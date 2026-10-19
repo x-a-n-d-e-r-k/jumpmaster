@@ -21,6 +21,18 @@ async function* lines(stream: Readable): AsyncIterable<string> {
 export class DockerDriver implements ContainerDriver {
   constructor(private readonly docker = new Docker()) {}
 
+  async listByLabel(key: string, value: string): Promise<string[]> {
+    const found = await this.docker.listContainers({
+      all: true,
+      filters: { label: [`${key}=${value}`] },
+    });
+    return found.map((c) => c.Id);
+  }
+
+  async remove(id: string): Promise<void> {
+    await this.docker.getContainer(id).remove({ force: true });
+  }
+
   async start(o: Parameters<ContainerDriver['start']>[0]): Promise<ContainerHandle> {
     const container = await this.docker.createContainer({
       Image: o.image,

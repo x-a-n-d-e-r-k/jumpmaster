@@ -233,3 +233,20 @@ test('push goes to the explicit repo target with the process sweep, and reports 
   expect(f.sweeps).toBe(1);
   expect(r.headSha).toBe('abc123');
 });
+
+test('existing remote branch → failed before claude runs', async () => {
+  const f = fakeDeps({ claude: [completeResult], remoteHasBranch: true });
+  const r = await runTrooper(payload, f.deps);
+  expect(r).toMatchObject({
+    status: 'failed',
+    reason: 'branch agent/issue-5 already exists on remote',
+  });
+  expect(f.claudeRan).toBe(false);
+  expect(f.pushed).toBe(false);
+  expect(f.lsRemote).toEqual({
+    t: { owner: 'o', name: 'r' },
+    b: 'agent/issue-5',
+    tok: payload.credentials.forgeToken,
+  });
+  expect(f.calls.indexOf('ls-remote')).toBeGreaterThan(f.calls.indexOf('clone'));
+});

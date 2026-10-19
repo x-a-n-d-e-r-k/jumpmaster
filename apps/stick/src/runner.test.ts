@@ -10,7 +10,7 @@ import {
 import { describe, expect, test } from 'vitest';
 import type { DropClient } from './client.js';
 import type { ContainerDriver } from './driver.js';
-import { runDrop } from './runner.js';
+import { reapOrphans, runDrop } from './runner.js';
 
 const TOKEN = 'sk-secret-claude-token';
 const payload: DropPayload = DropPayloadSchema.parse({
@@ -57,6 +57,10 @@ function fakeDriver(lines: string[], opts: { hang?: boolean; exitCode?: number }
           },
         };
       },
+      async listByLabel() {
+        return [];
+      },
+      async remove() {},
     } satisfies ContainerDriver,
   };
   return d;
@@ -88,7 +92,7 @@ describe('runDrop', () => {
       'JM_RESULT {"status":"completed","headSha":"a","gates":[]}',
     ]);
     const client = fakeClient();
-    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10 });
+    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
     expect(client.events.flat()).toHaveLength(1);
     expect(client.result).toMatchObject({ status: 'completed', headSha: 'a' });
   });
@@ -96,7 +100,7 @@ describe('runDrop', () => {
   test('exit without result reports failed', async () => {
     const d = fakeDriver(['plain log line'], { exitCode: 2 });
     const client = fakeClient();
-    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10 });
+    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
     expect(client.result).toEqual({
       status: 'failed',
       reason: 'trooper exited 2 without result',
@@ -107,7 +111,7 @@ describe('runDrop', () => {
   test('stale heartbeat stops the container with a 30s grace', async () => {
     const d = fakeDriver([], { hang: true });
     const client = fakeClient('stale');
-    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10 });
+    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
     expect(d.stopped).toBe(true);
     expect(d.stopGrace).toBe(30_000);
   });
@@ -115,7 +119,7 @@ describe('runDrop', () => {
   test('cancel heartbeat stops the container', async () => {
     const d = fakeDriver([], { hang: true });
     const client = fakeClient('cancel');
-    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10 });
+    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
     expect(d.stopped).toBe(true);
   });
 
@@ -125,9 +129,18 @@ describe('runDrop', () => {
     process.env.TMPDIR = dir;
     try {
       const d = fakeDriver(['JM_RESULT {"status":"no_changes","gates":[]}']);
-      await runDrop(payload, { client: fakeClient(), driver: d.driver, heartbeatMs: 10 });
+      await runDrop(payload, {
+        client: fakeClient(),
+        driver: d.driver,
+        heartbeatMs: 10,
+        stickId: 's1',
+      });
       expect(JSON.parse(d.started?.payload ?? '{}').credentials.claudeToken).toBe(TOKEN);
-      expect(d.started?.labels).toEqual({ 'jumpmaster.drop': 'd1', 'jumpmaster.epoch': '3' });
+      expect(d.started?.labels).toEqual({
+        'jumpmaster.drop': 'd1',
+        'jumpmaster.epoch': '3',
+        'jumpmaster.stick': 's1',
+      });
       for (const f of readdirSync(dir))
         expect(readFileSync(join(dir, f), 'utf8')).not.toContain(TOKEN);
     } finally {
@@ -142,7 +155,7 @@ describe('runDrop', () => {
       'JM_RESULT {"status":"no_changes","gates":[]}',
     ]);
     const client = fakeClient();
-    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10 });
+    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
     expect(client.events.flat()).toHaveLength(120);
     expect(Math.max(...client.events.map((b) => b.length))).toBeLessThanOrEqual(50);
   });
@@ -150,6 +163,7 @@ describe('runDrop', () => {
   test('logs() throwing stops the container and posts a failed result', async () => {
     const d = fakeDriver([]);
     const driver: ContainerDriver = {
+      ...d.driver,
       async start(o) {
         const h = await d.driver.start(o);
         return {
@@ -161,8 +175,50 @@ describe('runDrop', () => {
       },
     };
     const client = fakeClient();
-    await runDrop(payload, { client, driver, heartbeatMs: 10 });
+    await runDrop(payload, { client, driver, heartbeatMs: 10, stickId: 's1' });
     expect(d.stopped).toBe(true);
     expect(client.result).toMatchObject({ status: 'failed', reason: 'stick runner error: boom' });
+  });
+});
+
+describe('reapOrphans', () => {
+  test("force-removes only this stick's labelled containers", async () => {
+    const containers = [
+      { id: 'mine-1', labels: { 'jumpmaster.stick': 's1' } },
+      { id: 'other', labels: { 'jumpmaster.stick': 's2' } },
+      { id: 'mine-2', labels: { 'jumpmaster.stick': 's1' } },
+      { id: 'unrelated', labels: {} as Record<string, string> },
+    ];
+    const removed: string[] = [];
+    const queried: string[][] = [];
+    const driver: ContainerDriver = {
+      ...fakeDriver([]).driver,
+      async listByLabel(key, value) {
+        queried.push([key, value]);
+        return containers.filter((c) => c.labels[key] === value).map((c) => c.id);
+      },
+      async remove(id) {
+        removed.push(id);
+      },
+    };
+    expect(await reapOrphans(driver, 's1')).toEqual(['mine-1', 'mine-2']);
+    expect(queried).toEqual([['jumpmaster.stick', 's1']]);
+    expect(removed).toEqual(['mine-1', 'mine-2']);
+  });
+
+  test('one failed removal does not stop the others', async () => {
+    const removed: string[] = [];
+    const driver: ContainerDriver = {
+      ...fakeDriver([]).driver,
+      async listByLabel() {
+        return ['a', 'b'];
+      },
+      async remove(id) {
+        if (id === 'a') throw new Error('gone');
+        removed.push(id);
+      },
+    };
+    expect(await reapOrphans(driver, 's1')).toEqual(['b']);
+    expect(removed).toEqual(['b']);
   });
 });

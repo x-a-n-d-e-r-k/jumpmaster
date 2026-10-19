@@ -12,4 +12,8 @@ export interface ContainerDriver {
     name: string;
     labels: Record<string, string>;
   }): Promise<ContainerHandle>;
+  /** Ids of every container (running or not) whose label `key` equals `value`. */
+  listByLabel(key: string, value: string): Promise<string[]>;
+  /** Force-removes (kills) one container. */
+  remove(id: string): Promise<void>;
 }

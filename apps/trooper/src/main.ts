@@ -57,6 +57,14 @@ export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promi
       dir: repoDir,
     });
     const target = { owner: payload.repo.owner, name: payload.repo.name };
+    // Fail fast: the push refuses an existing branch, so don't burn a whole Claude run first.
+    if (await deps.git.remoteBranchExists(target, payload.branch, forgeToken)) {
+      return finish({
+        status: 'failed',
+        reason: `branch ${payload.branch} already exists on remote`,
+        gates,
+      });
+    }
     emitEvent('phase', { phase: 'branch', branch: payload.branch });
     await deps.git.prepareBranch(repoDir, payload.branch, base);
 

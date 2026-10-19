@@ -14,10 +14,34 @@ export const TROOPER_IMAGE = process.env.JM_TROOPER_IMAGE ?? 'jumpmaster-trooper
 const STOP_GRACE_MS = 30_000;
 const MAX_BATCH = 50;
 const FLUSH_MS = 1000;
+export const STICK_LABEL = 'jumpmaster.stick';
+
+/**
+ * Force-removes trooper containers this stick left behind (e.g. it crashed mid-drop), so a
+ * re-leased drop never runs alongside a still-live agent. Other sticks' containers are untouched.
+ */
+export async function reapOrphans(driver: ContainerDriver, stickId: string): Promise<string[]> {
+  const removed: string[] = [];
+  for (const id of await driver.listByLabel(STICK_LABEL, stickId)) {
+    try {
+      await driver.remove(id);
+      removed.push(id);
+    } catch {
+      // already gone (AutoRemove) or racing another cleanup
+    }
+  }
+  return removed;
+}
 
 export async function runDrop(
   payload: DropPayload,
-  deps: { client: DropClient; driver: ContainerDriver; heartbeatMs?: number; image?: string },
+  deps: {
+    client: DropClient;
+    driver: ContainerDriver;
+    stickId: string;
+    heartbeatMs?: number;
+    image?: string;
+  },
 ): Promise<void> {
   const { client, driver } = deps;
   const { dropId, epoch } = payload;
@@ -25,7 +49,11 @@ export async function runDrop(
     image: deps.image ?? TROOPER_IMAGE,
     payload: JSON.stringify(payload),
     name: `jumpmaster-drop-${dropId}-${epoch}`,
-    labels: { 'jumpmaster.drop': dropId, 'jumpmaster.epoch': String(epoch) },
+    labels: {
+      'jumpmaster.drop': dropId,
+      'jumpmaster.epoch': String(epoch),
+      [STICK_LABEL]: deps.stickId,
+    },
   });
 
   let stale = false;
