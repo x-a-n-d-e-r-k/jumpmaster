@@ -96,6 +96,10 @@ export function upsertDropZone(db: Db, z: DropZoneRow): void {
   ).run(z);
 }
 
+export function setDropZoneDefaultBranch(db: Db, id: string, defaultBranch: string): void {
+  db.prepare('UPDATE drop_zones SET default_branch = ? WHERE id = ?').run(defaultBranch, id);
+}
+
 /** Inserts a new ready work item, or refreshes issue fields of an existing one (state is preserved). */
 export function upsertWorkItem(db: Db, w: NewWorkItem): WorkItem {
   const row = db
