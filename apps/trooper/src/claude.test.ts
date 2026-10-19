@@ -78,3 +78,14 @@ test('non-JSON and blank lines are ignored', () => {
   expect(parseStreamLine('hello')).toEqual({ type: 'ignored' });
   expect(parseStreamLine('  ')).toEqual({ type: 'ignored' });
 });
+
+test('ignores an invalid resetsAt', () => {
+  const r = parseStreamLine(
+    JSON.stringify({
+      type: 'rate_limit_event',
+      rate_limit_info: { status: 'rejected', resetsAt: 1e20 },
+    }),
+  );
+  expect(r).toMatchObject({ type: 'rate_limit', status: 'rejected' });
+  expect(r).not.toHaveProperty('resetsAt');
+});

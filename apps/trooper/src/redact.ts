@@ -1,4 +1,8 @@
-const TOKEN_SHAPES = [/gh[pousr]_[A-Za-z0-9]{20,}/g, /sk-ant-[A-Za-z0-9_-]{20,}/g];
+const TOKEN_SHAPES = [
+  /github_pat_[A-Za-z0-9_]{20,}/g,
+  /gh[pousr]_[A-Za-z0-9]{20,}/g,
+  /sk-ant-[A-Za-z0-9_-]{20,}/g,
+];
 
 const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 

@@ -63,10 +63,11 @@ export type ParsedLine =
   | { type: 'ignored' };
 
 function normalizeResetsAt(v: unknown): string | undefined {
-  if (typeof v === 'number') return new Date(v < 1e12 ? v * 1000 : v).toISOString();
-  if (typeof v === 'string' && v !== '' && !Number.isNaN(Date.parse(v)))
-    return new Date(v).toISOString();
-  return undefined;
+  let d: Date;
+  if (typeof v === 'number') d = new Date(v < 1e12 ? v * 1000 : v);
+  else if (typeof v === 'string' && v !== '') d = new Date(v);
+  else return undefined;
+  return Number.isFinite(d.getTime()) ? d.toISOString() : undefined;
 }
 
 export function parseStreamLine(line: string): ParsedLine {

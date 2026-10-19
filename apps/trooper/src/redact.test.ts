@@ -8,3 +8,7 @@ test('redacts known secrets and token shapes', () => {
 test('escapes regex metacharacters and ignores empty secrets', () => {
   expect(redact('x a.b*c(d y axbbc', ['a.b*c(d', ''])).toBe('x [REDACTED] y axbbc');
 });
+
+test('redacts fine-grained GitHub PATs', () => {
+  expect(redact(`t github_pat_${'A1_'.repeat(10)} e`, [])).toBe('t [REDACTED] e');
+});
