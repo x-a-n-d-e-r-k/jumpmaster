@@ -1,6 +1,6 @@
 # Jumpmaster — Design
 
-*Status: draft v2 (after builder check + red team) · 2026-10-19*
+*Status: draft v3 (owner answers folded in) · 2026-10-19*
 
 > "I'm the orchestrator of my idea now, not the engineer."
 
@@ -12,8 +12,8 @@ setup the owner built by hand while developing a large private project.
 
 Markers: **[decided]** — the owner chose it in conversation. **[call]** — the designer's choice,
 not explicitly confirmed; the owner may overturn it. **[red team]** — added after the builder
-check and red-team review (§18); also a designer's call unless marked decided. **[OPEN]** — needs
-the owner's answer (§17). Unmarked text is description.
+check and red-team review (§18); also a designer's call unless marked decided. Unmarked text is
+description. §17 records the owner's answers to the review's open questions.
 
 ---
 
@@ -112,8 +112,9 @@ Plus, from the conversation:
 - **Multi-user / multi-tenant.** One operator per install; no roles or permission model [decided].
 - **Managing CI runners.** Jumpmaster measures pipelines; it never provisions, scales, or configures
   CI runners [decided].
-- **Non-Claude agents.** Claude Code CLI is the only agent; no Codex, pi [decided]. Which *Claude
-  credential types* are supported is **[OPEN]** (§12.1, §17 Q1).
+- **Non-Claude agents and non-subscription credentials.** Claude Code CLI is the only agent; no
+  Codex, pi [decided]. v1 supports **Claude subscription tokens only** — no API key, Bedrock, or
+  Vertex path [decided].
 - **Hosted sandbox backends** (Vercel, Daytona) [call].
 - **General-purpose platform features** — a workflow-definition engine, multi-user permission
   models, air-gapped operation [call].
@@ -127,7 +128,9 @@ Plus, from the conversation:
 - **Cross-pollinating projects** — any path by which one project's code, issues, or context reaches
   another project's agents [decided].
 - **Setup that needs the owner** — a friend needing a call with the owner to reach a first PR.
-- **A model with the merge button** — agents never approve or merge on their own authority (§7.4).
+- **An agent with the merge button** — merging is fully automatic (reviewer agent approves + CI
+  passes → merged, no human click), but it is done by Jumpmaster's deterministic code after it checks
+  those conditions, never by an LLM calling a merge API on its own judgment (§7.4).
 - **State that wedges** — rebuilding sandcastle-afk's livelocks (§5.1, §16).
 - **Untrusted text steering agents** — strangers' issues or comments acting as instructions (§7.1)
   [red team].
@@ -379,8 +382,12 @@ hostile.** Jumpmaster may be distributed to third parties; public repos receive 
 ### 7.3 Forge credentials
 
 - **Two bot identities per drop zone** — author and reviewer [decided], modelled as **credential
-  roles** so strategy can change by config [call]. Whether a **single-identity starter mode** exists
-  for first runs is **[OPEN]** (§17 Q2).
+  roles** so strategy can change by config [call].
+- **Single-identity starter mode** [decided]: a first-run operator may start with one bot and upgrade
+  to two later. In starter mode the bot authors; the reviewer agent's SHA-bound verdict is recorded
+  in Jumpmaster and the orchestrator merges when it and CI pass — still no human click. Because a
+  forge cannot require an approval from a different identity here, branch protection requires CI
+  only; the readiness doctor shows starter mode as a warning and links the two-bot upgrade [call].
 - Tokens are **repo-scoped per drop zone** (fine-grained PATs, GitHub App installation tokens, or
   GitLab project tokens), with documented minimum scopes: **no `workflow` scope, no admin**.
 - The credential broker mints or hands out **short-lived, drop-scoped credentials** where the forge
@@ -388,7 +395,12 @@ hostile.** Jumpmaster may be distributed to third parties; public repos receive 
 - Per role: implement/heal/resolve get **author** write; **review gets read-only forge access**; crew
   gets none (MCP only); gates get none.
 
-### 7.4 The orchestrator holds the merge button — under branch protection
+### 7.4 Automatic merge, performed by the orchestrator — under branch protection
+
+This is a factory: an ordinary PR merges with **no human involvement** once the reviewer agent
+approves and CI passes, exactly as in the POC [decided]. What changes is *who executes* the merge:
+Jumpmaster's code, after checking the conditions below, rather than an agent with a merge-capable
+token. Command is only pulled in by briefings (protected paths, `alwaysEscalate`, parked PRs).
 
 - The review drop returns a structured verdict (`--json-schema`) **bound to the head SHA**.
   Jumpmaster stores it, posts the approval **as the reviewer bot**, and merges only if
@@ -513,7 +525,7 @@ credential, forge credentials, sticks); readiness doctor.
 
 ## 12. Claude account, usage, and models
 
-### 12.1 Credential and terms [red team; OPEN]
+### 12.1 Credential and terms [decided: subscription tokens only]
 
 Verified from Anthropic's docs (see §18 sources): `claude setup-token` is explicitly offered for CI
 and scripts (one-year token, Pro/Max/Team/Enterprise). Consumer plans (Pro/Max) say limits assume
@@ -523,9 +535,9 @@ resell or intermediate usage, and must ship Claude Code unmodified.
 
 Implications [call]: the token always belongs to the operator who runs the install — never supplied
 or shared by a distributor or anyone else; Claude Code's own auth is never wrapped or modified; the app
-links to Anthropic's terms and recommends Team/Enterprise or an API key for business use; no
-Anthropic-endorsement wording. **Whether API key / Bedrock / Vertex are supported paths, and
-whether a commercial distributor seeks Anthropic's confirmation first, is [OPEN] (§17 Q1).**
+links to Anthropic's terms; no Anthropic-endorsement wording. v1 supports **subscription tokens
+only** [decided]. The owner's position is that this operator-owned, self-hosted model aligns with
+Anthropic's terms, so no separate confirmation is sought [decided].
 
 ### 12.2 Fable [red team]
 
@@ -581,11 +593,11 @@ budget numbers and deadlines.
 
 ---
 
-## 15. Releases and gates [red team; OPEN on partner timing]
+## 15. Releases and gates [red team; order decided]
 
 "All nine in v1" ships as usable releases. Each has a gate; later releases don't start until the
-gate passes. **[OPEN]** (§17 Q3): whether this order and the early reference-project cutover are right, and
-when design partners get it.
+gate passes. The order — including the reference-project cutover at M2 and design partners at
+M4 — is confirmed by the owner [decided].
 
 | Release | Contents | Gate |
 |---|---|---|
@@ -631,15 +643,13 @@ the three `gh` accounts map to credential roles.
 
 ---
 
-## 17. Open questions for the owner
+## 17. Owner answers to the review's open questions
 
-1. **Claude credential paths and commercial distribution.** Subscription tokens only, or also API key /
-   Bedrock / Vertex as supported paths? And should Anthropic's confirmation be obtained before any
-   commercial distribution?
-2. **Single-identity starter mode.** Two bots stay the standard; may first-run operators start with
-   one bot plus their own approval in the app, upgrading to two bots later?
-3. **Release order.** Is §15 right — especially the reference-project cutover at M2, before crew and before
-   friend-readiness — and do design partners get it at M4 or later?
+1. **Claude credential paths** — subscription tokens only for now; no API key, Bedrock, or Vertex
+   path. No separate Anthropic confirmation: the operator-owned, self-hosted model aligns with
+   Anthropic's terms.
+2. **Single-identity starter mode** — yes (§7.3), still fully automatic merging.
+3. **Release order** — §15 as written: reference-project cutover at M2, design partners at M4.
 
 ---
 
