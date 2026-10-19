@@ -31,7 +31,12 @@ const config: Config = {
       maxTurns: 200,
     },
   ],
-  secrets: { claudeToken: 'claude-secret', githubAuthorToken: 'gh-secret', joinToken: 'join-me' },
+  secrets: {
+    claudeToken: 'claude-secret',
+    githubAuthorToken: 'gh-secret',
+    githubReviewerToken: 'gh-reviewer',
+    joinToken: 'join-me',
+  },
 };
 
 const proto = { 'x-jumpmaster-protocol': '1' };
