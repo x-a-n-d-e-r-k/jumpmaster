@@ -1,0 +1,6 @@
+# Every change needs the owner's review. Paths that steer agents or CI are listed explicitly so
+# they stay protected if this file is later relaxed (see design spec §7.4, "protected paths").
+*                   @x-a-n-d-e-r-k
+/.github/           @x-a-n-d-e-r-k
+/SECURITY.md        @x-a-n-d-e-r-k
+/docs/superpowers/  @x-a-n-d-e-r-k
