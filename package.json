@@ -10,8 +10,8 @@
     "apps/*"
   ],
   "scripts": {
-    "build": "tsc -b && npm run postbuild --workspaces --if-present",
-    "typecheck": "tsc -b",
+    "build": "tsc -b packages/protocol && tsc -b && npm run postbuild --workspaces --if-present",
+    "typecheck": "tsc -b packages/protocol && tsc -b",
     "test": "vitest run",
     "lint": "biome check ."
   },
