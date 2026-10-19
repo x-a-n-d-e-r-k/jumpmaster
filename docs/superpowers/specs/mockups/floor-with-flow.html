@@ -1,0 +1,83 @@
+<h2>Factory floor + where the time goes</h2>
+<p class="subtitle">Option A, with a "Flow" strip added to the floor and a Flow page behind it. The question this answers: <b>is the bottleneck design, agents, or the pipeline?</b></p>
+
+<style>
+  .wf{font-size:12px;line-height:1.35}
+  .wf .row{display:flex;gap:8px;margin-bottom:8px}
+  .wf .box{border:1px solid var(--border,#ccc);border-radius:6px;padding:8px;flex:1;background:var(--bg-secondary,rgba(127,127,127,.06))}
+  .wf .t{font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;opacity:.7;margin-bottom:4px}
+  .wf .pill{display:inline-block;border-radius:10px;padding:1px 7px;font-size:10px;margin:1px;border:1px solid currentColor;opacity:.85}
+  .wf .bar{height:6px;border-radius:3px;background:rgba(127,127,127,.25);margin:4px 0}
+  .wf .bar i{display:block;height:100%;border-radius:3px;background:#4a8}
+  .wf .warn{color:#d90}.wf .bad{color:#d55}.wf .ok{color:#4a8}
+  .wf .line{border-bottom:1px dashed rgba(127,127,127,.3);padding:3px 0}
+  .stack{display:flex;height:22px;border-radius:4px;overflow:hidden;margin:6px 0;font-size:10px;color:#fff}
+  .stack span{display:flex;align-items:center;justify-content:center;white-space:nowrap;overflow:hidden}
+  .s-spec{background:#6b7fd7}.s-wait{background:#888}.s-impl{background:#3a9d7a}.s-rev{background:#2f7f9e}.s-ciq{background:#c98a1b}.s-ci{background:#d36b1f}.s-heal{background:#b5485d}.s-merge{background:#666}
+  .legend span{display:inline-flex;align-items:center;gap:4px;margin-right:10px;font-size:10px}
+  .legend i{width:10px;height:10px;border-radius:2px;display:inline-block}
+  .callout{border-left:3px solid #d36b1f;padding:6px 8px;background:rgba(211,107,31,.08);border-radius:0 6px 6px 0;margin:6px 0}
+  .spark{display:flex;align-items:flex-end;gap:2px;height:34px}
+  .spark b{flex:1;background:#d36b1f;opacity:.75;border-radius:1px}
+  .spark.g b{background:#3a9d7a}
+  table.m{width:100%;border-collapse:collapse;font-size:11px}
+  table.m td,table.m th{padding:3px 4px;border-bottom:1px dashed rgba(127,127,127,.3);text-align:left}
+</style>
+
+<h3>1 · The floor (home)</h3>
+<div class="mockup"><div class="mockup-header">Home · Factory floor</div><div class="mockup-body wf">
+  <div class="row">
+    <div class="box"><div class="t">Slot 1 · local</div><span class="pill ok">implement</span> acme-api #41<br>local gates 3/5 · 12m</div>
+    <div class="box"><div class="t">Slot 2 · local</div><span class="pill">review</span> blog #7<br>re-running preflight · 4m</div>
+    <div class="box"><div class="t">Slot 3 · remote</div><span class="pill warn">waiting on CI</span> acme-web #19<br>CI queued 9m · slot held? <b>no, released</b></div>
+  </div>
+  <div class="box" style="margin-bottom:8px">
+    <div class="t">Flow · median issue → merged, last 7 days · 6h 40m</div>
+    <div class="stack">
+      <span class="s-spec" style="flex:9">spec</span><span class="s-wait" style="flex:8">queue</span><span class="s-impl" style="flex:22">implement</span><span class="s-rev" style="flex:10">review</span><span class="s-ciq" style="flex:14">CI wait</span><span class="s-ci" style="flex:27">CI run</span><span class="s-heal" style="flex:7">heal</span><span class="s-merge" style="flex:3"></span>
+    </div>
+    <div class="callout"><b>Bottleneck: pipeline.</b> CI wait + run is 41% of cycle time and rising (+18% w/w). 4 PRs approved and idle behind CI right now.</div>
+  </div>
+  <div class="row">
+    <div class="box"><div class="t">Queue (next 4)</div>
+      <div class="line">highest · acme-api #52</div><div class="line">high · w3 · acme-web #22</div><div class="line">high · w1 · blog #9 · 2d</div><div class="line">normal · acme-api #60</div></div>
+    <div class="box"><div class="t">Subscription</div>5h window 62%<div class="bar"><i style="width:62%"></i></div>weekly 31%<div class="bar"><i style="width:31%"></i></div></div>
+    <div class="box"><div class="t">CI</div>runners 2/2 busy<br>queued jobs 5<br>p50 run 23m · p90 41m</div>
+  </div>
+  <div class="box"><div class="t bad">Waiting on you (2)</div>strip</div>
+</div></div>
+
+<h3 style="margin-top:24px">2 · Flow page (click the strip)</h3>
+<div class="mockup"><div class="mockup-header">Flow · all projects · 30 days</div><div class="mockup-body wf">
+  <div class="legend">
+    <span><i class="s-spec"></i>spec (staged → ready, crew refute)</span><span><i class="s-wait"></i>queue wait</span><span><i class="s-impl"></i>implement (agent + local gates)</span><span><i class="s-rev"></i>review (agent + gate re-run)</span><span><i class="s-ciq"></i>CI queued</span><span><i class="s-ci"></i>CI running</span><span><i class="s-heal"></i>heal loops</span><span><i class="s-merge"></i>merge</span>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <div class="box" style="flex:2"><div class="t">Cycle time by stage, per week</div>
+      <div style="font-size:10px;opacity:.7">wk 38</div><div class="stack"><span class="s-spec" style="flex:10"></span><span class="s-wait" style="flex:9"></span><span class="s-impl" style="flex:28"></span><span class="s-rev" style="flex:12"></span><span class="s-ciq" style="flex:5"></span><span class="s-ci" style="flex:15"></span><span class="s-heal" style="flex:12"></span><span class="s-merge" style="flex:3"></span></div>
+      <div style="font-size:10px;opacity:.7">wk 40</div><div class="stack"><span class="s-spec" style="flex:9"></span><span class="s-wait" style="flex:8"></span><span class="s-impl" style="flex:24"></span><span class="s-rev" style="flex:11"></span><span class="s-ciq" style="flex:9"></span><span class="s-ci" style="flex:21"></span><span class="s-heal" style="flex:9"></span><span class="s-merge" style="flex:3"></span></div>
+      <div style="font-size:10px;opacity:.7">wk 42</div><div class="stack"><span class="s-spec" style="flex:9"></span><span class="s-wait" style="flex:8"></span><span class="s-impl" style="flex:22"></span><span class="s-rev" style="flex:10"></span><span class="s-ciq" style="flex:14"></span><span class="s-ci" style="flex:27"></span><span class="s-heal" style="flex:7"></span><span class="s-merge" style="flex:3"></span></div>
+      <div style="font-size:10px;opacity:.7;margin-top:4px">Agents got faster and heal less. CI took the gain and then some.</div>
+    </div>
+    <div class="box"><div class="t">Throughput balance</div>
+      PRs ready for CI / day: <b>14</b><br>PRs CI can clear / day: <b>9</b>
+      <div class="callout" style="margin-top:6px">Agent slots out-produce CI by ~55%. Adding a runner slot won't help; adding a CI runner will.</div>
+    </div>
+  </div>
+  <div class="row">
+    <div class="box"><div class="t">Pipeline detail</div>
+      <table class="m">
+        <tr><th>step</th><th>p50</th><th>trend</th><th>tests</th></tr>
+        <tr><td>unit</td><td>14m</td><td class="bad">▲ 35%</td><td>4,210 (+900)</td></tr>
+        <tr><td>integration</td><td>6m</td><td>▬</td><td>310</td></tr>
+        <tr><td>lint/typecheck</td><td>3m</td><td>▬</td><td>—</td></tr>
+        <tr><td>CI queue</td><td>9m</td><td class="bad">▲ 80%</td><td>—</td></tr>
+      </table>
+    </div>
+    <div class="box"><div class="t">Duplicate work</div>
+      Gates run 3× per PR: implement (local), review (re-run), CI.<br>Gate minutes / PR: <b>58m</b> (CI 23m)<div class="spark"><b style="height:40%"></b><b style="height:48%"></b><b style="height:55%"></b><b style="height:61%"></b><b style="height:70%"></b><b style="height:82%"></b><b style="height:95%"></b></div>
+      <span style="font-size:10px;opacity:.7">Signal for optimization: which gates could skip, shard, or trust a prior run.</span>
+    </div>
+  </div>
+  <div class="box"><div class="t">Filter</div><span class="pill">all projects</span><span class="pill">acme-api</span><span class="pill">acme-web</span><span class="pill">blog</span> · <span class="pill">7d</span><span class="pill">30d</span><span class="pill">90d</span></div>
+</div></div>
