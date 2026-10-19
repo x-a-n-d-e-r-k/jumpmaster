@@ -11,7 +11,9 @@ dist/
 coverage/
 *.tsbuildinfo
 
-# Local data
+# Local data (runbook: keep config and server state out of git)
+/jumpmaster.config.json
+/data/
 *.sqlite
 *.sqlite-*
 *.db

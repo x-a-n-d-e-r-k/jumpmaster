@@ -1,7 +1,6 @@
 version: 2
 updates:
-  # Keep pinned GitHub Actions current. Add npm and docker ecosystems once package.json and
-  # Dockerfiles exist.
+  # Keep pinned GitHub Actions current. Add the docker ecosystem once Dockerfiles exist.
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -9,3 +8,7 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly

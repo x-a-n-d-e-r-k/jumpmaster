@@ -1,0 +1,14 @@
+{
+  "listen": { "host": "127.0.0.1", "port": 7420 },
+  "dataDir": "./data",
+  "pollSeconds": 60,
+  "dropZones": [
+    {
+      "id": "main",
+      "repo": "your-org/your-repo",
+      "readyLabel": "agent-ready",
+      "gates": [{ "name": "test", "run": "npm test", "timeoutMinutes": 20 }],
+      "image": "jumpmaster-trooper:latest"
+    }
+  ]
+}
