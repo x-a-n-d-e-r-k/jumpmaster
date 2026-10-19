@@ -18,7 +18,11 @@ export type GateSpec = z.infer<typeof GateSpecSchema>;
 export const RoleSchema = z.enum(['implement', 'review', 'heal', 'resolve']);
 export type Role = z.infer<typeof RoleSchema>;
 
-export const PrRefSchema = z.object({ number: z.number(), branch: z.string(), headSha: z.string() });
+export const PrRefSchema = z.object({
+  number: z.number(),
+  branch: z.string(),
+  headSha: z.string(),
+});
 export type PrRef = z.infer<typeof PrRefSchema>;
 
 const dropPayloadBase = {
