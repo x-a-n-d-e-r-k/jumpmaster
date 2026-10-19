@@ -211,3 +211,23 @@ export function getStickByTokenHash(db: Db, tokenHash: string): Stick | undefine
     )
     .get(tokenHash) as Stick | undefined;
 }
+
+export function listRecentDrops(db: Db, limit = 50): Drop[] {
+  return db
+    .prepare(`SELECT ${DROP_COLS} FROM drops ORDER BY created_at DESC, id LIMIT ?`)
+    .all(limit) as Drop[];
+}
+
+export function latestRateLimitEvent(db: Db): (StoredEvent & { dropId: string }) | undefined {
+  const r = db
+    .prepare(
+      `SELECT drop_id AS dropId, seq, ts, kind, data_json AS dataJson FROM drop_events
+       WHERE kind = 'rate_limit' ORDER BY ts DESC, seq DESC LIMIT 1`,
+    )
+    .get() as
+    | { dropId: string; seq: number; ts: string; kind: StoredEvent['kind']; dataJson: string }
+    | undefined;
+  return (
+    r && { dropId: r.dropId, seq: r.seq, ts: r.ts, kind: r.kind, data: JSON.parse(r.dataJson) }
+  );
+}
