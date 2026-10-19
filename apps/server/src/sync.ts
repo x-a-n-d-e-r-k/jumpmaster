@@ -60,7 +60,7 @@ export async function syncDropZone(
     });
     setDropZoneDefaultBranch(db, zone.id, defaultBranch);
 
-    const known = new Set(listWorkItems(db, zone.id).map((w) => w.issueNumber));
+    const existing = new Map(listWorkItems(db, zone.id).map((w) => [w.issueNumber, w]));
     for (const issue of issues) {
       if (!trust.get(issue.author)) {
         skippedUntrusted++;
@@ -76,7 +76,12 @@ export async function syncDropZone(
         isFix: isFixTitle(issue.title),
         issueCreatedAt: issue.createdAt,
       });
-      if (!known.has(issue.number)) added++;
+      const prev = existing.get(issue.number);
+      if (!prev) added++;
+      else if (prev.state === 'done' && prev.reason === 'no longer ready') {
+        setWorkItemState(db, prev.id, 'ready');
+        added++;
+      }
     }
 
     const listed = new Set(issues.map((i) => i.number));

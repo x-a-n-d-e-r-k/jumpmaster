@@ -123,4 +123,16 @@ describe('syncDropZone', () => {
     expect((await syncDropZone(db, forge, zone)).added).toBe(1);
     expect((await syncDropZone(db, forge, zone)).added).toBe(0);
   });
+
+  test('revives an item re-labelled ready', async () => {
+    const forge = fakeForge({ issues: [issue(1)], trusted: ['alice'] });
+    await syncDropZone(db, forge, zone);
+    await syncDropZone(db, fakeForge({ issues: [], trusted: ['alice'] }), zone);
+    expect(listWorkItems(db, 'main')[0]).toMatchObject({
+      state: 'done',
+      reason: 'no longer ready',
+    });
+    expect((await syncDropZone(db, forge, zone)).added).toBe(1);
+    expect(listWorkItems(db, 'main')[0]).toMatchObject({ state: 'ready', reason: null });
+  });
 });
