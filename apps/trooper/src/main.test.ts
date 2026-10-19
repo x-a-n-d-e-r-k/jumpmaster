@@ -1,7 +1,8 @@
+import { Readable } from 'node:stream';
 import type { DropPayload, GateResult } from '@jumpmaster/protocol';
 import { expect, test } from 'vitest';
 import type { TrooperDeps } from './main.js';
-import { runTrooper } from './main.js';
+import { readPayload, runTrooper } from './main.js';
 
 const payload: DropPayload = {
   protocol: 1,
@@ -49,7 +50,8 @@ function fakeDeps(o: { ahead?: number; claude: string[]; gateExit?: number; thro
   };
   const deps: TrooperDeps = {
     git: {
-      cloneRepo: async () => {
+      cloneRepo: async (c) => {
+        state.cloneDir = c.dir;
         state.calls.push('clone');
         if (o.throwOn === 'clone') throw new Error(`boom ${payload.credentials.forgeToken}`);
       },
@@ -61,18 +63,21 @@ function fakeDeps(o: { ahead?: number; claude: string[]; gateExit?: number; thro
         state.pushed = true;
       },
     },
-    async *runClaude(_args, env) {
+    async *runClaude(_args, env, cwd) {
       state.claudeEnv = env;
+      state.claudeCwd = cwd;
       for (const l of o.claude) yield l;
     },
-    runGates: async (gates): Promise<GateResult[]> =>
-      gates.map((g) => ({
+    runGates: async (gates, go): Promise<GateResult[]> => {
+      state.gatesEnv = go.env;
+      return gates.map((g) => ({
         name: g.name,
         exitCode: o.gateExit ?? 0,
         durationMs: 1,
         timedOut: false,
         outputTail: 'tail',
-      })),
+      }));
+    },
     emit: (l) => void state.lines.push(l),
   };
   return Object.assign(state, { deps });
@@ -144,4 +149,56 @@ test('rate limit lines are emitted as events and secrets are redacted', async ()
   expect(f.lines.some((l) => l.startsWith('JM_EVENT ') && l.includes('"rate_limit"'))).toBe(true);
   expect(f.lines.join('\n')).not.toContain(payload.credentials.claudeToken);
   expect(f.lines.at(-1)).toMatch(/^JM_RESULT /);
+});
+
+test('claude runs inside the clone dir', async () => {
+  const f = fakeDeps({ claude: [completeResult] });
+  await runTrooper(payload, f.deps);
+  expect(f.cloneDir).not.toBe('');
+  expect(f.claudeCwd).toBe(f.cloneDir);
+});
+
+test('gates env carries no credentials', async () => {
+  const saved = { ...process.env };
+  process.env.CLAUDE_CODE_OAUTH_TOKEN = payload.credentials.claudeToken;
+  process.env.GH_TOKEN = payload.credentials.forgeToken;
+  process.env.JM_SECRET = 'x';
+  try {
+    const f = fakeDeps({ claude: [completeResult] });
+    await runTrooper(payload, f.deps);
+    const env = JSON.stringify(f.gatesEnv);
+    expect(env).not.toContain(payload.credentials.claudeToken);
+    expect(env).not.toContain(payload.credentials.forgeToken);
+    expect(f.gatesEnv).not.toHaveProperty('JM_SECRET');
+  } finally {
+    process.env = saved;
+  }
+});
+
+test('forge token never reaches claude env even if present in process env', async () => {
+  const saved = { ...process.env };
+  process.env.GITHUB_TOKEN = payload.credentials.forgeToken;
+  try {
+    const f = fakeDeps({ claude: [completeResult] });
+    await runTrooper(payload, f.deps);
+    expect(JSON.stringify(f.claudeEnv)).not.toContain(payload.credentials.forgeToken);
+  } finally {
+    process.env = saved;
+  }
+});
+
+test('claude non-zero exit code is included in the failed reason', async () => {
+  const f = fakeDeps({
+    claude: [JSON.stringify({ type: 'claude_stderr', exitCode: 3, stderr: 'x' })],
+  });
+  const r = await runTrooper(payload, f.deps);
+  expect(r.status).toBe('failed');
+  expect(r.reason).toContain('exit 3');
+});
+
+test('readPayload parses the payload from stdin', async () => {
+  const text = JSON.stringify(payload);
+  const p = await readPayload(undefined, Readable.from([text.slice(0, 20), text.slice(20)]));
+  expect(p.dropId).toBe('d1');
+  await expect(readPayload(undefined, Readable.from(['{}']))).rejects.toThrow();
 });

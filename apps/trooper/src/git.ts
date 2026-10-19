@@ -1,30 +1,46 @@
 import { execFile } from 'node:child_process';
+import { scrubEnv } from './gates.js';
 
-function run(cwd: string | undefined, args: string[], token = ''): Promise<string> {
-  // The token rides on this one command only and never reaches .git/config.
-  const auth = token
-    ? [
-        '-c',
-        `http.extraheader=AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`,
-      ]
-    : [];
+export function runGit(cwd: string | undefined, args: string[], token = ''): Promise<string> {
+  // Auth rides in the child's env (not argv, so not in ps or error messages) for this one command
+  // and never reaches .git/config.
+  const auth: NodeJS.ProcessEnv = token
+    ? {
+        GIT_CONFIG_COUNT: '1',
+        GIT_CONFIG_KEY_0: 'http.extraheader',
+        GIT_CONFIG_VALUE_0: authHeader(token),
+      }
+    : {};
   return new Promise((resolve, reject) => {
     execFile(
       'git',
-      [...auth, ...args],
+      args,
       {
         cwd,
         encoding: 'utf8',
         maxBuffer: 16 * 1024 * 1024,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        env: { ...scrubEnv(process.env), GIT_TERMINAL_PROMPT: '0', ...auth },
       },
       (err, stdout, stderr) => {
-        if (err) reject(new Error(`git ${args[0]} failed: ${stderr.trim() || err.message}`));
-        else resolve(stdout.trim());
+        if (!err) return resolve(stdout.trim());
+        // Never use err.message: it embeds the full command line.
+        const code = (err as NodeJS.ErrnoException).code;
+        const detail = stderr.trim();
+        reject(
+          new Error(
+            `git ${args[0]} failed (${typeof code === 'number' ? `exit ${code}` : String(code)})${detail ? `: ${detail}` : ''}`,
+          ),
+        );
       },
     );
   });
 }
+
+export function authHeader(token: string): string {
+  return `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`;
+}
+
+const run = runGit;
 
 export async function cloneRepo(o: {
   owner: string;

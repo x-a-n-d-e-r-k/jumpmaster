@@ -20,14 +20,18 @@ import { redact } from './redact.js';
 
 export interface TrooperDeps {
   git: typeof import('./git.js');
-  runClaude(args: string[], env: NodeJS.ProcessEnv): AsyncIterable<string>;
+  runClaude(args: string[], env: NodeJS.ProcessEnv, cwd: string): AsyncIterable<string>;
   runGates: typeof runGates;
   emit(line: string): void;
 }
 
 export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promise<DropResult> {
   const { claudeToken, forgeToken } = payload.credentials;
-  const secrets = [claudeToken, forgeToken];
+  const secrets = [
+    claudeToken,
+    forgeToken,
+    Buffer.from(`x-access-token:${forgeToken}`).toString('base64'),
+  ];
   const emitEvent = (kind: TrooperEvent['kind'], data: Record<string, unknown>): void => {
     const ev: TrooperEvent = { ts: new Date().toISOString(), kind, data };
     deps.emit(redact(EVENT_PREFIX + JSON.stringify(ev), secrets));
@@ -76,8 +80,9 @@ export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promi
       ...scrubEnv(process.env, secrets),
       CLAUDE_CODE_OAUTH_TOKEN: claudeToken,
     };
+    let claudeExit: number | undefined;
     let result: Extract<ReturnType<typeof parseStreamLine>, { type: 'result' }> | undefined;
-    for await (const line of deps.runClaude(args, claudeEnv)) {
+    for await (const line of deps.runClaude(args, claudeEnv, repoDir)) {
       const parsed = parseStreamLine(line);
       if (parsed.type === 'ignored') continue;
       if (parsed.type === 'result') result = parsed;
@@ -88,6 +93,8 @@ export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promi
           raw: parsed.raw,
         });
       } else if (parsed.type === 'agent') {
+        const r = parsed.raw as { type?: unknown; exitCode?: unknown };
+        if (r.type === 'claude_stderr' && typeof r.exitCode === 'number') claudeExit = r.exitCode;
         emitEvent('agent', { raw: parsed.raw });
       } else {
         emitEvent('agent', {
@@ -105,12 +112,13 @@ export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promi
     const done = (r: Omit<DropResult, 'gates'>): DropResult =>
       finish({ ...stripUndefined(meta), ...r, gates });
 
+    const exitNote = claudeExit === undefined ? '' : ` (claude exit ${claudeExit})`;
     if (result === undefined)
-      return done({ status: 'failed', reason: 'claude produced no result' });
+      return done({ status: 'failed', reason: `claude produced no result${exitNote}` });
     if (result.isError) {
       return done({
         status: 'failed',
-        reason: `claude error: ${result.terminalReason ?? 'unknown'}`,
+        reason: `claude error: ${result.terminalReason ?? 'unknown'}${exitNote}`,
       });
     }
     const structured = result.structured as { status?: string; summary?: string } | undefined;
@@ -118,7 +126,10 @@ export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promi
       return done({ status: 'blocked', reason: structured.summary ?? 'blocked' });
     }
     if (structured?.status !== 'COMPLETE') {
-      return done({ status: 'failed', reason: 'claude returned no valid structured output' });
+      return done({
+        status: 'failed',
+        reason: `claude returned no valid structured output${exitNote}`,
+      });
     }
 
     emitEvent('phase', { phase: 'commit' });
@@ -130,7 +141,7 @@ export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promi
     emitEvent('phase', { phase: 'gates' });
     const results = await deps.runGates(payload.gates, {
       cwd: repoDir,
-      env: process.env,
+      env: scrubEnv(process.env, secrets),
       secrets,
     });
     gates.push(...results);
@@ -170,8 +181,12 @@ function stripUndefined<T extends object>(o: T): Partial<T> {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>;
 }
 
-async function* spawnClaude(args: string[], env: NodeJS.ProcessEnv): AsyncIterable<string> {
-  const child = spawn('claude', args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+async function* spawnClaude(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+): AsyncIterable<string> {
+  const child = spawn('claude', args, { env, cwd, stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = '';
   child.stderr.on('data', (c: Buffer) => {
     stderr = (stderr + c.toString('utf8')).slice(-4000);
@@ -186,10 +201,22 @@ async function* spawnClaude(args: string[], env: NodeJS.ProcessEnv): AsyncIterab
   if (code !== 0) yield JSON.stringify({ type: 'claude_stderr', exitCode: code, stderr });
 }
 
+export async function readPayload(
+  file: string | undefined,
+  stdin: AsyncIterable<string | Buffer>,
+): Promise<DropPayload> {
+  let text: string;
+  if (file) text = readFileSync(file, 'utf8');
+  else {
+    const chunks: Buffer[] = [];
+    for await (const c of stdin) chunks.push(typeof c === 'string' ? Buffer.from(c) : c);
+    text = Buffer.concat(chunks).toString('utf8');
+  }
+  return DropPayloadSchema.parse(JSON.parse(text));
+}
+
 async function main(): Promise<void> {
-  const file = process.argv[2];
-  if (!file) throw new Error('usage: main.js <payload.json>');
-  const payload = DropPayloadSchema.parse(JSON.parse(readFileSync(file, 'utf8')));
+  const payload = await readPayload(process.argv[2], process.stdin);
   const result = await runTrooper(payload, {
     git: gitOps,
     runClaude: spawnClaude,

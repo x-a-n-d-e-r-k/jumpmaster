@@ -23,4 +23,5 @@ RUN useradd --create-home --shell /bin/bash trooper
 USER trooper
 ENV CLAUDE_CONFIG_DIR=/home/trooper/.claude
 WORKDIR /home/trooper
-ENTRYPOINT ["node","/opt/trooper/main.js","/run/jumpmaster/payload.json"]
+# The payload (with credentials) arrives on stdin; no payload file exists in the container.
+ENTRYPOINT ["node","/opt/trooper/main.js"]
