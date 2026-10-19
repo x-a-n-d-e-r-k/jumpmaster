@@ -1,12 +1,12 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promptVersion } from './api/sticks.js';
 import { createApp } from './app.js';
 import { type Config, loadConfig } from './config.js';
 import { openDb } from './db/open.js';
 import { GitHubForge } from './forge/github.js';
 import { expireLeases } from './leases.js';
+import { promptVersions } from './payloads.js';
 import { enqueueNext } from './scheduler.js';
 import { syncDropZone } from './sync.js';
 
@@ -44,7 +44,7 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
     for (const zone of config.dropZones) {
       try {
         await syncDropZone(db, forgeFor(zone.id), zone);
-        enqueueNext(db, zone, promptVersion());
+        enqueueNext(db, zone, promptVersions().implement);
       } catch (e) {
         log(`sync failed for zone ${zone.id}: ${errorMessage(e)}`);
       }

@@ -12,9 +12,10 @@ import {
   upsertDropZone,
   upsertWorkItem,
 } from '../db/repo.js';
+import { buildPayload, promptVersions } from '../payloads.js';
 import { fakeForge } from '../test/fakes.js';
 import { t0, tmpDbFile, workItem } from '../test/helpers.js';
-import { buildPayload, promptVersion, registerStickRoutes } from './sticks.js';
+import { registerStickRoutes } from './sticks.js';
 
 const config: Config = {
   listen: { host: '127.0.0.1', port: 7420 },
@@ -29,6 +30,9 @@ const config: Config = {
       image: 'jm-trooper:test',
       model: 'claude-opus-5-5',
       maxTurns: 200,
+      models: {},
+      protectedPaths: [],
+      reviewReadToken: false,
     },
   ],
   secrets: {
@@ -170,7 +174,7 @@ describe('stick API', () => {
       credentials: { claudeToken: 'claude-secret', forgeToken: 'gh-secret' },
       model: 'claude-opus-5-5',
       maxTurns: 200,
-      promptVersion: promptVersion(),
+      promptVersion: promptVersions().implement,
     });
   });
 
@@ -199,7 +203,7 @@ describe('stick API', () => {
     const drop = { ...getDrop(db, 'd1')!, epoch: 1 };
     const p = buildPayload(db, zone, drop, config.secrets);
     expect(p.prompt).toMatch(/autonomous coding agent/);
-    expect(p.prompt).toMatch(/\n\n## Issue #7: Add widget\n\nPlease add a widget\.$/);
+    expect(p.prompt).toMatch(/\n\n## Issue \(data\)\n\n#7: Add widget\n\nPlease add a widget\.$/);
     expect(p.promptVersion).toMatch(/^[0-9a-f]{12}$/);
   });
 

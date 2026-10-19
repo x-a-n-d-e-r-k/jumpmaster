@@ -1,14 +1,8 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import {
-  agentBranch,
-  type DropPayload,
-  DropResultSchema,
-  TrooperEventSchema,
-} from '@jumpmaster/protocol';
+import { DropResultSchema, TrooperEventSchema } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import type { Config, DropZoneConfig } from '../config.js';
+import type { Config } from '../config.js';
 import type { Db } from '../db/open.js';
 import {
   appendEvents,
@@ -16,12 +10,12 @@ import {
   getDrop,
   getStickByTokenHash,
   insertStick,
-  listWorkItems,
   type Stick,
   updateDrop,
 } from '../db/repo.js';
 import type { Forge } from '../forge/github.js';
 import { heartbeat, leaseNextDrop } from '../leases.js';
+import { buildPayload } from '../payloads.js';
 import { applyResult } from '../results.js';
 
 export interface StickRouteDeps {
@@ -33,48 +27,7 @@ export interface StickRouteDeps {
   leasePollMs?: number;
 }
 
-// Same relative depth from src/api (vitest) and dist/api (built): up to apps/, then trooper/.
-const template = readFileSync(
-  new URL('../../../trooper/prompts/implement.md', import.meta.url),
-  'utf8',
-);
-
 const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex');
-
-/** First 12 hex of sha256(prompt template); recorded on every drop. */
-export const promptVersion = (): string => sha256(template).slice(0, 12);
-
-export function buildPayload(
-  db: Db,
-  zone: DropZoneConfig,
-  drop: Drop,
-  secrets: Config['secrets'],
-): DropPayload {
-  const item = listWorkItems(db, zone.id).find((w) => w.id === drop.workItemId);
-  if (!item) throw new Error(`unknown work item ${drop.workItemId}`);
-  const row = db
-    .prepare('SELECT default_branch AS defaultBranch FROM drop_zones WHERE id = ?')
-    .get(zone.id) as { defaultBranch: string };
-  const [owner = '', name = ''] = zone.repo.split('/');
-  return {
-    protocol: 1,
-    dropId: drop.id,
-    epoch: drop.epoch,
-    role: 'implement',
-    repo: { owner, name, defaultBranch: row.defaultBranch },
-    issue: { number: item.issueNumber, title: item.title, body: item.body },
-    branch: agentBranch(item.issueNumber),
-    gates: zone.gates,
-    model: zone.model,
-    maxTurns: zone.maxTurns,
-    promptVersion: promptVersion(),
-    image: zone.image,
-    resume: false,
-    protectedPaths: [],
-    prompt: `${template}\n\n## Issue #${item.issueNumber}: ${item.title}\n\n${item.body}`,
-    credentials: { claudeToken: secrets.claudeToken, forgeToken: secrets.githubAuthorToken },
-  };
-}
 
 const safeEqual = (a: string, b: string): boolean =>
   timingSafeEqual(createHash('sha256').update(a).digest(), createHash('sha256').update(b).digest());
