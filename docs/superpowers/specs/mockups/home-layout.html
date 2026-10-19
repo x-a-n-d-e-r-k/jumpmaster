@@ -1,0 +1,88 @@
+<h2>What should you see first when you open the app?</h2>
+<p class="subtitle">Three home-screen directions. Same data, different emphasis. Click the one that feels right (or tell me what to steal from each).</p>
+
+<style>
+  .wf{font-size:12px;line-height:1.35}
+  .wf .row{display:flex;gap:8px;margin-bottom:8px}
+  .wf .box{border:1px solid var(--border,#ccc);border-radius:6px;padding:8px;flex:1;background:var(--bg-secondary,rgba(127,127,127,.06))}
+  .wf .t{font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;opacity:.7;margin-bottom:4px}
+  .wf .pill{display:inline-block;border-radius:10px;padding:1px 7px;font-size:10px;margin:1px;border:1px solid currentColor;opacity:.85}
+  .wf .bar{height:6px;border-radius:3px;background:rgba(127,127,127,.25);margin:4px 0}
+  .wf .bar i{display:block;height:100%;border-radius:3px;background:#4a8}
+  .wf .warn{color:#c80}
+  .wf .bad{color:#c44}
+  .wf .ok{color:#4a8}
+  .wf .line{border-bottom:1px dashed rgba(127,127,127,.3);padding:3px 0}
+</style>
+
+<div class="options">
+
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Factory floor</h3>
+      <p>Runners and live jobs are the centerpiece. You watch work happen.</p>
+      <div class="mockup"><div class="mockup-body wf">
+        <div class="row">
+          <div class="box"><div class="t">Slot 1 · local</div><span class="pill ok">implement</span> acme-api #41<br>gates 3/5 · 12m</div>
+          <div class="box"><div class="t">Slot 2 · local</div><span class="pill">review</span> blog #7<br>re-running preflight · 4m</div>
+          <div class="box"><div class="t">Slot 3 · remote</div><span class="pill warn">heal 2/3</span> acme-web #19<br>typecheck failing</div>
+        </div>
+        <div class="row">
+          <div class="box"><div class="t">Queue (next 4)</div>
+            <div class="line">highest · acme-api #52</div>
+            <div class="line">high · w3 · acme-web #22</div>
+            <div class="line">high · w1 · blog #9 · 2d</div>
+            <div class="line">normal · acme-api #60</div>
+          </div>
+          <div class="box"><div class="t">Subscription</div>5h window 62%<div class="bar"><i style="width:62%"></i></div>weekly 31%<div class="bar"><i style="width:31%"></i></div></div>
+        </div>
+        <div class="box"><div class="t bad">Waiting on you (2)</div>small strip along the bottom</div>
+      </div></div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Projects &amp; goals</h3>
+      <p>One card per project: where it is on its goal ladder, what's moving, what's stuck.</p>
+      <div class="mockup"><div class="mockup-body wf">
+        <div class="row">
+          <div class="box"><div class="t">acme-api · weight 3</div>Rung R3 of 8 · "auth hand-over ready"<div class="bar"><i style="width:40%"></i></div>
+            <span class="pill">ready 4</span><span class="pill">staged 2</span><span class="pill">PRs 1</span><span class="pill bad">needs you 1</span></div>
+          <div class="box"><div class="t">acme-web · weight 3</div>Rung R1 of 5<div class="bar"><i style="width:15%"></i></div>
+            <span class="pill">ready 2</span><span class="pill warn">healing 1</span></div>
+        </div>
+        <div class="row">
+          <div class="box"><div class="t">blog · weight 1</div>Rung R5 of 6<div class="bar"><i style="width:85%"></i></div>
+            <span class="pill">ready 1</span><span class="pill bad">needs you 1</span></div>
+          <div class="box" style="opacity:.6"><div class="t">+ add project</div>&nbsp;</div>
+        </div>
+        <div class="box"><div class="t">Fleet</div>3 slots · 3 busy · queue 7 · subscription 62%</div>
+      </div></div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Inbox first</h3>
+      <p>Home is "what needs you": briefs, rulings, escalations. Everything else is a click away.</p>
+      <div class="mockup"><div class="mockup-body wf">
+        <div class="box" style="margin-bottom:8px"><div class="t bad">Brief · acme-api · blocks 2 issues</div>
+          <b>Reviewer and author disagree on token refresh approach.</b> Fable arbitrated, wants your call.<br>
+          Options: (1) keep sliding window (2) fixed expiry · Recommendation: 1<br>
+          <span class="pill">Rule 1</span><span class="pill">Rule 2</span><span class="pill">Discuss</span></div>
+        <div class="box" style="margin-bottom:8px"><div class="t warn">Escalation · blog · alwaysEscalate: deploy</div>
+          Ready to add a deploy workflow. Approve?<br><span class="pill">Approve</span><span class="pill">Decline</span></div>
+        <div class="row">
+          <div class="box"><div class="t">Today</div>5 merged · 1 parked · 2 heals</div>
+          <div class="box"><div class="t">Fleet</div>3/3 busy · queue 7</div>
+          <div class="box"><div class="t">Sub</div>62% of 5h</div>
+        </div>
+      </div></div>
+    </div>
+  </div>
+
+</div>
