@@ -90,7 +90,12 @@ describe('GitHubForge', () => {
       .query({ head: 'o:agent/issue-7', state: 'open' })
       .reply(200, [{ number: 12, html_url: 'u' }]);
     expect(
-      await forge.findOrCreatePullRequest({ head: 'agent/issue-7', base: 'main', title: 't', body: 'b' }),
+      await forge.findOrCreatePullRequest({
+        head: 'agent/issue-7',
+        base: 'main',
+        title: 't',
+        body: 'b',
+      }),
     ).toEqual({ number: 12, url: 'u', created: false });
   });
 
@@ -100,7 +105,12 @@ describe('GitHubForge', () => {
       .query({ head: 'o:agent/issue-8', state: 'open' })
       .reply(200, []);
     nock(api)
-      .post('/repos/o/r/pulls', { head: 'agent/issue-8', base: 'main', title: 't', body: 'Closes #8' })
+      .post('/repos/o/r/pulls', {
+        head: 'agent/issue-8',
+        base: 'main',
+        title: 't',
+        body: 'Closes #8',
+      })
       .reply(201, { number: 13, html_url: 'v' });
     expect(
       await forge.findOrCreatePullRequest({
