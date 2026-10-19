@@ -39,6 +39,14 @@ const minimal = fixture({
 });
 
 describe('loadConfig', () => {
+  test('reviewReadToken without JM_GITHUB_READ_TOKEN is a config error', () => {
+    const file = withZone({ reviewReadToken: true });
+    expect(() => loadConfig(file, fullEnv)).toThrow(/JM_GITHUB_READ_TOKEN/);
+    expect(
+      loadConfig(file, { ...fullEnv, JM_GITHUB_READ_TOKEN: 'rd' }).secrets.githubReadToken,
+    ).toBe('rd');
+  });
+
   test('missing JM_CLAUDE_TOKEN is a config error', () =>
     expect(() =>
       loadConfig(minimal, {

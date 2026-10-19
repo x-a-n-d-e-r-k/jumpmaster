@@ -123,6 +123,11 @@ export function loadConfig(path: string, env: NodeJS.ProcessEnv): Config {
   if (env[SECRET_VARS.githubReviewerToken] === env[SECRET_VARS.githubAuthorToken])
     throw new Error('JM_GITHUB_REVIEWER_TOKEN must differ from JM_GITHUB_AUTHOR_TOKEN');
   const readToken = env.JM_GITHUB_READ_TOKEN;
+  const needsRead = parsed.data.dropZones.filter((z) => z.reviewReadToken).map((z) => z.id);
+  if (needsRead.length > 0 && !readToken)
+    throw new Error(
+      `JM_GITHUB_READ_TOKEN is required because reviewReadToken is true for zone(s): ${needsRead.join(', ')}`,
+    );
   const secrets: Config['secrets'] = {
     claudeToken: env[SECRET_VARS.claudeToken] as string,
     githubAuthorToken: env[SECRET_VARS.githubAuthorToken] as string,

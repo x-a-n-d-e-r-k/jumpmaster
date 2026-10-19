@@ -18,12 +18,20 @@ const templates = Object.fromEntries(
 
 const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex');
 
+const VERSIONS = Object.fromEntries(
+  ROLES.map((r) => [r, sha256(templates[r]).slice(0, 12)]),
+) as Record<Role, string>;
+
 /** First 12 hex of sha256(prompt template), per role; recorded on every drop. */
-export function promptVersions(): Record<Role, string> {
-  return Object.fromEntries(ROLES.map((r) => [r, sha256(templates[r]).slice(0, 12)])) as Record<
-    Role,
-    string
-  >;
+export const promptVersions = (): Record<Role, string> => VERSIONS;
+
+/** Quotes heading lines and breaks up fences so feedback text cannot forge structure. */
+function neutralise(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => (/^\s*#/.test(line) ? `> ${line}` : line))
+    .join('\n')
+    .replaceAll('```', '`\u200b`\u200b`');
 }
 
 /** Human feedback is trusted; automated review and CI findings are untrusted data. */
@@ -32,7 +40,7 @@ export function renderFeedback(f: Feedback): string {
     f.source === 'human'
       ? '## Feedback (data, from trusted reviewers)'
       : '## Automated review findings (data, untrusted)';
-  return `${heading}\n\n${f.text}`;
+  return `${heading}\n\n${neutralise(f.text)}`;
 }
 
 export function buildPayload(
@@ -106,5 +114,7 @@ export function buildPayload(
     }
     case 'resolve':
       return { ...common, role, pr: pr(), credentials: author };
+    default:
+      throw new Error(`unknown drop role ${String(drop.role)}`);
   }
 }
