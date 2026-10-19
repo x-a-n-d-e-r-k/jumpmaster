@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { DropResultSchema, TrooperEventSchema } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import type { Config } from '../config.js';
+import { type Config, secretList } from '../config.js';
 import type { Db } from '../db/open.js';
 import {
   appendEvents,
@@ -13,16 +13,18 @@ import {
   type Stick,
   updateDrop,
 } from '../db/repo.js';
-import type { Forge } from '../forge/github.js';
 import { heartbeat, leaseNextDrop } from '../leases.js';
+import type { ForgePair } from '../outbox.js';
 import { buildPayload } from '../payloads.js';
 import { applyResult } from '../results.js';
 
 export interface StickRouteDeps {
   db: Db;
   config: Config;
-  forgeFor(zoneId: string): Forge;
+  forgesFor(zoneId: string): ForgePair;
   now(): Date;
+  /** Jitter source for usage pauses; defaults to `Math.random`. */
+  rand?: () => number;
   leaseWaitMs?: number;
   leasePollMs?: number;
 }
@@ -158,11 +160,26 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       if (!body.success) return reply.code(400).send({ error: 'invalid body' });
       const drop = liveDrop(req, reply, req.params.id, body.data.epoch, { requireLive: true });
       if (!drop) return reply;
+      const zone = config.dropZones.find((z) => z.id === drop.dropZoneId);
+      if (!zone) return reply.code(500).send({ error: `unknown drop zone ${drop.dropZoneId}` });
+      const at = now();
       updateDrop(db, drop.id, {
         resultJson: JSON.stringify(body.data.result),
-        finishedAt: now().toISOString(),
+        finishedAt: at.toISOString(),
       });
-      await applyResult(db, deps.forgeFor(drop.dropZoneId), drop.id, body.data.result);
+      await applyResult(
+        db,
+        {
+          forges: deps.forgesFor(zone.id),
+          zone,
+          secrets: secretList(config.secrets),
+          usageCfg: config.usage,
+          rand: deps.rand ?? Math.random,
+        },
+        drop.id,
+        body.data.result,
+        at,
+      );
       return reply.code(204).send();
     });
   });

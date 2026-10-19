@@ -6,6 +6,7 @@ import { type Config, loadConfig } from './config.js';
 import { openDb } from './db/open.js';
 import { GitHubForge } from './forge/github.js';
 import { expireLeases } from './leases.js';
+import type { ForgePair } from './outbox.js';
 import { promptVersions } from './payloads.js';
 import { enqueueNext } from './scheduler.js';
 import { syncDropZone } from './sync.js';
@@ -28,22 +29,26 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
   const forges = new Map(
     config.dropZones.map((zone) => {
       const [owner = '', name = ''] = zone.repo.split('/');
-      return [zone.id, new GitHubForge(owner, name, config.secrets.githubAuthorToken)] as const;
+      const pair: ForgePair = {
+        author: new GitHubForge(owner, name, config.secrets.githubAuthorToken),
+        reviewer: new GitHubForge(owner, name, config.secrets.githubReviewerToken),
+      };
+      return [zone.id, pair] as const;
     }),
   );
-  const forgeFor = (zoneId: string) => {
-    const forge = forges.get(zoneId);
-    if (!forge) throw new Error(`unknown drop zone ${zoneId}`);
-    return forge;
+  const forgesFor = (zoneId: string): ForgePair => {
+    const pair = forges.get(zoneId);
+    if (!pair) throw new Error(`unknown drop zone ${zoneId}`);
+    return pair;
   };
   const log = (msg: string) => console.error(`[jumpmaster] ${scrub(msg, config)}`);
 
-  const app = createApp({ db, config, forgeFor, now: () => new Date() });
+  const app = createApp({ db, config, forgesFor, now: () => new Date() });
 
   const pass = async () => {
     for (const zone of config.dropZones) {
       try {
-        await syncDropZone(db, forgeFor(zone.id), zone);
+        await syncDropZone(db, forgesFor(zone.id).author, zone);
         enqueueNext(db, zone, promptVersions().implement);
       } catch (e) {
         log(`sync failed for zone ${zone.id}: ${errorMessage(e)}`);
