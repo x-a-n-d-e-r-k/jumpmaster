@@ -16,6 +16,7 @@ function need(name: string): string {
 async function main() {
   const serverUrl = need('JM_SERVER_URL');
   const slots = Number(process.env.JM_SLOTS ?? '1');
+  if (!Number.isInteger(slots) || slots < 1) throw new Error('JM_SLOTS must be an integer >= 1');
   const dir = join(homedir(), '.jumpmaster');
   const file = join(dir, 'stick.json');
 
@@ -31,7 +32,7 @@ async function main() {
   if (!token) {
     const name = process.env.JM_STICK_NAME ?? 'stick';
     const { stickId, stickToken } = await client.enroll(need('JM_JOIN_TOKEN'), name, slots);
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(file, JSON.stringify({ serverUrl, stickId, stickToken }), { mode: 0o600 });
     chmodSync(file, 0o600);
     console.log(`enrolled as ${stickId}`);

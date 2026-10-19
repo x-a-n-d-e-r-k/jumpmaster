@@ -89,13 +89,25 @@ export async function runDrop(
     const { exitCode } = await handle.wait();
     await flush();
     await stopping;
-    if (stale) return; // the server no longer owns this lease epoch
-    const final: DropResult =
-      result ??
-      (cancelled
-        ? { status: 'failed', reason: 'cancelled', gates: [] }
-        : { status: 'failed', reason: `trooper exited ${exitCode} without result`, gates: [] });
-    await client.postResult(dropId, epoch, final);
+    // The server no longer owns this epoch (stale) or already cancelled it: it would 409 a result.
+    if (stale || cancelled) return;
+    await client.postResult(
+      dropId,
+      epoch,
+      result ?? {
+        status: 'failed',
+        reason: `trooper exited ${exitCode} without result`,
+        gates: [],
+      },
+    );
+  } catch (e) {
+    await stop();
+    if (!stale && !cancelled) {
+      const reason = `stick runner error: ${e instanceof Error ? e.message : String(e)}`;
+      await client
+        .postResult(dropId, epoch, { status: 'failed', reason, gates: [] })
+        .catch(() => {});
+    }
   } finally {
     clearInterval(hb);
     clearInterval(flusher);

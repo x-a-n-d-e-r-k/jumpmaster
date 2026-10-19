@@ -44,6 +44,7 @@ export class DockerDriver implements ContainerDriver {
       stderr: true,
       hijack: true,
     });
+    stream.on('error', () => {}); // EPIPE/ECONNRESET when the container dies instantly
     const out = new Readable({ read() {} });
     const err = new Readable({ read() {} });
     container.modem.demuxStream(stream, wrap(out), wrap(err));
@@ -57,9 +58,18 @@ export class DockerDriver implements ContainerDriver {
       (r: { StatusCode: number }) => ({ exitCode: r.StatusCode }),
       () => ({ exitCode: -1 }),
     );
-    await container.start();
-    stream.write(o.payload);
-    stream.end();
+    try {
+      await container.start();
+    } catch (e) {
+      (stream as unknown as Readable).destroy();
+      await container.remove({ force: true }).catch(() => {});
+      throw e;
+    }
+    try {
+      stream.end(o.payload);
+    } catch {
+      // container already gone; exit code surfaces via wait()
+    }
 
     return {
       logs: () => lines(out),

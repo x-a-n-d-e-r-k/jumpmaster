@@ -146,4 +146,23 @@ describe('runDrop', () => {
     expect(client.events.flat()).toHaveLength(120);
     expect(Math.max(...client.events.map((b) => b.length))).toBeLessThanOrEqual(50);
   });
+
+  test('logs() throwing stops the container and posts a failed result', async () => {
+    const d = fakeDriver([]);
+    const driver: ContainerDriver = {
+      async start(o) {
+        const h = await d.driver.start(o);
+        return {
+          ...h,
+          async *logs() {
+            throw new Error('boom');
+          },
+        };
+      },
+    };
+    const client = fakeClient();
+    await runDrop(payload, { client, driver, heartbeatMs: 10 });
+    expect(d.stopped).toBe(true);
+    expect(client.result).toMatchObject({ status: 'failed', reason: 'stick runner error: boom' });
+  });
 });
