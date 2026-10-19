@@ -1,12 +1,4 @@
-export const IMPLEMENT_OUTPUT_SCHEMA = {
-  type: 'object',
-  properties: {
-    status: { type: 'string', enum: ['COMPLETE', 'BLOCKED'] },
-    summary: { type: 'string' },
-  },
-  required: ['status', 'summary'],
-  additionalProperties: false,
-} as const;
+import { IMPLEMENT_OUTPUT_SCHEMA } from '@jumpmaster/protocol';
 
 export interface ClaudeArgsOptions {
   prompt: string;

@@ -68,6 +68,9 @@ export function buildPayload(
     model: zone.model,
     maxTurns: zone.maxTurns,
     promptVersion: promptVersion(),
+    image: zone.image,
+    resume: false,
+    protectedPaths: [],
     prompt: `${template}\n\n## Issue #${item.issueNumber}: ${item.title}\n\n${item.body}`,
     credentials: { claudeToken: secrets.claudeToken, forgeToken: secrets.githubAuthorToken },
   };

@@ -134,6 +134,7 @@ export async function runDrop(
     } else {
       await client.postResult(dropId, epoch, {
         status: 'failed',
+        role: payload.role,
         reason: `trooper exited ${exitCode} without result`,
         gates: [],
       });
@@ -146,7 +147,7 @@ export async function runDrop(
     if (!stale && !cancelled) {
       const reason = `stick runner error: ${e instanceof Error ? e.message : String(e)}`;
       await client
-        .postResult(dropId, epoch, { status: 'failed', reason, gates: [] })
+        .postResult(dropId, epoch, { status: 'failed', role: payload.role, reason, gates: [] })
         .catch(() => {});
     }
   } finally {

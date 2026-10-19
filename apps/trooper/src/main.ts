@@ -27,11 +27,13 @@ export interface TrooperDeps {
 
 export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promise<DropResult> {
   const { claudeToken, forgeToken } = payload.credentials;
-  const secrets = [
-    claudeToken,
-    forgeToken,
-    Buffer.from(`x-access-token:${forgeToken}`).toString('base64'),
-  ];
+  if (payload.role === 'implement' && forgeToken === undefined) {
+    throw new Error('forge token required for implement');
+  }
+  const secrets =
+    forgeToken === undefined
+      ? [claudeToken]
+      : [claudeToken, forgeToken, Buffer.from(`x-access-token:${forgeToken}`).toString('base64')];
   const emitEvent = (kind: TrooperEvent['kind'], data: Record<string, unknown>): void => {
     const ev: TrooperEvent = {
       ts: new Date().toISOString(),
@@ -57,12 +59,12 @@ export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promi
     await deps.git.cloneRepo({
       owner: payload.repo.owner,
       name: payload.repo.name,
-      token: forgeToken,
+      token: forgeToken as string,
       dir: repoDir,
     });
     const target = { owner: payload.repo.owner, name: payload.repo.name };
     // Fail fast: the push refuses an existing branch, so don't burn a whole Claude run first.
-    if (await deps.git.remoteBranchExists(target, payload.branch, forgeToken)) {
+    if (await deps.git.remoteBranchExists(target, payload.branch, forgeToken as string)) {
       return finish({
         status: 'failed',
         reason: `branch ${payload.branch} already exists on remote`,
@@ -174,7 +176,7 @@ export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promi
     const headSha = await deps.git.pushNewBranch(
       repoDir,
       payload.branch,
-      forgeToken,
+      forgeToken as string,
       target,
       () => void deps.git.sweepProcesses(),
     );

@@ -17,6 +17,8 @@ const payload: DropPayload = {
   maxTurns: 10,
   promptVersion: 'v1',
   prompt: 'do it',
+  image: 'jumpmaster-trooper:test',
+  protectedPaths: [],
   credentials: {
     claudeToken: 'sk-ant-oat-SECRETSECRETSECRET1234',
     forgeToken: 'ghp_FORGESECRETFORGESECRET1234',
@@ -271,4 +273,10 @@ test('every emitted event line stays under 64 KB and secrets cut by truncation a
   const joined = f.lines.join('\n');
   expect(joined).not.toContain(payload.credentials.claudeToken);
   expect(joined).not.toContain(payload.credentials.claudeToken.slice(0, 12));
+});
+
+test('implement without a forge token is refused', async () => {
+  const f = fakeDeps({ claude: [completeResult] });
+  const p = { ...payload, credentials: { claudeToken: payload.credentials.claudeToken } };
+  await expect(runTrooper(p, f.deps)).rejects.toThrow('forge token required for implement');
 });

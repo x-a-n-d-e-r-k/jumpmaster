@@ -26,6 +26,8 @@ const payload: DropPayload = DropPayloadSchema.parse({
   maxTurns: 5,
   promptVersion: 'v1',
   prompt: 'p',
+  image: 'jumpmaster-trooper:test',
+  protectedPaths: [],
   credentials: { claudeToken: TOKEN, forgeToken: 'ghs_forge' },
 });
 
@@ -103,6 +105,7 @@ describe('runDrop', () => {
     await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
     expect(client.result).toEqual({
       status: 'failed',
+      role: 'implement',
       reason: 'trooper exited 2 without result',
       gates: [],
     });
