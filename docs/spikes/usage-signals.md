@@ -1,6 +1,6 @@
 # Spike: Claude usage signals under a setup-token
 
-Status: procedure written; results TO BE FILLED BY OPERATOR.
+Status: run on 2026-10-19; results below.
 
 Purpose: find out which usage and rate-limit signals Claude Code exposes when it
 authenticates with a long-lived `setup-token` (not an API key). The findings decide
@@ -108,52 +108,117 @@ Raw output can contain account identifiers and, in error paths, credentials.
 
 ## Results
 
-Run date: TO BE FILLED BY OPERATOR
-Claude Code version (`claude --version` in the image): TO BE FILLED BY OPERATOR
-Plan type (e.g. Pro, Max): TO BE FILLED BY OPERATOR
+Run date: 2026-10-19
+Claude Code version (`claude --version` in the image): 2.1.302
+Plan type: a personal subscription via `claude setup-token` (tier not recorded)
 
 ### (a) `rate_limit_event`
 
-Appears: TO BE FILLED BY OPERATOR (yes / no / only sometimes)
+Appears: **yes, on every run** (3 of 3 headless runs, including the real M0 drop), as
+one message between the assistant output and the result, even at low utilization.
 
-Fields observed: TO BE FILLED BY OPERATOR
+Fields observed in `rate_limit_info`:
+
+- `status` (`allowed` in every run)
+- `resetsAt` (epoch seconds) and `rateLimitType` (`five_hour`) for the binding window
+- `overageStatus`, `overageResetsAt`, `isUsingOverage`
+- `unifiedWindows`: **both** windows with utilization, so the weekly window is visible
+  too, not only the 5-hour one
 
 Redacted example:
 
 ```json
-TO BE FILLED BY OPERATOR
+{
+  "type": "rate_limit_event",
+  "rate_limit_info": {
+    "status": "allowed",
+    "resetsAt": 1792442400,
+    "rateLimitType": "five_hour",
+    "overageStatus": "allowed",
+    "overageResetsAt": 1793491200,
+    "isUsingOverage": false,
+    "unifiedWindows": {
+      "five_hour": { "utilization": 0.02, "resetsAt": 1792442400 },
+      "seven_day": { "utilization": 0.15, "resetsAt": 1792555200 }
+    }
+  },
+  "uuid": "<redacted>",
+  "session_id": "<redacted>"
+}
 ```
 
 ### (b) Result message
 
-`usage`:
+`usage` (trimmed):
 
 ```json
-TO BE FILLED BY OPERATOR
+{
+  "input_tokens": 2,
+  "cache_creation_input_tokens": 5426,
+  "cache_read_input_tokens": 11228,
+  "output_tokens": 4,
+  "output_tokens_details": { "thinking_tokens": 0 },
+  "service_tier": "standard",
+  "speed": "standard"
+}
 ```
 
-`modelUsage`:
+`modelUsage` (keyed by model; trimmed):
 
 ```json
-TO BE FILLED BY OPERATOR
+{
+  "claude-sonnet-5-5": {
+    "inputTokens": 2,
+    "outputTokens": 4,
+    "cacheReadInputTokens": 11228,
+    "cacheCreationInputTokens": 5426,
+    "costUSD": 0.0228708,
+    "contextWindow": 1000000,
+    "canonicalModel": "claude-sonnet-5-5",
+    "costBasis": "list"
+  }
+}
 ```
 
-`terminal_reason`: TO BE FILLED BY OPERATOR
+`terminal_reason`: `completed`
 
-Other notable fields: TO BE FILLED BY OPERATOR
+Other notable fields: `subtype: "success"`, `is_error: false`, `num_turns`,
+`total_cost_usd` (list-price estimate, not a bill), `api_error_status`,
+`permission_denials`, `stop_reason`, and timing (`duration_ms`, `duration_api_ms`,
+`ttft_ms`). With no `--model`, the CLI default was `claude-sonnet-5-5`; the drop config
+sets the model explicitly, so drops are unaffected.
 
 ### (c) `/usage` report
 
-Readable with a setup-token: TO BE FILLED BY OPERATOR (yes / `rate_limits` is null / error)
-
-Detail: TO BE FILLED BY OPERATOR
+Readable with a setup-token: **not as rate limits.** `claude -p "/usage" --output-format json`
+succeeds, but `result` is a local session summary (cost, durations, code changes, token
+counts, all zero for a fresh session) and the message carries no `rate_limits` field.
+There is no headless way to read remaining quota on demand; the only source is the
+`rate_limit_event` that each run emits.
 
 ### Behaviour at the limit (optional)
 
-TO BE FILLED BY OPERATOR
+Not observed: utilization was about 2% of the 5-hour window and 15% of the weekly window.
+Not provoked deliberately.
 
 ## Conclusion for M1 usage-pause design
 
-Which signal(s) the M1 usage pause can rely on: TO BE FILLED BY OPERATOR
+Which signal(s) the M1 usage pause can rely on:
 
-Gaps and fallbacks: TO BE FILLED BY OPERATOR
+- `rate_limit_event.rate_limit_info` on every run. `status` drives the decision
+  (`allowed_warning` → soft throttle, `rejected` → global pause), and `resetsAt` gives
+  the resume time.
+- `unifiedWindows.{five_hour,seven_day}.utilization` allows a **proactive** throttle
+  before a limit is hit (for example, stop starting new drops above a configurable
+  utilization), and shows weekly exhaustion distinctly from the 5-hour window.
+- `modelUsage` per drop for per-project usage accounting and budgets (spec §5.3).
+
+Gaps and fallbacks:
+
+- No on-demand quota query, so state is only as fresh as the last drop. When idle, the
+  scheduler should run a cheap probe drop before resuming after a pause.
+- `rejected` behaviour and fields at the limit are still unobserved; M1 must also
+  handle `api_error_status` / `is_error` on the result and an assistant `rate_limit`
+  error, and stay correct if `unifiedWindows` is absent.
+- The trooper's parser already normalizes `status`/`resetsAt`. M1 should also keep
+  `rateLimitType` and `unifiedWindows` instead of reading only the raw event.
