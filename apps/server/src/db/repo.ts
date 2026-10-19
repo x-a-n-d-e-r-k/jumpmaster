@@ -525,6 +525,22 @@ export function deleteFailedOutbox(db: Db, itemId: number, kind?: OutboxRow['kin
     .run(itemId, kind ?? null, kind ?? null).changes;
 }
 
+/**
+ * Compare-and-set `done` -> `pending` for an op that must run again; restarts its `created_at`
+ * clock. Returns whether this caller won the reset.
+ */
+export function resetDoneOutbox(db: Db, opKey: string, now: Date): boolean {
+  const at = now.toISOString();
+  return (
+    db
+      .prepare(
+        `UPDATE outbox SET state = 'pending', result_json = NULL, error = NULL, created_at = ?,
+           updated_at = ? WHERE op_key = ? AND state = 'done'`,
+      )
+      .run(at, at, opKey).changes === 1
+  );
+}
+
 // ---- M1: usage state ---------------------------------------------------------------------------
 
 export interface UsageStateRow {

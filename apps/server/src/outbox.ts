@@ -6,6 +6,7 @@ import {
   listOutbox,
   type OutboxRow,
   type OutboxState,
+  resetDoneOutbox,
   updateOutbox,
 } from './db/repo.js';
 import type { Forge, ForgeError } from './forge/github.js';
@@ -147,12 +148,17 @@ async function fromExisting(
     case 'done': {
       const result: unknown = row.resultJson == null ? undefined : JSON.parse(row.resultJson);
       if (row.kind !== 'create_pr') return { state: 'done', result };
-      // A PR op stays done only while its PR is open; a closed one is opened again.
+      // A PR op stays done while its PR is open or merged; a closed one is opened again.
       const head = (JSON.parse(row.payloadJson) as CreatePrPayload).head;
-      const open = await forges.author.findOpenPullByHead(head);
-      if (open) return { state: 'done', result };
-      updateOutbox(db, row.opKey, { state: 'pending' }, now);
-      return execute(db, forges, op, now);
+      if (await forges.author.findOpenPullByHead(head)) return { state: 'done', result };
+      const stored = (result as { number?: number } | undefined)?.number;
+      if (stored !== undefined && (await forges.author.getPull(stored))?.merged) {
+        return { state: 'done', result };
+      }
+      if (resetDoneOutbox(db, row.opKey, now)) return execute(db, forges, op, now);
+      const current = getOutbox(db, row.opKey);
+      if (!current) throw new Error(`outbox row ${row.opKey} vanished`);
+      return fromExisting(db, forges, op, current, now);
     }
     case 'failed':
       return { state: 'failed', ...(row.error != null ? { error: row.error } : {}) };
@@ -220,18 +226,29 @@ export function markPendingUnknown(db: Db, now: Date): number {
   return rows.length;
 }
 
+const ZWJ = '\u200d';
+
+/** Cuts `text` to `maxLen` without leaving a code span open. */
+function truncate(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  const cut = text.slice(0, maxLen);
+  const runs = [...cut.matchAll(/`+/g)];
+  const last = runs.at(-1);
+  return runs.length % 2 === 1 && last ? cut.slice(0, last.index) : cut;
+}
+
 /**
  * Makes untrusted text safe to post: redacts secrets, escapes HTML comment markers (so no text can
- * forge a `jm:op:` marker), wraps `@mentions` and bare autolinks in code spans, and truncates.
+ * forge a `jm:op:` marker), breaks `@mentions` and autolinks with a zero-width joiner everywhere
+ * (code spans included, so no span boundary can revive one), and truncates without splitting a
+ * code span.
  */
 export function sanitizeForgeText(text: string, secrets: string[], maxLen = 60_000): string {
   let out = text;
   for (const s of secrets) if (s) out = out.split(s).join('[redacted]');
   out = out.replaceAll('<!--', '&lt;!--').replaceAll('-->', '--&gt;');
-  out = out.replace(
-    /(^|[^\w`])(@[A-Za-z0-9](?:[A-Za-z0-9-]*)(?:\/[A-Za-z0-9][\w.-]*)?)/g,
-    '$1`$2`',
-  );
-  out = out.replace(/(^|[^\w`(<[])((?:https?:\/\/|www\.)[^\s<>`]+)/g, '$1`$2`');
-  return out.length > maxLen ? out.slice(0, maxLen) : out;
+  out = out.replace(/(^|[^\w])@(?=[A-Za-z0-9])/g, `$1@${ZWJ}`);
+  out = out.replaceAll('://', `:${ZWJ}//`);
+  out = out.replace(/(^|[^\w])(www)\./gi, `$1$2${ZWJ}.`);
+  return truncate(out, maxLen);
 }

@@ -134,6 +134,15 @@ describe('FakeForgeState', () => {
     expect(await f.reviewer.viewerLogin()).toBe('reviewer-bot');
     expect(f.reviewer.calls[0]).toEqual({ method: 'getPull', identity: 'reviewer', args: [1] });
   });
+  test('createReview is 422 on a closed PR or a stale commit', async () => {
+    f.state.addPull({ headRef: 'agent/issue-1', headSha: 'h1', author: 'author-bot' });
+    const review = (commitId: string) =>
+      f.reviewer.createReview(1, { event: 'APPROVE', body: 'b', commitId });
+    await expect(review('old')).rejects.toMatchObject({ status: 422 });
+    f.state.close(1);
+    await expect(review('h1')).rejects.toMatchObject({ status: 422 });
+    expect(f.state.reviews).toHaveLength(0);
+  });
 });
 
 describe('runOp', () => {
@@ -231,6 +240,39 @@ describe('runOp', () => {
     expect(calls('findOrCreatePullRequest')).toHaveLength(2);
   });
 
+  test('a done create_pr whose PR merged keeps its stored result', async () => {
+    f.state.branches.set('agent/issue-1', 'h1');
+    await runOp(db, forges, prOp(), t0);
+    f.state.markMerged(1);
+    expect(await runOp(db, forges, prOp(), t1)).toMatchObject({
+      state: 'done',
+      result: { number: 1 },
+    });
+    expect(calls('findOrCreatePullRequest')).toHaveLength(1);
+    expect(getOutbox(db, prOp().opKey)?.state).toBe('done');
+  });
+
+  test('a reset create_pr restarts its deadline clock', async () => {
+    f.state.branches.set('agent/issue-1', 'h1');
+    await runOp(db, forges, prOp(), t0);
+    f.state.close(1);
+    f.author.failNext('findOrCreatePullRequest', '5xx');
+    expect((await runOp(db, forges, prOp(), t1)).state).toBe('unknown');
+    expect(getOutbox(db, prOp().opKey)?.createdAt).toBe(t1.toISOString());
+  });
+
+  test('the done to pending reset is compare-and-set', async () => {
+    f.state.branches.set('agent/issue-1', 'h1');
+    await runOp(db, forges, prOp(), t0);
+    f.state.close(1);
+    const [a, b] = await Promise.all([
+      runOp(db, forges, prOp(), t1),
+      runOp(db, forges, prOp(), t1),
+    ]);
+    expect([a.state, b.state].sort()).toEqual(['done', 'unknown']);
+    expect(calls('findOrCreatePullRequest')).toHaveLength(2);
+  });
+
   test('a done create_pr whose PR is still open is reused', async () => {
     f.state.branches.set('agent/issue-1', 'h1');
     await runOp(db, forges, prOp(), t0);
@@ -306,10 +348,25 @@ describe('sanitizeForgeText', () => {
     );
   });
 
-  test('wraps bare links, leaves emails alone and truncates', () => {
-    const out = sanitizeForgeText('see https://evil.test/x and a@b.test', []);
-    expect(out).toContain('`https://evil.test/x`');
-    expect(out).toContain('a@b.test');
+  test('neutralises mentions and links without code spans, leaves emails alone', () => {
+    const live = /(^|[^\w])@[A-Za-z0-9]|https?:\/\//;
+    for (const input of [
+      '`cc @org/team`',
+      '`a`@org/team',
+      '(https://evil.test/x)',
+      'www.evil.test',
+    ]) {
+      const out = sanitizeForgeText(input, []);
+      expect(out).not.toMatch(live);
+      expect(out).not.toMatch(/(^|[^\w])www\./);
+      expect(out.replaceAll('\u200d', '')).toBe(input);
+    }
+    expect(sanitizeForgeText('mail a@b.test', [])).toBe('mail a@b.test');
+  });
+
+  test('truncation never splits a code span', () => {
     expect(sanitizeForgeText('x'.repeat(100), [], 10)).toHaveLength(10);
+    expect(sanitizeForgeText('ab `code span` cd', [], 8)).toBe('ab ');
+    expect(sanitizeForgeText('ab `c` `d e`', [], 9)).toBe('ab `c` ');
   });
 });

@@ -257,7 +257,11 @@ function forgeFor(
     getFileAt: async (ref, path) => state.files.get(`${ref}:${path}`) ?? null,
     listReviews: async (n) => state.reviews.filter((r) => r.pr === n).map(({ pr: _pr, ...r }) => r),
     createReview: async (n, input) => {
-      mustPull(state, n);
+      const p = mustPull(state, n);
+      if (p.state !== 'open' || p.merged) throw forgeError(422, 'Pull request is closed');
+      if (p.headSha !== input.commitId) {
+        throw forgeError(422, 'commit_id is not part of the pull request');
+      }
       const rv = state.review({
         pr: n,
         author: me(),
