@@ -21,7 +21,16 @@ test('gates cannot see credentials', async () => {
 
 test('scrubEnv drops named keys, JM_ prefix and secret values', () => {
   const out = scrubEnv(
-    { PATH: '/bin', GH_TOKEN: 'a', GITHUB_TOKEN: 'b', GIT_ASKPASS: 'c', ANTHROPIC_API_KEY: 'd', JM_Z: 'e', OTHER: 'leak', KEEP: 'ok' },
+    {
+      PATH: '/bin',
+      GH_TOKEN: 'a',
+      GITHUB_TOKEN: 'b',
+      GIT_ASKPASS: 'c',
+      ANTHROPIC_API_KEY: 'd',
+      JM_Z: 'e',
+      OTHER: 'leak',
+      KEEP: 'ok',
+    },
     ['leak'],
   );
   expect(out).toEqual({ PATH: '/bin', KEEP: 'ok' });
@@ -55,6 +64,10 @@ test('outputTail is redacted and capped at the last 4000 chars', async () => {
   );
   expect(r!.outputTail.length).toBeLessThanOrEqual(4000);
   expect(r!.outputTail.endsWith('END\n')).toBe(true);
-  const [r2] = await runGates([{ name: 's', run: 'echo sekret', timeoutMinutes: 1 }], { cwd: tmp, env: process.env, secrets: ['sekret'] });
+  const [r2] = await runGates([{ name: 's', run: 'echo sekret', timeoutMinutes: 1 }], {
+    cwd: tmp,
+    env: process.env,
+    secrets: ['sekret'],
+  });
   expect(r2!.outputTail).toBe('[REDACTED]\n');
 });
