@@ -156,8 +156,9 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       if (body.data.freeSlots < 1) return reply.code(204).send();
 
       let closed = false;
-      req.raw.on('close', () => {
-        closed = true;
+      // Not req.raw: IncomingMessage 'close' fires once the body is consumed, not on disconnect.
+      reply.raw.on('close', () => {
+        if (!reply.raw.writableEnded) closed = true;
       });
       const deadline = Date.now() + waitMs;
       for (;;) {
@@ -165,7 +166,11 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         if (leased) {
           const drop = getDrop(db, leased.dropId) as Drop;
           const zone = config.dropZones.find((z) => z.id === drop.dropZoneId);
-          if (!zone) return reply.code(500).send({ error: `unknown drop zone ${drop.dropZoneId}` });
+          if (!zone) {
+            // Release the drop so a misconfigured zone does not strand a lease.
+            updateDrop(db, drop.id, { state: 'queued', stickId: null, leaseExpiresAt: null });
+            return reply.code(500).send({ error: `unknown drop zone ${drop.dropZoneId}` });
+          }
           return buildPayload(db, zone, drop, config.secrets);
         }
         if (closed || Date.now() + pollMs > deadline) return reply.code(204).send();

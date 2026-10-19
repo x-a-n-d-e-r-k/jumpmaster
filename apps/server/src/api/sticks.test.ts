@@ -41,7 +41,7 @@ const gateOk = { name: 'test', exitCode: 0, durationMs: 1500, timedOut: false, o
 
 let app: FastifyInstance;
 
-function setup(opts: { queued?: boolean } = {}) {
+function setup(opts: { queued?: boolean; leaseWaitMs?: number; leasePollMs?: number } = {}) {
   const db = openDb(tmpDbFile());
   upsertDropZone(db, { id: 'main', repo: 'octo/demo', defaultBranch: 'main', configJson: '{}' });
   const wi = upsertWorkItem(db, {
@@ -72,8 +72,8 @@ function setup(opts: { queued?: boolean } = {}) {
     config,
     forgeFor: () => forge,
     now: () => t0,
-    leaseWaitMs: 60,
-    leasePollMs: 10,
+    leaseWaitMs: opts.leaseWaitMs ?? 60,
+    leasePollMs: opts.leasePollMs ?? 10,
   });
   return { db, forge, wi };
 }
@@ -292,5 +292,59 @@ describe('stick API', () => {
     });
     expect(again.statusCode).toBe(409);
     expect(forge.created).toHaveLength(1);
+  });
+
+  test('long-poll over a real socket waits and returns a drop enqueued later', async () => {
+    const { db, wi } = setup({ queued: false, leaseWaitMs: 2000, leasePollMs: 50 });
+    const { stickToken } = await enroll();
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const addr = app.server.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+    const started = Date.now();
+    const pending = fetch(`http://127.0.0.1:${port}/api/sticks/lease`, {
+      method: 'POST',
+      headers: { ...bearer(stickToken), 'content-type': 'application/json' },
+      body: JSON.stringify({ freeSlots: 1 }),
+    });
+    setTimeout(() => {
+      insertDrop(db, {
+        id: 'late',
+        dropZoneId: 'main',
+        workItemId: wi.id,
+        role: 'implement',
+        state: 'queued',
+        createdAt: t0.toISOString(),
+      });
+    }, 200);
+    const res = await pending;
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { dropId: string }).dropId).toBe('late');
+    expect(Date.now() - started).toBeGreaterThanOrEqual(150);
+  });
+
+  test('lease for a drop whose zone is not configured releases it back to queued', async () => {
+    const { db, wi } = setup({ queued: false });
+    upsertDropZone(db, { id: 'ghost', repo: 'o/g', defaultBranch: 'main', configJson: '{}' });
+    const w2 = upsertWorkItem(db, {
+      dropZoneId: 'ghost',
+      issueNumber: 1,
+      title: 't',
+      body: 'b',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    insertDrop(db, {
+      id: 'g1',
+      dropZoneId: 'ghost',
+      workItemId: w2.id,
+      role: 'implement',
+      state: 'queued',
+    });
+    void wi;
+    const { stickToken } = await enroll();
+    expect((await lease(stickToken)).statusCode).toBe(500);
+    expect(getDrop(db, 'g1')).toMatchObject({ state: 'queued', stickId: null });
   });
 });
