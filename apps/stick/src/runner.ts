@@ -13,6 +13,8 @@ import type { ContainerDriver } from './driver.js';
 export const TROOPER_IMAGE = process.env.JM_TROOPER_IMAGE ?? 'jumpmaster-trooper:dev';
 const STOP_GRACE_MS = 30_000;
 const MAX_BATCH = 50;
+/** Keeps an events POST far below the server's 1 MB body limit (each event is ≤ 64 KB). */
+const MAX_BATCH_BYTES = 512 * 1024;
 const FLUSH_MS = 1000;
 export const STICK_LABEL = 'jumpmaster.stick';
 
@@ -65,11 +67,13 @@ export async function runDrop(
   };
 
   let pending: TrooperEvent[] = [];
+  let pendingBytes = 0;
   let flushing = Promise.resolve();
   const flush = () => {
     if (pending.length === 0) return flushing;
     const batch = pending;
     pending = [];
+    pendingBytes = 0;
     flushing = flushing.then(async () => {
       try {
         if ((await client.postEvents(dropId, epoch, batch)) === 'stale') {
@@ -97,11 +101,16 @@ export async function runDrop(
   const flusher = setInterval(() => void flush(), FLUSH_MS);
 
   let result: DropResult | undefined;
+  let postedReal = false;
   try {
     for await (const line of handle.logs()) {
       if (line.startsWith(EVENT_PREFIX)) {
         try {
-          pending.push(TrooperEventSchema.parse(JSON.parse(line.slice(EVENT_PREFIX.length))));
+          const ev = TrooperEventSchema.parse(JSON.parse(line.slice(EVENT_PREFIX.length)));
+          const bytes = Buffer.byteLength(line);
+          if (pending.length > 0 && pendingBytes + bytes > MAX_BATCH_BYTES) void flush();
+          pending.push(ev);
+          pendingBytes += bytes;
           if (pending.length >= MAX_BATCH) void flush();
         } catch {
           // malformed event line: drop it
@@ -119,17 +128,21 @@ export async function runDrop(
     await stopping;
     // The server no longer owns this epoch (stale) or already cancelled it: it would 409 a result.
     if (stale || cancelled) return;
-    await client.postResult(
-      dropId,
-      epoch,
-      result ?? {
+    if (result) {
+      postedReal = true;
+      await client.postResult(dropId, epoch, result);
+    } else {
+      await client.postResult(dropId, epoch, {
         status: 'failed',
         reason: `trooper exited ${exitCode} without result`,
         gates: [],
-      },
-    );
+      });
+    }
   } catch (e) {
     await stop();
+    // A real result that could not be delivered must not be replaced by a synthetic failure
+    // (the server would lose result_json); surface the error to the caller instead.
+    if (postedReal) throw e;
     if (!stale && !cancelled) {
       const reason = `stick runner error: ${e instanceof Error ? e.message : String(e)}`;
       await client

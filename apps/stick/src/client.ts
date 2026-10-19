@@ -1,4 +1,9 @@
-import type { DropPayload, DropResult, TrooperEvent } from '@jumpmaster/protocol';
+import {
+  type DropPayload,
+  DropPayloadSchema,
+  type DropResult,
+  type TrooperEvent,
+} from '@jumpmaster/protocol';
 
 export type Ack = 'ok' | 'stale';
 
@@ -47,7 +52,10 @@ export class StickClient implements DropClient {
     const res = await this.req('/api/sticks/lease', { freeSlots });
     if (res.status === 204) return null;
     if (!res.ok) throw new Error(`lease failed: ${res.status}`);
-    return (await res.json()) as DropPayload;
+    const parsed = DropPayloadSchema.safeParse(await res.json());
+    // Never echo the body: it carries credentials.
+    if (!parsed.success) throw new Error('lease failed: invalid lease payload');
+    return parsed.data;
   }
 
   async heartbeat(dropId: string, epoch: number): Promise<'ok' | 'cancel' | 'stale'> {

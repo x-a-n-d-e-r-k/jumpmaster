@@ -160,6 +160,32 @@ describe('runDrop', () => {
     expect(Math.max(...client.events.map((b) => b.length))).toBeLessThanOrEqual(50);
   });
 
+  test('batches by bytes so a post stays well under the 1 MB body limit', async () => {
+    const line = `JM_EVENT {"ts":"t","kind":"log","data":{"s":"${'x'.repeat(60_000)}"}}`;
+    const d = fakeDriver([...Array(40).fill(line), 'JM_RESULT {"status":"no_changes","gates":[]}']);
+    const client = fakeClient();
+    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
+    expect(client.events.flat()).toHaveLength(40);
+    for (const b of client.events) expect(JSON.stringify(b).length).toBeLessThan(600_000);
+  });
+
+  test('a real result whose post fails is not overwritten by a synthetic failure', async () => {
+    const d = fakeDriver(['JM_RESULT {"status":"completed","headSha":"a","gates":[]}']);
+    const posted: DropResult[] = [];
+    const client = {
+      ...fakeClient(),
+      async postResult(_d: string, _e: number, r: DropResult): Promise<'ok'> {
+        posted.push(r);
+        throw new Error('result failed: 502');
+      },
+    };
+    await expect(
+      runDrop(payload, { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' }),
+    ).rejects.toThrow('result failed: 502');
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({ status: 'completed', headSha: 'a' });
+  });
+
   test('logs() throwing stops the container and posts a failed result', async () => {
     const d = fakeDriver([]);
     const driver: ContainerDriver = {

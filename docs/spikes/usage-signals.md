@@ -33,6 +33,10 @@ the M1 usage-pause design (spec section 12.3).
 Work in a scratch directory outside the repository so raw output cannot be committed
 by accident.
 
+The commands below are bash/zsh. In fish, replace `mkdir -p "$(mktemp -d)/spike" && cd "$_"`
+with `set d (mktemp -d)/spike; mkdir -p $d; and cd $d` (fish has no `$_`); the
+`docker run` lines work unchanged.
+
 ### 1. One tiny headless run
 
 ```sh

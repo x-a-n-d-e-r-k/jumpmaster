@@ -250,3 +250,25 @@ test('existing remote branch → failed before claude runs', async () => {
   });
   expect(f.calls.indexOf('ls-remote')).toBeGreaterThan(f.calls.indexOf('clone'));
 });
+
+test('every emitted event line stays under 64 KB and secrets cut by truncation are still redacted', async () => {
+  const big = 'x'.repeat(200_000);
+  // A secret positioned so a naive cut would split it.
+  const sliced = `${'y'.repeat(16 * 1024 - 12)}${payload.credentials.claudeToken}${'z'.repeat(100_000)}`;
+  const f = fakeDeps({
+    claude: [
+      JSON.stringify({ type: 'assistant', text: big, nested: { arr: [big, sliced] } }),
+      completeResult,
+    ],
+  });
+  await runTrooper(payload, f.deps);
+  const events = f.lines.filter((l) => l.startsWith('JM_EVENT '));
+  expect(events.length).toBeGreaterThan(0);
+  for (const l of events) {
+    expect(Buffer.byteLength(l)).toBeLessThanOrEqual(64 * 1024);
+    expect(() => JSON.parse(l.slice('JM_EVENT '.length))).not.toThrow();
+  }
+  const joined = f.lines.join('\n');
+  expect(joined).not.toContain(payload.credentials.claudeToken);
+  expect(joined).not.toContain(payload.credentials.claudeToken.slice(0, 12));
+});

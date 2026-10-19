@@ -97,10 +97,12 @@ command line or in shell history. In bash or zsh:
 ```sh
 read -rs JM_CLAUDE_TOKEN && export JM_CLAUDE_TOKEN
 read -rs JM_GITHUB_AUTHOR_TOKEN && export JM_GITHUB_AUTHOR_TOKEN
-export JM_JOIN_TOKEN="$(openssl rand -hex 24)"   # shared secret for enrolling sticks
+read -rs JM_JOIN_TOKEN && export JM_JOIN_TOKEN   # shared secret for enrolling sticks
 ```
 
-(`read -rs` prompts silently; paste the value. In fish use `read -s -x NAME`.)
+(`read -rs` prompts silently; paste the value. In fish use `read -s -x NAME`.) For
+the join token, paste any long random string, for example one generated with
+`openssl rand -hex 24` in another window.
 
 | Variable | Meaning |
 |---|---|
@@ -123,7 +125,7 @@ In a second terminal, in the repository root, with Docker running. The stick nee
 the same join token:
 
 ```sh
-export JM_JOIN_TOKEN=...   # same value as the server (use read -rs as above)
+read -rs JM_JOIN_TOKEN && export JM_JOIN_TOKEN   # same value as the server
 export JM_SERVER_URL=http://127.0.0.1:7420
 export JM_STICK_NAME=my-stick     # optional, default "stick"
 export JM_SLOTS=1                 # optional, parallel drops, default 1
@@ -154,7 +156,7 @@ leased by the stick, and runs. Watch for:
 
 - the work item state: ready, in_flight, pr_open (or parked);
 - the drop state and its events (phases, gates, rate-limit events);
-- the last rate-limit event at the top of the page;
+- the last rate-limit event at the bottom of the page;
 - click a drop to open `/drops/<id>` for detail.
 
 The stick terminal shows lease and heartbeat activity; the server terminal logs
@@ -176,8 +178,16 @@ The M0 gate passes when all of these hold:
    curl -s http://127.0.0.1:7420/ | grep -E 'sk-ant-|ghp_|github_pat_'
    ```
 
-   Both commands must print nothing (grep exits 1). Also try your actual token
-   values as literal search strings, without putting them in history.
+   Both commands must print nothing (grep exits 1). Then search for your actual
+   token values as literal strings, reading each one silently so it never lands in
+   history (repeat for each token, and for `/`). In bash or zsh:
+
+   ```sh
+   read -rs v; curl -s http://127.0.0.1:7420/drops/<id> | grep -F -- "$v"; unset v
+   ```
+
+   In fish: `read -s v; curl -s http://127.0.0.1:7420/drops/<id> | grep -F -- "$v"; set -e v`.
+   Each must print nothing.
 
 Then merge the PR by hand. The issue closes automatically.
 
@@ -188,6 +198,35 @@ Then merge the PR by hand. The issue closes automatically.
 - Delete `~/.jumpmaster/stick.json` if you want a fresh enrolment next time, and
   `data/` to reset server state.
 - Delete the test repo.
+
+## Security notes
+
+M0 is a tracer, not a hardened deployment. Know the residual risks before you run it:
+
+- **The agent can read the Claude token.** The Claude CLI needs
+  `CLAUDE_CODE_OAUTH_TOKEN` in its own process environment, and the agent runs inside
+  that process with full tool access, so code it runs (or code planted by the issue it
+  works on) can read the token. Treat the Claude token as exposed to the repository's
+  content.
+- **No egress control.** The trooper container has unrestricted network access in M0;
+  anything that reads a secret can also send it anywhere. Network egress control is
+  planned for M4.
+- **Use a repo-scoped token on a throwaway repo.** The GitHub token must be a
+  fine-grained PAT limited to the single test repository with the permissions in step
+  3, short-lived, and revoked afterwards. Do not point M0 at a repository that matters.
+- **How the trooper protects the GitHub token.** The agent and the gates never receive
+  it: their environments are scrubbed of `GH_TOKEN`, `GITHUB_TOKEN`, every `GIT_*` and
+  `JM_*` variable and the token values themselves. At push time the trooper does not
+  push from the agent's working copy (whose hooks and git config the agent controls).
+  It first kills every other process in the container (it is PID 1 there), fetches the
+  agent's commits without the token into a fresh bare repository it owns, and pushes
+  from that repository to the explicit `https://github.com/<owner>/<name>.git` URL with
+  hooks disabled, global and system git config ignored, and the auth header scoped to
+  `https://github.com/` only. The token is passed in the environment of that one git
+  command, never in argv or a config file.
+- **Orphans.** If the stick dies mid-drop, its trooper container keeps running until
+  the stick restarts; on startup the stick force-removes every container labelled with
+  its own stick id before it leases new work.
 
 ## Troubleshooting
 
@@ -202,4 +241,5 @@ Then merge the PR by hand. The issue closes automatically.
 | Work item `parked`, reason about no changes (drop result `no_changes`) | The agent finished without changing anything, usually because the task was unclear or already done. Open the drop for the agent's summary, clarify the issue, and re-label. |
 | Work item `parked` with another reason / drop `failed` | The reason is shown on the home page and in the drop events. Common causes: a gate failed, the agent was blocked, or the trooper could not reach GitHub. |
 | `rate_limit` events, or the last rate-limit event shows a status other than `allowed` | You are close to or at the Claude usage limit. A `rejected` status means the run cannot continue until the reset time shown. Wait for the reset, then re-label the issue. Automatic pausing is M1 work; see `docs/spikes/usage-signals.md`. |
+| Drop `failed`: `branch agent/issue-N already exists on remote` | A previous run already pushed that branch. Delete the branch (or merge/close its PR) and re-label the issue. |
 | Trooper image not found | Rebuild: `docker build -t jumpmaster-trooper:dev -f images/trooper/Dockerfile .` and make sure the zone's `image` matches. |
