@@ -1,21 +1,33 @@
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, expect, test } from 'vitest';
 import {
   aheadOfBase,
+  authHeader,
   cloneRepo,
   commitIfDirty,
   headSha,
   prepareBranch,
   pushNewBranch,
+  remoteBranchExists,
   runGit,
+  sweepProcesses,
 } from './git.js';
 
 let tmp: string;
 let origin: string;
 const url = (): string => `file://${origin}`;
+const target = () => ({ owner: 'o', name: 'r', url: url() });
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 
@@ -72,8 +84,10 @@ test('pushNewBranch refuses to overwrite an existing remote branch', async () =>
     writeFileSync(join(d, `${d.endsWith('pa') ? 'x' : 'y'}.txt`), 'z\n');
     await commitIfDirty(d, 'feat: z');
   }
-  await pushNewBranch(dirA, 'agent/issue-1', '');
-  await expect(pushNewBranch(dirB, 'agent/issue-1', '')).rejects.toThrow(/stale info|rejected/);
+  await pushNewBranch(dirA, 'agent/issue-1', '', target());
+  await expect(pushNewBranch(dirB, 'agent/issue-1', '', target())).rejects.toThrow(
+    /stale info|rejected/,
+  );
 });
 
 test('a silent git failure leaks neither the token nor its base64 form', async () => {
@@ -104,11 +118,124 @@ test('git children never see agent or claude credentials', async () => {
   try {
     writeFileSync(join(dir, 'c.txt'), 'c\n');
     await commitIfDirty(dir, 'feat: c');
-    await pushNewBranch(dir, 'agent/issue-9', 'forge-tok');
+    await pushNewBranch(dir, 'agent/issue-9', 'forge-tok', target());
   } finally {
     process.env = saved;
   }
   const seen = readFileSync(dump, 'utf8');
   expect(seen).not.toMatch(/claude-secret-value|gh-secret-value|jm-secret-value/);
   expect(seen).not.toContain('CLAUDE_CODE_OAUTH_TOKEN');
+});
+
+function bare(name: string): string {
+  const d = join(tmp, name);
+  git(tmp, 'init', '--bare', '-q', '-b', 'main', d);
+  return d;
+}
+const hasBranch = (repo: string, b: string): boolean =>
+  git(repo, 'for-each-ref', '--format=%(refname)', `refs/heads/${b}`) !== '';
+
+test('push runs from a pristine repo: planted hooks, hooksPath and redirects never run or see the token', async () => {
+  const dir = await clone('planted');
+  await prepareBranch(dir, 'agent/issue-11', 'main');
+  writeFileSync(join(dir, 'p.txt'), 'p\n');
+  await commitIfDirty(dir, 'feat: p');
+  const decoy = bare('decoy.git');
+  const dump = join(tmp, 'planted-dump');
+  const hookBody = `#!/bin/sh\n{ env; echo "ARGS $*"; } >> ${dump}\n`;
+  const hookDir = join(tmp, 'evil-hooks');
+  mkdirSync(hookDir);
+  for (const f of [join(dir, '.git/hooks/pre-push'), join(hookDir, 'pre-push')]) {
+    writeFileSync(f, hookBody);
+    chmodSync(f, 0o755);
+  }
+  git(dir, 'config', 'core.hooksPath', hookDir);
+  git(dir, 'config', 'remote.origin.pushurl', `file://${decoy}`);
+  git(dir, 'config', `url.file://${decoy}.insteadOf`, url());
+
+  const sha = await pushNewBranch(
+    dir,
+    'agent/issue-11',
+    'ghp_PLANTEDTOKEN1234567890abcd',
+    target(),
+  );
+
+  expect(existsSync(dump)).toBe(false);
+  expect(hasBranch(decoy, 'agent/issue-11')).toBe(false);
+  expect(git(origin, 'rev-parse', 'refs/heads/agent/issue-11')).toBe(git(dir, 'rev-parse', 'HEAD'));
+  expect(sha).toBe(git(dir, 'rev-parse', 'HEAD'));
+});
+
+test('push ignores inherited GIT_* config and the global gitconfig', async () => {
+  const dir = await clone('globalcfg');
+  await prepareBranch(dir, 'agent/issue-12', 'main');
+  writeFileSync(join(dir, 'g.txt'), 'g\n');
+  await commitIfDirty(dir, 'feat: g');
+  const decoy = bare('decoy2.git');
+  const home = join(tmp, 'evil-home');
+  mkdirSync(home);
+  const evil = `[url "file://${decoy}"]\n\tinsteadOf = ${url()}\n`;
+  writeFileSync(join(home, '.gitconfig'), evil);
+  const saved = { ...process.env };
+  process.env.HOME = home;
+  process.env.GIT_CONFIG_GLOBAL = join(home, '.gitconfig');
+  process.env.GIT_CONFIG_COUNT = '1';
+  process.env.GIT_CONFIG_KEY_0 = `url.file://${decoy}.insteadOf`;
+  process.env.GIT_CONFIG_VALUE_0 = url();
+  try {
+    await pushNewBranch(dir, 'agent/issue-12', 'tok', target());
+  } finally {
+    process.env = saved;
+  }
+  expect(hasBranch(decoy, 'agent/issue-12')).toBe(false);
+  expect(hasBranch(origin, 'agent/issue-12')).toBe(true);
+});
+
+test('push sweeps other processes before the token is used', async () => {
+  const dir = await clone('sweep');
+  await prepareBranch(dir, 'agent/issue-13', 'main');
+  writeFileSync(join(dir, 's.txt'), 's\n');
+  await commitIfDirty(dir, 'feat: s');
+  let sweeps = 0;
+  await pushNewBranch(dir, 'agent/issue-13', 'tok', target(), () => {
+    sweeps++;
+    expect(hasBranch(origin, 'agent/issue-13')).toBe(false);
+  });
+  expect(sweeps).toBeGreaterThan(0);
+  expect(hasBranch(origin, 'agent/issue-13')).toBe(true);
+});
+
+test('the auth header is scoped to https://github.com/ only', async () => {
+  const dir = await clone('scoped');
+  const token = 'ghp_SCOPEDTOKEN1234567890abcd';
+  expect(
+    await runGit(dir, ['config', '--get', 'http.https://github.com/.extraheader'], token),
+  ).toBe(authHeader(token));
+  await expect(runGit(dir, ['config', '--get', 'http.extraheader'], token)).rejects.toThrow();
+});
+
+test('remoteBranchExists reports whether the branch is on the remote', async () => {
+  const dir = await clone('lsremote');
+  await prepareBranch(dir, 'agent/issue-14', 'main');
+  writeFileSync(join(dir, 'l.txt'), 'l\n');
+  await commitIfDirty(dir, 'feat: l');
+  expect(await remoteBranchExists(target(), 'agent/issue-14', 'tok')).toBe(false);
+  await pushNewBranch(dir, 'agent/issue-14', 'tok', target());
+  expect(await remoteBranchExists(target(), 'agent/issue-14', 'tok')).toBe(true);
+  expect(await remoteBranchExists(target(), 'agent/issue-1', 'tok')).toBe(
+    hasBranch(origin, 'agent/issue-1'),
+  );
+});
+
+test('sweepProcesses signals all other processes only in container mode', () => {
+  const calls: unknown[][] = [];
+  const kill = (...a: unknown[]): true => {
+    calls.push(a);
+    return true;
+  };
+  expect(sweepProcesses({}, kill)).toBe(false);
+  expect(sweepProcesses({ JM_CONTAINER: '0' }, kill)).toBe(false);
+  expect(calls).toEqual([]);
+  expect(sweepProcesses({ JM_CONTAINER: '1' }, kill)).toBe(true);
+  expect(calls).toEqual([[-1, 'SIGKILL']]);
 });

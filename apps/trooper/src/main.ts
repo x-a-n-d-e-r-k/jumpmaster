@@ -56,6 +56,7 @@ export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promi
       token: forgeToken,
       dir: repoDir,
     });
+    const target = { owner: payload.repo.owner, name: payload.repo.name };
     emitEvent('phase', { phase: 'branch', branch: payload.branch });
     await deps.git.prepareBranch(repoDir, payload.branch, base);
 
@@ -158,8 +159,14 @@ export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promi
     if (failed) return done({ status: 'failed', reason: `gate ${failed.name} failed` });
 
     emitEvent('phase', { phase: 'push' });
-    await deps.git.pushNewBranch(repoDir, payload.branch, forgeToken);
-    return done({ status: 'completed', headSha: await deps.git.headSha(repoDir) });
+    const headSha = await deps.git.pushNewBranch(
+      repoDir,
+      payload.branch,
+      forgeToken,
+      target,
+      () => void deps.git.sweepProcesses(),
+    );
+    return done({ status: 'completed', headSha });
   } catch (err) {
     return finish({
       status: 'failed',

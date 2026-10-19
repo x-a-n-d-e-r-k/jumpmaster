@@ -17,7 +17,7 @@ const STRIPPED_KEYS = new Set([
 export function scrubEnv(env: NodeJS.ProcessEnv, secrets: string[] = []): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(env)) {
-    if (STRIPPED_KEYS.has(k) || k.startsWith('JM_')) continue;
+    if (STRIPPED_KEYS.has(k) || k.startsWith('JM_') || k.startsWith('GIT_')) continue;
     if (v !== undefined && v !== '' && secrets.includes(v)) continue;
     out[k] = v;
   }

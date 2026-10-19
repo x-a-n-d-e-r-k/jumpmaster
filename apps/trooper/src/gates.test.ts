@@ -36,6 +36,20 @@ test('scrubEnv drops named keys, JM_ prefix and secret values', () => {
   expect(out).toEqual({ PATH: '/bin', KEEP: 'ok' });
 });
 
+test('scrubEnv drops every inherited GIT_* variable', () => {
+  const out = scrubEnv({
+    PATH: '/bin',
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'http.extraheader',
+    GIT_CONFIG_VALUE_0: 'AUTHORIZATION: basic x',
+    GIT_CONFIG_PARAMETERS: "'core.hookspath'='/evil'",
+    GIT_DIR: '/evil',
+    GIT_SSH_COMMAND: 'evil',
+    LEGIT_X: 'kept',
+  });
+  expect(out).toEqual({ PATH: '/bin', LEGIT_X: 'kept' });
+});
+
 test('kills a gate past its timeout', async () => {
   const [r] = await runGates([{ name: 'hang', run: 'sleep 30', timeoutMinutes: 1 }], {
     cwd: tmp,

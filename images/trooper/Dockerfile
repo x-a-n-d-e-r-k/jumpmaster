@@ -22,6 +22,8 @@ COPY --from=build /out /opt/trooper
 RUN useradd --create-home --shell /bin/bash trooper
 USER trooper
 ENV CLAUDE_CONFIG_DIR=/home/trooper/.claude
+# Container mode: the trooper is PID 1 and sweeps every other process before it pushes.
+ENV JM_CONTAINER=1
 WORKDIR /home/trooper
 # The payload (with credentials) arrives on stdin; no payload file exists in the container.
 ENTRYPOINT ["node","/opt/trooper/main.js"]

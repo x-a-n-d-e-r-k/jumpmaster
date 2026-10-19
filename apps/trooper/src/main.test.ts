@@ -41,11 +41,19 @@ const rateLimitRejectedLine = JSON.stringify({
   rate_limit_info: { status: 'rejected', resetsAt: 1900000000 },
 });
 
-function fakeDeps(o: { ahead?: number; claude: string[]; gateExit?: number; throwOn?: string }) {
+function fakeDeps(o: {
+  ahead?: number;
+  claude: string[];
+  gateExit?: number;
+  throwOn?: string;
+  remoteHasBranch?: boolean;
+}) {
   const state = {
     lines: [] as string[],
     pushed: false,
     calls: [] as string[],
+    sweeps: 0,
+    claudeRan: false,
     claudeEnv: {} as Record<string, string | undefined>,
   };
   const deps: TrooperDeps = {
@@ -57,13 +65,26 @@ function fakeDeps(o: { ahead?: number; claude: string[]; gateExit?: number; thro
       },
       prepareBranch: async () => void state.calls.push('branch'),
       commitIfDirty: async () => true,
-      headSha: async () => 'abc123',
+      headSha: async () => 'working-copy-sha',
       aheadOfBase: async () => o.ahead ?? 1,
-      pushNewBranch: async () => {
+      remoteBranchExists: async (t, b, tok) => {
+        state.calls.push('ls-remote');
+        state.lsRemote = { t, b, tok };
+        return o.remoteHasBranch ?? false;
+      },
+      pushNewBranch: async (_dir, _branch, _tok, t, sweep) => {
+        state.pushTarget = t;
+        state.pushSweep = sweep;
         state.pushed = true;
+        return 'abc123';
+      },
+      sweepProcesses: () => {
+        state.sweeps++;
+        return false;
       },
     },
     async *runClaude(_args, env, cwd) {
+      state.claudeRan = true;
       state.claudeEnv = env;
       state.claudeCwd = cwd;
       for (const l of o.claude) yield l;
@@ -201,4 +222,14 @@ test('readPayload parses the payload from stdin', async () => {
   const p = await readPayload(undefined, Readable.from([text.slice(0, 20), text.slice(20)]));
   expect(p.dropId).toBe('d1');
   await expect(readPayload(undefined, Readable.from(['{}']))).rejects.toThrow();
+});
+
+test('push goes to the explicit repo target with the process sweep, and reports the pushed sha', async () => {
+  const f = fakeDeps({ claude: [completeResult] });
+  const r = await runTrooper(payload, f.deps);
+  expect(f.pushTarget).toEqual({ owner: 'o', name: 'r' });
+  expect(typeof f.pushSweep).toBe('function');
+  f.pushSweep();
+  expect(f.sweeps).toBe(1);
+  expect(r.headSha).toBe('abc123');
 });
