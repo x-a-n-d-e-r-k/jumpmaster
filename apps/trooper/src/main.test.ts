@@ -29,6 +29,8 @@ const completeResult = JSON.stringify({
   type: 'result',
   is_error: false,
   structured_output: { status: 'COMPLETE', summary: 'done' },
+  terminal_reason: 'completed',
+  session_id: 's1',
   usage: { input_tokens: 1 },
   modelUsage: { m: { inputTokens: 1 } },
   num_turns: 3,
@@ -37,7 +39,10 @@ const blockedResult = JSON.stringify({
   type: 'result',
   is_error: false,
   structured_output: { status: 'BLOCKED', summary: 'need a decision' },
+  terminal_reason: 'completed',
+  session_id: 's1',
 });
+const initLine = JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' });
 const rateLimitRejectedLine = JSON.stringify({
   type: 'rate_limit_event',
   rate_limit_info: { status: 'rejected', resetsAt: 1900000000 },
@@ -69,10 +74,10 @@ function fakeDeps(o: {
       commitIfDirty: async () => true,
       headSha: async () => 'working-copy-sha',
       aheadOfBase: async () => o.ahead ?? 1,
-      remoteBranchExists: async (t, b, tok) => {
+      remoteBranchSha: async (t, b, tok) => {
         state.calls.push('ls-remote');
         state.lsRemote = { t, b, tok };
-        return o.remoteHasBranch ?? false;
+        return o.remoteHasBranch ? 'remote-sha' : null;
       },
       pushNewBranch: async (_dir, _branch, _tok, t, sweep) => {
         state.pushTarget = t;
@@ -89,6 +94,7 @@ function fakeDeps(o: {
       state.claudeRan = true;
       state.claudeEnv = env;
       state.claudeCwd = cwd;
+      yield initLine;
       for (const l of o.claude) yield l;
     },
     runGates: async (gates, go): Promise<GateResult[]> => {
@@ -145,11 +151,32 @@ test('no result line → failed', async () => {
 
 test('error result → failed', async () => {
   const f = fakeDeps({
-    claude: [JSON.stringify({ type: 'result', is_error: true, terminal_reason: 'max_turns' })],
+    claude: [
+      JSON.stringify({
+        type: 'result',
+        is_error: true,
+        terminal_reason: 'completed',
+        session_id: 's1',
+      }),
+    ],
   });
   const r = await runTrooper(payload, f.deps);
   expect(r.status).toBe('failed');
-  expect(r.reason).toContain('max_turns');
+  expect(r.reason).toContain('claude error');
+});
+
+test('max_turns result → interrupted', async () => {
+  const f = fakeDeps({
+    claude: [
+      JSON.stringify({
+        type: 'result',
+        is_error: true,
+        terminal_reason: 'max_turns',
+        session_id: 's1',
+      }),
+    ],
+  });
+  expect((await runTrooper(payload, f.deps)).status).toBe('interrupted');
 });
 
 test('thrown error → failed with redacted reason', async () => {

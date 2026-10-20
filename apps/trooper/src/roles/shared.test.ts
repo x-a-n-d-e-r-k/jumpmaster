@@ -47,8 +47,10 @@ const completeResult = JSON.stringify({
   type: 'result',
   is_error: false,
   structured_output: { status: 'COMPLETE', summary: 'done' },
+  terminal_reason: 'completed',
   session_id: 's1',
 });
+const initLine = JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' });
 
 function recorder(o: { claude?: string[] } = {}) {
   const state = {
@@ -65,7 +67,7 @@ function recorder(o: { claude?: string[] } = {}) {
       commitIfDirty: async () => true,
       headSha: async () => 'h',
       aheadOfBase: async () => 1,
-      remoteBranchExists: async () => false,
+      remoteBranchSha: async () => null,
       pushNewBranch: async (
         _d: string,
         _b: string,
@@ -84,7 +86,7 @@ function recorder(o: { claude?: string[] } = {}) {
       removeTree: async () => undefined,
     },
     async *runClaude() {
-      for (const l of o.claude ?? [completeResult]) yield l;
+      for (const l of o.claude ?? [initLine, completeResult]) yield l;
     },
     runGates: async (
       gates: { name: string }[],

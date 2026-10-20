@@ -142,7 +142,30 @@ export async function runAgent(
       emitEvent(deps, ctx, 'agent', { raw: parsed.raw });
     }
   }
+  // spawnClaude reports a non-zero exit as a claude_stderr line; a stream that ends without one exited 0.
+  out.exitCode ??= 0;
   return out;
+}
+
+export type Acceptance = { ok: true; result: ResultLine } | { ok: false; reason: string };
+
+/** A result counts only from a clean exit, exactly once, and from the session that started. */
+export function acceptOutcome(o: AgentOutcome): Acceptance {
+  if (o.exitCode !== 0) return { ok: false, reason: `claude exit ${o.exitCode}` };
+  if (o.results.length === 0) return { ok: false, reason: 'claude produced no result' };
+  if (o.results.length > 1) return { ok: false, reason: 'multiple results' };
+  const [result] = o.results as [ResultLine];
+  if (o.initSessionId === null || result.sessionId !== o.initSessionId) {
+    return { ok: false, reason: 'session mismatch' };
+  }
+  return { ok: true, result };
+}
+
+/** Whether the agent stopped early (limit or turn cap) and its work should be checkpointed. */
+export function stoppedEarly(o: AgentOutcome): 'rate_limited' | 'interrupted' | null {
+  if (o.rateLimited) return 'rate_limited';
+  const reason = o.results.at(-1)?.terminalReason;
+  return reason !== undefined && reason !== 'completed' ? 'interrupted' : null;
 }
 
 /**

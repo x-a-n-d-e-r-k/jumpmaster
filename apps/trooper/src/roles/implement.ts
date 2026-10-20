@@ -1,6 +1,8 @@
+import { join } from 'node:path';
 import { type DropPayload, type DropResult, IMPLEMENT_OUTPUT_SCHEMA } from '@jumpmaster/protocol';
 import type { TrooperDeps } from '../main.js';
 import {
+  acceptOutcome,
   cloneAndPrepare,
   emitEvent,
   pushSweep,
@@ -8,14 +10,19 @@ import {
   resultMeta,
   runAgent,
   runGatesPhase,
+  stoppedEarly,
 } from './shared.js';
 
-/** The M0 implement flow: fresh branch, one Claude run, commit, gates, push. */
+/**
+ * Implement: a fresh branch (or the resumed one), one Claude run, then commit, gates and a guarded
+ * push. A limit or turn cap checkpoints the work instead so the server can resume it.
+ */
 export async function runImplement(
   payload: DropPayload,
   deps: TrooperDeps,
   ctx: RoleCtx,
 ): Promise<DropResult> {
+  if (payload.role !== 'implement') throw new Error(`not an implement payload: ${payload.role}`);
   const gates: DropResult['gates'] = [];
   try {
     return await implementSteps(payload, deps, ctx, gates);
@@ -25,8 +32,10 @@ export async function runImplement(
   }
 }
 
+type ImplementPayload = Extract<DropPayload, { role: 'implement' }>;
+
 async function implementSteps(
-  payload: DropPayload,
+  payload: ImplementPayload,
   deps: TrooperDeps,
   ctx: RoleCtx,
   gates: DropResult['gates'],
@@ -35,17 +44,49 @@ async function implementSteps(
   const base = payload.repo.defaultBranch;
   const target = { owner: payload.repo.owner, name: payload.repo.name };
   const as = ctx.ids?.agent ?? null;
+  const resumeSha = payload.resume ? payload.resumeSha : undefined;
+  if (payload.resume && resumeSha === undefined) throw new Error('resume requires resumeSha');
+
   const repoDir = await cloneAndPrepare(payload, deps, ctx);
-  // Fail fast: the push refuses an existing branch, so don't burn a whole Claude run first.
-  if (await deps.git.remoteBranchExists(target, payload.branch, forgeToken)) {
-    return {
-      status: 'failed',
-      reason: `branch ${payload.branch} already exists on remote`,
-      gates: [],
-    };
+  if (resumeSha !== undefined) {
+    emitEvent(deps, ctx, 'phase', { phase: 'resume', branch: payload.branch });
+    await deps.git.mirrorFetch(join(ctx.workdir, 'mirror'), forgeToken, target, [payload.branch]);
+    await deps.git.checkoutBranch(repoDir, payload.branch, resumeSha, as);
+  } else {
+    // Fail fast: the server resumes items whose branch exists, so a fresh drop must not find one.
+    if ((await deps.git.remoteBranchSha(target, payload.branch, forgeToken)) !== null) {
+      return {
+        status: 'failed',
+        reason: `branch ${payload.branch} already exists on remote`,
+        gates,
+      };
+    }
+    emitEvent(deps, ctx, 'phase', { phase: 'branch', branch: payload.branch });
+    await deps.git.prepareBranch(repoDir, payload.branch, base, as);
   }
-  emitEvent(deps, ctx, 'phase', { phase: 'branch', branch: payload.branch });
-  await deps.git.prepareBranch(repoDir, payload.branch, base, as);
+
+  const guard = { as, base, protectedPaths: payload.protectedPaths };
+  const push = (): Promise<string> => {
+    emitEvent(deps, ctx, 'phase', { phase: 'push' });
+    return resumeSha !== undefined
+      ? deps.git.pushExistingBranch(
+          repoDir,
+          payload.branch,
+          forgeToken,
+          target,
+          resumeSha,
+          pushSweep(deps, ctx),
+          guard,
+        )
+      : deps.git.pushNewBranch(
+          repoDir,
+          payload.branch,
+          forgeToken,
+          target,
+          pushSweep(deps, ctx),
+          guard,
+        );
+  };
 
   const outcome = await runAgent(
     payload,
@@ -60,14 +101,21 @@ async function implementSteps(
     gates,
   });
 
-  const result = outcome.results.at(-1);
-  const exitNote = outcome.exitCode === null ? '' : ` (claude exit ${outcome.exitCode})`;
-  if (result === undefined)
-    return done({ status: 'failed', reason: `claude produced no result${exitNote}` });
+  const early = stoppedEarly(outcome);
+  if (early !== null) {
+    emitEvent(deps, ctx, 'phase', { phase: 'checkpoint' });
+    await deps.git.commitIfDirty(repoDir, 'wip: checkpoint', as);
+    if ((await deps.git.aheadOfBase(repoDir, base, as)) === 0) return done({ status: early });
+    return done({ status: early, headSha: await push() });
+  }
+
+  const accepted = acceptOutcome(outcome);
+  if (!accepted.ok) return done({ status: 'failed', reason: accepted.reason });
+  const result = accepted.result;
   if (result.isError) {
     return done({
       status: 'failed',
-      reason: `claude error: ${result.terminalReason ?? 'unknown'}${exitNote}`,
+      reason: `claude error: ${result.terminalReason ?? 'unknown'}`,
     });
   }
   const structured = result.structured as { status?: string; summary?: string } | undefined;
@@ -75,10 +123,7 @@ async function implementSteps(
     return done({ status: 'blocked', reason: structured.summary ?? 'blocked' });
   }
   if (structured?.status !== 'COMPLETE') {
-    return done({
-      status: 'failed',
-      reason: `claude returned no valid structured output${exitNote}`,
-    });
+    return done({ status: 'failed', reason: 'claude returned no valid structured output' });
   }
 
   emitEvent(deps, ctx, 'phase', { phase: 'commit' });
@@ -91,14 +136,5 @@ async function implementSteps(
   const failed = gates.find((g) => g.timedOut || g.exitCode !== 0);
   if (failed) return done({ status: 'failed', reason: `gate ${failed.name} failed` });
 
-  emitEvent(deps, ctx, 'phase', { phase: 'push' });
-  const headSha = await deps.git.pushNewBranch(
-    repoDir,
-    payload.branch,
-    forgeToken,
-    target,
-    pushSweep(deps, ctx),
-    { as, base, protectedPaths: payload.protectedPaths },
-  );
-  return done({ status: 'completed', headSha });
+  return done({ status: 'completed', headSha: await push() });
 }
