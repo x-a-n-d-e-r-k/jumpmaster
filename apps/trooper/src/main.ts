@@ -21,7 +21,9 @@ import {
   trooperIdentities,
 } from './privilege.js';
 import { redact } from './redact.js';
+import { runHeal } from './roles/heal.js';
 import { runImplement } from './roles/implement.js';
+import { runResolve } from './roles/resolve.js';
 import { runReview } from './roles/review.js';
 import type { RoleCtx, RoleRunner } from './roles/shared.js';
 
@@ -44,6 +46,8 @@ export interface TrooperDeps {
 const ROLES: Partial<Record<DropPayload['role'], RoleRunner>> = {
   implement: runImplement,
   review: runReview,
+  heal: runHeal,
+  resolve: runResolve,
 };
 
 export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promise<DropResult> {

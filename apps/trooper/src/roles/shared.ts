@@ -218,6 +218,42 @@ export function pushSweep(deps: TrooperDeps, ctx: RoleCtx): () => void {
   };
 }
 
+/**
+ * Commits whatever the agent left as a checkpoint and pushes it when the branch is ahead of base.
+ * Returns the pushed sha, or undefined when there was nothing to checkpoint.
+ */
+export async function checkpoint(
+  deps: TrooperDeps,
+  ctx: RoleCtx,
+  dir: string,
+  base: string,
+  push: () => Promise<string>,
+): Promise<string | undefined> {
+  const as = ctx.ids?.agent ?? null;
+  emitEvent(deps, ctx, 'phase', { phase: 'checkpoint' });
+  await deps.git.commitIfDirty(dir, 'wip: checkpoint', as);
+  if ((await deps.git.aheadOfBase(dir, base, as)) === 0) return undefined;
+  return push();
+}
+
+/** Catches a role's thrown error as `failed`, keeping the gates already run. */
+export async function guarded(
+  role: DropPayload['role'],
+  gates: GateResult[],
+  steps: () => Promise<DropResult>,
+): Promise<DropResult> {
+  try {
+    return await steps();
+  } catch (err) {
+    return {
+      status: 'failed',
+      role,
+      reason: err instanceof Error ? err.message : String(err),
+      gates,
+    };
+  }
+}
+
 export function asRecord(v: unknown): Record<string, unknown> | undefined {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
     ? (v as Record<string, unknown>)

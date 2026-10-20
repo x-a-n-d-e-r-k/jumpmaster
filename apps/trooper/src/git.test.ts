@@ -17,7 +17,9 @@ import {
   authHeader,
   cloneRepo,
   commitIfDirty,
+  conflictMarkers,
   headSha,
+  mergeInProgress,
   prepareBranch,
   pushNewBranch,
   remoteBranchExists,
@@ -81,6 +83,29 @@ test('treeState changes with an edit, an untracked file or a new commit', async 
   const s2 = await treeState(dir);
   expect(s2).not.toBe(s0);
   expect(s2).not.toBe(s1);
+});
+
+test('conflictMarkers lists tracked files with leftover markers; mergeInProgress sees MERGE_HEAD', async () => {
+  const dir = await clone('markers');
+  await prepareBranch(dir, 'agent/issue-9', 'main');
+  expect(await conflictMarkers(dir)).toEqual([]);
+  expect(await mergeInProgress(dir)).toBe(false);
+  writeFileSync(join(dir, 'a.txt'), 'ok\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> origin/main\n');
+  writeFileSync(join(dir, 'untracked.txt'), '<<<<<<< HEAD\n');
+  expect(await conflictMarkers(dir)).toEqual(['a.txt']);
+  writeFileSync(join(dir, 'a.txt'), 'a\n');
+  git(dir, 'checkout', '-q', '-b', 'side');
+  writeFileSync(join(dir, 'a.txt'), 'side\n');
+  git(dir, '-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-qam', 'side');
+  git(dir, 'checkout', '-q', 'agent/issue-9');
+  writeFileSync(join(dir, 'a.txt'), 'mine\n');
+  git(dir, '-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-qam', 'mine');
+  try {
+    git(dir, '-c', 'user.name=x', '-c', 'user.email=x@x', 'merge', '-q', 'side');
+  } catch {
+    // conflict expected
+  }
+  expect(await mergeInProgress(dir)).toBe(true);
 });
 
 test('branch, commit, ahead count, head sha', async () => {

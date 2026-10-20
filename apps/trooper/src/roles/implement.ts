@@ -3,6 +3,7 @@ import { type DropPayload, type DropResult, IMPLEMENT_OUTPUT_SCHEMA } from '@jum
 import type { TrooperDeps } from '../main.js';
 import {
   acceptOutcome,
+  checkpoint,
   cloneAndPrepare,
   emitEvent,
   pushSweep,
@@ -103,10 +104,8 @@ async function implementSteps(
 
   const early = stoppedEarly(outcome);
   if (early !== null) {
-    emitEvent(deps, ctx, 'phase', { phase: 'checkpoint' });
-    await deps.git.commitIfDirty(repoDir, 'wip: checkpoint', as);
-    if ((await deps.git.aheadOfBase(repoDir, base, as)) === 0) return done({ status: early });
-    return done({ status: early, headSha: await push() });
+    const headSha = await checkpoint(deps, ctx, repoDir, base, push);
+    return done(headSha === undefined ? { status: early } : { status: early, headSha });
   }
 
   const accepted = acceptOutcome(outcome);

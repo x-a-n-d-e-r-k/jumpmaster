@@ -420,6 +420,37 @@ export async function mergeBase(
   return (await headSha(dir, as)) === before ? 'up_to_date' : 'clean';
 }
 
+/** Tracked files that still hold a `<<<<<<<` or `>>>>>>>` conflict-marker line. */
+export async function conflictMarkers(
+  dir: string,
+  as: AgentIdentity | null = null,
+): Promise<string[]> {
+  try {
+    const out = await runGit(dir, ['grep', '-l', '-I', '-E', '-e', '^(<<<<<<<|>>>>>>>)( |$)'], '', {
+      as,
+    });
+    return out.split('\n').filter((l) => l !== '');
+  } catch (e) {
+    // git grep exits 1 when nothing matches.
+    if (e instanceof Error && e.message.includes('(exit 1)')) return [];
+    throw e;
+  }
+}
+
+/** True while a merge is unconcluded (MERGE_HEAD present or unmerged index entries). */
+export async function mergeInProgress(
+  dir: string,
+  as: AgentIdentity | null = null,
+): Promise<boolean> {
+  if ((await runGit(dir, ['ls-files', '-u'], '', { as })) !== '') return true;
+  try {
+    await runGit(dir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], '', { as });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export type PushOptions = {
   as?: AgentIdentity | null;
   /** Base branch for the pre-push guard; without it no guard runs. */
