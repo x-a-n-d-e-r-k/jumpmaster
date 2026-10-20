@@ -516,6 +516,24 @@ describe('§16 PR lifecycle edges', () => {
     expect(listOutbox(h.db, ['done']).map((o) => o.opKey)).toContain(opKeys.pr(1, 'sha2'));
   });
 
+  test("a retried PR at the same SHA is reviewed afresh, never merged on the closed PR's approval", async () => {
+    const h = await harness();
+    await toPrOpen(h, 'sha1');
+    await h.reconcile();
+    const review = await h.lease();
+    h.forge.state.close(1); // a human closes PR 1 while its approval is being posted
+    await h.postResult(review.dropId, review.epoch, reviewed(approve));
+    await h.reconcile();
+    expect(item(h)).toMatchObject({ state: 'parked', reason: 'pr closed' });
+    h.forge.state.setLabels(1, ['agent-ready', 'agent-retry']);
+    await h.reconcile();
+    await h.finishDrop('implement', implemented('sha1'));
+    expect(item(h)).toMatchObject({ state: 'pr_open', prNumber: 2 });
+    await h.reconcile();
+    expect(h.forge.state.merges).toEqual([]);
+    expect(h.queuedRoles()).toEqual(['review']);
+  });
+
   test('orphan (rule 10, agent branch deleted) parks', async () => {
     const h = await harness();
     await toPrOpen(h, 'sha1');

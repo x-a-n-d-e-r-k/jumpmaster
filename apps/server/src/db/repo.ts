@@ -347,12 +347,20 @@ export function upsertPullRequest(
 ): void {
   const at = now.toISOString();
   db.transaction(() => {
+    const prev = db
+      .prepare('SELECT number FROM pull_requests WHERE work_item_id = ?')
+      .get(row.workItemId) as { number: number } | undefined;
+    // A verdict belongs to the PR it was posted on: a new PR (retry after a close) starts clean,
+    // even at the same head SHA, and gets its own CI clock.
+    const newPr = prev !== undefined && prev.number !== row.number;
+    if (newPr) db.prepare('DELETE FROM verdicts WHERE work_item_id = ?').run(row.workItemId);
     db.prepare(
       `INSERT INTO pull_requests (work_item_id, number, head_ref, head_sha, head_first_seen_at, state,
          observed_at)
        VALUES (@workItemId, @number, @headRef, @headSha, @at, @state, @at)
        ON CONFLICT(work_item_id) DO UPDATE SET number = excluded.number, head_ref = excluded.head_ref,
-         head_first_seen_at = CASE WHEN pull_requests.head_sha = excluded.head_sha
+         head_first_seen_at = CASE
+           WHEN pull_requests.head_sha = excluded.head_sha AND pull_requests.number = excluded.number
            THEN pull_requests.head_first_seen_at ELSE excluded.head_first_seen_at END,
          head_sha = excluded.head_sha, state = excluded.state, observed_at = excluded.observed_at`,
     ).run({ ...row, at });
