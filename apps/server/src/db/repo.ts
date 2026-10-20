@@ -600,3 +600,23 @@ export function setUsageState(db: Db, patch: Partial<UsageStateRow>, now: Date):
   if (patch.pauseConfirmed !== undefined) params.pauseConfirmed = patch.pauseConfirmed ? 1 : 0;
   db.prepare(`UPDATE usage_state SET ${sets} WHERE id = 1`).run(params);
 }
+
+/** The zone's default branch as last synced from the forge, or null before the first sync. */
+export function getDropZoneDefaultBranch(db: Db, zoneId: string): string | null {
+  const r = db.prepare('SELECT default_branch AS b FROM drop_zones WHERE id = ?').get(zoneId) as
+    | { b: string }
+    | undefined;
+  return r?.b ?? null;
+}
+
+/** Whether the item has a create_pr outbox row that is still pending or unknown. */
+export function hasOpenCreatePr(db: Db, itemId: number): boolean {
+  return (
+    db
+      .prepare(
+        `SELECT 1 FROM outbox WHERE work_item_id = ? AND kind = 'create_pr'
+           AND state IN ('pending', 'unknown') LIMIT 1`,
+      )
+      .get(itemId) !== undefined
+  );
+}

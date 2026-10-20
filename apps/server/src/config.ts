@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { GateSpecSchema, type Role, RoleSchema } from '@jumpmaster/protocol';
 import { z } from 'zod';
 
-const DEFAULT_PROTECTED_PATHS = [
+export const DEFAULT_PROTECTED_PATHS = [
   '.github/**',
   '.claude/**',
   'CODEOWNERS',
