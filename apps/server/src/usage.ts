@@ -112,8 +112,10 @@ export function ingestRateLimit(
     const t = now.getTime();
     if (data.status === 'rejected') {
       const pauses = src.outcome !== null && src.outcome !== 'completed';
-      const reset = ms(normalizeResetsAt(data.resetsAt));
-      if (pauses && reset !== null) {
+      // No usable reset time: treat it like a past reset (pause one jitter, then probe) rather
+      // than ignoring a real limit and parking every drop that hits it.
+      const reset = ms(normalizeResetsAt(data.resetsAt)) ?? t;
+      if (pauses) {
         const window = data.rateLimitType === 'five_hour' ? FIVE_HOURS : SEVEN_DAYS;
         const base = reset <= t ? t : Math.min(reset, t + window);
         const target = base + jitterMs(cfg, rand);

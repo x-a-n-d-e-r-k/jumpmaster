@@ -166,10 +166,15 @@ describe('ingestRateLimit and dispatchGate', () => {
     expect(dispatchGate(db, cfg, plus(t0, 31_000))).toBe('probe');
   });
 
-  test('rejected without resetsAt is ignored', () => {
-    ingestRateLimit(db, rej(), src('d1', 'rate_limited'), cfg, t0);
-    ingestRateLimit(db, rej('not a date'), src('d2', 'rate_limited'), cfg, t0);
-    expect(dispatchGate(db, cfg, t0)).toBe('open');
+  test('rejected without a usable resetsAt pauses for one jitter, like a past reset', () => {
+    ingestRateLimit(db, rej(), src('d1', 'rate_limited'), cfg, t0, zero);
+    expect(dispatchGate(db, cfg, plus(t0, 29_000))).toBe('closed');
+    expect(dispatchGate(db, cfg, plus(t0, 31_000))).toBe('probe');
+  });
+
+  test('rejected with an unparsable resetsAt pauses too', () => {
+    ingestRateLimit(db, rej('not a date'), src('d2', 'rate_limited'), cfg, t0, zero);
+    expect(dispatchGate(db, cfg, plus(t0, 29_000))).toBe('closed');
   });
 
   test('jitter is drawn between the configured bounds, tolerating a reversed pair', () => {

@@ -139,7 +139,9 @@ export async function runAgent(
       emitEvent(deps, ctx, 'rate_limit', data);
     } else {
       const r = parsed.raw as { type?: unknown; exitCode?: unknown };
-      if (r.type === 'claude_stderr' && typeof r.exitCode === 'number') out.exitCode = r.exitCode;
+      // A null exit code means a signal killed claude: never a clean exit.
+      if (r.type === 'claude_stderr')
+        out.exitCode = typeof r.exitCode === 'number' ? r.exitCode : -1;
       emitEvent(deps, ctx, 'agent', { raw: parsed.raw });
     }
   }

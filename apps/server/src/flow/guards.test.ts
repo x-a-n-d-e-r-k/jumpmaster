@@ -36,6 +36,12 @@ describe('protectedPathHits', () => {
       ),
     ).toEqual(['docs/CODEOWNERS', 'jumpmaster.prod.json']));
 
+  test("a bare entry named like a protected directory (a '.claude' symlink) is a hit", () =>
+    expect(protectedPathHits([{ path: '.claude' }, { path: '.github' }], defaults)).toEqual([
+      '.claude',
+      '.github',
+    ]));
+
   test('a rename out of a protected path is a hit', () =>
     expect(
       protectedPathHits([{ path: 'x.yml', previousPath: '.github/workflows/ci.yml' }], defaults),

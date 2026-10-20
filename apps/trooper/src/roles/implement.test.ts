@@ -200,6 +200,15 @@ describe('runImplement', () => {
     expect(w.names()).not.toContain('pushNewBranch');
   });
 
+  test('a claude killed by a signal is not a clean exit', async () => {
+    const w = world([
+      ...complete,
+      JSON.stringify({ type: 'claude_stderr', exitCode: null, stderr: '' }),
+    ]);
+    const r = await runImplement(impl, w.deps, ctx);
+    expect(r).toMatchObject({ status: 'failed', reason: 'claude exit -1' });
+  });
+
   test('two result events are failed', async () => {
     const w = world([init('s'), resultLine(), resultLine()], { ahead: 1 });
     const r = await runImplement(impl, w.deps, ctx);

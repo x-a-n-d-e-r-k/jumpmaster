@@ -7,6 +7,8 @@ import type { BranchRulesRead, PullFiles } from '../forge/github.js';
 
 function pathMatches(p: string, glob: string): boolean {
   if (matchesGlob(p, glob)) return true;
+  // `dir/**` also covers a bare `dir` entry (a file or symlink standing in for the directory).
+  if (glob.endsWith('/**') && p === glob.slice(0, -3)) return true;
   return !glob.includes('/') && matchesGlob(basename(p), glob);
 }
 
