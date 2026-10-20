@@ -44,7 +44,17 @@ export class DockerDriver implements ContainerDriver {
       AttachStdout: true,
       AttachStderr: true,
       Tty: false,
-      HostConfig: { AutoRemove: true, Privileged: false },
+      HostConfig: {
+        AutoRemove: true,
+        Privileged: false,
+        // The trooper (root, PID 1) only needs to drop to the agent/gate uids and kill their
+        // processes. No CHOWN or DAC_OVERRIDE: root cannot read the agent's private files.
+        CapDrop: ['ALL'],
+        CapAdd: ['SETUID', 'SETGID', 'KILL'],
+        SecurityOpt: ['no-new-privileges'],
+        PidsLimit: 512,
+        Ulimits: [{ Name: 'core', Soft: 0, Hard: 0 }],
+      },
     });
 
     // Attach before start so no output is missed; the payload (with tokens)
