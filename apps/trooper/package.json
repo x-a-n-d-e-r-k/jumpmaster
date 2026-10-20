@@ -1,0 +1,13 @@
+{
+  "name": "@jumpmaster/trooper",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "main": "dist/claude.js",
+  "scripts": {
+    "test": "vitest run"
+  }
+}
