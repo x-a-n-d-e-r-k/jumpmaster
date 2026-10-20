@@ -209,6 +209,18 @@ describe('runImplement', () => {
     expect(r).toMatchObject({ status: 'failed', reason: 'claude exit -1' });
   });
 
+  test('a stop signal mid-run checkpoints and reports interrupted', async () => {
+    const stop = new AbortController();
+    const w = world([], { dirty: true });
+    (w.deps as { runClaude: unknown }).runClaude = async function* () {
+      yield init('s');
+      stop.abort(); // SIGTERM arrives; the agent is killed, so the stream just ends
+    };
+    const r = await runImplement(impl, { ...w.deps, signal: stop.signal }, ctx);
+    expect(r).toMatchObject({ status: 'interrupted', headSha: 'ck1' });
+    expect(w.calls).toContainEqual(['commitIfDirty', repoDir, 'wip: checkpoint', null]);
+  });
+
   test('two result events are failed', async () => {
     const w = world([init('s'), resultLine(), resultLine()], { ahead: 1 });
     const r = await runImplement(impl, w.deps, ctx);

@@ -42,6 +42,7 @@ test('container create options drop all capabilities and set no-new-privileges',
   ).rejects.toThrow('stop here');
   expect(seen[0]?.HostConfig).toEqual({
     AutoRemove: true,
+    Init: true,
     Privileged: false,
     CapDrop: ['ALL'],
     CapAdd: ['SETUID', 'SETGID', 'KILL'],

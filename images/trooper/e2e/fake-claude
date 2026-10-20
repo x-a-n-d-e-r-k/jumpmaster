@@ -16,6 +16,9 @@ const probes = {
 };
 const out = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
 out({ type: 'system', subtype: 'init', session_id: 'e2e' });
+if (process.argv.some((a) => a.includes('SLEEP'))) setInterval(() => {}, 1000);
+else {
 out({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', resetsAt: 1900000000, rateLimitType: 'five_hour' } });
 out({ type: 'result', is_error: false, terminal_reason: 'completed', session_id: 'e2e', num_turns: 1,
   structured_output: { decision: 'approve', summary: JSON.stringify(probes), findings: [] } });
+}

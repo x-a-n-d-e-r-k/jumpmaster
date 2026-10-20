@@ -16,7 +16,7 @@ import {
   type AgentIdentity,
   agentSpawnOptions,
   asAgentArgv,
-  type sweepUid,
+  sweepUid,
   type TrooperIdentities,
   trooperIdentities,
 } from './privilege.js';
@@ -34,6 +34,7 @@ export interface TrooperDeps {
     env: NodeJS.ProcessEnv,
     cwd: string,
     as?: AgentIdentity | null,
+    signal?: AbortSignal,
   ): AsyncIterable<string>;
   runGates: typeof runGates;
   emit(line: string): void;
@@ -41,6 +42,8 @@ export interface TrooperDeps {
   privilege?: { sweepUid: typeof sweepUid };
   /** Unprivileged identities; null outside the container. */
   ids?: TrooperIdentities | null;
+  /** Aborted on SIGTERM/SIGINT: the agent is stopped and the role checkpoints. */
+  signal?: AbortSignal;
 }
 
 const ROLES: Partial<Record<DropPayload['role'], RoleRunner>> = {
@@ -101,6 +104,7 @@ async function* spawnClaude(
   env: NodeJS.ProcessEnv,
   cwd: string,
   as: AgentIdentity | null = null,
+  signal?: AbortSignal,
 ): AsyncIterable<string> {
   const [cmd, ...argv] = asAgentArgv(as, ['claude', ...args]) as [string, ...string[]];
   const child = spawn(cmd, argv, {
@@ -108,6 +112,13 @@ async function* spawnClaude(
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  // On a stop, kill the agent and everything it started; the stream then ends.
+  const stop = () => {
+    child.kill('SIGKILL');
+    if (as) sweepUid(as.uid);
+  };
+  if (signal?.aborted) stop();
+  else signal?.addEventListener('abort', stop, { once: true });
   let stderr = '';
   child.stderr.on('data', (c: Buffer) => {
     stderr = (stderr + c.toString('utf8')).slice(-4000);
@@ -139,12 +150,17 @@ export async function readPayload(
 async function main(): Promise<void> {
   const payload = await readPayload(process.argv[2], process.stdin);
   if (process.env.JM_WORK_ROOT) gitOps.setWorkRoot(process.env.JM_WORK_ROOT);
+  const stopping = new AbortController();
+  for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+    process.on(sig, () => stopping.abort());
+  }
   const result = await runTrooper(payload, {
     git: gitOps,
     runClaude: spawnClaude,
     runGates,
     emit: (l) => process.stdout.write(`${l}\n`),
     ids: trooperIdentities(process.env),
+    signal: stopping.signal,
   });
   process.exitCode = result.status === 'failed' ? 1 : 0;
 }

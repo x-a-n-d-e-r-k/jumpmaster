@@ -46,6 +46,8 @@ export class DockerDriver implements ContainerDriver {
       Tty: false,
       HostConfig: {
         AutoRemove: true,
+        // An init as PID 1 forwards the stop signal to the trooper, which checkpoints on it.
+        Init: true,
         Privileged: false,
         // The trooper (root, PID 1) only needs to drop to the agent/gate uids and kill their
         // processes. No CHOWN or DAC_OVERRIDE: root cannot read the agent's private files.

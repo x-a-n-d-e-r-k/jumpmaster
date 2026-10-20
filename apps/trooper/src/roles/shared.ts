@@ -33,6 +33,8 @@ export interface AgentOutcome {
   /** The last rate-limit report of any status. */
   rateLimit?: RateLimitEventData;
   terminalReason?: string;
+  /** The trooper was told to stop (SIGTERM/SIGINT) while the agent ran. */
+  aborted?: boolean;
 }
 
 export function emitEvent(
@@ -114,7 +116,7 @@ export async function runAgent(
     initSessionId: null,
     rateLimited: false,
   };
-  for await (const line of deps.runClaude(args, env, dir, ctx.ids?.agent ?? null)) {
+  for await (const line of deps.runClaude(args, env, dir, ctx.ids?.agent ?? null, deps.signal)) {
     const parsed = parseStreamLine(line);
     if (parsed.type === 'ignored') continue;
     if (parsed.type === 'init') {
@@ -147,6 +149,7 @@ export async function runAgent(
   }
   // spawnClaude reports a non-zero exit as a claude_stderr line; a stream that ends without one exited 0.
   out.exitCode ??= 0;
+  if (deps.signal?.aborted) out.aborted = true;
   return out;
 }
 
@@ -167,6 +170,7 @@ export function acceptOutcome(o: AgentOutcome): Acceptance {
 /** Whether the agent stopped early (limit or turn cap) and its work should be checkpointed. */
 export function stoppedEarly(o: AgentOutcome): 'rate_limited' | 'interrupted' | null {
   if (o.rateLimited) return 'rate_limited';
+  if (o.aborted) return 'interrupted';
   const reason = o.results.at(-1)?.terminalReason;
   return reason !== undefined && reason !== 'completed' ? 'interrupted' : null;
 }
