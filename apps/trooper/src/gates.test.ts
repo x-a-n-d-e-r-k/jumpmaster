@@ -91,9 +91,11 @@ test('gates.ts spawns a gate command through the agent argv wrapper', async () =
   const gate = { uid: 10002, gid: 10002, home: '/home/gate' };
   let argv: string[] = [];
   let env: NodeJS.ProcessEnv = {};
+  let cwd: unknown;
   setGateSpawn((cmd, args, opts) => {
     argv = [cmd, ...args];
     env = opts.env ?? {};
+    cwd = opts.cwd;
     return spawn('true', [], opts);
   });
   try {
@@ -107,6 +109,16 @@ test('gates.ts spawns a gate command through the agent argv wrapper', async () =
     setGateSpawn(null);
   }
   expect(argv.slice(0, 2)).toEqual(['setpriv', `--reuid=${gate.uid}`]);
-  expect(argv.slice(-3)).toEqual(['sh', '-c', 'id -u']);
+  // Root (no DAC_OVERRIDE) cannot chdir into the gate's 0700 home: spawn from /, cd after the drop.
+  expect(cwd).toBe('/');
+  expect(argv.slice(-6)).toEqual([
+    'sh',
+    '-c',
+    'cd -- "$1" && exec sh -c "$2"',
+    'jm-gate',
+    tmp,
+    'id -u',
+  ]);
+  expect(argv.at(-7)).toBe('jm-agent');
   expect(env.HOME).toBe('/home/gate');
 });

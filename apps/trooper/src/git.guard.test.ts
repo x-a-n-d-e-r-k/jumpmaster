@@ -418,6 +418,52 @@ describe('working copy and helpers', () => {
     expect(await remoteBranchSha(w.target, 'agent/issue-404', 't')).toBeNull();
   });
 
+  test('agent git calls trust exactly the root-owned mirror; root calls trust nothing', async () => {
+    const agent = { uid: 10001, gid: 10001, home: '/home/agent' };
+    const base = join(tmp, 'safe-dir');
+    mkdirSync(base);
+    const mirror = join(base, 'mirror');
+    const calls: Call[] = [];
+    setSpawn((cmd, args, opts) => {
+      calls.push({
+        argv: [cmd, ...args],
+        cwd: opts.cwd as string,
+        env: (opts.env ?? {}) as NodeJS.ProcessEnv,
+      });
+      const child = new EventEmitter() as ReturnType<typeof spawn>;
+      Object.assign(child, {
+        stdout: new EventEmitter(),
+        stderr: new EventEmitter(),
+        kill: () => true,
+      });
+      setImmediate(() => child.emit('close', 0));
+      return child;
+    });
+    await cloneRepo({
+      owner: 'o',
+      name: 'r',
+      token: 't',
+      dir: '/home/agent/repo',
+      mirrorDir: mirror,
+      as: agent,
+    });
+    await mergeBase('/home/agent/repo', 'main', agent).catch(() => undefined);
+    // git strips GIT_CONFIG_COUNT/PARAMETERS from a local upload-pack's env, but not
+    // GIT_CONFIG_GLOBAL: agent calls get a root-written global config naming the mirror.
+    const agentCalls = calls.filter((c) => c.argv.includes('--reuid=10001'));
+    const rootCalls = calls.filter((c) => !c.argv.includes('setpriv'));
+    expect(agentCalls.length).toBeGreaterThan(0);
+    for (const c of agentCalls) {
+      const file = c.env.GIT_CONFIG_GLOBAL ?? '';
+      expect(file).not.toBe('/dev/null');
+      expect(readFileSync(file, 'utf8')).toBe(`[safe]\n\tdirectory = ${mirror}\n`);
+      const keys = Object.entries(c.env).filter(([k]) => /^GIT_CONFIG_KEY_\d+$/.test(k));
+      expect(keys.map(([, v]) => v)).not.toContain('safe.directory');
+    }
+    expect(rootCalls.length).toBeGreaterThan(0);
+    for (const c of rootCalls) expect(c.env.GIT_CONFIG_GLOBAL).toBe('/dev/null');
+  });
+
   test('cloneForGates runs no git in the agent repo as the gate uid', async () => {
     const fakeIds = {
       agent: { uid: 10001, gid: 10001, home: '/home/agent' },

@@ -1,0 +1,21 @@
+#!/usr/bin/env node
+// Stand-in for the Claude CLI: probes its own identity, then answers like stream-json.
+const { execSync } = require('node:child_process');
+const fs = require('node:fs');
+const sh = (c) => { try { return execSync(c, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); } catch (e) { return `ERR(${String(e.stderr || e.message).trim().split('\n')[0]})`; } };
+const probes = {
+  uid: sh('id -u'),
+  cwd: process.cwd(),
+  home: process.env.HOME,
+  tokenPresent: Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN),
+  readGateHome: sh('ls /home/gate'),
+  readProc1Environ: sh('cat /proc/1/environ'),
+  writeWork: sh('touch /work/x && echo wrote'),
+  head: sh('git rev-parse HEAD'),
+  systemPromptReadable: fs.existsSync(process.argv[process.argv.indexOf('--append-system-prompt-file') + 1] || '/nope'),
+};
+const out = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
+out({ type: 'system', subtype: 'init', session_id: 'e2e' });
+out({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', resetsAt: 1900000000, rateLimitType: 'five_hour' } });
+out({ type: 'result', is_error: false, terminal_reason: 'completed', session_id: 'e2e', num_turns: 1,
+  structured_output: { decision: 'approve', summary: JSON.stringify(probes), findings: [] } });

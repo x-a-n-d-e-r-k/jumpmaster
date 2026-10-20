@@ -124,6 +124,11 @@ Rebuild the trooper image: M1 changes it (two unprivileged users, hardened conta
 docker build -t jumpmaster-trooper:dev -f images/trooper/Dockerfile .
 ```
 
+Before the real run you can check the container without any token: `images/trooper/e2e/run.sh`
+builds the image with a fake Claude CLI and runs one review drop against a public repository
+under the stick's hardened options. It checks that the agent, gate and root identities are
+separated, and that the token never appears in the output.
+
 ## 5. Scenarios
 
 Create each issue in the test repository with the `agent-ready` label, then watch the

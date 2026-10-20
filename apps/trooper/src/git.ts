@@ -165,6 +165,28 @@ export type RunGitOpts = {
 };
 
 /**
+ * Root-owned mirrors this trooper created and checked (`assertRootOwnedDir`). Agent-identity git
+ * runs `upload-pack` inside them (clone and fetch from `file://<mirror>`), which git refuses for a
+ * repo owned by another uid unless `safe.directory` names it in protected config. A local
+ * transport strips GIT_CONFIG_COUNT/PARAMETERS from upload-pack's env but keeps GIT_CONFIG_GLOBAL,
+ * so the trust goes in a root-written global config file. Exactly these paths are trusted, never
+ * `*`, and root calls trust nothing.
+ */
+const trustedMirrors = new Set<string>();
+/** Root-written global config for agent-identity git: only `safe.directory` for those mirrors. */
+let agentGlobalConfig: string | null = null;
+
+function trustMirror(mirrorDir: string): void {
+  assertRootOwnedDir(mirrorDir);
+  trustedMirrors.add(mirrorDir);
+  const file = join(dirname(mirrorDir), 'agent.gitconfig');
+  const lines = [...trustedMirrors].map((m) => `\tdirectory = ${m}`).join('\n');
+  // In the root-owned workdir (0755): the agent can read it but not change it.
+  writeFileSync(file, `[safe]\n${lines}\n`, { mode: 0o644 });
+  agentGlobalConfig = file;
+}
+
+/**
  * Runs git. Auth rides in the child's env (never argv or config) as GIT_CONFIG_KEY_0, scoped to
  * github.com. Inherited GIT_* variables and global/system config are ignored. A token is only ever
  * used by a root call in a root-owned `gitDir`; working-copy calls carry no token.
@@ -189,7 +211,7 @@ export function runGit(
     ...scrubEnv(process.env),
     GIT_TERMINAL_PROMPT: '0',
     GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_GLOBAL: opts.as && agentGlobalConfig ? agentGlobalConfig : '/dev/null',
   };
   if (config.length > 0) {
     env.GIT_CONFIG_COUNT = String(config.length);
@@ -282,6 +304,7 @@ export async function cloneRepo(o: {
   await initBare(mirrorDir);
   await mirrorFetch(mirrorDir, o.token, o, ['*']);
   const as = o.as ?? null;
+  if (as) trustMirror(mirrorDir);
   await runGit(
     dirname(o.dir),
     ['clone', '-q', '--no-hardlinks', `file://${mirrorDir}`, o.dir],
@@ -733,7 +756,8 @@ export async function cloneForGates(
   const bundle = join(ids.agent.home, 'gates.bundle');
   await runGit(agentDir, ['bundle', 'create', '-q', bundle, 'HEAD'], '', { as: ids.agent });
   await removeTree(gateDir, ids.gate);
-  await runGit(ids.gate.home, ['clone', '-q', bundle, gateDir], '', { as: ids.gate });
+  // cwd '/': root cannot chdir into the gate's 0700 home before the uid drop; paths are absolute.
+  await runGit('/', ['clone', '-q', bundle, gateDir], '', { as: ids.gate });
 }
 
 /**

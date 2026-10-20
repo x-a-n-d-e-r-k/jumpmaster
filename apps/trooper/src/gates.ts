@@ -55,12 +55,14 @@ function runOne(
     let window = '';
     let timedOut = false;
     let killTimer: NodeJS.Timeout | undefined;
-    const [cmd, ...args] = asAgentArgv(o.as ?? null, ['sh', '-c', gate.run]) as [
-      string,
-      ...string[],
-    ];
+    // As another uid, root (no DAC_OVERRIDE) cannot chdir into that uid's private home, so the
+    // process starts in / and changes directory after the uid drop.
+    const argv = o.as
+      ? ['sh', '-c', 'cd -- "$1" && exec sh -c "$2"', 'jm-gate', o.cwd, gate.run]
+      : ['sh', '-c', gate.run];
+    const [cmd, ...args] = asAgentArgv(o.as ?? null, argv) as [string, ...string[]];
     const child = spawnImpl(cmd, args, {
-      cwd: o.cwd,
+      cwd: o.as ? '/' : o.cwd,
       env: agentSpawnOptions(o.as ?? null, scrubEnv(o.env, o.secrets)).env,
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
