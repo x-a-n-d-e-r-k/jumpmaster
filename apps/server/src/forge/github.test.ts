@@ -61,7 +61,7 @@ describe('GitHubForge', () => {
     expect((await forge.listReadyIssues('agent-ready'))[0]?.body).toBe('');
   });
 
-  test('trusts write/maintain/admin only and fails closed', async () => {
+  test('trusts write/maintain/admin only; 404 is untrusted, other errors throw', async () => {
     nock(api).get('/repos/o/r/collaborators/alice/permission').reply(200, { permission: 'write' });
     nock(api).get('/repos/o/r/collaborators/bob/permission').reply(200, { permission: 'read' });
     nock(api).get('/repos/o/r/collaborators/eve/permission').reply(500);
@@ -77,7 +77,7 @@ describe('GitHubForge', () => {
       .reply(200, { permission: 'admin', role_name: 'admin' });
     expect(await forge.isTrusted('alice')).toBe(true);
     expect(await forge.isTrusted('bob')).toBe(false);
-    expect(await forge.isTrusted('eve')).toBe(false);
+    await expect(forge.isTrusted('eve')).rejects.toThrow();
     expect(await forge.isTrusted('mal')).toBe(false);
     expect(await forge.isTrusted('maint')).toBe(true);
     expect(await forge.isTrusted('trg')).toBe(false);

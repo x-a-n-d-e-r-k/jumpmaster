@@ -70,8 +70,13 @@ export async function syncDropZone(
   const issues = await forge.listReadyIssues(zone.readyLabel);
 
   const trust = new Map<string, boolean>();
-  for (const author of new Set(issues.map((i: ForgeIssue) => i.author)))
-    trust.set(author, await forge.isTrusted(author));
+  for (const author of new Set(issues.map((i: ForgeIssue) => i.author))) {
+    try {
+      trust.set(author, await forge.isTrusted(author));
+    } catch {
+      trust.set(author, false); // intake fails closed: the issue is picked up on a later pass
+    }
+  }
 
   let added = 0;
   let skippedUntrusted = 0;

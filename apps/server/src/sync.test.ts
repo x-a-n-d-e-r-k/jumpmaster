@@ -6,6 +6,7 @@ import { listWorkItems, setWorkItemState, type WorkItem } from './db/repo.js';
 import type { ForgeIssue } from './forge/github.js';
 import { rankItems, syncDropZone } from './sync.js';
 import { fakeForge } from './test/fakes.js';
+import { zoneWorld } from './test/fixtures.js';
 import { t0, tmpDbFile } from './test/helpers.js';
 
 const pair = <F>(f: F) => ({ author: f, reviewer: f });
@@ -66,6 +67,18 @@ describe('rankItems', () => {
 });
 
 describe('syncDropZone', () => {
+  test('a failed author trust lookup skips that issue and keeps the pass', async () => {
+    const w = zoneWorld();
+    const real = w.f.author.isTrusted;
+    w.f.author.isTrusted = async (login) => {
+      if (login === 'human') throw new Error('fake 502');
+      return real(login);
+    };
+    const r = await syncDropZone(w.db, w.forges, w.zone, new Date('2026-01-01T00:00:00Z'));
+    expect(r.added).toBe(0);
+    expect(r.skippedUntrusted).toBe(5);
+  });
+
   test('skips untrusted authors', async () => {
     const forge = fakeForge({
       issues: [issue(1), issue(2, { author: 'eve' })],

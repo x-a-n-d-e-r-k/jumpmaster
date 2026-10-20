@@ -178,8 +178,11 @@ export class GitHubForge implements Forge {
       });
       if (data.role_name) return TRUSTED_ROLES.has(data.role_name);
       return TRUSTED_PERMISSIONS.has(data.permission);
-    } catch {
-      return false;
+    } catch (err) {
+      // Only "not a collaborator" is an answer. Anything else (5xx, a 403 secondary rate limit,
+      // the network) is unknown and must not quietly drop a maintainer's review: rethrow.
+      if ((err as ForgeError).status === 404) return false;
+      throw err;
     }
   }
 

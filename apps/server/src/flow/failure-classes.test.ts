@@ -414,7 +414,7 @@ describe('§16 reviews and heals', () => {
     expect(h.forge.state.merges.map((m) => m.sha)).toEqual(['sha1']);
   });
 
-  test('a failed trust lookup counts as untrusted', async () => {
+  test('a failed trust lookup waits instead of dropping the block; never merges', async () => {
     const h = await harness();
     await toApproved(h, 'sha1');
     h.forge.state.review({
@@ -424,12 +424,19 @@ describe('§16 reviews and heals', () => {
       commitId: 'sha1',
     });
     const real = h.forge.author.isTrusted;
+    let down = true;
     h.forge.author.isTrusted = async (login) => {
-      if (login === 'alice') throw new Error('fake 502 in isTrusted');
+      if (login === 'alice' && down) throw new Error('fake 502 in isTrusted');
       return real(login);
     };
     await h.reconcile();
-    expect(h.queuedRoles()).not.toContain('heal');
+    await h.reconcile();
+    expect(count(h, 'merge')).toBe(0);
+    expect(item(h).state).toBe('pr_open');
+    down = false;
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['heal']);
+    expect(count(h, 'merge')).toBe(0);
   });
 });
 
