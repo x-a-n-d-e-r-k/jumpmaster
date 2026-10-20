@@ -4,9 +4,7 @@ import { createApp } from '../app.js';
 import type { Config, DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import { openDb } from '../db/open.js';
-import { getDropZoneDefaultBranch } from '../db/repo.js';
 import { type ReconcileReport, reconcileZone } from '../flow/reconcile.js';
-import { zonePass } from '../flow/snapshot.js';
 import type { ForgeIssue } from '../forge/github.js';
 import { promptVersions } from '../payloads.js';
 import { syncDropZone } from '../sync.js';
@@ -26,7 +24,7 @@ export interface Harness {
   /** Advances the injected clock by `minutes`. */
   at(minutes: number): Date;
   sync(): Promise<void>;
-  /** `syncDropZone`, then `zonePass` once, then `reconcileZone` with that pass. */
+  /** `syncDropZone` (which reads the zone pass once), then `reconcileZone` with that pass. */
   reconcile(): Promise<ReconcileReport>;
   queuedRoles(): Role[];
   /** Deletes all workflow rows and resets usage; the forge state is kept. */
@@ -51,7 +49,7 @@ export async function harness(
       createdAt: '2026-01-01T00:00:00.000Z',
     },
   ];
-  const f = fakeForgePair({ issues, trusted: ['human'] });
+  const f = fakeForgePair({ issues, trusted: ['human', 'alice'] });
   const forges = { author: f.author, reviewer: f.reviewer };
   const zone = makeZone({ ciRequired: false, ...opts.zone });
   const config: Config = {
@@ -98,12 +96,10 @@ export async function harness(
       return clock;
     },
     async sync() {
-      await syncDropZone(db, forges.author, zone);
+      await syncDropZone(db, forges, zone, clock);
     },
     async reconcile() {
-      await syncDropZone(db, forges.author, zone);
-      const base = getDropZoneDefaultBranch(db, zone.id) ?? 'main';
-      const pass = await zonePass(forges, zone, base);
+      const { pass } = await syncDropZone(db, forges, zone, clock);
       return reconcileZone(db, forges, zone, pass, promptVersions(), usageCfg, [], clock);
     },
     queuedRoles() {
@@ -172,4 +168,18 @@ export async function toApproved(h: Harness, sha: string): Promise<void> {
     verdict: { decision: 'approve', summary: 'ok', findings: [] },
   });
   if (review !== 204) throw new Error(`review result returned ${review}`);
+}
+
+/**
+ * Reconcile (queues implement) → implement completed at `sha`: the item is pr_open with PR 1 and
+ * no drop is queued yet (the next reconcile would queue its review).
+ */
+export async function toPrOpen(h: Harness, sha: string): Promise<void> {
+  await h.reconcile();
+  const status = await h.finishDrop('implement', {
+    status: 'completed',
+    headSha: sha,
+    gates: [{ name: 'test', exitCode: 0, durationMs: 10, timedOut: false, outputTail: '' }],
+  });
+  if (status !== 204) throw new Error(`implement result returned ${status}`);
 }

@@ -1,7 +1,13 @@
 import type { DropResult, GateResult, Verdict } from '@jumpmaster/protocol';
 import { beforeEach, describe, expect, test } from 'vitest';
-import { getAttempts } from '../db/repo.js';
-import { type Harness, harness, toApproved } from '../test/flowHarness.js';
+import {
+  activeDropFor,
+  getAttempts,
+  getPullRequest,
+  setAttempts,
+  setWorkItemState,
+} from '../db/repo.js';
+import { type Harness, harness, toApproved, toPrOpen } from '../test/flowHarness.js';
 import { workItem } from '../test/helpers.js';
 
 const gateOk: GateResult = {
@@ -174,3 +180,86 @@ function issue(n: number) {
     createdAt: `2026-01-01T00:00:0${n}.000Z`,
   };
 }
+
+describe('parked-item recovery (sync)', () => {
+  const calls = (method: string) => h.forge.author.calls.filter((c) => c.method === method);
+
+  test('reopened PR and issue un-park', async () => {
+    await toPrOpen(h, 'sha1');
+    h.forge.state.close(1);
+    await h.reconcile();
+    expect(workItem(h.db, 1)).toMatchObject({ state: 'parked', reason: 'pr closed' });
+    h.forge.state.reopen(1);
+    await h.sync();
+    expect(workItem(h.db, 1).state).toBe('pr_open');
+  });
+
+  test('retry label on a closed-PR park resumes from the existing branch', async () => {
+    await toPrOpen(h, 'sha1');
+    h.forge.state.close(1);
+    await h.reconcile();
+    h.forge.state.setLabels(1, ['agent-ready', 'agent-retry']);
+    await h.reconcile();
+    expect(getPullRequest(h.db, 1)?.state).toBe('closed');
+    expect(activeDropFor(h.db, 1)).toMatchObject({ role: 'implement', headSha: 'sha1' });
+  });
+
+  test('retry label resets budgets once', async () => {
+    await toPrOpen(h, 'sha1');
+    setAttempts(h.db, 1, 'heal', 3, 'x');
+    setWorkItemState(h.db, 1, 'parked', 'budget exhausted: heal');
+    h.forge.state.setLabels(1, ['agent-ready', 'agent-retry']);
+    await h.sync();
+    expect(getAttempts(h.db, 1, 'heal').count).toBe(0);
+    expect(workItem(h.db, 1).state).toBe('pr_open');
+    setAttempts(h.db, 1, 'heal', 3, 'x');
+    setWorkItemState(h.db, 1, 'parked', 'budget exhausted: heal');
+    await h.sync(); // label still present: not reset again
+    expect(getAttempts(h.db, 1, 'heal').count).toBe(3);
+    expect(workItem(h.db, 1).state).toBe('parked');
+  });
+
+  test('retry after merge rejected clears the failed op and merges', async () => {
+    await toApproved(h, 'sha1');
+    h.forge.author.failNext('merge', { status: 405 });
+    await h.reconcile();
+    await h.reconcile();
+    expect(workItem(h.db, 1)).toMatchObject({
+      state: 'parked',
+      reason: expect.stringMatching(/^merge rejected/),
+    });
+    h.forge.state.setLabels(1, ['agent-ready', 'agent-retry']);
+    await h.reconcile();
+    await h.reconcile();
+    expect(calls('merge')).toHaveLength(2);
+    expect(workItem(h.db, 1).state).toBe('done');
+  });
+
+  test('a dismissed human block un-parks without the label', async () => {
+    await toApproved(h, 'sha1');
+    h.forge.state.review({ author: 'alice', state: 'CHANGES_REQUESTED', commitId: 'sha0' });
+    await h.reconcile();
+    expect(workItem(h.db, 1)).toMatchObject({ state: 'parked', reason: 'human block stands' });
+    const last = h.forge.state.reviews.at(-1);
+    if (last) last.state = 'DISMISSED';
+    await h.sync();
+    expect(workItem(h.db, 1).state).toBe('pr_open');
+  });
+
+  test('a merge rejected park whose PR did merge becomes done', async () => {
+    await toPrOpen(h, 'sha1');
+    setWorkItemState(h.db, 1, 'parked', 'merge rejected: unresolved after 45 min');
+    h.forge.state.markMerged(1);
+    await h.sync();
+    expect(workItem(h.db, 1)).toMatchObject({ state: 'done', reason: 'merged' });
+  });
+
+  test('a parked item whose PR was merged by a human becomes done', async () => {
+    await toPrOpen(h, 'sha1');
+    h.forge.state.close(1);
+    await h.reconcile();
+    h.forge.state.markMerged(1);
+    await h.sync();
+    expect(workItem(h.db, 1)).toMatchObject({ state: 'done', reason: 'merged' });
+  });
+});

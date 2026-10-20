@@ -2,13 +2,13 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
-import { type Config, loadConfig } from './config.js';
+import { type Config, loadConfig, secretList } from './config.js';
 import { openDb } from './db/open.js';
+import { reconcileZone } from './flow/reconcile.js';
 import { GitHubForge } from './forge/github.js';
 import { expireLeases } from './leases.js';
-import type { ForgePair } from './outbox.js';
+import { type ForgePair, markPendingUnknown } from './outbox.js';
 import { promptVersions } from './payloads.js';
-import { enqueueNext } from './scheduler.js';
 import { syncDropZone } from './sync.js';
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -25,6 +25,8 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
   const config = loadConfig(configPath, env);
   mkdirSync(config.dataDir, { recursive: true });
   const db = openDb(join(config.dataDir, 'jumpmaster.sqlite'));
+  // A write in flight when the process died has an unknown outcome: resolve it by read-back.
+  markPendingUnknown(db, new Date());
 
   const forges = new Map(
     config.dropZones.map((zone) => {
@@ -45,13 +47,25 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
 
   const app = createApp({ db, config, forgesFor, now: () => new Date() });
 
+  const secrets = secretList(config.secrets);
   const pass = async () => {
+    expireLeases(db, new Date(), config.usage);
     for (const zone of config.dropZones) {
       try {
-        await syncDropZone(db, forgesFor(zone.id).author, zone);
-        enqueueNext(db, zone, promptVersions().implement, config.usage, new Date());
+        const forgePair = forgesFor(zone.id);
+        const synced = await syncDropZone(db, forgePair, zone, new Date());
+        await reconcileZone(
+          db,
+          forgePair,
+          zone,
+          synced.pass,
+          promptVersions(),
+          config.usage,
+          secrets,
+          new Date(),
+        );
       } catch (e) {
-        log(`sync failed for zone ${zone.id}: ${errorMessage(e)}`);
+        log(`pass failed for zone ${zone.id}: ${errorMessage(e)}`);
       }
     }
   };

@@ -41,6 +41,12 @@ const agentIssue = (headRef: string): number | null => {
   return m ? Number(m[1]) : null;
 };
 
+/** A PR row that is not closed (a closed row is history: retry resumes past it). */
+const hasLivePr = (db: Db, itemId: number): boolean => {
+  const row = getPullRequest(db, itemId);
+  return row !== undefined && row.state !== 'closed';
+};
+
 const parkReason = (db: Db, itemId: number, reason: string, now: Date): void =>
   setWorkItemState(db, itemId, 'parked', reason, now);
 
@@ -60,7 +66,7 @@ async function adopt(
     if (n === null || pr.author !== authorLogin || pr.headSha === null) continue;
     const item = listWorkItems(db, zone.id).find((i) => i.issueNumber === n);
     if (!item || (item.state !== 'ready' && item.state !== 'in_flight')) continue;
-    if (activeDropFor(db, item.id) || getPullRequest(db, item.id)) continue;
+    if (activeDropFor(db, item.id) || hasLivePr(db, item.id)) continue;
     upsertPullRequest(
       db,
       {
@@ -92,7 +98,7 @@ async function resume(
     (i) =>
       (i.state === 'ready' || i.state === 'in_flight') &&
       !activeDropFor(db, i.id) &&
-      !getPullRequest(db, i.id) &&
+      !hasLivePr(db, i.id) &&
       !hasOpenCreatePr(db, i.id),
   );
   for (const item of candidates) {

@@ -1,14 +1,23 @@
 import type { DropZoneConfig } from './config.js';
 import type { Db } from './db/open.js';
 import {
+  deleteFailedOutbox,
+  getPullRequest,
+  getWorkItem,
   listWorkItems,
+  resetAttempts,
   setDropZoneDefaultBranch,
+  setRetryLabelSeen,
   setWorkItemState,
   upsertDropZone,
+  upsertPullRequest,
   upsertWorkItem,
   type WorkItem,
 } from './db/repo.js';
-import type { Forge, ForgeIssue } from './forge/github.js';
+import { decide } from './flow/decide.js';
+import { buildSnapshot, type ZonePass, zonePass } from './flow/snapshot.js';
+import type { ForgeIssue, PullFacts } from './forge/github.js';
+import type { ForgePair } from './outbox.js';
 
 const PRIORITY_LABELS = ['highest', 'high', 'low', 'lowest'] as const;
 const PRIORITY_VALUE: Record<(typeof PRIORITY_LABELS)[number], number> = {
@@ -37,11 +46,26 @@ export function rankItems(items: WorkItem[]): WorkItem[] {
   );
 }
 
+export type SyncResult = {
+  added: number;
+  skippedUntrusted: number;
+  retried: number;
+  reopened: number;
+  /** The zone's rules read for this pass; hand it to `reconcileZone`. */
+  pass: ZonePass;
+};
+
+/**
+ * Syncs ready issues into work items, reads the zone pass once, then recovers parked items
+ * (`syncParked`). The returned `pass` is reused by the reconciler, so rules are read once per pass.
+ */
 export async function syncDropZone(
   db: Db,
-  forge: Forge,
+  forges: ForgePair,
   zone: DropZoneConfig,
-): Promise<{ added: number; skippedUntrusted: number }> {
+  now: Date,
+): Promise<SyncResult> {
+  const forge = forges.author;
   const defaultBranch = await forge.getDefaultBranch();
   const issues = await forge.listReadyIssues(zone.readyLabel);
 
@@ -89,5 +113,100 @@ export async function syncDropZone(
       if (!listed.has(w.issueNumber)) setWorkItemState(db, w.id, 'done', 'no longer ready');
   });
   run();
-  return { added, skippedUntrusted };
+  const pass = await zonePass(forges, zone, defaultBranch);
+  const parked = await syncParked(db, forges, zone, pass, now);
+  return { added, skippedUntrusted, ...parked, pass };
+}
+
+async function readPull(forges: ForgePair, number: number | null): Promise<PullFacts | null> {
+  if (number === null) return null;
+  try {
+    return await forges.author.getPull(number);
+  } catch {
+    return null;
+  }
+}
+
+/** Puts an item back on the track its PR is on: open → pr_open, merged → done, gone → ready. */
+function restoreFromPull(db: Db, item: WorkItem, pr: PullFacts | null, now: Date): void {
+  if (pr?.merged) {
+    setWorkItemState(db, item.id, 'done', 'merged', now);
+    return;
+  }
+  if (pr && pr.state === 'open') {
+    setWorkItemState(db, item.id, 'pr_open', undefined, now);
+    return;
+  }
+  const row = getPullRequest(db, item.id);
+  if (row) upsertPullRequest(db, { ...row, state: 'closed' }, now);
+  setWorkItemState(db, item.id, 'ready', undefined, now);
+}
+
+/**
+ * Recovers parked items whose cause is gone: the retry label (once per labelling), a reopened PR
+ * or issue, a PR that merged after all, or a lifted human block / fixed branch protection.
+ */
+export async function syncParked(
+  db: Db,
+  forges: ForgePair,
+  zone: DropZoneConfig,
+  pass: ZonePass,
+  now: Date,
+): Promise<{ retried: number; reopened: number }> {
+  let retried = 0;
+  let reopened = 0;
+  for (const item of listWorkItems(db, zone.id, 'parked')) {
+    let labels: string[];
+    try {
+      labels = await forges.author.getIssueLabels(item.issueNumber);
+    } catch {
+      continue;
+    }
+    const prNumber = getPullRequest(db, item.id)?.number ?? item.prNumber;
+    const hasRetry = labels.includes(zone.retryLabel);
+    if (hasRetry && !item.retryLabelSeen) {
+      resetAttempts(db, item.id);
+      deleteFailedOutbox(db, item.id);
+      setRetryLabelSeen(db, item.id, true);
+      restoreFromPull(db, item, await readPull(forges, prNumber), now);
+      retried++;
+      continue;
+    }
+    if (!hasRetry && item.retryLabelSeen) setRetryLabelSeen(db, item.id, false);
+
+    const reason = item.reason ?? '';
+    if (reason === 'pr closed' || reason === 'issue closed') {
+      const pr = await readPull(forges, prNumber);
+      if (pr?.merged) {
+        setWorkItemState(db, item.id, 'done', 'merged', now);
+        reopened++;
+        continue;
+      }
+      let issueOpen = false;
+      try {
+        issueOpen = (await forges.author.getIssueState(item.issueNumber)) === 'open';
+      } catch {
+        issueOpen = false;
+      }
+      if (pr?.state === 'open' && issueOpen) {
+        setWorkItemState(db, item.id, 'pr_open', undefined, now);
+        reopened++;
+      }
+    } else if (reason.startsWith('merge rejected')) {
+      const pr = await readPull(forges, prNumber);
+      if (pr?.merged) {
+        setWorkItemState(db, item.id, 'done', 'merged', now);
+        reopened++;
+      }
+    } else if (reason === 'human block stands' || reason.startsWith('unsafe branch protection')) {
+      const fresh = getWorkItem(db, item.id);
+      if (!fresh) continue;
+      const action = decide(await buildSnapshot(db, forges, zone, fresh, pass, now));
+      if (!(action.kind === 'park' && action.reason === reason)) {
+        setWorkItemState(db, item.id, 'pr_open', undefined, now);
+        reopened++;
+      }
+    }
+  }
+  return { retried, reopened };
 }
