@@ -1,6 +1,14 @@
-import { spawn } from 'node:child_process';
+import { type ChildProcess, type SpawnOptions, spawn } from 'node:child_process';
 import type { GateResult, GateSpec } from '@jumpmaster/protocol';
+import { type AgentIdentity, agentSpawnOptions, asAgentArgv } from './privilege.js';
 import { redact } from './redact.js';
+
+type SpawnFn = (cmd: string, args: string[], opts: SpawnOptions) => ChildProcess;
+let spawnImpl: SpawnFn = spawn;
+/** Test seam for the gate process runner (null restores `child_process.spawn`). */
+export function setGateSpawn(fn: SpawnFn | null): void {
+  spawnImpl = fn ?? spawn;
+}
 
 const TAIL_CHARS = 4000;
 // Keep a window well beyond the tail so a secret straddling the cut is still redacted whole.
@@ -34,16 +42,26 @@ function killGroup(pid: number, signal: NodeJS.Signals): void {
 
 function runOne(
   gate: GateSpec,
-  o: { cwd: string; env: NodeJS.ProcessEnv; secrets: string[]; timeoutScale: number },
+  o: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    secrets: string[];
+    timeoutScale: number;
+    as?: AgentIdentity | null;
+  },
 ): Promise<GateResult> {
   return new Promise((resolve) => {
     const started = Date.now();
     let window = '';
     let timedOut = false;
     let killTimer: NodeJS.Timeout | undefined;
-    const child = spawn('sh', ['-c', gate.run], {
+    const [cmd, ...args] = asAgentArgv(o.as ?? null, ['sh', '-c', gate.run]) as [
+      string,
+      ...string[],
+    ];
+    const child = spawnImpl(cmd, args, {
       cwd: o.cwd,
-      env: scrubEnv(o.env, o.secrets),
+      env: agentSpawnOptions(o.as ?? null, scrubEnv(o.env, o.secrets)).env,
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -52,8 +70,8 @@ function runOne(
       window += chunk.toString('utf8');
       if (window.length > WINDOW_CHARS) window = window.slice(-WINDOW_CHARS);
     };
-    child.stdout.on('data', onData);
-    child.stderr.on('data', onData);
+    child.stdout?.on('data', onData);
+    child.stderr?.on('data', onData);
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -86,7 +104,14 @@ function runOne(
 
 export async function runGates(
   gates: GateSpec[],
-  o: { cwd: string; env: NodeJS.ProcessEnv; secrets: string[]; timeoutScale?: number },
+  o: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    secrets: string[];
+    timeoutScale?: number;
+    /** Run each gate as this unprivileged identity (container mode). */
+    as?: AgentIdentity | null;
+  },
 ): Promise<GateResult[]> {
   const results: GateResult[] = [];
   for (const gate of gates) {

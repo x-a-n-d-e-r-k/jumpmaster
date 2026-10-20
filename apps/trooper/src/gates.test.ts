@@ -1,8 +1,9 @@
+import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, expect, test } from 'vitest';
-import { runGates, scrubEnv } from './gates.js';
+import { runGates, scrubEnv, setGateSpawn } from './gates.js';
 
 let tmp: string;
 beforeAll(() => {
@@ -84,4 +85,28 @@ test('outputTail is redacted and capped at the last 4000 chars', async () => {
     secrets: ['sekret'],
   });
   expect(r2!.outputTail).toBe('[REDACTED]\n');
+});
+
+test('gates.ts spawns a gate command through the agent argv wrapper', async () => {
+  const gate = { uid: 10002, gid: 10002, home: '/home/gate' };
+  let argv: string[] = [];
+  let env: NodeJS.ProcessEnv = {};
+  setGateSpawn((cmd, args, opts) => {
+    argv = [cmd, ...args];
+    env = opts.env ?? {};
+    return spawn('true', [], opts);
+  });
+  try {
+    await runGates([{ name: 'g', run: 'id -u', timeoutMinutes: 1 }], {
+      cwd: tmp,
+      env: { PATH: process.env.PATH },
+      secrets: [],
+      as: gate,
+    });
+  } finally {
+    setGateSpawn(null);
+  }
+  expect(argv.slice(0, 2)).toEqual(['setpriv', `--reuid=${gate.uid}`]);
+  expect(argv.slice(-3)).toEqual(['sh', '-c', 'id -u']);
+  expect(env.HOME).toBe('/home/gate');
 });

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -8,22 +8,39 @@ import {
   type DropPayload,
   DropPayloadSchema,
   type DropResult,
-  EVENT_PREFIX,
-  type GateResult,
   RESULT_PREFIX,
-  type TrooperEvent,
 } from '@jumpmaster/protocol';
-import { buildClaudeArgs, parseStreamLine } from './claude.js';
-import { runGates, scrubEnv } from './gates.js';
+import { runGates } from './gates.js';
 import * as gitOps from './git.js';
+import {
+  type AgentIdentity,
+  agentSpawnOptions,
+  asAgentArgv,
+  type sweepUid,
+  type TrooperIdentities,
+  trooperIdentities,
+} from './privilege.js';
 import { redact } from './redact.js';
+import { runImplement } from './roles/implement.js';
+import type { RoleCtx, RoleRunner } from './roles/shared.js';
 
 export interface TrooperDeps {
   git: typeof import('./git.js');
-  runClaude(args: string[], env: NodeJS.ProcessEnv, cwd: string): AsyncIterable<string>;
+  runClaude(
+    args: string[],
+    env: NodeJS.ProcessEnv,
+    cwd: string,
+    as?: AgentIdentity | null,
+  ): AsyncIterable<string>;
   runGates: typeof runGates;
   emit(line: string): void;
+  /** Uid sweeps (default: the real `privilege.ts` functions). */
+  privilege?: { sweepUid: typeof sweepUid };
+  /** Unprivileged identities; null outside the container. */
+  ids?: TrooperIdentities | null;
 }
+
+const ROLES: Partial<Record<DropPayload['role'], RoleRunner>> = { implement: runImplement };
 
 export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promise<DropResult> {
   const { claudeToken, forgeToken } = payload.credentials;
@@ -34,215 +51,55 @@ export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promi
     forgeToken === undefined
       ? [claudeToken]
       : [claudeToken, forgeToken, Buffer.from(`x-access-token:${forgeToken}`).toString('base64')];
-  const emitEvent = (kind: TrooperEvent['kind'], data: Record<string, unknown>): void => {
-    const ev: TrooperEvent = {
-      ts: new Date().toISOString(),
-      kind,
-      data: capEventData(data, secrets),
-    };
-    deps.emit(redact(EVENT_PREFIX + JSON.stringify(ev), secrets));
-  };
   const finish = (r: DropResult): DropResult => {
     const out: DropResult =
       r.reason === undefined ? r : { ...r, reason: redact(r.reason, secrets) };
     deps.emit(redact(RESULT_PREFIX + JSON.stringify(out), secrets));
     return out;
   };
+  const runner = ROLES[payload.role];
+  if (!runner) return finish({ status: 'failed', reason: 'role not implemented', gates: [] });
 
-  const work = mkdtempSync(join(tmpdir(), 'trooper-'));
-  const gates: GateResult[] = [];
+  const ids = deps.ids ?? null;
+  const work = mkdtempSync(join(workRoot(), 'trooper-'));
+  // Root-owned but world-readable: the agent uid reads the settings and system prompt in here.
+  chmodSync(work, 0o755);
+  const ctx: RoleCtx = { workdir: work, secrets, ids };
   try {
-    const repoDir = join(work, 'repo');
-    const base = payload.repo.defaultBranch;
-
-    emitEvent('phase', { phase: 'clone' });
-    await deps.git.cloneRepo({
-      owner: payload.repo.owner,
-      name: payload.repo.name,
-      token: forgeToken as string,
-      dir: repoDir,
-    });
-    const target = { owner: payload.repo.owner, name: payload.repo.name };
-    // Fail fast: the push refuses an existing branch, so don't burn a whole Claude run first.
-    if (await deps.git.remoteBranchExists(target, payload.branch, forgeToken as string)) {
-      return finish({
-        status: 'failed',
-        reason: `branch ${payload.branch} already exists on remote`,
-        gates,
-      });
-    }
-    emitEvent('phase', { phase: 'branch', branch: payload.branch });
-    await deps.git.prepareBranch(repoDir, payload.branch, base);
-
-    const systemPromptFile = join(work, 'system.md');
-    const settingsFile = join(work, 'settings.json');
-    const gateList = payload.gates.map((g) => `- ${g.name}: ${g.run}`).join('\n');
-    writeFileSync(
-      systemPromptFile,
-      `Before finishing, run these commands and make them pass:\n${gateList}\n`,
-    );
-    writeFileSync(settingsFile, JSON.stringify({ hooks: {} }));
-
-    emitEvent('phase', { phase: 'claude' });
-    const args = buildClaudeArgs({
-      prompt: payload.prompt,
-      model: payload.model,
-      maxTurns: payload.maxTurns,
-      systemPromptFile,
-      settingsFile,
-    });
-    const claudeEnv: NodeJS.ProcessEnv = {
-      ...scrubEnv(process.env, secrets),
-      CLAUDE_CODE_OAUTH_TOKEN: claudeToken,
-    };
-    let claudeExit: number | undefined;
-    let result: Extract<ReturnType<typeof parseStreamLine>, { type: 'result' }> | undefined;
-    for await (const line of deps.runClaude(args, claudeEnv, repoDir)) {
-      const parsed = parseStreamLine(line);
-      if (parsed.type === 'ignored') continue;
-      if (parsed.type === 'result') result = parsed;
-      if (parsed.type === 'rate_limit') {
-        emitEvent('rate_limit', {
-          status: parsed.status,
-          resetsAt: parsed.resetsAt,
-          raw: parsed.raw,
-        });
-      } else if (parsed.type === 'agent') {
-        const r = parsed.raw as { type?: unknown; exitCode?: unknown };
-        if (r.type === 'claude_stderr' && typeof r.exitCode === 'number') claudeExit = r.exitCode;
-        emitEvent('agent', { raw: parsed.raw });
-      } else {
-        emitEvent('agent', {
-          result: true,
-          isError: parsed.isError,
-          terminalReason: parsed.terminalReason,
-        });
-      }
-    }
-    const meta = {
-      usage: asRecord(result?.usage),
-      modelUsage: asRecord(result?.modelUsage),
-      numTurns: result?.numTurns,
-    };
-    const done = (r: Omit<DropResult, 'gates'>): DropResult =>
-      finish({ ...stripUndefined(meta), ...r, gates });
-
-    const exitNote = claudeExit === undefined ? '' : ` (claude exit ${claudeExit})`;
-    if (result === undefined)
-      return done({ status: 'failed', reason: `claude produced no result${exitNote}` });
-    if (result.isError) {
-      return done({
-        status: 'failed',
-        reason: `claude error: ${result.terminalReason ?? 'unknown'}${exitNote}`,
-      });
-    }
-    const structured = result.structured as { status?: string; summary?: string } | undefined;
-    if (structured?.status === 'BLOCKED') {
-      return done({ status: 'blocked', reason: structured.summary ?? 'blocked' });
-    }
-    if (structured?.status !== 'COMPLETE') {
-      return done({
-        status: 'failed',
-        reason: `claude returned no valid structured output${exitNote}`,
-      });
-    }
-
-    emitEvent('phase', { phase: 'commit' });
-    await deps.git.commitIfDirty(repoDir, `feat: implement #${payload.issue.number}`);
-    if ((await deps.git.aheadOfBase(repoDir, base)) === 0) {
-      return done({ status: 'no_changes', reason: structured.summary });
-    }
-
-    emitEvent('phase', { phase: 'gates' });
-    const results = await deps.runGates(payload.gates, {
-      cwd: repoDir,
-      env: scrubEnv(process.env, secrets),
-      secrets,
-    });
-    gates.push(...results);
-    for (const g of results) {
-      emitEvent('gate', {
-        name: g.name,
-        exitCode: g.exitCode,
-        timedOut: g.timedOut,
-        durationMs: g.durationMs,
-        outputTail: g.outputTail,
-      });
-    }
-    const failed = results.find((g) => g.timedOut || g.exitCode !== 0);
-    if (failed) return done({ status: 'failed', reason: `gate ${failed.name} failed` });
-
-    emitEvent('phase', { phase: 'push' });
-    const headSha = await deps.git.pushNewBranch(
-      repoDir,
-      payload.branch,
-      forgeToken as string,
-      target,
-      () => void deps.git.sweepProcesses(),
-    );
-    return done({ status: 'completed', headSha });
+    return finish(await runner(payload, deps, ctx));
   } catch (err) {
     return finish({
       status: 'failed',
       reason: err instanceof Error ? err.message : String(err),
-      gates,
+      gates: [],
     });
   } finally {
+    if (ids) {
+      await deps.git.removeTree(join(ids.agent.home, 'repo'), ids.agent).catch(() => undefined);
+      await deps.git.removeTree(join(ids.gate.home, 'repo'), ids.gate).catch(() => undefined);
+    }
     rmSync(work, { recursive: true, force: true });
   }
 }
 
-/** One event line must stay well under the server's body limit even in a 50-event batch. */
-const MAX_EVENT_DATA_BYTES = 63 * 1024;
-
-const jsonBytes = (v: unknown): number => Buffer.byteLength(JSON.stringify(v));
-
-function mapStrings(v: unknown, f: (s: string) => string): unknown {
-  if (typeof v === 'string') return f(v);
-  if (Array.isArray(v)) return v.map((x) => mapStrings(x, f));
-  if (typeof v === 'object' && v !== null) {
-    return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, mapStrings(x, f)]));
-  }
-  return v;
+function workRoot(): string {
+  return process.env.JM_WORK_ROOT ?? realpathSync(tmpdir());
 }
 
-/**
- * Caps an event's serialized data. Strings are redacted BEFORE truncation, so a cut can never leave
- * an unrecognisable fragment of a secret behind.
- */
-export function capEventData(
-  data: Record<string, unknown>,
-  secrets: string[],
-  maxBytes = MAX_EVENT_DATA_BYTES,
-): Record<string, unknown> {
-  const clean = mapStrings(data, (s) => redact(s, secrets)) as Record<string, unknown>;
-  const size = jsonBytes(clean);
-  if (size <= maxBytes) return clean;
-  for (let limit = 16 * 1024; limit >= 64; limit = Math.floor(limit / 2)) {
-    const cut = mapStrings(clean, (s) =>
-      s.length > limit ? `${s.slice(0, limit)}…[truncated ${s.length - limit} chars]` : s,
-    ) as Record<string, unknown>;
-    if (jsonBytes(cut) <= maxBytes) return { ...cut, truncated: true };
-  }
-  return { truncated: true, bytes: size };
-}
-
-function asRecord(v: unknown): Record<string, unknown> | undefined {
-  return typeof v === 'object' && v !== null && !Array.isArray(v)
-    ? (v as Record<string, unknown>)
-    : undefined;
-}
-
-function stripUndefined<T extends object>(o: T): Partial<T> {
-  return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>;
-}
+export { capEventData } from './events.js';
 
 async function* spawnClaude(
   args: string[],
   env: NodeJS.ProcessEnv,
   cwd: string,
+  as: AgentIdentity | null = null,
 ): AsyncIterable<string> {
-  const child = spawn('claude', args, { env, cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+  const [cmd, ...argv] = asAgentArgv(as, ['claude', ...args]) as [string, ...string[]];
+  const child = spawn(cmd, argv, {
+    env: agentSpawnOptions(as, env).env,
+    cwd,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
   let stderr = '';
   child.stderr.on('data', (c: Buffer) => {
     stderr = (stderr + c.toString('utf8')).slice(-4000);
@@ -273,11 +130,13 @@ export async function readPayload(
 
 async function main(): Promise<void> {
   const payload = await readPayload(process.argv[2], process.stdin);
+  if (process.env.JM_WORK_ROOT) gitOps.setWorkRoot(process.env.JM_WORK_ROOT);
   const result = await runTrooper(payload, {
     git: gitOps,
     runClaude: spawnClaude,
     runGates,
     emit: (l) => process.stdout.write(`${l}\n`),
+    ids: trooperIdentities(process.env),
   });
   process.exitCode = result.status === 'failed' ? 1 : 0;
 }
