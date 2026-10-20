@@ -23,6 +23,7 @@ import {
   remoteBranchExists,
   runGit,
   sweepProcesses,
+  treeState,
 } from './git.js';
 
 let tmp: string;
@@ -66,6 +67,20 @@ test('clone sets the agent identity', async () => {
   const dir = await clone('ident');
   expect(git(dir, 'config', 'user.name')).toBe('Jumpmaster Agent');
   expect(git(dir, 'config', 'user.email')).toBe('jumpmaster-agent@users.noreply.github.com');
+});
+
+test('treeState changes with an edit, an untracked file or a new commit', async () => {
+  const dir = await clone('tree');
+  await prepareBranch(dir, 'agent/issue-8', 'main');
+  const s0 = await treeState(dir);
+  expect(await treeState(dir)).toBe(s0);
+  writeFileSync(join(dir, 'new.txt'), 'n\n');
+  const s1 = await treeState(dir);
+  expect(s1).not.toBe(s0);
+  await commitIfDirty(dir, 'chore: add new');
+  const s2 = await treeState(dir);
+  expect(s2).not.toBe(s0);
+  expect(s2).not.toBe(s1);
 });
 
 test('branch, commit, ahead count, head sha', async () => {

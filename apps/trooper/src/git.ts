@@ -318,6 +318,19 @@ export function headSha(dir: string, as: AgentIdentity | null = null): Promise<s
   return runGit(dir, ['rev-parse', 'HEAD'], '', { as });
 }
 
+/** Working-tree fingerprint: porcelain status (untracked included) plus HEAD, run as `as`. */
+export async function treeState(dir: string, as: AgentIdentity | null = null): Promise<string> {
+  const status = await runGit(
+    dir,
+    ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+    '',
+    {
+      as,
+    },
+  );
+  return `${await headSha(dir, as)}\n${status}`;
+}
+
 export async function aheadOfBase(
   dir: string,
   base: string,

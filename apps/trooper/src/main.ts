@@ -22,6 +22,7 @@ import {
 } from './privilege.js';
 import { redact } from './redact.js';
 import { runImplement } from './roles/implement.js';
+import { runReview } from './roles/review.js';
 import type { RoleCtx, RoleRunner } from './roles/shared.js';
 
 export interface TrooperDeps {
@@ -40,7 +41,10 @@ export interface TrooperDeps {
   ids?: TrooperIdentities | null;
 }
 
-const ROLES: Partial<Record<DropPayload['role'], RoleRunner>> = { implement: runImplement };
+const ROLES: Partial<Record<DropPayload['role'], RoleRunner>> = {
+  implement: runImplement,
+  review: runReview,
+};
 
 export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promise<DropResult> {
   const { claudeToken, forgeToken } = payload.credentials;

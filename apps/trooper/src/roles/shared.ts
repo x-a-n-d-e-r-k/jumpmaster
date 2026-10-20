@@ -65,7 +65,8 @@ export async function cloneAndPrepare(
   await deps.git.cloneRepo({
     owner: payload.repo.owner,
     name: payload.repo.name,
-    token: payload.credentials.forgeToken as string,
+    // Review may run without a forge token (public repo); git then clones anonymously.
+    token: payload.credentials.forgeToken ?? '',
     dir,
     mirrorDir: join(ctx.workdir, 'mirror'),
     as: ctx.ids?.agent ?? null,
