@@ -56,16 +56,16 @@ describe('heartbeat', () => {
     expect(heartbeat(db, 'd1', 'other', 1, t0)).toBe('stale');
   });
 
-  test('ok extends lease and moves leased to running, setting startedAt once', () => {
+  test('ok extends lease and moves leased to running; startedAt stays the lease time', () => {
     leaseNextDrop(db, 's1', t0);
     expect(heartbeat(db, 'd1', 's1', 1, plus(t0, 10_000))).toBe('ok');
     let d = getDrop(db, 'd1')!;
     expect(d.state).toBe('running');
-    expect(d.startedAt).toBe(plus(t0, 10_000).toISOString());
+    expect(d.startedAt).toBe(t0.toISOString());
     expect(d.leaseExpiresAt).toBe(plus(t0, 70_000).toISOString());
     expect(heartbeat(db, 'd1', 's1', 1, plus(t0, 20_000))).toBe('ok');
     d = getDrop(db, 'd1')!;
-    expect(d.startedAt).toBe(plus(t0, 10_000).toISOString());
+    expect(d.startedAt).toBe(t0.toISOString());
     expect(d.leaseExpiresAt).toBe(plus(t0, 80_000).toISOString());
   });
 

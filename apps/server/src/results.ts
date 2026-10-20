@@ -37,6 +37,7 @@ import {
   sanitizeForgeText,
 } from './outbox.js';
 import { promptVersions } from './payloads.js';
+import { ingestRateLimit, releaseProbe } from './usage.js';
 
 /** `usageCfg` and `rand` are consumed by the usage ingest and probe release (Task 10). */
 export type ResultDeps = {
@@ -327,17 +328,37 @@ export async function applyResult(
   const item = getWorkItem(db, drop.workItemId);
   if (!item) throw new Error(`unknown work item ${drop.workItemId}`);
   const c: Ctx = { db, deps, drop, item, now };
+  const rand = deps.rand ?? Math.random;
 
-  if (result.status === 'rate_limited') return rateLimited(c, wasProbe, result);
-  switch (drop.role) {
-    case 'implement':
-      return implementResult(c, result);
-    case 'review':
-      return reviewResult(c, result);
-    case 'heal':
-    case 'resolve':
-      return pushResult(c, result);
-    default:
-      throw new Error(`unknown drop role ${drop.role}`);
+  if (result.rateLimit) {
+    ingestRateLimit(
+      db,
+      result.rateLimit,
+      {
+        dropId: drop.id,
+        workItemId: drop.workItemId,
+        startedAt: drop.startedAt,
+        outcome: result.status,
+      },
+      deps.usageCfg,
+      now,
+      rand,
+    );
+  }
+  try {
+    if (result.status === 'rate_limited') return rateLimited(c, wasProbe, result);
+    switch (drop.role) {
+      case 'implement':
+        return await implementResult(c, result);
+      case 'review':
+        return await reviewResult(c, result);
+      case 'heal':
+      case 'resolve':
+        return await pushResult(c, result);
+      default:
+        throw new Error(`unknown drop role ${drop.role}`);
+    }
+  } finally {
+    releaseProbe(db, drop.id, deps.usageCfg, now, rand);
   }
 }

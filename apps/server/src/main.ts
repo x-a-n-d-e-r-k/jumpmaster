@@ -49,7 +49,7 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
     for (const zone of config.dropZones) {
       try {
         await syncDropZone(db, forgesFor(zone.id).author, zone);
-        enqueueNext(db, zone, promptVersions().implement);
+        enqueueNext(db, zone, promptVersions().implement, config.usage, new Date());
       } catch (e) {
         log(`sync failed for zone ${zone.id}: ${errorMessage(e)}`);
       }
@@ -72,7 +72,7 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
     setInterval(() => void guardedPass(), config.pollSeconds * 1000),
     setInterval(() => {
       try {
-        expireLeases(db, new Date());
+        expireLeases(db, new Date(), config.usage);
       } catch (e) {
         log(`lease expiry failed: ${errorMessage(e)}`);
       }

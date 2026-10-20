@@ -17,6 +17,7 @@ import { heartbeat, leaseNextDrop } from '../leases.js';
 import type { ForgePair } from '../outbox.js';
 import { buildPayload } from '../payloads.js';
 import { applyResult } from '../results.js';
+import { dispatchGate, ingestRateLimit, rateLimitFromEvent } from '../usage.js';
 
 export interface StickRouteDeps {
   db: Db;
@@ -120,7 +121,8 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       });
       const deadline = Date.now() + waitMs;
       for (;;) {
-        const leased = leaseNextDrop(db, stick.id, now());
+        const at = now();
+        const leased = leaseNextDrop(db, stick.id, at, dispatchGate(db, config.usage, at));
         if (leased) {
           const drop = getDrop(db, leased.dropId) as Drop;
           const zone = config.dropZones.find((z) => z.id === drop.dropZoneId);
@@ -152,6 +154,24 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       const drop = liveDrop(req, reply, req.params.id, body.data.epoch, { requireLive: true });
       if (!drop) return reply;
       appendEvents(db, drop.id, body.data.events);
+      for (const ev of body.data.events) {
+        if (ev.kind !== 'rate_limit') continue;
+        const data = rateLimitFromEvent(ev.data);
+        if (!data) continue;
+        ingestRateLimit(
+          db,
+          data,
+          {
+            dropId: drop.id,
+            workItemId: drop.workItemId,
+            startedAt: drop.startedAt,
+            outcome: null,
+          },
+          config.usage,
+          now(),
+          deps.rand ?? Math.random,
+        );
+      }
       return reply.code(204).send();
     });
 

@@ -8,8 +8,10 @@ import {
   getOutbox,
   getPullRequest,
   getStickByTokenHash,
+  getUsageState,
   insertDrop,
   listEvents,
+  setUsageState,
   setWorkItemState,
   upsertDropZone,
   upsertWorkItem,
@@ -272,6 +274,43 @@ describe('stick API', () => {
     expect(listEvents(db, 'd1').map((e) => e.seq)).toEqual([1, 2, 3]);
     expect((await post(9, 1)).statusCode).toBe(409);
     expect(listEvents(db, 'd1')).toHaveLength(3);
+  });
+
+  test('rate_limit events update utilization but a live rejected never pauses', async () => {
+    const { db } = setup();
+    const { stickToken } = await enroll();
+    await lease(stickToken);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/drops/d1/events',
+      headers: bearer(stickToken),
+      payload: {
+        epoch: 1,
+        events: [
+          {
+            ts: t0.toISOString(),
+            kind: 'rate_limit',
+            data: {
+              status: 'rejected',
+              resetsAt: '2026-01-01T03:00:00.000Z',
+              unifiedWindows: { seven_day: { utilization: 0.42 } },
+            },
+          },
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(204);
+    const u = getUsageState(db);
+    expect(u.sevenDayUtil).toBe(0.42);
+    expect(u.pausedUntil).toBeNull();
+  });
+
+  test('lease honours a closed usage gate', async () => {
+    const { db } = setup();
+    setUsageState(db, { status: 'rejected', pausedUntil: '2026-01-01T01:00:00.000Z' }, t0);
+    const { stickToken } = await enroll();
+    expect((await lease(stickToken)).statusCode).toBe(204);
+    expect(getDrop(db, 'd1')?.state).toBe('queued');
   });
 
   test('events for a drop that is not leased/running are 409', async () => {
