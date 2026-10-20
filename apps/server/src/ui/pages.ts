@@ -1,5 +1,13 @@
 import type { DropZoneConfig } from '../config.js';
-import type { Drop, StoredEvent, WorkItem } from '../db/repo.js';
+import type {
+  AttemptKey,
+  Drop,
+  OutboxRow,
+  StoredEvent,
+  UsageStateRow,
+  WorkItem,
+} from '../db/repo.js';
+import type { Gate } from '../usage.js';
 
 export const escapeHtml = (v: unknown): string =>
   String(v)
@@ -19,6 +27,62 @@ export interface HomeState {
   drops: Drop[];
   lastRateLimit?: RateLimitSeen;
   now?: Date;
+  usage?: { gate: Gate; state: UsageStateRow };
+  /** Per work item: PR head, latest verdict and attempt counts. */
+  details?: Map<number, ItemDetail>;
+  /** Outbox ops needing attention (`unknown` or `failed`). */
+  outbox?: OutboxRow[];
+}
+
+export interface ItemDetail {
+  headSha?: string;
+  verdict?: { decision: string; forced: boolean; summary: string };
+  attempts: Partial<Record<AttemptKey, number>>;
+}
+
+const pct = (v: number | null): string => (v === null ? '-' : `${Math.round(v * 100)}%`);
+
+function usageSection(u: HomeState['usage']): string {
+  if (!u) return '';
+  const s = u.state;
+  const row = (k: string, v: unknown) => `<tr><th>${k}</th><td>${escapeHtml(v ?? '-')}</td></tr>`;
+  return (
+    `<h2>Usage</h2><table>` +
+    row('Gate', u.gate) +
+    row('Status', s.status) +
+    row('Paused until', s.pausedUntil) +
+    row('5-hour', pct(s.fiveHourUtil)) +
+    row('7-day', pct(s.sevenDayUtil)) +
+    row('Observed', s.observedAt) +
+    row('Cause drop', s.causeDropId) +
+    `</table>`
+  );
+}
+
+function outboxSection(ops: OutboxRow[] | undefined): string {
+  if (!ops || ops.length === 0) return '';
+  const rows = ops
+    .map(
+      (o) =>
+        `<tr><td>${escapeHtml(o.id)}</td><td>${escapeHtml(o.kind)}</td><td>${escapeHtml(o.workItemId)}</td><td>${escapeHtml(o.state)}</td><td>${escapeHtml(o.error ?? '')}</td><td>${escapeHtml(o.updatedAt)}</td></tr>`,
+    )
+    .join('');
+  return `<h2>Outbox</h2><table><tr><th>Op</th><th>Kind</th><th>Item</th><th>State</th><th>Error</th><th>Updated</th></tr>${rows}</table>`;
+}
+
+function detailCells(d: ItemDetail | undefined): string {
+  const head = d?.headSha ? escapeHtml(d.headSha.slice(0, 7)) : '-';
+  const v = d?.verdict;
+  const verdict = v
+    ? `${escapeHtml(v.decision)}${v.forced ? ' (forced)' : ''}<br><small>${escapeHtml(v.summary)}</small>`
+    : '-';
+  const attempts = d
+    ? Object.entries(d.attempts)
+        .filter(([, n]) => (n ?? 0) > 0)
+        .map(([k, n]) => `${escapeHtml(k)} ${escapeHtml(n)}`)
+        .join(', ') || '-'
+    : '-';
+  return `<td><code>${head}</code></td><td>${verdict}</td><td>${attempts}</td>`;
 }
 
 const STYLE = `body{font:14px/1.4 system-ui,sans-serif;margin:2rem auto;max-width:60rem;padding:0 1rem;color:#222}
@@ -74,14 +138,14 @@ export function renderHome(state: HomeState): string {
         i.prNumber !== null && repo
           ? `<a href="${escapeHtml(`https://github.com/${repo}/pull/${i.prNumber}`)}">#${escapeHtml(i.prNumber)}</a>`
           : '-';
-      return `<tr><td>${escapeHtml(i.dropZoneId)}</td><td>#${escapeHtml(i.issueNumber)}</td><td>${escapeHtml(i.title)}</td><td>${escapeHtml(i.state)}</td><td>${escapeHtml(i.reason ?? '')}</td><td>${pr}</td></tr>`;
+      return `<tr><td>${escapeHtml(i.dropZoneId)}</td><td>#${escapeHtml(i.issueNumber)}</td><td>${escapeHtml(i.title)}</td><td>${escapeHtml(i.state)}</td><td>${escapeHtml(i.reason ?? '')}</td><td>${pr}</td>${detailCells(state.details?.get(i.id))}</tr>`;
     })
     .join('');
 
   const drops = state.drops
     .map((d) => {
       const wi = itemById.get(d.workItemId);
-      return `<tr><td><a href="/drops/${encodeURIComponent(d.id)}">${escapeHtml(d.id)}</a></td><td>${wi ? `#${escapeHtml(wi.issueNumber)}` : '-'}</td><td>${escapeHtml(d.state)}</td><td>${escapeHtml(elapsed(d, now))}</td><td>${gateSummary(d)}</td></tr>`;
+      return `<tr><td><a href="/drops/${encodeURIComponent(d.id)}">${escapeHtml(d.id)}</a></td><td>${wi ? `#${escapeHtml(wi.issueNumber)}` : '-'}</td><td>${escapeHtml(d.role)}</td><td>${escapeHtml(d.state)}</td><td>${escapeHtml(elapsed(d, now))}</td><td>${gateSummary(d)}</td></tr>`;
     })
     .join('');
 
@@ -90,9 +154,11 @@ export function renderHome(state: HomeState): string {
     : '<p>None seen.</p>';
 
   return page(
-    `<h2>Drop zones</h2><table><tr><th>Id</th><th>Repo</th><th>Label</th><th>Model</th></tr>${zones}</table>` +
-      `<h2>Work items</h2><table><tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th></tr>${items}</table>` +
-      `<h2>Drops</h2><table><tr><th>Drop</th><th>Issue</th><th>State</th><th>Elapsed</th><th>Gates</th></tr>${drops}</table>` +
+    usageSection(state.usage) +
+      `<h2>Drop zones</h2><table><tr><th>Id</th><th>Repo</th><th>Label</th><th>Model</th></tr>${zones}</table>` +
+      `<h2>Work items</h2><table><tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>${items}</table>` +
+      `<h2>Drops</h2><table><tr><th>Drop</th><th>Issue</th><th>Role</th><th>State</th><th>Elapsed</th><th>Gates</th></tr>${drops}</table>` +
+      outboxSection(state.outbox) +
       `<h2>Last rate limit</h2>${rl}`,
   );
 }

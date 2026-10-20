@@ -28,3 +28,26 @@ test('remove force-removes the container', async () => {
   await new DockerDriver(docker as never).remove('c1');
   expect(calls).toEqual([['c1', { force: true }]]);
 });
+
+test('container create options drop all capabilities and set no-new-privileges', async () => {
+  const seen: { HostConfig?: unknown }[] = [];
+  const docker = {
+    async createContainer(o: { HostConfig?: unknown }) {
+      seen.push(o);
+      throw new Error('stop here');
+    },
+  };
+  await expect(
+    new DockerDriver(docker as never).start({ image: 'img', name: 'n', labels: {} } as never),
+  ).rejects.toThrow('stop here');
+  expect(seen[0]?.HostConfig).toEqual({
+    AutoRemove: true,
+    Init: true,
+    Privileged: false,
+    CapDrop: ['ALL'],
+    CapAdd: ['SETUID', 'SETGID', 'KILL'],
+    SecurityOpt: ['no-new-privileges'],
+    PidsLimit: 512,
+    Ulimits: [{ Name: 'core', Soft: 0, Hard: 0 }],
+  });
+});

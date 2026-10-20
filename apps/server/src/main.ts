@@ -1,13 +1,14 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promptVersion } from './api/sticks.js';
 import { createApp } from './app.js';
-import { type Config, loadConfig } from './config.js';
+import { type Config, loadConfig, secretList } from './config.js';
 import { openDb } from './db/open.js';
+import { reconcileZone } from './flow/reconcile.js';
 import { GitHubForge } from './forge/github.js';
-import { expireLeases } from './leases.js';
-import { enqueueNext } from './scheduler.js';
+import { leaseExpirer } from './leases.js';
+import { type ForgePair, markPendingUnknown } from './outbox.js';
+import { promptVersions } from './payloads.js';
 import { syncDropZone } from './sync.js';
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -24,29 +25,48 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
   const config = loadConfig(configPath, env);
   mkdirSync(config.dataDir, { recursive: true });
   const db = openDb(join(config.dataDir, 'jumpmaster.sqlite'));
+  // A write in flight when the process died has an unknown outcome: resolve it by read-back.
+  markPendingUnknown(db, new Date());
 
   const forges = new Map(
     config.dropZones.map((zone) => {
       const [owner = '', name = ''] = zone.repo.split('/');
-      return [zone.id, new GitHubForge(owner, name, config.secrets.githubAuthorToken)] as const;
+      const pair: ForgePair = {
+        author: new GitHubForge(owner, name, config.secrets.githubAuthorToken),
+        reviewer: new GitHubForge(owner, name, config.secrets.githubReviewerToken),
+      };
+      return [zone.id, pair] as const;
     }),
   );
-  const forgeFor = (zoneId: string) => {
-    const forge = forges.get(zoneId);
-    if (!forge) throw new Error(`unknown drop zone ${zoneId}`);
-    return forge;
+  const forgesFor = (zoneId: string): ForgePair => {
+    const pair = forges.get(zoneId);
+    if (!pair) throw new Error(`unknown drop zone ${zoneId}`);
+    return pair;
   };
   const log = (msg: string) => console.error(`[jumpmaster] ${scrub(msg, config)}`);
 
-  const app = createApp({ db, config, forgeFor, now: () => new Date() });
+  const app = createApp({ db, config, forgesFor, now: () => new Date() });
 
+  const secrets = secretList(config.secrets);
+  const expireLeases = leaseExpirer(db, config.usage);
   const pass = async () => {
+    expireLeases(new Date());
     for (const zone of config.dropZones) {
       try {
-        await syncDropZone(db, forgeFor(zone.id), zone);
-        enqueueNext(db, zone, promptVersion());
+        const forgePair = forgesFor(zone.id);
+        const synced = await syncDropZone(db, forgePair, zone, new Date());
+        await reconcileZone(
+          db,
+          forgePair,
+          zone,
+          synced.pass,
+          promptVersions(),
+          config.usage,
+          secrets,
+          new Date(),
+        );
       } catch (e) {
-        log(`sync failed for zone ${zone.id}: ${errorMessage(e)}`);
+        log(`pass failed for zone ${zone.id}: ${errorMessage(e)}`);
       }
     }
   };
@@ -67,7 +87,7 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
     setInterval(() => void guardedPass(), config.pollSeconds * 1000),
     setInterval(() => {
       try {
-        expireLeases(db, new Date());
+        expireLeases(new Date());
       } catch (e) {
         log(`lease expiry failed: ${errorMessage(e)}`);
       }

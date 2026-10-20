@@ -1,19 +1,11 @@
-export const IMPLEMENT_OUTPUT_SCHEMA = {
-  type: 'object',
-  properties: {
-    status: { type: 'string', enum: ['COMPLETE', 'BLOCKED'] },
-    summary: { type: 'string' },
-  },
-  required: ['status', 'summary'],
-  additionalProperties: false,
-} as const;
-
 export interface ClaudeArgsOptions {
   prompt: string;
   model: string;
   maxTurns: number;
   systemPromptFile: string;
   settingsFile: string;
+  /** JSON schema for the structured result (implement, review, …). */
+  outputSchema: object;
 }
 
 export function buildClaudeArgs(o: ClaudeArgsOptions): string[] {
@@ -39,7 +31,7 @@ export function buildClaudeArgs(o: ClaudeArgsOptions): string[] {
     '--permission-mode',
     'bypassPermissions',
     '--json-schema',
-    JSON.stringify(IMPLEMENT_OUTPUT_SCHEMA),
+    JSON.stringify(o.outputSchema),
   ];
 }
 
@@ -48,8 +40,11 @@ export type ParsedLine =
       type: 'rate_limit';
       status: 'allowed' | 'allowed_warning' | 'rejected';
       resetsAt?: string;
+      rateLimitType?: string;
+      unifiedWindows?: Partial<Record<'five_hour' | 'seven_day', UsageWindow>>;
       raw: unknown;
     }
+  | { type: 'init'; sessionId: string }
   | {
       type: 'result';
       isError: boolean;
@@ -58,9 +53,26 @@ export type ParsedLine =
       modelUsage?: unknown;
       numTurns?: number;
       terminalReason?: string;
+      sessionId?: string;
     }
   | { type: 'agent'; raw: unknown }
   | { type: 'ignored' };
+
+export type UsageWindow = { utilization: number; resetsAt?: string };
+
+function windowsOf(
+  v: unknown,
+): Partial<Record<'five_hour' | 'seven_day', UsageWindow>> | undefined {
+  if (typeof v !== 'object' || v === null) return undefined;
+  const out: Partial<Record<'five_hour' | 'seven_day', UsageWindow>> = {};
+  for (const key of ['five_hour', 'seven_day'] as const) {
+    const w = (v as Record<string, Record<string, unknown> | undefined>)[key];
+    if (!w || typeof w.utilization !== 'number') continue;
+    const resetsAt = normalizeResetsAt(w.resetsAt ?? w.resets_at);
+    out[key] = { utilization: w.utilization, ...(resetsAt ? { resetsAt } : {}) };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
 
 function normalizeResetsAt(v: unknown): string | undefined {
   let d: Date;
@@ -85,11 +97,20 @@ export function parseStreamLine(line: string): ParsedLine {
     const status = info.status;
     if (status === 'allowed' || status === 'allowed_warning' || status === 'rejected') {
       const resetsAt = normalizeResetsAt(info.resetsAt);
-      return resetsAt === undefined
-        ? { type: 'rate_limit', status, raw }
-        : { type: 'rate_limit', status, resetsAt, raw };
+      const unifiedWindows = windowsOf(info.unifiedWindows);
+      return {
+        type: 'rate_limit',
+        status,
+        ...(resetsAt !== undefined ? { resetsAt } : {}),
+        ...(typeof info.rateLimitType === 'string' ? { rateLimitType: info.rateLimitType } : {}),
+        ...(unifiedWindows ? { unifiedWindows } : {}),
+        raw,
+      };
     }
     return { type: 'agent', raw };
+  }
+  if (m.type === 'system' && m.subtype === 'init' && typeof m.session_id === 'string') {
+    return { type: 'init', sessionId: m.session_id };
   }
   if (m.type === 'result') {
     return {
@@ -100,6 +121,7 @@ export function parseStreamLine(line: string): ParsedLine {
       modelUsage: m.modelUsage,
       numTurns: typeof m.num_turns === 'number' ? m.num_turns : undefined,
       terminalReason: typeof m.terminal_reason === 'string' ? m.terminal_reason : undefined,
+      sessionId: typeof m.session_id === 'string' ? m.session_id : undefined,
     };
   }
   return { type: 'agent', raw };
