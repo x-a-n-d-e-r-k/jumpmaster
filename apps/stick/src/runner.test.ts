@@ -10,7 +10,7 @@ import {
 import { describe, expect, test } from 'vitest';
 import type { DropClient } from './client.js';
 import type { ContainerDriver } from './driver.js';
-import { reapOrphans, runDrop } from './runner.js';
+import { allowedImages, reapOrphans, runDrop } from './runner.js';
 
 const TOKEN = 'sk-secret-claude-token';
 const payload: DropPayload = DropPayloadSchema.parse({
@@ -86,6 +86,83 @@ function fakeClient(heartbeatReply: 'ok' | 'cancel' | 'stale' = 'ok') {
     },
   } satisfies DropClient & Record<string, unknown>;
 }
+
+// The fixture image is not in the default allow-list; every legacy test runs with it allowed.
+process.env.JM_ALLOWED_IMAGES = 'jumpmaster-trooper:test';
+
+describe('image allow-list', () => {
+  test('uses payload image', async () => {
+    const d = fakeDriver(['JM_RESULT {"status":"completed","gates":[]}']);
+    await runDrop(
+      { ...payload, image: 'reg.example/trooper:1' },
+      {
+        client: fakeClient(),
+        driver: d.driver,
+        stickId: 's1',
+        image: 'other:1',
+        allowedImages: new Set(['reg.example/trooper:1']),
+      },
+    );
+    expect(d.started?.image).toBe('reg.example/trooper:1');
+  });
+
+  test('falls back to the stick image when the payload has none', async () => {
+    const d = fakeDriver(['JM_RESULT {"status":"completed","gates":[]}']);
+    await runDrop(
+      { ...payload, image: '' },
+      {
+        client: fakeClient(),
+        driver: d.driver,
+        stickId: 's1',
+        image: 'other:1',
+        allowedImages: new Set(['other:1']),
+      },
+    );
+    expect(d.started?.image).toBe('other:1');
+  });
+
+  test('refuses an image outside the allow-list', async () => {
+    const d = fakeDriver([]);
+    const client = fakeClient();
+    await runDrop(
+      { ...payload, image: 'evil/trooper:1' },
+      {
+        client,
+        driver: d.driver,
+        stickId: 's1',
+        allowedImages: new Set(['jumpmaster-trooper:dev']),
+      },
+    );
+    expect(d.started).toBeUndefined();
+    expect(client.result).toMatchObject({
+      status: 'failed',
+      role: 'implement',
+      reason: 'image not allowed: evil/trooper:1',
+      gates: [],
+    });
+  });
+
+  test('no prefix match', async () => {
+    const d = fakeDriver([]);
+    const client = fakeClient();
+    await runDrop(
+      { ...payload, image: 'jumpmaster-trooper:dev-evil' },
+      { client, driver: d.driver, stickId: 's1', allowedImages: allowedImages({}) },
+    );
+    expect(d.started).toBeUndefined();
+    expect(client.result?.reason).toBe('image not allowed: jumpmaster-trooper:dev-evil');
+  });
+
+  test('empty JM_ALLOWED_IMAGES means the default', () => {
+    expect(allowedImages({ JM_ALLOWED_IMAGES: ' , ' })).toEqual(
+      new Set(['jumpmaster-trooper:dev']),
+    );
+    expect(allowedImages({ JM_TROOPER_IMAGE: 'mine:2' })).toEqual(
+      new Set(['mine:2', 'jumpmaster-trooper:dev']),
+    );
+    expect(allowedImages({ JM_ALLOWED_IMAGES: ' a:1 ,b:2,, ' })).toEqual(new Set(['a:1', 'b:2']));
+  });
+});
 
 describe('runDrop', () => {
   test('relays events and posts the result', async () => {
