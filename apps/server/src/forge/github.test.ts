@@ -480,6 +480,21 @@ describe('GitHubForge', () => {
         });
       });
 
+      test('a 403 secondary rate limit is unavailable, a plain 403 is none', async () => {
+        nock(api)
+          .get(rulesUrl)
+          .query(true)
+          .reply(403, { message: 'You have exceeded a secondary rate limit. Please wait.' });
+        expect(await fresh().getBranchRules('main')).toEqual({ kind: 'unavailable' });
+        nock(api)
+          .get(rulesUrl)
+          .query(true)
+          .reply(403, { message: 'Forbidden' }, { 'x-ratelimit-remaining': '0' });
+        expect(await fresh().getBranchRules('main')).toEqual({ kind: 'unavailable' });
+        nock(api).get(rulesUrl).query(true).reply(403, { message: 'Resource not accessible' });
+        expect(await fresh().getBranchRules('main')).toEqual({ kind: 'none' });
+      });
+
       test('none when no ruleset is active', async () => {
         nock(api)
           .get(rulesUrl)

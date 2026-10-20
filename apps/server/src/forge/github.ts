@@ -104,6 +104,23 @@ const FAILED_CONCLUSIONS = new Set([
   'stale',
 ]);
 
+/**
+ * GitHub answers a primary or secondary rate limit with 403 (or 429). That is the forge being busy,
+ * not a fact about the repository, so callers must treat it as unavailable.
+ */
+export function isRateLimited(err: unknown): boolean {
+  const status = statusOf(err);
+  if (status !== 403 && status !== 429) return false;
+  const e = err as { message?: unknown; response?: { headers?: Record<string, unknown> } };
+  const headers = e.response?.headers ?? {};
+  return (
+    status === 429 ||
+    String(headers['x-ratelimit-remaining']) === '0' ||
+    headers['retry-after'] !== undefined ||
+    /rate limit/i.test(String(e.message ?? ''))
+  );
+}
+
 function statusOf(err: unknown): number | undefined {
   return (err as ForgeError | null)?.status;
 }
@@ -435,6 +452,7 @@ export class GitHubForge implements Forge {
       };
     } catch (err) {
       const status = statusOf(err);
+      if (isRateLimited(err)) return { kind: 'unavailable' };
       if (status === 403 || status === 404) return { kind: 'none' };
       if (status !== undefined && status >= 500) return { kind: 'unavailable' };
       throw err;

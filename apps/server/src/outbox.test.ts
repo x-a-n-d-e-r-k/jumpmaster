@@ -170,6 +170,16 @@ describe('runOp', () => {
     expect(f.state.merges).toHaveLength(0);
   });
 
+  test('a rate-limited write (403 secondary limit) is unknown, not failed', async () => {
+    f.state.addPull({ headRef: 'agent/issue-1', headSha: 'h1', author: 'author-bot' });
+    f.author.failNext('merge', {
+      status: 403,
+      message: 'You have exceeded a secondary rate limit',
+    });
+    expect((await runOp(db, forges, mergeOp(), t0)).state).toBe('unknown');
+    expect((await runOp(db, forges, mergeOp(), t1)).state).toBe('unknown');
+  });
+
   test('runOp on an unknown row runs the lookup only', async () => {
     f.state.addPull({ headRef: 'agent/issue-1', headSha: 'h1', author: 'author-bot' });
     seed(mergeOp(), 'unknown', t0);

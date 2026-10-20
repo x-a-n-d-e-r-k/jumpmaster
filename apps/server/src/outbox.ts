@@ -9,7 +9,7 @@ import {
   resetDoneOutbox,
   updateOutbox,
 } from './db/repo.js';
-import type { Forge, ForgeError } from './forge/github.js';
+import { type Forge, type ForgeError, isRateLimited } from './forge/github.js';
 
 /** One zone's forge identities: `author` creates PRs and merges, `reviewer` only posts reviews. */
 export type ForgePair = { author: Forge; reviewer: Forge };
@@ -130,8 +130,11 @@ async function execute(db: Db, forges: ForgePair, op: Op, now: Date): Promise<Op
   } catch (err) {
     const status = (err as ForgeError | null)?.status;
     const error = errorMessage(err);
+    // A rate limit (403/429) says nothing about the write: leave it to read-back like a 5xx.
     const state: OutboxState =
-      status !== undefined && status >= 400 && status < 500 ? 'failed' : 'unknown';
+      status !== undefined && status >= 400 && status < 500 && !isRateLimited(err)
+        ? 'failed'
+        : 'unknown';
     updateOutbox(db, op.opKey, { state, error }, now);
     return { state, error };
   }
