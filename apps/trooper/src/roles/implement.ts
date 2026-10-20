@@ -67,8 +67,9 @@ async function implementSteps(
   }
 
   const guard = { as, base, protectedPaths: payload.protectedPaths, secrets: ctx.secrets };
-  const push = (): Promise<string> => {
+  const push = (expectSha?: string): Promise<string> => {
     emitEvent(deps, ctx, 'phase', { phase: 'push' });
+    const o = expectSha === undefined ? guard : { ...guard, expectSha };
     return resumeSha !== undefined
       ? deps.git.pushExistingBranch(
           repoDir,
@@ -77,7 +78,7 @@ async function implementSteps(
           target,
           resumeSha,
           pushSweep(deps, ctx),
-          guard,
+          o,
         )
       : deps.git.pushNewBranch(
           repoDir,
@@ -85,7 +86,7 @@ async function implementSteps(
           forgeToken,
           target,
           pushSweep(deps, ctx),
-          guard,
+          o,
         );
   };
 
@@ -104,7 +105,7 @@ async function implementSteps(
 
   const early = stoppedEarly(outcome);
   if (early !== null) {
-    const headSha = await checkpoint(deps, ctx, repoDir, base, push);
+    const headSha = await checkpoint(deps, ctx, repoDir, base, () => push());
     return done(headSha === undefined ? { status: early } : { status: early, headSha });
   }
 
@@ -131,9 +132,11 @@ async function implementSteps(
     return done({ status: 'no_changes', reason: structured.summary });
   }
 
+  // Gates test HEAD; the push must carry exactly that commit.
+  const gatedSha = await deps.git.headSha(repoDir, as);
   gates.push(...(await runGatesPhase(payload, deps, ctx, repoDir)));
   const failed = gates.find((g) => g.timedOut || g.exitCode !== 0);
   if (failed) return done({ status: 'failed', reason: `gate ${failed.name} failed` });
 
-  return done({ status: 'completed', headSha: await push() });
+  return done({ status: 'completed', headSha: await push(gatedSha) });
 }

@@ -482,6 +482,8 @@ export type PushOptions = {
   protectedPaths?: string[];
   /** Credential values the push must not carry (in added lines or commit messages). */
   secrets?: string[];
+  /** The commit the gates tested: the pushed branch tip must be exactly this. */
+  expectSha?: string;
   limits?: { timeoutMs: number; maxBytes: number };
   /** Root mirror; defaults to `<dirname(dir)>/mirror`. */
   mirrorDir?: string;
@@ -679,6 +681,9 @@ async function guardedPush(
     const sha = await runGit(undefined, ['rev-parse', '--verify', `${ref}^{commit}`], '', {
       gitDir: pushDir,
     });
+    if (o.expectSha !== undefined && sha !== o.expectSha) {
+      throw new Error(`pushed branch is not the gated commit: ${sha} != ${o.expectSha}`);
+    }
     const url = remoteUrl(target);
     try {
       await runGit(

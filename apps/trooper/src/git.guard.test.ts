@@ -265,6 +265,17 @@ describe('the pre-push guard', () => {
     ).rejects.toThrow(/^secret in diff/);
   });
 
+  test('a push whose branch tip is not the gated commit is refused', async () => {
+    const w = await world('gated');
+    const gated = git(w.dir, 'rev-parse', 'HEAD');
+    writeFileSync(join(w.dir, 'late.txt'), 'after the gates\n');
+    await commitIfDirty(w.dir, 'feat: late');
+    await expect(
+      pushExistingBranch(w.dir, B, 't', w.target, w.s0, undefined, { ...guard, expectSha: gated }),
+    ).rejects.toThrow(/^pushed branch is not the gated commit/);
+    expect(w.remoteTip()).toBe(w.s0);
+  });
+
   test('push refuses a commit with a foreign author', async () => {
     const w = await world('foreign');
     git(

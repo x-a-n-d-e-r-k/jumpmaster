@@ -119,9 +119,60 @@ beforeEach(() => {
 describe('ingestRateLimit and dispatchGate', () => {
   test('a confirmed rejected pauses until resetsAt plus jitter', () => {
     ingestRateLimit(db, rej('2026-10-20T12:00:00Z'), src('d1', 'rate_limited'), cfg, t0, zero);
-    ingestRateLimit(db, rej('2026-10-20T12:00:00Z'), src('d2', 'rate_limited'), cfg, t0, zero);
+    ingestRateLimit(
+      db,
+      rej('2026-10-20T12:00:00Z'),
+      src('d2', 'rate_limited', t0.toISOString(), 2),
+      cfg,
+      t0,
+      zero,
+    );
     expect(dispatchGate(db, cfg, at('12:00:29'))).toBe('closed');
     expect(dispatchGate(db, cfg, at('12:00:31'))).toBe('probe');
+  });
+
+  test('a second drop of the same work item never confirms a pause', () => {
+    ingestRateLimit(
+      db,
+      rej('2026-10-27T12:00:00Z', 'seven_day'),
+      src('d1', 'rate_limited'),
+      cfg,
+      t0,
+      zero,
+    );
+    ingestRateLimit(
+      db,
+      rej('2026-10-27T12:00:00Z', 'seven_day'),
+      src('d2', 'rate_limited'),
+      cfg,
+      t0,
+      zero,
+    );
+    expect(getUsageState(db).pauseConfirmed).toBe(false);
+    expect(dispatchGate(db, cfg, plus(t0, H + 1000))).toBe('probe');
+  });
+
+  test('a probe re-running the cause item does not confirm a pause', () => {
+    ingestRateLimit(
+      db,
+      rej('2026-10-27T12:00:00Z', 'seven_day'),
+      src('d1', 'rate_limited'),
+      cfg,
+      t0,
+      zero,
+    );
+    setUsageState(db, { probeDropId: 'p1' }, plus(t0, H + 1000));
+    const later = plus(t0, H + 2000);
+    ingestRateLimit(
+      db,
+      rej('2026-10-27T12:00:00Z', 'seven_day'),
+      src('p1', 'rate_limited', later.toISOString()),
+      cfg,
+      later,
+      zero,
+    );
+    expect(getUsageState(db).pauseConfirmed).toBe(false);
+    expect(dispatchGate(db, cfg, plus(later, H + 1000))).toBe('probe');
   });
 
   test('an unconfirmed pause is capped at one hour', () => {
@@ -154,7 +205,14 @@ describe('ingestRateLimit and dispatchGate', () => {
 
   test('a far-future resetsAt is clamped to the window', () => {
     ingestRateLimit(db, rej('2099-01-01T00:00:00Z'), src('d1', 'rate_limited'), cfg, t0, zero);
-    ingestRateLimit(db, rej('2099-01-01T00:00:00Z'), src('d2', 'rate_limited'), cfg, t0, zero);
+    ingestRateLimit(
+      db,
+      rej('2099-01-01T00:00:00Z'),
+      src('d2', 'rate_limited', t0.toISOString(), 2),
+      cfg,
+      t0,
+      zero,
+    );
     expect(dispatchGate(db, cfg, plus(t0, 5 * H + 29_000))).toBe('closed');
     expect(dispatchGate(db, cfg, plus(t0, 5 * H + 31_000))).toBe('probe');
   });
@@ -180,7 +238,14 @@ describe('ingestRateLimit and dispatchGate', () => {
   test('jitter is drawn between the configured bounds, tolerating a reversed pair', () => {
     const reversed: UsageConfig = { throttleUtilization: 0.9, probeJitterSeconds: [90, 30] };
     ingestRateLimit(db, rej(future), src('d1', 'rate_limited'), reversed, t0, () => 1);
-    ingestRateLimit(db, rej(future), src('d2', 'rate_limited'), reversed, t0, () => 1);
+    ingestRateLimit(
+      db,
+      rej(future),
+      src('d2', 'rate_limited', t0.toISOString(), 2),
+      reversed,
+      t0,
+      () => 1,
+    );
     expect(getUsageState(db).pausedUntil).toBe('2026-10-20T12:01:30.000Z');
   });
 

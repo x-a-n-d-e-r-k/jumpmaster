@@ -103,6 +103,8 @@ async function resolveSteps(
     }
   }
 
+  // Gates test HEAD; the push must carry exactly that commit.
+  const gatedSha = await deps.git.headSha(dir, as);
   gates.push(...(await runGatesPhase(payload, deps, ctx, dir)));
   const failed = gates.find((g) => g.timedOut || g.exitCode !== 0);
   if (failed) return done({ status: 'failed', reason: `gate ${failed.name} failed` });
@@ -120,6 +122,7 @@ async function resolveSteps(
       base,
       protectedPaths: payload.protectedPaths,
       secrets: ctx.secrets,
+      expectSha: gatedSha,
     },
   );
   return done({ status: 'completed', headSha });

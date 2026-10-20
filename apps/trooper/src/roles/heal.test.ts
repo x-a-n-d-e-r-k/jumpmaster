@@ -50,6 +50,7 @@ test('heal pushes with lease on the PR head', async () => {
       protectedPaths: ['.github/**'],
       as: null,
       secrets: ctx.secrets,
+      expectSha: 'sha-new',
     }),
   ]);
   expect(w.calls).toContainEqual(['checkoutBranch', repoDir, 'agent/issue-1', 'sha1', null]);

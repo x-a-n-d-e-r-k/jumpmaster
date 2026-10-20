@@ -46,7 +46,7 @@ async function healSteps(
   emitEvent(deps, ctx, 'phase', { phase: 'checkout', branch });
   await deps.git.checkoutBranch(dir, branch, prHead, as);
 
-  const push = (): Promise<string> => {
+  const push = (expectSha?: string): Promise<string> => {
     emitEvent(deps, ctx, 'phase', { phase: 'push' });
     return deps.git.pushExistingBranch(
       dir,
@@ -60,6 +60,7 @@ async function healSteps(
         base,
         protectedPaths: payload.protectedPaths,
         secrets: ctx.secrets,
+        ...(expectSha === undefined ? {} : { expectSha }),
       },
     );
   };
@@ -82,7 +83,7 @@ async function healSteps(
 
   const early = stoppedEarly(outcome);
   if (early !== null) {
-    const headSha = await checkpoint(deps, ctx, dir, base, push);
+    const headSha = await checkpoint(deps, ctx, dir, base, () => push());
     return done(headSha === undefined ? { status: early } : { status: early, headSha });
   }
   const accepted = acceptOutcome(outcome);
@@ -109,9 +110,11 @@ async function healSteps(
     return done({ status: 'no_changes', reason: structured.summary });
   }
 
+  // Gates test HEAD; the push must carry exactly that commit.
+  const gatedSha = await deps.git.headSha(dir, as);
   gates.push(...(await runGatesPhase(payload, deps, ctx, dir)));
   const failed = gates.find((g) => g.timedOut || g.exitCode !== 0);
   if (failed) return done({ status: 'failed', reason: `gate ${failed.name} failed` });
 
-  return done({ status: 'completed', headSha: await push() });
+  return done({ status: 'completed', headSha: await push(gatedSha) });
 }

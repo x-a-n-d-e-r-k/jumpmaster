@@ -152,6 +152,13 @@ describe('runImplement', () => {
     });
   });
 
+  test('a completed implement pushes exactly the commit its gates tested', async () => {
+    const w = world(complete, { ahead: 1 });
+    await runImplement(impl, w.deps, ctx);
+    const push = w.calls.find((c) => c[0] === 'pushNewBranch');
+    expect(push?.[6]).toMatchObject({ expectSha: 'h' });
+  });
+
   test('a dirty tree with nothing committed is still checkpointed', async () => {
     const w = world([init('s'), rateLimit('rejected')], { dirty: true });
     const r = await runImplement(impl, w.deps, ctx);

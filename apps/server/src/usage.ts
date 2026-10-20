@@ -121,7 +121,10 @@ export function ingestRateLimit(
         const target = base + jitterMs(cfg, rand);
         const until = ms(u.pausedUntil);
         const inForce = until !== null && t < until;
-        const fromProbe = u.probeDropId !== null && src.dropId === u.probeDropId;
+        // Confirmation needs a second, independent witness: another work item's drop. A probe that is
+        // re-running the cause item (or that item's own retries) is the same agent, possibly forging.
+        const otherItem = src.workItemId !== u.causeWorkItemId;
+        const fromProbe = u.probeDropId !== null && src.dropId === u.probeDropId && otherItem;
         if (!inForce) {
           Object.assign(patch, {
             status: 'rejected',
@@ -133,7 +136,7 @@ export function ingestRateLimit(
             probeDropId: null,
             probeNotBefore: null,
           } satisfies Partial<UsageStateRow>);
-        } else if (!u.pauseConfirmed && src.dropId !== u.causeDropId) {
+        } else if (!u.pauseConfirmed && src.dropId !== u.causeDropId && otherItem) {
           patch.pauseConfirmed = true;
           patch.pausedUntil = iso(Math.max(until, target));
         } else if (u.pauseConfirmed) {

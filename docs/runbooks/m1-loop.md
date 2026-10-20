@@ -198,6 +198,7 @@ JM_GITHUB_REVIEWER_TOKEN JM_GITHUB_READ_TOKEN JM_JOIN_TOKEN`.
 | Items park `no CI result: missing <check>` | The ruleset requires a check that never reported on the head. Check the workflow runs on pull requests. |
 | Items park `unsupported rule: merge_queue` (or `required_deployments`) | The server merges through the API, which a merge queue or required deployment never allows. Remove that rule from the ruleset for the agent's base branch. |
 | Items park `merge rejected: …` | GitHub refused the merge on an unchanged head, often because of an unresolved conversation or a dismissed approval. Clear the cause; the server retries the merge about an hour after the refusal, or at once if you add the retry label. |
+| Items park `budget exhausted: heal` after gate timeouts | A gate that times out or flakes forces "request changes", and each heal that finds nothing to fix spends the heal budget. Raise the gate's `timeoutMinutes` or fix the flaky test, then add the retry label. |
 | Items park `no pipeline` | `ciRequired` is true but nothing reported. Add CI or set `ciRequired: false`. |
 | A drop fails `image not allowed: …` | Add the zone's image to `JM_ALLOWED_IMAGES` on the stick, spelled exactly. |
 | Usage shows gate `closed` | A drop hit a usage limit. Dispatch resumes after the reset time, at most one hour after an unconfirmed limit. |
