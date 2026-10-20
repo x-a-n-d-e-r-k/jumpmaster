@@ -220,6 +220,17 @@ describe('branchProtectionProblems', () => {
     },
   });
 
+  test('a merge queue or required deployments make the server unable to merge', () =>
+    expect(
+      branchProtectionProblems(
+        {
+          author: rules({ unsupportedRules: ['merge_queue', 'required_deployments'] }),
+          reviewer: rules(),
+        },
+        zone,
+      ),
+    ).toEqual(['unsupported rule: merge_queue', 'unsupported rule: required_deployments']));
+
   test('safe rules give no problems', () =>
     expect(branchProtectionProblems({ author: rules(), reviewer: rules() }, zone)).toEqual([]));
 

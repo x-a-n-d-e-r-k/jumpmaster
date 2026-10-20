@@ -453,6 +453,25 @@ describe('GitHubForge', () => {
         });
       });
 
+      test('reports merge-queue and required-deployment rules as unsupported', async () => {
+        nock(api)
+          .get(rulesUrl)
+          .query(true)
+          .reply(200, [
+            prRule(1),
+            { type: 'merge_queue', ruleset_id: 1, parameters: {} },
+            { type: 'required_deployments', ruleset_id: 1, parameters: {} },
+            { type: 'required_linear_history', ruleset_id: 1 },
+          ]);
+        mockRuleset(1, { enforcement: 'active', current_user_can_bypass: 'never' });
+        mockViewer('write');
+        const r = await fresh().getBranchRules('main');
+        expect(r.kind === 'ok' && r.rules.unsupportedRules).toEqual([
+          'merge_queue',
+          'required_deployments',
+        ]);
+      });
+
       test('treats a missing current_user_can_bypass as bypass', async () => {
         nock(api)
           .get(rulesUrl)

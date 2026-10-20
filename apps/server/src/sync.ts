@@ -4,6 +4,7 @@ import {
   deleteFailedOutbox,
   getPullRequest,
   getWorkItem,
+  listOutbox,
   listWorkItems,
   resetAttempts,
   setDropZoneDefaultBranch,
@@ -152,6 +153,8 @@ function restoreFromPull(db: Db, item: WorkItem, pr: PullFacts | null, now: Date
  * or issue, a PR that merged after all, a lifted human block / fixed branch protection, or forge
  * data that is readable again.
  */
+const MERGE_RETRY_MS = 60 * 60_000;
+
 export async function syncParked(
   db: Db,
   forges: ForgePair,
@@ -197,6 +200,19 @@ export async function syncParked(
         issueOpen = false;
       }
       if (pr?.state === 'open' && issueOpen) {
+        setWorkItemState(db, item.id, 'pr_open', undefined, now);
+        reopened++;
+      }
+    } else if (reason.startsWith('merge rejected')) {
+      // A refusal on an unchanged head is often a human-clearable blocker (an unresolved
+      // conversation, a dismissed approval). After an hour, forget the failed op and re-decide;
+      // a merge that still fails parks again, costing one call per hour.
+      const failed = listOutbox(db, ['failed']).filter(
+        (o) => o.workItemId === item.id && o.kind === 'merge',
+      );
+      const age = (o: (typeof failed)[number]) => now.getTime() - Date.parse(o.updatedAt);
+      if (failed.length > 0 && failed.every((o) => age(o) >= MERGE_RETRY_MS)) {
+        deleteFailedOutbox(db, item.id, 'merge');
         setWorkItemState(db, item.id, 'pr_open', undefined, now);
         reopened++;
       }

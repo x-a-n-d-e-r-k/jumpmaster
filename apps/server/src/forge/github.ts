@@ -51,6 +51,8 @@ export type BranchRules = {
   unpinnedChecks: string[];
   viewerCanBypass: boolean;
   viewerIsAdmin: boolean;
+  /** Active rule types the server cannot satisfy with its own merge (merge queue, deployments). */
+  unsupportedRules?: string[];
 };
 export type BranchRulesRead =
   | { kind: 'ok'; rules: BranchRules }
@@ -120,6 +122,9 @@ export function isRateLimited(err: unknown): boolean {
     /rate limit/i.test(String(e.message ?? ''))
   );
 }
+
+/** Rules under which an API merge by the server can never succeed. */
+const UNSUPPORTED_RULES = new Set(['merge_queue', 'required_deployments']);
 
 function statusOf(err: unknown): number | undefined {
   return (err as ForgeError | null)?.status;
@@ -418,8 +423,12 @@ export class GitHubForge implements Forge {
       let dismissStaleOnPush = false;
       const requiredChecks: string[] = [];
       const unpinnedChecks: string[] = [];
+      const unsupportedRules: string[] = [];
       for (const rule of rules) {
         if (rule.ruleset_id == null || !active.has(rule.ruleset_id)) continue;
+        if (UNSUPPORTED_RULES.has(rule.type) && !unsupportedRules.includes(rule.type)) {
+          unsupportedRules.push(rule.type);
+        }
         if (rule.type === 'pull_request') {
           const p = rule.parameters as
             | { required_approving_review_count?: number; dismiss_stale_reviews_on_push?: boolean }
@@ -448,6 +457,7 @@ export class GitHubForge implements Forge {
           unpinnedChecks,
           viewerCanBypass,
           viewerIsAdmin,
+          ...(unsupportedRules.length > 0 ? { unsupportedRules } : {}),
         },
       };
     } catch (err) {

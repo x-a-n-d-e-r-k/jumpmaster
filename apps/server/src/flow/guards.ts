@@ -283,6 +283,7 @@ export function branchProtectionProblems(
     if (r.viewerIsAdmin) out.add('bot is admin');
     for (const c of r.unpinnedChecks) out.add(`required check not pinned: ${c}`);
     if (zone.ciRequired && r.requiredChecks.length === 0) out.add('no required checks');
+    for (const t of r.unsupportedRules ?? []) out.add(`unsupported rule: ${t}`);
   }
   return [...out];
 }

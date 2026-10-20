@@ -666,6 +666,24 @@ describe('§16 server-side parks', () => {
     expect(item(h).state).toBe('pr_open');
   });
 
+  test('a merge rejected park is retried after an hour, so a cleared human blocker merges', async () => {
+    const h = await harness();
+    await toApproved(h, 'sha1');
+    h.forge.author.failNext('merge', { status: 405, message: 'unresolved conversations' });
+    await h.reconcile();
+    await h.reconcile();
+    expect(item(h).reason).toMatch(/^merge rejected/);
+    h.at(30);
+    await h.reconcile();
+    expect(item(h).state).toBe('parked');
+    expect(count(h, 'merge')).toBe(1);
+    h.at(31); // the human resolved the conversation meanwhile
+    await h.reconcile();
+    await h.reconcile();
+    expect(item(h)).toMatchObject({ state: 'done', reason: 'merged' });
+    expect(count(h, 'merge')).toBe(2);
+  });
+
   test('merge rejected park is cleared by the retry label', async () => {
     const h = await harness();
     await toApproved(h, 'sha1');
