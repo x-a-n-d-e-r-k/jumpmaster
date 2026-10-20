@@ -117,3 +117,36 @@ export function expireLeases(
     return lost;
   })();
 }
+
+/** Pushes every live lease out to a full TTL from `now`. */
+export function extendLiveLeases(db: Db, now: Date): number {
+  return db
+    .prepare(
+      `UPDATE drops SET lease_expires_at = @expires
+       WHERE state IN ('leased','running') AND lease_expires_at < @expires`,
+    )
+    .run({ expires: iso(now, LEASE_TTL_MS) }).changes;
+}
+
+/**
+ * `expireLeases` that knows when the server itself was away: on its first run (startup) and after
+ * any gap longer than the lease TTL (a slow restart, a sleeping laptop) the sticks could not have
+ * heartbeated, so live leases get a fresh TTL instead of being declared lost all at once.
+ */
+export function leaseExpirer(
+  db: Db,
+  usageCfg: UsageConfig = DEFAULT_USAGE_CONFIG,
+  rand: () => number = Math.random,
+): (now: Date) => number {
+  let last: number | null = null;
+  return (now) => {
+    const t = now.getTime();
+    const away = last === null || t - last > LEASE_TTL_MS;
+    last = t;
+    if (away) {
+      extendLiveLeases(db, now);
+      return 0;
+    }
+    return expireLeases(db, now, usageCfg, rand);
+  };
+}

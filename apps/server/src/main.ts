@@ -6,7 +6,7 @@ import { type Config, loadConfig, secretList } from './config.js';
 import { openDb } from './db/open.js';
 import { reconcileZone } from './flow/reconcile.js';
 import { GitHubForge } from './forge/github.js';
-import { expireLeases } from './leases.js';
+import { leaseExpirer } from './leases.js';
 import { type ForgePair, markPendingUnknown } from './outbox.js';
 import { promptVersions } from './payloads.js';
 import { syncDropZone } from './sync.js';
@@ -48,8 +48,9 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
   const app = createApp({ db, config, forgesFor, now: () => new Date() });
 
   const secrets = secretList(config.secrets);
+  const expireLeases = leaseExpirer(db, config.usage);
   const pass = async () => {
-    expireLeases(db, new Date(), config.usage);
+    expireLeases(new Date());
     for (const zone of config.dropZones) {
       try {
         const forgePair = forgesFor(zone.id);
@@ -86,7 +87,7 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
     setInterval(() => void guardedPass(), config.pollSeconds * 1000),
     setInterval(() => {
       try {
-        expireLeases(db, new Date(), config.usage);
+        expireLeases(new Date());
       } catch (e) {
         log(`lease expiry failed: ${errorMessage(e)}`);
       }

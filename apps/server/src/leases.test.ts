@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from 'vitest';
 import type { Db } from './db/open.js';
 import { getDrop, insertDrop, updateDrop } from './db/repo.js';
-import { expireLeases, heartbeat, leaseNextDrop } from './leases.js';
+import { expireLeases, heartbeat, leaseExpirer, leaseNextDrop } from './leases.js';
 import { plus, seedQueuedDrop, t0, workItem } from './test/helpers.js';
 
 let db: Db;
@@ -142,5 +142,34 @@ describe('expireLeases', () => {
     });
     expireLeases(db, plus(t0, 400_000));
     expect(workItem(db, 1).state).toBe('in_flight');
+  });
+});
+
+describe('leaseExpirer', () => {
+  test('the first run after startup extends live leases instead of losing them', () => {
+    leaseNextDrop(db, 's1', t0);
+    const expire = leaseExpirer(db);
+    expect(expire(plus(t0, 5 * 60_000))).toBe(0);
+    expect(getDrop(db, 'd1')!.state).toBe('leased');
+    expect(Date.parse(getDrop(db, 'd1')!.leaseExpiresAt!)).toBeGreaterThan(
+      plus(t0, 5 * 60_000).getTime(),
+    );
+  });
+
+  test('a gap longer than the lease TTL (the server slept) extends rather than expires', () => {
+    leaseNextDrop(db, 's1', t0);
+    const expire = leaseExpirer(db);
+    expire(plus(t0, 10_000));
+    expect(expire(plus(t0, 10_000 + 30 * 60_000))).toBe(0);
+    expect(getDrop(db, 'd1')!.state).toBe('leased');
+  });
+
+  test('regular ticks still expire a silent stick', () => {
+    leaseNextDrop(db, 's1', t0);
+    const expire = leaseExpirer(db);
+    let lost = 0;
+    for (let ms = 10_000; ms <= 200_000; ms += 10_000) lost += expire(plus(t0, ms));
+    expect(lost).toBe(1);
+    expect(getDrop(db, 'd1')!.state).toBe('lost');
   });
 });
