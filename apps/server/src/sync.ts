@@ -174,14 +174,16 @@ export async function syncParked(
     }
     if (!hasRetry && item.retryLabelSeen) setRetryLabelSeen(db, item.id, false);
 
+    // A PR merged by a human ends the item whatever it was parked for (budgets included).
+    const pr = await readPull(forges, prNumber);
+    if (pr?.merged) {
+      setWorkItemState(db, item.id, 'done', 'merged', now);
+      reopened++;
+      continue;
+    }
+
     const reason = item.reason ?? '';
     if (reason === 'pr closed' || reason === 'issue closed') {
-      const pr = await readPull(forges, prNumber);
-      if (pr?.merged) {
-        setWorkItemState(db, item.id, 'done', 'merged', now);
-        reopened++;
-        continue;
-      }
       let issueOpen = false;
       try {
         issueOpen = (await forges.author.getIssueState(item.issueNumber)) === 'open';
@@ -190,12 +192,6 @@ export async function syncParked(
       }
       if (pr?.state === 'open' && issueOpen) {
         setWorkItemState(db, item.id, 'pr_open', undefined, now);
-        reopened++;
-      }
-    } else if (reason.startsWith('merge rejected')) {
-      const pr = await readPull(forges, prNumber);
-      if (pr?.merged) {
-        setWorkItemState(db, item.id, 'done', 'merged', now);
         reopened++;
       }
     } else if (reason === 'human block stands' || reason.startsWith('unsafe branch protection')) {
