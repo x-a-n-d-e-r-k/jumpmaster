@@ -65,10 +65,12 @@ describe('buildSnapshot', () => {
     expect((await snapshotOf()).gateScriptChanges).toEqual(['test']);
   });
 
-  test('an unreadable package.json fails closed', async () => {
+  test('a thrown package.json read is forge unavailability (the pass waits), not a park', async () => {
     w.f.state.pullFiles.set(1, { files: [{ path: 'pkg/package.json' }], complete: true });
     w.f.author.failNext('getFileAt', '5xx');
-    expect((await snapshotOf()).gateScriptChanges).toContain('pkg/package.json unreadable');
+    const s = await snapshotOf();
+    expect(s.forgeUnavailable).toBe('getFileAt');
+    expect(s.gateScriptChanges).toEqual([]);
   });
 
   test('snapshot excludes both bots from trust', async () => {

@@ -87,7 +87,9 @@ Start from the M0 config. The zone gains these fields (defaults shown):
 
 - `mergeMethod` accepts only `squash` in M1.
 - Set `ciRequired: false` for a repository with no CI. The ruleset then needs no
-  required checks.
+  required checks. With `ciRequired: true`, only checks the ruleset names count: an
+  unrelated green check (a CLA bot, a labeler) never stands in for CI, and an item with no
+  named required check waits, then parks `no CI result`.
 - `protectedPaths` defaults to CI and agent configuration (`.github/**`, `.claude/**`,
   `CODEOWNERS`, `CLAUDE.md`, `AGENTS.md`, `.mcp.json`, `GOAL.md`, `jumpmaster*.json`), git
   and npm settings (`.gitattributes`, `.gitmodules`, `.npmrc`) and test-runner configs

@@ -1021,7 +1021,7 @@ describe('§16 human-action matrix', () => {
   });
 
   describe('force-pushes the branch', () => {
-    test('S1: implement push rejected → parked; the retry label recovers via resume', async () => {
+    test('S1: implement push rejected → back to ready, then resumed from the pushed branch', async () => {
       const { h, drop } = await s1();
       h.forge.state.branches.set('agent/issue-1', 'human1');
       await h.postResult(drop.dropId, drop.epoch, {
@@ -1029,8 +1029,7 @@ describe('§16 human-action matrix', () => {
         reason: 'branch agent/issue-1 already exists on remote',
         gates: [],
       });
-      expect(item(h).state).toBe('parked');
-      h.forge.state.setLabels(1, ['agent-ready', 'agent-retry']);
+      expect(item(h).state).toBe('ready');
       await h.reconcile();
       const { payload } = await h.lease();
       expect(payload).toMatchObject({ role: 'implement', resume: true, resumeSha: 'human1' });
@@ -1219,5 +1218,82 @@ describe('§16 human-action matrix', () => {
       expect(item(h).state).toBe('pr_open');
       expect(getAttempts(h.db, 1, 'heal').count).toBe(0);
     });
+  });
+});
+
+describe('§16 final-review regressions', () => {
+  test('a partial forge outage past the deadline recovers once the forge answers again', async () => {
+    const h = await harness();
+    await toApproved(h, 'sha1');
+    h.forge.author.failNext('getPull', '5xx');
+    h.forge.author.failNext('getPull', '5xx');
+    await h.reconcile();
+    h.at(h.zone.ciDeadlineMinutes + 5);
+    await h.reconcile();
+    expect(item(h)).toMatchObject({ state: 'parked', reason: 'forge data missing: pr' });
+    await h.reconcile();
+    await h.reconcile();
+    expect(item(h).state).not.toBe('parked');
+  });
+
+  test("an unchanged package.json with a 5xx on one read is reviewed, not parked 'unreadable'", async () => {
+    const h = await harness();
+    await toPrOpen(h, 'sha1');
+    const pkg = JSON.stringify({ scripts: { test: 'vitest run' } });
+    h.forge.state.pullFiles.set(1, {
+      files: [{ path: 'package.json' }, { path: 'src/a.ts' }],
+      complete: true,
+    });
+    h.forge.state.files.set('base0:package.json', pkg);
+    h.forge.state.files.set('sha1:package.json', pkg);
+    h.forge.author.failNext('getFileAt', '5xx');
+    await h.reconcile();
+    expect(item(h).state).toBe('pr_open');
+    await h.reconcile();
+    expect(h.queuedRoles()).toContain('review');
+  });
+
+  test('ciRequired without required checks never merges on a green third-party check', async () => {
+    const h = await harness({ zone: { requireBranchProtection: false, ciRequired: true } });
+    h.forge.state.checks.set('sha1', { state: 'success', names: ['license/cla'] });
+    await toApproved(h, 'sha1');
+    await h.reconcile();
+    expect(h.forge.state.merges).toHaveLength(0);
+    h.at(h.zone.ciDeadlineMinutes + 5);
+    await h.reconcile();
+    expect(item(h).state).toBe('parked');
+    expect(item(h).reason).toMatch(/^no CI result/);
+  });
+
+  test('an item whose agent branch exists is resumed, never freshly implemented', async () => {
+    const h = await harness();
+    h.forge.state.branches.set('agent/issue-1', 'old1');
+    h.forge.author.failNext('branchSha', '5xx');
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual([]);
+    await h.reconcile();
+    const { payload } = await h.lease();
+    expect(payload).toMatchObject({ role: 'implement', resume: true, resumeSha: 'old1' });
+  });
+
+  test("a 'stale info' or 'already exists' implement failure resumes instead of parking", async () => {
+    for (const reason of [
+      'stale info: ! [rejected] agent/issue-1 -> agent/issue-1 (stale info)',
+      'branch agent/issue-1 already exists on remote',
+    ]) {
+      const h = await harness();
+      await h.reconcile();
+      const { dropId, epoch } = await h.lease();
+      h.forge.state.branches.set('agent/issue-1', 'sha-other');
+      await h.postResult(dropId, epoch, { status: 'failed', reason, gates: [gateOk] });
+      expect(item(h).state).not.toBe('parked');
+      await h.reconcile();
+      const next = await h.lease();
+      expect(next.payload).toMatchObject({
+        role: 'implement',
+        resume: true,
+        resumeSha: 'sha-other',
+      });
+    }
   });
 });

@@ -101,7 +101,7 @@ const humanRc = (id: number, body: string): ForgeReview => ({
   submittedAt: minutesAgo(2),
 });
 
-const ok: ChecksFacts = { state: 'success', names: [] };
+const ok: ChecksFacts = { state: 'success', names: ['ci'] };
 const none: ChecksFacts = { state: 'none', names: [] };
 const pending: ChecksFacts = { state: 'pending', names: [] };
 const failing: ChecksFacts = { state: 'failure', names: ['test'] };
@@ -139,7 +139,7 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
 
 /** A snapshot that would merge if nothing else intervened. */
 const mergeable = (over: Partial<Snapshot> = {}): Snapshot =>
-  snap({ verdictsOnHead: [approve('s')], checks: ok, ...over });
+  snap({ verdictsOnHead: [approve('s')], checks: ok, requiredChecks: ok.names, ...over });
 
 describe('rules in order', () => {
   test('1: an active drop waits, whatever the forge says', () => {
@@ -430,6 +430,12 @@ describe('rules in order', () => {
       ),
     ).toEqual({ kind: 'merge', sha: 's' }));
 
+  test('25: with ciRequired, a green check is not CI unless a required check names it', () => {
+    expect(
+      decide(snap({ verdictsOnHead: [approve('s')], checks: ok, requiredChecks: [] })).kind,
+    ).toBe('wait');
+  });
+
   test('25, 26: no CI honours ciRequired', () => {
     expect(
       decide(
@@ -480,7 +486,9 @@ describe('rules in order', () => {
     ).toEqual({ kind: 'park', reason: 'no CI result: missing lint, test' }));
 
   test('26: pending CI past the deadline with nothing missing parks no CI result', () =>
-    expect(decide(mergeable({ checks: pending, headFirstSeenAt: minutesAgo(46) }))).toEqual({
+    expect(
+      decide(mergeable({ checks: pending, requiredChecks: [], headFirstSeenAt: minutesAgo(46) })),
+    ).toEqual({
       kind: 'park',
       reason: 'no CI result',
     }));

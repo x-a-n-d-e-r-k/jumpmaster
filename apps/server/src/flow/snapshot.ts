@@ -102,14 +102,17 @@ function latestDecisive(reviews: ForgeReview[]): ForgeReview[] {
 
 const isPackageJson = (p: string): boolean => p === 'package.json' || p.endsWith('/package.json');
 
+/** A 404 is `text: null`; a thrown read is the forge being unavailable (the pass waits). */
 async function readFile(
   forges: ForgePair,
   ref: string,
   path: string,
+  unavailable: (method: string) => void,
 ): Promise<{ ok: true; text: string | null } | { ok: false }> {
   try {
     return { ok: true, text: await forges.author.getFileAt(ref, path) };
   } catch {
+    unavailable('getFileAt');
     return { ok: false };
   }
 }
@@ -120,6 +123,7 @@ async function gateChanges(
   files: PullFiles['files'],
   mergeBaseSha: string,
   headSha: string,
+  unavailable: (method: string) => void,
 ): Promise<{ scripts: string[]; tools: string[] }> {
   const scripts = new Set<string>();
   const tools = new Set<string>();
@@ -129,18 +133,15 @@ async function gateChanges(
   }
   for (const path of paths) {
     const [basePkg, headPkg] = await Promise.all([
-      readFile(forges, mergeBaseSha, path),
-      readFile(forges, headSha, path),
+      readFile(forges, mergeBaseSha, path, unavailable),
+      readFile(forges, headSha, path, unavailable),
     ]);
-    if (!basePkg.ok || !headPkg.ok) {
-      scripts.add(`${path} unreadable`);
-      continue;
-    }
+    if (!basePkg.ok || !headPkg.ok) continue; // marked unavailable: decide waits
     for (const s of gateScriptChanges(zone.gates, basePkg.text, headPkg.text)) scripts.add(s);
     const lockPath = join(dirname(path), 'package-lock.json');
     const [baseLock, headLock] = await Promise.all([
-      readFile(forges, mergeBaseSha, lockPath),
-      readFile(forges, headSha, lockPath),
+      readFile(forges, mergeBaseSha, lockPath, unavailable),
+      readFile(forges, headSha, lockPath, unavailable),
     ]);
     for (const t of gateToolChanges(
       zone.gates,
@@ -237,7 +238,7 @@ export async function buildSnapshot(
 
   const gate =
     compare && headSha
-      ? await gateChanges(forges, zone, files.files, compare.mergeBaseSha, headSha)
+      ? await gateChanges(forges, zone, files.files, compare.mergeBaseSha, headSha, unavailable)
       : { scripts: [], tools: [] };
 
   if (pr && headSha) {

@@ -61,8 +61,10 @@ export function enqueueNext(
   promptVersion: string,
   usageCfg: UsageConfig,
   now: Date,
+  /** Items not to start fresh this pass (their agent branch could not be read). */
+  skip: ReadonlySet<number> = new Set(),
 ): string | null {
-  const top = rankItems(listWorkItems(db, zone.id, 'ready'))[0];
+  const top = rankItems(listWorkItems(db, zone.id, 'ready').filter((i) => !skip.has(i.id)))[0];
   if (!top) return null;
   return enqueueImplement(
     db,

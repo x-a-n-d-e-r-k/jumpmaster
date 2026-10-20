@@ -92,6 +92,7 @@ async function resume(
   versions: Record<Role, string>,
   usageCfg: UsageConfig,
   now: Date,
+  unknown: Set<number>,
 ): Promise<number> {
   let acted = 0;
   const candidates = listWorkItems(db, zone.id).filter(
@@ -106,7 +107,8 @@ async function resume(
     try {
       sha = await forges.author.branchSha(agentBranch(item.issueNumber));
     } catch {
-      continue; // unknown: judge on a later pass
+      unknown.add(item.id); // unknown: judge on a later pass, and never start it fresh meanwhile
+      continue;
     }
     if (sha === null) {
       if (item.state === 'in_flight') {
@@ -276,7 +278,8 @@ export async function reconcileZone(
   let merges = 0;
   await resolveUnknown(db, forges, zone.id, now, zone.ciDeadlineMinutes);
   actions += await adopt(db, forges, zone, pass, now);
-  actions += await resume(db, forges, zone, versions, usageCfg, now);
+  const branchUnknown = new Set<number>();
+  actions += await resume(db, forges, zone, versions, usageCfg, now, branchUnknown);
 
   for (const listed of listWorkItems(db, zone.id, 'pr_open')) {
     const item: WorkItem | undefined = getWorkItem(db, listed.id);
@@ -311,6 +314,6 @@ export async function reconcileZone(
     }
   }
 
-  if (enqueueNext(db, zone, versions.implement, usageCfg, now) !== null) actions++;
+  if (enqueueNext(db, zone, versions.implement, usageCfg, now, branchUnknown) !== null) actions++;
   return { actions, merges };
 }

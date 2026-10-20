@@ -101,6 +101,9 @@ function humanFeedback(reviews: ForgeReview[]): string {
 }
 
 function ciSatisfied(s: Snapshot): boolean {
+  // With CI required, only named required checks count: an unrelated green check (a CLA bot)
+  // must not stand in for CI that has not reported yet.
+  if (s.zone.ciRequired && s.requiredChecks.length === 0) return false;
   if (s.checks.state === 'success')
     return s.requiredChecks.every((n) => s.checks.names.includes(n));
   return s.checks.state === 'none' && !s.zone.ciRequired && s.requiredChecks.length === 0;

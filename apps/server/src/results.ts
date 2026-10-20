@@ -213,6 +213,13 @@ async function implementResult(c: Ctx, result: DropResult): Promise<void> {
         finish(c, 'succeeded');
       })();
     default:
+      if (result.status === 'failed' && IMPLEMENT_FENCED.test(result.reason ?? '')) {
+        // Another trooper (or a human) owns the branch now: resume() continues from it.
+        return db.transaction(() => {
+          setWorkItemState(db, item.id, 'ready', undefined, c.now);
+          finish(c, 'failed');
+        })();
+      }
       return park(
         c,
         result.reason ?? result.status,
@@ -220,6 +227,8 @@ async function implementResult(c: Ctx, result: DropResult): Promise<void> {
       );
   }
 }
+
+const IMPLEMENT_FENCED = /^(stale info|branch \S+ already exists on remote)/;
 
 async function reviewResult(c: Ctx, result: DropResult): Promise<void> {
   const { db, drop, item } = c;

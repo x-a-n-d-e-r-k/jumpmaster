@@ -149,7 +149,8 @@ function restoreFromPull(db: Db, item: WorkItem, pr: PullFacts | null, now: Date
 
 /**
  * Recovers parked items whose cause is gone: the retry label (once per labelling), a reopened PR
- * or issue, a PR that merged after all, or a lifted human block / fixed branch protection.
+ * or issue, a PR that merged after all, a lifted human block / fixed branch protection, or forge
+ * data that is readable again.
  */
 export async function syncParked(
   db: Db,
@@ -199,7 +200,11 @@ export async function syncParked(
         setWorkItemState(db, item.id, 'pr_open', undefined, now);
         reopened++;
       }
-    } else if (reason === 'human block stands' || reason.startsWith('unsafe branch protection')) {
+    } else if (
+      reason === 'human block stands' ||
+      reason.startsWith('unsafe branch protection') ||
+      reason.startsWith('forge data missing')
+    ) {
       const fresh = getWorkItem(db, item.id);
       if (!fresh) continue;
       const action = decide(await buildSnapshot(db, forges, zone, fresh, pass, now));
