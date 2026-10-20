@@ -45,7 +45,12 @@ test('heal pushes with lease on the PR head', async () => {
     { owner: 'o', name: 'r' },
     'sha1',
     expect.any(Function),
-    expect.objectContaining({ base: 'main', protectedPaths: ['.github/**'], as: null }),
+    expect.objectContaining({
+      base: 'main',
+      protectedPaths: ['.github/**'],
+      as: null,
+      secrets: ctx.secrets,
+    }),
   ]);
   expect(w.calls).toContainEqual(['checkoutBranch', repoDir, 'agent/issue-1', 'sha1', null]);
   expect(w.names().indexOf('mirrorFetch')).toBeLessThan(w.names().indexOf('checkoutBranch'));

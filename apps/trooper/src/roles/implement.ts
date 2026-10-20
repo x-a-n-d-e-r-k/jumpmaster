@@ -66,7 +66,7 @@ async function implementSteps(
     await deps.git.prepareBranch(repoDir, payload.branch, base, as);
   }
 
-  const guard = { as, base, protectedPaths: payload.protectedPaths };
+  const guard = { as, base, protectedPaths: payload.protectedPaths, secrets: ctx.secrets };
   const push = (): Promise<string> => {
     emitEvent(deps, ctx, 'phase', { phase: 'push' });
     return resumeSha !== undefined

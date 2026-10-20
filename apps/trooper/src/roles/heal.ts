@@ -59,6 +59,7 @@ async function healSteps(
         as,
         base,
         protectedPaths: payload.protectedPaths,
+        secrets: ctx.secrets,
       },
     );
   };

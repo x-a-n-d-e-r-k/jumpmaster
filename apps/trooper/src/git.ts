@@ -14,6 +14,7 @@ import { basename, dirname, join, matchesGlob, sep } from 'node:path';
 import type { MergeOutcome } from '@jumpmaster/protocol';
 import { scrubEnv } from './gates.js';
 import { type AgentIdentity, asAgentArgv, type TrooperIdentities } from './privilege.js';
+import { containsSecret } from './redact.js';
 
 /** The only URL prefix the forge auth header is ever sent to. */
 export const AUTH_SCOPE = 'https://github.com/';
@@ -456,6 +457,8 @@ export type PushOptions = {
   /** Base branch for the pre-push guard; without it no guard runs. */
   base?: string;
   protectedPaths?: string[];
+  /** Credential values the push must not carry (in added lines or commit messages). */
+  secrets?: string[];
   limits?: { timeoutMs: number; maxBytes: number };
   /** Root mirror; defaults to `<dirname(dir)>/mirror`. */
   mirrorDir?: string;
@@ -482,8 +485,14 @@ function dirSize(path: string): number {
 
 const shellQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
 
+/** `dir/**` also covers the bare `dir` entry itself (a file or symlink named like the directory). */
 const globHit = (p: string, globs: string[]): boolean =>
-  globs.some((g) => matchesGlob(p, g) || (!g.includes('/') && matchesGlob(basename(p), g)));
+  globs.some(
+    (g) =>
+      matchesGlob(p, g) ||
+      (g.endsWith('/**') && p === g.slice(0, -3)) ||
+      (!g.includes('/') && matchesGlob(basename(p), g)),
+  );
 
 /**
  * Root, in the root-owned bare repo only: refuses protected-path changes against the trusted base
@@ -495,19 +504,53 @@ export async function prePushCheck(
   branch: string,
   protectedPaths: string[],
   since: string,
+  secrets: string[] = [],
 ): Promise<string | null> {
   const ref = `refs/heads/${branch}`;
+  // -z: paths are raw bytes, never C-quoted, so a non-ASCII name cannot dodge the glob.
   const diff = await runGit(
     undefined,
-    ['--no-replace-objects', 'diff', '--name-status', '-M', `refs/jm/base...${ref}`],
+    ['--no-replace-objects', 'diff', '--name-status', '-z', '-M', `refs/jm/base...${ref}`],
     '',
     { gitDir: bareDir },
   );
-  for (const line of diff.split('\n').filter(Boolean)) {
-    const [, ...paths] = line.split('\t');
-    // For renames the source comes first, so it is reported first.
-    for (const p of paths) if (globHit(p, protectedPaths)) return `protected path ${p}`;
+  const fields = diff.split('\0');
+  for (let i = 0; i < fields.length; ) {
+    const status = fields[i++] ?? '';
+    if (status === '') continue;
+    // Renames and copies carry source then destination; the source is reported first.
+    const n = /^[RC]/.test(status) ? 2 : 1;
+    for (const p of fields.slice(i, i + n))
+      if (globHit(p, protectedPaths)) return `protected path ${p}`;
+    i += n;
   }
+  // Nothing this push adds may carry a credential: added lines and commit messages.
+  const patch = await runGit(
+    undefined,
+    [
+      '--no-replace-objects',
+      'diff',
+      '--text',
+      '--no-textconv',
+      '--no-ext-diff',
+      '--no-color',
+      '-U0',
+      `refs/jm/base...${ref}`,
+    ],
+    '',
+    { gitDir: bareDir },
+  );
+  const added = patch
+    .split('\n')
+    .filter((l) => l.startsWith('+') && !l.startsWith('+++'))
+    .join('\n');
+  const messages = await runGit(
+    undefined,
+    ['--no-replace-objects', 'log', '--format=%B', `${since}..${ref}`, '^refs/jm/base'],
+    '',
+    { gitDir: bareDir },
+  );
+  if (containsSecret(added, secrets) || containsSecret(messages, secrets)) return 'secret in diff';
   const log = await runGit(
     undefined,
     [
@@ -605,6 +648,7 @@ async function guardedPush(
         branch,
         o.protectedPaths ?? [],
         lease === '' ? 'refs/jm/base' : lease,
+        o.secrets ?? [],
       );
       if (refusal) throw new Error(refusal);
     }

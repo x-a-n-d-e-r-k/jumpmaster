@@ -119,6 +119,7 @@ async function resolveSteps(
       as,
       base,
       protectedPaths: payload.protectedPaths,
+      secrets: ctx.secrets,
     },
   );
   return done({ status: 'completed', headSha });

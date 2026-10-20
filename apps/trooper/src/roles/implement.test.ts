@@ -144,7 +144,12 @@ describe('runImplement', () => {
     expect(r).toMatchObject({ status: 'rate_limited', headSha: 'ck1' });
     expect(w.calls).toContainEqual(['commitIfDirty', repoDir, 'wip: checkpoint', null]);
     const push = w.calls.find((c) => c[0] === 'pushNewBranch');
-    expect(push?.[6]).toEqual({ as: null, base: 'main', protectedPaths: ['.github/**'] });
+    expect(push?.[6]).toEqual({
+      as: null,
+      base: 'main',
+      protectedPaths: ['.github/**'],
+      secrets: ctx.secrets,
+    });
   });
 
   test('a dirty tree with nothing committed is still checkpointed', async () => {

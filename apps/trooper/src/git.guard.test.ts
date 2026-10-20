@@ -220,6 +220,51 @@ describe('the pre-push guard', () => {
     expect(w.remoteTip()).toBe(w.s0);
   });
 
+  test('a protected path git would C-quote (non-ASCII) is still refused', async () => {
+    const w = await world('quoted');
+    mkdirSync(join(w.dir, '.github', 'workflows'), { recursive: true });
+    writeFileSync(join(w.dir, '.github', 'workflows', 'é.yml'), 'on: push\n');
+    await commitIfDirty(w.dir, 'ci: add');
+    await expect(
+      pushExistingBranch(w.dir, B, 't', w.target, w.s0, undefined, guard),
+    ).rejects.toThrow(/^protected path \.github\/workflows\/é\.yml/);
+    expect(w.remoteTip()).toBe(w.s0);
+  });
+
+  test('a bare protected directory entry (e.g. a .claude symlink) is refused', async () => {
+    const w = await world('bare-dir');
+    symlinkSync('docs', join(w.dir, '.claude'));
+    await commitIfDirty(w.dir, 'chore: link');
+    await expect(
+      pushExistingBranch(w.dir, B, 't', w.target, w.s0, undefined, {
+        base: 'main',
+        protectedPaths: ['.claude/**'],
+      }),
+    ).rejects.toThrow(/^protected path \.claude$/);
+  });
+
+  test('a secret in the pushed diff is refused', async () => {
+    const w = await world('secret-file');
+    writeFileSync(join(w.dir, 'leak.txt'), 'token=sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUVWX\n');
+    await commitIfDirty(w.dir, 'feat: leak');
+    await expect(
+      pushExistingBranch(w.dir, B, 't', w.target, w.s0, undefined, guard),
+    ).rejects.toThrow(/^secret in diff/);
+    expect(w.remoteTip()).toBe(w.s0);
+  });
+
+  test('a known secret value in a commit message is refused', async () => {
+    const w = await world('secret-msg');
+    writeFileSync(join(w.dir, 'ok.txt'), 'fine\n');
+    await commitIfDirty(w.dir, 'feat: plain-looking-secret-1234');
+    await expect(
+      pushExistingBranch(w.dir, B, 't', w.target, w.s0, undefined, {
+        ...guard,
+        secrets: ['plain-looking-secret-1234'],
+      }),
+    ).rejects.toThrow(/^secret in diff/);
+  });
+
   test('push refuses a commit with a foreign author', async () => {
     const w = await world('foreign');
     git(
