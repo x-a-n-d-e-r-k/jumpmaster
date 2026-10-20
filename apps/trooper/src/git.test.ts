@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -32,13 +33,15 @@ const git = (cwd: string, ...args: string[]): string =>
   execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 
 async function clone(name: string): Promise<string> {
-  const dir = join(tmp, name);
+  const home = join(tmp, name);
+  mkdirSync(home);
+  const dir = join(home, 'repo');
   await cloneRepo({ owner: 'o', name: 'r', token: 'tok', dir, url: url() });
   return dir;
 }
 
 beforeAll(() => {
-  tmp = mkdtempSync(join(tmpdir(), 'git-'));
+  tmp = mkdtempSync(join(realpathSync(tmpdir()), 'git-'));
   origin = join(tmp, 'origin.git');
   const seed = join(tmp, 'seed');
   git(tmp, 'init', '--bare', '-b', 'main', origin);
@@ -81,7 +84,7 @@ test('pushNewBranch refuses to overwrite an existing remote branch', async () =>
   const dirB = await clone('pb');
   for (const d of [dirA, dirB]) {
     await prepareBranch(d, 'agent/issue-1', 'main');
-    writeFileSync(join(d, `${d.endsWith('pa') ? 'x' : 'y'}.txt`), 'z\n');
+    writeFileSync(join(d, `${d.includes('/pa/') ? 'x' : 'y'}.txt`), 'z\n');
     await commitIfDirty(d, 'feat: z');
   }
   await pushNewBranch(dirA, 'agent/issue-1', '', target());
@@ -92,12 +95,19 @@ test('pushNewBranch refuses to overwrite an existing remote branch', async () =>
 
 test('a silent git failure leaks neither the token nor its base64 form', async () => {
   const dir = await clone('silent');
-  writeFileSync(join(dir, 'a.txt'), 'changed\n');
   const token = 'ghp_SILENTTOKEN1234567890abcdef';
-  const err = await runGit(dir, ['diff', '--quiet'], token).catch((e: Error) => e);
+  const mirror = join(dir, '..', 'mirror');
+  const err = await runGit(
+    undefined,
+    ['rev-parse', '--verify', '--quiet', 'refs/heads/nope'],
+    token,
+    {
+      gitDir: realpathSync(mirror),
+    },
+  ).catch((e: Error) => e);
   expect(err).toBeInstanceOf(Error);
   const msg = (err as Error).message;
-  expect(msg).toContain('git diff failed (exit 1)');
+  expect(msg).toContain('git rev-parse failed (exit 1)');
   expect(msg).not.toContain(token);
   expect(msg).not.toContain(Buffer.from(`x-access-token:${token}`).toString('base64'));
 });
@@ -208,10 +218,15 @@ test('push sweeps other processes before the token is used', async () => {
 test('the auth header is scoped to https://github.com/ only', async () => {
   const dir = await clone('scoped');
   const token = 'ghp_SCOPEDTOKEN1234567890abcd';
+  const gitDir = realpathSync(join(dir, '..', 'mirror'));
   expect(
-    await runGit(dir, ['config', '--get', 'http.https://github.com/.extraheader'], token),
+    await runGit(undefined, ['config', '--get', 'http.https://github.com/.extraheader'], token, {
+      gitDir,
+    }),
   ).toBe(authHeader(token));
-  await expect(runGit(dir, ['config', '--get', 'http.extraheader'], token)).rejects.toThrow();
+  await expect(
+    runGit(undefined, ['config', '--get', 'http.extraheader'], token, { gitDir }),
+  ).rejects.toThrow();
 });
 
 test('remoteBranchExists reports whether the branch is on the remote', async () => {
