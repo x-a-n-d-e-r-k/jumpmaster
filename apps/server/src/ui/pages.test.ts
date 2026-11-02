@@ -89,3 +89,108 @@ describe('renderDrop', () => {
     expect(html).toContain('&lt;script&gt;');
   });
 });
+
+const usageState = {
+  status: 'rejected' as const,
+  pausedUntil: '2026-01-01T05:00:00.000Z',
+  fiveHourUtil: 0.97,
+  fiveHourResetsAt: null,
+  sevenDayUtil: 0.41,
+  sevenDayResetsAt: null,
+  observedAt: '2026-01-01T00:30:00.000Z',
+  pausedAt: null,
+  pauseConfirmed: true,
+  probeDropId: null,
+  probeNotBefore: null,
+  causeDropId: 'd-cause',
+  causeWorkItemId: 1,
+  updatedAt: null,
+};
+
+describe('renderHome loop state', () => {
+  test('shows usage gate', () => {
+    const html = renderHome({
+      zones: [z],
+      items: [],
+      drops: [],
+      usage: { gate: 'closed', state: usageState },
+    });
+    expect(html).toContain('<h2>Usage</h2>');
+    expect(html).toContain('closed');
+    expect(html).toContain('2026-01-01T05:00:00.000Z');
+    expect(html).toContain('97%');
+    expect(html).toContain('41%');
+    expect(html).toContain('2026-01-01T00:30:00.000Z');
+    expect(html).toContain('d-cause');
+  });
+
+  test('shows verdict and attempts', () => {
+    const html = renderHome({
+      zones: [z],
+      items: [item],
+      drops: [{ ...drop, role: 'review' }],
+      details: new Map([
+        [
+          1,
+          {
+            headSha: 'abcdef1234567890',
+            verdict: { decision: 'approve', forced: true, summary: 'fine' },
+            attempts: { heal: 2, review: 1 },
+          },
+        ],
+      ]),
+    });
+    expect(html).toContain('abcdef1');
+    expect(html).not.toContain('abcdef12345');
+    expect(html).toContain('approve (forced)');
+    expect(html).toContain('heal 2');
+    expect(html).toContain('review 1');
+    expect(html).toContain('<td>review</td>');
+  });
+
+  test('escapes verdict summary', () => {
+    const html = renderHome({
+      zones: [z],
+      items: [item],
+      drops: [],
+      details: new Map([
+        [
+          1,
+          {
+            headSha: 'h',
+            verdict: { decision: 'request_changes', forced: false, summary: '<svg onload=x>' },
+            attempts: {},
+          },
+        ],
+      ]),
+    });
+    expect(html).not.toContain('<svg onload=x>');
+    expect(html).toContain('&lt;svg onload=x&gt;');
+  });
+
+  test('lists unknown and failed outbox ops', () => {
+    const op = (id: string, state: 'unknown' | 'failed', error: string | null) => ({
+      id,
+      opKey: `k-${id}`,
+      kind: 'merge' as const,
+      workItemId: 1,
+      payloadJson: '{}',
+      state,
+      resultJson: null,
+      error,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const html = renderHome({
+      zones: [z],
+      items: [item],
+      drops: [],
+      outbox: [op('o1', 'unknown', null), op('o2', 'failed', '<b>409</b>')],
+    });
+    expect(html).toContain('<h2>Outbox</h2>');
+    expect(html).toContain('o1');
+    expect(html).toContain('unknown');
+    expect(html).toContain('o2');
+    expect(html).toContain('&lt;b&gt;409&lt;/b&gt;');
+  });
+});

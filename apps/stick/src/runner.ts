@@ -17,6 +17,20 @@ const MAX_BATCH = 50;
 const MAX_BATCH_BYTES = 512 * 1024;
 const FLUSH_MS = 1000;
 export const STICK_LABEL = 'jumpmaster.stick';
+const DEFAULT_IMAGE = 'jumpmaster-trooper:dev';
+
+/**
+ * Images this stick will run, matched exactly (no prefix or tag wildcards). `JM_ALLOWED_IMAGES` is
+ * a comma list; unset or empty allows only the configured trooper image and the dev default.
+ */
+export function allowedImages(env: NodeJS.ProcessEnv): Set<string> {
+  const listed = (env.JM_ALLOWED_IMAGES ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s !== '');
+  if (listed.length > 0) return new Set(listed);
+  return new Set([...(env.JM_TROOPER_IMAGE ? [env.JM_TROOPER_IMAGE] : []), DEFAULT_IMAGE]);
+}
 
 /**
  * Force-removes trooper containers this stick left behind (e.g. it crashed mid-drop), so a
@@ -43,12 +57,24 @@ export async function runDrop(
     stickId: string;
     heartbeatMs?: number;
     image?: string;
+    /** Defaults to `allowedImages(process.env)`. */
+    allowedImages?: Set<string>;
   },
 ): Promise<void> {
   const { client, driver } = deps;
   const { dropId, epoch } = payload;
+  const image = payload.image || deps.image || TROOPER_IMAGE;
+  if (!(deps.allowedImages ?? allowedImages(process.env)).has(image)) {
+    await client.postResult(dropId, epoch, {
+      status: 'failed',
+      role: payload.role,
+      reason: `image not allowed: ${image}`,
+      gates: [],
+    });
+    return;
+  }
   const handle = await driver.start({
-    image: deps.image ?? TROOPER_IMAGE,
+    image,
     payload: JSON.stringify(payload),
     name: `jumpmaster-drop-${dropId}-${epoch}`,
     labels: {
@@ -134,6 +160,7 @@ export async function runDrop(
     } else {
       await client.postResult(dropId, epoch, {
         status: 'failed',
+        role: payload.role,
         reason: `trooper exited ${exitCode} without result`,
         gates: [],
       });
@@ -146,7 +173,7 @@ export async function runDrop(
     if (!stale && !cancelled) {
       const reason = `stick runner error: ${e instanceof Error ? e.message : String(e)}`;
       await client
-        .postResult(dropId, epoch, { status: 'failed', reason, gates: [] })
+        .postResult(dropId, epoch, { status: 'failed', role: payload.role, reason, gates: [] })
         .catch(() => {});
     }
   } finally {

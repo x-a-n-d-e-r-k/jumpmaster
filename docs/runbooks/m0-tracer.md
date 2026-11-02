@@ -6,6 +6,10 @@ request opened by an agent, with gate results recorded. You merge the PR by hand
 Everything runs on one machine: the server and the stick as plain Node processes,
 and the trooper as a Docker container started by the stick.
 
+> **From M1 on**, the server also requires `JM_GITHUB_REVIEWER_TOKEN` (a second bot
+> account) and merges PRs itself. Follow the [M1 loop runbook](m1-loop.md) for the
+> current build; this page stays as the M0 record.
+
 ## Prerequisites
 
 - Node 24 or newer, npm, Docker (daemon running), git.

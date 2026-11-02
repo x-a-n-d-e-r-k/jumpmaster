@@ -1,4 +1,5 @@
 {
+  "_env": "Required env: JM_CLAUDE_TOKEN, JM_GITHUB_AUTHOR_TOKEN, JM_GITHUB_REVIEWER_TOKEN (a different account from the author), JM_JOIN_TOKEN. Optional: JM_GITHUB_READ_TOKEN (read-only, used by review drops when reviewReadToken is true).",
   "listen": { "host": "127.0.0.1", "port": 7420 },
   "dataDir": "./data",
   "pollSeconds": 60,
@@ -8,7 +9,9 @@
       "repo": "your-org/your-repo",
       "readyLabel": "agent-ready",
       "gates": [{ "name": "test", "run": "npm test", "timeoutMinutes": 20 }],
-      "image": "jumpmaster-trooper:latest"
+      "image": "jumpmaster-trooper:latest",
+      "models": { "review": "claude-opus-5-5" },
+      "reviewReadToken": false
     }
   ]
 }

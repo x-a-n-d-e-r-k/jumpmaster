@@ -56,14 +56,14 @@
 - **Concurrency:** at most one active drop per item (`one_active_drop` index; a unique-constraint error on insert means "already active"), and at most one active implement drop per zone. Review, heal and resolve drops for different items run concurrently, limited only by stick slots. At most one merge op per zone per pass; zones are processed sequentially.
 - **Deadlines:** CI wait `ciDeadlineMinutes: 45` from the first time the current head was observed; `ciRequired: true` by default. Missing forge data (null PR, compare or issue read) waits, capped by the same deadline from `waiting_since`.
 - **Inside the trooper (R1, v3 Q2/Q5):** `work/` is root-owned 0755 and holds the bare mirror `work/mirror`, which root clones with the token before any agent process exists. The agent clones from it, without a token, into its own `$HOME/repo` (`/home/agent/repo`); no chown exists anywhere. Root git always sets `GIT_DIR` and `GIT_CEILING_DIRECTORIES`, and `lstat`-validates the mirror (uid 0, directory, not a symlink) before every call. Gates run as uid `gate` (10002) in a fresh `/home/gate/repo`, cloned as the gate uid from a bundle of the agent repo's `HEAD`, after root sweeps every agent-uid process; there is no shared group or setgid, and the agent umask is 0022. Cleanup of agent files runs as the agent. Every working-copy git command (`status`, `add`, `commit`, `checkout`, `merge`, `aheadOfBase`, dirty-tree and conflict-marker checks) runs as the agent uid, and `safe.directory` is never overridden. The pristine push fetches from the agent repo with `upload-pack` running as the agent uid (`setpriv`), then pushes as root from a root-owned bare repo. Extra `GIT_CONFIG_*` keys append after the auth header (index ≥ 1). Root reads agent-written files only via `readAgentFile`. Uid switching happens only when `JM_CONTAINER === '1'` and the process is root.
-- **Time:** every timestamp written by server code comes from a caller-supplied `now`. Tests never use the wall clock; jitter takes an injected `rand`.
+- **Time:** every timestamp written by server code comes from a caller-supplied `now` (Task 1 gives the M0 writers `insertDrop`, `setWorkItemState` and `upsertWorkItem` an optional `now`; every M1 caller passes it). Tests never use the wall clock; jitter takes an injected `rand`, threaded through `StickRouteDeps`, `ResultDeps` and `expireLeases` (Tasks 9, 10).
 - **Schema:** `schema.sql` is frozen as migration v1; never edit it.
 - **Protocol header:** `x-jumpmaster-protocol: 1` is unchanged; payload changes stay backward-compatible within this branch only.
 - **Known limitation (R13):** "already on base" is detected by `compare.aheadBy === 0` (ancestry). A change squash- or rebase-landed under different SHAs is not detected; such a closed-issue item parks `issue closed` instead of `done`. Tree-compare is deferred.
 
 ## Review Focus
 
-1. **A human force-pushes to the agent branch after an approval.** The approval no longer counts; a fresh review runs on the new head, and no merge happens on the old verdict. Task 7, `head change invalidates approval`.
+1. **A human force-pushes to the agent branch after an approval.** The approval no longer counts; a fresh review runs on the new head, and no merge happens on the old verdict. Task 11, `an approval on the previous head is not in verdictsOnHead`; Task 12, `force-push after approval reviews the new head and never merges the old one`; Task 7, `head change invalidates approval`.
 2. **The repo has no CI and `ciRequired` is false**, as in the M0 test repo. It merges once the verdict is approve and posted. With `ciRequired: true` it waits, then parks `no pipeline` at the deadline. Task 7, `no CI honours ciRequired`.
 3. **The merge call returns 5xx after GitHub actually merged.** Exactly one merge call; the outbox read-back marks it done and the item becomes `done`/`merged`. Task 5, `merge 5xx after success is resolved by read-back`.
 4. **The agent plants `core.fsmonitor`, a pre-commit hook and a clean filter in its working copy.** None of them runs on the root path (mirror clone, pristine fetch, push). Task 15, `planted fsmonitor, hook and clean filter never run on the root path`.
@@ -138,16 +138,18 @@ docs/runbooks/m1-loop.md                  operator procedure for the M1 real-rep
     - `OutboxRow = { id: string; opKey: string; kind: 'create_pr' | 'post_review' | 'merge'; workItemId: number; payloadJson: string; state: OutboxState; resultJson: string | null; error: string | null; createdAt: string; updatedAt: string }`
     - `UsageStateRow = { status: 'allowed' | 'allowed_warning' | 'rejected' | null; pausedUntil: string | null; fiveHourUtil: number | null; fiveHourResetsAt: string | null; sevenDayUtil: number | null; sevenDayResetsAt: string | null; observedAt: string | null; pausedAt: string | null; pauseConfirmed: boolean; probeDropId: string | null; probeNotBefore: string | null; causeDropId: string | null; causeWorkItemId: number | null; updatedAt: string | null }`
     - `WorkItem` gains `retryLabelSeen: boolean`, `waitingSince: string | null`.
-    - `Drop` gains `fingerprint`, `prNumber`, `headSha`, `inputJson`, `chargedKey: AttemptKey | null` (all nullable). `NewDrop` and `insertDrop` accept them; `DROP_COLUMN` gets an entry for each.
+    - `Drop` gains `fingerprint`, `prNumber`, `headSha`, `inputJson`, `chargedKey: string | null` (all nullable; `chargedKey` is a comma-separated list of the `AttemptKey`s the enqueue charged, e.g. `resolve_total` or `resolve,resolve_total`; Task 6). `NewDrop` and `insertDrop` accept them; `DROP_COLUMN` gets an entry for each.
+    - M0 writers gain an optional trailing `now?: Date` used for every timestamp they write, falling back to the wall clock only when omitted: `insertDrop(db, d, now?)` (`created_at`), `setWorkItemState(db, id, state, reason?, now?)`, `upsertWorkItem(db, w, now?)`. Every M1 caller passes `now`.
   - Functions (all writes take `now: Date`):
-    - `getWorkItem(db, id): WorkItem | undefined`; `setWaitingSince(db, id, at: string | null): void`
+    - `getWorkItem(db, id): WorkItem | undefined`; `setWaitingSince(db, id, at: string | null): void`; `setRetryLabelSeen(db, id, seen: boolean): void`
+    - `migrate(db)` returns the schema version after migrating (2), not the number of migrations applied.
     - `getPullRequest(db, itemId): PullRequestRow | undefined`
     - `upsertPullRequest(db, row: Omit<PullRequestRow, 'headFirstSeenAt' | 'observedAt'>, now): void` — resets `headFirstSeenAt` only when `headSha` changes; mirrors `number` into `work_items.pr_number` (UI copy; `pull_requests` is authoritative).
     - `insertVerdict(db, v: VerdictRow): boolean` — `INSERT OR IGNORE`; returns whether a row was inserted.
     - `latestVerdict(db, itemId): VerdictRow | undefined` (newest by `created_at`, then rowid); `verdictsForHead(db, itemId, headSha): VerdictRow[]` (oldest first).
     - `getAttempts(db, itemId, key: AttemptKey): { count: number; lastFingerprint: string | null }`; `setAttempts(db, itemId, key, count, fingerprint: string | null): void`; `resetAttempts(db, itemId): void`.
     - `activeDropFor(db, itemId): Drop | undefined`
-    - `getOutbox(db, opKey): OutboxRow | undefined`; `insertOutbox(db, row: Omit<OutboxRow, 'resultJson' | 'error' | 'updatedAt'>): boolean` (`INSERT OR IGNORE`); `updateOutbox(db, opKey, patch: Pick<Partial<OutboxRow>, 'state' | 'resultJson' | 'error'>, now): void`; `listOutbox(db, states: OutboxState[], zoneId?: string): OutboxRow[]` (joined through `work_items`); `deleteFailedOutbox(db, itemId): number`.
+    - `getOutbox(db, opKey): OutboxRow | undefined`; `insertOutbox(db, row: Omit<OutboxRow, 'resultJson' | 'error' | 'updatedAt'>): boolean` (`INSERT OR IGNORE`); `updateOutbox(db, opKey, patch: Pick<Partial<OutboxRow>, 'state' | 'resultJson' | 'error'>, now): void`; `listOutbox(db, states: OutboxState[], zoneId?: string): OutboxRow[]` (joined through `work_items`); `deleteFailedOutbox(db, itemId, kind?: OutboxRow['kind']): number` (all kinds when `kind` is omitted).
     - `getUsageState(db): UsageStateRow`; `setUsageState(db, patch: Partial<UsageStateRow>, now): void`.
 
 - [ ] **Step 1: Write failing tests**
@@ -161,10 +163,18 @@ test('an M0 database is stamped v1 then upgraded without data loss', () => {
 });
 test('migrate is idempotent', () => { const f = tmpDbFile(); openDb(f).close(); expect(migrate(openDb(f))).toBe(2); });
 test('usage_state row 1 is seeded', () => expect(getUsageState(openDb(tmpDbFile())).status).toBeNull());
-test('upsertPullRequest resets headFirstSeenAt only when the head changes', () => { /* t0 sha1, t1 sha1 → t0; t2 sha2 → t2 */ });
+test('upsertPullRequest resets headFirstSeenAt only when the head changes', () => {
+  const row = { workItemId: 1, number: 5, headRef: 'agent/issue-1', state: 'open' as const };
+  upsertPullRequest(db, { ...row, headSha: 'sha1' }, t0); upsertPullRequest(db, { ...row, headSha: 'sha1' }, plus(t0, MIN));
+  expect(getPullRequest(db, 1)?.headFirstSeenAt).toBe(t0.toISOString());
+  upsertPullRequest(db, { ...row, headSha: 'sha2' }, plus(t0, 2 * MIN));
+  expect(getPullRequest(db, 1)).toMatchObject({ headSha: 'sha2', headFirstSeenAt: plus(t0, 2 * MIN).toISOString() });
+});
 test('insertVerdict is idempotent per id', () => { expect(insertVerdict(db, v)).toBe(true); expect(insertVerdict(db, v)).toBe(false); });
+test('insertDrop and setWorkItemState use the given now', () => { insertDrop(db, newDrop, t0); setWorkItemState(db, 1, 'in_flight', undefined, t0); expect(getDrop(db, newDrop.id)?.createdAt).toBe(t0.toISOString()); });
+test('deleteFailedOutbox can limit to one kind', () => { seedFailed('create_pr'); seedFailed('merge'); expect(deleteFailedOutbox(db, 1, 'create_pr')).toBe(1); expect(listOutbox(db, ['failed'])).toHaveLength(1); });
 // also: 'upsertPullRequest mirrors work_items.pr_number'; 'latestVerdict returns the newest verdict'; 'insertDrop round-trips fingerprint, prNumber, headSha,
-//   inputJson, chargedKey'
+//   inputJson, chargedKey'; 'setRetryLabelSeen round-trips'
 ```
 
 - [ ] **Step 2: Run** `npm test -w apps/server -- db`. Expected: FAIL (`migrations.js` missing).
@@ -177,7 +187,7 @@ test('insertVerdict is idempotent per id', () => { expect(insertVerdict(db, v)).
 ### Task 2: Role-typed protocol
 
 **Files:**
-- Modify: `packages/protocol/src/index.ts`, `apps/server/src/api/sticks.ts` (`buildPayload`: add `image: zone.image`, `resume: false`, `protectedPaths: []` until Task 8), `apps/trooper/src/main.ts` (`forgeToken` optional; throw `forge token required for implement` when missing), `apps/stick/src/runner.ts` (synthesized `failed` results set `role: payload.role`)
+- Modify: `packages/protocol/src/index.ts`, `apps/server/src/api/sticks.ts` (`buildPayload`: add `image: zone.image`, `resume: false`, `protectedPaths: []` until Task 8), `apps/trooper/src/main.ts` (`forgeToken` optional; throw `forge token required for implement` when missing; the redaction `secrets` list drops an absent token), `apps/trooper/src/claude.ts` (imports `IMPLEMENT_OUTPUT_SCHEMA` from `@jumpmaster/protocol` instead of defining it), `apps/stick/src/runner.ts` (synthesized `failed` results set `role: payload.role`)
 - Test: `packages/protocol/src/index.test.ts`; fixtures in `apps/trooper/src/main.test.ts`, `apps/stick/src/runner.test.ts`, `apps/server/src/api/sticks.test.ts` gain `image`
 
 **Interfaces:**
@@ -198,7 +208,7 @@ test('insertVerdict is idempotent per id', () => { expect(insertVerdict(db, v)).
   - `MergeOutcome = 'clean' | 'conflicts' | 'up_to_date'`.
   - `RateLimitEventData = { status: 'allowed' | 'allowed_warning' | 'rejected'; resetsAt?: string; rateLimitType?: string; unifiedWindows?: { five_hour?: { utilization: number; resetsAt?: string }; seven_day?: { utilization: number; resetsAt?: string } } }` (all `resetsAt` ISO strings), `RateLimitEventDataSchema`. The trooper emits exactly these keys in `rate_limit` events.
   - `DropResult`: `status` adds `interrupted` (max turns; `headSha` set if a checkpoint was pushed) and `rate_limited` (usage limit; same). Adds `role?: Role` (optional; the server trusts `drop.role`), `verdict?: Verdict`, `mergeOutcome?: MergeOutcome`, `rateLimit?: RateLimitEventData` (the last rate-limit report of the run; the only source of a pause).
-  - `REVIEW_OUTPUT_SCHEMA`, `IMPLEMENT_OUTPUT_SCHEMA`: plain JSON-schema objects (moved from `apps/trooper/src/claude.ts`).
+  - `REVIEW_OUTPUT_SCHEMA` (new; mirrors `VerdictSchema`: `decision`, `summary`, `findings[{ severity, file?, detail }]`) and `IMPLEMENT_OUTPUT_SCHEMA` (moved from `apps/trooper/src/claude.ts`, which now imports it): plain JSON-schema objects.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -210,6 +220,7 @@ test('verdict decision is validated', () => expect(() => VerdictSchema.parse({ d
 test('role is optional on results', () => expect(DropResultSchema.parse({ status: 'failed', gates: [] }).role).toBeUndefined());
 test('rate limit event data keeps windows', () => expect(RateLimitEventDataSchema.parse({ status: 'allowed', unifiedWindows: { seven_day: { utilization: 0.5 } } }).unifiedWindows?.seven_day?.utilization).toBe(0.5));
 test('rate_limited result carries its rate limit', () => expect(DropResultSchema.parse({ status: 'rate_limited', gates: [], rateLimit: { status: 'rejected' } }).rateLimit?.status).toBe('rejected'));
+test('a REVIEW_OUTPUT_SCHEMA-shaped sample parses as a Verdict', () => expect(VerdictSchema.parse({ decision: 'approve', summary: 's', findings: [{ severity: 'minor', file: 'a.ts', detail: 'd' }] }).findings).toHaveLength(1));
 // also: 'rate_limited and interrupted are valid statuses'; 'payload requires protectedPaths'
 ```
 
@@ -271,7 +282,7 @@ test('modelFor falls back to zone model', () => expect(modelFor({ ...zone, model
 ### Task 4: GitHub adapter extensions
 
 **Files:**
-- Modify: `apps/server/src/forge/github.ts`
+- Modify: `apps/server/src/forge/github.ts`, `apps/server/src/test/fakes.ts` (the M0 `fakeForge` gains stub implementations of every new `Forge` method — throwing `not implemented in fakeForge` — so `npm run typecheck` stays green until Task 5 replaces them)
 - Test: `apps/server/src/forge/github.test.ts`
 
 **Interfaces:**
@@ -319,7 +330,7 @@ test('adapter errors carry status', async () => { nock(api).put(/merge/).reply(4
 //   paginates and keeps previousPath'
 ```
 
-- [ ] **Steps 2–4:** run `npm test -w apps/server -- forge` (expected FAIL); implement; run `npm test -w apps/server -- forge` (expected PASS).
+- [ ] **Steps 2–4:** run `npm test -w apps/server -- forge` (expected FAIL); implement; run `npm run typecheck && npm test -w apps/server` (expected PASS).
 - [ ] **Step 5: Commit** `feat(server): forge reads and writes for the PR lifecycle`
 
 ---
@@ -334,7 +345,25 @@ test('adapter errors carry status', async () => { nock(api).put(/merge/).reply(4
 **Interfaces:**
 - Consumes: `Forge`, `PullFacts`, `ForgeReview`, `ForgeError` (Task 4); `OutboxRow`, outbox repo functions (Task 1).
 - Produces:
-  - `fakeForgePair(opts: { issues: ForgeIssue[]; trusted: string[]; defaultBranch?: string; authorLogin?: string; reviewerLogin?: string }): { author: FakeForge; reviewer: FakeForge; state: FakeForgeState }` — both share `state` (issues, pulls, branches, checks, reviews, merges, files, rules). `FakeForge` adds `failNext(method: keyof Forge, mode: 'throw' | '5xx' | '5xx-after-success' | { status: number; message?: string })` and `calls: { method: string; identity: 'author' | 'reviewer'; args: unknown[] }[]`; failures throw `ForgeError` with `status`. The M0 `fakeForge({ issues, trusted })` factory and its `created` list keep working.
+  - `fakeForgePair(opts: { issues: ForgeIssue[]; trusted: string[]; defaultBranch?: string; authorLogin?: string; reviewerLogin?: string }): { author: FakeForge; reviewer: FakeForge; state: FakeForgeState }` — both share `state` (issues, pulls, branches, checks, reviews, merges, files, rules). `FakeForge` adds `failNext(method: keyof Forge, mode: 'throw' | '5xx' | '5xx-after-success' | { status: number; message?: string })` and `calls: { method: string; identity: 'author' | 'reviewer'; args: unknown[] }[]`; failures throw `ForgeError` with `status`. The M0 `fakeForge({ issues, trusted })` factory and its `created` list keep working (Task 4's stubs are replaced by real in-memory implementations).
+  - `FakeForgeState` (later tasks depend on exactly this API):
+
+    | Member | Shape / behaviour |
+    |---|---|
+    | `pulls` | `Map<number, PullFacts>`; PR numbers allocated from 1 in creation order (by `findOrCreatePullRequest` or `addPull`) |
+    | `addPull(p: Partial<PullFacts> & { headRef: string; headSha: string; author: string; number?: number }): PullFacts` | open, unmerged, `headRepo` = base repo, `baseRef` = `defaultBranch`, `title` `Issue <n>` for `agent/issue-<n>`; also sets `branches[headRef] = headSha` |
+    | `reopen(number)`, `close(number)`, `markMerged(number)` | set PR state; `markMerged` also records nothing in `merges` (a human merge) |
+    | `setHead(number, sha)` | moves the PR head and `branches[headRef]` (force-push) |
+    | `branches` | `Map<string, string>` (branch → sha); `deleteBranch(name)` removes it and closes any open PR on it |
+    | `issues` | `Map<number, { state: 'open' \| 'closed'; labels: string[] }>` seeded from `opts.issues`; `closeIssue(n)`, `reopenIssue(n)`, `setLabels(n, labels)` |
+    | `checks` | `Map<string, ChecksFacts>` keyed by sha; default `{ state: 'none', names: [] }` |
+    | `compares` | `Map<string, CompareFacts>` keyed `<base>...<head>`; default `{ aheadBy: 1, behindBy: 0, baseSha: 'base0', mergeBaseSha: 'base0' }` |
+    | `reviews` | `(ForgeReview & { pr: number })[]` (`listReviews(n)` filters by `pr`; `createReview` appends with `author` = that identity's login; test helper `review({...})` defaults `pr: 1`) |
+    | `files` | `Map<string, string>` keyed `<ref>:<path>` (read by `getFileAt`); `pullFiles: Map<number, PullFiles>` (default `{ files: [{ path: 'src/a.ts' }], complete: true }`) |
+    | `rules` | `{ author: BranchRulesRead; reviewer: BranchRulesRead }`; default for both `{ kind: 'ok', rules: { requiredApprovals: 1, dismissStaleOnPush: true, requiredChecks: [], unpinnedChecks: [], viewerCanBypass: false, viewerIsAdmin: false } }` |
+    | `merges` | `{ number: number; sha: string; title: string; message: string }[]` (one entry per successful `merge` call); a merge sets the PR `merged` |
+
+    Default logins: `authorLogin` `author-bot`, `reviewerLogin` `reviewer-bot`.
   - `ForgePair = { author: Forge; reviewer: Forge }`.
   - `OpKind = 'create_pr' | 'post_review' | 'merge'`; `OpResult = { state: OutboxState; result?: unknown; error?: string }`.
   - `opKeys`: `pr:<itemId>:<headSha>`, `review:<itemId>:<headSha>:<dropId>`, `merge:<itemId>:<headSha>`.
@@ -354,7 +383,7 @@ test('adapter errors carry status', async () => { nock(api).put(/merge/).reply(4
     | `merge` | `getPull`; `merged` → done | `merge` with `sha`, `method`, `title`, `message` | author |
 
     Thrown without status, or status ≥ 500 → `unknown`. Status 4xx → `failed`, `error` = message.
-  - `resolveUnknown(db, forges, zoneId: string, now: Date, maxAgeMinutes: number): Promise<number>` — lookup for every `unknown` row of that zone (forges are per zone); returns rows marked `done`. A row still unresolved after `maxAgeMinutes` (the zone's `ciDeadlineMinutes`) becomes `failed`, `error = 'unresolved after <n> min'`.
+  - `resolveUnknown(db, forges, zoneId: string, now: Date, maxAgeMinutes: number): Promise<number>` — lookup for every `unknown` row of that zone (forges are per zone); returns rows marked `done`. A row still unresolved `maxAgeMinutes` (the zone's `ciDeadlineMinutes`) after its `created_at` becomes `failed`, `error = 'unresolved after <n> min'`.
   - `markPendingUnknown(db, now): number` — startup: every `pending` row becomes `unknown`.
   - `sanitizeForgeText(text: string, secrets: string[], maxLen = 60_000): string` — replaces each secret with `[redacted]`; escapes `<!--` and `-->`; neutralises `@mentions` and bare autolinks by wrapping them in code spans; truncates to `maxLen`.
 
@@ -374,7 +403,7 @@ test('merge 405 is failed with the message', async () => { f.author.failNext('me
 test('sanitizeForgeText redacts secrets and escapes markers and mentions', () => expect(sanitizeForgeText('tok @org/team <!-- jm:op:x -->', ['tok'])).not.toMatch(/tok|<!--|(^|\s)@org/));
 // also: 'a done op is never re-issued'; 'runOp on a failed row never writes'; 'post_review finds its own marker instead of posting twice'; 'post_review uses
 //   the reviewer identity'; 'markPendingUnknown flips pending rows'; 'resolveUnknown ignores rows of
-//   other zones'
+//   other zones'; 'FakeForgeState numbers PRs from 1 and addPull creates the branch'; 'a merge appends to state.merges and marks the PR merged'
 ```
 
 - [ ] **Step 2: Run** `npm test -w apps/server -- outbox`. Expected: FAIL.
@@ -395,7 +424,7 @@ test('sanitizeForgeText redacts secrets and escapes markers and mentions', () =>
 - Produces:
   - `fingerprint(parts: (string | number | null)[]): string` — sha256 of the parts joined with `\0`, first 16 hex chars.
   - `RATE_LIMIT_REQUEUE_MAX = 3`.
-  - `chargeBudget(db, itemId, key: 'heal' | 'resolve' | 'resume' | 'review', fp: string, budgets: Budgets): { ok: true } | { ok: false; reason: string }`:
+  - `chargeBudget(db, itemId, key: 'heal' | 'resolve' | 'resume' | 'review', fp: string, budgets: Budgets): { ok: true; charged: AttemptKey[] } | { ok: false; reason: string }` — `charged` lists exactly the keys whose count was incremented (`[]` for a free resolve's `resolve` part; e.g. `['resolve_total']` or `['resolve', 'resolve_total']`). Callers store `charged.join(',')` (or null when empty) as the drop's `chargedKey`. For `resume`, `fp` is ignored (pass `''`):
 
     | Key | Charged when | Limit |
     |---|---|---|
@@ -408,7 +437,7 @@ test('sanitizeForgeText redacts secrets and escapes markers and mentions', () =>
   - `chargeResolveConflict(db, itemId, budgets): boolean` — +1 on `resolve`; false once over `maxResolve`.
   - `chargeNoChange(db, itemId, budgets): boolean` — +1 on `no_change`; false once over `maxNoChange`.
   - `chargeRateLimitRequeue(db, itemId): boolean` — +1 on `rate_limit`; false once over `RATE_LIMIT_REQUEUE_MAX`.
-  - `refundCharge(db, itemId, key: AttemptKey): void` — −1, floor 0.
+  - `refundCharge(db, itemId, chargedKey: string | null): void` — −1 (floor 0) on each key in the comma-separated `chargedKey`; null is a no-op. A review charge whose fingerprint was new (count reset to 1) refunds to 0.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -417,7 +446,9 @@ test('heal stops at maxHeal', () => { for (let i = 0; i < 3; i++) expect(chargeB
 test('a clean resolve on a new fingerprint is free', () => { for (const fp of ['a', 'b', 'c', 'd']) expect(chargeBudget(db, 1, 'resolve', fp, b).ok).toBe(true); expect(getAttempts(db, 1, 'resolve').count).toBe(0); });
 test('resolve conflicts are charged', () => { expect(chargeResolveConflict(db, 1, b)).toBe(true); expect(chargeResolveConflict(db, 1, b)).toBe(true); expect(chargeResolveConflict(db, 1, b)).toBe(false); });
 test('free resolves stop at maxResolveTotal', () => { for (let i = 0; i < 6; i++) expect(chargeBudget(db, 1, 'resolve', `f${i}`, b).ok).toBe(true); expect(chargeBudget(db, 1, 'resolve', 'f9', b)).toEqual({ ok: false, reason: 'budget exhausted: resolve-total' }); });
-// also: 'review repeats only count on the same fingerprint'; 'rate-limit requeues stop after 3'; 'refundCharge restores one charge'
+test('a free resolve charges only resolve_total and refunds exactly that', () => { const r = chargeBudget(db, 1, 'resolve', 'a', b); expect(r).toEqual({ ok: true, charged: ['resolve_total'] }); chargeResolveConflict(db, 1, b); refundCharge(db, 1, 'resolve_total'); expect(getAttempts(db, 1, 'resolve_total').count).toBe(0); expect(getAttempts(db, 1, 'resolve').count).toBe(1); });
+test('a repeated resolve fingerprint charges both keys', () => { chargeBudget(db, 1, 'resolve', 'a', b); expect(chargeBudget(db, 1, 'resolve', 'a', b)).toEqual({ ok: true, charged: ['resolve', 'resolve_total'] }); });
+// also: 'review repeats only count on the same fingerprint'; 'rate-limit requeues stop after 3'; 'refundCharge(null) is a no-op'
 ```
 
 - [ ] **Steps 2–4:** run `npm test -w apps/server -- budgets` (expected FAIL); implement; run `npm test -w apps/server -- budgets` (expected PASS).
@@ -442,9 +473,10 @@ test('free resolves stop at maxResolveTotal', () => { for (let i = 0; i < 6; i++
       activeDrop: Drop | null;
       pr: PullFacts | null;
       issueState: 'open' | 'closed' | null;      // null = read failed
-      branchSha: string | null;
+      branchSha: string | null;                  // null = confirmed absent (404) only; a thrown read sets forgeUnavailable instead
       compare: CompareFacts | null;              // null = read failed
       checks: ChecksFacts;
+      forgeUnavailable: string | null;           // name of the first fresh read that threw (other than getPull); null when all reads succeeded
       requiredChecks: string[];                  // from BranchRules; [] when none
       verdictsOnHead: VerdictRow[];              // verdicts with headSha === pr.headSha, oldest first
       reviewOp: OpResult | null;                 // post_review row of the latest verdict on head ("verdictPosted")
@@ -468,7 +500,7 @@ test('free resolves stop at maxResolveTotal', () => { for (let i = 0; i < 6; i++
     | # | Condition | Action |
     |---|---|---|
     | 1 | `activeDrop` | wait `drop` |
-    | 2 | `pr === null` | wait `forge` (deadline; `pr`) |
+    | 2 | `pr === null`, or `forgeUnavailable !== null` | wait `forge` (deadline; `pr`, or the `forgeUnavailable` name) — a failed read never becomes an empty list or a deleted branch |
     | 3 | `pr.merged` or `mergeOp.state === 'done'` | done `merged` |
     | 4 | `pr.state === 'closed'` | park `pr closed` |
     | 5 | `pr.headSha === null` | wait `forge` (deadline; `head`) — GitHub lag, not an orphan |
@@ -511,13 +543,18 @@ test('free resolves stop at maxResolveTotal', () => { for (let i = 0; i < 6; i++
 - [ ] **Step 1: Write failing tests**, one per rule plus these named cases:
 
 ```ts
-test('head change invalidates approval', () => expect(decide(snap({ verdictsOnHead: [], pr: pr('sha2'), checks: ok }))).toMatchObject({ kind: 'enqueue', role: 'review' }));
+// Review Focus 1 is proven end-to-end by Task 11 'an approval on the previous head is not in verdictsOnHead' (snapshot filter) and Task 12
+// 'force-push after approval reviews the new head and never merges the old one'; at decide level the test pins the consequence:
+test('head change invalidates approval', () => expect(decide(snap({ verdictsOnHead: [], pr: pr('sha2'), checks: ok, mergeOp: null }))).toEqual({ kind: 'enqueue', role: 'review', fingerprint: fingerprint(['sha2']) }));
+test('a failed fresh read waits instead of parking or merging', () => expect(decide(snap({ forgeUnavailable: 'listReviews', verdictsOnHead: [approve('s')], checks: ok }))).toEqual({ kind: 'wait', on: 'forge' }));
+test('a failed fresh read parks at the deadline', () => expect(decide(snap({ forgeUnavailable: 'listPullFiles', missingSince: minutesAgo(46) }))).toEqual({ kind: 'park', reason: 'forge data missing: listPullFiles' }));
 test('request_changes then approve on the same sha never merges', () => expect(decide(snap({ verdictsOnHead: [rc('s'), approve('s')], checks: ok })).kind).not.toBe('merge'));
 test('no CI honours ciRequired', () => {
   expect(decide(snap({ verdictsOnHead: [approve('s')], checks: none, zone: { ...z, ciRequired: false } }))).toEqual({ kind: 'merge', sha: 's' });
   expect(decide(snap({ verdictsOnHead: [approve('s')], checks: none, headFirstSeenAt: minutesAgo(46) }))).toEqual({ kind: 'park', reason: 'no pipeline' });
 });
-test('closed issue never blocks dispatch', () => expect(decide(snap({ issueState: 'closed', compare: cmp({ aheadBy: 2 }) }))).toEqual({ kind: 'park', reason: 'issue closed' }));
+test('closed issue with unlanded work parks issue closed', () => expect(decide(snap({ issueState: 'closed', compare: cmp({ aheadBy: 2 }) }))).toEqual({ kind: 'park', reason: 'issue closed' }));
+// "never blocks dispatch of another ready item" is asserted end-to-end in Task 23 (closed issue class).
 test('merge failed parks, merge unknown waits', () => { expect(decide(snap({ mergeOp: { state: 'failed', error: '405' } })).kind).toBe('park'); expect(decide(snap({ mergeOp: { state: 'unknown' } }))).toEqual({ kind: 'wait', on: 'outbox' }); });
 test('unposted verdict is posted before merge', () => expect(decide(snap({ verdictsOnHead: [approve('s')], reviewOp: null, checks: ok })).kind).toBe('post_review'));
 test('standing human block on an older commit parks after one review', () => { expect(decide(snap({ humanBlockStanding: true, verdictsOnHead: [] }))).toMatchObject({ kind: 'enqueue', role: 'review' }); expect(decide(snap({ humanBlockStanding: true, verdictsOnHead: [approve('s')] }))).toEqual({ kind: 'park', reason: 'human block stands' }); });
@@ -542,7 +579,7 @@ test('null headSha is not an orphan', () => expect(decide(snap({ pr: { ...pr('x'
 
 **Files:**
 - Create: `apps/server/src/payloads.ts`, `apps/trooper/prompts/review.md`, `heal.md`, `resolve.md`
-- Modify: `apps/server/src/api/sticks.ts` (use `payloads.ts`; drop its `promptVersion`/`buildPayload`), `apps/trooper/prompts/implement.md`
+- Modify: `apps/server/src/api/sticks.ts` (use `payloads.ts`; drop its `promptVersion`/`buildPayload`), `apps/server/src/main.ts` (import `promptVersions` from `./payloads.js`; pass `promptVersions().implement` to `enqueueNext`), `apps/server/src/api/sticks.test.ts` (import `buildPayload`/`promptVersions` from `../payloads.js`; `promptVersion()` → `promptVersions().implement`), `apps/trooper/prompts/implement.md`
 - Test: `apps/server/src/payloads.test.ts`
 
 **Interfaces:**
@@ -572,7 +609,7 @@ test('automated findings never sit under the trusted heading', () => expect(rend
 // also: 'payload carries zone protectedPaths'; 'review.md names weakened tests as a blocker'; 'review carries the read token only when reviewReadToken'; 'promptVersions differ per role'; 'payload carries zone image and role model'
 ```
 
-- [ ] **Steps 2–4:** run `npm test -w apps/server -- payloads` (expected FAIL); implement; run `npm test -w apps/server` (expected PASS).
+- [ ] **Steps 2–4:** run `npm test -w apps/server -- payloads` (expected FAIL); implement; run `npm run typecheck && npm test -w apps/server` (expected PASS).
 - [ ] **Step 5: Commit** `feat(server): role payloads, per-role prompts and versions`
 
 ---
@@ -580,20 +617,22 @@ test('automated findings never sit under the trusted heading', () => expect(rend
 ### Task 9: Result handling per role
 
 **Files:**
-- Modify: `apps/server/src/results.ts`, `apps/server/src/api/sticks.ts` (`StickRouteDeps.forgeFor` becomes `forgesFor(zoneId): ForgePair`; the result route passes the zone, `secretList(config.secrets)` and `now()`), `apps/server/src/app.ts`, `apps/server/src/main.ts` (builds both forges per zone)
+- Modify: `apps/server/src/results.ts`, `apps/server/src/api/sticks.ts` (`StickRouteDeps.forgeFor` becomes `forgesFor(zoneId): ForgePair`; `StickRouteDeps` gains `rand?: () => number` (default `Math.random`); the result route passes the zone, `secretList(config.secrets)`, `config.usage`, `deps.rand` and `now()`), `apps/server/src/app.ts`, `apps/server/src/main.ts` (builds both forges per zone)
 - Test: `apps/server/src/results.test.ts`, `apps/server/src/api/sticks.test.ts`
 
 **Interfaces:**
 - Consumes: Tasks 1–6; `sanitizeForgeText`, `runOp`, `ForgePair` (Task 5).
 - Produces:
-  - `ResultDeps = { forges: ForgePair; zone: DropZoneConfig; secrets: string[]; usageCfg: UsageConfig }` (`usageCfg` is used from Task 10).
+  - `ResultDeps = { forges: ForgePair; zone: DropZoneConfig; secrets: string[]; usageCfg: UsageConfig; rand?: () => number }` (`usageCfg` and `rand` are used from Task 10, passed to `ingestRateLimit` and `releaseProbe`).
+  - **Replacement inserts.** A continuation (interrupted) or requeue (rate_limited) is a *replacement*: in one transaction the finished drop is first set terminal (`succeeded` for interrupted, `cancelled` for rate_limited), then the new drop is inserted with `insertDrop(..., now)`. Replacements bypass the usage gate and the per-zone implement cap (the lease gate is the control) — this is the one stated exception to Task 10's single implement insert path.
+  - **Probe identity.** `applyResult` reads `wasProbe = drop.id === getUsageState(db).probeDropId` before anything else (before Task 10's ingest), and the table below uses `wasProbe`.
   - `applyResult(db, deps: ResultDeps, dropId: string, result: DropResult, now: Date): Promise<void>` — dispatches on `drop.role`. A drop already terminal is a no-op (stick retries are safe).
   - `renderReviewBody(v: Verdict, gates: GateResult[], secrets: string[]): string` — summary plus findings as a list, file names in code spans, all through `sanitizeForgeText`.
 
   | Role | Result | Effect |
   |---|---|---|
   | implement | `completed` | `create_pr` op `pr:<itemId>:<result.headSha>` (title = issue title; body as M0 plus marker). `done` → `upsertPullRequest`, item `pr_open`. `unknown` → item stays `in_flight` (adoption picks it up, or reconcile step 3 resumes once the row resolves or fails). `failed` → park `create pr failed: <error>` |
-  | implement | `interrupted` | `chargeBudget(resume)`; exhausted → park. Else queue an implement drop with `headSha = result.headSha ?? drop.headSha`, `chargedKey: 'resume'`; item stays `in_flight` |
+  | implement | `interrupted` | `chargeBudget(resume)`; exhausted → park. Else a replacement implement drop with `headSha = result.headSha ?? drop.headSha`, `chargedKey: 'resume'`; item stays `in_flight` |
   | implement | `no_changes` | `chargeNoChange`: within budget → `ready`; else park `no_changes` |
   | implement | `failed` / `blocked` | park with the reason (M0) |
   | review | `completed` + `verdict` | decision forced to `request_changes` (`forced: true`) if any gate failed or timed out. `insertVerdict` with `id = dropId`, `headSha = drop.headSha`. Then `post_review` op `review:<itemId>:<drop.headSha>:<dropId>` via reviewer, event from the stored decision, `commitId = drop.headSha`, body `renderReviewBody`. Item stays `pr_open` |
@@ -601,17 +640,23 @@ test('automated findings never sit under the trusted heading', () => expect(rend
   | review | `failed` (any reason) | drop `failed`; item stays `pr_open`; the next same-head review is charged against `maxReviewRepeat` |
   | heal / resolve | `completed` | `upsertPullRequest` with `result.headSha`; resolve with `mergeOutcome === 'conflicts'` → `chargeResolveConflict` |
   | heal / resolve | `no_changes` | recorded; item stays `pr_open` (re-decided; heal budget parks a heal that pushes nothing) |
-  | heal | `interrupted` | with `headSha`: `chargeBudget(resume)` (park on exhaustion), then queue a heal continuation with the same `fingerprint`, `prNumber`, `inputJson`, `headSha = result.headSha`, `chargedKey: 'resume'`. Without `headSha`: as `no_changes` |
+  | heal | `interrupted` | with `headSha`: `chargeBudget(resume)` (park on exhaustion), then a replacement heal drop with the same `fingerprint`, `prNumber`, `inputJson`, `headSha = result.headSha`, `chargedKey: 'resume'`. Without `headSha`: as `no_changes` |
   | heal / resolve | `failed` with reason starting `head moved` or `stale info` | drop `failed`; item stays `pr_open`; charge stands |
   | heal / resolve | other `failed` / `blocked` (including `protected path <f>` and `foreign commit identity` from the push guard) | park with the reason |
-  | any | `rate_limited` | drop `cancelled`. Requeue when the usage state is paused (`status === 'rejected'` or `pausedUntil > now`) and either `drop.id === probeDropId` (free) or `chargeRateLimitRequeue` succeeds: `refundCharge(drop.chargedKey)` (if set), same role, fingerprint, `prNumber`, `inputJson`, `headSha = result.headSha ?? drop.headSha`. Else park `rate limit: requeue refused` |
+  | any | `rate_limited` | drop `cancelled`. Requeue (a replacement) when the usage state is paused (`status === 'rejected'` or `pausedUntil > now`) and either `wasProbe` (free) or `chargeRateLimitRequeue` succeeds: `refundCharge(db, itemId, drop.chargedKey)`, same role, fingerprint, `prNumber`, `inputJson`, `headSha = result.headSha ?? drop.headSha`. Else park `rate limit: requeue refused` |
 
 - [ ] **Step 1: Write failing tests**, one per table row, plus:
 
 ```ts
 test('review result posted twice gives one verdict and one review', async () => { await applyResult(db, deps, 'd1', approveResult, t0); await applyResult(db, deps, 'd1', approveResult, t0); expect(count(db, 'verdicts')).toBe(1); expect(f.reviewer.calls.filter(c => c.method === 'createReview')).toHaveLength(1); });
 test('a red review gate forces request_changes', async () => { await applyResult(db, deps, 'd1', { ...approveResult, gates: [redGate] }, t0); expect(latestVerdict(db, 1)).toMatchObject({ decision: 'request_changes', forced: true }); });
-test('interrupted implement charges resume and carries the checkpoint', async () => { /* → new queued implement drop with headSha 'ck1', chargedKey 'resume' */ });
+test('interrupted implement charges resume and carries the checkpoint', async () => {
+  await applyResult(db, deps, 'd1', { status: 'interrupted', headSha: 'ck1', gates: [] }, t0);
+  expect(getDrop(db, 'd1')?.state).toBe('succeeded');
+  expect(activeDropFor(db, 1)).toMatchObject({ role: 'implement', state: 'queued', headSha: 'ck1', chargedKey: 'resume', createdAt: t0.toISOString() });
+  expect(getAttempts(db, 1, 'resume').count).toBe(1); expect(workItem(db, 1).state).toBe('in_flight');
+});
+test('a rate-limited requeue refunds exactly the charged keys', async () => { seedPaused(); seedDrop({ id: 'd1', role: 'resolve', chargedKey: 'resolve_total' }); setAttempts(db, 1, 'resolve_total', 1, null); await applyResult(db, deps, 'd1', { status: 'rate_limited', gates: [] }, t0); expect(getAttempts(db, 1, 'resolve_total').count).toBe(0); expect(activeDropFor(db, 1)?.role).toBe('resolve'); });
 // also: 'verdict text is redacted before posting'; 'three interruptions park'; 'heal head moved leaves the item pr_open'; 'rate_limited is requeued only while
 //   usage is rejected'; 'rate_limited stops after three requeues'; 'a rate-limited probe drop is requeued free'; 'heal interrupted with a checkpoint queues a
 //   continuation charged to resume'; 'create_pr is keyed by head'; 'the result route uses forgesFor and now()' (api/sticks.test.ts via app.inject)
@@ -626,7 +671,7 @@ test('interrupted implement charges resume and carries the checkpoint', async ()
 
 **Files:**
 - Create: `apps/server/src/usage.ts`
-- Modify: `apps/server/src/leases.ts`, `apps/server/src/scheduler.ts`, `apps/server/src/results.ts` (ingest `result.rateLimit` first; `releaseProbe` last), `apps/server/src/api/sticks.ts` (lease route passes the gate; events route ingests), `apps/server/src/main.ts`
+- Modify: `apps/server/src/leases.ts`, `apps/server/src/scheduler.ts`, `apps/server/src/results.ts` (after Task 9's `wasProbe` read, ingest `result.rateLimit` with `deps.rand`; `releaseProbe` last), `apps/server/src/api/sticks.ts` (lease route passes the gate; events route ingests), `apps/server/src/main.ts`
 - Test: `apps/server/src/usage.test.ts`, `apps/server/src/leases.test.ts`, `apps/server/src/scheduler.test.ts`
 
 **Interfaces:**
@@ -661,13 +706,14 @@ test('interrupted implement charges resume and carries the checkpoint', async ()
     | `open` | as M0 |
 
     Sets `started_at` at lease time (M0 elapsed fix).
-  - `enqueueImplement(db, zone, item: WorkItem, o: { headSha: string | null; chargedKey: AttemptKey | null; promptVersion: string }, usageCfg: UsageConfig, now: Date): string | null` — the single implement insert path: refuses unless the gate is `open` or `probe` and no implement drop is active in the zone; a `one_active_drop` constraint error returns null; sets the item `in_flight`.
+  - `enqueueImplement(db, zone, item: WorkItem, o: { headSha: string | null; chargedKey: string | null; promptVersion: string }, usageCfg: UsageConfig, now: Date): string | null` — the single path for *new* implement drops (the only exception is Task 9's replacement inserts for interrupted and rate_limited drops, which bypass the gate and cap by design): refuses unless the gate is `open` or `probe` and no implement drop is active in the zone; a `one_active_drop` constraint error returns null; sets the item `in_flight`.
   - `enqueueNext(db, zone, promptVersion: string, usageCfg: UsageConfig, now: Date): string | null` — the top-ranked `ready` item through `enqueueImplement` (at most one active implement drop per zone, not one drop per zone).
-  - `expireLeases(db, now, usageCfg: UsageConfig)` is role-aware: a lost implement drop keeps M0 behaviour (item → `ready` after grace); a lost review, heal or resolve drop leaves the item `pr_open`. It calls `releaseProbe` for each lost drop.
+  - `expireLeases(db, now, usageCfg: UsageConfig = DEFAULT_USAGE_CONFIG, rand: () => number = Math.random)` (`DEFAULT_USAGE_CONFIG` = the Task 3 defaults, exported from `usage.ts`, so M0's 2-argument calls in `leases.test.ts` keep working) is role-aware: a lost implement drop keeps M0 behaviour (item → `ready` after grace); a lost review, heal or resolve drop leaves the item `pr_open`. It calls `releaseProbe` for each lost drop.
 
 - [ ] **Step 1: Write failing tests**
 
 ```ts
+// This file declares its own clock: const t0 = new Date('2026-10-20T11:00:00Z'); at('hh:mm:ss') = 2026-10-20Thh:mm:ssZ (not helpers.t0).
 test('a confirmed rejected pauses until resetsAt plus jitter', () => { ingestRateLimit(db, rej('2026-10-20T12:00:00Z'), src('d1', 'rate_limited'), cfg, t0, () => 0); ingestRateLimit(db, rej('2026-10-20T12:00:00Z'), src('d2', 'rate_limited'), cfg, t0, () => 0); expect(dispatchGate(db, cfg, at('12:00:29'))).toBe('closed'); expect(dispatchGate(db, cfg, at('12:00:31'))).toBe('probe'); });
 test('an unconfirmed pause is capped at one hour', () => { ingestRateLimit(db, rej('2026-10-20T12:00:00Z'), src('d1', 'rate_limited'), cfg, t0, () => 0); expect(dispatchGate(db, cfg, plus(t0, H + 1000))).toBe('probe'); });
 test('a live event or a completed drop never pauses', () => { ingestRateLimit(db, rej(future), src('d1', null), cfg, t0); ingestRateLimit(db, rej(future), src('d2', 'completed'), cfg, t0); expect(dispatchGate(db, cfg, t0)).toBe('open'); });
@@ -675,7 +721,9 @@ test('a late allowed from an older drop does not reopen the gate', () => { pause
 test('with only the cause item queued, its requeued drop leases as the probe', () => { confirmedPause(rej(t1), t0, { item: 1 }); requeue(1); expect(leaseNextDrop(db, 's', plus(t1, 91_000), 'probe')?.dropId).toBe(requeuedId); expect(getUsageState(db).probeDropId).toBe(requeuedId); });
 test('a far-future resetsAt is clamped to the window', () => { confirmedPause(rej('2099-01-01T00:00:00Z', 'five_hour'), t0); expect(dispatchGate(db, cfg, plus(t0, 5 * H + 31_000))).toBe('probe'); });
 test('utilization at 0.9 throttles', () => { ingestRateLimit(db, { status: 'allowed', unifiedWindows: { seven_day: { utilization: 0.9 } } }, src('d1', null), cfg, t0); expect(dispatchGate(db, cfg, t0)).toBe('finishing_only'); });
-test('a utilization observed 8 days ago has expired', () => expect(dispatchGate(db, cfg, plus(t0, 8 * DAY))).toBe('open'));
+test('a utilization observed 8 days ago has expired', () => { ingestRateLimit(db, { status: 'allowed', unifiedWindows: { seven_day: { utilization: 0.95 } } }, src('d1', null), cfg, t0); expect(dispatchGate(db, cfg, plus(t0, 6 * DAY))).toBe('finishing_only'); expect(dispatchGate(db, cfg, plus(t0, 8 * DAY))).toBe('open'); });
+test('a rate-limited probe stays free after the ingest starts a new pause', async () => { expiredPause(); setUsageState(db, { probeDropId: 'p1' }, t0); seedDrop({ id: 'p1', workItemId: 2 }); await applyResult(db, deps, 'p1', { status: 'rate_limited', gates: [], rateLimit: rej(future) }, t0); expect(getAttempts(db, 2, 'rate_limit').count).toBe(0); expect(activeDropFor(db, 2)?.state).toBe('queued'); });
+test('expireLeases keeps its M0 two-argument form', () => expect(expireLeases(db, t0)).toBe(0));
 // also: 'a past resetsAt pauses for one jitter'; 'rejected without resetsAt is ignored'; 'probe allows exactly one lease'; 'a probe drop that fails without an event reopens after one
 //   jitter'; 'warning allows finishing roles only'; 'missing unifiedWindows is not treated as zero'; 'the raw rate_limit_info fallback is parsed'; 'started_at
 //   is set at lease time'; 'the probe is never the cause item'; 'lost review drop leaves the item pr_open'; 'a review drop for item A does not block implement for item B'; 'enqueueImplement refuses a second
@@ -701,21 +749,24 @@ test('a utilization observed 8 days ago has expired', () => expect(dispatchGate(
   - `protectedPathHits(files: PullFiles['files'], globs: string[]): string[]` — checks both `path` and `previousPath`; `matchesGlob` from `node:path`; a pattern without `/` also matches the basename at any depth.
   - `invokedScripts(gates: GateSpec[], pkg: Record<string, string>): Set<string> | 'all'` — names from gate commands (`npm test|t|start|stop|restart`, `npm run[-script] <name>`, `npm -w <ws> run <name>`, `node --run <name>`, `pnpm|yarn [run] <name>`), closed transitively over script bodies (whole-word references, `run-p`/`run-s`/`npm-run-all` `name:*` globs), plus `pre<name>`/`post<name>` of each. Any gate command it cannot classify returns `'all'` (fail closed).
   - `gateScriptChanges(gates: GateSpec[], basePkg: string | null, headPkg: string | null): string[]` — `basePkg` is the file at `compare.mergeBaseSha`, never the base tip. Returns invoked names (from either side) whose script text differs, including added or removed. The reconciler applies it to every changed `package.json`; one it cannot read yields `<path> unreadable`.
-  - `gateToolChanges(gates: GateSpec[], basePkg: string | null, headPkg: string | null, baseLock: string | null, headLock: string | null): string[]` — same merge-base comparison (`package-lock.json` read beside each changed `package.json`). Reports: any package added or changed in the lockfile's v2/v3 `packages` entries with `hasInstallScript: true`, as `install script: <pkg>`; `lockfile unreadable` (fail closed) when the lockfile is missing or unreadable while `package.json` dependencies changed; any added or changed dependency spec using `npm:`, `file:`, `link:`, `git`, `http` or `github:`; any `overrides`/`resolutions` change; any change of the `jest`, `mocha` or `vitest` keys; a version change of a package whose bin is the first word of an invoked script body.
-  - `branchProtectionProblems(rules: { author: BranchRulesRead; reviewer: BranchRulesRead }, zone: DropZoneConfig): string[] | null` — null if either read is `unavailable`; else `no ruleset`, `approvals < 1`, `stale approvals not dismissed`, `bot can bypass`, `bot is admin`, `required check not pinned: <name>`, `no required checks` (only when `ciRequired`).
-  - `ZonePass = { botLogins: string[]; requiredChecks: string[]; protectionProblems: string[] | null }`; `zonePass(forges: ForgePair, zone, baseBranch: string): Promise<ZonePass>` — read once per zone per pass.
+  - `gateToolChanges(gates: GateSpec[], basePkg: string | null, headPkg: string | null, baseLock: string | null, headLock: string | null): string[]` — same merge-base comparison (`package-lock.json` read beside each changed `package.json`). Reports: any package added or changed in the lockfile's v2/v3 `packages` entries with `hasInstallScript: true`, as `install script: <pkg>`; `lockfile unreadable` (fail closed) when the lockfile is missing or unreadable while `package.json` dependencies changed; any added or changed dependency spec using `npm:`, `file:`, `link:`, `git`, `http` or `github:`; any `overrides`/`resolutions` change; any change of the `jest`, `mocha` or `vitest` keys; a version change of a package whose bin is the first word of an invoked script body. Report strings, in this order of checks: `install script: <pkg>`; `lockfile unreadable`; `<dep>: <new spec>` (non-registry spec); `overrides changed` / `resolutions changed`; `<key> config changed` (`jest`/`mocha`/`vitest`); `<pkg> version changed` (runner bin).
+  - `branchProtectionProblems(rules: { author: BranchRulesRead; reviewer: BranchRulesRead }, zone: DropZoneConfig): string[] | null` — `[]` when `!zone.requireBranchProtection` (no read is judged); else null if either read is `unavailable`; else `no ruleset`, `approvals < 1`, `stale approvals not dismissed`, `bot can bypass`, `bot is admin`, `required check not pinned: <name>`, `no required checks` (only when `ciRequired`).
+  - `ZonePass = { botLogins: string[]; requiredChecks: string[]; protectionProblems: string[] | null }`; `zonePass(forges: ForgePair, zone, baseBranch: string): Promise<ZonePass>` — read once per zone per pass (the caller computes it once and hands the same object to `syncParked` and `reconcileZone`); `requiredChecks` come from the author identity's rules read (`[]` unless `kind === 'ok'`).
   - `buildSnapshot(db, forges: ForgePair, zone, item: WorkItem, pass: ZonePass, now): Promise<Snapshot>`:
-    - It reads `getPull`, `getIssueState`, `branchSha`, `compare(base, headSha)`, `checksFor(headSha)`, `listReviews`, `listPullFiles` fresh, and `getFileAt` at `mergeBaseSha` and at head for each changed `package.json` and its sibling `package-lock.json`. A thrown read gives `null` for that field.
-    - It upserts `pull_requests`, and sets `waiting_since` when a field is null (clears it otherwise).
+    - It reads `getPull`, `getIssueState`, `branchSha`, `compare(base, headSha)`, `checksFor(headSha)`, `listReviews`, `listPullFiles` fresh, and `getFileAt` at `mergeBaseSha` and at head for each changed `package.json` and its sibling `package-lock.json`. Failed reads fail closed, never open:
+      - `getPull` returning null, or throwing, gives `pr: null`; `getIssueState` or `compare` throwing gives `null` for that field (decide rules 2 and 8).
+      - Any other read that throws (`branchSha`, `checksFor`, `listReviews`, `listPullFiles`, `isTrusted`) sets `forgeUnavailable` to the first such method name, and the snapshot never substitutes `[]`, `'none'` or a deleted branch for it. `branchSha === null` only when the forge answered "no such branch".
+      - A `getFileAt` that throws (not a 404) is reported as `<path> unreadable` in `gateScriptChanges` (or `lockfile unreadable`), as before.
+    - It upserts `pull_requests`, and sets `waiting_since` when `pr`, `issueState` or `compare` is null, `forgeUnavailable` is set, or `pass.protectionProblems` is null (clears it otherwise).
     - Reviews: drop the bot logins and bodies containing `jm:op:`, keep only `isTrusted` authors (fail closed), and take each author's latest review. That review being `CHANGES_REQUESTED` on head goes to `trustedChangeRequests`; on another commit it sets `humanBlockStanding`.
     - `reviewOp` and `mergeOp` come from `getOutbox`.
   - `ReconcileReport = { actions: number; merges: number }`.
-  - `reconcileZone(db, forges: ForgePair, zone, versions: Record<Role, string>, usageCfg: UsageConfig, secrets: string[], now): Promise<ReconcileReport>` — in order:
+  - `reconcileZone(db, forges: ForgePair, zone, pass: ZonePass, versions: Record<Role, string>, usageCfg: UsageConfig, secrets: string[], now): Promise<ReconcileReport>` — uses the given `pass` (never calls `zonePass` itself); in order:
     1. `resolveUnknown(db, forges, zone.id, now, zone.ciDeadlineMinutes)`.
     2. **Adoption:** one `listOpenAgentPulls('agent/issue-')` call. PRs authored by the author bot whose issue maps to a `ready`/`in_flight` item with no active drop and no `pull_requests` row → `upsertPullRequest`, item `pr_open`.
-    3. **Resume (R12):** a `ready` item, or an `in_flight` item with no active drop, no PR row and no `pending`/`unknown` `create_pr` row, whose `branchSha(agentBranch(n))` is non-null → `chargeBudget(resume)` (park on exhaustion) and `enqueueImplement` with `headSha` = that SHA, `chargedKey: 'resume'` (the per-zone cap applies; a refusal rolls the charge back). An `in_flight` item in that state without a branch returns to `ready`.
+    3. **Resume (R12):** a `ready` item, or an `in_flight` item with no active drop, no PR row and no `pending`/`unknown` `create_pr` row, whose `branchSha(agentBranch(n))` is non-null → in one transaction: `deleteFailedOutbox(db, itemId, 'create_pr')` (so a resumed run that does not move the head can open its PR again under the same `pr:<itemId>:<headSha>` key), `chargeBudget(resume)` (park on exhaustion) and `enqueueImplement` with `headSha` = that SHA, `chargedKey: 'resume'` (the per-zone cap applies; a refusal rolls back the charge and the deletion). An `in_flight` item in that state without a branch returns to `ready`.
     4. For each `pr_open` item: `buildSnapshot`, `decide`, apply:
-       - `enqueue`: in one transaction, `chargeBudget(role key, fp)` (park on failure) and `insertDrop` with `role`, `fingerprint`, `prNumber`, `headSha`, `inputJson = JSON.stringify({ feedback })`, `promptVersion = versions[role]`, `chargedKey`. A `one_active_drop` error rolls back and counts as "already active".
+       - `enqueue`: in one transaction, `chargeBudget(role key, fp)` (park on failure) and `insertDrop(db, { …, role, fingerprint, prNumber, headSha, inputJson: JSON.stringify({ feedback }), promptVersion: versions[role], image: zone.image, chargedKey: charged.join(',') || null }, now)` (`charged` from `chargeBudget`). A `one_active_drop` error rolls back and counts as "already active".
        - `post_review`: re-run the verdict's op (same key and body as Task 9).
        - `merge`: at most one per zone per pass; `runOp` `merge:<itemId>:<sha>` with `title = pr.title`, `message = 'Closes #<issue>'`, `method = zone.mergeMethod` (squash-only in M1); `done` → item `done`/`merged`; other states are judged on the next pass.
        - `park` / `done`: set state and reason. `wait` / `none`: nothing.
@@ -724,15 +775,21 @@ test('a utilization observed 8 days ago has expired', () => expect(dispatchGate(
 - [ ] **Step 1: Write failing tests**
 
 ```ts
-test('protectedPathHits matches nested CODEOWNERS and jumpmaster*.json', () => expect(protectedPathHits(['docs/CODEOWNERS', 'jumpmaster.prod.json', 'src/a.ts'], defaults)).toEqual(['docs/CODEOWNERS', 'jumpmaster.prod.json']));
+// Helpers: pkg(scripts, deps?) returns package.json TEXT (for gateScriptChanges/gateToolChanges); scripts(pkgText) parses it to the
+// Record<string, string> that invokedScripts takes; lock(packages) returns package-lock.json v3 text.
+test('protectedPathHits matches nested CODEOWNERS and jumpmaster*.json', () => expect(protectedPathHits([{ path: 'docs/CODEOWNERS' }, { path: 'jumpmaster.prod.json' }, { path: 'src/a.ts' }], defaults)).toEqual(['docs/CODEOWNERS', 'jumpmaster.prod.json']));
 test('gate script change is detected through npm run indirection', () => expect(gateScriptChanges([{ name: 't', run: 'npm test' }], pkg({ test: 'npm run unit', unit: 'vitest' }), pkg({ test: 'npm run unit', unit: 'exit 0' }))).toEqual(['unit']));
 test('gate script compare uses the merge base, not the base tip', async () => { f.state.files.set('base-tip:package.json', pkg({ test: 'vitest --changed' })); expect((await snapshotOf(behindItem)).gateScriptChanges).toEqual([]); });
-test('pretest hooks and unclassified gate commands fail closed', () => { expect(gateScriptChanges([{ name: 't', run: 'npm test' }], pkg({ test: 'vitest' }), pkg({ test: 'vitest', pretest: 'x' }))).toEqual(['pretest']); expect(invokedScripts([{ name: 't', run: 'turbo test' }], pkg({}))).toBe('all'); });
-test('gateToolChanges flags an npm: alias for the runner', () => expect(gateToolChanges(g, pkg({}, { vitest: '^3' }), pkg({}, { vitest: 'npm:evil@1' }))).toEqual(['vitest: npm:evil@1']));
+test('pretest hooks and unclassified gate commands fail closed', () => { expect(gateScriptChanges([{ name: 't', run: 'npm test' }], pkg({ test: 'vitest' }), pkg({ test: 'vitest', pretest: 'x' }))).toEqual(['pretest']); expect(invokedScripts([{ name: 't', run: 'turbo test' }], scripts(pkg({})))).toBe('all'); });
+test('gateToolChanges flags an npm: alias for the runner', () => expect(gateToolChanges(g, pkg({}, { vitest: '^3' }), pkg({}, { vitest: 'npm:evil@1' }), lock({}), lock({}))).toEqual(['vitest: npm:evil@1']));
 test('a new dependency with an install script is a gate tool change', () => expect(gateToolChanges(g, pkg({}), pkg({}, { leftpad: '^1' }), lock({}), lock({ 'node_modules/leftpad': { version: '1.0.0', hasInstallScript: true } }))).toEqual(['install script: leftpad']));
 test('changed dependencies with an unreadable lockfile fail closed', () => expect(gateToolChanges(g, pkg({}), pkg({}, { a: '1' }), lock({}), null)).toEqual(['lockfile unreadable']));
 test('a rename out of a protected path is a hit', () => expect(protectedPathHits([{ path: 'x.yml', previousPath: '.github/workflows/ci.yml' }], defaults)).toEqual(['.github/workflows/ci.yml']));
 test('snapshot excludes both bots from trust', async () => { f.state.reviews.push(review({ author: 'reviewer-bot', state: 'CHANGES_REQUESTED' })); expect((await snapshotOf(item)).trustedChangeRequests).toEqual([]); });
+test('an approval on the previous head is not in verdictsOnHead', async () => { insertVerdict(db, approveRow('sha1')); f.state.setHead(1, 'sha2'); const s = await snapshotOf(item); expect(s.verdictsOnHead).toEqual([]); expect(decide(s)).toMatchObject({ kind: 'enqueue', role: 'review' }); });
+test('a thrown listReviews never hides a human block', async () => { f.author.failNext('listReviews', '5xx'); const s = await snapshotOf(item); expect(s.forgeUnavailable).toBe('listReviews'); expect(decide(s)).toEqual({ kind: 'wait', on: 'forge' }); });
+test('a thrown branchSha read does not park agent branch deleted', async () => { f.author.failNext('branchSha', 'throw'); await pass(); expect(workItem(db, 1).state).toBe('pr_open'); });
+test('a dead in_flight item whose create_pr failed reopens its PR on resume', async () => { seedFailedCreatePr(1, 'sha1'); await pass(); expect(getOutbox(db, 'pr:1:sha1')).toBeUndefined(); expect(activeDropFor(db, 1)).toMatchObject({ role: 'implement', headSha: 'sha1' }); });
 test('merge rejected parks without a second merge call', async () => { f.author.failNext('merge', { status: 405 }); await pass(); await pass(); expect(calls('merge')).toHaveLength(1); expect(workItem(db, 1)).toMatchObject({ state: 'parked', reason: expect.stringMatching(/^merge rejected/) }); });
 // also: 'adding a dependency is not a gate script change'; 'branchProtectionProblems lists every missing setting'; 'snapshot sees a standing human block on an
 //   older commit'; 'a failed trust lookup is untrusted'; 'adoption uses one listing call per pass'; 'adoption ignores PRs from other authors'; 'a ready item
@@ -754,14 +811,26 @@ test('merge rejected parks without a second merge call', async () => { f.author.
 
 **Interfaces:**
 - Consumes: Tasks 1–11; `createApp` and `app.inject` for result posting.
-- Produces: `harness(opts?: { zone?: Partial<DropZoneConfig>; issues?: ForgeIssue[] }): Promise<Harness>`. `Harness` has `db`, `forge: { author; reviewer; state }` (Task 5 pair), `zone`, `now()`, `at(minutes)` (advances the injected clock), `sync()` = `syncDropZone`, `reconcile()` = `syncDropZone` + `reconcileZone`, `queuedRoles(): Role[]`, `wipeDbKeepIssues()`. `lease(): Promise<{ dropId; epoch; payload: DropPayload }>` and `postResult(dropId, epoch, result): Promise<number>` (HTTP status) go through `app.inject`, so the route's live-epoch check runs; `finishDrop(role, result)` = lease + post. It uses `leaseWaitMs: 0` and `rand: () => 0`, and never reads the wall clock.
+- Produces: `harness(opts?: { zone?: Partial<DropZoneConfig>; issues?: ForgeIssue[] }): Promise<Harness>`. `Harness` has `db`, `forge: { author; reviewer; state }` (Task 5 pair), `zone`, `now()`, `at(minutes)` (advances the injected clock), `sync()` = `syncDropZone`, `reconcile()` = `syncDropZone`, then `zonePass` once, then `reconcileZone(..., pass, ...)` (Task 13 makes `syncDropZone` return the pass it computed, and `reconcile()` reuses it), `queuedRoles(): Role[]`, `wipeDbKeepIssues()` (deletes `drops`, `work_items`, `pull_requests`, `verdicts`, `attempts`, `outbox` rows and resets `usage_state`; keeps the forge state).
+  - Defaults: `zone` = a valid zone with `ciRequired: false` (the fake's default checks are `none`) and the Task 5 fake defaults (safe rules for both identities, logins `author-bot`/`reviewer-bot`), so the happy path can merge; tests override per case.
+  - `toApproved(h, sha)`: implement completed at `sha` → reconcile → review approve result posted; stops before the reconcile that would merge.
+  - Determinism: `createApp` gets `leaseWaitMs: 0`, `rand: () => 0` and `now: () => h.now()`; the harness's own calls to `expireLeases`, `reconcileZone` and `ingestRateLimit` pass the same `now` and `rand`. `lease(): Promise<{ dropId; epoch; payload: DropPayload }>` and `postResult(dropId, epoch, result): Promise<number>` (HTTP status) go through `app.inject`, so the route's live-epoch check runs; `finishDrop(role, result)` = lease + post. It uses `leaseWaitMs: 0` and `rand: () => 0`, and never reads the wall clock.
 
 - [ ] **Step 1: Write failing tests**
 
 ```ts
-test('happy path: implement → review approve → merge', async () => { /* finishDrop implement completed sha1 → reconcile → review queued → finishDrop review approve → reconcile (posts) → reconcile → merged */ expect(h.forge.state.merges).toEqual([{ number: 1, sha: 'sha1', title: 'Issue 1', message: 'Closes #1' }]); expect(workItem(h.db, 1)).toMatchObject({ state: 'done', reason: 'merged' }); });
+test('happy path: implement → review approve → merge', async () => { /* finishDrop implement completed sha1 (creates PR 1) → reconcile → review queued → finishDrop review approve (applyResult posts the review) → reconcile → merged */ expect(h.forge.reviewer.calls.filter(c => c.method === 'createReview')).toHaveLength(1); expect(h.forge.state.merges).toEqual([{ number: 1, sha: 'sha1', title: 'Issue 1', message: 'Closes #1' }]); expect(workItem(h.db, 1)).toMatchObject({ state: 'done', reason: 'merged' }); });
 test('adopts an existing agent PR', async () => { h.forge.state.addPull({ number: 9, headRef: 'agent/issue-1', headSha: 's', author: 'author-bot' }); h.wipeDbKeepIssues(); await h.reconcile(); expect(workItem(h.db, 1)).toMatchObject({ state: 'pr_open' }); expect(h.queuedRoles()).toEqual(['review']); });
-test('interrupted implement resumes with resume:true', async () => { /* finishDrop implement interrupted ck1 → lease → payload.resume === true, resumeSha 'ck1' */ });
+test('interrupted implement resumes with resume:true', async () => {
+  await h.reconcile(); await h.finishDrop('implement', { status: 'interrupted', headSha: 'ck1', gates: [] });
+  const { payload } = await h.lease();
+  expect(payload).toMatchObject({ role: 'implement', resume: true, resumeSha: 'ck1' });
+});
+test('force-push after approval reviews the new head and never merges the old one', async () => {
+  await toApproved(h, 'sha1'); h.forge.state.setHead(1, 'sha2'); await h.reconcile();
+  expect(h.queuedRoles()).toEqual(['review']); expect(h.forge.state.merges).toEqual([]);
+  expect(h.forge.author.calls.filter(c => c.method === 'merge')).toHaveLength(0);
+});
 test('stale epoch result is rejected', async () => expect(await h.postResult(id, epoch - 1, r)).toBe(409));
 // also: 'request_changes → heal → re-review on the new head'; 'restore after a merge never merges twice'; 'three PRs approved, one merges, the others resolve
 //   cleanly without charge'; 'one merge per zone per pass'
@@ -777,27 +846,41 @@ test('stale epoch result is rejected', async () => expect(await h.postResult(id,
 ### Task 13: Sync (retry label, reopen) and server wiring
 
 **Files:**
-- Modify: `apps/server/src/sync.ts`, `apps/server/src/main.ts`, `apps/server/src/test/flowHarness.ts` (`sync()` passes the pair)
+- Modify: `apps/server/src/sync.ts`, `apps/server/src/main.ts`, `apps/server/src/test/flowHarness.ts` (`sync()` passes the pair; `reconcile()` reuses `syncDropZone`'s returned `pass`; adds `toPrOpen(h, sha)`)
 - Test: `apps/server/src/sync.test.ts`, `apps/server/src/flow/lifecycle.test.ts`
 
 **Interfaces:**
 - Consumes: Tasks 1–12.
 - Produces:
   - `syncParked(db, forges: ForgePair, zone, pass: ZonePass, now): Promise<{ retried: number; reopened: number }>` — for each parked item, one `getIssueLabels` call:
-    - **Retry label:** if `zone.retryLabel` is present and `retryLabelSeen` is false → `resetAttempts`, `deleteFailedOutbox`, set `retryLabelSeen`, item → `pr_open` if it has a PR row, else `ready` (an existing branch is then resumed by reconcile step 3). Label absent → `retryLabelSeen = false`.
+    - **Retry label:** if `zone.retryLabel` is present and `retryLabelSeen` is false → `resetAttempts`, `deleteFailedOutbox`, `setRetryLabelSeen(true)`, then re-read the PR with `getPull`: open → item `pr_open`; merged → `done`/`merged`; closed or missing → mark the `pull_requests` row `closed` (`upsertPullRequest` with `state: 'closed'`) and set the item `ready`, so reconcile step 3 resumes the existing branch and a new PR is created under a fresh `create_pr` op. Label absent → `setRetryLabelSeen(false)`.
     - **Reopen / landed:** reason `pr closed` or `issue closed` → re-read the PR and issue. Both open → `pr_open`. PR merged → `done`/`merged`. Reason starting `merge rejected` → re-read the PR: merged → `done`/`merged`; open and not merged → stays parked.
     - **Cause gone:** reason `human block stands` or `unsafe branch protection: …` → `buildSnapshot` + `decide`; unless the result is the same park, the item returns to `pr_open`.
-  - `syncDropZone(db, forges: ForgePair, zone, now)` calls `zonePass` and then `syncParked` at its end; its return type gains `retried` and `reopened`.
-  - `main.ts` builds a `ForgePair` per zone, runs `markPendingUnknown(db, now)` once at startup, and on each poll pass runs, per zone sequentially, `expireLeases`, `syncDropZone`, `reconcileZone`.
+  - `syncDropZone(db, forges: ForgePair, zone, now)` calls `zonePass` once and then `syncParked` at its end; its return type gains `retried`, `reopened` and `pass: ZonePass`, which the caller hands to `reconcileZone` (no second rules read in the pass).
+  - `main.ts` uses the `ForgePair` per zone that Task 9 builds, runs `markPendingUnknown(db, now)` once at startup, runs `expireLeases(db, now, config.usage)` once per poll pass (it is global, not per zone), then per zone sequentially `syncDropZone` and `reconcileZone(..., result.pass, promptVersions(), ...)`.
 
 - [ ] **Step 1: Write failing tests**
 
 ```ts
-test('reopened PR and issue un-park', async () => { /* park 'pr closed' → state.reopen(1) → sync → pr_open */ });
+test('reopened PR and issue un-park', async () => {
+  await toPrOpen(h, 'sha1'); h.forge.state.close(1); await h.reconcile(); expect(workItem(h.db, 1)).toMatchObject({ state: 'parked', reason: 'pr closed' });
+  h.forge.state.reopen(1); await h.sync(); expect(workItem(h.db, 1).state).toBe('pr_open');
+});
+test('retry label on a closed-PR park resumes from the existing branch', async () => {
+  await toPrOpen(h, 'sha1'); h.forge.state.close(1); await h.reconcile(); h.forge.state.setLabels(1, ['agent-ready', 'agent-retry']);
+  await h.reconcile();
+  expect(getPullRequest(h.db, 1)?.state).toBe('closed');
+  expect(activeDropFor(h.db, 1)).toMatchObject({ role: 'implement', headSha: 'sha1' });
+});
 test('retry after merge rejected clears the failed op and merges', async () => { /* park 'merge rejected' → fix protection → label → sync → reconcile */ expect(calls('merge')).toHaveLength(2); expect(workItem(db, 1).state).toBe('done'); });
-test('a dismissed human block un-parks without the label', ...);
+test('a dismissed human block un-parks without the label', async () => {
+  await toApproved(h, 'sha1'); h.forge.state.reviews.push(review({ author: 'alice', state: 'CHANGES_REQUESTED', commitId: 'sha0' })); await h.reconcile();
+  expect(workItem(h.db, 1)).toMatchObject({ state: 'parked', reason: 'human block stands' });
+  h.forge.state.reviews.at(-1)!.state = 'DISMISSED'; await h.sync(); expect(workItem(h.db, 1).state).toBe('pr_open');
+});
 test('a merge rejected park whose PR did merge becomes done', async () => { park(1, 'merge rejected: unresolved after 45 min'); f.state.markMerged(1); await h.sync(); expect(workItem(db, 1)).toMatchObject({ state: 'done', reason: 'merged' }); });
-// also: 'retry label resets budgets once'; 'retry label on a closed-PR park resumes from the existing branch'; 'a parked item whose PR was merged by a human
+// (toPrOpen(h, sha): implement completed at sha → reconcile, item pr_open with PR 1; add it to flowHarness.ts. Harness issues trust 'alice'.)
+// also: 'retry label resets budgets once'; 'a parked item whose PR was merged by a human
 //   becomes done'; 'startup turns pending outbox rows into unknown'
 ```
 
@@ -816,10 +899,10 @@ test('a merge rejected park whose PR did merge becomes done', async () => { park
 - Produces:
   - `AgentIdentity = { uid: number; gid: number; home: string }` (any unprivileged uid); `TrooperIdentities = { agent: AgentIdentity; gate: AgentIdentity }`.
   - `trooperIdentities(env: NodeJS.ProcessEnv, getuid: () => number = process.getuid): TrooperIdentities | null` — from `JM_AGENT_UID/GID/HOME` and `JM_GATE_UID/GID/HOME`, only when `env.JM_CONTAINER === '1'` and `getuid() === 0`.
-  - `sweepUid(uid: number, kill = process.kill): number` — scans `/proc/*/status`, SIGKILLs every process with that real or effective uid, returns the count.
-  - `agentSpawnOptions(id: AgentIdentity | null, env: NodeJS.ProcessEnv): { uid?: number; gid?: number; umask?: number; env: NodeJS.ProcessEnv }` — with an identity: `uid`, `gid`, `HOME = id.home`, `CLAUDE_CONFIG_DIR = <home>/.claude` (mode 0700), `umask` 0022; without one: `env` unchanged. Used for both the agent and the gate identity.
-  - `asAgentArgv(id: AgentIdentity | null, argv: string[]): string[]` — `['setpriv', '--reuid=<uid>', '--regid=<gid>', '--clear-groups', '--', ...argv]`, or `argv` when `id` is null.
-  - `readAgentFile(path: string, id: AgentIdentity | null, maxBytes = 1_048_576): Promise<string>` — with an identity it reads through `asAgentArgv(id, ['cat', '--', path])`. Without one it uses `lstat` (regular file only), then `open` with `O_NOFOLLOW`. Over `maxBytes` throws.
+  - `sweepUid(uid: number, kill = process.kill, procRoot = '/proc'): number` — scans `<procRoot>/*/status` (tests pass a temp dir of fake status files, so they run on non-Linux hosts), SIGKILLs every process with that real or effective uid, returns the count.
+  - `agentSpawnOptions(id: AgentIdentity | null, env: NodeJS.ProcessEnv): { env: NodeJS.ProcessEnv }` — with an identity: `HOME = id.home`, `CLAUDE_CONFIG_DIR = <home>/.claude`; without one: `env` unchanged. Node's `spawn` has no umask option, so the uid, gid and umask are applied by the argv wrapper below, never by spawn options. Used for both the agent and the gate identity. `<home>/.claude` (mode 0700) is created by the image (Task 20) or by a `mkdir -m 0700` run through `asAgentArgv`, never by root (no chown).
+  - `asAgentArgv(id: AgentIdentity | null, argv: string[]): string[]` — `['setpriv', '--reuid=<uid>', '--regid=<gid>', '--clear-groups', '--', 'sh', '-c', 'umask 022; exec "$@"', 'jm-agent', ...argv]`, or `argv` when `id` is null. Every process run as the agent or gate uid (Claude, gates, working-copy git) is spawned through it.
+  - `readAgentFile(path: string, id: AgentIdentity | null, maxBytes = 1_048_576): Promise<string>` — with an identity it reads through `asAgentArgv(id, ['cat', '--', path])`. Without one it uses `lstat` (regular file only), then `open` with `O_NOFOLLOW`. Over `maxBytes` throws. It is the only permitted way for root to read an agent-written file; M1 roles read none, and Task 16 adds a test that enforces that.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -827,10 +910,13 @@ test('a merge rejected park whose PR did merge becomes done', async () => { park
 test('no identity outside container mode', () => expect(trooperIdentities({}, () => 0)).toBeNull());
 test('no identity when not root', () => expect(trooperIdentities(containerEnv, () => 1000)).toBeNull());
 test('gate and agent are distinct uids with distinct homes', () => { const ids = trooperIdentities(containerEnv, () => 0)!; expect(ids.gate.uid).not.toBe(ids.agent.uid); expect(ids.gate.home).not.toBe(ids.agent.home); });
-test('sweepUid kills only that uid', ...);
-test('spawn options use umask 0022 and no supplementary group', () => { const o = agentSpawnOptions(ids.agent, {}); expect(o.umask).toBe(0o022); expect(asAgentArgv(ids.agent, ['x'])).toContain('--clear-groups'); });
+test('sweepUid kills only that uid', () => {
+  const proc = fakeProc({ 10: { ruid: 10001, euid: 10001 }, 11: { ruid: 0, euid: 10001 }, 12: { ruid: 10002, euid: 10002 }, 1: { ruid: 0, euid: 0 } });
+  const killed: number[] = []; expect(sweepUid(10001, (pid) => void killed.push(pid), proc)).toBe(2); expect(killed.sort()).toEqual([10, 11]);
+});
+test('the agent argv sets umask 0022 and no supplementary group', () => { const a = asAgentArgv(ids.agent, ['x']); expect(a).toContain('--clear-groups'); expect(a).toContain('umask 022; exec "$@"'); expect(a.at(-1)).toBe('x'); expect(agentSpawnOptions(ids.agent, {})).not.toHaveProperty('umask'); });
 test('readAgentFile refuses a symlink', async () => { symlinkSync('/etc/hostname', p); await expect(readAgentFile(p, null)).rejects.toThrow(); });
-// also: 'identity in container as root'; 'spawn options set uid, HOME and CLAUDE_CONFIG_DIR'; 'asAgentArgv wraps with setpriv'
+// also: 'identity in container as root'; 'spawn options set HOME and CLAUDE_CONFIG_DIR'; 'asAgentArgv wraps with setpriv'
 ```
 
 - [ ] **Step 2: Run** `npm test -w apps/trooper -- privilege`. Expected: FAIL.
@@ -852,17 +938,18 @@ test('readAgentFile refuses a symlink', async () => { symlinkSync('/etc/hostname
   - `runGit(cwd, args, token = '', opts?: { as?: AgentIdentity | null; gitDir?: string; extraConfig?: [string, string][] }): Promise<string>` — the auth header stays `GIT_CONFIG_KEY_0`; `extraConfig` appends at index 1+; `as` with a token throws. A root call (no `as`) requires `gitDir`, sets `GIT_DIR=<gitDir>` and `GIT_CEILING_DIRECTORIES=<parent of gitDir>`, and first runs `assertRootOwnedDir(gitDir)`.
   - `assertRootOwnedDir(path, getuid = process.getuid): void` — `lstat` on every path component from `/` down to `path`: each a directory, not a symlink, and (when running as root) owned by uid 0 and not group- or other-writable; else throws `unsafe root git dir: <component>`.
   - Layout: `work/` (root, 0755) holds `work/mirror` (root bare mirror) and `work/push` (fresh pristine bare per push). The working copy is `<agent home>/repo`, or `<workdir>/repo` without an identity.
-  - `cloneRepo(o: { owner; name; token; dir; mirrorDir?: string; url?; as?: AgentIdentity | null }): Promise<void>` — M0 signature plus optional fields (`mirrorDir` defaults to the sibling `mirror`). Root runs `git clone --bare` with the token into `mirrorDir`; the agent then runs `git clone --no-hardlinks file://<mirrorDir> <dir>`, without a token.
+  - `cloneRepo(o: { owner; name; token; dir; mirrorDir?: string; url?; as?: AgentIdentity | null }): Promise<void>` — M0 signature plus optional fields. `mirrorDir` is required whenever `as` is non-null (it must be `<workdir>/mirror` under the root-owned `work/`; omitting it throws `mirrorDir required with an agent identity`); only without an identity does it default to `join(dirname(dir), 'mirror')`. Root runs `git clone --bare` with the token into `mirrorDir`; the agent then runs `git clone --no-hardlinks file://<mirrorDir> <dir>`, without a token.
   - `mirrorFetch(mirrorDir, token, target, refs: string[]): Promise<void>` — root, in the mirror only; runs before any agent process for that step.
   - `prepareBranch`, `commitIfDirty`, `headSha`, `aheadOfBase`: unchanged signatures plus `as`.
-  - `remoteBranchSha(target, branch, token): Promise<string | null>` — replaces `remoteBranchExists`.
+  - `remoteBranchSha(target, branch, token): Promise<string | null>`. `remoteBranchExists(target, branch, token)` stays, reimplemented as `(await remoteBranchSha(...)) !== null`, because `main.ts` and the `main.test.ts` fake still use it until Task 17 switches to `remoteBranchSha`.
   - `checkoutBranch(dir, branch, expectedSha, as): Promise<void>` — after `mirrorFetch`, the agent fetches from the mirror and checks out; throws `head moved: expected <a> got <b>`.
   - `mergeBase(dir, base, as): Promise<MergeOutcome>` — `git merge --no-edit origin/<base>` as Jumpmaster Agent; conflicts stay in the tree.
-  - `PushOptions = { as?: AgentIdentity | null; base?: string; protectedPaths?: string[] }`.
-  - `pushNewBranch(dir, branch, token, target, sweep?, o?: PushOptions)` and `pushExistingBranch(dir, branch, token, target, expectedRemoteSha, sweep?, o?: PushOptions): Promise<string>`. Root creates `work/push` and fetches from `file://<dir>` exactly `+refs/heads/<branch>:refs/heads/<branch>` with `--upload-pack='<asAgentArgv(as, ["git-upload-pack"])>'`, killed after `PUSH_FETCH_TIMEOUT_MS = 120_000` or once `work/push` exceeds `PUSH_FETCH_MAX_BYTES = 1 GiB` (polled each second). With `base` set, root then fetches `refs/heads/<base>` from `work/mirror` (refreshed with the token just before) into `work/push` as `refs/jm/base`, a local root-to-root fetch, and runs `prePushCheck` in that root-owned bare repo, and pushes from it (existing branch: `--force-with-lease=refs/heads/<branch>:<expectedRemoteSha>`). `GIT_DIR` and `GIT_COMMON_DIR` point at the bare repo (M0 `commondir` finding). A rejected lease throws `stale info: <stderr tail>`.
-  - `prePushCheck(bareDir, branch, protectedPaths, since: string): Promise<string | null>` — root, bare repo only, `--no-replace-objects`; never reads a ref fetched from the agent repo other than `refs/heads/<branch>`. `git diff --name-status -M refs/jm/base...<branch>`: any path or rename source matching `protectedPaths` → `protected path <f>`. `git log --format=%an%x00%ae%x00%cn%x00%ce <since>..<branch>`, where `since` is `expectedRemoteSha` for an existing branch and `refs/jm/base` for a new one, so only the commits this push adds are checked: any author or committer other than Jumpmaster Agent → `foreign commit identity`. Human commits already on the remote pass. A non-null result is thrown and nothing is pushed.
+  - `PushOptions = { as?: AgentIdentity | null; base?: string; protectedPaths?: string[]; limits?: { timeoutMs: number; maxBytes: number } }` (`limits` defaults to `PUSH_FETCH_TIMEOUT_MS`/`PUSH_FETCH_MAX_BYTES`; tests lower it).
+  - `pushNewBranch(dir, branch, token, target, sweep?, o?: PushOptions)` and `pushExistingBranch(dir, branch, token, target, expectedRemoteSha, sweep?, o?: PushOptions): Promise<string>`. Root creates `work/push` and fetches from `file://<dir>` exactly `+refs/heads/<branch>:refs/heads/<branch>` with `--upload-pack='<asAgentArgv(as, ["git-upload-pack"])>'`, killed after `PUSH_FETCH_TIMEOUT_MS = 120_000` (throws `push fetch timed out`) or once `work/push` exceeds `PUSH_FETCH_MAX_BYTES = 1 GiB` (polled each second; throws `push fetch too large`). The `sweep` runs immediately before this agent fetch and again after it, before any token-bearing command. With `base` set, root then fetches `refs/heads/<base>` from `work/mirror` (refreshed with the token just before) into `work/push` as `refs/jm/base`, a local root-to-root fetch, and runs `prePushCheck` in that root-owned bare repo, and pushes from it (existing branch: `--force-with-lease=refs/heads/<branch>:<expectedRemoteSha>`). `GIT_DIR` and `GIT_COMMON_DIR` point at the bare repo (M0 `commondir` finding). A rejected lease throws `stale info: <stderr tail>`.
+  - `prePushCheck(bareDir, branch, protectedPaths, since: string): Promise<string | null>` — root, bare repo only, `--no-replace-objects`; never reads a ref fetched from the agent repo other than `refs/heads/<branch>`. `git diff --name-status -M refs/jm/base...<branch>`: any path or rename source matching `protectedPaths` → `protected path <f>`. `git log --format=%an%x00%ae%x00%cn%x00%ce <since>..<branch> ^refs/jm/base`, where `since` is `expectedRemoteSha` for an existing branch and `refs/jm/base` for a new one, so only the commits this push adds that are not already on the trusted base are checked: any author or committer other than Jumpmaster Agent → `foreign commit identity`. Human commits already on the remote pass, and so do human commits that a resolve merged in from base (they are reachable from `refs/jm/base`). A non-null result is thrown and nothing is pushed.
   - `removeTree(dir, as): Promise<void>` — `rm -rf` through `asAgentArgv` (root has no `DAC_OVERRIDE`).
-  - `cloneForGates(agentDir, gateDir, ids: TrooperIdentities): Promise<void>` — the agent runs `git bundle create <agent home>/gates.bundle HEAD` (0644); the gate uid runs `git clone <bundle> <gateDir>` (`/home/gate/repo`, recreated each time). No git process runs in the other uid's repo.
+  - Test seam: every function takes its process runner from an injectable module-level `setSpawn(fn)` (default `child_process.spawn`), which records `{ argv, cwd, env }`; the tests below use it.
+  - `cloneForGates(agentDir, gateDir, ids: TrooperIdentities): Promise<void>` (container mode only; Task 16 skips it when `ids` is null) — the agent runs `git bundle create <agent home>/gates.bundle HEAD` (0644); the gate uid runs `git clone <bundle> <gateDir>` (`/home/gate/repo`, recreated each time). No git process runs in the other uid's repo.
   - Root never runs git with `cwd` or `GIT_DIR` inside the working copy.
 
 - [ ] **Step 1: Write failing tests**
@@ -870,24 +957,30 @@ test('readAgentFile refuses a symlink', async () => { symlinkSync('/etc/hostname
 ```ts
 test('planted fsmonitor, hook and clean filter never run on the root path', async () => { /* agent repo: core.fsmonitor + pre-commit + filter.x.clean with .gitattributes, each writing a marker file; run pushExistingBranch(as=null) */ expect(existsSync(marker)).toBe(false); });
 test('a symlinked or renamed mirror makes mirrorFetch throw', async () => { renameSync(mirror, mirror + '.x'); symlinkSync(evilRepo, mirror); await expect(mirrorFetch(mirror, 't', target, ['main'])).rejects.toThrow(/unsafe root git dir/); });
-test('every token-bearing git call sets GIT_DIR outside the working copy', async () => { /* recorder via injected spawn */ });
+test('every token-bearing git call sets GIT_DIR outside the working copy', async () => {
+  const rec = recordSpawn(); await cloneRepo({ ...o, mirrorDir: mirror }); await pushExistingBranch(dir, b, 't', target, s0, undefined, guard);
+  const tokenCalls = rec.calls.filter(c => Object.values(c.env).some(v => String(v).includes(authHeader('t'))));
+  expect(tokenCalls.length).toBeGreaterThan(0);
+  for (const c of tokenCalls) { expect(c.env.GIT_DIR).toBeTruthy(); expect(c.env.GIT_DIR!.startsWith(dir)).toBe(false); expect(c.cwd?.startsWith(dir) ?? false).toBe(false); }
+});
 test('push refuses a protected path, including a rename source', async () => { /* commit mv .github/x.yml y.yml */ await expect(pushExistingBranch(dir, b, 't', target, s0, undefined, { base: 'main', protectedPaths: ['.github/**'] })).rejects.toThrow(/^protected path \.github\/x\.yml/); expect(remoteTip()).toBe(s0); });
-test('push refuses a commit with a foreign author', ...);
+test('push refuses a commit with a foreign author', async () => { agentGit(['-c', 'user.name=Mallory', '-c', 'user.email=m@x', 'commit', '--allow-empty', '-m', 'x']); await expect(pushExistingBranch(dir, b, 't', target, s0, undefined, guard)).rejects.toThrow(/^foreign commit identity/); expect(remoteTip()).toBe(s0); });
+test('a resolve merge of human base commits passes the identity check', async () => { humanCommitOnBase(); await mergeBase(dir, 'main', null); await expect(pushExistingBranch(dir, b, 't', target, s0, undefined, guard)).resolves.toBe(headOf(dir)); });
 test('an agent origin/<base> pointing at its own tip does not bypass the guard', async () => { agentGit(['update-ref', 'refs/remotes/origin/main', 'HEAD']); await expect(pushProtectedChange()).rejects.toThrow(/^protected path/); });
 test('human commits already on the remote pass the identity check', async () => { /* remote has a human commit at s1; agent adds one commit */ await expect(pushExistingBranch(dir, b, 't', target, 's1', undefined, guard)).resolves.toBeTruthy(); });
-test('the push fetch takes only the branch ref', ...);
-test('assertRootOwnedDir rejects a writable or symlinked ancestor', ...);
-test('an oversized or slow agent pack aborts the push', ...);
-test('cloneForGates runs no git in the agent repo as the gate uid', ...);
+test('the push fetch takes only the branch ref', async () => { const rec = recordSpawn(); agentGit(['branch', 'evil']); await pushExistingBranch(dir, b, 't', target, s0, undefined, guard); const fetch = rec.calls.find(c => c.argv.includes('fetch') && c.argv.some(a => a.startsWith('file://')))!; expect(fetch.argv.filter(a => a.includes('refs/'))).toEqual([`+refs/heads/${b}:refs/heads/${b}`]); });
+test('assertRootOwnedDir rejects a writable or symlinked ancestor', () => { chmodSync(parent, 0o777); expect(() => assertRootOwnedDir(child, () => 0)).toThrow(/^unsafe root git dir: /); chmodSync(parent, 0o755); symlinkSync(child, link); expect(() => assertRootOwnedDir(link, () => 0)).toThrow(/^unsafe root git dir: /); });
+test('an oversized or slow agent pack aborts the push', async () => { bigCommit(2_000_000); await expect(pushExistingBranch(dir, b, 't', target, s0, undefined, { ...guard, limits: { timeoutMs: 120_000, maxBytes: 1_000_000 } })).rejects.toThrow(/push fetch (too large|timed out)/); await expect(pushExistingBranch(dir, b, 't', target, s0, undefined, { ...guard, limits: { timeoutMs: 1, maxBytes: 1e12 } })).rejects.toThrow(/push fetch (too large|timed out)/); expect(remoteTip()).toBe(s0); });
+test('cloneForGates runs no git in the agent repo as the gate uid', async () => { const rec = recordSpawn(); await cloneForGates(dir, gateDir, fakeIds); const gateCalls = rec.calls.filter(c => c.argv.includes(`--reuid=${fakeIds.gate.uid}`)); expect(gateCalls.length).toBeGreaterThan(0); for (const c of gateCalls) { expect(c.cwd?.startsWith(dir) ?? false).toBe(false); expect(c.argv.join(' ')).not.toContain(` ${dir}`); } });
 test('pushExistingBranch refuses when the remote moved', async () => { /* second clone advances remote */ await expect(push()).rejects.toThrow(/^stale info/); });
-test('second sweep runs after the tokenless fetch', async () => { /* expect [sweep, fetch, sweep, push] */ });
+test('second sweep runs after the tokenless fetch', async () => { const order: string[] = []; recordSpawn((c) => { if (c.argv.includes('fetch') && c.argv.includes(`file://${dir}`)) order.push('agent-fetch'); if (c.argv.includes('push')) order.push('push'); }); await pushExistingBranch(dir, b, 't', target, s0, () => void order.push('sweep'), guard); expect(order).toEqual(['sweep', 'agent-fetch', 'sweep', 'push']); });
 // also: 'extra config appends after the auth header'; 'runGit refuses a token with an agent identity'; 'checkoutBranch detects a moved head'; 'mergeBase
 //   reports conflicts and leaves markers'; 'a planted commondir in the bare repo does not change the push config'; 'remoteBranchSha returns the tip or null'
 ```
 
 - [ ] **Step 2: Run** `npm test -w apps/trooper -- git`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `npm test -w apps/trooper`. Expected: PASS, including `main.test.ts` (its fake `git` keeps the M0 function names).
+- [ ] **Step 4: Run** `npm run typecheck && npm test -w apps/trooper`. Expected: PASS, including `main.test.ts` (its fake `git` keeps the M0 function names, which `git.ts` still exports).
 - [ ] **Step 5: Commit** `feat(trooper): root-only mirror, agent-uid working copy, guarded leased pushes`
 
 ---
@@ -896,8 +989,8 @@ test('second sweep runs after the tokenless fetch', async () => { /* expect [swe
 
 **Files:**
 - Create: `apps/trooper/src/roles/shared.ts`, `apps/trooper/src/roles/implement.ts`
-- Modify: `apps/trooper/src/main.ts`, `apps/trooper/src/claude.ts`
-- Test: `apps/trooper/src/claude.test.ts`; `apps/trooper/src/main.test.ts` must pass **unmodified**
+- Modify: `apps/trooper/src/main.ts`, `apps/trooper/src/claude.ts`, `apps/trooper/src/gates.ts` (`runGates` options gain `as?: AgentIdentity | null`; each gate command is spawned through `asAgentArgv(as, …)` with `agentSpawnOptions(as, env).env`)
+- Test: `apps/trooper/src/claude.test.ts`, `apps/trooper/src/roles/shared.test.ts`, `apps/trooper/src/gates.test.ts`; `apps/trooper/src/main.test.ts` must pass **unmodified**
 
 **Interfaces:**
 - Consumes: Tasks 2, 14, 15.
@@ -905,11 +998,14 @@ test('second sweep runs after the tokenless fetch', async () => { /* expect [swe
   - `ClaudeArgsOptions` gains `outputSchema: object`, which replaces the baked-in implement schema.
   - `ParsedLine`: the `rate_limit` variant gains `rateLimitType?: string` and `unifiedWindows?` (ISO `resetsAt`); `result` gains `sessionId?: string`; a new `{ type: 'init'; sessionId: string }` variant comes from `system/init`.
   - `rate_limit` events are emitted with exactly the `RateLimitEventData` keys.
+  - `TrooperDeps` gains an optional `privilege?: { sweepUid: typeof sweepUid }` (default: the real `privilege.ts` function), so tests record uid sweeps; `main.test.ts` omits it and is unaffected.
   - `RoleCtx = { workdir: string; secrets: string[]; ids: TrooperIdentities | null }`; `RoleRunner = (payload: DropPayload, deps: TrooperDeps, ctx: RoleCtx) => Promise<DropResult>`.
+  - `workdir` is created root-owned with mode 0755 (not M0's 0700 `mkdtempSync`: `chmodSync(work, 0o755)` right after creation), so the agent uid can read the root-written settings and system-prompt files in it. Cleanup at the end of a run: `removeTree(<agent home>/repo, ids.agent)` and `removeTree('/home/gate/repo', ids.gate)` when `ids` is set, then root `rmSync(workdir)`; without `ids`, M0's `rmSync`.
+  - Non-container path (`ids === null`, as in CI and `main.test.ts`): no `sweepUid`, no `cloneForGates`; gates run in `dir` exactly as M0 (`runGates` with `as: null`).
   - `shared.ts`:
     - `cloneAndPrepare(payload, deps, ctx): Promise<string>` (repo dir; mirror at `<workdir>/mirror`, working copy at `<ids.agent.home>/repo` or `<workdir>/repo`);
-    - `runAgent(payload, deps, ctx, o: { prompt: string; outputSchema: object }): Promise<AgentOutcome>`, with `AgentOutcome = { exitCode: number | null; results: ParsedLine[]; initSessionId: string | null; rateLimited: boolean; terminalReason?: string }`;
-    - `runGatesPhase(payload, deps, ctx, dir): Promise<GateResult[]>` — first `sweepUid(ids.agent.uid)`, then `cloneForGates(dir, '/home/gate/repo', ids)`; gates run there with `agentSpawnOptions(ids.gate, …)` (own `HOME`). Gates therefore see committed `HEAD` only; implement, heal and resolve commit before gates, as in M0.
+    - `runAgent(payload, deps, ctx, o: { prompt: string; outputSchema: object }): Promise<AgentOutcome>`, with `AgentOutcome = { exitCode: number | null; results: ParsedLine[]; initSessionId: string | null; rateLimited: boolean; rateLimit?: RateLimitEventData; terminalReason?: string }` (`rateLimited` = a `rejected` report was seen; `rateLimit` = the last report of any status);
+    - `runGatesPhase(payload, deps, ctx, dir): Promise<GateResult[]>` — with `ids`: first `(deps.privilege?.sweepUid ?? sweepUid)(ids.agent.uid)`, then `deps.git.cloneForGates(dir, join(ids.gate.home, 'repo'), ids)`; gates run there via `deps.runGates(gates, { cwd: <gate repo>, env, secrets, as: ids.gate })` (own `HOME`). Without `ids`: the non-container path above. Gates therefore see committed `HEAD` only; implement, heal and resolve commit before gates, as in M0.
     - The `sweep` passed to every push runs the M0 sweep plus `sweepUid(ids.agent.uid)` and `sweepUid(ids.gate.uid)`.
   - Every rate-limit report seen is kept; the last one is attached to the result as `rateLimit`.
   - `runTrooper(payload, deps)` dispatches on `payload.role` to `runImplement` (M0 behaviour moved here); other roles return `failed`, `role not implemented` until Tasks 18–19.
@@ -919,7 +1015,10 @@ test('second sweep runs after the tokenless fetch', async () => { /* expect [swe
 ```ts
 test('rate_limit parsing keeps rateLimitType and unifiedWindows in ISO', () => expect(parseStreamLine(rlLine({ seven_day: { utilization: 0.5, resets_at: 1767225600 } }))).toMatchObject({ unifiedWindows: { seven_day: { resetsAt: '2026-01-01T00:00:00.000Z' } } }));
 test('gates run as the gate uid after an agent sweep', async () => { await runGatesPhase(p, deps, ctxWithIds, dir); expect(order).toEqual(['sweepUid:10001', 'cloneForGates', 'gate:10002@/home/gate/repo']); });
-test('the push sweep kills both the agent and gate uids', ...);
+test('the push sweep kills both the agent and gate uids', async () => { const swept: number[] = []; const deps = depsWith({ privilege: { sweepUid: (u) => (swept.push(u), 0) } }); await runImplement(impl, deps, ctxWithIds); deps.state.pushSweep!(); expect(swept).toEqual(expect.arrayContaining([10001, 10002])); expect(deps.state.m0Sweeps).toBe(1); });
+test('without identities gates run in the working copy with no sweep', async () => { const r = recorder(); await runGatesPhase(p, r.deps, { ...ctx, ids: null }, dir); expect(r.order).toEqual([`gate:self@${dir}`]); });
+test('gates.ts spawns a gate command through the agent argv wrapper', async () => { const rec = recordGateSpawn(); await runGates([{ name: 'g', run: 'id -u', timeoutMinutes: 1 }], { cwd: '/x', env: {}, secrets: [], as: fakeIds.gate }); expect(rec.argv.slice(0, 2)).toEqual(['setpriv', `--reuid=${fakeIds.gate.uid}`]); });
+test('roles read no agent-written file except through readAgentFile', () => { for (const f of readdirSync(rolesDir)) expect(readFileSync(join(rolesDir, f), 'utf8')).not.toMatch(/\breadFile(Sync)?\(/); });
 // also: 'buildClaudeArgs uses the given output schema'; 'results carry the last rate-limit report'; 'system/init yields the session id'; 'unknown role fails without cloning'
 ```
 
@@ -934,23 +1033,26 @@ test('the push sweep kills both the agent and gate uids', ...);
 
 **Files:**
 - Modify: `apps/trooper/src/roles/implement.ts`, `apps/trooper/src/roles/shared.ts`
-- Test: `apps/trooper/src/roles/implement.test.ts`, `apps/trooper/src/main.test.ts` (fake Claude streams gain `system/init`)
+- Test: `apps/trooper/src/roles/implement.test.ts`, `apps/trooper/src/main.test.ts` (fake Claude streams gain `system/init`; its fake git's `remoteBranchExists` becomes `remoteBranchSha`, returning `'remote-sha'` when `remoteHasBranch` else `null`, still pushing `'ls-remote'` to `calls`)
+- Fake git recorder convention (this task and Tasks 18–19): every fake git method records `[name, ...allArgs]` with the arguments exactly in signature order, including `dir`.
 
 **Interfaces:**
 - Consumes: Task 16.
 - Produces:
   - `acceptOutcome(o: AgentOutcome): { ok: true; result: Extract<ParsedLine, { type: 'result' }> } | { ok: false; reason: string }`. It accepts only when `exitCode === 0`, exactly one `result` event exists, and its `sessionId` equals `initSessionId`. Otherwise the reason is `claude exit <n>`, `multiple results` or `session mismatch`. It applies to every role that reads a result.
   - `runImplement`:
-    - `resume: false`: when `remoteBranchSha` is non-null → `failed`, `branch <b> already exists on remote` (the server resumes such items; R12).
+    - `resume: false`: when `remoteBranchSha` is non-null → `failed`, `branch <b> already exists on remote` (the server resumes such items; R12). `runImplement` no longer calls `remoteBranchExists` (it stays exported, unused by roles).
     - `resume: true`: `mirrorFetch` + `checkoutBranch(branch, resumeSha)` instead of the fail-fast; continue; push with `pushExistingBranch(..., resumeSha)`.
     - Every push passes `{ as: ids.agent, base, protectedPaths: payload.protectedPaths }`; a guard refusal becomes `failed` with its reason (`protected path <f>`, `foreign commit identity`).
-    - A `rate_limit` event with status `rejected`, or `terminalReason !== 'completed'`, with commits ahead of base: `wip: checkpoint` commit (as agent), then a leased push. It returns `rate_limited` or `interrupted` with that `headSha`; with nothing to checkpoint, the same status without `headSha`.
+    - A `rate_limit` event with status `rejected`, or `terminalReason !== 'completed'`: first `commitIfDirty(dir, 'wip: checkpoint', ids.agent)`, then if `aheadOfBase > 0` push the checkpoint (`pushExistingBranch(..., resumeSha)` when resuming, else `pushNewBranch`), both with the guard options. It returns `rate_limited` or `interrupted` with that `headSha`; with nothing to checkpoint (clean tree and nothing ahead), the same status without `headSha`.
 
 - [ ] **Step 1: Write failing tests**
 
 ```ts
-test('resume continues the existing branch instead of failing fast', async () => { const r = await runImplement({ ...impl, resume: true, resumeSha: 'ck1' }, deps, ctx); expect(git.calls).toContainEqual(['checkoutBranch', 'agent/issue-1', 'ck1']); expect(git.calls.map(c => c[0])).not.toContain('remoteBranchSha'); expect(r.status).toBe('completed'); });
-test('rate_limited implement pushes a checkpoint and reports headSha', async () => { const r = await runImplement(impl, depsWith(stream([init('s'), rateLimit('rejected')])), ctx); expect(r).toMatchObject({ status: 'rate_limited', headSha: 'ck1' }); expect(git.calls).toContainEqual(['commitIfDirty', expect.any(String), 'wip: checkpoint']); });
+// ctx.ids is null in these tests, so repoDir = join(ctx.workdir, 'repo') and the trailing `as` argument is null.
+test('resume continues the existing branch instead of failing fast', async () => { const r = await runImplement({ ...impl, resume: true, resumeSha: 'ck1' }, deps, ctx); expect(git.calls).toContainEqual(['checkoutBranch', repoDir, 'agent/issue-1', 'ck1', null]); expect(git.calls.map(c => c[0])).not.toContain('remoteBranchSha'); expect(r.status).toBe('completed'); });
+test('rate_limited implement pushes a checkpoint and reports headSha', async () => { const r = await runImplement(impl, depsWith(stream([init('s'), rateLimit('rejected')])), ctx); expect(r).toMatchObject({ status: 'rate_limited', headSha: 'ck1' }); expect(git.calls).toContainEqual(['commitIfDirty', repoDir, 'wip: checkpoint', null]); });
+test('a dirty tree with nothing committed is still checkpointed', async () => { const r = await runImplement(impl, depsWith(stream([init('s'), rateLimit('rejected')]), { dirty: true, aheadAfterCommit: 1 }), ctx); expect(r).toMatchObject({ status: 'rate_limited', headSha: 'ck1' }); });
 test('a result whose session id differs from init is failed', () => expect(acceptOutcome({ exitCode: 0, results: [result('other')], initSessionId: 's', rateLimited: false })).toEqual({ ok: false, reason: 'session mismatch' }));
 // also: 'a protected-path change is never pushed and fails'; 'resume:false with an existing branch fails fast'; 'max turns gives interrupted with a checkpoint'; 'a non-zero claude exit is failed even with a
 //   result line'; 'two result events are failed'
@@ -971,7 +1073,7 @@ test('a result whose session id differs from init is failed', () => expect(accep
 **Interfaces:**
 - Consumes: Tasks 15–17; `REVIEW_OUTPUT_SCHEMA`, `VerdictSchema` (Task 2); M0 `redact`.
 - Produces: `runReview: RoleRunner`:
-  1. Clone (read token or none) → `checkoutBranch(pr.branch, pr.headSha)` → gates as the agent, credential-less.
+  1. Clone (read token or none; `mirrorDir` = `<workdir>/mirror`) → `checkoutBranch(pr.branch, pr.headSha)` → gates through Task 16's `runGatesPhase` (the gate uid in container mode; credential-less).
   2. Record `treeState` (`status --porcelain=v1 -z --untracked-files=all` plus `HEAD`, as agent) **after** the gates. A failed gate skips Claude and gives `request_changes` with a `blocker` finding naming the gate.
   3. Otherwise Claude with `REVIEW_OUTPUT_SCHEMA` → `acceptOutcome` → `VerdictSchema.parse`. A changed `treeState` gives `failed`, `review modified the tree` (a sanity check, not a control).
   4. Every verdict string goes through `redact(…, ctx.secrets)`. Result: `completed` with `verdict` and `gates`; no commit, no push.
@@ -1003,15 +1105,18 @@ test('a red gate yields request_changes without running claude', async () => { c
 
   | Role | Pipeline |
   |---|---|
-  | heal | `mirrorFetch` → `checkoutBranch(pr.branch, pr.headSha)` → Claude with `heal.md` + feedback (`acceptOutcome`) → `commitIfDirty` as agent → `no_changes` if nothing changed → gates → `pushExistingBranch(..., pr.headSha)` → `completed` + `headSha`. Max turns or `rejected` → checkpoint as in Task 17 |
-  | resolve | `mirrorFetch` → `checkoutBranch` → `mergeBase`. `up_to_date` → `no_changes`. `clean` skips Claude. `conflicts` → Claude with `resolve.md`, then any `<<<<<<<`/`>>>>>>>` line in a tracked file (checked as agent) → `failed`. Then gates → `pushExistingBranch` → `completed` + `headSha`. Every result carries `mergeOutcome` |
+  | heal | `mirrorFetch` → `checkoutBranch(pr.branch, pr.headSha)` → Claude with `heal.md` + feedback (`acceptOutcome`) → `commitIfDirty` as agent → `no_changes` if `headSha(dir) === pr.headSha` (so commits the agent made itself count as changes) → gates → `pushExistingBranch(..., pr.headSha)` → `completed` + `headSha`. Max turns or `rejected` → checkpoint as in Task 17 |
+  | resolve | `mirrorFetch` → `checkoutBranch` → `mergeBase`. `up_to_date` → `no_changes`. `clean` skips Claude. `conflicts` → Claude with `resolve.md` (`acceptOutcome`), then any `<<<<<<<`/`>>>>>>>` line in a tracked file (checked as agent) → `failed`, then `commitIfDirty(dir, 'Merge origin/<base>', ids.agent)` to conclude the merge (gates see committed `HEAD` only; a still-unmerged index → `failed`, `merge not concluded`). Then gates → `pushExistingBranch` → `completed` + `headSha`. Every result carries `mergeOutcome` |
 
   Pushes pass the Task 17 guard options. `head moved` and `stale info` errors propagate as the `failed` reason prefix (the server keeps the item `pr_open`); guard refusals are `failed` with their reason (the server parks).
 
 - [ ] **Step 1: Write failing tests**
 
 ```ts
-test('heal pushes with lease on the PR head', async () => { await runHeal(heal, deps, ctx); expect(git.calls).toContainEqual(['pushExistingBranch', 'agent/issue-1', expect.anything(), expect.anything(), 'sha1']); });
+// Recorder convention from Task 17: [name, ...allArgs in signature order]; pushExistingBranch(dir, branch, token, target, expectedRemoteSha, sweep, o).
+test('heal pushes with lease on the PR head', async () => { await runHeal(heal, deps, ctx); expect(git.calls).toContainEqual(['pushExistingBranch', repoDir, 'agent/issue-1', expect.anything(), expect.anything(), 'sha1', expect.any(Function), expect.objectContaining({ base: 'main' })]); });
+test('resolve with conflicts commits the merge before gates', async () => { const order = await runResolveRecording(depsWithMerge('conflicts')); expect(order.indexOf('commitIfDirty')).toBeGreaterThan(-1); expect(order.indexOf('commitIfDirty')).toBeLessThan(order.indexOf('runGates')); });
+test('heal whose agent committed itself is not no_changes', async () => { const r = await runHeal(heal, depsWhereAgentCommits('sha2'), ctx); expect(r.status).toBe('completed'); });
 test('heal lease rejection fails with stale info', async () => expect((await runHeal(heal, depsWherePushRejects, ctx)).reason).toMatch(/^stale info/));
 test('resolve with clean merge skips claude and reports clean', async () => { const r = await runResolve(resolve, depsWithMerge('clean'), ctx); expect(r).toMatchObject({ status: 'completed', mergeOutcome: 'clean' }); expect(claude.runs).toBe(0); });
 test('resolve leaving conflict markers fails', async () => expect((await runResolve(resolve, depsWithMarkersLeft, ctx)).status).toBe('failed'));
@@ -1031,7 +1136,7 @@ test('resolve leaving conflict markers fails', async () => expect((await runReso
 
 **Interfaces:**
 - Produces:
-  - Dockerfile: creates `agent` (uid/gid 10001, home `/home/agent`, 0711) and `gate` (uid/gid 10002, home `/home/gate`, 0700), with no shared group; keeps the trooper as root (no `USER`); `work/` root-owned 0755; sets `JM_AGENT_*`, `JM_GATE_*`, `JM_CONTAINER=1`; installs `setpriv` (util-linux); strips setuid/setgid bits from every binary.
+  - Dockerfile: creates `agent` (uid/gid 10001, home `/home/agent`, 0711, with `/home/agent/.claude` owned by agent, 0700) and `gate` (uid/gid 10002, home `/home/gate`, 0700), with no shared group; keeps the trooper as root (no `USER`); `work/` root-owned 0755; sets `JM_AGENT_*`, `JM_GATE_*`, `JM_CONTAINER=1`; installs `setpriv` (util-linux); strips setuid/setgid bits from every binary.
   - `DockerDriver` create options: `Privileged: false`, `CapDrop: ['ALL']`, `CapAdd: ['SETUID', 'SETGID', 'KILL']` (no `CHOWN`: nothing is chowned), `SecurityOpt: ['no-new-privileges']`, `PidsLimit: 512`, `Ulimits: [{ Name: 'core', Soft: 0, Hard: 0 }]`.
   - The process sweep still kills everything except PID 1.
 
@@ -1052,7 +1157,7 @@ test('resolve leaving conflict markers fails', async () => expect((await runReso
 **Interfaces:**
 - Produces:
   - `allowedImages(env): Set<string>` — `JM_ALLOWED_IMAGES` split on commas, trimmed, empty entries dropped; unset or empty means `{ JM_TROOPER_IMAGE (if set), 'jumpmaster-trooper:dev' }`.
-  - `runDrop` uses `payload.image` (fallback `TROOPER_IMAGE`). An exact-string match against the allow-list is required; no prefix match. A refused image posts `failed`, reason `image not allowed: <image>`, and no container starts.
+  - `runDrop` uses `payload.image`, falling back to `deps.image`, then `TROOPER_IMAGE`. An exact-string match against the allow-list is required; no prefix match. A refused image posts `failed`, reason `image not allowed: <image>`, and no container starts.
 
 - [ ] **Step 1: Write failing tests:** `uses payload image`, `refuses an image outside the allow-list`, `no prefix match`, `empty JM_ALLOWED_IMAGES means the default`.
 - [ ] **Steps 2–4:** run `npm test -w apps/stick -- runner` (expected FAIL); implement; run `npm test -w apps/stick -- runner` (expected PASS).
@@ -1312,4 +1417,36 @@ The controller's rulings R1–R13 are applied throughout. Below, "T" = task in t
 | Fable Medium: cap the cause-gone re-decide | Not adopted (ruling): parked for final code review |
 
 Per Q10, a single verification pass over the Criticals and Highs follows v3. Remaining Mediums are recorded as rulings for the final code review and do not trigger another plan revision.
+
+**Pre-flight rulings (consistency scan; controller adopted every proposed resolution)**
+
+| ID | Ruling |
+|---|---|
+| F1 probe requeue charged after ingest | Adopted: T9 reads `wasProbe` before T10's ingest; T10 test `a rate-limited probe stays free after the ingest starts a new pause` |
+| F2 identity check flags merged base commits | Adopted: T15 `prePushCheck` logs `<since>..<branch> ^refs/jm/base`; test `a resolve merge of human base commits passes the identity check` |
+| F3 retry label re-parks a closed PR | Adopted: T13 re-reads the PR; open → `pr_open`, merged → `done`, closed → PR row `closed` and item `ready`; T13 test |
+| F4 failed create_pr blocks a resumed PR | Adopted: T11 step 3 runs `deleteFailedOutbox(db, itemId, 'create_pr')` in the resume transaction (T1 adds the `kind` filter); T11 test |
+| F5 thrown snapshot reads fail open | Adopted: T7 `Snapshot.forgeUnavailable` and rule 2; T11 fail-closed read rules; `branchSha === null` only on a confirmed absence; T7/T11 tests |
+| F6 single implement insert path | Adopted: T9 "replacement inserts" are the stated exception; T10 `enqueueImplement` text names it |
+| F7 resolve refund ill-defined | Adopted: T6 `chargeBudget` returns `charged`; `chargedKey` is a comma-separated key list (T1); `refundCharge` reverses exactly those; T6/T9 tests |
+| F8 review gates identity | Adopted: T18 step 1 uses `runGatesPhase` |
+| F9 umask and gate uid | Adopted: T14 `asAgentArgv` applies the umask via `sh -c 'umask 022; exec "$@"'`, `agentSpawnOptions` returns env only; T16 modifies `gates.ts` (`as` option) |
+| F10 no `sweepUid` seam | Adopted: T16 `TrooperDeps.privilege?` |
+| F11 `remoteBranchExists` removal | Adopted: T15 keeps it as a wrapper; T17 switches roles and the `main.test.ts` fake to `remoteBranchSha` |
+| F12 `promptVersion` importers | Adopted: T8 Files list `main.ts`, `sticks.test.ts`; typecheck in Steps 2–4 |
+| F13 `FakeForgeState` undefined | Adopted: T5 specifies the state API and defaults; T12 harness defaults |
+| F14 no `rand` seam | Adopted: T9 `StickRouteDeps.rand`, `ResultDeps.rand`; T10 `expireLeases(..., rand)`; T12 determinism line |
+| F15 T11 tests vs signatures | Adopted: tests pass `{ path }` objects and both lockfiles; helper split `pkg`/`scripts`/`lock`; report formats specified |
+| F16 resolve never concludes the merge | Adopted: T19 commits the merge before gates; test |
+| F17 recorder conventions | Adopted: T17 convention (all args in signature order); T17/T19 expectations corrected |
+| F18 vacuous and placeholder tests | Adopted: concrete assertions in T1, T7, T9, T10, T12, T13, T14, T15, T16; T11 snapshot-filter test and T12 force-push test now back Review Focus 1 |
+| F19 unsafe default `mirrorDir` | Adopted: T15 requires `mirrorDir` with an agent identity |
+| F20 T4 leaves typecheck red | Adopted: T4 stubs the new methods in M0 `fakeForge` and runs typecheck |
+| F21 wall-clock writes in M0 repo | Adopted: T1 adds optional `now` to `insertDrop`, `setWorkItemState`, `upsertWorkItem`; Global Constraints updated |
+| F22 rules read twice per pass | Adopted: T11 `reconcileZone` takes `pass`; T13 `syncDropZone` returns it |
+| F23 T10 test clock | Adopted: T10 declares its own `t0` on 2026-10-20 |
+| F24 T2 file list | Adopted: T2 lists trooper `claude.ts` |
+| F25 non-container path and unwired primitives | Adopted: T16 specifies the `ids === null` path, `removeTree` cleanup, a 0755 `workdir`; `readAgentFile` kept as the only permitted path, enforced by a T16 test |
+| F26 heal `no_changes` misses agent commits | Adopted: T19 compares `headSha(dir)` with `pr.headSha` |
+| F27 `expireLeases` arity | Adopted: T10 makes `usageCfg` optional (`DEFAULT_USAGE_CONFIG`) |
 

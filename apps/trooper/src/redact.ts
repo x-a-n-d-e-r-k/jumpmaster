@@ -14,3 +14,9 @@ export function redact(text: string, secrets: string[]): string {
   for (const re of TOKEN_SHAPES) out = out.replace(re, '[REDACTED]');
   return out;
 }
+
+/** True when `text` holds one of `secrets` verbatim or anything shaped like a known token. */
+export function containsSecret(text: string, secrets: string[]): boolean {
+  if (secrets.some((s) => s.length >= 8 && text.includes(s))) return true;
+  return TOKEN_SHAPES.some((re) => new RegExp(re.source).test(text));
+}

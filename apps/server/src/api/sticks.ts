@@ -1,14 +1,8 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import {
-  agentBranch,
-  type DropPayload,
-  DropResultSchema,
-  TrooperEventSchema,
-} from '@jumpmaster/protocol';
+import { DropResultSchema, TrooperEventSchema } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import type { Config, DropZoneConfig } from '../config.js';
+import { type Config, secretList } from '../config.js';
 import type { Db } from '../db/open.js';
 import {
   appendEvents,
@@ -16,62 +10,27 @@ import {
   getDrop,
   getStickByTokenHash,
   insertStick,
-  listWorkItems,
   type Stick,
   updateDrop,
 } from '../db/repo.js';
-import type { Forge } from '../forge/github.js';
 import { heartbeat, leaseNextDrop } from '../leases.js';
+import type { ForgePair } from '../outbox.js';
+import { buildPayload } from '../payloads.js';
 import { applyResult } from '../results.js';
+import { dispatchGate, ingestRateLimit, rateLimitFromEvent } from '../usage.js';
 
 export interface StickRouteDeps {
   db: Db;
   config: Config;
-  forgeFor(zoneId: string): Forge;
+  forgesFor(zoneId: string): ForgePair;
   now(): Date;
+  /** Jitter source for usage pauses; defaults to `Math.random`. */
+  rand?: () => number;
   leaseWaitMs?: number;
   leasePollMs?: number;
 }
 
-// Same relative depth from src/api (vitest) and dist/api (built): up to apps/, then trooper/.
-const template = readFileSync(
-  new URL('../../../trooper/prompts/implement.md', import.meta.url),
-  'utf8',
-);
-
 const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex');
-
-/** First 12 hex of sha256(prompt template); recorded on every drop. */
-export const promptVersion = (): string => sha256(template).slice(0, 12);
-
-export function buildPayload(
-  db: Db,
-  zone: DropZoneConfig,
-  drop: Drop,
-  secrets: Config['secrets'],
-): DropPayload {
-  const item = listWorkItems(db, zone.id).find((w) => w.id === drop.workItemId);
-  if (!item) throw new Error(`unknown work item ${drop.workItemId}`);
-  const row = db
-    .prepare('SELECT default_branch AS defaultBranch FROM drop_zones WHERE id = ?')
-    .get(zone.id) as { defaultBranch: string };
-  const [owner = '', name = ''] = zone.repo.split('/');
-  return {
-    protocol: 1,
-    dropId: drop.id,
-    epoch: drop.epoch,
-    role: 'implement',
-    repo: { owner, name, defaultBranch: row.defaultBranch },
-    issue: { number: item.issueNumber, title: item.title, body: item.body },
-    branch: agentBranch(item.issueNumber),
-    gates: zone.gates,
-    model: zone.model,
-    maxTurns: zone.maxTurns,
-    promptVersion: promptVersion(),
-    prompt: `${template}\n\n## Issue #${item.issueNumber}: ${item.title}\n\n${item.body}`,
-    credentials: { claudeToken: secrets.claudeToken, forgeToken: secrets.githubAuthorToken },
-  };
-}
 
 const safeEqual = (a: string, b: string): boolean =>
   timingSafeEqual(createHash('sha256').update(a).digest(), createHash('sha256').update(b).digest());
@@ -162,7 +121,8 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       });
       const deadline = Date.now() + waitMs;
       for (;;) {
-        const leased = leaseNextDrop(db, stick.id, now());
+        const at = now();
+        const leased = leaseNextDrop(db, stick.id, at, dispatchGate(db, config.usage, at));
         if (leased) {
           const drop = getDrop(db, leased.dropId) as Drop;
           const zone = config.dropZones.find((z) => z.id === drop.dropZoneId);
@@ -194,6 +154,24 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       const drop = liveDrop(req, reply, req.params.id, body.data.epoch, { requireLive: true });
       if (!drop) return reply;
       appendEvents(db, drop.id, body.data.events);
+      for (const ev of body.data.events) {
+        if (ev.kind !== 'rate_limit') continue;
+        const data = rateLimitFromEvent(ev.data);
+        if (!data) continue;
+        ingestRateLimit(
+          db,
+          data,
+          {
+            dropId: drop.id,
+            workItemId: drop.workItemId,
+            startedAt: drop.startedAt,
+            outcome: null,
+          },
+          config.usage,
+          now(),
+          deps.rand ?? Math.random,
+        );
+      }
       return reply.code(204).send();
     });
 
@@ -202,11 +180,26 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       if (!body.success) return reply.code(400).send({ error: 'invalid body' });
       const drop = liveDrop(req, reply, req.params.id, body.data.epoch, { requireLive: true });
       if (!drop) return reply;
+      const zone = config.dropZones.find((z) => z.id === drop.dropZoneId);
+      if (!zone) return reply.code(500).send({ error: `unknown drop zone ${drop.dropZoneId}` });
+      const at = now();
       updateDrop(db, drop.id, {
         resultJson: JSON.stringify(body.data.result),
-        finishedAt: now().toISOString(),
+        finishedAt: at.toISOString(),
       });
-      await applyResult(db, deps.forgeFor(drop.dropZoneId), drop.id, body.data.result);
+      await applyResult(
+        db,
+        {
+          forges: deps.forgesFor(zone.id),
+          zone,
+          secrets: secretList(config.secrets),
+          usageCfg: config.usage,
+          rand: deps.rand ?? Math.random,
+        },
+        drop.id,
+        body.data.result,
+        at,
+      );
       return reply.code(204).send();
     });
   });

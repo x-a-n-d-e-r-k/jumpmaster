@@ -5,16 +5,21 @@ import type { Config } from '../config.js';
 import { openDb } from '../db/open.js';
 import {
   getDrop,
+  getOutbox,
+  getPullRequest,
   getStickByTokenHash,
+  getUsageState,
   insertDrop,
   listEvents,
+  setUsageState,
   setWorkItemState,
   upsertDropZone,
   upsertWorkItem,
 } from '../db/repo.js';
+import { buildPayload, promptVersions } from '../payloads.js';
 import { fakeForge } from '../test/fakes.js';
-import { t0, tmpDbFile, workItem } from '../test/helpers.js';
-import { buildPayload, promptVersion, registerStickRoutes } from './sticks.js';
+import { plus, t0, tmpDbFile, workItem } from '../test/helpers.js';
+import { registerStickRoutes } from './sticks.js';
 
 const config: Config = {
   listen: { host: '127.0.0.1', port: 7420 },
@@ -29,9 +34,31 @@ const config: Config = {
       image: 'jm-trooper:test',
       model: 'claude-opus-5-5',
       maxTurns: 200,
+      models: {},
+      protectedPaths: [],
+      reviewReadToken: false,
+      budgets: {
+        maxHeal: 3,
+        maxResolve: 2,
+        maxResolveTotal: 6,
+        maxResume: 2,
+        maxReviewRepeat: 2,
+        maxNoChange: 1,
+      },
+      ciRequired: true,
+      ciDeadlineMinutes: 45,
+      retryLabel: 'agent-retry',
+      mergeMethod: 'squash',
+      requireBranchProtection: true,
     },
   ],
-  secrets: { claudeToken: 'claude-secret', githubAuthorToken: 'gh-secret', joinToken: 'join-me' },
+  usage: { throttleUtilization: 0.9, probeJitterSeconds: [30, 90] },
+  secrets: {
+    claudeToken: 'claude-secret',
+    githubAuthorToken: 'gh-secret',
+    githubReviewerToken: 'gh-reviewer',
+    joinToken: 'join-me',
+  },
 };
 
 const proto = { 'x-jumpmaster-protocol': '1' };
@@ -41,7 +68,9 @@ const gateOk = { name: 'test', exitCode: 0, durationMs: 1500, timedOut: false, o
 
 let app: FastifyInstance;
 
-function setup(opts: { queued?: boolean; leaseWaitMs?: number; leasePollMs?: number } = {}) {
+function setup(
+  opts: { queued?: boolean; leaseWaitMs?: number; leasePollMs?: number; now?: () => Date } = {},
+) {
   const db = openDb(tmpDbFile());
   upsertDropZone(db, { id: 'main', repo: 'octo/demo', defaultBranch: 'main', configJson: '{}' });
   const wi = upsertWorkItem(db, {
@@ -66,16 +95,20 @@ function setup(opts: { queued?: boolean; leaseWaitMs?: number; leasePollMs?: num
     });
   }
   const forge = fakeForge({ issues: [], trusted: [] });
+  const forgeZones: string[] = [];
   app = Fastify();
   registerStickRoutes(app, {
     db,
     config,
-    forgeFor: () => forge,
-    now: () => t0,
+    forgesFor: (zoneId) => {
+      forgeZones.push(zoneId);
+      return { author: forge, reviewer: forge };
+    },
+    now: opts.now ?? (() => t0),
     leaseWaitMs: opts.leaseWaitMs ?? 60,
     leasePollMs: opts.leasePollMs ?? 10,
   });
-  return { db, forge, wi };
+  return { db, forge, wi, forgeZones };
 }
 
 async function enroll(name = 'stick-1') {
@@ -159,10 +192,13 @@ describe('stick API', () => {
       epoch: 1,
       repo: { owner: 'octo', name: 'demo', defaultBranch: 'main' },
       issue: { number: 7, title: 'Add widget' },
+      image: 'jm-trooper:test',
+      resume: false,
+      protectedPaths: [],
       credentials: { claudeToken: 'claude-secret', forgeToken: 'gh-secret' },
       model: 'claude-opus-5-5',
       maxTurns: 200,
-      promptVersion: promptVersion(),
+      promptVersion: promptVersions().implement,
     });
   });
 
@@ -191,7 +227,7 @@ describe('stick API', () => {
     const drop = { ...getDrop(db, 'd1')!, epoch: 1 };
     const p = buildPayload(db, zone, drop, config.secrets);
     expect(p.prompt).toMatch(/autonomous coding agent/);
-    expect(p.prompt).toMatch(/\n\n## Issue #7: Add widget\n\nPlease add a widget\.$/);
+    expect(p.prompt).toMatch(/\n\n## Issue \(data\)\n\n#7: Add widget\n\nPlease add a widget\.$/);
     expect(p.promptVersion).toMatch(/^[0-9a-f]{12}$/);
   });
 
@@ -238,6 +274,43 @@ describe('stick API', () => {
     expect(listEvents(db, 'd1').map((e) => e.seq)).toEqual([1, 2, 3]);
     expect((await post(9, 1)).statusCode).toBe(409);
     expect(listEvents(db, 'd1')).toHaveLength(3);
+  });
+
+  test('rate_limit events update utilization but a live rejected never pauses', async () => {
+    const { db } = setup();
+    const { stickToken } = await enroll();
+    await lease(stickToken);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/drops/d1/events',
+      headers: bearer(stickToken),
+      payload: {
+        epoch: 1,
+        events: [
+          {
+            ts: t0.toISOString(),
+            kind: 'rate_limit',
+            data: {
+              status: 'rejected',
+              resetsAt: '2026-01-01T03:00:00.000Z',
+              unifiedWindows: { seven_day: { utilization: 0.42 } },
+            },
+          },
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(204);
+    const u = getUsageState(db);
+    expect(u.sevenDayUtil).toBe(0.42);
+    expect(u.pausedUntil).toBeNull();
+  });
+
+  test('lease honours a closed usage gate', async () => {
+    const { db } = setup();
+    setUsageState(db, { status: 'rejected', pausedUntil: '2026-01-01T01:00:00.000Z' }, t0);
+    const { stickToken } = await enroll();
+    expect((await lease(stickToken)).statusCode).toBe(204);
+    expect(getDrop(db, 'd1')?.state).toBe('queued');
   });
 
   test('events for a drop that is not leased/running are 409', async () => {
@@ -292,6 +365,28 @@ describe('stick API', () => {
     });
     expect(again.statusCode).toBe(409);
     expect(forge.created).toHaveLength(1);
+  });
+
+  test('the result route uses forgesFor and now()', async () => {
+    let clock = t0;
+    const { db, forgeZones } = setup({ now: () => clock });
+    const { stickToken } = await enroll();
+    await lease(stickToken);
+    clock = plus(t0, 5000);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/drops/d1/result',
+      headers: bearer(stickToken),
+      payload: { epoch: 1, result: { status: 'completed', headSha: 'abc', gates: [] } },
+    });
+    expect(res.statusCode).toBe(204);
+    expect(forgeZones).toEqual(['main']);
+    expect(getDrop(db, 'd1')?.finishedAt).toBe(clock.toISOString());
+    expect(getOutbox(db, 'pr:1:abc')).toMatchObject({
+      state: 'done',
+      createdAt: clock.toISOString(),
+    });
+    expect(getPullRequest(db, 1)?.observedAt).toBe(clock.toISOString());
   });
 
   test('long-poll over a real socket waits and returns a drop enqueued later', async () => {

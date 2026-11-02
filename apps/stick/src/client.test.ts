@@ -16,6 +16,8 @@ const valid = {
   maxTurns: 5,
   promptVersion: 'v1',
   prompt: 'p',
+  image: 'jumpmaster-trooper:test',
+  protectedPaths: [],
   credentials: { claudeToken: 'c', forgeToken: 'f' },
 };
 
