@@ -152,6 +152,41 @@ describe('GitHubForge', () => {
       ]);
     });
 
+    test('an error on the whole blocker list holds the issue instead of clearing it', async () => {
+      listOne(5);
+      nock(api)
+        .post('/graphql')
+        .reply(200, {
+          data: { repository: { i5: null } },
+          errors: [
+            {
+              message: 'Something went wrong while executing your query',
+              path: ['repository', 'i5', 'blockedBy'],
+            },
+          ],
+        });
+      expect((await forge.listReadyIssues('agent-ready'))[0]?.blockedBy).toEqual([
+        'unreadable blockers',
+      ]);
+    });
+
+    test('a null blocker node list holds the issue', async () => {
+      listOne(5);
+      nock(api)
+        .post('/graphql')
+        .reply(200, {
+          data: {
+            repository: {
+              i5: { issueDependenciesSummary: { blockedBy: 1 }, blockedBy: { nodes: null } },
+            },
+          },
+          errors: [{ message: 'x', path: ['repository', 'i5', 'blockedBy', 'nodes'] }],
+        });
+      expect((await forge.listReadyIssues('agent-ready'))[0]?.blockedBy).toEqual([
+        '1 unreadable blocker',
+      ]);
+    });
+
     test('an error outside blocker nodes fails intake', async () => {
       listOne(5);
       nock(api)

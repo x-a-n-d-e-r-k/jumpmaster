@@ -14,7 +14,7 @@ export type ForgeIssue = {
 type BlockerNode = { number: number; state: string; repository: { nameWithOwner: string } } | null;
 type BlockerEntry = {
   issueDependenciesSummary: { blockedBy: number };
-  blockedBy: { nodes: BlockerNode[] };
+  blockedBy: { nodes: BlockerNode[] | null };
 } | null;
 type BlockerData = { repository?: Record<string, BlockerEntry> | null };
 
@@ -27,9 +27,10 @@ function partialBlockerData(err: unknown): BlockerData | null {
   return e.errors.every((x) => x.path?.includes('blockedBy')) ? e.data : null;
 }
 
+/** A missing entry means its blocker list errored (the issue was just listed): fail closed. */
 function blockersOf(entry: BlockerEntry, repo: string): string[] {
-  if (!entry) return [];
-  const open = entry.blockedBy.nodes.filter(
+  if (!entry) return ['unreadable blockers'];
+  const open = (entry.blockedBy.nodes ?? []).filter(
     (n): n is NonNullable<BlockerNode> => n !== null && n.state === 'OPEN',
   );
   const named = open.map((n) =>
