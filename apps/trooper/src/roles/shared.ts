@@ -52,6 +52,11 @@ export function emitEvent(
 }
 
 /** The agent's working copy: under its own home in container mode, else in the workdir. */
+/** The root-owned mirror, never inside the agent's home. */
+export function mirrorDirOf(ctx: RoleCtx): string {
+  return join(ctx.workdir, 'mirror');
+}
+
 export function repoDirOf(ctx: RoleCtx): string {
   return ctx.ids ? join(ctx.ids.agent.home, 'repo') : join(ctx.workdir, 'repo');
 }
@@ -70,7 +75,7 @@ export async function cloneAndPrepare(
     // Review may run without a forge token (public repo); git then clones anonymously.
     token: payload.credentials.forgeToken ?? '',
     dir,
-    mirrorDir: join(ctx.workdir, 'mirror'),
+    mirrorDir: mirrorDirOf(ctx),
     as: ctx.ids?.agent ?? null,
   });
   return dir;

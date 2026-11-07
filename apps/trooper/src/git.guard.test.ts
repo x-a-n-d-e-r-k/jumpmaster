@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -13,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest';
 import {
   assertRootOwnedDir,
@@ -183,6 +184,16 @@ describe('root git never runs in the working copy', () => {
 });
 
 describe('the root mirror', () => {
+  test('a push with an agent identity must name the root mirror', async () => {
+    const dir = join(tmp, 'agent-home', 'repo');
+    mkdirSync(dirname(dir), { recursive: true });
+    const agent = { uid: 10001, gid: 10001, home: join(tmp, 'agent-home') };
+    await expect(
+      pushNewBranch(dir, 'b', 't', { owner: 'o', name: 'r' }, () => undefined, { as: agent }),
+    ).rejects.toThrow('mirrorDir required with an agent identity');
+    expect(readdirSync(dirname(dir))).toEqual([]);
+  });
+
   test('a symlinked or renamed mirror makes mirrorFetch throw', async () => {
     const w = await world('mirrorswap');
     const evilRepo = join(w.base, 'evil.git');
