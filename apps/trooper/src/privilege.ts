@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { constants, readdirSync, readFileSync } from 'node:fs';
+import { constants, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { lstat, open } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -65,13 +65,27 @@ export function sweepUid(
   return killed;
 }
 
-/** Environment for a process running as `id` (HOME and CLAUDE_CONFIG_DIR under its home). */
+/**
+ * Environment for a process running as `id`: HOME, CLAUDE_CONFIG_DIR and, when the image provides
+ * `<tmpRoot>/jm-<uid>`, its own TMPDIR. A shared /tmp let files the agent created (owned by it)
+ * break the gate's run of the same tests. The directory sits outside the 0700 homes so the
+ * trooper, root without DAC override, can see that it exists.
+ */
 export function agentSpawnOptions(
   id: AgentIdentity | null,
   env: NodeJS.ProcessEnv,
+  tmpRoot = '/tmp',
 ): { env: NodeJS.ProcessEnv } {
   if (!id) return { env };
-  return { env: { ...env, HOME: id.home, CLAUDE_CONFIG_DIR: join(id.home, '.claude') } };
+  const tmp = join(tmpRoot, `jm-${id.uid}`);
+  return {
+    env: {
+      ...env,
+      HOME: id.home,
+      CLAUDE_CONFIG_DIR: join(id.home, '.claude'),
+      ...(existsSync(tmp) ? { TMPDIR: tmp } : {}),
+    },
+  };
 }
 
 /**
