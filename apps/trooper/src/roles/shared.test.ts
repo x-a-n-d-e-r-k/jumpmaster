@@ -59,6 +59,9 @@ function recorder(o: { claude?: string[] } = {}) {
     swept: [] as number[],
     m0Sweeps: 0,
     pushSweep: undefined as undefined | (() => void),
+    gateEnv: undefined as NodeJS.ProcessEnv | undefined,
+    gateRedactions: undefined as string[] | undefined,
+    agentEnv: undefined as NodeJS.ProcessEnv | undefined,
   };
   const deps = {
     git: {
@@ -85,13 +88,16 @@ function recorder(o: { claude?: string[] } = {}) {
       cloneForGates: async () => void state.order.push('cloneForGates'),
       removeTree: async () => undefined,
     },
-    async *runClaude() {
+    async *runClaude(_args: string[], env: NodeJS.ProcessEnv) {
+      state.agentEnv = env;
       for (const l of o.claude ?? [initLine, completeResult]) yield l;
     },
     runGates: async (
       gates: { name: string }[],
-      go: { cwd: string; as?: { uid: number } | null },
+      go: { cwd: string; as?: { uid: number } | null; env: NodeJS.ProcessEnv; secrets: string[] },
     ): Promise<GateResult[]> => {
+      state.gateEnv = go.env;
+      state.gateRedactions = go.secrets;
       state.order.push(`gate:${go.as ? go.as.uid : 'self'}@${go.cwd}`);
       return gates.map((g) => ({
         name: g.name,
@@ -128,6 +134,28 @@ describe('runGatesPhase', () => {
     const r = recorder();
     await runGatesPhase(impl, r.deps, ctx, '/work/w1/repo');
     expect(r.state.order).toEqual(['gate:self@/work/w1/repo']);
+  });
+});
+
+describe('gate secrets', () => {
+  const secret = 'postgres://local/secret-value';
+  const withSecret = { ...impl, gateSecrets: { TEST_DB_URL: secret } };
+  const ctxSecret = { ...ctx, secrets: [...ctx.secrets, secret] };
+
+  test('gate steps receive the secret; the agent process does not', async () => {
+    const r = recorder();
+    await runGatesPhase(withSecret, r.deps, ctxSecret, '/work/w1/repo');
+    expect(r.state.gateEnv?.TEST_DB_URL).toBe(secret);
+    expect(r.state.gateRedactions).toContain(secret);
+    await runImplement(withSecret, r.deps, ctxSecret);
+    expect(r.state.agentEnv).toBeDefined();
+    expect(Object.values(r.state.agentEnv ?? {})).not.toContain(secret);
+  });
+
+  test('a zone with no secrets changes the gate env by nothing', async () => {
+    const r = recorder();
+    await runGatesPhase(impl, r.deps, ctx, '/work/w1/repo');
+    expect(r.state.gateEnv?.TEST_DB_URL).toBeUndefined();
   });
 });
 

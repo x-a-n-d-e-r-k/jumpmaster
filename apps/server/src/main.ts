@@ -15,10 +15,7 @@ const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : S
 
 /** Redacts configured secrets from a message before it is logged. */
 function scrub(msg: string, config: Config): string {
-  return Object.values(config.secrets).reduce(
-    (m, s) => (s ? m.split(s).join('[redacted]') : m),
-    msg,
-  );
+  return secretList(config.secrets).reduce((m, s) => m.split(s).join('[redacted]'), msg);
 }
 
 export async function start(configPath: string, env: NodeJS.ProcessEnv = process.env) {

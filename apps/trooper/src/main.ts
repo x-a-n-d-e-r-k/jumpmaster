@@ -58,10 +58,12 @@ export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promi
   if (payload.role === 'implement' && forgeToken === undefined) {
     throw new Error('forge token required for implement');
   }
-  const secrets =
-    forgeToken === undefined
+  const secrets = [
+    ...Object.values(payload.gateSecrets ?? {}),
+    ...(forgeToken === undefined
       ? [claudeToken]
-      : [claudeToken, forgeToken, Buffer.from(`x-access-token:${forgeToken}`).toString('base64')];
+      : [claudeToken, forgeToken, Buffer.from(`x-access-token:${forgeToken}`).toString('base64')]),
+  ];
   const finish = (r: DropResult): DropResult => {
     const out: DropResult =
       r.reason === undefined ? r : { ...r, reason: redact(r.reason, secrets) };

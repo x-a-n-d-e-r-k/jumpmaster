@@ -191,7 +191,7 @@ export async function runGatesPhase(
   dir: string,
 ): Promise<GateResult[]> {
   emitEvent(deps, ctx, 'phase', { phase: 'gates' });
-  const env = scrubEnv(process.env, ctx.secrets);
+  const env = { ...scrubEnv(process.env, ctx.secrets), ...payload.gateSecrets };
   let results: GateResult[];
   if (ctx.ids) {
     (deps.privilege?.sweepUid ?? sweepUid)(ctx.ids.agent.uid);

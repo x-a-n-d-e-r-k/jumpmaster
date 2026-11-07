@@ -41,6 +41,8 @@ const dropPayloadBase = {
   /** The trooper's pre-push guard: a change touching these paths is refused. */
   protectedPaths: z.array(z.string()),
   credentials: z.object({ claudeToken: z.string(), forgeToken: z.string().optional() }),
+  /** Environment for gate steps only, never the agent. Redacted like every credential. */
+  gateSecrets: z.record(z.string(), z.string()).optional(),
 };
 
 export const DropPayloadSchema = z.discriminatedUnion('role', [

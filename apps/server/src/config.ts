@@ -28,6 +28,8 @@ const DropZoneSchema = z.object({
   repo: z.string().regex(/^[^/\s]+\/[^/\s]+$/, 'repo must be "owner/name"'),
   readyLabel: z.string().default('agent-ready'),
   gates: z.array(GateSpecSchema),
+  /** Names of secrets for gate steps; values come from JM_ZONE_SECRET_<ZONE>_<NAME>. */
+  gateSecrets: z.array(z.string()).default([]),
   /** The starting mode, used only until an operator stores one. */
   mode: z.enum(ZONE_MODES).default('active'),
   image: z.string().min(1),
@@ -103,6 +105,8 @@ export interface Config {
     githubReadToken?: string;
     joinToken: string;
     operatorToken: string;
+    /** Per-zone values for gate steps only. Any PR's gate code can read them. */
+    zoneSecrets?: Record<string, Record<string, string>>;
   };
 }
 
@@ -115,7 +119,52 @@ export function modelFor(zone: DropZoneConfig, role: Role): string {
 
 /** Every non-empty secret value, for redaction. */
 export function secretList(secrets: Config['secrets']): string[] {
-  return Object.values(secrets).filter((v): v is string => typeof v === 'string' && v !== '');
+  const { zoneSecrets, ...tokens } = secrets;
+  return [
+    ...Object.values(tokens).filter((v): v is string => typeof v === 'string' && v !== ''),
+    ...Object.values(zoneSecrets ?? {}).flatMap((zone) => Object.values(zone)),
+  ];
+}
+
+/** The gate secrets declared for a zone. */
+export function zoneSecrets(
+  config: Pick<Config, 'secrets'>,
+  zoneId: string,
+): Record<string, string> {
+  return config.secrets.zoneSecrets?.[zoneId] ?? {};
+}
+
+const GATE_SECRET_NAME = /^[A-Z][A-Z0-9_]*$/;
+const RESERVED_NAME =
+  /^(GH_TOKEN|GITHUB_TOKEN|PATH|HOME|USER|SHELL|NODE_OPTIONS|NODE_PATH|(GIT|CLAUDE|ANTHROPIC|JM|LD|DYLD)_.*)$/;
+const MIN_SECRET_LENGTH = 8; // Shorter values can't be redacted without mangling ordinary output.
+
+const zoneSecretVar = (zoneId: string, name: string): string =>
+  `JM_ZONE_SECRET_${zoneId.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_${name}`;
+
+function loadZoneSecrets(
+  zones: { id: string; gateSecrets: string[] }[],
+  env: NodeJS.ProcessEnv,
+): Record<string, Record<string, string>> {
+  const out: Record<string, Record<string, string>> = {};
+  for (const zone of zones) {
+    if (zone.gateSecrets.length === 0) continue;
+    const values: Record<string, string> = {};
+    for (const name of zone.gateSecrets) {
+      if (!GATE_SECRET_NAME.test(name) || RESERVED_NAME.test(name)) {
+        throw new Error(`Invalid gate secret name: ${name}`);
+      }
+      const variable = zoneSecretVar(zone.id, name);
+      const value = env[variable];
+      if (!value) throw new Error(`Missing required environment variables: ${variable}`);
+      if (value.length < MIN_SECRET_LENGTH) {
+        throw new Error(`${variable} must be at least ${MIN_SECRET_LENGTH} characters`);
+      }
+      values[name] = value;
+    }
+    out[zone.id] = values;
+  }
+  return out;
 }
 
 const SECRET_VARS = {
@@ -157,6 +206,7 @@ export function loadConfig(path: string, env: NodeJS.ProcessEnv): Config {
     throw new Error(
       `JM_GITHUB_READ_TOKEN is required because reviewReadToken is true for zone(s): ${needsRead.join(', ')}`,
     );
+  const zones = loadZoneSecrets(parsed.data.dropZones, env);
   const secrets: Config['secrets'] = {
     claudeToken: env[SECRET_VARS.claudeToken] as string,
     githubAuthorToken: env[SECRET_VARS.githubAuthorToken] as string,
@@ -164,6 +214,7 @@ export function loadConfig(path: string, env: NodeJS.ProcessEnv): Config {
     joinToken: env[SECRET_VARS.joinToken] as string,
     operatorToken,
     ...(readToken ? { githubReadToken: readToken } : {}),
+    ...(Object.keys(zones).length > 0 ? { zoneSecrets: zones } : {}),
   };
   const { listen } = parsed.data;
   return {

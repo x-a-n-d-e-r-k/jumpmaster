@@ -179,6 +179,20 @@ test('max_turns result → interrupted', async () => {
   expect((await runTrooper(payload, f.deps)).status).toBe('interrupted');
 });
 
+test('gate secrets join the secrets every redaction and push guard uses', async () => {
+  const f = fakeDeps({ claude: [initLine, completeResult] });
+  let seen: string[] = [];
+  const runGates = f.deps.runGates;
+  f.deps.runGates = (gates, o) => {
+    seen = o.secrets ?? [];
+    return runGates(gates, o);
+  };
+  const value = 'postgres://local/secret-value';
+  await runTrooper({ ...payload, gateSecrets: { TEST_DB_URL: value } }, f.deps);
+  expect(seen).toContain(value);
+  expect(f.lines.join('\n')).not.toContain(value);
+});
+
 test('thrown error → failed with redacted reason', async () => {
   const f = fakeDeps({ claude: [], throwOn: 'clone' });
   const r = await runTrooper(payload, f.deps);

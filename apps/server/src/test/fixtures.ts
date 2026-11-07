@@ -37,6 +37,7 @@ export function makeZone(o: Partial<DropZoneConfig> = {}): DropZoneConfig {
     mergeMethod: 'squash',
     requireBranchProtection: true,
     mode: 'active',
+    gateSecrets: [],
     authorMayBeAdmin: false,
     protectedPaths: ['.github/**', 'CODEOWNERS'],
     reviewReadToken: false,

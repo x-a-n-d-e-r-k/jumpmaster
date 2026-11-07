@@ -38,7 +38,11 @@ export interface Harness {
 }
 
 export async function harness(
-  opts: { zone?: Partial<DropZoneConfig>; issues?: ForgeIssue[] } = {},
+  opts: {
+    zone?: Partial<DropZoneConfig>;
+    issues?: ForgeIssue[];
+    zoneSecrets?: Record<string, string>;
+  } = {},
 ): Promise<Harness> {
   const db = openDb(tmpDbFile());
   const issues = opts.issues ?? [
@@ -65,6 +69,7 @@ export async function harness(
       githubReviewerToken: 'reviewer-token',
       joinToken: 'join',
       operatorToken: 'o'.repeat(32),
+      ...(opts.zoneSecrets ? { zoneSecrets: { [zone.id]: opts.zoneSecrets } } : {}),
     },
     usage: usageCfg,
   };

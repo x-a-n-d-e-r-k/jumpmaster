@@ -70,6 +70,7 @@ export function buildPayload(
     promptVersion: promptVersions()[role],
     image: zone.image,
     protectedPaths: zone.protectedPaths,
+    ...(secrets.zoneSecrets?.[zone.id] ? { gateSecrets: secrets.zoneSecrets[zone.id] } : {}),
     prompt: `${templates[role]}\n\n## Issue (data)\n\n#${item.issueNumber}: ${item.title}\n\n${item.body}`,
   };
   const author = { claudeToken: secrets.claudeToken, forgeToken: secrets.githubAuthorToken };

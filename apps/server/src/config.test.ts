@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { loadConfig, modelFor, secretList } from './config.js';
+import { loadConfig, modelFor, secretList, zoneSecrets } from './config.js';
 
 const fullEnv: Record<string, string | undefined> = {
   JM_CLAUDE_TOKEN: 'a',
@@ -115,6 +115,47 @@ describe('loadConfig', () => {
     expect(() => loadConfig(minimal, { ...fullEnv, JM_GITHUB_REVIEWER_TOKEN: undefined })).toThrow(
       /JM_GITHUB_REVIEWER_TOKEN/,
     ));
+
+  describe('gateSecrets', () => {
+    const declared = () => withZone({ gateSecrets: ['TEST_DB_URL'] });
+    const value = { JM_ZONE_SECRET_MAIN_TEST_DB_URL: 'postgres://local/test' };
+
+    test('a declared secret with no env value stops the server at startup', () =>
+      expect(() => loadConfig(declared(), fullEnv)).toThrow(/JM_ZONE_SECRET_MAIN_TEST_DB_URL/));
+
+    test('a value under 8 characters is refused', () =>
+      expect(() =>
+        loadConfig(declared(), { ...fullEnv, JM_ZONE_SECRET_MAIN_TEST_DB_URL: 'short' }),
+      ).toThrow(/at least 8/));
+
+    test.each([
+      'GH_TOKEN',
+      'GITHUB_TOKEN',
+      'CLAUDE_X',
+      'GIT_DIR',
+      'JM_X',
+      'PATH',
+      'HOME',
+      'LD_PRELOAD',
+      'NODE_OPTIONS',
+      'lower',
+    ])('the name %s is refused', (name) =>
+      expect(() => loadConfig(withZone({ gateSecrets: [name] }), fullEnv)).toThrow(
+        /gate secret name/,
+      ),
+    );
+
+    test('values reach zoneSecrets and the redaction list', () => {
+      const c = loadConfig(declared(), { ...fullEnv, ...value });
+      expect(zoneSecrets(c, 'main')).toEqual({ TEST_DB_URL: 'postgres://local/test' });
+      expect(secretList(c.secrets)).toContain('postgres://local/test');
+    });
+
+    test('a zone id with punctuation maps to an underscored variable', () => {
+      const file = withZone({ id: 'my-zone', gateSecrets: ['A_B'] });
+      expect(() => loadConfig(file, fullEnv)).toThrow(/JM_ZONE_SECRET_MY_ZONE_A_B/);
+    });
+  });
 
   describe('authorMayBeAdmin', () => {
     const optedIn = () => withZone({ authorMayBeAdmin: true });
