@@ -102,6 +102,32 @@ describe('observe mode', () => {
     expect(seen(h)).toEqual(['would_wait:blocked']);
   });
 
+  test('records one implement pick per free slot, in rank order', async () => {
+    const h = await harness({
+      zone: { mode: 'observe', maxConcurrentImplement: 2 },
+      issues: [readyIssue(1), { ...readyIssue(2), labels: ['agent-ready', 'high'] }, readyIssue(3)],
+    });
+    await h.reconcile();
+    const picks = listObservations(h.db, h.zone.id)
+      .filter((o) => o.action === 'would_enqueue:implement')
+      .map((o) => o.detail);
+    expect(picks.sort()).toEqual(['issue #1', 'issue #2']); // #3 ranks last and gets no slot
+  });
+
+  test('a would-be resume takes one of the slots', async () => {
+    const h = await harness({
+      zone: { mode: 'observe', maxConcurrentImplement: 2 },
+      issues: [readyIssue(1), readyIssue(2), readyIssue(3)],
+    });
+    h.forge.state.branches.set('agent/issue-3', 'oldsha3');
+    await h.reconcile();
+    const obs = listObservations(h.db, h.zone.id).map((o) => `${o.action} ${o.detail}`);
+    expect(obs.filter((o) => o.startsWith('would_enqueue:')).sort()).toEqual([
+      'would_enqueue:implement issue #1',
+      'would_enqueue:resume branch at oldsha3',
+    ]);
+  });
+
   test('observe records what it would do, once per decision, with a count', async () => {
     const h = await observing();
     await h.reconcile();
