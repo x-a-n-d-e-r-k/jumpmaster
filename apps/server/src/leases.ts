@@ -1,6 +1,7 @@
 import type { UsageConfig } from './config.js';
 import type { Db } from './db/open.js';
-import { getUsageState, setUsageState } from './db/repo.js';
+import { getUsageState, isKilled, setKilled, setUsageState } from './db/repo.js';
+import { refundCharge } from './flow/budgets.js';
 import { DEFAULT_USAGE_CONFIG, type Gate, releaseProbe } from './usage.js';
 
 const LEASE_TTL_MS = 60_000;
@@ -26,6 +27,7 @@ export function leaseNextDrop(
 ): { dropId: string; epoch: number } | null {
   return db.transaction(() => {
     if (gate === 'closed') return null;
+    if (isKilled(db)) return null;
     let next: { id: string } | undefined;
     if (gate === 'probe') {
       const u = getUsageState(db);
@@ -57,6 +59,29 @@ export function leaseNextDrop(
     if (!row) return null;
     if (gate === 'probe') setUsageState(db, { probeDropId: next.id }, now);
     return { dropId: next.id, epoch: row.epoch };
+  })();
+}
+
+/**
+ * Engages the kill switch: refuses all new work and cancels every active drop, refunding its
+ * charge so a later reset doesn't count cancelled work as a repeat.
+ */
+export function engageKill(db: Db, now: Date): { cancelled: number } {
+  return db.transaction(() => {
+    setKilled(db, true, now);
+    const active = db
+      .prepare(
+        `UPDATE drops SET state = 'cancelled', finished_at = ?
+           WHERE state IN ('queued', 'leased', 'running')
+           RETURNING id, work_item_id AS itemId, charged_key AS chargedKey`,
+      )
+      .all(iso(now)) as { id: string; itemId: number; chargedKey: string | null }[];
+    const probe = getUsageState(db).probeDropId;
+    for (const d of active) {
+      refundCharge(db, d.itemId, d.chargedKey);
+      if (d.id === probe) setUsageState(db, { probeDropId: null }, now);
+    }
+    return { cancelled: active.length };
   })();
 }
 

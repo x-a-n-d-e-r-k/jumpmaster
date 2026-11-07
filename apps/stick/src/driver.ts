@@ -2,6 +2,8 @@ export type ContainerHandle = {
   logs(): AsyncIterable<string>;
   wait(): Promise<{ exitCode: number }>;
   stop(graceMs: number): Promise<void>;
+  /** SIGKILL with no grace: the trooper gets no chance to checkpoint or push. */
+  kill(): Promise<void>;
 };
 
 export interface ContainerDriver {

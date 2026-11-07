@@ -3,6 +3,7 @@ import type { Db } from './db/open.js';
 import {
   getOutbox,
   insertOutbox,
+  isKilled,
   listOutbox,
   type OutboxRow,
   type OutboxState,
@@ -216,6 +217,7 @@ function zoneModeOfItem(db: Db, itemId: number): string | undefined {
 
 /** Runs one forge write at most once per `opKey` (§5.2). */
 export async function runOp(db: Db, forges: ForgePair, op: Op, now: Date): Promise<OpResult> {
+  if (isKilled(db)) throw new Error(`kill switch engaged: forge write ${op.kind} refused`);
   // Before any insert: a row left behind would later become `unknown` and park the item.
   if (zoneModeOfItem(db, op.itemId) === 'observe') {
     throw new Error(`observe mode: forge write ${op.kind} suppressed`);

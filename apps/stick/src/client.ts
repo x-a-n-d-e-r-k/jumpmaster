@@ -9,7 +9,7 @@ export type Ack = 'ok' | 'stale';
 
 /** The per-drop calls the runner needs. */
 export interface DropClient {
-  heartbeat(dropId: string, epoch: number): Promise<'ok' | 'cancel' | 'stale'>;
+  heartbeat(dropId: string, epoch: number): Promise<'ok' | 'cancel' | 'hard_cancel' | 'stale'>;
   postEvents(dropId: string, epoch: number, events: TrooperEvent[]): Promise<Ack>;
   postResult(dropId: string, epoch: number, result: DropResult): Promise<Ack>;
 }
@@ -58,12 +58,16 @@ export class StickClient implements DropClient {
     return parsed.data;
   }
 
-  async heartbeat(dropId: string, epoch: number): Promise<'ok' | 'cancel' | 'stale'> {
+  async heartbeat(
+    dropId: string,
+    epoch: number,
+  ): Promise<'ok' | 'cancel' | 'hard_cancel' | 'stale'> {
     const res = await this.req(`/api/drops/${dropId}/heartbeat`, { epoch });
     if (res.status === 409) return 'stale';
     if (!res.ok) throw new Error(`heartbeat failed: ${res.status}`);
-    const out = (await res.json()) as { cancel: boolean };
-    return out.cancel ? 'cancel' : 'ok';
+    const out = (await res.json()) as { cancel: boolean; hard?: boolean };
+    if (!out.cancel) return 'ok';
+    return out.hard ? 'hard_cancel' : 'cancel';
   }
 
   async postEvents(dropId: string, epoch: number, events: TrooperEvent[]): Promise<Ack> {

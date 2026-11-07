@@ -35,6 +35,7 @@ function fakeDriver(lines: string[], opts: { hang?: boolean; exitCode?: number }
   const d = {
     started: undefined as Parameters<ContainerDriver['start']>[0] | undefined,
     stopped: false,
+    killed: false,
     stopGrace: 0,
     driver: {
       async start(o) {
@@ -57,6 +58,10 @@ function fakeDriver(lines: string[], opts: { hang?: boolean; exitCode?: number }
             d.stopGrace = grace;
             release();
           },
+          async kill() {
+            d.killed = true;
+            release();
+          },
         };
       },
       async listByLabel() {
@@ -68,7 +73,7 @@ function fakeDriver(lines: string[], opts: { hang?: boolean; exitCode?: number }
   return d;
 }
 
-function fakeClient(heartbeatReply: 'ok' | 'cancel' | 'stale' = 'ok') {
+function fakeClient(heartbeatReply: 'ok' | 'cancel' | 'hard_cancel' | 'stale' = 'ok') {
   return {
     events: [] as TrooperEvent[][],
     result: undefined as DropResult | undefined,
@@ -186,6 +191,63 @@ describe('runDrop', () => {
       reason: 'trooper exited 2 without result',
       gates: [],
     });
+  });
+
+  test('a hard cancel kills the container with no checkpoint stop', async () => {
+    const d = fakeDriver([], { hang: true });
+    const client = fakeClient('hard_cancel');
+    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
+    expect(d.killed).toBe(true);
+    expect(d.stopped).toBe(false);
+    expect(client.result).toBeUndefined();
+  });
+
+  test('an ordinary cancel still stops it gracefully', async () => {
+    const d = fakeDriver([], { hang: true });
+    const client = fakeClient('cancel');
+    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
+    expect(d.stopped).toBe(true);
+    expect(d.killed).toBe(false);
+  });
+
+  test('a stick that loses the server hard-kills its drop after the limit', async () => {
+    const d = fakeDriver([], { hang: true });
+    const client = fakeClient();
+    let beats = 0;
+    client.heartbeat = async () => {
+      beats++;
+      throw new Error('network down');
+    };
+    await runDrop(payload, {
+      client,
+      driver: d.driver,
+      heartbeatMs: 5,
+      stickId: 's1',
+      lostServerKillBeats: 3,
+    });
+    expect(beats).toBe(3);
+    expect(d.killed).toBe(true);
+  });
+
+  test('a heartbeat recovering before the limit resets the count', async () => {
+    const d = fakeDriver([], { hang: true });
+    const client = fakeClient();
+    let beats = 0;
+    client.heartbeat = async () => {
+      beats++;
+      if (beats === 7) return 'stale';
+      if (beats % 3 === 0) return 'ok';
+      throw new Error('blip');
+    };
+    await runDrop(payload, {
+      client,
+      driver: d.driver,
+      heartbeatMs: 5,
+      stickId: 's1',
+      lostServerKillBeats: 3,
+    });
+    expect(d.killed).toBe(false);
+    expect(d.stopped).toBe(true);
   });
 
   test('stale heartbeat stops the container with a 30s grace', async () => {

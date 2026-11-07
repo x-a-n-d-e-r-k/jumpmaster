@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { Config } from '../config.js';
 import type { Db } from '../db/open.js';
 import { activeWorkCount, setKilled, setZoneMode, ZONE_MODES } from '../db/repo.js';
+import { engageKill } from '../leases.js';
 
 export interface ControlDeps {
   db: Db;
@@ -70,8 +71,11 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
     scope.post('/api/control/kill', async (req, reply) => {
       const body = KillBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: 'invalid body' });
-      setKilled(db, body.data.engaged, now());
-      return { engaged: body.data.engaged };
+      if (!body.data.engaged) {
+        setKilled(db, false, now());
+        return { engaged: false, cancelled: 0 };
+      }
+      return { engaged: true, ...engageKill(db, now()) };
     });
   });
 }

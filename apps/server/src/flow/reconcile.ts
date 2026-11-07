@@ -11,6 +11,7 @@ import {
   getZoneMode,
   hasOpenCreatePr,
   insertDrop,
+  isKilled,
   listWorkItems,
   recordObservation,
   setWorkItemState,
@@ -327,6 +328,7 @@ export async function reconcileZone(
 ): Promise<ReconcileReport> {
   let actions = 0;
   let merges = 0;
+  if (isKilled(db)) return { actions, merges };
   ensureZoneMode(db, zone.id, zone.mode, now);
   const mode = getZoneMode(db, zone.id, zone.mode);
   await resolveUnknown(db, forges, zone.id, now, zone.ciDeadlineMinutes);

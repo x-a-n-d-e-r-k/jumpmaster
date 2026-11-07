@@ -8,6 +8,7 @@ import {
   getPullRequest,
   getUsageState,
   getZoneMode,
+  isKilled,
   latestRateLimitEvent,
   latestVerdict,
   listEvents,
@@ -51,6 +52,7 @@ export function createApp(deps: StickRouteDeps): FastifyInstance {
     }
     const html = renderHome({
       zones: config.dropZones,
+      killed: isKilled(db),
       modes: Object.fromEntries(config.dropZones.map((z) => [z.id, getZoneMode(db, z.id, z.mode)])),
       items,
       drops: listRecentDrops(db),

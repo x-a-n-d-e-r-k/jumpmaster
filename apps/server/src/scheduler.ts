@@ -4,6 +4,7 @@ import type { Db } from './db/open.js';
 import {
   getZoneMode,
   insertDrop,
+  isKilled,
   listWorkItems,
   setWorkItemState,
   type WorkItem,
@@ -27,6 +28,7 @@ export function enqueueImplement(
   usageCfg: UsageConfig,
   now: Date,
 ): string | null {
+  if (isKilled(db)) return null;
   const mode = getZoneMode(db, zone.id, zone.mode);
   if (mode === 'paused' || mode === 'observe') return null;
   const gate = dispatchGate(db, usageCfg, now);

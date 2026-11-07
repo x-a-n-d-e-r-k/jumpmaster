@@ -49,6 +49,9 @@ export async function reapOrphans(driver: ContainerDriver, stickId: string): Pro
   return removed;
 }
 
+/** At the 15-second beat this is inside the server's 60-second lease. */
+const DEFAULT_LOST_SERVER_KILL_BEATS = 3;
+
 export async function runDrop(
   payload: DropPayload,
   deps: {
@@ -56,6 +59,8 @@ export async function runDrop(
     driver: ContainerDriver;
     stickId: string;
     heartbeatMs?: number;
+    /** Consecutive failed heartbeats before a hard kill. A kill can't reach a cut-off stick. */
+    lostServerKillBeats?: number;
     image?: string;
     /** Defaults to `allowedImages(process.env)`. */
     allowedImages?: Set<string>;
@@ -87,6 +92,7 @@ export async function runDrop(
   let stale = false;
   let cancelled = false;
   let stopping: Promise<void> | undefined;
+  let killing: Promise<void> | undefined;
   const stop = () => {
     stopping ??= handle.stop(STOP_GRACE_MS).catch(() => {});
     return stopping;
@@ -113,15 +119,30 @@ export async function runDrop(
     return flushing;
   };
 
+  const hardKill = () => {
+    cancelled = true;
+    killing ??= handle.kill().catch(() => {});
+    return killing;
+  };
+  const lostLimit = deps.lostServerKillBeats ?? DEFAULT_LOST_SERVER_KILL_BEATS;
+  let failedBeats = 0;
   const hb = setInterval(async () => {
+    if (killing) return;
     try {
       const r = await client.heartbeat(dropId, epoch);
+      failedBeats = 0;
       if (r === 'ok') return;
+      if (r === 'hard_cancel') {
+        void hardKill();
+        return;
+      }
       if (r === 'stale') stale = true;
       else cancelled = true;
       void stop();
     } catch {
-      // transient network error: keep going, the next beat retries
+      // Keep going through a blip. Past the limit the lease is ending anyway.
+      failedBeats++;
+      if (failedBeats >= lostLimit) void hardKill();
     }
   }, deps.heartbeatMs ?? 15_000);
   const flusher = setInterval(() => void flush(), FLUSH_MS);

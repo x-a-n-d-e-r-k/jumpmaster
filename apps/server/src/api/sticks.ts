@@ -10,6 +10,7 @@ import {
   getDrop,
   getStickByTokenHash,
   insertStick,
+  isKilled,
   type Stick,
   updateDrop,
 } from '../db/repo.js';
@@ -145,7 +146,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       if (!body.success) return reply.code(400).send({ error: 'invalid body' });
       const out = heartbeat(db, req.params.id, stick.id, body.data.epoch, now());
       if (out === 'stale') return reply.code(409).send({ error: 'stale' });
-      return { cancel: out === 'cancel' };
+      return { cancel: out === 'cancel', hard: out === 'cancel' && isKilled(db) };
     });
 
     scope.post<{ Params: { id: string } }>('/api/drops/:id/events', async (req, reply) => {

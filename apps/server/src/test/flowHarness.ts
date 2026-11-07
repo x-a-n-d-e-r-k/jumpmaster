@@ -27,6 +27,8 @@ export interface Harness {
   /** `syncDropZone` (which reads the zone pass once), then `reconcileZone` with that pass. */
   reconcile(): Promise<ReconcileReport>;
   queuedRoles(): Role[];
+  /** Headers for a stick route, enrolling on first use. */
+  stickHeaders(): Record<string, string>;
   /** Deletes all workflow rows and resets usage; the forge state is kept. */
   wipeDbKeepIssues(): void;
   lease(): Promise<{ dropId: string; epoch: number; payload: DropPayload }>;
@@ -103,6 +105,7 @@ export async function harness(
       const { pass } = await syncDropZone(db, forges, zone, clock);
       return reconcileZone(db, forges, zone, pass, promptVersions(), usageCfg, [], clock);
     },
+    stickHeaders: () => auth,
     queuedRoles() {
       return (
         db

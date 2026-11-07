@@ -98,6 +98,9 @@ export class DockerDriver implements ContainerDriver {
     return {
       logs: () => lines(out),
       wait: () => waited,
+      async kill() {
+        await container.kill({ signal: 'SIGKILL' }).catch(() => {});
+      },
       async stop(graceMs: number) {
         try {
           await container.kill({ signal: 'SIGINT' });

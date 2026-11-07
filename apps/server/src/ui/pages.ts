@@ -26,6 +26,7 @@ export interface HomeState {
   zones: DropZoneConfig[];
   /** Each zone's current mode; absent means active. */
   modes?: Record<string, string>;
+  killed?: boolean;
   items: WorkItem[];
   drops: Drop[];
   lastRateLimit?: RateLimitSeen;
@@ -44,6 +45,15 @@ export interface ItemDetail {
 }
 
 const pct = (v: number | null): string => (v === null ? '-' : `${Math.round(v * 100)}%`);
+
+/** The kill control. The token field keeps a page visit from being able to trigger it. */
+function killSection(killed: boolean): string {
+  const notice = killed
+    ? '<p><strong>The kill switch is engaged.</strong> No work runs and no forge writes happen. Forge and Claude tokens stay valid until you revoke them with their providers.</p>'
+    : '';
+  const label = killed ? 'Reset kill switch' : 'Engage kill switch';
+  return `<h2>Kill switch</h2>${notice}<form id="kill"><input id="kill-token" type="password" placeholder="Operator token" autocomplete="off" required> <button>${label}</button></form><script>document.getElementById('kill').addEventListener('submit',async(e)=>{e.preventDefault();const r=await fetch('/api/control/kill',{method:'POST',headers:{authorization:'Bearer '+document.getElementById('kill-token').value,'content-type':'application/json'},body:JSON.stringify({engaged:${killed ? 'false' : 'true'}})});if(r.ok)location.reload();else alert('Refused: '+r.status);});</script>`;
+}
 
 function usageSection(u: HomeState['usage']): string {
   if (!u) return '';
@@ -157,7 +167,8 @@ export function renderHome(state: HomeState): string {
     : '<p>None seen.</p>';
 
   return page(
-    usageSection(state.usage) +
+    killSection(state.killed ?? false) +
+      usageSection(state.usage) +
       `<h2>Drop zones</h2><table><tr><th>Id</th><th>Repo</th><th>Label</th><th>Model</th><th>Mode</th></tr>${zones}</table>` +
       `<h2>Work items</h2><table><tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>${items}</table>` +
       `<h2>Drops</h2><table><tr><th>Drop</th><th>Issue</th><th>Role</th><th>State</th><th>Elapsed</th><th>Gates</th></tr>${drops}</table>` +
