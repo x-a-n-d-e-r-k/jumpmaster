@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from 'vitest';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { type Db, openDb } from './db/open.js';
 import { getOutbox, insertOutbox, upsertDropZone, upsertWorkItem } from './db/repo.js';
 import {
@@ -6,6 +6,7 @@ import {
   markPendingUnknown,
   opKeys,
   opMarker,
+  pairFor,
   resolveUnknown,
   runOp,
   sanitizeForgeText,
@@ -106,6 +107,51 @@ describe('FakeForgeState', () => {
     });
     expect(r).toMatchObject({ number: 2, created: true });
     expect(await f.author.findOpenPullByHead('agent/issue-3')).toMatchObject({ number: 1 });
+  });
+
+  test('a merger forge, when set, performs the merge instead of the author', async () => {
+    const byAuthor = vi.spyOn(forges.author, 'merge');
+    const byMerger = vi.spyOn(forges.reviewer, 'merge');
+    await runOp(db, { ...forges, merger: forges.reviewer }, mergeOp(), new Date());
+    expect(byMerger).toHaveBeenCalledOnce();
+    expect(byAuthor).not.toHaveBeenCalled();
+  });
+
+  test('pairFor merges through the reviewer only when the author may be an admin', () => {
+    const tokens = { githubAuthorToken: 'a', githubReviewerToken: 'r' };
+    const owner = pairFor({ repo: 'o/r', authorMayBeAdmin: true }, tokens);
+    expect(owner.merger).toBe(owner.reviewer);
+    expect(pairFor({ repo: 'o/r', authorMayBeAdmin: false }, tokens).merger).toBeUndefined();
+  });
+
+  test("create_pr refuses to track an open PR without this item's marker", async () => {
+    const op = {
+      kind: 'create_pr' as const,
+      opKey: opKeys.pr(itemId, 'h2'),
+      itemId,
+      payload: { head: 'agent/issue-77', base: 'main', title: 't', body: 'b' },
+    };
+    f.state.addPull({ headRef: 'agent/issue-77', headSha: 'h2', author: 'author-bot' });
+    expect(await runOp(db, forges, op, new Date())).toMatchObject({
+      state: 'failed',
+      error: 'hand-opened PR on agent branch: #1',
+    });
+  });
+
+  test('create_pr tracks an open PR carrying this item marker from an older head', async () => {
+    const op = {
+      kind: 'create_pr' as const,
+      opKey: opKeys.pr(itemId, 'h2'),
+      itemId,
+      payload: { head: 'agent/issue-77', base: 'main', title: 't', body: 'b' },
+    };
+    f.state.addPull({
+      headRef: 'agent/issue-77',
+      headSha: 'h2',
+      author: 'author-bot',
+      body: opMarker(opKeys.pr(itemId, 'h1')),
+    });
+    expect(await runOp(db, forges, op, new Date())).toMatchObject({ state: 'done' });
   });
 
   test('a merge appends to state.merges and marks the PR merged', async () => {
@@ -231,7 +277,12 @@ describe('runOp', () => {
   });
 
   test('create_pr adopts an open PR found by lookup', async () => {
-    f.state.addPull({ headRef: 'agent/issue-1', headSha: 'h1', author: 'author-bot' });
+    f.state.addPull({
+      headRef: 'agent/issue-1',
+      headSha: 'h1',
+      author: 'author-bot',
+      body: `Closes #1\n\n${opMarker(prOp().opKey)}`,
+    });
     expect(await runOp(db, forges, prOp(), t0)).toMatchObject({
       state: 'done',
       result: { number: 1 },

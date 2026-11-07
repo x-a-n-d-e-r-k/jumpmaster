@@ -164,8 +164,17 @@ describe('GitHubForge', () => {
         headRepo: null,
         baseRef: 'main',
         author: 'bot',
+        body: '',
+        labels: [],
       });
       expect(await forge.getPull(6)).toBeNull();
+    });
+
+    test('getPull maps body and label names', async () => {
+      nock(api)
+        .get('/repos/o/r/pulls/7')
+        .reply(200, pullJson(7, { body: 'text', labels: [{ name: 'jm:hold' }, { name: 'x' }] }));
+      expect(await forge.getPull(7)).toMatchObject({ body: 'text', labels: ['jm:hold', 'x'] });
     });
 
     test('findOpenPullByHead uses owner:branch and rejects fork heads', async () => {

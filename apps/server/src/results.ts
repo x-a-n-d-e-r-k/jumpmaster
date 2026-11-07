@@ -28,6 +28,7 @@ import {
   chargeResolveConflict,
   refundCharge,
 } from './flow/budgets.js';
+import { isHeld } from './forge/github.js';
 import {
   type CreatePrPayload,
   type ForgePair,
@@ -256,6 +257,12 @@ async function reviewResult(c: Ctx, result: DropResult): Promise<void> {
     commitId: drop.headSha,
     body: renderReviewBody({ ...verdict, decision }, result.gates, c.deps.secrets),
   };
+  // Fails closed: an unposted verdict is posted later by decide, which honours the hold.
+  const pull = await c.deps.forges.author.getPull(drop.prNumber).catch(() => null);
+  if (pull === null || isHeld(pull)) {
+    finish(c, 'succeeded');
+    return;
+  }
   await runOp(
     db,
     c.deps.forges,

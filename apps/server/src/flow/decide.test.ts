@@ -4,7 +4,7 @@ import type { Drop, VerdictRow, WorkItem } from '../db/repo.js';
 import type { ChecksFacts, CompareFacts, ForgeReview, PullFacts } from '../forge/github.js';
 import { t0 } from '../test/helpers.js';
 import { fingerprint } from './budgets.js';
-import { decide, type Snapshot } from './decide.js';
+import { decide, HOLD_REASON, type Snapshot } from './decide.js';
 
 const now = t0;
 const minutesAgo = (m: number): string => new Date(now.getTime() - m * 60_000).toISOString();
@@ -126,6 +126,7 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
     mergeOp: null,
     trustedChangeRequests: [],
     humanBlockStanding: false,
+    held: false,
     protectedHits: [],
     filesComplete: true,
     gateScriptChanges: [],
@@ -366,6 +367,14 @@ describe('rules in order', () => {
       role: 'review',
       fingerprint: fingerprint(['s']),
     }));
+
+  test('a hold parks before any heal, resolve or review is enqueued', () => {
+    const park = { kind: 'park', reason: HOLD_REASON };
+    expect(decide(snap({ held: true, verdictsOnHead: [] }))).toEqual(park);
+    expect(decide(snap({ held: true, verdictsOnHead: [approve('s')] }))).toEqual(park);
+    expect(decide(snap({ held: true, verdictsOnHead: [rc('s')] }))).toEqual(park);
+    expect(decide(snap({ held: true, compare: cmp({ behindBy: 3 }) }))).toEqual(park);
+  });
 
   test('20: standing human block on an older commit parks after one review', () => {
     expect(decide(snap({ humanBlockStanding: true, verdictsOnHead: [] }))).toMatchObject({

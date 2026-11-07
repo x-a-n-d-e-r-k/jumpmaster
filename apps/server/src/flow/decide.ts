@@ -5,6 +5,8 @@ import type { OpResult } from '../outbox.js';
 import { fingerprint } from './budgets.js';
 
 /** Everything `decide` may look at. Assembled fresh each pass; `decide` reads no other state. */
+export const HOLD_REASON = 'held by jm:hold label';
+
 export interface Snapshot {
   item: WorkItem;
   zone: DropZoneConfig;
@@ -32,6 +34,8 @@ export interface Snapshot {
   trustedChangeRequests: ForgeReview[];
   /** A trusted non-bot author's latest review is CHANGES_REQUESTED on another commit. */
   humanBlockStanding: boolean;
+  /** The owner put the hold label on the PR: no agent work, approval or merge. */
+  held: boolean;
   /** Changed paths (and rename sources) matching zone.protectedPaths. */
   protectedHits: string[];
   /** PullFiles.complete. */
@@ -160,6 +164,8 @@ export function decide(s: Snapshot): Action {
   if (s.protectionProblems.length > 0) {
     return { kind: 'park', reason: `unsafe branch protection: ${s.protectionProblems.join('; ')}` };
   }
+  // Above every enqueue, so a hold also stops agent pushes and spends no budget.
+  if (s.held) return { kind: 'park', reason: HOLD_REASON };
   // 16
   if (s.trustedChangeRequests.length > 0) {
     return {

@@ -234,6 +234,39 @@ describe('branchProtectionProblems', () => {
   test('safe rules give no problems', () =>
     expect(branchProtectionProblems({ author: rules(), reviewer: rules() }, zone)).toEqual([]));
 
+  test('an admin author is unsafe unless the zone opts in', () =>
+    expect(
+      branchProtectionProblems({ author: rules({ viewerIsAdmin: true }), reviewer: rules() }, zone),
+    ).toEqual(['bot is admin']));
+
+  describe('authorMayBeAdmin', () => {
+    const optedIn = { ...zone, authorMayBeAdmin: true };
+
+    test('allows an admin author', () =>
+      expect(
+        branchProtectionProblems(
+          { author: rules({ viewerIsAdmin: true }), reviewer: rules() },
+          optedIn,
+        ),
+      ).toEqual([]));
+
+    test('still refuses an admin reviewer', () =>
+      expect(
+        branchProtectionProblems(
+          { author: rules(), reviewer: rules({ viewerIsAdmin: true }) },
+          optedIn,
+        ),
+      ).toEqual(['bot is admin']));
+
+    test('still refuses an author who can bypass the ruleset', () =>
+      expect(
+        branchProtectionProblems(
+          { author: rules({ viewerIsAdmin: true, viewerCanBypass: true }), reviewer: rules() },
+          optedIn,
+        ),
+      ).toEqual(['bot can bypass']));
+  });
+
   test('branchProtectionProblems lists every missing setting', () =>
     expect(
       branchProtectionProblems(

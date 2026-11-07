@@ -21,7 +21,15 @@ export type PullFacts = {
   headRepo: string | null;
   baseRef: string;
   author: string;
+  body: string;
+  labels: string[];
 };
+
+/** A PR with this label takes no agent action, approval or merge until it is removed. */
+const HOLD_LABEL = 'jm:hold';
+
+export const isHeld = (pull: Pick<PullFacts, 'labels'>): boolean =>
+  pull.labels.some((label) => label.toLowerCase() === HOLD_LABEL);
 
 export type ForgeReview = {
   id: number;
@@ -138,6 +146,8 @@ type RawPull = {
   user: { login: string } | null;
   head: { sha: string | null; ref: string; repo: { full_name: string } | null };
   base: { ref: string };
+  body?: string | null;
+  labels?: { name: string }[];
 };
 
 function toPullFacts(p: RawPull): PullFacts {
@@ -151,6 +161,8 @@ function toPullFacts(p: RawPull): PullFacts {
     headRepo: p.head.repo?.full_name ?? null,
     baseRef: p.base.ref,
     author: p.user?.login ?? '',
+    body: p.body ?? '',
+    labels: (p.labels ?? []).map((l) => l.name),
   };
 }
 

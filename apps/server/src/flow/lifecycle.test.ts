@@ -7,6 +7,7 @@ import {
   setAttempts,
   setWorkItemState,
 } from '../db/repo.js';
+import { opKeys, opMarker } from '../outbox.js';
 import { type Harness, harness, toApproved, toPrOpen } from '../test/flowHarness.js';
 import { workItem } from '../test/helpers.js';
 
@@ -77,6 +78,7 @@ describe('lifecycle', () => {
       headRef: 'agent/issue-1',
       headSha: 's',
       author: 'author-bot',
+      body: opMarker(opKeys.pr(1, 's')),
     });
     h.wipeDbKeepIssues();
     await h.reconcile();

@@ -23,6 +23,36 @@ Everything from M0, plus:
   Neither token gets Workflows, Commit statuses, Checks, Secrets or Administration.
   Neither bot is a repository admin. The two tokens must differ; the server refuses to
   start if they are the same.
+- **Or: your own account as the author, plus one machine account as the reviewer.** This
+  suits a person running Jumpmaster alone, since GitHub's terms limit how many free machine
+  accounts one person may hold. The differences from two bots:
+
+  | Token | Owner | Access |
+  |---|---|---|
+  | `JM_GITHUB_AUTHOR_TOKEN` | you | Fine-grained, this repository only, same permissions as above |
+  | `JM_GITHUB_REVIEWER_TOKEN` | machine account | Classic `repo` scope |
+
+  - Set `"authorMayBeAdmin": true` on the zone, because a personal repository's owner is
+    always an admin. The reviewer still must not be an admin, and neither account may
+    bypass the ruleset, so your bypass list must not include you or the admin role.
+  - The reviewer needs a classic token because GitHub's fine-grained tokens don't cover a
+    collaborator's access to a repository owned by another personal account. It reaches
+    every repository that account can, so keep it on the server and use a token made for
+    Jumpmaster alone. It never enters a runner.
+  - The server refuses to start unless the author token is fine-grained. Don't grant it
+    Administration: the server can't check that, and an admin's token with it could
+    plausibly edit the ruleset.
+  - Merges run under the reviewer token, so your admin account never performs them.
+  - PRs, and so squash commits, appear under your name. Commits on agent branches are
+    authored by `Jumpmaster Agent`.
+  - GitHub won't let you review your own PRs, so your reviews can't stop one. Add the
+    `jm:hold` label instead: the PR parks, with no new agent work, approval or merge, and
+    continues when you remove the label. A running drop still finishes, and a merge
+    already being sent can't be recalled. The hold only binds the server: anyone holding
+    the author token could still act on the PR directly.
+  - Don't open PRs by hand on `agent/issue-*` branches. Only PRs carrying the server's
+    marker are adopted; the item parks with `hand-opened PR on agent branch` until you
+    close that PR and add the retry label.
 - **For a private repository only:** a read token (`JM_GITHUB_READ_TOKEN`, Contents:
   read and Metadata: read) and `"reviewReadToken": true` on the zone, so review drops can
   clone. In M1 this token is global; per-zone read tokens arrive in M5.

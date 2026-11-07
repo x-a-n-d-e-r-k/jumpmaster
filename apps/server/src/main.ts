@@ -5,9 +5,8 @@ import { createApp } from './app.js';
 import { type Config, loadConfig, secretList } from './config.js';
 import { openDb } from './db/open.js';
 import { reconcileZone } from './flow/reconcile.js';
-import { GitHubForge } from './forge/github.js';
 import { leaseExpirer } from './leases.js';
-import { type ForgePair, markPendingUnknown } from './outbox.js';
+import { type ForgePair, markPendingUnknown, pairFor } from './outbox.js';
 import { promptVersions } from './payloads.js';
 import { syncDropZone } from './sync.js';
 
@@ -30,12 +29,7 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
 
   const forges = new Map(
     config.dropZones.map((zone) => {
-      const [owner = '', name = ''] = zone.repo.split('/');
-      const pair: ForgePair = {
-        author: new GitHubForge(owner, name, config.secrets.githubAuthorToken),
-        reviewer: new GitHubForge(owner, name, config.secrets.githubReviewerToken),
-      };
-      return [zone.id, pair] as const;
+      return [zone.id, pairFor(zone, config.secrets)] as const;
     }),
   );
   const forgesFor = (zoneId: string): ForgePair => {

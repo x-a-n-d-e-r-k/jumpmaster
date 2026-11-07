@@ -117,6 +117,8 @@ function createState(opts: {
         merged: false,
         headRepo: state.repo,
         baseRef: state.defaultBranch,
+        body: '',
+        labels: [],
         ...p,
         number,
       };
@@ -214,6 +216,7 @@ function forgeFor(
         author: me(),
         title: input.title,
         baseRef: input.base,
+        body: input.body,
       });
       // M0 callers open PRs for branches the fake never saw pushed: no head, no branch.
       if (sha === undefined) {
