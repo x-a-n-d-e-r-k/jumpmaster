@@ -178,6 +178,7 @@ async function implementResult(c: Ctx, result: DropResult): Promise<void> {
         `Closes #${item.issueNumber}`,
       ].join('\n');
       const payload: CreatePrPayload = {
+        ...(c.deps.zone.adoptPulls?.length ? { adoptPulls: c.deps.zone.adoptPulls } : {}),
         head,
         base: base.defaultBranch,
         title: item.title,

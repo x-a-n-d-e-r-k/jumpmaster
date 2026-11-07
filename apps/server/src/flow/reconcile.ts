@@ -57,6 +57,8 @@ const hasLivePr = (db: Db, itemId: number): boolean => {
 const parkReason = (db: Db, itemId: number, reason: string, now: Date): void =>
   setWorkItemState(db, itemId, 'parked', reason, now);
 
+const handOpened = (n: number): string => `hand-opened PR on agent branch: #${n}`;
+
 /** Step 2: adopt open agent PRs (author, same repo, server marker) for items that lost track. */
 async function adopt(
   db: Db,
@@ -67,14 +69,31 @@ async function adopt(
   now: Date,
 ): Promise<number> {
   const authorLogin = pass.botLogins[0];
+  const items = listWorkItems(db, zone.id);
+  const refuse = (detail: string) =>
+    recordObservation(db, zone.id, null, 'adopt_refused', detail, now);
+  const listed = (n: number) => zone.adoptPulls.includes(n);
+  const seen = new Set<number>();
   let adopted = 0;
   for (const pr of pulls) {
+    seen.add(pr.number);
     const n = agentIssue(pr.headRef);
-    if (n === null || pr.author !== authorLogin || pr.headSha === null) continue;
-    const item = listWorkItems(db, zone.id).find((i) => i.issueNumber === n);
-    if (!item || (item.state !== 'ready' && item.state !== 'in_flight')) continue;
+    if (n === null || pr.headSha === null) continue;
+    if (pr.author !== authorLogin) {
+      if (listed(pr.number))
+        refuse(`#${pr.number} is authored by ${pr.author}, not the author account`);
+      continue;
+    }
+    const item = items.find((i) => i.issueNumber === n);
+    if (!item) {
+      if (listed(pr.number)) refuse(`#${pr.number} has no work item: label issue #${n} as ready`);
+      continue;
+    }
+    const held = item.state === 'parked' && item.reason === handOpened(pr.number);
+    if (item.state !== 'ready' && item.state !== 'in_flight' && !(held && listed(pr.number)))
+      continue;
     // The author login alone isn't proof: it may be a person who also opens PRs by hand.
-    if (!isServerPrBody(pr.body, item.id)) continue;
+    if (!isServerPrBody(pr.body, item.id) && !listed(pr.number)) continue;
     if (activeDropFor(db, item.id) || hasLivePr(db, item.id)) continue;
     upsertPullRequest(
       db,
@@ -89,6 +108,9 @@ async function adopt(
     );
     setWorkItemState(db, item.id, 'pr_open', undefined, now);
     adopted++;
+  }
+  for (const n of zone.adoptPulls) {
+    if (!seen.has(n)) refuse(`#${n} is not an open agent PR`);
   }
   return adopted;
 }
@@ -130,14 +152,17 @@ async function resume(
     }
     // `adopt` already took any PR with the server's marker, so an open one here isn't ours.
     const foreign = pulls.find((p) => p.headRef === agentBranch(item.issueNumber));
-    if (foreign && !isServerPrBody(foreign.body, item.id)) {
+    if (
+      foreign &&
+      !isServerPrBody(foreign.body, item.id) &&
+      !zone.adoptPulls.includes(foreign.number)
+    ) {
       if (observing) {
-        const why = `hand-opened PR on agent branch: #${foreign.number}`;
-        recordObservation(db, zone.id, item.id, 'would_park', why, now);
+        recordObservation(db, zone.id, item.id, 'would_park', handOpened(foreign.number), now);
         unknown.add(item.id);
         continue;
       }
-      parkReason(db, item.id, `hand-opened PR on agent branch: #${foreign.number}`, now);
+      parkReason(db, item.id, handOpened(foreign.number), now);
       acted++;
       continue;
     }
@@ -331,7 +356,13 @@ export async function reconcileZone(
   if (isKilled(db)) return { actions, merges };
   ensureZoneMode(db, zone.id, zone.mode, now);
   const mode = getZoneMode(db, zone.id, zone.mode);
-  await resolveUnknown(db, forges, zone.id, now, zone.ciDeadlineMinutes);
+  await resolveUnknown(
+    db,
+    forges,
+    zone.id,
+    now,
+    zone.outboxDeadlineMinutes ?? zone.ciDeadlineMinutes,
+  );
   const pulls = await forges.author.listOpenAgentPulls('agent/issue-');
   actions += await adopt(db, forges, zone, pass, pulls, now);
   if (mode === 'paused') return { actions, merges };

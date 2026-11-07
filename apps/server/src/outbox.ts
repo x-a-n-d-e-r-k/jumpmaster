@@ -10,7 +10,13 @@ import {
   resetDoneOutbox,
   updateOutbox,
 } from './db/repo.js';
-import { type Forge, type ForgeError, GitHubForge, isRateLimited } from './forge/github.js';
+import {
+  type Forge,
+  type ForgeError,
+  GitHubForge,
+  isRateLimited,
+  type PullFacts,
+} from './forge/github.js';
 
 /** One zone's forge identities: `author` creates PRs and merges, `reviewer` only posts reviews. */
 export type ForgePair = {
@@ -34,7 +40,14 @@ export function pairFor(
 export type OpKind = OutboxRow['kind'];
 export type OpResult = { state: OutboxState; result?: unknown; error?: string };
 
-export type CreatePrPayload = { head: string; base: string; title: string; body: string };
+export type CreatePrPayload = {
+  head: string;
+  base: string;
+  title: string;
+  body: string;
+  /** Open PRs on this head to accept without the server's marker. */
+  adoptPulls?: number[];
+};
 export type PostReviewPayload = {
   pr: number;
   event: 'APPROVE' | 'REQUEST_CHANGES';
@@ -67,13 +80,16 @@ const withMarker = (body: string, opKey: string): string =>
 const isOwnPr = (body: string, opKey: string): boolean =>
   isServerPrBody(body, Number(opKey.split(':')[1]));
 
+const ours = (pr: PullFacts, opKey: string, p: CreatePrPayload): boolean =>
+  isOwnPr(pr.body, opKey) || (p.adoptPulls ?? []).includes(pr.number);
+
 /** Read-back: the op's result if its effect is visible on the forge, else `null`. */
 async function lookup(forges: ForgePair, kind: OpKind, opKey: string, payload: unknown) {
   switch (kind) {
     case 'create_pr': {
       const p = payload as CreatePrPayload;
       const pr = await forges.author.findOpenPullByHead(p.head);
-      return pr && isOwnPr(pr.body, opKey) ? { number: pr.number, created: false } : null;
+      return pr && ours(pr, opKey, p) ? { number: pr.number, created: false } : null;
     }
     case 'post_review': {
       const p = payload as PostReviewPayload;
@@ -94,13 +110,14 @@ async function write(forges: ForgePair, kind: OpKind, opKey: string, payload: un
       const p = payload as CreatePrPayload;
       // Never take over a PR someone opened by hand on the agent branch: it would get merged.
       const open = await forges.author.findOpenPullByHead(p.head);
-      if (open && !isOwnPr(open.body, opKey)) {
+      if (open && !ours(open, opKey, p)) {
         // A 4xx status makes this a failed op, so the item parks with a reason instead of waiting.
         throw Object.assign(new Error(`hand-opened PR on agent branch: #${open.number}`), {
           status: 409,
         });
       }
-      return forges.author.findOrCreatePullRequest({ ...p, body: withMarker(p.body, opKey) });
+      const { adoptPulls: _listed, ...input } = p;
+      return forges.author.findOrCreatePullRequest({ ...input, body: withMarker(p.body, opKey) });
     }
     case 'post_review': {
       const p = payload as PostReviewPayload;

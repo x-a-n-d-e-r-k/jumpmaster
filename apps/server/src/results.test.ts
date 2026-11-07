@@ -26,6 +26,8 @@ import { plus, t0, tmpDbFile, workItem } from './test/helpers.js';
 
 const zone: DropZoneConfig = {
   verification: [],
+  adoptPulls: [],
+  maxConcurrentImplement: 1,
   services: [],
   limits: { pids: 512 },
   id: 'main',

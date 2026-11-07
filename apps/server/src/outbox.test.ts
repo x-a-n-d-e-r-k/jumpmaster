@@ -138,6 +138,20 @@ describe('FakeForgeState', () => {
     });
   });
 
+  test('create_pr accepts a listed open PR', async () => {
+    const op = {
+      kind: 'create_pr' as const,
+      opKey: opKeys.pr(itemId, 'h2'),
+      itemId,
+      payload: { head: 'agent/issue-77', base: 'main', title: 't', body: 'b', adoptPulls: [1] },
+    };
+    f.state.addPull({ headRef: 'agent/issue-77', headSha: 'h2', author: 'author-bot' });
+    expect(await runOp(db, forges, op, new Date())).toMatchObject({
+      state: 'done',
+      result: { number: 1 },
+    });
+  });
+
   test('create_pr tracks an open PR carrying this item marker from an older head', async () => {
     const op = {
       kind: 'create_pr' as const,

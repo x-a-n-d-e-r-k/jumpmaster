@@ -39,6 +39,8 @@ export function makeZone(o: Partial<DropZoneConfig> = {}): DropZoneConfig {
     mode: 'active',
     gateSecrets: [],
     services: [],
+    adoptPulls: [],
+    maxConcurrentImplement: 1,
     verification: [],
     limits: { pids: 512 },
     authorMayBeAdmin: false,

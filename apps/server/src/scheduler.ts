@@ -34,13 +34,13 @@ export function enqueueImplement(
   const gate = dispatchGate(db, usageCfg, now);
   if (gate !== 'open' && gate !== 'probe') return null;
   return db.transaction((): string | null => {
-    const activeImplement = db
+    const { n } = db
       .prepare(
-        `SELECT 1 FROM drops WHERE drop_zone_id = ? AND role = 'implement'
-           AND state IN ('queued', 'leased', 'running') LIMIT 1`,
+        `SELECT COUNT(*) AS n FROM drops WHERE drop_zone_id = ? AND role = 'implement'
+           AND state IN ('queued', 'leased', 'running')`,
       )
-      .get(zone.id);
-    if (activeImplement) return null;
+      .get(zone.id) as { n: number };
+    if (n >= (zone.maxConcurrentImplement ?? 1)) return null;
     const id = randomUUID();
     try {
       insertDrop(db, {

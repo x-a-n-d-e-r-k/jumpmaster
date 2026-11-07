@@ -47,6 +47,14 @@ const DropZoneSchema = z.object({
     }),
   verification: z.array(VerificationSpecSchema).default([]),
   limits: ContainerLimitsSchema.default({ pids: DEFAULT_PIDS_LIMIT }),
+  /**
+   * Open agent PRs to take over at cutover, even without the server's marker. Listed by number
+   * because a person may author both these and hand-opened PRs, so the login can't tell them apart.
+   */
+  adoptPulls: z.array(z.number().int().positive()).default([]),
+  maxConcurrentImplement: z.number().int().positive().default(1),
+  /** How long an unresolved forge write may stay unknown; defaults to ciDeadlineMinutes. */
+  outboxDeadlineMinutes: z.number().positive().optional(),
   /** Names of secrets for gate steps; values come from JM_ZONE_SECRET_<ZONE>_<NAME>. */
   gateSecrets: z.array(z.string()).default([]),
   /** The starting mode, used only until an operator stores one. */

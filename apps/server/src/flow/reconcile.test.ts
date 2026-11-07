@@ -7,7 +7,9 @@ import {
   insertDrop,
   insertOutbox,
   insertVerdict,
+  listObservations,
   setAttempts,
+  setWorkItemState,
   updateOutbox,
 } from '../db/repo.js';
 import { opKeys, opMarker } from '../outbox.js';
@@ -201,6 +203,150 @@ describe('reconcileZone — adoption and resume', () => {
       reason: 'hand-opened PR on agent branch: #9',
     });
     expect(activeDropFor(w.db, id)).toBeUndefined();
+  });
+
+  describe('adoptPulls', () => {
+    const listed = (zone: Parameters<typeof zoneWorld>[0] = {}) =>
+      zoneWorld({ adoptPulls: [9], ...zone });
+    const pull = (over = {}) => ({
+      number: 9,
+      headRef: 'agent/issue-1',
+      headSha: 's9',
+      author: 'author-bot',
+      body: 'from the old loop',
+      ...over,
+    });
+    const refusals = (world: ReturnType<typeof zoneWorld>) =>
+      listObservations(world.db, world.zone.id).filter((o) => o.action === 'adopt_refused');
+
+    test('a listed PR on an agent branch by the author is adopted without a marker', async () => {
+      w = listed();
+      const id = w.item(1, 'ready');
+      w.f.state.addPull(pull());
+      await pass();
+      expect(item(id)).toMatchObject({ state: 'pr_open', prNumber: 9 });
+    });
+
+    test('adoption charges nothing, and a review is the next step', async () => {
+      w = listed();
+      const id = w.item(1, 'ready');
+      w.f.state.addPull(pull());
+      await pass();
+      const row = w.db
+        .prepare('SELECT COUNT(*) AS n FROM attempts WHERE work_item_id = ? AND key <> ?')
+        .get(id, 'review') as { n: number };
+      expect(row.n).toBe(0);
+      expect(activeDropFor(w.db, id)?.role).toBe('review');
+    });
+
+    test('a listed PR from another author is refused and logged', async () => {
+      w = listed();
+      const id = w.item(1, 'ready');
+      w.f.state.addPull(pull({ author: 'mallory' }));
+      await pass();
+      expect(item(id).state).not.toBe('pr_open');
+      expect(refusals(w)[0]?.detail).toMatch(/#9.*mallory/);
+    });
+
+    test('a listed PR that is not an open agent PR is logged', async () => {
+      w = listed();
+      w.f.state.addPull(pull({ headRef: 'feature/x' }));
+      await pass();
+      expect(refusals(w)[0]?.detail).toMatch(/#9 is not an open agent PR/);
+    });
+
+    test('a listed PR with no work item is logged, since it needs the ready label', async () => {
+      w = listed();
+      w.f.state.addPull(pull());
+      await pass();
+      expect(refusals(w)[0]?.detail).toMatch(/#9.*no work item.*issue #1/);
+    });
+
+    test('an unlisted unmarked PR still parks as hand-opened', async () => {
+      w = zoneWorld();
+      const id = w.item(1, 'ready');
+      w.f.state.addPull(pull());
+      await pass();
+      expect(item(id)).toMatchObject({
+        state: 'parked',
+        reason: 'hand-opened PR on agent branch: #9',
+      });
+    });
+
+    test('an item already parked as hand-opened for a listed PR is adopted', async () => {
+      w = listed();
+      const id = w.item(1, 'ready');
+      setWorkItemState(w.db, id, 'parked', 'hand-opened PR on agent branch: #9');
+      w.f.state.addPull(pull());
+      await pass();
+      expect(item(id)).toMatchObject({ state: 'pr_open', prNumber: 9 });
+    });
+
+    test('an item parked for another reason is left alone', async () => {
+      w = listed();
+      const id = w.item(1, 'ready');
+      setWorkItemState(w.db, id, 'parked', 'budget exhausted: resume');
+      w.f.state.addPull(pull());
+      await pass();
+      expect(item(id).state).toBe('parked');
+    });
+
+    test('adding a number later adopts it on the next pass, so batches work', async () => {
+      w = zoneWorld();
+      const id = w.item(1, 'ready');
+      w.f.state.addPull(pull());
+      await pass();
+      expect(item(id).state).toBe('parked');
+      w.zone.adoptPulls = [9];
+      await pass();
+      expect(item(id)).toMatchObject({ state: 'pr_open', prNumber: 9 });
+    });
+
+    test('a listed PR whose issue closes follows the closed-issue path', async () => {
+      w = listed();
+      const id = w.item(1, 'ready');
+      w.f.state.addPull(pull());
+      await pass();
+      w.db.exec(`UPDATE drops SET state = 'cancelled'`); // the review it queued has ended
+      w.f.state.issues.set(1, { state: 'closed', labels: [] });
+      await pass();
+      expect(item(id)).toMatchObject({ state: 'parked', reason: 'issue closed' });
+    });
+  });
+
+  test('maxConcurrentImplement allows N implement drops; one per issue still holds', async () => {
+    w = zoneWorld({ maxConcurrentImplement: 2 });
+    const [a, b, c] = [w.item(1, 'ready'), w.item(2, 'ready'), w.item(3, 'ready')];
+    await pass();
+    await pass();
+    await pass();
+    const active = [a, b, c].map((id) => activeDropFor(w.db, id)).filter(Boolean);
+    expect(active).toHaveLength(2);
+    expect(new Set(active.map((d) => d?.workItemId)).size).toBe(2);
+  });
+
+  test('the default keeps one implement drop per zone', async () => {
+    w = zoneWorld();
+    const [a, b] = [w.item(1, 'ready'), w.item(2, 'ready')];
+    await pass();
+    await pass();
+    expect([a, b].map((id) => activeDropFor(w.db, id)).filter(Boolean)).toHaveLength(1);
+  });
+
+  test('outboxDeadlineMinutes ages unknown ops independently of the CI deadline', async () => {
+    w = zoneWorld({ ciDeadlineMinutes: 150, outboxDeadlineMinutes: 30 });
+    const id = w.item(1, 'pr_open');
+    insertOutbox(w.db, {
+      id: 'o1',
+      opKey: 'merge:x',
+      kind: 'merge',
+      workItemId: id,
+      payloadJson: JSON.stringify({ pr: 404, sha: 's', title: 't', message: 'm' }),
+      state: 'unknown',
+      createdAt: t.toISOString(),
+    });
+    await pass(new Date(t.getTime() + 31 * 60_000));
+    expect(getOutbox(w.db, 'merge:x')?.state).toBe('failed');
   });
 
   test("adoption ignores another item's marker", async () => {
