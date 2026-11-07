@@ -206,6 +206,7 @@ test('limits and a network reach the trooper container', async () => {
   expect(seen[0]?.HostConfig).toMatchObject({
     PidsLimit: 4096,
     Memory: 8192 * 1024 * 1024,
+    MemorySwap: 8192 * 1024 * 1024, // equal to Memory: no swap on a shared host
     ShmSize: 1024 * 1024 * 1024,
   });
 });

@@ -10,7 +10,7 @@ import type { TrooperDeps } from '../main.js';
 import { runTrooper } from '../main.js';
 import type { TrooperIdentities } from '../privilege.js';
 import { runImplement } from './implement.js';
-import { type RoleCtx, runAgent, runGatesPhase } from './shared.js';
+import { agentSettings, type RoleCtx, runAgent, runGatesPhase } from './shared.js';
 
 const rolesDir = dirname(fileURLToPath(import.meta.url));
 
@@ -318,4 +318,17 @@ test('roles read no agent-written file except through readAgentFile', () => {
   )) {
     expect(readFileSync(join(rolesDir, f), 'utf8')).not.toMatch(/\breadFile(Sync)?\(/);
   }
+});
+
+describe('agentSettings', () => {
+  test('turns off Claude attribution only when the zone asks', () => {
+    const p = (attribution?: boolean) => ({ attribution }) as unknown as DropPayload;
+    expect(agentSettings(p())).toEqual({ hooks: {} });
+    expect(agentSettings(p(true))).toEqual({ hooks: {} });
+    expect(agentSettings(p(false))).toEqual({
+      hooks: {},
+      includeCoAuthoredBy: false,
+      attribution: { commit: '', pr: '' },
+    });
+  });
 });

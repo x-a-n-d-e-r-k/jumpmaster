@@ -104,6 +104,8 @@ const dropPayloadBase = {
   services: z.array(ServiceSpecSchema).optional(),
   limits: ContainerLimitsSchema.optional(),
   verification: z.array(VerificationSpecSchema).optional(),
+  /** `false` turns off Claude's commit and PR attribution for the agent. Absent keeps the default. */
+  attribution: z.boolean().optional(),
 };
 
 export const DropPayloadSchema = z.discriminatedUnion('role', [

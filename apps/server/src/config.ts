@@ -92,6 +92,8 @@ const DropZoneSchema = z.object({
   authorMayBeAdmin: z.boolean().default(false),
   protectedPaths: z.array(z.string()).default(DEFAULT_PROTECTED_PATHS),
   reviewReadToken: z.boolean().default(false),
+  /** `false`: the agent adds no Claude co-author trailer or PR attribution. */
+  attribution: z.boolean().default(true),
 });
 
 const FileSchema = z.object({

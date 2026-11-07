@@ -334,7 +334,8 @@ export async function commitIfDirty(
 ): Promise<boolean> {
   if ((await runGit(dir, ['status', '--porcelain'], '', { as })) === '') return false;
   await runGit(dir, ['add', '-A'], '', { as });
-  await runGit(dir, ['commit', '-q', '-m', message], '', { as });
+  // The trooper's own housekeeping commit: project hooks (husky, lint-staged) must not fail it.
+  await runGit(dir, [...PRISTINE, 'commit', '-q', '-m', message], '', { as });
   return true;
 }
 

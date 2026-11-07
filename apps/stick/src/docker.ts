@@ -136,7 +136,10 @@ export class DockerDriver implements ContainerDriver {
         CapAdd: ['SETUID', 'SETGID', 'KILL'],
         SecurityOpt: ['no-new-privileges'],
         PidsLimit: o.limits?.pids ?? DEFAULT_PIDS,
-        ...(o.limits?.memoryMb ? { Memory: o.limits.memoryMb * MB } : {}),
+        // MemorySwap equal to Memory: no swap, so a heavy drop can't thrash a shared host.
+        ...(o.limits?.memoryMb
+          ? { Memory: o.limits.memoryMb * MB, MemorySwap: o.limits.memoryMb * MB }
+          : {}),
         ...(o.limits?.shmMb ? { ShmSize: o.limits.shmMb * MB } : {}),
         Ulimits: [{ Name: 'core', Soft: 0, Hard: 0 }],
       },
