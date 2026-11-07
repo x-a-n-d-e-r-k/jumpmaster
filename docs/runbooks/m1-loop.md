@@ -39,6 +39,7 @@ Everything from M0, plus:
     collaborator's access to a repository owned by another personal account. It reaches
     every repository that account can, so keep it on the server and use a token made for
     Jumpmaster alone. It never enters a runner.
+  - For a private repository, the author token also needs Issues: read.
   - The server refuses to start unless the author token is fine-grained. Don't grant it
     Administration: the server can't check that, and an admin's token with it could
     plausibly edit the ruleset.
@@ -51,8 +52,9 @@ Everything from M0, plus:
     already being sent can't be recalled. The hold only binds the server: anyone holding
     the author token could still act on the PR directly.
   - Don't open PRs by hand on `agent/issue-*` branches. Only PRs carrying the server's
-    marker are adopted; the item parks with `hand-opened PR on agent branch` until you
-    close that PR and add the retry label.
+    marker are adopted; the item parks with `hand-opened PR on agent branch`. To continue,
+    close that PR and add the retry label. The agent resumes the branch, so your commits on
+    it go through review and can merge. To start fresh instead, delete the branch first.
 - **For a private repository only:** a read token (`JM_GITHUB_READ_TOKEN`, Contents:
   read and Metadata: read) and `"reviewReadToken": true` on the zone, so review drops can
   clone. In M1 this token is global; per-zone read tokens arrive in M5.
@@ -157,7 +159,8 @@ docker build -t jumpmaster-trooper:dev -f images/trooper/Dockerfile .
 Before the real run you can check the container without any token: `images/trooper/e2e/run.sh`
 builds the image with a fake Claude CLI and runs one review drop against a public repository
 under the stick's hardened options. It checks that the agent, gate and root identities are
-separated, and that the token never appears in the output.
+separated, and that the token never appears in the output. It doesn't push, so only the real
+run below covers the push path.
 
 ## 5. Scenarios
 
