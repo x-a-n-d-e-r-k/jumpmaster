@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance } from 'fastify';
+import { registerControlRoutes } from './api/control.js';
 import { registerStickRoutes, type StickRouteDeps } from './api/sticks.js';
 import {
   type AttemptKey,
@@ -30,6 +31,7 @@ const ATTEMPT_KEYS: AttemptKey[] = [
 export function createApp(deps: StickRouteDeps): FastifyInstance {
   const app = Fastify({ logger: false });
   registerStickRoutes(app, deps);
+  registerControlRoutes(app, deps);
 
   app.get('/', async (_req, reply) => {
     const { db, config, now } = deps;

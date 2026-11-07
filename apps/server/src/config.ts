@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { GateSpecSchema, type Role, RoleSchema } from '@jumpmaster/protocol';
 import { z } from 'zod';
+import { ZONE_MODES } from './db/repo.js';
 
 export const DEFAULT_PROTECTED_PATHS = [
   '.github/**',
@@ -27,6 +28,8 @@ const DropZoneSchema = z.object({
   repo: z.string().regex(/^[^/\s]+\/[^/\s]+$/, 'repo must be "owner/name"'),
   readyLabel: z.string().default('agent-ready'),
   gates: z.array(GateSpecSchema),
+  /** The starting mode, used only until an operator stores one. */
+  mode: z.enum(ZONE_MODES).default('active'),
   image: z.string().min(1),
   model: z.string().default('claude-opus-5-5'),
   maxTurns: z.number().int().positive().default(200),
@@ -64,7 +67,12 @@ const DropZoneSchema = z.object({
 
 const FileSchema = z.object({
   listen: z
-    .object({ host: z.string().default('127.0.0.1'), port: z.number().int().default(7420) })
+    .object({
+      host: z.string().default('127.0.0.1'),
+      port: z.number().int().default(7420),
+      /** Accepted Host and Origin values for control routes; defaults to loopback on the port. */
+      allowedHosts: z.array(z.string()).optional(),
+    })
     .default({ host: '127.0.0.1', port: 7420 }),
   dataDir: z.string().min(1),
   pollSeconds: z.number().positive().default(60),
@@ -83,7 +91,7 @@ export type DropZoneConfig = z.infer<typeof DropZoneSchema>;
 export type Budgets = DropZoneConfig['budgets'];
 
 export interface Config {
-  listen: { host: string; port: number };
+  listen: { host: string; port: number; allowedHosts?: string[] };
   dataDir: string;
   pollSeconds: number;
   dropZones: DropZoneConfig[];
@@ -94,6 +102,7 @@ export interface Config {
     githubReviewerToken: string;
     githubReadToken?: string;
     joinToken: string;
+    operatorToken: string;
   };
 }
 
@@ -114,6 +123,7 @@ const SECRET_VARS = {
   githubAuthorToken: 'JM_GITHUB_AUTHOR_TOKEN',
   githubReviewerToken: 'JM_GITHUB_REVIEWER_TOKEN',
   joinToken: 'JM_JOIN_TOKEN',
+  operatorToken: 'JM_OPERATOR_TOKEN',
 } as const;
 
 export function loadConfig(path: string, env: NodeJS.ProcessEnv): Config {
@@ -133,6 +143,14 @@ export function loadConfig(path: string, env: NodeJS.ProcessEnv): Config {
     !env[SECRET_VARS.githubAuthorToken]?.startsWith('github_pat_')
   )
     throw new Error('authorMayBeAdmin requires a fine-grained JM_GITHUB_AUTHOR_TOKEN');
+  const operatorToken = env[SECRET_VARS.operatorToken] as string;
+  if (operatorToken.length < 32)
+    throw new Error('JM_OPERATOR_TOKEN must be at least 32 characters');
+  const others = Object.values(SECRET_VARS)
+    .filter((name) => name !== SECRET_VARS.operatorToken)
+    .map((name) => env[name]);
+  if (others.includes(operatorToken))
+    throw new Error('JM_OPERATOR_TOKEN must differ from every other token');
   const readToken = env.JM_GITHUB_READ_TOKEN;
   const needsRead = parsed.data.dropZones.filter((z) => z.reviewReadToken).map((z) => z.id);
   if (needsRead.length > 0 && !readToken)
@@ -144,7 +162,16 @@ export function loadConfig(path: string, env: NodeJS.ProcessEnv): Config {
     githubAuthorToken: env[SECRET_VARS.githubAuthorToken] as string,
     githubReviewerToken: env[SECRET_VARS.githubReviewerToken] as string,
     joinToken: env[SECRET_VARS.joinToken] as string,
+    operatorToken,
     ...(readToken ? { githubReadToken: readToken } : {}),
   };
-  return { ...parsed.data, secrets };
+  const { listen } = parsed.data;
+  return {
+    ...parsed.data,
+    listen: {
+      ...listen,
+      allowedHosts: listen.allowedHosts ?? [`127.0.0.1:${listen.port}`, `localhost:${listen.port}`],
+    },
+    secrets,
+  };
 }

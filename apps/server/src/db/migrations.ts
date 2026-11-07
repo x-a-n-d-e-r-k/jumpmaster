@@ -78,9 +78,24 @@ ALTER TABLE drops ADD COLUMN input_json TEXT;
 ALTER TABLE drops ADD COLUMN charged_key TEXT;
 `;
 
+const V3_SQL = `
+CREATE TABLE zone_controls (
+  zone_id     TEXT PRIMARY KEY,
+  mode        TEXT NOT NULL CHECK (mode IN ('active','paused','observe')),
+  updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE kill_switch (
+  id          INTEGER PRIMARY KEY CHECK (id = 1),
+  engaged     INTEGER NOT NULL CHECK (engaged IN (0,1)),
+  updated_at  TEXT NOT NULL
+);
+`;
+
 export const MIGRATIONS: { version: number; sql: string }[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
+  { version: 3, sql: V3_SQL },
 ];
 
 /**

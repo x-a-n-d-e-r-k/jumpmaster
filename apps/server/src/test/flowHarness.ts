@@ -62,6 +62,7 @@ export async function harness(
       githubAuthorToken: 'author-token',
       githubReviewerToken: 'reviewer-token',
       joinToken: 'join',
+      operatorToken: 'o'.repeat(32),
     },
     usage: usageCfg,
   };

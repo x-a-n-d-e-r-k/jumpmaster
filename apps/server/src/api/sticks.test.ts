@@ -58,6 +58,7 @@ const config: Config = {
     githubAuthorToken: 'gh-secret',
     githubReviewerToken: 'gh-reviewer',
     joinToken: 'join-me',
+    operatorToken: 'o'.repeat(32),
   },
 };
 

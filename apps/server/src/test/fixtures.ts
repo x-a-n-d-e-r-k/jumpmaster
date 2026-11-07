@@ -36,6 +36,7 @@ export function makeZone(o: Partial<DropZoneConfig> = {}): DropZoneConfig {
     retryLabel: 'agent-retry',
     mergeMethod: 'squash',
     requireBranchProtection: true,
+    mode: 'active',
     authorMayBeAdmin: false,
     protectedPaths: ['.github/**', 'CODEOWNERS'],
     reviewReadToken: false,

@@ -628,3 +628,53 @@ export function hasOpenCreatePr(db: Db, itemId: number): boolean {
       .get(itemId) !== undefined
   );
 }
+
+export const ZONE_MODES = ['active', 'paused', 'observe'] as const;
+export type ZoneMode = (typeof ZONE_MODES)[number];
+
+/** The zone's stored mode; `fallback` (from config) applies only until one is stored. */
+export function getZoneMode(db: Db, zoneId: string, fallback: ZoneMode): ZoneMode {
+  const row = db.prepare('SELECT mode FROM zone_controls WHERE zone_id = ?').get(zoneId) as
+    | { mode: ZoneMode }
+    | undefined;
+  return row?.mode ?? fallback;
+}
+
+export function setZoneMode(db: Db, zoneId: string, mode: ZoneMode, now: Date): void {
+  db.prepare(
+    `INSERT INTO zone_controls (zone_id, mode, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT (zone_id) DO UPDATE SET mode = excluded.mode, updated_at = excluded.updated_at`,
+  ).run(zoneId, mode, now.toISOString());
+}
+
+export function isKilled(db: Db): boolean {
+  const row = db.prepare('SELECT engaged FROM kill_switch WHERE id = 1').get() as
+    | { engaged: number }
+    | undefined;
+  return row?.engaged === 1;
+}
+
+export function setKilled(db: Db, engaged: boolean, now: Date): void {
+  db.prepare(
+    `INSERT INTO kill_switch (id, engaged, updated_at) VALUES (1, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET engaged = excluded.engaged, updated_at = excluded.updated_at`,
+  ).run(engaged ? 1 : 0, now.toISOString());
+}
+
+/** Drops in flight plus forge writes not yet settled in the zone. */
+export function activeWorkCount(db: Db, zoneId: string): number {
+  const row = db
+    .prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM drops
+            WHERE drop_zone_id = @zone AND state IN ('queued', 'leased', 'running'))
+       + (SELECT COUNT(*) FROM outbox o JOIN work_items w ON w.id = o.work_item_id
+            WHERE w.drop_zone_id = @zone AND o.state IN ('pending', 'unknown')) AS n`,
+    )
+    .get({ zone: zoneId }) as { n: number };
+  return row.n;
+}
+
+export function zoneIsDrained(db: Db, zoneId: string): boolean {
+  return activeWorkCount(db, zoneId) === 0;
+}

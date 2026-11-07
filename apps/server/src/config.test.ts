@@ -9,6 +9,7 @@ const fullEnv: Record<string, string | undefined> = {
   JM_GITHUB_AUTHOR_TOKEN: 'b',
   JM_GITHUB_REVIEWER_TOKEN: 'r',
   JM_JOIN_TOKEN: 'c',
+  JM_OPERATOR_TOKEN: 'o'.repeat(32),
 };
 
 function fixture(json: unknown): string {
@@ -58,7 +59,7 @@ describe('loadConfig', () => {
 
   test('applies defaults', () => {
     const c = loadConfig(minimal, fullEnv);
-    expect(c.listen).toEqual({ host: '127.0.0.1', port: 7420 });
+    expect(c.listen).toMatchObject({ host: '127.0.0.1', port: 7420 });
     expect(c.pollSeconds).toBe(60);
     expect(c.dropZones[0]).toMatchObject({
       readyLabel: 'agent-ready',
@@ -67,6 +68,7 @@ describe('loadConfig', () => {
     });
     expect(c.dropZones[0]?.gates[0]?.timeoutMinutes).toBe(20);
     expect(c.secrets).toEqual({
+      operatorToken: 'o'.repeat(32),
       claudeToken: 'a',
       githubAuthorToken: 'b',
       githubReviewerToken: 'r',
@@ -85,6 +87,29 @@ describe('loadConfig', () => {
     });
     expect(() => loadConfig(bad, fullEnv)).toThrow(/repo/);
   });
+
+  test('the operator token is required, long, and unique', () => {
+    expect(() => loadConfig(minimal, { ...fullEnv, JM_OPERATOR_TOKEN: undefined })).toThrow(
+      /JM_OPERATOR_TOKEN/,
+    );
+    expect(() => loadConfig(minimal, { ...fullEnv, JM_OPERATOR_TOKEN: 'short' })).toThrow(
+      /at least 32/,
+    );
+    const same = 'x'.repeat(32);
+    expect(() =>
+      loadConfig(minimal, { ...fullEnv, JM_OPERATOR_TOKEN: same, JM_JOIN_TOKEN: same }),
+    ).toThrow(/must differ/);
+  });
+
+  test('allowed hosts default to loopback on the listen port', () => {
+    expect(loadConfig(minimal, fullEnv).listen.allowedHosts).toEqual([
+      '127.0.0.1:7420',
+      'localhost:7420',
+    ]);
+  });
+
+  test('a zone mode defaults to active', () =>
+    expect(loadConfig(minimal, fullEnv).dropZones[0]?.mode).toBe('active'));
 
   test('reviewer token is required', () =>
     expect(() => loadConfig(minimal, { ...fullEnv, JM_GITHUB_REVIEWER_TOKEN: undefined })).toThrow(
@@ -159,7 +184,7 @@ describe('loadConfig', () => {
 
   test('secretList omits an absent read token', () => {
     const c = loadConfig(minimal, fullEnv);
-    expect(secretList(c.secrets).sort()).toEqual(['a', 'b', 'c', 'r']);
+    expect(secretList(c.secrets).sort()).toEqual(['a', 'b', 'c', 'o'.repeat(32), 'r'].sort());
     expect(secretList({ ...c.secrets, githubReadToken: 'rd' })).toContain('rd');
   });
 });
