@@ -101,7 +101,8 @@ If the server itself is unreachable, stop containers on the stick's host with `d
 - **Attribution:** `"attribution": false` stops the agent adding Claude's co-author trailer and
   PR attribution, for projects whose policy forbids them. Jumpmaster's own PR and review text
   never carries a tool footer.
-- **Memory:** `memoryMb` also caps swap, so a drop can't thrash a host it shares with other work.
+- **Memory:** `memoryMb` also caps swap for the trooper container, so it can't thrash a host it
+  shares with other work. Service sidecars have no memory limit yet.
 - **Git hooks:** a project's hooks (husky, lint-staged) run on the agent's commits, but not on the
   trooper's own housekeeping commits, so a hook can't fail a drop after the work is done.
 
