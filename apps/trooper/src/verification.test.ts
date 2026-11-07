@@ -96,6 +96,21 @@ describe('runVerification', () => {
     });
   });
 
+  test('the step gets the same scrubbed environment as gates, so tools on PATH work', async () => {
+    let env: NodeJS.ProcessEnv = {};
+    const f = fakeDeps(['apps/web/a.tsx'], {}, () => writeFileSync(join(dir, 'shots/a.png'), PNG));
+    const run = f.deps.runGates;
+    f.deps.runGates = (gates, o) => {
+      env = o.env;
+      return run(gates, o);
+    };
+    process.env.JM_TEST_LEAK = 'x';
+    await runVerification(payload(), f.deps, ctx, dir);
+    delete process.env.JM_TEST_LEAK;
+    expect(env.PATH).toBe(process.env.PATH);
+    expect(env.JM_TEST_LEAK).toBeUndefined();
+  });
+
   test('a failing step fails verification', async () => {
     const f = fakeDeps(['apps/web/a.tsx'], { exitCode: 2 });
     const r = await runVerification(payload(), f.deps, ctx, dir);

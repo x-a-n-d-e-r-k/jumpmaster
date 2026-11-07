@@ -152,6 +152,34 @@ test('removeServices removes the sidecars and network, and tolerates absence', a
   expect(calls.map((c) => c.kind)).toEqual(['removeContainer', 'removeNetwork']);
 });
 
+test('removing a network retries while the trooper is still detaching', async () => {
+  const { docker } = fakeDocker();
+  let tries = 0;
+  docker.getNetwork = () => ({
+    async remove() {
+      tries++;
+      if (tries < 3) throw new Error('has active endpoints');
+    },
+  });
+  const d = new DockerDriver(docker as never, { networkRetryMs: 1 });
+  await d.removeServices('jm-drop-d1-3', {});
+  expect(tries).toBe(3);
+});
+
+test('removing a network gives up quietly after its retries', async () => {
+  const { docker } = fakeDocker();
+  let tries = 0;
+  docker.getNetwork = () => ({
+    async remove() {
+      tries++;
+      throw new Error('has active endpoints');
+    },
+  });
+  const d = new DockerDriver(docker as never, { networkRetryMs: 1 });
+  await expect(d.removeServices('n', {})).resolves.toBeUndefined();
+  expect(tries).toBe(5);
+});
+
 test('removeNetworksByLabel removes every matching network', async () => {
   const { docker, calls } = fakeDocker();
   expect(await new DockerDriver(docker as never).removeNetworksByLabel('k', 'v')).toBe(1);

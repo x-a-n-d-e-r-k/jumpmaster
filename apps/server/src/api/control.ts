@@ -1,7 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import type { Config } from '../config.js';
+import { allowedHostsOf, type Config } from '../config.js';
 import type { Db } from '../db/open.js';
 import { activeWorkCount, setKilled, setZoneMode, ZONE_MODES } from '../db/repo.js';
 import { engageKill } from '../leases.js';
@@ -33,10 +33,7 @@ function originAllowed(origin: string | undefined, allowed: string[]): boolean {
 /** Operator routes. The token is required because a container can reach the host's loopback. */
 export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): void {
   const { db, config, now } = deps;
-  const allowed = config.listen.allowedHosts ?? [
-    `127.0.0.1:${config.listen.port}`,
-    `localhost:${config.listen.port}`,
-  ];
+  const allowed = allowedHostsOf(config);
 
   void app.register(async (scope) => {
     scope.addHook('onRequest', async (req, reply) => {

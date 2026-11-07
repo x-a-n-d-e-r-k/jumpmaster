@@ -121,6 +121,17 @@ describe('artifact routes', () => {
   });
 });
 
+describe('the drop page', () => {
+  test('links stored artifacts, with their names escaped', async () => {
+    const { h, dropId, epoch, post } = await reviewing();
+    await post(upload(epoch, { name: '<b>a</b>.png' }));
+    const [row] = listArtifacts(h.db, dropId);
+    const res = await h.app.inject({ method: 'GET', url: `/drops/${dropId}` });
+    expect(res.body).toContain(`href="/artifacts/${row?.id}"`);
+    expect(res.body).toContain('&lt;b&gt;a');
+  });
+});
+
 describe('the server checks for itself', () => {
   const touchWeb = (h: Awaited<ReturnType<typeof harness>>) => {
     const pr = [...h.forge.state.pulls.values()][0];

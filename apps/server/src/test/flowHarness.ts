@@ -60,7 +60,7 @@ export async function harness(
   const forges = { author: f.author, reviewer: f.reviewer };
   const zone = makeZone({ ciRequired: false, ...opts.zone });
   const config: Config = {
-    listen: { host: '127.0.0.1', port: 0 },
+    listen: { host: '127.0.0.1', port: 0, allowedHosts: ['localhost:80'] },
     dataDir: opts.dataDir ?? '.',
     pollSeconds: 60,
     dropZones: [zone],

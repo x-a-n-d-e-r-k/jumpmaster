@@ -125,6 +125,7 @@ async function resume(
   now: Date,
   unknown: Set<number>,
   pulls: PullFacts[],
+  authorLogin: string | undefined,
 ): Promise<number> {
   let acted = 0;
   const observing = getZoneMode(db, zone.id, zone.mode) === 'observe';
@@ -152,11 +153,9 @@ async function resume(
     }
     // `adopt` already took any PR with the server's marker, so an open one here isn't ours.
     const foreign = pulls.find((p) => p.headRef === agentBranch(item.issueNumber));
-    if (
-      foreign &&
-      !isServerPrBody(foreign.body, item.id) &&
-      !zone.adoptPulls.includes(foreign.number)
-    ) {
+    const vouched =
+      foreign && foreign.author === authorLogin && zone.adoptPulls.includes(foreign.number);
+    if (foreign && !isServerPrBody(foreign.body, item.id) && !vouched) {
       if (observing) {
         recordObservation(db, zone.id, item.id, 'would_park', handOpened(foreign.number), now);
         unknown.add(item.id);
@@ -367,7 +366,17 @@ export async function reconcileZone(
   actions += await adopt(db, forges, zone, pass, pulls, now);
   if (mode === 'paused') return { actions, merges };
   const branchUnknown = new Set<number>();
-  actions += await resume(db, forges, zone, versions, usageCfg, now, branchUnknown, pulls);
+  actions += await resume(
+    db,
+    forges,
+    zone,
+    versions,
+    usageCfg,
+    now,
+    branchUnknown,
+    pulls,
+    pass.botLogins[0],
+  );
 
   for (const listed of listWorkItems(db, zone.id, 'pr_open')) {
     const item: WorkItem | undefined = getWorkItem(db, listed.id);

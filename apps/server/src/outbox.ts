@@ -80,8 +80,17 @@ const withMarker = (body: string, opKey: string): string =>
 const isOwnPr = (body: string, opKey: string): boolean =>
   isServerPrBody(body, Number(opKey.split(':')[1]));
 
-const ours = (pr: PullFacts, opKey: string, p: CreatePrPayload): boolean =>
-  isOwnPr(pr.body, opKey) || (p.adoptPulls ?? []).includes(pr.number);
+/** Marked by the server, or listed by the operator and written by the author account. */
+async function ours(
+  forges: ForgePair,
+  pr: PullFacts,
+  opKey: string,
+  p: CreatePrPayload,
+): Promise<boolean> {
+  if (isOwnPr(pr.body, opKey)) return true;
+  if (!(p.adoptPulls ?? []).includes(pr.number)) return false;
+  return pr.author === (await forges.author.viewerLogin());
+}
 
 /** Read-back: the op's result if its effect is visible on the forge, else `null`. */
 async function lookup(forges: ForgePair, kind: OpKind, opKey: string, payload: unknown) {
@@ -89,7 +98,9 @@ async function lookup(forges: ForgePair, kind: OpKind, opKey: string, payload: u
     case 'create_pr': {
       const p = payload as CreatePrPayload;
       const pr = await forges.author.findOpenPullByHead(p.head);
-      return pr && ours(pr, opKey, p) ? { number: pr.number, created: false } : null;
+      return pr && (await ours(forges, pr, opKey, p))
+        ? { number: pr.number, created: false }
+        : null;
     }
     case 'post_review': {
       const p = payload as PostReviewPayload;
@@ -110,7 +121,7 @@ async function write(forges: ForgePair, kind: OpKind, opKey: string, payload: un
       const p = payload as CreatePrPayload;
       // Never take over a PR someone opened by hand on the agent branch: it would get merged.
       const open = await forges.author.findOpenPullByHead(p.head);
-      if (open && !ours(open, opKey, p)) {
+      if (open && !(await ours(forges, open, opKey, p))) {
         // A 4xx status makes this a failed op, so the item parks with a reason instead of waiting.
         throw Object.assign(new Error(`hand-opened PR on agent branch: #${open.number}`), {
           status: 409,

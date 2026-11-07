@@ -71,7 +71,7 @@ export function engageKill(db: Db, now: Date): { cancelled: number } {
     setKilled(db, true, now);
     const active = db
       .prepare(
-        `UPDATE drops SET state = 'cancelled', finished_at = ?
+        `UPDATE drops SET state = 'cancelled', finished_at = ?, hard_cancel = 1
            WHERE state IN ('queued', 'leased', 'running')
            RETURNING id, work_item_id AS itemId, charged_key AS chargedKey`,
       )
@@ -92,13 +92,18 @@ export function heartbeat(
   stickId: string,
   epoch: number,
   now: Date,
-): 'ok' | 'stale' | 'cancel' {
+): 'ok' | 'stale' | 'cancel' | 'hard_cancel' {
   return db.transaction(() => {
     const d = db
-      .prepare('SELECT state, stick_id AS stickId, epoch FROM drops WHERE id = ?')
-      .get(dropId) as { state: string; stickId: string | null; epoch: number } | undefined;
+      .prepare(
+        'SELECT state, stick_id AS stickId, epoch, hard_cancel AS hardCancel FROM drops WHERE id = ?',
+      )
+      .get(dropId) as
+      | { state: string; stickId: string | null; epoch: number; hardCancel: number }
+      | undefined;
     if (!d || d.stickId !== stickId || d.epoch !== epoch) return 'stale';
-    if (d.state === 'cancelled') return 'cancel';
+    // Hard stays hard after a reset: a trooper told to stop gracefully would checkpoint and push.
+    if (d.state === 'cancelled') return d.hardCancel === 1 ? 'hard_cancel' : 'cancel';
     if (d.state !== 'leased' && d.state !== 'running') return 'stale';
     db.prepare(
       `UPDATE drops SET state = 'running', lease_expires_at = @expires,

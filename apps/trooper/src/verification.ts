@@ -8,6 +8,7 @@ import {
   MAX_ARTIFACTS,
   pathMatches,
 } from '@jumpmaster/protocol';
+import { scrubEnv } from './gates.js';
 import type { TrooperDeps } from './main.js';
 import { listAgentFiles, readAgentBytes } from './privilege.js';
 import { gateExtraEnv, type RoleCtx } from './roles/shared.js';
@@ -98,7 +99,7 @@ export async function runVerification(
       [{ name: `verify:${rule.name}`, run: rule.run, timeoutMinutes: rule.timeoutMinutes }],
       {
         cwd: gateDir,
-        env: {},
+        env: scrubEnv(process.env, ctx.secrets),
         extraEnv: gateExtraEnv(payload),
         secrets: ctx.secrets,
         ...(as ? { as } : {}),

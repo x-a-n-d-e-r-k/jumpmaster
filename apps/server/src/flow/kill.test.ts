@@ -125,6 +125,21 @@ describe('kill switch', () => {
     expect(res.json()).toEqual({ cancel: true, hard: true });
   });
 
+  test('a cancel stays hard after a quick reset, so the trooper still gets no checkpoint', async () => {
+    const h = await harness();
+    await h.reconcile();
+    const { dropId, epoch } = await h.lease();
+    engageKill(h.db, h.now());
+    setKilled(h.db, false, h.now());
+    const res = await h.app.inject({
+      method: 'POST',
+      url: `/api/drops/${dropId}/heartbeat`,
+      headers: h.stickHeaders(),
+      payload: { epoch },
+    });
+    expect(res.json()).toEqual({ cancel: true, hard: true });
+  });
+
   test('the home page warns that tokens stay valid while engaged', async () => {
     const h = await harness();
     engageKill(h.db, h.now());

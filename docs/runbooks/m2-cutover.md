@@ -29,7 +29,8 @@ node apps/server/dist/ctl.js unkill
 A zone's `mode` in the config only applies the first time the server sees that zone. After that
 the stored mode wins, including across restarts.
 
-If you use a non-loopback address, list it in `listen.allowedHosts`, or control requests are refused.
+If you open the UI or control routes through anything but loopback, list that `host:port` in
+`listen.allowedHosts`, or they're refused. Stick routes aren't affected.
 
 ### Emergency stop
 

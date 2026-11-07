@@ -144,6 +144,12 @@ export function modelFor(zone: DropZoneConfig, role: Role): string {
   return zone.models[role] ?? zone.model;
 }
 
+/** Host and Origin values the operator's browser may use; defaults to loopback on the port. */
+export function allowedHostsOf(config: Pick<Config, 'listen'>): string[] {
+  const { port, allowedHosts } = config.listen;
+  return allowedHosts ?? [`127.0.0.1:${port}`, `localhost:${port}`];
+}
+
 /** Every non-empty secret value, for redaction. */
 export function secretList(secrets: Config['secrets']): string[] {
   const { zoneSecrets, ...tokens } = secrets;

@@ -248,6 +248,18 @@ describe('reconcileZone — adoption and resume', () => {
       expect(refusals(w)[0]?.detail).toMatch(/#9.*mallory/);
     });
 
+    test('a listed PR from another author is never resumed or taken over', async () => {
+      w = listed();
+      const id = w.item(1, 'ready');
+      w.f.state.addPull(pull({ author: 'mallory' }));
+      await pass();
+      expect(item(id)).toMatchObject({
+        state: 'parked',
+        reason: 'hand-opened PR on agent branch: #9',
+      });
+      expect(activeDropFor(w.db, id)).toBeUndefined();
+    });
+
     test('a listed PR that is not an open agent PR is logged', async () => {
       w = listed();
       w.f.state.addPull(pull({ headRef: 'feature/x' }));

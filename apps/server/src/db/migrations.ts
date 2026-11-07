@@ -85,6 +85,8 @@ CREATE TABLE zone_controls (
   updated_at  TEXT NOT NULL
 );
 
+ALTER TABLE drops ADD COLUMN hard_cancel INTEGER NOT NULL DEFAULT 0;
+
 CREATE TABLE kill_switch (
   id          INTEGER PRIMARY KEY CHECK (id = 1),
   engaged     INTEGER NOT NULL CHECK (engaged IN (0,1)),
