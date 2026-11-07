@@ -14,8 +14,10 @@ import {
   upsertPullRequest,
   type WorkItem,
 } from '../db/repo.js';
+import type { PullFacts } from '../forge/github.js';
 import {
   type ForgePair,
+  isServerPrBody,
   type MergePayload,
   opKeys,
   type PostReviewPayload,
@@ -50,22 +52,24 @@ const hasLivePr = (db: Db, itemId: number): boolean => {
 const parkReason = (db: Db, itemId: number, reason: string, now: Date): void =>
   setWorkItemState(db, itemId, 'parked', reason, now);
 
-/** Step 2: adopt open agent PRs (author bot, same repo) for items that lost track of them. */
+/** Step 2: adopt open agent PRs (author, same repo, server marker) for items that lost track. */
 async function adopt(
   db: Db,
   forges: ForgePair,
   zone: DropZoneConfig,
   pass: ZonePass,
+  pulls: PullFacts[],
   now: Date,
 ): Promise<number> {
   const authorLogin = pass.botLogins[0];
-  const pulls = await forges.author.listOpenAgentPulls('agent/issue-');
   let adopted = 0;
   for (const pr of pulls) {
     const n = agentIssue(pr.headRef);
     if (n === null || pr.author !== authorLogin || pr.headSha === null) continue;
     const item = listWorkItems(db, zone.id).find((i) => i.issueNumber === n);
     if (!item || (item.state !== 'ready' && item.state !== 'in_flight')) continue;
+    // The author login alone isn't proof: it may be a person who also opens PRs by hand.
+    if (!isServerPrBody(pr.body, item.id)) continue;
     if (activeDropFor(db, item.id) || hasLivePr(db, item.id)) continue;
     upsertPullRequest(
       db,
@@ -93,6 +97,7 @@ async function resume(
   usageCfg: UsageConfig,
   now: Date,
   unknown: Set<number>,
+  pulls: PullFacts[],
 ): Promise<number> {
   let acted = 0;
   const candidates = listWorkItems(db, zone.id).filter(
@@ -115,6 +120,13 @@ async function resume(
         setWorkItemState(db, item.id, 'ready', undefined, now);
         acted++;
       }
+      continue;
+    }
+    // `adopt` already took any PR with the server's marker, so an open one here isn't ours.
+    const foreign = pulls.find((p) => p.headRef === agentBranch(item.issueNumber));
+    if (foreign && !isServerPrBody(foreign.body, item.id)) {
+      parkReason(db, item.id, `hand-opened PR on agent branch: #${foreign.number}`, now);
+      acted++;
       continue;
     }
     const resumeSha = sha;
@@ -277,9 +289,10 @@ export async function reconcileZone(
   let actions = 0;
   let merges = 0;
   await resolveUnknown(db, forges, zone.id, now, zone.ciDeadlineMinutes);
-  actions += await adopt(db, forges, zone, pass, now);
+  const pulls = await forges.author.listOpenAgentPulls('agent/issue-');
+  actions += await adopt(db, forges, zone, pass, pulls, now);
   const branchUnknown = new Set<number>();
-  actions += await resume(db, forges, zone, versions, usageCfg, now, branchUnknown);
+  actions += await resume(db, forges, zone, versions, usageCfg, now, branchUnknown, pulls);
 
   for (const listed of listWorkItems(db, zone.id, 'pr_open')) {
     const item: WorkItem | undefined = getWorkItem(db, listed.id);

@@ -606,6 +606,8 @@ async function guardedPush(
   sweep: () => void,
   o: PushOptions,
 ): Promise<string> {
+  // Root must never work beside the agent's repo: that directory is the agent's to control.
+  if (o.as && !o.mirrorDir) throw new Error('mirrorDir required with an agent identity');
   const ref = `refs/heads/${branch}`;
   const mirrorDir = o.mirrorDir ?? join(dirname(dir), 'mirror');
   const limits = o.limits ?? { timeoutMs: PUSH_FETCH_TIMEOUT_MS, maxBytes: PUSH_FETCH_MAX_BYTES };

@@ -96,5 +96,7 @@ test('heal stopped by a limit checkpoints onto the PR branch', async () => {
   const r = await runHeal(heal, w.deps, ctx);
   expect(r).toMatchObject({ status: 'rate_limited', headSha: 'pushed' });
   expect(w.calls).toContainEqual(['commitIfDirty', repoDir, 'wip: checkpoint', null]);
-  expect(w.calls.find((c) => c[0] === 'pushExistingBranch')?.[5]).toBe('sha1');
+  const push = w.calls.find((c) => c[0] === 'pushExistingBranch');
+  expect(push?.[5]).toBe('sha1');
+  expect(push?.[7]).toMatchObject({ mirrorDir: join(ctx.workdir, 'mirror') });
 });

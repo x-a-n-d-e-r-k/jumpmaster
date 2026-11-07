@@ -8,6 +8,7 @@ import {
   cloneAndPrepare,
   emitEvent,
   guarded,
+  mirrorDirOf,
   pushSweep,
   type RoleCtx,
   resultMeta,
@@ -118,6 +119,7 @@ async function resolveSteps(
     prHead,
     pushSweep(deps, ctx),
     {
+      mirrorDir: mirrorDirOf(ctx),
       as,
       base,
       protectedPaths: payload.protectedPaths,

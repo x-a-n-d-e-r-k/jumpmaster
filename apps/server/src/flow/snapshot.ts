@@ -13,7 +13,13 @@ import {
   verdictsForHead,
   type WorkItem,
 } from '../db/repo.js';
-import type { ChecksFacts, ForgeReview, PullFacts, PullFiles } from '../forge/github.js';
+import {
+  type ChecksFacts,
+  type ForgeReview,
+  isHeld,
+  type PullFacts,
+  type PullFiles,
+} from '../forge/github.js';
 import { type ForgePair, type OpResult, opKeys } from '../outbox.js';
 import type { Snapshot } from './decide.js';
 import {
@@ -290,6 +296,7 @@ export async function buildSnapshot(
     mergeOp,
     trustedChangeRequests,
     humanBlockStanding,
+    held: pr !== null && isHeld(pr),
     protectedHits: protectedPathHits(files.files, zone.protectedPaths),
     filesComplete: files.complete,
     gateScriptChanges: gate.scripts,

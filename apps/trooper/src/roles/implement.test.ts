@@ -145,6 +145,7 @@ describe('runImplement', () => {
     expect(w.calls).toContainEqual(['commitIfDirty', repoDir, 'wip: checkpoint', null]);
     const push = w.calls.find((c) => c[0] === 'pushNewBranch');
     expect(push?.[6]).toEqual({
+      mirrorDir: join(ctx.workdir, 'mirror'),
       as: null,
       base: 'main',
       protectedPaths: ['.github/**'],

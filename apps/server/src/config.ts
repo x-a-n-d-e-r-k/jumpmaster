@@ -53,6 +53,11 @@ const DropZoneSchema = z.object({
   retryLabel: z.string().min(1).default('agent-retry'),
   mergeMethod: z.literal('squash').default('squash'),
   requireBranchProtection: z.boolean().default(true),
+  /**
+   * Allow the author token's account to be a repository admin, as when the owner of a personal
+   * repository authors the PRs. The reviewer must still not be an admin, and neither may bypass.
+   */
+  authorMayBeAdmin: z.boolean().default(false),
   protectedPaths: z.array(z.string()).default(DEFAULT_PROTECTED_PATHS),
   reviewReadToken: z.boolean().default(false),
 });
@@ -122,6 +127,12 @@ export function loadConfig(path: string, env: NodeJS.ProcessEnv): Config {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
   if (env[SECRET_VARS.githubReviewerToken] === env[SECRET_VARS.githubAuthorToken])
     throw new Error('JM_GITHUB_REVIEWER_TOKEN must differ from JM_GITHUB_AUTHOR_TOKEN');
+  // An admin's classic token could edit the ruleset. A fine-grained one can be limited to one repo.
+  if (
+    parsed.data.dropZones.some((z) => z.authorMayBeAdmin) &&
+    !env[SECRET_VARS.githubAuthorToken]?.startsWith('github_pat_')
+  )
+    throw new Error('authorMayBeAdmin requires a fine-grained JM_GITHUB_AUTHOR_TOKEN');
   const readToken = env.JM_GITHUB_READ_TOKEN;
   const needsRead = parsed.data.dropZones.filter((z) => z.reviewReadToken).map((z) => z.id);
   if (needsRead.length > 0 && !readToken)

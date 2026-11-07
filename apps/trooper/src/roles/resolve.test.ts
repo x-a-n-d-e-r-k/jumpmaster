@@ -41,7 +41,9 @@ test('resolve with conflicts commits the merge before gates', async () => {
   expect(order.indexOf('commitIfDirty')).toBeGreaterThan(-1);
   expect(order.indexOf('commitIfDirty')).toBeLessThan(order.indexOf('runGates'));
   expect(w.claude.runs).toBe(1);
-  expect(w.calls.find((c) => c[0] === 'pushExistingBranch')?.[5]).toBe('sha1');
+  const push = w.calls.find((c) => c[0] === 'pushExistingBranch');
+  expect(push?.[5]).toBe('sha1');
+  expect(push?.[7]).toMatchObject({ mirrorDir: join(ctx.workdir, 'mirror') });
 });
 
 test('resolve with clean merge skips claude and reports clean', async () => {

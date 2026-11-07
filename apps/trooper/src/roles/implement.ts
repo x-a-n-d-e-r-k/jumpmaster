@@ -6,6 +6,7 @@ import {
   checkpoint,
   cloneAndPrepare,
   emitEvent,
+  mirrorDirOf,
   pushSweep,
   type RoleCtx,
   resultMeta,
@@ -66,7 +67,13 @@ async function implementSteps(
     await deps.git.prepareBranch(repoDir, payload.branch, base, as);
   }
 
-  const guard = { as, base, protectedPaths: payload.protectedPaths, secrets: ctx.secrets };
+  const guard = {
+    mirrorDir: mirrorDirOf(ctx),
+    as,
+    base,
+    protectedPaths: payload.protectedPaths,
+    secrets: ctx.secrets,
+  };
   const push = (expectSha?: string): Promise<string> => {
     emitEvent(deps, ctx, 'phase', { phase: 'push' });
     const o = expectSha === undefined ? guard : { ...guard, expectSha };

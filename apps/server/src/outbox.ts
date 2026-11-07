@@ -9,10 +9,26 @@ import {
   resetDoneOutbox,
   updateOutbox,
 } from './db/repo.js';
-import { type Forge, type ForgeError, isRateLimited } from './forge/github.js';
+import { type Forge, type ForgeError, GitHubForge, isRateLimited } from './forge/github.js';
 
 /** One zone's forge identities: `author` creates PRs and merges, `reviewer` only posts reviews. */
-export type ForgePair = { author: Forge; reviewer: Forge };
+export type ForgePair = {
+  author: Forge;
+  reviewer: Forge;
+  /** Performs merges instead of the author, when the author's account is a repository admin. */
+  merger?: Forge;
+};
+
+/** The forges for a zone. An admin author must not be the identity that merges. */
+export function pairFor(
+  zone: { repo: string; authorMayBeAdmin: boolean },
+  secrets: { githubAuthorToken: string; githubReviewerToken: string },
+): ForgePair {
+  const [owner = '', name = ''] = zone.repo.split('/');
+  const author = new GitHubForge(owner, name, secrets.githubAuthorToken);
+  const reviewer = new GitHubForge(owner, name, secrets.githubReviewerToken);
+  return zone.authorMayBeAdmin ? { author, reviewer, merger: reviewer } : { author, reviewer };
+}
 
 export type OpKind = OutboxRow['kind'];
 export type OpResult = { state: OutboxState; result?: unknown; error?: string };
@@ -38,8 +54,17 @@ export const opKeys = {
 /** The final line of every body Jumpmaster writes to a forge. */
 export const opMarker = (opKey: string): string => `<!-- jm:op:${opKey} -->`;
 
+/** Whether a PR body ends with the marker the server writes when it opens this item's PR. */
+export const isServerPrBody = (body: string, itemId: number): boolean => {
+  const last = body.trimEnd().split('\n').pop() ?? '';
+  return last.startsWith(`<!-- jm:op:pr:${itemId}:`) && last.endsWith(' -->');
+};
+
 const withMarker = (body: string, opKey: string): string =>
   `${body.trimEnd()}\n\n${opMarker(opKey)}`;
+
+const isOwnPr = (body: string, opKey: string): boolean =>
+  isServerPrBody(body, Number(opKey.split(':')[1]));
 
 /** Read-back: the op's result if its effect is visible on the forge, else `null`. */
 async function lookup(forges: ForgePair, kind: OpKind, opKey: string, payload: unknown) {
@@ -47,7 +72,7 @@ async function lookup(forges: ForgePair, kind: OpKind, opKey: string, payload: u
     case 'create_pr': {
       const p = payload as CreatePrPayload;
       const pr = await forges.author.findOpenPullByHead(p.head);
-      return pr ? { number: pr.number, created: false } : null;
+      return pr && isOwnPr(pr.body, opKey) ? { number: pr.number, created: false } : null;
     }
     case 'post_review': {
       const p = payload as PostReviewPayload;
@@ -66,6 +91,14 @@ async function write(forges: ForgePair, kind: OpKind, opKey: string, payload: un
   switch (kind) {
     case 'create_pr': {
       const p = payload as CreatePrPayload;
+      // Never take over a PR someone opened by hand on the agent branch: it would get merged.
+      const open = await forges.author.findOpenPullByHead(p.head);
+      if (open && !isOwnPr(open.body, opKey)) {
+        // A 4xx status makes this a failed op, so the item parks with a reason instead of waiting.
+        throw Object.assign(new Error(`hand-opened PR on agent branch: #${open.number}`), {
+          status: 409,
+        });
+      }
       return forges.author.findOrCreatePullRequest({ ...p, body: withMarker(p.body, opKey) });
     }
     case 'post_review': {
@@ -78,7 +111,7 @@ async function write(forges: ForgePair, kind: OpKind, opKey: string, payload: un
     }
     case 'merge': {
       const p = payload as MergePayload;
-      const r = await forges.author.merge(p.pr, {
+      const r = await (forges.merger ?? forges.author).merge(p.pr, {
         sha: p.sha,
         method: 'squash',
         title: p.title,

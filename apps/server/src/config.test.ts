@@ -91,6 +91,21 @@ describe('loadConfig', () => {
       /JM_GITHUB_REVIEWER_TOKEN/,
     ));
 
+  describe('authorMayBeAdmin', () => {
+    const optedIn = () => withZone({ authorMayBeAdmin: true });
+
+    test('refuses an author token that is not fine-grained', () =>
+      expect(() =>
+        loadConfig(optedIn(), { ...fullEnv, JM_GITHUB_AUTHOR_TOKEN: 'ghp_classic' }),
+      ).toThrow(/fine-grained/));
+
+    test('accepts a fine-grained author token', () =>
+      expect(
+        loadConfig(optedIn(), { ...fullEnv, JM_GITHUB_AUTHOR_TOKEN: 'github_pat_x' }).dropZones[0]
+          ?.authorMayBeAdmin,
+      ).toBe(true));
+  });
+
   test('reviewer and author must differ', () =>
     expect(() =>
       loadConfig(minimal, {

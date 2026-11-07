@@ -15,7 +15,7 @@ import {
   upsertWorkItem,
   type WorkItem,
 } from './db/repo.js';
-import { decide } from './flow/decide.js';
+import { decide, HOLD_REASON } from './flow/decide.js';
 import { buildSnapshot, type ZonePass, zonePass } from './flow/snapshot.js';
 import type { ForgeIssue, PullFacts } from './forge/github.js';
 import type { ForgePair } from './outbox.js';
@@ -218,6 +218,7 @@ export async function syncParked(
       }
     } else if (
       reason === 'human block stands' ||
+      reason === HOLD_REASON ||
       reason.startsWith('unsafe branch protection') ||
       reason.startsWith('forge data missing')
     ) {

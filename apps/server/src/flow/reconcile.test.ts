@@ -10,6 +10,7 @@ import {
   setAttempts,
   updateOutbox,
 } from '../db/repo.js';
+import { opKeys, opMarker } from '../outbox.js';
 import { promptVersions } from '../payloads.js';
 import { usageCfg, zoneWorld } from '../test/fixtures.js';
 import { reconcileZone } from './reconcile.js';
@@ -159,7 +160,13 @@ describe('reconcileZone — pr_open items', () => {
 describe('reconcileZone — adoption and resume', () => {
   test('adoption uses one listing call per pass and adopts the author bot PR', async () => {
     const id = w.item(1, 'ready');
-    w.f.state.addPull({ number: 9, headRef: 'agent/issue-1', headSha: 's9', author: 'author-bot' });
+    w.f.state.addPull({
+      number: 9,
+      headRef: 'agent/issue-1',
+      headSha: 's9',
+      author: 'author-bot',
+      body: `work\n${opMarker(opKeys.pr(id, 's9'))}`,
+    });
     await pass();
     expect(calls('listOpenAgentPulls')).toHaveLength(1);
     expect(item(id)).toMatchObject({ state: 'pr_open', prNumber: 9 });
@@ -168,6 +175,43 @@ describe('reconcileZone — adoption and resume', () => {
   test('adoption ignores PRs from other authors', async () => {
     const id = w.item(1, 'ready');
     w.f.state.addPull({ number: 9, headRef: 'agent/issue-1', headSha: 's9', author: 'mallory' });
+    await pass();
+    expect(item(id).state).not.toBe('pr_open');
+  });
+
+  test('adoption ignores a PR the author opened by hand, without the server marker', async () => {
+    const id = w.item(1, 'ready');
+    w.f.state.addPull({
+      number: 9,
+      headRef: 'agent/issue-1',
+      headSha: 's9',
+      author: 'author-bot',
+      body: 'opened by hand',
+    });
+    await pass();
+    expect(item(id).state).not.toBe('pr_open');
+  });
+
+  test('a hand-opened PR on the agent branch parks the item instead of resuming', async () => {
+    const id = w.item(1, 'ready');
+    w.f.state.addPull({ number: 9, headRef: 'agent/issue-1', headSha: 's9', author: 'author-bot' });
+    await pass();
+    expect(item(id)).toMatchObject({
+      state: 'parked',
+      reason: 'hand-opened PR on agent branch: #9',
+    });
+    expect(activeDropFor(w.db, id)).toBeUndefined();
+  });
+
+  test("adoption ignores another item's marker", async () => {
+    const id = w.item(1, 'ready');
+    w.f.state.addPull({
+      number: 9,
+      headRef: 'agent/issue-1',
+      headSha: 's9',
+      author: 'author-bot',
+      body: opMarker(opKeys.pr(id + 1, 's9')),
+    });
     await pass();
     expect(item(id).state).not.toBe('pr_open');
   });

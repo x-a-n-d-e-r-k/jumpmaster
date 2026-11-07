@@ -272,6 +272,7 @@ export function branchProtectionProblems(
   if (rules.author.kind === 'unavailable' || rules.reviewer.kind === 'unavailable') return null;
   const out = new Set<string>();
   for (const read of [rules.author, rules.reviewer]) {
+    const adminAllowed = zone.authorMayBeAdmin && read === rules.author;
     if (read.kind === 'none') {
       out.add('no ruleset');
       continue;
@@ -280,7 +281,7 @@ export function branchProtectionProblems(
     if (r.requiredApprovals < 1) out.add('approvals < 1');
     if (!r.dismissStaleOnPush) out.add('stale approvals not dismissed');
     if (r.viewerCanBypass) out.add('bot can bypass');
-    if (r.viewerIsAdmin) out.add('bot is admin');
+    if (r.viewerIsAdmin && !adminAllowed) out.add('bot is admin');
     for (const c of r.unpinnedChecks) out.add(`required check not pinned: ${c}`);
     if (zone.ciRequired && r.requiredChecks.length === 0) out.add('no required checks');
     for (const t of r.unsupportedRules ?? []) out.add(`unsupported rule: ${t}`);

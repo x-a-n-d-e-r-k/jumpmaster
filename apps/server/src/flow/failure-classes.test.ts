@@ -19,6 +19,7 @@ import { usageCfg } from '../test/fixtures.js';
 import { type Harness, harness, toApproved, toPrOpen } from '../test/flowHarness.js';
 import { workItem } from '../test/helpers.js';
 import { dispatchGate } from '../usage.js';
+import { HOLD_REASON } from './decide.js';
 
 const gateOk: GateResult = {
   name: 'test',
@@ -713,6 +714,40 @@ describe('§16 server-side parks', () => {
     h.forge.state.review({ author: 'alice', state: 'APPROVED', commitId: 'sha1', id: rc.id + 10 });
     await h.reconcile();
     expect(item(h).state).not.toBe('parked');
+  });
+
+  test('a hold added during a review blocks the approval until it is removed', async () => {
+    const h = await harness();
+    await toPrOpen(h, 'sha1');
+    await h.reconcile();
+    const pull = [...h.forge.state.pulls.values()][0];
+    if (!pull) throw new Error('no pull');
+    pull.labels = ['JM:Hold'];
+    await h.finishDrop('review', reviewed(approve));
+    expect(h.forge.state.reviews).toHaveLength(0);
+    await h.reconcile();
+    expect(item(h)).toMatchObject({ state: 'parked', reason: HOLD_REASON });
+    expect(h.forge.state.reviews).toHaveLength(0);
+    expect(h.forge.state.merges).toHaveLength(0);
+    pull.labels = [];
+    await h.sync();
+    expect(item(h).state).not.toBe('parked');
+    await h.reconcile();
+    expect(h.forge.state.reviews.map((r) => r.state)).toEqual(['APPROVED']);
+  });
+
+  test('a held PR stays parked through sync and starts no agent work', async () => {
+    const h = await harness();
+    await toPrOpen(h, 'sha1');
+    const pull = [...h.forge.state.pulls.values()][0];
+    if (!pull) throw new Error('no pull');
+    pull.labels = ['jm:hold'];
+    await h.reconcile();
+    expect(item(h)).toMatchObject({ state: 'parked', reason: HOLD_REASON });
+    await h.sync();
+    await h.reconcile();
+    expect(item(h)).toMatchObject({ state: 'parked', reason: HOLD_REASON });
+    expect(h.queuedRoles()).toEqual([]);
   });
 
   test('budgets counted before the run; retry label resets once', async () => {
