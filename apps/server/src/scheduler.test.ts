@@ -56,6 +56,21 @@ describe('enqueueNext', () => {
     expect(listWorkItems(db, 'main', 'in_flight').map((w) => w.id)).toEqual([top.id]);
   });
 
+  test('skips a blocked ready item and starts the next', () => {
+    const blocked = add(1, 0);
+    upsertWorkItem(db, { ...blocked, blockedBy: ['#9'] });
+    const next = add(2, 2);
+    const id = enqueueNext(db, zone, 'v1', DEFAULT_USAGE_CONFIG, t0)!;
+    expect(getDrop(db, id)?.workItemId).toBe(next.id);
+    expect(listWorkItems(db, 'main', 'ready').map((w) => w.id)).toEqual([blocked.id]);
+  });
+
+  test('a lone blocked item starts nothing', () => {
+    const blocked = add(1, 0);
+    upsertWorkItem(db, { ...blocked, blockedBy: ['1 unreadable blocker'] });
+    expect(enqueueNext(db, zone, 'v1', DEFAULT_USAGE_CONFIG, t0)).toBeNull();
+  });
+
   test('returns null when nothing is ready', () => {
     expect(enqueueNext(db, zone, 'v1', DEFAULT_USAGE_CONFIG, t0)).toBeNull();
   });

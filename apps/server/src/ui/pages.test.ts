@@ -25,6 +25,9 @@ const item: WorkItem = {
   state: 'pr_open',
   reason: null,
   prNumber: 9,
+  retryLabelSeen: false,
+  waitingSince: null,
+  blockedBy: [],
 };
 const drop: Drop = {
   id: 'd1',
@@ -55,6 +58,15 @@ describe('renderHome', () => {
     });
     expect(html).not.toContain('<script>alert(1)</script>');
     expect(html).toContain('&lt;script&gt;');
+  });
+
+  test('a blocked ready item shows what it waits on', () => {
+    const html = renderHome({
+      zones: [z],
+      items: [{ ...item, state: 'ready', prNumber: null, blockedBy: ['#4', 'o/x#<2>'] }],
+      drops: [],
+    });
+    expect(html).toContain('waiting on #4, o/x#&lt;2&gt;');
   });
 
   test('escapes reasons, gate names and shows PR link, elapsed, rate limit', () => {

@@ -121,6 +121,16 @@ describe('syncDropZone', () => {
     expect(row.b).toBe('trunk');
   });
 
+  test('stores blockers and clears them when the blocker closes', async () => {
+    const five = issue(5, { blockedBy: ['#4'] });
+    const forge = pair(fakeForge({ issues: [five], trusted: ['alice'] }));
+    await syncDropZone(db, forge, zone, t0);
+    expect(listWorkItems(db, 'main')[0]?.blockedBy).toEqual(['#4']);
+    five.blockedBy = [];
+    await syncDropZone(db, forge, zone, t0);
+    expect(listWorkItems(db, 'main')[0]).toMatchObject({ blockedBy: [], state: 'ready' });
+  });
+
   test('ready items no longer listed become done; other states are left alone', async () => {
     await syncDropZone(
       db,
