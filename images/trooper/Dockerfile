@@ -4,7 +4,9 @@ COPY package.json package-lock.json tsconfig.base.json tsconfig.json ./
 COPY packages/protocol packages/protocol
 COPY apps/server apps/server
 COPY apps/trooper apps/trooper
-RUN npm ci
+# This stage only compiles the trooper and copies zod, so no dependency's install script is needed.
+# better-sqlite3 13 triggers node-gyp under npm ci, and this image has no Python or make.
+RUN npm ci --ignore-scripts
 RUN npx tsc -b packages/protocol && npx tsc -b apps/trooper \
  && mkdir -p /out/node_modules/@jumpmaster/protocol \
  && cp -r apps/trooper/dist/. /out/ \
