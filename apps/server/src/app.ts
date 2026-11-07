@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { registerControlRoutes } from './api/control.js';
 import { registerStickRoutes, type StickRouteDeps } from './api/sticks.js';
+import { getArtifact, listArtifacts, readArtifact } from './artifacts.js';
 import {
   type AttemptKey,
   getAttempts,
@@ -69,12 +70,22 @@ export function createApp(deps: StickRouteDeps): FastifyInstance {
     reply.type('text/html; charset=utf-8').send(renderObservations(listObservations(deps.db))),
   );
 
+  app.get<{ Params: { id: string } }>('/artifacts/:id', async (req, reply) => {
+    const row = getArtifact(deps.db, Number(req.params.id));
+    if (!row) return reply.code(404).type('text/plain').send('not found');
+    return reply
+      .header('x-content-type-options', 'nosniff')
+      .header('content-security-policy', "sandbox; default-src 'none'")
+      .type(row.mediaType)
+      .send(readArtifact(deps.config.dataDir, row));
+  });
+
   app.get<{ Params: { id: string } }>('/drops/:id', async (req, reply) => {
     const drop = getDrop(deps.db, req.params.id);
     if (!drop) return reply.code(404).type('text/plain').send('not found');
     return reply
       .type('text/html; charset=utf-8')
-      .send(renderDrop(drop, listEvents(deps.db, drop.id)));
+      .send(renderDrop(drop, listEvents(deps.db, drop.id), listArtifacts(deps.db, drop.id)));
   });
 
   return app;

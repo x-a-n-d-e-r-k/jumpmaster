@@ -1,7 +1,19 @@
+import { basename, matchesGlob } from 'node:path';
 import { z } from 'zod';
 
 export const EVENT_PREFIX = 'JM_EVENT ';
 export const RESULT_PREFIX = 'JM_RESULT ';
+export const ARTIFACT_PREFIX = 'JM_ARTIFACT ';
+export const MAX_ARTIFACTS = 10;
+export const MAX_ARTIFACT_BYTES = 5 * 1024 * 1024;
+
+/** Whether a repo-relative path matches a glob. A glob with no slash also matches a basename. */
+export function pathMatches(p: string, glob: string): boolean {
+  if (matchesGlob(p, glob)) return true;
+  // `dir/**` also covers a bare `dir` entry (a file or symlink standing in for the directory).
+  if (glob.endsWith('/**') && p === glob.slice(0, -3)) return true;
+  return !glob.includes('/') && matchesGlob(basename(p), glob);
+}
 
 /** The only place the agent branch name is built. */
 export function agentBranch(issueNumber: number): string {
@@ -24,6 +36,35 @@ export const PrRefSchema = z.object({
   headSha: z.string(),
 });
 export type PrRef = z.infer<typeof PrRefSchema>;
+
+/** A step that must produce evidence, such as screenshots, when a PR touches `paths`. */
+export const VerificationSpecSchema = z.object({
+  name: z.string().min(1),
+  paths: z.array(z.string()).min(1),
+  run: z.string().min(1),
+  artifacts: z.string().min(1),
+  timeoutMinutes: z.number().positive().default(20),
+});
+export type VerificationSpec = z.infer<typeof VerificationSpecSchema>;
+
+export const ArtifactChunkSchema = z.object({
+  rule: z.string(),
+  name: z.string(),
+  mediaType: z.string(),
+  sha256: z.string(),
+  index: z.number().int().nonnegative(),
+  total: z.number().int().positive(),
+  data: z.string(),
+});
+
+export const ArtifactUploadSchema = z.object({
+  rule: z.string(),
+  name: z.string().max(1024),
+  mediaType: z.string(),
+  sha256: z.string(),
+  dataBase64: z.string(),
+});
+export type ArtifactUpload = z.infer<typeof ArtifactUploadSchema>;
 
 /** A sidecar for gate steps, reachable by `name` on the drop's private network. */
 export const ServiceSpecSchema = z.object({
@@ -62,6 +103,7 @@ const dropPayloadBase = {
   gateSecrets: z.record(z.string(), z.string()).optional(),
   services: z.array(ServiceSpecSchema).optional(),
   limits: ContainerLimitsSchema.optional(),
+  verification: z.array(VerificationSpecSchema).optional(),
 };
 
 export const DropPayloadSchema = z.discriminatedUnion('role', [

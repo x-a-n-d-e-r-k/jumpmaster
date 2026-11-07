@@ -1,16 +1,10 @@
 import { basename, matchesGlob } from 'node:path';
 import type { GateSpec } from '@jumpmaster/protocol';
+import { pathMatches } from '@jumpmaster/protocol';
 import type { DropZoneConfig } from '../config.js';
 import type { BranchRulesRead, PullFiles } from '../forge/github.js';
 
 // ---- protected paths ---------------------------------------------------------------------------
-
-function pathMatches(p: string, glob: string): boolean {
-  if (matchesGlob(p, glob)) return true;
-  // `dir/**` also covers a bare `dir` entry (a file or symlink standing in for the directory).
-  if (glob.endsWith('/**') && p === glob.slice(0, -3)) return true;
-  return !glob.includes('/') && matchesGlob(basename(p), glob);
-}
 
 /** Changed paths, and rename sources, that match any protected glob (each reported once). */
 export function protectedPathHits(files: PullFiles['files'], globs: string[]): string[] {

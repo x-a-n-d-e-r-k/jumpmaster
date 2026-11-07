@@ -39,6 +39,7 @@ export function makeZone(o: Partial<DropZoneConfig> = {}): DropZoneConfig {
     mode: 'active',
     gateSecrets: [],
     services: [],
+    verification: [],
     limits: { pids: 512 },
     authorMayBeAdmin: false,
     protectedPaths: ['.github/**', 'CODEOWNERS'],

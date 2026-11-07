@@ -6,6 +6,7 @@ import {
   type Role,
   type Verdict,
 } from '@jumpmaster/protocol';
+import { listArtifacts } from './artifacts.js';
 import type { DropZoneConfig, UsageConfig } from './config.js';
 import type { Db } from './db/open.js';
 import {
@@ -29,6 +30,7 @@ import {
   chargeResolveConflict,
   refundCharge,
 } from './flow/budgets.js';
+import { protectedPathHits } from './flow/guards.js';
 import { isHeld } from './forge/github.js';
 import {
   type CreatePrPayload,
@@ -232,6 +234,23 @@ async function implementResult(c: Ctx, result: DropResult): Promise<void> {
 
 const IMPLEMENT_FENCED = /^(stale info|branch \S+ already exists on remote)/;
 
+/**
+ * Rules this PR must satisfy that have no stored artifact. Decided here from the forge's file
+ * list, since a stick's report is not trusted for a merge decision. An unreadable list fails
+ * closed: every rule counts.
+ */
+async function unverifiedRules(c: Ctx): Promise<string[]> {
+  const rules = c.deps.zone.verification;
+  if (rules.length === 0 || c.drop.prNumber === null) return [];
+  const pull = await c.deps.forges.author.listPullFiles(c.drop.prNumber).catch(() => null);
+  const needed =
+    pull?.complete === true
+      ? rules.filter((r) => protectedPathHits(pull.files, r.paths).length > 0)
+      : rules;
+  const stored = new Set(listArtifacts(c.db, c.drop.id).map((a) => a.rule));
+  return needed.filter((r) => !stored.has(r.name)).map((r) => r.name);
+}
+
 async function reviewResult(c: Ctx, result: DropResult): Promise<void> {
   const { db, drop, item } = c;
   const verdict = result.status === 'completed' ? result.verdict : undefined;
@@ -239,8 +258,17 @@ async function reviewResult(c: Ctx, result: DropResult): Promise<void> {
     // A failed review leaves the item pr_open; the next same-head review is charged as a repeat.
     return finish(c, 'failed');
   }
-  const forced = verdict.decision === 'approve' && result.gates.some(isRed);
+  const unverified = verdict.decision === 'approve' ? await unverifiedRules(c) : [];
+  const forced =
+    verdict.decision === 'approve' && (result.gates.some(isRed) || unverified.length > 0);
   const decision = forced ? 'request_changes' : verdict.decision;
+  const findings = [
+    ...verdict.findings,
+    ...unverified.map((rule) => ({
+      severity: 'blocker' as const,
+      detail: `verification ${rule} has no stored artifact`,
+    })),
+  ];
   insertVerdict(db, {
     id: drop.id,
     workItemId: item.id,
@@ -248,7 +276,7 @@ async function reviewResult(c: Ctx, result: DropResult): Promise<void> {
     decision,
     forced,
     summary: verdict.summary,
-    findingsJson: JSON.stringify(verdict.findings),
+    findingsJson: JSON.stringify(findings),
     gatesJson: JSON.stringify(result.gates),
     createdAt: c.now.toISOString(),
   });
@@ -256,7 +284,7 @@ async function reviewResult(c: Ctx, result: DropResult): Promise<void> {
     pr: drop.prNumber,
     event: decision === 'approve' ? 'APPROVE' : 'REQUEST_CHANGES',
     commitId: drop.headSha,
-    body: renderReviewBody({ ...verdict, decision }, result.gates, c.deps.secrets),
+    body: renderReviewBody({ ...verdict, findings, decision }, result.gates, c.deps.secrets),
   };
   // Fails closed: an unposted verdict is posted later by decide, which honours the hold and mode.
   if (getZoneMode(db, drop.dropZoneId, 'active') !== 'active') {

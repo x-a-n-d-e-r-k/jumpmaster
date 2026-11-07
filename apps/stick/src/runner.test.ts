@@ -1,7 +1,10 @@
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  ARTIFACT_PREFIX,
+  type ArtifactUpload,
   type DropPayload,
   DropPayloadSchema,
   type DropResult,
@@ -94,6 +97,13 @@ function fakeClient(heartbeatReply: 'ok' | 'cancel' | 'hard_cancel' | 'stale' = 
     events: [] as TrooperEvent[][],
     result: undefined as DropResult | undefined,
     heartbeatReply,
+    async postArtifact(
+      _dropId: string,
+      _epoch: number,
+      _a: ArtifactUpload,
+    ): Promise<'ok' | 'stale'> {
+      return 'ok';
+    },
     async heartbeat() {
       return this.heartbeatReply;
     },
@@ -264,6 +274,52 @@ describe('runDrop with services', () => {
     );
     expect(d.started?.limits).toEqual({ pids: 4096 });
     expect(d.services).toBeUndefined();
+  });
+});
+
+describe('artifacts', () => {
+  const bytes = Buffer.from('artifact-bytes');
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const chunk = (data: Buffer, index: number, total: number, hash = sha256) =>
+    `${ARTIFACT_PREFIX}${JSON.stringify({ rule: 'ui', name: 'a.png', mediaType: 'image/png', sha256: hash, index, total, data: data.toString('base64') })}`;
+  const done =
+    'JM_RESULT {"status":"completed","verdict":{"decision":"approve","summary":"s","findings":[]},"gates":[]}';
+
+  test('chunks reassemble, upload before the result, and stay out of events', async () => {
+    const d = fakeDriver([chunk(bytes.subarray(0, 5), 0, 2), chunk(bytes.subarray(5), 1, 2), done]);
+    const client = fakeClient();
+    const order: string[] = [];
+    client.postArtifact = async (_id, _e, a) => {
+      order.push('artifact');
+      expect(Buffer.from(a.dataBase64, 'base64').equals(bytes)).toBe(true);
+      expect(a).toMatchObject({ rule: 'ui', name: 'a.png', sha256 });
+      return 'ok';
+    };
+    const post = client.postResult.bind(client);
+    client.postResult = async (...args) => {
+      order.push('result');
+      return post(...args);
+    };
+    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 1000, stickId: 's1' });
+    expect(order).toEqual(['artifact', 'result']);
+    expect(client.events.flat()).toEqual([]);
+  });
+
+  test('a missing or corrupt chunk uploads nothing', async () => {
+    const d = fakeDriver([
+      chunk(bytes.subarray(0, 5), 0, 2),
+      chunk(bytes.subarray(5), 0, 2, 'f'.repeat(64)),
+      done,
+    ]);
+    const client = fakeClient();
+    let uploads = 0;
+    client.postArtifact = async () => {
+      uploads++;
+      return 'ok';
+    };
+    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 1000, stickId: 's1' });
+    expect(uploads).toBe(0);
+    expect(client.result).toMatchObject({ status: 'completed' });
   });
 });
 

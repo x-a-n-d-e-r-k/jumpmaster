@@ -1,3 +1,4 @@
+import type { ArtifactRow } from '../artifacts.js';
 import type { DropZoneConfig } from '../config.js';
 import type {
   AttemptKey,
@@ -177,7 +178,22 @@ export function renderHome(state: HomeState): string {
   );
 }
 
-export function renderDrop(drop: Drop, events: StoredEvent[]): string {
+function artifactsSection(artifacts: ArtifactRow[]): string {
+  if (artifacts.length === 0) return '';
+  const rows = artifacts
+    .map(
+      (a) =>
+        `<tr><td>${escapeHtml(a.rule)}</td><td><a href="/artifacts/${a.id}">${escapeHtml(a.name)}</a></td><td>${escapeHtml(a.mediaType)}</td><td>${a.bytes}</td></tr>`,
+    )
+    .join('');
+  return `<h2>Artifacts</h2><table><tr><th>Rule</th><th>Name</th><th>Type</th><th>Bytes</th></tr>${rows}</table>`;
+}
+
+export function renderDrop(
+  drop: Drop,
+  events: StoredEvent[],
+  artifacts: ArtifactRow[] = [],
+): string {
   const rows = events
     .map(
       (e) =>

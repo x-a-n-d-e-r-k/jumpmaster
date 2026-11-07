@@ -73,6 +73,7 @@ export function buildPayload(
     promptVersion: promptVersions()[role],
     image: zone.image,
     protectedPaths: zone.protectedPaths,
+    ...(zone.verification.length > 0 ? { verification: zone.verification } : {}),
     ...(zone.services.length > 0 ? { services: zone.services } : {}),
     ...(hasCustomLimits(zone) ? { limits: zone.limits } : {}),
     ...(secrets.zoneSecrets?.[zone.id] ? { gateSecrets: secrets.zoneSecrets[zone.id] } : {}),

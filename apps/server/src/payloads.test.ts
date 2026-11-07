@@ -15,6 +15,7 @@ const secrets: Config['secrets'] = {
 
 const zone = {
   services: [],
+  verification: [],
   limits: { pids: 512 },
   id: 'main',
   repo: 'octo/demo',

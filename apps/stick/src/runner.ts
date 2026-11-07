@@ -1,8 +1,14 @@
+import { createHash } from 'node:crypto';
 import {
+  ARTIFACT_PREFIX,
+  ArtifactChunkSchema,
+  type ArtifactUpload,
   type DropPayload,
   type DropResult,
   DropResultSchema,
   EVENT_PREFIX,
+  MAX_ARTIFACT_BYTES,
+  MAX_ARTIFACTS,
   RESULT_PREFIX,
   type TrooperEvent,
   TrooperEventSchema,
@@ -52,6 +58,39 @@ export async function reapOrphans(driver: ContainerDriver, stickId: string): Pro
 
 /** At the 15-second beat this is inside the server's 60-second lease. */
 const DEFAULT_LOST_SERVER_KILL_BEATS = 3;
+
+/** Rebuilds artifacts from their stdout chunks. A file that fails its hash is dropped. */
+class ArtifactAssembler {
+  private readonly parts = new Map<string, Buffer[]>();
+  private bytes = 0;
+  private finished = 0;
+
+  add(json: string): ArtifactUpload | null {
+    const chunk = ArtifactChunkSchema.safeParse(safeJson(json));
+    if (!chunk.success || this.finished >= MAX_ARTIFACTS) return null;
+    const { sha256, index, total, data, rule, name, mediaType } = chunk.data;
+    const decoded = Buffer.from(data, 'base64');
+    this.bytes += decoded.length;
+    if (this.bytes > MAX_ARTIFACTS * MAX_ARTIFACT_BYTES) return null;
+    const parts = this.parts.get(sha256) ?? [];
+    this.parts.set(sha256, parts);
+    parts[index] = decoded;
+    if (index !== total - 1) return null;
+    this.parts.delete(sha256);
+    const whole = Buffer.concat(parts.filter(Boolean));
+    if (createHash('sha256').update(whole).digest('hex') !== sha256) return null;
+    this.finished++;
+    return { rule, name, mediaType, sha256, dataBase64: whole.toString('base64') };
+  }
+}
+
+function safeJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
 
 type RunDeps = {
   client: DropClient;
@@ -192,11 +231,16 @@ async function runContainer(
   }, deps.heartbeatMs ?? 15_000);
   const flusher = setInterval(() => void flush(), FLUSH_MS);
 
+  const artifacts = new ArtifactAssembler();
+  const uploads: Promise<unknown>[] = [];
   let result: DropResult | undefined;
   let postedReal = false;
   try {
     for await (const line of handle.logs()) {
-      if (line.startsWith(EVENT_PREFIX)) {
+      if (line.startsWith(ARTIFACT_PREFIX)) {
+        const done = artifacts.add(line.slice(ARTIFACT_PREFIX.length));
+        if (done) uploads.push(client.postArtifact(dropId, epoch, done).catch(() => 'stale'));
+      } else if (line.startsWith(EVENT_PREFIX)) {
         try {
           const ev = TrooperEventSchema.parse(JSON.parse(line.slice(EVENT_PREFIX.length)));
           const bytes = Buffer.byteLength(line);
@@ -217,6 +261,8 @@ async function runContainer(
     }
     const { exitCode } = await handle.wait();
     await flush();
+    // Before the result: the server checks for these when it reads the verdict.
+    await Promise.allSettled(uploads);
     await stopping;
     // The server no longer owns this epoch (stale) or already cancelled it: it would 409 a result.
     if (stale || cancelled) return;

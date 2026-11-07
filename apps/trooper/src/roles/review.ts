@@ -7,6 +7,7 @@ import {
 } from '@jumpmaster/protocol';
 import type { TrooperDeps } from '../main.js';
 import { redact } from '../redact.js';
+import { runVerification } from '../verification.js';
 import {
   acceptOutcome,
   cloneAndPrepare,
@@ -73,13 +74,36 @@ async function reviewSteps(
     };
   }
 
+  const verified = await runVerification(payload, deps, ctx, dir);
+  if (!verified.ok) {
+    const detail = verified.reason ?? 'verification failed';
+    return {
+      status: 'completed',
+      role: 'review',
+      verdict: clean(
+        {
+          decision: 'request_changes',
+          summary: detail,
+          findings: [{ severity: 'blocker', detail }],
+        },
+        ctx.secrets,
+      ),
+      gates,
+    };
+  }
+  const evidence = verified.files.length
+    ? `\n\n## Verification artifacts\n\nInspect these before deciding:\n${verified.files
+        .map((f) => `- ${f.rule}: ${f.path} (${f.name})`)
+        .join('\n')}`
+    : '';
+
   // Recorded after the gates, so their build output is not mistaken for an edit by the reviewer.
   const before = await deps.git.treeState(dir, as);
   const outcome = await runAgent(
     payload,
     deps,
     ctx,
-    { prompt: payload.prompt, outputSchema: REVIEW_OUTPUT_SCHEMA },
+    { prompt: `${payload.prompt}${evidence}`, outputSchema: REVIEW_OUTPUT_SCHEMA },
     dir,
   );
   const done = (r: Omit<DropResult, 'gates' | 'role'>): DropResult => ({

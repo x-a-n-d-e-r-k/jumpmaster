@@ -1,4 +1,5 @@
 import {
+  type ArtifactUpload,
   type DropPayload,
   DropPayloadSchema,
   type DropResult,
@@ -12,6 +13,7 @@ export interface DropClient {
   heartbeat(dropId: string, epoch: number): Promise<'ok' | 'cancel' | 'hard_cancel' | 'stale'>;
   postEvents(dropId: string, epoch: number, events: TrooperEvent[]): Promise<Ack>;
   postResult(dropId: string, epoch: number, result: DropResult): Promise<Ack>;
+  postArtifact(dropId: string, epoch: number, artifact: ArtifactUpload): Promise<Ack>;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -68,6 +70,13 @@ export class StickClient implements DropClient {
     const out = (await res.json()) as { cancel: boolean; hard?: boolean };
     if (!out.cancel) return 'ok';
     return out.hard ? 'hard_cancel' : 'cancel';
+  }
+
+  async postArtifact(dropId: string, epoch: number, artifact: ArtifactUpload): Promise<Ack> {
+    const res = await this.req(`/api/drops/${dropId}/artifacts`, { epoch, ...artifact });
+    if (res.status === 409) return 'stale';
+    if (!res.ok) throw new Error(`artifact upload failed: ${res.status}`);
+    return 'ok';
   }
 
   async postEvents(dropId: string, epoch: number, events: TrooperEvent[]): Promise<Ack> {

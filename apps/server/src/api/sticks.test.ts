@@ -51,6 +51,7 @@ const config: Config = {
       mergeMethod: 'squash',
       requireBranchProtection: true,
       services: [],
+      verification: [],
       limits: { pids: 512 },
     },
   ],

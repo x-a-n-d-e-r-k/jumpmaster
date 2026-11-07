@@ -42,6 +42,7 @@ export async function harness(
     zone?: Partial<DropZoneConfig>;
     issues?: ForgeIssue[];
     zoneSecrets?: Record<string, string>;
+    dataDir?: string;
   } = {},
 ): Promise<Harness> {
   const db = openDb(tmpDbFile());
@@ -60,7 +61,7 @@ export async function harness(
   const zone = makeZone({ ciRequired: false, ...opts.zone });
   const config: Config = {
     listen: { host: '127.0.0.1', port: 0 },
-    dataDir: '.',
+    dataDir: opts.dataDir ?? '.',
     pollSeconds: 60,
     dropZones: [zone],
     secrets: {

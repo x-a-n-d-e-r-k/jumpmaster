@@ -182,6 +182,20 @@ export function stoppedEarly(o: AgentOutcome): 'rate_limited' | 'interrupted' | 
   return reason !== undefined && reason !== 'completed' ? 'interrupted' : null;
 }
 
+/** Gate secrets and service addresses, set for a gate step after its environment is scrubbed. */
+export function gateExtraEnv(
+  payload: DropPayload,
+  hostOf: (service: ServiceSpec) => string = (s) => s.name,
+): NodeJS.ProcessEnv {
+  const extra: NodeJS.ProcessEnv = { ...payload.gateSecrets };
+  for (const s of payload.services ?? []) {
+    const key = s.name.toUpperCase().replace(/-/g, '_');
+    extra[`JM_SERVICE_${key}_HOST`] = hostOf(s);
+    extra[`JM_SERVICE_${key}_PORT`] = String(s.port);
+  }
+  return extra;
+}
+
 /** Resolves once each service accepts a TCP connection; throws naming the first that doesn't. */
 export async function waitForServices(
   services: ServiceSpec[],
@@ -227,12 +241,7 @@ export async function runGatesPhase(
   await waitForServices(services, hostOf);
   emitEvent(deps, ctx, 'phase', { phase: 'gates' });
   const env = scrubEnv(process.env, ctx.secrets);
-  const extraEnv: NodeJS.ProcessEnv = { ...payload.gateSecrets };
-  for (const s of services) {
-    const key = s.name.toUpperCase().replace(/-/g, '_');
-    extraEnv[`JM_SERVICE_${key}_HOST`] = hostOf(s);
-    extraEnv[`JM_SERVICE_${key}_PORT`] = String(s.port);
-  }
+  const extraEnv = gateExtraEnv(payload, hostOf);
   let results: GateResult[];
   if (ctx.ids) {
     (deps.privilege?.sweepUid ?? sweepUid)(ctx.ids.agent.uid);

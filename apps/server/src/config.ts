@@ -5,6 +5,7 @@ import {
   type Role,
   RoleSchema,
   ServiceSpecSchema,
+  VerificationSpecSchema,
 } from '@jumpmaster/protocol';
 import { z } from 'zod';
 import { ZONE_MODES } from './db/repo.js';
@@ -44,6 +45,7 @@ const DropZoneSchema = z.object({
       const repeated = names.find((n, i) => names.indexOf(n) !== i);
       if (repeated) ctx.addIssue({ code: 'custom', message: `duplicate service: ${repeated}` });
     }),
+  verification: z.array(VerificationSpecSchema).default([]),
   limits: ContainerLimitsSchema.default({ pids: DEFAULT_PIDS_LIMIT }),
   /** Names of secrets for gate steps; values come from JM_ZONE_SECRET_<ZONE>_<NAME>. */
   gateSecrets: z.array(z.string()).default([]),

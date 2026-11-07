@@ -101,6 +101,17 @@ CREATE TABLE observations (
   last_at   TEXT NOT NULL,
   count     INTEGER NOT NULL
 );
+CREATE TABLE artifacts (
+  id          INTEGER PRIMARY KEY,
+  drop_id     TEXT NOT NULL REFERENCES drops(id),
+  rule        TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  sha256      TEXT NOT NULL,
+  media_type  TEXT NOT NULL,
+  bytes       INTEGER NOT NULL,
+  created_at  TEXT NOT NULL
+);
+
 CREATE UNIQUE INDEX observations_key
   ON observations (zone_id, COALESCE(item_id, 0), action, detail);
 `;
