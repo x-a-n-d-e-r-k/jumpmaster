@@ -39,3 +39,15 @@ test('lease rejects a payload that fails the schema', async () => {
     /invalid lease payload/,
   );
 });
+
+test('a heartbeat to a hung server fails instead of waiting forever', async () => {
+  vi.stubGlobal(
+    'fetch',
+    (_url: unknown, init: { signal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(new Error('timed out')));
+      }),
+  );
+  const client = new StickClient('http://server.test', 't', { heartbeatTimeoutMs: 5 });
+  await expect(client.heartbeat('d1', 1)).rejects.toThrow('timed out');
+});
