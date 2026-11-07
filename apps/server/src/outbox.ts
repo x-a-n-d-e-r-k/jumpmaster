@@ -204,8 +204,22 @@ async function fromExisting(
   }
 }
 
+function zoneModeOfItem(db: Db, itemId: number): string | undefined {
+  const row = db
+    .prepare(
+      `SELECT c.mode FROM work_items w JOIN zone_controls c ON c.zone_id = w.drop_zone_id
+         WHERE w.id = ?`,
+    )
+    .get(itemId) as { mode: string } | undefined;
+  return row?.mode;
+}
+
 /** Runs one forge write at most once per `opKey` (§5.2). */
 export async function runOp(db: Db, forges: ForgePair, op: Op, now: Date): Promise<OpResult> {
+  // Before any insert: a row left behind would later become `unknown` and park the item.
+  if (zoneModeOfItem(db, op.itemId) === 'observe') {
+    throw new Error(`observe mode: forge write ${op.kind} suppressed`);
+  }
   const existing = getOutbox(db, op.opKey);
   if (existing) return fromExisting(db, forges, op, existing, now);
   const inserted = insertOutbox(db, {

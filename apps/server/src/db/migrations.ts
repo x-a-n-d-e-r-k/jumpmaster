@@ -90,6 +90,19 @@ CREATE TABLE kill_switch (
   engaged     INTEGER NOT NULL CHECK (engaged IN (0,1)),
   updated_at  TEXT NOT NULL
 );
+
+CREATE TABLE observations (
+  id        INTEGER PRIMARY KEY,
+  zone_id   TEXT NOT NULL,
+  item_id   INTEGER REFERENCES work_items(id),
+  action    TEXT NOT NULL,
+  detail    TEXT NOT NULL,
+  first_at  TEXT NOT NULL,
+  last_at   TEXT NOT NULL,
+  count     INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX observations_key
+  ON observations (zone_id, COALESCE(item_id, 0), action, detail);
 `;
 
 export const MIGRATIONS: { version: number; sql: string }[] = [

@@ -7,14 +7,16 @@ import {
   getDrop,
   getPullRequest,
   getUsageState,
+  getZoneMode,
   latestRateLimitEvent,
   latestVerdict,
   listEvents,
+  listObservations,
   listOutbox,
   listRecentDrops,
   listWorkItems,
 } from './db/repo.js';
-import { type ItemDetail, renderDrop, renderHome } from './ui/pages.js';
+import { type ItemDetail, renderDrop, renderHome, renderObservations } from './ui/pages.js';
 import { dispatchGate } from './usage.js';
 
 const ATTEMPT_KEYS: AttemptKey[] = [
@@ -49,6 +51,7 @@ export function createApp(deps: StickRouteDeps): FastifyInstance {
     }
     const html = renderHome({
       zones: config.dropZones,
+      modes: Object.fromEntries(config.dropZones.map((z) => [z.id, getZoneMode(db, z.id, z.mode)])),
       items,
       drops: listRecentDrops(db),
       lastRateLimit: latestRateLimitEvent(db),
@@ -59,6 +62,10 @@ export function createApp(deps: StickRouteDeps): FastifyInstance {
     });
     return reply.type('text/html; charset=utf-8').send(html);
   });
+
+  app.get('/observations', async (_req, reply) =>
+    reply.type('text/html; charset=utf-8').send(renderObservations(listObservations(deps.db))),
+  );
 
   app.get<{ Params: { id: string } }>('/drops/:id', async (req, reply) => {
     const drop = getDrop(deps.db, req.params.id);

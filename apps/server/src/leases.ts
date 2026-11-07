@@ -15,6 +15,9 @@ const FINISHING = "('review','heal','resolve')";
  * `probe` leases exactly one drop (preferring one not on the pause's cause item) and records it.
  * All time comes from `now`.
  */
+/** Queued drops wait while their zone is paused or observing. */
+const ZONE_ACTIVE = `AND drop_zone_id NOT IN (SELECT zone_id FROM zone_controls WHERE mode <> 'active')`;
+
 export function leaseNextDrop(
   db: Db,
   stickId: string,
@@ -29,7 +32,7 @@ export function leaseNextDrop(
       if (u.probeDropId !== null) return null;
       next = db
         .prepare(
-          `SELECT id FROM drops WHERE state = 'queued'
+          `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE}
            ORDER BY CASE WHEN work_item_id IS ? THEN 1 ELSE 0 END, created_at, rowid LIMIT 1`,
         )
         .get(u.causeWorkItemId) as { id: string } | undefined;
@@ -37,7 +40,7 @@ export function leaseNextDrop(
       const roleFilter = gate === 'finishing_only' ? ` AND role IN ${FINISHING}` : '';
       next = db
         .prepare(
-          `SELECT id FROM drops WHERE state = 'queued'${roleFilter} ORDER BY created_at, rowid LIMIT 1`,
+          `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE}${roleFilter} ORDER BY created_at, rowid LIMIT 1`,
         )
         .get() as { id: string } | undefined;
     }

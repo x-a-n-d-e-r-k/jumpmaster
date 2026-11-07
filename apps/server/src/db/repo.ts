@@ -678,3 +678,50 @@ export function activeWorkCount(db: Db, zoneId: string): number {
 export function zoneIsDrained(db: Db, zoneId: string): boolean {
   return activeWorkCount(db, zoneId) === 0;
 }
+
+/** Stores the config's starting mode the first time a zone is seen; a stored mode then wins. */
+export function ensureZoneMode(db: Db, zoneId: string, mode: ZoneMode, now: Date): void {
+  db.prepare(
+    `INSERT INTO zone_controls (zone_id, mode, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT (zone_id) DO NOTHING`,
+  ).run(zoneId, mode, now.toISOString());
+}
+
+export type Observation = {
+  id: number;
+  zoneId: string;
+  itemId: number | null;
+  action: string;
+  detail: string;
+  firstAt: string;
+  lastAt: string;
+  count: number;
+};
+
+/** What observe mode would have done. A repeat of the same decision only raises its count. */
+export function recordObservation(
+  db: Db,
+  zoneId: string,
+  itemId: number | null,
+  action: string,
+  detail: string,
+  now: Date,
+): void {
+  const at = now.toISOString();
+  db.prepare(
+    `INSERT INTO observations (zone_id, item_id, action, detail, first_at, last_at, count)
+       VALUES (@zoneId, @itemId, @action, @detail, @at, @at, 1)
+       ON CONFLICT (zone_id, COALESCE(item_id, 0), action, detail)
+       DO UPDATE SET last_at = @at, count = count + 1`,
+  ).run({ zoneId, itemId, action, detail, at });
+}
+
+export function listObservations(db: Db, zoneId?: string): Observation[] {
+  return db
+    .prepare(
+      `SELECT id, zone_id AS zoneId, item_id AS itemId, action, detail,
+              first_at AS firstAt, last_at AS lastAt, count
+         FROM observations WHERE @zoneId IS NULL OR zone_id = @zoneId ORDER BY last_at DESC, id DESC`,
+    )
+    .all({ zoneId: zoneId ?? null }) as Observation[];
+}

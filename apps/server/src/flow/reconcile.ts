@@ -5,11 +5,14 @@ import type { Db } from '../db/open.js';
 import {
   activeDropFor,
   deleteFailedOutbox,
+  ensureZoneMode,
   getPullRequest,
   getWorkItem,
+  getZoneMode,
   hasOpenCreatePr,
   insertDrop,
   listWorkItems,
+  recordObservation,
   setWorkItemState,
   upsertPullRequest,
   type WorkItem,
@@ -26,6 +29,7 @@ import {
 } from '../outbox.js';
 import { renderReviewBody } from '../results.js';
 import { enqueueImplement, enqueueNext } from '../scheduler.js';
+import { rankItems } from '../sync.js';
 import { chargeBudget } from './budgets.js';
 import { type Action, decide, type Snapshot } from './decide.js';
 import { buildSnapshot, type ZonePass } from './snapshot.js';
@@ -100,6 +104,7 @@ async function resume(
   pulls: PullFacts[],
 ): Promise<number> {
   let acted = 0;
+  const observing = getZoneMode(db, zone.id, zone.mode) === 'observe';
   const candidates = listWorkItems(db, zone.id).filter(
     (i) =>
       (i.state === 'ready' || i.state === 'in_flight') &&
@@ -125,11 +130,23 @@ async function resume(
     // `adopt` already took any PR with the server's marker, so an open one here isn't ours.
     const foreign = pulls.find((p) => p.headRef === agentBranch(item.issueNumber));
     if (foreign && !isServerPrBody(foreign.body, item.id)) {
+      if (observing) {
+        const why = `hand-opened PR on agent branch: #${foreign.number}`;
+        recordObservation(db, zone.id, item.id, 'would_park', why, now);
+        unknown.add(item.id);
+        continue;
+      }
       parkReason(db, item.id, `hand-opened PR on agent branch: #${foreign.number}`, now);
       acted++;
       continue;
     }
     const resumeSha = sha;
+    if (observing) {
+      // Recorded here, not in the charge transaction, so no budget moves and the row survives.
+      recordObservation(db, zone.id, item.id, 'would_enqueue:resume', `branch at ${sha}`, now);
+      unknown.add(item.id);
+      continue;
+    }
     try {
       db.transaction(() => {
         deleteFailedOutbox(db, item.id, 'create_pr');
@@ -271,6 +288,28 @@ async function merge(
   return true;
 }
 
+/** Observe mode's record of a decision, in place of performing it. */
+function observeDecision(db: Db, zoneId: string, s: Snapshot, a: Action, now: Date): void {
+  const head = `head ${s.pr?.headSha ?? 'unknown'}`;
+  const note = (action: string, detail: string) =>
+    recordObservation(db, zoneId, s.item.id, action, detail, now);
+  switch (a.kind) {
+    case 'enqueue':
+      return note(`would_enqueue:${a.role}`, head);
+    case 'post_review':
+      return note('would_post_review', head);
+    case 'merge':
+      return note('would_merge', `sha ${a.sha}`);
+    case 'park':
+      return note('would_park', a.reason);
+    case 'done':
+      return note('would_done', a.reason);
+    case 'wait':
+    case 'none':
+      return;
+  }
+}
+
 /**
  * One reconcile pass for a zone (uses the given `pass`, never reads it itself): resolve unknown
  * outbox ops, adopt lost agent PRs, resume pushed branches, decide every pr_open item, then start
@@ -288,9 +327,12 @@ export async function reconcileZone(
 ): Promise<ReconcileReport> {
   let actions = 0;
   let merges = 0;
+  ensureZoneMode(db, zone.id, zone.mode, now);
+  const mode = getZoneMode(db, zone.id, zone.mode);
   await resolveUnknown(db, forges, zone.id, now, zone.ciDeadlineMinutes);
   const pulls = await forges.author.listOpenAgentPulls('agent/issue-');
   actions += await adopt(db, forges, zone, pass, pulls, now);
+  if (mode === 'paused') return { actions, merges };
   const branchUnknown = new Set<number>();
   actions += await resume(db, forges, zone, versions, usageCfg, now, branchUnknown, pulls);
 
@@ -299,6 +341,10 @@ export async function reconcileZone(
     if (!item) continue;
     const s = await buildSnapshot(db, forges, zone, item, pass, now);
     const a = decide(s);
+    if (mode === 'observe') {
+      observeDecision(db, zone.id, s, a, now);
+      continue;
+    }
     switch (a.kind) {
       case 'enqueue':
         enqueue(db, zone, s, a, versions, now);
@@ -327,6 +373,15 @@ export async function reconcileZone(
     }
   }
 
+  if (mode === 'observe') {
+    const skip = (i: WorkItem) => !branchUnknown.has(i.id);
+    const top = rankItems(listWorkItems(db, zone.id, 'ready').filter(skip))[0];
+    if (top) {
+      const detail = `issue #${top.issueNumber}`;
+      recordObservation(db, zone.id, top.id, 'would_enqueue:implement', detail, now);
+    }
+    return { actions, merges };
+  }
   if (enqueueNext(db, zone, versions.implement, usageCfg, now, branchUnknown) !== null) actions++;
   return { actions, merges };
 }

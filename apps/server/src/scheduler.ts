@@ -1,7 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type { DropZoneConfig, UsageConfig } from './config.js';
 import type { Db } from './db/open.js';
-import { insertDrop, listWorkItems, setWorkItemState, type WorkItem } from './db/repo.js';
+import {
+  getZoneMode,
+  insertDrop,
+  listWorkItems,
+  setWorkItemState,
+  type WorkItem,
+} from './db/repo.js';
 import { rankItems } from './sync.js';
 import { dispatchGate } from './usage.js';
 
@@ -21,6 +27,8 @@ export function enqueueImplement(
   usageCfg: UsageConfig,
   now: Date,
 ): string | null {
+  const mode = getZoneMode(db, zone.id, zone.mode);
+  if (mode === 'paused' || mode === 'observe') return null;
   const gate = dispatchGate(db, usageCfg, now);
   if (gate !== 'open' && gate !== 'probe') return null;
   return db.transaction((): string | null => {

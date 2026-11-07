@@ -14,6 +14,7 @@ import {
   getDrop,
   getUsageState,
   getWorkItem,
+  getZoneMode,
   insertDrop,
   insertVerdict,
   setWorkItemState,
@@ -257,7 +258,11 @@ async function reviewResult(c: Ctx, result: DropResult): Promise<void> {
     commitId: drop.headSha,
     body: renderReviewBody({ ...verdict, decision }, result.gates, c.deps.secrets),
   };
-  // Fails closed: an unposted verdict is posted later by decide, which honours the hold.
+  // Fails closed: an unposted verdict is posted later by decide, which honours the hold and mode.
+  if (getZoneMode(db, drop.dropZoneId, 'active') !== 'active') {
+    finish(c, 'succeeded');
+    return;
+  }
   const pull = await c.deps.forges.author.getPull(drop.prNumber).catch(() => null);
   if (pull === null || isHeld(pull)) {
     finish(c, 'succeeded');
