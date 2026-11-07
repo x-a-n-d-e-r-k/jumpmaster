@@ -100,7 +100,7 @@ export async function runAgent(
   const gateList = payload.gates.map((g) => `- ${g.name}: ${g.run}`).join('\n');
   writeFileSync(
     systemPromptFile,
-    `Before finishing, run these commands and make them pass:\n${gateList}\n`,
+    `Before finishing, run these commands and make them pass:\n${gateList}\n${gateOnlyNote(payload)}`,
   );
   writeFileSync(settingsFile, JSON.stringify({ hooks: {} }));
 
@@ -115,6 +115,7 @@ export async function runAgent(
   });
   const env: NodeJS.ProcessEnv = {
     ...scrubEnv(process.env, ctx.secrets),
+    ...serviceEnv(payload),
     CLAUDE_CODE_OAUTH_TOKEN: payload.credentials.claudeToken,
   };
   const out: AgentOutcome = {
@@ -187,13 +188,28 @@ export function gateExtraEnv(
   payload: DropPayload,
   hostOf: (service: ServiceSpec) => string = (s) => s.name,
 ): NodeJS.ProcessEnv {
-  const extra: NodeJS.ProcessEnv = { ...payload.gateSecrets };
+  return { ...payload.gateSecrets, ...serviceEnv(payload, hostOf) };
+}
+
+/** Service addresses. Unlike gate secrets, the agent gets these too. */
+function serviceEnv(
+  payload: DropPayload,
+  hostOf: (service: ServiceSpec) => string = (s) => s.name,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
   for (const s of payload.services ?? []) {
     const key = s.name.toUpperCase().replace(/-/g, '_');
-    extra[`JM_SERVICE_${key}_HOST`] = hostOf(s);
-    extra[`JM_SERVICE_${key}_PORT`] = String(s.port);
+    env[`JM_SERVICE_${key}_HOST`] = hostOf(s);
+    env[`JM_SERVICE_${key}_PORT`] = String(s.port);
   }
-  return extra;
+  return env;
+}
+
+/** Without this the agent reads a missing secret as a blocker, and stops with finished work. */
+function gateOnlyNote(payload: DropPayload): string {
+  const names = Object.keys(payload.gateSecrets ?? {});
+  if (names.length === 0) return '';
+  return `\nThese variables exist only in the gate step, which runs separately after you finish: ${names.join(', ')}. You don't have them, by design. A command that fails only because one is missing is not a problem and not a reason to stop. Run what you can, and finish normally.\n`;
 }
 
 /** Resolves once each service accepts a TCP connection; throws naming the first that doesn't. */

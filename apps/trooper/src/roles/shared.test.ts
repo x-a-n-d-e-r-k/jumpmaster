@@ -65,6 +65,7 @@ function recorder(o: { claude?: string[] } = {}) {
     gateExtraEnv: undefined as NodeJS.ProcessEnv | undefined,
     gateRedactions: undefined as string[] | undefined,
     agentEnv: undefined as NodeJS.ProcessEnv | undefined,
+    systemPrompt: '',
   };
   const deps = {
     git: {
@@ -91,8 +92,10 @@ function recorder(o: { claude?: string[] } = {}) {
       cloneForGates: async () => void state.order.push('cloneForGates'),
       removeTree: async () => undefined,
     },
-    async *runClaude(_args: string[], env: NodeJS.ProcessEnv) {
+    async *runClaude(args: string[], env: NodeJS.ProcessEnv) {
       state.agentEnv = env;
+      const file = args[args.indexOf('--append-system-prompt-file') + 1];
+      if (file) state.systemPrompt = readFileSync(file, 'utf8');
       for (const l of o.claude ?? [initLine, completeResult]) yield l;
     },
     runGates: async (
@@ -162,6 +165,20 @@ describe('gate secrets', () => {
     expect(Object.values(r.state.agentEnv ?? {})).not.toContain(secret);
   });
 
+  test('the agent is told which variables only the gate step has, by name not value', async () => {
+    const r = recorder();
+    await runImplement(withSecret, r.deps, ctxSecret);
+    expect(r.state.systemPrompt).toContain('TEST_DB_URL');
+    expect(r.state.systemPrompt).toMatch(/only in the gate step/i);
+    expect(r.state.systemPrompt).not.toContain(secret);
+  });
+
+  test('a zone with no secrets adds no such note', async () => {
+    const r = recorder();
+    await runImplement(impl, r.deps, ctx);
+    expect(r.state.systemPrompt).not.toMatch(/only in the gate step/i);
+  });
+
   test('a zone with no secrets changes the gate env by nothing', async () => {
     const r = recorder();
     await runGatesPhase(impl, r.deps, ctx, '/work/w1/repo');
@@ -191,6 +208,19 @@ describe('services', () => {
     expect(r.state.gateExtraEnv).toMatchObject({
       JM_SERVICE_MY_DB_HOST: '127.0.0.1',
       JM_SERVICE_MY_DB_PORT: String(port),
+    });
+  });
+
+  test('the agent can reach services too, so it can run gates that use them', async () => {
+    const r = recorder();
+    await runImplement(
+      { ...impl, services: [{ name: 'my-db', image: 'i', port: 5432, readyTimeoutSeconds: 1 }] },
+      r.deps,
+      ctx,
+    );
+    expect(r.state.agentEnv).toMatchObject({
+      JM_SERVICE_MY_DB_HOST: 'my-db',
+      JM_SERVICE_MY_DB_PORT: '5432',
     });
   });
 
