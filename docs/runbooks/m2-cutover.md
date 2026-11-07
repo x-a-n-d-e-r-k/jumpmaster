@@ -124,6 +124,14 @@ does, and investigate each difference.
 - `would_enqueue:resume` means a ready issue has an old `agent/issue-N` branch that would be
   continued. Delete the branch or accept it for each one.
 - `adopt_refused` lists PRs that won't be adopted, and why.
+- `would_wait:blocked` means a ready issue has an open GitHub "blocked by" link, so it won't
+  start until every blocker closes. A change to the blocker set adds a new row, so count issues,
+  not rows. `unreadable blocker` means the link points at an issue the author token can't see;
+  the issue waits rather than guess.
+
+Jumpmaster reads only GitHub's native issue dependencies. It ignores labels such as `blocked`
+and dependency markers in issue bodies that other tools use, so convert those to "blocked by"
+links before stage 5, or the blocked issues become startable.
 
 **Pass:** you can explain every difference.
 

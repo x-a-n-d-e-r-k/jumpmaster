@@ -173,6 +173,10 @@ home page (`http://127.0.0.1:7420`). The new **Usage** section shows the dispatc
 the work-item table shows the PR, its head SHA, the latest verdict and attempts per
 budget; the **Outbox** section lists any forge write that is `unknown` or `failed`.
 
+To order work, mark an issue "blocked by" another in GitHub's issue sidebar. A ready issue
+with an open blocker stays `ready` with "waiting on #N" and is never started or resumed until
+every blocker closes. Work already in flight continues if a blocker is added later.
+
 | # | Do | Expect |
 |---|---|---|
 | 1 | Happy path: an issue such as "add a `sum(a, b)` function with a test". | Implement → PR by the author bot → review drop → approval posted by the reviewer bot → CI green → merged by the server, no human click. Item `done`, reason `merged`. |

@@ -118,10 +118,16 @@ CREATE UNIQUE INDEX observations_key
   ON observations (zone_id, COALESCE(item_id, 0), action, detail);
 `;
 
+/** v4: open native "blocked by" links per work item, as a JSON array of strings. */
+const V4_SQL = `
+ALTER TABLE work_items ADD COLUMN blocked_by TEXT NOT NULL DEFAULT '[]';
+`;
+
 export const MIGRATIONS: { version: number; sql: string }[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
   { version: 3, sql: V3_SQL },
+  { version: 4, sql: V4_SQL },
 ];
 
 /**

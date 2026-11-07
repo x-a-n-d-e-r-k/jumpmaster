@@ -64,7 +64,10 @@ export function enqueueImplement(
   })();
 }
 
-/** Enqueue the top-ranked ready item (at most one active implement drop per zone). */
+/** A ready item with an open native blocker waits; work already started is not affected. */
+export const isBlocked = (item: WorkItem): boolean => item.blockedBy.length > 0;
+
+/** Enqueue the top-ranked unblocked ready item (at most one active implement drop per zone). */
 export function enqueueNext(
   db: Db,
   zone: DropZoneConfig,
@@ -74,7 +77,9 @@ export function enqueueNext(
   /** Items not to start fresh this pass (their agent branch could not be read). */
   skip: ReadonlySet<number> = new Set(),
 ): string | null {
-  const top = rankItems(listWorkItems(db, zone.id, 'ready').filter((i) => !skip.has(i.id)))[0];
+  const top = rankItems(
+    listWorkItems(db, zone.id, 'ready').filter((i) => !skip.has(i.id) && !isBlocked(i)),
+  )[0];
   if (!top) return null;
   return enqueueImplement(
     db,
