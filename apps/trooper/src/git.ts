@@ -416,6 +416,29 @@ export async function checkoutBranch(
 }
 
 /** The agent merges origin/<base> (refreshed from the mirror); conflicts are left in the tree. */
+/** Paths the branch changes against base, listing both sides of a rename. */
+export async function changedPaths(
+  dir: string,
+  base: string,
+  as: AgentIdentity | null = null,
+): Promise<string[]> {
+  await runGit(
+    dir,
+    ['fetch', '-q', '--no-tags', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`],
+    '',
+    { as, extraConfig: [['protocol.file.allow', 'always']] },
+  );
+  const out = await runGit(
+    dir,
+    ['diff', '--name-only', '--no-renames', '-z', `origin/${base}...HEAD`],
+    '',
+    {
+      as,
+    },
+  );
+  return out.split('\0').filter(Boolean);
+}
+
 export async function mergeBase(
   dir: string,
   base: string,

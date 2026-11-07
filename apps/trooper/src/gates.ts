@@ -32,6 +32,10 @@ export function scrubEnv(env: NodeJS.ProcessEnv, secrets: string[] = []): NodeJS
   return out;
 }
 
+const PROCESS_LIMIT_SIGNS = /Resource temporarily unavailable|EAGAIN|fork: |pthread_create/;
+const PROCESS_LIMIT_NOTE =
+  "\n[jumpmaster] This looks like the container's process limit, not the code. Raise the zone's limits.pids.";
+
 function killGroup(pid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(-pid, signal);
@@ -43,6 +47,7 @@ function killGroup(pid: number, signal: NodeJS.Signals): void {
 function runOne(
   gate: GateSpec,
   o: {
+    extraEnv?: NodeJS.ProcessEnv;
     cwd: string;
     env: NodeJS.ProcessEnv;
     secrets: string[];
@@ -63,7 +68,8 @@ function runOne(
     const [cmd, ...args] = asAgentArgv(o.as ?? null, argv) as [string, ...string[]];
     const child = spawnImpl(cmd, args, {
       cwd: o.as ? '/' : o.cwd,
-      env: agentSpawnOptions(o.as ?? null, scrubEnv(o.env, o.secrets)).env,
+      // extraEnv is added after the scrub, which would otherwise strip these by name or value.
+      env: agentSpawnOptions(o.as ?? null, { ...scrubEnv(o.env, o.secrets), ...o.extraEnv }).env,
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -90,7 +96,9 @@ function runOne(
       clearTimeout(killTimer);
       // Reap anything the gate left behind in its process group.
       if (pid !== undefined) killGroup(pid, 'SIGKILL');
-      const outputTail = redact(window + extra, o.secrets).slice(-TAIL_CHARS);
+      const note = exitCode !== 0 && PROCESS_LIMIT_SIGNS.test(window) ? PROCESS_LIMIT_NOTE : '';
+      const outputTail =
+        redact(window + extra, o.secrets).slice(-(TAIL_CHARS - note.length)) + note;
       resolve({
         name: gate.name,
         exitCode: timedOut ? null : exitCode,
@@ -110,6 +118,8 @@ export async function runGates(
     cwd: string;
     env: NodeJS.ProcessEnv;
     secrets: string[];
+    /** Set for the gate after scrubbing: gate secrets and service addresses. */
+    extraEnv?: NodeJS.ProcessEnv;
     timeoutScale?: number;
     /** Run each gate as this unprivileged identity (container mode). */
     as?: AgentIdentity | null;

@@ -1,8 +1,14 @@
+import { createHash } from 'node:crypto';
 import {
+  ARTIFACT_PREFIX,
+  ArtifactChunkSchema,
+  type ArtifactUpload,
   type DropPayload,
   type DropResult,
   DropResultSchema,
   EVENT_PREFIX,
+  MAX_ARTIFACT_BYTES,
+  MAX_ARTIFACTS,
   RESULT_PREFIX,
   type TrooperEvent,
   TrooperEventSchema,
@@ -46,21 +52,59 @@ export async function reapOrphans(driver: ContainerDriver, stickId: string): Pro
       // already gone (AutoRemove) or racing another cleanup
     }
   }
+  await driver.removeNetworksByLabel(STICK_LABEL, stickId).catch(() => 0);
   return removed;
 }
 
-export async function runDrop(
-  payload: DropPayload,
-  deps: {
-    client: DropClient;
-    driver: ContainerDriver;
-    stickId: string;
-    heartbeatMs?: number;
-    image?: string;
-    /** Defaults to `allowedImages(process.env)`. */
-    allowedImages?: Set<string>;
-  },
-): Promise<void> {
+/** At the 15-second beat this is inside the server's 60-second lease. */
+const DEFAULT_LOST_SERVER_KILL_BEATS = 3;
+
+/** Rebuilds artifacts from their stdout chunks. A file that fails its hash is dropped. */
+class ArtifactAssembler {
+  private readonly parts = new Map<string, Buffer[]>();
+  private bytes = 0;
+  private finished = 0;
+
+  add(json: string): ArtifactUpload | null {
+    const chunk = ArtifactChunkSchema.safeParse(safeJson(json));
+    if (!chunk.success || this.finished >= MAX_ARTIFACTS) return null;
+    const { sha256, index, total, data, rule, name, mediaType } = chunk.data;
+    const decoded = Buffer.from(data, 'base64');
+    this.bytes += decoded.length;
+    if (this.bytes > MAX_ARTIFACTS * MAX_ARTIFACT_BYTES) return null;
+    const parts = this.parts.get(sha256) ?? [];
+    this.parts.set(sha256, parts);
+    parts[index] = decoded;
+    if (index !== total - 1) return null;
+    this.parts.delete(sha256);
+    const whole = Buffer.concat(parts.filter(Boolean));
+    if (createHash('sha256').update(whole).digest('hex') !== sha256) return null;
+    this.finished++;
+    return { rule, name, mediaType, sha256, dataBase64: whole.toString('base64') };
+  }
+}
+
+function safeJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+type RunDeps = {
+  client: DropClient;
+  driver: ContainerDriver;
+  stickId: string;
+  heartbeatMs?: number;
+  /** Consecutive failed heartbeats before a hard kill. A kill can't reach a cut-off stick. */
+  lostServerKillBeats?: number;
+  image?: string;
+  /** Defaults to `allowedImages(process.env)`. */
+  allowedImages?: Set<string>;
+};
+
+export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void> {
   const { client, driver } = deps;
   const { dropId, epoch } = payload;
   const image = payload.image || deps.image || TROOPER_IMAGE;
@@ -73,20 +117,66 @@ export async function runDrop(
     });
     return;
   }
+  const allowed = deps.allowedImages ?? allowedImages(process.env);
+  const services = payload.services ?? [];
+  const blocked = services.find((s) => !allowed.has(s.image));
+  if (blocked) {
+    await client.postResult(dropId, epoch, {
+      status: 'failed',
+      role: payload.role,
+      reason: `image not allowed: ${blocked.image}`,
+      gates: [],
+    });
+    return;
+  }
+  const labels = {
+    'jumpmaster.drop': dropId,
+    'jumpmaster.epoch': String(epoch),
+    [STICK_LABEL]: deps.stickId,
+  };
+  const network = services.length > 0 ? `jm-drop-${dropId}-${epoch}` : undefined;
+  try {
+    if (network) {
+      try {
+        await driver.startServices(dropId, epoch, services, labels);
+      } catch (e) {
+        await client.postResult(dropId, epoch, {
+          status: 'failed',
+          role: payload.role,
+          reason: `services failed: ${e instanceof Error ? e.message : String(e)}`,
+          gates: [],
+        });
+        return;
+      }
+    }
+    await runContainer(payload, deps, image, labels, network);
+  } finally {
+    if (network) await driver.removeServices(network, labels).catch(() => {});
+  }
+}
+
+async function runContainer(
+  payload: DropPayload,
+  deps: RunDeps,
+  image: string,
+  labels: Record<string, string>,
+  network: string | undefined,
+): Promise<void> {
+  const { client, driver } = deps;
+  const { dropId, epoch } = payload;
   const handle = await driver.start({
     image,
     payload: JSON.stringify(payload),
     name: `jumpmaster-drop-${dropId}-${epoch}`,
-    labels: {
-      'jumpmaster.drop': dropId,
-      'jumpmaster.epoch': String(epoch),
-      [STICK_LABEL]: deps.stickId,
-    },
+    labels,
+    ...(network ? { network } : {}),
+    ...(payload.limits ? { limits: payload.limits } : {}),
   });
 
   let stale = false;
   let cancelled = false;
   let stopping: Promise<void> | undefined;
+  let killing: Promise<void> | undefined;
   const stop = () => {
     stopping ??= handle.stop(STOP_GRACE_MS).catch(() => {});
     return stopping;
@@ -113,24 +203,44 @@ export async function runDrop(
     return flushing;
   };
 
+  const hardKill = () => {
+    cancelled = true;
+    killing ??= handle.kill().catch(() => {});
+    return killing;
+  };
+  const lostLimit = deps.lostServerKillBeats ?? DEFAULT_LOST_SERVER_KILL_BEATS;
+  let failedBeats = 0;
   const hb = setInterval(async () => {
+    if (killing) return;
     try {
       const r = await client.heartbeat(dropId, epoch);
+      failedBeats = 0;
       if (r === 'ok') return;
+      if (r === 'hard_cancel') {
+        void hardKill();
+        return;
+      }
       if (r === 'stale') stale = true;
       else cancelled = true;
       void stop();
     } catch {
-      // transient network error: keep going, the next beat retries
+      // Keep going through a blip. Past the limit the lease is ending anyway.
+      failedBeats++;
+      if (failedBeats >= lostLimit) void hardKill();
     }
   }, deps.heartbeatMs ?? 15_000);
   const flusher = setInterval(() => void flush(), FLUSH_MS);
 
+  const artifacts = new ArtifactAssembler();
+  const uploads: Promise<unknown>[] = [];
   let result: DropResult | undefined;
   let postedReal = false;
   try {
     for await (const line of handle.logs()) {
-      if (line.startsWith(EVENT_PREFIX)) {
+      if (line.startsWith(ARTIFACT_PREFIX)) {
+        const done = artifacts.add(line.slice(ARTIFACT_PREFIX.length));
+        if (done) uploads.push(client.postArtifact(dropId, epoch, done).catch(() => 'stale'));
+      } else if (line.startsWith(EVENT_PREFIX)) {
         try {
           const ev = TrooperEventSchema.parse(JSON.parse(line.slice(EVENT_PREFIX.length)));
           const bytes = Buffer.byteLength(line);
@@ -151,6 +261,8 @@ export async function runDrop(
     }
     const { exitCode } = await handle.wait();
     await flush();
+    // Before the result: the server checks for these when it reads the verdict.
+    await Promise.allSettled(uploads);
     await stopping;
     // The server no longer owns this epoch (stale) or already cancelled it: it would 409 a result.
     if (stale || cancelled) return;

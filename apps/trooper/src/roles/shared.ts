@@ -1,4 +1,5 @@
 import { writeFileSync } from 'node:fs';
+import { connect } from 'node:net';
 import { join } from 'node:path';
 import {
   type DropPayload,
@@ -6,6 +7,7 @@ import {
   EVENT_PREFIX,
   type GateResult,
   type RateLimitEventData,
+  type ServiceSpec,
   type TrooperEvent,
 } from '@jumpmaster/protocol';
 import { buildClaudeArgs, type ParsedLine, parseStreamLine } from '../claude.js';
@@ -98,7 +100,7 @@ export async function runAgent(
   const gateList = payload.gates.map((g) => `- ${g.name}: ${g.run}`).join('\n');
   writeFileSync(
     systemPromptFile,
-    `Before finishing, run these commands and make them pass:\n${gateList}\n`,
+    `Before finishing, run these commands and make them pass:\n${gateList}\n${gateOnlyNote(payload)}`,
   );
   writeFileSync(settingsFile, JSON.stringify({ hooks: {} }));
 
@@ -113,6 +115,7 @@ export async function runAgent(
   });
   const env: NodeJS.ProcessEnv = {
     ...scrubEnv(process.env, ctx.secrets),
+    ...serviceEnv(payload),
     CLAUDE_CODE_OAUTH_TOKEN: payload.credentials.claudeToken,
   };
   const out: AgentOutcome = {
@@ -180,6 +183,64 @@ export function stoppedEarly(o: AgentOutcome): 'rate_limited' | 'interrupted' | 
   return reason !== undefined && reason !== 'completed' ? 'interrupted' : null;
 }
 
+/** Gate secrets and service addresses, set for a gate step after its environment is scrubbed. */
+export function gateExtraEnv(
+  payload: DropPayload,
+  hostOf: (service: ServiceSpec) => string = (s) => s.name,
+): NodeJS.ProcessEnv {
+  return { ...payload.gateSecrets, ...serviceEnv(payload, hostOf) };
+}
+
+/** Service addresses. Unlike gate secrets, the agent gets these too. */
+function serviceEnv(
+  payload: DropPayload,
+  hostOf: (service: ServiceSpec) => string = (s) => s.name,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const s of payload.services ?? []) {
+    const key = s.name.toUpperCase().replace(/-/g, '_');
+    env[`JM_SERVICE_${key}_HOST`] = hostOf(s);
+    env[`JM_SERVICE_${key}_PORT`] = String(s.port);
+  }
+  return env;
+}
+
+/** Without this the agent reads a missing secret as a blocker, and stops with finished work. */
+function gateOnlyNote(payload: DropPayload): string {
+  const names = Object.keys(payload.gateSecrets ?? {});
+  if (names.length === 0) return '';
+  return `\nThese variables exist only in the gate step, which runs separately after you finish: ${names.join(', ')}. You don't have them, by design. A command that fails only because one is missing is not a problem and not a reason to stop. Run what you can, and finish normally.\n`;
+}
+
+/** Resolves once each service accepts a TCP connection; throws naming the first that doesn't. */
+export async function waitForServices(
+  services: ServiceSpec[],
+  hostOf: (service: ServiceSpec) => string,
+): Promise<void> {
+  for (const s of services) {
+    const deadline = Date.now() + s.readyTimeoutSeconds * 1000;
+    while (!(await canConnect(hostOf(s), s.port))) {
+      if (Date.now() >= deadline) {
+        throw new Error(`service ${s.name} was not ready after ${s.readyTimeoutSeconds}s`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+}
+
+function canConnect(host: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect({ host, port, timeout: 1000 });
+    const done = (ok: boolean) => {
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.once('connect', () => done(true));
+    socket.once('error', () => done(false));
+    socket.once('timeout', () => done(false));
+  });
+}
+
 /**
  * Gates see committed HEAD only. In container mode the agent uid is swept first and the gates run
  * as the gate uid in a fresh clone; otherwise they run in the working copy, as in M0.
@@ -189,9 +250,14 @@ export async function runGatesPhase(
   deps: TrooperDeps,
   ctx: RoleCtx,
   dir: string,
+  /** Test seam: services are reached by name on the drop's network. */
+  hostOf: (service: ServiceSpec) => string = (s) => s.name,
 ): Promise<GateResult[]> {
+  const services = payload.services ?? [];
+  await waitForServices(services, hostOf);
   emitEvent(deps, ctx, 'phase', { phase: 'gates' });
   const env = scrubEnv(process.env, ctx.secrets);
+  const extraEnv = gateExtraEnv(payload, hostOf);
   let results: GateResult[];
   if (ctx.ids) {
     (deps.privilege?.sweepUid ?? sweepUid)(ctx.ids.agent.uid);
@@ -200,11 +266,12 @@ export async function runGatesPhase(
     results = await deps.runGates(payload.gates, {
       cwd: gateDir,
       env,
+      extraEnv,
       secrets: ctx.secrets,
       as: ctx.ids.gate,
     });
   } else {
-    results = await deps.runGates(payload.gates, { cwd: dir, env, secrets: ctx.secrets });
+    results = await deps.runGates(payload.gates, { cwd: dir, env, extraEnv, secrets: ctx.secrets });
   }
   for (const g of results) {
     emitEvent(deps, ctx, 'gate', {

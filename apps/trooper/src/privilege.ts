@@ -94,7 +94,7 @@ export function asAgentArgv(id: AgentIdentity | null, argv: string[]): string[] 
   ];
 }
 
-function runAs(argv: string[], maxBytes: number): Promise<string> {
+function runAs(argv: string[], maxBytes: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const [cmd, ...args] = argv as [string, ...string[]];
     const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'] });
@@ -112,7 +112,7 @@ function runAs(argv: string[], maxBytes: number): Promise<string> {
     child.on('error', reject);
     child.on('close', (code) => {
       if (size > maxBytes) return;
-      if (code === 0) resolve(Buffer.concat(chunks).toString('utf8'));
+      if (code === 0) resolve(Buffer.concat(chunks));
       else reject(new Error(`reading agent file failed (exit ${code})`));
     });
   });
@@ -127,16 +127,50 @@ export async function readAgentFile(
   id: AgentIdentity | null,
   maxBytes = 1_048_576,
 ): Promise<string> {
+  return (await readAgentBytes(path, id, maxBytes)).toString('utf8');
+}
+
+/** `readAgentFile` for binary content. */
+export async function readAgentBytes(
+  path: string,
+  id: AgentIdentity | null,
+  maxBytes = 1_048_576,
+): Promise<Buffer> {
   if (id) return runAs(asAgentArgv(id, ['cat', '--', path]), maxBytes);
   const st = await lstat(path);
   if (!st.isFile()) throw new Error('agent file is not a regular file');
   if (st.size > maxBytes) throw new Error('agent file too large');
   const fh = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
-    const text = await fh.readFile('utf8');
-    if (Buffer.byteLength(text) > maxBytes) throw new Error('agent file too large');
-    return text;
+    const bytes = await fh.readFile();
+    if (bytes.length > maxBytes) throw new Error('agent file too large');
+    return bytes;
   } finally {
     await fh.close();
   }
+}
+
+/** Regular files under `dir`, read as `id` since root can't enter a 0700 home. Symlinks are skipped. */
+export async function listAgentFiles(
+  dir: string,
+  id: AgentIdentity | null,
+  maxBytes = 4_194_304,
+): Promise<string[]> {
+  const out = await runAs(
+    asAgentArgv(id, [
+      'find',
+      dir,
+      '-type',
+      'f',
+      '-not',
+      '-path',
+      '*/.git/*',
+      '-not',
+      '-path',
+      '*/node_modules/*',
+      '-print0',
+    ]),
+    maxBytes,
+  );
+  return out.toString('utf8').split('\0').filter(Boolean);
 }

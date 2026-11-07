@@ -1,6 +1,7 @@
 import type { UsageConfig } from './config.js';
 import type { Db } from './db/open.js';
-import { getUsageState, setUsageState } from './db/repo.js';
+import { getUsageState, isKilled, setKilled, setUsageState } from './db/repo.js';
+import { refundCharge } from './flow/budgets.js';
 import { DEFAULT_USAGE_CONFIG, type Gate, releaseProbe } from './usage.js';
 
 const LEASE_TTL_MS = 60_000;
@@ -15,6 +16,9 @@ const FINISHING = "('review','heal','resolve')";
  * `probe` leases exactly one drop (preferring one not on the pause's cause item) and records it.
  * All time comes from `now`.
  */
+/** Queued drops wait while their zone is paused or observing. */
+const ZONE_ACTIVE = `AND drop_zone_id NOT IN (SELECT zone_id FROM zone_controls WHERE mode <> 'active')`;
+
 export function leaseNextDrop(
   db: Db,
   stickId: string,
@@ -23,13 +27,14 @@ export function leaseNextDrop(
 ): { dropId: string; epoch: number } | null {
   return db.transaction(() => {
     if (gate === 'closed') return null;
+    if (isKilled(db)) return null;
     let next: { id: string } | undefined;
     if (gate === 'probe') {
       const u = getUsageState(db);
       if (u.probeDropId !== null) return null;
       next = db
         .prepare(
-          `SELECT id FROM drops WHERE state = 'queued'
+          `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE}
            ORDER BY CASE WHEN work_item_id IS ? THEN 1 ELSE 0 END, created_at, rowid LIMIT 1`,
         )
         .get(u.causeWorkItemId) as { id: string } | undefined;
@@ -37,7 +42,7 @@ export function leaseNextDrop(
       const roleFilter = gate === 'finishing_only' ? ` AND role IN ${FINISHING}` : '';
       next = db
         .prepare(
-          `SELECT id FROM drops WHERE state = 'queued'${roleFilter} ORDER BY created_at, rowid LIMIT 1`,
+          `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE}${roleFilter} ORDER BY created_at, rowid LIMIT 1`,
         )
         .get() as { id: string } | undefined;
     }
@@ -57,6 +62,29 @@ export function leaseNextDrop(
   })();
 }
 
+/**
+ * Engages the kill switch: refuses all new work and cancels every active drop, refunding its
+ * charge so a later reset doesn't count cancelled work as a repeat.
+ */
+export function engageKill(db: Db, now: Date): { cancelled: number } {
+  return db.transaction(() => {
+    setKilled(db, true, now);
+    const active = db
+      .prepare(
+        `UPDATE drops SET state = 'cancelled', finished_at = ?, hard_cancel = 1
+           WHERE state IN ('queued', 'leased', 'running')
+           RETURNING id, work_item_id AS itemId, charged_key AS chargedKey`,
+      )
+      .all(iso(now)) as { id: string; itemId: number; chargedKey: string | null }[];
+    const probe = getUsageState(db).probeDropId;
+    for (const d of active) {
+      refundCharge(db, d.itemId, d.chargedKey);
+      if (d.id === probe) setUsageState(db, { probeDropId: null }, now);
+    }
+    return { cancelled: active.length };
+  })();
+}
+
 /** Extends a live lease and moves leased to running; reports stale/cancelled drops. */
 export function heartbeat(
   db: Db,
@@ -64,13 +92,18 @@ export function heartbeat(
   stickId: string,
   epoch: number,
   now: Date,
-): 'ok' | 'stale' | 'cancel' {
+): 'ok' | 'stale' | 'cancel' | 'hard_cancel' {
   return db.transaction(() => {
     const d = db
-      .prepare('SELECT state, stick_id AS stickId, epoch FROM drops WHERE id = ?')
-      .get(dropId) as { state: string; stickId: string | null; epoch: number } | undefined;
+      .prepare(
+        'SELECT state, stick_id AS stickId, epoch, hard_cancel AS hardCancel FROM drops WHERE id = ?',
+      )
+      .get(dropId) as
+      | { state: string; stickId: string | null; epoch: number; hardCancel: number }
+      | undefined;
     if (!d || d.stickId !== stickId || d.epoch !== epoch) return 'stale';
-    if (d.state === 'cancelled') return 'cancel';
+    // Hard stays hard after a reset: a trooper told to stop gracefully would checkpoint and push.
+    if (d.state === 'cancelled') return d.hardCancel === 1 ? 'hard_cancel' : 'cancel';
     if (d.state !== 'leased' && d.state !== 'running') return 'stale';
     db.prepare(
       `UPDATE drops SET state = 'running', lease_expires_at = @expires,

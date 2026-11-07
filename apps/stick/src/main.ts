@@ -61,7 +61,15 @@ async function main() {
       if (!drop) continue;
       running++;
       console.log(`drop ${drop.dropId} (epoch ${drop.epoch}) leased`);
-      runDrop(drop, { client, driver, stickId, heartbeatMs: 15_000 })
+      runDrop(drop, {
+        client,
+        driver,
+        stickId,
+        heartbeatMs: 15_000,
+        ...(process.env.JM_LOST_SERVER_KILL_BEATS
+          ? { lostServerKillBeats: Number(process.env.JM_LOST_SERVER_KILL_BEATS) }
+          : {}),
+      })
         .catch((e) =>
           console.error(`drop ${drop.dropId} failed: ${e instanceof Error ? e.message : e}`),
         )

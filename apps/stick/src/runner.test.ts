@@ -1,7 +1,10 @@
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  ARTIFACT_PREFIX,
+  type ArtifactUpload,
   type DropPayload,
   DropPayloadSchema,
   type DropResult,
@@ -31,10 +34,16 @@ const payload: DropPayload = DropPayloadSchema.parse({
   credentials: { claudeToken: TOKEN, forgeToken: 'ghs_forge' },
 });
 
-function fakeDriver(lines: string[], opts: { hang?: boolean; exitCode?: number } = {}) {
+function fakeDriver(
+  lines: string[],
+  opts: { hang?: boolean; exitCode?: number; serviceError?: string } = {},
+) {
   const d = {
     started: undefined as Parameters<ContainerDriver['start']>[0] | undefined,
     stopped: false,
+    killed: false,
+    services: undefined as unknown,
+    removedNetworks: [] as string[],
     stopGrace: 0,
     driver: {
       async start(o) {
@@ -57,22 +66,44 @@ function fakeDriver(lines: string[], opts: { hang?: boolean; exitCode?: number }
             d.stopGrace = grace;
             release();
           },
+          async kill() {
+            d.killed = true;
+            release();
+          },
         };
       },
       async listByLabel() {
         return [];
       },
       async remove() {},
+      async startServices(dropId, epoch, services, labels) {
+        d.services = { dropId, epoch, names: services.map((s) => s.name), labels };
+        if (opts.serviceError) throw new Error(opts.serviceError);
+        return `jm-drop-${dropId}-${epoch}`;
+      },
+      async removeServices(network) {
+        d.removedNetworks.push(network);
+      },
+      async removeNetworksByLabel() {
+        return 0;
+      },
     } satisfies ContainerDriver,
   };
   return d;
 }
 
-function fakeClient(heartbeatReply: 'ok' | 'cancel' | 'stale' = 'ok') {
+function fakeClient(heartbeatReply: 'ok' | 'cancel' | 'hard_cancel' | 'stale' = 'ok') {
   return {
     events: [] as TrooperEvent[][],
     result: undefined as DropResult | undefined,
     heartbeatReply,
+    async postArtifact(
+      _dropId: string,
+      _epoch: number,
+      _a: ArtifactUpload,
+    ): Promise<'ok' | 'stale'> {
+      return 'ok';
+    },
     async heartbeat() {
       return this.heartbeatReply;
     },
@@ -164,6 +195,134 @@ describe('image allow-list', () => {
   });
 });
 
+describe('runDrop with services', () => {
+  const withDb: DropPayload = {
+    ...payload,
+    image: 'trooper',
+    services: [{ name: 'db', image: 'postgres:16', port: 5432, readyTimeoutSeconds: 60 }],
+  };
+  const allowed = new Set(['trooper', 'postgres:16']);
+  const done = 'JM_RESULT {"status":"completed","headSha":"a","gates":[]}';
+
+  test('a service image off the allow-list fails the drop before any container starts', async () => {
+    const d = fakeDriver([done]);
+    const client = fakeClient();
+    await runDrop(withDb, {
+      client,
+      driver: d.driver,
+      stickId: 's1',
+      allowedImages: new Set(['trooper']),
+    });
+    expect(d.services).toBeUndefined();
+    expect(d.started).toBeUndefined();
+    expect(client.result).toMatchObject({
+      status: 'failed',
+      reason: 'image not allowed: postgres:16',
+    });
+  });
+
+  test('sidecars start first, join the trooper, and are removed on success', async () => {
+    const d = fakeDriver([done]);
+    const client = fakeClient();
+    await runDrop(withDb, { client, driver: d.driver, stickId: 's1', allowedImages: allowed });
+    expect(d.started?.network).toBe(`jm-drop-${payload.dropId}-${payload.epoch}`);
+    expect(d.removedNetworks).toEqual([`jm-drop-${payload.dropId}-${payload.epoch}`]);
+    expect(client.result).toMatchObject({ status: 'completed' });
+  });
+
+  test.each([
+    ['cancel', 'cancel'],
+    ['hard kill', 'hard_cancel'],
+  ] as const)('sidecars are removed on %s', async (_n, reply) => {
+    const d = fakeDriver([], { hang: true });
+    const client = fakeClient(reply);
+    await runDrop(withDb, {
+      client,
+      driver: d.driver,
+      heartbeatMs: 5,
+      stickId: 's1',
+      allowedImages: allowed,
+    });
+    expect(d.removedNetworks).toHaveLength(1);
+  });
+
+  test('a service that cannot start fails the drop and cleans up', async () => {
+    const d = fakeDriver([done], { serviceError: 'boom' });
+    const client = fakeClient();
+    await runDrop(withDb, { client, driver: d.driver, stickId: 's1', allowedImages: allowed });
+    expect(d.started).toBeUndefined();
+    expect(client.result).toMatchObject({ status: 'failed', reason: 'services failed: boom' });
+    expect(d.removedNetworks).toHaveLength(1);
+  });
+
+  test('stick startup removes networks left by a crashed run', async () => {
+    const d = fakeDriver([]);
+    let asked: string[] = [];
+    d.driver.removeNetworksByLabel = async (k, v) => {
+      asked = [k, v];
+      return 2;
+    };
+    await reapOrphans(d.driver, 's1');
+    expect(asked).toEqual(['jumpmaster.stick', 's1']);
+  });
+
+  test('limits reach the trooper; a zone with none changes nothing', async () => {
+    const d = fakeDriver([done]);
+    await runDrop(
+      { ...payload, image: 'trooper', limits: { pids: 4096 } },
+      { client: fakeClient(), driver: d.driver, stickId: 's1', allowedImages: allowed },
+    );
+    expect(d.started?.limits).toEqual({ pids: 4096 });
+    expect(d.services).toBeUndefined();
+  });
+});
+
+describe('artifacts', () => {
+  const bytes = Buffer.from('artifact-bytes');
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const chunk = (data: Buffer, index: number, total: number, hash = sha256) =>
+    `${ARTIFACT_PREFIX}${JSON.stringify({ rule: 'ui', name: 'a.png', mediaType: 'image/png', sha256: hash, index, total, data: data.toString('base64') })}`;
+  const done =
+    'JM_RESULT {"status":"completed","verdict":{"decision":"approve","summary":"s","findings":[]},"gates":[]}';
+
+  test('chunks reassemble, upload before the result, and stay out of events', async () => {
+    const d = fakeDriver([chunk(bytes.subarray(0, 5), 0, 2), chunk(bytes.subarray(5), 1, 2), done]);
+    const client = fakeClient();
+    const order: string[] = [];
+    client.postArtifact = async (_id, _e, a) => {
+      order.push('artifact');
+      expect(Buffer.from(a.dataBase64, 'base64').equals(bytes)).toBe(true);
+      expect(a).toMatchObject({ rule: 'ui', name: 'a.png', sha256 });
+      return 'ok';
+    };
+    const post = client.postResult.bind(client);
+    client.postResult = async (...args) => {
+      order.push('result');
+      return post(...args);
+    };
+    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 1000, stickId: 's1' });
+    expect(order).toEqual(['artifact', 'result']);
+    expect(client.events.flat()).toEqual([]);
+  });
+
+  test('a missing or corrupt chunk uploads nothing', async () => {
+    const d = fakeDriver([
+      chunk(bytes.subarray(0, 5), 0, 2),
+      chunk(bytes.subarray(5), 0, 2, 'f'.repeat(64)),
+      done,
+    ]);
+    const client = fakeClient();
+    let uploads = 0;
+    client.postArtifact = async () => {
+      uploads++;
+      return 'ok';
+    };
+    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 1000, stickId: 's1' });
+    expect(uploads).toBe(0);
+    expect(client.result).toMatchObject({ status: 'completed' });
+  });
+});
+
 describe('runDrop', () => {
   test('relays events and posts the result', async () => {
     const d = fakeDriver([
@@ -186,6 +345,63 @@ describe('runDrop', () => {
       reason: 'trooper exited 2 without result',
       gates: [],
     });
+  });
+
+  test('a hard cancel kills the container with no checkpoint stop', async () => {
+    const d = fakeDriver([], { hang: true });
+    const client = fakeClient('hard_cancel');
+    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
+    expect(d.killed).toBe(true);
+    expect(d.stopped).toBe(false);
+    expect(client.result).toBeUndefined();
+  });
+
+  test('an ordinary cancel still stops it gracefully', async () => {
+    const d = fakeDriver([], { hang: true });
+    const client = fakeClient('cancel');
+    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
+    expect(d.stopped).toBe(true);
+    expect(d.killed).toBe(false);
+  });
+
+  test('a stick that loses the server hard-kills its drop after the limit', async () => {
+    const d = fakeDriver([], { hang: true });
+    const client = fakeClient();
+    let beats = 0;
+    client.heartbeat = async () => {
+      beats++;
+      throw new Error('network down');
+    };
+    await runDrop(payload, {
+      client,
+      driver: d.driver,
+      heartbeatMs: 5,
+      stickId: 's1',
+      lostServerKillBeats: 3,
+    });
+    expect(beats).toBe(3);
+    expect(d.killed).toBe(true);
+  });
+
+  test('a heartbeat recovering before the limit resets the count', async () => {
+    const d = fakeDriver([], { hang: true });
+    const client = fakeClient();
+    let beats = 0;
+    client.heartbeat = async () => {
+      beats++;
+      if (beats === 7) return 'stale';
+      if (beats % 3 === 0) return 'ok';
+      throw new Error('blip');
+    };
+    await runDrop(payload, {
+      client,
+      driver: d.driver,
+      heartbeatMs: 5,
+      stickId: 's1',
+      lostServerKillBeats: 3,
+    });
+    expect(d.killed).toBe(false);
+    expect(d.stopped).toBe(true);
   });
 
   test('stale heartbeat stops the container with a 30s grace', async () => {

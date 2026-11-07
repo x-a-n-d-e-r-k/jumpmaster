@@ -1,0 +1,6 @@
+# A zone image for a pnpm project. Build it after the trooper image, and add it to the stick's
+# allow-list with JM_ALLOWED_IMAGES. Keep the base image's hardening: add tools, and don't add
+# setuid binaries, credentials or a different USER.
+FROM jumpmaster-trooper:dev
+RUN corepack enable && corepack prepare pnpm@latest --activate \
+ && find / -xdev -type f -perm /6000 -exec chmod a-s {} +

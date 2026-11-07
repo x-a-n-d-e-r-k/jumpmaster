@@ -1,7 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import type { DropZoneConfig, UsageConfig } from './config.js';
 import type { Db } from './db/open.js';
-import { insertDrop, listWorkItems, setWorkItemState, type WorkItem } from './db/repo.js';
+import {
+  getZoneMode,
+  insertDrop,
+  isKilled,
+  listWorkItems,
+  setWorkItemState,
+  type WorkItem,
+} from './db/repo.js';
 import { rankItems } from './sync.js';
 import { dispatchGate } from './usage.js';
 
@@ -21,16 +28,19 @@ export function enqueueImplement(
   usageCfg: UsageConfig,
   now: Date,
 ): string | null {
+  if (isKilled(db)) return null;
+  const mode = getZoneMode(db, zone.id, zone.mode);
+  if (mode === 'paused' || mode === 'observe') return null;
   const gate = dispatchGate(db, usageCfg, now);
   if (gate !== 'open' && gate !== 'probe') return null;
   return db.transaction((): string | null => {
-    const activeImplement = db
+    const { n } = db
       .prepare(
-        `SELECT 1 FROM drops WHERE drop_zone_id = ? AND role = 'implement'
-           AND state IN ('queued', 'leased', 'running') LIMIT 1`,
+        `SELECT COUNT(*) AS n FROM drops WHERE drop_zone_id = ? AND role = 'implement'
+           AND state IN ('queued', 'leased', 'running')`,
       )
-      .get(zone.id);
-    if (activeImplement) return null;
+      .get(zone.id) as { n: number };
+    if (n >= (zone.maxConcurrentImplement ?? 1)) return null;
     const id = randomUUID();
     try {
       insertDrop(db, {

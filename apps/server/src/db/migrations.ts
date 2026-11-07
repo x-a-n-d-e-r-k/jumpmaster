@@ -78,9 +78,50 @@ ALTER TABLE drops ADD COLUMN input_json TEXT;
 ALTER TABLE drops ADD COLUMN charged_key TEXT;
 `;
 
+const V3_SQL = `
+CREATE TABLE zone_controls (
+  zone_id     TEXT PRIMARY KEY,
+  mode        TEXT NOT NULL CHECK (mode IN ('active','paused','observe')),
+  updated_at  TEXT NOT NULL
+);
+
+ALTER TABLE drops ADD COLUMN hard_cancel INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE kill_switch (
+  id          INTEGER PRIMARY KEY CHECK (id = 1),
+  engaged     INTEGER NOT NULL CHECK (engaged IN (0,1)),
+  updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE observations (
+  id        INTEGER PRIMARY KEY,
+  zone_id   TEXT NOT NULL,
+  item_id   INTEGER REFERENCES work_items(id),
+  action    TEXT NOT NULL,
+  detail    TEXT NOT NULL,
+  first_at  TEXT NOT NULL,
+  last_at   TEXT NOT NULL,
+  count     INTEGER NOT NULL
+);
+CREATE TABLE artifacts (
+  id          INTEGER PRIMARY KEY,
+  drop_id     TEXT NOT NULL REFERENCES drops(id),
+  rule        TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  sha256      TEXT NOT NULL,
+  media_type  TEXT NOT NULL,
+  bytes       INTEGER NOT NULL,
+  created_at  TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX observations_key
+  ON observations (zone_id, COALESCE(item_id, 0), action, detail);
+`;
+
 export const MIGRATIONS: { version: number; sql: string }[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
+  { version: 3, sql: V3_SQL },
 ];
 
 /**

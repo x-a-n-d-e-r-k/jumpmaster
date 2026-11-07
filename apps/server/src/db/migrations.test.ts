@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { expect, test } from 'vitest';
-import { M0_SCHEMA_SQL, migrate } from './migrations.js';
+import { M0_SCHEMA_SQL, MIGRATIONS, migrate } from './migrations.js';
 import { type Db, openDb } from './open.js';
 import { getUsageState } from './repo.js';
 
@@ -13,8 +13,8 @@ const maxVersion = (db: Db) =>
 const count = (db: Db, table: string) =>
   (db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as { c: number }).c;
 
-test('fresh DB migrates to version 2', () => {
-  expect(maxVersion(openDb(tmpDbFile()))).toBe(2);
+test('fresh DB migrates to the latest version', () => {
+  expect(maxVersion(openDb(tmpDbFile()))).toBe(MIGRATIONS.length);
 });
 
 test('an M0 database is stamped v1 then upgraded without data loss', () => {
@@ -25,16 +25,16 @@ test('an M0 database is stamped v1 then upgraded without data loss', () => {
   raw.close();
   const db = openDb(f);
   expect(count(db, 'drop_zones')).toBe(1);
-  expect(maxVersion(db)).toBe(2);
-  expect(count(db, 'schema_version')).toBe(2);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(count(db, 'schema_version')).toBe(MIGRATIONS.length);
 });
 
 test('migrate is idempotent', () => {
   const f = tmpDbFile();
   openDb(f).close();
   const db = openDb(f);
-  expect(migrate(db)).toBe(2);
-  expect(count(db, 'schema_version')).toBe(2);
+  expect(migrate(db)).toBe(MIGRATIONS.length);
+  expect(count(db, 'schema_version')).toBe(MIGRATIONS.length);
 });
 
 test('usage_state row 1 is seeded', () => {

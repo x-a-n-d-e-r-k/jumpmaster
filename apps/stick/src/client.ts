@@ -1,4 +1,5 @@
 import {
+  type ArtifactUpload,
   type DropPayload,
   DropPayloadSchema,
   type DropResult,
@@ -9,10 +10,14 @@ export type Ack = 'ok' | 'stale';
 
 /** The per-drop calls the runner needs. */
 export interface DropClient {
-  heartbeat(dropId: string, epoch: number): Promise<'ok' | 'cancel' | 'stale'>;
+  heartbeat(dropId: string, epoch: number): Promise<'ok' | 'cancel' | 'hard_cancel' | 'stale'>;
   postEvents(dropId: string, epoch: number, events: TrooperEvent[]): Promise<Ack>;
   postResult(dropId: string, epoch: number, result: DropResult): Promise<Ack>;
+  postArtifact(dropId: string, epoch: number, artifact: ArtifactUpload): Promise<Ack>;
 }
+
+/** Shorter than the 15-second beat, so beats never overlap. */
+const HEARTBEAT_TIMEOUT_MS = 10_000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -20,9 +25,15 @@ export class StickClient implements DropClient {
   constructor(
     private readonly baseUrl: string,
     private token?: string,
+    private readonly opts: { heartbeatTimeoutMs?: number } = {},
   ) {}
 
-  private async req(path: string, body: unknown, auth = true): Promise<Response> {
+  private async req(
+    path: string,
+    body: unknown,
+    auth = true,
+    signal?: AbortSignal,
+  ): Promise<Response> {
     const headers: Record<string, string> = {
       'content-type': 'application/json',
       'x-jumpmaster-protocol': '1',
@@ -32,6 +43,7 @@ export class StickClient implements DropClient {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
     });
   }
 
@@ -58,12 +70,29 @@ export class StickClient implements DropClient {
     return parsed.data;
   }
 
-  async heartbeat(dropId: string, epoch: number): Promise<'ok' | 'cancel' | 'stale'> {
-    const res = await this.req(`/api/drops/${dropId}/heartbeat`, { epoch });
+  async heartbeat(
+    dropId: string,
+    epoch: number,
+  ): Promise<'ok' | 'cancel' | 'hard_cancel' | 'stale'> {
+    // A hung server must count as a failed beat, or a stick cut off from it never fences itself.
+    const res = await this.req(
+      `/api/drops/${dropId}/heartbeat`,
+      { epoch },
+      true,
+      AbortSignal.timeout(this.opts.heartbeatTimeoutMs ?? HEARTBEAT_TIMEOUT_MS),
+    );
     if (res.status === 409) return 'stale';
     if (!res.ok) throw new Error(`heartbeat failed: ${res.status}`);
-    const out = (await res.json()) as { cancel: boolean };
-    return out.cancel ? 'cancel' : 'ok';
+    const out = (await res.json()) as { cancel: boolean; hard?: boolean };
+    if (!out.cancel) return 'ok';
+    return out.hard ? 'hard_cancel' : 'cancel';
+  }
+
+  async postArtifact(dropId: string, epoch: number, artifact: ArtifactUpload): Promise<Ack> {
+    const res = await this.req(`/api/drops/${dropId}/artifacts`, { epoch, ...artifact });
+    if (res.status === 409) return 'stale';
+    if (!res.ok) throw new Error(`artifact upload failed: ${res.status}`);
+    return 'ok';
   }
 
   async postEvents(dropId: string, epoch: number, events: TrooperEvent[]): Promise<Ack> {

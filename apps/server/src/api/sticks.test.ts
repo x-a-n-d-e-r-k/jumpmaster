@@ -50,6 +50,9 @@ const config: Config = {
       retryLabel: 'agent-retry',
       mergeMethod: 'squash',
       requireBranchProtection: true,
+      services: [],
+      verification: [],
+      limits: { pids: 512 },
     },
   ],
   usage: { throttleUtilization: 0.9, probeJitterSeconds: [30, 90] },
@@ -58,6 +61,7 @@ const config: Config = {
     githubAuthorToken: 'gh-secret',
     githubReviewerToken: 'gh-reviewer',
     joinToken: 'join-me',
+    operatorToken: 'o'.repeat(32),
   },
 };
 
@@ -245,7 +249,7 @@ describe('stick API', () => {
       });
     const ok = await hb(a.stickToken, 1);
     expect(ok.statusCode).toBe(200);
-    expect(ok.json()).toEqual({ cancel: false });
+    expect(ok.json()).toEqual({ cancel: false, hard: false });
     expect(getDrop(db, 'd1')?.state).toBe('running');
     expect((await hb(a.stickToken, 2)).statusCode).toBe(409);
     expect((await hb(b.stickToken, 1)).statusCode).toBe(409);

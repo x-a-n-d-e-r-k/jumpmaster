@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
 import { type Config, loadConfig, secretList } from './config.js';
 import { openDb } from './db/open.js';
+import { ensureZoneMode } from './db/repo.js';
 import { reconcileZone } from './flow/reconcile.js';
 import { leaseExpirer } from './leases.js';
 import { type ForgePair, markPendingUnknown, pairFor } from './outbox.js';
@@ -14,10 +15,7 @@ const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : S
 
 /** Redacts configured secrets from a message before it is logged. */
 function scrub(msg: string, config: Config): string {
-  return Object.values(config.secrets).reduce(
-    (m, s) => (s ? m.split(s).join('[redacted]') : m),
-    msg,
-  );
+  return secretList(config.secrets).reduce((m, s) => m.split(s).join('[redacted]'), msg);
 }
 
 export async function start(configPath: string, env: NodeJS.ProcessEnv = process.env) {
@@ -26,6 +24,7 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
   const db = openDb(join(config.dataDir, 'jumpmaster.sqlite'));
   // A write in flight when the process died has an unknown outcome: resolve it by read-back.
   markPendingUnknown(db, new Date());
+  for (const zone of config.dropZones) ensureZoneMode(db, zone.id, zone.mode, new Date());
 
   const forges = new Map(
     config.dropZones.map((zone) => {

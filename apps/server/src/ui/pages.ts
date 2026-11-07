@@ -1,7 +1,9 @@
+import type { ArtifactRow } from '../artifacts.js';
 import type { DropZoneConfig } from '../config.js';
 import type {
   AttemptKey,
   Drop,
+  Observation,
   OutboxRow,
   StoredEvent,
   UsageStateRow,
@@ -23,6 +25,9 @@ export interface RateLimitSeen extends StoredEvent {
 
 export interface HomeState {
   zones: DropZoneConfig[];
+  /** Each zone's current mode; absent means active. */
+  modes?: Record<string, string>;
+  killed?: boolean;
   items: WorkItem[];
   drops: Drop[];
   lastRateLimit?: RateLimitSeen;
@@ -41,6 +46,15 @@ export interface ItemDetail {
 }
 
 const pct = (v: number | null): string => (v === null ? '-' : `${Math.round(v * 100)}%`);
+
+/** The kill control. The token field keeps a page visit from being able to trigger it. */
+function killSection(killed: boolean): string {
+  const notice = killed
+    ? '<p><strong>The kill switch is engaged.</strong> No work runs and no forge writes happen. Forge and Claude tokens stay valid until you revoke them with their providers.</p>'
+    : '';
+  const label = killed ? 'Reset kill switch' : 'Engage kill switch';
+  return `<h2>Kill switch</h2>${notice}<form id="kill"><input id="kill-token" type="password" placeholder="Operator token" autocomplete="off" required> <button>${label}</button></form><script>document.getElementById('kill').addEventListener('submit',async(e)=>{e.preventDefault();const r=await fetch('/api/control/kill',{method:'POST',headers:{authorization:'Bearer '+document.getElementById('kill-token').value,'content-type':'application/json'},body:JSON.stringify({engaged:${killed ? 'false' : 'true'}})});if(r.ok)location.reload();else alert('Refused: '+r.status);});</script>`;
+}
 
 function usageSection(u: HomeState['usage']): string {
   if (!u) return '';
@@ -127,7 +141,7 @@ export function renderHome(state: HomeState): string {
   const zones = state.zones
     .map(
       (z) =>
-        `<tr><td>${escapeHtml(z.id)}</td><td>${escapeHtml(z.repo)}</td><td>${escapeHtml(z.readyLabel)}</td><td>${escapeHtml(z.model)}</td></tr>`,
+        `<tr><td>${escapeHtml(z.id)}</td><td>${escapeHtml(z.repo)}</td><td>${escapeHtml(z.readyLabel)}</td><td>${escapeHtml(z.model)}</td><td>${escapeHtml(state.modes?.[z.id] ?? 'active')}</td></tr>`,
     )
     .join('');
 
@@ -154,8 +168,9 @@ export function renderHome(state: HomeState): string {
     : '<p>None seen.</p>';
 
   return page(
-    usageSection(state.usage) +
-      `<h2>Drop zones</h2><table><tr><th>Id</th><th>Repo</th><th>Label</th><th>Model</th></tr>${zones}</table>` +
+    killSection(state.killed ?? false) +
+      usageSection(state.usage) +
+      `<h2>Drop zones</h2><table><tr><th>Id</th><th>Repo</th><th>Label</th><th>Model</th><th>Mode</th></tr>${zones}</table>` +
       `<h2>Work items</h2><table><tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>${items}</table>` +
       `<h2>Drops</h2><table><tr><th>Drop</th><th>Issue</th><th>Role</th><th>State</th><th>Elapsed</th><th>Gates</th></tr>${drops}</table>` +
       outboxSection(state.outbox) +
@@ -163,7 +178,22 @@ export function renderHome(state: HomeState): string {
   );
 }
 
-export function renderDrop(drop: Drop, events: StoredEvent[]): string {
+function artifactsSection(artifacts: ArtifactRow[]): string {
+  if (artifacts.length === 0) return '';
+  const rows = artifacts
+    .map(
+      (a) =>
+        `<tr><td>${escapeHtml(a.rule)}</td><td><a href="/artifacts/${a.id}">${escapeHtml(a.name)}</a></td><td>${escapeHtml(a.mediaType)}</td><td>${a.bytes}</td></tr>`,
+    )
+    .join('');
+  return `<h2>Artifacts</h2><table><tr><th>Rule</th><th>Name</th><th>Type</th><th>Bytes</th></tr>${rows}</table>`;
+}
+
+export function renderDrop(
+  drop: Drop,
+  events: StoredEvent[],
+  artifacts: ArtifactRow[] = [],
+): string {
   const rows = events
     .map(
       (e) =>
@@ -172,6 +202,20 @@ export function renderDrop(drop: Drop, events: StoredEvent[]): string {
     .join('');
   return page(
     `<p><a href="/">Back</a></p><h2>Drop ${escapeHtml(drop.id)}</h2><p>State: ${escapeHtml(drop.state)}</p>` +
-      `<table><tr><th>Seq</th><th>Time</th><th>Kind</th><th>Data</th></tr>${rows}</table>`,
+      `<table><tr><th>Seq</th><th>Time</th><th>Kind</th><th>Data</th></tr>${rows}</table>` +
+      artifactsSection(artifacts),
+  );
+}
+
+/** Observe mode's would-do list, newest first. */
+export function renderObservations(rows: Observation[]): string {
+  const body = rows
+    .map(
+      (o) =>
+        `<tr><td>${escapeHtml(o.zoneId)}</td><td>${escapeHtml(o.itemId ?? '')}</td><td>${escapeHtml(o.action)}</td><td>${escapeHtml(o.detail)}</td><td>${o.count}</td><td>${escapeHtml(o.firstAt)}</td><td>${escapeHtml(o.lastAt)}</td></tr>`,
+    )
+    .join('');
+  return page(
+    `<h2>Observations</h2><table><tr><th>Zone</th><th>Item</th><th>Would do</th><th>Detail</th><th>Count</th><th>First</th><th>Last</th></tr>${body}</table>`,
   );
 }

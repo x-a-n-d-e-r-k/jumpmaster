@@ -3,13 +3,20 @@ import type { Db } from './db/open.js';
 import {
   getOutbox,
   insertOutbox,
+  isKilled,
   listOutbox,
   type OutboxRow,
   type OutboxState,
   resetDoneOutbox,
   updateOutbox,
 } from './db/repo.js';
-import { type Forge, type ForgeError, GitHubForge, isRateLimited } from './forge/github.js';
+import {
+  type Forge,
+  type ForgeError,
+  GitHubForge,
+  isRateLimited,
+  type PullFacts,
+} from './forge/github.js';
 
 /** One zone's forge identities: `author` creates PRs and merges, `reviewer` only posts reviews. */
 export type ForgePair = {
@@ -33,7 +40,14 @@ export function pairFor(
 export type OpKind = OutboxRow['kind'];
 export type OpResult = { state: OutboxState; result?: unknown; error?: string };
 
-export type CreatePrPayload = { head: string; base: string; title: string; body: string };
+export type CreatePrPayload = {
+  head: string;
+  base: string;
+  title: string;
+  body: string;
+  /** Open PRs on this head to accept without the server's marker. */
+  adoptPulls?: number[];
+};
 export type PostReviewPayload = {
   pr: number;
   event: 'APPROVE' | 'REQUEST_CHANGES';
@@ -66,13 +80,27 @@ const withMarker = (body: string, opKey: string): string =>
 const isOwnPr = (body: string, opKey: string): boolean =>
   isServerPrBody(body, Number(opKey.split(':')[1]));
 
+/** Marked by the server, or listed by the operator and written by the author account. */
+async function ours(
+  forges: ForgePair,
+  pr: PullFacts,
+  opKey: string,
+  p: CreatePrPayload,
+): Promise<boolean> {
+  if (isOwnPr(pr.body, opKey)) return true;
+  if (!(p.adoptPulls ?? []).includes(pr.number)) return false;
+  return pr.author === (await forges.author.viewerLogin());
+}
+
 /** Read-back: the op's result if its effect is visible on the forge, else `null`. */
 async function lookup(forges: ForgePair, kind: OpKind, opKey: string, payload: unknown) {
   switch (kind) {
     case 'create_pr': {
       const p = payload as CreatePrPayload;
       const pr = await forges.author.findOpenPullByHead(p.head);
-      return pr && isOwnPr(pr.body, opKey) ? { number: pr.number, created: false } : null;
+      return pr && (await ours(forges, pr, opKey, p))
+        ? { number: pr.number, created: false }
+        : null;
     }
     case 'post_review': {
       const p = payload as PostReviewPayload;
@@ -93,13 +121,14 @@ async function write(forges: ForgePair, kind: OpKind, opKey: string, payload: un
       const p = payload as CreatePrPayload;
       // Never take over a PR someone opened by hand on the agent branch: it would get merged.
       const open = await forges.author.findOpenPullByHead(p.head);
-      if (open && !isOwnPr(open.body, opKey)) {
+      if (open && !(await ours(forges, open, opKey, p))) {
         // A 4xx status makes this a failed op, so the item parks with a reason instead of waiting.
         throw Object.assign(new Error(`hand-opened PR on agent branch: #${open.number}`), {
           status: 409,
         });
       }
-      return forges.author.findOrCreatePullRequest({ ...p, body: withMarker(p.body, opKey) });
+      const { adoptPulls: _listed, ...input } = p;
+      return forges.author.findOrCreatePullRequest({ ...input, body: withMarker(p.body, opKey) });
     }
     case 'post_review': {
       const p = payload as PostReviewPayload;
@@ -204,8 +233,23 @@ async function fromExisting(
   }
 }
 
+function zoneModeOfItem(db: Db, itemId: number): string | undefined {
+  const row = db
+    .prepare(
+      `SELECT c.mode FROM work_items w JOIN zone_controls c ON c.zone_id = w.drop_zone_id
+         WHERE w.id = ?`,
+    )
+    .get(itemId) as { mode: string } | undefined;
+  return row?.mode;
+}
+
 /** Runs one forge write at most once per `opKey` (§5.2). */
 export async function runOp(db: Db, forges: ForgePair, op: Op, now: Date): Promise<OpResult> {
+  if (isKilled(db)) throw new Error(`kill switch engaged: forge write ${op.kind} refused`);
+  // Before any insert: a row left behind would later become `unknown` and park the item.
+  if (zoneModeOfItem(db, op.itemId) === 'observe') {
+    throw new Error(`observe mode: forge write ${op.kind} suppressed`);
+  }
   const existing = getOutbox(db, op.opKey);
   if (existing) return fromExisting(db, forges, op, existing, now);
   const inserted = insertOutbox(db, {

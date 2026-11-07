@@ -2,13 +2,14 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { loadConfig, modelFor, secretList } from './config.js';
+import { loadConfig, modelFor, secretList, zoneSecrets } from './config.js';
 
 const fullEnv: Record<string, string | undefined> = {
   JM_CLAUDE_TOKEN: 'a',
   JM_GITHUB_AUTHOR_TOKEN: 'b',
   JM_GITHUB_REVIEWER_TOKEN: 'r',
   JM_JOIN_TOKEN: 'c',
+  JM_OPERATOR_TOKEN: 'o'.repeat(32),
 };
 
 function fixture(json: unknown): string {
@@ -58,7 +59,7 @@ describe('loadConfig', () => {
 
   test('applies defaults', () => {
     const c = loadConfig(minimal, fullEnv);
-    expect(c.listen).toEqual({ host: '127.0.0.1', port: 7420 });
+    expect(c.listen).toMatchObject({ host: '127.0.0.1', port: 7420 });
     expect(c.pollSeconds).toBe(60);
     expect(c.dropZones[0]).toMatchObject({
       readyLabel: 'agent-ready',
@@ -67,6 +68,7 @@ describe('loadConfig', () => {
     });
     expect(c.dropZones[0]?.gates[0]?.timeoutMinutes).toBe(20);
     expect(c.secrets).toEqual({
+      operatorToken: 'o'.repeat(32),
       claudeToken: 'a',
       githubAuthorToken: 'b',
       githubReviewerToken: 'r',
@@ -86,10 +88,100 @@ describe('loadConfig', () => {
     expect(() => loadConfig(bad, fullEnv)).toThrow(/repo/);
   });
 
+  test('the operator token is required, long, and unique', () => {
+    expect(() => loadConfig(minimal, { ...fullEnv, JM_OPERATOR_TOKEN: undefined })).toThrow(
+      /JM_OPERATOR_TOKEN/,
+    );
+    expect(() => loadConfig(minimal, { ...fullEnv, JM_OPERATOR_TOKEN: 'short' })).toThrow(
+      /at least 32/,
+    );
+    const same = 'x'.repeat(32);
+    expect(() =>
+      loadConfig(minimal, { ...fullEnv, JM_OPERATOR_TOKEN: same, JM_JOIN_TOKEN: same }),
+    ).toThrow(/must differ/);
+  });
+
+  test('allowed hosts default to loopback on the listen port', () => {
+    expect(loadConfig(minimal, fullEnv).listen.allowedHosts).toEqual([
+      '127.0.0.1:7420',
+      'localhost:7420',
+    ]);
+  });
+
+  test('a zone mode defaults to active', () =>
+    expect(loadConfig(minimal, fullEnv).dropZones[0]?.mode).toBe('active'));
+
   test('reviewer token is required', () =>
     expect(() => loadConfig(minimal, { ...fullEnv, JM_GITHUB_REVIEWER_TOKEN: undefined })).toThrow(
       /JM_GITHUB_REVIEWER_TOKEN/,
     ));
+
+  describe('services and limits', () => {
+    test('default to none and the 512 process limit', () =>
+      expect(loadConfig(minimal, fullEnv).dropZones[0]).toMatchObject({
+        services: [],
+        limits: { pids: 512 },
+      }));
+
+    test('a service name that is not a DNS label is refused', () =>
+      expect(() =>
+        loadConfig(withZone({ services: [{ name: 'Bad_Name', image: 'i', port: 1 }] }), fullEnv),
+      ).toThrow(/services/));
+
+    test('duplicate service names are refused', () =>
+      expect(() =>
+        loadConfig(
+          withZone({
+            services: [
+              { name: 'db', image: 'i', port: 1 },
+              { name: 'db', image: 'j', port: 2 },
+            ],
+          }),
+          fullEnv,
+        ),
+      ).toThrow(/duplicate service/));
+  });
+
+  describe('gateSecrets', () => {
+    const declared = () => withZone({ gateSecrets: ['TEST_DB_URL'] });
+    const value = { JM_ZONE_SECRET_MAIN_TEST_DB_URL: 'postgres://local/test' };
+
+    test('a declared secret with no env value stops the server at startup', () =>
+      expect(() => loadConfig(declared(), fullEnv)).toThrow(/JM_ZONE_SECRET_MAIN_TEST_DB_URL/));
+
+    test('a value under 8 characters is refused', () =>
+      expect(() =>
+        loadConfig(declared(), { ...fullEnv, JM_ZONE_SECRET_MAIN_TEST_DB_URL: 'short' }),
+      ).toThrow(/at least 8/));
+
+    test.each([
+      'GH_TOKEN',
+      'GITHUB_TOKEN',
+      'CLAUDE_X',
+      'GIT_DIR',
+      'JM_X',
+      'PATH',
+      'HOME',
+      'LD_PRELOAD',
+      'NODE_OPTIONS',
+      'lower',
+    ])('the name %s is refused', (name) =>
+      expect(() => loadConfig(withZone({ gateSecrets: [name] }), fullEnv)).toThrow(
+        /gate secret name/,
+      ),
+    );
+
+    test('values reach zoneSecrets and the redaction list', () => {
+      const c = loadConfig(declared(), { ...fullEnv, ...value });
+      expect(zoneSecrets(c, 'main')).toEqual({ TEST_DB_URL: 'postgres://local/test' });
+      expect(secretList(c.secrets)).toContain('postgres://local/test');
+    });
+
+    test('a zone id with punctuation maps to an underscored variable', () => {
+      const file = withZone({ id: 'my-zone', gateSecrets: ['A_B'] });
+      expect(() => loadConfig(file, fullEnv)).toThrow(/JM_ZONE_SECRET_MY_ZONE_A_B/);
+    });
+  });
 
   describe('authorMayBeAdmin', () => {
     const optedIn = () => withZone({ authorMayBeAdmin: true });
@@ -159,7 +251,7 @@ describe('loadConfig', () => {
 
   test('secretList omits an absent read token', () => {
     const c = loadConfig(minimal, fullEnv);
-    expect(secretList(c.secrets).sort()).toEqual(['a', 'b', 'c', 'r']);
+    expect(secretList(c.secrets).sort()).toEqual(['a', 'b', 'c', 'o'.repeat(32), 'r'].sort());
     expect(secretList({ ...c.secrets, githubReadToken: 'rd' })).toContain('rd');
   });
 });

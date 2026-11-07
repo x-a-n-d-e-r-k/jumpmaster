@@ -1,7 +1,8 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { DropResultSchema, TrooperEventSchema } from '@jumpmaster/protocol';
+import { ArtifactUploadSchema, DropResultSchema, TrooperEventSchema } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import { storeArtifact } from '../artifacts.js';
 import { type Config, secretList } from '../config.js';
 import type { Db } from '../db/open.js';
 import {
@@ -18,6 +19,8 @@ import type { ForgePair } from '../outbox.js';
 import { buildPayload } from '../payloads.js';
 import { applyResult } from '../results.js';
 import { dispatchGate, ingestRateLimit, rateLimitFromEvent } from '../usage.js';
+
+const ArtifactBody = ArtifactUploadSchema.extend({ epoch: z.number() });
 
 export interface StickRouteDeps {
   db: Db;
@@ -145,8 +148,28 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       if (!body.success) return reply.code(400).send({ error: 'invalid body' });
       const out = heartbeat(db, req.params.id, stick.id, body.data.epoch, now());
       if (out === 'stale') return reply.code(409).send({ error: 'stale' });
-      return { cancel: out === 'cancel' };
+      return { cancel: out !== 'ok', hard: out === 'hard_cancel' };
     });
+
+    scope.post<{ Params: { id: string } }>(
+      '/api/drops/:id/artifacts',
+      { bodyLimit: 8 * 1024 * 1024 },
+      async (req, reply) => {
+        const body = ArtifactBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: 'invalid body' });
+        const drop = liveDrop(req, reply, req.params.id, body.data.epoch, { requireLive: true });
+        if (!drop) return reply;
+        const bytes = Buffer.from(body.data.dataBase64, 'base64');
+        const hash = createHash('sha256').update(bytes).digest('hex');
+        if (hash !== body.data.sha256) return reply.code(400).send({ error: 'hash mismatch' });
+        try {
+          storeArtifact(db, config.dataDir, drop.id, { ...body.data, bytes });
+        } catch (e) {
+          return reply.code(400).send({ error: e instanceof Error ? e.message : 'refused' });
+        }
+        return reply.code(204).send();
+      },
+    );
 
     scope.post<{ Params: { id: string } }>('/api/drops/:id/events', async (req, reply) => {
       const body = EventsBody.safeParse(req.body);

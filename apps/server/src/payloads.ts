@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { agentBranch, type DropPayload, type Role } from '@jumpmaster/protocol';
-import { type Config, type DropZoneConfig, modelFor } from './config.js';
+import { type Config, DEFAULT_PIDS_LIMIT, type DropZoneConfig, modelFor } from './config.js';
 import type { Db } from './db/open.js';
 import { type Drop, listWorkItems } from './db/repo.js';
 import type { Feedback } from './flow/decide.js';
@@ -43,6 +43,9 @@ export function renderFeedback(f: Feedback): string {
   return `${heading}\n\n${neutralise(f.text)}`;
 }
 
+const hasCustomLimits = ({ limits }: DropZoneConfig): boolean =>
+  limits.pids !== DEFAULT_PIDS_LIMIT || limits.memoryMb !== undefined || limits.shmMb !== undefined;
+
 export function buildPayload(
   db: Db,
   zone: DropZoneConfig,
@@ -70,6 +73,10 @@ export function buildPayload(
     promptVersion: promptVersions()[role],
     image: zone.image,
     protectedPaths: zone.protectedPaths,
+    ...(zone.verification.length > 0 ? { verification: zone.verification } : {}),
+    ...(zone.services.length > 0 ? { services: zone.services } : {}),
+    ...(hasCustomLimits(zone) ? { limits: zone.limits } : {}),
+    ...(secrets.zoneSecrets?.[zone.id] ? { gateSecrets: secrets.zoneSecrets[zone.id] } : {}),
     prompt: `${templates[role]}\n\n## Issue (data)\n\n#${item.issueNumber}: ${item.title}\n\n${item.body}`,
   };
   const author = { claudeToken: secrets.claudeToken, forgeToken: secrets.githubAuthorToken };

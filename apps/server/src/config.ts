@@ -1,6 +1,14 @@
 import { readFileSync } from 'node:fs';
-import { GateSpecSchema, type Role, RoleSchema } from '@jumpmaster/protocol';
+import {
+  ContainerLimitsSchema,
+  GateSpecSchema,
+  type Role,
+  RoleSchema,
+  ServiceSpecSchema,
+  VerificationSpecSchema,
+} from '@jumpmaster/protocol';
 import { z } from 'zod';
+import { ZONE_MODES } from './db/repo.js';
 
 export const DEFAULT_PROTECTED_PATHS = [
   '.github/**',
@@ -22,11 +30,35 @@ export const DEFAULT_PROTECTED_PATHS = [
   'babel.config.*',
 ];
 
+export const DEFAULT_PIDS_LIMIT = 512;
+
 const DropZoneSchema = z.object({
   id: z.string().min(1),
   repo: z.string().regex(/^[^/\s]+\/[^/\s]+$/, 'repo must be "owner/name"'),
   readyLabel: z.string().default('agent-ready'),
   gates: z.array(GateSpecSchema),
+  services: z
+    .array(ServiceSpecSchema)
+    .default([])
+    .superRefine((list, ctx) => {
+      const names = list.map((s) => s.name);
+      const repeated = names.find((n, i) => names.indexOf(n) !== i);
+      if (repeated) ctx.addIssue({ code: 'custom', message: `duplicate service: ${repeated}` });
+    }),
+  verification: z.array(VerificationSpecSchema).default([]),
+  limits: ContainerLimitsSchema.default({ pids: DEFAULT_PIDS_LIMIT }),
+  /**
+   * Open agent PRs to take over at cutover, even without the server's marker. Listed by number
+   * because a person may author both these and hand-opened PRs, so the login can't tell them apart.
+   */
+  adoptPulls: z.array(z.number().int().positive()).default([]),
+  maxConcurrentImplement: z.number().int().positive().default(1),
+  /** How long an unresolved forge write may stay unknown; defaults to ciDeadlineMinutes. */
+  outboxDeadlineMinutes: z.number().positive().optional(),
+  /** Names of secrets for gate steps; values come from JM_ZONE_SECRET_<ZONE>_<NAME>. */
+  gateSecrets: z.array(z.string()).default([]),
+  /** The starting mode, used only until an operator stores one. */
+  mode: z.enum(ZONE_MODES).default('active'),
   image: z.string().min(1),
   model: z.string().default('claude-opus-5-5'),
   maxTurns: z.number().int().positive().default(200),
@@ -64,7 +96,12 @@ const DropZoneSchema = z.object({
 
 const FileSchema = z.object({
   listen: z
-    .object({ host: z.string().default('127.0.0.1'), port: z.number().int().default(7420) })
+    .object({
+      host: z.string().default('127.0.0.1'),
+      port: z.number().int().default(7420),
+      /** Accepted Host and Origin values for control routes; defaults to loopback on the port. */
+      allowedHosts: z.array(z.string()).optional(),
+    })
     .default({ host: '127.0.0.1', port: 7420 }),
   dataDir: z.string().min(1),
   pollSeconds: z.number().positive().default(60),
@@ -83,7 +120,7 @@ export type DropZoneConfig = z.infer<typeof DropZoneSchema>;
 export type Budgets = DropZoneConfig['budgets'];
 
 export interface Config {
-  listen: { host: string; port: number };
+  listen: { host: string; port: number; allowedHosts?: string[] };
   dataDir: string;
   pollSeconds: number;
   dropZones: DropZoneConfig[];
@@ -94,6 +131,9 @@ export interface Config {
     githubReviewerToken: string;
     githubReadToken?: string;
     joinToken: string;
+    operatorToken: string;
+    /** Per-zone values for gate steps only. Any PR's gate code can read them. */
+    zoneSecrets?: Record<string, Record<string, string>>;
   };
 }
 
@@ -104,9 +144,60 @@ export function modelFor(zone: DropZoneConfig, role: Role): string {
   return zone.models[role] ?? zone.model;
 }
 
+/** Host and Origin values the operator's browser may use; defaults to loopback on the port. */
+export function allowedHostsOf(config: Pick<Config, 'listen'>): string[] {
+  const { port, allowedHosts } = config.listen;
+  return allowedHosts ?? [`127.0.0.1:${port}`, `localhost:${port}`];
+}
+
 /** Every non-empty secret value, for redaction. */
 export function secretList(secrets: Config['secrets']): string[] {
-  return Object.values(secrets).filter((v): v is string => typeof v === 'string' && v !== '');
+  const { zoneSecrets, ...tokens } = secrets;
+  return [
+    ...Object.values(tokens).filter((v): v is string => typeof v === 'string' && v !== ''),
+    ...Object.values(zoneSecrets ?? {}).flatMap((zone) => Object.values(zone)),
+  ];
+}
+
+/** The gate secrets declared for a zone. */
+export function zoneSecrets(
+  config: Pick<Config, 'secrets'>,
+  zoneId: string,
+): Record<string, string> {
+  return config.secrets.zoneSecrets?.[zoneId] ?? {};
+}
+
+const GATE_SECRET_NAME = /^[A-Z][A-Z0-9_]*$/;
+const RESERVED_NAME =
+  /^(GH_TOKEN|GITHUB_TOKEN|PATH|HOME|USER|SHELL|NODE_OPTIONS|NODE_PATH|(GIT|CLAUDE|ANTHROPIC|JM|LD|DYLD)_.*)$/;
+const MIN_SECRET_LENGTH = 8; // Shorter values can't be redacted without mangling ordinary output.
+
+const zoneSecretVar = (zoneId: string, name: string): string =>
+  `JM_ZONE_SECRET_${zoneId.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_${name}`;
+
+function loadZoneSecrets(
+  zones: { id: string; gateSecrets: string[] }[],
+  env: NodeJS.ProcessEnv,
+): Record<string, Record<string, string>> {
+  const out: Record<string, Record<string, string>> = {};
+  for (const zone of zones) {
+    if (zone.gateSecrets.length === 0) continue;
+    const values: Record<string, string> = {};
+    for (const name of zone.gateSecrets) {
+      if (!GATE_SECRET_NAME.test(name) || RESERVED_NAME.test(name)) {
+        throw new Error(`Invalid gate secret name: ${name}`);
+      }
+      const variable = zoneSecretVar(zone.id, name);
+      const value = env[variable];
+      if (!value) throw new Error(`Missing required environment variables: ${variable}`);
+      if (value.length < MIN_SECRET_LENGTH) {
+        throw new Error(`${variable} must be at least ${MIN_SECRET_LENGTH} characters`);
+      }
+      values[name] = value;
+    }
+    out[zone.id] = values;
+  }
+  return out;
 }
 
 const SECRET_VARS = {
@@ -114,6 +205,7 @@ const SECRET_VARS = {
   githubAuthorToken: 'JM_GITHUB_AUTHOR_TOKEN',
   githubReviewerToken: 'JM_GITHUB_REVIEWER_TOKEN',
   joinToken: 'JM_JOIN_TOKEN',
+  operatorToken: 'JM_OPERATOR_TOKEN',
 } as const;
 
 export function loadConfig(path: string, env: NodeJS.ProcessEnv): Config {
@@ -133,18 +225,37 @@ export function loadConfig(path: string, env: NodeJS.ProcessEnv): Config {
     !env[SECRET_VARS.githubAuthorToken]?.startsWith('github_pat_')
   )
     throw new Error('authorMayBeAdmin requires a fine-grained JM_GITHUB_AUTHOR_TOKEN');
+  const operatorToken = env[SECRET_VARS.operatorToken] as string;
+  if (operatorToken.length < 32)
+    throw new Error('JM_OPERATOR_TOKEN must be at least 32 characters');
+  const others = Object.values(SECRET_VARS)
+    .filter((name) => name !== SECRET_VARS.operatorToken)
+    .map((name) => env[name]);
+  if (others.includes(operatorToken))
+    throw new Error('JM_OPERATOR_TOKEN must differ from every other token');
   const readToken = env.JM_GITHUB_READ_TOKEN;
   const needsRead = parsed.data.dropZones.filter((z) => z.reviewReadToken).map((z) => z.id);
   if (needsRead.length > 0 && !readToken)
     throw new Error(
       `JM_GITHUB_READ_TOKEN is required because reviewReadToken is true for zone(s): ${needsRead.join(', ')}`,
     );
+  const zones = loadZoneSecrets(parsed.data.dropZones, env);
   const secrets: Config['secrets'] = {
     claudeToken: env[SECRET_VARS.claudeToken] as string,
     githubAuthorToken: env[SECRET_VARS.githubAuthorToken] as string,
     githubReviewerToken: env[SECRET_VARS.githubReviewerToken] as string,
     joinToken: env[SECRET_VARS.joinToken] as string,
+    operatorToken,
     ...(readToken ? { githubReadToken: readToken } : {}),
+    ...(Object.keys(zones).length > 0 ? { zoneSecrets: zones } : {}),
   };
-  return { ...parsed.data, secrets };
+  const { listen } = parsed.data;
+  return {
+    ...parsed.data,
+    listen: {
+      ...listen,
+      allowedHosts: listen.allowedHosts ?? [`127.0.0.1:${listen.port}`, `localhost:${listen.port}`],
+    },
+    secrets,
+  };
 }

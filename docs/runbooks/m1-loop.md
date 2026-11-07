@@ -9,7 +9,11 @@ environment-variable handling are the same; this runbook lists only what changes
 
 ## Prerequisites
 
+To move a real project, also read the [M2 cutover runbook](m2-cutover.md).
+
 Everything from M0, plus:
+
+- **`JM_OPERATOR_TOKEN`**, any secret of at least 32 characters, for the [control routes](m2-cutover.md#controls).
 
 - **A second bot account (the reviewer).** Add it to the test repository as a
   collaborator with write access. Accept the invitation from that account.
@@ -202,7 +206,7 @@ budget; the **Outbox** section lists any forge write that is `unknown` or `faile
 
 Revoke all fine-grained tokens and remove the reviewer bot's collaborator access when
 you are done. Then run `unset JM_CLAUDE_TOKEN JM_GITHUB_AUTHOR_TOKEN
-JM_GITHUB_REVIEWER_TOKEN JM_GITHUB_READ_TOKEN JM_JOIN_TOKEN`.
+JM_GITHUB_REVIEWER_TOKEN JM_GITHUB_READ_TOKEN JM_JOIN_TOKEN JM_OPERATOR_TOKEN`.
 
 ## Security notes
 

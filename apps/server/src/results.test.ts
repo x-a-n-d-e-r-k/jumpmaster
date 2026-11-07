@@ -25,6 +25,11 @@ import { fakeForgePair } from './test/fakes.js';
 import { plus, t0, tmpDbFile, workItem } from './test/helpers.js';
 
 const zone: DropZoneConfig = {
+  verification: [],
+  adoptPulls: [],
+  maxConcurrentImplement: 1,
+  services: [],
+  limits: { pids: 512 },
   id: 'main',
   repo: 'octo/demo',
   readyLabel: 'agent-ready',

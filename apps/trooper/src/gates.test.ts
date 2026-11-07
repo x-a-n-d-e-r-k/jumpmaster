@@ -51,6 +51,50 @@ test('scrubEnv drops every inherited GIT_* variable', () => {
   expect(out).toEqual({ PATH: '/bin', LEGIT_X: 'kept' });
 });
 
+test('extraEnv reaches the gate even when its value is a redacted secret', async () => {
+  const value = 'postgres://local/secret-value';
+  const [r] = await runGates(
+    [
+      {
+        name: 'e',
+        run: 'test "$TEST_DB_URL" = "postgres://local/secret-value" && test "$JM_SERVICE_DB_HOST" = db && echo "$TEST_DB_URL"',
+        timeoutMinutes: 1,
+      },
+    ],
+    {
+      cwd: tmp,
+      env: { PATH: process.env.PATH },
+      extraEnv: { TEST_DB_URL: value, JM_SERVICE_DB_HOST: 'db' },
+      secrets: [value],
+    },
+  );
+  expect(r?.exitCode).toBe(0);
+  expect(r?.outputTail).not.toContain(value);
+});
+
+test('a gate killed by the process limit reports that as the likely cause', async () => {
+  const [r] = await runGates(
+    [
+      {
+        name: 'p',
+        run: 'echo "fork: Resource temporarily unavailable" >&2; exit 1',
+        timeoutMinutes: 1,
+      },
+    ],
+    { cwd: tmp, env: { PATH: process.env.PATH }, secrets: [] },
+  );
+  expect(r?.outputTail).toMatch(/process limit.*limits\.pids/);
+});
+
+test('an ordinary failure gets no process-limit note', async () => {
+  const [r] = await runGates([{ name: 'p', run: 'echo nope; exit 1', timeoutMinutes: 1 }], {
+    cwd: tmp,
+    env: { PATH: process.env.PATH },
+    secrets: [],
+  });
+  expect(r?.outputTail).not.toMatch(/process limit/);
+});
+
 test('kills a gate past its timeout', async () => {
   const [r] = await runGates([{ name: 'hang', run: 'sleep 30', timeoutMinutes: 1 }], {
     cwd: tmp,

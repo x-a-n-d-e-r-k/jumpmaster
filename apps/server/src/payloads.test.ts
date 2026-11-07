@@ -14,6 +14,9 @@ const secrets: Config['secrets'] = {
 };
 
 const zone = {
+  services: [],
+  verification: [],
+  limits: { pids: 512 },
   id: 'main',
   repo: 'octo/demo',
   gates: [{ name: 'test', run: 'npm test', timeoutMinutes: 20 }],
@@ -119,6 +122,15 @@ describe('buildPayload', () => {
     const p = build(review);
     expect(p.promptVersion).toBe(promptVersions().review);
     expect(p.prompt).toMatch(/\n\n## Issue \(data\)\n\n#1: t\n\nb$/);
+  });
+});
+
+describe('gate secrets', () => {
+  test('a zone secret reaches the payload and only for its zone', () => {
+    const drop = impl;
+    const s = { ...secrets, zoneSecrets: { [zone.id]: { TEST_URL: 'postgres://x/y' } } };
+    expect(buildPayload(db, zone, drop, s).gateSecrets).toEqual({ TEST_URL: 'postgres://x/y' });
+    expect(buildPayload(db, zone, drop, secrets).gateSecrets).toBeUndefined();
   });
 });
 

@@ -27,6 +27,8 @@ export interface Harness {
   /** `syncDropZone` (which reads the zone pass once), then `reconcileZone` with that pass. */
   reconcile(): Promise<ReconcileReport>;
   queuedRoles(): Role[];
+  /** Headers for a stick route, enrolling on first use. */
+  stickHeaders(): Record<string, string>;
   /** Deletes all workflow rows and resets usage; the forge state is kept. */
   wipeDbKeepIssues(): void;
   lease(): Promise<{ dropId: string; epoch: number; payload: DropPayload }>;
@@ -36,7 +38,12 @@ export interface Harness {
 }
 
 export async function harness(
-  opts: { zone?: Partial<DropZoneConfig>; issues?: ForgeIssue[] } = {},
+  opts: {
+    zone?: Partial<DropZoneConfig>;
+    issues?: ForgeIssue[];
+    zoneSecrets?: Record<string, string>;
+    dataDir?: string;
+  } = {},
 ): Promise<Harness> {
   const db = openDb(tmpDbFile());
   const issues = opts.issues ?? [
@@ -53,8 +60,8 @@ export async function harness(
   const forges = { author: f.author, reviewer: f.reviewer };
   const zone = makeZone({ ciRequired: false, ...opts.zone });
   const config: Config = {
-    listen: { host: '127.0.0.1', port: 0 },
-    dataDir: '.',
+    listen: { host: '127.0.0.1', port: 0, allowedHosts: ['localhost:80'] },
+    dataDir: opts.dataDir ?? '.',
     pollSeconds: 60,
     dropZones: [zone],
     secrets: {
@@ -62,6 +69,8 @@ export async function harness(
       githubAuthorToken: 'author-token',
       githubReviewerToken: 'reviewer-token',
       joinToken: 'join',
+      operatorToken: 'o'.repeat(32),
+      ...(opts.zoneSecrets ? { zoneSecrets: { [zone.id]: opts.zoneSecrets } } : {}),
     },
     usage: usageCfg,
   };
@@ -102,6 +111,7 @@ export async function harness(
       const { pass } = await syncDropZone(db, forges, zone, clock);
       return reconcileZone(db, forges, zone, pass, promptVersions(), usageCfg, [], clock);
     },
+    stickHeaders: () => auth,
     queuedRoles() {
       return (
         db
