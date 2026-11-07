@@ -33,10 +33,12 @@ If you use a non-loopback address, list it in `listen.allowedHosts`, or control 
 
 ### Emergency stop
 
-The kill switch cancels every drop, hard-kills its container so nothing checkpoints or pushes,
-refuses all new work and survives a restart until you reset it. Three limits:
+The kill switch cancels every drop and refuses all new work, and it survives a restart until you
+reset it. The server's own PRs, reviews and merges stop immediately. Each stick hard-kills its
+container at its next heartbeat, so nothing checkpoints or pushes after that. Three limits:
 
-- **A push already under way can't be recalled.**
+- **A trooper keeps running for up to 15 seconds,** until that heartbeat, and a push it starts or
+  has under way in that window will land. It can't become a PR or a merge until you reset.
 - **Tokens stay valid.** Revoke them with GitHub and Anthropic if they may be compromised.
 - **A stick cut off from the server** kills its own drop after `JM_LOST_SERVER_KILL_BEATS` missed
   heartbeats (default 3, about 45 seconds).
