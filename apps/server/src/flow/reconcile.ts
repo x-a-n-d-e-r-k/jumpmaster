@@ -12,6 +12,7 @@ import {
   hasOpenCreatePr,
   insertDrop,
   isKilled,
+  listObservations,
   listWorkItems,
   recordObservation,
   setWorkItemState,
@@ -421,11 +422,15 @@ export async function reconcileZone(
       const detail = `blocked by ${i.blockedBy.join(', ')}`;
       recordObservation(db, zone.id, i.id, 'would_wait:blocked', detail, now);
     }
+    // Observe runs no drops, so every slot is free except those a resume would take this pass.
+    const resumes = listObservations(db, zone.id).filter(
+      (o) => o.action === 'would_enqueue:resume' && o.lastAt === now.toISOString(),
+    ).length;
+    const slots = Math.max(0, (zone.maxConcurrentImplement ?? 1) - resumes);
     const skip = (i: WorkItem) => !branchUnknown.has(i.id) && !isBlocked(i);
-    const top = rankItems(ready.filter(skip))[0];
-    if (top) {
-      const detail = `issue #${top.issueNumber}`;
-      recordObservation(db, zone.id, top.id, 'would_enqueue:implement', detail, now);
+    for (const pick of rankItems(ready.filter(skip)).slice(0, slots)) {
+      const detail = `issue #${pick.issueNumber}`;
+      recordObservation(db, zone.id, pick.id, 'would_enqueue:implement', detail, now);
     }
     return { actions, merges };
   }
