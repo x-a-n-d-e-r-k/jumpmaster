@@ -25,6 +25,23 @@ export const PrRefSchema = z.object({
 });
 export type PrRef = z.infer<typeof PrRefSchema>;
 
+/** A sidecar for gate steps, reachable by `name` on the drop's private network. */
+export const ServiceSpecSchema = z.object({
+  name: z.string().regex(/^[a-z][a-z0-9-]{0,30}$/, 'service name must be a DNS label'),
+  image: z.string().min(1),
+  port: z.number().int().min(1).max(65535),
+  env: z.record(z.string(), z.string()).optional(),
+  readyTimeoutSeconds: z.number().positive().default(60),
+});
+export type ServiceSpec = z.infer<typeof ServiceSpecSchema>;
+
+export const ContainerLimitsSchema = z.object({
+  pids: z.number().int().positive(),
+  memoryMb: z.number().int().positive().optional(),
+  shmMb: z.number().int().positive().optional(),
+});
+export type ContainerLimits = z.infer<typeof ContainerLimitsSchema>;
+
 const dropPayloadBase = {
   protocol: z.literal(1),
   dropId: z.string(),
@@ -43,6 +60,8 @@ const dropPayloadBase = {
   credentials: z.object({ claudeToken: z.string(), forgeToken: z.string().optional() }),
   /** Environment for gate steps only, never the agent. Redacted like every credential. */
   gateSecrets: z.record(z.string(), z.string()).optional(),
+  services: z.array(ServiceSpecSchema).optional(),
+  limits: ContainerLimitsSchema.optional(),
 };
 
 export const DropPayloadSchema = z.discriminatedUnion('role', [

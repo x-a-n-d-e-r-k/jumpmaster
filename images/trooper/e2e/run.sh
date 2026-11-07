@@ -44,4 +44,33 @@ const r = JSON.parse(process.argv[1].split("\n").find((l) => l.startsWith("JM_RE
 const ok = r.verdict?.decision === "request_changes" && /Permission denied/.test(r.gates[0]?.outputTail ?? "");
 console.log(ok ? "gate cannot read agent credentials: ok" : "FAIL: gate read agent credentials");
 process.exit(ok ? 0 : 1);' "$out"
+# A sidecar on an internal network, reached by name with the trooper on both networks.
+NET="jm-e2e-$$"
+SIDE="jm-e2e-side-$$"
+TROOPER=""
+cleanup() {
+  [ -z "$TROOPER" ] || docker rm -f "$TROOPER" >/dev/null 2>&1 || true
+  docker rm -f "$SIDE" >/dev/null 2>&1 || true
+  docker network rm "$NET" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+docker network create --internal "$NET" >/dev/null
+docker run -d --name "$SIDE" --network "$NET" --network-alias db --security-opt no-new-privileges \
+  --pids-limit 512 alpine:3.20 sh -c 'while true; do nc -l -p 5432 >/dev/null; done' >/dev/null
+gate='{"name":"svc","run":"test \"$JM_SERVICE_DB_HOST\" = db && test \"$JM_SERVICE_DB_PORT\" = 5432 && test \"$E2E_SECRET\" = e2e-secret-value && echo service-ok","timeoutMinutes":2}'
+extra='"services":[{"name":"db","image":"alpine:3.20","port":5432,"readyTimeoutSeconds":30}],"gateSecrets":{"E2E_SECRET":"e2e-secret-value"}'
+TROOPER="$(docker create -i --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add KILL \
+  --security-opt no-new-privileges --pids-limit 512 --ulimit core=0:0 jumpmaster-trooper:e2e)"
+docker network connect "$NET" "$TROOPER"
+out="$(payload "$gate" | node -e '
+const extra = JSON.parse("{" + process.argv[1] + "}");
+let t = ""; process.stdin.on("data", (d) => (t += d));
+process.stdin.on("end", () => process.stdout.write(JSON.stringify({ ...JSON.parse(t), ...extra })));
+' "$extra" | docker start -ai "$TROOPER" || true)"
+if grep -q e2e-secret-value <<<"$out"; then echo "FAIL: gate secret in output" >&2; exit 1; fi
+check '
+const r = JSON.parse(process.argv[1].split("\n").find((l) => l.startsWith("JM_RESULT ")).slice(10));
+const ok = r.gates[0]?.exitCode === 0 && /service-ok/.test(r.gates[0]?.outputTail);
+console.log(ok ? "sidecar reachable, gate secret delivered: ok" : "FAIL: " + JSON.stringify(r).slice(0, 400));
+process.exit(ok ? 0 : 1);' "$out"
 echo "e2e: pass"

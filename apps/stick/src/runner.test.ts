@@ -31,11 +31,16 @@ const payload: DropPayload = DropPayloadSchema.parse({
   credentials: { claudeToken: TOKEN, forgeToken: 'ghs_forge' },
 });
 
-function fakeDriver(lines: string[], opts: { hang?: boolean; exitCode?: number } = {}) {
+function fakeDriver(
+  lines: string[],
+  opts: { hang?: boolean; exitCode?: number; serviceError?: string } = {},
+) {
   const d = {
     started: undefined as Parameters<ContainerDriver['start']>[0] | undefined,
     stopped: false,
     killed: false,
+    services: undefined as unknown,
+    removedNetworks: [] as string[],
     stopGrace: 0,
     driver: {
       async start(o) {
@@ -68,6 +73,17 @@ function fakeDriver(lines: string[], opts: { hang?: boolean; exitCode?: number }
         return [];
       },
       async remove() {},
+      async startServices(dropId, epoch, services, labels) {
+        d.services = { dropId, epoch, names: services.map((s) => s.name), labels };
+        if (opts.serviceError) throw new Error(opts.serviceError);
+        return `jm-drop-${dropId}-${epoch}`;
+      },
+      async removeServices(network) {
+        d.removedNetworks.push(network);
+      },
+      async removeNetworksByLabel() {
+        return 0;
+      },
     } satisfies ContainerDriver,
   };
   return d;
@@ -166,6 +182,88 @@ describe('image allow-list', () => {
       new Set(['mine:2', 'jumpmaster-trooper:dev']),
     );
     expect(allowedImages({ JM_ALLOWED_IMAGES: ' a:1 ,b:2,, ' })).toEqual(new Set(['a:1', 'b:2']));
+  });
+});
+
+describe('runDrop with services', () => {
+  const withDb: DropPayload = {
+    ...payload,
+    image: 'trooper',
+    services: [{ name: 'db', image: 'postgres:16', port: 5432, readyTimeoutSeconds: 60 }],
+  };
+  const allowed = new Set(['trooper', 'postgres:16']);
+  const done = 'JM_RESULT {"status":"completed","headSha":"a","gates":[]}';
+
+  test('a service image off the allow-list fails the drop before any container starts', async () => {
+    const d = fakeDriver([done]);
+    const client = fakeClient();
+    await runDrop(withDb, {
+      client,
+      driver: d.driver,
+      stickId: 's1',
+      allowedImages: new Set(['trooper']),
+    });
+    expect(d.services).toBeUndefined();
+    expect(d.started).toBeUndefined();
+    expect(client.result).toMatchObject({
+      status: 'failed',
+      reason: 'image not allowed: postgres:16',
+    });
+  });
+
+  test('sidecars start first, join the trooper, and are removed on success', async () => {
+    const d = fakeDriver([done]);
+    const client = fakeClient();
+    await runDrop(withDb, { client, driver: d.driver, stickId: 's1', allowedImages: allowed });
+    expect(d.started?.network).toBe(`jm-drop-${payload.dropId}-${payload.epoch}`);
+    expect(d.removedNetworks).toEqual([`jm-drop-${payload.dropId}-${payload.epoch}`]);
+    expect(client.result).toMatchObject({ status: 'completed' });
+  });
+
+  test.each([
+    ['cancel', 'cancel'],
+    ['hard kill', 'hard_cancel'],
+  ] as const)('sidecars are removed on %s', async (_n, reply) => {
+    const d = fakeDriver([], { hang: true });
+    const client = fakeClient(reply);
+    await runDrop(withDb, {
+      client,
+      driver: d.driver,
+      heartbeatMs: 5,
+      stickId: 's1',
+      allowedImages: allowed,
+    });
+    expect(d.removedNetworks).toHaveLength(1);
+  });
+
+  test('a service that cannot start fails the drop and cleans up', async () => {
+    const d = fakeDriver([done], { serviceError: 'boom' });
+    const client = fakeClient();
+    await runDrop(withDb, { client, driver: d.driver, stickId: 's1', allowedImages: allowed });
+    expect(d.started).toBeUndefined();
+    expect(client.result).toMatchObject({ status: 'failed', reason: 'services failed: boom' });
+    expect(d.removedNetworks).toHaveLength(1);
+  });
+
+  test('stick startup removes networks left by a crashed run', async () => {
+    const d = fakeDriver([]);
+    let asked: string[] = [];
+    d.driver.removeNetworksByLabel = async (k, v) => {
+      asked = [k, v];
+      return 2;
+    };
+    await reapOrphans(d.driver, 's1');
+    expect(asked).toEqual(['jumpmaster.stick', 's1']);
+  });
+
+  test('limits reach the trooper; a zone with none changes nothing', async () => {
+    const d = fakeDriver([done]);
+    await runDrop(
+      { ...payload, image: 'trooper', limits: { pids: 4096 } },
+      { client: fakeClient(), driver: d.driver, stickId: 's1', allowedImages: allowed },
+    );
+    expect(d.started?.limits).toEqual({ pids: 4096 });
+    expect(d.services).toBeUndefined();
   });
 });
 

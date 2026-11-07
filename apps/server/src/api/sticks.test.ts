@@ -50,6 +50,8 @@ const config: Config = {
       retryLabel: 'agent-retry',
       mergeMethod: 'squash',
       requireBranchProtection: true,
+      services: [],
+      limits: { pids: 512 },
     },
   ],
   usage: { throttleUtilization: 0.9, probeJitterSeconds: [30, 90] },

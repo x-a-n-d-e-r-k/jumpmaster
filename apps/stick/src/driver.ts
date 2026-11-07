@@ -1,3 +1,5 @@
+import type { ContainerLimits, ServiceSpec } from '@jumpmaster/protocol';
+
 export type ContainerHandle = {
   logs(): AsyncIterable<string>;
   wait(): Promise<{ exitCode: number }>;
@@ -13,7 +15,21 @@ export interface ContainerDriver {
     payload: string;
     name: string;
     labels: Record<string, string>;
+    /** A private network to join alongside the default one. */
+    network?: string;
+    limits?: ContainerLimits;
   }): Promise<ContainerHandle>;
+  /** Starts sidecars on a new internal network and returns its name. */
+  startServices(
+    dropId: string,
+    epoch: number,
+    services: ServiceSpec[],
+    labels: Record<string, string>,
+  ): Promise<string>;
+  /** Removes a drop's sidecars and network; anything already gone is fine. */
+  removeServices(network: string, labels: Record<string, string>): Promise<void>;
+  /** Removes networks left behind by a crashed run; returns how many. */
+  removeNetworksByLabel(key: string, value: string): Promise<number>;
   /** Ids of every container (running or not) whose label `key` equals `value`. */
   listByLabel(key: string, value: string): Promise<string[]>;
   /** Force-removes (kills) one container. */

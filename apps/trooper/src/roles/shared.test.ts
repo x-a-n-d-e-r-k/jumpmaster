@@ -1,4 +1,6 @@
+import { once } from 'node:events';
 import { mkdtempSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { type AddressInfo, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -60,6 +62,7 @@ function recorder(o: { claude?: string[] } = {}) {
     m0Sweeps: 0,
     pushSweep: undefined as undefined | (() => void),
     gateEnv: undefined as NodeJS.ProcessEnv | undefined,
+    gateExtraEnv: undefined as NodeJS.ProcessEnv | undefined,
     gateRedactions: undefined as string[] | undefined,
     agentEnv: undefined as NodeJS.ProcessEnv | undefined,
   };
@@ -94,9 +97,16 @@ function recorder(o: { claude?: string[] } = {}) {
     },
     runGates: async (
       gates: { name: string }[],
-      go: { cwd: string; as?: { uid: number } | null; env: NodeJS.ProcessEnv; secrets: string[] },
+      go: {
+        cwd: string;
+        as?: { uid: number } | null;
+        env: NodeJS.ProcessEnv;
+        extraEnv?: NodeJS.ProcessEnv;
+        secrets: string[];
+      },
     ): Promise<GateResult[]> => {
       state.gateEnv = go.env;
+      state.gateExtraEnv = go.extraEnv;
       state.gateRedactions = go.secrets;
       state.order.push(`gate:${go.as ? go.as.uid : 'self'}@${go.cwd}`);
       return gates.map((g) => ({
@@ -145,7 +155,7 @@ describe('gate secrets', () => {
   test('gate steps receive the secret; the agent process does not', async () => {
     const r = recorder();
     await runGatesPhase(withSecret, r.deps, ctxSecret, '/work/w1/repo');
-    expect(r.state.gateEnv?.TEST_DB_URL).toBe(secret);
+    expect(r.state.gateExtraEnv?.TEST_DB_URL).toBe(secret);
     expect(r.state.gateRedactions).toContain(secret);
     await runImplement(withSecret, r.deps, ctxSecret);
     expect(r.state.agentEnv).toBeDefined();
@@ -155,7 +165,41 @@ describe('gate secrets', () => {
   test('a zone with no secrets changes the gate env by nothing', async () => {
     const r = recorder();
     await runGatesPhase(impl, r.deps, ctx, '/work/w1/repo');
-    expect(r.state.gateEnv?.TEST_DB_URL).toBeUndefined();
+    expect(r.state.gateExtraEnv).toEqual({});
+  });
+});
+
+describe('services', () => {
+  const withDb = {
+    ...impl,
+    services: [{ name: 'db', image: 'postgres:16', port: 1, readyTimeoutSeconds: 1 }],
+  };
+
+  test('gates get host and port variables once the service accepts connections', async () => {
+    const server = createServer().listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+    const r = recorder();
+    await runGatesPhase(
+      { ...impl, services: [{ name: 'my-db', image: 'i', port, readyTimeoutSeconds: 2 }] },
+      r.deps,
+      ctx,
+      '/work/w1/repo',
+      () => '127.0.0.1',
+    );
+    server.close();
+    expect(r.state.gateExtraEnv).toMatchObject({
+      JM_SERVICE_MY_DB_HOST: '127.0.0.1',
+      JM_SERVICE_MY_DB_PORT: String(port),
+    });
+  });
+
+  test('a service that never accepts connections fails naming the service', async () => {
+    const r = recorder();
+    await expect(
+      runGatesPhase(withDb, r.deps, ctx, '/work/w1/repo', () => '127.0.0.1'),
+    ).rejects.toThrow(/service db .*not ready/);
+    expect(r.state.gateEnv).toBeUndefined();
   });
 });
 

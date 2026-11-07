@@ -1,6 +1,11 @@
 import { Readable } from 'node:stream';
+import type { ServiceSpec } from '@jumpmaster/protocol';
 import Docker from 'dockerode';
 import type { ContainerDriver, ContainerHandle } from './driver.js';
+
+const SERVICE_LABEL = 'jumpmaster.service';
+const DEFAULT_PIDS = 512;
+const MB = 1024 * 1024;
 
 /** Splits a byte stream into lines. */
 async function* lines(stream: Readable): AsyncIterable<string> {
@@ -33,6 +38,70 @@ export class DockerDriver implements ContainerDriver {
     await this.docker.getContainer(id).remove({ force: true });
   }
 
+  async startServices(
+    dropId: string,
+    epoch: number,
+    services: ServiceSpec[],
+    labels: Record<string, string>,
+  ): Promise<string> {
+    const name = `jm-drop-${dropId}-${epoch}`;
+    await this.docker.createNetwork({ Name: name, Internal: true, Labels: labels });
+    for (const s of services) {
+      let container: Docker.Container;
+      try {
+        container = await this.docker.createContainer({
+          Image: s.image,
+          Env: Object.entries(s.env ?? {}).map(([k, v]) => `${k}=${v}`),
+          Labels: { ...labels, [SERVICE_LABEL]: s.name },
+          // No published ports or mounts. Default capabilities: database images need them.
+          HostConfig: {
+            NetworkMode: name,
+            Privileged: false,
+            SecurityOpt: ['no-new-privileges'],
+            PidsLimit: DEFAULT_PIDS,
+            Ulimits: [{ Name: 'core', Soft: 0, Hard: 0 }],
+          },
+          NetworkingConfig: { EndpointsConfig: { [name]: { Aliases: [s.name] } } },
+        });
+      } catch (e) {
+        if ((e as { statusCode?: number }).statusCode === 404) {
+          throw new Error(`image ${s.image} is missing: docker pull ${s.image} on this host`);
+        }
+        throw e;
+      }
+      await container.start();
+    }
+    return name;
+  }
+
+  async removeServices(network: string, labels: Record<string, string>): Promise<void> {
+    const filter = [...Object.entries(labels).map(([k, v]) => `${k}=${v}`), SERVICE_LABEL];
+    const found = await this.docker
+      .listContainers({ all: true, filters: { label: filter } })
+      .catch(() => []);
+    for (const c of found) {
+      await this.docker
+        .getContainer(c.Id)
+        .remove({ force: true })
+        .catch(() => {});
+    }
+    await this.docker
+      .getNetwork(network)
+      .remove()
+      .catch(() => {});
+  }
+
+  async removeNetworksByLabel(key: string, value: string): Promise<number> {
+    const found = await this.docker.listNetworks({ filters: { label: [`${key}=${value}`] } });
+    for (const n of found) {
+      await this.docker
+        .getNetwork(n.Id)
+        .remove()
+        .catch(() => {});
+    }
+    return found.length;
+  }
+
   async start(o: Parameters<ContainerDriver['start']>[0]): Promise<ContainerHandle> {
     const container = await this.docker.createContainer({
       Image: o.image,
@@ -54,10 +123,14 @@ export class DockerDriver implements ContainerDriver {
         CapDrop: ['ALL'],
         CapAdd: ['SETUID', 'SETGID', 'KILL'],
         SecurityOpt: ['no-new-privileges'],
-        PidsLimit: 512,
+        PidsLimit: o.limits?.pids ?? DEFAULT_PIDS,
+        ...(o.limits?.memoryMb ? { Memory: o.limits.memoryMb * MB } : {}),
+        ...(o.limits?.shmMb ? { ShmSize: o.limits.shmMb * MB } : {}),
         Ulimits: [{ Name: 'core', Soft: 0, Hard: 0 }],
       },
     });
+
+    if (o.network) await this.docker.getNetwork(o.network).connect({ Container: container.id });
 
     // Attach before start so no output is missed; the payload (with tokens)
     // goes over stdin, never onto disk or into a mount.

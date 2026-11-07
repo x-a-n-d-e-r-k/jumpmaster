@@ -1,5 +1,11 @@
 import { readFileSync } from 'node:fs';
-import { GateSpecSchema, type Role, RoleSchema } from '@jumpmaster/protocol';
+import {
+  ContainerLimitsSchema,
+  GateSpecSchema,
+  type Role,
+  RoleSchema,
+  ServiceSpecSchema,
+} from '@jumpmaster/protocol';
 import { z } from 'zod';
 import { ZONE_MODES } from './db/repo.js';
 
@@ -23,11 +29,22 @@ export const DEFAULT_PROTECTED_PATHS = [
   'babel.config.*',
 ];
 
+export const DEFAULT_PIDS_LIMIT = 512;
+
 const DropZoneSchema = z.object({
   id: z.string().min(1),
   repo: z.string().regex(/^[^/\s]+\/[^/\s]+$/, 'repo must be "owner/name"'),
   readyLabel: z.string().default('agent-ready'),
   gates: z.array(GateSpecSchema),
+  services: z
+    .array(ServiceSpecSchema)
+    .default([])
+    .superRefine((list, ctx) => {
+      const names = list.map((s) => s.name);
+      const repeated = names.find((n, i) => names.indexOf(n) !== i);
+      if (repeated) ctx.addIssue({ code: 'custom', message: `duplicate service: ${repeated}` });
+    }),
+  limits: ContainerLimitsSchema.default({ pids: DEFAULT_PIDS_LIMIT }),
   /** Names of secrets for gate steps; values come from JM_ZONE_SECRET_<ZONE>_<NAME>. */
   gateSecrets: z.array(z.string()).default([]),
   /** The starting mode, used only until an operator stores one. */

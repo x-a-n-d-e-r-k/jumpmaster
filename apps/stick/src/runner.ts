@@ -46,26 +46,26 @@ export async function reapOrphans(driver: ContainerDriver, stickId: string): Pro
       // already gone (AutoRemove) or racing another cleanup
     }
   }
+  await driver.removeNetworksByLabel(STICK_LABEL, stickId).catch(() => 0);
   return removed;
 }
 
 /** At the 15-second beat this is inside the server's 60-second lease. */
 const DEFAULT_LOST_SERVER_KILL_BEATS = 3;
 
-export async function runDrop(
-  payload: DropPayload,
-  deps: {
-    client: DropClient;
-    driver: ContainerDriver;
-    stickId: string;
-    heartbeatMs?: number;
-    /** Consecutive failed heartbeats before a hard kill. A kill can't reach a cut-off stick. */
-    lostServerKillBeats?: number;
-    image?: string;
-    /** Defaults to `allowedImages(process.env)`. */
-    allowedImages?: Set<string>;
-  },
-): Promise<void> {
+type RunDeps = {
+  client: DropClient;
+  driver: ContainerDriver;
+  stickId: string;
+  heartbeatMs?: number;
+  /** Consecutive failed heartbeats before a hard kill. A kill can't reach a cut-off stick. */
+  lostServerKillBeats?: number;
+  image?: string;
+  /** Defaults to `allowedImages(process.env)`. */
+  allowedImages?: Set<string>;
+};
+
+export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void> {
   const { client, driver } = deps;
   const { dropId, epoch } = payload;
   const image = payload.image || deps.image || TROOPER_IMAGE;
@@ -78,15 +78,60 @@ export async function runDrop(
     });
     return;
   }
+  const allowed = deps.allowedImages ?? allowedImages(process.env);
+  const services = payload.services ?? [];
+  const blocked = services.find((s) => !allowed.has(s.image));
+  if (blocked) {
+    await client.postResult(dropId, epoch, {
+      status: 'failed',
+      role: payload.role,
+      reason: `image not allowed: ${blocked.image}`,
+      gates: [],
+    });
+    return;
+  }
+  const labels = {
+    'jumpmaster.drop': dropId,
+    'jumpmaster.epoch': String(epoch),
+    [STICK_LABEL]: deps.stickId,
+  };
+  const network = services.length > 0 ? `jm-drop-${dropId}-${epoch}` : undefined;
+  try {
+    if (network) {
+      try {
+        await driver.startServices(dropId, epoch, services, labels);
+      } catch (e) {
+        await client.postResult(dropId, epoch, {
+          status: 'failed',
+          role: payload.role,
+          reason: `services failed: ${e instanceof Error ? e.message : String(e)}`,
+          gates: [],
+        });
+        return;
+      }
+    }
+    await runContainer(payload, deps, image, labels, network);
+  } finally {
+    if (network) await driver.removeServices(network, labels).catch(() => {});
+  }
+}
+
+async function runContainer(
+  payload: DropPayload,
+  deps: RunDeps,
+  image: string,
+  labels: Record<string, string>,
+  network: string | undefined,
+): Promise<void> {
+  const { client, driver } = deps;
+  const { dropId, epoch } = payload;
   const handle = await driver.start({
     image,
     payload: JSON.stringify(payload),
     name: `jumpmaster-drop-${dropId}-${epoch}`,
-    labels: {
-      'jumpmaster.drop': dropId,
-      'jumpmaster.epoch': String(epoch),
-      [STICK_LABEL]: deps.stickId,
-    },
+    labels,
+    ...(network ? { network } : {}),
+    ...(payload.limits ? { limits: payload.limits } : {}),
   });
 
   let stale = false;

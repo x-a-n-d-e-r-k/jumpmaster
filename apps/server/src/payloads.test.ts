@@ -14,6 +14,8 @@ const secrets: Config['secrets'] = {
 };
 
 const zone = {
+  services: [],
+  limits: { pids: 512 },
   id: 'main',
   repo: 'octo/demo',
   gates: [{ name: 'test', run: 'npm test', timeoutMinutes: 20 }],

@@ -116,6 +116,32 @@ describe('loadConfig', () => {
       /JM_GITHUB_REVIEWER_TOKEN/,
     ));
 
+  describe('services and limits', () => {
+    test('default to none and the 512 process limit', () =>
+      expect(loadConfig(minimal, fullEnv).dropZones[0]).toMatchObject({
+        services: [],
+        limits: { pids: 512 },
+      }));
+
+    test('a service name that is not a DNS label is refused', () =>
+      expect(() =>
+        loadConfig(withZone({ services: [{ name: 'Bad_Name', image: 'i', port: 1 }] }), fullEnv),
+      ).toThrow(/services/));
+
+    test('duplicate service names are refused', () =>
+      expect(() =>
+        loadConfig(
+          withZone({
+            services: [
+              { name: 'db', image: 'i', port: 1 },
+              { name: 'db', image: 'j', port: 2 },
+            ],
+          }),
+          fullEnv,
+        ),
+      ).toThrow(/duplicate service/));
+  });
+
   describe('gateSecrets', () => {
     const declared = () => withZone({ gateSecrets: ['TEST_DB_URL'] });
     const value = { JM_ZONE_SECRET_MAIN_TEST_DB_URL: 'postgres://local/test' };
