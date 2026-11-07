@@ -7,7 +7,40 @@ export type ForgeIssue = {
   author: string;
   labels: string[];
   createdAt: string;
+  /** Open native "blocked by" links (`#N` or `owner/name#N`); empty or absent means startable. */
+  blockedBy?: string[];
 };
+
+type BlockerNode = { number: number; state: string; repository: { nameWithOwner: string } } | null;
+type BlockerEntry = {
+  issueDependenciesSummary: { blockedBy: number };
+  blockedBy: { nodes: BlockerNode[] };
+} | null;
+type BlockerData = { repository?: Record<string, BlockerEntry> | null };
+
+const BLOCKER_BATCH = 100;
+
+/** An unreadable blocker node yields a partial GraphQL answer; anything else is a real failure. */
+function partialBlockerData(err: unknown): BlockerData | null {
+  const e = err as { name?: string; errors?: { path?: (string | number)[] }[]; data?: BlockerData };
+  if (e?.name !== 'GraphqlResponseError' || !e.data?.repository || !e.errors?.length) return null;
+  return e.errors.every((x) => x.path?.includes('blockedBy')) ? e.data : null;
+}
+
+function blockersOf(entry: BlockerEntry, repo: string): string[] {
+  if (!entry) return [];
+  const open = entry.blockedBy.nodes.filter(
+    (n): n is NonNullable<BlockerNode> => n !== null && n.state === 'OPEN',
+  );
+  const named = open.map((n) =>
+    n.repository.nameWithOwner.toLowerCase() === repo.toLowerCase()
+      ? `#${n.number}`
+      : `${n.repository.nameWithOwner}#${n.number}`,
+  );
+  const hidden = Math.max(0, entry.issueDependenciesSummary.blockedBy - open.length);
+  if (hidden > 0) named.push(`${hidden} unreadable blocker${hidden === 1 ? '' : 's'}`);
+  return named;
+}
 
 export type ForgeError = Error & { status?: number };
 
@@ -191,7 +224,7 @@ export class GitHubForge implements Forge {
       state: 'open',
       per_page: 100,
     });
-    return items
+    const issues: ForgeIssue[] = items
       .filter((i) => !i.pull_request)
       .map((i) => ({
         number: i.number,
@@ -201,6 +234,34 @@ export class GitHubForge implements Forge {
         labels: i.labels.map((l) => (typeof l === 'string' ? l : (l.name ?? ''))),
         createdAt: i.created_at,
       }));
+    for (let at = 0; at < issues.length; at += BLOCKER_BATCH) {
+      const batch = issues.slice(at, at + BLOCKER_BATCH);
+      const data = await this.readBlockers(batch.map((i) => i.number));
+      for (const i of batch)
+        i.blockedBy = blockersOf(
+          data.repository?.[`i${i.number}`] ?? null,
+          `${this.owner}/${this.repo}`,
+        );
+    }
+    return issues;
+  }
+
+  /** One GraphQL call for up to 100 issues' open "blocked by" links, aliased `i<number>`. */
+  private async readBlockers(numbers: number[]): Promise<BlockerData> {
+    const fields = numbers
+      .map(
+        (n) =>
+          `i${n}: issue(number: ${n}) { issueDependenciesSummary { blockedBy } blockedBy(first: 100) { nodes { number state repository { nameWithOwner } } } }`,
+      )
+      .join(' ');
+    const query = `query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { ${fields} } }`;
+    try {
+      return await this.octokit.graphql<BlockerData>(query, { owner: this.owner, repo: this.repo });
+    } catch (err) {
+      const partial = partialBlockerData(err);
+      if (partial) return partial;
+      throw err;
+    }
   }
 
   async isTrusted(login: string): Promise<boolean> {

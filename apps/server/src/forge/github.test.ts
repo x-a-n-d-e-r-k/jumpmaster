@@ -17,6 +17,31 @@ function issue(n: number, extra: Record<string, unknown> = {}) {
   };
 }
 
+type BlockerNode = { number: number; state: 'OPEN' | 'CLOSED'; repo?: string } | null;
+const blockerEntry = (open: number, nodes: BlockerNode[]) => ({
+  issueDependenciesSummary: { blockedBy: open },
+  blockedBy: {
+    nodes: nodes.map((n) =>
+      n === null
+        ? null
+        : { number: n.number, state: n.state, repository: { nameWithOwner: n.repo ?? 'o/r' } },
+    ),
+  },
+});
+const aliasesOf = (body: unknown) =>
+  [...String((body as { query: string }).query).matchAll(/(i\d+): issue\(/g)].map((m) => m[1]);
+/** Answers every blocker query with no blockers, `times` times. */
+function noBlockers(times = 1) {
+  nock(api)
+    .post('/graphql')
+    .times(times)
+    .reply(200, (_uri, body) => ({
+      data: {
+        repository: Object.fromEntries(aliasesOf(body).map((a) => [a, blockerEntry(0, [])])),
+      },
+    }));
+}
+
 describe('GitHubForge', () => {
   beforeAll(() => {
     nock.disableNetConnect();
@@ -40,6 +65,7 @@ describe('GitHubForge', () => {
       .query({ labels: 'agent-ready', state: 'open', per_page: '100' })
       .reply(200, page1, { Link: `<${api}/repositories/1/issues?page=2>; rel="next"` });
     nock(api).get('/repositories/1/issues').query({ page: '2' }).reply(200, page2);
+    noBlockers(2); // 104 issues: blockers are read in batches of 100
     const issues = await forge.listReadyIssues('agent-ready');
     expect(issues.length).toBe(104);
     expect(issues.some((i) => i.number === 4)).toBe(false);
@@ -50,6 +76,7 @@ describe('GitHubForge', () => {
       author: 'alice',
       labels: ['agent-ready', 'plain'],
       createdAt: '2026-01-01T00:00:00Z',
+      blockedBy: [],
     });
   });
 
@@ -58,7 +85,83 @@ describe('GitHubForge', () => {
       .get('/repos/o/r/issues')
       .query(true)
       .reply(200, [issue(1, { body: null })]);
+    noBlockers();
     expect((await forge.listReadyIssues('agent-ready'))[0]?.body).toBe('');
+  });
+
+  test('no ready issues makes no blocker query', async () => {
+    nock(api).get('/repos/o/r/issues').query(true).reply(200, []);
+    expect(await forge.listReadyIssues('agent-ready')).toEqual([]);
+  });
+
+  describe('native blockers', () => {
+    const listOne = (n: number) =>
+      nock(api)
+        .get('/repos/o/r/issues')
+        .query(true)
+        .reply(200, [issue(n)]);
+
+    test('listReadyIssues returns open blockers and ignores closed ones', async () => {
+      listOne(5);
+      nock(api)
+        .post('/graphql')
+        .reply(200, {
+          data: {
+            repository: {
+              i5: blockerEntry(2, [
+                { number: 7, state: 'OPEN' },
+                { number: 8, state: 'CLOSED' },
+                { number: 3, state: 'OPEN', repo: 'other/repo' },
+              ]),
+            },
+          },
+        });
+      const [one] = await forge.listReadyIssues('agent-ready');
+      expect(one?.blockedBy).toEqual(['#7', 'other/repo#3']);
+    });
+
+    test('counts blockers the token cannot see as unreadable', async () => {
+      listOne(5);
+      nock(api)
+        .post('/graphql')
+        .reply(200, {
+          data: { repository: { i5: blockerEntry(2, [{ number: 7, state: 'OPEN' }]) } },
+        });
+      expect((await forge.listReadyIssues('agent-ready'))[0]?.blockedBy).toEqual([
+        '#7',
+        '1 unreadable blocker',
+      ]);
+    });
+
+    test('a forbidden blocker node does not fail intake', async () => {
+      listOne(5);
+      nock(api)
+        .post('/graphql')
+        .reply(200, {
+          data: { repository: { i5: blockerEntry(1, [null]) } },
+          errors: [
+            {
+              type: 'FORBIDDEN',
+              message: 'Resource not accessible',
+              path: ['repository', 'i5', 'blockedBy', 'nodes', 0],
+            },
+          ],
+        });
+      expect((await forge.listReadyIssues('agent-ready'))[0]?.blockedBy).toEqual([
+        '1 unreadable blocker',
+      ]);
+    });
+
+    test('an error outside blocker nodes fails intake', async () => {
+      listOne(5);
+      nock(api)
+        .post('/graphql')
+        .reply(200, {
+          data: { repository: { i5: null } },
+          errors: [{ type: 'NOT_FOUND', message: 'gone', path: ['repository', 'i5'] }],
+        });
+      await expect(forge.listReadyIssues('agent-ready')).rejects.toThrow();
+    });
   });
 
   test('trusts write/maintain/admin only; 404 is untrusted, other errors throw', async () => {
