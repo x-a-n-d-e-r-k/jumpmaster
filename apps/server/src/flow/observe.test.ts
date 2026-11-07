@@ -5,6 +5,7 @@ import {
   getWorkItem,
   listObservations,
   recordObservation,
+  setWorkItemState,
   setZoneMode,
 } from '../db/repo.js';
 import { opKeys, opMarker, runOp } from '../outbox.js';
@@ -22,6 +23,36 @@ const approved: DropResult = {
   gates: [gateOk],
 };
 const observing = () => harness({ zone: { mode: 'observe' } });
+const readyIssue = (n: number) => ({
+  number: n,
+  title: `Issue ${n}`,
+  body: 'b',
+  author: 'human',
+  labels: ['agent-ready'],
+  createdAt: '2026-01-01T00:00:00.000Z',
+});
+
+describe('native blockers in active mode', () => {
+  test('a blocked ready item with an old branch is not resumed', async () => {
+    const h = await harness({ issues: [{ ...readyIssue(1), blockedBy: ['#4'] }] });
+    h.forge.state.branches.set('agent/issue-1', 'wip1');
+    await h.reconcile();
+    expect(activeDropFor(h.db, 1)).toBeUndefined();
+    expect(getWorkItem(h.db, 1)?.state).toBe('ready');
+  });
+
+  test('an in_flight item that gains a blocker still resumes', async () => {
+    const one = { ...readyIssue(1), blockedBy: [] as string[] };
+    const h = await harness({ zone: { mode: 'paused' }, issues: [one] });
+    await h.reconcile(); // paused: the item is synced, nothing starts
+    setWorkItemState(h.db, 1, 'in_flight'); // work began before the link was added
+    setZoneMode(h.db, h.zone.id, 'active', h.now());
+    one.blockedBy = ['#4'];
+    h.forge.state.branches.set('agent/issue-1', 'wip1');
+    await h.reconcile();
+    expect(activeDropFor(h.db, 1)).toMatchObject({ role: 'implement', headSha: 'wip1' });
+  });
+});
 
 /** A PR opened and reviewed for real, then observed from that state. */
 async function reviewedThenObserving(): Promise<Harness> {
@@ -44,6 +75,31 @@ describe('observe mode', () => {
     expect(getWorkItem(h.db, 1)?.state).toBe('ready');
     expect(activeDropFor(h.db, 1)).toBeUndefined();
     expect(writes(h)).toEqual([]);
+  });
+
+  test('records would_wait for a blocked item and would_enqueue for the next', async () => {
+    const h = await harness({
+      zone: { mode: 'observe' },
+      issues: [
+        { ...readyIssue(1), labels: ['agent-ready', 'high'], blockedBy: ['#4'] },
+        readyIssue(2),
+      ],
+    });
+    await h.reconcile();
+    const obs = listObservations(h.db, h.zone.id).map((o) => [o.action, o.itemId, o.detail]);
+    expect(obs).toContainEqual(['would_wait:blocked', 1, 'blocked by #4']);
+    expect(obs).toContainEqual(['would_enqueue:implement', 2, 'issue #2']);
+    expect(obs.some(([a, id]) => a === 'would_enqueue:implement' && id === 1)).toBe(false);
+  });
+
+  test('observe does not record a resume for a blocked ready item with an old branch', async () => {
+    const h = await harness({
+      zone: { mode: 'observe' },
+      issues: [{ ...readyIssue(1), blockedBy: ['#4'] }],
+    });
+    h.forge.state.branches.set('agent/issue-1', 'oldsha1');
+    await h.reconcile();
+    expect(seen(h)).toEqual(['would_wait:blocked']);
   });
 
   test('observe records what it would do, once per decision, with a count', async () => {

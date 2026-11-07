@@ -152,7 +152,9 @@ export function renderHome(state: HomeState): string {
         i.prNumber !== null && repo
           ? `<a href="${escapeHtml(`https://github.com/${repo}/pull/${i.prNumber}`)}">#${escapeHtml(i.prNumber)}</a>`
           : '-';
-      return `<tr><td>${escapeHtml(i.dropZoneId)}</td><td>#${escapeHtml(i.issueNumber)}</td><td>${escapeHtml(i.title)}</td><td>${escapeHtml(i.state)}</td><td>${escapeHtml(i.reason ?? '')}</td><td>${pr}</td>${detailCells(state.details?.get(i.id))}</tr>`;
+      const waiting =
+        i.state === 'ready' && i.blockedBy.length > 0 ? `waiting on ${i.blockedBy.join(', ')}` : '';
+      return `<tr><td>${escapeHtml(i.dropZoneId)}</td><td>#${escapeHtml(i.issueNumber)}</td><td>${escapeHtml(i.title)}</td><td>${escapeHtml(i.state)}</td><td>${escapeHtml(i.reason ?? waiting)}</td><td>${pr}</td>${detailCells(state.details?.get(i.id))}</tr>`;
     })
     .join('');
 

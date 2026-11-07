@@ -105,6 +105,7 @@ export async function syncDropZone(
         priority: priorityOf(issue.labels),
         isFix: isFixTitle(issue.title),
         issueCreatedAt: issue.createdAt,
+        blockedBy: issue.blockedBy ?? [],
       });
       const prev = existing.get(issue.number);
       if (!prev) added++;

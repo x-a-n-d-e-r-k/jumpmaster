@@ -33,12 +33,14 @@ export interface WorkItem {
   prNumber: number | null;
   retryLabelSeen: boolean;
   waitingSince: string | null;
+  /** Open native "blocked by" links; a ready item with any is never started. */
+  blockedBy: string[];
 }
 
 export type NewWorkItem = Omit<
   WorkItem,
-  'id' | 'state' | 'reason' | 'prNumber' | 'retryLabelSeen' | 'waitingSince'
->;
+  'id' | 'state' | 'reason' | 'prNumber' | 'retryLabelSeen' | 'waitingSince' | 'blockedBy'
+> & { blockedBy?: string[] };
 
 export interface Drop {
   id: string;
@@ -104,21 +106,23 @@ const iso = (now?: Date) => (now ? now.toISOString() : wallClock());
 
 const WORK_ITEM_COLS = `id, drop_zone_id AS dropZoneId, issue_number AS issueNumber, title, body, author,
   priority, is_fix AS isFix, issue_created_at AS issueCreatedAt, state, reason, pr_number AS prNumber,
-  retry_label_seen AS retryLabelSeen, waiting_since AS waitingSince`;
+  retry_label_seen AS retryLabelSeen, waiting_since AS waitingSince, blocked_by AS blockedBy`;
 
 const DROP_COLS = `id, drop_zone_id AS dropZoneId, work_item_id AS workItemId, role, state, stick_id AS stickId,
   epoch, lease_expires_at AS leaseExpiresAt, prompt_version AS promptVersion, image,
   result_json AS resultJson, created_at AS createdAt, started_at AS startedAt, finished_at AS finishedAt,
   fingerprint, pr_number AS prNumber, head_sha AS headSha, input_json AS inputJson, charged_key AS chargedKey`;
 
-type WorkItemRow = Omit<WorkItem, 'isFix' | 'retryLabelSeen'> & {
+type WorkItemRow = Omit<WorkItem, 'isFix' | 'retryLabelSeen' | 'blockedBy'> & {
   isFix: number;
   retryLabelSeen: number;
+  blockedBy: string;
 };
 const toWorkItem = (r: WorkItemRow): WorkItem => ({
   ...r,
   isFix: r.isFix === 1,
   retryLabelSeen: r.retryLabelSeen === 1,
+  blockedBy: JSON.parse(r.blockedBy) as string[],
 });
 
 export function upsertDropZone(db: Db, z: DropZoneRow): void {
@@ -139,14 +143,27 @@ export function upsertWorkItem(db: Db, w: NewWorkItem, now?: Date): WorkItem {
   const row = db
     .prepare(
       `INSERT INTO work_items (drop_zone_id, issue_number, title, body, author, priority, is_fix,
-         issue_created_at, updated_at)
-       VALUES (@dropZoneId, @issueNumber, @title, @body, @author, @priority, @isFix, @issueCreatedAt, @updatedAt)
+         issue_created_at, blocked_by, updated_at)
+       VALUES (@dropZoneId, @issueNumber, @title, @body, @author, @priority, @isFix, @issueCreatedAt,
+         @blockedBy, @updatedAt)
        ON CONFLICT(drop_zone_id, issue_number) DO UPDATE SET title = excluded.title, body = excluded.body,
          author = excluded.author, priority = excluded.priority, is_fix = excluded.is_fix,
-         issue_created_at = excluded.issue_created_at, updated_at = excluded.updated_at
+         issue_created_at = excluded.issue_created_at, blocked_by = excluded.blocked_by,
+         updated_at = excluded.updated_at
        RETURNING ${WORK_ITEM_COLS}`,
     )
-    .get({ ...w, isFix: w.isFix ? 1 : 0, updatedAt: iso(now) }) as WorkItemRow;
+    .get({
+      dropZoneId: w.dropZoneId,
+      issueNumber: w.issueNumber,
+      title: w.title,
+      body: w.body,
+      author: w.author,
+      priority: w.priority,
+      isFix: w.isFix ? 1 : 0,
+      issueCreatedAt: w.issueCreatedAt,
+      blockedBy: JSON.stringify(w.blockedBy ?? []),
+      updatedAt: iso(now),
+    }) as WorkItemRow;
   return toWorkItem(row);
 }
 

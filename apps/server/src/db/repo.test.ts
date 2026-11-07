@@ -81,6 +81,26 @@ describe('openDb', () => {
 });
 
 describe('work items', () => {
+  test('blockedBy defaults to empty, is stored, and is refreshed on upsert', () => {
+    expect(getWorkItem(db, workItemId)?.blockedBy).toEqual([]);
+    const base = {
+      dropZoneId: 'main',
+      issueNumber: 7,
+      title: 't',
+      body: 'b',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: '2026-01-01T00:00:00Z',
+    };
+    expect(upsertWorkItem(db, { ...base, blockedBy: ['#4', 'o/x#2'] }).blockedBy).toEqual([
+      '#4',
+      'o/x#2',
+    ]);
+    expect(listWorkItems(db, 'main')[0]?.blockedBy).toEqual(['#4', 'o/x#2']);
+    expect(upsertWorkItem(db, { ...base, blockedBy: [] }).blockedBy).toEqual([]);
+  });
+
   test('upsert keeps state and id, refreshes fields; list filters by state', () => {
     const again = upsertWorkItem(db, {
       dropZoneId: 'main',

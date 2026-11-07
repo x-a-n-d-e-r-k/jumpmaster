@@ -29,7 +29,7 @@ import {
   runOp,
 } from '../outbox.js';
 import { renderReviewBody } from '../results.js';
-import { enqueueImplement, enqueueNext } from '../scheduler.js';
+import { enqueueImplement, enqueueNext, isBlocked } from '../scheduler.js';
 import { rankItems } from '../sync.js';
 import { chargeBudget } from './budgets.js';
 import { type Action, decide, type Snapshot } from './decide.js';
@@ -131,7 +131,7 @@ async function resume(
   const observing = getZoneMode(db, zone.id, zone.mode) === 'observe';
   const candidates = listWorkItems(db, zone.id).filter(
     (i) =>
-      (i.state === 'ready' || i.state === 'in_flight') &&
+      (i.state === 'in_flight' || (i.state === 'ready' && !isBlocked(i))) &&
       !activeDropFor(db, i.id) &&
       !hasLivePr(db, i.id) &&
       !hasOpenCreatePr(db, i.id),
@@ -416,8 +416,13 @@ export async function reconcileZone(
   }
 
   if (mode === 'observe') {
-    const skip = (i: WorkItem) => !branchUnknown.has(i.id);
-    const top = rankItems(listWorkItems(db, zone.id, 'ready').filter(skip))[0];
+    const ready = listWorkItems(db, zone.id, 'ready');
+    for (const i of ready.filter(isBlocked)) {
+      const detail = `blocked by ${i.blockedBy.join(', ')}`;
+      recordObservation(db, zone.id, i.id, 'would_wait:blocked', detail, now);
+    }
+    const skip = (i: WorkItem) => !branchUnknown.has(i.id) && !isBlocked(i);
+    const top = rankItems(ready.filter(skip))[0];
     if (top) {
       const detail = `issue #${top.issueNumber}`;
       recordObservation(db, zone.id, top.id, 'would_enqueue:implement', detail, now);
