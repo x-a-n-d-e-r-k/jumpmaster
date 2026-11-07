@@ -44,6 +44,13 @@ const r = JSON.parse(process.argv[1].split("\n").find((l) => l.startsWith("JM_RE
 const ok = r.verdict?.decision === "request_changes" && /Permission denied/.test(r.gates[0]?.outputTail ?? "");
 console.log(ok ? "gate cannot read agent credentials: ok" : "FAIL: gate read agent credentials");
 process.exit(ok ? 0 : 1);' "$out"
+# Gates get their own temp directory, so files the agent left in /tmp can't break them.
+out="$(run '{"name":"tmp","run":"echo \"$TMPDIR\" && touch \"$TMPDIR/x\"","timeoutMinutes":2}' || true)"
+check '
+const r = JSON.parse(process.argv[1].split("\n").find((l) => l.startsWith("JM_RESULT ")).slice(10));
+const ok = r.gates[0]?.exitCode === 0 && r.gates[0]?.outputTail.trim() === "/tmp/jm-10002";
+console.log(ok ? "gate has its own TMPDIR: ok" : `FAIL: gate TMPDIR ${r.gates[0]?.outputTail}`);
+process.exit(ok ? 0 : 1);' "$out"
 # A sidecar on an internal network, reached by name with the trooper on both networks.
 NET="jm-e2e-$$"
 SIDE="jm-e2e-side-$$"

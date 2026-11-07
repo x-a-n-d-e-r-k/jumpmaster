@@ -117,6 +117,17 @@ describe('spawning as another uid', () => {
     });
     expect(agentSpawnOptions(null, { HOME: '/root' })).toEqual({ env: { HOME: '/root' } });
   });
+
+  test('each identity gets its own TMPDIR when the image provides jm-<uid>', () => {
+    const root = mkdtempSync(join(tmpdir(), 'jm-tmproot-'));
+    const tmpOf = (id: typeof ids.agent) =>
+      agentSpawnOptions(id, { TMPDIR: '/tmp' }, root).env.TMPDIR;
+    expect(tmpOf(ids.agent)).toBe('/tmp'); // directory not provided: unchanged
+    mkdirSync(join(root, `jm-${ids.agent.uid}`));
+    mkdirSync(join(root, `jm-${ids.gate.uid}`));
+    expect(tmpOf(ids.agent)).toBe(join(root, `jm-${ids.agent.uid}`));
+    expect(tmpOf(ids.gate)).toBe(join(root, `jm-${ids.gate.uid}`));
+  });
 });
 
 describe('readAgentFile', () => {

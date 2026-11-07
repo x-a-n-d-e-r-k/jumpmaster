@@ -25,6 +25,8 @@ RUN groupadd -g 10001 agent && useradd -u 10001 -g 10001 -d /home/agent -m -s /b
  && groupadd -g 10002 gate && useradd -u 10002 -g 10002 -d /home/gate -m -s /bin/sh gate \
  && chmod 0711 /home/agent && chmod 0700 /home/gate \
  && install -d -o agent -g agent -m 0700 /home/agent/.claude \
+ && install -d -o agent -g agent -m 0700 /tmp/jm-10001 \
+ && install -d -o gate -g gate -m 0700 /tmp/jm-10002 \
  && install -d -o root -g root -m 0755 /work \
  && find / -xdev -type f -perm /6000 -exec chmod a-s {} +
 ENV JM_CONTAINER=1 \
