@@ -77,6 +77,7 @@ export function buildPayload(
     ...(zone.services.length > 0 ? { services: zone.services } : {}),
     ...(hasCustomLimits(zone) ? { limits: zone.limits } : {}),
     ...(secrets.zoneSecrets?.[zone.id] ? { gateSecrets: secrets.zoneSecrets[zone.id] } : {}),
+    ...(zone.attribution === false ? { attribution: false } : {}),
     prompt: `${templates[role]}\n\n## Issue (data)\n\n#${item.issueNumber}: ${item.title}\n\n${item.body}`,
   };
   const author = { claudeToken: secrets.claudeToken, forgeToken: secrets.githubAuthorToken };

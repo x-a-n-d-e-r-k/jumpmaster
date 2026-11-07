@@ -108,6 +108,19 @@ test('conflictMarkers lists tracked files with leftover markers; mergeInProgress
   expect(await mergeInProgress(dir)).toBe(true);
 });
 
+test("commitIfDirty ignores the project's own git hooks", async () => {
+  const dir = await clone('hooks');
+  await prepareBranch(dir, 'agent/issue-8', 'main');
+  const hooks = join(dir, '.husky-like');
+  mkdirSync(hooks);
+  writeFileSync(join(hooks, 'pre-commit'), '#!/bin/sh\nexit 1\n');
+  chmodSync(join(hooks, 'pre-commit'), 0o755);
+  git(dir, 'config', 'core.hooksPath', hooks);
+  writeFileSync(join(dir, 'c.txt'), 'c\n');
+  expect(await commitIfDirty(dir, 'chore: checkpoint')).toBe(true);
+  expect(await aheadOfBase(dir, 'main')).toBe(1);
+});
+
 test('branch, commit, ahead count, head sha', async () => {
   const dir = await clone('flow');
   await prepareBranch(dir, 'agent/issue-7', 'main');
@@ -167,7 +180,9 @@ test('git children never see agent or claude credentials', async () => {
   process.env.JM_X = 'jm-secret-value';
   try {
     writeFileSync(join(dir, 'c.txt'), 'c\n');
-    await commitIfDirty(dir, 'feat: c');
+    // A plain runGit commit still runs project hooks (commitIfDirty deliberately doesn't).
+    await runGit(dir, ['add', '-A']);
+    await runGit(dir, ['commit', '-q', '-m', 'feat: c']);
     await pushNewBranch(dir, 'agent/issue-9', 'forge-tok', target());
   } finally {
     process.env = saved;

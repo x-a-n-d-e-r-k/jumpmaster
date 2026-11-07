@@ -174,6 +174,7 @@ describe('applyResult: implement', () => {
     expect(body).toContain('| test | 0 | 1.5 |');
     expect(body).toContain('| slow \\| gate | timeout | 60.0 |');
     expect(body).not.toContain('SECRET-TAIL');
+    expect(body).not.toMatch(/Generated with|Co-Authored-By|claude\.com\/claude-code/i);
     expect(body.trimEnd().split('\n').pop()).toBe('<!-- jm:op:pr:1:abc -->');
     expect(workItem(db, 1)).toMatchObject({ state: 'pr_open', prNumber: 1 });
     expect(getPullRequest(db, 1)).toMatchObject({ number: 1, headSha: 'abc', state: 'open' });
@@ -366,6 +367,15 @@ describe('applyResult: review', () => {
 });
 
 describe('renderReviewBody', () => {
+  test('carries no tool attribution footer', () => {
+    const body = renderReviewBody(
+      { decision: 'approve', summary: 'ok', findings: [] },
+      [gateOk],
+      [],
+    );
+    expect(body).not.toMatch(/Generated with|Co-Authored-By|claude\.com\/claude-code/i);
+  });
+
   test('summary, findings as a list with file code spans, and red gates', () => {
     const body = renderReviewBody(
       {

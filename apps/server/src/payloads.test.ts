@@ -83,6 +83,13 @@ describe('buildPayload', () => {
     );
   });
 
+  test('attribution: false reaches every role; the default sends nothing', () => {
+    for (const d of [impl, review, heal, resolve]) {
+      expect(build(d).attribution).toBeUndefined();
+      expect(build(d, { ...zone, attribution: false }).attribution).toBe(false);
+    }
+  });
+
   test('implement, heal and resolve carry the author token', () => {
     for (const d of [impl, heal, resolve]) {
       expect(build(d).credentials.forgeToken).toBe('author-secret');

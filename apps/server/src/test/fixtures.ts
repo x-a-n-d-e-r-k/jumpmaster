@@ -46,6 +46,7 @@ export function makeZone(o: Partial<DropZoneConfig> = {}): DropZoneConfig {
     authorMayBeAdmin: false,
     protectedPaths: ['.github/**', 'CODEOWNERS'],
     reviewReadToken: false,
+    attribution: true,
     ...o,
   };
 }

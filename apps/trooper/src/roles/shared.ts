@@ -87,6 +87,12 @@ function stripUndefined<T extends object>(o: T): T {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
 }
 
+/** The `--settings` file for the agent: no hooks, and no attribution when the zone says so. */
+export function agentSettings(payload: DropPayload): Record<string, unknown> {
+  if (payload.attribution !== false) return { hooks: {} };
+  return { hooks: {}, includeCoAuthoredBy: false, attribution: { commit: '', pr: '' } };
+}
+
 /** Runs Claude in `dir` as the agent identity and collects what the stream reported. */
 export async function runAgent(
   payload: DropPayload,
@@ -102,7 +108,7 @@ export async function runAgent(
     systemPromptFile,
     `Before finishing, run these commands and make them pass:\n${gateList}\n${gateOnlyNote(payload)}`,
   );
-  writeFileSync(settingsFile, JSON.stringify({ hooks: {} }));
+  writeFileSync(settingsFile, JSON.stringify(agentSettings(payload)));
 
   emitEvent(deps, ctx, 'phase', { phase: 'claude' });
   const args = buildClaudeArgs({
