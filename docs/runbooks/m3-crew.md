@@ -174,9 +174,15 @@ item's **PR** (the label on the issue does nothing). Then open the diagnose drop
 
 ## Usage credits
 
-When a drop reports that it ran on usage credits (`isUsingOverage: true` in its rate-limit event;
-`overageStatus` only says whether the account allows extra usage), Jumpmaster raises a
-`credits_required` briefing naming the drop. It does not yet stop dispatch, so later drops may also
-run on credits. To stop spending, `ctl pause <zone>` (or `ctl kill`) and turn off extra usage on
-the Claude account. If a Fable drop caused it on a plan without Fable, also set `claude.plan`
-correctly and restart; Fable stays disabled until you rule **Re-enable Fable**.
+`overageStatus` in a drop's rate-limit event only says whether the account allows extra usage.
+When a drop reports `isUsingOverage: true` (it ran on usage credits), Jumpmaster stops starting
+new drops in every zone, for every role; running drops finish. The stop lifts by itself when the
+exhausted usage window resets (up to seven days for the weekly window), because work after that
+runs inside the plan again. A `credits:stop` briefing names the drop, both windows' use and
+resets, and offers **Run on credits now (until <time>)**, at most five hours, and **Noted**. During
+that time only the drop's own work item may keep using credits; any other drop on credits stops
+dispatch again. Set `usage.stopOnOverage: false` to keep the old behaviour (a briefing only).
+
+A Fable drop on credits also disables Fable until you rule **Re-enable Fable**. If your plan
+doesn't include Fable, set `claude.plan` correctly and restart. `ctl briefings` lists open
+briefings with their option ids, so you can rule from a terminal.
