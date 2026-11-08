@@ -105,8 +105,17 @@ function gateParkReason(what: string, changes: string[]): string {
     shown++;
   }
   if (shown < changes.length) list += `; … (+${changes.length - shown} more)`;
-  return `${what}: ${list}${OVERRIDE_HINT}`;
+  // The hint is only offered when the guard read everything it judged.
+  return `${what}: ${list}${changes.some(unverified) ? UNVERIFIED_NOTE : OVERRIDE_HINT}`;
 }
+
+const UNVERIFIED_NOTE = ' (not fully read: review it by hand)';
+
+/** A change the guard could not read: an unreadable, missing or unsupported file. */
+const unverified = (c: string): boolean =>
+  c.endsWith(' unreadable') ||
+  c === 'lockfile not found' ||
+  c.startsWith('lockfile format not supported: ');
 
 /** Waits on missing forge data; past the deadline from `missingSince`, parks naming it. */
 function waitForge(s: Snapshot, what: string): Action {

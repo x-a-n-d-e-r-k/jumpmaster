@@ -338,7 +338,7 @@ describe('pnpm lockfile', () => {
 
   test('a new package key (pnpm < 10 or unpinned) is a dependency added', () =>
     expect(pnpm(sample, typesNode26(sample))).toEqual([
-      'dependency added: @types/node@26.6.5 (install scripts may run)',
+      'dependency added: @types/node@26.6.5 (verified: registry integrity only; install scripts may run)',
     ]));
 
   test('with pnpm 10 pinned a new registry package is accepted', () =>
@@ -404,8 +404,8 @@ catalogs:
     expect(pnpm(null, sample)).toEqual(
       expect.arrayContaining([
         'xlsx: non-registry resolution',
-        'dependency added: esbuild@0.28.2 (install scripts may run)',
-        'dependency added: @csstools/css-calc@3.1.1 (install scripts may run)',
+        'dependency added: esbuild@0.28.2 (verified: registry integrity only; install scripts may run)',
+        'dependency added: @csstools/css-calc@3.1.1 (verified: registry integrity only; install scripts may run)',
       ]),
     ));
 
@@ -435,7 +435,7 @@ ${extra}`;
 `);
     expect(pnpm(v6(''), head)).toEqual([
       'install script: esbuild',
-      'dependency added: @types/node@20.0.0 (install scripts may run)',
+      'dependency added: @types/node@20.0.0 (verified: registry integrity only; install scripts may run)',
     ]);
   });
 
@@ -446,7 +446,7 @@ ${extra}`;
       '  "left-pad@1.3.0":\n    resolution: {integrity: sha512-bGVm}\n',
     );
     expect(pnpm(sample, head)).toEqual([
-      'dependency added: left-pad@1.3.0 (install scripts may run)',
+      'dependency added: left-pad@1.3.0 (verified: registry integrity only; install scripts may run)',
     ]);
   });
 

@@ -300,6 +300,20 @@ describe('rules in order', () => {
     expect(a.reason).toMatch(/… \(\+\d+ more\) \(a maintainer can approve this head/);
   });
 
+  test('13–14: no override hint when the guard could not fully read what changed', () => {
+    for (const s of [
+      { gateToolChanges: ['vitest: npm:x@1', 'lockfile unreadable'] },
+      { gateToolChanges: ['lockfile not found'] },
+      { gateToolChanges: ['lockfile format not supported: yarn.lock'] },
+      { gateScriptChanges: ['package.json unreadable'] },
+    ]) {
+      const a = decide(snap(s));
+      if (a.kind !== 'park') throw new Error(a.kind);
+      expect(a.reason).not.toContain(OVERRIDE_HINT);
+      expect(a.reason).toMatch(/ \(not fully read: review it by hand\)$/);
+    }
+  });
+
   test('13–14: a maintainer approval of the head lets gate changes through', () => {
     const s = { gateScriptChanges: ['test'], gateToolChanges: ['x'], maintainerApproved: true };
     expect(decide(snap(s))).toEqual(decide(snap()));
@@ -599,7 +613,7 @@ describe('overlaps', () => {
       decide(snap({ gateScriptChanges: ['package.json unreadable'], verdictsOnHead: [rc('s')] })),
     ).toEqual({
       kind: 'park',
-      reason: `gate script changed: package.json unreadable${OVERRIDE_HINT}`,
+      reason: 'gate script changed: package.json unreadable (not fully read: review it by hand)',
     }));
 
   test('behind base and request_changes heals first', () => {

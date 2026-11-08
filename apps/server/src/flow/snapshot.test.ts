@@ -103,7 +103,7 @@ describe('buildSnapshot', () => {
     test('reads pnpm-lock.yaml at the repo root for a nested package.json', async () => {
       addTypesNode(JSON.stringify({ name: 'root' }));
       expect((await snapshotOf()).gateToolChanges).toEqual([
-        'dependency added: @types/node@26.6.5 (install scripts may run)',
+        'dependency added: @types/node@26.6.5 (verified: registry integrity only; install scripts may run)',
       ]);
     });
 

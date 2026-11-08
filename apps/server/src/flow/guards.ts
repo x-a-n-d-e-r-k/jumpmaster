@@ -483,7 +483,9 @@ function pnpmLockChanges(
       if (section !== 'packages') continue;
       if (entry.requiresBuild) out.push(`install script: ${name}`);
       else if (!opts.pnpmBlocksBuilds) {
-        out.push(`dependency added: ${name}@${version} (install scripts may run)`);
+        out.push(
+          `dependency added: ${name}@${version} (verified: registry integrity only; install scripts may run)`,
+        );
       }
     }
   }
