@@ -146,3 +146,37 @@ test('a result carries its session id', () =>
     type: 'result',
     sessionId: 's-1',
   }));
+
+test('parseStreamLine keeps isUsingOverage and overageStatus', () => {
+  expect(
+    parseStreamLine(
+      JSON.stringify({
+        type: 'rate_limit_event',
+        rate_limit_info: { status: 'allowed', isUsingOverage: true, overageStatus: 'allowed' },
+      }),
+    ),
+  ).toMatchObject({ type: 'rate_limit', isUsingOverage: true, overageStatus: 'allowed' });
+});
+
+test('buildClaudeArgs emits --add-dir once per directory', () => {
+  const a = buildClaudeArgs({
+    prompt: 'P',
+    model: 'm',
+    maxTurns: 1,
+    systemPromptFile: '/p.md',
+    settingsFile: '/s.json',
+    outputSchema: IMPLEMENT_OUTPUT_SCHEMA,
+    addDirs: ['/work/repo', '/work/notes'],
+  });
+  const at = a.flatMap((v, i) => (v === '--add-dir' ? [a[i + 1]] : []));
+  expect(at).toEqual(['/work/repo', '/work/notes']);
+  const none = buildClaudeArgs({
+    prompt: 'P',
+    model: 'm',
+    maxTurns: 1,
+    systemPromptFile: '/p.md',
+    settingsFile: '/s.json',
+    outputSchema: IMPLEMENT_OUTPUT_SCHEMA,
+  });
+  expect(none).not.toContain('--add-dir');
+});

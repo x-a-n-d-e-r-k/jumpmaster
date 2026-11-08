@@ -120,7 +120,7 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
     return;
   }
   const allowed = deps.allowedImages ?? allowedImages(process.env);
-  const services = payload.services ?? [];
+  const services = ('services' in payload ? payload.services : undefined) ?? [];
   const blocked = services.find((s) => !allowed.has(s.image));
   if (blocked) {
     await client.postResult(dropId, epoch, {

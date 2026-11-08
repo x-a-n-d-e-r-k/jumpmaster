@@ -6,6 +6,7 @@ import {
   type DropResult,
   EVENT_PREFIX,
   type GateResult,
+  type ItemDropPayload,
   type RateLimitEventData,
   REPORT_MAX_CHARS,
   type ServiceSpec,
@@ -96,7 +97,7 @@ export function agentSettings(payload: DropPayload): Record<string, unknown> {
 
 /** Runs Claude in `dir` as the agent identity and collects what the stream reported. */
 export async function runAgent(
-  payload: DropPayload,
+  payload: ItemDropPayload,
   deps: TrooperDeps,
   ctx: RoleCtx,
   o: { prompt: string; outputSchema: object; gateResults?: GateResult[] },
@@ -146,6 +147,8 @@ export async function runAgent(
         resetsAt: parsed.resetsAt,
         rateLimitType: parsed.rateLimitType,
         unifiedWindows: parsed.unifiedWindows,
+        isUsingOverage: parsed.isUsingOverage,
+        overageStatus: parsed.overageStatus,
       });
       out.rateLimit = data;
       if (data.status === 'rejected') out.rateLimited = true;
@@ -188,7 +191,7 @@ export function stoppedEarly(o: AgentOutcome): 'rate_limited' | 'interrupted' | 
 
 /** Gate secrets and service addresses, set for a gate step after its environment is scrubbed. */
 export function gateExtraEnv(
-  payload: DropPayload,
+  payload: ItemDropPayload,
   hostOf: (service: ServiceSpec) => string = (s) => s.name,
 ): NodeJS.ProcessEnv {
   return { ...payload.gateSecrets, ...serviceEnv(payload, hostOf) };
@@ -196,7 +199,7 @@ export function gateExtraEnv(
 
 /** Service addresses. Unlike gate secrets, the agent gets these too. */
 function serviceEnv(
-  payload: DropPayload,
+  payload: ItemDropPayload,
   hostOf: (service: ServiceSpec) => string = (s) => s.name,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
@@ -212,7 +215,7 @@ function serviceEnv(
  * The agent's appended system prompt: the gates, gate-only variables, and reachable services. A
  * reviewer gets the gate results it is judging instead of an instruction to make them pass.
  */
-export function agentSystemPrompt(payload: DropPayload, gateResults?: GateResult[]): string {
+export function agentSystemPrompt(payload: ItemDropPayload, gateResults?: GateResult[]): string {
   if (payload.role === 'review') {
     return `${gateResultsNote(payload, gateResults ?? [])}${gateOnlyNote(payload)}${servicesNote(payload)}`;
   }
@@ -220,7 +223,7 @@ export function agentSystemPrompt(payload: DropPayload, gateResults?: GateResult
   return `Before finishing, run these commands and make them pass:\n${gateList}\n${gateOnlyNote(payload)}${servicesNote(payload)}`;
 }
 
-function gateResultsNote(payload: DropPayload, results: GateResult[]): string {
+function gateResultsNote(payload: ItemDropPayload, results: GateResult[]): string {
   if (payload.gates.length === 0) return 'This zone has no gates.\n';
   if (results.length === 0) return 'No gate results were recorded for this head.\n';
   const runOf = new Map(payload.gates.map((g) => [g.name, g.run]));
@@ -234,7 +237,7 @@ function gateResultsNote(payload: DropPayload, results: GateResult[]): string {
 }
 
 /** Without this the agent doesn't know a sidecar exists, and skips work that needs it. */
-function servicesNote(payload: DropPayload): string {
+function servicesNote(payload: ItemDropPayload): string {
   const services = payload.services ?? [];
   if (services.length === 0) return '';
   const lines = services.map((s) => {
@@ -245,7 +248,7 @@ function servicesNote(payload: DropPayload): string {
 }
 
 /** Without this the agent reads a missing secret as a blocker, and stops with finished work. */
-function gateOnlyNote(payload: DropPayload): string {
+function gateOnlyNote(payload: ItemDropPayload): string {
   const names = Object.keys(payload.gateSecrets ?? {});
   if (names.length === 0) return '';
   return `\nThese variables exist only in the gate step, which runs separately after you finish: ${names.join(', ')}. You don't have them, by design. A command that fails only because one is missing is not a problem and not a reason to stop. Run what you can, and finish normally.\n`;
@@ -285,7 +288,7 @@ function canConnect(host: string, port: number): Promise<boolean> {
  * as the gate uid in a fresh clone; otherwise they run in the working copy, as in M0.
  */
 export async function runGatesPhase(
-  payload: DropPayload,
+  payload: ItemDropPayload,
   deps: TrooperDeps,
   ctx: RoleCtx,
   dir: string,

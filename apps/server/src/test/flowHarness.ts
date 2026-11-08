@@ -154,7 +154,9 @@ export async function harness(
       const pushed = result.status === 'completed' || result.status === 'interrupted';
       if (pushed && result.headSha) {
         if (payload.role === 'implement') f.state.branches.set(payload.branch, result.headSha);
-        else if (payload.role !== 'review') f.state.setHead(payload.pr.number, result.headSha);
+        else if (payload.role === 'heal' || payload.role === 'resolve') {
+          f.state.setHead(payload.pr.number, result.headSha);
+        }
       }
       return h.postResult(dropId, epoch, result);
     },

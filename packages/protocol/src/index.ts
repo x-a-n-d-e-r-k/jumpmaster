@@ -27,7 +27,13 @@ export const GateSpecSchema = z.object({
 });
 export type GateSpec = z.infer<typeof GateSpecSchema>;
 
-export const RoleSchema = z.enum(['implement', 'review', 'heal', 'resolve']);
+/** Roles that work for the zone rather than one work item. They hold no forge write credential. */
+export const CREW_ROLES = ['crew-lead', 'refute', 'diagnose'] as const;
+export type CrewRole = (typeof CREW_ROLES)[number];
+export const isCrewRole = (r: string): r is CrewRole =>
+  (CREW_ROLES as readonly string[]).includes(r);
+
+export const RoleSchema = z.enum(['implement', 'review', 'heal', 'resolve', ...CREW_ROLES]);
 export type Role = z.infer<typeof RoleSchema>;
 
 export const PrRefSchema = z.object({
@@ -108,6 +114,26 @@ const dropPayloadBase = {
   attribution: z.boolean().optional(),
 };
 
+/**
+ * A crew drop: no issue, branch, gates, services or gate secrets. Strict, so a payload carrying any
+ * of those is refused rather than stripped.
+ */
+const crewPayloadBase = {
+  protocol: dropPayloadBase.protocol,
+  dropId: dropPayloadBase.dropId,
+  epoch: dropPayloadBase.epoch,
+  repo: dropPayloadBase.repo,
+  model: dropPayloadBase.model,
+  maxTurns: dropPayloadBase.maxTurns,
+  promptVersion: dropPayloadBase.promptVersion,
+  prompt: dropPayloadBase.prompt,
+  image: dropPayloadBase.image,
+  protectedPaths: dropPayloadBase.protectedPaths,
+  credentials: dropPayloadBase.credentials,
+  limits: dropPayloadBase.limits,
+  attribution: dropPayloadBase.attribution,
+};
+
 export const DropPayloadSchema = z.discriminatedUnion('role', [
   z.object({
     ...dropPayloadBase,
@@ -119,8 +145,19 @@ export const DropPayloadSchema = z.discriminatedUnion('role', [
   z.object({ ...dropPayloadBase, role: z.literal('review'), pr: PrRefSchema }),
   z.object({ ...dropPayloadBase, role: z.literal('heal'), pr: PrRefSchema, feedback: z.string() }),
   z.object({ ...dropPayloadBase, role: z.literal('resolve'), pr: PrRefSchema }),
+  z.strictObject({ ...crewPayloadBase, role: z.literal('crew-lead') }),
+  z.strictObject({ ...crewPayloadBase, role: z.literal('refute') }),
+  z.strictObject({
+    ...crewPayloadBase,
+    role: z.literal('diagnose'),
+    /** The parked PR to inspect, when there is one. */
+    checkout: PrRefSchema.optional(),
+  }),
 ]);
 export type DropPayload = z.infer<typeof DropPayloadSchema>;
+/** A drop for one work item: it has an issue, a branch and gates. */
+export type ItemDropPayload = Exclude<DropPayload, { role: CrewRole }>;
+export type CrewDropPayload = Extract<DropPayload, { role: CrewRole }>;
 
 export const VerdictSchema = z.object({
   decision: z.enum(['approve', 'request_changes']),
@@ -146,6 +183,9 @@ export const RateLimitEventDataSchema = z.object({
   unifiedWindows: z
     .object({ five_hour: UsageWindowSchema.optional(), seven_day: UsageWindowSchema.optional() })
     .optional(),
+  /** Unobserved field names, kept as sent (pending rehearsal). */
+  isUsingOverage: z.boolean().optional(),
+  overageStatus: z.string().optional(),
 });
 export type RateLimitEventData = z.infer<typeof RateLimitEventDataSchema>;
 
@@ -182,6 +222,84 @@ export const REVIEW_OUTPUT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+const PRIORITIES = ['highest', 'high', 'low', 'lowest'] as const;
+
+export const CrewLeadOutputSchema = z.strictObject({
+  summary: z.string().max(4000),
+  fileIssues: z
+    .array(
+      z.strictObject({
+        key: z.string().regex(/^[a-z0-9-]{1,40}$/),
+        objective: z.string().max(200),
+        title: z.string().min(1).max(120),
+        body: z.string().min(1).max(12000),
+        priority: z.enum(PRIORITIES).optional(),
+      }),
+    )
+    .max(5),
+  briefings: z
+    .array(
+      z.strictObject({
+        subject: z.string().max(80),
+        decision: z.string().max(500),
+        why: z.string().max(2000),
+        options: z.array(z.string().max(200)).min(2).max(4),
+        recommendation: z.string().max(1000),
+        onHold: z.string().max(500),
+      }),
+    )
+    .max(3),
+});
+export type CrewLeadOutput = z.infer<typeof CrewLeadOutputSchema>;
+
+export const RefuteOutputSchema = z.strictObject({
+  decision: z.enum(['promote', 'revise', 'reject']),
+  findings: z.array(z.string().max(1000)).max(20),
+  revisedTitle: z.string().min(1).max(120).optional(),
+  revisedBody: z.string().min(1).max(12000).optional(),
+});
+export type RefuteOutput = z.infer<typeof RefuteOutputSchema>;
+
+export const DiagnoseOutputSchema = z.strictObject({
+  diagnosis: z.string().max(4000),
+  recommendation: z.enum(['retry', 'leave_parked', 'needs_command']),
+  detail: z.string().max(2000),
+});
+export type DiagnoseOutput = z.infer<typeof DiagnoseOutputSchema>;
+
+const CREW_OUTPUT = {
+  'crew-lead': CrewLeadOutputSchema,
+  refute: RefuteOutputSchema,
+  diagnose: DiagnoseOutputSchema,
+} as const;
+
+export type CrewOutput = {
+  'crew-lead': CrewLeadOutput;
+  refute: RefuteOutput;
+  diagnose: DiagnoseOutput;
+};
+
+/** The `--json-schema` for a crew role; every object forbids additional properties. */
+export function crewOutputJsonSchema(role: CrewRole): object {
+  const { $schema: _drop, ...schema } = z.toJSONSchema(CREW_OUTPUT[role]) as Record<
+    string,
+    unknown
+  >;
+  return schema;
+}
+
+/** Validates a crew result on either side; the reason names the first failing field. */
+export function parseCrewOutput<R extends CrewRole>(
+  role: R,
+  v: unknown,
+): { ok: true; value: CrewOutput[R] } | { ok: false; reason: string } {
+  const r = CREW_OUTPUT[role].safeParse(v);
+  if (r.success) return { ok: true, value: r.data as CrewOutput[R] };
+  const issue = r.error.issues[0];
+  const path = issue?.path.join('.') || '(root)';
+  return { ok: false, reason: `${path}: ${issue?.message ?? 'invalid'}` };
+}
+
 export const GateResultSchema = z.object({
   name: z.string(),
   exitCode: z.number().nullable(),
@@ -208,6 +326,10 @@ export const DropResultSchema = z.object({
   verdict: VerdictSchema.optional(),
   mergeOutcome: MergeOutcomeSchema.optional(),
   rateLimit: RateLimitEventDataSchema.optional(),
+  /** A crew role's structured output, validated per role on both sides (`parseCrewOutput`). */
+  crew: z.unknown().optional(),
+  /** The model that actually served the drop, when the trooper could tell. */
+  servedModel: z.string().optional(),
   reason: z.string().optional(),
   headSha: z.string().optional(),
   /** The author's report (implement/heal): each acceptance criterion, how it is met, and evidence. */
