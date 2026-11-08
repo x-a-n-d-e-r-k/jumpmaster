@@ -335,6 +335,35 @@ describe('runAgent', () => {
     );
   });
 
+  test('a result keeps isUsingOverage once any report said it, though the last did not', async () => {
+    const rl = (info: Record<string, unknown>) =>
+      JSON.stringify({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', ...info } });
+    const r = recorder({
+      claude: [
+        rl({ isUsingOverage: true, overageStatus: 'allowed' }),
+        rl({ rateLimitType: 'seven_day' }),
+        completeResult,
+      ],
+    });
+    const out = await runAgent(
+      impl,
+      r.deps,
+      ctx,
+      { prompt: 'p', outputSchema: {} },
+      '/work/w1/repo',
+    );
+    expect(out.rateLimit).toEqual({
+      status: 'allowed',
+      rateLimitType: 'seven_day',
+      isUsingOverage: true,
+    });
+    // The live events stay as reported.
+    const events = r.state.lines
+      .filter((l) => l.startsWith('JM_EVENT ') && l.includes('"rate_limit"'))
+      .map((l) => JSON.parse(l.slice('JM_EVENT '.length)).data);
+    expect(events[1]).toEqual({ status: 'allowed', rateLimitType: 'seven_day' });
+  });
+
   test('records the init session id', async () => {
     const r = recorder({
       claude: [

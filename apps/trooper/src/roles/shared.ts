@@ -170,8 +170,12 @@ export async function runAgent(
         unifiedWindows: parsed.unifiedWindows,
         isUsingOverage: parsed.isUsingOverage,
         overageStatus: parsed.overageStatus,
+        overageResetsAt: parsed.overageResetsAt,
       });
-      out.rateLimit = data;
+      // The result keeps the last report, but a drop that ran on credits at any point did: the
+      // server's backstop when live events were lost.
+      const onCredits = out.rateLimit?.isUsingOverage === true && data.isUsingOverage !== true;
+      out.rateLimit = onCredits ? { ...data, isUsingOverage: true } : data;
       if (data.status === 'rejected') out.rateLimited = true;
       emitEvent(deps, ctx, 'rate_limit', data);
     } else {

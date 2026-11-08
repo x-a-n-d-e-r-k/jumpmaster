@@ -47,6 +47,8 @@ export type ParsedLine =
       unifiedWindows?: Partial<Record<'five_hour' | 'seven_day', UsageWindow>>;
       isUsingOverage?: boolean;
       overageStatus?: string;
+      /** When the extra-usage spending cap resets (monthly), not a usage window. */
+      overageResetsAt?: string;
       raw: unknown;
     }
   | { type: 'init'; sessionId: string }
@@ -103,6 +105,7 @@ export function parseStreamLine(line: string): ParsedLine {
     if (status === 'allowed' || status === 'allowed_warning' || status === 'rejected') {
       const resetsAt = normalizeResetsAt(info.resetsAt);
       const unifiedWindows = windowsOf(info.unifiedWindows);
+      const overageResetsAt = normalizeResetsAt(info.overageResetsAt);
       return {
         type: 'rate_limit',
         status,
@@ -113,6 +116,7 @@ export function parseStreamLine(line: string): ParsedLine {
           ? { isUsingOverage: info.isUsingOverage }
           : {}),
         ...(typeof info.overageStatus === 'string' ? { overageStatus: info.overageStatus } : {}),
+        ...(overageResetsAt !== undefined ? { overageResetsAt } : {}),
         raw,
       };
     }
