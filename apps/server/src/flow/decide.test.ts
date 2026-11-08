@@ -610,6 +610,43 @@ describe('rules in order', () => {
       reason: 'no CI result',
     }));
 
+  test('26: a check still queued at the deadline is named as never started', () =>
+    expect(
+      decide(
+        mergeable({
+          checks: { state: 'pending', names: ['preflight', 'lint'], queued: ['preflight'] },
+          requiredChecks: ['preflight'],
+          headFirstSeenAt: minutesAgo(46),
+        }),
+      ),
+    ).toEqual({
+      kind: 'park',
+      reason:
+        'no CI result: preflight queued and never started (is a runner available for its labels?)',
+    }));
+
+  test('26: a missing required check is named before a queued one', () =>
+    expect(
+      decide(
+        mergeable({
+          checks: { state: 'pending', names: ['lint'], queued: ['lint'] },
+          requiredChecks: ['lint', 'test'],
+          headFirstSeenAt: minutesAgo(46),
+        }),
+      ),
+    ).toEqual({ kind: 'park', reason: 'no CI result: missing test' }));
+
+  test('27: a queued check before the deadline still waits', () =>
+    expect(
+      decide(
+        mergeable({
+          checks: { state: 'pending', names: ['preflight'], queued: ['preflight'] },
+          requiredChecks: ['preflight'],
+          headFirstSeenAt: minutesAgo(5),
+        }),
+      ),
+    ).toEqual({ kind: 'wait', on: 'ci' }));
+
   test('27: required check missing waits even when checks are green', () =>
     expect(
       decide(

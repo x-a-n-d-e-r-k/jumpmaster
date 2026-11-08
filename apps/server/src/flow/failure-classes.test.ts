@@ -985,6 +985,94 @@ describe('§16 CI and forge data', () => {
     expect(item(h).reason).toMatch(/^no CI result/);
   });
 
+  test('a no-CI-result park clears when the checks finally report green', async () => {
+    const h = await harness({ zone: { ciRequired: true } });
+    requireCi(h);
+    await toApproved(h, 'sha1');
+    h.forge.state.checks.set('sha1', { state: 'pending', names: ['ci'], queued: ['ci'] });
+    h.at(h.zone.ciDeadlineMinutes + 5);
+    await h.reconcile();
+    await h.reconcile();
+    expect(item(h)).toMatchObject({
+      state: 'parked',
+      reason: 'no CI result: ci queued and never started (is a runner available for its labels?)',
+    });
+    h.forge.state.checks.set('sha1', { state: 'success', names: ['ci'] });
+    h.at(6); // past the probe interval (h.at advances the clock)
+    await h.reconcile();
+    await h.reconcile();
+    expect(item(h)).toMatchObject({ state: 'done', reason: 'merged' });
+  });
+
+  test('a no-CI-result park probes at most every few minutes', async () => {
+    const h = await harness({ zone: { ciRequired: true } });
+    requireCi(h);
+    await toApproved(h, 'sha1');
+    h.forge.state.checks.set('sha1', { state: 'pending', names: ['ci'] });
+    h.at(h.zone.ciDeadlineMinutes + 5);
+    await h.reconcile();
+    await h.reconcile();
+    await h.reconcile(); // parked, and probed once while still pending
+    expect(item(h).state).toBe('parked');
+    h.forge.state.checks.set('sha1', { state: 'success', names: ['ci'] });
+    h.at(2);
+    await h.reconcile();
+    expect(item(h).state).toBe('parked'); // probed under five minutes ago
+    h.at(4);
+    await h.reconcile();
+    await h.reconcile();
+    expect(item(h)).toMatchObject({ state: 'done', reason: 'merged' });
+  });
+
+  test('a no-CI-result park ignores a failed forge read', async () => {
+    const h = await harness({ zone: { ciRequired: true } });
+    requireCi(h);
+    await toApproved(h, 'sha1');
+    h.forge.state.checks.set('sha1', { state: 'pending', names: ['ci'] });
+    h.at(h.zone.ciDeadlineMinutes + 5);
+    await h.reconcile();
+    await h.reconcile();
+    const parked = item(h);
+    h.forge.state.checks.set('sha1', { state: 'success', names: ['ci'] });
+    h.forge.author.failNext('compare', { status: 502 });
+    h.at(6);
+    await h.reconcile();
+    expect(item(h)).toMatchObject({ state: 'parked', reason: parked.reason });
+  });
+
+  test('CI that fails after a no-CI-result park sends the item to heal', async () => {
+    const h = await harness({ zone: { ciRequired: true } });
+    requireCi(h);
+    await toApproved(h, 'sha1');
+    h.forge.state.checks.set('sha1', { state: 'pending', names: ['ci'] });
+    h.at(h.zone.ciDeadlineMinutes + 5);
+    await h.reconcile();
+    await h.reconcile();
+    h.forge.state.checks.set('sha1', { state: 'failure', names: ['ci'] });
+    h.at(6);
+    await h.reconcile();
+    await h.reconcile();
+    expect(item(h).state).not.toBe('parked');
+    expect(h.queuedRoles()).toContain('heal');
+  });
+
+  test('a no-CI-result park stays parked while CI is still out, whatever its reason now says', async () => {
+    const h = await harness({ zone: { ciRequired: true } });
+    requireCi(h);
+    await toApproved(h, 'sha1');
+    h.forge.state.checks.set('sha1', { state: 'pending', names: ['ci'], queued: ['ci'] });
+    h.at(h.zone.ciDeadlineMinutes + 5);
+    await h.reconcile();
+    await h.reconcile();
+    const parked = item(h);
+    h.forge.state.checks.set('sha1', { state: 'pending', names: ['ci'] }); // started, still running
+    h.at(6);
+    await h.reconcile();
+    await h.reconcile();
+    expect(item(h)).toMatchObject({ state: 'parked', reason: parked.reason });
+    expect(count(h, 'merge')).toBe(0);
+  });
+
   test("missing pipeline: deadline parks with 'no pipeline'", async () => {
     // With protection required, ciRequired and no required check is already unsafe protection.
     const h = await harness({ zone: { ciRequired: true, requireBranchProtection: false } });

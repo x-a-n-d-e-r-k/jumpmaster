@@ -314,10 +314,20 @@ export function decide(s: Snapshot): Action {
       return { kind: 'park', reason: 'no pipeline' };
     }
     const missing = s.requiredChecks.filter((n) => !s.checks.names.includes(n));
-    return {
-      kind: 'park',
-      reason: missing.length > 0 ? `no CI result: missing ${missing.join(', ')}` : 'no CI result',
-    };
+    if (missing.length > 0) {
+      return { kind: 'park', reason: `no CI result: missing ${missing.join(', ')}` };
+    }
+    // A check that never left the queue usually means no runner matches its labels.
+    const queued = s.checks.queued ?? [];
+    const stuck =
+      s.requiredChecks.length > 0 ? queued.filter((n) => s.requiredChecks.includes(n)) : queued;
+    if (stuck.length > 0) {
+      return {
+        kind: 'park',
+        reason: `no CI result: ${stuck.join(', ')} queued and never started (is a runner available for its labels?)`,
+      };
+    }
+    return { kind: 'park', reason: 'no CI result' };
   }
   // 27
   return { kind: 'wait', on: 'ci' };

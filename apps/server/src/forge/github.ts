@@ -77,7 +77,8 @@ export type ForgeReview = {
 };
 
 export type ChecksState = 'success' | 'pending' | 'failure' | 'none';
-export type ChecksFacts = { state: ChecksState; names: string[] };
+/** `queued`: check runs that have not started (no runner has picked them up). */
+export type ChecksFacts = { state: ChecksState; names: string[]; queued?: string[] };
 
 export type CompareFacts = {
   aheadBy: number;
@@ -228,6 +229,12 @@ function toPullFacts(p: RawPull): PullFacts {
 const lastLine = (body: string): string => body.trimEnd().split('\n').pop() ?? '';
 
 type CheckRunFacts = { name: string; status: string; conclusion: string | null };
+
+/**
+ * Check-run and Actions job statuses that mean no runner has picked the work up. `waiting` and
+ * `pending` are holds (environment approval, concurrency), not a missing runner.
+ */
+const NOT_STARTED = new Set(['queued', 'requested']);
 
 export class GitHubForge implements Forge {
   private readonly octokit: Octokit;
@@ -586,7 +593,10 @@ export class GitHubForge implements Forge {
         : names.length === 0
           ? 'none'
           : 'success';
-    return { state, names };
+    const queued = [
+      ...new Set(runs.filter((r) => NOT_STARTED.has(r.status)).map((r) => r.name)),
+    ].sort();
+    return queued.length > 0 ? { state, names, queued } : { state, names };
   }
 
   /**
