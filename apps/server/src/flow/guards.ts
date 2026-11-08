@@ -119,6 +119,9 @@ type Pkg = {
   peerDependencies?: Record<string, string>;
   overrides?: unknown;
   resolutions?: unknown;
+  pnpm?: unknown;
+  packageManager?: unknown;
+  devEngines?: unknown;
   jest?: unknown;
   mocha?: unknown;
   vitest?: unknown;
@@ -173,54 +176,41 @@ function allDeps(p: Pkg): Record<string, string> {
   return Object.assign({}, ...DEP_FIELDS.map((f) => p[f] ?? {}));
 }
 
-const NON_REGISTRY = /^(npm:|file:|link:|git|http|github:)/;
+const NON_REGISTRY = /^(npm:|file:|link:|git|http|github:|workspace:|catalog:|portal:|jsr:)/;
 
-type LockPackages = Record<
-  string,
-  { version?: string; resolved?: string; hasInstallScript?: boolean }
->;
-
-function parseLock(text: string | null): LockPackages | null {
-  if (text === null) return null;
-  try {
-    const v = JSON.parse(text) as { packages?: LockPackages };
-    return v.packages && typeof v.packages === 'object' ? v.packages : null;
-  } catch {
-    return null;
-  }
+/** Whether the dependency fields differ (the lockfile must then be checked). */
+export function dependenciesChanged(basePkg: string | null, headPkg: string | null): boolean {
+  return !same(allDeps(parsePkg(basePkg)), allDeps(parsePkg(headPkg)));
 }
 
-const lockName = (key: string): string => key.slice(key.lastIndexOf('node_modules/') + 13);
+/**
+ * Whether `packageManager` pins pnpm 10 or later, which runs no dependency install script unless
+ * allow-listed (`pnpm.onlyBuiltDependencies`, itself guarded by `gateToolChanges`).
+ */
+export function pnpmBlocksBuilds(pkgText: string | null): boolean {
+  const pm = parsePkg(pkgText).packageManager;
+  const major = typeof pm === 'string' ? /^pnpm@(\d+)(?:[.+]|$)/.exec(pm)?.[1] : undefined;
+  return major !== undefined && Number(major) >= 10;
+}
 
-/** Changes that could swap or wrap the tools the gates run (see the plan's report-string order). */
+const asRecord = (v: unknown): Record<string, unknown> =>
+  v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+
+/**
+ * package.json changes that could swap or wrap the tools the gates run. Lockfile contents are
+ * judged separately by `lockfileChanges`.
+ */
 export function gateToolChanges(
   gates: GateSpec[],
   basePkg: string | null,
   headPkg: string | null,
-  baseLock: string | null,
-  headLock: string | null,
 ): string[] {
   const base = parsePkg(basePkg);
   const head = parsePkg(headPkg);
   const out: string[] = [];
 
-  const headPackages = parseLock(headLock);
-  const basePackages = parseLock(baseLock) ?? {};
-  if (headPackages) {
-    for (const [key, entry] of Object.entries(headPackages)) {
-      if (!key || !entry.hasInstallScript) continue;
-      const before = basePackages[key];
-      if (!before || before.version !== entry.version || before.resolved !== entry.resolved) {
-        out.push(`install script: ${lockName(key)}`);
-      }
-    }
-  }
-
   const baseDeps = allDeps(base);
   const headDeps = allDeps(head);
-  const depsChanged = !same(baseDeps, headDeps);
-  if (depsChanged && headPackages === null) out.push('lockfile unreadable');
-
   const nonRegistry = new Set<string>();
   for (const [dep, spec] of Object.entries(headDeps)) {
     if (baseDeps[dep] !== spec && NON_REGISTRY.test(spec)) {
@@ -230,6 +220,18 @@ export function gateToolChanges(
   }
   for (const key of ['overrides', 'resolutions'] as const) {
     if (!same(base[key], head[key])) out.push(`${key} changed`);
+  }
+  // pnpm reads overrides, build allow-lists, patches and more from here: any change counts.
+  const basePnpm = asRecord(base.pnpm);
+  const headPnpm = asRecord(head.pnpm);
+  if (!same(base.pnpm, head.pnpm)) {
+    const keys = [...new Set([...Object.keys(basePnpm), ...Object.keys(headPnpm)])];
+    const changed = keys.filter((k) => !same(basePnpm[k], headPnpm[k]));
+    if (changed.length === 0) out.push('pnpm changed');
+    for (const k of changed) out.push(`pnpm.${k} changed`);
+  }
+  if (!same(base.packageManager, head.packageManager) || !same(base.devEngines, head.devEngines)) {
+    out.push('package manager changed');
   }
   for (const key of ['jest', 'mocha', 'vitest'] as const) {
     if (!same(base[key], head[key])) out.push(`${key} config changed`);
@@ -250,6 +252,286 @@ export function gateToolChanges(
     }
   }
   return out;
+}
+
+// ---- lockfiles ---------------------------------------------------------------------------------
+
+/** Lockfile names, in the order a directory's lockfile is chosen. */
+export const LOCKFILES = [
+  'npm-shrinkwrap.json',
+  'package-lock.json',
+  'pnpm-lock.yaml',
+  'yarn.lock',
+  'bun.lock',
+  'bun.lockb',
+];
+
+const UNREADABLE = 'lockfile unreadable';
+
+type NpmPackages = Record<
+  string,
+  { version?: string; resolved?: string; hasInstallScript?: boolean }
+>;
+
+function parseNpmLock(text: string): NpmPackages | null {
+  try {
+    const v = JSON.parse(text) as { packages?: NpmPackages };
+    return v.packages && typeof v.packages === 'object' ? v.packages : null;
+  } catch {
+    return null;
+  }
+}
+
+const npmName = (key: string): string => key.slice(key.lastIndexOf('node_modules/') + 13);
+
+function npmLockChanges(baseText: string | null, headText: string): string[] {
+  const head = parseNpmLock(headText);
+  const base = baseText === null ? {} : parseNpmLock(baseText);
+  if (!head || !base) return [UNREADABLE];
+  const out: string[] = [];
+  for (const [key, entry] of Object.entries(head)) {
+    if (!key || !entry.hasInstallScript) continue;
+    const before = base[key];
+    if (!before || before.version !== entry.version || before.resolved !== entry.resolved) {
+      out.push(`install script: ${npmName(key)}`);
+    }
+  }
+  return out;
+}
+
+/** A parsed pnpm lockfile: each top-level block's text, and each entry's text by key. */
+export type PnpmLock = {
+  major: number;
+  blocks: Map<string, string[]>;
+  packages: Map<string, string>;
+  snapshots: Map<string, string>;
+};
+
+/** Blocks whose any change is reported as `<key> changed`. */
+const PNPM_DIFFED = [
+  'settings',
+  'overrides',
+  'patchedDependencies',
+  'pnpmfileChecksum',
+  'catalogs',
+  'packageExtensionsChecksum',
+  'ignoredOptionalDependencies',
+];
+/** Blocks holding dependency `version:` values: importers (v9) and a v6 single project's own. */
+const PNPM_IMPORTERS = ['importers', 'dependencies', 'devDependencies', 'optionalDependencies'];
+const PNPM_TOP = new Set([
+  'lockfileVersion',
+  'packages',
+  'snapshots',
+  ...PNPM_DIFFED,
+  ...PNPM_IMPORTERS,
+]);
+
+/** A YAML mapping line's key (plain, single- or double-quoted) and inline value; null if odd. */
+function splitKey(s: string): { key: string; value: string } | null {
+  let key = '';
+  let rest: string;
+  if (s.startsWith("'")) {
+    let i = 1;
+    for (;;) {
+      const j = s.indexOf("'", i);
+      if (j < 0) return null;
+      key += s.slice(i, j);
+      if (s[j + 1] !== "'") {
+        rest = s.slice(j + 1);
+        break;
+      }
+      key += "'";
+      i = j + 2;
+    }
+  } else if (s.startsWith('"')) {
+    const j = s.indexOf('"', 1);
+    if (j < 0 || s.slice(1, j).includes('\\')) return null;
+    key = s.slice(1, j);
+    rest = s.slice(j + 1);
+  } else {
+    const j = s.indexOf(': ');
+    if (j >= 0) {
+      key = s.slice(0, j);
+      rest = s.slice(j);
+    } else if (s.endsWith(':')) {
+      key = s.slice(0, -1);
+      rest = ':';
+    } else {
+      return null;
+    }
+  }
+  if (key === '') return null;
+  if (rest === ':') return { key, value: '' };
+  return rest.startsWith(': ') ? { key, value: rest.slice(2) } : null;
+}
+
+/**
+ * A line-oriented reader for pnpm lockfiles v6–v9 (no YAML dependency). It refuses (null) on
+ * anything it does not expect: document markers, comments, tabs, odd or jumping indentation,
+ * unknown top-level keys, duplicate keys or another lockfile version.
+ */
+export function parsePnpmLock(text: string): PnpmLock | null {
+  if (text.includes('\t')) return null;
+  const blocks = new Map<string, string[]>();
+  const sections = {
+    packages: new Map<string, string[]>(),
+    snapshots: new Map<string, string[]>(),
+  };
+  let top: string | null = null;
+  let topInline = false;
+  let entry: string[] | null = null;
+  let entryInline = false;
+  let prev = 0;
+  for (const line of text.replace(/\r\n/g, '\n').split('\n')) {
+    if (line.trim() === '') continue;
+    const trimmed = line.trimStart();
+    if (/^(---|\.\.\.)(\s|$)/.test(line) || trimmed.startsWith('#')) return null;
+    const indent = line.length - trimmed.length;
+    if (indent % 2 !== 0 || indent > prev + 2) return null;
+    prev = indent;
+    if (indent === 0) {
+      const kv = splitKey(line);
+      if (!kv || !PNPM_TOP.has(kv.key) || blocks.has(kv.key)) return null;
+      top = kv.key;
+      topInline = kv.value !== '';
+      blocks.set(top, [kv.value]);
+      entry = null;
+      continue;
+    }
+    if (top === null || topInline) return null;
+    blocks.get(top)?.push(line);
+    if (top !== 'packages' && top !== 'snapshots') continue;
+    const map = sections[top];
+    if (indent === 2) {
+      const kv = splitKey(trimmed);
+      if (!kv || map.has(kv.key)) return null;
+      entry = [kv.value];
+      entryInline = kv.value !== '';
+      map.set(kv.key, entry);
+    } else {
+      if (!entry || entryInline) return null;
+      entry.push(line);
+    }
+  }
+  const version = blocks.get('lockfileVersion')?.[0]?.replace(/^(['"])(.*)\1$/, '$2') ?? '';
+  if (!/^\d+(\.\d+)?$/.test(version)) return null;
+  const major = Math.floor(Number(version));
+  if (major < 6 || major > 9) return null;
+  const join = (m: Map<string, string[]>) => new Map([...m].map(([k, v]) => [k, v.join('\n')]));
+  return { major, blocks, packages: join(sections.packages), snapshots: join(sections.snapshots) };
+}
+
+/** `name` and `version` of an entry key (`/` prefix of v6, peer and patch suffixes dropped). */
+function pnpmKeyName(key: string): { name: string; version: string } {
+  let k = key.startsWith('/') ? key.slice(1) : key;
+  const paren = k.indexOf('(');
+  if (paren >= 0) k = k.slice(0, paren);
+  const at = k.lastIndexOf('@');
+  return at > 0 ? { name: k.slice(0, at), version: k.slice(at + 1) } : { name: k, version: '' };
+}
+
+const PLAIN_RESOLUTION = /^ {4}resolution: \{integrity: [^,{}\s]+\}$/m;
+
+/** Dependencies of one entry whose value is not a plain version (an alias, link or file). */
+function nonRegistryDeps(text: string): string[] {
+  const out: string[] = [];
+  let inDeps = false;
+  for (const line of text.split('\n')) {
+    if (/^ {4}\S/.test(line)) inDeps = /^ {4}(dependencies|optionalDependencies):$/.test(line);
+    else if (inDeps && /^ {6}\S/.test(line)) {
+      const kv = splitKey(line.trimStart());
+      if (!kv || !/^\d/.test(kv.value)) out.push(kv?.key ?? line.trim());
+    }
+  }
+  return out;
+}
+
+/** Every `version:` value in an importers-like block, by the path of keys above it. */
+function depVersions(lines: string[]): Map<string, { dep: string; version: string }> {
+  const out = new Map<string, { dep: string; version: string }>();
+  const stack: string[] = [];
+  for (const line of lines.slice(1)) {
+    const trimmed = line.trimStart();
+    const level = (line.length - trimmed.length) / 2;
+    const kv = splitKey(trimmed);
+    if (!kv) continue;
+    stack.length = level;
+    stack[level] = kv.key;
+    if (kv.key === 'version') {
+      out.set(stack.slice(0, level).join('\0'), { dep: stack[level - 1] ?? '', version: kv.value });
+    }
+  }
+  return out;
+}
+
+function pnpmLockChanges(
+  baseText: string | null,
+  headText: string,
+  opts: { pnpmBlocksBuilds: boolean },
+): string[] {
+  const head = parsePnpmLock(headText);
+  const base: PnpmLock | null =
+    baseText === null
+      ? { major: head?.major ?? 9, blocks: new Map(), packages: new Map(), snapshots: new Map() }
+      : parsePnpmLock(baseText);
+  if (!head || !base) return [UNREADABLE];
+  const out: string[] = [];
+  const text = (l: PnpmLock, key: string) => l.blocks.get(key)?.join('\n');
+  for (const key of PNPM_DIFFED) {
+    if (text(base, key) !== text(head, key)) out.push(`${key} changed`);
+  }
+  for (const key of PNPM_IMPORTERS) {
+    const before = depVersions(base.blocks.get(key) ?? []);
+    for (const [path, { dep, version }] of depVersions(head.blocks.get(key) ?? [])) {
+      if (before.get(path)?.version !== version && !/^\d/.test(version)) {
+        out.push(`${dep}: non-registry version ${version}`);
+      }
+    }
+  }
+  for (const section of ['packages', 'snapshots'] as const) {
+    for (const [key, entry] of head[section]) {
+      const before = base[section].get(key);
+      if (before === entry) continue;
+      const { name, version } = pnpmKeyName(key);
+      if (section === 'packages' && !PLAIN_RESOLUTION.test(entry)) {
+        out.push(`${name}: non-registry resolution`);
+        continue;
+      }
+      if (before !== undefined) {
+        out.push(`lockfile entry changed: ${key}`);
+        continue;
+      }
+      for (const dep of nonRegistryDeps(entry)) out.push(`${name}: non-registry dependency ${dep}`);
+      if (section !== 'packages') continue;
+      if (/^ {4}requiresBuild: true$/m.test(entry)) out.push(`install script: ${name}`);
+      else if (!opts.pnpmBlocksBuilds) {
+        out.push(`dependency added: ${name}@${version} (install scripts may run)`);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Lockfile changes that could swap or wrap the tools the gates run, judged by the file's name.
+ * A missing head lockfile, an empty read or anything unparseable is `lockfile unreadable`, never
+ * "everything added"; a missing base lockfile makes every entry new.
+ */
+export function lockfileChanges(
+  path: string,
+  baseText: string | null,
+  headText: string | null,
+  opts: { pnpmBlocksBuilds: boolean } = { pnpmBlocksBuilds: false },
+): string[] {
+  const file = basename(path);
+  if (file !== 'package-lock.json' && file !== 'npm-shrinkwrap.json' && file !== 'pnpm-lock.yaml') {
+    return [`lockfile format not supported: ${file}`];
+  }
+  if (headText === null || headText === '' || baseText === '') return [UNREADABLE];
+  return file === 'pnpm-lock.yaml'
+    ? pnpmLockChanges(baseText, headText, opts)
+    : npmLockChanges(baseText, headText);
 }
 
 // ---- branch protection -------------------------------------------------------------------------

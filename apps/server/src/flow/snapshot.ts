@@ -24,8 +24,12 @@ import { type ForgePair, type OpResult, opKeys } from '../outbox.js';
 import type { Snapshot } from './decide.js';
 import {
   branchProtectionProblems,
+  dependenciesChanged,
   gateScriptChanges,
   gateToolChanges,
+  LOCKFILES,
+  lockfileChanges,
+  pnpmBlocksBuilds,
   protectedPathHits,
 } from './guards.js';
 
@@ -108,15 +112,6 @@ function latestDecisive(reviews: ForgeReview[]): ForgeReview[] {
 
 const isPackageJson = (p: string): boolean => p === 'package.json' || p.endsWith('/package.json');
 
-const LOCKFILES = [
-  'npm-shrinkwrap.json',
-  'package-lock.json',
-  'pnpm-lock.yaml',
-  'yarn.lock',
-  'bun.lock',
-  'bun.lockb',
-];
-
 /** A 404 is `text: null`; a thrown read is the forge being unavailable (the pass waits). */
 async function readFile(
   forges: ForgePair,
@@ -142,37 +137,64 @@ async function gateChanges(
 ): Promise<{ scripts: string[]; tools: string[] }> {
   const scripts = new Set<string>();
   const tools = new Set<string>();
-  const paths = new Set<string>();
+  const pkgPaths = new Set<string>();
+  // Every lockfile in the PR is checked, and each changed package.json's lockfile when its
+  // dependencies change; a workspace's packages share one lockfile, checked once.
+  const lockPaths = new Set<string>();
   for (const f of files) {
     for (const p of [f.path, f.previousPath]) {
-      if (p && isPackageJson(p)) paths.add(p);
-      // A lockfile changed on its own can still swap a gate tool: check its package.json too.
-      else if (p && LOCKFILES.includes(basename(p))) paths.add(join(dirname(p), 'package.json'));
+      if (p && isPackageJson(p)) pkgPaths.add(p);
+      else if (p && LOCKFILES.includes(basename(p))) lockPaths.add(p);
     }
   }
-  for (const path of paths) {
+  for (const path of pkgPaths) {
     const [basePkg, headPkg] = await Promise.all([
       readFile(forges, mergeBaseSha, path, unavailable),
       readFile(forges, headSha, path, unavailable),
     ]);
     if (!basePkg.ok || !headPkg.ok) continue; // marked unavailable: decide waits
     for (const s of gateScriptChanges(zone.gates, basePkg.text, headPkg.text)) scripts.add(s);
-    const lockPath = join(dirname(path), 'package-lock.json');
-    const [baseLock, headLock] = await Promise.all([
-      readFile(forges, mergeBaseSha, lockPath, unavailable),
-      readFile(forges, headSha, lockPath, unavailable),
+    for (const t of gateToolChanges(zone.gates, basePkg.text, headPkg.text)) tools.add(t);
+    if (!dependenciesChanged(basePkg.text, headPkg.text)) continue;
+    const lock = await findLockfile(forges, headSha, dirname(path), unavailable);
+    if (lock === undefined) continue;
+    if (lock === null) tools.add('lockfile not found');
+    else lockPaths.add(lock);
+  }
+  for (const path of lockPaths) {
+    const pkgPath = join(dirname(path), 'package.json');
+    const [baseLock, headLock, headPkg] = await Promise.all([
+      readFile(forges, mergeBaseSha, path, unavailable),
+      readFile(forges, headSha, path, unavailable),
+      readFile(forges, headSha, pkgPath, unavailable),
     ]);
-    for (const t of gateToolChanges(
-      zone.gates,
-      basePkg.text,
-      headPkg.text,
-      baseLock.ok ? baseLock.text : null,
-      headLock.ok ? headLock.text : null,
-    )) {
-      tools.add(t);
-    }
+    if (!baseLock.ok || !headLock.ok || !headPkg.ok) continue;
+    const opts = { pnpmBlocksBuilds: pnpmBlocksBuilds(headPkg.text) };
+    for (const t of lockfileChanges(path, baseLock.text, headLock.text, opts)) tools.add(t);
   }
   return { scripts: [...scripts], tools: [...tools] };
+}
+
+/**
+ * The lockfile governing a directory at `ref`: the first lockfile found walking up to the repo
+ * root. null when there is none; undefined when a read failed (marked unavailable).
+ */
+async function findLockfile(
+  forges: ForgePair,
+  ref: string,
+  dir: string,
+  unavailable: (method: string, err?: unknown) => void,
+): Promise<string | null | undefined> {
+  for (let d = dir; ; d = dirname(d)) {
+    const here = d === '.' ? '' : d;
+    for (const name of LOCKFILES) {
+      const path = here ? `${here}/${name}` : name;
+      const read = await readFile(forges, ref, path, unavailable);
+      if (!read.ok) return undefined;
+      if (read.text !== null) return path;
+    }
+    if (here === '') return null;
+  }
 }
 
 /**

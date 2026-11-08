@@ -79,6 +79,64 @@ describe('buildSnapshot', () => {
     expect((await snapshotOf()).gateToolChanges).toEqual(['install script: evil']);
   });
 
+  describe('pnpm workspaces', () => {
+    const lockV9 = (...keys: string[]): string =>
+      [
+        "lockfileVersion: '9.0'",
+        'packages:',
+        ...keys.map((k) => `  '${k}':\n    resolution: {integrity: sha512-${k.length}}`),
+      ].join('\n');
+    const deps = (d: Record<string, string>, extra: Record<string, unknown> = {}) =>
+      JSON.stringify({ name: 'a', devDependencies: d, ...extra });
+    const addTypesNode = (rootPkg: string) => {
+      w.f.state.pullFiles.set(1, {
+        files: [{ path: 'packages/a/package.json' }, { path: 'pnpm-lock.yaml' }],
+        complete: true,
+      });
+      w.f.state.files.set('base0:packages/a/package.json', deps({}));
+      w.f.state.files.set('sha1:packages/a/package.json', deps({ '@types/node': '^26' }));
+      w.f.state.files.set('base0:pnpm-lock.yaml', lockV9('vitest@4.1.0'));
+      w.f.state.files.set('sha1:pnpm-lock.yaml', lockV9('vitest@4.1.0', '@types/node@26.6.5'));
+      w.f.state.files.set('sha1:package.json', rootPkg);
+    };
+
+    test('reads pnpm-lock.yaml at the repo root for a nested package.json', async () => {
+      addTypesNode(JSON.stringify({ name: 'root' }));
+      expect((await snapshotOf()).gateToolChanges).toEqual([
+        'dependency added: @types/node@26.6.5 (install scripts may run)',
+      ]);
+    });
+
+    test('the root package.json pinning pnpm 10 accepts a new registry dependency', async () => {
+      addTypesNode(JSON.stringify({ name: 'root', packageManager: 'pnpm@10.4.1' }));
+      expect((await snapshotOf()).gateToolChanges).toEqual([]);
+    });
+
+    test('a dependency change with no lockfile anywhere fails closed', async () => {
+      w.f.state.pullFiles.set(1, { files: [{ path: 'packages/a/package.json' }], complete: true });
+      w.f.state.files.set('base0:packages/a/package.json', deps({}));
+      w.f.state.files.set('sha1:packages/a/package.json', deps({ x: '^1' }));
+      expect((await snapshotOf()).gateToolChanges).toEqual(['lockfile not found']);
+    });
+
+    test('a dependency change in a yarn project names the unsupported lockfile', async () => {
+      w.f.state.pullFiles.set(1, { files: [{ path: 'packages/a/package.json' }], complete: true });
+      w.f.state.files.set('base0:packages/a/package.json', deps({}));
+      w.f.state.files.set('sha1:packages/a/package.json', deps({ x: '^1' }));
+      w.f.state.files.set('sha1:yarn.lock', '# yarn lockfile v1\n');
+      expect((await snapshotOf()).gateToolChanges).toEqual([
+        'lockfile format not supported: yarn.lock',
+      ]);
+    });
+
+    test('a package.json change without dependency changes reads no lockfile', async () => {
+      w.f.state.pullFiles.set(1, { files: [{ path: 'packages/a/package.json' }], complete: true });
+      w.f.state.files.set('base0:packages/a/package.json', deps({ x: '^1' }));
+      w.f.state.files.set('sha1:packages/a/package.json', deps({ x: '^1' }, { version: '2.0.0' }));
+      expect((await snapshotOf()).gateToolChanges).toEqual([]);
+    });
+  });
+
   test('a thrown package.json read is forge unavailability (the pass waits), not a park', async () => {
     w.f.state.pullFiles.set(1, { files: [{ path: 'pkg/package.json' }], complete: true });
     w.f.author.failNext('getFileAt', '5xx');
