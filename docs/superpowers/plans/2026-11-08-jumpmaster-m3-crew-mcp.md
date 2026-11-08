@@ -20,7 +20,7 @@
 - §7.1 applies to everything the crew reads. Only content by users with write, maintain or admin permission enters a crew prompt as instructions, and a failed lookup counts as untrusted. Agent output (verdicts, drop reasons) is fenced as untrusted data.
 - Fable: "enable Fable roles only where included; otherwise default those roles to Opus … never auto-buy credits" (§12.2).
 - Defaults keep every M2 zone behaving exactly as it does now: `crew.enabled` defaults to `false`, `claude.plan` to `"pro"` (no Fable), and `mcp.enabled` to `false`.
-- Add DB changes as migrations v5 to v10, in the task order below. Never edit `schema.sql` or an earlier migration.
+- Add DB changes as migrations from v5 on, in the order they land (the MCP server's is v14). Never edit `schema.sql` or an earlier migration.
 - No secret value is ever printed, logged, stored in the database, placed in argv or URLs, or written into a forge body. MCP tokens are stored only as SHA-256 hashes.
 
 ## Rulings on spec gaps
@@ -479,7 +479,12 @@ test('an unknown zone on /zones/:id/goals is 404', ...)
 
 The claims listed under Review Focus as resting on unit tests are accepted on those tests.
 
-### Task 12: Zone-scoped MCP server (after the gate; migration v10)
+### Task 12: Zone-scoped MCP server (after the gate; migration v14)
+
+> Revised after a red team: v14 also widens `briefings.source` to `mcp`, tokens carry a label and
+> `last_used_at` with a list route, writes use the crew's protocol schema and are refused with the
+> crew disabled or under a credits stop, batches are refused, and writes have a per-token budget
+> and an open-briefing cap. See the MCP section of `docs/runbooks/m3-crew.md`.
 
 **Files:**
 - Create: `apps/server/src/mcp/tokens.ts`, `apps/server/src/mcp/server.ts`
@@ -488,7 +493,7 @@ The claims listed under Review Focus as resting on unit tests are accepted on th
 
 **Interfaces:**
 - Config (top level): `mcp: { enabled: boolean = false; maxBodyBytes: number = 262_144 }`. When it is disabled, `/mcp` isn't registered (404).
-- Tables (v10): `mcp_tokens(id PK, token_hash UNIQUE, zone_id, scope CHECK IN ('read','write'), expires_at, created_at, revoked_at)` and `mcp_audit(id PK, token_id, zone_id, tool, args_sha256, outcome CHECK IN ('ok','refused','error'), detail, at)`.
+- Tables (v14): `mcp_tokens(id PK, token_hash UNIQUE, zone_id, scope CHECK IN ('read','write'), expires_at, created_at, revoked_at)` and `mcp_audit(id PK, token_id, zone_id, tool, args_sha256, outcome CHECK IN ('ok','refused','error'), detail, at)`.
 - Produces:
   - `type McpPrincipal = { tokenId: number; zoneId: string; scope: 'read' | 'write' }`.
   - `mintMcpToken(db, o: { zoneId: string; scope: 'read' | 'write'; days: number }, now): { id: number; token: string }`. The token is `jmm_` plus 32 random bytes in base64url, and `days` is 1 to 90.

@@ -196,3 +196,103 @@ lease) is marked lost and its later reports are refused, so credits it used are 
 A Fable drop on credits also disables Fable until you rule **Re-enable Fable**. If your plan
 doesn't include Fable, set `claude.plan` correctly and restart. `ctl briefings` lists open
 briefings with their option ids, so you can rule from a terminal.
+
+## MCP
+
+Jumpmaster can serve a zone-scoped MCP server at `POST /mcp` for Command's own Claude Code. It
+reads a zone's state and, with a write token, proposes staged issues and raises briefings through
+the same action core as a crew drop. It never merges, reviews, pushes, promotes, rules or edits
+`GOAL.md`, and every forge write still goes through the outbox as the author identity.
+
+### Enable
+
+```json
+"mcp": { "enabled": true, "maxBodyBytes": 262144, "writesPerHour": 20, "maxOpenBriefings": 5 }
+```
+
+The setting is read once at start: **restart the server** after changing it. With
+`enabled: false` (the default) `/mcp` and the token routes below are not registered and answer
+404. The other fields are optional and default to the values shown.
+
+### Mint, list and revoke tokens
+
+Tokens are issued only by the operator control route; `ctl` never mints or prints one. A token
+belongs to one zone and one scope (`read` or `write`), lasts `days` (1 to 90), and is returned
+**once**: the server keeps only its SHA-256. Read the operator token from the environment so it
+never lands in argv:
+
+```bash
+URL=http://127.0.0.1:7420
+auth() { printf 'Authorization: Bearer %s\n' "$JM_OPERATOR_TOKEN"; }
+
+# Mint (the response holds the token; store it in a password manager)
+auth | curl -sS -H @- -H 'content-type: application/json' \
+  -d '{"zoneId":"main","scope":"write","days":30,"label":"laptop"}' "$URL/api/control/mcp-tokens"
+
+# List: id, zone, scope, label, created, expires, last used, revoked. Never the token or hash.
+auth | curl -sS -H @- "$URL/api/control/mcp-tokens"
+
+# Revoke by id (takes effect on the next call)
+auth | curl -sS -H @- -X DELETE "$URL/api/control/mcp-tokens/3"
+```
+
+Mint and revoke are recorded in `mcp_audit` beside every tool call, so a token's whole life is in
+one table. A `last used` time you don't recognise means the token is in someone else's hands:
+revoke it.
+
+### Connect Claude Code
+
+```bash
+claude mcp add --scope user --transport http jumpmaster http://127.0.0.1:7420/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
+Use the user scope: Claude Code stores the header in its config, and a project `.mcp.json` could
+be committed. Connect through a host listed in `listen.allowedHosts` (by default `127.0.0.1:<port>`
+and `localhost:<port>`). The server is stateless streamable HTTP with JSON responses; a client
+must accept both `application/json` and `text/event-stream`, as Claude Code does.
+
+**Rehearsal (test repository):** enable MCP and restart, mint a write token, connect Claude Code,
+ask it to read the goals and file one staged issue, and see the issue appear on the goals page
+and on the forge under the staged label. Then confirm that a token for another zone cannot see
+this zone's items and that a revoked or expired token gets 401.
+
+### What a token can do
+
+- **Read** (`read` and `write` tokens): `get_goals`, `list_work` (titles, states, PRs, park
+  reasons; no bodies), `get_work_item` (one issue with its body), `list_briefings`,
+  `list_rulings`, `get_queue` (zone mode, kill switch, the global usage gate with any credits
+  stop, the zone's queued and active drops and unresolved forge writes). Text from the forge or
+  from agents comes fenced and labelled `(data)` or `(data, untrusted)`; your ruling notes and
+  `GOAL.md` are labelled `(trusted)`. Jumpmaster op markers are removed and configured secrets
+  redacted.
+- **Write** (`write` tokens only): `file_staged_issues` (up to 5 issues per call) and
+  `raise_briefing` (up to 3 per call, options with no effect). They use the crew's own schema and
+  checks: objective on the ladder, agent-ready format, no duplicate, a free `maxStaged` slot, zone
+  active, kill switch off. Filed issues wait under the staged label for your **Promote** ruling,
+  as crew issues do. Assistant briefings show as "Raised by assistant (MCP)" on `/briefings`,
+  under an `mcp:` subject: they can never update a crew or server briefing, and raising one on the
+  subject of an open assistant briefing replaces its text.
+
+**Treat a read token like a read PAT.** For a private repository it reads issue titles and bodies,
+park reasons (which can quote gate output), briefings with their diagnoses, and your ruling notes.
+`get_queue` also shows two global facts on purpose: the usage gate and the kill switch. The plan
+tier and Fable status are never shown.
+
+### Refusals
+
+- 401: no token, an unknown, expired (from `expiresAt` on) or revoked token, or a token whose zone
+  is no longer in the config. Audited with no token material; at most 500 such rows are kept.
+- 403: a Host not in `allowedHosts`, or an `Origin` that is `null` or not an allowed host.
+- 400 for a JSON-RPC batch; 405 for `GET` or `DELETE /mcp`; 406 when `Accept` lacks either type;
+  415 for a non-JSON body; 413 above `maxBodyBytes`. Authentication runs before the body is read.
+- Tool calls answer with an error result, audited `refused`, when: a read token calls a write
+  tool; the arguments fail the schema; the zone's crew is disabled; a usage credits stop is in
+  force; the arguments contain a token or a configured secret; the token has made
+  `writesPerHour` write calls in the past hour; or the zone already holds `maxOpenBriefings` open
+  assistant briefings. In pause, observe or kill the action core refuses each item with the mode.
+- The audit stores tool, token, zone, a SHA-256 of the arguments, the outcome and a reason code or
+  counts, never the text you sent.
+
+Issues filed over MCP that are still `filing` when the crew is later disabled wait, as crew
+filings do, and are filed once it is enabled again.
