@@ -176,12 +176,20 @@ item's **PR** (the label on the issue does nothing). Then open the diagnose drop
 
 `overageStatus` in a drop's rate-limit event only says whether the account allows extra usage.
 When a drop reports `isUsingOverage: true` (it ran on usage credits), Jumpmaster stops starting
-new drops in every zone, for every role; running drops finish. The stop lifts by itself when the
-exhausted usage window resets (up to seven days for the weekly window), because work after that
-runs inside the plan again. A `credits:stop` briefing names the drop, both windows' use and
-resets, and offers **Run on credits now (until <time>)**, at most five hours, and **Noted**. During
-that time only the drop's own work item may keep using credits; any other drop on credits stops
-dispatch again. Set `usage.stopOnOverage: false` to keep the old behaviour (a briefing only).
+new drops in every zone, for every role; running drops finish. A drop's result only backs up its
+live events: it never starts a new stop for a drop already seen on credits. The stop lifts by
+itself when the exhausted usage window resets (a window at 98% or more; up to seven days for the
+weekly window), because work after that runs inside the plan again; the briefing names the window
+and why. After it lifts, one drop runs as a probe, and dispatch opens fully only once a drop
+reports live that it runs in plan; a probe on credits stops again. A `credits:stop` briefing names
+the drop, both windows' use and resets, and offers **Run on credits now** and **Noted**. Run on
+credits lasts until the five-hour window resets when that is the exhausted window (the time is
+shown), otherwise five hours. During that time the drop's own work item's queued drops lease first
+and alone; with none queued, one other drop may run (and bill) as a probe; any other drop on
+credits stops dispatch again, and when the time is up one drop probes as above. Set
+`usage.stopOnOverage: false` and restart the server to keep the old behaviour (a briefing only);
+the config is read once at start. A drop that outlives its lease (a server outage longer than the
+lease) is marked lost and its later reports are refused, so credits it used are never seen.
 
 A Fable drop on credits also disables Fable until you rule **Re-enable Fable**. If your plan
 doesn't include Fable, set `claude.plan` correctly and restart. `ctl briefings` lists open
