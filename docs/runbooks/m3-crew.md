@@ -45,7 +45,8 @@ And at the top level of the server config:
   including ones waiting to be promoted.
 - `maxRefute` caps refute attempts per issue. An attempt counts when the drop is queued, so a
   failed, killed or rate-limited refute uses one up.
-- `maxDropsPerDay` counts every crew drop (crew-lead, refute, diagnose) over a trailing 24 hours.
+- `maxDropsPerDay` counts crew drops (crew-lead, refute, diagnose) over a trailing 24 hours,
+  including failed and killed ones but not rate-limited or lost ones.
   Each ruling on a crew briefing starts a new crew-lead cycle, so a busy day can hit the cap; crew
   work then stops until the window rolls.
 
@@ -70,8 +71,10 @@ And at the top level of the server config:
    A workflow with `runs-on: self-hosted` and no runner stays queued, and the item parks with "no
    CI result: <check> queued and never started". Run a self-hosted runner in a container with no
    host mounts and no Docker socket: it runs code the agent wrote.
-7. Enabling the crew starts a crew-lead cycle on the next pass, so check first with the zone
-   paused: `ctl pause <zone>`, set `crew.enabled: true`, restart.
+7. Enabling the crew first queues one diagnose drop per open parked briefing, one at a time, then
+   any pending refutes, then a crew-lead cycle. Rule or clear old parked items first, or expect
+   those drops (and Fable use on a Fable plan) before the first cycle. Check with the zone paused:
+   `ctl pause <zone>`, set `crew.enabled: true`, restart.
 
 **Pass:** `/zones/<id>/goals` lists every objective with its status and marks the first open one
 Current objective (a parse error shows there too). The status page's Crew table lists the zone
@@ -80,14 +83,15 @@ with its next cycle and its Fable status (for `pro`: "plan pro does not include 
 
 ### 2. First cycle
 
-The first cycle runs on the next pass after resume. To ask for another one:
+The first crew-lead cycle runs after resume, once any diagnose and refute work ahead of it is done.
+To ask for another one:
 
 ```bash
 node apps/server/dist/ctl.js crew-cycle <zone>
 ```
 
 This marks a cycle due; it runs once the zone is active, the usage gate is open, no other crew drop
-is running, the daily cap allows, and pending refute or diagnose work is done. `ctl` needs
+is running, the daily cap allows, `GOAL.md` parses, and pending refute or diagnose work is done. `ctl` needs
 `JM_OPERATOR_TOKEN` (and `JM_SERVER_URL` if the server isn't on `http://127.0.0.1:7420`).
 
 **Pass:**
@@ -123,8 +127,8 @@ implement, review and merge loop.
 - Don't edit a crew issue on the forge before promoting it. A changed body stops the promotion and
   raises a briefing with **Re-stage** (take your edit and refute again) or **Reject**.
 - A crew issue never starts work until it is promoted, even if someone adds the ready label by
-  hand or edits its body: the server checks its own record of the issue, not the labels or the
-  body. A crew issue that was rejected or failed stays unstartable; the goals page lists it with
+  hand or edits its body: the server starts a crew issue only when its own record says promoted
+  and the staged label is gone. Labels and the body can stop a crew issue, never start one. A crew issue that was rejected or failed stays unstartable; the goals page lists it with
   its state. Close it, or file a fresh issue for the work.
 
 ### 4. Optional: let refutes promote
@@ -139,8 +143,9 @@ When an item parks, the server raises a parked briefing with **Retry**, **Leave 
 fully read gate-script or gate-tool park on the current head, **Allow these gate changes for
 <sha7>**. The allow option is bound to that head; a later push, even a merge of the base branch,
 needs a new ruling. A diagnose drop then reads the branch once per park and adds a **Diagnosis**
-and a recommendation to the briefing. They stay until what they diagnosed changes (a new park
-reason, or the same park on a new head); then they are cleared and the new state is diagnosed once.
+and a recommendation to the briefing. They stay until the park's stated reason changes (a new
+reason, or a gate park judged on a new head); then they are cleared and the new state is diagnosed
+once.
 
 To check the model rules, park something on purpose: add the `jm:hold` label to an in-flight
 item's **PR** (the label on the issue does nothing). Then open the diagnose drop at `/drops/<id>`:
@@ -148,20 +153,22 @@ item's **PR** (the label on the issue does nothing). Then open the diagnose drop
 - With `plan: "pro"`, the requested model is never Fable.
 - With `max` or `team_premium` and `fableModel` set, diagnose may request Fable, as may any role
   whose model names Fable, until `fableWeeklyDropCap` drops across all zones have asked for it in
-  the trailing seven days (failed and cancelled drops count). A Fable-only rate limit pauses Fable
+  the trailing seven days (drops that started and asked for Fable count, even if they failed or were cancelled). A Fable-only rate limit pauses Fable
   until it resets.
 
 ## Kill, pause, observe and restart
 
 - `ctl kill` cancels queued and running crew drops; a cancelled refute or diagnose still used its
-  attempt, so a park killed mid-diagnose isn't diagnosed again. Nothing is filed, promoted or applied until `ctl unkill`.
+  attempt, so a park killed mid-diagnose isn't diagnosed again.
+  Nothing is filed, promoted or applied until `ctl unkill`.
 - `ctl pause <zone>` stops new drops and forge writes. Rulings still record and apply on
   `ctl resume`. A crew-lead that finishes while paused has its filings refused.
-- `ctl observe <zone>`: crew work is recorded as `would_enqueue:<role>` on `/observations`; no
+- `ctl observe <zone>` is refused while drops or forge writes are active: `ctl pause <zone>`, wait
+  for them to drain, then observe. In observe, crew work is recorded as `would_enqueue:<role>` on `/observations`; no
   drops, no rulings applied, no forge writes.
 - A restart never files an issue twice. An intent with no outbox row is filed on the next active
   pass. A write that may have reached the forge is found by its marker, or marked failed after
-  `outboxDeadlineMinutes` (45 by default). A ruling recorded before a restart applies on the next
+  `outboxDeadlineMinutes` (defaults to `ciDeadlineMinutes`, 45). A ruling recorded before a restart applies on the next
   active pass; one whose effect failed shows its error in the rulings table and is not retried. A
   `ctl crew-cycle` request does not survive a restart.
 
