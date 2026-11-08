@@ -35,7 +35,14 @@ export interface HomeState {
   drops: Drop[];
   lastRateLimit?: RateLimitSeen;
   now?: Date;
-  usage?: { gate: Gate; state: UsageStateRow };
+  usage?: {
+    gate: Gate;
+    state: UsageStateRow;
+    /** Drops that reported usage credits since Command's Resume. */
+    creditDropsSinceResume?: number;
+    /** The account's `overageStatus` as last reported (raw, pending rehearsal). */
+    overageStatus?: string | null;
+  };
   /** Per work item: PR head, latest verdict and attempt counts. */
   details?: Map<number, ItemDetail>;
   /** Outbox ops needing attention (`unknown` or `failed`). */
@@ -76,13 +83,30 @@ function killSection(killed: boolean): string {
   return `<h2>Kill switch</h2>${notice}<form id="kill"><input id="kill-token" type="password" placeholder="Operator token" autocomplete="off" required> <button>${label}</button></form><script>document.getElementById('kill').addEventListener('submit',async(e)=>{e.preventDefault();const r=await fetch('/api/control/kill',{method:'POST',headers:{authorization:'Bearer '+document.getElementById('kill-token').value,'content-type':'application/json'},body:JSON.stringify({engaged:${killed ? 'false' : 'true'}})});if(r.ok)location.reload();else alert('Refused: '+r.status);});</script>`;
 }
 
-function usageSection(u: HomeState['usage']): string {
+/** The credits stop, in words: why nothing leases, or the Resume in force. */
+function creditsLine(u: NonNullable<HomeState['usage']>, now: Date): string | null {
+  const s = u.state;
+  if (u.gate === 'stopped') {
+    return `stopped: drop ${s.overageDropId} ran on usage credits at ${s.overageStoppedAt}. Nothing leases, reviews included, until ${s.overageUntil} (the exhausted window resets) or you rule Run on credits.`;
+  }
+  const until = s.overageResumeUntil;
+  if (until !== null && now.getTime() < Date.parse(until)) {
+    const n = u.creditDropsSinceResume ?? 0;
+    return `resumed on credits until ${until}; ${n} drop${n === 1 ? '' : 's'} reported credits since.`;
+  }
+  return null;
+}
+
+function usageSection(u: HomeState['usage'], now: Date): string {
   if (!u) return '';
   const s = u.state;
   const row = (k: string, v: unknown) => `<tr><th>${k}</th><td>${escapeHtml(v ?? '-')}</td></tr>`;
+  const credits = creditsLine(u, now);
   return (
     `<h2>Usage</h2><table>` +
     row('Gate', u.gate) +
+    (credits ? row('Credits', credits) : '') +
+    row('Overage status', u.overageStatus) +
     row('Status', s.status) +
     row('Paused until', s.pausedUntil) +
     row('5-hour', pct(s.fiveHourUtil)) +
@@ -339,7 +363,7 @@ export function renderHome(state: HomeState): string {
   return page(
     killSection(state.killed ?? false) +
       (state.briefings ? waitingOnYou(state.briefings) : '') +
-      usageSection(state.usage) +
+      usageSection(state.usage, state.now ?? new Date()) +
       crewSection(state.crew) +
       `<h2>Drop zones</h2><table><tr><th>Id</th><th>Repo</th><th>Label</th><th>Model</th><th>Mode</th></tr>${zones}</table>` +
       `<h2>Work items</h2><table><tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>${items}</table>` +

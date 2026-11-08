@@ -1,7 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { ruleBriefing } from '../briefings.js';
+import { listBriefings, ruleBriefing } from '../briefings.js';
 import { allowedHostsOf, type Config } from '../config.js';
 import { requestCrewCycle } from '../crew/schedule.js';
 import type { Db } from '../db/open.js';
@@ -69,6 +69,18 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       setZoneMode(db, zone.id, body.data.mode, now());
       return { zone: zone.id, mode: body.data.mode };
     });
+
+    // Open briefings with their option ids, for `ctl rule` without the UI.
+    scope.get('/api/control/briefings', async () => ({
+      briefings: listBriefings(db, { state: 'open' }).map((b) => ({
+        id: b.id,
+        zone: b.zoneId,
+        kind: b.kind,
+        subject: b.subject,
+        decision: b.decision,
+        options: b.options.map((o) => ({ id: o.id, label: o.label })),
+      })),
+    }));
 
     scope.post<{ Params: { id: string } }>(
       '/api/control/briefings/:id/rule',

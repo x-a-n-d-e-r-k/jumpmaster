@@ -8,7 +8,7 @@ import type { ZonePass } from '../flow/snapshot.js';
 import { getGoals } from '../goals.js';
 import type { ForgePair } from '../outbox.js';
 import type { CrewInputJson } from '../payloads.js';
-import { dispatchGate } from '../usage.js';
+import { dispatchGate, gateQueuesCrew } from '../usage.js';
 import { PROMOTE_OPTIONS, subjectOf } from './flush.js';
 import { crewLeadInput, diagnoseInput, refuteInput } from './inputs.js';
 
@@ -154,7 +154,7 @@ export async function enqueueCrew(
   if (!zone.crew?.enabled || isKilled(db)) return null;
   const mode = getZoneMode(db, zone.id, zone.mode);
   if (mode === 'paused') return null;
-  if (dispatchGate(db, usageCfg, now) !== 'open') return null;
+  if (!gateQueuesCrew(dispatchGate(db, usageCfg, now))) return null;
   if (hasActiveCrewDrop(db, zone.id)) return null;
   if (crewDropsToday(db, zone.id, now) >= zone.crew.maxDropsPerDay) return null;
   const work = nextCrewWork(db, zone, now);

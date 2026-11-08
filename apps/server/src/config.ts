@@ -196,8 +196,13 @@ const FileSchema = z.object({
       probeJitterSeconds: z
         .tuple([z.number().nonnegative(), z.number().nonnegative()])
         .default([30, 90]),
+      /**
+       * Stop all dispatch when a drop reports running on usage credits (spec §12.2). False only
+       * raises a briefing.
+       */
+      stopOnOverage: z.boolean().default(true),
     })
-    .default({ throttleUtilization: 0.9, probeJitterSeconds: [30, 90] }),
+    .default({ throttleUtilization: 0.9, probeJitterSeconds: [30, 90], stopOnOverage: true }),
   /**
    * The Claude plan as declared (not detected). Fable runs only on a plan that includes it, with
    * `fableModel` set, under a trailing seven-day drop cap.
@@ -219,7 +224,12 @@ export interface Config {
   dataDir: string;
   pollSeconds: number;
   dropZones: DropZoneConfig[];
-  usage: { throttleUtilization: number; probeJitterSeconds: [number, number] };
+  /** `stopOnOverage` absent means true. */
+  usage: {
+    throttleUtilization: number;
+    probeJitterSeconds: [number, number];
+    stopOnOverage?: boolean;
+  };
   claude: ClaudeConfig;
   secrets: {
     claudeToken: string;

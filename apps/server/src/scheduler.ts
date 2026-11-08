@@ -10,7 +10,7 @@ import {
   type WorkItem,
 } from './db/repo.js';
 import { rankItems } from './sync.js';
-import { dispatchGate } from './usage.js';
+import { dispatchGate, gateQueuesImplement } from './usage.js';
 
 const isUniqueViolation = (e: unknown): boolean =>
   e instanceof Error && /UNIQUE constraint failed/.test(e.message);
@@ -31,8 +31,7 @@ export function enqueueImplement(
   if (isKilled(db)) return null;
   const mode = getZoneMode(db, zone.id, zone.mode);
   if (mode === 'paused' || mode === 'observe') return null;
-  const gate = dispatchGate(db, usageCfg, now);
-  if (gate !== 'open' && gate !== 'probe') return null;
+  if (!gateQueuesImplement(dispatchGate(db, usageCfg, now))) return null;
   return db.transaction((): string | null => {
     const { n } = db
       .prepare(

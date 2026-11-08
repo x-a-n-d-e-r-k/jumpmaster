@@ -354,6 +354,30 @@ function afterV12(db: Db): void {
   for (const r of rows) set.run(createHash('sha256').update(r.why).digest('hex'), r.id);
 }
 
+/**
+ * v13: the credits stop (spec §12.2, never buy credits). A drop that reports running on usage
+ * credits stops all dispatch until the exhausted window resets (`overage_until`) or Command resumes
+ * on credits for a bounded horizon. Kept apart from the throttle columns, which an allowed event
+ * clears. `credit_drops` records every drop seen on credits, for the status page.
+ */
+const V13_SQL = `
+ALTER TABLE usage_state ADD COLUMN overage_stopped_at TEXT;
+ALTER TABLE usage_state ADD COLUMN overage_drop_id TEXT;
+ALTER TABLE usage_state ADD COLUMN overage_until TEXT;
+ALTER TABLE usage_state ADD COLUMN overage_signal_json TEXT;
+ALTER TABLE usage_state ADD COLUMN overage_resume_until TEXT;
+ALTER TABLE usage_state ADD COLUMN overage_resume_drop_id TEXT;
+ALTER TABLE usage_state ADD COLUMN overage_resume_work_item_id INTEGER;
+ALTER TABLE usage_state ADD COLUMN overage_resumed_at TEXT;
+CREATE TABLE credit_drops (
+  drop_id         TEXT PRIMARY KEY,
+  zone_id         TEXT NOT NULL,
+  overage_status  TEXT,
+  first_at        TEXT NOT NULL,
+  last_at         TEXT NOT NULL
+);
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -375,6 +399,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 10, sql: V10_SQL },
   { version: 11, sql: V11_SQL },
   { version: 12, sql: V12_SQL, after: afterV12 },
+  { version: 13, sql: V13_SQL },
 ];
 
 /**

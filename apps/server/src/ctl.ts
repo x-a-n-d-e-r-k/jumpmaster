@@ -2,9 +2,12 @@ import { pathToFileURL } from 'node:url';
 
 const MODES: Record<string, string> = { pause: 'paused', resume: 'active', observe: 'observe' };
 
+export type CtlRequest = { path: string; body: unknown } | { path: string; method: 'GET' };
+
 /** The control request for a command line, or null when it isn't one. */
-export function ctlRequest(args: string[]): { path: string; body: unknown } | null {
+export function ctlRequest(args: string[]): CtlRequest | null {
   const [command, zone] = args;
+  if (command === 'briefings') return { path: '/api/control/briefings', method: 'GET' };
   if (command === 'rule') {
     const [, briefing, optionId, ...note] = args;
     if (!briefing || !optionId) return null;
@@ -29,7 +32,7 @@ async function main(): Promise<number> {
   const request = ctlRequest(process.argv.slice(2));
   if (!request) {
     console.error(
-      'usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl rule <briefing> <option> [note] | ctl crew-cycle <zone>',
+      'usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [note] | ctl crew-cycle <zone>',
     );
     return 2;
   }
@@ -39,11 +42,16 @@ async function main(): Promise<number> {
     return 2;
   }
   const base = process.env.JM_SERVER_URL ?? 'http://127.0.0.1:7420';
-  const res = await fetch(new URL(request.path, base), {
-    method: 'POST',
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify(request.body),
-  });
+  const res = await fetch(
+    new URL(request.path, base),
+    'method' in request
+      ? { method: 'GET', headers: { authorization: `Bearer ${token}` } }
+      : {
+          method: 'POST',
+          headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+          body: JSON.stringify(request.body),
+        },
+  );
   console.log(`${res.status} ${await res.text()}`);
   return res.ok ? 0 : 1;
 }

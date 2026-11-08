@@ -8,6 +8,7 @@ import {
 } from '@jumpmaster/protocol';
 import { listArtifacts } from './artifacts.js';
 import type { ClaudeConfig, DropZoneConfig, UsageConfig } from './config.js';
+import { noteOverage } from './credits.js';
 import { applyCrewResult } from './crew/results.js';
 import type { Db } from './db/open.js';
 import {
@@ -412,7 +413,15 @@ export async function applyResult(
   const drop = getDrop(db, dropId);
   if (!drop) throw new Error(`unknown drop ${dropId}`);
   if (TERMINAL.has(drop.state)) return;
-  noteFableSignals(db, { claude: deps.claude ?? DEFAULT_CLAUDE }, drop, result, now);
+  // First and whatever the outcome: the backstop for live credits events that never arrived.
+  if (result.rateLimit) noteOverage(db, deps.usageCfg, drop, result.rateLimit, result.status, now);
+  noteFableSignals(
+    db,
+    { claude: deps.claude ?? DEFAULT_CLAUDE, usage: deps.usageCfg },
+    drop,
+    result,
+    now,
+  );
   const served = result.servedModel ?? servedModel(result.modelUsage);
   if (served !== null) updateDrop(db, drop.id, { servedModel: served });
   if (drop.workItemId === null) return applyCrewResult(db, deps, drop, result, now);

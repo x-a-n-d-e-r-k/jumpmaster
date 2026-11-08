@@ -2,7 +2,7 @@ import type { UsageConfig } from './config.js';
 import type { Db } from './db/open.js';
 import { getUsageState, isKilled, setKilled, setUsageState } from './db/repo.js';
 import { refundCharge } from './flow/budgets.js';
-import { DEFAULT_USAGE_CONFIG, type Gate, releaseProbe } from './usage.js';
+import { DEFAULT_USAGE_CONFIG, type Gate, releaseProbe, unreachable } from './usage.js';
 
 const LEASE_TTL_MS = 60_000;
 const LOST_GRACE_MS = 120_000;
@@ -29,27 +29,37 @@ export function leaseNextDrop(
   gate: Gate = 'open',
 ): { dropId: string; epoch: number } | null {
   return db.transaction(() => {
-    if (gate === 'closed') return null;
     if (isKilled(db)) return null;
     let next: { id: string } | undefined;
-    if (gate === 'probe') {
-      const u = getUsageState(db);
-      if (u.probeDropId !== null) return null;
-      next = db
-        .prepare(
-          `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE}
-           ORDER BY CASE WHEN work_item_id = ? THEN 1 ELSE 0 END, ${ROLE_CLASS}, created_at, rowid
-           LIMIT 1`,
-        )
-        .get(u.causeWorkItemId) as { id: string } | undefined;
-    } else {
-      const roleFilter = gate === 'finishing_only' ? ` AND role IN ${FINISHING}` : '';
-      next = db
-        .prepare(
-          `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE}${roleFilter}
-           ORDER BY ${ROLE_CLASS}, created_at, rowid LIMIT 1`,
-        )
-        .get() as { id: string } | undefined;
+    switch (gate) {
+      case 'closed':
+      case 'stopped':
+        return null;
+      case 'probe': {
+        const u = getUsageState(db);
+        if (u.probeDropId !== null) return null;
+        next = db
+          .prepare(
+            `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE}
+             ORDER BY CASE WHEN work_item_id = ? THEN 1 ELSE 0 END, ${ROLE_CLASS}, created_at, rowid
+             LIMIT 1`,
+          )
+          .get(u.causeWorkItemId) as { id: string } | undefined;
+        break;
+      }
+      case 'open':
+      case 'finishing_only': {
+        const roleFilter = gate === 'finishing_only' ? ` AND role IN ${FINISHING}` : '';
+        next = db
+          .prepare(
+            `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE}${roleFilter}
+             ORDER BY ${ROLE_CLASS}, created_at, rowid LIMIT 1`,
+          )
+          .get() as { id: string } | undefined;
+        break;
+      }
+      default:
+        return unreachable(gate);
     }
     if (!next) return null;
     const row = db

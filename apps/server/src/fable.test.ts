@@ -7,6 +7,7 @@ import {
   syncParkBriefings,
 } from './briefings.js';
 import type { ClaudeConfig, Config } from './config.js';
+import { creditsPass } from './credits.js';
 import { enqueueCrew } from './crew/schedule.js';
 import { getDrop, getUsageState, insertDrop, setWorkItemState, updateDrop } from './db/repo.js';
 import {
@@ -218,9 +219,10 @@ describe('Fable signals (best-effort, pending rehearsal)', () => {
     expect(open[0]?.options.map((o) => o.effect)).toEqual(['enable_fable', 'none']);
   });
 
-  test('overage on any other drop raises the briefing without the re-enable option', () => {
+  test('with stopOnOverage off, overage on any other drop raises the briefing without re-enable', () => {
     pastDrop('z1', w.zone.model, t0);
-    noteFableSignals(w.db, maxPlan, getDrop(w.db, 'z1') as never, overage, t0);
+    const off = { ...maxPlan, usage: { stopOnOverage: false } };
+    noteFableSignals(w.db, off, getDrop(w.db, 'z1') as never, overage, t0);
     expect(getFableState(w.db).disabledReason).toBeNull();
     const [b] = listBriefings(w.db, { state: 'open' });
     expect(b?.kind).toBe('credits_required');
@@ -260,13 +262,14 @@ describe('Fable signals (best-effort, pending rehearsal)', () => {
     expect(getFableState(w.db).pausedUntil).toBe(plus(t0, 6 * DAY).toISOString());
   });
 
-  test('ruling Re-enable Fable clears the disable', async () => {
+  test('ruling Re-enable Fable clears the disable, in the global credits step', async () => {
     pastDrop('f1', FABLE, t0);
     noteFableSignals(w.db, maxPlan, getDrop(w.db, 'f1') as never, overage, t0);
     const [b] = listBriefings(w.db, { state: 'open' });
     ruleBriefing(w.db, b?.id ?? -1, 'enable', '', t0);
     const deps = { forges: () => w.forges, zone: () => w.zone };
-    expect(await applyPendingRulings(w.db, deps, 'main', t0)).toBe(1);
+    expect(await applyPendingRulings(w.db, deps, 'main', t0)).toBe(0);
+    expect(creditsPass(w.db, t0)).toBe(1);
     expect(getFableState(w.db).disabledReason).toBeNull();
     expect(fableStatus(w.db, maxPlan, t0).available).toBe(true);
   });
