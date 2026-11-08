@@ -4,13 +4,17 @@ import {
   RateLimitEventDataSchema,
 } from '@jumpmaster/protocol';
 import type { UsageConfig } from './config.js';
-import { creditsStopInForce } from './credits.js';
+import { creditsProbing, creditsResumeInForce, creditsStopInForce } from './credits.js';
 import type { Db } from './db/open.js';
 import { getUsageState, setUsageState, type UsageStateRow } from './db/repo.js';
 import { isFableRateLimit, pauseFableFor } from './fable.js';
 
-/** `stopped`: a drop ran on usage credits (credits.ts); nothing leases, of any role. */
-export type Gate = 'open' | 'finishing_only' | 'probe' | 'closed' | 'stopped';
+/**
+ * `stopped`: a drop ran on usage credits (credits.ts); nothing leases, of any role.
+ * `credits_resume`: Command resumed on credits; the bound work item's drops lease first and alone,
+ * else one probe.
+ */
+export type Gate = 'open' | 'finishing_only' | 'probe' | 'closed' | 'stopped' | 'credits_resume';
 
 /** For an exhaustive `switch` on a union: a new member fails to compile. */
 export function unreachable(x: never): never {
@@ -22,6 +26,7 @@ export function gateQueuesImplement(gate: Gate): boolean {
   switch (gate) {
     case 'open':
     case 'probe':
+    case 'credits_resume':
       return true;
     case 'finishing_only':
     case 'closed':
@@ -38,6 +43,7 @@ export function gateQueuesCrew(gate: Gate): boolean {
     case 'open':
       return true;
     case 'probe':
+    case 'credits_resume':
     case 'finishing_only':
     case 'closed':
     case 'stopped':
@@ -201,7 +207,8 @@ export function ingestRateLimit(
           status: data.status,
           pausedUntil: null,
           pauseConfirmed: false,
-          probeDropId: null,
+          // A credits probe holds its slot until a live in-plan report (credits.ts).
+          probeDropId: creditsProbing(u, now) ? u.probeDropId : null,
           probeNotBefore: null,
           causeDropId: null,
           causeWorkItemId: null,
@@ -244,7 +251,8 @@ export function dispatchGate(db: Db, cfg: UsageConfig, now: Date): Gate {
   const until = ms(u.pausedUntil);
   const notBefore = ms(u.probeNotBefore);
   if ((until !== null && t < until) || (notBefore !== null && t < notBefore)) return 'closed';
-  if (u.status === 'rejected') return 'probe';
+  if (creditsResumeInForce(u, now)) return 'credits_resume';
+  if (u.status === 'rejected' || creditsProbing(u, now)) return 'probe';
   return throttled(u, cfg, t) ? 'finishing_only' : 'open';
 }
 

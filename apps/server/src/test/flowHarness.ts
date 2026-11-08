@@ -138,7 +138,7 @@ export async function harness(
           probe_not_before = NULL, cause_drop_id = NULL, cause_work_item_id = NULL,
           overage_stopped_at = NULL, overage_drop_id = NULL, overage_until = NULL,
           overage_signal_json = NULL, overage_resume_until = NULL, overage_resume_drop_id = NULL,
-          overage_resume_work_item_id = NULL, overage_resumed_at = NULL;`);
+          overage_resume_work_item_id = NULL, overage_resumed_at = NULL, overage_probe_since = NULL;`);
     },
     async lease() {
       const res = await app.inject({

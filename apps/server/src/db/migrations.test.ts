@@ -378,6 +378,7 @@ test('v13 adds the credits stop to a v12 usage row, keeping the throttle state, 
     overageResumeDropId: null,
     overageResumeWorkItemId: null,
     overageResumedAt: null,
+    overageProbeSince: null,
   });
   expect(Object.keys(u)).toContain('overageStoppedAt');
   expect(count(db, 'credit_drops')).toBe(0);

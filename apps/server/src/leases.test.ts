@@ -11,8 +11,8 @@ beforeEach(() => {
 
 describe('leaseNextDrop', () => {
   test('leases oldest queued drop and bumps epoch', () => {
-    expect(leaseNextDrop(db, 's1', t0)).toEqual({ dropId: 'd1', epoch: 1 });
-    expect(leaseNextDrop(db, 's1', t0)).toBeNull();
+    expect(leaseNextDrop(db, 's1', t0, 'open')).toEqual({ dropId: 'd1', epoch: 1 });
+    expect(leaseNextDrop(db, 's1', t0, 'open')).toBeNull();
     const d = getDrop(db, 'd1')!;
     expect(d.state).toBe('leased');
     expect(d.stickId).toBe('s1');
@@ -41,23 +41,23 @@ describe('leaseNextDrop', () => {
       state: 'queued',
       createdAt: plus(t0, 1000).toISOString(),
     });
-    expect(leaseNextDrop(db, 's1', t0)?.dropId).toBe('early');
+    expect(leaseNextDrop(db, 's1', t0, 'open')?.dropId).toBe('early');
   });
 });
 
 describe('heartbeat', () => {
   test('stale epoch is rejected', () => {
-    leaseNextDrop(db, 's1', t0);
+    leaseNextDrop(db, 's1', t0, 'open');
     expect(heartbeat(db, 'd1', 's1', 0, t0)).toBe('stale');
   });
 
   test('stale on stick mismatch', () => {
-    leaseNextDrop(db, 's1', t0);
+    leaseNextDrop(db, 's1', t0, 'open');
     expect(heartbeat(db, 'd1', 'other', 1, t0)).toBe('stale');
   });
 
   test('ok extends lease and moves leased to running; startedAt stays the lease time', () => {
-    leaseNextDrop(db, 's1', t0);
+    leaseNextDrop(db, 's1', t0, 'open');
     expect(heartbeat(db, 'd1', 's1', 1, plus(t0, 10_000))).toBe('ok');
     let d = getDrop(db, 'd1')!;
     expect(d.state).toBe('running');
@@ -70,7 +70,7 @@ describe('heartbeat', () => {
   });
 
   test('cancel when the drop is cancelled', () => {
-    leaseNextDrop(db, 's1', t0);
+    leaseNextDrop(db, 's1', t0, 'open');
     updateDrop(db, 'd1', { state: 'cancelled' });
     expect(heartbeat(db, 'd1', 's1', 1, t0)).toBe('cancel');
   });
@@ -80,7 +80,7 @@ describe('heartbeat', () => {
   });
 
   test('a heartbeat after expiry is stale', () => {
-    leaseNextDrop(db, 's1', t0);
+    leaseNextDrop(db, 's1', t0, 'open');
     expireLeases(db, plus(t0, 61_000));
     expect(heartbeat(db, 'd1', 's1', 1, plus(t0, 62_000))).toBe('stale');
   });
@@ -88,7 +88,7 @@ describe('heartbeat', () => {
 
 describe('expireLeases', () => {
   test('expires leases with grace', () => {
-    leaseNextDrop(db, 's1', t0);
+    leaseNextDrop(db, 's1', t0, 'open');
     expect(expireLeases(db, plus(t0, 61_000))).toBe(1);
     const d = getDrop(db, 'd1')!;
     expect(d.state).toBe('lost');
@@ -101,13 +101,13 @@ describe('expireLeases', () => {
   });
 
   test('does not expire a lease that is still live', () => {
-    leaseNextDrop(db, 's1', t0);
+    leaseNextDrop(db, 's1', t0, 'open');
     expect(expireLeases(db, plus(t0, 60_000))).toBe(0);
     expect(getDrop(db, 'd1')!.state).toBe('leased');
   });
 
   test('expires running drops too', () => {
-    leaseNextDrop(db, 's1', t0);
+    leaseNextDrop(db, 's1', t0, 'open');
     heartbeat(db, 'd1', 's1', 1, plus(t0, 10_000));
     expect(expireLeases(db, plus(t0, 69_000))).toBe(0);
     expect(expireLeases(db, plus(t0, 71_000))).toBe(1);
@@ -115,7 +115,7 @@ describe('expireLeases', () => {
   });
 
   test('keeps the work item in_flight when another active drop exists', () => {
-    leaseNextDrop(db, 's1', t0);
+    leaseNextDrop(db, 's1', t0, 'open');
     expireLeases(db, plus(t0, 61_000));
     insertDrop(db, {
       id: 'd2',
@@ -130,7 +130,7 @@ describe('expireLeases', () => {
   });
 
   test('does not touch a work item whose latest drop is not lost', () => {
-    leaseNextDrop(db, 's1', t0);
+    leaseNextDrop(db, 's1', t0, 'open');
     expireLeases(db, plus(t0, 61_000));
     insertDrop(db, {
       id: 'd2',
@@ -147,7 +147,7 @@ describe('expireLeases', () => {
 
 describe('leaseExpirer', () => {
   test('the first run after startup extends live leases instead of losing them', () => {
-    leaseNextDrop(db, 's1', t0);
+    leaseNextDrop(db, 's1', t0, 'open');
     const expire = leaseExpirer(db);
     expect(expire(plus(t0, 5 * 60_000))).toBe(0);
     expect(getDrop(db, 'd1')!.state).toBe('leased');
@@ -157,7 +157,7 @@ describe('leaseExpirer', () => {
   });
 
   test('a gap longer than the lease TTL (the server slept) extends rather than expires', () => {
-    leaseNextDrop(db, 's1', t0);
+    leaseNextDrop(db, 's1', t0, 'open');
     const expire = leaseExpirer(db);
     expire(plus(t0, 10_000));
     expect(expire(plus(t0, 10_000 + 30 * 60_000))).toBe(0);
@@ -165,7 +165,7 @@ describe('leaseExpirer', () => {
   });
 
   test('regular ticks still expire a silent stick', () => {
-    leaseNextDrop(db, 's1', t0);
+    leaseNextDrop(db, 's1', t0, 'open');
     const expire = leaseExpirer(db);
     let lost = 0;
     for (let ms = 10_000; ms <= 200_000; ms += 10_000) lost += expire(plus(t0, ms));
@@ -188,8 +188,8 @@ describe('crew drops', () => {
   test('an older crew drop leases after a newer implement or review drop', () => {
     db.prepare("UPDATE drops SET created_at = ? WHERE id = 'd1'").run(plus(t0, 5000).toISOString());
     crew('c1', 'crew-lead', 0);
-    expect(leaseNextDrop(db, 's1', t0)?.dropId).toBe('d1');
-    expect(leaseNextDrop(db, 's1', t0)?.dropId).toBe('c1');
+    expect(leaseNextDrop(db, 's1', t0, 'open')?.dropId).toBe('d1');
+    expect(leaseNextDrop(db, 's1', t0, 'open')?.dropId).toBe('c1');
   });
 
   test('a finishing drop leases before an older implement drop', () => {
@@ -205,7 +205,7 @@ describe('crew drops', () => {
       state: 'queued',
       createdAt: plus(t0, 9000).toISOString(),
     });
-    expect(leaseNextDrop(db, 's1', t0)?.dropId).toBe('rev');
+    expect(leaseNextDrop(db, 's1', t0, 'open')?.dropId).toBe('rev');
   });
 
   test('the probe also leases a crew drop last', () => {
@@ -217,7 +217,7 @@ describe('crew drops', () => {
   test('expireLeases marks a lost crew drop and touches no work item', () => {
     db.prepare("UPDATE drops SET state = 'succeeded' WHERE id = 'd1'").run();
     crew('c1', 'crew-lead', 0);
-    leaseNextDrop(db, 's1', t0);
+    leaseNextDrop(db, 's1', t0, 'open');
     const before = workItem(db, 1);
     expect(expireLeases(db, plus(t0, 61_000))).toBe(1);
     expect(getDrop(db, 'c1')?.state).toBe('lost');

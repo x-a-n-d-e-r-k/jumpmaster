@@ -743,6 +743,8 @@ export interface UsageStateRow {
   overageResumeDropId: string | null;
   overageResumeWorkItemId: number | null;
   overageResumedAt: string | null;
+  /** Set when a stop or a Resume horizon ended: one drop probes until a live in-plan report. */
+  overageProbeSince: string | null;
   updatedAt: string | null;
 }
 
@@ -768,6 +770,7 @@ const USAGE_COLUMN: Record<keyof UsageStateRow, string> = {
   overageResumeDropId: 'overage_resume_drop_id',
   overageResumeWorkItemId: 'overage_resume_work_item_id',
   overageResumedAt: 'overage_resumed_at',
+  overageProbeSince: 'overage_probe_since',
   updatedAt: 'updated_at',
 };
 

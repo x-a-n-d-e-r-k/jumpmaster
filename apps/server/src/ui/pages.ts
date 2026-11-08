@@ -84,24 +84,27 @@ function killSection(killed: boolean): string {
 }
 
 /** The credits stop, in words: why nothing leases, or the Resume in force. */
-function creditsLine(u: NonNullable<HomeState['usage']>, now: Date): string | null {
+function creditsLine(u: NonNullable<HomeState['usage']>): string | null {
   const s = u.state;
   if (u.gate === 'stopped') {
     return `stopped: drop ${s.overageDropId} ran on usage credits at ${s.overageStoppedAt}. Nothing leases, reviews included, until ${s.overageUntil} (the exhausted window resets) or you rule Run on credits.`;
   }
-  const until = s.overageResumeUntil;
-  if (until !== null && now.getTime() < Date.parse(until)) {
+  if (u.gate === 'credits_resume') {
     const n = u.creditDropsSinceResume ?? 0;
-    return `resumed on credits until ${until}; ${n} drop${n === 1 ? '' : 's'} reported credits since.`;
+    return `resumed on credits until ${s.overageResumeUntil}; ${n} drop${n === 1 ? '' : 's'} reported credits since. The resumed work item's drops lease first.`;
+  }
+  const lifted = s.overageProbeSince ?? s.overageUntil ?? s.overageResumeUntil;
+  if (u.gate === 'probe' && lifted !== null) {
+    return `probing: the credits stop ended at ${lifted}; one drop runs until a drop reports running in plan.`;
   }
   return null;
 }
 
-function usageSection(u: HomeState['usage'], now: Date): string {
+function usageSection(u: HomeState['usage']): string {
   if (!u) return '';
   const s = u.state;
   const row = (k: string, v: unknown) => `<tr><th>${k}</th><td>${escapeHtml(v ?? '-')}</td></tr>`;
-  const credits = creditsLine(u, now);
+  const credits = creditsLine(u);
   return (
     `<h2>Usage</h2><table>` +
     row('Gate', u.gate) +
@@ -363,7 +366,7 @@ export function renderHome(state: HomeState): string {
   return page(
     killSection(state.killed ?? false) +
       (state.briefings ? waitingOnYou(state.briefings) : '') +
-      usageSection(state.usage, state.now ?? new Date()) +
+      usageSection(state.usage) +
       crewSection(state.crew) +
       `<h2>Drop zones</h2><table><tr><th>Id</th><th>Repo</th><th>Label</th><th>Model</th><th>Mode</th></tr>${zones}</table>` +
       `<h2>Work items</h2><table><tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>${items}</table>` +

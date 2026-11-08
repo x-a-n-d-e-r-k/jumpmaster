@@ -24,6 +24,8 @@ import { enableFable } from './fable.js';
  * reviews included; running drops finish. The stop lifts by itself when the exhausted window resets
  * (usage is in plan again), or when Command rules Resume: credits may then run for at most five
  * hours, for the stopping drop (and its work item) only; another drop on credits stops again.
+ * After a stop or a Resume horizon ends, one drop probes (the `probe` gate) until a live report says
+ * the account runs in plan (`isUsingOverage: false`).
  */
 
 export const CREDITS_STOP = 'credits:stop:';
@@ -32,6 +34,11 @@ const MIN = 60_000;
 const HOUR = 60 * MIN;
 const FIVE_HOURS = 5 * HOUR;
 const SEVEN_DAYS = 7 * 24 * HOUR;
+/** A window at or above this utilization counts as the exhausted one (rounding, credit denominators). */
+const EXHAUSTED = 0.98;
+
+type WindowKey = 'five_hour' | 'seven_day';
+const WINDOW_LABEL: Record<WindowKey, string> = { five_hour: '5-hour', seven_day: '7-day' };
 
 /** What the stopping drop reported, kept for the briefing and the status page. */
 export type CreditSignal = {
@@ -43,6 +50,9 @@ export type CreditSignal = {
   rateLimit: RateLimitEventData;
   /** Stopped during a Resume by a drop other than the one resumed. */
   secondDrop: boolean;
+  /** The window the stop waits for, if known, and why it was chosen. */
+  window?: WindowKey | null;
+  reason?: string;
 };
 
 export const stopsOnOverage = (cfg: Pick<UsageConfig, 'stopOnOverage'> | undefined): boolean =>
@@ -71,42 +81,94 @@ export function creditSignal(u: UsageStateRow): CreditSignal | null {
 }
 
 /**
- * When the stop lifts by itself: the reset of the window at full utilization (the later, if both),
- * else the reported limit's window (`rateLimitType`, top-level `resetsAt`), else five hours. At
- * most seven days.
+ * When the stop lifts by itself, and why: the reset of a window at 98% or more (the later, if
+ * both), else the reported limit's window (`rateLimitType`), else the top-level `resetsAt` when the
+ * limit type is a plan window or absent (never a Fable cap), else five hours. At most seven days.
  */
-export function stopUntil(data: RateLimitEventData, now: Date): string {
+export function stopWindow(
+  data: RateLimitEventData,
+  now: Date,
+): { until: string; window: WindowKey | null; reason: string } {
   const t = now.getTime();
   const future = (v: string | undefined): number | null => {
     const r = ms(v);
     return r !== null && r > t ? r : null;
   };
   const windows = data.unifiedWindows ?? {};
-  const exhausted = [windows.five_hour, windows.seven_day]
-    .filter((w) => w !== undefined && w.utilization >= 1)
-    .map((w) => future(w?.resetsAt))
-    .filter((r): r is number => r !== null);
-  let until: number;
-  if (exhausted.length > 0) until = Math.max(...exhausted);
-  else {
-    const type = data.rateLimitType;
-    const named =
-      type === 'five_hour' || type === 'seven_day' ? windows[type]?.resetsAt : undefined;
-    until = future(named) ?? future(data.resetsAt) ?? t + FIVE_HOURS;
+  const capped = (until: number, window: WindowKey | null, reason: string) =>
+    until > t + SEVEN_DAYS
+      ? { until: iso(t + SEVEN_DAYS), window, reason: `${reason} Capped at seven days.` }
+      : { until: iso(until), window, reason };
+  const exhausted = (['five_hour', 'seven_day'] as const)
+    .map((key) => ({ key, w: windows[key], reset: future(windows[key]?.resetsAt) }))
+    .filter((x) => x.w !== undefined && x.w.utilization >= EXHAUSTED && x.reset !== null)
+    .sort((a, b) => (b.reset ?? 0) - (a.reset ?? 0));
+  const top = exhausted[0];
+  if (top?.w && top.reset !== null) {
+    const used = Math.round(top.w.utilization * 100);
+    return capped(
+      top.reset,
+      top.key,
+      `Stopped until the ${WINDOW_LABEL[top.key]} window resets: it is at ${used}%.`,
+    );
   }
-  return iso(Math.min(until, t + SEVEN_DAYS));
+  const type = data.rateLimitType;
+  const plan = type === 'five_hour' || type === 'seven_day' ? type : null;
+  const named = plan ? future(windows[plan]?.resetsAt) : null;
+  if (plan && named !== null) {
+    return capped(
+      named,
+      plan,
+      `Stopped until the ${WINDOW_LABEL[plan]} window resets: no window reported as exhausted; the reported limit is ${plan}.`,
+    );
+  }
+  const topReset = plan || type === undefined ? future(data.resetsAt) : null;
+  if (topReset !== null) {
+    return capped(
+      topReset,
+      plan,
+      `Stopped until the reported limit (${type ?? 'no type'}) resets: no window reported as exhausted.`,
+    );
+  }
+  return {
+    until: iso(t + FIVE_HOURS),
+    window: null,
+    reason: 'Stopped for five hours: no window reported as exhausted and no usable reset time.',
+  };
 }
 
-/** How long a Resume lets credits run: until the 5-hour window resets, at most five hours. */
-export function resumeHorizon(u: UsageStateRow, now: Date): string {
+/**
+ * How long a Resume lets credits run: until the 5-hour window resets when that is the exhausted one
+ * (at most five hours), else five hours. `atReset` says the 5-hour reset decided it.
+ */
+export function resumeHorizon(u: UsageStateRow, now: Date): { until: string; atReset: boolean } {
   const t = now.getTime();
-  const resets = [
-    u.fiveHourResetsAt,
-    creditSignal(u)?.rateLimit.unifiedWindows?.five_hour?.resetsAt,
-  ]
+  const s = creditSignal(u);
+  const cap = t + FIVE_HOURS;
+  if (s?.window !== 'five_hour') return { until: iso(cap), atReset: false };
+  const resets = [u.fiveHourResetsAt, s.rateLimit.unifiedWindows?.five_hour?.resetsAt]
     .map((v) => ms(v))
-    .filter((r): r is number => r !== null && r > t);
-  return iso(Math.min(t + FIVE_HOURS, ...resets));
+    .filter((r): r is number => r !== null && r > t && r < cap);
+  return resets.length > 0
+    ? { until: iso(Math.min(...resets)), atReset: true }
+    : { until: iso(cap), atReset: false };
+}
+
+/** A Resume horizon in force (and no stop). */
+export function creditsResumeInForce(u: UsageStateRow, now: Date): boolean {
+  const until = ms(u.overageResumeUntil);
+  return until !== null && now.getTime() < until && !creditsStopInForce(u, now);
+}
+
+/** A stop or a Resume horizon has ended and no live report has shown the account in plan yet. */
+export function creditsProbing(u: UsageStateRow, now: Date): boolean {
+  if (creditsStopInForce(u, now)) return false;
+  const resumeUntil = ms(u.overageResumeUntil);
+  return (
+    u.overageProbeSince !== null ||
+    u.overageStoppedAt !== null ||
+    (resumeUntil !== null && now.getTime() >= resumeUntil)
+  );
 }
 
 const CLEAR_STOP = {
@@ -123,9 +185,29 @@ const CLEAR_RESUME = {
   overageResumedAt: null,
 } satisfies Partial<UsageStateRow>;
 
+/** Turns an ended stop or Resume horizon into the stored probe (what the pass does). */
+function settleLifted(db: Db, u: UsageStateRow, now: Date): void {
+  if (creditsStopInForce(u, now)) return;
+  if (u.overageStoppedAt !== null) {
+    setUsageState(
+      db,
+      { ...CLEAR_STOP, overageProbeSince: u.overageUntil ?? now.toISOString() },
+      now,
+    );
+    return;
+  }
+  const resumeUntil = ms(u.overageResumeUntil);
+  if (resumeUntil !== null && now.getTime() >= resumeUntil) {
+    setUsageState(db, { ...CLEAR_RESUME, overageProbeSince: u.overageResumeUntil }, now);
+  }
+}
+
 /**
  * Notes one rate-limit report from `drop` (a live event, `outcome` null, or its result). Only sets
  * state: the briefing is the pass's (`syncCreditsBriefing`). Returns true when it set a new stop.
+ * A result is the backstop for live events that never arrived: for a drop already seen on credits
+ * it may extend a stop in force but never starts one (its report may predate a reset). Only a live
+ * report with `isUsingOverage: false` ends the probe after a stop (a result's report has no time).
  */
 export function noteOverage(
   db: Db,
@@ -135,9 +217,20 @@ export function noteOverage(
   outcome: DropResult['status'] | null,
   now: Date,
 ): boolean {
+  if (data.isUsingOverage === false && outcome === null) {
+    db.transaction(() => {
+      const u = getUsageState(db);
+      if (!creditsProbing(u, now)) return;
+      settleLifted(db, u, now);
+      setUsageState(db, { overageProbeSince: null }, now);
+    })();
+    return false;
+  }
   if (data.isUsingOverage !== true) return false;
   return db.transaction(() => {
     const at = now.toISOString();
+    const seen =
+      db.prepare('SELECT 1 FROM credit_drops WHERE drop_id = ?').get(drop.id) !== undefined;
     db.prepare(
       `INSERT INTO credit_drops (drop_id, zone_id, overage_status, first_at, last_at)
        VALUES (?, ?, ?, ?, ?)
@@ -146,7 +239,8 @@ export function noteOverage(
     ).run(drop.id, drop.dropZoneId, data.overageStatus ?? null, at, at);
     if (!stopsOnOverage(cfg)) return false;
     const u = getUsageState(db);
-    const until = stopUntil(data, now);
+    const chosen = stopWindow(data, now);
+    const until = chosen.until;
     if (creditsStopInForce(u, now)) {
       // Keeps its first drop; a later report may know a later reset.
       const current = ms(u.overageUntil);
@@ -155,6 +249,7 @@ export function noteOverage(
       }
       return false;
     }
+    if (outcome !== null && seen) return false;
     const resumeUntil = ms(u.overageResumeUntil);
     let secondDrop = false;
     if (resumeUntil !== null && now.getTime() < resumeUntil) {
@@ -171,6 +266,8 @@ export function noteOverage(
       outcome,
       rateLimit: data,
       secondDrop,
+      window: chosen.window,
+      reason: chosen.reason,
     };
     setUsageState(
       db,
@@ -180,6 +277,7 @@ export function noteOverage(
         overageDropId: drop.id,
         overageUntil: until,
         overageSignalJson: JSON.stringify(signal),
+        overageProbeSince: null,
       },
       now,
     );
@@ -201,7 +299,7 @@ export function resumeAfterCredits(db: Db, dropId: string, now: Date): void {
       db,
       {
         ...CLEAR_STOP,
-        overageResumeUntil: resumeHorizon(u, now),
+        overageResumeUntil: resumeHorizon(u, now).until,
         overageResumeDropId: dropId,
         overageResumeWorkItemId: creditSignal(u)?.workItemId ?? null,
         overageResumedAt: now.toISOString(),
@@ -230,6 +328,10 @@ export function applyCreditsEffect(db: Db, subject: string, effect: Effect, now:
     case 'restage_issue':
     case 'allow_gate_change':
       throw new Error(`${effect} does not apply to ${subject}`);
+    default: {
+      const never: never = effect;
+      throw new Error(`unknown effect ${String(never)}`);
+    }
   }
 }
 
@@ -249,13 +351,18 @@ function stopBriefing(db: Db, u: UsageStateRow, now: Date): NewBriefing {
   const lines = [
     `Drop ${dropId} (${role}) reported running on usage credits at ${u.overageStoppedAt}; outcome: ${s?.outcome ?? 'still running'}.`,
     ...(s?.secondDrop ? ['This stop was confirmed by a second drop during a Resume.'] : []),
+    ...(s?.reason ? [s.reason] : []),
     win('5-hour window', rl?.unifiedWindows?.five_hour),
     win('7-day window', rl?.unifiedWindows?.seven_day),
     `Reported limit: ${rl?.rateLimitType ?? 'not reported'}, resets ${rl?.resetsAt ?? 'unknown'}; account overage status: ${rl?.overageStatus ?? 'not reported'}.`,
     '',
     'Nothing leases, reviews included; running drops finish. Run on credits buys usage credits for',
-    `this drop's work until ${horizon} (the 5-hour reset, at most five hours); another drop on`,
-    'credits stops dispatch again.',
+    horizon.atReset
+      ? `this drop's work item until the 5-hour window resets (${minute(horizon.until)}): its queued`
+      : "this drop's work item for at most five hours from the ruling: its queued",
+    'drops lease first and alone; with none queued, one other drop may run (and bill) as a probe.',
+    'Another drop on credits stops dispatch again. When the time is up, one drop probes until a',
+    'drop reports running in plan.',
   ];
   return {
     zoneId: s?.zoneId ?? getDrop(db, dropId)?.dropZoneId ?? '',
@@ -266,7 +373,9 @@ function stopBriefing(db: Db, u: UsageStateRow, now: Date): NewBriefing {
     options: [
       {
         id: 'resume',
-        label: `Run on credits now (until ${minute(horizon)}, at most 5 hours)`,
+        label: horizon.atReset
+          ? `Run on credits now (until ${minute(horizon.until)})`
+          : 'Run on credits now (at most 5 hours)',
         effect: 'resume_after_credits',
       },
       { id: 'noted', label: 'Noted', effect: 'none' },
@@ -282,11 +391,8 @@ function stopBriefing(db: Db, u: UsageStateRow, now: Date): NewBriefing {
  * Resume ruled but not yet applied (the kill switch is on) counts as answered.
  */
 export function syncCreditsBriefing(db: Db, now: Date): void {
-  let u = getUsageState(db);
-  if (u.overageStoppedAt !== null && !creditsStopInForce(u, now)) {
-    setUsageState(db, CLEAR_STOP, now);
-    u = getUsageState(db);
-  }
+  settleLifted(db, getUsageState(db), now);
+  const u = getUsageState(db);
   const open = listBriefings(db, { state: 'open' }).filter((b) =>
     b.subject.startsWith(CREDITS_STOP),
   );

@@ -103,7 +103,8 @@ describe('a drop on usage credits stops dispatch', () => {
     expect(rule.statusCode).toBe(200);
     h.at(1);
     await h.reconcile();
-    expect(getUsageState(h.db).overageResumeUntil).toBe('2026-01-01T03:00:00.000Z');
+    // The weekly window is the exhausted one: five hours from the ruling's application.
+    expect(getUsageState(h.db).overageResumeUntil).toBe('2026-01-01T05:03:00.000Z');
     expect(openStop(h)).toEqual([]);
     // Queued drops lease after Resume, finishing work first.
     const next = await h.lease();
@@ -113,7 +114,7 @@ describe('a drop on usage credits stops dispatch', () => {
     expect(await postEvents(h, next.dropId, next.epoch, [creditsEvent(h)])).toBe(204);
     expect(getUsageState(h.db).overageStoppedAt).toBeNull();
     const page = await h.app.inject({ method: 'GET', url: '/' });
-    expect(page.body).toContain('resumed on credits until 2026-01-01T03:00:00.000Z; 1 drop');
+    expect(page.body).toContain('resumed on credits until 2026-01-01T05:03:00.000Z; 1 drop');
   });
 
   test('the result alone stops when the live events were lost', async () => {
@@ -187,5 +188,77 @@ describe('a drop on usage credits stops dispatch', () => {
     expect(listRulings(h.db, 'main')[0]).toMatchObject({ choice: 'resume', applyError: null });
     expect(listRulings(h.db, 'main')[0]?.appliedAt).not.toBeNull();
     expect(openStop(h)).toEqual([]);
+  });
+
+  test('C1: the 15:30 to 16:20 case: a result after the five-hour reset starts no new stop', async () => {
+    const h = await harness({ issues });
+    await h.reconcile();
+    const x = await h.lease();
+    // 15:30 in the reviewer's terms: the 5-hour window is out, resetting in 30 minutes.
+    const live = creditsEvent(h, {
+      unifiedWindows: {
+        five_hour: { utilization: 1, resetsAt: '2026-01-01T00:30:00.000Z' },
+        seven_day: { utilization: 0.7, resetsAt: '2026-01-04T00:00:00.000Z' },
+      },
+    });
+    expect(await postEvents(h, x.dropId, x.epoch, [live])).toBe(204);
+    expect(getUsageState(h.db).overageUntil).toBe('2026-01-01T00:30:00.000Z');
+    // 16:20: X finishes; its result still says credits, with the windows after the reset.
+    h.at(50);
+    const result: DropResult = {
+      status: 'completed',
+      headSha: 'x1',
+      gates: GREEN,
+      rateLimit: {
+        status: 'allowed',
+        rateLimitType: 'seven_day',
+        resetsAt: '2026-01-04T00:00:00.000Z',
+        unifiedWindows: {
+          five_hour: { utilization: 0.05, resetsAt: '2026-01-01T05:00:00.000Z' },
+          seven_day: { utilization: 0.72, resetsAt: '2026-01-04T00:00:00.000Z' },
+        },
+        isUsingOverage: true,
+      },
+    };
+    h.forge.state.branches.set(x.payload.branch, 'x1');
+    expect(await h.postResult(x.dropId, x.epoch, result)).toBe(204);
+    await h.reconcile();
+    expect(getUsageState(h.db).overageStoppedAt).toBeNull();
+    expect(openStop(h)).toEqual([]);
+    expect(await leaseStatus(h)).toBe(200);
+  });
+
+  test('I1: after the stop lifts, with free slots, exactly one drop leases until an in-plan report', async () => {
+    const four = [1, 2, 3, 4].map((n) => ({ ...issues[0], number: n, title: `Issue ${n}` }));
+    const h = await harness({ issues: four as typeof issues, zone: { maxConcurrentImplement: 4 } });
+    for (let i = 0; i < 4; i++) await h.reconcile();
+    expect(h.queuedRoles()).toHaveLength(4);
+    const d1 = await h.lease();
+    const out = creditsEvent(h, {
+      unifiedWindows: {
+        five_hour: { utilization: 1, resetsAt: '2026-01-01T01:00:00.000Z' },
+        seven_day: { utilization: 0.5, resetsAt: '2026-01-04T00:00:00.000Z' },
+      },
+    });
+    await postEvents(h, d1.dropId, d1.epoch, [out]);
+    expect(await leaseStatus(h)).toBe(204);
+    h.at(61);
+    await h.reconcile();
+    // Three queued, three free slots: one probe.
+    const probe = await h.lease();
+    expect(await leaseStatus(h)).toBe(204);
+    // A report that does not say whether credits ran proves nothing.
+    const silent = {
+      ts: h.now().toISOString(),
+      kind: 'rate_limit',
+      data: { status: 'allowed', unifiedWindows: { five_hour: { utilization: 0.1 } } },
+    };
+    expect(await postEvents(h, probe.dropId, probe.epoch, [silent])).toBe(204);
+    expect(await leaseStatus(h)).toBe(204);
+    // In plan: the gate opens fully.
+    const inPlan = { ...silent, data: { ...silent.data, isUsingOverage: false } };
+    expect(await postEvents(h, probe.dropId, probe.epoch, [inPlan])).toBe(204);
+    expect(await leaseStatus(h)).toBe(200);
+    expect(await leaseStatus(h)).toBe(200);
   });
 });

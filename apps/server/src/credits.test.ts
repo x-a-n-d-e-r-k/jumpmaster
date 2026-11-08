@@ -148,7 +148,8 @@ describe('the stop lifts by itself at the exhausted window reset', () => {
     noteOverage(db, cfg, drop('d1'), onCredits(), null, t0);
     expect(getUsageState(db).overageUntil).toBe(iso(3 * DAY));
     expect(dispatchGate(db, cfg, at(3 * DAY - MIN))).toBe('stopped');
-    expect(dispatchGate(db, cfg, at(3 * DAY))).toBe('open');
+    // Lifted into a single-drop probe (until a live in-plan report).
+    expect(dispatchGate(db, cfg, at(3 * DAY))).toBe('probe');
     // The next pass clears it and withdraws the briefing.
     creditsPass(db, at(MIN));
     expect(openStop()).toHaveLength(1);
@@ -201,7 +202,7 @@ describe('the stop lifts by itself at the exhausted window reset', () => {
       null,
       t0,
     );
-    expect(dispatchGate(db, cfg, at(5 * H))).toBe('open');
+    expect(dispatchGate(db, cfg, at(5 * H))).toBe('probe');
     expect(noteOverage(db, cfg, drop('d2', 'crew-lead'), onCredits(), null, at(5 * H))).toBe(true);
     expect(getUsageState(db).overageDropId).toBe('d2');
   });
@@ -224,9 +225,9 @@ describe('the credits briefing', () => {
       ['resume', 'resume_after_credits'],
       ['noted', 'none'],
     ]);
-    // The horizon is the 5-hour reset (2 h away), never the weekly one.
-    expect(b?.options[0]?.label).toMatch(/credits/);
-    expect(b?.options[0]?.label).toContain('2026-03-02 12:00');
+    // The weekly window is the exhausted one: at most five hours, no time named (M2, M1).
+    expect(b?.options[0]?.label).toBe('Run on credits now (at most 5 hours)');
+    expect(b?.why).toContain('Stopped until the 7-day window resets: it is at 100%.');
     expect(b?.why).toContain('5-hour window: 40% used, resets 2026-03-02T12:00:00.000Z');
     expect(b?.why).toContain('7-day window: 100% used, resets 2026-03-05T10:00:00.000Z');
     expect(b?.why).toContain('overage status: allowed');
@@ -247,12 +248,15 @@ describe('the credits briefing', () => {
   });
 
   test('Resume runs on credits until the 5-hour reset at most, and withdraws nothing it should not', () => {
-    // The 5-hour window resets in 2 h: the horizon is that, not the weekly reset 3 days away.
-    noteOverage(db, cfg, drop('d1'), onCredits(), null, t0);
+    // The 5-hour window is exhausted and resets in 2 h: the horizon is that.
+    const fiveOut = onCredits({
+      unifiedWindows: { five_hour: { utilization: 1, resetsAt: iso(2 * H) } },
+    });
+    noteOverage(db, cfg, drop('d1'), fiveOut, null, t0);
     creditsPass(db, t0);
     ruleBriefing(db, openStop()[0]?.id ?? -1, 'resume', '', t0);
     expect(creditsPass(db, at(MIN))).toBe(1);
-    expect(dispatchGate(db, cfg, at(MIN))).toBe('open');
+    expect(dispatchGate(db, cfg, at(MIN))).toBe('credits_resume');
     expect(getUsageState(db)).toMatchObject({
       overageStoppedAt: null,
       overageResumeUntil: iso(2 * H),
@@ -281,7 +285,7 @@ describe('the credits briefing', () => {
     db.prepare(`UPDATE drops SET state = 'succeeded' WHERE id = 'd1'`).run();
     const sameItem = drop('d1b', 'review', d1.workItemId);
     expect(noteOverage(db, cfg, sameItem, onCredits(), null, at(3 * MIN))).toBe(false);
-    expect(dispatchGate(db, cfg, at(3 * MIN))).toBe('open');
+    expect(dispatchGate(db, cfg, at(3 * MIN))).toBe('credits_resume');
     const other = drop('d2', 'crew-lead');
     expect(noteOverage(db, cfg, other, onCredits(), null, at(4 * MIN))).toBe(true);
     expect(dispatchGate(db, cfg, at(4 * MIN))).toBe('stopped');
@@ -297,7 +301,7 @@ describe('the credits briefing', () => {
     creditsPass(db, t0);
     ruleBriefing(db, openStop()[0]?.id ?? -1, 'resume', '', t0);
     creditsPass(db, at(MIN));
-    expect(noteOverage(db, cfg, d1, onCredits(), null, at(2 * H))).toBe(true);
+    expect(noteOverage(db, cfg, d1, onCredits(), null, at(5 * H + 2 * MIN))).toBe(true);
   });
 
   test('a Resume ruled on an older stop is a no-op recorded as stale', () => {
@@ -330,7 +334,7 @@ describe('the credits briefing', () => {
     expect(await applyPendingRulings(db, deps, 'main', at(MIN))).toBe(0);
     expect(dispatchGate(db, cfg, at(MIN))).toBe('stopped');
     expect(creditsPass(db, at(MIN))).toBe(1);
-    expect(dispatchGate(db, cfg, at(MIN))).toBe('open');
+    expect(dispatchGate(db, cfg, at(MIN))).toBe('credits_resume');
   });
 
   test('a Resume ruled while killed applies after unkill', () => {
@@ -396,5 +400,181 @@ describe('with Fable and the old overage briefing', () => {
     creditsPass(db, t0);
     expect(listBriefings(db, { state: 'open' }).map((b) => b.subject)).toEqual(['credits:overage']);
     expect(dispatchGate(db, off, t0)).toBe('open');
+  });
+});
+
+describe('review fixes', () => {
+  /** The five-hour window is the exhausted one; the weekly window binds (`rateLimitType`). */
+  const fiveHourOut = (o: Partial<RateLimitEventData> = {}): RateLimitEventData =>
+    onCredits({
+      unifiedWindows: {
+        five_hour: { utilization: 1, resetsAt: iso(30 * MIN) },
+        seven_day: { utilization: 0.7, resetsAt: iso(3 * DAY) },
+      },
+      ...o,
+    });
+
+  test('C1: a result never starts a stop for a drop already seen on credits; it may extend one', () => {
+    // 15:30: X reports live; the five-hour window resets at 16:00.
+    const x = drop('x');
+    expect(noteOverage(db, cfg, x, fiveHourOut(), null, t0)).toBe(true);
+    expect(getUsageState(db).overageUntil).toBe(iso(30 * MIN));
+    // 16:20: X's result, flag kept, windows after the reset, the weekly window binding.
+    const after = onCredits({
+      unifiedWindows: {
+        five_hour: { utilization: 0.05, resetsAt: iso(5 * H) },
+        seven_day: { utilization: 0.72, resetsAt: iso(3 * DAY) },
+      },
+    });
+    expect(noteOverage(db, cfg, x, after, 'completed', at(50 * MIN))).toBe(false);
+    expect(dispatchGate(db, cfg, at(50 * MIN))).not.toBe('stopped');
+    creditsPass(db, at(50 * MIN));
+    expect(openStop()).toEqual([]);
+  });
+
+  test('C1: a result from a drop seen live may extend the stop in force', () => {
+    const x = drop('x');
+    noteOverage(db, cfg, x, fiveHourOut(), null, t0);
+    const later = fiveHourOut({
+      unifiedWindows: { five_hour: { utilization: 1, resetsAt: iso(H) } },
+    });
+    noteOverage(db, cfg, x, later, 'completed', at(10 * MIN));
+    expect(getUsageState(db).overageUntil).toBe(iso(H));
+  });
+
+  test('I3: a window at 98% or more counts as exhausted, and the why names it', () => {
+    const near = onCredits({
+      unifiedWindows: {
+        five_hour: { utilization: 0.99, resetsAt: iso(2 * H) },
+        seven_day: { utilization: 0.6, resetsAt: iso(3 * DAY) },
+      },
+    });
+    noteOverage(db, cfg, drop('d1'), near, null, t0);
+    expect(getUsageState(db).overageUntil).toBe(iso(2 * H));
+    creditsPass(db, t0);
+    expect(openStop()[0]?.why).toContain('Stopped until the 5-hour window resets: it is at 99%.');
+  });
+
+  test('I3: a Fable limit type never lends its reset; the fallback is named', () => {
+    const fable = {
+      status: 'allowed' as const,
+      rateLimitType: 'seven_day_fable',
+      resetsAt: iso(4 * DAY),
+      isUsingOverage: true,
+    };
+    noteOverage(db, cfg, drop('d1'), fable, null, t0);
+    expect(getUsageState(db).overageUntil).toBe(iso(5 * H));
+    creditsPass(db, t0);
+    expect(openStop()[0]?.why).toContain('Stopped for five hours: no window reported as exhausted');
+  });
+
+  test('M2: with the weekly window exhausted a Resume runs five hours; with the 5-hour one, to its reset', () => {
+    noteOverage(db, cfg, drop('d1'), onCredits(), null, t0); // weekly at 100%, 5-hour resets in 2 h
+    creditsPass(db, t0);
+    ruleBriefing(db, openStop()[0]?.id ?? -1, 'resume', '', t0);
+    creditsPass(db, at(MIN));
+    expect(getUsageState(db).overageResumeUntil).toBe(iso(MIN + 5 * H));
+
+    const b = zoneWorld();
+    const d = { id: 'e1', dropZoneId: 'main', workItemId: null, role: 'x' } as Drop;
+    noteOverage(b.db, cfg, d, fiveHourOut(), null, t0);
+    creditsPass(b.db, t0);
+    const [open] = listBriefings(b.db, { state: 'open' });
+    expect(open?.options[0]?.label).toBe('Run on credits now (until 2026-03-02 10:30 UTC)');
+    ruleBriefing(b.db, open?.id ?? -1, 'resume', '', t0);
+    creditsPass(b.db, at(MIN));
+    expect(getUsageState(b.db).overageResumeUntil).toBe(iso(30 * MIN));
+  });
+
+  test('M1: a five-hour fallback names no time, so the open briefing is not rewritten each pass', () => {
+    noteOverage(db, cfg, drop('d1'), onCredits(), null, t0);
+    creditsPass(db, t0);
+    const [first] = openStop();
+    expect(first?.options[0]?.label).toBe('Run on credits now (at most 5 hours)');
+    creditsPass(db, at(10 * MIN));
+    expect(openStop()[0]?.updatedAt).toBe(first?.updatedAt);
+  });
+
+  test('I1: a lifted stop probes with one drop until a live in-plan report', () => {
+    insertStick(db, { id: 's1', name: 's', tokenHash: 'h', slots: 4 });
+    noteOverage(db, cfg, drop('d1'), fiveHourOut(), null, t0);
+    for (const n of [1, 2, 3]) {
+      insertDrop(db, {
+        id: `q${n}`,
+        dropZoneId: 'main',
+        workItemId: w.item(n),
+        role: 'implement',
+        state: 'queued',
+      });
+    }
+    const lifted = at(31 * MIN);
+    creditsPass(db, lifted);
+    expect(dispatchGate(db, cfg, lifted)).toBe('probe');
+    const probe = leaseNextDrop(db, 's1', lifted, dispatchGate(db, cfg, lifted));
+    expect(probe).not.toBeNull();
+    expect(leaseNextDrop(db, 's1', lifted, dispatchGate(db, cfg, lifted))).toBeNull();
+    // A result's in-plan report does not count (its time is unknown); a live one does.
+    const inPlan = { status: 'allowed' as const, isUsingOverage: false };
+    const pd = {
+      id: probe?.dropId ?? '',
+      dropZoneId: 'main',
+      workItemId: null,
+      role: 'implement',
+    } as Drop;
+    noteOverage(db, cfg, pd, inPlan, 'completed', at(32 * MIN));
+    expect(dispatchGate(db, cfg, at(32 * MIN))).toBe('probe');
+    noteOverage(db, cfg, pd, inPlan, null, at(33 * MIN));
+    expect(dispatchGate(db, cfg, at(33 * MIN))).toBe('open');
+  });
+
+  test('I1: the end of a Resume horizon also probes', () => {
+    noteOverage(db, cfg, drop('d1'), fiveHourOut(), null, t0);
+    creditsPass(db, t0);
+    ruleBriefing(db, openStop()[0]?.id ?? -1, 'resume', '', t0);
+    creditsPass(db, at(MIN));
+    expect(dispatchGate(db, cfg, at(30 * MIN))).toBe('probe');
+  });
+
+  test('I2: during a Resume the bound item leases first and alone; with none queued, one probe', () => {
+    insertStick(db, { id: 's1', name: 's', tokenHash: 'h', slots: 4 });
+    const bound = w.item(1);
+    const d1 = drop('d1', 'implement', bound);
+    noteOverage(db, cfg, d1, onCredits(), null, t0);
+    db.prepare(`UPDATE drops SET state = 'succeeded' WHERE id = 'd1'`).run();
+    // Older unrelated work, then the bound item's review.
+    insertDrop(db, {
+      id: 'old',
+      dropZoneId: 'main',
+      workItemId: w.item(2),
+      role: 'review',
+      state: 'queued',
+      createdAt: iso(-H),
+    });
+    insertDrop(db, {
+      id: 'old2',
+      dropZoneId: 'main',
+      workItemId: w.item(3),
+      role: 'implement',
+      state: 'queued',
+      createdAt: iso(-H),
+    });
+    insertDrop(db, {
+      id: 'mine',
+      dropZoneId: 'main',
+      workItemId: bound,
+      role: 'review',
+      state: 'queued',
+      createdAt: iso(MIN),
+    });
+    creditsPass(db, t0);
+    ruleBriefing(db, openStop()[0]?.id ?? -1, 'resume', '', t0);
+    const now = at(2 * MIN);
+    creditsPass(db, now);
+    const lease = () => leaseNextDrop(db, 's1', now, dispatchGate(db, cfg, now))?.dropId ?? null;
+    expect(dispatchGate(db, cfg, now)).toBe('credits_resume');
+    expect(lease()).toBe('mine');
+    // The bound item has nothing queued now: one unrelated drop as a probe, then nothing.
+    expect(lease()).toBe('old');
+    expect(lease()).toBeNull();
   });
 });

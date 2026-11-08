@@ -357,7 +357,8 @@ function afterV12(db: Db): void {
 /**
  * v13: the credits stop (spec §12.2, never buy credits). A drop that reports running on usage
  * credits stops all dispatch until the exhausted window resets (`overage_until`) or Command resumes
- * on credits for a bounded horizon. Kept apart from the throttle columns, which an allowed event
+ * on credits for a bounded horizon; then one drop probes (`overage_probe_since`) until a live report
+ * says the account runs in plan. Kept apart from the throttle columns, which an allowed event
  * clears. `credit_drops` records every drop seen on credits, for the status page.
  */
 const V13_SQL = `
@@ -369,6 +370,7 @@ ALTER TABLE usage_state ADD COLUMN overage_resume_until TEXT;
 ALTER TABLE usage_state ADD COLUMN overage_resume_drop_id TEXT;
 ALTER TABLE usage_state ADD COLUMN overage_resume_work_item_id INTEGER;
 ALTER TABLE usage_state ADD COLUMN overage_resumed_at TEXT;
+ALTER TABLE usage_state ADD COLUMN overage_probe_since TEXT;
 CREATE TABLE credit_drops (
   drop_id         TEXT PRIMARY KEY,
   zone_id         TEXT NOT NULL,
