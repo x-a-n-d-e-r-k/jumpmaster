@@ -216,6 +216,23 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   server defines effects.
 - Budgets are per work item. When one runs out the item parks `budget exhausted: <key>`;
   the retry label resets them (see scenario 5).
+- **Usage credits stop dispatch** (`usage.stopOnOverage`, default `true`; spec §12.2, never buy
+  credits). When any drop reports running on usage credits (`isUsingOverage: true`, from a live
+  event or its result), the gate becomes `stopped`: nothing leases, reviews, heals, resolves and
+  crew drops included; running drops finish; queued drops wait. The stop survives restarts and
+  allowed reports, and lifts by itself at the exhausted window's reset (the window at 100%,
+  else the reported limit's reset, else five hours; at most seven days). The home page's
+  **Usage** section shows `stopped: drop <id> ran on usage credits at <time>` and the account's
+  overage status. A `credits:stop:<drop id>` briefing (Waiting on you) offers **Run on credits now
+  (until <time>, at most 5 hours)**, which buys credits for that drop's work item until the
+  five-hour window resets, and **Noted**, after which the stop stays and the briefing is asked
+  again on the next pass. During that horizon another drop on credits stops dispatch again
+  ("confirmed by a second drop"); the Usage section counts the drops on credits since. Rulings
+  on credits briefings apply in any zone mode, but not while the kill switch is on: a Run on
+  credits ruled while killed applies after unkill. Without the UI: `ctl briefings` lists the open
+  briefings with their option ids, then `ctl rule <briefing> resume`. With `stopOnOverage: false`
+  nothing stops and a `credits:overage` briefing reports the drop instead. A Fable drop on credits
+  also disables Fable (`credits:fable`, ruled separately).
 
 ## 4. Start the server and the stick
 
@@ -362,3 +379,4 @@ JM_GITHUB_REVIEWER_TOKEN JM_GITHUB_READ_TOKEN JM_JOIN_TOKEN JM_OPERATOR_TOKEN`.
 | Items park `no pipeline` | `ciRequired` is true but nothing reported. Add CI or set `ciRequired: false`. |
 | A drop fails `image not allowed: …` | Add the zone's image to `JM_ALLOWED_IMAGES` on the stick, spelled exactly. |
 | Usage shows gate `closed` | A drop hit a usage limit. Dispatch resumes after the reset time, at most one hour after an unconfirmed limit. |
+| Usage shows gate `stopped` | A drop ran on usage credits (section 3, "Usage credits stop dispatch"). Wait for the time shown, or rule **Run on credits now** on its briefing (`ctl briefings`, then `ctl rule <id> resume`). |
