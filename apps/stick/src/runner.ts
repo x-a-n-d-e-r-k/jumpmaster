@@ -297,6 +297,8 @@ async function runContainer(
 }
 
 const MAX_STDERR_REASON = 500;
+/** Stack frames and the lines Node prints after a crash: they say nothing about its cause. */
+const NODE_FOOTER = /^(at |Node\.js v\d|\(Use `node --trace-)/;
 
 /** Names the exit and, when the trooper said why on stderr, its last line with every credential scrubbed. */
 function noResultReason(exitCode: number, stderr: string, payload: DropPayload): string {
@@ -304,7 +306,7 @@ function noResultReason(exitCode: number, stderr: string, payload: DropPayload):
   const last = stderr
     .split('\n')
     .map((l) => l.trim())
-    .filter((l) => l.length > 0)
+    .filter((l) => l.length > 0 && !NODE_FOOTER.test(l))
     .at(-1);
   if (!last) return base;
   return `${base}: ${redact(last, payloadSecrets(payload)).slice(0, MAX_STDERR_REASON)}`;

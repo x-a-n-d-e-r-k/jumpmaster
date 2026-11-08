@@ -2,7 +2,7 @@ import { Readable } from 'node:stream';
 import type { DropPayload, GateResult } from '@jumpmaster/protocol';
 import { expect, test } from 'vitest';
 import type { TrooperDeps } from './main.js';
-import { readPayload, runTrooper } from './main.js';
+import { describeFatal, readPayload, runTrooper } from './main.js';
 
 const payload: DropPayload = {
   protocol: 1,
@@ -339,4 +339,23 @@ test('a setup failure before the role runs still posts a redacted result', async
     if (prev === undefined) delete process.env.JM_WORK_ROOT;
     else process.env.JM_WORK_ROOT = prev;
   }
+});
+
+test('a payload that is not JSON is refused without echoing its text', async () => {
+  const err = await readPayload(undefined, Readable.from(['{"t":"SECRET-TAIL",@}'])).catch(
+    (e) => e,
+  );
+  expect(String(err.message)).toBe('payload is not valid JSON');
+});
+
+test('describeFatal puts a schema rejection on one line', async () => {
+  const err = await readPayload(undefined, Readable.from(['{}'])).catch((e) => e);
+  const line = describeFatal(err);
+  expect(line).not.toContain('\n');
+  expect(line).toMatch(/^payload rejected: /);
+  expect(line).toContain('role');
+});
+
+test('describeFatal flattens a multi-line message', () => {
+  expect(describeFatal(new Error('a\n  b\n'))).toBe('a b');
 });

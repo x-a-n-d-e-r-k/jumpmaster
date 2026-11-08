@@ -7,7 +7,7 @@ const SERVICE_LABEL = 'jumpmaster.service';
 const DEFAULT_PIDS = 512;
 const NETWORK_REMOVE_ATTEMPTS = 5;
 const MB = 1024 * 1024;
-const STDERR_TAIL_BYTES = 4000;
+const STDERR_TAIL_CHARS = 4000;
 
 /** Splits a byte stream into lines. */
 async function* lines(stream: Readable): AsyncIterable<string> {
@@ -168,7 +168,14 @@ export class DockerDriver implements ContainerDriver {
     // stderr is not relayed; its tail explains a trooper that died before posting a result.
     let errTail = '';
     err.on('data', (c: Buffer) => {
-      errTail = (errTail + c.toString('utf8')).slice(-STDERR_TAIL_BYTES);
+      const all = errTail + c.toString('utf8');
+      if (all.length <= STDERR_TAIL_CHARS) errTail = all;
+      else {
+        // A cut line may start mid-credential, past what redaction can recognise: drop it.
+        const cut = all.slice(-STDERR_TAIL_CHARS);
+        const nl = cut.indexOf('\n');
+        errTail = nl < 0 ? '' : cut.slice(nl + 1);
+      }
     });
     // AutoRemove means the container may be gone by the time we ask; subscribe first.
     const waited = container.wait({ condition: 'next-exit' }).then(

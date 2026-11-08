@@ -144,7 +144,32 @@ export async function readPayload(
     for await (const c of stdin) chunks.push(typeof c === 'string' ? Buffer.from(c) : c);
     text = Buffer.concat(chunks).toString('utf8');
   }
-  return DropPayloadSchema.parse(JSON.parse(text));
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    // V8's parse errors quote the text around the fault, which may be a credential.
+    throw new Error('payload is not valid JSON');
+  }
+  return DropPayloadSchema.parse(raw);
+}
+
+type SchemaIssue = { path: PropertyKey[]; message: string };
+const isSchemaError = (e: unknown): e is Error & { issues: SchemaIssue[] } =>
+  e instanceof Error && e.name === 'ZodError' && Array.isArray((e as { issues?: unknown }).issues);
+
+/** One line for stderr: the stick reports the last line of a trooper that died without a result. */
+export function describeFatal(err: unknown): string {
+  if (isSchemaError(err)) {
+    const issues = err.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`);
+    return `payload rejected: ${issues.join('; ')}`;
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .join(' ');
 }
 
 async function main(): Promise<void> {
@@ -167,7 +192,7 @@ async function main(): Promise<void> {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   main().catch((err: unknown) => {
-    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    process.stderr.write(`${describeFatal(err)}\n`);
     process.exitCode = 1;
   });
 }
