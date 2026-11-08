@@ -335,13 +335,18 @@ describe('runAgent', () => {
     );
   });
 
-  test('a result keeps isUsingOverage once any report said it, though the last did not', async () => {
+  test('a result keeps the report that said credits (its windows too), though the last did not', async () => {
     const rl = (info: Record<string, unknown>) =>
       JSON.stringify({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', ...info } });
     const r = recorder({
       claude: [
-        rl({ isUsingOverage: true, overageStatus: 'allowed' }),
-        rl({ rateLimitType: 'seven_day' }),
+        rl({
+          isUsingOverage: true,
+          overageStatus: 'allowed',
+          rateLimitType: 'five_hour',
+          unifiedWindows: { five_hour: { utilization: 1 } },
+        }),
+        rl({ rateLimitType: 'seven_day', unifiedWindows: { five_hour: { utilization: 0.05 } } }),
         completeResult,
       ],
     });
@@ -352,16 +357,23 @@ describe('runAgent', () => {
       { prompt: 'p', outputSchema: {} },
       '/work/w1/repo',
     );
+    // The credit moment's windows, not the in-plan ones after a reset.
     expect(out.rateLimit).toEqual({
       status: 'allowed',
-      rateLimitType: 'seven_day',
+      rateLimitType: 'five_hour',
+      unifiedWindows: { five_hour: { utilization: 1 } },
       isUsingOverage: true,
+      overageStatus: 'allowed',
     });
     // The live events stay as reported.
     const events = r.state.lines
       .filter((l) => l.startsWith('JM_EVENT ') && l.includes('"rate_limit"'))
       .map((l) => JSON.parse(l.slice('JM_EVENT '.length)).data);
-    expect(events[1]).toEqual({ status: 'allowed', rateLimitType: 'seven_day' });
+    expect(events[1]).toEqual({
+      status: 'allowed',
+      rateLimitType: 'seven_day',
+      unifiedWindows: { five_hour: { utilization: 0.05 } },
+    });
   });
 
   test('records the init session id', async () => {

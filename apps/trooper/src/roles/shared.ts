@@ -172,10 +172,12 @@ export async function runAgent(
         overageStatus: parsed.overageStatus,
         overageResetsAt: parsed.overageResetsAt,
       });
-      // The result keeps the last report, but a drop that ran on credits at any point did: the
-      // server's backstop when live events were lost.
-      const onCredits = out.rateLimit?.isUsingOverage === true && data.isUsingOverage !== true;
-      out.rateLimit = onCredits ? { ...data, isUsingOverage: true } : data;
+      // The result keeps the last report, except that a drop that ran on credits keeps its latest
+      // report saying so, windows included: the credit moment, not the in-plan state after a reset
+      // (the server's backstop when live events were lost). A later rejection still wins.
+      const held = out.rateLimit?.isUsingOverage === true && data.isUsingOverage !== true;
+      if (!held) out.rateLimit = data;
+      else if (data.status === 'rejected') out.rateLimit = { ...data, isUsingOverage: true };
       if (data.status === 'rejected') out.rateLimited = true;
       emitEvent(deps, ctx, 'rate_limit', data);
     } else {
