@@ -49,6 +49,12 @@ If the server itself is unreachable, stop containers on the stick's host with `d
 
 `jm:hold` on a PR stops work on that PR only. See the M1 runbook.
 
+### Lease order
+
+Since M3, queued drops lease by role class first and age second: finishing work (`review`, `heal`,
+`resolve`), then `implement`, then crew roles. So a review queued after an implement drop can lease
+before it. With one free slot, crew drops wait until no finishing or implement drop is queued.
+
 ## Zone settings for a real project
 
 ```json
