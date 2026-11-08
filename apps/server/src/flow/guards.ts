@@ -1,6 +1,7 @@
 import { basename, matchesGlob } from 'node:path';
 import type { GateSpec } from '@jumpmaster/protocol';
 import { pathMatches } from '@jumpmaster/protocol';
+import yaml from 'js-yaml';
 import type { DropZoneConfig } from '../config.js';
 import type { BranchRulesRead, PullFiles } from '../forge/github.js';
 
@@ -299,12 +300,14 @@ function npmLockChanges(baseText: string | null, headText: string): string[] {
   return out;
 }
 
-/** A parsed pnpm lockfile: each top-level block's text, and each entry's text by key. */
+type YamlMap = Record<string, unknown>;
+
+/** A parsed pnpm lockfile: the whole tree, and each `packages:` / `snapshots:` entry by key. */
 export type PnpmLock = {
   major: number;
-  blocks: Map<string, string[]>;
-  packages: Map<string, string>;
-  snapshots: Map<string, string>;
+  doc: YamlMap;
+  packages: Map<string, YamlMap>;
+  snapshots: Map<string, YamlMap>;
 };
 
 /** Blocks whose any change is reported as `<key> changed`. */
@@ -327,99 +330,65 @@ const PNPM_TOP = new Set([
   ...PNPM_IMPORTERS,
 ]);
 
-/** A YAML mapping line's key (plain, single- or double-quoted) and inline value; null if odd. */
-function splitKey(s: string): { key: string; value: string } | null {
-  let key = '';
-  let rest: string;
-  if (s.startsWith("'")) {
-    let i = 1;
-    for (;;) {
-      const j = s.indexOf("'", i);
-      if (j < 0) return null;
-      key += s.slice(i, j);
-      if (s[j + 1] !== "'") {
-        rest = s.slice(j + 1);
-        break;
-      }
-      key += "'";
-      i = j + 2;
-    }
-  } else if (s.startsWith('"')) {
-    const j = s.indexOf('"', 1);
-    if (j < 0 || s.slice(1, j).includes('\\')) return null;
-    key = s.slice(1, j);
-    rest = s.slice(j + 1);
-  } else {
-    const j = s.indexOf(': ');
-    if (j >= 0) {
-      key = s.slice(0, j);
-      rest = s.slice(j);
-    } else if (s.endsWith(':')) {
-      key = s.slice(0, -1);
-      rest = ':';
-    } else {
-      return null;
-    }
-  }
-  if (key === '') return null;
-  if (rest === ':') return { key, value: '' };
-  return rest.startsWith(': ') ? { key, value: rest.slice(2) } : null;
+const isMap = (v: unknown): v is YamlMap =>
+  v !== null && typeof v === 'object' && !Array.isArray(v);
+
+/** One line with its quoted scalars blanked, so their contents can't look like YAML syntax. */
+function unquoted(line: string): string {
+  return line.replace(/'(?:[^']|'')*'|"(?:[^"\\]|\\.)*"/g, '""');
 }
 
 /**
- * A line-oriented reader for pnpm lockfiles v6–v9 (no YAML dependency). It refuses (null) on
- * anything it does not expect: document markers, comments, tabs, odd or jumping indentation,
- * unknown top-level keys, duplicate keys or another lockfile version.
+ * YAML features pnpm never writes and a reader could disagree on: a lone CR, tabs, document
+ * markers, comments, anchors (`&`), aliases (`*`), tags (`!`) and merge keys (`<<`).
+ */
+function unexpectedSyntax(text: string): boolean {
+  if (/\r(?!\n)/.test(text) || text.includes('\t')) return true;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = unquoted(raw);
+    if (/^(---|\.\.\.)(\s|$)/.test(line) || /^\s*#/.test(line)) return true;
+    // A node starts at the line start, after `key:`, `- ` or a flow `[`, `{` or `,`.
+    if (/(^\s*|:\s+|-\s+|[[{,]\s*)[&*!]/.test(line)) return true;
+    if (/(^|[\s{,])<<\s*:/.test(line)) return true;
+  }
+  return false;
+}
+
+/**
+ * Reads a pnpm lockfile v6–v9 with js-yaml (as pnpm does), after refusing syntax pnpm never
+ * writes. null on anything unexpected: a parse error (duplicate keys included), an unknown
+ * top-level key, an entry that is not a mapping, or another lockfile version.
  */
 export function parsePnpmLock(text: string): PnpmLock | null {
-  if (text.includes('\t')) return null;
-  const blocks = new Map<string, string[]>();
-  const sections = {
-    packages: new Map<string, string[]>(),
-    snapshots: new Map<string, string[]>(),
-  };
-  let top: string | null = null;
-  let topInline = false;
-  let entry: string[] | null = null;
-  let entryInline = false;
-  let prev = 0;
-  for (const line of text.replace(/\r\n/g, '\n').split('\n')) {
-    if (line.trim() === '') continue;
-    const trimmed = line.trimStart();
-    if (/^(---|\.\.\.)(\s|$)/.test(line) || trimmed.startsWith('#')) return null;
-    const indent = line.length - trimmed.length;
-    if (indent % 2 !== 0 || indent > prev + 2) return null;
-    prev = indent;
-    if (indent === 0) {
-      const kv = splitKey(line);
-      if (!kv || !PNPM_TOP.has(kv.key) || blocks.has(kv.key)) return null;
-      top = kv.key;
-      topInline = kv.value !== '';
-      blocks.set(top, [kv.value]);
-      entry = null;
-      continue;
-    }
-    if (top === null || topInline) return null;
-    blocks.get(top)?.push(line);
-    if (top !== 'packages' && top !== 'snapshots') continue;
-    const map = sections[top];
-    if (indent === 2) {
-      const kv = splitKey(trimmed);
-      if (!kv || map.has(kv.key)) return null;
-      entry = [kv.value];
-      entryInline = kv.value !== '';
-      map.set(kv.key, entry);
-    } else {
-      if (!entry || entryInline) return null;
-      entry.push(line);
-    }
+  if (unexpectedSyntax(text)) return null;
+  let doc: unknown;
+  try {
+    doc = yaml.load(text, { schema: yaml.CORE_SCHEMA });
+  } catch {
+    return null;
   }
-  const version = blocks.get('lockfileVersion')?.[0]?.replace(/^(['"])(.*)\1$/, '$2') ?? '';
+  if (!isMap(doc) || Object.keys(doc).some((k) => !PNPM_TOP.has(k))) return null;
+  const version = String(doc.lockfileVersion ?? '');
   if (!/^\d+(\.\d+)?$/.test(version)) return null;
   const major = Math.floor(Number(version));
   if (major < 6 || major > 9) return null;
-  const join = (m: Map<string, string[]>) => new Map([...m].map(([k, v]) => [k, v.join('\n')]));
-  return { major, blocks, packages: join(sections.packages), snapshots: join(sections.snapshots) };
+  const entries = (v: unknown): Map<string, YamlMap> | null => {
+    if (v === undefined || v === null) return new Map();
+    if (!isMap(v)) return null;
+    const out = new Map<string, YamlMap>();
+    for (const [k, e] of Object.entries(v)) {
+      if (e !== null && !isMap(e)) return null;
+      out.set(k, e ?? {});
+    }
+    return out;
+  };
+  const packages = entries(doc.packages);
+  const snapshots = entries(doc.snapshots);
+  if (!packages || !snapshots) return null;
+  for (const key of PNPM_IMPORTERS) {
+    if (doc[key] !== undefined && doc[key] !== null && !isMap(doc[key])) return null;
+  }
+  return { major, doc, packages, snapshots };
 }
 
 /** `name` and `version` of an entry key (`/` prefix of v6, peer and patch suffixes dropped). */
@@ -431,37 +400,44 @@ function pnpmKeyName(key: string): { name: string; version: string } {
   return at > 0 ? { name: k.slice(0, at), version: k.slice(at + 1) } : { name: k, version: '' };
 }
 
-const PLAIN_RESOLUTION = /^ {4}resolution: \{integrity: [^,{}\s]+\}$/m;
+/** A registry tarball: a resolution that is exactly `{integrity: <string>}`. */
+const plainResolution = (entry: YamlMap): boolean => {
+  const r = entry.resolution;
+  return isMap(r) && Object.keys(r).length === 1 && typeof r.integrity === 'string';
+};
 
-/** Dependencies of one entry whose value is not a plain version (an alias, link or file). */
-function nonRegistryDeps(text: string): string[] {
+/**
+ * Dependencies of one entry whose value is not a plain version (an alias, link or file); a
+ * dependency map that is not a mapping of scalars is null (unreadable).
+ */
+function nonRegistryDeps(entry: YamlMap): string[] | null {
   const out: string[] = [];
-  let inDeps = false;
-  for (const line of text.split('\n')) {
-    if (/^ {4}\S/.test(line)) inDeps = /^ {4}(dependencies|optionalDependencies):$/.test(line);
-    else if (inDeps && /^ {6}\S/.test(line)) {
-      const kv = splitKey(line.trimStart());
-      if (!kv || !/^\d/.test(kv.value)) out.push(kv?.key ?? line.trim());
+  for (const field of ['dependencies', 'optionalDependencies']) {
+    const deps = entry[field];
+    if (deps === undefined || deps === null) continue;
+    if (!isMap(deps)) return null;
+    for (const [dep, value] of Object.entries(deps)) {
+      if (typeof value !== 'string' && typeof value !== 'number') return null;
+      if (!/^\d/.test(String(value))) out.push(dep);
     }
   }
   return out;
 }
 
-/** Every `version:` value in an importers-like block, by the path of keys above it. */
-function depVersions(lines: string[]): Map<string, { dep: string; version: string }> {
+/** Every `version:` value under an importers-like block, by the path of keys above it. */
+function depVersions(block: unknown): Map<string, { dep: string; version: string }> {
   const out = new Map<string, { dep: string; version: string }>();
-  const stack: string[] = [];
-  for (const line of lines.slice(1)) {
-    const trimmed = line.trimStart();
-    const level = (line.length - trimmed.length) / 2;
-    const kv = splitKey(trimmed);
-    if (!kv) continue;
-    stack.length = level;
-    stack[level] = kv.key;
-    if (kv.key === 'version') {
-      out.set(stack.slice(0, level).join('\0'), { dep: stack[level - 1] ?? '', version: kv.value });
+  const walk = (node: unknown, path: string[]) => {
+    if (!isMap(node)) return;
+    for (const [k, v] of Object.entries(node)) {
+      if (k === 'version' && (typeof v === 'string' || typeof v === 'number')) {
+        out.set(path.join('\0'), { dep: path.at(-1) ?? '', version: String(v) });
+      } else {
+        walk(v, [...path, k]);
+      }
     }
-  }
+  };
+  walk(block, []);
   return out;
 }
 
@@ -473,17 +449,16 @@ function pnpmLockChanges(
   const head = parsePnpmLock(headText);
   const base: PnpmLock | null =
     baseText === null
-      ? { major: head?.major ?? 9, blocks: new Map(), packages: new Map(), snapshots: new Map() }
+      ? { major: head?.major ?? 9, doc: {}, packages: new Map(), snapshots: new Map() }
       : parsePnpmLock(baseText);
   if (!head || !base) return [UNREADABLE];
   const out: string[] = [];
-  const text = (l: PnpmLock, key: string) => l.blocks.get(key)?.join('\n');
   for (const key of PNPM_DIFFED) {
-    if (text(base, key) !== text(head, key)) out.push(`${key} changed`);
+    if (!same(base.doc[key], head.doc[key])) out.push(`${key} changed`);
   }
   for (const key of PNPM_IMPORTERS) {
-    const before = depVersions(base.blocks.get(key) ?? []);
-    for (const [path, { dep, version }] of depVersions(head.blocks.get(key) ?? [])) {
+    const before = depVersions(base.doc[key]);
+    for (const [path, { dep, version }] of depVersions(head.doc[key])) {
       if (before.get(path)?.version !== version && !/^\d/.test(version)) {
         out.push(`${dep}: non-registry version ${version}`);
       }
@@ -492,9 +467,11 @@ function pnpmLockChanges(
   for (const section of ['packages', 'snapshots'] as const) {
     for (const [key, entry] of head[section]) {
       const before = base[section].get(key);
-      if (before === entry) continue;
+      if (before !== undefined && same(before, entry)) continue;
       const { name, version } = pnpmKeyName(key);
-      if (section === 'packages' && !PLAIN_RESOLUTION.test(entry)) {
+      const deps = nonRegistryDeps(entry);
+      if (deps === null) return [UNREADABLE];
+      if (section === 'packages' && !plainResolution(entry)) {
         out.push(`${name}: non-registry resolution`);
         continue;
       }
@@ -502,9 +479,9 @@ function pnpmLockChanges(
         out.push(`lockfile entry changed: ${key}`);
         continue;
       }
-      for (const dep of nonRegistryDeps(entry)) out.push(`${name}: non-registry dependency ${dep}`);
+      for (const dep of deps) out.push(`${name}: non-registry dependency ${dep}`);
       if (section !== 'packages') continue;
-      if (/^ {4}requiresBuild: true$/m.test(entry)) out.push(`install script: ${name}`);
+      if (entry.requiresBuild) out.push(`install script: ${name}`);
       else if (!opts.pnpmBlocksBuilds) {
         out.push(`dependency added: ${name}@${version} (install scripts may run)`);
       }

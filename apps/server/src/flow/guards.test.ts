@@ -330,7 +330,7 @@ describe('pnpm lockfile', () => {
         'undici-types@7.18.2',
       ]),
     );
-    expect(l?.snapshots.get('undici-types@7.18.2')).toBe('{}');
+    expect(l?.snapshots.get('undici-types@7.18.2')).toEqual({});
   });
 
   test('an unchanged lockfile reports nothing, even with a non-registry entry', () =>
@@ -468,6 +468,135 @@ ${extra}`;
     }
     expect(pnpm('', sample)).toEqual(['lockfile unreadable']);
     expect(pnpm('lockfileVersion: 1', sample)).toEqual(['lockfile unreadable']);
+  });
+
+  describe('layout tricks that hid an alias from the line reader', () => {
+    const base = `lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    devDependencies:
+      vitest:
+        specifier: ^3.0.0
+        version: 3.0.0
+
+packages:
+
+  vite@5.0.0:
+    resolution: {integrity: sha512-AAAA}
+
+  vitest@3.0.0:
+    resolution: {integrity: sha512-BBBB}
+
+snapshots:
+
+  vite@5.0.0: {}
+
+  vitest@3.0.0:
+    dependencies:
+      vite: 5.0.0
+`;
+    /** vitest bumped to 3.0.1, whose snapshot is `snapshot`, plus a registry `evil` package. */
+    const bump = (snapshot: string) =>
+      `${base
+        .replace('version: 3.0.0', 'version: 3.0.1')
+        .replace(
+          '  vitest@3.0.0:\n    resolution: {integrity: sha512-BBBB}\n',
+          '  vitest@3.0.1:\n    resolution: {integrity: sha512-CCCC}\n\n  evil@1.0.0:\n    resolution: {integrity: sha512-EVIL}\n',
+        )
+        .replace(
+          '  vitest@3.0.0:\n    dependencies:\n      vite: 5.0.0\n',
+          snapshot,
+        )}\n  evil@1.0.0: {}\n`;
+    const alias = 'vitest: non-registry dependency vite';
+
+    test('control: the plain layout is caught', () =>
+      expect(
+        pnpm(base, bump('  vitest@3.0.1:\n    dependencies:\n      vite: evil@1.0.0\n'), pnpm10),
+      ).toContain(alias));
+
+    test('a trailing space after dependencies: is still read', () =>
+      expect(
+        pnpm(base, bump('  vitest@3.0.1:\n    dependencies: \n      vite: evil@1.0.0\n'), pnpm10),
+      ).toContain(alias));
+
+    test('an inline flow map of dependencies is still read', () =>
+      expect(
+        pnpm(base, bump('  vitest@3.0.1:\n    dependencies: {vite: evil@1.0.0}\n'), pnpm10),
+      ).toContain(alias));
+
+    test('an anchor is refused', () =>
+      expect(
+        pnpm(base, bump('  vitest@3.0.1:\n    dependencies: &d\n      vite: evil@1.0.0\n'), pnpm10),
+      ).toEqual(['lockfile unreadable']));
+
+    test('a lone carriage return is refused', () =>
+      expect(
+        pnpm(
+          base,
+          bump(
+            '  vitest@3.0.1:\n    transitivePeerDependencies:\r      - foo\r    dependencies:\r      vite: evil@1.0.0\n',
+          ),
+          pnpm10,
+        ),
+      ).toEqual(['lockfile unreadable']));
+
+    test('a lone carriage return cannot hide an importer version', () =>
+      expect(
+        pnpm(
+          base,
+          base.replace(
+            '        version: 3.0.0\n',
+            '        version: 3.0.0\r      vite:\r        specifier: ^5\r        version: link:./fake\n',
+          ),
+          pnpm10,
+        ),
+      ).toEqual(['lockfile unreadable']));
+
+    test('a duplicate key (a second, tarball resolution) is refused', () =>
+      expect(
+        pnpm(
+          base,
+          base.replace(
+            '    resolution: {integrity: sha512-BBBB}\n',
+            '    resolution: {integrity: sha512-BBBB}\n    resolution: {tarball: https://example.test/v.tgz}\n',
+          ),
+          pnpm10,
+        ),
+      ).toEqual(['lockfile unreadable']));
+
+    test('aliases, tags and merge keys are refused', () => {
+      for (const head of [
+        base.replace('      vite: 5.0.0\n', '      vite: *x\n'),
+        base.replace('  vite@5.0.0: {}\n', '  vite@5.0.0: !!map {}\n'),
+        base.replace('  vite@5.0.0: {}\n', '  vite@5.0.0:\n    <<: {a: 1}\n'),
+      ]) {
+        expect(pnpm(base, head, pnpm10)).toEqual(['lockfile unreadable']);
+      }
+    });
+
+    test('quoted values with * & ! are not mistaken for YAML syntax', () => {
+      const head = base.replace(
+        '  vite@5.0.0:\n    resolution: {integrity: sha512-AAAA}\n',
+        "  vite@5.0.0:\n    resolution: {integrity: sha512-AAAA}\n    peerDependencies:\n      a: '*'\n      b: '!x & y'\n    deprecated: use x & y instead!\n",
+      );
+      expect(pnpm(base, head, pnpm10)).toEqual(['lockfile entry changed: vite@5.0.0']);
+    });
+
+    test('requiresBuild is read by YAML truthiness', () => {
+      const v6 = (extra: string) =>
+        `lockfileVersion: '6.0'\n\npackages:\n\n  /vitest@1.0.0:\n    resolution: {integrity: sha512-dml0}\n${extra}`;
+      expect(
+        pnpm(
+          v6(''),
+          v6(
+            '\n  /evil@1.0.0:\n    resolution: {integrity: sha512-ZXZp}\n    requiresBuild: True\n',
+          ),
+          pnpm10,
+        ),
+      ).toEqual(['install script: evil']);
+    });
   });
 });
 
