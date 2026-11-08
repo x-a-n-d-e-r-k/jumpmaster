@@ -65,6 +65,20 @@ describe('buildSnapshot', () => {
     expect((await snapshotOf()).gateScriptChanges).toEqual(['test']);
   });
 
+  test('a lockfile changed without any package.json is still checked', async () => {
+    const npmLock = (packages: Record<string, unknown>): string =>
+      JSON.stringify({ lockfileVersion: 3, packages: { '': { name: 'x' }, ...packages } });
+    w.f.state.pullFiles.set(1, { files: [{ path: 'package-lock.json' }], complete: true });
+    w.f.state.files.set('base0:package.json', pkg({ test: 'vitest' }));
+    w.f.state.files.set('sha1:package.json', pkg({ test: 'vitest' }));
+    w.f.state.files.set('base0:package-lock.json', npmLock({}));
+    w.f.state.files.set(
+      'sha1:package-lock.json',
+      npmLock({ 'node_modules/evil': { version: '1.0.0', hasInstallScript: true } }),
+    );
+    expect((await snapshotOf()).gateToolChanges).toEqual(['install script: evil']);
+  });
+
   test('a thrown package.json read is forge unavailability (the pass waits), not a park', async () => {
     w.f.state.pullFiles.set(1, { files: [{ path: 'pkg/package.json' }], complete: true });
     w.f.author.failNext('getFileAt', '5xx');

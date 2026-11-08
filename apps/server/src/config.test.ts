@@ -232,7 +232,8 @@ describe('loadConfig', () => {
     const paths = loadConfig(minimal, fullEnv).dropZones[0]?.protectedPaths;
     expect(paths).toContain('.github/**');
     expect(paths).toContain('playwright.config.*');
-    expect(paths).toHaveLength(17);
+    expect(paths).toEqual(expect.arrayContaining(['pnpm-workspace.yaml', 'patches/**']));
+    expect(paths).toHaveLength(24);
   });
 
   test('read token is optional and passed through', () => {

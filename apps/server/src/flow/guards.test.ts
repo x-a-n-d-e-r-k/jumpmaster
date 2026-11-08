@@ -47,6 +47,25 @@ describe('protectedPathHits', () => {
       protectedPathHits([{ path: 'x.yml', previousPath: '.github/workflows/ci.yml' }], defaults),
     ).toEqual(['.github/workflows/ci.yml']));
 
+  test('package-manager config, hooks and patches are protected by default', () => {
+    const paths = [
+      'pnpm-workspace.yaml',
+      '.pnpmfile.cjs',
+      'pnpmfile.cjs',
+      'patches/vitest@4.1.0.patch',
+      '.yarnrc',
+      '.yarnrc.yml',
+      'npm-shrinkwrap.json',
+      'packages/a/.npmrc',
+    ];
+    expect(
+      protectedPathHits(
+        paths.map((path) => ({ path })),
+        defaults,
+      ),
+    ).toEqual(paths);
+  });
+
   test('ordinary source files are not hits', () =>
     expect(protectedPathHits([{ path: 'src/index.ts' }, { path: 'README.md' }], defaults)).toEqual(
       [],

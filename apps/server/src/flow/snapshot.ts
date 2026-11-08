@@ -1,4 +1,4 @@
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { agentBranch } from '@jumpmaster/protocol';
 import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
@@ -108,6 +108,15 @@ function latestDecisive(reviews: ForgeReview[]): ForgeReview[] {
 
 const isPackageJson = (p: string): boolean => p === 'package.json' || p.endsWith('/package.json');
 
+const LOCKFILES = [
+  'npm-shrinkwrap.json',
+  'package-lock.json',
+  'pnpm-lock.yaml',
+  'yarn.lock',
+  'bun.lock',
+  'bun.lockb',
+];
+
 /** A 404 is `text: null`; a thrown read is the forge being unavailable (the pass waits). */
 async function readFile(
   forges: ForgePair,
@@ -135,7 +144,11 @@ async function gateChanges(
   const tools = new Set<string>();
   const paths = new Set<string>();
   for (const f of files) {
-    for (const p of [f.path, f.previousPath]) if (p && isPackageJson(p)) paths.add(p);
+    for (const p of [f.path, f.previousPath]) {
+      if (p && isPackageJson(p)) paths.add(p);
+      // A lockfile changed on its own can still swap a gate tool: check its package.json too.
+      else if (p && LOCKFILES.includes(basename(p))) paths.add(join(dirname(p), 'package.json'));
+    }
   }
   for (const path of paths) {
     const [basePkg, headPkg] = await Promise.all([
