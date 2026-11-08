@@ -189,9 +189,12 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   most 8,000 characters: each changed gate script as `name: "<old>" → "<new>"` (merge base →
   head), and tool changes with old → new versions where the guard knows them. Rule on
   `/briefings`, or `ctl rule <briefing> <option id> [note]` (the id is shown beside each option)
-  over the operator-authenticated control route. The ruling binds to that exact head commit:
-  when it is applied (the next pass) the server re-reads the PR, and if the head has moved the
-  ruling records `head moved` and allows nothing. Otherwise the allowance is recorded (it
+  over the operator-authenticated control route. The ruling binds to the diff it showed: that
+  exact head commit, the merge base it was judged against, and a digest of every change listed.
+  When it is applied (the next pass), a briefing that no longer matches what the item is parked
+  on records `briefing out of date`, and a head that has moved on the forge records `head moved`;
+  either way nothing is allowed. A moved merge base or a different change list on the same head
+  is not covered by the allowance either. Otherwise the allowance is recorded (it
   survives restarts), the next sync re-decides the item and the reviewer agent reviews it as
   usual; the status page shows `gate change allowed by Command for <sha7>` on the item. Any new
   push (a heal or resolve included) is a new head with no allowance, so it parks again and is

@@ -15,6 +15,7 @@ import {
 } from './db/repo.js';
 import { enableFable } from './fable.js';
 import { GATE_PARK_PREFIXES, gateParkAllowable } from './flow/decide.js';
+import { gateDigest } from './flow/snapshot.js';
 import type { ForgePair } from './outbox.js';
 import { retryParkedItem } from './sync.js';
 
@@ -37,7 +38,15 @@ export type Effect =
  * `sha` is set by the server on an `allow_gate_change` option: the head it was offered for. A crew
  * briefing carries effect `none` only, so it can never offer one.
  */
-export type BriefingOption = { id: string; label: string; effect: Effect; sha?: string };
+export type BriefingOption = {
+  id: string;
+  label: string;
+  effect: Effect;
+  sha?: string;
+  /** With `sha`: the merge base and gateDigest of the changes the briefing listed. */
+  mergeBase?: string;
+  digest?: string;
+};
 export type BriefingState = 'open' | 'ruled' | 'withdrawn';
 
 export type NewBriefing = {
@@ -306,16 +315,30 @@ export async function applyGateAllowance(
   db: Db,
   deps: RulingDeps,
   zoneId: string,
-  ruling: { id: number; subject: string; kind: BriefingKind; source: 'server' | 'crew' },
+  ruling: {
+    id: number;
+    subject: string;
+    kind: BriefingKind;
+    source: 'server' | 'crew';
+    why: string;
+  },
   option: BriefingOption,
   now: Date,
 ): Promise<boolean> {
   const itemId = idOf(ruling.subject, 'item:');
-  if (ruling.source !== 'server' || ruling.kind !== 'parked' || itemId === null || !option.sha) {
+  const { sha, mergeBase, digest } = option;
+  if (ruling.source !== 'server' || ruling.kind !== 'parked' || itemId === null) {
     throw new Error(NOT_ALLOWABLE);
   }
+  if (!sha || !mergeBase || !digest) throw new Error(NOT_ALLOWABLE);
   const item = getWorkItem(db, itemId);
   if (!item || item.dropZoneId !== zoneId || item.state !== 'parked') return true;
+  // Command allowed what its briefing showed: the briefing raised now must be the same one.
+  const current = parkBriefing(db, zoneId, item);
+  const allowNow = current.options.find((o) => o.effect === 'allow_gate_change');
+  if (current.why !== ruling.why || JSON.stringify(allowNow) !== JSON.stringify(option)) {
+    throw new Error('briefing out of date');
+  }
   const prNumber = getPullRequest(db, item.id)?.number ?? item.prNumber;
   if (prNumber === null) throw new Error('no pull request');
   let pr: Awaited<ReturnType<ForgePair['author']['getPull']>>;
@@ -325,8 +348,12 @@ export async function applyGateAllowance(
     return false;
   }
   if (!pr || pr.state !== 'open' || pr.merged) throw new Error('pull request not open');
-  if (pr.headSha !== option.sha) throw new Error('head moved');
-  recordGateAllowance(db, { itemId, headSha: option.sha, rulingId: ruling.id }, now);
+  if (pr.headSha !== sha) throw new Error('head moved');
+  recordGateAllowance(
+    db,
+    { itemId, headSha: sha, mergeBaseSha: mergeBase, digest, rulingId: ruling.id },
+    now,
+  );
   return true;
 }
 
@@ -342,7 +369,7 @@ export async function applyPendingRulings(
 ): Promise<number> {
   const pending = db
     .prepare(
-      `SELECT r.id, r.choice, b.subject, b.kind, b.source, b.options_json AS optionsJson
+      `SELECT r.id, r.choice, b.subject, b.kind, b.source, b.why, b.options_json AS optionsJson
          FROM rulings r JOIN briefings b ON b.id = r.briefing_id
        WHERE r.zone_id = ? AND r.applied_at IS NULL AND r.apply_error IS NULL ORDER BY r.id`,
     )
@@ -352,6 +379,7 @@ export async function applyPendingRulings(
     subject: string;
     kind: BriefingKind;
     source: 'server' | 'crew';
+    why: string;
     optionsJson: string;
   }[];
   let applied = 0;
@@ -451,6 +479,8 @@ function parkBriefing(db: Db, zoneId: string, item: WorkItem): NewBriefing {
         label: `Allow these gate changes for ${sha7}`,
         effect: 'allow_gate_change',
         sha: park.headSha,
+        mergeBase: park.mergeBaseSha,
+        digest: gateDigest(park.details),
       });
     }
   }

@@ -295,10 +295,12 @@ CREATE TABLE gate_parks (
   recorded_at     TEXT NOT NULL
 );
 CREATE TABLE gate_allowances (
-  item_id    INTEGER NOT NULL REFERENCES work_items(id),
-  head_sha   TEXT NOT NULL,
-  ruled_at   TEXT NOT NULL,
-  ruling_id  INTEGER NOT NULL,
+  item_id         INTEGER NOT NULL REFERENCES work_items(id),
+  head_sha        TEXT NOT NULL,
+  merge_base_sha  TEXT NOT NULL,
+  reason_digest   TEXT NOT NULL,
+  ruled_at        TEXT NOT NULL,
+  ruling_id       INTEGER NOT NULL,
   PRIMARY KEY (item_id, head_sha)
 );
 `;

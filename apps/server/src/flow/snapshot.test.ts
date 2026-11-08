@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from 'vitest';
 import { getWorkItem, insertVerdict, recordGateAllowance, type VerdictRow } from '../db/repo.js';
 import { zoneWorld } from '../test/fixtures.js';
 import { decide } from './decide.js';
-import { buildSnapshot, zonePass } from './snapshot.js';
+import { buildSnapshot, gateDigest, zonePass } from './snapshot.js';
 
 const now = new Date('2026-01-01T01:00:00Z');
 const pkg = (scripts: Record<string, string>): string => JSON.stringify({ name: 'x', scripts });
@@ -309,12 +309,31 @@ describe('buildSnapshot', () => {
       expect(s.forgeUnavailable).toBe('isMaintainer');
     });
 
-    test('a Command allowance counts only for the exact head', async () => {
+    test('a Command allowance counts only for the exact head, merge base and changes', async () => {
+      const s0 = await snapshotOf();
+      expect(s0.commandAllowed).toBe(false);
+      const digest = gateDigest(s0.gateDetails);
+      const allowance = { itemId, mergeBaseSha: 'base0', digest, rulingId: 1 };
+      recordGateAllowance(w.db, { ...allowance, headSha: 'sha0' }, now);
       expect((await snapshotOf()).commandAllowed).toBe(false);
-      recordGateAllowance(w.db, { itemId, headSha: 'sha0', rulingId: 1 }, now);
+      recordGateAllowance(w.db, { ...allowance, headSha: 'sha1', digest: 'other' }, now);
       expect((await snapshotOf()).commandAllowed).toBe(false);
-      recordGateAllowance(w.db, { itemId, headSha: 'sha1', rulingId: 2 }, now);
+      w.db.prepare('DELETE FROM gate_allowances').run();
+      recordGateAllowance(w.db, { ...allowance, headSha: 'sha1', mergeBaseSha: 'base9' }, now);
+      expect((await snapshotOf()).commandAllowed).toBe(false);
+      w.db.prepare('DELETE FROM gate_allowances').run();
+      recordGateAllowance(w.db, { ...allowance, headSha: 'sha1' }, now);
       expect((await snapshotOf()).commandAllowed).toBe(true);
+      // The same head judged against another merge base (the base moved) is not allowed.
+      w.f.state.compares.set('main...sha1', {
+        aheadBy: 1,
+        behindBy: 1,
+        baseSha: 'base1',
+        mergeBaseSha: 'base1',
+      });
+      w.f.state.files.set('base1:package.json', pkg({ test: 'vitest' }));
+      expect((await snapshotOf()).commandAllowed).toBe(false);
+      w.f.state.compares.delete('main...sha1');
       w.f.state.setHead(1, 'sha2');
       w.f.state.files.set('sha2:package.json', pkg({ test: 'vitest --bail' }));
       expect((await snapshotOf()).commandAllowed).toBe(false);

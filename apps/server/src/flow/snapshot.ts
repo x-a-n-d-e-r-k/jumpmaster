@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import { agentBranch } from '@jumpmaster/protocol';
 import type { DropZoneConfig } from '../config.js';
@@ -297,6 +298,15 @@ async function gateChanges(
   };
 }
 
+/** sha256 of the sorted full gate change list: what Command's allowance is bound to. */
+export function gateDigest(details: { scripts: string[]; tools: string[] }): string {
+  const lines = [
+    ...details.scripts.map((d) => `script ${d}`),
+    ...details.tools.map((d) => `tool ${d}`),
+  ].sort();
+  return createHash('sha256').update(JSON.stringify(lines)).digest('hex');
+}
+
 /** After a gate park: records what it judged (PR, head, merge base, every change in full). */
 export function recordGateParkOf(db: Db, s: Snapshot, now: Date): void {
   if (!s.pr?.headSha || !s.compare) return;
@@ -435,11 +445,16 @@ export async function buildSnapshot(
     headSha !== null && (gate.scripts.length > 0 || gate.tools.length > 0)
       ? await maintainerApprovedHead(forges, zone, trusted, headSha, pass.botLogins, unavailable)
       : false;
-  // Command's ruling allows the gate changes of one head only: the head read just now.
+  // Command's ruling allows one judged diff only: the head read just now, against the same merge
+  // base, with exactly the changes its briefing listed.
+  const allowance =
+    headSha !== null && compare && (gate.scripts.length > 0 || gate.tools.length > 0)
+      ? getGateAllowance(db, item.id, headSha)
+      : undefined;
   const commandAllowed =
-    headSha !== null && (gate.scripts.length > 0 || gate.tools.length > 0)
-      ? getGateAllowance(db, item.id, headSha) !== undefined
-      : false;
+    allowance !== undefined &&
+    allowance.mergeBaseSha === compare?.mergeBaseSha &&
+    allowance.digest === gateDigest(gate.details);
 
   if (pr && headSha) {
     upsertPullRequest(

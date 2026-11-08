@@ -9,10 +9,16 @@ import {
   ruleBriefing,
 } from './briefings.js';
 import { openDb } from './db/open.js';
-import { getGateAllowance, getWorkItem, setWorkItemState } from './db/repo.js';
+import {
+  getGateAllowance,
+  getGatePark,
+  getWorkItem,
+  recordGatePark,
+  setWorkItemState,
+} from './db/repo.js';
 import { decide } from './flow/decide.js';
 import { reconcileZone } from './flow/reconcile.js';
-import { buildSnapshot, zonePass } from './flow/snapshot.js';
+import { buildSnapshot, gateDigest, zonePass } from './flow/snapshot.js';
 import { promptVersions } from './payloads.js';
 import { syncParked } from './sync.js';
 import { usageCfg, type ZoneWorld, zoneWorld } from './test/fixtures.js';
@@ -95,6 +101,8 @@ describe('allow a gate change by Command ruling', () => {
         label: 'Allow these gate changes for a1b2c3d',
         effect: 'allow_gate_change',
         sha: HEAD,
+        mergeBase: 'base0',
+        digest: expect.stringMatching(/^[0-9a-f]{64}$/),
       },
     ]);
   });
@@ -240,6 +248,35 @@ describe('allow a gate change by Command ruling', () => {
     const db = openDb(file);
     expect(getGateAllowance(db, id, HEAD)).toMatchObject({ headSha: HEAD });
     db.close();
+  });
+
+  test('a briefing out of date with what the item is parked on allows nothing', async () => {
+    const { w, id } = gateWorld();
+    const b = await parkAndBrief(w, id);
+    await allow(w, b, plus(t0, 2 * MIN));
+    // Re-judged on the same head with another change list (e.g. a guard upgrade).
+    const park = getGatePark(w.db, id);
+    if (!park) throw new Error('no gate park');
+    recordGatePark(
+      w.db,
+      { ...park, details: { scripts: ['test: "vitest" → "evil"'], tools: [] } },
+      plus(t0, 2 * MIN),
+    );
+    await reconcile(w, plus(t0, 3 * MIN));
+    expect(listRulings(w.db, 'main')[0]).toMatchObject({ applyError: 'briefing out of date' });
+    expect(getGateAllowance(w.db, id, HEAD)).toBeUndefined();
+  });
+
+  test('the allowance records the merge base and digest of the changes Command read', async () => {
+    const { w, id } = gateWorld();
+    const b = await parkAndBrief(w, id);
+    await allow(w, b, plus(t0, 2 * MIN));
+    await reconcile(w, plus(t0, 3 * MIN));
+    const park = getGatePark(w.db, id);
+    expect(getGateAllowance(w.db, id, HEAD)).toMatchObject({
+      mergeBaseSha: 'base0',
+      digest: park && gateDigest(park.details),
+    });
   });
 
   test('an item that left parked before the ruling applied is left alone', async () => {

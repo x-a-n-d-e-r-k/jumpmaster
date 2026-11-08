@@ -283,18 +283,33 @@ export function getGatePark(db: Db, itemId: number): GatePark | undefined {
   return { ...rest, details: JSON.parse(detailsJson) as GateDetails };
 }
 
-export type GateAllowance = { itemId: number; headSha: string; ruledAt: string; rulingId: number };
+/**
+ * Command's allowance of one judged diff: the head, the merge base it was judged against, and the
+ * digest of every change listed (gateDigest).
+ */
+export type GateAllowance = {
+  itemId: number;
+  headSha: string;
+  mergeBaseSha: string;
+  digest: string;
+  ruledAt: string;
+  rulingId: number;
+};
 
-/** Records Command's allowance of `headSha`'s gate changes. A repeat is a no-op (first one kept). */
-export function recordGateAllowance(
-  db: Db,
-  a: { itemId: number; headSha: string; rulingId: number },
-  now: Date,
-): void {
+/**
+ * Records Command's allowance of `headSha`'s gate changes. Repeating the same allowance is a no-op
+ * (the first ruled_at kept); a later ruling on the same head for another judgement replaces it.
+ */
+export function recordGateAllowance(db: Db, a: Omit<GateAllowance, 'ruledAt'>, now: Date): void {
   db.prepare(
-    `INSERT INTO gate_allowances (item_id, head_sha, ruled_at, ruling_id) VALUES (?, ?, ?, ?)
-       ON CONFLICT (item_id, head_sha) DO NOTHING`,
-  ).run(a.itemId, a.headSha, now.toISOString(), a.rulingId);
+    `INSERT INTO gate_allowances (item_id, head_sha, merge_base_sha, reason_digest, ruled_at,
+       ruling_id) VALUES (@itemId, @headSha, @mergeBaseSha, @digest, @at, @rulingId)
+     ON CONFLICT (item_id, head_sha) DO UPDATE SET merge_base_sha = excluded.merge_base_sha,
+       reason_digest = excluded.reason_digest, ruled_at = excluded.ruled_at,
+       ruling_id = excluded.ruling_id
+     WHERE merge_base_sha IS NOT excluded.merge_base_sha
+       OR reason_digest IS NOT excluded.reason_digest`,
+  ).run({ ...a, at: now.toISOString() });
 }
 
 /** Command's allowance for exactly this item and head, if any. */
@@ -305,7 +320,8 @@ export function getGateAllowance(
 ): GateAllowance | undefined {
   return db
     .prepare(
-      `SELECT item_id AS itemId, head_sha AS headSha, ruled_at AS ruledAt, ruling_id AS rulingId
+      `SELECT item_id AS itemId, head_sha AS headSha, merge_base_sha AS mergeBaseSha,
+         reason_digest AS digest, ruled_at AS ruledAt, ruling_id AS rulingId
          FROM gate_allowances WHERE item_id = ? AND head_sha = ?`,
     )
     .get(itemId, headSha) as GateAllowance | undefined;

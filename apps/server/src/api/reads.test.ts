@@ -24,7 +24,8 @@ test("the home page shows Command's gate change allowance for the item's current
   if (!item) throw new Error('no item');
   const home = async () => (await h.app.inject({ method: 'GET', url: '/' })).body;
   expect(await home()).not.toContain('allowed by Command');
-  recordGateAllowance(h.db, { itemId: item.id, headSha: 'abcdef1234567890', rulingId: 1 }, h.now());
+  const allowance = { itemId: item.id, headSha: 'abcdef1234567890', rulingId: 1 };
+  recordGateAllowance(h.db, { ...allowance, mergeBaseSha: 'mb', digest: 'd' }, h.now());
   expect(await home()).toContain('gate change allowed by Command for abcdef1');
 });
 
