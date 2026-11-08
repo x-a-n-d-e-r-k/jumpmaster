@@ -343,6 +343,7 @@ export const DropResultSchema = z.object({
 });
 export type DropResult = z.infer<typeof DropResultSchema>;
 export { containsSecret, payloadSecrets, redact, redactTokenShapes } from './redact.js';
+export { readSecret } from './secrets.js';
 
 /**
  * The model that served a run: the `modelUsage` key with the most output tokens (the first on a
