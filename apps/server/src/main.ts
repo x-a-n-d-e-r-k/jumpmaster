@@ -38,7 +38,14 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
   };
   const log = (msg: string) => console.error(`[jumpmaster] ${scrub(msg, config)}`);
 
-  const app = createApp({ db, config, forgesFor, now: () => new Date() });
+  // A ruling starts a pass at once; `guardedPass` is defined below and only called after listen.
+  const app = createApp({
+    db,
+    config,
+    forgesFor,
+    now: () => new Date(),
+    kick: () => void guardedPass(),
+  });
 
   const secrets = secretList(config.secrets);
   const expireLeases = leaseExpirer(db, config.usage);

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { beforeEach, describe, expect, test } from 'vitest';
+import { listBriefings, raiseBriefing } from '../briefings.js';
 import { getOutbox, setKilled, setWorkItemState, setZoneMode, upsertWorkItem } from '../db/repo.js';
 import { isJmIssueBody, opMarker, resolveUnknown, sanitizeCrewText } from '../outbox.js';
 import { makeZone, type ZoneWorld, zoneWorld } from '../test/fixtures.js';
@@ -172,8 +173,24 @@ describe('promotion', () => {
     expect(writes('setLabels')).toHaveLength(0);
   });
 
-  test('a promote_held issue moves to promoting only after hold_until', async () => {
+  test('a promote_held issue moves to promoting only after hold_until, while its briefing is open', async () => {
     const id = await staged();
+    raiseBriefing(
+      w.db,
+      {
+        zoneId: 'main',
+        kind: 'promote_held',
+        subject: `issue:${id}`,
+        decision: 'd',
+        why: 'w',
+        options: [
+          { id: 'reject', label: 'Reject', effect: 'reject_issue' },
+          { id: 'now', label: 'Promote now', effect: 'promote_issue' },
+        ],
+        source: 'server',
+      },
+      t0,
+    );
     setCrewIssue(
       w.db,
       id,
@@ -184,6 +201,14 @@ describe('promotion', () => {
     expect(getCrewIssue(w.db, id)?.state).toBe('promote_held');
     await flush(plus(t0, 11 * MIN));
     expect(getCrewIssue(w.db, id)?.state).toBe('promoted');
+    expect(listBriefings(w.db, { zoneId: 'main', state: 'open' })).toEqual([]);
+  });
+
+  test('a promote_held issue whose briefing is gone does not move', async () => {
+    const id = await staged();
+    setCrewIssue(w.db, id, { state: 'promote_held', holdUntil: t0.toISOString() }, t0);
+    await flush(plus(t0, MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('promote_held');
   });
 
   test('revising updates the body with a new marker; rejecting closes the issue', async () => {

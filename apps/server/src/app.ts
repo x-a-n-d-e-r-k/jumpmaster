@@ -34,7 +34,7 @@ const ATTEMPT_KEYS: AttemptKey[] = [
 ];
 
 /** Fastify instance with stick and UI routes registered; the caller listens. Logger stays off: payloads carry tokens. */
-export function createApp(deps: StickRouteDeps): FastifyInstance {
+export function createApp(deps: StickRouteDeps & { kick?: () => void }): FastifyInstance {
   const app = Fastify({ logger: false });
   // Pages have no login, so a foreign Host could read them through DNS rebinding. Stick routes
   // authenticate with their own token and may arrive on any address a stick can reach.

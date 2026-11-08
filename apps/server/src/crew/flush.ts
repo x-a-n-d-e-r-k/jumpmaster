@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { hasOpenBriefing, raiseBriefing, withdrawBriefing } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import { getZoneMode, isKilled } from '../db/repo.js';
@@ -25,6 +26,14 @@ const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex
 
 /** The hash a promotion compares: the sanitised body as written, without its marker line. */
 export const crewBodySha = (sanitised: string): string => sha256(sanitised.trimEnd());
+
+/** The briefing subject for a crew issue. */
+export const subjectOf = (row: Pick<CrewIssue, 'id'>): string => `issue:${row.id}`;
+
+export const PROMOTE_OPTIONS = [
+  { id: 'promote', label: 'Promote', effect: 'promote_issue' as const },
+  { id: 'reject', label: 'Reject', effect: 'reject_issue' as const },
+];
 
 const PENDING: CrewIssueState[] = ['filing', 'promote_held', 'promoting', 'revising', 'rejecting'];
 
@@ -180,6 +189,8 @@ export async function flushCrewOps(
           break;
         case 'promote_held':
           if (row.holdUntil !== null && now.getTime() < Date.parse(row.holdUntil)) continue;
+          // Held with a Reject option: it goes ahead only while that briefing is still unanswered.
+          if (!hasOpenBriefing(db, zone.id, subjectOf(row))) continue;
           setCrewIssue(db, row.id, { state: 'promoting' }, now);
           moved++;
           step = await promote(db, forges, zone, { ...row, state: 'promoting' }, now);
@@ -202,11 +213,28 @@ export async function flushCrewOps(
     if (step === 'wait') continue;
     if (step === 'changed') {
       setCrewIssue(db, row.id, { state: 'staged' }, now);
+      raiseBriefing(
+        db,
+        {
+          zoneId: zone.id,
+          kind: 'promote',
+          subject: subjectOf(row),
+          decision: `Promote crew issue #${row.number} as it now reads?`,
+          why: 'The issue body changed on the forge after it was staged, so it is not the text that was proposed.',
+          options: PROMOTE_OPTIONS,
+          onHold: `Crew issue #${row.number}`,
+          source: 'server',
+        },
+        now,
+      );
       moved++;
       continue;
     }
     if (step.result.state === 'done') {
       setCrewIssue(db, row.id, step.done, now);
+      if (step.done.state === 'promoted' || step.done.state === 'rejected') {
+        withdrawBriefing(db, zone.id, subjectOf(row), now);
+      }
       moved++;
     } else if (step.result.state === 'failed') {
       setCrewIssue(db, row.id, { state: 'failed' }, now);

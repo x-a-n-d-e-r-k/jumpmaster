@@ -235,6 +235,40 @@ CREATE TABLE crew_issues (
 CREATE INDEX crew_issues_by_number ON crew_issues(zone_id, number);
 `;
 
+/** v9: briefings put decisions to Command; rulings are Command's answers, applied once. */
+const V9_SQL = `
+CREATE TABLE briefings (
+  id                 INTEGER PRIMARY KEY,
+  zone_id            TEXT NOT NULL,
+  kind               TEXT NOT NULL CHECK (kind IN ('parked','promote','promote_held',
+                       'refute_exhausted','crew','credits_required')),
+  subject            TEXT NOT NULL,
+  decision           TEXT NOT NULL,
+  why                TEXT NOT NULL,
+  options_json       TEXT NOT NULL,
+  recommendation     TEXT NOT NULL DEFAULT '',
+  on_hold            TEXT NOT NULL DEFAULT '',
+  source             TEXT NOT NULL CHECK (source IN ('server','crew')),
+  source_ref         TEXT,
+  state              TEXT NOT NULL CHECK (state IN ('open','ruled','withdrawn')),
+  diagnose_attempts  INTEGER NOT NULL DEFAULT 0,
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL
+);
+CREATE UNIQUE INDEX briefings_open_subject ON briefings(zone_id, subject) WHERE state = 'open';
+
+CREATE TABLE rulings (
+  id           INTEGER PRIMARY KEY,
+  zone_id      TEXT NOT NULL,
+  briefing_id  INTEGER NOT NULL UNIQUE REFERENCES briefings(id),
+  choice       TEXT NOT NULL,
+  note         TEXT NOT NULL DEFAULT '',
+  created_at   TEXT NOT NULL,
+  applied_at   TEXT,
+  apply_error  TEXT
+);
+`;
+
 export type Migration = { version: number; sql: string; foreignKeysOff?: boolean };
 
 export const MIGRATIONS: Migration[] = [
@@ -246,6 +280,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 6, sql: V6_SQL, foreignKeysOff: true },
   { version: 7, sql: V7_SQL },
   { version: 8, sql: V8_SQL },
+  { version: 9, sql: V9_SQL },
 ];
 
 /**

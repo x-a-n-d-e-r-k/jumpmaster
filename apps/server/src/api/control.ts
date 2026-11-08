@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import { ruleBriefing } from '../briefings.js';
 import { allowedHostsOf, type Config } from '../config.js';
 import type { Db } from '../db/open.js';
 import { activeWorkCount, setKilled, setZoneMode, ZONE_MODES } from '../db/repo.js';
@@ -10,9 +11,12 @@ export interface ControlDeps {
   db: Db;
   config: Config;
   now(): Date;
+  /** Starts a pass without waiting for it, so a ruling applies promptly. */
+  kick?: () => void;
 }
 
 const ZoneBody = z.object({ mode: z.enum(ZONE_MODES) });
+const RuleBody = z.object({ optionId: z.string().min(1), note: z.string().max(2000).optional() });
 const KillBody = z.object({ engaged: z.boolean() });
 
 function tokenMatches(req: FastifyRequest, expected: string): boolean {
@@ -64,6 +68,25 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       setZoneMode(db, zone.id, body.data.mode, now());
       return { zone: zone.id, mode: body.data.mode };
     });
+
+    scope.post<{ Params: { id: string } }>(
+      '/api/control/briefings/:id/rule',
+      async (req, reply) => {
+        const id = Number(req.params.id);
+        if (!Number.isInteger(id) || id <= 0) {
+          return reply.code(404).send({ error: 'unknown briefing' });
+        }
+        const body = RuleBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: 'invalid body' });
+        const r = ruleBriefing(db, id, body.data.optionId, body.data.note ?? '', now());
+        if (!r.ok) {
+          const error = { 404: 'unknown briefing', 409: 'already ruled', 400: 'unknown option' };
+          return reply.code(r.status).send({ error: error[r.status] });
+        }
+        deps.kick?.();
+        return { briefing: id, rulingId: r.rulingId };
+      },
+    );
 
     scope.post('/api/control/kill', async (req, reply) => {
       const body = KillBody.safeParse(req.body);

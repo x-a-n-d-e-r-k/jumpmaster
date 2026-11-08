@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { agentBranch, type GateResult, type Role, type Verdict } from '@jumpmaster/protocol';
+import { applyPendingRulings, syncParkBriefings } from '../briefings.js';
 import type { DropZoneConfig, UsageConfig } from '../config.js';
 import { flushCrewOps } from '../crew/flush.js';
 import type { Db } from '../db/open.js';
@@ -372,7 +373,13 @@ export async function reconcileZone(
     now,
     zone.outboxDeadlineMinutes ?? zone.ciDeadlineMinutes,
   );
-  if (mode === 'active') actions += await flushCrewOps(db, forges, zone, secrets, now);
+  syncParkBriefings(db, zone, now);
+  if (mode === 'active') {
+    // Rulings apply only while the zone acts; one made while paused waits for resume.
+    const deps = { forges: () => forges, zone: () => zone };
+    actions += await applyPendingRulings(db, deps, zone.id, now);
+    actions += await flushCrewOps(db, forges, zone, secrets, now);
+  }
   const pulls = await forges.author.listOpenAgentPulls('agent/issue-');
   actions += await adopt(db, forges, zone, pass, pulls, now);
   if (mode === 'paused') return { actions, merges };
