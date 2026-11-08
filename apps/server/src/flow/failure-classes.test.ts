@@ -20,7 +20,7 @@ import { usageCfg } from '../test/fixtures.js';
 import { type Harness, harness, toApproved, toPrOpen } from '../test/flowHarness.js';
 import { workItem } from '../test/helpers.js';
 import { dispatchGate } from '../usage.js';
-import { HOLD_REASON } from './decide.js';
+import { HOLD_REASON, OVERRIDE_HINT } from './decide.js';
 
 const gateOk: GateResult = {
   name: 'test',
@@ -569,7 +569,52 @@ describe('§16 hostile PR content', () => {
     h.forge.state.files.set('base0:package.json', pkg('vitest run'));
     h.forge.state.files.set('sha1:package.json', pkg('true'));
     await h.reconcile();
-    expect(item(h)).toMatchObject({ state: 'parked', reason: 'gate script changed: test' });
+    expect(item(h)).toMatchObject({
+      state: 'parked',
+      reason: `gate script changed: test${OVERRIDE_HINT}`,
+    });
+  });
+
+  test('a maintainer approval of the head lifts a gate park and the PR is reviewed', async () => {
+    const h = await withFiles(['package.json']);
+    h.forge.state.maintainers = ['alice'];
+    h.forge.state.files.set('base0:package.json', pkg('vitest run'));
+    h.forge.state.files.set('sha1:package.json', pkg('vitest run --bail'));
+    await h.reconcile();
+    expect(item(h).state).toBe('parked');
+    h.forge.state.review({ author: 'alice', state: 'APPROVED', commitId: 'sha1' });
+    await h.sync();
+    expect(item(h).state).toBe('pr_open');
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['review']);
+  });
+
+  test('a maintainer approval of an older head does not lift a gate park', async () => {
+    const h = await withFiles(['package.json']);
+    h.forge.state.maintainers = ['alice'];
+    h.forge.state.review({ author: 'alice', state: 'APPROVED', commitId: 'sha1' });
+    h.forge.state.setHead(1, 'sha2');
+    h.forge.state.files.set('base0:package.json', pkg('vitest run'));
+    h.forge.state.files.set('sha2:package.json', pkg('vitest run --bail'));
+    await h.reconcile();
+    await h.sync();
+    expect(item(h)).toMatchObject({
+      state: 'parked',
+      reason: `gate script changed: test${OVERRIDE_HINT}`,
+    });
+    expect(h.queuedRoles()).toEqual([]);
+  });
+
+  test('a maintainer approval does not lift a protected-path park', async () => {
+    const h = await withFiles(['pnpm-workspace.yaml']);
+    h.forge.state.maintainers = ['alice'];
+    h.forge.state.review({ author: 'alice', state: 'APPROVED', commitId: 'sha1' });
+    await h.reconcile();
+    await h.sync();
+    expect(item(h)).toMatchObject({
+      state: 'parked',
+      reason: 'protected path: pnpm-workspace.yaml',
+    });
   });
 
   test("an npm: alias for the runner parks 'gate tool changed'", async () => {

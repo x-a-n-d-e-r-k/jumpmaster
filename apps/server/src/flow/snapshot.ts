@@ -110,6 +110,35 @@ function latestDecisive(reviews: ForgeReview[]): ForgeReview[] {
   return [...latest.values()];
 }
 
+/**
+ * Whether someone may let this head's gate changes through: among trusted reviewers' latest
+ * decisive reviews (a later change request or a dismissal cancels an approval), an APPROVED on
+ * exactly `headSha` by a non-bot with maintain/admin, or listed in `zone.overrideApprovers`.
+ */
+async function maintainerApprovedHead(
+  forges: ForgePair,
+  zone: DropZoneConfig,
+  latest: ForgeReview[],
+  headSha: string,
+  bots: string[],
+  unavailable: (method: string) => void,
+): Promise<boolean> {
+  const listed = new Set(zone.overrideApprovers.map((l) => l.toLowerCase()));
+  const botSet = new Set(bots.map((b) => b.toLowerCase()));
+  for (const r of latest) {
+    const login = r.author.toLowerCase();
+    if (r.state !== 'APPROVED' || r.commitId !== headSha) continue;
+    if (botSet.has(login) || login.endsWith('[bot]')) continue;
+    if (listed.has(login)) return true;
+    try {
+      if (await forges.author.isMaintainer(r.author)) return true;
+    } catch {
+      unavailable('isMaintainer');
+    }
+  }
+  return false;
+}
+
 const isPackageJson = (p: string): boolean => p === 'package.json' || p.endsWith('/package.json');
 
 /**
@@ -326,6 +355,10 @@ export async function buildSnapshot(
     compare && headSha
       ? await gateChanges(forges, zone, files.files, compare.mergeBaseSha, headSha, unavailable)
       : { scripts: [], tools: [] };
+  const maintainerApproved =
+    headSha !== null && (gate.scripts.length > 0 || gate.tools.length > 0)
+      ? await maintainerApprovedHead(forges, zone, trusted, headSha, pass.botLogins, unavailable)
+      : false;
 
   if (pr && headSha) {
     upsertPullRequest(
@@ -382,6 +415,7 @@ export async function buildSnapshot(
     filesComplete: files.complete,
     gateScriptChanges: gate.scripts,
     gateToolChanges: gate.tools,
+    maintainerApproved,
     protectionProblems: pass.protectionProblems,
     headFirstSeenAt,
     missingSince,

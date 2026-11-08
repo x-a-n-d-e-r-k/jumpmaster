@@ -105,6 +105,8 @@ export interface Forge {
   getDefaultBranch(): Promise<string>;
   listReadyIssues(label: string): Promise<ForgeIssue[]>;
   isTrusted(login: string): Promise<boolean>;
+  /** maintain or admin on the repository (write is not enough). */
+  isMaintainer(login: string): Promise<boolean>;
   findOrCreatePullRequest(input: {
     head: string;
     base: string;
@@ -137,6 +139,8 @@ export interface Forge {
 
 const TRUSTED_ROLES = new Set(['write', 'maintain', 'admin']);
 const TRUSTED_PERMISSIONS = new Set(['write', 'admin']);
+const MAINTAINER_ROLES = new Set(['maintain', 'admin']);
+const MAINTAINER_PERMISSIONS = new Set(['admin']);
 
 const PULLS_FILES_CAP = 3000;
 const FAILED_CONCLUSIONS = new Set([
@@ -268,14 +272,27 @@ export class GitHubForge implements Forge {
   }
 
   async isTrusted(login: string): Promise<boolean> {
+    return this.hasRole(login, TRUSTED_ROLES, TRUSTED_PERMISSIONS);
+  }
+
+  async isMaintainer(login: string): Promise<boolean> {
+    // The legacy `permission` field folds maintain into write, so only admin answers there.
+    return this.hasRole(login, MAINTAINER_ROLES, MAINTAINER_PERMISSIONS);
+  }
+
+  private async hasRole(
+    login: string,
+    roles: Set<string>,
+    permissions: Set<string>,
+  ): Promise<boolean> {
     try {
       const { data } = await this.octokit.rest.repos.getCollaboratorPermissionLevel({
         owner: this.owner,
         repo: this.repo,
         username: login,
       });
-      if (data.role_name) return TRUSTED_ROLES.has(data.role_name);
-      return TRUSTED_PERMISSIONS.has(data.permission);
+      if (data.role_name) return roles.has(data.role_name);
+      return permissions.has(data.permission);
     } catch (err) {
       // Only "not a collaborator" is an answer. Anything else (5xx, a 403 secondary rate limit,
       // the network) is unknown and must not quietly drop a maintainer's review: rethrow.

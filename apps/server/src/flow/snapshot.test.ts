@@ -160,6 +160,77 @@ describe('buildSnapshot', () => {
     });
   });
 
+  describe('maintainer override of gate changes', () => {
+    const gateChange = () => {
+      w.f.state.pullFiles.set(1, { files: [{ path: 'package.json' }], complete: true });
+      w.f.state.files.set('base0:package.json', pkg({ test: 'vitest' }));
+      w.f.state.files.set('sha1:package.json', pkg({ test: 'vitest --bail' }));
+    };
+    beforeEach(() => {
+      gateChange();
+      w.f.state.maintainers = ['human'];
+    });
+
+    test('a maintainer approval of the head SHA counts', async () => {
+      w.f.state.review({ author: 'human', state: 'APPROVED', commitId: 'sha1' });
+      expect((await snapshotOf()).maintainerApproved).toBe(true);
+    });
+
+    test('an approval of an older head does not count', async () => {
+      w.f.state.review({ author: 'human', state: 'APPROVED', commitId: 'sha0' });
+      expect((await snapshotOf()).maintainerApproved).toBe(false);
+    });
+
+    test('a dismissed approval, or a later change request, cancels it', async () => {
+      w.f.state.review({ id: 1, author: 'human', state: 'DISMISSED', commitId: 'sha1' });
+      expect((await snapshotOf()).maintainerApproved).toBe(false);
+      w.f.state.review({ id: 2, author: 'human', state: 'APPROVED', commitId: 'sha1' });
+      w.f.state.review({ id: 3, author: 'human', state: 'COMMENTED', commitId: 'sha1' });
+      expect((await snapshotOf()).maintainerApproved).toBe(true);
+      w.f.state.review({ id: 4, author: 'human', state: 'CHANGES_REQUESTED', commitId: 'sha1' });
+      expect((await snapshotOf()).maintainerApproved).toBe(false);
+    });
+
+    test('write access alone is not enough', async () => {
+      w.f.state.maintainers = [];
+      w.f.state.review({ author: 'human', state: 'APPROVED', commitId: 'sha1' });
+      expect((await snapshotOf()).maintainerApproved).toBe(false);
+    });
+
+    test('a zone overrideApprover with write access counts; without write it does not', async () => {
+      w.f.state.maintainers = [];
+      w.zone.overrideApprovers = ['Human', 'outsider'];
+      w.f.state.review({ author: 'outsider', state: 'APPROVED', commitId: 'sha1' });
+      expect((await snapshotOf()).maintainerApproved).toBe(false);
+      w.f.state.review({ author: 'human', state: 'APPROVED', commitId: 'sha1' });
+      expect((await snapshotOf()).maintainerApproved).toBe(true);
+    });
+
+    test('bot logins never count, including starter mode where both bots are one login', async () => {
+      w.f.state.logins = { author: 'human', reviewer: 'human' };
+      w.f.state.maintainers = ['human', 'deps[bot]'];
+      w.f.state.trusted.push('deps[bot]');
+      w.f.state.review({ author: 'human', state: 'APPROVED', commitId: 'sha1' });
+      w.f.state.review({ author: 'deps[bot]', state: 'APPROVED', commitId: 'sha1' });
+      expect((await snapshotOf()).maintainerApproved).toBe(false);
+    });
+
+    test('a failed permission lookup is not a maintainer', async () => {
+      w.f.state.review({ author: 'human', state: 'APPROVED', commitId: 'sha1' });
+      w.f.author.failNext('isMaintainer', '5xx');
+      const s = await snapshotOf();
+      expect(s.maintainerApproved).toBe(false);
+      expect(s.forgeUnavailable).toBe('isMaintainer');
+    });
+
+    test('no gate change: no permission lookup', async () => {
+      w.f.state.pullFiles.set(1, { files: [{ path: 'src/a.ts' }], complete: true });
+      w.f.state.review({ author: 'human', state: 'APPROVED', commitId: 'sha1' });
+      await snapshotOf();
+      expect(w.f.author.calls.some((c) => c.method === 'isMaintainer')).toBe(false);
+    });
+  });
+
   test('a thrown package.json read is forge unavailability (the pass waits), not a park', async () => {
     w.f.state.pullFiles.set(1, { files: [{ path: 'pkg/package.json' }], complete: true });
     w.f.author.failNext('getFileAt', '5xx');

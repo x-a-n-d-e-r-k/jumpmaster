@@ -222,6 +222,23 @@ describe('GitHubForge', () => {
     expect(await forge.isTrusted('adm')).toBe(true);
   });
 
+  test('a maintainer has maintain or admin; write is not enough; 404 is not one', async () => {
+    const perm = (login: string, body: Record<string, string>) =>
+      nock(api).get(`/repos/o/r/collaborators/${login}/permission`).reply(200, body);
+    perm('wr', { permission: 'write', role_name: 'write' });
+    perm('maint', { permission: 'write', role_name: 'maintain' });
+    perm('adm', { permission: 'admin', role_name: 'admin' });
+    perm('legacy', { permission: 'write' });
+    nock(api).get('/repos/o/r/collaborators/mal/permission').reply(404);
+    nock(api).get('/repos/o/r/collaborators/eve/permission').reply(500);
+    expect(await forge.isMaintainer('wr')).toBe(false);
+    expect(await forge.isMaintainer('maint')).toBe(true);
+    expect(await forge.isMaintainer('adm')).toBe(true);
+    expect(await forge.isMaintainer('legacy')).toBe(false);
+    expect(await forge.isMaintainer('mal')).toBe(false);
+    await expect(forge.isMaintainer('eve')).rejects.toThrow();
+  });
+
   test('findOrCreatePullRequest returns an existing PR for the head branch', async () => {
     nock(api)
       .get('/repos/o/r/pulls')

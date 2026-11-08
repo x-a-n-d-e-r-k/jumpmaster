@@ -16,7 +16,7 @@ import {
   upsertWorkItem,
   type WorkItem,
 } from './db/repo.js';
-import { DENIED_PREFIX, decide, HOLD_REASON } from './flow/decide.js';
+import { DENIED_PREFIX, decide, GATE_PARK_PREFIXES, HOLD_REASON } from './flow/decide.js';
 import { buildSnapshot, type ZonePass, zonePass } from './flow/snapshot.js';
 import type { ForgeIssue, PullFacts } from './forge/github.js';
 import type { ForgePair } from './outbox.js';
@@ -152,8 +152,8 @@ function restoreFromPull(db: Db, item: WorkItem, pr: PullFacts | null, now: Date
 
 /**
  * Recovers parked items whose cause is gone: the retry label (once per labelling), a reopened PR
- * or issue, a PR that merged after all, a lifted human block / fixed branch protection, or forge
- * data that is readable again.
+ * or issue, a PR that merged after all, a lifted human block / fixed branch protection, forge
+ * data that is readable again, or a maintainer's approval of a gate-changing head.
  */
 const MERGE_RETRY_MS = 60 * 60_000;
 
@@ -236,7 +236,9 @@ export async function syncParked(
       reason === HOLD_REASON ||
       reason.startsWith('unsafe branch protection') ||
       reason.startsWith('forge data missing') ||
-      reason.startsWith(DENIED_PREFIX)
+      reason.startsWith(DENIED_PREFIX) ||
+      // A maintainer's approval of the head lifts a gate park.
+      GATE_PARK_PREFIXES.some((p) => reason.startsWith(p))
     ) {
       const fresh = getWorkItem(db, item.id);
       if (!fresh) continue;

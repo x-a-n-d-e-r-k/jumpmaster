@@ -99,6 +99,11 @@ const DropZoneSchema = z.object({
    */
   authorMayBeAdmin: z.boolean().default(false),
   protectedPaths: z.array(z.string()).default(DEFAULT_PROTECTED_PATHS),
+  /**
+   * Logins (with write access) whose approval of the exact head lets a gate script or gate tool
+   * change through, besides anyone with maintain or admin. Protected paths are never overridden.
+   */
+  overrideApprovers: z.array(z.string()).default([]),
   reviewReadToken: z.boolean().default(false),
   /** `false`: the agent adds no Claude co-author trailer or PR attribution. */
   attribution: z.boolean().default(true),
