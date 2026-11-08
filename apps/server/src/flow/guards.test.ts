@@ -708,6 +708,101 @@ snapshots:
       ).toEqual(['install script: evil']);
     });
   });
+
+  describe('schema desyncs (round-2 probe)', () => {
+    /** The round-2 probe's head lockfile: vitest 3.0.1 and a registry `evil` package. */
+    const head = (
+      pkgExtra: string,
+      snapshotEntry: string,
+      settingsExtra = '',
+    ) => `lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+${settingsExtra}
+importers:
+
+  .:
+    devDependencies:
+      vitest:
+        specifier: ^3.0.0
+        version: 3.0.1
+
+packages:
+
+  evil@1.0.0:
+    resolution: {integrity: sha512-EVIL}
+    hasBin: true
+
+  vite@5.0.0:
+    resolution: {integrity: sha512-AAAA}
+    hasBin: true
+
+  vitest@3.0.1:
+    resolution: {integrity: sha512-CCCC}
+${pkgExtra}    hasBin: true
+
+snapshots:
+
+  evil@1.0.0: {}
+
+  vite@5.0.0: {}
+
+${snapshotEntry}`;
+    const base = head('', '  vitest@3.0.1:\n    dependencies:\n      vite: 5.0.0\n')
+      .replace('vitest@3.0.1', 'vitest@3.0.0')
+      .replace('vitest@3.0.1', 'vitest@3.0.0')
+      .replace('version: 3.0.1', 'version: 3.0.0')
+      .replace('  evil@1.0.0:\n    resolution: {integrity: sha512-EVIL}\n    hasBin: true\n\n', '')
+      .replace('  evil@1.0.0: {}\n\n', '');
+
+    test('a merge key whose anchor is parked in settings is refused', () =>
+      expect(
+        pnpm(
+          base,
+          head(
+            '',
+            "  vitest@3.0.1: {a'b: 1, <<: *x, c: 'd'}\n",
+            "  a'b: {q: &x {dependencies: {vite: evil@1.0.0}}, c: 'd'}\n",
+          ),
+          pnpm10,
+        ),
+      ).toEqual(['lockfile unreadable']));
+
+    test('a merge key hidden by apostrophe blanking is refused', () =>
+      expect(
+        pnpm(
+          base,
+          head(
+            "    engines: {a'b: 1, q: &x {dependencies: {vite: evil@1.0.0}}, c: 'd'}\n",
+            "  vitest@3.0.1: {a'b: 1, <<: *x, c: 'd'}\n",
+          ),
+          pnpm10,
+        ),
+      ).toEqual(['lockfile unreadable']));
+
+    test('a value the two schemas read differently (a timestamp) is refused', () =>
+      expect(
+        pnpm(
+          base,
+          head(
+            '    deprecated: 2020-01-01\n',
+            '  vitest@3.0.1:\n    dependencies:\n      vite: 5.0.0\n',
+          ),
+          pnpm10,
+        ),
+      ).toEqual(['lockfile unreadable']));
+
+    test('a dependency value with whitespace in it is not a plain version', () =>
+      expect(
+        pnpm(
+          base,
+          head('', '  vitest@3.0.1:\n    dependencies:\n      vite: 5.0.0 evil@1.0.0\n'),
+          pnpm10,
+        ),
+      ).toContain('vitest: non-registry dependency vite'));
+  });
 });
 
 describe('branchProtectionProblems', () => {

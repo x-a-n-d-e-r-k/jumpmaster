@@ -405,7 +405,47 @@ const isMap = (v: unknown): v is YamlMap =>
 
 /** One line with its quoted scalars blanked, so their contents can't look like YAML syntax. */
 function unquoted(line: string): string {
-  return line.replace(/'(?:[^']|'')*'|"(?:[^"\\]|\\.)*"/g, '""');
+  let out = '';
+  // A quote opens a quoted scalar only where a node starts: an apostrophe inside a plain scalar
+  // (`a'b`) is just a character.
+  let atNode = true;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i] as string;
+    if (atNode && (c === "'" || c === '"')) {
+      let j = i + 1;
+      for (; j < line.length; j++) {
+        if (c === '"' && line[j] === '\\') j++;
+        else if (line[j] === c) {
+          if (c === "'" && line[j + 1] === "'") j++;
+          else break;
+        }
+      }
+      out += '""';
+      i = j;
+      atNode = false;
+      continue;
+    }
+    out += c;
+    if (c === ' ') continue;
+    const next = line[i + 1];
+    atNode =
+      c === '[' ||
+      c === '{' ||
+      c === ',' ||
+      ((c === ':' || c === '-') && (next === undefined || next === ' '));
+  }
+  return out;
+}
+
+/** Only what JSON can hold: a Date, Buffer or other typed value means a schema-specific read. */
+function plainTree(v: unknown): boolean {
+  if (v === null || typeof v === 'string' || typeof v === 'boolean') return true;
+  if (typeof v === 'number') return Number.isFinite(v);
+  if (Array.isArray(v)) return v.every(plainTree);
+  if (typeof v !== 'object') return false;
+  const proto = Object.getPrototypeOf(v);
+  if (proto !== Object.prototype && proto !== null) return false;
+  return Object.values(v as object).every(plainTree);
 }
 
 /**
@@ -425,15 +465,20 @@ function unexpectedSyntax(text: string): boolean {
 }
 
 /**
- * Reads a pnpm lockfile v6–v9 with js-yaml (as pnpm does), after refusing syntax pnpm never
- * writes. null on anything unexpected: a parse error (duplicate keys included), an unknown
+ * Reads a pnpm lockfile v6–v9 with js-yaml's default schema (as pnpm does), after refusing
+ * syntax pnpm never writes. null on anything unexpected: a parse error (duplicate keys included), an unknown
  * top-level key, an entry that is not a mapping, or another lockfile version.
  */
 export function parsePnpmLock(text: string): PnpmLock | null {
   if (unexpectedSyntax(text)) return null;
+  // The text check above is hygiene; this is the boundary. pnpm reads with js-yaml's default
+  // schema (merge keys, timestamps, binary): the tree must be plain and the same under the core
+  // schema, so no schema-specific feature can mean something the checks below don't see.
   let doc: unknown;
   try {
-    doc = yaml.load(text, { schema: yaml.CORE_SCHEMA });
+    doc = yaml.load(text);
+    const core = yaml.load(text, { schema: yaml.CORE_SCHEMA });
+    if (!plainTree(doc) || JSON.stringify(doc) !== JSON.stringify(core)) return null;
   } catch {
     return null;
   }
@@ -488,7 +533,7 @@ function nonRegistryDeps(entry: YamlMap): string[] | null {
     if (!isMap(deps)) return null;
     for (const [dep, value] of Object.entries(deps)) {
       if (typeof value !== 'string' && typeof value !== 'number') return null;
-      if (!/^\d/.test(String(value))) out.push(dep);
+      if (!/^\d\S*$/.test(String(value))) out.push(dep);
     }
   }
   return out;
@@ -575,7 +620,7 @@ function pnpmLockChanges(baseText: string | null, headText: string, opts: LockOp
   for (const key of PNPM_IMPORTERS) {
     const before = depVersions(base.doc[key]);
     for (const [path, { dep, version }] of depVersions(head.doc[key])) {
-      if (before.get(path)?.version !== version && !/^\d/.test(version)) {
+      if (before.get(path)?.version !== version && !/^\d\S*$/.test(version)) {
         out.push(`${dep}: non-registry version ${version}`);
       }
     }
