@@ -1,8 +1,10 @@
-import { mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, test } from 'vitest';
-import { joinToken, loadEnrollment, saveEnrollment, stateDir } from './main.js';
+import { joinToken, loadEnrollment, saveEnrollment, stateDir } from './state.js';
 
 const fresh = () => mkdtempSync(join(tmpdir(), 'jm-stick-'));
 
@@ -37,5 +39,26 @@ describe('stick state', () => {
     expect(() => joinToken({ JM_JOIN_TOKEN: 'x', JM_JOIN_TOKEN_FILE: file })).toThrow(
       /JM_JOIN_TOKEN and JM_JOIN_TOKEN_FILE/,
     );
+  });
+});
+
+describe('stick entry point', () => {
+  // The built entry must run main() however it is launched; a guard that silently returned would
+  // leave a stick that exits 0 and runs nothing. Needs `npx tsc -b` (CI's typecheck step).
+  const dist = fileURLToPath(new URL('../dist/main.js', import.meta.url));
+  const wrapper = join(fresh(), 'wrapper.mjs');
+  writeFileSync(wrapper, `import ${JSON.stringify(pathToFileURL(dist).href)};\n`);
+  const launches: [string, string][] = [
+    ['main.js', dist],
+    ['main without the .js extension', dist.replace(/\.js$/, '')],
+    ['a wrapper that imports it', wrapper],
+  ];
+
+  test.each(launches)('launched as %s, it runs and reports missing config', (_how, path) => {
+    expect(existsSync(dist), 'build first: npx tsc -b').toBe(true);
+    const env = { ...process.env, JM_SERVER_URL: '', JM_STATE_DIR: fresh() };
+    const child = spawnSync(process.execPath, [path], { encoding: 'utf8', env, timeout: 10_000 });
+    expect(child.stderr).toContain('JM_SERVER_URL is required');
+    expect(child.status).toBe(1);
   });
 });

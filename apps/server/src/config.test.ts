@@ -189,6 +189,29 @@ describe('loadConfig', () => {
       expect(() => loadConfig(file, fullEnv)).toThrow(/JM_ZONE_SECRET_MY_ZONE_A_B/);
     });
 
+    test('a zone declaring both X and X_FILE as gate secrets stops startup naming both', () => {
+      // JM_ZONE_SECRET_MAIN_DB_FILE would be read as the file for DB, so the pair is ambiguous.
+      const file = withZone({ gateSecrets: ['DB', 'DB_FILE'] });
+      const env = {
+        ...fullEnv,
+        JM_ZONE_SECRET_MAIN_DB: 'db-value-123',
+        JM_ZONE_SECRET_MAIN_DB_FILE: 'db-file-value-123',
+      };
+      expect(() => loadConfig(file, env)).toThrow(
+        'zone main declares gate secrets DB and DB_FILE; DB_FILE collides with the file variable for DB. Rename one.',
+      );
+      // DB_FILE alone keeps working as an ordinary name, as on M3.
+      expect(
+        zoneSecrets(
+          loadConfig(withZone({ gateSecrets: ['DB_FILE'] }), {
+            ...fullEnv,
+            JM_ZONE_SECRET_MAIN_DB_FILE: 'db-file-value-123',
+          }),
+          'main',
+        ),
+      ).toEqual({ DB_FILE: 'db-file-value-123' });
+    });
+
     test('zone gate secrets load from JM_ZONE_SECRET_<ZONE>_<NAME>_FILE', () => {
       const env = {
         ...fullEnv,

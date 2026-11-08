@@ -328,6 +328,13 @@ function loadZoneSecrets(
   const out: Record<string, Record<string, string>> = {};
   for (const zone of zones) {
     if (zone.gateSecrets.length === 0) continue;
+    // NAME_FILE names the file holding NAME, so a zone can't also declare NAME_FILE as a secret.
+    for (const name of zone.gateSecrets) {
+      if (zone.gateSecrets.includes(`${name}_FILE`))
+        throw new Error(
+          `zone ${zone.id} declares gate secrets ${name} and ${name}_FILE; ${name}_FILE collides with the file variable for ${name}. Rename one.`,
+        );
+    }
     const values: Record<string, string> = {};
     for (const name of zone.gateSecrets) {
       if (!GATE_SECRET_NAME.test(name) || RESERVED_NAME.test(name)) {

@@ -1,6 +1,8 @@
+import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import { readSecret } from './secrets.js';
 
@@ -79,5 +81,38 @@ describe('readSecret', () => {
     // Existing deployments set secrets in the environment; their values are not reinterpreted.
     expect(readSecret({ JM_X: 'a b\n' }, 'JM_X')).toBe('a b\n');
     expect(readSecret({ JM_X: '' }, 'JM_X')).toBe('');
+  });
+
+  test('a FIFO is refused at once instead of blocking startup', () => {
+    // Run in a child with a timeout: a blocking open would hang this worker for good.
+    const fifo = join(mkdtempSync(join(tmpdir(), 'jm-secret-')), 'pipe');
+    execFileSync('mkfifo', ['-m', '0600', fifo]);
+    const source = fileURLToPath(
+      new URL('../../../packages/protocol/src/secrets.ts', import.meta.url),
+    );
+    const script = [
+      `import { readSecret } from ${JSON.stringify(pathToFileURL(source).href)};`,
+      'try {',
+      `  readSecret({ JM_X_FILE: ${JSON.stringify(fifo)} }, 'JM_X');`,
+      "  console.log('read');",
+      '} catch (e) {',
+      '  console.log(e.message);',
+      '}',
+    ].join('\n');
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+    expect(child.signal, 'timed out: the open blocked').toBeNull();
+    expect(child.stdout.trim()).toBe(`JM_X_FILE: ${fifo} is not a regular file`);
+  });
+
+  test('a secret file over 64 KiB is refused without reading it whole', () => {
+    expect(readSecret({ JM_X_FILE: secretFile('a'.repeat(64 * 1024)) }, 'JM_X')).toHaveLength(
+      64 * 1024,
+    );
+    expect(
+      thrown(() => readSecret({ JM_X_FILE: secretFile('a'.repeat(64 * 1024 + 1)) }, 'JM_X')),
+    ).toMatch(/^JM_X_FILE: .* is larger than 64 KiB$/);
   });
 });

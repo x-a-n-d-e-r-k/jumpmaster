@@ -5,29 +5,10 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { load } from 'js-yaml';
 import { describe, expect, test } from 'vitest';
-import { LOCAL_IMAGE_FILES, walk } from '../scripts/repo-files.js';
+import { type Instruction, instructions, LOCAL_IMAGE_FILES, walk } from '../scripts/repo-files.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const read = (file: string): string => readFileSync(join(ROOT, file), 'utf8');
-
-type Instruction = { op: string; args: string };
-
-/** Dockerfile instructions with line continuations joined and comments dropped. */
-export function instructions(text: string): Instruction[] {
-  const out: Instruction[] = [];
-  let pending = '';
-  for (const raw of text.split('\n')) {
-    const line = raw.trim();
-    if (pending === '' && (line === '' || line.startsWith('#'))) continue;
-    if (line.startsWith('#')) continue;
-    pending += (pending ? ' ' : '') + line.replace(/\\$/, '').trim();
-    if (line.endsWith('\\')) continue;
-    const [op = '', ...rest] = pending.split(/\s+/);
-    out.push({ op: op.toUpperCase(), args: rest.join(' ') });
-    pending = '';
-  }
-  return out;
-}
 
 /** The instructions of the last stage (from its FROM on). */
 const finalStage = (all: Instruction[]): Instruction[] =>
@@ -55,7 +36,7 @@ describe('Dockerfiles', () => {
     // No Docker CLI, engine or API client in any stage of the server image.
     expect(text).not.toMatch(/docker(\.io|-ce|-cli)|\bdockerode\b|@jumpmaster\/stick|apps\/stick/);
     const final = finalStage(instructions(text));
-    expect(final).toContainEqual({ op: 'WORKDIR', args: '/app' });
+    expect(final).toContainEqual(expect.objectContaining({ op: 'WORKDIR', args: '/app' }));
     expect(final.some((i) => i.op === 'ENV' && /\bJM_CONTAINER=1\b/.test(i.args))).toBe(true);
     expect(final.some((i) => i.op === 'ENV' && /\bTMPDIR=\/tmp\b/.test(i.args))).toBe(true);
   });
@@ -119,7 +100,11 @@ type Workflow = {
   permissions?: Record<string, string>;
   jobs: Record<
     string,
-    { 'runs-on': string; steps: { run?: string; env?: Record<string, string> }[] }
+    {
+      'runs-on': string;
+      'timeout-minutes'?: number;
+      steps: { uses?: string; run?: string; with?: Record<string, unknown> }[];
+    }
   >;
 };
 
@@ -143,11 +128,27 @@ describe('images.yml', () => {
     expect(runs.some((r) => /images\/smoke\.sh/.test(r))).toBe(true);
   });
 
-  test('builds every shipped image and never pushes or logs in', () => {
+  test('builds each shipped image by name and never pushes or logs in', () => {
     const text = read('.github/workflows/images.yml');
-    for (const file of SHIPPED) expect(text).toContain(file.split('/')[1] as string);
-    expect(text).toMatch(/docker build[^\n]*-f images\/\$\{?image\}?\/Dockerfile/);
-    expect(text).toMatch(/SOURCE_URL=/);
+    const builds = Object.values(workflow().jobs)
+      .flatMap((j) => j.steps.map((s) => s.run ?? ''))
+      .flatMap((run) => run.split('\n'))
+      .filter((line) => /^\s*docker build /.test(line));
+    for (const file of SHIPPED) {
+      const name = file.split('/')[1] as string;
+      const build = builds.find((line) => line.includes(` -f ${file} `));
+      expect(build, file).toMatch(new RegExp(` -t jumpmaster-${name}:dev -f ${file} \\.$`));
+      expect(build, file).toMatch(/--build-arg SOURCE_URL="\$SOURCE_URL"/);
+    }
+    expect(builds).toHaveLength(SHIPPED.length);
     expect(text).not.toMatch(/--push|docker push|docker login|login-action|packages: write/);
+  });
+
+  test('checkout keeps no credentials and every job has a timeout', () => {
+    for (const job of Object.values(workflow().jobs)) {
+      expect(job['timeout-minutes']).toBe(30);
+      for (const step of job.steps.filter((s) => s.uses?.startsWith('actions/checkout@')))
+        expect(step.with?.['persist-credentials']).toBe(false);
+    }
   });
 });

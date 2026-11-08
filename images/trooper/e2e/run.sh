@@ -94,7 +94,7 @@ docker network create --internal "$NET" >/dev/null
 docker run -d --name "$SIDE" --network "$NET" --network-alias db --security-opt no-new-privileges \
   --pids-limit 512 "$SIDECAR_IMAGE" sh -c 'while true; do nc -l -p 5432 >/dev/null; done' >/dev/null
 gate='{"name":"svc","run":"test \"$JM_SERVICE_DB_HOST\" = db && test \"$JM_SERVICE_DB_PORT\" = 5432 && test \"$E2E_SECRET\" = e2e-secret-value && echo service-ok","timeoutMinutes":2}'
-extra='"services":[{"name":"db","image":"alpine:3.20","port":5432,"readyTimeoutSeconds":30}],"gateSecrets":{"E2E_SECRET":"e2e-secret-value"}'
+extra='"services":[{"name":"db","image":"alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc","port":5432,"readyTimeoutSeconds":30}],"gateSecrets":{"E2E_SECRET":"e2e-secret-value"}'
 TROOPER="$(docker create -i --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add KILL \
   --security-opt no-new-privileges --pids-limit 512 --ulimit core=0:0 jumpmaster-trooper:e2e)"
 docker network connect "$NET" "$TROOPER"

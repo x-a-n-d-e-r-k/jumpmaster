@@ -13,8 +13,11 @@ permissions:
 jobs:
   images:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
@@ -30,9 +33,9 @@ jobs:
         env:
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
-          for image in server stick trooper; do
-            docker build --build-arg SOURCE_URL="$SOURCE_URL" -t "jumpmaster-${image}:dev" -f images/${image}/Dockerfile .
-          done
+          docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-server:dev -f images/server/Dockerfile .
+          docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-stick:dev -f images/stick/Dockerfile .
+          docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-trooper:dev -f images/trooper/Dockerfile .
       - name: Image smoke test
         run: images/smoke.sh
       - name: Trooper e2e
