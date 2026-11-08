@@ -158,6 +158,10 @@ A drop whose image is not on the list fails with `image not allowed: <image>` an
 container starts.
 
 Rebuild the trooper image: M1 changes it (two unprivileged users, hardened container).
+Whenever you upgrade, build and deploy the trooper image before the server, or together with
+it. A server that finds a result from an older trooper (one that sends no author report)
+tells the reviewer so, and missing run-and-report evidence then counts as `minor`, so a
+mixed rollout does not park every item.
 
 ```sh
 docker build -t jumpmaster-trooper:dev -f images/trooper/Dockerfile .
@@ -188,6 +192,35 @@ every blocker closes. Work already in flight continues if a blocker is added lat
 | 4 | Close an issue while its PR is open. Then reopen it. | The item parks `issue closed`, with no merge call. After reopening, the next pass returns it to `pr_open` and re-decides it. |
 | 5 | Park an item (for example scenario 6), then add the `agent-retry` label to its issue. | Attempts reset once, the item returns to `pr_open` (or resumes the branch if the PR was closed). Leaving the label on does not reset again; remove and re-add it to retry again. |
 | 6 | An issue that asks the agent to edit a file under `.github/`. | The push is refused in the trooper (`protected path …`), or, if such a change reaches a PR, the item parks `protected path: .github/…` before any review. |
+
+### Acceptance criteria and waivers
+
+The implement and heal agents end with a report: each acceptance criterion in the issue, how
+it is met, and the evidence (commands run and their results). The reviewer sees the last three
+reports, each labelled with the head it produced, next to the gate results. It checks every
+criterion: one that is not met, or not shown to be met, is `major`, so the PR is sent back. A
+criterion the issue marks `(manual)` is `minor`: a person checks it, and it does not block the
+merge.
+
+A criterion the agents cannot meet in this environment (for example one that needs a real
+browser or a device) ends in a park: the heal returns `BLOCKED`, or makes no changes twice for
+the same findings (`heal made no changes for the same findings`). To waive it:
+
+1. Edit the issue and add `(manual)` to that criterion.
+2. Add the `agent-retry` label.
+
+The retry label clears the stored request-changes on the PR's current head, so the next pass
+reviews that same head again against the edited issue. There is no override that approves a PR
+by hand.
+
+- `(manual)` takes effect only together with the retry label, which only a maintainer can add.
+  Anyone who can edit the issue can add the token, so check the issue's edit history before you
+  add the label.
+- A standing request-changes from a human reviewer still blocks the PR: dismiss it first. On the
+  current head it sends the PR back to a heal; on an older commit the item parks
+  `human block stands` after the fresh review.
+- A retry on a head that carries a request-changes costs one fresh review (charged to the
+  review budget) before any further heal.
 
 ## 6. Pass criteria
 
@@ -242,6 +275,7 @@ JM_GITHUB_REVIEWER_TOKEN JM_GITHUB_READ_TOKEN JM_JOIN_TOKEN JM_OPERATOR_TOKEN`.
 | Items park `no CI result: missing <check>` | The ruleset requires a check that never reported on the head. Check the workflow runs on pull requests. |
 | Items park `unsupported rule: merge_queue` (or `required_deployments`) | The server merges through the API, which a merge queue or required deployment never allows. Remove that rule from the ruleset for the agent's base branch. |
 | Items park `merge rejected: …` | GitHub refused the merge on an unchanged head, often because of an unresolved conversation or a dismissed approval. Clear the cause; the server retries the merge about an hour after the refusal, or at once if you add the retry label. |
+| Items park `heal made no changes for the same findings` | Two heals in a row found nothing to change for the same review findings. Either a finding cannot be met here (waive it: mark the criterion `(manual)` in the issue, then add the retry label) or the review is wrong (fix the issue text, then add the retry label). |
 | Items park `budget exhausted: heal` after gate timeouts | A gate that times out or flakes forces "request changes", and each heal that finds nothing to fix spends the heal budget. Raise the gate's `timeoutMinutes` or fix the flaky test, then add the retry label. |
 | Items park `no pipeline` | `ciRequired` is true but nothing reported. Add CI or set `ciRequired: false`. |
 | A drop fails `image not allowed: …` | Add the zone's image to `JM_ALLOWED_IMAGES` on the stick, spelled exactly. |

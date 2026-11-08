@@ -9,6 +9,7 @@ import {
   mirrorDirOf,
   pushSweep,
   type RoleCtx,
+  reportOf,
   resultMeta,
   runAgent,
   runGatesPhase,
@@ -145,5 +146,9 @@ async function implementSteps(
   const failed = gates.find((g) => g.timedOut || g.exitCode !== 0);
   if (failed) return done({ status: 'failed', reason: `gate ${failed.name} failed` });
 
-  return done({ status: 'completed', headSha: await push(gatedSha) });
+  return done({
+    status: 'completed',
+    headSha: await push(gatedSha),
+    ...reportOf(structured.summary),
+  });
 }

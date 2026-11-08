@@ -11,6 +11,7 @@ import {
   mirrorDirOf,
   pushSweep,
   type RoleCtx,
+  reportOf,
   resultMeta,
   runAgent,
   runGatesPhase,
@@ -109,7 +110,11 @@ async function healSteps(
   await deps.git.commitIfDirty(dir, `fix: address review on #${payload.pr.number}`, as);
   // Compare HEAD, not the commit flag: commits the agent made itself are changes too.
   if ((await deps.git.headSha(dir, as)) === prHead) {
-    return done({ status: 'no_changes', reason: structured.summary });
+    return done({
+      status: 'no_changes',
+      reason: structured.summary,
+      ...reportOf(structured.summary),
+    });
   }
 
   // Gates test HEAD; the push must carry exactly that commit.
@@ -118,5 +123,9 @@ async function healSteps(
   const failed = gates.find((g) => g.timedOut || g.exitCode !== 0);
   if (failed) return done({ status: 'failed', reason: `gate ${failed.name} failed` });
 
-  return done({ status: 'completed', headSha: await push(gatedSha) });
+  return done({
+    status: 'completed',
+    headSha: await push(gatedSha),
+    ...reportOf(structured.summary),
+  });
 }

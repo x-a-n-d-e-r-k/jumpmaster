@@ -10,6 +10,7 @@ import { listArtifacts } from './artifacts.js';
 import type { DropZoneConfig, UsageConfig } from './config.js';
 import type { Db } from './db/open.js';
 import {
+  clearRequestChangesOnHead,
   type Drop,
   type DropState,
   getDrop,
@@ -28,6 +29,7 @@ import {
   chargeNoChange,
   chargeRateLimitRequeue,
   chargeResolveConflict,
+  noteHealNoChange,
   refundCharge,
 } from './flow/budgets.js';
 import { protectedPathHits } from './flow/guards.js';
@@ -313,6 +315,17 @@ async function reviewResult(c: Ctx, result: DropResult): Promise<void> {
 
 const STALE_REASON = /^(head moved|stale info)/;
 
+/** A heal on bot review findings that changed nothing but reported its evidence. */
+function answersReviewWithEvidence(drop: Drop, result: DropResult): boolean {
+  if ((result.summary ?? '').trim() === '') return false;
+  try {
+    const input = JSON.parse(drop.inputJson ?? '{}') as { feedback?: { source?: unknown } };
+    return input.feedback?.source === 'review';
+  } catch {
+    return false;
+  }
+}
+
 function pushResult(c: Ctx, result: DropResult): void {
   const { db, drop, item } = c;
   const role = drop.role as 'heal' | 'resolve';
@@ -346,6 +359,15 @@ function pushResult(c: Ctx, result: DropResult): void {
         if (role === 'heal' && result.headSha) return continueInterrupted(c, result.headSha);
         return finish(c, 'succeeded');
       case 'no_changes':
+        if (role === 'heal' && answersReviewWithEvidence(drop, result) && drop.headSha) {
+          // Nothing to change, but the report may show the review's findings are met: review the
+          // head again with it visible. The review-repeat budget on the head bounds this loop.
+          clearRequestChangesOnHead(db, item.id, drop.headSha);
+          return finish(c, 'succeeded');
+        }
+        if (role === 'heal' && !noteHealNoChange(db, item.id, drop.fingerprint)) {
+          return park(c, 'heal made no changes for the same findings', 'succeeded');
+        }
         return finish(c, 'succeeded');
       default:
         if (result.status === 'failed' && STALE_REASON.test(result.reason ?? '')) {

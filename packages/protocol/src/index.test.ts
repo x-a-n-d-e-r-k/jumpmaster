@@ -76,6 +76,15 @@ describe('protocol', () => {
     expect(() => VerdictSchema.parse({ decision: 'lgtm', summary: '', findings: [] })).toThrow());
   test('role is optional on results', () =>
     expect(DropResultSchema.parse({ status: 'failed', gates: [] }).role).toBeUndefined());
+  test('a result summary is optional and capped at 8000 characters', () => {
+    expect(DropResultSchema.parse({ status: 'completed', gates: [] }).summary).toBeUndefined();
+    expect(
+      DropResultSchema.parse({ status: 'completed', gates: [], summary: 'x'.repeat(8000) }).summary,
+    ).toHaveLength(8000);
+    expect(() =>
+      DropResultSchema.parse({ status: 'completed', gates: [], summary: 'x'.repeat(8001) }),
+    ).toThrow();
+  });
   test('rate_limited and interrupted are valid statuses', () => {
     for (const status of ['rate_limited', 'interrupted'])
       expect(DropResultSchema.parse({ status, gates: [] }).status).toBe(status);

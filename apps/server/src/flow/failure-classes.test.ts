@@ -7,6 +7,7 @@ import { describe, expect, test } from 'vitest';
 import {
   activeDropFor,
   getAttempts,
+  getPullRequest,
   getUsageState,
   insertOutbox,
   insertVerdict,
@@ -333,7 +334,7 @@ describe('§16 reviews and heals', () => {
     });
   });
 
-  test('heal that pushes nothing: never reaches approval; parks at maxHeal', async () => {
+  test('heal that pushes nothing: never reaches approval; parks on the second identical try', async () => {
     const h = await harness();
     await toHealQueued(h, 'sha1');
     for (let i = 0; i < h.zone.budgets.maxHeal + 2 && item(h).state === 'pr_open'; i++) {
@@ -341,10 +342,110 @@ describe('§16 reviews and heals', () => {
         await h.finishDrop('heal', { status: 'no_changes', gates: [] });
       await h.reconcile();
     }
-    expect(item(h)).toMatchObject({ state: 'parked', reason: 'budget exhausted: heal' });
+    expect(item(h)).toMatchObject({
+      state: 'parked',
+      reason: 'heal made no changes for the same findings',
+    });
+    expect(h.db.prepare("SELECT COUNT(*) AS n FROM drops WHERE role = 'heal'").get()).toEqual({
+      n: 2,
+    });
     expect(count(h, 'merge')).toBe(0);
     const approvals = h.forge.state.reviews.filter((r) => r.state === 'APPROVED');
     expect(approvals).toHaveLength(0);
+  });
+
+  test('waiver: marking a criterion (manual) and adding the retry label reviews the same head afresh', async () => {
+    const issues = [{ ...issue(1), body: '- [ ] works in a browser' }];
+    const h = await harness({ issues });
+    await toHealQueued(h, 'sha1');
+    await h.finishDrop('heal', { status: 'no_changes', gates: [] });
+    await h.reconcile();
+    await h.finishDrop('heal', { status: 'no_changes', gates: [] });
+    await h.reconcile();
+    expect(item(h)).toMatchObject({
+      state: 'parked',
+      reason: 'heal made no changes for the same findings',
+    });
+    issues[0]!.body = '- [ ] works in a browser (manual)';
+    h.forge.state.setLabels(1, ['agent-ready', 'agent-retry']);
+    await h.reconcile();
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['review']);
+    const { payload } = await h.lease();
+    expect(payload).toMatchObject({ role: 'review', pr: { headSha: 'sha1' } });
+    expect(payload.prompt).toContain('works in a browser (manual)');
+  });
+
+  test('a heal that answers review findings with evidence gets re-reviews, bounded by the review budget', async () => {
+    const h = await harness();
+    await toHealQueued(h, 'sha1');
+    for (let i = 0; i < 10 && item(h).state === 'pr_open'; i++) {
+      const role = h.queuedRoles()[0];
+      if (role === 'heal') {
+        await h.finishDrop('heal', {
+          status: 'no_changes',
+          summary: 'ran it: 3 passed',
+          gates: [],
+        });
+      } else if (role === 'review') {
+        const l = await h.lease();
+        expect(l.payload.prompt).toContain('ran it: 3 passed');
+        await h.postResult(l.dropId, l.epoch, reviewed(changes));
+      }
+      await h.reconcile();
+    }
+    expect(item(h)).toMatchObject({ state: 'parked', reason: 'budget exhausted: review' });
+    expect(h.db.prepare("SELECT COUNT(*) AS n FROM drops WHERE role = 'review'").get()).toEqual({
+      n: h.zone.budgets.maxReviewRepeat,
+    });
+    expect(count(h, 'merge')).toBe(0);
+  });
+
+  test('a failed PR read during a retry skips the item without consuming the label', async () => {
+    const h = await harness();
+    await toHealQueued(h, 'sha1');
+    await h.finishDrop('heal', { status: 'no_changes', gates: [] });
+    await h.reconcile();
+    await h.finishDrop('heal', { status: 'no_changes', gates: [] });
+    await h.reconcile();
+    expect(item(h).state).toBe('parked');
+    h.forge.state.setLabels(1, ['agent-ready', 'agent-retry']);
+    h.forge.author.failNext('getPull', 'throw');
+    await h.sync();
+    expect(item(h)).toMatchObject({ state: 'parked', retryLabelSeen: false });
+    expect(getAttempts(h.db, 1, 'heal_no_change').count).toBe(1);
+    expect(getPullRequest(h.db, 1)?.state).toBe('open');
+    await h.reconcile();
+    await h.reconcile();
+    expect(item(h)).toMatchObject({ state: 'pr_open', prNumber: 1 });
+    expect(h.queuedRoles()).toEqual(['review']);
+    expect(h.forge.state.pulls.size).toBe(1);
+  });
+
+  test('the retry label never leaves a stale approve standing alone on a request-changes head', async () => {
+    const h = await harness();
+    await toHealQueued(h, 'sha1');
+    insertVerdict(h.db, {
+      id: 'v-late',
+      workItemId: 1,
+      headSha: 'sha1',
+      decision: 'approve',
+      forced: false,
+      summary: 'ok now',
+      findingsJson: '[]',
+      gatesJson: '[]',
+      createdAt: h.at(1).toISOString(),
+    });
+    await h.finishDrop('heal', { status: 'no_changes', gates: [] });
+    await h.reconcile();
+    await h.finishDrop('heal', { status: 'no_changes', gates: [] });
+    await h.reconcile();
+    expect(item(h).state).toBe('parked');
+    h.forge.state.setLabels(1, ['agent-ready', 'agent-retry']);
+    await h.reconcile();
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['review']);
+    expect(count(h, 'merge')).toBe(0);
   });
 
   test('reviewer blocked SHA X, then the same SHA is approved: never merges', async () => {
@@ -763,6 +864,10 @@ describe('§16 server-side parks', () => {
     await h.sync();
     expect(item(h).state).toBe('pr_open');
     expect(getAttempts(h.db, 1, 'heal').count).toBe(0);
+    // The retry label clears the request-changes on the head, so it is reviewed afresh first.
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['review']);
+    await h.finishDrop('review', reviewed(changes));
     setAttempts(h.db, 1, 'heal', h.zone.budgets.maxHeal, 'old2');
     await h.reconcile();
     expect(item(h).reason).toBe('budget exhausted: heal');

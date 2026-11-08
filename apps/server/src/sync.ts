@@ -1,6 +1,7 @@
 import type { DropZoneConfig } from './config.js';
 import type { Db } from './db/open.js';
 import {
+  clearRequestChangesOnHead,
   deleteFailedOutbox,
   getPullRequest,
   getWorkItem,
@@ -175,10 +176,23 @@ export async function syncParked(
     const prNumber = getPullRequest(db, item.id)?.number ?? item.prNumber;
     const hasRetry = labels.includes(zone.retryLabel);
     if (hasRetry && !item.retryLabelSeen) {
+      // Read the PR before consuming the label: a failed read must not pass for a closed PR
+      // (that would open a second one). The label stays unconsumed and is tried next pass.
+      let pr: PullFacts | null = null;
+      if (prNumber !== null) {
+        try {
+          pr = await forges.author.getPull(prNumber);
+        } catch {
+          continue;
+        }
+      }
       resetAttempts(db, item.id);
       deleteFailedOutbox(db, item.id);
       setRetryLabelSeen(db, item.id, true);
-      restoreFromPull(db, item, await readPull(forges, prNumber), now);
+      // A stored request-changes on the head would re-heal the same findings; the owner may have
+      // waived a criterion in the issue, so the head is reviewed afresh against the new body.
+      if (pr?.state === 'open' && pr.headSha) clearRequestChangesOnHead(db, item.id, pr.headSha);
+      restoreFromPull(db, item, pr, now);
       retried++;
       continue;
     }

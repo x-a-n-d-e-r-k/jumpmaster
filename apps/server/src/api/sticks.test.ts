@@ -231,7 +231,9 @@ describe('stick API', () => {
     const drop = { ...getDrop(db, 'd1')!, epoch: 1 };
     const p = buildPayload(db, zone, drop, config.secrets);
     expect(p.prompt).toMatch(/autonomous coding agent/);
-    expect(p.prompt).toMatch(/\n\n## Issue \(data\)\n\n#7: Add widget\n\nPlease add a widget\.$/);
+    expect(p.prompt).toMatch(
+      /\n\n## Issue \(data\)\n\n<<<jm-data:d1:begin issue>>>\n#7: Add widget\n\nPlease add a widget\.\n<<<jm-data:d1:end issue>>>$/,
+    );
     expect(p.promptVersion).toMatch(/^[0-9a-f]{12}$/);
   });
 

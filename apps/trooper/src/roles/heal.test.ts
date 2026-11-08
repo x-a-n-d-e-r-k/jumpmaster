@@ -65,6 +65,25 @@ test('heal shows the feedback to the agent under its own heading', async () => {
   expect(prompt).toContain('## Feedback (data, from trusted reviewers)');
 });
 
+test('a completed heal carries the agent summary as its report, truncated', async () => {
+  const r = await runHeal(heal, roleWorld({ dirty: true }).deps, ctx);
+  expect(r).toMatchObject({ status: 'completed', summary: 'done' });
+  const long = await runHeal(heal, roleWorld({ dirty: true, summary: 'y'.repeat(9000) }).deps, ctx);
+  expect(long.summary).toHaveLength(8000);
+});
+
+test('a heal that changes nothing still carries its report', async () => {
+  const r = await runHeal(heal, roleWorld().deps, ctx);
+  expect(r).toMatchObject({ status: 'no_changes', summary: 'done' });
+});
+
+test('a heal whose agent gave no summary still sends an empty one', async () => {
+  const done = await runHeal(heal, roleWorld({ dirty: true, noSummary: true }).deps, ctx);
+  expect(done).toMatchObject({ status: 'completed', summary: '' });
+  const none = await runHeal(heal, roleWorld({ noSummary: true }).deps, ctx);
+  expect(none).toMatchObject({ status: 'no_changes', summary: '' });
+});
+
 test('heal whose agent committed itself is not no_changes', async () => {
   const r = await runHeal(heal, roleWorld({ agentCommits: 'sha2' }).deps, ctx);
   expect(r.status).toBe('completed');

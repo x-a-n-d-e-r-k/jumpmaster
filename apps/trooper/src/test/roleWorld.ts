@@ -12,6 +12,8 @@ export function roleWorld(
     merge?: MergeOutcome;
     markers?: string[];
     mergeStuck?: boolean;
+    summary?: string;
+    noSummary?: boolean;
   } = {},
 ) {
   const calls: unknown[][] = [];
@@ -63,7 +65,9 @@ export function roleWorld(
         is_error: false,
         terminal_reason: 'completed',
         session_id: 's',
-        structured_output: { status: 'COMPLETE', summary: 'done' },
+        structured_output: o.noSummary
+          ? { status: 'COMPLETE' }
+          : { status: 'COMPLETE', summary: o.summary ?? 'done' },
       });
     },
     runGates: async (gates: { name: string }[]): Promise<GateResult[]> => {

@@ -78,6 +78,17 @@ export const chargeResolveConflict = (db: Db, itemId: number, budgets: Budgets):
 export const chargeNoChange = (db: Db, itemId: number, budgets: Budgets): boolean =>
   chargeCounter(db, itemId, 'no_change', budgets.maxNoChange);
 
+/**
+ * Records a heal that changed nothing for findings `fp`. False when the previous no-change heal
+ * had the same findings: re-running it would burn the heal budget on identical containers.
+ */
+export function noteHealNoChange(db: Db, itemId: number, fp: string | null): boolean {
+  const a = getAttempts(db, itemId, 'heal_no_change');
+  if (fp !== null && a.lastFingerprint === fp) return false;
+  setAttempts(db, itemId, 'heal_no_change', a.count + 1, fp);
+  return true;
+}
+
 export const chargeRateLimitRequeue = (db: Db, itemId: number): boolean =>
   chargeCounter(db, itemId, 'rate_limit', RATE_LIMIT_REQUEUE_MAX);
 

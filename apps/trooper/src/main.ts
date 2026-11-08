@@ -9,6 +9,7 @@ import {
   DropPayloadSchema,
   type DropResult,
   payloadSecrets,
+  REPORT_MAX_CHARS,
   RESULT_PREFIX,
 } from '@jumpmaster/protocol';
 import { runGates } from './gates.js';
@@ -57,8 +58,12 @@ const ROLES: Partial<Record<DropPayload['role'], RoleRunner>> = {
 export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promise<DropResult> {
   const secrets = payloadSecrets(payload);
   const finish = (r: DropResult): DropResult => {
-    const out: DropResult =
-      r.reason === undefined ? r : { ...r, reason: redact(r.reason, secrets) };
+    // Redact before serialising: JSON escaping could hide a secret from the line-level redact.
+    const out: DropResult = { ...r };
+    if (r.reason !== undefined) out.reason = redact(r.reason, secrets);
+    if (r.summary !== undefined) {
+      out.summary = redact(r.summary, secrets).slice(0, REPORT_MAX_CHARS);
+    }
     deps.emit(redact(RESULT_PREFIX + JSON.stringify(out), secrets));
     return out;
   };
