@@ -43,37 +43,6 @@ function crewCwd(ctx: RoleCtx): string {
   return dir;
 }
 
-const INSTRUCTION_FILE = /^(CLAUDE.*\.md|\.mcp\.json)$/;
-
-/**
- * Removes the repository's agent instructions from the crew clone's working tree, at any depth
- * (`.claude/`, `CLAUDE*.md`, `.mcp.json`), so nothing in it can load as instructions, whatever the
- * CLI's discovery rules. `.git` is left alone; symlinks are removed as links, never followed. The
- * removal is never committed back: a crew drop never pushes, and the tree snapshot is taken after.
- */
-export function stripInstructionFiles(dir: string): string[] {
-  const removed: string[] = [];
-  if (!existsSync(dir)) return removed;
-  const walk = (d: string, rel: string): void => {
-    for (const e of readdirSync(d, { withFileTypes: true })) {
-      const path = join(d, e.name);
-      const relPath = rel ? `${rel}/${e.name}` : e.name;
-      if (e.name === '.git' && rel === '') continue;
-      if ((e.isDirectory() || e.isSymbolicLink()) && e.name === '.claude') {
-        rmSync(path, { recursive: true, force: true });
-        removed.push(relPath);
-      } else if (!e.isDirectory() && INSTRUCTION_FILE.test(e.name)) {
-        rmSync(path, { force: true });
-        removed.push(relPath);
-      } else if (e.isDirectory()) {
-        walk(path, relPath);
-      }
-    }
-  };
-  walk(dir, '');
-  return removed;
-}
-
 /**
  * A crew role (crew-lead, refute, diagnose): a read-only clone, no gates, no verification, no
  * services, never a commit or a push. The structured output goes back to the server, which decides
@@ -104,7 +73,10 @@ async function crewSteps(
     // A local branch at origin/<default>, so the clone has a HEAD; it is never pushed.
     await deps.git.prepareBranch(clone, 'jm-crew', payload.repo.defaultBranch, as);
   }
-  const stripped = stripInstructionFiles(clone);
+  // The repo's agent instructions (`.claude/`, `CLAUDE*.md`, `.mcp.json`) are removed so nothing in
+  // the clone can load as instructions, whatever the CLI's discovery rules. As the clone's owner:
+  // root has no DAC_OVERRIDE. Never committed back: a crew drop never pushes, and the snapshot is after.
+  const stripped = await deps.git.removeInstructionFiles(clone, as);
   if (stripped.length > 0) emitEvent(deps, ctx, 'phase', { phase: 'strip', removed: stripped });
   const cwd = crewCwd(ctx);
   const before = await deps.git.treeState(clone, as);

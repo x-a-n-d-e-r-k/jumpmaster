@@ -7,6 +7,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,6 +24,7 @@ import {
   prepareBranch,
   pushNewBranch,
   remoteBranchExists,
+  removeInstructionFiles,
   runGit,
   sweepProcesses,
   treeState,
@@ -308,4 +310,28 @@ test('sweepProcesses signals all other processes only in container mode', () => 
   expect(calls).toEqual([]);
   expect(sweepProcesses({ JM_CONTAINER: '1' }, kill)).toBe(true);
   expect(calls).toEqual([[-1, 'SIGKILL']]);
+});
+
+// Crew clones: the repo's agent instructions are removed before the agent runs. In a container the
+// clone is the agent's and root has no DAC_OVERRIDE, so the removal must run as the clone's owner.
+test('removeInstructionFiles removes instruction files at any depth, never .git, never through a link', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'jm strip '));
+  const outside = mkdtempSync(join(tmpdir(), 'jm-outside-'));
+  writeFileSync(join(outside, 'CLAUDE.md'), 'keep me');
+  mkdirSync(join(root, '.git'));
+  writeFileSync(join(root, '.git', 'CLAUDE.md'), 'git internals stay');
+  writeFileSync(join(root, 'CLAUDE.md'), 'x');
+  writeFileSync(join(root, '.mcp.json'), '{}');
+  mkdirSync(join(root, '.claude', 'skills'), { recursive: true });
+  writeFileSync(join(root, '.claude', 'skills', 'SKILL.md'), 'x');
+  mkdirSync(join(root, 'pkg', 'sub'), { recursive: true });
+  writeFileSync(join(root, 'pkg', 'sub', 'CLAUDE.local.md'), 'x');
+  writeFileSync(join(root, 'pkg', 'README.md'), 'keep');
+  symlinkSync(outside, join(root, 'linked'));
+  const removed = await removeInstructionFiles(root, null);
+  expect(removed.sort()).toEqual(['.claude', '.mcp.json', 'CLAUDE.md', 'pkg/sub/CLAUDE.local.md']);
+  expect(existsSync(join(root, '.git', 'CLAUDE.md'))).toBe(true);
+  expect(existsSync(join(root, 'pkg', 'README.md'))).toBe(true);
+  expect(existsSync(join(outside, 'CLAUDE.md'))).toBe(true);
+  expect(existsSync(join(root, '.claude'))).toBe(false);
 });
