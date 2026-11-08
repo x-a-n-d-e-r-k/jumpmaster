@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DropPayload, GateResult } from '@jumpmaster/protocol';
@@ -49,7 +49,7 @@ function world(
 ) {
   const calls: unknown[][] = [];
   let tree = 'clean';
-  const claude = { runs: 0 };
+  const claude = { runs: 0, systemPrompt: '' };
   const rec =
     <T>(name: string, ret: (...a: unknown[]) => T) =>
     async (...a: unknown[]) => {
@@ -69,8 +69,10 @@ function world(
       cloneForGates: rec('cloneForGates', () => undefined),
       removeTree: rec('removeTree', () => undefined),
     },
-    async *runClaude() {
+    async *runClaude(args: string[]) {
       claude.runs++;
+      const file = args[args.indexOf('--append-system-prompt-file') + 1];
+      if (file) claude.systemPrompt = readFileSync(file, 'utf8');
       if (o.claudeWrites) tree = 'dirty a.ts';
       yield init;
       yield verdictLine(o.verdict ?? approve);
@@ -103,6 +105,22 @@ test('review never pushes and returns the verdict', async () => {
   expect(w.names()).not.toContain('pushExistingBranch');
   expect(w.names()).not.toContain('pushNewBranch');
   expect(w.names()).not.toContain('commitIfDirty');
+});
+
+test('the reviewer system prompt reports each gate result, not an instruction to run them', async () => {
+  const w = world();
+  const twoGates = {
+    ...review,
+    gates: [
+      { name: 'test', run: 'npm test', timeoutMinutes: 5 },
+      { name: 'lint', run: 'npm run lint', timeoutMinutes: 5 },
+    ],
+  } as DropPayload;
+  await runReview(twoGates, w.deps, ctx);
+  const p = w.claude.systemPrompt;
+  expect(p).not.toContain('Before finishing, run these commands');
+  expect(p).toContain('- test (npm test): exit 0, 1 ms, timed out: no');
+  expect(p).toContain('- lint (npm run lint): exit 0, 1 ms, timed out: no');
 });
 
 test('review that edits files is discarded', async () => {

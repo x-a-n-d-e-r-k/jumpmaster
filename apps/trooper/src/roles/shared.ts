@@ -98,12 +98,12 @@ export async function runAgent(
   payload: DropPayload,
   deps: TrooperDeps,
   ctx: RoleCtx,
-  o: { prompt: string; outputSchema: object },
+  o: { prompt: string; outputSchema: object; gateResults?: GateResult[] },
   dir: string,
 ): Promise<AgentOutcome> {
   const systemPromptFile = join(ctx.workdir, 'system.md');
   const settingsFile = join(ctx.workdir, 'settings.json');
-  writeFileSync(systemPromptFile, agentSystemPrompt(payload));
+  writeFileSync(systemPromptFile, agentSystemPrompt(payload, o.gateResults));
   writeFileSync(settingsFile, JSON.stringify(agentSettings(payload)));
 
   emitEvent(deps, ctx, 'phase', { phase: 'claude' });
@@ -207,10 +207,27 @@ function serviceEnv(
   return env;
 }
 
-/** The agent's appended system prompt: the gates, gate-only variables, and reachable services. */
-export function agentSystemPrompt(payload: DropPayload): string {
+/**
+ * The agent's appended system prompt: the gates, gate-only variables, and reachable services. A
+ * reviewer gets the gate results it is judging instead of an instruction to make them pass.
+ */
+export function agentSystemPrompt(payload: DropPayload, gateResults?: GateResult[]): string {
+  if (payload.role === 'review') {
+    return `${gateResultsNote(payload, gateResults ?? [])}${gateOnlyNote(payload)}${servicesNote(payload)}`;
+  }
   const gateList = payload.gates.map((g) => `- ${g.name}: ${g.run}`).join('\n');
   return `Before finishing, run these commands and make them pass:\n${gateList}\n${gateOnlyNote(payload)}${servicesNote(payload)}`;
+}
+
+function gateResultsNote(payload: DropPayload, results: GateResult[]): string {
+  if (results.length === 0) return 'No gate results were recorded for this head.\n';
+  const runOf = new Map(payload.gates.map((g) => [g.name, g.run]));
+  const lines = results.map((r) => {
+    const run = runOf.get(r.name);
+    const label = run === undefined ? r.name : `${r.name} (${run})`;
+    return `- ${label}: exit ${r.exitCode}, ${r.durationMs} ms, timed out: ${r.timedOut ? 'yes' : 'no'}`;
+  });
+  return `The gates ran on this head, in a separate step, before you started. Results:\n${lines.join('\n')}\n`;
 }
 
 /** Without this the agent doesn't know a sidecar exists, and skips work that needs it. */

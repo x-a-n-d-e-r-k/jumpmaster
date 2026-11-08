@@ -103,7 +103,11 @@ async function reviewSteps(
     payload,
     deps,
     ctx,
-    { prompt: `${payload.prompt}${evidence}`, outputSchema: REVIEW_OUTPUT_SCHEMA },
+    {
+      prompt: `${payload.prompt}${evidence}`,
+      outputSchema: REVIEW_OUTPUT_SCHEMA,
+      gateResults: gates,
+    },
     dir,
   );
   const done = (r: Omit<DropResult, 'gates' | 'role'>): DropResult => ({
