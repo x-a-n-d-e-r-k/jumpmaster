@@ -4,7 +4,9 @@ COPY package.json package-lock.json tsconfig.base.json tsconfig.json ./
 COPY packages/protocol packages/protocol
 COPY apps/server apps/server
 COPY apps/trooper apps/trooper
-RUN npm ci
+# The trooper needs no install scripts (only zod and the protocol package ship); skipping them keeps
+# the server's native module (better-sqlite3) from being built or downloaded here.
+RUN npm ci --ignore-scripts
 RUN npx tsc -b packages/protocol && npx tsc -b apps/trooper \
  && mkdir -p /out/node_modules/@jumpmaster/protocol \
  && cp -r apps/trooper/dist/. /out/ \
