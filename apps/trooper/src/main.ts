@@ -133,6 +133,8 @@ async function* spawnClaude(
   if (code !== 0) yield JSON.stringify({ type: 'claude_stderr', exitCode: code, stderr });
 }
 
+const PAYLOAD_START = '{"protocol":';
+
 export async function readPayload(
   file: string | undefined,
   stdin: AsyncIterable<string | Buffer>,
@@ -144,6 +146,10 @@ export async function readPayload(
     for await (const c of stdin) chunks.push(typeof c === 'string' ? Buffer.from(c) : c);
     text = Buffer.concat(chunks).toString('utf8');
   }
+  // Docker can pass the attach request's body to stdin ahead of the payload. The payload is
+  // serialised in schema order, so it starts with its protocol field: parse from there.
+  const start = text.indexOf(PAYLOAD_START);
+  if (start > 0) text = text.slice(start);
   let raw: unknown;
   try {
     raw = JSON.parse(text);

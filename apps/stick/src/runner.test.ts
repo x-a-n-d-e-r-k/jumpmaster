@@ -336,6 +336,18 @@ describe('runDrop', () => {
     expect(client.result).toMatchObject({ status: 'completed', headSha: 'a' });
   });
 
+  // The trooper finds the payload on a polluted stdin by this prefix (see trooper readPayload).
+  test('the payload on stdin starts with its protocol field', async () => {
+    const d = fakeDriver(['JM_RESULT {"status":"completed","gates":[]}']);
+    await runDrop(payload, {
+      client: fakeClient(),
+      driver: d.driver,
+      heartbeatMs: 10,
+      stickId: 's1',
+    });
+    expect(d.started?.payload.startsWith('{"protocol":')).toBe(true);
+  });
+
   test('exit without result reports failed', async () => {
     const d = fakeDriver(['plain log line'], { exitCode: 2 });
     const client = fakeClient();

@@ -267,6 +267,21 @@ test('readPayload parses the payload from stdin', async () => {
   await expect(readPayload(undefined, Readable.from(['{}']))).rejects.toThrow();
 });
 
+// Docker sometimes passes the attach request's own body to stdin ahead of the payload.
+test('readPayload skips the attach options a daemon leaks ahead of the payload', async () => {
+  const leak = '{"stream":true,"stdin":true,"stdout":true,"stderr":true,"hijack":true}';
+  const p = await readPayload(undefined, Readable.from([leak + JSON.stringify(payload)]));
+  expect(p.dropId).toBe('d1');
+});
+
+test('readPayload still refuses text with no payload in it', async () => {
+  const leak = '{"stream":true,"stdin":true}';
+  await expect(readPayload(undefined, Readable.from([leak]))).rejects.toThrow();
+  await expect(readPayload(undefined, Readable.from([`${leak}{"protocol":1,`]))).rejects.toThrow(
+    'payload is not valid JSON',
+  );
+});
+
 test('push goes to the explicit repo target with the process sweep, and reports the pushed sha', async () => {
   const f = fakeDeps({ claude: [completeResult] });
   const r = await runTrooper(payload, f.deps);
