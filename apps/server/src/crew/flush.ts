@@ -25,8 +25,14 @@ import {
 
 const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex');
 
+/** Line endings normalised to LF, so a forge that stores CRLF compares equal. */
+const lf = (s: string): string => s.replace(/\r\n?/g, '\n');
+
 /** The hash a promotion compares: the sanitised body as written, without its marker line. */
-export const crewBodySha = (sanitised: string): string => sha256(sanitised.trimEnd());
+export const crewBodySha = (sanitised: string): string => sha256(lf(sanitised).trimEnd());
+
+/** The live forge body as a crew issue stores it: marker line removed, LF line endings. */
+export const liveCrewBody = (body: string): string => bodyWithoutMarker(lf(body));
 
 /** The briefing subject for a crew issue. */
 export const subjectOf = (row: Pick<CrewIssue, 'id'>): string => `issue:${row.id}`;
@@ -105,7 +111,7 @@ async function promote(
   const live = await forges.author.getIssue(row.number);
   if (!live) return 'wait';
   // A body edited on the forge since it was staged is not what Command approved.
-  if (row.bodySha === null || sha256(bodyWithoutMarker(live.body)) !== row.bodySha) {
+  if (row.bodySha === null || crewBodySha(liveCrewBody(live.body)) !== row.bodySha) {
     return 'changed';
   }
   const payload: SetLabelsPayload = {
@@ -229,9 +235,12 @@ export async function flushCrewOps(
           zoneId: zone.id,
           kind: 'promote',
           subject: subjectOf(row),
-          decision: `Promote crew issue #${row.number} as it now reads?`,
-          why: 'The issue body changed on the forge after it was staged, so it is not the text that was proposed.',
-          options: PROMOTE_OPTIONS,
+          decision: `Crew issue #${row.number} was edited on the forge. Re-stage it as it now reads, or reject it?`,
+          why: 'The issue body changed on the forge after it was staged, so it is not the text that was proposed. Re-stage takes the edited text and has a refute judge it before any promotion.',
+          options: [
+            { id: 'restage', label: 'Re-stage', effect: 'restage_issue' },
+            { id: 'reject', label: 'Reject', effect: 'reject_issue' },
+          ],
           onHold: `Crew issue #${row.number}`,
           source: 'server',
         },

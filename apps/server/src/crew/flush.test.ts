@@ -179,6 +179,40 @@ describe('promotion', () => {
     expect(writes('setLabels')).toHaveLength(0);
   });
 
+  test('a body-changed briefing offers Re-stage and Reject; Re-stage takes the edited text for a fresh refute', async () => {
+    const id = await staged();
+    setCrewIssue(w.db, id, { refuteCount: 2, refutedSha: getCrewIssue(w.db, id)?.bodySha }, t0);
+    const n = getCrewIssue(w.db, id)?.number ?? -1;
+    const e = w.f.state.issues.get(n);
+    if (e?.issue) e.issue.body = `Edited by someone.\n\n${opMarker('issue:main:x:y')}`;
+    setCrewIssue(w.db, id, { state: 'promoting' }, t0);
+    await flush(plus(t0, MIN));
+    const [b] = listBriefings(w.db, { zoneId: 'main', state: 'open' });
+    expect(b?.options.map((o) => [o.label, o.effect])).toEqual([
+      ['Re-stage', 'restage_issue'],
+      ['Reject', 'reject_issue'],
+    ]);
+    ruleBriefing(w.db, b?.id ?? -1, 'restage', '', plus(t0, 2 * MIN));
+    expect(await applyPendingRulings(w.db, rulingDeps(), 'main', plus(t0, 2 * MIN))).toBe(1);
+    expect(getCrewIssue(w.db, id)).toMatchObject({
+      state: 'staged',
+      body: 'Edited by someone.',
+      bodySha: sha('Edited by someone.'),
+      refutedSha: null,
+      refuteCount: 0,
+    });
+  });
+
+  test('a body that differs only by CRLF line endings still promotes', async () => {
+    const id = await staged({ body: 'Line one.\nLine two.\n\n- [ ] done' });
+    const n = getCrewIssue(w.db, id)?.number ?? -1;
+    const e = w.f.state.issues.get(n);
+    if (e?.issue) e.issue.body = e.issue.body.replace(/\n/g, '\r\n');
+    setCrewIssue(w.db, id, { state: 'promoting' }, t0);
+    await flush(plus(t0, MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('promoted');
+  });
+
   test('a promote_held issue moves to promoting only after hold_until, while its briefing is open', async () => {
     const id = await staged();
     raiseBriefing(

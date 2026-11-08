@@ -1,4 +1,5 @@
 import type { DropZoneConfig } from './config.js';
+import { crewBodySha, liveCrewBody } from './crew/flush.js';
 import { getCrewIssue, setCrewIssue } from './crew/store.js';
 import type { Db } from './db/open.js';
 import { activeDropFor, getWorkItem, listWorkItems, setWorkItemState } from './db/repo.js';
@@ -13,7 +14,13 @@ export type BriefingKind =
   | 'refute_exhausted'
   | 'crew'
   | 'credits_required';
-export type Effect = 'none' | 'retry_item' | 'promote_issue' | 'reject_issue' | 'enable_fable';
+export type Effect =
+  | 'none'
+  | 'retry_item'
+  | 'promote_issue'
+  | 'reject_issue'
+  | 'restage_issue'
+  | 'enable_fable';
 export type BriefingOption = { id: string; label: string; effect: Effect };
 export type BriefingState = 'open' | 'ruled' | 'withdrawn';
 
@@ -245,6 +252,23 @@ export async function applyEffect(
       if (!ISSUE_ACTIONABLE.has(issue.state)) return true;
       const state = effect === 'promote_issue' ? 'promoting' : 'rejecting';
       setCrewIssue(db, id, { state }, now);
+      return true;
+    }
+    case 'restage_issue': {
+      // Takes the body as edited on the forge, so a fresh refute judges what will be promoted.
+      const id = idOf(subject, 'issue:');
+      if (id === null) throw new Error(`restage_issue needs a crew issue subject, got ${subject}`);
+      const issue = getCrewIssue(db, id);
+      if (!issue || issue.state !== 'staged' || issue.number === null) return true;
+      const live = await deps.forges(zoneId).author.getIssue(issue.number);
+      if (!live) return false;
+      const body = liveCrewBody(live.body);
+      setCrewIssue(
+        db,
+        id,
+        { body, bodySha: crewBodySha(body), refutedSha: null, refuteCount: 0 },
+        now,
+      );
       return true;
     }
     case 'enable_fable':
