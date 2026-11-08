@@ -2,7 +2,7 @@ import { Readable } from 'node:stream';
 import type { DropPayload, GateResult } from '@jumpmaster/protocol';
 import { expect, test } from 'vitest';
 import type { TrooperDeps } from './main.js';
-import { readPayload, runTrooper } from './main.js';
+import { describeFatal, readPayload, runTrooper } from './main.js';
 
 const payload: DropPayload = {
   protocol: 1,
@@ -316,8 +316,46 @@ test('every emitted event line stays under 64 KB and secrets cut by truncation a
   expect(joined).not.toContain(payload.credentials.claudeToken.slice(0, 12));
 });
 
-test('implement without a forge token is refused', async () => {
+test('implement without a forge token is refused with a result', async () => {
   const f = fakeDeps({ claude: [completeResult] });
   const p = { ...payload, credentials: { claudeToken: payload.credentials.claudeToken } };
-  await expect(runTrooper(p, f.deps)).rejects.toThrow('forge token required for implement');
+  const r = await runTrooper(p, f.deps);
+  expect(r).toMatchObject({ status: 'failed', reason: 'forge token required for implement' });
+  expect(f.lines.some((l) => l.startsWith('JM_RESULT '))).toBe(true);
+});
+
+test('a setup failure before the role runs still posts a redacted result', async () => {
+  const f = fakeDeps({ claude: [completeResult] });
+  const token = payload.credentials.claudeToken;
+  const prev = process.env.JM_WORK_ROOT;
+  process.env.JM_WORK_ROOT = `/nonexistent-${token}`;
+  try {
+    const r = await runTrooper(payload, f.deps);
+    expect(r.status).toBe('failed');
+    expect(r.reason).toMatch(/^trooper setup failed: /);
+    expect(r.reason).not.toContain(token);
+    expect(f.lines.join('\n')).not.toContain(token);
+  } finally {
+    if (prev === undefined) delete process.env.JM_WORK_ROOT;
+    else process.env.JM_WORK_ROOT = prev;
+  }
+});
+
+test('a payload that is not JSON is refused without echoing its text', async () => {
+  const err = await readPayload(undefined, Readable.from(['{"t":"SECRET-TAIL",@}'])).catch(
+    (e) => e,
+  );
+  expect(String(err.message)).toBe('payload is not valid JSON');
+});
+
+test('describeFatal puts a schema rejection on one line', async () => {
+  const err = await readPayload(undefined, Readable.from(['{}'])).catch((e) => e);
+  const line = describeFatal(err);
+  expect(line).not.toContain('\n');
+  expect(line).toMatch(/^payload rejected: /);
+  expect(line).toContain('role');
+});
+
+test('describeFatal flattens a multi-line message', () => {
+  expect(describeFatal(new Error('a\n  b\n'))).toBe('a b');
 });

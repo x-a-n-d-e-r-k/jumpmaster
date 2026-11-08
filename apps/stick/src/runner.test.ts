@@ -36,7 +36,7 @@ const payload: DropPayload = DropPayloadSchema.parse({
 
 function fakeDriver(
   lines: string[],
-  opts: { hang?: boolean; exitCode?: number; serviceError?: string } = {},
+  opts: { hang?: boolean; exitCode?: number; serviceError?: string; stderr?: string } = {},
 ) {
   const d = {
     started: undefined as Parameters<ContainerDriver['start']>[0] | undefined,
@@ -61,6 +61,7 @@ function fakeDriver(
             if (opts.hang) await gate;
             return { exitCode: d.stopped ? 137 : (opts.exitCode ?? 0) };
           },
+          stderrTail: () => opts.stderr ?? '',
           async stop(grace: number) {
             d.stopped = true;
             d.stopGrace = grace;
@@ -345,6 +346,31 @@ describe('runDrop', () => {
       reason: 'trooper exited 2 without result',
       gates: [],
     });
+  });
+
+  test('exit without result carries the last stderr line, redacted', async () => {
+    const stderr = `starting\n\nSyntaxError: Unexpected token in JSON near "${TOKEN}" and ghs_forge\n\n`;
+    const d = fakeDriver([], { exitCode: 1, stderr });
+    const client = fakeClient();
+    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
+    expect(client.result?.reason).toBe(
+      'trooper exited 1 without result: SyntaxError: Unexpected token in JSON near "[REDACTED]" and [REDACTED]',
+    );
+  });
+
+  test('Node footer lines are not taken as the reason', async () => {
+    const stderr = 'Error: real cause\n    at x (y.js:1:1)\n\nNode.js v26.1.0\n';
+    const d = fakeDriver([], { exitCode: 1, stderr });
+    const client = fakeClient();
+    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
+    expect(client.result?.reason).toBe('trooper exited 1 without result: Error: real cause');
+  });
+
+  test('a long stderr line is cut to a readable reason', async () => {
+    const d = fakeDriver([], { exitCode: 1, stderr: `Error: ${'x'.repeat(2000)}` });
+    const client = fakeClient();
+    await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
+    expect(client.result?.reason?.length).toBeLessThanOrEqual(600);
   });
 
   test('a hard cancel kills the container with no checkpoint stop', async () => {

@@ -8,6 +8,7 @@ import {
   type DropPayload,
   DropPayloadSchema,
   type DropResult,
+  payloadSecrets,
   RESULT_PREFIX,
 } from '@jumpmaster/protocol';
 import { runGates } from './gates.js';
@@ -54,38 +55,35 @@ const ROLES: Partial<Record<DropPayload['role'], RoleRunner>> = {
 };
 
 export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promise<DropResult> {
-  const { claudeToken, forgeToken } = payload.credentials;
-  if (payload.role === 'implement' && forgeToken === undefined) {
-    throw new Error('forge token required for implement');
-  }
-  const secrets = [
-    ...Object.values(payload.gateSecrets ?? {}),
-    ...(forgeToken === undefined
-      ? [claudeToken]
-      : [claudeToken, forgeToken, Buffer.from(`x-access-token:${forgeToken}`).toString('base64')]),
-  ];
+  const secrets = payloadSecrets(payload);
   const finish = (r: DropResult): DropResult => {
     const out: DropResult =
       r.reason === undefined ? r : { ...r, reason: redact(r.reason, secrets) };
     deps.emit(redact(RESULT_PREFIX + JSON.stringify(out), secrets));
     return out;
   };
+  // Every failure from here on posts a result, so the server records why the drop stopped.
+  const fail = (reason: string) => finish({ status: 'failed', reason, gates: [] });
+  if (payload.role === 'implement' && payload.credentials.forgeToken === undefined) {
+    return fail('forge token required for implement');
+  }
   const runner = ROLES[payload.role];
-  if (!runner) return finish({ status: 'failed', reason: 'role not implemented', gates: [] });
+  if (!runner) return fail('role not implemented');
 
   const ids = deps.ids ?? null;
-  const work = mkdtempSync(join(workRoot(), 'trooper-'));
-  // Root-owned but world-readable: the agent uid reads the settings and system prompt in here.
-  chmodSync(work, 0o755);
+  let work: string;
+  try {
+    work = mkdtempSync(join(workRoot(), 'trooper-'));
+    // Root-owned but world-readable: the agent uid reads the settings and system prompt in here.
+    chmodSync(work, 0o755);
+  } catch (err) {
+    return fail(`trooper setup failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
   const ctx: RoleCtx = { workdir: work, secrets, ids };
   try {
     return finish(await runner(payload, deps, ctx));
   } catch (err) {
-    return finish({
-      status: 'failed',
-      reason: err instanceof Error ? err.message : String(err),
-      gates: [],
-    });
+    return fail(err instanceof Error ? err.message : String(err));
   } finally {
     if (ids) {
       await deps.git.removeTree(join(ids.agent.home, 'repo'), ids.agent).catch(() => undefined);
@@ -146,7 +144,32 @@ export async function readPayload(
     for await (const c of stdin) chunks.push(typeof c === 'string' ? Buffer.from(c) : c);
     text = Buffer.concat(chunks).toString('utf8');
   }
-  return DropPayloadSchema.parse(JSON.parse(text));
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    // V8's parse errors quote the text around the fault, which may be a credential.
+    throw new Error('payload is not valid JSON');
+  }
+  return DropPayloadSchema.parse(raw);
+}
+
+type SchemaIssue = { path: PropertyKey[]; message: string };
+const isSchemaError = (e: unknown): e is Error & { issues: SchemaIssue[] } =>
+  e instanceof Error && e.name === 'ZodError' && Array.isArray((e as { issues?: unknown }).issues);
+
+/** One line for stderr: the stick reports the last line of a trooper that died without a result. */
+export function describeFatal(err: unknown): string {
+  if (isSchemaError(err)) {
+    const issues = err.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`);
+    return `payload rejected: ${issues.join('; ')}`;
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .join(' ');
 }
 
 async function main(): Promise<void> {
@@ -169,7 +192,7 @@ async function main(): Promise<void> {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   main().catch((err: unknown) => {
-    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    process.stderr.write(`${describeFatal(err)}\n`);
     process.exitCode = 1;
   });
 }

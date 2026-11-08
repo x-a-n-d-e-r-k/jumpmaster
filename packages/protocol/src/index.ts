@@ -213,3 +213,4 @@ export const DropResultSchema = z.object({
   numTurns: z.number().optional(),
 });
 export type DropResult = z.infer<typeof DropResultSchema>;
+export { containsSecret, payloadSecrets, redact } from './redact.js';
