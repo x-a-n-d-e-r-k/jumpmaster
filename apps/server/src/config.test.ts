@@ -325,3 +325,13 @@ describe('crew config', () => {
     expect(() => loadConfig(withZone({ crew: { maxRefute: 0 } }), fullEnv)).toThrow(/maxRefute/);
   });
 });
+
+describe('shipped example config', () => {
+  test('parses, declares the default plan, and ships crew disabled', () => {
+    const example = new URL('../../../examples/jumpmaster.config.json', import.meta.url).pathname;
+    const config = loadConfig(example, fullEnv);
+    expect(config.claude.plan).toBe('pro');
+    expect(config.claude.fableModel).toBeUndefined();
+    expect(config.dropZones[0]?.crew.enabled).toBe(false);
+  });
+});

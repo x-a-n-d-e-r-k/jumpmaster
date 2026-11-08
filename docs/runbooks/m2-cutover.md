@@ -200,3 +200,8 @@ markers Jumpmaster left behind, since that differs per system.
 ### 6. Retire
 
 After the week holds, remove the old system and any accounts it needed.
+
+## Next
+
+Once the project runs on Jumpmaster, the [M3 crew runbook](m3-crew.md) adds a crew that turns the
+objectives in `GOAL.md` into staged issues for you to promote.
