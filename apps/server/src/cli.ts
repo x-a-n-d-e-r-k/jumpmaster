@@ -1,0 +1,78 @@
+#!/usr/bin/env node
+// The `jumpmaster` command:
+//   jumpmaster [serve] <config>   run the server (the default)
+//   jumpmaster ctl …              control commands against the running server
+//   jumpmaster doctor …           alias of `ctl doctor …`
+// In the server container run ctl as `docker compose exec jumpmaster jumpmaster ctl …`, never
+// `compose run`: a new container's loopback is not the server.
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+export type CliDeps = {
+  serve: (configPath: string) => Promise<number>;
+  ctl: (args: string[]) => Promise<number>;
+  err?: (line: string) => void;
+};
+
+const USAGE = [
+  'usage: jumpmaster [serve] <config>',
+  '       jumpmaster ctl <command> …   (see `jumpmaster ctl` for commands)',
+  '       jumpmaster doctor …          (alias of `jumpmaster ctl doctor …`)',
+].join('\n');
+
+/** Command words that are never read as a config path. */
+const RESERVED = new Set(['serve', 'ctl', 'doctor', 'init', 'help', '--help', '-h']);
+
+export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
+  const err = deps.err ?? console.error;
+  const [command, ...rest] = argv;
+  if (command === 'ctl') return deps.ctl(rest);
+  if (command === 'doctor') return deps.ctl(['doctor', ...rest]);
+  if (command === 'init') {
+    err('jumpmaster init is not in this build');
+    err(USAGE);
+    return 2;
+  }
+  const config = command === 'serve' ? rest[0] : command;
+  if (!config || RESERVED.has(config)) {
+    err(USAGE);
+    return 2;
+  }
+  return deps.serve(config);
+}
+
+const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+async function serve(configPath: string): Promise<number> {
+  const { start } = await import('./main.js');
+  try {
+    const srv = await start(configPath);
+    const shutdown = () => void srv.stop().finally(() => process.exit(0));
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+    return 0;
+  } catch (e) {
+    console.error(`[jumpmaster] fatal: ${errorMessage(e)}`);
+    return 1;
+  }
+}
+
+async function ctl(args: string[]): Promise<number> {
+  const { runCtl } = await import('./ctl.js');
+  return runCtl(args);
+}
+
+// Run when executed directly, including through a symlink such as /usr/local/bin/jumpmaster.
+const isMain = (): boolean => {
+  const invoked = process.argv[1];
+  if (!invoked) return false;
+  try {
+    return realpathSync(invoked) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+};
+if (isMain()) {
+  const code = await runCli(process.argv.slice(2), { serve, ctl });
+  if (code !== 0) process.exit(code);
+}

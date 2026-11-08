@@ -1,9 +1,7 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { StickClient } from './client.js';
 import { DockerDriver } from './docker.js';
 import { reapOrphans, runDrop } from './runner.js';
+import { joinToken, loadEnrollment, saveEnrollment, stateDir } from './state.js';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -17,32 +15,16 @@ async function main() {
   const serverUrl = need('JM_SERVER_URL');
   const slots = Number(process.env.JM_SLOTS ?? '1');
   if (!Number.isInteger(slots) || slots < 1) throw new Error('JM_SLOTS must be an integer >= 1');
-  const dir = join(homedir(), '.jumpmaster');
-  const file = join(dir, 'stick.json');
-
-  let token: string | undefined;
-  let stickId: string | undefined;
-  if (existsSync(file)) {
-    const saved = JSON.parse(readFileSync(file, 'utf8')) as {
-      serverUrl?: string;
-      stickId?: string;
-      stickToken?: string;
-    };
-    if (saved.serverUrl === serverUrl && saved.stickId && saved.stickToken) {
-      token = saved.stickToken;
-      stickId = saved.stickId;
-    }
-  }
+  const dir = stateDir(process.env);
+  const saved = loadEnrollment(dir, serverUrl);
+  const token = saved?.stickToken;
+  let stickId = saved?.stickId;
   const client = new StickClient(serverUrl, token);
   if (!token || !stickId) {
     const name = process.env.JM_STICK_NAME ?? 'stick';
-    const enrolled = await client.enroll(need('JM_JOIN_TOKEN'), name, slots);
+    const enrolled = await client.enroll(joinToken(process.env), name, slots);
     stickId = enrolled.stickId;
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    writeFileSync(file, JSON.stringify({ serverUrl, stickId, stickToken: enrolled.stickToken }), {
-      mode: 0o600,
-    });
-    chmodSync(file, 0o600);
+    saveEnrollment(dir, { serverUrl, stickId, stickToken: enrolled.stickToken });
     console.log(`enrolled as ${stickId}`);
   }
 
@@ -83,6 +65,7 @@ async function main() {
   }
 }
 
+// The entry point: always runs (the helpers it uses live in state.ts so tests can import them).
 main().catch((e) => {
   console.error(e instanceof Error ? e.message : e);
   process.exit(1);

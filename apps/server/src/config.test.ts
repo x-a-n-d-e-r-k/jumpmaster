@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -15,6 +15,12 @@ const fullEnv: Record<string, string | undefined> = {
 function fixture(json: unknown): string {
   const file = join(mkdtempSync(join(tmpdir(), 'jm-config-')), 'jumpmaster.config.json');
   writeFileSync(file, JSON.stringify(json));
+  return file;
+}
+
+function secretFile(content: string): string {
+  const file = join(mkdtempSync(join(tmpdir(), 'jm-secret-')), 'value');
+  writeFileSync(file, content, { mode: 0o600 });
   return file;
 }
 
@@ -182,6 +188,91 @@ describe('loadConfig', () => {
       const file = withZone({ id: 'my-zone', gateSecrets: ['A_B'] });
       expect(() => loadConfig(file, fullEnv)).toThrow(/JM_ZONE_SECRET_MY_ZONE_A_B/);
     });
+
+    test('a zone declaring both X and X_FILE as gate secrets stops startup naming both', () => {
+      // JM_ZONE_SECRET_MAIN_DB_FILE would be read as the file for DB, so the pair is ambiguous.
+      const file = withZone({ gateSecrets: ['DB', 'DB_FILE'] });
+      const env = {
+        ...fullEnv,
+        JM_ZONE_SECRET_MAIN_DB: 'db-value-123',
+        JM_ZONE_SECRET_MAIN_DB_FILE: 'db-file-value-123',
+      };
+      expect(() => loadConfig(file, env)).toThrow(
+        'zone main declares gate secrets DB and DB_FILE; DB_FILE collides with the file variable for DB. Rename one.',
+      );
+      // DB_FILE alone keeps working as an ordinary name, as on M3.
+      expect(
+        zoneSecrets(
+          loadConfig(withZone({ gateSecrets: ['DB_FILE'] }), {
+            ...fullEnv,
+            JM_ZONE_SECRET_MAIN_DB_FILE: 'db-file-value-123',
+          }),
+          'main',
+        ),
+      ).toEqual({ DB_FILE: 'db-file-value-123' });
+    });
+
+    test('zone gate secrets load from JM_ZONE_SECRET_<ZONE>_<NAME>_FILE', () => {
+      const env = {
+        ...fullEnv,
+        JM_ZONE_SECRET_MAIN_TEST_DB_URL_FILE: secretFile('postgres://f/t\n'),
+      };
+      expect(zoneSecrets(loadConfig(declared(), env), 'main')).toEqual({
+        TEST_DB_URL: 'postgres://f/t',
+      });
+      expect(() =>
+        loadConfig(declared(), { ...env, JM_ZONE_SECRET_MAIN_TEST_DB_URL: 'postgres://e/t' }),
+      ).toThrow(/JM_ZONE_SECRET_MAIN_TEST_DB_URL and JM_ZONE_SECRET_MAIN_TEST_DB_URL_FILE/);
+    });
+  });
+
+  describe('secrets from files', () => {
+    const fileEnv = (): Record<string, string> => ({
+      JM_CLAUDE_TOKEN_FILE: secretFile('a-claude\n'),
+      JM_GITHUB_AUTHOR_TOKEN_FILE: secretFile('b-author\n'),
+      JM_GITHUB_REVIEWER_TOKEN_FILE: secretFile('r-reviewer\n'),
+      JM_JOIN_TOKEN_FILE: secretFile('c-join\n'),
+      JM_OPERATOR_TOKEN_FILE: secretFile(`${'o'.repeat(32)}\n`),
+      JM_GITHUB_READ_TOKEN_FILE: secretFile('rd-read\n'),
+    });
+
+    test('every JM_ secret can come from its _FILE variable', () => {
+      expect(loadConfig(minimal, fileEnv()).secrets).toEqual({
+        operatorToken: 'o'.repeat(32),
+        claudeToken: 'a-claude',
+        githubAuthorToken: 'b-author',
+        githubReviewerToken: 'r-reviewer',
+        joinToken: 'c-join',
+        githubReadToken: 'rd-read',
+      });
+    });
+
+    test('a secret set both ways stops startup naming both variables', () =>
+      expect(() => loadConfig(minimal, { ...fileEnv(), JM_CLAUDE_TOKEN: 'a' })).toThrow(
+        /JM_CLAUDE_TOKEN and JM_CLAUDE_TOKEN_FILE/,
+      ));
+
+    test('the cross-token checks see file values', () => {
+      const env = fileEnv();
+      expect(() =>
+        loadConfig(minimal, {
+          ...env,
+          JM_GITHUB_REVIEWER_TOKEN_FILE: env.JM_GITHUB_AUTHOR_TOKEN_FILE,
+        }),
+      ).toThrow(/must differ/);
+    });
+
+    test.skipIf(process.getuid?.() === 0)(
+      'an unreadable secret file stops startup by variable and path, never by value',
+      () => {
+        const env = fileEnv();
+        const path = env.JM_CLAUDE_TOKEN_FILE as string;
+        chmodSync(path, 0o000);
+        expect(() => loadConfig(minimal, env)).toThrow(
+          `JM_CLAUDE_TOKEN_FILE: ${path} is not readable by uid ${process.getuid?.()}`,
+        );
+      },
+    );
   });
 
   describe('authorMayBeAdmin', () => {

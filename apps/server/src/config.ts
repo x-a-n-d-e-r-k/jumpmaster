@@ -10,6 +10,7 @@ import {
 } from '@jumpmaster/protocol';
 import { z } from 'zod';
 import { ZONE_MODES } from './db/repo.js';
+import { readSecret } from './secrets.js';
 
 export const DEFAULT_PROTECTED_PATHS = [
   '.github/**',
@@ -119,7 +120,7 @@ const DropZoneObject = z.object({
   maxConcurrentImplement: z.number().int().positive().default(1),
   /** How long an unresolved forge write may stay unknown; defaults to ciDeadlineMinutes. */
   outboxDeadlineMinutes: z.number().positive().optional(),
-  /** Names of secrets for gate steps; values come from JM_ZONE_SECRET_<ZONE>_<NAME>. */
+  /** Names of secrets for gate steps; values come from JM_ZONE_SECRET_<ZONE>_<NAME>[_FILE]. */
   gateSecrets: z.array(z.string()).default([]),
   /** The starting mode, used only until an operator stores one. */
   mode: z.enum(ZONE_MODES).default('active'),
@@ -327,13 +328,20 @@ function loadZoneSecrets(
   const out: Record<string, Record<string, string>> = {};
   for (const zone of zones) {
     if (zone.gateSecrets.length === 0) continue;
+    // NAME_FILE names the file holding NAME, so a zone can't also declare NAME_FILE as a secret.
+    for (const name of zone.gateSecrets) {
+      if (zone.gateSecrets.includes(`${name}_FILE`))
+        throw new Error(
+          `zone ${zone.id} declares gate secrets ${name} and ${name}_FILE; ${name}_FILE collides with the file variable for ${name}. Rename one.`,
+        );
+    }
     const values: Record<string, string> = {};
     for (const name of zone.gateSecrets) {
       if (!GATE_SECRET_NAME.test(name) || RESERVED_NAME.test(name)) {
         throw new Error(`Invalid gate secret name: ${name}`);
       }
       const variable = zoneSecretVar(zone.id, name);
-      const value = env[variable];
+      const value = readSecret(env, variable);
       if (!value) throw new Error(`Missing required environment variables: ${variable}`);
       if (value.length < MIN_SECRET_LENGTH) {
         throw new Error(`${variable} must be at least ${MIN_SECRET_LENGTH} characters`);
@@ -353,12 +361,16 @@ const SECRET_VARS = {
   operatorToken: 'JM_OPERATOR_TOKEN',
 } as const;
 
-export function loadConfig(path: string, env: NodeJS.ProcessEnv): Config {
+export function loadConfig(path: string, rawEnv: NodeJS.ProcessEnv): Config {
   const parsed = FileSchema.safeParse(JSON.parse(readFileSync(path, 'utf8')));
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`);
     throw new Error(`Invalid config ${path}: ${issues.join('; ')}`);
   }
+  // Every secret may come from NAME or from the file named by NAME_FILE (never both).
+  const env: Record<string, string | undefined> = {};
+  for (const name of [...Object.values(SECRET_VARS), 'JM_GITHUB_READ_TOKEN'])
+    env[name] = readSecret(rawEnv, name);
   const missing = Object.values(SECRET_VARS).filter((name) => !env[name]);
   if (missing.length > 0)
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
@@ -384,7 +396,7 @@ export function loadConfig(path: string, env: NodeJS.ProcessEnv): Config {
     throw new Error(
       `JM_GITHUB_READ_TOKEN is required because reviewReadToken is true for zone(s): ${needsRead.join(', ')}`,
     );
-  const zones = loadZoneSecrets(parsed.data.dropZones, env);
+  const zones = loadZoneSecrets(parsed.data.dropZones, rawEnv);
   const secrets: Config['secrets'] = {
     claudeToken: env[SECRET_VARS.claudeToken] as string,
     githubAuthorToken: env[SECRET_VARS.githubAuthorToken] as string,

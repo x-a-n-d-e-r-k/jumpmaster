@@ -6,6 +6,9 @@ set -euo pipefail
 cd "$(dirname "$0")/../../.."
 REPO="${E2E_REPO:-x-a-n-d-e-r-k/jumpmaster}"
 BRANCH="${E2E_BRANCH:-main}"
+# The sidecar image is pinned by digest (alpine 3.20, multi-arch index).
+SIDECAR_IMAGE="alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+echo "e2e: Docker Engine $(docker version --format '{{.Server.Version}}')"
 SHA="$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/${BRANCH}" | cut -f1)"
 [ -n "$SHA" ] || { echo "cannot resolve ${REPO}@${BRANCH}" >&2; exit 1; }
 docker build -q -t jumpmaster-trooper:dev -f images/trooper/Dockerfile . >/dev/null
@@ -89,9 +92,9 @@ cleanup() {
 trap cleanup EXIT
 docker network create --internal "$NET" >/dev/null
 docker run -d --name "$SIDE" --network "$NET" --network-alias db --security-opt no-new-privileges \
-  --pids-limit 512 alpine:3.20 sh -c 'while true; do nc -l -p 5432 >/dev/null; done' >/dev/null
+  --pids-limit 512 "$SIDECAR_IMAGE" sh -c 'while true; do nc -l -p 5432 >/dev/null; done' >/dev/null
 gate='{"name":"svc","run":"test \"$JM_SERVICE_DB_HOST\" = db && test \"$JM_SERVICE_DB_PORT\" = 5432 && test \"$E2E_SECRET\" = e2e-secret-value && echo service-ok","timeoutMinutes":2}'
-extra='"services":[{"name":"db","image":"alpine:3.20","port":5432,"readyTimeoutSeconds":30}],"gateSecrets":{"E2E_SECRET":"e2e-secret-value"}'
+extra='"services":[{"name":"db","image":"alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc","port":5432,"readyTimeoutSeconds":30}],"gateSecrets":{"E2E_SECRET":"e2e-secret-value"}'
 TROOPER="$(docker create -i --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add KILL \
   --security-opt no-new-privileges --pids-limit 512 --ulimit core=0:0 jumpmaster-trooper:e2e)"
 docker network connect "$NET" "$TROOPER"
