@@ -7,12 +7,18 @@ import type { BranchRulesRead, PullFiles } from '../forge/github.js';
 
 // ---- protected paths ---------------------------------------------------------------------------
 
+/** Segment-leading dots made plain, so `**` and `*` also cover dotfiles (`node_modules/.bin`). */
+const undot = (s: string): string => s.replace(/(^|\/)\./g, '$1\u0001');
+
+const protectedMatch = (p: string, glob: string): boolean =>
+  pathMatches(p, glob) || pathMatches(undot(p), undot(glob));
+
 /** Changed paths, and rename sources, that match any protected glob (each reported once). */
 export function protectedPathHits(files: PullFiles['files'], globs: string[]): string[] {
   const hits: string[] = [];
   for (const f of files) {
     for (const p of [f.path, f.previousPath]) {
-      if (p && !hits.includes(p) && globs.some((g) => pathMatches(p, g))) hits.push(p);
+      if (p && !hits.includes(p) && globs.some((g) => protectedMatch(p, g))) hits.push(p);
     }
   }
   return hits;

@@ -24,6 +24,12 @@ export const DEFAULT_PROTECTED_PATHS = [
   'patches/**',
   '.yarnrc',
   '.yarnrc.yml',
+  // Installed code and package-manager state committed into the tree.
+  'node_modules/**',
+  '**/node_modules/**',
+  '.pnp.*',
+  '.yarn/**',
+  '.pnpm-store/**',
   '.gitattributes',
   '.gitmodules',
   'jumpmaster*.json',

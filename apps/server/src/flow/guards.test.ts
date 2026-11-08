@@ -63,6 +63,13 @@ describe('protectedPathHits', () => {
       '.yarnrc.yml',
       'npm-shrinkwrap.json',
       'packages/a/.npmrc',
+      'node_modules/.bin/vitest',
+      'packages/a/node_modules/vitest/index.js',
+      '.pnp.cjs',
+      '.pnp.loader.mjs',
+      '.yarn/releases/yarn.cjs',
+      '.pnpm-store/v3/x',
+      '.github/.hidden/x.yml',
     ];
     expect(
       protectedPathHits(
