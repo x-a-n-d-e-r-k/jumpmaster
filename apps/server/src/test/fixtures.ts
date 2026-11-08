@@ -49,6 +49,17 @@ export function makeZone(o: Partial<DropZoneConfig> = {}): DropZoneConfig {
     trustPnpmBuildBlocking: false,
     reviewReadToken: false,
     attribution: true,
+    crew: {
+      enabled: false,
+      goalPath: 'GOAL.md',
+      cycleMinutes: 60,
+      maxDropsPerDay: 24,
+      stagedLabel: 'agent-staged',
+      maxStaged: 3,
+      refutePromotes: false,
+      maxRefute: 2,
+    },
+    botLogins: [],
     ...o,
   };
 }

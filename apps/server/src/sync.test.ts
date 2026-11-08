@@ -4,6 +4,7 @@ import type { Db } from './db/open.js';
 import { openDb } from './db/open.js';
 import { listWorkItems, setWorkItemState, type WorkItem } from './db/repo.js';
 import type { ForgeIssue } from './forge/github.js';
+import { getGoals } from './goals.js';
 import { rankItems, syncDropZone } from './sync.js';
 import { fakeForge } from './test/fakes.js';
 import { zoneWorld } from './test/fixtures.js';
@@ -168,5 +169,37 @@ describe('syncDropZone', () => {
     });
     expect((await syncDropZone(db, pair(forge), zone, t0)).added).toBe(1);
     expect(listWorkItems(db, 'main')[0]).toMatchObject({ state: 'ready', reason: null });
+  });
+});
+
+describe('GOAL.md refresh', () => {
+  const crewZone = (enabled: boolean) =>
+    ({
+      ...zone,
+      crew: { enabled, goalPath: 'GOAL.md' },
+    }) as unknown as DropZoneConfig;
+
+  test('a crew zone reads GOAL.md on the default branch after intake', async () => {
+    const forge = fakeForge({ issues: [], trusted: [] });
+    forge.state.files.set('main:GOAL.md', '## Objectives\n### One\n');
+    await syncDropZone(db, pair(forge), crewZone(true), t0);
+    expect(getGoals(db, 'main')?.parse).toMatchObject({ ok: true });
+  });
+
+  test('a zone without crew never reads GOAL.md', async () => {
+    const forge = fakeForge({ issues: [], trusted: [] });
+    forge.state.files.set('main:GOAL.md', '## Objectives\n### One\n');
+    await syncDropZone(db, pair(forge), crewZone(false), t0);
+    expect(getGoals(db, 'main')).toBeUndefined();
+  });
+
+  test('a thrown GOAL.md read never fails the sync', async () => {
+    const forge = fakeForge({ issues: [issue(1)], trusted: ['alice'] });
+    forge.getFileAt = async () => {
+      throw new Error('fake 502');
+    };
+    await expect(syncDropZone(db, pair(forge), crewZone(true), t0)).resolves.toMatchObject({
+      added: 1,
+    });
   });
 });

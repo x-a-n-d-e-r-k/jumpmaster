@@ -21,6 +21,7 @@ import {
 import { DENIED_PREFIX, decide, GATE_PARK_PREFIXES, HOLD_REASON } from './flow/decide.js';
 import { buildSnapshot, newestReviewAt, type ZonePass, zonePass } from './flow/snapshot.js';
 import type { ForgeIssue, PullFacts } from './forge/github.js';
+import { refreshGoals } from './goals.js';
 import type { ForgePair } from './outbox.js';
 
 const PRIORITY_LABELS = ['highest', 'high', 'low', 'lowest'] as const;
@@ -37,6 +38,8 @@ function priorityOf(labels: string[]): number {
   for (const name of PRIORITY_LABELS) if (names.has(name)) return PRIORITY_VALUE[name];
   return DEFAULT_PRIORITY;
 }
+
+const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 const isFixTitle = (title: string): boolean => /^fix:/i.test(title);
 
@@ -123,6 +126,14 @@ export async function syncDropZone(
       if (!listed.has(w.issueNumber)) setWorkItemState(db, w.id, 'done', 'no longer ready');
   });
   run();
+  if (zone.crew?.enabled) {
+    try {
+      await refreshGoals(db, forge, zone, defaultBranch, now);
+    } catch (err) {
+      // The last good ladder stays; the sync goes on.
+      console.warn(`zone ${zone.id}: reading ${zone.crew.goalPath} failed: ${errorText(err)}`);
+    }
+  }
   const pass = await zonePass(forges, zone, defaultBranch);
   const parked = await syncParked(db, forges, zone, pass, now);
   return { added, skippedUntrusted, ...parked, pass };

@@ -256,3 +256,45 @@ describe('loadConfig', () => {
     expect(secretList({ ...c.secrets, githubReadToken: 'rd' })).toContain('rd');
   });
 });
+
+describe('crew config', () => {
+  test('crew defaults keep a zone off, with botLogins empty', () => {
+    const z = loadConfig(minimal, fullEnv).dropZones[0];
+    expect(z?.crew).toEqual({
+      enabled: false,
+      goalPath: 'GOAL.md',
+      cycleMinutes: 60,
+      maxDropsPerDay: 24,
+      stagedLabel: 'agent-staged',
+      maxStaged: 3,
+      refutePromotes: false,
+      maxRefute: 2,
+    });
+    expect(z?.botLogins).toEqual([]);
+  });
+
+  test('crew.enabled with an unprotected goalPath is a config error', () => {
+    expect(() =>
+      loadConfig(withZone({ crew: { enabled: true, goalPath: 'docs/GOALS.md' } }), fullEnv),
+    ).toThrow(/goalPath/);
+    expect(() =>
+      loadConfig(
+        withZone({ crew: { enabled: true, goalPath: 'GOAL.md' }, protectedPaths: ['.github/**'] }),
+        fullEnv,
+      ),
+    ).toThrow(/goalPath/);
+    expect(
+      loadConfig(withZone({ crew: { enabled: true } }), fullEnv).dropZones[0]?.crew.enabled,
+    ).toBe(true);
+    // Off, the path is not checked.
+    expect(() =>
+      loadConfig(withZone({ crew: { goalPath: 'docs/GOALS.md' } }), fullEnv),
+    ).not.toThrow();
+  });
+
+  test('crew.enabled with stagedLabel equal to readyLabel is a config error', () => {
+    expect(() =>
+      loadConfig(withZone({ crew: { enabled: true, stagedLabel: 'agent-ready' } }), fullEnv),
+    ).toThrow(/stagedLabel/);
+  });
+});

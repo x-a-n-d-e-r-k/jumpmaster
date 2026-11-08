@@ -195,6 +195,18 @@ DROP TABLE outbox;
 ALTER TABLE new_outbox RENAME TO outbox;
 `;
 
+/** v7: the parsed GOAL.md ladder, one row per zone. */
+const V7_SQL = `
+CREATE TABLE goals (
+  zone_id         TEXT PRIMARY KEY,
+  sha256          TEXT,
+  parser_version  INTEGER NOT NULL,
+  raw             TEXT,
+  parse_json      TEXT NOT NULL,
+  read_at         TEXT NOT NULL
+);
+`;
+
 export type Migration = { version: number; sql: string; foreignKeysOff?: boolean };
 
 export const MIGRATIONS: Migration[] = [
@@ -204,6 +216,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 4, sql: V4_SQL },
   { version: 5, sql: V5_SQL },
   { version: 6, sql: V6_SQL, foreignKeysOff: true },
+  { version: 7, sql: V7_SQL },
 ];
 
 /**
