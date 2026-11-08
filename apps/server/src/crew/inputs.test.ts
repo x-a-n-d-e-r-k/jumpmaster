@@ -105,10 +105,18 @@ describe('crew-lead input', () => {
       author: 'human',
     });
     w.f.state.addIssue({ number: 21, title: 'Bot issue', author: 'bot', authorType: 'Bot' });
+    // A crew issue whose marker was edited out still carries the staged label.
+    w.f.state.addIssue({
+      number: 22,
+      title: 'Staged without its marker',
+      author: 'human',
+      labels: ['agent-staged'],
+    });
     w.f.author.calls.length = 0;
     const input = await leadInput();
     expect(input).not.toContain('Forged crew issue');
     expect(input).not.toContain('Bot issue');
+    expect(input).not.toContain('Staged without its marker');
     const methods = new Set(w.f.author.calls.map((c) => c.method));
     for (const m of methods) {
       expect(['listOpenIssues', 'isTrusted', 'viewerLogin', 'getBranchRules']).toContain(m);

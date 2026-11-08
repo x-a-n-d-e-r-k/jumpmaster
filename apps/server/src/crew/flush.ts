@@ -2,13 +2,14 @@ import { createHash } from 'node:crypto';
 import { hasOpenBriefing, raiseBriefing, withdrawBriefing } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
-import { getZoneMode, isKilled } from '../db/repo.js';
+import { getOutbox, getZoneMode, isKilled } from '../db/repo.js';
 import {
   bodyWithoutMarker,
   type CreateIssuePayload,
   type ForgePair,
   type OpResult,
   opKeys,
+  recordFiledNumber,
   runOp,
   type SetLabelsPayload,
   sanitizeCrewText,
@@ -194,7 +195,17 @@ export async function flushCrewOps(
   const crewOn = zone.crew?.enabled === true;
   let moved = 0;
   for (const row of listCrewIssues(db, zone.id, PENDING)) {
-    if (!crewOn && row.state !== 'rejecting') continue;
+    if (!crewOn) {
+      // No forge write, but a create that already resolved gives the row its number, so intake
+      // knows the issue as crew.
+      if (row.state === 'filing' && row.number === null) {
+        const op = getOutbox(db, opKeys.issue(zone.id, row.objective, row.key));
+        if (op?.state === 'done' && op.resultJson != null) {
+          recordFiledNumber(db, op.opKey, JSON.parse(op.resultJson), now);
+        }
+      }
+      if (row.state !== 'rejecting') continue;
+    }
     let step: Step | 'wait' | 'changed';
     try {
       switch (row.state) {

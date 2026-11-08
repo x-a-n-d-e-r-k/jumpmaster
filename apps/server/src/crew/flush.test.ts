@@ -559,6 +559,20 @@ describe('crew disabled', () => {
     expect(getCrewIssue(w.db, id)?.state).toBe('promoted');
   });
 
+  test('a filed row whose number was never recorded learns it on a disabled pass', async () => {
+    const id = intent();
+    w.f.author.failNext('createIssue', '5xx-after-success');
+    await flush();
+    await resolveUnknown(w.db, w.forges, 'main', plus(t0, MIN), 45);
+    const n = getCrewIssue(w.db, id)?.number;
+    expect(n).toEqual(expect.any(Number));
+    // As a database from before the number was recorded at resolution would have it.
+    w.db.prepare('UPDATE crew_issues SET number = NULL WHERE id = ?').run(id);
+    await flushOff(plus(t0, 2 * MIN));
+    expect(getCrewIssue(w.db, id)).toMatchObject({ state: 'filing', number: n });
+    expect(writes('createIssue')).toHaveLength(1);
+  });
+
   test('a filing whose create resolves while disabled gets its one issue after re-enable', async () => {
     const id = intent();
     w.f.author.failNext('createIssue', '5xx-after-success');

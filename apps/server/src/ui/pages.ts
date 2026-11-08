@@ -223,10 +223,23 @@ export function renderGoals(s: {
       return `<tr><td>${escapeHtml(c.objective)}</td><td><code>${escapeHtml(c.key)}</code></td><td>${escapeHtml(c.title)}</td><td>${escapeHtml(c.state)}</td><td>${c.number === null ? '-' : `#${escapeHtml(c.number)}`}</td><td>${escapeHtml(wi?.state ?? '-')}</td><td>${findings}</td></tr>`;
     })
     .join('');
+  const rowByNumber = new Map(
+    s.crewIssues.flatMap((c) => (c.number === null ? [] : [[c.number, c] as const])),
+  );
+  // Why it was skipped: its crew row's state, if it has one (else a marker, bot author or the
+  // staged label marked it crew). A rejected or failed row never starts: say what to do instead.
+  const skippedLine = (n: number): string => {
+    const c = rowByNumber.get(n);
+    if (!c) return `#${escapeHtml(n)}`;
+    if (c.state === 'rejected' || c.state === 'failed') {
+      return `#${escapeHtml(n)}: crew issue ${escapeHtml(c.state)}. It can never start: close it, or file a fresh issue for the work.`;
+    }
+    return `#${escapeHtml(n)}: crew issue ${escapeHtml(c.state)}, not promoted`;
+  };
   const skipped =
     s.skippedCrewUnpromoted.length === 0
       ? '<p>None.</p>'
-      : `<ul>${s.skippedCrewUnpromoted.map((n) => `<li>#${escapeHtml(n)}</li>`).join('')}</ul>`;
+      : `<ul>${s.skippedCrewUnpromoted.map((n) => `<li>${skippedLine(n)}</li>`).join('')}</ul>`;
   return page(
     `<p><a href="/">Back</a></p><h2>Objectives (goal ladder): ${escapeHtml(s.zone.id)}</h2>${ladder}` +
       `<h2>Crew issues</h2><table><tr><th>Objective</th><th>Key</th><th>Title</th><th>State</th><th>Issue</th><th>Work item</th><th>Findings</th></tr>${issues}</table>` +

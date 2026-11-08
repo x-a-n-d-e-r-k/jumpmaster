@@ -492,6 +492,28 @@ describe('goal ladder', () => {
     expect(html).toContain('#13');
   });
 
+  test('a skipped issue on a rejected or failed crew row is listed with its remedy', () => {
+    const html = renderGoals({
+      zone: z,
+      goals: undefined,
+      crewIssues: [
+        crewIssue({ id: 5, number: 24, state: 'rejected' }),
+        crewIssue({ id: 6, number: 25, state: 'failed' }),
+        crewIssue({ id: 7, number: 26, state: 'staged' }),
+      ],
+      items: [],
+      skippedCrewUnpromoted: [24, 25, 26, 27],
+    });
+    expect(html).toContain(
+      '<li>#24: crew issue rejected. It can never start: close it, or file a fresh issue for the work.</li>',
+    );
+    expect(html).toContain(
+      '<li>#25: crew issue failed. It can never start: close it, or file a fresh issue for the work.</li>',
+    );
+    expect(html).toContain('<li>#26: crew issue staged, not promoted</li>');
+    expect(html).toContain('<li>#27</li>');
+  });
+
   test('an unparsed GOAL.md shows its parse error', () => {
     const html = renderGoals({
       zone: z,
