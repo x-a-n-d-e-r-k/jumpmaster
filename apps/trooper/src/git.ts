@@ -762,6 +762,56 @@ export function pushExistingBranch(
   return guardedPush(dir, branch, token, target, expectedRemoteSha, sweep, o);
 }
 
+/**
+ * Removes the repository's agent instructions (`.claude/`, `CLAUDE*.md`, `.mcp.json`) from `dir` at
+ * any depth, as `as` (the clone's owner: root has no DAC_OVERRIDE over it). `.git` is left alone and
+ * links are removed as links, never followed (`find` without `-L`). Returns the removed paths,
+ * relative to `dir`.
+ */
+export async function removeInstructionFiles(
+  dir: string,
+  as: AgentIdentity | null = null,
+): Promise<string[]> {
+  // Without an identity (outside the container) a missing clone has nothing to strip. With one,
+  // never skip: root can't see into the agent's private home, so an existence check would lie.
+  if (!as && !existsSync(dir)) return [];
+  const find = [
+    'find',
+    '.',
+    '-path',
+    './.git',
+    '-prune',
+    '-o',
+    '(',
+    '-name',
+    '.claude',
+    '-o',
+    '-name',
+    'CLAUDE*.md',
+    '-o',
+    '-name',
+    '.mcp.json',
+    ')',
+    '-prune',
+    '-print',
+    '-exec',
+    'rm',
+    '-rf',
+    '--',
+    '{}',
+    '+',
+  ];
+  const out = await exec(asAgentArgv(as, find), {
+    cwd: dir,
+    env: scrubEnv(process.env),
+    label: 'strip',
+  });
+  return out
+    .split('\n')
+    .filter((l) => l.startsWith('./'))
+    .map((l) => l.slice(2));
+}
+
 /** `rm -rf` as `as` (root has no DAC_OVERRIDE over the agent's private files). */
 export async function removeTree(dir: string, as: AgentIdentity | null = null): Promise<void> {
   if (!as) {

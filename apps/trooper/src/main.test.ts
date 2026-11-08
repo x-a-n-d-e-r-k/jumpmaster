@@ -74,6 +74,7 @@ function fakeDeps(o: {
       commitIfDirty: async () => true,
       headSha: async () => 'working-copy-sha',
       treeState: async () => 'clean',
+      removeInstructionFiles: async () => [],
       aheadOfBase: async () => o.ahead ?? 1,
       remoteBranchSha: async (t, b, tok) => {
         state.calls.push('ls-remote');

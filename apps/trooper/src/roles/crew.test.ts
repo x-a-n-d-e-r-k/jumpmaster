@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type CrewDropPayload, crewOutputJsonSchema } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
+import { removeInstructionFiles } from '../git.js';
 import type { TrooperDeps } from '../main.js';
 import { runCrew } from './crew.js';
 import type { RoleCtx } from './shared.js';
@@ -78,6 +79,10 @@ function world(
       pushExistingBranch: rec('pushExistingBranch', () => 'x'),
       sweepProcesses: () => false,
       removeTree: rec('removeTree', () => undefined),
+      removeInstructionFiles: (async (dir: string, as: unknown) => {
+        calls.push(['removeInstructionFiles', dir, as]);
+        return removeInstructionFiles(dir, null);
+      }) as never,
     },
     async *runClaude(args: string[], _env: NodeJS.ProcessEnv, cwd: string) {
       claude.args = args;
@@ -165,6 +170,20 @@ describe('runCrew', () => {
     expect(seenAtSnapshot).toEqual([]);
     for (const f of planted) expect(existsSync(join(clone, f)), f).toBe(false);
     for (const f of kept) expect(existsSync(join(clone, f)), f).toBe(true);
+  });
+
+  // In a container the clone belongs to the agent and root has no DAC_OVERRIDE: the removal must
+  // run as the agent, or every crew drop fails with EACCES on the first CLAUDE.md.
+  test('instruction files are removed as the agent identity', async () => {
+    const w = world();
+    const agent = { uid: 10001, gid: 10001, home: '/home/agent' };
+    const ctx = {
+      ...newCtx(),
+      ids: { agent, gate: { uid: 10002, gid: 10002, home: '/home/gate' } },
+    };
+    await runCrew(lead, w.deps, ctx as never);
+    const call = w.calls.find((c) => c[0] === 'removeInstructionFiles');
+    expect(call?.[2]).toEqual(agent);
   });
 
   test('diagnose checks out the given head; crew-lead stays on the default branch', async () => {
