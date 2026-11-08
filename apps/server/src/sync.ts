@@ -1,4 +1,5 @@
 import type { DropZoneConfig } from './config.js';
+import { getCrewIssueByNumber } from './crew/store.js';
 import type { Db } from './db/open.js';
 import {
   clearRequestChangesOnHead,
@@ -21,7 +22,9 @@ import {
 import { DENIED_PREFIX, decide, GATE_PARK_PREFIXES, HOLD_REASON } from './flow/decide.js';
 import { buildSnapshot, newestReviewAt, type ZonePass, zonePass } from './flow/snapshot.js';
 import type { ForgeIssue, PullFacts } from './forge/github.js';
+import { refreshGoals } from './goals.js';
 import type { ForgePair } from './outbox.js';
+import { isJmIssueBody } from './outbox.js';
 
 const PRIORITY_LABELS = ['highest', 'high', 'low', 'lowest'] as const;
 const PRIORITY_VALUE: Record<(typeof PRIORITY_LABELS)[number], number> = {
@@ -36,6 +39,20 @@ function priorityOf(labels: string[]): number {
   const names = new Set(labels.map((l) => l.toLowerCase()));
   for (const name of PRIORITY_LABELS) if (names.has(name)) return PRIORITY_VALUE[name];
   return DEFAULT_PRIORITY;
+}
+
+const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/**
+ * Crew-filed: the body ends with a Jumpmaster issue marker, or the author is a bot by type or by
+ * the zone's list. The marker decides whatever the login, since the author identity may be the
+ * operator's own account.
+ */
+export function isCrewFiled(issue: ForgeIssue, zone: DropZoneConfig): boolean {
+  if (isJmIssueBody(issue.body)) return true;
+  // The extra signals apply only with the crew on, so an M2 zone's intake is unchanged.
+  if (!zone.crew?.enabled) return false;
+  return issue.authorType === 'Bot' || (zone.botLogins ?? []).includes(issue.author);
 }
 
 const isFixTitle = (title: string): boolean => /^fix:/i.test(title);
@@ -53,6 +70,10 @@ export function rankItems(items: WorkItem[]): WorkItem[] {
 export type SyncResult = {
   added: number;
   skippedUntrusted: number;
+  /** Ready crew-filed issues with no recorded promotion: never started (§7.1). */
+  skippedCrewUnpromoted: number[];
+  /** Set when classifying an issue failed: this pass added nothing and marked nothing done. */
+  intakeSkipped?: string;
   retried: number;
   reopened: number;
   /** The zone's rules read for this pass; hand it to `reconcileZone`. */
@@ -63,6 +84,12 @@ export type SyncResult = {
  * Syncs ready issues into work items, reads the zone pass once, then recovers parked items
  * (`syncParked`). The returned `pass` is reused by the reconciler, so rules are read once per pass.
  */
+/** Each zone's last sync result, kept in memory for the zone page (lost on restart). */
+const lastSyncs = new Map<string, SyncResult>();
+
+/** The zone's last sync result in this process, if any. */
+export const lastSyncResult = (zoneId: string): SyncResult | undefined => lastSyncs.get(zoneId);
+
 export async function syncDropZone(
   db: Db,
   forges: ForgePair,
@@ -73,8 +100,27 @@ export async function syncDropZone(
   const defaultBranch = await forge.getDefaultBranch();
   const issues = await forge.listReadyIssues(zone.readyLabel);
 
+  // Crew provenance first: a crew-filed issue starts only once its promotion is recorded.
+  const skippedCrewUnpromoted: number[] = [];
+  const crewPromoted = new Set<number>();
+  let intakeSkipped: string | undefined;
+  try {
+    for (const issue of issues) {
+      if (!isCrewFiled(issue, zone)) continue;
+      if (getCrewIssueByNumber(db, zone.id, issue.number)?.state === 'promoted') {
+        crewPromoted.add(issue.number);
+      } else {
+        skippedCrewUnpromoted.push(issue.number);
+      }
+    }
+  } catch (err) {
+    intakeSkipped = `classifying ready issues failed: ${errorText(err)}`;
+  }
+  const crewNumbers = new Set([...crewPromoted, ...skippedCrewUnpromoted]);
+  const human = intakeSkipped ? [] : issues.filter((i) => !crewNumbers.has(i.number));
+
   const trust = new Map<string, boolean>();
-  for (const author of new Set(issues.map((i: ForgeIssue) => i.author))) {
+  for (const author of new Set(human.map((i: ForgeIssue) => i.author))) {
     try {
       trust.set(author, await forge.isTrusted(author));
     } catch {
@@ -92,10 +138,12 @@ export async function syncDropZone(
       configJson: JSON.stringify(zone),
     });
     setDropZoneDefaultBranch(db, zone.id, defaultBranch);
+    if (intakeSkipped) return;
 
     const existing = new Map(listWorkItems(db, zone.id).map((w) => [w.issueNumber, w]));
     for (const issue of issues) {
-      if (!trust.get(issue.author)) {
+      if (skippedCrewUnpromoted.includes(issue.number)) continue;
+      if (!crewPromoted.has(issue.number) && !trust.get(issue.author)) {
         skippedUntrusted++;
         continue;
       }
@@ -123,9 +171,26 @@ export async function syncDropZone(
       if (!listed.has(w.issueNumber)) setWorkItemState(db, w.id, 'done', 'no longer ready');
   });
   run();
+  if (zone.crew?.enabled) {
+    try {
+      await refreshGoals(db, forge, zone, defaultBranch, now);
+    } catch (err) {
+      // The last good ladder stays; the sync goes on.
+      console.warn(`zone ${zone.id}: reading ${zone.crew.goalPath} failed: ${errorText(err)}`);
+    }
+  }
   const pass = await zonePass(forges, zone, defaultBranch);
   const parked = await syncParked(db, forges, zone, pass, now);
-  return { added, skippedUntrusted, ...parked, pass };
+  const result: SyncResult = {
+    added,
+    skippedUntrusted,
+    skippedCrewUnpromoted,
+    ...(intakeSkipped ? { intakeSkipped } : {}),
+    ...parked,
+    pass,
+  };
+  lastSyncs.set(zone.id, result);
+  return result;
 }
 
 async function readPull(forges: ForgePair, number: number | null): Promise<PullFacts | null> {
@@ -183,6 +248,37 @@ async function gateParkMayHaveChanged(
   return true;
 }
 
+/**
+ * What the retry label does to a parked item: attempts reset, failed ops forgotten, and the item
+ * back on its PR's track. Returns false, changing nothing, when the PR can't be read.
+ */
+export async function retryParkedItem(
+  db: Db,
+  forges: ForgePair,
+  item: WorkItem,
+  now: Date,
+): Promise<boolean> {
+  const prNumber = getPullRequest(db, item.id)?.number ?? item.prNumber;
+  // Read the PR before consuming the label: a failed read must not pass for a closed PR
+  // (that would open a second one). The label stays unconsumed and is tried next pass.
+  let pr: PullFacts | null = null;
+  if (prNumber !== null) {
+    try {
+      pr = await forges.author.getPull(prNumber);
+    } catch {
+      return false;
+    }
+  }
+  resetAttempts(db, item.id);
+  deleteFailedOutbox(db, item.id);
+  setRetryLabelSeen(db, item.id, true);
+  // A stored request-changes on the head would re-heal the same findings; the owner may have
+  // waived a criterion in the issue, so the head is reviewed afresh against the new body.
+  if (pr?.state === 'open' && pr.headSha) clearRequestChangesOnHead(db, item.id, pr.headSha);
+  restoreFromPull(db, item, pr, now);
+  return true;
+}
+
 export async function syncParked(
   db: Db,
   forges: ForgePair,
@@ -202,24 +298,7 @@ export async function syncParked(
     const prNumber = getPullRequest(db, item.id)?.number ?? item.prNumber;
     const hasRetry = labels.includes(zone.retryLabel);
     if (hasRetry && !item.retryLabelSeen) {
-      // Read the PR before consuming the label: a failed read must not pass for a closed PR
-      // (that would open a second one). The label stays unconsumed and is tried next pass.
-      let pr: PullFacts | null = null;
-      if (prNumber !== null) {
-        try {
-          pr = await forges.author.getPull(prNumber);
-        } catch {
-          continue;
-        }
-      }
-      resetAttempts(db, item.id);
-      deleteFailedOutbox(db, item.id);
-      setRetryLabelSeen(db, item.id, true);
-      // A stored request-changes on the head would re-heal the same findings; the owner may have
-      // waived a criterion in the issue, so the head is reviewed afresh against the new body.
-      if (pr?.state === 'open' && pr.headSha) clearRequestChangesOnHead(db, item.id, pr.headSha);
-      restoreFromPull(db, item, pr, now);
-      retried++;
+      if (await retryParkedItem(db, forges, item, now)) retried++;
       continue;
     }
     if (!hasRetry && item.retryLabelSeen) setRetryLabelSeen(db, item.id, false);

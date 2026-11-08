@@ -1,6 +1,8 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
+import { listRulings, raiseBriefing } from '../briefings.js';
 import type { Config } from '../config.js';
+import { nextCrewWork } from '../crew/schedule.js';
 import { ctlRequest } from '../ctl.js';
 import { openDb } from '../db/open.js';
 import {
@@ -27,12 +29,12 @@ afterEach(async () => {
   app = undefined;
 });
 
-function setup(allowedHosts?: string[]) {
+function setup(allowedHosts?: string[], zone = makeZone({ id: 'main' })) {
   const db = openDb(tmpDbFile());
   upsertDropZone(db, { id: 'main', repo: 'o/r', defaultBranch: 'main', configJson: '{}' });
   const config = {
     listen: { host: '127.0.0.1', port: 7420, ...(allowedHosts ? { allowedHosts } : {}) },
-    dropZones: [makeZone({ id: 'main' })],
+    dropZones: [zone],
     secrets: { operatorToken: TOKEN },
   } as unknown as Config;
   app = Fastify();
@@ -176,5 +178,100 @@ describe('ctl', () => {
     expect(ctlRequest(['unkill'])?.body).toEqual({ engaged: false });
     expect(ctlRequest(['pause'])).toBeNull();
     expect(ctlRequest(['nonsense', 'main'])).toBeNull();
+    expect(ctlRequest(['crew-cycle', 'main'])).toEqual({
+      path: '/api/control/zones/main/crew-cycle',
+      body: {},
+    });
+    expect(ctlRequest(['crew-cycle'])).toBeNull();
+  });
+});
+
+describe('crew-cycle route', () => {
+  test('makes the lead cycle due now; 404 for an unknown zone, 409 with the crew off', async () => {
+    const crew = { ...makeZone().crew, enabled: true, cycleMinutes: 60 };
+    const db = setup(undefined, makeZone({ id: 'main', crew }));
+    insertDrop(db, {
+      id: 'lead',
+      dropZoneId: 'main',
+      workItemId: null,
+      role: 'crew-lead',
+      state: 'succeeded',
+      createdAt: new Date(t0.getTime() - 60_000).toISOString(),
+    });
+    const zone = makeZone({ id: 'main', crew });
+    expect(nextCrewWork(db, zone, t0)).toBeNull();
+    expect((await post('/api/control/zones/main/crew-cycle', {})).statusCode).toBe(200);
+    expect(nextCrewWork(db, zone, new Date(t0.getTime() + 1000))).toEqual({ role: 'crew-lead' });
+    expect((await post('/api/control/zones/nope/crew-cycle', {})).statusCode).toBe(404);
+    expect((await post('/api/control/zones/main/crew-cycle', {}, { host: HOST })).statusCode).toBe(
+      401,
+    );
+  });
+
+  test('409 when the crew is off', async () => {
+    setup();
+    expect((await post('/api/control/zones/main/crew-cycle', {})).statusCode).toBe(409);
+  });
+});
+
+describe('rule route', () => {
+  function withBriefing() {
+    const db = setup();
+    const id = raiseBriefing(
+      db,
+      {
+        zoneId: 'main',
+        kind: 'crew',
+        subject: 'goal change',
+        decision: 'd',
+        why: 'w',
+        options: [
+          { id: 'yes', label: 'Yes', effect: 'none' },
+          { id: 'no', label: 'No', effect: 'none' },
+        ],
+        source: 'crew',
+      },
+      t0,
+    );
+    return { db, id };
+  }
+
+  test('the rule route refuses a missing token and a foreign Origin', async () => {
+    const { db, id } = withBriefing();
+    const url = `/api/control/briefings/${id}/rule`;
+    expect((await post(url, { optionId: 'yes' }, { host: HOST })).statusCode).toBe(401);
+    expect(
+      (await post(url, { optionId: 'yes' }, { ...auth, origin: 'http://evil.test' })).statusCode,
+    ).toBe(403);
+    expect(listRulings(db, 'main')).toEqual([]);
+  });
+
+  test('records a ruling, then 409 on a second; 400 on a bad option or long note; 404 unknown', async () => {
+    const { db, id } = withBriefing();
+    const url = `/api/control/briefings/${id}/rule`;
+    expect((await post(url, { optionId: 'maybe' })).statusCode).toBe(400);
+    expect((await post(url, { optionId: 'yes', note: 'x'.repeat(2001) })).statusCode).toBe(400);
+    expect((await post('/api/control/briefings/999/rule', { optionId: 'yes' })).statusCode).toBe(
+      404,
+    );
+    expect((await post('/api/control/briefings/abc/rule', { optionId: 'yes' })).statusCode).toBe(
+      404,
+    );
+    const ok = await post(url, { optionId: 'yes', note: 'fine' });
+    expect(ok.statusCode).toBe(200);
+    expect((await post(url, { optionId: 'no' })).statusCode).toBe(409);
+    expect(listRulings(db, 'main').map((r) => [r.choice, r.note])).toEqual([['yes', 'fine']]);
+  });
+
+  test('ctl rule builds the rule request', () => {
+    expect(ctlRequest(['rule', '7', 'retry'])).toEqual({
+      path: '/api/control/briefings/7/rule',
+      body: { optionId: 'retry' },
+    });
+    expect(ctlRequest(['rule', '7', 'retry', 'looks', 'fine'])?.body).toEqual({
+      optionId: 'retry',
+      note: 'looks fine',
+    });
+    expect(ctlRequest(['rule', '7'])).toBeNull();
   });
 });

@@ -1,12 +1,14 @@
 import { beforeEach, describe, expect, test } from 'vitest';
 import type { DropZoneConfig } from './config.js';
+import { insertCrewIssue } from './crew/store.js';
 import type { Db } from './db/open.js';
 import { openDb } from './db/open.js';
 import { listWorkItems, setWorkItemState, type WorkItem } from './db/repo.js';
 import type { ForgeIssue } from './forge/github.js';
+import { getGoals } from './goals.js';
 import { rankItems, syncDropZone } from './sync.js';
 import { fakeForge } from './test/fakes.js';
-import { zoneWorld } from './test/fixtures.js';
+import { makeZone, zoneWorld } from './test/fixtures.js';
 import { t0, tmpDbFile } from './test/helpers.js';
 
 const pair = <F>(f: F) => ({ author: f, reviewer: f });
@@ -168,5 +170,153 @@ describe('syncDropZone', () => {
     });
     expect((await syncDropZone(db, pair(forge), zone, t0)).added).toBe(1);
     expect(listWorkItems(db, 'main')[0]).toMatchObject({ state: 'ready', reason: null });
+  });
+});
+
+describe('GOAL.md refresh', () => {
+  const crewZone = (enabled: boolean) =>
+    ({
+      ...zone,
+      crew: { enabled, goalPath: 'GOAL.md' },
+    }) as unknown as DropZoneConfig;
+
+  test('a crew zone reads GOAL.md on the default branch after intake', async () => {
+    const forge = fakeForge({ issues: [], trusted: [] });
+    forge.state.files.set('main:GOAL.md', '## Objectives\n### One\n');
+    await syncDropZone(db, pair(forge), crewZone(true), t0);
+    expect(getGoals(db, 'main')?.parse).toMatchObject({ ok: true });
+  });
+
+  test('a zone without crew never reads GOAL.md', async () => {
+    const forge = fakeForge({ issues: [], trusted: [] });
+    forge.state.files.set('main:GOAL.md', '## Objectives\n### One\n');
+    await syncDropZone(db, pair(forge), crewZone(false), t0);
+    expect(getGoals(db, 'main')).toBeUndefined();
+  });
+
+  test('a thrown GOAL.md read never fails the sync', async () => {
+    const forge = fakeForge({ issues: [issue(1)], trusted: ['alice'] });
+    forge.getFileAt = async () => {
+      throw new Error('fake 502');
+    };
+    await expect(syncDropZone(db, pair(forge), crewZone(true), t0)).resolves.toMatchObject({
+      added: 1,
+    });
+  });
+});
+
+describe('crew provenance at intake', () => {
+  const MARK = '\n\n<!-- jm:op:issue:main:obj:k -->';
+  const crewIssue = (n: number, o: Partial<ForgeIssue> = {}): ForgeIssue => ({
+    number: n,
+    title: `crew ${n}`,
+    body: `Do it.${MARK}`,
+    author: 'author-bot',
+    authorType: 'User',
+    labels: ['agent-ready'],
+    createdAt: t0.toISOString(),
+    ...o,
+  });
+  const world = (issues: ForgeIssue[], botLogins: string[] = [], crewEnabled = true) => {
+    const w = zoneWorld({ botLogins, crew: { ...makeZone().crew, enabled: crewEnabled } });
+    for (const n of [1, 2, 3, 4, 5]) w.f.state.closeIssue(n);
+    for (const i of issues) w.f.state.addIssue(i);
+    return w;
+  };
+  const numbers = (w: ReturnType<typeof zoneWorld>) =>
+    listWorkItems(w.db, 'main').map((i) => i.issueNumber);
+  const promoted = (w: ReturnType<typeof zoneWorld>, n: number) =>
+    insertCrewIssue(w.db, {
+      zoneId: 'main',
+      key: `k${n}`,
+      source: 'crew-lead',
+      sourceRef: 'd',
+      objective: 'obj',
+      title: `crew ${n}`,
+      body: 'Do it.',
+      priority: null,
+      state: 'promoted',
+      number: n,
+      createdAt: t0.toISOString(),
+    });
+
+  test('a marker-bearing issue labelled ready by a human without a recorded promotion is not started', async () => {
+    const w = world([crewIssue(10)]);
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([]);
+    expect(r.skippedCrewUnpromoted).toEqual([10]);
+  });
+
+  test('a marker forged into a stranger issue is skipped, not trusted', async () => {
+    const w = world([crewIssue(11, { author: 'stranger' })]);
+    w.f.state.trusted.push('stranger');
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([]);
+    expect(r.skippedCrewUnpromoted).toEqual([11]);
+  });
+
+  test("the operator's own unmarked issue is still trusted", async () => {
+    const w = world([crewIssue(12, { body: 'My own issue.' })]);
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([12]);
+    expect(r.skippedCrewUnpromoted).toEqual([]);
+  });
+
+  test('with the crew off, Bot-typed and configured bot authors are judged as before; markers still skip', async () => {
+    const w = world(
+      [
+        crewIssue(13, { body: 'plain', author: 'some-app[bot]', authorType: 'Bot' }),
+        crewIssue(14, { body: 'plain', author: 'helper' }),
+        crewIssue(15, { author: 'human' }),
+      ],
+      ['helper'],
+      false,
+    );
+    w.f.state.trusted.push('some-app[bot]', 'helper');
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([13, 14]);
+    expect(r.skippedCrewUnpromoted).toEqual([15]);
+  });
+
+  test('a Bot-typed or configured bot author without a promotion is skipped', async () => {
+    const w = world(
+      [
+        crewIssue(13, { body: 'plain', author: 'some-app[bot]', authorType: 'Bot' }),
+        crewIssue(14, { body: 'plain', author: 'helper' }),
+      ],
+      ['helper'],
+    );
+    w.f.state.trusted.push('some-app[bot]', 'helper');
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([]);
+    expect(r.skippedCrewUnpromoted).toEqual([13, 14]);
+  });
+
+  test('a promoted crew issue becomes a work item', async () => {
+    const w = world([crewIssue(15)]);
+    promoted(w, 15);
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([15]);
+    expect(r.skippedCrewUnpromoted).toEqual([]);
+  });
+
+  test('lookup failure skips the pass', async () => {
+    const w = world([crewIssue(16), crewIssue(17, { body: 'human', author: 'human' })]);
+    w.item(3, 'ready');
+    w.db.exec('DROP TABLE crew_issues');
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(r.intakeSkipped).toMatch(/crew_issues/);
+    expect(r.added).toBe(0);
+    // #3 is no longer ready on the forge, but a skipped pass marks nothing done.
+    expect(listWorkItems(w.db, 'main').map((i) => [i.issueNumber, i.state])).toEqual([
+      [3, 'ready'],
+    ]);
+  });
+
+  test('after restoring an older database, an unknown promoted crew issue is skipped and listed', async () => {
+    const w = world([crewIssue(18, { labels: ['agent-ready', 'high'] })]);
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([]);
+    expect(r.skippedCrewUnpromoted).toEqual([18]);
   });
 });

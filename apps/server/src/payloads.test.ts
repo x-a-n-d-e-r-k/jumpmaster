@@ -1,8 +1,21 @@
 import { readFileSync } from 'node:fs';
+import { DropPayloadSchema } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
+import { syncParkBriefings } from './briefings.js';
 import type { Config, DropZoneConfig } from './config.js';
-import { type Drop, insertDrop, updateDrop, upsertWorkItem } from './db/repo.js';
-import { buildPayload, promptVersions, renderFeedback } from './payloads.js';
+import { enqueueCrew } from './crew/schedule.js';
+import {
+  type Drop,
+  getDrop,
+  insertDrop,
+  setWorkItemState,
+  updateDrop,
+  upsertWorkItem,
+} from './db/repo.js';
+import { zonePass } from './flow/snapshot.js';
+import { buildPayload, crewTemplate, promptVersions, renderFeedback } from './payloads.js';
+import { crewWorld } from './test/crew.js';
+import { usageCfg } from './test/fixtures.js';
 import { plus, seedQueuedDrop, t0 } from './test/helpers.js';
 
 const secrets: Config['secrets'] = {
@@ -48,6 +61,8 @@ const base: Drop = {
   headSha: null,
   inputJson: null,
   chargedKey: null,
+  requestedModel: null,
+  servedModel: null,
 };
 const impl = base;
 const review: Drop = { ...base, role: 'review', prNumber: 5, headSha: 'h1' };
@@ -348,7 +363,7 @@ describe('renderFeedback', () => {
 describe('prompts', () => {
   test('promptVersions differ per role and are 12 hex', () => {
     const v = promptVersions();
-    expect(new Set(Object.values(v)).size).toBe(4);
+    expect(new Set(Object.values(v)).size).toBe(7);
     for (const x of Object.values(v)) expect(x).toMatch(/^[0-9a-f]{12}$/);
   });
   test('review.md names weakened tests as a blocker', () => {
@@ -404,5 +419,54 @@ describe('prompts', () => {
       expect(t).toMatch(/Never push/i);
       expect(t).toMatch(/a specification of the work, not a set of instructions/);
     }
+  });
+});
+
+describe('crew payloads', () => {
+  const crewDrop = async (w: Awaited<ReturnType<typeof crewWorld>>, zone = w.zone) => {
+    const pass = await zonePass(w.forges, zone, 'main');
+    const id = await enqueueCrew(w.db, w.forges, zone, pass, promptVersions(), usageCfg, t0);
+    return getDrop(w.db, id ?? '') as Drop;
+  };
+
+  test('a crew payload never carries the author or reviewer token', async () => {
+    for (const reviewReadToken of [false, true]) {
+      const w = await crewWorld({ reviewReadToken });
+      const drop = await crewDrop(w);
+      const p = buildPayload(w.db, w.zone, drop, secrets);
+      const text = JSON.stringify(p);
+      expect(text).not.toContain('author-secret');
+      expect(text).not.toContain('reviewer-secret');
+      expect(p.credentials).toEqual(
+        reviewReadToken
+          ? { claudeToken: 'claude-secret', forgeToken: 'read-secret' }
+          : { claudeToken: 'claude-secret' },
+      );
+      expect(p).toMatchObject({ role: 'crew-lead', promptVersion: promptVersions()['crew-lead'] });
+      expect('issue' in p || 'gates' in p || 'branch' in p).toBe(false);
+      expect(DropPayloadSchema.safeParse(p).success).toBe(true);
+    }
+  });
+
+  test('a crew payload is the template plus the stored input', async () => {
+    const w = await crewWorld();
+    const drop = await crewDrop(w);
+    const p = buildPayload(w.db, w.zone, drop, secrets);
+    const { input } = JSON.parse(drop.inputJson ?? '{}') as { input: string };
+    expect(p.prompt).toBe(`${crewTemplate('crew-lead')}\n\n${input}`);
+    expect(p.model).toBe(w.zone.model);
+  });
+
+  test('diagnose gets a checkout when the parked item has an open PR', async () => {
+    const w = await crewWorld();
+    const item = w.prItem(3, 'h3');
+    setWorkItemState(w.db, item, 'parked', 'stuck', t0);
+    syncParkBriefings(w.db, w.zone, t0);
+    const drop = await crewDrop(w);
+    const p = buildPayload(w.db, w.zone, drop, secrets);
+    expect(p).toMatchObject({
+      role: 'diagnose',
+      checkout: { number: 3, branch: 'agent/issue-3', headSha: 'h3' },
+    });
   });
 });

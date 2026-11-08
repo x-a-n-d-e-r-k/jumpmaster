@@ -6,9 +6,12 @@ import {
   type DropResult,
   EVENT_PREFIX,
   type GateResult,
+  type ItemDropPayload,
+  isCrewRole,
   type RateLimitEventData,
   REPORT_MAX_CHARS,
   type ServiceSpec,
+  servedModel,
   type TrooperEvent,
 } from '@jumpmaster/protocol';
 import { buildClaudeArgs, type ParsedLine, parseStreamLine } from '../claude.js';
@@ -94,17 +97,33 @@ export function agentSettings(payload: DropPayload): Record<string, unknown> {
   return { hooks: {}, includeCoAuthoredBy: false, attribution: { commit: '', pr: '' } };
 }
 
-/** Runs Claude in `dir` as the agent identity and collects what the stream reported. */
+/** The appended system prompt for a crew role: where the read-only clone is. */
+export function crewSystemPrompt(addDirs: string[]): string {
+  const where = addDirs.map((d) => `- ${d}`).join('\n');
+  return `Your working directory is empty on purpose. The repository is cloned, read-only for this task, at:\n${where}\nRead it there. Never modify, commit or push anything in it.\n`;
+}
+
+/**
+ * Runs Claude with `cwd` as its working directory, as the agent identity, and collects what the
+ * stream reported. `addDirs` are passed as `--add-dir` (a crew role reads its clone that way, so
+ * the clone's own instructions are never loaded).
+ */
 export async function runAgent(
   payload: DropPayload,
   deps: TrooperDeps,
   ctx: RoleCtx,
-  o: { prompt: string; outputSchema: object; gateResults?: GateResult[] },
-  dir: string,
+  o: { prompt: string; outputSchema: object; gateResults?: GateResult[]; addDirs?: string[] },
+  cwd: string,
 ): Promise<AgentOutcome> {
   const systemPromptFile = join(ctx.workdir, 'system.md');
   const settingsFile = join(ctx.workdir, 'settings.json');
-  writeFileSync(systemPromptFile, agentSystemPrompt(payload, o.gateResults));
+  const crew = isCrewRole(payload.role);
+  writeFileSync(
+    systemPromptFile,
+    crew
+      ? crewSystemPrompt(o.addDirs ?? [])
+      : agentSystemPrompt(payload as ItemDropPayload, o.gateResults),
+  );
   writeFileSync(settingsFile, JSON.stringify(agentSettings(payload)));
 
   emitEvent(deps, ctx, 'phase', { phase: 'claude' });
@@ -115,19 +134,22 @@ export async function runAgent(
     systemPromptFile,
     settingsFile,
     outputSchema: o.outputSchema,
+    ...(o.addDirs && o.addDirs.length > 0 ? { addDirs: o.addDirs } : {}),
   });
   const env: NodeJS.ProcessEnv = {
     ...scrubEnv(process.env, ctx.secrets),
-    ...serviceEnv(payload),
+    ...(crew ? {} : serviceEnv(payload as ItemDropPayload)),
     CLAUDE_CODE_OAUTH_TOKEN: payload.credentials.claudeToken,
   };
+  // Instructions in an --add-dir directory load only with this set; a crew role must never load them.
+  delete env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD;
   const out: AgentOutcome = {
     exitCode: null,
     results: [],
     initSessionId: null,
     rateLimited: false,
   };
-  for await (const line of deps.runClaude(args, env, dir, ctx.ids?.agent ?? null, deps.signal)) {
+  for await (const line of deps.runClaude(args, env, cwd, ctx.ids?.agent ?? null, deps.signal)) {
     const parsed = parseStreamLine(line);
     if (parsed.type === 'ignored') continue;
     if (parsed.type === 'init') {
@@ -146,6 +168,8 @@ export async function runAgent(
         resetsAt: parsed.resetsAt,
         rateLimitType: parsed.rateLimitType,
         unifiedWindows: parsed.unifiedWindows,
+        isUsingOverage: parsed.isUsingOverage,
+        overageStatus: parsed.overageStatus,
       });
       out.rateLimit = data;
       if (data.status === 'rejected') out.rateLimited = true;
@@ -188,7 +212,7 @@ export function stoppedEarly(o: AgentOutcome): 'rate_limited' | 'interrupted' | 
 
 /** Gate secrets and service addresses, set for a gate step after its environment is scrubbed. */
 export function gateExtraEnv(
-  payload: DropPayload,
+  payload: ItemDropPayload,
   hostOf: (service: ServiceSpec) => string = (s) => s.name,
 ): NodeJS.ProcessEnv {
   return { ...payload.gateSecrets, ...serviceEnv(payload, hostOf) };
@@ -196,7 +220,7 @@ export function gateExtraEnv(
 
 /** Service addresses. Unlike gate secrets, the agent gets these too. */
 function serviceEnv(
-  payload: DropPayload,
+  payload: ItemDropPayload,
   hostOf: (service: ServiceSpec) => string = (s) => s.name,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
@@ -212,7 +236,7 @@ function serviceEnv(
  * The agent's appended system prompt: the gates, gate-only variables, and reachable services. A
  * reviewer gets the gate results it is judging instead of an instruction to make them pass.
  */
-export function agentSystemPrompt(payload: DropPayload, gateResults?: GateResult[]): string {
+export function agentSystemPrompt(payload: ItemDropPayload, gateResults?: GateResult[]): string {
   if (payload.role === 'review') {
     return `${gateResultsNote(payload, gateResults ?? [])}${gateOnlyNote(payload)}${servicesNote(payload)}`;
   }
@@ -220,7 +244,7 @@ export function agentSystemPrompt(payload: DropPayload, gateResults?: GateResult
   return `Before finishing, run these commands and make them pass:\n${gateList}\n${gateOnlyNote(payload)}${servicesNote(payload)}`;
 }
 
-function gateResultsNote(payload: DropPayload, results: GateResult[]): string {
+function gateResultsNote(payload: ItemDropPayload, results: GateResult[]): string {
   if (payload.gates.length === 0) return 'This zone has no gates.\n';
   if (results.length === 0) return 'No gate results were recorded for this head.\n';
   const runOf = new Map(payload.gates.map((g) => [g.name, g.run]));
@@ -234,7 +258,7 @@ function gateResultsNote(payload: DropPayload, results: GateResult[]): string {
 }
 
 /** Without this the agent doesn't know a sidecar exists, and skips work that needs it. */
-function servicesNote(payload: DropPayload): string {
+function servicesNote(payload: ItemDropPayload): string {
   const services = payload.services ?? [];
   if (services.length === 0) return '';
   const lines = services.map((s) => {
@@ -245,7 +269,7 @@ function servicesNote(payload: DropPayload): string {
 }
 
 /** Without this the agent reads a missing secret as a blocker, and stops with finished work. */
-function gateOnlyNote(payload: DropPayload): string {
+function gateOnlyNote(payload: ItemDropPayload): string {
   const names = Object.keys(payload.gateSecrets ?? {});
   if (names.length === 0) return '';
   return `\nThese variables exist only in the gate step, which runs separately after you finish: ${names.join(', ')}. You don't have them, by design. A command that fails only because one is missing is not a problem and not a reason to stop. Run what you can, and finish normally.\n`;
@@ -285,7 +309,7 @@ function canConnect(host: string, port: number): Promise<boolean> {
  * as the gate uid in a fresh clone; otherwise they run in the working copy, as in M0.
  */
 export async function runGatesPhase(
-  payload: DropPayload,
+  payload: ItemDropPayload,
   deps: TrooperDeps,
   ctx: RoleCtx,
   dir: string,
@@ -391,6 +415,7 @@ export function resultMeta(outcome: AgentOutcome): Partial<DropResult> {
   return stripUndefined({
     usage: asRecord(last?.usage),
     modelUsage: asRecord(last?.modelUsage),
+    servedModel: servedModel(last?.modelUsage) ?? undefined,
     numTurns: last?.numTurns,
     rateLimit: outcome.rateLimit,
   });

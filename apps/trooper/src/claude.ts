@@ -6,6 +6,8 @@ export interface ClaudeArgsOptions {
   settingsFile: string;
   /** JSON schema for the structured result (implement, review, …). */
   outputSchema: object;
+  /** Extra directories the agent may read and write, each passed as `--add-dir`. */
+  addDirs?: string[];
 }
 
 export function buildClaudeArgs(o: ClaudeArgsOptions): string[] {
@@ -32,6 +34,7 @@ export function buildClaudeArgs(o: ClaudeArgsOptions): string[] {
     'bypassPermissions',
     '--json-schema',
     JSON.stringify(o.outputSchema),
+    ...(o.addDirs ?? []).flatMap((d) => ['--add-dir', d]),
   ];
 }
 
@@ -42,6 +45,8 @@ export type ParsedLine =
       resetsAt?: string;
       rateLimitType?: string;
       unifiedWindows?: Partial<Record<'five_hour' | 'seven_day', UsageWindow>>;
+      isUsingOverage?: boolean;
+      overageStatus?: string;
       raw: unknown;
     }
   | { type: 'init'; sessionId: string }
@@ -104,6 +109,10 @@ export function parseStreamLine(line: string): ParsedLine {
         ...(resetsAt !== undefined ? { resetsAt } : {}),
         ...(typeof info.rateLimitType === 'string' ? { rateLimitType: info.rateLimitType } : {}),
         ...(unifiedWindows ? { unifiedWindows } : {}),
+        ...(typeof info.isUsingOverage === 'boolean'
+          ? { isUsingOverage: info.isUsingOverage }
+          : {}),
+        ...(typeof info.overageStatus === 'string' ? { overageStatus: info.overageStatus } : {}),
         raw,
       };
     }

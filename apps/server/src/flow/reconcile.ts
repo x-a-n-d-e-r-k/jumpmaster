@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { agentBranch, type GateResult, type Role, type Verdict } from '@jumpmaster/protocol';
+import { applyPendingRulings, syncParkBriefings } from '../briefings.js';
 import type { DropZoneConfig, UsageConfig } from '../config.js';
+import { flushCrewOps } from '../crew/flush.js';
+import { enqueueCrew } from '../crew/schedule.js';
 import type { Db } from '../db/open.js';
 import {
   activeDropFor,
@@ -271,6 +274,7 @@ async function postReview(
     {
       kind: 'post_review',
       opKey: opKeys.review(s.item.id, v.headSha, v.id),
+      zoneId: s.item.dropZoneId,
       itemId: s.item.id,
       payload,
     },
@@ -295,7 +299,13 @@ async function merge(
   const r = await runOp(
     db,
     forges,
-    { kind: 'merge', opKey: opKeys.merge(s.item.id, sha), itemId: s.item.id, payload },
+    {
+      kind: 'merge',
+      opKey: opKeys.merge(s.item.id, sha),
+      zoneId: s.item.dropZoneId,
+      itemId: s.item.id,
+      payload,
+    },
     now,
   );
   if (r.state === 'done') {
@@ -364,6 +374,13 @@ export async function reconcileZone(
     now,
     zone.outboxDeadlineMinutes ?? zone.ciDeadlineMinutes,
   );
+  syncParkBriefings(db, zone, now);
+  if (mode === 'active') {
+    // Rulings apply only while the zone acts; one made while paused waits for resume.
+    const deps = { forges: () => forges, zone: () => zone };
+    actions += await applyPendingRulings(db, deps, zone.id, now);
+    actions += await flushCrewOps(db, forges, zone, secrets, now);
+  }
   const pulls = await forges.author.listOpenAgentPulls('agent/issue-');
   actions += await adopt(db, forges, zone, pass, pulls, now);
   if (mode === 'paused') return { actions, merges };
@@ -437,8 +454,11 @@ export async function reconcileZone(
       const detail = `issue #${pick.issueNumber}`;
       recordObservation(db, zone.id, pick.id, 'would_enqueue:implement', detail, now);
     }
+    await enqueueCrew(db, forges, zone, pass, versions, usageCfg, now);
     return { actions, merges };
   }
   if (enqueueNext(db, zone, versions.implement, usageCfg, now, branchUnknown) !== null) actions++;
+  // Last, so crew work never takes a place ahead of finishing or implement work.
+  if ((await enqueueCrew(db, forges, zone, pass, versions, usageCfg, now)) !== null) actions++;
   return { actions, merges };
 }

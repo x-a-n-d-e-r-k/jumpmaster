@@ -6,13 +6,15 @@ import {
 import type { UsageConfig } from './config.js';
 import type { Db } from './db/open.js';
 import { getUsageState, setUsageState, type UsageStateRow } from './db/repo.js';
+import { isFableRateLimit, pauseFableFor } from './fable.js';
 
 export type Gate = 'open' | 'finishing_only' | 'probe' | 'closed';
 
 /** Where a rate-limit observation came from. `outcome` null means a live stream event. */
 export type RateLimitSource = {
   dropId: string;
-  workItemId: number;
+  /** Null for a crew drop. */
+  workItemId: number | null;
   startedAt: string | null;
   outcome: DropResult['status'] | null;
 };
@@ -94,6 +96,8 @@ export function ingestRateLimit(
   now: Date,
   rand: () => number = Math.random,
 ): void {
+  // A Fable-only limit pauses Fable, never dispatch (best-effort, pending rehearsal).
+  if (isFableRateLimit(data)) return pauseFableFor(db, data, now);
   db.transaction(() => {
     const u = getUsageState(db);
     const patch: Partial<UsageStateRow> = {};

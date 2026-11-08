@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   ARTIFACT_PREFIX,
-  type DropPayload,
+  type ItemDropPayload,
   MAX_ARTIFACT_BYTES,
   MAX_ARTIFACTS,
   pathMatches,
@@ -76,7 +76,7 @@ export function artifactLines(a: {
  * collects what it produced. A rule that matches must leave at least one valid artifact.
  */
 export async function runVerification(
-  payload: DropPayload,
+  payload: ItemDropPayload,
   deps: TrooperDeps,
   ctx: RoleCtx,
   dir: string,

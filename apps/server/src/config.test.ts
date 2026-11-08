@@ -256,3 +256,72 @@ describe('loadConfig', () => {
     expect(secretList({ ...c.secrets, githubReadToken: 'rd' })).toContain('rd');
   });
 });
+
+describe('crew config', () => {
+  test('crew defaults keep a zone off, with botLogins empty', () => {
+    const z = loadConfig(minimal, fullEnv).dropZones[0];
+    expect(z?.crew).toEqual({
+      enabled: false,
+      goalPath: 'GOAL.md',
+      cycleMinutes: 60,
+      maxDropsPerDay: 24,
+      stagedLabel: 'agent-staged',
+      maxStaged: 3,
+      refutePromotes: false,
+      maxRefute: 2,
+    });
+    expect(z?.botLogins).toEqual([]);
+  });
+
+  test('crew.enabled with an unprotected goalPath is a config error', () => {
+    expect(() =>
+      loadConfig(withZone({ crew: { enabled: true, goalPath: 'docs/GOALS.md' } }), fullEnv),
+    ).toThrow(/goalPath/);
+    expect(() =>
+      loadConfig(
+        withZone({ crew: { enabled: true, goalPath: 'GOAL.md' }, protectedPaths: ['.github/**'] }),
+        fullEnv,
+      ),
+    ).toThrow(/goalPath/);
+    expect(
+      loadConfig(withZone({ crew: { enabled: true } }), fullEnv).dropZones[0]?.crew.enabled,
+    ).toBe(true);
+    // Off, the path is not checked.
+    expect(() =>
+      loadConfig(withZone({ crew: { goalPath: 'docs/GOALS.md' } }), fullEnv),
+    ).not.toThrow();
+  });
+
+  test('crew.enabled with stagedLabel equal to readyLabel is a config error', () => {
+    expect(() =>
+      loadConfig(withZone({ crew: { enabled: true, stagedLabel: 'agent-ready' } }), fullEnv),
+    ).toThrow(/stagedLabel/);
+  });
+
+  test('claude defaults to the pro plan with no Fable and a weekly cap of 5', () => {
+    expect(loadConfig(minimal, fullEnv).claude).toEqual({ plan: 'pro', fableWeeklyDropCap: 5 });
+    const c = loadConfig(
+      fixture({
+        dataDir: './data',
+        dropZones: [baseZone],
+        claude: { plan: 'max', fableModel: 'claude-fable-1', fableWeeklyDropCap: 3 },
+      }),
+      fullEnv,
+    );
+    expect(c.claude).toEqual({ plan: 'max', fableModel: 'claude-fable-1', fableWeeklyDropCap: 3 });
+    expect(() =>
+      loadConfig(
+        fixture({ dataDir: './data', dropZones: [baseZone], claude: { plan: 'gold' } }),
+        fullEnv,
+      ),
+    ).toThrow(/claude.plan/);
+  });
+
+  test('a zone model naming Fable is a config error', () => {
+    expect(() => loadConfig(withZone({ model: 'claude-Fable-1' }), fullEnv)).toThrow(/model/);
+  });
+
+  test('crew.maxRefute must be at least 1', () => {
+    expect(() => loadConfig(withZone({ crew: { maxRefute: 0 } }), fullEnv)).toThrow(/maxRefute/);
+  });
+});

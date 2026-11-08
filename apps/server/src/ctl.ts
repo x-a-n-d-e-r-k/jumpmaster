@@ -5,6 +5,18 @@ const MODES: Record<string, string> = { pause: 'paused', resume: 'active', obser
 /** The control request for a command line, or null when it isn't one. */
 export function ctlRequest(args: string[]): { path: string; body: unknown } | null {
   const [command, zone] = args;
+  if (command === 'rule') {
+    const [, briefing, optionId, ...note] = args;
+    if (!briefing || !optionId) return null;
+    return {
+      path: `/api/control/briefings/${encodeURIComponent(briefing)}/rule`,
+      body: { optionId, ...(note.length > 0 ? { note: note.join(' ') } : {}) },
+    };
+  }
+  if (command === 'crew-cycle') {
+    if (!zone) return null;
+    return { path: `/api/control/zones/${encodeURIComponent(zone)}/crew-cycle`, body: {} };
+  }
   if (command === 'kill' || command === 'unkill') {
     return { path: '/api/control/kill', body: { engaged: command === 'kill' } };
   }
@@ -16,7 +28,9 @@ export function ctlRequest(args: string[]): { path: string; body: unknown } | nu
 async function main(): Promise<number> {
   const request = ctlRequest(process.argv.slice(2));
   if (!request) {
-    console.error('usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill>');
+    console.error(
+      'usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl rule <briefing> <option> [note] | ctl crew-cycle <zone>',
+    );
     return 2;
   }
   const token = process.env.JM_OPERATOR_TOKEN;

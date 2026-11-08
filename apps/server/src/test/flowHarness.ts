@@ -5,10 +5,9 @@ import type { Config, DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import { openDb } from '../db/open.js';
 import { type ReconcileReport, reconcileZone } from '../flow/reconcile.js';
-import type { ForgeIssue } from '../forge/github.js';
 import { promptVersions } from '../payloads.js';
 import { syncDropZone } from '../sync.js';
-import { type FakeForge, type FakeForgeState, fakeForgePair } from './fakes.js';
+import { type FakeForge, type FakeForgeState, type FakeIssue, fakeForgePair } from './fakes.js';
 import { makeZone, usageCfg } from './fixtures.js';
 import { tmpDbFile } from './helpers.js';
 
@@ -40,7 +39,7 @@ export interface Harness {
 export async function harness(
   opts: {
     zone?: Partial<DropZoneConfig>;
-    issues?: ForgeIssue[];
+    issues?: FakeIssue[];
     zoneSecrets?: Record<string, string>;
     dataDir?: string;
   } = {},
@@ -64,6 +63,7 @@ export async function harness(
     dataDir: opts.dataDir ?? '.',
     pollSeconds: 60,
     dropZones: [zone],
+    claude: { plan: 'pro', fableWeeklyDropCap: 5 },
     secrets: {
       claudeToken: 'claude-token',
       githubAuthorToken: 'author-token',
@@ -154,7 +154,9 @@ export async function harness(
       const pushed = result.status === 'completed' || result.status === 'interrupted';
       if (pushed && result.headSha) {
         if (payload.role === 'implement') f.state.branches.set(payload.branch, result.headSha);
-        else if (payload.role !== 'review') f.state.setHead(payload.pr.number, result.headSha);
+        else if (payload.role === 'heal' || payload.role === 'resolve') {
+          f.state.setHead(payload.pr.number, result.headSha);
+        }
       }
       return h.postResult(dropId, epoch, result);
     },

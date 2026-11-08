@@ -1,5 +1,7 @@
 import type { ArtifactRow } from '../artifacts.js';
+import type { Briefing, Ruling } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
+import type { CrewIssue } from '../crew/store.js';
 import type {
   AttemptKey,
   Drop,
@@ -9,6 +11,7 @@ import type {
   UsageStateRow,
   WorkItem,
 } from '../db/repo.js';
+import type { GoalRow } from '../goals.js';
 import type { Gate } from '../usage.js';
 
 export const escapeHtml = (v: unknown): string =>
@@ -37,6 +40,21 @@ export interface HomeState {
   details?: Map<number, ItemDetail>;
   /** Outbox ops needing attention (`unknown` or `failed`). */
   outbox?: OutboxRow[];
+  /** Open briefings, for "Waiting on you". */
+  briefings?: Briefing[];
+  /** One line per zone about its crew. */
+  crew?: CrewLine[];
+}
+
+export interface CrewLine {
+  zoneId: string;
+  enabled: boolean;
+  /** When the last lead cycle's drop was created, if any. */
+  lastCycle: string | null;
+  /** When the next lead cycle is due by time (null: due now, or crew off). */
+  nextDue: string | null;
+  /** Fable's status reason (`available`, or why not). */
+  fable: string;
 }
 
 export interface ItemDetail {
@@ -78,10 +96,132 @@ function outboxSection(ops: OutboxRow[] | undefined): string {
   const rows = ops
     .map(
       (o) =>
-        `<tr><td>${escapeHtml(o.id)}</td><td>${escapeHtml(o.kind)}</td><td>${escapeHtml(o.workItemId)}</td><td>${escapeHtml(o.state)}</td><td>${escapeHtml(o.error ?? '')}</td><td>${escapeHtml(o.updatedAt)}</td></tr>`,
+        `<tr><td>${escapeHtml(o.id)}</td><td>${escapeHtml(o.kind)}</td><td>${escapeHtml(o.workItemId ?? `zone ${o.zoneId}`)}</td><td>${escapeHtml(o.state)}</td><td>${escapeHtml(o.error ?? '')}</td><td>${escapeHtml(o.updatedAt)}</td></tr>`,
     )
     .join('');
   return `<h2>Outbox</h2><table><tr><th>Op</th><th>Kind</th><th>Item</th><th>State</th><th>Error</th><th>Updated</th></tr>${rows}</table>`;
+}
+
+/** The home page's list of open briefings, each linking to where it is answered. */
+export function waitingOnYou(open: Briefing[]): string {
+  if (open.length === 0) {
+    return '<h2>Waiting on you</h2><p>Nothing is waiting on you. <a href="/briefings">Briefings and rulings</a></p>';
+  }
+  const rows = open
+    .map(
+      (b) =>
+        `<li>${escapeHtml(b.zoneId)}: ${escapeHtml(b.decision)} <small>(${escapeHtml(b.kind)})</small></li>`,
+    )
+    .join('');
+  return `<h2>Waiting on you</h2><p>${open.length} decision${open.length === 1 ? '' : 's'} waiting. <a href="/briefings">Answer them on the briefings page</a>.</p><ul>${rows}</ul>`;
+}
+
+function crewSection(lines: CrewLine[] | undefined): string {
+  if (!lines || lines.length === 0) return '';
+  const rows = lines
+    .map(
+      (c) =>
+        `<tr><td>${escapeHtml(c.zoneId)}</td><td>${c.enabled ? 'on' : 'off'}</td><td>${escapeHtml(c.lastCycle ?? '-')}</td><td>${escapeHtml(c.enabled ? (c.nextDue ?? 'now') : '-')}</td><td>${escapeHtml(c.fable)}</td><td><a href="/zones/${encodeURIComponent(c.zoneId)}/goals">Goals</a></td></tr>`,
+    )
+    .join('');
+  return `<h2>Crew</h2><table><tr><th>Zone</th><th>Crew</th><th>Last cycle</th><th>Next due</th><th>Fable</th><th></th></tr>${rows}</table>`;
+}
+
+/** One shared handler for every rule form: the operator token comes from a password field. */
+const RULE_SCRIPT = `<script>for(const f of document.querySelectorAll('form.rule'))f.addEventListener('submit',async(e)=>{e.preventDefault();const o=f.querySelector('input[name=option]:checked');if(!o){alert('Choose an option');return;}const r=await fetch('/api/control/briefings/'+f.dataset.briefing+'/rule',{method:'POST',headers:{authorization:'Bearer '+f.querySelector('input[type=password]').value,'content-type':'application/json'},body:JSON.stringify({optionId:o.value,note:f.querySelector('textarea').value})});if(r.ok)location.reload();else alert('Refused: '+r.status);});</script>`;
+
+function briefingBlock(b: Briefing, holds: Map<string, string> | undefined): string {
+  const hold = b.kind === 'promote_held' ? holds?.get(b.subject) : undefined;
+  const options = b.options
+    .map(
+      (o) =>
+        `<label><input type="radio" name="option" value="${escapeHtml(o.id)}" required> ${escapeHtml(o.label)}</label><br>`,
+    )
+    .join('');
+  const row = (k: string, v: string) =>
+    v ? `<tr><th>${k}</th><td>${escapeHtml(v)}</td></tr>` : '';
+  return (
+    `<h3>${escapeHtml(b.decision)}</h3>` +
+    `<table>${row('Zone', b.zoneId)}${row('Kind', b.kind)}${row('About', b.subject)}${row('Why', b.why)}${row('Recommendation', b.recommendation)}${row('On hold', b.onHold)}${row('Raised by', b.source)}${row('Raised', b.createdAt)}</table>` +
+    (hold ? `<p>Promotes at ${escapeHtml(hold)} unless you reject it.</p>` : '') +
+    `<form class="rule" data-briefing="${escapeHtml(b.id)}">${options}<textarea name="note" maxlength="2000" placeholder="Note (optional)"></textarea><br><input type="password" placeholder="Operator token" autocomplete="off" required> <button>Rule</button></form>`
+  );
+}
+
+/** Briefings waiting on Command, with a rule form each, and the rulings recorded so far. */
+export function renderBriefings(s: {
+  open: Briefing[];
+  rulings: Ruling[];
+  zones: DropZoneConfig[];
+  /** Hold-until per subject, for held refute promotions. */
+  holds?: Map<string, string>;
+}): string {
+  const open =
+    s.open.length === 0
+      ? '<p>Nothing is waiting on you.</p>'
+      : s.open.map((b) => briefingBlock(b, s.holds)).join('') + RULE_SCRIPT;
+  const rulings = s.rulings
+    .map(
+      (r) =>
+        `<tr><td>${escapeHtml(r.id)}</td><td>${escapeHtml(r.zoneId)}</td><td>${escapeHtml(r.briefingId)}</td><td>${escapeHtml(r.choice)}</td><td>${escapeHtml(r.note)}</td><td>${escapeHtml(r.createdAt)}</td><td>${escapeHtml(r.appliedAt ?? '-')}</td><td>${escapeHtml(r.applyError ?? '')}</td></tr>`,
+    )
+    .join('');
+  return page(
+    `<p><a href="/">Back</a></p><h2>Briefings (decisions waiting on you)</h2>${open}` +
+      `<h2>Rulings (decisions recorded)</h2><table><tr><th>Ruling</th><th>Zone</th><th>Briefing</th><th>Choice</th><th>Note</th><th>Ruled</th><th>Applied</th><th>Error</th></tr>${rulings}</table>`,
+  );
+}
+
+/** A zone's goal ladder, its crew issues, and marker-bearing issues intake did not start. */
+export function renderGoals(s: {
+  zone: DropZoneConfig;
+  goals: GoalRow | undefined;
+  crewIssues: CrewIssue[];
+  items: WorkItem[];
+  skippedCrewUnpromoted: number[];
+}): string {
+  const path = s.zone.crew?.goalPath ?? 'GOAL.md';
+  let ladder: string;
+  if (!s.goals) {
+    ladder = `<p>${escapeHtml(path)} has not been read yet.</p>`;
+  } else if (!s.goals.parse.ok) {
+    ladder = `<p>${escapeHtml(path)} could not be parsed: ${escapeHtml(s.goals.parse.error)}</p>`;
+  } else {
+    const current = s.goals.parse.objectives.find((o) => !o.done);
+    const rows = s.goals.parse.objectives
+      .map((o) => {
+        const status = o.done ? 'done' : o === current ? 'Current objective' : 'open';
+        return `<tr><td>${escapeHtml(o.title)}</td><td>${status}</td><td><code>${escapeHtml(o.key)}</code></td></tr>`;
+      })
+      .join('');
+    ladder =
+      `<p>${escapeHtml(s.goals.parse.lighthouse)}</p>` +
+      `<table><tr><th>Objective</th><th>Status</th><th>Key</th></tr>${rows}</table>` +
+      `<p><small>Read ${escapeHtml(s.goals.readAt)}</small></p>`;
+  }
+  const byNumber = new Map(s.items.map((i) => [i.issueNumber, i]));
+  const issues = s.crewIssues
+    .map((c) => {
+      const wi = c.number === null ? undefined : byNumber.get(c.number);
+      let findings = '';
+      try {
+        const list = JSON.parse(c.findingsJson ?? '[]') as unknown[];
+        findings = list.map((f) => escapeHtml(f)).join('<br>');
+      } catch {
+        findings = '';
+      }
+      return `<tr><td>${escapeHtml(c.objective)}</td><td><code>${escapeHtml(c.key)}</code></td><td>${escapeHtml(c.title)}</td><td>${escapeHtml(c.state)}</td><td>${c.number === null ? '-' : `#${escapeHtml(c.number)}`}</td><td>${escapeHtml(wi?.state ?? '-')}</td><td>${findings}</td></tr>`;
+    })
+    .join('');
+  const skipped =
+    s.skippedCrewUnpromoted.length === 0
+      ? '<p>None.</p>'
+      : `<ul>${s.skippedCrewUnpromoted.map((n) => `<li>#${escapeHtml(n)}</li>`).join('')}</ul>`;
+  return page(
+    `<p><a href="/">Back</a></p><h2>Objectives (goal ladder): ${escapeHtml(s.zone.id)}</h2>${ladder}` +
+      `<h2>Crew issues</h2><table><tr><th>Objective</th><th>Key</th><th>Title</th><th>State</th><th>Issue</th><th>Work item</th><th>Findings</th></tr>${issues}</table>` +
+      `<h2>Crew issues not started (no recorded promotion)</h2>${skipped}`,
+  );
 }
 
 function detailCells(d: ItemDetail | undefined): string {
@@ -160,8 +300,9 @@ export function renderHome(state: HomeState): string {
 
   const drops = state.drops
     .map((d) => {
-      const wi = itemById.get(d.workItemId);
-      return `<tr><td><a href="/drops/${encodeURIComponent(d.id)}">${escapeHtml(d.id)}</a></td><td>${wi ? `#${escapeHtml(wi.issueNumber)}` : '-'}</td><td>${escapeHtml(d.role)}</td><td>${escapeHtml(d.state)}</td><td>${escapeHtml(elapsed(d, now))}</td><td>${gateSummary(d)}</td></tr>`;
+      const wi = d.workItemId === null ? undefined : itemById.get(d.workItemId);
+      const target = d.workItemId === null ? 'crew' : wi ? `#${escapeHtml(wi.issueNumber)}` : '-';
+      return `<tr><td><a href="/drops/${encodeURIComponent(d.id)}">${escapeHtml(d.id)}</a></td><td>${target}</td><td>${escapeHtml(d.role)}</td><td>${escapeHtml(d.state)}</td><td>${escapeHtml(elapsed(d, now))}</td><td>${gateSummary(d)}</td></tr>`;
     })
     .join('');
 
@@ -171,7 +312,9 @@ export function renderHome(state: HomeState): string {
 
   return page(
     killSection(state.killed ?? false) +
+      (state.briefings ? waitingOnYou(state.briefings) : '') +
       usageSection(state.usage) +
+      crewSection(state.crew) +
       `<h2>Drop zones</h2><table><tr><th>Id</th><th>Repo</th><th>Label</th><th>Model</th><th>Mode</th></tr>${zones}</table>` +
       `<h2>Work items</h2><table><tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>${items}</table>` +
       `<h2>Drops</h2><table><tr><th>Drop</th><th>Issue</th><th>Role</th><th>State</th><th>Elapsed</th><th>Gates</th></tr>${drops}</table>` +
@@ -191,6 +334,17 @@ function artifactsSection(artifacts: ArtifactRow[]): string {
   return `<h2>Artifacts</h2><table><tr><th>Rule</th><th>Name</th><th>Type</th><th>Bytes</th></tr>${rows}</table>`;
 }
 
+/** The model a drop asked for and the one that served it, flagging a difference. */
+function modelLines(drop: Drop): string {
+  const requested = drop.requestedModel ?? null;
+  const served = drop.servedModel ?? null;
+  const mismatch =
+    requested !== null && served !== null && requested !== served
+      ? ` (mismatch: requested ${escapeHtml(requested)})`
+      : '';
+  return `<p>Requested model: ${escapeHtml(requested ?? '-')}<br>Served model: ${escapeHtml(served ?? '-')}${mismatch}</p>`;
+}
+
 export function renderDrop(
   drop: Drop,
   events: StoredEvent[],
@@ -204,6 +358,7 @@ export function renderDrop(
     .join('');
   return page(
     `<p><a href="/">Back</a></p><h2>Drop ${escapeHtml(drop.id)}</h2><p>State: ${escapeHtml(drop.state)}</p>` +
+      modelLines(drop) +
       `<table><tr><th>Seq</th><th>Time</th><th>Kind</th><th>Data</th></tr>${rows}</table>` +
       artifactsSection(artifacts),
   );

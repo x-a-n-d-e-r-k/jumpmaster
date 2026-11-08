@@ -171,7 +171,7 @@ test('git children never see agent or claude credentials', async () => {
   const dump = join(tmp, 'env-dump');
   for (const hook of ['pre-commit', 'pre-push']) {
     const f = join(dir, '.git/hooks', hook);
-    writeFileSync(f, `#!/bin/sh\nenv >> ${dump}\n`);
+    writeFileSync(f, `#!/bin/sh\nenv >> '${dump}'\n`);
     chmodSync(f, 0o755);
   }
   const saved = { ...process.env };

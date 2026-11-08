@@ -1,12 +1,25 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { agentBranch, type DropPayload, type Role } from '@jumpmaster/protocol';
-import { type Config, DEFAULT_PIDS_LIMIT, type DropZoneConfig, modelFor } from './config.js';
+import {
+  agentBranch,
+  CREW_ROLES,
+  type CrewRole,
+  type DropPayload,
+  isCrewRole,
+  type Role,
+} from '@jumpmaster/protocol';
+import {
+  type ClaudeConfig,
+  type Config,
+  DEFAULT_PIDS_LIMIT,
+  type DropZoneConfig,
+} from './config.js';
 import type { Db } from './db/open.js';
-import { type Drop, listWorkItems } from './db/repo.js';
+import { type Drop, getPullRequest, listWorkItems, updateDrop } from './db/repo.js';
+import { resolveModel } from './fable.js';
 import type { Feedback } from './flow/decide.js';
 
-const ROLES: Role[] = ['implement', 'review', 'heal', 'resolve'];
+const ROLES: Role[] = ['implement', 'review', 'heal', 'resolve', ...CREW_ROLES];
 
 // Same relative depth from src (vitest) and dist (built): up to apps/, then trooper/.
 const templates = Object.fromEntries(
@@ -24,6 +37,9 @@ const VERSIONS = Object.fromEntries(
 
 /** First 12 hex of sha256(prompt template), per role; recorded on every drop. */
 export const promptVersions = (): Record<Role, string> => VERSIONS;
+
+/** A crew role's prompt template; the rendered input follows it. */
+export const crewTemplate = (role: CrewRole): string => templates[role];
 
 /**
  * Quotes heading lines and breaks up code fences and data-fence markers so text from a forge
@@ -110,12 +126,99 @@ function authorReports(db: Db, drop: Drop): string {
 const hasCustomLimits = ({ limits }: DropZoneConfig): boolean =>
   limits.pids !== DEFAULT_PIDS_LIMIT || limits.memoryMb !== undefined || limits.shmMb !== undefined;
 
+/** What a crew drop stores in `input_json`: its work and the rendered (fenced) input. */
+export type CrewInputJson = {
+  work:
+    | { role: 'diagnose'; briefingId: number; itemId: number }
+    | { role: 'refute'; crewIssueId: number }
+    | { role: 'crew-lead' };
+  input: string;
+};
+
+/**
+ * A crew drop: the template plus the input rendered at enqueue. It never carries the author or
+ * reviewer token: at most the read token, on the same terms as review.
+ */
+function buildCrewPayload(
+  db: Db,
+  zone: DropZoneConfig,
+  drop: Drop,
+  role: CrewRole,
+  secrets: Config['secrets'],
+  model: string,
+): DropPayload {
+  const stored = JSON.parse(drop.inputJson ?? 'null') as CrewInputJson | null;
+  if (!stored || typeof stored.input !== 'string') {
+    throw new Error(`crew drop ${drop.id} has no input`);
+  }
+  const row = db
+    .prepare('SELECT default_branch AS defaultBranch FROM drop_zones WHERE id = ?')
+    .get(zone.id) as { defaultBranch: string };
+  const [owner = '', name = ''] = zone.repo.split('/');
+  const common = {
+    protocol: 1 as const,
+    dropId: drop.id,
+    epoch: drop.epoch,
+    repo: { owner, name, defaultBranch: row.defaultBranch },
+    model,
+    maxTurns: zone.maxTurns,
+    promptVersion: promptVersions()[role],
+    image: zone.image,
+    protectedPaths: zone.protectedPaths,
+    ...(hasCustomLimits(zone) ? { limits: zone.limits } : {}),
+    ...(zone.attribution === false ? { attribution: false } : {}),
+    prompt: `${templates[role]}\n\n${stored.input}`,
+    credentials: {
+      claudeToken: secrets.claudeToken,
+      ...(zone.reviewReadToken && secrets.githubReadToken
+        ? { forgeToken: secrets.githubReadToken }
+        : {}),
+    },
+  };
+  if (role !== 'diagnose') return { ...common, role };
+  const work = stored.work;
+  const itemId = work.role === 'diagnose' ? work.itemId : null;
+  const pr = itemId === null ? undefined : getPullRequest(db, itemId);
+  const item =
+    itemId === null ? undefined : listWorkItems(db, zone.id).find((w) => w.id === itemId);
+  return {
+    ...common,
+    role,
+    ...(pr && pr.state === 'open' && pr.headSha && item
+      ? {
+          checkout: {
+            number: pr.number,
+            branch: agentBranch(item.issueNumber),
+            headSha: pr.headSha,
+          },
+        }
+      : {}),
+  };
+}
+
+const DEFAULT_CLAUDE: ClaudeConfig = { plan: 'pro', fableWeeklyDropCap: 5 };
+
+/**
+ * The payload for a leased drop. The model comes from `resolveModel` (Fable only where the declared
+ * plan includes it) and is recorded on the drop as `requested_model`.
+ */
 export function buildPayload(
   db: Db,
   zone: DropZoneConfig,
   drop: Drop,
   secrets: Config['secrets'],
+  o: { claude?: ClaudeConfig; now?: Date } = {},
 ): DropPayload {
+  const model = resolveModel(
+    db,
+    { claude: o.claude ?? DEFAULT_CLAUDE },
+    zone,
+    drop.role as Role,
+    o.now ?? new Date(),
+  );
+  // Records requested_model on the drop as a side effect (the Fable weekly cap counts it).
+  updateDrop(db, drop.id, { requestedModel: model });
+  if (isCrewRole(drop.role)) return buildCrewPayload(db, zone, drop, drop.role, secrets, model);
   const item = listWorkItems(db, zone.id).find((w) => w.id === drop.workItemId);
   if (!item) throw new Error(`unknown work item ${drop.workItemId}`);
   const row = db
@@ -132,7 +235,7 @@ export function buildPayload(
     issue: { number: item.issueNumber, title: item.title, body: item.body },
     branch,
     gates: zone.gates,
-    model: modelFor(zone, role),
+    model,
     maxTurns: zone.maxTurns,
     promptVersion: promptVersions()[role],
     image: zone.image,

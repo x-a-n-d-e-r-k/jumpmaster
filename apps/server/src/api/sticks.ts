@@ -134,7 +134,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
             updateDrop(db, drop.id, { state: 'queued', stickId: null, leaseExpiresAt: null });
             return reply.code(500).send({ error: `unknown drop zone ${drop.dropZoneId}` });
           }
-          return buildPayload(db, zone, drop, config.secrets);
+          return buildPayload(db, zone, drop, config.secrets, { claude: config.claude, now: at });
         }
         if (closed || Date.now() + pollMs > deadline) return reply.code(204).send();
         await sleep(pollMs);
@@ -218,6 +218,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
           secrets: secretList(config.secrets),
           usageCfg: config.usage,
           rand: deps.rand ?? Math.random,
+          claude: config.claude,
         },
         drop.id,
         body.data.result,

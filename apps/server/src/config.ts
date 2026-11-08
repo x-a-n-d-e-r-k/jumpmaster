@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import {
   ContainerLimitsSchema,
   GateSpecSchema,
+  pathMatches,
   type Role,
   RoleSchema,
   ServiceSpecSchema,
@@ -46,7 +47,34 @@ export const DEFAULT_PROTECTED_PATHS = [
 
 export const DEFAULT_PIDS_LIMIT = 512;
 
-const DropZoneSchema = z.object({
+const CREW_DEFAULTS = {
+  enabled: false,
+  goalPath: 'GOAL.md',
+  cycleMinutes: 60,
+  maxDropsPerDay: 24,
+  stagedLabel: 'agent-staged',
+  maxStaged: 3,
+  refutePromotes: false,
+  maxRefute: 2,
+};
+
+const CrewSchema = z
+  .object({
+    enabled: z.boolean().default(CREW_DEFAULTS.enabled),
+    /** The objective ladder the crew reads; must be a protected path so no drop can edit it. */
+    goalPath: z.string().min(1).default(CREW_DEFAULTS.goalPath),
+    cycleMinutes: z.number().positive().default(CREW_DEFAULTS.cycleMinutes),
+    maxDropsPerDay: z.number().int().nonnegative().default(CREW_DEFAULTS.maxDropsPerDay),
+    /** Crew-filed issues wait under this label until Command promotes them. */
+    stagedLabel: z.string().min(1).default(CREW_DEFAULTS.stagedLabel),
+    maxStaged: z.number().int().nonnegative().default(CREW_DEFAULTS.maxStaged),
+    /** Lets a crew refute promote an issue (still held one pass with a Reject option). */
+    refutePromotes: z.boolean().default(CREW_DEFAULTS.refutePromotes),
+    maxRefute: z.number().int().min(1).default(CREW_DEFAULTS.maxRefute),
+  })
+  .default(CREW_DEFAULTS);
+
+const DropZoneObject = z.object({
   id: z.string().min(1),
   repo: z.string().regex(/^[^/\s]+\/[^/\s]+$/, 'repo must be "owner/name"'),
   readyLabel: z.string().default('agent-ready'),
@@ -119,6 +147,35 @@ const DropZoneSchema = z.object({
   reviewReadToken: z.boolean().default(false),
   /** `false`: the agent adds no Claude co-author trailer or PR attribution. */
   attribution: z.boolean().default(true),
+  crew: CrewSchema,
+  /** Logins whose ready issues count as crew-filed (never the only provenance signal). */
+  botLogins: z.array(z.string()).default([]),
+});
+
+const DropZoneSchema = DropZoneObject.superRefine((zone, ctx) => {
+  // Fable is chosen per role by the declared plan, never as a zone's default model.
+  if (/fable/i.test(zone.model)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['model'],
+      message: 'model may not name Fable: declare claude.plan and claude.fableModel instead',
+    });
+  }
+  if (!zone.crew.enabled) return;
+  if (!zone.protectedPaths.some((g) => pathMatches(zone.crew.goalPath, g))) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['crew', 'goalPath'],
+      message: `crew.goalPath ${zone.crew.goalPath} must match a protectedPaths glob`,
+    });
+  }
+  if (zone.crew.stagedLabel === zone.readyLabel) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['crew', 'stagedLabel'],
+      message: 'crew.stagedLabel must differ from readyLabel',
+    });
+  }
 });
 
 const FileSchema = z.object({
@@ -141,6 +198,17 @@ const FileSchema = z.object({
         .default([30, 90]),
     })
     .default({ throttleUtilization: 0.9, probeJitterSeconds: [30, 90] }),
+  /**
+   * The Claude plan as declared (not detected). Fable runs only on a plan that includes it, with
+   * `fableModel` set, under a trailing seven-day drop cap.
+   */
+  claude: z
+    .object({
+      plan: z.enum(['pro', 'max', 'team_standard', 'team_premium', 'enterprise']).default('pro'),
+      fableModel: z.string().min(1).optional(),
+      fableWeeklyDropCap: z.number().int().nonnegative().default(5),
+    })
+    .default({ plan: 'pro', fableWeeklyDropCap: 5 }),
 });
 
 export type DropZoneConfig = z.infer<typeof DropZoneSchema>;
@@ -152,6 +220,7 @@ export interface Config {
   pollSeconds: number;
   dropZones: DropZoneConfig[];
   usage: { throttleUtilization: number; probeJitterSeconds: [number, number] };
+  claude: ClaudeConfig;
   secrets: {
     claudeToken: string;
     githubAuthorToken: string;
@@ -165,6 +234,8 @@ export interface Config {
 }
 
 export type UsageConfig = Config['usage'];
+export type ClaudePlan = 'pro' | 'max' | 'team_standard' | 'team_premium' | 'enterprise';
+export type ClaudeConfig = { plan: ClaudePlan; fableModel?: string; fableWeeklyDropCap: number };
 
 /** The model for a role: the per-role override, else the zone's model. */
 export function modelFor(zone: DropZoneConfig, role: Role): string {

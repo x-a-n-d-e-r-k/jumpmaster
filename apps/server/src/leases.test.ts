@@ -173,3 +173,55 @@ describe('leaseExpirer', () => {
     expect(getDrop(db, 'd1')!.state).toBe('lost');
   });
 });
+
+describe('crew drops', () => {
+  const crew = (id: string, role: string, at: number) =>
+    insertDrop(db, {
+      id,
+      dropZoneId: 'main',
+      workItemId: null,
+      role,
+      state: 'queued',
+      createdAt: plus(t0, at).toISOString(),
+    });
+
+  test('an older crew drop leases after a newer implement or review drop', () => {
+    db.prepare("UPDATE drops SET created_at = ? WHERE id = 'd1'").run(plus(t0, 5000).toISOString());
+    crew('c1', 'crew-lead', 0);
+    expect(leaseNextDrop(db, 's1', t0)?.dropId).toBe('d1');
+    expect(leaseNextDrop(db, 's1', t0)?.dropId).toBe('c1');
+  });
+
+  test('a finishing drop leases before an older implement drop', () => {
+    db.prepare(
+      `INSERT INTO work_items (drop_zone_id, issue_number, title, body, author, issue_created_at, updated_at)
+       VALUES ('main', 2, 't', 'b', 'a', 'x', 'x')`,
+    ).run();
+    insertDrop(db, {
+      id: 'rev',
+      dropZoneId: 'main',
+      workItemId: 2,
+      role: 'review',
+      state: 'queued',
+      createdAt: plus(t0, 9000).toISOString(),
+    });
+    expect(leaseNextDrop(db, 's1', t0)?.dropId).toBe('rev');
+  });
+
+  test('the probe also leases a crew drop last', () => {
+    db.prepare("UPDATE drops SET created_at = ? WHERE id = 'd1'").run(plus(t0, 5000).toISOString());
+    crew('c1', 'crew-lead', 0);
+    expect(leaseNextDrop(db, 's1', t0, 'probe')?.dropId).toBe('d1');
+  });
+
+  test('expireLeases marks a lost crew drop and touches no work item', () => {
+    db.prepare("UPDATE drops SET state = 'succeeded' WHERE id = 'd1'").run();
+    crew('c1', 'crew-lead', 0);
+    leaseNextDrop(db, 's1', t0);
+    const before = workItem(db, 1);
+    expect(expireLeases(db, plus(t0, 61_000))).toBe(1);
+    expect(getDrop(db, 'c1')?.state).toBe('lost');
+    expect(expireLeases(db, plus(t0, 400_000))).toBe(0);
+    expect(workItem(db, 1)).toEqual(before);
+  });
+});

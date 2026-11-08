@@ -10,6 +10,15 @@ import type {
   PullFiles,
 } from '../forge/github.js';
 
+/** A fake's issue: `authorType` defaults to `User`. */
+export type FakeIssue = Omit<ForgeIssue, 'authorType'> & { authorType?: string };
+
+const asForgeIssue = (i: FakeIssue, labels: string[]): ForgeIssue => ({
+  ...i,
+  authorType: i.authorType ?? 'User',
+  labels: [...labels],
+});
+
 export type PullRequestInput = Parameters<Forge['findOrCreatePullRequest']>[0];
 
 export type Identity = 'author' | 'reviewer';
@@ -43,7 +52,13 @@ export interface FakeForgeState {
   setHead(number: number, sha: string): void;
   branches: Map<string, string>;
   deleteBranch(name: string): void;
-  issues: Map<number, { state: 'open' | 'closed'; labels: string[] }>;
+  /** `issue` holds the content; `updatedAt` is what `findIssueByMarker`'s `since` compares. */
+  issues: Map<
+    number,
+    { state: 'open' | 'closed'; labels: string[]; issue?: FakeIssue; updatedAt?: string }
+  >;
+  /** Adds an open issue (author type `User` unless given). */
+  addIssue(i: Partial<FakeIssue> & { number: number }): void;
   closeIssue(n: number): void;
   reopenIssue(n: number): void;
   setLabels(n: number, labels: string[]): void;
@@ -79,7 +94,7 @@ function mustIssue(state: FakeForgeState, n: number) {
 }
 
 function createState(opts: {
-  issues: ForgeIssue[];
+  issues: FakeIssue[];
   trusted: string[];
   defaultBranch?: string;
   authorLogin?: string;
@@ -152,7 +167,35 @@ function createState(opts: {
         if (p.headRef === name && p.state === 'open') p.state = 'closed';
       }
     },
-    issues: new Map(opts.issues.map((i) => [i.number, { state: 'open', labels: [...i.labels] }])),
+    issues: new Map(
+      opts.issues.map((i) => [
+        i.number,
+        {
+          state: 'open',
+          labels: [...i.labels],
+          // The caller's object, so a test that edits it edits the forge's copy.
+          issue: i,
+          updatedAt: i.createdAt,
+        },
+      ]),
+    ),
+    addIssue(i) {
+      const issue: FakeIssue = {
+        title: `Issue ${i.number}`,
+        body: '',
+        author: 'human',
+        authorType: 'User',
+        labels: [],
+        createdAt: new Date(STATE_EPOCH).toISOString(),
+        ...i,
+      };
+      state.issues.set(i.number, {
+        state: 'open',
+        labels: [...issue.labels],
+        issue,
+        updatedAt: issue.createdAt,
+      });
+    },
     closeIssue(n) {
       mustIssue(state, n).state = 'closed';
     },
@@ -196,9 +239,62 @@ function forgeFor(
   readyIssues: (label: string) => ForgeIssue[],
 ): FakeForge {
   const me = () => state.logins[identity];
+  const lastLine = (body: string) => body.trimEnd().split('\n').pop() ?? '';
   const impl: Forge = {
     getDefaultBranch: async () => state.defaultBranch,
     listReadyIssues: async (label) => readyIssues(label),
+    listOpenIssues: async (label) =>
+      [...state.issues.values()].flatMap((e) =>
+        e.issue && e.state === 'open' && (label === undefined || e.labels.includes(label))
+          ? [asForgeIssue(e.issue, e.labels)]
+          : [],
+      ),
+    getIssue: async (n) => {
+      const e = state.issues.get(n);
+      return e ? { body: e.issue?.body ?? '', state: e.state, labels: [...e.labels] } : null;
+    },
+    createIssue: async (input) => {
+      const number = Math.max(0, ...state.issues.keys(), ...state.pulls.keys()) + 1;
+      const at = new Date().toISOString();
+      state.issues.set(number, {
+        state: 'open',
+        labels: [...input.labels],
+        issue: {
+          number,
+          title: input.title,
+          body: input.body,
+          author: me(),
+          authorType: 'User',
+          labels: [...input.labels],
+          createdAt: at,
+        },
+        updatedAt: at,
+      });
+      return { number };
+    },
+    findIssueByMarker: async (marker, since) => {
+      for (const [number, e] of state.issues) {
+        if (!e.issue || e.issue.author !== me()) continue;
+        if ((e.updatedAt ?? '') < since) continue;
+        if (lastLine(e.issue.body) === marker) return { number };
+      }
+      return null;
+    },
+    updateIssue: async (n, patch) => {
+      const e = mustIssue(state, n);
+      if (e.issue) {
+        if (patch.title !== undefined) e.issue.title = patch.title;
+        if (patch.body !== undefined) e.issue.body = patch.body;
+      }
+      if (patch.state) e.state = patch.state;
+      e.updatedAt = new Date().toISOString();
+    },
+    setLabels: async (n, change) => {
+      const e = mustIssue(state, n);
+      e.labels = [...e.labels.filter((l) => !change.remove.includes(l)), ...change.add].filter(
+        (l, i, all) => all.indexOf(l) === i,
+      );
+    },
     isTrusted: async (login) => state.trusted.includes(login),
     isMaintainer: async (login) => state.maintainers.includes(login),
     viewerLogin: async () => me(),
@@ -323,7 +419,7 @@ function forgeFor(
 
 /** Author and reviewer identities over one shared in-memory forge. */
 export function fakeForgePair(opts: {
-  issues: ForgeIssue[];
+  issues: FakeIssue[];
   trusted: string[];
   defaultBranch?: string;
   authorLogin?: string;
@@ -331,12 +427,11 @@ export function fakeForgePair(opts: {
 }): { author: FakeForge; reviewer: FakeForge; state: FakeForgeState } {
   const state = createState(opts);
   const ready = (label: string): ForgeIssue[] =>
-    opts.issues.flatMap((i) => {
-      const s = state.issues.get(i.number);
-      return s?.state === 'open' && s.labels.includes(label)
-        ? [{ ...i, labels: [...s.labels] }]
-        : [];
-    });
+    [...state.issues.values()].flatMap((s) =>
+      s.issue && s.state === 'open' && s.labels.includes(label)
+        ? [asForgeIssue(s.issue, s.labels)]
+        : [],
+    );
   const author = forgeFor(state, 'author', ready);
   const reviewer = forgeFor(state, 'reviewer', ready);
   return { author, reviewer, state };
@@ -347,13 +442,13 @@ export function fakeForgePair(opts: {
  * at 101, and every `findOrCreatePullRequest` input is recorded in `created`.
  */
 export function fakeForge(opts: {
-  issues: ForgeIssue[];
+  issues: FakeIssue[];
   trusted: string[];
   defaultBranch?: string;
 }): FakeForge & { created: PullRequestInput[]; state: FakeForgeState } {
   const state = createState({ ...opts, firstPullNumber: 101 });
   const created: PullRequestInput[] = [];
-  const forge = forgeFor(state, 'author', () => opts.issues);
+  const forge = forgeFor(state, 'author', () => opts.issues.map((i) => asForgeIssue(i, i.labels)));
   const findOrCreate = forge.findOrCreatePullRequest;
   forge.findOrCreatePullRequest = async (input) => {
     created.push(input);

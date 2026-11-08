@@ -97,6 +97,7 @@ describe('§16 outbox and merge', () => {
       opKey: opKeys.merge(1, 'sha1'),
       kind: 'merge',
       workItemId: 1,
+      zoneId: 'main',
       payloadJson: JSON.stringify({ pr: 1, sha: 'sha1', title: 'Issue 1', message: 'Closes #1' }),
       state: 'pending',
       createdAt: h.now().toISOString(),

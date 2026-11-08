@@ -514,3 +514,15 @@ describe('applyResult and usage', () => {
     expect(activeDropFor(db, it)?.state).toBe('queued');
   });
 });
+
+test('ingestRateLimit accepts a source with no work item', () => {
+  const crew: RateLimitSource = {
+    dropId: 'c1',
+    workItemId: null,
+    startedAt: t0.toISOString(),
+    outcome: 'rate_limited',
+  };
+  ingestRateLimit(db, rej(future), crew, cfg, t0, zero);
+  expect(getUsageState(db)).toMatchObject({ status: 'rejected', causeWorkItemId: null });
+  expect(dispatchGate(db, cfg, plus(t0, MIN))).toBe('closed');
+});

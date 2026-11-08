@@ -7,9 +7,11 @@ import {
   type Verdict,
 } from '@jumpmaster/protocol';
 import { listArtifacts } from './artifacts.js';
-import type { DropZoneConfig, UsageConfig } from './config.js';
+import type { ClaudeConfig, DropZoneConfig, UsageConfig } from './config.js';
+import { applyCrewResult } from './crew/results.js';
 import type { Db } from './db/open.js';
 import {
+  appendEvents,
   clearRequestChangesOnHead,
   type Drop,
   type DropState,
@@ -24,6 +26,7 @@ import {
   upsertPullRequest,
   type WorkItem,
 } from './db/repo.js';
+import { isFableRateLimit, noteFableSignals, servedModel } from './fable.js';
 import {
   chargeBudget,
   chargeNoChange,
@@ -52,7 +55,11 @@ export type ResultDeps = {
   secrets: string[];
   usageCfg: UsageConfig;
   rand?: () => number;
+  /** The declared plan, for Fable's signals; defaults to `pro`. */
+  claude?: ClaudeConfig;
 };
+
+const DEFAULT_CLAUDE: ClaudeConfig = { plan: 'pro', fableWeeklyDropCap: 5 };
 
 const TERMINAL: ReadonlySet<DropState> = new Set(['succeeded', 'failed', 'lost', 'cancelled']);
 
@@ -148,7 +155,9 @@ function continueInterrupted(c: Ctx, headSha: string | null): void {
 function rateLimited(c: Ctx, wasProbe: boolean, result: DropResult): void {
   c.db.transaction(() => {
     const usage = getUsageState(c.db);
+    // A Fable-only limit pauses Fable, not dispatch: the replacement runs on another model.
     const paused =
+      isFableRateLimit(result.rateLimit) ||
       usage.status === 'rejected' ||
       (usage.pausedUntil !== null && Date.parse(usage.pausedUntil) > c.now.getTime());
     if (!paused || !(wasProbe || chargeRateLimitRequeue(c.db, c.item.id))) {
@@ -189,7 +198,13 @@ async function implementResult(c: Ctx, result: DropResult): Promise<void> {
       const op = await runOp(
         db,
         c.deps.forges,
-        { kind: 'create_pr', opKey: opKeys.pr(item.id, headSha), itemId: item.id, payload },
+        {
+          kind: 'create_pr',
+          opKey: opKeys.pr(item.id, headSha),
+          zoneId: item.dropZoneId,
+          itemId: item.id,
+          payload,
+        },
         c.now,
       );
       db.transaction(() => {
@@ -305,6 +320,7 @@ async function reviewResult(c: Ctx, result: DropResult): Promise<void> {
     {
       kind: 'post_review',
       opKey: opKeys.review(item.id, drop.headSha, drop.id),
+      zoneId: item.dropZoneId,
       itemId: item.id,
       payload,
     },
@@ -396,6 +412,10 @@ export async function applyResult(
   const drop = getDrop(db, dropId);
   if (!drop) throw new Error(`unknown drop ${dropId}`);
   if (TERMINAL.has(drop.state)) return;
+  noteFableSignals(db, { claude: deps.claude ?? DEFAULT_CLAUDE }, drop, result, now);
+  const served = result.servedModel ?? servedModel(result.modelUsage);
+  if (served !== null) updateDrop(db, drop.id, { servedModel: served });
+  if (drop.workItemId === null) return applyCrewResult(db, deps, drop, result, now);
   const wasProbe = drop.id === getUsageState(db).probeDropId;
   const item = getWorkItem(db, drop.workItemId);
   if (!item) throw new Error(`unknown work item ${drop.workItemId}`);

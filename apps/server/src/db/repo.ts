@@ -45,7 +45,8 @@ export type NewWorkItem = Omit<
 export interface Drop {
   id: string;
   dropZoneId: string;
-  workItemId: number;
+  /** Null for a crew drop, which works for the zone rather than one work item. */
+  workItemId: number | null;
   role: string;
   state: DropState;
   stickId: string | null;
@@ -63,6 +64,10 @@ export interface Drop {
   inputJson: string | null;
   /** Comma-separated AttemptKeys the enqueue charged, e.g. `resolve,resolve_total`. */
   chargedKey: string | null;
+  /** The model the payload asked for (set when the drop is leased). */
+  requestedModel: string | null;
+  /** The model that actually served the drop, as its result reported. */
+  servedModel: string | null;
 }
 
 export type NewDrop = Pick<Drop, 'id' | 'dropZoneId' | 'workItemId' | 'role' | 'state'> &
@@ -111,7 +116,8 @@ const WORK_ITEM_COLS = `id, drop_zone_id AS dropZoneId, issue_number AS issueNum
 const DROP_COLS = `id, drop_zone_id AS dropZoneId, work_item_id AS workItemId, role, state, stick_id AS stickId,
   epoch, lease_expires_at AS leaseExpiresAt, prompt_version AS promptVersion, image,
   result_json AS resultJson, created_at AS createdAt, started_at AS startedAt, finished_at AS finishedAt,
-  fingerprint, pr_number AS prNumber, head_sha AS headSha, input_json AS inputJson, charged_key AS chargedKey`;
+  fingerprint, pr_number AS prNumber, head_sha AS headSha, input_json AS inputJson, charged_key AS chargedKey,
+  requested_model AS requestedModel, served_model AS servedModel`;
 
 type WorkItemRow = Omit<WorkItem, 'isFix' | 'retryLabelSeen' | 'blockedBy'> & {
   isFix: number;
@@ -274,6 +280,8 @@ const DROP_COLUMN: Record<keyof DropPatch, string> = {
   headSha: 'head_sha',
   inputJson: 'input_json',
   chargedKey: 'charged_key',
+  requestedModel: 'requested_model',
+  servedModel: 'served_model',
 };
 
 export function updateDrop(db: Db, id: string, patch: DropPatch): void {
@@ -523,8 +531,10 @@ export type OutboxState = 'pending' | 'done' | 'unknown' | 'failed';
 export interface OutboxRow {
   id: string;
   opKey: string;
-  kind: 'create_pr' | 'post_review' | 'merge';
-  workItemId: number;
+  kind: 'create_pr' | 'post_review' | 'merge' | 'create_issue' | 'update_issue' | 'set_labels';
+  /** Null for a zone-level op (issue and label writes). */
+  workItemId: number | null;
+  zoneId: string;
   payloadJson: string;
   state: OutboxState;
   resultJson: string | null;
@@ -533,7 +543,7 @@ export interface OutboxRow {
   updatedAt: string;
 }
 
-const OUTBOX_COLS = `o.id, o.op_key AS opKey, o.kind, o.work_item_id AS workItemId,
+const OUTBOX_COLS = `o.id, o.op_key AS opKey, o.kind, o.work_item_id AS workItemId, o.zone_id AS zoneId,
   o.payload_json AS payloadJson, o.state, o.result_json AS resultJson, o.error,
   o.created_at AS createdAt, o.updated_at AS updatedAt`;
 
@@ -550,9 +560,9 @@ export function insertOutbox(
 ): boolean {
   const r = db
     .prepare(
-      `INSERT OR IGNORE INTO outbox (id, op_key, kind, work_item_id, payload_json, state, created_at,
-         updated_at)
-       VALUES (@id, @opKey, @kind, @workItemId, @payloadJson, @state, @createdAt, @createdAt)`,
+      `INSERT OR IGNORE INTO outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state,
+         created_at, updated_at)
+       VALUES (@id, @opKey, @kind, @workItemId, @zoneId, @payloadJson, @state, @createdAt, @createdAt)`,
     )
     .run(row);
   return r.changes === 1;
@@ -579,8 +589,8 @@ export function listOutbox(db: Db, states: OutboxState[], zoneId?: string): Outb
   const marks = states.map(() => '?').join(', ');
   return db
     .prepare(
-      `SELECT ${OUTBOX_COLS} FROM outbox o JOIN work_items w ON w.id = o.work_item_id
-       WHERE o.state IN (${marks}) AND (? IS NULL OR w.drop_zone_id = ?)
+      `SELECT ${OUTBOX_COLS} FROM outbox o
+       WHERE o.state IN (${marks}) AND (? IS NULL OR o.zone_id = ?)
        ORDER BY o.created_at, o.rowid`,
     )
     .all(...states, zoneId ?? null, zoneId ?? null) as OutboxRow[];
@@ -730,8 +740,8 @@ export function activeWorkCount(db: Db, zoneId: string): number {
       `SELECT
          (SELECT COUNT(*) FROM drops
             WHERE drop_zone_id = @zone AND state IN ('queued', 'leased', 'running'))
-       + (SELECT COUNT(*) FROM outbox o JOIN work_items w ON w.id = o.work_item_id
-            WHERE w.drop_zone_id = @zone AND o.state IN ('pending', 'unknown')) AS n`,
+       + (SELECT COUNT(*) FROM outbox o
+            WHERE o.zone_id = @zone AND o.state IN ('pending', 'unknown')) AS n`,
     )
     .get({ zone: zoneId }) as { n: number };
   return row.n;
