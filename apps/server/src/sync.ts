@@ -28,7 +28,7 @@ import {
   type ZonePass,
   zonePass,
 } from './flow/snapshot.js';
-import type { ForgeIssue, PullFacts } from './forge/github.js';
+import type { ChecksFacts, ForgeIssue, PullFacts } from './forge/github.js';
 import { refreshGoals } from './goals.js';
 import type { ForgePair } from './outbox.js';
 import { isJmIssueBody } from './outbox.js';
@@ -232,6 +232,9 @@ function restoreFromPull(db: Db, item: WorkItem, pr: PullFacts | null, now: Date
  */
 const MERGE_RETRY_MS = 60 * 60_000;
 
+/** How often a no-CI park probes its head's checks. */
+const CI_PROBE_MS = 5 * 60_000;
+
 /** A park on CI that hadn't reported by the deadline (decide step 26). */
 const isNoCiPark = (reason: string): boolean =>
   reason === 'no pipeline' || reason.startsWith('no CI result');
@@ -357,14 +360,37 @@ export async function syncParked(
         setWorkItemState(db, item.id, 'pr_open', undefined, now);
         reopened++;
       }
+    } else if (isNoCiPark(reason)) {
+      // CI that reports after the deadline (a runner came back, a lost webhook) clears the park.
+      // Probe the head's checks at most every few minutes; re-decide only once CI has finished,
+      // and leave the park only for an outcome that acts on it (merge, heal, done). A wait (a
+      // transient forge read) or another park keeps it parked, so nothing churns.
+      if (!pr?.headSha) continue;
+      const mark = getParkMark(db, item.id);
+      if (mark.checkedAt !== null && now.getTime() - Date.parse(mark.checkedAt) < CI_PROBE_MS) {
+        continue;
+      }
+      setParkMark(db, item.id, mark.reviewsSeen ?? '', now);
+      let checks: ChecksFacts;
+      try {
+        checks = await forges.author.checksFor(pr.headSha);
+      } catch {
+        continue;
+      }
+      if (checks.state !== 'success' && checks.state !== 'failure') continue;
+      const fresh = getWorkItem(db, item.id);
+      if (!fresh) continue;
+      const action = decide(await buildSnapshot(db, forges, zone, fresh, pass, now));
+      if (action.kind !== 'park' && action.kind !== 'wait') {
+        setWorkItemState(db, item.id, 'pr_open', undefined, now);
+        reopened++;
+      }
     } else if (
       reason === 'human block stands' ||
       reason === HOLD_REASON ||
       reason.startsWith('unsafe branch protection') ||
       reason.startsWith('forge data missing') ||
       reason.startsWith(DENIED_PREFIX) ||
-      // CI that reports after the deadline (a runner came back, a lost webhook) clears the park.
-      isNoCiPark(reason) ||
       // A maintainer's approval of the head, or Command's allowance of it, lifts a gate park:
       // re-decide only once a review newer than the newest seen appears (one cheap read per
       // pass) or an allowance is recorded, or hourly.
@@ -375,11 +401,7 @@ export async function syncParked(
       if (!fresh) continue;
       const s = await buildSnapshot(db, forges, zone, fresh, pass, now);
       const action = decide(s);
-      // Still waiting on CI stays parked even if the detail (which check is queued) changed.
-      const same =
-        action.kind === 'park' &&
-        (action.reason === reason || (isNoCiPark(reason) && isNoCiPark(action.reason)));
-      if (same) {
+      if (action.kind === 'park' && action.reason === reason) {
         // Still parked on the same changes, perhaps on a new head: brief what was judged now.
         if (GATE_PARK_PREFIXES.some((p) => reason.startsWith(p))) recordGateParkOf(db, s, now);
       } else {
