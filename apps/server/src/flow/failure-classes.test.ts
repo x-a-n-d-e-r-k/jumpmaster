@@ -605,6 +605,43 @@ describe('§16 hostile PR content', () => {
     expect(h.queuedRoles()).toEqual([]);
   });
 
+  test('an unchanged gate park costs one review read per sync pass, not a snapshot', async () => {
+    const h = await withFiles(['package.json']);
+    h.forge.state.maintainers = ['alice'];
+    h.forge.state.files.set('base0:package.json', pkg('vitest run'));
+    h.forge.state.files.set('sha1:package.json', pkg('vitest run --bail'));
+    await h.reconcile();
+    expect(item(h).state).toBe('parked');
+    const snapshotReads = () => count(h, 'compare') + count(h, 'listPullFiles');
+    const before = { reviews: count(h, 'listReviews'), snap: snapshotReads() };
+    await h.sync();
+    await h.sync();
+    expect(count(h, 'listReviews') - before.reviews).toBe(2);
+    expect(snapshotReads()).toBe(before.snap);
+    expect(item(h).state).toBe('parked');
+    // A new review is re-decided at once.
+    h.forge.state.review({ author: 'alice', state: 'APPROVED', commitId: 'sha1' });
+    await h.sync();
+    expect(snapshotReads()).toBeGreaterThan(before.snap);
+    expect(item(h).state).toBe('pr_open');
+  });
+
+  test('an unchanged gate park is re-decided at most hourly', async () => {
+    const h = await withFiles(['package.json']);
+    h.forge.state.files.set('base0:package.json', pkg('vitest run'));
+    h.forge.state.files.set('sha1:package.json', pkg('vitest run --bail'));
+    await h.reconcile();
+    const snapshotReads = () => count(h, 'compare') + count(h, 'listPullFiles');
+    const before = snapshotReads();
+    h.at(30);
+    await h.sync();
+    expect(snapshotReads()).toBe(before);
+    h.at(31);
+    await h.sync();
+    expect(snapshotReads()).toBeGreaterThan(before);
+    expect(item(h).state).toBe('parked');
+  });
+
   test('a maintainer approval does not lift a protected-path park', async () => {
     const h = await withFiles(['pnpm-workspace.yaml']);
     h.forge.state.maintainers = ['alice'];

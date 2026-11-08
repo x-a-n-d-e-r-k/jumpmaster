@@ -3,12 +3,14 @@ import type { Db } from './db/open.js';
 import {
   clearRequestChangesOnHead,
   deleteFailedOutbox,
+  getParkMark,
   getPullRequest,
   getWorkItem,
   listOutbox,
   listWorkItems,
   resetAttempts,
   setDropZoneDefaultBranch,
+  setParkMark,
   setRetryLabelSeen,
   setWorkItemState,
   upsertDropZone,
@@ -17,7 +19,7 @@ import {
   type WorkItem,
 } from './db/repo.js';
 import { DENIED_PREFIX, decide, GATE_PARK_PREFIXES, HOLD_REASON } from './flow/decide.js';
-import { buildSnapshot, type ZonePass, zonePass } from './flow/snapshot.js';
+import { buildSnapshot, newestReviewAt, type ZonePass, zonePass } from './flow/snapshot.js';
 import type { ForgeIssue, PullFacts } from './forge/github.js';
 import type { ForgePair } from './outbox.js';
 
@@ -156,6 +158,30 @@ function restoreFromPull(db: Db, item: WorkItem, pr: PullFacts | null, now: Date
  * data that is readable again, or a maintainer's approval of a gate-changing head.
  */
 const MERGE_RETRY_MS = 60 * 60_000;
+const GATE_RECHECK_MS = 60 * 60_000;
+
+/** Whether a gate-parked item has a review newer than the newest seen, or is due an hourly look. */
+async function gateParkMayHaveChanged(
+  db: Db,
+  forges: ForgePair,
+  itemId: number,
+  prNumber: number | null,
+  now: Date,
+): Promise<boolean> {
+  if (prNumber === null) return false;
+  let newest: string;
+  try {
+    newest = newestReviewAt(await forges.author.listReviews(prNumber)) ?? '';
+  } catch {
+    return false;
+  }
+  const mark = getParkMark(db, itemId);
+  const recent =
+    mark.checkedAt !== null && now.getTime() - Date.parse(mark.checkedAt) < GATE_RECHECK_MS;
+  if (recent && mark.reviewsSeen !== null && newest <= mark.reviewsSeen) return false;
+  setParkMark(db, itemId, newest, now);
+  return true;
+}
 
 export async function syncParked(
   db: Db,
@@ -237,8 +263,10 @@ export async function syncParked(
       reason.startsWith('unsafe branch protection') ||
       reason.startsWith('forge data missing') ||
       reason.startsWith(DENIED_PREFIX) ||
-      // A maintainer's approval of the head lifts a gate park.
-      GATE_PARK_PREFIXES.some((p) => reason.startsWith(p))
+      // A maintainer's approval of the head lifts a gate park: re-decide only once a review newer
+      // than the newest seen appears (one cheap read per pass), or hourly.
+      (GATE_PARK_PREFIXES.some((p) => reason.startsWith(p)) &&
+        (await gateParkMayHaveChanged(db, forges, item.id, prNumber, now)))
     ) {
       const fresh = getWorkItem(db, item.id);
       if (!fresh) continue;

@@ -133,6 +133,7 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
     gateScriptChanges: [],
     gateToolChanges: [],
     maintainerApproved: false,
+    newestReviewAt: null,
     protectionProblems: [],
     headFirstSeenAt: now.toISOString(),
     missingSince: null,

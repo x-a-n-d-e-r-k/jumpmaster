@@ -110,6 +110,13 @@ function latestDecisive(reviews: ForgeReview[]): ForgeReview[] {
   return [...latest.values()];
 }
 
+/** The newest review's submittedAt (ISO strings sort by time); null when there is none. */
+export const newestReviewAt = (reviews: ForgeReview[]): string | null =>
+  reviews.reduce<string | null>(
+    (max, r) => (max === null || r.submittedAt > max ? r.submittedAt : max),
+    null,
+  );
+
 /**
  * Whether someone may let this head's gate changes through: among trusted reviewers' latest
  * decisive reviews (a later change request or a dismissal cancels an approval), an APPROVED on
@@ -416,6 +423,7 @@ export async function buildSnapshot(
     gateScriptChanges: gate.scripts,
     gateToolChanges: gate.tools,
     maintainerApproved,
+    newestReviewAt: newestReviewAt(reviews),
     protectionProblems: pass.protectionProblems,
     headFirstSeenAt,
     missingSince,

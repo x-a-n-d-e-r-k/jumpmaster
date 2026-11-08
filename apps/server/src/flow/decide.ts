@@ -50,6 +50,8 @@ export interface Snapshot {
    * decisive review, APPROVED pr.headSha: gate script and gate tool changes do not park.
    */
   maintainerApproved: boolean;
+  /** The newest review's submittedAt on the PR (any author); null when there is none. */
+  newestReviewAt: string | null;
   /** null = rules read unavailable; [] when safe or !zone.requireBranchProtection. */
   protectionProblems: string[] | null;
   headFirstSeenAt: string;

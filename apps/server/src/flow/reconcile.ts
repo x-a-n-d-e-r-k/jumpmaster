@@ -15,6 +15,7 @@ import {
   listObservations,
   listWorkItems,
   recordObservation,
+  setParkMark,
   setWorkItemState,
   upsertPullRequest,
   type WorkItem,
@@ -33,7 +34,7 @@ import { renderReviewBody } from '../results.js';
 import { enqueueImplement, enqueueNext, isBlocked } from '../scheduler.js';
 import { rankItems } from '../sync.js';
 import { chargeBudget } from './budgets.js';
-import { type Action, decide, type Snapshot } from './decide.js';
+import { type Action, decide, GATE_PARK_PREFIXES, type Snapshot } from './decide.js';
 import { buildSnapshot, type ZonePass } from './snapshot.js';
 
 export type ReconcileReport = { actions: number; merges: number };
@@ -404,6 +405,10 @@ export async function reconcileZone(
         break;
       case 'park':
         parkReason(db, item.id, a.reason, now);
+        // syncParked re-decides a gate park only once a newer review appears (or hourly).
+        if (GATE_PARK_PREFIXES.some((p) => a.reason.startsWith(p))) {
+          setParkMark(db, item.id, s.newestReviewAt ?? '', now);
+        }
         actions++;
         break;
       case 'done':
