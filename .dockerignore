@@ -6,3 +6,13 @@ dist
 .worktrees
 .git
 **/*.tsbuildinfo
+# Never send an install's secrets, config or database to a build.
+secrets
+data
+config
+**/.env*
+**/*.sqlite*
+# Not needed by any image build.
+docs
+.github
+scripts
