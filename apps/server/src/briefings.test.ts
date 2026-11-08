@@ -190,7 +190,13 @@ describe('rulings', () => {
     await flushCrewOps(w.db, w.forges, w.zone, [], plus(t0, MIN));
     expect(getCrewIssue(w.db, issue)?.state).toBe('promoted');
     await applyEffect(w.db, deps(w), 'main', subject, 'promote_issue', plus(t0, 2 * MIN));
-    await applyEffect(w.db, deps(w), 'main', subject, 'reject_issue', plus(t0, 2 * MIN));
+    expect(getCrewIssue(w.db, issue)?.state).toBe('promoted');
+    // Once its work has started, a promoted issue can no longer be rejected.
+    const started = w.item(getCrewIssue(w.db, issue)?.number ?? -1, 'in_flight');
+    expect(started).toBeGreaterThan(0);
+    await expect(
+      applyEffect(w.db, deps(w), 'main', subject, 'reject_issue', plus(t0, 2 * MIN)),
+    ).rejects.toThrow('already started');
     expect(getCrewIssue(w.db, issue)?.state).toBe('promoted');
 
     const { w: pw, id } = parkedWorld();

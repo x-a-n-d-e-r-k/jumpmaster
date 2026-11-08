@@ -1,7 +1,7 @@
 import type { DropZoneConfig } from './config.js';
 import { getCrewIssue, setCrewIssue } from './crew/store.js';
 import type { Db } from './db/open.js';
-import { getWorkItem, listWorkItems } from './db/repo.js';
+import { activeDropFor, getWorkItem, listWorkItems, setWorkItemState } from './db/repo.js';
 import { enableFable } from './fable.js';
 import type { ForgePair } from './outbox.js';
 import { retryParkedItem } from './sync.js';
@@ -227,7 +227,22 @@ export async function applyEffect(
       const id = idOf(subject, 'issue:');
       if (id === null) throw new Error(`${effect} needs a crew issue subject, got ${subject}`);
       const issue = getCrewIssue(db, id);
-      if (!issue || !ISSUE_ACTIONABLE.has(issue.state)) return true;
+      if (!issue) return true;
+      if (effect === 'reject_issue' && issue.state === 'promoted') {
+        // Promoted, perhaps by a write in flight when Command ruled: still rejectable until the
+        // work starts. Closing the issue (rejecting) takes it out of intake.
+        const item =
+          issue.number === null
+            ? undefined
+            : listWorkItems(db, issue.zoneId).find((w) => w.issueNumber === issue.number);
+        if (item && (item.state !== 'ready' || activeDropFor(db, item.id))) {
+          throw new Error('already started');
+        }
+        if (item) setWorkItemState(db, item.id, 'done', 'rejected by Command', now);
+        setCrewIssue(db, id, { state: 'rejecting' }, now);
+        return true;
+      }
+      if (!ISSUE_ACTIONABLE.has(issue.state)) return true;
       const state = effect === 'promote_issue' ? 'promoting' : 'rejecting';
       setCrewIssue(db, id, { state }, now);
       return true;

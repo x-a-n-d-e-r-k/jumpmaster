@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto';
 import { beforeEach, describe, expect, test } from 'vitest';
-import { listBriefings, raiseBriefing } from '../briefings.js';
+import {
+  applyPendingRulings,
+  listBriefings,
+  listRulings,
+  raiseBriefing,
+  ruleBriefing,
+} from '../briefings.js';
 import { getOutbox, setKilled, setWorkItemState, setZoneMode, upsertWorkItem } from '../db/repo.js';
 import { isJmIssueBody, opMarker, resolveUnknown, sanitizeCrewText } from '../outbox.js';
 import { makeZone, type ZoneWorld, zoneWorld } from '../test/fixtures.js';
@@ -248,6 +254,93 @@ describe('promotion', () => {
     setCrewIssue(w.db, id, { state: 'promote_held' }, t0);
     await flush(plus(t0, 5 * 24 * 60 * MIN));
     expect(getCrewIssue(w.db, id)?.state).toBe('promote_held');
+  });
+
+  const rulingDeps = () => ({ forges: () => w.forges, zone: () => zone });
+
+  function promoteBriefing(id: number): number {
+    return raiseBriefing(
+      w.db,
+      {
+        zoneId: 'main',
+        kind: 'promote',
+        subject: `issue:${id}`,
+        decision: 'd',
+        why: 'w',
+        options: [
+          { id: 'promote', label: 'Promote', effect: 'promote_issue' },
+          { id: 'reject', label: 'Reject', effect: 'reject_issue' },
+        ],
+        source: 'server',
+      },
+      t0,
+    );
+  }
+
+  test('a Reject applied while the promote write is in flight wins over the promotion', async () => {
+    const id = await staged();
+    const b = promoteBriefing(id);
+    setCrewIssue(w.db, id, { state: 'promoting' }, t0);
+    const author = w.forges.author;
+    const setLabels = author.setLabels.bind(author);
+    author.setLabels = async (...args: Parameters<typeof setLabels>) => {
+      ruleBriefing(w.db, b, 'reject', '', t0);
+      await applyPendingRulings(w.db, rulingDeps(), 'main', t0);
+      return setLabels(...args);
+    };
+    await flush(plus(t0, MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('rejecting');
+    author.setLabels = setLabels;
+    await flush(plus(t0, 2 * MIN));
+    const row = getCrewIssue(w.db, id);
+    expect(row?.state).toBe('rejected');
+    expect((await w.f.author.getIssue(row?.number ?? -1))?.state).toBe('closed');
+    expect(listRulings(w.db, 'main')[0]).toMatchObject({ applyError: null });
+  });
+
+  test('a Reject on a promoted issue whose work has not started rejects it and drops the item', async () => {
+    const id = await staged();
+    const b = promoteBriefing(id);
+    setCrewIssue(w.db, id, { state: 'promoted' }, t0);
+    const n = getCrewIssue(w.db, id)?.number ?? -1;
+    const item = upsertWorkItem(w.db, {
+      dropZoneId: 'main',
+      issueNumber: n,
+      title: 't',
+      body: 'b',
+      author: 'author-bot',
+      priority: 2,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    ruleBriefing(w.db, b, 'reject', '', t0);
+    expect(await applyPendingRulings(w.db, rulingDeps(), 'main', t0)).toBe(1);
+    expect(getCrewIssue(w.db, id)?.state).toBe('rejecting');
+    expect(w.db.prepare('SELECT state, reason FROM work_items WHERE id = ?').get(item.id)).toEqual({
+      state: 'done',
+      reason: 'rejected by Command',
+    });
+  });
+
+  test('a Reject on a promoted issue whose work started records apply_error', async () => {
+    const id = await staged();
+    const b = promoteBriefing(id);
+    setCrewIssue(w.db, id, { state: 'promoted' }, t0);
+    const item = upsertWorkItem(w.db, {
+      dropZoneId: 'main',
+      issueNumber: getCrewIssue(w.db, id)?.number ?? -1,
+      title: 't',
+      body: 'b',
+      author: 'author-bot',
+      priority: 2,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    setWorkItemState(w.db, item.id, 'in_flight', undefined, t0);
+    ruleBriefing(w.db, b, 'reject', '', t0);
+    await applyPendingRulings(w.db, rulingDeps(), 'main', t0);
+    expect(getCrewIssue(w.db, id)?.state).toBe('promoted');
+    expect(listRulings(w.db, 'main')[0]?.applyError).toBe('already started');
   });
 
   test('a promote_held issue whose briefing is gone does not move', async () => {

@@ -18,6 +18,7 @@ import {
   type CrewIssue,
   type CrewIssuePatch,
   type CrewIssueState,
+  getCrewIssue,
   listCrewIssues,
   setCrewIssue,
 } from './store.js';
@@ -239,6 +240,11 @@ export async function flushCrewOps(
       moved++;
       continue;
     }
+    // A ruling applied while the write was in flight (a Reject during a promotion) wins: the
+    // step's outcome is recorded only if the issue is still where this step found it.
+    const current = getCrewIssue(db, row.id)?.state;
+    const expected = row.state === 'promote_held' ? 'promoting' : row.state;
+    if (current !== expected) continue;
     if (step.result.state === 'done') {
       setCrewIssue(db, row.id, step.done, now);
       if (step.done.state === 'promoted' || step.done.state === 'rejected') {
