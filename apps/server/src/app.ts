@@ -26,6 +26,7 @@ import {
 } from './db/repo.js';
 import { fableStatus } from './fable.js';
 import { getGoals } from './goals.js';
+import { registerMcpRoute } from './mcp/server.js';
 import { lastSyncResult } from './sync.js';
 import {
   type CrewLine,
@@ -78,6 +79,7 @@ export function createApp(deps: StickRouteDeps & { kick?: () => void }): Fastify
   });
   registerStickRoutes(app, deps);
   registerControlRoutes(app, deps);
+  registerMcpRoute(app, deps);
 
   app.get('/', async (_req, reply) => {
     const { db, config, now } = deps;
