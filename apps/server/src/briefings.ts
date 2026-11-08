@@ -52,6 +52,11 @@ export type BriefingOption = {
   prNumber?: number;
 };
 export type BriefingState = 'open' | 'ruled' | 'withdrawn';
+/**
+ * Who raised a briefing: the server, a crew drop, or Command's own assistant over MCP. Only the
+ * server defines effects; `crew` and `mcp` briefings carry effect `none` only.
+ */
+export type BriefingSource = 'server' | 'crew' | 'mcp';
 
 export type NewBriefing = {
   zoneId: string;
@@ -63,7 +68,7 @@ export type NewBriefing = {
   options: BriefingOption[];
   recommendation?: string;
   onHold?: string;
-  source: 'server' | 'crew';
+  source: BriefingSource;
   sourceRef?: string | null;
 };
 
@@ -132,8 +137,8 @@ const toBriefing = ({ optionsJson, ...r }: BriefingRow): Briefing => ({
  * `syncParkBriefings` decides when one no longer applies.
  */
 export function raiseBriefing(db: Db, b: NewBriefing, now: Date): number {
-  if (b.source === 'crew' && b.options.some((o) => o.effect !== 'none')) {
-    throw new Error('a crew briefing may only carry options with effect none');
+  if (b.source !== 'server' && b.options.some((o) => o.effect !== 'none')) {
+    throw new Error(`a ${b.source} briefing may only carry options with effect none`);
   }
   const at = now.toISOString();
   const params = {
@@ -365,7 +370,7 @@ export async function applyGateAllowance(
     id: number;
     subject: string;
     kind: BriefingKind;
-    source: 'server' | 'crew';
+    source: BriefingSource;
     why: string;
   },
   option: BriefingOption,
@@ -434,7 +439,7 @@ export async function applyPendingRulings(
     choice: string;
     subject: string;
     kind: BriefingKind;
-    source: 'server' | 'crew';
+    source: BriefingSource;
     why: string;
     optionsJson: string;
   }[];

@@ -268,6 +268,22 @@ describe('rulings', () => {
         t0,
       ),
     ).toThrow(/effect none/);
+    // An assistant (MCP) briefing is held to the same rule.
+    expect(() =>
+      raiseBriefing(
+        w.db,
+        {
+          ...crew,
+          subject: 'mcp:x',
+          source: 'mcp',
+          options: [
+            { id: 'a', label: 'Yes', effect: 'enable_fable' },
+            { id: 'b', label: 'No', effect: 'none' },
+          ],
+        },
+        t0,
+      ),
+    ).toThrow(/effect none/);
     const id = raiseBriefing(
       w.db,
       {

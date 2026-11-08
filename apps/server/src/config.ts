@@ -58,6 +58,25 @@ const CREW_DEFAULTS = {
   maxRefute: 2,
 };
 
+export type McpConfig = {
+  enabled: boolean;
+  maxBodyBytes: number;
+  writesPerHour: number;
+  maxOpenBriefings: number;
+};
+
+export const MCP_DEFAULTS: McpConfig = {
+  enabled: false,
+  maxBodyBytes: 262_144,
+  writesPerHour: 20,
+  maxOpenBriefings: 5,
+};
+
+/** The MCP settings with defaults filled in; absent means off. */
+export function mcpConfigOf(config: Pick<Config, 'mcp'>): McpConfig {
+  return { ...MCP_DEFAULTS, ...config.mcp };
+}
+
 const CrewSchema = z
   .object({
     enabled: z.boolean().default(CREW_DEFAULTS.enabled),
@@ -214,6 +233,17 @@ const FileSchema = z.object({
       fableWeeklyDropCap: z.number().int().nonnegative().default(5),
     })
     .default({ plan: 'pro', fableWeeklyDropCap: 5 }),
+  /** The zone-scoped MCP server at `/mcp` (off by default; read at start, so a flip needs a restart). */
+  mcp: z
+    .object({
+      enabled: z.boolean().default(MCP_DEFAULTS.enabled),
+      maxBodyBytes: z.number().int().positive().default(MCP_DEFAULTS.maxBodyBytes),
+      /** Write calls one token may make in a trailing hour. */
+      writesPerHour: z.number().int().nonnegative().default(MCP_DEFAULTS.writesPerHour),
+      /** Open MCP-raised briefings a zone may hold. */
+      maxOpenBriefings: z.number().int().nonnegative().default(MCP_DEFAULTS.maxOpenBriefings),
+    })
+    .default(MCP_DEFAULTS),
 });
 
 export type DropZoneConfig = z.infer<typeof DropZoneSchema>;
@@ -231,6 +261,8 @@ export interface Config {
     stopOnOverage?: boolean;
   };
   claude: ClaudeConfig;
+  /** Absent means the defaults (`MCP_DEFAULTS`): off. */
+  mcp?: Partial<McpConfig>;
   secrets: {
     claudeToken: string;
     githubAuthorToken: string;

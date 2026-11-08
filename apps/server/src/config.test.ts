@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -318,6 +318,30 @@ describe('crew config', () => {
     ).toThrow(/claude.plan/);
   });
 
+  test('mcp defaults to off, with a 256 KiB body limit, 20 writes an hour and 5 open briefings', () => {
+    expect(loadConfig(minimal, fullEnv).mcp).toEqual({
+      enabled: false,
+      maxBodyBytes: 262_144,
+      writesPerHour: 20,
+      maxOpenBriefings: 5,
+    });
+    const c = loadConfig(
+      fixture({
+        dataDir: './data',
+        dropZones: [baseZone],
+        mcp: { enabled: true, writesPerHour: 3 },
+      }),
+      fullEnv,
+    );
+    expect(c.mcp).toMatchObject({ enabled: true, writesPerHour: 3, maxOpenBriefings: 5 });
+    expect(() =>
+      loadConfig(
+        fixture({ dataDir: './data', dropZones: [baseZone], mcp: { enabled: 'yes' } }),
+        fullEnv,
+      ),
+    ).toThrow(/mcp.enabled/);
+  });
+
   test('a zone model naming Fable is a config error', () => {
     expect(() => loadConfig(withZone({ model: 'claude-Fable-1' }), fullEnv)).toThrow(/model/);
   });
@@ -328,11 +352,13 @@ describe('crew config', () => {
 });
 
 describe('shipped example config', () => {
-  test('parses, declares the default plan, and ships crew disabled', () => {
+  test('parses, declares the default plan, and ships crew and MCP disabled', () => {
     const example = new URL('../../../examples/jumpmaster.config.json', import.meta.url).pathname;
     const config = loadConfig(example, fullEnv);
     expect(config.claude.plan).toBe('pro');
     expect(config.claude.fableModel).toBeUndefined();
     expect(config.dropZones[0]?.crew.enabled).toBe(false);
+    expect(config.mcp?.enabled).toBe(false);
+    expect(JSON.parse(readFileSync(example, 'utf8')).mcp).toEqual({ enabled: false });
   });
 });

@@ -4,6 +4,7 @@
   "dataDir": "./data",
   "pollSeconds": 60,
   "claude": { "plan": "pro" },
+  "mcp": { "enabled": false },
   "dropZones": [
     {
       "id": "main",

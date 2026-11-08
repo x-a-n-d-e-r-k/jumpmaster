@@ -380,6 +380,68 @@ CREATE TABLE credit_drops (
 );
 `;
 
+/**
+ * v14: the zone-scoped MCP server. `briefings.source` gains `mcp` (Command's own assistant, told
+ * apart from the crew), by SQLite's rebuild with foreign keys off (`rulings` references it).
+ * `mcp_tokens` holds only SHA-256 hashes; `mcp_audit` records every tool call, mint and revoke, and
+ * refused authentication with no token id when the token matched none.
+ */
+const V14_SQL = `
+CREATE TABLE new_briefings (
+  id                 INTEGER PRIMARY KEY,
+  zone_id            TEXT NOT NULL,
+  kind               TEXT NOT NULL CHECK (kind IN ('parked','promote','promote_held',
+                       'refute_exhausted','crew','credits_required')),
+  subject            TEXT NOT NULL,
+  decision           TEXT NOT NULL,
+  why                TEXT NOT NULL,
+  options_json       TEXT NOT NULL,
+  recommendation     TEXT NOT NULL DEFAULT '',
+  on_hold            TEXT NOT NULL DEFAULT '',
+  source             TEXT NOT NULL CHECK (source IN ('server','crew','mcp')),
+  source_ref         TEXT,
+  state              TEXT NOT NULL CHECK (state IN ('open','ruled','withdrawn')),
+  diagnose_attempts  INTEGER NOT NULL DEFAULT 0,
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL,
+  diagnosis          TEXT,
+  diagnosis_basis    TEXT
+);
+INSERT INTO new_briefings (id, zone_id, kind, subject, decision, why, options_json, recommendation,
+  on_hold, source, source_ref, state, diagnose_attempts, created_at, updated_at, diagnosis,
+  diagnosis_basis)
+SELECT id, zone_id, kind, subject, decision, why, options_json, recommendation, on_hold, source,
+  source_ref, state, diagnose_attempts, created_at, updated_at, diagnosis, diagnosis_basis
+FROM briefings;
+DROP TABLE briefings;
+ALTER TABLE new_briefings RENAME TO briefings;
+CREATE UNIQUE INDEX briefings_open_subject ON briefings(zone_id, subject) WHERE state = 'open';
+
+CREATE TABLE mcp_tokens (
+  id            INTEGER PRIMARY KEY,
+  token_hash    TEXT NOT NULL UNIQUE,
+  zone_id       TEXT NOT NULL,
+  scope         TEXT NOT NULL CHECK (scope IN ('read','write')),
+  label         TEXT NOT NULL DEFAULT '',
+  created_at    TEXT NOT NULL,
+  expires_at    TEXT NOT NULL,
+  revoked_at    TEXT,
+  last_used_at  TEXT
+);
+
+CREATE TABLE mcp_audit (
+  id           INTEGER PRIMARY KEY,
+  token_id     INTEGER REFERENCES mcp_tokens(id),
+  zone_id      TEXT,
+  tool         TEXT NOT NULL,
+  args_sha256  TEXT,
+  outcome      TEXT NOT NULL CHECK (outcome IN ('ok','refused','error')),
+  detail       TEXT NOT NULL DEFAULT '',
+  at           TEXT NOT NULL
+);
+CREATE INDEX mcp_audit_by_token ON mcp_audit(token_id, at);
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -402,6 +464,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 11, sql: V11_SQL },
   { version: 12, sql: V12_SQL, after: afterV12 },
   { version: 13, sql: V13_SQL },
+  { version: 14, sql: V14_SQL, foreignKeysOff: true },
 ];
 
 /**

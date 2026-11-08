@@ -2,11 +2,18 @@ import { timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { listBriefings, ruleBriefing } from '../briefings.js';
-import { allowedHostsOf, type Config } from '../config.js';
+import { allowedHostsOf, type Config, mcpConfigOf } from '../config.js';
 import { requestCrewCycle } from '../crew/schedule.js';
 import type { Db } from '../db/open.js';
 import { activeWorkCount, setKilled, setZoneMode, ZONE_MODES } from '../db/repo.js';
 import { engageKill } from '../leases.js';
+import {
+  listMcpTokens,
+  MAX_TOKEN_DAYS,
+  MCP_SCOPES,
+  mintMcpToken,
+  revokeMcpToken,
+} from '../mcp/tokens.js';
 
 export interface ControlDeps {
   db: Db;
@@ -19,6 +26,12 @@ export interface ControlDeps {
 const ZoneBody = z.object({ mode: z.enum(ZONE_MODES) });
 const RuleBody = z.object({ optionId: z.string().min(1), note: z.string().max(2000).optional() });
 const KillBody = z.object({ engaged: z.boolean() });
+const MintBody = z.strictObject({
+  zoneId: z.string().min(1),
+  scope: z.enum(MCP_SCOPES),
+  days: z.number().int().min(1).max(MAX_TOKEN_DAYS),
+  label: z.string().max(80).optional(),
+});
 
 function tokenMatches(req: FastifyRequest, expected: string): boolean {
   const given = Buffer.from(req.headers.authorization ?? '');
@@ -26,7 +39,8 @@ function tokenMatches(req: FastifyRequest, expected: string): boolean {
   return given.length === want.length && timingSafeEqual(given, want);
 }
 
-function originAllowed(origin: string | undefined, allowed: string[]): boolean {
+/** Whether a request's Origin may reach a token route: absent (not a browser) or an allowed host. */
+export function originAllowed(origin: string | undefined, allowed: string[]): boolean {
   if (origin === undefined) return true; // Not a browser: the CLI sends no Origin.
   try {
     return allowed.includes(new URL(origin).host);
@@ -112,6 +126,37 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         return { zone: zone.id, crewCycle: 'due' };
       },
     );
+
+    // MCP tokens: minted only here, the plain token returned once; registered only with mcp on.
+    if (mcpConfigOf(config).enabled) {
+      scope.post('/api/control/mcp-tokens', async (req, reply) => {
+        const body = MintBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: 'invalid body' });
+        const { zoneId, scope: tokenScope, days, label } = body.data;
+        if (!config.dropZones.some((z) => z.id === zoneId)) {
+          return reply.code(404).send({ error: 'unknown zone' });
+        }
+        const minted = mintMcpToken(
+          db,
+          { zoneId, scope: tokenScope, days, ...(label ? { label } : {}) },
+          now(),
+        );
+        return { ...minted, zoneId, scope: tokenScope, label: label ?? '' };
+      });
+
+      scope.get('/api/control/mcp-tokens', async () => ({ tokens: listMcpTokens(db) }));
+
+      scope.delete<{ Params: { id: string } }>(
+        '/api/control/mcp-tokens/:id',
+        async (req, reply) => {
+          const id = Number(req.params.id);
+          if (!Number.isInteger(id) || id <= 0 || !revokeMcpToken(db, id, now())) {
+            return reply.code(404).send({ error: 'unknown or revoked token' });
+          }
+          return { id, revoked: true };
+        },
+      );
+    }
 
     scope.post('/api/control/kill', async (req, reply) => {
       const body = KillBody.safeParse(req.body);

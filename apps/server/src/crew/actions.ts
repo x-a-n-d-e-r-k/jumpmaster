@@ -156,21 +156,25 @@ export function applyCrewActions(
       );
     }
 
+    // An MCP briefing is the assistant's, under its own `mcp:` prefix: it can never update a
+    // crew-drop briefing (`crew:`) or a server one, and Command can tell it from the crew's.
+    const mcp = source.kind === 'mcp';
     for (const b of briefs) {
+      const subject = `${mcp ? 'mcp' : 'crew'}:${b.subject}`;
       report.briefings.push(
         raiseBriefing(
           db,
           {
             zoneId: zone.id,
             kind: 'crew',
-            // Prefixed so a crew subject can never update a server briefing (item:, issue:).
-            subject: `crew:${b.subject}`,
+            // Prefixed so it can never update a server briefing (item:, issue:, credits:).
+            subject,
             decision: b.decision,
             why: b.why,
             options: b.options.map((label, n) => ({ id: `o${n + 1}`, label, effect: 'none' })),
             recommendation: b.recommendation,
             onHold: b.onHold,
-            source: 'crew',
+            source: mcp ? 'mcp' : 'crew',
             sourceRef: sourceRefOf(source),
           },
           now,
