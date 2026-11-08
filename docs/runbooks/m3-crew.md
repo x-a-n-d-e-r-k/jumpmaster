@@ -207,7 +207,13 @@ the same action core as a crew drop. It never merges, reviews, pushes, promotes,
 ### Enable
 
 ```json
-"mcp": { "enabled": true, "maxBodyBytes": 262144, "writesPerHour": 20, "maxOpenBriefings": 5 }
+"mcp": {
+  "enabled": true,
+  "maxBodyBytes": 262144,
+  "writesPerHour": 20,
+  "callsPerHour": 600,
+  "maxOpenBriefings": 5
+}
 ```
 
 The setting is read once at start: **restart the server** after changing it. With
@@ -244,11 +250,14 @@ revoke it.
 
 ```bash
 claude mcp add --scope user --transport http jumpmaster http://127.0.0.1:7420/mcp \
-  --header "Authorization: Bearer <token>"
+  --header 'Authorization: Bearer ${JM_MCP_TOKEN}'
 ```
 
-Use the user scope: Claude Code stores the header in its config, and a project `.mcp.json` could
-be committed. Connect through a host listed in `listen.allowedHosts` (by default `127.0.0.1:<port>`
+The single quotes keep `${JM_MCP_TOKEN}` literal: Claude Code stores the reference and expands it
+from its environment when it connects, so the token is never in argv, shell history or its
+config. Export `JM_MCP_TOKEN` in the environment Claude Code starts from (from a password manager,
+not a dotfile in a repository). Use the user scope all the same, so the entry is never in a
+project `.mcp.json`. Connect through a host listed in `listen.allowedHosts` (by default `127.0.0.1:<port>`
 and `localhost:<port>`). The server is stateless streamable HTTP with JSON responses; a client
 must accept both `application/json` and `text/event-stream`, as Claude Code does.
 
@@ -273,6 +282,11 @@ this zone's items and that a revoked or expired token gets 401.
   as crew issues do. Assistant briefings show as "Raised by assistant (MCP)" on `/briefings`,
   under an `mcp:` subject: they can never update a crew or server briefing, and raising one on the
   subject of an open assistant briefing replaces its text.
+- **Ruling on an assistant briefing** checks that its options are the ones you read. The page
+  sends that for you; from a terminal, take the `optionsDigest` from `ctl briefings` and pass it:
+  `ctl rule <briefing> <option> --options <digest> [note]`. If the assistant rewrote the options
+  since, the ruling is refused (409 "options changed"): read them again. Every ruling records the
+  label and effect you chose.
 
 **Treat a read token like a read PAT.** For a private repository it reads issue titles and bodies,
 park reasons (which can quote gate output), briefings with their diagnoses, and your ruling notes.
@@ -282,17 +296,22 @@ tier and Fable status are never shown.
 ### Refusals
 
 - 401: no token, an unknown, expired (from `expiresAt` on) or revoked token, or a token whose zone
-  is no longer in the config. Audited with no token material; at most 500 such rows are kept.
+  is no longer in the config. Audited with no token material (see retention below).
 - 403: a Host not in `allowedHosts`, or an `Origin` that is `null` or not an allowed host.
 - 400 for a JSON-RPC batch; 405 for `GET` or `DELETE /mcp`; 406 when `Accept` lacks either type;
   415 for a non-JSON body; 413 above `maxBodyBytes`. Authentication runs before the body is read.
-- Tool calls answer with an error result, audited `refused`, when: a read token calls a write
-  tool; the arguments fail the schema; the zone's crew is disabled; a usage credits stop is in
+- Tool calls answer with an error result, audited `refused`, when: the token has made
+  `callsPerHour` tool calls of any kind in the past hour (audited once per hour, not per call); a
+  read token calls a write tool; the arguments fail the schema; the zone's crew is disabled; a usage credits stop is in
   force; the arguments contain a token or a configured secret; the token has made
   `writesPerHour` write calls in the past hour; or the zone already holds `maxOpenBriefings` open
   assistant briefings. In pause, observe or kill the action core refuses each item with the mode.
 - The audit stores tool, token, zone, a SHA-256 of the arguments, the outcome and a reason code or
-  counts, never the text you sent.
+  counts, never the text you sent. A failure inside the server answers a bare JSON-RPC
+  "internal error", audited `error`, and the call records nothing.
+- Retention, swept at most once a minute: rows older than 90 days go, then the newest 100,000 are
+  kept; refused logins keep the newest 500 anonymous rows and, separately, the newest 500 that name
+  a token (an expired or revoked token in use). Mint and revoke rows are kept.
 
 Issues filed over MCP that are still `filing` when the crew is later disabled wait, as crew
 filings do, and are filed once it is enabled again.
