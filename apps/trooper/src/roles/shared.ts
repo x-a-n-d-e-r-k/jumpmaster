@@ -7,6 +7,7 @@ import {
   EVENT_PREFIX,
   type GateResult,
   type ItemDropPayload,
+  isCrewRole,
   type RateLimitEventData,
   REPORT_MAX_CHARS,
   type ServiceSpec,
@@ -95,17 +96,33 @@ export function agentSettings(payload: DropPayload): Record<string, unknown> {
   return { hooks: {}, includeCoAuthoredBy: false, attribution: { commit: '', pr: '' } };
 }
 
-/** Runs Claude in `dir` as the agent identity and collects what the stream reported. */
+/** The appended system prompt for a crew role: where the read-only clone is. */
+export function crewSystemPrompt(addDirs: string[]): string {
+  const where = addDirs.map((d) => `- ${d}`).join('\n');
+  return `Your working directory is empty on purpose. The repository is cloned, read-only for this task, at:\n${where}\nRead it there. Never modify, commit or push anything in it.\n`;
+}
+
+/**
+ * Runs Claude with `cwd` as its working directory, as the agent identity, and collects what the
+ * stream reported. `addDirs` are passed as `--add-dir` (a crew role reads its clone that way, so
+ * the clone's own instructions are never loaded).
+ */
 export async function runAgent(
-  payload: ItemDropPayload,
+  payload: DropPayload,
   deps: TrooperDeps,
   ctx: RoleCtx,
-  o: { prompt: string; outputSchema: object; gateResults?: GateResult[] },
-  dir: string,
+  o: { prompt: string; outputSchema: object; gateResults?: GateResult[]; addDirs?: string[] },
+  cwd: string,
 ): Promise<AgentOutcome> {
   const systemPromptFile = join(ctx.workdir, 'system.md');
   const settingsFile = join(ctx.workdir, 'settings.json');
-  writeFileSync(systemPromptFile, agentSystemPrompt(payload, o.gateResults));
+  const crew = isCrewRole(payload.role);
+  writeFileSync(
+    systemPromptFile,
+    crew
+      ? crewSystemPrompt(o.addDirs ?? [])
+      : agentSystemPrompt(payload as ItemDropPayload, o.gateResults),
+  );
   writeFileSync(settingsFile, JSON.stringify(agentSettings(payload)));
 
   emitEvent(deps, ctx, 'phase', { phase: 'claude' });
@@ -116,19 +133,22 @@ export async function runAgent(
     systemPromptFile,
     settingsFile,
     outputSchema: o.outputSchema,
+    ...(o.addDirs && o.addDirs.length > 0 ? { addDirs: o.addDirs } : {}),
   });
   const env: NodeJS.ProcessEnv = {
     ...scrubEnv(process.env, ctx.secrets),
-    ...serviceEnv(payload),
+    ...(crew ? {} : serviceEnv(payload as ItemDropPayload)),
     CLAUDE_CODE_OAUTH_TOKEN: payload.credentials.claudeToken,
   };
+  // Instructions in an --add-dir directory load only with this set; a crew role must never load them.
+  delete env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD;
   const out: AgentOutcome = {
     exitCode: null,
     results: [],
     initSessionId: null,
     rateLimited: false,
   };
-  for await (const line of deps.runClaude(args, env, dir, ctx.ids?.agent ?? null, deps.signal)) {
+  for await (const line of deps.runClaude(args, env, cwd, ctx.ids?.agent ?? null, deps.signal)) {
     const parsed = parseStreamLine(line);
     if (parsed.type === 'ignored') continue;
     if (parsed.type === 'init') {

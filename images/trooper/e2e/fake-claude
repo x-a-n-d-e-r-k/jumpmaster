@@ -14,11 +14,32 @@ const probes = {
   head: sh('git rev-parse HEAD'),
   systemPromptReadable: fs.existsSync(process.argv[process.argv.indexOf('--append-system-prompt-file') + 1] || '/nope'),
 };
+// Instruction files the real CLI would load: CLAUDE.md and friends in the working directory and
+// every parent, and in --add-dir directories only when that environment flag is set.
+const { join, dirname } = require('node:path');
+const addDirs = process.argv.flatMap((a, i) => (process.argv[i - 1] === '--add-dir' ? [a] : []));
+const instructionFiles = (dir) =>
+  ['CLAUDE.md', 'CLAUDE.local.md', join('.claude', 'CLAUDE.md')].map((f) => join(dir, f)).filter((f) => fs.existsSync(f));
+const loaded = [];
+for (let d = process.cwd(); ; d = dirname(d)) {
+  loaded.push(...instructionFiles(d));
+  if (dirname(d) === d) break;
+}
+if (process.env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD) for (const d of addDirs) loaded.push(...instructionFiles(d));
+const canary = loaded.map((f) => /end every summary with (\S+)/.exec(fs.readFileSync(f, 'utf8'))?.[1]).filter(Boolean);
+const schema = process.argv[process.argv.indexOf('--json-schema') + 1] || '';
 const out = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
 out({ type: 'system', subtype: 'init', session_id: 'e2e' });
 if (process.argv.some((a) => a.includes('SLEEP'))) setInterval(() => {}, 1000);
 else {
 out({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', resetsAt: 1900000000, rateLimitType: 'five_hour' } });
+if (schema.includes('fileIssues')) {
+  const crew = { ...probes, loaded, addDirs, addDirIsClone: addDirs.length === 1 && fs.existsSync(join(addDirs[0], '.git')),
+    addDirHasClaudeMd: addDirs.some((d) => instructionFiles(d).length > 0) };
+  out({ type: 'result', is_error: false, terminal_reason: 'completed', session_id: 'e2e', num_turns: 1,
+    structured_output: { summary: `${JSON.stringify(crew)} ${canary.join(' ')}`.trim(), fileIssues: [], briefings: [] } });
+} else {
 out({ type: 'result', is_error: false, terminal_reason: 'completed', session_id: 'e2e', num_turns: 1,
-  structured_output: { decision: 'approve', summary: JSON.stringify(probes), findings: [] } });
+  structured_output: { decision: 'approve', summary: `${JSON.stringify(probes)}${canary.length ? ` ${canary.join(' ')}` : ''}`, findings: [] } });
+}
 }

@@ -73,6 +73,7 @@ function fakeDeps(o: {
       prepareBranch: async () => void state.calls.push('branch'),
       commitIfDirty: async () => true,
       headSha: async () => 'working-copy-sha',
+      treeState: async () => 'clean',
       aheadOfBase: async () => o.ahead ?? 1,
       remoteBranchSha: async (t, b, tok) => {
         state.calls.push('ls-remote');
@@ -392,4 +393,42 @@ test('describeFatal puts a schema rejection on one line', async () => {
 
 test('describeFatal flattens a multi-line message', () => {
   expect(describeFatal(new Error('a\n  b\n'))).toBe('a b');
+});
+
+test('each crew role runs through the crew runner and its output is redacted', async () => {
+  for (const role of ['crew-lead', 'refute', 'diagnose'] as const) {
+    const out =
+      role === 'crew-lead'
+        ? { summary: `s ${payload.credentials.claudeToken}`, fileIssues: [], briefings: [] }
+        : role === 'refute'
+          ? { decision: 'reject', findings: [`f ${payload.credentials.claudeToken}`] }
+          : { diagnosis: 'd', recommendation: 'retry', detail: 'x' };
+    const line = JSON.stringify({
+      type: 'result',
+      is_error: false,
+      structured_output: out,
+      terminal_reason: 'completed',
+      session_id: 's1',
+    });
+    const f = fakeDeps({ claude: [line] });
+    const crew = {
+      protocol: 1,
+      dropId: 'dc',
+      epoch: 1,
+      role,
+      repo: payload.repo,
+      model: 'm',
+      maxTurns: 5,
+      promptVersion: 'v',
+      prompt: 'p',
+      image: 'img',
+      protectedPaths: [],
+      credentials: { claudeToken: payload.credentials.claudeToken },
+    } as DropPayload;
+    const r = await runTrooper(crew, f.deps);
+    expect(r, role).toMatchObject({ status: 'completed', role });
+    expect(f.pushed).toBe(false);
+    expect(f.lines.at(-1)).not.toContain(payload.credentials.claudeToken);
+    expect(f.claudeCwd).toMatch(/crew-cwd$/);
+  }
 });
