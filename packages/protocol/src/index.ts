@@ -199,6 +199,9 @@ export const TrooperEventSchema = z.object({
 });
 export type TrooperEvent = z.infer<typeof TrooperEventSchema>;
 
+/** Longest author report a result may carry; the trooper truncates to this. */
+export const REPORT_MAX_CHARS = 8000;
+
 export const DropResultSchema = z.object({
   status: z.enum(['completed', 'no_changes', 'blocked', 'failed', 'interrupted', 'rate_limited']),
   role: RoleSchema.optional(),
@@ -207,6 +210,8 @@ export const DropResultSchema = z.object({
   rateLimit: RateLimitEventDataSchema.optional(),
   reason: z.string().optional(),
   headSha: z.string().optional(),
+  /** The author's report (implement/heal): each acceptance criterion, how it is met, and evidence. */
+  summary: z.string().max(REPORT_MAX_CHARS).optional(),
   gates: z.array(GateResultSchema),
   usage: z.record(z.string(), z.unknown()).optional(),
   modelUsage: z.record(z.string(), z.unknown()).optional(),

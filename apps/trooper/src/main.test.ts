@@ -128,6 +128,25 @@ test('no commits → no_changes and no push', async () => {
   expect(f.pushed).toBe(false);
 });
 
+test('the report summary is redacted before it is serialised, even a secret JSON would escape', async () => {
+  const quoted = 'db"pass\\word-1234567';
+  const p = { ...payload, gateSecrets: { TEST_DB_PASSWORD: quoted } } as DropPayload;
+  const leaky = JSON.stringify({
+    type: 'result',
+    is_error: false,
+    structured_output: { status: 'COMPLETE', summary: `ran tests with ${quoted}: 12 passed` },
+    terminal_reason: 'completed',
+    session_id: 's1',
+  });
+  const f = fakeDeps({ claude: [leaky] });
+  const r = await runTrooper(p, f.deps);
+  expect(r.status).toBe('completed');
+  expect(r.summary).toBe('ran tests with [REDACTED]: 12 passed');
+  const line = f.lines.at(-1) ?? '';
+  expect(line).not.toContain(JSON.stringify(quoted).slice(1, -1));
+  expect(line).not.toContain(quoted);
+});
+
 test('BLOCKED → blocked with summary, no push', async () => {
   const f = fakeDeps({ claude: [blockedResult] });
   const r = await runTrooper(payload, f.deps);

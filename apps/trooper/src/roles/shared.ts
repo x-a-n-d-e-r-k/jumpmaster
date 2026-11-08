@@ -7,6 +7,7 @@ import {
   EVENT_PREFIX,
   type GateResult,
   type RateLimitEventData,
+  REPORT_MAX_CHARS,
   type ServiceSpec,
   type TrooperEvent,
 } from '@jumpmaster/protocol';
@@ -372,6 +373,11 @@ export function asRecord(v: unknown): Record<string, unknown> | undefined {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
     ? (v as Record<string, unknown>)
     : undefined;
+}
+
+/** The agent's summary as an author report, cut to what the protocol accepts. */
+export function reportOf(summary: string | undefined): { summary: string } | Record<string, never> {
+  return summary === undefined ? {} : { summary: summary.slice(0, REPORT_MAX_CHARS) };
 }
 
 /** Usage metadata from the last result line, without undefined keys. */

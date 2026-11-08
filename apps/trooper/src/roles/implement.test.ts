@@ -36,14 +36,20 @@ const repoDir = join(ctx.workdir, 'repo');
 
 const init = (s: string) => JSON.stringify({ type: 'system', subtype: 'init', session_id: s });
 const resultLine = (
-  o: { session?: string; terminal?: string; status?: string; isError?: boolean } = {},
+  o: {
+    session?: string;
+    terminal?: string;
+    status?: string;
+    isError?: boolean;
+    summary?: string;
+  } = {},
 ) =>
   JSON.stringify({
     type: 'result',
     is_error: o.isError ?? false,
     terminal_reason: o.terminal ?? 'completed',
     session_id: o.session ?? 's',
-    structured_output: { status: o.status ?? 'COMPLETE', summary: 'done' },
+    structured_output: { status: o.status ?? 'COMPLETE', summary: o.summary ?? 'done' },
   });
 const rateLimit = (status: string) =>
   JSON.stringify({ type: 'rate_limit_event', rate_limit_info: { status, resetsAt: 1767225600 } });
@@ -158,6 +164,18 @@ describe('runImplement', () => {
     await runImplement(impl, w.deps, ctx);
     const push = w.calls.find((c) => c[0] === 'pushNewBranch');
     expect(push?.[6]).toMatchObject({ expectSha: 'h' });
+  });
+
+  test('a completed implement carries the agent summary as its report', async () => {
+    const w = world(complete, { ahead: 1 });
+    const r = await runImplement(impl, w.deps, ctx);
+    expect(r).toMatchObject({ status: 'completed', summary: 'done' });
+  });
+
+  test('the report is truncated to 8000 characters', async () => {
+    const w = world([init('s'), resultLine({ summary: 'x'.repeat(9000) })], { ahead: 1 });
+    const r = await runImplement(impl, w.deps, ctx);
+    expect(r.summary).toHaveLength(8000);
   });
 
   test('a dirty tree with nothing committed is still checkpointed', async () => {
