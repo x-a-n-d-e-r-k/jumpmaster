@@ -1,4 +1,5 @@
 import type { DropZoneConfig } from './config.js';
+import { getCrewIssueByNumber } from './crew/store.js';
 import type { Db } from './db/open.js';
 import {
   clearRequestChangesOnHead,
@@ -23,6 +24,7 @@ import { buildSnapshot, newestReviewAt, type ZonePass, zonePass } from './flow/s
 import type { ForgeIssue, PullFacts } from './forge/github.js';
 import { refreshGoals } from './goals.js';
 import type { ForgePair } from './outbox.js';
+import { isJmIssueBody } from './outbox.js';
 
 const PRIORITY_LABELS = ['highest', 'high', 'low', 'lowest'] as const;
 const PRIORITY_VALUE: Record<(typeof PRIORITY_LABELS)[number], number> = {
@@ -41,6 +43,19 @@ function priorityOf(labels: string[]): number {
 
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
+/**
+ * Crew-filed: the body ends with a Jumpmaster issue marker, or the author is a bot by type or by
+ * the zone's list. The marker decides whatever the login, since the author identity may be the
+ * operator's own account.
+ */
+function isCrewFiled(issue: ForgeIssue, zone: DropZoneConfig): boolean {
+  return (
+    isJmIssueBody(issue.body) ||
+    issue.authorType === 'Bot' ||
+    (zone.botLogins ?? []).includes(issue.author)
+  );
+}
+
 const isFixTitle = (title: string): boolean => /^fix:/i.test(title);
 
 /** Orders by priority, then fix: items first, then oldest issue. Does not mutate the input. */
@@ -56,6 +71,10 @@ export function rankItems(items: WorkItem[]): WorkItem[] {
 export type SyncResult = {
   added: number;
   skippedUntrusted: number;
+  /** Ready crew-filed issues with no recorded promotion: never started (§7.1). */
+  skippedCrewUnpromoted: number[];
+  /** Set when classifying an issue failed: this pass added nothing and marked nothing done. */
+  intakeSkipped?: string;
   retried: number;
   reopened: number;
   /** The zone's rules read for this pass; hand it to `reconcileZone`. */
@@ -76,8 +95,27 @@ export async function syncDropZone(
   const defaultBranch = await forge.getDefaultBranch();
   const issues = await forge.listReadyIssues(zone.readyLabel);
 
+  // Crew provenance first: a crew-filed issue starts only once its promotion is recorded.
+  const skippedCrewUnpromoted: number[] = [];
+  const crewPromoted = new Set<number>();
+  let intakeSkipped: string | undefined;
+  try {
+    for (const issue of issues) {
+      if (!isCrewFiled(issue, zone)) continue;
+      if (getCrewIssueByNumber(db, zone.id, issue.number)?.state === 'promoted') {
+        crewPromoted.add(issue.number);
+      } else {
+        skippedCrewUnpromoted.push(issue.number);
+      }
+    }
+  } catch (err) {
+    intakeSkipped = `classifying ready issues failed: ${errorText(err)}`;
+  }
+  const crewNumbers = new Set([...crewPromoted, ...skippedCrewUnpromoted]);
+  const human = intakeSkipped ? [] : issues.filter((i) => !crewNumbers.has(i.number));
+
   const trust = new Map<string, boolean>();
-  for (const author of new Set(issues.map((i: ForgeIssue) => i.author))) {
+  for (const author of new Set(human.map((i: ForgeIssue) => i.author))) {
     try {
       trust.set(author, await forge.isTrusted(author));
     } catch {
@@ -95,10 +133,12 @@ export async function syncDropZone(
       configJson: JSON.stringify(zone),
     });
     setDropZoneDefaultBranch(db, zone.id, defaultBranch);
+    if (intakeSkipped) return;
 
     const existing = new Map(listWorkItems(db, zone.id).map((w) => [w.issueNumber, w]));
     for (const issue of issues) {
-      if (!trust.get(issue.author)) {
+      if (skippedCrewUnpromoted.includes(issue.number)) continue;
+      if (!crewPromoted.has(issue.number) && !trust.get(issue.author)) {
         skippedUntrusted++;
         continue;
       }
@@ -136,7 +176,14 @@ export async function syncDropZone(
   }
   const pass = await zonePass(forges, zone, defaultBranch);
   const parked = await syncParked(db, forges, zone, pass, now);
-  return { added, skippedUntrusted, ...parked, pass };
+  return {
+    added,
+    skippedUntrusted,
+    skippedCrewUnpromoted,
+    ...(intakeSkipped ? { intakeSkipped } : {}),
+    ...parked,
+    pass,
+  };
 }
 
 async function readPull(forges: ForgePair, number: number | null): Promise<PullFacts | null> {

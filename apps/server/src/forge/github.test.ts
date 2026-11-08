@@ -10,7 +10,7 @@ function issue(n: number, extra: Record<string, unknown> = {}) {
     number: n,
     title: `t${n}`,
     body: `b${n}`,
-    user: { login: 'alice' },
+    user: { login: 'alice', type: 'User' },
     labels: [{ name: 'agent-ready' }, 'plain'],
     created_at: '2026-01-01T00:00:00Z',
     ...extra,
@@ -74,6 +74,7 @@ describe('GitHubForge', () => {
       title: 't1',
       body: 'b1',
       author: 'alice',
+      authorType: 'User',
       labels: ['agent-ready', 'plain'],
       createdAt: '2026-01-01T00:00:00Z',
       blockedBy: [],
@@ -780,5 +781,77 @@ describe('GitHubForge', () => {
         expect(await fresh().getBranchRules('main')).toEqual({ kind: 'none' });
       });
     });
+  });
+});
+
+describe('GitHubForge issue writes', () => {
+  beforeAll(() => {
+    nock.disableNetConnect();
+  });
+  afterEach(() => {
+    expect(nock.pendingMocks()).toEqual([]);
+    nock.cleanAll();
+  });
+  const MARK = '<!-- jm:op:issue:main:o:k -->';
+
+  test('findIssueByMarker pages past 100 issues', async () => {
+    const f = new GitHubForge('o', 'r', 'tok');
+    nock(api).get('/user').reply(200, { login: 'jm-bot' });
+    const page1 = Array.from({ length: 100 }, (_, i) =>
+      issue(i + 1, { user: { login: 'jm-bot' }, body: `x\n${MARK.replace('k', `k${i}`)}` }),
+    );
+    const page2 = [
+      issue(150, { user: { login: 'jm-bot' }, pull_request: { url: 'x' }, body: `y\n${MARK}` }),
+      issue(151, { user: { login: 'jm-bot' }, body: `${MARK}\nnot last` }),
+      issue(152, { user: { login: 'jm-bot' }, body: `body\n\n${MARK}\n` }),
+    ];
+    nock(api)
+      .get('/repos/o/r/issues')
+      .query({ creator: 'jm-bot', state: 'all', since: '2026-01-01T00:00:00Z', per_page: '100' })
+      .reply(200, page1, { Link: `<${api}/repositories/1/issues?page=2>; rel="next"` });
+    nock(api).get('/repositories/1/issues').query({ page: '2' }).reply(200, page2);
+    expect(await f.findIssueByMarker(MARK, '2026-01-01T00:00:00Z')).toEqual({ number: 152 });
+  });
+
+  test('createIssue, updateIssue and getIssue map the API', async () => {
+    const f = new GitHubForge('o', 'r', 'tok');
+    nock(api)
+      .post('/repos/o/r/issues', { title: 'T', body: 'B', labels: ['agent-staged'] })
+      .reply(201, issue(9));
+    expect(await f.createIssue({ title: 'T', body: 'B', labels: ['agent-staged'] })).toEqual({
+      number: 9,
+    });
+    nock(api).patch('/repos/o/r/issues/9', { state: 'closed' }).reply(200, issue(9));
+    await f.updateIssue(9, { state: 'closed' });
+    nock(api)
+      .get('/repos/o/r/issues/9')
+      .reply(200, issue(9, { state: 'closed', body: null }));
+    expect(await f.getIssue(9)).toEqual({
+      body: '',
+      state: 'closed',
+      labels: ['agent-ready', 'plain'],
+    });
+    nock(api).get('/repos/o/r/issues/10').reply(404, {});
+    expect(await f.getIssue(10)).toBeNull();
+  });
+
+  test('setLabels adds and removes, ignoring a label already gone', async () => {
+    const f = new GitHubForge('o', 'r', 'tok');
+    nock(api)
+      .post('/repos/o/r/issues/9/labels', { labels: ['agent-ready'] })
+      .reply(200, []);
+    nock(api).delete('/repos/o/r/issues/9/labels/agent-staged').reply(404, {});
+    await f.setLabels(9, { add: ['agent-ready'], remove: ['agent-staged'] });
+  });
+
+  test('open issues report the author type', async () => {
+    const f = new GitHubForge('o', 'r', 'tok');
+    nock(api)
+      .get('/repos/o/r/issues')
+      .query({ state: 'open', per_page: '100' })
+      .reply(200, [issue(1, { user: { login: 'app[bot]', type: 'Bot' } })]);
+    noBlockers(1);
+    const [one] = await f.listOpenIssues();
+    expect(one).toMatchObject({ author: 'app[bot]', authorType: 'Bot' });
   });
 });

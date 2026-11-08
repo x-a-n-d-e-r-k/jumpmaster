@@ -207,6 +207,34 @@ CREATE TABLE goals (
 );
 `;
 
+/** v8: issues the crew proposes, from intent to promotion; forge writes go through the outbox. */
+const V8_SQL = `
+CREATE TABLE crew_issues (
+  id             INTEGER PRIMARY KEY,
+  zone_id        TEXT NOT NULL,
+  key            TEXT NOT NULL,
+  source         TEXT NOT NULL,
+  source_ref     TEXT,
+  objective      TEXT NOT NULL,
+  title          TEXT NOT NULL,
+  title_norm     TEXT NOT NULL,
+  body           TEXT NOT NULL,
+  body_sha       TEXT,
+  priority       TEXT,
+  number         INTEGER,
+  state          TEXT NOT NULL CHECK (state IN ('filing','staged','promote_held','promoting',
+                   'promoted','revising','rejecting','rejected','failed')),
+  refute_count   INTEGER NOT NULL DEFAULT 0,
+  refuted_sha    TEXT,
+  findings_json  TEXT,
+  hold_until     TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  UNIQUE (zone_id, key)
+);
+CREATE INDEX crew_issues_by_number ON crew_issues(zone_id, number);
+`;
+
 export type Migration = { version: number; sql: string; foreignKeysOff?: boolean };
 
 export const MIGRATIONS: Migration[] = [
@@ -217,6 +245,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 5, sql: V5_SQL },
   { version: 6, sql: V6_SQL, foreignKeysOff: true },
   { version: 7, sql: V7_SQL },
+  { version: 8, sql: V8_SQL },
 ];
 
 /**

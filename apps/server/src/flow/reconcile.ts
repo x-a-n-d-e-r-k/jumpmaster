@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { agentBranch, type GateResult, type Role, type Verdict } from '@jumpmaster/protocol';
 import type { DropZoneConfig, UsageConfig } from '../config.js';
+import { flushCrewOps } from '../crew/flush.js';
 import type { Db } from '../db/open.js';
 import {
   activeDropFor,
@@ -371,6 +372,7 @@ export async function reconcileZone(
     now,
     zone.outboxDeadlineMinutes ?? zone.ciDeadlineMinutes,
   );
+  if (mode === 'active') actions += await flushCrewOps(db, forges, zone, secrets, now);
   const pulls = await forges.author.listOpenAgentPulls('agent/issue-');
   actions += await adopt(db, forges, zone, pass, pulls, now);
   if (mode === 'paused') return { actions, merges };

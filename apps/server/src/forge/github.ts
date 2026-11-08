@@ -5,6 +5,8 @@ export type ForgeIssue = {
   title: string;
   body: string;
   author: string;
+  /** GitHub's `user.type` (`User`, `Bot`, …); empty when unknown. */
+  authorType: string;
   labels: string[];
   createdAt: string;
   /** Open native "blocked by" links (`#N` or `owner/name#N`); empty or absent means startable. */
@@ -101,9 +103,27 @@ export type BranchRulesRead =
   | { kind: 'none' }
   | { kind: 'unavailable' };
 
+export type IssueFacts = { body: string; state: 'open' | 'closed'; labels: string[] };
+
 export interface Forge {
   getDefaultBranch(): Promise<string>;
   listReadyIssues(label: string): Promise<ForgeIssue[]>;
+  /** Open issues (not PRs), all of them or only those carrying `label`. */
+  listOpenIssues(label?: string): Promise<ForgeIssue[]>;
+  /** `null` when the issue does not exist. */
+  getIssue(number: number): Promise<IssueFacts | null>;
+  createIssue(input: {
+    title: string;
+    body: string;
+    labels: string[];
+  }): Promise<{ number: number }>;
+  /** An issue this identity created whose body ends with `marker`, updated since `since`. */
+  findIssueByMarker(marker: string, since: string): Promise<{ number: number } | null>;
+  updateIssue(
+    number: number,
+    patch: { title?: string; body?: string; state?: 'closed' },
+  ): Promise<void>;
+  setLabels(number: number, change: { add: string[]; remove: string[] }): Promise<void>;
   isTrusted(login: string): Promise<boolean>;
   /** maintain or admin on the repository (write is not enough). */
   isMaintainer(login: string): Promise<boolean>;
@@ -204,6 +224,9 @@ function toPullFacts(p: RawPull): PullFacts {
   };
 }
 
+/** The last non-empty line, trimmed of trailing whitespace. */
+const lastLine = (body: string): string => body.trimEnd().split('\n').pop() ?? '';
+
 type CheckRunFacts = { name: string; status: string; conclusion: string | null };
 
 export class GitHubForge implements Forge {
@@ -224,10 +247,14 @@ export class GitHubForge implements Forge {
   }
 
   async listReadyIssues(label: string): Promise<ForgeIssue[]> {
+    return this.listOpenIssues(label);
+  }
+
+  async listOpenIssues(label?: string): Promise<ForgeIssue[]> {
     const items = await this.octokit.paginate(this.octokit.rest.issues.listForRepo, {
       owner: this.owner,
       repo: this.repo,
-      labels: label,
+      ...(label !== undefined ? { labels: label } : {}),
       state: 'open',
       per_page: 100,
     });
@@ -238,6 +265,7 @@ export class GitHubForge implements Forge {
         title: i.title,
         body: i.body ?? '',
         author: i.user?.login ?? '',
+        authorType: i.user?.type ?? '',
         labels: i.labels.map((l) => (typeof l === 'string' ? l : (l.name ?? ''))),
         createdAt: i.created_at,
       }));
@@ -385,6 +413,90 @@ export class GitHubForge implements Forge {
       issue_number: number,
     });
     return data.state === 'open' ? 'open' : 'closed';
+  }
+
+  async getIssue(number: number): Promise<IssueFacts | null> {
+    try {
+      const { data } = await this.octokit.rest.issues.get({
+        owner: this.owner,
+        repo: this.repo,
+        issue_number: number,
+      });
+      return {
+        body: data.body ?? '',
+        state: data.state === 'open' ? 'open' : 'closed',
+        labels: data.labels.map((l) => (typeof l === 'string' ? l : (l.name ?? ''))),
+      };
+    } catch (err) {
+      if (statusOf(err) === 404) return null;
+      throw err;
+    }
+  }
+
+  async createIssue(input: {
+    title: string;
+    body: string;
+    labels: string[];
+  }): Promise<{ number: number }> {
+    const { data } = await this.octokit.rest.issues.create({
+      owner: this.owner,
+      repo: this.repo,
+      title: input.title,
+      body: input.body,
+      labels: input.labels,
+    });
+    return { number: data.number };
+  }
+
+  async findIssueByMarker(marker: string, since: string): Promise<{ number: number } | null> {
+    const me = await this.viewerLogin();
+    const items = await this.octokit.paginate(this.octokit.rest.issues.listForRepo, {
+      owner: this.owner,
+      repo: this.repo,
+      creator: me,
+      state: 'all',
+      since,
+      per_page: 100,
+    });
+    const hit = items.find(
+      (i) => !i.pull_request && lastLine(i.body ?? '') === marker && i.user?.login === me,
+    );
+    return hit ? { number: hit.number } : null;
+  }
+
+  async updateIssue(
+    number: number,
+    patch: { title?: string; body?: string; state?: 'closed' },
+  ): Promise<void> {
+    await this.octokit.rest.issues.update({
+      owner: this.owner,
+      repo: this.repo,
+      issue_number: number,
+      ...patch,
+    });
+  }
+
+  async setLabels(number: number, change: { add: string[]; remove: string[] }): Promise<void> {
+    if (change.add.length > 0) {
+      await this.octokit.rest.issues.addLabels({
+        owner: this.owner,
+        repo: this.repo,
+        issue_number: number,
+        labels: change.add,
+      });
+    }
+    for (const name of change.remove) {
+      try {
+        await this.octokit.rest.issues.removeLabel({
+          owner: this.owner,
+          repo: this.repo,
+          issue_number: number,
+          name,
+        });
+      } catch (err) {
+        if (statusOf(err) !== 404) throw err; // already gone
+      }
+    }
   }
 
   async getIssueLabels(number: number): Promise<string[]> {

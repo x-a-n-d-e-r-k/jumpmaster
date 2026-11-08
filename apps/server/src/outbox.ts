@@ -55,6 +55,16 @@ export type PostReviewPayload = {
   commitId: string;
 };
 export type MergePayload = { pr: number; sha: string; title: string; message: string };
+/** `since`: the crew intent's creation time; the marker search looks at issues updated after it. */
+export type CreateIssuePayload = { title: string; body: string; labels: string[]; since: string };
+/** A body update (the op marker is appended) or, with `state: 'closed'`, a close. */
+export type UpdateIssuePayload = {
+  number: number;
+  title?: string;
+  body?: string;
+  state?: 'closed';
+};
+export type SetLabelsPayload = { number: number; add: string[]; remove: string[] };
 
 /** `itemId` is null for a zone-level op; `zoneId` decides the mode check and the outbox row. */
 export type Op = {
@@ -70,7 +80,15 @@ export const opKeys = {
   review: (itemId: number, headSha: string, dropId: string) =>
     `review:${itemId}:${headSha}:${dropId}`,
   merge: (itemId: number, headSha: string) => `merge:${itemId}:${headSha}`,
+  issue: (zoneId: string, objective: string, outputKey: string) =>
+    `issue:${zoneId}:${objective}:${outputKey}`,
+  update: (crewIssueId: number, sha12: string) => `update:${crewIssueId}:${sha12}`,
+  close: (crewIssueId: number) => `close:${crewIssueId}`,
+  promote: (crewIssueId: number) => `labels:${crewIssueId}:promote`,
 };
+
+/** How far back the last marker search before failing a create looks, for forge clock skew. */
+const WIDE_SEARCH_MS = 24 * 60 * 60_000;
 
 /** The final line of every body Jumpmaster writes to a forge. */
 export const opMarker = (opKey: string): string => `<!-- jm:op:${opKey} -->`;
@@ -79,6 +97,28 @@ export const opMarker = (opKey: string): string => `<!-- jm:op:${opKey} -->`;
 export const isServerPrBody = (body: string, itemId: number): boolean => {
   const last = body.trimEnd().split('\n').pop() ?? '';
   return last.startsWith(`<!-- jm:op:pr:${itemId}:`) && last.endsWith(' -->');
+};
+
+const lastLine = (body: string): string => body.trimEnd().split('\n').pop() ?? '';
+
+/**
+ * Whether an issue body ends with a marker Jumpmaster writes on issues it files (`issue:`) or
+ * rewrites (`update:`). Such an issue is crew-filed whatever its author.
+ */
+export const isJmIssueBody = (body: string): boolean => {
+  const last = lastLine(body).trim();
+  return (
+    (last.startsWith('<!-- jm:op:issue:') || last.startsWith('<!-- jm:op:update:')) &&
+    last.endsWith(' -->')
+  );
+};
+
+/** The body without its final Jumpmaster marker line, as `body_sha` is computed. */
+export const bodyWithoutMarker = (body: string): string => {
+  const lines = body.trimEnd().split('\n');
+  const last = lines.at(-1)?.trim() ?? '';
+  if (last.startsWith('<!-- jm:op:') && last.endsWith(' -->')) lines.pop();
+  return lines.join('\n').trimEnd();
 };
 
 const withMarker = (body: string, opKey: string): string =>
@@ -118,8 +158,40 @@ async function lookup(forges: ForgePair, kind: OpKind, opKey: string, payload: u
       const pr = await forges.author.getPull(p.pr);
       return pr?.merged ? { merged: true } : null;
     }
-    default:
-      throw new Error(`${kind} is not supported yet`);
+    case 'create_issue': {
+      const p = payload as CreateIssuePayload;
+      return forges.author.findIssueByMarker(opMarker(opKey), p.since);
+    }
+    case 'update_issue': {
+      const p = payload as UpdateIssuePayload;
+      const issue = await forges.author.getIssue(p.number);
+      if (!issue) return null;
+      if (p.state === 'closed') return issue.state === 'closed' ? { number: p.number } : null;
+      return lastLine(issue.body) === opMarker(opKey) ? { number: p.number } : null;
+    }
+    case 'set_labels': {
+      const p = payload as SetLabelsPayload;
+      const issue = await forges.author.getIssue(p.number);
+      if (!issue) return null;
+      const has = new Set(issue.labels);
+      const matches = p.add.every((l) => has.has(l)) && !p.remove.some((l) => has.has(l));
+      return matches ? { number: p.number } : null;
+    }
+  }
+}
+
+/** The last look before a `create_issue` row is failed: a day wider than the normal search. */
+async function wideIssueSearch(
+  forges: ForgePair,
+  row: Pick<OutboxRow, 'kind' | 'opKey' | 'payloadJson'>,
+): Promise<{ number: number } | null> {
+  if (row.kind !== 'create_issue') return null;
+  const p = JSON.parse(row.payloadJson) as CreateIssuePayload;
+  const since = new Date(Date.parse(p.since) - WIDE_SEARCH_MS).toISOString();
+  try {
+    return await forges.author.findIssueByMarker(opMarker(row.opKey), since);
+  } catch {
+    return null;
   }
 }
 
@@ -157,8 +229,29 @@ async function write(forges: ForgePair, kind: OpKind, opKey: string, payload: un
       });
       return r.merged ? r : null;
     }
-    default:
-      throw Object.assign(new Error(`${kind} is not supported yet`), { status: 400 });
+    case 'create_issue': {
+      const p = payload as CreateIssuePayload;
+      const r = await forges.author.createIssue({
+        title: p.title,
+        body: withMarker(p.body, opKey),
+        labels: p.labels,
+      });
+      return { number: r.number, created: true };
+    }
+    case 'update_issue': {
+      const p = payload as UpdateIssuePayload;
+      await forges.author.updateIssue(p.number, {
+        ...(p.title !== undefined ? { title: p.title } : {}),
+        ...(p.body !== undefined ? { body: withMarker(p.body, opKey) } : {}),
+        ...(p.state ? { state: p.state } : {}),
+      });
+      return { number: p.number };
+    }
+    case 'set_labels': {
+      const p = payload as SetLabelsPayload;
+      await forges.author.setLabels(p.number, { add: p.add, remove: p.remove });
+      return { number: p.number };
+    }
   }
 }
 
@@ -208,6 +301,14 @@ async function execute(db: Db, forges: ForgePair, op: Op, now: Date): Promise<Op
       status !== undefined && status >= 400 && status < 500 && !isRateLimited(err)
         ? 'failed'
         : 'unknown';
+    if (state === 'failed') {
+      const found = await wideIssueSearch(forges, {
+        kind: op.kind,
+        opKey: op.opKey,
+        payloadJson: JSON.stringify(op.payload),
+      });
+      if (found) return markDone(db, op.opKey, found, now);
+    }
     updateOutbox(db, op.opKey, { state, error }, now);
     return { state, error };
   }
@@ -297,6 +398,12 @@ export async function resolveUnknown(
       continue;
     }
     if (now.getTime() - Date.parse(row.createdAt) >= maxAgeMinutes * 60_000) {
+      const found = await wideIssueSearch(forges, row);
+      if (found) {
+        markDone(db, row.opKey, found, now);
+        resolved++;
+        continue;
+      }
       updateOutbox(
         db,
         row.opKey,
@@ -332,6 +439,14 @@ function truncate(text: string, maxLen: number): string {
  * (code spans included, so no span boundary can revive one), and truncates without splitting a
  * code span.
  */
+/**
+ * `sanitizeForgeText` for crew-written issue text, which also breaks `#N` and `owner/repo#N`
+ * references so a crew issue cannot link, close or notify other issues.
+ */
+export function sanitizeCrewText(text: string, secrets: string[]): string {
+  return sanitizeForgeText(text, secrets).replace(/#(?=\d)/g, `#${ZWJ}`);
+}
+
 export function sanitizeForgeText(text: string, secrets: string[], maxLen = 60_000): string {
   let out = text;
   for (const s of secrets) if (s) out = out.split(s).join('[redacted]');

@@ -1,0 +1,217 @@
+import { createHash } from 'node:crypto';
+import type { DropZoneConfig } from '../config.js';
+import type { Db } from '../db/open.js';
+import { getZoneMode, isKilled } from '../db/repo.js';
+import {
+  bodyWithoutMarker,
+  type CreateIssuePayload,
+  type ForgePair,
+  type OpResult,
+  opKeys,
+  runOp,
+  type SetLabelsPayload,
+  sanitizeCrewText,
+  type UpdateIssuePayload,
+} from '../outbox.js';
+import {
+  type CrewIssue,
+  type CrewIssuePatch,
+  type CrewIssueState,
+  listCrewIssues,
+  setCrewIssue,
+} from './store.js';
+
+const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex');
+
+/** The hash a promotion compares: the sanitised body as written, without its marker line. */
+export const crewBodySha = (sanitised: string): string => sha256(sanitised.trimEnd());
+
+const PENDING: CrewIssueState[] = ['filing', 'promote_held', 'promoting', 'revising', 'rejecting'];
+
+type Step = { result: OpResult; done: CrewIssuePatch };
+
+/**
+ * Whether another crew issue of the same objective is promoted and its work is not merged yet.
+ * Without blocker links this keeps an objective's issues landing one at a time.
+ */
+function objectiveBusy(db: Db, row: CrewIssue): boolean {
+  return (
+    db
+      .prepare(
+        `SELECT 1 FROM crew_issues c
+           LEFT JOIN work_items w ON w.drop_zone_id = c.zone_id AND w.issue_number = c.number
+         WHERE c.zone_id = ? AND c.objective = ? AND c.id <> ? AND c.state = 'promoted'
+           AND NOT (COALESCE(w.state, '') = 'done' AND COALESCE(w.reason, '') = 'merged')
+         LIMIT 1`,
+      )
+      .get(row.zoneId, row.objective, row.id) !== undefined
+  );
+}
+
+async function file(
+  db: Db,
+  forges: ForgePair,
+  zone: DropZoneConfig,
+  row: CrewIssue,
+  secrets: string[],
+  now: Date,
+): Promise<Step> {
+  const title = sanitizeCrewText(row.title, secrets);
+  const body = sanitizeCrewText(row.body, secrets);
+  const bodySha = crewBodySha(body);
+  if (row.bodySha !== bodySha) setCrewIssue(db, row.id, { bodySha }, now);
+  const payload: CreateIssuePayload = {
+    title,
+    body,
+    labels: [zone.crew.stagedLabel, ...(row.priority ? [row.priority] : [])],
+    since: row.createdAt,
+  };
+  const result = await runOp(
+    db,
+    forges,
+    {
+      kind: 'create_issue',
+      opKey: opKeys.issue(zone.id, row.objective, row.key),
+      zoneId: zone.id,
+      itemId: null,
+      payload,
+    },
+    now,
+  );
+  const number = (result.result as { number?: number } | undefined)?.number;
+  return { result, done: { state: 'staged', ...(number !== undefined ? { number } : {}) } };
+}
+
+/** `null` when the promotion must wait (or go back to staged) instead of writing labels. */
+async function promote(
+  db: Db,
+  forges: ForgePair,
+  zone: DropZoneConfig,
+  row: CrewIssue,
+  now: Date,
+): Promise<Step | 'wait' | 'changed'> {
+  if (row.number === null) return 'wait';
+  if (objectiveBusy(db, row)) return 'wait';
+  const live = await forges.author.getIssue(row.number);
+  if (!live) return 'wait';
+  // A body edited on the forge since it was staged is not what Command approved.
+  if (row.bodySha === null || sha256(bodyWithoutMarker(live.body)) !== row.bodySha) {
+    return 'changed';
+  }
+  const payload: SetLabelsPayload = {
+    number: row.number,
+    add: [zone.readyLabel],
+    remove: [zone.crew.stagedLabel],
+  };
+  const result = await runOp(
+    db,
+    forges,
+    { kind: 'set_labels', opKey: opKeys.promote(row.id), zoneId: zone.id, itemId: null, payload },
+    now,
+  );
+  return { result, done: { state: 'promoted' } };
+}
+
+async function revise(
+  db: Db,
+  forges: ForgePair,
+  zone: DropZoneConfig,
+  row: CrewIssue,
+  secrets: string[],
+  now: Date,
+): Promise<Step | 'wait'> {
+  if (row.number === null) return 'wait';
+  const title = sanitizeCrewText(row.title, secrets);
+  const body = sanitizeCrewText(row.body, secrets);
+  const bodySha = crewBodySha(body);
+  const payload: UpdateIssuePayload = { number: row.number, title, body };
+  const result = await runOp(
+    db,
+    forges,
+    {
+      kind: 'update_issue',
+      opKey: opKeys.update(row.id, bodySha.slice(0, 12)),
+      zoneId: zone.id,
+      itemId: null,
+      payload,
+    },
+    now,
+  );
+  return { result, done: { state: 'staged', bodySha } };
+}
+
+async function reject(
+  db: Db,
+  forges: ForgePair,
+  zone: DropZoneConfig,
+  row: CrewIssue,
+  now: Date,
+): Promise<Step | 'wait'> {
+  if (row.number === null) return 'wait';
+  const payload: UpdateIssuePayload = { number: row.number, state: 'closed' };
+  const result = await runOp(
+    db,
+    forges,
+    { kind: 'update_issue', opKey: opKeys.close(row.id), zoneId: zone.id, itemId: null, payload },
+    now,
+  );
+  return { result, done: { state: 'rejected' } };
+}
+
+/**
+ * Moves crew issues along by their forge writes, all through the outbox as the author identity.
+ * Only in an active zone with the kill switch off; returns how many issues changed state.
+ */
+export async function flushCrewOps(
+  db: Db,
+  forges: ForgePair,
+  zone: DropZoneConfig,
+  secrets: string[],
+  now: Date,
+): Promise<number> {
+  if (isKilled(db) || getZoneMode(db, zone.id, zone.mode) !== 'active') return 0;
+  let moved = 0;
+  for (const row of listCrewIssues(db, zone.id, PENDING)) {
+    let step: Step | 'wait' | 'changed';
+    try {
+      switch (row.state) {
+        case 'filing':
+          step = await file(db, forges, zone, row, secrets, now);
+          break;
+        case 'promote_held':
+          if (row.holdUntil !== null && now.getTime() < Date.parse(row.holdUntil)) continue;
+          setCrewIssue(db, row.id, { state: 'promoting' }, now);
+          moved++;
+          step = await promote(db, forges, zone, { ...row, state: 'promoting' }, now);
+          break;
+        case 'promoting':
+          step = await promote(db, forges, zone, row, now);
+          break;
+        case 'revising':
+          step = await revise(db, forges, zone, row, secrets, now);
+          break;
+        case 'rejecting':
+          step = await reject(db, forges, zone, row, now);
+          break;
+        default:
+          continue;
+      }
+    } catch {
+      continue; // a forge read failed: tried again next pass
+    }
+    if (step === 'wait') continue;
+    if (step === 'changed') {
+      setCrewIssue(db, row.id, { state: 'staged' }, now);
+      moved++;
+      continue;
+    }
+    if (step.result.state === 'done') {
+      setCrewIssue(db, row.id, step.done, now);
+      moved++;
+    } else if (step.result.state === 'failed') {
+      setCrewIssue(db, row.id, { state: 'failed' }, now);
+      moved++;
+    }
+  }
+  return moved;
+}

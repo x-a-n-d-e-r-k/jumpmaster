@@ -5,10 +5,9 @@ import type { Config, DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import { openDb } from '../db/open.js';
 import { type ReconcileReport, reconcileZone } from '../flow/reconcile.js';
-import type { ForgeIssue } from '../forge/github.js';
 import { promptVersions } from '../payloads.js';
 import { syncDropZone } from '../sync.js';
-import { type FakeForge, type FakeForgeState, fakeForgePair } from './fakes.js';
+import { type FakeForge, type FakeForgeState, type FakeIssue, fakeForgePair } from './fakes.js';
 import { makeZone, usageCfg } from './fixtures.js';
 import { tmpDbFile } from './helpers.js';
 
@@ -40,7 +39,7 @@ export interface Harness {
 export async function harness(
   opts: {
     zone?: Partial<DropZoneConfig>;
-    issues?: ForgeIssue[];
+    issues?: FakeIssue[];
     zoneSecrets?: Record<string, string>;
     dataDir?: string;
   } = {},
