@@ -127,9 +127,43 @@ describe('buildSnapshot', () => {
       ]);
     });
 
-    test('the root package.json pinning pnpm 10 accepts a new registry dependency', async () => {
-      addTypesNode(JSON.stringify({ name: 'root', packageManager: 'pnpm@10.4.1' }));
+    const added =
+      'dependency added: @types/node@26.6.5 (verified: registry integrity only; install scripts may run)';
+    const pinned = JSON.stringify({ name: 'root', packageManager: 'pnpm@10.4.1' });
+
+    test('a pnpm 10 pin alone does not accept a new package: the zone must opt in', async () => {
+      addTypesNode(pinned);
+      expect((await snapshotOf()).gateToolChanges).toEqual([added]);
+    });
+
+    test('with trustPnpmBuildBlocking and pnpm 10 pinned a new registry dependency passes', async () => {
+      w.zone.trustPnpmBuildBlocking = true;
+      addTypesNode(pinned);
       expect((await snapshotOf()).gateToolChanges).toEqual([]);
+    });
+
+    test('trusted build blocking still reports an allow-listed build', async () => {
+      w.zone.trustPnpmBuildBlocking = true;
+      addTypesNode(pinned);
+      w.f.state.files.set(
+        'sha1:pnpm-workspace.yaml',
+        "onlyBuiltDependencies:\n  - '@types/node'\n",
+      );
+      expect((await snapshotOf()).gateToolChanges).toEqual([
+        'dependency added: @types/node@26.6.5 (in the build allow-list: its install script runs)',
+      ]);
+    });
+
+    test('trusted build blocking still reports when base allows all builds', async () => {
+      w.zone.trustPnpmBuildBlocking = true;
+      addTypesNode(pinned);
+      w.f.state.files.set(
+        'base0:package.json',
+        JSON.stringify({ name: 'root', pnpm: { dangerouslyAllowAllBuilds: true } }),
+      );
+      expect((await snapshotOf()).gateToolChanges).toEqual([
+        'dependency added: @types/node@26.6.5 (all builds allowed: its install script runs)',
+      ]);
     });
 
     test('a dependency change with no lockfile anywhere fails closed', async () => {

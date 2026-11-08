@@ -30,7 +30,9 @@ import {
   gateToolChanges,
   LOCKFILES,
   lockfileChanges,
+  type PnpmBuildPolicy,
   pnpmBlocksBuilds,
+  pnpmBuildPolicy,
   protectedPathHits,
 } from './guards.js';
 
@@ -246,8 +248,26 @@ async function gateChanges(
       readFile(forges, headSha, pkgPath, unavailable),
     ]);
     if (!baseLock.ok || !headLock.ok || !basePkg.ok || !headPkg.ok) continue;
+    // pnpm 10's build blocking is trusted only when the zone opts in (the server can't see which
+    // pnpm the image runs); allow-listed builds, base or head, are still reported.
+    const blocks =
+      zone.trustPnpmBuildBlocking &&
+      basename(path) === 'pnpm-lock.yaml' &&
+      pnpmBlocksBuilds(headPkg.text);
+    let policy: PnpmBuildPolicy = { allowAll: false, allowed: [] };
+    if (blocks) {
+      const wsPath = join(dirname(path), 'pnpm-workspace.yaml');
+      const [baseWs, headWs] = await Promise.all([
+        readFile(forges, mergeBaseSha, wsPath, unavailable),
+        readFile(forges, headSha, wsPath, unavailable),
+      ]);
+      if (!baseWs.ok || !headWs.ok) continue;
+      policy = pnpmBuildPolicy([basePkg.text, headPkg.text], [baseWs.text, headWs.text]);
+    }
     const opts = {
-      pnpmBlocksBuilds: pnpmBlocksBuilds(headPkg.text),
+      pnpmBlocksBuilds: blocks,
+      allowAllBuilds: policy.allowAll,
+      allowedBuilds: policy.allowed,
       gateBins: gateBins(zone.gates, basePkg.text, headPkg.text),
     };
     for (const t of lockfileChanges(path, baseLock.text, headLock.text, opts)) tools.add(t);

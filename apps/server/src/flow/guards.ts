@@ -511,11 +511,57 @@ function depVersions(block: unknown): Map<string, { dep: string; version: string
   return out;
 }
 
-function pnpmLockChanges(
-  baseText: string | null,
-  headText: string,
-  opts: { pnpmBlocksBuilds: boolean },
-): string[] {
+/** Which packages pnpm 10 still lets build: read from package.json and pnpm-workspace.yaml. */
+export type PnpmBuildPolicy = { allowAll: boolean; allowed: string[] };
+
+type LockOptions = {
+  /** New registry packages pass: the zone trusts pnpm >= 10's build blocking and it is pinned. */
+  pnpmBlocksBuilds: boolean;
+  allowAllBuilds?: boolean;
+  allowedBuilds?: string[];
+  gateBins?: string[];
+};
+
+/**
+ * The union of build allow-lists over the given package.json and pnpm-workspace.yaml texts (base
+ * and head). An allow-list file, an allow-all setting or an unreadable workspace file allow all.
+ */
+export function pnpmBuildPolicy(
+  pkgTexts: (string | null)[],
+  workspaceTexts: (string | null)[],
+): PnpmBuildPolicy {
+  const allowed = new Set<string>();
+  let allowAll = false;
+  const read = (settings: YamlMap) => {
+    if (settings.dangerouslyAllowAllBuilds || settings.onlyBuiltDependenciesFile) allowAll = true;
+    const only = settings.onlyBuiltDependencies;
+    if (Array.isArray(only)) for (const n of only) allowed.add(String(n));
+    else if (only !== undefined && only !== null) allowAll = true;
+    const builds = settings.allowBuilds;
+    if (Array.isArray(builds)) for (const n of builds) allowed.add(String(n));
+    else if (isMap(builds)) {
+      for (const [n, v] of Object.entries(builds)) if (v) allowed.add(n);
+    } else if (builds !== undefined && builds !== null) allowAll = true;
+  };
+  for (const t of pkgTexts) {
+    const pnpm = parsePkg(t).pnpm;
+    if (isMap(pnpm)) read(pnpm);
+  }
+  for (const t of workspaceTexts) {
+    if (t === null) continue;
+    let doc: unknown;
+    try {
+      doc = yaml.load(t, { schema: yaml.CORE_SCHEMA }); // read as pnpm reads it
+    } catch {
+      doc = undefined;
+    }
+    if (isMap(doc)) read(doc);
+    else if (t.trim() !== '') allowAll = true;
+  }
+  return { allowAll, allowed: [...allowed] };
+}
+
+function pnpmLockChanges(baseText: string | null, headText: string, opts: LockOptions): string[] {
   const head = parsePnpmLock(headText);
   const base: PnpmLock | null =
     baseText === null
@@ -551,8 +597,13 @@ function pnpmLockChanges(
       }
       for (const dep of deps) out.push(`${name}: non-registry dependency ${dep}`);
       if (section !== 'packages') continue;
+      const added = `dependency added: ${name}@${version}`;
       if (entry.requiresBuild) out.push(`install script: ${name}`);
-      else if (!opts.pnpmBlocksBuilds) {
+      else if (opts.pnpmBlocksBuilds && opts.allowAllBuilds) {
+        out.push(`${added} (all builds allowed: its install script runs)`);
+      } else if (opts.pnpmBlocksBuilds && opts.allowedBuilds?.includes(name)) {
+        out.push(`${added} (in the build allow-list: its install script runs)`);
+      } else if (!opts.pnpmBlocksBuilds) {
         out.push(
           `dependency added: ${name}@${version} (verified: registry integrity only; install scripts may run)`,
         );
@@ -571,7 +622,7 @@ export function lockfileChanges(
   path: string,
   baseText: string | null,
   headText: string | null,
-  opts: { pnpmBlocksBuilds: boolean; gateBins?: string[] } = { pnpmBlocksBuilds: false },
+  opts: LockOptions = { pnpmBlocksBuilds: false },
 ): string[] {
   const file = basename(path);
   if (file !== 'package-lock.json' && file !== 'npm-shrinkwrap.json' && file !== 'pnpm-lock.yaml') {

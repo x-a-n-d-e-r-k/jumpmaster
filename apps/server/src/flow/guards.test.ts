@@ -13,6 +13,7 @@ import {
   lockfileChanges,
   parsePnpmLock,
   pnpmBlocksBuilds,
+  pnpmBuildPolicy,
   protectedPathHits,
 } from './guards.js';
 
@@ -247,6 +248,30 @@ describe('dependenciesChanged', () => {
   });
 });
 
+describe('pnpmBuildPolicy', () => {
+  test('reads allow-lists from package.json and pnpm-workspace.yaml, base or head', () => {
+    const p = (pnpm: Record<string, unknown>) => JSON.stringify({ name: 'x', pnpm });
+    expect(pnpmBuildPolicy([p({ onlyBuiltDependencies: ['esbuild'] }), null], [null])).toEqual({
+      allowAll: false,
+      allowed: ['esbuild'],
+    });
+    expect(
+      pnpmBuildPolicy(
+        [null],
+        ['onlyBuiltDependencies:\n  - sharp\nallowBuilds:\n  bcrypt: true\n'],
+      ),
+    ).toEqual({ allowAll: false, allowed: ['sharp', 'bcrypt'] });
+    for (const [pkgs, ws] of [
+      [[p({ dangerouslyAllowAllBuilds: true })], []],
+      [[p({ onlyBuiltDependenciesFile: 'x.json' })], []],
+      [[], ['dangerouslyAllowAllBuilds: true\n']],
+      [[], ['not: [valid']],
+    ] as [(string | null)[], (string | null)[]][]) {
+      expect(pnpmBuildPolicy(pkgs, ws).allowAll).toBe(true);
+    }
+  });
+});
+
 describe('pnpmBlocksBuilds', () => {
   test('is true only when packageManager pins pnpm 10 or later', () => {
     const pm = (packageManager?: string) => pkg({}, {}, packageManager ? { packageManager } : {});
@@ -418,6 +443,16 @@ describe('pnpm lockfile', () => {
 
   test('with pnpm 10 pinned a new registry package is accepted', () =>
     expect(pnpm(sample, typesNode26(sample), pnpm10)).toEqual([]));
+
+  test('accepted builds still report a package allowed to build', () => {
+    const head = typesNode26(sample);
+    expect(pnpm(sample, head, { ...pnpm10, allowedBuilds: ['@types/node'] })).toEqual([
+      'dependency added: @types/node@26.6.5 (in the build allow-list: its install script runs)',
+    ]);
+    expect(pnpm(sample, head, { ...pnpm10, allowAllBuilds: true })).toEqual([
+      'dependency added: @types/node@26.6.5 (all builds allowed: its install script runs)',
+    ]);
+  });
 
   test('a new package with a non-registry resolution is reported even with pnpm 10', () =>
     expect(

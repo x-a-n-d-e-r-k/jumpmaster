@@ -136,7 +136,8 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   `CODEOWNERS`, `CLAUDE.md`, `AGENTS.md`, `.mcp.json`, `GOAL.md`, `jumpmaster*.json`), git
   settings (`.gitattributes`, `.gitmodules`), package-manager settings, hooks and patches
   (`.npmrc`, `npm-shrinkwrap.json`, `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `pnpmfile.cjs`,
-  `patches/**`, `.yarnrc`, `.yarnrc.yml`) and test-runner configs (`vitest.config.*`,
+  `patches/**`, `.yarnrc`, `.yarnrc.yml`), installed code and package-manager state
+  (`node_modules/**`, `**/node_modules/**`, `.pnp.*`, `.yarn/**`, `.pnpm-store/**`) and test-runner configs (`vitest.config.*`,
   `vite.config.*`, `jest.config.*`, `.mocharc*`, …); the full list is
   `DEFAULT_PROTECTED_PATHS` in `apps/server/src/config.ts`. Add paths; removing defaults is
   not recommended. A protected-path park is never overridden: a person merges such a PR.
@@ -147,15 +148,23 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   `overrides`/`resolutions`, any key of the `pnpm` field, `packageManager`/`devEngines`, runner
   config keys, a runner version change, and the lockfile. The lockfile is checked whenever one
   is in the PR, or a package.json's dependencies change (the first lockfile walking up from it):
-  - npm (`package-lock.json`, `npm-shrinkwrap.json`): a new or changed package with an install
-    script.
-  - pnpm (`pnpm-lock.yaml`, v6–v9): every entry is compared by full text. A changed entry, a
-    resolution other than registry integrity, an aliased or linked dependency, and a change to
-    `settings`, `overrides`, `patchedDependencies`, `pnpmfileChecksum` or `catalogs` are all
-    reported. A new package is reported as `dependency added` unless the root `package.json`
-    pins `packageManager: pnpm@10` or later, which runs no install script unless allow-listed;
-    the image must then really run pnpm 10 (Corepack or a pinned install), since an older
-    pnpm runs install scripts with only a warning.
+  - npm (`package-lock.json`, `npm-shrinkwrap.json`): for a new or changed package, an install
+    script, a `resolved` URL off the registry host (npm's, or one the base lockfile already
+    uses), a link, and any version change of a package whose name or bin a gate runs.
+  - pnpm (`pnpm-lock.yaml`, v6–v9): read with js-yaml, as pnpm reads it. A lone carriage return,
+    tabs, comments, document markers, anchors, aliases, tags, merge keys and duplicate keys park
+    `lockfile unreadable`. Every entry is compared in full. A changed entry, a resolution
+    other than registry integrity, an aliased or linked dependency, and a change to `settings`,
+    `overrides`, `patchedDependencies`, `pnpmfileChecksum` or `catalogs` are all reported. A
+    new package is reported as `dependency added: … (verified: registry integrity only; install
+    scripts may run)`.
+- `trustPnpmBuildBlocking` (default `false`): set it only when the image really runs pnpm 10 or
+  later (Corepack or a pinned install), since an older pnpm runs install scripts with only a
+  warning. With it on and the root `package.json` pinning `packageManager: pnpm@10` or later, a
+  new registry package passes, because pnpm 10 runs no install script unless allow-listed. A
+  package that may build is still reported: one named in `onlyBuiltDependencies` or
+  `allowBuilds`, or any package when `dangerouslyAllowAllBuilds` or an allow-list file is set,
+  in `package.json` or `pnpm-workspace.yaml`, at base or head.
   - yarn and bun lockfiles are not read: a dependency change parks `lockfile format not
     supported: <file>`. Anything the reader does not expect parks `lockfile unreadable`.
 - `overrideApprovers` (default `[]`): to let a gate script or gate tool change through, a
@@ -163,7 +172,12 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   not enough unless the login is listed here. The approval must be their latest decisive review
   and on the exact head commit: a later change request, a dismissal or any new push (a heal or
   resolve included) parks the PR again until they approve the new head. Bot logins never count.
-  The next pass un-parks the item and the reviewer agent reviews it as usual.
+  The next sync pass that sees a newer review re-decides the item (otherwise it is re-checked
+  hourly), and the reviewer agent then reviews it as usual. The park reason offers this only
+  when the guard read everything it judged; a reason ending `(not fully read: review it by
+  hand)` names a file it could not read. **Starter mode** (the operator's own account is the
+  token for both bots): the operator's login is a bot login, so their approval never counts.
+  Another maintainer must approve, or the operator merges the PR by hand.
 - Budgets are per work item. When one runs out the item parks `budget exhausted: <key>`;
   the retry label resets them (see scenario 5).
 
@@ -307,7 +321,7 @@ JM_GITHUB_REVIEWER_TOKEN JM_GITHUB_READ_TOKEN JM_JOIN_TOKEN JM_OPERATOR_TOKEN`.
 | Items park `heal made no changes for the same findings` | Two heals in a row found nothing to change for the same review findings. Either a finding cannot be met here (waive it: mark the criterion `(manual)` in the issue, then add the retry label) or the review is wrong (fix the issue text, then add the retry label). |
 | Items park `budget exhausted: heal` after gate timeouts | A gate that times out or flakes forces "request changes", and each heal that finds nothing to fix spends the heal budget. Raise the gate's `timeoutMinutes` or fix the flaky test, then add the retry label. |
 | Items park `gate tool changed: …` or `gate script changed: …` | The PR changes what the gates run. Read the listed changes; if they are fine, approve the PR's current head as a maintainer (section 3, `overrideApprovers`) and the next pass un-parks it. Otherwise close the PR or ask for a different change. |
-| Items park `gate tool changed: dependency added: …` on every dependency change in a pnpm project | Pin pnpm 10 or later in the root `package.json` (`"packageManager": "pnpm@10.x.y"`) and make the image run that version; new registry packages then pass. |
+| Items park `gate tool changed: dependency added: …` on every dependency change in a pnpm project | Pin pnpm 10 or later in the root `package.json` (`"packageManager": "pnpm@10.x.y"`), make the image run that version, and set `trustPnpmBuildBlocking: true`; new registry packages then pass unless allowed to build. |
 | Items park `gate tool changed: lockfile unreadable` or `lockfile format not supported: …` | The lockfile could not be read (yarn, bun, a pnpm lockfile older than v6, or an unexpected layout). Review the dependency change yourself and approve the head as a maintainer. |
 | Items park `no pipeline` | `ciRequired` is true but nothing reported. Add CI or set `ciRequired: false`. |
 | A drop fails `image not allowed: …` | Add the zone's image to `JM_ALLOWED_IMAGES` on the stick, spelled exactly. |

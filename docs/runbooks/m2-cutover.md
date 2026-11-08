@@ -104,13 +104,15 @@ If the server itself is unreachable, stop containers on the stick's host with `d
   never carries a tool footer.
 - **Memory:** `memoryMb` also caps swap for the trooper container, so it can't thrash a host it
   shares with other work. Service sidecars have no memory limit yet.
-- **pnpm:** pin pnpm 10 or later in the root `package.json` (`packageManager`) and run that
-  version in the image. Otherwise every new package in `pnpm-lock.yaml` parks `gate tool changed:
-  dependency added: …`. `pnpm-workspace.yaml`, `.pnpmfile.cjs` and `patches/**` are protected
+- **pnpm:** pin pnpm 10 or later in the root `package.json` (`packageManager`), run that
+  version in the image, and set `"trustPnpmBuildBlocking": true`. Otherwise every new package in
+  `pnpm-lock.yaml` parks `gate tool changed: dependency added: …`. Packages allowed to build are
+  still reported. `pnpm-workspace.yaml`, `.pnpmfile.cjs` and `patches/**` are protected
   paths: a PR that touches them always waits for a person.
 - **Gate-change override:** a PR that parks `gate script changed` or `gate tool changed` goes on
   once someone with maintain or admin (or a login in `overrideApprovers` with write access)
-  approves its current head on GitHub. Any new push needs a new approval.
+  approves its current head on GitHub. Any new push needs a new approval. In starter mode the
+  operator's own account is the bots' token, so the operator's approval never counts.
 - **Git hooks:** a project's hooks (husky, lint-staged) run on the agent's commits, but not on the
   trooper's own housekeeping commits, so a hook can't fail a drop after the work is done.
 
@@ -136,7 +138,8 @@ does, and investigate each difference.
   Later decisions (post, merge, heal) only appear for PRs with verdicts from an earlier active run.
 - `would_park` is the most useful signal: protected paths, changed gate scripts and tools, and
   branch protection problems all show up here. A `gate tool changed: dependency added` on every
-  dependency PR means pnpm is not pinned to 10 or later (see Zone settings).
+  dependency PR means pnpm is not pinned to 10 or later, or `trustPnpmBuildBlocking` is off
+  (see Zone settings).
 - `would_enqueue:resume` means a ready issue has an old `agent/issue-N` branch that would be
   continued. Delete the branch or accept it for each one.
 - `adopt_refused` lists PRs that won't be adopted, and why.

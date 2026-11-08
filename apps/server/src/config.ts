@@ -110,6 +110,12 @@ const DropZoneSchema = z.object({
    * change through, besides anyone with maintain or admin. Protected paths are never overridden.
    */
   overrideApprovers: z.array(z.string()).default([]),
+  /**
+   * Accept new registry packages in pnpm-lock.yaml when the root package.json pins pnpm 10 or
+   * later, which runs no install script unless allow-listed. Turn on only when the image really
+   * runs that pnpm: an older pnpm runs install scripts with only a warning.
+   */
+  trustPnpmBuildBlocking: z.boolean().default(false),
   reviewReadToken: z.boolean().default(false),
   /** `false`: the agent adds no Claude co-author trailer or PR attribution. */
   attribution: z.boolean().default(true),
