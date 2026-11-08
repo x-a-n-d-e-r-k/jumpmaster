@@ -4,6 +4,7 @@ import type { Db } from './db/open.js';
 import {
   clearRequestChangesOnHead,
   deleteFailedOutbox,
+  getGateAllowance,
   getParkMark,
   getPullRequest,
   getWorkItem,
@@ -220,12 +221,16 @@ function restoreFromPull(db: Db, item: WorkItem, pr: PullFacts | null, now: Date
 /**
  * Recovers parked items whose cause is gone: the retry label (once per labelling), a reopened PR
  * or issue, a PR that merged after all, a lifted human block / fixed branch protection, forge
- * data that is readable again, or a maintainer's approval of a gate-changing head.
+ * data that is readable again, or a maintainer's approval (or Command's allowance) of a
+ * gate-changing head.
  */
 const MERGE_RETRY_MS = 60 * 60_000;
 const GATE_RECHECK_MS = 60 * 60_000;
 
-/** Whether a gate-parked item has a review newer than the newest seen, or is due an hourly look. */
+/**
+ * Whether a gate-parked item has a review newer than the newest seen, a Command allowance for its
+ * head recorded since it was last re-decided, or is due an hourly look.
+ */
 async function gateParkMayHaveChanged(
   db: Db,
   forges: ForgePair,
@@ -243,7 +248,13 @@ async function gateParkMayHaveChanged(
   const mark = getParkMark(db, itemId);
   const recent =
     mark.checkedAt !== null && now.getTime() - Date.parse(mark.checkedAt) < GATE_RECHECK_MS;
-  if (recent && mark.reviewsSeen !== null && newest <= mark.reviewsSeen) return false;
+  const head = getPullRequest(db, itemId)?.headSha;
+  const allowance = head ? getGateAllowance(db, itemId, head) : undefined;
+  const newAllowance =
+    allowance !== undefined && (mark.checkedAt === null || allowance.ruledAt >= mark.checkedAt);
+  if (recent && !newAllowance && mark.reviewsSeen !== null && newest <= mark.reviewsSeen) {
+    return false;
+  }
   setParkMark(db, itemId, newest, now);
   return true;
 }
@@ -342,8 +353,9 @@ export async function syncParked(
       reason.startsWith('unsafe branch protection') ||
       reason.startsWith('forge data missing') ||
       reason.startsWith(DENIED_PREFIX) ||
-      // A maintainer's approval of the head lifts a gate park: re-decide only once a review newer
-      // than the newest seen appears (one cheap read per pass), or hourly.
+      // A maintainer's approval of the head, or Command's allowance of it, lifts a gate park:
+      // re-decide only once a review newer than the newest seen appears (one cheap read per
+      // pass) or an allowance is recorded, or hourly.
       (GATE_PARK_PREFIXES.some((p) => reason.startsWith(p)) &&
         (await gateParkMayHaveChanged(db, forges, item.id, prNumber, now)))
     ) {

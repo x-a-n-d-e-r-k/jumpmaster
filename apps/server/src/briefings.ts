@@ -2,8 +2,16 @@ import type { DropZoneConfig } from './config.js';
 import { crewBodySha, liveCrewBody } from './crew/flush.js';
 import { getCrewIssue, setCrewIssue } from './crew/store.js';
 import type { Db } from './db/open.js';
-import { activeDropFor, getWorkItem, listWorkItems, setWorkItemState } from './db/repo.js';
+import {
+  activeDropFor,
+  getPullRequest,
+  getWorkItem,
+  listWorkItems,
+  recordGateAllowance,
+  setWorkItemState,
+} from './db/repo.js';
 import { enableFable } from './fable.js';
+import { gateParkAllowable } from './flow/decide.js';
 import type { ForgePair } from './outbox.js';
 import { retryParkedItem } from './sync.js';
 
@@ -20,8 +28,13 @@ export type Effect =
   | 'promote_issue'
   | 'reject_issue'
   | 'restage_issue'
-  | 'enable_fable';
-export type BriefingOption = { id: string; label: string; effect: Effect };
+  | 'enable_fable'
+  | 'allow_gate_change';
+/**
+ * `sha` is set by the server on an `allow_gate_change` option: the head it was offered for. A crew
+ * briefing carries effect `none` only, so it can never offer one.
+ */
+export type BriefingOption = { id: string; label: string; effect: Effect; sha?: string };
 export type BriefingState = 'open' | 'ruled' | 'withdrawn';
 
 export type NewBriefing = {
@@ -274,7 +287,44 @@ export async function applyEffect(
     case 'enable_fable':
       enableFable(db, now);
       return true;
+    case 'allow_gate_change':
+      throw new Error('allow_gate_change applies only through a ruling');
   }
+}
+
+const NOT_ALLOWABLE = 'allow_gate_change needs a server parked briefing with a head';
+
+/**
+ * Applies an `allow_gate_change` ruling: records Command's allowance of the option's head for the
+ * item. Allows nothing (throws `head moved`) when the PR's head is no longer that SHA. Idempotent;
+ * an item that left parked meanwhile is left alone. Returns false when the PR can't be read yet.
+ */
+export async function applyGateAllowance(
+  db: Db,
+  deps: RulingDeps,
+  zoneId: string,
+  ruling: { id: number; subject: string; kind: BriefingKind; source: 'server' | 'crew' },
+  option: BriefingOption,
+  now: Date,
+): Promise<boolean> {
+  const itemId = idOf(ruling.subject, 'item:');
+  if (ruling.source !== 'server' || ruling.kind !== 'parked' || itemId === null || !option.sha) {
+    throw new Error(NOT_ALLOWABLE);
+  }
+  const item = getWorkItem(db, itemId);
+  if (!item || item.dropZoneId !== zoneId || item.state !== 'parked') return true;
+  const prNumber = getPullRequest(db, item.id)?.number ?? item.prNumber;
+  if (prNumber === null) throw new Error('no pull request');
+  let pr: Awaited<ReturnType<ForgePair['author']['getPull']>>;
+  try {
+    pr = await deps.forges(zoneId).author.getPull(prNumber);
+  } catch {
+    return false;
+  }
+  if (!pr || pr.state !== 'open' || pr.merged) throw new Error('pull request not open');
+  if (pr.headSha !== option.sha) throw new Error('head moved');
+  recordGateAllowance(db, { itemId, headSha: option.sha, rulingId: ruling.id }, now);
+  return true;
 }
 
 /**
@@ -289,17 +339,28 @@ export async function applyPendingRulings(
 ): Promise<number> {
   const pending = db
     .prepare(
-      `SELECT r.id, r.choice, b.subject, b.options_json AS optionsJson FROM rulings r
-         JOIN briefings b ON b.id = r.briefing_id
+      `SELECT r.id, r.choice, b.subject, b.kind, b.source, b.options_json AS optionsJson
+         FROM rulings r JOIN briefings b ON b.id = r.briefing_id
        WHERE r.zone_id = ? AND r.applied_at IS NULL AND r.apply_error IS NULL ORDER BY r.id`,
     )
-    .all(zoneId) as { id: number; choice: string; subject: string; optionsJson: string }[];
+    .all(zoneId) as {
+    id: number;
+    choice: string;
+    subject: string;
+    kind: BriefingKind;
+    source: 'server' | 'crew';
+    optionsJson: string;
+  }[];
   let applied = 0;
   for (const r of pending) {
     const option = (JSON.parse(r.optionsJson) as BriefingOption[]).find((o) => o.id === r.choice);
     try {
       if (!option) throw new Error(`option ${r.choice} is not on the briefing`);
-      if (!(await applyEffect(db, deps, zoneId, r.subject, option.effect, now))) continue;
+      const done =
+        option.effect === 'allow_gate_change'
+          ? await applyGateAllowance(db, deps, zoneId, r, option, now)
+          : await applyEffect(db, deps, zoneId, r.subject, option.effect, now);
+      if (!done) continue;
       db.prepare('UPDATE rulings SET applied_at = ? WHERE id = ?').run(now.toISOString(), r.id);
       applied++;
     } catch (err) {
@@ -333,6 +394,21 @@ export function syncParkBriefings(db: Db, zone: DropZoneConfig, now: Date): void
     const at = (parkedAt.get(item.id) as { at: string }).at;
     if (ruledSince.get(zone.id, subject, at)) continue;
     const reason = item.reason ?? 'no reason recorded';
+    const options: BriefingOption[] = [
+      { id: 'retry', label: 'Retry', effect: 'retry_item' },
+      { id: 'leave', label: 'Leave parked', effect: 'none' },
+    ];
+    // A fully read gate park may be let through for the head it was judged on (the last head
+    // read); the reason lists every change, so Command sees what it allows.
+    const head = getPullRequest(db, item.id)?.headSha;
+    if (head && gateParkAllowable(reason)) {
+      options.push({
+        id: 'allow',
+        label: `Allow these gate changes for ${head.slice(0, 7)}`,
+        effect: 'allow_gate_change',
+        sha: head,
+      });
+    }
     raiseBriefing(
       db,
       {
@@ -341,10 +417,7 @@ export function syncParkBriefings(db: Db, zone: DropZoneConfig, now: Date): void
         subject,
         decision: `Issue #${item.issueNumber} is parked. Retry it?`,
         why: reason,
-        options: [
-          { id: 'retry', label: 'Retry', effect: 'retry_item' },
-          { id: 'leave', label: 'Leave parked', effect: 'none' },
-        ],
+        options,
         recommendation: '',
         onHold: `Issue #${item.issueNumber}`,
         source: 'server',
