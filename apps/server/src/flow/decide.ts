@@ -111,7 +111,7 @@ function gateParkReason(what: string, changes: string[]): string {
   return `${what}: ${list}${changes.some(unverified) ? UNVERIFIED_NOTE : OVERRIDE_HINT}`;
 }
 
-const UNVERIFIED_NOTE = ' (not fully read: review it by hand)';
+const UNVERIFIED_NOTE = ' (not fully read: merge it by hand)';
 
 /** A change the guard could not read: an unreadable, missing or unsupported file. */
 const unverified = (c: string): boolean =>
@@ -207,10 +207,13 @@ export function decide(s: Snapshot): Action {
   }
   if (!s.filesComplete) return { kind: 'park', reason: 'protected path: file list truncated' };
   // A maintainer's approval of this exact head lets gate changes through; a push changes the head.
-  if (s.gateScriptChanges.length > 0 && !s.maintainerApproved) {
+  // A change the guard could not fully read is never overridden: a person merges it by hand.
+  const overridable =
+    s.maintainerApproved && ![...s.gateScriptChanges, ...s.gateToolChanges].some(unverified);
+  if (s.gateScriptChanges.length > 0 && !overridable) {
     return { kind: 'park', reason: gateParkReason('gate script changed', s.gateScriptChanges) };
   }
-  if (s.gateToolChanges.length > 0 && !s.maintainerApproved) {
+  if (s.gateToolChanges.length > 0 && !overridable) {
     return { kind: 'park', reason: gateParkReason('gate tool changed', s.gateToolChanges) };
   }
   if (s.protectionProblems === null) return waitForge(s, 'branch rules');

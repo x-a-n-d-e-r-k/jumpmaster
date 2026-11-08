@@ -173,9 +173,10 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   and on the exact head commit: a later change request, a dismissal or any new push (a heal or
   resolve included) parks the PR again until they approve the new head. Bot logins never count.
   The next sync pass that sees a newer review re-decides the item (otherwise it is re-checked
-  hourly), and the reviewer agent then reviews it as usual. The park reason offers this only
-  when the guard read everything it judged; a reason ending `(not fully read: review it by
-  hand)` names a file it could not read. **Starter mode** (the operator's own account is the
+  hourly), and the reviewer agent then reviews it as usual. This works only when the guard read
+  everything it judged: a reason ending `(not fully read: merge it by hand)` names a file it
+  could not read (unreadable, missing or unsupported), and no approval lifts it; a person
+  reviews and merges that PR. **Starter mode** (the operator's own account is the
   token for both bots): the operator's login is a bot login, so their approval never counts.
   Another maintainer must approve, or the operator merges the PR by hand.
 - Budgets are per work item. When one runs out the item parks `budget exhausted: <key>`;
@@ -322,7 +323,7 @@ JM_GITHUB_REVIEWER_TOKEN JM_GITHUB_READ_TOKEN JM_JOIN_TOKEN JM_OPERATOR_TOKEN`.
 | Items park `budget exhausted: heal` after gate timeouts | A gate that times out or flakes forces "request changes", and each heal that finds nothing to fix spends the heal budget. Raise the gate's `timeoutMinutes` or fix the flaky test, then add the retry label. |
 | Items park `gate tool changed: …` or `gate script changed: …` | The PR changes what the gates run. Read the listed changes; if they are fine, approve the PR's current head as a maintainer (section 3, `overrideApprovers`) and the next pass un-parks it. Otherwise close the PR or ask for a different change. |
 | Items park `gate tool changed: dependency added: …` on every dependency change in a pnpm project | Pin pnpm 10 or later in the root `package.json` (`"packageManager": "pnpm@10.x.y"`), make the image run that version, and set `trustPnpmBuildBlocking: true`; new registry packages then pass unless allowed to build. |
-| Items park `gate tool changed: lockfile unreadable` or `lockfile format not supported: …` | The lockfile could not be read (yarn, bun, a pnpm lockfile older than v6, or an unexpected layout). Review the dependency change yourself and approve the head as a maintainer. |
+| Items park `gate tool changed: lockfile unreadable` or `lockfile format not supported: …` | The lockfile could not be read (yarn, bun, a pnpm lockfile older than v6, or an unexpected layout). No approval lifts this park. Review the dependency change yourself and merge the PR by hand, or close it. |
 | Items park `no pipeline` | `ciRequired` is true but nothing reported. Add CI or set `ciRequired: false`. |
 | A drop fails `image not allowed: …` | Add the zone's image to `JM_ALLOWED_IMAGES` on the stick, spelled exactly. |
 | Usage shows gate `closed` | A drop hit a usage limit. Dispatch resumes after the reset time, at most one hour after an unconfirmed limit. |
