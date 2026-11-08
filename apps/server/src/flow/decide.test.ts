@@ -4,7 +4,7 @@ import type { Drop, VerdictRow, WorkItem } from '../db/repo.js';
 import type { ChecksFacts, CompareFacts, ForgeReview, PullFacts } from '../forge/github.js';
 import { t0 } from '../test/helpers.js';
 import { fingerprint } from './budgets.js';
-import { decide, HOLD_REASON, OVERRIDE_HINT, type Snapshot } from './decide.js';
+import { decide, gateParkAllowable, HOLD_REASON, OVERRIDE_HINT, type Snapshot } from './decide.js';
 
 const now = t0;
 const minutesAgo = (m: number): string => new Date(now.getTime() - m * 60_000).toISOString();
@@ -331,6 +331,29 @@ describe('rules in order', () => {
   test('13–14: a maintainer approval of the head lets gate changes through', () => {
     const s = { gateScriptChanges: ['test'], gateToolChanges: ['x'], maintainerApproved: true };
     expect(decide(snap(s))).toEqual(decide(snap()));
+  });
+
+  test('13: a script park offers no override when a tool change was not fully read', () => {
+    const a = decide(
+      snap({ gateScriptChanges: ['test'], gateToolChanges: ['lockfile not found'] }),
+    );
+    expect(a).toEqual({
+      kind: 'park',
+      reason: 'gate script changed: test (not fully read: merge it by hand)',
+    });
+    if (a.kind === 'park') expect(gateParkAllowable(a.reason)).toBe(false);
+  });
+
+  test('gateParkAllowable: only a gate park whose reason offers the override', () => {
+    const reasonOf = (s: Partial<Snapshot>) => {
+      const a = decide(snap(s));
+      return a.kind === 'park' ? a.reason : '';
+    };
+    expect(gateParkAllowable(reasonOf({ gateScriptChanges: ['test'] }))).toBe(true);
+    expect(gateParkAllowable(reasonOf({ gateToolChanges: ['vitest: npm:x@1'] }))).toBe(true);
+    expect(gateParkAllowable(reasonOf({ gateToolChanges: ['lockfile not found'] }))).toBe(false);
+    expect(gateParkAllowable(reasonOf({ protectedHits: ['CODEOWNERS'] }))).toBe(false);
+    expect(gateParkAllowable(`protected path: x${OVERRIDE_HINT}`)).toBe(false);
   });
 
   test('13–14: a Command allowance for the head lets gate changes through', () => {

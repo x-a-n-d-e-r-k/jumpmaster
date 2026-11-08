@@ -98,8 +98,18 @@ export const OVERRIDE_HINT = ' (a maintainer can approve this head to allow it)'
 export const GATE_PARK_PREFIXES = ['gate script changed: ', 'gate tool changed: '];
 const MAX_CHANGE_LIST = 500;
 
-/** Every change, so the approver sees them all, capped with a count of the rest. */
-function gateParkReason(what: string, changes: string[]): string {
+/**
+ * Whether a park reason is a gate park that an approval (or Command's ruling) may lift: decide
+ * ends such a reason with OVERRIDE_HINT only when the guard read every change it judged.
+ */
+export const gateParkAllowable = (reason: string): boolean =>
+  GATE_PARK_PREFIXES.some((p) => reason.startsWith(p)) && reason.endsWith(OVERRIDE_HINT);
+
+/**
+ * Every change, so the approver sees them all, capped with a count of the rest. `allRead` is false
+ * when any gate change on the head (listed here or not) was not fully read.
+ */
+function gateParkReason(what: string, changes: string[], allRead: boolean): string {
   let list = '';
   let shown = 0;
   for (const c of changes) {
@@ -110,7 +120,7 @@ function gateParkReason(what: string, changes: string[]): string {
   }
   if (shown < changes.length) list += `; … (+${changes.length - shown} more)`;
   // The hint is only offered when the guard read everything it judged.
-  return `${what}: ${list}${changes.some(unverified) ? UNVERIFIED_NOTE : OVERRIDE_HINT}`;
+  return `${what}: ${list}${allRead ? OVERRIDE_HINT : UNVERIFIED_NOTE}`;
 }
 
 const UNVERIFIED_NOTE = ' (not fully read: merge it by hand)';
@@ -211,14 +221,19 @@ export function decide(s: Snapshot): Action {
   // A maintainer's approval of this exact head, or Command's ruling for it, lets gate changes
   // through; a push changes the head. A change the guard could not fully read is never
   // overridden: a person merges it by hand.
-  const overridable =
-    (s.maintainerApproved || s.commandAllowed) &&
-    ![...s.gateScriptChanges, ...s.gateToolChanges].some(unverified);
+  const allRead = ![...s.gateScriptChanges, ...s.gateToolChanges].some(unverified);
+  const overridable = (s.maintainerApproved || s.commandAllowed) && allRead;
   if (s.gateScriptChanges.length > 0 && !overridable) {
-    return { kind: 'park', reason: gateParkReason('gate script changed', s.gateScriptChanges) };
+    return {
+      kind: 'park',
+      reason: gateParkReason('gate script changed', s.gateScriptChanges, allRead),
+    };
   }
   if (s.gateToolChanges.length > 0 && !overridable) {
-    return { kind: 'park', reason: gateParkReason('gate tool changed', s.gateToolChanges) };
+    return {
+      kind: 'park',
+      reason: gateParkReason('gate tool changed', s.gateToolChanges, allRead),
+    };
   }
   if (s.protectionProblems === null) return waitForge(s, 'branch rules');
   if (s.protectionProblems.length > 0) {
