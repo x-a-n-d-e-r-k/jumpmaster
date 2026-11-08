@@ -8,6 +8,7 @@ import {
 } from '@jumpmaster/protocol';
 import { listArtifacts } from './artifacts.js';
 import type { DropZoneConfig, UsageConfig } from './config.js';
+import { applyCrewResult } from './crew/results.js';
 import type { Db } from './db/open.js';
 import {
   appendEvents,
@@ -53,6 +54,8 @@ export type ResultDeps = {
   secrets: string[];
   usageCfg: UsageConfig;
   rand?: () => number;
+  /** How long a refute promotion is held for a Reject (one pass); defaults to 60 seconds. */
+  pollSeconds?: number;
 };
 
 const TERMINAL: ReadonlySet<DropState> = new Set(['succeeded', 'failed', 'lost', 'cancelled']);
@@ -439,38 +442,6 @@ export async function applyResult(
       default:
         throw new Error(`unknown drop role ${drop.role}`);
     }
-  } finally {
-    releaseProbe(db, drop.id, deps.usageCfg, now, rand);
-  }
-}
-
-/**
- * A crew drop's result (no work item). Until crew roles are enabled it only releases the probe and
- * fails the drop, so nothing a crew drop returns can reach the forge.
- */
-function applyCrewResult(
-  db: Db,
-  deps: ResultDeps,
-  drop: Drop,
-  result: DropResult,
-  now: Date,
-): void {
-  const rand = deps.rand ?? Math.random;
-  try {
-    if (result.rateLimit) {
-      ingestRateLimit(
-        db,
-        result.rateLimit,
-        { dropId: drop.id, workItemId: null, startedAt: drop.startedAt, outcome: result.status },
-        deps.usageCfg,
-        now,
-        rand,
-      );
-    }
-    updateDrop(db, drop.id, { state: 'failed' });
-    appendEvents(db, drop.id, [
-      { ts: now.toISOString(), kind: 'log', data: { message: 'crew roles not enabled' } },
-    ]);
   } finally {
     releaseProbe(db, drop.id, deps.usageCfg, now, rand);
   }

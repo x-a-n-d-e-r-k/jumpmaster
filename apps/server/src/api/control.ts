@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { ruleBriefing } from '../briefings.js';
 import { allowedHostsOf, type Config } from '../config.js';
+import { requestCrewCycle } from '../crew/schedule.js';
 import type { Db } from '../db/open.js';
 import { activeWorkCount, setKilled, setZoneMode, ZONE_MODES } from '../db/repo.js';
 import { engageKill } from '../leases.js';
@@ -85,6 +86,18 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         }
         deps.kick?.();
         return { briefing: id, rulingId: r.rulingId };
+      },
+    );
+
+    scope.post<{ Params: { id: string } }>(
+      '/api/control/zones/:id/crew-cycle',
+      async (req, reply) => {
+        const zone = config.dropZones.find((z) => z.id === req.params.id);
+        if (!zone) return reply.code(404).send({ error: 'unknown zone' });
+        if (!zone.crew?.enabled) return reply.code(409).send({ error: 'crew is not enabled' });
+        requestCrewCycle(zone.id, now());
+        deps.kick?.();
+        return { zone: zone.id, crewCycle: 'due' };
       },
     );
 

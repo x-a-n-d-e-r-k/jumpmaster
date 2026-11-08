@@ -48,7 +48,7 @@ const errorText = (err: unknown): string => (err instanceof Error ? err.message 
  * the zone's list. The marker decides whatever the login, since the author identity may be the
  * operator's own account.
  */
-function isCrewFiled(issue: ForgeIssue, zone: DropZoneConfig): boolean {
+export function isCrewFiled(issue: ForgeIssue, zone: DropZoneConfig): boolean {
   return (
     isJmIssueBody(issue.body) ||
     issue.authorType === 'Bot' ||

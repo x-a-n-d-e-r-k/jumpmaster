@@ -3,6 +3,7 @@ import { agentBranch, type GateResult, type Role, type Verdict } from '@jumpmast
 import { applyPendingRulings, syncParkBriefings } from '../briefings.js';
 import type { DropZoneConfig, UsageConfig } from '../config.js';
 import { flushCrewOps } from '../crew/flush.js';
+import { enqueueCrew } from '../crew/schedule.js';
 import type { Db } from '../db/open.js';
 import {
   activeDropFor,
@@ -453,8 +454,11 @@ export async function reconcileZone(
       const detail = `issue #${pick.issueNumber}`;
       recordObservation(db, zone.id, pick.id, 'would_enqueue:implement', detail, now);
     }
+    await enqueueCrew(db, forges, zone, pass, versions, usageCfg, now);
     return { actions, merges };
   }
   if (enqueueNext(db, zone, versions.implement, usageCfg, now, branchUnknown) !== null) actions++;
+  // Last, so crew work never takes a place ahead of finishing or implement work.
+  if ((await enqueueCrew(db, forges, zone, pass, versions, usageCfg, now)) !== null) actions++;
   return { actions, merges };
 }

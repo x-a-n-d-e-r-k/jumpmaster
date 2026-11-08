@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
 import { listRulings, raiseBriefing } from '../briefings.js';
 import type { Config } from '../config.js';
+import { nextCrewWork } from '../crew/schedule.js';
 import { ctlRequest } from '../ctl.js';
 import { openDb } from '../db/open.js';
 import {
@@ -28,12 +29,12 @@ afterEach(async () => {
   app = undefined;
 });
 
-function setup(allowedHosts?: string[]) {
+function setup(allowedHosts?: string[], zone = makeZone({ id: 'main' })) {
   const db = openDb(tmpDbFile());
   upsertDropZone(db, { id: 'main', repo: 'o/r', defaultBranch: 'main', configJson: '{}' });
   const config = {
     listen: { host: '127.0.0.1', port: 7420, ...(allowedHosts ? { allowedHosts } : {}) },
-    dropZones: [makeZone({ id: 'main' })],
+    dropZones: [zone],
     secrets: { operatorToken: TOKEN },
   } as unknown as Config;
   app = Fastify();
@@ -177,6 +178,39 @@ describe('ctl', () => {
     expect(ctlRequest(['unkill'])?.body).toEqual({ engaged: false });
     expect(ctlRequest(['pause'])).toBeNull();
     expect(ctlRequest(['nonsense', 'main'])).toBeNull();
+    expect(ctlRequest(['crew-cycle', 'main'])).toEqual({
+      path: '/api/control/zones/main/crew-cycle',
+      body: {},
+    });
+    expect(ctlRequest(['crew-cycle'])).toBeNull();
+  });
+});
+
+describe('crew-cycle route', () => {
+  test('makes the lead cycle due now; 404 for an unknown zone, 409 with the crew off', async () => {
+    const crew = { ...makeZone().crew, enabled: true, cycleMinutes: 60 };
+    const db = setup(undefined, makeZone({ id: 'main', crew }));
+    insertDrop(db, {
+      id: 'lead',
+      dropZoneId: 'main',
+      workItemId: null,
+      role: 'crew-lead',
+      state: 'succeeded',
+      createdAt: new Date(t0.getTime() - 60_000).toISOString(),
+    });
+    const zone = makeZone({ id: 'main', crew });
+    expect(nextCrewWork(db, zone, t0)).toBeNull();
+    expect((await post('/api/control/zones/main/crew-cycle', {})).statusCode).toBe(200);
+    expect(nextCrewWork(db, zone, new Date(t0.getTime() + 1000))).toEqual({ role: 'crew-lead' });
+    expect((await post('/api/control/zones/nope/crew-cycle', {})).statusCode).toBe(404);
+    expect((await post('/api/control/zones/main/crew-cycle', {}, { host: HOST })).statusCode).toBe(
+      401,
+    );
+  });
+
+  test('409 when the crew is off', async () => {
+    setup();
+    expect((await post('/api/control/zones/main/crew-cycle', {})).statusCode).toBe(409);
   });
 });
 

@@ -218,6 +218,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
           secrets: secretList(config.secrets),
           usageCfg: config.usage,
           rand: deps.rand ?? Math.random,
+          pollSeconds: config.pollSeconds,
         },
         drop.id,
         body.data.result,
