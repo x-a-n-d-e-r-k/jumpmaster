@@ -3,6 +3,7 @@
   "listen": { "host": "127.0.0.1", "port": 7420 },
   "dataDir": "./data",
   "pollSeconds": 60,
+  "claude": { "plan": "pro" },
   "dropZones": [
     {
       "id": "main",
@@ -11,7 +12,8 @@
       "gates": [{ "name": "test", "run": "npm test", "timeoutMinutes": 20 }],
       "image": "jumpmaster-trooper:latest",
       "models": { "review": "claude-opus-5-5" },
-      "reviewReadToken": false
+      "reviewReadToken": false,
+      "crew": { "enabled": false, "goalPath": "GOAL.md", "stagedLabel": "agent-staged" }
     }
   ]
 }
