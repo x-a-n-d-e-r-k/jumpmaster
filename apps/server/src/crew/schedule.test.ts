@@ -187,6 +187,17 @@ describe('enqueueCrew', () => {
     expect(nextCrewWork(w.db, w.zone, t0)).toEqual({ role: 'refute', crewIssueId: issue });
   });
 
+  test('a staged issue whose refute budget ran out unjudged is put to Command, once', async () => {
+    const issue = stagedIssue();
+    setCrewIssue(w.db, issue, { refuteCount: 2 }, t0); // two refute drops died without a verdict
+    expect(nextCrewWork(w.db, w.zone, t0)).toEqual({ role: 'crew-lead' });
+    nextCrewWork(w.db, w.zone, plus(t0, MIN));
+    const open = listBriefings(w.db, { zoneId: 'main', state: 'open' });
+    expect(open).toHaveLength(1);
+    expect(open[0]).toMatchObject({ kind: 'refute_exhausted', subject: `issue:${issue}` });
+    expect(open[0]?.options.map((o) => o.effect)).toEqual(['promote_issue', 'reject_issue']);
+  });
+
   test('a ruling newer than the last cycle makes the lead cycle due at once', async () => {
     const l = (await enqueue()) ?? '';
     finish(l);

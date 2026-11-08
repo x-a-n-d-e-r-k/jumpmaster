@@ -320,4 +320,8 @@ describe('crew config', () => {
   test('a zone model naming Fable is a config error', () => {
     expect(() => loadConfig(withZone({ model: 'claude-Fable-1' }), fullEnv)).toThrow(/model/);
   });
+
+  test('crew.maxRefute must be at least 1', () => {
+    expect(() => loadConfig(withZone({ crew: { maxRefute: 0 } }), fullEnv)).toThrow(/maxRefute/);
+  });
 });

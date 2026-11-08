@@ -70,7 +70,7 @@ const CrewSchema = z
     maxStaged: z.number().int().nonnegative().default(CREW_DEFAULTS.maxStaged),
     /** Lets a crew refute promote an issue (still held one pass with a Reject option). */
     refutePromotes: z.boolean().default(CREW_DEFAULTS.refutePromotes),
-    maxRefute: z.number().int().nonnegative().default(CREW_DEFAULTS.maxRefute),
+    maxRefute: z.number().int().min(1).default(CREW_DEFAULTS.maxRefute),
   })
   .default(CREW_DEFAULTS);
 

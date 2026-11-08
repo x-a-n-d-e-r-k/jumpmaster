@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Role } from '@jumpmaster/protocol';
+import { raiseBriefing } from '../briefings.js';
 import type { DropZoneConfig, UsageConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import { getZoneMode, insertDrop, isKilled, recordObservation } from '../db/repo.js';
@@ -8,6 +9,7 @@ import { getGoals } from '../goals.js';
 import type { ForgePair } from '../outbox.js';
 import type { CrewInputJson } from '../payloads.js';
 import { dispatchGate } from '../usage.js';
+import { PROMOTE_OPTIONS, subjectOf } from './flush.js';
 import { crewLeadInput, diagnoseInput, refuteInput } from './inputs.js';
 
 export type { CrewInputJson } from '../payloads.js';
@@ -55,6 +57,33 @@ export function nextCrewWork(db: Db, zone: DropZoneConfig, now: Date): CrewWork 
     )
     .get(zone.id, zone.crew.maxRefute) as { id: number } | undefined;
   if (refute) return { role: 'refute', crewIssueId: refute.id };
+
+  // Refute attempts that died (failed, rate-limited, invalid) used up the budget with the current
+  // body unjudged: put it to Command rather than leave it staged forever.
+  const exhausted = db
+    .prepare(
+      `SELECT id, number, key FROM crew_issues WHERE zone_id = ? AND state = 'staged'
+         AND body_sha IS NOT NULL AND (refuted_sha IS NULL OR refuted_sha <> body_sha)
+         AND refute_count >= ?`,
+    )
+    .all(zone.id, zone.crew.maxRefute) as { id: number; number: number | null; key: string }[];
+  for (const c of exhausted) {
+    const label = c.number !== null ? `crew issue #${c.number}` : `crew issue ${c.key}`;
+    raiseBriefing(
+      db,
+      {
+        zoneId: zone.id,
+        kind: 'refute_exhausted',
+        subject: subjectOf(c),
+        decision: `Promote ${label} without a refute verdict?`,
+        why: `Its ${zone.crew.maxRefute} refute attempts ended without judging the current text.`,
+        options: PROMOTE_OPTIONS,
+        onHold: label,
+        source: 'server',
+      },
+      now,
+    );
+  }
 
   const last = db
     .prepare(
