@@ -332,6 +332,8 @@ export type AttemptKey =
   | 'resume'
   | 'review'
   | 'no_change'
+  /** A heal that changed nothing; `lastFingerprint` is the findings it could not act on. */
+  | 'heal_no_change'
   | 'rate_limit';
 
 export interface PullRequestRow {

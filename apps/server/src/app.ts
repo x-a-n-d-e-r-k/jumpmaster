@@ -29,6 +29,7 @@ const ATTEMPT_KEYS: AttemptKey[] = [
   'resume',
   'review',
   'no_change',
+  'heal_no_change',
   'rate_limit',
 ];
 

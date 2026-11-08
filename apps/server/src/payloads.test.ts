@@ -373,7 +373,9 @@ describe('prompts', () => {
     expect(rules[0]).toMatch(/^1\. Check that the change implements the issue/);
     const ac = rules[1] ?? '';
     expect(ac).toMatch(/^2\. /);
-    expect(ac).toMatch(/every acceptance criterion[^.]*diff[^.]*gate results[^.]*author's reports/i);
+    expect(ac).toMatch(
+      /every acceptance criterion[^.]*diff[^.]*gate results[^.]*author's reports/i,
+    );
     expect(ac).toMatch(/A report's claim is not evidence by itself/);
     expect(ac).toMatch(/re-run a read-only command/);
     expect(ac).toMatch(/not met or not shown to be met is `major`/);

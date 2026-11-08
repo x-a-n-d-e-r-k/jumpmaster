@@ -12,6 +12,7 @@ import {
   insertDrop,
   latestVerdict,
   type NewDrop,
+  resetAttempts,
   setAttempts,
   setUsageState,
   setWorkItemState,
@@ -460,6 +461,65 @@ describe('applyResult: heal and resolve', () => {
     expect(workItem(db, 1).state).toBe('pr_open');
     expect(getDrop(db, 'd1')?.state).toBe('succeeded');
     expect(getPullRequest(db, 1)?.headSha).toBe('h1');
+  });
+
+  const healAgain = (db: Db, id: string, fp: string) =>
+    insertDrop(
+      db,
+      {
+        id,
+        dropZoneId: 'main',
+        workItemId: 1,
+        role: 'heal',
+        state: 'running',
+        prNumber: 1,
+        headSha: 'h1',
+        fingerprint: fp,
+      },
+      plus(t0, 1000),
+    );
+
+  test('a heal that changes nothing twice for the same findings parks at once', async () => {
+    const { db, deps } = setup('heal', { fingerprint: 'fp1' });
+    await applyResult(db, deps, 'd1', { status: 'no_changes', gates: [] }, t0);
+    expect(workItem(db, 1).state).toBe('pr_open');
+    healAgain(db, 'd2', 'fp1');
+    await applyResult(db, deps, 'd2', { status: 'no_changes', gates: [] }, plus(t0, 2000));
+    expect(workItem(db, 1)).toMatchObject({
+      state: 'parked',
+      reason: 'heal made no changes for the same findings',
+    });
+    expect(getDrop(db, 'd2')?.state).toBe('succeeded');
+  });
+
+  test('a heal that changes nothing for new findings does not park', async () => {
+    const { db, deps } = setup('heal', { fingerprint: 'fp1' });
+    await applyResult(db, deps, 'd1', { status: 'no_changes', gates: [] }, t0);
+    healAgain(db, 'd2', 'fp2');
+    await applyResult(db, deps, 'd2', { status: 'no_changes', gates: [] }, plus(t0, 2000));
+    expect(workItem(db, 1).state).toBe('pr_open');
+  });
+
+  test('the retry label forgets an earlier no-change heal', async () => {
+    const { db, deps } = setup('heal', { fingerprint: 'fp1' });
+    await applyResult(db, deps, 'd1', { status: 'no_changes', gates: [] }, t0);
+    resetAttempts(db, 1);
+    healAgain(db, 'd2', 'fp1');
+    await applyResult(db, deps, 'd2', { status: 'no_changes', gates: [] }, plus(t0, 2000));
+    expect(workItem(db, 1).state).toBe('pr_open');
+  });
+
+  test('heal blocked parks with its reason; the drop succeeds', async () => {
+    const { db, deps } = setup('heal', { fingerprint: 'fp1' });
+    await applyResult(
+      db,
+      deps,
+      'd1',
+      { status: 'blocked', reason: 'needs a browser', gates: [] },
+      t0,
+    );
+    expect(workItem(db, 1)).toMatchObject({ state: 'parked', reason: 'needs a browser' });
+    expect(getDrop(db, 'd1')?.state).toBe('succeeded');
   });
 
   test('heal interrupted with a checkpoint queues a continuation charged to resume', async () => {

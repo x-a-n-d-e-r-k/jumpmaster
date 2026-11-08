@@ -333,7 +333,7 @@ describe('§16 reviews and heals', () => {
     });
   });
 
-  test('heal that pushes nothing: never reaches approval; parks at maxHeal', async () => {
+  test('heal that pushes nothing: never reaches approval; parks on the second identical try', async () => {
     const h = await harness();
     await toHealQueued(h, 'sha1');
     for (let i = 0; i < h.zone.budgets.maxHeal + 2 && item(h).state === 'pr_open'; i++) {
@@ -341,7 +341,13 @@ describe('§16 reviews and heals', () => {
         await h.finishDrop('heal', { status: 'no_changes', gates: [] });
       await h.reconcile();
     }
-    expect(item(h)).toMatchObject({ state: 'parked', reason: 'budget exhausted: heal' });
+    expect(item(h)).toMatchObject({
+      state: 'parked',
+      reason: 'heal made no changes for the same findings',
+    });
+    expect(h.db.prepare("SELECT COUNT(*) AS n FROM drops WHERE role = 'heal'").get()).toEqual({
+      n: 2,
+    });
     expect(count(h, 'merge')).toBe(0);
     const approvals = h.forge.state.reviews.filter((r) => r.state === 'APPROVED');
     expect(approvals).toHaveLength(0);

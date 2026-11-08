@@ -28,6 +28,7 @@ import {
   chargeNoChange,
   chargeRateLimitRequeue,
   chargeResolveConflict,
+  noteHealNoChange,
   refundCharge,
 } from './flow/budgets.js';
 import { protectedPathHits } from './flow/guards.js';
@@ -346,6 +347,9 @@ function pushResult(c: Ctx, result: DropResult): void {
         if (role === 'heal' && result.headSha) return continueInterrupted(c, result.headSha);
         return finish(c, 'succeeded');
       case 'no_changes':
+        if (role === 'heal' && !noteHealNoChange(db, item.id, drop.fingerprint)) {
+          return park(c, 'heal made no changes for the same findings', 'succeeded');
+        }
         return finish(c, 'succeeded');
       default:
         if (result.status === 'failed' && STALE_REASON.test(result.reason ?? '')) {
