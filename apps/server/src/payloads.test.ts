@@ -298,6 +298,13 @@ describe('author reports in the review prompt', () => {
     expect(current).not.toContain('older trooper');
   });
 
+  test('an empty summary is a current trooper with nothing to report', () => {
+    const p = reviewPrompt([{ role: 'heal', result: done('bbbbbbb222', '') }]);
+    expect(p).not.toContain('### Report for');
+    expect(p).toContain('No author report was recorded for this pull request.');
+    expect(p).not.toContain('older trooper');
+  });
+
   test('only the review prompt carries author reports', () => {
     expect(build(impl).prompt).not.toContain('author-reports');
     expect(build(heal).prompt).not.toContain('author-reports');

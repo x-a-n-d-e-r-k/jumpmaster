@@ -375,9 +375,12 @@ export function asRecord(v: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-/** The agent's summary as an author report, cut to what the protocol accepts. */
-export function reportOf(summary: string | undefined): { summary: string } | Record<string, never> {
-  return summary === undefined ? {} : { summary: summary.slice(0, REPORT_MAX_CHARS) };
+/**
+ * The agent's summary as an author report, cut to what the protocol accepts. Always present (empty
+ * when the agent gave none): the server reads a missing key as an older trooper.
+ */
+export function reportOf(summary: string | undefined): { summary: string } {
+  return { summary: (summary ?? '').slice(0, REPORT_MAX_CHARS) };
 }
 
 /** Usage metadata from the last result line, without undefined keys. */

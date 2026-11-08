@@ -172,6 +172,18 @@ describe('runImplement', () => {
     expect(r).toMatchObject({ status: 'completed', summary: 'done' });
   });
 
+  test('an implement whose agent gave no summary still sends an empty one', async () => {
+    const bare = JSON.stringify({
+      type: 'result',
+      is_error: false,
+      terminal_reason: 'completed',
+      session_id: 's',
+      structured_output: { status: 'COMPLETE' },
+    });
+    const r = await runImplement(impl, world([init('s'), bare], { ahead: 1 }).deps, ctx);
+    expect(r).toMatchObject({ status: 'completed', summary: '' });
+  });
+
   test('the report is truncated to 8000 characters', async () => {
     const w = world([init('s'), resultLine({ summary: 'x'.repeat(9000) })], { ahead: 1 });
     const r = await runImplement(impl, w.deps, ctx);

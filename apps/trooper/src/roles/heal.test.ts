@@ -77,6 +77,13 @@ test('a heal that changes nothing still carries its report', async () => {
   expect(r).toMatchObject({ status: 'no_changes', summary: 'done' });
 });
 
+test('a heal whose agent gave no summary still sends an empty one', async () => {
+  const done = await runHeal(heal, roleWorld({ dirty: true, noSummary: true }).deps, ctx);
+  expect(done).toMatchObject({ status: 'completed', summary: '' });
+  const none = await runHeal(heal, roleWorld({ noSummary: true }).deps, ctx);
+  expect(none).toMatchObject({ status: 'no_changes', summary: '' });
+});
+
 test('heal whose agent committed itself is not no_changes', async () => {
   const r = await runHeal(heal, roleWorld({ agentCommits: 'sha2' }).deps, ctx);
   expect(r.status).toBe('completed');

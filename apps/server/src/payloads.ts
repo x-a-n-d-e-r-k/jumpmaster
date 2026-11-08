@@ -89,7 +89,7 @@ function authorReports(db: Db, drop: Drop): string {
     .filter((r): r is { row: ReportRow; result: StoredResult } => r !== null)
     .filter(({ row, result }) => carriesReport(row.role, result));
   const reports = runs
-    .filter(({ result }) => typeof result.summary === 'string')
+    .filter(({ result }) => typeof result.summary === 'string' && result.summary.trim() !== '')
     .slice(-MAX_REPORTS)
     .map(({ row, result }) => {
       const head = typeof result.headSha === 'string' ? result.headSha : (row.headSha ?? 'unknown');
