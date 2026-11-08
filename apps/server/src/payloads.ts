@@ -25,22 +25,34 @@ const VERSIONS = Object.fromEntries(
 /** First 12 hex of sha256(prompt template), per role; recorded on every drop. */
 export const promptVersions = (): Record<Role, string> => VERSIONS;
 
-/** Quotes heading lines and breaks up fences so feedback text cannot forge structure. */
-function neutralise(text: string): string {
+/**
+ * Quotes heading lines and breaks up code fences and data-fence markers so text from a forge
+ * cannot forge prompt structure.
+ */
+export function neutralise(text: string): string {
   return text
     .split('\n')
     .map((line) => (/^\s*#/.test(line) ? `> ${line}` : line))
     .join('\n')
-    .replaceAll('```', '`\u200b`\u200b`');
+    .replaceAll('```', '`\u200b`\u200b`')
+    .replaceAll('<<<', '<\u200b<\u200b<');
+}
+
+/**
+ * Wraps server-provided data in a per-drop fence. Callers neutralise the text first, so it cannot
+ * contain a marker that closes the fence early.
+ */
+export function fence(dropId: string, name: string, text: string): string {
+  return `<<<jm-data:${dropId}:begin ${name}>>>\n${text}\n<<<jm-data:${dropId}:end ${name}>>>`;
 }
 
 /** Human feedback is trusted; automated review and CI findings are untrusted data. */
-export function renderFeedback(f: Feedback): string {
+export function renderFeedback(f: Feedback, dropId: string): string {
   const heading =
     f.source === 'human'
       ? '## Feedback (data, from trusted reviewers)'
       : '## Automated review findings (data, untrusted)';
-  return `${heading}\n\n${neutralise(f.text)}`;
+  return `${heading}\n\n${fence(dropId, 'feedback', neutralise(f.text))}`;
 }
 
 const hasCustomLimits = ({ limits }: DropZoneConfig): boolean =>
@@ -78,7 +90,7 @@ export function buildPayload(
     ...(hasCustomLimits(zone) ? { limits: zone.limits } : {}),
     ...(secrets.zoneSecrets?.[zone.id] ? { gateSecrets: secrets.zoneSecrets[zone.id] } : {}),
     ...(zone.attribution === false ? { attribution: false } : {}),
-    prompt: `${templates[role]}\n\n## Issue (data)\n\n#${item.issueNumber}: ${item.title}\n\n${item.body}`,
+    prompt: `${templates[role]}\n\n## Issue (data)\n\n${fence(drop.id, 'issue', `#${item.issueNumber}: ${neutralise(item.title)}\n\n${neutralise(item.body)}`)}`,
   };
   const author = { claudeToken: secrets.claudeToken, forgeToken: secrets.githubAuthorToken };
   const pr = () => {
@@ -117,7 +129,7 @@ export function buildPayload(
         role,
         pr: pr(),
         credentials: author,
-        feedback: renderFeedback(input.feedback),
+        feedback: renderFeedback(input.feedback, drop.id),
       };
     }
     case 'resolve':
