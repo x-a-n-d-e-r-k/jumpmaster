@@ -50,6 +50,8 @@ export interface Snapshot {
    * decisive review, APPROVED pr.headSha: gate script and gate tool changes do not park.
    */
   maintainerApproved: boolean;
+  /** Command ruled `allow_gate_change` for exactly pr.headSha (a gate_allowances row). */
+  commandAllowed: boolean;
   /** The newest review's submittedAt on the PR (any author); null when there is none. */
   newestReviewAt: string | null;
   /** null = rules read unavailable; [] when safe or !zone.requireBranchProtection. */
@@ -206,10 +208,12 @@ export function decide(s: Snapshot): Action {
     return { kind: 'park', reason: `protected path: ${s.protectedHits[0]}` };
   }
   if (!s.filesComplete) return { kind: 'park', reason: 'protected path: file list truncated' };
-  // A maintainer's approval of this exact head lets gate changes through; a push changes the head.
-  // A change the guard could not fully read is never overridden: a person merges it by hand.
+  // A maintainer's approval of this exact head, or Command's ruling for it, lets gate changes
+  // through; a push changes the head. A change the guard could not fully read is never
+  // overridden: a person merges it by hand.
   const overridable =
-    s.maintainerApproved && ![...s.gateScriptChanges, ...s.gateToolChanges].some(unverified);
+    (s.maintainerApproved || s.commandAllowed) &&
+    ![...s.gateScriptChanges, ...s.gateToolChanges].some(unverified);
   if (s.gateScriptChanges.length > 0 && !overridable) {
     return { kind: 'park', reason: gateParkReason('gate script changed', s.gateScriptChanges) };
   }

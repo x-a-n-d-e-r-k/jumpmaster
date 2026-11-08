@@ -238,6 +238,34 @@ export function setParkMark(db: Db, id: number, reviewsSeen: string, checkedAt: 
   );
 }
 
+export type GateAllowance = { itemId: number; headSha: string; ruledAt: string; rulingId: number };
+
+/** Records Command's allowance of `headSha`'s gate changes. A repeat is a no-op (first one kept). */
+export function recordGateAllowance(
+  db: Db,
+  a: { itemId: number; headSha: string; rulingId: number },
+  now: Date,
+): void {
+  db.prepare(
+    `INSERT INTO gate_allowances (item_id, head_sha, ruled_at, ruling_id) VALUES (?, ?, ?, ?)
+       ON CONFLICT (item_id, head_sha) DO NOTHING`,
+  ).run(a.itemId, a.headSha, now.toISOString(), a.rulingId);
+}
+
+/** Command's allowance for exactly this item and head, if any. */
+export function getGateAllowance(
+  db: Db,
+  itemId: number,
+  headSha: string,
+): GateAllowance | undefined {
+  return db
+    .prepare(
+      `SELECT item_id AS itemId, head_sha AS headSha, ruled_at AS ruledAt, ruling_id AS rulingId
+         FROM gate_allowances WHERE item_id = ? AND head_sha = ?`,
+    )
+    .get(itemId, headSha) as GateAllowance | undefined;
+}
+
 export function insertDrop(db: Db, d: NewDrop, now?: Date): void {
   db.prepare(
     `INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, stick_id, epoch, lease_expires_at,

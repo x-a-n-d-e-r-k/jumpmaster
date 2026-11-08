@@ -5,6 +5,7 @@ import type { Db } from '../db/open.js';
 import {
   activeDropFor,
   getDropZoneDefaultBranch,
+  getGateAllowance,
   getOutbox,
   getPullRequest,
   type OutboxRow,
@@ -395,6 +396,11 @@ export async function buildSnapshot(
     headSha !== null && (gate.scripts.length > 0 || gate.tools.length > 0)
       ? await maintainerApprovedHead(forges, zone, trusted, headSha, pass.botLogins, unavailable)
       : false;
+  // Command's ruling allows the gate changes of one head only: the head read just now.
+  const commandAllowed =
+    headSha !== null && (gate.scripts.length > 0 || gate.tools.length > 0)
+      ? getGateAllowance(db, item.id, headSha) !== undefined
+      : false;
 
   if (pr && headSha) {
     upsertPullRequest(
@@ -452,6 +458,7 @@ export async function buildSnapshot(
     gateScriptChanges: gate.scripts,
     gateToolChanges: gate.tools,
     maintainerApproved,
+    commandAllowed,
     newestReviewAt: newestReviewAt(reviews),
     protectionProblems: pass.protectionProblems,
     headFirstSeenAt,

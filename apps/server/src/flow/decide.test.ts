@@ -133,6 +133,7 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
     gateScriptChanges: [],
     gateToolChanges: [],
     maintainerApproved: false,
+    commandAllowed: false,
     newestReviewAt: null,
     protectionProblems: [],
     headFirstSeenAt: now.toISOString(),
@@ -331,6 +332,28 @@ describe('rules in order', () => {
     const s = { gateScriptChanges: ['test'], gateToolChanges: ['x'], maintainerApproved: true };
     expect(decide(snap(s))).toEqual(decide(snap()));
   });
+
+  test('13–14: a Command allowance for the head lets gate changes through', () => {
+    const s = { gateScriptChanges: ['test'], gateToolChanges: ['x'], commandAllowed: true };
+    expect(decide(snap(s))).toEqual(decide(snap()));
+  });
+
+  test('13–14: a Command allowance does not lift a park on a change not fully read', () => {
+    for (const s of [
+      { gateToolChanges: ['vitest: npm:x@1', 'lockfile unreadable'] },
+      { gateScriptChanges: ['package.json unreadable'] },
+    ]) {
+      const a = decide(snap({ ...s, commandAllowed: true }));
+      expect(a).toMatchObject({ kind: 'park' });
+      if (a.kind === 'park') expect(a.reason).toMatch(/\(not fully read: merge it by hand\)$/);
+    }
+  });
+
+  test('12: a Command allowance does not lift a protected path park', () =>
+    expect(decide(snap({ protectedHits: ['.github/x.yml'], commandAllowed: true }))).toEqual({
+      kind: 'park',
+      reason: 'protected path: .github/x.yml',
+    }));
 
   test('12: a maintainer approval does not lift a protected path park', () =>
     expect(

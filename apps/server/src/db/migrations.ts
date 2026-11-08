@@ -281,6 +281,17 @@ ALTER TABLE drops ADD COLUMN requested_model TEXT;
 ALTER TABLE drops ADD COLUMN served_model TEXT;
 `;
 
+/** v11: Command's allowance of one head's gate changes, recorded by an `allow_gate_change` ruling. */
+const V11_SQL = `
+CREATE TABLE gate_allowances (
+  item_id    INTEGER NOT NULL REFERENCES work_items(id),
+  head_sha   TEXT NOT NULL,
+  ruled_at   TEXT NOT NULL,
+  ruling_id  INTEGER NOT NULL,
+  PRIMARY KEY (item_id, head_sha)
+);
+`;
+
 export type Migration = { version: number; sql: string; foreignKeysOff?: boolean };
 
 export const MIGRATIONS: Migration[] = [
@@ -294,6 +305,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 8, sql: V8_SQL },
   { version: 9, sql: V9_SQL },
   { version: 10, sql: V10_SQL },
+  { version: 11, sql: V11_SQL },
 ];
 
 /**

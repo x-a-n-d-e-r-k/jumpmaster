@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from 'vitest';
-import { getWorkItem, insertVerdict, type VerdictRow } from '../db/repo.js';
+import { getWorkItem, insertVerdict, recordGateAllowance, type VerdictRow } from '../db/repo.js';
 import { zoneWorld } from '../test/fixtures.js';
 import { decide } from './decide.js';
 import { buildSnapshot, zonePass } from './snapshot.js';
@@ -284,6 +284,17 @@ describe('buildSnapshot', () => {
       const s = await snapshotOf();
       expect(s.maintainerApproved).toBe(false);
       expect(s.forgeUnavailable).toBe('isMaintainer');
+    });
+
+    test('a Command allowance counts only for the exact head', async () => {
+      expect((await snapshotOf()).commandAllowed).toBe(false);
+      recordGateAllowance(w.db, { itemId, headSha: 'sha0', rulingId: 1 }, now);
+      expect((await snapshotOf()).commandAllowed).toBe(false);
+      recordGateAllowance(w.db, { itemId, headSha: 'sha1', rulingId: 2 }, now);
+      expect((await snapshotOf()).commandAllowed).toBe(true);
+      w.f.state.setHead(1, 'sha2');
+      w.f.state.files.set('sha2:package.json', pkg({ test: 'vitest --bail' }));
+      expect((await snapshotOf()).commandAllowed).toBe(false);
     });
 
     test('no gate change: no permission lookup', async () => {
