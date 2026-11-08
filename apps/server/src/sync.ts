@@ -85,6 +85,12 @@ export type SyncResult = {
  * Syncs ready issues into work items, reads the zone pass once, then recovers parked items
  * (`syncParked`). The returned `pass` is reused by the reconciler, so rules are read once per pass.
  */
+/** Each zone's last sync result, kept in memory for the zone page (lost on restart). */
+const lastSyncs = new Map<string, SyncResult>();
+
+/** The zone's last sync result in this process, if any. */
+export const lastSyncResult = (zoneId: string): SyncResult | undefined => lastSyncs.get(zoneId);
+
 export async function syncDropZone(
   db: Db,
   forges: ForgePair,
@@ -176,7 +182,7 @@ export async function syncDropZone(
   }
   const pass = await zonePass(forges, zone, defaultBranch);
   const parked = await syncParked(db, forges, zone, pass, now);
-  return {
+  const result: SyncResult = {
     added,
     skippedUntrusted,
     skippedCrewUnpromoted,
@@ -184,6 +190,8 @@ export async function syncDropZone(
     ...parked,
     pass,
   };
+  lastSyncs.set(zone.id, result);
+  return result;
 }
 
 async function readPull(forges: ForgePair, number: number | null): Promise<PullFacts | null> {
