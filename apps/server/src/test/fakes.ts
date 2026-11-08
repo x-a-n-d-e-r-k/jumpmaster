@@ -29,6 +29,8 @@ export interface FakeForgeState {
   defaultBranch: string;
   logins: Record<Identity, string>;
   trusted: string[];
+  /** Logins with maintain or admin (default none). */
+  maintainers: string[];
   pulls: Map<number, PullFacts>;
   addPull(
     p: Partial<PullFacts> & { headRef: string; headSha: string; author: string; number?: number },
@@ -106,6 +108,7 @@ function createState(opts: {
       reviewer: opts.reviewerLogin ?? 'reviewer-bot',
     },
     trusted: [...opts.trusted],
+    maintainers: [],
     pulls: new Map(),
     addPull(p) {
       const number = p.number ?? nextPull;
@@ -197,6 +200,7 @@ function forgeFor(
     getDefaultBranch: async () => state.defaultBranch,
     listReadyIssues: async (label) => readyIssues(label),
     isTrusted: async (login) => state.trusted.includes(login),
+    isMaintainer: async (login) => state.maintainers.includes(login),
     viewerLogin: async () => me(),
     findOrCreatePullRequest: async (input) => {
       const open = [...state.pulls.values()].find(

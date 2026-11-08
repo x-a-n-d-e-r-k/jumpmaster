@@ -1,4 +1,4 @@
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { agentBranch } from '@jumpmaster/protocol';
 import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
@@ -24,8 +24,15 @@ import { type ForgePair, type OpResult, opKeys } from '../outbox.js';
 import type { Snapshot } from './decide.js';
 import {
   branchProtectionProblems,
+  dependenciesChanged,
+  gateBins,
   gateScriptChanges,
   gateToolChanges,
+  LOCKFILES,
+  lockfileChanges,
+  type PnpmBuildPolicy,
+  pnpmBlocksBuilds,
+  pnpmBuildPolicy,
   protectedPathHits,
 } from './guards.js';
 
@@ -106,17 +113,92 @@ function latestDecisive(reviews: ForgeReview[]): ForgeReview[] {
   return [...latest.values()];
 }
 
+/** The newest review's submittedAt (ISO strings sort by time); null when there is none. */
+export const newestReviewAt = (reviews: ForgeReview[]): string | null =>
+  reviews.reduce<string | null>(
+    (max, r) => (max === null || r.submittedAt > max ? r.submittedAt : max),
+    null,
+  );
+
+/**
+ * Whether someone may let this head's gate changes through: among trusted reviewers' latest
+ * decisive reviews (a later change request or a dismissal cancels an approval), an APPROVED on
+ * exactly `headSha` by a non-bot with maintain/admin, or listed in `zone.overrideApprovers`.
+ */
+async function maintainerApprovedHead(
+  forges: ForgePair,
+  zone: DropZoneConfig,
+  latest: ForgeReview[],
+  headSha: string,
+  bots: string[],
+  unavailable: (method: string) => void,
+): Promise<boolean> {
+  const listed = new Set(zone.overrideApprovers.map((l) => l.toLowerCase()));
+  const botSet = new Set(bots.map((b) => b.toLowerCase()));
+  for (const r of latest) {
+    const login = r.author.toLowerCase();
+    if (r.state !== 'APPROVED' || r.commitId !== headSha) continue;
+    if (botSet.has(login) || login.endsWith('[bot]')) continue;
+    if (listed.has(login)) return true;
+    try {
+      if (await forges.author.isMaintainer(r.author)) return true;
+    } catch {
+      unavailable('isMaintainer');
+    }
+  }
+  return false;
+}
+
 const isPackageJson = (p: string): boolean => p === 'package.json' || p.endsWith('/package.json');
+
+/**
+ * Answered reads (404s included) by `sha:path`, per forge. Callers pass commit SHAs only, whose
+ * contents never change. Least recently used entries go first past either bound.
+ */
+const FILE_CACHE_ENTRIES = 256;
+const FILE_CACHE_BYTES = 64 * 1024 * 1024;
+const fileCaches = new WeakMap<object, { files: Map<string, string | null>; bytes: number }>();
+
+function cached(forge: object, key: string): { hit: boolean; text: string | null } {
+  const c = fileCaches.get(forge);
+  if (!c?.files.has(key)) return { hit: false, text: null };
+  const text = c.files.get(key) ?? null;
+  c.files.delete(key);
+  c.files.set(key, text);
+  return { hit: true, text };
+}
+
+function remember(forge: object, key: string, text: string | null): void {
+  let c = fileCaches.get(forge);
+  if (!c) {
+    c = { files: new Map(), bytes: 0 };
+    fileCaches.set(forge, c);
+  }
+  const size = (t: string | null | undefined) => t?.length ?? 0;
+  if (size(text) > FILE_CACHE_BYTES) return;
+  c.files.set(key, text);
+  c.bytes += size(text);
+  for (const [k, v] of c.files) {
+    if (c.files.size <= FILE_CACHE_ENTRIES && c.bytes <= FILE_CACHE_BYTES) break;
+    c.files.delete(k);
+    c.bytes -= size(v);
+  }
+}
 
 /** A 404 is `text: null`; a thrown read is the forge being unavailable (the pass waits). */
 async function readFile(
   forges: ForgePair,
-  ref: string,
+  sha: string,
   path: string,
   unavailable: (method: string, err?: unknown) => void,
 ): Promise<{ ok: true; text: string | null } | { ok: false }> {
+  const key = `${sha}:${path}`;
+  const hit = cached(forges.author, key);
+  if (hit.hit) return { ok: true, text: hit.text };
   try {
-    return { ok: true, text: await forges.author.getFileAt(ref, path) };
+    const text = await forges.author.getFileAt(sha, path);
+    remember(forges.author, key, text);
+    return { ok: true, text };
   } catch (err) {
     unavailable('getFileAt', err);
     return { ok: false };
@@ -133,33 +215,90 @@ async function gateChanges(
 ): Promise<{ scripts: string[]; tools: string[] }> {
   const scripts = new Set<string>();
   const tools = new Set<string>();
-  const paths = new Set<string>();
+  const pkgPaths = new Set<string>();
+  // Every lockfile in the PR is checked, and each changed package.json's lockfile when its
+  // dependencies change; a workspace's packages share one lockfile, checked once.
+  const lockPaths = new Set<string>();
   for (const f of files) {
-    for (const p of [f.path, f.previousPath]) if (p && isPackageJson(p)) paths.add(p);
+    for (const p of [f.path, f.previousPath]) {
+      if (p && isPackageJson(p)) pkgPaths.add(p);
+      else if (p && LOCKFILES.includes(basename(p))) lockPaths.add(p);
+    }
   }
-  for (const path of paths) {
+  for (const path of pkgPaths) {
     const [basePkg, headPkg] = await Promise.all([
       readFile(forges, mergeBaseSha, path, unavailable),
       readFile(forges, headSha, path, unavailable),
     ]);
     if (!basePkg.ok || !headPkg.ok) continue; // marked unavailable: decide waits
     for (const s of gateScriptChanges(zone.gates, basePkg.text, headPkg.text)) scripts.add(s);
-    const lockPath = join(dirname(path), 'package-lock.json');
-    const [baseLock, headLock] = await Promise.all([
-      readFile(forges, mergeBaseSha, lockPath, unavailable),
-      readFile(forges, headSha, lockPath, unavailable),
+    for (const t of gateToolChanges(zone.gates, basePkg.text, headPkg.text)) tools.add(t);
+    if (!dependenciesChanged(basePkg.text, headPkg.text)) continue;
+    const lock = await findLockfile(forges, headSha, dirname(path), unavailable);
+    if (lock === undefined) continue;
+    if (lock === null) tools.add('lockfile not found');
+    else lockPaths.add(lock);
+  }
+  for (const path of lockPaths) {
+    const pkgPath = join(dirname(path), 'package.json');
+    const [baseLock, headLock, basePkg, headPkg] = await Promise.all([
+      readFile(forges, mergeBaseSha, path, unavailable),
+      readFile(forges, headSha, path, unavailable),
+      readFile(forges, mergeBaseSha, pkgPath, unavailable),
+      readFile(forges, headSha, pkgPath, unavailable),
     ]);
-    for (const t of gateToolChanges(
-      zone.gates,
-      basePkg.text,
-      headPkg.text,
-      baseLock.ok ? baseLock.text : null,
-      headLock.ok ? headLock.text : null,
-    )) {
-      tools.add(t);
+    if (!baseLock.ok || !headLock.ok || !basePkg.ok || !headPkg.ok) continue;
+    // pnpm 10's build blocking is trusted only when the zone opts in (the server can't see which
+    // pnpm the image runs); allow-listed builds, base or head, are still reported.
+    const blocks =
+      zone.trustPnpmBuildBlocking &&
+      basename(path) === 'pnpm-lock.yaml' &&
+      pnpmBlocksBuilds(headPkg.text);
+    let policy: PnpmBuildPolicy = { allowAll: false, allowed: [] };
+    if (blocks) {
+      const wsPath = join(dirname(path), 'pnpm-workspace.yaml');
+      const rcPaths = [...new Set([join(dirname(path), '.npmrc'), '.npmrc'])];
+      const reads = await Promise.all(
+        [wsPath, ...rcPaths].flatMap((p) => [
+          readFile(forges, mergeBaseSha, p, unavailable),
+          readFile(forges, headSha, p, unavailable),
+        ]),
+      );
+      if (reads.some((r) => !r.ok)) continue;
+      const texts = reads.map((r) => (r.ok ? r.text : null));
+      policy = pnpmBuildPolicy([basePkg.text, headPkg.text], texts.slice(0, 2), texts.slice(2));
     }
+    const opts = {
+      pnpmBlocksBuilds: blocks,
+      allowAllBuilds: policy.allowAll,
+      allowedBuilds: policy.allowed,
+      gateBins: gateBins(zone.gates, basePkg.text, headPkg.text),
+    };
+    for (const t of lockfileChanges(path, baseLock.text, headLock.text, opts)) tools.add(t);
   }
   return { scripts: [...scripts], tools: [...tools] };
+}
+
+/**
+ * The lockfile governing a directory at `ref`: the first lockfile found walking up to the repo
+ * root. null when there is none; undefined when a read failed (marked unavailable).
+ */
+async function findLockfile(
+  forges: ForgePair,
+  ref: string,
+  dir: string,
+  unavailable: (method: string, err?: unknown) => void,
+): Promise<string | null | undefined> {
+  for (let d = dir; ; d = dirname(d)) {
+    const here = d === '.' ? '' : d;
+    for (const name of LOCKFILES) {
+      const path = here ? `${here}/${name}` : name;
+      const read = await readFile(forges, ref, path, unavailable);
+      if (!read.ok) return undefined;
+      if (read.text !== null) return path;
+    }
+    if (here === '') return null;
+  }
 }
 
 /**
@@ -252,6 +391,10 @@ export async function buildSnapshot(
     compare && headSha
       ? await gateChanges(forges, zone, files.files, compare.mergeBaseSha, headSha, unavailable)
       : { scripts: [], tools: [] };
+  const maintainerApproved =
+    headSha !== null && (gate.scripts.length > 0 || gate.tools.length > 0)
+      ? await maintainerApprovedHead(forges, zone, trusted, headSha, pass.botLogins, unavailable)
+      : false;
 
   if (pr && headSha) {
     upsertPullRequest(
@@ -308,6 +451,8 @@ export async function buildSnapshot(
     filesComplete: files.complete,
     gateScriptChanges: gate.scripts,
     gateToolChanges: gate.tools,
+    maintainerApproved,
+    newestReviewAt: newestReviewAt(reviews),
     protectionProblems: pass.protectionProblems,
     headFirstSeenAt,
     missingSince,

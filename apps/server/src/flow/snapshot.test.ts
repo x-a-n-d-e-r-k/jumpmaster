@@ -65,6 +65,235 @@ describe('buildSnapshot', () => {
     expect((await snapshotOf()).gateScriptChanges).toEqual(['test']);
   });
 
+  test('a lockfile changed without any package.json is still checked', async () => {
+    const npmLock = (packages: Record<string, unknown>): string =>
+      JSON.stringify({ lockfileVersion: 3, packages: { '': { name: 'x' }, ...packages } });
+    w.f.state.pullFiles.set(1, { files: [{ path: 'package-lock.json' }], complete: true });
+    w.f.state.files.set('base0:package.json', pkg({ test: 'vitest' }));
+    w.f.state.files.set('sha1:package.json', pkg({ test: 'vitest' }));
+    w.f.state.files.set('base0:package-lock.json', npmLock({}));
+    w.f.state.files.set(
+      'sha1:package-lock.json',
+      npmLock({ 'node_modules/evil': { version: '1.0.0', hasInstallScript: true } }),
+    );
+    expect((await snapshotOf()).gateToolChanges).toEqual(['install script: evil']);
+  });
+
+  test('a gate runner bumped in package-lock.json alone is reported', async () => {
+    const npmLock = (v: string): string =>
+      JSON.stringify({
+        lockfileVersion: 3,
+        packages: {
+          '': { name: 'x' },
+          'node_modules/vitest': {
+            version: v,
+            resolved: `https://registry.npmjs.org/vitest/-/vitest-${v}.tgz`,
+          },
+        },
+      });
+    w.f.state.pullFiles.set(1, { files: [{ path: 'package-lock.json' }], complete: true });
+    w.f.state.files.set('base0:package.json', pkg({ test: 'vitest run' }));
+    w.f.state.files.set('sha1:package.json', pkg({ test: 'vitest run' }));
+    w.f.state.files.set('base0:package-lock.json', npmLock('3.0.0'));
+    w.f.state.files.set('sha1:package-lock.json', npmLock('3.0.1'));
+    expect((await snapshotOf()).gateToolChanges).toEqual(['vitest version changed in lockfile']);
+  });
+
+  describe('pnpm workspaces', () => {
+    const lockV9 = (...keys: string[]): string =>
+      [
+        "lockfileVersion: '9.0'",
+        'packages:',
+        ...keys.map((k) => `  '${k}':\n    resolution: {integrity: sha512-${k.length}}`),
+      ].join('\n');
+    const deps = (d: Record<string, string>, extra: Record<string, unknown> = {}) =>
+      JSON.stringify({ name: 'a', devDependencies: d, ...extra });
+    const addTypesNode = (rootPkg: string) => {
+      w.f.state.pullFiles.set(1, {
+        files: [{ path: 'packages/a/package.json' }, { path: 'pnpm-lock.yaml' }],
+        complete: true,
+      });
+      w.f.state.files.set('base0:packages/a/package.json', deps({}));
+      w.f.state.files.set('sha1:packages/a/package.json', deps({ '@types/node': '^26' }));
+      w.f.state.files.set('base0:pnpm-lock.yaml', lockV9('vitest@4.1.0'));
+      w.f.state.files.set('sha1:pnpm-lock.yaml', lockV9('vitest@4.1.0', '@types/node@26.6.5'));
+      w.f.state.files.set('sha1:package.json', rootPkg);
+    };
+
+    test('reads pnpm-lock.yaml at the repo root for a nested package.json', async () => {
+      addTypesNode(JSON.stringify({ name: 'root' }));
+      expect((await snapshotOf()).gateToolChanges).toEqual([
+        'dependency added: @types/node@26.6.5 (verified: registry integrity only; install scripts may run)',
+      ]);
+    });
+
+    const added =
+      'dependency added: @types/node@26.6.5 (verified: registry integrity only; install scripts may run)';
+    const pinned = JSON.stringify({ name: 'root', packageManager: 'pnpm@10.4.1' });
+
+    test('a pnpm 10 pin alone does not accept a new package: the zone must opt in', async () => {
+      addTypesNode(pinned);
+      expect((await snapshotOf()).gateToolChanges).toEqual([added]);
+    });
+
+    test('with trustPnpmBuildBlocking and pnpm 10 pinned a new registry dependency passes', async () => {
+      w.zone.trustPnpmBuildBlocking = true;
+      addTypesNode(pinned);
+      expect((await snapshotOf()).gateToolChanges).toEqual([]);
+    });
+
+    test('trusted build blocking still reports an allow-listed build', async () => {
+      w.zone.trustPnpmBuildBlocking = true;
+      addTypesNode(pinned);
+      w.f.state.files.set(
+        'sha1:pnpm-workspace.yaml',
+        "onlyBuiltDependencies:\n  - '@types/node'\n",
+      );
+      expect((await snapshotOf()).gateToolChanges).toEqual([
+        'dependency added: @types/node@26.6.5 (in the build allow-list: its install script runs)',
+      ]);
+    });
+
+    test('trusted build blocking still reports when a root .npmrc allows all builds', async () => {
+      w.zone.trustPnpmBuildBlocking = true;
+      addTypesNode(pinned);
+      w.f.state.files.set('base0:.npmrc', 'dangerously-allow-all-builds=true\n');
+      expect((await snapshotOf()).gateToolChanges).toEqual([
+        'dependency added: @types/node@26.6.5 (all builds allowed: its install script runs)',
+      ]);
+    });
+
+    test('trusted build blocking still reports when base allows all builds', async () => {
+      w.zone.trustPnpmBuildBlocking = true;
+      addTypesNode(pinned);
+      w.f.state.files.set(
+        'base0:package.json',
+        JSON.stringify({ name: 'root', pnpm: { dangerouslyAllowAllBuilds: true } }),
+      );
+      expect((await snapshotOf()).gateToolChanges).toEqual([
+        'dependency added: @types/node@26.6.5 (all builds allowed: its install script runs)',
+      ]);
+    });
+
+    test('a dependency change with no lockfile anywhere fails closed', async () => {
+      w.f.state.pullFiles.set(1, { files: [{ path: 'packages/a/package.json' }], complete: true });
+      w.f.state.files.set('base0:packages/a/package.json', deps({}));
+      w.f.state.files.set('sha1:packages/a/package.json', deps({ x: '^1' }));
+      expect((await snapshotOf()).gateToolChanges).toEqual(['lockfile not found']);
+    });
+
+    test('a shared lockfile is read once per commit, and reads are memoized across passes', async () => {
+      addTypesNode(JSON.stringify({ name: 'root' }));
+      w.f.state.pullFiles.set(1, {
+        files: [
+          { path: 'packages/a/package.json' },
+          { path: 'packages/b/package.json' },
+          { path: 'pnpm-lock.yaml' },
+        ],
+        complete: true,
+      });
+      w.f.state.files.set('base0:packages/b/package.json', deps({}));
+      w.f.state.files.set('sha1:packages/b/package.json', deps({ x: '^1' }));
+      const reads = () =>
+        w.f.author.calls.filter((c) => c.method === 'getFileAt').map((c) => c.args.join(':'));
+      await snapshotOf();
+      const first = reads();
+      expect(first.filter((r) => r === 'sha1:pnpm-lock.yaml')).toHaveLength(1);
+      expect(first.filter((r) => r === 'base0:pnpm-lock.yaml')).toHaveLength(1);
+      expect(new Set(first).size).toBe(first.length);
+      await snapshotOf();
+      expect(reads()).toEqual(first);
+    });
+
+    test('a dependency change in a yarn project names the unsupported lockfile', async () => {
+      w.f.state.pullFiles.set(1, { files: [{ path: 'packages/a/package.json' }], complete: true });
+      w.f.state.files.set('base0:packages/a/package.json', deps({}));
+      w.f.state.files.set('sha1:packages/a/package.json', deps({ x: '^1' }));
+      w.f.state.files.set('sha1:yarn.lock', '# yarn lockfile v1\n');
+      expect((await snapshotOf()).gateToolChanges).toEqual([
+        'lockfile format not supported: yarn.lock',
+      ]);
+    });
+
+    test('a package.json change without dependency changes reads no lockfile', async () => {
+      w.f.state.pullFiles.set(1, { files: [{ path: 'packages/a/package.json' }], complete: true });
+      w.f.state.files.set('base0:packages/a/package.json', deps({ x: '^1' }));
+      w.f.state.files.set('sha1:packages/a/package.json', deps({ x: '^1' }, { version: '2.0.0' }));
+      expect((await snapshotOf()).gateToolChanges).toEqual([]);
+    });
+  });
+
+  describe('maintainer override of gate changes', () => {
+    const gateChange = () => {
+      w.f.state.pullFiles.set(1, { files: [{ path: 'package.json' }], complete: true });
+      w.f.state.files.set('base0:package.json', pkg({ test: 'vitest' }));
+      w.f.state.files.set('sha1:package.json', pkg({ test: 'vitest --bail' }));
+    };
+    beforeEach(() => {
+      gateChange();
+      w.f.state.maintainers = ['human'];
+    });
+
+    test('a maintainer approval of the head SHA counts', async () => {
+      w.f.state.review({ author: 'human', state: 'APPROVED', commitId: 'sha1' });
+      expect((await snapshotOf()).maintainerApproved).toBe(true);
+    });
+
+    test('an approval of an older head does not count', async () => {
+      w.f.state.review({ author: 'human', state: 'APPROVED', commitId: 'sha0' });
+      expect((await snapshotOf()).maintainerApproved).toBe(false);
+    });
+
+    test('a dismissed approval, or a later change request, cancels it', async () => {
+      w.f.state.review({ id: 1, author: 'human', state: 'DISMISSED', commitId: 'sha1' });
+      expect((await snapshotOf()).maintainerApproved).toBe(false);
+      w.f.state.review({ id: 2, author: 'human', state: 'APPROVED', commitId: 'sha1' });
+      w.f.state.review({ id: 3, author: 'human', state: 'COMMENTED', commitId: 'sha1' });
+      expect((await snapshotOf()).maintainerApproved).toBe(true);
+      w.f.state.review({ id: 4, author: 'human', state: 'CHANGES_REQUESTED', commitId: 'sha1' });
+      expect((await snapshotOf()).maintainerApproved).toBe(false);
+    });
+
+    test('write access alone is not enough', async () => {
+      w.f.state.maintainers = [];
+      w.f.state.review({ author: 'human', state: 'APPROVED', commitId: 'sha1' });
+      expect((await snapshotOf()).maintainerApproved).toBe(false);
+    });
+
+    test('a zone overrideApprover with write access counts; without write it does not', async () => {
+      w.f.state.maintainers = [];
+      w.zone.overrideApprovers = ['Human', 'outsider'];
+      w.f.state.review({ author: 'outsider', state: 'APPROVED', commitId: 'sha1' });
+      expect((await snapshotOf()).maintainerApproved).toBe(false);
+      w.f.state.review({ author: 'human', state: 'APPROVED', commitId: 'sha1' });
+      expect((await snapshotOf()).maintainerApproved).toBe(true);
+    });
+
+    test('bot logins never count, including starter mode where both bots are one login', async () => {
+      w.f.state.logins = { author: 'human', reviewer: 'human' };
+      w.f.state.maintainers = ['human', 'deps[bot]'];
+      w.f.state.trusted.push('deps[bot]');
+      w.f.state.review({ author: 'human', state: 'APPROVED', commitId: 'sha1' });
+      w.f.state.review({ author: 'deps[bot]', state: 'APPROVED', commitId: 'sha1' });
+      expect((await snapshotOf()).maintainerApproved).toBe(false);
+    });
+
+    test('a failed permission lookup is not a maintainer', async () => {
+      w.f.state.review({ author: 'human', state: 'APPROVED', commitId: 'sha1' });
+      w.f.author.failNext('isMaintainer', '5xx');
+      const s = await snapshotOf();
+      expect(s.maintainerApproved).toBe(false);
+      expect(s.forgeUnavailable).toBe('isMaintainer');
+    });
+
+    test('no gate change: no permission lookup', async () => {
+      w.f.state.pullFiles.set(1, { files: [{ path: 'src/a.ts' }], complete: true });
+      w.f.state.review({ author: 'human', state: 'APPROVED', commitId: 'sha1' });
+      await snapshotOf();
+      expect(w.f.author.calls.some((c) => c.method === 'isMaintainer')).toBe(false);
+    });
+  });
+
   test('a thrown package.json read is forge unavailability (the pass waits), not a park', async () => {
     w.f.state.pullFiles.set(1, { files: [{ path: 'pkg/package.json' }], complete: true });
     w.f.author.failNext('getFileAt', '5xx');

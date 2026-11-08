@@ -45,6 +45,13 @@ export interface Snapshot {
   /** Gate-invoked scripts changed vs merge base; '<path> unreadable' for an unreadable package.json. */
   gateScriptChanges: string[];
   gateToolChanges: string[];
+  /**
+   * A trusted non-bot with maintain/admin (or in zone.overrideApprovers) has, as their latest
+   * decisive review, APPROVED pr.headSha: gate script and gate tool changes do not park.
+   */
+  maintainerApproved: boolean;
+  /** The newest review's submittedAt on the PR (any author); null when there is none. */
+  newestReviewAt: string | null;
   /** null = rules read unavailable; [] when safe or !zone.requireBranchProtection. */
   protectionProblems: string[] | null;
   headFirstSeenAt: string;
@@ -84,6 +91,33 @@ const READ_PERMISSION: Record<string, string> = {
 };
 
 export const DENIED_PREFIX = 'forge read denied: ';
+
+export const OVERRIDE_HINT = ' (a maintainer can approve this head to allow it)';
+export const GATE_PARK_PREFIXES = ['gate script changed: ', 'gate tool changed: '];
+const MAX_CHANGE_LIST = 500;
+
+/** Every change, so the approver sees them all, capped with a count of the rest. */
+function gateParkReason(what: string, changes: string[]): string {
+  let list = '';
+  let shown = 0;
+  for (const c of changes) {
+    const next = shown === 0 ? c : `${list}; ${c}`;
+    if (shown > 0 && next.length > MAX_CHANGE_LIST) break;
+    list = next;
+    shown++;
+  }
+  if (shown < changes.length) list += `; … (+${changes.length - shown} more)`;
+  // The hint is only offered when the guard read everything it judged.
+  return `${what}: ${list}${changes.some(unverified) ? UNVERIFIED_NOTE : OVERRIDE_HINT}`;
+}
+
+const UNVERIFIED_NOTE = ' (not fully read: merge it by hand)';
+
+/** A change the guard could not read: an unreadable, missing or unsupported file. */
+const unverified = (c: string): boolean =>
+  c.endsWith(' unreadable') ||
+  c === 'lockfile not found' ||
+  c.startsWith('lockfile format not supported: ');
 
 /** Waits on missing forge data; past the deadline from `missingSince`, parks naming it. */
 function waitForge(s: Snapshot, what: string): Action {
@@ -172,11 +206,15 @@ export function decide(s: Snapshot): Action {
     return { kind: 'park', reason: `protected path: ${s.protectedHits[0]}` };
   }
   if (!s.filesComplete) return { kind: 'park', reason: 'protected path: file list truncated' };
-  if (s.gateScriptChanges.length > 0) {
-    return { kind: 'park', reason: `gate script changed: ${s.gateScriptChanges[0]}` };
+  // A maintainer's approval of this exact head lets gate changes through; a push changes the head.
+  // A change the guard could not fully read is never overridden: a person merges it by hand.
+  const overridable =
+    s.maintainerApproved && ![...s.gateScriptChanges, ...s.gateToolChanges].some(unverified);
+  if (s.gateScriptChanges.length > 0 && !overridable) {
+    return { kind: 'park', reason: gateParkReason('gate script changed', s.gateScriptChanges) };
   }
-  if (s.gateToolChanges.length > 0) {
-    return { kind: 'park', reason: `gate tool changed: ${s.gateToolChanges[0]}` };
+  if (s.gateToolChanges.length > 0 && !overridable) {
+    return { kind: 'park', reason: gateParkReason('gate tool changed', s.gateToolChanges) };
   }
   if (s.protectionProblems === null) return waitForge(s, 'branch rules');
   if (s.protectionProblems.length > 0) {

@@ -222,6 +222,23 @@ describe('GitHubForge', () => {
     expect(await forge.isTrusted('adm')).toBe(true);
   });
 
+  test('a maintainer has maintain or admin; write is not enough; 404 is not one', async () => {
+    const perm = (login: string, body: Record<string, string>) =>
+      nock(api).get(`/repos/o/r/collaborators/${login}/permission`).reply(200, body);
+    perm('wr', { permission: 'write', role_name: 'write' });
+    perm('maint', { permission: 'write', role_name: 'maintain' });
+    perm('adm', { permission: 'admin', role_name: 'admin' });
+    perm('legacy', { permission: 'write' });
+    nock(api).get('/repos/o/r/collaborators/mal/permission').reply(404);
+    nock(api).get('/repos/o/r/collaborators/eve/permission').reply(500);
+    expect(await forge.isMaintainer('wr')).toBe(false);
+    expect(await forge.isMaintainer('maint')).toBe(true);
+    expect(await forge.isMaintainer('adm')).toBe(true);
+    expect(await forge.isMaintainer('legacy')).toBe(false);
+    expect(await forge.isMaintainer('mal')).toBe(false);
+    await expect(forge.isMaintainer('eve')).rejects.toThrow();
+  });
+
   test('findOrCreatePullRequest returns an existing PR for the head branch', async () => {
     nock(api)
       .get('/repos/o/r/pulls')
@@ -503,18 +520,28 @@ describe('GitHubForge', () => {
       });
     });
 
-    test('getFileAt decodes contents and returns null on 404', async () => {
-      nock(api)
+    test('getFileAt reads the raw file (any size) and returns null on 404', async () => {
+      const big = 'x'.repeat(2 * 1024 * 1024);
+      nock(api, { reqheaders: { accept: 'application/vnd.github.raw' } })
         .get('/repos/o/r/contents/a/b.txt')
         .query({ ref: 'main' })
-        .reply(200, {
-          type: 'file',
-          encoding: 'base64',
-          content: Buffer.from('hi\n').toString('base64'),
-        });
+        .reply(200, big, { 'content-type': 'application/vnd.github.raw; charset=utf-8' });
       nock(api).get('/repos/o/r/contents/nope').query({ ref: 'main' }).reply(404, { message: 'x' });
-      expect(await forge.getFileAt('main', 'a/b.txt')).toBe('hi\n');
+      expect(await forge.getFileAt('main', 'a/b.txt')).toBe(big);
       expect(await forge.getFileAt('main', 'nope')).toBeNull();
+    });
+
+    test('getFileAt is null for a directory and decodes a binary file', async () => {
+      nock(api)
+        .get('/repos/o/r/contents/dir')
+        .query({ ref: 'main' })
+        .reply(200, [{ type: 'file', name: 'a' }]);
+      nock(api)
+        .get('/repos/o/r/contents/bun.lockb')
+        .query({ ref: 'main' })
+        .reply(200, Buffer.from('bin'), { 'content-type': 'application/octet-stream' });
+      expect(await forge.getFileAt('main', 'dir')).toBeNull();
+      expect(await forge.getFileAt('main', 'bun.lockb')).toBe('bin');
     });
 
     describe('reviews', () => {

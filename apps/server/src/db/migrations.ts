@@ -123,11 +123,18 @@ const V4_SQL = `
 ALTER TABLE work_items ADD COLUMN blocked_by TEXT NOT NULL DEFAULT '[]';
 `;
 
+/** v5: for a gate park, the newest review seen and when the item was last re-decided. */
+const V5_SQL = `
+ALTER TABLE work_items ADD COLUMN park_reviews_seen TEXT;
+ALTER TABLE work_items ADD COLUMN park_checked_at TEXT;
+`;
+
 export const MIGRATIONS: { version: number; sql: string }[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
   { version: 3, sql: V3_SQL },
   { version: 4, sql: V4_SQL },
+  { version: 5, sql: V5_SQL },
 ];
 
 /**

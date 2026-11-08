@@ -207,6 +207,31 @@ export function setRetryLabelSeen(db: Db, id: number, seen: boolean): void {
   db.prepare('UPDATE work_items SET retry_label_seen = ? WHERE id = ?').run(seen ? 1 : 0, id);
 }
 
+/** For a gate park: the newest review submittedAt seen, and when the item was last re-decided. */
+export function getParkMark(
+  db: Db,
+  id: number,
+): { reviewsSeen: string | null; checkedAt: string | null } {
+  return (
+    (db
+      .prepare(
+        'SELECT park_reviews_seen AS reviewsSeen, park_checked_at AS checkedAt FROM work_items WHERE id = ?',
+      )
+      .get(id) as { reviewsSeen: string | null; checkedAt: string | null } | undefined) ?? {
+      reviewsSeen: null,
+      checkedAt: null,
+    }
+  );
+}
+
+export function setParkMark(db: Db, id: number, reviewsSeen: string, checkedAt: Date): void {
+  db.prepare('UPDATE work_items SET park_reviews_seen = ?, park_checked_at = ? WHERE id = ?').run(
+    reviewsSeen,
+    checkedAt.toISOString(),
+    id,
+  );
+}
+
 export function insertDrop(db: Db, d: NewDrop, now?: Date): void {
   db.prepare(
     `INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, stick_id, epoch, lease_expires_at,

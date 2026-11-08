@@ -16,6 +16,20 @@ export const DEFAULT_PROTECTED_PATHS = [
   'CODEOWNERS',
   'GOAL.md',
   '.npmrc',
+  // Package-manager config, hooks and patches can swap the tools the gates run.
+  'npm-shrinkwrap.json',
+  'pnpm-workspace.yaml',
+  '.pnpmfile.cjs',
+  'pnpmfile.cjs',
+  'patches/**',
+  '.yarnrc',
+  '.yarnrc.yml',
+  // Installed code and package-manager state committed into the tree.
+  'node_modules/**',
+  '**/node_modules/**',
+  '.pnp.*',
+  '.yarn/**',
+  '.pnpm-store/**',
   '.gitattributes',
   '.gitmodules',
   'jumpmaster*.json',
@@ -91,6 +105,17 @@ const DropZoneSchema = z.object({
    */
   authorMayBeAdmin: z.boolean().default(false),
   protectedPaths: z.array(z.string()).default(DEFAULT_PROTECTED_PATHS),
+  /**
+   * Logins (with write access) whose approval of the exact head lets a gate script or gate tool
+   * change through, besides anyone with maintain or admin. Protected paths are never overridden.
+   */
+  overrideApprovers: z.array(z.string()).default([]),
+  /**
+   * Accept new registry packages in pnpm-lock.yaml when the root package.json pins pnpm 10 or
+   * later, which runs no install script unless allow-listed. Turn on only when the image really
+   * runs that pnpm: an older pnpm runs install scripts with only a warning.
+   */
+  trustPnpmBuildBlocking: z.boolean().default(false),
   reviewReadToken: z.boolean().default(false),
   /** `false`: the agent adds no Claude co-author trailer or PR attribution. */
   attribution: z.boolean().default(true),

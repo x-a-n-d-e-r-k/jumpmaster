@@ -4,7 +4,7 @@ import type { Drop, VerdictRow, WorkItem } from '../db/repo.js';
 import type { ChecksFacts, CompareFacts, ForgeReview, PullFacts } from '../forge/github.js';
 import { t0 } from '../test/helpers.js';
 import { fingerprint } from './budgets.js';
-import { decide, HOLD_REASON, type Snapshot } from './decide.js';
+import { decide, HOLD_REASON, OVERRIDE_HINT, type Snapshot } from './decide.js';
 
 const now = t0;
 const minutesAgo = (m: number): string => new Date(now.getTime() - m * 60_000).toISOString();
@@ -132,6 +132,8 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
     filesComplete: true,
     gateScriptChanges: [],
     gateToolChanges: [],
+    maintainerApproved: false,
+    newestReviewAt: null,
     protectionProblems: [],
     headFirstSeenAt: now.toISOString(),
     missingSince: null,
@@ -278,17 +280,62 @@ describe('rules in order', () => {
       reason: 'protected path: file list truncated',
     }));
 
-  test('13: gate script change parks', () =>
+  test('13: gate script change parks, listing every change and the override', () =>
     expect(decide(snap({ gateScriptChanges: ['scripts/test.sh', 'scripts/lint.sh'] }))).toEqual({
       kind: 'park',
-      reason: 'gate script changed: scripts/test.sh',
+      reason: `gate script changed: scripts/test.sh; scripts/lint.sh${OVERRIDE_HINT}`,
     }));
 
-  test('14: gate tool change parks', () =>
+  test('14: gate tool change parks, listing every change and the override', () =>
     expect(decide(snap({ gateToolChanges: ['node_modules/.bin/vitest'] }))).toEqual({
       kind: 'park',
-      reason: 'gate tool changed: node_modules/.bin/vitest',
+      reason: `gate tool changed: node_modules/.bin/vitest${OVERRIDE_HINT}`,
     }));
+
+  test('13–14: a long change list is capped and counts the rest', () => {
+    const changes = Array.from({ length: 40 }, (_, i) => `dependency added: package-${i}@1.0.0`);
+    const a = decide(snap({ gateToolChanges: changes }));
+    if (a.kind !== 'park') throw new Error(a.kind);
+    expect(a.reason.length).toBeLessThanOrEqual(600);
+    expect(a.reason).toMatch(/^gate tool changed: dependency added: package-0@1\.0\.0; /);
+    expect(a.reason).toMatch(/… \(\+\d+ more\) \(a maintainer can approve this head/);
+  });
+
+  test('13–14: no override hint when the guard could not fully read what changed', () => {
+    for (const s of [
+      { gateToolChanges: ['vitest: npm:x@1', 'lockfile unreadable'] },
+      { gateToolChanges: ['lockfile not found'] },
+      { gateToolChanges: ['lockfile format not supported: yarn.lock'] },
+      { gateScriptChanges: ['package.json unreadable'] },
+    ]) {
+      const a = decide(snap(s));
+      if (a.kind !== 'park') throw new Error(a.kind);
+      expect(a.reason).not.toContain(OVERRIDE_HINT);
+      expect(a.reason).toMatch(/ \(not fully read: merge it by hand\)$/);
+    }
+  });
+
+  test('13–14: a maintainer approval does not lift a park on a change not fully read', () => {
+    for (const s of [
+      { gateToolChanges: ['vitest: npm:x@1', 'lockfile unreadable'] },
+      { gateToolChanges: ['lockfile format not supported: yarn.lock'] },
+      { gateScriptChanges: ['package.json unreadable'] },
+    ]) {
+      const a = decide(snap({ ...s, maintainerApproved: true }));
+      expect(a).toMatchObject({ kind: 'park' });
+      if (a.kind === 'park') expect(a.reason).toMatch(/\(not fully read: merge it by hand\)$/);
+    }
+  });
+
+  test('13–14: a maintainer approval of the head lets gate changes through', () => {
+    const s = { gateScriptChanges: ['test'], gateToolChanges: ['x'], maintainerApproved: true };
+    expect(decide(snap(s))).toEqual(decide(snap()));
+  });
+
+  test('12: a maintainer approval does not lift a protected path park', () =>
+    expect(
+      decide(snap({ protectedHits: ['pnpm-workspace.yaml'], maintainerApproved: true })),
+    ).toEqual({ kind: 'park', reason: 'protected path: pnpm-workspace.yaml' }));
 
   test('15: unavailable branch rules wait', () =>
     expect(decide(snap({ protectionProblems: null }))).toEqual({ kind: 'wait', on: 'forge' }));
@@ -579,7 +626,7 @@ describe('overlaps', () => {
       decide(snap({ gateScriptChanges: ['package.json unreadable'], verdictsOnHead: [rc('s')] })),
     ).toEqual({
       kind: 'park',
-      reason: 'gate script changed: package.json unreadable',
+      reason: 'gate script changed: package.json unreadable (not fully read: merge it by hand)',
     }));
 
   test('behind base and request_changes heals first', () => {
