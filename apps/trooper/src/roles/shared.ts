@@ -221,12 +221,14 @@ export function agentSystemPrompt(payload: DropPayload, gateResults?: GateResult
 }
 
 function gateResultsNote(payload: DropPayload, results: GateResult[]): string {
+  if (payload.gates.length === 0) return 'This zone has no gates.\n';
   if (results.length === 0) return 'No gate results were recorded for this head.\n';
   const runOf = new Map(payload.gates.map((g) => [g.name, g.run]));
   const lines = results.map((r) => {
     const run = runOf.get(r.name);
     const label = run === undefined ? r.name : `${r.name} (${run})`;
-    return `- ${label}: exit ${r.exitCode}, ${r.durationMs} ms, timed out: ${r.timedOut ? 'yes' : 'no'}`;
+    if (r.timedOut) return `- ${label}: timed out after ${r.durationMs} ms`;
+    return `- ${label}: exit ${r.exitCode ?? 'none'}, ${r.durationMs} ms, timed out: no`;
   });
   return `The gates ran on this head, in a separate step, before you started. Results:\n${lines.join('\n')}\n`;
 }

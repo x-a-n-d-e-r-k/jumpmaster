@@ -185,6 +185,28 @@ describe('services', () => {
   });
 });
 
+describe('reviewer gate results', () => {
+  const rev = {
+    ...impl,
+    role: 'review',
+    pr: { number: 1, branch: 'agent/issue-5', headSha: 'h' },
+  } as DropPayload;
+
+  test('a timed-out gate reads "timed out", not "exit null"', () => {
+    const p = agentSystemPrompt(rev, [
+      { name: 'test', exitCode: null, durationMs: 300000, timedOut: true, outputTail: '' },
+    ]);
+    expect(p).toContain('- test (npm test): timed out after 300000 ms');
+    expect(p).not.toContain('exit null');
+  });
+
+  test('a zone with no gates says so plainly', () => {
+    const p = agentSystemPrompt({ ...rev, gates: [] } as DropPayload, []);
+    expect(p).toContain('This zone has no gates.');
+    expect(p).not.toContain('No gate results were recorded');
+  });
+});
+
 describe('gate secrets', () => {
   const secret = 'postgres://local/secret-value';
   const withSecret = { ...impl, gateSecrets: { TEST_DB_URL: secret } };
