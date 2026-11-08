@@ -483,18 +483,20 @@ describe('GitHubForge', () => {
           .get('/repos/o/r/actions/runs/11/jobs')
           .query(true)
           .reply(200, {
-            total_count: 3,
+            total_count: 5,
             jobs: [
               run('preflight', 'queued', null),
               run('guard', 'waiting', null),
               run('lint', 'in_progress', null),
+              run('build', 'queued', null),
+              run('preflight', 'queued', null),
             ],
           });
         statusesOnly([]);
         expect(await forge.checksFor('sha1')).toEqual({
           state: 'pending',
-          names: ['preflight', 'guard', 'lint'],
-          queued: ['preflight', 'guard'],
+          names: ['preflight', 'guard', 'lint', 'build', 'preflight'],
+          queued: ['build', 'preflight'], // de-duplicated, sorted; `waiting` is an approval hold
         });
       });
 

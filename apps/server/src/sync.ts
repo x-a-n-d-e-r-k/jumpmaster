@@ -231,6 +231,10 @@ function restoreFromPull(db: Db, item: WorkItem, pr: PullFacts | null, now: Date
  * gate-changing head.
  */
 const MERGE_RETRY_MS = 60 * 60_000;
+
+/** A park on CI that hadn't reported by the deadline (decide step 26). */
+const isNoCiPark = (reason: string): boolean =>
+  reason === 'no pipeline' || reason.startsWith('no CI result');
 const GATE_RECHECK_MS = 60 * 60_000;
 
 /**
@@ -359,6 +363,8 @@ export async function syncParked(
       reason.startsWith('unsafe branch protection') ||
       reason.startsWith('forge data missing') ||
       reason.startsWith(DENIED_PREFIX) ||
+      // CI that reports after the deadline (a runner came back, a lost webhook) clears the park.
+      isNoCiPark(reason) ||
       // A maintainer's approval of the head, or Command's allowance of it, lifts a gate park:
       // re-decide only once a review newer than the newest seen appears (one cheap read per
       // pass) or an allowance is recorded, or hourly.
@@ -369,7 +375,11 @@ export async function syncParked(
       if (!fresh) continue;
       const s = await buildSnapshot(db, forges, zone, fresh, pass, now);
       const action = decide(s);
-      if (action.kind === 'park' && action.reason === reason) {
+      // Still waiting on CI stays parked even if the detail (which check is queued) changed.
+      const same =
+        action.kind === 'park' &&
+        (action.reason === reason || (isNoCiPark(reason) && isNoCiPark(action.reason)));
+      if (same) {
         // Still parked on the same changes, perhaps on a new head: brief what was judged now.
         if (GATE_PARK_PREFIXES.some((p) => reason.startsWith(p))) recordGateParkOf(db, s, now);
       } else {
