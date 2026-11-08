@@ -163,6 +163,25 @@ describe('renderHome loop state', () => {
     expect(html).toContain('<td>review</td>');
   });
 
+  test("shows Command's gate change allowance for the item's head", () => {
+    const html = renderHome({
+      zones: [z],
+      items: [item],
+      drops: [],
+      details: new Map([
+        [1, { headSha: 'abcdef1234567890', gateAllowedSha: 'abcdef1234567890', attempts: {} }],
+      ]),
+    });
+    expect(html).toContain('gate change allowed by Command for abcdef1');
+    const plain = renderHome({
+      zones: [z],
+      items: [item],
+      drops: [],
+      details: new Map([[1, { headSha: 'abcdef1234567890', attempts: {} }]]),
+    });
+    expect(plain).not.toContain('allowed by Command');
+  });
+
   test('escapes verdict summary', () => {
     const html = renderHome({
       zones: [z],

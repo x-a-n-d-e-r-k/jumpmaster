@@ -59,6 +59,8 @@ export interface CrewLine {
 
 export interface ItemDetail {
   headSha?: string;
+  /** The head whose gate changes Command allowed (set only when it is the current head). */
+  gateAllowedSha?: string;
   verdict?: { decision: string; forced: boolean; summary: string };
   attempts: Partial<Record<AttemptKey, number>>;
 }
@@ -225,6 +227,9 @@ export function renderGoals(s: {
 }
 
 function detailCells(d: ItemDetail | undefined): string {
+  const allowed = d?.gateAllowedSha
+    ? `<br><small>gate change allowed by Command for ${escapeHtml(d.gateAllowedSha.slice(0, 7))}</small>`
+    : '';
   const head = d?.headSha ? escapeHtml(d.headSha.slice(0, 7)) : '-';
   const v = d?.verdict;
   const verdict = v
@@ -236,7 +241,7 @@ function detailCells(d: ItemDetail | undefined): string {
         .map(([k, n]) => `${escapeHtml(k)} ${escapeHtml(n)}`)
         .join(', ') || '-'
     : '-';
-  return `<td><code>${head}</code></td><td>${verdict}</td><td>${attempts}</td>`;
+  return `<td><code>${head}</code>${allowed}</td><td>${verdict}</td><td>${attempts}</td>`;
 }
 
 const STYLE = `body{font:14px/1.4 system-ui,sans-serif;margin:2rem auto;max-width:60rem;padding:0 1rem;color:#222}
