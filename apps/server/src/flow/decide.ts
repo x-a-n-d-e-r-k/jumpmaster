@@ -22,6 +22,8 @@ export interface Snapshot {
   checks: ChecksFacts;
   /** Name of the first fresh read that threw (other than getPull); null when all reads succeeded. */
   forgeUnavailable: string | null;
+  /** The first read refused with 403: a token permission problem, not a transient one. */
+  forgeDenied: string | null;
   /** From BranchRules; [] when none. */
   requiredChecks: string[];
   /** Verdicts with headSha === pr.headSha, oldest first. */
@@ -72,6 +74,17 @@ function pastDeadline(s: Snapshot, anchor: string | null): boolean {
   return s.now.getTime() - Date.parse(anchor) > s.zone.ciDeadlineMinutes * 60_000;
 }
 
+/** The token permission each read needs, named in a denied-read park reason. */
+const READ_PERMISSION: Record<string, string> = {
+  checksFor: 'Checks: read and Commit statuses: read',
+  listReviews: 'Pull requests: read',
+  listPullFiles: 'Pull requests: read',
+  branchSha: 'Contents: read',
+  getFileAt: 'Contents: read',
+};
+
+export const DENIED_PREFIX = 'forge read denied: ';
+
 /** Waits on missing forge data; past the deadline from `missingSince`, parks naming it. */
 function waitForge(s: Snapshot, what: string): Action {
   return pastDeadline(s, s.missingSince)
@@ -119,6 +132,11 @@ export function decide(s: Snapshot): Action {
   if (s.activeDrop) return { kind: 'wait', on: 'drop' };
   // 2: a failed read never becomes an empty list or a deleted branch.
   if (s.pr === null) return waitForge(s, 'pr');
+  if (s.forgeDenied !== null) {
+    const need = READ_PERMISSION[s.forgeDenied];
+    const hint = need ? ` (grant the author token ${need})` : '';
+    return { kind: 'park', reason: `${DENIED_PREFIX}${s.forgeDenied}${hint}` };
+  }
   if (s.forgeUnavailable !== null) return waitForge(s, s.forgeUnavailable);
   const pr = s.pr;
   // 3

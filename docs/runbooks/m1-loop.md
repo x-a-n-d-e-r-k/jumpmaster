@@ -43,7 +43,10 @@ Everything from M0, plus:
     collaborator's access to a repository owned by another personal account. It reaches
     every repository that account can, so keep it on the server and use a token made for
     Jumpmaster alone. It never enters a runner.
-  - For a private repository, the author token also needs Issues: read.
+  - For a private repository, the author token also needs Issues: read, and, when the zone
+    requires CI or branch protection requires checks, Checks: read and Commit statuses: read.
+    A read refused with 403 parks the item at once with a reason naming the permission to grant;
+    it recovers on its own once the token can read.
   - The server refuses to start unless the author token is fine-grained. Don't grant it
     Administration: the server can't check that, and an admin's token with it could
     plausibly edit the ruleset.

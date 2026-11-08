@@ -113,12 +113,12 @@ async function readFile(
   forges: ForgePair,
   ref: string,
   path: string,
-  unavailable: (method: string) => void,
+  unavailable: (method: string, err?: unknown) => void,
 ): Promise<{ ok: true; text: string | null } | { ok: false }> {
   try {
     return { ok: true, text: await forges.author.getFileAt(ref, path) };
-  } catch {
-    unavailable('getFileAt');
+  } catch (err) {
+    unavailable('getFileAt', err);
     return { ok: false };
   }
 }
@@ -176,8 +176,10 @@ export async function buildSnapshot(
   now: Date,
 ): Promise<Snapshot> {
   let forgeUnavailable: string | null = null;
-  const unavailable = (method: string) => {
+  let forgeDenied: string | null = null;
+  const unavailable = (method: string, err?: unknown) => {
     forgeUnavailable ??= method;
+    if ((err as { status?: number } | undefined)?.status === 403) forgeDenied ??= method;
   };
   const base = getDropZoneDefaultBranch(db, zone.id) ?? 'main';
   const prRow = getPullRequest(db, item.id);
@@ -202,8 +204,8 @@ export async function buildSnapshot(
   let branchSha: string | null = null;
   try {
     branchSha = await forges.author.branchSha(pr?.headRef ?? agentBranch(item.issueNumber));
-  } catch {
-    unavailable('branchSha');
+  } catch (err) {
+    unavailable('branchSha', err);
   }
 
   let compare: Snapshot['compare'] = null;
@@ -216,20 +218,24 @@ export async function buildSnapshot(
     } catch {
       compare = null;
     }
-    try {
-      checks = await forges.author.checksFor(headSha);
-    } catch {
-      unavailable('checksFor');
+    // Checks matter only when CI is required or branch protection requires named checks; a
+    // private repo's checks need a token permission a zone without CI shouldn't have to grant.
+    if (zone.ciRequired || pass.requiredChecks.length > 0) {
+      try {
+        checks = await forges.author.checksFor(headSha);
+      } catch (err) {
+        unavailable('checksFor', err);
+      }
     }
     try {
       reviews = await forges.author.listReviews(pr.number);
-    } catch {
-      unavailable('listReviews');
+    } catch (err) {
+      unavailable('listReviews', err);
     }
     try {
       files = await forges.author.listPullFiles(pr.number);
-    } catch {
-      unavailable('listPullFiles');
+    } catch (err) {
+      unavailable('listPullFiles', err);
     }
   }
 
@@ -290,6 +296,7 @@ export async function buildSnapshot(
     compare,
     checks,
     forgeUnavailable,
+    forgeDenied,
     requiredChecks: pass.requiredChecks,
     verdictsOnHead,
     reviewOp,
