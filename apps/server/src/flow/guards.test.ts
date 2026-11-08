@@ -6,6 +6,7 @@ import type { BranchRules, BranchRulesRead } from '../forge/github.js';
 import {
   branchProtectionProblems,
   dependenciesChanged,
+  gateBins,
   gateScriptChanges,
   gateToolChanges,
   invokedScripts,
@@ -286,6 +287,73 @@ describe('lockfileChanges: npm', () => {
       expect(lockfileChanges('package-lock.json', base, head)).toEqual(['lockfile unreadable']);
     }
   });
+
+  const reg = (name: string, version: string, host = 'registry.npmjs.org') => ({
+    version,
+    resolved: `https://${host}/${name}/-/${name}-${version}.tgz`,
+    integrity: `sha512-${name}${version}`,
+  });
+  const npm = (base: string, head: string, gateBins: string[] = []) =>
+    lockfileChanges('package-lock.json', base, head, { pnpmBlocksBuilds: false, gateBins });
+
+  test('a new or changed entry resolved off the registry host is reported', () => {
+    const base = lock({ 'node_modules/a': reg('a', '1.0.0') });
+    expect(
+      npm(
+        base,
+        lock({
+          'node_modules/a': { ...reg('a', '1.0.0'), resolved: 'https://evil.example/a.tgz' },
+          'node_modules/b': { version: '1.0.0', resolved: 'git+ssh://git@example.test/b.git' },
+          'node_modules/c': reg('c', '1.0.0'),
+        }),
+      ),
+    ).toEqual([
+      'a: non-registry resolved https://evil.example/a.tgz',
+      'b: non-registry resolved git+ssh://git@example.test/b.git',
+    ]);
+  });
+
+  test('the registry host base entries already use is accepted', () => {
+    const base = lock({ 'node_modules/a': reg('a', '1.0.0', 'npm.example.test') });
+    const head = lock({
+      'node_modules/a': reg('a', '1.0.0', 'npm.example.test'),
+      'node_modules/b': reg('b', '2.0.0', 'npm.example.test'),
+    });
+    expect(npm(base, head)).toEqual([]);
+  });
+
+  test('a linked entry is reported', () =>
+    expect(
+      npm(lock({}), lock({ 'node_modules/vitest': { resolved: 'tools/fake', link: true } })),
+    ).toEqual(['vitest: linked to tools/fake']));
+
+  test('a gate tool changed in the lockfile alone is reported, by name or by bin', () => {
+    const base = lock({
+      'node_modules/vitest': reg('vitest', '3.0.0'),
+      'node_modules/typescript': { ...reg('typescript', '5.0.0'), bin: { tsc: 'bin/tsc' } },
+      'node_modules/lodash': reg('lodash', '4.0.0'),
+    });
+    const head = lock({
+      'node_modules/vitest': reg('vitest', '3.0.1'),
+      'node_modules/typescript': { ...reg('typescript', '5.0.1'), bin: { tsc: 'bin/tsc' } },
+      'node_modules/lodash': reg('lodash', '4.0.1'),
+    });
+    expect(npm(base, head, ['vitest', 'tsc'])).toEqual([
+      'vitest version changed in lockfile',
+      'typescript version changed in lockfile',
+    ]);
+    expect(npm(base, head)).toEqual([]);
+  });
+});
+
+describe('gateBins', () => {
+  test('first words of invoked scripts and npx targets', () =>
+    expect(
+      gateBins(
+        [gate('npm test'), gate('npx --yes eslint .')],
+        pkg({ test: 'npm run unit', unit: 'vitest run', lint: 'biome check' }),
+      ).sort(),
+    ).toEqual(['biome', 'eslint', 'npm', 'vitest'])); // npx is unclassified: every script counts
 });
 
 describe('lockfileChanges: unsupported formats', () => {

@@ -79,6 +79,26 @@ describe('buildSnapshot', () => {
     expect((await snapshotOf()).gateToolChanges).toEqual(['install script: evil']);
   });
 
+  test('a gate runner bumped in package-lock.json alone is reported', async () => {
+    const npmLock = (v: string): string =>
+      JSON.stringify({
+        lockfileVersion: 3,
+        packages: {
+          '': { name: 'x' },
+          'node_modules/vitest': {
+            version: v,
+            resolved: `https://registry.npmjs.org/vitest/-/vitest-${v}.tgz`,
+          },
+        },
+      });
+    w.f.state.pullFiles.set(1, { files: [{ path: 'package-lock.json' }], complete: true });
+    w.f.state.files.set('base0:package.json', pkg({ test: 'vitest run' }));
+    w.f.state.files.set('sha1:package.json', pkg({ test: 'vitest run' }));
+    w.f.state.files.set('base0:package-lock.json', npmLock('3.0.0'));
+    w.f.state.files.set('sha1:package-lock.json', npmLock('3.0.1'));
+    expect((await snapshotOf()).gateToolChanges).toEqual(['vitest version changed in lockfile']);
+  });
+
   describe('pnpm workspaces', () => {
     const lockV9 = (...keys: string[]): string =>
       [

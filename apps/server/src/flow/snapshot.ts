@@ -25,6 +25,7 @@ import type { Snapshot } from './decide.js';
 import {
   branchProtectionProblems,
   dependenciesChanged,
+  gateBins,
   gateScriptChanges,
   gateToolChanges,
   LOCKFILES,
@@ -238,13 +239,17 @@ async function gateChanges(
   }
   for (const path of lockPaths) {
     const pkgPath = join(dirname(path), 'package.json');
-    const [baseLock, headLock, headPkg] = await Promise.all([
+    const [baseLock, headLock, basePkg, headPkg] = await Promise.all([
       readFile(forges, mergeBaseSha, path, unavailable),
       readFile(forges, headSha, path, unavailable),
+      readFile(forges, mergeBaseSha, pkgPath, unavailable),
       readFile(forges, headSha, pkgPath, unavailable),
     ]);
-    if (!baseLock.ok || !headLock.ok || !headPkg.ok) continue;
-    const opts = { pnpmBlocksBuilds: pnpmBlocksBuilds(headPkg.text) };
+    if (!baseLock.ok || !headLock.ok || !basePkg.ok || !headPkg.ok) continue;
+    const opts = {
+      pnpmBlocksBuilds: pnpmBlocksBuilds(headPkg.text),
+      gateBins: gateBins(zone.gates, basePkg.text, headPkg.text),
+    };
     for (const t of lockfileChanges(path, baseLock.text, headLock.text, opts)) tools.add(t);
   }
   return { scripts: [...scripts], tools: [...tools] };

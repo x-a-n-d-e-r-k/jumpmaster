@@ -197,6 +197,39 @@ export function pnpmBlocksBuilds(pkgText: string | null): boolean {
 const asRecord = (v: unknown): Record<string, unknown> =>
   v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 
+/** First words of the scripts the gates invoke, in either package.json. */
+function scriptBins(gates: GateSpec[], base: Pkg, head: Pkg): Set<string> {
+  const names = invokedNames(gates, base, head);
+  const bins = new Set<string>();
+  for (const p of [base, head]) {
+    for (const n of names) {
+      const first = p.scripts?.[n]?.trim().split(/\s+/)[0];
+      if (first) bins.add(first);
+    }
+  }
+  return bins;
+}
+
+/**
+ * Executables the gates run from node_modules: the first word of each invoked script (base or
+ * head package.json) and each `npx` target in a gate command.
+ */
+export function gateBins(
+  gates: GateSpec[],
+  basePkg: string | null,
+  headPkg?: string | null,
+): string[] {
+  const bins = scriptBins(gates, parsePkg(basePkg), parsePkg(headPkg ?? basePkg));
+  for (const g of gates) {
+    for (const seg of g.run.split(/&&|\|\||;|\|/)) {
+      const [tool, ...rest] = seg.trim().split(/\s+/);
+      const target = rest.find((a) => !a.startsWith('-'));
+      if ((tool === 'npx' || tool === 'pnpx') && target) bins.add(target);
+    }
+  }
+  return [...bins];
+}
+
 /**
  * package.json changes that could swap or wrap the tools the gates run. Lockfile contents are
  * judged separately by `lockfileChanges`.
@@ -238,14 +271,7 @@ export function gateToolChanges(
     if (!same(base[key], head[key])) out.push(`${key} config changed`);
   }
 
-  const names = invokedNames(gates, base, head);
-  const bins = new Set<string>();
-  for (const p of [base, head]) {
-    for (const n of names) {
-      const first = p.scripts?.[n]?.trim().split(/\s+/)[0];
-      if (first) bins.add(first);
-    }
-  }
+  const bins = scriptBins(gates, base, head);
   for (const bin of bins) {
     if (nonRegistry.has(bin)) continue;
     if (bin in baseDeps || bin in headDeps) {
@@ -269,10 +295,15 @@ export const LOCKFILES = [
 
 const UNREADABLE = 'lockfile unreadable';
 
-type NpmPackages = Record<
-  string,
-  { version?: string; resolved?: string; hasInstallScript?: boolean }
->;
+type NpmEntry = {
+  version?: string;
+  resolved?: string;
+  integrity?: string;
+  link?: boolean;
+  hasInstallScript?: boolean;
+  bin?: unknown;
+};
+type NpmPackages = Record<string, NpmEntry>;
 
 function parseNpmLock(text: string): NpmPackages | null {
   try {
@@ -285,16 +316,49 @@ function parseNpmLock(text: string): NpmPackages | null {
 
 const npmName = (key: string): string => key.slice(key.lastIndexOf('node_modules/') + 13);
 
-function npmLockChanges(baseText: string | null, headText: string): string[] {
+const NPM_REGISTRY = 'registry.npmjs.org';
+
+/** The host of an http(s) `resolved` URL; null for git, file and anything else. */
+function httpHost(resolved: string): string | null {
+  try {
+    const u = new URL(resolved);
+    return u.protocol === 'https:' || u.protocol === 'http:' ? u.host : null;
+  } catch {
+    return null;
+  }
+}
+
+function npmLockChanges(
+  baseText: string | null,
+  headText: string,
+  gateBinNames: string[],
+): string[] {
   const head = parseNpmLock(headText);
   const base = baseText === null ? {} : parseNpmLock(baseText);
   if (!head || !base) return [UNREADABLE];
+  // The registry is npm's, or the one the base lockfile already resolves from.
+  const hosts = new Set([NPM_REGISTRY]);
+  for (const e of Object.values(base)) {
+    const h = typeof e.resolved === 'string' && !e.link ? httpHost(e.resolved) : null;
+    if (h) hosts.add(h);
+  }
   const out: string[] = [];
   for (const [key, entry] of Object.entries(head)) {
-    if (!key || !entry.hasInstallScript) continue;
+    if (!key) continue;
     const before = base[key];
-    if (!before || before.version !== entry.version || before.resolved !== entry.resolved) {
-      out.push(`install script: ${npmName(key)}`);
+    const moved = !before || before.version !== entry.version || before.resolved !== entry.resolved;
+    if (!moved && before.integrity === entry.integrity && before.link === entry.link) continue;
+    const name = npmName(key);
+    if (entry.link) {
+      out.push(`${name}: linked to ${entry.resolved ?? '?'}`);
+    } else if (typeof entry.resolved === 'string') {
+      const host = httpHost(entry.resolved);
+      if (!host || !hosts.has(host)) out.push(`${name}: non-registry resolved ${entry.resolved}`);
+    }
+    if (entry.hasInstallScript && moved) out.push(`install script: ${name}`);
+    const bins = entry.bin && typeof entry.bin === 'object' ? Object.keys(entry.bin) : [];
+    if (moved && [name, ...bins].some((b) => gateBinNames.includes(b))) {
+      out.push(`${name} version changed in lockfile`);
     }
   }
   return out;
@@ -501,7 +565,7 @@ export function lockfileChanges(
   path: string,
   baseText: string | null,
   headText: string | null,
-  opts: { pnpmBlocksBuilds: boolean } = { pnpmBlocksBuilds: false },
+  opts: { pnpmBlocksBuilds: boolean; gateBins?: string[] } = { pnpmBlocksBuilds: false },
 ): string[] {
   const file = basename(path);
   if (file !== 'package-lock.json' && file !== 'npm-shrinkwrap.json' && file !== 'pnpm-lock.yaml') {
@@ -510,7 +574,7 @@ export function lockfileChanges(
   if (headText === null || headText === '' || baseText === '') return [UNREADABLE];
   return file === 'pnpm-lock.yaml'
     ? pnpmLockChanges(baseText, headText, opts)
-    : npmLockChanges(baseText, headText);
+    : npmLockChanges(baseText, headText, opts.gateBins ?? []);
 }
 
 // ---- branch protection -------------------------------------------------------------------------
