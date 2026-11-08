@@ -103,11 +103,7 @@ export async function runAgent(
 ): Promise<AgentOutcome> {
   const systemPromptFile = join(ctx.workdir, 'system.md');
   const settingsFile = join(ctx.workdir, 'settings.json');
-  const gateList = payload.gates.map((g) => `- ${g.name}: ${g.run}`).join('\n');
-  writeFileSync(
-    systemPromptFile,
-    `Before finishing, run these commands and make them pass:\n${gateList}\n${gateOnlyNote(payload)}`,
-  );
+  writeFileSync(systemPromptFile, agentSystemPrompt(payload));
   writeFileSync(settingsFile, JSON.stringify(agentSettings(payload)));
 
   emitEvent(deps, ctx, 'phase', { phase: 'claude' });
@@ -209,6 +205,23 @@ function serviceEnv(
     env[`JM_SERVICE_${key}_PORT`] = String(s.port);
   }
   return env;
+}
+
+/** The agent's appended system prompt: the gates, gate-only variables, and reachable services. */
+export function agentSystemPrompt(payload: DropPayload): string {
+  const gateList = payload.gates.map((g) => `- ${g.name}: ${g.run}`).join('\n');
+  return `Before finishing, run these commands and make them pass:\n${gateList}\n${gateOnlyNote(payload)}${servicesNote(payload)}`;
+}
+
+/** Without this the agent doesn't know a sidecar exists, and skips work that needs it. */
+function servicesNote(payload: DropPayload): string {
+  const services = payload.services ?? [];
+  if (services.length === 0) return '';
+  const lines = services.map((s) => {
+    const key = s.name.toUpperCase().replace(/-/g, '_');
+    return `- ${s.name} (${s.image}): host in $JM_SERVICE_${key}_HOST, port in $JM_SERVICE_${key}_PORT`;
+  });
+  return `\nThese services are running for this task and you can reach them:\n${lines.join('\n')}\nWhen the issue or the project's docs need one (for example a database URL for a test suite), build its address from these variables.\n`;
 }
 
 /** Without this the agent reads a missing secret as a blocker, and stops with finished work. */

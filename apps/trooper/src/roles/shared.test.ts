@@ -10,7 +10,13 @@ import type { TrooperDeps } from '../main.js';
 import { runTrooper } from '../main.js';
 import type { TrooperIdentities } from '../privilege.js';
 import { runImplement } from './implement.js';
-import { agentSettings, type RoleCtx, runAgent, runGatesPhase } from './shared.js';
+import {
+  agentSettings,
+  agentSystemPrompt,
+  type RoleCtx,
+  runAgent,
+  runGatesPhase,
+} from './shared.js';
 
 const rolesDir = dirname(fileURLToPath(import.meta.url));
 
@@ -147,6 +153,35 @@ describe('runGatesPhase', () => {
     const r = recorder();
     await runGatesPhase(impl, r.deps, ctx, '/work/w1/repo');
     expect(r.state.order).toEqual(['gate:self@/work/w1/repo']);
+  });
+});
+
+describe('services', () => {
+  const withDb = {
+    ...impl,
+    services: [
+      {
+        name: 'db',
+        image: 'postgres:16-alpine',
+        port: 5432,
+        env: { POSTGRES_PASSWORD: 'pw-value' },
+      },
+    ],
+  };
+
+  test('the agent is told which services it can reach and how', () => {
+    const p = agentSystemPrompt(withDb);
+    expect(p).toContain('db (postgres:16-alpine)');
+    expect(p).toContain('JM_SERVICE_DB_HOST');
+    expect(p).toContain('JM_SERVICE_DB_PORT');
+    expect(p).not.toContain('pw-value');
+  });
+
+  test('no services, no services note', async () => {
+    const r = recorder();
+    await runImplement(impl, r.deps, ctx);
+    expect(r.state.systemPrompt).toContain('Before finishing');
+    expect(r.state.systemPrompt).not.toContain('JM_SERVICE_');
   });
 });
 
