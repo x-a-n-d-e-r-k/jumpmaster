@@ -184,16 +184,23 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   any setup where the operator's account is the PR author, which GitHub won't let approve its own
   PR), the operator rules on the item's parked briefing instead. A gate park that is fully read
   is briefed with three options: `Retry`, `Leave parked` and `Allow these gate changes for
-  <sha7>` (option id `allow`). The briefing says "Read the PR diff at <sha7> on the forge before
+  <sha7>` (option id `allow-<head sha, 12 chars>-<digest, 8 chars>`). The briefing says "Read the PR diff at <sha7> on the forge before
   ruling": do that. Its text is the park reason followed by every reported change in full, at
   most 8,000 characters: each changed gate script as `name: "<old>" → "<new>"` (merge base →
   head), and tool changes with old → new versions where the guard knows them. Rule on
   `/briefings`, or `ctl rule <briefing> <option id> [note]` (the id is shown beside each option)
-  over the operator-authenticated control route. The ruling binds to the diff it showed: that
-  exact head commit, the merge base it was judged against, and a digest of every change listed.
+  over the operator-authenticated control route. While it is open, the briefing is refreshed
+  when what it would say changes (a new head judged, a park that became or stopped being fully
+  read); the Allow option's id changes with it, so a ruling from a page showing an older version
+  is refused (`unknown option`): reload and read again. The ruling binds to the diff it showed:
+  that PR, that exact head commit, the merge base it was judged against, and a digest of every
+  change listed.
   When it is applied (the next pass), a briefing that no longer matches what the item is parked
   on records `briefing out of date`, and a head that has moved on the forge records `head moved`;
-  either way nothing is allowed. A moved merge base or a different change list on the same head
+  either way nothing is allowed. If the PR can't be read, the ruling is tried again on later
+  passes and gives up with `forge unavailable` after 10; a PR that is gone or closed records
+  `pull request not open`. After a failed ruling the item is briefed again once a new head is
+  judged. A moved merge base or a different change list on the same head
   is not covered by the allowance either. Otherwise the allowance is recorded (it
   survives restarts), the next sync re-decides the item and the reviewer agent reviews it as
   usual; the status page shows `gate change allowed by Command for <sha7>` on the item. Any new

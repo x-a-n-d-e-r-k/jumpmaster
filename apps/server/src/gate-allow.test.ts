@@ -80,8 +80,11 @@ async function parkAndBrief(w: ZoneWorld, id: number): Promise<Briefing> {
   return parkedBriefing(w);
 }
 
+const allowId = (b: Briefing): string =>
+  b.options.find((o) => o.effect === 'allow_gate_change')?.id ?? 'missing';
+
 async function allow(w: ZoneWorld, b: Briefing, at: Date): Promise<void> {
-  const r = ruleBriefing(w.db, b.id, 'allow', '', at);
+  const r = ruleBriefing(w.db, b.id, allowId(b), '', at);
   expect(r.ok).toBe(true);
 }
 
@@ -97,12 +100,13 @@ describe('allow a gate change by Command ruling', () => {
       { id: 'retry', label: 'Retry', effect: 'retry_item' },
       { id: 'leave', label: 'Leave parked', effect: 'none' },
       {
-        id: 'allow',
+        id: expect.stringMatching(/^allow-a1b2c3d4e5f6-[0-9a-f]{8}$/),
         label: 'Allow these gate changes for a1b2c3d',
         effect: 'allow_gate_change',
         sha: HEAD,
         mergeBase: 'base0',
         digest: expect.stringMatching(/^[0-9a-f]{64}$/),
+        prNumber: 1,
       },
     ]);
   });
@@ -156,7 +160,7 @@ describe('allow a gate change by Command ruling', () => {
     await allow(w, b, plus(t0, 2 * MIN));
     await reconcile(w, plus(t0, 3 * MIN));
     expect(listRulings(w.db, 'main')[0]).toMatchObject({ applyError: null });
-    expect(getGateAllowance(w.db, id, HEAD)).toMatchObject({ headSha: HEAD });
+    expect(getGateAllowance(w.db, id, 1, HEAD)).toMatchObject({ headSha: HEAD });
     await sync(w, plus(t0, 4 * MIN));
     expect(stateOf(w, id)).toBe('pr_open');
     expect(await decideNow(w, id, plus(t0, 5 * MIN))).toMatchObject({
@@ -173,8 +177,8 @@ describe('allow a gate change by Command ruling', () => {
     gateChange(w, NEXT);
     await reconcile(w, plus(t0, 3 * MIN));
     expect(listRulings(w.db, 'main')[0]).toMatchObject({ applyError: 'head moved' });
-    expect(getGateAllowance(w.db, id, HEAD)).toBeUndefined();
-    expect(getGateAllowance(w.db, id, NEXT)).toBeUndefined();
+    expect(getGateAllowance(w.db, id, 1, HEAD)).toBeUndefined();
+    expect(getGateAllowance(w.db, id, 1, NEXT)).toBeUndefined();
     await sync(w, plus(t0, 4 * MIN));
     await sync(w, plus(t0, 2 * 60 * MIN));
     expect(stateOf(w, id)).toBe('parked');
@@ -185,7 +189,7 @@ describe('allow a gate change by Command ruling', () => {
     const b = await parkAndBrief(w, id);
     await allow(w, b, plus(t0, 2 * MIN));
     await reconcile(w, plus(t0, 3 * MIN));
-    expect(getGateAllowance(w.db, id, HEAD)).toBeDefined();
+    expect(getGateAllowance(w.db, id, 1, HEAD)).toBeDefined();
     w.f.state.setHead(1, NEXT);
     gateChange(w, NEXT);
     await sync(w, plus(t0, 4 * MIN));
@@ -233,7 +237,7 @@ describe('allow a gate change by Command ruling', () => {
     expect(await applyPendingRulings(w.db, deps(w), 'main', plus(t0, 3 * MIN))).toBe(1);
     expect(await applyPendingRulings(w.db, deps(w), 'main', plus(t0, 4 * MIN))).toBe(0);
     const ruling = { ...b, id: listRulings(w.db, 'main')[0]?.id ?? 0 };
-    const option = b.options.find((o) => o.id === 'allow');
+    const option = b.options.find((o) => o.effect === 'allow_gate_change');
     if (!option) throw new Error('no allow option');
     expect(await applyGateAllowance(w.db, deps(w), 'main', ruling, option, plus(t0, 5 * MIN))).toBe(
       true,
@@ -241,12 +245,12 @@ describe('allow a gate change by Command ruling', () => {
     const count = () =>
       (w.db.prepare('SELECT COUNT(*) AS n FROM gate_allowances').get() as { n: number }).n;
     expect(count()).toBe(1);
-    expect(getGateAllowance(w.db, id, HEAD)?.ruledAt).toBe(plus(t0, 3 * MIN).toISOString());
+    expect(getGateAllowance(w.db, id, 1, HEAD)?.ruledAt).toBe(plus(t0, 3 * MIN).toISOString());
 
     const file = w.db.name;
     w.db.close();
     const db = openDb(file);
-    expect(getGateAllowance(db, id, HEAD)).toMatchObject({ headSha: HEAD });
+    expect(getGateAllowance(db, id, 1, HEAD)).toMatchObject({ headSha: HEAD });
     db.close();
   });
 
@@ -264,7 +268,7 @@ describe('allow a gate change by Command ruling', () => {
     );
     await reconcile(w, plus(t0, 3 * MIN));
     expect(listRulings(w.db, 'main')[0]).toMatchObject({ applyError: 'briefing out of date' });
-    expect(getGateAllowance(w.db, id, HEAD)).toBeUndefined();
+    expect(getGateAllowance(w.db, id, 1, HEAD)).toBeUndefined();
   });
 
   test('the allowance records the merge base and digest of the changes Command read', async () => {
@@ -273,10 +277,76 @@ describe('allow a gate change by Command ruling', () => {
     await allow(w, b, plus(t0, 2 * MIN));
     await reconcile(w, plus(t0, 3 * MIN));
     const park = getGatePark(w.db, id);
-    expect(getGateAllowance(w.db, id, HEAD)).toMatchObject({
+    expect(getGateAllowance(w.db, id, 1, HEAD)).toMatchObject({
       mergeBaseSha: 'base0',
       digest: park && gateDigest(park.details),
     });
+  });
+
+  test('an open briefing is refreshed when the head it judged moves; a stale ruling is refused', async () => {
+    const { w, id } = gateWorld();
+    const b = await parkAndBrief(w, id);
+    w.f.state.setHead(1, NEXT);
+    gateChange(w, NEXT);
+    // The hourly re-check re-decides on the new head: same changes, still parked.
+    await sync(w, plus(t0, 2 * 60 * MIN));
+    expect(stateOf(w, id)).toBe('parked');
+    await reconcile(w, plus(t0, 2 * 60 * MIN + MIN));
+    const fresh = parkedBriefing(w);
+    expect(fresh.id).toBe(b.id);
+    expect(fresh.decision).toContain('Read the PR diff at f0e1d2c on the forge');
+    expect(fresh.options.find((o) => o.effect === 'allow_gate_change')?.sha).toBe(NEXT);
+    // A page still showing the old head rules the old option: refused.
+    expect(ruleBriefing(w.db, b.id, allowId(b), '', plus(t0, 3 * 60 * MIN))).toEqual({
+      ok: false,
+      status: 400,
+    });
+  });
+
+  test('an open briefing loses Allow when the park becomes not fully read', async () => {
+    const { w, id } = gateWorld();
+    await parkAndBrief(w, id);
+    w.db
+      .prepare('UPDATE work_items SET reason = ? WHERE id = ?')
+      .run('gate tool changed: lockfile not found (not fully read: merge it by hand)', id);
+    await reconcile(w, plus(t0, 2 * MIN));
+    expect(parkedBriefing(w).options.map((o) => o.effect)).toEqual(['retry_item', 'none']);
+  });
+
+  test('after a head-moved ruling the item is briefed again once the new head is judged', async () => {
+    const { w, id } = gateWorld();
+    const b = await parkAndBrief(w, id);
+    await allow(w, b, plus(t0, 2 * MIN));
+    w.f.state.setHead(1, NEXT);
+    gateChange(w, NEXT);
+    await reconcile(w, plus(t0, 3 * MIN));
+    expect(listRulings(w.db, 'main')[0]).toMatchObject({ applyError: 'head moved' });
+    await sync(w, plus(t0, 2 * 60 * MIN));
+    await reconcile(w, plus(t0, 2 * 60 * MIN + MIN));
+    expect(parkedBriefing(w).options.find((o) => o.effect === 'allow_gate_change')?.sha).toBe(NEXT);
+  });
+
+  test('a PR read that keeps failing gives up after 10 passes', async () => {
+    const { w, id } = gateWorld();
+    const b = await parkAndBrief(w, id);
+    await allow(w, b, plus(t0, 2 * MIN));
+    for (let n = 1; n <= 10; n++) {
+      w.f.author.failNext('getPull', '5xx');
+      await applyPendingRulings(w.db, deps(w), 'main', plus(t0, (2 + n) * MIN));
+      const r = listRulings(w.db, 'main')[0];
+      expect(r?.applyError).toBe(n < 10 ? null : 'forge unavailable');
+    }
+    expect(getGateAllowance(w.db, id, 1, HEAD)).toBeUndefined();
+  });
+
+  test('a missing PR fails the ruling at once', async () => {
+    const { w, id } = gateWorld();
+    const b = await parkAndBrief(w, id);
+    await allow(w, b, plus(t0, 2 * MIN));
+    w.f.state.pulls.delete(1);
+    await applyPendingRulings(w.db, deps(w), 'main', plus(t0, 3 * MIN));
+    expect(listRulings(w.db, 'main')[0]?.applyError).toBe('pull request not open');
+    expect(getGateAllowance(w.db, id, 1, HEAD)).toBeUndefined();
   });
 
   test('an item that left parked before the ruling applied is left alone', async () => {
@@ -285,7 +355,7 @@ describe('allow a gate change by Command ruling', () => {
     await allow(w, b, plus(t0, 2 * MIN));
     setWorkItemState(w.db, id, 'done', 'merged', plus(t0, 2 * MIN));
     expect(await applyPendingRulings(w.db, deps(w), 'main', plus(t0, 3 * MIN))).toBe(1);
-    expect(getGateAllowance(w.db, id, HEAD)).toBeUndefined();
+    expect(getGateAllowance(w.db, id, 1, HEAD)).toBeUndefined();
   });
 
   test('a crew briefing can never carry allow_gate_change', () => {
@@ -343,6 +413,6 @@ describe('allow a gate change by Command ruling', () => {
       'allow_gate_change needs a server parked briefing with a head',
       'allow_gate_change needs a server parked briefing with a head',
     ]);
-    expect(getGateAllowance(w.db, id, HEAD)).toBeUndefined();
+    expect(getGateAllowance(w.db, id, 1, HEAD)).toBeUndefined();
   });
 });

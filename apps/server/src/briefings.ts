@@ -46,6 +46,7 @@ export type BriefingOption = {
   /** With `sha`: the merge base and gateDigest of the changes the briefing listed. */
   mergeBase?: string;
   digest?: string;
+  prNumber?: number;
 };
 export type BriefingState = 'open' | 'ruled' | 'withdrawn';
 
@@ -305,6 +306,8 @@ export async function applyEffect(
 }
 
 const NOT_ALLOWABLE = 'allow_gate_change needs a server parked briefing with a head';
+/** PR reads that fail (other than a 404) before an allow ruling gives up. */
+const MAX_APPLY_ATTEMPTS = 10;
 
 /**
  * Applies an `allow_gate_change` ruling: records Command's allowance of the option's head for the
@@ -326,11 +329,11 @@ export async function applyGateAllowance(
   now: Date,
 ): Promise<boolean> {
   const itemId = idOf(ruling.subject, 'item:');
-  const { sha, mergeBase, digest } = option;
+  const { sha, mergeBase, digest, prNumber } = option;
   if (ruling.source !== 'server' || ruling.kind !== 'parked' || itemId === null) {
     throw new Error(NOT_ALLOWABLE);
   }
-  if (!sha || !mergeBase || !digest) throw new Error(NOT_ALLOWABLE);
+  if (!sha || !mergeBase || !digest || prNumber === undefined) throw new Error(NOT_ALLOWABLE);
   const item = getWorkItem(db, itemId);
   if (!item || item.dropZoneId !== zoneId || item.state !== 'parked') return true;
   // Command allowed what its briefing showed: the briefing raised now must be the same one.
@@ -339,19 +342,26 @@ export async function applyGateAllowance(
   if (current.why !== ruling.why || JSON.stringify(allowNow) !== JSON.stringify(option)) {
     throw new Error('briefing out of date');
   }
-  const prNumber = getPullRequest(db, item.id)?.number ?? item.prNumber;
-  if (prNumber === null) throw new Error('no pull request');
+  // (parkBriefing offers Allow only while the item's current PR is the one judged.)
   let pr: Awaited<ReturnType<ForgePair['author']['getPull']>>;
   try {
     pr = await deps.forges(zoneId).author.getPull(prNumber);
   } catch {
+    // Not a 404 (that reads as null): try again next pass, but not forever.
+    const tries = db
+      .prepare(
+        'UPDATE rulings SET apply_attempts = apply_attempts + 1 WHERE id = ? RETURNING apply_attempts AS n',
+      )
+      .get(ruling.id) as { n: number } | undefined;
+    if ((tries?.n ?? MAX_APPLY_ATTEMPTS) >= MAX_APPLY_ATTEMPTS)
+      throw new Error('forge unavailable');
     return false;
   }
   if (!pr || pr.state !== 'open' || pr.merged) throw new Error('pull request not open');
   if (pr.headSha !== sha) throw new Error('head moved');
   recordGateAllowance(
     db,
-    { itemId, headSha: sha, mergeBaseSha: mergeBase, digest, rulingId: ruling.id },
+    { itemId, prNumber, headSha: sha, mergeBaseSha: mergeBase, digest, rulingId: ruling.id },
     now,
   );
   return true;
@@ -403,8 +413,10 @@ export async function applyPendingRulings(
 }
 
 /**
- * One open `parked` briefing per parked item, withdrawn once the item leaves parked. An item
- * whose briefing was ruled (Leave parked) is not briefed again until it parks again.
+ * One open `parked` briefing per parked item, withdrawn once the item leaves parked, and refreshed
+ * while open when what it would say has changed (a new head judged, a park that became or stopped
+ * being fully read). An item whose briefing was ruled is not briefed again until it parks again
+ * or its gate park is judged afresh (a new head, merge base or change list).
  */
 export function syncParkBriefings(db: Db, zone: DropZoneConfig, now: Date): void {
   const parked = listWorkItems(db, zone.id, 'parked');
@@ -419,12 +431,28 @@ export function syncParkBriefings(db: Db, zone: DropZoneConfig, now: Date): void
     `SELECT 1 FROM briefings WHERE zone_id = ? AND subject = ? AND state = 'ruled'
        AND updated_at >= ? LIMIT 1`,
   );
+  const open = new Map(
+    listBriefings(db, { zoneId: zone.id, state: 'open' }).map((b) => [b.subject, b]),
+  );
   for (const item of parked) {
     const subject = `item:${item.id}`;
-    if (hasOpenBriefing(db, zone.id, subject)) continue;
-    const at = (parkedAt.get(item.id) as { at: string }).at;
+    const want = parkBriefing(db, zone.id, item);
+    const current = open.get(subject);
+    if (current) {
+      const same =
+        current.decision === want.decision &&
+        current.why === want.why &&
+        JSON.stringify(current.options) === JSON.stringify(want.options);
+      if (!same) raiseBriefing(db, want, now);
+      continue;
+    }
+    const parkedAtTime = (parkedAt.get(item.id) as { at: string }).at;
+    const judged = GATE_PARK_PREFIXES.some((p) => (item.reason ?? '').startsWith(p))
+      ? getGatePark(db, item.id)?.recordedAt
+      : undefined;
+    const at = judged && judged > parkedAtTime ? judged : parkedAtTime;
     if (ruledSince.get(zone.id, subject, at)) continue;
-    raiseBriefing(db, parkBriefing(db, zone.id, item), now);
+    raiseBriefing(db, want, now);
   }
 }
 
@@ -474,13 +502,16 @@ function parkBriefing(db: Db, zoneId: string, item: WorkItem): NewBriefing {
     const pr = getPullRequest(db, item.id);
     const current = pr?.headSha === park.headSha && pr.number === park.prNumber;
     if (g.complete && current && gateParkAllowable(reason)) {
+      const digest = gateDigest(park.details);
       options.push({
-        id: 'allow',
+        // Bound to the head and changes shown: a page showing an older briefing can't rule this.
+        id: `allow-${park.headSha.slice(0, 12)}-${digest.slice(0, 8)}`,
         label: `Allow these gate changes for ${sha7}`,
         effect: 'allow_gate_change',
         sha: park.headSha,
         mergeBase: park.mergeBaseSha,
-        digest: gateDigest(park.details),
+        digest,
+        prNumber: park.prNumber,
       });
     }
   }

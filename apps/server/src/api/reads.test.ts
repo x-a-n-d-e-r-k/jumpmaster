@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { listWorkItems, recordGateAllowance } from '../db/repo.js';
+import { getPullRequest, listWorkItems, recordGateAllowance } from '../db/repo.js';
 import { harness, toPrOpen } from '../test/flowHarness.js';
 
 test.each(['/', '/observations', '/drops/x', '/artifacts/1'])(
@@ -24,7 +24,8 @@ test("the home page shows Command's gate change allowance for the item's current
   if (!item) throw new Error('no item');
   const home = async () => (await h.app.inject({ method: 'GET', url: '/' })).body;
   expect(await home()).not.toContain('allowed by Command');
-  const allowance = { itemId: item.id, headSha: 'abcdef1234567890', rulingId: 1 };
+  const prNumber = getPullRequest(h.db, item.id)?.number ?? 0;
+  const allowance = { itemId: item.id, prNumber, headSha: 'abcdef1234567890', rulingId: 1 };
   recordGateAllowance(h.db, { ...allowance, mergeBaseSha: 'mb', digest: 'd' }, h.now());
   expect(await home()).toContain('gate change allowed by Command for abcdef1');
 });

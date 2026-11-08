@@ -289,6 +289,7 @@ export function getGatePark(db: Db, itemId: number): GatePark | undefined {
  */
 export type GateAllowance = {
   itemId: number;
+  prNumber: number;
   headSha: string;
   mergeBaseSha: string;
   digest: string;
@@ -302,9 +303,10 @@ export type GateAllowance = {
  */
 export function recordGateAllowance(db: Db, a: Omit<GateAllowance, 'ruledAt'>, now: Date): void {
   db.prepare(
-    `INSERT INTO gate_allowances (item_id, head_sha, merge_base_sha, reason_digest, ruled_at,
-       ruling_id) VALUES (@itemId, @headSha, @mergeBaseSha, @digest, @at, @rulingId)
-     ON CONFLICT (item_id, head_sha) DO UPDATE SET merge_base_sha = excluded.merge_base_sha,
+    `INSERT INTO gate_allowances (item_id, pr_number, head_sha, merge_base_sha, reason_digest,
+       ruled_at, ruling_id) VALUES (@itemId, @prNumber, @headSha, @mergeBaseSha, @digest, @at,
+       @rulingId)
+     ON CONFLICT (item_id, pr_number, head_sha) DO UPDATE SET merge_base_sha = excluded.merge_base_sha,
        reason_digest = excluded.reason_digest, ruled_at = excluded.ruled_at,
        ruling_id = excluded.ruling_id
      WHERE merge_base_sha IS NOT excluded.merge_base_sha
@@ -312,19 +314,21 @@ export function recordGateAllowance(db: Db, a: Omit<GateAllowance, 'ruledAt'>, n
   ).run({ ...a, at: now.toISOString() });
 }
 
-/** Command's allowance for exactly this item and head, if any. */
+/** Command's allowance for exactly this item, PR and head, if any. */
 export function getGateAllowance(
   db: Db,
   itemId: number,
+  prNumber: number,
   headSha: string,
 ): GateAllowance | undefined {
   return db
     .prepare(
-      `SELECT item_id AS itemId, head_sha AS headSha, merge_base_sha AS mergeBaseSha,
-         reason_digest AS digest, ruled_at AS ruledAt, ruling_id AS rulingId
-         FROM gate_allowances WHERE item_id = ? AND head_sha = ?`,
+      `SELECT item_id AS itemId, pr_number AS prNumber, head_sha AS headSha,
+         merge_base_sha AS mergeBaseSha, reason_digest AS digest, ruled_at AS ruledAt,
+         ruling_id AS rulingId
+         FROM gate_allowances WHERE item_id = ? AND pr_number = ? AND head_sha = ?`,
     )
-    .get(itemId, headSha) as GateAllowance | undefined;
+    .get(itemId, prNumber, headSha) as GateAllowance | undefined;
 }
 
 export function insertDrop(db: Db, d: NewDrop, now?: Date): void {

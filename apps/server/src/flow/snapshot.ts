@@ -448,8 +448,8 @@ export async function buildSnapshot(
   // Command's ruling allows one judged diff only: the head read just now, against the same merge
   // base, with exactly the changes its briefing listed.
   const allowance =
-    headSha !== null && compare && (gate.scripts.length > 0 || gate.tools.length > 0)
-      ? getGateAllowance(db, item.id, headSha)
+    pr && headSha !== null && compare && (gate.scripts.length > 0 || gate.tools.length > 0)
+      ? getGateAllowance(db, item.id, pr.number, headSha)
       : undefined;
   const commandAllowed =
     allowance !== undefined &&

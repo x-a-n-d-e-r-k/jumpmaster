@@ -254,8 +254,8 @@ async function gateParkMayHaveChanged(
   const mark = getParkMark(db, itemId);
   const recent =
     mark.checkedAt !== null && now.getTime() - Date.parse(mark.checkedAt) < GATE_RECHECK_MS;
-  const head = getPullRequest(db, itemId)?.headSha;
-  const allowance = head ? getGateAllowance(db, itemId, head) : undefined;
+  const row = getPullRequest(db, itemId);
+  const allowance = row ? getGateAllowance(db, itemId, row.number, row.headSha) : undefined;
   const newAllowance =
     allowance !== undefined && (mark.checkedAt === null || allowance.ruledAt >= mark.checkedAt);
   if (recent && !newAllowance && mark.reviewsSeen !== null && newest <= mark.reviewsSeen) {

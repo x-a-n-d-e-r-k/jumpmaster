@@ -313,13 +313,16 @@ describe('buildSnapshot', () => {
       const s0 = await snapshotOf();
       expect(s0.commandAllowed).toBe(false);
       const digest = gateDigest(s0.gateDetails);
-      const allowance = { itemId, mergeBaseSha: 'base0', digest, rulingId: 1 };
+      const allowance = { itemId, prNumber: 1, mergeBaseSha: 'base0', digest, rulingId: 1 };
       recordGateAllowance(w.db, { ...allowance, headSha: 'sha0' }, now);
       expect((await snapshotOf()).commandAllowed).toBe(false);
       recordGateAllowance(w.db, { ...allowance, headSha: 'sha1', digest: 'other' }, now);
       expect((await snapshotOf()).commandAllowed).toBe(false);
       w.db.prepare('DELETE FROM gate_allowances').run();
       recordGateAllowance(w.db, { ...allowance, headSha: 'sha1', mergeBaseSha: 'base9' }, now);
+      expect((await snapshotOf()).commandAllowed).toBe(false);
+      w.db.prepare('DELETE FROM gate_allowances').run();
+      recordGateAllowance(w.db, { ...allowance, headSha: 'sha1', prNumber: 2 }, now);
       expect((await snapshotOf()).commandAllowed).toBe(false);
       w.db.prepare('DELETE FROM gate_allowances').run();
       recordGateAllowance(w.db, { ...allowance, headSha: 'sha1' }, now);

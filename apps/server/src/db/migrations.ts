@@ -296,13 +296,15 @@ CREATE TABLE gate_parks (
 );
 CREATE TABLE gate_allowances (
   item_id         INTEGER NOT NULL REFERENCES work_items(id),
+  pr_number       INTEGER NOT NULL,
   head_sha        TEXT NOT NULL,
   merge_base_sha  TEXT NOT NULL,
   reason_digest   TEXT NOT NULL,
   ruled_at        TEXT NOT NULL,
   ruling_id       INTEGER NOT NULL,
-  PRIMARY KEY (item_id, head_sha)
+  PRIMARY KEY (item_id, pr_number, head_sha)
 );
+ALTER TABLE rulings ADD COLUMN apply_attempts INTEGER NOT NULL DEFAULT 0;
 `;
 
 export type Migration = { version: number; sql: string; foreignKeysOff?: boolean };
