@@ -422,6 +422,59 @@ describe('GitHubForge', () => {
           .reply(200, { state: 'pending', statuses });
       };
 
+      // GitHub never lets a fine-grained token read check runs; Actions jobs carry the same names.
+      const refuseCheckRuns = () =>
+        nock(api)
+          .get('/repos/o/r/commits/sha1/check-runs')
+          .query(true)
+          .reply(403, { message: 'Resource not accessible by personal access token' });
+      const statusesOnly = (statuses: unknown[]) =>
+        nock(api)
+          .get('/repos/o/r/commits/sha1/status')
+          .query(true)
+          .reply(200, { state: 'pending', statuses });
+
+      test('a refused check-runs read falls back to the Actions jobs for the commit', async () => {
+        refuseCheckRuns();
+        nock(api)
+          .get('/repos/o/r/actions/runs')
+          .query((q) => q.head_sha === 'sha1')
+          .reply(200, { total_count: 2, workflow_runs: [{ id: 11 }, { id: 12 }] });
+        nock(api)
+          .get('/repos/o/r/actions/runs/11/jobs')
+          .query(true)
+          .reply(200, { total_count: 1, jobs: [run('preflight', 'completed', 'success')] });
+        nock(api)
+          .get('/repos/o/r/actions/runs/12/jobs')
+          .query(true)
+          .reply(200, { total_count: 1, jobs: [run('unblock', 'in_progress', null)] });
+        statusesOnly([{ context: 'ci/x', state: 'success' }]);
+        expect(await forge.checksFor('sha1')).toEqual({
+          state: 'pending',
+          names: ['preflight', 'unblock', 'ci/x'],
+        });
+      });
+
+      test('a failed Actions job fails the checks through the fallback', async () => {
+        refuseCheckRuns();
+        nock(api)
+          .get('/repos/o/r/actions/runs')
+          .query(true)
+          .reply(200, { total_count: 1, workflow_runs: [{ id: 11 }] });
+        nock(api)
+          .get('/repos/o/r/actions/runs/11/jobs')
+          .query(true)
+          .reply(200, { total_count: 1, jobs: [run('preflight', 'completed', 'failure')] });
+        statusesOnly([]);
+        expect((await forge.checksFor('sha1')).state).toBe('failure');
+      });
+
+      test('when the fallback is refused too, the read fails as before', async () => {
+        refuseCheckRuns();
+        nock(api).get('/repos/o/r/actions/runs').query(true).reply(403, { message: 'nope' });
+        await expect(forge.checksFor('sha1')).rejects.toMatchObject({ status: 403 });
+      });
+
       test('combines check runs and statuses', async () => {
         mock([run('build', 'completed', 'success')], [{ context: 'ci/x', state: 'success' }]);
         expect(await forge.checksFor('sha1')).toEqual({

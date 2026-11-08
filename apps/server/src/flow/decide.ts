@@ -76,7 +76,7 @@ function pastDeadline(s: Snapshot, anchor: string | null): boolean {
 
 /** The token permission each read needs, named in a denied-read park reason. */
 const READ_PERMISSION: Record<string, string> = {
-  checksFor: 'Checks: read and Commit statuses: read',
+  checksFor: 'Commit statuses: read and Actions: read',
   listReviews: 'Pull requests: read',
   listPullFiles: 'Pull requests: read',
   branchSha: 'Contents: read',

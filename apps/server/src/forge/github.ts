@@ -200,6 +200,8 @@ function toPullFacts(p: RawPull): PullFacts {
   };
 }
 
+type CheckRunFacts = { name: string; status: string; conclusion: string | null };
+
 export class GitHubForge implements Forge {
   private readonly octokit: Octokit;
   private viewer: Promise<string> | undefined;
@@ -423,12 +425,7 @@ export class GitHubForge implements Forge {
   }
 
   async checksFor(sha: string): Promise<ChecksFacts> {
-    const runs = await this.octokit.paginate(this.octokit.rest.checks.listForRef, {
-      owner: this.owner,
-      repo: this.repo,
-      ref: sha,
-      per_page: 100,
-    });
+    const runs = await this.checkRunsFor(sha);
     // The combined-status payload is not a plain list, so page it by hand.
     const statuses: { context: string; state: string }[] = [];
     for (let page = 1; ; page++) {
@@ -461,6 +458,40 @@ export class GitHubForge implements Forge {
           ? 'none'
           : 'success';
     return { state, names };
+  }
+
+  /**
+   * Check runs on `sha`. GitHub never lets a fine-grained token read check runs (403), but
+   * with Actions: read it can list the commit's workflow jobs, which are the same checks under
+   * the same names. Checks from other apps are not visible that way.
+   */
+  private async checkRunsFor(sha: string): Promise<CheckRunFacts[]> {
+    try {
+      return await this.octokit.paginate(this.octokit.rest.checks.listForRef, {
+        owner: this.owner,
+        repo: this.repo,
+        ref: sha,
+        per_page: 100,
+      });
+    } catch (e) {
+      if ((e as { status?: number }).status !== 403) throw e;
+    }
+    const workflowRuns = await this.octokit.paginate(
+      this.octokit.rest.actions.listWorkflowRunsForRepo,
+      { owner: this.owner, repo: this.repo, head_sha: sha, per_page: 100 },
+    );
+    const jobs: CheckRunFacts[] = [];
+    for (const run of workflowRuns) {
+      jobs.push(
+        ...(await this.octokit.paginate(this.octokit.rest.actions.listJobsForWorkflowRun, {
+          owner: this.owner,
+          repo: this.repo,
+          run_id: run.id,
+          per_page: 100,
+        })),
+      );
+    }
+    return jobs;
   }
 
   async getBranchRules(branch: string): Promise<BranchRulesRead> {

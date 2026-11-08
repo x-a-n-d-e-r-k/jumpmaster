@@ -44,7 +44,10 @@ Everything from M0, plus:
     every repository that account can, so keep it on the server and use a token made for
     Jumpmaster alone. It never enters a runner.
   - For a private repository, the author token also needs Issues: read, and, when the zone
-    requires CI or branch protection requires checks, Checks: read and Commit statuses: read.
+    requires CI or branch protection requires checks, Commit statuses: read and Actions: read.
+    GitHub never lets a fine-grained token read check runs, so Jumpmaster reads GitHub Actions
+    jobs instead, which carry the same names. Checks posted by other GitHub Apps are not
+    visible this way: a required check that only such an app reports never turns green.
     A read refused with 403 parks the item at once with a reason naming the permission to grant;
     it recovers on its own once the token can read.
   - The server refuses to start unless the author token is fine-grained. Don't grant it
