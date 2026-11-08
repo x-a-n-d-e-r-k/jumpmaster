@@ -164,7 +164,8 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   new registry package passes, because pnpm 10 runs no install script unless allow-listed. A
   package that may build is still reported: one named in `onlyBuiltDependencies` or
   `allowBuilds`, or any package when `dangerouslyAllowAllBuilds` or an allow-list file is set,
-  in `package.json` or `pnpm-workspace.yaml`, at base or head.
+  in `package.json`, `pnpm-workspace.yaml` or `.npmrc` (`dangerously-allow-all-builds`), at
+  base or head.
   - yarn and bun lockfiles are not read: a dependency change parks `lockfile format not
     supported: <file>`. Anything the reader does not expect parks `lockfile unreadable`.
 - `overrideApprovers` (default `[]`): to let a gate script or gate tool change through, a

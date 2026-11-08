@@ -257,12 +257,16 @@ async function gateChanges(
     let policy: PnpmBuildPolicy = { allowAll: false, allowed: [] };
     if (blocks) {
       const wsPath = join(dirname(path), 'pnpm-workspace.yaml');
-      const [baseWs, headWs] = await Promise.all([
-        readFile(forges, mergeBaseSha, wsPath, unavailable),
-        readFile(forges, headSha, wsPath, unavailable),
-      ]);
-      if (!baseWs.ok || !headWs.ok) continue;
-      policy = pnpmBuildPolicy([basePkg.text, headPkg.text], [baseWs.text, headWs.text]);
+      const rcPaths = [...new Set([join(dirname(path), '.npmrc'), '.npmrc'])];
+      const reads = await Promise.all(
+        [wsPath, ...rcPaths].flatMap((p) => [
+          readFile(forges, mergeBaseSha, p, unavailable),
+          readFile(forges, headSha, p, unavailable),
+        ]),
+      );
+      if (reads.some((r) => !r.ok)) continue;
+      const texts = reads.map((r) => (r.ok ? r.text : null));
+      policy = pnpmBuildPolicy([basePkg.text, headPkg.text], texts.slice(0, 2), texts.slice(2));
     }
     const opts = {
       pnpmBlocksBuilds: blocks,

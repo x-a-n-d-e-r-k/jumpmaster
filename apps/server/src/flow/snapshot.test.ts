@@ -154,6 +154,15 @@ describe('buildSnapshot', () => {
       ]);
     });
 
+    test('trusted build blocking still reports when a root .npmrc allows all builds', async () => {
+      w.zone.trustPnpmBuildBlocking = true;
+      addTypesNode(pinned);
+      w.f.state.files.set('base0:.npmrc', 'dangerously-allow-all-builds=true\n');
+      expect((await snapshotOf()).gateToolChanges).toEqual([
+        'dependency added: @types/node@26.6.5 (all builds allowed: its install script runs)',
+      ]);
+    });
+
     test('trusted build blocking still reports when base allows all builds', async () => {
       w.zone.trustPnpmBuildBlocking = true;
       addTypesNode(pinned);

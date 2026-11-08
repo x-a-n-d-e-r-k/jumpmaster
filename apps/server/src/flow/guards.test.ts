@@ -272,6 +272,21 @@ describe('pnpmBuildPolicy', () => {
   });
 });
 
+describe('pnpmBuildPolicy: .npmrc', () => {
+  test('dangerously-allow-all-builds and only-built-dependencies in .npmrc count', () => {
+    expect(pnpmBuildPolicy([], [], ['# x\ndangerously-allow-all-builds=true\n']).allowAll).toBe(
+      true,
+    );
+    expect(pnpmBuildPolicy([], [], [null, 'dangerously-allow-all-builds = false\n']).allowAll).toBe(
+      false,
+    );
+    expect(pnpmBuildPolicy([], [], ['only-built-dependencies[]=esbuild\n'])).toEqual({
+      allowAll: false,
+      allowed: ['esbuild'],
+    });
+  });
+});
+
 describe('pnpmBlocksBuilds', () => {
   test('is true only when packageManager pins pnpm 10 or later', () => {
     const pm = (packageManager?: string) => pkg({}, {}, packageManager ? { packageManager } : {});

@@ -585,12 +585,13 @@ type LockOptions = {
 };
 
 /**
- * The union of build allow-lists over the given package.json and pnpm-workspace.yaml texts (base
- * and head). An allow-list file, an allow-all setting or an unreadable workspace file allow all.
+ * The union of build allow-lists over the given package.json, pnpm-workspace.yaml and .npmrc
+ * texts (base and head). An allow-list file, an allow-all setting or an unreadable workspace file allow all.
  */
 export function pnpmBuildPolicy(
   pkgTexts: (string | null)[],
   workspaceTexts: (string | null)[],
+  npmrcTexts: (string | null)[] = [],
 ): PnpmBuildPolicy {
   const allowed = new Set<string>();
   let allowAll = false;
@@ -619,6 +620,19 @@ export function pnpmBuildPolicy(
     }
     if (isMap(doc)) read(doc);
     else if (t.trim() !== '') allowAll = true;
+  }
+  for (const t of npmrcTexts) {
+    for (const raw of (t ?? '').split(/\r?\n/)) {
+      const line = raw.trim();
+      if (line === '' || line.startsWith('#') || line.startsWith(';')) continue;
+      const eq = line.indexOf('=');
+      const key = (eq < 0 ? line : line.slice(0, eq)).trim();
+      const value = eq < 0 ? 'true' : line.slice(eq + 1).trim();
+      if (key === 'dangerously-allow-all-builds' && value !== 'false') allowAll = true;
+      if (key === 'only-built-dependencies-file') allowAll = true;
+      if (key === 'only-built-dependencies[]') allowed.add(value);
+      else if (key === 'only-built-dependencies') allowAll = true;
+    }
   }
   return { allowAll, allowed: [...allowed] };
 }
