@@ -8,7 +8,7 @@ import {
 } from '@jumpmaster/protocol';
 import { listArtifacts } from './artifacts.js';
 import type { ClaudeConfig, DropZoneConfig, UsageConfig } from './config.js';
-import { noteOverage } from './credits.js';
+import { noteOverage, noteProbeResult } from './credits.js';
 import { applyCrewResult } from './crew/results.js';
 import type { Db } from './db/open.js';
 import {
@@ -415,6 +415,7 @@ export async function applyResult(
   if (TERMINAL.has(drop.state)) return;
   // First and whatever the outcome: the backstop for live credits events that never arrived.
   if (result.rateLimit) noteOverage(db, deps.usageCfg, drop, result.rateLimit, result.status, now);
+  noteProbeResult(db, drop, result, now);
   noteFableSignals(
     db,
     { claude: deps.claude ?? DEFAULT_CLAUDE, usage: deps.usageCfg },

@@ -180,15 +180,17 @@ new drops in every zone, for every role; running drops finish. A drop's result o
 live events: it never starts a new stop for a drop already seen on credits. The stop lifts by
 itself when the exhausted usage window resets (a window at 98% or more; up to seven days for the
 weekly window), because work after that runs inside the plan again; the briefing names the window
-and why. After it lifts, one drop runs as a probe, and dispatch opens fully only once a drop
-reports live that it runs in plan; a probe on credits stops again. A `credits:stop` briefing names
+and why. After it lifts, one drop runs as a probe, and dispatch opens fully once a drop reports
+live that it runs in plan, or the probe finishes without using credits; a probe on credits stops
+again. A `credits:stop` briefing names
 the drop, both windows' use and resets, and offers **Run on credits now** and **Noted**. Run on
 credits lasts until the five-hour window resets when that is the exhausted window (the time is
-shown), otherwise five hours. During that time the drop's own work item's queued drops lease first
-and alone; with none queued, one other drop may run (and bill) as a probe; any other drop on
-credits stops dispatch again, and when the time is up one drop probes as above. Set
+shown), otherwise five hours. During that time only the drop's own work item's follow-on drops
+(review, heal, resolve) lease; nothing else leases and no new work is queued, so the time idles
+until that work is queued (a Resume on a crew drop lets nothing lease). Any other drop on credits
+stops dispatch again, and when the time is up one drop probes as above. Set
 `usage.stopOnOverage: false` and restart the server to keep the old behaviour (a briefing only);
-the config is read once at start. A drop that outlives its lease (a server outage longer than the
+the config is read once at start, and a stop or probe already recorded then no longer holds. A drop that outlives its lease (a server outage longer than the
 lease) is marked lost and its later reports are refused, so credits it used are never seen.
 
 A Fable drop on credits also disables Fable until you rule **Re-enable Fable**. If your plan

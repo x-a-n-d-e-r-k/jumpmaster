@@ -4,7 +4,12 @@ import {
   RateLimitEventDataSchema,
 } from '@jumpmaster/protocol';
 import type { UsageConfig } from './config.js';
-import { creditsProbing, creditsResumeInForce, creditsStopInForce } from './credits.js';
+import {
+  creditsProbing,
+  creditsResumeInForce,
+  creditsStopInForce,
+  stopsOnOverage,
+} from './credits.js';
 import type { Db } from './db/open.js';
 import { getUsageState, setUsageState, type UsageStateRow } from './db/repo.js';
 import { isFableRateLimit, pauseFableFor } from './fable.js';
@@ -26,8 +31,9 @@ export function gateQueuesImplement(gate: Gate): boolean {
   switch (gate) {
     case 'open':
     case 'probe':
-    case 'credits_resume':
       return true;
+    // During a Resume only the bound item's follow-on drops (queued by the reconciler) run.
+    case 'credits_resume':
     case 'finishing_only':
     case 'closed':
     case 'stopped':
@@ -246,13 +252,15 @@ function throttled(u: UsageStateRow, cfg: UsageConfig, t: number): boolean {
 /** What the scheduler and the lease route may start right now. A credits stop wins over all. */
 export function dispatchGate(db: Db, cfg: UsageConfig, now: Date): Gate {
   const u = getUsageState(db);
-  if (creditsStopInForce(u, now)) return 'stopped';
+  // The credits stop and what follows it apply only while configured (stopOnOverage).
+  const credits = stopsOnOverage(cfg);
+  if (credits && creditsStopInForce(u, now)) return 'stopped';
   const t = now.getTime();
   const until = ms(u.pausedUntil);
   const notBefore = ms(u.probeNotBefore);
   if ((until !== null && t < until) || (notBefore !== null && t < notBefore)) return 'closed';
-  if (creditsResumeInForce(u, now)) return 'credits_resume';
-  if (u.status === 'rejected' || creditsProbing(u, now)) return 'probe';
+  if (credits && creditsResumeInForce(u, now)) return 'credits_resume';
+  if (u.status === 'rejected' || (credits && creditsProbing(u, now))) return 'probe';
   return throttled(u, cfg, t) ? 'finishing_only' : 'open';
 }
 

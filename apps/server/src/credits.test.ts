@@ -8,7 +8,13 @@ import {
   ruleBriefing,
 } from './briefings.js';
 import type { UsageConfig } from './config.js';
-import { creditsPass, creditsStopInForce, noteOverage, syncCreditsBriefing } from './credits.js';
+import {
+  creditsPass,
+  creditsStopInForce,
+  noteOverage,
+  noteProbeResult,
+  syncCreditsBriefing,
+} from './credits.js';
 import type { Db } from './db/open.js';
 import { openDb } from './db/open.js';
 import {
@@ -25,7 +31,7 @@ import { getFableState, noteFableSignals } from './fable.js';
 import { leaseNextDrop } from './leases.js';
 import { type ZoneWorld, zoneWorld } from './test/fixtures.js';
 import { tmpDbFile } from './test/helpers.js';
-import { dispatchGate, ingestRateLimit } from './usage.js';
+import { dispatchGate, gateQueuesImplement, ingestRateLimit } from './usage.js';
 
 const t0 = new Date('2026-03-02T10:00:00.000Z');
 const MIN = 60_000;
@@ -535,7 +541,7 @@ describe('review fixes', () => {
     expect(dispatchGate(db, cfg, at(30 * MIN))).toBe('probe');
   });
 
-  test('I2: during a Resume the bound item leases first and alone; with none queued, one probe', () => {
+  test('I2/N1: during a Resume only the bound item leases; with none queued, nothing', () => {
     insertStick(db, { id: 's1', name: 's', tokenHash: 'h', slots: 4 });
     const bound = w.item(1);
     const d1 = drop('d1', 'implement', bound);
@@ -573,8 +579,132 @@ describe('review fixes', () => {
     const lease = () => leaseNextDrop(db, 's1', now, dispatchGate(db, cfg, now))?.dropId ?? null;
     expect(dispatchGate(db, cfg, now)).toBe('credits_resume');
     expect(lease()).toBe('mine');
-    // The bound item has nothing queued now: one unrelated drop as a probe, then nothing.
-    expect(lease()).toBe('old');
+    // The bound item has nothing queued now: nothing leases, no probe.
     expect(lease()).toBeNull();
+    expect(lease()).toBeNull();
+    // And no new implement work is queued during the horizon.
+    expect(gateQueuesImplement(dispatchGate(db, cfg, now))).toBe(false);
+  });
+
+  test('N1: a Resume bound to a crew drop leases nothing', () => {
+    insertStick(db, { id: 's1', name: 's', tokenHash: 'h', slots: 4 });
+    noteOverage(db, cfg, drop('c1', 'crew-lead'), onCredits(), null, t0);
+    insertDrop(db, {
+      id: 'q',
+      dropZoneId: 'main',
+      workItemId: w.item(2),
+      role: 'review',
+      state: 'queued',
+    });
+    creditsPass(db, t0);
+    ruleBriefing(db, openStop()[0]?.id ?? -1, 'resume', '', t0);
+    creditsPass(db, at(MIN));
+    expect(leaseNextDrop(db, 's1', at(MIN), dispatchGate(db, cfg, at(MIN)))).toBeNull();
+  });
+
+  test('N2: the probe drop finishing off credits ends probing', () => {
+    insertStick(db, { id: 's1', name: 's', tokenHash: 'h', slots: 4 });
+    noteOverage(
+      db,
+      cfg,
+      drop('d1'),
+      onCredits({ unifiedWindows: undefined, resetsAt: undefined }),
+      null,
+      t0,
+    );
+    insertDrop(db, {
+      id: 'p',
+      dropZoneId: 'main',
+      workItemId: w.item(2),
+      role: 'review',
+      state: 'queued',
+    });
+    const lifted = at(5 * H);
+    creditsPass(db, lifted);
+    expect(leaseNextDrop(db, 's1', lifted, dispatchGate(db, cfg, lifted))?.dropId).toBe('p');
+    const p = { id: 'p', dropZoneId: 'main', workItemId: w.item(2), role: 'review' } as Drop;
+    // Another drop's result proves nothing; the probe's does.
+    noteProbeResult(db, drop('other', 'crew-lead'), { status: 'completed', gates: [] }, lifted);
+    expect(dispatchGate(db, cfg, lifted)).toBe('probe');
+    noteProbeResult(db, p, { status: 'completed', gates: [] }, lifted);
+    expect(dispatchGate(db, cfg, lifted)).toBe('open');
+  });
+
+  test('N2: a probe drop seen on credits does not end probing', () => {
+    insertStick(db, { id: 's1', name: 's', tokenHash: 'h', slots: 4 });
+    noteOverage(
+      db,
+      cfg,
+      drop('d1'),
+      onCredits({ unifiedWindows: undefined, resetsAt: undefined }),
+      null,
+      t0,
+    );
+    insertDrop(db, {
+      id: 'p',
+      dropZoneId: 'main',
+      workItemId: w.item(2),
+      role: 'review',
+      state: 'queued',
+    });
+    const lifted = at(5 * H);
+    creditsPass(db, lifted);
+    leaseNextDrop(db, 's1', lifted, dispatchGate(db, cfg, lifted));
+    const p = { id: 'p', dropZoneId: 'main', workItemId: w.item(2), role: 'review' } as Drop;
+    db.prepare(
+      `INSERT INTO credit_drops (drop_id, zone_id, first_at, last_at) VALUES ('p', 'main', 'x', 'x')`,
+    ).run();
+    noteProbeResult(db, p, { status: 'completed', gates: [] }, lifted);
+    expect(dispatchGate(db, cfg, lifted)).toBe('probe');
+  });
+
+  test('N2: with stopOnOverage false the gate never probes', () => {
+    noteOverage(
+      db,
+      cfg,
+      drop('d1'),
+      onCredits({ unifiedWindows: undefined, resetsAt: undefined }),
+      null,
+      t0,
+    );
+    creditsPass(db, at(5 * H));
+    expect(dispatchGate(db, cfg, at(5 * H))).toBe('probe');
+    expect(dispatchGate(db, { ...cfg, stopOnOverage: false }, at(5 * H))).toBe('open');
+  });
+
+  test('an extension refreshes the window and reason, so why and decision agree', () => {
+    noteOverage(
+      db,
+      cfg,
+      drop('d1'),
+      onCredits({ unifiedWindows: { five_hour: { utilization: 1, resetsAt: iso(H) } } }),
+      null,
+      t0,
+    );
+    noteOverage(db, cfg, drop('d2', 'crew-lead'), onCredits(), null, at(MIN));
+    expect(getUsageState(db).overageUntil).toBe(iso(3 * DAY));
+    creditsPass(db, at(2 * MIN));
+    const [b] = openStop();
+    expect(b?.why).toContain('Stopped until the 7-day window resets');
+    expect(b?.decision).toContain(iso(3 * DAY));
+  });
+
+  test('an in-plan event older than the lift does not end probing', () => {
+    noteOverage(
+      db,
+      cfg,
+      drop('d1'),
+      onCredits({ unifiedWindows: undefined, resetsAt: undefined }),
+      null,
+      t0,
+    );
+    const lifted = at(5 * H);
+    creditsPass(db, lifted);
+    const d2 = drop('d2', 'crew-lead');
+    const inPlan = { status: 'allowed' as const, isUsingOverage: false };
+    noteOverage(db, cfg, d2, inPlan, null, at(5 * H + MIN), at(H));
+    expect(dispatchGate(db, cfg, at(5 * H + MIN))).toBe('probe');
+    noteOverage(db, cfg, d2, inPlan, null, at(5 * H + MIN), at(5 * H + MIN));
+    expect(dispatchGate(db, cfg, at(5 * H + MIN))).toBe('open');
   });
 });

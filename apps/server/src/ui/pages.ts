@@ -91,7 +91,7 @@ function creditsLine(u: NonNullable<HomeState['usage']>): string | null {
   }
   if (u.gate === 'credits_resume') {
     const n = u.creditDropsSinceResume ?? 0;
-    return `resumed on credits until ${s.overageResumeUntil}; ${n} drop${n === 1 ? '' : 's'} reported credits since. The resumed work item's drops lease first.`;
+    return `resumed on credits until ${s.overageResumeUntil}; ${n} drop${n === 1 ? '' : 's'} reported credits since. Only the resumed work item's drops lease.`;
   }
   const lifted = s.overageProbeSince ?? s.overageUntil ?? s.overageResumeUntil;
   if (u.gate === 'probe' && lifted !== null) {

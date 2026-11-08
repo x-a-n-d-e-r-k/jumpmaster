@@ -216,13 +216,17 @@ export function noteOverage(
   data: RateLimitEventData,
   outcome: DropResult['status'] | null,
   now: Date,
+  /** When the drop reported it (a live event's `ts`); defaults to `now`. */
+  reportedAt: Date = now,
 ): boolean {
   if (data.isUsingOverage === false && outcome === null) {
     db.transaction(() => {
       const u = getUsageState(db);
       if (!creditsProbing(u, now)) return;
-      settleLifted(db, u, now);
-      setUsageState(db, { overageProbeSince: null }, now);
+      // A report from before the lift (a batch posted late) says nothing about now.
+      const start = ms(u.overageProbeSince ?? u.overageUntil ?? u.overageResumeUntil);
+      if (start !== null && reportedAt.getTime() < start) return;
+      endProbe(db, u, now);
     })();
     return false;
   }
@@ -244,8 +248,23 @@ export function noteOverage(
     if (creditsStopInForce(u, now)) {
       // Keeps its first drop; a later report may know a later reset.
       const current = ms(u.overageUntil);
+      const signal = creditSignal(u);
       if (current !== null && Date.parse(until) > current) {
-        setUsageState(db, { overageUntil: until }, now);
+        // The briefing's why names the window it waits for: keep it in step with the decision.
+        const refreshed = signal && {
+          ...signal,
+          rateLimit: data,
+          window: chosen.window,
+          reason: chosen.reason,
+        };
+        setUsageState(
+          db,
+          {
+            overageUntil: until,
+            ...(refreshed ? { overageSignalJson: JSON.stringify(refreshed) } : {}),
+          },
+          now,
+        );
       }
       return false;
     }
@@ -282,6 +301,31 @@ export function noteOverage(
       now,
     );
     return true;
+  })();
+}
+
+function endProbe(db: Db, u: UsageStateRow, now: Date): void {
+  settleLifted(db, u, now);
+  setUsageState(db, { overageProbeSince: null }, now);
+}
+
+/**
+ * A finished drop's result, after `noteOverage`: the probe drop that ran without being seen on
+ * credits (no live report and no result saying so) ends probing. The probe started after the
+ * lift, so this is a witness the account runs in plan. Other drops' results prove nothing.
+ */
+export function noteProbeResult(
+  db: Db,
+  drop: Pick<Drop, 'id'>,
+  result: DropResult,
+  now: Date,
+): void {
+  if (result.rateLimit?.isUsingOverage === true) return;
+  db.transaction(() => {
+    const u = getUsageState(db);
+    if (u.probeDropId !== drop.id || !creditsProbing(u, now)) return;
+    const seen = db.prepare('SELECT 1 FROM credit_drops WHERE drop_id = ?').get(drop.id);
+    if (seen === undefined) endProbe(db, u, now);
   })();
 }
 
@@ -358,9 +402,9 @@ function stopBriefing(db: Db, u: UsageStateRow, now: Date): NewBriefing {
     '',
     'Nothing leases, reviews included; running drops finish. Run on credits buys usage credits for',
     horizon.atReset
-      ? `this drop's work item until the 5-hour window resets (${minute(horizon.until)}): its queued`
-      : "this drop's work item for at most five hours from the ruling: its queued",
-    'drops lease first and alone; with none queued, one other drop may run (and bill) as a probe.',
+      ? `this drop's work item until the 5-hour window resets (${minute(horizon.until)}): only its`
+      : "this drop's work item for at most five hours from the ruling: only its",
+    'follow-on drops (review, heal, resolve) lease; nothing else does, and no new work is queued.',
     'Another drop on credits stops dispatch again. When the time is up, one drop probes until a',
     'drop reports running in plan.',
   ];

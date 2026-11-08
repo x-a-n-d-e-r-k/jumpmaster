@@ -20,8 +20,8 @@ const ZONE_ACTIVE = `AND drop_zone_id NOT IN (SELECT zone_id FROM zone_controls 
 /**
  * Leases the oldest queued drop the usage gate allows, bumping its epoch and stamping started_at.
  * `probe` leases exactly one drop (preferring one not on the pause's cause item) and records it.
- * `credits_resume` leases the resumed work item's drops first and alone; with none queued, it
- * probes. The gate is required: a caller that forgets it must not lease while stopped. All time
+ * `credits_resume` leases only the resumed work item's drops; with none queued (or a crew drop
+ * resumed), nothing. The gate is required: a caller that forgets it must not lease while stopped. All time
  * comes from `now`.
  */
 export function leaseNextDrop(
@@ -64,7 +64,6 @@ export function leaseNextDrop(
                    ORDER BY ${ROLE_CLASS}, created_at, rowid LIMIT 1`,
                 )
                 .get(bound) as { id: string } | undefined);
-        next ??= probeNext();
         break;
       }
       case 'open':

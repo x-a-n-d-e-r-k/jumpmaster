@@ -261,4 +261,63 @@ describe('a drop on usage credits stops dispatch', () => {
     expect(await leaseStatus(h)).toBe(200);
     expect(await leaseStatus(h)).toBe(200);
   });
+
+  test('N1: Resume while the stopping drop still runs leases nothing else; its review then leases', async () => {
+    const h = await harness({ issues, zone: { maxConcurrentImplement: 2 } });
+    await h.reconcile();
+    await h.reconcile();
+    const x = await h.lease();
+    await postEvents(h, x.dropId, x.epoch, [creditsEvent(h)]);
+    await h.reconcile();
+    const [b] = openStop(h);
+    await h.app.inject({
+      method: 'POST',
+      url: `/api/control/briefings/${b?.id}/rule`,
+      headers: OPERATOR,
+      payload: { optionId: 'resume' },
+    });
+    h.at(1);
+    await h.reconcile();
+    expect(getUsageState(h.db).overageResumeDropId).toBe(x.dropId);
+    // X still runs; the other implement is queued but unrelated.
+    expect(h.queuedRoles()).toEqual(['implement']);
+    expect(await leaseStatus(h)).toBe(204);
+    h.at(1);
+    h.forge.state.branches.set(x.payload.branch, 'x1');
+    await h.postResult(x.dropId, x.epoch, { status: 'completed', headSha: 'x1', gates: GREEN });
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['implement', 'review']);
+    const next = await h.lease();
+    expect(next.payload.role).toBe('review');
+    expect(await leaseStatus(h)).toBe(204);
+  });
+
+  test('N2: a probe drop with no events whose result completes in plan opens the gate', async () => {
+    const four = [1, 2, 3, 4].map((n) => ({ ...issues[0], number: n, title: `Issue ${n}` }));
+    const h = await harness({ issues: four as typeof issues, zone: { maxConcurrentImplement: 4 } });
+    for (let i = 0; i < 4; i++) await h.reconcile();
+    const d1 = await h.lease();
+    const out = creditsEvent(h, {
+      unifiedWindows: {
+        five_hour: { utilization: 1, resetsAt: '2026-01-01T01:00:00.000Z' },
+        seven_day: { utilization: 0.5, resetsAt: '2026-01-04T00:00:00.000Z' },
+      },
+    });
+    await postEvents(h, d1.dropId, d1.epoch, [out]);
+    h.at(61);
+    await h.reconcile();
+    const probe = await h.lease();
+    expect(await leaseStatus(h)).toBe(204);
+    h.forge.state.branches.set(probe.payload.branch, 'p1');
+    const done: DropResult = {
+      status: 'completed',
+      headSha: 'p1',
+      gates: GREEN,
+      rateLimit: { status: 'allowed', isUsingOverage: false },
+    };
+    expect(await h.postResult(probe.dropId, probe.epoch, done)).toBe(204);
+    // Two implements still queued, slots free: both lease.
+    expect(await leaseStatus(h)).toBe(200);
+    expect(await leaseStatus(h)).toBe(200);
+  });
 });

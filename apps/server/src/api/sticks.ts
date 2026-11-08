@@ -186,7 +186,10 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         const data = rateLimitFromEvent(ev.data);
         if (!data) continue;
         // First, whatever else the report means (a Fable limit returns early below).
-        if (noteOverage(db, config.usage, drop, data, null, now())) stopped = true;
+        const at = now();
+        const ts = Date.parse(ev.ts);
+        const reportedAt = Number.isFinite(ts) ? new Date(Math.min(ts, at.getTime())) : at;
+        if (noteOverage(db, config.usage, drop, data, null, at, reportedAt)) stopped = true;
         ingestRateLimit(
           db,
           data,
