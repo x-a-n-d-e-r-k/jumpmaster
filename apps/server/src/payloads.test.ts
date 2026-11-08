@@ -367,6 +367,19 @@ describe('prompts', () => {
     const t = readFileSync(new URL('../../trooper/prompts/heal.md', import.meta.url), 'utf8');
     expect(t).toMatch(/impossible in this environment[^.]*`BLOCKED`[^.]*why/i);
   });
+  test('review.md checks every acceptance criterion against evidence', () => {
+    const t = readFileSync(new URL('../../trooper/prompts/review.md', import.meta.url), 'utf8');
+    const rules = t.split('\n').filter((l) => /^\d+\. /.test(l));
+    expect(rules[0]).toMatch(/^1\. Check that the change implements the issue/);
+    const ac = rules[1] ?? '';
+    expect(ac).toMatch(/^2\. /);
+    expect(ac).toMatch(/every acceptance criterion[^.]*diff[^.]*gate results[^.]*author's reports/i);
+    expect(ac).toMatch(/A report's claim is not evidence by itself/);
+    expect(ac).toMatch(/re-run a read-only command/);
+    expect(ac).toMatch(/not met or not shown to be met is `major`/);
+    expect(ac).toMatch(/`\(manual\)`[^.]*`minor`/);
+    expect(ac).toMatch(/can't be met here is still `major`/);
+  });
   test('every template keeps the shared rules', () => {
     for (const r of ['implement', 'review', 'heal', 'resolve']) {
       const t = readFileSync(new URL(`../../trooper/prompts/${r}.md`, import.meta.url), 'utf8');
