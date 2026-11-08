@@ -29,7 +29,7 @@ describe('forge reads a zone does not need, and reads it is denied', () => {
     expect(getWorkItem(h.db, 1)).toMatchObject({
       state: 'parked',
       reason:
-        'forge read denied: checksFor (grant the author token Checks: read and Commit statuses: read)',
+        'forge read denied: checksFor (grant the author token Commit statuses: read and Actions: read)',
     });
   });
 
