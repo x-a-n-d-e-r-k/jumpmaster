@@ -9,6 +9,7 @@ import {
   getOutbox,
   getPullRequest,
   type OutboxRow,
+  recordGatePark,
   setWaitingSince,
   upsertPullRequest,
   verdictsForHead,
@@ -28,6 +29,7 @@ import {
   dependenciesChanged,
   gateBins,
   gateScriptChanges,
+  gateScriptDetails,
   gateToolChanges,
   LOCKFILES,
   lockfileChanges,
@@ -213,9 +215,12 @@ async function gateChanges(
   mergeBaseSha: string,
   headSha: string,
   unavailable: (method: string) => void,
-): Promise<{ scripts: string[]; tools: string[] }> {
+): Promise<GateChanges> {
   const scripts = new Set<string>();
   const tools = new Set<string>();
+  const scriptDetails = new Set<string>();
+  const toolDetails = new Map<string, string>();
+  const detail = (change: string, text: string) => toolDetails.set(change, text);
   const pkgPaths = new Set<string>();
   // Every lockfile in the PR is checked, and each changed package.json's lockfile when its
   // dependencies change; a workspace's packages share one lockfile, checked once.
@@ -233,7 +238,11 @@ async function gateChanges(
     ]);
     if (!basePkg.ok || !headPkg.ok) continue; // marked unavailable: decide waits
     for (const s of gateScriptChanges(zone.gates, basePkg.text, headPkg.text)) scripts.add(s);
-    for (const t of gateToolChanges(zone.gates, basePkg.text, headPkg.text)) tools.add(t);
+    const prefix = path === 'package.json' ? '' : `${path} `;
+    for (const d of gateScriptDetails(zone.gates, basePkg.text, headPkg.text, prefix)) {
+      scriptDetails.add(d);
+    }
+    for (const t of gateToolChanges(zone.gates, basePkg.text, headPkg.text, detail)) tools.add(t);
     if (!dependenciesChanged(basePkg.text, headPkg.text)) continue;
     const lock = await findLockfile(forges, headSha, dirname(path), unavailable);
     if (lock === undefined) continue;
@@ -274,11 +283,41 @@ async function gateChanges(
       allowAllBuilds: policy.allowAll,
       allowedBuilds: policy.allowed,
       gateBins: gateBins(zone.gates, basePkg.text, headPkg.text),
+      detail,
     };
     for (const t of lockfileChanges(path, baseLock.text, headLock.text, opts)) tools.add(t);
   }
-  return { scripts: [...scripts], tools: [...tools] };
+  return {
+    scripts: [...scripts],
+    tools: [...tools],
+    details: {
+      scripts: [...scriptDetails].sort(),
+      tools: [...tools].map((t) => toolDetails.get(t) ?? t).sort(),
+    },
+  };
 }
+
+/** After a gate park: records what it judged (PR, head, merge base, every change in full). */
+export function recordGateParkOf(db: Db, s: Snapshot, now: Date): void {
+  if (!s.pr?.headSha || !s.compare) return;
+  recordGatePark(
+    db,
+    {
+      itemId: s.item.id,
+      prNumber: s.pr.number,
+      headSha: s.pr.headSha,
+      mergeBaseSha: s.compare.mergeBaseSha,
+      details: s.gateDetails,
+    },
+    now,
+  );
+}
+
+type GateChanges = {
+  scripts: string[];
+  tools: string[];
+  details: { scripts: string[]; tools: string[] };
+};
 
 /**
  * The lockfile governing a directory at `ref`: the first lockfile found walking up to the repo
@@ -391,7 +430,7 @@ export async function buildSnapshot(
   const gate =
     compare && headSha
       ? await gateChanges(forges, zone, files.files, compare.mergeBaseSha, headSha, unavailable)
-      : { scripts: [], tools: [] };
+      : { scripts: [], tools: [], details: { scripts: [], tools: [] } };
   const maintainerApproved =
     headSha !== null && (gate.scripts.length > 0 || gate.tools.length > 0)
       ? await maintainerApprovedHead(forges, zone, trusted, headSha, pass.botLogins, unavailable)
@@ -459,6 +498,7 @@ export async function buildSnapshot(
     gateToolChanges: gate.tools,
     maintainerApproved,
     commandAllowed,
+    gateDetails: gate.details,
     newestReviewAt: newestReviewAt(reviews),
     protectionProblems: pass.protectionProblems,
     headFirstSeenAt,

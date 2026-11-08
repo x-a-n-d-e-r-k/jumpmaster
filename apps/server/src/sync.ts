@@ -21,7 +21,13 @@ import {
   type WorkItem,
 } from './db/repo.js';
 import { DENIED_PREFIX, decide, GATE_PARK_PREFIXES, HOLD_REASON } from './flow/decide.js';
-import { buildSnapshot, newestReviewAt, type ZonePass, zonePass } from './flow/snapshot.js';
+import {
+  buildSnapshot,
+  newestReviewAt,
+  recordGateParkOf,
+  type ZonePass,
+  zonePass,
+} from './flow/snapshot.js';
 import type { ForgeIssue, PullFacts } from './forge/github.js';
 import { refreshGoals } from './goals.js';
 import type { ForgePair } from './outbox.js';
@@ -361,8 +367,12 @@ export async function syncParked(
     ) {
       const fresh = getWorkItem(db, item.id);
       if (!fresh) continue;
-      const action = decide(await buildSnapshot(db, forges, zone, fresh, pass, now));
-      if (!(action.kind === 'park' && action.reason === reason)) {
+      const s = await buildSnapshot(db, forges, zone, fresh, pass, now);
+      const action = decide(s);
+      if (action.kind === 'park' && action.reason === reason) {
+        // Still parked on the same changes, perhaps on a new head: brief what was judged now.
+        if (GATE_PARK_PREFIXES.some((p) => reason.startsWith(p))) recordGateParkOf(db, s, now);
+      } else {
         setWorkItemState(db, item.id, 'pr_open', undefined, now);
         reopened++;
       }

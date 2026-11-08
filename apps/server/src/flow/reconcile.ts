@@ -38,7 +38,7 @@ import { enqueueImplement, enqueueNext, isBlocked } from '../scheduler.js';
 import { rankItems } from '../sync.js';
 import { chargeBudget } from './budgets.js';
 import { type Action, decide, GATE_PARK_PREFIXES, type Snapshot } from './decide.js';
-import { buildSnapshot, type ZonePass } from './snapshot.js';
+import { buildSnapshot, recordGateParkOf, type ZonePass } from './snapshot.js';
 
 export type ReconcileReport = { actions: number; merges: number };
 
@@ -425,6 +425,7 @@ export async function reconcileZone(
         // syncParked re-decides a gate park only once a newer review appears (or hourly).
         if (GATE_PARK_PREFIXES.some((p) => a.reason.startsWith(p))) {
           setParkMark(db, item.id, s.newestReviewAt ?? '', now);
+          recordGateParkOf(db, s, now);
         }
         actions++;
         break;

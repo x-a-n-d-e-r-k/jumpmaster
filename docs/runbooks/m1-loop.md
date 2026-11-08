@@ -184,17 +184,22 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   any setup where the operator's account is the PR author, which GitHub won't let approve its own
   PR), the operator rules on the item's parked briefing instead. A gate park that is fully read
   is briefed with three options: `Retry`, `Leave parked` and `Allow these gate changes for
-  <sha7>` (option id `allow`). The briefing's text is the park reason, which lists every
-  reported change, so read it before ruling: on `/briefings`, or `ctl rule <briefing> allow
-  [note]` over the operator-authenticated control route. The ruling binds to that exact head
-  commit: when it is applied (the next pass) the server re-reads the PR, and if the head has
-  moved the ruling records `head moved` and allows nothing. Otherwise the allowance is recorded
-  (it survives restarts), the next sync re-decides the item and the reviewer agent reviews it as
+  <sha7>` (option id `allow`). The briefing says "Read the PR diff at <sha7> on the forge before
+  ruling": do that. Its text is the park reason followed by every reported change in full, at
+  most 8,000 characters: each changed gate script as `name: "<old>" → "<new>"` (merge base →
+  head), and tool changes with old → new versions where the guard knows them. Rule on
+  `/briefings`, or `ctl rule <briefing> <option id> [note]` (the id is shown beside each option)
+  over the operator-authenticated control route. The ruling binds to that exact head commit:
+  when it is applied (the next pass) the server re-reads the PR, and if the head has moved the
+  ruling records `head moved` and allows nothing. Otherwise the allowance is recorded (it
+  survives restarts), the next sync re-decides the item and the reviewer agent reviews it as
   usual; the status page shows `gate change allowed by Command for <sha7>` on the item. Any new
   push (a heal or resolve included) is a new head with no allowance, so it parks again and is
-  briefed again. Not offered, and not honoured, for a reason ending `(not fully read: merge it
-  by hand)` or for a `protected path:` park: those still need a person to merge by hand. Crew
-  briefings can't offer it: only the server defines effects.
+  briefed again. Not offered, and not honoured, when the park reason's list is cut short
+  (`… (+N more)`), when the full list does not fit the briefing, for a reason ending `(not fully
+  read: merge it by hand)`, or for a `protected path:` park: those still need a maintainer's
+  approval on the forge or a person to merge by hand. Crew briefings can't offer it: only the
+  server defines effects.
 - Budgets are per work item. When one runs out the item parks `budget exhausted: <key>`;
   the retry label resets them (see scenario 5).
 

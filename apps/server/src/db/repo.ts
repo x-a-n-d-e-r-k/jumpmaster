@@ -238,6 +238,51 @@ export function setParkMark(db: Db, id: number, reviewsSeen: string, checkedAt: 
   );
 }
 
+export type GateDetails = { scripts: string[]; tools: string[] };
+export type GatePark = {
+  itemId: number;
+  prNumber: number;
+  headSha: string;
+  mergeBaseSha: string;
+  details: GateDetails;
+  /** When this content was first recorded (unchanged by re-recording the same judgement). */
+  recordedAt: string;
+};
+
+/** Records what a gate park judged; recorded_at moves only when the judgement changes. */
+export function recordGatePark(db: Db, p: Omit<GatePark, 'recordedAt'>, now: Date): void {
+  db.prepare(
+    `INSERT INTO gate_parks (item_id, pr_number, head_sha, merge_base_sha, details_json, recorded_at)
+       VALUES (@itemId, @prNumber, @headSha, @mergeBaseSha, @detailsJson, @at)
+     ON CONFLICT (item_id) DO UPDATE SET pr_number = excluded.pr_number,
+       head_sha = excluded.head_sha, merge_base_sha = excluded.merge_base_sha,
+       details_json = excluded.details_json, recorded_at = excluded.recorded_at
+     WHERE pr_number IS NOT excluded.pr_number OR head_sha IS NOT excluded.head_sha
+       OR merge_base_sha IS NOT excluded.merge_base_sha
+       OR details_json IS NOT excluded.details_json`,
+  ).run({
+    itemId: p.itemId,
+    prNumber: p.prNumber,
+    headSha: p.headSha,
+    mergeBaseSha: p.mergeBaseSha,
+    detailsJson: JSON.stringify(p.details),
+    at: now.toISOString(),
+  });
+}
+
+export function getGatePark(db: Db, itemId: number): GatePark | undefined {
+  const r = db
+    .prepare(
+      `SELECT item_id AS itemId, pr_number AS prNumber, head_sha AS headSha,
+         merge_base_sha AS mergeBaseSha, details_json AS detailsJson, recorded_at AS recordedAt
+         FROM gate_parks WHERE item_id = ?`,
+    )
+    .get(itemId) as (Omit<GatePark, 'details'> & { detailsJson: string }) | undefined;
+  if (!r) return undefined;
+  const { detailsJson, ...rest } = r;
+  return { ...rest, details: JSON.parse(detailsJson) as GateDetails };
+}
+
 export type GateAllowance = { itemId: number; headSha: string; ruledAt: string; rulingId: number };
 
 /** Records Command's allowance of `headSha`'s gate changes. A repeat is a no-op (first one kept). */

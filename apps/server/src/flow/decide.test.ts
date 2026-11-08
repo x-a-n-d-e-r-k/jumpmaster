@@ -134,6 +134,7 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
     gateToolChanges: [],
     maintainerApproved: false,
     commandAllowed: false,
+    gateDetails: { scripts: [], tools: [] },
     newestReviewAt: null,
     protectionProblems: [],
     headFirstSeenAt: now.toISOString(),
@@ -354,6 +355,19 @@ describe('rules in order', () => {
     expect(gateParkAllowable(reasonOf({ gateToolChanges: ['lockfile not found'] }))).toBe(false);
     expect(gateParkAllowable(reasonOf({ protectedHits: ['CODEOWNERS'] }))).toBe(false);
     expect(gateParkAllowable(`protected path: x${OVERRIDE_HINT}`)).toBe(false);
+  });
+
+  test('a truncated change list is not allowable, and a Command allowance does not lift it', () => {
+    const long = Array.from({ length: 40 }, (_, i) => `dependency added: package-${i}@1.0.0`);
+    const a = decide(snap({ gateToolChanges: long }));
+    if (a.kind !== 'park') throw new Error(a.kind);
+    expect(a.reason).toMatch(/\(\+\d+ more\)/);
+    expect(gateParkAllowable(a.reason)).toBe(false);
+    expect(decide(snap({ gateToolChanges: long, commandAllowed: true }))).toEqual(a);
+    // A maintainer reads the diff on the forge: their approval still lifts it.
+    expect(decide(snap({ gateToolChanges: long, maintainerApproved: true }))).toEqual(
+      decide(snap()),
+    );
   });
 
   test('13–14: a Command allowance for the head lets gate changes through', () => {

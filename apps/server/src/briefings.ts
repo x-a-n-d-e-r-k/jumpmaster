@@ -4,14 +4,17 @@ import { getCrewIssue, setCrewIssue } from './crew/store.js';
 import type { Db } from './db/open.js';
 import {
   activeDropFor,
+  type GatePark,
+  getGatePark,
   getPullRequest,
   getWorkItem,
   listWorkItems,
   recordGateAllowance,
   setWorkItemState,
+  type WorkItem,
 } from './db/repo.js';
 import { enableFable } from './fable.js';
-import { gateParkAllowable } from './flow/decide.js';
+import { GATE_PARK_PREFIXES, gateParkAllowable } from './flow/decide.js';
 import type { ForgePair } from './outbox.js';
 import { retryParkedItem } from './sync.js';
 
@@ -393,36 +396,73 @@ export function syncParkBriefings(db: Db, zone: DropZoneConfig, now: Date): void
     if (hasOpenBriefing(db, zone.id, subject)) continue;
     const at = (parkedAt.get(item.id) as { at: string }).at;
     if (ruledSince.get(zone.id, subject, at)) continue;
-    const reason = item.reason ?? 'no reason recorded';
-    const options: BriefingOption[] = [
-      { id: 'retry', label: 'Retry', effect: 'retry_item' },
-      { id: 'leave', label: 'Leave parked', effect: 'none' },
-    ];
-    // A fully read gate park may be let through for the head it was judged on (the last head
-    // read); the reason lists every change, so Command sees what it allows.
-    const head = getPullRequest(db, item.id)?.headSha;
-    if (head && gateParkAllowable(reason)) {
+    raiseBriefing(db, parkBriefing(db, zone.id, item), now);
+  }
+}
+
+/** The most a briefing's why carries; a longer gate change list is cut and not allowable. */
+export const MAX_BRIEFING_WHY = 8000;
+const CUT_NOTE = '\n… (cut: too long to review here; merge it by hand)';
+
+/**
+ * A gate park's why: the park reason, then every change it judged in full (scripts old → new,
+ * tool changes old → new where known). `complete` is false when it had to be cut.
+ */
+export function gateParkWhy(reason: string, park: GatePark): { why: string; complete: boolean } {
+  const lines = [
+    reason,
+    '',
+    `Every gate change on head ${park.headSha.slice(0, 7)} (merge base ${park.mergeBaseSha.slice(0, 7)}, PR #${park.prNumber}):`,
+  ];
+  if (park.details.scripts.length > 0) {
+    lines.push('gate script changed:', ...park.details.scripts.map((d) => `  ${d}`));
+  }
+  if (park.details.tools.length > 0) {
+    lines.push('gate tool changed:', ...park.details.tools.map((d) => `  ${d}`));
+  }
+  const full = lines.join('\n');
+  if (full.length <= MAX_BRIEFING_WHY) return { why: full, complete: true };
+  return { why: full.slice(0, MAX_BRIEFING_WHY - CUT_NOTE.length) + CUT_NOTE, complete: false };
+}
+
+/** The parked briefing the server raises for `item` now. */
+function parkBriefing(db: Db, zoneId: string, item: WorkItem): NewBriefing {
+  const reason = item.reason ?? 'no reason recorded';
+  const options: BriefingOption[] = [
+    { id: 'retry', label: 'Retry', effect: 'retry_item' },
+    { id: 'leave', label: 'Leave parked', effect: 'none' },
+  ];
+  let decision = `Issue #${item.issueNumber} is parked. Retry it?`;
+  let why = reason;
+  const park = GATE_PARK_PREFIXES.some((p) => reason.startsWith(p))
+    ? getGatePark(db, item.id)
+    : undefined;
+  if (park) {
+    const g = gateParkWhy(reason, park);
+    why = g.why;
+    const sha7 = park.headSha.slice(0, 7);
+    decision = `Issue #${item.issueNumber} is parked on a gate change. Read the PR diff at ${sha7} on the forge before ruling.`;
+    // Allowable only for the head it judged, when every change is listed and was fully read.
+    const pr = getPullRequest(db, item.id);
+    const current = pr?.headSha === park.headSha && pr.number === park.prNumber;
+    if (g.complete && current && gateParkAllowable(reason)) {
       options.push({
         id: 'allow',
-        label: `Allow these gate changes for ${head.slice(0, 7)}`,
+        label: `Allow these gate changes for ${sha7}`,
         effect: 'allow_gate_change',
-        sha: head,
+        sha: park.headSha,
       });
     }
-    raiseBriefing(
-      db,
-      {
-        zoneId: zone.id,
-        kind: 'parked',
-        subject,
-        decision: `Issue #${item.issueNumber} is parked. Retry it?`,
-        why: reason,
-        options,
-        recommendation: '',
-        onHold: `Issue #${item.issueNumber}`,
-        source: 'server',
-      },
-      now,
-    );
   }
+  return {
+    zoneId,
+    kind: 'parked',
+    subject: `item:${item.id}`,
+    decision,
+    why,
+    options,
+    recommendation: '',
+    onHold: `Issue #${item.issueNumber}`,
+    source: 'server',
+  };
 }

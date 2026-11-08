@@ -172,6 +172,29 @@ export function gateScriptChanges(
   return [...names].filter((n) => base.scripts?.[n] !== head.scripts?.[n]).sort();
 }
 
+/** A value for a change detail: JSON-quoted, or `(none)` when absent. */
+export const quoteValue = (v: unknown): string => (v === undefined ? '(none)' : JSON.stringify(v));
+
+/**
+ * gateScriptChanges with each script's text at the merge base and at head:
+ * `<prefix><name>: "<old>" → "<new>"`.
+ */
+export function gateScriptDetails(
+  gates: GateSpec[],
+  basePkg: string | null,
+  headPkg: string | null,
+  prefix = '',
+): string[] {
+  const base = parsePkg(basePkg);
+  const head = parsePkg(headPkg);
+  return gateScriptChanges(gates, basePkg, headPkg).map(
+    (n) => `${prefix}${n}: ${quoteValue(base.scripts?.[n])} → ${quoteValue(head.scripts?.[n])}`,
+  );
+}
+
+/** Receives a fuller description (old → new) of a reported change, where the guard knows it. */
+export type ChangeDetail = (change: string, detail: string) => void;
+
 const DEP_FIELDS = [
   'dependencies',
   'devDependencies',
@@ -244,6 +267,7 @@ export function gateToolChanges(
   gates: GateSpec[],
   basePkg: string | null,
   headPkg: string | null,
+  detail?: ChangeDetail,
 ): string[] {
   const base = parsePkg(basePkg);
   const head = parsePkg(headPkg);
@@ -281,7 +305,11 @@ export function gateToolChanges(
   for (const bin of bins) {
     if (nonRegistry.has(bin)) continue;
     if (bin in baseDeps || bin in headDeps) {
-      if (baseDeps[bin] !== headDeps[bin]) out.push(`${bin} version changed`);
+      if (baseDeps[bin] !== headDeps[bin]) {
+        const c = `${bin} version changed`;
+        out.push(c);
+        detail?.(c, `${c}: ${quoteValue(baseDeps[bin])} → ${quoteValue(headDeps[bin])}`);
+      }
     }
   }
   return out;
@@ -350,6 +378,7 @@ function npmLockChanges(
   baseText: string | null,
   headText: string,
   gateBinNames: string[],
+  detail?: ChangeDetail,
 ): string[] {
   const head = parseNpmLock(headText);
   const base = baseText === null ? {} : parseNpmLock(baseText);
@@ -381,7 +410,9 @@ function npmLockChanges(
     if (entry.hasInstallScript && moved) out.push(`install script: ${name}`);
     const bins = entry.bin && typeof entry.bin === 'object' ? Object.keys(entry.bin) : [];
     if (moved && [name, ...bins].some((b) => gateBinNames.includes(b))) {
-      out.push(`${name} version changed in lockfile`);
+      const c = `${name} version changed in lockfile`;
+      out.push(c);
+      detail?.(c, `${c}: ${quoteValue(before?.version)} → ${quoteValue(entry.version)}`);
     }
   }
   return out;
@@ -582,6 +613,7 @@ type LockOptions = {
   allowAllBuilds?: boolean;
   allowedBuilds?: string[];
   gateBins?: string[];
+  detail?: ChangeDetail;
 };
 
 /**
@@ -707,7 +739,7 @@ export function lockfileChanges(
   if (headText === null || headText === '' || baseText === '') return [UNREADABLE];
   return file === 'pnpm-lock.yaml'
     ? pnpmLockChanges(baseText, headText, opts)
-    : npmLockChanges(baseText, headText, opts.gateBins ?? []);
+    : npmLockChanges(baseText, headText, opts.gateBins ?? [], opts.detail);
 }
 
 // ---- branch protection -------------------------------------------------------------------------

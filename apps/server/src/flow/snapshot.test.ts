@@ -62,7 +62,28 @@ describe('buildSnapshot', () => {
     w.f.state.pullFiles.set(1, { files: [{ path: 'package.json' }], complete: true });
     w.f.state.files.set('base0:package.json', pkg({ test: 'vitest' }));
     w.f.state.files.set('sha1:package.json', pkg({ test: 'exit 0' }));
-    expect((await snapshotOf()).gateScriptChanges).toEqual(['test']);
+    const s = await snapshotOf();
+    expect(s.gateScriptChanges).toEqual(['test']);
+    expect(s.gateDetails).toEqual({ scripts: ['test: "vitest" → "exit 0"'], tools: [] });
+  });
+
+  test('a script in a nested package.json, added or removed, is detailed with its path', async () => {
+    w.f.state.pullFiles.set(1, { files: [{ path: 'pkg/a/package.json' }], complete: true });
+    w.f.state.files.set('base0:pkg/a/package.json', pkg({ test: 'vitest' }));
+    w.f.state.files.set('sha1:pkg/a/package.json', pkg({}));
+    const s = await snapshotOf();
+    expect(s.gateDetails.scripts).toEqual(['pkg/a/package.json test: "vitest" → (none)']);
+  });
+
+  test('a gate runner bumped in package.json is detailed old → new', async () => {
+    const withDep = (v: string) =>
+      JSON.stringify({ name: 'x', scripts: { test: 'vitest' }, devDependencies: { vitest: v } });
+    w.f.state.pullFiles.set(1, { files: [{ path: 'package.json' }], complete: true });
+    w.f.state.files.set('base0:package.json', withDep('^1.0.0'));
+    w.f.state.files.set('sha1:package.json', withDep('^2.0.0'));
+    const s = await snapshotOf();
+    expect(s.gateToolChanges).toContain('vitest version changed');
+    expect(s.gateDetails.tools).toContain('vitest version changed: "^1.0.0" → "^2.0.0"');
   });
 
   test('a lockfile changed without any package.json is still checked', async () => {
@@ -96,7 +117,9 @@ describe('buildSnapshot', () => {
     w.f.state.files.set('sha1:package.json', pkg({ test: 'vitest run' }));
     w.f.state.files.set('base0:package-lock.json', npmLock('3.0.0'));
     w.f.state.files.set('sha1:package-lock.json', npmLock('3.0.1'));
-    expect((await snapshotOf()).gateToolChanges).toEqual(['vitest version changed in lockfile']);
+    const s = await snapshotOf();
+    expect(s.gateToolChanges).toEqual(['vitest version changed in lockfile']);
+    expect(s.gateDetails.tools).toEqual(['vitest version changed in lockfile: "3.0.0" → "3.0.1"']);
   });
 
   describe('pnpm workspaces', () => {

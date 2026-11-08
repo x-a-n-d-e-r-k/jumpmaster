@@ -282,6 +282,23 @@ describe('briefings', () => {
     }
   });
 
+  test('a briefing keeps the line breaks of its why and shows each option id for ctl', () => {
+    const html = renderBriefings({
+      open: [
+        briefing({
+          why: 'gate script changed: test\n  test: "a" → "<b>"',
+          options: [{ id: 'allow-x', label: 'Allow', effect: 'allow_gate_change', sha: 'x' }],
+        }),
+      ],
+      rulings: [],
+      zones: [z],
+    });
+    expect(html).toContain(
+      '<pre>gate script changed: test\n  test: &quot;a&quot; → &quot;&lt;b&gt;&quot;</pre>',
+    );
+    expect(html).toContain('<code>allow-x</code>');
+  });
+
   test('a held refute promotion shows its Reject option and when it will promote', () => {
     const held = briefing({
       kind: 'promote_held',

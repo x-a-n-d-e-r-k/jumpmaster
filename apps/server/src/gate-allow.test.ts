@@ -84,6 +84,9 @@ describe('allow a gate change by Command ruling', () => {
     const { w, id } = gateWorld();
     const b = await parkAndBrief(w, id);
     expect(b.why).toMatch(/^gate script changed: test/);
+    // Every change in full, old → new, so Command sees what it allows.
+    expect(b.why).toContain('test: "vitest" → "vitest --bail"');
+    expect(b.decision).toContain('Read the PR diff at a1b2c3d on the forge before ruling.');
     expect(b.options).toEqual([
       { id: 'retry', label: 'Retry', effect: 'retry_item' },
       { id: 'leave', label: 'Leave parked', effect: 'none' },
@@ -96,13 +99,35 @@ describe('allow a gate change by Command ruling', () => {
     ]);
   });
 
+  test('a change list too long for the briefing is shown cut, with no allow option', async () => {
+    const { w, id } = gateWorld(pkg({ test: `vitest ${'x'.repeat(9000)}` }));
+    const b = await parkAndBrief(w, id);
+    expect(b.why.length).toBeLessThanOrEqual(8200);
+    expect(b.why).toContain('too long to review here');
+    expect(b.options.map((o) => o.effect)).toEqual(['retry_item', 'none']);
+  });
+
+  test('a truncated park reason offers no allow option', async () => {
+    const { w, id } = gateWorld();
+    const many = Object.fromEntries(
+      Array.from({ length: 60 }, (_, i) => [`script-number-${i}`, `vitest ${i}`]),
+    );
+    const test = Object.keys(many)
+      .map((n) => `npm run ${n}`)
+      .join(' && ');
+    gateChange(w, HEAD, pkg({ test, ...many }));
+    const b = await parkAndBrief(w, id);
+    expect(b.why).toMatch(/\(\+\d+ more\)/);
+    expect(b.options.map((o) => o.effect)).toEqual(['retry_item', 'none']);
+  });
+
   test('a park not fully read offers no allow option', async () => {
     // A dependency added with no lockfile anywhere: `lockfile not found`.
     const { w, id } = gateWorld(
       JSON.stringify({ name: 'x', scripts: { test: 'vitest' }, dependencies: { x: '^1' } }),
     );
     const b = await parkAndBrief(w, id);
-    expect(b.why).toMatch(/\(not fully read: merge it by hand\)$/);
+    expect(b.why).toContain('(not fully read: merge it by hand)');
     expect(b.options.map((o) => o.effect)).toEqual(['retry_item', 'none']);
   });
 

@@ -281,8 +281,19 @@ ALTER TABLE drops ADD COLUMN requested_model TEXT;
 ALTER TABLE drops ADD COLUMN served_model TEXT;
 `;
 
-/** v11: Command's allowance of one head's gate changes, recorded by an `allow_gate_change` ruling. */
+/**
+ * v11: the gate changes a gate park judged, in full (for Command's briefing), and Command's
+ * allowance of one head's gate changes, recorded by an `allow_gate_change` ruling.
+ */
 const V11_SQL = `
+CREATE TABLE gate_parks (
+  item_id         INTEGER PRIMARY KEY REFERENCES work_items(id),
+  pr_number       INTEGER NOT NULL,
+  head_sha        TEXT NOT NULL,
+  merge_base_sha  TEXT NOT NULL,
+  details_json    TEXT NOT NULL,
+  recorded_at     TEXT NOT NULL
+);
 CREATE TABLE gate_allowances (
   item_id    INTEGER NOT NULL REFERENCES work_items(id),
   head_sha   TEXT NOT NULL,

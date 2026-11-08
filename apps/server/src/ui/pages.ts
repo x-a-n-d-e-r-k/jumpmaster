@@ -137,14 +137,14 @@ function briefingBlock(b: Briefing, holds: Map<string, string> | undefined): str
   const options = b.options
     .map(
       (o) =>
-        `<label><input type="radio" name="option" value="${escapeHtml(o.id)}" required> ${escapeHtml(o.label)}</label><br>`,
+        `<label><input type="radio" name="option" value="${escapeHtml(o.id)}" required> ${escapeHtml(o.label)}</label> <small><code>${escapeHtml(o.id)}</code></small><br>`,
     )
     .join('');
   const row = (k: string, v: string) =>
     v ? `<tr><th>${k}</th><td>${escapeHtml(v)}</td></tr>` : '';
   return (
     `<h3>${escapeHtml(b.decision)}</h3>` +
-    `<table>${row('Zone', b.zoneId)}${row('Kind', b.kind)}${row('About', b.subject)}${row('Why', b.why)}${row('Recommendation', b.recommendation)}${row('On hold', b.onHold)}${row('Raised by', b.source)}${row('Raised', b.createdAt)}</table>` +
+    `<table>${row('Zone', b.zoneId)}${row('Kind', b.kind)}${row('About', b.subject)}${b.why ? `<tr><th>Why</th><td><pre>${escapeHtml(b.why)}</pre></td></tr>` : ''}${row('Recommendation', b.recommendation)}${row('On hold', b.onHold)}${row('Raised by', b.source)}${row('Raised', b.createdAt)}</table>` +
     (hold ? `<p>Promotes at ${escapeHtml(hold)} unless you reject it.</p>` : '') +
     `<form class="rule" data-briefing="${escapeHtml(b.id)}">${options}<textarea name="note" maxlength="2000" placeholder="Note (optional)"></textarea><br><input type="password" placeholder="Operator token" autocomplete="off" required> <button>Rule</button></form>`
   );
