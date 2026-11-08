@@ -7,6 +7,7 @@ import { describe, expect, test } from 'vitest';
 import {
   activeDropFor,
   getAttempts,
+  getPullRequest,
   getUsageState,
   insertOutbox,
   insertVerdict,
@@ -373,6 +374,27 @@ describe('§16 reviews and heals', () => {
     const { payload } = await h.lease();
     expect(payload).toMatchObject({ role: 'review', pr: { headSha: 'sha1' } });
     expect(payload.prompt).toContain('works in a browser (manual)');
+  });
+
+  test('a failed PR read during a retry skips the item without consuming the label', async () => {
+    const h = await harness();
+    await toHealQueued(h, 'sha1');
+    await h.finishDrop('heal', { status: 'no_changes', gates: [] });
+    await h.reconcile();
+    await h.finishDrop('heal', { status: 'no_changes', gates: [] });
+    await h.reconcile();
+    expect(item(h).state).toBe('parked');
+    h.forge.state.setLabels(1, ['agent-ready', 'agent-retry']);
+    h.forge.author.failNext('getPull', 'throw');
+    await h.sync();
+    expect(item(h)).toMatchObject({ state: 'parked', retryLabelSeen: false });
+    expect(getAttempts(h.db, 1, 'heal_no_change').count).toBe(1);
+    expect(getPullRequest(h.db, 1)?.state).toBe('open');
+    await h.reconcile();
+    await h.reconcile();
+    expect(item(h)).toMatchObject({ state: 'pr_open', prNumber: 1 });
+    expect(h.queuedRoles()).toEqual(['review']);
+    expect(h.forge.state.pulls.size).toBe(1);
   });
 
   test('the retry label never leaves a stale approve standing alone on a request-changes head', async () => {
