@@ -63,6 +63,7 @@ export async function harness(
     dataDir: opts.dataDir ?? '.',
     pollSeconds: 60,
     dropZones: [zone],
+    claude: { plan: 'pro', fableWeeklyDropCap: 5 },
     secrets: {
       claudeToken: 'claude-token',
       githubAuthorToken: 'author-token',

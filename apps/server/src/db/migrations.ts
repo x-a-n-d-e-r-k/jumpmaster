@@ -269,6 +269,18 @@ CREATE TABLE rulings (
 );
 `;
 
+/** v10: Fable's global state, and the model each drop asked for and was served. */
+const V10_SQL = `
+CREATE TABLE fable_state (
+  id               INTEGER PRIMARY KEY CHECK (id = 1),
+  disabled_reason  TEXT,
+  paused_until     TEXT,
+  updated_at       TEXT NOT NULL
+);
+ALTER TABLE drops ADD COLUMN requested_model TEXT;
+ALTER TABLE drops ADD COLUMN served_model TEXT;
+`;
+
 export type Migration = { version: number; sql: string; foreignKeysOff?: boolean };
 
 export const MIGRATIONS: Migration[] = [
@@ -281,6 +293,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 7, sql: V7_SQL },
   { version: 8, sql: V8_SQL },
   { version: 9, sql: V9_SQL },
+  { version: 10, sql: V10_SQL },
 ];
 
 /**

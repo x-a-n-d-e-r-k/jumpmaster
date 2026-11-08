@@ -8,9 +8,15 @@ import {
   isCrewRole,
   type Role,
 } from '@jumpmaster/protocol';
-import { type Config, DEFAULT_PIDS_LIMIT, type DropZoneConfig, modelFor } from './config.js';
+import {
+  type ClaudeConfig,
+  type Config,
+  DEFAULT_PIDS_LIMIT,
+  type DropZoneConfig,
+} from './config.js';
 import type { Db } from './db/open.js';
-import { type Drop, getPullRequest, listWorkItems } from './db/repo.js';
+import { type Drop, getPullRequest, listWorkItems, updateDrop } from './db/repo.js';
+import { resolveModel } from './fable.js';
 import type { Feedback } from './flow/decide.js';
 
 const ROLES: Role[] = ['implement', 'review', 'heal', 'resolve', ...CREW_ROLES];
@@ -139,6 +145,7 @@ function buildCrewPayload(
   drop: Drop,
   role: CrewRole,
   secrets: Config['secrets'],
+  model: string,
 ): DropPayload {
   const stored = JSON.parse(drop.inputJson ?? 'null') as CrewInputJson | null;
   if (!stored || typeof stored.input !== 'string') {
@@ -153,7 +160,7 @@ function buildCrewPayload(
     dropId: drop.id,
     epoch: drop.epoch,
     repo: { owner, name, defaultBranch: row.defaultBranch },
-    model: modelFor(zone, role),
+    model,
     maxTurns: zone.maxTurns,
     promptVersion: promptVersions()[role],
     image: zone.image,
@@ -189,13 +196,28 @@ function buildCrewPayload(
   };
 }
 
+const DEFAULT_CLAUDE: ClaudeConfig = { plan: 'pro', fableWeeklyDropCap: 5 };
+
+/**
+ * The payload for a leased drop. The model comes from `resolveModel` (Fable only where the declared
+ * plan includes it) and is recorded on the drop as `requested_model`.
+ */
 export function buildPayload(
   db: Db,
   zone: DropZoneConfig,
   drop: Drop,
   secrets: Config['secrets'],
+  o: { claude?: ClaudeConfig; now?: Date } = {},
 ): DropPayload {
-  if (isCrewRole(drop.role)) return buildCrewPayload(db, zone, drop, drop.role, secrets);
+  const model = resolveModel(
+    db,
+    { claude: o.claude ?? DEFAULT_CLAUDE },
+    zone,
+    drop.role as Role,
+    o.now ?? new Date(),
+  );
+  updateDrop(db, drop.id, { requestedModel: model });
+  if (isCrewRole(drop.role)) return buildCrewPayload(db, zone, drop, drop.role, secrets, model);
   const item = listWorkItems(db, zone.id).find((w) => w.id === drop.workItemId);
   if (!item) throw new Error(`unknown work item ${drop.workItemId}`);
   const row = db
@@ -212,7 +234,7 @@ export function buildPayload(
     issue: { number: item.issueNumber, title: item.title, body: item.body },
     branch,
     gates: zone.gates,
-    model: modelFor(zone, role),
+    model,
     maxTurns: zone.maxTurns,
     promptVersion: promptVersions()[role],
     image: zone.image,

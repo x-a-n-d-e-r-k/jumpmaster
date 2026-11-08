@@ -297,4 +297,27 @@ describe('crew config', () => {
       loadConfig(withZone({ crew: { enabled: true, stagedLabel: 'agent-ready' } }), fullEnv),
     ).toThrow(/stagedLabel/);
   });
+
+  test('claude defaults to the pro plan with no Fable and a weekly cap of 5', () => {
+    expect(loadConfig(minimal, fullEnv).claude).toEqual({ plan: 'pro', fableWeeklyDropCap: 5 });
+    const c = loadConfig(
+      fixture({
+        dataDir: './data',
+        dropZones: [baseZone],
+        claude: { plan: 'max', fableModel: 'claude-fable-1', fableWeeklyDropCap: 3 },
+      }),
+      fullEnv,
+    );
+    expect(c.claude).toEqual({ plan: 'max', fableModel: 'claude-fable-1', fableWeeklyDropCap: 3 });
+    expect(() =>
+      loadConfig(
+        fixture({ dataDir: './data', dropZones: [baseZone], claude: { plan: 'gold' } }),
+        fullEnv,
+      ),
+    ).toThrow(/claude.plan/);
+  });
+
+  test('a zone model naming Fable is a config error', () => {
+    expect(() => loadConfig(withZone({ model: 'claude-Fable-1' }), fullEnv)).toThrow(/model/);
+  });
 });

@@ -2,6 +2,7 @@ import type { DropZoneConfig } from './config.js';
 import { getCrewIssue, setCrewIssue } from './crew/store.js';
 import type { Db } from './db/open.js';
 import { getWorkItem, listWorkItems } from './db/repo.js';
+import { enableFable } from './fable.js';
 import type { ForgePair } from './outbox.js';
 import { retryParkedItem } from './sync.js';
 
@@ -232,8 +233,8 @@ export async function applyEffect(
       return true;
     }
     case 'enable_fable':
-      // The plan setting it flips lands with Fable gating.
-      throw new Error('enable_fable is not available yet');
+      enableFable(db, now);
+      return true;
   }
 }
 

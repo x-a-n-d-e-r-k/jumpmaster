@@ -6,6 +6,7 @@ import {
 import type { UsageConfig } from './config.js';
 import type { Db } from './db/open.js';
 import { getUsageState, setUsageState, type UsageStateRow } from './db/repo.js';
+import { isFableRateLimit, pauseFableFor } from './fable.js';
 
 export type Gate = 'open' | 'finishing_only' | 'probe' | 'closed';
 
@@ -95,6 +96,8 @@ export function ingestRateLimit(
   now: Date,
   rand: () => number = Math.random,
 ): void {
+  // A Fable-only limit pauses Fable, never dispatch (best-effort, pending rehearsal).
+  if (isFableRateLimit(data)) return pauseFableFor(db, data, now);
   db.transaction(() => {
     const u = getUsageState(db);
     const patch: Partial<UsageStateRow> = {};

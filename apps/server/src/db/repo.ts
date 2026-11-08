@@ -64,6 +64,10 @@ export interface Drop {
   inputJson: string | null;
   /** Comma-separated AttemptKeys the enqueue charged, e.g. `resolve,resolve_total`. */
   chargedKey: string | null;
+  /** The model the payload asked for (set when the drop is leased). */
+  requestedModel: string | null;
+  /** The model that actually served the drop, as its result reported. */
+  servedModel: string | null;
 }
 
 export type NewDrop = Pick<Drop, 'id' | 'dropZoneId' | 'workItemId' | 'role' | 'state'> &
@@ -112,7 +116,8 @@ const WORK_ITEM_COLS = `id, drop_zone_id AS dropZoneId, issue_number AS issueNum
 const DROP_COLS = `id, drop_zone_id AS dropZoneId, work_item_id AS workItemId, role, state, stick_id AS stickId,
   epoch, lease_expires_at AS leaseExpiresAt, prompt_version AS promptVersion, image,
   result_json AS resultJson, created_at AS createdAt, started_at AS startedAt, finished_at AS finishedAt,
-  fingerprint, pr_number AS prNumber, head_sha AS headSha, input_json AS inputJson, charged_key AS chargedKey`;
+  fingerprint, pr_number AS prNumber, head_sha AS headSha, input_json AS inputJson, charged_key AS chargedKey,
+  requested_model AS requestedModel, served_model AS servedModel`;
 
 type WorkItemRow = Omit<WorkItem, 'isFix' | 'retryLabelSeen' | 'blockedBy'> & {
   isFix: number;
@@ -275,6 +280,8 @@ const DROP_COLUMN: Record<keyof DropPatch, string> = {
   headSha: 'head_sha',
   inputJson: 'input_json',
   chargedKey: 'charged_key',
+  requestedModel: 'requested_model',
+  servedModel: 'served_model',
 };
 
 export function updateDrop(db: Db, id: string, patch: DropPatch): void {

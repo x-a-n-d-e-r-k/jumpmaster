@@ -61,6 +61,8 @@ const base: Drop = {
   headSha: null,
   inputJson: null,
   chargedKey: null,
+  requestedModel: null,
+  servedModel: null,
 };
 const impl = base;
 const review: Drop = { ...base, role: 'review', prNumber: 5, headSha: 'h1' };

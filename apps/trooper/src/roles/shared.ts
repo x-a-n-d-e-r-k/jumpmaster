@@ -11,6 +11,7 @@ import {
   type RateLimitEventData,
   REPORT_MAX_CHARS,
   type ServiceSpec,
+  servedModel,
   type TrooperEvent,
 } from '@jumpmaster/protocol';
 import { buildClaudeArgs, type ParsedLine, parseStreamLine } from '../claude.js';
@@ -414,6 +415,7 @@ export function resultMeta(outcome: AgentOutcome): Partial<DropResult> {
   return stripUndefined({
     usage: asRecord(last?.usage),
     modelUsage: asRecord(last?.modelUsage),
+    servedModel: servedModel(last?.modelUsage) ?? undefined,
     numTurns: last?.numTurns,
     rateLimit: outcome.rateLimit,
   });

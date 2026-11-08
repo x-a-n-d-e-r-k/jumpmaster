@@ -341,3 +341,22 @@ export const DropResultSchema = z.object({
 });
 export type DropResult = z.infer<typeof DropResultSchema>;
 export { containsSecret, payloadSecrets, redact } from './redact.js';
+
+/**
+ * The model that served a run: the `modelUsage` key with the most output tokens (the first on a
+ * tie), or null when there is none to tell by.
+ */
+export function servedModel(modelUsage: unknown): string | null {
+  if (typeof modelUsage !== 'object' || modelUsage === null) return null;
+  let best: string | null = null;
+  let most = -1;
+  for (const [model, usage] of Object.entries(modelUsage)) {
+    const out = (usage as { outputTokens?: unknown } | null)?.outputTokens;
+    const n = typeof out === 'number' ? out : 0;
+    if (n > most) {
+      best = model;
+      most = n;
+    }
+  }
+  return best;
+}

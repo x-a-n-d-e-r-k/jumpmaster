@@ -217,6 +217,7 @@ describe('runCrew', () => {
   test('the model usage is passed back for the served model', async () => {
     const r = await runCrew(lead, world().deps, newCtx());
     expect(r.modelUsage).toEqual({ m: { outputTokens: 5 } });
+    expect(r.servedModel).toBe('m');
   });
 });
 
