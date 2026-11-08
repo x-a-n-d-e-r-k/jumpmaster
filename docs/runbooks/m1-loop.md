@@ -213,6 +213,15 @@ The retry label clears the stored request-changes on the PR's current head, so t
 reviews that same head again against the edited issue. There is no override that approves a PR
 by hand.
 
+- `(manual)` takes effect only together with the retry label, which only a maintainer can add.
+  Anyone who can edit the issue can add the token, so check the issue's edit history before you
+  add the label.
+- A standing request-changes from a human reviewer still blocks the PR: dismiss it first. On the
+  current head it sends the PR back to a heal; on an older commit the item parks
+  `human block stands` after the fresh review.
+- A retry on a head that carries a request-changes costs one fresh review (charged to the
+  review budget) before any further heal.
+
 ## 6. Pass criteria
 
 - **Scenario 1:** the merge commit on base has the PR title as its subject and
