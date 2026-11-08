@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { redactTokenShapes } from '@jumpmaster/protocol';
 import type { Db } from './db/open.js';
 import {
   getOutbox,
@@ -470,6 +471,8 @@ export function sanitizeCrewText(text: string, secrets: string[]): string {
 export function sanitizeForgeText(text: string, secrets: string[], maxLen = 60_000): string {
   let out = text;
   for (const s of secrets) if (s) out = out.split(s).join('[redacted]');
+  // Token shapes too: a token pasted into a body (an MCP caller's, say) is never configured.
+  out = redactTokenShapes(out, '[redacted]');
   out = out.replaceAll('<!--', '&lt;!--').replaceAll('-->', '--&gt;');
   out = out.replace(/(^|[^\w])@(?=[A-Za-z0-9])/g, `$1@${ZWJ}`);
   out = out.replaceAll('://', `:${ZWJ}//`);

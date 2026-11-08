@@ -26,6 +26,7 @@ import {
 } from './db/repo.js';
 import { fableStatus } from './fable.js';
 import { getGoals } from './goals.js';
+import { registerMcpRoute } from './mcp/server.js';
 import { lastSyncResult } from './sync.js';
 import {
   type CrewLine,
@@ -65,7 +66,13 @@ function usageView(db: Db, config: Config, at: Date): NonNullable<HomeState['usa
   };
 }
 
-export function createApp(deps: StickRouteDeps & { kick?: () => void }): FastifyInstance {
+export function createApp(
+  deps: StickRouteDeps & {
+    kick?: () => void;
+    /** The operator's log, scrubbed of secrets (main.ts); MCP's internal errors go here. */
+    log?: (msg: string) => void;
+  },
+): FastifyInstance {
   const app = Fastify({ logger: false });
   // Pages have no login, so a foreign Host could read them through DNS rebinding. Stick routes
   // authenticate with their own token and may arrive on any address a stick can reach.
@@ -78,6 +85,7 @@ export function createApp(deps: StickRouteDeps & { kick?: () => void }): Fastify
   });
   registerStickRoutes(app, deps);
   registerControlRoutes(app, deps);
+  registerMcpRoute(app, deps);
 
   app.get('/', async (_req, reply) => {
     const { db, config, now } = deps;

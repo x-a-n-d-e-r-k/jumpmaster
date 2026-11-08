@@ -46,6 +46,7 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
     forgesFor,
     now: () => new Date(),
     kick: () => void guardedPass(),
+    log,
   });
 
   const secrets = secretList(config.secrets);

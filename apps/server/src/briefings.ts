@@ -52,6 +52,11 @@ export type BriefingOption = {
   prNumber?: number;
 };
 export type BriefingState = 'open' | 'ruled' | 'withdrawn';
+/**
+ * Who raised a briefing: the server, a crew drop, or Command's own assistant over MCP. Only the
+ * server defines effects; `crew` and `mcp` briefings carry effect `none` only.
+ */
+export type BriefingSource = 'server' | 'crew' | 'mcp';
 
 export type NewBriefing = {
   zoneId: string;
@@ -63,7 +68,7 @@ export type NewBriefing = {
   options: BriefingOption[];
   recommendation?: string;
   onHold?: string;
-  source: 'server' | 'crew';
+  source: BriefingSource;
   sourceRef?: string | null;
 };
 
@@ -91,8 +96,10 @@ export type Ruling = {
   applyError: string | null;
   /** The ruled briefing's diagnosis, if it had one: what Command read when it ruled. */
   diagnosis: string | null;
-  /** The chosen option's effect (`null` if the option is not on the briefing). */
+  /** The chosen option's effect, as recorded when Command ruled (`null` if unknown). */
   effect: Effect | null;
+  /** The chosen option's label, as recorded when Command ruled (`null` if unknown). */
+  label: string | null;
 };
 
 /**
@@ -118,7 +125,29 @@ const BRIEFING_COLS = `id, zone_id AS zoneId, kind, subject, decision, why, opti
 
 const RULING_COLS = `r.id, r.zone_id AS zoneId, r.briefing_id AS briefingId, r.choice, r.note,
   r.created_at AS createdAt, r.applied_at AS appliedAt, r.apply_error AS applyError,
+  r.choice_label AS choiceLabel, r.choice_effect AS choiceEffect,
   b.diagnosis, b.options_json AS optionsJson`;
+
+/**
+ * A short digest of what a briefing shows Command (decision, why, recommendation, on hold, and
+ * the options' ids, labels and effects): given by the page and `ctl briefings`, so a ruling can
+ * say what it was made on.
+ */
+export const optionsDigest = (
+  b: Pick<Briefing, 'decision' | 'why' | 'recommendation' | 'onHold' | 'options'>,
+): string =>
+  createHash('sha256')
+    .update(
+      JSON.stringify([
+        b.decision,
+        b.why,
+        b.recommendation,
+        b.onHold,
+        b.options.map((o) => [o.id, o.label, o.effect]),
+      ]),
+    )
+    .digest('hex')
+    .slice(0, 16);
 
 type BriefingRow = Omit<Briefing, 'options'> & { optionsJson: string };
 const toBriefing = ({ optionsJson, ...r }: BriefingRow): Briefing => ({
@@ -132,8 +161,8 @@ const toBriefing = ({ optionsJson, ...r }: BriefingRow): Briefing => ({
  * `syncParkBriefings` decides when one no longer applies.
  */
 export function raiseBriefing(db: Db, b: NewBriefing, now: Date): number {
-  if (b.source === 'crew' && b.options.some((o) => o.effect !== 'none')) {
-    throw new Error('a crew briefing may only carry options with effect none');
+  if (b.source !== 'server' && b.options.some((o) => o.effect !== 'none')) {
+    throw new Error(`a ${b.source} briefing may only carry options with effect none`);
   }
   const at = now.toISOString();
   const params = {
@@ -212,7 +241,9 @@ export function hasOpenBriefing(db: Db, zoneId: string, subject: string): boolea
 
 /**
  * Records Command's ruling in one transaction; it is applied by the next pass. A briefing is
- * ruled once: a second ruling (another tab) is 409.
+ * ruled once: a second ruling (another tab) is 409. The chosen option's label and effect are
+ * recorded with it. An assistant (MCP) briefing can be rewritten while open, so a ruling on one
+ * must name the option set it was made on (`optionsDigest`); otherwise, or if they changed, 409.
  */
 export function ruleBriefing(
   db: Db,
@@ -220,12 +251,17 @@ export function ruleBriefing(
   optionId: string,
   note: string,
   now: Date,
-): { ok: true; rulingId: number } | { ok: false; status: 404 | 409 | 400 } {
+  seen: { optionsDigest?: string } = {},
+):
+  | { ok: true; rulingId: number }
+  | { ok: false; status: 404 | 409 | 400; reason?: 'options changed' } {
   return db.transaction(() => {
     const b = getBriefing(db, id);
     if (!b) return { ok: false as const, status: 404 as const };
-    if (!b.options.some((o) => o.id === optionId)) {
-      return { ok: false as const, status: 400 as const };
+    const option = b.options.find((o) => o.id === optionId);
+    if (!option) return { ok: false as const, status: 400 as const };
+    if (b.source === 'mcp' && seen.optionsDigest !== optionsDigest(b)) {
+      return { ok: false as const, status: 409 as const, reason: 'options changed' as const };
     }
     const at = now.toISOString();
     const won = db
@@ -236,10 +272,10 @@ export function ruleBriefing(
     if (won === 0) return { ok: false as const, status: 409 as const };
     const r = db
       .prepare(
-        `INSERT INTO rulings (zone_id, briefing_id, choice, note, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO rulings (zone_id, briefing_id, choice, note, created_at, choice_label,
+           choice_effect) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(b.zoneId, id, optionId, note, at);
+      .run(b.zoneId, id, optionId, note, at, option.label, option.effect);
     return { ok: true as const, rulingId: Number(r.lastInsertRowid) };
   })();
 }
@@ -250,12 +286,20 @@ export function listRulings(db: Db, zoneId: string, limit = 50): Ruling[] {
       `SELECT ${RULING_COLS} FROM rulings r JOIN briefings b ON b.id = r.briefing_id
          WHERE r.zone_id = ? ORDER BY r.id DESC LIMIT ?`,
     )
-    .all(zoneId, limit) as (Omit<Ruling, 'effect'> & { optionsJson: string })[];
-  return rows.map(({ optionsJson, ...r }) => ({
-    ...r,
-    effect:
-      (JSON.parse(optionsJson) as BriefingOption[]).find((o) => o.id === r.choice)?.effect ?? null,
-  }));
+    .all(zoneId, limit) as (Omit<Ruling, 'effect' | 'label'> & {
+    optionsJson: string;
+    choiceLabel: string | null;
+    choiceEffect: Effect | null;
+  })[];
+  return rows.map(({ optionsJson, choiceLabel, choiceEffect, ...r }) => {
+    // Rulings from before v14 recorded no snapshot: fall back to the briefing's options.
+    const current = (JSON.parse(optionsJson) as BriefingOption[]).find((o) => o.id === r.choice);
+    return {
+      ...r,
+      effect: choiceEffect ?? current?.effect ?? null,
+      label: choiceLabel ?? current?.label ?? null,
+    };
+  });
 }
 
 export type RulingDeps = {
@@ -365,7 +409,7 @@ export async function applyGateAllowance(
     id: number;
     subject: string;
     kind: BriefingKind;
-    source: 'server' | 'crew';
+    source: BriefingSource;
     why: string;
   },
   option: BriefingOption,
@@ -434,7 +478,7 @@ export async function applyPendingRulings(
     choice: string;
     subject: string;
     kind: BriefingKind;
-    source: 'server' | 'crew';
+    source: BriefingSource;
     why: string;
     optionsJson: string;
   }[];

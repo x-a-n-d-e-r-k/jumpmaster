@@ -272,6 +272,12 @@ describe('rule route', () => {
       optionId: 'retry',
       note: 'looks fine',
     });
+    expect(ctlRequest(['rule', '7', 'o1', '--options', 'abc123', 'looks', 'fine'])?.body).toEqual({
+      optionId: 'o1',
+      optionsDigest: 'abc123',
+      note: 'looks fine',
+    });
+    expect(ctlRequest(['rule', '7', 'o1', '--options'])).toBeNull();
     expect(ctlRequest(['rule', '7'])).toBeNull();
   });
 });

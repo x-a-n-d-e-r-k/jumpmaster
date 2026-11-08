@@ -364,7 +364,7 @@ test('v13 adds the credits stop to a v12 usage row, keeping the throttle state, 
   );
   raw.close();
   const db = openDb(f);
-  expect(maxVersion(db)).toBe(13);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
   const u = getUsageState(db);
   expect(u).toMatchObject({
     status: 'rejected',
@@ -382,4 +382,103 @@ test('v13 adds the credits stop to a v12 usage row, keeping the throttle state, 
   });
   expect(Object.keys(u)).toContain('overageStoppedAt');
   expect(count(db, 'credit_drops')).toBe(0);
+});
+
+test('v14 widens briefings.source to mcp, keeps every briefing and ruling, and adds the MCP tables', () => {
+  const f = tmpDbFile();
+  const raw = new Database(f);
+  raw.exec('CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+  for (const m of MIGRATIONS.filter((m) => m.version <= 13)) {
+    raw.exec(m.sql);
+    m.after?.(raw as unknown as Db);
+    raw.prepare('INSERT INTO schema_version VALUES (?, ?)').run(m.version, 'x');
+  }
+  raw.exec(
+    `INSERT INTO briefings (id, zone_id, kind, subject, decision, why, options_json, source,
+       source_ref, state, diagnosis, diagnosis_basis, created_at, updated_at)
+     VALUES (1, 'main', 'parked', 'item:1', 'd1', 'w1', '[]', 'server', NULL, 'ruled', 'diag',
+       'basis', 'a', 'b'),
+            (2, 'main', 'crew', 'crew:x', 'd2', 'w2', '[]', 'crew', 'drop-1', 'open', NULL, NULL,
+       'c', 'd');
+     INSERT INTO rulings (zone_id, briefing_id, choice, note, created_at)
+       VALUES ('main', 1, 'o1', 'my note', 'e');`,
+  );
+  expect(() =>
+    raw.exec(
+      `INSERT INTO briefings (zone_id, kind, subject, decision, why, options_json, source, state,
+         created_at, updated_at) VALUES ('main', 'crew', 'mcp:y', 'd', 'w', '[]', 'mcp', 'open', 'a', 'a')`,
+    ),
+  ).toThrow(/CHECK/);
+  raw.close();
+
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(14);
+  expect(db.pragma('foreign_key_check')).toEqual([]);
+  expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
+  const rows = db
+    .prepare(
+      'SELECT id, subject, source, source_ref AS ref, state, diagnosis, diagnosis_basis AS basis FROM briefings ORDER BY id',
+    )
+    .all();
+  expect(rows).toEqual([
+    {
+      id: 1,
+      subject: 'item:1',
+      source: 'server',
+      ref: null,
+      state: 'ruled',
+      diagnosis: 'diag',
+      basis: 'basis',
+    },
+    {
+      id: 2,
+      subject: 'crew:x',
+      source: 'crew',
+      ref: 'drop-1',
+      state: 'open',
+      diagnosis: null,
+      basis: null,
+    },
+  ]);
+  expect(db.prepare('SELECT briefing_id AS b, note FROM rulings').all()).toEqual([
+    { b: 1, note: 'my note' },
+  ]);
+  db.prepare(
+    `INSERT INTO briefings (zone_id, kind, subject, decision, why, options_json, source, state,
+       created_at, updated_at) VALUES ('main', 'crew', 'mcp:y', 'd', 'w', '[]', 'mcp', 'open', 'a', 'a')`,
+  ).run();
+  // The open-subject index survived the rebuild.
+  expect(() =>
+    db
+      .prepare(
+        `INSERT INTO briefings (zone_id, kind, subject, decision, why, options_json, source, state,
+           created_at, updated_at) VALUES ('main', 'crew', 'crew:x', 'd', 'w', '[]', 'crew', 'open', 'a', 'a')`,
+      )
+      .run(),
+  ).toThrow(/UNIQUE/);
+  expect(count(db, 'mcp_tokens')).toBe(0);
+  expect(count(db, 'mcp_audit')).toBe(0);
+  // A refused-auth audit row carries no token id.
+  db.prepare(
+    `INSERT INTO mcp_audit (token_id, zone_id, tool, args_sha256, outcome, detail, at)
+     VALUES (NULL, NULL, 'auth', NULL, 'refused', 'unknown token', 'a')`,
+  ).run();
+  expect(() =>
+    db
+      .prepare(
+        `INSERT INTO mcp_tokens (token_hash, zone_id, scope, created_at, expires_at)
+         VALUES ('h', 'main', 'admin', 'a', 'b')`,
+      )
+      .run(),
+  ).toThrow(/CHECK/);
+  // Pruning by tool walks an index, not the table.
+  expect(
+    db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'mcp_audit_by_tool'")
+      .get(),
+  ).toEqual({ sql: 'CREATE INDEX mcp_audit_by_tool ON mcp_audit(tool, id)' });
+  // A ruling records the label and effect Command chose; older rulings have none.
+  expect(
+    db.prepare('SELECT choice_label AS label, choice_effect AS effect FROM rulings').all(),
+  ).toEqual([{ label: null, effect: null }]);
 });
