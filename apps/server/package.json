@@ -23,6 +23,6 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/js-yaml": "^4.0.9",
-    "nock": "^14.0.17"
+    "nock": "^15.0.6"
   }
 }
