@@ -1,0 +1,18 @@
+{
+  "package.json": ["@biomejs/biome", "typescript", "vitest"],
+  "apps/server/package.json": [
+    "@jumpmaster/protocol",
+    "@modelcontextprotocol/sdk",
+    "@octokit/rest",
+    "@types/better-sqlite3",
+    "@types/js-yaml",
+    "better-sqlite3",
+    "fastify",
+    "js-yaml",
+    "nock",
+    "zod"
+  ],
+  "apps/stick/package.json": ["@jumpmaster/protocol", "@types/dockerode", "dockerode"],
+  "apps/trooper/package.json": [],
+  "packages/protocol/package.json": ["zod"]
+}

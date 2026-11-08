@@ -1,12 +1,21 @@
 version: 2
 updates:
-  # Keep pinned GitHub Actions current. Add the docker ecosystem once Dockerfiles exist.
+  # Keep pinned GitHub Actions current.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     groups:
       actions:
+        patterns: ["*"]
+  # Base-image digests in the shipped Dockerfiles (FROM ...@sha256:...).
+  - package-ecosystem: docker
+    directories:
+      - "/images/*"
+    schedule:
+      interval: weekly
+    groups:
+      images:
         patterns: ["*"]
   - package-ecosystem: npm
     directory: /
