@@ -89,7 +89,19 @@ export type Ruling = {
   applyError: string | null;
   /** The ruled briefing's diagnosis, if it had one: what Command read when it ruled. */
   diagnosis: string | null;
+  /** The chosen option's effect (`null` if the option is not on the briefing). */
+  effect: Effect | null;
 };
+
+/**
+ * Effects that move a crew issue toward work (or read the forge for it): with the zone's crew
+ * disabled they wait, recorded, and apply once it is enabled again. `reject_issue` never waits:
+ * it is Command's brake on a promoted issue before its work starts.
+ */
+export const WAITS_FOR_CREW: ReadonlySet<Effect> = new Set<Effect>([
+  'promote_issue',
+  'restage_issue',
+]);
 
 /**
  * What a diagnosis is about: the sha256 of the server-built `why` it was asked for. A diagnosis is
@@ -104,7 +116,7 @@ const BRIEFING_COLS = `id, zone_id AS zoneId, kind, subject, decision, why, opti
 
 const RULING_COLS = `r.id, r.zone_id AS zoneId, r.briefing_id AS briefingId, r.choice, r.note,
   r.created_at AS createdAt, r.applied_at AS appliedAt, r.apply_error AS applyError,
-  b.diagnosis`;
+  b.diagnosis, b.options_json AS optionsJson`;
 
 type BriefingRow = Omit<Briefing, 'options'> & { optionsJson: string };
 const toBriefing = ({ optionsJson, ...r }: BriefingRow): Briefing => ({
@@ -231,12 +243,17 @@ export function ruleBriefing(
 }
 
 export function listRulings(db: Db, zoneId: string, limit = 50): Ruling[] {
-  return db
+  const rows = db
     .prepare(
       `SELECT ${RULING_COLS} FROM rulings r JOIN briefings b ON b.id = r.briefing_id
          WHERE r.zone_id = ? ORDER BY r.id DESC LIMIT ?`,
     )
-    .all(zoneId, limit) as Ruling[];
+    .all(zoneId, limit) as (Omit<Ruling, 'effect'> & { optionsJson: string })[];
+  return rows.map(({ optionsJson, ...r }) => ({
+    ...r,
+    effect:
+      (JSON.parse(optionsJson) as BriefingOption[]).find((o) => o.id === r.choice)?.effect ?? null,
+  }));
 }
 
 export type RulingDeps = {
@@ -390,7 +407,9 @@ export async function applyGateAllowance(
 
 /**
  * Applies the zone's recorded rulings that are neither applied nor failed, each exactly once. A
- * failed effect records `apply_error` and is not tried again. Returns how many were applied.
+ * failed effect records `apply_error` and is not tried again. A ruling whose effect waits for the
+ * crew (`WAITS_FOR_CREW`) stays pending while the zone's crew is disabled. Returns how many were
+ * applied.
  */
 export async function applyPendingRulings(
   db: Db,
@@ -418,6 +437,7 @@ export async function applyPendingRulings(
     const option = (JSON.parse(r.optionsJson) as BriefingOption[]).find((o) => o.id === r.choice);
     try {
       if (!option) throw new Error(`option ${r.choice} is not on the briefing`);
+      if (WAITS_FOR_CREW.has(option.effect) && !deps.zone(zoneId).crew?.enabled) continue;
       const done =
         option.effect === 'allow_gate_change'
           ? await applyGateAllowance(db, deps, zoneId, r, option, now)

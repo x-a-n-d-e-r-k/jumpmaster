@@ -1,5 +1,5 @@
 import type { ArtifactRow } from '../artifacts.js';
-import type { Briefing, Ruling } from '../briefings.js';
+import { type Briefing, type Ruling, WAITS_FOR_CREW } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
 import type { CrewIssue } from '../crew/store.js';
 import type {
@@ -162,10 +162,18 @@ export function renderBriefings(s: {
     s.open.length === 0
       ? '<p>Nothing is waiting on you.</p>'
       : s.open.map((b) => briefingBlock(b, s.holds)).join('') + RULE_SCRIPT;
+  const crewOff = new Set(s.zones.filter((z) => !z.crew?.enabled).map((z) => z.id));
+  // Recorded, and held until the zone's crew is enabled again (applyPendingRulings).
+  const waiting = (r: Ruling) =>
+    r.appliedAt === null &&
+    r.applyError === null &&
+    r.effect !== null &&
+    WAITS_FOR_CREW.has(r.effect) &&
+    crewOff.has(r.zoneId);
   const rulings = s.rulings
     .map(
       (r) =>
-        `<tr><td>${escapeHtml(r.id)}</td><td>${escapeHtml(r.zoneId)}</td><td>${escapeHtml(r.briefingId)}</td><td>${escapeHtml(r.choice)}</td><td>${escapeHtml(r.note)}</td><td>${escapeHtml(r.createdAt)}</td><td>${escapeHtml(r.appliedAt ?? '-')}</td><td>${escapeHtml(r.applyError ?? '')}</td><td>${escapeHtml(r.diagnosis ?? '')}</td></tr>`,
+        `<tr><td>${escapeHtml(r.id)}</td><td>${escapeHtml(r.zoneId)}</td><td>${escapeHtml(r.briefingId)}</td><td>${escapeHtml(r.choice)}</td><td>${escapeHtml(r.note)}</td><td>${escapeHtml(r.createdAt)}</td><td>${escapeHtml(r.appliedAt ?? (waiting(r) ? 'waiting: crew disabled' : '-'))}</td><td>${escapeHtml(r.applyError ?? '')}</td><td>${escapeHtml(r.diagnosis ?? '')}</td></tr>`,
     )
     .join('');
   return page(

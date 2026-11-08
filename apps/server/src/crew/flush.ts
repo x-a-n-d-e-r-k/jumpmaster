@@ -176,7 +176,10 @@ async function reject(
 
 /**
  * Moves crew issues along by their forge writes, all through the outbox as the author identity.
- * Only in an active zone with the kill switch off; returns how many issues changed state.
+ * Only in an active zone with the kill switch off; returns how many issues changed state. With the
+ * zone's crew disabled nothing is filed, promoted (a refute hold neither starts nor ends) or
+ * revised: those rows wait as they are until it is enabled again. A Command rejection still
+ * closes its issue.
  */
 export async function flushCrewOps(
   db: Db,
@@ -188,8 +191,10 @@ export async function flushCrewOps(
   holdMs = 60_000,
 ): Promise<number> {
   if (isKilled(db) || getZoneMode(db, zone.id, zone.mode) !== 'active') return 0;
+  const crewOn = zone.crew?.enabled === true;
   let moved = 0;
   for (const row of listCrewIssues(db, zone.id, PENDING)) {
+    if (!crewOn && row.state !== 'rejecting') continue;
     let step: Step | 'wait' | 'changed';
     try {
       switch (row.state) {

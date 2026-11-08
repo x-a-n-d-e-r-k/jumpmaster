@@ -264,6 +264,7 @@ const ruling = (o: Partial<Ruling> = {}): Ruling => ({
   appliedAt: null,
   applyError: null,
   diagnosis: null,
+  effect: 'none',
   ...o,
 });
 
@@ -333,6 +334,21 @@ describe('briefings', () => {
     });
     expect(ruled).toContain('<th>Diagnosis</th>');
     expect(ruled).toContain('<td>Out of disk.</td>');
+  });
+
+  test('a Promote ruling held while the crew is off says so; a Reject does not wait', () => {
+    const off = { ...z, crew: { ...z.crew, enabled: false } };
+    const on = { ...z, crew: { ...z.crew, enabled: true } };
+    const rulings = [
+      ruling({ id: 1, choice: 'promote', effect: 'promote_issue' }),
+      ruling({ id: 2, choice: 'reject', effect: 'reject_issue' }),
+    ];
+    const html = renderBriefings({ open: [], rulings, zones: [off] });
+    expect(html).toMatch(/<td>promote<\/td>.*?<td>waiting: crew disabled<\/td>/s);
+    expect(html.match(/waiting: crew disabled/g)).toHaveLength(1);
+    expect(renderBriefings({ open: [], rulings, zones: [on] })).not.toContain(
+      'waiting: crew disabled',
+    );
   });
 
   test('a held refute promotion shows its Reject option and when it will promote', () => {
