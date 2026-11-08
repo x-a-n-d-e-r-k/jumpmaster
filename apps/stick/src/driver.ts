@@ -3,6 +3,8 @@ import type { ContainerLimits, ServiceSpec } from '@jumpmaster/protocol';
 export type ContainerHandle = {
   logs(): AsyncIterable<string>;
   wait(): Promise<{ exitCode: number }>;
+  /** The end of the container's stderr (unredacted), for a failure that left no result. */
+  stderrTail(): string;
   stop(graceMs: number): Promise<void>;
   /** SIGKILL with no grace: the trooper gets no chance to checkpoint or push. */
   kill(): Promise<void>;

@@ -8,6 +8,7 @@ import {
   type DropPayload,
   DropPayloadSchema,
   type DropResult,
+  payloadSecrets,
   RESULT_PREFIX,
 } from '@jumpmaster/protocol';
 import { runGates } from './gates.js';
@@ -54,38 +55,35 @@ const ROLES: Partial<Record<DropPayload['role'], RoleRunner>> = {
 };
 
 export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promise<DropResult> {
-  const { claudeToken, forgeToken } = payload.credentials;
-  if (payload.role === 'implement' && forgeToken === undefined) {
-    throw new Error('forge token required for implement');
-  }
-  const secrets = [
-    ...Object.values(payload.gateSecrets ?? {}),
-    ...(forgeToken === undefined
-      ? [claudeToken]
-      : [claudeToken, forgeToken, Buffer.from(`x-access-token:${forgeToken}`).toString('base64')]),
-  ];
+  const secrets = payloadSecrets(payload);
   const finish = (r: DropResult): DropResult => {
     const out: DropResult =
       r.reason === undefined ? r : { ...r, reason: redact(r.reason, secrets) };
     deps.emit(redact(RESULT_PREFIX + JSON.stringify(out), secrets));
     return out;
   };
+  // Every failure from here on posts a result, so the server records why the drop stopped.
+  const fail = (reason: string) => finish({ status: 'failed', reason, gates: [] });
+  if (payload.role === 'implement' && payload.credentials.forgeToken === undefined) {
+    return fail('forge token required for implement');
+  }
   const runner = ROLES[payload.role];
-  if (!runner) return finish({ status: 'failed', reason: 'role not implemented', gates: [] });
+  if (!runner) return fail('role not implemented');
 
   const ids = deps.ids ?? null;
-  const work = mkdtempSync(join(workRoot(), 'trooper-'));
-  // Root-owned but world-readable: the agent uid reads the settings and system prompt in here.
-  chmodSync(work, 0o755);
+  let work: string;
+  try {
+    work = mkdtempSync(join(workRoot(), 'trooper-'));
+    // Root-owned but world-readable: the agent uid reads the settings and system prompt in here.
+    chmodSync(work, 0o755);
+  } catch (err) {
+    return fail(`trooper setup failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
   const ctx: RoleCtx = { workdir: work, secrets, ids };
   try {
     return finish(await runner(payload, deps, ctx));
   } catch (err) {
-    return finish({
-      status: 'failed',
-      reason: err instanceof Error ? err.message : String(err),
-      gates: [],
-    });
+    return fail(err instanceof Error ? err.message : String(err));
   } finally {
     if (ids) {
       await deps.git.removeTree(join(ids.agent.home, 'repo'), ids.agent).catch(() => undefined);

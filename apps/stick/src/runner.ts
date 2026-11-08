@@ -9,7 +9,9 @@ import {
   EVENT_PREFIX,
   MAX_ARTIFACT_BYTES,
   MAX_ARTIFACTS,
+  payloadSecrets,
   RESULT_PREFIX,
+  redact,
   type TrooperEvent,
   TrooperEventSchema,
 } from '@jumpmaster/protocol';
@@ -273,7 +275,7 @@ async function runContainer(
       await client.postResult(dropId, epoch, {
         status: 'failed',
         role: payload.role,
-        reason: `trooper exited ${exitCode} without result`,
+        reason: noResultReason(exitCode, handle.stderrTail(), payload),
         gates: [],
       });
     }
@@ -292,4 +294,18 @@ async function runContainer(
     clearInterval(hb);
     clearInterval(flusher);
   }
+}
+
+const MAX_STDERR_REASON = 500;
+
+/** Names the exit and, when the trooper said why on stderr, its last line with every credential scrubbed. */
+function noResultReason(exitCode: number, stderr: string, payload: DropPayload): string {
+  const base = `trooper exited ${exitCode} without result`;
+  const last = stderr
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .at(-1);
+  if (!last) return base;
+  return `${base}: ${redact(last, payloadSecrets(payload)).slice(0, MAX_STDERR_REASON)}`;
 }
