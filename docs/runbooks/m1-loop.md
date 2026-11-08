@@ -179,7 +179,37 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   could not read (unreadable, missing or unsupported), and no approval lifts it; a person
   reviews and merges that PR. **Starter mode** (the operator's own account is the
   token for both bots): the operator's login is a bot login, so their approval never counts.
-  Another maintainer must approve, or the operator merges the PR by hand.
+  Another maintainer must approve, or Command allows the head (next item).
+- **Allowing a gate change by Command ruling.** Where no one else can approve (starter mode, or
+  any setup where the operator's account is the PR author, which GitHub won't let approve its own
+  PR), the operator rules on the item's parked briefing instead. A gate park that is fully read
+  is briefed with three options: `Retry`, `Leave parked` and `Allow these gate changes for
+  <sha7>` (option id `allow-<head sha, 12 chars>-<digest, 8 chars>`). The briefing says "Read the PR diff at <sha7> on the forge before
+  ruling": do that. Its text is the park reason followed by every reported change in full, at
+  most 8,000 characters: each changed gate script as `name: "<old>" → "<new>"` (merge base →
+  head), and tool changes with old → new versions where the guard knows them. Rule on
+  `/briefings`, or `ctl rule <briefing> <option id> [note]` (the id is shown beside each option)
+  over the operator-authenticated control route. While it is open, the briefing is refreshed
+  when what it would say changes (a new head judged, a park that became or stopped being fully
+  read); the Allow option's id changes with it, so a ruling from a page showing an older version
+  is refused (`unknown option`): reload and read again. The ruling binds to the diff it showed:
+  that PR, that exact head commit, the merge base it was judged against, and a digest of every
+  change listed.
+  When it is applied (the next pass), a briefing that no longer matches what the item is parked
+  on records `briefing out of date`, and a head that has moved on the forge records `head moved`;
+  either way nothing is allowed. If the PR can't be read, the ruling is tried again on later
+  passes and gives up with `forge unavailable` after 10; a PR that is gone or closed records
+  `pull request not open`. After a failed ruling the item is briefed again once a new head is
+  judged. A moved merge base or a different change list on the same head
+  is not covered by the allowance either. Otherwise the allowance is recorded (it
+  survives restarts), the next sync re-decides the item and the reviewer agent reviews it as
+  usual; the status page shows `gate change allowed by Command for <sha7>` on the item. Any new
+  push (a heal or resolve included) is a new head with no allowance, so it parks again and is
+  briefed again. Not offered, and not honoured, when the park reason's list is cut short
+  (`… (+N more)`), when the full list does not fit the briefing, for a reason ending `(not fully
+  read: merge it by hand)`, or for a `protected path:` park: those still need a maintainer's
+  approval on the forge or a person to merge by hand. Crew briefings can't offer it: only the
+  server defines effects.
 - Budgets are per work item. When one runs out the item parks `budget exhausted: <key>`;
   the retry label resets them (see scenario 5).
 
@@ -322,7 +352,7 @@ JM_GITHUB_REVIEWER_TOKEN JM_GITHUB_READ_TOKEN JM_JOIN_TOKEN JM_OPERATOR_TOKEN`.
 | Items park `merge rejected: …` | GitHub refused the merge on an unchanged head, often because of an unresolved conversation or a dismissed approval. Clear the cause; the server retries the merge about an hour after the refusal, or at once if you add the retry label. |
 | Items park `heal made no changes for the same findings` | Two heals in a row found nothing to change for the same review findings. Either a finding cannot be met here (waive it: mark the criterion `(manual)` in the issue, then add the retry label) or the review is wrong (fix the issue text, then add the retry label). |
 | Items park `budget exhausted: heal` after gate timeouts | A gate that times out or flakes forces "request changes", and each heal that finds nothing to fix spends the heal budget. Raise the gate's `timeoutMinutes` or fix the flaky test, then add the retry label. |
-| Items park `gate tool changed: …` or `gate script changed: …` | The PR changes what the gates run. Read the listed changes; if they are fine, approve the PR's current head as a maintainer (section 3, `overrideApprovers`) and the next pass un-parks it. Otherwise close the PR or ask for a different change. |
+| Items park `gate tool changed: …` or `gate script changed: …` | The PR changes what the gates run. Read the listed changes; if they are fine, approve the PR's current head as a maintainer (section 3, `overrideApprovers`), or rule `Allow these gate changes for <sha7>` on the item's parked briefing, and the next pass un-parks it. Otherwise close the PR or ask for a different change. |
 | Items park `gate tool changed: dependency added: …` on every dependency change in a pnpm project | Pin pnpm 10 or later in the root `package.json` (`"packageManager": "pnpm@10.x.y"`), make the image run that version, and set `trustPnpmBuildBlocking: true`; new registry packages then pass unless allowed to build. |
 | Items park `gate tool changed: lockfile unreadable` or `lockfile format not supported: …` | The lockfile could not be read (yarn, bun, a pnpm lockfile older than v6, or an unexpected layout). No approval lifts this park. Review the dependency change yourself and merge the PR by hand, or close it. |
 | Items park `no pipeline` | `ciRequired` is true but nothing reported. Add CI or set `ciRequired: false`. |

@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, test } from 'vitest';
-import { getWorkItem, insertVerdict, type VerdictRow } from '../db/repo.js';
+import { getWorkItem, insertVerdict, recordGateAllowance, type VerdictRow } from '../db/repo.js';
 import { zoneWorld } from '../test/fixtures.js';
 import { decide } from './decide.js';
-import { buildSnapshot, zonePass } from './snapshot.js';
+import { buildSnapshot, gateDigest, zonePass } from './snapshot.js';
 
 const now = new Date('2026-01-01T01:00:00Z');
 const pkg = (scripts: Record<string, string>): string => JSON.stringify({ name: 'x', scripts });
@@ -62,7 +62,28 @@ describe('buildSnapshot', () => {
     w.f.state.pullFiles.set(1, { files: [{ path: 'package.json' }], complete: true });
     w.f.state.files.set('base0:package.json', pkg({ test: 'vitest' }));
     w.f.state.files.set('sha1:package.json', pkg({ test: 'exit 0' }));
-    expect((await snapshotOf()).gateScriptChanges).toEqual(['test']);
+    const s = await snapshotOf();
+    expect(s.gateScriptChanges).toEqual(['test']);
+    expect(s.gateDetails).toEqual({ scripts: ['test: "vitest" → "exit 0"'], tools: [] });
+  });
+
+  test('a script in a nested package.json, added or removed, is detailed with its path', async () => {
+    w.f.state.pullFiles.set(1, { files: [{ path: 'pkg/a/package.json' }], complete: true });
+    w.f.state.files.set('base0:pkg/a/package.json', pkg({ test: 'vitest' }));
+    w.f.state.files.set('sha1:pkg/a/package.json', pkg({}));
+    const s = await snapshotOf();
+    expect(s.gateDetails.scripts).toEqual(['pkg/a/package.json test: "vitest" → (none)']);
+  });
+
+  test('a gate runner bumped in package.json is detailed old → new', async () => {
+    const withDep = (v: string) =>
+      JSON.stringify({ name: 'x', scripts: { test: 'vitest' }, devDependencies: { vitest: v } });
+    w.f.state.pullFiles.set(1, { files: [{ path: 'package.json' }], complete: true });
+    w.f.state.files.set('base0:package.json', withDep('^1.0.0'));
+    w.f.state.files.set('sha1:package.json', withDep('^2.0.0'));
+    const s = await snapshotOf();
+    expect(s.gateToolChanges).toContain('vitest version changed');
+    expect(s.gateDetails.tools).toContain('vitest version changed: "^1.0.0" → "^2.0.0"');
   });
 
   test('a lockfile changed without any package.json is still checked', async () => {
@@ -96,7 +117,9 @@ describe('buildSnapshot', () => {
     w.f.state.files.set('sha1:package.json', pkg({ test: 'vitest run' }));
     w.f.state.files.set('base0:package-lock.json', npmLock('3.0.0'));
     w.f.state.files.set('sha1:package-lock.json', npmLock('3.0.1'));
-    expect((await snapshotOf()).gateToolChanges).toEqual(['vitest version changed in lockfile']);
+    const s = await snapshotOf();
+    expect(s.gateToolChanges).toEqual(['vitest version changed in lockfile']);
+    expect(s.gateDetails.tools).toEqual(['vitest version changed in lockfile: "3.0.0" → "3.0.1"']);
   });
 
   describe('pnpm workspaces', () => {
@@ -284,6 +307,39 @@ describe('buildSnapshot', () => {
       const s = await snapshotOf();
       expect(s.maintainerApproved).toBe(false);
       expect(s.forgeUnavailable).toBe('isMaintainer');
+    });
+
+    test('a Command allowance counts only for the exact head, merge base and changes', async () => {
+      const s0 = await snapshotOf();
+      expect(s0.commandAllowed).toBe(false);
+      const digest = gateDigest(s0.gateDetails);
+      const allowance = { itemId, prNumber: 1, mergeBaseSha: 'base0', digest, rulingId: 1 };
+      recordGateAllowance(w.db, { ...allowance, headSha: 'sha0' }, now);
+      expect((await snapshotOf()).commandAllowed).toBe(false);
+      recordGateAllowance(w.db, { ...allowance, headSha: 'sha1', digest: 'other' }, now);
+      expect((await snapshotOf()).commandAllowed).toBe(false);
+      w.db.prepare('DELETE FROM gate_allowances').run();
+      recordGateAllowance(w.db, { ...allowance, headSha: 'sha1', mergeBaseSha: 'base9' }, now);
+      expect((await snapshotOf()).commandAllowed).toBe(false);
+      w.db.prepare('DELETE FROM gate_allowances').run();
+      recordGateAllowance(w.db, { ...allowance, headSha: 'sha1', prNumber: 2 }, now);
+      expect((await snapshotOf()).commandAllowed).toBe(false);
+      w.db.prepare('DELETE FROM gate_allowances').run();
+      recordGateAllowance(w.db, { ...allowance, headSha: 'sha1' }, now);
+      expect((await snapshotOf()).commandAllowed).toBe(true);
+      // The same head judged against another merge base (the base moved) is not allowed.
+      w.f.state.compares.set('main...sha1', {
+        aheadBy: 1,
+        behindBy: 1,
+        baseSha: 'base1',
+        mergeBaseSha: 'base1',
+      });
+      w.f.state.files.set('base1:package.json', pkg({ test: 'vitest' }));
+      expect((await snapshotOf()).commandAllowed).toBe(false);
+      w.f.state.compares.delete('main...sha1');
+      w.f.state.setHead(1, 'sha2');
+      w.f.state.files.set('sha2:package.json', pkg({ test: 'vitest --bail' }));
+      expect((await snapshotOf()).commandAllowed).toBe(false);
     });
 
     test('no gate change: no permission lookup', async () => {

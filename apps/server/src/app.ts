@@ -9,6 +9,7 @@ import {
   type AttemptKey,
   getAttempts,
   getDrop,
+  getGateAllowance,
   getPullRequest,
   getUsageState,
   getZoneMode,
@@ -71,6 +72,9 @@ export function createApp(deps: StickRouteDeps & { kick?: () => void }): Fastify
       const pr = getPullRequest(db, i.id);
       details.set(i.id, {
         ...(pr ? { headSha: pr.headSha } : {}),
+        ...(pr && getGateAllowance(db, i.id, pr.number, pr.headSha)
+          ? { gateAllowedSha: pr.headSha }
+          : {}),
         ...(v ? { verdict: { decision: v.decision, forced: v.forced, summary: v.summary } } : {}),
         attempts: Object.fromEntries(ATTEMPT_KEYS.map((k) => [k, getAttempts(db, i.id, k).count])),
       });

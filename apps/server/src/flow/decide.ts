@@ -50,6 +50,13 @@ export interface Snapshot {
    * decisive review, APPROVED pr.headSha: gate script and gate tool changes do not park.
    */
   maintainerApproved: boolean;
+  /** Command ruled `allow_gate_change` for exactly pr.headSha (a gate_allowances row). */
+  commandAllowed: boolean;
+  /**
+   * Every gate change in full, for Command's briefing: scripts as `name: "<old>" → "<new>"`
+   * (merge base → head), tool changes with old → new where the guard knows them.
+   */
+  gateDetails: { scripts: string[]; tools: string[] };
   /** The newest review's submittedAt on the PR (any author); null when there is none. */
   newestReviewAt: string | null;
   /** null = rules read unavailable; [] when safe or !zone.requireBranchProtection. */
@@ -96,8 +103,20 @@ export const OVERRIDE_HINT = ' (a maintainer can approve this head to allow it)'
 export const GATE_PARK_PREFIXES = ['gate script changed: ', 'gate tool changed: '];
 const MAX_CHANGE_LIST = 500;
 
-/** Every change, so the approver sees them all, capped with a count of the rest. */
-function gateParkReason(what: string, changes: string[]): string {
+const TRUNCATED = /; … \(\+\d+ more\)/;
+
+/**
+ * Whether a park reason is a gate park Command may allow: decide ends such a reason with
+ * OVERRIDE_HINT only when the guard read every change it judged, and the list is not cut short
+ * (Command must see every change it allows).
+ */
+export const gateParkAllowable = (reason: string): boolean =>
+  GATE_PARK_PREFIXES.some((p) => reason.startsWith(p)) &&
+  reason.endsWith(OVERRIDE_HINT) &&
+  !TRUNCATED.test(reason);
+
+/** The change list as a park reason shows it: capped, with a count of the rest. */
+function changeList(changes: string[]): { list: string; truncated: boolean } {
   let list = '';
   let shown = 0;
   for (const c of changes) {
@@ -107,8 +126,17 @@ function gateParkReason(what: string, changes: string[]): string {
     shown++;
   }
   if (shown < changes.length) list += `; … (+${changes.length - shown} more)`;
+  return { list, truncated: shown < changes.length };
+}
+
+/**
+ * Every change, so the approver sees them all, capped with a count of the rest. `allRead` is false
+ * when any gate change on the head (listed here or not) was not fully read.
+ */
+function gateParkReason(what: string, changes: string[], allRead: boolean): string {
+  const { list } = changeList(changes);
   // The hint is only offered when the guard read everything it judged.
-  return `${what}: ${list}${changes.some(unverified) ? UNVERIFIED_NOTE : OVERRIDE_HINT}`;
+  return `${what}: ${list}${allRead ? OVERRIDE_HINT : UNVERIFIED_NOTE}`;
 }
 
 const UNVERIFIED_NOTE = ' (not fully read: merge it by hand)';
@@ -206,15 +234,25 @@ export function decide(s: Snapshot): Action {
     return { kind: 'park', reason: `protected path: ${s.protectedHits[0]}` };
   }
   if (!s.filesComplete) return { kind: 'park', reason: 'protected path: file list truncated' };
-  // A maintainer's approval of this exact head lets gate changes through; a push changes the head.
-  // A change the guard could not fully read is never overridden: a person merges it by hand.
-  const overridable =
-    s.maintainerApproved && ![...s.gateScriptChanges, ...s.gateToolChanges].some(unverified);
+  // A maintainer's approval of this exact head, or Command's ruling for it, lets gate changes
+  // through; a push changes the head. A change the guard could not fully read is never
+  // overridden: a person merges it by hand.
+  const allRead = ![...s.gateScriptChanges, ...s.gateToolChanges].some(unverified);
+  // Command's allowance counts only when its briefing listed every change (not cut short).
+  const listed =
+    !changeList(s.gateScriptChanges).truncated && !changeList(s.gateToolChanges).truncated;
+  const overridable = (s.maintainerApproved || (s.commandAllowed && listed)) && allRead;
   if (s.gateScriptChanges.length > 0 && !overridable) {
-    return { kind: 'park', reason: gateParkReason('gate script changed', s.gateScriptChanges) };
+    return {
+      kind: 'park',
+      reason: gateParkReason('gate script changed', s.gateScriptChanges, allRead),
+    };
   }
   if (s.gateToolChanges.length > 0 && !overridable) {
-    return { kind: 'park', reason: gateParkReason('gate tool changed', s.gateToolChanges) };
+    return {
+      kind: 'park',
+      reason: gateParkReason('gate tool changed', s.gateToolChanges, allRead),
+    };
   }
   if (s.protectionProblems === null) return waitForge(s, 'branch rules');
   if (s.protectionProblems.length > 0) {

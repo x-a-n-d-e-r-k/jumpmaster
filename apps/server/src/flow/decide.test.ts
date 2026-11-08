@@ -4,7 +4,7 @@ import type { Drop, VerdictRow, WorkItem } from '../db/repo.js';
 import type { ChecksFacts, CompareFacts, ForgeReview, PullFacts } from '../forge/github.js';
 import { t0 } from '../test/helpers.js';
 import { fingerprint } from './budgets.js';
-import { decide, HOLD_REASON, OVERRIDE_HINT, type Snapshot } from './decide.js';
+import { decide, gateParkAllowable, HOLD_REASON, OVERRIDE_HINT, type Snapshot } from './decide.js';
 
 const now = t0;
 const minutesAgo = (m: number): string => new Date(now.getTime() - m * 60_000).toISOString();
@@ -133,6 +133,8 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
     gateScriptChanges: [],
     gateToolChanges: [],
     maintainerApproved: false,
+    commandAllowed: false,
+    gateDetails: { scripts: [], tools: [] },
     newestReviewAt: null,
     protectionProblems: [],
     headFirstSeenAt: now.toISOString(),
@@ -331,6 +333,64 @@ describe('rules in order', () => {
     const s = { gateScriptChanges: ['test'], gateToolChanges: ['x'], maintainerApproved: true };
     expect(decide(snap(s))).toEqual(decide(snap()));
   });
+
+  test('13: a script park offers no override when a tool change was not fully read', () => {
+    const a = decide(
+      snap({ gateScriptChanges: ['test'], gateToolChanges: ['lockfile not found'] }),
+    );
+    expect(a).toEqual({
+      kind: 'park',
+      reason: 'gate script changed: test (not fully read: merge it by hand)',
+    });
+    if (a.kind === 'park') expect(gateParkAllowable(a.reason)).toBe(false);
+  });
+
+  test('gateParkAllowable: only a gate park whose reason offers the override', () => {
+    const reasonOf = (s: Partial<Snapshot>) => {
+      const a = decide(snap(s));
+      return a.kind === 'park' ? a.reason : '';
+    };
+    expect(gateParkAllowable(reasonOf({ gateScriptChanges: ['test'] }))).toBe(true);
+    expect(gateParkAllowable(reasonOf({ gateToolChanges: ['vitest: npm:x@1'] }))).toBe(true);
+    expect(gateParkAllowable(reasonOf({ gateToolChanges: ['lockfile not found'] }))).toBe(false);
+    expect(gateParkAllowable(reasonOf({ protectedHits: ['CODEOWNERS'] }))).toBe(false);
+    expect(gateParkAllowable(`protected path: x${OVERRIDE_HINT}`)).toBe(false);
+  });
+
+  test('a truncated change list is not allowable, and a Command allowance does not lift it', () => {
+    const long = Array.from({ length: 40 }, (_, i) => `dependency added: package-${i}@1.0.0`);
+    const a = decide(snap({ gateToolChanges: long }));
+    if (a.kind !== 'park') throw new Error(a.kind);
+    expect(a.reason).toMatch(/\(\+\d+ more\)/);
+    expect(gateParkAllowable(a.reason)).toBe(false);
+    expect(decide(snap({ gateToolChanges: long, commandAllowed: true }))).toEqual(a);
+    // A maintainer reads the diff on the forge: their approval still lifts it.
+    expect(decide(snap({ gateToolChanges: long, maintainerApproved: true }))).toEqual(
+      decide(snap()),
+    );
+  });
+
+  test('13–14: a Command allowance for the head lets gate changes through', () => {
+    const s = { gateScriptChanges: ['test'], gateToolChanges: ['x'], commandAllowed: true };
+    expect(decide(snap(s))).toEqual(decide(snap()));
+  });
+
+  test('13–14: a Command allowance does not lift a park on a change not fully read', () => {
+    for (const s of [
+      { gateToolChanges: ['vitest: npm:x@1', 'lockfile unreadable'] },
+      { gateScriptChanges: ['package.json unreadable'] },
+    ]) {
+      const a = decide(snap({ ...s, commandAllowed: true }));
+      expect(a).toMatchObject({ kind: 'park' });
+      if (a.kind === 'park') expect(a.reason).toMatch(/\(not fully read: merge it by hand\)$/);
+    }
+  });
+
+  test('12: a Command allowance does not lift a protected path park', () =>
+    expect(decide(snap({ protectedHits: ['.github/x.yml'], commandAllowed: true }))).toEqual({
+      kind: 'park',
+      reason: 'protected path: .github/x.yml',
+    }));
 
   test('12: a maintainer approval does not lift a protected path park', () =>
     expect(

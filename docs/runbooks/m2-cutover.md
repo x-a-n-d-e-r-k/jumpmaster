@@ -118,7 +118,9 @@ before it. With one free slot, crew drops wait until no finishing or implement d
 - **Gate-change override:** a PR that parks `gate script changed` or `gate tool changed` goes on
   once someone with maintain or admin (or a login in `overrideApprovers` with write access)
   approves its current head on GitHub. Any new push needs a new approval. In starter mode the
-  operator's own account is the bots' token, so the operator's approval never counts.
+  operator's own account is the bots' token, so the operator's approval never counts; rule
+  `Allow these gate changes for <sha7>` on the item's parked briefing instead (m1-loop runbook,
+  section 3). That ruling binds to the head it names: a new push parks again.
 - **Git hooks:** a project's hooks (husky, lint-staged) run on the agent's commits, but not on the
   trooper's own housekeeping commits, so a hook can't fail a drop after the work is done.
 

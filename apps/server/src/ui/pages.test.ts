@@ -163,6 +163,25 @@ describe('renderHome loop state', () => {
     expect(html).toContain('<td>review</td>');
   });
 
+  test("shows Command's gate change allowance for the item's head", () => {
+    const html = renderHome({
+      zones: [z],
+      items: [item],
+      drops: [],
+      details: new Map([
+        [1, { headSha: 'abcdef1234567890', gateAllowedSha: 'abcdef1234567890', attempts: {} }],
+      ]),
+    });
+    expect(html).toContain('gate change allowed by Command for abcdef1');
+    const plain = renderHome({
+      zones: [z],
+      items: [item],
+      drops: [],
+      details: new Map([[1, { headSha: 'abcdef1234567890', attempts: {} }]]),
+    });
+    expect(plain).not.toContain('allowed by Command');
+  });
+
   test('escapes verdict summary', () => {
     const html = renderHome({
       zones: [z],
@@ -261,6 +280,23 @@ describe('briefings', () => {
     ]) {
       expect(html).toContain(text);
     }
+  });
+
+  test('a briefing keeps the line breaks of its why and shows each option id for ctl', () => {
+    const html = renderBriefings({
+      open: [
+        briefing({
+          why: 'gate script changed: test\n  test: "a" → "<b>"',
+          options: [{ id: 'allow-x', label: 'Allow', effect: 'allow_gate_change', sha: 'x' }],
+        }),
+      ],
+      rulings: [],
+      zones: [z],
+    });
+    expect(html).toContain(
+      '<pre>gate script changed: test\n  test: &quot;a&quot; → &quot;&lt;b&gt;&quot;</pre>',
+    );
+    expect(html).toContain('<code>allow-x</code>');
   });
 
   test('a held refute promotion shows its Reject option and when it will promote', () => {

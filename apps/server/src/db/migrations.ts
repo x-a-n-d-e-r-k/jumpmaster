@@ -281,6 +281,32 @@ ALTER TABLE drops ADD COLUMN requested_model TEXT;
 ALTER TABLE drops ADD COLUMN served_model TEXT;
 `;
 
+/**
+ * v11: the gate changes a gate park judged, in full (for Command's briefing), and Command's
+ * allowance of one head's gate changes, recorded by an `allow_gate_change` ruling.
+ */
+const V11_SQL = `
+CREATE TABLE gate_parks (
+  item_id         INTEGER PRIMARY KEY REFERENCES work_items(id),
+  pr_number       INTEGER NOT NULL,
+  head_sha        TEXT NOT NULL,
+  merge_base_sha  TEXT NOT NULL,
+  details_json    TEXT NOT NULL,
+  recorded_at     TEXT NOT NULL
+);
+CREATE TABLE gate_allowances (
+  item_id         INTEGER NOT NULL REFERENCES work_items(id),
+  pr_number       INTEGER NOT NULL,
+  head_sha        TEXT NOT NULL,
+  merge_base_sha  TEXT NOT NULL,
+  reason_digest   TEXT NOT NULL,
+  ruled_at        TEXT NOT NULL,
+  ruling_id       INTEGER NOT NULL,
+  PRIMARY KEY (item_id, pr_number, head_sha)
+);
+ALTER TABLE rulings ADD COLUMN apply_attempts INTEGER NOT NULL DEFAULT 0;
+`;
+
 export type Migration = { version: number; sql: string; foreignKeysOff?: boolean };
 
 export const MIGRATIONS: Migration[] = [
@@ -294,6 +320,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 8, sql: V8_SQL },
   { version: 9, sql: V9_SQL },
   { version: 10, sql: V10_SQL },
+  { version: 11, sql: V11_SQL },
 ];
 
 /**

@@ -238,6 +238,99 @@ export function setParkMark(db: Db, id: number, reviewsSeen: string, checkedAt: 
   );
 }
 
+export type GateDetails = { scripts: string[]; tools: string[] };
+export type GatePark = {
+  itemId: number;
+  prNumber: number;
+  headSha: string;
+  mergeBaseSha: string;
+  details: GateDetails;
+  /** When this content was first recorded (unchanged by re-recording the same judgement). */
+  recordedAt: string;
+};
+
+/** Records what a gate park judged; recorded_at moves only when the judgement changes. */
+export function recordGatePark(db: Db, p: Omit<GatePark, 'recordedAt'>, now: Date): void {
+  db.prepare(
+    `INSERT INTO gate_parks (item_id, pr_number, head_sha, merge_base_sha, details_json, recorded_at)
+       VALUES (@itemId, @prNumber, @headSha, @mergeBaseSha, @detailsJson, @at)
+     ON CONFLICT (item_id) DO UPDATE SET pr_number = excluded.pr_number,
+       head_sha = excluded.head_sha, merge_base_sha = excluded.merge_base_sha,
+       details_json = excluded.details_json, recorded_at = excluded.recorded_at
+     WHERE pr_number IS NOT excluded.pr_number OR head_sha IS NOT excluded.head_sha
+       OR merge_base_sha IS NOT excluded.merge_base_sha
+       OR details_json IS NOT excluded.details_json`,
+  ).run({
+    itemId: p.itemId,
+    prNumber: p.prNumber,
+    headSha: p.headSha,
+    mergeBaseSha: p.mergeBaseSha,
+    detailsJson: JSON.stringify(p.details),
+    at: now.toISOString(),
+  });
+}
+
+export function getGatePark(db: Db, itemId: number): GatePark | undefined {
+  const r = db
+    .prepare(
+      `SELECT item_id AS itemId, pr_number AS prNumber, head_sha AS headSha,
+         merge_base_sha AS mergeBaseSha, details_json AS detailsJson, recorded_at AS recordedAt
+         FROM gate_parks WHERE item_id = ?`,
+    )
+    .get(itemId) as (Omit<GatePark, 'details'> & { detailsJson: string }) | undefined;
+  if (!r) return undefined;
+  const { detailsJson, ...rest } = r;
+  return { ...rest, details: JSON.parse(detailsJson) as GateDetails };
+}
+
+/**
+ * Command's allowance of one judged diff: the head, the merge base it was judged against, and the
+ * digest of every change listed (gateDigest).
+ */
+export type GateAllowance = {
+  itemId: number;
+  prNumber: number;
+  headSha: string;
+  mergeBaseSha: string;
+  digest: string;
+  ruledAt: string;
+  rulingId: number;
+};
+
+/**
+ * Records Command's allowance of `headSha`'s gate changes. Repeating the same allowance is a no-op
+ * (the first ruled_at kept); a later ruling on the same head for another judgement replaces it.
+ */
+export function recordGateAllowance(db: Db, a: Omit<GateAllowance, 'ruledAt'>, now: Date): void {
+  db.prepare(
+    `INSERT INTO gate_allowances (item_id, pr_number, head_sha, merge_base_sha, reason_digest,
+       ruled_at, ruling_id) VALUES (@itemId, @prNumber, @headSha, @mergeBaseSha, @digest, @at,
+       @rulingId)
+     ON CONFLICT (item_id, pr_number, head_sha) DO UPDATE SET merge_base_sha = excluded.merge_base_sha,
+       reason_digest = excluded.reason_digest, ruled_at = excluded.ruled_at,
+       ruling_id = excluded.ruling_id
+     WHERE merge_base_sha IS NOT excluded.merge_base_sha
+       OR reason_digest IS NOT excluded.reason_digest`,
+  ).run({ ...a, at: now.toISOString() });
+}
+
+/** Command's allowance for exactly this item, PR and head, if any. */
+export function getGateAllowance(
+  db: Db,
+  itemId: number,
+  prNumber: number,
+  headSha: string,
+): GateAllowance | undefined {
+  return db
+    .prepare(
+      `SELECT item_id AS itemId, pr_number AS prNumber, head_sha AS headSha,
+         merge_base_sha AS mergeBaseSha, reason_digest AS digest, ruled_at AS ruledAt,
+         ruling_id AS rulingId
+         FROM gate_allowances WHERE item_id = ? AND pr_number = ? AND head_sha = ?`,
+    )
+    .get(itemId, prNumber, headSha) as GateAllowance | undefined;
+}
+
 export function insertDrop(db: Db, d: NewDrop, now?: Date): void {
   db.prepare(
     `INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, stick_id, epoch, lease_expires_at,
