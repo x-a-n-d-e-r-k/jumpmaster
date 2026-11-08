@@ -119,6 +119,29 @@ describe('buildSnapshot', () => {
       expect((await snapshotOf()).gateToolChanges).toEqual(['lockfile not found']);
     });
 
+    test('a shared lockfile is read once per commit, and reads are memoized across passes', async () => {
+      addTypesNode(JSON.stringify({ name: 'root' }));
+      w.f.state.pullFiles.set(1, {
+        files: [
+          { path: 'packages/a/package.json' },
+          { path: 'packages/b/package.json' },
+          { path: 'pnpm-lock.yaml' },
+        ],
+        complete: true,
+      });
+      w.f.state.files.set('base0:packages/b/package.json', deps({}));
+      w.f.state.files.set('sha1:packages/b/package.json', deps({ x: '^1' }));
+      const reads = () =>
+        w.f.author.calls.filter((c) => c.method === 'getFileAt').map((c) => c.args.join(':'));
+      await snapshotOf();
+      const first = reads();
+      expect(first.filter((r) => r === 'sha1:pnpm-lock.yaml')).toHaveLength(1);
+      expect(first.filter((r) => r === 'base0:pnpm-lock.yaml')).toHaveLength(1);
+      expect(new Set(first).size).toBe(first.length);
+      await snapshotOf();
+      expect(reads()).toEqual(first);
+    });
+
     test('a dependency change in a yarn project names the unsupported lockfile', async () => {
       w.f.state.pullFiles.set(1, { files: [{ path: 'packages/a/package.json' }], complete: true });
       w.f.state.files.set('base0:packages/a/package.json', deps({}));

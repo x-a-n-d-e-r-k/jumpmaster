@@ -112,15 +112,54 @@ function latestDecisive(reviews: ForgeReview[]): ForgeReview[] {
 
 const isPackageJson = (p: string): boolean => p === 'package.json' || p.endsWith('/package.json');
 
+/**
+ * Answered reads (404s included) by `sha:path`, per forge. Callers pass commit SHAs only, whose
+ * contents never change. Least recently used entries go first past either bound.
+ */
+const FILE_CACHE_ENTRIES = 256;
+const FILE_CACHE_BYTES = 64 * 1024 * 1024;
+const fileCaches = new WeakMap<object, { files: Map<string, string | null>; bytes: number }>();
+
+function cached(forge: object, key: string): { hit: boolean; text: string | null } {
+  const c = fileCaches.get(forge);
+  if (!c?.files.has(key)) return { hit: false, text: null };
+  const text = c.files.get(key) ?? null;
+  c.files.delete(key);
+  c.files.set(key, text);
+  return { hit: true, text };
+}
+
+function remember(forge: object, key: string, text: string | null): void {
+  let c = fileCaches.get(forge);
+  if (!c) {
+    c = { files: new Map(), bytes: 0 };
+    fileCaches.set(forge, c);
+  }
+  const size = (t: string | null | undefined) => t?.length ?? 0;
+  if (size(text) > FILE_CACHE_BYTES) return;
+  c.files.set(key, text);
+  c.bytes += size(text);
+  for (const [k, v] of c.files) {
+    if (c.files.size <= FILE_CACHE_ENTRIES && c.bytes <= FILE_CACHE_BYTES) break;
+    c.files.delete(k);
+    c.bytes -= size(v);
+  }
+}
+
 /** A 404 is `text: null`; a thrown read is the forge being unavailable (the pass waits). */
 async function readFile(
   forges: ForgePair,
-  ref: string,
+  sha: string,
   path: string,
   unavailable: (method: string, err?: unknown) => void,
 ): Promise<{ ok: true; text: string | null } | { ok: false }> {
+  const key = `${sha}:${path}`;
+  const hit = cached(forges.author, key);
+  if (hit.hit) return { ok: true, text: hit.text };
   try {
-    return { ok: true, text: await forges.author.getFileAt(ref, path) };
+    const text = await forges.author.getFileAt(sha, path);
+    remember(forges.author, key, text);
+    return { ok: true, text };
   } catch (err) {
     unavailable('getFileAt', err);
     return { ok: false };

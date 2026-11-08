@@ -503,18 +503,28 @@ describe('GitHubForge', () => {
       });
     });
 
-    test('getFileAt decodes contents and returns null on 404', async () => {
-      nock(api)
+    test('getFileAt reads the raw file (any size) and returns null on 404', async () => {
+      const big = 'x'.repeat(2 * 1024 * 1024);
+      nock(api, { reqheaders: { accept: 'application/vnd.github.raw' } })
         .get('/repos/o/r/contents/a/b.txt')
         .query({ ref: 'main' })
-        .reply(200, {
-          type: 'file',
-          encoding: 'base64',
-          content: Buffer.from('hi\n').toString('base64'),
-        });
+        .reply(200, big, { 'content-type': 'application/vnd.github.raw; charset=utf-8' });
       nock(api).get('/repos/o/r/contents/nope').query({ ref: 'main' }).reply(404, { message: 'x' });
-      expect(await forge.getFileAt('main', 'a/b.txt')).toBe('hi\n');
+      expect(await forge.getFileAt('main', 'a/b.txt')).toBe(big);
       expect(await forge.getFileAt('main', 'nope')).toBeNull();
+    });
+
+    test('getFileAt is null for a directory and decodes a binary file', async () => {
+      nock(api)
+        .get('/repos/o/r/contents/dir')
+        .query({ ref: 'main' })
+        .reply(200, [{ type: 'file', name: 'a' }]);
+      nock(api)
+        .get('/repos/o/r/contents/bun.lockb')
+        .query({ ref: 'main' })
+        .reply(200, Buffer.from('bin'), { 'content-type': 'application/octet-stream' });
+      expect(await forge.getFileAt('main', 'dir')).toBeNull();
+      expect(await forge.getFileAt('main', 'bun.lockb')).toBe('bin');
     });
 
     describe('reviews', () => {

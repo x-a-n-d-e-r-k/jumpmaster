@@ -583,16 +583,19 @@ export class GitHubForge implements Forge {
     return (data.role_name ?? data.permission) === 'admin';
   }
 
+  /** The raw media type: the JSON form leaves `content` empty for files over 1 MB. */
   async getFileAt(ref: string, path: string): Promise<string | null> {
     try {
-      const { data } = await this.octokit.request('GET /repos/{owner}/{repo}/contents/{+path}', {
+      const { data } = (await this.octokit.request('GET /repos/{owner}/{repo}/contents/{+path}', {
         owner: this.owner,
         repo: this.repo,
         path: path.split('/').map(encodeURIComponent).join('/'),
         ref,
-      });
-      if (Array.isArray(data) || data.type !== 'file' || !('content' in data)) return null;
-      return Buffer.from(data.content, 'base64').toString('utf8');
+        headers: { accept: 'application/vnd.github.raw' },
+      })) as { data: unknown };
+      if (typeof data === 'string') return data;
+      if (data instanceof ArrayBuffer) return Buffer.from(data).toString('utf8');
+      return null; // a directory listing (or anything else that is not one file's bytes)
     } catch (err) {
       if (statusOf(err) === 404) return null;
       throw err;
