@@ -96,7 +96,11 @@ export function nextCrewWork(db: Db, zone: DropZoneConfig, now: Date): CrewWork 
     return { role: 'crew-lead' };
   }
   const ruled = db
-    .prepare('SELECT 1 FROM rulings WHERE zone_id = ? AND created_at > ? LIMIT 1')
+    .prepare(
+      `SELECT 1 FROM rulings r JOIN briefings b ON b.id = r.briefing_id
+       WHERE r.zone_id = ? AND r.created_at > ?
+         AND b.kind IN ('crew', 'promote', 'promote_held', 'refute_exhausted') LIMIT 1`,
+    )
     .get(zone.id, last.at);
   const requested = cycleRequests.get(zone.id);
   if (ruled || (requested !== undefined && requested > last.at)) return { role: 'crew-lead' };

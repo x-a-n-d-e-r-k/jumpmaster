@@ -94,7 +94,8 @@ export function resolveModel(
   const fableRole = (FABLE_ROLES as readonly string[]).includes(role);
   if (fableRole && status.available && cfg.claude.fableModel) return cfg.claude.fableModel;
   const configured = modelFor(zone, role);
-  return FABLE.test(configured) && !status.available ? zone.model : configured;
+  const isFable = FABLE.test(configured) || configured === cfg.claude.fableModel;
+  return isFable && !status.available ? zone.model : configured;
 }
 
 const isFableRequest = (cfg: Pick<Config, 'claude'>, drop: Drop): boolean =>

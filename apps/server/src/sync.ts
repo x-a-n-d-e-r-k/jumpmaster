@@ -49,11 +49,10 @@ const errorText = (err: unknown): string => (err instanceof Error ? err.message 
  * operator's own account.
  */
 export function isCrewFiled(issue: ForgeIssue, zone: DropZoneConfig): boolean {
-  return (
-    isJmIssueBody(issue.body) ||
-    issue.authorType === 'Bot' ||
-    (zone.botLogins ?? []).includes(issue.author)
-  );
+  if (isJmIssueBody(issue.body)) return true;
+  // The extra signals apply only with the crew on, so an M2 zone's intake is unchanged.
+  if (!zone.crew?.enabled) return false;
+  return issue.authorType === 'Bot' || (zone.botLogins ?? []).includes(issue.author);
 }
 
 const isFixTitle = (title: string): boolean => /^fix:/i.test(title);

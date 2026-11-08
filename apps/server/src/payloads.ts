@@ -216,6 +216,7 @@ export function buildPayload(
     drop.role as Role,
     o.now ?? new Date(),
   );
+  // Records requested_model on the drop as a side effect (the Fable weekly cap counts it).
   updateDrop(db, drop.id, { requestedModel: model });
   if (isCrewRole(drop.role)) return buildCrewPayload(db, zone, drop, drop.role, secrets, model);
   const item = listWorkItems(db, zone.id).find((w) => w.id === drop.workItemId);

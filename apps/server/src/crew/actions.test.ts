@@ -159,7 +159,18 @@ describe('applyCrewActions', () => {
     // Nor is one whose earlier proposal was rejected.
     const [first] = listCrewIssues(w.db, 'main');
     setCrewIssue(w.db, first?.id ?? -1, { state: 'rejected' }, t0);
-    expect(apply({ fileIssues: [issue({ key: 'docs-4' })] }).filed).toHaveLength(1);
+    expect(
+      apply({ fileIssues: [issue({ key: 'docs-4' })] }, plus(t0, 8 * 24 * 3600_000)).filed,
+    ).toHaveLength(1);
+  });
+
+  test('a title rejected in the last 7 days is refused as a duplicate, then allowed', () => {
+    const [first] = apply({ fileIssues: [issue()] }).filed;
+    setCrewIssue(w.db, first ?? -1, { state: 'rejected' }, t0);
+    const soon = apply({ fileIssues: [issue({ key: 'again' })] }, plus(t0, 6 * 24 * 3600_000));
+    expect(soon.refused).toEqual(['again: duplicate of a crew issue rejected in the last 7 days']);
+    const later = apply({ fileIssues: [issue({ key: 'later' })] }, plus(t0, 8 * 24 * 3600_000));
+    expect(later.filed).toHaveLength(1);
   });
 
   test('crew briefings get server ids and options with effect none', () => {

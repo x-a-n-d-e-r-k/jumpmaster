@@ -444,7 +444,9 @@ function truncate(text: string, maxLen: number): string {
  * references so a crew issue cannot link, close or notify other issues.
  */
 export function sanitizeCrewText(text: string, secrets: string[]): string {
-  return sanitizeForgeText(text, secrets).replace(/#(?=\d)/g, `#${ZWJ}`);
+  return sanitizeForgeText(text, secrets)
+    .replace(/#(?=\d)/g, `#${ZWJ}`)
+    .replace(/\b(gh-)(?=\d)/gi, `$1${ZWJ}`);
 }
 
 export function sanitizeForgeText(text: string, secrets: string[], maxLen = 60_000): string {

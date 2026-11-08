@@ -8,7 +8,7 @@ import type { ForgeIssue } from './forge/github.js';
 import { getGoals } from './goals.js';
 import { rankItems, syncDropZone } from './sync.js';
 import { fakeForge } from './test/fakes.js';
-import { zoneWorld } from './test/fixtures.js';
+import { makeZone, zoneWorld } from './test/fixtures.js';
 import { t0, tmpDbFile } from './test/helpers.js';
 
 const pair = <F>(f: F) => ({ author: f, reviewer: f });
@@ -217,8 +217,8 @@ describe('crew provenance at intake', () => {
     createdAt: t0.toISOString(),
     ...o,
   });
-  const world = (issues: ForgeIssue[], botLogins: string[] = []) => {
-    const w = zoneWorld({ botLogins });
+  const world = (issues: ForgeIssue[], botLogins: string[] = [], crewEnabled = true) => {
+    const w = zoneWorld({ botLogins, crew: { ...makeZone().crew, enabled: crewEnabled } });
     for (const n of [1, 2, 3, 4, 5]) w.f.state.closeIssue(n);
     for (const i of issues) w.f.state.addIssue(i);
     return w;
@@ -260,6 +260,22 @@ describe('crew provenance at intake', () => {
     const r = await syncDropZone(w.db, w.forges, w.zone, t0);
     expect(numbers(w)).toEqual([12]);
     expect(r.skippedCrewUnpromoted).toEqual([]);
+  });
+
+  test('with the crew off, Bot-typed and configured bot authors are judged as before; markers still skip', async () => {
+    const w = world(
+      [
+        crewIssue(13, { body: 'plain', author: 'some-app[bot]', authorType: 'Bot' }),
+        crewIssue(14, { body: 'plain', author: 'helper' }),
+        crewIssue(15, { author: 'human' }),
+      ],
+      ['helper'],
+      false,
+    );
+    w.f.state.trusted.push('some-app[bot]', 'helper');
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([13, 14]);
+    expect(r.skippedCrewUnpromoted).toEqual([15]);
   });
 
   test('a Bot-typed or configured bot author without a promotion is skipped', async () => {

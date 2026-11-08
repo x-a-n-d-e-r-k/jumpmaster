@@ -222,6 +222,14 @@ describe('enqueueCrew', () => {
     expect(nextCrewWork(w.db, w.zone, plus(t0, 7 * MIN))).toEqual({ role: 'crew-lead' });
   });
 
+  test('a ruling on a parked or credits briefing does not make the lead cycle due', async () => {
+    finish((await enqueue()) ?? '');
+    parkedItem();
+    const [b] = listBriefings(w.db, { zoneId: 'main', state: 'open' });
+    ruleBriefing(w.db, b?.id ?? -1, 'leave', '', plus(t0, 2 * MIN));
+    expect(nextCrewWork(w.db, w.zone, plus(t0, 3 * MIN))).toBeNull();
+  });
+
   test('crew-cycle makes the lead cycle due now', async () => {
     finish((await enqueue()) ?? '');
     expect(nextCrewWork(w.db, w.zone, plus(t0, 5 * MIN))).toBeNull();

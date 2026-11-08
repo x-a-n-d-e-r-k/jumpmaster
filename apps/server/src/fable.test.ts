@@ -122,6 +122,12 @@ describe('which model a drop gets', () => {
     ).toBe(zone.model);
   });
 
+  test('the configured fableModel typed into models counts as Fable even without "fable" in its name', () => {
+    const c = cfg({ plan: 'pro', fableModel: 'opus-special' });
+    const zone = { ...w.zone, models: { review: 'opus-special' } };
+    expect(resolveModel(w.db, c, zone, 'review', t0)).toBe(zone.model);
+  });
+
   test('with the default config no drop changes model', async () => {
     const id = await diagnoseDrop();
     const p = buildPayload(w.db, w.zone, getDrop(w.db, id) as never, secrets);

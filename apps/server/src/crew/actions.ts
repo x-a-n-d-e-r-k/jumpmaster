@@ -107,6 +107,11 @@ export function applyCrewActions(
       `SELECT 1 FROM crew_issues WHERE zone_id = ? AND objective = ? AND title_norm = ?
          AND state NOT IN ('rejected', 'failed') LIMIT 1`,
     );
+    const recentlyRejected = db.prepare(
+      `SELECT 1 FROM crew_issues WHERE zone_id = ? AND objective = ? AND title_norm = ?
+         AND state = 'rejected' AND updated_at > ? LIMIT 1`,
+    );
+    const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
     let slots = crewIssueSlots(db, zone);
     for (const i of issues) {
       const refuse = (why: string) => report.refused.push(`${i.key}: ${why}`);
@@ -120,6 +125,10 @@ export function applyCrewActions(
       }
       if (titleUsed.get(zone.id, i.objective, normaliseTitle(i.title))) {
         refuse('duplicate of an open crew issue');
+        continue;
+      }
+      if (recentlyRejected.get(zone.id, i.objective, normaliseTitle(i.title), weekAgo)) {
+        refuse('duplicate of a crew issue rejected in the last 7 days');
         continue;
       }
       const reasons = validateIssueSpec(i.title, i.body);

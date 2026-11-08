@@ -127,6 +127,12 @@ describe('filing', () => {
   });
 });
 
+test('crew text breaks GH-N references in any case', () => {
+  const out = sanitizeCrewText('see GH-12, gh-3 and Gh-4 but not GH-x', []);
+  expect(out).not.toMatch(/gh-\d/i);
+  expect(out).toContain('GH-x');
+});
+
 describe('promotion', () => {
   async function staged(o: Parameters<typeof intent>[0] = {}): Promise<number> {
     const id = intent(o);
