@@ -120,6 +120,7 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
     compare: cmp(),
     checks: pending,
     forgeUnavailable: null,
+    forgeDenied: null,
     requiredChecks: [],
     verdictsOnHead: [],
     reviewOp: { state: 'done' },
