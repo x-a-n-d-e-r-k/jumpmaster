@@ -1,7 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { listBriefings, ruleBriefing } from '../briefings.js';
+import { listBriefings, optionsDigest, ruleBriefing } from '../briefings.js';
 import { allowedHostsOf, type Config, mcpConfigOf } from '../config.js';
 import { requestCrewCycle } from '../crew/schedule.js';
 import type { Db } from '../db/open.js';
@@ -24,7 +24,12 @@ export interface ControlDeps {
 }
 
 const ZoneBody = z.object({ mode: z.enum(ZONE_MODES) });
-const RuleBody = z.object({ optionId: z.string().min(1), note: z.string().max(2000).optional() });
+const RuleBody = z.object({
+  optionId: z.string().min(1),
+  note: z.string().max(2000).optional(),
+  /** The option set the ruler saw (from the page or `ctl briefings`). */
+  optionsDigest: z.string().max(64).optional(),
+});
 const KillBody = z.object({ engaged: z.boolean() });
 const MintBody = z.strictObject({
   zoneId: z.string().min(1),
@@ -93,6 +98,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         subject: b.subject,
         decision: b.decision,
         options: b.options.map((o) => ({ id: o.id, label: o.label })),
+        optionsDigest: optionsDigest(b.options),
       })),
     }));
 
@@ -105,10 +111,13 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         }
         const body = RuleBody.safeParse(req.body);
         if (!body.success) return reply.code(400).send({ error: 'invalid body' });
-        const r = ruleBriefing(db, id, body.data.optionId, body.data.note ?? '', now());
+        const { optionId, note, optionsDigest: seen } = body.data;
+        const r = ruleBriefing(db, id, optionId, note ?? '', now(), {
+          ...(seen ? { optionsDigest: seen } : {}),
+        });
         if (!r.ok) {
           const error = { 404: 'unknown briefing', 409: 'already ruled', 400: 'unknown option' };
-          return reply.code(r.status).send({ error: error[r.status] });
+          return reply.code(r.status).send({ error: r.reason ?? error[r.status] });
         }
         deps.kick?.();
         return { briefing: id, rulingId: r.rulingId };

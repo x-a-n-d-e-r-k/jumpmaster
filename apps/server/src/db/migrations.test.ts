@@ -471,4 +471,14 @@ test('v14 widens briefings.source to mcp, keeps every briefing and ruling, and a
       )
       .run(),
   ).toThrow(/CHECK/);
+  // Pruning by tool walks an index, not the table.
+  expect(
+    db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'mcp_audit_by_tool'")
+      .get(),
+  ).toEqual({ sql: 'CREATE INDEX mcp_audit_by_tool ON mcp_audit(tool, id)' });
+  // A ruling records the label and effect Command chose; older rulings have none.
+  expect(
+    db.prepare('SELECT choice_label AS label, choice_effect AS effect FROM rulings').all(),
+  ).toEqual([{ label: null, effect: null }]);
 });

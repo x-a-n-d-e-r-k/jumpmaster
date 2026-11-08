@@ -106,6 +106,7 @@ const getGoalsTool: ToolDef = {
     return ok(
       [
         `Zone ${zone.id}. ${PREAMBLE}`,
+        // Trusted: goalPath is a protected path no drop can change, though anyone who can push can.
         `Lighthouse: ${fx('trusted', 'lighthouse', p.lighthouse)}`,
         'Objectives (key: title):',
         ...p.objectives.map(
@@ -385,33 +386,63 @@ export function listTools(scope: McpScope): Tool[] {
   }));
 }
 
+const hourBefore = (at: Date): string => new Date(at.getTime() - 60 * 60 * 1000).toISOString();
+
+/** Rows refused by a budget are not calls the budget counts. */
+const NOT_BUDGET_REFUSAL =
+  "NOT (outcome = 'refused' AND detail IN ('write budget', 'call budget'))";
+
 /**
  * Write calls the token made in the trailing hour, refused ones included (so a loop of bad calls
- * is bounded too), except refusals by the budget itself.
+ * is bounded too), except refusals by a budget itself.
  */
-function writesInLastHour(db: Db, tokenId: number, now: Date): number {
-  const since = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+function writesInLastHour(db: Db, tokenId: number, at: Date): number {
   const { n } = db
     .prepare(
       `SELECT COUNT(*) AS n FROM mcp_audit WHERE token_id = ? AND at > ?
-         AND tool IN (${WRITE_TOOLS.map(() => '?').join(', ')})
-         AND NOT (outcome = 'refused' AND detail = 'write budget')`,
+         AND tool IN (${WRITE_TOOLS.map(() => '?').join(', ')}) AND ${NOT_BUDGET_REFUSAL}`,
     )
-    .get(tokenId, since, ...WRITE_TOOLS) as { n: number };
+    .get(tokenId, hourBefore(at), ...WRITE_TOOLS) as { n: number };
   return n;
 }
 
 /**
+ * Whether the token has spent its hourly budget of tool calls of any kind (batches included). Read
+ * from the `(token_id, at)` index, so it costs at most the budget's rows.
+ */
+export function callBudgetSpent(db: Db, config: Config, tokenId: number, at: Date): boolean {
+  const { n } = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM mcp_audit WHERE token_id = ? AND at > ?
+         AND tool NOT IN ('auth', 'mint', 'revoke') AND ${NOT_BUDGET_REFUSAL}`,
+    )
+    .get(tokenId, hourBefore(at)) as { n: number };
+  return n >= mcpConfigOf(config).callsPerHour;
+}
+
+/** Whether a call-budget refusal is already recorded in the window: it is audited once. */
+const budgetRefusalRecorded = (db: Db, tokenId: number, at: Date): boolean =>
+  db
+    .prepare(
+      `SELECT 1 FROM mcp_audit WHERE token_id = ? AND at > ? AND outcome = 'refused'
+         AND detail = 'call budget' LIMIT 1`,
+    )
+    .get(tokenId, hourBefore(at)) !== undefined;
+
+/**
  * Runs one tool call for the principal and audits it in the handler (a hijacked reply has no
- * hooks): tool name, args hash, outcome and a reason code. A tool that throws is audited `error`
- * and answered with a bare JSON-RPC internal error, so no database text reaches the caller.
+ * hooks): tool name, args hash, outcome and a reason code. Budgets, the run and the audit commit in
+ * one transaction. Anything that throws, the database included, is audited `error` where the
+ * database still allows it and answered with a bare JSON-RPC internal error: no error text reaches
+ * the caller.
  */
 export async function callTool(
   ctx: ToolContext,
   name: string,
   args: Record<string, unknown>,
 ): Promise<CallToolResult> {
-  const { db, principal, now } = ctx;
+  const { db, principal } = ctx;
+  const at = ctx.now();
   const tool = TOOLS.find((t) => t.name === name);
   const audit = (outcome: 'ok' | 'refused' | 'error', detail?: string) =>
     auditMcp(
@@ -425,39 +456,56 @@ export async function callTool(
         outcome,
         ...(detail ? { detail } : {}),
       },
-      now(),
+      at,
     );
   const refuse = (o: Outcome): CallToolResult => {
     audit('refused', o.detail);
     return o.result;
   };
-  if (!tool) return refuse(refused('unknown tool', 'unknown tool'));
-  if (tool.scope === 'write') {
-    if (principal.scope !== 'write') {
-      return refuse(refused('a read token cannot call write tools', 'read scope'));
-    }
-    const budget = mcpConfigOf(ctx.config).writesPerHour;
-    if (writesInLastHour(db, principal.tokenId, now()) >= budget) {
-      return refuse(
-        refused(`the write budget of ${budget} calls an hour is spent`, 'write budget'),
-      );
-    }
-  }
-  const parsed = tool.input.safeParse(args);
-  if (!parsed.success) {
-    const issues = parsed.error.issues
-      .map((i) => `${i.path.join('.') || '(arguments)'}: ${i.message}`)
-      .join('; ');
-    return refuse(refused(`invalid arguments: ${issues}`, 'invalid arguments'));
-  }
-  let out: Outcome;
   try {
-    out = tool.run(ctx, parsed.data as never, fencer(secretList(ctx.config.secrets)));
+    return db.transaction((): CallToolResult => {
+      if (callBudgetSpent(db, ctx.config, principal.tokenId, at)) {
+        const out = refused(
+          `the call budget of ${mcpConfigOf(ctx.config).callsPerHour} tool calls an hour is spent`,
+          'call budget',
+        );
+        return budgetRefusalRecorded(db, principal.tokenId, at) ? out.result : refuse(out);
+      }
+      if (!tool) return refuse(refused('unknown tool', 'unknown tool'));
+      if (tool.scope === 'write') {
+        if (principal.scope !== 'write') {
+          return refuse(refused('a read token cannot call write tools', 'read scope'));
+        }
+        const budget = mcpConfigOf(ctx.config).writesPerHour;
+        if (writesInLastHour(db, principal.tokenId, at) >= budget) {
+          return refuse(
+            refused(`the write budget of ${budget} calls an hour is spent`, 'write budget'),
+          );
+        }
+      }
+      const parsed = tool.input.safeParse(args);
+      if (!parsed.success) {
+        const issues = parsed.error.issues
+          .map((i) => `${i.path.join('.') || '(arguments)'}: ${i.message}`)
+          .join('; ');
+        return refuse(refused(`invalid arguments: ${issues}`, 'invalid arguments'));
+      }
+      const out = tool.run(
+        { ...ctx, now: () => at },
+        parsed.data as never,
+        fencer(secretList(ctx.config.secrets)),
+      );
+      if (tool.scope === 'read' && out.outcome === 'ok') audit('ok');
+      else audit(out.outcome, out.detail);
+      return out.result;
+    })();
   } catch {
-    audit('error', 'exception');
+    // The transaction rolled back: whatever the tool recorded is gone with it.
+    try {
+      audit('error', 'exception');
+    } catch {
+      // The database refuses even this; the caller still gets a well-formed error.
+    }
     throw new McpError(ErrorCode.InternalError, 'internal error');
   }
-  if (tool.scope === 'read' && out.outcome === 'ok') audit('ok');
-  else audit(out.outcome, out.detail);
-  return out.result;
 }

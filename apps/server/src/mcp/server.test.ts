@@ -9,6 +9,7 @@ import {
   applyPendingRulings,
   listBriefings,
   listRulings,
+  optionsDigest,
   raiseBriefing,
   ruleBriefing,
 } from '../briefings.js';
@@ -235,7 +236,7 @@ describe('transport', () => {
   });
 
   // Red team §7.4.
-  test('a JSON-RPC batch is 400, runs no tool, and writes at most one audit row', async () => {
+  test('a JSON-RPC batch is 400, runs no tool, and writes exactly one refused audit row', async () => {
     const s = await setup();
     const one = (id: number) => ({
       jsonrpc: '2.0',
@@ -249,9 +250,9 @@ describe('transport', () => {
     const r = await post(s.write, [one(1), one(2), one(3)]);
     expect(r.statusCode).toBe(400);
     expect(listBriefings(s.db, { zoneId: 'main' })).toEqual([]);
-    const rows = audit(s);
-    expect(rows.length).toBeLessThanOrEqual(1);
-    expect(rows.every((x) => x.outcome === 'refused')).toBe(true);
+    expect(audit(s)).toEqual([
+      expect.objectContaining({ tool: 'batch', outcome: 'refused', tokenId: s.writeId }),
+    ]);
   });
 
   // Red team §7.17.
@@ -635,7 +636,11 @@ describe('write tools', () => {
 
     // A ruling on it applies no effect.
     const id = mine?.id as number;
-    expect(ruleBriefing(s.db, id, 'o1', 'fine', t0)).toMatchObject({ ok: true });
+    expect(
+      ruleBriefing(s.db, id, 'o1', 'fine', t0, {
+        optionsDigest: optionsDigest(mine?.options ?? []),
+      }),
+    ).toMatchObject({ ok: true });
     const forges = { forges: () => s.forges as never, zone: () => s.zone };
     expect(await applyPendingRulings(s.db, forges, 'main', t0)).toBe(1);
     expect(listRulings(s.db, 'main')[0]).toMatchObject({ effect: 'none', applyError: null });
@@ -827,5 +832,126 @@ describe('read tools', () => {
     const t = textOf(await call(s.read, 'list_rulings'));
     expect(t).toMatch(/\(trusted\)\s*<<<jm-data:[^:]+:begin note>>>\nCommand note/);
     expect(t).toMatch(/\(data, untrusted\)\s*<<<jm-data:[^:]+:begin diagnosis>>>\nagent diagnosis/);
+  });
+});
+
+describe('review fixes', () => {
+  const control = (method: 'GET' | 'POST', url: string, payload?: unknown) =>
+    (app as FastifyInstance).inject({
+      method,
+      url,
+      headers: { host: HOST, authorization: `Bearer ${OP}` },
+      ...(payload === undefined ? {} : { payload: payload as object }),
+    });
+
+  // Review I1: a budget on every tools/call, audited once per window.
+  test('a token past its hourly call budget is refused, and the refusal is audited once', async () => {
+    const s = await setup({ mcp: { callsPerHour: 3 } });
+    for (let n = 0; n < 3; n++) expect((await call(s.read, 'get_goals')).isError).toBeFalsy();
+    const over = await call(s.read, 'get_goals');
+    expect(over.isError).toBe(true);
+    expect(textOf(over)).toMatch(/call budget/);
+    expect((await call(s.read, 'no_such_tool')).isError).toBe(true);
+    expect((await call(s.read, 'list_work')).isError).toBe(true);
+    // Per token: the write token is unaffected.
+    expect((await call(s.write, 'get_goals')).isError).toBeFalsy();
+    const mine = audit(s).filter((r) => r.tokenId === s.readId);
+    expect(mine).toHaveLength(4);
+    expect(mine.filter((r) => r.detail === 'call budget')).toEqual([
+      expect.objectContaining({ outcome: 'refused', tool: 'get_goals' }),
+    ]);
+    s.at(plus(t0, 61 * 60 * 1000));
+    expect((await call(s.read, 'get_goals')).isError).toBeFalsy();
+  });
+
+  // Review I2: the whole call is guarded, not only the tool body.
+  test('a database failure anywhere in a call is a generic JSON-RPC error with no SQLite text', async () => {
+    const s = await setup();
+    s.db.exec('DROP TABLE mcp_audit');
+    const r = await post(s.read, {
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'tools/call',
+      params: { name: 'get_goals', arguments: {} },
+    });
+    expect(r.statusCode).toBe(200);
+    const body = r.json() as { id: number; error?: { code: number; message: string } };
+    expect(body.id).toBe(5);
+    expect(body.error).toEqual({ code: -32603, message: 'internal error' });
+    expect(r.body).not.toMatch(/SQLITE|no such table|mcp_audit/i);
+  });
+
+  test('a malformed tools/call is a generic JSON-RPC error without a validator dump', async () => {
+    const s = await setup();
+    const r = await post(s.read, {
+      jsonrpc: '2.0',
+      id: 6,
+      method: 'tools/call',
+      params: { name: 'get_goals', arguments: null },
+    });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toEqual({
+      jsonrpc: '2.0',
+      id: 6,
+      // The SDK's request-schema failure carries no code, so it is classed internal.
+      error: { code: -32603, message: 'internal error' },
+    });
+    expect(r.body).not.toMatch(/invalid_type|expected/);
+  });
+
+  // Review M6: budget, run and audit commit together or not at all.
+  test('a write whose audit cannot be written leaves nothing recorded and is audited as error', async () => {
+    const s = await setup();
+    s.db.exec(`CREATE TRIGGER no_ok_write BEFORE INSERT ON mcp_audit
+      WHEN NEW.tool = 'raise_briefing' AND NEW.outcome = 'ok'
+      BEGIN SELECT RAISE(ABORT, 'audit refused'); END`);
+    const r = await rpc(s.write, 'tools/call', {
+      name: 'raise_briefing',
+      arguments: { briefings: [briefing()] },
+    });
+    expect(r.error).toEqual({ code: -32603, message: 'internal error' });
+    expect(listBriefings(s.db)).toEqual([]);
+    expect(audit(s).at(-1)).toMatchObject({ tool: 'raise_briefing', outcome: 'error' });
+  });
+
+  // Review M1.
+  test('a ruling on an assistant briefing whose options changed since they were read is refused', async () => {
+    const s = await setup();
+    const raise = (options: string[]) =>
+      call(s.write, 'raise_briefing', { briefings: [briefing({ subject: 'ord', options })] });
+    expect((await raise(['A first', 'B first'])).isError).toBeFalsy();
+    const digestOf = async () => {
+      const r = (await control('GET', '/api/control/briefings')).json() as {
+        briefings: { id: number; subject: string; optionsDigest: string }[];
+      };
+      const b = r.briefings.find((x) => x.subject === 'mcp:ord');
+      return { id: b?.id as number, digest: b?.optionsDigest as string };
+    };
+    const seen = await digestOf();
+    expect(seen.digest).toMatch(/^[0-9a-f]{16}$/);
+    const page = await app?.inject({ method: 'GET', url: '/briefings', headers: { host: HOST } });
+    expect(page?.body).toContain(`data-options="${seen.digest}"`);
+
+    expect((await raise(['B first', 'A first'])).isError).toBeFalsy();
+    const rule = (body: unknown) => control('POST', `/api/control/briefings/${seen.id}/rule`, body);
+    const stale = await rule({ optionId: 'o1', optionsDigest: seen.digest });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json()).toEqual({ error: 'options changed' });
+    expect((await rule({ optionId: 'o1' })).statusCode).toBe(409);
+    expect(listRulings(s.db, 'main')).toEqual([]);
+
+    const now = await digestOf();
+    expect(now.digest).not.toBe(seen.digest);
+    expect((await rule({ optionId: 'o1', optionsDigest: now.digest, note: 'ok' })).statusCode).toBe(
+      200,
+    );
+    expect(listRulings(s.db, 'main')[0]).toMatchObject({
+      choice: 'o1',
+      label: 'B first',
+      effect: 'none',
+    });
+    expect(s.db.prepare('SELECT choice_label AS l, choice_effect AS e FROM rulings').get()).toEqual(
+      { l: 'B first', e: 'none' },
+    );
   });
 });

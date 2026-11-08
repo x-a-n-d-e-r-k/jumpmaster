@@ -1,12 +1,16 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import {
+  CallToolRequestSchema,
+  type JSONRPCMessage,
+  ListToolsRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { originAllowed } from '../api/control.js';
 import { allowedHostsOf, type Config, type DropZoneConfig, mcpConfigOf } from '../config.js';
 import type { Db } from '../db/open.js';
 import { auditMcp, auditRefusedAuth, checkMcpToken, type McpPrincipal } from './tokens.js';
-import { callTool, listTools } from './tools.js';
+import { callBudgetSpent, callTool, listTools } from './tools.js';
 
 export interface McpDeps {
   db: Db;
@@ -20,6 +24,20 @@ const bearer = (req: FastifyRequest): string | undefined => {
   const h = req.headers.authorization;
   return h?.startsWith('Bearer ') ? h.slice('Bearer '.length) : undefined;
 };
+
+const GENERIC: Record<number, string> = {
+  [-32700]: 'parse error',
+  [-32600]: 'invalid request',
+  [-32601]: 'method not found',
+  [-32602]: 'invalid params',
+  [-32603]: 'internal error',
+};
+
+function withGenericError(message: JSONRPCMessage): JSONRPCMessage {
+  if (!('error' in message)) return message;
+  const { code } = message.error;
+  return { ...message, error: { code, message: GENERIC[code] ?? 'error' } };
+}
 
 const rpcError = (code: number, message: string) =>
   JSON.stringify({ jsonrpc: '2.0', id: null, error: { code, message } });
@@ -66,17 +84,21 @@ export function registerMcpRoute(app: FastifyInstance, deps: McpDeps): void {
       // The MCP revision of 2025-06-18 removed batching; one request would otherwise carry
       // hundreds of tool calls past the write budget's check.
       if (Array.isArray(req.body)) {
-        auditMcp(
-          db,
-          {
-            tokenId: principal.tokenId,
-            zoneId: principal.zoneId,
-            tool: 'batch',
-            outcome: 'refused',
-            detail: 'batch',
-          },
-          now(),
-        );
+        const at = now();
+        // Counted against the call budget, and past it not audited again.
+        if (!callBudgetSpent(db, config, principal.tokenId, at)) {
+          auditMcp(
+            db,
+            {
+              tokenId: principal.tokenId,
+              zoneId: principal.zoneId,
+              tool: 'batch',
+              outcome: 'refused',
+              detail: 'batch',
+            },
+            at,
+          );
+        }
         return reply
           .code(400)
           .type('application/json')
@@ -101,6 +123,10 @@ export function registerMcpRoute(app: FastifyInstance, deps: McpDeps): void {
         sessionIdGenerator: undefined,
         enableJsonResponse: true,
       });
+      // Every JSON-RPC error leaves with a fixed message for its code: the SDK would otherwise send
+      // an exception's or a validator's text (`error.message`) as is.
+      const send = transport.send.bind(transport);
+      transport.send = (message, options) => send(withGenericError(message), options);
       // After hijack Fastify's error handling no longer applies: this path answers for itself.
       reply.hijack();
       const res = reply.raw;

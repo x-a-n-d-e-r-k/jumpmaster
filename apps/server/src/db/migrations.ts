@@ -384,7 +384,8 @@ CREATE TABLE credit_drops (
  * v14: the zone-scoped MCP server. `briefings.source` gains `mcp` (Command's own assistant, told
  * apart from the crew), by SQLite's rebuild with foreign keys off (`rulings` references it).
  * `mcp_tokens` holds only SHA-256 hashes; `mcp_audit` records every tool call, mint and revoke, and
- * refused authentication with no token id when the token matched none.
+ * refused authentication with no token id when the token matched none. A ruling records the label
+ * and effect Command chose, so a later change to the briefing's options can't change its meaning.
  */
 const V14_SQL = `
 CREATE TABLE new_briefings (
@@ -440,6 +441,10 @@ CREATE TABLE mcp_audit (
   at           TEXT NOT NULL
 );
 CREATE INDEX mcp_audit_by_token ON mcp_audit(token_id, at);
+CREATE INDEX mcp_audit_by_tool ON mcp_audit(tool, id);
+
+ALTER TABLE rulings ADD COLUMN choice_label TEXT;
+ALTER TABLE rulings ADD COLUMN choice_effect TEXT;
 `;
 
 export type Migration = {

@@ -318,11 +318,12 @@ describe('crew config', () => {
     ).toThrow(/claude.plan/);
   });
 
-  test('mcp defaults to off, with a 256 KiB body limit, 20 writes an hour and 5 open briefings', () => {
+  test('mcp defaults to off, with a 256 KiB body limit, 20 writes and 600 calls an hour and 5 open briefings', () => {
     expect(loadConfig(minimal, fullEnv).mcp).toEqual({
       enabled: false,
       maxBodyBytes: 262_144,
       writesPerHour: 20,
+      callsPerHour: 600,
       maxOpenBriefings: 5,
     });
     const c = loadConfig(

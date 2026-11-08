@@ -62,6 +62,8 @@ export type McpConfig = {
   enabled: boolean;
   maxBodyBytes: number;
   writesPerHour: number;
+  /** Tool calls of any kind one token may make in a trailing hour. */
+  callsPerHour: number;
   maxOpenBriefings: number;
 };
 
@@ -69,6 +71,7 @@ export const MCP_DEFAULTS: McpConfig = {
   enabled: false,
   maxBodyBytes: 262_144,
   writesPerHour: 20,
+  callsPerHour: 600,
   maxOpenBriefings: 5,
 };
 
@@ -240,6 +243,8 @@ const FileSchema = z.object({
       maxBodyBytes: z.number().int().positive().default(MCP_DEFAULTS.maxBodyBytes),
       /** Write calls one token may make in a trailing hour. */
       writesPerHour: z.number().int().nonnegative().default(MCP_DEFAULTS.writesPerHour),
+      /** Tool calls of any kind one token may make in a trailing hour. */
+      callsPerHour: z.number().int().nonnegative().default(MCP_DEFAULTS.callsPerHour),
       /** Open MCP-raised briefings a zone may hold. */
       maxOpenBriefings: z.number().int().nonnegative().default(MCP_DEFAULTS.maxOpenBriefings),
     })

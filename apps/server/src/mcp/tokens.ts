@@ -22,8 +22,23 @@ export type TokenCheck =
   | { ok: false; reason: RefusedAuth; tokenId: number | null };
 
 export const MAX_TOKEN_DAYS = 90;
-/** Refused-auth rows kept: a stream of bad tokens can't grow the table past this. */
-export const MAX_REFUSED_AUTH_ROWS = 500;
+
+/**
+ * How much of `mcp_audit` is kept. `mint` and `revoke` rows are never pruned (one each per token).
+ * Refused-auth rows that name a token (an expired or revoked token in use, or one whose zone left
+ * the config) have their own cap, so anonymous noise can't evict that evidence.
+ */
+export const AUDIT_LIMITS = {
+  maxAgeDays: 90,
+  maxRows: 100_000,
+  anonymousAuthRows: 500,
+  tokenAuthRows: 500,
+};
+export type AuditLimits = typeof AUDIT_LIMITS;
+/** Anonymous refused-auth rows kept by the sweep. */
+export const MAX_REFUSED_AUTH_ROWS = AUDIT_LIMITS.anonymousAuthRows;
+/** The sweep runs at most this often, from whichever audit insert comes first after it. */
+const PRUNE_EVERY_MS = 60_000;
 
 const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex');
 
@@ -38,6 +53,37 @@ export type McpAuditEntry = {
   detail?: string;
 };
 
+/** Deletes the newest-first remainder past `keep` rows matching `where` (an id range delete). */
+function keepNewest(db: Db, where: string, keep: number): void {
+  const edge = db
+    .prepare(`SELECT id FROM mcp_audit WHERE ${where} ORDER BY id DESC LIMIT 1 OFFSET ?`)
+    .get(keep) as { id: number } | undefined;
+  if (edge) db.prepare(`DELETE FROM mcp_audit WHERE ${where} AND id <= ?`).run(edge.id);
+}
+
+const PRUNABLE = "tool NOT IN ('mint', 'revoke')";
+
+/** Applies the retention rules now: age, the two refused-auth caps, then the hard cap. */
+export function pruneMcpAudit(db: Db, now: Date, limits: AuditLimits = AUDIT_LIMITS): void {
+  db.transaction(() => {
+    const cutoff = new Date(now.getTime() - limits.maxAgeDays * 24 * 60 * 60 * 1000);
+    db.prepare(`DELETE FROM mcp_audit WHERE ${PRUNABLE} AND at < ?`).run(cutoff.toISOString());
+    keepNewest(db, "tool = 'auth' AND token_id IS NULL", limits.anonymousAuthRows);
+    keepNewest(db, "tool = 'auth' AND token_id IS NOT NULL", limits.tokenAuthRows);
+    keepNewest(db, PRUNABLE, limits.maxRows);
+  })();
+}
+
+const lastPruned = new WeakMap<Db, number>();
+
+/** `pruneMcpAudit` at most once a minute per database, so no request pays for a scan. */
+function maybePrune(db: Db, now: Date): void {
+  const last = lastPruned.get(db);
+  if (last !== undefined && now.getTime() - last < PRUNE_EVERY_MS) return;
+  lastPruned.set(db, now.getTime());
+  pruneMcpAudit(db, now);
+}
+
 export function auditMcp(db: Db, e: McpAuditEntry, now: Date): void {
   db.prepare(
     `INSERT INTO mcp_audit (token_id, zone_id, tool, args_sha256, outcome, detail, at)
@@ -51,21 +97,16 @@ export function auditMcp(db: Db, e: McpAuditEntry, now: Date): void {
     e.detail ?? '',
     now.toISOString(),
   );
+  maybePrune(db, now);
 }
 
 /**
  * Records a refused authentication with nothing derived from the presented token. `tokenId` is set
- * only when the token matched a row (expired or revoked: a stolen token in use). The oldest rows
- * beyond `MAX_REFUSED_AUTH_ROWS` are dropped.
+ * only when the token matched a row (expired or revoked: a stolen token in use). Bounded by the
+ * sweep (`AUDIT_LIMITS`), not per request.
  */
 export function auditRefusedAuth(db: Db, reason: string, tokenId: number | null, now: Date): void {
-  db.transaction(() => {
-    auditMcp(db, { tokenId, zoneId: null, tool: 'auth', outcome: 'refused', detail: reason }, now);
-    db.prepare(
-      `DELETE FROM mcp_audit WHERE tool = 'auth' AND id NOT IN
-         (SELECT id FROM mcp_audit WHERE tool = 'auth' ORDER BY id DESC LIMIT ?)`,
-    ).run(MAX_REFUSED_AUTH_ROWS);
-  })();
+  auditMcp(db, { tokenId, zoneId: null, tool: 'auth', outcome: 'refused', detail: reason }, now);
 }
 
 /**

@@ -10,11 +10,14 @@ import { sanitizeCrewText, sanitizeForgeText } from '../outbox.js';
 import { makeZone } from '../test/fixtures.js';
 import { plus, t0, tmpDbFile } from '../test/helpers.js';
 import {
+  AUDIT_LIMITS,
+  auditMcp,
   auditRefusedAuth,
   checkMcpToken,
   listMcpTokens,
   MAX_REFUSED_AUTH_ROWS,
   mintMcpToken,
+  pruneMcpAudit,
   revokeMcpToken,
   verifyMcpToken,
 } from './tokens.js';
@@ -130,11 +133,14 @@ describe('tokens', () => {
   });
 
   // Red team §7.9: refused authentication stores no token material and stays bounded.
-  test('refused-auth audit rows carry no token id or hash and are capped', () => {
+  test('refused-auth rows carry no token id or hash, and are capped by a sweep at most once a minute', () => {
     const d = db();
     for (let n = 0; n < MAX_REFUSED_AUTH_ROWS + 25; n++) {
       auditRefusedAuth(d, 'unknown', null, plus(t0, n));
     }
+    // Within the minute nothing is swept: no per-request scan.
+    expect(auditRows(d)).toHaveLength(MAX_REFUSED_AUTH_ROWS + 25);
+    auditRefusedAuth(d, 'unknown', null, plus(t0, 61_000));
     const rows = auditRows(d);
     expect(rows).toHaveLength(MAX_REFUSED_AUTH_ROWS);
     expect(rows.every((r) => r.tokenId === null && r.argsSha === null)).toBe(true);
@@ -146,12 +152,51 @@ describe('tokens', () => {
       outcome: 'refused',
       detail: 'unknown',
     });
-    // Tool-call rows are never pruned by the cap.
+  });
+
+  // Review M3: a stolen token in use is not evicted by anonymous noise.
+  test('refused-auth rows naming a token have their own cap, apart from anonymous ones', () => {
+    const d = db();
     const { id } = mintMcpToken(d, { zoneId: 'main', scope: 'read', days: 1 }, t0);
-    auditRefusedAuth(d, 'unknown', null, plus(t0, 10 * DAY));
-    expect(auditRows(d).filter((r) => r.tool === 'mint')).toEqual([
-      expect.objectContaining({ tokenId: id }),
+    auditRefusedAuth(d, 'revoked', id, t0);
+    for (let n = 0; n < 30; n++) auditRefusedAuth(d, 'unknown', null, plus(t0, n));
+    pruneMcpAudit(d, plus(t0, 1000), { ...AUDIT_LIMITS, anonymousAuthRows: 10, tokenAuthRows: 2 });
+    const rows = auditRows(d);
+    expect(rows.filter((r) => r.tool === 'auth' && r.tokenId === null)).toHaveLength(10);
+    expect(rows.filter((r) => r.tool === 'auth' && r.tokenId === id)).toEqual([
+      expect.objectContaining({ detail: 'revoked' }),
     ]);
+    for (let n = 0; n < 5; n++) auditRefusedAuth(d, 'expired', id, plus(t0, 2000 + n));
+    pruneMcpAudit(d, plus(t0, 3000), { ...AUDIT_LIMITS, anonymousAuthRows: 10, tokenAuthRows: 2 });
+    expect(auditRows(d).filter((r) => r.tool === 'auth' && r.tokenId === id)).toHaveLength(2);
+    expect(auditRows(d).filter((r) => r.tool === 'auth' && r.tokenId === null)).toHaveLength(10);
+  });
+
+  // Review I1: retention by age and a hard cap; mint and revoke are kept.
+  test('audit rows other than mint and revoke expire after 90 days and are capped at the newest N', () => {
+    const d = db();
+    expect(AUDIT_LIMITS).toMatchObject({ maxAgeDays: 90, maxRows: 100_000 });
+    const old = plus(t0, -91 * DAY);
+    const { id } = mintMcpToken(d, { zoneId: 'main', scope: 'read', days: 1 }, old);
+    const call = (at: Date, tool = 'get_goals') =>
+      auditMcp(d, { tokenId: id, zoneId: 'main', tool, outcome: 'ok' }, at);
+    call(old);
+    call(plus(old, 1), 'list_work');
+    call(plus(t0, -89 * DAY), 'list_rulings');
+    pruneMcpAudit(d, t0);
+    // Age alone: past 90 days gone, inside 90 days kept, mint kept whatever its age.
+    expect(auditRows(d).map((r) => r.tool)).toEqual(['mint', 'list_rulings']);
+    for (let n = 0; n < 8; n++) call(plus(t0, n));
+    pruneMcpAudit(d, t0, { ...AUDIT_LIMITS, maxRows: 5 });
+    const rows = auditRows(d);
+    expect(rows.filter((r) => r.tool === 'mint')).toHaveLength(1);
+    expect(rows.filter((r) => r.tool !== 'mint')).toHaveLength(5);
+    expect(rows.some((r) => r.tool === 'list_work')).toBe(false);
+    // The newest are the ones kept.
+    const ats = d
+      .prepare("SELECT at FROM mcp_audit WHERE tool = 'get_goals' ORDER BY id")
+      .all() as { at: string }[];
+    expect(ats.map((a) => a.at)).toEqual([3, 4, 5, 6, 7].map((n) => plus(t0, n).toISOString()));
   });
 
   // Red team §7.10 (redaction half).

@@ -374,11 +374,11 @@ describe('briefings', () => {
 
   test('a rule form posts optionId with the operator token from a password field', () => {
     const html = renderBriefings({ open: [briefing()], rulings: [], zones: [z] });
-    expect(html).toMatch(/<form class="rule" data-briefing="4">/);
+    expect(html).toMatch(/<form class="rule" data-briefing="4" data-options="[0-9a-f]{16}">/);
     expect(html).toContain('type="password"');
     expect(html).toContain("'/api/control/briefings/'+f.dataset.briefing+'/rule'");
     expect(html).toContain("authorization:'Bearer '+");
-    expect(html).toContain('JSON.stringify({optionId:');
+    expect(html).toContain('JSON.stringify({optionId:o.value,optionsDigest:f.dataset.options');
     expect(html).toContain('location.reload()');
   });
 
