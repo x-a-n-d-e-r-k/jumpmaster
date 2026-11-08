@@ -1,6 +1,7 @@
 import type { DropZoneConfig } from './config.js';
 import type { Db } from './db/open.js';
 import {
+  clearRequestChangesOnHead,
   deleteFailedOutbox,
   getPullRequest,
   getWorkItem,
@@ -178,7 +179,11 @@ export async function syncParked(
       resetAttempts(db, item.id);
       deleteFailedOutbox(db, item.id);
       setRetryLabelSeen(db, item.id, true);
-      restoreFromPull(db, item, await readPull(forges, prNumber), now);
+      const pr = await readPull(forges, prNumber);
+      // A stored request-changes on the head would re-heal the same findings; the owner may have
+      // waived a criterion in the issue, so the head is reviewed afresh against the new body.
+      if (pr?.state === 'open' && pr.headSha) clearRequestChangesOnHead(db, item.id, pr.headSha);
+      restoreFromPull(db, item, pr, now);
       retried++;
       continue;
     }

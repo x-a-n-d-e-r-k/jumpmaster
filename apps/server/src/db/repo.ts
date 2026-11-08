@@ -430,6 +430,24 @@ export function latestVerdict(db: Db, itemId: number): VerdictRow | undefined {
   return r && toVerdict(r);
 }
 
+/**
+ * When a head carries a request-changes verdict, forgets every verdict on it so the next pass
+ * reviews it afresh (a request-changes there outranks any later approve, so none may survive
+ * alone). A head with only approvals is left as it is. Only the retry label calls this: the owner
+ * may have waived a criterion in the issue. Returns whether anything was forgotten.
+ */
+export function clearRequestChangesOnHead(db: Db, itemId: number, headSha: string): boolean {
+  const rc = db
+    .prepare(
+      `SELECT 1 FROM verdicts WHERE work_item_id = ? AND head_sha = ?
+       AND decision = 'request_changes' LIMIT 1`,
+    )
+    .get(itemId, headSha);
+  if (!rc) return false;
+  db.prepare('DELETE FROM verdicts WHERE work_item_id = ? AND head_sha = ?').run(itemId, headSha);
+  return true;
+}
+
 export function verdictsForHead(db: Db, itemId: number, headSha: string): VerdictRow[] {
   const rows = db
     .prepare(
