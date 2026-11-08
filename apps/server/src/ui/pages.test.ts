@@ -380,6 +380,10 @@ describe('briefings', () => {
     expect(html).toContain("authorization:'Bearer '+");
     expect(html).toContain('JSON.stringify({optionId:o.value,optionsDigest:f.dataset.options');
     expect(html).toContain('location.reload()');
+    // A refusal names its reason (already ruled, options changed), not only the status.
+    expect(html).toContain(
+      "alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''))",
+    );
   });
 
   test('markup in any crew-written field is escaped', () => {

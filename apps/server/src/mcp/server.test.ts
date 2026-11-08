@@ -78,11 +78,13 @@ async function setup(
     mcp: { enabled: true, ...o.mcp },
   } as Config;
   let clock = t0;
+  const logs: string[] = [];
   app = createApp({
     db: w.db,
     config,
     forgesFor: () => w.forges as never,
     now: () => clock,
+    log: (msg: string) => logs.push(msg),
   });
   const write = mintMcpToken(w.db, { zoneId: 'main', scope: 'write', days: 30 }, t0);
   const read = mintMcpToken(w.db, { zoneId: 'main', scope: 'read', days: 30 }, t0);
@@ -93,6 +95,7 @@ async function setup(
     writeId: write.id,
     read: read.token,
     readId: read.id,
+    logs,
     at(d: Date) {
       clock = d;
     },
@@ -638,7 +641,7 @@ describe('write tools', () => {
     const id = mine?.id as number;
     expect(
       ruleBriefing(s.db, id, 'o1', 'fine', t0, {
-        optionsDigest: optionsDigest(mine?.options ?? []),
+        optionsDigest: mine ? optionsDigest(mine) : '',
       }),
     ).toMatchObject({ ok: true });
     const forges = { forges: () => s.forges as never, zone: () => s.zone };
@@ -953,5 +956,51 @@ describe('review fixes', () => {
     expect(s.db.prepare('SELECT choice_label AS l, choice_effect AS e FROM rulings').get()).toEqual(
       { l: 'B first', e: 'none' },
     );
+  });
+});
+
+describe('re-review fixes', () => {
+  // R1: the caller gets a generic error; the operator's log gets the cause.
+  test('an internal error reaches the injected log, and the audit classifies it', async () => {
+    const s = await setup();
+    s.db.exec('DROP TABLE goals');
+    const r = await rpc(s.read, 'tools/call', { name: 'get_goals', arguments: {} });
+    expect(r.error).toEqual({ code: -32603, message: 'internal error' });
+    expect(s.logs).toEqual([expect.stringMatching(/get_goals.*no such table: goals/)]);
+    expect(audit(s).at(-1)).toMatchObject({
+      tool: 'get_goals',
+      outcome: 'error',
+      detail: 'SQLITE_ERROR',
+    });
+  });
+
+  // R2: the digest covers the text Command read, not only the options.
+  test('a re-raise that changes only why makes the old digest stale', async () => {
+    const s = await setup();
+    const raise = (why: string) =>
+      call(s.write, 'raise_briefing', { briefings: [briefing({ subject: 'ord', why })] });
+    expect((await raise('first reason')).isError).toBeFalsy();
+    const list = async () =>
+      (
+        (
+          await (app as FastifyInstance).inject({
+            method: 'GET',
+            url: '/api/control/briefings',
+            headers: { host: HOST, authorization: `Bearer ${OP}` },
+          })
+        ).json() as { briefings: { id: number; subject: string; optionsDigest: string }[] }
+      ).briefings.find((b) => b.subject === 'mcp:ord');
+    const seen = await list();
+    expect((await raise('a different reason')).isError).toBeFalsy();
+    const r = await (app as FastifyInstance).inject({
+      method: 'POST',
+      url: `/api/control/briefings/${seen?.id}/rule`,
+      headers: { host: HOST, authorization: `Bearer ${OP}` },
+      payload: { optionId: 'o1', optionsDigest: seen?.optionsDigest },
+    });
+    expect(r.statusCode).toBe(409);
+    expect(r.json()).toEqual({ error: 'options changed' });
+    expect((await list())?.optionsDigest).not.toBe(seen?.optionsDigest);
+    expect(listRulings(s.db, 'main')).toEqual([]);
   });
 });

@@ -27,6 +27,15 @@ export type ToolContext = {
   zone: DropZoneConfig;
   principal: McpPrincipal;
   now(): Date;
+  log?: (msg: string) => void;
+};
+
+export const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/** An audit code for an internal error: SQLite's own code (a fixed vocabulary), else `exception`. */
+const errorCode = (e: unknown): string => {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && code.startsWith('SQLITE_') ? code : 'exception';
 };
 
 /** What a tool did, for the caller and (as reason codes only) for the audit. */
@@ -499,10 +508,11 @@ export async function callTool(
       else audit(out.outcome, out.detail);
       return out.result;
     })();
-  } catch {
+  } catch (e) {
     // The transaction rolled back: whatever the tool recorded is gone with it.
+    ctx.log?.(`mcp ${tool?.name ?? 'unknown tool'} failed: ${errorMessage(e)}`);
     try {
-      audit('error', 'exception');
+      audit('error', errorCode(e));
     } catch {
       // The database refuses even this; the caller still gets a well-formed error.
     }

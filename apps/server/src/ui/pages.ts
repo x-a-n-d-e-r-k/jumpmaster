@@ -157,7 +157,7 @@ function crewSection(lines: CrewLine[] | undefined): string {
 }
 
 /** One shared handler for every rule form: the operator token comes from a password field. */
-const RULE_SCRIPT = `<script>for(const f of document.querySelectorAll('form.rule'))f.addEventListener('submit',async(e)=>{e.preventDefault();const o=f.querySelector('input[name=option]:checked');if(!o){alert('Choose an option');return;}const r=await fetch('/api/control/briefings/'+f.dataset.briefing+'/rule',{method:'POST',headers:{authorization:'Bearer '+f.querySelector('input[type=password]').value,'content-type':'application/json'},body:JSON.stringify({optionId:o.value,optionsDigest:f.dataset.options,note:f.querySelector('textarea').value})});if(r.ok)location.reload();else alert('Refused: '+r.status);});</script>`;
+const RULE_SCRIPT = `<script>for(const f of document.querySelectorAll('form.rule'))f.addEventListener('submit',async(e)=>{e.preventDefault();const o=f.querySelector('input[name=option]:checked');if(!o){alert('Choose an option');return;}const r=await fetch('/api/control/briefings/'+f.dataset.briefing+'/rule',{method:'POST',headers:{authorization:'Bearer '+f.querySelector('input[type=password]').value,'content-type':'application/json'},body:JSON.stringify({optionId:o.value,optionsDigest:f.dataset.options,note:f.querySelector('textarea').value})});if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});</script>`;
 
 function briefingBlock(b: Briefing, holds: Map<string, string> | undefined): string {
   const hold = b.kind === 'promote_held' ? holds?.get(b.subject) : undefined;
@@ -173,7 +173,7 @@ function briefingBlock(b: Briefing, holds: Map<string, string> | undefined): str
     `<h3>${escapeHtml(b.decision)}</h3>` +
     `<table>${row('Zone', b.zoneId)}${row('Kind', b.kind)}${row('About', b.subject)}${b.why ? `<tr><th>Why</th><td><pre>${escapeHtml(b.why)}</pre></td></tr>` : ''}${b.diagnosis ? `<tr><th>Diagnosis</th><td><pre>${escapeHtml(b.diagnosis)}</pre></td></tr>` : ''}${row('Recommendation', b.recommendation)}${row('On hold', b.onHold)}${row('Raised by', b.source === 'mcp' ? 'assistant (MCP)' : b.source)}${row('Raised', b.createdAt)}</table>` +
     (hold ? `<p>Promotes at ${escapeHtml(hold)} unless you reject it.</p>` : '') +
-    `<form class="rule" data-briefing="${escapeHtml(b.id)}" data-options="${optionsDigest(b.options)}">${options}<textarea name="note" maxlength="2000" placeholder="Note (optional)"></textarea><br><input type="password" placeholder="Operator token" autocomplete="off" required> <button>Rule</button></form>`
+    `<form class="rule" data-briefing="${escapeHtml(b.id)}" data-options="${optionsDigest(b)}">${options}<textarea name="note" maxlength="2000" placeholder="Note (optional)"></textarea><br><input type="password" placeholder="Operator token" autocomplete="off" required> <button>Rule</button></form>`
   );
 }
 

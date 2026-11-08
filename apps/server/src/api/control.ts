@@ -98,7 +98,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         subject: b.subject,
         decision: b.decision,
         options: b.options.map((o) => ({ id: o.id, label: o.label })),
-        optionsDigest: optionsDigest(b.options),
+        optionsDigest: optionsDigest(b),
       })),
     }));
 

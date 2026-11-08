@@ -10,12 +10,14 @@ import { originAllowed } from '../api/control.js';
 import { allowedHostsOf, type Config, type DropZoneConfig, mcpConfigOf } from '../config.js';
 import type { Db } from '../db/open.js';
 import { auditMcp, auditRefusedAuth, checkMcpToken, type McpPrincipal } from './tokens.js';
-import { callBudgetSpent, callTool, listTools } from './tools.js';
+import { callBudgetSpent, callTool, errorMessage, listTools } from './tools.js';
 
 export interface McpDeps {
   db: Db;
   config: Config;
   now(): Date;
+  /** The operator's scrubbed log: the caller sees a generic error, the operator the cause. */
+  log?: (msg: string) => void;
 }
 
 type Caller = { principal: McpPrincipal; zone: DropZoneConfig };
@@ -114,7 +116,7 @@ export function registerMcpRoute(app: FastifyInstance, deps: McpDeps): void {
       }));
       server.setRequestHandler(CallToolRequestSchema, async (request) =>
         callTool(
-          { db, config, zone, principal, now },
+          { db, config, zone, principal, now, ...(deps.log ? { log: deps.log } : {}) },
           request.params.name,
           request.params.arguments ?? {},
         ),
@@ -137,7 +139,8 @@ export function registerMcpRoute(app: FastifyInstance, deps: McpDeps): void {
       try {
         await server.connect(transport);
         await transport.handleRequest(req.raw, res, req.body);
-      } catch {
+      } catch (e) {
+        deps.log?.(`mcp request failed: ${errorMessage(e)}`);
         if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' });
         if (!res.writableEnded) res.end(rpcError(-32603, 'internal error'));
       }

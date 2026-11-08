@@ -129,12 +129,23 @@ const RULING_COLS = `r.id, r.zone_id AS zoneId, r.briefing_id AS briefingId, r.c
   b.diagnosis, b.options_json AS optionsJson`;
 
 /**
- * A short digest of a briefing's option set (ids, labels, effects): what the page and
- * `ctl briefings` show, so a ruling can say which options it was made on.
+ * A short digest of what a briefing shows Command (decision, why, recommendation, on hold, and
+ * the options' ids, labels and effects): given by the page and `ctl briefings`, so a ruling can
+ * say what it was made on.
  */
-export const optionsDigest = (options: BriefingOption[]): string =>
+export const optionsDigest = (
+  b: Pick<Briefing, 'decision' | 'why' | 'recommendation' | 'onHold' | 'options'>,
+): string =>
   createHash('sha256')
-    .update(JSON.stringify(options.map((o) => [o.id, o.label, o.effect])))
+    .update(
+      JSON.stringify([
+        b.decision,
+        b.why,
+        b.recommendation,
+        b.onHold,
+        b.options.map((o) => [o.id, o.label, o.effect]),
+      ]),
+    )
     .digest('hex')
     .slice(0, 16);
 
@@ -249,7 +260,7 @@ export function ruleBriefing(
     if (!b) return { ok: false as const, status: 404 as const };
     const option = b.options.find((o) => o.id === optionId);
     if (!option) return { ok: false as const, status: 400 as const };
-    if (b.source === 'mcp' && seen.optionsDigest !== optionsDigest(b.options)) {
+    if (b.source === 'mcp' && seen.optionsDigest !== optionsDigest(b)) {
       return { ok: false as const, status: 409 as const, reason: 'options changed' as const };
     }
     const at = now.toISOString();
