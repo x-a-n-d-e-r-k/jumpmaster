@@ -376,6 +376,31 @@ describe('§16 reviews and heals', () => {
     expect(payload.prompt).toContain('works in a browser (manual)');
   });
 
+  test('a heal that answers review findings with evidence gets re-reviews, bounded by the review budget', async () => {
+    const h = await harness();
+    await toHealQueued(h, 'sha1');
+    for (let i = 0; i < 10 && item(h).state === 'pr_open'; i++) {
+      const role = h.queuedRoles()[0];
+      if (role === 'heal') {
+        await h.finishDrop('heal', {
+          status: 'no_changes',
+          summary: 'ran it: 3 passed',
+          gates: [],
+        });
+      } else if (role === 'review') {
+        const l = await h.lease();
+        expect(l.payload.prompt).toContain('ran it: 3 passed');
+        await h.postResult(l.dropId, l.epoch, reviewed(changes));
+      }
+      await h.reconcile();
+    }
+    expect(item(h)).toMatchObject({ state: 'parked', reason: 'budget exhausted: review' });
+    expect(h.db.prepare("SELECT COUNT(*) AS n FROM drops WHERE role = 'review'").get()).toEqual({
+      n: h.zone.budgets.maxReviewRepeat,
+    });
+    expect(count(h, 'merge')).toBe(0);
+  });
+
   test('a failed PR read during a retry skips the item without consuming the label', async () => {
     const h = await harness();
     await toHealQueued(h, 'sha1');

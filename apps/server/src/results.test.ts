@@ -10,6 +10,7 @@ import {
   getOutbox,
   getPullRequest,
   insertDrop,
+  insertVerdict,
   latestVerdict,
   type NewDrop,
   resetAttempts,
@@ -19,6 +20,7 @@ import {
   upsertDropZone,
   upsertPullRequest,
   upsertWorkItem,
+  verdictsForHead,
 } from './db/repo.js';
 import { promptVersions } from './payloads.js';
 import { applyResult, type ResultDeps, renderReviewBody } from './results.js';
@@ -478,6 +480,58 @@ describe('applyResult: heal and resolve', () => {
       },
       plus(t0, 1000),
     );
+
+  const botRc = (db: Db) =>
+    insertVerdict(db, {
+      id: 'rc1',
+      workItemId: 1,
+      headSha: 'h1',
+      decision: 'request_changes',
+      forced: false,
+      summary: 'criterion 2 not shown',
+      findingsJson: '[]',
+      gatesJson: '[]',
+      createdAt: t0.toISOString(),
+    });
+  const feedback = (source: string) => JSON.stringify({ feedback: { source, text: 'x' } });
+
+  test('a no-change heal with a report on review findings clears the request-changes for a re-review', async () => {
+    const { db, deps } = setup('heal', { fingerprint: 'fp1', inputJson: feedback('review') });
+    botRc(db);
+    await applyResult(
+      db,
+      deps,
+      'd1',
+      { status: 'no_changes', summary: 'criterion 2: ran npm test, 12 passed', gates: [] },
+      t0,
+    );
+    expect(verdictsForHead(db, 1, 'h1')).toEqual([]);
+    expect(workItem(db, 1).state).toBe('pr_open');
+    expect(getDrop(db, 'd1')?.state).toBe('succeeded');
+  });
+
+  test('a no-change heal on review findings without a report keeps the request-changes', async () => {
+    const { db, deps } = setup('heal', { fingerprint: 'fp1', inputJson: feedback('review') });
+    botRc(db);
+    await applyResult(db, deps, 'd1', { status: 'no_changes', summary: '  ', gates: [] }, t0);
+    expect(verdictsForHead(db, 1, 'h1')).toHaveLength(1);
+  });
+
+  test('no-change heals with a report on human or CI feedback still park on the second try', async () => {
+    for (const source of ['human', 'ci']) {
+      const { db, deps } = setup('heal', { fingerprint: 'fp1', inputJson: feedback(source) });
+      botRc(db);
+      const r: DropResult = { status: 'no_changes', summary: 'evidence', gates: [] };
+      await applyResult(db, deps, 'd1', r, t0);
+      expect(verdictsForHead(db, 1, 'h1')).toHaveLength(1);
+      healAgain(db, 'd2', 'fp1');
+      await applyResult(db, deps, 'd2', r, plus(t0, 2000));
+      expect(workItem(db, 1)).toMatchObject({
+        state: 'parked',
+        reason: 'heal made no changes for the same findings',
+      });
+    }
+  });
 
   test('a heal that changes nothing twice for the same findings parks at once', async () => {
     const { db, deps } = setup('heal', { fingerprint: 'fp1' });
