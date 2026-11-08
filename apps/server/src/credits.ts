@@ -310,9 +310,11 @@ function endProbe(db: Db, u: UsageStateRow, now: Date): void {
 }
 
 /**
- * A finished drop's result, after `noteOverage`: the probe drop that ran without being seen on
- * credits (no live report and no result saying so) ends probing. The probe started after the
- * lift, so this is a witness the account runs in plan. Other drops' results prove nothing.
+ * A finished drop's result, after `noteOverage`. The probe drop's result ends probing when it
+ * carries a report saying the account ran in plan (`isUsingOverage: false`), or when the drop
+ * succeeded and was never seen on credits. A failed or cancelled probe with no such report proves
+ * nothing (it may never have called the API): probing goes on and the next drop takes the slot.
+ * The probe started after the lift, so either is a witness. Other drops' results prove nothing.
  */
 export function noteProbeResult(
   db: Db,
@@ -320,12 +322,15 @@ export function noteProbeResult(
   result: DropResult,
   now: Date,
 ): void {
-  if (result.rateLimit?.isUsingOverage === true) return;
+  const flag = result.rateLimit?.isUsingOverage;
+  if (flag === true) return;
+  const succeeded = result.status === 'completed' || result.status === 'no_changes';
   db.transaction(() => {
     const u = getUsageState(db);
     if (u.probeDropId !== drop.id || !creditsProbing(u, now)) return;
+    if (flag === false) return endProbe(db, u, now);
     const seen = db.prepare('SELECT 1 FROM credit_drops WHERE drop_id = ?').get(drop.id);
-    if (seen === undefined) endProbe(db, u, now);
+    if (succeeded && seen === undefined) endProbe(db, u, now);
   })();
 }
 

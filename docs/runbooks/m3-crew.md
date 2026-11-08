@@ -181,9 +181,9 @@ live events: it never starts a new stop for a drop already seen on credits. The 
 itself when the exhausted usage window resets (a window at 98% or more; up to seven days for the
 weekly window), because work after that runs inside the plan again; the briefing names the window
 and why. After it lifts, one drop runs as a probe, and dispatch opens fully once a drop reports
-live that it runs in plan, or the probe finishes without using credits; a probe on credits stops
-again. A `credits:stop` briefing names
-the drop, both windows' use and resets, and offers **Run on credits now** and **Noted**. Run on
+live that it runs in plan, its result says so, or it succeeds without using credits (a failed
+probe with no report hands the slot to the next drop); a probe on credits stops again. A
+`credits:stop` briefing names the drop, both windows' use and resets, and offers **Run on credits now** and **Noted**. Run on
 credits lasts until the five-hour window resets when that is the exhausted window (the time is
 shown), otherwise five hours. During that time only the drop's own work item's follow-on drops
 (review, heal, resolve) lease; nothing else leases and no new work is queued, so the time idles

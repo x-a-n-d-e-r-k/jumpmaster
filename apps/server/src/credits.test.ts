@@ -31,7 +31,7 @@ import { getFableState, noteFableSignals } from './fable.js';
 import { leaseNextDrop } from './leases.js';
 import { type ZoneWorld, zoneWorld } from './test/fixtures.js';
 import { tmpDbFile } from './test/helpers.js';
-import { dispatchGate, gateQueuesImplement, ingestRateLimit } from './usage.js';
+import { dispatchGate, gateQueuesImplement, ingestRateLimit, releaseProbe } from './usage.js';
 
 const t0 = new Date('2026-03-02T10:00:00.000Z');
 const MIN = 60_000;
@@ -706,5 +706,71 @@ describe('review fixes', () => {
     expect(dispatchGate(db, cfg, at(5 * H + MIN))).toBe('probe');
     noteOverage(db, cfg, d2, inPlan, null, at(5 * H + MIN), at(5 * H + MIN));
     expect(dispatchGate(db, cfg, at(5 * H + MIN))).toBe('open');
+  });
+
+  test('N2: a failed probe with no report keeps probing; the next queued drop takes the slot', () => {
+    insertStick(db, { id: 's1', name: 's', tokenHash: 'h', slots: 4 });
+    noteOverage(
+      db,
+      cfg,
+      drop('d1'),
+      onCredits({ unifiedWindows: undefined, resetsAt: undefined }),
+      null,
+      t0,
+    );
+    insertDrop(db, {
+      id: 'p',
+      dropZoneId: 'main',
+      workItemId: w.item(2),
+      role: 'review',
+      state: 'queued',
+    });
+    insertDrop(db, {
+      id: 'p2',
+      dropZoneId: 'main',
+      workItemId: w.item(3),
+      role: 'review',
+      state: 'queued',
+    });
+    const lifted = at(5 * H);
+    creditsPass(db, lifted);
+    expect(leaseNextDrop(db, 's1', lifted, dispatchGate(db, cfg, lifted))?.dropId).toBe('p');
+    const p = { id: 'p', dropZoneId: 'main', workItemId: w.item(2), role: 'review' } as Drop;
+    noteProbeResult(db, p, { status: 'failed', gates: [] }, lifted);
+    expect(dispatchGate(db, cfg, lifted)).toBe('probe');
+    db.prepare(`UPDATE drops SET state = 'failed' WHERE id = 'p'`).run();
+    releaseProbe(db, 'p', cfg, lifted);
+    expect(leaseNextDrop(db, 's1', lifted, dispatchGate(db, cfg, lifted))?.dropId).toBe('p2');
+    expect(getUsageState(db).probeDropId).toBe('p2');
+  });
+
+  test('N2: a failed probe whose result carries an in-plan report ends probing', () => {
+    insertStick(db, { id: 's1', name: 's', tokenHash: 'h', slots: 4 });
+    noteOverage(
+      db,
+      cfg,
+      drop('d1'),
+      onCredits({ unifiedWindows: undefined, resetsAt: undefined }),
+      null,
+      t0,
+    );
+    insertDrop(db, {
+      id: 'p',
+      dropZoneId: 'main',
+      workItemId: w.item(2),
+      role: 'review',
+      state: 'queued',
+    });
+    const lifted = at(5 * H);
+    creditsPass(db, lifted);
+    leaseNextDrop(db, 's1', lifted, dispatchGate(db, cfg, lifted));
+    const p = { id: 'p', dropZoneId: 'main', workItemId: w.item(2), role: 'review' } as Drop;
+    const result = {
+      status: 'failed' as const,
+      gates: [],
+      rateLimit: { status: 'allowed' as const, isUsingOverage: false },
+    };
+    noteProbeResult(db, p, result, lifted);
+    expect(dispatchGate(db, cfg, lifted)).toBe('open');
   });
 });
