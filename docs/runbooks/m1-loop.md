@@ -200,7 +200,11 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   either way nothing is allowed. If the PR can't be read, the ruling is tried again on later
   passes and gives up with `forge unavailable` after 10; a PR that is gone or closed records
   `pull request not open`. After a failed ruling the item is briefed again once a new head is
-  judged. A moved merge base or a different change list on the same head
+  judged; after `briefing out of date` it is briefed again on the next pass, on what it is
+  parked on now. With the crew on, a parked briefing is diagnosed once: the diagnosis shows
+  under the why on `/briefings` (and beside the ruling once ruled) and stays while the why is
+  unchanged; when the why changes (another park reason, or a new head judged) the diagnosis is
+  dropped and the briefing is diagnosed again. A moved merge base or a different change list on the same head
   is not covered by the allowance either. Otherwise the allowance is recorded (it
   survives restarts), the next sync re-decides the item and the reviewer agent reviews it as
   usual; the status page shows `gate change allowed by Command for <sha7>` on the item. Any new

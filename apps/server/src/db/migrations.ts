@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { Db } from './open.js';
 
@@ -307,7 +308,39 @@ CREATE TABLE gate_allowances (
 ALTER TABLE rulings ADD COLUMN apply_attempts INTEGER NOT NULL DEFAULT 0;
 `;
 
-export type Migration = { version: number; sql: string; foreignKeysOff?: boolean };
+/**
+ * v12: a parked briefing's diagnosis lives beside the server-built `why`, keyed to the `why` it
+ * diagnosed (`diagnosis_basis`, sha256), so a pass that rebuilds the briefing keeps it. Briefings
+ * written before v12 carry it inside `why` after a blank line: carved out here (see carveV12Bases).
+ */
+const V12_SQL = `
+ALTER TABLE briefings ADD COLUMN diagnosis TEXT;
+ALTER TABLE briefings ADD COLUMN diagnosis_basis TEXT;
+UPDATE briefings SET
+    diagnosis = substr(why, instr(why, char(10) || char(10) || 'Diagnosis: ') + 13),
+    why = substr(why, 1, instr(why, char(10) || char(10) || 'Diagnosis: ') - 1)
+  WHERE kind = 'parked' AND source = 'server'
+    AND instr(why, char(10) || char(10) || 'Diagnosis: ') > 0;
+`;
+
+/** The basis of each diagnosis v12 carved: SQLite has no sha256, so it is set here. */
+function carveV12Bases(db: Db): void {
+  const rows = db
+    .prepare(
+      'SELECT id, why FROM briefings WHERE diagnosis IS NOT NULL AND diagnosis_basis IS NULL',
+    )
+    .all() as { id: number; why: string }[];
+  const set = db.prepare('UPDATE briefings SET diagnosis_basis = ? WHERE id = ?');
+  for (const r of rows) set.run(createHash('sha256').update(r.why).digest('hex'), r.id);
+}
+
+export type Migration = {
+  version: number;
+  sql: string;
+  foreignKeysOff?: boolean;
+  /** Runs after `sql`, in the same transaction. */
+  after?: (db: Db) => void;
+};
 
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
@@ -321,6 +354,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 9, sql: V9_SQL },
   { version: 10, sql: V10_SQL },
   { version: 11, sql: V11_SQL },
+  { version: 12, sql: V12_SQL, after: carveV12Bases },
 ];
 
 /**
@@ -348,6 +382,7 @@ export function migrate(db: Db): number {
     if (m.version <= current()) continue;
     const apply = db.transaction(() => {
       db.exec(m.sql);
+      m.after?.(db);
       if (m.foreignKeysOff) {
         const broken = db.pragma('foreign_key_check') as unknown[];
         if (broken.length > 0) {

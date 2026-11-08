@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Role } from '@jumpmaster/protocol';
-import { raiseBriefing } from '../briefings.js';
+import { raiseBriefing, whyBasis } from '../briefings.js';
 import type { DropZoneConfig, UsageConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import { getZoneMode, insertDrop, isKilled, recordObservation } from '../db/repo.js';
@@ -40,13 +40,15 @@ export function requestCrewCycle(zoneId: string, now: Date): void {
 export function nextCrewWork(db: Db, zone: DropZoneConfig, now: Date): CrewWork | null {
   const parked = db
     .prepare(
-      `SELECT id, subject FROM briefings WHERE zone_id = ? AND kind = 'parked' AND state = 'open'
-         AND diagnose_attempts < 1 ORDER BY id`,
+      `SELECT id, subject, why FROM briefings WHERE zone_id = ? AND kind = 'parked'
+         AND state = 'open' AND diagnose_attempts < 1 ORDER BY id`,
     )
-    .all(zone.id) as { id: number; subject: string }[];
+    .all(zone.id) as { id: number; subject: string; why: string }[];
   for (const b of parked) {
     const m = /^item:(\d+)$/.exec(b.subject);
-    if (m) return { role: 'diagnose', briefingId: b.id, itemId: Number(m[1]) };
+    // The basis ties the diagnosis to this why: one that lands after the why changed is dropped.
+    if (!m) continue;
+    return { role: 'diagnose', briefingId: b.id, itemId: Number(m[1]), basis: whyBasis(b.why) };
   }
 
   const refute = db

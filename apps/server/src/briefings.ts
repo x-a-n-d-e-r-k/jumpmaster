@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { DropZoneConfig } from './config.js';
 import { crewBodySha, liveCrewBody } from './crew/flush.js';
 import { getCrewIssue, setCrewIssue } from './crew/store.js';
@@ -69,6 +70,10 @@ export type Briefing = Required<Omit<NewBriefing, 'sourceRef'>> & {
   sourceRef: string | null;
   state: BriefingState;
   diagnoseAttempts: number;
+  /** A parked briefing's diagnosis by the crew, shown beside the server-built `why`. */
+  diagnosis: string | null;
+  /** `whyBasis` of the `why` the diagnosis was about. */
+  diagnosisBasis: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -82,14 +87,24 @@ export type Ruling = {
   createdAt: string;
   appliedAt: string | null;
   applyError: string | null;
+  /** The ruled briefing's diagnosis, if it had one: what Command read when it ruled. */
+  diagnosis: string | null;
 };
+
+/**
+ * What a diagnosis is about: the sha256 of the server-built `why` it was asked for. A diagnosis is
+ * shown only while the briefing's `why` still hashes to it.
+ */
+export const whyBasis = (why: string): string => createHash('sha256').update(why).digest('hex');
 
 const BRIEFING_COLS = `id, zone_id AS zoneId, kind, subject, decision, why, options_json AS optionsJson,
   recommendation, on_hold AS onHold, source, source_ref AS sourceRef, state,
-  diagnose_attempts AS diagnoseAttempts, created_at AS createdAt, updated_at AS updatedAt`;
+  diagnose_attempts AS diagnoseAttempts, diagnosis, diagnosis_basis AS diagnosisBasis,
+  created_at AS createdAt, updated_at AS updatedAt`;
 
-const RULING_COLS = `id, zone_id AS zoneId, briefing_id AS briefingId, choice, note,
-  created_at AS createdAt, applied_at AS appliedAt, apply_error AS applyError`;
+const RULING_COLS = `r.id, r.zone_id AS zoneId, r.briefing_id AS briefingId, r.choice, r.note,
+  r.created_at AS createdAt, r.applied_at AS appliedAt, r.apply_error AS applyError,
+  b.diagnosis`;
 
 type BriefingRow = Omit<Briefing, 'options'> & { optionsJson: string };
 const toBriefing = ({ optionsJson, ...r }: BriefingRow): Briefing => ({
@@ -99,7 +114,8 @@ const toBriefing = ({ optionsJson, ...r }: BriefingRow): Briefing => ({
 
 /**
  * Raises a briefing, or updates the open one on the same subject. A crew-raised briefing may only
- * carry options with effect `none`: only the server defines effects.
+ * carry options with effect `none`: only the server defines effects. Never touches a diagnosis:
+ * `syncParkBriefings` decides when one no longer applies.
  */
 export function raiseBriefing(db: Db, b: NewBriefing, now: Date): number {
   if (b.source === 'crew' && b.options.some((o) => o.effect !== 'none')) {
@@ -216,7 +232,10 @@ export function ruleBriefing(
 
 export function listRulings(db: Db, zoneId: string, limit = 50): Ruling[] {
   return db
-    .prepare(`SELECT ${RULING_COLS} FROM rulings WHERE zone_id = ? ORDER BY id DESC LIMIT ?`)
+    .prepare(
+      `SELECT ${RULING_COLS} FROM rulings r JOIN briefings b ON b.id = r.briefing_id
+         WHERE r.zone_id = ? ORDER BY r.id DESC LIMIT ?`,
+    )
     .all(zoneId, limit) as Ruling[];
 }
 
@@ -306,6 +325,8 @@ export async function applyEffect(
 }
 
 const NOT_ALLOWABLE = 'allow_gate_change needs a server parked briefing with a head';
+/** An Allow ruled on a briefing that no longer says what the item is parked on. */
+const OUT_OF_DATE = 'briefing out of date';
 /** PR reads that fail (other than a 404) before an allow ruling gives up. */
 const MAX_APPLY_ATTEMPTS = 10;
 
@@ -340,7 +361,7 @@ export async function applyGateAllowance(
   const current = parkBriefing(db, zoneId, item);
   const allowNow = current.options.find((o) => o.effect === 'allow_gate_change');
   if (current.why !== ruling.why || JSON.stringify(allowNow) !== JSON.stringify(option)) {
-    throw new Error('briefing out of date');
+    throw new Error(OUT_OF_DATE);
   }
   // (parkBriefing offers Allow only while the item's current PR is the one judged.)
   let pr: Awaited<ReturnType<ForgePair['author']['getPull']>>;
@@ -415,8 +436,11 @@ export async function applyPendingRulings(
 /**
  * One open `parked` briefing per parked item, withdrawn once the item leaves parked, and refreshed
  * while open when what it would say has changed (a new head judged, a park that became or stopped
- * being fully read). An item whose briefing was ruled is not briefed again until it parks again
- * or its gate park is judged afresh (a new head, merge base or change list).
+ * being fully read). A refresh keeps the crew's diagnosis and recommendation while the server-built
+ * `why` is unchanged; when the `why` changes they no longer apply: they are cleared and the
+ * briefing is diagnosed afresh. An item whose briefing was ruled is not briefed again until it
+ * parks again or its gate park is judged afresh (a new head, merge base or change list), unless
+ * the ruling was refused as out of date: then Command is asked again about what it is parked on.
  */
 export function syncParkBriefings(db: Db, zone: DropZoneConfig, now: Date): void {
   const parked = listWorkItems(db, zone.id, 'parked');
@@ -428,8 +452,14 @@ export function syncParkBriefings(db: Db, zone: DropZoneConfig, now: Date): void
   }
   const parkedAt = db.prepare('SELECT updated_at AS at FROM work_items WHERE id = ?');
   const ruledSince = db.prepare(
-    `SELECT 1 FROM briefings WHERE zone_id = ? AND subject = ? AND state = 'ruled'
-       AND updated_at >= ? LIMIT 1`,
+    `SELECT 1 FROM briefings b WHERE b.zone_id = ? AND b.subject = ? AND b.state = 'ruled'
+       AND b.updated_at >= ?
+       AND NOT EXISTS (SELECT 1 FROM rulings r WHERE r.briefing_id = b.id AND r.apply_error = ?)
+     LIMIT 1`,
+  );
+  const forget = db.prepare(
+    `UPDATE briefings SET diagnosis = NULL, diagnosis_basis = NULL, diagnose_attempts = 0
+       WHERE id = ?`,
   );
   const open = new Map(
     listBriefings(db, { zoneId: zone.id, state: 'open' }).map((b) => [b.subject, b]),
@@ -439,11 +469,16 @@ export function syncParkBriefings(db: Db, zone: DropZoneConfig, now: Date): void
     const want = parkBriefing(db, zone.id, item);
     const current = open.get(subject);
     if (current) {
+      const whySame = current.why === want.why;
       const same =
+        whySame &&
         current.decision === want.decision &&
-        current.why === want.why &&
         JSON.stringify(current.options) === JSON.stringify(want.options);
-      if (!same) raiseBriefing(db, want, now);
+      if (same) continue;
+      db.transaction(() => {
+        raiseBriefing(db, { ...want, recommendation: whySame ? current.recommendation : '' }, now);
+        if (!whySame) forget.run(current.id);
+      })();
       continue;
     }
     const parkedAtTime = (parkedAt.get(item.id) as { at: string }).at;
@@ -451,7 +486,7 @@ export function syncParkBriefings(db: Db, zone: DropZoneConfig, now: Date): void
       ? getGatePark(db, item.id)?.recordedAt
       : undefined;
     const at = judged && judged > parkedAtTime ? judged : parkedAtTime;
-    if (ruledSince.get(zone.id, subject, at)) continue;
+    if (ruledSince.get(zone.id, subject, at, OUT_OF_DATE)) continue;
     raiseBriefing(db, want, now);
   }
 }

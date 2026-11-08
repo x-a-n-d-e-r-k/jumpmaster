@@ -129,7 +129,13 @@ const hasCustomLimits = ({ limits }: DropZoneConfig): boolean =>
 /** What a crew drop stores in `input_json`: its work and the rendered (fenced) input. */
 export type CrewInputJson = {
   work:
-    | { role: 'diagnose'; briefingId: number; itemId: number }
+    | {
+        role: 'diagnose';
+        briefingId: number;
+        itemId: number;
+        /** `whyBasis` of the briefing's why when asked; absent on drops queued before v12. */
+        basis?: string;
+      }
     | { role: 'refute'; crewIssueId: number }
     | { role: 'crew-lead' };
   input: string;

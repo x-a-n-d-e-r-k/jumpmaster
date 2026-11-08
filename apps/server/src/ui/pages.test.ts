@@ -249,6 +249,21 @@ const briefing = (o: Partial<Briefing> = {}): Briefing => ({
   diagnoseAttempts: 0,
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: '2026-01-01T00:00:00.000Z',
+  diagnosis: null,
+  diagnosisBasis: null,
+  ...o,
+});
+
+const ruling = (o: Partial<Ruling> = {}): Ruling => ({
+  id: 1,
+  zoneId: 'main',
+  briefingId: 4,
+  choice: 'o1',
+  note: '',
+  createdAt: 't',
+  appliedAt: null,
+  applyError: null,
+  diagnosis: null,
   ...o,
 });
 
@@ -299,6 +314,27 @@ describe('briefings', () => {
     expect(html).toContain('<code>allow-x</code>');
   });
 
+  test('a diagnosis shows under the why, and beside the ruling once ruled', () => {
+    const parked = briefing({
+      kind: 'parked',
+      subject: 'item:3',
+      why: 'heal budget exhausted',
+      diagnosis: 'The test is flaky.',
+      source: 'server',
+    });
+    const html = renderBriefings({ open: [parked], rulings: [], zones: [z] });
+    expect(html).toMatch(
+      /<pre>heal budget exhausted<\/pre><\/td><\/tr><tr><th>Diagnosis<\/th><td><pre>The test is flaky\.<\/pre>/,
+    );
+    const ruled = renderBriefings({
+      open: [],
+      rulings: [ruling({ diagnosis: 'Out of disk.' })],
+      zones: [z],
+    });
+    expect(ruled).toContain('<th>Diagnosis</th>');
+    expect(ruled).toContain('<td>Out of disk.</td>');
+  });
+
   test('a held refute promotion shows its Reject option and when it will promote', () => {
     const held = briefing({
       kind: 'promote_held',
@@ -342,18 +378,9 @@ describe('briefings', () => {
         { id: 'b', label: 'b', effect: 'none' },
       ],
     });
-    const ruling: Ruling = {
-      id: 1,
-      zoneId: 'main',
-      briefingId: 4,
-      choice: X,
-      note: X,
-      createdAt: 't',
-      appliedAt: null,
-      applyError: X,
-    };
+    const evilRuling = ruling({ choice: X, note: X, applyError: X, diagnosis: X });
     const html =
-      renderBriefings({ open: [evil], rulings: [ruling], zones: [z] }) +
+      renderBriefings({ open: [evil], rulings: [evilRuling], zones: [z] }) +
       renderHome({ zones: [z], items: [], drops: [], briefings: [evil] }) +
       renderGoals({
         zone: z,
