@@ -408,14 +408,14 @@ describe('probe and leases', () => {
 
   test('started_at is set at lease time', () => {
     drop({ id: 'x', workItemId: item(1) });
-    leaseNextDrop(db, 's', t0);
+    leaseNextDrop(db, 's', t0, 'open');
     expect(getDrop(db, 'x')?.startedAt).toBe(t0.toISOString());
   });
 
   test('lost review drop leaves the item pr_open', () => {
     const it = item(1, 'pr_open');
     drop({ id: 'rev', workItemId: it, role: 'review' });
-    leaseNextDrop(db, 's', t0);
+    leaseNextDrop(db, 's', t0, 'open');
     expireLeases(db, plus(t0, 10 * MIN), cfg);
     expireLeases(db, plus(t0, 20 * MIN), cfg);
     expect(getDrop(db, 'rev')?.state).toBe('lost');

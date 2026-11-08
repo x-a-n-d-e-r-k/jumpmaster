@@ -730,6 +730,21 @@ export interface UsageStateRow {
   probeNotBefore: string | null;
   causeDropId: string | null;
   causeWorkItemId: number | null;
+  /** Set while a credits stop is recorded; in force until `overageUntil` (see credits.ts). */
+  overageStoppedAt: string | null;
+  /** The drop whose report of credit use set the stop. */
+  overageDropId: string | null;
+  /** When the exhausted window resets and the stop lifts by itself. */
+  overageUntil: string | null;
+  /** JSON `CreditSignal`: what the stopping drop reported, for the briefing and status page. */
+  overageSignalJson: string | null;
+  /** Command's Resume: credits may run until then, for the bound drop only. */
+  overageResumeUntil: string | null;
+  overageResumeDropId: string | null;
+  overageResumeWorkItemId: number | null;
+  overageResumedAt: string | null;
+  /** Set when a stop or a Resume horizon ended: one drop probes until a live in-plan report. */
+  overageProbeSince: string | null;
   updatedAt: string | null;
 }
 
@@ -747,6 +762,15 @@ const USAGE_COLUMN: Record<keyof UsageStateRow, string> = {
   probeNotBefore: 'probe_not_before',
   causeDropId: 'cause_drop_id',
   causeWorkItemId: 'cause_work_item_id',
+  overageStoppedAt: 'overage_stopped_at',
+  overageDropId: 'overage_drop_id',
+  overageUntil: 'overage_until',
+  overageSignalJson: 'overage_signal_json',
+  overageResumeUntil: 'overage_resume_until',
+  overageResumeDropId: 'overage_resume_drop_id',
+  overageResumeWorkItemId: 'overage_resume_work_item_id',
+  overageResumedAt: 'overage_resumed_at',
+  overageProbeSince: 'overage_probe_since',
   updatedAt: 'updated_at',
 };
 

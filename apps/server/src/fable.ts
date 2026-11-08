@@ -1,6 +1,13 @@
 import type { CrewRole, DropResult, RateLimitEventData, Role } from '@jumpmaster/protocol';
 import { raiseBriefing } from './briefings.js';
-import { type ClaudePlan, type Config, type DropZoneConfig, modelFor } from './config.js';
+import {
+  type ClaudePlan,
+  type Config,
+  type DropZoneConfig,
+  modelFor,
+  type UsageConfig,
+} from './config.js';
+import { stopsOnOverage } from './credits.js';
 import type { Db } from './db/open.js';
 import type { Drop } from './db/repo.js';
 
@@ -127,11 +134,13 @@ export function pauseFableFor(db: Db, data: RateLimitEventData, now: Date): void
 
 /**
  * Reacts to what a finished drop reported about Fable and overage. Best-effort, pending rehearsal
- * (the field names are unobserved; see the rehearsal notes): read only when present.
+ * (the field names are unobserved; see the rehearsal notes): read only when present. A Fable drop
+ * on credits disables Fable (`credits:fable`). Any other drop on credits raises `credits:overage`
+ * only when `usage.stopOnOverage` is false; otherwise the credits stop briefs it (credits.ts).
  */
 export function noteFableSignals(
   db: Db,
-  cfg: Pick<Config, 'claude'>,
+  cfg: Pick<Config, 'claude'> & { usage?: Pick<UsageConfig, 'stopOnOverage'> },
   drop: Drop,
   result: DropResult,
   now: Date,
@@ -142,6 +151,7 @@ export function noteFableSignals(
   if (rl.isUsingOverage !== true) return;
   const fable = isFableRequest(cfg, drop);
   if (fable) setFableState(db, { disabledReason: 'credits_required' }, now);
+  else if (stopsOnOverage(cfg.usage)) return;
   raiseBriefing(
     db,
     {

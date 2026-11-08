@@ -348,3 +348,38 @@ test('a crew drop has no work item, and a second active crew drop in the zone is
       .run(),
   ).toThrow(/UNIQUE/);
 });
+
+test('v13 adds the credits stop to a v12 usage row, keeping the throttle state, not stopped', () => {
+  const f = tmpDbFile();
+  const raw = new Database(f);
+  raw.exec('CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+  for (const m of MIGRATIONS.filter((m) => m.version <= 12)) {
+    raw.exec(m.sql);
+    m.after?.(raw as unknown as Db);
+    raw.prepare('INSERT INTO schema_version VALUES (?, ?)').run(m.version, 'x');
+  }
+  raw.exec(
+    `UPDATE usage_state SET status = 'rejected', paused_until = '2026-01-01T05:00:00.000Z',
+       cause_drop_id = 'd1' WHERE id = 1`,
+  );
+  raw.close();
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(13);
+  const u = getUsageState(db);
+  expect(u).toMatchObject({
+    status: 'rejected',
+    pausedUntil: '2026-01-01T05:00:00.000Z',
+    causeDropId: 'd1',
+    overageStoppedAt: null,
+    overageDropId: null,
+    overageUntil: null,
+    overageSignalJson: null,
+    overageResumeUntil: null,
+    overageResumeDropId: null,
+    overageResumeWorkItemId: null,
+    overageResumedAt: null,
+    overageProbeSince: null,
+  });
+  expect(Object.keys(u)).toContain('overageStoppedAt');
+  expect(count(db, 'credit_drops')).toBe(0);
+});

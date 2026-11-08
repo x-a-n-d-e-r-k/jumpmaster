@@ -18,6 +18,8 @@ node apps/server/dist/ctl.js resume main
 node apps/server/dist/ctl.js observe main   # refused until the zone is drained
 node apps/server/dist/ctl.js kill           # also on the home page
 node apps/server/dist/ctl.js unkill
+node apps/server/dist/ctl.js briefings      # open briefings with their option ids
+node apps/server/dist/ctl.js rule 12 resume # rule briefing 12 with option `resume`
 ```
 
 | Mode | Reads the forge | Starts work | Writes to the forge |

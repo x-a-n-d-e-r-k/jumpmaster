@@ -35,7 +35,14 @@ export interface HomeState {
   drops: Drop[];
   lastRateLimit?: RateLimitSeen;
   now?: Date;
-  usage?: { gate: Gate; state: UsageStateRow };
+  usage?: {
+    gate: Gate;
+    state: UsageStateRow;
+    /** Drops that reported usage credits since Command's Resume. */
+    creditDropsSinceResume?: number;
+    /** The account's `overageStatus` as last reported (raw, pending rehearsal). */
+    overageStatus?: string | null;
+  };
   /** Per work item: PR head, latest verdict and attempt counts. */
   details?: Map<number, ItemDetail>;
   /** Outbox ops needing attention (`unknown` or `failed`). */
@@ -76,13 +83,33 @@ function killSection(killed: boolean): string {
   return `<h2>Kill switch</h2>${notice}<form id="kill"><input id="kill-token" type="password" placeholder="Operator token" autocomplete="off" required> <button>${label}</button></form><script>document.getElementById('kill').addEventListener('submit',async(e)=>{e.preventDefault();const r=await fetch('/api/control/kill',{method:'POST',headers:{authorization:'Bearer '+document.getElementById('kill-token').value,'content-type':'application/json'},body:JSON.stringify({engaged:${killed ? 'false' : 'true'}})});if(r.ok)location.reload();else alert('Refused: '+r.status);});</script>`;
 }
 
+/** The credits stop, in words: why nothing leases, or the Resume in force. */
+function creditsLine(u: NonNullable<HomeState['usage']>): string | null {
+  const s = u.state;
+  if (u.gate === 'stopped') {
+    return `stopped: drop ${s.overageDropId} ran on usage credits at ${s.overageStoppedAt}. Nothing leases, reviews included, until ${s.overageUntil} (the exhausted window resets) or you rule Run on credits.`;
+  }
+  if (u.gate === 'credits_resume') {
+    const n = u.creditDropsSinceResume ?? 0;
+    return `resumed on credits until ${s.overageResumeUntil}; ${n} drop${n === 1 ? '' : 's'} reported credits since. Only the resumed work item's drops lease.`;
+  }
+  const lifted = s.overageProbeSince ?? s.overageUntil ?? s.overageResumeUntil;
+  if (u.gate === 'probe' && lifted !== null) {
+    return `probing: the credits stop ended at ${lifted}; one drop runs until a drop reports running in plan.`;
+  }
+  return null;
+}
+
 function usageSection(u: HomeState['usage']): string {
   if (!u) return '';
   const s = u.state;
   const row = (k: string, v: unknown) => `<tr><th>${k}</th><td>${escapeHtml(v ?? '-')}</td></tr>`;
+  const credits = creditsLine(u);
   return (
     `<h2>Usage</h2><table>` +
     row('Gate', u.gate) +
+    (credits ? row('Credits', credits) : '') +
+    row('Overage status', u.overageStatus) +
     row('Status', s.status) +
     row('Paused until', s.pausedUntil) +
     row('5-hour', pct(s.fiveHourUtil)) +

@@ -3,8 +3,10 @@ import { registerControlRoutes } from './api/control.js';
 import { registerStickRoutes, type StickRouteDeps } from './api/sticks.js';
 import { getArtifact, listArtifacts, readArtifact } from './artifacts.js';
 import { listBriefings, listRulings } from './briefings.js';
-import { allowedHostsOf } from './config.js';
+import { allowedHostsOf, type Config } from './config.js';
+import { creditDropsSince, creditSignal } from './credits.js';
 import { listCrewIssues } from './crew/store.js';
+import type { Db } from './db/open.js';
 import {
   type AttemptKey,
   getAttempts,
@@ -27,6 +29,7 @@ import { getGoals } from './goals.js';
 import { lastSyncResult } from './sync.js';
 import {
   type CrewLine,
+  type HomeState,
   type ItemDetail,
   renderBriefings,
   renderDrop,
@@ -48,6 +51,20 @@ const ATTEMPT_KEYS: AttemptKey[] = [
 ];
 
 /** Fastify instance with stick and UI routes registered; the caller listens. Logger stays off: payloads carry tokens. */
+/** The home page's usage section: the gate, the stored state and the credits stop's counts. */
+function usageView(db: Db, config: Config, at: Date): NonNullable<HomeState['usage']> {
+  const state = getUsageState(db);
+  const last = latestRateLimitEvent(db)?.data.overageStatus;
+  return {
+    gate: dispatchGate(db, config.usage, at),
+    state,
+    creditDropsSinceResume:
+      state.overageResumedAt === null ? 0 : creditDropsSince(db, state.overageResumedAt),
+    overageStatus:
+      typeof last === 'string' ? last : (creditSignal(state)?.rateLimit.overageStatus ?? null),
+  };
+}
+
 export function createApp(deps: StickRouteDeps & { kick?: () => void }): FastifyInstance {
   const app = Fastify({ logger: false });
   // Pages have no login, so a foreign Host could read them through DNS rebinding. Stick routes
@@ -87,7 +104,7 @@ export function createApp(deps: StickRouteDeps & { kick?: () => void }): Fastify
       drops: listRecentDrops(db),
       lastRateLimit: latestRateLimitEvent(db),
       now: at,
-      usage: { gate: dispatchGate(db, config.usage, at), state: getUsageState(db) },
+      usage: usageView(db, config, at),
       details,
       outbox: listOutbox(db, ['unknown', 'failed']),
       briefings: listBriefings(db, { state: 'open' }),

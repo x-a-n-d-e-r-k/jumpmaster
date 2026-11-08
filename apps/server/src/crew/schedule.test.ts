@@ -150,9 +150,9 @@ describe('enqueueCrew', () => {
       state: 'queued',
       createdAt: plus(t0, MIN).toISOString(),
     });
-    expect(leaseNextDrop(w.db, 'stick', plus(t0, 2 * MIN))?.dropId).toBe('impl');
+    expect(leaseNextDrop(w.db, 'stick', plus(t0, 2 * MIN), 'open')?.dropId).toBe('impl');
     updateDrop(w.db, 'impl', { state: 'succeeded' });
-    expect(leaseNextDrop(w.db, 'stick', plus(t0, 3 * MIN))?.dropId).toBe(crew);
+    expect(leaseNextDrop(w.db, 'stick', plus(t0, 3 * MIN), 'open')?.dropId).toBe(crew);
   });
 
   test('diagnose precedes refute precedes the lead cycle; one crew drop at a time', async () => {

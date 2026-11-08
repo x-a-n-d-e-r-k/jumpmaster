@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { DropZoneConfig } from './config.js';
+import { applyCreditsEffect } from './credits.js';
 import { crewBodySha, liveCrewBody } from './crew/flush.js';
 import { getCrewIssue, setCrewIssue } from './crew/store.js';
 import type { Db } from './db/open.js';
@@ -34,7 +35,8 @@ export type Effect =
   | 'reject_issue'
   | 'restage_issue'
   | 'enable_fable'
-  | 'allow_gate_change';
+  | 'allow_gate_change'
+  | 'resume_after_credits';
 /**
  * `sha` is set by the server on an `allow_gate_change` option: the head it was offered for. A crew
  * briefing carries effect `none` only, so it can never offer one.
@@ -338,6 +340,9 @@ export async function applyEffect(
       return true;
     case 'allow_gate_change':
       throw new Error('allow_gate_change applies only through a ruling');
+    case 'resume_after_credits':
+      applyCreditsEffect(db, subject, effect, now);
+      return true;
   }
 }
 
@@ -408,8 +413,8 @@ export async function applyGateAllowance(
 /**
  * Applies the zone's recorded rulings that are neither applied nor failed, each exactly once. A
  * failed effect records `apply_error` and is not tried again. A ruling whose effect waits for the
- * crew (`WAITS_FOR_CREW`) stays pending while the zone's crew is disabled. Returns how many were
- * applied.
+ * crew (`WAITS_FOR_CREW`) stays pending while the zone's crew is disabled. `credits:*` rulings are
+ * the pass's global step (`creditsPass`), in any zone mode. Returns how many were applied.
  */
 export async function applyPendingRulings(
   db: Db,
@@ -421,7 +426,8 @@ export async function applyPendingRulings(
     .prepare(
       `SELECT r.id, r.choice, b.subject, b.kind, b.source, b.why, b.options_json AS optionsJson
          FROM rulings r JOIN briefings b ON b.id = r.briefing_id
-       WHERE r.zone_id = ? AND r.applied_at IS NULL AND r.apply_error IS NULL ORDER BY r.id`,
+       WHERE r.zone_id = ? AND r.applied_at IS NULL AND r.apply_error IS NULL
+         AND b.subject NOT LIKE 'credits:%' ORDER BY r.id`,
     )
     .all(zoneId) as {
     id: number;

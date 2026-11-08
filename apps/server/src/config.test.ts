@@ -77,6 +77,7 @@ describe('loadConfig', () => {
     expect(c.usage).toEqual({
       throttleUtilization: 0.9,
       probeJitterSeconds: [30, 90],
+      stopOnOverage: true,
     });
   });
 

@@ -4,11 +4,60 @@ import {
   RateLimitEventDataSchema,
 } from '@jumpmaster/protocol';
 import type { UsageConfig } from './config.js';
+import {
+  creditsProbing,
+  creditsResumeInForce,
+  creditsStopInForce,
+  stopsOnOverage,
+} from './credits.js';
 import type { Db } from './db/open.js';
 import { getUsageState, setUsageState, type UsageStateRow } from './db/repo.js';
 import { isFableRateLimit, pauseFableFor } from './fable.js';
 
-export type Gate = 'open' | 'finishing_only' | 'probe' | 'closed';
+/**
+ * `stopped`: a drop ran on usage credits (credits.ts); nothing leases, of any role.
+ * `credits_resume`: Command resumed on credits; the bound work item's drops lease first and alone,
+ * else one probe.
+ */
+export type Gate = 'open' | 'finishing_only' | 'probe' | 'closed' | 'stopped' | 'credits_resume';
+
+/** For an exhaustive `switch` on a union: a new member fails to compile. */
+export function unreachable(x: never): never {
+  throw new Error(`unexpected value ${String(x)}`);
+}
+
+/** Whether new implement work may be queued under `gate` (a probe may start one). */
+export function gateQueuesImplement(gate: Gate): boolean {
+  switch (gate) {
+    case 'open':
+    case 'probe':
+      return true;
+    // During a Resume only the bound item's follow-on drops (queued by the reconciler) run.
+    case 'credits_resume':
+    case 'finishing_only':
+    case 'closed':
+    case 'stopped':
+      return false;
+    default:
+      return unreachable(gate);
+  }
+}
+
+/** Whether crew work may be queued under `gate`: only with the gate open. */
+export function gateQueuesCrew(gate: Gate): boolean {
+  switch (gate) {
+    case 'open':
+      return true;
+    case 'probe':
+    case 'credits_resume':
+    case 'finishing_only':
+    case 'closed':
+    case 'stopped':
+      return false;
+    default:
+      return unreachable(gate);
+  }
+}
 
 /** Where a rate-limit observation came from. `outcome` null means a live stream event. */
 export type RateLimitSource = {
@@ -22,6 +71,7 @@ export type RateLimitSource = {
 export const DEFAULT_USAGE_CONFIG: UsageConfig = {
   throttleUtilization: 0.9,
   probeJitterSeconds: [30, 90],
+  stopOnOverage: true,
 };
 
 const HOUR = 60 * 60 * 1000;
@@ -82,6 +132,8 @@ export function rateLimitFromEvent(data: unknown): RateLimitEventData | null {
     ...(resetsAt ? { resetsAt } : {}),
     ...(typeof raw.rateLimitType === 'string' ? { rateLimitType: raw.rateLimitType } : {}),
     ...(Object.keys(unifiedWindows).length > 0 ? { unifiedWindows } : {}),
+    ...(typeof raw.isUsingOverage === 'boolean' ? { isUsingOverage: raw.isUsingOverage } : {}),
+    ...(typeof raw.overageStatus === 'string' ? { overageStatus: raw.overageStatus } : {}),
   };
   const parsed = RateLimitEventDataSchema.safeParse(candidate);
   return parsed.success ? parsed.data : null;
@@ -161,7 +213,8 @@ export function ingestRateLimit(
           status: data.status,
           pausedUntil: null,
           pauseConfirmed: false,
-          probeDropId: null,
+          // A credits probe holds its slot until a live in-plan report (credits.ts).
+          probeDropId: creditsProbing(u, now) ? u.probeDropId : null,
           probeNotBefore: null,
           causeDropId: null,
           causeWorkItemId: null,
@@ -196,14 +249,18 @@ function throttled(u: UsageStateRow, cfg: UsageConfig, t: number): boolean {
   );
 }
 
-/** What the scheduler and the lease route may start right now. */
+/** What the scheduler and the lease route may start right now. A credits stop wins over all. */
 export function dispatchGate(db: Db, cfg: UsageConfig, now: Date): Gate {
   const u = getUsageState(db);
+  // The credits stop and what follows it apply only while configured (stopOnOverage).
+  const credits = stopsOnOverage(cfg);
+  if (credits && creditsStopInForce(u, now)) return 'stopped';
   const t = now.getTime();
   const until = ms(u.pausedUntil);
   const notBefore = ms(u.probeNotBefore);
   if ((until !== null && t < until) || (notBefore !== null && t < notBefore)) return 'closed';
-  if (u.status === 'rejected') return 'probe';
+  if (credits && creditsResumeInForce(u, now)) return 'credits_resume';
+  if (u.status === 'rejected' || (credits && creditsProbing(u, now))) return 'probe';
   return throttled(u, cfg, t) ? 'finishing_only' : 'open';
 }
 

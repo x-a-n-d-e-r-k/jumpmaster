@@ -186,6 +186,8 @@ export const RateLimitEventDataSchema = z.object({
   /** Unobserved field names, kept as sent (pending rehearsal). */
   isUsingOverage: z.boolean().optional(),
   overageStatus: z.string().optional(),
+  /** When the extra-usage spending cap resets (monthly); never a usage window's reset. */
+  overageResetsAt: z.string().optional(),
 });
 export type RateLimitEventData = z.infer<typeof RateLimitEventDataSchema>;
 

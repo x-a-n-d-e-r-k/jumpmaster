@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
 import { type Config, loadConfig, secretList } from './config.js';
+import { creditsPass } from './credits.js';
 import { openDb } from './db/open.js';
 import { ensureZoneMode } from './db/repo.js';
 import { reconcileZone } from './flow/reconcile.js';
@@ -51,6 +52,12 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
   const expireLeases = leaseExpirer(db, config.usage);
   const pass = async () => {
     expireLeases(new Date());
+    // Global, before any zone: credits rulings apply whatever a zone's mode (not while killed).
+    try {
+      creditsPass(db, new Date());
+    } catch (e) {
+      log(`credits step failed: ${errorMessage(e)}`);
+    }
     for (const zone of config.dropZones) {
       try {
         const forgePair = forgesFor(zone.id);

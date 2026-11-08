@@ -158,6 +158,17 @@ test('parseStreamLine keeps isUsingOverage and overageStatus', () => {
   ).toMatchObject({ type: 'rate_limit', isUsingOverage: true, overageStatus: 'allowed' });
 });
 
+test('parseStreamLine keeps overageResetsAt (the extra-usage cap reset), normalized', () => {
+  expect(
+    parseStreamLine(
+      JSON.stringify({
+        type: 'rate_limit_event',
+        rate_limit_info: { status: 'allowed', overageResetsAt: 1793491200 },
+      }),
+    ),
+  ).toMatchObject({ type: 'rate_limit', overageResetsAt: '2026-11-01T00:00:00.000Z' });
+});
+
 test('buildClaudeArgs emits --add-dir once per directory', () => {
   const a = buildClaudeArgs({
     prompt: 'P',

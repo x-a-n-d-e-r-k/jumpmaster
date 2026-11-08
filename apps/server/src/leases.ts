@@ -2,7 +2,7 @@ import type { UsageConfig } from './config.js';
 import type { Db } from './db/open.js';
 import { getUsageState, isKilled, setKilled, setUsageState } from './db/repo.js';
 import { refundCharge } from './flow/budgets.js';
-import { DEFAULT_USAGE_CONFIG, type Gate, releaseProbe } from './usage.js';
+import { DEFAULT_USAGE_CONFIG, type Gate, releaseProbe, unreachable } from './usage.js';
 
 const LEASE_TTL_MS = 60_000;
 const LOST_GRACE_MS = 120_000;
@@ -14,42 +14,71 @@ const FINISHING = "('review','heal','resolve')";
 /** Finishing roles first, then implement, then crew roles (§5.3); age within a class. */
 const ROLE_CLASS = `CASE WHEN role IN ${FINISHING} THEN 0 WHEN role = 'implement' THEN 1 ELSE 2 END`;
 
-/**
- * Leases the oldest queued drop the usage gate allows, bumping its epoch and stamping started_at.
- * `probe` leases exactly one drop (preferring one not on the pause's cause item) and records it.
- * All time comes from `now`.
- */
 /** Queued drops wait while their zone is paused or observing. */
 const ZONE_ACTIVE = `AND drop_zone_id NOT IN (SELECT zone_id FROM zone_controls WHERE mode <> 'active')`;
 
+/**
+ * Leases the oldest queued drop the usage gate allows, bumping its epoch and stamping started_at.
+ * `probe` leases exactly one drop (preferring one not on the pause's cause item) and records it.
+ * `credits_resume` leases only the resumed work item's drops; with none queued (or a crew drop
+ * resumed), nothing. The gate is required: a caller that forgets it must not lease while stopped. All time
+ * comes from `now`.
+ */
 export function leaseNextDrop(
   db: Db,
   stickId: string,
   now: Date,
-  gate: Gate = 'open',
+  gate: Gate,
 ): { dropId: string; epoch: number } | null {
   return db.transaction(() => {
-    if (gate === 'closed') return null;
     if (isKilled(db)) return null;
     let next: { id: string } | undefined;
-    if (gate === 'probe') {
+    let probe = false;
+    const probeNext = (): { id: string } | undefined => {
       const u = getUsageState(db);
-      if (u.probeDropId !== null) return null;
-      next = db
+      if (u.probeDropId !== null) return undefined;
+      probe = true;
+      return db
         .prepare(
           `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE}
            ORDER BY CASE WHEN work_item_id = ? THEN 1 ELSE 0 END, ${ROLE_CLASS}, created_at, rowid
            LIMIT 1`,
         )
         .get(u.causeWorkItemId) as { id: string } | undefined;
-    } else {
-      const roleFilter = gate === 'finishing_only' ? ` AND role IN ${FINISHING}` : '';
-      next = db
-        .prepare(
-          `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE}${roleFilter}
-           ORDER BY ${ROLE_CLASS}, created_at, rowid LIMIT 1`,
-        )
-        .get() as { id: string } | undefined;
+    };
+    switch (gate) {
+      case 'closed':
+      case 'stopped':
+        return null;
+      case 'probe':
+        next = probeNext();
+        break;
+      case 'credits_resume': {
+        const bound = getUsageState(db).overageResumeWorkItemId;
+        next =
+          bound === null
+            ? undefined
+            : (db
+                .prepare(
+                  `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE} AND work_item_id = ?
+                   ORDER BY ${ROLE_CLASS}, created_at, rowid LIMIT 1`,
+                )
+                .get(bound) as { id: string } | undefined);
+        break;
+      }
+      case 'open':
+      case 'finishing_only': {
+        const roleFilter = gate === 'finishing_only' ? ` AND role IN ${FINISHING}` : '';
+        next = db
+          .prepare(
+            `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE}${roleFilter}
+             ORDER BY ${ROLE_CLASS}, created_at, rowid LIMIT 1`,
+          )
+          .get() as { id: string } | undefined;
+        break;
+      }
+      default:
+        return unreachable(gate);
     }
     if (!next) return null;
     const row = db
@@ -62,7 +91,7 @@ export function leaseNextDrop(
       | { epoch: number }
       | undefined;
     if (!row) return null;
-    if (gate === 'probe') setUsageState(db, { probeDropId: next.id }, now);
+    if (probe) setUsageState(db, { probeDropId: next.id }, now);
     return { dropId: next.id, epoch: row.epoch };
   })();
 }

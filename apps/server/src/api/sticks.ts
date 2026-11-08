@@ -4,6 +4,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { storeArtifact } from '../artifacts.js';
 import { type Config, secretList } from '../config.js';
+import { noteOverage } from '../credits.js';
 import type { Db } from '../db/open.js';
 import {
   appendEvents,
@@ -31,6 +32,8 @@ export interface StickRouteDeps {
   rand?: () => number;
   leaseWaitMs?: number;
   leasePollMs?: number;
+  /** Starts a pass without waiting for it (a credits stop briefs Command at once). */
+  kick?: () => void;
 }
 
 const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex');
@@ -177,10 +180,16 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       const drop = liveDrop(req, reply, req.params.id, body.data.epoch, { requireLive: true });
       if (!drop) return reply;
       appendEvents(db, drop.id, body.data.events);
+      let stopped = false;
       for (const ev of body.data.events) {
         if (ev.kind !== 'rate_limit') continue;
         const data = rateLimitFromEvent(ev.data);
         if (!data) continue;
+        // First, whatever else the report means (a Fable limit returns early below).
+        const at = now();
+        const ts = Date.parse(ev.ts);
+        const reportedAt = Number.isFinite(ts) ? new Date(Math.min(ts, at.getTime())) : at;
+        if (noteOverage(db, config.usage, drop, data, null, at, reportedAt)) stopped = true;
         ingestRateLimit(
           db,
           data,
@@ -195,6 +204,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
           deps.rand ?? Math.random,
         );
       }
+      if (stopped) deps.kick?.();
       return reply.code(204).send();
     });
 

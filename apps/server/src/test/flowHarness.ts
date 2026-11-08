@@ -1,7 +1,8 @@
 import type { DropPayload, DropResult, Role } from '@jumpmaster/protocol';
 import type { FastifyInstance } from 'fastify';
 import { createApp } from '../app.js';
-import type { Config, DropZoneConfig } from '../config.js';
+import type { Config, DropZoneConfig, UsageConfig } from '../config.js';
+import { creditsPass } from '../credits.js';
 import type { Db } from '../db/open.js';
 import { openDb } from '../db/open.js';
 import { type ReconcileReport, reconcileZone } from '../flow/reconcile.js';
@@ -23,7 +24,10 @@ export interface Harness {
   /** Advances the injected clock by `minutes`. */
   at(minutes: number): Date;
   sync(): Promise<void>;
-  /** `syncDropZone` (which reads the zone pass once), then `reconcileZone` with that pass. */
+  /**
+   * As the server's pass: the global credits step, `syncDropZone` (which reads the zone pass
+   * once), then `reconcileZone` with that pass.
+   */
   reconcile(): Promise<ReconcileReport>;
   queuedRoles(): Role[];
   /** Headers for a stick route, enrolling on first use. */
@@ -42,6 +46,9 @@ export async function harness(
     issues?: FakeIssue[];
     zoneSecrets?: Record<string, string>;
     dataDir?: string;
+    usage?: Partial<UsageConfig>;
+    /** Called when a route asks for a pass at once. */
+    kick?: () => void;
   } = {},
 ): Promise<Harness> {
   const db = openDb(tmpDbFile());
@@ -72,7 +79,7 @@ export async function harness(
       operatorToken: 'o'.repeat(32),
       ...(opts.zoneSecrets ? { zoneSecrets: { [zone.id]: opts.zoneSecrets } } : {}),
     },
-    usage: usageCfg,
+    usage: { ...usageCfg, ...opts.usage },
   };
   let clock = START;
   const rand = () => 0;
@@ -84,6 +91,7 @@ export async function harness(
     rand,
     leaseWaitMs: 0,
     leasePollMs: 0,
+    ...(opts.kick ? { kick: opts.kick } : {}),
   });
   const enroll = await app.inject({
     method: 'POST',
@@ -108,8 +116,9 @@ export async function harness(
       await syncDropZone(db, forges, zone, clock);
     },
     async reconcile() {
+      creditsPass(db, clock);
       const { pass } = await syncDropZone(db, forges, zone, clock);
-      return reconcileZone(db, forges, zone, pass, promptVersions(), usageCfg, [], clock);
+      return reconcileZone(db, forges, zone, pass, promptVersions(), config.usage, [], clock);
     },
     stickHeaders: () => auth,
     queuedRoles() {
@@ -126,7 +135,10 @@ export async function harness(
         UPDATE usage_state SET status = NULL, paused_until = NULL, five_hour_util = NULL,
           five_hour_resets_at = NULL, seven_day_util = NULL, seven_day_resets_at = NULL,
           observed_at = NULL, paused_at = NULL, pause_confirmed = 0, probe_drop_id = NULL,
-          probe_not_before = NULL, cause_drop_id = NULL, cause_work_item_id = NULL;`);
+          probe_not_before = NULL, cause_drop_id = NULL, cause_work_item_id = NULL,
+          overage_stopped_at = NULL, overage_drop_id = NULL, overage_until = NULL,
+          overage_signal_json = NULL, overage_resume_until = NULL, overage_resume_drop_id = NULL,
+          overage_resume_work_item_id = NULL, overage_resumed_at = NULL, overage_probe_since = NULL;`);
     },
     async lease() {
       const res = await app.inject({
