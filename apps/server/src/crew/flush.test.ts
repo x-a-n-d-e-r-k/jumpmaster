@@ -204,6 +204,52 @@ describe('promotion', () => {
     expect(listBriefings(w.db, { zoneId: 'main', state: 'open' })).toEqual([]);
   });
 
+  function holdBriefing(id: number): void {
+    raiseBriefing(
+      w.db,
+      {
+        zoneId: 'main',
+        kind: 'promote_held',
+        subject: `issue:${id}`,
+        decision: 'd',
+        why: 'w',
+        options: [
+          { id: 'reject', label: 'Reject', effect: 'reject_issue' },
+          { id: 'now', label: 'Promote now', effect: 'promote_issue' },
+        ],
+        source: 'server',
+      },
+      t0,
+    );
+  }
+
+  test('a held promotion starts its hold at the first active flush, so a pause never skips it', async () => {
+    const id = await staged();
+    holdBriefing(id);
+    setCrewIssue(w.db, id, { state: 'promote_held' }, t0);
+    setZoneMode(w.db, 'main', 'paused', t0);
+    await flush(plus(t0, 5 * MIN));
+    setZoneMode(w.db, 'main', 'active', t0);
+    const resumed = plus(t0, 10 * 60 * MIN);
+    await flush(resumed);
+    expect(getCrewIssue(w.db, id)).toMatchObject({
+      state: 'promote_held',
+      holdUntil: plus(resumed, MIN).toISOString(),
+    });
+    await flush(plus(resumed, 30_000));
+    expect(getCrewIssue(w.db, id)?.state).toBe('promote_held');
+    await flush(plus(resumed, 2 * MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('promoted');
+  });
+
+  test('a restart long past the refute still gives Command one active pass', async () => {
+    const id = await staged();
+    holdBriefing(id);
+    setCrewIssue(w.db, id, { state: 'promote_held' }, t0);
+    await flush(plus(t0, 5 * 24 * 60 * MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('promote_held');
+  });
+
   test('a promote_held issue whose briefing is gone does not move', async () => {
     const id = await staged();
     setCrewIssue(w.db, id, { state: 'promote_held', holdUntil: t0.toISOString() }, t0);

@@ -38,7 +38,6 @@ const deps = (zone: DropZoneConfig = w.zone): ResultDeps => ({
   zone,
   secrets: [],
   usageCfg,
-  pollSeconds: 60,
   rand: () => 0.5,
 });
 
@@ -151,7 +150,7 @@ describe('refute results', () => {
     );
     expect(getCrewIssue(w.db, issue)).toMatchObject({
       state: 'promote_held',
-      holdUntil: plus(t0, 60_000).toISOString(),
+      holdUntil: null,
       refutedSha: 'sha-1',
     });
     const [b] = listBriefings(w.db, { zoneId: 'main', state: 'open' });
@@ -181,7 +180,9 @@ describe('refute results', () => {
     await applyResult(w.db, deps(zone), id2, completed({ decision: 'promote', findings: [] }), t0);
     // The live body must match what was staged for the promotion to go ahead.
     setCrewIssue(w.db, other, { bodySha: crewBodySha(ISSUE_BODY) }, t0);
-    await flushCrewOps(w.db, w.forges, zone, [], plus(t0, 2 * MIN));
+    await flushCrewOps(w.db, w.forges, zone, [], plus(t0, 2 * MIN)); // starts the hold
+    expect(getCrewIssue(w.db, other)?.state).toBe('promote_held');
+    await flushCrewOps(w.db, w.forges, zone, [], plus(t0, 4 * MIN));
     expect(getCrewIssue(w.db, other)?.state).toBe('promoted');
   });
 

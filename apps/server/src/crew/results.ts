@@ -14,8 +14,6 @@ import { applyCrewActions, validateIssueSpec } from './actions.js';
 import { PROMOTE_OPTIONS, subjectOf } from './flush.js';
 import { type CrewIssue, getCrewIssue, setCrewIssue } from './store.js';
 
-const DEFAULT_POLL_SECONDS = 60;
-
 const log = (db: Db, drop: Drop, now: Date, message: string) =>
   appendEvents(db, drop.id, [{ ts: now.toISOString(), kind: 'log', data: { message } }]);
 
@@ -51,16 +49,15 @@ function applyRefute(
 
   if (out.decision === 'promote') {
     if (zone.crew.refutePromotes) {
-      const pollSeconds = deps.pollSeconds ?? DEFAULT_POLL_SECONDS;
-      const holdUntil = new Date(now.getTime() + pollSeconds * 1000).toISOString();
-      setCrewIssue(db, issue.id, { ...base, state: 'promote_held', holdUntil }, now);
+      // hold_until is set by the first active flush that sees it (one pass for Command).
+      setCrewIssue(db, issue.id, { ...base, state: 'promote_held' }, now);
       raiseBriefing(
         db,
         {
           zoneId: zone.id,
           kind: 'promote_held',
           subject,
-          decision: `The refute promoted ${label}. It will be promoted after ${holdUntil} unless you reject it.`,
+          decision: `The refute promoted ${label}. It will be promoted after one active pass unless you reject it.`,
           why: 'Every criterion survived the refute, and this zone lets a refute promote.',
           options: [
             { id: 'reject', label: 'Reject', effect: 'reject_issue' },

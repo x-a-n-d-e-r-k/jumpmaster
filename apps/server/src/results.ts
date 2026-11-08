@@ -55,8 +55,6 @@ export type ResultDeps = {
   secrets: string[];
   usageCfg: UsageConfig;
   rand?: () => number;
-  /** How long a refute promotion is held for a Reject (one pass); defaults to 60 seconds. */
-  pollSeconds?: number;
   /** The declared plan, for Fable's signals; defaults to `pro`. */
   claude?: ClaudeConfig;
 };

@@ -177,6 +177,8 @@ export async function flushCrewOps(
   zone: DropZoneConfig,
   secrets: string[],
   now: Date,
+  /** How long a held refute promotion waits once an active pass has seen it (one poll). */
+  holdMs = 60_000,
 ): Promise<number> {
   if (isKilled(db) || getZoneMode(db, zone.id, zone.mode) !== 'active') return 0;
   let moved = 0;
@@ -188,7 +190,14 @@ export async function flushCrewOps(
           step = await file(db, forges, zone, row, secrets, now);
           break;
         case 'promote_held':
-          if (row.holdUntil !== null && now.getTime() < Date.parse(row.holdUntil)) continue;
+          // The hold starts at the first active flush that sees it, so a pause, kill or restart
+          // never lets the promotion through without Command getting one active pass.
+          if (row.holdUntil === null) {
+            const holdUntil = new Date(now.getTime() + holdMs).toISOString();
+            setCrewIssue(db, row.id, { holdUntil }, now);
+            continue;
+          }
+          if (now.getTime() < Date.parse(row.holdUntil)) continue;
           // Held with a Reject option: it goes ahead only while that briefing is still unanswered.
           if (!hasOpenBriefing(db, zone.id, subjectOf(row))) continue;
           setCrewIssue(db, row.id, { state: 'promoting' }, now);
