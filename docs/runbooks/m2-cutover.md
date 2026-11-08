@@ -85,8 +85,9 @@ If the server itself is unreachable, stop containers on the stick's host with `d
   Allow-list it, and every service image, with `JM_ALLOWED_IMAGES`.
 - **Limits:** the default of 512 counts threads and is too low for many large test suites. A gate
   that hits it says so in its output.
-- **Services:** run on an internal network for one drop. Gates get `JM_SERVICE_DB_HOST` and
-  `JM_SERVICE_DB_PORT`. Containers are never pulled automatically, so `docker pull` each image on
+- **Services:** run on an internal network for one drop. The agent and the gates get
+  `JM_SERVICE_DB_HOST` and `JM_SERVICE_DB_PORT`, and the agent's system prompt names each service.
+  Point the project's own variable at them in its docs (for example a test-database URL). Containers are never pulled automatically, so `docker pull` each image on
   the stick's host first.
 - **Gate secrets:** each value comes from `JM_ZONE_SECRET_<ZONE>_<NAME>`. **Any PR's gate code,
   including an install script, can read and send these.** Jumpmaster has no egress control until
