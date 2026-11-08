@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { expect, test } from 'vitest';
 import { syncParkBriefings } from '../briefings.js';
+import { syncDropZone } from '../sync.js';
+import { fakeForge } from '../test/fakes.js';
 import { makeZone } from '../test/fixtures.js';
 import { M0_SCHEMA_SQL, MIGRATIONS, migrate } from './migrations.js';
 import { type Db, openDb } from './open.js';
@@ -275,6 +277,51 @@ test('v12 carves a diagnosis out of each parked briefing why, keyed to the serve
       updated_at: 'x',
     },
   ]);
+});
+
+test('v12 gives a crew row the number its resolved create recorded; intake then starts nothing', async () => {
+  const f = tmpDbFile();
+  v11Db(f);
+  const raw = new Database(f);
+  const crewRow = raw.prepare(
+    `INSERT INTO crew_issues (zone_id, key, source, objective, title, title_norm, body, state,
+       created_at, updated_at)
+     VALUES ('main', ?, 'crew-lead', 'obj', 't', 't', 'b', 'filing', 'x', 'x')`,
+  );
+  crewRow.run('k'); // its create resolved while the zone was paused: op done, row unnumbered
+  crewRow.run('open'); // its create is still unresolved
+  const op = raw.prepare(
+    `INSERT INTO outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state,
+       result_json, created_at, updated_at)
+     VALUES (?, ?, 'create_issue', NULL, 'main', '{}', ?, ?, 'x', 'x')`,
+  );
+  op.run('o1', 'issue:main:obj:k', 'done', '{"number":7}');
+  op.run('o2', 'issue:main:obj:open', 'unknown', null);
+  raw.close();
+  const db = openDb(f);
+  expect(ids(db, 'SELECT key, number FROM crew_issues ORDER BY id')).toEqual([
+    { key: 'k', number: 7 },
+    { key: 'open', number: null },
+  ]);
+  // Someone edits the marker out of #7, drops the staged label and adds ready; the crew is off.
+  const forge = fakeForge({
+    issues: [
+      {
+        number: 7,
+        title: 't',
+        body: 'Cleaned up.',
+        author: 'alice',
+        authorType: 'User',
+        labels: ['agent-ready'],
+        createdAt: 'x',
+      },
+    ],
+    trusted: ['alice'],
+  });
+  const zone = makeZone({ crew: { ...makeZone().crew, enabled: false } });
+  const r = await syncDropZone(db, { author: forge, reviewer: forge }, zone, new Date());
+  expect(r.skippedCrewUnpromoted).toEqual([7]);
+  expect(ids(db, 'SELECT issue_number FROM work_items WHERE issue_number = 7')).toEqual([]);
 });
 
 test('a crew drop has no work item, and a second active crew drop in the zone is refused', () => {

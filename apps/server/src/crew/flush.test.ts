@@ -516,13 +516,35 @@ describe('crew disabled', () => {
     );
     expect(listRulings(w.db, 'main')[0]).toMatchObject({ applyError: null });
     expect(listRulings(w.db, 'main')[0]?.appliedAt).not.toBeNull();
-    expect(getCrewIssue(w.db, id)?.state).not.toBe('promoted');
+    // Command's Reject is the one forge write the disabled crew still makes: the issue closes.
+    const row = getCrewIssue(w.db, id);
+    expect(row?.state).toBe('rejected');
+    expect((await w.f.author.getIssue(row?.number ?? -1))?.state).toBe('closed');
     expect(w.db.prepare('SELECT state FROM work_items WHERE id = ?').get(item.id)).toEqual({
       state: 'done',
     });
     expect(
       w.db.prepare('SELECT COUNT(*) AS n FROM drops WHERE work_item_id = ?').get(item.id),
     ).toEqual({ n: 0 });
+  });
+
+  test('a refute rejection landing while disabled closes nothing until the crew is enabled', async () => {
+    const id = await staged();
+    // What applyRefute records for a refute `reject` verdict: no ruling by Command.
+    setCrewIssue(w.db, id, { state: 'rejecting' }, t0);
+    const n = getCrewIssue(w.db, id)?.number ?? -1;
+    const closes = () => writes('updateIssue').length;
+    const before = closes();
+    await flushOff(plus(t0, MIN));
+    await flushOff(plus(t0, 2 * MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('rejecting');
+    expect(closes()).toBe(before);
+    expect((await w.f.author.getIssue(n))?.state).toBe('open');
+    await flush(plus(t0, 3 * MIN));
+    await flush(plus(t0, 4 * MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('rejected');
+    expect((await w.f.author.getIssue(n))?.state).toBe('closed');
+    expect(closes()).toBe(before + 1);
   });
 
   test('a Retry on a parked item applies with the crew off', async () => {

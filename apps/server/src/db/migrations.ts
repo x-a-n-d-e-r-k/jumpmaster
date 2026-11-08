@@ -311,7 +311,7 @@ ALTER TABLE rulings ADD COLUMN apply_attempts INTEGER NOT NULL DEFAULT 0;
 /**
  * v12: a parked briefing's diagnosis lives beside the server-built `why`, keyed to the `why` it
  * diagnosed (`diagnosis_basis`, sha256), so a pass that rebuilds the briefing keeps it. Briefings
- * written before v12 carry it inside `why` after a blank line: carved out here (see carveV12Bases).
+ * written before v12 carry it inside `why` after a blank line: carved out here (see afterV12).
  */
 const V12_SQL = `
 ALTER TABLE briefings ADD COLUMN diagnosis TEXT;
@@ -323,8 +323,28 @@ UPDATE briefings SET
     AND instr(why, char(10) || char(10) || 'Diagnosis: ') > 0;
 `;
 
-/** The basis of each diagnosis v12 carved: SQLite has no sha256, so it is set here. */
-function carveV12Bases(db: Db): void {
+/**
+ * After the v12 SQL: the basis of each diagnosis carved (SQLite has no sha256, so it is set here),
+ * and the issue number of each crew row whose create already resolved. Before v12 the row learned
+ * its number only in the flush, so a create resolved while the zone was paused (or the crew off)
+ * left it unnumbered and intake could not know the issue as crew by number. The op key is
+ * `opKeys.issue`: `issue:<zone>:<objective>:<key>`.
+ */
+function afterV12(db: Db): void {
+  db.exec(`
+    UPDATE crew_issues SET number = (
+        SELECT json_extract(o.result_json, '$.number') FROM outbox o
+          WHERE o.op_key = 'issue:' || crew_issues.zone_id || ':' || crew_issues.objective || ':'
+            || crew_issues.key
+            AND o.state = 'done' AND o.kind = 'create_issue'
+            AND json_type(o.result_json, '$.number') = 'integer')
+      WHERE number IS NULL AND EXISTS (
+        SELECT 1 FROM outbox o
+          WHERE o.op_key = 'issue:' || crew_issues.zone_id || ':' || crew_issues.objective || ':'
+            || crew_issues.key
+            AND o.state = 'done' AND o.kind = 'create_issue'
+            AND json_type(o.result_json, '$.number') = 'integer');
+  `);
   const rows = db
     .prepare(
       'SELECT id, why FROM briefings WHERE diagnosis IS NOT NULL AND diagnosis_basis IS NULL',
@@ -354,7 +374,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 9, sql: V9_SQL },
   { version: 10, sql: V10_SQL },
   { version: 11, sql: V11_SQL },
-  { version: 12, sql: V12_SQL, after: carveV12Bases },
+  { version: 12, sql: V12_SQL, after: afterV12 },
 ];
 
 /**

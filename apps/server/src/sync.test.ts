@@ -384,9 +384,9 @@ describe('crew provenance at intake', () => {
     expect(r.skippedCrewUnpromoted).toEqual([24, 25]);
   });
 
-  test('an issue filed while its row has no number is crew once the create resolves', async () => {
+  /** A filing crew row whose create reached the forge but answered 5xx: op unknown, no number. */
+  async function unresolvedFiling(w: ReturnType<typeof zoneWorld>): Promise<number> {
     const on = makeZone({ crew: { ...makeZone().crew, enabled: true } });
-    const w = world([]);
     const id = insertCrewIssue(w.db, {
       zoneId: 'main',
       key: 'k',
@@ -401,11 +401,34 @@ describe('crew provenance at intake', () => {
     w.f.author.failNext('createIssue', '5xx-after-success');
     await flushCrewOps(w.db, w.forges, on, [], t0);
     expect(getCrewIssue(w.db, id)).toMatchObject({ state: 'filing', number: null });
+    return id;
+  }
+
+  test('before the create resolves, the row has no number and the staged label keeps the issue from starting', async () => {
+    const w = world([]);
+    const id = await unresolvedFiling(w);
+    const [n, e] =
+      [...w.f.state.issues.entries()].find(([, x]) => x.issue?.title === 'Add docs') ?? [];
+    if (n === undefined || !e?.issue) throw new Error('issue not created');
+    // The marker is edited out and ready added by hand; the staged label is still on.
+    e.issue.body = 'Cleaned up.';
+    e.labels = ['agent-staged', 'agent-ready'];
+    e.issue.labels = [...e.labels];
+    const off = makeZone({ crew: { ...makeZone().crew, enabled: false } });
+    const r = await syncDropZone(w.db, w.forges, off, plus(t0, 1));
+    expect(getCrewIssue(w.db, id)?.number).toBeNull();
+    expect(numbers(w)).toEqual([]);
+    expect(r.skippedCrewUnpromoted).toEqual([n]);
+  });
+
+  test('once the create resolves the row has its number, and intake knows the issue by it alone', async () => {
+    const w = world([]);
+    const id = await unresolvedFiling(w);
     // The create resolves while the crew is disabled: the flush that would record it does not run.
     await resolveUnknown(w.db, w.forges, 'main', plus(t0, 1), 45);
     const n = getCrewIssue(w.db, id)?.number;
     expect(n).toEqual(expect.any(Number));
-    // Someone edits the marker out and labels it ready.
+    // Someone edits the marker out, drops the staged label and labels it ready.
     const e = w.f.state.issues.get(n ?? -1);
     if (!e?.issue) throw new Error('issue not created');
     e.issue.body = 'Cleaned up.';

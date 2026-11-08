@@ -299,6 +299,28 @@ describe('diagnose results', () => {
     });
   });
 
+  test('a diagnosis for a briefing already ruled or withdrawn is discarded', async () => {
+    for (const end of ['ruled', 'withdrawn'] as const) {
+      w = await crewWorld();
+      const item = w.item(1, 'ready');
+      setWorkItemState(w.db, item, 'parked', 'heal budget exhausted', t0);
+      syncParkBriefings(w.db, w.zone, t0);
+      const id = await crewDrop();
+      const [b] = listBriefings(w.db, { zoneId: 'main', state: 'open' });
+      if (end === 'ruled') {
+        expect(ruleBriefing(w.db, b?.id ?? -1, 'leave', '', plus(t0, MIN)).ok).toBe(true);
+      } else {
+        setWorkItemState(w.db, item, 'ready', undefined, plus(t0, MIN)); // left parked
+        syncParkBriefings(w.db, w.zone, plus(t0, MIN));
+      }
+      await applyResult(w.db, deps(), id, completed(diagnosis), plus(t0, 2 * MIN));
+      const after = listBriefings(w.db, { zoneId: 'main' }).find((x) => x.id === b?.id);
+      expect(after).toMatchObject({ state: end, diagnosis: null, recommendation: '' });
+      const messages = listEvents(w.db, id).map((e) => String(e.data.message));
+      expect(messages).toContain('diagnosis discarded: the briefing is no longer open');
+    }
+  });
+
   test('a diagnosis that lands after the briefing changed is discarded; the new why is diagnosed', async () => {
     const item = w.item(1, 'ready');
     setWorkItemState(w.db, item, 'parked', 'heal budget exhausted', t0);

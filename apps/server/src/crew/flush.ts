@@ -175,12 +175,28 @@ async function reject(
   return { result, done: { state: 'rejected' } };
 }
 
+/** Whether Command rejected the issue by a ruling that has been applied (not a refute verdict). */
+function rejectedByCommand(db: Db, row: CrewIssue): boolean {
+  return (
+    db
+      .prepare(
+        `SELECT 1 FROM rulings r JOIN briefings b ON b.id = r.briefing_id, json_each(b.options_json) o
+         WHERE b.zone_id = ? AND b.subject = ? AND r.applied_at IS NOT NULL
+           AND json_extract(o.value, '$.id') = r.choice
+           AND json_extract(o.value, '$.effect') = 'reject_issue'
+         LIMIT 1`,
+      )
+      .get(row.zoneId, subjectOf(row)) !== undefined
+  );
+}
+
 /**
  * Moves crew issues along by their forge writes, all through the outbox as the author identity.
  * Only in an active zone with the kill switch off; returns how many issues changed state. With the
- * zone's crew disabled nothing is filed, promoted (a refute hold neither starts nor ends) or
- * revised: those rows wait as they are until it is enabled again. A Command rejection still
- * closes its issue.
+ * zone's crew disabled nothing is filed, promoted (a refute hold neither starts nor ends), revised
+ * or closed by the crew: those rows wait as they are until it is enabled again. The one write that
+ * goes ahead is the close of an issue Command rejected by ruling (its brake); a `rejecting` row from
+ * a refute verdict waits like the rest.
  */
 export async function flushCrewOps(
   db: Db,
@@ -204,7 +220,7 @@ export async function flushCrewOps(
           recordFiledNumber(db, op.opKey, JSON.parse(op.resultJson), now);
         }
       }
-      if (row.state !== 'rejecting') continue;
+      if (row.state !== 'rejecting' || !rejectedByCommand(db, row)) continue;
     }
     let step: Step | 'wait' | 'changed';
     try {

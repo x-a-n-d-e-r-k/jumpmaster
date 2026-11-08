@@ -508,7 +508,8 @@ describe('a diagnosis on a gate park', () => {
       diagnosis: 'The new head keeps --bail.',
       diagnoseAttempts: 1,
     });
-    expect(nextCrewWork(w.db, crewZone(w), plus(at, MIN))?.role).not.toBe('diagnose');
+    // Diagnosed once: the zone's next crew work is the lead cycle, not another diagnosis.
+    expect(nextCrewWork(w.db, crewZone(w), plus(at, MIN))).toEqual({ role: 'crew-lead' });
   });
 
   test('an out-of-date Allow re-raises a fresh briefing on the unchanged head', async () => {
@@ -529,5 +530,9 @@ describe('a diagnosis on a gate park', () => {
     expect(again.id).not.toBe(b.id);
     expect(again.why).toContain('"evil"');
     expect(again.options.some((o) => o.effect === 'allow_gate_change')).toBe(true);
+    // Raised once: the next pass keeps the same briefing rather than raising another.
+    await reconcile(w, plus(t0, 5 * MIN));
+    expect(parkedBriefing(w).id).toBe(again.id);
+    expect(listBriefings(w.db, { zoneId: 'main', state: 'open' })).toHaveLength(1);
   });
 });
