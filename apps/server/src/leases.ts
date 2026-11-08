@@ -11,6 +11,9 @@ const iso = (d: Date, offsetMs = 0): string => new Date(d.getTime() + offsetMs).
 
 const FINISHING = "('review','heal','resolve')";
 
+/** Finishing roles first, then implement, then crew roles (§5.3); age within a class. */
+const ROLE_CLASS = `CASE WHEN role IN ${FINISHING} THEN 0 WHEN role = 'implement' THEN 1 ELSE 2 END`;
+
 /**
  * Leases the oldest queued drop the usage gate allows, bumping its epoch and stamping started_at.
  * `probe` leases exactly one drop (preferring one not on the pause's cause item) and records it.
@@ -35,14 +38,16 @@ export function leaseNextDrop(
       next = db
         .prepare(
           `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE}
-           ORDER BY CASE WHEN work_item_id IS ? THEN 1 ELSE 0 END, created_at, rowid LIMIT 1`,
+           ORDER BY CASE WHEN work_item_id = ? THEN 1 ELSE 0 END, ${ROLE_CLASS}, created_at, rowid
+           LIMIT 1`,
         )
         .get(u.causeWorkItemId) as { id: string } | undefined;
     } else {
       const roleFilter = gate === 'finishing_only' ? ` AND role IN ${FINISHING}` : '';
       next = db
         .prepare(
-          `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE}${roleFilter} ORDER BY created_at, rowid LIMIT 1`,
+          `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE}${roleFilter}
+           ORDER BY ${ROLE_CLASS}, created_at, rowid LIMIT 1`,
         )
         .get() as { id: string } | undefined;
     }
@@ -75,10 +80,11 @@ export function engageKill(db: Db, now: Date): { cancelled: number } {
            WHERE state IN ('queued', 'leased', 'running')
            RETURNING id, work_item_id AS itemId, charged_key AS chargedKey`,
       )
-      .all(iso(now)) as { id: string; itemId: number; chargedKey: string | null }[];
+      .all(iso(now)) as { id: string; itemId: number | null; chargedKey: string | null }[];
     const probe = getUsageState(db).probeDropId;
     for (const d of active) {
-      refundCharge(db, d.itemId, d.chargedKey);
+      // Only item drops are charged against a work item's budget.
+      if (d.itemId !== null) refundCharge(db, d.itemId, d.chargedKey);
       if (d.id === probe) setUsageState(db, { probeDropId: null }, now);
     }
     return { cancelled: active.length };

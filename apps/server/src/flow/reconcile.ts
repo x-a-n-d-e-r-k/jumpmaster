@@ -271,6 +271,7 @@ async function postReview(
     {
       kind: 'post_review',
       opKey: opKeys.review(s.item.id, v.headSha, v.id),
+      zoneId: s.item.dropZoneId,
       itemId: s.item.id,
       payload,
     },
@@ -295,7 +296,13 @@ async function merge(
   const r = await runOp(
     db,
     forges,
-    { kind: 'merge', opKey: opKeys.merge(s.item.id, sha), itemId: s.item.id, payload },
+    {
+      kind: 'merge',
+      opKey: opKeys.merge(s.item.id, sha),
+      zoneId: s.item.dropZoneId,
+      itemId: s.item.id,
+      payload,
+    },
     now,
   );
   if (r.state === 'done') {

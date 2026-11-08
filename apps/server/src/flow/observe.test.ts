@@ -211,6 +211,7 @@ describe('observe mode', () => {
     const op = {
       kind: 'merge' as const,
       opKey: 'merge:1:s',
+      zoneId: h.zone.id,
       itemId: 1,
       payload: { pr: 1, sha: 's', title: 't', message: 'm' },
     };

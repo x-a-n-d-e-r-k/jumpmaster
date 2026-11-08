@@ -45,7 +45,8 @@ export type NewWorkItem = Omit<
 export interface Drop {
   id: string;
   dropZoneId: string;
-  workItemId: number;
+  /** Null for a crew drop, which works for the zone rather than one work item. */
+  workItemId: number | null;
   role: string;
   state: DropState;
   stickId: string | null;
@@ -523,8 +524,10 @@ export type OutboxState = 'pending' | 'done' | 'unknown' | 'failed';
 export interface OutboxRow {
   id: string;
   opKey: string;
-  kind: 'create_pr' | 'post_review' | 'merge';
-  workItemId: number;
+  kind: 'create_pr' | 'post_review' | 'merge' | 'create_issue' | 'update_issue' | 'set_labels';
+  /** Null for a zone-level op (issue and label writes). */
+  workItemId: number | null;
+  zoneId: string;
   payloadJson: string;
   state: OutboxState;
   resultJson: string | null;
@@ -533,7 +536,7 @@ export interface OutboxRow {
   updatedAt: string;
 }
 
-const OUTBOX_COLS = `o.id, o.op_key AS opKey, o.kind, o.work_item_id AS workItemId,
+const OUTBOX_COLS = `o.id, o.op_key AS opKey, o.kind, o.work_item_id AS workItemId, o.zone_id AS zoneId,
   o.payload_json AS payloadJson, o.state, o.result_json AS resultJson, o.error,
   o.created_at AS createdAt, o.updated_at AS updatedAt`;
 
@@ -550,9 +553,9 @@ export function insertOutbox(
 ): boolean {
   const r = db
     .prepare(
-      `INSERT OR IGNORE INTO outbox (id, op_key, kind, work_item_id, payload_json, state, created_at,
-         updated_at)
-       VALUES (@id, @opKey, @kind, @workItemId, @payloadJson, @state, @createdAt, @createdAt)`,
+      `INSERT OR IGNORE INTO outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state,
+         created_at, updated_at)
+       VALUES (@id, @opKey, @kind, @workItemId, @zoneId, @payloadJson, @state, @createdAt, @createdAt)`,
     )
     .run(row);
   return r.changes === 1;
@@ -579,8 +582,8 @@ export function listOutbox(db: Db, states: OutboxState[], zoneId?: string): Outb
   const marks = states.map(() => '?').join(', ');
   return db
     .prepare(
-      `SELECT ${OUTBOX_COLS} FROM outbox o JOIN work_items w ON w.id = o.work_item_id
-       WHERE o.state IN (${marks}) AND (? IS NULL OR w.drop_zone_id = ?)
+      `SELECT ${OUTBOX_COLS} FROM outbox o
+       WHERE o.state IN (${marks}) AND (? IS NULL OR o.zone_id = ?)
        ORDER BY o.created_at, o.rowid`,
     )
     .all(...states, zoneId ?? null, zoneId ?? null) as OutboxRow[];
@@ -730,8 +733,8 @@ export function activeWorkCount(db: Db, zoneId: string): number {
       `SELECT
          (SELECT COUNT(*) FROM drops
             WHERE drop_zone_id = @zone AND state IN ('queued', 'leased', 'running'))
-       + (SELECT COUNT(*) FROM outbox o JOIN work_items w ON w.id = o.work_item_id
-            WHERE w.drop_zone_id = @zone AND o.state IN ('pending', 'unknown')) AS n`,
+       + (SELECT COUNT(*) FROM outbox o
+            WHERE o.zone_id = @zone AND o.state IN ('pending', 'unknown')) AS n`,
     )
     .get({ zone: zoneId }) as { n: number };
   return row.n;

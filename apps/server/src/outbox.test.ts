@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { type Db, openDb } from './db/open.js';
-import { getOutbox, insertOutbox, upsertDropZone, upsertWorkItem } from './db/repo.js';
+import {
+  getOutbox,
+  insertOutbox,
+  listOutbox,
+  setKilled,
+  setZoneMode,
+  upsertDropZone,
+  upsertWorkItem,
+} from './db/repo.js';
 import {
   type ForgePair,
   markPendingUnknown,
@@ -41,18 +49,21 @@ const calls = (method: string) =>
 const prOp = () => ({
   kind: 'create_pr' as const,
   opKey: opKeys.pr(itemId, 'h1'),
+  zoneId: 'main',
   itemId,
   payload: { head: 'agent/issue-1', base: 'main', title: 'Issue 1', body: 'Closes #1' },
 });
 const reviewOp = () => ({
   kind: 'post_review' as const,
   opKey: opKeys.review(itemId, 'h1', 'd9'),
+  zoneId: 'main',
   itemId,
   payload: { pr: 1, event: 'APPROVE' as const, body: 'looks good', commitId: 'h1' },
 });
 const mergeOp = () => ({
   kind: 'merge' as const,
   opKey: opKeys.merge(itemId, 'h1'),
+  zoneId: 'main',
   itemId,
   payload: { pr: 1, sha: 'h1', title: 'Issue 1', message: 'Closes #1' },
 });
@@ -61,6 +72,7 @@ function seed(
   op: {
     kind: 'create_pr' | 'post_review' | 'merge';
     opKey: string;
+    zoneId: string;
     itemId: number;
     payload: unknown;
   },
@@ -72,6 +84,7 @@ function seed(
     opKey: op.opKey,
     kind: op.kind,
     workItemId: op.itemId,
+    zoneId: op.zoneId,
     payloadJson: JSON.stringify(op.payload),
     state,
     createdAt: at.toISOString(),
@@ -128,6 +141,7 @@ describe('FakeForgeState', () => {
     const op = {
       kind: 'create_pr' as const,
       opKey: opKeys.pr(itemId, 'h2'),
+      zoneId: 'main',
       itemId,
       payload: { head: 'agent/issue-77', base: 'main', title: 't', body: 'b' },
     };
@@ -142,6 +156,7 @@ describe('FakeForgeState', () => {
     const op = {
       kind: 'create_pr' as const,
       opKey: opKeys.pr(itemId, 'h2'),
+      zoneId: 'main',
       itemId,
       payload: { head: 'agent/issue-77', base: 'main', title: 't', body: 'b', adoptPulls: [1] },
     };
@@ -156,6 +171,7 @@ describe('FakeForgeState', () => {
     const op = {
       kind: 'create_pr' as const,
       opKey: opKeys.pr(itemId, 'h2'),
+      zoneId: 'main',
       itemId,
       payload: { head: 'agent/issue-77', base: 'main', title: 't', body: 'b', adoptPulls: [1] },
     };
@@ -167,6 +183,7 @@ describe('FakeForgeState', () => {
     const op = {
       kind: 'create_pr' as const,
       opKey: opKeys.pr(itemId, 'h2'),
+      zoneId: 'main',
       itemId,
       payload: { head: 'agent/issue-77', base: 'main', title: 't', body: 'b' },
     };
@@ -411,7 +428,12 @@ describe('recovery', () => {
     const otherItem = item(db, 'other', 1);
     f.state.addPull({ headRef: 'agent/issue-1', headSha: 'h1', author: 'author-bot' });
     f.state.markMerged(1);
-    const op = { ...mergeOp(), opKey: opKeys.merge(otherItem, 'h1'), itemId: otherItem };
+    const op = {
+      ...mergeOp(),
+      opKey: opKeys.merge(otherItem, 'h1'),
+      zoneId: 'other',
+      itemId: otherItem,
+    };
     seed(op, 'unknown', t0);
     expect(await resolveUnknown(db, forges, 'main', t1, 45)).toBe(0);
     expect(getOutbox(db, op.opKey)?.state).toBe('unknown');
@@ -454,5 +476,41 @@ describe('sanitizeForgeText', () => {
     expect(sanitizeForgeText('x'.repeat(100), [], 10)).toHaveLength(10);
     expect(sanitizeForgeText('ab `code span` cd', [], 8)).toBe('ab ');
     expect(sanitizeForgeText('ab `c` `d e`', [], 9)).toBe('ab `c` ');
+  });
+});
+
+describe('zone-level ops', () => {
+  const crewOp = () => ({
+    kind: 'create_issue' as const,
+    opKey: 'issue:main:obj:k',
+    zoneId: 'main',
+    itemId: null,
+    payload: { title: 't', body: 'b', labels: [], since: t0.toISOString() },
+  });
+  const rows = () => (db.prepare('SELECT COUNT(*) AS c FROM outbox').get() as { c: number }).c;
+
+  test('runOp refuses a crew op in observe and while killed, before any insert', async () => {
+    setZoneMode(db, 'main', 'observe', t0);
+    await expect(runOp(db, forges, crewOp(), t1)).rejects.toThrow(/observe mode/);
+    setZoneMode(db, 'main', 'active', t0);
+    setKilled(db, true, t0);
+    await expect(runOp(db, forges, crewOp(), t1)).rejects.toThrow(/kill switch/);
+    expect(rows()).toBe(0);
+    expect(f.author.calls).toHaveLength(0);
+  });
+
+  test('listOutbox filters on the row zone, not on a work item', () => {
+    insertOutbox(db, {
+      id: 'z1',
+      opKey: 'issue:main:o:a',
+      kind: 'create_issue',
+      zoneId: 'main',
+      workItemId: null,
+      payloadJson: '{}',
+      state: 'unknown',
+      createdAt: t0.toISOString(),
+    });
+    expect(listOutbox(db, ['unknown'], 'main').map((r) => r.opKey)).toEqual(['issue:main:o:a']);
+    expect(listOutbox(db, ['unknown'], 'other')).toEqual([]);
   });
 });

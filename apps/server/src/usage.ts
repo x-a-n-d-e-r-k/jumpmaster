@@ -12,7 +12,8 @@ export type Gate = 'open' | 'finishing_only' | 'probe' | 'closed';
 /** Where a rate-limit observation came from. `outcome` null means a live stream event. */
 export type RateLimitSource = {
   dropId: string;
-  workItemId: number;
+  /** Null for a crew drop. */
+  workItemId: number | null;
   startedAt: string | null;
   outcome: DropResult['status'] | null;
 };

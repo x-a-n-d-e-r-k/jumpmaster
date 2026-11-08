@@ -1,7 +1,15 @@
 import type { DropResult } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
 import { openDb } from '../db/open.js';
-import { activeDropFor, getAttempts, getWorkItem, isKilled, setKilled } from '../db/repo.js';
+import {
+  activeDropFor,
+  getAttempts,
+  getWorkItem,
+  insertDrop,
+  isKilled,
+  setKilled,
+  upsertDropZone,
+} from '../db/repo.js';
 import { engageKill } from '../leases.js';
 import { runOp } from '../outbox.js';
 import { harness, toPrOpen } from '../test/flowHarness.js';
@@ -42,6 +50,7 @@ describe('kill switch', () => {
     const op = {
       kind: 'merge' as const,
       opKey: 'merge:1:s',
+      zoneId: 'main',
       itemId: 1,
       payload: { pr: 1, sha: 's', title: 't', message: 'm' },
     };
@@ -146,5 +155,25 @@ describe('kill switch', () => {
     const res = await h.app.inject({ method: 'GET', url: '/' });
     expect(res.body).toMatch(/kill switch is engaged/i);
     expect(res.body).toMatch(/revoke/i);
+  });
+});
+
+describe('kill switch and crew drops', () => {
+  test('engaging the kill switch cancels a crew drop and refunds nothing for it', () => {
+    const db = openDb(tmpDbFile());
+    upsertDropZone(db, { id: 'main', repo: 'o/r', defaultBranch: 'main', configJson: '{}' });
+    insertDrop(db, {
+      id: 'c1',
+      dropZoneId: 'main',
+      workItemId: null,
+      role: 'crew-lead',
+      state: 'queued',
+      chargedKey: 'review',
+    });
+    expect(engageKill(db, new Date())).toEqual({ cancelled: 1 });
+    expect(db.prepare("SELECT state FROM drops WHERE id = 'c1'").get()).toEqual({
+      state: 'cancelled',
+    });
+    expect(db.prepare('SELECT COUNT(*) AS c FROM attempts').get()).toEqual({ c: 0 });
   });
 });

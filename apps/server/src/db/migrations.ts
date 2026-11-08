@@ -129,12 +129,81 @@ ALTER TABLE work_items ADD COLUMN park_reviews_seen TEXT;
 ALTER TABLE work_items ADD COLUMN park_checked_at TEXT;
 `;
 
-export const MIGRATIONS: { version: number; sql: string }[] = [
+/**
+ * v6: crew drops (no work item) and zone-level outbox ops. SQLite's twelve-step rebuild of `drops`
+ * and `outbox`, run with foreign keys off. `outbox.zone_id` defaults to '' so an M2 binary's
+ * insert still succeeds against this schema.
+ */
+const V6_SQL = `
+CREATE TABLE new_drops (
+  id               TEXT PRIMARY KEY,
+  drop_zone_id     TEXT NOT NULL REFERENCES drop_zones(id),
+  work_item_id     INTEGER REFERENCES work_items(id),
+  role             TEXT NOT NULL,
+  state            TEXT NOT NULL
+                   CHECK (state IN ('queued','leased','running','succeeded','failed','lost','cancelled')),
+  stick_id         TEXT REFERENCES sticks(id),
+  epoch            INTEGER NOT NULL DEFAULT 0,
+  lease_expires_at TEXT,
+  prompt_version   TEXT,
+  image            TEXT,
+  result_json      TEXT,
+  created_at       TEXT NOT NULL,
+  started_at       TEXT,
+  finished_at      TEXT,
+  fingerprint      TEXT,
+  pr_number        INTEGER,
+  head_sha         TEXT,
+  input_json       TEXT,
+  charged_key      TEXT,
+  hard_cancel      INTEGER NOT NULL DEFAULT 0,
+  CHECK ((work_item_id IS NULL) = (role IN ('crew-lead','refute','diagnose')))
+);
+INSERT INTO new_drops (id, drop_zone_id, work_item_id, role, state, stick_id, epoch, lease_expires_at,
+  prompt_version, image, result_json, created_at, started_at, finished_at, fingerprint, pr_number,
+  head_sha, input_json, charged_key, hard_cancel)
+SELECT id, drop_zone_id, work_item_id, role, state, stick_id, epoch, lease_expires_at,
+  prompt_version, image, result_json, created_at, started_at, finished_at, fingerprint, pr_number,
+  head_sha, input_json, charged_key, hard_cancel FROM drops;
+DROP TABLE drops;
+ALTER TABLE new_drops RENAME TO drops;
+CREATE UNIQUE INDEX one_active_drop
+  ON drops(work_item_id) WHERE state IN ('queued','leased','running');
+CREATE UNIQUE INDEX one_active_crew_drop
+  ON drops(drop_zone_id) WHERE work_item_id IS NULL AND state IN ('queued','leased','running');
+
+CREATE TABLE new_outbox (
+  id           TEXT PRIMARY KEY,
+  op_key       TEXT NOT NULL UNIQUE,
+  kind         TEXT NOT NULL CHECK (kind IN ('create_pr','post_review','merge',
+                 'create_issue','update_issue','set_labels')),
+  work_item_id INTEGER REFERENCES work_items(id),
+  zone_id      TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL,
+  state        TEXT NOT NULL CHECK (state IN ('pending','done','unknown','failed')),
+  result_json  TEXT,
+  error        TEXT,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+INSERT INTO new_outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state, result_json,
+  error, created_at, updated_at)
+SELECT o.id, o.op_key, o.kind, o.work_item_id,
+  COALESCE((SELECT w.drop_zone_id FROM work_items w WHERE w.id = o.work_item_id), ''),
+  o.payload_json, o.state, o.result_json, o.error, o.created_at, o.updated_at FROM outbox o;
+DROP TABLE outbox;
+ALTER TABLE new_outbox RENAME TO outbox;
+`;
+
+export type Migration = { version: number; sql: string; foreignKeysOff?: boolean };
+
+export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
   { version: 3, sql: V3_SQL },
   { version: 4, sql: V4_SQL },
   { version: 5, sql: V5_SQL },
+  { version: 6, sql: V6_SQL, foreignKeysOff: true },
 ];
 
 /**
@@ -160,13 +229,31 @@ export function migrate(db: Db): number {
   }
   for (const m of MIGRATIONS) {
     if (m.version <= current()) continue;
-    db.transaction(() => {
+    const apply = db.transaction(() => {
       db.exec(m.sql);
+      if (m.foreignKeysOff) {
+        const broken = db.pragma('foreign_key_check') as unknown[];
+        if (broken.length > 0) {
+          throw new Error(`migration v${m.version} broke ${broken.length} foreign key(s)`);
+        }
+      }
       db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)').run(
         m.version,
         new Date().toISOString(),
       );
-    })();
+    });
+    if (!m.foreignKeysOff) {
+      apply();
+      continue;
+    }
+    // SQLite ignores this pragma inside a transaction, so it is set around it.
+    const fkWasOn = db.pragma('foreign_keys', { simple: true }) === 1;
+    db.pragma('foreign_keys = OFF');
+    try {
+      apply();
+    } finally {
+      if (fkWasOn) db.pragma('foreign_keys = ON');
+    }
   }
   return current();
 }

@@ -10,6 +10,7 @@ import { listArtifacts } from './artifacts.js';
 import type { DropZoneConfig, UsageConfig } from './config.js';
 import type { Db } from './db/open.js';
 import {
+  appendEvents,
   clearRequestChangesOnHead,
   type Drop,
   type DropState,
@@ -189,7 +190,13 @@ async function implementResult(c: Ctx, result: DropResult): Promise<void> {
       const op = await runOp(
         db,
         c.deps.forges,
-        { kind: 'create_pr', opKey: opKeys.pr(item.id, headSha), itemId: item.id, payload },
+        {
+          kind: 'create_pr',
+          opKey: opKeys.pr(item.id, headSha),
+          zoneId: item.dropZoneId,
+          itemId: item.id,
+          payload,
+        },
         c.now,
       );
       db.transaction(() => {
@@ -305,6 +312,7 @@ async function reviewResult(c: Ctx, result: DropResult): Promise<void> {
     {
       kind: 'post_review',
       opKey: opKeys.review(item.id, drop.headSha, drop.id),
+      zoneId: item.dropZoneId,
       itemId: item.id,
       payload,
     },
@@ -396,6 +404,7 @@ export async function applyResult(
   const drop = getDrop(db, dropId);
   if (!drop) throw new Error(`unknown drop ${dropId}`);
   if (TERMINAL.has(drop.state)) return;
+  if (drop.workItemId === null) return applyCrewResult(db, deps, drop, result, now);
   const wasProbe = drop.id === getUsageState(db).probeDropId;
   const item = getWorkItem(db, drop.workItemId);
   if (!item) throw new Error(`unknown work item ${drop.workItemId}`);
@@ -430,6 +439,38 @@ export async function applyResult(
       default:
         throw new Error(`unknown drop role ${drop.role}`);
     }
+  } finally {
+    releaseProbe(db, drop.id, deps.usageCfg, now, rand);
+  }
+}
+
+/**
+ * A crew drop's result (no work item). Until crew roles are enabled it only releases the probe and
+ * fails the drop, so nothing a crew drop returns can reach the forge.
+ */
+function applyCrewResult(
+  db: Db,
+  deps: ResultDeps,
+  drop: Drop,
+  result: DropResult,
+  now: Date,
+): void {
+  const rand = deps.rand ?? Math.random;
+  try {
+    if (result.rateLimit) {
+      ingestRateLimit(
+        db,
+        result.rateLimit,
+        { dropId: drop.id, workItemId: null, startedAt: drop.startedAt, outcome: result.status },
+        deps.usageCfg,
+        now,
+        rand,
+      );
+    }
+    updateDrop(db, drop.id, { state: 'failed' });
+    appendEvents(db, drop.id, [
+      { ts: now.toISOString(), kind: 'log', data: { message: 'crew roles not enabled' } },
+    ]);
   } finally {
     releaseProbe(db, drop.id, deps.usageCfg, now, rand);
   }

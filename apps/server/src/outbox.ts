@@ -56,7 +56,14 @@ export type PostReviewPayload = {
 };
 export type MergePayload = { pr: number; sha: string; title: string; message: string };
 
-export type Op = { kind: OpKind; opKey: string; itemId: number; payload: unknown };
+/** `itemId` is null for a zone-level op; `zoneId` decides the mode check and the outbox row. */
+export type Op = {
+  kind: OpKind;
+  opKey: string;
+  zoneId: string;
+  itemId: number | null;
+  payload: unknown;
+};
 
 export const opKeys = {
   pr: (itemId: number, headSha: string) => `pr:${itemId}:${headSha}`,
@@ -111,6 +118,8 @@ async function lookup(forges: ForgePair, kind: OpKind, opKey: string, payload: u
       const pr = await forges.author.getPull(p.pr);
       return pr?.merged ? { merged: true } : null;
     }
+    default:
+      throw new Error(`${kind} is not supported yet`);
   }
 }
 
@@ -148,6 +157,8 @@ async function write(forges: ForgePair, kind: OpKind, opKey: string, payload: un
       });
       return r.merged ? r : null;
     }
+    default:
+      throw Object.assign(new Error(`${kind} is not supported yet`), { status: 400 });
   }
 }
 
@@ -233,13 +244,10 @@ async function fromExisting(
   }
 }
 
-function zoneModeOfItem(db: Db, itemId: number): string | undefined {
-  const row = db
-    .prepare(
-      `SELECT c.mode FROM work_items w JOIN zone_controls c ON c.zone_id = w.drop_zone_id
-         WHERE w.id = ?`,
-    )
-    .get(itemId) as { mode: string } | undefined;
+function zoneMode(db: Db, zoneId: string): string | undefined {
+  const row = db.prepare('SELECT mode FROM zone_controls WHERE zone_id = ?').get(zoneId) as
+    | { mode: string }
+    | undefined;
   return row?.mode;
 }
 
@@ -247,7 +255,7 @@ function zoneModeOfItem(db: Db, itemId: number): string | undefined {
 export async function runOp(db: Db, forges: ForgePair, op: Op, now: Date): Promise<OpResult> {
   if (isKilled(db)) throw new Error(`kill switch engaged: forge write ${op.kind} refused`);
   // Before any insert: a row left behind would later become `unknown` and park the item.
-  if (zoneModeOfItem(db, op.itemId) === 'observe') {
+  if (zoneMode(db, op.zoneId) === 'observe') {
     throw new Error(`observe mode: forge write ${op.kind} suppressed`);
   }
   const existing = getOutbox(db, op.opKey);
@@ -257,6 +265,7 @@ export async function runOp(db: Db, forges: ForgePair, op: Op, now: Date): Promi
     opKey: op.opKey,
     kind: op.kind,
     workItemId: op.itemId,
+    zoneId: op.zoneId,
     payloadJson: JSON.stringify(op.payload),
     state: 'pending',
     createdAt: now.toISOString(),

@@ -196,6 +196,7 @@ describe('M1 repo', () => {
       opKey,
       kind,
       workItemId,
+      zoneId: 'main',
       payloadJson: '{}',
       state: state as 'failed',
       createdAt: t0.toISOString(),

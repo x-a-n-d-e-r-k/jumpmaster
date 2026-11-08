@@ -78,7 +78,7 @@ function outboxSection(ops: OutboxRow[] | undefined): string {
   const rows = ops
     .map(
       (o) =>
-        `<tr><td>${escapeHtml(o.id)}</td><td>${escapeHtml(o.kind)}</td><td>${escapeHtml(o.workItemId)}</td><td>${escapeHtml(o.state)}</td><td>${escapeHtml(o.error ?? '')}</td><td>${escapeHtml(o.updatedAt)}</td></tr>`,
+        `<tr><td>${escapeHtml(o.id)}</td><td>${escapeHtml(o.kind)}</td><td>${escapeHtml(o.workItemId ?? `zone ${o.zoneId}`)}</td><td>${escapeHtml(o.state)}</td><td>${escapeHtml(o.error ?? '')}</td><td>${escapeHtml(o.updatedAt)}</td></tr>`,
     )
     .join('');
   return `<h2>Outbox</h2><table><tr><th>Op</th><th>Kind</th><th>Item</th><th>State</th><th>Error</th><th>Updated</th></tr>${rows}</table>`;
@@ -160,8 +160,9 @@ export function renderHome(state: HomeState): string {
 
   const drops = state.drops
     .map((d) => {
-      const wi = itemById.get(d.workItemId);
-      return `<tr><td><a href="/drops/${encodeURIComponent(d.id)}">${escapeHtml(d.id)}</a></td><td>${wi ? `#${escapeHtml(wi.issueNumber)}` : '-'}</td><td>${escapeHtml(d.role)}</td><td>${escapeHtml(d.state)}</td><td>${escapeHtml(elapsed(d, now))}</td><td>${gateSummary(d)}</td></tr>`;
+      const wi = d.workItemId === null ? undefined : itemById.get(d.workItemId);
+      const target = d.workItemId === null ? 'crew' : wi ? `#${escapeHtml(wi.issueNumber)}` : '-';
+      return `<tr><td><a href="/drops/${encodeURIComponent(d.id)}">${escapeHtml(d.id)}</a></td><td>${target}</td><td>${escapeHtml(d.role)}</td><td>${escapeHtml(d.state)}</td><td>${escapeHtml(elapsed(d, now))}</td><td>${gateSummary(d)}</td></tr>`;
     })
     .join('');
 
