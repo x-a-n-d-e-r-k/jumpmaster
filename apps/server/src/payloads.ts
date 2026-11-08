@@ -55,6 +55,58 @@ export function renderFeedback(f: Feedback, dropId: string): string {
   return `${heading}\n\n${fence(dropId, 'feedback', neutralise(f.text))}`;
 }
 
+/** How many of the latest author reports a reviewer sees. */
+const MAX_REPORTS = 3;
+
+type ReportRow = { role: string; headSha: string | null; resultJson: string };
+type StoredResult = { status?: unknown; headSha?: unknown; summary?: unknown };
+
+/** Results on which a current trooper always sends its report. */
+const carriesReport = (role: string, r: StoredResult): boolean =>
+  r.status === 'completed' || (role === 'heal' && r.status === 'no_changes');
+
+/**
+ * The author's reports for the reviewer: every succeeded implement and heal run on this item that
+ * should carry one, oldest first, the last few fenced and labelled by the head each produced.
+ */
+function authorReports(db: Db, drop: Drop): string {
+  const rows = db
+    .prepare(
+      `SELECT role, head_sha AS headSha, result_json AS resultJson FROM drops
+       WHERE work_item_id = ? AND role IN ('implement', 'heal') AND state = 'succeeded'
+         AND result_json IS NOT NULL
+       ORDER BY created_at, rowid`,
+    )
+    .all(drop.workItemId) as ReportRow[];
+  const runs = rows
+    .map((row) => {
+      try {
+        return { row, result: JSON.parse(row.resultJson) as StoredResult };
+      } catch {
+        return null;
+      }
+    })
+    .filter((r): r is { row: ReportRow; result: StoredResult } => r !== null)
+    .filter(({ row, result }) => carriesReport(row.role, result));
+  const reports = runs
+    .filter(({ result }) => typeof result.summary === 'string')
+    .slice(-MAX_REPORTS)
+    .map(({ row, result }) => {
+      const head = typeof result.headSha === 'string' ? result.headSha : (row.headSha ?? 'unknown');
+      return `### Report for ${head.slice(0, 7)} (${row.role})\n\n${neutralise(String(result.summary))}`;
+    });
+  const body =
+    reports.length > 0
+      ? fence(drop.id, 'author-reports', reports.join('\n\n'))
+      : 'No author report was recorded for this pull request.';
+  const latest = runs.at(-1);
+  const olderTrooper =
+    latest !== undefined && !('summary' in latest.result)
+      ? '\nThe latest author run came from an older trooper that sends no report, so for this review an acceptance criterion that needs a command run and reported, with no evidence, is `minor`, not `major`.'
+      : '';
+  return `## Author reports (data)\n\n${body}\n\nThe head under review is ${drop.headSha ?? 'unknown'}.${olderTrooper}`;
+}
+
 const hasCustomLimits = ({ limits }: DropZoneConfig): boolean =>
   limits.pids !== DEFAULT_PIDS_LIMIT || limits.memoryMb !== undefined || limits.shmMb !== undefined;
 
@@ -114,6 +166,7 @@ export function buildPayload(
         ...common,
         role,
         pr: pr(),
+        prompt: `${common.prompt}\n\n${authorReports(db, drop)}`,
         credentials: {
           claudeToken: secrets.claudeToken,
           ...(zone.reviewReadToken && secrets.githubReadToken
