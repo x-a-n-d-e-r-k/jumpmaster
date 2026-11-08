@@ -345,6 +345,26 @@ describe('lockfileChanges: npm', () => {
     ]);
   });
 
+  test("a registry tarball must be the entry's own package and version", () => {
+    const base = lock({ 'node_modules/vite': reg('vite', '5.0.0') });
+    const evil = 'https://registry.npmjs.org/evil/-/evil-1.0.0.tgz';
+    expect(
+      npm(base, lock({ 'node_modules/vite': { ...reg('vite', '5.0.0'), resolved: evil } })),
+    ).toEqual([`vite: resolved ${evil} is not vite@5.0.0`]);
+    const scoped = {
+      version: '1.2.0',
+      resolved: 'https://registry.npmjs.org/@types/node/-/node-1.2.0.tgz',
+    };
+    const alias = {
+      name: 'string-width',
+      version: '4.2.3',
+      resolved: 'https://registry.npmjs.org/string-width/-/string-width-4.2.3.tgz',
+    };
+    expect(
+      npm(base, lock({ 'node_modules/@types/node': scoped, 'node_modules/sw-cjs': alias })),
+    ).toEqual([]);
+  });
+
   test('the registry host base entries already use is accepted', () => {
     const base = lock({ 'node_modules/a': reg('a', '1.0.0', 'npm.example.test') });
     const head = lock({

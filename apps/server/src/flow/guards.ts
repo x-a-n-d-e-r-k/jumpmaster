@@ -302,6 +302,8 @@ export const LOCKFILES = [
 const UNREADABLE = 'lockfile unreadable';
 
 type NpmEntry = {
+  /** The real package name of an alias (`node_modules/<alias>`). */
+  name?: string;
   version?: string;
   resolved?: string;
   integrity?: string;
@@ -334,6 +336,16 @@ function httpHost(resolved: string): string | null {
   }
 }
 
+/**
+ * Whether a registry URL is the tarball of `pkg@version`: its path ends
+ * `/<pkg>/-/<unscoped name>-<version>.tgz` (`/@scope/name/-/name-1.0.0.tgz` when scoped).
+ */
+function ownTarball(resolved: string, pkg: string, version: string | undefined): boolean {
+  if (!version) return false;
+  const file = pkg.slice(pkg.lastIndexOf('/') + 1);
+  return new URL(resolved).pathname.endsWith(`/${pkg}/-/${file}-${version}.tgz`);
+}
+
 function npmLockChanges(
   baseText: string | null,
   headText: string,
@@ -360,6 +372,11 @@ function npmLockChanges(
     } else if (typeof entry.resolved === 'string') {
       const host = httpHost(entry.resolved);
       if (!host || !hosts.has(host)) out.push(`${name}: non-registry resolved ${entry.resolved}`);
+      else if (!ownTarball(entry.resolved, entry.name ?? name, entry.version)) {
+        out.push(
+          `${name}: resolved ${entry.resolved} is not ${entry.name ?? name}@${entry.version}`,
+        );
+      }
     }
     if (entry.hasInstallScript && moved) out.push(`install script: ${name}`);
     const bins = entry.bin && typeof entry.bin === 'object' ? Object.keys(entry.bin) : [];
