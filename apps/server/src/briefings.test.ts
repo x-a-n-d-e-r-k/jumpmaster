@@ -50,6 +50,25 @@ const open = (w: ZoneWorld) => listBriefings(w.db, { zoneId: 'main', state: 'ope
 const optionOf = (b: { options: BriefingOption[] }, effect: string) =>
   b.options.find((o) => o.effect === effect)?.id ?? 'missing';
 
+describe('raising a briefing', () => {
+  test('a crew briefing raised again takes the crew recommendation and has no diagnosis', () => {
+    const w = zoneWorld({ crew: crewOn });
+    const crew = (recommendation: string) => ({
+      zoneId: 'main',
+      kind: 'crew' as const,
+      subject: 'crew:split',
+      decision: 'Split?',
+      why: 'Two parts.',
+      options: [{ id: 'yes', label: 'Yes', effect: 'none' as const }],
+      recommendation,
+      source: 'crew' as const,
+    });
+    raiseBriefing(w.db, crew('Split it'), t0);
+    raiseBriefing(w.db, crew('Keep it'), plus(t0, MIN));
+    expect(open(w)).toMatchObject([{ recommendation: 'Keep it', diagnosis: null }]);
+  });
+});
+
 describe('parked briefings', () => {
   test('a newly parked item raises one parked briefing; a second pass does not duplicate it', () => {
     const { w, id } = parkedWorld();

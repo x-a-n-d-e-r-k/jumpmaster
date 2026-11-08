@@ -152,8 +152,10 @@ export async function crewLeadInput(
   ].join('\n');
 
   const known = new Set(crewIssues.flatMap((c) => (c.number === null ? [] : [c.number])));
+  // The staged label marks a crew issue whose number the database may not know yet.
   const open = (await forges.author.listOpenIssues()).filter(
-    (i) => !known.has(i.number) && !isCrewFiled(i, zone),
+    (i) =>
+      !known.has(i.number) && !isCrewFiled(i, zone) && !i.labels.includes(zone.crew.stagedLabel),
   );
   const trust = new Map<string, boolean>();
   for (const author of new Set(open.map((i) => i.author))) {

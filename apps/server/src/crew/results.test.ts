@@ -5,6 +5,7 @@ import {
   listBriefings,
   ruleBriefing,
   syncParkBriefings,
+  whyBasis,
 } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
 import {
@@ -23,7 +24,7 @@ import { usageCfg, type ZoneWorld } from '../test/fixtures.js';
 import { plus, t0 } from '../test/helpers.js';
 import { applyCrewActions } from './actions.js';
 import { crewBodySha, flushCrewOps } from './flush.js';
-import { enqueueCrew } from './schedule.js';
+import { enqueueCrew, nextCrewWork } from './schedule.js';
 import { getCrewIssue, listCrewIssues, setCrewIssue } from './store.js';
 
 const MIN = 60_000;
@@ -258,24 +259,92 @@ describe('refute results', () => {
 });
 
 describe('diagnose results', () => {
-  test('a diagnosis updates the parked briefing', async () => {
+  const diagnosis = {
+    diagnosis: 'The test is flaky.',
+    recommendation: 'retry',
+    detail: 'Re-run it.',
+  };
+
+  test('a diagnosis updates the parked briefing beside the server why', async () => {
     const item = w.item(1, 'ready');
     setWorkItemState(w.db, item, 'parked', 'heal budget exhausted', t0);
     syncParkBriefings(w.db, w.zone, t0);
     const id = await crewDrop();
-    await applyResult(
-      w.db,
-      deps(),
-      id,
-      completed({ diagnosis: 'The test is flaky.', recommendation: 'retry', detail: 'Re-run it.' }),
-      t0,
-    );
+    await applyResult(w.db, deps(), id, completed(diagnosis), t0);
     const [b] = listBriefings(w.db, { zoneId: 'main', state: 'open' });
     expect(b).toMatchObject({
       kind: 'parked',
-      why: 'heal budget exhausted\n\nDiagnosis: The test is flaky.',
+      why: 'heal budget exhausted',
+      diagnosis: 'The test is flaky.',
+      diagnosisBasis: whyBasis('heal budget exhausted'),
       recommendation: 'retry: Re-run it.',
     });
     expect(getDrop(w.db, id)?.state).toBe('succeeded');
+  });
+
+  test('the diagnosis survives the passes that follow while the item stays parked', async () => {
+    const item = w.item(1, 'ready');
+    setWorkItemState(w.db, item, 'parked', 'heal budget exhausted', t0);
+    syncParkBriefings(w.db, w.zone, t0);
+    const id = await crewDrop();
+    await applyResult(w.db, deps(), id, completed(diagnosis), t0);
+    syncParkBriefings(w.db, w.zone, plus(t0, MIN));
+    syncParkBriefings(w.db, w.zone, plus(t0, 2 * MIN));
+    const [b] = listBriefings(w.db, { zoneId: 'main', state: 'open' });
+    expect(b).toMatchObject({
+      why: 'heal budget exhausted',
+      diagnosis: 'The test is flaky.',
+      recommendation: 'retry: Re-run it.',
+      diagnoseAttempts: 1,
+    });
+  });
+
+  test('a diagnosis for a briefing already ruled or withdrawn is discarded', async () => {
+    for (const end of ['ruled', 'withdrawn'] as const) {
+      w = await crewWorld();
+      const item = w.item(1, 'ready');
+      setWorkItemState(w.db, item, 'parked', 'heal budget exhausted', t0);
+      syncParkBriefings(w.db, w.zone, t0);
+      const id = await crewDrop();
+      const [b] = listBriefings(w.db, { zoneId: 'main', state: 'open' });
+      if (end === 'ruled') {
+        expect(ruleBriefing(w.db, b?.id ?? -1, 'leave', '', plus(t0, MIN)).ok).toBe(true);
+      } else {
+        setWorkItemState(w.db, item, 'ready', undefined, plus(t0, MIN)); // left parked
+        syncParkBriefings(w.db, w.zone, plus(t0, MIN));
+      }
+      await applyResult(w.db, deps(), id, completed(diagnosis), plus(t0, 2 * MIN));
+      const after = listBriefings(w.db, { zoneId: 'main' }).find((x) => x.id === b?.id);
+      expect(after).toMatchObject({ state: end, diagnosis: null, recommendation: '' });
+      const messages = listEvents(w.db, id).map((e) => String(e.data.message));
+      expect(messages).toContain('diagnosis discarded: the briefing is no longer open');
+    }
+  });
+
+  test('a diagnosis that lands after the briefing changed is discarded; the new why is diagnosed', async () => {
+    const item = w.item(1, 'ready');
+    setWorkItemState(w.db, item, 'parked', 'heal budget exhausted', t0);
+    syncParkBriefings(w.db, w.zone, t0);
+    const id = await crewDrop();
+    // While the drop runs, the item parks again for another reason.
+    setWorkItemState(w.db, item, 'parked', 'review budget exhausted', plus(t0, MIN));
+    syncParkBriefings(w.db, w.zone, plus(t0, MIN));
+    await applyResult(w.db, deps(), id, completed(diagnosis), plus(t0, 2 * MIN));
+    const [b] = listBriefings(w.db, { zoneId: 'main', state: 'open' });
+    expect(b).toMatchObject({
+      why: 'review budget exhausted',
+      diagnosis: null,
+      diagnosisBasis: null,
+      recommendation: '',
+      diagnoseAttempts: 0,
+    });
+    expect(getDrop(w.db, id)?.state).toBe('succeeded');
+    const messages = listEvents(w.db, id).map((e) => String(e.data.message));
+    expect(messages).toContain('diagnosis discarded: the briefing changed since it was asked');
+    expect(nextCrewWork(w.db, w.zone, plus(t0, 3 * MIN))).toMatchObject({
+      role: 'diagnose',
+      briefingId: b?.id,
+      basis: whyBasis('review budget exhausted'),
+    });
   });
 });

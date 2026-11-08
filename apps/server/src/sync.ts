@@ -62,6 +62,16 @@ export function isCrewFiled(issue: ForgeIssue, zone: DropZoneConfig): boolean {
   return issue.authorType === 'Bot' || (zone.botLogins ?? []).includes(issue.author);
 }
 
+/**
+ * A ready issue that still carries the staged label had its ready label added by hand: a
+ * promotion swaps one for the other in a single write, so the two never meet otherwise.
+ */
+const isStagedAndReady = (issue: ForgeIssue, zone: DropZoneConfig): boolean =>
+  zone.crew?.stagedLabel !== undefined && issue.labels.includes(zone.crew.stagedLabel);
+
+/** Why a ready work item for a crew issue that is not (or no longer) promoted was retired. */
+const CREW_NOT_PROMOTED = 'crew issue not promoted';
+
 const isFixTitle = (title: string): boolean => /^fix:/i.test(title);
 
 /** Orders by priority, then fix: items first, then oldest issue. Does not mutate the input. */
@@ -107,14 +117,18 @@ export async function syncDropZone(
   const defaultBranch = await forge.getDefaultBranch();
   const issues = await forge.listReadyIssues(zone.readyLabel);
 
-  // Crew provenance first: a crew-filed issue starts only once its promotion is recorded.
+  // Crew provenance first: a crew issue starts only once its promotion is recorded. An issue is
+  // crew if a crew row of this zone has its number (whatever its body says now, and with the
+  // crew on or off), if it is crew-filed by marker or author, or if it carries the staged label.
   const skippedCrewUnpromoted: number[] = [];
   const crewPromoted = new Set<number>();
   let intakeSkipped: string | undefined;
   try {
     for (const issue of issues) {
-      if (!isCrewFiled(issue, zone)) continue;
-      if (getCrewIssueByNumber(db, zone.id, issue.number)?.state === 'promoted') {
+      const row = getCrewIssueByNumber(db, zone.id, issue.number);
+      const staged = isStagedAndReady(issue, zone);
+      if (!row && !staged && !isCrewFiled(issue, zone)) continue;
+      if (row?.state === 'promoted' && !staged) {
         crewPromoted.add(issue.number);
       } else {
         skippedCrewUnpromoted.push(issue.number);
@@ -167,15 +181,24 @@ export async function syncDropZone(
       });
       const prev = existing.get(issue.number);
       if (!prev) added++;
-      else if (prev.state === 'done' && prev.reason === 'no longer ready') {
+      else if (
+        prev.state === 'done' &&
+        (prev.reason === 'no longer ready' || prev.reason === CREW_NOT_PROMOTED)
+      ) {
         setWorkItemState(db, prev.id, 'ready');
         added++;
       }
     }
 
     const listed = new Set(issues.map((i) => i.number));
-    for (const w of listWorkItems(db, zone.id, 'ready'))
+    for (const w of listWorkItems(db, zone.id, 'ready')) {
       if (!listed.has(w.issueNumber)) setWorkItemState(db, w.id, 'done', 'no longer ready');
+      // Admitted before it was known as crew (a window with no recorded number): it does not
+      // start. An item already in flight is out of reach here.
+      else if (skippedCrewUnpromoted.includes(w.issueNumber)) {
+        setWorkItemState(db, w.id, 'done', CREW_NOT_PROMOTED);
+      }
+    }
   });
   run();
   if (zone.crew?.enabled) {

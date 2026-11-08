@@ -258,8 +258,26 @@ async function write(forges: ForgePair, kind: OpKind, opKey: string, payload: un
 const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 function markDone(db: Db, opKey: string, result: unknown, now: Date): OpResult {
-  updateOutbox(db, opKey, { state: 'done', resultJson: JSON.stringify(result) }, now);
+  db.transaction(() => {
+    updateOutbox(db, opKey, { state: 'done', resultJson: JSON.stringify(result) }, now);
+    recordFiledNumber(db, opKey, result, now);
+  })();
   return { state: 'done', result };
+}
+
+/**
+ * A crew issue's create resolved: its row learns the issue number now, wherever the op resolved
+ * (written, read back, or found by `resolveUnknown`), so intake knows the issue as crew even while
+ * the flush that moves the row on is not running (zone paused, crew disabled, a crash between).
+ */
+export function recordFiledNumber(db: Db, opKey: string, result: unknown, now: Date): void {
+  if (!opKey.startsWith('issue:')) return;
+  const number = (result as { number?: unknown } | undefined)?.number;
+  if (typeof number !== 'number') return;
+  db.prepare(
+    `UPDATE crew_issues SET number = ?, updated_at = ?
+       WHERE number IS NULL AND 'issue:' || zone_id || ':' || objective || ':' || key = ?`,
+  ).run(number, now.toISOString(), opKey);
 }
 
 /** Lookup only; never writes to the forge. Visible → `done`, otherwise the row is `unknown`. */

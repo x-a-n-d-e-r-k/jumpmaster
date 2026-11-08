@@ -249,6 +249,22 @@ const briefing = (o: Partial<Briefing> = {}): Briefing => ({
   diagnoseAttempts: 0,
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: '2026-01-01T00:00:00.000Z',
+  diagnosis: null,
+  diagnosisBasis: null,
+  ...o,
+});
+
+const ruling = (o: Partial<Ruling> = {}): Ruling => ({
+  id: 1,
+  zoneId: 'main',
+  briefingId: 4,
+  choice: 'o1',
+  note: '',
+  createdAt: 't',
+  appliedAt: null,
+  applyError: null,
+  diagnosis: null,
+  effect: 'none',
   ...o,
 });
 
@@ -299,6 +315,42 @@ describe('briefings', () => {
     expect(html).toContain('<code>allow-x</code>');
   });
 
+  test('a diagnosis shows under the why, and beside the ruling once ruled', () => {
+    const parked = briefing({
+      kind: 'parked',
+      subject: 'item:3',
+      why: 'heal budget exhausted',
+      diagnosis: 'The test is flaky.',
+      source: 'server',
+    });
+    const html = renderBriefings({ open: [parked], rulings: [], zones: [z] });
+    expect(html).toMatch(
+      /<pre>heal budget exhausted<\/pre><\/td><\/tr><tr><th>Diagnosis<\/th><td><pre>The test is flaky\.<\/pre>/,
+    );
+    const ruled = renderBriefings({
+      open: [],
+      rulings: [ruling({ diagnosis: 'Out of disk.' })],
+      zones: [z],
+    });
+    expect(ruled).toContain('<th>Diagnosis</th>');
+    expect(ruled).toContain('<td>Out of disk.</td>');
+  });
+
+  test('a Promote ruling held while the crew is off says so; a Reject does not wait', () => {
+    const off = { ...z, crew: { ...z.crew, enabled: false } };
+    const on = { ...z, crew: { ...z.crew, enabled: true } };
+    const rulings = [
+      ruling({ id: 1, choice: 'promote', effect: 'promote_issue' }),
+      ruling({ id: 2, choice: 'reject', effect: 'reject_issue' }),
+    ];
+    const html = renderBriefings({ open: [], rulings, zones: [off] });
+    expect(html).toMatch(/<td>promote<\/td>.*?<td>waiting: crew disabled<\/td>/s);
+    expect(html.match(/waiting: crew disabled/g)).toHaveLength(1);
+    expect(renderBriefings({ open: [], rulings, zones: [on] })).not.toContain(
+      'waiting: crew disabled',
+    );
+  });
+
   test('a held refute promotion shows its Reject option and when it will promote', () => {
     const held = briefing({
       kind: 'promote_held',
@@ -342,18 +394,9 @@ describe('briefings', () => {
         { id: 'b', label: 'b', effect: 'none' },
       ],
     });
-    const ruling: Ruling = {
-      id: 1,
-      zoneId: 'main',
-      briefingId: 4,
-      choice: X,
-      note: X,
-      createdAt: 't',
-      appliedAt: null,
-      applyError: X,
-    };
+    const evilRuling = ruling({ choice: X, note: X, applyError: X, diagnosis: X });
     const html =
-      renderBriefings({ open: [evil], rulings: [ruling], zones: [z] }) +
+      renderBriefings({ open: [evil], rulings: [evilRuling], zones: [z] }) +
       renderHome({ zones: [z], items: [], drops: [], briefings: [evil] }) +
       renderGoals({
         zone: z,
@@ -447,6 +490,28 @@ describe('goal ladder', () => {
     expect(html).toContain('Crew issues not started (no recorded promotion)');
     expect(html).toContain('#12');
     expect(html).toContain('#13');
+  });
+
+  test('a skipped issue on a rejected or failed crew row is listed with its remedy', () => {
+    const html = renderGoals({
+      zone: z,
+      goals: undefined,
+      crewIssues: [
+        crewIssue({ id: 5, number: 24, state: 'rejected' }),
+        crewIssue({ id: 6, number: 25, state: 'failed' }),
+        crewIssue({ id: 7, number: 26, state: 'staged' }),
+      ],
+      items: [],
+      skippedCrewUnpromoted: [24, 25, 26, 27],
+    });
+    expect(html).toContain(
+      '<li>#24: crew issue rejected. It can never start: close it, or file a fresh issue for the work.</li>',
+    );
+    expect(html).toContain(
+      '<li>#25: crew issue failed. It can never start: close it, or file a fresh issue for the work.</li>',
+    );
+    expect(html).toContain('<li>#26: crew issue staged, not promoted</li>');
+    expect(html).toContain('<li>#27</li>');
   });
 
   test('an unparsed GOAL.md shows its parse error', () => {

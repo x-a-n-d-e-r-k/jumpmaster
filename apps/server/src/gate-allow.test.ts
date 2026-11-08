@@ -1,3 +1,4 @@
+import type { DropResult } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
 import {
   applyGateAllowance,
@@ -7,7 +8,9 @@ import {
   listRulings,
   raiseBriefing,
   ruleBriefing,
+  whyBasis,
 } from './briefings.js';
+import { enqueueCrew, nextCrewWork } from './crew/schedule.js';
 import { openDb } from './db/open.js';
 import {
   getGateAllowance,
@@ -15,12 +18,15 @@ import {
   getWorkItem,
   recordGatePark,
   setWorkItemState,
+  updateDrop,
 } from './db/repo.js';
 import { decide } from './flow/decide.js';
 import { reconcileZone } from './flow/reconcile.js';
 import { buildSnapshot, gateDigest, zonePass } from './flow/snapshot.js';
 import { promptVersions } from './payloads.js';
+import { applyResult } from './results.js';
 import { syncParked } from './sync.js';
+import { crewOn } from './test/crew.js';
 import { usageCfg, type ZoneWorld, zoneWorld } from './test/fixtures.js';
 import { plus, t0 } from './test/helpers.js';
 
@@ -414,5 +420,119 @@ describe('allow a gate change by Command ruling', () => {
       'allow_gate_change needs a server parked briefing with a head',
     ]);
     expect(getGateAllowance(w.db, id, 1, HEAD)).toBeUndefined();
+  });
+});
+
+/** The zone with its crew on, so a diagnose drop can be enqueued for the parked briefing. */
+const crewZone = (w: ZoneWorld) => ({ ...w.zone, crew: crewOn });
+
+/** Runs one diagnose drop for the open parked briefing and lands its result at `at`. */
+async function diagnose(w: ZoneWorld, at: Date, text = 'The gate change is deliberate.') {
+  const zone = crewZone(w);
+  const drop = await enqueueCrew(
+    w.db,
+    w.forges,
+    zone,
+    await zonePass(w.forges, zone, 'main'),
+    promptVersions(),
+    usageCfg,
+    at,
+  );
+  if (!drop) throw new Error('no diagnose drop enqueued');
+  updateDrop(w.db, drop, { state: 'running', startedAt: at.toISOString() });
+  const result: DropResult = {
+    status: 'completed',
+    gates: [],
+    crew: { diagnosis: text, recommendation: 'needs_command', detail: 'It only adds --bail.' },
+  };
+  await applyResult(
+    w.db,
+    { forges: w.forges, zone, secrets: [], usageCfg, rand: () => 0.5 },
+    drop,
+    result,
+    at,
+  );
+}
+
+describe('a diagnosis on a gate park', () => {
+  test('an Allow ruled while a diagnosis is shown still applies', async () => {
+    const { w, id } = gateWorld();
+    const b = await parkAndBrief(w, id);
+    await diagnose(w, plus(t0, 2 * MIN));
+    const shown = parkedBriefing(w);
+    expect(shown.diagnosis).toBe('The gate change is deliberate.');
+    expect(shown.why).toBe(b.why);
+    await allow(w, shown, plus(t0, 3 * MIN));
+    await reconcile(w, plus(t0, 4 * MIN));
+    expect(listRulings(w.db, 'main')[0]).toMatchObject({ applyError: null });
+    expect(getGateAllowance(w.db, id, 1, HEAD)).toMatchObject({ headSha: HEAD });
+  });
+
+  test('the diagnosis stays through later passes on the same head', async () => {
+    const { w, id } = gateWorld();
+    await parkAndBrief(w, id);
+    await diagnose(w, plus(t0, 2 * MIN));
+    await reconcile(w, plus(t0, 3 * MIN));
+    await reconcile(w, plus(t0, 4 * MIN));
+    expect(parkedBriefing(w)).toMatchObject({
+      diagnosis: 'The gate change is deliberate.',
+      recommendation: 'needs_command: It only adds --bail.',
+    });
+  });
+
+  test('a park re-judged on a new head drops the old diagnosis and is diagnosed once more', async () => {
+    const { w, id } = gateWorld();
+    const b = await parkAndBrief(w, id);
+    await diagnose(w, plus(t0, 2 * MIN));
+    w.f.state.setHead(1, NEXT);
+    gateChange(w, NEXT);
+    await sync(w, plus(t0, 2 * 60 * MIN));
+    await reconcile(w, plus(t0, 2 * 60 * MIN + MIN));
+    const fresh = parkedBriefing(w);
+    expect(fresh.id).toBe(b.id);
+    expect(fresh.why).toContain('on head f0e1d2c');
+    expect(fresh).toMatchObject({
+      diagnosis: null,
+      diagnosisBasis: null,
+      recommendation: '',
+      diagnoseAttempts: 0,
+    });
+    const at = plus(t0, 2 * 60 * MIN + 2 * MIN);
+    expect(nextCrewWork(w.db, crewZone(w), at)).toMatchObject({
+      role: 'diagnose',
+      briefingId: b.id,
+      basis: whyBasis(fresh.why),
+    });
+    await diagnose(w, at, 'The new head keeps --bail.');
+    expect(parkedBriefing(w)).toMatchObject({
+      diagnosis: 'The new head keeps --bail.',
+      diagnoseAttempts: 1,
+    });
+    // Diagnosed once: the zone's next crew work is the lead cycle, not another diagnosis.
+    expect(nextCrewWork(w.db, crewZone(w), plus(at, MIN))).toEqual({ role: 'crew-lead' });
+  });
+
+  test('an out-of-date Allow re-raises a fresh briefing on the unchanged head', async () => {
+    const { w, id } = gateWorld();
+    const b = await parkAndBrief(w, id);
+    await allow(w, b, plus(t0, 2 * MIN));
+    const park = getGatePark(w.db, id);
+    if (!park) throw new Error('no gate park');
+    recordGatePark(
+      w.db,
+      { ...park, details: { scripts: ['test: "vitest" → "evil"'], tools: [] } },
+      plus(t0, 2 * MIN),
+    );
+    await reconcile(w, plus(t0, 3 * MIN));
+    expect(listRulings(w.db, 'main')[0]).toMatchObject({ applyError: 'briefing out of date' });
+    await reconcile(w, plus(t0, 4 * MIN));
+    const again = parkedBriefing(w);
+    expect(again.id).not.toBe(b.id);
+    expect(again.why).toContain('"evil"');
+    expect(again.options.some((o) => o.effect === 'allow_gate_change')).toBe(true);
+    // Raised once: the next pass keeps the same briefing rather than raising another.
+    await reconcile(w, plus(t0, 5 * MIN));
+    expect(parkedBriefing(w).id).toBe(again.id);
+    expect(listBriefings(w.db, { zoneId: 'main', state: 'open' })).toHaveLength(1);
   });
 });

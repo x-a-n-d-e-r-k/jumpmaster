@@ -2,13 +2,14 @@ import { createHash } from 'node:crypto';
 import { hasOpenBriefing, raiseBriefing, withdrawBriefing } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
-import { getZoneMode, isKilled } from '../db/repo.js';
+import { getOutbox, getZoneMode, isKilled } from '../db/repo.js';
 import {
   bodyWithoutMarker,
   type CreateIssuePayload,
   type ForgePair,
   type OpResult,
   opKeys,
+  recordFiledNumber,
   runOp,
   type SetLabelsPayload,
   sanitizeCrewText,
@@ -174,9 +175,28 @@ async function reject(
   return { result, done: { state: 'rejected' } };
 }
 
+/** Whether Command rejected the issue by a ruling that has been applied (not a refute verdict). */
+function rejectedByCommand(db: Db, row: CrewIssue): boolean {
+  return (
+    db
+      .prepare(
+        `SELECT 1 FROM rulings r JOIN briefings b ON b.id = r.briefing_id, json_each(b.options_json) o
+         WHERE b.zone_id = ? AND b.subject = ? AND r.applied_at IS NOT NULL
+           AND json_extract(o.value, '$.id') = r.choice
+           AND json_extract(o.value, '$.effect') = 'reject_issue'
+         LIMIT 1`,
+      )
+      .get(row.zoneId, subjectOf(row)) !== undefined
+  );
+}
+
 /**
  * Moves crew issues along by their forge writes, all through the outbox as the author identity.
- * Only in an active zone with the kill switch off; returns how many issues changed state.
+ * Only in an active zone with the kill switch off; returns how many issues changed state. With the
+ * zone's crew disabled nothing is filed, promoted (a refute hold neither starts nor ends), revised
+ * or closed by the crew: those rows wait as they are until it is enabled again. The one write that
+ * goes ahead is the close of an issue Command rejected by ruling (its brake); a `rejecting` row from
+ * a refute verdict waits like the rest.
  */
 export async function flushCrewOps(
   db: Db,
@@ -188,8 +208,20 @@ export async function flushCrewOps(
   holdMs = 60_000,
 ): Promise<number> {
   if (isKilled(db) || getZoneMode(db, zone.id, zone.mode) !== 'active') return 0;
+  const crewOn = zone.crew?.enabled === true;
   let moved = 0;
   for (const row of listCrewIssues(db, zone.id, PENDING)) {
+    if (!crewOn) {
+      // No forge write, but a create that already resolved gives the row its number, so intake
+      // knows the issue as crew.
+      if (row.state === 'filing' && row.number === null) {
+        const op = getOutbox(db, opKeys.issue(zone.id, row.objective, row.key));
+        if (op?.state === 'done' && op.resultJson != null) {
+          recordFiledNumber(db, op.opKey, JSON.parse(op.resultJson), now);
+        }
+      }
+      if (row.state !== 'rejecting' || !rejectedByCommand(db, row)) continue;
+    }
     let step: Step | 'wait' | 'changed';
     try {
       switch (row.state) {

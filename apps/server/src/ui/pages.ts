@@ -1,5 +1,5 @@
 import type { ArtifactRow } from '../artifacts.js';
-import type { Briefing, Ruling } from '../briefings.js';
+import { type Briefing, type Ruling, WAITS_FOR_CREW } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
 import type { CrewIssue } from '../crew/store.js';
 import type {
@@ -144,7 +144,7 @@ function briefingBlock(b: Briefing, holds: Map<string, string> | undefined): str
     v ? `<tr><th>${k}</th><td>${escapeHtml(v)}</td></tr>` : '';
   return (
     `<h3>${escapeHtml(b.decision)}</h3>` +
-    `<table>${row('Zone', b.zoneId)}${row('Kind', b.kind)}${row('About', b.subject)}${b.why ? `<tr><th>Why</th><td><pre>${escapeHtml(b.why)}</pre></td></tr>` : ''}${row('Recommendation', b.recommendation)}${row('On hold', b.onHold)}${row('Raised by', b.source)}${row('Raised', b.createdAt)}</table>` +
+    `<table>${row('Zone', b.zoneId)}${row('Kind', b.kind)}${row('About', b.subject)}${b.why ? `<tr><th>Why</th><td><pre>${escapeHtml(b.why)}</pre></td></tr>` : ''}${b.diagnosis ? `<tr><th>Diagnosis</th><td><pre>${escapeHtml(b.diagnosis)}</pre></td></tr>` : ''}${row('Recommendation', b.recommendation)}${row('On hold', b.onHold)}${row('Raised by', b.source)}${row('Raised', b.createdAt)}</table>` +
     (hold ? `<p>Promotes at ${escapeHtml(hold)} unless you reject it.</p>` : '') +
     `<form class="rule" data-briefing="${escapeHtml(b.id)}">${options}<textarea name="note" maxlength="2000" placeholder="Note (optional)"></textarea><br><input type="password" placeholder="Operator token" autocomplete="off" required> <button>Rule</button></form>`
   );
@@ -162,15 +162,23 @@ export function renderBriefings(s: {
     s.open.length === 0
       ? '<p>Nothing is waiting on you.</p>'
       : s.open.map((b) => briefingBlock(b, s.holds)).join('') + RULE_SCRIPT;
+  const crewOff = new Set(s.zones.filter((z) => !z.crew?.enabled).map((z) => z.id));
+  // Recorded, and held until the zone's crew is enabled again (applyPendingRulings).
+  const waiting = (r: Ruling) =>
+    r.appliedAt === null &&
+    r.applyError === null &&
+    r.effect !== null &&
+    WAITS_FOR_CREW.has(r.effect) &&
+    crewOff.has(r.zoneId);
   const rulings = s.rulings
     .map(
       (r) =>
-        `<tr><td>${escapeHtml(r.id)}</td><td>${escapeHtml(r.zoneId)}</td><td>${escapeHtml(r.briefingId)}</td><td>${escapeHtml(r.choice)}</td><td>${escapeHtml(r.note)}</td><td>${escapeHtml(r.createdAt)}</td><td>${escapeHtml(r.appliedAt ?? '-')}</td><td>${escapeHtml(r.applyError ?? '')}</td></tr>`,
+        `<tr><td>${escapeHtml(r.id)}</td><td>${escapeHtml(r.zoneId)}</td><td>${escapeHtml(r.briefingId)}</td><td>${escapeHtml(r.choice)}</td><td>${escapeHtml(r.note)}</td><td>${escapeHtml(r.createdAt)}</td><td>${escapeHtml(r.appliedAt ?? (waiting(r) ? 'waiting: crew disabled' : '-'))}</td><td>${escapeHtml(r.applyError ?? '')}</td><td>${escapeHtml(r.diagnosis ?? '')}</td></tr>`,
     )
     .join('');
   return page(
     `<p><a href="/">Back</a></p><h2>Briefings (decisions waiting on you)</h2>${open}` +
-      `<h2>Rulings (decisions recorded)</h2><table><tr><th>Ruling</th><th>Zone</th><th>Briefing</th><th>Choice</th><th>Note</th><th>Ruled</th><th>Applied</th><th>Error</th></tr>${rulings}</table>`,
+      `<h2>Rulings (decisions recorded)</h2><table><tr><th>Ruling</th><th>Zone</th><th>Briefing</th><th>Choice</th><th>Note</th><th>Ruled</th><th>Applied</th><th>Error</th><th>Diagnosis</th></tr>${rulings}</table>`,
   );
 }
 
@@ -215,10 +223,23 @@ export function renderGoals(s: {
       return `<tr><td>${escapeHtml(c.objective)}</td><td><code>${escapeHtml(c.key)}</code></td><td>${escapeHtml(c.title)}</td><td>${escapeHtml(c.state)}</td><td>${c.number === null ? '-' : `#${escapeHtml(c.number)}`}</td><td>${escapeHtml(wi?.state ?? '-')}</td><td>${findings}</td></tr>`;
     })
     .join('');
+  const rowByNumber = new Map(
+    s.crewIssues.flatMap((c) => (c.number === null ? [] : [[c.number, c] as const])),
+  );
+  // Why it was skipped: its crew row's state, if it has one (else a marker, bot author or the
+  // staged label marked it crew). A rejected or failed row never starts: say what to do instead.
+  const skippedLine = (n: number): string => {
+    const c = rowByNumber.get(n);
+    if (!c) return `#${escapeHtml(n)}`;
+    if (c.state === 'rejected' || c.state === 'failed') {
+      return `#${escapeHtml(n)}: crew issue ${escapeHtml(c.state)}. It can never start: close it, or file a fresh issue for the work.`;
+    }
+    return `#${escapeHtml(n)}: crew issue ${escapeHtml(c.state)}, not promoted`;
+  };
   const skipped =
     s.skippedCrewUnpromoted.length === 0
       ? '<p>None.</p>'
-      : `<ul>${s.skippedCrewUnpromoted.map((n) => `<li>#${escapeHtml(n)}</li>`).join('')}</ul>`;
+      : `<ul>${s.skippedCrewUnpromoted.map((n) => `<li>${skippedLine(n)}</li>`).join('')}</ul>`;
   return page(
     `<p><a href="/">Back</a></p><h2>Objectives (goal ladder): ${escapeHtml(s.zone.id)}</h2>${ladder}` +
       `<h2>Crew issues</h2><table><tr><th>Objective</th><th>Key</th><th>Title</th><th>State</th><th>Issue</th><th>Work item</th><th>Findings</th></tr>${issues}</table>` +

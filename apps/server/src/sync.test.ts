@@ -1,15 +1,17 @@
 import { beforeEach, describe, expect, test } from 'vitest';
 import type { DropZoneConfig } from './config.js';
-import { insertCrewIssue } from './crew/store.js';
+import { flushCrewOps } from './crew/flush.js';
+import { type CrewIssueState, getCrewIssue, insertCrewIssue, setCrewIssue } from './crew/store.js';
 import type { Db } from './db/open.js';
 import { openDb } from './db/open.js';
 import { listWorkItems, setWorkItemState, type WorkItem } from './db/repo.js';
 import type { ForgeIssue } from './forge/github.js';
 import { getGoals } from './goals.js';
+import { resolveUnknown } from './outbox.js';
 import { rankItems, syncDropZone } from './sync.js';
 import { fakeForge } from './test/fakes.js';
 import { makeZone, zoneWorld } from './test/fixtures.js';
-import { t0, tmpDbFile } from './test/helpers.js';
+import { plus, t0, tmpDbFile } from './test/helpers.js';
 
 const pair = <F>(f: F) => ({ author: f, reviewer: f });
 
@@ -318,5 +320,123 @@ describe('crew provenance at intake', () => {
     const r = await syncDropZone(w.db, w.forges, w.zone, t0);
     expect(numbers(w)).toEqual([]);
     expect(r.skippedCrewUnpromoted).toEqual([18]);
+  });
+
+  /** A crew row for issue `n` in `state`. */
+  const crewRow = (w: ReturnType<typeof zoneWorld>, n: number, state: CrewIssueState) =>
+    insertCrewIssue(w.db, {
+      zoneId: 'main',
+      key: `k${n}`,
+      source: 'crew-lead',
+      sourceRef: 'd',
+      objective: 'obj',
+      title: `crew ${n}`,
+      body: 'Do it.',
+      priority: null,
+      state,
+      number: n,
+      createdAt: t0.toISOString(),
+    });
+
+  test('an issue on a crew row is crew whatever its body, with the crew off', async () => {
+    // The marker was edited out and the ready label added by hand; the crew was then disabled.
+    const w = world([crewIssue(20, { body: 'Cleaned up.' })], [], false);
+    crewRow(w, 20, 'staged');
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([]);
+    expect(r.skippedCrewUnpromoted).toEqual([20]);
+  });
+
+  test('a ready issue that still carries the staged label is crew and not started', async () => {
+    const both = ['agent-ready', 'agent-staged'];
+    const w = world([
+      crewIssue(21, { body: 'No marker, no row.', labels: both }),
+      crewIssue(22, { body: 'Promoted row, staged label back.', labels: both }),
+    ]);
+    crewRow(w, 22, 'promoted');
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([]);
+    expect(r.skippedCrewUnpromoted).toEqual([21, 22]);
+  });
+
+  test('a ready work item admitted for a crew issue not promoted is retired; it comes back once promoted', async () => {
+    const w = world([crewIssue(23, { body: 'Cleaned up.' })]);
+    const item = w.item(23, 'ready');
+    const row = crewRow(w, 23, 'staged');
+    await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(listWorkItems(w.db, 'main').map((i) => [i.id, i.state, i.reason])).toEqual([
+      [item, 'done', 'crew issue not promoted'],
+    ]);
+    setCrewIssue(w.db, row, { state: 'promoted' }, t0);
+    await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(listWorkItems(w.db, 'main').map((i) => [i.id, i.state])).toEqual([[item, 'ready']]);
+  });
+
+  test('a reopened rejected or failed crew issue stays unstartable and is listed', async () => {
+    const w = world([
+      crewIssue(24, { body: 'Reopened and cleaned.' }),
+      crewIssue(25, { body: 'Cleaned.' }),
+    ]);
+    crewRow(w, 24, 'rejected');
+    crewRow(w, 25, 'failed');
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([]);
+    expect(r.skippedCrewUnpromoted).toEqual([24, 25]);
+  });
+
+  /** A filing crew row whose create reached the forge but answered 5xx: op unknown, no number. */
+  async function unresolvedFiling(w: ReturnType<typeof zoneWorld>): Promise<number> {
+    const on = makeZone({ crew: { ...makeZone().crew, enabled: true } });
+    const id = insertCrewIssue(w.db, {
+      zoneId: 'main',
+      key: 'k',
+      source: 'crew-lead',
+      sourceRef: 'd',
+      objective: 'obj',
+      title: 'Add docs',
+      body: 'Do it.',
+      priority: null,
+      createdAt: t0.toISOString(),
+    });
+    w.f.author.failNext('createIssue', '5xx-after-success');
+    await flushCrewOps(w.db, w.forges, on, [], t0);
+    expect(getCrewIssue(w.db, id)).toMatchObject({ state: 'filing', number: null });
+    return id;
+  }
+
+  test('before the create resolves, the row has no number and the staged label keeps the issue from starting', async () => {
+    const w = world([]);
+    const id = await unresolvedFiling(w);
+    const [n, e] =
+      [...w.f.state.issues.entries()].find(([, x]) => x.issue?.title === 'Add docs') ?? [];
+    if (n === undefined || !e?.issue) throw new Error('issue not created');
+    // The marker is edited out and ready added by hand; the staged label is still on.
+    e.issue.body = 'Cleaned up.';
+    e.labels = ['agent-staged', 'agent-ready'];
+    e.issue.labels = [...e.labels];
+    const off = makeZone({ crew: { ...makeZone().crew, enabled: false } });
+    const r = await syncDropZone(w.db, w.forges, off, plus(t0, 1));
+    expect(getCrewIssue(w.db, id)?.number).toBeNull();
+    expect(numbers(w)).toEqual([]);
+    expect(r.skippedCrewUnpromoted).toEqual([n]);
+  });
+
+  test('once the create resolves the row has its number, and intake knows the issue by it alone', async () => {
+    const w = world([]);
+    const id = await unresolvedFiling(w);
+    // The create resolves while the crew is disabled: the flush that would record it does not run.
+    await resolveUnknown(w.db, w.forges, 'main', plus(t0, 1), 45);
+    const n = getCrewIssue(w.db, id)?.number;
+    expect(n).toEqual(expect.any(Number));
+    // Someone edits the marker out, drops the staged label and labels it ready.
+    const e = w.f.state.issues.get(n ?? -1);
+    if (!e?.issue) throw new Error('issue not created');
+    e.issue.body = 'Cleaned up.';
+    e.labels = ['agent-ready'];
+    e.issue.labels = ['agent-ready'];
+    const off = makeZone({ crew: { ...makeZone().crew, enabled: false } });
+    const r = await syncDropZone(w.db, w.forges, off, plus(t0, 2));
+    expect(numbers(w)).toEqual([]);
+    expect(r.skippedCrewUnpromoted).toEqual([n]);
   });
 });

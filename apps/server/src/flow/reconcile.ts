@@ -376,7 +376,9 @@ export async function reconcileZone(
   );
   syncParkBriefings(db, zone, now);
   if (mode === 'active') {
-    // Rulings apply only while the zone acts; one made while paused waits for resume.
+    // Rulings apply only while the zone acts; one made while paused waits for resume. They apply
+    // before the flush, so a Reject recorded meanwhile beats a refute hold that has run out (also
+    // on the first pass after the crew is enabled again).
     const deps = { forges: () => forges, zone: () => zone };
     actions += await applyPendingRulings(db, deps, zone.id, now);
     actions += await flushCrewOps(db, forges, zone, secrets, now);

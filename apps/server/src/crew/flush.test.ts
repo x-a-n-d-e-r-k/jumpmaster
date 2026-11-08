@@ -8,8 +8,11 @@ import {
   ruleBriefing,
 } from '../briefings.js';
 import { getOutbox, setKilled, setWorkItemState, setZoneMode, upsertWorkItem } from '../db/repo.js';
+import { reconcileZone } from '../flow/reconcile.js';
+import { zonePass } from '../flow/snapshot.js';
 import { isJmIssueBody, opMarker, resolveUnknown, sanitizeCrewText } from '../outbox.js';
-import { makeZone, type ZoneWorld, zoneWorld } from '../test/fixtures.js';
+import { promptVersions } from '../payloads.js';
+import { makeZone, usageCfg, type ZoneWorld, zoneWorld } from '../test/fixtures.js';
 import { plus, t0 } from '../test/helpers.js';
 import { flushCrewOps } from './flush.js';
 import {
@@ -403,6 +406,206 @@ describe('promotion', () => {
     expect(isJmIssueBody(ia?.body ?? '')).toBe(true);
     expect(getCrewIssue(w.db, b)?.state).toBe('rejected');
     expect((await w.f.author.getIssue(getCrewIssue(w.db, b)?.number ?? -1))?.state).toBe('closed');
+  });
+});
+
+describe('crew disabled', () => {
+  const off = makeZone({ crew: { ...crewOn, enabled: false } });
+  const flushOff = (at = t0) => flushCrewOps(w.db, w.forges, off, [SECRET], at);
+  const depsOff = () => ({ forges: () => w.forges, zone: () => off });
+  const depsOn = () => ({ forges: () => w.forges, zone: () => zone });
+  const outboxRows = () =>
+    (w.db.prepare('SELECT COUNT(*) AS n FROM outbox').get() as { n: number }).n;
+
+  async function staged(key = 'add-docs'): Promise<number> {
+    const id = intent({ key });
+    await flush();
+    expect(getCrewIssue(w.db, id)?.state).toBe('staged');
+    return id;
+  }
+
+  function briefingFor(id: number, kind: 'promote' | 'promote_held'): number {
+    return raiseBriefing(
+      w.db,
+      {
+        zoneId: 'main',
+        kind,
+        subject: `issue:${id}`,
+        decision: 'd',
+        why: 'w',
+        options: [
+          { id: 'promote', label: 'Promote', effect: 'promote_issue' },
+          { id: 'reject', label: 'Reject', effect: 'reject_issue' },
+          { id: 'restage', label: 'Re-stage', effect: 'restage_issue' },
+        ],
+        source: 'server',
+      },
+      t0,
+    );
+  }
+
+  test('a promoting issue stays promoting and nothing is written', async () => {
+    const id = await staged();
+    setCrewIssue(w.db, id, { state: 'promoting' }, t0);
+    const before = outboxRows();
+    expect(await flushOff(plus(t0, MIN))).toBe(0);
+    expect(getCrewIssue(w.db, id)?.state).toBe('promoting');
+    expect(outboxRows()).toBe(before);
+    expect(writes('setLabels')).toHaveLength(0);
+  });
+
+  test('a filing intent is not filed, and revising waits too', async () => {
+    const r = await staged('other');
+    const id = intent();
+    setCrewIssue(w.db, r, { state: 'revising', body: 'Better docs.' }, t0);
+    const updates = writes('updateIssue').length;
+    expect(await flushOff()).toBe(0);
+    expect(getCrewIssue(w.db, id)?.state).toBe('filing');
+    expect(getCrewIssue(w.db, r)?.state).toBe('revising');
+    expect(writes('createIssue')).toHaveLength(1); // only `other`, filed while the crew was on
+    expect(writes('updateIssue')).toHaveLength(updates);
+  });
+
+  test('a Promote ruling is recorded but applies only once the crew is enabled again', async () => {
+    const id = await staged();
+    const b = briefingFor(id, 'promote');
+    expect(ruleBriefing(w.db, b, 'promote', '', t0).ok).toBe(true);
+    expect(await applyPendingRulings(w.db, depsOff(), 'main', plus(t0, MIN))).toBe(0);
+    expect(listRulings(w.db, 'main')[0]).toMatchObject({ appliedAt: null, applyError: null });
+    expect(getCrewIssue(w.db, id)?.state).toBe('staged');
+    expect(await applyPendingRulings(w.db, depsOn(), 'main', plus(t0, 2 * MIN))).toBe(1);
+    expect(getCrewIssue(w.db, id)?.state).toBe('promoting');
+    await flush(plus(t0, 3 * MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('promoted');
+  });
+
+  test('a Re-stage ruling waits for the crew too', async () => {
+    const id = await staged();
+    const b = briefingFor(id, 'promote');
+    ruleBriefing(w.db, b, 'restage', '', t0);
+    const reads = writes('getIssue').length;
+    expect(await applyPendingRulings(w.db, depsOff(), 'main', plus(t0, MIN))).toBe(0);
+    expect(writes('getIssue')).toHaveLength(reads);
+    expect(listRulings(w.db, 'main')[0]).toMatchObject({ appliedAt: null, applyError: null });
+  });
+
+  test('a Reject applies with the crew off: a promoted issue never starts', async () => {
+    const id = await staged();
+    const b = briefingFor(id, 'promote');
+    setCrewIssue(w.db, id, { state: 'promoted' }, t0);
+    const item = upsertWorkItem(w.db, {
+      dropZoneId: 'main',
+      issueNumber: getCrewIssue(w.db, id)?.number ?? -1,
+      title: 't',
+      body: 'b',
+      author: 'author-bot',
+      priority: 2,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    ruleBriefing(w.db, b, 'reject', '', t0);
+    await reconcileZone(
+      w.db,
+      w.forges,
+      off,
+      await zonePass(w.forges, off, 'main'),
+      promptVersions(),
+      usageCfg,
+      [],
+      plus(t0, MIN),
+    );
+    expect(listRulings(w.db, 'main')[0]).toMatchObject({ applyError: null });
+    expect(listRulings(w.db, 'main')[0]?.appliedAt).not.toBeNull();
+    // Command's Reject is the one forge write the disabled crew still makes: the issue closes.
+    const row = getCrewIssue(w.db, id);
+    expect(row?.state).toBe('rejected');
+    expect((await w.f.author.getIssue(row?.number ?? -1))?.state).toBe('closed');
+    expect(w.db.prepare('SELECT state FROM work_items WHERE id = ?').get(item.id)).toEqual({
+      state: 'done',
+    });
+    expect(
+      w.db.prepare('SELECT COUNT(*) AS n FROM drops WHERE work_item_id = ?').get(item.id),
+    ).toEqual({ n: 0 });
+  });
+
+  test('a refute rejection landing while disabled closes nothing until the crew is enabled', async () => {
+    const id = await staged();
+    // What applyRefute records for a refute `reject` verdict: no ruling by Command.
+    setCrewIssue(w.db, id, { state: 'rejecting' }, t0);
+    const n = getCrewIssue(w.db, id)?.number ?? -1;
+    const closes = () => writes('updateIssue').length;
+    const before = closes();
+    await flushOff(plus(t0, MIN));
+    await flushOff(plus(t0, 2 * MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('rejecting');
+    expect(closes()).toBe(before);
+    expect((await w.f.author.getIssue(n))?.state).toBe('open');
+    await flush(plus(t0, 3 * MIN));
+    await flush(plus(t0, 4 * MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('rejected');
+    expect((await w.f.author.getIssue(n))?.state).toBe('closed');
+    expect(closes()).toBe(before + 1);
+  });
+
+  test('a Retry on a parked item applies with the crew off', async () => {
+    const item = w.item(5, 'ready');
+    setWorkItemState(w.db, item, 'parked', 'stuck', t0);
+    const b = raiseBriefing(
+      w.db,
+      {
+        zoneId: 'main',
+        kind: 'parked',
+        subject: `item:${item}`,
+        decision: 'd',
+        why: 'stuck',
+        options: [{ id: 'retry', label: 'Retry', effect: 'retry_item' }],
+        source: 'server',
+      },
+      t0,
+    );
+    ruleBriefing(w.db, b, 'retry', '', t0);
+    expect(await applyPendingRulings(w.db, depsOff(), 'main', plus(t0, MIN))).toBe(1);
+    expect(w.db.prepare('SELECT state FROM work_items WHERE id = ?').get(item)).not.toEqual({
+      state: 'parked',
+    });
+  });
+
+  test('an expired refute hold does not promote while disabled; it does once enabled', async () => {
+    const id = await staged();
+    briefingFor(id, 'promote_held');
+    setCrewIssue(w.db, id, { state: 'promote_held', holdUntil: t0.toISOString() }, t0);
+    await flushOff(plus(t0, 10 * MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('promote_held');
+    expect(writes('setLabels')).toHaveLength(0);
+    await flush(plus(t0, 11 * MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('promoted');
+  });
+
+  test('a filed row whose number was never recorded learns it on a disabled pass', async () => {
+    const id = intent();
+    w.f.author.failNext('createIssue', '5xx-after-success');
+    await flush();
+    await resolveUnknown(w.db, w.forges, 'main', plus(t0, MIN), 45);
+    const n = getCrewIssue(w.db, id)?.number;
+    expect(n).toEqual(expect.any(Number));
+    // As a database from before the number was recorded at resolution would have it.
+    w.db.prepare('UPDATE crew_issues SET number = NULL WHERE id = ?').run(id);
+    await flushOff(plus(t0, 2 * MIN));
+    expect(getCrewIssue(w.db, id)).toMatchObject({ state: 'filing', number: n });
+    expect(writes('createIssue')).toHaveLength(1);
+  });
+
+  test('a filing whose create resolves while disabled gets its one issue after re-enable', async () => {
+    const id = intent();
+    w.f.author.failNext('createIssue', '5xx-after-success');
+    await flush();
+    expect(getCrewIssue(w.db, id)?.state).toBe('filing');
+    await resolveUnknown(w.db, w.forges, 'main', plus(t0, MIN), 45);
+    await flushOff(plus(t0, 2 * MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('filing');
+    await flush(plus(t0, 3 * MIN));
+    expect(getCrewIssue(w.db, id)).toMatchObject({ state: 'staged', number: expect.any(Number) });
+    expect(writes('createIssue')).toHaveLength(1);
   });
 });
 

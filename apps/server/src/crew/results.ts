@@ -4,7 +4,7 @@ import {
   isCrewRole,
   parseCrewOutput,
 } from '@jumpmaster/protocol';
-import { raiseBriefing } from '../briefings.js';
+import { raiseBriefing, whyBasis } from '../briefings.js';
 import type { Db } from '../db/open.js';
 import { appendEvents, type Drop, type DropState, updateDrop } from '../db/repo.js';
 import type { CrewInputJson } from '../payloads.js';
@@ -117,18 +117,37 @@ function applyRefute(
   setCrewIssue(db, issue.id, { ...base, state: 'rejecting' }, now);
 }
 
-/** Folds a diagnosis into the parked briefing, if it is still open. */
-function applyDiagnose(db: Db, briefingId: number, out: CrewOutput['diagnose'], now: Date): void {
+/**
+ * Records a diagnosis on the parked briefing it was asked for, beside the server's why, if that
+ * briefing is still open and its why is still the one diagnosed (`basis`). Returns why it was
+ * discarded, if it was.
+ */
+function applyDiagnose(
+  db: Db,
+  work: { briefingId: number; basis?: string },
+  out: CrewOutput['diagnose'],
+  now: Date,
+): string | undefined {
   const row = db
     .prepare(`SELECT why FROM briefings WHERE id = ? AND state = 'open'`)
-    .get(briefingId) as { why: string } | undefined;
-  if (!row) return;
-  db.prepare('UPDATE briefings SET why = ?, recommendation = ?, updated_at = ? WHERE id = ?').run(
-    `${row.why}\n\nDiagnosis: ${out.diagnosis}`,
+    .get(work.briefingId) as { why: string } | undefined;
+  if (!row) return 'diagnosis discarded: the briefing is no longer open';
+  const basis = whyBasis(row.why);
+  // A drop queued before v12 carries no basis: it is accepted, as it was then.
+  if (work.basis !== undefined && work.basis !== basis) {
+    return 'diagnosis discarded: the briefing changed since it was asked';
+  }
+  db.prepare(
+    `UPDATE briefings SET diagnosis = ?, diagnosis_basis = ?, recommendation = ?, updated_at = ?
+       WHERE id = ?`,
+  ).run(
+    out.diagnosis,
+    basis,
     `${out.recommendation}: ${out.detail}`,
     now.toISOString(),
-    briefingId,
+    work.briefingId,
   );
+  return undefined;
 }
 
 /**
@@ -182,7 +201,8 @@ export async function applyCrewResult(
         const issue = getCrewIssue(db, work.crewIssueId);
         if (issue) applyRefute(db, deps, issue, parsed.value as CrewOutput['refute'], now);
       } else if (role === 'diagnose' && work?.role === 'diagnose') {
-        applyDiagnose(db, work.briefingId, parsed.value as CrewOutput['diagnose'], now);
+        const discarded = applyDiagnose(db, work, parsed.value as CrewOutput['diagnose'], now);
+        return finish(db, drop, 'succeeded', now, discarded);
       }
       finish(db, drop, 'succeeded', now);
     })();

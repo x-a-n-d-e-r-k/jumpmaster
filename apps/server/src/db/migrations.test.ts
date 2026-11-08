@@ -1,8 +1,13 @@
+import { createHash } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { expect, test } from 'vitest';
+import { syncParkBriefings } from '../briefings.js';
+import { syncDropZone } from '../sync.js';
+import { fakeForge } from '../test/fakes.js';
+import { makeZone } from '../test/fixtures.js';
 import { M0_SCHEMA_SQL, MIGRATIONS, migrate } from './migrations.js';
 import { type Db, openDb } from './open.js';
 import { getUsageState } from './repo.js';
@@ -136,6 +141,187 @@ test('an item drop without a work item is refused by the CHECK', () => {
       .run(id, item, role);
   expect(() => ins('a', null, 'implement')).toThrow(/CHECK/);
   expect(() => ins('b', 1, 'crew-lead')).toThrow(/CHECK/);
+});
+
+/**
+ * A database at v11 whose parked briefings carry a diagnosis inside `why`, as the crew wrote it
+ * before v12: item 1's open briefing (diagnosed), item 2's open briefing (not yet diagnosed), a
+ * ruled briefing for item 1 with a diagnosis, and a crew briefing whose why merely contains the
+ * same words.
+ */
+function v11Db(f: string): void {
+  const raw = new Database(f);
+  raw.exec('CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+  for (const m of MIGRATIONS.filter((m) => m.version <= 11)) {
+    raw.exec(m.sql);
+    raw.prepare('INSERT INTO schema_version VALUES (?, ?)').run(m.version, 'x');
+  }
+  const options = JSON.stringify([
+    { id: 'retry', label: 'Retry', effect: 'retry_item' },
+    { id: 'leave', label: 'Leave parked', effect: 'none' },
+  ]);
+  raw.exec(`
+    INSERT INTO drop_zones VALUES ('main','o/r','main','{}');
+    INSERT INTO work_items (drop_zone_id, issue_number, title, body, author, issue_created_at,
+        updated_at, state, reason)
+      VALUES ('main', 1, 't', 'b', 'a', 'x', '2026-01-01T00:00:00.000Z', 'parked', 'heal budget exhausted'),
+             ('main', 2, 't', 'b', 'a', 'x', '2026-01-01T00:00:00.000Z', 'parked', 'stuck');
+  `);
+  const ins = raw.prepare(
+    `INSERT INTO briefings (zone_id, kind, subject, decision, why, options_json, recommendation,
+       on_hold, source, state, diagnose_attempts, created_at, updated_at)
+     VALUES ('main', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'x', 'x')`,
+  );
+  ins.run(
+    'parked',
+    'item:1',
+    'Issue #1 is parked. Retry it?',
+    'heal budget exhausted\n\nDiagnosis: The test is flaky.',
+    options,
+    'retry: Re-run it.',
+    'Issue #1',
+    'server',
+    'open',
+  );
+  ins.run(
+    'parked',
+    'item:2',
+    'Issue #2 is parked. Retry it?',
+    'stuck',
+    options,
+    '',
+    'Issue #2',
+    'server',
+    'open',
+  );
+  ins.run(
+    'parked',
+    'item:1',
+    'Issue #1 is parked. Retry it?',
+    'earlier\n\nDiagnosis: Out of disk.',
+    options,
+    'leave: Wait.',
+    'Issue #1',
+    'server',
+    'ruled',
+  );
+  ins.run(
+    'crew',
+    'crew:x',
+    'Split?',
+    'Two parts.\n\nDiagnosis: none here.',
+    '[]',
+    '',
+    '',
+    'crew',
+    'open',
+  );
+  raw.close();
+}
+
+const sha = (s: string) => createHash('sha256').update(s).digest('hex');
+
+test('v12 carves a diagnosis out of each parked briefing why, keyed to the server text', () => {
+  const f = tmpDbFile();
+  v11Db(f);
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(
+    ids(
+      db,
+      'SELECT subject, state, why, diagnosis, diagnosis_basis AS basis, recommendation FROM briefings ORDER BY id',
+    ),
+  ).toEqual([
+    {
+      subject: 'item:1',
+      state: 'open',
+      why: 'heal budget exhausted',
+      diagnosis: 'The test is flaky.',
+      basis: sha('heal budget exhausted'),
+      recommendation: 'retry: Re-run it.',
+    },
+    {
+      subject: 'item:2',
+      state: 'open',
+      why: 'stuck',
+      diagnosis: null,
+      basis: null,
+      recommendation: '',
+    },
+    {
+      subject: 'item:1',
+      state: 'ruled',
+      why: 'earlier',
+      diagnosis: 'Out of disk.',
+      basis: sha('earlier'),
+      recommendation: 'leave: Wait.',
+    },
+    {
+      subject: 'crew:x',
+      state: 'open',
+      why: 'Two parts.\n\nDiagnosis: none here.',
+      diagnosis: null,
+      basis: null,
+      recommendation: '',
+    },
+  ]);
+  // The next pass finds the carved briefing up to date: it keeps the diagnosis and is not rewritten.
+  syncParkBriefings(db, makeZone(), new Date('2026-01-02T00:00:00.000Z'));
+  expect(
+    ids(db, 'SELECT why, diagnosis, recommendation, updated_at FROM briefings WHERE id = 1'),
+  ).toEqual([
+    {
+      why: 'heal budget exhausted',
+      diagnosis: 'The test is flaky.',
+      recommendation: 'retry: Re-run it.',
+      updated_at: 'x',
+    },
+  ]);
+});
+
+test('v12 gives a crew row the number its resolved create recorded; intake then starts nothing', async () => {
+  const f = tmpDbFile();
+  v11Db(f);
+  const raw = new Database(f);
+  const crewRow = raw.prepare(
+    `INSERT INTO crew_issues (zone_id, key, source, objective, title, title_norm, body, state,
+       created_at, updated_at)
+     VALUES ('main', ?, 'crew-lead', 'obj', 't', 't', 'b', 'filing', 'x', 'x')`,
+  );
+  crewRow.run('k'); // its create resolved while the zone was paused: op done, row unnumbered
+  crewRow.run('open'); // its create is still unresolved
+  const op = raw.prepare(
+    `INSERT INTO outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state,
+       result_json, created_at, updated_at)
+     VALUES (?, ?, 'create_issue', NULL, 'main', '{}', ?, ?, 'x', 'x')`,
+  );
+  op.run('o1', 'issue:main:obj:k', 'done', '{"number":7}');
+  op.run('o2', 'issue:main:obj:open', 'unknown', null);
+  raw.close();
+  const db = openDb(f);
+  expect(ids(db, 'SELECT key, number FROM crew_issues ORDER BY id')).toEqual([
+    { key: 'k', number: 7 },
+    { key: 'open', number: null },
+  ]);
+  // Someone edits the marker out of #7, drops the staged label and adds ready; the crew is off.
+  const forge = fakeForge({
+    issues: [
+      {
+        number: 7,
+        title: 't',
+        body: 'Cleaned up.',
+        author: 'alice',
+        authorType: 'User',
+        labels: ['agent-ready'],
+        createdAt: 'x',
+      },
+    ],
+    trusted: ['alice'],
+  });
+  const zone = makeZone({ crew: { ...makeZone().crew, enabled: false } });
+  const r = await syncDropZone(db, { author: forge, reviewer: forge }, zone, new Date());
+  expect(r.skippedCrewUnpromoted).toEqual([7]);
+  expect(ids(db, 'SELECT issue_number FROM work_items WHERE issue_number = 7')).toEqual([]);
 });
 
 test('a crew drop has no work item, and a second active crew drop in the zone is refused', () => {

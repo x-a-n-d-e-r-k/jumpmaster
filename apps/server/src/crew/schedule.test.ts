@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, test } from 'vitest';
-import { listBriefings, raiseBriefing, ruleBriefing, syncParkBriefings } from '../briefings.js';
+import {
+  listBriefings,
+  raiseBriefing,
+  ruleBriefing,
+  syncParkBriefings,
+  whyBasis,
+} from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
 import {
   getDrop,
@@ -157,6 +163,7 @@ describe('enqueueCrew', () => {
       role: 'diagnose',
       briefingId: briefing?.id,
       itemId: item,
+      basis: whyBasis(briefing?.why ?? 'no briefing'),
     });
     const d = (await enqueue()) ?? '';
     expect(work(d).role).toBe('diagnose');

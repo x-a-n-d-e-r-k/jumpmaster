@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { Db } from './open.js';
 
@@ -307,7 +308,59 @@ CREATE TABLE gate_allowances (
 ALTER TABLE rulings ADD COLUMN apply_attempts INTEGER NOT NULL DEFAULT 0;
 `;
 
-export type Migration = { version: number; sql: string; foreignKeysOff?: boolean };
+/**
+ * v12: a parked briefing's diagnosis lives beside the server-built `why`, keyed to the `why` it
+ * diagnosed (`diagnosis_basis`, sha256), so a pass that rebuilds the briefing keeps it. Briefings
+ * written before v12 carry it inside `why` after a blank line: carved out here (see afterV12).
+ */
+const V12_SQL = `
+ALTER TABLE briefings ADD COLUMN diagnosis TEXT;
+ALTER TABLE briefings ADD COLUMN diagnosis_basis TEXT;
+UPDATE briefings SET
+    diagnosis = substr(why, instr(why, char(10) || char(10) || 'Diagnosis: ') + 13),
+    why = substr(why, 1, instr(why, char(10) || char(10) || 'Diagnosis: ') - 1)
+  WHERE kind = 'parked' AND source = 'server'
+    AND instr(why, char(10) || char(10) || 'Diagnosis: ') > 0;
+`;
+
+/**
+ * After the v12 SQL: the basis of each diagnosis carved (SQLite has no sha256, so it is set here),
+ * and the issue number of each crew row whose create already resolved. Before v12 the row learned
+ * its number only in the flush, so a create resolved while the zone was paused (or the crew off)
+ * left it unnumbered and intake could not know the issue as crew by number. The op key is
+ * `opKeys.issue`: `issue:<zone>:<objective>:<key>`.
+ */
+function afterV12(db: Db): void {
+  db.exec(`
+    UPDATE crew_issues SET number = (
+        SELECT json_extract(o.result_json, '$.number') FROM outbox o
+          WHERE o.op_key = 'issue:' || crew_issues.zone_id || ':' || crew_issues.objective || ':'
+            || crew_issues.key
+            AND o.state = 'done' AND o.kind = 'create_issue'
+            AND json_type(o.result_json, '$.number') = 'integer')
+      WHERE number IS NULL AND EXISTS (
+        SELECT 1 FROM outbox o
+          WHERE o.op_key = 'issue:' || crew_issues.zone_id || ':' || crew_issues.objective || ':'
+            || crew_issues.key
+            AND o.state = 'done' AND o.kind = 'create_issue'
+            AND json_type(o.result_json, '$.number') = 'integer');
+  `);
+  const rows = db
+    .prepare(
+      'SELECT id, why FROM briefings WHERE diagnosis IS NOT NULL AND diagnosis_basis IS NULL',
+    )
+    .all() as { id: number; why: string }[];
+  const set = db.prepare('UPDATE briefings SET diagnosis_basis = ? WHERE id = ?');
+  for (const r of rows) set.run(createHash('sha256').update(r.why).digest('hex'), r.id);
+}
+
+export type Migration = {
+  version: number;
+  sql: string;
+  foreignKeysOff?: boolean;
+  /** Runs after `sql`, in the same transaction. */
+  after?: (db: Db) => void;
+};
 
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
@@ -321,6 +374,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 9, sql: V9_SQL },
   { version: 10, sql: V10_SQL },
   { version: 11, sql: V11_SQL },
+  { version: 12, sql: V12_SQL, after: afterV12 },
 ];
 
 /**
@@ -348,6 +402,7 @@ export function migrate(db: Db): number {
     if (m.version <= current()) continue;
     const apply = db.transaction(() => {
       db.exec(m.sql);
+      m.after?.(db);
       if (m.foreignKeysOff) {
         const broken = db.pragma('foreign_key_check') as unknown[];
         if (broken.length > 0) {
