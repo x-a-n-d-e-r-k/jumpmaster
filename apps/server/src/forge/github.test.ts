@@ -473,6 +473,31 @@ describe('GitHubForge', () => {
         });
       });
 
+      test('jobs no runner has picked up are reported as queued', async () => {
+        refuseCheckRuns();
+        nock(api)
+          .get('/repos/o/r/actions/runs')
+          .query(true)
+          .reply(200, { total_count: 1, workflow_runs: [{ id: 11 }] });
+        nock(api)
+          .get('/repos/o/r/actions/runs/11/jobs')
+          .query(true)
+          .reply(200, {
+            total_count: 3,
+            jobs: [
+              run('preflight', 'queued', null),
+              run('guard', 'waiting', null),
+              run('lint', 'in_progress', null),
+            ],
+          });
+        statusesOnly([]);
+        expect(await forge.checksFor('sha1')).toEqual({
+          state: 'pending',
+          names: ['preflight', 'guard', 'lint'],
+          queued: ['preflight', 'guard'],
+        });
+      });
+
       test('a failed Actions job fails the checks through the fallback', async () => {
         refuseCheckRuns();
         nock(api)
@@ -505,6 +530,7 @@ describe('GitHubForge', () => {
         expect(await forge.checksFor('sha1')).toEqual({
           state: 'failure',
           names: ['build', 'ci/x'],
+          queued: ['build'],
         });
         mock([run('lint', 'completed', 'timed_out'), run('slow', 'queued', null)], []);
         expect((await forge.checksFor('sha1')).state).toBe('failure');
