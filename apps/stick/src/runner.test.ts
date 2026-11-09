@@ -583,7 +583,10 @@ describe('runDrop', () => {
       for (const f of readdirSync(dir))
         expect(readFileSync(join(dir, f), 'utf8')).not.toContain(TOKEN);
     } finally {
-      process.env.TMPDIR = prev;
+      // Assigning undefined would store the string "undefined", and every later tmpdir() would
+      // point there (CI runners have no TMPDIR).
+      if (prev === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = prev;
     }
   });
 
