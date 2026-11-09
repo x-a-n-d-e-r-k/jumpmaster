@@ -29,8 +29,10 @@ ENV JAVA_HOME=/opt/java/openjdk \
     MAVEN_HOME=/opt/maven \
     PATH=/opt/java/openjdk/bin:/opt/maven/bin:${PATH}
 # Root-owned and read-only to both identities: the agent can't change a binary the gate runs.
+# A login shell rebuilds PATH from /etc/profile: the profile.d snippet puts Java and Maven back.
 RUN chown -R root:root /opt/java/openjdk /opt/maven \
  && chmod -R go-w /opt/java/openjdk /opt/maven \
  && java -version \
  && mvn -v \
+ && printf '%s\n' 'case ":$PATH:" in *:/opt/java/openjdk/bin:*) ;; *) PATH="/opt/java/openjdk/bin:/opt/maven/bin:$PATH" ;; esac' > /etc/profile.d/jm-jvm.sh \
  && find / -xdev -type f -perm /6000 -exec chmod a-s {} +

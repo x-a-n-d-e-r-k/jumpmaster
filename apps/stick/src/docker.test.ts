@@ -289,6 +289,9 @@ function egressDocker(
       return {
         async inspect() {
           if (name === 'present:1') return { Id: 'sha256:x' };
+          if (name === 'labelled:1')
+            return { Id: 'sha256:y', Config: { Labels: { 'org.jumpmaster.trooper.egress': '1' } } };
+          if (name === 'nolabels:1') return { Id: 'sha256:z', Config: { Labels: null } };
           throw Object.assign(new Error('no such image'), { statusCode: 404 });
         },
       };
@@ -500,4 +503,13 @@ test('imageExists asks the engine; listNetworksByLabel returns names and labels'
   expect(await d.listNetworksByLabel('jumpmaster.stick', 's1')).toEqual([
     { name: 'jm-drop-d1-3', labels: { 'jumpmaster.drop': 'd1' } },
   ]);
+});
+
+test('imageLabels reads the image config labels; none is empty, an absent image throws', async () => {
+  const { docker } = egressDocker();
+  const d = new DockerDriver(docker as never);
+  expect(await d.imageLabels('labelled:1')).toEqual({ 'org.jumpmaster.trooper.egress': '1' });
+  expect(await d.imageLabels('nolabels:1')).toEqual({});
+  expect(await d.imageLabels('present:1')).toEqual({});
+  await expect(d.imageLabels('absent:1')).rejects.toThrow(/no such image/);
 });

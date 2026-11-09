@@ -15,6 +15,8 @@ const env = process.env;
 const [owner, name] = (env.E2E_REPO ?? '').split('/');
 const TROOPER = 'jumpmaster-trooper:e2e';
 const SERVICE = 'jumpmaster-e2e-service:dev';
+/** The e2e trooper with its egress label emptied, as on an image built before egress. */
+const OLD_TROOPER = 'jumpmaster-trooper:e2e-pre-egress';
 const ALPINE = env.E2E_ALPINE;
 const docker = new Docker();
 let failures = 0;
@@ -73,7 +75,7 @@ class ProbingDriver extends DockerDriver {
   }
 }
 
-function payload(dropId, mode, allow) {
+function payload(dropId, mode, allow, image = TROOPER) {
   return {
     protocol: 1,
     dropId,
@@ -95,7 +97,7 @@ function payload(dropId, mode, allow) {
     maxTurns: 1,
     promptVersion: 'e2e',
     prompt: 'review',
-    image: TROOPER,
+    image,
     protectedPaths: [],
     credentials: { claudeToken: 'sk-ant-oat01-E2EDUMMYDUMMYDUMMYDUMMY' },
     services: [{ name: 'db', image: SERVICE, port: 5432, readyTimeoutSeconds: 30 }],
@@ -129,11 +131,11 @@ async function drop(dropId, mode, allow, o = {}) {
   driver.probe = o.probe;
   const c = client();
   const started = Date.now();
-  await runDrop(payload(dropId, mode, allow), {
+  await runDrop(payload(dropId, mode, allow, o.image), {
     client: c,
     driver,
     stickId: 'e2e-stick',
-    allowedImages: new Set([TROOPER, SERVICE]),
+    allowedImages: new Set([TROOPER, OLD_TROOPER, SERVICE]),
     egressImage: o.egressImage ?? 'jumpmaster-egress:dev',
     heartbeatMs: 60_000,
   });
@@ -343,6 +345,21 @@ check(
     closed.started.length === 0,
   { result: closed.result, started: closed.started },
 );
+
+// 4. an image whose trooper predates egress would ignore payload.egress: refused before anything.
+for (const mode of ['enforce', 'monitor']) {
+  const old = await drop(`e2e-egress-old-${mode}`, mode, allow, { image: OLD_TROOPER });
+  check(
+    `${mode}: an image without the trooper egress label fails the drop, naming it and the fix`,
+    old.result?.status === 'failed' &&
+      (old.result?.reason ?? '').startsWith(
+        `image ${OLD_TROOPER} does not declare egress support`,
+      ) &&
+      /Rebuild it FROM a current jumpmaster-trooper image/.test(old.result?.reason ?? '') &&
+      old.started.length === 0,
+    { result: old.result, started: old.started },
+  );
+}
 
 console.log(failures === 0 ? 'egress e2e: pass' : `egress e2e: ${failures} failure(s)`);
 process.exit(failures === 0 ? 0 : 1);

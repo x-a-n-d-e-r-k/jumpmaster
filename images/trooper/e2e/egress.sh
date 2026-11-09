@@ -9,6 +9,8 @@
 #     DNS, no route out. From jm-egress-out: the proxy accepts nothing.
 #   - monitor: unlisted public hosts go through and are reported; private answers are still refused.
 #   - fail closed: a proxy image that isn't there fails the drop before any trooper exists.
+#   - an image whose trooper predates egress (no egress label) fails the drop, enforce or monitor,
+#     before any network, proxy or trooper exists.
 # Controls first prove each refusal means something: from the default bridge the host listener,
 # a raw IP and external DNS all work. Exits non-zero on any failure.
 set -euo pipefail
@@ -34,6 +36,9 @@ trap cleanup EXIT
 
 docker build -q --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-trooper:dev -f images/trooper/Dockerfile . >/dev/null
 docker build -q -t jumpmaster-trooper:e2e images/trooper/e2e >/dev/null
+# The same trooper as if built before egress: its egress label emptied (a label can't be removed).
+printf 'FROM jumpmaster-trooper:e2e\nLABEL org.jumpmaster.trooper.egress=""\n' |
+  docker build -q -t jumpmaster-trooper:e2e-pre-egress - >/dev/null
 docker build -q --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-egress:dev -f images/egress/Dockerfile . >/dev/null
 docker build -q --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-stick:dev -f images/stick/Dockerfile . >/dev/null
 docker build -q --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-e2e-service:dev -f images/trooper/e2e/service.Dockerfile images/trooper/e2e >/dev/null

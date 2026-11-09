@@ -163,6 +163,47 @@ describe('stack presets', () => {
     expect(sweep).toBeGreaterThan(install);
   });
 
+  test('every toolchain directory a preset puts on PATH is put back for login shells', () => {
+    // /etc/profile resets PATH in a login shell; each preset's /etc/profile.d snippet restores it.
+    for (const file of Object.values(PRESET_FILES)) {
+      const final = finalStage(instructions(read(file)));
+      const dirs = final
+        .filter((i) => i.op === 'ENV')
+        .flatMap((i) => /(?:^|\s)PATH=(\S+)/.exec(i.args)?.[1]?.split(':') ?? [])
+        .filter((d) => d.startsWith('/'));
+      const runs = final
+        .filter((i) => i.op === 'RUN')
+        .map((i) => i.args)
+        .join('\n');
+      const snippet = /printf[^\n]*>\s*\/etc\/profile\.d\/jm-[\w-]+\.sh/.exec(runs)?.[0] ?? '';
+      if (file.includes('python')) expect(dirs, file).toEqual([]);
+      for (const dir of dirs) expect(snippet, `${file} ${dir}`).toContain(`${dir}:`);
+    }
+  });
+
+  test('the pnpm example zone image is pinned and leaves the Corepack shims where they are', () => {
+    const text = read('images/trooper/examples/Dockerfile.pnpm');
+    const runs = instructions(text)
+      .filter((i) => i.op === 'RUN')
+      .map((i) => i.args);
+    const all = runs.join('\n');
+    // A bare `corepack enable` would put shims back into /usr/local/bin; @latest isn't a pin.
+    expect(all).not.toMatch(/\bcorepack (enable|prepare|install)\b/);
+    expect(all).not.toMatch(/@latest\b/);
+    const pack = /npm pack\b[^\n&]*\bpnpm@(\d+\.\d+\.\d+)\b/.exec(all);
+    expect(pack).not.toBeNull();
+    const version = pack?.[1] as string;
+    expect(all).toMatch(
+      new RegExp(`[0-9a-f]{128}\\s+pnpm-${version}\\.tgz"\\s*\\|\\s*sha512sum -c -`),
+    );
+    expect(all).toMatch(new RegExp(`npm i -g [^\\n&]*\\./pnpm-${version}\\.tgz`));
+    expect(runs.at(-1)).toMatch(SETUID_SWEEP);
+    // The preset e2e builds it and runs its pnpm.
+    expect(read('images/trooper/e2e/presets.sh')).toMatch(
+      /-t jumpmaster-trooper-example-pnpm:dev -f images\/trooper\/examples\/Dockerfile\.pnpm/,
+    );
+  });
+
   test('the trooper installs the Claude CLI with npm ci from a lockfile with an integrity hash', () => {
     const text = read('images/trooper/Dockerfile');
     expect(text).not.toMatch(/npm (i|install)\b[^\n]*claude-code/);
@@ -194,6 +235,45 @@ describe('stack presets', () => {
         'node_modules/@anthropic-ai/claude-code-linux-x64',
         'node_modules/@anthropic-ai/claude-code-linux-arm64',
       ]),
+    );
+  });
+
+  test("the trooper's Corepack shims sit on PATH after /usr/local/bin, so a global npm install wins", () => {
+    // Shims in /usr/local/bin made `npm i -g pnpm` in a zone image fail with EEXIST; in their own
+    // directory, last on PATH, they still serve `packageManager` repos and detected gates.
+    const final = finalStage(instructions(read('images/trooper/Dockerfile')));
+    const runs = final.filter((i) => i.op === 'RUN').map((i) => i.args);
+    const enable = runs.flatMap((r) => r.split(/&&/)).find((c) => /\bcorepack enable\b/.test(c));
+    expect(enable).toMatch(/--install-directory[= ]\/opt\/corepack\/bin\b/);
+    expect(enable).toMatch(/\bpnpm\b/);
+    expect(enable).toMatch(/\byarn\b/);
+    const path = final
+      .filter((i) => i.op === 'ENV')
+      .map((i) => /(?:^|\s)PATH=(\S+)/.exec(i.args)?.[1])
+      .filter((p) => p !== undefined)
+      .at(-1);
+    expect(path).toMatch(/^\$\{?PATH\}?:\/opt\/corepack\/bin$/);
+    // A login shell resets PATH from /etc/profile; the profile.d snippet puts the shims back.
+    expect(runs.join('\n')).toMatch(/\/etc\/profile\.d\/\S*corepack\S*\.sh/);
+    // The Node image's bundled Yarn 1 would shadow Corepack's yarn (and block `npm i -g yarn`).
+    expect(runs.join('\n')).toMatch(/\brm -rf [^&\n]*\/usr\/local\/bin\/yarn\b/);
+  });
+
+  test('the trooper declares egress support in an image label the stick checks', () => {
+    // FROM-derived zone images inherit it; one built on an older trooper lacks it, and the stick
+    // refuses to run that image under egress (it would ignore payload.egress).
+    const final = finalStage(instructions(read('images/trooper/Dockerfile')));
+    const labels = final
+      .filter((i) => i.op === 'LABEL')
+      .map((i) => i.args)
+      .join(' ');
+    expect(labels).toMatch(/(^|\s)org\.jumpmaster\.trooper\.egress="1"(\s|$)/);
+    const stick = read('apps/stick/src/egress.ts');
+    expect(stick).toContain("TROOPER_EGRESS_LABEL = 'org.jumpmaster.trooper.egress'");
+    expect(stick).toContain("TROOPER_EGRESS_VERSION = '1'");
+    // The egress e2e runs an unlabelled image under egress.
+    expect(read('images/trooper/e2e/egress.sh')).toMatch(
+      /LABEL org\.jumpmaster\.trooper\.egress=""[\s\S]*-t jumpmaster-trooper:e2e-pre-egress/,
     );
   });
 
@@ -261,6 +341,28 @@ describe('stack presets', () => {
     // The agent user runs the probes directly, and the gate user runs them as a drop's gate.
     expect(e2e).toMatch(/--user 10001:10001/);
     expect(e2e).toMatch(/gates: \[\{ name: "toolchain", run/);
+    // The node preset: a zone image with a global npm pnpm builds, and that pnpm wins for both
+    // users, while Corepack still serves a repository's `packageManager`.
+    expect(e2e).toMatch(
+      /-t jumpmaster-trooper-globalpnpm:dev -f images\/trooper\/e2e\/global-pnpm\.Dockerfile/,
+    );
+    for (const probe of ['pnpm@10.18.3+sha512.', 'yarn@1.22.22+sha512.', '/opt/corepack/bin/'])
+      expect(e2e).toContain(probe);
+    expect(e2e).toMatch(/'node as agent'/);
+    expect(e2e).toMatch(/'node as gate'/);
+    expect(e2e).toMatch(/'global pnpm as agent'/);
+    expect(e2e).toMatch(/'global pnpm as gate'/);
+    // Login shells (which reset PATH from /etc/profile) still find every preset's toolchain.
+    expect(e2e).toContain('"$1 in a login shell"');
+    for (const [preset, image] of [
+      ['python', 'python'],
+      ['go', 'go'],
+      ['jvm', 'jvm'],
+      ['example pnpm', 'example-pnpm'],
+    ]) {
+      expect(e2e).toMatch(new RegExp(`jumpmaster-trooper-${image}:dev -lc `));
+      expect(e2e).toContain(`in_login '${preset}' `);
+    }
   });
 });
 

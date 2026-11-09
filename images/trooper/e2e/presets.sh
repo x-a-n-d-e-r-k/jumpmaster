@@ -17,12 +17,33 @@ docker build -q --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-trooper:dev -
 docker build -q --build-arg SOURCE_URL="$SOURCE_URL" --build-arg BASE=jumpmaster-trooper:dev -t jumpmaster-trooper-python:dev -f images/trooper/presets/python/Dockerfile . >/dev/null
 docker build -q --build-arg SOURCE_URL="$SOURCE_URL" --build-arg BASE=jumpmaster-trooper:dev -t jumpmaster-trooper-go:dev -f images/trooper/presets/go/Dockerfile . >/dev/null
 docker build -q --build-arg SOURCE_URL="$SOURCE_URL" --build-arg BASE=jumpmaster-trooper:dev -t jumpmaster-trooper-jvm:dev -f images/trooper/presets/jvm/Dockerfile . >/dev/null
+# A zone image as operators write one: `npm i -g pnpm@…` over the trooper. Corepack shims in
+# /usr/local/bin made this fail with EEXIST.
+if ! built="$(docker build -q -t jumpmaster-trooper-globalpnpm:dev -f images/trooper/e2e/global-pnpm.Dockerfile images/trooper/e2e 2>&1)"; then
+  echo "FAIL: global pnpm zone image does not build: $(tail -c 600 <<<"$built")" >&2
+  exit 1
+fi
+echo 'global pnpm zone image builds: ok'
+docker build -q -t jumpmaster-trooper-example-pnpm:dev -f images/trooper/examples/Dockerfile.pnpm images/trooper/examples >/dev/null
 
 PY='python3 --version && python3.12 --version && uv --version'
 # A real build with the shipped toolchain only (GOTOOLCHAIN=local, no module downloads).
 # shellcheck disable=SC2016 # expanded by the container's sh
 GO='go version && test "$(go env GOTOOLCHAIN)" = local && d="$(mktemp -d)" && cd "$d" && printf "module example.test/hello\n\ngo 1.21\n" > go.mod && printf "package main\n\nfunc main() { println(\"go-build-ok\") }\n" > main.go && go build -o hello . && ./hello'
 JVM='java -version && mvn -v'
+# The node preset (the trooper itself): Corepack runs the pnpm and yarn a repository's
+# `packageManager` declares (hash-pinned, fetched and checked on first use), from its own shim
+# directory, after /usr/local/bin on PATH.
+PNPM_PM='pnpm@10.18.3+sha512.bbd16e6d7286fd7e01f6b3c0b3c932cda2965c06a908328f74663f10a9aea51f1129eea615134bf992831b009eabe167ecb7008b597f40ff9bc75946aadfb08d'
+YARN_PM='yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e'
+# shellcheck disable=SC2016 # expanded by the container's sh
+NODE='command -v pnpm && command -v yarn && d="$(mktemp -d)" && cd "$d" && mkdir p y && printf "{\"packageManager\":\"'"$PNPM_PM"'\"}" > p/package.json && printf "{\"packageManager\":\"'"$YARN_PM"'\"}" > y/package.json && (cd p && echo "pnpm=$(pnpm --version)") && (cd y && echo "yarn=$(yarn --version)") && echo "login=$(sh -lc "command -v pnpm")"'
+NODE_OK='/opt/corepack/bin/pnpm./opt/corepack/bin/yarn.*pnpm=10\.18\.3.*yarn=1\.22\.22.*login=/opt/corepack/bin/pnpm'
+# With a global npm pnpm the zone's pnpm wins everywhere, even over a `packageManager` pin
+# (pnpm 9 doesn't switch versions); yarn still comes from Corepack.
+# shellcheck disable=SC2016 # expanded by the container's sh
+GLOBAL='command -v pnpm && command -v yarn && cd "$(mktemp -d)" && echo "pnpm=$(pnpm --version)" && echo "login=$(sh -lc "command -v pnpm")"'
+GLOBAL_OK='/usr/local/bin/pnpm./opt/corepack/bin/yarn.*pnpm=9\.15\.4.*login=/usr/local/bin/pnpm'
 HARDEN=(--cap-drop ALL --security-opt no-new-privileges --pids-limit 512)
 
 # As the agent user, with the agent's home, as Claude's tools would run.
@@ -35,6 +56,26 @@ out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --e
 expect 'go as agent' '^go version go1\..*go-build-ok' "$(tr '\n' ' ' <<<"$out")"
 out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-jvm:dev -c "$JVM" 2>&1 || true)"
 expect 'jvm as agent' 'openjdk version "21\..*Apache Maven 3\.' "$(tr '\n' ' ' <<<"$out")"
+out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper:dev -c "$NODE" 2>&1 || true)"
+expect 'node as agent' "$NODE_OK" "$(tr '\n' ' ' <<<"$out")"
+out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-globalpnpm:dev -c "$GLOBAL" 2>&1 || true)"
+expect 'global pnpm as agent' "$GLOBAL_OK" "$(tr '\n' ' ' <<<"$out")"
+
+# A login shell rebuilds PATH from /etc/profile: each preset's profile.d snippet puts its
+# toolchain back (and the Corepack directory, last).
+# shellcheck disable=SC2016 # expanded by the container's login shell
+LOGIN_PATH=' && echo "path=$PATH"'
+in_login() { # name, pattern, output
+  expect "$1 in a login shell" "$2" "$(tr '\n' ' ' <<<"$3")"
+}
+out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-python:dev -lc "command -v uv && command -v python3.12$LOGIN_PATH" 2>&1 || true)"
+in_login 'python' '^/usr/local/bin/uv /usr/local/bin/python3\.12 path=.*:/opt/corepack/bin *$' "$out"
+out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-go:dev -lc "command -v go && go version$LOGIN_PATH" 2>&1 || true)"
+in_login 'go' '^/usr/local/go/bin/go go version go1\..* path=.*:/opt/corepack/bin *$' "$out"
+out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-jvm:dev -lc "command -v java && command -v mvn && mvn -v$LOGIN_PATH" 2>&1 || true)"
+in_login 'jvm' '^/opt/java/openjdk/bin/java /opt/maven/bin/mvn Apache Maven 3\..* path=.*:/opt/corepack/bin *$' "$out"
+out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-example-pnpm:dev -lc 'command -v pnpm && cd "$(mktemp -d)" && pnpm --version'"$LOGIN_PATH" 2>&1 || true)"
+in_login 'example pnpm' '^/usr/local/bin/pnpm 10\.18\.3 path=.*:/opt/corepack/bin *$' "$out"
 
 # The agent can't write anything in a toolchain the gate runs (a world-writable file there would
 # let uid 10001 change a binary uid 10002 executes). `find -writable` checks as the calling user.
@@ -76,6 +117,10 @@ out="$(payload "$GO" | docker run "${TROOPER[@]}" "${MOUNT[@]}" jumpmaster-troop
 gate_ok 'go as gate' 'go version go1\..*go-build-ok' "$out"
 out="$(payload "$JVM" | docker run "${TROOPER[@]}" "${MOUNT[@]}" jumpmaster-trooper-jvm:dev || true)"
 gate_ok 'jvm as gate' 'openjdk version "21\..*Apache Maven 3\.' "$out"
+out="$(payload "$NODE" | docker run "${TROOPER[@]}" "${MOUNT[@]}" jumpmaster-trooper:dev || true)"
+gate_ok 'node as gate' "$NODE_OK" "$out"
+out="$(payload "$GLOBAL" | docker run "${TROOPER[@]}" "${MOUNT[@]}" jumpmaster-trooper-globalpnpm:dev || true)"
+gate_ok 'global pnpm as gate' "$GLOBAL_OK" "$out"
 if grep -q E2EDUMMY <<<"$out"; then echo "FAIL: token in output" >&2; exit 1; fi
 
 docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep -E '^jumpmaster-trooper(-python|-go|-jvm)?:dev ' | sort

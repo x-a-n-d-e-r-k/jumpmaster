@@ -19,7 +19,9 @@ COPY --from=go /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:${PATH} \
     GOTOOLCHAIN=local
 # Root-owned and read-only to both identities: the agent can't change a binary the gate runs.
+# A login shell rebuilds PATH from /etc/profile: the profile.d snippet puts Go back.
 RUN chown -R root:root /usr/local/go \
  && chmod -R go-w /usr/local/go \
  && go version \
+ && printf '%s\n' 'case ":$PATH:" in *:/usr/local/go/bin:*) ;; *) PATH="/usr/local/go/bin:$PATH" ;; esac' > /etc/profile.d/jm-go.sh \
  && find / -xdev -type f -perm /6000 -exec chmod a-s {} +
