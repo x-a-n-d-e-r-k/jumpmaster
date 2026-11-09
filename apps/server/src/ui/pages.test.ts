@@ -53,6 +53,45 @@ const drop: Drop = {
 };
 
 describe('renderHome', () => {
+  test('the home page shows each stick, and names a stick that cannot run a zone and why', () => {
+    const html = renderHome({
+      zones: [z],
+      items: [],
+      drops: [],
+      sticks: [
+        {
+          id: 's1',
+          name: 'old<stick>',
+          version: null,
+          lastSeenAt: '2026-01-01T00:00:00.000Z',
+          capabilities: [],
+          imagePolicy: 'allowlist',
+          cannotRun: [{ zoneId: 'locked', missing: ['egress-v1', 'image-policy:signed'] }],
+        },
+        {
+          id: 's2',
+          name: 'new',
+          version: '0.4.0',
+          lastSeenAt: null,
+          capabilities: ['egress-v1'],
+          imagePolicy: 'signed',
+          cannotRun: [],
+        },
+      ],
+    });
+    expect(html).toContain('<h2>Sticks</h2>');
+    expect(html).toContain('old&lt;stick&gt;');
+    expect(html).not.toContain('old<stick>');
+    expect(html).toContain('cannot run locked: lacks egress-v1, image-policy:signed');
+    expect(html).toMatch(
+      /new<\/td><td>0\.4\.0<\/td><td>never<\/td><td>egress-v1<\/td><td>signed<\/td><td>all zones<\/td>/,
+    );
+    // No sticks known: the section says so rather than vanishing.
+    expect(renderHome({ zones: [z], items: [], drops: [], sticks: [] })).toContain(
+      'No stick has enrolled.',
+    );
+  });
+
   test('escapes issue titles', () => {
     const html = renderHome({
       zones: [z],

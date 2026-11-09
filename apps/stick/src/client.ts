@@ -3,6 +3,10 @@ import {
   type DropPayload,
   DropPayloadSchema,
   type DropResult,
+  type LeaseSkip,
+  LeaseSkipSchema,
+  SKIPPED_HEADER,
+  type StickInfo,
   type TrooperEvent,
 } from '@jumpmaster/protocol';
 
@@ -21,12 +25,66 @@ const HEARTBEAT_TIMEOUT_MS = 10_000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** How much of a refused request's body goes into the error (it is the server's error JSON). */
+const ERROR_BODY_CHARS = 400;
+
+async function failure(what: string, res: Response): Promise<Error> {
+  const text = (await res.text().catch(() => '')).replace(/\s+/g, ' ').trim();
+  const body = text.length > ERROR_BODY_CHARS ? `${text.slice(0, ERROR_BODY_CHARS)}…` : text;
+  return new Error(`${what} failed: ${res.status}${body ? ` ${body}` : ''}`);
+}
+
+/** The skipped zones a lease response names; a missing or malformed header is none. */
+function skippedOf(res: Response): LeaseSkip[] {
+  const raw = res.headers.get(SKIPPED_HEADER);
+  if (!raw) return [];
+  try {
+    const parsed = LeaseSkipSchema.array().safeParse(JSON.parse(decodeURIComponent(raw)));
+    return parsed.success ? parsed.data : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Lease logging that doesn't flood: each distinct skip reason and each distinct lease error is
+ * logged at most once a minute, though the stick polls every few seconds.
+ */
+export function leaseLogger(
+  log: (line: string) => void,
+  now: () => number = Date.now,
+  everyMs = 60_000,
+) {
+  const last = new Map<string, number>();
+  const once = (line: string) => {
+    const t = now();
+    const at = last.get(line);
+    if (at !== undefined && t - at < everyMs) return;
+    last.set(line, t);
+    log(line);
+  };
+  return {
+    skipped(list: LeaseSkip[]) {
+      for (const s of list)
+        once(`lease: zone ${s.zoneId} skipped: this stick lacks ${s.missing.join(', ')}`);
+    },
+    error(message: string) {
+      once(`lease error: ${message}`);
+    },
+  };
+}
+
 export class StickClient implements DropClient {
   constructor(
     private readonly baseUrl: string,
     private token?: string,
-    private readonly opts: { heartbeatTimeoutMs?: number } = {},
+    private readonly opts: { heartbeatTimeoutMs?: number; info?: StickInfo } = {},
   ) {}
+
+  /** What this stick advertises on enroll and on every lease (an M3 stick sent nothing). */
+  private get info(): Partial<StickInfo> {
+    return this.opts.info ?? {};
+  }
 
   private async req(
     path: string,
@@ -52,22 +110,31 @@ export class StickClient implements DropClient {
     name: string,
     slots: number,
   ): Promise<{ stickId: string; stickToken: string }> {
-    const res = await this.req('/api/sticks/enroll', { joinToken, name, slots }, false);
-    if (!res.ok) throw new Error(`enroll failed: ${res.status}`);
+    const res = await this.req(
+      '/api/sticks/enroll',
+      { joinToken, name, slots, ...this.info },
+      false,
+    );
+    if (!res.ok) throw await failure('enroll', res);
     const out = (await res.json()) as { stickId: string; stickToken: string };
     this.token = out.stickToken;
     return out;
   }
 
-  /** Long-polls; resolves null when the server has nothing (204). */
-  async lease(freeSlots: number): Promise<DropPayload | null> {
-    const res = await this.req('/api/sticks/lease', { freeSlots });
-    if (res.status === 204) return null;
-    if (!res.ok) throw new Error(`lease failed: ${res.status}`);
+  /**
+   * Long-polls. `drop` is null when the server has nothing (204). `skipped` names zones with work
+   * waiting that this stick can't run, and what it lacks for each.
+   */
+  async lease(freeSlots: number): Promise<{ drop: DropPayload | null; skipped: LeaseSkip[] }> {
+    const res = await this.req('/api/sticks/lease', { freeSlots, ...this.info });
+    const skipped = skippedOf(res);
+    if (res.status === 204) return { drop: null, skipped };
+    // A refusal's body is the server's error JSON, never a payload: safe to show.
+    if (!res.ok) throw await failure('lease', res);
     const parsed = DropPayloadSchema.safeParse(await res.json());
-    // Never echo the body: it carries credentials.
+    // Never echo a 2xx body: it carries credentials.
     if (!parsed.success) throw new Error('lease failed: invalid lease payload');
-    return parsed.data;
+    return { drop: parsed.data, skipped };
   }
 
   async heartbeat(

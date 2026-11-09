@@ -504,3 +504,30 @@ describe('zone images and presets', () => {
     );
   });
 });
+
+describe('egress and signed-image settings', () => {
+  test('both default off, so an M3 config needs no new capability', () => {
+    const c = loadConfig(minimal, fullEnv);
+    expect(c.requireSignedImages).toBe(false);
+    expect(c.dropZones[0]?.egress).toBeUndefined();
+    expect(c.dropZones[0]?.requireSignedImages).toBeUndefined();
+  });
+
+  test('egress.mode and requireSignedImages parse, and an unknown mode is refused', () => {
+    const file = fixture({
+      dataDir: './data',
+      requireSignedImages: true,
+      dropZones: [{ ...baseZone, egress: { mode: 'enforce' }, requireSignedImages: false }],
+    });
+    const c = loadConfig(file, fullEnv);
+    expect(c.requireSignedImages).toBe(true);
+    expect(c.dropZones[0]).toMatchObject({
+      egress: { mode: 'enforce' },
+      requireSignedImages: false,
+    });
+    expect(loadConfig(withZone({ egress: {} }), fullEnv).dropZones[0]?.egress).toEqual({
+      mode: 'off',
+    });
+    expect(() => loadConfig(withZone({ egress: { mode: 'open' } }), fullEnv)).toThrow(/egress/);
+  });
+});

@@ -32,6 +32,37 @@ export const PRESETS = ['node', 'python', 'go', 'jvm'] as const;
 export type Preset = (typeof PRESETS)[number];
 export const PresetSchema = z.enum(PRESETS);
 
+/**
+ * What a stick can enforce. A stick advertises a capability only once its code really does it,
+ * and the server never leases it a drop from a zone that needs one it lacks.
+ */
+export const STICK_CAPABILITIES = ['egress-v1', 'image-verify-v1'] as const;
+export type StickCapability = (typeof STICK_CAPABILITIES)[number];
+export const ImagePolicySchema = z.enum(['allowlist', 'signed']);
+export type ImagePolicy = z.infer<typeof ImagePolicySchema>;
+
+/**
+ * Sent with every enroll and lease. Every field has a default, so an M3 stick (which sends none)
+ * is a stick with no capabilities under the allowlist policy. `pinnedImages` are the stick's
+ * digest pins: not secrets, sent so the doctor can check service images.
+ */
+export const StickInfoSchema = z.object({
+  capabilities: z.array(z.string().min(1).max(64)).max(32).default([]),
+  imagePolicy: ImagePolicySchema.default('allowlist'),
+  version: z.string().min(1).max(64).optional(),
+  pinnedImages: z.array(z.string().min(1).max(512)).max(256).default([]),
+});
+export type StickInfo = z.infer<typeof StickInfoSchema>;
+
+/** A zone the lease passed over for this stick, and what the stick lacks for it. */
+export const LeaseSkipSchema = z.object({ zoneId: z.string(), missing: z.array(z.string()) });
+export type LeaseSkip = z.infer<typeof LeaseSkipSchema>;
+/**
+ * The lease response header naming skipped zones (URI-encoded JSON `LeaseSkip[]`). A header, so
+ * it rides on a 204 too and an M3 stick ignores it.
+ */
+export const SKIPPED_HEADER = 'x-jumpmaster-skipped';
+
 /** Roles that work for the zone rather than one work item. They hold no forge write credential. */
 export const CREW_ROLES = ['crew-lead', 'refute', 'diagnose'] as const;
 export type CrewRole = (typeof CREW_ROLES)[number];

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import { raiseBriefing, ruleBriefing } from '../briefings.js';
 import { insertCrewIssue } from '../crew/store.js';
-import { insertDrop, updateDrop } from '../db/repo.js';
+import { insertDrop, insertStick, updateDrop } from '../db/repo.js';
 import { opMarker } from '../outbox.js';
 import { crewOn, GOAL } from '../test/crew.js';
 import { harness } from '../test/flowHarness.js';
@@ -36,6 +36,21 @@ async function crewHarness() {
 }
 
 describe('UI routes', () => {
+  test('the home page names an enrolled stick that cannot run an enforce zone', async () => {
+    const h = await harness({ zone: { egress: { mode: 'enforce' } } });
+    insertStick(h.db, { id: 's1', name: 'm3-stick', tokenHash: 'h1', slots: 1 });
+    insertStick(h.db, {
+      id: 's2',
+      name: 'new-stick',
+      tokenHash: 'h2',
+      slots: 1,
+      capabilities: ['egress-v1'],
+    });
+    const html = (await get(h, '/')).body;
+    expect(html).toMatch(/m3-stick<\/td>.*cannot run main: lacks egress-v1/);
+    expect(html).toMatch(/new-stick<\/td>.*all zones/);
+  });
+
   test('/briefings lists open briefings and recorded rulings', async () => {
     const h = await crewHarness();
     const at = h.now();

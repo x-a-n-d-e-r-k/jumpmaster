@@ -49,6 +49,7 @@ export const DEFAULT_PROTECTED_PATHS = [
 ];
 
 export const DEFAULT_PIDS_LIMIT = 512;
+export const EGRESS_MODES = ['off', 'monitor', 'enforce'] as const;
 
 const CREW_DEFAULTS = {
   enabled: false,
@@ -130,6 +131,13 @@ const DropZoneObject = z.object({
   image: z.string().min(1).optional(),
   /** A prebuilt stack image (see presets.ts). Gates stay explicit config either way. */
   preset: PresetSchema.optional(),
+  /**
+   * Egress control. Absent or `off` (the default) keeps M3 behaviour. Any other mode needs a stick
+   * that advertises `egress-v1`: until one does, the zone's drops stay queued.
+   */
+  egress: z.object({ mode: z.enum(EGRESS_MODES).default('off') }).optional(),
+  /** Overrides the install-wide `requireSignedImages` for this zone. */
+  requireSignedImages: z.boolean().optional(),
   model: z.string().default('claude-opus-5-5'),
   maxTurns: z.number().int().positive().default(200),
   models: z.partialRecord(RoleSchema, z.string()).default({}),
@@ -244,6 +252,11 @@ const FileSchema = z.object({
       fableWeeklyDropCap: z.number().int().nonnegative().default(5),
     })
     .default({ plan: 'pro', fableWeeklyDropCap: 5 }),
+  /**
+   * Run trooper images only from a stick that verifies signatures (`image-verify-v1`) under the
+   * `signed` policy. Off by default; the generated install turns it on.
+   */
+  requireSignedImages: z.boolean().default(false),
   /** The zone-scoped MCP server at `/mcp` (off by default; read at start, so a flip needs a restart). */
   mcp: z
     .object({
@@ -277,6 +290,8 @@ export interface Config {
   claude: ClaudeConfig;
   /** Absent means the defaults (`MCP_DEFAULTS`): off. */
   mcp?: Partial<McpConfig>;
+  /** Absent means false. */
+  requireSignedImages?: boolean;
   secrets: {
     claudeToken: string;
     githubAuthorToken: string;

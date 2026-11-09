@@ -1,4 +1,4 @@
-import type { TrooperEvent } from '@jumpmaster/protocol';
+import type { ImagePolicy, TrooperEvent } from '@jumpmaster/protocol';
 import type { Db } from './open.js';
 
 export type WorkItemState = 'ready' | 'in_flight' | 'pr_open' | 'parked' | 'done';
@@ -104,6 +104,11 @@ export interface Stick {
   slots: number;
   lastSeenAt: string | null;
   createdAt: string;
+  /** As advertised on its last enroll or lease (v15). */
+  capabilities: string[];
+  imagePolicy: ImagePolicy;
+  version: string | null;
+  pinnedImages: string[];
 }
 
 const wallClock = () => new Date().toISOString();
@@ -405,19 +410,86 @@ export function listEvents(db: Db, dropId: string): StoredEvent[] {
   return rows.map((r) => ({ seq: r.seq, ts: r.ts, kind: r.kind, data: JSON.parse(r.dataJson) }));
 }
 
-export function insertStick(db: Db, s: Pick<Stick, 'id' | 'name' | 'tokenHash' | 'slots'>): void {
+type StickAdvert = Pick<Stick, 'capabilities' | 'imagePolicy' | 'version' | 'pinnedImages'>;
+const NO_ADVERT: StickAdvert = {
+  capabilities: [],
+  imagePolicy: 'allowlist',
+  version: null,
+  pinnedImages: [],
+};
+const advertParams = (a: StickAdvert) => ({
+  caps: JSON.stringify(a.capabilities),
+  policy: a.imagePolicy,
+  version: a.version,
+  pinned: JSON.stringify(a.pinnedImages),
+});
+
+export function insertStick(
+  db: Db,
+  s: Pick<Stick, 'id' | 'name' | 'tokenHash' | 'slots'> & Partial<StickAdvert>,
+): void {
+  const { id, name, tokenHash, slots, ...advert } = s;
   db.prepare(
-    'INSERT INTO sticks (id, name, token_hash, slots, created_at) VALUES (@id, @name, @tokenHash, @slots, @createdAt)',
-  ).run({ ...s, createdAt: wallClock() });
+    `INSERT INTO sticks (id, name, token_hash, slots, created_at, capabilities_json, image_policy,
+       version, pinned_json)
+     VALUES (@id, @name, @tokenHash, @slots, @createdAt, @caps, @policy, @version, @pinned)`,
+  ).run({
+    id,
+    name,
+    tokenHash,
+    slots,
+    createdAt: wallClock(),
+    ...advertParams({ ...NO_ADVERT, ...advert }),
+  });
 }
 
+/** Records what the stick advertised on this lease, and that it was seen now. */
+export function stampStick(db: Db, id: string, advert: StickAdvert, now: Date): void {
+  db.prepare(
+    `UPDATE sticks SET last_seen_at = @now, capabilities_json = @caps, image_policy = @policy,
+       version = @version, pinned_json = @pinned WHERE id = @id`,
+  ).run({ id, now: now.toISOString(), ...advertParams(advert) });
+}
+
+const STICK_COLS = `id, name, token_hash AS tokenHash, slots, last_seen_at AS lastSeenAt,
+  created_at AS createdAt, capabilities_json AS capabilitiesJson, image_policy AS imagePolicy,
+  version, pinned_json AS pinnedJson`;
+type StickRow = Omit<Stick, 'capabilities' | 'pinnedImages'> & {
+  capabilitiesJson: string;
+  pinnedJson: string;
+};
+const parseList = (json: string): string[] => {
+  try {
+    const v: unknown = JSON.parse(json);
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+};
+const toStick = ({ capabilitiesJson, pinnedJson, ...r }: StickRow): Stick => ({
+  ...r,
+  // Anything but an exact 'signed' reads as the weaker policy.
+  imagePolicy: r.imagePolicy === 'signed' ? 'signed' : 'allowlist',
+  capabilities: parseList(capabilitiesJson),
+  pinnedImages: parseList(pinnedJson),
+});
+
 export function getStickByTokenHash(db: Db, tokenHash: string): Stick | undefined {
-  return db
-    .prepare(
-      `SELECT id, name, token_hash AS tokenHash, slots, last_seen_at AS lastSeenAt, created_at AS createdAt
-       FROM sticks WHERE token_hash = ?`,
-    )
-    .get(tokenHash) as Stick | undefined;
+  const row = db.prepare(`SELECT ${STICK_COLS} FROM sticks WHERE token_hash = ?`).get(tokenHash) as
+    | StickRow
+    | undefined;
+  return row ? toStick(row) : undefined;
+}
+
+/** Every enrolled stick, most recently seen first. */
+export function listSticks(db: Db): Stick[] {
+  return (
+    db
+      .prepare(
+        `SELECT ${STICK_COLS} FROM sticks ORDER BY last_seen_at IS NULL, last_seen_at DESC, name`,
+      )
+      .all() as StickRow[]
+  ).map(toStick);
 }
 
 export function listRecentDrops(db: Db, limit = 50): Drop[] {

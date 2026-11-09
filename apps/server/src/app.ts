@@ -22,10 +22,12 @@ import {
   listObservations,
   listOutbox,
   listRecentDrops,
+  listSticks,
   listWorkItems,
 } from './db/repo.js';
 import { fableStatus } from './fable.js';
 import { getGoals } from './goals.js';
+import { missingFor, zoneRequirements } from './leases.js';
 import { registerMcpRoute } from './mcp/server.js';
 import { lastSyncResult } from './sync.js';
 import {
@@ -37,6 +39,7 @@ import {
   renderGoals,
   renderHome,
   renderObservations,
+  type StickLine,
 } from './ui/pages.js';
 import { dispatchGate } from './usage.js';
 
@@ -116,6 +119,19 @@ export function createApp(
       details,
       outbox: listOutbox(db, ['unknown', 'failed']),
       briefings: listBriefings(db, { state: 'open' }),
+      sticks: listSticks(db).map(
+        (s): StickLine => ({
+          id: s.id,
+          name: s.name,
+          version: s.version,
+          lastSeenAt: s.lastSeenAt,
+          capabilities: s.capabilities,
+          imagePolicy: s.imagePolicy,
+          cannotRun: config.dropZones
+            .map((z) => ({ zoneId: z.id, missing: missingFor(s, zoneRequirements(z, config)) }))
+            .filter((c) => c.missing.length > 0),
+        }),
+      ),
       crew: config.dropZones.map((z): CrewLine => {
         const last = db
           .prepare(

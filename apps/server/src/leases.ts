@@ -1,4 +1,5 @@
-import type { UsageConfig } from './config.js';
+import type { ImagePolicy, StickCapability } from '@jumpmaster/protocol';
+import type { Config, DropZoneConfig, UsageConfig } from './config.js';
 import type { Db } from './db/open.js';
 import { getUsageState, isKilled, setKilled, setUsageState } from './db/repo.js';
 import { refundCharge } from './flow/budgets.js';
@@ -17,19 +18,53 @@ const ROLE_CLASS = `CASE WHEN role IN ${FINISHING} THEN 0 WHEN role = 'implement
 /** Queued drops wait while their zone is paused or observing. */
 const ZONE_ACTIVE = `AND drop_zone_id NOT IN (SELECT zone_id FROM zone_controls WHERE mode <> 'active')`;
 
+export type ZoneRequirements = { caps: Set<StickCapability>; signed: boolean };
+
+/**
+ * What a stick must have to run this zone's drops: `egress-v1` unless egress is off, and
+ * `image-verify-v1` under the `signed` policy when signed images are required (the zone's own
+ * `requireSignedImages`, else the install-wide one).
+ */
+export function zoneRequirements(
+  zone: Pick<DropZoneConfig, 'egress' | 'requireSignedImages'>,
+  config: Pick<Config, 'requireSignedImages'>,
+): ZoneRequirements {
+  const caps = new Set<StickCapability>();
+  if ((zone.egress?.mode ?? 'off') !== 'off') caps.add('egress-v1');
+  const signed = (zone.requireSignedImages ?? config.requireSignedImages) === true;
+  if (signed) caps.add('image-verify-v1');
+  return { caps, signed };
+}
+
+/** What the stick lacks for these requirements (empty: it may run the zone's drops). */
+export function missingFor(
+  stick: { capabilities: readonly string[]; imagePolicy: ImagePolicy },
+  need: ZoneRequirements,
+): string[] {
+  const missing: string[] = [...need.caps].filter((c) => !stick.capabilities.includes(c));
+  if (need.signed && stick.imagePolicy !== 'signed') missing.push('image-policy:signed');
+  return missing;
+}
+
+/** Excludes queued drops of zones the stick can't run (a JSON array of zone ids). */
+const NOT_EXCLUDED = 'AND drop_zone_id NOT IN (SELECT value FROM json_each(@exclude))';
+
 /**
  * Leases the oldest queued drop the usage gate allows, bumping its epoch and stamping started_at.
  * `probe` leases exactly one drop (preferring one not on the pause's cause item) and records it.
  * `credits_resume` leases only the resumed work item's drops; with none queued (or a crew drop
  * resumed), nothing. The gate is required: a caller that forgets it must not lease while stopped. All time
- * comes from `now`.
+ * comes from `now`. Drops of the `exclude` zones (ones the stick can't run) are never picked, under
+ * any gate: they stay queued, untouched, for a capable stick.
  */
 export function leaseNextDrop(
   db: Db,
   stickId: string,
   now: Date,
   gate: Gate,
+  exclude: readonly string[] = [],
 ): { dropId: string; epoch: number } | null {
+  const ex = JSON.stringify(exclude);
   return db.transaction(() => {
     if (isKilled(db)) return null;
     let next: { id: string } | undefined;
@@ -40,11 +75,11 @@ export function leaseNextDrop(
       probe = true;
       return db
         .prepare(
-          `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE}
-           ORDER BY CASE WHEN work_item_id = ? THEN 1 ELSE 0 END, ${ROLE_CLASS}, created_at, rowid
+          `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE} ${NOT_EXCLUDED}
+           ORDER BY CASE WHEN work_item_id = @cause THEN 1 ELSE 0 END, ${ROLE_CLASS}, created_at, rowid
            LIMIT 1`,
         )
-        .get(u.causeWorkItemId) as { id: string } | undefined;
+        .get({ cause: u.causeWorkItemId, exclude: ex }) as { id: string } | undefined;
     };
     switch (gate) {
       case 'closed':
@@ -60,10 +95,11 @@ export function leaseNextDrop(
             ? undefined
             : (db
                 .prepare(
-                  `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE} AND work_item_id = ?
+                  `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE} ${NOT_EXCLUDED}
+                     AND work_item_id = @bound
                    ORDER BY ${ROLE_CLASS}, created_at, rowid LIMIT 1`,
                 )
-                .get(bound) as { id: string } | undefined);
+                .get({ bound, exclude: ex }) as { id: string } | undefined);
         break;
       }
       case 'open':
@@ -71,10 +107,10 @@ export function leaseNextDrop(
         const roleFilter = gate === 'finishing_only' ? ` AND role IN ${FINISHING}` : '';
         next = db
           .prepare(
-            `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE}${roleFilter}
+            `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE} ${NOT_EXCLUDED}${roleFilter}
              ORDER BY ${ROLE_CLASS}, created_at, rowid LIMIT 1`,
           )
-          .get() as { id: string } | undefined;
+          .get({ exclude: ex }) as { id: string } | undefined;
         break;
       }
       default:
@@ -217,4 +253,19 @@ export function leaseExpirer(
     }
     return expireLeases(db, now, usageCfg, rand);
   };
+}
+
+/**
+ * The zones among `zoneIds` with a drop waiting that a lease would otherwise consider: queued, in
+ * an active zone. These are the ones a stick that can't run them is told it skipped.
+ */
+export function zonesWaiting(db: Db, zoneIds: readonly string[]): Set<string> {
+  if (zoneIds.length === 0) return new Set();
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT drop_zone_id AS z FROM drops WHERE state = 'queued' ${ZONE_ACTIVE}
+         AND drop_zone_id IN (SELECT value FROM json_each(?))`,
+    )
+    .all(JSON.stringify(zoneIds)) as { z: string }[];
+  return new Set(rows.map((r) => r.z));
 }
