@@ -75,6 +75,8 @@ const doc = (anchor: string): string => `${DOC}#${anchor}`;
 
 /** A check that has not finished by then is a warn: one stalled read can't hang the run. */
 export const CHECK_TIMEOUT_MS = 60_000;
+/** Denied hosts a passing egress check names before it only counts the rest. */
+const MAX_LISTED_HOSTS = 10;
 /** A stick is live when it asked for work this recently. */
 export const STICK_LIVE_MS = 120_000;
 const TOKEN_WARN_DAYS = 330;
@@ -1195,7 +1197,7 @@ function egressCheck(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck {
     return {
       ...base,
       status: 'pass',
-      summary: `egress is enforced (${allow.length} allowed host entries); hosts drops tried and were refused, as enforce means, in ${window}: ${denied.join(', ')} (add one to egress.allow only if a gate or tool needs it)`,
+      summary: `egress is enforced (${allow.length} allowed host entries); hosts drops tried and were refused, as enforce means, in ${window}: ${denied.slice(0, MAX_LISTED_HOSTS).join(', ')}${denied.length > MAX_LISTED_HOSTS ? ` and ${denied.length - MAX_LISTED_HOSTS} more` : ''} (add one to egress.allow only if a gate or tool needs it)`,
     };
   return {
     ...base,
@@ -1342,6 +1344,14 @@ function doctorDropCheck(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck {
     result = null;
   }
   const findings = DoctorResultSchema.safeParse(result?.doctor);
+  // Cancelled (by --cancel, or by the kill switch) is a choice, not a finding: nothing ran.
+  if (!findings.success && row.state === 'cancelled')
+    return {
+      ...at,
+      status: 'skip',
+      summary: `doctor drop ${row.id} was cancelled before it ran, so the Claude token, the clone, services and gates are unproven`,
+      fix: `Run another when a stick can take it: ${ask}`,
+    };
   if (!findings.success)
     return {
       ...at,

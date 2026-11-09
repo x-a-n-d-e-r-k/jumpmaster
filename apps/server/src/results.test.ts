@@ -810,6 +810,10 @@ describe('applyResult: doctor', () => {
       );
       expect(getDrop(db, 'doc')?.state).toBe('failed');
       expect(JSON.parse(getDrop(db, 'doc')?.resultJson ?? '{}').doctor).toBeTruthy();
+      // It had findings: no "without findings" log.
+      expect(
+        db.prepare("SELECT data_json AS d FROM drop_events WHERE drop_id = 'doc'").all(),
+      ).toEqual([]);
     }
   });
 

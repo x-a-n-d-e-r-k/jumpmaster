@@ -447,7 +447,7 @@ function applyDoctorResult(
       state: ok ? 'succeeded' : 'failed',
       resultJson: JSON.stringify(redactDeep(result, deps.secrets)),
     });
-    if (!ok && result.status === 'completed') {
+    if (!findings.success && result.status === 'completed') {
       appendEvents(db, drop.id, [
         { ts: now.toISOString(), kind: 'log', data: { message: 'doctor result without findings' } },
       ]);

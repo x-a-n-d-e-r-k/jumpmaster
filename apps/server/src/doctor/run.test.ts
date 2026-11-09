@@ -57,13 +57,17 @@ describe('runDoctor', () => {
     let at = hung.deps.now().getTime();
     hung.deps.now = () => new Date(at);
     // A check that never answers, with no deadline in force: the first run hangs.
-    hung.deps.checkTimeoutMs = 3_600_000;
-    hung.f.author.listLabels = () => new Promise(() => {});
-    void runDoctor(hung.deps);
+    let answer: (labels: string[]) => void = () => {};
+    hung.f.author.listLabels = () => new Promise<string[]>((resolve) => (answer = resolve));
+    const first = runDoctor(hung.deps);
     await expect(runDoctor(hung.deps)).rejects.toBeInstanceOf(DoctorBusyError);
     at += 11 * 60_000;
     const ok = world();
     ok.deps.now = () => new Date(at);
+    await expect(runDoctor(ok.deps)).resolves.toMatchObject({ finishedAt: expect.any(String) });
+    // Let the stalled run finish, so no timer or promise outlives the test; the lock is free.
+    answer(['agent-ready', 'agent-retry']);
+    await first;
     await expect(runDoctor(ok.deps)).resolves.toMatchObject({ finishedAt: expect.any(String) });
   });
 

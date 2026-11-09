@@ -741,6 +741,43 @@ describe('fix pass', () => {
     expect(c.fix).toContain('Actions: Read-only');
   });
 
+  test('a cancelled doctor drop is a skip that says to run another, not a fail', async () => {
+    const w = world();
+    insertDrop(
+      w.db,
+      { id: 'docx', dropZoneId: 'main', workItemId: null, role: 'doctor', state: 'cancelled' },
+      ago(60_000),
+    );
+    const c = one(await w.run(), 'zone.doctor-drop');
+    expect(c.status).toBe('skip');
+    expect(c.summary).toContain('was cancelled');
+    expect(c.fix).toContain('jumpmaster ctl doctor main --drop');
+    expect(c.fix).not.toContain('docker compose logs');
+  });
+
+  test('the enforce pass lists at most ten denied hosts, then how many more', async () => {
+    const w = world();
+    insertDrop(
+      w.db,
+      { id: 'd1', dropZoneId: 'main', workItemId: null, role: 'crew-lead', state: 'succeeded' },
+      ago(3_600_000),
+    );
+    appendEvents(
+      w.db,
+      'd1',
+      Array.from({ length: 12 }, (_, i) => ({
+        ts: NOW.toISOString(),
+        kind: 'egress' as const,
+        data: { host: `h${String(i).padStart(2, '0')}.example`, decision: 'deny', count: 1 },
+      })),
+    );
+    const c = one(await w.run(), 'zone.egress');
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('h09.example');
+    expect(c.summary).not.toContain('h10.example');
+    expect(c.summary).toContain('and 2 more');
+  });
+
   test('M-8: routine denials under enforce pass, saying what they mean', async () => {
     const w = world();
     insertDrop(
