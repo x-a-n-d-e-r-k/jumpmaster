@@ -30,6 +30,7 @@ import {
 } from './flow/snapshot.js';
 import type { ChecksFacts, ForgeIssue, PullFacts } from './forge/github.js';
 import { refreshGoals } from './goals.js';
+import { confirmIntakeIssues } from './intake.js';
 import type { ForgePair } from './outbox.js';
 import { isJmIssueBody } from './outbox.js';
 
@@ -124,6 +125,8 @@ export async function syncDropZone(
   const crewPromoted = new Set<number>();
   let intakeSkipped: string | undefined;
   try {
+    // An intake issue whose create resolved after its request is promoted before it is judged.
+    confirmIntakeIssues(db, zone.id, now);
     for (const issue of issues) {
       const row = getCrewIssueByNumber(db, zone.id, issue.number);
       const staged = isStagedAndReady(issue, zone);
@@ -201,7 +204,9 @@ export async function syncDropZone(
     }
   });
   run();
-  if (zone.crew?.enabled) {
+  // The ladder is read whenever a goal file is configured, crew on or off: one file read per
+  // pass, no usage, and the goals page, the intake and MCP's get_goals rely on it.
+  if (zone.crew?.goalPath) {
     try {
       await refreshGoals(db, forge, zone, defaultBranch, now);
     } catch (err) {

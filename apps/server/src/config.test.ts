@@ -2,7 +2,14 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { loadConfig, modelFor, secretList, zoneSecrets } from './config.js';
+import {
+  loadConfig,
+  modelFor,
+  STARTER_WARNING,
+  secretList,
+  startupWarnings,
+  zoneSecrets,
+} from './config.js';
 
 const fullEnv: Record<string, string | undefined> = {
   JM_CLAUDE_TOKEN: 'a',
@@ -290,6 +297,74 @@ describe('loadConfig', () => {
       ).toBe(true));
   });
 
+  describe('starter identity', () => {
+    const { JM_GITHUB_REVIEWER_TOKEN: _r, ...noReviewer } = fullEnv;
+    const starterEnv = { ...noReviewer, JM_GITHUB_AUTHOR_TOKEN: 'github_pat_author' };
+
+    test('identity defaults to two-bot', () =>
+      expect(loadConfig(minimal, fullEnv).dropZones[0]?.identity).toBe('two-bot'));
+
+    test('starter without JM_GITHUB_REVIEWER_TOKEN loads; two-bot without it is still an error', () => {
+      const c = loadConfig(withZone({ identity: 'starter' }), starterEnv);
+      expect(c.dropZones[0]?.identity).toBe('starter');
+      expect(c.secrets.githubReviewerToken).toBeUndefined();
+      expect(() => loadConfig(minimal, starterEnv)).toThrow(/JM_GITHUB_REVIEWER_TOKEN/);
+      // One two-bot zone among starter zones still needs the reviewer token.
+      const mixed = fixture({
+        dataDir: './data',
+        dropZones: [
+          { ...baseZone, identity: 'starter' },
+          { ...baseZone, id: 'other' },
+        ],
+      });
+      expect(() => loadConfig(mixed, starterEnv)).toThrow(/JM_GITHUB_REVIEWER_TOKEN/);
+    });
+
+    test('starter with ciRequired false, or with a classic author token, is a config error', () => {
+      expect(() =>
+        loadConfig(withZone({ identity: 'starter', ciRequired: false }), starterEnv),
+      ).toThrow(/starter.*ciRequired/);
+      expect(() =>
+        loadConfig(withZone({ identity: 'starter' }), {
+          ...starterEnv,
+          JM_GITHUB_AUTHOR_TOKEN: 'ghp_classic',
+        }),
+      ).toThrow(/starter.*fine-grained/);
+    });
+
+    test('starter with authorMayBeAdmin loads: the personal-repository path', () => {
+      const c = loadConfig(withZone({ identity: 'starter', authorMayBeAdmin: true }), starterEnv);
+      expect(c.dropZones[0]).toMatchObject({ identity: 'starter', authorMayBeAdmin: true });
+    });
+
+    test('the classic-token error explains the personal-repository path', () =>
+      expect(() =>
+        loadConfig(withZone({ identity: 'starter' }), {
+          ...starterEnv,
+          JM_GITHUB_AUTHOR_TOKEN: 'ghp_classic',
+        }),
+      ).toThrow(/personal repository.*your own account.*authorMayBeAdmin: true/));
+
+    test('a config with no zones still needs the reviewer token', () =>
+      expect(() => loadConfig(fixture({ dataDir: './data', dropZones: [] }), starterEnv)).toThrow(
+        /JM_GITHUB_REVIEWER_TOKEN/,
+      ));
+
+    test('startupWarnings names each starter zone with the warning, and nothing for two-bot', () => {
+      const c = loadConfig(withZone({ identity: 'starter' }), starterEnv);
+      expect(startupWarnings(c)).toEqual([`zone main: ${STARTER_WARNING}`]);
+      expect(startupWarnings(loadConfig(minimal, fullEnv))).toEqual([]);
+    });
+
+    test('a starter install with a reviewer token set still checks it differs', () =>
+      expect(() =>
+        loadConfig(withZone({ identity: 'starter' }), {
+          ...starterEnv,
+          JM_GITHUB_REVIEWER_TOKEN: starterEnv.JM_GITHUB_AUTHOR_TOKEN,
+        }),
+      ).toThrow(/must differ/));
+  });
+
   test('reviewer and author must differ', () =>
     expect(() =>
       loadConfig(minimal, {
@@ -378,9 +453,20 @@ describe('crew config', () => {
     expect(
       loadConfig(withZone({ crew: { enabled: true } }), fullEnv).dropZones[0]?.crew.enabled,
     ).toBe(true);
-    // Off, the path is not checked.
+  });
+
+  test('the goal file must be a protected path with the crew off too: it is read every pass', () => {
+    expect(() => loadConfig(withZone({ crew: { goalPath: 'docs/GOALS.md' } }), fullEnv)).toThrow(
+      /goalPath/,
+    );
+    expect(() => loadConfig(withZone({ protectedPaths: ['.github/**'] }), fullEnv)).toThrow(
+      /goalPath GOAL\.md must match a protectedPaths glob/,
+    );
     expect(() =>
-      loadConfig(withZone({ crew: { goalPath: 'docs/GOALS.md' } }), fullEnv),
+      loadConfig(
+        withZone({ crew: { goalPath: 'docs/GOALS.md' }, protectedPaths: ['docs/GOALS.md'] }),
+        fullEnv,
+      ),
     ).not.toThrow();
   });
 

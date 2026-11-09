@@ -54,6 +54,16 @@ export const DEFAULT_PROTECTED_PATHS = [
 
 export const DEFAULT_PIDS_LIMIT = 512;
 export const EGRESS_MODES = ['off', 'monitor', 'enforce'] as const;
+/**
+ * `two-bot`: an author and a reviewer account. `starter`: the author account alone; the reviewer
+ * drop's verdict is kept in Jumpmaster, not posted, and the author merges on it and green CI.
+ */
+export const IDENTITIES = ['two-bot', 'starter'] as const;
+export type Identity = (typeof IDENTITIES)[number];
+
+/** What starter mode costs, as the doctor, README and install runbook state it. */
+export const STARTER_WARNING =
+  "starter mode: the author token can merge any green PR, including an unreviewed one; it is held by the server and by the trooper's root process in implement, heal and resolve drops. Use a fine-grained token for this repository only, with no Workflows permission, or add a reviewer identity.";
 /** Services a zone may declare with egress on: each drop's /28 gives them .8 to .14. */
 export const MAX_EGRESS_SERVICES = 6;
 
@@ -192,6 +202,11 @@ const DropZoneObject = z.object({
    * repository authors the PRs. The reviewer must still not be an admin, and neither may bypass.
    */
   authorMayBeAdmin: z.boolean().default(false),
+  /**
+   * `starter` runs with the author token alone (opt-in): no review is posted, and the author
+   * merges on the reviewer drop's verdict and green CI. See STARTER_WARNING.
+   */
+  identity: z.enum(IDENTITIES).default('two-bot'),
   protectedPaths: z.array(z.string()).default(DEFAULT_PROTECTED_PATHS),
   /**
    * Logins (with write access) whose approval of the exact head lets a gate script or gate tool
@@ -223,6 +238,14 @@ const DropZoneSchema = DropZoneObject.superRefine((zone, ctx) => {
       message: 'model may not name Fable: declare claude.plan and claude.fableModel instead',
     });
   }
+  if (zone.identity === 'starter' && !zone.ciRequired) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['ciRequired'],
+      message:
+        'a starter zone requires ciRequired: true: with no reviewer identity, required CI is what GitHub enforces',
+    });
+  }
   if ((zone.egress?.mode ?? 'off') !== 'off' && zone.services.length > MAX_EGRESS_SERVICES) {
     ctx.addIssue({
       code: 'custom',
@@ -230,7 +253,8 @@ const DropZoneSchema = DropZoneObject.superRefine((zone, ctx) => {
       message: `with egress on a zone may declare at most ${MAX_EGRESS_SERVICES} services (each drop network is a /28)`,
     });
   }
-  if (!zone.crew.enabled) return;
+  // The goal file is read every pass, crew on or off, and served as Command's text: it must be a
+  // path no drop can change.
   if (!zone.protectedPaths.some((g) => pathMatches(zone.crew.goalPath, g))) {
     ctx.addIssue({
       code: 'custom',
@@ -238,6 +262,7 @@ const DropZoneSchema = DropZoneObject.superRefine((zone, ctx) => {
       message: `crew.goalPath ${zone.crew.goalPath} must match a protectedPaths glob`,
     });
   }
+  if (!zone.crew.enabled) return;
   if (zone.crew.stagedLabel === zone.readyLabel) {
     ctx.addIssue({
       code: 'custom',
@@ -336,7 +361,8 @@ export interface Config {
   secrets: {
     claudeToken: string;
     githubAuthorToken: string;
-    githubReviewerToken: string;
+    /** Absent only when every zone is `starter`. */
+    githubReviewerToken?: string;
     githubReadToken?: string;
     joinToken: string;
     operatorToken: string;
@@ -353,6 +379,13 @@ export type ClaudeConfig = {
   fableWeeklyDropCap: number;
   tokenCreatedAt?: string;
 };
+
+/** What the server says at startup about risky settings: one line per starter zone. */
+export function startupWarnings(config: Pick<Config, 'dropZones'>): string[] {
+  return config.dropZones
+    .filter((z) => z.identity === 'starter')
+    .map((z) => `zone ${z.id}: ${STARTER_WARNING}`);
+}
 
 /** The model for a role: the per-role override, else the zone's model. */
 export function modelFor(zone: DropZoneConfig, role: Role): string {
@@ -480,11 +513,26 @@ export function loadConfig(
   const env: Record<string, string | undefined> = {};
   for (const name of [...Object.values(SECRET_VARS), 'JM_GITHUB_READ_TOKEN'])
     env[name] = readSecret(rawEnv, name);
-  const missing = Object.values(SECRET_VARS).filter((name) => !env[name]);
+  // The reviewer token is optional only when no zone has a reviewer identity.
+  const allStarter =
+    parsed.data.dropZones.length > 0 &&
+    parsed.data.dropZones.every((z) => z.identity === 'starter');
+  const missing = Object.values(SECRET_VARS).filter(
+    (name) => !env[name] && !(allStarter && name === SECRET_VARS.githubReviewerToken),
+  );
   if (missing.length > 0)
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
-  if (env[SECRET_VARS.githubReviewerToken] === env[SECRET_VARS.githubAuthorToken])
+  if (
+    env[SECRET_VARS.githubReviewerToken] !== undefined &&
+    env[SECRET_VARS.githubReviewerToken] === env[SECRET_VARS.githubAuthorToken]
+  )
     throw new Error('JM_GITHUB_REVIEWER_TOKEN must differ from JM_GITHUB_AUTHOR_TOKEN');
+  // Starter mode merges with the author token: one limited to this repository, never a classic one.
+  const starters = parsed.data.dropZones.filter((z) => z.identity === 'starter').map((z) => z.id);
+  if (starters.length > 0 && !env[SECRET_VARS.githubAuthorToken]?.startsWith('github_pat_'))
+    throw new Error(
+      `starter identity (zone(s): ${starters.join(', ')}) requires a fine-grained JM_GITHUB_AUTHOR_TOKEN (github_pat_), limited to the repository, with no Workflows or Administration permission. On a personal repository, create it with your own account (the owner) and set authorMayBeAdmin: true on the zone: the owner is always an admin, and the fine-grained token is what keeps it from changing the ruleset`,
+    );
   // An admin's classic token could edit the ruleset. A fine-grained one can be limited to one repo.
   if (
     parsed.data.dropZones.some((z) => z.authorMayBeAdmin) &&
@@ -496,7 +544,8 @@ export function loadConfig(
     throw new Error('JM_OPERATOR_TOKEN must be at least 32 characters');
   const others = Object.values(SECRET_VARS)
     .filter((name) => name !== SECRET_VARS.operatorToken)
-    .map((name) => env[name]);
+    .map((name) => env[name])
+    .filter((v) => v !== undefined);
   if (others.includes(operatorToken))
     throw new Error('JM_OPERATOR_TOKEN must differ from every other token');
   const readToken = env.JM_GITHUB_READ_TOKEN;
@@ -509,7 +558,9 @@ export function loadConfig(
   const secrets: Config['secrets'] = {
     claudeToken: env[SECRET_VARS.claudeToken] as string,
     githubAuthorToken: env[SECRET_VARS.githubAuthorToken] as string,
-    githubReviewerToken: env[SECRET_VARS.githubReviewerToken] as string,
+    ...(env[SECRET_VARS.githubReviewerToken]
+      ? { githubReviewerToken: env[SECRET_VARS.githubReviewerToken] }
+      : {}),
     joinToken: env[SECRET_VARS.joinToken] as string,
     operatorToken,
     ...(readToken ? { githubReadToken: readToken } : {}),

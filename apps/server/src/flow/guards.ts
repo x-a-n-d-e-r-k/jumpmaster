@@ -745,14 +745,39 @@ export function lockfileChanges(
 // ---- branch protection -------------------------------------------------------------------------
 
 /**
- * Problems with the branch rules both bot identities see. `[]` when protection is not required;
- * null when either read is unavailable (judged on a later pass).
+ * What the pass's admin-only read said about the author token: `present` (it answered),
+ * `absent` (refused with 403/404), `unknown` (rate-limited, 5xx or no answer). Only `present`
+ * parks.
+ */
+export type AdministrationRead = 'present' | 'absent' | 'unknown';
+
+export const ADMINISTRATION_PROBLEM =
+  'the admin author token has Administration permission, so it could change the ruleset (only an admin-only read that answers parks; a refused, rate-limited or unanswered probe never does)';
+
+/** The probe's answer as a read: a 2xx is present, a plain 403/404 absent, anything else unknown. */
+export function administrationOf(p: {
+  status: number | null;
+  rateLimited?: boolean;
+}): AdministrationRead {
+  if (p.status !== null && p.status >= 200 && p.status < 300) return 'present';
+  if ((p.status === 403 || p.status === 404) && !p.rateLimited) return 'absent';
+  return 'unknown';
+}
+
+/**
+ * Problems with the branch rules both bot identities see (the author alone in starter mode, where
+ * `reviewer` is null). `[]` when protection is not required; null when a read is unavailable
+ * (judged on a later pass).
  */
 export function branchProtectionProblems(
-  rules: { author: BranchRulesRead; reviewer: BranchRulesRead },
+  rules: { author: BranchRulesRead; reviewer: BranchRulesRead | null },
   zone: DropZoneConfig,
+  probe: { authorAdministration?: AdministrationRead } = {},
 ): string[] | null {
   if (!zone.requireBranchProtection) return [];
+  if (zone.identity === 'starter')
+    return starterProblems(rules.author, zone, probe.authorAdministration);
+  if (rules.reviewer === null) return null; // two-bot always reads both identities
   if (rules.author.kind === 'unavailable' || rules.reviewer.kind === 'unavailable') return null;
   const out = new Set<string>();
   for (const read of [rules.author, rules.reviewer]) {
@@ -770,5 +795,36 @@ export function branchProtectionProblems(
     if (zone.ciRequired && r.requiredChecks.length === 0) out.add('no required checks');
     for (const t of r.unsupportedRules ?? []) out.add(`unsupported rule: ${t}`);
   }
+  return [...out];
+}
+
+/**
+ * Starter mode's rules, read by the author alone: a pull request rule, required checks pinned to
+ * GitHub Actions, and no bypass. An approval requirement is a problem (no second identity can
+ * give one), and stale-approval dismissal is moot with zero approvals.
+ */
+function starterProblems(
+  read: BranchRulesRead,
+  zone: DropZoneConfig,
+  administration: AdministrationRead | undefined,
+): string[] | null {
+  if (read.kind === 'unavailable') return null;
+  if (read.kind === 'none') return ['no ruleset'];
+  const r = read.rules;
+  const out = new Set<string>();
+  // Unknown counts as missing: the author must not be able to push straight to the branch.
+  if (r.requiresPullRequest !== true) out.add('no pull request rule');
+  if (r.requiredApprovals > 0) out.add('approvals required in starter mode');
+  if (r.viewerCanBypass) out.add('bot can bypass');
+  // The personal-repository path: the owner's own account is always an admin, allowed by
+  // authorMayBeAdmin with a fine-grained token (no Administration permission; the doctor probes it).
+  if (r.viewerIsAdmin && !zone.authorMayBeAdmin) out.add('bot is admin');
+  // What the allowance rests on, enforced: an admin author's token must not hold Administration.
+  if (r.viewerIsAdmin && zone.authorMayBeAdmin && administration === 'present')
+    out.add(ADMINISTRATION_PROBLEM);
+  for (const c of r.unpinnedChecks) out.add(`required check not pinned: ${c}`);
+  for (const c of r.nonActionsChecks ?? []) out.add(`required check not from GitHub Actions: ${c}`);
+  if (r.requiredChecks.length === 0) out.add('no required checks');
+  for (const t of r.unsupportedRules ?? []) out.add(`unsupported rule: ${t}`);
   return [...out];
 }

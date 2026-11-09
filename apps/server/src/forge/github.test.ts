@@ -831,6 +831,25 @@ describe('GitHubForge', () => {
         });
       });
 
+      test('lists required checks pinned to an app other than GitHub Actions', async () => {
+        nock(api)
+          .get(rulesUrl)
+          .query(true)
+          .reply(200, [
+            checksRule(1, [
+              { context: 'build', integration_id: 15368 },
+              { context: 'other', integration_id: 1 },
+              { context: 'lint' },
+            ]),
+          ]);
+        mockRuleset(1, { enforcement: 'active', current_user_can_bypass: 'never' });
+        mockViewer('write');
+        expect(await fresh().getBranchRules('main')).toMatchObject({
+          kind: 'ok',
+          rules: { unpinnedChecks: ['lint'], nonActionsChecks: ['other'] },
+        });
+      });
+
       test('5xx is unavailable, 403 is none', async () => {
         nock(api).get(rulesUrl).query(true).reply(503, { message: 'down' });
         expect(await fresh().getBranchRules('main')).toEqual({ kind: 'unavailable' });
@@ -1030,6 +1049,34 @@ describe('GitHubForge doctor reads', () => {
       { permission: 'Actions: read', status: 403, accepted: 'actions=read' },
       { permission: 'Commit statuses: read', status: 200, accepted: null },
     ]);
+  });
+
+  test('probeAdministration tries an admin-only read: 403 means the token lacks Administration', async () => {
+    nock(api)
+      .get('/repos/o/r/actions/permissions')
+      .reply(
+        403,
+        { message: 'Resource not accessible by personal access token' },
+        { 'x-accepted-github-permissions': 'administration=read' },
+      );
+    expect(await new GitHubForge('o', 'r', 'tok').probeAdministration()).toEqual({
+      permission: 'Administration: read',
+      status: 403,
+      accepted: 'administration=read',
+    });
+    nock(api).get('/repos/o/r/actions/permissions').reply(200, { enabled: true });
+    expect(await new GitHubForge('o', 'r', 'tok').probeAdministration()).toEqual({
+      permission: 'Administration: read',
+      status: 200,
+      accepted: null,
+    });
+    nock(api)
+      .get('/repos/o/r/actions/permissions')
+      .reply(403, { message: 'API rate limit exceeded' }, { 'x-ratelimit-remaining': '0' });
+    expect(await new GitHubForge('o', 'r', 'tok').probeAdministration()).toMatchObject({
+      status: 403,
+      rateLimited: true,
+    });
   });
 
   test('probeReads marks a rate-limited read as such, and a network failure as status null', async () => {

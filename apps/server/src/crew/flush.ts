@@ -20,6 +20,7 @@ import {
   type CrewIssuePatch,
   type CrewIssueState,
   getCrewIssue,
+  INTAKE_SOURCE,
   listCrewIssues,
   setCrewIssue,
 } from './store.js';
@@ -106,11 +107,13 @@ async function promote(
   zone: DropZoneConfig,
   row: CrewIssue,
   now: Date,
-): Promise<Step | 'wait' | 'changed'> {
+): Promise<Step | 'wait' | 'changed' | 'closed'> {
   if (row.number === null) return 'wait';
   if (objectiveBusy(db, row)) return 'wait';
   const live = await forges.author.getIssue(row.number);
   if (!live) return 'wait';
+  // Closed on the forge since Command ruled: a label swap would "promote" an issue no sync lists.
+  if (live.state === 'closed') return 'closed';
   // A body edited on the forge since it was staged is not what Command approved.
   if (row.bodySha === null || crewBodySha(liveCrewBody(live.body)) !== row.bodySha) {
     return 'changed';
@@ -193,10 +196,11 @@ function rejectedByCommand(db: Db, row: CrewIssue): boolean {
 /**
  * Moves crew issues along by their forge writes, all through the outbox as the author identity.
  * Only in an active zone with the kill switch off; returns how many issues changed state. With the
- * zone's crew disabled nothing is filed, promoted (a refute hold neither starts nor ends), revised
- * or closed by the crew: those rows wait as they are until it is enabled again. The one write that
- * goes ahead is the close of an issue Command rejected by ruling (its brake); a `rejecting` row from
- * a refute verdict waits like the rest.
+ * zone's crew disabled nothing is promoted (a refute hold neither starts nor ends), revised or
+ * closed by the crew, and crew drops' filings wait until it is enabled again. Two writes go ahead:
+ * an assistant's (MCP) filing, which lands staged and starts nothing without a Promote ruling, and
+ * the close of an issue Command rejected by ruling (its brake); a `rejecting` row from a refute
+ * verdict waits like the rest.
  */
 export async function flushCrewOps(
   db: Db,
@@ -211,7 +215,13 @@ export async function flushCrewOps(
   const crewOn = zone.crew?.enabled === true;
   let moved = 0;
   for (const row of listCrewIssues(db, zone.id, PENDING)) {
-    if (!crewOn) {
+    // An intake row is Command's issue, filed ready by its own route: never a staged crew filing.
+    if (row.source === INTAKE_SOURCE) continue;
+    // An assistant's (MCP) proposal is filed staged with the crew off: it starts nothing until
+    // Command promotes it, and promotion still waits for the crew.
+    // Its server-briefed promotion goes ahead too, once Command has ruled Promote.
+    const mcpOwn = row.source === 'mcp' && (row.state === 'filing' || row.state === 'promoting');
+    if (!crewOn && !mcpOwn) {
       // No forge write, but a create that already resolved gives the row its number, so intake
       // knows the issue as crew.
       if (row.state === 'filing' && row.number === null) {
@@ -222,7 +232,7 @@ export async function flushCrewOps(
       }
       if (row.state !== 'rejecting' || !rejectedByCommand(db, row)) continue;
     }
-    let step: Step | 'wait' | 'changed';
+    let step: Step | 'wait' | 'changed' | 'closed';
     try {
       switch (row.state) {
         case 'filing':
@@ -259,6 +269,27 @@ export async function flushCrewOps(
       continue; // a forge read failed: tried again next pass
     }
     if (step === 'wait') continue;
+    if (step === 'closed') {
+      // Left unpromoted, and Command is told why; a fresh ruling decides (reopen, or reject).
+      setCrewIssue(db, row.id, { state: 'staged' }, now);
+      raiseBriefing(
+        db,
+        {
+          zoneId: zone.id,
+          kind: 'promote',
+          subject: subjectOf(row),
+          decision: `Crew issue #${row.number} was closed on GitHub, so it was not promoted. Reopen it and promote it, or reject it?`,
+          why: 'The issue was closed on the forge after it was staged. Promoting a closed issue would start nothing: reopen it on GitHub first if the work is still wanted.',
+          options: PROMOTE_OPTIONS,
+          onHold: `Crew issue #${row.number}`,
+          source: 'server',
+          ...(row.bodySha ? { sourceRef: row.bodySha } : {}),
+        },
+        now,
+      );
+      moved++;
+      continue;
+    }
     if (step === 'changed') {
       setCrewIssue(db, row.id, { state: 'staged' }, now);
       raiseBriefing(
@@ -297,5 +328,41 @@ export async function flushCrewOps(
       moved++;
     }
   }
+  if (!crewOn) briefStagedMcpIssues(db, zone, now);
   return moved;
+}
+
+/**
+ * With the crew off no refute drop judges a staged issue, so nothing would put it to Command: the
+ * server raises the Promote briefing for an assistant's (MCP) staged issue itself, with the
+ * refute path's options. Once per issue: an issue that has ever had a briefing is skipped, so a
+ * re-flush or a restart raises no second one. With the crew on the refute owns promotion.
+ */
+function briefStagedMcpIssues(db: Db, zone: DropZoneConfig, now: Date): void {
+  // Once per staged body: skipped while any briefing on the issue is open, or once one was raised
+  // for this body. A Re-stage (a new body) earns a fresh Promote briefing.
+  const briefed = db.prepare(
+    `SELECT 1 FROM briefings WHERE zone_id = ? AND subject = ?
+       AND (state = 'open' OR source_ref = ?) LIMIT 1`,
+  );
+  for (const row of listCrewIssues(db, zone.id, ['staged'])) {
+    if (row.source !== 'mcp' || row.number === null || row.bodySha === null) continue;
+    if (briefed.get(zone.id, subjectOf(row), row.bodySha)) continue;
+    const label = `issue #${row.number}`;
+    raiseBriefing(
+      db,
+      {
+        zoneId: zone.id,
+        kind: 'promote',
+        subject: subjectOf(row),
+        decision: `Promote ${label}?`,
+        why: 'Proposed by the assistant (MCP) and filed staged. The crew is off, so no refute judged it: read the issue, then promote it to let an agent start, or reject it.',
+        options: PROMOTE_OPTIONS,
+        onHold: label,
+        source: 'server',
+        sourceRef: row.bodySha,
+      },
+      now,
+    );
+  }
 }

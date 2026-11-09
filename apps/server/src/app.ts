@@ -42,6 +42,7 @@ import {
   renderDrop,
   renderGoals,
   renderHome,
+  renderIntake,
   renderObservations,
   type StickLine,
 } from './ui/pages.js';
@@ -80,6 +81,8 @@ export function createApp(
     readForgeFor?: (zoneId: string) => Forge | undefined;
     /** The doctor's forges (requests time out); defaults to `forgesFor`. */
     doctorForgesFor?: (zoneId: string) => ForgePair;
+    /** The intake's forges (requests time out); defaults to `forgesFor`. */
+    intakeForgesFor?: (zoneId: string) => ForgePair;
     /** The operator's log, scrubbed of secrets (main.ts); MCP's internal errors go here. */
     log?: (msg: string) => void;
   },
@@ -191,6 +194,12 @@ export function createApp(
       skippedCrewUnpromoted: lastSyncResult(zone.id)?.skippedCrewUnpromoted ?? [],
     });
     return reply.type('text/html; charset=utf-8').send(html);
+  });
+
+  app.get<{ Params: { id: string } }>('/zones/:id/intake', async (req, reply) => {
+    const zone = deps.config.dropZones.find((z) => z.id === req.params.id);
+    if (!zone) return reply.code(404).type('text/plain').send('not found');
+    return reply.type('text/html; charset=utf-8').send(renderIntake(zone));
   });
 
   app.get('/doctor', async (_req, reply) =>

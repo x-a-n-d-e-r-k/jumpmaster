@@ -1,10 +1,20 @@
 import { describe, expect, test } from 'vitest';
 import type { Briefing, Ruling } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
+import { STARTER_WARNING } from '../config.js';
 import type { CrewIssue } from '../crew/store.js';
 import type { Drop, WorkItem } from '../db/repo.js';
 import type { GoalRow } from '../goals.js';
-import { renderBriefings, renderDrop, renderGoals, renderHome, waitingOnYou } from './pages.js';
+import { forgetSubmitKey, submitKey } from '../intake.js';
+import {
+  escapeHtml,
+  renderBriefings,
+  renderDrop,
+  renderGoals,
+  renderHome,
+  renderIntake,
+  waitingOnYou,
+} from './pages.js';
 
 const z: DropZoneConfig = {
   id: 'main',
@@ -636,5 +646,39 @@ describe('home crew line', () => {
     expect(html).toMatch(
       /main<\/td><td>on<\/td><td>2026-01-01T00:00:00.000Z<\/td><td>2026-01-01T01:00:00.000Z<\/td><td>plan pro does not include Fable/,
     );
+  });
+});
+
+describe('starter banner', () => {
+  test('the home page warns about each starter zone, and says nothing for two-bot', () => {
+    const starter = { ...z, id: 'solo', identity: 'starter' } as DropZoneConfig;
+    const html = renderHome({ zones: [z, starter], items: [], drops: [] });
+    expect(html).toContain('Starter mode in zone solo');
+    expect(html).toContain(escapeHtml(STARTER_WARNING));
+    expect(renderHome({ zones: [z], items: [], drops: [] })).not.toContain('Starter mode');
+  });
+});
+
+describe('renderIntake', () => {
+  const zone = { id: 'main"><script>x</script>', repo: 'octo/demo' } as DropZoneConfig;
+
+  test('three steps, every value escaped, no secret, and the first issue needs no merged GOAL.md', () => {
+    const html = renderIntake(zone);
+    expect(html).not.toContain('<script>x</script>');
+    expect(html).toContain('main&quot;&gt;&lt;script&gt;x&lt;/script&gt;');
+    expect(html).toContain("the first issue doesn't need GOAL.md merged first");
+    for (const t of ['existing', 'idea', 'partial']) expect(html).toContain(`value="${t}"`);
+    expect(html).toMatch(/Step 1/);
+    expect(html).toMatch(/Step 2/);
+    expect(html).toMatch(/Step 3/);
+    expect(html).toContain('type="password"');
+    expect(html).not.toMatch(/github_pat_|ghp_|sk-ant-/);
+    // The page reuses the tested helpers, not a copy of them.
+    expect(html).toContain(submitKey.toString());
+    expect(html).toContain(forgetSubmitKey.toString());
+    expect(html).toContain('sessionStorage');
+    // A refused filing starts afresh: the stored key is dropped, and the page says so.
+    expect(html).toMatch(/r\.status === 502\) \{\s*forgetSubmitKey\(sessionStorage, content\)/);
+    expect(html).not.toContain('innerHTML');
   });
 });

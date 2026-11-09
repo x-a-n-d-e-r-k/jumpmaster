@@ -89,11 +89,16 @@ export type CompareFacts = {
 
 export type PullFiles = { files: { path: string; previousPath?: string }[]; complete: boolean };
 
+/** GitHub's app id for GitHub Actions, as a ruleset's required check names its source. */
+export const GITHUB_ACTIONS_APP_ID = 15368;
+
 export type BranchRules = {
   requiredApprovals: number;
   dismissStaleOnPush: boolean;
   requiredChecks: string[];
   unpinnedChecks: string[];
+  /** Required checks pinned to an app other than GitHub Actions (absent when none). */
+  nonActionsChecks?: string[];
   viewerCanBypass: boolean;
   viewerIsAdmin: boolean;
   /** Active rule types the server cannot satisfy with its own merge (merge queue, deployments). */
@@ -190,6 +195,11 @@ export interface Forge {
   listDir(ref: string, path: string): Promise<string[] | null>;
   /** Tries each read the server relies on (one GET each) and reports the status. */
   probeReads(sha: string): Promise<ReadProbe[]>;
+  /**
+   * Tries one read only Administration permission allows (`GET …/actions/permissions`): a 403 or
+   * 404 says the token lacks Administration, so it can't change the repository's rulesets.
+   */
+  probeAdministration(): Promise<ReadProbe>;
 }
 
 const TRUSTED_ROLES = new Set(['write', 'maintain', 'admin']);
@@ -723,6 +733,7 @@ export class GitHubForge implements Forge {
       let requireCodeOwnerReview = false;
       const requiredChecks: string[] = [];
       const unpinnedChecks: string[] = [];
+      const nonActionsChecks: string[] = [];
       const unsupportedRules: string[] = [];
       for (const rule of rules) {
         if (rule.ruleset_id == null || !active.has(rule.ruleset_id)) continue;
@@ -749,6 +760,12 @@ export class GitHubForge implements Forge {
             if (!requiredChecks.includes(c.context)) requiredChecks.push(c.context);
             if (c.integration_id == null && !unpinnedChecks.includes(c.context)) {
               unpinnedChecks.push(c.context);
+            } else if (
+              c.integration_id != null &&
+              c.integration_id !== GITHUB_ACTIONS_APP_ID &&
+              !nonActionsChecks.includes(c.context)
+            ) {
+              nonActionsChecks.push(c.context);
             }
           }
         }
@@ -764,6 +781,7 @@ export class GitHubForge implements Forge {
           viewerCanBypass,
           viewerIsAdmin,
           ...(unsupportedRules.length > 0 ? { unsupportedRules } : {}),
+          ...(nonActionsChecks.length > 0 ? { nonActionsChecks } : {}),
           requiresPullRequest,
           requireCodeOwnerReview,
         },
@@ -916,6 +934,27 @@ export class GitHubForge implements Forge {
     } catch (err) {
       if (statusOf(err) === 404) return null;
       throw err;
+    }
+  }
+
+  async probeAdministration(): Promise<ReadProbe> {
+    const permission = 'Administration: read';
+    try {
+      const res = await this.octokit.request('GET /repos/{owner}/{repo}/actions/permissions', {
+        owner: this.owner,
+        repo: this.repo,
+      });
+      return { permission, status: res.status, accepted: null };
+    } catch (err) {
+      const response = (err as { response?: { headers?: Record<string, unknown> } }).response;
+      const status = response ? (statusOf(err) ?? null) : null;
+      const accepted = response?.headers?.['x-accepted-github-permissions'];
+      return {
+        permission,
+        status,
+        accepted: typeof accepted === 'string' ? accepted : null,
+        ...(status !== null && isRateLimited(err) ? { rateLimited: true } : {}),
+      };
     }
   }
 

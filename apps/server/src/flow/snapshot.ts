@@ -26,6 +26,7 @@ import {
 import { type ForgePair, type OpResult, opKeys } from '../outbox.js';
 import type { Snapshot } from './decide.js';
 import {
+  administrationOf,
   branchProtectionProblems,
   dependenciesChanged,
   gateBins,
@@ -42,7 +43,7 @@ import {
 
 /** Read once per zone per pass and shared by the parked-item sync and the reconciler. */
 export type ZonePass = {
-  /** `[authorLogin, reviewerLogin]`, in that order. */
+  /** `[authorLogin, reviewerLogin]`, in that order; `[authorLogin]` alone in starter mode. */
   botLogins: string[];
   requiredChecks: string[];
   protectionProblems: string[] | null;
@@ -53,18 +54,35 @@ export async function zonePass(
   zone: DropZoneConfig,
   baseBranch: string,
 ): Promise<ZonePass> {
+  // Starter mode has no reviewer identity: every read is the author's.
+  const reviewer = forges.reviewer;
   const [authorLogin, reviewerLogin, authorRules, reviewerRules] = await Promise.all([
     forges.author.viewerLogin(),
-    forges.reviewer.viewerLogin(),
+    reviewer ? reviewer.viewerLogin() : null,
     forges.author.getBranchRules(baseBranch),
-    forges.reviewer.getBranchRules(baseBranch),
+    reviewer ? reviewer.getBranchRules(baseBranch) : null,
   ]);
+  // Starter mode with an admin author (the personal-repository path) rests on its token lacking
+  // Administration: one admin-only read per pass checks it. Only an answer parks (see guards).
+  const probeAdmin =
+    zone.identity === 'starter' &&
+    zone.authorMayBeAdmin &&
+    authorRules.kind === 'ok' &&
+    authorRules.rules.viewerIsAdmin;
+  const authorAdministration = probeAdmin
+    ? administrationOf(
+        await forges.author
+          .probeAdministration()
+          .catch(() => ({ status: null as number | null, rateLimited: false })),
+      )
+    : undefined;
   return {
-    botLogins: [authorLogin, reviewerLogin],
+    botLogins: reviewerLogin === null ? [authorLogin] : [authorLogin, reviewerLogin],
     requiredChecks: authorRules.kind === 'ok' ? authorRules.rules.requiredChecks : [],
     protectionProblems: branchProtectionProblems(
       { author: authorRules, reviewer: reviewerRules },
       zone,
+      authorAdministration ? { authorAdministration } : {},
     ),
   };
 }

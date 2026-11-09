@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest';
+import { STARTER_WARNING } from '../config.js';
 import {
   appendEvents,
   insertDrop,
@@ -16,7 +17,6 @@ describe('a healthy install', () => {
     const notPass = checks.filter((c) => c.status !== 'pass');
     expect(notPass.map((c) => [c.id, c.status])).toEqual([
       ['claude.token-age', 'skip'],
-      ['zone.identity', 'skip'],
       ['zone.doctor-drop', 'skip'],
     ]);
     for (const c of checks) {
@@ -227,7 +227,11 @@ describe('forge checks', () => {
     expect(one(await w.run(), 'forge.admin').status).toBe('fail');
     const allowed = world({ zone: { authorMayBeAdmin: true } });
     allowed.f.state.access.author.permissions.admin = true;
-    expect(one(await allowed.run(), 'forge.admin').status).toBe('warn');
+    // The admin-only read is refused, so the token lacks Administration: allowed, and said why.
+    expect(one(await allowed.run(), 'forge.admin')).toMatchObject({
+      status: 'pass',
+      summary: expect.stringContaining('no Administration permission'),
+    });
     const unneeded = world({ zone: { authorMayBeAdmin: true } });
     expect(one(await unneeded.run(), 'forge.admin')).toMatchObject({
       status: 'warn',
@@ -524,11 +528,122 @@ describe('zone checks', () => {
     expect(one(checks, 'zone.goals')).toMatchObject({ status: 'warn' });
   });
 
-  test('zone.identity reports skip until its task lands', async () => {
-    const checks = await world().run();
-    expect(one(checks, 'zone.identity')).toMatchObject({
-      status: 'skip',
-      summary: expect.stringContaining('available after Task 13'),
+  test('zone.identity passes for two bot identities', async () => {
+    expect(one(await world().run(), 'zone.identity')).toMatchObject({
+      status: 'pass',
+      summary: expect.stringContaining('two-bot'),
+    });
+  });
+
+  test('no check names a plan task number', async () => {
+    for (const w of [world(), world({ zone: { identity: 'starter' } })])
+      for (const c of await w.run()) expect(`${c.summary} ${c.fix ?? ''}`).not.toMatch(/\bTask \d/);
+  });
+});
+
+describe('starter identity', () => {
+  const starter = () => world({ zone: { identity: 'starter' } });
+
+  test('zone.identity warns with the merge-any-green-PR consequence', async () => {
+    const c = one(await starter().run(), 'zone.identity');
+    expect(c).toMatchObject({ status: 'warn', summary: STARTER_WARNING });
+    expect(STARTER_WARNING).toContain('can merge any green PR, including an unreviewed one');
+    expect(STARTER_WARNING).toContain('no Workflows permission');
+    expect(c.fix).toContain('JM_GITHUB_REVIEWER_TOKEN');
+    expect(c.fix).toMatch(/personal repository[^.]*authorMayBeAdmin: true/);
+    expect(c.doc).toMatch(/install\.md#/);
+  });
+
+  test('a healthy starter install warns only on its identity', async () => {
+    const checks = await starter().run();
+    expect(checks.filter((c) => c.status !== 'pass').map((c) => [c.id, c.status])).toEqual([
+      ['claude.token-age', 'skip'],
+      ['forge.reviewer', 'skip'],
+      ['forge.reviewer-reads', 'skip'],
+      ['zone.identity', 'warn'],
+      ['zone.doctor-drop', 'skip'],
+    ]);
+    expect(one(checks, 'forge.reviewer').summary).toContain('starter mode');
+  });
+
+  test('starter reads only the author: the reviewer forge is never called', async () => {
+    const w = starter();
+    await w.run();
+    expect(w.f.reviewer.calls).toEqual([]);
+  });
+
+  test('forge.branch-rules fails starter rules that require an approval, naming the fix', async () => {
+    const w = starter();
+    const r = w.f.state.rules.author;
+    if (r.kind === 'ok') {
+      r.rules.requiredApprovals = 1;
+      r.rules.nonActionsChecks = ['ci'];
+    }
+    const c = one(await w.run(), 'forge.branch-rules');
+    expect(c).toMatchObject({ status: 'fail' });
+    expect(c.summary).toContain('approvals required in starter mode');
+    expect(c.summary).toContain('required check not from GitHub Actions: ci');
+    expect(c.fix).toContain('Required approvals to 0');
+    expect(c.fix).toContain('GitHub Actions');
+  });
+
+  test('a starter install on a personal repository: own admin account, authorMayBeAdmin, no Administration', async () => {
+    const w = world({ zone: { identity: 'starter', authorMayBeAdmin: true } });
+    w.f.state.access.author.permissions.admin = true;
+    const r = w.f.state.rules.author;
+    if (r.kind === 'ok') r.rules.viewerIsAdmin = true;
+    const checks = await w.run();
+    expect(one(checks, 'forge.branch-rules').status).toBe('pass');
+    expect(one(checks, 'forge.admin')).toMatchObject({
+      status: 'pass',
+      summary: expect.stringContaining('personal repository'),
+    });
+  });
+
+  test('forge.admin warns when the admin author token has Administration permission', async () => {
+    const w = world({ zone: { identity: 'starter', authorMayBeAdmin: true } });
+    w.f.state.access.author.permissions.admin = true;
+    w.f.state.adminProbe.author = {
+      permission: 'Administration: read',
+      status: 200,
+      accepted: null,
+    };
+    const c = one(await w.run(), 'forge.admin');
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('Administration');
+    expect(c.fix).toContain('Administration');
+    w.f.state.adminProbe.author = {
+      permission: 'Administration: read',
+      status: 502,
+      accepted: null,
+    };
+    expect(one(await w.run(), 'forge.admin')).toMatchObject({
+      status: 'warn',
+      summary: expect.stringContaining('could not check'),
+    });
+  });
+
+  test('a starter admin author without authorMayBeAdmin: the doctor names the personal-repository path', async () => {
+    const w = starter();
+    w.f.state.access.author.permissions.admin = true;
+    const r = w.f.state.rules.author;
+    if (r.kind === 'ok') r.rules.viewerIsAdmin = true;
+    const checks = await w.run();
+    for (const id of ['forge.admin', 'forge.branch-rules']) {
+      const c = one(checks, id);
+      expect(c.status, id).toBe('fail');
+      expect(c.fix, id).toMatch(/personal repository/);
+      expect(c.fix, id).toContain('authorMayBeAdmin: true');
+    }
+  });
+
+  test('forge.codeowners warns: a required code owner review needs a human in starter mode', async () => {
+    const w = starter();
+    const r = w.f.state.rules.author;
+    if (r.kind === 'ok') r.rules.requireCodeOwnerReview = true;
+    expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
+      status: 'warn',
+      summary: expect.stringContaining('starter mode'),
     });
   });
 });

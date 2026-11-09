@@ -1626,3 +1626,48 @@ describe('§16 final-review regressions', () => {
     }
   });
 });
+
+describe('starter identity (one forge identity)', () => {
+  const starter = () => harness({ zone: { identity: 'starter', ciRequired: true } });
+
+  test('the whole loop merges under the author token and posts no review', async () => {
+    const h = await starter();
+    await toApproved(h, 'sha1');
+    h.forge.state.checks.set('sha1', { state: 'success', names: ['ci'] });
+    await h.reconcile();
+    expect(item(h)).toMatchObject({ state: 'done', reason: 'merged' });
+    expect(h.forge.state.merges).toEqual([
+      { number: 1, sha: 'sha1', title: 'Issue 1', message: 'Closes #1' },
+    ]);
+    expect(count(h, 'createReview')).toBe(0);
+    expect(h.forge.reviewer.calls).toEqual([]);
+    const ops = listOutbox(h.db, ['pending', 'unknown', 'done', 'failed']);
+    expect(ops.some((o) => o.kind === 'post_review')).toBe(false);
+    expect(ops.some((o) => o.kind === 'merge')).toBe(true);
+  });
+
+  test('starter never merges on a verdict for an older SHA', async () => {
+    const h = await starter();
+    await toApproved(h, 'sha1');
+    // Someone pushes after the verdict: CI is green on the new head, but no verdict covers it.
+    h.forge.state.setHead(1, 'sha2');
+    h.forge.state.checks.set('sha1', { state: 'success', names: ['ci'] });
+    h.forge.state.checks.set('sha2', { state: 'success', names: ['ci'] });
+    await h.reconcile();
+    await h.reconcile();
+    expect(count(h, 'merge')).toBe(0);
+    expect(h.queuedRoles()).toEqual(['review']);
+    const { payload } = await h.lease();
+    expect(payload.role === 'review' && payload.pr.headSha).toBe('sha2');
+  });
+
+  test('starter review payloads carry no write token', async () => {
+    const h = await starter();
+    await toPrOpen(h, 'sha1');
+    await h.reconcile();
+    const { payload } = await h.lease();
+    expect(payload.role).toBe('review');
+    expect(JSON.stringify(payload)).not.toContain('author-token');
+    expect(payload.credentials).toEqual({ claudeToken: 'claude-token' });
+  });
+});

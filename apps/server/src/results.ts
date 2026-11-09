@@ -307,8 +307,9 @@ async function reviewResult(c: Ctx, result: DropResult): Promise<void> {
     commitId: drop.headSha,
     body: renderReviewBody({ ...verdict, findings, decision }, result.gates, c.deps.secrets),
   };
+  // Starter mode has no reviewer identity: the stored verdict is all there is (shown in the UI).
   // Fails closed: an unposted verdict is posted later by decide, which honours the hold and mode.
-  if (getZoneMode(db, drop.dropZoneId, 'active') !== 'active') {
+  if (c.deps.forges.reviewer === null || getZoneMode(db, drop.dropZoneId, 'active') !== 'active') {
     finish(c, 'succeeded');
     return;
   }
