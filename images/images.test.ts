@@ -197,6 +197,27 @@ describe('stack presets', () => {
     );
   });
 
+  test("the trooper's Corepack shims sit on PATH after /usr/local/bin, so a global npm install wins", () => {
+    // Shims in /usr/local/bin made `npm i -g pnpm` in a zone image fail with EEXIST; in their own
+    // directory, last on PATH, they still serve `packageManager` repos and detected gates.
+    const final = finalStage(instructions(read('images/trooper/Dockerfile')));
+    const runs = final.filter((i) => i.op === 'RUN').map((i) => i.args);
+    const enable = runs.flatMap((r) => r.split(/&&/)).find((c) => /\bcorepack enable\b/.test(c));
+    expect(enable).toMatch(/--install-directory[= ]\/opt\/corepack\/bin\b/);
+    expect(enable).toMatch(/\bpnpm\b/);
+    expect(enable).toMatch(/\byarn\b/);
+    const path = final
+      .filter((i) => i.op === 'ENV')
+      .map((i) => /(?:^|\s)PATH=(\S+)/.exec(i.args)?.[1])
+      .filter((p) => p !== undefined)
+      .at(-1);
+    expect(path).toMatch(/^\$\{?PATH\}?:\/opt\/corepack\/bin$/);
+    // A login shell resets PATH from /etc/profile; the profile.d snippet puts the shims back.
+    expect(runs.join('\n')).toMatch(/\/etc\/profile\.d\/\S*corepack\S*\.sh/);
+    // The Node image's bundled Yarn 1 would shadow Corepack's yarn (and block `npm i -g yarn`).
+    expect(runs.join('\n')).toMatch(/\brm -rf [^&\n]*\/usr\/local\/bin\/yarn\b/);
+  });
+
   test('the python preset ships 3.11 and a uv-installed 3.12 every user can find', () => {
     const final = finalStage(instructions(read(PRESET_FILES.python)));
     const env = final
@@ -261,6 +282,17 @@ describe('stack presets', () => {
     // The agent user runs the probes directly, and the gate user runs them as a drop's gate.
     expect(e2e).toMatch(/--user 10001:10001/);
     expect(e2e).toMatch(/gates: \[\{ name: "toolchain", run/);
+    // The node preset: a zone image with a global npm pnpm builds, and that pnpm wins for both
+    // users, while Corepack still serves a repository's `packageManager`.
+    expect(e2e).toMatch(
+      /-t jumpmaster-trooper-globalpnpm:dev -f images\/trooper\/e2e\/global-pnpm\.Dockerfile/,
+    );
+    for (const probe of ['pnpm@10.18.3+sha512.', 'yarn@1.22.22+sha512.', '/opt/corepack/bin/'])
+      expect(e2e).toContain(probe);
+    expect(e2e).toMatch(/'node as agent'/);
+    expect(e2e).toMatch(/'node as gate'/);
+    expect(e2e).toMatch(/'global pnpm as agent'/);
+    expect(e2e).toMatch(/'global pnpm as gate'/);
   });
 });
 

@@ -91,6 +91,12 @@ before it. With one free slot, crew drops wait until no finishing or implement d
 
 - **Image:** derive from the trooper image, as in `images/trooper/examples/Dockerfile.pnpm`.
   Allow-list it, and every service image, with `JM_ALLOWED_IMAGES`.
+  The trooper's Corepack `pnpm` and `yarn` shims live in `/opt/corepack/bin`, last on `PATH` (a
+  login shell gets it back from `/etc/profile.d`), and the Node image's bundled Yarn 1 is removed.
+  A repository that declares `packageManager` gets that version, fetched and checked on first use.
+  A zone image may instead `npm i -g pnpm@<version>` (or yarn): it installs into `/usr/local/bin`
+  without a conflict and wins for the agent and the gates, whatever `packageManager` says (pnpm 9
+  doesn't switch versions). The preset e2e (`images/trooper/e2e/presets.sh`) checks both.
 - **Limits:** the default of 512 counts threads and is too low for many large test suites. A gate
   that hits it says so in its output.
 - **Services:** run on an internal network for one drop. The agent and the gates get
