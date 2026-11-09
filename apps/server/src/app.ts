@@ -42,6 +42,7 @@ import {
   renderDrop,
   renderGoals,
   renderHome,
+  renderIntake,
   renderObservations,
   type StickLine,
 } from './ui/pages.js';
@@ -191,6 +192,12 @@ export function createApp(
       skippedCrewUnpromoted: lastSyncResult(zone.id)?.skippedCrewUnpromoted ?? [],
     });
     return reply.type('text/html; charset=utf-8').send(html);
+  });
+
+  app.get<{ Params: { id: string } }>('/zones/:id/intake', async (req, reply) => {
+    const zone = deps.config.dropZones.find((z) => z.id === req.params.id);
+    if (!zone) return reply.code(404).type('text/plain').send('not found');
+    return reply.type('text/html; charset=utf-8').send(renderIntake(zone));
   });
 
   app.get('/doctor', async (_req, reply) =>

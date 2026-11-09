@@ -12,6 +12,7 @@ import type {
   WorkItem,
 } from '../db/repo.js';
 import type { GoalRow } from '../goals.js';
+import { forgetSubmitKey, submitKey } from '../intake.js';
 import type { Gate } from '../usage.js';
 
 export const escapeHtml = (v: unknown): string =>
@@ -163,7 +164,7 @@ function crewSection(lines: CrewLine[] | undefined): string {
   const rows = lines
     .map(
       (c) =>
-        `<tr><td>${escapeHtml(c.zoneId)}</td><td>${c.enabled ? 'on' : 'off'}</td><td>${escapeHtml(c.lastCycle ?? '-')}</td><td>${escapeHtml(c.enabled ? (c.nextDue ?? 'now') : '-')}</td><td>${escapeHtml(c.fable)}</td><td><a href="/zones/${encodeURIComponent(c.zoneId)}/goals">Goals</a></td></tr>`,
+        `<tr><td>${escapeHtml(c.zoneId)}</td><td>${c.enabled ? 'on' : 'off'}</td><td>${escapeHtml(c.lastCycle ?? '-')}</td><td>${escapeHtml(c.enabled ? (c.nextDue ?? 'now') : '-')}</td><td>${escapeHtml(c.fable)}</td><td><a href="/zones/${encodeURIComponent(c.zoneId)}/goals">Goals</a> <a href="/zones/${encodeURIComponent(c.zoneId)}/intake">Intake</a></td></tr>`,
     )
     .join('');
   return `<h2>Crew</h2><table><tr><th>Zone</th><th>Crew</th><th>Last cycle</th><th>Next due</th><th>Fable</th><th></th></tr>${rows}</table>`;
@@ -547,3 +548,81 @@ export type DoctorCheckView = {
   fix?: string;
   doc?: string;
 };
+
+/**
+ * The intake page's script. The idempotency key is minted per submit and kept in sessionStorage
+ * under a hash of the form's content until the server confirms, so a retry or a reload and
+ * resubmit of the same content reuses it; the helpers are the tested ones, embedded by source.
+ * Server text is shown with textContent only.
+ */
+const INTAKE_SCRIPT = `<script>
+const submitKey = ${submitKey.toString()};
+const forgetSubmitKey = ${forgetSubmitKey.toString()};
+const root = document.getElementById('intake');
+const base = root.dataset.base;
+const lines = (id) => document.getElementById(id).value.split('\\n').map((s) => s.trim()).filter(Boolean);
+const val = (id) => document.getElementById(id).value.trim();
+const say = (id, text) => { document.getElementById(id).textContent = text; };
+async function call(path, body) {
+  const token = val('intake-token');
+  if (!token) { alert('Enter the operator token'); return null; }
+  const r = await fetch(base + path, { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  return { status: r.status, body: await r.json().catch(() => ({})) };
+}
+document.getElementById('stub-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const body = { template: val('stub-template'), lighthouse: val('stub-lighthouse'), objectives: lines('stub-objectives') };
+  const nonGoals = lines('stub-nongoals'); if (nonGoals.length) body.nonGoals = nonGoals;
+  const constraints = lines('stub-constraints'); if (constraints.length) body.constraints = constraints;
+  const r = await call('/goal-stub', body);
+  if (!r) return;
+  if (r.status !== 200) { say('stub-status', 'Refused: ' + r.status + ' ' + (r.body.error ?? '')); return; }
+  document.getElementById('stub-out').value = r.body.markdown;
+  say('stub-status', 'Rendered. Copy it into GOAL.md and open a pull request (step 2).');
+});
+document.getElementById('stub-copy').addEventListener('click', () => navigator.clipboard.writeText(document.getElementById('stub-out').value));
+document.getElementById('issue-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const issue = { title: val('issue-title'), context: val('issue-context'), acceptance: lines('issue-acceptance'), tests: lines('issue-tests') };
+  const out = lines('issue-out'); if (out.length) issue.outOfScope = out;
+  const content = JSON.stringify(issue);
+  const idempotencyKey = submitKey(sessionStorage, content, () => crypto.randomUUID());
+  const button = e.submitter; if (button) button.disabled = true;
+  const r = await call('/issue', { idempotencyKey, ...issue });
+  if (button) button.disabled = false;
+  if (!r) return;
+  if (r.status === 200 || r.status === 201) {
+    forgetSubmitKey(sessionStorage, content);
+    say('issue-status', r.body.number != null ? 'Filed as issue #' + r.body.number + ', ready. It starts on the next pass.' : 'Already filed (' + r.body.state + ').');
+  } else if (r.status === 202) {
+    say('issue-status', 'The forge has not confirmed the issue yet. Submit again: the same key is reused, so it is never filed twice.');
+  } else {
+    say('issue-status', 'Refused: ' + r.status + ' ' + (r.body.error ?? ''));
+  }
+});
+</script>`;
+
+/** The minimal intake: the GOAL.md stub, how to commit it, and the first ready issue. */
+export function renderIntake(zone: Pick<DropZoneConfig, 'id' | 'repo'>): string {
+  const base = `/api/control/zones/${encodeURIComponent(zone.id)}/intake`;
+  const field = (id: string, label: string, input: string) =>
+    `<p><label for="${id}">${label}</label><br>${input}</p>`;
+  const area = (id: string, rows: number, required = false) =>
+    `<textarea id="${id}" rows="${rows}" cols="80"${required ? ' required' : ''}></textarea>`;
+  const goal = `<h3>Step 1: the goal</h3><form id="stub-form">${field(
+    'stub-template',
+    'Where the project starts',
+    `<select id="stub-template">${[
+      ['existing', 'An existing codebase'],
+      ['idea', 'An idea, nothing built yet'],
+      ['partial', 'Partly built'],
+    ]
+      .map(([v, l]) => `<option value="${v}">${l}</option>`)
+      .join('')}</select>`,
+  )}${field('stub-lighthouse', 'Lighthouse: what the project is for, in a few sentences', area('stub-lighthouse', 4, true))}${field('stub-objectives', 'Objectives, one per line, first first (at most 5)', area('stub-objectives', 5, true))}${field('stub-nongoals', 'Non-goals, one per line (optional)', area('stub-nongoals', 3))}${field('stub-constraints', 'Constraints, one per line (optional)', area('stub-constraints', 3))}<button>Render the stub</button> <span id="stub-status"></span></form>`;
+  const commit = `<h3>Step 2: commit it by pull request</h3><p>GOAL.md is a protected path, so no agent may write it and Jumpmaster doesn't commit it either. Copy the stub, then on a branch of ${escapeHtml(zone.repo)}: save it as GOAL.md, commit, push, open a pull request, and merge it yourself. The crew reads it once it is on the default branch.</p><p><textarea id="stub-out" rows="16" cols="80" readonly></textarea><br><button type="button" id="stub-copy">Copy</button></p>`;
+  const first = `<h3>Step 3: the first issue</h3><p>Filed ready, under objective 1, as soon as you submit: the first issue doesn't need GOAL.md merged first.</p><form id="issue-form">${field('issue-title', 'Title (at most 120 characters)', '<input id="issue-title" size="80" maxlength="120" required>')}${field('issue-context', 'Context', area('issue-context', 6, true))}${field('issue-acceptance', 'Acceptance criteria, one per line', area('issue-acceptance', 5, true))}${field('issue-tests', 'Required tests, one per line', area('issue-tests', 3, true))}${field('issue-out', 'Out of scope, one per line (optional)', area('issue-out', 3))}<button>File the issue</button> <span id="issue-status"></span></form>`;
+  return page(
+    `<h2>Intake: ${escapeHtml(zone.id)}</h2><div id="intake" data-base="${escapeHtml(base)}"><p><label>Operator token <input type="password" id="intake-token" autocomplete="off"></label></p>${goal}${commit}${first}</div>${INTAKE_SCRIPT}`,
+  );
+}

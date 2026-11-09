@@ -2,7 +2,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { listBriefings, optionsDigest, ruleBriefing } from '../briefings.js';
-import { allowedHostsOf, type Config, mcpConfigOf } from '../config.js';
+import { allowedHostsOf, type Config, mcpConfigOf, secretList } from '../config.js';
 import { requestCrewCycle } from '../crew/schedule.js';
 import type { Db } from '../db/open.js';
 import {
@@ -17,6 +17,13 @@ import {
 import type { DoctorEnv } from '../doctor/checks.js';
 import { DoctorBusyError, latestDoctorRun, processEnv, runDoctor } from '../doctor/run.js';
 import type { Forge } from '../forge/github.js';
+import {
+  fileIntakeIssue,
+  GoalStubSchema,
+  IntakeIssueSchema,
+  intakeLimiter,
+  renderGoalStub,
+} from '../intake.js';
 import { engageKill } from '../leases.js';
 import {
   listMcpTokens,
@@ -287,6 +294,48 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         next: `It runs on the next free stick slot. Then: jumpmaster ctl doctor ${zone.id}`,
       });
     });
+
+    // The minimal intake. The stub is rendered only; the first issue is filed ready through the
+    // outbox, once per idempotency key, and only while the zone acts.
+    scope.post<{ Params: { id: string } }>(
+      '/api/control/zones/:id/intake/goal-stub',
+      async (req, reply) => {
+        const zone = config.dropZones.find((z) => z.id === req.params.id);
+        if (!zone) return reply.code(404).send({ error: 'unknown zone' });
+        const body = GoalStubSchema.safeParse(req.body ?? {});
+        if (!body.success) return reply.code(400).send({ error: 'invalid answers' });
+        const { template, ...answers } = body.data;
+        return { markdown: renderGoalStub(template, answers) };
+      },
+    );
+
+    const limiter = intakeLimiter();
+    scope.post<{ Params: { id: string } }>(
+      '/api/control/zones/:id/intake/issue',
+      async (req, reply) => {
+        const zone = config.dropZones.find((z) => z.id === req.params.id);
+        if (!zone) return reply.code(404).send({ error: 'unknown zone' });
+        if (!deps.forgesFor)
+          return reply.code(503).send({ error: 'this server has no forge to file through' });
+        const body = IntakeIssueSchema.safeParse(req.body ?? {});
+        if (!body.success)
+          return reply.code(400).send({
+            error: `invalid issue: ${body.error.issues.map((i) => i.path.join('.') || '(body)').join(', ')}`,
+          });
+        const out = await fileIntakeIssue(
+          db,
+          deps.forgesFor(zone.id),
+          zone,
+          body.data,
+          secretList(config.secrets),
+          limiter,
+          now(),
+        );
+        const { status, ...rest } = out;
+        if (status === 201) deps.kick?.();
+        return reply.code(status).send(rest);
+      },
+    );
 
     scope.post('/api/control/kill', async (req, reply) => {
       const body = KillBody.safeParse(req.body);

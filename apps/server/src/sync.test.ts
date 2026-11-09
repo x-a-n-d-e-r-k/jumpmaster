@@ -4,7 +4,13 @@ import { flushCrewOps } from './crew/flush.js';
 import { type CrewIssueState, getCrewIssue, insertCrewIssue, setCrewIssue } from './crew/store.js';
 import type { Db } from './db/open.js';
 import { openDb } from './db/open.js';
-import { listWorkItems, setWorkItemState, type WorkItem } from './db/repo.js';
+import {
+  insertOutbox,
+  listWorkItems,
+  setWorkItemState,
+  updateOutbox,
+  type WorkItem,
+} from './db/repo.js';
 import type { ForgeIssue } from './forge/github.js';
 import { getGoals } from './goals.js';
 import { resolveUnknown } from './outbox.js';
@@ -438,5 +444,105 @@ describe('crew provenance at intake', () => {
     const r = await syncDropZone(w.db, w.forges, off, plus(t0, 2));
     expect(numbers(w)).toEqual([]);
     expect(r.skippedCrewUnpromoted).toEqual([n]);
+  });
+});
+
+describe('intake issues at sync', () => {
+  const KEY = 'intake-0123456789ab';
+  const OP = `issue:main:1:${KEY}`;
+  const intakeIssue = (n: number): ForgeIssue => ({
+    number: n,
+    title: 'Add sum',
+    body: `## Context\n\nx\n\n<!-- jm:op:${OP} -->`,
+    author: 'author-bot',
+    authorType: 'User',
+    labels: ['agent-ready'],
+    createdAt: t0.toISOString(),
+  });
+  const world = (crewEnabled: boolean) => {
+    const w = zoneWorld({ crew: { ...makeZone().crew, enabled: crewEnabled } });
+    for (const n of [1, 2, 3, 4, 5]) w.f.state.closeIssue(n);
+    w.f.state.addIssue(intakeIssue(20));
+    return w;
+  };
+  const row = (
+    w: ReturnType<typeof zoneWorld>,
+    o: Partial<{ state: CrewIssueState; number: number; source: string }>,
+  ) =>
+    insertCrewIssue(w.db, {
+      zoneId: 'main',
+      key: KEY,
+      source: 'intake',
+      objective: '1',
+      title: 'Add sum',
+      body: 'x',
+      priority: null,
+      createdAt: t0.toISOString(),
+      ...o,
+    });
+  const numbers = (w: ReturnType<typeof zoneWorld>) =>
+    listWorkItems(w.db, 'main').map((i) => i.issueNumber);
+  /** The create came back unknown at the request; reconcile's read-back resolved it since. */
+  const resolvedCreate = (w: ReturnType<typeof zoneWorld>) => {
+    insertOutbox(w.db, {
+      id: 'o1',
+      opKey: OP,
+      kind: 'create_issue',
+      workItemId: null,
+      zoneId: 'main',
+      payloadJson: '{}',
+      state: 'pending',
+      createdAt: t0.toISOString(),
+    });
+    updateOutbox(w.db, OP, { state: 'done', resultJson: '{"number":20}' }, t0);
+  };
+
+  test('an intake issue starts with crew.enabled false', async () => {
+    const w = world(false);
+    row(w, { state: 'promoted', number: 20 });
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([20]);
+    expect(r.skippedCrewUnpromoted).toEqual([]);
+  });
+
+  test('an intake row whose create resolved after the request is confirmed at the next sync', async () => {
+    const w = world(true);
+    const id = row(w, { state: 'filing' });
+    resolvedCreate(w);
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(getCrewIssue(w.db, id)).toMatchObject({ state: 'promoted', number: 20 });
+    expect(numbers(w)).toEqual([20]);
+    expect(r.skippedCrewUnpromoted).toEqual([]);
+  });
+
+  test('an intake row is never filed as a staged crew issue by the crew flush', async () => {
+    const w = world(true);
+    const id = row(w, { state: 'filing' });
+    await flushCrewOps(w.db, w.forges, w.zone, [], t0);
+    expect(getCrewIssue(w.db, id)?.state).toBe('filing');
+    expect(w.f.author.calls.filter((c) => c.method === 'createIssue')).toEqual([]);
+  });
+
+  test('an intake marker without an intake row is not started', async () => {
+    const w = world(false);
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([]);
+    expect(r.skippedCrewUnpromoted).toEqual([20]);
+  });
+
+  test('a crew-filed staged issue is still not started without a ruling', async () => {
+    const w = world(true);
+    // A crew row (not intake) with the same shape: only a ruling promotes it.
+    row(w, { state: 'staged', number: 20, source: 'crew-lead' });
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([]);
+    expect(r.skippedCrewUnpromoted).toEqual([20]);
+    // A crew row stuck in filing is not confirmed as if it were intake.
+    const w2 = world(true);
+    const id = row(w2, { state: 'filing', source: 'mcp' });
+    resolvedCreate(w2);
+    await syncDropZone(w2.db, w2.forges, w2.zone, t0);
+    expect(getCrewIssue(w2.db, id)?.state).toBe('filing');
+    expect(numbers(w2)).toEqual([]);
   });
 });

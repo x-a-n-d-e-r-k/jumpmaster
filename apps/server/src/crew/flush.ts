@@ -20,6 +20,7 @@ import {
   type CrewIssuePatch,
   type CrewIssueState,
   getCrewIssue,
+  INTAKE_SOURCE,
   listCrewIssues,
   setCrewIssue,
 } from './store.js';
@@ -211,6 +212,8 @@ export async function flushCrewOps(
   const crewOn = zone.crew?.enabled === true;
   let moved = 0;
   for (const row of listCrewIssues(db, zone.id, PENDING)) {
+    // An intake row is Command's issue, filed ready by its own route: never a staged crew filing.
+    if (row.source === INTAKE_SOURCE) continue;
     if (!crewOn) {
       // No forge write, but a create that already resolved gives the row its number, so intake
       // knows the issue as crew.

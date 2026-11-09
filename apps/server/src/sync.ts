@@ -30,6 +30,7 @@ import {
 } from './flow/snapshot.js';
 import type { ChecksFacts, ForgeIssue, PullFacts } from './forge/github.js';
 import { refreshGoals } from './goals.js';
+import { confirmIntakeIssues } from './intake.js';
 import type { ForgePair } from './outbox.js';
 import { isJmIssueBody } from './outbox.js';
 
@@ -124,6 +125,8 @@ export async function syncDropZone(
   const crewPromoted = new Set<number>();
   let intakeSkipped: string | undefined;
   try {
+    // An intake issue whose create resolved after its request is promoted before it is judged.
+    confirmIntakeIssues(db, zone.id, now);
     for (const issue of issues) {
       const row = getCrewIssueByNumber(db, zone.id, issue.number);
       const staged = isStagedAndReady(issue, zone);

@@ -1,5 +1,11 @@
 import type { Db } from '../db/open.js';
 
+/**
+ * `source` of a row the in-app intake filed: Command's own issue, filed ready (never staged) by
+ * the intake route, and moved on only by it and by `confirmIntakeIssues`, never by the crew flush.
+ */
+export const INTAKE_SOURCE = 'intake';
+
 export type CrewIssueState =
   | 'filing'
   | 'staged'

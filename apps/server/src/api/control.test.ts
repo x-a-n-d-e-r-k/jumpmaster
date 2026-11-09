@@ -3,9 +3,11 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { listRulings, raiseBriefing } from '../briefings.js';
 import type { Config } from '../config.js';
 import { nextCrewWork } from '../crew/schedule.js';
+import { listCrewIssues } from '../crew/store.js';
 import { ctlRequest } from '../ctl.js';
 import { openDb } from '../db/open.js';
 import {
+  getOutbox,
   getZoneMode,
   insertDrop,
   isKilled,
@@ -16,7 +18,9 @@ import {
   upsertWorkItem,
   zoneIsDrained,
 } from '../db/repo.js';
+import { intakeKey } from '../intake.js';
 import { NOW, world } from '../test/doctorWorld.js';
+import { fakeForgePair } from '../test/fakes.js';
 import { makeZone } from '../test/fixtures.js';
 import { t0, tmpDbFile } from '../test/helpers.js';
 import { registerControlRoutes } from './control.js';
@@ -393,5 +397,165 @@ describe('doctor routes', () => {
       path: '/api/control/doctor/drop',
       body: { zone: 'main', cancel: true },
     });
+  });
+});
+
+describe('intake routes', () => {
+  const KEY = '6f9619ff-8b86-4011-b42d-00c04fc964ff';
+  const issue = {
+    title: 'Add sum',
+    context: 'The CLI needs a sum function.',
+    acceptance: ['sum(1, 2) returns 3'],
+    tests: ['a unit test for sum'],
+  };
+  const ISSUE_URL = '/api/control/zones/main/intake/issue';
+
+  function intakeApp(zone = makeZone({ id: 'main' })) {
+    const db = openDb(tmpDbFile());
+    upsertDropZone(db, { id: 'main', repo: 'octo/demo', defaultBranch: 'main', configJson: '{}' });
+    const f = fakeForgePair({ issues: [], trusted: [] });
+    const config = {
+      listen: { host: '127.0.0.1', port: 7420 },
+      dropZones: [zone],
+      secrets: { operatorToken: TOKEN, githubAuthorToken: 'github_pat_secretsecret' },
+    } as unknown as Config;
+    app = Fastify();
+    registerControlRoutes(app, {
+      db,
+      config,
+      now: () => t0,
+      forgesFor: () => ({ author: f.author, reviewer: f.reviewer }),
+    });
+    return { db, f };
+  }
+  const creates = (f: ReturnType<typeof fakeForgePair>) =>
+    f.author.calls.filter((c) => c.method === 'createIssue').length;
+
+  test('intake/issue without the operator token is 401; with a foreign Origin 403', async () => {
+    const { f } = intakeApp();
+    const body = { idempotencyKey: KEY, ...issue };
+    expect((await post(ISSUE_URL, body, { host: HOST })).statusCode).toBe(401);
+    expect(
+      (await post(ISSUE_URL, body, { ...auth, authorization: 'Bearer nope' })).statusCode,
+    ).toBe(401);
+    expect((await post(ISSUE_URL, body, { ...auth, origin: 'http://evil.test' })).statusCode).toBe(
+      403,
+    );
+    expect(
+      (await post('/api/control/zones/main/intake/goal-stub', {}, { host: HOST })).statusCode,
+    ).toBe(401);
+    expect(f.author.calls).toEqual([]);
+  });
+
+  test('intake/issue files one ready issue with the marker, objective "1", through the outbox', async () => {
+    const { db, f } = intakeApp();
+    const res = await post(ISSUE_URL, { idempotencyKey: KEY, ...issue });
+    expect(res.statusCode).toBe(201);
+    const key = intakeKey(KEY);
+    expect(res.json()).toMatchObject({ key, number: 1, state: 'promoted' });
+    const filed = f.state.issues.get(1);
+    expect(filed?.labels).toEqual(['agent-ready']);
+    expect(filed?.issue?.title).toBe('Add sum');
+    const body = filed?.issue?.body ?? '';
+    expect(body).toContain('## Acceptance criteria');
+    expect(body.trimEnd().split('\n').at(-1)).toBe(`<!-- jm:op:issue:main:1:${key} -->`);
+    expect(listCrewIssues(db, 'main')).toEqual([
+      expect.objectContaining({
+        key,
+        source: 'intake',
+        objective: '1',
+        number: 1,
+        state: 'promoted',
+      }),
+    ]);
+    expect(getOutbox(db, `issue:main:1:${key}`)?.state).toBe('done');
+  });
+
+  test('the same idempotencyKey twice files exactly once', async () => {
+    const { db, f } = intakeApp();
+    const a = await post(ISSUE_URL, { idempotencyKey: KEY, ...issue });
+    const b = await post(ISSUE_URL, { idempotencyKey: KEY, ...issue, title: 'Edited' });
+    expect(a.statusCode).toBe(201);
+    expect(b.statusCode).toBe(200);
+    expect(b.json()).toMatchObject({ number: 1, state: 'promoted', repeated: true });
+    expect(creates(f)).toBe(1);
+    expect(listCrewIssues(db, 'main')).toHaveLength(1);
+  });
+
+  test('a 5xx after create is resolved by marker read-back, not a second create', async () => {
+    const { db, f } = intakeApp();
+    f.author.failNext('createIssue', '5xx-after-success');
+    const first = await post(ISSUE_URL, { idempotencyKey: KEY, ...issue });
+    expect(first.statusCode).toBe(202);
+    expect(first.json()).toMatchObject({ state: 'filing' });
+    const again = await post(ISSUE_URL, { idempotencyKey: KEY, ...issue });
+    expect(again.statusCode).toBe(200);
+    expect(again.json()).toMatchObject({ number: 1, state: 'promoted' });
+    expect(creates(f)).toBe(1);
+    expect(listCrewIssues(db, 'main')[0]?.state).toBe('promoted');
+  });
+
+  test('intake in observe, paused or killed is 409 naming the mode', async () => {
+    const { db, f } = intakeApp();
+    for (const mode of ['observe', 'paused'] as const) {
+      setZoneMode(db, 'main', mode, t0);
+      const r = await post(ISSUE_URL, { idempotencyKey: KEY, ...issue });
+      expect(r.statusCode).toBe(409);
+      expect(r.json().error).toContain(mode);
+    }
+    setZoneMode(db, 'main', 'active', t0);
+    setKilled(db, true, t0);
+    const k = await post(ISSUE_URL, { idempotencyKey: KEY, ...issue });
+    expect(k.statusCode).toBe(409);
+    expect(k.json().error).toContain('kill switch');
+    expect(f.author.calls).toEqual([]);
+    expect(listCrewIssues(db, 'main')).toEqual([]);
+  });
+
+  test('the eleventh intake issue in an hour is 429', async () => {
+    const { f } = intakeApp();
+    for (let i = 0; i < 10; i++) {
+      const r = await post(ISSUE_URL, {
+        idempotencyKey: `6f9619ff-8b86-4011-b42d-00c04fc964${String(i).padStart(2, '0')}`,
+        ...issue,
+        title: `Issue ${i}`,
+      });
+      expect(r.statusCode).toBe(201);
+    }
+    const r = await post(ISSUE_URL, {
+      idempotencyKey: '6f9619ff-8b86-4011-b42d-00c04fc96499',
+      ...issue,
+    });
+    expect(r.statusCode).toBe(429);
+    expect(creates(f)).toBe(10);
+  });
+
+  test('an invalid body, a non-uuid key or an unknown zone is refused without a forge call', async () => {
+    const { f } = intakeApp();
+    expect((await post(ISSUE_URL, { idempotencyKey: 'nope', ...issue })).statusCode).toBe(400);
+    expect(
+      (await post(ISSUE_URL, { idempotencyKey: KEY, ...issue, acceptance: [] })).statusCode,
+    ).toBe(400);
+    expect(
+      (await post('/api/control/zones/nope/intake/issue', { idempotencyKey: KEY, ...issue }))
+        .statusCode,
+    ).toBe(404);
+    expect(f.author.calls).toEqual([]);
+  });
+
+  test('goal-stub makes no forge call', async () => {
+    const { db, f } = intakeApp();
+    const r = await post('/api/control/zones/main/intake/goal-stub', {
+      template: 'existing',
+      lighthouse: 'A small CLI.',
+      objectives: ['Parse the input'],
+    });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().markdown).toContain('## Objectives');
+    expect(
+      (await post('/api/control/zones/main/intake/goal-stub', { template: 'nope' })).statusCode,
+    ).toBe(400);
+    expect(f.author.calls).toEqual([]);
+    expect(listCrewIssues(db, 'main')).toEqual([]);
   });
 });
