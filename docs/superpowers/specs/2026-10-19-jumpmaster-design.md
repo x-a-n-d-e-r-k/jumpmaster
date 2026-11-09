@@ -432,8 +432,10 @@ token. Command is only pulled in by briefings (protected paths, `alwaysEscalate`
   audited. Scope enforced server-side on every resource id.
 - **Vault**: secrets encrypted at rest with a key supplied via env var or Docker secret **outside the
   data volume**; the docs state the threat model plainly. The vault lands in M4.5. File secrets
-  (`*_FILE`) stay supported and take precedence over a vault entry, so a config-as-code install is
-  unchanged and the UI says which source is in use [call, 2026-11-09].
+  (a file named for the credential under the install's secrets directory, or a `*_FILE` variable)
+  stay supported and take precedence over a vault entry, so an existing install upgrades by
+  replacing its compose file and a config-as-code install is unchanged; the UI says which source
+  is in use [call, 2026-11-09].
 - **Transcripts** are redacted for secrets, retained per a configurable policy, and **excluded from
   the diagnostics export**.
 - **Supply chain**: signed images (cosign), SBOM and provenance, digest-pinned compose, Claude CLI
