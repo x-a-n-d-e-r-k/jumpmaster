@@ -38,7 +38,8 @@ export function pairFor(
 ): ForgePair {
   const [owner = '', name = ''] = zone.repo.split('/');
   const author = new GitHubForge(owner, name, secrets.githubAuthorToken, opts);
-  // Config refuses starter with authorMayBeAdmin, so a starter pair never needs a merger.
+  // Starter has no second identity, so the author merges (an admin author included: see
+  // authorMayBeAdmin, and the per-pass Administration probe that guards it).
   if (zone.identity === 'starter') return { author, reviewer: null };
   if (!secrets.githubReviewerToken)
     throw new Error('JM_GITHUB_REVIEWER_TOKEN is required for a two-bot zone');

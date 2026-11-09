@@ -182,31 +182,28 @@ describe('syncDropZone', () => {
 });
 
 describe('GOAL.md refresh', () => {
-  const crewZone = (enabled: boolean) =>
-    ({
-      ...zone,
-      crew: { enabled, goalPath: 'GOAL.md' },
-    }) as unknown as DropZoneConfig;
+  /** A zone as the config loads it: crew settings defaulted, GOAL.md protected. */
+  const realZone = (enabled: boolean) => makeZone({ crew: { ...makeZone().crew, enabled } });
 
   test('a crew zone reads GOAL.md on the default branch after intake', async () => {
     const forge = fakeForge({ issues: [], trusted: [] });
     forge.state.files.set('main:GOAL.md', '## Objectives\n### One\n');
-    await syncDropZone(db, pair(forge), crewZone(true), t0);
+    await syncDropZone(db, pair(forge), realZone(true), t0);
     expect(getGoals(db, 'main')?.parse).toMatchObject({ ok: true });
   });
 
-  test('with the crew off, GOAL.md is still read whenever crew.goalPath is set', async () => {
+  test('with the crew off (the default), GOAL.md is still read every pass', async () => {
     const forge = fakeForge({ issues: [], trusted: [] });
     forge.state.files.set('main:GOAL.md', '## Objectives\n### One\n');
-    await syncDropZone(db, pair(forge), crewZone(false), t0);
+    await syncDropZone(db, pair(forge), realZone(false), t0);
     expect(getGoals(db, 'main')?.parse).toMatchObject({ ok: true });
   });
 
-  test('a zone with no crew settings at all never reads a goal file', async () => {
-    const forge = fakeForge({ issues: [], trusted: [] });
-    forge.state.files.set('main:GOAL.md', '## Objectives\n### One\n');
-    await syncDropZone(db, pair(forge), zone, t0);
-    expect(getGoals(db, 'main')).toBeUndefined();
+  test('a zone without a GOAL.md records it as not found, and nothing acts on it', async () => {
+    const forge = fakeForge({ issues: [issue(1)], trusted: ['alice'] });
+    const r = await syncDropZone(db, pair(forge), realZone(false), t0);
+    expect(getGoals(db, 'main')?.parse).toEqual({ ok: false, error: 'GOAL.md not found' });
+    expect(r.added).toBe(1);
   });
 
   test('a thrown GOAL.md read never fails the sync', async () => {
@@ -214,7 +211,7 @@ describe('GOAL.md refresh', () => {
     forge.getFileAt = async () => {
       throw new Error('fake 502');
     };
-    await expect(syncDropZone(db, pair(forge), crewZone(true), t0)).resolves.toMatchObject({
+    await expect(syncDropZone(db, pair(forge), realZone(true), t0)).resolves.toMatchObject({
       added: 1,
     });
   });

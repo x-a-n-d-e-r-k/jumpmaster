@@ -26,6 +26,7 @@ import {
 import { type ForgePair, type OpResult, opKeys } from '../outbox.js';
 import type { Snapshot } from './decide.js';
 import {
+  administrationOf,
   branchProtectionProblems,
   dependenciesChanged,
   gateBins,
@@ -61,12 +62,27 @@ export async function zonePass(
     forges.author.getBranchRules(baseBranch),
     reviewer ? reviewer.getBranchRules(baseBranch) : null,
   ]);
+  // Starter mode with an admin author (the personal-repository path) rests on its token lacking
+  // Administration: one admin-only read per pass checks it. Only an answer parks (see guards).
+  const probeAdmin =
+    zone.identity === 'starter' &&
+    zone.authorMayBeAdmin &&
+    authorRules.kind === 'ok' &&
+    authorRules.rules.viewerIsAdmin;
+  const authorAdministration = probeAdmin
+    ? administrationOf(
+        await forges.author
+          .probeAdministration()
+          .catch(() => ({ status: null as number | null, rateLimited: false })),
+      )
+    : undefined;
   return {
     botLogins: reviewerLogin === null ? [authorLogin] : [authorLogin, reviewerLogin],
     requiredChecks: authorRules.kind === 'ok' ? authorRules.rules.requiredChecks : [],
     protectionProblems: branchProtectionProblems(
       { author: authorRules, reviewer: reviewerRules },
       zone,
+      authorAdministration ? { authorAdministration } : {},
     ),
   };
 }

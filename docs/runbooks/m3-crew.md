@@ -318,7 +318,11 @@ Issues filed over MCP are filed under the staged label whether the crew is on or
 nothing until you rule. With the crew on, its refute judges each one and then briefs you. With the
 crew off, the server raises the Promote briefing itself on its next pass (once per issue, with the
 same Promote and Reject options), and a Promote ruling applies at once: the issue gets the ready
-label and starts like any promoted crew issue. `GOAL.md` is read on every pass whenever `crew.goalPath` is set (it is by default),
+label and starts like any promoted crew issue. If the issue was edited on GitHub meanwhile, a
+Re-stage ruling (which also applies with the crew off) takes the edited text and earns a fresh
+Promote briefing; if it was closed, nothing is promoted and a briefing says so. `crew.goalPath`
+must match a `protectedPaths` glob in every zone, crew on or off (`GOAL.md` is protected by
+default), because the file is read every pass and served as your own text. `GOAL.md` is read on every pass whenever `crew.goalPath` is set (it is by default),
 crew on or off, so `get_goals` works before you ever enable the crew.
 
 ### Intake skills

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { CrewLeadOutputSchema, containsSecret, redact } from '@jumpmaster/protocol';
+import { CrewLeadOutputSchema, containsSecret, pathMatches, redact } from '@jumpmaster/protocol';
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
@@ -107,6 +107,11 @@ const getGoalsTool: ToolDef = {
     "The zone's objective ladder from its goal file: lighthouse, objectives, the current one.",
   input: NoArgs,
   run({ db, zone }, _args, fx) {
+    // Trusted only while the goal file is a protected path no drop can change (config requires it;
+    // checked again here so a hand-built zone can't promote repo text to trusted).
+    const trust: Trust = zone.protectedPaths.some((g) => pathMatches(zone.crew.goalPath, g))
+      ? 'trusted'
+      : 'untrusted';
     const row = getGoals(db, zone.id);
     if (!row) return ok(`Zone ${zone.id}: the goal file has not been read yet.`);
     if (!row.parse.ok) return ok(`Zone ${zone.id}: the goal file does not parse.`);
@@ -116,10 +121,10 @@ const getGoalsTool: ToolDef = {
       [
         `Zone ${zone.id}. ${PREAMBLE}`,
         // Trusted: goalPath is a protected path no drop can change, though anyone who can push can.
-        `Lighthouse: ${fx('trusted', 'lighthouse', p.lighthouse)}`,
+        `Lighthouse: ${fx(trust, 'lighthouse', p.lighthouse)}`,
         'Objectives (key: title):',
         ...p.objectives.map(
-          (o) => `- [${o.done ? 'x' : ' '}] ${o.key}: ${fx('trusted', 'objective', o.title)}`,
+          (o) => `- [${o.done ? 'x' : ' '}] ${o.key}: ${fx(trust, 'objective', o.title)}`,
         ),
         `Current objective: ${current ? current.key : 'none (all done)'}`,
       ].join('\n'),
@@ -336,7 +341,9 @@ const fileStagedIssuesTool: ToolDef = {
     'Proposes up to 5 issues for the current objectives. Each is filed on the forge under the staged ' +
     'label by Jumpmaster and waits for Command to promote it; the same validation, slots and ' +
     'duplicate checks as crew drops apply. Bodies need "## Acceptance criteria" (a checklist) and ' +
-    '"## Tests" sections. Works with the crew off; promotion waits until Command enables the crew.',
+    '"## Tests" sections. Works with the crew off. Nothing starts until Command rules: the ' +
+    'server (or, with the crew on, the crew after judging it) puts a Promote briefing to ' +
+    'Command, whose ruling promotes it.',
   input: FileIssuesArgs,
   run(ctx, args: z.infer<typeof FileIssuesArgs>) {
     // Staged issues start nothing until Command promotes them, so filing needs no crew.

@@ -107,11 +107,13 @@ async function promote(
   zone: DropZoneConfig,
   row: CrewIssue,
   now: Date,
-): Promise<Step | 'wait' | 'changed'> {
+): Promise<Step | 'wait' | 'changed' | 'closed'> {
   if (row.number === null) return 'wait';
   if (objectiveBusy(db, row)) return 'wait';
   const live = await forges.author.getIssue(row.number);
   if (!live) return 'wait';
+  // Closed on the forge since Command ruled: a label swap would "promote" an issue no sync lists.
+  if (live.state === 'closed') return 'closed';
   // A body edited on the forge since it was staged is not what Command approved.
   if (row.bodySha === null || crewBodySha(liveCrewBody(live.body)) !== row.bodySha) {
     return 'changed';
@@ -230,7 +232,7 @@ export async function flushCrewOps(
       }
       if (row.state !== 'rejecting' || !rejectedByCommand(db, row)) continue;
     }
-    let step: Step | 'wait' | 'changed';
+    let step: Step | 'wait' | 'changed' | 'closed';
     try {
       switch (row.state) {
         case 'filing':
@@ -267,6 +269,27 @@ export async function flushCrewOps(
       continue; // a forge read failed: tried again next pass
     }
     if (step === 'wait') continue;
+    if (step === 'closed') {
+      // Left unpromoted, and Command is told why; a fresh ruling decides (reopen, or reject).
+      setCrewIssue(db, row.id, { state: 'staged' }, now);
+      raiseBriefing(
+        db,
+        {
+          zoneId: zone.id,
+          kind: 'promote',
+          subject: subjectOf(row),
+          decision: `Crew issue #${row.number} was closed on GitHub, so it was not promoted. Reopen it and promote it, or reject it?`,
+          why: 'The issue was closed on the forge after it was staged. Promoting a closed issue would start nothing: reopen it on GitHub first if the work is still wanted.',
+          options: PROMOTE_OPTIONS,
+          onHold: `Crew issue #${row.number}`,
+          source: 'server',
+          ...(row.bodySha ? { sourceRef: row.bodySha } : {}),
+        },
+        now,
+      );
+      moved++;
+      continue;
+    }
     if (step === 'changed') {
       setCrewIssue(db, row.id, { state: 'staged' }, now);
       raiseBriefing(
@@ -316,10 +339,15 @@ export async function flushCrewOps(
  * re-flush or a restart raises no second one. With the crew on the refute owns promotion.
  */
 function briefStagedMcpIssues(db: Db, zone: DropZoneConfig, now: Date): void {
-  const briefed = db.prepare('SELECT 1 FROM briefings WHERE zone_id = ? AND subject = ? LIMIT 1');
+  // Once per staged body: skipped while any briefing on the issue is open, or once one was raised
+  // for this body. A Re-stage (a new body) earns a fresh Promote briefing.
+  const briefed = db.prepare(
+    `SELECT 1 FROM briefings WHERE zone_id = ? AND subject = ?
+       AND (state = 'open' OR source_ref = ?) LIMIT 1`,
+  );
   for (const row of listCrewIssues(db, zone.id, ['staged'])) {
-    if (row.source !== 'mcp' || row.number === null) continue;
-    if (briefed.get(zone.id, subjectOf(row))) continue;
+    if (row.source !== 'mcp' || row.number === null || row.bodySha === null) continue;
+    if (briefed.get(zone.id, subjectOf(row), row.bodySha)) continue;
     const label = `issue #${row.number}`;
     raiseBriefing(
       db,
@@ -332,6 +360,7 @@ function briefStagedMcpIssues(db: Db, zone: DropZoneConfig, now: Date): void {
         options: PROMOTE_OPTIONS,
         onHold: label,
         source: 'server',
+        sourceRef: row.bodySha,
       },
       now,
     );

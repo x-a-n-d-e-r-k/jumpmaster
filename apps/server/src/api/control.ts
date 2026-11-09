@@ -36,7 +36,10 @@ export interface ControlDeps {
   kick?: () => void;
   /** The zone's forges, for the doctor's reads (it never writes). Absent: no doctor routes. */
   forgesFor?(zoneId: string): ForgePair;
-  /** The intake's forges, whose requests time out (a stalled forge is a 502, not a hang). */
+  /**
+   * The intake's forges: they write (one create_issue through the outbox per submission), and
+   * their requests time out, so a stalled forge is a 502, not a hang. Defaults to `forgesFor`.
+   */
   intakeForgesFor?(zoneId: string): ForgePair;
   /** The doctor's own forges, whose requests time out; defaults to `forgesFor`. */
   doctorForgesFor?(zoneId: string): ForgePair;

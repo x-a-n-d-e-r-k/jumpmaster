@@ -461,11 +461,12 @@ export async function applyGateAllowance(
  * the pass's global step (`creditsPass`), in any zone mode. Returns how many were applied.
  */
 /**
- * A Promote on an assistant's (MCP) staged issue applies with the crew off: the server raised its
- * briefing, and the promotion is the same label write the crew's path makes.
+ * A Promote or Re-stage on an assistant's (MCP) staged issue applies with the crew off: the server
+ * raised its briefing, the promotion is the same label write the crew's path makes, and a re-stage
+ * (one forge read) earns a fresh Promote briefing for the edited body.
  */
 function promotesWithoutCrew(db: Db, effect: Effect, subject: string): boolean {
-  if (effect !== 'promote_issue') return false;
+  if (effect !== 'promote_issue' && effect !== 'restage_issue') return false;
   const id = idOf(subject, 'issue:');
   return id !== null && getCrewIssue(db, id)?.source === 'mcp';
 }

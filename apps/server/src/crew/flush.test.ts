@@ -541,6 +541,57 @@ describe('crew disabled', () => {
     expect(getCrewIssue(w.db, id)?.state).toBe('rejected');
   });
 
+  /** Rules `option` on the issue's open briefing and applies it with the crew off. */
+  async function ruleOff(id: number, option: string, at: Date): Promise<void> {
+    const open = briefingsOn(id).find((b) => b.state === 'open');
+    expect(open, `an open briefing on issue:${id}`).toBeDefined();
+    expect(ruleBriefing(w.db, open?.id ?? -1, option, '', at).ok).toBe(true);
+    expect(await applyPendingRulings(w.db, depsOff(), 'main', at)).toBe(1);
+  }
+
+  test('a Promote on an issue closed on GitHub is not applied: no label swap, and Command is told', async () => {
+    const id = mcpIntent();
+    await flushOff();
+    await ruleOff(id, 'promote', plus(t0, MIN));
+    const n = getCrewIssue(w.db, id)?.number ?? -1;
+    w.f.state.closeIssue(n);
+    const labelWrites = writes('setLabels').length;
+    await flushOff(plus(t0, 2 * MIN));
+    expect(writes('setLabels')).toHaveLength(labelWrites);
+    const row = getCrewIssue(w.db, id);
+    expect(row?.state).not.toBe('promoted');
+    expect(row?.state).toBe('staged');
+    const open = briefingsOn(id).filter((b) => b.state === 'open');
+    expect(open).toHaveLength(1);
+    expect(open[0]?.decision).toMatch(/closed on GitHub/);
+    // A second flush neither promotes it nor stacks briefings.
+    await flushOff(plus(t0, 3 * MIN));
+    expect(writes('setLabels')).toHaveLength(labelWrites);
+    expect(briefingsOn(id).filter((b) => b.state === 'open')).toHaveLength(1);
+  });
+
+  test('crew off: edit on GitHub → Re-stage → a fresh Promote briefing → Promote → ready', async () => {
+    const id = mcpIntent();
+    await flushOff();
+    await ruleOff(id, 'promote', plus(t0, MIN));
+    const n = getCrewIssue(w.db, id)?.number ?? -1;
+    const live = w.f.state.issues.get(n);
+    if (live?.issue)
+      live.issue.body = live.issue.body.replace('Write the docs.', 'Write better docs.');
+    await flushOff(plus(t0, 2 * MIN)); // the promotion sees the edit: back to staged, Re-stage briefing
+    expect(getCrewIssue(w.db, id)?.state).toBe('staged');
+    await ruleOff(id, 'restage', plus(t0, 3 * MIN));
+    expect(getCrewIssue(w.db, id)?.body).toContain('Write better docs.');
+    await flushOff(plus(t0, 4 * MIN)); // a new body: a fresh Promote briefing
+    const open = briefingsOn(id).filter((b) => b.state === 'open');
+    expect(open).toHaveLength(1);
+    expect(open[0]?.options.map((o) => o.id)).toEqual(PROMOTE_OPTIONS.map((o) => o.id));
+    await ruleOff(id, 'promote', plus(t0, 5 * MIN));
+    await flushOff(plus(t0, 6 * MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('promoted');
+    expect(w.f.state.issues.get(n)?.labels).toContain(off.readyLabel);
+  });
+
   test('crew off: a crew-drop staged issue gets no server briefing', async () => {
     const id = await staged();
     await flushOff(plus(t0, MIN));

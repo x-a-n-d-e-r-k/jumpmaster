@@ -253,7 +253,8 @@ const DropZoneSchema = DropZoneObject.superRefine((zone, ctx) => {
       message: `with egress on a zone may declare at most ${MAX_EGRESS_SERVICES} services (each drop network is a /28)`,
     });
   }
-  if (!zone.crew.enabled) return;
+  // The goal file is read every pass, crew on or off, and served as Command's text: it must be a
+  // path no drop can change.
   if (!zone.protectedPaths.some((g) => pathMatches(zone.crew.goalPath, g))) {
     ctx.addIssue({
       code: 'custom',
@@ -261,6 +262,7 @@ const DropZoneSchema = DropZoneObject.superRefine((zone, ctx) => {
       message: `crew.goalPath ${zone.crew.goalPath} must match a protectedPaths glob`,
     });
   }
+  if (!zone.crew.enabled) return;
   if (zone.crew.stagedLabel === zone.readyLabel) {
     ctx.addIssue({
       code: 'custom',

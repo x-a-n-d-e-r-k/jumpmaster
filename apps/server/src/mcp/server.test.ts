@@ -13,7 +13,7 @@ import {
   raiseBriefing,
   ruleBriefing,
 } from '../briefings.js';
-import type { Config, McpConfig } from '../config.js';
+import type { Config, DropZoneConfig, McpConfig } from '../config.js';
 import { insertCrewIssue, listCrewIssues } from '../crew/store.js';
 import {
   insertDrop,
@@ -48,12 +48,16 @@ type Setup = Awaited<ReturnType<typeof setup>>;
 async function setup(
   o: {
     crew?: boolean;
+    zone?: Partial<DropZoneConfig>;
     mcp?: Partial<McpConfig>;
     dropZonesWithoutMain?: boolean;
     port?: number;
   } = {},
 ) {
-  const w = await crewWorld(o.crew === false ? { crew: { ...crewOn, enabled: false } } : {});
+  const w = await crewWorld({
+    ...(o.crew === false ? { crew: { ...crewOn, enabled: false } } : {}),
+    ...o.zone,
+  });
   upsertDropZone(w.db, {
     id: 'other',
     repo: 'octo/other',
@@ -501,6 +505,28 @@ describe('write tools', () => {
     const g = await call(s.read, 'get_goals');
     expect(g.isError).toBeFalsy();
     expect(textOf(g)).toContain(OBJECTIVE);
+  });
+
+  test('no tool text says promotion waits for the crew', async () => {
+    const s = await setup({ crew: false });
+    const r = (await rpc(s.write, 'tools/list')) as {
+      result: { tools: { name: string; description: string }[] };
+    };
+    const texts = r.result.tools.map((t) => `${t.name}: ${t.description}`);
+    for (const t of texts) expect(t).not.toMatch(/waits? (until|for) (Command enables )?the crew/i);
+    const filing = texts.find((t) => t.startsWith('file_staged_issues'));
+    expect(filing).toMatch(/Promote briefing/);
+  });
+
+  test('get_goals labels the goal file trusted only when its path is protected', async () => {
+    const open = await setup({ zone: { protectedPaths: ['.github/**'] } });
+    const g = textOf(await call(open.read, 'get_goals'));
+    expect(g).toContain(OBJECTIVE);
+    expect(g).not.toMatch(/Lighthouse: \(trusted\)/);
+    expect(g).toMatch(/Lighthouse: \(data, untrusted\)/);
+    await app?.close();
+    const guarded = await setup({ zone: { protectedPaths: ['.github/**', 'GOAL.md'] } });
+    expect(textOf(await call(guarded.read, 'get_goals'))).toMatch(/Lighthouse: \(trusted\)/);
   });
 
   // Red team §7.3: decided as refused, as crew drops are not dispatched while stopped.

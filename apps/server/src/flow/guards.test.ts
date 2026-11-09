@@ -4,6 +4,7 @@ import { describe, expect, test } from 'vitest';
 import { DEFAULT_PROTECTED_PATHS, type DropZoneConfig } from '../config.js';
 import type { BranchRules, BranchRulesRead } from '../forge/github.js';
 import {
+  ADMINISTRATION_PROBLEM,
   branchProtectionProblems,
   dependenciesChanged,
   gateBins,
@@ -994,6 +995,18 @@ describe('branchProtectionProblems', () => {
           admin,
         ),
       ).toEqual(['bot can bypass']);
+    });
+
+    test('an admin author whose token has Administration parks; refused or unknown probes do not', () => {
+      const admin = { ...starter, authorMayBeAdmin: true } as DropZoneConfig;
+      const read = { author: ok({ viewerIsAdmin: true }), reviewer: null };
+      expect(branchProtectionProblems(read, admin, { authorAdministration: 'present' })).toEqual([
+        ADMINISTRATION_PROBLEM,
+      ]);
+      expect(ADMINISTRATION_PROBLEM).toMatch(/Administration/);
+      expect(ADMINISTRATION_PROBLEM).toMatch(/rate-limited or unanswered/);
+      for (const a of ['absent', 'unknown', undefined] as const)
+        expect(branchProtectionProblems(read, admin, { authorAdministration: a })).toEqual([]);
     });
 
     test('a pull request rule of unknown presence is a problem in starter mode', () =>

@@ -453,9 +453,20 @@ describe('crew config', () => {
     expect(
       loadConfig(withZone({ crew: { enabled: true } }), fullEnv).dropZones[0]?.crew.enabled,
     ).toBe(true);
-    // Off, the path is not checked.
+  });
+
+  test('the goal file must be a protected path with the crew off too: it is read every pass', () => {
+    expect(() => loadConfig(withZone({ crew: { goalPath: 'docs/GOALS.md' } }), fullEnv)).toThrow(
+      /goalPath/,
+    );
+    expect(() => loadConfig(withZone({ protectedPaths: ['.github/**'] }), fullEnv)).toThrow(
+      /goalPath GOAL\.md must match a protectedPaths glob/,
+    );
     expect(() =>
-      loadConfig(withZone({ crew: { goalPath: 'docs/GOALS.md' } }), fullEnv),
+      loadConfig(
+        withZone({ crew: { goalPath: 'docs/GOALS.md' }, protectedPaths: ['docs/GOALS.md'] }),
+        fullEnv,
+      ),
     ).not.toThrow();
   });
 
