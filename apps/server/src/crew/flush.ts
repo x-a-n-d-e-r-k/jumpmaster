@@ -217,8 +217,9 @@ export async function flushCrewOps(
     if (row.source === INTAKE_SOURCE) continue;
     // An assistant's (MCP) proposal is filed staged with the crew off: it starts nothing until
     // Command promotes it, and promotion still waits for the crew.
-    const mcpFiling = row.source === 'mcp' && row.state === 'filing';
-    if (!crewOn && !mcpFiling) {
+    // Its server-briefed promotion goes ahead too, once Command has ruled Promote.
+    const mcpOwn = row.source === 'mcp' && (row.state === 'filing' || row.state === 'promoting');
+    if (!crewOn && !mcpOwn) {
       // No forge write, but a create that already resolved gives the row its number, so intake
       // knows the issue as crew.
       if (row.state === 'filing' && row.number === null) {
@@ -304,5 +305,35 @@ export async function flushCrewOps(
       moved++;
     }
   }
+  if (!crewOn) briefStagedMcpIssues(db, zone, now);
   return moved;
+}
+
+/**
+ * With the crew off no refute drop judges a staged issue, so nothing would put it to Command: the
+ * server raises the Promote briefing for an assistant's (MCP) staged issue itself, with the
+ * refute path's options. Once per issue: an issue that has ever had a briefing is skipped, so a
+ * re-flush or a restart raises no second one. With the crew on the refute owns promotion.
+ */
+function briefStagedMcpIssues(db: Db, zone: DropZoneConfig, now: Date): void {
+  const briefed = db.prepare('SELECT 1 FROM briefings WHERE zone_id = ? AND subject = ? LIMIT 1');
+  for (const row of listCrewIssues(db, zone.id, ['staged'])) {
+    if (row.source !== 'mcp' || row.number === null) continue;
+    if (briefed.get(zone.id, subjectOf(row))) continue;
+    const label = `issue #${row.number}`;
+    raiseBriefing(
+      db,
+      {
+        zoneId: zone.id,
+        kind: 'promote',
+        subject: subjectOf(row),
+        decision: `Promote ${label}?`,
+        why: 'Proposed by the assistant (MCP) and filed staged. The crew is off, so no refute judged it: read the issue, then promote it to let an agent start, or reject it.',
+        options: PROMOTE_OPTIONS,
+        onHold: label,
+        source: 'server',
+      },
+      now,
+    );
+  }
 }

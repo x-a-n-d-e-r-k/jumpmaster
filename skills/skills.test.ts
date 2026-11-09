@@ -132,6 +132,16 @@ describe('skills', () => {
     expect(splitter).toMatch(/spends?\s+usage/i);
   });
 
+  test('the flow ends at Command ruling Promote on the briefing in the web UI, crew on or off', () => {
+    const splitter = read(join(ROOT, 'shared', 'issue-splitter.md'));
+    expect(splitter).toMatch(/rule \*\*Promote\*\* on (its|the) briefing[^.]*web UI/i);
+    expect(splitter).not.toMatch(/that waits/i);
+    for (const s of SKILLS)
+      expect(read(join(ROOT, s, 'SKILL.md')), s).toMatch(
+        /rule \*\*Promote\*\*[^.]*Briefings page/i,
+      );
+  });
+
   test('no skill pushes a branch unless Command asks for it', () => {
     for (const f of markdownFiles())
       for (const line of read(f).split('\n'))

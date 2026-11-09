@@ -315,8 +315,10 @@ tier and Fable status are never shown.
   a token (an expired or revoked token in use). Mint and revoke rows are kept.
 
 Issues filed over MCP are filed under the staged label whether the crew is on or off, and start
-nothing: the crew's refute and your Promote ruling still come first, and those wait until the
-crew is on. `GOAL.md` is read on every pass whenever `crew.goalPath` is set (it is by default),
+nothing until you rule. With the crew on, its refute judges each one and then briefs you. With the
+crew off, the server raises the Promote briefing itself on its next pass (once per issue, with the
+same Promote and Reject options), and a Promote ruling applies at once: the issue gets the ready
+label and starts like any promoted crew issue. `GOAL.md` is read on every pass whenever `crew.goalPath` is set (it is by default),
 crew on or off, so `get_goals` works before you ever enable the crew.
 
 ### Intake skills
@@ -347,7 +349,8 @@ cp -R skills/jumpmaster-intake-existing skills/jumpmaster-intake-idea \
 ```
 
 Then, in a checkout of the zone's repository, ask Claude Code to run the one that fits. None of
-it needs the crew on: the issues wait staged until you enable the crew, which is a separate,
-later choice that spends usage (its own cycles start then).
+it needs the crew on: each filed issue gets a Promote briefing on `/briefings`, and your Promote
+ruling starts it. Enabling the crew is a separate, later choice that spends usage (its own cycles
+start then).
 For a quick first issue without the crew, the in-app intake page (`/zones/<id>/intake`) files one
 ready issue directly.

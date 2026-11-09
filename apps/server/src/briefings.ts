@@ -460,6 +460,16 @@ export async function applyGateAllowance(
  * crew (`WAITS_FOR_CREW`) stays pending while the zone's crew is disabled. `credits:*` rulings are
  * the pass's global step (`creditsPass`), in any zone mode. Returns how many were applied.
  */
+/**
+ * A Promote on an assistant's (MCP) staged issue applies with the crew off: the server raised its
+ * briefing, and the promotion is the same label write the crew's path makes.
+ */
+function promotesWithoutCrew(db: Db, effect: Effect, subject: string): boolean {
+  if (effect !== 'promote_issue') return false;
+  const id = idOf(subject, 'issue:');
+  return id !== null && getCrewIssue(db, id)?.source === 'mcp';
+}
+
 export async function applyPendingRulings(
   db: Db,
   deps: RulingDeps,
@@ -487,7 +497,12 @@ export async function applyPendingRulings(
     const option = (JSON.parse(r.optionsJson) as BriefingOption[]).find((o) => o.id === r.choice);
     try {
       if (!option) throw new Error(`option ${r.choice} is not on the briefing`);
-      if (WAITS_FOR_CREW.has(option.effect) && !deps.zone(zoneId).crew?.enabled) continue;
+      if (
+        WAITS_FOR_CREW.has(option.effect) &&
+        !deps.zone(zoneId).crew?.enabled &&
+        !promotesWithoutCrew(db, option.effect, r.subject)
+      )
+        continue;
       const done =
         option.effect === 'allow_gate_change'
           ? await applyGateAllowance(db, deps, zoneId, r, option, now)

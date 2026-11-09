@@ -39,8 +39,8 @@ Follow these steps in order. Each links the shared guide that says how.
    as [the ladder writer](../shared/ladder-writer.md) says. It is a protected path: no agent and
    no skill commits it to the default branch.
 5. **After the merge, propose the first issues** with `mcp__jumpmaster__file_staged_issues` (at
-   most 5), as [the issue splitter](../shared/issue-splitter.md) says, and tell Command to
-   promote each one by ruling on the Briefings page.
+   most 5), as [the issue splitter](../shared/issue-splitter.md) says. The flow ends with
+   Command's step: rule **Promote** on each issue's briefing, on the Briefings page of the web UI.
 
 ## What this skill never does
 

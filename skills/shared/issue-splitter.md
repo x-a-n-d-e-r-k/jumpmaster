@@ -56,9 +56,11 @@ example `report-bad-csv-rows`). Priority is optional: `highest`, `high`, `low` o
 2. Call `mcp__jumpmaster__file_staged_issues` once with the list (`key`, `objective`, `title`,
    `body`, optional `priority`). Report what it filed and, for each refusal, its reason.
 3. Tell Command what happens next: each filed issue waits on the forge under the staged label,
-   and nothing starts. The crew judges each staged issue and puts a **Promote** or **Reject**
-   briefing on the Briefings page; only a Promote ruling lets an agent start. If the zone's crew
-   is off, that waits: turning the crew on is a separate, later choice for Command, which spends
-   usage, because the crew then runs its own cycles (bounded by `crew.cycleMinutes` and
-   `crew.maxDropsPerDay`). Don't recommend it as part of this flow. You never promote, label or
-   merge anything yourself, and you never use a forge command line for it.
+   and nothing starts until Command rules. Each gets a briefing on the Briefings page of the
+   Jumpmaster web UI: with the zone's crew off, the server puts it there on its next pass; with the
+   crew on, the crew judges the issue first and then puts it there. Command reads the issue and
+   should rule **Promote** on its briefing in the web UI to let an agent start, or **Reject** to
+   close it. Turning the crew on is a separate, later choice for Command, which spends usage
+   (the crew then runs its own cycles, bounded by `crew.cycleMinutes` and `crew.maxDropsPerDay`);
+   this flow doesn't need it. You never promote, label or merge anything yourself, and you never
+   use a forge command line for it.
