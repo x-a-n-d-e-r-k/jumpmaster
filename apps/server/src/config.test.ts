@@ -454,3 +454,53 @@ describe('shipped example config', () => {
     expect(JSON.parse(readFileSync(example, 'utf8')).mcp).toEqual({ enabled: false });
   });
 });
+
+describe('zone images and presets', () => {
+  const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json') };
+  const zone = (extra: Record<string, unknown>) => {
+    const { image: _image, ...rest } = baseZone;
+    return fixture({ dataDir: './data', dropZones: [{ ...rest, ...extra }] });
+  };
+
+  test('a zone with preset and no image resolves to the preset image; neither is a config error', () => {
+    expect(loadConfig(zone({ preset: 'python' }), fullEnv, noLock).dropZones[0]?.image).toBe(
+      'jumpmaster-trooper-python:dev',
+    );
+    expect(loadConfig(zone({ preset: 'node' }), fullEnv, noLock).dropZones[0]?.image).toBe(
+      'jumpmaster-trooper:dev',
+    );
+    expect(() => loadConfig(zone({}), fullEnv, noLock)).toThrow(/dropZones\.0.*image or preset/);
+    expect(() => loadConfig(zone({ preset: 'rust' }), fullEnv, noLock)).toThrow(/preset/);
+  });
+
+  test('an explicit image wins over the preset, and an M3 zone is unchanged', () => {
+    expect(
+      loadConfig(zone({ preset: 'go', image: 'mine:1' }), fullEnv, noLock).dropZones[0]?.image,
+    ).toBe('mine:1');
+    const m3 = loadConfig(minimal, fullEnv, noLock).dropZones[0];
+    expect(m3?.image).toBe('jm-trooper:dev');
+    expect(m3?.preset).toBeUndefined();
+  });
+
+  test('gates stay required with a preset', () => {
+    const { gates: _gates, image: _image, ...rest } = baseZone;
+    const file = fixture({ dataDir: './data', dropZones: [{ ...rest, preset: 'go' }] });
+    expect(() => loadConfig(file, fullEnv, noLock)).toThrow(/gates/);
+  });
+
+  test('with an image lock, a preset resolves to its registry digest', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'jm-lock-'));
+    const digest = `sha256:${'c'.repeat(64)}`;
+    const lock = join(dir, 'images.lock.json');
+    writeFileSync(
+      lock,
+      JSON.stringify({ registry: 'ghcr.io/o/r', images: { 'jumpmaster-trooper-go': digest } }),
+    );
+    expect(
+      loadConfig(zone({ preset: 'go' }), fullEnv, { imageLockPath: lock }).dropZones[0]?.image,
+    ).toBe(`ghcr.io/o/r/jumpmaster-trooper-go@${digest}`);
+    expect(() => loadConfig(zone({ preset: 'jvm' }), fullEnv, { imageLockPath: lock })).toThrow(
+      /zone main.*jumpmaster-trooper-jvm/,
+    );
+  });
+});

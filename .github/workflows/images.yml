@@ -1,7 +1,8 @@
 name: Images
 
 # Builds every image without pushing, then runs the image smoke test and the trooper e2e against
-# the fake Claude CLI. Later tasks add e2e cases (presets, egress, verification, the doctor drop).
+# the fake Claude CLI, and (in its own job) the stack presets. Later tasks add e2e cases (egress,
+# verification, the doctor drop).
 on:
   pull_request:
   push:
@@ -42,3 +43,29 @@ jobs:
         env:
           E2E_REPO: ${{ github.repository }}
         run: images/trooper/e2e/run.sh
+
+  # The stack presets build FROM the trooper image; this job builds all four and checks each
+  # toolchain as the agent user and as the gate user inside a review drop.
+  presets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Record the Docker Engine
+        run: |
+          {
+            echo '### Docker Engine (presets)'
+            echo '```'
+            docker version
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Preset e2e
+        env:
+          E2E_REPO: ${{ github.repository }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: images/trooper/e2e/presets.sh

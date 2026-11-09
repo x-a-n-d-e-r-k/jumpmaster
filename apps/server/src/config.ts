@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import {
   ContainerLimitsSchema,
   GateSpecSchema,
+  PresetSchema,
   pathMatches,
   type Role,
   RoleSchema,
@@ -10,6 +11,7 @@ import {
 } from '@jumpmaster/protocol';
 import { z } from 'zod';
 import { ZONE_MODES } from './db/repo.js';
+import { IMAGE_LOCK_PATH, loadImageLock, resolveImage } from './presets.js';
 import { readSecret } from './secrets.js';
 
 export const DEFAULT_PROTECTED_PATHS = [
@@ -124,7 +126,10 @@ const DropZoneObject = z.object({
   gateSecrets: z.array(z.string()).default([]),
   /** The starting mode, used only until an operator stores one. */
   mode: z.enum(ZONE_MODES).default('active'),
-  image: z.string().min(1),
+  /** The trooper image. Optional when `preset` is set: the preset's image is used. */
+  image: z.string().min(1).optional(),
+  /** A prebuilt stack image (see presets.ts). Gates stay explicit config either way. */
+  preset: PresetSchema.optional(),
   model: z.string().default('claude-opus-5-5'),
   maxTurns: z.number().int().positive().default(200),
   models: z.partialRecord(RoleSchema, z.string()).default({}),
@@ -176,6 +181,8 @@ const DropZoneObject = z.object({
 });
 
 const DropZoneSchema = DropZoneObject.superRefine((zone, ctx) => {
+  if (!zone.image && !zone.preset)
+    ctx.addIssue({ code: 'custom', path: ['image'], message: 'a zone needs image or preset' });
   // Fable is chosen per role by the declared plan, never as a zone's default model.
   if (/fable/i.test(zone.model)) {
     ctx.addIssue({
@@ -252,7 +259,8 @@ const FileSchema = z.object({
     .default(MCP_DEFAULTS),
 });
 
-export type DropZoneConfig = z.infer<typeof DropZoneSchema>;
+/** A loaded zone: `image` is always resolved (from the preset when it wasn't given). */
+export type DropZoneConfig = Omit<z.infer<typeof DropZoneSchema>, 'image'> & { image: string };
 export type Budgets = DropZoneConfig['budgets'];
 
 export interface Config {
@@ -361,12 +369,27 @@ const SECRET_VARS = {
   operatorToken: 'JM_OPERATOR_TOKEN',
 } as const;
 
-export function loadConfig(path: string, rawEnv: NodeJS.ProcessEnv): Config {
+export function loadConfig(
+  path: string,
+  rawEnv: NodeJS.ProcessEnv,
+  opts: { imageLockPath?: string } = {},
+): Config {
   const parsed = FileSchema.safeParse(JSON.parse(readFileSync(path, 'utf8')));
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`);
     throw new Error(`Invalid config ${path}: ${issues.join('; ')}`);
   }
+  // A zone without an explicit image runs its preset's: the release lock's digest when the
+  // image ships one, else the local `:dev` build.
+  const zonesNeedLock = parsed.data.dropZones.some((z) => !z.image);
+  const lock = zonesNeedLock ? loadImageLock(opts.imageLockPath ?? IMAGE_LOCK_PATH) : undefined;
+  const dropZones: DropZoneConfig[] = parsed.data.dropZones.map((zone) => {
+    try {
+      return { ...zone, image: resolveImage(zone, lock) };
+    } catch (e) {
+      throw new Error(`Invalid config ${path}: zone ${zone.id}: ${(e as Error).message}`);
+    }
+  });
   // Every secret may come from NAME or from the file named by NAME_FILE (never both).
   const env: Record<string, string | undefined> = {};
   for (const name of [...Object.values(SECRET_VARS), 'JM_GITHUB_READ_TOKEN'])
@@ -409,6 +432,7 @@ export function loadConfig(path: string, rawEnv: NodeJS.ProcessEnv): Config {
   const { listen } = parsed.data;
   return {
     ...parsed.data,
+    dropZones,
     listen: {
       ...listen,
       allowedHosts: listen.allowedHosts ?? [`127.0.0.1:${listen.port}`, `localhost:${listen.port}`],

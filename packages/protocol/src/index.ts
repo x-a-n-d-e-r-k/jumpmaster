@@ -27,6 +27,11 @@ export const GateSpecSchema = z.object({
 });
 export type GateSpec = z.infer<typeof GateSpecSchema>;
 
+/** Prebuilt trooper images, one per stack. The base trooper image doubles as `node`. */
+export const PRESETS = ['node', 'python', 'go', 'jvm'] as const;
+export type Preset = (typeof PRESETS)[number];
+export const PresetSchema = z.enum(PRESETS);
+
 /** Roles that work for the zone rather than one work item. They hold no forge write credential. */
 export const CREW_ROLES = ['crew-lead', 'refute', 'diagnose'] as const;
 export type CrewRole = (typeof CREW_ROLES)[number];
