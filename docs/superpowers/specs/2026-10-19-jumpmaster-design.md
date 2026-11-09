@@ -421,8 +421,12 @@ token. Command is only pulled in by briefings (protected paths, `alwaysEscalate`
   reveal or replace secrets. The login is an operator passphrase chosen in the browser on first
   run, claimed with a one-time setup code the server prints at start; `jumpmaster ctl` keeps a
   generated machine token. Both are the one operator principal, and every mutating call records
-  which was used. Secrets are write-only: the UI shows a fingerprint and dates, never the value
-  [call, M4.5, 2026-11-09].
+  which was used. Secrets are write-only: the UI shows a fingerprint and dates, never the value.
+  Re-auth also guards the settings that decide what runs with the secrets and what merges without
+  a human (signed images, a zone's image, egress, protected paths, identity, the CI and
+  branch-rule requirements, gate secrets): a browser session confirms each such change with its
+  consequence stated verbatim, and may never weaken the signed-image requirement or change a
+  zone's image; those are `ctl`'s or the config file's [call, M4.5, 2026-11-09].
 - **MCP/API tokens**: crew/worker tokens are minted per drop, bound to one drop zone, expire with the
   drop; Command's tokens are created in the UI with an expiry and scope. Every mutating call is
   audited. Scope enforced server-side on every resource id.
@@ -510,27 +514,32 @@ Jumpmaster's drop records plus forge CI APIs; nothing extra for operators to ins
 
 ### 10.3 Other surfaces [decided in scope; shape and timing amended 2026-11-09]
 
-All of these are v1. When each ships [call] [owner: confirm the M4.5 placement, §15]:
+All of these are v1. When each ships [call; the M4.5 placement confirmed by the owner 2026-11-09, §15]:
 
 - **Shipped by M4:** home (§10.1), briefings and ruling history, drop detail (live transcript,
   gates, verdict, usage, model actually used), observations, the goals ladder, the readiness doctor
   (read-only, fix hints as text) and the minimal intake page. Every write asks for the operator
   token in a form field, and every setting is a hand edit of the config file plus a restart.
-- **M4.5 Operable:** first-run setup in the browser and the operator login (§3, §7.5); live
-  config (the database holds revisions; settings apply without a restart; audit trail; rollback;
-  the config file kept for operators who manage config as code); the **zones page** (add, edit,
-  pause, observe, remove: mode, preset or image, gates, verification, services, egress allow list
-  with the hosts monitor mode observed offered for adoption, identity, labels, crew settings, the
-  heal and conflict budgets that exist today); **settings** (Claude credential, forge credentials
-  and sticks: entered, rotated and tested in the UI, never shown back; token-age and expiry
-  reminders; MCP tokens for Command's own Claude Code, minted with scope and expiry as §7.5 asks;
-  install-wide settings; config history); the doctor's fails **link to the control that
-  fixes them**; a plain-language **status line** ("what is Jumpmaster doing and why is it
+- **M4.5 Operable:** first-run setup in the browser and the operator login (§3, §7.5);
+  **GitHub guidance** (pre-filled fine-grained token links, a ruleset file for GitHub's import
+  with the detected CI job names, an identity recommendation from the repository's owner type and
+  visibility, CODEOWNERS text, a collaborator checklist: links and generated text, never a forge
+  write); live config (the database holds revisions; settings apply without a restart; audit
+  trail; rollback; guarded changes confirmed with their consequence; the config file kept for
+  operators who manage config as code); the **zones page** (add, edit, pause, observe, remove:
+  mode, preset, gates, verification, services, egress allow list with the hosts monitor mode
+  observed offered for adoption, identity, labels; models, budgets and crew settings through the
+  advanced editor); **settings** (Claude credential and forge credentials: entered, rotated and
+  tested in the UI, never shown back; token-age and expiry reminders; MCP tokens for Command's own
+  Claude Code, minted with scope and expiry as §7.5 asks; install-wide settings; config history);
+  the doctor's fails **link to the control that fixes them**, carrying the generated file where
+  there is one; a plain-language **status line** ("what is Jumpmaster doing and why is it
   waiting"); every UI action also a `jumpmaster ctl` command.
-- **M5:** weight, usage budget and placement affinity join the zones page; per-zone forge
-  credentials and GitLab join settings.
+- **M5:** weight, usage budget and placement affinity join the zones page, with separate forms
+  for models, budgets and crew; per-zone forge credentials and GitLab join settings.
 - **M6:** issue graph per drop zone (states, blocker edges, objective mapping, PR state); the
-  flow page (§10.2); remote stick enrollment in settings.
+  flow page (§10.2); the sticks tab in settings (drain, remove, join tokens) and remote stick
+  enrollment.
 - **M7:** prompts registry (versions, outcomes, proposals).
 
 ---
@@ -624,7 +633,9 @@ budget numbers and deadlines.
 "All nine in v1" ships as usable releases. Each has a gate; later releases don't start until the
 gate passes. The order — including the reference-project cutover at M2 and design partners at
 M4 — is confirmed by the owner [decided]. M4.5 was added on 2026-11-09 at the owner's ask that
-the barrier to *using* Jumpmaster be as low as possible [call] [owner: confirm the placement].
+the barrier to *using* Jumpmaster be as low as possible [call; placement confirmed by the owner
+2026-11-09]. M4's partner gate session is run with M4.5's counters and stopwatch, so M4.5's
+report compares before and after [call].
 
 | Release | Contents | Gate |
 |---|---|---|
@@ -632,22 +643,22 @@ the barrier to *using* Jumpmaster be as low as possible [call] [owner: confirm t
 | **M1 Loop parity** | review, heal, resolve-conflicts, outbox + SHA-bound orchestrator merge, two-bot roles, checkpoint resume, usage pause, trust boundary | POC failure-class tests (§16) green |
 | **M2 Dogfood cutover** | observe/shadow mode, open-agent-PR adoption, kill switch, pause, drop-zone secrets + services, verification gate | the reference project runs on Jumpmaster; POC retired |
 | **M3 Crew + MCP** | crew lead + roles (Fable gating), briefings UI, scoped MCP, GOAL.md ladder | the POC crew retired |
-| **M4 Friend-ready** | readiness doctor, stack presets, minimal in-app intake, intake skills, compose install, egress control, signed images | 2 design partners reach a first PR unaided |
-| **M4.5 Operable** | browser first-run setup and operator login, live config (revisions, rollback, hot apply; the file kept for config as code), encrypted vault, zones and settings pages, doctor fails linked to their fix, plain-language status, `ctl` parity | two design partners who have never opened the config file each complete the operability session with the browser as their only interface after `docker compose up`: install to a green doctor, first PR merged, pause a zone and change a gate without a restart, rotate a token, add a second repository, recover from an injected doctor FAIL, and say from the status line what Jumpmaster is doing and why it waits; counted per partner: zero file edits, zero shell commands beyond `docker compose up` and `logs`, zero questions to the author, under 60 minutes of their own hands-on time (CI and drop time excluded); any count above zero fails |
+| **M4 Friend-ready** | readiness doctor, stack presets, minimal in-app intake, intake skills, compose install, egress control, signed images | 2 design partners reach a first PR unaided (the session recorded with M4.5's counters, as M4.5's baseline) |
+| **M4.5 Operable** | browser first-run setup and operator login, GitHub guidance (pre-filled token links, ruleset file, identity recommendation, CODEOWNERS, collaborator checklist), live config (revisions, rollback, hot apply, guarded changes; the file kept for config as code), encrypted vault, zones and settings pages, doctor fails linked to their fix, plain-language status, `ctl` parity | two design partners who have never opened the config file, each on a supported host, complete the operability session with the browser as their only interface after `docker compose up`: install to a green doctor, first PR merged, pause a zone and change a gate without a restart, rotate a token, add a second repository, recover from an injected doctor FAIL, and say from the status line what Jumpmaster is doing and why it waits. Per partner: the README's prelude in at most 6 commands and 10 minutes; zero file edits and zero shell commands after `docker compose up` (`logs` allowed); zero blocking questions, every question and hesitation reported; under 60 minutes hands-on, CI and drop time excluded. The two shell steps excluded by design are the prelude and `claude setup-token`; rulesets, CODEOWNERS and labels are not pre-provisioned; M4's session is the baseline |
 | **M5 Multi-project + GitLab** | weighted scheduler, budgets, affinity (set on the M4.5 zones page), GitLab adapter validated e2e | two drop zones on two forges concurrently |
-| **M6 Flow + placements** | flow/CI metrics, issue graph, remote Docker, Podman, K8s sticks, sentinel | a remote stick runs drops through NAT |
+| **M6 Flow + placements** | flow/CI metrics, issue graph, sticks tab (drain, remove, join tokens), remote Docker, Podman, K8s sticks, sentinel | a remote stick runs drops through NAT |
 | **M7 Optimization + chat** | prompt outcomes and proposals, in-app intake chat | first accepted prompt proposal |
 
-**M4.5 placement** [call] [owner: confirm the place and the name]: it sits between M4 and M5
-rather than inside M5 or after it. M5's weight, usage budget and affinity need a place to be set;
-building that place inside M5 would either leave them as hand edits of the JSON file (and move them
-to the UI later, so twice the work) or make M5 carry live config, the vault, login and GitLab under
-one gate that measures two different things (operability for one person; two zones on two forges).
-M4's design partners are the first people to meet the barrier, so the fix follows M4 directly. It is
-numbered M4.5 instead of renumbering M5–M7 because the plans, runbooks and this spec's own
-cross-references (§8.2, §10.3, the M4 plan's deferrals) already name M5, M6 and M7 by number. Its
-gate is a timed session with counters, not an impression; the plan
-(`../plans/2026-11-09-jumpmaster-m4-5-operable.md`) carries the script.
+**M4.5 placement** [call; place and name confirmed by the owner 2026-11-09]: it sits between M4
+and M5 rather than inside M5 or after it. M5's weight, usage budget and affinity need a place to be
+set; building that place inside M5 would either leave them as hand edits of the JSON file (and move
+them to the UI later, so twice the work) or make M5 carry live config, the vault, login and GitLab
+under one gate that measures two different things (operability for one person; two zones on two
+forges). M4's partner session, run with the same counters, is the measure of the barrier the
+milestone then removes, so the fix follows M4 directly. It is numbered M4.5 instead of renumbering
+M5–M7 because the plans, runbooks and this spec's own cross-references (§8.2, §10.3, the M4 plan's
+deferrals) already name M5, M6 and M7 by number. Its gate is a timed session with counters, not an
+impression; the plan (`../plans/2026-11-09-jumpmaster-m4-5-operable.md`) carries the script.
 
 **Reference-project migration** [red team; call]: clean cutover rather than importing POC label state —
 drain the sandcastle-afk loops, run Jumpmaster in observe mode against the reference project to compare decisions,
@@ -692,8 +703,10 @@ the three `gh` accounts map to credential roles.
 4. **Barrier to entry** (2026-11-09) — the owner asked that the barrier to *using* Jumpmaster be
    as low as possible, and whether there would be an interface to see status, configure and
    interact with it. Yes: §10.3 lists the surfaces and when each ships; M4.5 Operable (§15)
-   carries the ones a first-time user needs, placed straight after M4 [owner: confirm the
-   placement and the name].
+   carries the ones a first-time user needs, placed straight after M4. The owner confirmed the
+   placement and the name on 2026-11-09 and delegated the plan's open questions (the setup code
+   on stderr, one-click label creation, the reference project adopting the live config first,
+   the gate's numbers) to be decided as its red team recommended [call].
 
 ---
 

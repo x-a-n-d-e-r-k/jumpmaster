@@ -957,7 +957,7 @@ test('the cosign commands in SECURITY.md and install.md use the same identity as
 
 The stick log shows signed, verified images and enforced egress for every drop, and one run uses starter mode.
 
-**The spec's gate ("2 design partners reach a first PR unaided") stays the owner's.** It needs real people the owner recruits. This plan prepares it and does not claim it.
+**The spec's gate ("2 design partners reach a first PR unaided") stays the owner's.** It needs real people the owner recruits. This plan prepares it and does not claim it. When it runs, it is recorded on M4.5's sheet (`2026-11-09-jumpmaster-m4-5-operable.md`, Task 13): prelude commands and minutes, file edits and shell commands after `docker compose up`, questions (blocking and other), hesitations over a minute, hands-on minutes. That recording is M4.5's baseline.
 
 The claims listed under Review Focus as resting on unit tests are accepted on those tests.
 
