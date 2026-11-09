@@ -8,7 +8,8 @@ REPO="${E2E_REPO:-x-a-n-d-e-r-k/jumpmaster}"
 BRANCH="${E2E_BRANCH:-main}"
 # The sidecar image is pinned by digest (alpine 3.20, multi-arch index).
 SIDECAR_IMAGE="alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
-echo "e2e: Docker Engine $(docker version --format '{{.Server.Version}}')"
+# The architecture these images were built for and ran on (release images are amd64 and arm64).
+echo "e2e: Docker Engine $(docker version --format '{{.Server.Version}} {{.Server.Os}}/{{.Server.Arch}}')"
 SHA="$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/${BRANCH}" | cut -f1)"
 [ -n "$SHA" ] || { echo "cannot resolve ${REPO}@${BRANCH}" >&2; exit 1; }
 docker build -q -t jumpmaster-trooper:dev -f images/trooper/Dockerfile . >/dev/null

@@ -427,6 +427,17 @@ describe('image verification in the stick image', () => {
   });
 });
 
+test('every e2e script records the engine architecture it ran on', () => {
+  for (const f of [
+    'images/smoke.sh',
+    'images/trooper/e2e/run.sh',
+    'images/trooper/e2e/egress.sh',
+    'images/trooper/e2e/verify.sh',
+    'images/trooper/e2e/presets.sh',
+  ])
+    expect(read(f), f).toContain('{{.Server.Os}}/{{.Server.Arch}}');
+});
+
 describe('release metadata in the images', () => {
   test('the server image bakes images.lock.json from IMAGES_LOCK only when given, and checks it', () => {
     const final = finalStage(instructions(read('images/server/Dockerfile')));

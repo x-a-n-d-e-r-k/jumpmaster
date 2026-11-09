@@ -6,11 +6,11 @@
 # shipped cosign and a read-only root (/state writable):
 #   - a non-digest pin refuses startup; the real startup passes and advertises image-verify-v1;
 #   - a tag is refused before any pull or container;
-#   - the unsigned image, by digest, is pulled, then refused by cosign; nothing is created;
+#   - the unsigned image, by digest, is refused by cosign and never downloaded; nothing is created;
 #   - an image signed keyless by another identity (Sigstore's cosign image) is refused;
 #   - the same unsigned image, pinned by digest in JM_ALLOWED_IMAGES, runs a review drop;
-#   - under egress, an unpinned unsigned proxy image is pulled and refused before any network or
-#     container exists, and once pinned the drop runs through it.
+#   - under egress, an unpinned unsigned proxy image is refused before any download, network or
+#     container, and once pinned the drop runs through it.
 # Exits non-zero on any failure.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
@@ -22,7 +22,8 @@ SOURCE_URL="${SOURCE_URL:-}"
 REGISTRY_IMAGE="registry:3.1.1@sha256:325b4b29b041e82803abeb703e201655e4e23ab83264ec1a7c9ddb0a5b14a6e0"
 OTHER_SIGNED="ghcr.io/sigstore/cosign/cosign@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d"
 REG="jm-e2e-registry-$$"
-echo "verify e2e: Docker Engine $(docker version --format '{{.Server.Version}}')"
+# The architecture these images were built for and ran on (release images are amd64 and arm64).
+echo "verify e2e: Docker Engine $(docker version --format '{{.Server.Version}} {{.Server.Os}}/{{.Server.Arch}}')"
 SHA="$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/${BRANCH}" | cut -f1)"
 [ -n "$SHA" ] || { echo "cannot resolve ${REPO}@${BRANCH}" >&2; exit 1; }
 
@@ -60,7 +61,7 @@ docker tag jumpmaster-trooper:e2e "${LOCAL}:unsigned"
 docker push -q "${LOCAL}:unsigned" >/dev/null
 UNSIGNED="$(docker image inspect "${LOCAL}:unsigned" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep "^${LOCAL}@sha256:" | head -n1)"
 [ -n "$UNSIGNED" ] || { echo "no digest for ${LOCAL}:unsigned" >&2; exit 1; }
-# The egress proxy too: under signed it is pulled by digest and verified like any image.
+# The egress proxy too: under signed it is verified, then pulled by digest, like any image.
 LOCAL_EGRESS="127.0.0.1:${PORT}/jumpmaster-egress-e2e"
 docker tag jumpmaster-egress:dev "${LOCAL_EGRESS}:unsigned"
 docker push -q "${LOCAL_EGRESS}:unsigned" >/dev/null

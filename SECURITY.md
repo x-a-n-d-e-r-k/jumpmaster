@@ -65,8 +65,15 @@ docker run --rm -v "$PWD:/w" -w /w ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:
 ```
 
 A signature proves the image was built and signed by `release.yml` in this repository, from a
-`push` of a version tag. The workflow refuses a tag whose commit is not on `main`, and only the
-repository owner can push version tags.
+`push` of a version tag. Only repository administrators can create, move or delete version tags
+(a tag ruleset on `refs/tags/v*`): that is the control on who can mint a release. The workflow
+additionally refuses a tag whose commit is not on `main`. Images are published for linux/amd64
+and linux/arm64 under one digest.
+
+A signature is never withdrawn. Every image this workflow has ever signed keeps verifying, and a
+stick has no minimum version: it runs any signed release's images it is given. The newest
+release's `images.lock.json` is the only floor; to move off an image, update the lock (or the
+zone's digest) rather than expecting old signatures to stop working.
 
 ## Supported versions
 

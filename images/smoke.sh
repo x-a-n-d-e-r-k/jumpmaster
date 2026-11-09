@@ -40,6 +40,7 @@ wait_log() {
   return 1
 }
 
+echo "smoke: Docker Engine $(docker version --format '{{.Server.Version}} {{.Server.Os}}/{{.Server.Arch}}')"
 # Static facts about the server image.
 out="$(docker run --rm --entrypoint sh "$SERVER_IMAGE" -c \
   'id -u; command -v docker || echo no-docker; test -e /app/node_modules/dockerode && echo dockerode || echo no-dockerode')"

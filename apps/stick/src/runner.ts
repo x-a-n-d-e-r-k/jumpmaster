@@ -198,16 +198,9 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
     await fail(`egress allows at most ${MAX_EGRESS_SERVICES} services per drop`);
     return;
   }
-  // Then pull (digest references only), then verify, all before any container exists.
+  // Then verify (cosign asks the registry: under signed nothing is downloaded until every image
+  // has verified), then pull digest references, all before any container exists.
   const unique = [...new Map(images.map((i) => [i.ref, i])).values()];
-  for (const i of unique) {
-    try {
-      await pullImage(i.ref, { driver, log });
-    } catch (e) {
-      await fail(e instanceof Error ? e.message : String(e));
-      return;
-    }
-  }
   if (trust.policy === 'signed') {
     for (const i of unique) {
       const v = await decide(i);
@@ -216,6 +209,14 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
         return;
       }
       log(JSON.stringify({ event: 'image-verified', dropId, ref: i.ref, via: v.via }));
+    }
+  }
+  for (const i of unique) {
+    try {
+      await pullImage(i.ref, { driver, log });
+    } catch (e) {
+      await fail(e instanceof Error ? e.message : String(e));
+      return;
     }
   }
   if (egress) {

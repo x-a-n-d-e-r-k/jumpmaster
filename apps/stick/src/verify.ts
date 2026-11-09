@@ -69,16 +69,49 @@ export function digestOf(ref: string): string | null {
   return DIGEST_REF.exec(ref)?.[1] ?? null;
 }
 
+/**
+ * `name@sha256:…` for a digest reference: a `name:tag@sha256:…` loses its tag, which the digest
+ * overrides anyway (a registry port before the last `/` stays).
+ */
+export function canonicalRef(ref: string): string {
+  const at = ref.lastIndexOf('@');
+  if (at < 0) return ref;
+  const name = ref.slice(0, at);
+  const slash = name.lastIndexOf('/');
+  const colon = name.lastIndexOf(':');
+  return `${colon > slash ? name.slice(0, colon) : name}${ref.slice(at)}`;
+}
+
 export type CosignResult = { code: number | null; stdout: string; stderr: string; error?: string };
 export type Cosign = (args: string[], o: { timeoutMs: number }) => Promise<CosignResult>;
 
 /**
- * Runs cosign with `execFile` (no shell), a timeout, and the stick's environment minus every
- * `JM_` variable, so no stick secret reaches it.
+ * The only variables cosign gets: where to find binaries, its home and temp dir, the TUF cache,
+ * the CA store and an outbound proxy. No stick secret, and nothing (SIGSTORE_*, TUF_MIRROR,
+ * COSIGN_*) that would change what it trusts.
  */
+export const COSIGN_ENV = [
+  'PATH',
+  'HOME',
+  'TMPDIR',
+  'TUF_ROOT',
+  'SSL_CERT_FILE',
+  'SSL_CERT_DIR',
+  'HTTPS_PROXY',
+  'HTTP_PROXY',
+  'NO_PROXY',
+  'https_proxy',
+  'http_proxy',
+  'no_proxy',
+] as const;
+
+/** Variables cosign reads that would repoint its trust root or behaviour. */
+const COSIGN_TRUST_VARS = /^(SIGSTORE_|COSIGN_|TUF_MIRROR$)/;
+
+/** Runs cosign with `execFile` (no shell), a timeout, and only the COSIGN_ENV variables. */
 export function execCosign(bin = 'cosign', env: NodeJS.ProcessEnv = process.env): Cosign {
   const childEnv = Object.fromEntries(
-    Object.entries(env).filter(([k, v]) => !k.startsWith('JM_') && v !== undefined),
+    COSIGN_ENV.flatMap((k) => (env[k] !== undefined ? [[k, env[k] as string]] : [])),
   ) as NodeJS.ProcessEnv;
   return (args, o) =>
     new Promise((resolve) => {
@@ -162,8 +195,11 @@ export class VerifyCache {
   add(digest: string): void {
     const entries = this.load();
     const now = this.now().getTime();
-    for (const [d, at] of Object.entries(entries))
-      if (!(now - Date.parse(at) < this.ttlMs)) delete entries[d];
+    // Expired, unparsable and future-dated entries all go.
+    for (const [d, at] of Object.entries(entries)) {
+      const t = Date.parse(at);
+      if (!(now - t < this.ttlMs) || t > now + CLOCK_SKEW_MS) delete entries[d];
+    }
     entries[digest] = new Date(now).toISOString();
     try {
       mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 });
@@ -204,20 +240,31 @@ function cosignWhy(stderr: string): string {
 
 /** Whether `ref` may run under `trust`, and how that was decided. Never throws. */
 export async function verifyImage(ref: string, trust: ImageTrust): Promise<Verdict> {
+  const refuseTag = (why: string): Verdict => ({
+    ok: false,
+    reason: `image not verified: ${ref}: ${why}`,
+  });
   if (trust.policy === 'allowlist')
     return trust.allowed.has(ref)
       ? { ok: true, via: 'allowlist' }
       : { ok: false, reason: `image not allowed: ${ref}` };
-  const refuse = (why: string): Verdict => ({
-    ok: false,
-    reason: `image not verified: ${ref}: ${why}`,
-  });
   const digest = digestOf(ref);
   if (!digest)
-    return refuse(
+    return refuseTag(
       'a tag reference; under the signed image policy images run only by digest (name@sha256:<64 hex>)',
     );
-  if (trust.allowed.has(ref)) return { ok: true, via: 'pinned' };
+  // A pin is a name and a digest; a tag on either side doesn't change what runs.
+  const canonical = canonicalRef(ref);
+  const pins = [...trust.allowed].filter((p) => digestOf(p) !== null);
+  if (pins.some((p) => canonicalRef(p) === canonical)) return { ok: true, via: 'pinned' };
+  const elsewhere = pins.find((p) => digestOf(p) === digest);
+  const hint = elsewhere
+    ? `; JM_ALLOWED_IMAGES pins this digest as ${elsewhere}, under another name: a pin matches only the same name and digest`
+    : '';
+  const refuse = (why: string): Verdict => ({
+    ok: false,
+    reason: `image not verified: ${ref}: ${why}${hint}`,
+  });
   const { signer, cosign } = trust;
   if (!signer) return refuse('this stick has no trusted signer');
   if (trust.cache?.has(digest)) return { ok: true, via: 'cache' };
@@ -290,6 +337,10 @@ export async function prepareImageTrust(
   if (!policy.success)
     throw new Error(`JM_IMAGE_POLICY must be allowlist or signed, not ${env.JM_IMAGE_POLICY}`);
   if (policy.data === 'allowlist') return { policy: 'allowlist', allowed: allowedImages(env) };
+
+  for (const name of Object.keys(env).sort())
+    if (COSIGN_TRUST_VARS.test(name) && env[name] !== undefined)
+      throw new Error(`${name} is set: it would change what cosign trusts; unset it`);
 
   const pins = (env.JM_ALLOWED_IMAGES ?? '')
     .split(',')

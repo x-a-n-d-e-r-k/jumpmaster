@@ -641,6 +641,13 @@ export function scanRepo(root: string): Finding[] {
       }
       // A local action is scanned wherever it lives, with everything in its directory.
       for (const { target, line } of localUses(text)) {
+        // A reusable workflow (a job-level uses: of a .yml file) is scanned as a workflow.
+        if (/\.ya?ml$/.test(target)) {
+          if (!exists(target))
+            findings.push({ file, line, message: `uses: ./${target} does not exist` });
+          else scanFile(target);
+          continue;
+        }
         const action = [`${target}/action.yml`, `${target}/action.yaml`].find(exists);
         if (!action) {
           findings.push({
@@ -1010,6 +1017,36 @@ describe('pin scan: review bypasses', () => {
       '.github/actions/d/Dockerfile:1',
       '.github/workflows/w.yml:6',
       'tools/b/action.yaml:3',
+    ]);
+  });
+
+  test('a job-level uses: of a local reusable workflow scans that workflow; a missing one is reported', () => {
+    const root = mkdtempSync(join(tmpdir(), 'jm-pins-'));
+    const put = (file: string, text: string) => {
+      mkdirSync(dirname(join(root, file)), { recursive: true });
+      writeFileSync(join(root, file), text);
+    };
+    put('package.json', '{"workspaces":[]}');
+    put('scripts/fixtures/pre-m4-deps.json', '{}');
+    put(
+      '.github/workflows/w.yml',
+      [
+        'jobs:',
+        '  a:',
+        '    uses: ./.github/workflows/called.yml',
+        '  b:',
+        '    uses: ./.github/workflows/missing.yml',
+      ].join('\n'),
+    );
+    // Outside the scanned roots, so only the uses: reaches it.
+    put('other/called.yml', 'jobs:\n  x:\n    steps:\n      - uses: foo/bar@v1\n');
+    put(
+      '.github/workflows/called.yml',
+      'on: workflow_call\njobs:\n  x:\n    steps:\n      - uses: foo/bar@v1\n',
+    );
+    expect(scanRepo(root).map((f) => `${f.file}:${f.line} ${f.message}`)).toEqual([
+      '.github/workflows/called.yml:5 uses: foo/bar@v1 is not a full 40-hex commit SHA',
+      '.github/workflows/w.yml:5 uses: ./.github/workflows/missing.yml does not exist',
     ]);
   });
 

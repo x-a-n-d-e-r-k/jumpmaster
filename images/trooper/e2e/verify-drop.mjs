@@ -149,15 +149,16 @@ check(
   tag,
 );
 
-// 2. The unsigned local image, by digest: pulled (it was removed locally), then refused by cosign.
+// 2. The unsigned local image, by digest (removed locally): refused by cosign against the registry,
+// and never downloaded.
 const before = await new DockerDriver(docker).imageExists(UNSIGNED);
 const unsigned = await drop('verify-unsigned', UNSIGNED, trust);
 const after = await new DockerDriver(docker).imageExists(UNSIGNED);
 check('the unsigned image was missing before the drop', before === false, { before });
 check(
-  'the stick pulled it by digest',
-  after === true && unsigned.log.some((l) => l.event === 'image-pull' && l.status === 'done'),
-  unsigned.log,
+  'the stick never downloaded it',
+  after === false && !unsigned.log.some((l) => l.event === 'image-pull'),
+  { after, log: unsigned.log },
 );
 // Refused because cosign found no signature, not because it couldn't reach Sigstore.
 check(
@@ -200,13 +201,19 @@ check(
   run.result,
 );
 check(
+  'once pinned, the stick pulled it by digest',
+  (await new DockerDriver(docker).imageExists(UNSIGNED)) &&
+    run.log.some((l) => l.event === 'image-pull' && l.ref === UNSIGNED && l.status === 'done'),
+  run.log,
+);
+check(
   "it is logged as image-verified via: 'pinned'",
   run.log.some((l) => l.event === 'image-verified' && l.ref === UNSIGNED && l.via === 'pinned'),
   run.log,
 );
 
-// 5. Under egress the proxy image is pulled by digest and verified like the trooper: unpinned
-// and unsigned, the drop fails before any network, proxy or trooper; pinned, it runs through it.
+// 5. Under egress the proxy image is verified and pulled like the trooper: unpinned and unsigned,
+// the drop fails before any download, network, proxy or trooper; pinned, it runs through it.
 const egress = { mode: 'enforce', allow: ['api.anthropic.com', 'github.com'] };
 const proxyBefore = await new DockerDriver(docker).imageExists(EGRESS);
 const unpinnedProxy = await drop('verify-egress-unsigned', UNSIGNED, pinned, {
@@ -217,13 +224,11 @@ check('the unsigned proxy image was missing before the drop', proxyBefore === fa
   proxyBefore,
 });
 check(
-  'an unsigned proxy image is pulled, then refused before any network or container',
+  'an unsigned proxy image is refused before any download, network or container',
   (unpinnedProxy.result?.reason ?? '').startsWith(`image not verified: ${EGRESS}: cosign exit `) &&
     unpinnedProxy.networks === 0 &&
     unpinnedProxy.started === 0 &&
-    unpinnedProxy.log.some(
-      (l) => l.event === 'image-pull' && l.ref === EGRESS && l.status === 'done',
-    ),
+    !unpinnedProxy.log.some((l) => l.event === 'image-pull'),
   unpinnedProxy,
 );
 const both = await startup({ JM_ALLOWED_IMAGES: `${UNSIGNED},${EGRESS}`, JM_EGRESS_IMAGE: EGRESS });

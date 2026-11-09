@@ -10,6 +10,7 @@ import type {
   ProxyHandle,
 } from './driver.js';
 import { allocateSubnet, dropLayout } from './subnets.js';
+import { canonicalRef } from './verify.js';
 
 const SERVICE_LABEL = 'jumpmaster.service';
 /** `drop` on a drop network, `proxy` on a proxy container, `out` on the shared exit network. */
@@ -34,18 +35,8 @@ const PROBE_MS = 20_000;
 /** The host-network probe containers run as nobody. */
 const PROBE_USER = '65534:65534';
 
-/**
- * `name@sha256:…` for a pull: a `name:tag@sha256:…` reference loses its tag, which the digest
- * overrides anyway (the API would otherwise take the tag as part of the repository name).
- */
-export function pullRef(ref: string): string {
-  const at = ref.lastIndexOf('@');
-  if (at < 0) return ref;
-  const name = ref.slice(0, at);
-  const slash = name.lastIndexOf('/');
-  const colon = name.lastIndexOf(':');
-  return `${colon > slash ? name.slice(0, colon) : name}${ref.slice(at)}`;
-}
+/** `name@sha256:…` for a pull: the API would take a tag before the digest as part of the name. */
+export const pullRef = canonicalRef;
 
 /**
  * This process's container id, from the bind mounts Docker gives every container (its

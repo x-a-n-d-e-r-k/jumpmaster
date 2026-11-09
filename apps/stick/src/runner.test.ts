@@ -954,7 +954,7 @@ describe('egress', () => {
   });
 });
 
-describe('image trust: pull, then verify, then create', () => {
+describe('image trust: verify, then pull, then create', () => {
   const done = 'JM_RESULT {"status":"completed","gates":[]}';
   const dg = (c: string) => `sha256:${c.repeat(64)}`;
   const TROOPER = `ghcr.io/o/jumpmaster-trooper@${dg('1')}`;
@@ -1009,14 +1009,18 @@ describe('image trust: pull, then verify, then create', () => {
     log: (l: string) => log.push(l),
   });
 
-  test('runDrop pulls and verifies trooper, egress and service images before creating any container', async () => {
+  test('runDrop verifies, then pulls, the trooper, egress and service images before creating any container', async () => {
     const d = fakeDriver([done], { present: () => false });
-    const c = cosignFor([dg('1'), dg('2'), dg('3')]);
+    // cosign asks the registry; nothing is downloaded until every image has verified.
+    const c = cosignFor([dg('1'), dg('2'), dg('3')], d.order);
     const client = fakeClient();
     const log: string[] = [];
     await runDrop(signedPayload, deps(d, trust(c.cosign), client, log));
     expect(client.result).toMatchObject({ status: 'completed' });
     expect(d.order).toEqual([
+      TROOPER,
+      EGRESS,
+      DB,
       `pull ${TROOPER}`,
       `pull ${EGRESS}`,
       `pull ${DB}`,
@@ -1027,7 +1031,6 @@ describe('image trust: pull, then verify, then create', () => {
       'proxy-stop',
       'teardown',
     ]);
-    expect(c.calls).toEqual([TROOPER, EGRESS, DB]);
     // Every container is created from the verified digest reference itself.
     expect(d.started?.image).toBe(TROOPER);
     expect(d.proxy?.image).toBe(EGRESS);
@@ -1042,19 +1045,24 @@ describe('image trust: pull, then verify, then create', () => {
     ['trooper', dg('1')],
     ['egress proxy', dg('2')],
     ['service', dg('3')],
-  ])('an unverified %s image fails the drop before anything is created', async (_n, bad) => {
-    const d = fakeDriver([done]);
-    const good = [dg('1'), dg('2'), dg('3')].filter((x) => x !== bad);
-    const client = fakeClient();
-    await runDrop(signedPayload, deps(d, trust(cosignFor(good).cosign), client));
-    expect(client.result).toMatchObject({ status: 'failed', role: 'implement', gates: [] });
-    expect(client.result?.reason).toMatch(
-      new RegExp(`^image not verified: \\S+@${bad}: cosign exit 10: no signatures found$`),
-    );
-    expect(d.order.filter((o) => !o.startsWith('pull '))).toEqual([]);
-    expect(d.started).toBeUndefined();
-    expect(d.inspected).toEqual([]);
-  });
+  ])(
+    'an unverified %s image fails the drop before anything is pulled or created',
+    async (_n, bad) => {
+      const d = fakeDriver([done], { present: () => false });
+      const good = [dg('1'), dg('2'), dg('3')].filter((x) => x !== bad);
+      const client = fakeClient();
+      await runDrop(signedPayload, deps(d, trust(cosignFor(good).cosign), client));
+      expect(client.result).toMatchObject({ status: 'failed', role: 'implement', gates: [] });
+      expect(client.result?.reason).toMatch(
+        new RegExp(`^image not verified: \\S+@${bad}: cosign exit 10: no signatures found$`),
+      );
+      // Under signed an unsigned image is never downloaded, not even the ones that did verify.
+      expect(d.images).toEqual([]);
+      expect(d.order).toEqual([]);
+      expect(d.started).toBeUndefined();
+      expect(d.inspected).toEqual([]);
+    },
+  );
 
   test('under signed, a tag ref is refused before any pull, cosign call or container', async () => {
     for (const p of [
@@ -1103,7 +1111,8 @@ describe('image trust: pull, then verify, then create', () => {
     expect(failed.result).toMatchObject({ status: 'failed', gates: [] });
     expect(failed.result?.reason).toBe(`image pull failed: ${TROOPER}: manifest unknown`);
     expect(e.order).toEqual([`pull ${TROOPER}`]);
-    expect(c.calls).toEqual([]);
+    // Verified first, so cosign was asked about all three.
+    expect(c.calls).toEqual([TROOPER, EGRESS, DB]);
   });
 
   test('a pinned digest runs without cosign; a cached one without asking again', async () => {

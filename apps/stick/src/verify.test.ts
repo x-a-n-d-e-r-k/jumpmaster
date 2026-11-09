@@ -146,6 +146,26 @@ describe('verifyImage', () => {
     expect(f.calls).toHaveLength(1);
   });
 
+  test('a pin matches on name and digest, whatever tag either side carries', async () => {
+    const f = fakeCosign(() => ({ code: 10, stdout: '', stderr: 'Error: no signatures found' }));
+    const d = OTHER.split('@')[1];
+    const pinned = (pin: string, ref: string) =>
+      verifyImage(ref, signedTrust({ cosign: f.cosign, allowed: new Set([pin]) }));
+    expect(await pinned(`jmreg:5000/demo:v1@${d}`, OTHER)).toEqual({ ok: true, via: 'pinned' });
+    expect(await pinned(OTHER, `jmreg:5000/demo:v2@${d}`)).toEqual({ ok: true, via: 'pinned' });
+    expect(await pinned(`jmreg:5000/demo:a@${d}`, `jmreg:5000/demo:b@${d}`)).toEqual({
+      ok: true,
+      via: 'pinned',
+    });
+    expect(f.calls).toEqual([]);
+    // Another name with the same digest is not the pin; the refusal says why.
+    const v = await pinned(`elsewhere/demo@${d}`, OTHER);
+    expect(v).toEqual({
+      ok: false,
+      reason: `image not verified: ${OTHER}: cosign exit 10: no signatures found; JM_ALLOWED_IMAGES pins this digest as elsewhere/demo@${d}, under another name: a pin matches only the same name and digest`,
+    });
+  });
+
   test('cosign exit 0 with a matching digest passes and is cached by digest', async () => {
     const dir = fresh();
     const f = fakeCosign(() => ok());
@@ -343,6 +363,10 @@ describe('the verify cache', () => {
       { mode: 0o600 },
     );
     expect(cache.has(SIGNED_DIGEST)).toBe(false);
+    // And the next success drops it from the file rather than carrying it forward.
+    cache.add(`sha256:${'7'.repeat(64)}`);
+    const kept = JSON.parse(readFileSync(join(dir, 'future.json'), 'utf8')).entries;
+    expect(Object.keys(kept)).toEqual([`sha256:${'7'.repeat(64)}`]);
   });
 });
 
@@ -394,6 +418,24 @@ describe('startup under the signed policy', () => {
     expect(t.signer).toEqual(releaseSigner(REPO));
     // The Sigstore TUF root is the stick's own: root-only.
     expect(statSync(join(dir, 'sigstore')).mode & 0o777).toBe(0o700);
+  });
+
+  test("under signed, a variable that repoints cosign's trust refuses startup, by name", async () => {
+    const dir = fresh();
+    const cosign = cosignVersion(COSIGN_VERSION).cosign;
+    for (const name of [
+      'SIGSTORE_ROOT_FILE',
+      'SIGSTORE_REKOR_PUBLIC_KEY',
+      'TUF_MIRROR',
+      'COSIGN_REPOSITORY',
+    ])
+      await expect(
+        prepareImageTrust({ ...base(dir), [name]: 'x' }, { cosign, release, log: () => {} }),
+      ).rejects.toThrow(`${name} is set: it would change what cosign trusts; unset it`);
+    // Under allowlist cosign never runs, so they don't matter.
+    await expect(
+      prepareImageTrust({ JM_STATE_DIR: dir, TUF_MIRROR: 'x' }, { cosign, log: () => {} }),
+    ).resolves.toMatchObject({ policy: 'allowlist' });
   });
 
   test('a non-digest JM_ALLOWED_IMAGES entry refuses startup under signed', async () => {
@@ -479,6 +521,38 @@ describe('execCosign', () => {
       TUF_ROOT: '/x',
     })(['verify', '--', 'a@b'], { timeoutMs: 5000 });
     expect(r).toEqual({ code: 3, stdout: 'verify -- a@b\n', stderr: '0\n' });
+  });
+
+  test('cosign gets an allow-listed environment: nothing can repoint its trust root', async () => {
+    const bin = script('env | cut -d= -f1 | sort');
+    const r = await execCosign(bin, {
+      PATH: process.env.PATH,
+      HOME: '/root',
+      TMPDIR: '/tmp',
+      TUF_ROOT: '/state/sigstore',
+      SSL_CERT_FILE: '/etc/ssl/certs/ca-certificates.crt',
+      HTTPS_PROXY: 'http://proxy:3128',
+      no_proxy: 'localhost',
+      SIGSTORE_ROOT_FILE: '/evil/root.json',
+      SIGSTORE_REKOR_PUBLIC_KEY: '/evil/rekor.pub',
+      TUF_MIRROR: 'https://evil.example',
+      COSIGN_EXPERIMENTAL: '1',
+      JM_JOIN_TOKEN: 'secret',
+      LD_PRELOAD: '/evil.so',
+    })(['version'], { timeoutMs: 5000 });
+    const names = r.stdout
+      .trim()
+      .split('\n')
+      .filter((n) => !['PWD', 'SHLVL', '_', 'OLDPWD'].includes(n));
+    expect(names).toEqual([
+      'HOME',
+      'HTTPS_PROXY',
+      'PATH',
+      'SSL_CERT_FILE',
+      'TMPDIR',
+      'TUF_ROOT',
+      'no_proxy',
+    ]);
   });
 
   test('a missing binary or a timeout is an error, never an exit 0', async () => {

@@ -3,20 +3,43 @@
 For the repository owner. A release is a version tag on `main`. Pushing it runs
 `.github/workflows/release.yml`, which:
 
-1. **guard**: refuses the tag unless it is `vX.Y.Z` or `vX.Y.Z-rc.N` and its commit is on `main`
-   (`git merge-base --is-ancestor "$GITHUB_SHA" origin/main`). Nothing else runs if it fails.
-2. **troopers**: builds the trooper (the node preset), the python, go and jvm presets (`FROM` the
-   trooper just built, by digest) and the egress proxy, each with an SBOM, `provenance: mode=max`
-   and the `org.opencontainers.image.source` label, and pushes them to `ghcr.io/<owner>` by digest.
-3. **apps**: builds the server with the release's `images.lock.json` baked in, and the stick with
-   the release version, this repository as its trusted signer and the release's egress proxy
-   digest, and pushes both by digest.
-4. **sign**: signs every image by its index digest with cosign keyless, then verifies each with
-   exactly the flags the stick uses. Renders `compose.yaml` from `deploy/compose.yaml.tmpl`, writes
-   `images.lock.json` and `SHA256SUMS`, and signs `SHA256SUMS` (`SHA256SUMS.sigstore.json`).
-5. **publish**: creates the GitHub Release with those four files. An `-rc.N` tag is a pre-release.
+1. **guard**: refuses the tag unless it is `vX.Y.Z` or `vX.Y.Z-rc.N` and the commit it names
+   (`git rev-parse "$GITHUB_SHA^{commit}"`) is on `main` (`git merge-base --is-ancestor`). Nothing
+   else runs if it fails.
+2. **build** (`.github/workflows/release-build.yml`), for linux/amd64 and linux/arm64:
+   - `troopers` builds the trooper (the node preset), the python, go and jvm presets (`FROM` the
+     trooper just built, by digest) and the egress proxy, each with an SBOM, `provenance: mode=max`
+     and the `org.opencontainers.image.source` label, and pushes them to `ghcr.io/<owner>` by
+     digest;
+   - `apps` builds the server with the release's `images.lock.json` baked in, and the stick with
+     the release version, this repository as its trusted signer and the release's egress proxy
+     digest, and pushes both by digest.
+3. **sign**: signs every image by its index digest with cosign keyless, then verifies each with
+   exactly the checks the stick makes (the identity flags, and every signed payload naming that
+   digest). Renders `compose.yaml` from `deploy/compose.yaml.tmpl`, writes `images.lock.json` and
+   `SHA256SUMS`, and signs `SHA256SUMS` (`SHA256SUMS.sigstore.json`).
+4. **publish**: creates the GitHub Release with those four files. An `-rc.N` tag is a pre-release.
 
-Only `sign` holds `id-token: write`. Only `publish` holds `contents: write`.
+Only `sign` holds `id-token: write`. Only `build` and `sign` hold `packages: write`, and only
+`publish` holds `contents: write`.
+
+## What actually controls a release
+
+A tag push runs the workflow file as it is at the tagged commit, not as it is on `main`. Anyone
+who can push a `v*` tag can therefore push a branch whose `release.yml` skips `guard`, tag it, and
+get a signature that every stick accepts, permanently (a signature cannot be revoked). `guard`
+does not stop that; it only catches the owner tagging the wrong commit. The control is the **tag
+ruleset** on `refs/tags/v*`, which must be in place before this workflow is merged to `main`.
+
+This repository already has one: a tag ruleset targeting `refs/tags/v*` that restricts creation,
+update and deletion, with only the repository admin role able to bypass it. Keep it that way:
+
+- no account other than the owner may hold admin or maintain on the repository (on an
+  organisation-owned repository both roles can edit rulesets; on a user-owned one collaborators
+  have write at most), and an automation or agent account gets write only;
+- don't add bypass actors to the ruleset, and don't disable it, even briefly.
+
+A fork or a new repository must create the same ruleset before it merges this workflow.
 
 ## Owner steps
 
@@ -24,7 +47,7 @@ These change repository or package settings. Nobody else does them.
 
 | When | Step |
 |---|---|
-| Once, before the first tag | Add a **tag ruleset**: Settings → Rules → Rulesets → New tag ruleset. Target `refs/tags/v*`. Restrict creations, updates and deletions. Bypass list: the owner only (no other account, the approving agent account included). |
+| Once, before this workflow reaches `main` | The **tag ruleset** (above): Settings → Rules → Rulesets → New tag ruleset. Target `refs/tags/v*`. Restrict creations, updates and deletions. Bypass: the admin role only. This repository already has it. |
 | Once, before the first tag | Settings → Actions → General: allow GitHub Actions, and under "Workflow permissions" keep the default read-only `GITHUB_TOKEN`. The workflow asks for `packages: write`, `id-token: write` and `contents: write` per job, which a repository workflow may do. If an organisation policy blocks `id-token: write` (OIDC), allow it. |
 | First pre-release | Push `v0.4.0-rc.1` (below). |
 | After the first push | For each package (server, stick, egress, trooper, and the python, go and jvm presets): Packages → the package → Package settings → **Change visibility → Public**. Check "Repository source" shows this repository: the `org.opencontainers.image.source` label links it. If a package isn't linked, use "Connect repository". |
@@ -32,14 +55,30 @@ These change repository or package settings. Nobody else does them.
 
 ## Dry run
 
-Actions → Release → Run workflow, on any branch. `guard`, `sign` and `publish` are skipped (a
-`workflow_dispatch` never logs in to GHCR, signs or publishes). The images are built exactly as
-for a release and pushed to a registry that lives only inside the job, so the presets still build
-`FROM` the trooper by digest. Expected: `troopers` and `apps` green, nothing on GHCR.
+Actions → Release → Run workflow, on any branch. `guard`, `build`, `sign` and `publish` are
+skipped; `dryrun` runs the same builds (`workflow_dispatch` never logs in to GHCR, signs or
+publishes). The images are built exactly as for a release and pushed to a registry that lives only
+inside the job, so the presets still build `FROM` the trooper by digest. `dryrun` holds only
+`packages: read`, so even a modified branch's dry run cannot push to GHCR. Expected: `dryrun`'s
+`troopers` and `apps` green, nothing on GHCR.
 
 ## Cutting a release
 
-From a clean checkout of `main` that includes the commit you want:
+First, check nothing was released behind your back. Both must show only what you created:
+
+```sh
+git ls-remote --tags origin 'v*'
+gh api "/users/x-a-n-d-e-r-k/packages?package_type=container" --jq '.[].name'
+```
+
+The first release must find no `v*` tag and no `jumpmaster-*` package at all. If either shows a
+tag or package you didn't create, stop and treat the signing identity as burned: a signature made
+from it cannot be withdrawn, and every stick trusting it would run whatever was signed. Rotate the
+identity ("If the workflow path or the repository moves", below: rename the workflow file and
+release a stick that trusts only the new one), find out who held tag or admin rights, and delete
+the stray tag and packages.
+
+Then, from a clean checkout of `main` that includes the commit you want:
 
 ```sh
 git fetch origin
@@ -64,9 +103,30 @@ From a machine that is not logged in to GHCR (`docker logout ghcr.io` first):
 3. The SBOM and provenance are attached:
    `docker buildx imagetools inspect ghcr.io/x-a-n-d-e-r-k/jumpmaster-server@sha256:<digest> --format '{{ json .SBOM }}'`
    (and `.Provenance`).
-4. Once, as a negative rehearsal: create an rc tag on a commit that is not on `main` (a scratch
+4. Each image index lists both `linux/amd64` and `linux/arm64`:
+   `docker buildx imagetools inspect ghcr.io/x-a-n-d-e-r-k/jumpmaster-stick@sha256:<digest>`.
+5. Once, as a negative rehearsal: create an rc tag on a commit that is not on `main` (a scratch
    branch), push it, and confirm `guard` fails and nothing is built. Then delete the tag
-   (`git push origin :refs/tags/<tag>`, which the ruleset lets only the owner do).
+   (`git push origin :refs/tags/<tag>`, which the ruleset lets only an admin do).
+
+### After the first tag: the stick rehearsals
+
+These need a published, signed release, so they wait for `v0.4.0-rc.1`. Run them with the release's
+stick image on a test host, against a zone with `requireSignedImages: true`, and record the stick
+log lines in the release notes:
+
+1. A released preset runs: the stick logs `image-verified` with `"via":"cosign"` for the trooper
+   (a released preset from `images.lock.json`) and the proxy, the drop completes, and
+   `/state/verified.json` now lists their digests.
+2. An unsigned local image is refused (`image not verified: …: no signatures found`) and is never
+   pulled; pinned by digest in `JM_ALLOWED_IMAGES` it runs (`"via":"pinned"`).
+3. With a cold cache and Sigstore unreachable: stop the stick, delete `/state/verified.json`, block
+   `tuf-repo-cdn.sigstore.dev`, `rekor.sigstore.dev` and `fulcio.sigstore.dev` from the stick (a
+   host firewall rule, or an unreachable `HTTPS_PROXY` for the stick), start it, run a drop: it
+   fails with `image not verified`, nothing is created.
+4. With a warm cache and Sigstore unreachable: same block, but keep the `verified.json` from step 1: the same
+   drop runs (`"via":"cache"`).
+5. Repeat step 1 on an arm64 host (Apple silicon) and an amd64 host.
 
 ## The signing identity
 
@@ -119,9 +179,12 @@ the release's index digest under the release's registry, so a preset zone runs
 ## What a stick needs to verify images
 
 The stick image runs the `signed` image policy (`JM_IMAGE_POLICY=signed`). Before it creates any
-container for a drop it pulls the trooper, the egress proxy and every service image by digest,
-then verifies each: a digest the operator pinned in `JM_ALLOWED_IMAGES` passes as it is, and
-anything else must carry a cosign signature with the identity above. A tag never runs. A
+container for a drop it verifies the trooper, the egress proxy and every service image, then
+pulls each by digest: a digest the operator pinned in `JM_ALLOWED_IMAGES` passes as it is, and
+anything else must carry a cosign signature with the identity above, checked against the
+registry, so an unsigned image is never downloaded. A tag never runs. A pin is a name and a
+digest: `ghcr.io/o/x:v1@sha256:…` and `ghcr.io/o/x@sha256:…` are the same pin, but the same
+digest under another name is not (the refusal says so). A
 verified digest is cached for 7 days in `/state/verified.json` (root-only, `0600`; a file that
 doesn't parse or has another owner or mode is ignored), so a short Sigstore outage doesn't stop
 images it already verified. Each image is logged once per drop as
@@ -132,6 +195,8 @@ At startup under `signed` the stick refuses to run, with the reason, when:
 - its cosign isn't the pinned version (the image ships it; nothing to install);
 - a `JM_ALLOWED_IMAGES`, `JM_TROOPER_IMAGE` or `JM_EGRESS_IMAGE` value is not a digest
   reference (`name@sha256:<64 hex>`);
+- `SIGSTORE_*`, `COSIGN_*` or `TUF_MIRROR` is set (they would change what cosign trusts; cosign
+  gets only `PATH`, `HOME`, `TMPDIR`, `TUF_ROOT`, the CA-store variables and proxy variables);
 - it has no trusted signer (an image built without `RELEASE_REPOSITORY`). A fork sets
   `JM_TRUSTED_SIGNER_REPOSITORY=<owner/name>` to trust its own release workflow; the stick logs
   the override at start.
@@ -150,7 +215,7 @@ The stick's own outbound traffic (not restricted by Jumpmaster; allow it if the 
 
 The egress capability check (`egress-v1`) runs short-lived probe containers on the host network,
 from the stick's own image, as `nobody`, with no capabilities, to prove a drop can't reach the
-host. Under `signed`, the proxy image it starts is first pulled by digest and verified, so the
+host. Under `signed`, the proxy image it starts is first verified and then pulled by digest, so the
 release stick image carries its release's proxy digest in `JM_EGRESS_IMAGE`.
 
 ### Moving an existing zone onto the stick image

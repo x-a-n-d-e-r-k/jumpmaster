@@ -1,0 +1,231 @@
+name: Release build
+
+# Builds every release image for linux/amd64 and linux/arm64 with SBOM, provenance and the source
+# label, and pushes each by digest. Called only by release.yml:
+# - `release: true` (a version tag push, after guard): pushes to ghcr.io/<owner>; the calling job
+#   grants `packages: write`.
+# - `release: false` (the workflow_dispatch dry run): pushes to a registry that lives only inside
+#   the job, so the presets still build FROM the trooper by digest; the calling job grants
+#   `packages: read`, so even a modified dry run cannot push to GHCR.
+# Its jobs declare no permissions: they get exactly what the calling job grants.
+on:
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        required: true
+    outputs:
+      registry:
+        value: ${{ jobs.troopers.outputs.registry }}
+      version:
+        value: ${{ jobs.troopers.outputs.version }}
+      trooper:
+        value: ${{ jobs.troopers.outputs.trooper }}
+      python:
+        value: ${{ jobs.troopers.outputs.python }}
+      go:
+        value: ${{ jobs.troopers.outputs.go }}
+      jvm:
+        value: ${{ jobs.troopers.outputs.jvm }}
+      egress:
+        value: ${{ jobs.troopers.outputs.egress }}
+      server:
+        value: ${{ jobs.apps.outputs.server }}
+      stick:
+        value: ${{ jobs.apps.outputs.stick }}
+
+jobs:
+  troopers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    # The dry run's registry: the presets build FROM the trooper this job just pushed.
+    services:
+      registry:
+        image: registry:3.1.1@sha256:325b4b29b041e82803abeb703e201655e4e23ab83264ec1a7c9ddb0a5b14a6e0
+        ports:
+          - 5000:5000
+    outputs:
+      registry: ${{ steps.target.outputs.registry }}
+      version: ${{ steps.target.outputs.version }}
+      trooper: ${{ steps.trooper.outputs.digest }}
+      python: ${{ steps.python.outputs.digest }}
+      go: ${{ steps.go.outputs.digest }}
+      jvm: ${{ steps.jvm.outputs.digest }}
+      egress: ${{ steps.egress.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: target
+        name: Choose where the images go
+        env:
+          RELEASE: ${{ inputs.release }}
+          OWNER: ${{ github.repository_owner }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          owner="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          if [ "$RELEASE" = true ]; then
+            echo "registry=ghcr.io/$owner" >> "$GITHUB_OUTPUT"
+            echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "registry=localhost:5000/$owner" >> "$GITHUB_OUTPUT"
+            echo "version=0.0.0-dryrun.${SHA:0:12}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Log in to GHCR
+        if: inputs.release
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      # arm64 too: operators on Apple silicon run these natively.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          image: tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host
+      - id: trooper
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/trooper/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ steps.target.outputs.registry }}/jumpmaster-trooper,push-by-digest=true,name-canonical=true,push=true
+      - id: python
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/trooper/presets/python/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+            BASE=${{ steps.target.outputs.registry }}/jumpmaster-trooper@${{ steps.trooper.outputs.digest }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ steps.target.outputs.registry }}/jumpmaster-trooper-python,push-by-digest=true,name-canonical=true,push=true
+      - id: go
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/trooper/presets/go/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+            BASE=${{ steps.target.outputs.registry }}/jumpmaster-trooper@${{ steps.trooper.outputs.digest }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ steps.target.outputs.registry }}/jumpmaster-trooper-go,push-by-digest=true,name-canonical=true,push=true
+      - id: jvm
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/trooper/presets/jvm/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+            BASE=${{ steps.target.outputs.registry }}/jumpmaster-trooper@${{ steps.trooper.outputs.digest }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ steps.target.outputs.registry }}/jumpmaster-trooper-jvm,push-by-digest=true,name-canonical=true,push=true
+      - id: egress
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/egress/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ steps.target.outputs.registry }}/jumpmaster-egress,push-by-digest=true,name-canonical=true,push=true
+
+  apps:
+    needs: troopers
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      registry:
+        image: registry:3.1.1@sha256:325b4b29b041e82803abeb703e201655e4e23ab83264ec1a7c9ddb0a5b14a6e0
+        ports:
+          - 5000:5000
+    outputs:
+      server: ${{ steps.server.outputs.digest }}
+      stick: ${{ steps.stick.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Log in to GHCR
+        if: inputs.release
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      # The lock the server image carries: the zone images it may resolve a preset to.
+      - id: lock
+        name: Write the server's image lock
+        env:
+          REGISTRY: ${{ needs.troopers.outputs.registry }}
+          TROOPER: ${{ needs.troopers.outputs.trooper }}
+          PYTHON: ${{ needs.troopers.outputs.python }}
+          GO: ${{ needs.troopers.outputs.go }}
+          JVM: ${{ needs.troopers.outputs.jvm }}
+          EGRESS: ${{ needs.troopers.outputs.egress }}
+        run: |
+          lock="$(jq -cn --arg r "$REGISTRY" --arg t "$TROOPER" --arg p "$PYTHON" --arg g "$GO" --arg j "$JVM" --arg e "$EGRESS" \
+            '{registry: $r, images: {"jumpmaster-trooper": $t, "jumpmaster-trooper-python": $p, "jumpmaster-trooper-go": $g, "jumpmaster-trooper-jvm": $j, "jumpmaster-egress": $e}}')"
+          echo "lock=$lock" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          image: tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host
+      - id: server
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/server/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+            IMAGES_LOCK=${{ steps.lock.outputs.lock }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ needs.troopers.outputs.registry }}/jumpmaster-server,push-by-digest=true,name-canonical=true,push=true
+      # The stick trusts this repository's release workflow and runs this release's egress proxy.
+      - id: stick
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/stick/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+            RELEASE_REPOSITORY=${{ github.repository }}
+            RELEASE_VERSION=${{ needs.troopers.outputs.version }}
+            EGRESS_IMAGE=${{ needs.troopers.outputs.registry }}/jumpmaster-egress@${{ needs.troopers.outputs.egress }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ needs.troopers.outputs.registry }}/jumpmaster-stick,push-by-digest=true,name-canonical=true,push=true

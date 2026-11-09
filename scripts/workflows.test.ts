@@ -23,6 +23,8 @@ type Step = {
   with?: Record<string, unknown>;
 };
 type Job = {
+  uses?: string;
+  with?: Record<string, unknown>;
   needs?: string | string[];
   if?: string;
   permissions?: Record<string, string> | string;
@@ -37,7 +39,10 @@ type Workflow = {
 };
 
 const RELEASE = '.github/workflows/release.yml';
+const BUILD = '.github/workflows/release-build.yml';
 const release = (): Workflow => load(read(RELEASE)) as Workflow;
+/** The reusable workflow both `build` (a release) and `dryrun` call. */
+const buildWorkflow = (): Workflow => load(read(BUILD)) as Workflow;
 const needsOf = (job: Job): string[] =>
   job.needs === undefined ? [] : Array.isArray(job.needs) ? job.needs : [job.needs];
 const steps = (job: Job | undefined): Step[] => job?.steps ?? [];
@@ -214,7 +219,9 @@ describe('release.yml', () => {
     const script = steps(guard)
       .map((s) => s.run ?? '')
       .join('\n');
-    expect(script).toMatch(/git merge-base --is-ancestor "\$GITHUB_SHA" origin\/main/);
+    // The commit the tag names, peeled (an annotated tag's object is not a commit).
+    expect(script).toContain('commit="$(git rev-parse --verify "$GITHUB_SHA^{commit}")"');
+    expect(script).toMatch(/git merge-base --is-ancestor "\$commit" origin\/main/);
     // The tag name itself is checked, not only the trigger's glob.
     expect(script).toContain('^v[0-9]+\\.[0-9]+\\.[0-9]+(-rc\\.[0-9]+)?$');
     // No job runs regardless of a failed guard.
@@ -224,7 +231,8 @@ describe('release.yml', () => {
   test('a tag push runs every job only after guard passes; a failed guard stops everything', () => {
     const w = release();
     const ok = simulate(w, TAG_PUSH);
-    for (const job of Object.keys(w.jobs)) expect(ok[job], job).toBe('success');
+    for (const job of Object.keys(w.jobs))
+      expect(ok[job], job).toBe(job === 'dryrun' ? 'skipped' : 'success');
     const failed = simulate(w, TAG_PUSH, ['guard']);
     for (const job of Object.keys(w.jobs))
       expect(failed[job], job).toBe(job === 'guard' ? 'failure' : 'skipped');
@@ -236,11 +244,13 @@ describe('release.yml', () => {
     expect(run.guard).toBe('skipped');
     expect(run.sign).toBe('skipped');
     expect(run.publish).toBe('skipped');
-    expect(run.troopers).toBe('success');
-    expect(run.apps).toBe('success');
+    expect(run.dryrun).toBe('success');
+    expect(run.build).toBe('skipped');
     // Dispatched on a tag ref, guard runs, and still nothing is signed or published.
     const onTag = simulate(w, DISPATCH_ON_TAG);
     expect(onTag.guard).toBe('success');
+    expect(onTag.dryrun).toBe('success');
+    expect(onTag.build).toBe('skipped');
     expect(onTag.sign).toBe('skipped');
     expect(onTag.publish).toBe('skipped');
   });
@@ -250,14 +260,29 @@ describe('release.yml', () => {
     const isRelease = "github.event_name == 'push' && github.ref_type == 'tag'";
     expect(w.jobs.sign?.if).toBe(isRelease);
     expect(w.jobs.publish?.if).toBe(isRelease);
-    for (const name of ['troopers', 'apps']) {
-      const job = w.jobs[name] as Job;
+    // A release builds with release: true and may write packages; the dry run may not.
+    expect(w.jobs.build).toMatchObject({
+      uses: './.github/workflows/release-build.yml',
+      with: { release: true },
+      permissions: { contents: 'read', packages: 'write' },
+    });
+    expect(w.jobs.build?.if).toBe(isRelease);
+    expect(w.jobs.dryrun).toMatchObject({
+      uses: './.github/workflows/release-build.yml',
+      with: { release: false },
+      permissions: { contents: 'read', packages: 'read' },
+    });
+    const b = buildWorkflow();
+    expect(Object.keys(b.on as Record<string, unknown>)).toEqual(['workflow_call']);
+    for (const [name, job] of Object.entries(b.jobs)) {
+      // The called jobs take exactly what the caller grants.
+      expect(job.permissions, name).toBeUndefined();
       // The only registry login is to GHCR, and only for a release.
       const logins = steps(job).filter((s) =>
         /docker login|login-action/.test(`${s.run}${s.uses}`),
       );
       expect(logins.length, name).toBeGreaterThan(0);
-      for (const s of logins) expect(s.if, name).toBe(isRelease);
+      for (const s of logins) expect(s.if, name).toBe('inputs.release');
       // Every image goes to the registry the target step chose.
       for (const s of steps(job).filter((s) => s.uses?.startsWith('docker/build-push-action@'))) {
         const outputs = String(s.with?.outputs ?? '');
@@ -269,7 +294,7 @@ describe('release.yml', () => {
       }
     }
     // Run the target step's script: GHCR only for a release, a job-local registry otherwise.
-    const target = steps(w.jobs.troopers).find((s) => s.id === 'target') as Step;
+    const target = steps(b.jobs.troopers).find((s) => s.id === 'target') as Step;
     const env = target.env ?? {};
     const runTarget = (github: Record<string, string>) => {
       const out = join(mkdtempSync(join(tmpdir(), 'jm-wf-')), 'out');
@@ -279,6 +304,9 @@ describe('release.yml', () => {
           if (!m) return [k, v];
           const expr = (m[1] as string).trim();
           if (/^github\.[\w.]+$/.test(expr)) return [k, github[expr.slice(7)] ?? ''];
+          // inputs.release is what the calling job passes: true only from `build`.
+          if (expr === 'inputs.release')
+            return [k, String(simulate(w, github).build === 'success')];
           return [k, String(evaluate(expr, { github, needs: {} }, []))];
         }),
       );
@@ -308,7 +336,7 @@ describe('release.yml', () => {
     expect(dry.version).toBe(`0.0.0-dryrun.${'c'.repeat(12)}`);
     expect(runTarget({ ...DISPATCH_ON_TAG, ...common }).registry).toBe('localhost:5000/some-owner');
     // The job-local registry is a pinned service container.
-    expect(w.jobs.troopers?.services?.registry?.image).toMatch(
+    expect(b.jobs.troopers?.services?.registry?.image).toMatch(
       /^registry:[\d.]+@sha256:[0-9a-f]{64}$/,
     );
   });
@@ -323,13 +351,13 @@ describe('release.yml', () => {
         if (level === 'write') (grants[scope] ??= []).push(name);
     }
     expect(grants['id-token']).toEqual(['sign']);
-    expect(grants.packages?.sort()).toEqual(['apps', 'sign', 'troopers']);
+    expect(grants.packages?.sort()).toEqual(['build', 'sign']);
     expect(grants.contents).toEqual(['publish']);
     expect(Object.keys(grants).sort()).toEqual(['contents', 'id-token', 'packages']);
   });
 
   test('every image builds with provenance mode=max, sbom true and the source label', () => {
-    const w = release();
+    const w = buildWorkflow();
     const builds = Object.values(w.jobs).flatMap((j) =>
       steps(j).filter((s) => s.uses?.startsWith('docker/build-push-action@')),
     );
@@ -344,6 +372,8 @@ describe('release.yml', () => {
       'images/trooper/presets/python/Dockerfile',
     ]);
     for (const s of builds) {
+      // Both architectures: operators on Apple silicon run these natively.
+      expect(s.with?.platforms, s.id).toBe('linux/amd64,linux/arm64');
       expect(s.with?.provenance, s.id).toBe('mode=max');
       expect(s.with?.sbom, s.id).toBe(true);
       expect(String(s.with?.['build-args']), s.id).toMatch(
@@ -363,9 +393,11 @@ describe('release.yml', () => {
   });
 
   test('every checkout drops its credentials, and every job has a timeout', () => {
-    const w = release();
-    for (const [name, job] of Object.entries(w.jobs)) {
-      expect((job as { 'timeout-minutes'?: number })['timeout-minutes'], name).toBeGreaterThan(0);
+    const jobs = [...Object.entries(release().jobs), ...Object.entries(buildWorkflow().jobs)];
+    for (const [name, job] of jobs) {
+      // A job that calls a reusable workflow takes its jobs' timeouts.
+      if (!job.uses)
+        expect((job as { 'timeout-minutes'?: number })['timeout-minutes'], name).toBeGreaterThan(0);
       for (const s of steps(job).filter((s) => s.uses?.startsWith('actions/checkout@')))
         expect(s.with?.['persist-credentials'], name).toBe(false);
     }
@@ -393,6 +425,11 @@ describe('release.yml', () => {
       .join('\n');
     expect(script).toMatch(/cosign sign --yes "\$ref"/);
     expect(script).toContain('cosign verify');
+    // The self-check asserts what the stick asserts: every payload names the ref's digest.
+    expect(script).toContain('--output json -- "$ref" > verify.json');
+    expect(script).toContain(
+      `jq -e --arg d "\${ref##*@}" 'type == "array" and length > 0 and all(.[]; .critical.image."docker-manifest-digest" == $d)' verify.json`,
+    );
     for (const flag of [
       '--certificate-identity-regexp "$IDENTITY"',
       '--certificate-oidc-issuer https://token.actions.githubusercontent.com',
@@ -404,9 +441,21 @@ describe('release.yml', () => {
     // Seven images, each by its index digest.
     const env = (sign as { env?: Record<string, string> }).env ?? {};
     for (const name of ['TROOPER', 'PYTHON', 'GO', 'JVM', 'EGRESS', 'SERVER', 'STICK'])
-      expect(env[name], name).toMatch(/^\$\{\{ needs\.(troopers|apps)\.outputs\.[a-z]+ \}\}$/);
+      expect(env[name], name).toMatch(/^\$\{\{ needs\.build\.outputs\.[a-z]+ \}\}$/);
     for (const name of ['TROOPER', 'PYTHON', 'GO', 'JVM', 'EGRESS', 'SERVER', 'STICK'])
       expect(script, name).toContain(`@$${name}"`);
+    // Run that jq check on cosign v3.1.4's recorded output (the stick's fixture).
+    const filter = /jq -e --arg d "\$\{ref##\*@\}" '([^']+)' verify\.json/.exec(
+      script,
+    )?.[1] as string;
+    const recorded = read('apps/stick/src/fixtures/cosign-verify-ok.stdout');
+    const signed = 'sha256:742bbaf3524be1effb687bb69e991a5e5a43ad35c306f88ea4b91553d6aa78ef';
+    const jq = (input: string, digest: string) =>
+      spawnSync('jq', ['-e', '--arg', 'd', digest, filter], { input, encoding: 'utf8' }).status;
+    expect(jq(recorded, signed)).toBe(0);
+    expect(jq(recorded, `sha256:${'6'.repeat(64)}`)).not.toBe(0);
+    expect(jq('[]', signed)).not.toBe(0);
+    expect(jq('{}', signed)).not.toBe(0);
     // The identity the workflow checks is built the way the stick builds it.
     const bash = spawnSync(
       'bash',
@@ -443,6 +492,12 @@ describe('release docs', () => {
     expect(section).toContain(`--certificate-github-workflow-repository ${PUBLIC_REPO}`);
     expect(section).toContain('--bundle SHA256SUMS.sigstore.json');
     expect(section).toContain('sha256sum -c SHA256SUMS');
+    // The control on who can release is named, and the guard is described as what it is.
+    expect(section).toMatch(/tag ruleset/);
+    expect(section).toMatch(/additionally refuses a tag whose commit is not on `main`/);
+    // No revocation: stated plainly.
+    expect(section).toMatch(/never withdrawn/);
+    expect(section).toMatch(/no minimum version/i);
     // cosign without installing it: a digest-pinned image.
     expect(section).toMatch(
       /docker run --rm[^\n]*ghcr\.io\/sigstore\/cosign\/cosign:v[\d.]+@sha256:[0-9a-f]{64}/,
@@ -469,6 +524,19 @@ describe('release docs', () => {
       'pkg-containers.githubusercontent.com',
     ])
       expect(doc, s).toContain(s);
+    // The tag ruleset is the control, and it has to be in place before this workflow is on main.
+    expect(doc).toMatch(/before this workflow (is merged to|reaches) `main`/);
+    expect(doc).toMatch(/runs the workflow file as it is at the tagged commit/);
+    expect(doc).toMatch(/already has (such|this) a? ?ruleset|already has one/);
+    expect(doc).toMatch(/admin or maintain/);
+    // A pre-release check for stray tags and packages, and what to do if one is found.
+    expect(doc).toContain("git ls-remote --tags origin 'v*'");
+    expect(doc).toMatch(/treat the signing identity as burned/i);
+    // The rehearsals that wait for the first tag.
+    for (const s of ['cold cache', 'warm cache', 'rekor.sigstore.dev', 'released preset'])
+      expect(doc, s).toContain(s);
+    // Both architectures are published.
+    expect(doc).toContain('linux/arm64');
     // No private hostnames or paths in a public runbook.
     expect(doc).not.toMatch(/\/Users\/|\/home\/[a-z]+\/|\.local\b|\.internal\b/);
   });

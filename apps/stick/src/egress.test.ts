@@ -255,7 +255,7 @@ describe('the egress capability', () => {
       cosign: cosign(code),
     });
 
-    test('the proxy image is pulled by digest and verified before any probe container runs', async () => {
+    test('the proxy image is verified, then pulled by digest, before any probe container runs', async () => {
       const d = probeDriver({ present: false });
       const r = await egressCapability(
         d.driver,
@@ -284,7 +284,7 @@ describe('the egress capability', () => {
         [
           { JM_EGRESS_IMAGE: EG },
           trust(10),
-          {},
+          { present: false },
           /^the egress proxy image is not verified: image not verified: .*: cosign exit 10: no signatures found$/,
         ],
         [
@@ -305,7 +305,9 @@ describe('the egress capability', () => {
         expect(r.ok || r.reason).toMatch(reason);
         expect(d.calls.some((c) => c.startsWith('create') || c.startsWith('isolation'))).toBe(
           false,
-        );
+        ); // An unverified proxy image is never downloaded.
+        if (/not verified/.test(reason.source))
+          expect(d.calls.some((c) => c.startsWith('pull'))).toBe(false);
       }
     });
   });

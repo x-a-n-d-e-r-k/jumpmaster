@@ -246,20 +246,20 @@ export async function egressCapability(
   const image = egressImage(env);
   const signed = o.trust?.policy === 'signed';
   if (signed && o.trust) {
-    // Nothing runs from the proxy image, here or in a drop, before it is pulled by digest and
-    // verified.
+    // Nothing runs from the proxy image, here or in a drop, before it is verified (against the
+    // registry, so an unsigned image is never downloaded) and then pulled by digest.
     if (!digestOf(image))
       return {
         ok: false,
         reason: `the egress proxy image ${image} is not a digest reference; under the signed image policy set JM_EGRESS_IMAGE to the release's proxy by digest`,
       };
+    const v = await verifyImage(image, o.trust);
+    if (!v.ok) return { ok: false, reason: `the egress proxy image is not verified: ${v.reason}` };
     try {
       await pullImage(image, { driver, ...(o.log ? { log: o.log } : {}) });
     } catch (e) {
       return { ok: false, reason: message(e) };
     }
-    const v = await verifyImage(image, o.trust);
-    if (!v.ok) return { ok: false, reason: `the egress proxy image is not verified: ${v.reason}` };
   }
   if (!(await driver.imageExists(image).catch(() => false)))
     return { ok: false, reason: `the egress proxy image ${image} is not on this engine` };
