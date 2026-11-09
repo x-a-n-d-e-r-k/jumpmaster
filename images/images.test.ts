@@ -302,6 +302,26 @@ describe('images.yml', () => {
     expect(runs.some((r) => /images\/smoke\.sh/.test(r))).toBe(true);
   });
 
+  test('images.yml runs the egress e2e after building the egress image, in the job that records the Engine', () => {
+    const jobs = Object.values(workflow().jobs);
+    const job = jobs.find((j) =>
+      j.steps.some((s) => /images\/trooper\/e2e\/egress\.sh/.test(s.run ?? '')),
+    );
+    expect(job).toBeDefined();
+    const runs = job?.steps.map((s) => s.run ?? '') ?? [];
+    expect(runs.find((r) => /docker version/.test(r))).toMatch(/GITHUB_STEP_SUMMARY/);
+    const build = runs.findIndex((r) =>
+      /-t jumpmaster-egress:dev -f images\/egress\/Dockerfile/.test(r),
+    );
+    const e2e = runs.findIndex((r) => /egress\.sh/.test(r));
+    expect(build).toBeGreaterThanOrEqual(0);
+    expect(build).toBeLessThan(e2e);
+    // The e2e builds the proxy locally (pulling by digest arrives with image verification).
+    expect(read('images/trooper/e2e/egress.sh')).toMatch(
+      /-t jumpmaster-egress:dev -f images\/egress\/Dockerfile/,
+    );
+  });
+
   test('images.yml runs the preset e2e in its own job, recording the Engine there too', () => {
     const jobs = Object.values(workflow().jobs);
     const job = jobs.find((j) =>

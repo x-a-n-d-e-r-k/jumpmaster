@@ -16,7 +16,12 @@ import {
   TrooperEventSchema,
 } from '@jumpmaster/protocol';
 import type { DropClient } from './client.js';
-import type { ContainerDriver } from './driver.js';
+import type { ContainerDriver, DropNet } from './driver.js';
+import { type EgressSession, egressImage, startEgress } from './egress.js';
+import { dropSubnetPool } from './subnets.js';
+
+/** Services a drop network holds under egress: `.8` to `.14` of its /28. */
+const MAX_EGRESS_SERVICES = 6;
 
 export const TROOPER_IMAGE = process.env.JM_TROOPER_IMAGE ?? 'jumpmaster-trooper:dev';
 const STOP_GRACE_MS = 30_000;
@@ -55,6 +60,35 @@ export async function reapOrphans(driver: ContainerDriver, stickId: string): Pro
     }
   }
   await driver.removeNetworksByLabel(STICK_LABEL, stickId).catch(() => 0);
+  return removed;
+}
+
+/**
+ * Removes this stick's drop networks that no running drop holds, with whatever is left on them
+ * (services and proxies carry the drop's labels). Runs every 10 minutes, not only at start: a
+ * leaked network holds a /28 of a small pool. Returns how many it removed.
+ */
+export async function sweepDropNetworks(
+  driver: ContainerDriver,
+  stickId: string,
+  active: Set<string>,
+): Promise<number> {
+  let removed = 0;
+  for (const n of await driver.listNetworksByLabel(STICK_LABEL, stickId)) {
+    if (active.has(n.name)) continue;
+    const drop = n.labels['jumpmaster.drop'];
+    const epoch = n.labels['jumpmaster.epoch'];
+    // Without the drop labels the container filter would be too wide: leave it for a restart.
+    if (!drop || !epoch) continue;
+    await driver
+      .removeServices(n.name, {
+        'jumpmaster.drop': drop,
+        'jumpmaster.epoch': epoch,
+        [STICK_LABEL]: stickId,
+      })
+      .catch(() => {});
+    removed++;
+  }
   return removed;
 }
 
@@ -104,6 +138,13 @@ type RunDeps = {
   image?: string;
   /** Defaults to `allowedImages(process.env)`. */
   allowedImages?: Set<string>;
+  /** The egress proxy image; defaults to `JM_EGRESS_IMAGE`. Allowed for the proxy only. */
+  egressImage?: string;
+  egressReadyMs?: number;
+  /** Defaults to `JM_DROP_SUBNET_POOL`. */
+  subnetPool?: string;
+  /** Drop networks in use, so the periodic sweep leaves them alone. */
+  active?: Set<string>;
 };
 
 export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void> {
@@ -131,29 +172,56 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
     });
     return;
   }
+  const egress = payload.egress;
+  const fail = (reason: string) =>
+    client.postResult(dropId, epoch, { status: 'failed', role: payload.role, reason, gates: [] });
+  if (egress && services.length > MAX_EGRESS_SERVICES) {
+    await fail(`egress allows at most ${MAX_EGRESS_SERVICES} services per drop`);
+    return;
+  }
   const labels = {
     'jumpmaster.drop': dropId,
     'jumpmaster.epoch': String(epoch),
     [STICK_LABEL]: deps.stickId,
   };
-  const network = services.length > 0 ? `jm-drop-${dropId}-${epoch}` : undefined;
+  const network = services.length > 0 || egress ? `jm-drop-${dropId}-${epoch}` : undefined;
+  let net: DropNet | undefined;
+  let session: EgressSession | undefined;
+  if (network) deps.active?.add(network);
   try {
-    if (network) {
+    if (egress && network) {
+      // Fail closed: no network, no proxy or no ready line means no trooper.
       try {
-        await driver.startServices(dropId, epoch, services, labels);
-      } catch (e) {
-        await client.postResult(dropId, epoch, {
-          status: 'failed',
-          role: payload.role,
-          reason: `services failed: ${e instanceof Error ? e.message : String(e)}`,
-          gates: [],
+        const pool = deps.subnetPool ?? dropSubnetPool(process.env);
+        net = await driver.createDropNetwork(network, labels, pool);
+        session = await startEgress(driver, {
+          dropId,
+          epoch,
+          egress,
+          net,
+          image: deps.egressImage ?? egressImage(process.env),
+          labels,
+          ...(deps.egressReadyMs !== undefined ? { readyMs: deps.egressReadyMs } : {}),
         });
+      } catch (e) {
+        await fail(`egress proxy failed to start: ${e instanceof Error ? e.message : String(e)}`);
+        return;
+      }
+      console.log(JSON.stringify({ event: 'egress', dropId, mode: egress.mode, proxy: 'ready' }));
+    }
+    if (services.length > 0) {
+      try {
+        await driver.startServices(dropId, epoch, services, labels, net);
+      } catch (e) {
+        await fail(`services failed: ${e instanceof Error ? e.message : String(e)}`);
         return;
       }
     }
-    await runContainer(payload, deps, image, labels, network);
+    await runContainer(payload, deps, image, labels, network, net, session);
   } finally {
+    if (session) await session.stop();
     if (network) await driver.removeServices(network, labels).catch(() => {});
+    if (network) deps.active?.delete(network);
   }
 }
 
@@ -163,6 +231,8 @@ async function runContainer(
   image: string,
   labels: Record<string, string>,
   network: string | undefined,
+  net: DropNet | undefined,
+  session: EgressSession | undefined,
 ): Promise<void> {
   const { client, driver } = deps;
   const { dropId, epoch } = payload;
@@ -172,6 +242,7 @@ async function runContainer(
     name: `jumpmaster-drop-${dropId}-${epoch}`,
     labels,
     ...(network ? { network } : {}),
+    ...(net ? { egress: net } : {}),
     ...(payload.limits ? { limits: payload.limits } : {}),
   });
 
@@ -187,6 +258,12 @@ async function runContainer(
   let pending: TrooperEvent[] = [];
   let pendingBytes = 0;
   let flushing = Promise.resolve();
+  const queue = (ev: TrooperEvent, bytes: number) => {
+    if (pending.length > 0 && pendingBytes + bytes > MAX_BATCH_BYTES) void flush();
+    pending.push(ev);
+    pendingBytes += bytes;
+    if (pending.length >= MAX_BATCH) void flush();
+  };
   const flush = () => {
     if (pending.length === 0) return flushing;
     const batch = pending;
@@ -245,11 +322,9 @@ async function runContainer(
       } else if (line.startsWith(EVENT_PREFIX)) {
         try {
           const ev = TrooperEventSchema.parse(JSON.parse(line.slice(EVENT_PREFIX.length)));
-          const bytes = Buffer.byteLength(line);
-          if (pending.length > 0 && pendingBytes + bytes > MAX_BATCH_BYTES) void flush();
-          pending.push(ev);
-          pendingBytes += bytes;
-          if (pending.length >= MAX_BATCH) void flush();
+          // Egress events come from the stick's own reading of the proxy, never the trooper.
+          if (ev.kind === 'egress') continue;
+          queue(ev, Buffer.byteLength(line));
         } catch {
           // malformed event line: drop it
         }
@@ -262,6 +337,9 @@ async function runContainer(
       }
     }
     const { exitCode } = await handle.wait();
+    // The proxy logs each tunnel as it closes: stop it, then report the drop's egress.
+    if (session)
+      for (const ev of await session.finish()) queue(ev, Buffer.byteLength(JSON.stringify(ev)));
     await flush();
     // Before the result: the server checks for these when it reads the verdict.
     await Promise.allSettled(uploads);

@@ -432,6 +432,40 @@ function modelLines(drop: Drop): string {
   return `<p>Requested model: ${escapeHtml(requested ?? '-')}<br>Served model: ${escapeHtml(served ?? '-')}${mismatch}</p>`;
 }
 
+/** Denied first, then hosts monitor let through unlisted, then allowed; busiest first within each. */
+const EGRESS_ORDER: Record<string, number> = { deny: 0, unlisted: 1, allow: 2 };
+const MAX_EGRESS_ROWS = 200;
+
+/** The drop's egress events summed per host and decision, or nothing when it had none. */
+function egressSection(events: StoredEvent[]): string {
+  const totals = new Map<string, { host: string; decision: string; count: number }>();
+  for (const e of events) {
+    if (e.kind !== 'egress') continue;
+    const host = typeof e.data.host === 'string' ? e.data.host : '';
+    const decision = typeof e.data.decision === 'string' ? e.data.decision : 'allow';
+    const count = typeof e.data.count === 'number' && e.data.count > 0 ? e.data.count : 0;
+    const key = `${decision}\u0000${host}`;
+    const t = totals.get(key) ?? { host, decision, count: 0 };
+    t.count += count;
+    totals.set(key, t);
+  }
+  if (totals.size === 0) return '';
+  const rows = [...totals.values()]
+    .sort(
+      (a, b) =>
+        (EGRESS_ORDER[a.decision] ?? 3) - (EGRESS_ORDER[b.decision] ?? 3) ||
+        b.count - a.count ||
+        a.host.localeCompare(b.host),
+    )
+    .slice(0, MAX_EGRESS_ROWS)
+    .map(
+      (t) =>
+        `<tr class="egress"><td>${escapeHtml(t.host)}</td><td>${escapeHtml(t.decision)}</td><td>${t.count}</td></tr>`,
+    )
+    .join('');
+  return `<h3>Egress</h3><table><tr><th>Host</th><th>Decision</th><th>Connections</th></tr>${rows}</table>`;
+}
+
 export function renderDrop(
   drop: Drop,
   events: StoredEvent[],
@@ -446,6 +480,7 @@ export function renderDrop(
   return page(
     `<p><a href="/">Back</a></p><h2>Drop ${escapeHtml(drop.id)}</h2><p>State: ${escapeHtml(drop.state)}</p>` +
       modelLines(drop) +
+      egressSection(events) +
       `<table><tr><th>Seq</th><th>Time</th><th>Kind</th><th>Data</th></tr>${rows}</table>` +
       artifactsSection(artifacts),
   );

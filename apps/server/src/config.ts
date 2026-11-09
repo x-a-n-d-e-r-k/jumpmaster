@@ -8,6 +8,7 @@ import {
   RoleSchema,
   ServiceSpecSchema,
   VerificationSpecSchema,
+  validAllowEntry,
 } from '@jumpmaster/protocol';
 import { z } from 'zod';
 import { ZONE_MODES } from './db/repo.js';
@@ -50,6 +51,8 @@ export const DEFAULT_PROTECTED_PATHS = [
 
 export const DEFAULT_PIDS_LIMIT = 512;
 export const EGRESS_MODES = ['off', 'monitor', 'enforce'] as const;
+/** Services a zone may declare with egress on: each drop's /28 gives them .8 to .14. */
+export const MAX_EGRESS_SERVICES = 6;
 
 const CREW_DEFAULTS = {
   enabled: false,
@@ -135,7 +138,22 @@ const DropZoneObject = z.object({
    * Egress control. Absent or `off` (the default) keeps M3 behaviour. Any other mode needs a stick
    * that advertises `egress-v1`: until one does, the zone's drops stay queued.
    */
-  egress: z.object({ mode: z.enum(EGRESS_MODES).default('off') }).optional(),
+  egress: z
+    .object({
+      mode: z.enum(EGRESS_MODES).default('off'),
+      /**
+       * Hosts beyond the base and preset lists: a name, or `*.` plus a name (subdomains only).
+       * Never an IP literal, a port, a path or a URL.
+       */
+      allow: z
+        .array(
+          z.string().refine(validAllowEntry, {
+            message: 'egress.allow entries are host names or *.name, never an IP, port or path',
+          }),
+        )
+        .default([]),
+    })
+    .optional(),
   /**
    * `true` requires signed images for this zone even when the install doesn't. A zone can't
    * weaken the install-wide setting: `false` under a top-level `true` is a config error.
@@ -200,6 +218,13 @@ const DropZoneSchema = DropZoneObject.superRefine((zone, ctx) => {
       code: 'custom',
       path: ['model'],
       message: 'model may not name Fable: declare claude.plan and claude.fableModel instead',
+    });
+  }
+  if ((zone.egress?.mode ?? 'off') !== 'off' && zone.services.length > MAX_EGRESS_SERVICES) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['services'],
+      message: `with egress on a zone may declare at most ${MAX_EGRESS_SERVICES} services (each drop network is a /28)`,
     });
   }
   if (!zone.crew.enabled) return;

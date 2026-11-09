@@ -98,8 +98,32 @@ before it. With one free slot, crew drops wait until no finishing or implement d
   Point the project's own variable at them in its docs (for example a test-database URL). Containers are never pulled automatically, so `docker pull` each image on
   the stick's host first.
 - **Gate secrets:** each value comes from `JM_ZONE_SECRET_<ZONE>_<NAME>`. **Any PR's gate code,
-  including an install script, can read and send these.** Jumpmaster has no egress control until
-  M4, so use only throwaway or sidecar-local values, never a real credential.
+  including an install script, can read and send these.** With egress `off` (the default) nothing
+  limits where they go, and even under `enforce` an allowed host can carry them out (below), so
+  use only throwaway or sidecar-local values, never a real credential.
+- **Egress (M4):** `"egress": { "mode": "enforce", "allow": ["…"] }` on a zone gives each drop its
+  own internal `/28` network with no route out, no IPv6 and no address on the host's side of the
+  bridge; the only exit is a per-drop proxy that allows `CONNECT` on port 443 to listed public
+  hosts (the base list, the preset's hosts and `allow`). `monitor` lets any public host through
+  and lists it on the drop page, so run `monitor` first and move to `enforce` once the drop page
+  shows no unlisted host. The stick needs the `jumpmaster-egress` image on its engine
+  (`JM_EGRESS_IMAGE`) and advertises egress only when it can create a drop network; until one
+  does, the zone's drops stay queued. Drop networks come from `JM_DROP_SUBNET_POOL` (default
+  `172.30.0.0/16`): keep it clear of the daemon's `default-address-pools` and of your LAN. The
+  image workflow's egress e2e (`images/trooper/e2e/egress.sh`) checks DNS from the trooper and a
+  service, the drop gateway against a host listener, raw IPs, the metadata address, IPv6 and the
+  proxy's bind on each run's engine; run it on your stick's engine before relying on `enforce`
+  (first run on Docker Engine 29.9.2). What egress does not stop:
+  - **Exfiltration through an allowed host.** In an implement, heal or resolve drop the trooper's
+    root process holds the author token and `github.com` is allowed: that is an unbounded write
+    channel to anything the token can reach (the agent itself never holds the token). The
+    operator's Claude token reaches `api.anthropic.com`. Domain fronting on a shared CDN remains
+    where the CDN still allows it (the proxy does not compare the TLS SNI with the CONNECT host).
+  - **Tools that ignore the proxy** get no route at all, so they fail rather than leak.
+  - **The proxy's own lookups** use the engine's DNS: in `enforce` an unlisted name is refused
+    before any lookup, but in `monitor` every name a drop asks for is resolved.
+  - **The services** share the drop network: a service image can use the proxy like the trooper.
+    Pin service images by digest.
 - **Verification:** runs during review with no credentials. A matching PR must produce at least
   one PNG, JPEG, WebP or JSON artifact, 10 at most and 5 MB each. Artifacts are stored and linked
   from the drop page, and the reviewer inspects them. Treat them as readable by anyone with access

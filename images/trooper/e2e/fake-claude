@@ -12,6 +12,7 @@ const probes = {
   readProc1Environ: sh('cat /proc/1/environ'),
   writeWork: sh('touch /work/x && echo wrote'),
   head: sh('git rev-parse HEAD'),
+  httpsProxy: process.env.HTTPS_PROXY ?? null,
   systemPromptReadable: fs.existsSync(process.argv[process.argv.indexOf('--append-system-prompt-file') + 1] || '/nope'),
 };
 // Instruction files the real CLI would load: CLAUDE.md and friends in the working directory and

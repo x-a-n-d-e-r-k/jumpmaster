@@ -362,7 +362,7 @@ export type GateResult = z.infer<typeof GateResultSchema>;
 
 export const TrooperEventSchema = z.object({
   ts: z.string(),
-  kind: z.enum(['phase', 'agent', 'rate_limit', 'gate', 'log']),
+  kind: z.enum(['phase', 'agent', 'rate_limit', 'gate', 'log', 'egress']),
   data: z.record(z.string(), z.unknown()),
 });
 export type TrooperEvent = z.infer<typeof TrooperEventSchema>;
