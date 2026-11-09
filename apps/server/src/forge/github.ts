@@ -302,10 +302,21 @@ export class GitHubForge implements Forge {
         ? {}
         : {
             request: {
-              fetch: (url: string | URL | Request, init: RequestInit = {}) => {
+              fetch: async (url: string | URL | Request, init: RequestInit = {}) => {
                 const timeout = AbortSignal.timeout(ms);
                 const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
-                return fetch(url, { ...init, signal });
+                const res = await fetch(url, { ...init, signal });
+                // Read the body here, under the same deadline: Octokit swallows a failed body
+                // read and returns "" as the data, so a body that stalls after the headers
+                // would come back as an empty answer instead of an error.
+                const body = res.body === null ? null : await res.arrayBuffer();
+                const copy = new Response(body, {
+                  status: res.status,
+                  statusText: res.statusText,
+                  headers: res.headers,
+                });
+                Object.defineProperty(copy, 'url', { value: res.url });
+                return copy;
               },
             },
           }),

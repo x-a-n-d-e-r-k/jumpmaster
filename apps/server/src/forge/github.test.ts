@@ -35,9 +35,12 @@ function noBlockers(times = 1) {
   nock(api)
     .post('/graphql')
     .times(times)
-    .reply(200, (_uri, body) => ({
+    // nock 15 hands a reply function the fetch Request; the GraphQL query is its JSON body.
+    .reply(200, async (request: Request) => ({
       data: {
-        repository: Object.fromEntries(aliasesOf(body).map((a) => [a, blockerEntry(0, [])])),
+        repository: Object.fromEntries(
+          aliasesOf(await request.json()).map((a) => [a, blockerEntry(0, [])]),
+        ),
       },
     }));
 }
@@ -944,11 +947,48 @@ describe('GitHubForge doctor reads', () => {
   });
 
   test('I-3: with a request timeout, a read that never answers is aborted', async () => {
-    nock(api).get('/repos/o/r').delay(2000).reply(200, { default_branch: 'main' });
+    // The reply function holds the response back: no status line, no headers.
+    nock(api)
+      .get('/repos/o/r')
+      .reply(async () => {
+        await new Promise((r) => setTimeout(r, 2000));
+        return [200, { default_branch: 'main' }];
+      });
     const f = new GitHubForge('o', 'r', 'tok', { requestTimeoutMs: 50 });
     const started = Date.now();
     await expect(f.repoAccess()).rejects.toThrow();
     expect(Date.now() - started).toBeLessThan(1500);
+  });
+
+  test('I-3: a body that stalls after the headers is aborted, never read as an empty answer', async () => {
+    // nock 15's delay sends the headers at once and holds the end of the body. Octokit swallows
+    // a failed body read and hands back "" as the data, which reads as "no permissions". The
+    // body has a length, as GitHub's do: an EOF-delimited one makes the mock socket's close
+    // after the abort trip an undici assertion (an artefact of the mock, not of the forge).
+    nock(api).get('/repos/o/r').delay(2000).reply(200, '{"default_branch":"main"}', {
+      'Content-Type': 'application/json',
+      'Content-Length': '25',
+    });
+    const f = new GitHubForge('o', 'r', 'tok', { requestTimeoutMs: 50 });
+    const started = Date.now();
+    await expect(f.repoAccess()).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(1500);
+  });
+
+  test('I-3: with a request timeout, answers still read in full: JSON and headers, 404, empty 204', async () => {
+    const f = new GitHubForge('o', 'r', 'tok', { requestTimeoutMs: 5000 });
+    nock(api)
+      .get('/repos/o/r')
+      .reply(200, { private: true, default_branch: 'trunk' }, { 'x-oauth-scopes': 'repo' });
+    expect(await f.repoAccess()).toMatchObject({
+      private: true,
+      defaultBranch: 'trunk',
+      scopes: ['repo'],
+    });
+    nock(api).get('/repos/o/r/issues/10').reply(404, {});
+    expect(await f.getIssue(10)).toBeNull();
+    nock(api).delete('/repos/o/r/issues/9/labels/agent-staged').reply(204);
+    await f.setLabels(9, { add: [], remove: ['agent-staged'] });
   });
 
   test('repoAccess reads the token account permissions, scopes and expiry', async () => {
