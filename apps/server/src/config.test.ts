@@ -541,8 +541,50 @@ describe('egress and signed-image settings', () => {
     });
     expect(loadConfig(withZone({ egress: {} }), fullEnv).dropZones[0]?.egress).toEqual({
       mode: 'off',
+      allow: [],
     });
     expect(() => loadConfig(withZone({ egress: { mode: 'open' } }), fullEnv)).toThrow(/egress/);
+  });
+
+  test('an egress allow entry that is an IP literal or has a path is a config error', () => {
+    const ok = loadConfig(
+      withZone({ egress: { mode: 'enforce', allow: ['Example.COM.', '*.example.org'] } }),
+      fullEnv,
+    );
+    expect(ok.dropZones[0]?.egress?.allow).toEqual(['Example.COM.', '*.example.org']);
+    for (const bad of [
+      '1.2.3.4',
+      '169.254.169.254',
+      '[::1]',
+      '::1',
+      'example.com/path',
+      'https://example.com',
+      'example.com:443',
+      '*',
+      '*.',
+      'a.*.example.com',
+      'bücher.example',
+    ])
+      expect(
+        () => loadConfig(withZone({ egress: { mode: 'enforce', allow: [bad] } }), fullEnv),
+        bad,
+      ).toThrow(/egress\.allow/);
+  });
+
+  test('with egress on a zone declares at most 6 services; off keeps the M3 limit', () => {
+    const services = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({ name: `s${i}`, image: 'img', port: 1000 + i }));
+    expect(
+      loadConfig(withZone({ egress: { mode: 'monitor' }, services: services(6) }), fullEnv)
+        .dropZones[0]?.services,
+    ).toHaveLength(6);
+    expect(() =>
+      loadConfig(withZone({ egress: { mode: 'enforce' }, services: services(7) }), fullEnv),
+    ).toThrow(/at most 6 services/);
+    expect(
+      loadConfig(withZone({ egress: { mode: 'off' }, services: services(7) }), fullEnv).dropZones[0]
+        ?.services,
+    ).toHaveLength(7);
   });
 
   test('a zone may not turn off signed images that the install requires', () => {

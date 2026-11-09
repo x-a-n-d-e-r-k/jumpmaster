@@ -1,6 +1,7 @@
 import { leaseLogger, StickClient } from './client.js';
 import { DockerDriver } from './docker.js';
-import { reapOrphans, runDrop } from './runner.js';
+import { egressCapability } from './egress.js';
+import { reapOrphans, runDrop, sweepDropNetworks } from './runner.js';
 import {
   joinToken,
   loadEnrollment,
@@ -11,6 +12,7 @@ import {
 } from './state.js';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const SWEEP_MS = 10 * 60_000;
 
 function need(name: string): string {
   const v = process.env[name];
@@ -26,7 +28,12 @@ async function main() {
   const saved = loadEnrollment(dir, serverUrl);
   const token = saved?.stickToken;
   let stickId = saved?.stickId;
-  const info = stickInfo(process.env, stickVersion());
+  const driver = new DockerDriver();
+  // Advertised only when this engine really can enforce it; the server then never leases this
+  // stick a drop from a zone that restricts egress.
+  const egress = await egressCapability(driver, process.env);
+  if (!egress.ok) console.log(`egress-v1 not advertised: ${egress.reason}`);
+  const info = stickInfo(process.env, stickVersion(), egress.ok ? ['egress-v1'] : []);
   console.log(
     `stick ${info.version}: image policy ${info.imagePolicy}, capabilities ${info.capabilities.join(', ') || 'none'}`,
   );
@@ -40,10 +47,18 @@ async function main() {
     console.log(`enrolled as ${stickId}`);
   }
 
-  const driver = new DockerDriver();
   // Before leasing: kill troopers a previous run of this stick left behind.
   const reaped = await reapOrphans(driver, stickId);
   if (reaped.length > 0) console.log(`removed ${reaped.length} orphaned trooper container(s)`);
+  const active = new Set<string>();
+  const id = stickId;
+  setInterval(() => {
+    sweepDropNetworks(driver, id, active)
+      .then((n) => {
+        if (n > 0) console.log(`removed ${n} leaked drop network(s)`);
+      })
+      .catch(() => {});
+  }, SWEEP_MS).unref();
   let running = 0;
   for (;;) {
     if (running >= slots) {
@@ -60,6 +75,7 @@ async function main() {
         client,
         driver,
         stickId,
+        active,
         heartbeatMs: 15_000,
         ...(process.env.JM_LOST_SERVER_KILL_BEATS
           ? { lostServerKillBeats: Number(process.env.JM_LOST_SERVER_KILL_BEATS) }

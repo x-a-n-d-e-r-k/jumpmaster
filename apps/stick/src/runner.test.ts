@@ -12,8 +12,18 @@ import {
 } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
 import type { DropClient } from './client.js';
-import type { ContainerDriver } from './driver.js';
-import { allowedImages, reapOrphans, runDrop } from './runner.js';
+import type { ContainerDriver, DropNet } from './driver.js';
+import { allowedImages, reapOrphans, runDrop, sweepDropNetworks } from './runner.js';
+
+const NET: DropNet = {
+  name: 'jm-drop-d1-3',
+  subnet: '172.30.0.16/28',
+  gateway: '172.30.0.17',
+  proxy: '172.30.0.18',
+  trooper: '172.30.0.19',
+  dns: '172.30.0.20',
+  ipRange: '172.30.0.24/29',
+};
 
 const TOKEN = 'sk-secret-claude-token';
 const payload: DropPayload = DropPayloadSchema.parse({
@@ -36,17 +46,85 @@ const payload: DropPayload = DropPayloadSchema.parse({
 
 function fakeDriver(
   lines: string[],
-  opts: { hang?: boolean; exitCode?: number; serviceError?: string; stderr?: string } = {},
+  opts: {
+    hang?: boolean;
+    exitCode?: number;
+    serviceError?: string;
+    stderr?: string;
+    /** The proxy's stdout; `hang` keeps it open with no ready line. */
+    proxyLines?: string[];
+    proxyHang?: boolean;
+    netError?: string;
+    proxyError?: string;
+    networks?: { name: string; labels: Record<string, string> }[];
+  } = {},
 ) {
+  const order: string[] = [];
   const d = {
+    order,
     started: undefined as Parameters<ContainerDriver['start']>[0] | undefined,
     stopped: false,
     killed: false,
     services: undefined as unknown,
+    servicesNet: undefined as DropNet | undefined,
     removedNetworks: [] as string[],
+    removedLabels: [] as Record<string, string>[],
     stopGrace: 0,
+    net: undefined as { name: string; labels: Record<string, string>; pool: string } | undefined,
+    proxy: undefined as Parameters<ContainerDriver['startEgressProxy']>[0] | undefined,
+    proxyStopped: false,
     driver: {
+      async createDropNetwork(name, labels, pool) {
+        order.push('network');
+        d.net = { name, labels, pool };
+        if (opts.netError) throw new Error(opts.netError);
+        return { ...NET, name };
+      },
+      async startEgressProxy(o) {
+        order.push('proxy');
+        d.proxy = o;
+        if (opts.proxyError) throw new Error(opts.proxyError);
+        let release: () => void = () => {};
+        const stopped = new Promise<void>((r) => {
+          release = r;
+        });
+        return {
+          async *logs() {
+            if (opts.proxyHang) {
+              await stopped;
+              return;
+            }
+            yield '{"ready":true}';
+            await stopped;
+            for (const l of opts.proxyLines ?? []) yield l;
+          },
+          async stop() {
+            order.push('proxy-stop');
+            d.proxyStopped = true;
+            release();
+          },
+        };
+      },
+      async listNetworksByLabel() {
+        return opts.networks ?? [];
+      },
+      async removeNetwork() {},
+      async imageExists() {
+        return true;
+      },
+      async engineVersion() {
+        return '29.9.2';
+      },
+      async probeIsolation() {
+        return {
+          listenerUp: true,
+          gatewayOnHost: false,
+          gatewayReachable: false,
+          ipv6Disabled: true,
+        };
+      },
       async start(o) {
+        order.push('trooper');
         d.started = o;
         let release: () => void = () => {};
         const gate = new Promise<void>((r) => {
@@ -77,13 +155,17 @@ function fakeDriver(
         return [];
       },
       async remove() {},
-      async startServices(dropId, epoch, services, labels) {
+      async startServices(dropId, epoch, services, labels, net) {
+        order.push('services');
         d.services = { dropId, epoch, names: services.map((s) => s.name), labels };
+        d.servicesNet = net;
         if (opts.serviceError) throw new Error(opts.serviceError);
         return `jm-drop-${dropId}-${epoch}`;
       },
-      async removeServices(network) {
+      async removeServices(network, labels) {
+        order.push('teardown');
         d.removedNetworks.push(network);
+        d.removedLabels.push(labels);
       },
       async removeNetworksByLabel() {
         return 0;
@@ -580,5 +662,201 @@ describe('reapOrphans', () => {
     };
     expect(await reapOrphans(driver, 's1')).toEqual(['b']);
     expect(removed).toEqual(['b']);
+  });
+});
+
+describe('egress', () => {
+  const done = 'JM_RESULT {"status":"completed","headSha":"a","gates":[]}';
+  const enforce: DropPayload = {
+    ...payload,
+    image: 'trooper',
+    egress: { mode: 'enforce', allow: ['api.anthropic.com', 'github.com'] },
+  };
+  const withDb: DropPayload = {
+    ...enforce,
+    services: [{ name: 'db', image: 'postgres:16', port: 5432, readyTimeoutSeconds: 60 }],
+  };
+  const allowed = new Set(['trooper', 'postgres:16']);
+  const deps = (d: ReturnType<typeof fakeDriver>, client = fakeClient()) => ({
+    client,
+    driver: d.driver,
+    stickId: 's1',
+    allowedImages: allowed,
+    egressImage: 'jumpmaster-egress:test',
+    egressReadyMs: 50,
+    subnetPool: '172.30.0.0/16',
+  });
+
+  test('egress off leaves the payload without egress and the trooper on the default network', async () => {
+    const d = fakeDriver([done]);
+    await runDrop({ ...payload, image: 'trooper' }, deps(d));
+    expect(d.net).toBeUndefined();
+    expect(d.proxy).toBeUndefined();
+    expect(d.started?.egress).toBeUndefined();
+    expect(d.started?.network).toBeUndefined();
+    expect(d.order).toEqual(['trooper']);
+  });
+
+  test('the proxy gets the static .2 address and JM_EGRESS_BIND equal to it', async () => {
+    const d = fakeDriver([done]);
+    const client = fakeClient();
+    await runDrop(withDb, deps(d, client));
+    expect(client.result).toMatchObject({ status: 'completed' });
+    expect(d.net).toEqual({
+      name: 'jm-drop-d1-3',
+      labels: { 'jumpmaster.drop': 'd1', 'jumpmaster.epoch': '3', 'jumpmaster.stick': 's1' },
+      pool: '172.30.0.0/16',
+    });
+    expect(d.proxy).toMatchObject({
+      name: 'jm-egress-d1-3',
+      image: 'jumpmaster-egress:test',
+      net: { ...NET },
+      env: {
+        JM_EGRESS_MODE: 'enforce',
+        JM_EGRESS_ALLOW: 'api.anthropic.com,github.com',
+        JM_EGRESS_BIND: '172.30.0.18',
+      },
+    });
+    // Ready before services and the trooper; everything torn down after, proxy included.
+    expect(d.order).toEqual(['network', 'proxy', 'services', 'trooper', 'proxy-stop', 'teardown']);
+    expect(d.servicesNet).toEqual(NET);
+    expect(d.started?.egress).toEqual(NET);
+    expect(d.started?.network).toBe('jm-drop-d1-3');
+    expect(d.removedNetworks).toEqual(['jm-drop-d1-3']);
+    // The proxy image is allowed for the proxy only, never as a trooper or service image.
+    expect(allowed.has('jumpmaster-egress:test')).toBe(false);
+  });
+
+  test('a drop under egress without services still gets its own network and proxy', async () => {
+    const d = fakeDriver([done]);
+    await runDrop(enforce, deps(d));
+    expect(d.order).toEqual(['network', 'proxy', 'trooper', 'proxy-stop', 'teardown']);
+    expect(d.services).toBeUndefined();
+  });
+
+  test('the egress image never runs as a trooper', async () => {
+    const d = fakeDriver([done]);
+    const client = fakeClient();
+    await runDrop({ ...enforce, image: 'jumpmaster-egress:test' }, deps(d, client));
+    expect(client.result?.reason).toBe('image not allowed: jumpmaster-egress:test');
+    expect(d.order).toEqual([]);
+  });
+
+  test.each([
+    ['never prints ready', { proxyHang: true }],
+    ['cannot be created', { proxyError: 'image jumpmaster-egress:test is missing' }],
+    ['has no network', { netError: 'no free /28 in 172.30.0.0/16' }],
+  ])('a proxy that %s fails the drop before any trooper is created', async (_n, o) => {
+    const d = fakeDriver([done], o);
+    const client = fakeClient();
+    await runDrop(withDb, deps(d, client));
+    expect(d.started).toBeUndefined();
+    expect(d.services).toBeUndefined();
+    expect(client.result).toMatchObject({ status: 'failed', role: 'implement', gates: [] });
+    expect(client.result?.reason).toMatch(/^egress proxy failed to start: /);
+    expect(d.removedNetworks).toEqual(['jm-drop-d1-3']);
+    if (!('netError' in o) && !('proxyError' in o)) expect(d.proxyStopped).toBe(true);
+  });
+
+  test('more services than a /28 holds fails the drop closed', async () => {
+    const d = fakeDriver([done]);
+    const client = fakeClient();
+    const many = Array.from({ length: 7 }, (_, i) => ({
+      name: `s${i}`,
+      image: 'postgres:16',
+      port: 5432,
+      readyTimeoutSeconds: 60,
+    }));
+    await runDrop({ ...enforce, services: many }, deps(d, client));
+    expect(client.result?.reason).toMatch(/at most 6 services/);
+    expect(d.order).toEqual([]);
+  });
+
+  test('egress log lines become aggregated egress events, capped at 200 hosts', async () => {
+    const line = (host: string, decision: string, reason?: string) =>
+      JSON.stringify({ at: 't', host, port: 443, decision, ...(reason ? { reason } : {}) });
+    const proxyLines = [
+      line('github.com', 'allow'),
+      line('github.com', 'allow'),
+      line('github.com', 'allow'),
+      line('example.com', 'deny', 'not allowed'),
+      line('example.com', 'deny', 'not allowed'),
+      line('cdn.example.net', 'allow', 'unlisted'),
+      'not json',
+      '{"ready":true}',
+      ...Array.from({ length: 250 }, (_, i) => line(`h${i}.exfil.test`, 'deny', 'not allowed')),
+    ];
+    const d = fakeDriver(
+      [
+        // A trooper can't forge an egress event: only the stick's own reading of the proxy counts.
+        'JM_EVENT {"ts":"t","kind":"egress","data":{"host":"forged.test","decision":"allow","count":1}}',
+        done,
+      ],
+      { proxyLines },
+    );
+    const calls: string[] = [];
+    const client = fakeClient();
+    const postEvents = client.postEvents.bind(client);
+    client.postEvents = async (...a) => {
+      calls.push('events');
+      return postEvents(...a);
+    };
+    const postResult = client.postResult.bind(client);
+    client.postResult = async (...a) => {
+      calls.push('result');
+      return postResult(...a);
+    };
+    await runDrop(enforce, deps(d, client));
+    const egress = client.events.flat().filter((e) => e.kind === 'egress');
+    const byHost = new Map(egress.map((e) => [`${e.data.decision} ${e.data.host}`, e.data.count]));
+    expect(byHost.get('allow github.com')).toBe(3);
+    expect(byHost.get('deny example.com')).toBe(2);
+    expect(byHost.get('unlisted cdn.example.net')).toBe(1);
+    expect(byHost.has('allow forged.test')).toBe(false);
+    // 200 per decision: the denied flood is cut, the allowed and unlisted hosts are all shown.
+    const hosts = egress.filter((e) => !e.data.overflow);
+    expect(hosts.filter((e) => e.data.decision === 'deny')).toHaveLength(200);
+    expect(hosts).toHaveLength(202);
+    expect(egress.filter((e) => e.data.overflow).map((e) => e.data)).toEqual([
+      expect.objectContaining({ decision: 'deny', hosts: 51, count: 51, overflow: true }),
+    ]);
+    // Every batch stays within the events limit, and they all land before the result.
+    expect(client.events.every((b) => b.length <= 50)).toBe(true);
+    expect(calls.at(-1)).toBe('result');
+    expect(calls.filter((c) => c === 'result')).toHaveLength(1);
+  });
+
+  test('teardown and the periodic sweep remove proxies and drop networks by label', async () => {
+    const d = fakeDriver([], {
+      networks: [
+        {
+          name: 'jm-drop-live-1',
+          labels: { 'jumpmaster.drop': 'live', 'jumpmaster.epoch': '1', 'jumpmaster.stick': 's1' },
+        },
+        {
+          name: 'jm-drop-old-2',
+          labels: { 'jumpmaster.drop': 'old', 'jumpmaster.epoch': '2', 'jumpmaster.stick': 's1' },
+        },
+      ],
+    });
+    const removed = await sweepDropNetworks(d.driver, 's1', new Set(['jm-drop-live-1']));
+    expect(removed).toBe(1);
+    expect(d.removedNetworks).toEqual(['jm-drop-old-2']);
+    // removeServices takes the proxy too: it carries the drop's labels and the service label.
+    expect(d.removedLabels).toEqual([
+      { 'jumpmaster.drop': 'old', 'jumpmaster.epoch': '2', 'jumpmaster.stick': 's1' },
+    ]);
+    // A running drop's network is in the active set while it runs, and out of it after.
+    const active = new Set<string>();
+    let during = false;
+    const live = fakeDriver([done]);
+    const start = live.driver.start;
+    live.driver.start = async (o) => {
+      during = active.has('jm-drop-d1-3');
+      return start(o);
+    };
+    await runDrop(enforce, { ...deps(live), active });
+    expect(during).toBe(true);
+    expect(active.size).toBe(0);
   });
 });

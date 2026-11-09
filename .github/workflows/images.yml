@@ -1,8 +1,8 @@
 name: Images
 
 # Builds every image without pushing, then runs the image smoke test and the trooper e2e against
-# the fake Claude CLI, and (in its own job) the stack presets. Later tasks add e2e cases (egress,
-# verification, the doctor drop).
+# the fake Claude CLI, the egress e2e, and (in its own job) the stack presets. Later tasks add e2e
+# cases (verification, the doctor drop).
 on:
   pull_request:
   push:
@@ -37,12 +37,20 @@ jobs:
           docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-server:dev -f images/server/Dockerfile .
           docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-stick:dev -f images/stick/Dockerfile .
           docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-trooper:dev -f images/trooper/Dockerfile .
+          docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-egress:dev -f images/egress/Dockerfile .
       - name: Image smoke test
         run: images/smoke.sh
       - name: Trooper e2e
         env:
           E2E_REPO: ${{ github.repository }}
         run: images/trooper/e2e/run.sh
+      # Egress enforcement on this engine: DNS (trooper and service), the drop gateway, raw IPs,
+      # the metadata address, IPv6 and the proxy's bind, each against a control that works.
+      - name: Egress e2e
+        env:
+          E2E_REPO: ${{ github.repository }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: images/trooper/e2e/egress.sh
 
   # The stack presets build FROM the trooper image; this job builds all four and checks each
   # toolchain as the agent user and as the gate user inside a review drop.

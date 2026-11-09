@@ -142,6 +142,39 @@ describe('renderDrop', () => {
     expect(html).not.toContain('<script>x</script>');
     expect(html).toContain('&lt;script&gt;');
   });
+
+  test('the drop page lists denied hosts before allowed ones', () => {
+    const ev = (seq: number, host: string, decision: string, count: number) => ({
+      seq,
+      ts: 't',
+      kind: 'egress' as const,
+      data: { host, decision, count },
+    });
+    const html = renderDrop(drop, [
+      ev(1, 'registry.npmjs.org', 'allow', 40),
+      ev(2, 'api.anthropic.com', 'allow', 3),
+      ev(3, 'example.com', 'deny', 2),
+      ev(4, 'cdn.example.net', 'unlisted', 5),
+      ev(5, '<b>evil</b>.test', 'deny', 9),
+      ev(6, 'example.com', 'deny', 1), // a second batch for the same host adds up
+      { seq: 7, ts: 't', kind: 'log', data: { msg: 'x' } },
+    ]);
+    const section = html.slice(html.indexOf('<h3>Egress</h3>'));
+    expect(section).toContain('<h3>Egress</h3>');
+    const rows = [
+      ...section.matchAll(/<tr class="egress"><td>([^<]*)<\/td><td>([^<]*)<\/td><td>(\d+)<\/td>/g),
+    ].map((m) => [m[1], m[2], Number(m[3])]);
+    expect(rows).toEqual([
+      ['&lt;b&gt;evil&lt;/b&gt;.test', 'deny', 9],
+      ['example.com', 'deny', 3],
+      ['cdn.example.net', 'unlisted', 5],
+      ['registry.npmjs.org', 'allow', 40],
+      ['api.anthropic.com', 'allow', 3],
+    ]);
+    expect(html).not.toContain('<b>evil</b>');
+    // No egress events, no Egress section.
+    expect(renderDrop(drop, [])).not.toContain('<h3>Egress</h3>');
+  });
 });
 
 const usageState = {

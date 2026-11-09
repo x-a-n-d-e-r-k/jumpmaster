@@ -4,6 +4,7 @@
     { "path": "packages/protocol" },
     { "path": "apps/server" },
     { "path": "apps/trooper" },
-    { "path": "apps/stick" }
+    { "path": "apps/stick" },
+    { "path": "apps/egress" }
   ]
 }

@@ -10,6 +10,37 @@ export type ContainerHandle = {
   kill(): Promise<void>;
 };
 
+/** A drop's internal /28 network under egress and its fixed addresses (see subnets.ts). */
+export type DropNet = {
+  name: string;
+  subnet: string;
+  gateway: string;
+  proxy: string;
+  trooper: string;
+  /** The dead DNS upstream: in the subnet, never assigned. */
+  dns: string;
+  ipRange: string;
+};
+
+/** What the capability probe saw on a real drop network (see `probeIsolation`). */
+export type IsolationFacts = {
+  /** The host-side listener started (without it the other facts prove nothing). */
+  listenerUp: boolean;
+  /** The drop's gateway address is on one of the host's interfaces. */
+  gatewayOnHost: boolean;
+  /** A container with the drop's settings connected to the host listener at the gateway. */
+  gatewayReachable: boolean;
+  /** IPv6 was off in that container (the drop sysctls applied). */
+  ipv6Disabled: boolean;
+};
+
+/** The running egress proxy: its stdout lines (ready, then one per tunnel) and a stop. */
+export type ProxyHandle = {
+  logs(): AsyncIterable<string>;
+  /** Stops it gracefully, so its open tunnels are logged; the logs then end. */
+  stop(): Promise<void>;
+};
+
 export interface ContainerDriver {
   start(o: {
     image: string;
@@ -17,18 +48,27 @@ export interface ContainerDriver {
     payload: string;
     name: string;
     labels: Record<string, string>;
-    /** A private network to join alongside the default one. */
+    /**
+     * Without egress: a private network for services, joined alongside the default one. With
+     * egress (`egress` set): the only network, which has no route out.
+     */
     network?: string;
+    /** Egress on: the trooper joins only this drop network, at `.3`, with the dead DNS. */
+    egress?: DropNet;
     limits?: ContainerLimits;
   }): Promise<ContainerHandle>;
-  /** Starts sidecars on a new internal network and returns its name. */
+  /**
+   * Starts sidecars and returns the network name. Without `net`, on a new internal network; with
+   * `net` (egress), on that drop network with the dead DNS, like the trooper.
+   */
   startServices(
     dropId: string,
     epoch: number,
     services: ServiceSpec[],
     labels: Record<string, string>,
+    net?: DropNet,
   ): Promise<string>;
-  /** Removes a drop's sidecars and network; anything already gone is fine. */
+  /** Removes a drop's sidecars, its proxy and its network; anything already gone is fine. */
   removeServices(network: string, labels: Record<string, string>): Promise<void>;
   /** Removes networks left behind by a crashed run; returns how many. */
   removeNetworksByLabel(key: string, value: string): Promise<number>;
@@ -36,4 +76,34 @@ export interface ContainerDriver {
   listByLabel(key: string, value: string): Promise<string[]>;
   /** Force-removes (kills) one container. */
   remove(id: string): Promise<void>;
+  /**
+   * Creates the drop's internal network on a free /28 of `pool`, retrying with the next subnet
+   * when the engine reports a conflict. No gateway address on the host side.
+   */
+  createDropNetwork(name: string, labels: Record<string, string>, pool: string): Promise<DropNet>;
+  /** Starts the drop's proxy at `net.proxy`, also on the shared `jm-egress-out` network. */
+  startEgressProxy(o: {
+    name: string;
+    image: string;
+    net: DropNet;
+    env: Record<string, string>;
+    labels: Record<string, string>;
+  }): Promise<ProxyHandle>;
+  /** Networks whose label `key` equals `value`, with their labels. */
+  listNetworksByLabel(
+    key: string,
+    value: string,
+  ): Promise<{ name: string; labels: Record<string, string> }[]>;
+  /** Removes one network; gone already is fine. */
+  removeNetwork(name: string): Promise<void>;
+  /** Whether the image is present on this engine. */
+  imageExists(image: string): Promise<boolean>;
+  /** The engine's version (`Server.Version`). */
+  engineVersion(): Promise<string>;
+  /**
+   * Behavioural check of a drop network with `image` (any image with node): a listener on the
+   * host network, and a container on `net` with the trooper's settings trying to reach it at the
+   * gateway. Containers it starts are removed before it returns.
+   */
+  probeIsolation(net: DropNet, image: string): Promise<IsolationFacts>;
 }

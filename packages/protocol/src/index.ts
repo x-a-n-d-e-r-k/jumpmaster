@@ -125,6 +125,16 @@ export const ContainerLimitsSchema = z.object({
 });
 export type ContainerLimits = z.infer<typeof ContainerLimitsSchema>;
 
+/**
+ * Egress control for a drop. Absent when the zone's mode is `off`. The trooper derives its proxy
+ * (the fixed `EGRESS_PROXY_URL`) from its presence; the stick runs the proxy with `allow`.
+ */
+export const EgressPayloadSchema = z.object({
+  mode: z.enum(['monitor', 'enforce']),
+  allow: z.array(z.string()),
+});
+export type EgressPayload = z.infer<typeof EgressPayloadSchema>;
+
 const dropPayloadBase = {
   protocol: z.literal(1),
   dropId: z.string(),
@@ -148,6 +158,7 @@ const dropPayloadBase = {
   verification: z.array(VerificationSpecSchema).optional(),
   /** `false` turns off Claude's commit and PR attribution for the agent. Absent keeps the default. */
   attribution: z.boolean().optional(),
+  egress: EgressPayloadSchema.optional(),
 };
 
 /**
@@ -168,6 +179,7 @@ const crewPayloadBase = {
   credentials: dropPayloadBase.credentials,
   limits: dropPayloadBase.limits,
   attribution: dropPayloadBase.attribution,
+  egress: dropPayloadBase.egress,
 };
 
 export const DropPayloadSchema = z.discriminatedUnion('role', [
@@ -350,7 +362,7 @@ export type GateResult = z.infer<typeof GateResultSchema>;
 
 export const TrooperEventSchema = z.object({
   ts: z.string(),
-  kind: z.enum(['phase', 'agent', 'rate_limit', 'gate', 'log']),
+  kind: z.enum(['phase', 'agent', 'rate_limit', 'gate', 'log', 'egress']),
   data: z.record(z.string(), z.unknown()),
 });
 export type TrooperEvent = z.infer<typeof TrooperEventSchema>;
@@ -378,6 +390,7 @@ export const DropResultSchema = z.object({
   numTurns: z.number().optional(),
 });
 export type DropResult = z.infer<typeof DropResultSchema>;
+export * from './egress.js';
 export { containsSecret, payloadSecrets, redact, redactTokenShapes } from './redact.js';
 export { readSecret } from './secrets.js';
 

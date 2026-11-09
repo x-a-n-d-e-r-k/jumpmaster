@@ -18,6 +18,7 @@ const SHIPPED = [
   'images/server/Dockerfile',
   'images/stick/Dockerfile',
   'images/trooper/Dockerfile',
+  'images/egress/Dockerfile',
 ];
 const dockerfiles = () =>
   walk(ROOT, ['images']).filter((f) => /(^|\/)Dockerfile(\.[^/]*)?$|\.Dockerfile$/.test(f));
@@ -60,6 +61,18 @@ describe('Dockerfiles', () => {
     expect(env).toMatch(/\bJM_STATE_DIR=\/state\b/);
     expect(env).toMatch(/\bTUF_ROOT=\/state\/sigstore\b/);
     expect(env).toMatch(/\bJM_CONTAINER=1\b/);
+  });
+
+  test('the egress proxy image runs as a non-root user with no npm install in its final stage', () => {
+    const final = finalStage(instructions(read('images/egress/Dockerfile')));
+    const user = final.filter((i) => i.op === 'USER').at(-1)?.args ?? '';
+    expect(user).toMatch(/^\d+:\d+$/);
+    expect(user.split(':')[0]).not.toBe('0');
+    expect(final.some((i) => i.op === 'RUN' && /\bnpm\b/.test(i.args))).toBe(false);
+    expect(final.some((i) => i.op === 'RUN' && SETUID_SWEEP.test(i.args))).toBe(true);
+    // Only the stdlib egress module of the protocol package loads: it must not import zod.
+    expect(read('packages/protocol/src/egress.ts')).not.toMatch(/from '(zod|\.\/index\.js)'/);
+    expect(read('apps/egress/package.json')).not.toMatch(/"zod"/);
   });
 
   test('no Dockerfile passes a JM_ secret as ARG or ENV', () => {
@@ -210,6 +223,12 @@ describe('stack presets', () => {
   test('the go preset copies Go from a digest-pinned image; jvm a JDK and a checked Maven', () => {
     const go = read(PRESET_FILES.go);
     expect(go).toMatch(/^FROM golang:[\w.-]+@sha256:[0-9a-f]{64} AS go$/m);
+    // The shipped toolchain only: go never downloads another one (that would need an egress host).
+    const goEnv = finalStage(instructions(go))
+      .filter((i) => i.op === 'ENV')
+      .map((i) => i.args)
+      .join(' ');
+    expect(goEnv).toMatch(/\bGOTOOLCHAIN=local\b/);
     expect(go).toMatch(/COPY --from=go \/usr\/local\/go \/usr\/local\/go/);
     expect(go).toMatch(/ENV [^\n]*PATH=\/usr\/local\/go\/bin:/);
     const jvm = read(PRESET_FILES.jvm);
@@ -287,6 +306,26 @@ describe('images.yml', () => {
     expect(summary).toMatch(/GITHUB_STEP_SUMMARY/);
     expect(runs.some((r) => /images\/trooper\/e2e\/run\.sh/.test(r))).toBe(true);
     expect(runs.some((r) => /images\/smoke\.sh/.test(r))).toBe(true);
+  });
+
+  test('images.yml runs the egress e2e after building the egress image, in the job that records the Engine', () => {
+    const jobs = Object.values(workflow().jobs);
+    const job = jobs.find((j) =>
+      j.steps.some((s) => /images\/trooper\/e2e\/egress\.sh/.test(s.run ?? '')),
+    );
+    expect(job).toBeDefined();
+    const runs = job?.steps.map((s) => s.run ?? '') ?? [];
+    expect(runs.find((r) => /docker version/.test(r))).toMatch(/GITHUB_STEP_SUMMARY/);
+    const build = runs.findIndex((r) =>
+      /-t jumpmaster-egress:dev -f images\/egress\/Dockerfile/.test(r),
+    );
+    const e2e = runs.findIndex((r) => /egress\.sh/.test(r));
+    expect(build).toBeGreaterThanOrEqual(0);
+    expect(build).toBeLessThan(e2e);
+    // The e2e builds the proxy locally (pulling by digest arrives with image verification).
+    expect(read('images/trooper/e2e/egress.sh')).toMatch(
+      /-t jumpmaster-egress:dev -f images\/egress\/Dockerfile/,
+    );
   });
 
   test('images.yml runs the preset e2e in its own job, recording the Engine there too', () => {

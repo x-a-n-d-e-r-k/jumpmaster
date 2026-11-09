@@ -259,9 +259,9 @@ describe('preset images and egress', () => {
         'objects.githubusercontent.com',
       ]),
     );
-    expect(PRESET_EGRESS.go).toEqual(
-      expect.arrayContaining(['proxy.golang.org', 'sum.golang.org', 'storage.googleapis.com']),
-    );
+    // GOTOOLCHAIN=local in the image: no toolchain downloads, so no storage.googleapis.com, a
+    // generic object store where anyone can make a bucket that takes anonymous writes.
+    expect(PRESET_EGRESS.go).toEqual(['proxy.golang.org', 'sum.golang.org']);
     expect(PRESET_EGRESS.jvm).toEqual(
       expect.arrayContaining([
         'repo.maven.apache.org',

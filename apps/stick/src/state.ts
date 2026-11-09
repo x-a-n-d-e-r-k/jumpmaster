@@ -41,16 +41,20 @@ export function saveEnrollment(dir: string, data: Enrollment & { serverUrl: stri
 const DIGEST_REF = /@sha256:[0-9a-f]{64}$/;
 
 /**
- * What this stick advertises. No capability yet: `egress-v1` arrives with egress enforcement and
- * `image-verify-v1` with image verification, each only once the stick really does it. The policy
+ * What this stick advertises. `capabilities` are the ones its startup checks proved (`egress-v1`
+ * when `egressCapability` passes); `image-verify-v1` arrives with image verification. The policy
  * is `JM_IMAGE_POLICY` (unset: `allowlist`); the pins are the digest refs it allows.
  */
-export function stickInfo(env: NodeJS.ProcessEnv, version: string): StickInfo {
+export function stickInfo(
+  env: NodeJS.ProcessEnv,
+  version: string,
+  capabilities: string[] = [],
+): StickInfo {
   const policy = ImagePolicySchema.safeParse(env.JM_IMAGE_POLICY || 'allowlist');
   if (!policy.success)
     throw new Error(`JM_IMAGE_POLICY must be allowlist or signed, not ${env.JM_IMAGE_POLICY}`);
   return {
-    capabilities: [],
+    capabilities: [...capabilities],
     imagePolicy: policy.data,
     version,
     pinnedImages: [...allowedImages(env)].filter((i) => DIGEST_REF.test(i)).sort(),

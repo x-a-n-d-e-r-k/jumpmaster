@@ -17,8 +17,10 @@ export const PRESET_EGRESS: Record<Preset, string[]> = {
   ],
   // uv-managed Pythons are GitHub release assets.
   python: ['pypi.org', 'files.pythonhosted.org', 'objects.githubusercontent.com'],
-  // GOTOOLCHAIN downloads come from storage.googleapis.com.
-  go: ['proxy.golang.org', 'sum.golang.org', 'storage.googleapis.com'],
+  // The image sets GOTOOLCHAIN=local, so no toolchain download (those come from
+  // storage.googleapis.com, a generic object store that takes anonymous writes to any bucket that
+  // allows them: never allow-list it). A repository needing a newer Go fails loudly instead.
+  go: ['proxy.golang.org', 'sum.golang.org'],
   jvm: [
     'repo.maven.apache.org',
     'repo1.maven.org',

@@ -13,7 +13,14 @@ import {
   upsertWorkItem,
 } from './db/repo.js';
 import { zonePass } from './flow/snapshot.js';
-import { buildPayload, crewTemplate, promptVersions, renderFeedback } from './payloads.js';
+import {
+  BASE_EGRESS,
+  buildPayload,
+  crewTemplate,
+  promptVersions,
+  renderFeedback,
+} from './payloads.js';
+import { PRESET_EGRESS } from './presets.js';
 import { crewWorld } from './test/crew.js';
 import { usageCfg } from './test/fixtures.js';
 import { plus, seedQueuedDrop, t0 } from './test/helpers.js';
@@ -468,5 +475,53 @@ describe('crew payloads', () => {
       role: 'diagnose',
       checkout: { number: 3, branch: 'agent/issue-3', headSha: 'h3' },
     });
+  });
+});
+
+describe('egress', () => {
+  test('egress off leaves the payload without egress', () => {
+    for (const egress of [undefined, { mode: 'off', allow: ['example.com'] }]) {
+      const z = { ...zone, ...(egress ? { egress } : {}) } as DropZoneConfig;
+      for (const d of [impl, review, heal, resolve])
+        expect(build(d, z)).not.toHaveProperty('egress');
+    }
+  });
+
+  test('enforce builds the allow list from base, preset and zone entries, sorted and unique', () => {
+    expect(BASE_EGRESS).toEqual(['api.anthropic.com', 'github.com']);
+    const z = {
+      ...zone,
+      preset: 'python',
+      egress: {
+        mode: 'enforce',
+        allow: ['GitHub.com.', '*.internal-mirror.example', 'pypi.org', 'files.example.net'],
+      },
+    } as DropZoneConfig;
+    const expected = [
+      ...new Set([
+        ...BASE_EGRESS,
+        ...PRESET_EGRESS.python,
+        '*.internal-mirror.example',
+        'files.example.net',
+      ]),
+    ].sort();
+    for (const d of [impl, review, heal, resolve]) {
+      const p = build(d, z);
+      expect(p.egress).toEqual({ mode: 'enforce', allow: expected });
+      expect(DropPayloadSchema.parse(p).egress).toEqual(p.egress);
+    }
+    // A zone with its own image and no preset gets the base and its own entries only.
+    const plain = { ...zone, egress: { mode: 'monitor', allow: [] } } as DropZoneConfig;
+    expect(build(impl, plain).egress).toEqual({ mode: 'monitor', allow: [...BASE_EGRESS] });
+  });
+
+  test('a crew drop carries the zone egress too', async () => {
+    const w = await crewWorld();
+    const z = { ...w.zone, egress: { mode: 'enforce', allow: [] } } as DropZoneConfig;
+    const pass = await zonePass(w.forges, z, 'main');
+    const id = await enqueueCrew(w.db, w.forges, z, pass, promptVersions(), usageCfg, t0);
+    const p = buildPayload(w.db, z, getDrop(w.db, id ?? '') as Drop, secrets);
+    expect(p.egress).toEqual({ mode: 'enforce', allow: [...BASE_EGRESS] });
+    expect(DropPayloadSchema.safeParse(p).success).toBe(true);
   });
 });

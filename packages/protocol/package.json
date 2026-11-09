@@ -12,6 +12,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./egress": {
+      "types": "./dist/egress.d.ts",
+      "default": "./dist/egress.js"
     }
   },
   "scripts": {
