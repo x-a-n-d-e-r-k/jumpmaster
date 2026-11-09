@@ -24,6 +24,7 @@ if ! built="$(docker build -q -t jumpmaster-trooper-globalpnpm:dev -f images/tro
   exit 1
 fi
 echo 'global pnpm zone image builds: ok'
+docker build -q -t jumpmaster-trooper-example-pnpm:dev -f images/trooper/examples/Dockerfile.pnpm images/trooper/examples >/dev/null
 
 PY='python3 --version && python3.12 --version && uv --version'
 # A real build with the shipped toolchain only (GOTOOLCHAIN=local, no module downloads).
@@ -59,6 +60,22 @@ out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --e
 expect 'node as agent' "$NODE_OK" "$(tr '\n' ' ' <<<"$out")"
 out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-globalpnpm:dev -c "$GLOBAL" 2>&1 || true)"
 expect 'global pnpm as agent' "$GLOBAL_OK" "$(tr '\n' ' ' <<<"$out")"
+
+# A login shell rebuilds PATH from /etc/profile: each preset's profile.d snippet puts its
+# toolchain back (and the Corepack directory, last).
+# shellcheck disable=SC2016 # expanded by the container's login shell
+LOGIN_PATH=' && echo "path=$PATH"'
+in_login() { # name, pattern, output
+  expect "$1 in a login shell" "$2" "$(tr '\n' ' ' <<<"$3")"
+}
+out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-python:dev -lc "command -v uv && command -v python3.12$LOGIN_PATH" 2>&1 || true)"
+in_login 'python' '^/usr/local/bin/uv /usr/local/bin/python3\.12 path=.*:/opt/corepack/bin *$' "$out"
+out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-go:dev -lc "command -v go && go version$LOGIN_PATH" 2>&1 || true)"
+in_login 'go' '^/usr/local/go/bin/go go version go1\..* path=.*:/opt/corepack/bin *$' "$out"
+out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-jvm:dev -lc "command -v java && command -v mvn && mvn -v$LOGIN_PATH" 2>&1 || true)"
+in_login 'jvm' '^/opt/java/openjdk/bin/java /opt/maven/bin/mvn Apache Maven 3\..* path=.*:/opt/corepack/bin *$' "$out"
+out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-example-pnpm:dev -lc 'command -v pnpm && cd "$(mktemp -d)" && pnpm --version'"$LOGIN_PATH" 2>&1 || true)"
+in_login 'example pnpm' '^/usr/local/bin/pnpm 10\.18\.3 path=.*:/opt/corepack/bin *$' "$out"
 
 # The agent can't write anything in a toolchain the gate runs (a world-writable file there would
 # let uid 10001 change a binary uid 10002 executes). `find -writable` checks as the calling user.

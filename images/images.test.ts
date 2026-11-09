@@ -163,6 +163,47 @@ describe('stack presets', () => {
     expect(sweep).toBeGreaterThan(install);
   });
 
+  test('every toolchain directory a preset puts on PATH is put back for login shells', () => {
+    // /etc/profile resets PATH in a login shell; each preset's /etc/profile.d snippet restores it.
+    for (const file of Object.values(PRESET_FILES)) {
+      const final = finalStage(instructions(read(file)));
+      const dirs = final
+        .filter((i) => i.op === 'ENV')
+        .flatMap((i) => /(?:^|\s)PATH=(\S+)/.exec(i.args)?.[1]?.split(':') ?? [])
+        .filter((d) => d.startsWith('/'));
+      const runs = final
+        .filter((i) => i.op === 'RUN')
+        .map((i) => i.args)
+        .join('\n');
+      const snippet = /printf[^\n]*>\s*\/etc\/profile\.d\/jm-[\w-]+\.sh/.exec(runs)?.[0] ?? '';
+      if (file.includes('python')) expect(dirs, file).toEqual([]);
+      for (const dir of dirs) expect(snippet, `${file} ${dir}`).toContain(`${dir}:`);
+    }
+  });
+
+  test('the pnpm example zone image is pinned and leaves the Corepack shims where they are', () => {
+    const text = read('images/trooper/examples/Dockerfile.pnpm');
+    const runs = instructions(text)
+      .filter((i) => i.op === 'RUN')
+      .map((i) => i.args);
+    const all = runs.join('\n');
+    // A bare `corepack enable` would put shims back into /usr/local/bin; @latest isn't a pin.
+    expect(all).not.toMatch(/\bcorepack (enable|prepare|install)\b/);
+    expect(all).not.toMatch(/@latest\b/);
+    const pack = /npm pack\b[^\n&]*\bpnpm@(\d+\.\d+\.\d+)\b/.exec(all);
+    expect(pack).not.toBeNull();
+    const version = pack?.[1] as string;
+    expect(all).toMatch(
+      new RegExp(`[0-9a-f]{128}\\s+pnpm-${version}\\.tgz"\\s*\\|\\s*sha512sum -c -`),
+    );
+    expect(all).toMatch(new RegExp(`npm i -g [^\\n&]*\\./pnpm-${version}\\.tgz`));
+    expect(runs.at(-1)).toMatch(SETUID_SWEEP);
+    // The preset e2e builds it and runs its pnpm.
+    expect(read('images/trooper/e2e/presets.sh')).toMatch(
+      /-t jumpmaster-trooper-example-pnpm:dev -f images\/trooper\/examples\/Dockerfile\.pnpm/,
+    );
+  });
+
   test('the trooper installs the Claude CLI with npm ci from a lockfile with an integrity hash', () => {
     const text = read('images/trooper/Dockerfile');
     expect(text).not.toMatch(/npm (i|install)\b[^\n]*claude-code/);
@@ -311,6 +352,17 @@ describe('stack presets', () => {
     expect(e2e).toMatch(/'node as gate'/);
     expect(e2e).toMatch(/'global pnpm as agent'/);
     expect(e2e).toMatch(/'global pnpm as gate'/);
+    // Login shells (which reset PATH from /etc/profile) still find every preset's toolchain.
+    expect(e2e).toContain('"$1 in a login shell"');
+    for (const [preset, image] of [
+      ['python', 'python'],
+      ['go', 'go'],
+      ['jvm', 'jvm'],
+      ['example pnpm', 'example-pnpm'],
+    ]) {
+      expect(e2e).toMatch(new RegExp(`jumpmaster-trooper-${image}:dev -lc `));
+      expect(e2e).toContain(`in_login '${preset}' `);
+    }
   });
 });
 

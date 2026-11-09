@@ -95,8 +95,12 @@ before it. With one free slot, crew drops wait until no finishing or implement d
   login shell gets it back from `/etc/profile.d`), and the Node image's bundled Yarn 1 is removed.
   A repository that declares `packageManager` gets that version, fetched and checked on first use.
   A zone image may instead `npm i -g pnpm@<version>` (or yarn): it installs into `/usr/local/bin`
-  without a conflict and wins for the agent and the gates, whatever `packageManager` says (pnpm 9
-  doesn't switch versions). The preset e2e (`images/trooper/e2e/presets.sh`) checks both.
+  without a conflict and wins for the agent and the gates (pnpm 10 still switches to a version
+  `packageManager` pins; pnpm 9 doesn't). The example does this with a checksum-checked pnpm
+  tarball; don't run `corepack enable` in a zone image, which puts shims back into
+  `/usr/local/bin`. A toolchain a zone image adds to `PATH` with `ENV` also needs an
+  `/etc/profile.d` snippet, as the go and jvm presets have, or a login shell loses it. The preset
+  e2e (`images/trooper/e2e/presets.sh`) checks all of this, the example included.
 - **Limits:** the default of 512 counts threads and is too low for many large test suites. A gate
   that hits it says so in its output.
 - **Services:** run on an internal network for one drop. The agent and the gates get
