@@ -4,6 +4,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import type { Config } from '../config.js';
 import { openDb } from '../db/open.js';
 import {
+  getAttempts,
   getDrop,
   getOutbox,
   getPullRequest,
@@ -73,7 +74,14 @@ const gateOk = { name: 'test', exitCode: 0, durationMs: 1500, timedOut: false, o
 let app: FastifyInstance;
 
 function setup(
-  opts: { queued?: boolean; leaseWaitMs?: number; leasePollMs?: number; now?: () => Date } = {},
+  opts: {
+    queued?: boolean;
+    leaseWaitMs?: number;
+    leasePollMs?: number;
+    now?: () => Date;
+    config?: Config;
+    logs?: string[];
+  } = {},
 ) {
   const db = openDb(tmpDbFile());
   upsertDropZone(db, { id: 'main', repo: 'octo/demo', defaultBranch: 'main', configJson: '{}' });
@@ -103,7 +111,8 @@ function setup(
   app = Fastify();
   registerStickRoutes(app, {
     db,
-    config,
+    config: opts.config ?? config,
+    ...(opts.logs ? { log: (line: string) => opts.logs?.push(line) } : {}),
     forgesFor: (zoneId) => {
       forgeZones.push(zoneId);
       return { author: forge, reviewer: forge };
@@ -447,5 +456,236 @@ describe('stick API', () => {
     const { stickToken } = await enroll();
     expect((await lease(stickToken)).statusCode).toBe(500);
     expect(getDrop(db, 'g1')).toMatchObject({ state: 'queued', stickId: null });
+  });
+});
+
+describe('stick capabilities, per zone', () => {
+  // `main` needs nothing new (an M3 zone). `locked` enforces egress; with requireSignedImages it
+  // also needs verified images under the signed policy.
+  const locked = {
+    ...config.dropZones[0]!,
+    id: 'locked',
+    repo: 'octo/locked',
+    egress: { mode: 'enforce' as const },
+  };
+  const twoZones = (extra: Partial<Config> = {}): Config => ({
+    ...config,
+    dropZones: [config.dropZones[0]!, locked],
+    ...extra,
+  });
+
+  function lockedDrop(db: ReturnType<typeof setup>['db'], createdAt = t0) {
+    upsertDropZone(db, {
+      id: 'locked',
+      repo: 'octo/locked',
+      defaultBranch: 'main',
+      configJson: '{}',
+    });
+    const w = upsertWorkItem(db, {
+      dropZoneId: 'locked',
+      issueNumber: 9,
+      title: 'Locked work',
+      body: 'b',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    setWorkItemState(db, w.id, 'in_flight');
+    insertDrop(db, {
+      id: 'x1',
+      dropZoneId: 'locked',
+      workItemId: w.id,
+      role: 'implement',
+      state: 'queued',
+      createdAt: plus(createdAt, -60_000).toISOString(),
+    });
+    return w;
+  }
+
+  const leaseWith = (token: string, body: Record<string, unknown>) =>
+    app.inject({
+      method: 'POST',
+      url: '/api/sticks/lease',
+      headers: bearer(token),
+      payload: { freeSlots: 1, ...body },
+    });
+  const skippedOf = (res: { headers: Record<string, unknown> }) => {
+    const h = res.headers['x-jumpmaster-skipped'];
+    return typeof h === 'string' ? JSON.parse(decodeURIComponent(h)) : undefined;
+  };
+
+  test('every lease stamps last_seen_at, capabilities, policy, version and pins', async () => {
+    const at = plus(t0, 5000);
+    const { db } = setup({ queued: false, now: () => at });
+    const { stickToken } = await enroll();
+    const hash = createHash('sha256').update(stickToken).digest('hex');
+    expect(getStickByTokenHash(db, hash)).toMatchObject({
+      lastSeenAt: null,
+      capabilities: [],
+      imagePolicy: 'allowlist',
+      version: null,
+      pinnedImages: [],
+    });
+    const pin = `ghcr.io/o/svc@sha256:${'d'.repeat(64)}`;
+    await leaseWith(stickToken, {
+      capabilities: ['egress-v1', 'future-cap'],
+      imagePolicy: 'signed',
+      version: '0.4.0',
+      pinnedImages: [pin],
+    });
+    expect(getStickByTokenHash(db, hash)).toMatchObject({
+      lastSeenAt: at.toISOString(),
+      capabilities: ['egress-v1', 'future-cap'],
+      imagePolicy: 'signed',
+      version: '0.4.0',
+      pinnedImages: [pin],
+    });
+    // An M3 body stamps the defaults, so a downgraded stick doesn't keep its old claims.
+    await lease(stickToken);
+    expect(getStickByTokenHash(db, hash)).toMatchObject({
+      capabilities: [],
+      imagePolicy: 'allowlist',
+      version: null,
+      pinnedImages: [],
+    });
+  });
+
+  test('enroll records what the stick advertises; a malformed advertisement is refused', async () => {
+    const { db } = setup({ queued: false });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/sticks/enroll',
+      headers: proto,
+      payload: {
+        joinToken: 'join-me',
+        name: 's',
+        slots: 1,
+        capabilities: ['egress-v1'],
+        version: '0.4.0',
+      },
+    });
+    const { stickToken } = res.json() as { stickToken: string };
+    const hash = createHash('sha256').update(stickToken).digest('hex');
+    expect(getStickByTokenHash(db, hash)).toMatchObject({
+      capabilities: ['egress-v1'],
+      version: '0.4.0',
+    });
+    for (const bad of [
+      { imagePolicy: 'anything' },
+      { capabilities: 'egress-v1' },
+      { capabilities: Array.from({ length: 33 }, (_, i) => `c${i}`) },
+      { version: 'v'.repeat(65) },
+      { pinnedImages: ['x'.repeat(513)] },
+    ])
+      expect((await leaseWith(stickToken, bad)).statusCode, JSON.stringify(bad).slice(0, 40)).toBe(
+        400,
+      );
+  });
+
+  test('a stick without egress-v1 skips an enforce zone drop and leases a drop from an off zone', async () => {
+    const { db } = setup({ config: twoZones() });
+    lockedDrop(db);
+    const { stickToken } = await enroll();
+    const res = await lease(stickToken);
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { dropId: string }).dropId).toBe('d1');
+    expect(getDrop(db, 'x1')).toMatchObject({ state: 'queued', stickId: null, epoch: 0 });
+    // A capable stick takes the enforce zone's drop.
+    const capable = await enroll('stick-2');
+    const res2 = await leaseWith(capable.stickToken, { capabilities: ['egress-v1'] });
+    expect((res2.json() as { dropId: string }).dropId).toBe('x1');
+  });
+
+  test('the body governs, not the stored row: a downgraded stick is excluded on that very poll', async () => {
+    const { db } = setup({ queued: false, config: twoZones() });
+    const enrolled = await app.inject({
+      method: 'POST',
+      url: '/api/sticks/enroll',
+      headers: proto,
+      payload: { joinToken: 'join-me', name: 's', slots: 1, capabilities: ['egress-v1'] },
+    });
+    const { stickToken } = enrolled.json() as { stickToken: string };
+    // The capable advertisement is on record from enroll and from a lease with nothing waiting.
+    expect((await leaseWith(stickToken, { capabilities: ['egress-v1'] })).statusCode).toBe(204);
+    const hash = createHash('sha256').update(stickToken).digest('hex');
+    expect(getStickByTokenHash(db, hash)?.capabilities).toEqual(['egress-v1']);
+    lockedDrop(db);
+    // The same stick now sends a bare M3 body: the enforce zone's drop is not leased to it.
+    const res = await lease(stickToken);
+    expect(res.statusCode).toBe(204);
+    expect(skippedOf(res)).toEqual([{ zoneId: 'locked', missing: ['egress-v1'] }]);
+    expect(getDrop(db, 'x1')).toMatchObject({ state: 'queued', stickId: null, epoch: 0 });
+  });
+
+  test('a stick with allowlist policy skips drops of a zone needing signed images', async () => {
+    const { db } = setup({ queued: false, config: twoZones({ requireSignedImages: true }) });
+    lockedDrop(db);
+    const { stickToken } = await enroll();
+    const caps = ['egress-v1', 'image-verify-v1'];
+    const res = await leaseWith(stickToken, { capabilities: caps, imagePolicy: 'allowlist' });
+    expect(res.statusCode).toBe(204);
+    expect(skippedOf(res)).toEqual([{ zoneId: 'locked', missing: ['image-policy:signed'] }]);
+    expect(getDrop(db, 'x1')?.state).toBe('queued');
+    const ok = await leaseWith(stickToken, { capabilities: caps, imagePolicy: 'signed' });
+    expect((ok.json() as { dropId: string }).dropId).toBe('x1');
+    expect(skippedOf(ok)).toBeUndefined();
+  });
+
+  test('a skipped drop stays queued with no budget consumed', async () => {
+    const { db } = setup({ queued: false, config: twoZones() });
+    const w = lockedDrop(db);
+    const before = getAttempts(db, w.id, 'resume');
+    const { stickToken } = await enroll();
+    for (let i = 0; i < 3; i++) expect((await lease(stickToken)).statusCode).toBe(204);
+    expect(getDrop(db, 'x1')).toMatchObject({
+      state: 'queued',
+      stickId: null,
+      epoch: 0,
+      leaseExpiresAt: null,
+      startedAt: null,
+    });
+    expect(getAttempts(db, w.id, 'resume')).toEqual(before);
+    expect(getUsageState(db).probeDropId).toBeNull();
+    expect(listEvents(db, 'x1')).toEqual([]);
+  });
+
+  test('the lease response names skipped zones and missing capabilities, and the server logs why', async () => {
+    const logs: string[] = [];
+    const signedLocked = { ...locked, requireSignedImages: true };
+    const cfg = { ...config, dropZones: [config.dropZones[0]!, signedLocked] };
+    const { db } = setup({ config: cfg, logs });
+    lockedDrop(db);
+    const { stickId, stickToken } = await enroll();
+    const res = await lease(stickToken);
+    expect(res.statusCode).toBe(200);
+    expect(skippedOf(res)).toEqual([
+      { zoneId: 'locked', missing: ['egress-v1', 'image-verify-v1', 'image-policy:signed'] },
+    ]);
+    // Another poll within the minute logs nothing new.
+    await lease(stickToken);
+    const lines = logs.filter((l) => l.includes('locked'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain(stickId);
+    expect(lines[0]).toMatch(/egress-v1, image-verify-v1, image-policy:signed/);
+    // A poll that leases nothing (204) still names the zone while its drop waits.
+    const waiting = await lease(stickToken);
+    expect(waiting.statusCode).toBe(204);
+    expect(skippedOf(waiting)).toEqual([
+      { zoneId: 'locked', missing: ['egress-v1', 'image-verify-v1', 'image-policy:signed'] },
+    ]);
+    // Once nothing waits in the incapable zone, nothing is named.
+    db.prepare("UPDATE drops SET state = 'cancelled' WHERE id = 'x1'").run();
+    expect(skippedOf(await lease(stickToken))).toBeUndefined();
+  });
+
+  test('with no zone needing a capability, an M3 stick still leases', async () => {
+    // The reference zone: image set, egress and signed images left at their defaults.
+    setup({ config: { ...config, requireSignedImages: false } });
+    const { stickToken } = await enroll();
+    const res = await lease(stickToken); // body { freeSlots } only, as an M3 stick sends
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { dropId: string }).dropId).toBe('d1');
+    expect(skippedOf(res)).toBeUndefined();
   });
 });

@@ -1,7 +1,14 @@
-import { StickClient } from './client.js';
+import { leaseLogger, StickClient } from './client.js';
 import { DockerDriver } from './docker.js';
 import { reapOrphans, runDrop } from './runner.js';
-import { joinToken, loadEnrollment, saveEnrollment, stateDir } from './state.js';
+import {
+  joinToken,
+  loadEnrollment,
+  saveEnrollment,
+  stateDir,
+  stickInfo,
+  stickVersion,
+} from './state.js';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -19,7 +26,12 @@ async function main() {
   const saved = loadEnrollment(dir, serverUrl);
   const token = saved?.stickToken;
   let stickId = saved?.stickId;
-  const client = new StickClient(serverUrl, token);
+  const info = stickInfo(process.env, stickVersion());
+  console.log(
+    `stick ${info.version}: image policy ${info.imagePolicy}, capabilities ${info.capabilities.join(', ') || 'none'}`,
+  );
+  const client = new StickClient(serverUrl, token, { info });
+  const leaseLog = leaseLogger((line) => console.error(line));
   if (!token || !stickId) {
     const name = process.env.JM_STICK_NAME ?? 'stick';
     const enrolled = await client.enroll(joinToken(process.env), name, slots);
@@ -39,7 +51,8 @@ async function main() {
       continue;
     }
     try {
-      const drop = await client.lease(slots - running);
+      const { drop, skipped } = await client.lease(slots - running);
+      leaseLog.skipped(skipped);
       if (!drop) continue;
       running++;
       console.log(`drop ${drop.dropId} (epoch ${drop.epoch}) leased`);
@@ -59,7 +72,7 @@ async function main() {
           running--;
         });
     } catch (e) {
-      console.error(`lease error: ${e instanceof Error ? e.message : e}`);
+      leaseLog.error(e instanceof Error ? e.message : String(e));
       await sleep(5000);
     }
   }

@@ -51,6 +51,19 @@ export interface HomeState {
   briefings?: Briefing[];
   /** One line per zone about its crew. */
   crew?: CrewLine[];
+  /** Every enrolled stick, and the zones each can't run. */
+  sticks?: StickLine[];
+}
+
+export interface StickLine {
+  id: string;
+  name: string;
+  version: string | null;
+  lastSeenAt: string | null;
+  capabilities: string[];
+  imagePolicy: string;
+  /** Zones whose requirements this stick lacks, and what it lacks for each. */
+  cannotRun: { zoneId: string; missing: string[] }[];
 }
 
 export interface CrewLine {
@@ -154,6 +167,26 @@ function crewSection(lines: CrewLine[] | undefined): string {
     )
     .join('');
   return `<h2>Crew</h2><table><tr><th>Zone</th><th>Crew</th><th>Last cycle</th><th>Next due</th><th>Fable</th><th></th></tr>${rows}</table>`;
+}
+
+function sticksSection(lines: StickLine[] | undefined): string {
+  if (!lines) return '';
+  if (lines.length === 0) return '<h2>Sticks</h2><p>No stick has enrolled.</p>';
+  const rows = lines
+    .map((s) => {
+      const runs =
+        s.cannotRun.length === 0
+          ? 'all zones'
+          : s.cannotRun
+              .map(
+                (c) =>
+                  `cannot run ${escapeHtml(c.zoneId)}: lacks ${escapeHtml(c.missing.join(', '))}`,
+              )
+              .join('<br>');
+      return `<tr><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.version ?? '-')}</td><td>${escapeHtml(s.lastSeenAt ?? 'never')}</td><td>${escapeHtml(s.capabilities.join(', ') || '-')}</td><td>${escapeHtml(s.imagePolicy)}</td><td>${runs}</td></tr>`;
+    })
+    .join('');
+  return `<h2>Sticks</h2><table><tr><th>Stick</th><th>Version</th><th>Last seen</th><th>Capabilities</th><th>Image policy</th><th>Zones</th></tr>${rows}</table>`;
 }
 
 /** One shared handler for every rule form: the operator token comes from a password field. */
@@ -368,6 +401,7 @@ export function renderHome(state: HomeState): string {
       (state.briefings ? waitingOnYou(state.briefings) : '') +
       usageSection(state.usage) +
       crewSection(state.crew) +
+      sticksSection(state.sticks) +
       `<h2>Drop zones</h2><table><tr><th>Id</th><th>Repo</th><th>Label</th><th>Model</th><th>Mode</th></tr>${zones}</table>` +
       `<h2>Work items</h2><table><tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>${items}</table>` +
       `<h2>Drops</h2><table><tr><th>Drop</th><th>Issue</th><th>Role</th><th>State</th><th>Elapsed</th><th>Gates</th></tr>${drops}</table>` +

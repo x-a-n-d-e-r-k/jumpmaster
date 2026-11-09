@@ -447,6 +447,17 @@ ALTER TABLE rulings ADD COLUMN choice_label TEXT;
 ALTER TABLE rulings ADD COLUMN choice_effect TEXT;
 `;
 
+/**
+ * v15: what each stick advertises, stamped (with last_seen_at) on every lease. Defaulted columns
+ * only, so an M3 binary still runs against v15: its stick insert names none of them.
+ */
+const V15_SQL = `
+ALTER TABLE sticks ADD COLUMN capabilities_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE sticks ADD COLUMN image_policy TEXT NOT NULL DEFAULT 'allowlist';
+ALTER TABLE sticks ADD COLUMN version TEXT;
+ALTER TABLE sticks ADD COLUMN pinned_json TEXT NOT NULL DEFAULT '[]';
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -470,6 +481,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 12, sql: V12_SQL, after: afterV12 },
   { version: 13, sql: V13_SQL },
   { version: 14, sql: V14_SQL, foreignKeysOff: true },
+  { version: 15, sql: V15_SQL },
 ];
 
 /**

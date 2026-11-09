@@ -1,7 +1,23 @@
 import { beforeEach, describe, expect, test } from 'vitest';
 import type { Db } from './db/open.js';
-import { getDrop, insertDrop, updateDrop } from './db/repo.js';
-import { expireLeases, heartbeat, leaseExpirer, leaseNextDrop } from './leases.js';
+import {
+  getDrop,
+  getUsageState,
+  insertDrop,
+  setUsageState,
+  updateDrop,
+  upsertDropZone,
+  upsertWorkItem,
+} from './db/repo.js';
+import {
+  expireLeases,
+  heartbeat,
+  leaseExpirer,
+  leaseNextDrop,
+  missingFor,
+  zoneRequirements,
+} from './leases.js';
+import { makeZone } from './test/fixtures.js';
 import { plus, seedQueuedDrop, t0, workItem } from './test/helpers.js';
 
 let db: Db;
@@ -223,5 +239,121 @@ describe('crew drops', () => {
     expect(getDrop(db, 'c1')?.state).toBe('lost');
     expect(expireLeases(db, plus(t0, 400_000))).toBe(0);
     expect(workItem(db, 1)).toEqual(before);
+  });
+});
+
+describe('stick capabilities, per zone', () => {
+  const m3 = { capabilities: [], imagePolicy: 'allowlist' as const };
+
+  test('zoneRequirements: egress-v1 unless egress is off; image-verify-v1 and signed when required', () => {
+    const req = (zone: Parameters<typeof zoneRequirements>[0], signed?: boolean) => {
+      const r = zoneRequirements(zone, signed === undefined ? {} : { requireSignedImages: signed });
+      return { caps: [...r.caps].sort(), signed: r.signed };
+    };
+    expect(req(makeZone())).toEqual({ caps: [], signed: false });
+    expect(req(makeZone({ egress: { mode: 'off' } }))).toEqual({ caps: [], signed: false });
+    expect(req(makeZone({ egress: { mode: 'monitor' } }))).toEqual({
+      caps: ['egress-v1'],
+      signed: false,
+    });
+    expect(req(makeZone({ egress: { mode: 'enforce' } }), true)).toEqual({
+      caps: ['egress-v1', 'image-verify-v1'],
+      signed: true,
+    });
+    expect(req(makeZone(), false)).toEqual({ caps: [], signed: false });
+    // A zone can only strengthen the install-wide setting, never weaken it.
+    expect(req(makeZone({ requireSignedImages: true }), false)).toEqual({
+      caps: ['image-verify-v1'],
+      signed: true,
+    });
+    expect(req(makeZone({ requireSignedImages: false }), true)).toEqual({
+      caps: ['image-verify-v1'],
+      signed: true,
+    });
+  });
+
+  test('missingFor names each missing capability and a policy that is not signed', () => {
+    const need = zoneRequirements(makeZone({ egress: { mode: 'enforce' } }), {
+      requireSignedImages: true,
+    });
+    expect(missingFor(m3, need)).toEqual(['egress-v1', 'image-verify-v1', 'image-policy:signed']);
+    expect(
+      missingFor({ capabilities: ['image-verify-v1', 'egress-v1'], imagePolicy: 'signed' }, need),
+    ).toEqual([]);
+    expect(
+      missingFor(
+        { capabilities: ['egress-v1', 'image-verify-v1'], imagePolicy: 'allowlist' },
+        need,
+      ),
+    ).toEqual(['image-policy:signed']);
+    // An unknown capability string never satisfies a requirement it doesn't name.
+    expect(
+      missingFor(
+        { capabilities: ['egress-v2'], imagePolicy: 'allowlist' },
+        zoneRequirements(makeZone({ egress: { mode: 'monitor' } }), {}),
+      ),
+    ).toEqual(['egress-v1']);
+    expect(missingFor(m3, zoneRequirements(makeZone(), {}))).toEqual([]);
+  });
+
+  function secondZone() {
+    upsertDropZone(db, {
+      id: 'locked',
+      repo: 'octo/locked',
+      defaultBranch: 'main',
+      configJson: '{}',
+    });
+    const w = upsertWorkItem(db, {
+      dropZoneId: 'locked',
+      issueNumber: 9,
+      title: 't',
+      body: 'b',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    // Older than d1, so it would lease first if it were not excluded.
+    insertDrop(db, {
+      id: 'x1',
+      dropZoneId: 'locked',
+      workItemId: w.id,
+      role: 'implement',
+      state: 'queued',
+      createdAt: plus(t0, -60_000).toISOString(),
+    });
+  }
+
+  test('an excluded zone is skipped and its drop stays queued, untouched', () => {
+    secondZone();
+    expect(leaseNextDrop(db, 's1', t0, 'open', ['locked'])).toEqual({ dropId: 'd1', epoch: 1 });
+    expect(leaseNextDrop(db, 's1', t0, 'open', ['locked'])).toBeNull();
+    expect(getDrop(db, 'x1')).toMatchObject({
+      state: 'queued',
+      stickId: null,
+      epoch: 0,
+      leaseExpiresAt: null,
+      startedAt: null,
+    });
+    // Without the exclusion the older drop leases first.
+    expect(leaseNextDrop(db, 's1', t0, 'open')?.dropId).toBe('x1');
+  });
+
+  test('a probe never picks a drop from an excluded zone', () => {
+    secondZone();
+    db.prepare("UPDATE drops SET state = 'succeeded' WHERE id = 'd1'").run();
+    expect(leaseNextDrop(db, 's1', t0, 'probe', ['locked'])).toBeNull();
+    expect(getUsageState(db).probeDropId).toBeNull();
+    expect(getDrop(db, 'x1')?.state).toBe('queued');
+    setUsageState(db, { probeDropId: null }, t0);
+    expect(leaseNextDrop(db, 's1', t0, 'probe')?.dropId).toBe('x1');
+  });
+
+  test('a credits resume never picks a drop from an excluded zone', () => {
+    secondZone();
+    const bound = getDrop(db, 'x1')?.workItemId ?? null;
+    setUsageState(db, { overageResumeWorkItemId: bound }, t0);
+    expect(leaseNextDrop(db, 's1', t0, 'credits_resume', ['locked'])).toBeNull();
+    expect(leaseNextDrop(db, 's1', t0, 'credits_resume')?.dropId).toBe('x1');
   });
 });

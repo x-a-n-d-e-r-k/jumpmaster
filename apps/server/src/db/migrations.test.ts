@@ -412,7 +412,7 @@ test('v14 widens briefings.source to mcp, keeps every briefing and ruling, and a
   raw.close();
 
   const db = openDb(f);
-  expect(maxVersion(db)).toBe(14);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(db.pragma('foreign_key_check')).toEqual([]);
   expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
   const rows = db
@@ -481,4 +481,66 @@ test('v14 widens briefings.source to mcp, keeps every briefing and ruling, and a
   expect(
     db.prepare('SELECT choice_label AS label, choice_effect AS effect FROM rulings').all(),
   ).toEqual([{ label: null, effect: null }]);
+});
+
+test('v15 adds the stick columns, keeping every stick row', () => {
+  const f = tmpDbFile();
+  const raw = new Database(f);
+  raw.exec('CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+  for (const m of MIGRATIONS.filter((m) => m.version <= 14)) {
+    raw.exec(m.sql);
+    m.after?.(raw as unknown as Db);
+    raw.prepare('INSERT INTO schema_version VALUES (?, ?)').run(m.version, 'x');
+  }
+  raw.exec(
+    `INSERT INTO sticks (id, name, token_hash, slots, last_seen_at, created_at)
+       VALUES ('s1', 'one', 'h1', 2, NULL, 'a'), ('s2', 'two', 'h2', 1, 'b', 'c');`,
+  );
+  raw.close();
+
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.pragma('foreign_key_check')).toEqual([]);
+  const rows = db
+    .prepare(
+      `SELECT id, name, token_hash AS hash, slots, last_seen_at AS seen, created_at AS created,
+         capabilities_json AS caps, image_policy AS policy, version, pinned_json AS pinned
+       FROM sticks ORDER BY id`,
+    )
+    .all();
+  expect(rows).toEqual([
+    {
+      id: 's1',
+      name: 'one',
+      hash: 'h1',
+      slots: 2,
+      seen: null,
+      created: 'a',
+      caps: '[]',
+      policy: 'allowlist',
+      version: null,
+      pinned: '[]',
+    },
+    {
+      id: 's2',
+      name: 'two',
+      hash: 'h2',
+      slots: 1,
+      seen: 'b',
+      created: 'c',
+      caps: '[]',
+      policy: 'allowlist',
+      version: null,
+      pinned: '[]',
+    },
+  ]);
+  // An M3 binary's insert (no new columns) still works against v15.
+  db.prepare(
+    "INSERT INTO sticks (id, name, token_hash, slots, created_at) VALUES ('s3', 'm3', 'h3', 1, 'd')",
+  ).run();
+  expect(
+    db
+      .prepare("SELECT image_policy AS p, capabilities_json AS c FROM sticks WHERE id = 's3'")
+      .get(),
+  ).toEqual({ p: 'allowlist', c: '[]' });
 });

@@ -95,6 +95,167 @@ describe('Dockerfiles', () => {
   });
 });
 
+const PRESET_FILES = {
+  python: 'images/trooper/presets/python/Dockerfile',
+  go: 'images/trooper/presets/go/Dockerfile',
+  jvm: 'images/trooper/presets/jvm/Dockerfile',
+} as const;
+const SETUID_SWEEP = /find \/ -xdev -type f -perm \/6000 -exec chmod a-s \{\} \+/;
+const IS_DIGEST_REF = /@sha256:[0-9a-f]{64}$/;
+
+describe('stack presets', () => {
+  test('preset Dockerfiles take a digest ARG BASE, keep the setuid sweep and set no USER', () => {
+    for (const file of Object.values(PRESET_FILES)) {
+      expect(existsSync(join(ROOT, file)), file).toBe(true);
+      const all = instructions(read(file));
+      const first = all.findIndex((i) => i.op === 'FROM');
+      const base = all.slice(0, first).find((i) => i.op === 'ARG' && i.args.startsWith('BASE='));
+      expect(base?.args.slice(5), file).toMatch(IS_DIGEST_REF);
+      const final = finalStage(all);
+      expect(final[0]?.args, file).toMatch(/^\$\{?BASE\}?$/);
+      expect(
+        all.filter((i) => i.op === 'USER'),
+        file,
+      ).toEqual([]);
+      // The sweep is the final stage's last RUN, so nothing added after it keeps a setuid bit.
+      const runs = final.filter((i) => i.op === 'RUN');
+      expect(runs.at(-1)?.args, file).toMatch(SETUID_SWEEP);
+      // Every toolchain directory the preset adds loses group and world write, so the agent
+      // (uid 10001) can't change a binary the gate (uid 10002) runs.
+      const added = final
+        .filter((i) => i.op === 'COPY' && i.args.startsWith('--from='))
+        .map((i) => i.args.split(/\s+/).at(-1) as string)
+        .filter((dst) => dst !== '/usr/local/bin/');
+      const writeSweep = runs.map((r) => r.args).join('\n');
+      for (const dir of [...added, ...(file.includes('python') ? ['/opt/uv'] : [])]) {
+        const sweep = writeSweep
+          .split(/&&|\n/)
+          .find((cmd) => /chmod -R \S*go-w/.test(cmd) && cmd.split(/\s+/).includes(dir));
+        expect(sweep, `${file} ${dir}`).toBeDefined();
+      }
+      // Image pins live on named FROM stages (which Dependabot bumps), never inline in COPY.
+      for (const c of final.filter((i) => i.op === 'COPY'))
+        expect(c.args, file).not.toMatch(/--from=\S*@sha256:/);
+      // A build from the wrong base (the default is the plain Node image) fails loudly.
+      expect(
+        final.some((i) => i.op === 'RUN' && i.args.includes('test -f /opt/trooper/main.js')),
+        file,
+      ).toBe(true);
+    }
+    // The base trooper (the node preset) keeps its own sweep after the Claude CLI install.
+    const trooper = finalStage(instructions(read('images/trooper/Dockerfile')));
+    const sweep = trooper.findIndex((i) => i.op === 'RUN' && SETUID_SWEEP.test(i.args));
+    const install = trooper.findIndex((i) => i.op === 'RUN' && /\bnpm ci\b/.test(i.args));
+    expect(install).toBeGreaterThanOrEqual(0);
+    expect(sweep).toBeGreaterThan(install);
+  });
+
+  test('the trooper installs the Claude CLI with npm ci from a lockfile with an integrity hash', () => {
+    const text = read('images/trooper/Dockerfile');
+    expect(text).not.toMatch(/npm (i|install)\b[^\n]*claude-code/);
+    expect(text).toMatch(
+      /COPY images\/trooper\/claude\/package\.json images\/trooper\/claude\/package-lock\.json /,
+    );
+    expect(text).toMatch(/\bnpm ci\b/);
+    const manifest = JSON.parse(read('images/trooper/claude/package.json')) as {
+      dependencies: Record<string, string>;
+    };
+    const version = manifest.dependencies['@anthropic-ai/claude-code'];
+    expect(version).toMatch(/^\d+\.\d+\.\d+$/);
+    const lock = JSON.parse(read('images/trooper/claude/package-lock.json')) as {
+      lockfileVersion: number;
+      packages: Record<string, { version?: string; integrity?: string; resolved?: string }>;
+    };
+    expect(lock.lockfileVersion).toBe(3);
+    const cli = lock.packages['node_modules/@anthropic-ai/claude-code'];
+    expect(cli?.version).toBe(version);
+    expect(cli?.integrity).toMatch(/^sha512-[A-Za-z0-9+/]+=*$/);
+    // Every locked package (the platform binaries too) carries its own integrity hash.
+    for (const [name, p] of Object.entries(lock.packages)) {
+      if (name === '') continue;
+      expect(p.integrity, name).toMatch(/^sha512-/);
+      expect(p.resolved, name).toMatch(/^https:\/\/registry\.npmjs\.org\//);
+    }
+    expect(Object.keys(lock.packages)).toEqual(
+      expect.arrayContaining([
+        'node_modules/@anthropic-ai/claude-code-linux-x64',
+        'node_modules/@anthropic-ai/claude-code-linux-arm64',
+      ]),
+    );
+  });
+
+  test('the python preset ships 3.11 and a uv-installed 3.12 every user can find', () => {
+    const final = finalStage(instructions(read(PRESET_FILES.python)));
+    const env = final
+      .filter((i) => i.op === 'ENV')
+      .map((i) => i.args)
+      .join(' ');
+    expect(env).toMatch(/\bUV_PYTHON_DOWNLOADS=automatic\b/);
+    // The shipped 3.12 goes to a world-readable root-owned directory, but the variable is not
+    // left set: a run-time download into that shared directory fails (or, if it were writable,
+    // would let the agent swap the gate's interpreter). Each user's uv downloads into its home.
+    expect(env).not.toMatch(/UV_PYTHON_INSTALL_DIR/);
+    const runs = final.filter((i) => i.op === 'RUN').map((i) => i.args);
+    expect(runs.join('\n')).toMatch(/python3-venv/);
+    expect(runs.join('\n')).toMatch(
+      /UV_PYTHON_INSTALL_DIR=\/opt\/uv\/python uv python install --no-bin 3\.12\.\d+/,
+    );
+    expect(runs.join('\n')).toMatch(/ln -s[^\n]*\/usr\/local\/bin\/python3\.12/);
+    // uv is copied from a stage that checked its checksum.
+    const text = read(PRESET_FILES.python);
+    expect(text).toMatch(/uv-\$\{?\w+\}?-unknown-linux-gnu\.tar\.gz/);
+    expect(text).toMatch(/sha256sum -c/);
+  });
+
+  test('the go preset copies Go from a digest-pinned image; jvm a JDK and a checked Maven', () => {
+    const go = read(PRESET_FILES.go);
+    expect(go).toMatch(/^FROM golang:[\w.-]+@sha256:[0-9a-f]{64} AS go$/m);
+    expect(go).toMatch(/COPY --from=go \/usr\/local\/go \/usr\/local\/go/);
+    expect(go).toMatch(/ENV [^\n]*PATH=\/usr\/local\/go\/bin:/);
+    const jvm = read(PRESET_FILES.jvm);
+    expect(jvm).toMatch(/^FROM eclipse-temurin:21[\w.-]*@sha256:[0-9a-f]{64} AS jdk$/m);
+    expect(jvm).toMatch(/COPY --from=jdk \/opt\/java\/openjdk \/opt\/java\/openjdk/);
+    expect(jvm).toMatch(/apache-maven-[\d.]+-bin\.tar\.gz/);
+    expect(jvm).toMatch(/sha512sum -c/);
+    expect(jvm).toMatch(/JAVA_HOME=\/opt\/java\/openjdk/);
+  });
+
+  test('the image e2e builds every preset and runs its toolchain as the agent and gate users', () => {
+    const e2e = read('images/trooper/e2e/presets.sh');
+    for (const [preset, file] of Object.entries(PRESET_FILES))
+      expect(e2e, preset).toMatch(
+        new RegExp(`-t jumpmaster-trooper-${preset}:dev -f ${file.replace(/\//g, '\\/')}`),
+      );
+    expect(e2e).toMatch(/--build-arg BASE=jumpmaster-trooper:dev/);
+    for (const probe of [
+      'python3 --version && python3.12 --version && uv --version',
+      'uv python find 3.12',
+      'python3.12 -V',
+      'go version',
+      'java -version && mvn -v',
+    ])
+      expect(e2e).toContain(probe);
+    // The agent can't write any toolchain directory the gate runs from.
+    for (const dir of ['/opt/uv', '/usr/local/go', '/opt/java/openjdk', '/opt/maven'])
+      expect(e2e).toContain(dir);
+    expect(e2e).toMatch(/-writable/);
+    // The agent user runs the probes directly, and the gate user runs them as a drop's gate.
+    expect(e2e).toMatch(/--user 10001:10001/);
+    expect(e2e).toMatch(/gates: \[\{ name: "toolchain", run/);
+  });
+});
+
+test('dependabot watches the preset Dockerfiles and the Claude CLI lockfile', () => {
+  type Update = { 'package-ecosystem': string; directory?: string; directories?: string[] };
+  const updates = (load(read('.github/dependabot.yml')) as { updates: Update[] }).updates;
+  const dirs = (eco: string) =>
+    updates
+      .filter((u) => u['package-ecosystem'] === eco)
+      .flatMap((u) => [...(u.directories ?? []), ...(u.directory ? [u.directory] : [])]);
+  expect(dirs('docker')).toContain('/images/trooper/presets/*');
+  expect(dirs('npm')).toContain('/images/trooper/claude');
+});
+
 type Workflow = {
   on: Record<string, unknown>;
   permissions?: Record<string, string>;
@@ -126,6 +287,16 @@ describe('images.yml', () => {
     expect(summary).toMatch(/GITHUB_STEP_SUMMARY/);
     expect(runs.some((r) => /images\/trooper\/e2e\/run\.sh/.test(r))).toBe(true);
     expect(runs.some((r) => /images\/smoke\.sh/.test(r))).toBe(true);
+  });
+
+  test('images.yml runs the preset e2e in its own job, recording the Engine there too', () => {
+    const jobs = Object.values(workflow().jobs);
+    const job = jobs.find((j) =>
+      j.steps.some((s) => /images\/trooper\/e2e\/presets\.sh/.test(s.run ?? '')),
+    );
+    expect(job).toBeDefined();
+    const runs = job?.steps.map((s) => s.run ?? '') ?? [];
+    expect(runs.find((r) => /docker version/.test(r))).toMatch(/GITHUB_STEP_SUMMARY/);
   });
 
   test('builds each shipped image by name and never pushes or logs in', () => {

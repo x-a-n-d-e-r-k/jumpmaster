@@ -477,7 +477,8 @@ function dockerCommands(line: string, isDocker: (word: string) => boolean): Dock
  * Image references and downloads in a shell script (or a workflow `run:` block):
  * - the image argument of docker run/create/pull, in every form `dockerCommands` knows;
  * - every JSON `"image":"…"` field;
- * - `--build-arg BASE=…` and `--build-arg *_IMAGE=…` values of docker build;
+ * - `--build-arg BASE=…` and `--build-arg *_IMAGE=…` values of docker build, which must be digests
+ *   or a tag this script built on an earlier line (from its own scanned Dockerfile);
  * - an inline Dockerfile (`docker build … - <<EOF` or `-f-`), scanned as a Dockerfile;
  * - curl and wget, which need a checksum check nearby.
  * An image must be an @sha256 digest, an image the script builds itself (`docker build -t`), or one
@@ -520,10 +521,13 @@ export function scanShell(
     const r = word.startsWith('$') ? resolve(word) : { value: word };
     return 'value' in r && (r.value === 'docker' || r.value.endsWith('/docker'));
   };
+  // Tags built on lines already passed: a BASE build-arg may name only these.
+  const builtBefore = new Set<string>();
   const check = (line: number, what: string, ref: string, localOk = true) => {
     const r = resolve(ref);
     if ('error' in r) return findings.push({ file, line, message: `${what} ${ref}: ${r.error}` });
-    if (!IS_DIGEST.test(r.value) && !(localOk && allowed.has(r.value)))
+    const ok = localOk ? allowed.has(r.value) : builtBefore.has(r.value);
+    if (!IS_DIGEST.test(r.value) && !ok)
       findings.push({
         file,
         line,
@@ -566,6 +570,11 @@ export function scanShell(
             findings.push({ ...f, line: f.line + end });
           skipThrough = bodyEnd + 1;
         }
+        c.args.forEach((t, i) => {
+          if ((t === '-t' || t === '--tag') && c.args[i + 1])
+            builtBefore.add(c.args[i + 1] as string);
+          else if (t.startsWith('--tag=')) builtBefore.add(t.slice(6));
+        });
         continue;
       }
       const bools = BOOLEAN_FLAGS[c.sub] as Set<string>;
@@ -1086,6 +1095,22 @@ describe('pin scan: re-review', () => {
       'docker buildx build --build-arg "BASE=$B" -t e .',
     ].join('\n');
     expect(lines(scanShell(S, text))).toEqual([1, 2, 6]);
+  });
+
+  test('shell scripts: a BASE build-arg may name an image the script itself builds earlier', () => {
+    // Preset images build FROM the trooper image the same script just built from its own
+    // (scanned, digest-pinned) Dockerfile. A listed local image the script doesn't build, an image
+    // built only later, and a remote tag all still fail.
+    const local = { [S]: { images: ['listed:dev'], reason: 'test' } };
+    const text = [
+      'docker build -t base:dev -f images/trooper/Dockerfile .',
+      'docker build --build-arg BASE=base:dev -t p1 -f images/trooper/presets/go/Dockerfile .',
+      'docker build --build-arg BASE=listed:dev -t p2 .',
+      'docker build --build-arg BASE=later:dev -t p3 .',
+      'docker build -t later:dev .',
+      'docker build --build-arg BASE=node:24 -t p4 .',
+    ].join('\n');
+    expect(lines(scanShell(S, text, local))).toEqual([3, 4, 6]);
   });
 
   test('shell scripts: other docker command forms are recognised', () => {

@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import {
   ContainerLimitsSchema,
   GateSpecSchema,
+  PresetSchema,
   pathMatches,
   type Role,
   RoleSchema,
@@ -10,6 +11,7 @@ import {
 } from '@jumpmaster/protocol';
 import { z } from 'zod';
 import { ZONE_MODES } from './db/repo.js';
+import { IMAGE_LOCK_PATH, loadImageLock, resolveImage } from './presets.js';
 import { readSecret } from './secrets.js';
 
 export const DEFAULT_PROTECTED_PATHS = [
@@ -47,6 +49,7 @@ export const DEFAULT_PROTECTED_PATHS = [
 ];
 
 export const DEFAULT_PIDS_LIMIT = 512;
+export const EGRESS_MODES = ['off', 'monitor', 'enforce'] as const;
 
 const CREW_DEFAULTS = {
   enabled: false,
@@ -124,7 +127,20 @@ const DropZoneObject = z.object({
   gateSecrets: z.array(z.string()).default([]),
   /** The starting mode, used only until an operator stores one. */
   mode: z.enum(ZONE_MODES).default('active'),
-  image: z.string().min(1),
+  /** The trooper image. Optional when `preset` is set: the preset's image is used. */
+  image: z.string().min(1).optional(),
+  /** A prebuilt stack image (see presets.ts). Gates stay explicit config either way. */
+  preset: PresetSchema.optional(),
+  /**
+   * Egress control. Absent or `off` (the default) keeps M3 behaviour. Any other mode needs a stick
+   * that advertises `egress-v1`: until one does, the zone's drops stay queued.
+   */
+  egress: z.object({ mode: z.enum(EGRESS_MODES).default('off') }).optional(),
+  /**
+   * `true` requires signed images for this zone even when the install doesn't. A zone can't
+   * weaken the install-wide setting: `false` under a top-level `true` is a config error.
+   */
+  requireSignedImages: z.boolean().optional(),
   model: z.string().default('claude-opus-5-5'),
   maxTurns: z.number().int().positive().default(200),
   models: z.partialRecord(RoleSchema, z.string()).default({}),
@@ -176,6 +192,8 @@ const DropZoneObject = z.object({
 });
 
 const DropZoneSchema = DropZoneObject.superRefine((zone, ctx) => {
+  if (!zone.image && !zone.preset)
+    ctx.addIssue({ code: 'custom', path: ['image'], message: 'a zone needs image or preset' });
   // Fable is chosen per role by the declared plan, never as a zone's default model.
   if (/fable/i.test(zone.model)) {
     ctx.addIssue({
@@ -237,6 +255,11 @@ const FileSchema = z.object({
       fableWeeklyDropCap: z.number().int().nonnegative().default(5),
     })
     .default({ plan: 'pro', fableWeeklyDropCap: 5 }),
+  /**
+   * Run trooper images only from a stick that verifies signatures (`image-verify-v1`) under the
+   * `signed` policy. Off by default; the generated install turns it on.
+   */
+  requireSignedImages: z.boolean().default(false),
   /** The zone-scoped MCP server at `/mcp` (off by default; read at start, so a flip needs a restart). */
   mcp: z
     .object({
@@ -252,7 +275,8 @@ const FileSchema = z.object({
     .default(MCP_DEFAULTS),
 });
 
-export type DropZoneConfig = z.infer<typeof DropZoneSchema>;
+/** A loaded zone: `image` is always resolved (from the preset when it wasn't given). */
+export type DropZoneConfig = Omit<z.infer<typeof DropZoneSchema>, 'image'> & { image: string };
 export type Budgets = DropZoneConfig['budgets'];
 
 export interface Config {
@@ -269,6 +293,8 @@ export interface Config {
   claude: ClaudeConfig;
   /** Absent means the defaults (`MCP_DEFAULTS`): off. */
   mcp?: Partial<McpConfig>;
+  /** Absent means false. */
+  requireSignedImages?: boolean;
   secrets: {
     claudeToken: string;
     githubAuthorToken: string;
@@ -361,12 +387,40 @@ const SECRET_VARS = {
   operatorToken: 'JM_OPERATOR_TOKEN',
 } as const;
 
-export function loadConfig(path: string, rawEnv: NodeJS.ProcessEnv): Config {
+export function loadConfig(
+  path: string,
+  rawEnv: NodeJS.ProcessEnv,
+  opts: { imageLockPath?: string } = {},
+): Config {
   const parsed = FileSchema.safeParse(JSON.parse(readFileSync(path, 'utf8')));
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`);
     throw new Error(`Invalid config ${path}: ${issues.join('; ')}`);
   }
+  // A zone without an explicit image runs its preset's: the release lock's digest when the
+  // image ships one, else the local `:dev` build.
+  const zonesNeedLock = parsed.data.dropZones.some((z) => !z.image);
+  const lockPath = opts.imageLockPath ?? IMAGE_LOCK_PATH;
+  const lock = zonesNeedLock ? loadImageLock(lockPath) : undefined;
+  // Without a lock a preset would run a mutable local `:dev` tag: only when asked for, for
+  // development against locally built images.
+  const devImages = rawEnv.JM_DEV_IMAGES === '1';
+  const dropZones: DropZoneConfig[] = parsed.data.dropZones.map((zone) => {
+    if (!zone.image && zone.preset && !lock && !devImages)
+      throw new Error(
+        `Invalid config ${path}: zone ${zone.id}: preset ${zone.preset} needs the release image lock at ${lockPath}; set image explicitly, or JM_DEV_IMAGES=1 to run locally built :dev images`,
+      );
+    // A zone may require signed images when the install doesn't, never the other way round.
+    if (parsed.data.requireSignedImages && zone.requireSignedImages === false)
+      throw new Error(
+        `Invalid config ${path}: zone ${zone.id} sets requireSignedImages: false, but the install requires signed images (top-level requireSignedImages: true); a zone can only strengthen it, so remove the zone's setting`,
+      );
+    try {
+      return { ...zone, image: resolveImage(zone, lock) };
+    } catch (e) {
+      throw new Error(`Invalid config ${path}: zone ${zone.id}: ${(e as Error).message}`);
+    }
+  });
   // Every secret may come from NAME or from the file named by NAME_FILE (never both).
   const env: Record<string, string | undefined> = {};
   for (const name of [...Object.values(SECRET_VARS), 'JM_GITHUB_READ_TOKEN'])
@@ -409,6 +463,7 @@ export function loadConfig(path: string, rawEnv: NodeJS.ProcessEnv): Config {
   const { listen } = parsed.data;
   return {
     ...parsed.data,
+    dropZones,
     listen: {
       ...listen,
       allowedHosts: listen.allowedHosts ?? [`127.0.0.1:${listen.port}`, `localhost:${listen.port}`],

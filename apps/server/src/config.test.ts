@@ -454,3 +454,113 @@ describe('shipped example config', () => {
     expect(JSON.parse(readFileSync(example, 'utf8')).mcp).toEqual({ enabled: false });
   });
 });
+
+describe('zone images and presets', () => {
+  const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json') };
+  const zone = (extra: Record<string, unknown>) => {
+    const { image: _image, ...rest } = baseZone;
+    return fixture({ dataDir: './data', dropZones: [{ ...rest, ...extra }] });
+  };
+
+  const devEnv = { ...fullEnv, JM_DEV_IMAGES: '1' };
+
+  test('without the image lock, a preset zone stops startup unless local dev images are asked for', () => {
+    expect(() => loadConfig(zone({ preset: 'python' }), fullEnv, noLock)).toThrow(
+      /zone main: preset python needs the release image lock at .*jm-no-such-lock\.json.*JM_DEV_IMAGES=1/,
+    );
+    // Only exactly "1" opts in.
+    expect(() =>
+      loadConfig(zone({ preset: 'python' }), { ...fullEnv, JM_DEV_IMAGES: 'yes' }, noLock),
+    ).toThrow(/image lock/);
+    // A zone with an explicit image never needs the lock.
+    expect(loadConfig(minimal, fullEnv, noLock).dropZones[0]?.image).toBe('jm-trooper:dev');
+  });
+
+  test('a zone with preset and no image resolves to the preset image; neither is a config error', () => {
+    expect(loadConfig(zone({ preset: 'python' }), devEnv, noLock).dropZones[0]?.image).toBe(
+      'jumpmaster-trooper-python:dev',
+    );
+    expect(loadConfig(zone({ preset: 'node' }), devEnv, noLock).dropZones[0]?.image).toBe(
+      'jumpmaster-trooper:dev',
+    );
+    expect(() => loadConfig(zone({}), fullEnv, noLock)).toThrow(/dropZones\.0.*image or preset/);
+    expect(() => loadConfig(zone({ preset: 'rust' }), fullEnv, noLock)).toThrow(/preset/);
+  });
+
+  test('an explicit image wins over the preset, and an M3 zone is unchanged', () => {
+    expect(
+      loadConfig(zone({ preset: 'go', image: 'mine:1' }), devEnv, noLock).dropZones[0]?.image,
+    ).toBe('mine:1');
+    const m3 = loadConfig(minimal, fullEnv, noLock).dropZones[0];
+    expect(m3?.image).toBe('jm-trooper:dev');
+    expect(m3?.preset).toBeUndefined();
+  });
+
+  test('gates stay required with a preset', () => {
+    const { gates: _gates, image: _image, ...rest } = baseZone;
+    const file = fixture({ dataDir: './data', dropZones: [{ ...rest, preset: 'go' }] });
+    expect(() => loadConfig(file, fullEnv, noLock)).toThrow(/gates/);
+  });
+
+  test('with an image lock, a preset resolves to its registry digest', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'jm-lock-'));
+    const digest = `sha256:${'c'.repeat(64)}`;
+    const lock = join(dir, 'images.lock.json');
+    writeFileSync(
+      lock,
+      JSON.stringify({ registry: 'ghcr.io/o/r', images: { 'jumpmaster-trooper-go': digest } }),
+    );
+    expect(
+      loadConfig(zone({ preset: 'go' }), fullEnv, { imageLockPath: lock }).dropZones[0]?.image,
+    ).toBe(`ghcr.io/o/r/jumpmaster-trooper-go@${digest}`);
+    expect(() => loadConfig(zone({ preset: 'jvm' }), fullEnv, { imageLockPath: lock })).toThrow(
+      /zone main.*jumpmaster-trooper-jvm/,
+    );
+  });
+});
+
+describe('egress and signed-image settings', () => {
+  test('both default off, so an M3 config needs no new capability', () => {
+    const c = loadConfig(minimal, fullEnv);
+    expect(c.requireSignedImages).toBe(false);
+    expect(c.dropZones[0]?.egress).toBeUndefined();
+    expect(c.dropZones[0]?.requireSignedImages).toBeUndefined();
+  });
+
+  test('egress.mode and requireSignedImages parse, and an unknown mode is refused', () => {
+    const file = fixture({
+      dataDir: './data',
+      requireSignedImages: false,
+      dropZones: [{ ...baseZone, egress: { mode: 'enforce' }, requireSignedImages: true }],
+    });
+    const c = loadConfig(file, fullEnv);
+    expect(c.requireSignedImages).toBe(false);
+    expect(c.dropZones[0]).toMatchObject({
+      egress: { mode: 'enforce' },
+      requireSignedImages: true,
+    });
+    expect(loadConfig(withZone({ egress: {} }), fullEnv).dropZones[0]?.egress).toEqual({
+      mode: 'off',
+    });
+    expect(() => loadConfig(withZone({ egress: { mode: 'open' } }), fullEnv)).toThrow(/egress/);
+  });
+
+  test('a zone may not turn off signed images that the install requires', () => {
+    const weak = fixture({
+      dataDir: './data',
+      requireSignedImages: true,
+      dropZones: [{ ...baseZone, requireSignedImages: false }],
+    });
+    expect(() => loadConfig(weak, fullEnv)).toThrow(
+      /zone main sets requireSignedImages: false, but the install requires signed images.*remove/,
+    );
+    // Restating true, or leaving it unset, is fine.
+    for (const z of [{ ...baseZone, requireSignedImages: true }, baseZone])
+      expect(
+        loadConfig(
+          fixture({ dataDir: './data', requireSignedImages: true, dropZones: [z] }),
+          fullEnv,
+        ).requireSignedImages,
+      ).toBe(true);
+  });
+});

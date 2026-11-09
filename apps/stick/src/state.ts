@@ -1,7 +1,8 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { readSecret } from '@jumpmaster/protocol';
+import { ImagePolicySchema, readSecret, type StickInfo } from '@jumpmaster/protocol';
+import { allowedImages } from './runner.js';
 
 /** Where the stick keeps its enrollment (and, in the image, its verify state). */
 export const stateDir = (env: NodeJS.ProcessEnv): string =>
@@ -35,4 +36,35 @@ export function saveEnrollment(dir: string, data: Enrollment & { serverUrl: stri
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   writeFileSync(file, JSON.stringify(data), { mode: 0o600 });
   chmodSync(file, 0o600);
+}
+
+const DIGEST_REF = /@sha256:[0-9a-f]{64}$/;
+
+/**
+ * What this stick advertises. No capability yet: `egress-v1` arrives with egress enforcement and
+ * `image-verify-v1` with image verification, each only once the stick really does it. The policy
+ * is `JM_IMAGE_POLICY` (unset: `allowlist`); the pins are the digest refs it allows.
+ */
+export function stickInfo(env: NodeJS.ProcessEnv, version: string): StickInfo {
+  const policy = ImagePolicySchema.safeParse(env.JM_IMAGE_POLICY || 'allowlist');
+  if (!policy.success)
+    throw new Error(`JM_IMAGE_POLICY must be allowlist or signed, not ${env.JM_IMAGE_POLICY}`);
+  return {
+    capabilities: [],
+    imagePolicy: policy.data,
+    version,
+    pinnedImages: [...allowedImages(env)].filter((i) => DIGEST_REF.test(i)).sort(),
+  };
+}
+
+/** This stick's version, from its package.json (next to dist/ in the image and the repository). */
+export function stickVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version?: unknown;
+    };
+    return typeof pkg.version === 'string' && pkg.version !== '' ? pkg.version : 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
