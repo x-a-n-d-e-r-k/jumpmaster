@@ -3,7 +3,9 @@
 #   docker build --build-arg BASE=<trooper image> -f images/trooper/presets/python/Dockerfile .
 # The default BASE is the plain Node image the trooper starts from, so a build that forgets BASE
 # fails at the check below instead of producing an image without the trooper. Release builds pass
-# the trooper's digest.
+# the trooper's digest. Until the first release, that default is a placeholder: once
+# images/published.json lists the released trooper, the default becomes its digest
+# (images/images.test.ts checks the two agree; see docs/runbooks/release.md).
 ARG BASE=node:24-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5
 
 FROM node:24-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5 AS fetch

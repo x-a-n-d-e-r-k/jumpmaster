@@ -1,5 +1,6 @@
+import { Readable } from 'node:stream';
 import { expect, test } from 'vitest';
-import { DockerDriver } from './docker.js';
+import { DockerDriver, ownContainerId, pullRef } from './docker.js';
 
 test('listByLabel queries all containers (incl. stopped) by exact label', async () => {
   const seen: unknown[] = [];
@@ -512,4 +513,113 @@ test('imageLabels reads the image config labels; none is empty, an absent image 
   expect(await d.imageLabels('nolabels:1')).toEqual({});
   expect(await d.imageLabels('present:1')).toEqual({});
   await expect(d.imageLabels('absent:1')).rejects.toThrow(/no such image/);
+});
+
+const D = `sha256:${'a'.repeat(64)}`;
+
+test('pullImage pulls the digest reference, reports progress and fails on an error line', async () => {
+  const pulled: string[] = [];
+  const docker = (body: string) => ({
+    async pull(ref: string, o: { abortSignal?: AbortSignal }) {
+      pulled.push(ref);
+      expect(o.abortSignal).toBeInstanceOf(AbortSignal);
+      return Readable.from([body]);
+    },
+  });
+  const progress: unknown[] = [];
+  const ok = new DockerDriver(
+    docker('{"status":"Pulling fs layer"}\n{"status":"Digest: x"}\n') as never,
+  );
+  await ok.pullImage(`ghcr.io/o/x:v1@${D}`, (e) => progress.push(e), new AbortController().signal);
+  expect(pulled).toEqual([`ghcr.io/o/x@${D}`]);
+  expect(progress).toEqual([{ status: 'Pulling fs layer' }, { status: 'Digest: x' }]);
+  const bad = new DockerDriver(
+    docker(
+      '{"status":"x"}\n{"errorDetail":{"message":"manifest unknown"},"error":"manifest unknown"}\n',
+    ) as never,
+  );
+  await expect(
+    bad.pullImage(`ghcr.io/o/x@${D}`, () => {}, new AbortController().signal),
+  ).rejects.toThrow('manifest unknown');
+  const aborted = new AbortController();
+  aborted.abort();
+  await expect(bad.pullImage(`ghcr.io/o/x@${D}`, () => {}, aborted.signal)).rejects.toThrow(
+    'aborted',
+  );
+});
+
+test('pullRef drops a tag before the digest and keeps a registry port', () => {
+  expect(pullRef(`ghcr.io/o/x:v1@${D}`)).toBe(`ghcr.io/o/x@${D}`);
+  expect(pullRef(`localhost:5000/o/x@${D}`)).toBe(`localhost:5000/o/x@${D}`);
+  expect(pullRef(`localhost:5000/x:t@${D}`)).toBe(`localhost:5000/x@${D}`);
+  expect(pullRef('x:1')).toBe('x:1');
+});
+
+test('the stick finds its own container id in its mounts, and its image through the engine', async () => {
+  const id = 'f'.repeat(64);
+  const mounts = [
+    '1 0 0:1 / / rw - overlay overlay rw',
+    `2 1 254:1 /docker/containers/${id}/resolv.conf /etc/resolv.conf rw - ext4 /dev/vda1 rw`,
+    `3 1 254:1 /docker/containers/${id}/hostname /etc/hostname rw - ext4 /dev/vda1 rw`,
+  ].join('\n');
+  expect(ownContainerId(mounts)).toBe(id);
+  expect(ownContainerId('1 0 0:1 / / rw - overlay overlay rw')).toBeUndefined();
+  // A volume path that merely looks like a container directory doesn't count.
+  expect(
+    ownContainerId(`2 1 254:1 /data/containers/${id}/other /x rw - ext4 /dev/vda1 rw`),
+  ).toBeUndefined();
+});
+
+test('the isolation probe runs the host side from the host image as nobody, the drop side from the drop image', async () => {
+  const created: { Image: string; User?: string; HostConfig: { NetworkMode: string } }[] = [];
+  const docker = {
+    async createContainer(o: {
+      Image: string;
+      User?: string;
+      HostConfig: { NetworkMode: string };
+    }) {
+      created.push(o);
+      const host = o.HostConfig.NetworkMode === 'host';
+      const line = host
+        ? '{"listening":true,"addrs":["127.0.0.1"]}'
+        : '{"connect":"ECONNREFUSED","v6":"1"}';
+      return {
+        modem: {
+          demuxStream(_s: unknown, out: { write(c: Buffer): void }) {
+            out.write(Buffer.from(`${line}\n`));
+          },
+        },
+        async attach() {
+          const r = new Readable({ read() {} });
+          return r;
+        },
+        async start() {},
+        async remove() {},
+      };
+    },
+  };
+  const net = {
+    name: 'probe',
+    subnet: '172.30.0.0/28',
+    gateway: '172.30.0.1',
+    proxy: '172.30.0.2',
+    trooper: '172.30.0.3',
+    dns: '172.30.0.4',
+    ipRange: '172.30.0.8/29',
+  };
+  const facts = await new DockerDriver(docker as never).probeIsolation(net, {
+    host: 'sha256:stick',
+    drop: 'egress@sha256:e',
+  });
+  expect(facts).toEqual({
+    listenerUp: true,
+    gatewayOnHost: false,
+    gatewayReachable: false,
+    ipv6Disabled: true,
+  });
+  expect(created.map((c) => [c.Image, c.HostConfig.NetworkMode, c.User])).toEqual([
+    ['sha256:stick', 'host', '65534:65534'],
+    ['egress@sha256:e', 'probe', undefined],
+    ['sha256:stick', 'host', '65534:65534'],
+  ]);
 });

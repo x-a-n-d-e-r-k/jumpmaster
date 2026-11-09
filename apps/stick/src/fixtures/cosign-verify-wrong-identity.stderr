@@ -1,0 +1,4 @@
+Error: no matching attestations: failed to verify log inclusion: transparency log certificate does not match
+failed to verify certificate identity: no matching CertificateIdentity found, last error: expected SAN value to match regex "^https://github\.com/x-a-n-d-e-r-k/jumpmaster/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$", got "keyless@projectsigstore.iam.gserviceaccount.com"
+error during command execution: no matching attestations: failed to verify log inclusion: transparency log certificate does not match
+failed to verify certificate identity: no matching CertificateIdentity found, last error: expected SAN value to match regex "^https://github\.com/x-a-n-d-e-r-k/jumpmaster/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$", got "keyless@projectsigstore.iam.gserviceaccount.com"

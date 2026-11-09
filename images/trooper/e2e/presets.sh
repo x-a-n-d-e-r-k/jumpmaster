@@ -9,7 +9,7 @@ REPO="${E2E_REPO:-x-a-n-d-e-r-k/jumpmaster}"
 BRANCH="${E2E_BRANCH:-main}"
 SOURCE_URL="${SOURCE_URL:-}"
 FAKE="$PWD/images/trooper/e2e/fake-claude"
-echo "presets: Docker Engine $(docker version --format '{{.Server.Version}}')"
+echo "presets: Docker Engine $(docker version --format '{{.Server.Version}} {{.Server.Os}}/{{.Server.Arch}}')"
 SHA="$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/${BRANCH}" | cut -f1)"
 [ -n "$SHA" ] || { echo "cannot resolve ${REPO}@${BRANCH}" >&2; exit 1; }
 

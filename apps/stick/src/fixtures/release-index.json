@@ -1,0 +1,33 @@
+{
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": [
+    {
+      "digest": "sha256:9dea4f54c8b115c1212c21ff022d9a58d88edda1d7a96f56f503dbb3e3a71d07",
+      "platform": {
+        "architecture": "amd64",
+        "os": "linux"
+      }
+    },
+    {
+      "digest": "sha256:6c2774dafb9c63245aae8f3fb1f08d0bd7259634a8ffd0ffe84ed45bfbf70daa",
+      "platform": {
+        "architecture": "unknown",
+        "os": "unknown"
+      }
+    },
+    {
+      "digest": "sha256:9a0845234800184d020d5afebec599109a47fdb7feb3c7065257802c2d1ff410",
+      "platform": {
+        "architecture": "arm64",
+        "os": "linux"
+      }
+    },
+    {
+      "digest": "sha256:bb5f120063caf5ae9a2d229cab0eb151bb9e6235a85b90f29309d6c8a382e576",
+      "platform": {
+        "architecture": "unknown",
+        "os": "unknown"
+      }
+    }
+  ]
+}

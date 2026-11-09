@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { EGRESS_PROXY_ALIAS, type ServiceSpec } from '@jumpmaster/protocol';
 import Docker from 'dockerode';
@@ -9,6 +10,7 @@ import type {
   ProxyHandle,
 } from './driver.js';
 import { allocateSubnet, dropLayout } from './subnets.js';
+import { canonicalRef } from './verify.js';
 
 const SERVICE_LABEL = 'jumpmaster.service';
 /** `drop` on a drop network, `proxy` on a proxy container, `out` on the shared exit network. */
@@ -30,6 +32,28 @@ const NO_IPV6 = {
 };
 
 const PROBE_MS = 20_000;
+/** The host-network probe containers run as nobody. */
+const PROBE_USER = '65534:65534';
+
+/** `name@sha256:…` for a pull: the API would take a tag before the digest as part of the name. */
+export const pullRef = canonicalRef;
+
+/**
+ * This process's container id, from the bind mounts Docker gives every container (its
+ * hostname, hosts and resolv.conf live under /var/lib/docker/containers/<id>/). Undefined
+ * outside a container.
+ */
+export function ownContainerId(mountinfo?: string): string | undefined {
+  let text = mountinfo;
+  if (text === undefined) {
+    try {
+      text = readFileSync('/proc/self/mountinfo', 'utf8');
+    } catch {
+      return undefined;
+    }
+  }
+  return /\/containers\/([0-9a-f]{64})\/(?:hostname|hosts|resolv\.conf)\b/.exec(text)?.[1];
+}
 /** On the host network: listens on every address and reports the host's addresses. */
 const HOST_ADDRESSES = `const os=require('os');console.log(JSON.stringify({addrs:Object.values(os.networkInterfaces()).flat().filter(Boolean).map((a)=>a.address)}));`;
 const HOST_LISTENER = `const net=require('net'),os=require('os');const s=net.createServer((c)=>c.end('hi'));s.on('error',()=>{console.log(JSON.stringify({listening:false}));process.exit(0)});s.listen(Number(process.env.PORT),'0.0.0.0',()=>{const addrs=Object.values(os.networkInterfaces()).flat().filter(Boolean).map((a)=>a.address);console.log(JSON.stringify({listening:true,addrs}))});setTimeout(()=>process.exit(0),60000);`;
@@ -339,7 +363,10 @@ export class DockerDriver implements ContainerDriver {
     return v.Version ?? '';
   }
 
-  async probeIsolation(net: DropNet, image: string): Promise<IsolationFacts> {
+  async probeIsolation(
+    net: DropNet,
+    images: { host: string; drop: string },
+  ): Promise<IsolationFacts> {
     const hardening = {
       Privileged: false,
       ReadonlyRootfs: true,
@@ -349,7 +376,7 @@ export class DockerDriver implements ContainerDriver {
     };
     const labels = { [EGRESS_LABEL]: 'probe' };
     const created: Docker.Container[] = [];
-    const run = async (o: Docker.ContainerCreateOptions) => {
+    const run = async (image: string, o: Docker.ContainerCreateOptions) => {
       const c = await this.docker.createContainer({ Image: image, Labels: labels, ...o });
       created.push(c);
       const stream = (await c.attach({
@@ -369,9 +396,11 @@ export class DockerDriver implements ContainerDriver {
       let port = 0;
       for (let attempt = 0; attempt < 3 && !listener?.listening; attempt++) {
         port = 40_000 + Math.floor(Math.random() * 10_000);
-        listener = await run({
+        // On the host's network: from the stick's own image, as nobody.
+        listener = await run(images.host, {
           Entrypoint: ['node', '-e', HOST_LISTENER],
           Env: [`PORT=${port}`],
+          User: PROBE_USER,
           HostConfig: { NetworkMode: 'host', ...hardening },
         });
       }
@@ -382,7 +411,7 @@ export class DockerDriver implements ContainerDriver {
           gatewayReachable: false,
           ipv6Disabled: false,
         };
-      const inside = (await run({
+      const inside = (await run(images.drop, {
         Entrypoint: ['node', '-e', DROP_PROBE],
         Env: [`GW=${net.gateway}`, `PORT=${port}`],
         HostConfig: { ...egressHostConfig(net), ...hardening },
@@ -391,8 +420,9 @@ export class DockerDriver implements ContainerDriver {
         },
       })) as { connect?: string; v6?: string } | null;
       // Read while the drop container is attached: an engine may bring the bridge up lazily.
-      const host = (await run({
+      const host = (await run(images.host, {
         Entrypoint: ['node', '-e', HOST_ADDRESSES],
+        User: PROBE_USER,
         HostConfig: { NetworkMode: 'host', ...hardening },
       })) as { addrs?: string[] } | null;
       return {
@@ -404,6 +434,48 @@ export class DockerDriver implements ContainerDriver {
       };
     } finally {
       for (const c of created) await c.remove({ force: true }).catch(() => {});
+    }
+  }
+
+  async pullImage(
+    ref: string,
+    onProgress: (event: Record<string, unknown>) => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (signal.aborted) throw new Error('aborted');
+    const stream = (await this.docker.pull(pullRef(ref), { abortSignal: signal })) as Readable;
+    const abort = () => stream.destroy(new Error('aborted'));
+    signal.addEventListener('abort', abort, { once: true });
+    try {
+      // One JSON object per line; an `error` in any of them is the pull failing.
+      for await (const line of lines(stream)) {
+        if (line.trim() === '') continue;
+        let event: Record<string, unknown>;
+        try {
+          event = JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        if (event.error !== undefined || event.errorDetail !== undefined)
+          throw new Error(
+            String(event.error ?? (event.errorDetail as { message?: unknown })?.message ?? 'error'),
+          );
+        onProgress(event);
+      }
+    } finally {
+      signal.removeEventListener('abort', abort);
+    }
+    if (signal.aborted) throw new Error('aborted');
+  }
+
+  async selfImage(): Promise<string | undefined> {
+    const id = ownContainerId();
+    if (!id) return undefined;
+    try {
+      const info = (await this.docker.getContainer(id).inspect()) as { Image?: string };
+      return typeof info.Image === 'string' && info.Image !== '' ? info.Image : undefined;
+    } catch {
+      return undefined;
     }
   }
 

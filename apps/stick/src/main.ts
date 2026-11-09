@@ -3,13 +3,16 @@ import { DockerDriver } from './docker.js';
 import { egressCapability } from './egress.js';
 import { reapOrphans, runDrop, sweepDropNetworks } from './runner.js';
 import {
+  advertisedCapabilities,
   joinToken,
   loadEnrollment,
+  loadRelease,
   saveEnrollment,
   stateDir,
   stickInfo,
   stickVersion,
 } from './state.js';
+import { execCosign, prepareImageTrust } from './verify.js';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const SWEEP_MS = 10 * 60_000;
@@ -29,11 +32,27 @@ async function main() {
   const token = saved?.stickToken;
   let stickId = saved?.stickId;
   const driver = new DockerDriver();
+  const release = loadRelease();
+  // Under the signed policy this refuses to start (with the reason) unless cosign is the pinned
+  // version, every pin is a digest and there is a trusted signer.
+  const trust = await prepareImageTrust(process.env, {
+    cosign: execCosign('cosign', process.env),
+    ...(release ? { release } : {}),
+    log: (line) => console.log(line),
+  });
   // Advertised only when this engine really can enforce it; the server then never leases this
   // stick a drop from a zone that restricts egress.
-  const egress = await egressCapability(driver, process.env);
+  const egress = await egressCapability(driver, process.env, {
+    trust,
+    log: (line) => console.log(line),
+  });
   if (!egress.ok) console.log(`egress-v1 not advertised: ${egress.reason}`);
-  const info = stickInfo(process.env, stickVersion(), egress.ok ? ['egress-v1'] : []);
+  const capabilities = advertisedCapabilities({ egress: egress.ok, policy: trust.policy });
+  const info = {
+    ...stickInfo(process.env, stickVersion(release), capabilities),
+    // Under signed the pins are exactly what verification lets through unsigned.
+    ...(trust.policy === 'signed' ? { pinnedImages: [...trust.allowed].sort() } : {}),
+  };
   console.log(
     `stick ${info.version}: image policy ${info.imagePolicy}, capabilities ${info.capabilities.join(', ') || 'none'}`,
   );
@@ -76,6 +95,7 @@ async function main() {
         driver,
         stickId,
         active,
+        trust,
         heartbeatMs: 15_000,
         ...(process.env.JM_LOST_SERVER_KILL_BEATS
           ? { lostServerKillBeats: Number(process.env.JM_LOST_SERVER_KILL_BEATS) }

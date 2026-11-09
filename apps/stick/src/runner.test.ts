@@ -14,6 +14,7 @@ import { describe, expect, test } from 'vitest';
 import type { DropClient } from './client.js';
 import type { ContainerDriver, DropNet } from './driver.js';
 import { allowedImages, reapOrphans, runDrop, sweepDropNetworks } from './runner.js';
+import { type Cosign, type ImageTrust, releaseSigner, VerifyCache } from './verify.js';
 
 const NET: DropNet = {
   name: 'jm-drop-d1-3',
@@ -59,6 +60,9 @@ function fakeDriver(
     networks?: { name: string; labels: Record<string, string> }[];
     /** The trooper image's labels (default: a current trooper's); an Error is thrown instead. */
     imageLabels?: Record<string, string> | Error;
+    /** Which images are on the engine already (default: all of them). */
+    present?: (ref: string) => boolean;
+    pullError?: string;
   } = {},
 ) {
   const order: string[] = [];
@@ -76,6 +80,8 @@ function fakeDriver(
     proxy: undefined as Parameters<ContainerDriver['startEgressProxy']>[0] | undefined,
     proxyStopped: false,
     inspected: [] as string[],
+    /** Pulls and verification steps, in order, with the container steps in `order` too. */
+    images: [] as string[],
     driver: {
       async imageLabels(image) {
         d.inspected.push(image);
@@ -118,11 +124,19 @@ function fakeDriver(
         return opts.networks ?? [];
       },
       async removeNetwork() {},
-      async imageExists() {
-        return true;
+      async imageExists(ref) {
+        return opts.present ? opts.present(ref) : true;
+      },
+      async pullImage(ref) {
+        order.push(`pull ${ref}`);
+        d.images.push(`pull ${ref}`);
+        if (opts.pullError) throw new Error(opts.pullError);
       },
       async engineVersion() {
         return '29.9.2';
+      },
+      async selfImage() {
+        return undefined;
       },
       async probeIsolation() {
         return {
@@ -569,7 +583,10 @@ describe('runDrop', () => {
       for (const f of readdirSync(dir))
         expect(readFileSync(join(dir, f), 'utf8')).not.toContain(TOKEN);
     } finally {
-      process.env.TMPDIR = prev;
+      // Assigning undefined would store the string "undefined", and every later tmpdir() would
+      // point there (CI runners have no TMPDIR).
+      if (prev === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = prev;
     }
   });
 
@@ -769,14 +786,24 @@ describe('egress', () => {
 
   describe('the trooper image must declare egress support (an older one ignores payload.egress)', () => {
     const monitor: DropPayload = { ...enforce, egress: { mode: 'monitor', allow: [] } };
+    const MISSING =
+      'image trooper does not declare egress support (label org.jumpmaster.trooper.egress=1): it was built on a trooper image older than egress, which ignores the drop\'s egress settings. Rebuild it FROM a current jumpmaster-trooper image, or set the zone\'s egress mode to "off".';
+    const different = (v: string) =>
+      `image trooper declares egress support org.jumpmaster.trooper.egress=${v}, but this stick runs only org.jumpmaster.trooper.egress=1: the image and the stick come from different releases. Use a trooper image from the stick's release (or a stick that supports ${v}), or set the zone's egress mode to "off".`;
     test.each([
-      ['enforce, no label', enforce, {}],
-      ['monitor, no label', monitor, {}],
-      ['enforce, label 0', enforce, { 'org.jumpmaster.trooper.egress': '0' }],
-      ['enforce, empty label', enforce, { 'org.jumpmaster.trooper.egress': '' }],
-      ['enforce, a later version only', enforce, { 'org.jumpmaster.trooper.egress': '2' }],
-      ['enforce, a look-alike key', enforce, { 'jumpmaster.trooper.egress': '1' }],
-    ])('%s: fails the drop before any network, proxy or trooper', async (_n, p, labels) => {
+      ['enforce, no label', enforce, {}, MISSING],
+      ['monitor, no label', monitor, {}, MISSING],
+      // A label can't be removed from an image, so an emptied one counts as missing.
+      ['enforce, empty label', enforce, { 'org.jumpmaster.trooper.egress': '' }, MISSING],
+      ['enforce, a look-alike key', enforce, { 'jumpmaster.trooper.egress': '1' }, MISSING],
+      ['enforce, label 0', enforce, { 'org.jumpmaster.trooper.egress': '0' }, different('0')],
+      [
+        'enforce, a later version only',
+        enforce,
+        { 'org.jumpmaster.trooper.egress': '2' },
+        different('2'),
+      ],
+    ])('%s: fails the drop before any network, proxy or trooper', async (_n, p, labels, reason) => {
       const d = fakeDriver([done], { imageLabels: labels });
       const client = fakeClient();
       await runDrop(p, deps(d, client));
@@ -784,9 +811,17 @@ describe('egress', () => {
       expect(d.order).toEqual([]);
       expect(d.started).toBeUndefined();
       expect(client.result).toMatchObject({ status: 'failed', role: 'implement', gates: [] });
-      expect(client.result?.reason).toBe(
-        'image trooper does not declare egress support (label org.jumpmaster.trooper.egress=1): it was built on a trooper image older than egress, which ignores the drop\'s egress settings. Rebuild it FROM a current jumpmaster-trooper image, or set the zone\'s egress mode to "off".',
-      );
+      expect(client.result?.reason).toBe(reason);
+    });
+
+    test('a label value is cut short and stripped of control characters in the reason', async () => {
+      const d = fakeDriver([done], {
+        imageLabels: { 'org.jumpmaster.trooper.egress': `9\n${'x'.repeat(200)}` },
+      });
+      const client = fakeClient();
+      await runDrop(enforce, deps(d, client));
+      expect(client.result?.reason).toContain('org.jumpmaster.trooper.egress=9?xxxx');
+      expect(client.result?.reason).not.toContain('x'.repeat(65));
     });
 
     test('an image the engine cannot inspect fails the drop closed', async () => {
@@ -919,5 +954,211 @@ describe('egress', () => {
     await runDrop(enforce, { ...deps(live), active });
     expect(during).toBe(true);
     expect(active.size).toBe(0);
+  });
+});
+
+describe('image trust: verify, then pull, then create', () => {
+  const done = 'JM_RESULT {"status":"completed","gates":[]}';
+  const dg = (c: string) => `sha256:${c.repeat(64)}`;
+  const TROOPER = `ghcr.io/o/jumpmaster-trooper@${dg('1')}`;
+  const EGRESS = `ghcr.io/o/jumpmaster-egress@${dg('2')}`;
+  const DB = `ghcr.io/o/postgres@${dg('3')}`;
+  const signedPayload: DropPayload = {
+    ...payload,
+    image: TROOPER,
+    egress: { mode: 'enforce', allow: ['github.com'] },
+    services: [{ name: 'db', image: DB, port: 5432, readyTimeoutSeconds: 60 }],
+  };
+  /** A cosign that verifies exactly the digests in `good`, recording what it was asked. */
+  const cosignFor = (good: string[], calls: string[] = []) => {
+    const cosign: Cosign = async (args) => {
+      const ref = args.at(-1) as string;
+      calls.push(ref);
+      const digest = ref.split('@')[1] as string;
+      if (!good.includes(digest))
+        return { code: 10, stdout: '', stderr: 'Error: no signatures found' };
+      return {
+        code: 0,
+        stdout: JSON.stringify([{ critical: { image: { 'docker-manifest-digest': digest } } }]),
+        stderr: '',
+      };
+    };
+    return { cosign, calls };
+  };
+  const trust = (cosign: Cosign, allowed: string[] = []): ImageTrust => ({
+    policy: 'signed',
+    allowed: new Set(allowed),
+    signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster'),
+    cosign,
+    cache: new VerifyCache(
+      join(mkdtempSync(join(tmpdir(), 'jm-trust-')), 'verified.json'),
+      releaseSigner('x-a-n-d-e-r-k/jumpmaster'),
+      { now: () => new Date('2026-11-08T12:00:00Z') },
+    ),
+  });
+  const deps = (
+    d: ReturnType<typeof fakeDriver>,
+    t: ImageTrust,
+    client = fakeClient(),
+    log: string[] = [],
+  ) => ({
+    client,
+    driver: d.driver,
+    stickId: 's1',
+    trust: t,
+    egressImage: EGRESS,
+    egressReadyMs: 50,
+    subnetPool: '172.30.0.0/16',
+    log: (l: string) => log.push(l),
+  });
+
+  test('runDrop verifies, then pulls, the trooper, egress and service images before creating any container', async () => {
+    const d = fakeDriver([done], { present: () => false });
+    // cosign asks the registry; nothing is downloaded until every image has verified.
+    const c = cosignFor([dg('1'), dg('2'), dg('3')], d.order);
+    const client = fakeClient();
+    const log: string[] = [];
+    await runDrop(signedPayload, deps(d, trust(c.cosign), client, log));
+    expect(client.result).toMatchObject({ status: 'completed' });
+    expect(d.order).toEqual([
+      TROOPER,
+      EGRESS,
+      DB,
+      `pull ${TROOPER}`,
+      `pull ${EGRESS}`,
+      `pull ${DB}`,
+      'network',
+      'proxy',
+      'services',
+      'trooper',
+      'proxy-stop',
+      'teardown',
+    ]);
+    // Every container is created from the verified digest reference itself.
+    expect(d.started?.image).toBe(TROOPER);
+    expect(d.proxy?.image).toBe(EGRESS);
+    expect(log.map((l) => JSON.parse(l)).filter((l) => l.event === 'image-verified')).toEqual([
+      { event: 'image-verified', dropId: 'd1', ref: TROOPER, via: 'cosign' },
+      { event: 'image-verified', dropId: 'd1', ref: EGRESS, via: 'cosign' },
+      { event: 'image-verified', dropId: 'd1', ref: DB, via: 'cosign' },
+    ]);
+  });
+
+  test.each([
+    ['trooper', dg('1')],
+    ['egress proxy', dg('2')],
+    ['service', dg('3')],
+  ])(
+    'an unverified %s image fails the drop before anything is pulled or created',
+    async (_n, bad) => {
+      const d = fakeDriver([done], { present: () => false });
+      const good = [dg('1'), dg('2'), dg('3')].filter((x) => x !== bad);
+      const client = fakeClient();
+      await runDrop(signedPayload, deps(d, trust(cosignFor(good).cosign), client));
+      expect(client.result).toMatchObject({ status: 'failed', role: 'implement', gates: [] });
+      expect(client.result?.reason).toMatch(
+        new RegExp(`^image not verified: \\S+@${bad}: cosign exit 10: no signatures found$`),
+      );
+      // Under signed an unsigned image is never downloaded, not even the ones that did verify.
+      expect(d.images).toEqual([]);
+      expect(d.order).toEqual([]);
+      expect(d.started).toBeUndefined();
+      expect(d.inspected).toEqual([]);
+    },
+  );
+
+  test('under signed, a tag ref is refused before any pull, cosign call or container', async () => {
+    for (const p of [
+      { ...signedPayload, image: 'jumpmaster-trooper:dev' },
+      {
+        ...signedPayload,
+        services: [{ name: 'db', image: 'postgres:16', port: 5432, readyTimeoutSeconds: 60 }],
+      },
+    ]) {
+      const d = fakeDriver([done], { present: () => false });
+      const c = cosignFor([dg('1'), dg('2'), dg('3')]);
+      const client = fakeClient();
+      await runDrop(p, deps(d, trust(c.cosign), client));
+      expect(client.result?.reason).toMatch(/^image not verified: \S+: a tag reference;/);
+      expect(d.order).toEqual([]);
+      expect(c.calls).toEqual([]);
+    }
+    // The egress proxy too.
+    const d = fakeDriver([done]);
+    const client = fakeClient();
+    await runDrop(signedPayload, {
+      ...deps(d, trust(cosignFor([]).cosign), client),
+      egressImage: 'jumpmaster-egress:dev',
+    });
+    expect(client.result?.reason).toMatch(
+      /^image not verified: jumpmaster-egress:dev: a tag reference;/,
+    );
+    expect(d.order).toEqual([]);
+  });
+
+  test('a missing image is pulled by digest before create; a pull failure fails the drop naming the ref', async () => {
+    const present = new Set([EGRESS, DB]);
+    const d = fakeDriver([done], { present: (r) => present.has(r) });
+    const client = fakeClient();
+    await runDrop(
+      signedPayload,
+      deps(d, trust(cosignFor([dg('1'), dg('2'), dg('3')]).cosign), client),
+    );
+    expect(d.images).toEqual([`pull ${TROOPER}`]);
+    expect(client.result).toMatchObject({ status: 'completed' });
+
+    const e = fakeDriver([done], { present: () => false, pullError: 'manifest unknown\nmore' });
+    const c = cosignFor([dg('1'), dg('2'), dg('3')]);
+    const failed = fakeClient();
+    await runDrop(signedPayload, deps(e, trust(c.cosign), failed));
+    expect(failed.result).toMatchObject({ status: 'failed', gates: [] });
+    expect(failed.result?.reason).toBe(`image pull failed: ${TROOPER}: manifest unknown`);
+    expect(e.order).toEqual([`pull ${TROOPER}`]);
+    // Verified first, so cosign was asked about all three.
+    expect(c.calls).toEqual([TROOPER, EGRESS, DB]);
+  });
+
+  test('a pinned digest runs without cosign; a cached one without asking again', async () => {
+    const d = fakeDriver([done]);
+    const c = cosignFor([dg('1'), dg('2')]);
+    const t = trust(c.cosign, [DB]);
+    const log: string[] = [];
+    await runDrop(signedPayload, deps(d, t, fakeClient(), log));
+    await runDrop(signedPayload, deps(fakeDriver([done]), t, fakeClient(), log));
+    expect(c.calls).toEqual([TROOPER, EGRESS]);
+    const via = log
+      .map((l) => JSON.parse(l))
+      .filter((l) => l.event === 'image-verified')
+      .map((l) => l.via);
+    expect(via).toEqual(['cosign', 'cosign', 'pinned', 'cache', 'cache', 'pinned']);
+  });
+
+  test('allowlist policy behaves exactly as in M3: no pull, no inspection, no cosign for tags', async () => {
+    const d = fakeDriver([done], { present: () => false });
+    const client = fakeClient();
+    await runDrop(
+      { ...payload, image: 'trooper' },
+      {
+        client,
+        driver: d.driver,
+        stickId: 's1',
+        trust: { policy: 'allowlist', allowed: new Set(['trooper']) },
+      },
+    );
+    expect(client.result).toMatchObject({ status: 'completed' });
+    expect(d.order).toEqual(['trooper']);
+    // A digest the allow-list names is pulled when it's missing (the only change: it can run).
+    const pin = `reg.example/trooper@${dg('9')}`;
+    const e = fakeDriver([done], { present: () => false });
+    await runDrop(
+      { ...payload, image: pin },
+      {
+        client: fakeClient(),
+        driver: e.driver,
+        stickId: 's1',
+        trust: { policy: 'allowlist', allowed: new Set([pin]) },
+      },
+    );
+    expect(e.order).toEqual([`pull ${pin}`, 'trooper']);
   });
 });

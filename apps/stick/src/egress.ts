@@ -3,9 +3,15 @@
 // egress never runs without its only exit being the proxy.
 import type { DropPayload, TrooperEvent } from '@jumpmaster/protocol';
 import type { ContainerDriver, DropNet, IsolationFacts, ProxyHandle } from './driver.js';
+import { pullImage } from './pull.js';
 import { dropSubnetPool } from './subnets.js';
+import { digestOf, type ImageTrust, verifyImage } from './verify.js';
 
-/** The proxy image. Until image verification lands it is allowed automatically, for the proxy only. */
+/**
+ * The proxy image. Under the allow-list policy it is allowed automatically, for the proxy only.
+ * Under the signed policy it must be a digest reference (the release stick image sets it to its
+ * own release's proxy) and is pulled and verified like any other image.
+ */
 export const egressImage = (env: NodeJS.ProcessEnv): string =>
   (env.JM_EGRESS_IMAGE ?? '').trim() || 'jumpmaster-egress:dev';
 
@@ -19,11 +25,19 @@ export const TROOPER_EGRESS_VERSION = '1';
 
 /**
  * Why `image` may not run a drop under egress, or null when its labels declare support. Anything
- * but the exact label and version is refused.
+ * but the exact label and version is refused. A missing (or emptied: a label can't be removed)
+ * label means a trooper older than egress; another value means a trooper from another release
+ * than this stick, and the remedy differs.
  */
 export function trooperEgressRefusal(image: string, labels: Record<string, string>): string | null {
-  if (labels[TROOPER_EGRESS_LABEL] === TROOPER_EGRESS_VERSION) return null;
-  return `image ${image} does not declare egress support (label ${TROOPER_EGRESS_LABEL}=${TROOPER_EGRESS_VERSION}): it was built on a trooper image older than egress, which ignores the drop's egress settings. Rebuild it FROM a current jumpmaster-trooper image, or set the zone's egress mode to "off".`;
+  const value = labels[TROOPER_EGRESS_LABEL];
+  if (value === TROOPER_EGRESS_VERSION) return null;
+  const want = `${TROOPER_EGRESS_LABEL}=${TROOPER_EGRESS_VERSION}`;
+  if (value === undefined || value === '')
+    return `image ${image} does not declare egress support (label ${want}): it was built on a trooper image older than egress, which ignores the drop's egress settings. Rebuild it FROM a current jumpmaster-trooper image, or set the zone's egress mode to "off".`;
+  // The value is image metadata: shown short and printable only.
+  const shown = value.replace(/[^\x20-\x7e]/g, '?').slice(0, 32);
+  return `image ${image} declares egress support ${TROOPER_EGRESS_LABEL}=${shown}, but this stick runs only ${want}: the image and the stick come from different releases. Use a trooper image from the stick's release (or a stick that supports ${shown}), or set the zone's egress mode to "off".`;
 }
 
 export const EGRESS_READY_MS = 30_000;
@@ -227,9 +241,26 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export async function egressCapability(
   driver: ContainerDriver,
   env: NodeJS.ProcessEnv,
-  o: { readyMs?: number } = {},
+  o: { readyMs?: number; trust?: ImageTrust; log?: (line: string) => void } = {},
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   const image = egressImage(env);
+  const signed = o.trust?.policy === 'signed';
+  if (signed && o.trust) {
+    // Nothing runs from the proxy image, here or in a drop, before it is verified (against the
+    // registry, so an unsigned image is never downloaded) and then pulled by digest.
+    if (!digestOf(image))
+      return {
+        ok: false,
+        reason: `the egress proxy image ${image} is not a digest reference; under the signed image policy set JM_EGRESS_IMAGE to the release's proxy by digest`,
+      };
+    const v = await verifyImage(image, o.trust);
+    if (!v.ok) return { ok: false, reason: `the egress proxy image is not verified: ${v.reason}` };
+    try {
+      await pullImage(image, { driver, ...(o.log ? { log: o.log } : {}) });
+    } catch (e) {
+      return { ok: false, reason: message(e) };
+    }
+  }
   if (!(await driver.imageExists(image).catch(() => false)))
     return { ok: false, reason: `the egress proxy image ${image} is not on this engine` };
   let pool: string;
@@ -258,7 +289,10 @@ export async function egressCapability(
   try {
     let facts: IsolationFacts;
     try {
-      facts = await driver.probeIsolation(net, image);
+      // The host-network side runs from the stick's own image; without one (a stick outside a
+      // container) from the proxy image, which under the signed policy was just verified.
+      const self = await driver.selfImage().catch(() => undefined);
+      facts = await driver.probeIsolation(net, { host: self ?? image, drop: image });
     } catch (e) {
       return { ok: false, reason: `the isolation probe failed: ${message(e)}` };
     }

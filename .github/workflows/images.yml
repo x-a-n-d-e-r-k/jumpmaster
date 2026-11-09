@@ -1,8 +1,9 @@
 name: Images
 
 # Builds every image without pushing, then runs the image smoke test and the trooper e2e against
-# the fake Claude CLI, the egress e2e, and (in its own job) the stack presets. Later tasks add e2e
-# cases (verification, the doctor drop).
+# the fake Claude CLI, the egress e2e, the image verification e2e, the stack presets, the
+# release's index join against a job-local registry, and the trooper and stick natively on arm64.
+# Nothing here logs in, publishes or signs. A later task adds the doctor drop.
 on:
   pull_request:
   push:
@@ -30,12 +31,15 @@ jobs:
             docker version
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      # The stick trusts this repository's release workflow, as a release stick does, so it starts
+      # under its own signed image policy in the smoke test.
       - name: Build the images (no push)
         env:
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
         run: |
           docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-server:dev -f images/server/Dockerfile .
-          docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-stick:dev -f images/stick/Dockerfile .
+          docker build --build-arg SOURCE_URL="$SOURCE_URL" --build-arg RELEASE_REPOSITORY="$RELEASE_REPOSITORY" -t jumpmaster-stick:dev -f images/stick/Dockerfile .
           docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-trooper:dev -f images/trooper/Dockerfile .
           docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-egress:dev -f images/egress/Dockerfile .
       - name: Image smoke test
@@ -51,6 +55,133 @@ jobs:
           E2E_REPO: ${{ github.repository }}
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
         run: images/trooper/e2e/egress.sh
+
+  # Image verification under the stick's own signed policy, cosign and read-only root: a tag, an
+  # unsigned image and an image signed by another identity are refused, and the unsigned image
+  # runs once pinned by digest. It builds the trooper and the stick itself.
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Record the Docker Engine
+        run: |
+          {
+            echo '### Docker Engine (verify)'
+            echo '```'
+            docker version
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Verification e2e
+        env:
+          E2E_REPO: ${{ github.repository }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: images/trooper/e2e/verify.sh
+
+  # The release's index join, for real: two per-arch builds (provenance and SBOM on, as in a
+  # release) pushed by digest to a job-local registry, then scripts/release-index.sh exactly as
+  # release-build.yml runs it. One job, because a job-local registry can't be shared between
+  # jobs; the image is FROM scratch with COPY only, so building its arm64 half on amd64 executes
+  # nothing of arm64 and needs no emulation. Native arm64 builds are the `arm64` job's.
+  release-index:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      registry:
+        image: registry:3.1.1@sha256:325b4b29b041e82803abeb703e201655e4e23ab83264ec1a7c9ddb0a5b14a6e0
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: A two-file image
+        run: |
+          mkdir -p ci-index
+          printf 'jumpmaster release-index check\n' > ci-index/hello
+          printf 'FROM scratch\nCOPY hello /hello\n' > ci-index/Dockerfile
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host
+      - id: amd64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ci-index
+          platforms: linux/amd64
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=localhost:5000/ci/jumpmaster-ci,push-by-digest=true,name-canonical=true,push=true
+      - id: arm64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ci-index
+          platforms: linux/arm64
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=localhost:5000/ci/jumpmaster-ci,push-by-digest=true,name-canonical=true,push=true
+      - name: Record the per-arch digests
+        env:
+          AMD64: ${{ steps.amd64.outputs.digest }}
+          ARM64: ${{ steps.arm64.outputs.digest }}
+        run: |
+          mkdir -p digests
+          jq -n --arg d "$AMD64" '{"jumpmaster-ci": $d}' > digests/ci-amd64.json
+          jq -n --arg d "$ARM64" '{"jumpmaster-ci": $d}' > digests/ci-arm64.json
+      - id: index
+        name: Join them with the release's script
+        env:
+          RELEASE: "true"
+          GROUP: ci
+          REGISTRY: localhost:5000/ci
+          VERSION: 0.0.0-ci
+        run: scripts/release-index.sh
+      - name: The output is a four-manifest index of both arches and their attestations
+        env:
+          OUT: ${{ steps.index.outputs.jumpmaster-ci }}
+        run: |
+          digest="$OUT"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no index digest: '$digest'"; exit 1; }
+          got="$(docker buildx imagetools inspect "localhost:5000/ci/jumpmaster-ci@$digest" --raw \
+            | jq -r '[.manifests[] | "\(.platform.os)/\(.platform.architecture)"] | sort | join(",")')"
+          [ "$got" = "linux/amd64,linux/arm64,unknown/unknown,unknown/unknown" ] \
+            || { echo "::error::index lists $got"; exit 1; }
+          echo "index $digest: $got" >> "$GITHUB_STEP_SUMMARY"
+
+  # The images on a native arm64 runner (as on Apple silicon or an arm64 server): the trooper and
+  # the stick build there (the stick's arm64 cosign checksum, the trooper's arm64 tools), and the
+  # verification and trooper e2e run against them.
+  arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Record the Docker Engine
+        run: |
+          {
+            echo '### Docker Engine (arm64)'
+            echo '```'
+            docker version
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Verification e2e (arm64)
+        env:
+          E2E_REPO: ${{ github.repository }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: images/trooper/e2e/verify.sh
+      - name: Trooper e2e (arm64)
+        env:
+          E2E_REPO: ${{ github.repository }}
+        run: images/trooper/e2e/run.sh
 
   # The stack presets build FROM the trooper image; this job builds all four and checks each
   # toolchain as the agent user and as the gate user inside a review drop.

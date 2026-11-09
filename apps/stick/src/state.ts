@@ -1,8 +1,15 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { ImagePolicySchema, readSecret, type StickInfo } from '@jumpmaster/protocol';
+import {
+  type ImagePolicy,
+  ImagePolicySchema,
+  readSecret,
+  type StickCapability,
+  type StickInfo,
+} from '@jumpmaster/protocol';
 import { allowedImages } from './runner.js';
+import type { ReleaseInfo } from './verify.js';
 
 /** Where the stick keeps its enrollment (and, in the image, its verify state). */
 export const stateDir = (env: NodeJS.ProcessEnv): string =>
@@ -41,9 +48,24 @@ export function saveEnrollment(dir: string, data: Enrollment & { serverUrl: stri
 const DIGEST_REF = /@sha256:[0-9a-f]{64}$/;
 
 /**
+ * The capabilities a stick advertises from what its startup proved: `egress-v1` when the egress
+ * check passed, and `image-verify-v1` only under the signed policy (a stick that doesn't verify
+ * signatures must never lease a drop from a zone that requires signed images).
+ */
+export function advertisedCapabilities(o: {
+  egress: boolean;
+  policy: ImagePolicy;
+}): StickCapability[] {
+  return [
+    ...(o.egress ? (['egress-v1'] as const) : []),
+    ...(o.policy === 'signed' ? (['image-verify-v1'] as const) : []),
+  ];
+}
+
+/**
  * What this stick advertises. `capabilities` are the ones its startup checks proved (`egress-v1`
- * when `egressCapability` passes); `image-verify-v1` arrives with image verification. The policy
- * is `JM_IMAGE_POLICY` (unset: `allowlist`); the pins are the digest refs it allows.
+ * when `egressCapability` passes, `image-verify-v1` when it starts under the signed policy). The
+ * policy is `JM_IMAGE_POLICY` (unset: `allowlist`); the pins are the digest refs it allows.
  */
 export function stickInfo(
   env: NodeJS.ProcessEnv,
@@ -61,13 +83,38 @@ export function stickInfo(
   };
 }
 
-/** This stick's version, from its package.json (next to dist/ in the image and the repository). */
-export function stickVersion(): string {
+/** Where the stick image's build records its release (see images/stick/Dockerfile). */
+export const RELEASE_FILE = new URL('../../../release.json', import.meta.url);
+
+/**
+ * The release this stick image was built for: its version and the repository whose release
+ * workflow it trusts. Undefined for a build without release arguments (or outside the image).
+ */
+export function loadRelease(file: URL | string = RELEASE_FILE): ReleaseInfo | undefined {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    return undefined;
+  }
+  const { version, repository } = (raw ?? {}) as { version?: unknown; repository?: unknown };
+  return {
+    version: typeof version === 'string' && version !== '' ? version : null,
+    repository: typeof repository === 'string' && repository !== '' ? repository : null,
+  };
+}
+
+/**
+ * This stick's version: the release it was built for, else its package.json version marked
+ * `-dev` (a build from a checkout is not a release, and must not look like 0.0.0 of one).
+ */
+export function stickVersion(release: ReleaseInfo | undefined = loadRelease()): string {
+  if (release?.version) return release.version;
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
       version?: unknown;
     };
-    return typeof pkg.version === 'string' && pkg.version !== '' ? pkg.version : 'unknown';
+    return typeof pkg.version === 'string' && pkg.version !== '' ? `${pkg.version}-dev` : 'unknown';
   } catch {
     return 'unknown';
   }

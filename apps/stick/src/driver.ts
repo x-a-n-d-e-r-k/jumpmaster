@@ -98,14 +98,26 @@ export interface ContainerDriver {
   removeNetwork(name: string): Promise<void>;
   /** Whether the image is present on this engine. */
   imageExists(image: string): Promise<boolean>;
+  /**
+   * Pulls `ref` (a digest reference), reporting each progress event; rejects on any error the
+   * engine reports and when `signal` aborts.
+   */
+  pullImage(
+    ref: string,
+    onProgress: (event: Record<string, unknown>) => void,
+    signal: AbortSignal,
+  ): Promise<void>;
+  /** The image this stick's own container runs (an image id), or undefined outside a container. */
+  selfImage(): Promise<string | undefined>;
   /** The image's config labels (empty when it has none); throws when it can't be inspected. */
   imageLabels(image: string): Promise<Record<string, string>>;
   /** The engine's version (`Server.Version`). */
   engineVersion(): Promise<string>;
   /**
-   * Behavioural check of a drop network with `image` (any image with node): a listener on the
-   * host network, and a container on `net` with the trooper's settings trying to reach it at the
-   * gateway. Containers it starts are removed before it returns.
+   * Behavioural check of a drop network: a listener on the host network (run from `images.host`,
+   * the stick's own image where it can find it, as an unprivileged user), and a container on
+   * `net` with the trooper's settings (from `images.drop`) trying to reach it at the gateway. Both
+   * images need node. Containers it starts are removed before it returns.
    */
-  probeIsolation(net: DropNet, image: string): Promise<IsolationFacts>;
+  probeIsolation(net: DropNet, images: { host: string; drop: string }): Promise<IsolationFacts>;
 }

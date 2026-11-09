@@ -366,6 +366,133 @@ describe('stack presets', () => {
   });
 });
 
+describe('image verification in the stick image', () => {
+  test('the stick image ships cosign at the pinned version, checked with sha256sum -c, and sets the signed policy', () => {
+    const text = read('images/stick/Dockerfile');
+    const version = /export const COSIGN_VERSION = '(v[\d.]+)'/.exec(
+      read('apps/stick/src/verify.ts'),
+    )?.[1];
+    expect(version).toBeDefined();
+    // From Sigstore's own image, pinned by digest, as a named stage.
+    expect(text).toMatch(
+      new RegExp(
+        `^FROM ghcr\\.io/sigstore/cosign/cosign:${version?.replace(/\./g, '\\.')}@sha256:[0-9a-f]{64} AS cosign$`,
+        'm',
+      ),
+    );
+    const final = finalStage(instructions(text));
+    expect(
+      final.some(
+        (i) => i.op === 'COPY' && i.args === '--from=cosign /ko-app/cosign /usr/local/bin/cosign',
+      ),
+    ).toBe(true);
+    const runs = final
+      .filter((i) => i.op === 'RUN')
+      .map((i) => i.args)
+      .join('\n');
+    // Each platform's binary is checked against its own SHA-256, and the version is asserted.
+    expect(runs).toMatch(/amd64\) sum=[0-9a-f]{64}/);
+    expect(runs).toMatch(/arm64\) sum=[0-9a-f]{64}/);
+    expect(runs).toMatch(/sha256sum -c -/);
+    // cosign checks TLS against the system store, which the slim base lacks.
+    expect(runs).toMatch(/apt-get install -y --no-install-recommends ca-certificates/);
+    expect(runs).toContain(`gitVersion !== '${version}'`);
+    const env = final
+      .filter((i) => i.op === 'ENV')
+      .map((i) => i.args)
+      .join(' ');
+    expect(env).toMatch(/\bJM_IMAGE_POLICY=signed\b/);
+    expect(env).toMatch(/\bJM_EGRESS_IMAGE=\$\{EGRESS_IMAGE\}/);
+    expect(final.some((i) => i.op === 'ARG' && i.args === 'EGRESS_IMAGE')).toBe(true);
+    // The setuid sweep runs after cosign is in place.
+    const sweep = final.findIndex((i) => i.op === 'RUN' && SETUID_SWEEP.test(i.args));
+    const copy = final.findIndex(
+      (i) => i.op === 'COPY' && i.args.includes('/usr/local/bin/cosign'),
+    );
+    expect(sweep).toBeGreaterThan(copy);
+  });
+
+  test('images.yml builds the stick with a trusted signer, and runs the verification e2e', () => {
+    const text = read('.github/workflows/images.yml');
+    expect(text).toMatch(
+      /--build-arg RELEASE_REPOSITORY="\$RELEASE_REPOSITORY"[^\n]*-t jumpmaster-stick:dev/,
+    );
+    expect(text).toContain('images/trooper/e2e/verify.sh');
+    const e2e = read('images/trooper/e2e/verify.sh');
+    // An unsigned local image is refused under signed, and the same image runs once pinned.
+    expect(e2e).toContain('verify-drop.mjs');
+    const drop = read('images/trooper/e2e/verify-drop.mjs');
+    for (const s of ['image not verified', "via: 'pinned'", 'image-verify-v1', 'a tag reference'])
+      expect(drop, s).toContain(s);
+  });
+});
+
+test('every e2e script records the engine architecture it ran on', () => {
+  for (const f of [
+    'images/smoke.sh',
+    'images/trooper/e2e/run.sh',
+    'images/trooper/e2e/egress.sh',
+    'images/trooper/e2e/verify.sh',
+    'images/trooper/e2e/presets.sh',
+  ])
+    expect(read(f), f).toContain('{{.Server.Os}}/{{.Server.Arch}}');
+});
+
+describe('release metadata in the images', () => {
+  test('the server image bakes images.lock.json from IMAGES_LOCK only when given, and checks it', () => {
+    const final = finalStage(instructions(read('images/server/Dockerfile')));
+    // No default: a build without the argument has no lock, and a preset zone then needs
+    // JM_DEV_IMAGES=1 or an explicit image.
+    expect(final.some((i) => i.op === 'ARG' && i.args === 'IMAGES_LOCK')).toBe(true);
+    const write = final.find((i) => i.op === 'RUN' && i.args.includes('/app/images.lock.json'));
+    expect(write?.args).toMatch(/if \[ -n "\$IMAGES_LOCK" \]/);
+    // The build parses it with the server's own loader, so a malformed lock fails the build.
+    expect(write?.args).toMatch(/loadImageLock\('\/app\/images\.lock\.json'\)/);
+    expect(read('apps/server/src/presets.ts')).toContain(
+      "export const IMAGE_LOCK_PATH = '/app/images.lock.json'",
+    );
+  });
+
+  test('the stick image records its release version and repository from build arguments', () => {
+    const final = finalStage(instructions(read('images/stick/Dockerfile')));
+    for (const arg of ['RELEASE_VERSION', 'RELEASE_REPOSITORY'])
+      expect(
+        final.some((i) => i.op === 'ARG' && i.args === arg),
+        arg,
+      ).toBe(true);
+    const write = final.find((i) => i.op === 'RUN' && i.args.includes('/app/release.json'));
+    expect(write?.args).toContain('RELEASE_VERSION');
+    expect(write?.args).toContain('RELEASE_REPOSITORY');
+  });
+
+  test('each preset ARG BASE default is the published trooper digest, or the marked placeholder before the first release', () => {
+    const published = JSON.parse(read('images/published.json')) as {
+      version: string | null;
+      registry: string | null;
+      images: Record<string, string>;
+    };
+    const trooper = published.images['jumpmaster-trooper'];
+    const nodeBase = /^FROM (node:24-bookworm-slim@sha256:[0-9a-f]{64})/m.exec(
+      read('images/server/Dockerfile'),
+    )?.[1];
+    for (const file of Object.values(PRESET_FILES)) {
+      const text = read(file);
+      const base = /^ARG BASE=(\S+)$/m.exec(text)?.[1];
+      if (trooper) {
+        expect(published.registry, 'images/published.json names its registry').toMatch(
+          /^ghcr\.io\//,
+        );
+        expect(base, file).toBe(`${published.registry}/jumpmaster-trooper@${trooper}`);
+      } else {
+        // Nothing published yet: the plain Node image, which the build's own check refuses.
+        expect(published.version).toBeNull();
+        expect(base, file).toBe(nodeBase);
+        expect(text, file).toContain('images/published.json');
+      }
+    }
+  });
+});
+
 test('dependabot watches the preset Dockerfiles and the Claude CLI lockfile', () => {
   type Update = { 'package-ecosystem': string; directory?: string; directories?: string[] };
   const updates = (load(read('.github/dependabot.yml')) as { updates: Update[] }).updates;
@@ -391,6 +518,59 @@ type Workflow = {
 };
 
 describe('images.yml', () => {
+  type FullJob = Workflow['jobs'][string] & {
+    services?: Record<string, { image?: string }>;
+    permissions?: unknown;
+    steps: {
+      id?: string;
+      uses?: string;
+      run?: string;
+      env?: Record<string, string>;
+      with?: Record<string, unknown>;
+    }[];
+  };
+  const job = (name: string) =>
+    (load(read('.github/workflows/images.yml')) as { jobs: Record<string, FullJob> }).jobs[name];
+
+  test('a PR job runs the real release-index.sh on two real per-arch builds, without emulation or GHCR', () => {
+    const j = job('release-index') as FullJob;
+    expect(j).toBeDefined();
+    expect(j['runs-on']).toBe('ubuntu-24.04');
+    // A job-local registry, pinned; no login, no write token.
+    expect(j.services?.registry?.image).toMatch(/^registry:[\d.]+@sha256:[0-9a-f]{64}$/);
+    const text = JSON.stringify(j);
+    expect(text).not.toMatch(/docker login|login-action|ghcr\.io|id-token|qemu|binfmt/i);
+    // FROM scratch with COPY only: nothing of the other arch executes, so no emulation is needed.
+    const runs = j.steps.map((s) => s.run ?? '').join('\n');
+    expect(runs).toMatch(/FROM scratch/);
+    expect(runs).not.toMatch(/^RUN /m);
+    const builds = j.steps.filter((s) => s.uses?.startsWith('docker/build-push-action@'));
+    expect(builds.map((b) => b.with?.platforms).sort()).toEqual(['linux/amd64', 'linux/arm64']);
+    for (const b of builds) {
+      expect(b.with?.provenance).toBe('mode=max');
+      expect(b.with?.sbom).toBe(true);
+      expect(String(b.with?.outputs)).toMatch(
+        /^type=image,name=localhost:5000\/ci\/jumpmaster-ci,push-by-digest=true,name-canonical=true,push=true$/,
+      );
+    }
+    // The real script, as a release runs it, then the result checked as a four-manifest index.
+    const index = j.steps.find((s) => s.run?.includes('scripts/release-index.sh'));
+    expect(index?.env?.RELEASE).toBe('true');
+    expect(runs).toMatch(/imagetools inspect "localhost:5000\/ci\/jumpmaster-ci@\$digest" --raw/);
+    expect(runs).toContain('linux/amd64,linux/arm64,unknown/unknown,unknown/unknown');
+  });
+
+  test('a PR job builds the trooper and the stick natively on arm64 and runs verify.sh and run.sh there', () => {
+    const j = job('arm64') as FullJob;
+    expect(j).toBeDefined();
+    expect(j['runs-on']).toBe('ubuntu-24.04-arm');
+    const runs = j.steps.map((s) => s.run ?? '').join('\n');
+    expect(runs).toMatch(/images\/trooper\/e2e\/verify\.sh/);
+    expect(runs).toMatch(/images\/trooper\/e2e\/run\.sh/);
+    expect(runs).toMatch(/docker version/);
+    expect(JSON.stringify(j)).not.toMatch(/docker login|login-action|id-token|qemu|binfmt/i);
+  });
+
   const workflow = () => load(read('.github/workflows/images.yml')) as Workflow;
 
   test('runs on pull requests and main, read-only', () => {
@@ -458,7 +638,8 @@ describe('images.yml', () => {
 
   test('checkout keeps no credentials and every job has a timeout', () => {
     for (const job of Object.values(workflow().jobs)) {
-      expect(job['timeout-minutes']).toBe(30);
+      expect(job['timeout-minutes']).toBeGreaterThan(0);
+      expect(job['timeout-minutes']).toBeLessThanOrEqual(45);
       for (const step of job.steps.filter((s) => s.uses?.startsWith('actions/checkout@')))
         expect(step.with?.['persist-credentials']).toBe(false);
     }

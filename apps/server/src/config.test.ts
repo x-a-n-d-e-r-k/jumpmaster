@@ -476,7 +476,7 @@ describe('zone images and presets', () => {
     expect(loadConfig(minimal, fullEnv, noLock).dropZones[0]?.image).toBe('jm-trooper:dev');
   });
 
-  test('a zone with preset and no image resolves to the preset image; neither is a config error', () => {
+  test('with JM_DEV_IMAGES=1, a zone with preset and no image resolves to the local preset image; neither is a config error', () => {
     expect(loadConfig(zone({ preset: 'python' }), devEnv, noLock).dropZones[0]?.image).toBe(
       'jumpmaster-trooper-python:dev',
     );
@@ -519,6 +519,8 @@ describe('zone images and presets', () => {
   });
 });
 
+const PINNED = `ghcr.io/o/jumpmaster-trooper@sha256:${'d'.repeat(64)}`;
+
 describe('egress and signed-image settings', () => {
   test('both default off, so an M3 config needs no new capability', () => {
     const c = loadConfig(minimal, fullEnv);
@@ -531,7 +533,9 @@ describe('egress and signed-image settings', () => {
     const file = fixture({
       dataDir: './data',
       requireSignedImages: false,
-      dropZones: [{ ...baseZone, egress: { mode: 'enforce' }, requireSignedImages: true }],
+      dropZones: [
+        { ...baseZone, image: PINNED, egress: { mode: 'enforce' }, requireSignedImages: true },
+      ],
     });
     const c = loadConfig(file, fullEnv);
     expect(c.requireSignedImages).toBe(false);
@@ -597,12 +601,79 @@ describe('egress and signed-image settings', () => {
       /zone main sets requireSignedImages: false, but the install requires signed images.*remove/,
     );
     // Restating true, or leaving it unset, is fine.
-    for (const z of [{ ...baseZone, requireSignedImages: true }, baseZone])
+    for (const z of [
+      { ...baseZone, image: PINNED, requireSignedImages: true },
+      { ...baseZone, image: PINNED },
+    ])
       expect(
         loadConfig(
           fixture({ dataDir: './data', requireSignedImages: true, dropZones: [z] }),
           fullEnv,
         ).requireSignedImages,
       ).toBe(true);
+  });
+
+  test('a zone that requires signed images refuses a tag image or service image at startup', () => {
+    const svc = (image: string) => [{ name: 'db', image, port: 5432 }];
+    const cases: [Record<string, unknown>, Record<string, unknown>, RegExp][] = [
+      // The zone's own trooper image.
+      [
+        {},
+        { requireSignedImages: true },
+        /zone main requires signed images, but its image jm-trooper:dev is a tag/,
+      ],
+      [
+        { requireSignedImages: true },
+        {},
+        /zone main requires signed images, but its image jm-trooper:dev is a tag/,
+      ],
+      // A service image.
+      [
+        {},
+        { image: PINNED, requireSignedImages: true, services: svc('postgres:16') },
+        /zone main requires signed images, but its service db image postgres:16 is a tag/,
+      ],
+      // A digest with the wrong shape is a tag too.
+      [{}, { image: 'x@sha256:abc', requireSignedImages: true }, /is a tag/],
+    ];
+    for (const [top, z, err] of cases)
+      expect(
+        () =>
+          loadConfig(
+            fixture({ dataDir: './data', ...top, dropZones: [{ ...baseZone, ...z }] }),
+            fullEnv,
+          ),
+        err.source,
+      ).toThrow(err);
+    // Digest references pass, and a zone without the requirement keeps its tag (M3).
+    const pinnedSvc = `ghcr.io/o/postgres@sha256:${'e'.repeat(64)}`;
+    expect(
+      loadConfig(
+        fixture({
+          dataDir: './data',
+          requireSignedImages: true,
+          dropZones: [{ ...baseZone, image: PINNED, services: svc(pinnedSvc) }],
+        }),
+        fullEnv,
+      ).dropZones[0]?.image,
+    ).toBe(PINNED);
+    expect(loadConfig(minimal, fullEnv).dropZones[0]?.image).toBe('jm-trooper:dev');
+  });
+
+  test('a signed zone on a local :dev preset (JM_DEV_IMAGES=1) is refused, naming the lock', () => {
+    const { image: _image, ...rest } = baseZone;
+    const file = fixture({
+      dataDir: './data',
+      dropZones: [{ ...rest, preset: 'python', requireSignedImages: true }],
+    });
+    expect(() =>
+      loadConfig(
+        file,
+        { ...fullEnv, JM_DEV_IMAGES: '1' },
+        {
+          imageLockPath: join(tmpdir(), 'jm-no-such-lock.json'),
+        },
+      ),
+    ).toThrow(/its image jumpmaster-trooper-python:dev is a tag.*release image lock/);
   });
 });

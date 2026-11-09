@@ -15,6 +15,9 @@ import { ZONE_MODES } from './db/repo.js';
 import { IMAGE_LOCK_PATH, loadImageLock, resolveImage } from './presets.js';
 import { readSecret } from './secrets.js';
 
+/** An image by digest (`name@sha256:<64 hex>`), the only form a signed zone runs. */
+const DIGEST_REF = /^[^\s@-][^\s@]*@sha256:[0-9a-f]{64}$/;
+
 export const DEFAULT_PROTECTED_PATHS = [
   '.github/**',
   '.claude/**',
@@ -440,11 +443,23 @@ export function loadConfig(
       throw new Error(
         `Invalid config ${path}: zone ${zone.id} sets requireSignedImages: false, but the install requires signed images (top-level requireSignedImages: true); a zone can only strengthen it, so remove the zone's setting`,
       );
+    let image: string;
     try {
-      return { ...zone, image: resolveImage(zone, lock) };
+      image = resolveImage(zone, lock);
     } catch (e) {
       throw new Error(`Invalid config ${path}: zone ${zone.id}: ${(e as Error).message}`);
     }
+    // A signed zone's stick refuses tags at run time; say so at startup, naming the image.
+    if (parsed.data.requireSignedImages || zone.requireSignedImages) {
+      const tag = (what: string, ref: string) =>
+        new Error(
+          `Invalid config ${path}: zone ${zone.id} requires signed images, but its ${what} ${ref} is a tag: use a digest reference (name@sha256:<64 hex>)${zone.preset && !zone.image ? ', or the release image lock for the preset' : ''}`,
+        );
+      if (!DIGEST_REF.test(image)) throw tag('image', image);
+      for (const s of zone.services ?? [])
+        if (!DIGEST_REF.test(s.image)) throw tag(`service ${s.name} image`, s.image);
+    }
+    return { ...zone, image };
   });
   // Every secret may come from NAME or from the file named by NAME_FILE (never both).
   const env: Record<string, string | undefined> = {};
