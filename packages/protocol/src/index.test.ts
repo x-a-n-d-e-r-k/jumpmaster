@@ -161,6 +161,17 @@ describe('crew roles', () => {
     expect(DropPayloadSchema.safeParse({ ...crew, services: [] }).success).toBe(false);
   });
 
+  test('crew and item payloads may carry egress; only monitor or enforce, never off', () => {
+    const egress = { mode: 'enforce', allow: ['github.com'] };
+    for (const role of CREW_ROLES)
+      expect(DropPayloadSchema.parse({ ...crew, role, egress })).toMatchObject({ egress });
+    expect(DropPayloadSchema.parse({ ...base, egress })).toMatchObject({ egress });
+    expect(DropPayloadSchema.parse(base)).not.toHaveProperty('egress');
+    expect(
+      DropPayloadSchema.safeParse({ ...crew, egress: { mode: 'off', allow: [] } }).success,
+    ).toBe(false);
+  });
+
   test('a diagnose payload may carry a checkout; crew-lead may not', () => {
     expect(DropPayloadSchema.safeParse({ ...crew, role: 'diagnose', checkout }).success).toBe(true);
     expect(DropPayloadSchema.safeParse({ ...crew, checkout }).success).toBe(false);

@@ -125,6 +125,16 @@ export const ContainerLimitsSchema = z.object({
 });
 export type ContainerLimits = z.infer<typeof ContainerLimitsSchema>;
 
+/**
+ * Egress control for a drop. Absent when the zone's mode is `off`. The trooper derives its proxy
+ * (the fixed `EGRESS_PROXY_URL`) from its presence; the stick runs the proxy with `allow`.
+ */
+export const EgressPayloadSchema = z.object({
+  mode: z.enum(['monitor', 'enforce']),
+  allow: z.array(z.string()),
+});
+export type EgressPayload = z.infer<typeof EgressPayloadSchema>;
+
 const dropPayloadBase = {
   protocol: z.literal(1),
   dropId: z.string(),
@@ -148,6 +158,7 @@ const dropPayloadBase = {
   verification: z.array(VerificationSpecSchema).optional(),
   /** `false` turns off Claude's commit and PR attribution for the agent. Absent keeps the default. */
   attribution: z.boolean().optional(),
+  egress: EgressPayloadSchema.optional(),
 };
 
 /**
@@ -168,6 +179,7 @@ const crewPayloadBase = {
   credentials: dropPayloadBase.credentials,
   limits: dropPayloadBase.limits,
   attribution: dropPayloadBase.attribution,
+  egress: dropPayloadBase.egress,
 };
 
 export const DropPayloadSchema = z.discriminatedUnion('role', [

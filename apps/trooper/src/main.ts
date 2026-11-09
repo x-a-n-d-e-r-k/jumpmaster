@@ -12,6 +12,7 @@ import {
   REPORT_MAX_CHARS,
   RESULT_PREFIX,
 } from '@jumpmaster/protocol';
+import { applyEgress } from './egress-env.js';
 import { runGates } from './gates.js';
 import * as gitOps from './git.js';
 import {
@@ -80,6 +81,12 @@ export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promi
   if (!runner) return fail('role not implemented');
 
   const ids = deps.ids ?? null;
+  // Before anything is spawned: every environment built from here on carries the proxy.
+  try {
+    await applyEgress(payload, ids);
+  } catch (err) {
+    return fail(`egress setup failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
   let work: string;
   try {
     work = mkdtempSync(join(workRoot(), 'trooper-'));
