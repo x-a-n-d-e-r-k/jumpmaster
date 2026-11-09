@@ -19,8 +19,8 @@
 #     over the compose network with the join token from a file;
 #   - `docker compose exec jumpmaster jumpmaster ctl …` reaches the server, the doctor included,
 #     and the doctor sees the secret files as 0600 (config.secret-files);
-#   - release mode: the stick runs the signed policy with image-verify-v1, and the doctor's
-#     stick.image-policy passes;
+#   - release mode: SHA256SUMS and its signature check (version form); the stick runs the signed
+#     policy with image-verify-v1 and egress-v1, and the doctor's stick.image-policy passes;
 #   - no secret value appears in any output or log.
 # JM_SMOKE_ONLINE=1 also requires GitHub's own 401 for the dummy token (needs api.github.com).
 # Prints one line per check; exits non-zero on the first failure.
@@ -64,10 +64,25 @@ if [ "$MODE" = release ]; then
     node "$ROOT/scripts/render-compose.ts" "$ROOT/deploy/compose.yaml.tmpl" "$RELEASE" >compose.yaml \
       || fail "render the template with $RELEASE"
   else
-    for f in compose.yaml images.lock.json SHA256SUMS; do
+    for f in compose.yaml images.lock.json SHA256SUMS SHA256SUMS.sigstore.json; do
       curl -fsSLO "https://github.com/x-a-n-d-e-r-k/jumpmaster/releases/download/$RELEASE/$f" || fail "download $f for $RELEASE"
     done
     (sha256sum -c SHA256SUMS 2>/dev/null || shasum -a 256 -c SHA256SUMS) >/dev/null || fail "SHA256SUMS does not match"
+    # The signature on SHA256SUMS, with the identity the stick verifies images against: cosign
+    # from PATH, else from its image pinned by digest (mounting only the two files it reads).
+    cosign_run() {
+      if command -v cosign >/dev/null; then cosign "$@"; return; fi
+      docker run --rm -w /w -v "$PWD/SHA256SUMS:/w/SHA256SUMS:ro" \
+        -v "$PWD/SHA256SUMS.sigstore.json:/w/SHA256SUMS.sigstore.json:ro" \
+        ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d "$@"
+    }
+    cosign_run verify-blob --bundle SHA256SUMS.sigstore.json \
+      --certificate-identity-regexp '^https://github\.com/x-a-n-d-e-r-k/jumpmaster/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      --certificate-github-workflow-trigger push \
+      --certificate-github-workflow-repository x-a-n-d-e-r-k/jumpmaster \
+      SHA256SUMS >/dev/null 2>&1 || fail "the signature on SHA256SUMS does not verify"
+    echo "release files: SHA256SUMS signed by the release workflow, files match: ok"
   fi
   grep -q 'JM_IMAGE_POLICY: signed' compose.yaml || fail "the compose file's stick is not signed"
   grep -qE 'JM_EGRESS_IMAGE: "?[^"]*@sha256:[0-9a-f]{64}' compose.yaml \
@@ -75,6 +90,12 @@ if [ "$MODE" = release ]; then
   echo "release compose.yaml: signed stick, egress image by digest: ok"
 fi
 printf 'JM_UID=%s\nJM_GID=%s\n' "$(id -u)" "$(id -g)" >.env
+# A local lock's images carry no release signature: pin its egress proxy, as an operator pins an
+# image they built, so the stick's egress self-check can start it. A published release needs no pin.
+if [ "$MODE" = release ] && [ -f "$RELEASE" ]; then
+  egress="$(grep -oE '[^" ]*/jumpmaster-egress@sha256:[0-9a-f]{64}' compose.yaml | head -1)"
+  printf 'JM_ALLOWED_IMAGES=%s\n' "$egress" >>.env
+fi
 mkdir -m 0700 secrets
 put() { printf '%s\n' "$2" >"secrets/$1" && chmod 0600 "secrets/$1"; }
 put claude_token sk-ant-oat01-SMOKEDUMMYSMOKEDUMMY
@@ -146,7 +167,11 @@ echo "stick: enrolled with the join token file over the compose network: ok"
 if [ "$MODE" = release ]; then
   "${C[@]}" logs stick 2>&1 | grep -qE 'image policy signed, capabilities .*image-verify-v1' \
     || fail "the stick does not run the signed policy with image-verify-v1"
-  echo "stick: signed policy, image-verify-v1: ok"
+  # Egress control: the stick proved a drop network keeps a drop off the host, with the release's
+  # proxy image (verified, or pinned for a local lock).
+  "${C[@]}" logs stick 2>&1 | grep -qE 'image policy signed, capabilities [^\n]*egress-v1' \
+    || fail "the stick does not advertise egress-v1: $("${C[@]}" logs stick 2>&1 | grep -i 'egress-v1' | tail -2)"
+  echo "stick: signed policy, image-verify-v1 and egress-v1: ok"
 fi
 
 out="$("${C[@]}" exec -T jumpmaster jumpmaster ctl briefings)" || fail "ctl briefings: $out"
@@ -161,6 +186,28 @@ if [ "$MODE" = release ]; then
   grep -qE '^PASS .*stick\.image-policy' <<<"$out" || fail "stick.image-policy did not pass: $out"
 fi
 echo "docker compose exec jumpmaster jumpmaster ctl (briefings, doctor; secret files 0600): ok"
+
+# The doctor sees the host file's mode through the secret's bind mount: 0644 fails, 0600 passes.
+doctor_after_restart() {
+  "${C[@]}" restart jumpmaster >/dev/null 2>&1 || fail "restart jumpmaster"
+  for _ in $(seq 60); do
+    out="$("${C[@]}" exec -T jumpmaster jumpmaster ctl doctor 2>&1)" && break
+    grep -q 'config.uid' <<<"$out" && break
+    sleep 1
+  done
+}
+chmod 644 secrets/claude_token
+set +e
+doctor_after_restart
+set -e
+grep -qE '^FAIL .*config\.secret-files' <<<"$out" || fail "a 0644 secret did not fail config.secret-files: $out"
+grep -q 'chmod 600 secrets/\*' <<<"$out" || fail "the config.secret-files fix is missing: $out"
+chmod 600 secrets/claude_token
+set +e
+doctor_after_restart
+set -e
+grep -qE '^PASS .*config\.secret-files' <<<"$out" || fail "config.secret-files did not pass again: $out"
+echo "config.secret-files on real files: 0644 fails with the chmod fix, 0600 passes: ok"
 
 no_secret "$("${C[@]}" logs 2>&1)" "the logs"
 echo "no secret value in any log: ok"

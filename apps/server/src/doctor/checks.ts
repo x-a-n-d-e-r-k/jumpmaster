@@ -72,8 +72,16 @@ export type DoctorDeps = {
   readForge?(zoneId: string): Forge | undefined;
 };
 
-/** Full URLs: on the install host there is no checkout to open a repository path in. */
-export const DOC = 'https://github.com/x-a-n-d-e-r-k/jumpmaster/blob/main/docs/runbooks/install.md';
+/**
+ * The install runbook as a full URL (on the install host there is no checkout), at the tag of the
+ * release this server image was built for, so a doctor line and the section it names are one
+ * commit. A development build (no release version, or a dry run's) points at main.
+ */
+export function installDocUrl(version: string | undefined): string {
+  const tag = version && /^\d+\.\d+\.\d+(-rc\.\d+)?$/.test(version) ? `v${version}` : 'main';
+  return `https://github.com/x-a-n-d-e-r-k/jumpmaster/blob/${tag}/docs/runbooks/install.md`;
+}
+export const DOC = installDocUrl(process.env.JM_RELEASE_VERSION);
 const doc = (anchor: string): string => `${DOC}#${anchor}`;
 
 /** A check that has not finished by then is a warn: one stalled read can't hang the run. */
@@ -1147,6 +1155,15 @@ async function presetCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCh
     status = 'warn';
     notes.push(`the image ${zone.image} is a tag: whoever moves the tag changes what drops run`);
     fixes.push(`Pin it by digest: ${pinHow(zone.image)} Then set image to that reference.`);
+  }
+  if (zone.gates.length === 0) {
+    status = 'warn';
+    notes.push(
+      'the zone has no gates: drops run no checks of their own, so a change merges on CI alone',
+    );
+    fixes.push(
+      "Add the repository's install and test commands to the zone's gates in the config (init writes none with --offline, or when it finds no build file), then restart.",
+    );
   }
   if (!zone.preset) {
     notes.unshift(`explicit image ${zone.image} (no preset)`);

@@ -1,3 +1,6 @@
+import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { STARTER_WARNING } from '../config.js';
 import {
@@ -10,6 +13,8 @@ import {
 } from '../db/repo.js';
 import { ago, NOW, one, PG, world } from '../test/doctorWorld.js';
 import { okProbes } from '../test/fakes.js';
+import { installDocUrl } from './checks.js';
+import { processEnv } from './run.js';
 
 describe('a healthy install', () => {
   test('passes every check but those that cannot run yet, which say so', async () => {
@@ -471,8 +476,51 @@ describe('zone checks', () => {
     expect(docs.length).toBeGreaterThan(5);
     for (const d of docs)
       expect(d).toMatch(
-        /^https:\/\/github\.com\/x-a-n-d-e-r-k\/jumpmaster\/blob\/main\/docs\/runbooks\/install\.md#[a-z0-9-]+$/,
+        /^https:\/\/github\.com\/x-a-n-d-e-r-k\/jumpmaster\/blob\/(main|v[0-9][^/]*)\/docs\/runbooks\/install\.md#[a-z0-9-]+$/,
       );
+  });
+
+  test("doc URLs follow the server image's release version, and main for a development build", () => {
+    const base = 'https://github.com/x-a-n-d-e-r-k/jumpmaster/blob';
+    const tail = 'docs/runbooks/install.md';
+    expect(installDocUrl('0.4.0-rc.1')).toBe(`${base}/v0.4.0-rc.1/${tail}`);
+    expect(installDocUrl('1.2.3')).toBe(`${base}/v1.2.3/${tail}`);
+    for (const dev of [undefined, '', '0.0.0-dryrun.abc', 'main', '1.2', 'v1.2.3', '1.2.3/../x'])
+      expect(installDocUrl(dev), String(dev)).toBe(`${base}/main/${tail}`);
+  });
+
+  test('zone.preset warns when the zone has no gates, naming the risk and the fix', async () => {
+    const none = one(await world({ zone: { gates: [] } }).run(), 'zone.preset');
+    expect(none.status).toBe('warn');
+    expect(none.summary).toMatch(/no gates/);
+    expect(none.summary).toMatch(/no checks of their own/);
+    expect(none.fix).toMatch(/gates/);
+    const some = one(
+      await world({
+        zone: { gates: [{ name: 'test', run: 'npm test', timeoutMinutes: 20 }] },
+      }).run(),
+      'zone.preset',
+    );
+    expect(some.status).toBe('pass');
+  });
+
+  test('config.secret-files reads the real modes: a 0644 file fails and a 0600 file passes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'jm-secret-modes-'));
+    chmodSync(dir, 0o700);
+    const file = join(dir, 'claude_token');
+    writeFileSync(file, 'x\n', { mode: 0o644 });
+    chmodSync(file, 0o644);
+    const w = world();
+    // The server sees the file through a bind mount, not the host directory: a 0700 directory
+    // around a 0644 file still fails.
+    w.deps.env = processEnv({ JM_CLAUDE_TOKEN_FILE: file });
+    const c = one(await w.run(), 'config.secret-files');
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain(file);
+    expect(c.summary).toContain('644');
+    chmodSync(file, 0o600);
+    w.deps.env = processEnv({ JM_CLAUDE_TOKEN_FILE: file });
+    expect(one(await w.run(), 'config.secret-files').status).toBe('pass');
   });
 
   test('a private repository with no ruleset is told rulesets there need a paid plan', async () => {

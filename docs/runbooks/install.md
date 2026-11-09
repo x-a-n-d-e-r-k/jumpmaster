@@ -267,6 +267,10 @@ At this point these warnings are expected, and the next steps clear the first tw
 - `zone.identity`, in starter mode only: the starter-mode cost (it stays; see
   [Starter mode](#starter-mode)).
 
+`zone.preset` warns when the zone has no gates (an `init --offline` install, or a repository
+whose build file `init` didn't find): add them before going on, or agent changes merge on CI
+alone.
+
 ### Step 9: Run the doctor drop, then enforce egress
 
 The doctor drop runs your zone's real image, gates, services and egress setting on the default
@@ -698,7 +702,10 @@ keeps this warning for good. `skip` with "rootless unsupported": use a rootful e
 
 Every secret file must be readable by its owner only. A `fail` names the files others can read;
 in the install directory run `chmod 700 secrets && chmod 600 secrets/*`, then
-`docker compose restart jumpmaster` ([Tokens](#tokens)).
+`docker compose restart jumpmaster` ([Tokens](#tokens)). It judges each file, not the `secrets/`
+directory: the server sees a secret through its bind mount at `/run/secrets`, never the directory
+around it, and a copy or backup of the file keeps the file's own mode, so a `0644` file fails even
+inside a `0700` directory.
 
 ### `claude.token-age`
 
@@ -787,7 +794,9 @@ The zone is paused or observing: `docker compose exec jumpmaster jumpmaster ctl 
 
 ### `zone.preset`
 
-The preset against the repository's root files, and whether the image is a digest reference. A
+The preset against the repository's root files, whether the zone has gates, and whether the image
+is a digest reference. With no gates, drops run no checks of their own: add the repository's
+install and test commands to `gates`. A
 `:dev` image is a local build; a tag needs pinning
 ([Presets](#presets), [Pinning an image by digest](#pinning-an-image-by-digest)).
 

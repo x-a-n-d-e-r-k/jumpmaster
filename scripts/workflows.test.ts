@@ -450,6 +450,11 @@ describe('release.yml', () => {
         /^org\.opencontainers\.image\.source=\$\{\{ github\.server_url \}\}\/\$\{\{ github\.repository \}\}$/m,
       );
     }
+    // The server prints doc links pinned to its release: it takes the version like the stick.
+    for (const id of ['server', 'stick'])
+      expect(String(builds.find((b) => b.id === id)?.with?.['build-args']), id).toContain(
+        'RELEASE_VERSION=${{ needs.target.outputs.version }}',
+      );
     // The presets build FROM the trooper this run built, by digest.
     for (const id of ['python', 'go', 'jvm']) {
       const s = builds.find((b) => b.id === id);

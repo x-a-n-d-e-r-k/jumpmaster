@@ -172,6 +172,18 @@ describe("init's .env block", () => {
     expect(withEnvBlock(once, [])).toBe('JM_UID=1\nJM_GID=1\n');
   });
 
+  test('a CRLF .env keeps one block: a rerun replaces it, and removing it leaves the rest', () => {
+    const lines = composeEnv({ starter: true, privateRepo: false });
+    const crlf = withEnvBlock('JM_UID=1\r\nJM_GID=1\r\n', lines).replace(/\n/g, '\r\n');
+    const again = withEnvBlock(crlf, lines);
+    expect(again.match(/jumpmaster init: begin/g)).toHaveLength(1);
+    expect(again.match(/JM_REVIEWER_TOKEN_SRC/g)).toHaveLength(1);
+    const removed = withEnvBlock(crlf, []);
+    expect(removed).not.toContain('jumpmaster init');
+    expect(removed).toContain('JM_UID=1');
+    expect(removed).toContain('JM_GID=1');
+  });
+
   test.skipIf(!hasCompose)('docker compose resolves the .env block as intended', () => {
     const resolve = (lines: string[]) => {
       const dir = mkdtempSync(join(tmpdir(), 'jm-compose-'));
@@ -198,11 +210,12 @@ describe("init's .env block", () => {
     expect(plain.services.jumpmaster?.environment?.JM_GITHUB_REVIEWER_TOKEN_FILE).toBe(
       '/run/secrets/github_reviewer_token',
     );
-    expect(plain.services.jumpmaster?.environment?.JM_GITHUB_READ_TOKEN_FILE ?? '').toBe('');
+    expect(plain.services.jumpmaster?.environment?.JM_GITHUB_READ_TOKEN_FILE).toBe('');
     expect(plain.secrets.github_read_token?.file).toBe('/dev/null');
     const { doc } = resolve(composeEnv({ starter: true, privateRepo: true }));
     const env = doc.services.jumpmaster?.environment ?? {};
-    expect(env.JM_GITHUB_REVIEWER_TOKEN_FILE ?? '').toBe('');
+    // An empty string, not null: null would mean "inherit from the compose process".
+    expect(env.JM_GITHUB_REVIEWER_TOKEN_FILE).toBe('');
     expect(env.JM_GITHUB_READ_TOKEN_FILE).toBe('/run/secrets/github_read_token');
     expect(doc.secrets.github_reviewer_token?.file).toBe('/dev/null');
     expect(doc.secrets.github_read_token?.file).toMatch(/\/secrets\/github_read_token$/);

@@ -202,6 +202,27 @@ describe('the README and runbooks', () => {
   test('the release runbook makes the release-path compose smoke the first post-tag step', () => {
     const text = read('docs/runbooks/release.md');
     expect(text).toContain('deploy/smoke.sh --release v0.4.0-rc.1');
+    // What the smoke can't cover is named, with the rehearsal that does.
+    expect(text).toMatch(/verif\w+ during a drop[^.]*rehearsal 1/i);
+  });
+
+  test("the release smoke checks the signature on SHA256SUMS with the stick's identity, and egress-v1", () => {
+    const smoke = read('deploy/smoke.sh');
+    expect(smoke).toContain('SHA256SUMS.sigstore.json');
+    expect(smoke).toContain('verify-blob');
+    expect(smoke).toContain(`--certificate-identity-regexp '${identityRegexp(REPOSITORY)}'`);
+    expect(smoke).toContain(`--certificate-oidc-issuer ${GITHUB_ISSUER}`);
+    expect(smoke).toContain('--certificate-github-workflow-trigger push');
+    expect(smoke).toContain(`--certificate-github-workflow-repository ${REPOSITORY}`);
+    expect(smoke).toMatch(/capabilities [^\n]*egress-v1/);
+  });
+
+  test('cosign_docker mounts only the two release files, read-only, never the install directory', () => {
+    const block = /cosign_docker\(\) \{[\s\S]*?\n\}/.exec(read(INSTALL))?.[0] ?? '';
+    expect(block).toContain('-v "$PWD/SHA256SUMS:/w/SHA256SUMS:ro"');
+    expect(block).toContain('-v "$PWD/SHA256SUMS.sigstore.json:/w/SHA256SUMS.sigstore.json:ro"');
+    expect(block.match(/-v /g)).toHaveLength(2);
+    expect(block).not.toMatch(/\$PWD:/);
   });
 
   test('install.md is reached from the README and the older runbooks', () => {

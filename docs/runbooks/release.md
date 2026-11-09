@@ -135,7 +135,8 @@ release's server image, and starts the server and a `signed`-policy stick with t
 tag against images built locally under one registry name (`deploy/smoke.sh --release
 <images.lock.json>`, the lock giving the registry and each image's local digest, with the server
 built with that lock as `IMAGES_LOCK`); it can't check signatures, which only a published release
-carries.
+carries. The smoke runs no drop, so image verification during a drop (cosign on the trooper and
+proxy, then the pull by digest) is covered by rehearsal 1 below, not by the smoke.
 
 Then run these with the release's stick image on a test host, against a zone with
 `requireSignedImages: true`, and record the stick log lines in the release notes:

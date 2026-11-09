@@ -200,9 +200,11 @@ export function composeEnv(o: { starter: boolean; privateRepo: boolean }): strin
 export function withEnvBlock(env: string, lines: string[]): string {
   const kept: string[] = [];
   let inside = false;
+  // A CRLF .env (edited on Windows, say) still has init's markers: compare without the \r.
   for (const line of env.split('\n')) {
-    if (line === ENV_BEGIN) inside = true;
-    else if (line === ENV_END) inside = false;
+    const bare = line.replace(/\r$/, '');
+    if (bare === ENV_BEGIN) inside = true;
+    else if (bare === ENV_END) inside = false;
     else if (!inside) kept.push(line);
   }
   let text = kept.join('\n');
