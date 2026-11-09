@@ -302,7 +302,8 @@ tier and Fable status are never shown.
   415 for a non-JSON body; 413 above `maxBodyBytes`. Authentication runs before the body is read.
 - Tool calls answer with an error result, audited `refused`, when: the token has made
   `callsPerHour` tool calls of any kind in the past hour (audited once per hour, not per call); a
-  read token calls a write tool; the arguments fail the schema; the zone's crew is disabled; a usage credits stop is in
+  read token calls a write tool; the arguments fail the schema; the zone's crew is disabled
+  (`raise_briefing` only: `file_staged_issues` works with the crew off); a usage credits stop is in
   force; the arguments contain a token or a configured secret; the token has made
   `writesPerHour` write calls in the past hour; or the zone already holds `maxOpenBriefings` open
   assistant briefings. In pause, observe or kill the action core refuses each item with the mode.
@@ -313,8 +314,10 @@ tier and Fable status are never shown.
   kept; refused logins keep the newest 500 anonymous rows and, separately, the newest 500 that name
   a token (an expired or revoked token in use). Mint and revoke rows are kept.
 
-Issues filed over MCP that are still `filing` when the crew is later disabled wait, as crew
-filings do, and are filed once it is enabled again.
+Issues filed over MCP are filed under the staged label whether the crew is on or off, and start
+nothing: the crew's refute and your Promote ruling still come first, and those wait until the
+crew is on. `GOAL.md` is read on every pass whenever `crew.goalPath` is set (it is by default),
+crew on or off, so `get_goals` works before you ever enable the crew.
 
 ### Intake skills
 
@@ -343,7 +346,8 @@ cp -R skills/jumpmaster-intake-existing skills/jumpmaster-intake-idea \
   skills/jumpmaster-intake-partial skills/shared ~/.claude/skills/
 ```
 
-Then, in a checkout of the zone's repository, ask Claude Code to run the one that fits.
-`file_staged_issues` needs the zone's crew enabled; enable it after `GOAL.md` is merged.
+Then, in a checkout of the zone's repository, ask Claude Code to run the one that fits. None of
+it needs the crew on: the issues wait staged until you enable the crew, which is a separate,
+later choice that spends usage (its own cycles start then).
 For a quick first issue without the crew, the in-app intake page (`/zones/<id>/intake`) files one
 ready issue directly.

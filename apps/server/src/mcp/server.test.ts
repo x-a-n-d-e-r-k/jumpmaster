@@ -482,19 +482,21 @@ describe('write tools', () => {
   });
 
   // Red team §7.2.
-  test('with the crew disabled both writes are refused and audited; reads still work', async () => {
+  // Staged issues need a Promote ruling, so filing them starts nothing: it works with the crew off.
+  test('with the crew disabled file_staged_issues still records staged intents; raise_briefing is refused', async () => {
     const s = await setup({ crew: false });
     const f = await call(s.write, 'file_staged_issues', { issues: [issue()] });
     const b = await call(s.write, 'raise_briefing', { briefings: [briefing()] });
-    for (const r of [f, b]) {
-      expect(r.isError).toBe(true);
-      expect(textOf(r)).toMatch(/crew is not enabled/);
-    }
-    expect(listCrewIssues(s.db, 'main')).toEqual([]);
+    expect(f.isError).toBeFalsy();
+    expect(b.isError).toBe(true);
+    expect(textOf(b)).toMatch(/crew is not enabled/);
+    expect(listCrewIssues(s.db, 'main').map((r) => [r.source, r.state])).toEqual([
+      ['mcp', 'filing'],
+    ]);
     expect(listBriefings(s.db)).toEqual([]);
-    expect(audit(s).map((r) => [r.tool, r.outcome, r.detail])).toEqual([
-      ['file_staged_issues', 'refused', 'crew disabled'],
-      ['raise_briefing', 'refused', 'crew disabled'],
+    expect(audit(s).map((r) => [r.tool, r.outcome])).toEqual([
+      ['file_staged_issues', 'ok'],
+      ['raise_briefing', 'refused'],
     ]);
     const g = await call(s.read, 'get_goals');
     expect(g.isError).toBeFalsy();

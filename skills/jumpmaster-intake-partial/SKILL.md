@@ -1,5 +1,4 @@
 ---
-
 name: jumpmaster-intake-partial
 description: "Takes over a partly built project with Jumpmaster: interviews Command one question at a time, scouts what is half done as data, writes GOAL.md on a branch for Command to merge, then proposes staged issues that finish or repair before anything new, through the Jumpmaster MCP server."
 ---

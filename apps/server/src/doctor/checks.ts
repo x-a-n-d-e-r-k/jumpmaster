@@ -639,20 +639,44 @@ async function adminCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorChe
     return readFailed(base, 'author', `read the repository ${zone.repo}`, 'Metadata: read', access);
   const who = login.ok ? login.value : 'the author account';
   const admin = access.value.permissions.admin;
+  const starter = zone.identity === 'starter';
   if (admin && !zone.authorMayBeAdmin)
     return {
       ...base,
       status: 'fail',
       summary: `${who} (the author) is a repository admin: an admin's token could edit the ruleset that guards merges`,
-      fix: `Give ${who} the Write role, or (when the owner's own account authors) set authorMayBeAdmin: true with a fine-grained author token limited to ${zone.repo}; merges then go through the reviewer.`,
+      fix: starter
+        ? `${PERSONAL_REPO_FIX(zone)} Otherwise give ${who} the Write role.`
+        : `Give ${who} the Write role, or (when the owner's own account authors) set authorMayBeAdmin: true with a fine-grained author token limited to ${zone.repo}; merges then go through the reviewer.`,
     };
-  if (admin)
+  if (admin) {
+    // Admin-ness adds ruleset editing; a fine-grained token without Administration can't use it.
+    const probe = await attempt(() => r.pair.author.probeAdministration());
+    const status = probe.ok ? probe.value.status : probe.status;
+    const limited = probe.ok && probe.value.rateLimited === true;
+    const allowed = `${who} (the author) is a repository admin, allowed by authorMayBeAdmin: true (the path for a personal repository, whose owner is always an admin)${starter ? '' : '; merges go through the reviewer'}`;
+    if (status === 403 || status === 404) {
+      if (!limited)
+        return {
+          ...base,
+          status: 'pass',
+          summary: `${allowed}; its token has no Administration permission (an admin-only read was refused with HTTP ${status}), so it can't change the ruleset`,
+        };
+    }
+    if (status !== null && status >= 200 && status < 300)
+      return {
+        ...base,
+        status: 'warn',
+        summary: `${allowed}, but its token has Administration permission (an admin-only read succeeded): it could change the ruleset that guards its own merges`,
+        fix: `Edit the fine-grained author token (Settings → Developer settings → Fine-grained tokens): set Administration to No access, keep it limited to ${zone.repo}, and restart.`,
+      };
     return {
       ...base,
       status: 'warn',
-      summary: `${who} (the author) is a repository admin, allowed by authorMayBeAdmin: true; merges go through the reviewer, and the fine-grained token is the only limit on what the author token can change`,
-      fix: 'Keep the author token fine-grained, limited to this repository, with no Administration permission.',
+      summary: `${allowed}; could not check whether its token has Administration permission (${limited ? 'rate limit' : status === null ? 'no answer' : `HTTP ${status}`})`,
+      fix: 'Run the doctor again in a few minutes; the author token must have no Administration permission.',
     };
+  }
   if (zone.authorMayBeAdmin)
     return {
       ...base,
@@ -770,6 +794,10 @@ async function readsCheck(
   };
 }
 
+/** The starter-mode fix for an admin author: the path for a personal repository, in plain words. */
+const PERSONAL_REPO_FIX = (zone: DropZoneConfig): string =>
+  `On a personal repository the owner is always an admin, and only the owner's account can make a fine-grained token for it, so starter mode runs with your own account: set authorMayBeAdmin: true on the zone, and keep the author token fine-grained, limited to ${zone.repo}, with no Administration or Workflows permission (the doctor's forge.admin check tries an admin-only read to confirm it).`;
+
 const RULE_FIX: [RegExp, (zone: DropZoneConfig, branch: string) => string][] = [
   [
     /^no ruleset$/,
@@ -801,7 +829,10 @@ const RULE_FIX: [RegExp, (zone: DropZoneConfig, branch: string) => string][] = [
   ],
   [
     /^bot is admin$/,
-    () => 'Give the bot accounts the Write role instead of Admin (see forge.admin).',
+    (z) =>
+      z.identity === 'starter'
+        ? PERSONAL_REPO_FIX(z)
+        : 'Give the bot accounts the Write role instead of Admin (see forge.admin).',
   ],
   [
     /^required check not pinned: /,
@@ -1330,7 +1361,7 @@ function identityModeCheck(zone: DropZoneConfig): DoctorCheck {
       ...base,
       status: 'warn',
       summary: STARTER_WARNING,
-      fix: `To add a reviewer identity: give a second account Write on ${zone.repo}, put its token in the file JM_GITHUB_REVIEWER_TOKEN_FILE names, set identity: "two-bot" in the zone, require 1 approval with stale approvals dismissed in the ruleset, and restart.`,
+      fix: `To add a reviewer identity: give a second account Write on ${zone.repo}, put its token in the file JM_GITHUB_REVIEWER_TOKEN_FILE names, set identity: "two-bot" in the zone, require 1 approval with stale approvals dismissed in the ruleset, and restart. On a personal repository you can stay in starter mode with your own account (the owner, always an admin) by setting authorMayBeAdmin: true with a fine-grained token that has no Administration or Workflows permission.`,
     };
   return {
     ...base,

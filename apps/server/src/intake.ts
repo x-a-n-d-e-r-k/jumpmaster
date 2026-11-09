@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { containsSecret } from '@jumpmaster/protocol';
 import { z } from 'zod';
 import type { DropZoneConfig } from './config.js';
 import {
@@ -40,7 +41,7 @@ export const ISSUE_SPEC_HEADINGS = [
   'Out of scope',
 ] as const;
 
-/** Filings one zone may make in a trailing hour (in memory: a restart clears it). */
+/** Filings one zone may make in a trailing hour (counted in `crew_issues`). */
 export const INTAKE_PER_HOUR = 10;
 
 const item = (max: number) => z.string().trim().min(1).max(max);
@@ -195,31 +196,26 @@ export function forgetSubmitKey(store: KeyStore, content: string): void {
   store.removeItem(`jm-intake:${h.toString(16)}${g.toString(16)}:${content.length}`);
 }
 
-/** Trailing-hour filings per zone; one limiter per server process. */
-export function intakeLimiter(perHour = INTAKE_PER_HOUR) {
-  const seen = new Map<string, number[]>();
-  return {
-    /** Takes a slot for the zone, or returns false when the hour's are used. */
-    take(zoneId: string, now: Date): boolean {
-      const since = now.getTime() - 60 * 60_000;
-      const recent = (seen.get(zoneId) ?? []).filter((t) => t > since);
-      if (recent.length >= perHour) {
-        seen.set(zoneId, recent);
-        return false;
-      }
-      recent.push(now.getTime());
-      seen.set(zoneId, recent);
-      return true;
-    },
-  };
+/** Intake filings the zone made in the trailing hour, counted in the database (restarts keep it). */
+function filingsLastHour(db: Db, zoneId: string, now: Date): number {
+  const since = new Date(now.getTime() - 60 * 60_000).toISOString();
+  return (
+    db
+      .prepare(
+        'SELECT COUNT(*) AS n FROM crew_issues WHERE zone_id = ? AND source = ? AND created_at > ?',
+      )
+      .get(zoneId, INTAKE_SOURCE, since) as { n: number }
+  ).n;
 }
-export type IntakeLimiter = ReturnType<typeof intakeLimiter>;
+
+/** How long a `filing` intake row may lack its outbox row before it is given up as failed. */
+export const INTAKE_ORPHAN_MS = 10 * 60_000;
 
 export type IntakeOutcome =
   | { status: 201 | 200; key: string; number: number; state: 'promoted'; repeated?: true }
   | { status: 202; key: string; state: 'filing' }
   | { status: 200; key: string; state: string; number: number | null; repeated: true }
-  | { status: 409 | 429 | 502; error: string };
+  | { status: 400 | 409 | 429 | 502; error: string };
 
 const opKeyOf = (zoneId: string, key: string): string =>
   opKeys.issue(zoneId, INTAKE_OBJECTIVE, key);
@@ -240,7 +236,10 @@ function outcome(row: CrewIssue, created: boolean, error?: string): IntakeOutcom
       : { status: 200, key: row.key, number: row.number, state: 'promoted', repeated: true };
   if (row.state === 'filing') return { status: 202, key: row.key, state: 'filing' };
   if (row.state === 'failed')
-    return { status: 502, error: `the forge refused the issue: ${error ?? 'see the outbox'}` };
+    return {
+      status: 502,
+      error: `GitHub refused the issue, so nothing was filed${error ? ` (${error.split('\n')[0]?.slice(0, 200)})` : ''}. Change what it refused and submit again: the page starts a fresh submission.`,
+    };
   return { status: 200, key: row.key, state: row.state, number: row.number, repeated: true };
 }
 
@@ -254,9 +253,16 @@ export async function fileIntakeIssue(
   zone: DropZoneConfig,
   input: z.infer<typeof IntakeIssueSchema>,
   secrets: string[],
-  limiter: IntakeLimiter,
   now: Date,
 ): Promise<IntakeOutcome> {
+  // A secret never reaches the database or the forge: refused before anything is stored, as the
+  // MCP write path refuses it.
+  const { idempotencyKey: _key, ...text } = input;
+  if (containsSecret(JSON.stringify(text), secrets))
+    return {
+      status: 400,
+      error: 'the issue contains a token or secret: remove it and submit again',
+    };
   const key = intakeKey(input.idempotencyKey);
   const existing = listCrewIssues(db, zone.id).find((r) => r.key === key);
   if (existing && existing.source !== INTAKE_SOURCE)
@@ -272,7 +278,7 @@ export async function fileIntakeIssue(
     };
   let row = existing;
   if (!row) {
-    if (!limiter.take(zone.id, now))
+    if (filingsLastHour(db, zone.id, now) >= INTAKE_PER_HOUR)
       return {
         status: 429,
         error: `at most ${INTAKE_PER_HOUR} intake issues per zone per hour; try again later`,
@@ -326,7 +332,17 @@ export function confirmIntakeIssues(db: Db, zoneId: string, now: Date): number {
   for (const row of listCrewIssues(db, zoneId, ['filing'])) {
     if (row.source !== INTAKE_SOURCE) continue;
     const op = getOutbox(db, opKeyOf(zoneId, row.key));
-    if (!op || (op.state !== 'done' && op.state !== 'failed')) continue;
+    if (!op) {
+      // No outbox row: the request stopped before `runOp` inserted one (a crash, or a mode change
+      // in between), so no forge call was made. Past a grace period it is given up as failed, so
+      // it holds no slot and the page can submit afresh.
+      if (now.getTime() - Date.parse(row.createdAt) >= INTAKE_ORPHAN_MS) {
+        setCrewIssue(db, row.id, { state: 'failed' }, now);
+        moved++;
+      }
+      continue;
+    }
+    if (op.state !== 'done' && op.state !== 'failed') continue;
     let result: unknown;
     try {
       result = op.resultJson == null ? undefined : JSON.parse(op.resultJson);

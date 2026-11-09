@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
-import { type Config, loadConfig, secretList } from './config.js';
+import { type Config, loadConfig, secretList, startupWarnings } from './config.js';
 import { creditsPass } from './credits.js';
 import { openDb } from './db/open.js';
 import { ensureZoneMode } from './db/repo.js';
@@ -42,6 +42,8 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
     return pair;
   };
   const log = (msg: string) => console.error(`[jumpmaster] ${scrub(msg, config)}`);
+  // Risky settings are said out loud at every start (starter mode's merge-any-green-PR residual).
+  for (const w of startupWarnings(config)) log(`warning: ${w}`);
 
   // The doctor's forge on the read token: reads only, never handed a write.
   const readToken = config.secrets.githubReadToken;
@@ -72,6 +74,8 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
     forgesFor,
     readForgeFor,
     doctorForgesFor,
+    // The intake files through the same timed forges: a stalled forge answers 502, not a hang.
+    intakeForgesFor: doctorForgesFor,
     now: () => new Date(),
     kick: () => void guardedPass(),
     log,

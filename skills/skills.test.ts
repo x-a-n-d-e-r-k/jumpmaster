@@ -29,7 +29,8 @@ const label = (path: string): string => relative(ROOT, path);
 
 /** `---` frontmatter, parsed as YAML (as Claude Code reads it); null when absent or not a map. */
 function frontmatter(md: string): Record<string, unknown> | null {
-  const m = /^---\n([\s\S]*?)\n---\n/.exec(md);
+  // The documented shape: `---` on the first line, `name:` on the next, nothing in between.
+  const m = /^---\n(name: [\s\S]*?)\n---\n/.exec(md);
   if (!m) return null;
   const doc: unknown = yaml.load(m[1] ?? '', { schema: yaml.CORE_SCHEMA });
   return doc !== null && typeof doc === 'object' ? (doc as Record<string, unknown>) : null;
@@ -116,6 +117,30 @@ describe('skills', () => {
     ];
     for (const f of markdownFiles())
       for (const [what, re] of banned) expect(read(f), `${label(f)}: ${what}`).not.toMatch(re);
+  });
+
+  test('enabling the crew is never a step: it is a separate later choice that spends usage', () => {
+    for (const f of markdownFiles()) {
+      const text = read(f);
+      expect(text, label(f)).not.toMatch(/crew\.enabled:\s*true/);
+      expect(text, label(f)).not.toMatch(
+        /\b(set|turn on|enable)\s+(the\s+)?(zone's\s+)?crew\b(?![^.]*\b(separate|later)\b)/i,
+      );
+    }
+    const splitter = read(join(ROOT, 'shared', 'issue-splitter.md'));
+    expect(splitter).toMatch(/separate[^.]*later[^.]*choice/i);
+    expect(splitter).toMatch(/spends?\s+usage/i);
+  });
+
+  test('no skill pushes a branch unless Command asks for it', () => {
+    for (const f of markdownFiles())
+      for (const line of read(f).split('\n'))
+        if (
+          /\bpush\b.*\bbranch\b|git push/i.test(line) &&
+          !/never push|push to the default branch/i.test(line)
+        )
+          expect(line, label(f)).toMatch(/\b(ask|asks|asked|only if)\b/i);
+    expect(read(join(ROOT, 'shared', 'ladder-writer.md'))).toMatch(/Ask Command whether to push/);
   });
 
   test('every relative link between skill files resolves', () => {

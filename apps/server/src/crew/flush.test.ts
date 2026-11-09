@@ -7,11 +7,19 @@ import {
   raiseBriefing,
   ruleBriefing,
 } from '../briefings.js';
-import { getOutbox, setKilled, setWorkItemState, setZoneMode, upsertWorkItem } from '../db/repo.js';
+import {
+  getOutbox,
+  listWorkItems,
+  setKilled,
+  setWorkItemState,
+  setZoneMode,
+  upsertWorkItem,
+} from '../db/repo.js';
 import { reconcileZone } from '../flow/reconcile.js';
 import { zonePass } from '../flow/snapshot.js';
 import { isJmIssueBody, opMarker, resolveUnknown, sanitizeCrewText } from '../outbox.js';
 import { promptVersions } from '../payloads.js';
+import { syncDropZone } from '../sync.js';
 import { makeZone, usageCfg, type ZoneWorld, zoneWorld } from '../test/fixtures.js';
 import { plus, t0 } from '../test/helpers.js';
 import { flushCrewOps } from './flush.js';
@@ -452,6 +460,29 @@ describe('crew disabled', () => {
     expect(getCrewIssue(w.db, id)?.state).toBe('promoting');
     expect(outboxRows()).toBe(before);
     expect(writes('setLabels')).toHaveLength(0);
+  });
+
+  test('an MCP-filed intent is filed staged with the crew off, and is still not started', async () => {
+    const id = insertCrewIssue(w.db, {
+      zoneId: 'main',
+      key: 'mcp-docs',
+      source: 'mcp',
+      sourceRef: 'token-1',
+      objective: 'document-every-endpoint',
+      title: 'Add docs',
+      body: 'Write the docs.',
+      priority: null,
+      createdAt: t0.toISOString(),
+    });
+    expect(await flushOff()).toBe(1);
+    const row = getCrewIssue(w.db, id);
+    expect(row?.state).toBe('staged');
+    const created = writes('createIssue');
+    expect(created).toHaveLength(1);
+    expect((created[0]?.args[0] as { labels: string[] }).labels).toEqual([off.crew.stagedLabel]);
+    // Staged, not ready: the next sync starts nothing.
+    await syncDropZone(w.db, w.forges, off, t0);
+    expect(listWorkItems(w.db, 'main').filter((i) => i.issueNumber === row?.number)).toEqual([]);
   });
 
   test('a filing intent is not filed, and revising waits too', async () => {

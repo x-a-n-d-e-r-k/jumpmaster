@@ -81,6 +81,8 @@ export function createApp(
     readForgeFor?: (zoneId: string) => Forge | undefined;
     /** The doctor's forges (requests time out); defaults to `forgesFor`. */
     doctorForgesFor?: (zoneId: string) => ForgePair;
+    /** The intake's forges (requests time out); defaults to `forgesFor`. */
+    intakeForgesFor?: (zoneId: string) => ForgePair;
     /** The operator's log, scrubbed of secrets (main.ts); MCP's internal errors go here. */
     log?: (msg: string) => void;
   },

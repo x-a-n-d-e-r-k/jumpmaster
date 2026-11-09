@@ -53,9 +53,10 @@ fewer; the rest can wait in Non-goals or come later.
 2. Create a **local branch** (for example `goal/first-ladder`), write `GOAL.md` at the
    repository root (or at the zone's `crew.goalPath` if Command set another), and commit it with
    a plain message such as "Add the goal ladder".
-3. Push the branch and tell Command to **open a pull request and merge it themselves**. Never
+3. Ask Command whether to push the branch, or whether they will push it themselves; push only if
+   they ask you to. Then Command **opens a pull request and merges it themselves**. Never
    push to the default branch and never merge: the merge is Command's review of the ladder.
 4. Wait until Command says it is merged. Then check `mcp__jumpmaster__get_goals`: the ladder
-   appears there once Jumpmaster has read the default branch (the crew must be enabled for the
-   zone; see [the issue splitter](issue-splitter.md)). If it reports a parse error, fix the file
-   on a new branch the same way.
+   appears there once Jumpmaster has read the default branch, on its next pass, whether or not
+   the zone's crew is on. If it reports a parse error, fix the file on a new branch the same way.
+   Then go on to [the issue splitter](issue-splitter.md).

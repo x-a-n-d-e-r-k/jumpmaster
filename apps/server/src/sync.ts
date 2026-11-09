@@ -204,7 +204,9 @@ export async function syncDropZone(
     }
   });
   run();
-  if (zone.crew?.enabled) {
+  // The ladder is read whenever a goal file is configured, crew on or off: one file read per
+  // pass, no usage, and the goals page, the intake and MCP's get_goals rely on it.
+  if (zone.crew?.goalPath) {
     try {
       await refreshGoals(db, forge, zone, defaultBranch, now);
     } catch (err) {

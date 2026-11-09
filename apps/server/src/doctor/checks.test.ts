@@ -227,7 +227,11 @@ describe('forge checks', () => {
     expect(one(await w.run(), 'forge.admin').status).toBe('fail');
     const allowed = world({ zone: { authorMayBeAdmin: true } });
     allowed.f.state.access.author.permissions.admin = true;
-    expect(one(await allowed.run(), 'forge.admin').status).toBe('warn');
+    // The admin-only read is refused, so the token lacks Administration: allowed, and said why.
+    expect(one(await allowed.run(), 'forge.admin')).toMatchObject({
+      status: 'pass',
+      summary: expect.stringContaining('no Administration permission'),
+    });
     const unneeded = world({ zone: { authorMayBeAdmin: true } });
     expect(one(await unneeded.run(), 'forge.admin')).toMatchObject({
       status: 'warn',
@@ -546,6 +550,7 @@ describe('starter identity', () => {
     expect(STARTER_WARNING).toContain('can merge any green PR, including an unreviewed one');
     expect(STARTER_WARNING).toContain('no Workflows permission');
     expect(c.fix).toContain('JM_GITHUB_REVIEWER_TOKEN');
+    expect(c.fix).toMatch(/personal repository[^.]*authorMayBeAdmin: true/);
     expect(c.doc).toMatch(/install\.md#/);
   });
 
@@ -580,6 +585,56 @@ describe('starter identity', () => {
     expect(c.summary).toContain('required check not from GitHub Actions: ci');
     expect(c.fix).toContain('Required approvals to 0');
     expect(c.fix).toContain('GitHub Actions');
+  });
+
+  test('a starter install on a personal repository: own admin account, authorMayBeAdmin, no Administration', async () => {
+    const w = world({ zone: { identity: 'starter', authorMayBeAdmin: true } });
+    w.f.state.access.author.permissions.admin = true;
+    const r = w.f.state.rules.author;
+    if (r.kind === 'ok') r.rules.viewerIsAdmin = true;
+    const checks = await w.run();
+    expect(one(checks, 'forge.branch-rules').status).toBe('pass');
+    expect(one(checks, 'forge.admin')).toMatchObject({
+      status: 'pass',
+      summary: expect.stringContaining('personal repository'),
+    });
+  });
+
+  test('forge.admin warns when the admin author token has Administration permission', async () => {
+    const w = world({ zone: { identity: 'starter', authorMayBeAdmin: true } });
+    w.f.state.access.author.permissions.admin = true;
+    w.f.state.adminProbe.author = {
+      permission: 'Administration: read',
+      status: 200,
+      accepted: null,
+    };
+    const c = one(await w.run(), 'forge.admin');
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('Administration');
+    expect(c.fix).toContain('Administration');
+    w.f.state.adminProbe.author = {
+      permission: 'Administration: read',
+      status: 502,
+      accepted: null,
+    };
+    expect(one(await w.run(), 'forge.admin')).toMatchObject({
+      status: 'warn',
+      summary: expect.stringContaining('could not check'),
+    });
+  });
+
+  test('a starter admin author without authorMayBeAdmin: the doctor names the personal-repository path', async () => {
+    const w = starter();
+    w.f.state.access.author.permissions.admin = true;
+    const r = w.f.state.rules.author;
+    if (r.kind === 'ok') r.rules.viewerIsAdmin = true;
+    const checks = await w.run();
+    for (const id of ['forge.admin', 'forge.branch-rules']) {
+      const c = one(checks, id);
+      expect(c.status, id).toBe('fail');
+      expect(c.fix, id).toMatch(/personal repository/);
+      expect(c.fix, id).toContain('authorMayBeAdmin: true');
+    }
   });
 
   test('forge.codeowners warns: a required code owner review needs a human in starter mode', async () => {

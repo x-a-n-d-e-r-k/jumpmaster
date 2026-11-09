@@ -195,6 +195,11 @@ export interface Forge {
   listDir(ref: string, path: string): Promise<string[] | null>;
   /** Tries each read the server relies on (one GET each) and reports the status. */
   probeReads(sha: string): Promise<ReadProbe[]>;
+  /**
+   * Tries one read only Administration permission allows (`GET …/actions/permissions`): a 403 or
+   * 404 says the token lacks Administration, so it can't change the repository's rulesets.
+   */
+  probeAdministration(): Promise<ReadProbe>;
 }
 
 const TRUSTED_ROLES = new Set(['write', 'maintain', 'admin']);
@@ -929,6 +934,27 @@ export class GitHubForge implements Forge {
     } catch (err) {
       if (statusOf(err) === 404) return null;
       throw err;
+    }
+  }
+
+  async probeAdministration(): Promise<ReadProbe> {
+    const permission = 'Administration: read';
+    try {
+      const res = await this.octokit.request('GET /repos/{owner}/{repo}/actions/permissions', {
+        owner: this.owner,
+        repo: this.repo,
+      });
+      return { permission, status: res.status, accepted: null };
+    } catch (err) {
+      const response = (err as { response?: { headers?: Record<string, unknown> } }).response;
+      const status = response ? (statusOf(err) ?? null) : null;
+      const accepted = response?.headers?.['x-accepted-github-permissions'];
+      return {
+        permission,
+        status,
+        accepted: typeof accepted === 'string' ? accepted : null,
+        ...(status !== null && isRateLimited(err) ? { rateLimited: true } : {}),
+      };
     }
   }
 

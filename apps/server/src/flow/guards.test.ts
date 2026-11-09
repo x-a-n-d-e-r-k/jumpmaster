@@ -980,6 +980,22 @@ describe('branchProtectionProblems', () => {
         'required check not from GitHub Actions: other',
       ]));
 
+    test('an admin author is allowed with authorMayBeAdmin (the personal-repository path), never a bypass', () => {
+      const admin = { ...starter, authorMayBeAdmin: true } as DropZoneConfig;
+      expect(
+        branchProtectionProblems({ author: ok({ viewerIsAdmin: true }), reviewer: null }, admin),
+      ).toEqual([]);
+      expect(
+        branchProtectionProblems({ author: ok({ viewerIsAdmin: true }), reviewer: null }, starter),
+      ).toEqual(['bot is admin']);
+      expect(
+        branchProtectionProblems(
+          { author: ok({ viewerIsAdmin: true, viewerCanBypass: true }), reviewer: null },
+          admin,
+        ),
+      ).toEqual(['bot can bypass']);
+    });
+
     test('a pull request rule of unknown presence is a problem in starter mode', () =>
       expect(
         branchProtectionProblems(

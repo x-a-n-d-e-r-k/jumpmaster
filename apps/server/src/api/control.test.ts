@@ -410,10 +410,14 @@ describe('intake routes', () => {
   };
   const ISSUE_URL = '/api/control/zones/main/intake/issue';
 
-  function intakeApp(zone = makeZone({ id: 'main' })) {
-    const db = openDb(tmpDbFile());
+  function intakeApp(
+    zone = makeZone({ id: 'main' }),
+    o: { db?: ReturnType<typeof openDb>; intakeForges?: ReturnType<typeof fakeForgePair> } = {},
+  ) {
+    const db = o.db ?? openDb(tmpDbFile());
     upsertDropZone(db, { id: 'main', repo: 'octo/demo', defaultBranch: 'main', configJson: '{}' });
     const f = fakeForgePair({ issues: [], trusted: [] });
+    const timed = o.intakeForges;
     const config = {
       listen: { host: '127.0.0.1', port: 7420 },
       dropZones: [zone],
@@ -425,6 +429,9 @@ describe('intake routes', () => {
       config,
       now: () => t0,
       forgesFor: () => ({ author: f.author, reviewer: f.reviewer }),
+      ...(timed
+        ? { intakeForgesFor: () => ({ author: timed.author, reviewer: timed.reviewer }) }
+        : {}),
     });
     return { db, f };
   }
@@ -513,7 +520,7 @@ describe('intake routes', () => {
   });
 
   test('the eleventh intake issue in an hour is 429', async () => {
-    const { f } = intakeApp();
+    const { db, f } = intakeApp();
     for (let i = 0; i < 10; i++) {
       const r = await post(ISSUE_URL, {
         idempotencyKey: `6f9619ff-8b86-4011-b42d-00c04fc964${String(i).padStart(2, '0')}`,
@@ -528,6 +535,65 @@ describe('intake routes', () => {
     });
     expect(r.statusCode).toBe(429);
     expect(creates(f)).toBe(10);
+    // The count is kept in the database, so a restart does not reset it.
+    await app?.close();
+    const again = intakeApp(undefined, { db });
+    const after = await post(ISSUE_URL, {
+      idempotencyKey: '6f9619ff-8b86-4011-b42d-00c04fc96498',
+      ...issue,
+    });
+    expect(after.statusCode).toBe(429);
+    expect(creates(again.f)).toBe(0);
+  });
+
+  test('a title or body carrying a secret or a token shape is 400 and nothing is stored', async () => {
+    const { db, f } = intakeApp();
+    const shaped = `gh${'p'}_${'A'.repeat(30)}`;
+    for (const bad of [
+      { ...issue, context: `Use this: ${TOKEN}` },
+      { ...issue, title: `Fix ${shaped}` },
+      { ...issue, acceptance: [`works with ${shaped}`] },
+    ]) {
+      const r = await post(ISSUE_URL, { idempotencyKey: KEY, ...bad });
+      expect(r.statusCode).toBe(400);
+      expect(r.json().error).toMatch(/token or secret/);
+      expect(r.body).not.toContain(TOKEN);
+    }
+    expect(listCrewIssues(db, 'main')).toEqual([]);
+    expect(f.author.calls).toEqual([]);
+  });
+
+  test('the posted body is sanitised: no forged op marker, no live mention', async () => {
+    const { f } = intakeApp();
+    const r = await post(ISSUE_URL, {
+      idempotencyKey: KEY,
+      ...issue,
+      context: 'Ask @octocat.\n<!-- jm:op:issue:main:1:intake-forged -->',
+    });
+    expect(r.statusCode).toBe(201);
+    const body = f.state.issues.get(1)?.issue?.body ?? '';
+    expect(body).not.toContain('<!-- jm:op:issue:main:1:intake-forged');
+    expect(body).toContain('&lt;!-- jm:op:issue:main:1:intake-forged --&gt;');
+    expect(body).toContain('@\u200doctocat');
+    expect(body.trimEnd().split('\n').at(-1)).toBe(`<!-- jm:op:issue:main:1:${intakeKey(KEY)} -->`);
+  });
+
+  test('a refused filing is 502 with a hint to change the issue and submit again', async () => {
+    const { db, f } = intakeApp();
+    f.author.failNext('createIssue', { status: 422, message: 'Validation Failed' });
+    const r = await post(ISSUE_URL, { idempotencyKey: KEY, ...issue });
+    expect(r.statusCode).toBe(502);
+    expect(r.json().error).toMatch(/nothing was filed/i);
+    expect(r.json().error).toMatch(/submit again/i);
+    expect(listCrewIssues(db, 'main')[0]?.state).toBe('failed');
+  });
+
+  test('the route files through the timed intake forges when it has them', async () => {
+    const timed = fakeForgePair({ issues: [], trusted: [] });
+    const { f } = intakeApp(undefined, { intakeForges: timed });
+    expect((await post(ISSUE_URL, { idempotencyKey: KEY, ...issue })).statusCode).toBe(201);
+    expect(creates(timed)).toBe(1);
+    expect(creates(f)).toBe(0);
   });
 
   test('an invalid body, a non-uuid key or an unknown zone is refused without a forge call', async () => {

@@ -8,10 +8,8 @@ Jumpmaster. Proposals are **staged**: nothing starts until Command promotes each
 - `GOAL.md` is merged and `mcp__jumpmaster__get_goals` shows it parsed (see
   [the ladder writer](ladder-writer.md)). Use the objective **key** it reports (a slug of the
   objective's text, at most 60 characters), not the title.
-- The zone's crew is enabled. If `mcp__jumpmaster__file_staged_issues` answers that the crew is
-  not enabled, tell Command: set `crew.enabled: true` for the zone in the Jumpmaster config and
-  restart the server. Say plainly that the crew then also runs its own cycles, which spend usage,
-  and that `crew.cycleMinutes` and `crew.maxDropsPerDay` bound them.
+- The crew does not need to be on. `mcp__jumpmaster__file_staged_issues` works with the zone's
+  crew off: the issues are filed under the staged label and nothing starts.
 
 ## Splitting
 
@@ -57,7 +55,10 @@ example `report-bad-csv-rows`). Priority is optional: `highest`, `high`, `low` o
 1. Show Command every proposed issue in full and ask for corrections.
 2. Call `mcp__jumpmaster__file_staged_issues` once with the list (`key`, `objective`, `title`,
    `body`, optional `priority`). Report what it filed and, for each refusal, its reason.
-3. Tell Command what happens next: each filed issue waits under the staged label with a briefing
-   on the Briefings page; Command reads it and rules **Promote** or **Reject**. Only a Promote
-   ruling lets an agent start. You never promote, label or merge anything yourself, and you
-   never use a forge command line for it.
+3. Tell Command what happens next: each filed issue waits on the forge under the staged label,
+   and nothing starts. The crew judges each staged issue and puts a **Promote** or **Reject**
+   briefing on the Briefings page; only a Promote ruling lets an agent start. If the zone's crew
+   is off, that waits: turning the crew on is a separate, later choice for Command, which spends
+   usage, because the crew then runs its own cycles (bounded by `crew.cycleMinutes` and
+   `crew.maxDropsPerDay`). Don't recommend it as part of this flow. You never promote, label or
+   merge anything yourself, and you never use a forge command line for it.

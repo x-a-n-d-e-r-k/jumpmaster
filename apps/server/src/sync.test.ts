@@ -195,10 +195,17 @@ describe('GOAL.md refresh', () => {
     expect(getGoals(db, 'main')?.parse).toMatchObject({ ok: true });
   });
 
-  test('a zone without crew never reads GOAL.md', async () => {
+  test('with the crew off, GOAL.md is still read whenever crew.goalPath is set', async () => {
     const forge = fakeForge({ issues: [], trusted: [] });
     forge.state.files.set('main:GOAL.md', '## Objectives\n### One\n');
     await syncDropZone(db, pair(forge), crewZone(false), t0);
+    expect(getGoals(db, 'main')?.parse).toMatchObject({ ok: true });
+  });
+
+  test('a zone with no crew settings at all never reads a goal file', async () => {
+    const forge = fakeForge({ issues: [], trusted: [] });
+    forge.state.files.set('main:GOAL.md', '## Objectives\n### One\n');
+    await syncDropZone(db, pair(forge), zone, t0);
     expect(getGoals(db, 'main')).toBeUndefined();
   });
 
@@ -513,6 +520,33 @@ describe('intake issues at sync', () => {
     expect(getCrewIssue(w.db, id)).toMatchObject({ state: 'promoted', number: 20 });
     expect(numbers(w)).toEqual([20]);
     expect(r.skippedCrewUnpromoted).toEqual([]);
+  });
+
+  test('an intake row whose create failed is marked failed at the next sync', async () => {
+    const w = world(true);
+    const id = row(w, { state: 'filing' });
+    insertOutbox(w.db, {
+      id: 'o1',
+      opKey: OP,
+      kind: 'create_issue',
+      workItemId: null,
+      zoneId: 'main',
+      payloadJson: '{}',
+      state: 'pending',
+      createdAt: t0.toISOString(),
+    });
+    updateOutbox(w.db, OP, { state: 'failed', error: 'HTTP 422' }, t0);
+    await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(getCrewIssue(w.db, id)?.state).toBe('failed');
+  });
+
+  test('a filing intake row with no outbox row is swept to failed after ten minutes, not before', async () => {
+    const w = world(true);
+    const id = row(w, { state: 'filing' });
+    await syncDropZone(w.db, w.forges, w.zone, plus(t0, 9 * 60_000));
+    expect(getCrewIssue(w.db, id)?.state).toBe('filing');
+    await syncDropZone(w.db, w.forges, w.zone, plus(t0, 11 * 60_000));
+    expect(getCrewIssue(w.db, id)?.state).toBe('failed');
   });
 
   test('an intake row is never filed as a staged crew issue by the crew flush', async () => {

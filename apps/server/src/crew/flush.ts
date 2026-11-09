@@ -194,10 +194,11 @@ function rejectedByCommand(db: Db, row: CrewIssue): boolean {
 /**
  * Moves crew issues along by their forge writes, all through the outbox as the author identity.
  * Only in an active zone with the kill switch off; returns how many issues changed state. With the
- * zone's crew disabled nothing is filed, promoted (a refute hold neither starts nor ends), revised
- * or closed by the crew: those rows wait as they are until it is enabled again. The one write that
- * goes ahead is the close of an issue Command rejected by ruling (its brake); a `rejecting` row from
- * a refute verdict waits like the rest.
+ * zone's crew disabled nothing is promoted (a refute hold neither starts nor ends), revised or
+ * closed by the crew, and crew drops' filings wait until it is enabled again. Two writes go ahead:
+ * an assistant's (MCP) filing, which lands staged and starts nothing without a Promote ruling, and
+ * the close of an issue Command rejected by ruling (its brake); a `rejecting` row from a refute
+ * verdict waits like the rest.
  */
 export async function flushCrewOps(
   db: Db,
@@ -214,7 +215,10 @@ export async function flushCrewOps(
   for (const row of listCrewIssues(db, zone.id, PENDING)) {
     // An intake row is Command's issue, filed ready by its own route: never a staged crew filing.
     if (row.source === INTAKE_SOURCE) continue;
-    if (!crewOn) {
+    // An assistant's (MCP) proposal is filed staged with the crew off: it starts nothing until
+    // Command promotes it, and promotion still waits for the crew.
+    const mcpFiling = row.source === 'mcp' && row.state === 'filing';
+    if (!crewOn && !mcpFiling) {
       // No forge write, but a create that already resolved gives the row its number, so intake
       // knows the issue as crew.
       if (row.state === 'filing' && row.number === null) {

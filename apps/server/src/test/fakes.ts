@@ -81,6 +81,8 @@ export interface FakeForgeState {
   dirs: Map<string, string[]>;
   /** Each identity's read probes (default: every read 200). */
   probes: Record<Identity, ReadProbe[]>;
+  /** What `probeAdministration` answers; by default refused (no Administration permission). */
+  adminProbe: Record<Identity, ReadProbe>;
 }
 
 /** The forge's methods that write; a doctor run must call none of them. */
@@ -273,6 +275,10 @@ function createState(opts: {
     labels: [],
     dirs: new Map(),
     probes: { author: okProbes(), reviewer: okProbes() },
+    adminProbe: {
+      author: { permission: 'Administration: read', status: 403, accepted: null },
+      reviewer: { permission: 'Administration: read', status: 403, accepted: null },
+    },
   };
   return state;
 }
@@ -442,6 +448,7 @@ function forgeFor(
       return d ? [...d] : null;
     },
     probeReads: async () => structuredClone(state.probes[identity]),
+    probeAdministration: async () => structuredClone(state.adminProbe[identity]),
   };
 
   const failures = new Map<string, FailMode[]>();

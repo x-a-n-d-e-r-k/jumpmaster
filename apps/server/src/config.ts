@@ -246,14 +246,6 @@ const DropZoneSchema = DropZoneObject.superRefine((zone, ctx) => {
         'a starter zone requires ciRequired: true: with no reviewer identity, required CI is what GitHub enforces',
     });
   }
-  if (zone.identity === 'starter' && zone.authorMayBeAdmin) {
-    ctx.addIssue({
-      code: 'custom',
-      path: ['authorMayBeAdmin'],
-      message:
-        'a starter zone may not set authorMayBeAdmin: there is no second identity to merge, and an admin author could change the rules its own merges are checked against',
-    });
-  }
   if ((zone.egress?.mode ?? 'off') !== 'off' && zone.services.length > MAX_EGRESS_SERVICES) {
     ctx.addIssue({
       code: 'custom',
@@ -386,6 +378,13 @@ export type ClaudeConfig = {
   tokenCreatedAt?: string;
 };
 
+/** What the server says at startup about risky settings: one line per starter zone. */
+export function startupWarnings(config: Pick<Config, 'dropZones'>): string[] {
+  return config.dropZones
+    .filter((z) => z.identity === 'starter')
+    .map((z) => `zone ${z.id}: ${STARTER_WARNING}`);
+}
+
 /** The model for a role: the per-role override, else the zone's model. */
 export function modelFor(zone: DropZoneConfig, role: Role): string {
   return zone.models[role] ?? zone.model;
@@ -513,7 +512,9 @@ export function loadConfig(
   for (const name of [...Object.values(SECRET_VARS), 'JM_GITHUB_READ_TOKEN'])
     env[name] = readSecret(rawEnv, name);
   // The reviewer token is optional only when no zone has a reviewer identity.
-  const allStarter = parsed.data.dropZones.every((z) => z.identity === 'starter');
+  const allStarter =
+    parsed.data.dropZones.length > 0 &&
+    parsed.data.dropZones.every((z) => z.identity === 'starter');
   const missing = Object.values(SECRET_VARS).filter(
     (name) => !env[name] && !(allStarter && name === SECRET_VARS.githubReviewerToken),
   );
@@ -528,7 +529,7 @@ export function loadConfig(
   const starters = parsed.data.dropZones.filter((z) => z.identity === 'starter').map((z) => z.id);
   if (starters.length > 0 && !env[SECRET_VARS.githubAuthorToken]?.startsWith('github_pat_'))
     throw new Error(
-      `starter identity (zone(s): ${starters.join(', ')}) requires a fine-grained JM_GITHUB_AUTHOR_TOKEN (github_pat_), limited to the repository, with no Workflows permission`,
+      `starter identity (zone(s): ${starters.join(', ')}) requires a fine-grained JM_GITHUB_AUTHOR_TOKEN (github_pat_), limited to the repository, with no Workflows or Administration permission. On a personal repository, create it with your own account (the owner) and set authorMayBeAdmin: true on the zone: the owner is always an admin, and the fine-grained token is what keeps it from changing the ruleset`,
     );
   // An admin's classic token could edit the ruleset. A fine-grained one can be limited to one repo.
   if (

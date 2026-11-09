@@ -285,9 +285,14 @@ const FileIssuesArgs = z.strictObject({ issues: CrewLeadOutputSchema.shape.fileI
 const BriefingsArgs = z.strictObject({ briefings: CrewLeadOutputSchema.shape.briefings });
 
 /** Checks a write must pass before the action core runs; null when it may go ahead. */
-function writeBlocked(ctx: ToolContext, args: unknown): Outcome | null {
+function writeBlocked(
+  ctx: ToolContext,
+  args: unknown,
+  opts: { needsCrew: boolean } = { needsCrew: true },
+): Outcome | null {
   const { db, config, zone, now } = ctx;
-  if (!zone.crew.enabled) return refused("the zone's crew is not enabled", 'crew disabled');
+  if (opts.needsCrew && !zone.crew.enabled)
+    return refused("the zone's crew is not enabled", 'crew disabled');
   const at = now();
   if (dispatchGate(db, config.usage, at) === 'stopped') {
     const until = getUsageState(db).overageUntil;
@@ -331,10 +336,13 @@ const fileStagedIssuesTool: ToolDef = {
     'Proposes up to 5 issues for the current objectives. Each is filed on the forge under the staged ' +
     'label by Jumpmaster and waits for Command to promote it; the same validation, slots and ' +
     'duplicate checks as crew drops apply. Bodies need "## Acceptance criteria" (a checklist) and ' +
-    '"## Tests" sections.',
+    '"## Tests" sections. Works with the crew off; promotion waits until Command enables the crew.',
   input: FileIssuesArgs,
   run(ctx, args: z.infer<typeof FileIssuesArgs>) {
-    return writeBlocked(ctx, args) ?? applied(ctx, { fileIssues: args.issues });
+    // Staged issues start nothing until Command promotes them, so filing needs no crew.
+    return (
+      writeBlocked(ctx, args, { needsCrew: false }) ?? applied(ctx, { fileIssues: args.issues })
+    );
   },
 };
 

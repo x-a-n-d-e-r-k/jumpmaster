@@ -1,11 +1,13 @@
 import { describe, expect, test } from 'vitest';
 import type { Briefing, Ruling } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
+import { STARTER_WARNING } from '../config.js';
 import type { CrewIssue } from '../crew/store.js';
 import type { Drop, WorkItem } from '../db/repo.js';
 import type { GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import {
+  escapeHtml,
   renderBriefings,
   renderDrop,
   renderGoals,
@@ -647,6 +649,16 @@ describe('home crew line', () => {
   });
 });
 
+describe('starter banner', () => {
+  test('the home page warns about each starter zone, and says nothing for two-bot', () => {
+    const starter = { ...z, id: 'solo', identity: 'starter' } as DropZoneConfig;
+    const html = renderHome({ zones: [z, starter], items: [], drops: [] });
+    expect(html).toContain('Starter mode in zone solo');
+    expect(html).toContain(escapeHtml(STARTER_WARNING));
+    expect(renderHome({ zones: [z], items: [], drops: [] })).not.toContain('Starter mode');
+  });
+});
+
 describe('renderIntake', () => {
   const zone = { id: 'main"><script>x</script>', repo: 'octo/demo' } as DropZoneConfig;
 
@@ -665,6 +677,8 @@ describe('renderIntake', () => {
     expect(html).toContain(submitKey.toString());
     expect(html).toContain(forgetSubmitKey.toString());
     expect(html).toContain('sessionStorage');
+    // A refused filing starts afresh: the stored key is dropped, and the page says so.
+    expect(html).toMatch(/r\.status === 502\) \{\s*forgetSubmitKey\(sessionStorage, content\)/);
     expect(html).not.toContain('innerHTML');
   });
 });

@@ -790,7 +790,9 @@ function starterProblems(read: BranchRulesRead, zone: DropZoneConfig): string[] 
   if (r.requiresPullRequest !== true) out.add('no pull request rule');
   if (r.requiredApprovals > 0) out.add('approvals required in starter mode');
   if (r.viewerCanBypass) out.add('bot can bypass');
-  if (r.viewerIsAdmin) out.add('bot is admin');
+  // The personal-repository path: the owner's own account is always an admin, allowed by
+  // authorMayBeAdmin with a fine-grained token (no Administration permission; the doctor probes it).
+  if (r.viewerIsAdmin && !zone.authorMayBeAdmin) out.add('bot is admin');
   for (const c of r.unpinnedChecks) out.add(`required check not pinned: ${c}`);
   for (const c of r.nonActionsChecks ?? []) out.add(`required check not from GitHub Actions: ${c}`);
   if (r.requiredChecks.length === 0) out.add('no required checks');

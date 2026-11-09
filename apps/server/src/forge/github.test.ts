@@ -1051,6 +1051,34 @@ describe('GitHubForge doctor reads', () => {
     ]);
   });
 
+  test('probeAdministration tries an admin-only read: 403 means the token lacks Administration', async () => {
+    nock(api)
+      .get('/repos/o/r/actions/permissions')
+      .reply(
+        403,
+        { message: 'Resource not accessible by personal access token' },
+        { 'x-accepted-github-permissions': 'administration=read' },
+      );
+    expect(await new GitHubForge('o', 'r', 'tok').probeAdministration()).toEqual({
+      permission: 'Administration: read',
+      status: 403,
+      accepted: 'administration=read',
+    });
+    nock(api).get('/repos/o/r/actions/permissions').reply(200, { enabled: true });
+    expect(await new GitHubForge('o', 'r', 'tok').probeAdministration()).toEqual({
+      permission: 'Administration: read',
+      status: 200,
+      accepted: null,
+    });
+    nock(api)
+      .get('/repos/o/r/actions/permissions')
+      .reply(403, { message: 'API rate limit exceeded' }, { 'x-ratelimit-remaining': '0' });
+    expect(await new GitHubForge('o', 'r', 'tok').probeAdministration()).toMatchObject({
+      status: 403,
+      rateLimited: true,
+    });
+  });
+
   test('probeReads marks a rate-limited read as such, and a network failure as status null', async () => {
     const r = nock(api);
     r.get('/repos/o/r/commits').query(true).replyWithError('socket hang up');

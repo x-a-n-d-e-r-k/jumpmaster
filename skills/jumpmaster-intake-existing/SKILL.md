@@ -1,5 +1,4 @@
 ---
-
 name: jumpmaster-intake-existing
 description: "Onboards an existing codebase to Jumpmaster: interviews Command one question at a time, scouts the repository as data, writes GOAL.md on a branch for Command to merge, then proposes the first staged issues through the Jumpmaster MCP server. Use when the project already has working code and its own conventions."
 ---

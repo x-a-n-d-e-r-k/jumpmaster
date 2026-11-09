@@ -2,7 +2,14 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { loadConfig, modelFor, secretList, zoneSecrets } from './config.js';
+import {
+  loadConfig,
+  modelFor,
+  STARTER_WARNING,
+  secretList,
+  startupWarnings,
+  zoneSecrets,
+} from './config.js';
 
 const fullEnv: Record<string, string | undefined> = {
   JM_CLAUDE_TOKEN: 'a',
@@ -325,10 +332,29 @@ describe('loadConfig', () => {
       ).toThrow(/starter.*fine-grained/);
     });
 
-    test('starter with authorMayBeAdmin is a config error: there is no second identity to merge', () =>
+    test('starter with authorMayBeAdmin loads: the personal-repository path', () => {
+      const c = loadConfig(withZone({ identity: 'starter', authorMayBeAdmin: true }), starterEnv);
+      expect(c.dropZones[0]).toMatchObject({ identity: 'starter', authorMayBeAdmin: true });
+    });
+
+    test('the classic-token error explains the personal-repository path', () =>
       expect(() =>
-        loadConfig(withZone({ identity: 'starter', authorMayBeAdmin: true }), starterEnv),
-      ).toThrow(/starter.*authorMayBeAdmin/));
+        loadConfig(withZone({ identity: 'starter' }), {
+          ...starterEnv,
+          JM_GITHUB_AUTHOR_TOKEN: 'ghp_classic',
+        }),
+      ).toThrow(/personal repository.*your own account.*authorMayBeAdmin: true/));
+
+    test('a config with no zones still needs the reviewer token', () =>
+      expect(() => loadConfig(fixture({ dataDir: './data', dropZones: [] }), starterEnv)).toThrow(
+        /JM_GITHUB_REVIEWER_TOKEN/,
+      ));
+
+    test('startupWarnings names each starter zone with the warning, and nothing for two-bot', () => {
+      const c = loadConfig(withZone({ identity: 'starter' }), starterEnv);
+      expect(startupWarnings(c)).toEqual([`zone main: ${STARTER_WARNING}`]);
+      expect(startupWarnings(loadConfig(minimal, fullEnv))).toEqual([]);
+    });
 
     test('a starter install with a reviewer token set still checks it differs', () =>
       expect(() =>

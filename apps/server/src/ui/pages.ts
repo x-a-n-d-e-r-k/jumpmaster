@@ -1,6 +1,6 @@
 import type { ArtifactRow } from '../artifacts.js';
 import { type Briefing, optionsDigest, type Ruling, WAITS_FOR_CREW } from '../briefings.js';
-import type { DropZoneConfig } from '../config.js';
+import { type DropZoneConfig, STARTER_WARNING } from '../config.js';
 import type { CrewIssue } from '../crew/store.js';
 import type {
   AttemptKey,
@@ -362,6 +362,13 @@ function gateSummary(drop: Drop): string {
 
 export function renderHome(state: HomeState): string {
   const now = state.now ?? new Date();
+  const starterBanner = state.zones
+    .filter((z) => z.identity === 'starter')
+    .map(
+      (z) =>
+        `<p class="warn"><strong>Starter mode in zone ${escapeHtml(z.id)}.</strong> ${escapeHtml(STARTER_WARNING)}</p>`,
+    )
+    .join('');
   const repoOf = new Map(state.zones.map((z) => [z.id, z.repo]));
   const itemById = new Map(state.items.map((i) => [i.id, i]));
 
@@ -405,7 +412,8 @@ export function renderHome(state: HomeState): string {
     : '<p>None seen.</p>';
 
   return page(
-    killSection(state.killed ?? false) +
+    starterBanner +
+      killSection(state.killed ?? false) +
       (state.briefings ? waitingOnYou(state.briefings) : '') +
       usageSection(state.usage) +
       crewSection(state.crew) +
@@ -594,6 +602,9 @@ document.getElementById('issue-form').addEventListener('submit', async (e) => {
   if (r.status === 200 || r.status === 201) {
     forgetSubmitKey(sessionStorage, content);
     say('issue-status', r.body.number != null ? 'Filed as issue #' + r.body.number + ', ready. It starts on the next pass.' : 'Already filed (' + r.body.state + ').');
+  } else if (r.status === 502) {
+    forgetSubmitKey(sessionStorage, content);
+    say('issue-status', 'Nothing was filed: ' + (r.body.error ?? 'GitHub refused it') + ' Submitting again starts a fresh filing.');
   } else if (r.status === 202) {
     say('issue-status', 'The forge has not confirmed the issue yet. Submit again: the same key is reused, so it is never filed twice.');
   } else {

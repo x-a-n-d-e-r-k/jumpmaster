@@ -1,5 +1,4 @@
 ---
-
 name: jumpmaster-intake-idea
 description: "Starts a new project from an idea with Jumpmaster: interviews Command one question at a time, writes GOAL.md on a branch for Command to merge, then proposes the first staged issues (skeleton, gates and CI first) through the Jumpmaster MCP server. Use when little or no code exists yet."
 ---

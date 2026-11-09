@@ -17,13 +17,7 @@ import {
 import type { DoctorEnv } from '../doctor/checks.js';
 import { DoctorBusyError, latestDoctorRun, processEnv, runDoctor } from '../doctor/run.js';
 import type { Forge } from '../forge/github.js';
-import {
-  fileIntakeIssue,
-  GoalStubSchema,
-  IntakeIssueSchema,
-  intakeLimiter,
-  renderGoalStub,
-} from '../intake.js';
+import { fileIntakeIssue, GoalStubSchema, IntakeIssueSchema, renderGoalStub } from '../intake.js';
 import { engageKill } from '../leases.js';
 import {
   listMcpTokens,
@@ -42,6 +36,8 @@ export interface ControlDeps {
   kick?: () => void;
   /** The zone's forges, for the doctor's reads (it never writes). Absent: no doctor routes. */
   forgesFor?(zoneId: string): ForgePair;
+  /** The intake's forges, whose requests time out (a stalled forge is a 502, not a hang). */
+  intakeForgesFor?(zoneId: string): ForgePair;
   /** The doctor's own forges, whose requests time out; defaults to `forgesFor`. */
   doctorForgesFor?(zoneId: string): ForgePair;
   /** A forge on the read token, when one is configured. */
@@ -309,13 +305,13 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       },
     );
 
-    const limiter = intakeLimiter();
     scope.post<{ Params: { id: string } }>(
       '/api/control/zones/:id/intake/issue',
       async (req, reply) => {
         const zone = config.dropZones.find((z) => z.id === req.params.id);
         if (!zone) return reply.code(404).send({ error: 'unknown zone' });
-        if (!deps.forgesFor)
+        const forgesFor = deps.intakeForgesFor ?? deps.forgesFor;
+        if (!forgesFor)
           return reply.code(503).send({ error: 'this server has no forge to file through' });
         const body = IntakeIssueSchema.safeParse(req.body ?? {});
         if (!body.success)
@@ -324,11 +320,10 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
           });
         const out = await fileIntakeIssue(
           db,
-          deps.forgesFor(zone.id),
+          forgesFor(zone.id),
           zone,
           body.data,
           secretList(config.secrets),
-          limiter,
           now(),
         );
         const { status, ...rest } = out;
