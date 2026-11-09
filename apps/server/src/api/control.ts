@@ -1,11 +1,19 @@
-import { timingSafeEqual } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { listBriefings, optionsDigest, ruleBriefing } from '../briefings.js';
 import { allowedHostsOf, type Config, mcpConfigOf } from '../config.js';
 import { requestCrewCycle } from '../crew/schedule.js';
 import type { Db } from '../db/open.js';
-import { activeWorkCount, setKilled, setZoneMode, ZONE_MODES } from '../db/repo.js';
+import {
+  activeWorkCount,
+  getZoneMode,
+  insertDrop,
+  isKilled,
+  setKilled,
+  setZoneMode,
+  ZONE_MODES,
+} from '../db/repo.js';
 import type { DoctorEnv } from '../doctor/checks.js';
 import { DoctorBusyError, latestDoctorRun, processEnv, runDoctor } from '../doctor/run.js';
 import type { Forge } from '../forge/github.js';
@@ -34,6 +42,7 @@ export interface ControlDeps {
 }
 
 const DoctorBody = z.strictObject({ zone: z.string().min(1).optional() });
+const DoctorDropBody = z.strictObject({ zone: z.string().min(1) });
 
 const ZoneBody = z.object({ mode: z.enum(ZONE_MODES) });
 const RuleBody = z.object({
@@ -210,6 +219,47 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       });
       scope.get('/api/control/doctor', async () => ({ run: latestDoctorRun(db) }));
     }
+
+    // A doctor drop spends a turn of usage, so it runs only on request, one per zone, and is
+    // refused rather than queued where nothing would lease it.
+    scope.post('/api/control/doctor/drop', async (req, reply) => {
+      const body = DoctorDropBody.safeParse(req.body ?? {});
+      if (!body.success) return reply.code(400).send({ error: 'invalid body: {"zone": "<id>"}' });
+      const zone = config.dropZones.find((z) => z.id === body.data.zone);
+      if (!zone) return reply.code(404).send({ error: 'unknown zone' });
+      if (isKilled(db))
+        return reply.code(409).send({
+          error: 'the kill switch is engaged, so no drop would run: jumpmaster ctl unkill first',
+        });
+      const mode = getZoneMode(db, zone.id, zone.mode);
+      if (mode !== 'active')
+        return reply.code(409).send({
+          error: `zone ${zone.id} is ${mode === 'observe' ? 'in observe mode' : mode}, so no drop would run: jumpmaster ctl resume ${zone.id} first`,
+        });
+      const active = db
+        .prepare(
+          `SELECT id, state FROM drops WHERE drop_zone_id = ? AND role = 'doctor'
+             AND state IN ('queued','leased','running')`,
+        )
+        .get(zone.id) as { id: string; state: string } | undefined;
+      if (active)
+        return reply
+          .code(409)
+          .send({ error: `doctor drop ${active.id} is already ${active.state} in ${zone.id}` });
+      const dropId = randomUUID();
+      insertDrop(
+        db,
+        { id: dropId, dropZoneId: zone.id, workItemId: null, role: 'doctor', state: 'queued' },
+        now(),
+      );
+      deps.kick?.();
+      return reply.code(202).send({
+        dropId,
+        zone: zone.id,
+        state: 'queued',
+        next: `It runs on the next free stick slot. Then: jumpmaster ctl doctor ${zone.id}`,
+      });
+    });
 
     scope.post('/api/control/kill', async (req, reply) => {
       const body = KillBody.safeParse(req.body);

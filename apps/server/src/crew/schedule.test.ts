@@ -122,6 +122,21 @@ describe('enqueueCrew', () => {
     expect(await enqueue(plus(t0, 6 * MIN), capped)).toBeNull();
   });
 
+  test('a doctor drop is not a crew drop: it neither counts toward the cap nor blocks one', async () => {
+    const capped = { ...w.zone, crew: { ...crewOn, maxDropsPerDay: 1, cycleMinutes: 1 } };
+    insertDrop(
+      w.db,
+      { id: 'doc0', dropZoneId: 'main', workItemId: null, role: 'doctor', state: 'succeeded' },
+      t0,
+    );
+    insertDrop(
+      w.db,
+      { id: 'doc1', dropZoneId: 'main', workItemId: null, role: 'doctor', state: 'queued' },
+      t0,
+    );
+    expect(await enqueue(plus(t0, MIN), capped)).not.toBeNull();
+  });
+
   test('an unparsed GOAL.md blocks the lead cycle but not diagnose or refute', async () => {
     w.f.state.files.set('main:GOAL.md', '# nothing here');
     const issue = stagedIssue();

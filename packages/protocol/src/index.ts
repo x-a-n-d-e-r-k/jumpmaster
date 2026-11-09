@@ -69,7 +69,19 @@ export type CrewRole = (typeof CREW_ROLES)[number];
 export const isCrewRole = (r: string): r is CrewRole =>
   (CREW_ROLES as readonly string[]).includes(r);
 
-export const RoleSchema = z.enum(['implement', 'review', 'heal', 'resolve', ...CREW_ROLES]);
+/**
+ * `doctor` proves a zone's setup on request: the Claude token, the clone, services and gates on the
+ * default branch. Like a crew role it has no work item, but it is not crew: it never runs an agent
+ * with tools, and it holds no forge write credential either.
+ */
+export const RoleSchema = z.enum([
+  'implement',
+  'review',
+  'heal',
+  'resolve',
+  ...CREW_ROLES,
+  'doctor',
+]);
 export type Role = z.infer<typeof RoleSchema>;
 
 export const PrRefSchema = z.object({
@@ -201,11 +213,37 @@ export const DropPayloadSchema = z.discriminatedUnion('role', [
     /** The parked PR to inspect, when there is one. */
     checkout: PrRefSchema.optional(),
   }),
+  /**
+   * A doctor drop: the zone's real image, gates, services and egress, on the default branch. Strict
+   * and with its own credentials shape, so a write token, an issue or a branch is refused.
+   */
+  z.strictObject({
+    protocol: dropPayloadBase.protocol,
+    dropId: dropPayloadBase.dropId,
+    epoch: dropPayloadBase.epoch,
+    role: z.literal('doctor'),
+    repo: dropPayloadBase.repo,
+    model: dropPayloadBase.model,
+    image: dropPayloadBase.image,
+    gates: dropPayloadBase.gates,
+    services: dropPayloadBase.services,
+    limits: dropPayloadBase.limits,
+    gateSecrets: dropPayloadBase.gateSecrets,
+    egress: dropPayloadBase.egress,
+    /** At most the read token, for a private repository's clone. Never a write token. */
+    credentials: z.strictObject({
+      claudeToken: z.string(),
+      readToken: z.string().optional(),
+      /** Never present: any value is refused. Declared so `credentials.forgeToken` reads as absent. */
+      forgeToken: z.never().optional(),
+    }),
+  }),
 ]);
 export type DropPayload = z.infer<typeof DropPayloadSchema>;
 /** A drop for one work item: it has an issue, a branch and gates. */
-export type ItemDropPayload = Exclude<DropPayload, { role: CrewRole }>;
+export type ItemDropPayload = Exclude<DropPayload, { role: CrewRole | 'doctor' }>;
 export type CrewDropPayload = Extract<DropPayload, { role: CrewRole }>;
+export type DoctorDropPayload = Extract<DropPayload, { role: 'doctor' }>;
 
 export const VerdictSchema = z.object({
   decision: z.enum(['approve', 'request_changes']),
@@ -367,6 +405,23 @@ export const TrooperEventSchema = z.object({
 });
 export type TrooperEvent = z.infer<typeof TrooperEventSchema>;
 
+/** What a doctor drop found. Every error text is redacted by the trooper before it is sent. */
+export const DoctorResultSchema = z.object({
+  claude: z.object({
+    ok: z.boolean(),
+    servedModel: z.string().optional(),
+    error: z.string().max(1000).optional(),
+  }),
+  clone: z.object({
+    ok: z.boolean(),
+    sha: z.string().optional(),
+    error: z.string().max(1000).optional(),
+  }),
+  services: z.array(z.object({ name: z.string(), ok: z.boolean() })),
+  gates: z.array(GateResultSchema),
+});
+export type DoctorResult = z.infer<typeof DoctorResultSchema>;
+
 /** Longest author report a result may carry; the trooper truncates to this. */
 export const REPORT_MAX_CHARS = 8000;
 
@@ -378,6 +433,8 @@ export const DropResultSchema = z.object({
   rateLimit: RateLimitEventDataSchema.optional(),
   /** A crew role's structured output, validated per role on both sides (`parseCrewOutput`). */
   crew: z.unknown().optional(),
+  /** A doctor drop's findings. */
+  doctor: DoctorResultSchema.optional(),
   /** The model that actually served the drop, when the trooper could tell. */
   servedModel: z.string().optional(),
   reason: z.string().optional(),

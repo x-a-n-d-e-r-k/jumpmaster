@@ -25,6 +25,7 @@ import {
 } from './privilege.js';
 import { redact } from './redact.js';
 import { runCrew } from './roles/crew.js';
+import { runDoctorRole } from './roles/doctor.js';
 import { runHeal } from './roles/heal.js';
 import { runImplement } from './roles/implement.js';
 import { runResolve } from './roles/resolve.js';
@@ -58,6 +59,7 @@ const ROLES: Partial<Record<DropPayload['role'], RoleRunner>> = {
   'crew-lead': runCrew,
   refute: runCrew,
   diagnose: runCrew,
+  doctor: runDoctorRole,
 };
 
 export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promise<DropResult> {

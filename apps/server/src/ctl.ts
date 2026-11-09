@@ -11,9 +11,12 @@ export function ctlRequest(args: string[]): CtlRequest | null {
   const [command, zone] = args;
   if (command === 'briefings') return { path: '/api/control/briefings', method: 'GET' };
   if (command === 'doctor') {
-    const words = args.slice(1).filter((a) => a !== '--json');
+    const drop = args.includes('--drop');
+    const words = args.slice(1).filter((a) => a !== '--json' && a !== '--drop');
     if (words.some((w) => w.startsWith('--')) || words.length > 1) return null;
     const [only] = words;
+    // A doctor drop is for one zone, and spends a turn of usage: never all zones at once.
+    if (drop) return only ? { path: '/api/control/doctor/drop', body: { zone: only } } : null;
     return { path: '/api/control/doctor', body: only ? { zone: only } : {} };
   }
   if (command === 'rule') {
@@ -64,7 +67,8 @@ export function formatDoctor(run: {
     lines.push(
       `${STATUS_WORD[c.status]}  ${(c.zoneId ?? '').padEnd(zoneWidth)}  ${c.id.padEnd(idWidth)}  ${c.summary}`,
     );
-    const indent = ' '.repeat(8 + zoneWidth + idWidth);
+    // Under the summary column: status (4), zone and id, each followed by two spaces.
+    const indent = ' '.repeat(4 + 2 + zoneWidth + 2 + idWidth + 2);
     if (c.status !== 'pass' && c.fix)
       for (const [i, l] of c.fix.split('\n').entries())
         lines.push(`${indent}${i === 0 ? 'fix: ' : '     '}${l}`);
@@ -79,7 +83,7 @@ export function formatDoctor(run: {
 }
 
 const USAGE =
-  'usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json]';
+  'usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] | ctl doctor <zone> --drop';
 
 /** Runs one control command against the server. Returns the process exit code. */
 export async function runCtl(
@@ -117,7 +121,7 @@ export async function runCtl(
         },
   );
   const text = await res.text();
-  if (args[0] === 'doctor' && res.ok) {
+  if (args[0] === 'doctor' && !args.includes('--drop') && res.ok) {
     const { run } = JSON.parse(text) as {
       run: { id: number; finishedAt: string | null; checks: DoctorCheck[] };
     };

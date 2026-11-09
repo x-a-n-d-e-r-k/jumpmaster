@@ -66,6 +66,9 @@ describe('UI routes', () => {
     expect(html).toMatch(/<tr class="fail">.*forge\.labels/);
     expect(html).toContain('gh label create agent-ready');
     expect(html).toContain('1 pass, 0 warn, 1 fail, 0 skip');
+    expect(html).toContain(
+      'data-doctor="/api/control/doctor/drop" data-body="{&quot;zone&quot;:&quot;main&quot;}"',
+    );
   });
 
   test('the home page names an enrolled stick that cannot run an enforce zone', async () => {

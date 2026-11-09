@@ -4,6 +4,7 @@ import {
   getDrop,
   getUsageState,
   insertDrop,
+  setKilled,
   setUsageState,
   updateDrop,
   upsertDropZone,
@@ -239,6 +240,47 @@ describe('crew drops', () => {
     expect(getDrop(db, 'c1')?.state).toBe('lost');
     expect(expireLeases(db, plus(t0, 400_000))).toBe(0);
     expect(workItem(db, 1)).toEqual(before);
+  });
+});
+
+describe('doctor drops', () => {
+  const queue = (id: string, role: string, at: number) =>
+    insertDrop(db, {
+      id,
+      dropZoneId: 'main',
+      workItemId: null,
+      role,
+      state: 'queued',
+      createdAt: plus(t0, at).toISOString(),
+    });
+
+  test('a doctor drop leases after crew drops and never while paused, observe, killed or usage-gated', () => {
+    // The oldest is the doctor drop; it still goes last.
+    queue('doc', 'doctor', -9000);
+    queue('c1', 'crew-lead', 5000);
+    expect(leaseNextDrop(db, 's1', t0, 'open')?.dropId).toBe('d1');
+    expect(leaseNextDrop(db, 's1', t0, 'open')?.dropId).toBe('c1');
+    for (const gate of ['closed', 'stopped', 'finishing_only', 'probe', 'credits_resume'] as const)
+      expect(leaseNextDrop(db, 's1', t0, gate)).toBeNull();
+    for (const mode of ['paused', 'observe']) {
+      db.prepare(
+        "INSERT OR REPLACE INTO zone_controls (zone_id, mode, updated_at) VALUES ('main', ?, 'x')",
+      ).run(mode);
+      expect(leaseNextDrop(db, 's1', t0, 'open')).toBeNull();
+    }
+    db.prepare("UPDATE zone_controls SET mode = 'active' WHERE zone_id = 'main'").run();
+    setKilled(db, true, t0);
+    expect(leaseNextDrop(db, 's1', t0, 'open')).toBeNull();
+    setKilled(db, false, t0);
+    expect(leaseNextDrop(db, 's1', t0, 'open')?.dropId).toBe('doc');
+  });
+
+  test('the usage probe never selects a doctor drop', () => {
+    db.prepare("UPDATE drops SET state = 'succeeded' WHERE id = 'd1'").run();
+    queue('doc', 'doctor', 0);
+    expect(leaseNextDrop(db, 's1', t0, 'probe')).toBeNull();
+    expect(getUsageState(db).probeDropId).toBeNull();
+    expect(getDrop(db, 'doc')?.state).toBe('queued');
   });
 });
 

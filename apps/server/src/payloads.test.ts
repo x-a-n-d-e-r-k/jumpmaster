@@ -333,6 +333,46 @@ describe('author reports in the review prompt', () => {
   });
 });
 
+describe('the doctor payload', () => {
+  const doctorDrop: Drop = { ...base, id: 'doc', workItemId: null, role: 'doctor' };
+  const full = {
+    ...zone,
+    services: [{ name: 'db', image: 'pg@sha256:x', port: 5432, readyTimeoutSeconds: 30 }],
+    egress: { mode: 'monitor', allow: ['pypi.org'] },
+  } as unknown as DropZoneConfig;
+
+  test('carries the gates, services, gate secrets and egress, and no write token, issue or prompt', () => {
+    const s = { ...secrets, zoneSecrets: { main: { DB_URL: 'postgres://x' } } };
+    const p = buildPayload(db, full, doctorDrop, s);
+    expect(DropPayloadSchema.parse(p)).toEqual(p);
+    expect(p).toMatchObject({
+      role: 'doctor',
+      dropId: 'doc',
+      repo: { owner: 'octo', name: 'demo', defaultBranch: 'main' },
+      image: 'jm-trooper:test',
+      gates: zone.gates,
+      services: full.services,
+      gateSecrets: { DB_URL: 'postgres://x' },
+      egress: { mode: 'monitor' },
+      credentials: { claudeToken: 'claude-secret' },
+    });
+    const text = JSON.stringify(p);
+    for (const t of [
+      secrets.githubAuthorToken,
+      secrets.githubReviewerToken,
+      secrets.githubReadToken,
+    ])
+      expect(text).not.toContain(t);
+    for (const k of ['issue', 'branch', 'prompt', 'protectedPaths', 'maxTurns'])
+      expect(Object.keys(p)).not.toContain(k);
+  });
+
+  test('carries the read token, as readToken, only when reviewReadToken', () => {
+    const p = buildPayload(db, { ...zone, reviewReadToken: true }, doctorDrop, secrets);
+    expect(p.credentials).toEqual({ claudeToken: 'claude-secret', readToken: 'read-secret' });
+  });
+});
+
 describe('gate secrets', () => {
   test('a zone secret reaches the payload and only for its zone', () => {
     const drop = impl;

@@ -523,15 +523,146 @@ describe('zone checks', () => {
     expect(one(checks, 'zone.goals')).toMatchObject({ status: 'warn' });
   });
 
-  test('zone.identity and zone.doctor-drop report skip until their tasks land', async () => {
+  test('zone.identity reports skip until its task lands', async () => {
     const checks = await world().run();
     expect(one(checks, 'zone.identity')).toMatchObject({
       status: 'skip',
       summary: expect.stringContaining('available after Task 13'),
     });
-    expect(one(checks, 'zone.doctor-drop')).toMatchObject({
+  });
+});
+
+describe('zone.doctor-drop', () => {
+  const findings = {
+    claude: { ok: true, servedModel: 'claude-opus-5-5' },
+    clone: { ok: true, sha: 'abc1234def' },
+    services: [{ name: 'db', ok: true }],
+    gates: [
+      { name: 'install', exitCode: 0, durationMs: 9000, timedOut: false, outputTail: 'ok' },
+      { name: 'test', exitCode: 0, durationMs: 4000, timedOut: false, outputTail: 'ok' },
+    ],
+  };
+  function withDrop(
+    w: ReturnType<typeof world>,
+    o: { state?: string; result?: unknown; at?: Date; events?: unknown[] } = {},
+  ) {
+    insertDrop(
+      w.db,
+      {
+        id: 'doc1',
+        dropZoneId: 'main',
+        workItemId: null,
+        role: 'doctor',
+        state: (o.state ?? 'succeeded') as 'succeeded',
+      },
+      o.at ?? ago(600_000),
+    );
+    if (o.result !== undefined)
+      w.db
+        .prepare("UPDATE drops SET result_json = ?, finished_at = ? WHERE id = 'doc1'")
+        .run(
+          JSON.stringify(o.result),
+          new Date((o.at ?? ago(600_000)).getTime() + 100_000).toISOString(),
+        );
+    if (o.events) appendEvents(w.db, 'doc1', o.events as never);
+  }
+  const ok = { status: 'completed', role: 'doctor', gates: findings.gates, doctor: findings };
+
+  test('skips, naming the command, until a doctor drop has run', async () => {
+    const w = world();
+    expect(one(await w.run(), 'zone.doctor-drop')).toMatchObject({
       status: 'skip',
-      summary: expect.stringContaining('after Task 12'),
+      fix: expect.stringContaining('jumpmaster ctl doctor main --drop'),
     });
+    withDrop(w, { state: 'queued' });
+    expect(one(await w.run(), 'zone.doctor-drop')).toMatchObject({
+      status: 'skip',
+      summary: expect.stringContaining('queued'),
+      dropId: 'doc1',
+    });
+  });
+
+  test('a passing doctor drop passes, reporting claude, clone, services and each gate', async () => {
+    const w = world();
+    withDrop(w, { result: ok });
+    const c = one(await w.run(), 'zone.doctor-drop');
+    expect(c).toMatchObject({ status: 'pass', dropId: 'doc1' });
+    for (const s of ['claude-opus-5-5', 'abc1234', 'db', 'install', 'test'])
+      expect(c.summary).toContain(s);
+  });
+
+  test('a failing gate or a rejected Claude token fails it, saying what to do', async () => {
+    const w = world();
+    withDrop(w, {
+      result: {
+        ...ok,
+        doctor: {
+          ...findings,
+          claude: { ok: false, error: 'authentication_failed' },
+          gates: [
+            findings.gates[0],
+            {
+              name: 'test',
+              exitCode: 2,
+              durationMs: 1,
+              timedOut: false,
+              outputTail: 'boom\nFAIL x',
+            },
+          ],
+        },
+      },
+    });
+    const c = one(await w.run(), 'zone.doctor-drop');
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('authentication_failed');
+    expect(c.summary).toContain('test exited 2');
+    expect(c.summary).toContain('FAIL x');
+    expect(c.fix).toContain('claude setup-token');
+  });
+
+  test('a drop that failed without findings reports its reason', async () => {
+    const w = world();
+    withDrop(w, {
+      state: 'failed',
+      result: {
+        status: 'failed',
+        role: 'doctor',
+        reason: 'image x does not declare egress support',
+        gates: [],
+      },
+    });
+    expect(one(await w.run(), 'zone.doctor-drop')).toMatchObject({
+      status: 'fail',
+      summary: expect.stringContaining('does not declare egress support'),
+    });
+  });
+
+  test('reports the egress hosts the drop observed or was denied', async () => {
+    const w = world({ zone: { egress: { mode: 'monitor', allow: [] } } });
+    withDrop(w, {
+      result: ok,
+      events: [
+        {
+          ts: NOW.toISOString(),
+          kind: 'egress',
+          data: { host: 'files.example', decision: 'unlisted', count: 1 },
+        },
+        {
+          ts: NOW.toISOString(),
+          kind: 'egress',
+          data: { host: 'github.com', decision: 'allow', count: 4 },
+        },
+      ],
+    });
+    expect(one(await w.run(), 'zone.doctor-drop')).toMatchObject({
+      status: 'warn',
+      summary: expect.stringContaining('observed outside the allow list: files.example'),
+    });
+  });
+
+  test('a doctor drop older than a week is reported as stale', async () => {
+    const w = world();
+    withDrop(w, { result: ok, at: ago(8 * 86_400_000) });
+    expect(one(await w.run(), 'zone.doctor-drop').status).toBe('warn');
   });
 });

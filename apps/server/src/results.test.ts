@@ -727,3 +727,76 @@ describe('applyResult: rate_limited', () => {
     expect(activeDropFor(db, 1)?.role).toBe('implement');
   });
 });
+
+describe('applyResult: doctor', () => {
+  const READ = 'read-token-secret-123';
+  function doctorSetup() {
+    const s = setup();
+    insertDrop(
+      s.db,
+      { id: 'doc', dropZoneId: 'main', workItemId: null, role: 'doctor', state: 'running' },
+      t0,
+    );
+    s.deps.secrets = [SECRET, READ];
+    return s;
+  }
+  const findings = (tail: string) => ({
+    claude: { ok: true, servedModel: 'm' },
+    clone: { ok: true, sha: 'abc' },
+    services: [],
+    gates: [{ name: 'test', exitCode: 0, durationMs: 1, timedOut: false, outputTail: tail }],
+  });
+
+  test('a doctor result with no work item never reaches applyCrewResult', async () => {
+    const { db, deps } = doctorSetup();
+    const doctor = findings('ok');
+    await applyResult(
+      db,
+      deps,
+      'doc',
+      { status: 'completed', role: 'doctor', gates: doctor.gates, doctor },
+      t0,
+    );
+    const drop = getDrop(db, 'doc');
+    expect(drop?.state).toBe('succeeded');
+    // applyCrewResult would have failed it: a doctor result carries no crew output.
+    expect(
+      db.prepare("SELECT data_json AS d FROM drop_events WHERE drop_id = 'doc'").all(),
+    ).toEqual([]);
+    expect(count(db, 'briefings')).toBe(0);
+  });
+
+  test('applyResult stores the doctor result redacted and consumes no budget', async () => {
+    const { db, deps } = doctorSetup();
+    const doctor = findings(`token ${READ} and ${SECRET}`);
+    const before = db.prepare('SELECT * FROM attempts').all();
+    await applyResult(
+      db,
+      deps,
+      'doc',
+      {
+        status: 'completed',
+        role: 'doctor',
+        gates: doctor.gates,
+        doctor,
+        rateLimit: { status: 'allowed' },
+      },
+      t0,
+    );
+    const stored = getDrop(db, 'doc')?.resultJson ?? '';
+    expect(stored).not.toContain(READ);
+    expect(stored).not.toContain(SECRET);
+    expect(JSON.parse(stored).doctor.gates[0].outputTail).toBe('token [REDACTED] and [REDACTED]');
+    expect(db.prepare('SELECT * FROM attempts').all()).toEqual(before);
+    expect(getDrop(db, 'doc')?.chargedKey).toBeNull();
+    expect(workItem(db, 1).state).toBe('in_flight');
+  });
+
+  test('a doctor result without findings fails the drop, saying why', async () => {
+    const { db, deps } = doctorSetup();
+    await applyResult(db, deps, 'doc', { status: 'failed', reason: 'clone died', gates: [] }, t0);
+    expect(getDrop(db, 'doc')?.state).toBe('failed');
+    await applyResult(db, deps, 'doc', { status: 'completed', gates: [] }, t0);
+    expect(getDrop(db, 'doc')?.state).toBe('failed');
+  });
+});

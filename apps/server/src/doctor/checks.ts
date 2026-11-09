@@ -6,7 +6,7 @@
  * A check that cannot run says so and why (`warn` when the cause is passing, such as a rate limit;
  * `fail` when the cause is a setting, such as a refused permission). It is never a `pass`.
  */
-import { hostAllowed } from '@jumpmaster/protocol';
+import { DoctorResultSchema, type DropResult, hostAllowed } from '@jumpmaster/protocol';
 import type { Config, DropZoneConfig } from '../config.js';
 import { creditsStopInForce } from '../credits.js';
 import { crewDropsToday } from '../crew/schedule.js';
@@ -1133,7 +1133,7 @@ function egressCheck(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck {
       ...base,
       status: 'warn',
       summary: 'egress is off: a drop can reach any host on the internet',
-      fix: 'Set egress.mode to "monitor", run a doctor drop (jumpmaster ctl doctor <zone> --drop) to see the hosts it uses, add any it needs to egress.allow, then set "enforce".',
+      fix: `Set egress.mode to "monitor", run a doctor drop (jumpmaster ctl doctor ${zone.id} --drop) to see the hosts it uses, add any it needs to egress.allow, then set "enforce".`,
     };
   const allow = egressFor(zone)?.allow ?? [];
   const seen = egressSeen(d.db, zone.id, new Date(d.now().getTime() - EGRESS_WINDOW_MS));
@@ -1156,7 +1156,7 @@ function egressCheck(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck {
         names.length > 0
           ? `Add the hosts the drops need to egress.allow (leave out any you don't expect), run another doctor drop, and flip to enforce when this is empty.`
           : seen.drops === 0
-            ? 'Run a doctor drop (jumpmaster ctl doctor <zone> --drop), then run the doctor again; flip to enforce when this is empty.'
+            ? `Run a doctor drop (jumpmaster ctl doctor ${zone.id} --drop), then run the doctor again; flip to enforce when this is empty.`
             : 'Set egress.mode to "enforce": flip to enforce when this is empty, and it is.',
     };
   }
@@ -1252,13 +1252,171 @@ function pendingChecks(zone: DropZoneConfig): DoctorCheck[] {
       status: 'skip',
       summary: 'the identity mode check is available after Task 13 (single-identity starter mode)',
     },
-    {
-      id: 'zone.doctor-drop',
-      zoneId: zone.id,
-      status: 'skip',
-      summary: 'the live doctor drop (Claude token, clone, services, gates) arrives after Task 12',
-    },
   ];
+}
+
+const DOCTOR_DROP_STALE_MS = 7 * DAY_MS;
+
+/** The last non-empty line of a gate's output, cut short: what a person reads first. */
+const lastLine = (text: string): string =>
+  (
+    text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .at(-1) ?? ''
+  ).slice(0, 200);
+
+/**
+ * The zone's latest doctor drop, as the live proof of what the server can't check from outside: the
+ * Claude token answers, the default branch clones, services start, and the gates pass.
+ */
+function doctorDropCheck(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck {
+  const base = { id: 'zone.doctor-drop', zoneId: zone.id, doc: doc('doctor-drop') };
+  const ask = `jumpmaster ctl doctor ${zone.id} --drop`;
+  const row = d.db
+    .prepare(
+      `SELECT id, state, created_at AS createdAt, finished_at AS finishedAt,
+         result_json AS resultJson
+       FROM drops WHERE drop_zone_id = ? AND role = 'doctor'
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(zone.id) as
+    | {
+        id: string;
+        state: string;
+        createdAt: string;
+        finishedAt: string | null;
+        resultJson: string | null;
+      }
+    | undefined;
+  if (!row)
+    return {
+      ...base,
+      status: 'skip',
+      summary:
+        'no doctor drop has run in this zone yet, so the Claude token, the clone, services and gates are unproven',
+      fix: `Run one: ${ask} (it spends one turn of usage), then run the doctor again once it has finished.`,
+    };
+  const at = { ...base, dropId: row.id };
+  if (['queued', 'leased', 'running'].includes(row.state))
+    return {
+      ...at,
+      status: 'skip',
+      summary: `doctor drop ${row.id} is ${row.state} (asked for at ${row.createdAt})`,
+      fix: 'Run the doctor again when it finishes. A queued drop waits for a free stick that can run this zone (see stick.capabilities and usage.gate).',
+    };
+  let result: DropResult | null = null;
+  try {
+    result = row.resultJson ? (JSON.parse(row.resultJson) as DropResult) : null;
+  } catch {
+    result = null;
+  }
+  const findings = DoctorResultSchema.safeParse(result?.doctor);
+  if (!findings.success)
+    return {
+      ...at,
+      status: 'fail',
+      summary: `doctor drop ${row.id} ${row.state === 'lost' ? 'was lost (its stick stopped answering)' : row.state === 'cancelled' ? 'was cancelled' : `failed: ${result?.reason ?? 'it sent no findings'}`}`,
+      fix: `Fix what it names (the stick's log has more: docker compose logs stick), then run another: ${ask}`,
+    };
+  const f = findings.data;
+  const problems: string[] = [];
+  const fixes: string[] = [];
+  if (!f.claude.ok) {
+    problems.push(`the Claude probe failed: ${f.claude.error ?? 'no reason given'}`);
+    fixes.push(
+      /auth|401|invalid api key|login/i.test(f.claude.error ?? '')
+        ? 'The Claude token was rejected: run claude setup-token, write the new token to the JM_CLAUDE_TOKEN file, set claude.tokenCreatedAt, and restart the server.'
+        : /usage limit|rate/i.test(f.claude.error ?? '')
+          ? 'The Claude usage limit was reached: run the doctor drop again after it resets (usage.gate shows when).'
+          : `Check the model the zone asks for (${zone.model}) is available on your plan, and that the Claude token works.`,
+    );
+  }
+  const branch = getDropZoneDefaultBranch(d.db, zone.id) ?? 'the default branch';
+  if (!f.clone.ok) {
+    problems.push(`cloning ${branch} failed: ${f.clone.error ?? 'no reason given'}`);
+    fixes.push(
+      'A private repository needs the read token (see forge.private-clone); otherwise check the stick host can reach github.com.',
+    );
+  }
+  const down = f.services.filter((s) => !s.ok);
+  if (down.length > 0) {
+    problems.push(`service(s) never accepted a connection: ${down.map((s) => s.name).join(', ')}`);
+    fixes.push(
+      'Check the service image, its env and readyTimeoutSeconds in the zone; on the stick host, docker logs shows why a sidecar did not start.',
+    );
+  }
+  const red = f.gates.filter((g) => g.timedOut || g.exitCode !== 0);
+  for (const g of red)
+    problems.push(
+      `gate ${g.name} ${g.timedOut ? 'timed out' : `exited ${g.exitCode ?? 'without a code'}`}${lastLine(g.outputTail) ? ` (last output: ${lastLine(g.outputTail)})` : ''}`,
+    );
+  if (red.length > 0)
+    fixes.push(
+      `Make the gates pass on ${branch} first: every agent pull request is judged by them, so a gate red on ${branch} parks every item. Run them locally, or fix the gate commands in the zone.`,
+    );
+  if (f.clone.ok && f.gates.length === 0 && zone.gates.length > 0)
+    problems.push('no gate ran, though the zone declares gates');
+  // What the drop reached, from its own egress events.
+  const allow = egressFor(zone)?.allow ?? [];
+  const events = d.db
+    .prepare("SELECT data_json AS data FROM drop_events WHERE drop_id = ? AND kind = 'egress'")
+    .all(row.id) as { data: string }[];
+  const hosts = events.flatMap((e) => {
+    try {
+      const v = JSON.parse(e.data) as { host?: unknown; decision?: unknown };
+      return typeof v.host === 'string' && typeof v.decision === 'string'
+        ? [{ host: v.host, decision: v.decision }]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  const unlisted = [
+    ...new Set(
+      hosts
+        .filter((h) => h.decision === 'unlisted' && !hostAllowed(h.host, allow))
+        .map((h) => h.host),
+    ),
+  ];
+  const denied = [...new Set(hosts.filter((h) => h.decision === 'deny').map((h) => h.host))];
+  const egressNotes = [
+    ...(unlisted.length ? [`observed outside the allow list: ${unlisted.join(', ')}`] : []),
+    ...(denied.length ? [`denied: ${denied.join(', ')}`] : []),
+  ];
+  const when = row.finishedAt ?? row.createdAt;
+  const head = `doctor drop ${row.id} (${when})`;
+  if (problems.length > 0)
+    return {
+      ...at,
+      status: 'fail',
+      summary: `${head}: ${problems.join('; ')}${egressNotes.length ? `; egress ${egressNotes.join('; ')}` : ''}`,
+      fix: `${fixes.join(' ')} Then run another: ${ask}`,
+    };
+  const proven = [
+    `Claude answered${f.claude.servedModel ? ` (${f.claude.servedModel})` : ''}`,
+    `cloned ${branch} at ${(f.clone.sha ?? '').slice(0, 7)}`,
+    ...(f.services.length ? [`services up: ${f.services.map((s) => s.name).join(', ')}`] : []),
+    f.gates.length
+      ? `gates passed: ${f.gates.map((g) => `${g.name} (${(g.durationMs / 1000).toFixed(1)}s)`).join(', ')}`
+      : 'the zone has no gates',
+  ].join(', ');
+  if (egressNotes.length > 0)
+    return {
+      ...at,
+      status: 'warn',
+      summary: `${head}: ${proven}; egress ${egressNotes.join('; ')}`,
+      fix: 'Add the hosts the drop needs to egress.allow (leave out any you do not expect), and run another doctor drop.',
+    };
+  if (d.now().getTime() - Date.parse(when) > DOCTOR_DROP_STALE_MS)
+    return {
+      ...at,
+      status: 'warn',
+      summary: `${head} passed, but is over a week old: ${proven}`,
+      fix: `Run a fresh one after changing the image, the gates or the token: ${ask}`,
+    };
+  return { ...at, status: 'pass', summary: `${head}: ${proven}` };
 }
 
 /** A thrown check becomes a `fail` naming what threw (the run redacts it before anyone sees it). */
@@ -1311,7 +1469,11 @@ export async function zoneChecks(
         ]
       : []),
   ];
-  return [...(await Promise.all(checks)), ...pendingChecks(zone)];
+  return [
+    ...(await Promise.all(checks)),
+    ...pendingChecks(zone),
+    await guard('zone.doctor-drop', z, () => doctorDropCheck(d, zone)),
+  ];
 }
 
 /** Every check, global ones first, then each zone's (zones in parallel). */

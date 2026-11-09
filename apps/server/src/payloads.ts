@@ -236,6 +236,44 @@ function buildCrewPayload(
   };
 }
 
+/**
+ * A doctor drop: the zone's image, gates, services, gate secrets and egress, on the default branch.
+ * No issue, branch, prompt or write token: at most the read token, on the same terms as review.
+ */
+function buildDoctorPayload(
+  db: Db,
+  zone: DropZoneConfig,
+  drop: Drop,
+  secrets: Config['secrets'],
+  model: string,
+): DropPayload {
+  const row = db
+    .prepare('SELECT default_branch AS defaultBranch FROM drop_zones WHERE id = ?')
+    .get(zone.id) as { defaultBranch: string };
+  const [owner = '', name = ''] = zone.repo.split('/');
+  return {
+    // The trooper finds the payload on stdin by its leading protocol field.
+    protocol: 1 as const,
+    dropId: drop.id,
+    epoch: drop.epoch,
+    role: 'doctor',
+    repo: { owner, name, defaultBranch: row.defaultBranch },
+    model,
+    image: zone.image,
+    gates: zone.gates,
+    ...(zone.services.length > 0 ? { services: zone.services } : {}),
+    ...(hasCustomLimits(zone) ? { limits: zone.limits } : {}),
+    ...(secrets.zoneSecrets?.[zone.id] ? { gateSecrets: secrets.zoneSecrets[zone.id] } : {}),
+    ...egressField(zone),
+    credentials: {
+      claudeToken: secrets.claudeToken,
+      ...(zone.reviewReadToken && secrets.githubReadToken
+        ? { readToken: secrets.githubReadToken }
+        : {}),
+    },
+  };
+}
+
 const DEFAULT_CLAUDE: ClaudeConfig = { plan: 'pro', fableWeeklyDropCap: 5 };
 
 /**
@@ -259,6 +297,7 @@ export function buildPayload(
   // Records requested_model on the drop as a side effect (the Fable weekly cap counts it).
   updateDrop(db, drop.id, { requestedModel: model });
   if (isCrewRole(drop.role)) return buildCrewPayload(db, zone, drop, drop.role, secrets, model);
+  if (drop.role === 'doctor') return buildDoctorPayload(db, zone, drop, secrets, model);
   const item = listWorkItems(db, zone.id).find((w) => w.id === drop.workItemId);
   if (!item) throw new Error(`unknown work item ${drop.workItemId}`);
   const row = db

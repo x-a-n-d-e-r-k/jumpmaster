@@ -476,6 +476,57 @@ BEGIN
 END;
 `;
 
+/**
+ * v17: the `doctor` role, a drop with no work item that is not crew. SQLite's twelve-step rebuild of
+ * `drops` with foreign keys off (events and artifacts reference it): the CHECK admits `doctor`
+ * without a work item, the crew index is narrowed to the crew roles so a doctor drop and a crew drop
+ * may be active in one zone at once, and a new index allows one active doctor drop per zone. An M3
+ * binary does not run against v17 (the CHECK changed); rolling back past it is a database restore.
+ */
+const V17_SQL = `
+CREATE TABLE new_drops (
+  id               TEXT PRIMARY KEY,
+  drop_zone_id     TEXT NOT NULL REFERENCES drop_zones(id),
+  work_item_id     INTEGER REFERENCES work_items(id),
+  role             TEXT NOT NULL,
+  state            TEXT NOT NULL
+                   CHECK (state IN ('queued','leased','running','succeeded','failed','lost','cancelled')),
+  stick_id         TEXT REFERENCES sticks(id),
+  epoch            INTEGER NOT NULL DEFAULT 0,
+  lease_expires_at TEXT,
+  prompt_version   TEXT,
+  image            TEXT,
+  result_json      TEXT,
+  created_at       TEXT NOT NULL,
+  started_at       TEXT,
+  finished_at      TEXT,
+  fingerprint      TEXT,
+  pr_number        INTEGER,
+  head_sha         TEXT,
+  input_json       TEXT,
+  charged_key      TEXT,
+  hard_cancel      INTEGER NOT NULL DEFAULT 0,
+  requested_model  TEXT,
+  served_model     TEXT,
+  CHECK ((work_item_id IS NULL) = (role IN ('crew-lead','refute','diagnose','doctor')))
+);
+INSERT INTO new_drops (id, drop_zone_id, work_item_id, role, state, stick_id, epoch, lease_expires_at,
+  prompt_version, image, result_json, created_at, started_at, finished_at, fingerprint, pr_number,
+  head_sha, input_json, charged_key, hard_cancel, requested_model, served_model)
+SELECT id, drop_zone_id, work_item_id, role, state, stick_id, epoch, lease_expires_at,
+  prompt_version, image, result_json, created_at, started_at, finished_at, fingerprint, pr_number,
+  head_sha, input_json, charged_key, hard_cancel, requested_model, served_model FROM drops;
+DROP TABLE drops;
+ALTER TABLE new_drops RENAME TO drops;
+CREATE UNIQUE INDEX one_active_drop
+  ON drops(work_item_id) WHERE state IN ('queued','leased','running');
+CREATE UNIQUE INDEX one_active_crew_drop
+  ON drops(drop_zone_id) WHERE role IN ('crew-lead','refute','diagnose')
+    AND state IN ('queued','leased','running');
+CREATE UNIQUE INDEX one_active_doctor_drop
+  ON drops(drop_zone_id) WHERE role = 'doctor' AND state IN ('queued','leased','running');
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -501,6 +552,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 14, sql: V14_SQL, foreignKeysOff: true },
   { version: 15, sql: V15_SQL },
   { version: 16, sql: V16_SQL },
+  { version: 17, sql: V17_SQL, foreignKeysOff: true },
 ];
 
 /**

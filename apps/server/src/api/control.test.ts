@@ -9,6 +9,7 @@ import {
   getZoneMode,
   insertDrop,
   isKilled,
+  setKilled,
   setWorkItemState,
   setZoneMode,
   upsertDropZone,
@@ -325,5 +326,42 @@ describe('doctor routes', () => {
       path: '/api/control/doctor',
       body: { zone: 'main' },
     });
+    expect(ctlRequest(['doctor', 'main', '--drop'])).toEqual({
+      path: '/api/control/doctor/drop',
+      body: { zone: 'main' },
+    });
+    expect(ctlRequest(['doctor', '--drop'])).toBeNull();
+  });
+
+  test('ctl doctor --drop in observe or paused is refused naming the mode', async () => {
+    const w = doctorApp();
+    const ask = () => post('/api/control/doctor/drop', { zone: 'main' });
+    const doctorDrops = () =>
+      w.db.prepare("SELECT id, state, work_item_id AS item FROM drops WHERE role = 'doctor'").all();
+    for (const mode of ['observe', 'paused'] as const) {
+      setZoneMode(w.db, 'main', mode, NOW);
+      const r = await ask();
+      expect(r?.statusCode).toBe(409);
+      expect(r?.json().error).toContain(mode);
+    }
+    setZoneMode(w.db, 'main', 'active', NOW);
+    setKilled(w.db, true, NOW);
+    expect((await ask())?.json().error).toContain('kill switch');
+    setKilled(w.db, false, NOW);
+    expect(doctorDrops()).toEqual([]);
+
+    const queued = await ask();
+    expect(queued?.statusCode).toBe(202);
+    const { dropId } = queued?.json() as { dropId: string };
+    expect(doctorDrops()).toEqual([{ id: dropId, state: 'queued', item: null }]);
+    // One per zone: a second is refused while the first is active.
+    const again = await ask();
+    expect(again?.statusCode).toBe(409);
+    expect(again?.json().error).toContain(dropId);
+    expect((await post('/api/control/doctor/drop', { zone: 'nope' }))?.statusCode).toBe(404);
+    expect((await post('/api/control/doctor/drop', {}))?.statusCode).toBe(400);
+    expect(
+      (await post('/api/control/doctor/drop', { zone: 'main' }, { host: HOST }))?.statusCode,
+    ).toBe(401);
   });
 });

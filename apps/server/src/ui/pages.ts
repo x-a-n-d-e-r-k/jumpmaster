@@ -387,7 +387,14 @@ export function renderHome(state: HomeState): string {
   const drops = state.drops
     .map((d) => {
       const wi = d.workItemId === null ? undefined : itemById.get(d.workItemId);
-      const target = d.workItemId === null ? 'crew' : wi ? `#${escapeHtml(wi.issueNumber)}` : '-';
+      const target =
+        d.workItemId === null
+          ? d.role === 'doctor'
+            ? 'doctor'
+            : 'crew'
+          : wi
+            ? `#${escapeHtml(wi.issueNumber)}`
+            : '-';
       return `<tr><td><a href="/drops/${encodeURIComponent(d.id)}">${escapeHtml(d.id)}</a></td><td>${target}</td><td>${escapeHtml(d.role)}</td><td>${escapeHtml(d.state)}</td><td>${escapeHtml(elapsed(d, now))}</td><td>${gateSummary(d)}</td></tr>`;
     })
     .join('');
@@ -507,7 +514,12 @@ export function renderDoctor(
   run: { id: number; finishedAt: string | null; checks: DoctorCheckView[] } | null,
   zones: DropZoneConfig[],
 ): string {
-  const controls = `<p><label>Operator token <input type="password" id="doctor-token" autocomplete="off"></label> <button data-doctor="/api/control/doctor">Run the doctor</button></p><p>Zones: ${zones.map((z) => escapeHtml(z.id)).join(', ') || 'none'}</p>`;
+  const controls = `<p><label>Operator token <input type="password" id="doctor-token" autocomplete="off"></label> <button data-doctor="/api/control/doctor">Run the doctor</button></p><p>A doctor drop proves the Claude token, the clone, services and gates on a stick; it spends one turn of usage.${zones
+    .map(
+      (z) =>
+        ` <button data-doctor="/api/control/doctor/drop" data-body="${escapeHtml(JSON.stringify({ zone: z.id }))}">Doctor drop: ${escapeHtml(z.id)}</button>`,
+    )
+    .join('')}</p>`;
   if (!run)
     return page(
       `<h2>Doctor</h2><p>No doctor run has finished yet. Run one here or with <code>jumpmaster ctl doctor</code>.</p>${controls}${DOCTOR_SCRIPT}`,
