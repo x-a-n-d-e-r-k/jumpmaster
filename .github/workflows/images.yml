@@ -37,6 +37,7 @@ jobs:
           docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-server:dev -f images/server/Dockerfile .
           docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-stick:dev -f images/stick/Dockerfile .
           docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-trooper:dev -f images/trooper/Dockerfile .
+          docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-egress:dev -f images/egress/Dockerfile .
       - name: Image smoke test
         run: images/smoke.sh
       - name: Trooper e2e

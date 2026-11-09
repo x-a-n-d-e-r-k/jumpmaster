@@ -1,0 +1,19 @@
+{
+  "name": "@jumpmaster/egress",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "main": "dist/main.js",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@jumpmaster/protocol": "*"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5"
+  }
+}

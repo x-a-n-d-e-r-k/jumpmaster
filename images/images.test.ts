@@ -18,6 +18,7 @@ const SHIPPED = [
   'images/server/Dockerfile',
   'images/stick/Dockerfile',
   'images/trooper/Dockerfile',
+  'images/egress/Dockerfile',
 ];
 const dockerfiles = () =>
   walk(ROOT, ['images']).filter((f) => /(^|\/)Dockerfile(\.[^/]*)?$|\.Dockerfile$/.test(f));
@@ -60,6 +61,18 @@ describe('Dockerfiles', () => {
     expect(env).toMatch(/\bJM_STATE_DIR=\/state\b/);
     expect(env).toMatch(/\bTUF_ROOT=\/state\/sigstore\b/);
     expect(env).toMatch(/\bJM_CONTAINER=1\b/);
+  });
+
+  test('the egress proxy image runs as a non-root user with no npm install in its final stage', () => {
+    const final = finalStage(instructions(read('images/egress/Dockerfile')));
+    const user = final.filter((i) => i.op === 'USER').at(-1)?.args ?? '';
+    expect(user).toMatch(/^\d+:\d+$/);
+    expect(user.split(':')[0]).not.toBe('0');
+    expect(final.some((i) => i.op === 'RUN' && /\bnpm\b/.test(i.args))).toBe(false);
+    expect(final.some((i) => i.op === 'RUN' && SETUID_SWEEP.test(i.args))).toBe(true);
+    // Only the stdlib egress module of the protocol package loads: it must not import zod.
+    expect(read('packages/protocol/src/egress.ts')).not.toMatch(/from '(zod|\.\/index\.js)'/);
+    expect(read('apps/egress/package.json')).not.toMatch(/"zod"/);
   });
 
   test('no Dockerfile passes a JM_ secret as ARG or ENV', () => {

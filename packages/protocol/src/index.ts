@@ -378,6 +378,7 @@ export const DropResultSchema = z.object({
   numTurns: z.number().optional(),
 });
 export type DropResult = z.infer<typeof DropResultSchema>;
+export * from './egress.js';
 export { containsSecret, payloadSecrets, redact, redactTokenShapes } from './redact.js';
 export { readSecret } from './secrets.js';
 
