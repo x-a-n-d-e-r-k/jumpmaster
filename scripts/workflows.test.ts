@@ -602,6 +602,10 @@ describe('release docs', () => {
     // The rehearsals that wait for the first tag.
     for (const s of ['cold cache', 'warm cache', 'rekor.sigstore.dev', 'released preset'])
       expect(doc, s).toContain(s);
+    // GHCR cleanup of untagged versions would delete the per-arch manifests a signed index uses.
+    expect(doc).toMatch(/[Nn]ever delete untagged versions/);
+    expect(doc).toMatch(/retention policy/);
+    expect(doc).toMatch(/per-arch manifests/);
     // Both architectures are published.
     expect(doc).toContain('linux/arm64');
     // No private hostnames or paths in a public runbook.

@@ -6,7 +6,10 @@
 // verified with this repository's identity flags, exit 1). `release-index.json` is a real
 // two-arch index joined from per-arch builds the way release-build.yml does it;
 // `cosign-verify-index-ok.stdout` is cosign verifying it by its index digest, and
-// `cosign-verify-platform-unsigned.stderr` is cosign asked about its arm64 manifest (exit 10). The keyless identity itself is checked
+// `cosign-verify-platform-unsigned.stderr` is cosign asked about its arm64 manifest (exit 10).
+// Both `.stderr` "unsigned" fixtures were recorded with key-based verification and
+// `--insecure-ignore-tlog` (their first line is cosign's warning about it); they only feed the
+// stderr parser, and the stick never passes that flag. Re-recording them keyless is deferred. The keyless identity itself is checked
 // by cosign's flags, which these tests pin exactly, and by the release workflow, which verifies
 // every image it signs with the same flags.
 import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';

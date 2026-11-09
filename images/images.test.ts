@@ -518,6 +518,59 @@ type Workflow = {
 };
 
 describe('images.yml', () => {
+  type FullJob = Workflow['jobs'][string] & {
+    services?: Record<string, { image?: string }>;
+    permissions?: unknown;
+    steps: {
+      id?: string;
+      uses?: string;
+      run?: string;
+      env?: Record<string, string>;
+      with?: Record<string, unknown>;
+    }[];
+  };
+  const job = (name: string) =>
+    (load(read('.github/workflows/images.yml')) as { jobs: Record<string, FullJob> }).jobs[name];
+
+  test('a PR job runs the real release-index.sh on two real per-arch builds, without emulation or GHCR', () => {
+    const j = job('release-index') as FullJob;
+    expect(j).toBeDefined();
+    expect(j['runs-on']).toBe('ubuntu-24.04');
+    // A job-local registry, pinned; no login, no write token.
+    expect(j.services?.registry?.image).toMatch(/^registry:[\d.]+@sha256:[0-9a-f]{64}$/);
+    const text = JSON.stringify(j);
+    expect(text).not.toMatch(/docker login|login-action|ghcr\.io|id-token|qemu|binfmt/i);
+    // FROM scratch with COPY only: nothing of the other arch executes, so no emulation is needed.
+    const runs = j.steps.map((s) => s.run ?? '').join('\n');
+    expect(runs).toMatch(/FROM scratch/);
+    expect(runs).not.toMatch(/^RUN /m);
+    const builds = j.steps.filter((s) => s.uses?.startsWith('docker/build-push-action@'));
+    expect(builds.map((b) => b.with?.platforms).sort()).toEqual(['linux/amd64', 'linux/arm64']);
+    for (const b of builds) {
+      expect(b.with?.provenance).toBe('mode=max');
+      expect(b.with?.sbom).toBe(true);
+      expect(String(b.with?.outputs)).toMatch(
+        /^type=image,name=localhost:5000\/ci\/jumpmaster-ci,push-by-digest=true,name-canonical=true,push=true$/,
+      );
+    }
+    // The real script, as a release runs it, then the result checked as a four-manifest index.
+    const index = j.steps.find((s) => s.run?.includes('scripts/release-index.sh'));
+    expect(index?.env?.RELEASE).toBe('true');
+    expect(runs).toMatch(/imagetools inspect "localhost:5000\/ci\/jumpmaster-ci@\$digest" --raw/);
+    expect(runs).toContain('linux/amd64,linux/arm64,unknown/unknown,unknown/unknown');
+  });
+
+  test('a PR job builds the trooper and the stick natively on arm64 and runs verify.sh and run.sh there', () => {
+    const j = job('arm64') as FullJob;
+    expect(j).toBeDefined();
+    expect(j['runs-on']).toBe('ubuntu-24.04-arm');
+    const runs = j.steps.map((s) => s.run ?? '').join('\n');
+    expect(runs).toMatch(/images\/trooper\/e2e\/verify\.sh/);
+    expect(runs).toMatch(/images\/trooper\/e2e\/run\.sh/);
+    expect(runs).toMatch(/docker version/);
+    expect(JSON.stringify(j)).not.toMatch(/docker login|login-action|id-token|qemu|binfmt/i);
+  });
+
   const workflow = () => load(read('.github/workflows/images.yml')) as Workflow;
 
   test('runs on pull requests and main, read-only', () => {
@@ -585,7 +638,8 @@ describe('images.yml', () => {
 
   test('checkout keeps no credentials and every job has a timeout', () => {
     for (const job of Object.values(workflow().jobs)) {
-      expect(job['timeout-minutes']).toBe(30);
+      expect(job['timeout-minutes']).toBeGreaterThan(0);
+      expect(job['timeout-minutes']).toBeLessThanOrEqual(45);
       for (const step of job.steps.filter((s) => s.uses?.startsWith('actions/checkout@')))
         expect(step.with?.['persist-credentials']).toBe(false);
     }

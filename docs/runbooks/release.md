@@ -15,7 +15,9 @@ For the repository owner. A release is a version tag on `main`. Pushing it runs
      an arm64 preset always sits on the arm64 trooper.
    - `troopers-index` joins each image's two per-arch digests into one multi-arch index
      (`docker buildx imagetools create`, sources by digest; buildx pushes the index under the tag
-     `vX.Y.Z`, a convenience only) and checks the index holds exactly those two images. The
+     `vX.Y.Z`, a convenience only). Before pushing, `scripts/release-index.sh` checks the planned
+     index lists exactly every manifest the two builds list, attestations included; after, it
+     reads the index back by its digest (never through the tag). The
      **index digest** is the image's release digest: it is what is signed, locked and pulled.
    - `apps` (per arch) builds the server with the release's `images.lock.json` (index digests)
      baked in, and the stick with the release version, this repository as its trusted signer and
@@ -57,6 +59,7 @@ These change repository or package settings. Nobody else does them.
 | Once, before the first tag | Settings → Actions → General: allow GitHub Actions, and under "Workflow permissions" keep the default read-only `GITHUB_TOKEN`. The workflow asks for `packages: write`, `id-token: write` and `contents: write` per job, which a repository workflow may do. If an organisation policy blocks `id-token: write` (OIDC), allow it. |
 | First pre-release | Push `v0.4.0-rc.1` (below). |
 | After the first push | For each package (server, stick, egress, trooper, and the python, go and jvm presets): Packages → the package → Package settings → **Change visibility → Public**. Check "Repository source" shows this repository: the `org.opencontainers.image.source` label links it. If a package isn't linked, use "Connect repository". |
+| Always | **Never delete untagged versions** of the `jumpmaster-*` packages, by hand or with a cleanup action, and never attach a retention policy to them. Only each release's index carries a tag; the per-arch manifests (and their attestations) it points at are untagged versions. Deleting them breaks `docker pull name@<index digest>` on every stick for that release, and it can't be repaired without a new release. |
 | Every release after that | Push the version tag. |
 
 ## Dry run
