@@ -281,20 +281,25 @@ describe('release.yml', () => {
       const logins = steps(job).filter((s) =>
         /docker login|login-action/.test(`${s.run}${s.uses}`),
       );
-      expect(logins.length, name).toBeGreaterThan(0);
+      // Every job that pushes (a build or an index) logs in, and only for a release.
+      const pushes = steps(job).some(
+        (s) =>
+          s.uses?.startsWith('docker/build-push-action@') || /release-index\.sh/.test(s.run ?? ''),
+      );
+      expect(logins.length > 0, name).toBe(pushes);
       for (const s of logins) expect(s.if, name).toBe('inputs.release');
       // Every image goes to the registry the target step chose.
       for (const s of steps(job).filter((s) => s.uses?.startsWith('docker/build-push-action@'))) {
         const outputs = String(s.with?.outputs ?? '');
         expect(outputs, `${name} ${s.id}`).toMatch(
-          /^type=image,name=\$\{\{ (steps\.target|needs\.troopers)\.outputs\.registry \}\}\/jumpmaster-[a-z-]+,push-by-digest=true,name-canonical=true,push=true$/,
+          /^type=image,name=\$\{\{ needs\.target\.outputs\.registry \}\}\/jumpmaster-[a-z-]+,push-by-digest=true,name-canonical=true,push=true$/,
         );
         expect(s.with?.push, `${name} ${s.id}`).toBeUndefined();
         expect(s.with?.tags, `${name} ${s.id}`).toBeUndefined();
       }
     }
     // Run the target step's script: GHCR only for a release, a job-local registry otherwise.
-    const target = steps(b.jobs.troopers).find((s) => s.id === 'target') as Step;
+    const target = steps(b.jobs.target).find((s) => s.id === 'target') as Step;
     const env = target.env ?? {};
     const runTarget = (github: Record<string, string>) => {
       const out = join(mkdtempSync(join(tmpdir(), 'jm-wf-')), 'out');
@@ -341,6 +346,67 @@ describe('release.yml', () => {
     );
   });
 
+  test("each arch builds natively on its own runner, and the presets build FROM that arch's trooper", () => {
+    const b = buildWorkflow();
+    const MATRIX = [
+      { arch: 'amd64', runner: 'ubuntu-24.04' },
+      { arch: 'arm64', runner: 'ubuntu-24.04-arm' },
+    ];
+    for (const name of ['troopers', 'apps']) {
+      const job = b.jobs[name] as Job & {
+        strategy?: { matrix?: { include?: unknown } };
+        'runs-on'?: string;
+      };
+      expect(job.strategy?.matrix?.include, name).toEqual(MATRIX);
+      expect(job['runs-on'], name).toBe('${{ matrix.runner }}');
+    }
+    // No emulation anywhere.
+    for (const f of [RELEASE, BUILD, '.github/workflows/images.yml'])
+      expect(read(f), f).not.toMatch(/setup-qemu-action|binfmt|qemu/i);
+    // The presets take the trooper built in the same job (same runner, same arch) by digest.
+    const presets = steps(b.jobs.troopers).filter((s) =>
+      ['python', 'go', 'jvm'].includes(s.id ?? ''),
+    );
+    expect(presets).toHaveLength(3);
+    const ids = steps(b.jobs.troopers).map((s) => s.id);
+    for (const s of presets)
+      expect(ids.indexOf(s.id), s.id).toBeGreaterThan(ids.indexOf('trooper'));
+  });
+
+  test('the index jobs join the two arches, and the index digests are what the release signs and locks', () => {
+    const b = buildWorkflow();
+    const call = b as unknown as {
+      on: { workflow_call: { outputs: Record<string, { value: string }> } };
+    };
+    const outputs = call.on.workflow_call.outputs;
+    for (const [name, job] of [
+      ['trooper', 'troopers-index'],
+      ['python', 'troopers-index'],
+      ['go', 'troopers-index'],
+      ['jvm', 'troopers-index'],
+      ['egress', 'troopers-index'],
+      ['server', 'apps-index'],
+      ['stick', 'apps-index'],
+    ])
+      expect(outputs[name as string]?.value, name).toBe(`\${{ jobs.${job}.outputs.${name} }}`);
+    for (const job of ['troopers-index', 'apps-index']) {
+      const j = b.jobs[job] as Job;
+      const run = steps(j).find((s) => s.id === 'index');
+      expect(run?.run, job).toBe('scripts/release-index.sh');
+      expect(run?.env?.RELEASE, job).toBe('${{ inputs.release }}');
+      // Each output is the script's line for that image.
+      for (const v of Object.values(j.outputs ?? {}))
+        expect(v, job).toMatch(/^\$\{\{ steps\.index\.outputs\.jumpmaster-[a-z-]+ \}\}$/);
+    }
+    // The server's lock and the stick's proxy are index digests, not one arch's.
+    const apps = JSON.stringify(b.jobs.apps);
+    expect(apps).toContain(
+      'EGRESS_IMAGE=${{ needs.target.outputs.registry }}/jumpmaster-egress@${{ needs.troopers-index.outputs.egress }}',
+    );
+    expect(apps).toContain('TROOPER":"${{ needs.troopers-index.outputs.trooper }}');
+    expect(apps).not.toMatch(/needs\.troopers\.outputs/);
+  });
+
   test('id-token: write appears only on the sign job; top-level permissions are read-only', () => {
     const w = release();
     expect(w.permissions).toEqual({ contents: 'read' });
@@ -373,7 +439,8 @@ describe('release.yml', () => {
     ]);
     for (const s of builds) {
       // Both architectures: operators on Apple silicon run these natively.
-      expect(s.with?.platforms, s.id).toBe('linux/amd64,linux/arm64');
+      // One arch per job, on that arch's own runner: no emulation.
+      expect(s.with?.platforms, s.id).toBe('linux/${{ matrix.arch }}');
       expect(s.with?.provenance, s.id).toBe('mode=max');
       expect(s.with?.sbom, s.id).toBe(true);
       expect(String(s.with?.['build-args']), s.id).toMatch(
@@ -387,7 +454,7 @@ describe('release.yml', () => {
     for (const id of ['python', 'go', 'jvm']) {
       const s = builds.find((b) => b.id === id);
       expect(String(s?.with?.['build-args']), id).toContain(
-        'BASE=${{ steps.target.outputs.registry }}/jumpmaster-trooper@${{ steps.trooper.outputs.digest }}',
+        'BASE=${{ needs.target.outputs.registry }}/jumpmaster-trooper@${{ steps.trooper.outputs.digest }}',
       );
     }
   });

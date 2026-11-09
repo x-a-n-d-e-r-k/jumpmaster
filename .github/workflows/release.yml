@@ -2,8 +2,9 @@ name: Release
 
 # Publishes signed, digest-pinned images, only from a version tag on main (docs/runbooks/release.md).
 # - A push of vX.Y.Z or vX.Y.Z-rc.N: `guard` checks the tag's commit is on main; `build`
-#   (release-build.yml) builds every image for amd64 and arm64 with SBOM and provenance and pushes
-#   it to GHCR by digest; `sign` signs each by its index digest with cosign keyless (the identity
+#   (release-build.yml) builds every image natively on amd64 and arm64 runners with SBOM and
+#   provenance, pushes each by digest and joins them into one multi-arch index per image; `sign`
+#   signs each by its index digest with cosign keyless (the identity
 #   the stick verifies) and signs SHA256SUMS; `publish` attaches compose.yaml, images.lock.json,
 #   SHA256SUMS and its bundle to the GitHub Release.
 # - workflow_dispatch is a dry run (`dryrun`): the same builds, pushed to a job-local registry that

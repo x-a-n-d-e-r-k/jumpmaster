@@ -6,14 +6,20 @@ For the repository owner. A release is a version tag on `main`. Pushing it runs
 1. **guard**: refuses the tag unless it is `vX.Y.Z` or `vX.Y.Z-rc.N` and the commit it names
    (`git rev-parse "$GITHUB_SHA^{commit}"`) is on `main` (`git merge-base --is-ancestor`). Nothing
    else runs if it fails.
-2. **build** (`.github/workflows/release-build.yml`), for linux/amd64 and linux/arm64:
-   - `troopers` builds the trooper (the node preset), the python, go and jvm presets (`FROM` the
-     trooper just built, by digest) and the egress proxy, each with an SBOM, `provenance: mode=max`
-     and the `org.opencontainers.image.source` label, and pushes them to `ghcr.io/<owner>` by
-     digest;
-   - `apps` builds the server with the release's `images.lock.json` baked in, and the stick with
-     the release version, this repository as its trusted signer and the release's egress proxy
-     digest, and pushes both by digest.
+2. **build** (`.github/workflows/release-build.yml`), natively, with no emulation: every per-arch
+   job runs twice, on `ubuntu-24.04` (linux/amd64) and `ubuntu-24.04-arm` (linux/arm64).
+   - `troopers` builds the trooper (the node preset), the python, go and jvm presets and the
+     egress proxy, each with an SBOM, `provenance: mode=max` and the
+     `org.opencontainers.image.source` label, and pushes each to `ghcr.io/<owner>` by digest. Each
+     preset builds `FROM` the trooper built earlier in the same job, by that per-arch digest, so
+     an arm64 preset always sits on the arm64 trooper.
+   - `troopers-index` joins each image's two per-arch digests into one multi-arch index
+     (`docker buildx imagetools create`, sources by digest; buildx pushes the index under the tag
+     `vX.Y.Z`, a convenience only) and checks the index holds exactly those two images. The
+     **index digest** is the image's release digest: it is what is signed, locked and pulled.
+   - `apps` (per arch) builds the server with the release's `images.lock.json` (index digests)
+     baked in, and the stick with the release version, this repository as its trusted signer and
+     the egress proxy's index digest; `apps-index` joins them the same way.
 3. **sign**: signs every image by its index digest with cosign keyless, then verifies each with
    exactly the checks the stick makes (the identity flags, and every signed payload naming that
    digest). Renders `compose.yaml` from `deploy/compose.yaml.tmpl`, writes `images.lock.json` and

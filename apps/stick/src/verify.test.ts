@@ -3,7 +3,10 @@
 // (`cosign-verify-ok.stdout`: a key-signed image, whose JSON payload has the same shape a keyless
 // signature's has; `cosign-verify-unsigned.stderr`: an image with no signature, exit 10) and
 // against GHCR (`cosign-verify-wrong-identity.stderr`: an image signed keyless by someone else,
-// verified with this repository's identity flags, exit 1). The keyless identity itself is checked
+// verified with this repository's identity flags, exit 1). `release-index.json` is a real
+// two-arch index joined from per-arch builds the way release-build.yml does it;
+// `cosign-verify-index-ok.stdout` is cosign verifying it by its index digest, and
+// `cosign-verify-platform-unsigned.stderr` is cosign asked about its arm64 manifest (exit 10). The keyless identity itself is checked
 // by cosign's flags, which these tests pin exactly, and by the release workflow, which verifies
 // every image it signs with the same flags.
 import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -176,6 +179,40 @@ describe('verifyImage', () => {
     const saved = JSON.parse(readFileSync(join(dir, 'verified.json'), 'utf8'));
     expect(Object.keys(saved.entries)).toEqual([SIGNED_DIGEST]);
     expect(statSync(join(dir, 'verified.json')).mode & 0o777).toBe(0o600);
+  });
+
+  test('a signed multi-arch index verifies by its index digest; a platform manifest inside it is refused', async () => {
+    // Recorded: a two-arch index (amd64 and arm64 builds joined, as the release does), signed by
+    // its index digest; cosign's answers for the index and for its arm64 manifest.
+    const index = JSON.parse(fixture('release-index.json')) as {
+      manifests: { digest: string; platform: { os: string; architecture: string } }[];
+    };
+    const indexRef = JSON.parse(fixture('cosign-verify-index-ok.stdout'))[0].critical.identity[
+      'docker-reference'
+    ] as string;
+    const indexDigest = indexRef.split('@')[1] as string;
+    const name = indexRef.split('@')[0] as string;
+    const platforms = index.manifests.filter((m) => m.platform.os === 'linux');
+    expect(platforms.map((m) => m.platform.architecture)).toEqual(['amd64', 'arm64']);
+    const recorded = fakeCosign((args) => {
+      const ref = args.at(-1) as string;
+      return ref === indexRef
+        ? ok(fixture('cosign-verify-index-ok.stdout'))
+        : { code: 10, stdout: '', stderr: fixture('cosign-verify-platform-unsigned.stderr') };
+    });
+    expect(await verifyImage(indexRef, signedTrust({ cosign: recorded.cosign }))).toEqual({
+      ok: true,
+      via: 'cosign',
+    });
+    for (const m of platforms) {
+      const v = await verifyImage(`${name}@${m.digest}`, signedTrust({ cosign: recorded.cosign }));
+      expect(v.ok || v.reason).toMatch(/: cosign exit 10: no signatures found$/);
+    }
+    // Even if cosign answered a platform digest with the index's signature, the digests differ.
+    const confused = fakeCosign(() => ok(fixture('cosign-verify-index-ok.stdout')));
+    const arm = platforms[1]?.digest as string;
+    const v = await verifyImage(`${name}@${arm}`, signedTrust({ cosign: confused.cosign }));
+    expect(v.ok || v.reason).toMatch(`cosign verified ${indexDigest}, not ${arm}`);
   });
 
   test('cosign exit 0 with a different manifest digest is refused', async () => {
