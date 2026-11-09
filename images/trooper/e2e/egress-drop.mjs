@@ -188,14 +188,23 @@ check('stick: egressCapability passes on this engine (egress-v1 advertised)', ca
       Config: [{ Subnet: open.subnet, IPRange: open.ipRange, Gateway: open.gateway }],
     },
   });
+  // As the stick runs it: the host side from the stick's own image (found through its own
+  // container), the drop side from the proxy image.
+  const self = await d.selfImage();
+  check(
+    'stick: finds its own image to run the host-side probe from',
+    typeof self === 'string',
+    self,
+  );
+  const images = { host: self ?? 'jumpmaster-egress:dev', drop: 'jumpmaster-egress:dev' };
   try {
-    const g = await d.probeIsolation(good, 'jumpmaster-egress:dev');
+    const g = await d.probeIsolation(good, images);
     check(
       'probe: on a drop network the gateway holds no host address and is unreachable, IPv6 off',
       g.listenerUp && !g.gatewayOnHost && !g.gatewayReachable && g.ipv6Disabled,
       g,
     );
-    const o = await d.probeIsolation(open, 'jumpmaster-egress:dev');
+    const o = await d.probeIsolation(open, images);
     check(
       'probe control: without inhibit_ipv4 the probe sees the host at the gateway',
       o.listenerUp && o.gatewayOnHost && o.gatewayReachable,

@@ -462,6 +462,11 @@ describe('release docs', () => {
       'images.lock.json',
       'JM_DEV_IMAGES=1',
       'images/published.json',
+      'JM_TRUSTED_SIGNER_REPOSITORY',
+      'JM_IMAGE_POLICY=allowlist',
+      'tuf-repo-cdn.sigstore.dev',
+      'rekor.sigstore.dev',
+      'pkg-containers.githubusercontent.com',
     ])
       expect(doc, s).toContain(s);
     // No private hostnames or paths in a public runbook.

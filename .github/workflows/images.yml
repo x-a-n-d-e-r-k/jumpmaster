@@ -1,8 +1,8 @@
 name: Images
 
 # Builds every image without pushing, then runs the image smoke test and the trooper e2e against
-# the fake Claude CLI, the egress e2e, and (in its own job) the stack presets. Later tasks add e2e
-# cases (verification, the doctor drop).
+# the fake Claude CLI, the egress e2e, the image verification e2e, and (in its own job) the stack
+# presets. A later task adds the doctor drop.
 on:
   pull_request:
   push:
@@ -30,12 +30,15 @@ jobs:
             docker version
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      # The stick trusts this repository's release workflow, as a release stick does, so it starts
+      # under its own signed image policy in the smoke test.
       - name: Build the images (no push)
         env:
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
         run: |
           docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-server:dev -f images/server/Dockerfile .
-          docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-stick:dev -f images/stick/Dockerfile .
+          docker build --build-arg SOURCE_URL="$SOURCE_URL" --build-arg RELEASE_REPOSITORY="$RELEASE_REPOSITORY" -t jumpmaster-stick:dev -f images/stick/Dockerfile .
           docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-trooper:dev -f images/trooper/Dockerfile .
           docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-egress:dev -f images/egress/Dockerfile .
       - name: Image smoke test
@@ -51,6 +54,33 @@ jobs:
           E2E_REPO: ${{ github.repository }}
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
         run: images/trooper/e2e/egress.sh
+
+  # Image verification under the stick's own signed policy, cosign and read-only root: a tag, an
+  # unsigned image and an image signed by another identity are refused, and the unsigned image
+  # runs once pinned by digest. It builds the trooper and the stick itself.
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Record the Docker Engine
+        run: |
+          {
+            echo '### Docker Engine (verify)'
+            echo '```'
+            docker version
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Verification e2e
+        env:
+          E2E_REPO: ${{ github.repository }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: images/trooper/e2e/verify.sh
 
   # The stack presets build FROM the trooper image; this job builds all four and checks each
   # toolchain as the agent user and as the gate user inside a review drop.

@@ -366,6 +366,67 @@ describe('stack presets', () => {
   });
 });
 
+describe('image verification in the stick image', () => {
+  test('the stick image ships cosign at the pinned version, checked with sha256sum -c, and sets the signed policy', () => {
+    const text = read('images/stick/Dockerfile');
+    const version = /export const COSIGN_VERSION = '(v[\d.]+)'/.exec(
+      read('apps/stick/src/verify.ts'),
+    )?.[1];
+    expect(version).toBeDefined();
+    // From Sigstore's own image, pinned by digest, as a named stage.
+    expect(text).toMatch(
+      new RegExp(
+        `^FROM ghcr\\.io/sigstore/cosign/cosign:${version?.replace(/\./g, '\\.')}@sha256:[0-9a-f]{64} AS cosign$`,
+        'm',
+      ),
+    );
+    const final = finalStage(instructions(text));
+    expect(
+      final.some(
+        (i) => i.op === 'COPY' && i.args === '--from=cosign /ko-app/cosign /usr/local/bin/cosign',
+      ),
+    ).toBe(true);
+    const runs = final
+      .filter((i) => i.op === 'RUN')
+      .map((i) => i.args)
+      .join('\n');
+    // Each platform's binary is checked against its own SHA-256, and the version is asserted.
+    expect(runs).toMatch(/amd64\) sum=[0-9a-f]{64}/);
+    expect(runs).toMatch(/arm64\) sum=[0-9a-f]{64}/);
+    expect(runs).toMatch(/sha256sum -c -/);
+    // cosign checks TLS against the system store, which the slim base lacks.
+    expect(runs).toMatch(/apt-get install -y --no-install-recommends ca-certificates/);
+    expect(runs).toContain(`gitVersion !== '${version}'`);
+    const env = final
+      .filter((i) => i.op === 'ENV')
+      .map((i) => i.args)
+      .join(' ');
+    expect(env).toMatch(/\bJM_IMAGE_POLICY=signed\b/);
+    expect(env).toMatch(/\bJM_EGRESS_IMAGE=\$\{EGRESS_IMAGE\}/);
+    expect(final.some((i) => i.op === 'ARG' && i.args === 'EGRESS_IMAGE')).toBe(true);
+    // The setuid sweep runs after cosign is in place.
+    const sweep = final.findIndex((i) => i.op === 'RUN' && SETUID_SWEEP.test(i.args));
+    const copy = final.findIndex(
+      (i) => i.op === 'COPY' && i.args.includes('/usr/local/bin/cosign'),
+    );
+    expect(sweep).toBeGreaterThan(copy);
+  });
+
+  test('images.yml builds the stick with a trusted signer, and runs the verification e2e', () => {
+    const text = read('.github/workflows/images.yml');
+    expect(text).toMatch(
+      /--build-arg RELEASE_REPOSITORY="\$RELEASE_REPOSITORY"[^\n]*-t jumpmaster-stick:dev/,
+    );
+    expect(text).toContain('images/trooper/e2e/verify.sh');
+    const e2e = read('images/trooper/e2e/verify.sh');
+    // An unsigned local image is refused under signed, and the same image runs once pinned.
+    expect(e2e).toContain('verify-drop.mjs');
+    const drop = read('images/trooper/e2e/verify-drop.mjs');
+    for (const s of ['image not verified', "via: 'pinned'", 'image-verify-v1', 'a tag reference'])
+      expect(drop, s).toContain(s);
+  });
+});
+
 describe('release metadata in the images', () => {
   test('the server image bakes images.lock.json from IMAGES_LOCK only when given, and checks it', () => {
     const final = finalStage(instructions(read('images/server/Dockerfile')));

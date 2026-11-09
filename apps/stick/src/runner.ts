@@ -18,7 +18,9 @@ import {
 import type { DropClient } from './client.js';
 import type { ContainerDriver, DropNet } from './driver.js';
 import { type EgressSession, egressImage, startEgress, trooperEgressRefusal } from './egress.js';
+import { pullImage } from './pull.js';
 import { dropSubnetPool } from './subnets.js';
+import { digestOf, type ImageTrust, verifyImage } from './verify.js';
 
 /** Services a drop network holds under egress: `.8` to `.14` of its /28. */
 const MAX_EGRESS_SERVICES = 6;
@@ -136,10 +138,20 @@ type RunDeps = {
   /** Consecutive failed heartbeats before a hard kill. A kill can't reach a cut-off stick. */
   lostServerKillBeats?: number;
   image?: string;
-  /** Defaults to `allowedImages(process.env)`. */
+  /**
+   * The image policy and what it trusts (main builds it at startup). Without it: the allow-list
+   * policy over `allowedImages`, else over `allowedImages(process.env)`.
+   */
+  trust?: ImageTrust;
+  /** Defaults to `allowedImages(process.env)`; used only when `trust` is not given. */
   allowedImages?: Set<string>;
-  /** The egress proxy image; defaults to `JM_EGRESS_IMAGE`. Allowed for the proxy only. */
+  /**
+   * The egress proxy image; defaults to `JM_EGRESS_IMAGE`. Under the allow-list policy it is
+   * allowed for the proxy only; under signed it is pulled and verified like the others.
+   */
   egressImage?: string;
+  /** Where image pull and verification lines go (default stdout). */
+  log?: (line: string) => void;
   egressReadyMs?: number;
   /** Defaults to `JM_DROP_SUBNET_POOL`. */
   subnetPool?: string;
@@ -151,33 +163,60 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
   const { client, driver } = deps;
   const { dropId, epoch } = payload;
   const image = payload.image || deps.image || TROOPER_IMAGE;
-  if (!(deps.allowedImages ?? allowedImages(process.env)).has(image)) {
-    await client.postResult(dropId, epoch, {
-      status: 'failed',
-      role: payload.role,
-      reason: `image not allowed: ${image}`,
-      gates: [],
-    });
-    return;
-  }
-  const allowed = deps.allowedImages ?? allowedImages(process.env);
+  const trust: ImageTrust = deps.trust ?? {
+    policy: 'allowlist',
+    allowed: deps.allowedImages ?? allowedImages(process.env),
+  };
+  const log = deps.log ?? ((line: string) => console.log(line));
   const services = ('services' in payload ? payload.services : undefined) ?? [];
-  const blocked = services.find((s) => !allowed.has(s.image));
-  if (blocked) {
-    await client.postResult(dropId, epoch, {
-      status: 'failed',
-      role: payload.role,
-      reason: `image not allowed: ${blocked.image}`,
-      gates: [],
-    });
-    return;
-  }
   const egress = payload.egress;
   const fail = (reason: string) =>
     client.postResult(dropId, epoch, { status: 'failed', role: payload.role, reason, gates: [] });
+  const proxyImage = egress ? (deps.egressImage ?? egressImage(process.env)) : undefined;
+  // Every image this drop would create a container from: the trooper, its proxy, its services.
+  const images: { ref: string; proxy?: true }[] = [
+    { ref: image },
+    ...(proxyImage ? [{ ref: proxyImage, proxy: true as const }] : []),
+    ...services.map((s) => ({ ref: s.image })),
+  ];
+  // The allow-list lets the proxy image run as the proxy only (never as a trooper or service).
+  const decide = (i: { ref: string; proxy?: true }) =>
+    i.proxy && trust.policy === 'allowlist'
+      ? Promise.resolve({ ok: true as const, via: 'allowlist' as const })
+      : verifyImage(i.ref, trust);
+  // First what needs no network: a tag under signed, or an image off the allow-list.
+  for (const i of images) {
+    // Under signed only the tag check is offline; verifyImage refuses a tag without cosign.
+    if (trust.policy === 'signed' && digestOf(i.ref)) continue;
+    const v = await decide(i);
+    if (!v.ok) {
+      await fail(v.reason);
+      return;
+    }
+  }
   if (egress && services.length > MAX_EGRESS_SERVICES) {
     await fail(`egress allows at most ${MAX_EGRESS_SERVICES} services per drop`);
     return;
+  }
+  // Then pull (digest references only), then verify, all before any container exists.
+  const unique = [...new Map(images.map((i) => [i.ref, i])).values()];
+  for (const i of unique) {
+    try {
+      await pullImage(i.ref, { driver, log });
+    } catch (e) {
+      await fail(e instanceof Error ? e.message : String(e));
+      return;
+    }
+  }
+  if (trust.policy === 'signed') {
+    for (const i of unique) {
+      const v = await decide(i);
+      if (!v.ok) {
+        await fail(v.reason);
+        return;
+      }
+      log(JSON.stringify({ event: 'image-verified', dropId, ref: i.ref, via: v.via }));
+    }
   }
   if (egress) {
     // A trooper older than egress ignores payload.egress: refuse it before anything is created,
@@ -213,7 +252,7 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
           epoch,
           egress,
           net,
-          image: deps.egressImage ?? egressImage(process.env),
+          image: proxyImage ?? egressImage(process.env),
           labels,
           ...(deps.egressReadyMs !== undefined ? { readyMs: deps.egressReadyMs } : {}),
         });

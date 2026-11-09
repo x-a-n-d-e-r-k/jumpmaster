@@ -6,7 +6,8 @@
 #     uid, writes its database under /data, and answers `jumpmaster ctl` through `docker exec`;
 #   - on Linux, the default uid 10000 cannot read a host-owned 0600 secret and says so by name;
 #   - the stick, read-only with only /state writable, enrolls from a join-token file and keeps
-#     stick.json at mode 0600 under /state.
+#     stick.json at mode 0600 under /state; it starts under its signed image policy (its cosign is
+#     the pinned version) and advertises image-verify-v1.
 # Prints one line per check; exits non-zero on the first failure.
 set -euo pipefail
 SERVER_IMAGE="${SMOKE_SERVER_IMAGE:-jumpmaster-server:dev}"
@@ -108,6 +109,9 @@ docker run -d --name "$STICK" --network "$NET" --read-only --tmpfs /tmp \
   -e JM_SERVER_URL=http://jumpmaster:7420 -e JM_JOIN_TOKEN_FILE=/run/secrets/join \
   -e JM_STICK_NAME=smoke "$STICK_IMAGE" >/dev/null
 wait_log "$STICK" "enrolled as" 60 || fail "stick did not enroll"
+# The stick image runs the signed policy with its shipped cosign, so it advertises image-verify-v1.
+docker logs "$STICK" 2>&1 | grep -qE "image policy signed, capabilities (egress-v1, )?image-verify-v1" \
+  || fail "stick did not start under the signed policy with image-verify-v1"
 mode="$(docker exec "$STICK" stat -c '%a %U' /state/stick.json)"
 [ "$mode" = "600 root" ] || fail "stick.json is $mode"
 if docker exec "$STICK" sh -c 'touch /app/x' 2>/dev/null; then fail "stick root is writable"; fi
@@ -116,5 +120,5 @@ for name in "$SERVER" "$STICK"; do
     fail "a secret value appears in the $name logs"
   fi
 done
-echo "stick: read-only root, enrolled from a join-token file, /state/stick.json 0600: ok"
+echo "stick: read-only root, enrolled from a join-token file, /state/stick.json 0600, signed policy: ok"
 echo "smoke: pass"

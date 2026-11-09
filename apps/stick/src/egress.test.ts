@@ -10,6 +10,7 @@ import {
   startEgress,
 } from './egress.js';
 import { stickInfo } from './state.js';
+import { type Cosign, releaseSigner } from './verify.js';
 
 const GOOD: IsolationFacts = {
   listenerUp: true,
@@ -27,13 +28,26 @@ function probeDriver(
     facts?: Partial<IsolationFacts>;
     probeError?: string;
     proxyReady?: boolean;
+    self?: string;
+    present?: boolean;
+    pullError?: string;
   } = {},
 ) {
   const calls: string[] = [];
+  let pulled = false;
   const driver = {
     async imageExists(image: string) {
       calls.push(`image ${image}`);
-      return o.image ?? true;
+      return pulled || (o.present ?? o.image ?? true);
+    },
+    async pullImage(ref: string) {
+      calls.push(`pull ${ref}`);
+      if (o.pullError) throw new Error(o.pullError);
+      pulled = true;
+    },
+    async selfImage() {
+      calls.push('self');
+      return o.self;
     },
     async engineVersion() {
       calls.push('version');
@@ -44,8 +58,8 @@ function probeDriver(
       if (o.netError) throw new Error(o.netError);
       return { name, gateway: '172.30.0.1', proxy: '172.30.0.2' } as never;
     },
-    async probeIsolation(net: { name: string }, image: string) {
-      calls.push(`isolation ${net.name} ${image}`);
+    async probeIsolation(net: { name: string }, images: { host: string; drop: string }) {
+      calls.push(`isolation ${net.name} host=${images.host} drop=${images.drop}`);
       if (o.probeError) throw new Error(o.probeError);
       return { ...GOOD, ...o.facts };
     },
@@ -84,7 +98,8 @@ describe('the egress capability', () => {
       'version',
       `teardown jm-egress-probe-h1 ${labels}`,
       'create jm-egress-probe-h1 172.30.0.0/16',
-      'isolation jm-egress-probe-h1 jumpmaster-egress:dev',
+      'self',
+      'isolation jm-egress-probe-h1 host=jumpmaster-egress:dev drop=jumpmaster-egress:dev',
       'proxy jm-egress-probe-h1-0 bind=172.30.0.2',
       'proxy-stop',
       `teardown jm-egress-probe-h1 ${labels}`,
@@ -206,6 +221,92 @@ describe('the egress capability', () => {
       JM_EGRESS_BIND: '172.30.0.2',
       JM_EGRESS_MAX_TUNNELS: '256',
       JM_EGRESS_MAX_CONNECTIONS: '512',
+    });
+  });
+
+  test("the host-side probe runs from the stick's own image, the drop side from the proxy image", async () => {
+    const d = probeDriver({ self: 'sha256:stickimage' });
+    expect(await egressCapability(d.driver, { HOSTNAME: 'h1' }, { readyMs: 50 })).toEqual({
+      ok: true,
+    });
+    expect(d.calls).toContain(
+      'isolation jm-egress-probe-h1 host=sha256:stickimage drop=jumpmaster-egress:dev',
+    );
+  });
+
+  describe('under the signed image policy', () => {
+    const EG = `ghcr.io/o/jumpmaster-egress@sha256:${'e'.repeat(64)}`;
+    const cosign =
+      (code: number): Cosign =>
+      async () =>
+        code === 0
+          ? {
+              code: 0,
+              stdout: JSON.stringify([
+                { critical: { image: { 'docker-manifest-digest': `sha256:${'e'.repeat(64)}` } } },
+              ]),
+              stderr: '',
+            }
+          : { code, stdout: '', stderr: 'Error: no signatures found' };
+    const trust = (code = 0) => ({
+      policy: 'signed' as const,
+      allowed: new Set<string>(),
+      signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster'),
+      cosign: cosign(code),
+    });
+
+    test('the proxy image is pulled by digest and verified before any probe container runs', async () => {
+      const d = probeDriver({ present: false });
+      const r = await egressCapability(
+        d.driver,
+        { HOSTNAME: 'h1', JM_EGRESS_IMAGE: EG },
+        { readyMs: 50, trust: trust(), log: () => {} },
+      );
+      expect(r).toEqual({ ok: true });
+      expect(d.calls.slice(0, 3)).toEqual([`image ${EG}`, `pull ${EG}`, `image ${EG}`]);
+      // No stick image to run the host side from: the verified proxy image runs it.
+      expect(d.calls).toContain(`isolation jm-egress-probe-h1 host=${EG} drop=${EG}`);
+    });
+
+    test('a tag, an unverified or an unpullable proxy image means no egress-v1, and no probe', async () => {
+      const cases: [
+        Record<string, string>,
+        ReturnType<typeof trust>,
+        Parameters<typeof probeDriver>[0],
+        RegExp,
+      ][] = [
+        [
+          {},
+          trust(),
+          {},
+          /^the egress proxy image jumpmaster-egress:dev is not a digest reference; under the signed image policy set JM_EGRESS_IMAGE to the release's proxy by digest$/,
+        ],
+        [
+          { JM_EGRESS_IMAGE: EG },
+          trust(10),
+          {},
+          /^the egress proxy image is not verified: image not verified: .*: cosign exit 10: no signatures found$/,
+        ],
+        [
+          { JM_EGRESS_IMAGE: EG },
+          trust(),
+          { present: false, pullError: 'denied' },
+          /^image pull failed: .*: denied$/,
+        ],
+      ];
+      for (const [env, t, o, reason] of cases) {
+        const d = probeDriver(o);
+        const r = await egressCapability(
+          d.driver,
+          { HOSTNAME: 'h1', ...env },
+          { readyMs: 50, trust: t, log: () => {} },
+        );
+        expect(r.ok, reason.source).toBe(false);
+        expect(r.ok || r.reason).toMatch(reason);
+        expect(d.calls.some((c) => c.startsWith('create') || c.startsWith('isolation'))).toBe(
+          false,
+        );
+      }
     });
   });
 

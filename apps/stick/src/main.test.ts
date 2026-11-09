@@ -4,7 +4,16 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, test } from 'vitest';
-import { joinToken, loadEnrollment, saveEnrollment, stateDir } from './state.js';
+import {
+  advertisedCapabilities,
+  joinToken,
+  loadEnrollment,
+  loadRelease,
+  RELEASE_FILE,
+  saveEnrollment,
+  stateDir,
+  stickVersion,
+} from './state.js';
 
 const fresh = () => mkdtempSync(join(tmpdir(), 'jm-stick-'));
 
@@ -61,4 +70,37 @@ describe('stick entry point', () => {
     expect(child.stderr).toContain('JM_SERVER_URL is required');
     expect(child.status).toBe(1);
   });
+});
+
+describe('the version the stick reports', () => {
+  test('a release stick reports its release; a build without one reports its package version as -dev', () => {
+    expect(stickVersion({ version: '0.4.0-rc.1', repository: 'o/r' })).toBe('0.4.0-rc.1');
+    expect(stickVersion({ version: null, repository: 'o/r' })).toMatch(/^\d+\.\d+\.\d+-dev$/);
+    expect(stickVersion(undefined)).toMatch(/-dev$/);
+    expect(stickVersion(undefined)).not.toBe('0.0.0');
+  });
+
+  test('loadRelease reads the file the image build writes, and nothing else counts', () => {
+    const dir = fresh();
+    const file = join(dir, 'release.json');
+    writeFileSync(file, JSON.stringify({ version: '1.2.3', repository: 'o/r' }));
+    expect(loadRelease(file)).toEqual({ version: '1.2.3', repository: 'o/r' });
+    writeFileSync(file, JSON.stringify({ version: '', repository: 7 }));
+    expect(loadRelease(file)).toEqual({ version: null, repository: null });
+    writeFileSync(file, 'not json');
+    expect(loadRelease(file)).toBeUndefined();
+    expect(loadRelease(join(dir, 'absent.json'))).toBeUndefined();
+    // In the image, /app/release.json sits three levels above dist/state.js.
+    expect(RELEASE_FILE.pathname.endsWith('/release.json')).toBe(true);
+  });
+});
+
+test('a stick advertises image-verify-v1 only under the signed policy', () => {
+  expect(advertisedCapabilities({ egress: false, policy: 'allowlist' })).toEqual([]);
+  expect(advertisedCapabilities({ egress: true, policy: 'allowlist' })).toEqual(['egress-v1']);
+  expect(advertisedCapabilities({ egress: false, policy: 'signed' })).toEqual(['image-verify-v1']);
+  expect(advertisedCapabilities({ egress: true, policy: 'signed' })).toEqual([
+    'egress-v1',
+    'image-verify-v1',
+  ]);
 });

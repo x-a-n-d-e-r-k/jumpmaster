@@ -115,3 +115,50 @@ the release's index digest under the release's registry, so a preset zone runs
 - With a lock that lacks the preset's image, `JM_DEV_IMAGES=1` does not help: the zone must set
   `image`, or the server must come from a release whose lock has it.
 - The release's `images.lock.json` asset is the same map plus the server and stick images.
+
+## What a stick needs to verify images
+
+The stick image runs the `signed` image policy (`JM_IMAGE_POLICY=signed`). Before it creates any
+container for a drop it pulls the trooper, the egress proxy and every service image by digest,
+then verifies each: a digest the operator pinned in `JM_ALLOWED_IMAGES` passes as it is, and
+anything else must carry a cosign signature with the identity above. A tag never runs. A
+verified digest is cached for 7 days in `/state/verified.json` (root-only, `0600`; a file that
+doesn't parse or has another owner or mode is ignored), so a short Sigstore outage doesn't stop
+images it already verified. Each image is logged once per drop as
+`{"event":"image-verified","ref":…,"via":"cosign"|"pinned"|"cache"}`.
+
+At startup under `signed` the stick refuses to run, with the reason, when:
+
+- its cosign isn't the pinned version (the image ships it; nothing to install);
+- a `JM_ALLOWED_IMAGES`, `JM_TROOPER_IMAGE` or `JM_EGRESS_IMAGE` value is not a digest
+  reference (`name@sha256:<64 hex>`);
+- it has no trusted signer (an image built without `RELEASE_REPOSITORY`). A fork sets
+  `JM_TRUSTED_SIGNER_REPOSITORY=<owner/name>` to trust its own release workflow; the stick logs
+  the override at start.
+
+Only then does it advertise `image-verify-v1`, which the server requires before it leases a drop
+from a zone with `requireSignedImages`. To run unsigned local images instead, set
+`JM_IMAGE_POLICY=allowlist` (M3's behaviour: `JM_ALLOWED_IMAGES` names each image exactly, tags
+allowed); such a stick never gets a signed zone's drops.
+
+The stick's own outbound traffic (not restricted by Jumpmaster; allow it if the host filters):
+
+- `ghcr.io` and `pkg-containers.githubusercontent.com`: image pulls;
+- `tuf-repo-cdn.sigstore.dev`: the Sigstore trust root (kept under `/state/sigstore`);
+- `rekor.sigstore.dev` and `fulcio.sigstore.dev`: the transparency log and the CA;
+- the Jumpmaster server.
+
+The egress capability check (`egress-v1`) runs short-lived probe containers on the host network,
+from the stick's own image, as `nobody`, with no capabilities, to prove a drop can't reach the
+host. Under `signed`, the proxy image it starts is first pulled by digest and verified, so the
+release stick image carries its release's proxy digest in `JM_EGRESS_IMAGE`.
+
+### Moving an existing zone onto the stick image
+
+A zone that runs a locally built trooper (an image with a tag, such as one built `FROM` the
+trooper for a project's toolchain) does not run on the stick image as it is: the signed policy
+refuses tags. Either push that image to a registry and pin its digest in `JM_ALLOWED_IMAGES`
+(and use the same digest reference as the zone's `image`), build it `FROM` a released preset and
+pin it the same way, or keep that zone's stick on `JM_IMAGE_POLICY=allowlist` and leave the zone's
+`requireSignedImages` unset. A service image (a database, say) is not signed by this workflow:
+pin it by digest.
