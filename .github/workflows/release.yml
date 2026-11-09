@@ -1,0 +1,351 @@
+name: Release
+
+# Publishes signed, digest-pinned images, only from a version tag on main (docs/runbooks/release.md).
+# - A push of vX.Y.Z or vX.Y.Z-rc.N: `guard` checks the tag's commit is on main; the images are
+#   built with SBOM and provenance and pushed to GHCR by digest; `sign` signs each by its index
+#   digest with cosign keyless (the identity the stick verifies) and signs SHA256SUMS; `publish`
+#   attaches compose.yaml, images.lock.json, SHA256SUMS and its bundle to the GitHub Release.
+# - workflow_dispatch is a dry run: the same builds, pushed to a job-local registry that dies with
+#   the job. It never logs in to GHCR, signs or publishes. `guard` runs only for tag refs.
+# Only the repository owner can push v* tags (a tag ruleset, an owner step).
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: The tag names a version and its commit is on main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "::error::$TAG is not vX.Y.Z or vX.Y.Z-rc.N"
+            exit 1
+          fi
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$TAG points at $GITHUB_SHA, which is not on main: nothing is built or signed"
+            exit 1
+          fi
+
+  troopers:
+    needs: guard
+    if: ${{ !cancelled() && (needs.guard.result == 'success' || (github.ref_type != 'tag' && needs.guard.result == 'skipped')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    # The dry run's registry: the presets build FROM the trooper this job just pushed.
+    services:
+      registry:
+        image: registry:3.1.1@sha256:325b4b29b041e82803abeb703e201655e4e23ab83264ec1a7c9ddb0a5b14a6e0
+        ports:
+          - 5000:5000
+    outputs:
+      registry: ${{ steps.target.outputs.registry }}
+      version: ${{ steps.target.outputs.version }}
+      trooper: ${{ steps.trooper.outputs.digest }}
+      python: ${{ steps.python.outputs.digest }}
+      go: ${{ steps.go.outputs.digest }}
+      jvm: ${{ steps.jvm.outputs.digest }}
+      egress: ${{ steps.egress.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: target
+        name: Choose where the images go
+        env:
+          RELEASE: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
+          OWNER: ${{ github.repository_owner }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          owner="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          if [ "$RELEASE" = true ]; then
+            echo "registry=ghcr.io/$owner" >> "$GITHUB_OUTPUT"
+            echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "registry=localhost:5000/$owner" >> "$GITHUB_OUTPUT"
+            echo "version=0.0.0-dryrun.${SHA:0:12}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host
+      - id: trooper
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/trooper/Dockerfile
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ steps.target.outputs.registry }}/jumpmaster-trooper,push-by-digest=true,name-canonical=true,push=true
+      - id: python
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/trooper/presets/python/Dockerfile
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+            BASE=${{ steps.target.outputs.registry }}/jumpmaster-trooper@${{ steps.trooper.outputs.digest }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ steps.target.outputs.registry }}/jumpmaster-trooper-python,push-by-digest=true,name-canonical=true,push=true
+      - id: go
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/trooper/presets/go/Dockerfile
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+            BASE=${{ steps.target.outputs.registry }}/jumpmaster-trooper@${{ steps.trooper.outputs.digest }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ steps.target.outputs.registry }}/jumpmaster-trooper-go,push-by-digest=true,name-canonical=true,push=true
+      - id: jvm
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/trooper/presets/jvm/Dockerfile
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+            BASE=${{ steps.target.outputs.registry }}/jumpmaster-trooper@${{ steps.trooper.outputs.digest }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ steps.target.outputs.registry }}/jumpmaster-trooper-jvm,push-by-digest=true,name-canonical=true,push=true
+      - id: egress
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/egress/Dockerfile
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ steps.target.outputs.registry }}/jumpmaster-egress,push-by-digest=true,name-canonical=true,push=true
+
+  apps:
+    needs: [guard, troopers]
+    if: ${{ !cancelled() && needs.troopers.result == 'success' && (needs.guard.result == 'success' || (github.ref_type != 'tag' && needs.guard.result == 'skipped')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    services:
+      registry:
+        image: registry:3.1.1@sha256:325b4b29b041e82803abeb703e201655e4e23ab83264ec1a7c9ddb0a5b14a6e0
+        ports:
+          - 5000:5000
+    outputs:
+      server: ${{ steps.server.outputs.digest }}
+      stick: ${{ steps.stick.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      # The lock the server image carries: the zone images it may resolve a preset to.
+      - id: lock
+        name: Write the server's image lock
+        env:
+          REGISTRY: ${{ needs.troopers.outputs.registry }}
+          TROOPER: ${{ needs.troopers.outputs.trooper }}
+          PYTHON: ${{ needs.troopers.outputs.python }}
+          GO: ${{ needs.troopers.outputs.go }}
+          JVM: ${{ needs.troopers.outputs.jvm }}
+          EGRESS: ${{ needs.troopers.outputs.egress }}
+        run: |
+          lock="$(jq -cn --arg r "$REGISTRY" --arg t "$TROOPER" --arg p "$PYTHON" --arg g "$GO" --arg j "$JVM" --arg e "$EGRESS" \
+            '{registry: $r, images: {"jumpmaster-trooper": $t, "jumpmaster-trooper-python": $p, "jumpmaster-trooper-go": $g, "jumpmaster-trooper-jvm": $j, "jumpmaster-egress": $e}}')"
+          echo "lock=$lock" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host
+      - id: server
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/server/Dockerfile
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+            IMAGES_LOCK=${{ steps.lock.outputs.lock }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ needs.troopers.outputs.registry }}/jumpmaster-server,push-by-digest=true,name-canonical=true,push=true
+      # The stick trusts this repository's release workflow and runs this release's egress proxy.
+      - id: stick
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/stick/Dockerfile
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+            RELEASE_REPOSITORY=${{ github.repository }}
+            RELEASE_VERSION=${{ needs.troopers.outputs.version }}
+            EGRESS_IMAGE=${{ needs.troopers.outputs.registry }}/jumpmaster-egress@${{ needs.troopers.outputs.egress }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ needs.troopers.outputs.registry }}/jumpmaster-stick,push-by-digest=true,name-canonical=true,push=true
+
+  sign:
+    needs: [guard, troopers, apps]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      REPO: ${{ github.repository }}
+      REGISTRY: ${{ needs.troopers.outputs.registry }}
+      TROOPER: ${{ needs.troopers.outputs.trooper }}
+      PYTHON: ${{ needs.troopers.outputs.python }}
+      GO: ${{ needs.troopers.outputs.go }}
+      JVM: ${{ needs.troopers.outputs.jvm }}
+      EGRESS: ${{ needs.troopers.outputs.egress }}
+      SERVER: ${{ needs.apps.outputs.server }}
+      STICK: ${{ needs.apps.outputs.stick }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # cosign v3.1.4 (released 2026-10-20), checked against the release's published SHA-256.
+      - name: Install cosign
+        run: |
+          curl -fsSLo /tmp/cosign https://github.com/sigstore/cosign/releases/download/v3.1.4/cosign-linux-amd64
+          echo "424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa  /tmp/cosign" | sha256sum -c -
+          sudo install -m 0755 /tmp/cosign /usr/local/bin/cosign
+          cosign version
+      - name: Log in to GHCR
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - name: Sign every image by its index digest, then verify it as the stick will
+        run: |
+          repo_re="$(printf '%s' "$REPO" | sed 's/[.]/\\./g')"
+          IDENTITY="^https://github\.com/${repo_re}/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$"
+          refs=(
+            "$REGISTRY/jumpmaster-trooper@$TROOPER"
+            "$REGISTRY/jumpmaster-trooper-python@$PYTHON"
+            "$REGISTRY/jumpmaster-trooper-go@$GO"
+            "$REGISTRY/jumpmaster-trooper-jvm@$JVM"
+            "$REGISTRY/jumpmaster-egress@$EGRESS"
+            "$REGISTRY/jumpmaster-server@$SERVER"
+            "$REGISTRY/jumpmaster-stick@$STICK"
+          )
+          for ref in "${refs[@]}"; do
+            [[ "$ref" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "::error::$ref has no digest"; exit 1; }
+            cosign sign --yes "$ref"
+          done
+          for ref in "${refs[@]}"; do
+            cosign verify \
+              --certificate-identity-regexp "$IDENTITY" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-github-workflow-trigger push \
+              --certificate-github-workflow-repository "$REPO" \
+              "$ref" > /dev/null
+          done
+      - name: Render compose.yaml and images.lock.json, and sign SHA256SUMS
+        run: |
+          repo_re="$(printf '%s' "$REPO" | sed 's/[.]/\\./g')"
+          IDENTITY="^https://github\.com/${repo_re}/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$"
+          mkdir -p release
+          jq -n --arg r "$REGISTRY" --arg t "$TROOPER" --arg p "$PYTHON" --arg g "$GO" --arg j "$JVM" \
+            --arg e "$EGRESS" --arg s "$SERVER" --arg k "$STICK" \
+            '{registry: $r, images: {"jumpmaster-trooper": $t, "jumpmaster-trooper-python": $p, "jumpmaster-trooper-go": $g, "jumpmaster-trooper-jvm": $j, "jumpmaster-egress": $e, "jumpmaster-server": $s, "jumpmaster-stick": $k}}' \
+            > release/images.lock.json
+          node scripts/render-compose.ts deploy/compose.yaml.tmpl release/images.lock.json > release/compose.yaml
+          cd release
+          sha256sum compose.yaml images.lock.json > SHA256SUMS
+          cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+          cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+            --certificate-identity-regexp "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-trigger push \
+            --certificate-github-workflow-repository "$REPO" \
+            SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files
+          path: release/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [guard, troopers, apps, sign]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: release
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          pre=()
+          if [[ "$TAG" == *-rc.* ]]; then pre=(--prerelease); fi
+          cd release
+          gh release create "$TAG" --repo "$REPO" --verify-tag --title "$TAG" "${pre[@]}" \
+            --notes "Images are signed with cosign keyless by this repository's release workflow. Verify them and this release's files as SECURITY.md describes." \
+            compose.yaml images.lock.json SHA256SUMS SHA256SUMS.sigstore.json

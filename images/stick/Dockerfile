@@ -25,6 +25,17 @@ ARG SOURCE_URL
 LABEL org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.title="jumpmaster-stick"
 COPY --from=build /out /app
+# Release metadata (the release workflow passes both): the version the stick reports, and the
+# repository whose release workflow it trusts to sign images. A build without them has neither.
+ARG RELEASE_VERSION
+ARG RELEASE_REPOSITORY
+RUN node -e " \
+      const v = process.env.RELEASE_VERSION || ''; \
+      const r = process.env.RELEASE_REPOSITORY || ''; \
+      if (v && !/^[0-9]+[.][0-9]+[.][0-9]+(-[0-9A-Za-z.-]+)?$/.test(v)) throw new Error('RELEASE_VERSION ' + v); \
+      if (r && !/^[A-Za-z0-9-]+[/][A-Za-z0-9._-]+$/.test(r)) throw new Error('RELEASE_REPOSITORY ' + r); \
+      if (v || r) require('fs').writeFileSync('/app/release.json', JSON.stringify({ version: v || null, repository: r || null }) + '\\n', { mode: 0o444 }); \
+    "
 RUN install -d -o root -g root -m 0700 /state \
  && find / -xdev -type f -perm /6000 -exec chmod a-s {} +
 ENV NODE_ENV=production \

@@ -366,6 +366,61 @@ describe('stack presets', () => {
   });
 });
 
+describe('release metadata in the images', () => {
+  test('the server image bakes images.lock.json from IMAGES_LOCK only when given, and checks it', () => {
+    const final = finalStage(instructions(read('images/server/Dockerfile')));
+    // No default: a build without the argument has no lock, and a preset zone then needs
+    // JM_DEV_IMAGES=1 or an explicit image.
+    expect(final.some((i) => i.op === 'ARG' && i.args === 'IMAGES_LOCK')).toBe(true);
+    const write = final.find((i) => i.op === 'RUN' && i.args.includes('/app/images.lock.json'));
+    expect(write?.args).toMatch(/if \[ -n "\$IMAGES_LOCK" \]/);
+    // The build parses it with the server's own loader, so a malformed lock fails the build.
+    expect(write?.args).toMatch(/loadImageLock\('\/app\/images\.lock\.json'\)/);
+    expect(read('apps/server/src/presets.ts')).toContain(
+      "export const IMAGE_LOCK_PATH = '/app/images.lock.json'",
+    );
+  });
+
+  test('the stick image records its release version and repository from build arguments', () => {
+    const final = finalStage(instructions(read('images/stick/Dockerfile')));
+    for (const arg of ['RELEASE_VERSION', 'RELEASE_REPOSITORY'])
+      expect(
+        final.some((i) => i.op === 'ARG' && i.args === arg),
+        arg,
+      ).toBe(true);
+    const write = final.find((i) => i.op === 'RUN' && i.args.includes('/app/release.json'));
+    expect(write?.args).toContain('RELEASE_VERSION');
+    expect(write?.args).toContain('RELEASE_REPOSITORY');
+  });
+
+  test('each preset ARG BASE default is the published trooper digest, or the marked placeholder before the first release', () => {
+    const published = JSON.parse(read('images/published.json')) as {
+      version: string | null;
+      registry: string | null;
+      images: Record<string, string>;
+    };
+    const trooper = published.images['jumpmaster-trooper'];
+    const nodeBase = /^FROM (node:24-bookworm-slim@sha256:[0-9a-f]{64})/m.exec(
+      read('images/server/Dockerfile'),
+    )?.[1];
+    for (const file of Object.values(PRESET_FILES)) {
+      const text = read(file);
+      const base = /^ARG BASE=(\S+)$/m.exec(text)?.[1];
+      if (trooper) {
+        expect(published.registry, 'images/published.json names its registry').toMatch(
+          /^ghcr\.io\//,
+        );
+        expect(base, file).toBe(`${published.registry}/jumpmaster-trooper@${trooper}`);
+      } else {
+        // Nothing published yet: the plain Node image, which the build's own check refuses.
+        expect(published.version).toBeNull();
+        expect(base, file).toBe(nodeBase);
+        expect(text, file).toContain('images/published.json');
+      }
+    }
+  });
+});
+
 test('dependabot watches the preset Dockerfiles and the Claude CLI lockfile', () => {
   type Update = { 'package-ecosystem': string; directory?: string; directories?: string[] };
   const updates = (load(read('.github/dependabot.yml')) as { updates: Update[] }).updates;
