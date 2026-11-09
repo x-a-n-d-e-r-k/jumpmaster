@@ -2,7 +2,7 @@
 # code. No Docker client of any kind: only the stick talks to the engine.
 # Run it with a read-only root, a tmpfs at /tmp (SQLite temp files), /data writable and secrets
 # passed as *_FILE paths. Compose overrides the user with the host uid that owns the secret files.
-FROM node:24-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5 AS build
+FROM node:26-bookworm-slim@sha256:add5c17c14752c54d2f3d519ec46a3815684d41c33f198bcb09fb998f7dcbf68 AS build
 # better-sqlite3 is compiled here from source against the image's own Node headers, so nothing
 # is downloaded outside npm's integrity-checked lockfile.
 RUN apt-get update \
@@ -30,7 +30,7 @@ RUN cp /src/package.json /src/package-lock.json ./ \
  && node -e "new (require('better-sqlite3'))(':memory:').close()" \
  && chmod 0755 apps/server/dist/cli.js
 
-FROM node:24-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5
+FROM node:26-bookworm-slim@sha256:add5c17c14752c54d2f3d519ec46a3815684d41c33f198bcb09fb998f7dcbf68
 ARG SOURCE_URL
 LABEL org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.title="jumpmaster-server"

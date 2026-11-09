@@ -1,4 +1,4 @@
-FROM node:24-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5 AS build
+FROM node:26-bookworm-slim@sha256:add5c17c14752c54d2f3d519ec46a3815684d41c33f198bcb09fb998f7dcbf68 AS build
 WORKDIR /src
 COPY package.json package-lock.json tsconfig.base.json tsconfig.json ./
 COPY packages/protocol packages/protocol
@@ -14,7 +14,7 @@ RUN npx tsc -b packages/protocol && npx tsc -b apps/trooper \
  && cp -r node_modules/zod /out/node_modules/zod \
  && cp -r packages/protocol/package.json packages/protocol/dist /out/node_modules/@jumpmaster/protocol/
 
-FROM node:24-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5
+FROM node:26-bookworm-slim@sha256:add5c17c14752c54d2f3d519ec46a3815684d41c33f198bcb09fb998f7dcbf68
 ARG SOURCE_URL
 LABEL org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.title="jumpmaster-trooper" \
