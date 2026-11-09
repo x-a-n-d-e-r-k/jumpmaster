@@ -1,7 +1,22 @@
 import { basename, matchesGlob } from 'node:path';
 import type { GateSpec } from '@jumpmaster/protocol';
 import { pathMatches } from '@jumpmaster/protocol';
-import yaml from 'js-yaml';
+import {
+  binaryTag,
+  boolCoreTag,
+  CORE_SCHEMA,
+  FAILSAFE_SCHEMA,
+  floatYaml11Tag,
+  intYaml11Tag,
+  load,
+  mergeTag,
+  nullCoreTag,
+  omapTag,
+  pairsTag,
+  Schema,
+  setTag,
+  timestampTag,
+} from 'js-yaml';
 import type { DropZoneConfig } from '../config.js';
 import type { BranchRulesRead, PullFiles } from '../forge/github.js';
 
@@ -513,19 +528,39 @@ function unexpectedSyntax(text: string): boolean {
 }
 
 /**
- * Reads a pnpm lockfile v6–v9 with js-yaml's default schema (as pnpm does), after refusing
- * syntax pnpm never writes. null on anything unexpected: a parse error (duplicate keys included), an unknown
+ * The schema pnpm reads lockfiles with: js-yaml 4's default. Core booleans and nulls; integers and
+ * floats in the wider YAML 1.1 forms (`_` separators, `0b`); timestamps, merge keys, binary,
+ * omap, pairs and set. js-yaml 5 dropped it (its `load` defaults to the YAML 1.2 core schema,
+ * and its YAML 1.1 schema also reads `y`, `n`, `on` and `off` as booleans), so it is rebuilt here.
+ */
+const PNPM_READER_SCHEMA = new Schema([
+  ...FAILSAFE_SCHEMA.tags,
+  nullCoreTag,
+  boolCoreTag,
+  intYaml11Tag,
+  floatYaml11Tag,
+  timestampTag,
+  mergeTag,
+  binaryTag,
+  omapTag,
+  pairsTag,
+  setTag,
+]);
+
+/**
+ * Reads a pnpm lockfile v6–v9 with the schema pnpm reads it with, after refusing syntax pnpm
+ * never writes. null on anything unexpected: a parse error (duplicate keys included), an unknown
  * top-level key, an entry that is not a mapping, or another lockfile version.
  */
 export function parsePnpmLock(text: string): PnpmLock | null {
   if (unexpectedSyntax(text)) return null;
-  // The text check above is hygiene; this is the boundary. pnpm reads with js-yaml's default
-  // schema (merge keys, timestamps, binary): the tree must be plain and the same under the core
-  // schema, so no schema-specific feature can mean something the checks below don't see.
+  // The text check above is hygiene; this is the boundary. pnpm's schema has merge keys,
+  // timestamps, binary and wider number forms: the tree must be plain and the same under the
+  // core schema, so no schema-specific feature can mean something the checks below don't see.
   let doc: unknown;
   try {
-    doc = yaml.load(text);
-    const core = yaml.load(text, { schema: yaml.CORE_SCHEMA });
+    doc = load(text, { schema: PNPM_READER_SCHEMA });
+    const core = load(text, { schema: CORE_SCHEMA });
     if (!plainTree(doc) || JSON.stringify(doc) !== JSON.stringify(core)) return null;
   } catch {
     return null;
@@ -646,7 +681,7 @@ export function pnpmBuildPolicy(
     if (t === null) continue;
     let doc: unknown;
     try {
-      doc = yaml.load(t, { schema: yaml.CORE_SCHEMA }); // read as pnpm reads it
+      doc = load(t, { schema: CORE_SCHEMA }); // read as pnpm reads it
     } catch {
       doc = undefined;
     }

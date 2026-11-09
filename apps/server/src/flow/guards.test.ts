@@ -438,8 +438,11 @@ describe('pnpm lockfile', () => {
   const sample = readFileSync(new URL('../test/pnpm-lock.v9.yaml', import.meta.url), 'utf8');
   const unpinned = { pnpmBlocksBuilds: false };
   const pnpm10 = { pnpmBlocksBuilds: true };
-  const pnpm = (base: string | null, head: string | null, opts = unpinned) =>
-    lockfileChanges('pnpm-lock.yaml', base, head, opts);
+  const pnpm = (
+    base: string | null,
+    head: string | null,
+    opts: Parameters<typeof lockfileChanges>[3] = unpinned,
+  ) => lockfileChanges('pnpm-lock.yaml', base, head, opts);
   /** The sample with an entry added after a section header. */
   const withEntry = (text: string, section: string, entry: string): string =>
     text.replace(`\n${section}:\n\n`, `\n${section}:\n\n${entry}\n`);
@@ -829,6 +832,56 @@ ${snapshotEntry}`;
           pnpm10,
         ),
       ).toEqual(['lockfile unreadable']));
+
+    // pnpm reads with js-yaml 4's default schema, whose integers and floats also take `_`
+    // separators and `0b`; js-yaml 5's core schema reads those as strings.
+    for (const value of ['1_000', '0b11'])
+      test(`a number pnpm reads differently from the core schema (${value}) is refused`, () =>
+        expect(
+          pnpm(
+            base,
+            head(
+              `    deprecated: ${value}\n`,
+              '  vitest@3.0.1:\n    dependencies:\n      vite: 5.0.0\n',
+            ),
+            pnpm10,
+          ),
+        ).toEqual(['lockfile unreadable']));
+
+    // ...but its booleans are the core ones: a package named like a YAML 1.1 boolean is a name.
+    for (const name of ['n', 'yes', 'off'])
+      test(`a dependency named ${name} is read as a name`, () =>
+        expect(
+          pnpm(
+            base,
+            head(
+              '',
+              `  vitest@3.0.1:\n    dependencies:\n      vite: 5.0.0\n      ${name}: 1.0.0\n`,
+            )
+              .replace(
+                'importers:\n\n  .:\n',
+                `importers:\n\n  .:\n    dependencies:\n      ${name}:\n        specifier: 1.0.0\n        version: 1.0.0\n`,
+              )
+              .replace(
+                'packages:\n\n',
+                `packages:\n\n  ${name}@1.0.0:\n    resolution: {integrity: sha512-NNNN}\n\n`,
+              ),
+          ),
+        ).toContain(
+          `dependency added: ${name}@1.0.0 (verified: registry integrity only; install scripts may run)`,
+        ));
+
+    test('an unreadable pnpm-workspace.yaml allows every build, so a new dependency is reported', () => {
+      const policy = pnpmBuildPolicy([], ['not: [valid']);
+      expect(policy.allowAll).toBe(true);
+      expect(
+        pnpm(base, head('', '  vitest@3.0.1:\n    dependencies:\n      vite: 5.0.0\n'), {
+          ...pnpm10,
+          allowAllBuilds: policy.allowAll,
+          allowedBuilds: policy.allowed,
+        }),
+      ).toContain('dependency added: evil@1.0.0 (all builds allowed: its install script runs)');
+    });
 
     test('a dependency value with whitespace in it is not a plain version', () =>
       expect(

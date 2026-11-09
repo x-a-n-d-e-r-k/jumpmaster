@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import yaml from 'js-yaml';
+import { CORE_SCHEMA, load } from 'js-yaml';
 import { describe, expect, test } from 'vitest';
 import { validateIssueSpec } from '../apps/server/src/crew/actions.js';
 import { currentObjective, parseGoals } from '../apps/server/src/goals.js';
@@ -32,7 +32,7 @@ function frontmatter(md: string): Record<string, unknown> | null {
   // The documented shape: `---` on the first line, `name:` on the next, nothing in between.
   const m = /^---\n(name: [\s\S]*?)\n---\n/.exec(md);
   if (!m) return null;
-  const doc: unknown = yaml.load(m[1] ?? '', { schema: yaml.CORE_SCHEMA });
+  const doc: unknown = load(m[1] ?? '', { schema: CORE_SCHEMA });
   return doc !== null && typeof doc === 'object' ? (doc as Record<string, unknown>) : null;
 }
 
