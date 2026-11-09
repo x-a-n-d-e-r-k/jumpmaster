@@ -5,6 +5,9 @@
 # fails at the check below instead of producing an image without the trooper.
 ARG BASE=node:24-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5
 
+# Temurin JDK 21.0.13+9 (released 2026-10-22). A named stage, so Dependabot bumps the digest.
+FROM eclipse-temurin:21.0.13_9-jdk-noble@sha256:114cabb73033ca4ce7ceec3deb62396bc1b716282bae051ed3c1d82e38fcab2d AS jdk
+
 FROM node:24-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5 AS fetch
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates \
@@ -20,12 +23,14 @@ ARG SOURCE_URL
 LABEL org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.title="jumpmaster-trooper-jvm"
 RUN test -f /opt/trooper/main.js || { echo "BASE must be the jumpmaster trooper image" >&2; exit 1; }
-# Temurin JDK 21.0.13+9 (released 2026-10-22).
-COPY --from=eclipse-temurin:21.0.13_9-jdk-noble@sha256:114cabb73033ca4ce7ceec3deb62396bc1b716282bae051ed3c1d82e38fcab2d /opt/java/openjdk /opt/java/openjdk
+COPY --from=jdk /opt/java/openjdk /opt/java/openjdk
 COPY --from=fetch /out/maven /opt/maven
 ENV JAVA_HOME=/opt/java/openjdk \
     MAVEN_HOME=/opt/maven \
     PATH=/opt/java/openjdk/bin:/opt/maven/bin:${PATH}
-RUN java -version \
+# Root-owned and read-only to both identities: the agent can't change a binary the gate runs.
+RUN chown -R root:root /opt/java/openjdk /opt/maven \
+ && chmod -R go-w /opt/java/openjdk /opt/maven \
+ && java -version \
  && mvn -v \
  && find / -xdev -type f -perm /6000 -exec chmod a-s {} +

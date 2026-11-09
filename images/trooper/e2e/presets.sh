@@ -34,6 +34,17 @@ expect 'go as agent' '^go version go1\.' "$out"
 out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-jvm:dev -c "$JVM" 2>&1 || true)"
 expect 'jvm as agent' 'openjdk version "21\..*Apache Maven 3\.' "$(tr '\n' ' ' <<<"$out")"
 
+# The agent can't write anything in a toolchain the gate runs (a world-writable file there would
+# let uid 10001 change a binary uid 10002 executes). `find -writable` checks as the calling user.
+# shellcheck disable=SC2016 # expanded by the container's sh, not here
+WRITABLE='found="$(find "$@" -writable -print 2>&1 | head -5)"; [ -z "$found" ] && echo none-writable || echo "$found"'
+out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-python:dev -c "$WRITABLE" sh /opt/uv /usr/local/bin/uv /usr/local/bin/uvx 2>&1 || true)"
+expect 'python toolchain read-only to agent' '^none-writable$' "$out"
+out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-go:dev -c "$WRITABLE" sh /usr/local/go 2>&1 || true)"
+expect 'go toolchain read-only to agent' '^none-writable$' "$out"
+out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-jvm:dev -c "$WRITABLE" sh /opt/java/openjdk /opt/maven 2>&1 || true)"
+expect 'jvm toolchain read-only to agent' '^none-writable$' "$out"
+
 # As the gate user: one review drop whose only gate runs the probe.
 payload() { # gate command
   node -e '

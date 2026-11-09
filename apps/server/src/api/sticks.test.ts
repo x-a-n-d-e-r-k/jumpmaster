@@ -597,6 +597,27 @@ describe('stick capabilities, per zone', () => {
     expect((res2.json() as { dropId: string }).dropId).toBe('x1');
   });
 
+  test('the body governs, not the stored row: a downgraded stick is excluded on that very poll', async () => {
+    const { db } = setup({ queued: false, config: twoZones() });
+    const enrolled = await app.inject({
+      method: 'POST',
+      url: '/api/sticks/enroll',
+      headers: proto,
+      payload: { joinToken: 'join-me', name: 's', slots: 1, capabilities: ['egress-v1'] },
+    });
+    const { stickToken } = enrolled.json() as { stickToken: string };
+    // The capable advertisement is on record from enroll and from a lease with nothing waiting.
+    expect((await leaseWith(stickToken, { capabilities: ['egress-v1'] })).statusCode).toBe(204);
+    const hash = createHash('sha256').update(stickToken).digest('hex');
+    expect(getStickByTokenHash(db, hash)?.capabilities).toEqual(['egress-v1']);
+    lockedDrop(db);
+    // The same stick now sends a bare M3 body: the enforce zone's drop is not leased to it.
+    const res = await lease(stickToken);
+    expect(res.statusCode).toBe(204);
+    expect(skippedOf(res)).toEqual([{ zoneId: 'locked', missing: ['egress-v1'] }]);
+    expect(getDrop(db, 'x1')).toMatchObject({ state: 'queued', stickId: null, epoch: 0 });
+  });
+
   test('a stick with allowlist policy skips drops of a zone needing signed images', async () => {
     const { db } = setup({ queued: false, config: twoZones({ requireSignedImages: true }) });
     lockedDrop(db);

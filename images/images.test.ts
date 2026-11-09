@@ -120,6 +120,22 @@ describe('stack presets', () => {
       // The sweep is the final stage's last RUN, so nothing added after it keeps a setuid bit.
       const runs = final.filter((i) => i.op === 'RUN');
       expect(runs.at(-1)?.args, file).toMatch(SETUID_SWEEP);
+      // Every toolchain directory the preset adds loses group and world write, so the agent
+      // (uid 10001) can't change a binary the gate (uid 10002) runs.
+      const added = final
+        .filter((i) => i.op === 'COPY' && i.args.startsWith('--from='))
+        .map((i) => i.args.split(/\s+/).at(-1) as string)
+        .filter((dst) => dst !== '/usr/local/bin/');
+      const writeSweep = runs.map((r) => r.args).join('\n');
+      for (const dir of [...added, ...(file.includes('python') ? ['/opt/uv'] : [])]) {
+        const sweep = writeSweep
+          .split(/&&|\n/)
+          .find((cmd) => /chmod -R \S*go-w/.test(cmd) && cmd.split(/\s+/).includes(dir));
+        expect(sweep, `${file} ${dir}`).toBeDefined();
+      }
+      // Image pins live on named FROM stages (which Dependabot bumps), never inline in COPY.
+      for (const c of final.filter((i) => i.op === 'COPY'))
+        expect(c.args, file).not.toMatch(/--from=\S*@sha256:/);
       // A build from the wrong base (the default is the plain Node image) fails loudly.
       expect(
         final.some((i) => i.op === 'RUN' && i.args.includes('test -f /opt/trooper/main.js')),
@@ -193,14 +209,12 @@ describe('stack presets', () => {
 
   test('the go preset copies Go from a digest-pinned image; jvm a JDK and a checked Maven', () => {
     const go = read(PRESET_FILES.go);
-    expect(go).toMatch(
-      /COPY --from=golang:[\w.-]+@sha256:[0-9a-f]{64} \/usr\/local\/go \/usr\/local\/go/,
-    );
+    expect(go).toMatch(/^FROM golang:[\w.-]+@sha256:[0-9a-f]{64} AS go$/m);
+    expect(go).toMatch(/COPY --from=go \/usr\/local\/go \/usr\/local\/go/);
     expect(go).toMatch(/ENV [^\n]*PATH=\/usr\/local\/go\/bin:/);
     const jvm = read(PRESET_FILES.jvm);
-    expect(jvm).toMatch(
-      /COPY --from=eclipse-temurin:21[\w.-]*@sha256:[0-9a-f]{64} \/opt\/java\/openjdk/,
-    );
+    expect(jvm).toMatch(/^FROM eclipse-temurin:21[\w.-]*@sha256:[0-9a-f]{64} AS jdk$/m);
+    expect(jvm).toMatch(/COPY --from=jdk \/opt\/java\/openjdk \/opt\/java\/openjdk/);
     expect(jvm).toMatch(/apache-maven-[\d.]+-bin\.tar\.gz/);
     expect(jvm).toMatch(/sha512sum -c/);
     expect(jvm).toMatch(/JAVA_HOME=\/opt\/java\/openjdk/);
@@ -221,6 +235,10 @@ describe('stack presets', () => {
       'java -version && mvn -v',
     ])
       expect(e2e).toContain(probe);
+    // The agent can't write any toolchain directory the gate runs from.
+    for (const dir of ['/opt/uv', '/usr/local/go', '/opt/java/openjdk', '/opt/maven'])
+      expect(e2e).toContain(dir);
+    expect(e2e).toMatch(/-writable/);
     // The agent user runs the probes directly, and the gate user runs them as a drop's gate.
     expect(e2e).toMatch(/--user 10001:10001/);
     expect(e2e).toMatch(/gates: \[\{ name: "toolchain", run/);

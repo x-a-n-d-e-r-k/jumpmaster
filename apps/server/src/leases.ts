@@ -22,8 +22,8 @@ export type ZoneRequirements = { caps: Set<StickCapability>; signed: boolean };
 
 /**
  * What a stick must have to run this zone's drops: `egress-v1` unless egress is off, and
- * `image-verify-v1` under the `signed` policy when signed images are required (the zone's own
- * `requireSignedImages`, else the install-wide one).
+ * `image-verify-v1` under the `signed` policy when signed images are required (install-wide, or
+ * by the zone itself).
  */
 export function zoneRequirements(
   zone: Pick<DropZoneConfig, 'egress' | 'requireSignedImages'>,
@@ -31,7 +31,8 @@ export function zoneRequirements(
 ): ZoneRequirements {
   const caps = new Set<StickCapability>();
   if ((zone.egress?.mode ?? 'off') !== 'off') caps.add('egress-v1');
-  const signed = (zone.requireSignedImages ?? config.requireSignedImages) === true;
+  // Strengthen-only: the zone can add the requirement, never remove the install's.
+  const signed = config.requireSignedImages === true || zone.requireSignedImages === true;
   if (signed) caps.add('image-verify-v1');
   return { caps, signed };
 }

@@ -126,7 +126,8 @@ const gate = (name: string, run: string): GateSpec => ({ name, run, timeoutMinut
 const has = (files: Files, path: string): boolean => typeof files[path] === 'string';
 const requirementFiles = (files: Files): string[] =>
   Object.keys(files)
-    .filter((f) => /^requirements[^/]*\.txt$/.test(f) && has(files, f))
+    // Repository names are data: only plain names are read, and they are quoted in gates.
+    .filter((f) => /^requirements[\w.-]*\.txt$/.test(f) && has(files, f))
     .sort((a, b) =>
       a === 'requirements.txt' ? -1 : b === 'requirements.txt' ? 1 : a < b ? -1 : 1,
     );
@@ -258,7 +259,7 @@ function detectPython(files: Files): Found {
   } else {
     const install =
       reqs.length > 0
-        ? `.venv/bin/pip install ${reqs.map((r) => `-r ${r}`).join(' ')}`
+        ? `.venv/bin/pip install ${reqs.map((r) => `-r '${r}'`).join(' ')}`
         : '.venv/bin/pip install -e .';
     gates = [
       gate('install', `${python} -m venv .venv && ${install}`),

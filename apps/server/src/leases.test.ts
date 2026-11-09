@@ -261,14 +261,14 @@ describe('stick capabilities, per zone', () => {
       signed: true,
     });
     expect(req(makeZone(), false)).toEqual({ caps: [], signed: false });
-    // A zone's own setting wins over the install-wide one, either way.
+    // A zone can only strengthen the install-wide setting, never weaken it.
     expect(req(makeZone({ requireSignedImages: true }), false)).toEqual({
       caps: ['image-verify-v1'],
       signed: true,
     });
     expect(req(makeZone({ requireSignedImages: false }), true)).toEqual({
-      caps: [],
-      signed: false,
+      caps: ['image-verify-v1'],
+      signed: true,
     });
   });
 

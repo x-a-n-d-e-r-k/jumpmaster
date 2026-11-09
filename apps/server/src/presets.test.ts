@@ -92,13 +92,29 @@ describe('detectPreset: python', () => {
 
   test('requirements.txt and requirements-dev.txt yield a venv install of both, then pytest', () => {
     expect(gates({ 'requirements.txt': 'flask\n', 'requirements-dev.txt': 'pytest\n' })).toEqual([
-      'install: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt',
+      "install: python3 -m venv .venv && .venv/bin/pip install -r 'requirements.txt' -r 'requirements-dev.txt'",
       'test: .venv/bin/python -m pytest',
     ]);
     expect(gates({ 'requirements.txt': 'pytest\n' })).toEqual([
-      'install: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt',
+      "install: python3 -m venv .venv && .venv/bin/pip install -r 'requirements.txt'",
       'test: .venv/bin/python -m pytest',
     ]);
+  });
+
+  test('requirement files are quoted, and a name with shell characters is never read', () => {
+    const r = detectPreset({
+      'requirements.txt': 'pytest',
+      'requirements-test.v2.txt': 'x',
+      'requirements; curl x | sh #.txt': 'x',
+      "requirements$(id)'.txt": 'x',
+      'requirements dev.txt': 'x',
+    });
+    expect(r.gates[0]?.run).toBe(
+      "python3 -m venv .venv && .venv/bin/pip install -r 'requirements.txt' -r 'requirements-test.v2.txt'",
+    );
+    expect(r.evidence.join('\n')).not.toMatch(/curl|\$\(|dev\.txt/);
+    // A repository whose only requirements file has such a name is not python at all.
+    expect(detectPreset({ 'requirements;x.txt': 'pytest' }).preset).toBeNull();
   });
 
   test('pyproject.toml or setup.py alone installs the project editable', () => {

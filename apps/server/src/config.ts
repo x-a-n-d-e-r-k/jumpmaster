@@ -136,7 +136,10 @@ const DropZoneObject = z.object({
    * that advertises `egress-v1`: until one does, the zone's drops stay queued.
    */
   egress: z.object({ mode: z.enum(EGRESS_MODES).default('off') }).optional(),
-  /** Overrides the install-wide `requireSignedImages` for this zone. */
+  /**
+   * `true` requires signed images for this zone even when the install doesn't. A zone can't
+   * weaken the install-wide setting: `false` under a top-level `true` is a config error.
+   */
   requireSignedImages: z.boolean().optional(),
   model: z.string().default('claude-opus-5-5'),
   maxTurns: z.number().int().positive().default(200),
@@ -397,8 +400,21 @@ export function loadConfig(
   // A zone without an explicit image runs its preset's: the release lock's digest when the
   // image ships one, else the local `:dev` build.
   const zonesNeedLock = parsed.data.dropZones.some((z) => !z.image);
-  const lock = zonesNeedLock ? loadImageLock(opts.imageLockPath ?? IMAGE_LOCK_PATH) : undefined;
+  const lockPath = opts.imageLockPath ?? IMAGE_LOCK_PATH;
+  const lock = zonesNeedLock ? loadImageLock(lockPath) : undefined;
+  // Without a lock a preset would run a mutable local `:dev` tag: only when asked for, for
+  // development against locally built images.
+  const devImages = rawEnv.JM_DEV_IMAGES === '1';
   const dropZones: DropZoneConfig[] = parsed.data.dropZones.map((zone) => {
+    if (!zone.image && zone.preset && !lock && !devImages)
+      throw new Error(
+        `Invalid config ${path}: zone ${zone.id}: preset ${zone.preset} needs the release image lock at ${lockPath}; set image explicitly, or JM_DEV_IMAGES=1 to run locally built :dev images`,
+      );
+    // A zone may require signed images when the install doesn't, never the other way round.
+    if (parsed.data.requireSignedImages && zone.requireSignedImages === false)
+      throw new Error(
+        `Invalid config ${path}: zone ${zone.id} sets requireSignedImages: false, but the install requires signed images (top-level requireSignedImages: true); a zone can only strengthen it, so remove the zone's setting`,
+      );
     try {
       return { ...zone, image: resolveImage(zone, lock) };
     } catch (e) {
