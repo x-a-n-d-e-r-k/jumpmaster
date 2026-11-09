@@ -36,6 +36,38 @@ async function crewHarness() {
 }
 
 describe('UI routes', () => {
+  test('/doctor shows the latest run, escaped, and refuses a foreign Host', async () => {
+    const h = await harness();
+    const foreign = await h.app.inject({
+      method: 'GET',
+      url: '/doctor',
+      headers: { host: 'evil.test' },
+    });
+    expect(foreign.statusCode).toBe(403);
+    expect((await get(h, '/doctor')).body).toContain('No doctor run has finished yet');
+    const checks = [
+      { id: 'config.listen', zoneId: null, status: 'pass', summary: 'loopback only' },
+      {
+        id: 'forge.labels',
+        zoneId: 'main',
+        status: 'fail',
+        summary: 'missing <script>',
+        fix: 'gh label create agent-ready',
+        doc: 'docs/runbooks/install.md#labels',
+      },
+    ];
+    h.db
+      .prepare(
+        "INSERT INTO doctor_runs (started_at, finished_at, results_json) VALUES ('a', 'b', ?)",
+      )
+      .run(JSON.stringify(checks));
+    const html = (await get(h, '/doctor')).body;
+    expect(html).toContain('missing &lt;script&gt;');
+    expect(html).toMatch(/<tr class="fail">.*forge\.labels/);
+    expect(html).toContain('gh label create agent-ready');
+    expect(html).toContain('1 pass, 0 warn, 1 fail, 0 skip');
+  });
+
   test('the home page names an enrolled stick that cannot run an enforce zone', async () => {
     const h = await harness({ zone: { egress: { mode: 'enforce' } } });
     insertStick(h.db, { id: 's1', name: 'm3-stick', tokenHash: 'h1', slots: 1 });

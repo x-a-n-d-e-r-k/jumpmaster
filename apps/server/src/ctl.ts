@@ -1,4 +1,5 @@
 import { pathToFileURL } from 'node:url';
+import type { DoctorCheck } from './doctor/checks.js';
 import { readSecret } from './secrets.js';
 
 const MODES: Record<string, string> = { pause: 'paused', resume: 'active', observe: 'observe' };
@@ -9,6 +10,12 @@ export type CtlRequest = { path: string; body: unknown } | { path: string; metho
 export function ctlRequest(args: string[]): CtlRequest | null {
   const [command, zone] = args;
   if (command === 'briefings') return { path: '/api/control/briefings', method: 'GET' };
+  if (command === 'doctor') {
+    const words = args.slice(1).filter((a) => a !== '--json');
+    if (words.some((w) => w.startsWith('--')) || words.length > 1) return null;
+    const [only] = words;
+    return { path: '/api/control/doctor', body: only ? { zone: only } : {} };
+  }
   if (command === 'rule') {
     const [, briefing, optionId, ...rest] = args;
     if (!briefing || !optionId) return null;
@@ -37,6 +44,43 @@ export function ctlRequest(args: string[]): CtlRequest | null {
   return { path: `/api/control/zones/${encodeURIComponent(zone)}`, body: { mode } };
 }
 
+const STATUS_WORD: Record<DoctorCheck['status'], string> = {
+  pass: 'PASS',
+  warn: 'WARN',
+  fail: 'FAIL',
+  skip: 'SKIP',
+};
+
+/** The doctor's run as lines a person reads: each check, then its fix and doc for any not passing. */
+export function formatDoctor(run: {
+  id: number;
+  finishedAt: string | null;
+  checks: DoctorCheck[];
+}) {
+  const lines = [`Jumpmaster doctor, run ${run.id} (${run.finishedAt ?? 'unfinished'})`, ''];
+  const zoneWidth = Math.max(4, ...run.checks.map((c) => (c.zoneId ?? '').length));
+  const idWidth = Math.max(...run.checks.map((c) => c.id.length));
+  for (const c of run.checks) {
+    lines.push(
+      `${STATUS_WORD[c.status]}  ${(c.zoneId ?? '').padEnd(zoneWidth)}  ${c.id.padEnd(idWidth)}  ${c.summary}`,
+    );
+    const indent = ' '.repeat(8 + zoneWidth + idWidth);
+    if (c.status !== 'pass' && c.fix)
+      for (const [i, l] of c.fix.split('\n').entries())
+        lines.push(`${indent}${i === 0 ? 'fix: ' : '     '}${l}`);
+    if (c.status !== 'pass' && c.doc) lines.push(`${indent}see: ${c.doc}`);
+  }
+  const n = (s: DoctorCheck['status']) => run.checks.filter((c) => c.status === s).length;
+  lines.push(
+    '',
+    `${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip${n('fail') > 0 ? ': fix each FAIL, then run the doctor again' : ''}`,
+  );
+  return lines;
+}
+
+const USAGE =
+  'usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json]';
+
 /** Runs one control command against the server. Returns the process exit code. */
 export async function runCtl(
   args: string[],
@@ -47,9 +91,7 @@ export async function runCtl(
 ): Promise<number> {
   const request = ctlRequest(args);
   if (!request) {
-    err(
-      'usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone>',
-    );
+    err(USAGE);
     return 2;
   }
   let token: string | undefined;
@@ -74,7 +116,16 @@ export async function runCtl(
           body: JSON.stringify(request.body),
         },
   );
-  out(`${res.status} ${await res.text()}`);
+  const text = await res.text();
+  if (args[0] === 'doctor' && res.ok) {
+    const { run } = JSON.parse(text) as {
+      run: { id: number; finishedAt: string | null; checks: DoctorCheck[] };
+    };
+    if (args.includes('--json')) out(JSON.stringify({ run }, null, 2));
+    else for (const line of formatDoctor(run)) out(line);
+    return run.checks.some((c) => c.status === 'fail') ? 1 : 0;
+  }
+  out(`${res.status} ${text}`);
   return res.ok ? 0 : 1;
 }
 

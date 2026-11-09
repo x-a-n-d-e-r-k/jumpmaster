@@ -407,6 +407,11 @@ describe('crew config', () => {
         fullEnv,
       ),
     ).toThrow(/claude.plan/);
+    // The token's creation date, for the doctor's age check: a date, never a secret.
+    const dated = (tokenCreatedAt: string) =>
+      fixture({ dataDir: './data', dropZones: [baseZone], claude: { tokenCreatedAt } });
+    expect(loadConfig(dated('2026-01-31'), fullEnv).claude.tokenCreatedAt).toBe('2026-01-31');
+    expect(() => loadConfig(dated('last spring'), fullEnv)).toThrow(/claude.tokenCreatedAt/);
   });
 
   test('mcp defaults to off, with a 256 KiB body limit, 20 writes and 600 calls an hour and 5 open briefings', () => {

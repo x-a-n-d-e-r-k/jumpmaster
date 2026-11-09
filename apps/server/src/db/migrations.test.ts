@@ -544,3 +544,65 @@ test('v15 adds the stick columns, keeping every stick row', () => {
       .get(),
   ).toEqual({ p: 'allowlist', c: '[]' });
 });
+
+/** A database built by every migration up to and including `version`, closed. */
+function dbAt(version: number, seed?: (raw: Database.Database) => void): string {
+  const f = tmpDbFile();
+  const raw = new Database(f);
+  raw.exec('CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+  for (const m of MIGRATIONS.filter((m) => m.version <= version)) {
+    raw.exec(m.sql);
+    m.after?.(raw as unknown as Db);
+    raw.prepare('INSERT INTO schema_version VALUES (?, ?)').run(m.version, 'x');
+  }
+  seed?.(raw);
+  raw.close();
+  return f;
+}
+
+test('v16 adds doctor_runs and keeps the last 20', () => {
+  const f = dbAt(15, (raw) =>
+    raw.exec(
+      `INSERT INTO sticks (id, name, token_hash, slots, created_at) VALUES ('s1', 'one', 'h1', 1, 'a');`,
+    ),
+  );
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(count(db, 'sticks')).toBe(1);
+  const insert = db.prepare(
+    'INSERT INTO doctor_runs (started_at, finished_at, results_json, drop_ids_json) VALUES (?, ?, ?, ?)',
+  );
+  for (let i = 1; i <= 25; i++) insert.run(`t${i}`, `f${i}`, `[{"n":${i}}]`, '[]');
+  const rows = db.prepare('SELECT id, started_at AS s FROM doctor_runs ORDER BY id').all() as {
+    id: number;
+    s: string;
+  }[];
+  expect(rows).toHaveLength(20);
+  expect(rows[0]?.s).toBe('t6');
+  expect(rows.at(-1)?.s).toBe('t25');
+  // A run still in progress has no finish and no results yet.
+  db.prepare('INSERT INTO doctor_runs (started_at) VALUES (?)').run('t26');
+  expect(
+    db
+      .prepare(
+        "SELECT finished_at AS f, results_json AS r, drop_ids_json AS d FROM doctor_runs WHERE started_at = 't26'",
+      )
+      .get(),
+  ).toEqual({ f: null, r: '[]', d: '[]' });
+  // Reopening runs nothing again.
+  db.close();
+  const again = openDb(f);
+  expect(maxVersion(again)).toBe(MIGRATIONS.length);
+  expect(count(again, 'doctor_runs')).toBe(20);
+});
+
+test('an M3-era statement set still runs against v16 (the new table is ignored)', () => {
+  const db = openDb(dbAt(16));
+  db.prepare(
+    "INSERT INTO sticks (id, name, token_hash, slots, created_at) VALUES ('s3', 'm3', 'h3', 1, 'd')",
+  ).run();
+  db.prepare(
+    "INSERT INTO drop_zones (id, repo, default_branch, config_json) VALUES ('z', 'o/r', 'main', '{}')",
+  ).run();
+  expect(count(db, 'sticks')).toBe(1);
+});

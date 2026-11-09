@@ -15,6 +15,7 @@ import {
   upsertWorkItem,
   zoneIsDrained,
 } from '../db/repo.js';
+import { NOW, world } from '../test/doctorWorld.js';
 import { makeZone } from '../test/fixtures.js';
 import { t0, tmpDbFile } from '../test/helpers.js';
 import { registerControlRoutes } from './control.js';
@@ -279,5 +280,50 @@ describe('rule route', () => {
     });
     expect(ctlRequest(['rule', '7', 'o1', '--options'])).toBeNull();
     expect(ctlRequest(['rule', '7'])).toBeNull();
+  });
+});
+
+describe('doctor routes', () => {
+  function doctorApp() {
+    const w = world();
+    app = Fastify();
+    registerControlRoutes(app, {
+      db: w.db,
+      config: { ...w.config, secrets: { ...w.config.secrets, operatorToken: TOKEN } },
+      now: () => NOW,
+      forgesFor: w.deps.forges,
+      doctorEnv: w.deps.env,
+    });
+    return w;
+  }
+
+  test('the doctor routes need the operator token and an allowed Origin', async () => {
+    const w = doctorApp();
+    const get = (headers: Record<string, string>) =>
+      app?.inject({ method: 'GET', url: '/api/control/doctor', headers });
+    expect((await post('/api/control/doctor', {}, { host: HOST }))?.statusCode).toBe(401);
+    expect((await get({ host: HOST }))?.statusCode).toBe(401);
+    expect(
+      (await post('/api/control/doctor', {}, { ...auth, origin: 'http://evil.test' }))?.statusCode,
+    ).toBe(403);
+    expect((await get({ ...auth, host: 'evil.test:7420' }))?.statusCode).toBe(403);
+    expect(w.f.author.calls).toEqual([]);
+    expect((await get(auth))?.json()).toEqual({ run: null });
+
+    const ran = await post('/api/control/doctor', {});
+    expect(ran?.statusCode).toBe(200);
+    const run = ran?.json() as { run: { id: number; checks: { id: string }[] } };
+    expect(run.run.checks.some((c) => c.id === 'forge.author')).toBe(true);
+    expect((await get(auth))?.json()).toMatchObject({ run: { id: run.run.id } });
+    expect((await post('/api/control/doctor', { zone: 'nope' }))?.statusCode).toBe(404);
+    expect((await post('/api/control/doctor', { zone: 'main', extra: 1 }))?.statusCode).toBe(400);
+  });
+
+  test('ctl doctor builds the doctor request', () => {
+    expect(ctlRequest(['doctor'])).toEqual({ path: '/api/control/doctor', body: {} });
+    expect(ctlRequest(['doctor', 'main', '--json'])).toEqual({
+      path: '/api/control/doctor',
+      body: { zone: 'main' },
+    });
   });
 });

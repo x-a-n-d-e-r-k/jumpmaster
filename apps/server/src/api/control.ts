@@ -6,6 +6,9 @@ import { allowedHostsOf, type Config, mcpConfigOf } from '../config.js';
 import { requestCrewCycle } from '../crew/schedule.js';
 import type { Db } from '../db/open.js';
 import { activeWorkCount, setKilled, setZoneMode, ZONE_MODES } from '../db/repo.js';
+import type { DoctorEnv } from '../doctor/checks.js';
+import { DoctorBusyError, latestDoctorRun, processEnv, runDoctor } from '../doctor/run.js';
+import type { Forge } from '../forge/github.js';
 import { engageKill } from '../leases.js';
 import {
   listMcpTokens,
@@ -14,6 +17,7 @@ import {
   mintMcpToken,
   revokeMcpToken,
 } from '../mcp/tokens.js';
+import type { ForgePair } from '../outbox.js';
 
 export interface ControlDeps {
   db: Db;
@@ -21,7 +25,15 @@ export interface ControlDeps {
   now(): Date;
   /** Starts a pass without waiting for it, so a ruling applies promptly. */
   kick?: () => void;
+  /** The zone's forges, for the doctor's reads (it never writes). Absent: no doctor routes. */
+  forgesFor?(zoneId: string): ForgePair;
+  /** A forge on the read token, when one is configured. */
+  readForgeFor?(zoneId: string): Forge | undefined;
+  /** This process as the doctor sees it (default: read from the process). */
+  doctorEnv?: DoctorEnv;
 }
+
+const DoctorBody = z.strictObject({ zone: z.string().min(1).optional() });
 
 const ZoneBody = z.object({ mode: z.enum(ZONE_MODES) });
 const RuleBody = z.object({
@@ -165,6 +177,38 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
           return { id, revoked: true };
         },
       );
+    }
+
+    // The readiness doctor: reads only. One run at a time; a second is refused, not queued.
+    const forgesFor = deps.forgesFor;
+    if (forgesFor) {
+      const env = deps.doctorEnv ?? processEnv();
+      scope.post('/api/control/doctor', async (req, reply) => {
+        const body = DoctorBody.safeParse(req.body ?? {});
+        if (!body.success) return reply.code(400).send({ error: 'invalid body' });
+        const zoneId = body.data.zone;
+        if (zoneId !== undefined && !config.dropZones.some((z) => z.id === zoneId)) {
+          return reply.code(404).send({ error: 'unknown zone' });
+        }
+        try {
+          const run = await runDoctor(
+            {
+              db,
+              config,
+              now,
+              env,
+              forges: forgesFor,
+              ...(deps.readForgeFor ? { readForge: deps.readForgeFor } : {}),
+            },
+            zoneId !== undefined ? { zoneId } : {},
+          );
+          return { run };
+        } catch (e) {
+          if (e instanceof DoctorBusyError) return reply.code(409).send({ error: e.message });
+          throw e;
+        }
+      });
+      scope.get('/api/control/doctor', async () => ({ run: latestDoctorRun(db) }));
     }
 
     scope.post('/api/control/kill', async (req, reply) => {

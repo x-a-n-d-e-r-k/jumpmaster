@@ -7,6 +7,7 @@ import { creditsPass } from './credits.js';
 import { openDb } from './db/open.js';
 import { ensureZoneMode } from './db/repo.js';
 import { reconcileZone } from './flow/reconcile.js';
+import { GitHubForge } from './forge/github.js';
 import { leaseExpirer } from './leases.js';
 import { type ForgePair, markPendingUnknown, pairFor } from './outbox.js';
 import { promptVersions } from './payloads.js';
@@ -39,11 +40,21 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
   };
   const log = (msg: string) => console.error(`[jumpmaster] ${scrub(msg, config)}`);
 
+  // The doctor's forge on the read token: reads only, never handed a write.
+  const readToken = config.secrets.githubReadToken;
+  const readForgeFor = (zoneId: string) => {
+    const zone = config.dropZones.find((z) => z.id === zoneId);
+    if (!zone || !readToken) return undefined;
+    const [owner = '', name = ''] = zone.repo.split('/');
+    return new GitHubForge(owner, name, readToken);
+  };
+
   // A ruling starts a pass at once; `guardedPass` is defined below and only called after listen.
   const app = createApp({
     db,
     config,
     forgesFor,
+    readForgeFor,
     now: () => new Date(),
     kick: () => void guardedPass(),
     log,

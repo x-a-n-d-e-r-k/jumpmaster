@@ -458,6 +458,24 @@ ALTER TABLE sticks ADD COLUMN version TEXT;
 ALTER TABLE sticks ADD COLUMN pinned_json TEXT NOT NULL DEFAULT '[]';
 `;
 
+/**
+ * v16: the readiness doctor's runs, the last 20 kept (a trigger prunes older ones). A new table
+ * only, so an M3 binary still runs against v16. `results_json` holds redacted checks.
+ */
+const V16_SQL = `
+CREATE TABLE IF NOT EXISTS doctor_runs (
+  id             INTEGER PRIMARY KEY,
+  started_at     TEXT NOT NULL,
+  finished_at    TEXT,
+  results_json   TEXT NOT NULL DEFAULT '[]',
+  drop_ids_json  TEXT NOT NULL DEFAULT '[]'
+);
+CREATE TRIGGER IF NOT EXISTS doctor_runs_keep_20 AFTER INSERT ON doctor_runs
+BEGIN
+  DELETE FROM doctor_runs WHERE id NOT IN (SELECT id FROM doctor_runs ORDER BY id DESC LIMIT 20);
+END;
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -482,6 +500,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 13, sql: V13_SQL },
   { version: 14, sql: V14_SQL, foreignKeysOff: true },
   { version: 15, sql: V15_SQL },
+  { version: 16, sql: V16_SQL },
 ];
 
 /**

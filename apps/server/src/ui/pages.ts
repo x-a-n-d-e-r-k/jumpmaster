@@ -498,3 +498,40 @@ export function renderObservations(rows: Observation[]): string {
     `<h2>Observations</h2><table><tr><th>Zone</th><th>Item</th><th>Would do</th><th>Detail</th><th>Count</th><th>First</th><th>Last</th></tr>${body}</table>`,
   );
 }
+
+/** The doctor page's actions: each posts with the operator token typed into the page. */
+const DOCTOR_SCRIPT = `<script>for(const b of document.querySelectorAll('button[data-doctor]'))b.addEventListener('click',async()=>{const t=document.querySelector('#doctor-token').value;if(!t){alert('Enter the operator token');return;}b.disabled=true;const r=await fetch(b.dataset.doctor,{method:'POST',headers:{authorization:'Bearer '+t,'content-type':'application/json'},body:b.dataset.body||'{}'});b.disabled=false;if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});</script>`;
+
+/** The readiness doctor's latest run: every check, with its fix for any that did not pass. */
+export function renderDoctor(
+  run: { id: number; finishedAt: string | null; checks: DoctorCheckView[] } | null,
+  zones: DropZoneConfig[],
+): string {
+  const controls = `<p><label>Operator token <input type="password" id="doctor-token" autocomplete="off"></label> <button data-doctor="/api/control/doctor">Run the doctor</button></p><p>Zones: ${zones.map((z) => escapeHtml(z.id)).join(', ') || 'none'}</p>`;
+  if (!run)
+    return page(
+      `<h2>Doctor</h2><p>No doctor run has finished yet. Run one here or with <code>jumpmaster ctl doctor</code>.</p>${controls}${DOCTOR_SCRIPT}`,
+    );
+  const n = (s: string) => run.checks.filter((c) => c.status === s).length;
+  const rows = run.checks
+    .map((c) => {
+      const help =
+        c.status === 'pass'
+          ? ''
+          : `${c.fix ? `<pre>${escapeHtml(c.fix)}</pre>` : ''}${c.doc ? `<div>See ${escapeHtml(c.doc)}</div>` : ''}`;
+      return `<tr class="${escapeHtml(c.status)}"><td>${escapeHtml(c.status.toUpperCase())}</td><td>${escapeHtml(c.zoneId ?? '')}</td><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.summary)}${help}</td></tr>`;
+    })
+    .join('');
+  return page(
+    `<h2>Doctor</h2><p>Run ${run.id}, finished ${escapeHtml(run.finishedAt ?? '-')}: ${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip.</p>${controls}<table><tr><th>Status</th><th>Zone</th><th>Check</th><th>Finding</th></tr>${rows}</table>${DOCTOR_SCRIPT}`,
+  );
+}
+
+export type DoctorCheckView = {
+  id: string;
+  zoneId: string | null;
+  status: string;
+  summary: string;
+  fix?: string;
+  doc?: string;
+};

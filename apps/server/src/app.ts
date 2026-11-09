@@ -25,7 +25,9 @@ import {
   listSticks,
   listWorkItems,
 } from './db/repo.js';
+import { latestDoctorRun } from './doctor/run.js';
 import { fableStatus } from './fable.js';
+import type { Forge } from './forge/github.js';
 import { getGoals } from './goals.js';
 import { missingFor, zoneRequirements } from './leases.js';
 import { registerMcpRoute } from './mcp/server.js';
@@ -35,6 +37,7 @@ import {
   type HomeState,
   type ItemDetail,
   renderBriefings,
+  renderDoctor,
   renderDrop,
   renderGoals,
   renderHome,
@@ -72,6 +75,8 @@ function usageView(db: Db, config: Config, at: Date): NonNullable<HomeState['usa
 export function createApp(
   deps: StickRouteDeps & {
     kick?: () => void;
+    /** A forge on the read token, for the doctor (absent without `JM_GITHUB_READ_TOKEN`). */
+    readForgeFor?: (zoneId: string) => Forge | undefined;
     /** The operator's log, scrubbed of secrets (main.ts); MCP's internal errors go here. */
     log?: (msg: string) => void;
   },
@@ -184,6 +189,12 @@ export function createApp(
     });
     return reply.type('text/html; charset=utf-8').send(html);
   });
+
+  app.get('/doctor', async (_req, reply) =>
+    reply
+      .type('text/html; charset=utf-8')
+      .send(renderDoctor(latestDoctorRun(deps.db), deps.config.dropZones)),
+  );
 
   app.get('/observations', async (_req, reply) =>
     reply.type('text/html; charset=utf-8').send(renderObservations(listObservations(deps.db))),

@@ -281,6 +281,16 @@ const FileSchema = z.object({
       plan: z.enum(['pro', 'max', 'team_standard', 'team_premium', 'enterprise']).default('pro'),
       fableModel: z.string().min(1).optional(),
       fableWeeklyDropCap: z.number().int().nonnegative().default(5),
+      /**
+       * When `claude setup-token` made the token (YYYY-MM-DD): such tokens last a year, and the
+       * doctor warns from day 330. Not a secret.
+       */
+      tokenCreatedAt: z
+        .string()
+        .refine((s) => /^\d{4}-\d{2}-\d{2}/.test(s) && Number.isFinite(Date.parse(s)), {
+          message: 'claude.tokenCreatedAt must be a date (YYYY-MM-DD)',
+        })
+        .optional(),
     })
     .default({ plan: 'pro', fableWeeklyDropCap: 5 }),
   /**
@@ -337,7 +347,12 @@ export interface Config {
 
 export type UsageConfig = Config['usage'];
 export type ClaudePlan = 'pro' | 'max' | 'team_standard' | 'team_premium' | 'enterprise';
-export type ClaudeConfig = { plan: ClaudePlan; fableModel?: string; fableWeeklyDropCap: number };
+export type ClaudeConfig = {
+  plan: ClaudePlan;
+  fableModel?: string;
+  fableWeeklyDropCap: number;
+  tokenCreatedAt?: string;
+};
 
 /** The model for a role: the per-role override, else the zone's model. */
 export function modelFor(zone: DropZoneConfig, role: Role): string {
