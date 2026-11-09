@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import {
   agentBranch,
+  DoctorResultSchema,
   type DropResult,
   type GateResult,
   type Role,
+  redact,
   type Verdict,
 } from '@jumpmaster/protocol';
 import { listArtifacts } from './artifacts.js';
@@ -399,6 +401,62 @@ function pushResult(c: Ctx, result: DropResult): void {
   })();
 }
 
+/** Every string in a value, redacted; numbers, booleans and structure kept. */
+function redactDeep(v: unknown, secrets: string[]): unknown {
+  if (typeof v === 'string') return redact(v, secrets);
+  if (Array.isArray(v)) return v.map((x) => redactDeep(x, secrets));
+  if (typeof v === 'object' && v !== null)
+    return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, redactDeep(x, secrets)]));
+  return v;
+}
+
+/**
+ * A doctor drop's result: stored redacted for the doctor's `zone.doctor-drop` check, and nothing
+ * else. No work item, no budget, no forge write. A rate-limit report still reaches the usage gate.
+ */
+function applyDoctorResult(
+  db: Db,
+  deps: ResultDeps,
+  drop: Drop,
+  result: DropResult,
+  now: Date,
+): void {
+  const rand = deps.rand ?? Math.random;
+  try {
+    if (result.rateLimit) {
+      ingestRateLimit(
+        db,
+        result.rateLimit,
+        { dropId: drop.id, workItemId: null, startedAt: drop.startedAt, outcome: result.status },
+        deps.usageCfg,
+        now,
+        rand,
+      );
+    }
+    const findings = DoctorResultSchema.safeParse(result.doctor);
+    // The drop's state says whether the doctor found the zone ready, as its check does.
+    const f = findings.success ? findings.data : null;
+    const ok =
+      result.status === 'completed' &&
+      f !== null &&
+      f.claude.ok &&
+      f.clone.ok &&
+      f.services.every((s) => s.ok) &&
+      f.gates.every((g) => !g.timedOut && g.exitCode === 0);
+    updateDrop(db, drop.id, {
+      state: ok ? 'succeeded' : 'failed',
+      resultJson: JSON.stringify(redactDeep(result, deps.secrets)),
+    });
+    if (!findings.success && result.status === 'completed') {
+      appendEvents(db, drop.id, [
+        { ts: now.toISOString(), kind: 'log', data: { message: 'doctor result without findings' } },
+      ]);
+    }
+  } finally {
+    releaseProbe(db, drop.id, deps.usageCfg, now, rand);
+  }
+}
+
 /**
  * Applies a finished drop's result per role (see the Task 9 table). A drop already terminal is a
  * no-op, so stick retries are safe. Forge writes go through the outbox.
@@ -425,6 +483,8 @@ export async function applyResult(
   );
   const served = result.servedModel ?? servedModel(result.modelUsage);
   if (served !== null) updateDrop(db, drop.id, { servedModel: served });
+  // By role first: a doctor drop has no work item either, and is not crew.
+  if (drop.role === 'doctor') return applyDoctorResult(db, deps, drop, result, now);
   if (drop.workItemId === null) return applyCrewResult(db, deps, drop, result, now);
   const wasProbe = drop.id === getUsageState(db).probeDropId;
   const item = getWorkItem(db, drop.workItemId);

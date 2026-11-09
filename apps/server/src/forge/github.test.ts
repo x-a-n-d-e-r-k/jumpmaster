@@ -705,7 +705,38 @@ describe('GitHubForge', () => {
             unpinnedChecks: [],
             viewerCanBypass: false,
             viewerIsAdmin: false,
+            requiresPullRequest: true,
+            requireCodeOwnerReview: false,
           },
+        });
+      });
+
+      test('reads a code-owner review requirement, and no PR rule as requiresPullRequest false', async () => {
+        nock(api)
+          .get(rulesUrl)
+          .query(true)
+          .reply(200, [
+            {
+              type: 'pull_request',
+              ruleset_id: 1,
+              parameters: { required_approving_review_count: 1, require_code_owner_review: true },
+            },
+          ]);
+        mockRuleset(1, { enforcement: 'active', current_user_can_bypass: 'never' });
+        mockViewer('write');
+        expect(await fresh().getBranchRules('main')).toMatchObject({
+          kind: 'ok',
+          rules: { requiresPullRequest: true, requireCodeOwnerReview: true },
+        });
+        nock(api)
+          .get(rulesUrl)
+          .query(true)
+          .reply(200, [checksRule(1, [{ context: 'ci', integration_id: 1 }])]);
+        mockRuleset(1, { enforcement: 'active', current_user_can_bypass: 'never' });
+        mockViewer('write');
+        expect(await fresh().getBranchRules('main')).toMatchObject({
+          kind: 'ok',
+          rules: { requiresPullRequest: false, requireCodeOwnerReview: false },
         });
       });
 
@@ -881,5 +912,143 @@ describe('GitHubForge issue writes', () => {
     noBlockers(1);
     const [one] = await f.listOpenIssues();
     expect(one).toMatchObject({ author: 'app[bot]', authorType: 'Bot' });
+  });
+});
+
+describe('GitHubForge doctor reads', () => {
+  beforeAll(() => {
+    nock.disableNetConnect();
+  });
+  afterEach(() => {
+    expect(nock.pendingMocks()).toEqual([]);
+    nock.cleanAll();
+  });
+
+  test('I-3: with a request timeout, a read that never answers is aborted', async () => {
+    nock(api).get('/repos/o/r').delay(2000).reply(200, { default_branch: 'main' });
+    const f = new GitHubForge('o', 'r', 'tok', { requestTimeoutMs: 50 });
+    const started = Date.now();
+    await expect(f.repoAccess()).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(1500);
+  });
+
+  test('repoAccess reads the token account permissions, scopes and expiry', async () => {
+    nock(api)
+      .get('/repos/o/r')
+      .reply(
+        200,
+        {
+          private: true,
+          default_branch: 'trunk',
+          permissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
+        },
+        {
+          'x-oauth-scopes': 'repo, workflow',
+          'github-authentication-token-expiration': '2026-12-01 10:00:00 UTC',
+        },
+      );
+    expect(await new GitHubForge('o', 'r', 'tok').repoAccess()).toEqual({
+      private: true,
+      defaultBranch: 'trunk',
+      permissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
+      scopes: ['repo', 'workflow'],
+      tokenExpiresAt: '2026-12-01T10:00:00.000Z',
+    });
+  });
+
+  test('repoAccess without scope or expiry headers (fine-grained, no expiry) reports null', async () => {
+    nock(api).get('/repos/o/r').reply(200, { private: false, default_branch: 'main' });
+    expect(await new GitHubForge('o', 'r', 'tok').repoAccess()).toEqual({
+      private: false,
+      defaultBranch: 'main',
+      permissions: { admin: false, maintain: false, push: false, triage: false, pull: false },
+      scopes: null,
+      tokenExpiresAt: null,
+    });
+  });
+
+  test('listLabels pages past 100', async () => {
+    const page1 = Array.from({ length: 100 }, (_, i) => ({ name: `l${i}` }));
+    nock(api)
+      .get('/repos/o/r/labels')
+      .query({ per_page: '100' })
+      .reply(200, page1, { Link: `<${api}/repositories/1/labels?page=2>; rel="next"` });
+    nock(api)
+      .get('/repositories/1/labels')
+      .query({ page: '2' })
+      .reply(200, [{ name: 'agent-ready' }]);
+    const labels = await new GitHubForge('o', 'r', 'tok').listLabels();
+    expect(labels).toHaveLength(101);
+    expect(labels.at(-1)).toBe('agent-ready');
+  });
+
+  test('listDir names the entries of a directory, and is null for a missing path or a file', async () => {
+    const f = new GitHubForge('o', 'r', 'tok');
+    nock(api)
+      .get('/repos/o/r/contents/.github/workflows')
+      .query({ ref: 'main' })
+      .reply(200, [
+        { name: 'ci.yml', type: 'file' },
+        { name: 'x', type: 'dir' },
+      ]);
+    expect(await f.listDir('main', '.github/workflows')).toEqual(['ci.yml', 'x']);
+    nock(api).get('/repos/o/r/contents/nope').query({ ref: 'main' }).reply(404, {});
+    expect(await f.listDir('main', 'nope')).toBeNull();
+    nock(api)
+      .get('/repos/o/r/contents/README.md')
+      .query({ ref: 'main' })
+      .reply(200, { name: 'README.md', type: 'file' });
+    expect(await f.listDir('main', 'README.md')).toBeNull();
+    nock(api)
+      .get('/repos/o/r/contents')
+      .query({ ref: 'main' })
+      .reply(200, [{ name: 'a' }]);
+    expect(await f.listDir('main', '')).toEqual(['a']);
+  });
+
+  test('probeReads reports each read the server relies on, with the permission GitHub asks for', async () => {
+    const r = nock(api);
+    r.get('/repos/o/r/commits').query({ per_page: '1' }).reply(200, []);
+    r.get('/repos/o/r/issues').query({ per_page: '1', state: 'all' }).reply(200, []);
+    r.get('/repos/o/r/pulls').query({ per_page: '1', state: 'all' }).reply(200, []);
+    r.get('/repos/o/r/commits/abc/check-runs')
+      .query({ per_page: '1' })
+      .reply(403, { message: 'Resource not accessible by personal access token' });
+    r.get('/repos/o/r/actions/runs')
+      .query({ per_page: '1' })
+      .reply(
+        403,
+        { message: 'Resource not accessible by personal access token' },
+        { 'x-accepted-github-permissions': 'actions=read' },
+      );
+    r.get('/repos/o/r/commits/abc/status').reply(200, { statuses: [] });
+    expect(await new GitHubForge('o', 'r', 'tok').probeReads('abc')).toEqual([
+      { permission: 'Contents: read', status: 200, accepted: null },
+      { permission: 'Issues: read', status: 200, accepted: null },
+      { permission: 'Pull requests: read', status: 200, accepted: null },
+      { permission: 'Checks: read', status: 403, accepted: null },
+      { permission: 'Actions: read', status: 403, accepted: 'actions=read' },
+      { permission: 'Commit statuses: read', status: 200, accepted: null },
+    ]);
+  });
+
+  test('probeReads marks a rate-limited read as such, and a network failure as status null', async () => {
+    const r = nock(api);
+    r.get('/repos/o/r/commits').query(true).replyWithError('socket hang up');
+    r.get('/repos/o/r/issues')
+      .query(true)
+      .reply(403, { message: 'API rate limit exceeded' }, { 'x-ratelimit-remaining': '0' });
+    r.get('/repos/o/r/pulls').query(true).reply(200, []);
+    r.get('/repos/o/r/commits/abc/check-runs').query(true).reply(200, { check_runs: [] });
+    r.get('/repos/o/r/actions/runs').query(true).reply(200, { workflow_runs: [] });
+    r.get('/repos/o/r/commits/abc/status').reply(200, { statuses: [] });
+    const probes = await new GitHubForge('o', 'r', 'tok').probeReads('abc');
+    expect(probes[0]).toEqual({ permission: 'Contents: read', status: null, accepted: null });
+    expect(probes[1]).toEqual({
+      permission: 'Issues: read',
+      status: 403,
+      accepted: null,
+      rateLimited: true,
+    });
   });
 });

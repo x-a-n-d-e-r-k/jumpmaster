@@ -31,10 +31,11 @@ export type ForgePair = {
 export function pairFor(
   zone: { repo: string; authorMayBeAdmin: boolean },
   secrets: { githubAuthorToken: string; githubReviewerToken: string },
+  opts: { requestTimeoutMs?: number } = {},
 ): ForgePair {
   const [owner = '', name = ''] = zone.repo.split('/');
-  const author = new GitHubForge(owner, name, secrets.githubAuthorToken);
-  const reviewer = new GitHubForge(owner, name, secrets.githubReviewerToken);
+  const author = new GitHubForge(owner, name, secrets.githubAuthorToken, opts);
+  const reviewer = new GitHubForge(owner, name, secrets.githubReviewerToken, opts);
   return zone.authorMayBeAdmin ? { author, reviewer, merger: reviewer } : { author, reviewer };
 }
 

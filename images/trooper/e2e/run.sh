@@ -81,6 +81,41 @@ const ok = r.status === "completed" && r.role === "crew-lead" && !summary.includ
 console.log(ok ? `crew ignores the clone CLAUDE.md: ok${strict ? "" : " (no canary repo given)"}`
   : "FAIL: " + JSON.stringify(r).slice(0, 600));
 process.exit(ok ? 0 : 1);' "$out" "${E2E_CANARY_REPO:-}"
+# A doctor drop: clones the default branch with no write token, asks the (fake) CLI one line with
+# every tool off from an empty directory, and runs every gate, a red one not stopping the next.
+doctor() {
+  cat <<JSON | docker run --rm -i --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add KILL \
+    --security-opt no-new-privileges --pids-limit 512 --ulimit core=0:0 jumpmaster-trooper:e2e || true
+{"protocol":1,"dropId":"e2e-doctor","epoch":1,"role":"doctor",
+ "repo":{"owner":"${REPO%%/*}","name":"${REPO##*/}","defaultBranch":"${BRANCH}"},
+ "model":"m","image":"jumpmaster-trooper:e2e",
+ "gates":[{"name":"uid","run":"id -u","timeoutMinutes":2},{"name":"red","run":"exit 3","timeoutMinutes":2},
+  {"name":"after","run":"echo after-red","timeoutMinutes":2}],
+ "credentials":{"claudeToken":"$1"}}
+JSON
+}
+out="$(doctor sk-ant-oat01-E2EDUMMYDUMMYDUMMYDUMMY)"
+if grep -q E2EDUMMY <<<"$out"; then echo "FAIL: token in doctor output" >&2; exit 1; fi
+check '
+const r = JSON.parse(process.argv[1].split("\n").find((l) => l.startsWith("JM_RESULT ")).slice(10));
+const d = r.doctor ?? {};
+const how = JSON.parse((d.claude?.servedModel ?? "fake-doctor {}").replace(/^fake-doctor /, ""));
+const gate = (n) => d.gates?.find((g) => g.name === n);
+const ok = r.status === "completed" && r.role === "doctor" && d.clone?.ok && d.clone.sha === process.argv[2]
+  && d.claude?.ok && how.tools === "" && how.maxTurns === "1" && how.cwdEntries === 0 && how.uid === "10001"
+  && how.tokenPresent && /denied/.test(how.writeWork)
+  && gate("uid")?.outputTail.trim() === "10002" && gate("red")?.exitCode === 3
+  && gate("after")?.exitCode === 0 && /after-red/.test(gate("after")?.outputTail ?? "");
+console.log(ok ? "doctor drop: clone, one-turn tool-less probe, every gate: ok" : "FAIL: " + JSON.stringify(r).slice(0, 800));
+process.exit(ok ? 0 : 1);' "$out" "$SHA"
+out="$(doctor sk-ant-oat01-E2EBADTOKENBADTOKENBADTOKEN)"
+if grep -q E2EBADTOKEN <<<"$out"; then echo "FAIL: token in doctor output" >&2; exit 1; fi
+check '
+const r = JSON.parse(process.argv[1].split("\n").find((l) => l.startsWith("JM_RESULT ")).slice(10));
+const c = r.doctor?.claude ?? {};
+const ok = r.status === "completed" && c.ok === false && /authentication_failed/.test(c.error ?? "");
+console.log(ok ? "doctor drop reports a rejected Claude token: ok" : "FAIL: " + JSON.stringify(r).slice(0, 600));
+process.exit(ok ? 0 : 1);' "$out"
 # A sidecar on an internal network, reached by name with the trooper on both networks.
 NET="jm-e2e-$$"
 SIDE="jm-e2e-side-$$"

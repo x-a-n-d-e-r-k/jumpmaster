@@ -475,6 +475,31 @@ describe('runDrop', () => {
     );
   });
 
+  test('a stderr tail containing the read token is redacted in noResultReason', async () => {
+    const read = 'read-token-value-1234567890';
+    const doctor = DropPayloadSchema.parse({
+      protocol: 1,
+      dropId: 'd1',
+      epoch: 3,
+      role: 'doctor',
+      repo: { owner: 'o', name: 'r', defaultBranch: 'main' },
+      model: 'm',
+      image: 'jumpmaster-trooper:test',
+      gates: [],
+      credentials: { claudeToken: TOKEN, readToken: read },
+    });
+    const basic = Buffer.from(`x-access-token:${read}`).toString('base64');
+    const d = fakeDriver([], { exitCode: 1, stderr: `fatal: clone with ${read} as ${basic}\n` });
+    const client = fakeClient();
+    await runDrop(doctor, { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
+    expect(client.result).toEqual({
+      status: 'failed',
+      role: 'doctor',
+      reason: 'trooper exited 1 without result: fatal: clone with [REDACTED] as [REDACTED]',
+      gates: [],
+    });
+  });
+
   test('Node footer lines are not taken as the reason', async () => {
     const stderr = 'Error: real cause\n    at x (y.js:1:1)\n\nNode.js v26.1.0\n';
     const d = fakeDriver([], { exitCode: 1, stderr });

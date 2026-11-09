@@ -53,7 +53,7 @@ function fableDropsThisWeek(db: Db, cfg: Pick<Config, 'claude'>, now: Date): num
   const { n } = db
     .prepare(
       `SELECT COUNT(*) AS n FROM drops WHERE created_at > ?
-         AND (requested_model = ? OR requested_model LIKE '%fable%')`,
+         AND role <> 'doctor' AND (requested_model = ? OR requested_model LIKE '%fable%')`,
     )
     .get(new Date(now.getTime() - WEEK_MS).toISOString(), cfg.claude.fableModel ?? '') as {
     n: number;
@@ -101,6 +101,9 @@ export function resolveModel(
   const fableRole = (FABLE_ROLES as readonly string[]).includes(role);
   if (fableRole && status.available && cfg.claude.fableModel) return cfg.claude.fableModel;
   const configured = modelFor(zone, role);
+  // The doctor's one-line probe never spends Fable: it runs on the zone's model whatever models says.
+  if (role === 'doctor' && (FABLE.test(configured) || configured === cfg.claude.fableModel))
+    return zone.model;
   const isFable = FABLE.test(configured) || configured === cfg.claude.fableModel;
   return isFable && !status.available ? zone.model : configured;
 }

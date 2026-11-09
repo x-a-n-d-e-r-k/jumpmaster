@@ -109,12 +109,12 @@ export function nextCrewWork(db: Db, zone: DropZoneConfig, now: Date): CrewWork 
   return null;
 }
 
-/** Crew drops created in the trailing 24 hours, not counting lost or rate-limited ones. */
+/** Crew drops created in the trailing 24 hours, not counting lost or rate-limited ones (nor doctor drops). */
 export function crewDropsToday(db: Db, zoneId: string, now: Date): number {
   const { n } = db
     .prepare(
       `SELECT COUNT(*) AS n FROM drops WHERE drop_zone_id = ? AND work_item_id IS NULL
-         AND created_at > ? AND state <> 'lost'
+         AND role <> 'doctor' AND created_at > ? AND state <> 'lost'
          AND COALESCE(json_extract(result_json, '$.status'), '') <> 'rate_limited'`,
     )
     .get(zoneId, new Date(now.getTime() - DAY_MS).toISOString()) as { n: number };
@@ -124,7 +124,7 @@ export function crewDropsToday(db: Db, zoneId: string, now: Date): number {
 const hasActiveCrewDrop = (db: Db, zoneId: string): boolean =>
   db
     .prepare(
-      `SELECT 1 FROM drops WHERE drop_zone_id = ? AND work_item_id IS NULL
+      `SELECT 1 FROM drops WHERE drop_zone_id = ? AND work_item_id IS NULL AND role <> 'doctor'
          AND state IN ('queued', 'leased', 'running') LIMIT 1`,
     )
     .get(zoneId) !== undefined;

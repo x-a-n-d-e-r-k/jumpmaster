@@ -84,4 +84,55 @@ describe('ctl', () => {
     expect(said).toMatch(/JM_OPERATOR_TOKEN or JM_OPERATOR_TOKEN_FILE is required/);
     expect(said).not.toContain(OPERATOR);
   });
+
+  describe('ctl doctor', () => {
+    const check = (status: string, id = `x.${status}`) => ({
+      id,
+      zoneId: status === 'pass' ? null : 'main',
+      status,
+      summary: `${id} summary`,
+      ...(status === 'pass' ? {} : { fix: `${id} fix`, doc: 'docs/runbooks/install.md#x' }),
+    });
+    const answer = (checks: unknown[]) =>
+      vi.fn(
+        async (_url: URL | string, _init?: RequestInit) =>
+          new Response(
+            JSON.stringify({
+              run: { id: 3, startedAt: 'a', finishedAt: 'b', checks, dropIds: [] },
+            }),
+            { status: 200 },
+          ),
+      );
+    const env = { JM_OPERATOR_TOKEN: OPERATOR };
+
+    test('ctl doctor exits 1 on a fail and 0 with only warns', async () => {
+      const lines: string[] = [];
+      const warnOnly = answer([check('pass'), check('warn'), check('skip')]);
+      expect(await runCtl(['doctor'], env, warnOnly, (l) => lines.push(l))).toBe(0);
+      const text = lines.join('\n');
+      expect(text).toMatch(/PASS\s+x\.pass/);
+      expect(text).toMatch(/WARN\s+main\s+x\.warn\s+x\.warn summary/);
+      expect(text).toContain('fix: x.warn fix');
+      expect(text).toContain('see: docs/runbooks/install.md#x');
+      expect(text).toContain('1 pass, 1 warn, 0 fail, 1 skip');
+      const [, init] = warnOnly.mock.calls[0] ?? [];
+      expect(init?.method).toBe('POST');
+      expect(await runCtl(['doctor', 'main'], env, answer([check('fail')]), () => {})).toBe(1);
+    });
+
+    test('--json prints the run as JSON, and a refused request exits 1', async () => {
+      const lines: string[] = [];
+      expect(
+        await runCtl(['doctor', '--json'], env, answer([check('warn')]), (l) => lines.push(l)),
+      ).toBe(0);
+      expect(JSON.parse(lines.join('\n'))).toMatchObject({ run: { id: 3 } });
+      const busy = vi.fn(
+        async () =>
+          new Response('{"error":"a doctor run is already in progress"}', { status: 409 }),
+      );
+      const out: string[] = [];
+      expect(await runCtl(['doctor'], env, busy, (l) => out.push(l))).toBe(1);
+      expect(out.join('\n')).toContain('already in progress');
+    });
+  });
 });

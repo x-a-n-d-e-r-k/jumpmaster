@@ -12,8 +12,12 @@ const iso = (d: Date, offsetMs = 0): string => new Date(d.getTime() + offsetMs).
 
 const FINISHING = "('review','heal','resolve')";
 
-/** Finishing roles first, then implement, then crew roles (§5.3); age within a class. */
-const ROLE_CLASS = `CASE WHEN role IN ${FINISHING} THEN 0 WHEN role = 'implement' THEN 1 ELSE 2 END`;
+/**
+ * Finishing roles first, then implement, then crew roles (§5.3), then doctor drops; age within a
+ * class. A doctor drop is charged to no budget and is never the usage probe.
+ */
+const ROLE_CLASS = `CASE WHEN role IN ${FINISHING} THEN 0 WHEN role = 'implement' THEN 1
+  WHEN role = 'doctor' THEN 3 ELSE 2 END`;
 
 /** Queued drops wait while their zone is paused or observing. */
 const ZONE_ACTIVE = `AND drop_zone_id NOT IN (SELECT zone_id FROM zone_controls WHERE mode <> 'active')`;
@@ -76,7 +80,8 @@ export function leaseNextDrop(
       probe = true;
       return db
         .prepare(
-          `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE} ${NOT_EXCLUDED}
+          // A doctor drop never probes: what clears a usage limit is real work, not a check.
+          `SELECT id FROM drops WHERE state = 'queued' AND role <> 'doctor' ${ZONE_ACTIVE} ${NOT_EXCLUDED}
            ORDER BY CASE WHEN work_item_id = @cause THEN 1 ELSE 0 END, ${ROLE_CLASS}, created_at, rowid
            LIMIT 1`,
         )

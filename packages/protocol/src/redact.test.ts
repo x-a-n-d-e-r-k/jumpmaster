@@ -26,3 +26,11 @@ test('payloadSecrets lists every credential a drop carries', () => {
   ]);
   expect(payloadSecrets({ credentials: { claudeToken: 'c' } })).toEqual(['c']);
 });
+
+test('payloadSecrets includes credentials.readToken, and its git basic-auth form', () => {
+  expect(payloadSecrets({ credentials: { claudeToken: 'c', readToken: 'read-tok' } })).toEqual([
+    'c',
+    'read-tok',
+    Buffer.from('x-access-token:read-tok').toString('base64'),
+  ]);
+});

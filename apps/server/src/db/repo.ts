@@ -928,7 +928,9 @@ export function activeWorkCount(db: Db, zoneId: string): number {
     .prepare(
       `SELECT
          (SELECT COUNT(*) FROM drops
-            WHERE drop_zone_id = @zone AND state IN ('queued', 'leased', 'running'))
+            WHERE drop_zone_id = @zone AND state IN ('queued', 'leased', 'running')
+              -- A queued doctor drop has done nothing yet: it never blocks a mode change.
+              AND NOT (role = 'doctor' AND state = 'queued'))
        + (SELECT COUNT(*) FROM outbox o
             WHERE o.zone_id = @zone AND o.state IN ('pending', 'unknown')) AS n`,
     )

@@ -146,6 +146,27 @@ describe('which model a drop gets', () => {
     expect(fableStatus(w.db, c, t0).reason).toBe('weekly cap reached (2 Fable drops in 7 days)');
     expect(resolveModel(w.db, c, w.zone, 'diagnose', plus(t0, 1 * DAY + 1000))).toBe(FABLE);
   });
+
+  test('a doctor drop never runs on Fable and never counts toward the weekly cap', () => {
+    const c = cfg({ plan: 'max', fableModel: FABLE, fableWeeklyDropCap: 1 });
+    const zone = { ...w.zone, models: { doctor: FABLE } };
+    expect(resolveModel(w.db, c, zone, 'doctor', t0)).toBe(w.zone.model);
+    // A doctor drop recorded as asking for Fable (an older server) does not use the cap up.
+    insertDrop(
+      w.db,
+      {
+        id: 'doc',
+        dropZoneId: 'main',
+        workItemId: null,
+        role: 'doctor',
+        state: 'succeeded',
+        createdAt: plus(t0, -DAY).toISOString(),
+      },
+      plus(t0, -DAY),
+    );
+    updateDrop(w.db, 'doc', { requestedModel: FABLE });
+    expect(fableStatus(w.db, c, t0).available).toBe(true);
+  });
 });
 
 describe('what the drop reports', () => {

@@ -9,12 +9,14 @@ import {
   getZoneMode,
   insertDrop,
   isKilled,
+  setKilled,
   setWorkItemState,
   setZoneMode,
   upsertDropZone,
   upsertWorkItem,
   zoneIsDrained,
 } from '../db/repo.js';
+import { NOW, world } from '../test/doctorWorld.js';
 import { makeZone } from '../test/fixtures.js';
 import { t0, tmpDbFile } from '../test/helpers.js';
 import { registerControlRoutes } from './control.js';
@@ -279,5 +281,117 @@ describe('rule route', () => {
     });
     expect(ctlRequest(['rule', '7', 'o1', '--options'])).toBeNull();
     expect(ctlRequest(['rule', '7'])).toBeNull();
+  });
+});
+
+describe('doctor routes', () => {
+  function doctorApp() {
+    const w = world();
+    app = Fastify();
+    registerControlRoutes(app, {
+      db: w.db,
+      config: { ...w.config, secrets: { ...w.config.secrets, operatorToken: TOKEN } },
+      now: () => NOW,
+      forgesFor: w.deps.forges,
+      doctorEnv: w.deps.env,
+    });
+    return w;
+  }
+
+  test('the doctor routes need the operator token and an allowed Origin', async () => {
+    const w = doctorApp();
+    const get = (headers: Record<string, string>) =>
+      app?.inject({ method: 'GET', url: '/api/control/doctor', headers });
+    expect((await post('/api/control/doctor', {}, { host: HOST }))?.statusCode).toBe(401);
+    expect((await get({ host: HOST }))?.statusCode).toBe(401);
+    expect(
+      (await post('/api/control/doctor', {}, { ...auth, origin: 'http://evil.test' }))?.statusCode,
+    ).toBe(403);
+    expect((await get({ ...auth, host: 'evil.test:7420' }))?.statusCode).toBe(403);
+    expect(w.f.author.calls).toEqual([]);
+    expect((await get(auth))?.json()).toEqual({ run: null });
+
+    const ran = await post('/api/control/doctor', {});
+    expect(ran?.statusCode).toBe(200);
+    const run = ran?.json() as { run: { id: number; checks: { id: string }[] } };
+    expect(run.run.checks.some((c) => c.id === 'forge.author')).toBe(true);
+    expect((await get(auth))?.json()).toMatchObject({ run: { id: run.run.id } });
+    expect((await post('/api/control/doctor', { zone: 'nope' }))?.statusCode).toBe(404);
+    expect((await post('/api/control/doctor', { zone: 'main', extra: 1 }))?.statusCode).toBe(400);
+  });
+
+  test('ctl doctor builds the doctor request', () => {
+    expect(ctlRequest(['doctor'])).toEqual({ path: '/api/control/doctor', body: {} });
+    expect(ctlRequest(['doctor', 'main', '--json'])).toEqual({
+      path: '/api/control/doctor',
+      body: { zone: 'main' },
+    });
+    expect(ctlRequest(['doctor', 'main', '--drop'])).toEqual({
+      path: '/api/control/doctor/drop',
+      body: { zone: 'main' },
+    });
+    expect(ctlRequest(['doctor', '--drop'])).toBeNull();
+  });
+
+  test('ctl doctor --drop in observe or paused is refused naming the mode', async () => {
+    const w = doctorApp();
+    const ask = () => post('/api/control/doctor/drop', { zone: 'main' });
+    const doctorDrops = () =>
+      w.db.prepare("SELECT id, state, work_item_id AS item FROM drops WHERE role = 'doctor'").all();
+    for (const mode of ['observe', 'paused'] as const) {
+      setZoneMode(w.db, 'main', mode, NOW);
+      const r = await ask();
+      expect(r?.statusCode).toBe(409);
+      expect(r?.json().error).toContain(mode);
+    }
+    setZoneMode(w.db, 'main', 'active', NOW);
+    setKilled(w.db, true, NOW);
+    expect((await ask())?.json().error).toContain('kill switch');
+    setKilled(w.db, false, NOW);
+    expect(doctorDrops()).toEqual([]);
+
+    const queued = await ask();
+    expect(queued?.statusCode).toBe(202);
+    const { dropId } = queued?.json() as { dropId: string };
+    expect(doctorDrops()).toEqual([{ id: dropId, state: 'queued', item: null }]);
+    // One per zone: a second is refused while the first is active.
+    const again = await ask();
+    expect(again?.statusCode).toBe(409);
+    expect(again?.json().error).toContain(dropId);
+    expect((await post('/api/control/doctor/drop', { zone: 'nope' }))?.statusCode).toBe(404);
+    expect((await post('/api/control/doctor/drop', {}))?.statusCode).toBe(400);
+    expect(
+      (await post('/api/control/doctor/drop', { zone: 'main' }, { host: HOST }))?.statusCode,
+    ).toBe(401);
+  });
+
+  test('I-4: a queued doctor drop does not block observe, and --cancel cancels it', async () => {
+    const w = doctorApp();
+    const queued = await post('/api/control/doctor/drop', { zone: 'main' });
+    const { dropId } = queued?.json() as { dropId: string };
+    // Observe is not blocked by a drop nothing will run.
+    expect((await post('/api/control/zones/main', { mode: 'observe' }))?.statusCode).toBe(200);
+    setZoneMode(w.db, 'main', 'active', NOW);
+    const cancel = await post('/api/control/doctor/drop', { zone: 'main', cancel: true });
+    expect(cancel?.statusCode).toBe(200);
+    expect(cancel?.json()).toMatchObject({ dropId, state: 'cancelled' });
+    expect(w.db.prepare('SELECT state FROM drops WHERE id = ?').get(dropId)).toEqual({
+      state: 'cancelled',
+    });
+    // Nothing queued: nothing to cancel. A running one is not cancelled here.
+    expect(
+      (await post('/api/control/doctor/drop', { zone: 'main', cancel: true }))?.statusCode,
+    ).toBe(404);
+    const again = (await post('/api/control/doctor/drop', { zone: 'main' }))?.json() as {
+      dropId: string;
+    };
+    w.db.prepare("UPDATE drops SET state = 'running' WHERE id = ?").run(again.dropId);
+    const running = await post('/api/control/doctor/drop', { zone: 'main', cancel: true });
+    expect(running?.statusCode).toBe(409);
+    expect(running?.json().error).toContain('running');
+    expect(ctlRequest(['doctor', 'main', '--cancel'])).toEqual({
+      path: '/api/control/doctor/drop',
+      body: { zone: 'main', cancel: true },
+    });
   });
 });
