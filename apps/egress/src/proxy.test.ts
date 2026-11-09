@@ -460,6 +460,9 @@ describe('connection load', () => {
     new Promise<Socket>((resolve, reject) => {
       const s = connect(port, '127.0.0.1', () => resolve(s));
       s.on('error', reject);
+      // Drain whatever the proxy answers (a 408, say): a paused socket never sees 'end', so its
+      // 'close' would wait on unread data and the test would time out with the proxy correct.
+      s.resume();
       cleanups.push(() => void s.destroy());
     });
   const closed = (s: Socket, ms: number) =>
@@ -489,6 +492,36 @@ describe('connection load', () => {
     const s = await rawSocket(w.proxy.port);
     s.write('CONNECT allowed.test:4');
     expect(await closed(s, 3000)).toBe(true);
+  });
+
+  test('a client dripping a request line forever is still cut near the header timeout', async () => {
+    const w = await world({ limits: { headersTimeoutMs: 300 } });
+    const s = await rawSocket(w.proxy.port);
+    const start = Date.now();
+    const drip = setInterval(() => {
+      if (!s.destroyed) s.write('X');
+    }, 50);
+    cleanups.push(() => clearInterval(drip));
+    // No CRLF ever, and a byte every 50 ms so no idle timer fires.
+    s.write('CONNECT allowed.test');
+    expect(await closed(s, 3000)).toBe(true);
+    clearInterval(drip);
+    // The cut lands near the deadline, never a checking-interval multiple later.
+    expect(Date.now() - start).toBeLessThan(300 + 250);
+  });
+
+  test('a tunnel outlives the header deadline', async () => {
+    const echo = await echoServer();
+    const w = await world({
+      limits: { headersTimeoutMs: 200 },
+      answers: { 'allowed.test': ['8.8.8.8'] },
+      routes: { '8.8.8.8': echo.port },
+    });
+    const s = await rawSocket(w.proxy.port);
+    s.write('CONNECT allowed.test:443 HTTP/1.1\r\nHost: allowed.test:443\r\n\r\n');
+    await new Promise((r) => s.once('data', r));
+    await new Promise((r) => setTimeout(r, 600));
+    expect(s.destroyed).toBe(false);
   });
 
   test('an idle socket that never sends anything is cut', async () => {
