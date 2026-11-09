@@ -24,8 +24,12 @@ export type ProxyOptions = {
   dial?: (address: string, port: number) => Socket;
   limits?: {
     maxTunnels?: number;
+    /** Every TCP connection, including ones that haven't sent CONNECT yet. */
+    maxConnections?: number;
     connectTimeoutMs?: number;
     idleTimeoutMs?: number;
+    /** How long a connection may take to send its request headers, or sit idle before them. */
+    headersTimeoutMs?: number;
   };
 };
 
@@ -33,7 +37,17 @@ export type Proxy = { address: string; port: number; close(): Promise<void> };
 
 /** Header bytes a request may carry; larger is answered 431 by Node's parser. */
 export const MAX_HEADER_BYTES = 8 * 1024;
-const DEFAULTS = { maxTunnels: 64, connectTimeoutMs: 10_000, idleTimeoutMs: 5 * 60_000 };
+/**
+ * 128 tunnels: package managers open many parallel connections. 256 connections in all bounds what
+ * a drop can hold open before CONNECT. Both are settable (JM_EGRESS_MAX_TUNNELS, ..._CONNECTIONS).
+ */
+export const DEFAULT_LIMITS = {
+  maxTunnels: 128,
+  maxConnections: 256,
+  connectTimeoutMs: 10_000,
+  idleTimeoutMs: 5 * 60_000,
+  headersTimeoutMs: 10_000,
+};
 /** The longest host a log line keeps: a refused request's target is attacker-chosen. */
 const MAX_LOGGED_HOST = 253;
 
@@ -66,7 +80,13 @@ async function dialFirst(
   dial: (address: string, port: number) => Socket,
   timeoutMs: number,
 ): Promise<Socket | null> {
-  for (const { address } of addresses) {
+  // IPv4 first: the exit network is IPv4, so an AAAA answer first would cost a timeout each time.
+  // Answer order is kept within each family, and IPv6 is still tried when no IPv4 address answers.
+  const ordered = [
+    ...addresses.filter((a) => !a.address.includes(':')),
+    ...addresses.filter((a) => a.address.includes(':')),
+  ];
+  for (const { address } of ordered) {
     const socket = await new Promise<Socket | null>((resolve) => {
       let s: Socket;
       try {
@@ -97,11 +117,14 @@ async function dialFirst(
 
 export async function startProxy(o: ProxyOptions): Promise<Proxy> {
   const ports = o.ports ?? [443];
-  const limits = { ...DEFAULTS, ...o.limits };
+  const limits = { ...DEFAULT_LIMITS, ...o.limits };
   const lookup = o.lookup ?? defaultLookup;
   const dial = o.dial ?? defaultDial;
   let tunnels = 0;
-  const open = new Set<Duplex>();
+  /** Every socket, from accept to close, so close() can end them all. */
+  const sockets = new Set<Duplex>();
+  /** Open tunnels, each resolving once its log line is written. */
+  const tunnelsLogged = new Set<Promise<void>>();
 
   const logLine = (line: Omit<EgressLogLine, 'at'>) =>
     o.log({ at: new Date().toISOString(), ...line, host: line.host.slice(0, MAX_LOGGED_HOST) });
@@ -116,7 +139,11 @@ export async function startProxy(o: ProxyOptions): Promise<Proxy> {
   };
 
   const server = createServer(
-    { maxHeaderSize: MAX_HEADER_BYTES },
+    {
+      maxHeaderSize: MAX_HEADER_BYTES,
+      // Node enforces headersTimeout on this beat (30 s by default): keep it tight.
+      connectionsCheckingInterval: Math.max(50, Math.min(1000, limits.headersTimeoutMs / 2)),
+    },
     (req: IncomingMessage, res: ServerResponse) => {
       // Plain HTTP, absolute-URI proxying included: nothing but CONNECT is served.
       logLine({
@@ -129,13 +156,26 @@ export async function startProxy(o: ProxyOptions): Promise<Proxy> {
       res.end();
     },
   );
-  server.headersTimeout = 10_000;
-  server.requestTimeout = 30_000;
+  server.headersTimeout = limits.headersTimeoutMs;
+  server.requestTimeout = limits.headersTimeoutMs + 5_000;
+  // Counts every socket, not only tunnels: a drop holding connections open before CONNECT is
+  // bounded too. Node closes the extra socket at once; this logs it.
+  server.maxConnections = limits.maxConnections;
+  server.on('drop', () => {
+    logLine({ host: '', port: 0, decision: 'deny', reason: 'too many connections' });
+  });
+  server.on('connection', (socket: Socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+    socket.on('error', () => {});
+    // Idle before or while sending headers: cut. A tunnel replaces this with its own timeout.
+    socket.setTimeout(limits.headersTimeoutMs, () => socket.destroy());
+  });
 
   server.on('connect', (req: IncomingMessage, client: Duplex, head: Buffer) => {
     client.on('error', () => {});
-    open.add(client);
-    client.once('close', () => open.delete(client));
+    // Resolving and dialling can take longer than the header timeout.
+    (client as Socket).setTimeout?.(0);
     void handleConnect(req, client, head);
   });
 
@@ -198,9 +238,15 @@ export async function startProxy(o: ProxyOptions): Promise<Proxy> {
     let bytesUp = head.length;
     let bytesDown = 0;
     let done = false;
+    let logged: () => void = () => {};
+    const written = new Promise<void>((r) => {
+      logged = r;
+    });
+    tunnelsLogged.add(written);
     const finish = () => {
       if (done) return;
       done = true;
+      tunnelsLogged.delete(written);
       client.destroy();
       upstream.destroy();
       release();
@@ -213,6 +259,7 @@ export async function startProxy(o: ProxyOptions): Promise<Proxy> {
         bytesDown,
         ms: Date.now() - started,
       });
+      logged();
     };
     upstream.on('error', finish);
     upstream.on('close', finish);
@@ -245,10 +292,13 @@ export async function startProxy(o: ProxyOptions): Promise<Proxy> {
   return {
     address: addr.address,
     port: addr.port,
-    close: () =>
-      new Promise<void>((resolve) => {
-        for (const s of open) s.destroy();
-        server.close(() => resolve());
-      }),
+    /** Ends every connection (idle and half-sent ones too) and resolves once each tunnel is logged. */
+    async close() {
+      const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+      const pending = [...tunnelsLogged];
+      for (const s of sockets) s.destroy();
+      await Promise.all(pending);
+      await closed;
+    },
   };
 }

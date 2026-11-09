@@ -1,20 +1,67 @@
 import { describe, expect, test } from 'vitest';
-import type { ContainerDriver } from './driver.js';
-import { EgressTally, egressCapability, egressImage } from './egress.js';
+import type { ContainerDriver, IsolationFacts } from './driver.js';
+import {
+  EgressTally,
+  egressCapability,
+  egressImage,
+  engineAtLeast,
+  MAX_EGRESS_HOSTS,
+  MIN_ENGINE_VERSION,
+  startEgress,
+} from './egress.js';
 import { stickInfo } from './state.js';
 
+const GOOD: IsolationFacts = {
+  listenerUp: true,
+  gatewayOnHost: false,
+  gatewayReachable: false,
+  ipv6Disabled: true,
+};
+
 /** Just the calls the capability probe makes. */
-function probeDriver(o: { image?: boolean; netError?: string } = {}) {
+function probeDriver(
+  o: {
+    image?: boolean;
+    netError?: string;
+    version?: string;
+    facts?: Partial<IsolationFacts>;
+    probeError?: string;
+    proxyReady?: boolean;
+  } = {},
+) {
   const calls: string[] = [];
   const driver = {
     async imageExists(image: string) {
       calls.push(`image ${image}`);
       return o.image ?? true;
     },
+    async engineVersion() {
+      calls.push('version');
+      return o.version ?? '29.9.2';
+    },
     async createDropNetwork(name: string, _labels: Record<string, string>, pool: string) {
       calls.push(`create ${name} ${pool}`);
       if (o.netError) throw new Error(o.netError);
-      return { name } as never;
+      return { name, gateway: '172.30.0.1', proxy: '172.30.0.2' } as never;
+    },
+    async probeIsolation(net: { name: string }, image: string) {
+      calls.push(`isolation ${net.name} ${image}`);
+      if (o.probeError) throw new Error(o.probeError);
+      return { ...GOOD, ...o.facts };
+    },
+    async startEgressProxy(p: { name: string; env: Record<string, string> }) {
+      calls.push(`proxy ${p.name} bind=${p.env.JM_EGRESS_BIND}`);
+      return {
+        async *logs() {
+          if (o.proxyReady !== false) yield '{"ready":true}';
+        },
+        async stop() {
+          calls.push('proxy-stop');
+        },
+      };
+    },
+    async removeServices(name: string, labels: Record<string, string>) {
+      calls.push(`teardown ${name} ${JSON.stringify(labels)}`);
     },
     async removeNetwork(name: string) {
       calls.push(`remove ${name}`);
@@ -26,13 +73,21 @@ function probeDriver(o: { image?: boolean; netError?: string } = {}) {
 describe('the egress capability', () => {
   test('the stick advertises egress-v1 only when it can enforce it', async () => {
     const ok = probeDriver();
-    expect(await egressCapability(ok.driver, { HOSTNAME: 'h1' })).toEqual({ ok: true });
-    // It proves it can make a drop network on its pool, and cleans the probe up.
+    expect(await egressCapability(ok.driver, { HOSTNAME: 'h1' }, { readyMs: 50 })).toEqual({
+      ok: true,
+    });
+    // It proves isolation behaviourally on a real drop network, then that the proxy image starts
+    // there and says it is ready, and tears the probe down.
+    const labels = JSON.stringify({ 'jumpmaster.egress-probe': 'jm-egress-probe-h1' });
     expect(ok.calls).toEqual([
       'image jumpmaster-egress:dev',
-      'remove jm-egress-probe-h1',
+      'version',
+      `teardown jm-egress-probe-h1 ${labels}`,
       'create jm-egress-probe-h1 172.30.0.0/16',
-      'remove jm-egress-probe-h1',
+      'isolation jm-egress-probe-h1 jumpmaster-egress:dev',
+      'proxy jm-egress-probe-h1-0 bind=172.30.0.2',
+      'proxy-stop',
+      `teardown jm-egress-probe-h1 ${labels}`,
     ]);
 
     const noImage = probeDriver({ image: false });
@@ -50,13 +105,108 @@ describe('the egress capability', () => {
     const badPool = probeDriver();
     expect(
       await egressCapability(badPool.driver, { JM_DROP_SUBNET_POOL: 'fd00::/48' }),
-    ).toMatchObject({
-      ok: false,
-      reason: expect.stringMatching(/JM_DROP_SUBNET_POOL/),
-    });
+    ).toMatchObject({ ok: false, reason: expect.stringMatching(/JM_DROP_SUBNET_POOL/) });
 
     expect(stickInfo({}, '1', ['egress-v1']).capabilities).toEqual(['egress-v1']);
     expect(stickInfo({}, '1').capabilities).toEqual([]);
+  });
+
+  test('an engine older than the minimum is refused before any probe', async () => {
+    expect(MIN_ENGINE_VERSION).toBe('27.0');
+    for (const version of ['20.10.24', '26.1.4', 'unknown', '']) {
+      const d = probeDriver({ version });
+      const r = await egressCapability(d.driver, {}, { readyMs: 50 });
+      expect(r, version).toEqual({
+        ok: false,
+        reason: `Docker Engine ${version || 'unknown'} is older than ${MIN_ENGINE_VERSION}, the oldest egress is checked against`,
+      });
+      expect(d.calls.some((c) => c.startsWith('create'))).toBe(false);
+    }
+    expect(engineAtLeast('27.0.0', '27.0')).toBe(true);
+    expect(engineAtLeast('29.9.2', '27.0')).toBe(true);
+    expect(engineAtLeast('28.0.0-rc.1', '27.0')).toBe(true);
+    expect(engineAtLeast('26.99.0', '27.0')).toBe(false);
+    expect(engineAtLeast('100.0', '27.0')).toBe(true);
+  });
+
+  test.each([
+    [
+      'the gateway holds a host address (inhibit_ipv4 ignored)',
+      { gatewayOnHost: true },
+      'the engine put the drop gateway 172.30.0.1 on the host: inhibit_ipv4 is not honoured',
+    ],
+    [
+      'a host listener answers at the gateway',
+      { gatewayReachable: true },
+      'a drop container reached a host listener at its gateway 172.30.0.1',
+    ],
+    [
+      'the probe could not listen on the host',
+      { listenerUp: false },
+      'the isolation probe could not start its host listener',
+    ],
+    [
+      'IPv6 could not be disabled',
+      { ipv6Disabled: false },
+      'IPv6 could not be disabled in a drop container',
+    ],
+  ])('no egress-v1 when %s', async (_n, facts, reason) => {
+    const d = probeDriver({ facts });
+    expect(await egressCapability(d.driver, { HOSTNAME: 'h1' }, { readyMs: 50 })).toEqual({
+      ok: false,
+      reason,
+    });
+    // The probe network is removed whatever the outcome.
+    expect(d.calls.at(-1)).toMatch(/^teardown jm-egress-probe-h1/);
+    expect(d.calls.some((c) => c.startsWith('proxy '))).toBe(false);
+  });
+
+  test('no egress-v1 when the probe fails or the proxy image never says it is ready', async () => {
+    const broken = probeDriver({ probeError: 'sysctl not allowed' });
+    expect(await egressCapability(broken.driver, {}, { readyMs: 50 })).toEqual({
+      ok: false,
+      reason: 'the isolation probe failed: sysctl not allowed',
+    });
+    const silent = probeDriver({ proxyReady: false });
+    expect(await egressCapability(silent.driver, {}, { readyMs: 50 })).toEqual({
+      ok: false,
+      reason: 'the egress proxy did not start on a drop network: no ready line within 0s',
+    });
+    expect(silent.calls.at(-1)).toMatch(/^teardown/);
+  });
+
+  test('the stick passes its proxy limits on to every proxy', async () => {
+    const d = probeDriver();
+    const env: Record<string, string> = {};
+    (d.driver as unknown as { startEgressProxy: unknown }).startEgressProxy = async (p: {
+      env: Record<string, string>;
+    }) => {
+      Object.assign(env, p.env);
+      return {
+        async *logs() {
+          yield '{"ready":true}';
+        },
+        async stop() {},
+      };
+    };
+    const s = await startEgress(d.driver, {
+      dropId: 'd',
+      epoch: 1,
+      egress: { mode: 'enforce', allow: ['github.com'] },
+      net: { proxy: '172.30.0.2' } as never,
+      image: 'i',
+      labels: {},
+      readyMs: 50,
+      env: { JM_EGRESS_MAX_TUNNELS: '256', JM_EGRESS_MAX_CONNECTIONS: '512', JM_OTHER: 'x' },
+    });
+    await s.stop();
+    expect(env).toEqual({
+      JM_EGRESS_MODE: 'enforce',
+      JM_EGRESS_ALLOW: 'github.com',
+      JM_EGRESS_BIND: '172.30.0.2',
+      JM_EGRESS_MAX_TUNNELS: '256',
+      JM_EGRESS_MAX_CONNECTIONS: '512',
+    });
   });
 
   test('JM_EGRESS_IMAGE names the proxy image', () => {
@@ -64,6 +214,9 @@ describe('the egress capability', () => {
     expect(egressImage({ JM_EGRESS_IMAGE: ' reg/e@sha256:1 ' })).toBe('reg/e@sha256:1');
   });
 });
+
+const line = (host: string, decision: string, reason?: string) =>
+  JSON.stringify({ at: 't', host, port: 443, decision, ...(reason ? { reason } : {}) });
 
 describe('EgressTally', () => {
   test('ignores the ready line, malformed lines and unknown decisions; trims long hosts', () => {
@@ -75,5 +228,36 @@ describe('EgressTally', () => {
     const ev = t.events('t');
     expect(ev).toHaveLength(1);
     expect((ev[0]?.data.host as string).length).toBe(253);
+  });
+
+  test('refusals cannot push allowed or unlisted hosts out: the cap is per decision', () => {
+    expect(MAX_EGRESS_HOSTS).toBe(200);
+    const t = new EgressTally();
+    // An agent floods refusals first...
+    for (let i = 0; i < 500; i++) t.add(line(`x${i}.invalid`, 'deny', 'port not allowed'));
+    // ...then leaks through monitor mode, and uses an allowed host.
+    t.add(line('evil.example', 'allow', 'unlisted'));
+    t.add(line('github.com', 'allow'));
+    const ev = t.events('t');
+    const shown = (d: string) => ev.filter((e) => e.data.decision === d && !e.data.overflow);
+    expect(shown('unlisted').map((e) => e.data.host)).toEqual(['evil.example']);
+    expect(shown('allow').map((e) => e.data.host)).toEqual(['github.com']);
+    expect(shown('deny')).toHaveLength(200);
+    // Overflow is counted per decision, so the page can say which kind was cut.
+    expect(ev.filter((e) => e.data.overflow).map((e) => e.data)).toEqual([
+      { host: '(300 more deny hosts)', decision: 'deny', count: 300, hosts: 300, overflow: true },
+    ]);
+  });
+
+  test('each decision overflows on its own, counting hosts and connections', () => {
+    const t = new EgressTally();
+    for (let i = 0; i < 203; i++) {
+      t.add(line(`u${i}.example`, 'allow', 'unlisted'));
+      if (i >= 200) t.add(line(`u${i}.example`, 'allow', 'unlisted'));
+    }
+    const over = t.events('t').filter((e) => e.data.overflow);
+    expect(over.map((e) => e.data)).toEqual([
+      { host: '(3 more unlisted hosts)', decision: 'unlisted', count: 6, hosts: 3, overflow: true },
+    ]);
   });
 });

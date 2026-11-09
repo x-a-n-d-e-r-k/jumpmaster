@@ -1,7 +1,13 @@
 import { Readable } from 'node:stream';
 import { EGRESS_PROXY_ALIAS, type ServiceSpec } from '@jumpmaster/protocol';
 import Docker from 'dockerode';
-import type { ContainerDriver, ContainerHandle, DropNet, ProxyHandle } from './driver.js';
+import type {
+  ContainerDriver,
+  ContainerHandle,
+  DropNet,
+  IsolationFacts,
+  ProxyHandle,
+} from './driver.js';
 import { allocateSubnet, dropLayout } from './subnets.js';
 
 const SERVICE_LABEL = 'jumpmaster.service';
@@ -22,6 +28,41 @@ const NO_IPV6 = {
   'net.ipv6.conf.all.disable_ipv6': '1',
   'net.ipv6.conf.default.disable_ipv6': '1',
 };
+
+const PROBE_MS = 20_000;
+/** On the host network: listens on every address and reports the host's addresses. */
+const HOST_ADDRESSES = `const os=require('os');console.log(JSON.stringify({addrs:Object.values(os.networkInterfaces()).flat().filter(Boolean).map((a)=>a.address)}));`;
+const HOST_LISTENER = `const net=require('net'),os=require('os');const s=net.createServer((c)=>c.end('hi'));s.on('error',()=>{console.log(JSON.stringify({listening:false}));process.exit(0)});s.listen(Number(process.env.PORT),'0.0.0.0',()=>{const addrs=Object.values(os.networkInterfaces()).flat().filter(Boolean).map((a)=>a.address);console.log(JSON.stringify({listening:true,addrs}))});setTimeout(()=>process.exit(0),60000);`;
+/**
+ * On the drop network, with the trooper's settings: tries the host listener at the gateway, then
+ * stays attached so the host's addresses are read while the network is in use.
+ */
+const DROP_PROBE = `const net=require('net'),fs=require('fs');let v6;try{v6=fs.readFileSync('/proc/sys/net/ipv6/conf/all/disable_ipv6','utf8').trim()}catch(e){v6=String(e.code)}const s=net.connect({host:process.env.GW,port:Number(process.env.PORT)});const done=(r)=>{s.destroy();console.log(JSON.stringify({connect:r,v6}));setTimeout(()=>process.exit(0),30000)};s.setTimeout(3000,()=>done('timeout'));s.on('connect',()=>done('connected'));s.on('error',(e)=>done(e.code||'error'));`;
+
+/** The first JSON line of a stream, or null when it ends or the time runs out first. */
+async function firstJsonLine(
+  stream: AsyncIterable<string>,
+  ms: number,
+): Promise<Record<string, unknown> | null> {
+  const it = stream[Symbol.asyncIterator]();
+  const deadline = Date.now() + ms;
+  for (;;) {
+    let timer: NodeJS.Timeout | undefined;
+    const next = await Promise.race([
+      it.next(),
+      new Promise<'timeout'>((r) => {
+        timer = setTimeout(() => r('timeout'), Math.max(0, deadline - Date.now()));
+      }),
+    ]);
+    clearTimeout(timer);
+    if (next === 'timeout' || next.done) return null;
+    try {
+      return JSON.parse(next.value) as Record<string, unknown>;
+    } catch {
+      // keep reading
+    }
+  }
+}
 
 /** Whether a network create failed because the subnet is taken (another drop raced us to it). */
 const isSubnetConflict = (e: unknown): boolean =>
@@ -291,6 +332,79 @@ export class DockerDriver implements ContainerDriver {
       .getNetwork(name)
       .remove()
       .catch(() => {});
+  }
+
+  async engineVersion(): Promise<string> {
+    const v = (await this.docker.version()) as { Version?: string };
+    return v.Version ?? '';
+  }
+
+  async probeIsolation(net: DropNet, image: string): Promise<IsolationFacts> {
+    const hardening = {
+      Privileged: false,
+      ReadonlyRootfs: true,
+      CapDrop: ['ALL'],
+      SecurityOpt: ['no-new-privileges'],
+      PidsLimit: PROXY_PIDS,
+    };
+    const labels = { [EGRESS_LABEL]: 'probe' };
+    const created: Docker.Container[] = [];
+    const run = async (o: Docker.ContainerCreateOptions) => {
+      const c = await this.docker.createContainer({ Image: image, Labels: labels, ...o });
+      created.push(c);
+      const stream = (await c.attach({
+        stream: true,
+        stdout: true,
+        stderr: false,
+      })) as unknown as Readable;
+      stream.on('error', () => {});
+      const out = new Readable({ read() {} });
+      c.modem.demuxStream(stream, wrap(out), wrap(new Readable({ read() {} })));
+      stream.on('end', () => out.push(null));
+      await c.start();
+      return firstJsonLine(lines(out), PROBE_MS);
+    };
+    try {
+      let listener: { listening?: boolean; addrs?: string[] } | null = null;
+      let port = 0;
+      for (let attempt = 0; attempt < 3 && !listener?.listening; attempt++) {
+        port = 40_000 + Math.floor(Math.random() * 10_000);
+        listener = await run({
+          Entrypoint: ['node', '-e', HOST_LISTENER],
+          Env: [`PORT=${port}`],
+          HostConfig: { NetworkMode: 'host', ...hardening },
+        });
+      }
+      if (!listener?.listening)
+        return {
+          listenerUp: false,
+          gatewayOnHost: false,
+          gatewayReachable: false,
+          ipv6Disabled: false,
+        };
+      const inside = (await run({
+        Entrypoint: ['node', '-e', DROP_PROBE],
+        Env: [`GW=${net.gateway}`, `PORT=${port}`],
+        HostConfig: { ...egressHostConfig(net), ...hardening },
+        NetworkingConfig: {
+          EndpointsConfig: { [net.name]: { IPAMConfig: { IPv4Address: net.trooper } } },
+        },
+      })) as { connect?: string; v6?: string } | null;
+      // Read while the drop container is attached: an engine may bring the bridge up lazily.
+      const host = (await run({
+        Entrypoint: ['node', '-e', HOST_ADDRESSES],
+        HostConfig: { NetworkMode: 'host', ...hardening },
+      })) as { addrs?: string[] } | null;
+      return {
+        listenerUp: true,
+        gatewayOnHost: [...(listener.addrs ?? []), ...(host?.addrs ?? [])].includes(net.gateway),
+        // No answer at all from inside is not proof of isolation: treat it as reachable.
+        gatewayReachable: inside === null || inside.connect === 'connected',
+        ipv6Disabled: inside?.v6 === '1',
+      };
+    } finally {
+      for (const c of created) await c.remove({ force: true }).catch(() => {});
+    }
   }
 
   async imageExists(image: string): Promise<boolean> {

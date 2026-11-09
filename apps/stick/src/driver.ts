@@ -22,6 +22,18 @@ export type DropNet = {
   ipRange: string;
 };
 
+/** What the capability probe saw on a real drop network (see `probeIsolation`). */
+export type IsolationFacts = {
+  /** The host-side listener started (without it the other facts prove nothing). */
+  listenerUp: boolean;
+  /** The drop's gateway address is on one of the host's interfaces. */
+  gatewayOnHost: boolean;
+  /** A container with the drop's settings connected to the host listener at the gateway. */
+  gatewayReachable: boolean;
+  /** IPv6 was off in that container (the drop sysctls applied). */
+  ipv6Disabled: boolean;
+};
+
 /** The running egress proxy: its stdout lines (ready, then one per tunnel) and a stop. */
 export type ProxyHandle = {
   logs(): AsyncIterable<string>;
@@ -86,4 +98,12 @@ export interface ContainerDriver {
   removeNetwork(name: string): Promise<void>;
   /** Whether the image is present on this engine. */
   imageExists(image: string): Promise<boolean>;
+  /** The engine's version (`Server.Version`). */
+  engineVersion(): Promise<string>;
+  /**
+   * Behavioural check of a drop network with `image` (any image with node): a listener on the
+   * host network, and a container on `net` with the trooper's settings trying to reach it at the
+   * gateway. Containers it starts are removed before it returns.
+   */
+  probeIsolation(net: DropNet, image: string): Promise<IsolationFacts>;
 }

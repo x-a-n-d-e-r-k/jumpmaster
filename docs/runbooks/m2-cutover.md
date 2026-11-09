@@ -106,19 +106,47 @@ before it. With one free slot, crew drops wait until no finishing or implement d
   bridge; the only exit is a per-drop proxy that allows `CONNECT` on port 443 to listed public
   hosts (the base list, the preset's hosts and `allow`). `monitor` lets any public host through
   and lists it on the drop page, so run `monitor` first and move to `enforce` once the drop page
-  shows no unlisted host. The stick needs the `jumpmaster-egress` image on its engine
-  (`JM_EGRESS_IMAGE`) and advertises egress only when it can create a drop network; until one
-  does, the zone's drops stay queued. Drop networks come from `JM_DROP_SUBNET_POOL` (default
-  `172.30.0.0/16`): keep it clear of the daemon's `default-address-pools` and of your LAN. The
-  image workflow's egress e2e (`images/trooper/e2e/egress.sh`) checks DNS from the trooper and a
-  service, the drop gateway against a host listener, raw IPs, the metadata address, IPv6 and the
-  proxy's bind on each run's engine; run it on your stick's engine before relying on `enforce`
-  (first run on Docker Engine 29.9.2). What egress does not stop:
+  shows no unlisted host. Drop networks come from `JM_DROP_SUBNET_POOL` (default
+  `172.30.0.0/16`): keep it clear of the daemon's `default-address-pools` and of your LAN.
+  - **Engine.** Docker Engine **27.0 or later** (tested on 29.9.2). The bridge driver accepts
+    options it doesn't know without complaint, so the stick doesn't trust the option that keeps
+    the host off the drop's gateway: at startup it checks it. It refuses an engine older than
+    27.0; then on a real drop network it starts a listener on the host network and a container
+    with a drop's settings, and requires that the gateway holds no host address, that the
+    listener can't be reached at the gateway, that IPv6 is off in the container, and that the
+    `jumpmaster-egress` image (`JM_EGRESS_IMAGE`) starts there and prints its ready line. Only then
+    does it advertise egress; otherwise its log says `egress-v1 not advertised:` and why, and the
+    zone's drops stay queued. The image workflow's egress e2e (`images/trooper/e2e/egress.sh`)
+    checks the rest on each run's engine.
+  - **The drop page's Egress table** itemises up to 200 hosts per decision (denied, unlisted,
+    allowed); the rest show as one `(N more … hosts)` row for that decision. A cap per decision
+    means a flood of refusals can't hide an unlisted or allowed host, but a page with an overflow
+    row is not a clean bill of health: the hosts in it were not reviewed.
+  - **Proxy limits:** 128 tunnels and 256 connections per drop by default
+    (`JM_EGRESS_MAX_TUNNELS`, `JM_EGRESS_MAX_CONNECTIONS` on the stick, passed to each proxy).
+
+  What egress does not stop:
   - **Exfiltration through an allowed host.** In an implement, heal or resolve drop the trooper's
     root process holds the author token and `github.com` is allowed: that is an unbounded write
     channel to anything the token can reach (the agent itself never holds the token). The
     operator's Claude token reaches `api.anthropic.com`. Domain fronting on a shared CDN remains
     where the CDN still allows it (the proxy does not compare the TLS SNI with the CONNECT host).
+  - **What each listed host accepts.** No shipped host should take writes without a credential:
+    `api.anthropic.com` and `github.com` need the tokens above; the package registries and
+    download hosts (`registry.npmjs.org`, `nodejs.org`, `pypi.org`, `files.pythonhosted.org`,
+    `objects.githubusercontent.com`, `codeload.github.com`, the Maven and Gradle hosts,
+    `proxy.golang.org`, `sum.golang.org`) serve reads; a publish needs a registry token the drop
+    doesn't have. Reads still leak a little: the module path a drop asks `proxy.golang.org` for is
+    fetched from that module's own host, which sees it. Generic object stores (for example
+    `storage.googleapis.com`, `*.s3.amazonaws.com`) accept anonymous writes to any bucket that
+    allows them: never list one. The go preset sets `GOTOOLCHAIN=local` so it needs none.
+  - **Wildcard entries.** `*.example.com` lets a drop make the proxy resolve any name under
+    `example.com` (a DNS side channel to whoever runs that zone) and reach any host under it on
+    443. No shipped list uses a wildcard; add one only for a domain you trust that much.
+  - **Your own public address.** The proxy refuses private and reserved addresses, but it can't
+    know the host's public IP. In `monitor`, and in `enforce` if you list your own domain, a drop
+    can reach port 443 on your own public address (a VPS, or the router in front of a home
+    server).
   - **Tools that ignore the proxy** get no route at all, so they fail rather than leak.
   - **The proxy's own lookups** use the engine's DNS: in `enforce` an unlisted name is refused
     before any lookup, but in `monitor` every name a drop asks for is resolved.

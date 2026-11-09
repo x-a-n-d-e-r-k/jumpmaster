@@ -14,7 +14,10 @@ LABEL org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.title="jumpmaster-trooper-go"
 RUN test -f /opt/trooper/main.js || { echo "BASE must be the jumpmaster trooper image" >&2; exit 1; }
 COPY --from=go /usr/local/go /usr/local/go
-ENV PATH=/usr/local/go/bin:${PATH}
+# GOTOOLCHAIN=local: go runs this toolchain only and never downloads another (a `toolchain` line
+# asking for a newer Go fails instead), so egress needs no toolchain host.
+ENV PATH=/usr/local/go/bin:${PATH} \
+    GOTOOLCHAIN=local
 # Root-owned and read-only to both identities: the agent can't change a binary the gate runs.
 RUN chown -R root:root /usr/local/go \
  && chmod -R go-w /usr/local/go \

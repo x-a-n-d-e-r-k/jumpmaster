@@ -161,6 +161,50 @@ const egressOf = (events) =>
 const cap = await egressCapability(new DockerDriver(docker), env);
 check('stick: egressCapability passes on this engine (egress-v1 advertised)', cap.ok, cap);
 
+// 0b. The capability probe is behavioural: on a drop network it finds the gateway closed, and on
+// a network that leaves the host an address at its gateway (no inhibit_ipv4) it finds it open, so
+// an engine that ignored the option would not get egress-v1.
+{
+  const { allocateSubnet, dropLayout } = await import('/app/apps/stick/dist/subnets.js');
+  const d = new DockerDriver(docker);
+  const probeLabels = {
+    'jumpmaster.stick': 'e2e-stick',
+    'jumpmaster.drop': 'e2e-probe',
+    'jumpmaster.epoch': '1',
+  };
+  const good = await d.createDropNetwork('jm-e2e-probe-good', probeLabels, '172.30.0.0/16');
+  const held = (await docker.listNetworks()).flatMap((n) =>
+    (n.IPAM?.Config ?? []).map((c) => c.Subnet).filter(Boolean),
+  );
+  const open = dropLayout('jm-e2e-probe-open', allocateSubnet(held, '172.30.0.0/16'));
+  await docker.createNetwork({
+    Name: open.name,
+    Internal: true,
+    Labels: probeLabels,
+    IPAM: {
+      Driver: 'default',
+      Config: [{ Subnet: open.subnet, IPRange: open.ipRange, Gateway: open.gateway }],
+    },
+  });
+  try {
+    const g = await d.probeIsolation(good, 'jumpmaster-egress:dev');
+    check(
+      'probe: on a drop network the gateway holds no host address and is unreachable, IPv6 off',
+      g.listenerUp && !g.gatewayOnHost && !g.gatewayReachable && g.ipv6Disabled,
+      g,
+    );
+    const o = await d.probeIsolation(open, 'jumpmaster-egress:dev');
+    check(
+      'probe control: without inhibit_ipv4 the probe sees the host at the gateway',
+      o.listenerUp && o.gatewayOnHost && o.gatewayReachable,
+      o,
+    );
+  } finally {
+    await d.removeNetwork(good.name);
+    await d.removeNetwork(open.name);
+  }
+}
+
 // 1. enforce: allowed hosts work, everything else is refused, from the trooper and its service.
 const allow = ['api.anthropic.com', 'github.com', 'registry.npmjs.org'];
 const enforce = await drop('e2e-egress-enforce', 'enforce', allow, {

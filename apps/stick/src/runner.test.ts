@@ -112,6 +112,17 @@ function fakeDriver(
       async imageExists() {
         return true;
       },
+      async engineVersion() {
+        return '29.9.2';
+      },
+      async probeIsolation() {
+        return {
+          listenerUp: true,
+          gatewayOnHost: false,
+          gatewayReachable: false,
+          ipv6Disabled: true,
+        };
+      },
       async start(o) {
         order.push('trooper');
         d.started = o;
@@ -802,9 +813,13 @@ describe('egress', () => {
     expect(byHost.get('deny example.com')).toBe(2);
     expect(byHost.get('unlisted cdn.example.net')).toBe(1);
     expect(byHost.has('allow forged.test')).toBe(false);
+    // 200 per decision: the denied flood is cut, the allowed and unlisted hosts are all shown.
     const hosts = egress.filter((e) => !e.data.overflow);
-    expect(hosts).toHaveLength(200);
-    expect(egress.find((e) => e.data.overflow)?.data).toMatchObject({ overflow: true, count: 53 });
+    expect(hosts.filter((e) => e.data.decision === 'deny')).toHaveLength(200);
+    expect(hosts).toHaveLength(202);
+    expect(egress.filter((e) => e.data.overflow).map((e) => e.data)).toEqual([
+      expect.objectContaining({ decision: 'deny', hosts: 51, count: 51, overflow: true }),
+    ]);
     // Every batch stays within the events limit, and they all land before the result.
     expect(client.events.every((b) => b.length <= 50)).toBe(true);
     expect(calls.at(-1)).toBe('result');

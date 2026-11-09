@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { EgressLogLine } from '@jumpmaster/protocol/egress';
 import { afterEach, describe, expect, test } from 'vitest';
 import { configFromEnv } from './config.js';
-import { type Proxy, type ProxyOptions, startProxy } from './proxy.js';
+import { DEFAULT_LIMITS, type Proxy, type ProxyOptions, startProxy } from './proxy.js';
 
 const cleanups: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
@@ -167,8 +167,27 @@ describe('tunnels', () => {
     expect(status).toBe(200);
     socket.write('x');
     expect(await readSome(socket)).toBe('x');
-    expect(w.dialed).toEqual(['1.1.1.1', '2606:4700:4700::1111', '8.8.8.8']);
+    // IPv4 first (the exit network is IPv4), in answer order within each family.
+    expect(w.dialed).toEqual(['1.1.1.1', '8.8.8.8']);
     expect(w.lookups).toEqual(['allowed.test']);
+  });
+
+  test('IPv4 answers are dialled before IPv6 ones, so an unroutable AAAA costs nothing', async () => {
+    const echo = await echoServer();
+    const dead = await closedPort();
+    const w = await world({
+      answers: { 'allowed.test': ['2606:4700:4700::1111', '2001:4860:4860::8888', '8.8.8.8'] },
+      routes: { '8.8.8.8': echo.port, '2606:4700:4700::1111': dead, '2001:4860:4860::8888': dead },
+    });
+    expect((await connectTo(w.proxy.port, 'allowed.test:443')).status).toBe(200);
+    expect(w.dialed).toEqual(['8.8.8.8']);
+    // IPv6 is still tried when IPv4 fails.
+    const v6only = await world({
+      answers: { 'allowed.test': ['2606:4700:4700::1111', '1.1.1.1'] },
+      routes: { '1.1.1.1': dead, '2606:4700:4700::1111': echo.port },
+    });
+    expect((await connectTo(v6only.proxy.port, 'allowed.test:443')).status).toBe(200);
+    expect(v6only.dialed).toEqual(['1.1.1.1', '2606:4700:4700::1111']);
   });
 
   test('an address that hangs times out and the next is tried', async () => {
@@ -348,10 +367,12 @@ describe('binding and limits', () => {
   });
 
   test('each tunnel logs one line; the 65th concurrent tunnel is refused', async () => {
+    expect(DEFAULT_LIMITS.maxTunnels).toBe(128);
     const echo = await echoServer();
     const w = await world({
       answers: { 'allowed.test': ['8.8.8.8'] },
       routes: { '8.8.8.8': echo.port },
+      limits: { maxTunnels: 64 },
     });
     const open: Socket[] = [];
     for (let i = 0; i < 64; i++) {
@@ -386,6 +407,7 @@ describe('main', () => {
       ports: [443],
       bind: '172.30.0.2',
       port: 3128,
+      limits: {},
     });
     expect(() =>
       configFromEnv({ ...base, JM_EGRESS_BIND: '172.30.0.2', JM_EGRESS_MODE: 'off' }),
@@ -403,6 +425,18 @@ describe('main', () => {
     expect(() =>
       configFromEnv({ ...base, JM_EGRESS_BIND: '172.30.0.2', JM_EGRESS_PORTS: '443,0' }),
     ).toThrow(/JM_EGRESS_PORTS/);
+    const limits = configFromEnv({
+      ...base,
+      JM_EGRESS_BIND: '172.30.0.2',
+      JM_EGRESS_MAX_TUNNELS: '256',
+      JM_EGRESS_MAX_CONNECTIONS: '512',
+    });
+    expect(limits.limits).toEqual({ maxTunnels: 256, maxConnections: 512 });
+    expect(configFromEnv({ ...base, JM_EGRESS_BIND: '172.30.0.2' }).limits).toEqual({});
+    for (const bad of ['0', '-1', 'x', '100000'])
+      expect(() =>
+        configFromEnv({ ...base, JM_EGRESS_BIND: '172.30.0.2', JM_EGRESS_MAX_TUNNELS: bad }),
+      ).toThrow(/JM_EGRESS_MAX_TUNNELS/);
   });
 
   test('the built entry exits non-zero naming JM_EGRESS_BIND, and prints no ready line', () => {
@@ -418,5 +452,69 @@ describe('main', () => {
     expect(child.stderr).toContain('JM_EGRESS_BIND is required');
     expect(child.stdout).not.toContain('ready');
     expect(child.status).toBe(1);
+  });
+});
+
+describe('connection load', () => {
+  const rawSocket = (port: number) =>
+    new Promise<Socket>((resolve, reject) => {
+      const s = connect(port, '127.0.0.1', () => resolve(s));
+      s.on('error', reject);
+      cleanups.push(() => void s.destroy());
+    });
+  const closed = (s: Socket, ms: number) =>
+    new Promise<boolean>((resolve) => {
+      if (s.destroyed) return resolve(true);
+      const t = setTimeout(() => resolve(false), ms);
+      s.once('close', () => {
+        clearTimeout(t);
+        resolve(true);
+      });
+    });
+
+  test('connections beyond the cap are refused and logged, sockets before CONNECT included', async () => {
+    expect(DEFAULT_LIMITS.maxConnections).toBe(256);
+    const w = await world({ limits: { maxConnections: 5 } });
+    const idle: Socket[] = [];
+    for (let i = 0; i < 5; i++) idle.push(await rawSocket(w.proxy.port));
+    const extra = await rawSocket(w.proxy.port);
+    expect(await closed(extra, 2000)).toBe(true);
+    for (const s of idle) expect(s.destroyed).toBe(false);
+    await until(() => w.logs.some((l) => l.reason === 'too many connections'));
+    expect(w.logs.filter((l) => l.reason === 'too many connections')).toHaveLength(1);
+  });
+
+  test('a client that never finishes its headers is cut after the header timeout', async () => {
+    const w = await world({ limits: { headersTimeoutMs: 200 } });
+    const s = await rawSocket(w.proxy.port);
+    s.write('CONNECT allowed.test:4');
+    expect(await closed(s, 3000)).toBe(true);
+  });
+
+  test('an idle socket that never sends anything is cut', async () => {
+    const w = await world({ limits: { headersTimeoutMs: 200 } });
+    const s = await rawSocket(w.proxy.port);
+    expect(await closed(s, 3000)).toBe(true);
+  });
+
+  test('close returns at once with idle sockets open, and logs every open tunnel', async () => {
+    const echo = await echoServer();
+    const w = await world({
+      answers: { 'allowed.test': ['8.8.8.8'] },
+      routes: { '8.8.8.8': echo.port },
+    });
+    const { status, socket } = await connectTo(w.proxy.port, 'allowed.test:443');
+    expect(status).toBe(200);
+    socket.write('x');
+    await readSome(socket);
+    for (let i = 0; i < 3; i++) await rawSocket(w.proxy.port);
+    const slow = await rawSocket(w.proxy.port);
+    slow.write('CONNECT allowed');
+    const started = Date.now();
+    await w.proxy.close();
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(w.logs.filter((l) => l.decision === 'allow')).toEqual([
+      expect.objectContaining({ host: 'allowed.test', bytesUp: 1, bytesDown: 1 }),
+    ]);
   });
 });

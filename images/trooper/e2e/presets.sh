@@ -19,7 +19,9 @@ docker build -q --build-arg SOURCE_URL="$SOURCE_URL" --build-arg BASE=jumpmaster
 docker build -q --build-arg SOURCE_URL="$SOURCE_URL" --build-arg BASE=jumpmaster-trooper:dev -t jumpmaster-trooper-jvm:dev -f images/trooper/presets/jvm/Dockerfile . >/dev/null
 
 PY='python3 --version && python3.12 --version && uv --version'
-GO='go version'
+# A real build with the shipped toolchain only (GOTOOLCHAIN=local, no module downloads).
+# shellcheck disable=SC2016 # expanded by the container's sh
+GO='go version && test "$(go env GOTOOLCHAIN)" = local && d="$(mktemp -d)" && cd "$d" && printf "module example.test/hello\n\ngo 1.21\n" > go.mod && printf "package main\n\nfunc main() { println(\"go-build-ok\") }\n" > main.go && go build -o hello . && ./hello'
 JVM='java -version && mvn -v'
 HARDEN=(--cap-drop ALL --security-opt no-new-privileges --pids-limit 512)
 
@@ -30,7 +32,7 @@ expect() { # name, pattern, output
 out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-python:dev -c "$PY && uv python find 3.12 && python3.12 -V" 2>&1 || true)"
 expect 'python as agent' 'Python 3\.11\..*Python 3\.12\..*uv [0-9.]+.*/usr/local/bin/python3\.12.*Python 3\.12\.' "$(tr '\n' ' ' <<<"$out")"
 out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-go:dev -c "$GO" 2>&1 || true)"
-expect 'go as agent' '^go version go1\.' "$out"
+expect 'go as agent' '^go version go1\..*go-build-ok' "$(tr '\n' ' ' <<<"$out")"
 out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-jvm:dev -c "$JVM" 2>&1 || true)"
 expect 'jvm as agent' 'openjdk version "21\..*Apache Maven 3\.' "$(tr '\n' ' ' <<<"$out")"
 
@@ -71,7 +73,7 @@ TROOPER=(-i --rm --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add KILL
 out="$(payload "$PY" | docker run "${TROOPER[@]}" "${MOUNT[@]}" jumpmaster-trooper-python:dev || true)"
 gate_ok 'python as gate' 'Python 3\.11\..*Python 3\.12\..*uv [0-9.]+' "$out"
 out="$(payload "$GO" | docker run "${TROOPER[@]}" "${MOUNT[@]}" jumpmaster-trooper-go:dev || true)"
-gate_ok 'go as gate' 'go version go1\.' "$out"
+gate_ok 'go as gate' 'go version go1\..*go-build-ok' "$out"
 out="$(payload "$JVM" | docker run "${TROOPER[@]}" "${MOUNT[@]}" jumpmaster-trooper-jvm:dev || true)"
 gate_ok 'jvm as gate' 'openjdk version "21\..*Apache Maven 3\.' "$out"
 if grep -q E2EDUMMY <<<"$out"; then echo "FAIL: token in output" >&2; exit 1; fi

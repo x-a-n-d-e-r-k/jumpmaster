@@ -223,6 +223,12 @@ describe('stack presets', () => {
   test('the go preset copies Go from a digest-pinned image; jvm a JDK and a checked Maven', () => {
     const go = read(PRESET_FILES.go);
     expect(go).toMatch(/^FROM golang:[\w.-]+@sha256:[0-9a-f]{64} AS go$/m);
+    // The shipped toolchain only: go never downloads another one (that would need an egress host).
+    const goEnv = finalStage(instructions(go))
+      .filter((i) => i.op === 'ENV')
+      .map((i) => i.args)
+      .join(' ');
+    expect(goEnv).toMatch(/\bGOTOOLCHAIN=local\b/);
     expect(go).toMatch(/COPY --from=go \/usr\/local\/go \/usr\/local\/go/);
     expect(go).toMatch(/ENV [^\n]*PATH=\/usr\/local\/go\/bin:/);
     const jvm = read(PRESET_FILES.jvm);

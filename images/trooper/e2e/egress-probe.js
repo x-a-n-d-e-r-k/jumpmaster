@@ -164,6 +164,8 @@ const dnsQuery = (server, name, ms = 3000) =>
     'GET http://registry.npmjs.org/ HTTP/1.1\r\nHost: registry.npmjs.org\r\n\r\n',
   );
   check('proxy: plain HTTP is refused', plain === 405, plain);
+  // localtest.me is a public name that resolves to 127.0.0.1. If its DNS ever changes, this check
+  // fails as a false alarm: the unit tests cover the private-answer refusal either way.
   const rebind = await connectVia('localtest.me:443');
   check('proxy: a public name resolving to loopback is refused', rebind === 403, rebind);
 
