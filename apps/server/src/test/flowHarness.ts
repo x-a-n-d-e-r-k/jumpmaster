@@ -63,8 +63,23 @@ export async function harness(
     },
   ];
   const f = fakeForgePair({ issues, trusted: ['human', 'alice'] });
-  const forges = { author: f.author, reviewer: f.reviewer };
   const zone = makeZone({ ciRequired: false, ...opts.zone });
+  // Starter mode: no reviewer identity, no reviewer token, and rules that need no approval.
+  const starter = zone.identity === 'starter';
+  if (starter)
+    f.state.rules.author = {
+      kind: 'ok',
+      rules: {
+        requiredApprovals: 0,
+        dismissStaleOnPush: false,
+        requiredChecks: zone.ciRequired ? ['ci'] : [],
+        unpinnedChecks: [],
+        viewerCanBypass: false,
+        viewerIsAdmin: false,
+        requiresPullRequest: true,
+      },
+    };
+  const forges = { author: f.author, reviewer: starter ? null : f.reviewer };
   const config: Config = {
     listen: { host: '127.0.0.1', port: 0, allowedHosts: ['localhost:80'] },
     dataDir: opts.dataDir ?? '.',
@@ -74,7 +89,7 @@ export async function harness(
     secrets: {
       claudeToken: 'claude-token',
       githubAuthorToken: 'author-token',
-      githubReviewerToken: 'reviewer-token',
+      ...(starter ? {} : { githubReviewerToken: 'reviewer-token' }),
       joinToken: 'join',
       operatorToken: 'o'.repeat(32),
       ...(opts.zoneSecrets ? { zoneSecrets: { [zone.id]: opts.zoneSecrets } } : {}),

@@ -745,14 +745,17 @@ export function lockfileChanges(
 // ---- branch protection -------------------------------------------------------------------------
 
 /**
- * Problems with the branch rules both bot identities see. `[]` when protection is not required;
- * null when either read is unavailable (judged on a later pass).
+ * Problems with the branch rules both bot identities see (the author alone in starter mode, where
+ * `reviewer` is null). `[]` when protection is not required; null when a read is unavailable
+ * (judged on a later pass).
  */
 export function branchProtectionProblems(
-  rules: { author: BranchRulesRead; reviewer: BranchRulesRead },
+  rules: { author: BranchRulesRead; reviewer: BranchRulesRead | null },
   zone: DropZoneConfig,
 ): string[] | null {
   if (!zone.requireBranchProtection) return [];
+  if (zone.identity === 'starter') return starterProblems(rules.author, zone);
+  if (rules.reviewer === null) return null; // two-bot always reads both identities
   if (rules.author.kind === 'unavailable' || rules.reviewer.kind === 'unavailable') return null;
   const out = new Set<string>();
   for (const read of [rules.author, rules.reviewer]) {
@@ -770,5 +773,27 @@ export function branchProtectionProblems(
     if (zone.ciRequired && r.requiredChecks.length === 0) out.add('no required checks');
     for (const t of r.unsupportedRules ?? []) out.add(`unsupported rule: ${t}`);
   }
+  return [...out];
+}
+
+/**
+ * Starter mode's rules, read by the author alone: a pull request rule, required checks pinned to
+ * GitHub Actions, and no bypass. An approval requirement is a problem (no second identity can
+ * give one), and stale-approval dismissal is moot with zero approvals.
+ */
+function starterProblems(read: BranchRulesRead, zone: DropZoneConfig): string[] | null {
+  if (read.kind === 'unavailable') return null;
+  if (read.kind === 'none') return ['no ruleset'];
+  const r = read.rules;
+  const out = new Set<string>();
+  // Unknown counts as missing: the author must not be able to push straight to the branch.
+  if (r.requiresPullRequest !== true) out.add('no pull request rule');
+  if (r.requiredApprovals > 0) out.add('approvals required in starter mode');
+  if (r.viewerCanBypass) out.add('bot can bypass');
+  if (r.viewerIsAdmin) out.add('bot is admin');
+  for (const c of r.unpinnedChecks) out.add(`required check not pinned: ${c}`);
+  for (const c of r.nonActionsChecks ?? []) out.add(`required check not from GitHub Actions: ${c}`);
+  if (r.requiredChecks.length === 0) out.add('no required checks');
+  for (const t of r.unsupportedRules ?? []) out.add(`unsupported rule: ${t}`);
   return [...out];
 }

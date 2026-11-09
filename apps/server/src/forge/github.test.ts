@@ -831,6 +831,25 @@ describe('GitHubForge', () => {
         });
       });
 
+      test('lists required checks pinned to an app other than GitHub Actions', async () => {
+        nock(api)
+          .get(rulesUrl)
+          .query(true)
+          .reply(200, [
+            checksRule(1, [
+              { context: 'build', integration_id: 15368 },
+              { context: 'other', integration_id: 1 },
+              { context: 'lint' },
+            ]),
+          ]);
+        mockRuleset(1, { enforcement: 'active', current_user_can_bypass: 'never' });
+        mockViewer('write');
+        expect(await fresh().getBranchRules('main')).toMatchObject({
+          kind: 'ok',
+          rules: { unpinnedChecks: ['lint'], nonActionsChecks: ['other'] },
+        });
+      });
+
       test('5xx is unavailable, 403 is none', async () => {
         nock(api).get(rulesUrl).query(true).reply(503, { message: 'down' });
         expect(await fresh().getBranchRules('main')).toEqual({ kind: 'unavailable' });

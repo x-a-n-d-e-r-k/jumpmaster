@@ -289,13 +289,16 @@ export function decide(s: Snapshot): Action {
     return { kind: 'enqueue', role: 'review', fingerprint: fingerprint([head]) };
   // 20
   if (s.humanBlockStanding) return { kind: 'park', reason: 'human block stands' };
-  // 21–23
-  if (s.reviewOp === null) return { kind: 'post_review', verdictId: latest.id };
-  if (s.reviewOp.state === 'pending' || s.reviewOp.state === 'unknown') {
-    return { kind: 'wait', on: 'outbox' };
-  }
-  if (s.reviewOp.state === 'failed') {
-    return { kind: 'park', reason: `review post failed: ${s.reviewOp.error ?? 'unknown error'}` };
+  // 21–23. Starter mode has no reviewer identity: the verdict on this head stays in Jumpmaster
+  // (shown in the UI), and the merge below rests on it and CI alone.
+  if (s.zone.identity !== 'starter') {
+    if (s.reviewOp === null) return { kind: 'post_review', verdictId: latest.id };
+    if (s.reviewOp.state === 'pending' || s.reviewOp.state === 'unknown') {
+      return { kind: 'wait', on: 'outbox' };
+    }
+    if (s.reviewOp.state === 'failed') {
+      return { kind: 'park', reason: `review post failed: ${s.reviewOp.error ?? 'unknown error'}` };
+    }
   }
   // 24
   if (s.checks.state === 'failure') {

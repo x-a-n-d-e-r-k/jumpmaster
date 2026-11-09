@@ -7,7 +7,7 @@
  * `fail` when the cause is a setting, such as a refused permission). It is never a `pass`.
  */
 import { DoctorResultSchema, type DropResult, hostAllowed } from '@jumpmaster/protocol';
-import type { Config, DropZoneConfig } from '../config.js';
+import { type Config, type DropZoneConfig, STARTER_WARNING } from '../config.js';
 import { creditsStopInForce } from '../credits.js';
 import { crewDropsToday } from '../crew/schedule.js';
 import type { Db } from '../db/open.js';
@@ -482,7 +482,17 @@ type ZoneReads = {
     () => Promise<Read<Awaited<ReturnType<Forge['repoAccess']>>>>
   >;
   branch: () => Promise<string>;
-  rules: () => Promise<{ author: BranchRulesRead; reviewer: BranchRulesRead }>;
+  /** The reviewer's rules read is null in starter mode, which has no reviewer identity. */
+  rules: () => Promise<{ author: BranchRulesRead; reviewer: BranchRulesRead | null }>;
+};
+
+/** What a skipped reviewer check says in starter mode. */
+const NO_REVIEWER = 'starter mode has no reviewer identity, so there is no reviewer token to check';
+
+/** The reviewer forge; only reached by checks that skip in starter mode first. */
+const reviewerOf = (pair: ForgePair): Forge => {
+  if (!pair.reviewer) throw new Error(NO_REVIEWER);
+  return pair.reviewer;
 };
 
 const tokenKind = (token: string | undefined): string =>
@@ -507,7 +517,7 @@ function zoneReads(d: DoctorDeps, zone: DropZoneConfig): ZoneReads {
   const pair = () => reads.pair;
   const access = {
     author: once(() => attempt(() => pair().author.repoAccess())),
-    reviewer: once(() => attempt(() => pair().reviewer.repoAccess())),
+    reviewer: once(() => attempt(() => reviewerOf(pair()).repoAccess())),
   };
   const branch = once(async () => {
     const a = await access.author();
@@ -516,19 +526,18 @@ function zoneReads(d: DoctorDeps, zone: DropZoneConfig): ZoneReads {
   return Object.assign(reads, {
     logins: {
       author: once(() => attempt(() => pair().author.viewerLogin())),
-      reviewer: once(() => attempt(() => pair().reviewer.viewerLogin())),
+      reviewer: once(() => attempt(() => reviewerOf(pair()).viewerLogin())),
     },
     access,
     branch,
     rules: once(async () => {
       const b = await branch();
+      const rev = pair().reviewer;
       const [author, reviewer] = await Promise.all([
         pair()
           .author.getBranchRules(b)
           .catch((): BranchRulesRead => ({ kind: 'unavailable' })),
-        pair()
-          .reviewer.getBranchRules(b)
-          .catch((): BranchRulesRead => ({ kind: 'unavailable' })),
+        rev ? rev.getBranchRules(b).catch((): BranchRulesRead => ({ kind: 'unavailable' })) : null,
       ]);
       return { author, reviewer };
     }),
@@ -556,6 +565,8 @@ async function identityCheck(
   who: 'author' | 'reviewer',
 ): Promise<DoctorCheck> {
   const base = { id: `forge.${who}`, zoneId: zone.id, doc: doc('tokens') };
+  if (who === 'reviewer' && zone.identity === 'starter')
+    return { ...base, status: 'skip', summary: NO_REVIEWER, doc: doc('starter-mode') };
   const login = await r.logins[who]();
   if (!login.ok)
     return readFailed(base, who, 'read its own account (GET /user)', 'any valid token', login);
@@ -649,7 +660,14 @@ async function adminCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorChe
       summary: `authorMayBeAdmin is true, but ${who} is not an admin: the setting relaxes a guard for nothing`,
       fix: 'Set authorMayBeAdmin: false in the zone.',
     };
-  return { ...base, status: 'pass', summary: 'neither bot account is a repository admin' };
+  return {
+    ...base,
+    status: 'pass',
+    summary:
+      zone.identity === 'starter'
+        ? 'the author account is not a repository admin'
+        : 'neither bot account is a repository admin',
+  };
 }
 
 const PERMISSION_USE: Record<string, string> = {
@@ -665,8 +683,12 @@ async function readsCheck(
   who: 'author' | 'reviewer',
 ): Promise<DoctorCheck> {
   const base = { id: `forge.${who}-reads`, zoneId: zone.id, doc: doc('tokens') };
+  if (who === 'reviewer' && zone.identity === 'starter')
+    return { ...base, status: 'skip', summary: NO_REVIEWER, doc: doc('starter-mode') };
   const branch = await r.branch();
-  const probed = await attempt(() => r.pair[who].probeReads(branch));
+  const probed = await attempt(() =>
+    (who === 'author' ? r.pair.author : reviewerOf(r.pair)).probeReads(branch),
+  );
   if (!probed.ok) return readFailed(base, who, 'try its reads', 'Metadata: read', probed);
   const probes = new Map(probed.value.map((p) => [p.permission, p]));
   // The reviewer only reads pull requests and the repository; the author reads everything.
@@ -751,8 +773,20 @@ async function readsCheck(
 const RULE_FIX: [RegExp, (zone: DropZoneConfig, branch: string) => string][] = [
   [
     /^no ruleset$/,
-    (_z, b) =>
-      `Create a branch ruleset targeting ${b} (Settings → Rules → Rulesets → New branch ruleset), enforcement Active, with Require a pull request before merging (1 approval, dismiss stale approvals) and Require status checks to pass; leave the bypass list without the bot accounts.`,
+    (z, b) =>
+      z.identity === 'starter'
+        ? `Create a branch ruleset targeting ${b} (Settings → Rules → Rulesets → New branch ruleset), enforcement Active, with Require a pull request before merging (0 approvals) and Require status checks to pass (each check with GitHub Actions as the source); leave the bypass list without the author account.`
+        : `Create a branch ruleset targeting ${b} (Settings → Rules → Rulesets → New branch ruleset), enforcement Active, with Require a pull request before merging (1 approval, dismiss stale approvals) and Require status checks to pass; leave the bypass list without the bot accounts.`,
+  ],
+  [
+    /^approvals required in starter mode$/,
+    () =>
+      'In the pull request rule, set Required approvals to 0: in starter mode no second account can approve, so GitHub would refuse every merge (or add a reviewer identity and switch the zone to two-bot).',
+  ],
+  [
+    /^required check not from GitHub Actions: /,
+    () =>
+      'Edit each such required check in the ruleset and select GitHub Actions as its source: in starter mode a required Actions check is what stands between the author token and a merge.',
   ],
   [/^approvals < 1$/, () => 'In the pull request rule, set Required approvals to 1 or more.'],
   [
@@ -810,10 +844,16 @@ async function branchRulesCheck(zone: DropZoneConfig, r: ZoneReads): Promise<Doc
       fix: 'Run the doctor again in a few minutes.',
     };
   for (const read of [rules.author, rules.reviewer])
-    if (read.kind === 'ok' && read.rules.requiresPullRequest === false)
+    if (read?.kind === 'ok' && read.rules.requiresPullRequest === false)
       if (!problems.includes('no pull request rule')) problems.push('no pull request rule');
   if (problems.length === 0) {
     const ok = rules.author.kind === 'ok' ? rules.author.rules : null;
+    if (zone.identity === 'starter')
+      return {
+        ...base,
+        status: 'pass',
+        summary: `${branch} requires a pull request and required checks pinned to GitHub Actions (${ok?.requiredChecks.join(', ') || 'none'}), with no approval (starter mode), and the author can't bypass`,
+      };
     return {
       ...base,
       status: 'pass',
@@ -841,10 +881,18 @@ async function codeownersCheck(zone: DropZoneConfig, r: ZoneReads): Promise<Doct
   const base = { id: 'forge.codeowners', zoneId: zone.id, doc: doc('branch-rules') };
   const rules = await r.rules();
   const required = [rules.author, rules.reviewer].some(
-    (x) => x.kind === 'ok' && x.rules.requireCodeOwnerReview === true,
+    (x) => x?.kind === 'ok' && x.rules.requireCodeOwnerReview === true,
   );
   if (!required)
     return { ...base, status: 'pass', summary: 'the rules do not require a code owner review' };
+  if (zone.identity === 'starter')
+    return {
+      ...base,
+      status: 'warn',
+      summary:
+        "the rules require a code owner's review, and starter mode has no reviewer identity: a pull request touching owned paths waits for a human code owner",
+      fix: 'Turn off Require review from Code Owners, if a human review of those paths is not what you want, or add a reviewer identity named in CODEOWNERS.',
+    };
   const branch = await r.branch();
   const reviewer = await r.logins.reviewer();
   if (!reviewer.ok)
@@ -886,7 +934,7 @@ async function ciCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck>
   const required = [
     ...new Set(
       [rules.author, rules.reviewer].flatMap((x) =>
-        x.kind === 'ok' ? x.rules.requiredChecks : [],
+        x?.kind === 'ok' ? x.rules.requiredChecks : [],
       ),
     ),
   ];
@@ -1274,16 +1322,22 @@ function modeCheck(zone: DropZoneConfig, d: DoctorDeps): DoctorCheck {
   };
 }
 
-/** Checks the later tasks fill in; until then they say they did not run. */
-function pendingChecks(zone: DropZoneConfig): DoctorCheck[] {
-  return [
-    {
-      id: 'zone.identity',
-      zoneId: zone.id,
-      status: 'skip',
-      summary: 'the identity mode check is available after Task 13 (single-identity starter mode)',
-    },
-  ];
+/** The zone's identity mode: two bots pass; starter mode warns with what it costs. */
+function identityModeCheck(zone: DropZoneConfig): DoctorCheck {
+  const base = { id: 'zone.identity', zoneId: zone.id, doc: doc('starter-mode') };
+  if (zone.identity === 'starter')
+    return {
+      ...base,
+      status: 'warn',
+      summary: STARTER_WARNING,
+      fix: `To add a reviewer identity: give a second account Write on ${zone.repo}, put its token in the file JM_GITHUB_REVIEWER_TOKEN_FILE names, set identity: "two-bot" in the zone, require 1 approval with stale approvals dismissed in the ruleset, and restart.`,
+    };
+  return {
+    ...base,
+    status: 'pass',
+    summary:
+      'two-bot: separate author and reviewer identities; the reviewer approves each head on GitHub before the author merges',
+  };
 }
 
 const DOCTOR_DROP_STALE_MS = 7 * DAY_MS;
@@ -1526,6 +1580,7 @@ export async function zoneChecks(
     g('zone.preset', z, () => presetCheck(zone, r)),
     g('zone.services', z, () => servicesCheck(d, zone, sticks)),
     g('zone.egress', z, () => egressCheck(d, zone)),
+    g('zone.identity', z, () => identityModeCheck(zone)),
     ...(zone.crew.enabled
       ? [
           g('zone.goals', z, () => goalsCheck(zone, d)),
@@ -1535,7 +1590,6 @@ export async function zoneChecks(
   ];
   return [
     ...(await Promise.all(checks)),
-    ...pendingChecks(zone),
     await g('zone.doctor-drop', z, () => doctorDropCheck(d, zone)),
   ];
 }

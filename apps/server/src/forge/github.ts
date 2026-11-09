@@ -89,11 +89,16 @@ export type CompareFacts = {
 
 export type PullFiles = { files: { path: string; previousPath?: string }[]; complete: boolean };
 
+/** GitHub's app id for GitHub Actions, as a ruleset's required check names its source. */
+export const GITHUB_ACTIONS_APP_ID = 15368;
+
 export type BranchRules = {
   requiredApprovals: number;
   dismissStaleOnPush: boolean;
   requiredChecks: string[];
   unpinnedChecks: string[];
+  /** Required checks pinned to an app other than GitHub Actions (absent when none). */
+  nonActionsChecks?: string[];
   viewerCanBypass: boolean;
   viewerIsAdmin: boolean;
   /** Active rule types the server cannot satisfy with its own merge (merge queue, deployments). */
@@ -723,6 +728,7 @@ export class GitHubForge implements Forge {
       let requireCodeOwnerReview = false;
       const requiredChecks: string[] = [];
       const unpinnedChecks: string[] = [];
+      const nonActionsChecks: string[] = [];
       const unsupportedRules: string[] = [];
       for (const rule of rules) {
         if (rule.ruleset_id == null || !active.has(rule.ruleset_id)) continue;
@@ -749,6 +755,12 @@ export class GitHubForge implements Forge {
             if (!requiredChecks.includes(c.context)) requiredChecks.push(c.context);
             if (c.integration_id == null && !unpinnedChecks.includes(c.context)) {
               unpinnedChecks.push(c.context);
+            } else if (
+              c.integration_id != null &&
+              c.integration_id !== GITHUB_ACTIONS_APP_ID &&
+              !nonActionsChecks.includes(c.context)
+            ) {
+              nonActionsChecks.push(c.context);
             }
           }
         }
@@ -764,6 +776,7 @@ export class GitHubForge implements Forge {
           viewerCanBypass,
           viewerIsAdmin,
           ...(unsupportedRules.length > 0 ? { unsupportedRules } : {}),
+          ...(nonActionsChecks.length > 0 ? { nonActionsChecks } : {}),
           requiresPullRequest,
           requireCodeOwnerReview,
         },

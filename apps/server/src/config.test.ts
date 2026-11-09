@@ -290,6 +290,55 @@ describe('loadConfig', () => {
       ).toBe(true));
   });
 
+  describe('starter identity', () => {
+    const { JM_GITHUB_REVIEWER_TOKEN: _r, ...noReviewer } = fullEnv;
+    const starterEnv = { ...noReviewer, JM_GITHUB_AUTHOR_TOKEN: 'github_pat_author' };
+
+    test('identity defaults to two-bot', () =>
+      expect(loadConfig(minimal, fullEnv).dropZones[0]?.identity).toBe('two-bot'));
+
+    test('starter without JM_GITHUB_REVIEWER_TOKEN loads; two-bot without it is still an error', () => {
+      const c = loadConfig(withZone({ identity: 'starter' }), starterEnv);
+      expect(c.dropZones[0]?.identity).toBe('starter');
+      expect(c.secrets.githubReviewerToken).toBeUndefined();
+      expect(() => loadConfig(minimal, starterEnv)).toThrow(/JM_GITHUB_REVIEWER_TOKEN/);
+      // One two-bot zone among starter zones still needs the reviewer token.
+      const mixed = fixture({
+        dataDir: './data',
+        dropZones: [
+          { ...baseZone, identity: 'starter' },
+          { ...baseZone, id: 'other' },
+        ],
+      });
+      expect(() => loadConfig(mixed, starterEnv)).toThrow(/JM_GITHUB_REVIEWER_TOKEN/);
+    });
+
+    test('starter with ciRequired false, or with a classic author token, is a config error', () => {
+      expect(() =>
+        loadConfig(withZone({ identity: 'starter', ciRequired: false }), starterEnv),
+      ).toThrow(/starter.*ciRequired/);
+      expect(() =>
+        loadConfig(withZone({ identity: 'starter' }), {
+          ...starterEnv,
+          JM_GITHUB_AUTHOR_TOKEN: 'ghp_classic',
+        }),
+      ).toThrow(/starter.*fine-grained/);
+    });
+
+    test('starter with authorMayBeAdmin is a config error: there is no second identity to merge', () =>
+      expect(() =>
+        loadConfig(withZone({ identity: 'starter', authorMayBeAdmin: true }), starterEnv),
+      ).toThrow(/starter.*authorMayBeAdmin/));
+
+    test('a starter install with a reviewer token set still checks it differs', () =>
+      expect(() =>
+        loadConfig(withZone({ identity: 'starter' }), {
+          ...starterEnv,
+          JM_GITHUB_REVIEWER_TOKEN: starterEnv.JM_GITHUB_AUTHOR_TOKEN,
+        }),
+      ).toThrow(/must differ/));
+  });
+
   test('reviewer and author must differ', () =>
     expect(() =>
       loadConfig(minimal, {

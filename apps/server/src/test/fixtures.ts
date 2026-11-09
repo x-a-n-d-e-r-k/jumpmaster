@@ -44,6 +44,7 @@ export function makeZone(o: Partial<DropZoneConfig> = {}): DropZoneConfig {
     verification: [],
     limits: { pids: 512 },
     authorMayBeAdmin: false,
+    identity: 'two-bot',
     protectedPaths: ['.github/**', 'CODEOWNERS', 'pnpm-workspace.yaml'],
     overrideApprovers: [],
     trustPnpmBuildBlocking: false,
@@ -67,7 +68,7 @@ export function makeZone(o: Partial<DropZoneConfig> = {}): DropZoneConfig {
 export interface ZoneWorld {
   db: Db;
   f: { author: FakeForge; reviewer: FakeForge; state: FakeForgeState };
-  forges: { author: FakeForge; reviewer: FakeForge };
+  forges: { author: FakeForge; reviewer: FakeForge | null };
   zone: DropZoneConfig;
   item(n: number, state?: WorkItemState): number;
   prItem(n: number, headSha?: string, now?: Date): number;
@@ -103,7 +104,22 @@ export function zoneWorld(zoneOverrides: Partial<DropZoneConfig> = {}): ZoneWorl
     };
   }
   const zone = makeZone(zoneOverrides);
-  const forges = { author: f.author, reviewer: f.reviewer };
+  // Starter mode has no reviewer identity, and its rules need no approval but a pull request rule.
+  const starter = zone.identity === 'starter';
+  if (starter)
+    f.state.rules.author = {
+      kind: 'ok',
+      rules: {
+        requiredApprovals: 0,
+        dismissStaleOnPush: false,
+        requiredChecks: ['ci'],
+        unpinnedChecks: [],
+        viewerCanBypass: false,
+        viewerIsAdmin: false,
+        requiresPullRequest: true,
+      },
+    };
+  const forges = { author: f.author, reviewer: starter ? null : f.reviewer };
 
   function item(n: number, state: WorkItemState = 'ready'): number {
     const wi = upsertWorkItem(db, {

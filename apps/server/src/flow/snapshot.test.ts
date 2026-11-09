@@ -43,6 +43,37 @@ describe('zonePass', () => {
   });
 });
 
+describe('starter identity (reviewer null)', () => {
+  beforeEach(() => {
+    w = zoneWorld({ identity: 'starter' });
+    itemId = w.prItem(1, 'sha1');
+  });
+
+  test('a pass with reviewer null completes snapshot and reconcile reads with the author only', async () => {
+    const p = await zonePass(w.forges, w.zone, 'main');
+    expect(p.botLogins).toEqual(['author-bot']);
+    expect(p.requiredChecks).toEqual(['ci']);
+    expect(p.protectionProblems).toEqual([]);
+    const s = await snapshotOf();
+    expect(s.forgeUnavailable).toBeNull();
+    expect(w.f.reviewer.calls).toEqual([]);
+  });
+
+  test('trusted reviews still exclude the author bot', async () => {
+    w.f.state.review({ author: 'author-bot', state: 'CHANGES_REQUESTED', commitId: 'sha1' });
+    w.f.state.review({ id: 9, author: 'human', state: 'CHANGES_REQUESTED', commitId: 'sha1' });
+    const s = await snapshotOf();
+    expect(s.trustedChangeRequests.map((r) => r.author)).toEqual(['human']);
+  });
+
+  test('starter rules requiring an approval are a protection problem', async () => {
+    const r = w.f.state.rules.author;
+    if (r.kind === 'ok') r.rules.requiredApprovals = 1;
+    const s = await snapshotOf();
+    expect(s.protectionProblems).toEqual(['approvals required in starter mode']);
+  });
+});
+
 describe('buildSnapshot', () => {
   test('gate script compare uses the merge base, not the base tip', async () => {
     w.f.state.compares.set('main...sha1', {

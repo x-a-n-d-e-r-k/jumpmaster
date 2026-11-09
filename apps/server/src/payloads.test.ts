@@ -98,6 +98,16 @@ describe('buildPayload', () => {
     expect(s).not.toContain(secrets.githubReviewerToken);
   });
 
+  test('starter review payloads carry no write token: the read token or none', () => {
+    const { githubReviewerToken: _r, ...starterSecrets } = secrets;
+    const starter = { ...zone, identity: 'starter' } as DropZoneConfig;
+    for (const z of [starter, { ...starter, reviewReadToken: true }]) {
+      const p = buildPayload(db, z, review, starterSecrets);
+      expect(JSON.stringify(p)).not.toContain(secrets.githubAuthorToken);
+      expect(p.credentials.forgeToken ?? null).toBe(z.reviewReadToken ? 'read-secret' : null);
+    }
+  });
+
   test('review carries the read token only when reviewReadToken', () => {
     expect(build(review).credentials.forgeToken).toBeUndefined();
     expect(build(review, { ...zone, reviewReadToken: true }).credentials.forgeToken).toBe(

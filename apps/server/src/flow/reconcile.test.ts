@@ -160,6 +160,62 @@ describe('reconcileZone — pr_open items', () => {
   });
 });
 
+describe('reconcileZone — starter identity', () => {
+  beforeEach(() => {
+    w = zoneWorld({ identity: 'starter' });
+  });
+
+  test('starter merges on an approve verdict at head with green CI and posts no review', async () => {
+    const id = w.prItem(1, 'sha1');
+    approve(id, 'sha1', false);
+    const r = await pass();
+    expect(r.merges).toBe(1);
+    expect(w.f.state.merges).toEqual([
+      { number: 1, sha: 'sha1', title: 'Issue 1', message: 'Closes #1' },
+    ]);
+    expect(w.f.state.reviews).toEqual([]);
+    expect(w.f.reviewer.calls).toEqual([]);
+    expect(getOutbox(w.db, `review:${id}:sha1:rev-${id}-sha1`)).toBeUndefined();
+    expect(item(id)).toMatchObject({ state: 'done', reason: 'merged' });
+  });
+
+  test('the verdict stays stored for the UI', async () => {
+    const id = w.prItem(1, 'sha1');
+    approve(id, 'sha1', false);
+    await pass();
+    const v = w.db
+      .prepare('SELECT decision, head_sha AS headSha FROM verdicts WHERE work_item_id = ?')
+      .all(id);
+    expect(v).toEqual([{ decision: 'approve', headSha: 'sha1' }]);
+  });
+
+  test('starter waits for CI: an approve verdict with CI pending does not merge', async () => {
+    const id = w.prItem(1, 'sha1');
+    w.f.state.checks.set('sha1', { state: 'pending', names: [] });
+    approve(id, 'sha1', false);
+    await pass(new Date('2026-01-01T00:10:00Z')); // inside the CI deadline
+    expect(w.f.state.merges).toEqual([]);
+    expect(item(id).state).toBe('pr_open');
+  });
+
+  test('starter never merges while a human CHANGES_REQUESTED is on the head', async () => {
+    const id = w.prItem(1, 'sha1');
+    approve(id, 'sha1', false);
+    w.f.state.review({ id: 5, author: 'human', state: 'CHANGES_REQUESTED', commitId: 'sha1' });
+    await pass();
+    expect(w.f.state.merges).toEqual([]);
+    expect(activeDropFor(w.db, id)).toMatchObject({ role: 'heal' });
+  });
+
+  test('starter never merges on a verdict for an older SHA', async () => {
+    const id = w.prItem(1, 'sha2');
+    approve(id, 'sha1', false);
+    await pass();
+    expect(w.f.state.merges).toEqual([]);
+    expect(activeDropFor(w.db, id)).toMatchObject({ role: 'review', headSha: 'sha2' });
+  });
+});
+
 describe('reconcileZone — adoption and resume', () => {
   test('adoption uses one listing call per pass and adopts the author bot PR', async () => {
     const id = w.item(1, 'ready');

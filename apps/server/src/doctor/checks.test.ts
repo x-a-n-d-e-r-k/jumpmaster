@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest';
+import { STARTER_WARNING } from '../config.js';
 import {
   appendEvents,
   insertDrop,
@@ -16,7 +17,6 @@ describe('a healthy install', () => {
     const notPass = checks.filter((c) => c.status !== 'pass');
     expect(notPass.map((c) => [c.id, c.status])).toEqual([
       ['claude.token-age', 'skip'],
-      ['zone.identity', 'skip'],
       ['zone.doctor-drop', 'skip'],
     ]);
     for (const c of checks) {
@@ -524,11 +524,71 @@ describe('zone checks', () => {
     expect(one(checks, 'zone.goals')).toMatchObject({ status: 'warn' });
   });
 
-  test('zone.identity reports skip until its task lands', async () => {
-    const checks = await world().run();
-    expect(one(checks, 'zone.identity')).toMatchObject({
-      status: 'skip',
-      summary: expect.stringContaining('available after Task 13'),
+  test('zone.identity passes for two bot identities', async () => {
+    expect(one(await world().run(), 'zone.identity')).toMatchObject({
+      status: 'pass',
+      summary: expect.stringContaining('two-bot'),
+    });
+  });
+
+  test('no check names a plan task number', async () => {
+    for (const w of [world(), world({ zone: { identity: 'starter' } })])
+      for (const c of await w.run()) expect(`${c.summary} ${c.fix ?? ''}`).not.toMatch(/\bTask \d/);
+  });
+});
+
+describe('starter identity', () => {
+  const starter = () => world({ zone: { identity: 'starter' } });
+
+  test('zone.identity warns with the merge-any-green-PR consequence', async () => {
+    const c = one(await starter().run(), 'zone.identity');
+    expect(c).toMatchObject({ status: 'warn', summary: STARTER_WARNING });
+    expect(STARTER_WARNING).toContain('can merge any green PR, including an unreviewed one');
+    expect(STARTER_WARNING).toContain('no Workflows permission');
+    expect(c.fix).toContain('JM_GITHUB_REVIEWER_TOKEN');
+    expect(c.doc).toMatch(/install\.md#/);
+  });
+
+  test('a healthy starter install warns only on its identity', async () => {
+    const checks = await starter().run();
+    expect(checks.filter((c) => c.status !== 'pass').map((c) => [c.id, c.status])).toEqual([
+      ['claude.token-age', 'skip'],
+      ['forge.reviewer', 'skip'],
+      ['forge.reviewer-reads', 'skip'],
+      ['zone.identity', 'warn'],
+      ['zone.doctor-drop', 'skip'],
+    ]);
+    expect(one(checks, 'forge.reviewer').summary).toContain('starter mode');
+  });
+
+  test('starter reads only the author: the reviewer forge is never called', async () => {
+    const w = starter();
+    await w.run();
+    expect(w.f.reviewer.calls).toEqual([]);
+  });
+
+  test('forge.branch-rules fails starter rules that require an approval, naming the fix', async () => {
+    const w = starter();
+    const r = w.f.state.rules.author;
+    if (r.kind === 'ok') {
+      r.rules.requiredApprovals = 1;
+      r.rules.nonActionsChecks = ['ci'];
+    }
+    const c = one(await w.run(), 'forge.branch-rules');
+    expect(c).toMatchObject({ status: 'fail' });
+    expect(c.summary).toContain('approvals required in starter mode');
+    expect(c.summary).toContain('required check not from GitHub Actions: ci');
+    expect(c.fix).toContain('Required approvals to 0');
+    expect(c.fix).toContain('GitHub Actions');
+  });
+
+  test('forge.codeowners warns: a required code owner review needs a human in starter mode', async () => {
+    const w = starter();
+    const r = w.f.state.rules.author;
+    if (r.kind === 'ok') r.rules.requireCodeOwnerReview = true;
+    expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
+      status: 'warn',
+      summary: expect.stringContaining('starter mode'),
     });
   });
 });

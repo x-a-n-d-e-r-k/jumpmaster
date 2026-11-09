@@ -42,12 +42,14 @@ export function world(
     ...o.zone,
   });
   const f = fakeForgePair({ issues: [], trusted: [] });
+  // Starter mode: the author alone, with rules that need no approval.
+  const starter = zone.identity === 'starter';
   for (const id of ['author', 'reviewer'] as const) {
     f.state.rules[id] = {
       kind: 'ok',
       rules: {
-        requiredApprovals: 1,
-        dismissStaleOnPush: true,
+        requiredApprovals: starter ? 0 : 1,
+        dismissStaleOnPush: !starter,
         requiredChecks: ['ci'],
         unpinnedChecks: [],
         viewerCanBypass: false,
@@ -84,7 +86,7 @@ export function world(
     secrets: {
       claudeToken: CLAUDE_TOKEN,
       githubAuthorToken: AUTHOR_TOKEN,
-      githubReviewerToken: REVIEWER_TOKEN,
+      ...(starter ? {} : { githubReviewerToken: REVIEWER_TOKEN }),
       joinToken: 'join-join-join-join',
       operatorToken: 'o'.repeat(32),
       ...(o.readToken ? { githubReadToken: READ_TOKEN } : {}),
@@ -98,7 +100,7 @@ export function world(
     config,
     now: () => NOW,
     env: { uid: 1000, inContainer: true, uidMap: '         0          0 4294967295\n' },
-    forges: () => ({ author: f.author, reviewer: f.reviewer }),
+    forges: () => ({ author: f.author, reviewer: starter ? null : f.reviewer }),
     readForge: () => (o.readToken ? read.author : undefined),
   };
   const run = () => runChecks(deps);
