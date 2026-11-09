@@ -9,6 +9,23 @@ import { dropSubnetPool } from './subnets.js';
 export const egressImage = (env: NodeJS.ProcessEnv): string =>
   (env.JM_EGRESS_IMAGE ?? '').trim() || 'jumpmaster-egress:dev';
 
+/**
+ * The image label a trooper that understands `payload.egress` carries (set in the trooper
+ * Dockerfile, inherited by every image built FROM it). An image built on an older trooper lacks
+ * it: that trooper would ignore the proxy settings and fail every drop for want of a network.
+ */
+export const TROOPER_EGRESS_LABEL = 'org.jumpmaster.trooper.egress';
+export const TROOPER_EGRESS_VERSION = '1';
+
+/**
+ * Why `image` may not run a drop under egress, or null when its labels declare support. Anything
+ * but the exact label and version is refused.
+ */
+export function trooperEgressRefusal(image: string, labels: Record<string, string>): string | null {
+  if (labels[TROOPER_EGRESS_LABEL] === TROOPER_EGRESS_VERSION) return null;
+  return `image ${image} does not declare egress support (label ${TROOPER_EGRESS_LABEL}=${TROOPER_EGRESS_VERSION}): it was built on a trooper image older than egress, which ignores the drop's egress settings. Rebuild it FROM a current jumpmaster-trooper image, or set the zone's egress mode to "off".`;
+}
+
 export const EGRESS_READY_MS = 30_000;
 /** Hosts itemised per decision per drop; the rest are counted in one overflow event each. */
 export const MAX_EGRESS_HOSTS = 200;

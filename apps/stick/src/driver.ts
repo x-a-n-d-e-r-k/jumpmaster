@@ -98,6 +98,8 @@ export interface ContainerDriver {
   removeNetwork(name: string): Promise<void>;
   /** Whether the image is present on this engine. */
   imageExists(image: string): Promise<boolean>;
+  /** The image's config labels (empty when it has none); throws when it can't be inspected. */
+  imageLabels(image: string): Promise<Record<string, string>>;
   /** The engine's version (`Server.Version`). */
   engineVersion(): Promise<string>;
   /**

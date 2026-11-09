@@ -17,7 +17,7 @@ import {
 } from '@jumpmaster/protocol';
 import type { DropClient } from './client.js';
 import type { ContainerDriver, DropNet } from './driver.js';
-import { type EgressSession, egressImage, startEgress } from './egress.js';
+import { type EgressSession, egressImage, startEgress, trooperEgressRefusal } from './egress.js';
 import { dropSubnetPool } from './subnets.js';
 
 /** Services a drop network holds under egress: `.8` to `.14` of its /28. */
@@ -178,6 +178,20 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
   if (egress && services.length > MAX_EGRESS_SERVICES) {
     await fail(`egress allows at most ${MAX_EGRESS_SERVICES} services per drop`);
     return;
+  }
+  if (egress) {
+    // A trooper older than egress ignores payload.egress: refuse it before anything is created,
+    // with a reason the operator can act on, rather than a drop that fails for want of a network.
+    let refusal: string | null;
+    try {
+      refusal = trooperEgressRefusal(image, await driver.imageLabels(image));
+    } catch (e) {
+      refusal = `cannot inspect image ${image} for egress support: ${e instanceof Error ? e.message : String(e)}`;
+    }
+    if (refusal) {
+      await fail(refusal);
+      return;
+    }
   }
   const labels = {
     'jumpmaster.drop': dropId,

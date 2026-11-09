@@ -124,6 +124,16 @@ before it. With one free slot, crew drops wait until no finishing or implement d
     does it advertise egress; otherwise its log says `egress-v1 not advertised:` and why, and the
     zone's drops stay queued. The image workflow's egress e2e (`images/trooper/e2e/egress.sh`)
     checks the rest on each run's engine.
+  - **Zone image.** Only a trooper that understands the drop's egress settings can run under
+    `monitor` or `enforce`: one built before egress ignores them and would fail every drop for
+    want of a network. The trooper image carries the label `org.jumpmaster.trooper.egress="1"`,
+    which every image built `FROM` it inherits. Before it creates anything for an egress drop the
+    stick inspects the zone's image, and if the label is missing or different (or the image can't
+    be inspected) it fails the drop with `image <name> does not declare egress support …` and
+    starts no network, proxy or trooper. Fix: rebuild the zone image `FROM` a current trooper image
+    (`docker image inspect --format '{{ index .Config.Labels "org.jumpmaster.trooper.egress" }}'
+    <image>` prints `1`), or set the zone's egress back to `off`. Drops with egress `off` are not
+    checked. The egress e2e runs an unlabelled image in both modes to check the refusal.
   - **The drop page's Egress table** itemises up to 200 hosts per decision (denied, unlisted,
     allowed); the rest show as one `(N more … hosts)` row for that decision. A cap per decision
     means a flood of refusals can't hide an unlisted or allowed host, but a page with an overflow

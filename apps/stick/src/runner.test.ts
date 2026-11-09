@@ -57,6 +57,8 @@ function fakeDriver(
     netError?: string;
     proxyError?: string;
     networks?: { name: string; labels: Record<string, string> }[];
+    /** The trooper image's labels (default: a current trooper's); an Error is thrown instead. */
+    imageLabels?: Record<string, string> | Error;
   } = {},
 ) {
   const order: string[] = [];
@@ -73,7 +75,14 @@ function fakeDriver(
     net: undefined as { name: string; labels: Record<string, string>; pool: string } | undefined,
     proxy: undefined as Parameters<ContainerDriver['startEgressProxy']>[0] | undefined,
     proxyStopped: false,
+    inspected: [] as string[],
     driver: {
+      async imageLabels(image) {
+        d.inspected.push(image);
+        const l = opts.imageLabels ?? { 'org.jumpmaster.trooper.egress': '1' };
+        if (l instanceof Error) throw l;
+        return l;
+      },
       async createDropNetwork(name, labels, pool) {
         order.push('network');
         d.net = { name, labels, pool };
@@ -756,6 +765,58 @@ describe('egress', () => {
     expect(client.result?.reason).toMatch(/^egress proxy failed to start: /);
     expect(d.removedNetworks).toEqual(['jm-drop-d1-3']);
     if (!('netError' in o) && !('proxyError' in o)) expect(d.proxyStopped).toBe(true);
+  });
+
+  describe('the trooper image must declare egress support (an older one ignores payload.egress)', () => {
+    const monitor: DropPayload = { ...enforce, egress: { mode: 'monitor', allow: [] } };
+    test.each([
+      ['enforce, no label', enforce, {}],
+      ['monitor, no label', monitor, {}],
+      ['enforce, label 0', enforce, { 'org.jumpmaster.trooper.egress': '0' }],
+      ['enforce, empty label', enforce, { 'org.jumpmaster.trooper.egress': '' }],
+      ['enforce, a later version only', enforce, { 'org.jumpmaster.trooper.egress': '2' }],
+      ['enforce, a look-alike key', enforce, { 'jumpmaster.trooper.egress': '1' }],
+    ])('%s: fails the drop before any network, proxy or trooper', async (_n, p, labels) => {
+      const d = fakeDriver([done], { imageLabels: labels });
+      const client = fakeClient();
+      await runDrop(p, deps(d, client));
+      expect(d.inspected).toEqual(['trooper']);
+      expect(d.order).toEqual([]);
+      expect(d.started).toBeUndefined();
+      expect(client.result).toMatchObject({ status: 'failed', role: 'implement', gates: [] });
+      expect(client.result?.reason).toBe(
+        'image trooper does not declare egress support (label org.jumpmaster.trooper.egress=1): it was built on a trooper image older than egress, which ignores the drop\'s egress settings. Rebuild it FROM a current jumpmaster-trooper image, or set the zone\'s egress mode to "off".',
+      );
+    });
+
+    test('an image the engine cannot inspect fails the drop closed', async () => {
+      const d = fakeDriver([done], { imageLabels: new Error('no such image') });
+      const client = fakeClient();
+      await runDrop(enforce, deps(d, client));
+      expect(d.order).toEqual([]);
+      expect(client.result).toMatchObject({ status: 'failed', gates: [] });
+      expect(client.result?.reason).toBe(
+        'cannot inspect image trooper for egress support: no such image',
+      );
+    });
+
+    test('a current trooper image runs the drop under egress', async () => {
+      const d = fakeDriver([done]);
+      const client = fakeClient();
+      await runDrop(monitor, deps(d, client));
+      expect(d.inspected).toEqual(['trooper']);
+      expect(client.result).toMatchObject({ status: 'completed' });
+      expect(d.order).toEqual(['network', 'proxy', 'trooper', 'proxy-stop', 'teardown']);
+    });
+
+    test('egress off never inspects the image: an older image still runs', async () => {
+      const d = fakeDriver([done], { imageLabels: {} });
+      const client = fakeClient();
+      await runDrop({ ...payload, image: 'trooper' }, deps(d, client));
+      expect(d.inspected).toEqual([]);
+      expect(client.result).toMatchObject({ status: 'completed' });
+      expect(d.order).toEqual(['trooper']);
+    });
   });
 
   test('more services than a /28 holds fails the drop closed', async () => {

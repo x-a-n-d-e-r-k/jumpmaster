@@ -218,6 +218,24 @@ describe('stack presets', () => {
     expect(runs.join('\n')).toMatch(/\brm -rf [^&\n]*\/usr\/local\/bin\/yarn\b/);
   });
 
+  test('the trooper declares egress support in an image label the stick checks', () => {
+    // FROM-derived zone images inherit it; one built on an older trooper lacks it, and the stick
+    // refuses to run that image under egress (it would ignore payload.egress).
+    const final = finalStage(instructions(read('images/trooper/Dockerfile')));
+    const labels = final
+      .filter((i) => i.op === 'LABEL')
+      .map((i) => i.args)
+      .join(' ');
+    expect(labels).toMatch(/(^|\s)org\.jumpmaster\.trooper\.egress="1"(\s|$)/);
+    const stick = read('apps/stick/src/egress.ts');
+    expect(stick).toContain("TROOPER_EGRESS_LABEL = 'org.jumpmaster.trooper.egress'");
+    expect(stick).toContain("TROOPER_EGRESS_VERSION = '1'");
+    // The egress e2e runs an unlabelled image under egress.
+    expect(read('images/trooper/e2e/egress.sh')).toMatch(
+      /LABEL org\.jumpmaster\.trooper\.egress=""[\s\S]*-t jumpmaster-trooper:e2e-pre-egress/,
+    );
+  });
+
   test('the python preset ships 3.11 and a uv-installed 3.12 every user can find', () => {
     const final = finalStage(instructions(read(PRESET_FILES.python)));
     const env = final

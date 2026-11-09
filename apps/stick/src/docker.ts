@@ -416,6 +416,13 @@ export class DockerDriver implements ContainerDriver {
     }
   }
 
+  async imageLabels(image: string): Promise<Record<string, string>> {
+    const info = (await this.docker.getImage(image).inspect()) as {
+      Config?: { Labels?: Record<string, string> | null };
+    };
+    return { ...(info.Config?.Labels ?? {}) };
+  }
+
   async start(o: Parameters<ContainerDriver['start']>[0]): Promise<ContainerHandle> {
     const container = await this.docker.createContainer({
       Image: o.image,
