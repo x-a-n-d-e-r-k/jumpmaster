@@ -17,6 +17,7 @@ function deps() {
   return {
     serve: vi.fn(async (_config: string) => 0),
     ctl: vi.fn(async (_args: string[]) => 0),
+    init: vi.fn(async (_args: string[]) => 0),
     err: vi.fn((_line: string) => undefined),
   };
 }
@@ -39,13 +40,22 @@ describe('jumpmaster command', () => {
     expect(d.serve).not.toHaveBeenCalled();
   });
 
-  test('no arguments, serve without a config, or init in this build print usage and exit 2', async () => {
+  test('no arguments, or serve without a config, print usage and exit 2', async () => {
     const d = deps();
     expect(await runCli([], d)).toBe(2);
     expect(await runCli(['serve'], d)).toBe(2);
-    expect(await runCli(['init'], d)).toBe(2);
+    expect(await runCli(['serve', 'init'], d)).toBe(2);
     expect(d.serve).not.toHaveBeenCalled();
+    expect(d.init).not.toHaveBeenCalled();
     expect(d.err.mock.calls.flat().join('\n')).toMatch(/usage: jumpmaster/);
+  });
+
+  test('init passes its arguments through and returns its exit code', async () => {
+    const d = deps();
+    d.init.mockResolvedValueOnce(3);
+    expect(await runCli(['init', '--repo', 'octo/demo'], d)).toBe(3);
+    expect(d.init.mock.calls).toEqual([[['--repo', 'octo/demo']]]);
+    expect(d.serve).not.toHaveBeenCalled();
   });
 });
 

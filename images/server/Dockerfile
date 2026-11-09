@@ -48,7 +48,11 @@ RUN if [ -n "$IMAGES_LOCK" ]; then \
       && chmod 0444 /app/images.lock.json \
       && node --input-type=module -e "const m = await import('/app/apps/server/dist/presets.js'); if (!m.loadImageLock('/app/images.lock.json')) process.exit(1);"; \
     fi
+# The release this image belongs to (the release workflow passes it): the doctor's links point at
+# that tag's install runbook. Empty in other builds, which link to main.
+ARG RELEASE_VERSION
 ENV NODE_ENV=production \
+    JM_RELEASE_VERSION=${RELEASE_VERSION} \
     JM_CONTAINER=1 \
     TMPDIR=/tmp
 WORKDIR /app

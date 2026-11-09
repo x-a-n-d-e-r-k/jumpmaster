@@ -303,6 +303,29 @@ function detectJvm(files: Files): Found {
   };
 }
 
+/**
+ * The gates one preset proposes, reading only that stack's files: for a repository whose root
+ * holds more than one stack, once the operator has chosen (`init --preset`).
+ */
+export function detectAs(preset: Preset, files: Files): Detection {
+  const own = SIGNALS[preset](files);
+  const keep = new Set([
+    ...own,
+    ...(preset === 'node' ? ['pnpm-lock.yaml', 'yarn.lock', 'package-lock.json'] : []),
+    ...(preset === 'python' ? ['uv.lock'] : []),
+  ]);
+  const only = Object.fromEntries(Object.entries(files).filter(([f]) => keep.has(f)));
+  if (own.length === 0)
+    return {
+      preset,
+      candidates: [],
+      gates: [],
+      evidence: [],
+      problems: [`no ${preset} build file at the repository root, so no gates were written`],
+    };
+  return { ...detectPreset(only), preset, candidates: [preset] };
+}
+
 /** The preset and gates the repository's root files suggest. */
 export function detectPreset(files: Files): Detection {
   const candidates = PRESETS.filter((p) => SIGNALS[p](files).length > 0);

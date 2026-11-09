@@ -431,10 +431,23 @@ async function runContainer(
 const MAX_STDERR_REASON = 500;
 /** Stack frames and the lines Node prints after a crash: they say nothing about its cause. */
 const NODE_FOOTER = /^(at |Node\.js v\d|\(Use `node --trace-)/;
+/**
+ * zod rejecting the payload's `role` discriminator (v3 and v4 wordings): as the trooper's one-line
+ * `payload rejected: role: …`, or as a raw ZodError whose issue has the path ["role"].
+ */
+const ROLE_REJECTED = [
+  /payload rejected: role: Invalid discriminator value/,
+  /"(?:note|message)":\s*"(?:No matching discriminator|Invalid discriminator value)[^"]*"[^\]}]*"path":\s*\[\s*"role"\s*\]/,
+  /"path":\s*\[\s*"role"\s*\][^}]*"(?:note|message)":\s*"(?:No matching discriminator|Invalid discriminator value)/,
+];
 
 /** Names the exit and, when the trooper said why on stderr, its last line with every credential scrubbed. */
 function noResultReason(exitCode: number, stderr: string, payload: DropPayload): string {
   const base = `trooper exited ${exitCode} without result`;
+  // A trooper built before this role existed rejects the payload's role. Its own words (zod's
+  // discriminator error, on one line or as raw JSON) don't say what to do; this does.
+  if (ROLE_REJECTED.some((re) => re.test(stderr)))
+    return `${base}: the zone's image ${payload.image} is older than the ${payload.role} role (its trooper rejected the payload's role); rebuild the zone image on the current trooper (FROM the release's preset), or use the release's preset image`;
   const last = stderr
     .split('\n')
     .map((l) => l.trim())

@@ -1,18 +1,28 @@
 {
-  "_env": "Required env: JM_CLAUDE_TOKEN, JM_GITHUB_AUTHOR_TOKEN, JM_GITHUB_REVIEWER_TOKEN (a different account from the author), JM_JOIN_TOKEN. Optional: JM_GITHUB_READ_TOKEN (read-only, used by review drops when reviewReadToken is true).",
-  "listen": { "host": "127.0.0.1", "port": 7420 },
-  "dataDir": "./data",
+  "_about": "A config like the one `jumpmaster init` writes for a compose install (docs/runbooks/install.md). Secrets are never in this file: the server reads JM_CLAUDE_TOKEN, JM_GITHUB_AUTHOR_TOKEN, JM_GITHUB_REVIEWER_TOKEN (a different account from the author; not needed with identity starter), JM_JOIN_TOKEN and JM_OPERATOR_TOKEN, each from the file its *_FILE variable names. JM_GITHUB_READ_TOKEN is needed when reviewReadToken is true. The preset's image comes from the release image lock in the server image, by digest.",
+  "listen": {
+    "host": "0.0.0.0",
+    "port": 7420,
+    "allowedHosts": ["127.0.0.1:7420", "localhost:7420"]
+  },
+  "dataDir": "/data",
   "pollSeconds": 60,
+  "requireSignedImages": true,
   "claude": { "plan": "pro" },
   "mcp": { "enabled": false },
   "dropZones": [
     {
-      "id": "main",
+      "id": "your-repo",
       "repo": "your-org/your-repo",
       "readyLabel": "agent-ready",
-      "gates": [{ "name": "test", "run": "npm test", "timeoutMinutes": 20 }],
-      "image": "jumpmaster-trooper:latest",
-      "models": { "review": "claude-opus-5-5" },
+      "preset": "node",
+      "gates": [
+        { "name": "install", "run": "npm ci", "timeoutMinutes": 20 },
+        { "name": "test", "run": "npm test", "timeoutMinutes": 20 }
+      ],
+      "egress": { "mode": "monitor", "allow": [] },
+      "identity": "two-bot",
+      "ciRequired": true,
       "reviewReadToken": false,
       "crew": { "enabled": false, "goalPath": "GOAL.md", "stagedLabel": "agent-staged" }
     }

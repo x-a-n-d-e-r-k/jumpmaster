@@ -294,7 +294,12 @@ function yamlRefs(text: string): YamlRef[] | { error: string; line: number } {
 
 const isActionFile = (file: string): boolean => /(^|\/)action\.ya?ml$/.test(file);
 
-export function scanYaml(file: string, text: string): Finding[] {
+export function scanYaml(
+  file: string,
+  text: string,
+  local: typeof LOCAL_IMAGE_FILES = LOCAL_IMAGE_FILES,
+): Finding[] {
+  const allowed = new Set(local[file]?.images ?? []);
   const refs = yamlRefs(text);
   if (!Array.isArray(refs)) return [{ file, line: refs.line, message: refs.error }];
   const findings: Finding[] = [];
@@ -311,7 +316,7 @@ export function scanYaml(file: string, text: string): Finding[] {
       else if (!IS_SHA.test(value)) message = `uses: ${value} is not a full 40-hex commit SHA`;
     } else if (isActionImage(file, path) && !value.startsWith('docker://')) {
       continue; // a Docker action's own Dockerfile: scanRepo scans that file
-    } else message = yamlImage(key, value);
+    } else message = key === 'image' && allowed.has(value) ? undefined : yamlImage(key, value);
     if (message) findings.push({ file, line, message });
   }
   return findings.sort((a, b) => a.line - b.line);
@@ -783,6 +788,19 @@ describe('pin scan', () => {
     expect(scanYaml('deploy/compose.yml', text)).toEqual([
       { file: 'deploy/compose.yml', line: 5, message: expect.stringMatching(/image:.*digest/) },
     ]);
+  });
+
+  test('a compose file listed in LOCAL_IMAGE_FILES may name only its own local images', () => {
+    const local = { 'deploy/dev.yaml': { images: ['jm-server:dev'], reason: 'test' } };
+    const text = [
+      'services:',
+      '  a:',
+      '    image: jm-server:dev',
+      '  b:',
+      '    image: other:dev',
+    ].join('\n');
+    expect(scanYaml('deploy/dev.yaml', text, local).map((f) => f.line)).toEqual([5]);
+    expect(scanYaml('deploy/other.yaml', text, local).map((f) => f.line)).toEqual([3, 5]);
   });
 
   test('a download line without a checksum within three lines is reported', () => {

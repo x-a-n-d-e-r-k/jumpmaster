@@ -453,6 +453,16 @@ describe('release metadata in the images', () => {
     );
   });
 
+  test('the server image exports its release version (JM_RELEASE_VERSION) from a build argument', () => {
+    const final = finalStage(instructions(read('images/server/Dockerfile')));
+    expect(final.some((i) => i.op === 'ARG' && i.args === 'RELEASE_VERSION')).toBe(true);
+    const env = final
+      .filter((i) => i.op === 'ENV')
+      .map((i) => i.args)
+      .join(' ');
+    expect(env).toMatch(/JM_RELEASE_VERSION=\$\{RELEASE_VERSION\}/);
+  });
+
   test('the stick image records its release version and repository from build arguments', () => {
     const final = finalStage(instructions(read('images/stick/Dockerfile')));
     for (const arg of ['RELEASE_VERSION', 'RELEASE_REPOSITORY'])

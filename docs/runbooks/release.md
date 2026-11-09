@@ -120,9 +120,26 @@ From a machine that is not logged in to GHCR (`docker logout ghcr.io` first):
 
 ### After the first tag: the stick rehearsals
 
-These need a published, signed release, so they wait for `v0.4.0-rc.1`. Run them with the release's
-stick image on a test host, against a zone with `requireSignedImages: true`, and record the stick
-log lines in the release notes:
+These need a published, signed release, so they wait for `v0.4.0-rc.1`. First, before anything
+else and before any fresh-agent install rehearsal, start the release exactly as a user does:
+
+```sh
+deploy/smoke.sh --release v0.4.0-rc.1
+```
+
+It downloads the release's `compose.yaml` (checked against `SHA256SUMS`), runs `init` in the
+release's server image, and starts the server and a `signed`-policy stick with the template's empty
+`JM_ALLOWED_IMAGES` and the release's egress digest, with dummy tokens: the stick must advertise
+`image-verify-v1` and the doctor's `stick.image-policy` and `config.secret-files` must pass.
+`JM_SMOKE_ONLINE=1` also requires GitHub's 401 for the dummy token. The same run works before a
+tag against images built locally under one registry name (`deploy/smoke.sh --release
+<images.lock.json>`, the lock giving the registry and each image's local digest, with the server
+built with that lock as `IMAGES_LOCK`); it can't check signatures, which only a published release
+carries. The smoke runs no drop, so image verification during a drop (cosign on the trooper and
+proxy, then the pull by digest) is covered by rehearsal 1 below, not by the smoke.
+
+Then run these with the release's stick image on a test host, against a zone with
+`requireSignedImages: true`, and record the stick log lines in the release notes:
 
 1. A released preset runs: the stick logs `image-verified` with `"via":"cosign"` for the trooper
    (a released preset from `images.lock.json`) and the proxy, the drop completes, and

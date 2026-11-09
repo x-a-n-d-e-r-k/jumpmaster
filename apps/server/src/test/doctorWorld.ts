@@ -99,7 +99,14 @@ export function world(
     db,
     config,
     now: () => NOW,
-    env: { uid: 1000, inContainer: true, uidMap: '         0          0 4294967295\n' },
+    env: {
+      uid: 1000,
+      inContainer: true,
+      uidMap: '         0          0 4294967295\n',
+      secretFiles: [
+        { variable: 'JM_CLAUDE_TOKEN_FILE', path: '/run/secrets/claude_token', mode: 0o600 },
+      ],
+    },
     forges: () => ({ author: f.author, reviewer: starter ? null : f.reviewer }),
     readForge: () => (o.readToken ? read.author : undefined),
   };

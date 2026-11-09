@@ -276,6 +276,7 @@ jobs:
           build-args: |
             SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
             IMAGES_LOCK=${{ steps.lock.outputs.lock }}
+            RELEASE_VERSION=${{ needs.target.outputs.version }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           provenance: mode=max

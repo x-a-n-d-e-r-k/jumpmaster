@@ -500,6 +500,61 @@ describe('runDrop', () => {
     });
   });
 
+  describe('a trooper image older than the role', () => {
+    const doctor = () =>
+      DropPayloadSchema.parse({
+        protocol: 1,
+        dropId: 'd1',
+        epoch: 3,
+        role: 'doctor',
+        repo: { owner: 'o', name: 'r', defaultBranch: 'main' },
+        model: 'm',
+        image: 'jumpmaster-trooper:test',
+        gates: [],
+        credentials: { claudeToken: TOKEN },
+      });
+    const stderrs = {
+      // What a trooper with describeFatal prints when its schema has no such role.
+      'one line': `payload rejected: role: Invalid discriminator value. Expected 'implement' | 'review' | 'heal'\n`,
+      // An older trooper's raw ZodError: its message is the issues as indented JSON.
+      'raw zod JSON': `ZodError: [\n  {\n    "code": "invalid_union",\n    "note": "No matching discriminator",\n    "path": [\n      "role"\n    ],\n    "message": "Invalid discriminator value. Expected 'implement' | 'review'"\n  }\n]\n    at x (y.js:1:1)\n\nNode.js v24.1.0\n`,
+    };
+    for (const [form, stderr] of Object.entries(stderrs))
+      test(`says to rebuild the zone image on the current trooper (${form})`, async () => {
+        const d = fakeDriver([], { exitCode: 1, stderr });
+        const client = fakeClient();
+        await runDrop(doctor(), { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
+        const reason = client.result?.reason ?? '';
+        expect(reason).toMatch(/^trooper exited 1 without result: /);
+        expect(reason).toContain(
+          "the zone's image jumpmaster-trooper:test is older than the doctor role",
+        );
+        expect(reason).toContain('rebuild the zone image on the current trooper');
+        expect(reason).not.toContain('Invalid discriminator value');
+      });
+
+    test('a discriminator error on another path, with "role" elsewhere, keeps the trooper line', async () => {
+      const stderr =
+        "loading prompts/role.md\npayload rejected: egress.kind: Invalid discriminator value. Expected 'proxy'\n";
+      const d = fakeDriver([], { exitCode: 1, stderr });
+      const client = fakeClient();
+      await runDrop(doctor(), { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
+      expect(client.result?.reason).toBe(
+        "trooper exited 1 without result: payload rejected: egress.kind: Invalid discriminator value. Expected 'proxy'",
+      );
+    });
+
+    test('another payload rejection keeps the trooper line', async () => {
+      const stderr = 'payload rejected: repo.owner: Invalid input\n';
+      const d = fakeDriver([], { exitCode: 1, stderr });
+      const client = fakeClient();
+      await runDrop(doctor(), { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
+      expect(client.result?.reason).toBe(
+        'trooper exited 1 without result: payload rejected: repo.owner: Invalid input',
+      );
+    });
+  });
+
   test('Node footer lines are not taken as the reason', async () => {
     const stderr = 'Error: real cause\n    at x (y.js:1:1)\n\nNode.js v26.1.0\n';
     const d = fakeDriver([], { exitCode: 1, stderr });

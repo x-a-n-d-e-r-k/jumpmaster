@@ -1,3 +1,6 @@
+import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { STARTER_WARNING } from '../config.js';
 import {
@@ -10,6 +13,8 @@ import {
 } from '../db/repo.js';
 import { ago, NOW, one, PG, world } from '../test/doctorWorld.js';
 import { okProbes } from '../test/fakes.js';
+import { installDocUrl } from './checks.js';
+import { processEnv } from './run.js';
 
 describe('a healthy install', () => {
   test('passes every check but those that cannot run yet, which say so', async () => {
@@ -439,6 +444,124 @@ describe('zone checks', () => {
       zone: { services: [{ name: 'db', image: PG, port: 5432, readyTimeoutSeconds: 60 }] },
     });
     expect(one(await pinned.run(), 'zone.services').status).toBe('pass');
+  });
+
+  // `imagetools inspect` reads a registry: a locally built image has no registry digest until it
+  // is pushed, so the fix must say how to get one for both.
+  test('a tag pin fix covers registry images and locally built ones', async () => {
+    const zoneImage = world({ zone: { image: 'registry.example.com/team/trooper:1' } });
+    const z = one(await zoneImage.run(), 'zone.preset');
+    expect(z.status).toBe('warn');
+    expect(z.fix).toContain('docker buildx imagetools inspect registry.example.com/team/trooper:1');
+    expect(z.fix).toContain('docker push registry.example.com/team/trooper:1');
+    expect(z.fix).toContain("docker image inspect --format '{{index .RepoDigests 0}}'");
+    expect(z.fix).toContain('registry.example.com/team/trooper@sha256:<digest>');
+    expect(z.fix).toContain('JM_ALLOWED_IMAGES');
+    // A Docker Hub image is in a registry already: never tell anyone to push it.
+    const service = world({
+      zone: {
+        services: [{ name: 'db', image: 'postgres:16', port: 5432, readyTimeoutSeconds: 60 }],
+      },
+    });
+    const s = one(await service.run(), 'zone.services');
+    expect(s.fix).toContain('docker buildx imagetools inspect postgres:16');
+    expect(s.fix).not.toContain('docker push');
+    expect(s.fix).toContain('postgres@sha256:<digest>');
+    expect(s.fix).toContain('JM_ALLOWED_IMAGES');
+  });
+
+  test('every doc pointer is a full GitHub URL to an install.md anchor', async () => {
+    const checks = await world({ zone: { egress: { mode: 'off', allow: [] } } }).run();
+    const docs = checks.map((c) => c.doc).filter((d): d is string => d !== undefined);
+    expect(docs.length).toBeGreaterThan(5);
+    for (const d of docs)
+      expect(d).toMatch(
+        /^https:\/\/github\.com\/x-a-n-d-e-r-k\/jumpmaster\/blob\/(main|v[0-9][^/]*)\/docs\/runbooks\/install\.md#[a-z0-9-]+$/,
+      );
+  });
+
+  test("doc URLs follow the server image's release version, and main for a development build", () => {
+    const base = 'https://github.com/x-a-n-d-e-r-k/jumpmaster/blob';
+    const tail = 'docs/runbooks/install.md';
+    expect(installDocUrl('0.4.0-rc.1')).toBe(`${base}/v0.4.0-rc.1/${tail}`);
+    expect(installDocUrl('1.2.3')).toBe(`${base}/v1.2.3/${tail}`);
+    for (const dev of [undefined, '', '0.0.0-dryrun.abc', 'main', '1.2', 'v1.2.3', '1.2.3/../x'])
+      expect(installDocUrl(dev), String(dev)).toBe(`${base}/main/${tail}`);
+  });
+
+  test('zone.preset warns when the zone has no gates, naming the risk and the fix', async () => {
+    const none = one(await world({ zone: { gates: [] } }).run(), 'zone.preset');
+    expect(none.status).toBe('warn');
+    expect(none.summary).toMatch(/no gates/);
+    expect(none.summary).toMatch(/no checks of their own/);
+    expect(none.fix).toMatch(/gates/);
+    const some = one(
+      await world({
+        zone: { gates: [{ name: 'test', run: 'npm test', timeoutMinutes: 20 }] },
+      }).run(),
+      'zone.preset',
+    );
+    expect(some.status).toBe('pass');
+  });
+
+  test('config.secret-files reads the real modes: a 0644 file fails and a 0600 file passes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'jm-secret-modes-'));
+    chmodSync(dir, 0o700);
+    const file = join(dir, 'claude_token');
+    writeFileSync(file, 'x\n', { mode: 0o644 });
+    chmodSync(file, 0o644);
+    const w = world();
+    // The server sees the file through a bind mount, not the host directory: a 0700 directory
+    // around a 0644 file still fails.
+    w.deps.env = processEnv({ JM_CLAUDE_TOKEN_FILE: file });
+    const c = one(await w.run(), 'config.secret-files');
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain(file);
+    expect(c.summary).toContain('644');
+    chmodSync(file, 0o600);
+    w.deps.env = processEnv({ JM_CLAUDE_TOKEN_FILE: file });
+    expect(one(await w.run(), 'config.secret-files').status).toBe('pass');
+  });
+
+  test('a private repository with no ruleset is told rulesets there need a paid plan', async () => {
+    const w = world();
+    for (const id of ['author', 'reviewer'] as const) {
+      w.f.state.rules[id] = { kind: 'none' };
+      w.f.state.access[id] = { ...w.f.state.access[id], private: true };
+    }
+    const c = one(await w.run(), 'forge.branch-rules');
+    expect(c.status).toBe('fail');
+    expect(c.fix).toContain('GitHub Pro');
+    // A public repository's fix doesn't mention plans.
+    const pub = world();
+    for (const id of ['author', 'reviewer'] as const) pub.f.state.rules[id] = { kind: 'none' };
+    expect(one(await pub.run(), 'forge.branch-rules').fix).not.toContain('GitHub Pro');
+  });
+
+  test('config.secret-files fails on a secret file others can read, with the chmod fix', async () => {
+    const w = world();
+    w.deps.env = {
+      ...w.deps.env,
+      secretFiles: [
+        { variable: 'JM_CLAUDE_TOKEN_FILE', path: '/run/secrets/claude_token', mode: 0o644 },
+        { variable: 'JM_JOIN_TOKEN_FILE', path: '/run/secrets/join_token', mode: 0o600 },
+      ],
+    };
+    const c = one(await w.run(), 'config.secret-files');
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('claude_token');
+    expect(c.summary).not.toContain('join_token');
+    expect(c.fix).toContain('chmod 600 secrets/*');
+    w.deps.env = {
+      ...w.deps.env,
+      secretFiles: [
+        { variable: 'JM_CLAUDE_TOKEN_FILE', path: '/run/secrets/claude_token', mode: 0o600 },
+      ],
+    };
+    expect(one(await w.run(), 'config.secret-files').status).toBe('pass');
+    // Secrets from the environment, not files: nothing to judge.
+    w.deps.env = { ...w.deps.env, secretFiles: [] };
+    expect(one(await w.run(), 'config.secret-files').status).toBe('skip');
   });
 
   test('egress monitor warns with observed hosts missing from the allow list', async () => {

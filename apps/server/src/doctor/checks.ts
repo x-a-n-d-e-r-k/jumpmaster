@@ -56,6 +56,8 @@ export type DoctorEnv = {
   inContainer: boolean;
   /** `/proc/self/uid_map`, or null off Linux: anything but the identity map is a user namespace. */
   uidMap: string | null;
+  /** Each secret read from a file (`JM_*_FILE`), with its mode (null when it can't be read). */
+  secretFiles?: { variable: string; path: string; mode: number | null }[];
 };
 
 export type DoctorDeps = {
@@ -70,7 +72,16 @@ export type DoctorDeps = {
   readForge?(zoneId: string): Forge | undefined;
 };
 
-const DOC = 'docs/runbooks/install.md';
+/**
+ * The install runbook as a full URL (on the install host there is no checkout), at the tag of the
+ * release this server image was built for, so a doctor line and the section it names are one
+ * commit. A development build (no release version, or a dry run's) points at main.
+ */
+export function installDocUrl(version: string | undefined): string {
+  const tag = version && /^\d+\.\d+\.\d+(-rc\.\d+)?$/.test(version) ? `v${version}` : 'main';
+  return `https://github.com/x-a-n-d-e-r-k/jumpmaster/blob/${tag}/docs/runbooks/install.md`;
+}
+export const DOC = installDocUrl(process.env.JM_RELEASE_VERSION);
 const doc = (anchor: string): string => `${DOC}#${anchor}`;
 
 /** A check that has not finished by then is a warn: one stalled read can't hang the run. */
@@ -211,7 +222,7 @@ function listenCheck(d: DoctorDeps): DoctorCheck {
 }
 
 /** The identity map: no user namespace (a rootful engine, or no container). */
-const identityMap = (map: string): boolean => {
+export const identityMap = (map: string): boolean => {
   const rows = map
     .trim()
     .split('\n')
@@ -247,6 +258,26 @@ function uidCheck(d: DoctorDeps): DoctorCheck {
       doc: doc('uid'),
     };
   return { ...base, status: 'pass', summary: `the server runs as uid ${uid}, not root` };
+}
+
+function secretFilesCheck(d: DoctorDeps): DoctorCheck {
+  const base = { id: 'config.secret-files', zoneId: null, doc: doc('tokens') };
+  const files = d.env.secretFiles ?? [];
+  if (files.length === 0)
+    return { ...base, status: 'skip', summary: 'no secret is read from a file (*_FILE)' };
+  const open = files.filter((f) => f.mode !== null && (f.mode & 0o077) !== 0);
+  if (open.length === 0)
+    return {
+      ...base,
+      status: 'pass',
+      summary: `every secret file is readable by its owner only (${files.length})`,
+    };
+  return {
+    ...base,
+    status: 'fail',
+    summary: `secret file(s) other users on the host can read: ${open.map((f) => `${f.path} (${f.variable}, mode ${(f.mode as number).toString(8).padStart(3, '0')})`).join(', ')}`,
+    fix: 'In the install directory: chmod 700 secrets && chmod 600 secrets/*, then docker compose restart jumpmaster.',
+  };
 }
 
 function tokenAgeCheck(d: DoctorDeps): DoctorCheck {
@@ -867,12 +898,18 @@ async function branchRulesCheck(zone: DropZoneConfig, r: ZoneReads): Promise<Doc
     };
   const rules = await r.rules();
   const problems = branchProtectionProblems(rules, zone);
+  // GitHub offers rulesets on a private repository only on a paid plan.
+  const access = await r.access.author();
+  const paid =
+    access.ok && access.value.private
+      ? ' Rulesets on a private repository need a paid plan: GitHub Pro for a personal account, GitHub Team for an organization. Without one, make the repository public or move it to an organization on a paid plan.'
+      : '';
   if (problems === null)
     return {
       ...base,
       status: 'warn',
       summary: `could not read the branch rules for ${branch} (GitHub was rate-limited or unavailable); the check did not run`,
-      fix: 'Run the doctor again in a few minutes.',
+      fix: `Run the doctor again in a few minutes.${paid}`,
     };
   for (const read of [rules.author, rules.reviewer])
     if (read?.kind === 'ok' && read.rules.requiresPullRequest === false)
@@ -902,7 +939,7 @@ async function branchRulesCheck(zone: DropZoneConfig, r: ZoneReads): Promise<Doc
     ...base,
     status: 'fail',
     summary: `the rules on ${branch} are unsafe for unattended merges: ${problems.join('; ')}`,
-    fix: fixes.join(' '),
+    fix: `${fixes.join(' ')}${problems.includes('no ruleset') ? paid : ''}`,
   };
 }
 
@@ -1085,6 +1122,22 @@ async function privateCloneCheck(
   };
 }
 
+/**
+ * How to turn a tag into a digest reference. `imagetools inspect` asks the registry, so it works
+ * only for an image that is in one; a locally built image has no registry digest until it is
+ * pushed. A name with no registry host is a Docker Hub image: already in a registry, never pushed.
+ */
+function pinHow(ref: string): string {
+  const name = ref.replace(/:[^/:@]+$/, '');
+  const first = ref.split('/')[0] ?? '';
+  const hub =
+    !ref.includes('/') || !(first.includes('.') || first.includes(':') || first === 'localhost');
+  const inspect = `docker buildx imagetools inspect ${ref} prints its digest (the Digest: line)`;
+  const pin = `The pin is ${name}@sha256:<digest>; under the signed image policy also add it to the stick's JM_ALLOWED_IMAGES (comma-separated, in .env) and run docker compose up -d.`;
+  if (hub) return `${inspect}. ${pin}`;
+  return `for an image in a registry, ${inspect}; for an image you built locally, push it to a registry the stick can pull from (docker push ${ref}) and read the pushed digest with docker image inspect --format '{{index .RepoDigests 0}}' ${ref}. ${pin}`;
+}
+
 async function presetCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck> {
   const base = { id: 'zone.preset', zoneId: zone.id, doc: doc('presets') };
   const notes: string[] = [];
@@ -1101,8 +1154,15 @@ async function presetCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCh
   } else if (!DIGEST_REF.test(zone.image)) {
     status = 'warn';
     notes.push(`the image ${zone.image} is a tag: whoever moves the tag changes what drops run`);
+    fixes.push(`Pin it by digest: ${pinHow(zone.image)} Then set image to that reference.`);
+  }
+  if (zone.gates.length === 0) {
+    status = 'warn';
+    notes.push(
+      'the zone has no gates: drops run no checks of their own, so a change merges on CI alone',
+    );
     fixes.push(
-      `Pin it by digest: docker buildx imagetools inspect ${zone.image} prints the digest; set image to name@sha256:<digest>.`,
+      "Add the repository's install and test commands to the zone's gates in the config (init writes none with --offline, or when it finds no build file), then restart.",
     );
   }
   if (!zone.preset) {
@@ -1165,12 +1225,7 @@ function servicesCheck(d: DoctorDeps, zone: DropZoneConfig, sticks: Stick[]): Do
       ...base,
       status: 'fail',
       summary: `service image(s) by tag, not digest: ${tagged.map((s) => `${s.name} (${s.image})`).join(', ')}`,
-      fix: tagged
-        .map(
-          (s) =>
-            `Run docker buildx imagetools inspect ${s.image}, and set ${s.name}'s image to ${s.image.replace(/:[^/:@]+$/, '')}@sha256:<the digest it prints>.`,
-        )
-        .join(' '),
+      fix: tagged.map((s) => `${s.name}: ${pinHow(s.image)} Set its image to that.`).join(' '),
     };
   const need = zoneRequirements(zone, d.config);
   if (!need.signed)
@@ -1635,6 +1690,7 @@ export async function runChecks(
   const global = await Promise.all([
     g('config.listen', null, () => listenCheck(d)),
     g('config.uid', null, () => uidCheck(d)),
+    g('config.secret-files', null, () => secretFilesCheck(d)),
     g('claude.token-age', null, () => tokenAgeCheck(d)),
     g('claude.plan', null, () => planCheck(d)),
     g('control.kill', null, () => killCheck(d)),

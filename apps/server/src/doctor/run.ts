@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { redact } from '@jumpmaster/protocol';
 import { secretList } from '../config.js';
 import type { Db } from '../db/open.js';
@@ -120,9 +120,21 @@ export function processEnv(env: NodeJS.ProcessEnv = process.env): DoctorEnv {
   } catch {
     uidMap = null; // not Linux
   }
+  const secretFiles = Object.entries(env)
+    .filter(([k, v]) => /^JM_[A-Z0-9_]+_FILE$/.test(k) && typeof v === 'string' && v !== '')
+    .map(([variable, path]) => {
+      let mode: number | null = null;
+      try {
+        mode = statSync(path as string).mode & 0o777;
+      } catch {
+        mode = null; // startup already refused an unreadable secret
+      }
+      return { variable, path: path as string, mode };
+    });
   return {
     uid: typeof process.getuid === 'function' ? process.getuid() : null,
     inContainer: env.JM_CONTAINER === '1',
     uidMap,
+    secretFiles,
   };
 }
