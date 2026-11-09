@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { load } from 'js-yaml';
 import { describe, expect, test } from 'vitest';
-import { composeOverride } from '../apps/server/src/init.js';
+import { composeEnv, withEnvBlock } from '../apps/server/src/init.js';
 import { RELEASE_IMAGES, renderCompose } from '../scripts/render-compose.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -90,15 +90,34 @@ describe('the released compose file', () => {
 
   test('no compose service passes a JM_ secret as a plain environment value', () => {
     const secretVar = /^JM_.*(TOKEN|SECRET)/;
+    // A secret's variable names a file under /run/secrets, possibly behind a .env default.
+    const fileRef =
+      /^(\/run\/secrets\/[a-z_]+|\$\{JM_[A-Z_]+-\/run\/secrets\/[a-z_]+\}|\$\{JM_[A-Z_]+:-\})$/;
     for (const [name, s] of Object.entries(compose.services))
       for (const [key, value] of Object.entries(s.environment ?? {})) {
         if (!secretVar.test(key)) continue;
         expect(key, `${name}.${key}`).toMatch(/_FILE$/);
-        expect(String(value), `${name}.${key}`).toMatch(/^\/run\/secrets\/[a-z_]+$/);
+        expect(String(value), `${name}.${key}`).toMatch(fileRef);
       }
-    // Each secret is a file next to compose.yaml.
+    // Each secret is a file next to compose.yaml (or /dev/null for one that is off).
     for (const [name, def] of Object.entries(compose.secrets))
-      expect(def.file).toBe(`./secrets/${name}`);
+      expect(def.file).toMatch(
+        new RegExp(`^(\\./secrets/${name}|\\$\\{JM_[A-Z_]+:-(\\./secrets/${name}|/dev/null)\\})$`),
+      );
+  });
+
+  test('the template needs no override file and no Compose YAML tags', () => {
+    const tmpl = read('deploy/compose.yaml.tmpl');
+    expect(tmpl).not.toMatch(/!override|!reset/);
+    expect(svc('jumpmaster').environment).toMatchObject({
+      JM_GITHUB_REVIEWER_TOKEN_FILE: '${JM_REVIEWER_TOKEN_FILE-/run/secrets/github_reviewer_token}',
+      JM_GITHUB_READ_TOKEN_FILE: '${JM_READ_TOKEN_FILE:-}',
+    });
+    expect(compose.secrets.github_reviewer_token?.file).toBe(
+      '${JM_REVIEWER_TOKEN_SRC:-./secrets/github_reviewer_token}',
+    );
+    expect(compose.secrets.github_read_token?.file).toBe('${JM_READ_TOKEN_SRC:-/dev/null}');
+    expect(svc('jumpmaster').secrets).toContain('github_read_token');
   });
 
   test('the stick service sets JM_IMAGE_POLICY=signed and keeps state on a volume', () => {
@@ -138,58 +157,56 @@ describe('the released compose file', () => {
   });
 });
 
-describe("init's compose override", () => {
-  test('starter mode mounts no reviewer token; a private repository adds the read token', () => {
-    expect(composeOverride({ starter: false, privateRepo: false })).toBeNull();
-    const starter = composeOverride({ starter: true, privateRepo: false }) ?? '';
-    expect(starter).not.toContain('github_read_token');
-    const both = composeOverride({ starter: true, privateRepo: true }) ?? '';
-    expect(both).toContain('- github_read_token');
-    expect(both).toContain('github_reviewer_token: !reset null');
+describe("init's .env block", () => {
+  test('starter mode unmounts the reviewer token; a private repository mounts the read token', () => {
+    expect(composeEnv({ starter: false, privateRepo: false })).toEqual([]);
+    expect(composeEnv({ starter: true, privateRepo: false })).toEqual([
+      'JM_REVIEWER_TOKEN_FILE=',
+      'JM_REVIEWER_TOKEN_SRC=/dev/null',
+    ]);
+    const both = composeEnv({ starter: true, privateRepo: true });
+    expect(both).toContain('JM_READ_TOKEN_SRC=./secrets/github_read_token');
+    // The block replaces itself and leaves the operator's lines alone.
+    const once = withEnvBlock('JM_UID=1\nJM_GID=1\n', both);
+    expect(withEnvBlock(once, both)).toBe(once);
+    expect(withEnvBlock(once, [])).toBe('JM_UID=1\nJM_GID=1\n');
   });
 
-  test.skipIf(!hasCompose)('docker compose resolves the override as intended', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'jm-compose-'));
-    writeFileSync(join(dir, 'compose.yaml'), rendered);
-    const resolve = (override: string | null) => {
-      if (override) writeFileSync(join(dir, 'compose.override.yaml'), override);
-      const r = spawnSync('docker', ['compose', 'config', '--no-interpolate', '--format', 'json'], {
+  test.skipIf(!hasCompose)('docker compose resolves the .env block as intended', () => {
+    const resolve = (lines: string[]) => {
+      const dir = mkdtempSync(join(tmpdir(), 'jm-compose-'));
+      writeFileSync(join(dir, 'compose.yaml'), rendered);
+      writeFileSync(join(dir, '.env'), withEnvBlock('JM_UID=1000\nJM_GID=1000\n', lines));
+      const r = spawnSync('docker', ['compose', 'config', '--format', 'json'], {
         cwd: dir,
         encoding: 'utf8',
-        env: { ...process.env, JM_UID: '1000', JM_GID: '1000' },
+        env: Object.fromEntries(
+          Object.entries(process.env).filter(([k]) => !/^(JM_|DOCKER_SOCKET)/.test(k)),
+        ),
       });
       expect(r.status, r.stderr).toBe(0);
-      return JSON.parse(r.stdout) as {
+      const doc = JSON.parse(r.stdout) as {
         services: Record<
           string,
-          { environment?: Record<string, string>; secrets?: { source: string }[] }
+          { environment?: Record<string, string | null>; secrets?: { source: string }[] }
         >;
-        secrets?: Record<string, unknown>;
+        secrets: Record<string, { file: string }>;
       };
+      return { doc };
     };
-    const plain = resolve(null);
-    expect(plain.services.jumpmaster?.secrets?.map((s) => s.source)).toContain(
-      'github_reviewer_token',
+    const plain = resolve([]).doc;
+    expect(plain.services.jumpmaster?.environment?.JM_GITHUB_REVIEWER_TOKEN_FILE).toBe(
+      '/run/secrets/github_reviewer_token',
     );
-    const starter = resolve(composeOverride({ starter: true, privateRepo: true }));
-    const j = starter.services.jumpmaster;
-    const sources = j?.secrets?.map((s) => s.source) ?? [];
-    expect(sources).not.toContain('github_reviewer_token');
-    expect(sources).toContain('github_read_token');
-    // `config --no-interpolate` prints environment as KEY=value lines.
-    const env = Object.fromEntries(
-      (Array.isArray(j?.environment)
-        ? (j.environment as string[]).map((l) => [
-            l.slice(0, l.indexOf('=')),
-            l.slice(l.indexOf('=') + 1),
-          ])
-        : Object.entries(j?.environment ?? {})) as [string, string][],
-    );
-    expect(env.JM_GITHUB_REVIEWER_TOKEN_FILE).toBe('');
+    expect(plain.services.jumpmaster?.environment?.JM_GITHUB_READ_TOKEN_FILE ?? '').toBe('');
+    expect(plain.secrets.github_read_token?.file).toBe('/dev/null');
+    const { doc } = resolve(composeEnv({ starter: true, privateRepo: true }));
+    const env = doc.services.jumpmaster?.environment ?? {};
+    expect(env.JM_GITHUB_REVIEWER_TOKEN_FILE ?? '').toBe('');
     expect(env.JM_GITHUB_READ_TOKEN_FILE).toBe('/run/secrets/github_read_token');
-    expect(Object.keys(starter.secrets ?? {})).not.toContain('github_reviewer_token');
-    // The stick and init are untouched.
-    expect(starter.services.stick?.secrets?.map((s) => s.source)).toEqual(['join_token']);
+    expect(doc.secrets.github_reviewer_token?.file).toBe('/dev/null');
+    expect(doc.secrets.github_read_token?.file).toMatch(/\/secrets\/github_read_token$/);
+    expect(doc.services.stick?.secrets?.map((s) => s.source)).toEqual(['join_token']);
   });
 });
 

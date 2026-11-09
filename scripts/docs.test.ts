@@ -90,6 +90,8 @@ describe('the README and runbooks', () => {
       const text = read(file);
       const refs = [
         ...[...text.matchAll(/install\.md#([A-Za-z0-9_-]+)/g)].map((m) => m[1] as string),
+        // Code that builds the URL from the doctor's DOC constant.
+        ...[...text.matchAll(/\$\{DOC\}#([A-Za-z0-9_-]+)/g)].map((m) => m[1] as string),
         // The doctor's checks name an anchor through doc('…').
         ...(file === 'apps/server/src/doctor/checks.ts'
           ? [...text.matchAll(/\bdoc\('([a-z0-9-]+)'\)/g)].map((m) => m[1] as string)
@@ -171,6 +173,35 @@ describe('the README and runbooks', () => {
       expect(text, file).not.toMatch(/\/Users\/|\/home\/[a-z]/);
       expect(text, file).toContain('your-org/your-repo');
     }
+  });
+
+  test('the token helper is safe: bash fence, a prompt on stderr, nothing written on empty input', () => {
+    for (const file of ['README.md', INSTALL]) {
+      const text = read(file);
+      const fence = /```(\w*)\n(?:(?!```)[\s\S])*?^put\(\) \{[\s\S]*?^```/m.exec(text);
+      expect(fence, file).not.toBeNull();
+      expect(fence?.[1], file).toBe('bash');
+      const body = fence?.[0] ?? '';
+      expect(body, file).toContain('IFS= read -rs t');
+      expect(body, file).toContain('[ -z "$t" ]');
+      expect(body, file).toContain('return 1');
+      expect(body, file).toMatch(/printf 'Paste[^\n]*>&2/);
+      // Never a token echoed into a file.
+      expect(text, file).not.toMatch(/echo [^\n|]*> *secrets\//);
+      expect(text, file).toContain('install -m 0600');
+    }
+  });
+
+  test('the install needs no Compose override file or version floor', () => {
+    for (const file of ['README.md', INSTALL]) {
+      expect(read(file), file).not.toContain('compose.override.yaml');
+      expect(read(file), file).not.toMatch(/Compose 2\.24/);
+    }
+  });
+
+  test('the release runbook makes the release-path compose smoke the first post-tag step', () => {
+    const text = read('docs/runbooks/release.md');
+    expect(text).toContain('deploy/smoke.sh --release v0.4.0-rc.1');
   });
 
   test('install.md is reached from the README and the older runbooks', () => {

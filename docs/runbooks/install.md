@@ -14,11 +14,10 @@ What you end up with, in one directory:
 | Path | What it is |
 |---|---|
 | `compose.yaml` | The release's compose file: every image pinned by `@sha256` digest. |
-| `.env` | `JM_UID` and `JM_GID`, the host user that owns everything below. No secrets. |
+| `.env` | `JM_UID` and `JM_GID`, the host user that owns everything below, and a few lines `init` adds for starter mode or a private repository. No secrets. |
 | `secrets/` | One token per file, mode `0600`. |
 | `config/jumpmaster.config.json` | The config `init` writes. No secrets. |
 | `data/` | The database. |
-| `compose.override.yaml` | Only for starter mode or a private repository; `init` writes it. |
 
 Three containers run: `jumpmaster` (the server and UI, no Docker access), `stick` (the only one
 with the Docker socket; it starts a container, a *drop*, per agent task) and, once, `init`.
@@ -28,9 +27,10 @@ with the Docker socket; it starts a container, a *drop*, per agent task) and, on
 You need all of these before step 1.
 
 - **A host:** Linux (amd64 or arm64) with a **rootful Docker Engine 27.0 or later**, or macOS with
-  **Docker Desktop**. Engine 29.9.2 is the version tested. **Docker Compose 2.24 or later**
-  (`docker compose version`). On Linux, run the `docker` commands as a user in the `docker` group
-  (or with `sudo`; the files still belong to the user `.env` names).
+  **Docker Desktop**. Engine 29.9.2 is the version tested so far. **Docker Compose v2**
+  (`docker compose version`; any v2 release). On Linux, run the `docker` commands as an ordinary
+  user in the `docker` group (or with `sudo`; the files still belong to the user `.env` names).
+  If the host gives you only root (a fresh VPS, say), see step 1.
 - **Not supported in this release: rootless Docker.** Its user-namespace uid mapping contradicts
   the host-uid install: `init` refuses to run under it, and the doctor's `config.uid` reports
   `skip: rootless unsupported in this release`. Use a rootful engine.
@@ -38,7 +38,10 @@ You need all of these before step 1.
   machine with a browser, to run `claude setup-token` once.
 - **GitHub:** a repository (`your-org/your-repo`) with a GitHub Actions workflow that runs its
   tests on `pull_request`, plus **either** two bot accounts (an author and a reviewer, the
-  default, "two-bot") **or** [starter mode](#starter-mode) (your account alone).
+  default, "two-bot") **or** [starter mode](#starter-mode) (your account alone). The default
+  branch needs a ruleset ([Branch rules](#branch-rules)): on a **private** repository GitHub offers
+  rulesets only on a paid plan (GitHub Pro for a personal account, GitHub Team for an
+  organization); on a free plan, use a public repository.
 - **Repository settings:** the GitHub CLI (`gh`, logged in as an admin of the repository) or the
   GitHub web UI, for the labels and the ruleset.
 - **Verification:** `cosign` v3, or Docker to run cosign from its image (step 2 shows both).
@@ -61,6 +64,18 @@ mkdir -p ~/jumpmaster && cd ~/jumpmaster
 printf 'JM_UID=%s\nJM_GID=%s\n' "$(id -u)" "$(id -g)" > .env
 mkdir -m 700 secrets
 ```
+
+**If you are root** (`id -u` prints `0`, as on many fresh servers), make an ordinary user first and
+do the whole install as that user: the server holds your GitHub and Claude tokens, and running it
+as root would let a bug in it act as root on the host's files. `init` refuses to run as root for
+that reason.
+
+```sh
+adduser jumpmaster && usermod -aG docker jumpmaster
+su - jumpmaster      # then start step 1 again
+```
+
+(`init --allow-root` runs as root anyway; the doctor's `config.uid` then warns for good.)
 
 `.env` may also set the optional stick settings in the release's
 [`.env.example`](../../deploy/.env.example): `DOCKER_SOCKET`, `JM_SLOTS`, `JM_DROP_SUBNET_POOL`
@@ -110,11 +125,14 @@ done
 Each must print `verified`; a failure prints why. Stop if any fails.
 
 Without cosign installed, define this and use `cosign_docker` in place of `cosign` in both commands
-above (it mounts the current directory, so `verify-blob` finds the files):
+above. It mounts only the two release files `verify-blob` reads, read-only, never the install
+directory (which holds `secrets/` when you upgrade):
 
 ```sh
 cosign_docker() {
-  docker run --rm -v "$PWD:/w" -w /w \
+  docker run --rm -w /w \
+    -v "$PWD/SHA256SUMS:/w/SHA256SUMS:ro" \
+    -v "$PWD/SHA256SUMS.sigstore.json:/w/SHA256SUMS.sigstore.json:ro" \
     ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d "$@"
 }
 ```
@@ -125,21 +143,41 @@ download; the images are pinned whatever you skip. More in
 
 ### Step 3: Create the tokens
 
-Write each token into its own file under `secrets/`, mode `0600`, one line, without echoing it to
-the terminal or shell history. This prompt reads it silently (paste, then Enter):
+Each token goes in its own file under `secrets/`: mode `0600`, the token on one line. Never
+`echo` a token into a file: that leaves it in your shell history. In bash or zsh, this helper
+asks for each one and reads it without showing it (paste, then Enter); it writes nothing, and
+says so, if the input is empty:
 
-```sh
-put() { ( umask 077; IFS= read -rs t; printf '%s\n' "$t" > "secrets/$1" ); echo "wrote secrets/$1"; }
-put claude_token           # then paste the Claude token
-put github_author_token    # then paste the author token
+```bash
+put() {
+  local t
+  printf 'Paste the %s, then press Enter: ' "$1" >&2
+  if ! IFS= read -rs t || [ -z "$t" ]; then echo >&2; echo "nothing written to secrets/$1" >&2; return 1; fi
+  echo >&2
+  ( umask 077 && printf '%s\n' "$t" > "secrets/$1" && chmod 600 "secrets/$1" ) && echo "wrote secrets/$1" >&2
+}
+put claude_token           # the Claude token
+put github_author_token    # the author token
 put github_reviewer_token  # two-bot only: the reviewer token
 put github_read_token      # private repositories only
 ```
 
+A token that is already in a file (copied from another machine, say) goes in with `install`,
+which sets the mode as it copies:
+
+```sh
+install -m 0600 /path/to/token-file secrets/claude_token
+```
+
+The file must hold the token alone: one trailing newline is fine, anything else (spaces, a second
+line, a byte-order mark an editor added) is refused at startup with the file's name. `init`
+tightens any token file others can read to `0600`, and the doctor's `config.secret-files` fails
+if one is readable by others later.
+
 What each token is, and its exact permissions, is under [Tokens](#tokens) and
 [Claude token](#claude-token). `init` generates the other two (`join_token` and `operator_token`).
 Doctor checks: `forge.author`, `forge.reviewer`, `forge.author-reads`, `forge.reviewer-reads`,
-`forge.admin`, `forge.private-clone`, `claude.token-age`.
+`forge.admin`, `forge.private-clone`, `claude.token-age`, `config.secret-files`.
 
 ### Step 4: Set the branch ruleset
 
@@ -164,15 +202,23 @@ see [Starter mode](#starter-mode)). `init`:
 - writes `config/jumpmaster.config.json`: one zone, egress `monitor`, signed images only, CI
   required, crew off; a private repository also gets `reviewReadToken: true`;
 - generates `secrets/join_token` and `secrets/operator_token` (`0600`) if they don't exist;
-- writes `compose.override.yaml` for starter mode or a private repository;
+- for starter mode or a private repository, adds a few lines to `.env` (between
+  `# jumpmaster init` markers) that leave the reviewer token out or pass the read token;
+- tightens any token file others can read to `0600`, and says so;
 - prints the zone id (`<zone>` below, the repository name in lower case), the preset, the gates,
   and what is left to do. It never prints a token.
 
 Exit codes: `2` when the root holds more than one stack (or none): rerun with
-`--preset node|python|go|jvm`; `3` when a config exists: add `--force` to replace it (generated
-secrets are kept); `4` when the directory isn't writable: the install directory must be mounted
-read-write, as compose's `init` service does, and owned by the `.env` user; `1` for anything else,
-with the reason (a refused token, uid 0, rootless Docker).
+`--preset node|python|go|jvm`; `3` when a config exists: `--force` replaces it, and **rewrites the
+whole config**, so any edits you made (gates, `egress.allow`, anything else) are lost and must be
+made again (generated secrets are kept); `4` when a directory isn't writable: the install
+directory must be owned by the `.env` user (if `docker compose up` ran before `init`, Docker made
+`config/` and `data/` as root: `sudo chown -R "$(id -u):$(id -g)" config data secrets`); `1` for
+anything else, with the reason (a refused token, root, rootless Docker). `--help` lists every flag.
+
+If the host can't reach GitHub when you run `init`, `--offline --preset <preset>` (plus `--private`
+for a private repository) writes the config from the flags instead, with no gates: add them by
+hand.
 
 Read the gates `init` printed. They are what every agent change must pass inside its drop: if the
 repository's tests need another command, edit `gates` in the config now. Doctor check:
@@ -193,7 +239,7 @@ gh label create agent-retry --repo your-org/your-repo --color FBCA04 --descripti
 ```sh
 docker compose up -d
 docker compose ps                      # jumpmaster and stick: running
-docker compose logs stick | tail -5    # "enrolled as …", then its image policy and capabilities
+docker compose logs stick | tail -5    # its image policy and capabilities, then "enrolled as …"
 ```
 
 The UI is at <http://127.0.0.1:7420/>, on the host only. From another machine, tunnel it:
@@ -231,7 +277,10 @@ one turn of Claude usage.
 docker compose exec jumpmaster jumpmaster ctl doctor <zone> --drop
 ```
 
-Wait for it to finish (a few minutes; the UI's home page shows it), then run the doctor again:
+Wait for it to finish: usually a few minutes, longer when the gates install many packages. While
+it runs, the doctor's `zone.doctor-drop` line says `doctor drop … is queued for N minutes` or
+`… is running`; once it has finished, the line reports what the drop proved (a `PASS`) or what
+failed. Then run the doctor again:
 
 ```sh
 docker compose exec jumpmaster jumpmaster ctl doctor
@@ -321,8 +370,10 @@ images, and `egress` with `"mode":"enforce","proxy":"ready"`.
 docker compose exec jumpmaster node -e "require('better-sqlite3')('/data/jumpmaster.sqlite').exec(\"VACUUM INTO '/data/backup-$(date +%Y%m%d).sqlite'\")"
 ```
 
-Copy `data/backup-*.sqlite`, `config/`, `secrets/` and `.env` somewhere safe; together they are the
-whole install. To restore, stop it (`docker compose down`), put the backup in place as
+Copy `data/backup-*.sqlite`, `config/`, `secrets/` and `.env` somewhere safe, keeping the file
+modes (`cp -a`, or `tar -cpf`); keep the copy readable by you alone, since `secrets/` holds every
+token. Together they are the whole install. To restore, stop it (`docker compose down`), put the
+files back, then `chmod 700 secrets && chmod 600 secrets/*`, put the backup in place as
 `data/jumpmaster.sqlite` (remove any `jumpmaster.sqlite-wal` and `-shm` beside it) and start it.
 
 **Upgrade** (drain first, so no drop is cut off):
@@ -331,7 +382,8 @@ whole install. To restore, stop it (`docker compose down`), put the backup in pl
    finish. Wait until the home page shows nothing running.
 2. Back up (above).
 3. `docker compose down` (keeps the `jm-stick` volume: the stick's enrollment and verify cache).
-4. Download and verify the new release's files into the same directory, as in step 2.
+4. Download and verify the new release's files into the same directory, as in step 2 (with
+   `cosign_docker`, only the two release files are mounted, never `secrets/`).
 5. `docker compose up -d`, then `docker compose exec jumpmaster jumpmaster ctl resume <zone>` and
    run the doctor.
 
@@ -401,12 +453,17 @@ only on a plan that includes it and only with `claude.fableModel` set; `claude.p
 
 A private repository needs `secrets/github_read_token` (Contents: Read-only, Metadata: Read-only):
 review, crew and doctor drops clone with it, since they never get a write token. `init` sees the
-repository is private, sets `reviewReadToken: true` and writes `compose.override.yaml` to pass the
-token; if the file is missing, `init` says so. Doctor check: `forge.private-clone`.
+repository is private, sets `reviewReadToken: true` and adds `JM_READ_TOKEN_FILE` and
+`JM_READ_TOKEN_SRC` to `.env` so compose passes the token; if the file is missing, `init` says so. Doctor check: `forge.private-clone`.
 
 ## Branch rules
 
 On GitHub: the repository → Settings → Rules → Rulesets → New ruleset → New branch ruleset.
+
+A private repository can have rulesets only on a paid plan: GitHub Pro for a personal account,
+GitHub Team for an organization. On a free plan there is no Rulesets page for a private repository
+(and `gh api` answers 403); make the repository public or use a paid plan. The doctor's
+`forge.branch-rules` says so when it finds no ruleset on a private repository.
 
 - **Enforcement status:** Active.
 - **Target branches:** Include default branch.
@@ -481,13 +538,14 @@ It requires:
 - `ciRequired: true` (written by `init`), and a ruleset with a pull request rule (0 approvals),
   required checks with GitHub Actions as the source, and no bypass ([Branch rules](#branch-rules)).
 
+On a **private** personal repository, rulesets need GitHub Pro ([Branch rules](#branch-rules)).
 On a **personal repository**, only the owner can make a fine-grained token for it, and the owner
 is always an admin, so the author is your own account: run `init` with
 `--identity starter --author-may-be-admin`. The doctor's `forge.admin` then confirms the token
 has no Administration permission.
 
-`init` leaves the reviewer token out (`compose.override.yaml`), so no `secrets/github_reviewer_token`
-is needed. To move to two-bot later, see the fix under [`zone.identity`](#zoneidentity).
+`init` leaves the reviewer token out (`JM_REVIEWER_TOKEN_FILE=` and
+`JM_REVIEWER_TOKEN_SRC=/dev/null` in `.env`), so no `secrets/github_reviewer_token` is needed. To move to two-bot later, see the fix under [`zone.identity`](#zoneidentity).
 
 ## Presets
 
@@ -631,8 +689,16 @@ See [Listen](#listen).
 
 ### `config.uid`
 
-The uid the server runs as. `warn` as root: set `JM_UID`/`JM_GID` in `.env` ([UID](#uid)). `skip`
-with "rootless unsupported": use a rootful engine ([Prerequisites](#prerequisites)).
+The uid the server runs as. `warn` as root: set `JM_UID`/`JM_GID` in `.env` to an ordinary user
+([UID](#uid), and step 1 for a host with only root). An install made with `init --allow-root`
+keeps this warning for good. `skip` with "rootless unsupported": use a rootful engine
+([Prerequisites](#prerequisites)).
+
+### `config.secret-files`
+
+Every secret file must be readable by its owner only. A `fail` names the files others can read;
+in the install directory run `chmod 700 secrets && chmod 600 secrets/*`, then
+`docker compose restart jumpmaster` ([Tokens](#tokens)).
 
 ### `claude.token-age`
 
@@ -739,9 +805,7 @@ The egress mode and the hosts seen; in monitor, the hosts to add before enforcin
 `two-bot` passes. Starter mode always warns with its cost ([Starter mode](#starter-mode)). To add
 a reviewer: give a second account Write, write its token to `secrets/github_reviewer_token`, set
 `"identity": "two-bot"` in the zone, require 1 approval with stale approvals dismissed in the
-ruleset, delete `compose.override.yaml` (for a private repository, rerun `init --force` without
-`--identity starter` instead, which rewrites both files, and re-apply your config edits), and
-`docker compose up -d`.
+ruleset, delete the two `JM_REVIEWER_TOKEN_*` lines from `.env`, and `docker compose up -d`.
 
 ### `zone.doctor-drop`
 

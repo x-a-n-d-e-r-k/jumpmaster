@@ -18,6 +18,7 @@ const CLASSIC = 'ghp_INITCLASSICDUMMY0123456789';
 const REVIEWER = 'github_pat_INITREVIEWERDUMMY0123456789';
 const READ = 'github_pat_INITREADDUMMY0123456789';
 const CLAUDE = 'sk-ant-oat01-INITCLAUDEDUMMY0123456789';
+const ENV_FILE = 'JM_UID=1000\nJM_GID=1000\n# mine\nJM_SLOTS=2\n';
 const IDENTITY_MAP = '         0          0 4294967295\n';
 const digest = (c: string) => `sha256:${c.repeat(64)}`;
 
@@ -67,6 +68,7 @@ const NODE_REPO: Repo = {
 /** An install directory with the token files the operator writes before `init`. */
 function installDir(opts: { author?: string; reviewer?: boolean; read?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'jm-init-'));
+  writeFileSync(join(dir, '.env'), ENV_FILE);
   mkdirSync(join(dir, 'secrets'), { mode: 0o700 });
   const put = (name: string, value: string) =>
     writeFileSync(join(dir, 'secrets', name), `${value}\n`, { mode: 0o600 });
@@ -296,14 +298,19 @@ describe('jumpmaster init', () => {
     expect(r.all).not.toContain(AUTHOR);
   });
 
-  test('a private repository turns on reviewReadToken and wires the read token into compose', async () => {
+  const envOf = (dir: string) => readFileSync(join(dir, '.env'), 'utf8');
+
+  test('a private repository turns on reviewReadToken and wires the read token in .env', async () => {
     const dir = installDir({ read: true });
     const r = await run(dir, ['--repo', 'octo/demo'], {}, { ...NODE_REPO, private: true });
     expect(r.code, r.all).toBe(0);
     expect(configOf(dir).dropZones[0].reviewReadToken).toBe(true);
-    const override = readFileSync(join(dir, 'compose.override.yaml'), 'utf8');
-    expect(override).toContain('JM_GITHUB_READ_TOKEN_FILE: /run/secrets/github_read_token');
-    expect(override).toContain('file: ./secrets/github_read_token');
+    const env = envOf(dir);
+    expect(env.startsWith(ENV_FILE)).toBe(true);
+    expect(env).toContain('JM_READ_TOKEN_FILE=/run/secrets/github_read_token\n');
+    expect(env).toContain('JM_READ_TOKEN_SRC=./secrets/github_read_token\n');
+    expect(env).not.toContain('JM_REVIEWER_TOKEN');
+    expect(existsSync(join(dir, 'compose.override.yaml'))).toBe(false);
     expect(() =>
       loadConfig(join(dir, 'config', 'jumpmaster.config.json'), serverEnv(dir, { read: true }), {
         imageLockPath: lockFile(),
@@ -316,16 +323,15 @@ describe('jumpmaster init', () => {
     expect(m.out).toContain('secrets/github_read_token');
   });
 
-  test('starter mode needs no reviewer token, drops it from compose and states the cost', async () => {
+  test('starter mode needs no reviewer token, unwires it in .env and states the cost', async () => {
     const dir = installDir({ reviewer: false });
     const r = await run(dir, ['--repo', 'octo/demo', '--identity', 'starter']);
     expect(r.code, r.all).toBe(0);
     expect(configOf(dir).dropZones[0].identity).toBe('starter');
     expect(r.out).toContain('the author token can merge any green PR');
-    const override = readFileSync(join(dir, 'compose.override.yaml'), 'utf8');
-    expect(override).toContain('JM_GITHUB_REVIEWER_TOKEN_FILE: ""');
-    expect(override).toContain('github_reviewer_token: !reset null');
-    expect(override).not.toMatch(/^\s+- github_reviewer_token$/m);
+    const env = envOf(dir);
+    expect(env).toContain('JM_REVIEWER_TOKEN_FILE=\n');
+    expect(env).toContain('JM_REVIEWER_TOKEN_SRC=/dev/null\n');
     expect(() =>
       loadConfig(
         join(dir, 'config', 'jumpmaster.config.json'),
@@ -333,10 +339,14 @@ describe('jumpmaster init', () => {
         { imageLockPath: lockFile() },
       ),
     ).not.toThrow();
-    // A two-bot rerun removes the override init wrote.
+    // Rerunning keeps one block; a two-bot rerun removes it and keeps the operator's own lines.
+    expect((await run(dir, ['--repo', 'octo/demo', '--identity', 'starter', '--force'])).code).toBe(
+      0,
+    );
+    expect(envOf(dir).match(/JM_REVIEWER_TOKEN_FILE/g)).toHaveLength(1);
     writeFileSync(join(dir, 'secrets', 'github_reviewer_token'), `${REVIEWER}\n`, { mode: 0o600 });
     expect((await run(dir, ['--repo', 'octo/demo', '--force'])).code).toBe(0);
-    expect(existsSync(join(dir, 'compose.override.yaml'))).toBe(false);
+    expect(envOf(dir)).toBe(ENV_FILE);
   });
 
   test('starter mode refuses a classic author token', async () => {
@@ -364,13 +374,89 @@ describe('jumpmaster init', () => {
     expect(configOf(dir).dropZones[0].authorMayBeAdmin).toBe(true);
   });
 
-  test("an override file init didn't write is never replaced", async () => {
+  test('--force is named as rewriting the whole config', async () => {
+    const dir = installDir();
+    expect((await run(dir, ['--repo', 'octo/demo'])).code).toBe(0);
+    const again = await run(dir, ['--repo', 'octo/demo']);
+    expect(again.code).toBe(3);
+    expect(again.err).toMatch(/rewrites the whole config/);
+    expect(again.err).toMatch(/gates|egress/);
+  });
+
+  test('a config/ directory init cannot write is exit 4 with the chown fix, not a stack trace', async () => {
+    if (process.getuid?.() === 0) return; // root writes anyway
+    const dir = installDir();
+    mkdirSync(join(dir, 'config'), { mode: 0o555 });
+    const r = await run(dir, ['--repo', 'octo/demo']);
+    chmodSync(join(dir, 'config'), 0o755);
+    expect(r.code).toBe(4);
+    expect(r.err).toContain('config');
+    expect(r.err).toContain('sudo chown -R');
+  });
+
+  test('a token file others can read is tightened to 0600, and init says so', async () => {
+    const dir = installDir();
+    chmodSync(join(dir, 'secrets', 'claude_token'), 0o644);
+    const r = await run(dir, ['--repo', 'octo/demo']);
+    expect(r.code, r.all).toBe(0);
+    expect(mode(join(dir, 'secrets', 'claude_token'))).toBe(0o600);
+    expect(r.out).toContain('secrets/claude_token');
+    expect(r.out).toMatch(/0600/);
+  });
+
+  test('--offline writes the config without reading GitHub, and needs --preset', async () => {
+    const never = () => {
+      throw new Error('the forge must not be used offline');
+    };
     const dir = installDir({ reviewer: false });
-    writeFileSync(join(dir, 'compose.override.yaml'), 'services: {}\n');
-    const r = await run(dir, ['--repo', 'octo/demo', '--identity', 'starter']);
-    expect(r.code).toBe(3);
-    expect(r.err).toContain('compose.override.yaml');
-    expect(readFileSync(join(dir, 'compose.override.yaml'), 'utf8')).toBe('services: {}\n');
+    const r = await run(
+      dir,
+      ['--repo', 'octo/demo', '--offline', '--preset', 'node', '--identity', 'starter'],
+      { forge: never },
+    );
+    expect(r.code, r.all).toBe(0);
+    const zone = configOf(dir).dropZones[0];
+    expect(zone).toMatchObject({
+      preset: 'node',
+      identity: 'starter',
+      egress: { mode: 'monitor' },
+    });
+    expect(zone.gates).toEqual([]);
+    expect(zone.reviewReadToken).toBeUndefined();
+    expect(r.out).toMatch(/offline/);
+    expect(r.out).toMatch(/no gates were written/);
+    expect(mode(join(dir, 'secrets', 'join_token'))).toBe(0o600);
+    const priv = installDir({ read: true });
+    const p = await run(
+      priv,
+      ['--repo', 'octo/demo', '--offline', '--preset', 'python', '--private'],
+      {
+        forge: never,
+      },
+    );
+    expect(p.code, p.all).toBe(0);
+    expect(configOf(priv).dropZones[0].reviewReadToken).toBe(true);
+    const noPreset = await run(installDir(), ['--repo', 'octo/demo', '--offline'], {
+      forge: never,
+    });
+    expect(noPreset.code).toBe(2);
+    expect(noPreset.err).toContain('--preset');
+  });
+
+  test('--help prints usage and exits 0', async () => {
+    for (const flag of ['--help', '-h']) {
+      const r = await run(installDir(), [flag]);
+      expect(r.code).toBe(0);
+      expect(r.out).toMatch(/usage: jumpmaster init/);
+    }
+  });
+
+  test('uid 0 is refused with the reason, and --allow-root is named as a last resort', async () => {
+    const r = await run(installDir(), ['--repo', 'octo/demo'], { uid: 0 });
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/root/);
+    expect(r.err).toMatch(/adduser|useradd/);
+    expect(r.err).toContain('--allow-root');
   });
 
   test('usage errors exit 2', async () => {
@@ -380,6 +466,7 @@ describe('jumpmaster init', () => {
       ['--repo', 'o/r', '--preset', 'cobol'],
       ['--repo', 'o/r', '--identity', 'solo'],
       ['--repo', 'o/r', '--bogus'],
+      ['--repo', 'o/r', '--private'],
     ]) {
       const r = await run(installDir(), args);
       expect(r.code, args.join(' ')).toBe(2);

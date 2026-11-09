@@ -451,14 +451,69 @@ describe('zone checks', () => {
     expect(z.fix).toContain('docker push registry.example.com/team/trooper:1');
     expect(z.fix).toContain("docker image inspect --format '{{index .RepoDigests 0}}'");
     expect(z.fix).toContain('registry.example.com/team/trooper@sha256:<digest>');
+    expect(z.fix).toContain('JM_ALLOWED_IMAGES');
+    // A Docker Hub image is in a registry already: never tell anyone to push it.
     const service = world({
       zone: {
         services: [{ name: 'db', image: 'postgres:16', port: 5432, readyTimeoutSeconds: 60 }],
       },
     });
     const s = one(await service.run(), 'zone.services');
-    expect(s.fix).toContain('docker push postgres:16');
+    expect(s.fix).toContain('docker buildx imagetools inspect postgres:16');
+    expect(s.fix).not.toContain('docker push');
     expect(s.fix).toContain('postgres@sha256:<digest>');
+    expect(s.fix).toContain('JM_ALLOWED_IMAGES');
+  });
+
+  test('every doc pointer is a full GitHub URL to an install.md anchor', async () => {
+    const checks = await world({ zone: { egress: { mode: 'off', allow: [] } } }).run();
+    const docs = checks.map((c) => c.doc).filter((d): d is string => d !== undefined);
+    expect(docs.length).toBeGreaterThan(5);
+    for (const d of docs)
+      expect(d).toMatch(
+        /^https:\/\/github\.com\/x-a-n-d-e-r-k\/jumpmaster\/blob\/main\/docs\/runbooks\/install\.md#[a-z0-9-]+$/,
+      );
+  });
+
+  test('a private repository with no ruleset is told rulesets there need a paid plan', async () => {
+    const w = world();
+    for (const id of ['author', 'reviewer'] as const) {
+      w.f.state.rules[id] = { kind: 'none' };
+      w.f.state.access[id] = { ...w.f.state.access[id], private: true };
+    }
+    const c = one(await w.run(), 'forge.branch-rules');
+    expect(c.status).toBe('fail');
+    expect(c.fix).toContain('GitHub Pro');
+    // A public repository's fix doesn't mention plans.
+    const pub = world();
+    for (const id of ['author', 'reviewer'] as const) pub.f.state.rules[id] = { kind: 'none' };
+    expect(one(await pub.run(), 'forge.branch-rules').fix).not.toContain('GitHub Pro');
+  });
+
+  test('config.secret-files fails on a secret file others can read, with the chmod fix', async () => {
+    const w = world();
+    w.deps.env = {
+      ...w.deps.env,
+      secretFiles: [
+        { variable: 'JM_CLAUDE_TOKEN_FILE', path: '/run/secrets/claude_token', mode: 0o644 },
+        { variable: 'JM_JOIN_TOKEN_FILE', path: '/run/secrets/join_token', mode: 0o600 },
+      ],
+    };
+    const c = one(await w.run(), 'config.secret-files');
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('claude_token');
+    expect(c.summary).not.toContain('join_token');
+    expect(c.fix).toContain('chmod 600 secrets/*');
+    w.deps.env = {
+      ...w.deps.env,
+      secretFiles: [
+        { variable: 'JM_CLAUDE_TOKEN_FILE', path: '/run/secrets/claude_token', mode: 0o600 },
+      ],
+    };
+    expect(one(await w.run(), 'config.secret-files').status).toBe('pass');
+    // Secrets from the environment, not files: nothing to judge.
+    w.deps.env = { ...w.deps.env, secretFiles: [] };
+    expect(one(await w.run(), 'config.secret-files').status).toBe('skip');
   });
 
   test('egress monitor warns with observed hosts missing from the allow list', async () => {

@@ -533,6 +533,17 @@ describe('runDrop', () => {
         expect(reason).not.toContain('Invalid discriminator value');
       });
 
+    test('a discriminator error on another path, with "role" elsewhere, keeps the trooper line', async () => {
+      const stderr =
+        "loading prompts/role.md\npayload rejected: egress.kind: Invalid discriminator value. Expected 'proxy'\n";
+      const d = fakeDriver([], { exitCode: 1, stderr });
+      const client = fakeClient();
+      await runDrop(doctor(), { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
+      expect(client.result?.reason).toBe(
+        "trooper exited 1 without result: payload rejected: egress.kind: Invalid discriminator value. Expected 'proxy'",
+      );
+    });
+
     test('another payload rejection keeps the trooper line', async () => {
       const stderr = 'payload rejected: repo.owner: Invalid input\n';
       const d = fakeDriver([], { exitCode: 1, stderr });

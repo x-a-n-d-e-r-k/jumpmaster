@@ -4,21 +4,26 @@
 //
 //   docker compose --profile init run --rm init --repo owner/name [--preset p]
 //     [--identity two-bot|starter] [--author-may-be-admin] [--plan p] [--force] [--allow-root]
+//     [--offline --preset p [--private]]
 //
 // It reads the author token from secrets/github_author_token and, with it, the repository's
-// visibility and root build files (GET requests only), then writes:
+// visibility and root build files (GET requests only; `--offline` skips GitHub and takes the
+// preset and visibility from the flags), then writes:
 //   - config/jumpmaster.config.json (the stack preset and its gates, egress monitor, signed images);
 //   - secrets/join_token and secrets/operator_token (0600), only when absent;
-//   - compose.override.yaml, only for starter mode or a private repository (it drops the reviewer
-//     token or adds the read token), and removes one it wrote earlier when neither applies.
+//   - a block of compose variables in .env, only for starter mode (no reviewer token is mounted)
+//     or a private repository (the read token is), removed again when neither applies.
+// Token files others can read are tightened to 0600.
 //
 // Exit codes: 0 done, 1 refused or failed (the reason is printed), 2 usage or ambiguous detection
-// without --preset, 3 an existing config without --force (or an override file init didn't write),
-// 4 the install directory is not writable. No secret value is ever printed.
+// without --preset, 3 an existing config without --force, 4 the install directory is not
+// writable. No secret value is ever printed.
 import { randomBytes } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -28,7 +33,7 @@ import {
 import { join } from 'node:path';
 import { PRESETS, type Preset } from '@jumpmaster/protocol';
 import { IDENTITIES, type Identity, STARTER_WARNING } from './config.js';
-import { identityMap } from './doctor/checks.js';
+import { DOC, identityMap } from './doctor/checks.js';
 import type { Forge } from './forge/github.js';
 import { DETECT_FILES, type Detection, detectAs, detectPreset } from './presets.js';
 import { readSecret } from './secrets.js';
@@ -51,14 +56,14 @@ const USAGE = [
   'usage: jumpmaster init --repo owner/name [--preset node|python|go|jvm]',
   '         [--identity two-bot|starter] [--author-may-be-admin]',
   '         [--plan pro|max|team_standard|team_premium|enterprise] [--force] [--allow-root]',
+  '         [--offline --preset p [--private]]   (write the config without reading GitHub)',
 ].join('\n');
 const PLANS = ['pro', 'max', 'team_standard', 'team_premium', 'enterprise'] as const;
 const REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
-const DOC = 'docs/runbooks/install.md';
-/** Marks an override file as init's own, so a rerun may replace or remove it. */
-const OVERRIDE_MARK = '# Written by `jumpmaster init`.';
 const CONFIG = 'config/jumpmaster.config.json';
-const OVERRIDE = 'compose.override.yaml';
+/** init's own lines in .env, between these markers; everything else in .env is the operator's. */
+const ENV_BEGIN = '# jumpmaster init: begin (rerun init to change these lines)';
+const ENV_END = '# jumpmaster init: end';
 
 type Args = {
   repo: string;
@@ -68,16 +73,23 @@ type Args = {
   authorMayBeAdmin: boolean;
   force: boolean;
   allowRoot: boolean;
+  offline: boolean;
+  privateRepo: boolean;
+  help: boolean;
 };
 
 class UsageError extends Error {}
 
 function parseArgs(argv: string[]): Args {
-  const args: Partial<Args> & Pick<Args, 'authorMayBeAdmin' | 'force' | 'allowRoot'> = {
+  const args: Partial<Args> &
+    Pick<Args, 'authorMayBeAdmin' | 'force' | 'allowRoot' | 'offline' | 'privateRepo' | 'help'> = {
     identity: 'two-bot',
     authorMayBeAdmin: false,
     force: false,
     allowRoot: false,
+    offline: false,
+    privateRepo: false,
+    help: false,
   };
   const value = (i: number, flag: string): string => {
     const v = argv[i + 1];
@@ -121,11 +133,25 @@ function parseArgs(argv: string[]): Args {
       case '--allow-root':
         args.allowRoot = true;
         break;
+      case '--offline':
+        args.offline = true;
+        break;
+      case '--private':
+        args.privateRepo = true;
+        break;
+      case '--help':
+      case '-h':
+        args.help = true;
+        return args as Args;
       default:
         throw new UsageError(`unknown argument ${a}`);
     }
   }
   if (!args.repo) throw new UsageError('--repo is required');
+  if (args.privateRepo && !args.offline)
+    throw new UsageError('--private goes with --offline (online, init reads the visibility)');
+  if (args.offline && !args.preset)
+    throw new UsageError('--offline needs --preset: without GitHub, init cannot detect the stack');
   return args as Args;
 }
 
@@ -153,38 +179,35 @@ async function rootFiles(forge: InitForge, branch: string): Promise<Record<strin
   return files;
 }
 
-/** The compose override for starter mode and private repositories, or null when neither. */
-export function composeOverride(o: { starter: boolean; privateRepo: boolean }): string | null {
-  if (!o.starter && !o.privateRepo) return null;
-  const secrets = [
-    'claude_token',
-    'github_author_token',
-    ...(o.starter ? [] : ['github_reviewer_token']),
-    ...(o.privateRepo ? ['github_read_token'] : []),
-    'join_token',
-    'operator_token',
-  ];
+/**
+ * The compose variables init keeps in .env: the template mounts the reviewer token and no read
+ * token by default; starter mode unmounts the first, a private repository mounts the second.
+ * Plain `.env` interpolation, so any Compose v2 reads it.
+ */
+export function composeEnv(o: { starter: boolean; privateRepo: boolean }): string[] {
   return [
-    `${OVERRIDE_MARK} Rerun init with --force to regenerate it; don't edit it by hand.`,
-    ...(o.starter
-      ? ['# Starter mode: there is no reviewer identity, so no reviewer token is mounted.']
-      : []),
+    ...(o.starter ? ['JM_REVIEWER_TOKEN_FILE=', 'JM_REVIEWER_TOKEN_SRC=/dev/null'] : []),
     ...(o.privateRepo
-      ? ['# A private repository: review, crew and doctor drops clone with the read token.']
+      ? [
+          'JM_READ_TOKEN_FILE=/run/secrets/github_read_token',
+          'JM_READ_TOKEN_SRC=./secrets/github_read_token',
+        ]
       : []),
-    '# Docker Compose reads this file next to compose.yaml on its own (Compose 2.24 or later).',
-    'services:',
-    '  jumpmaster:',
-    '    environment:',
-    ...(o.starter ? ['      JM_GITHUB_REVIEWER_TOKEN_FILE: ""'] : []),
-    ...(o.privateRepo ? ['      JM_GITHUB_READ_TOKEN_FILE: /run/secrets/github_read_token'] : []),
-    '    secrets: !override',
-    ...secrets.map((s) => `      - ${s}`),
-    'secrets:',
-    ...(o.starter ? ['  github_reviewer_token: !reset null'] : []),
-    ...(o.privateRepo ? ['  github_read_token:', '    file: ./secrets/github_read_token'] : []),
-    '',
-  ].join('\n');
+  ];
+}
+
+/** .env with init's block replaced by `lines` (removed when empty); other lines untouched. */
+export function withEnvBlock(env: string, lines: string[]): string {
+  const kept: string[] = [];
+  let inside = false;
+  for (const line of env.split('\n')) {
+    if (line === ENV_BEGIN) inside = true;
+    else if (line === ENV_END) inside = false;
+    else if (!inside) kept.push(line);
+  }
+  let text = kept.join('\n');
+  if (text !== '' && !text.endsWith('\n')) text += '\n';
+  return lines.length === 0 ? text : `${text}${[ENV_BEGIN, ...lines, ENV_END].join('\n')}\n`;
 }
 
 /** Writes a file through a temporary name, so a crash never leaves half a config. */
@@ -205,6 +228,11 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
     err(USAGE);
     return 2;
   }
+  if (args.help) {
+    out(USAGE);
+    out(`see ${DOC}#step-5-run-init`);
+    return 0;
+  }
   const fail = (line: string, code = 1): number => {
     err(`jumpmaster init: ${line}`);
     return code;
@@ -217,30 +245,48 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
     );
   if (deps.uid === 0 && !args.allowRoot)
     return fail(
-      `refusing to run as uid 0: the server would own the data and secret files as root. Set JM_UID and JM_GID in .env to your own user (id -u, id -g; ${DOC}#install), or pass --allow-root if you really mean root.`,
+      `refusing to run as root (uid 0): the server holds your GitHub and Claude tokens and runs as the user that owns the install's files, so a bug in it would act as root on the host's files. Set JM_UID and JM_GID in .env to an ordinary user (id -u, id -g). On a host where you only have root, create one first (adduser jumpmaster && usermod -aG docker jumpmaster, then do the install as that user; ${DOC}#step-1-write-env). --allow-root runs as root anyway, and the doctor's config.uid then warns for good.`,
     );
-  try {
-    const probe = join(dir, `.jumpmaster-init-${process.pid}`);
-    writeFileSync(probe, '');
-    rmSync(probe);
-  } catch (e) {
-    return fail(
-      `can't write to ${dir} (${errno(e) ?? 'error'}): mount /install read-write, owned by the JM_UID user (compose's init service mounts the install directory as .:/install)`,
-      4,
-    );
+  // Every directory init writes, probed before anything is written: a directory Docker created
+  // as root (`up` before `init`) is exit 4 with the fix, not a stack trace halfway through.
+  for (const d of ['', 'config', 'data', 'secrets']) {
+    const at = join(dir, d);
+    try {
+      mkdirSync(at, { recursive: true, mode: 0o700 });
+      const probe = join(at, `.jumpmaster-init-${process.pid}`);
+      writeFileSync(probe, '');
+      rmSync(probe);
+    } catch (e) {
+      const where = d === '' ? 'the install directory' : `${d}/`;
+      return fail(
+        `can't write to ${where} (${errno(e) ?? 'error'}): mount /install read-write (compose's init service mounts the install directory as .:/install), owned by the JM_UID user. If Docker created it as root (docker compose up before init), run in the install directory: sudo chown -R "$(id -u):$(id -g)" config data secrets`,
+        4,
+      );
+    }
   }
   const configPath = join(dir, CONFIG);
   if (existsSync(configPath) && !args.force)
     return fail(
-      `${CONFIG} already exists; rerun with --force to replace it (generated secrets are kept)`,
+      `${CONFIG} already exists. --force rewrites the whole config: hand edits (gates, egress.allow, anything else) are lost, so reapply them after; generated secrets are kept`,
       3,
     );
-  const overridePath = join(dir, OVERRIDE);
-  const ownOverride =
-    !existsSync(overridePath) || readFileSync(overridePath, 'utf8').startsWith(OVERRIDE_MARK);
+
+  // Token files only their owner may read; tighten any that others can.
+  const secretPath = (name: string) => join(dir, 'secrets', name);
+  const tightened: string[] = [];
+  for (const name of readdirSync(join(dir, 'secrets'))) {
+    try {
+      const st = statSync(secretPath(name));
+      if (st.isFile() && (st.mode & 0o077) !== 0) {
+        chmodSync(secretPath(name), 0o600);
+        tightened.push(`secrets/${name}`);
+      }
+    } catch {
+      // not ours to change: readSecret reports it if it matters
+    }
+  }
 
   // The author token: read, never shown.
-  const secretPath = (name: string) => join(dir, 'secrets', name);
   let authorToken: string | undefined;
   try {
     authorToken = readSecret(
@@ -262,22 +308,30 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
     );
 
   // The repository: visibility and its root build files, on the default branch.
-  const forge = deps.forge(args.repo, authorToken);
-  let access: Awaited<ReturnType<InitForge['repoAccess']>>;
+  let access: { private: boolean; defaultBranch: string; permissions: { admin: boolean } };
   let files: Record<string, string | null>;
-  try {
-    access = await forge.repoAccess();
-    files = await rootFiles(forge, access.defaultBranch);
-  } catch (e) {
-    const status = (e as { status?: unknown }).status;
-    const why =
-      status === 401
-        ? 'GitHub rejected the author token (401): it is expired, revoked or mistyped'
-        : status === 403 || status === 404
-          ? `the author token can't read ${args.repo} (HTTP ${status}): check the repository name, and that the token's repository access includes it with Contents and Metadata read`
-          : `could not read ${args.repo} from GitHub (${typeof status === 'number' ? `HTTP ${status}` : 'no HTTP answer'}): check this host reaches api.github.com`;
-    return fail(`${why} (${DOC}#tokens)`);
-  }
+  if (args.offline) {
+    access = {
+      private: args.privateRepo,
+      defaultBranch: '(not read)',
+      permissions: { admin: false },
+    };
+    files = {};
+  } else
+    try {
+      const forge = deps.forge(args.repo, authorToken);
+      access = await forge.repoAccess();
+      files = await rootFiles(forge, access.defaultBranch);
+    } catch (e) {
+      const status = (e as { status?: unknown }).status;
+      const why =
+        status === 401
+          ? 'GitHub rejected the author token (401): it is expired, revoked or mistyped'
+          : status === 403 || status === 404
+            ? `the author token can't read ${args.repo} (HTTP ${status}): check the repository name, and that the token's repository access includes it with Contents and Metadata read`
+            : `could not read ${args.repo} from GitHub (${typeof status === 'number' ? `HTTP ${status}` : 'no HTTP answer'}): check this host reaches api.github.com`;
+      return fail(`${why} (${DOC}#tokens)`);
+    }
   let found: Detection;
   if (args.preset) found = detectAs(args.preset, files);
   else {
@@ -289,19 +343,12 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
       );
   }
   const preset = found.preset as Preset;
-  const override = composeOverride({
+  const envLines = composeEnv({
     starter: args.identity === 'starter',
     privateRepo: access.private,
   });
-  if (override && !ownOverride)
-    return fail(
-      `${OVERRIDE} exists and init didn't write it; move it aside (init writes its own for starter mode and private repositories), then rerun`,
-      3,
-    );
 
-  // Write: directories, generated secrets (only when absent), the config, the override.
-  for (const d of ['config', 'data', 'secrets'])
-    mkdirSync(join(dir, d), { recursive: true, mode: 0o700 });
+  // Write: generated secrets (only when absent), the config, init's .env block.
   const generated: string[] = [];
   for (const name of ['join_token', 'operator_token']) {
     try {
@@ -343,10 +390,18 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
     dropZones: [zone],
   };
   writeAtomic(configPath, `${JSON.stringify(config, null, 2)}\n`, 0o644);
-  if (override) writeAtomic(overridePath, override, 0o644);
-  else if (existsSync(overridePath) && ownOverride) rmSync(overridePath);
+  const envPath = join(dir, '.env');
+  const envBefore = existsSync(envPath) ? readFileSync(envPath, 'utf8') : '';
+  const envAfter = withEnvBlock(envBefore, envLines);
+  if (envAfter !== envBefore)
+    writeAtomic(envPath, envAfter, existsSync(envPath) ? statSync(envPath).mode & 0o777 : 0o644);
 
   // Report: what was written and what is left, never a value.
+  if (args.offline)
+    out(
+      `offline: GitHub was not read; preset ${preset} and visibility ${access.private ? 'private' : 'public'} are from the flags`,
+    );
+  for (const t of tightened) out(`${t} was readable by other users: set it to 0600`);
   out(`wrote ${CONFIG}: zone ${zone.id} for ${args.repo}, preset ${preset}`);
   out(`  evidence: ${found.evidence.join(', ') || 'none'}`);
   for (const g of found.gates) out(`  gate ${g.name}: ${g.run}`);
@@ -359,7 +414,12 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
   out('  images: signed releases only (requireSignedImages: true)');
   if (access.private) out('  the repository is private: reviewReadToken is on');
   if (generated.length) out(`generated ${generated.join(' and ')} (mode 0600)`);
-  if (override) out(`wrote ${OVERRIDE} (compose reads it next to compose.yaml)`);
+  if (envAfter !== envBefore)
+    out(
+      envLines.length
+        ? `wrote init's lines in .env (${envLines.map((l) => l.split('=')[0]).join(', ')})`
+        : "removed init's lines from .env",
+    );
   if (tokenCreatedAt)
     out(
       `claude.tokenCreatedAt is ${tokenCreatedAt} (the date of secrets/claude_token); correct it in the config if you ran claude setup-token on another day`,
