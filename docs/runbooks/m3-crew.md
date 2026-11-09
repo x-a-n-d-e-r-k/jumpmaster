@@ -1,5 +1,8 @@
 # Runbook: M3 crew
 
+> **New install?** Start with the [install runbook](install.md): it installs a published release
+> with Docker Compose. This runbook turns on the crew for an installed zone.
+
 The crew reads the objective ladder in `GOAL.md`, files candidate issues under a staged label, tries
 to refute each one, and raises briefings. Command (you) rules on those briefings in the UI. A crew
 drop never writes to the forge: the server decides what its output leads to, and every forge write

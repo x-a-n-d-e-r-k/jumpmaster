@@ -1,5 +1,8 @@
 # Runbook: M1 loop
 
+> **New install?** Start with the [install runbook](install.md): it installs a published release
+> with Docker Compose. This runbook is the M1 development rehearsal, run from a checkout.
+
 End-to-end check that Jumpmaster M1 runs the whole loop with no human click: a labelled
 issue is implemented, reviewed by a second bot identity, healed or resolved when needed,
 and merged by the server once the verdict, CI and the PR head all agree on one SHA.

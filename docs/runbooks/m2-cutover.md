@@ -1,5 +1,8 @@
 # Runbook: M2 cutover
 
+> **New install?** Start with the [install runbook](install.md): it installs a published release
+> with Docker Compose. This runbook is for moving an existing project's agent work onto Jumpmaster.
+
 Moves a real repository from another automation system onto Jumpmaster. The two systems must never
 both act on one repository, so work moves in stages, and Jumpmaster only starts writing at stage 5.
 
