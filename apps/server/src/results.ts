@@ -434,7 +434,15 @@ function applyDoctorResult(
       );
     }
     const findings = DoctorResultSchema.safeParse(result.doctor);
-    const ok = result.status === 'completed' && findings.success;
+    // The drop's state says whether the doctor found the zone ready, as its check does.
+    const f = findings.success ? findings.data : null;
+    const ok =
+      result.status === 'completed' &&
+      f !== null &&
+      f.claude.ok &&
+      f.clone.ok &&
+      f.services.every((s) => s.ok) &&
+      f.gates.every((g) => !g.timedOut && g.exitCode === 0);
     updateDrop(db, drop.id, {
       state: ok ? 'succeeded' : 'failed',
       resultJson: JSON.stringify(redactDeep(result, deps.secrets)),

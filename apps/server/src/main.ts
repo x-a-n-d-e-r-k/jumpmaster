@@ -13,6 +13,9 @@ import { type ForgePair, markPendingUnknown, pairFor } from './outbox.js';
 import { promptVersions } from './payloads.js';
 import { syncDropZone } from './sync.js';
 
+/** How long one doctor read may take before it is abandoned. */
+const DOCTOR_REQUEST_MS = 30_000;
+
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 /** Redacts configured secrets from a message before it is logged. */
@@ -46,7 +49,20 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
     const zone = config.dropZones.find((z) => z.id === zoneId);
     if (!zone || !readToken) return undefined;
     const [owner = '', name = ''] = zone.repo.split('/');
-    return new GitHubForge(owner, name, readToken);
+    return new GitHubForge(owner, name, readToken, { requestTimeoutMs: DOCTOR_REQUEST_MS });
+  };
+  // The doctor's own forges: the same tokens, but every request is abandoned after a deadline, so
+  // one stalled connection can't hang a run (the polling pass keeps its forges as they were).
+  const doctorForges = new Map(
+    config.dropZones.map(
+      (zone) =>
+        [zone.id, pairFor(zone, config.secrets, { requestTimeoutMs: DOCTOR_REQUEST_MS })] as const,
+    ),
+  );
+  const doctorForgesFor = (zoneId: string): ForgePair => {
+    const pair = doctorForges.get(zoneId);
+    if (!pair) throw new Error(`unknown drop zone ${zoneId}`);
+    return pair;
   };
 
   // A ruling starts a pass at once; `guardedPass` is defined below and only called after listen.
@@ -55,6 +71,7 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
     config,
     forgesFor,
     readForgeFor,
+    doctorForgesFor,
     now: () => new Date(),
     kick: () => void guardedPass(),
     log,

@@ -924,6 +924,14 @@ describe('GitHubForge doctor reads', () => {
     nock.cleanAll();
   });
 
+  test('I-3: with a request timeout, a read that never answers is aborted', async () => {
+    nock(api).get('/repos/o/r').delay(2000).reply(200, { default_branch: 'main' });
+    const f = new GitHubForge('o', 'r', 'tok', { requestTimeoutMs: 50 });
+    const started = Date.now();
+    await expect(f.repoAccess()).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(1500);
+  });
+
   test('repoAccess reads the token account permissions, scopes and expiry', async () => {
     nock(api)
       .get('/repos/o/r')

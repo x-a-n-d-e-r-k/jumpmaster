@@ -364,4 +364,34 @@ describe('doctor routes', () => {
       (await post('/api/control/doctor/drop', { zone: 'main' }, { host: HOST }))?.statusCode,
     ).toBe(401);
   });
+
+  test('I-4: a queued doctor drop does not block observe, and --cancel cancels it', async () => {
+    const w = doctorApp();
+    const queued = await post('/api/control/doctor/drop', { zone: 'main' });
+    const { dropId } = queued?.json() as { dropId: string };
+    // Observe is not blocked by a drop nothing will run.
+    expect((await post('/api/control/zones/main', { mode: 'observe' }))?.statusCode).toBe(200);
+    setZoneMode(w.db, 'main', 'active', NOW);
+    const cancel = await post('/api/control/doctor/drop', { zone: 'main', cancel: true });
+    expect(cancel?.statusCode).toBe(200);
+    expect(cancel?.json()).toMatchObject({ dropId, state: 'cancelled' });
+    expect(w.db.prepare('SELECT state FROM drops WHERE id = ?').get(dropId)).toEqual({
+      state: 'cancelled',
+    });
+    // Nothing queued: nothing to cancel. A running one is not cancelled here.
+    expect(
+      (await post('/api/control/doctor/drop', { zone: 'main', cancel: true }))?.statusCode,
+    ).toBe(404);
+    const again = (await post('/api/control/doctor/drop', { zone: 'main' }))?.json() as {
+      dropId: string;
+    };
+    w.db.prepare("UPDATE drops SET state = 'running' WHERE id = ?").run(again.dropId);
+    const running = await post('/api/control/doctor/drop', { zone: 'main', cancel: true });
+    expect(running?.statusCode).toBe(409);
+    expect(running?.json().error).toContain('running');
+    expect(ctlRequest(['doctor', 'main', '--cancel'])).toEqual({
+      path: '/api/control/doctor/drop',
+      body: { zone: 'main', cancel: true },
+    });
+  });
 });

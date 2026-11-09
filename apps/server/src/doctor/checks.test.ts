@@ -279,7 +279,8 @@ describe('forge checks', () => {
     const thrown = world();
     thrown.f.author.failNext('repoAccess', 'throw');
     const c = one(await thrown.run(), 'forge.author');
-    expect(['warn', 'fail']).toContain(c.status);
+    // No HTTP answer: the check could not run, which is a warn (never a pass).
+    expect(c.status).toBe('warn');
     expect(c.summary).toContain('could not');
   });
 
@@ -574,10 +575,11 @@ describe('zone.doctor-drop', () => {
       status: 'skip',
       fix: expect.stringContaining('jumpmaster ctl doctor main --drop'),
     });
-    withDrop(w, { state: 'queued' });
+    withDrop(w, { state: 'queued', at: ago(45 * 60_000) });
     expect(one(await w.run(), 'zone.doctor-drop')).toMatchObject({
       status: 'skip',
-      summary: expect.stringContaining('queued'),
+      summary: expect.stringContaining('queued for 45 minutes'),
+      fix: expect.stringContaining('jumpmaster ctl doctor main --cancel'),
       dropId: 'doc1',
     });
   });
@@ -664,5 +666,98 @@ describe('zone.doctor-drop', () => {
     const w = world();
     withDrop(w, { result: ok, at: ago(8 * 86_400_000) });
     expect(one(await w.run(), 'zone.doctor-drop').status).toBe('warn');
+  });
+});
+
+describe('fix pass', () => {
+  test('I-1: a rate-limited 403 on a read probe is a warn to run again, not a missing permission', async () => {
+    const w = world();
+    w.f.state.probes.author = okProbes().map((p) =>
+      p.permission === 'Issues: read' ? { ...p, status: 403, rateLimited: true } : p,
+    );
+    const c = one(await w.run(), 'forge.author-reads');
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('rate limit');
+    expect(c.fix).not.toContain('Read-only');
+  });
+
+  test('I-2: a required check with no workflow warns, naming the hang and the external-CI exception', async () => {
+    const w = world();
+    w.f.state.dirs.delete('main:.github/workflows');
+    const c = one(await w.run(), 'forge.ci');
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('no GitHub Actions workflow');
+    expect(c.summary).toContain('wait forever');
+    expect(c.summary).toContain('another CI');
+  });
+
+  test('I-3: a check whose read never answers turns into a warn after the deadline', async () => {
+    const w = world();
+    w.deps.checkTimeoutMs = 50;
+    w.f.author.listLabels = () => new Promise(() => {});
+    const checks = await w.run();
+    expect(one(checks, 'forge.labels')).toMatchObject({
+      status: 'warn',
+      summary: expect.stringContaining('did not answer within'),
+    });
+    expect(one(checks, 'forge.ci').status).toBe('pass');
+  });
+
+  test('I-5a: on a public repository the read probes disclaim instead of claiming the permissions', async () => {
+    const c = one(await world().run(), 'forge.author-reads');
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('is public');
+    expect(c.summary).toContain('proves the token works, not its permissions');
+    const priv = world();
+    priv.f.state.access.author.private = true;
+    expect(one(await priv.run(), 'forge.author-reads').summary).toContain(
+      'can make every read the server relies on',
+    );
+  });
+
+  test('I-5b: no push names both the account role and the token as the cause', async () => {
+    const w = world();
+    w.f.state.access.author.permissions.push = false;
+    const c = one(await w.run(), 'forge.author');
+    expect(c.fix).toContain('Write role');
+    expect(c.fix).toContain("token's repository access");
+    expect(c.fix).toContain('Contents: Read and write');
+  });
+
+  test('M-1: refused check runs name Checks: Read-only as a fix, without claiming it is impossible', async () => {
+    const w = world();
+    w.f.state.probes.author = okProbes().map((p) =>
+      p.permission === 'Checks: read'
+        ? { ...p, status: 403, accepted: 'checks=read' }
+        : p.permission === 'Actions: read'
+          ? { ...p, status: 403 }
+          : p,
+    );
+    const c = one(await w.run(), 'forge.author-reads');
+    expect(c.status).toBe('fail');
+    expect(`${c.summary} ${c.fix}`).not.toContain('never');
+    expect(c.summary).toContain('checks=read');
+    expect(c.fix).toContain('Checks: Read-only');
+    expect(c.fix).toContain('Actions: Read-only');
+  });
+
+  test('M-8: routine denials under enforce pass, saying what they mean', async () => {
+    const w = world();
+    insertDrop(
+      w.db,
+      { id: 'd1', dropZoneId: 'main', workItemId: null, role: 'crew-lead', state: 'succeeded' },
+      ago(3_600_000),
+    );
+    appendEvents(w.db, 'd1', [
+      {
+        ts: NOW.toISOString(),
+        kind: 'egress',
+        data: { host: 'pypi.org', decision: 'deny', count: 2 },
+      },
+    ]);
+    const c = one(await w.run(), 'zone.egress');
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('pypi.org');
+    expect(c.summary).toContain('refused, as enforce means');
   });
 });

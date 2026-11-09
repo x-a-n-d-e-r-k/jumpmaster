@@ -31,6 +31,7 @@ import type { Forge } from './forge/github.js';
 import { getGoals } from './goals.js';
 import { missingFor, zoneRequirements } from './leases.js';
 import { registerMcpRoute } from './mcp/server.js';
+import type { ForgePair } from './outbox.js';
 import { lastSyncResult } from './sync.js';
 import {
   type CrewLine,
@@ -77,6 +78,8 @@ export function createApp(
     kick?: () => void;
     /** A forge on the read token, for the doctor (absent without `JM_GITHUB_READ_TOKEN`). */
     readForgeFor?: (zoneId: string) => Forge | undefined;
+    /** The doctor's forges (requests time out); defaults to `forgesFor`. */
+    doctorForgesFor?: (zoneId: string) => ForgePair;
     /** The operator's log, scrubbed of secrets (main.ts); MCP's internal errors go here. */
     log?: (msg: string) => void;
   },

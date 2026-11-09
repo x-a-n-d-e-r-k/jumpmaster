@@ -12,10 +12,14 @@ export function ctlRequest(args: string[]): CtlRequest | null {
   if (command === 'briefings') return { path: '/api/control/briefings', method: 'GET' };
   if (command === 'doctor') {
     const drop = args.includes('--drop');
-    const words = args.slice(1).filter((a) => a !== '--json' && a !== '--drop');
+    const cancel = args.includes('--cancel');
+    const words = args.slice(1).filter((a) => a !== '--json' && a !== '--drop' && a !== '--cancel');
     if (words.some((w) => w.startsWith('--')) || words.length > 1) return null;
     const [only] = words;
     // A doctor drop is for one zone, and spends a turn of usage: never all zones at once.
+    if (drop && cancel) return null;
+    if (cancel)
+      return only ? { path: '/api/control/doctor/drop', body: { zone: only, cancel: true } } : null;
     if (drop) return only ? { path: '/api/control/doctor/drop', body: { zone: only } } : null;
     return { path: '/api/control/doctor', body: only ? { zone: only } : {} };
   }
@@ -83,7 +87,7 @@ export function formatDoctor(run: {
 }
 
 const USAGE =
-  'usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] | ctl doctor <zone> --drop';
+  'usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] | ctl doctor <zone> --drop | ctl doctor <zone> --cancel';
 
 /** Runs one control command against the server. Returns the process exit code. */
 export async function runCtl(
@@ -121,7 +125,7 @@ export async function runCtl(
         },
   );
   const text = await res.text();
-  if (args[0] === 'doctor' && !args.includes('--drop') && res.ok) {
+  if (args[0] === 'doctor' && !args.includes('--drop') && !args.includes('--cancel') && res.ok) {
     const { run } = JSON.parse(text) as {
       run: { id: number; finishedAt: string | null; checks: DoctorCheck[] };
     };

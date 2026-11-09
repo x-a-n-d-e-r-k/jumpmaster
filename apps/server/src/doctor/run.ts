@@ -26,8 +26,12 @@ export class DoctorBusyError extends Error {
   }
 }
 
-/** One run at a time per server: a second request is refused rather than queued. */
-let running = false;
+/**
+ * One run at a time per server: a second request is refused rather than queued. The lock carries
+ * its start time and expires, so a run that somehow never finishes can't refuse every later one.
+ */
+const LOCK_MS = 10 * 60_000;
+let running: { since: number } | null = null;
 
 const redactCheck = (c: DoctorCheck, secrets: string[]): DoctorCheck => ({
   ...c,
@@ -41,8 +45,10 @@ const redactCheck = (c: DoctorCheck, secrets: string[]): DoctorCheck => ({
  * Throws `DoctorBusyError` while another run is in progress.
  */
 export async function runDoctor(d: DoctorDeps, opts: { zoneId?: string } = {}): Promise<DoctorRun> {
-  if (running) throw new DoctorBusyError();
-  running = true;
+  const now = d.now().getTime();
+  if (running !== null && now - running.since < LOCK_MS) throw new DoctorBusyError();
+  const mine = { since: now };
+  running = mine;
   try {
     const startedAt = d.now().toISOString();
     const { lastInsertRowid } = d.db
@@ -60,7 +66,8 @@ export async function runDoctor(d: DoctorDeps, opts: { zoneId?: string } = {}): 
       .run(finishedAt, JSON.stringify(checks), JSON.stringify(dropIds), id);
     return { id, startedAt, finishedAt, checks, dropIds };
   } finally {
-    running = false;
+    // Only this run's own lock: a newer run that took over an expired lock keeps it.
+    if (running === mine) running = null;
   }
 }
 

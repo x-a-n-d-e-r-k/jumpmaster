@@ -274,12 +274,32 @@ export class GitHubForge implements Forge {
   private readonly octokit: Octokit;
   private viewer: Promise<string> | undefined;
 
+  /**
+   * `requestTimeoutMs` aborts any request that has not answered in time (the doctor's forges set
+   * it, so one stalled connection can't hang a run); absent, requests wait as before.
+   */
   constructor(
     private readonly owner: string,
     private readonly repo: string,
     token: string,
+    opts: { requestTimeoutMs?: number } = {},
   ) {
-    this.octokit = new Octokit({ auth: token, baseUrl: 'https://api.github.com' });
+    const ms = opts.requestTimeoutMs;
+    this.octokit = new Octokit({
+      auth: token,
+      baseUrl: 'https://api.github.com',
+      ...(ms === undefined
+        ? {}
+        : {
+            request: {
+              fetch: (url: string | URL | Request, init: RequestInit = {}) => {
+                const timeout = AbortSignal.timeout(ms);
+                const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+                return fetch(url, { ...init, signal });
+              },
+            },
+          }),
+    });
   }
 
   async getDefaultBranch(): Promise<string> {

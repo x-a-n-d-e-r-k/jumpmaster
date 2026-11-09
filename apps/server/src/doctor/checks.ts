@@ -64,6 +64,8 @@ export type DoctorDeps = {
   now(): Date;
   env: DoctorEnv;
   forges(zoneId: string): ForgePair;
+  /** How long one check may take before it is reported as not answering (default 60 s). */
+  checkTimeoutMs?: number;
   /** A forge on the read token (`JM_GITHUB_READ_TOKEN`), when one is configured. */
   readForge?(zoneId: string): Forge | undefined;
 };
@@ -71,6 +73,8 @@ export type DoctorDeps = {
 const DOC = 'docs/runbooks/install.md';
 const doc = (anchor: string): string => `${DOC}#${anchor}`;
 
+/** A check that has not finished by then is a warn: one stalled read can't hang the run. */
+export const CHECK_TIMEOUT_MS = 60_000;
 /** A stick is live when it asked for work this recently. */
 export const STICK_LIVE_MS = 120_000;
 const TOKEN_WARN_DAYS = 330;
@@ -584,8 +588,8 @@ async function identityCheck(
     return {
       ...base,
       status: 'fail',
-      summary: `the ${who} account ${login.value} has ${role} access to ${zone.repo}, not write`,
-      fix: `Invite ${login.value} to ${zone.repo} with the Write role (Settings → Collaborators), and accept the invitation as that account.`,
+      summary: `GitHub reports ${role} access to ${zone.repo} for the ${who} token (account ${login.value}), not write: either the account lacks the role, or the token does`,
+      fix: `Give ${login.value} the Write role on ${zone.repo} (Settings → Collaborators, then accept the invitation as that account), and check the token's repository access includes ${zone.repo} with Contents: Read and write.`,
     };
   if (who === 'reviewer' && a.permissions.admin)
     return {
@@ -668,7 +672,9 @@ async function readsCheck(
     who === 'reviewer'
       ? ['Contents: read', 'Pull requests: read']
       : ['Contents: read', 'Issues: read', 'Pull requests: read', 'Commit statuses: read'];
-  const refused = (p: ReadProbe | undefined) => p?.status === 403 || p?.status === 404;
+  // A rate-limited 403 says nothing about permissions: it is a read that could not be tried.
+  const refused = (p: ReadProbe | undefined) =>
+    p !== undefined && !p.rateLimited && (p.status === 403 || p.status === 404);
   const wants = (p: ReadProbe) => (p.accepted ? ` (GitHub says it needs ${p.accepted})` : '');
   const unknown = probed.value.filter(
     (p) =>
@@ -701,12 +707,14 @@ async function readsCheck(
     const actions = probes.get('Actions: read');
     if (refused(checks) && refused(actions)) {
       problems.push(
-        `the server can't read CI results: check runs refused (HTTP ${checks?.status}; fine-grained tokens never can) and Actions: read refused (HTTP ${actions?.status})${actions ? wants(actions) : ''}, which is how it reads CI jobs instead`,
+        `the server can't read CI results: check runs refused (HTTP ${checks?.status})${checks ? wants(checks) : ''} and Actions: read refused (HTTP ${actions?.status})${actions ? wants(actions) : ''}, the fallback it reads CI jobs through`,
       );
-      fixes.push('Actions: Read-only');
+      fixes.push(
+        'Checks: Read-only (or Actions: Read-only, which the server then reads CI jobs through)',
+      );
     } else if (refused(checks)) {
       ci =
-        '; CI is read through Actions jobs, since check runs are refused (fine-grained tokens never can read them; checks from apps other than GitHub Actions are not visible)';
+        '; CI is read through Actions jobs, since check runs are refused (checks from apps other than GitHub Actions are then not visible; Checks: Read-only on the token would show them)';
     }
   }
   if (problems.length > 0)
@@ -722,6 +730,14 @@ async function readsCheck(
       status: 'warn',
       summary: `could not try ${unknown.map((p) => p.permission).join(', ')} (${unknown.map((p) => (p.rateLimited ? 'rate limit' : p.status === null ? 'no answer' : `HTTP ${p.status}`)).join(', ')}); the check did not finish`,
       fix: 'Run the doctor again in a few minutes.',
+    };
+  // GitHub lets any token read a public repository, so there a 200 proves only that the token works.
+  const access = await r.access[who]();
+  if (access.ok && !access.value.private)
+    return {
+      ...base,
+      status: 'pass',
+      summary: `the ${who} token works, and ${zone.repo} is public, so every read succeeds with any token: this proves the token works, not its permissions; a missing Contents, Issues or Pull requests permission shows at the first push or filing${ci}`,
     };
   return {
     ...base,
@@ -880,7 +896,19 @@ async function ciCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck>
       summary: `the no-CI-yet path (ciRequired: false): the zone's gates are the only check before a merge; ${seen}`,
       fix: 'Once CI exists, require its check in the ruleset (select GitHub Actions as the source) and set ciRequired: true.',
     };
-  if (required.length > 0) return { ...base, status: 'pass', summary: `CI is required: ${seen}` };
+  if (required.length > 0 && workflows.length === 0)
+    return {
+      ...base,
+      status: 'warn',
+      summary: `required check(s) ${required.join(', ')}, but no GitHub Actions workflow on ${branch}: if another CI reports ${required.join(', ')} as a commit status, nothing to do; otherwise every pull request would wait forever for a check that never runs`,
+      fix: `Add the workflow that produces ${required.join(', ')} under .github/workflows, or set ciRequired: false and drop the required check until CI exists.`,
+    };
+  if (required.length > 0)
+    return {
+      ...base,
+      status: 'pass',
+      summary: `CI is required: ${seen} (each required check must be the name of a job those workflows run)`,
+    };
   return {
     ...base,
     status: 'fail',
@@ -1161,12 +1189,13 @@ function egressCheck(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck {
     };
   }
   const denied = [...new Set(seen.hosts.filter((h) => h.decision === 'deny').map((h) => h.host))];
+  // Under enforce a denial is the control working: listed for the operator, not a warning. A host
+  // the doctor drop itself needed and was denied shows as zone.doctor-drop's warn.
   if (denied.length > 0)
     return {
       ...base,
-      status: 'warn',
-      summary: `egress is enforced; hosts denied in ${window}: ${denied.join(', ')}`,
-      fix: 'If a gate or tool needs one of these, add it to egress.allow; otherwise nothing to do.',
+      status: 'pass',
+      summary: `egress is enforced (${allow.length} allowed host entries); hosts drops tried and were refused, as enforce means, in ${window}: ${denied.join(', ')} (add one to egress.allow only if a gate or tool needs it)`,
     };
   return {
     ...base,
@@ -1303,8 +1332,8 @@ function doctorDropCheck(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck {
     return {
       ...at,
       status: 'skip',
-      summary: `doctor drop ${row.id} is ${row.state} (asked for at ${row.createdAt})`,
-      fix: 'Run the doctor again when it finishes. A queued drop waits for a free stick that can run this zone (see stick.capabilities and usage.gate).',
+      summary: `doctor drop ${row.id} is ${row.state === 'queued' ? `queued for ${Math.round((d.now().getTime() - Date.parse(row.createdAt)) / 60_000)} minutes` : row.state} (asked for at ${row.createdAt})`,
+      fix: `Run the doctor again when it finishes. A queued drop waits for a free stick that can run this zone (see stick.capabilities and usage.gate); to give up on it: jumpmaster ctl doctor ${zone.id} --cancel`,
     };
   let result: DropResult | null = null;
   try {
@@ -1424,9 +1453,25 @@ async function guard(
   id: string,
   zoneId: string | null,
   fn: () => Promise<DoctorCheck> | DoctorCheck,
+  deadlineMs: number,
 ): Promise<DoctorCheck> {
+  let timer: NodeJS.Timeout | undefined;
+  // A read that never answers must not hang the run: past the deadline the check is a warn.
+  const late = new Promise<DoctorCheck>((resolve) => {
+    timer = setTimeout(
+      () =>
+        resolve({
+          id,
+          zoneId,
+          status: 'warn',
+          summary: `${id} did not answer within ${Math.round(deadlineMs / 1000)}s; the check did not run`,
+          fix: 'Check the server can reach api.github.com, then run the doctor again.',
+        }),
+      deadlineMs,
+    );
+  });
   try {
-    return await fn();
+    return await Promise.race([Promise.resolve().then(fn), late]);
   } catch (err) {
     const status = (err as { status?: unknown }).status;
     return {
@@ -1436,8 +1481,16 @@ async function guard(
       summary: `the check could not run: ${String((err as Error)?.message ?? err).split('\n')[0]}${typeof status === 'number' ? ` (HTTP ${status})` : ''}`,
       fix: 'Run the doctor again; if this repeats, the server log says more.',
     };
+  } finally {
+    clearTimeout(timer);
   }
 }
+
+/** The deadline-bound guard for this run. */
+const guardFor =
+  (d: DoctorDeps) =>
+  (id: string, zoneId: string | null, fn: () => Promise<DoctorCheck> | DoctorCheck) =>
+    guard(id, zoneId, fn, d.checkTimeoutMs ?? CHECK_TIMEOUT_MS);
 
 export async function zoneChecks(
   d: DoctorDeps,
@@ -1446,33 +1499,34 @@ export async function zoneChecks(
 ): Promise<DoctorCheck[]> {
   const r = zoneReads(d, zone);
   const z = zone.id;
+  const g = guardFor(d);
   const checks: Promise<DoctorCheck>[] = [
-    guard('zone.mode', z, () => modeCheck(zone, d)),
-    guard('stick.capabilities', z, () => stickCapabilityCheck(d, zone, sticks)),
-    guard('forge.author', z, () => identityCheck(d, zone, r, 'author')),
-    guard('forge.reviewer', z, () => identityCheck(d, zone, r, 'reviewer')),
-    guard('forge.admin', z, () => adminCheck(zone, r)),
-    guard('forge.author-reads', z, () => readsCheck(zone, r, 'author')),
-    guard('forge.reviewer-reads', z, () => readsCheck(zone, r, 'reviewer')),
-    guard('forge.branch-rules', z, () => branchRulesCheck(zone, r)),
-    guard('forge.codeowners', z, () => codeownersCheck(zone, r)),
-    guard('forge.ci', z, () => ciCheck(zone, r)),
-    guard('forge.labels', z, () => labelsCheck(zone, r)),
-    guard('forge.private-clone', z, () => privateCloneCheck(d, zone, r)),
-    guard('zone.preset', z, () => presetCheck(zone, r)),
-    guard('zone.services', z, () => servicesCheck(d, zone, sticks)),
-    guard('zone.egress', z, () => egressCheck(d, zone)),
+    g('zone.mode', z, () => modeCheck(zone, d)),
+    g('stick.capabilities', z, () => stickCapabilityCheck(d, zone, sticks)),
+    g('forge.author', z, () => identityCheck(d, zone, r, 'author')),
+    g('forge.reviewer', z, () => identityCheck(d, zone, r, 'reviewer')),
+    g('forge.admin', z, () => adminCheck(zone, r)),
+    g('forge.author-reads', z, () => readsCheck(zone, r, 'author')),
+    g('forge.reviewer-reads', z, () => readsCheck(zone, r, 'reviewer')),
+    g('forge.branch-rules', z, () => branchRulesCheck(zone, r)),
+    g('forge.codeowners', z, () => codeownersCheck(zone, r)),
+    g('forge.ci', z, () => ciCheck(zone, r)),
+    g('forge.labels', z, () => labelsCheck(zone, r)),
+    g('forge.private-clone', z, () => privateCloneCheck(d, zone, r)),
+    g('zone.preset', z, () => presetCheck(zone, r)),
+    g('zone.services', z, () => servicesCheck(d, zone, sticks)),
+    g('zone.egress', z, () => egressCheck(d, zone)),
     ...(zone.crew.enabled
       ? [
-          guard('zone.goals', z, () => goalsCheck(zone, d)),
-          guard('zone.crew-cap', z, () => crewCapCheck(zone, d)),
+          g('zone.goals', z, () => goalsCheck(zone, d)),
+          g('zone.crew-cap', z, () => crewCapCheck(zone, d)),
         ]
       : []),
   ];
   return [
     ...(await Promise.all(checks)),
     ...pendingChecks(zone),
-    await guard('zone.doctor-drop', z, () => doctorDropCheck(d, zone)),
+    await g('zone.doctor-drop', z, () => doctorDropCheck(d, zone)),
   ];
 }
 
@@ -1482,15 +1536,16 @@ export async function runChecks(
   opts: { zoneId?: string } = {},
 ): Promise<DoctorCheck[]> {
   const sticks = listSticks(d.db);
+  const g = guardFor(d);
   const global = await Promise.all([
-    guard('config.listen', null, () => listenCheck(d)),
-    guard('config.uid', null, () => uidCheck(d)),
-    guard('claude.token-age', null, () => tokenAgeCheck(d)),
-    guard('claude.plan', null, () => planCheck(d)),
-    guard('control.kill', null, () => killCheck(d)),
-    guard('usage.gate', null, () => usageCheck(d)),
-    guard('stick.seen', null, () => stickSeenCheck(d, sticks)),
-    guard('stick.image-policy', null, () => imagePolicyCheck(d, sticks)),
+    g('config.listen', null, () => listenCheck(d)),
+    g('config.uid', null, () => uidCheck(d)),
+    g('claude.token-age', null, () => tokenAgeCheck(d)),
+    g('claude.plan', null, () => planCheck(d)),
+    g('control.kill', null, () => killCheck(d)),
+    g('usage.gate', null, () => usageCheck(d)),
+    g('stick.seen', null, () => stickSeenCheck(d, sticks)),
+    g('stick.image-policy', null, () => imagePolicyCheck(d, sticks)),
   ]);
   const zones = d.config.dropZones.filter((z) => opts.zoneId === undefined || z.id === opts.zoneId);
   const perZone = await Promise.all(zones.map((z) => zoneChecks(d, z, sticks)));

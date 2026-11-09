@@ -792,6 +792,27 @@ describe('applyResult: doctor', () => {
     expect(workItem(db, 1).state).toBe('in_flight');
   });
 
+  test('M-5: a doctor drop whose probe, a service or a gate failed is stored as failed', async () => {
+    for (const bad of [
+      { claude: { ok: false, error: 'authentication_failed' } },
+      { services: [{ name: 'db', ok: false }] },
+      { gates: [{ name: 'test', exitCode: 1, durationMs: 1, timedOut: false, outputTail: '' }] },
+      { clone: { ok: false, error: 'x' } },
+    ]) {
+      const { db, deps } = doctorSetup();
+      const doctor = { ...findings('ok'), ...bad };
+      await applyResult(
+        db,
+        deps,
+        'doc',
+        { status: 'completed', role: 'doctor', gates: doctor.gates, doctor },
+        t0,
+      );
+      expect(getDrop(db, 'doc')?.state).toBe('failed');
+      expect(JSON.parse(getDrop(db, 'doc')?.resultJson ?? '{}').doctor).toBeTruthy();
+    }
+  });
+
   test('a doctor result without findings fails the drop, saying why', async () => {
     const { db, deps } = doctorSetup();
     await applyResult(db, deps, 'doc', { status: 'failed', reason: 'clone died', gates: [] }, t0);

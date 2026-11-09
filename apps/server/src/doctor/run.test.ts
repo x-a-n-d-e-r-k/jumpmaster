@@ -52,6 +52,21 @@ describe('runDoctor', () => {
     await expect(runDoctor(w.deps)).resolves.toMatchObject({ checks: expect.any(Array) });
   });
 
+  test('I-3: a run older than the lock lifetime no longer holds the doctor at 409', async () => {
+    const hung = world();
+    let at = hung.deps.now().getTime();
+    hung.deps.now = () => new Date(at);
+    // A check that never answers, with no deadline in force: the first run hangs.
+    hung.deps.checkTimeoutMs = 3_600_000;
+    hung.f.author.listLabels = () => new Promise(() => {});
+    void runDoctor(hung.deps);
+    await expect(runDoctor(hung.deps)).rejects.toBeInstanceOf(DoctorBusyError);
+    at += 11 * 60_000;
+    const ok = world();
+    ok.deps.now = () => new Date(at);
+    await expect(runDoctor(ok.deps)).resolves.toMatchObject({ finishedAt: expect.any(String) });
+  });
+
   test('a run is stored, the latest is read back, and a zone filter limits the zone checks', async () => {
     const w = world();
     expect(latestDoctorRun(w.db)).toBeNull();

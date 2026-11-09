@@ -35,6 +35,8 @@ export interface ControlDeps {
   kick?: () => void;
   /** The zone's forges, for the doctor's reads (it never writes). Absent: no doctor routes. */
   forgesFor?(zoneId: string): ForgePair;
+  /** The doctor's own forges, whose requests time out; defaults to `forgesFor`. */
+  doctorForgesFor?(zoneId: string): ForgePair;
   /** A forge on the read token, when one is configured. */
   readForgeFor?(zoneId: string): Forge | undefined;
   /** This process as the doctor sees it (default: read from the process). */
@@ -42,7 +44,10 @@ export interface ControlDeps {
 }
 
 const DoctorBody = z.strictObject({ zone: z.string().min(1).optional() });
-const DoctorDropBody = z.strictObject({ zone: z.string().min(1) });
+const DoctorDropBody = z.strictObject({
+  zone: z.string().min(1),
+  cancel: z.literal(true).optional(),
+});
 
 const ZoneBody = z.object({ mode: z.enum(ZONE_MODES) });
 const RuleBody = z.object({
@@ -206,7 +211,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
               config,
               now,
               env,
-              forges: forgesFor,
+              forges: deps.doctorForgesFor ?? forgesFor,
               ...(deps.readForgeFor ? { readForge: deps.readForgeFor } : {}),
             },
             zoneId !== undefined ? { zoneId } : {},
@@ -227,6 +232,28 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       if (!body.success) return reply.code(400).send({ error: 'invalid body: {"zone": "<id>"}' });
       const zone = config.dropZones.find((z) => z.id === body.data.zone);
       if (!zone) return reply.code(404).send({ error: 'unknown zone' });
+      // Cancel: only a queued doctor drop, which nothing has started (a running one finishes).
+      if (body.data.cancel) {
+        const mine = db
+          .prepare(
+            `SELECT id, state FROM drops WHERE drop_zone_id = ? AND role = 'doctor'
+               AND state IN ('queued','leased','running')`,
+          )
+          .get(zone.id) as { id: string; state: string } | undefined;
+        if (!mine) return reply.code(404).send({ error: `no doctor drop is queued in ${zone.id}` });
+        if (mine.state !== 'queued')
+          return reply.code(409).send({
+            error: `doctor drop ${mine.id} is already ${mine.state === 'leased' ? 'leased' : 'running'} on a stick; it finishes on its own`,
+          });
+        const done = db
+          .prepare(
+            "UPDATE drops SET state = 'cancelled', finished_at = ? WHERE id = ? AND state = 'queued'",
+          )
+          .run(now().toISOString(), mine.id);
+        if (done.changes === 0)
+          return reply.code(409).send({ error: `doctor drop ${mine.id} has just started` });
+        return { dropId: mine.id, zone: zone.id, state: 'cancelled' };
+      }
       if (isKilled(db))
         return reply.code(409).send({
           error: 'the kill switch is engaged, so no drop would run: jumpmaster ctl unkill first',
