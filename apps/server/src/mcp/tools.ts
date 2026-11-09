@@ -380,6 +380,8 @@ const TOOLS: ToolDef[] = [
   raiseBriefingTool,
 ];
 const WRITE_TOOLS = TOOLS.filter((t) => t.scope === 'write').map((t) => t.name);
+/** Every tool's name, as a client sees it after `mcp__jumpmaster__` (the intake skills name them). */
+export const TOOL_NAMES: readonly string[] = TOOLS.map((t) => t.name);
 
 function inputSchema(schema: z.ZodType): Tool['inputSchema'] {
   const { $schema: _drop, ...json } = z.toJSONSchema(schema) as Record<string, unknown>;

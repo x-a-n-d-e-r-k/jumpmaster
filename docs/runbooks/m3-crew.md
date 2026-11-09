@@ -315,3 +315,35 @@ tier and Fable status are never shown.
 
 Issues filed over MCP that are still `filing` when the crew is later disabled wait, as crew
 filings do, and are filed once it is enabled again.
+
+### Intake skills
+
+Three Claude Code skills walk you from a repository to a merged `GOAL.md` and the first staged
+issues over this MCP server, with a write token for the zone:
+
+- [`jumpmaster-intake-existing`](../../skills/jumpmaster-intake-existing/SKILL.md): an existing
+  codebase;
+- [`jumpmaster-intake-idea`](../../skills/jumpmaster-intake-idea/SKILL.md): a new project from an
+  idea;
+- [`jumpmaster-intake-partial`](../../skills/jumpmaster-intake-partial/SKILL.md): a partly built
+  project.
+
+They share one flow, in [`skills/shared`](../../skills/shared/interviewer.md): check the connection
+with `get_queue`, interview you one question at a time, read the repository as data, write
+`GOAL.md` on a local branch for you to merge by pull request (it is a protected path), then file
+at most five issues with `file_staged_issues`. Those wait under the staged label for your
+**Promote** ruling, like any crew issue. The skills hold no forge token and never label, promote
+or merge anything.
+
+Install them as user skills, keeping the layout (each skill links `../shared`):
+
+```bash
+mkdir -p ~/.claude/skills
+cp -R skills/jumpmaster-intake-existing skills/jumpmaster-intake-idea \
+  skills/jumpmaster-intake-partial skills/shared ~/.claude/skills/
+```
+
+Then, in a checkout of the zone's repository, ask Claude Code to run the one that fits.
+`file_staged_issues` needs the zone's crew enabled; enable it after `GOAL.md` is merged.
+For a quick first issue without the crew, the in-app intake page (`/zones/<id>/intake`) files one
+ready issue directly.
