@@ -414,6 +414,8 @@ export async function reconcileZone(
         actions++;
         break;
       case 'post_review':
+        // Starter mode never posts (decide doesn't ask); with no reviewer there is no one to post.
+        if (forges.reviewer === null) break;
         await postReview(db, forges, s, a.verdictId, secrets, now);
         actions++;
         break;

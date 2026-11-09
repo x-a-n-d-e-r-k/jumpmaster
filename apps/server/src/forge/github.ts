@@ -89,15 +89,46 @@ export type CompareFacts = {
 
 export type PullFiles = { files: { path: string; previousPath?: string }[]; complete: boolean };
 
+/** GitHub's app id for GitHub Actions, as a ruleset's required check names its source. */
+export const GITHUB_ACTIONS_APP_ID = 15368;
+
 export type BranchRules = {
   requiredApprovals: number;
   dismissStaleOnPush: boolean;
   requiredChecks: string[];
   unpinnedChecks: string[];
+  /** Required checks pinned to an app other than GitHub Actions (absent when none). */
+  nonActionsChecks?: string[];
   viewerCanBypass: boolean;
   viewerIsAdmin: boolean;
   /** Active rule types the server cannot satisfy with its own merge (merge queue, deployments). */
   unsupportedRules?: string[];
+  /** An active ruleset has a pull-request rule (absent in fakes and older callers: unknown). */
+  requiresPullRequest?: boolean;
+  /** An active pull-request rule requires a code owner's review. */
+  requireCodeOwnerReview?: boolean;
+};
+
+/** What the token's account may do on the repository, as `GET /repos/{repo}` reports it. */
+export type RepoAccess = {
+  private: boolean;
+  defaultBranch: string;
+  permissions: { admin: boolean; maintain: boolean; push: boolean; triage: boolean; pull: boolean };
+  /** A classic token's scopes (`x-oauth-scopes`); null when GitHub sent none (fine-grained). */
+  scopes: string[] | null;
+  /** When the token expires, if GitHub said (`github-authentication-token-expiration`). */
+  tokenExpiresAt: string | null;
+};
+
+/**
+ * One read the server relies on, tried with this token: the HTTP status (null when no answer came)
+ * and, on a refusal, the permission GitHub says the endpoint accepts.
+ */
+export type ReadProbe = {
+  permission: string;
+  status: number | null;
+  accepted: string | null;
+  rateLimited?: boolean;
 };
 export type BranchRulesRead =
   | { kind: 'ok'; rules: BranchRules }
@@ -156,6 +187,19 @@ export interface Forge {
     number: number,
     input: { sha: string; method: 'squash'; title: string; message: string },
   ): Promise<{ merged: boolean; sha?: string }>;
+  /** Doctor reads (never a write): the token account's access to the repository. */
+  repoAccess(): Promise<RepoAccess>;
+  /** Every label name on the repository. */
+  listLabels(): Promise<string[]>;
+  /** Entry names in a directory at `ref`; null when the path is missing or is not a directory. */
+  listDir(ref: string, path: string): Promise<string[] | null>;
+  /** Tries each read the server relies on (one GET each) and reports the status. */
+  probeReads(sha: string): Promise<ReadProbe[]>;
+  /**
+   * Tries one read only Administration permission allows (`GET …/actions/permissions`): a 403 or
+   * 404 says the token lacks Administration, so it can't change the repository's rulesets.
+   */
+  probeAdministration(): Promise<ReadProbe>;
 }
 
 const TRUSTED_ROLES = new Set(['write', 'maintain', 'admin']);
@@ -240,12 +284,32 @@ export class GitHubForge implements Forge {
   private readonly octokit: Octokit;
   private viewer: Promise<string> | undefined;
 
+  /**
+   * `requestTimeoutMs` aborts any request that has not answered in time (the doctor's forges set
+   * it, so one stalled connection can't hang a run); absent, requests wait as before.
+   */
   constructor(
     private readonly owner: string,
     private readonly repo: string,
     token: string,
+    opts: { requestTimeoutMs?: number } = {},
   ) {
-    this.octokit = new Octokit({ auth: token, baseUrl: 'https://api.github.com' });
+    const ms = opts.requestTimeoutMs;
+    this.octokit = new Octokit({
+      auth: token,
+      baseUrl: 'https://api.github.com',
+      ...(ms === undefined
+        ? {}
+        : {
+            request: {
+              fetch: (url: string | URL | Request, init: RequestInit = {}) => {
+                const timeout = AbortSignal.timeout(ms);
+                const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+                return fetch(url, { ...init, signal });
+              },
+            },
+          }),
+    });
   }
 
   async getDefaultBranch(): Promise<string> {
@@ -665,8 +729,11 @@ export class GitHubForge implements Forge {
 
       let requiredApprovals = 0;
       let dismissStaleOnPush = false;
+      let requiresPullRequest = false;
+      let requireCodeOwnerReview = false;
       const requiredChecks: string[] = [];
       const unpinnedChecks: string[] = [];
+      const nonActionsChecks: string[] = [];
       const unsupportedRules: string[] = [];
       for (const rule of rules) {
         if (rule.ruleset_id == null || !active.has(rule.ruleset_id)) continue;
@@ -675,10 +742,16 @@ export class GitHubForge implements Forge {
         }
         if (rule.type === 'pull_request') {
           const p = rule.parameters as
-            | { required_approving_review_count?: number; dismiss_stale_reviews_on_push?: boolean }
+            | {
+                required_approving_review_count?: number;
+                dismiss_stale_reviews_on_push?: boolean;
+                require_code_owner_review?: boolean;
+              }
             | undefined;
+          requiresPullRequest = true;
           requiredApprovals = Math.max(requiredApprovals, p?.required_approving_review_count ?? 0);
           if (p?.dismiss_stale_reviews_on_push) dismissStaleOnPush = true;
+          if (p?.require_code_owner_review) requireCodeOwnerReview = true;
         } else if (rule.type === 'required_status_checks') {
           const p = rule.parameters as
             | { required_status_checks?: { context: string; integration_id?: number | null }[] }
@@ -687,6 +760,12 @@ export class GitHubForge implements Forge {
             if (!requiredChecks.includes(c.context)) requiredChecks.push(c.context);
             if (c.integration_id == null && !unpinnedChecks.includes(c.context)) {
               unpinnedChecks.push(c.context);
+            } else if (
+              c.integration_id != null &&
+              c.integration_id !== GITHUB_ACTIONS_APP_ID &&
+              !nonActionsChecks.includes(c.context)
+            ) {
+              nonActionsChecks.push(c.context);
             }
           }
         }
@@ -702,6 +781,9 @@ export class GitHubForge implements Forge {
           viewerCanBypass,
           viewerIsAdmin,
           ...(unsupportedRules.length > 0 ? { unsupportedRules } : {}),
+          ...(nonActionsChecks.length > 0 ? { nonActionsChecks } : {}),
+          requiresPullRequest,
+          requireCodeOwnerReview,
         },
       };
     } catch (err) {
@@ -798,5 +880,114 @@ export class GitHubForge implements Forge {
       commit_message: input.message,
     });
     return data.sha ? { merged: data.merged, sha: data.sha } : { merged: data.merged };
+  }
+
+  async repoAccess(): Promise<RepoAccess> {
+    const { data, headers } = await this.octokit.rest.repos.get({
+      owner: this.owner,
+      repo: this.repo,
+    });
+    const p = (data.permissions ?? {}) as Partial<RepoAccess['permissions']>;
+    const scopes = headers['x-oauth-scopes'];
+    const expiry = headers['github-authentication-token-expiration'];
+    const expiresAt = typeof expiry === 'string' ? Date.parse(expiry.replace(' UTC', 'Z')) : NaN;
+    return {
+      private: data.private === true,
+      defaultBranch: data.default_branch,
+      permissions: {
+        admin: p.admin === true,
+        maintain: p.maintain === true,
+        push: p.push === true,
+        triage: p.triage === true,
+        pull: p.pull === true,
+      },
+      scopes:
+        typeof scopes === 'string'
+          ? scopes
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : null,
+      tokenExpiresAt: Number.isFinite(expiresAt) ? new Date(expiresAt).toISOString() : null,
+    };
+  }
+
+  async listLabels(): Promise<string[]> {
+    const labels = await this.octokit.paginate(this.octokit.rest.issues.listLabelsForRepo, {
+      owner: this.owner,
+      repo: this.repo,
+      per_page: 100,
+    });
+    return labels.map((l) => l.name);
+  }
+
+  async listDir(ref: string, path: string): Promise<string[] | null> {
+    try {
+      const { data } = (await this.octokit.request('GET /repos/{owner}/{repo}/contents/{+path}', {
+        owner: this.owner,
+        repo: this.repo,
+        path: path.split('/').map(encodeURIComponent).join('/'),
+        ref,
+      })) as { data: unknown };
+      if (!Array.isArray(data)) return null; // a file, symlink or submodule
+      return data.map((e) => String((e as { name?: unknown }).name ?? ''));
+    } catch (err) {
+      if (statusOf(err) === 404) return null;
+      throw err;
+    }
+  }
+
+  async probeAdministration(): Promise<ReadProbe> {
+    const permission = 'Administration: read';
+    try {
+      const res = await this.octokit.request('GET /repos/{owner}/{repo}/actions/permissions', {
+        owner: this.owner,
+        repo: this.repo,
+      });
+      return { permission, status: res.status, accepted: null };
+    } catch (err) {
+      const response = (err as { response?: { headers?: Record<string, unknown> } }).response;
+      const status = response ? (statusOf(err) ?? null) : null;
+      const accepted = response?.headers?.['x-accepted-github-permissions'];
+      return {
+        permission,
+        status,
+        accepted: typeof accepted === 'string' ? accepted : null,
+        ...(status !== null && isRateLimited(err) ? { rateLimited: true } : {}),
+      };
+    }
+  }
+
+  async probeReads(sha: string): Promise<ReadProbe[]> {
+    const { owner, repo } = this;
+    const sha_ = encodeURIComponent(sha);
+    const reads: [string, string, Record<string, string>][] = [
+      ['Contents: read', `/repos/${owner}/${repo}/commits`, { per_page: '1' }],
+      ['Issues: read', `/repos/${owner}/${repo}/issues`, { per_page: '1', state: 'all' }],
+      ['Pull requests: read', `/repos/${owner}/${repo}/pulls`, { per_page: '1', state: 'all' }],
+      ['Checks: read', `/repos/${owner}/${repo}/commits/${sha_}/check-runs`, { per_page: '1' }],
+      ['Actions: read', `/repos/${owner}/${repo}/actions/runs`, { per_page: '1' }],
+      ['Commit statuses: read', `/repos/${owner}/${repo}/commits/${sha_}/status`, {}],
+    ];
+    const out: ReadProbe[] = [];
+    for (const [permission, url, query] of reads) {
+      try {
+        const res = await this.octokit.request(`GET ${url}`, query);
+        out.push({ permission, status: res.status, accepted: null });
+      } catch (err) {
+        // Octokit reports a request that got no answer as status 500 with no response.
+        const response = (err as { response?: { headers?: Record<string, unknown> } }).response;
+        const status = response ? (statusOf(err) ?? null) : null;
+        const headers = response?.headers;
+        const accepted = headers?.['x-accepted-github-permissions'];
+        out.push({
+          permission,
+          status,
+          accepted: typeof accepted === 'string' ? accepted : null,
+          ...(status !== null && isRateLimited(err) ? { rateLimited: true } : {}),
+        });
+      }
+    }
+    return out;
   }
 }

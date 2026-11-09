@@ -2,15 +2,19 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
-import { type Config, loadConfig, secretList } from './config.js';
+import { type Config, loadConfig, secretList, startupWarnings } from './config.js';
 import { creditsPass } from './credits.js';
 import { openDb } from './db/open.js';
 import { ensureZoneMode } from './db/repo.js';
 import { reconcileZone } from './flow/reconcile.js';
+import { GitHubForge } from './forge/github.js';
 import { leaseExpirer } from './leases.js';
 import { type ForgePair, markPendingUnknown, pairFor } from './outbox.js';
 import { promptVersions } from './payloads.js';
 import { syncDropZone } from './sync.js';
+
+/** How long one request on the timed forges (doctor reads, intake writes) may take. */
+const TIMED_REQUEST_MS = 30_000;
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -38,12 +42,45 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
     return pair;
   };
   const log = (msg: string) => console.error(`[jumpmaster] ${scrub(msg, config)}`);
+  // Risky settings are said out loud at every start (starter mode's merge-any-green-PR residual).
+  for (const w of startupWarnings(config)) log(`warning: ${w}`);
+
+  // The doctor's forge on the read token: reads only, never handed a write.
+  const readToken = config.secrets.githubReadToken;
+  const readForgeFor = (zoneId: string) => {
+    const zone = config.dropZones.find((z) => z.id === zoneId);
+    if (!zone || !readToken) return undefined;
+    const [owner = '', name = ''] = zone.repo.split('/');
+    return new GitHubForge(owner, name, readToken, { requestTimeoutMs: TIMED_REQUEST_MS });
+  };
+  // Timed forges: the zone's tokens again, but every request is abandoned after a deadline, so one
+  // stalled connection can't hang a request handler (the polling pass keeps its forges as they
+  // were). Two users, with different contracts:
+  // - the doctor only reads through them (it never writes: `doctorForgesFor`);
+  // - the intake writes through them, behind the operator token and the outbox, so a stalled forge
+  //   answers 502 instead of hanging the browser (`intakeForgesFor`).
+  const timedForges = new Map(
+    config.dropZones.map(
+      (zone) =>
+        [zone.id, pairFor(zone, config.secrets, { requestTimeoutMs: TIMED_REQUEST_MS })] as const,
+    ),
+  );
+  const timedForgesFor = (zoneId: string): ForgePair => {
+    const pair = timedForges.get(zoneId);
+    if (!pair) throw new Error(`unknown drop zone ${zoneId}`);
+    return pair;
+  };
+  const doctorForgesFor = timedForgesFor;
+  const intakeForgesFor = timedForgesFor;
 
   // A ruling starts a pass at once; `guardedPass` is defined below and only called after listen.
   const app = createApp({
     db,
     config,
     forgesFor,
+    readForgeFor,
+    doctorForgesFor,
+    intakeForgesFor,
     now: () => new Date(),
     kick: () => void guardedPass(),
     log,

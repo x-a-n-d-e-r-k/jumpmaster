@@ -212,9 +212,10 @@ M0 is a tracer, not a hardened deployment. Know the residual risks before you ru
   that process with full tool access, so code it runs (or code planted by the issue it
   works on) can read the token. Treat the Claude token as exposed to the repository's
   content.
-- **No egress control.** The trooper container has unrestricted network access in M0;
-  anything that reads a secret can also send it anywhere. Network egress control is
-  planned for M4.
+- **No egress control by default.** With a zone's `egress.mode` at `off` (the default) the
+  trooper container has unrestricted network access; anything that reads a secret can also send
+  it anywhere. From M4 a zone can set `egress.mode` to `monitor` or `enforce` (see the M2 cutover
+  runbook's egress notes for what that does and does not stop).
 - **Use a repo-scoped token on a throwaway repo.** The GitHub token must be a
   fine-grained PAT limited to the single test repository with the permissions in step
   3, short-lived, and revoked afterwards. Do not point M0 at a repository that matters.

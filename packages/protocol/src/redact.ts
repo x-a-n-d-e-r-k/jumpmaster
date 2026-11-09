@@ -29,17 +29,22 @@ export function containsSecret(text: string, secrets: string[]): boolean {
   return TOKEN_SHAPES.some((re) => new RegExp(re.source).test(text));
 }
 
-/** Every credential a drop payload carries, including the git basic-auth form of the forge token. */
+const withBasicAuth = (token: string | undefined): string[] =>
+  token === undefined ? [] : [token, Buffer.from(`x-access-token:${token}`).toString('base64')];
+
+/**
+ * Every credential a drop payload carries, including the git basic-auth form of each GitHub token
+ * (the forge token of item and crew roles, the read token of a doctor drop).
+ */
 export function payloadSecrets(p: {
-  credentials: { claudeToken: string; forgeToken?: string };
+  credentials: { claudeToken: string; forgeToken?: string; readToken?: string };
   gateSecrets?: Record<string, string>;
 }): string[] {
-  const { claudeToken, forgeToken } = p.credentials;
+  const { claudeToken, forgeToken, readToken } = p.credentials;
   return [
     ...Object.values(p.gateSecrets ?? {}),
     claudeToken,
-    ...(forgeToken === undefined
-      ? []
-      : [forgeToken, Buffer.from(`x-access-token:${forgeToken}`).toString('base64')]),
+    ...withBasicAuth(forgeToken),
+    ...withBasicAuth(readToken),
   ];
 }

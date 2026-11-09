@@ -3,6 +3,7 @@ import {
   agentBranch,
   CREW_ROLES,
   crewOutputJsonSchema,
+  DoctorResultSchema,
   DropPayloadSchema,
   DropResultSchema,
   EVENT_PREFIX,
@@ -161,6 +162,17 @@ describe('crew roles', () => {
     expect(DropPayloadSchema.safeParse({ ...crew, services: [] }).success).toBe(false);
   });
 
+  test('crew and item payloads may carry egress; only monitor or enforce, never off', () => {
+    const egress = { mode: 'enforce', allow: ['github.com'] };
+    for (const role of CREW_ROLES)
+      expect(DropPayloadSchema.parse({ ...crew, role, egress })).toMatchObject({ egress });
+    expect(DropPayloadSchema.parse({ ...base, egress })).toMatchObject({ egress });
+    expect(DropPayloadSchema.parse(base)).not.toHaveProperty('egress');
+    expect(
+      DropPayloadSchema.safeParse({ ...crew, egress: { mode: 'off', allow: [] } }).success,
+    ).toBe(false);
+  });
+
   test('a diagnose payload may carry a checkout; crew-lead may not', () => {
     expect(DropPayloadSchema.safeParse({ ...crew, role: 'diagnose', checkout }).success).toBe(true);
     expect(DropPayloadSchema.safeParse({ ...crew, checkout }).success).toBe(false);
@@ -245,5 +257,65 @@ describe('crew roles', () => {
       isUsingOverage: true,
       overageStatus: 'allowed',
     });
+  });
+});
+
+describe('the doctor role', () => {
+  const doctor = {
+    protocol: 1,
+    dropId: 'doc-1',
+    epoch: 1,
+    role: 'doctor',
+    repo: { owner: 'octo', name: 'widgets', defaultBranch: 'main' },
+    model: 'claude-opus-5-5',
+    image: 'jumpmaster-trooper:test',
+    gates: [{ name: 'test', run: 'npm test', timeoutMinutes: 5 }],
+    credentials: { claudeToken: 'c', readToken: 'r' },
+  };
+
+  test('a doctor payload parses, with services, limits, gate secrets and egress', () => {
+    const p = DropPayloadSchema.parse({
+      ...doctor,
+      services: [{ name: 'db', image: 'pg@sha256:x', port: 5432 }],
+      limits: { pids: 100 },
+      gateSecrets: { DB: 'pw' },
+      egress: { mode: 'monitor', allow: ['github.com'] },
+    });
+    expect(p.role).toBe('doctor');
+    expect(DropPayloadSchema.parse({ ...doctor, credentials: { claudeToken: 'c' } }).role).toBe(
+      'doctor',
+    );
+    expect(RoleSchema.options).toContain('doctor');
+    expect(isCrewRole('doctor')).toBe(false);
+  });
+
+  test('a doctor payload with a forgeToken, issue or branch is rejected', () => {
+    for (const extra of [
+      { credentials: { claudeToken: 'c', forgeToken: 'f' } },
+      { issue: { number: 1, title: 't', body: 'b' } },
+      { branch: 'agent/issue-1' },
+      { prompt: 'do anything' },
+      { protectedPaths: [] },
+    ])
+      expect(DropPayloadSchema.safeParse({ ...doctor, ...extra }).success).toBe(false);
+  });
+
+  test('a result may carry the doctor findings; they are validated', () => {
+    const findings = {
+      claude: { ok: false, error: 'authentication_failed' },
+      clone: { ok: true, sha: 'abc' },
+      services: [{ name: 'db', ok: true }],
+      gates: [{ name: 'test', exitCode: 1, durationMs: 5, timedOut: false, outputTail: 'x' }],
+    };
+    const r = DropResultSchema.parse({
+      status: 'completed',
+      role: 'doctor',
+      gates: findings.gates,
+      doctor: findings,
+    });
+    expect(r.doctor).toEqual(findings);
+    expect(DoctorResultSchema.safeParse({ ...findings, claude: { ok: 'yes' } }).success).toBe(
+      false,
+    );
   });
 });

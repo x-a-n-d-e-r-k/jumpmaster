@@ -4,6 +4,7 @@ import { describe, expect, test } from 'vitest';
 import { DEFAULT_PROTECTED_PATHS, type DropZoneConfig } from '../config.js';
 import type { BranchRules, BranchRulesRead } from '../forge/github.js';
 import {
+  ADMINISTRATION_PROBLEM,
   branchProtectionProblems,
   dependenciesChanged,
   gateBins,
@@ -935,6 +936,97 @@ describe('branchProtectionProblems', () => {
     expect(
       branchProtectionProblems({ author: rules(), reviewer: { kind: 'unavailable' } }, zone),
     ).toBeNull());
+
+  describe('starter identity', () => {
+    const starter = { ...zone, identity: 'starter' } as DropZoneConfig;
+    const ok = (r: Partial<BranchRules> = {}) =>
+      rules({ requiredApprovals: 0, dismissStaleOnPush: false, requiresPullRequest: true, ...r });
+
+    test('reads one identity: a null reviewer is judged on the author alone', () =>
+      expect(branchProtectionProblems({ author: ok(), reviewer: null }, starter)).toEqual([]));
+
+    test('starter rules requiring an approval are a problem; dismissStaleOnPush false is not', () => {
+      expect(
+        branchProtectionProblems({ author: ok({ requiredApprovals: 1 }), reviewer: null }, starter),
+      ).toEqual(['approvals required in starter mode']);
+      expect(
+        branchProtectionProblems(
+          { author: ok({ dismissStaleOnPush: false }), reviewer: null },
+          starter,
+        ),
+      ).toEqual([]);
+    });
+
+    test('starter needs a pull request rule, Actions-pinned required checks and no bypass', () =>
+      expect(
+        branchProtectionProblems(
+          {
+            author: ok({
+              requiresPullRequest: false,
+              requiredChecks: ['ci', 'lint', 'other'],
+              unpinnedChecks: ['lint'],
+              nonActionsChecks: ['other'],
+              viewerCanBypass: true,
+              viewerIsAdmin: true,
+            }),
+            reviewer: null,
+          },
+          starter,
+        ),
+      ).toEqual([
+        'no pull request rule',
+        'bot can bypass',
+        'bot is admin',
+        'required check not pinned: lint',
+        'required check not from GitHub Actions: other',
+      ]));
+
+    test('an admin author is allowed with authorMayBeAdmin (the personal-repository path), never a bypass', () => {
+      const admin = { ...starter, authorMayBeAdmin: true } as DropZoneConfig;
+      expect(
+        branchProtectionProblems({ author: ok({ viewerIsAdmin: true }), reviewer: null }, admin),
+      ).toEqual([]);
+      expect(
+        branchProtectionProblems({ author: ok({ viewerIsAdmin: true }), reviewer: null }, starter),
+      ).toEqual(['bot is admin']);
+      expect(
+        branchProtectionProblems(
+          { author: ok({ viewerIsAdmin: true, viewerCanBypass: true }), reviewer: null },
+          admin,
+        ),
+      ).toEqual(['bot can bypass']);
+    });
+
+    test('an admin author whose token has Administration parks; refused or unknown probes do not', () => {
+      const admin = { ...starter, authorMayBeAdmin: true } as DropZoneConfig;
+      const read = { author: ok({ viewerIsAdmin: true }), reviewer: null };
+      expect(branchProtectionProblems(read, admin, { authorAdministration: 'present' })).toEqual([
+        ADMINISTRATION_PROBLEM,
+      ]);
+      expect(ADMINISTRATION_PROBLEM).toMatch(/Administration/);
+      expect(ADMINISTRATION_PROBLEM).toMatch(/rate-limited or unanswered/);
+      for (const a of ['absent', 'unknown', undefined] as const)
+        expect(branchProtectionProblems(read, admin, { authorAdministration: a })).toEqual([]);
+    });
+
+    test('a pull request rule of unknown presence is a problem in starter mode', () =>
+      expect(
+        branchProtectionProblems(
+          { author: ok({ requiresPullRequest: undefined }), reviewer: null },
+          starter,
+        ),
+      ).toEqual(['no pull request rule']));
+
+    test('starter needs a non-empty required-check list', () =>
+      expect(
+        branchProtectionProblems({ author: ok({ requiredChecks: [] }), reviewer: null }, starter),
+      ).toEqual(['no required checks']));
+
+    test('an unavailable author read is still null', () =>
+      expect(
+        branchProtectionProblems({ author: { kind: 'unavailable' }, reviewer: null }, starter),
+      ).toBeNull());
+  });
 
   test('nothing is judged when protection is not required', () =>
     expect(

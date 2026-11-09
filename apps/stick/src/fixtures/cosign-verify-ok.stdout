@@ -1,0 +1,2 @@
+
+[{"critical":{"identity":{"docker-reference":"jmreg:5000/demo@sha256:742bbaf3524be1effb687bb69e991a5e5a43ad35c306f88ea4b91553d6aa78ef"},"image":{"docker-manifest-digest":"sha256:742bbaf3524be1effb687bb69e991a5e5a43ad35c306f88ea4b91553d6aa78ef"},"type":"https://sigstore.dev/cosign/sign/v1"},"optional":{}}]

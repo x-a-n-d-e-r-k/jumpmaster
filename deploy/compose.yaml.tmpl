@@ -1,0 +1,117 @@
+# Jumpmaster's compose file, as each release publishes it. The release workflow renders this
+# template with scripts/render-compose.ts: each image placeholder becomes the release's image pinned
+# by its @sha256 index digest, and rendering fails if any image is left unpinned. The template is
+# not a .yaml file so the repository's pin scan never mistakes its placeholders for images.
+#
+# Next to compose.yaml (docs/runbooks/install.md walks through each):
+#   .env                              JM_UID and JM_GID: the host user who owns the files below
+#   secrets/*                         one token per file, mode 0600, owned by that user
+#   config/jumpmaster.config.json     written by `jumpmaster init` (the init service below)
+#   data/                             the database, written by the server as that user
+#
+# Starter mode has no reviewer token, and a private repository adds a read token: init writes
+# JM_REVIEWER_TOKEN_* and JM_READ_TOKEN_* lines into .env, which the defaults below read. Plain
+# variable interpolation, so any Compose v2 works.
+#
+# Only the stick mounts the Docker socket, which is root on the host. The UI is on 127.0.0.1 only.
+name: jumpmaster
+
+services:
+  jumpmaster:
+    image: "{{image jumpmaster-server}}"
+    user: "${JM_UID:?set JM_UID in .env (see the install runbook)}:${JM_GID:?set JM_GID in .env (see the install runbook)}"
+    command: ["serve", "/config/jumpmaster.config.json"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "127.0.0.1:7420:7420"
+    environment:
+      JM_CLAUDE_TOKEN_FILE: /run/secrets/claude_token
+      JM_GITHUB_AUTHOR_TOKEN_FILE: /run/secrets/github_author_token
+      # Empty in starter mode (JM_REVIEWER_TOKEN_FILE= in .env): no reviewer identity.
+      JM_GITHUB_REVIEWER_TOKEN_FILE: ${JM_REVIEWER_TOKEN_FILE-/run/secrets/github_reviewer_token}
+      # Set for a private repository (JM_READ_TOKEN_FILE in .env); empty means no read token.
+      JM_GITHUB_READ_TOKEN_FILE: ${JM_READ_TOKEN_FILE:-}
+      JM_JOIN_TOKEN_FILE: /run/secrets/join_token
+      JM_OPERATOR_TOKEN_FILE: /run/secrets/operator_token
+    secrets:
+      - claude_token
+      - github_author_token
+      - github_reviewer_token
+      - github_read_token
+      - join_token
+      - operator_token
+    volumes:
+      - ./data:/data
+      - ./config:/config:ro
+    restart: unless-stopped
+
+  stick:
+    image: "{{image jumpmaster-stick}}"
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      JM_SERVER_URL: http://jumpmaster:7420
+      JM_JOIN_TOKEN_FILE: /run/secrets/join_token
+      JM_STICK_NAME: stick
+      JM_SLOTS: ${JM_SLOTS:-1}
+      # Images only by digest, each verified with cosign against this repository's release
+      # workflow, or pinned by the operator in JM_ALLOWED_IMAGES (name@sha256:…, comma-separated).
+      JM_IMAGE_POLICY: signed
+      JM_ALLOWED_IMAGES: ${JM_ALLOWED_IMAGES:-}
+      JM_EGRESS_IMAGE: "{{image jumpmaster-egress}}"
+      # Each egress-controlled drop takes a /28 from this pool (empty: the stick's default).
+      JM_DROP_SUBNET_POOL: ${JM_DROP_SUBNET_POOL:-}
+      # The enrollment, the Sigstore trust root and the verify cache.
+      JM_STATE_DIR: /state
+    secrets:
+      - join_token
+    volumes:
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - jm-stick:/state
+    depends_on:
+      - jumpmaster
+    restart: unless-stopped
+
+  # `docker compose --profile init run --rm init --repo owner/name`: writes config/ and the
+  # generated secrets into this directory, as the host user. Never started by `up`.
+  init:
+    image: "{{image jumpmaster-server}}"
+    profiles: ["init"]
+    user: "${JM_UID:?set JM_UID in .env (see the install runbook)}:${JM_GID:?set JM_GID in .env (see the install runbook)}"
+    entrypoint: ["jumpmaster", "init"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      JM_INSTALL_DIR: /install
+    volumes:
+      - .:/install
+
+secrets:
+  claude_token:
+    file: ./secrets/claude_token
+  github_author_token:
+    file: ./secrets/github_author_token
+  # A secret that is off is /dev/null: Compose needs a source, and the server never reads it.
+  github_reviewer_token:
+    file: ${JM_REVIEWER_TOKEN_SRC:-./secrets/github_reviewer_token}
+  github_read_token:
+    file: ${JM_READ_TOKEN_SRC:-/dev/null}
+  join_token:
+    file: ./secrets/join_token
+  operator_token:
+    file: ./secrets/operator_token
+
+volumes:
+  jm-stick:

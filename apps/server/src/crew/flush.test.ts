@@ -7,14 +7,22 @@ import {
   raiseBriefing,
   ruleBriefing,
 } from '../briefings.js';
-import { getOutbox, setKilled, setWorkItemState, setZoneMode, upsertWorkItem } from '../db/repo.js';
+import {
+  getOutbox,
+  listWorkItems,
+  setKilled,
+  setWorkItemState,
+  setZoneMode,
+  upsertWorkItem,
+} from '../db/repo.js';
 import { reconcileZone } from '../flow/reconcile.js';
 import { zonePass } from '../flow/snapshot.js';
 import { isJmIssueBody, opMarker, resolveUnknown, sanitizeCrewText } from '../outbox.js';
 import { promptVersions } from '../payloads.js';
+import { syncDropZone } from '../sync.js';
 import { makeZone, usageCfg, type ZoneWorld, zoneWorld } from '../test/fixtures.js';
 import { plus, t0 } from '../test/helpers.js';
-import { flushCrewOps } from './flush.js';
+import { flushCrewOps, PROMOTE_OPTIONS } from './flush.js';
 import {
   type CrewIssueState,
   getCrewIssue,
@@ -452,6 +460,149 @@ describe('crew disabled', () => {
     expect(getCrewIssue(w.db, id)?.state).toBe('promoting');
     expect(outboxRows()).toBe(before);
     expect(writes('setLabels')).toHaveLength(0);
+  });
+
+  test('an MCP-filed intent is filed staged with the crew off, and is still not started', async () => {
+    const id = insertCrewIssue(w.db, {
+      zoneId: 'main',
+      key: 'mcp-docs',
+      source: 'mcp',
+      sourceRef: 'token-1',
+      objective: 'document-every-endpoint',
+      title: 'Add docs',
+      body: 'Write the docs.',
+      priority: null,
+      createdAt: t0.toISOString(),
+    });
+    expect(await flushOff()).toBe(1);
+    const row = getCrewIssue(w.db, id);
+    expect(row?.state).toBe('staged');
+    const created = writes('createIssue');
+    expect(created).toHaveLength(1);
+    expect((created[0]?.args[0] as { labels: string[] }).labels).toEqual([off.crew.stagedLabel]);
+    // Staged, not ready: the next sync starts nothing.
+    await syncDropZone(w.db, w.forges, off, t0);
+    expect(listWorkItems(w.db, 'main').filter((i) => i.issueNumber === row?.number)).toEqual([]);
+  });
+
+  /** An assistant's (MCP) proposal, waiting to be filed. */
+  const mcpIntent = (key = 'mcp-docs') =>
+    insertCrewIssue(w.db, {
+      zoneId: 'main',
+      key,
+      source: 'mcp',
+      sourceRef: 'token-1',
+      objective: 'document-every-endpoint',
+      title: `Add docs ${key}`,
+      body: 'Write the docs.',
+      priority: null,
+      createdAt: t0.toISOString(),
+    });
+  const briefingsOn = (id: number) =>
+    listBriefings(w.db).filter((b) => b.subject === `issue:${id}`);
+
+  test('crew off: filed → server Promote briefing → Promote → ready label → the issue starts', async () => {
+    const id = mcpIntent();
+    await flushOff();
+    expect(getCrewIssue(w.db, id)?.state).toBe('staged');
+    const [b] = briefingsOn(id);
+    expect(b).toMatchObject({ kind: 'promote', source: 'server', state: 'open' });
+    expect(b?.options.map((o) => [o.id, o.effect])).toEqual(
+      PROMOTE_OPTIONS.map((o) => [o.id, o.effect]),
+    );
+    expect(ruleBriefing(w.db, b?.id ?? -1, 'promote', '', t0).ok).toBe(true);
+    expect(await applyPendingRulings(w.db, depsOff(), 'main', plus(t0, MIN))).toBe(1);
+    expect(getCrewIssue(w.db, id)?.state).toBe('promoting');
+    await flushOff(plus(t0, 2 * MIN));
+    const row = getCrewIssue(w.db, id);
+    expect(row?.state).toBe('promoted');
+    const labels = w.f.state.issues.get(row?.number ?? -1)?.labels;
+    expect(labels).toContain(off.readyLabel);
+    expect(labels).not.toContain(off.crew.stagedLabel);
+    // Eligible to start: the next sync admits it as a ready work item.
+    await syncDropZone(w.db, w.forges, off, plus(t0, 3 * MIN));
+    expect(listWorkItems(w.db, 'main').find((i) => i.issueNumber === row?.number)?.state).toBe(
+      'ready',
+    );
+  });
+
+  test('crew off: a second flush, or a restart, raises no second briefing', async () => {
+    const id = mcpIntent();
+    await flushOff();
+    await flushOff(plus(t0, MIN));
+    expect(briefingsOn(id)).toHaveLength(1);
+    // Ruled and closed: still never raised again.
+    const [b] = briefingsOn(id);
+    ruleBriefing(w.db, b?.id ?? -1, 'reject', '', t0);
+    await applyPendingRulings(w.db, depsOff(), 'main', plus(t0, 2 * MIN));
+    await flushOff(plus(t0, 3 * MIN));
+    await flushOff(plus(t0, 4 * MIN));
+    expect(briefingsOn(id)).toHaveLength(1);
+    expect(getCrewIssue(w.db, id)?.state).toBe('rejected');
+  });
+
+  /** Rules `option` on the issue's open briefing and applies it with the crew off. */
+  async function ruleOff(id: number, option: string, at: Date): Promise<void> {
+    const open = briefingsOn(id).find((b) => b.state === 'open');
+    expect(open, `an open briefing on issue:${id}`).toBeDefined();
+    expect(ruleBriefing(w.db, open?.id ?? -1, option, '', at).ok).toBe(true);
+    expect(await applyPendingRulings(w.db, depsOff(), 'main', at)).toBe(1);
+  }
+
+  test('a Promote on an issue closed on GitHub is not applied: no label swap, and Command is told', async () => {
+    const id = mcpIntent();
+    await flushOff();
+    await ruleOff(id, 'promote', plus(t0, MIN));
+    const n = getCrewIssue(w.db, id)?.number ?? -1;
+    w.f.state.closeIssue(n);
+    const labelWrites = writes('setLabels').length;
+    await flushOff(plus(t0, 2 * MIN));
+    expect(writes('setLabels')).toHaveLength(labelWrites);
+    const row = getCrewIssue(w.db, id);
+    expect(row?.state).not.toBe('promoted');
+    expect(row?.state).toBe('staged');
+    const open = briefingsOn(id).filter((b) => b.state === 'open');
+    expect(open).toHaveLength(1);
+    expect(open[0]?.decision).toMatch(/closed on GitHub/);
+    // A second flush neither promotes it nor stacks briefings.
+    await flushOff(plus(t0, 3 * MIN));
+    expect(writes('setLabels')).toHaveLength(labelWrites);
+    expect(briefingsOn(id).filter((b) => b.state === 'open')).toHaveLength(1);
+  });
+
+  test('crew off: edit on GitHub → Re-stage → a fresh Promote briefing → Promote → ready', async () => {
+    const id = mcpIntent();
+    await flushOff();
+    await ruleOff(id, 'promote', plus(t0, MIN));
+    const n = getCrewIssue(w.db, id)?.number ?? -1;
+    const live = w.f.state.issues.get(n);
+    if (live?.issue)
+      live.issue.body = live.issue.body.replace('Write the docs.', 'Write better docs.');
+    await flushOff(plus(t0, 2 * MIN)); // the promotion sees the edit: back to staged, Re-stage briefing
+    expect(getCrewIssue(w.db, id)?.state).toBe('staged');
+    await ruleOff(id, 'restage', plus(t0, 3 * MIN));
+    expect(getCrewIssue(w.db, id)?.body).toContain('Write better docs.');
+    await flushOff(plus(t0, 4 * MIN)); // a new body: a fresh Promote briefing
+    const open = briefingsOn(id).filter((b) => b.state === 'open');
+    expect(open).toHaveLength(1);
+    expect(open[0]?.options.map((o) => o.id)).toEqual(PROMOTE_OPTIONS.map((o) => o.id));
+    await ruleOff(id, 'promote', plus(t0, 5 * MIN));
+    await flushOff(plus(t0, 6 * MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('promoted');
+    expect(w.f.state.issues.get(n)?.labels).toContain(off.readyLabel);
+  });
+
+  test('crew off: a crew-drop staged issue gets no server briefing', async () => {
+    const id = await staged();
+    await flushOff(plus(t0, MIN));
+    expect(briefingsOn(id)).toEqual([]);
+  });
+
+  test('crew on: an MCP filing gets no server briefing; the refute owns promotion', async () => {
+    const id = mcpIntent();
+    await flush();
+    expect(getCrewIssue(w.db, id)?.state).toBe('staged');
+    expect(briefingsOn(id)).toEqual([]);
   });
 
   test('a filing intent is not filed, and revising waits too', async () => {

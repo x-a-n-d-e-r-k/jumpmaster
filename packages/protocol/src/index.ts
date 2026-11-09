@@ -27,13 +27,61 @@ export const GateSpecSchema = z.object({
 });
 export type GateSpec = z.infer<typeof GateSpecSchema>;
 
+/** Prebuilt trooper images, one per stack. The base trooper image doubles as `node`. */
+export const PRESETS = ['node', 'python', 'go', 'jvm'] as const;
+export type Preset = (typeof PRESETS)[number];
+export const PresetSchema = z.enum(PRESETS);
+
+/**
+ * What a stick can enforce. A stick advertises a capability only once its code really does it,
+ * and the server never leases it a drop from a zone that needs one it lacks.
+ */
+export const STICK_CAPABILITIES = ['egress-v1', 'image-verify-v1'] as const;
+export type StickCapability = (typeof STICK_CAPABILITIES)[number];
+export const ImagePolicySchema = z.enum(['allowlist', 'signed']);
+export type ImagePolicy = z.infer<typeof ImagePolicySchema>;
+
+/**
+ * Sent with every enroll and lease. Every field has a default, so an M3 stick (which sends none)
+ * is a stick with no capabilities under the allowlist policy. `pinnedImages` are the stick's
+ * digest pins: not secrets, sent so the doctor can check service images.
+ */
+export const StickInfoSchema = z.object({
+  capabilities: z.array(z.string().min(1).max(64)).max(32).default([]),
+  imagePolicy: ImagePolicySchema.default('allowlist'),
+  version: z.string().min(1).max(64).optional(),
+  pinnedImages: z.array(z.string().min(1).max(512)).max(256).default([]),
+});
+export type StickInfo = z.infer<typeof StickInfoSchema>;
+
+/** A zone the lease passed over for this stick, and what the stick lacks for it. */
+export const LeaseSkipSchema = z.object({ zoneId: z.string(), missing: z.array(z.string()) });
+export type LeaseSkip = z.infer<typeof LeaseSkipSchema>;
+/**
+ * The lease response header naming skipped zones (URI-encoded JSON `LeaseSkip[]`). A header, so
+ * it rides on a 204 too and an M3 stick ignores it.
+ */
+export const SKIPPED_HEADER = 'x-jumpmaster-skipped';
+
 /** Roles that work for the zone rather than one work item. They hold no forge write credential. */
 export const CREW_ROLES = ['crew-lead', 'refute', 'diagnose'] as const;
 export type CrewRole = (typeof CREW_ROLES)[number];
 export const isCrewRole = (r: string): r is CrewRole =>
   (CREW_ROLES as readonly string[]).includes(r);
 
-export const RoleSchema = z.enum(['implement', 'review', 'heal', 'resolve', ...CREW_ROLES]);
+/**
+ * `doctor` proves a zone's setup on request: the Claude token, the clone, services and gates on the
+ * default branch. Like a crew role it has no work item, but it is not crew: it never runs an agent
+ * with tools, and it holds no forge write credential either.
+ */
+export const RoleSchema = z.enum([
+  'implement',
+  'review',
+  'heal',
+  'resolve',
+  ...CREW_ROLES,
+  'doctor',
+]);
 export type Role = z.infer<typeof RoleSchema>;
 
 export const PrRefSchema = z.object({
@@ -89,6 +137,16 @@ export const ContainerLimitsSchema = z.object({
 });
 export type ContainerLimits = z.infer<typeof ContainerLimitsSchema>;
 
+/**
+ * Egress control for a drop. Absent when the zone's mode is `off`. The trooper derives its proxy
+ * (the fixed `EGRESS_PROXY_URL`) from its presence; the stick runs the proxy with `allow`.
+ */
+export const EgressPayloadSchema = z.object({
+  mode: z.enum(['monitor', 'enforce']),
+  allow: z.array(z.string()),
+});
+export type EgressPayload = z.infer<typeof EgressPayloadSchema>;
+
 const dropPayloadBase = {
   protocol: z.literal(1),
   dropId: z.string(),
@@ -112,6 +170,7 @@ const dropPayloadBase = {
   verification: z.array(VerificationSpecSchema).optional(),
   /** `false` turns off Claude's commit and PR attribution for the agent. Absent keeps the default. */
   attribution: z.boolean().optional(),
+  egress: EgressPayloadSchema.optional(),
 };
 
 /**
@@ -132,6 +191,7 @@ const crewPayloadBase = {
   credentials: dropPayloadBase.credentials,
   limits: dropPayloadBase.limits,
   attribution: dropPayloadBase.attribution,
+  egress: dropPayloadBase.egress,
 };
 
 export const DropPayloadSchema = z.discriminatedUnion('role', [
@@ -153,11 +213,37 @@ export const DropPayloadSchema = z.discriminatedUnion('role', [
     /** The parked PR to inspect, when there is one. */
     checkout: PrRefSchema.optional(),
   }),
+  /**
+   * A doctor drop: the zone's real image, gates, services and egress, on the default branch. Strict
+   * and with its own credentials shape, so a write token, an issue or a branch is refused.
+   */
+  z.strictObject({
+    protocol: dropPayloadBase.protocol,
+    dropId: dropPayloadBase.dropId,
+    epoch: dropPayloadBase.epoch,
+    role: z.literal('doctor'),
+    repo: dropPayloadBase.repo,
+    model: dropPayloadBase.model,
+    image: dropPayloadBase.image,
+    gates: dropPayloadBase.gates,
+    services: dropPayloadBase.services,
+    limits: dropPayloadBase.limits,
+    gateSecrets: dropPayloadBase.gateSecrets,
+    egress: dropPayloadBase.egress,
+    /** At most the read token, for a private repository's clone. Never a write token. */
+    credentials: z.strictObject({
+      claudeToken: z.string(),
+      readToken: z.string().optional(),
+      /** Never present: any value is refused. Declared so `credentials.forgeToken` reads as absent. */
+      forgeToken: z.never().optional(),
+    }),
+  }),
 ]);
 export type DropPayload = z.infer<typeof DropPayloadSchema>;
 /** A drop for one work item: it has an issue, a branch and gates. */
-export type ItemDropPayload = Exclude<DropPayload, { role: CrewRole }>;
+export type ItemDropPayload = Exclude<DropPayload, { role: CrewRole | 'doctor' }>;
 export type CrewDropPayload = Extract<DropPayload, { role: CrewRole }>;
+export type DoctorDropPayload = Extract<DropPayload, { role: 'doctor' }>;
 
 export const VerdictSchema = z.object({
   decision: z.enum(['approve', 'request_changes']),
@@ -314,10 +400,27 @@ export type GateResult = z.infer<typeof GateResultSchema>;
 
 export const TrooperEventSchema = z.object({
   ts: z.string(),
-  kind: z.enum(['phase', 'agent', 'rate_limit', 'gate', 'log']),
+  kind: z.enum(['phase', 'agent', 'rate_limit', 'gate', 'log', 'egress']),
   data: z.record(z.string(), z.unknown()),
 });
 export type TrooperEvent = z.infer<typeof TrooperEventSchema>;
+
+/** What a doctor drop found. Every error text is redacted by the trooper before it is sent. */
+export const DoctorResultSchema = z.object({
+  claude: z.object({
+    ok: z.boolean(),
+    servedModel: z.string().optional(),
+    error: z.string().max(1000).optional(),
+  }),
+  clone: z.object({
+    ok: z.boolean(),
+    sha: z.string().optional(),
+    error: z.string().max(1000).optional(),
+  }),
+  services: z.array(z.object({ name: z.string(), ok: z.boolean() })),
+  gates: z.array(GateResultSchema),
+});
+export type DoctorResult = z.infer<typeof DoctorResultSchema>;
 
 /** Longest author report a result may carry; the trooper truncates to this. */
 export const REPORT_MAX_CHARS = 8000;
@@ -330,6 +433,8 @@ export const DropResultSchema = z.object({
   rateLimit: RateLimitEventDataSchema.optional(),
   /** A crew role's structured output, validated per role on both sides (`parseCrewOutput`). */
   crew: z.unknown().optional(),
+  /** A doctor drop's findings. */
+  doctor: DoctorResultSchema.optional(),
   /** The model that actually served the drop, when the trooper could tell. */
   servedModel: z.string().optional(),
   reason: z.string().optional(),
@@ -342,6 +447,7 @@ export const DropResultSchema = z.object({
   numTurns: z.number().optional(),
 });
 export type DropResult = z.infer<typeof DropResultSchema>;
+export * from './egress.js';
 export { containsSecret, payloadSecrets, redact, redactTokenShapes } from './redact.js';
 export { readSecret } from './secrets.js';
 

@@ -1,5 +1,8 @@
 # Runbook: M3 crew
 
+> **New install?** Start with the [install runbook](install.md): it installs a published release
+> with Docker Compose. This runbook turns on the crew for an installed zone.
+
 The crew reads the objective ladder in `GOAL.md`, files candidate issues under a staged label, tries
 to refute each one, and raises briefings. Command (you) rules on those briefings in the UI. A crew
 drop never writes to the forge: the server decides what its output leads to, and every forge write
@@ -302,7 +305,8 @@ tier and Fable status are never shown.
   415 for a non-JSON body; 413 above `maxBodyBytes`. Authentication runs before the body is read.
 - Tool calls answer with an error result, audited `refused`, when: the token has made
   `callsPerHour` tool calls of any kind in the past hour (audited once per hour, not per call); a
-  read token calls a write tool; the arguments fail the schema; the zone's crew is disabled; a usage credits stop is in
+  read token calls a write tool; the arguments fail the schema; the zone's crew is disabled
+  (`raise_briefing` only: `file_staged_issues` works with the crew off); a usage credits stop is in
   force; the arguments contain a token or a configured secret; the token has made
   `writesPerHour` write calls in the past hour; or the zone already holds `maxOpenBriefings` open
   assistant briefings. In pause, observe or kill the action core refuses each item with the mode.
@@ -313,5 +317,47 @@ tier and Fable status are never shown.
   kept; refused logins keep the newest 500 anonymous rows and, separately, the newest 500 that name
   a token (an expired or revoked token in use). Mint and revoke rows are kept.
 
-Issues filed over MCP that are still `filing` when the crew is later disabled wait, as crew
-filings do, and are filed once it is enabled again.
+Issues filed over MCP are filed under the staged label whether the crew is on or off, and start
+nothing until you rule. With the crew on, its refute judges each one and then briefs you. With the
+crew off, the server raises the Promote briefing itself on its next pass (once per issue, with the
+same Promote and Reject options), and a Promote ruling applies at once: the issue gets the ready
+label and starts like any promoted crew issue. If the issue was edited on GitHub meanwhile, a
+Re-stage ruling (which also applies with the crew off) takes the edited text and earns a fresh
+Promote briefing; if it was closed, nothing is promoted and a briefing says so. `crew.goalPath`
+must match a `protectedPaths` glob in every zone, crew on or off (`GOAL.md` is protected by
+default), because the file is read every pass and served as your own text. `GOAL.md` is read on every pass whenever `crew.goalPath` is set (it is by default),
+crew on or off, so `get_goals` works before you ever enable the crew.
+
+### Intake skills
+
+Three Claude Code skills walk you from a repository to a merged `GOAL.md` and the first staged
+issues over this MCP server, with a write token for the zone:
+
+- [`jumpmaster-intake-existing`](../../skills/jumpmaster-intake-existing/SKILL.md): an existing
+  codebase;
+- [`jumpmaster-intake-idea`](../../skills/jumpmaster-intake-idea/SKILL.md): a new project from an
+  idea;
+- [`jumpmaster-intake-partial`](../../skills/jumpmaster-intake-partial/SKILL.md): a partly built
+  project.
+
+They share one flow, in [`skills/shared`](../../skills/shared/interviewer.md): check the connection
+with `get_queue`, interview you one question at a time, read the repository as data, write
+`GOAL.md` on a local branch for you to merge by pull request (it is a protected path), then file
+at most five issues with `file_staged_issues`. Those wait under the staged label for your
+**Promote** ruling, like any crew issue. The skills hold no forge token and never label, promote
+or merge anything.
+
+Install them as user skills, keeping the layout (each skill links `../shared`):
+
+```bash
+mkdir -p ~/.claude/skills
+cp -R skills/jumpmaster-intake-existing skills/jumpmaster-intake-idea \
+  skills/jumpmaster-intake-partial skills/shared ~/.claude/skills/
+```
+
+Then, in a checkout of the zone's repository, ask Claude Code to run the one that fits. None of
+it needs the crew on: each filed issue gets a Promote briefing on `/briefings`, and your Promote
+ruling starts it. Enabling the crew is a separate, later choice that spends usage (its own cycles
+start then).
+For a quick first issue without the crew, the in-app intake page (`/zones/<id>/intake`) files one
+ready issue directly.

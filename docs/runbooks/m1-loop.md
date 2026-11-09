@@ -1,5 +1,8 @@
 # Runbook: M1 loop
 
+> **New install?** Start with the [install runbook](install.md): it installs a published release
+> with Docker Compose. This runbook is the M1 development rehearsal, run from a checkout.
+
 End-to-end check that Jumpmaster M1 runs the whole loop with no human click: a labelled
 issue is implemented, reviewed by a second bot identity, healed or resolved when needed,
 and merged by the server once the verdict, CI and the PR head all agree on one SHA.
@@ -43,6 +46,16 @@ Everything from M0, plus:
     collaborator's access to a repository owned by another personal account. It reaches
     every repository that account can, so keep it on the server and use a token made for
     Jumpmaster alone. It never enters a runner.
+- **Or: one account, in starter mode** (opt-in, `"identity": "starter"` on the zone). No
+  reviewer token: the reviewer drop's verdict is kept in Jumpmaster and shown in the UI, and
+  the author merges when that verdict and CI pass on the same head. It needs a fine-grained
+  author token, `ciRequired: true`, and a ruleset with a pull request rule (0 approvals),
+  required checks with GitHub Actions as the source, and no bypass. What it costs, as the
+  doctor's `zone.identity` warning states it: starter mode: the author token can merge any
+  green PR, including an unreviewed one; it is held by the server and by the trooper's root
+  process in implement, heal and resolve drops. Use a fine-grained token for this repository
+  only, with no Workflows permission, or add a reviewer identity. See
+  [the install runbook](install.md#starter-mode).
   - For a private repository, the author token also needs Issues: read, and, when the zone
     requires CI or branch protection requires checks, Commit statuses: read and Actions: read.
     GitHub never lets a fine-grained token read check runs, so Jumpmaster reads GitHub Actions

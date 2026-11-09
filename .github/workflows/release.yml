@@ -1,0 +1,199 @@
+name: Release
+
+# Publishes signed, digest-pinned images, only from a version tag on main (docs/runbooks/release.md).
+# - A push of vX.Y.Z or vX.Y.Z-rc.N: `guard` checks the tag's commit is on main; `build`
+#   (release-build.yml) builds every image natively on amd64 and arm64 runners with SBOM and
+#   provenance, pushes each by digest and joins them into one multi-arch index per image; `sign`
+#   signs each by its index digest with cosign keyless (the identity
+#   the stick verifies) and signs SHA256SUMS; `publish` attaches compose.yaml, images.lock.json,
+#   SHA256SUMS and its bundle to the GitHub Release.
+# - workflow_dispatch is a dry run (`dryrun`): the same builds, pushed to a job-local registry that
+#   dies with the job, with only `packages: read`. It never logs in to GHCR, signs or publishes.
+#   `guard` runs only for tag refs.
+# The control on who can mint a release is the repository's tag ruleset on refs/tags/v* (only
+# admins may create, move or delete them). A tag runs this file as it is at the tagged commit, so
+# the ruleset must exist before this workflow reaches main; `guard` only catches a tag the owner
+# put on the wrong commit.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: The tag names a version and its commit is on main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "::error::$TAG is not vX.Y.Z or vX.Y.Z-rc.N"
+            exit 1
+          fi
+          # The commit the tag names (an annotated tag's object is peeled to it).
+          if ! commit="$(git rev-parse --verify "$GITHUB_SHA^{commit}")"; then
+            echo "::error::$GITHUB_SHA does not name a commit"
+            exit 1
+          fi
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$commit" origin/main; then
+            echo "::error::$TAG points at $commit, which is not on main: nothing is built or signed"
+            exit 1
+          fi
+
+  # A version tag push, after guard: pushes to GHCR.
+  build:
+    needs: guard
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/release-build.yml
+    with:
+      release: true
+
+  # The dry run: the same builds into a job-local registry, with no write to any package.
+  dryrun:
+    needs: guard
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && (needs.guard.result == 'success' || (github.ref_type != 'tag' && needs.guard.result == 'skipped')) }}
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/release-build.yml
+    with:
+      release: false
+
+  sign:
+    needs: [guard, build]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      REPO: ${{ github.repository }}
+      REGISTRY: ${{ needs.build.outputs.registry }}
+      TROOPER: ${{ needs.build.outputs.trooper }}
+      PYTHON: ${{ needs.build.outputs.python }}
+      GO: ${{ needs.build.outputs.go }}
+      JVM: ${{ needs.build.outputs.jvm }}
+      EGRESS: ${{ needs.build.outputs.egress }}
+      SERVER: ${{ needs.build.outputs.server }}
+      STICK: ${{ needs.build.outputs.stick }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # cosign v3.1.4 (released 2026-10-20), checked against the release's published SHA-256.
+      - name: Install cosign
+        run: |
+          curl -fsSLo /tmp/cosign https://github.com/sigstore/cosign/releases/download/v3.1.4/cosign-linux-amd64
+          echo "424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa  /tmp/cosign" | sha256sum -c -
+          sudo install -m 0755 /tmp/cosign /usr/local/bin/cosign
+          cosign version
+      - name: Log in to GHCR
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - name: Sign every image by its index digest, then verify it as the stick will
+        run: |
+          repo_re="$(printf '%s' "$REPO" | sed 's/[.]/\\./g')"
+          IDENTITY="^https://github\.com/${repo_re}/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$"
+          refs=(
+            "$REGISTRY/jumpmaster-trooper@$TROOPER"
+            "$REGISTRY/jumpmaster-trooper-python@$PYTHON"
+            "$REGISTRY/jumpmaster-trooper-go@$GO"
+            "$REGISTRY/jumpmaster-trooper-jvm@$JVM"
+            "$REGISTRY/jumpmaster-egress@$EGRESS"
+            "$REGISTRY/jumpmaster-server@$SERVER"
+            "$REGISTRY/jumpmaster-stick@$STICK"
+          )
+          for ref in "${refs[@]}"; do
+            [[ "$ref" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "::error::$ref has no digest"; exit 1; }
+            cosign sign --yes "$ref"
+          done
+          # As the stick checks: exit 0, and every payload names exactly this digest.
+          for ref in "${refs[@]}"; do
+            cosign verify \
+              --certificate-identity-regexp "$IDENTITY" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-github-workflow-trigger push \
+              --certificate-github-workflow-repository "$REPO" \
+              --output json -- "$ref" > verify.json
+            jq -e --arg d "${ref##*@}" 'type == "array" and length > 0 and all(.[]; .critical.image."docker-manifest-digest" == $d)' verify.json > /dev/null \
+              || { echo "::error::$ref: cosign's payload does not name its digest"; exit 1; }
+          done
+      - name: Render compose.yaml and images.lock.json, and sign SHA256SUMS
+        run: |
+          repo_re="$(printf '%s' "$REPO" | sed 's/[.]/\\./g')"
+          IDENTITY="^https://github\.com/${repo_re}/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$"
+          mkdir -p release
+          jq -n --arg r "$REGISTRY" --arg t "$TROOPER" --arg p "$PYTHON" --arg g "$GO" --arg j "$JVM" \
+            --arg e "$EGRESS" --arg s "$SERVER" --arg k "$STICK" \
+            '{registry: $r, images: {"jumpmaster-trooper": $t, "jumpmaster-trooper-python": $p, "jumpmaster-trooper-go": $g, "jumpmaster-trooper-jvm": $j, "jumpmaster-egress": $e, "jumpmaster-server": $s, "jumpmaster-stick": $k}}' \
+            > release/images.lock.json
+          node scripts/render-compose.ts deploy/compose.yaml.tmpl release/images.lock.json > release/compose.yaml
+          cd release
+          sha256sum compose.yaml images.lock.json > SHA256SUMS
+          cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+          cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+            --certificate-identity-regexp "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-trigger push \
+            --certificate-github-workflow-repository "$REPO" \
+            SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files
+          path: release/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [guard, build, sign]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: release
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          pre=()
+          if [[ "$TAG" == *-rc.* ]]; then pre=(--prerelease); fi
+          cd release
+          gh release create "$TAG" --repo "$REPO" --verify-tag --title "$TAG" "${pre[@]}" \
+            --notes "Images are signed with cosign keyless by this repository's release workflow. Verify them and this release's files as SECURITY.md describes." \
+            compose.yaml images.lock.json SHA256SUMS SHA256SUMS.sigstore.json

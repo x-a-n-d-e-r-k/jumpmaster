@@ -1,0 +1,51 @@
+# From-source override, for developing Jumpmaster itself: it builds the server, stick, trooper and
+# egress images from a checkout and runs them unsigned. A real install uses the release's
+# compose.yaml instead (docs/runbooks/install.md). From an empty install directory:
+#
+#   export JM_SOURCE=/path/to/jumpmaster-checkout
+#   C="docker compose -f $JM_SOURCE/deploy/compose.yaml.tmpl -f $JM_SOURCE/deploy/compose.build.yaml --project-directory ."
+#   $C --profile build build            # the four :dev images
+#   $C --profile init run --rm init --repo owner/name
+#   # then set "requireSignedImages": false in config/jumpmaster.config.json: :dev tags are
+#   # mutable and unsigned, and a signed install refuses them
+#   $C up -d
+#
+# What differs from a release: the server has no image lock, so presets resolve to local
+# jumpmaster-trooper[-<preset>]:dev builds (JM_DEV_IMAGES=1); the stick runs the allowlist policy
+# (M3's: images named exactly, tags allowed), so it never gets a signed zone's drops.
+services:
+  jumpmaster:
+    image: jumpmaster-server:dev
+    build:
+      context: ${JM_SOURCE:?set JM_SOURCE to the Jumpmaster checkout}
+      dockerfile: images/server/Dockerfile
+    environment:
+      JM_DEV_IMAGES: "1"
+
+  init:
+    image: jumpmaster-server:dev
+
+  stick:
+    image: jumpmaster-stick:dev
+    build:
+      context: ${JM_SOURCE:?set JM_SOURCE to the Jumpmaster checkout}
+      dockerfile: images/stick/Dockerfile
+    environment:
+      JM_IMAGE_POLICY: allowlist
+      JM_EGRESS_IMAGE: jumpmaster-egress:dev
+      JM_ALLOWED_IMAGES: ${JM_ALLOWED_IMAGES:-jumpmaster-trooper:dev,jumpmaster-trooper-python:dev,jumpmaster-trooper-go:dev,jumpmaster-trooper-jvm:dev}
+
+  # Build-only: `--profile build build` makes the images drops run. Never started.
+  trooper:
+    image: jumpmaster-trooper:dev
+    profiles: ["build"]
+    build:
+      context: ${JM_SOURCE:?set JM_SOURCE to the Jumpmaster checkout}
+      dockerfile: images/trooper/Dockerfile
+
+  egress:
+    image: jumpmaster-egress:dev
+    profiles: ["build"]
+    build:
+      context: ${JM_SOURCE:?set JM_SOURCE to the Jumpmaster checkout}
+      dockerfile: images/egress/Dockerfile

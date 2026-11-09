@@ -19,22 +19,31 @@ import {
   type PullFacts,
 } from './forge/github.js';
 
-/** One zone's forge identities: `author` creates PRs and merges, `reviewer` only posts reviews. */
+/**
+ * One zone's forge identities: `author` creates PRs and merges, `reviewer` only posts reviews.
+ * `reviewer` is null in starter mode: nothing is posted, and every reader uses the author alone.
+ */
 export type ForgePair = {
   author: Forge;
-  reviewer: Forge;
+  reviewer: Forge | null;
   /** Performs merges instead of the author, when the author's account is a repository admin. */
   merger?: Forge;
 };
 
 /** The forges for a zone. An admin author must not be the identity that merges. */
 export function pairFor(
-  zone: { repo: string; authorMayBeAdmin: boolean },
-  secrets: { githubAuthorToken: string; githubReviewerToken: string },
+  zone: { repo: string; authorMayBeAdmin: boolean; identity?: 'two-bot' | 'starter' },
+  secrets: { githubAuthorToken: string; githubReviewerToken?: string },
+  opts: { requestTimeoutMs?: number } = {},
 ): ForgePair {
   const [owner = '', name = ''] = zone.repo.split('/');
-  const author = new GitHubForge(owner, name, secrets.githubAuthorToken);
-  const reviewer = new GitHubForge(owner, name, secrets.githubReviewerToken);
+  const author = new GitHubForge(owner, name, secrets.githubAuthorToken, opts);
+  // Starter has no second identity, so the author merges (an admin author included: see
+  // authorMayBeAdmin, and the per-pass Administration probe that guards it).
+  if (zone.identity === 'starter') return { author, reviewer: null };
+  if (!secrets.githubReviewerToken)
+    throw new Error('JM_GITHUB_REVIEWER_TOKEN is required for a two-bot zone');
+  const reviewer = new GitHubForge(owner, name, secrets.githubReviewerToken, opts);
   return zone.authorMayBeAdmin ? { author, reviewer, merger: reviewer } : { author, reviewer };
 }
 
@@ -152,6 +161,7 @@ async function lookup(forges: ForgePair, kind: OpKind, opKey: string, payload: u
     }
     case 'post_review': {
       const p = payload as PostReviewPayload;
+      if (!forges.reviewer) throw new Error('no reviewer identity (starter mode) to post a review');
       return forges.reviewer.findReviewByMarker(p.pr, opMarker(opKey));
     }
     case 'merge': {
@@ -214,6 +224,7 @@ async function write(forges: ForgePair, kind: OpKind, opKey: string, payload: un
     }
     case 'post_review': {
       const p = payload as PostReviewPayload;
+      if (!forges.reviewer) throw new Error('no reviewer identity (starter mode) to post a review');
       return forges.reviewer.createReview(p.pr, {
         event: p.event,
         commitId: p.commitId,

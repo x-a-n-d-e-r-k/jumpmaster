@@ -12,9 +12,23 @@ export const LOCAL_IMAGE_FILES: Record<string, { images: string[]; reason: strin
     images: ['jumpmaster-trooper:dev'],
     reason: 'test layer over the trooper image that run.sh builds locally just before',
   },
+  'images/trooper/e2e/global-pnpm.Dockerfile': {
+    images: ['jumpmaster-trooper:dev'],
+    reason: 'test zone image over the trooper image that presets.sh builds locally just before',
+  },
   'images/trooper/examples/Dockerfile.pnpm': {
     images: ['jumpmaster-trooper:dev'],
     reason: 'example zone image built by the operator on top of their locally built trooper',
+  },
+  'deploy/compose.build.yaml': {
+    images: [
+      'jumpmaster-server:dev',
+      'jumpmaster-stick:dev',
+      'jumpmaster-trooper:dev',
+      'jumpmaster-egress:dev',
+    ],
+    reason:
+      'from-source override for developing Jumpmaster: it builds each of these from the checkout itself (build:) and names the result',
   },
   'images/smoke.sh': {
     images: ['jumpmaster-server:dev', 'jumpmaster-stick:dev', 'jumpmaster-trooper:dev'],

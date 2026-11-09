@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test } from 'vitest';
 import { getWorkItem, insertVerdict, recordGateAllowance, type VerdictRow } from '../db/repo.js';
 import { zoneWorld } from '../test/fixtures.js';
 import { decide } from './decide.js';
+import { ADMINISTRATION_PROBLEM } from './guards.js';
 import { buildSnapshot, gateDigest, zonePass } from './snapshot.js';
 
 const now = new Date('2026-01-01T01:00:00Z');
@@ -40,6 +41,84 @@ describe('zonePass', () => {
     expect(p.botLogins).toEqual(['author-bot', 'reviewer-bot']);
     expect(p.requiredChecks).toEqual(['ci']);
     expect(p.protectionProblems).toEqual([]);
+  });
+});
+
+describe('starter identity (reviewer null)', () => {
+  beforeEach(() => {
+    w = zoneWorld({ identity: 'starter' });
+    itemId = w.prItem(1, 'sha1');
+  });
+
+  test('a pass with reviewer null completes snapshot and reconcile reads with the author only', async () => {
+    const p = await zonePass(w.forges, w.zone, 'main');
+    expect(p.botLogins).toEqual(['author-bot']);
+    expect(p.requiredChecks).toEqual(['ci']);
+    expect(p.protectionProblems).toEqual([]);
+    const s = await snapshotOf();
+    expect(s.forgeUnavailable).toBeNull();
+    expect(w.f.reviewer.calls).toEqual([]);
+  });
+
+  test('trusted reviews still exclude the author bot', async () => {
+    w.f.state.review({ author: 'author-bot', state: 'CHANGES_REQUESTED', commitId: 'sha1' });
+    w.f.state.review({ id: 9, author: 'human', state: 'CHANGES_REQUESTED', commitId: 'sha1' });
+    const s = await snapshotOf();
+    expect(s.trustedChangeRequests.map((r) => r.author)).toEqual(['human']);
+  });
+
+  describe('an admin author (authorMayBeAdmin)', () => {
+    beforeEach(() => {
+      w = zoneWorld({ identity: 'starter', authorMayBeAdmin: true });
+      itemId = w.prItem(1, 'sha1');
+      const r = w.f.state.rules.author;
+      if (r.kind === 'ok') r.rules.viewerIsAdmin = true;
+    });
+    const probes = () => w.f.author.calls.filter((c) => c.method === 'probeAdministration');
+
+    test('the pass probes Administration once, and a token that has it is a protection problem', async () => {
+      w.f.state.adminProbe.author = {
+        permission: 'Administration: read',
+        status: 200,
+        accepted: null,
+      };
+      const p = await zonePass(w.forges, w.zone, 'main');
+      expect(p.protectionProblems).toEqual([ADMINISTRATION_PROBLEM]);
+      expect(probes()).toHaveLength(1);
+      expect(decide(await snapshotOf())).toMatchObject({
+        kind: 'park',
+        reason: expect.stringContaining('Administration'),
+      });
+    });
+
+    test('a refused, rate-limited or unanswered probe never parks', async () => {
+      for (const probe of [
+        { permission: 'Administration: read', status: 403, accepted: null },
+        { permission: 'Administration: read', status: 403, accepted: null, rateLimited: true },
+        { permission: 'Administration: read', status: 502, accepted: null },
+        { permission: 'Administration: read', status: null, accepted: null },
+      ]) {
+        w.f.state.adminProbe.author = probe;
+        expect((await zonePass(w.forges, w.zone, 'main')).protectionProblems).toEqual([]);
+      }
+    });
+
+    test('no probe for a non-admin author or a two-bot zone', async () => {
+      const r = w.f.state.rules.author;
+      if (r.kind === 'ok') r.rules.viewerIsAdmin = false;
+      await zonePass(w.forges, w.zone, 'main');
+      const two = zoneWorld();
+      await zonePass(two.forges, two.zone, 'main');
+      expect(probes()).toHaveLength(0);
+      expect(two.f.author.calls.filter((c) => c.method === 'probeAdministration')).toHaveLength(0);
+    });
+  });
+
+  test('starter rules requiring an approval are a protection problem', async () => {
+    const r = w.f.state.rules.author;
+    if (r.kind === 'ok') r.rules.requiredApprovals = 1;
+    const s = await snapshotOf();
+    expect(s.protectionProblems).toEqual(['approvals required in starter mode']);
   });
 });
 

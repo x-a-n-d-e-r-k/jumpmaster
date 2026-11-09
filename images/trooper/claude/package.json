@@ -1,0 +1,9 @@
+{
+  "name": "jumpmaster-trooper-claude",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The Claude CLI the trooper image installs with npm ci; the lockfile carries its integrity hashes.",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.319"
+  }
+}

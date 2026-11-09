@@ -447,6 +447,86 @@ ALTER TABLE rulings ADD COLUMN choice_label TEXT;
 ALTER TABLE rulings ADD COLUMN choice_effect TEXT;
 `;
 
+/**
+ * v15: what each stick advertises, stamped (with last_seen_at) on every lease. Defaulted columns
+ * only, so an M3 binary still runs against v15: its stick insert names none of them.
+ */
+const V15_SQL = `
+ALTER TABLE sticks ADD COLUMN capabilities_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE sticks ADD COLUMN image_policy TEXT NOT NULL DEFAULT 'allowlist';
+ALTER TABLE sticks ADD COLUMN version TEXT;
+ALTER TABLE sticks ADD COLUMN pinned_json TEXT NOT NULL DEFAULT '[]';
+`;
+
+/**
+ * v16: the readiness doctor's runs, the last 20 kept (a trigger prunes older ones). A new table
+ * only, so an M3 binary still runs against v16. `results_json` holds redacted checks.
+ */
+const V16_SQL = `
+CREATE TABLE IF NOT EXISTS doctor_runs (
+  id             INTEGER PRIMARY KEY,
+  started_at     TEXT NOT NULL,
+  finished_at    TEXT,
+  results_json   TEXT NOT NULL DEFAULT '[]',
+  drop_ids_json  TEXT NOT NULL DEFAULT '[]'
+);
+CREATE TRIGGER IF NOT EXISTS doctor_runs_keep_20 AFTER INSERT ON doctor_runs
+BEGIN
+  DELETE FROM doctor_runs WHERE id NOT IN (SELECT id FROM doctor_runs ORDER BY id DESC LIMIT 20);
+END;
+`;
+
+/**
+ * v17: the `doctor` role, a drop with no work item that is not crew. SQLite's twelve-step rebuild of
+ * `drops` with foreign keys off (events and artifacts reference it): the CHECK admits `doctor`
+ * without a work item, the crew index is narrowed to the crew roles so a doctor drop and a crew drop
+ * may be active in one zone at once, and a new index allows one active doctor drop per zone. An M3
+ * binary does not run against v17 (the CHECK changed); rolling back past it is a database restore.
+ */
+const V17_SQL = `
+CREATE TABLE new_drops (
+  id               TEXT PRIMARY KEY,
+  drop_zone_id     TEXT NOT NULL REFERENCES drop_zones(id),
+  work_item_id     INTEGER REFERENCES work_items(id),
+  role             TEXT NOT NULL,
+  state            TEXT NOT NULL
+                   CHECK (state IN ('queued','leased','running','succeeded','failed','lost','cancelled')),
+  stick_id         TEXT REFERENCES sticks(id),
+  epoch            INTEGER NOT NULL DEFAULT 0,
+  lease_expires_at TEXT,
+  prompt_version   TEXT,
+  image            TEXT,
+  result_json      TEXT,
+  created_at       TEXT NOT NULL,
+  started_at       TEXT,
+  finished_at      TEXT,
+  fingerprint      TEXT,
+  pr_number        INTEGER,
+  head_sha         TEXT,
+  input_json       TEXT,
+  charged_key      TEXT,
+  hard_cancel      INTEGER NOT NULL DEFAULT 0,
+  requested_model  TEXT,
+  served_model     TEXT,
+  CHECK ((work_item_id IS NULL) = (role IN ('crew-lead','refute','diagnose','doctor')))
+);
+INSERT INTO new_drops (id, drop_zone_id, work_item_id, role, state, stick_id, epoch, lease_expires_at,
+  prompt_version, image, result_json, created_at, started_at, finished_at, fingerprint, pr_number,
+  head_sha, input_json, charged_key, hard_cancel, requested_model, served_model)
+SELECT id, drop_zone_id, work_item_id, role, state, stick_id, epoch, lease_expires_at,
+  prompt_version, image, result_json, created_at, started_at, finished_at, fingerprint, pr_number,
+  head_sha, input_json, charged_key, hard_cancel, requested_model, served_model FROM drops;
+DROP TABLE drops;
+ALTER TABLE new_drops RENAME TO drops;
+CREATE UNIQUE INDEX one_active_drop
+  ON drops(work_item_id) WHERE state IN ('queued','leased','running');
+CREATE UNIQUE INDEX one_active_crew_drop
+  ON drops(drop_zone_id) WHERE role IN ('crew-lead','refute','diagnose')
+    AND state IN ('queued','leased','running');
+CREATE UNIQUE INDEX one_active_doctor_drop
+  ON drops(drop_zone_id) WHERE role = 'doctor' AND state IN ('queued','leased','running');
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -470,6 +550,9 @@ export const MIGRATIONS: Migration[] = [
   { version: 12, sql: V12_SQL, after: afterV12 },
   { version: 13, sql: V13_SQL },
   { version: 14, sql: V14_SQL, foreignKeysOff: true },
+  { version: 15, sql: V15_SQL },
+  { version: 16, sql: V16_SQL },
+  { version: 17, sql: V17_SQL, foreignKeysOff: true },
 ];
 
 /**

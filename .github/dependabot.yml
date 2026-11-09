@@ -12,6 +12,7 @@ updates:
   - package-ecosystem: docker
     directories:
       - "/images/*"
+      - "/images/trooper/presets/*"
     schedule:
       interval: weekly
     groups:
@@ -19,5 +20,10 @@ updates:
         patterns: ["*"]
   - package-ecosystem: npm
     directory: /
+    schedule:
+      interval: weekly
+  # The Claude CLI the trooper image installs with npm ci.
+  - package-ecosystem: npm
+    directory: /images/trooper/claude
     schedule:
       interval: weekly

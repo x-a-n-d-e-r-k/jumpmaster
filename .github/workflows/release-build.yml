@@ -1,0 +1,348 @@
+name: Release build
+
+# Builds every release image natively for linux/amd64 (ubuntu-24.04) and linux/arm64
+# (ubuntu-24.04-arm), with SBOM, provenance and the source label, pushes each per-arch image by
+# digest, then joins the two into one multi-arch index per image. The index digest is what the
+# release signs, records in its lock and what a stick pulls and verifies. Called only by
+# release.yml:
+# - `release: true` (a version tag push, after guard): pushes to ghcr.io/<owner>; the calling job
+#   grants `packages: write`.
+# - `release: false` (the workflow_dispatch dry run): each per-arch job pushes to a registry that
+#   lives only inside it (so the presets still build FROM the trooper by digest), and no index is
+#   created (the two arches' images are in two job-local registries); the calling job grants
+#   `packages: read`, so even a modified dry run cannot push to GHCR.
+# Its jobs declare no permissions: they get exactly what the calling job grants.
+on:
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        required: true
+    outputs:
+      registry:
+        value: ${{ jobs.target.outputs.registry }}
+      version:
+        value: ${{ jobs.target.outputs.version }}
+      trooper:
+        value: ${{ jobs.troopers-index.outputs.trooper }}
+      python:
+        value: ${{ jobs.troopers-index.outputs.python }}
+      go:
+        value: ${{ jobs.troopers-index.outputs.go }}
+      jvm:
+        value: ${{ jobs.troopers-index.outputs.jvm }}
+      egress:
+        value: ${{ jobs.troopers-index.outputs.egress }}
+      server:
+        value: ${{ jobs.apps-index.outputs.server }}
+      stick:
+        value: ${{ jobs.apps-index.outputs.stick }}
+
+jobs:
+  target:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      registry: ${{ steps.target.outputs.registry }}
+      version: ${{ steps.target.outputs.version }}
+    steps:
+      - id: target
+        name: Choose where the images go
+        env:
+          RELEASE: ${{ inputs.release }}
+          OWNER: ${{ github.repository_owner }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          owner="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          if [ "$RELEASE" = true ]; then
+            echo "registry=ghcr.io/$owner" >> "$GITHUB_OUTPUT"
+            echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "registry=localhost:5000/$owner" >> "$GITHUB_OUTPUT"
+            echo "version=0.0.0-dryrun.${SHA:0:12}" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Each arch on its own native runner. The presets build FROM this job's own trooper, by its
+  # per-arch digest, so a preset's amd64 image is always on the amd64 trooper and its arm64 image
+  # on the arm64 trooper.
+  troopers:
+    needs: target
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    services:
+      registry:
+        image: registry:3.1.1@sha256:325b4b29b041e82803abeb703e201655e4e23ab83264ec1a7c9ddb0a5b14a6e0
+        ports:
+          - 5000:5000
+    env:
+      REGISTRY: ${{ needs.target.outputs.registry }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Log in to GHCR
+        if: inputs.release
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host
+      - id: trooper
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/trooper/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ needs.target.outputs.registry }}/jumpmaster-trooper,push-by-digest=true,name-canonical=true,push=true
+      - id: python
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/trooper/presets/python/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+            BASE=${{ needs.target.outputs.registry }}/jumpmaster-trooper@${{ steps.trooper.outputs.digest }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ needs.target.outputs.registry }}/jumpmaster-trooper-python,push-by-digest=true,name-canonical=true,push=true
+      - id: go
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/trooper/presets/go/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+            BASE=${{ needs.target.outputs.registry }}/jumpmaster-trooper@${{ steps.trooper.outputs.digest }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ needs.target.outputs.registry }}/jumpmaster-trooper-go,push-by-digest=true,name-canonical=true,push=true
+      - id: jvm
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/trooper/presets/jvm/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+            BASE=${{ needs.target.outputs.registry }}/jumpmaster-trooper@${{ steps.trooper.outputs.digest }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ needs.target.outputs.registry }}/jumpmaster-trooper-jvm,push-by-digest=true,name-canonical=true,push=true
+      - id: egress
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/egress/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ needs.target.outputs.registry }}/jumpmaster-egress,push-by-digest=true,name-canonical=true,push=true
+      - name: Record this arch's digests
+        env:
+          ARCH: ${{ matrix.arch }}
+          TROOPER: ${{ steps.trooper.outputs.digest }}
+          PYTHON: ${{ steps.python.outputs.digest }}
+          GO: ${{ steps.go.outputs.digest }}
+          JVM: ${{ steps.jvm.outputs.digest }}
+          EGRESS: ${{ steps.egress.outputs.digest }}
+        run: |
+          mkdir -p digests
+          jq -n --arg t "$TROOPER" --arg p "$PYTHON" --arg g "$GO" --arg j "$JVM" --arg e "$EGRESS" \
+            '{"jumpmaster-trooper": $t, "jumpmaster-trooper-python": $p, "jumpmaster-trooper-go": $g, "jumpmaster-trooper-jvm": $j, "jumpmaster-egress": $e}' \
+            > "digests/troopers-$ARCH.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digests-troopers-${{ matrix.arch }}
+          path: digests/
+          if-no-files-found: error
+          retention-days: 1
+
+  troopers-index:
+    needs: [target, troopers]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      trooper: ${{ steps.index.outputs.jumpmaster-trooper }}
+      python: ${{ steps.index.outputs.jumpmaster-trooper-python }}
+      go: ${{ steps.index.outputs.jumpmaster-trooper-go }}
+      jvm: ${{ steps.index.outputs.jumpmaster-trooper-jvm }}
+      egress: ${{ steps.index.outputs.jumpmaster-egress }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: digests-troopers-*
+          path: digests
+          merge-multiple: true
+      - name: Log in to GHCR
+        if: inputs.release
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - id: index
+        name: Join each image's amd64 and arm64 digests into one index
+        env:
+          RELEASE: ${{ inputs.release }}
+          REGISTRY: ${{ needs.target.outputs.registry }}
+          VERSION: ${{ needs.target.outputs.version }}
+          GROUP: troopers
+        run: scripts/release-index.sh
+
+  # The same, for the server (with the release's lock of index digests) and the stick (with the
+  # release's egress proxy index digest).
+  apps:
+    needs: [target, troopers-index]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    services:
+      registry:
+        image: registry:3.1.1@sha256:325b4b29b041e82803abeb703e201655e4e23ab83264ec1a7c9ddb0a5b14a6e0
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Log in to GHCR
+        if: inputs.release
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      # The lock the server image carries: the zone images it may resolve a preset to.
+      - id: lock
+        name: Write the server's image lock
+        env:
+          REGISTRY: ${{ needs.target.outputs.registry }}
+          TROOPER: ${{ needs.troopers-index.outputs.trooper }}
+          PYTHON: ${{ needs.troopers-index.outputs.python }}
+          GO: ${{ needs.troopers-index.outputs.go }}
+          JVM: ${{ needs.troopers-index.outputs.jvm }}
+          EGRESS: ${{ needs.troopers-index.outputs.egress }}
+        run: |
+          lock="$(jq -cn --arg r "$REGISTRY" --arg t "$TROOPER" --arg p "$PYTHON" --arg g "$GO" --arg j "$JVM" --arg e "$EGRESS" \
+            '{registry: $r, images: {"jumpmaster-trooper": $t, "jumpmaster-trooper-python": $p, "jumpmaster-trooper-go": $g, "jumpmaster-trooper-jvm": $j, "jumpmaster-egress": $e}}')"
+          echo "lock=$lock" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host
+      - id: server
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/server/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+            IMAGES_LOCK=${{ steps.lock.outputs.lock }}
+            RELEASE_VERSION=${{ needs.target.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ needs.target.outputs.registry }}/jumpmaster-server,push-by-digest=true,name-canonical=true,push=true
+      # The stick trusts this repository's release workflow and runs this release's egress proxy.
+      - id: stick
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/stick/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+            RELEASE_REPOSITORY=${{ github.repository }}
+            RELEASE_VERSION=${{ needs.target.outputs.version }}
+            EGRESS_IMAGE=${{ needs.target.outputs.registry }}/jumpmaster-egress@${{ needs.troopers-index.outputs.egress }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ needs.target.outputs.registry }}/jumpmaster-stick,push-by-digest=true,name-canonical=true,push=true
+      - name: Record this arch's digests
+        env:
+          ARCH: ${{ matrix.arch }}
+          SERVER: ${{ steps.server.outputs.digest }}
+          STICK: ${{ steps.stick.outputs.digest }}
+        run: |
+          mkdir -p digests
+          jq -n --arg s "$SERVER" --arg k "$STICK" '{"jumpmaster-server": $s, "jumpmaster-stick": $k}' \
+            > "digests/apps-$ARCH.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digests-apps-${{ matrix.arch }}
+          path: digests/
+          if-no-files-found: error
+          retention-days: 1
+
+  apps-index:
+    needs: [target, apps]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      server: ${{ steps.index.outputs.jumpmaster-server }}
+      stick: ${{ steps.index.outputs.jumpmaster-stick }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: digests-apps-*
+          path: digests
+          merge-multiple: true
+      - name: Log in to GHCR
+        if: inputs.release
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - id: index
+        name: Join each image's amd64 and arm64 digests into one index
+        env:
+          RELEASE: ${{ inputs.release }}
+          REGISTRY: ${{ needs.target.outputs.registry }}
+          VERSION: ${{ needs.target.outputs.version }}
+          GROUP: apps
+        run: scripts/release-index.sh

@@ -3,18 +3,24 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { listRulings, raiseBriefing } from '../briefings.js';
 import type { Config } from '../config.js';
 import { nextCrewWork } from '../crew/schedule.js';
+import { listCrewIssues } from '../crew/store.js';
 import { ctlRequest } from '../ctl.js';
 import { openDb } from '../db/open.js';
 import {
+  getOutbox,
   getZoneMode,
   insertDrop,
   isKilled,
+  setKilled,
   setWorkItemState,
   setZoneMode,
   upsertDropZone,
   upsertWorkItem,
   zoneIsDrained,
 } from '../db/repo.js';
+import { intakeKey } from '../intake.js';
+import { NOW, world } from '../test/doctorWorld.js';
+import { fakeForgePair } from '../test/fakes.js';
 import { makeZone } from '../test/fixtures.js';
 import { t0, tmpDbFile } from '../test/helpers.js';
 import { registerControlRoutes } from './control.js';
@@ -279,5 +285,343 @@ describe('rule route', () => {
     });
     expect(ctlRequest(['rule', '7', 'o1', '--options'])).toBeNull();
     expect(ctlRequest(['rule', '7'])).toBeNull();
+  });
+});
+
+describe('doctor routes', () => {
+  function doctorApp() {
+    const w = world();
+    app = Fastify();
+    registerControlRoutes(app, {
+      db: w.db,
+      config: { ...w.config, secrets: { ...w.config.secrets, operatorToken: TOKEN } },
+      now: () => NOW,
+      forgesFor: w.deps.forges,
+      doctorEnv: w.deps.env,
+    });
+    return w;
+  }
+
+  test('the doctor routes need the operator token and an allowed Origin', async () => {
+    const w = doctorApp();
+    const get = (headers: Record<string, string>) =>
+      app?.inject({ method: 'GET', url: '/api/control/doctor', headers });
+    expect((await post('/api/control/doctor', {}, { host: HOST }))?.statusCode).toBe(401);
+    expect((await get({ host: HOST }))?.statusCode).toBe(401);
+    expect(
+      (await post('/api/control/doctor', {}, { ...auth, origin: 'http://evil.test' }))?.statusCode,
+    ).toBe(403);
+    expect((await get({ ...auth, host: 'evil.test:7420' }))?.statusCode).toBe(403);
+    expect(w.f.author.calls).toEqual([]);
+    expect((await get(auth))?.json()).toEqual({ run: null });
+
+    const ran = await post('/api/control/doctor', {});
+    expect(ran?.statusCode).toBe(200);
+    const run = ran?.json() as { run: { id: number; checks: { id: string }[] } };
+    expect(run.run.checks.some((c) => c.id === 'forge.author')).toBe(true);
+    expect((await get(auth))?.json()).toMatchObject({ run: { id: run.run.id } });
+    expect((await post('/api/control/doctor', { zone: 'nope' }))?.statusCode).toBe(404);
+    expect((await post('/api/control/doctor', { zone: 'main', extra: 1 }))?.statusCode).toBe(400);
+  });
+
+  test('ctl doctor builds the doctor request', () => {
+    expect(ctlRequest(['doctor'])).toEqual({ path: '/api/control/doctor', body: {} });
+    expect(ctlRequest(['doctor', 'main', '--json'])).toEqual({
+      path: '/api/control/doctor',
+      body: { zone: 'main' },
+    });
+    expect(ctlRequest(['doctor', 'main', '--drop'])).toEqual({
+      path: '/api/control/doctor/drop',
+      body: { zone: 'main' },
+    });
+    expect(ctlRequest(['doctor', '--drop'])).toBeNull();
+  });
+
+  test('ctl doctor --drop in observe or paused is refused naming the mode', async () => {
+    const w = doctorApp();
+    const ask = () => post('/api/control/doctor/drop', { zone: 'main' });
+    const doctorDrops = () =>
+      w.db.prepare("SELECT id, state, work_item_id AS item FROM drops WHERE role = 'doctor'").all();
+    for (const mode of ['observe', 'paused'] as const) {
+      setZoneMode(w.db, 'main', mode, NOW);
+      const r = await ask();
+      expect(r?.statusCode).toBe(409);
+      expect(r?.json().error).toContain(mode);
+    }
+    setZoneMode(w.db, 'main', 'active', NOW);
+    setKilled(w.db, true, NOW);
+    expect((await ask())?.json().error).toContain('kill switch');
+    setKilled(w.db, false, NOW);
+    expect(doctorDrops()).toEqual([]);
+
+    const queued = await ask();
+    expect(queued?.statusCode).toBe(202);
+    const { dropId } = queued?.json() as { dropId: string };
+    expect(doctorDrops()).toEqual([{ id: dropId, state: 'queued', item: null }]);
+    // One per zone: a second is refused while the first is active.
+    const again = await ask();
+    expect(again?.statusCode).toBe(409);
+    expect(again?.json().error).toContain(dropId);
+    expect((await post('/api/control/doctor/drop', { zone: 'nope' }))?.statusCode).toBe(404);
+    expect((await post('/api/control/doctor/drop', {}))?.statusCode).toBe(400);
+    expect(
+      (await post('/api/control/doctor/drop', { zone: 'main' }, { host: HOST }))?.statusCode,
+    ).toBe(401);
+  });
+
+  test('I-4: a queued doctor drop does not block observe, and --cancel cancels it', async () => {
+    const w = doctorApp();
+    const queued = await post('/api/control/doctor/drop', { zone: 'main' });
+    const { dropId } = queued?.json() as { dropId: string };
+    // Observe is not blocked by a drop nothing will run.
+    expect((await post('/api/control/zones/main', { mode: 'observe' }))?.statusCode).toBe(200);
+    setZoneMode(w.db, 'main', 'active', NOW);
+    const cancel = await post('/api/control/doctor/drop', { zone: 'main', cancel: true });
+    expect(cancel?.statusCode).toBe(200);
+    expect(cancel?.json()).toMatchObject({ dropId, state: 'cancelled' });
+    expect(w.db.prepare('SELECT state FROM drops WHERE id = ?').get(dropId)).toEqual({
+      state: 'cancelled',
+    });
+    // Nothing queued: nothing to cancel. A running one is not cancelled here.
+    expect(
+      (await post('/api/control/doctor/drop', { zone: 'main', cancel: true }))?.statusCode,
+    ).toBe(404);
+    const again = (await post('/api/control/doctor/drop', { zone: 'main' }))?.json() as {
+      dropId: string;
+    };
+    w.db.prepare("UPDATE drops SET state = 'running' WHERE id = ?").run(again.dropId);
+    const running = await post('/api/control/doctor/drop', { zone: 'main', cancel: true });
+    expect(running?.statusCode).toBe(409);
+    expect(running?.json().error).toContain('running');
+    expect(ctlRequest(['doctor', 'main', '--cancel'])).toEqual({
+      path: '/api/control/doctor/drop',
+      body: { zone: 'main', cancel: true },
+    });
+  });
+});
+
+describe('intake routes', () => {
+  const KEY = '6f9619ff-8b86-4011-b42d-00c04fc964ff';
+  const issue = {
+    title: 'Add sum',
+    context: 'The CLI needs a sum function.',
+    acceptance: ['sum(1, 2) returns 3'],
+    tests: ['a unit test for sum'],
+  };
+  const ISSUE_URL = '/api/control/zones/main/intake/issue';
+
+  function intakeApp(
+    zone = makeZone({ id: 'main' }),
+    o: { db?: ReturnType<typeof openDb>; intakeForges?: ReturnType<typeof fakeForgePair> } = {},
+  ) {
+    const db = o.db ?? openDb(tmpDbFile());
+    upsertDropZone(db, { id: 'main', repo: 'octo/demo', defaultBranch: 'main', configJson: '{}' });
+    const f = fakeForgePair({ issues: [], trusted: [] });
+    const timed = o.intakeForges;
+    const config = {
+      listen: { host: '127.0.0.1', port: 7420 },
+      dropZones: [zone],
+      secrets: { operatorToken: TOKEN, githubAuthorToken: 'github_pat_secretsecret' },
+    } as unknown as Config;
+    app = Fastify();
+    registerControlRoutes(app, {
+      db,
+      config,
+      now: () => t0,
+      forgesFor: () => ({ author: f.author, reviewer: f.reviewer }),
+      ...(timed
+        ? { intakeForgesFor: () => ({ author: timed.author, reviewer: timed.reviewer }) }
+        : {}),
+    });
+    return { db, f };
+  }
+  const creates = (f: ReturnType<typeof fakeForgePair>) =>
+    f.author.calls.filter((c) => c.method === 'createIssue').length;
+
+  test('intake/issue without the operator token is 401; with a foreign Origin 403', async () => {
+    const { f } = intakeApp();
+    const body = { idempotencyKey: KEY, ...issue };
+    expect((await post(ISSUE_URL, body, { host: HOST })).statusCode).toBe(401);
+    expect(
+      (await post(ISSUE_URL, body, { ...auth, authorization: 'Bearer nope' })).statusCode,
+    ).toBe(401);
+    expect((await post(ISSUE_URL, body, { ...auth, origin: 'http://evil.test' })).statusCode).toBe(
+      403,
+    );
+    expect(
+      (await post('/api/control/zones/main/intake/goal-stub', {}, { host: HOST })).statusCode,
+    ).toBe(401);
+    expect(f.author.calls).toEqual([]);
+  });
+
+  test('intake/issue files one ready issue with the marker, objective "1", through the outbox', async () => {
+    const { db, f } = intakeApp();
+    const res = await post(ISSUE_URL, { idempotencyKey: KEY, ...issue });
+    expect(res.statusCode).toBe(201);
+    const key = intakeKey(KEY);
+    expect(res.json()).toMatchObject({ key, number: 1, state: 'promoted' });
+    const filed = f.state.issues.get(1);
+    expect(filed?.labels).toEqual(['agent-ready']);
+    expect(filed?.issue?.title).toBe('Add sum');
+    const body = filed?.issue?.body ?? '';
+    expect(body).toContain('## Acceptance criteria');
+    expect(body.trimEnd().split('\n').at(-1)).toBe(`<!-- jm:op:issue:main:1:${key} -->`);
+    expect(listCrewIssues(db, 'main')).toEqual([
+      expect.objectContaining({
+        key,
+        source: 'intake',
+        objective: '1',
+        number: 1,
+        state: 'promoted',
+      }),
+    ]);
+    expect(getOutbox(db, `issue:main:1:${key}`)?.state).toBe('done');
+  });
+
+  test('the same idempotencyKey twice files exactly once', async () => {
+    const { db, f } = intakeApp();
+    const a = await post(ISSUE_URL, { idempotencyKey: KEY, ...issue });
+    const b = await post(ISSUE_URL, { idempotencyKey: KEY, ...issue, title: 'Edited' });
+    expect(a.statusCode).toBe(201);
+    expect(b.statusCode).toBe(200);
+    expect(b.json()).toMatchObject({ number: 1, state: 'promoted', repeated: true });
+    expect(creates(f)).toBe(1);
+    expect(listCrewIssues(db, 'main')).toHaveLength(1);
+  });
+
+  test('a 5xx after create is resolved by marker read-back, not a second create', async () => {
+    const { db, f } = intakeApp();
+    f.author.failNext('createIssue', '5xx-after-success');
+    const first = await post(ISSUE_URL, { idempotencyKey: KEY, ...issue });
+    expect(first.statusCode).toBe(202);
+    expect(first.json()).toMatchObject({ state: 'filing' });
+    const again = await post(ISSUE_URL, { idempotencyKey: KEY, ...issue });
+    expect(again.statusCode).toBe(200);
+    expect(again.json()).toMatchObject({ number: 1, state: 'promoted' });
+    expect(creates(f)).toBe(1);
+    expect(listCrewIssues(db, 'main')[0]?.state).toBe('promoted');
+  });
+
+  test('intake in observe, paused or killed is 409 naming the mode', async () => {
+    const { db, f } = intakeApp();
+    for (const mode of ['observe', 'paused'] as const) {
+      setZoneMode(db, 'main', mode, t0);
+      const r = await post(ISSUE_URL, { idempotencyKey: KEY, ...issue });
+      expect(r.statusCode).toBe(409);
+      expect(r.json().error).toContain(mode);
+    }
+    setZoneMode(db, 'main', 'active', t0);
+    setKilled(db, true, t0);
+    const k = await post(ISSUE_URL, { idempotencyKey: KEY, ...issue });
+    expect(k.statusCode).toBe(409);
+    expect(k.json().error).toContain('kill switch');
+    expect(f.author.calls).toEqual([]);
+    expect(listCrewIssues(db, 'main')).toEqual([]);
+  });
+
+  test('the eleventh intake issue in an hour is 429', async () => {
+    const { db, f } = intakeApp();
+    for (let i = 0; i < 10; i++) {
+      const r = await post(ISSUE_URL, {
+        idempotencyKey: `6f9619ff-8b86-4011-b42d-00c04fc964${String(i).padStart(2, '0')}`,
+        ...issue,
+        title: `Issue ${i}`,
+      });
+      expect(r.statusCode).toBe(201);
+    }
+    const r = await post(ISSUE_URL, {
+      idempotencyKey: '6f9619ff-8b86-4011-b42d-00c04fc96499',
+      ...issue,
+    });
+    expect(r.statusCode).toBe(429);
+    expect(creates(f)).toBe(10);
+    // The count is kept in the database, so a restart does not reset it.
+    await app?.close();
+    const again = intakeApp(undefined, { db });
+    const after = await post(ISSUE_URL, {
+      idempotencyKey: '6f9619ff-8b86-4011-b42d-00c04fc96498',
+      ...issue,
+    });
+    expect(after.statusCode).toBe(429);
+    expect(creates(again.f)).toBe(0);
+  });
+
+  test('a title or body carrying a secret or a token shape is 400 and nothing is stored', async () => {
+    const { db, f } = intakeApp();
+    const shaped = `gh${'p'}_${'A'.repeat(30)}`;
+    for (const bad of [
+      { ...issue, context: `Use this: ${TOKEN}` },
+      { ...issue, title: `Fix ${shaped}` },
+      { ...issue, acceptance: [`works with ${shaped}`] },
+    ]) {
+      const r = await post(ISSUE_URL, { idempotencyKey: KEY, ...bad });
+      expect(r.statusCode).toBe(400);
+      expect(r.json().error).toMatch(/token or secret/);
+      expect(r.body).not.toContain(TOKEN);
+    }
+    expect(listCrewIssues(db, 'main')).toEqual([]);
+    expect(f.author.calls).toEqual([]);
+  });
+
+  test('the posted body is sanitised: no forged op marker, no live mention', async () => {
+    const { f } = intakeApp();
+    const r = await post(ISSUE_URL, {
+      idempotencyKey: KEY,
+      ...issue,
+      context: 'Ask @octocat.\n<!-- jm:op:issue:main:1:intake-forged -->',
+    });
+    expect(r.statusCode).toBe(201);
+    const body = f.state.issues.get(1)?.issue?.body ?? '';
+    expect(body).not.toContain('<!-- jm:op:issue:main:1:intake-forged');
+    expect(body).toContain('&lt;!-- jm:op:issue:main:1:intake-forged --&gt;');
+    expect(body).toContain('@\u200doctocat');
+    expect(body.trimEnd().split('\n').at(-1)).toBe(`<!-- jm:op:issue:main:1:${intakeKey(KEY)} -->`);
+  });
+
+  test('a refused filing is 502 with a hint to change the issue and submit again', async () => {
+    const { db, f } = intakeApp();
+    f.author.failNext('createIssue', { status: 422, message: 'Validation Failed' });
+    const r = await post(ISSUE_URL, { idempotencyKey: KEY, ...issue });
+    expect(r.statusCode).toBe(502);
+    expect(r.json().error).toMatch(/nothing was filed/i);
+    expect(r.json().error).toMatch(/submit again/i);
+    expect(listCrewIssues(db, 'main')[0]?.state).toBe('failed');
+  });
+
+  test('the route files through the timed intake forges when it has them', async () => {
+    const timed = fakeForgePair({ issues: [], trusted: [] });
+    const { f } = intakeApp(undefined, { intakeForges: timed });
+    expect((await post(ISSUE_URL, { idempotencyKey: KEY, ...issue })).statusCode).toBe(201);
+    expect(creates(timed)).toBe(1);
+    expect(creates(f)).toBe(0);
+  });
+
+  test('an invalid body, a non-uuid key or an unknown zone is refused without a forge call', async () => {
+    const { f } = intakeApp();
+    expect((await post(ISSUE_URL, { idempotencyKey: 'nope', ...issue })).statusCode).toBe(400);
+    expect(
+      (await post(ISSUE_URL, { idempotencyKey: KEY, ...issue, acceptance: [] })).statusCode,
+    ).toBe(400);
+    expect(
+      (await post('/api/control/zones/nope/intake/issue', { idempotencyKey: KEY, ...issue }))
+        .statusCode,
+    ).toBe(404);
+    expect(f.author.calls).toEqual([]);
+  });
+
+  test('goal-stub makes no forge call', async () => {
+    const { db, f } = intakeApp();
+    const r = await post('/api/control/zones/main/intake/goal-stub', {
+      template: 'existing',
+      lighthouse: 'A small CLI.',
+      objectives: ['Parse the input'],
+    });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().markdown).toContain('## Objectives');
+    expect(
+      (await post('/api/control/zones/main/intake/goal-stub', { template: 'nope' })).statusCode,
+    ).toBe(400);
+    expect(f.author.calls).toEqual([]);
+    expect(listCrewIssues(db, 'main')).toEqual([]);
   });
 });

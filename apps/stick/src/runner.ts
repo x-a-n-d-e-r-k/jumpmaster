@@ -16,7 +16,14 @@ import {
   TrooperEventSchema,
 } from '@jumpmaster/protocol';
 import type { DropClient } from './client.js';
-import type { ContainerDriver } from './driver.js';
+import type { ContainerDriver, DropNet } from './driver.js';
+import { type EgressSession, egressImage, startEgress, trooperEgressRefusal } from './egress.js';
+import { pullImage } from './pull.js';
+import { dropSubnetPool } from './subnets.js';
+import { digestOf, type ImageTrust, verifyImage } from './verify.js';
+
+/** Services a drop network holds under egress: `.8` to `.14` of its /28. */
+const MAX_EGRESS_SERVICES = 6;
 
 export const TROOPER_IMAGE = process.env.JM_TROOPER_IMAGE ?? 'jumpmaster-trooper:dev';
 const STOP_GRACE_MS = 30_000;
@@ -55,6 +62,35 @@ export async function reapOrphans(driver: ContainerDriver, stickId: string): Pro
     }
   }
   await driver.removeNetworksByLabel(STICK_LABEL, stickId).catch(() => 0);
+  return removed;
+}
+
+/**
+ * Removes this stick's drop networks that no running drop holds, with whatever is left on them
+ * (services and proxies carry the drop's labels). Runs every 10 minutes, not only at start: a
+ * leaked network holds a /28 of a small pool. Returns how many it removed.
+ */
+export async function sweepDropNetworks(
+  driver: ContainerDriver,
+  stickId: string,
+  active: Set<string>,
+): Promise<number> {
+  let removed = 0;
+  for (const n of await driver.listNetworksByLabel(STICK_LABEL, stickId)) {
+    if (active.has(n.name)) continue;
+    const drop = n.labels['jumpmaster.drop'];
+    const epoch = n.labels['jumpmaster.epoch'];
+    // Without the drop labels the container filter would be too wide: leave it for a restart.
+    if (!drop || !epoch) continue;
+    await driver
+      .removeServices(n.name, {
+        'jumpmaster.drop': drop,
+        'jumpmaster.epoch': epoch,
+        [STICK_LABEL]: stickId,
+      })
+      .catch(() => {});
+    removed++;
+  }
   return removed;
 }
 
@@ -102,58 +138,144 @@ type RunDeps = {
   /** Consecutive failed heartbeats before a hard kill. A kill can't reach a cut-off stick. */
   lostServerKillBeats?: number;
   image?: string;
-  /** Defaults to `allowedImages(process.env)`. */
+  /**
+   * The image policy and what it trusts (main builds it at startup). Without it: the allow-list
+   * policy over `allowedImages`, else over `allowedImages(process.env)`.
+   */
+  trust?: ImageTrust;
+  /** Defaults to `allowedImages(process.env)`; used only when `trust` is not given. */
   allowedImages?: Set<string>;
+  /**
+   * The egress proxy image; defaults to `JM_EGRESS_IMAGE`. Under the allow-list policy it is
+   * allowed for the proxy only; under signed it is pulled and verified like the others.
+   */
+  egressImage?: string;
+  /** Where image pull and verification lines go (default stdout). */
+  log?: (line: string) => void;
+  egressReadyMs?: number;
+  /** Defaults to `JM_DROP_SUBNET_POOL`. */
+  subnetPool?: string;
+  /** Drop networks in use, so the periodic sweep leaves them alone. */
+  active?: Set<string>;
 };
 
 export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void> {
   const { client, driver } = deps;
   const { dropId, epoch } = payload;
   const image = payload.image || deps.image || TROOPER_IMAGE;
-  if (!(deps.allowedImages ?? allowedImages(process.env)).has(image)) {
-    await client.postResult(dropId, epoch, {
-      status: 'failed',
-      role: payload.role,
-      reason: `image not allowed: ${image}`,
-      gates: [],
-    });
+  const trust: ImageTrust = deps.trust ?? {
+    policy: 'allowlist',
+    allowed: deps.allowedImages ?? allowedImages(process.env),
+  };
+  const log = deps.log ?? ((line: string) => console.log(line));
+  const services = ('services' in payload ? payload.services : undefined) ?? [];
+  const egress = payload.egress;
+  const fail = (reason: string) =>
+    client.postResult(dropId, epoch, { status: 'failed', role: payload.role, reason, gates: [] });
+  const proxyImage = egress ? (deps.egressImage ?? egressImage(process.env)) : undefined;
+  // Every image this drop would create a container from: the trooper, its proxy, its services.
+  const images: { ref: string; proxy?: true }[] = [
+    { ref: image },
+    ...(proxyImage ? [{ ref: proxyImage, proxy: true as const }] : []),
+    ...services.map((s) => ({ ref: s.image })),
+  ];
+  // The allow-list lets the proxy image run as the proxy only (never as a trooper or service).
+  const decide = (i: { ref: string; proxy?: true }) =>
+    i.proxy && trust.policy === 'allowlist'
+      ? Promise.resolve({ ok: true as const, via: 'allowlist' as const })
+      : verifyImage(i.ref, trust);
+  // First what needs no network: a tag under signed, or an image off the allow-list.
+  for (const i of images) {
+    // Under signed only the tag check is offline; verifyImage refuses a tag without cosign.
+    if (trust.policy === 'signed' && digestOf(i.ref)) continue;
+    const v = await decide(i);
+    if (!v.ok) {
+      await fail(v.reason);
+      return;
+    }
+  }
+  if (egress && services.length > MAX_EGRESS_SERVICES) {
+    await fail(`egress allows at most ${MAX_EGRESS_SERVICES} services per drop`);
     return;
   }
-  const allowed = deps.allowedImages ?? allowedImages(process.env);
-  const services = ('services' in payload ? payload.services : undefined) ?? [];
-  const blocked = services.find((s) => !allowed.has(s.image));
-  if (blocked) {
-    await client.postResult(dropId, epoch, {
-      status: 'failed',
-      role: payload.role,
-      reason: `image not allowed: ${blocked.image}`,
-      gates: [],
-    });
-    return;
+  // Then verify (cosign asks the registry: under signed nothing is downloaded until every image
+  // has verified), then pull digest references, all before any container exists.
+  const unique = [...new Map(images.map((i) => [i.ref, i])).values()];
+  if (trust.policy === 'signed') {
+    for (const i of unique) {
+      const v = await decide(i);
+      if (!v.ok) {
+        await fail(v.reason);
+        return;
+      }
+      log(JSON.stringify({ event: 'image-verified', dropId, ref: i.ref, via: v.via }));
+    }
+  }
+  for (const i of unique) {
+    try {
+      await pullImage(i.ref, { driver, log });
+    } catch (e) {
+      await fail(e instanceof Error ? e.message : String(e));
+      return;
+    }
+  }
+  if (egress) {
+    // A trooper older than egress ignores payload.egress: refuse it before anything is created,
+    // with a reason the operator can act on, rather than a drop that fails for want of a network.
+    let refusal: string | null;
+    try {
+      refusal = trooperEgressRefusal(image, await driver.imageLabels(image));
+    } catch (e) {
+      refusal = `cannot inspect image ${image} for egress support: ${e instanceof Error ? e.message : String(e)}`;
+    }
+    if (refusal) {
+      await fail(refusal);
+      return;
+    }
   }
   const labels = {
     'jumpmaster.drop': dropId,
     'jumpmaster.epoch': String(epoch),
     [STICK_LABEL]: deps.stickId,
   };
-  const network = services.length > 0 ? `jm-drop-${dropId}-${epoch}` : undefined;
+  const network = services.length > 0 || egress ? `jm-drop-${dropId}-${epoch}` : undefined;
+  let net: DropNet | undefined;
+  let session: EgressSession | undefined;
+  if (network) deps.active?.add(network);
   try {
-    if (network) {
+    if (egress && network) {
+      // Fail closed: no network, no proxy or no ready line means no trooper.
       try {
-        await driver.startServices(dropId, epoch, services, labels);
-      } catch (e) {
-        await client.postResult(dropId, epoch, {
-          status: 'failed',
-          role: payload.role,
-          reason: `services failed: ${e instanceof Error ? e.message : String(e)}`,
-          gates: [],
+        const pool = deps.subnetPool ?? dropSubnetPool(process.env);
+        net = await driver.createDropNetwork(network, labels, pool);
+        session = await startEgress(driver, {
+          dropId,
+          epoch,
+          egress,
+          net,
+          image: proxyImage ?? egressImage(process.env),
+          labels,
+          ...(deps.egressReadyMs !== undefined ? { readyMs: deps.egressReadyMs } : {}),
         });
+      } catch (e) {
+        await fail(`egress proxy failed to start: ${e instanceof Error ? e.message : String(e)}`);
+        return;
+      }
+      console.log(JSON.stringify({ event: 'egress', dropId, mode: egress.mode, proxy: 'ready' }));
+    }
+    if (services.length > 0) {
+      try {
+        await driver.startServices(dropId, epoch, services, labels, net);
+      } catch (e) {
+        await fail(`services failed: ${e instanceof Error ? e.message : String(e)}`);
         return;
       }
     }
-    await runContainer(payload, deps, image, labels, network);
+    await runContainer(payload, deps, image, labels, network, net, session);
   } finally {
+    if (session) await session.stop();
     if (network) await driver.removeServices(network, labels).catch(() => {});
+    if (network) deps.active?.delete(network);
   }
 }
 
@@ -163,6 +285,8 @@ async function runContainer(
   image: string,
   labels: Record<string, string>,
   network: string | undefined,
+  net: DropNet | undefined,
+  session: EgressSession | undefined,
 ): Promise<void> {
   const { client, driver } = deps;
   const { dropId, epoch } = payload;
@@ -172,6 +296,7 @@ async function runContainer(
     name: `jumpmaster-drop-${dropId}-${epoch}`,
     labels,
     ...(network ? { network } : {}),
+    ...(net ? { egress: net } : {}),
     ...(payload.limits ? { limits: payload.limits } : {}),
   });
 
@@ -187,6 +312,12 @@ async function runContainer(
   let pending: TrooperEvent[] = [];
   let pendingBytes = 0;
   let flushing = Promise.resolve();
+  const queue = (ev: TrooperEvent, bytes: number) => {
+    if (pending.length > 0 && pendingBytes + bytes > MAX_BATCH_BYTES) void flush();
+    pending.push(ev);
+    pendingBytes += bytes;
+    if (pending.length >= MAX_BATCH) void flush();
+  };
   const flush = () => {
     if (pending.length === 0) return flushing;
     const batch = pending;
@@ -245,11 +376,9 @@ async function runContainer(
       } else if (line.startsWith(EVENT_PREFIX)) {
         try {
           const ev = TrooperEventSchema.parse(JSON.parse(line.slice(EVENT_PREFIX.length)));
-          const bytes = Buffer.byteLength(line);
-          if (pending.length > 0 && pendingBytes + bytes > MAX_BATCH_BYTES) void flush();
-          pending.push(ev);
-          pendingBytes += bytes;
-          if (pending.length >= MAX_BATCH) void flush();
+          // Egress events come from the stick's own reading of the proxy, never the trooper.
+          if (ev.kind === 'egress') continue;
+          queue(ev, Buffer.byteLength(line));
         } catch {
           // malformed event line: drop it
         }
@@ -262,6 +391,9 @@ async function runContainer(
       }
     }
     const { exitCode } = await handle.wait();
+    // The proxy logs each tunnel as it closes: stop it, then report the drop's egress.
+    if (session)
+      for (const ev of await session.finish()) queue(ev, Buffer.byteLength(JSON.stringify(ev)));
     await flush();
     // Before the result: the server checks for these when it reads the verdict.
     await Promise.allSettled(uploads);
@@ -299,10 +431,23 @@ async function runContainer(
 const MAX_STDERR_REASON = 500;
 /** Stack frames and the lines Node prints after a crash: they say nothing about its cause. */
 const NODE_FOOTER = /^(at |Node\.js v\d|\(Use `node --trace-)/;
+/**
+ * zod rejecting the payload's `role` discriminator (v3 and v4 wordings): as the trooper's one-line
+ * `payload rejected: role: …`, or as a raw ZodError whose issue has the path ["role"].
+ */
+const ROLE_REJECTED = [
+  /payload rejected: role: Invalid discriminator value/,
+  /"(?:note|message)":\s*"(?:No matching discriminator|Invalid discriminator value)[^"]*"[^\]}]*"path":\s*\[\s*"role"\s*\]/,
+  /"path":\s*\[\s*"role"\s*\][^}]*"(?:note|message)":\s*"(?:No matching discriminator|Invalid discriminator value)/,
+];
 
 /** Names the exit and, when the trooper said why on stderr, its last line with every credential scrubbed. */
 function noResultReason(exitCode: number, stderr: string, payload: DropPayload): string {
   const base = `trooper exited ${exitCode} without result`;
+  // A trooper built before this role existed rejects the payload's role. Its own words (zod's
+  // discriminator error, on one line or as raw JSON) don't say what to do; this does.
+  if (ROLE_REJECTED.some((re) => re.test(stderr)))
+    return `${base}: the zone's image ${payload.image} is older than the ${payload.role} role (its trooper rejected the payload's role); rebuild the zone image on the current trooper (FROM the release's preset), or use the release's preset image`;
   const last = stderr
     .split('\n')
     .map((l) => l.trim())

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import { raiseBriefing, ruleBriefing } from '../briefings.js';
 import { insertCrewIssue } from '../crew/store.js';
-import { insertDrop, updateDrop } from '../db/repo.js';
+import { insertDrop, insertStick, updateDrop } from '../db/repo.js';
 import { opMarker } from '../outbox.js';
 import { crewOn, GOAL } from '../test/crew.js';
 import { harness } from '../test/flowHarness.js';
@@ -36,6 +36,56 @@ async function crewHarness() {
 }
 
 describe('UI routes', () => {
+  test('/doctor shows the latest run, escaped, and refuses a foreign Host', async () => {
+    const h = await harness();
+    const foreign = await h.app.inject({
+      method: 'GET',
+      url: '/doctor',
+      headers: { host: 'evil.test' },
+    });
+    expect(foreign.statusCode).toBe(403);
+    expect((await get(h, '/doctor')).body).toContain('No doctor run has finished yet');
+    const checks = [
+      { id: 'config.listen', zoneId: null, status: 'pass', summary: 'loopback only' },
+      {
+        id: 'forge.labels',
+        zoneId: 'main',
+        status: 'fail',
+        summary: 'missing <script>',
+        fix: 'gh label create agent-ready',
+        doc: 'docs/runbooks/install.md#labels',
+      },
+    ];
+    h.db
+      .prepare(
+        "INSERT INTO doctor_runs (started_at, finished_at, results_json) VALUES ('a', 'b', ?)",
+      )
+      .run(JSON.stringify(checks));
+    const html = (await get(h, '/doctor')).body;
+    expect(html).toContain('missing &lt;script&gt;');
+    expect(html).toMatch(/<tr class="fail">.*forge\.labels/);
+    expect(html).toContain('gh label create agent-ready');
+    expect(html).toContain('1 pass, 0 warn, 1 fail, 0 skip');
+    expect(html).toContain(
+      'data-doctor="/api/control/doctor/drop" data-body="{&quot;zone&quot;:&quot;main&quot;}"',
+    );
+  });
+
+  test('the home page names an enrolled stick that cannot run an enforce zone', async () => {
+    const h = await harness({ zone: { egress: { mode: 'enforce' } } });
+    insertStick(h.db, { id: 's1', name: 'm3-stick', tokenHash: 'h1', slots: 1 });
+    insertStick(h.db, {
+      id: 's2',
+      name: 'new-stick',
+      tokenHash: 'h2',
+      slots: 1,
+      capabilities: ['egress-v1'],
+    });
+    const html = (await get(h, '/')).body;
+    expect(html).toMatch(/m3-stick<\/td>.*cannot run main: lacks egress-v1/);
+    expect(html).toMatch(/new-stick<\/td>.*all zones/);
+  });
+
   test('/briefings lists open briefings and recorded rulings', async () => {
     const h = await crewHarness();
     const at = h.now();
@@ -131,9 +181,20 @@ describe('UI routes', () => {
     );
   });
 
-  test.each(['/briefings', '/zones/main/goals'])('a foreign Host cannot read %s', async (url) => {
+  test('the intake page renders for a known zone and is 404 for an unknown one', async () => {
     const h = await crewHarness();
-    const res = await h.app.inject({ method: 'GET', url, headers: { host: 'evil.test' } });
-    expect(res.statusCode).toBe(403);
+    const res = await get(h, '/zones/main/intake');
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("the first issue doesn't need GOAL.md merged first");
+    expect((await get(h, '/zones/nope/intake')).statusCode).toBe(404);
   });
+
+  test.each(['/briefings', '/zones/main/goals', '/zones/main/intake'])(
+    'a foreign Host cannot read %s',
+    async (url) => {
+      const h = await crewHarness();
+      const res = await h.app.inject({ method: 'GET', url, headers: { host: 'evil.test' } });
+      expect(res.statusCode).toBe(403);
+    },
+  );
 });

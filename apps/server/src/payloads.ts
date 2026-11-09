@@ -5,7 +5,9 @@ import {
   CREW_ROLES,
   type CrewRole,
   type DropPayload,
+  type EgressPayload,
   isCrewRole,
+  normalizeHost,
   type Role,
 } from '@jumpmaster/protocol';
 import {
@@ -18,6 +20,7 @@ import type { Db } from './db/open.js';
 import { type Drop, getPullRequest, listWorkItems, updateDrop } from './db/repo.js';
 import { resolveModel } from './fable.js';
 import type { Feedback } from './flow/decide.js';
+import { PRESET_EGRESS } from './presets.js';
 
 const ROLES: Role[] = ['implement', 'review', 'heal', 'resolve', ...CREW_ROLES];
 
@@ -123,6 +126,36 @@ function authorReports(db: Db, drop: Drop): string {
   return `## Author reports (data)\n\n${body}\n\nThe head under review is ${drop.headSha ?? 'unknown'}.${olderTrooper}`;
 }
 
+/**
+ * Hosts every drop under egress reaches: the Claude API and GitHub (clone and push). The monitor
+ * rehearsal may extend this; the commit that does records the hosts it observed.
+ */
+export const BASE_EGRESS = ['api.anthropic.com', 'github.com'];
+
+/** An entry in canonical form: a name, or `*.` plus a name. */
+const canonicalEntry = (e: string): string =>
+  e.startsWith('*.') ? `*.${normalizeHost(e.slice(2)) ?? e.slice(2)}` : (normalizeHost(e) ?? e);
+
+/**
+ * The payload's `egress`, absent when the zone's mode is `off` (M3 behaviour). The allow list is
+ * the base, the preset's hosts and the zone's own entries, canonical, deduplicated and sorted.
+ */
+export function egressFor(zone: DropZoneConfig): EgressPayload | undefined {
+  const mode = zone.egress?.mode ?? 'off';
+  if (mode === 'off') return undefined;
+  const entries = [
+    ...BASE_EGRESS,
+    ...(zone.preset ? PRESET_EGRESS[zone.preset] : []),
+    ...(zone.egress?.allow ?? []),
+  ].map(canonicalEntry);
+  return { mode, allow: [...new Set(entries)].sort() };
+}
+
+const egressField = (zone: DropZoneConfig): { egress?: EgressPayload } => {
+  const egress = egressFor(zone);
+  return egress ? { egress } : {};
+};
+
 const hasCustomLimits = ({ limits }: DropZoneConfig): boolean =>
   limits.pids !== DEFAULT_PIDS_LIMIT || limits.memoryMb !== undefined || limits.shmMb !== undefined;
 
@@ -173,6 +206,7 @@ function buildCrewPayload(
     protectedPaths: zone.protectedPaths,
     ...(hasCustomLimits(zone) ? { limits: zone.limits } : {}),
     ...(zone.attribution === false ? { attribution: false } : {}),
+    ...egressField(zone),
     prompt: `${templates[role]}\n\n${stored.input}`,
     credentials: {
       claudeToken: secrets.claudeToken,
@@ -202,6 +236,44 @@ function buildCrewPayload(
   };
 }
 
+/**
+ * A doctor drop: the zone's image, gates, services, gate secrets and egress, on the default branch.
+ * No issue, branch, prompt or write token: at most the read token, on the same terms as review.
+ */
+function buildDoctorPayload(
+  db: Db,
+  zone: DropZoneConfig,
+  drop: Drop,
+  secrets: Config['secrets'],
+  model: string,
+): DropPayload {
+  const row = db
+    .prepare('SELECT default_branch AS defaultBranch FROM drop_zones WHERE id = ?')
+    .get(zone.id) as { defaultBranch: string };
+  const [owner = '', name = ''] = zone.repo.split('/');
+  return {
+    // The trooper finds the payload on stdin by its leading protocol field.
+    protocol: 1 as const,
+    dropId: drop.id,
+    epoch: drop.epoch,
+    role: 'doctor',
+    repo: { owner, name, defaultBranch: row.defaultBranch },
+    model,
+    image: zone.image,
+    gates: zone.gates,
+    ...(zone.services.length > 0 ? { services: zone.services } : {}),
+    ...(hasCustomLimits(zone) ? { limits: zone.limits } : {}),
+    ...(secrets.zoneSecrets?.[zone.id] ? { gateSecrets: secrets.zoneSecrets[zone.id] } : {}),
+    ...egressField(zone),
+    credentials: {
+      claudeToken: secrets.claudeToken,
+      ...(zone.reviewReadToken && secrets.githubReadToken
+        ? { readToken: secrets.githubReadToken }
+        : {}),
+    },
+  };
+}
+
 const DEFAULT_CLAUDE: ClaudeConfig = { plan: 'pro', fableWeeklyDropCap: 5 };
 
 /**
@@ -225,6 +297,7 @@ export function buildPayload(
   // Records requested_model on the drop as a side effect (the Fable weekly cap counts it).
   updateDrop(db, drop.id, { requestedModel: model });
   if (isCrewRole(drop.role)) return buildCrewPayload(db, zone, drop, drop.role, secrets, model);
+  if (drop.role === 'doctor') return buildDoctorPayload(db, zone, drop, secrets, model);
   const item = listWorkItems(db, zone.id).find((w) => w.id === drop.workItemId);
   if (!item) throw new Error(`unknown work item ${drop.workItemId}`);
   const row = db
@@ -251,6 +324,7 @@ export function buildPayload(
     ...(hasCustomLimits(zone) ? { limits: zone.limits } : {}),
     ...(secrets.zoneSecrets?.[zone.id] ? { gateSecrets: secrets.zoneSecrets[zone.id] } : {}),
     ...(zone.attribution === false ? { attribution: false } : {}),
+    ...egressField(zone),
     prompt: `${templates[role]}\n\n## Issue (data)\n\n${fence(drop.id, 'issue', `#${item.issueNumber}: ${neutralise(item.title)}\n\n${neutralise(item.body)}`)}`,
   };
   const author = { claudeToken: secrets.claudeToken, forgeToken: secrets.githubAuthorToken };

@@ -22,21 +22,29 @@ import {
   listObservations,
   listOutbox,
   listRecentDrops,
+  listSticks,
   listWorkItems,
 } from './db/repo.js';
+import { latestDoctorRun } from './doctor/run.js';
 import { fableStatus } from './fable.js';
+import type { Forge } from './forge/github.js';
 import { getGoals } from './goals.js';
+import { missingFor, zoneRequirements } from './leases.js';
 import { registerMcpRoute } from './mcp/server.js';
+import type { ForgePair } from './outbox.js';
 import { lastSyncResult } from './sync.js';
 import {
   type CrewLine,
   type HomeState,
   type ItemDetail,
   renderBriefings,
+  renderDoctor,
   renderDrop,
   renderGoals,
   renderHome,
+  renderIntake,
   renderObservations,
+  type StickLine,
 } from './ui/pages.js';
 import { dispatchGate } from './usage.js';
 
@@ -69,6 +77,12 @@ function usageView(db: Db, config: Config, at: Date): NonNullable<HomeState['usa
 export function createApp(
   deps: StickRouteDeps & {
     kick?: () => void;
+    /** A forge on the read token, for the doctor (absent without `JM_GITHUB_READ_TOKEN`). */
+    readForgeFor?: (zoneId: string) => Forge | undefined;
+    /** The doctor's forges (requests time out); defaults to `forgesFor`. */
+    doctorForgesFor?: (zoneId: string) => ForgePair;
+    /** The intake's forges (requests time out); defaults to `forgesFor`. */
+    intakeForgesFor?: (zoneId: string) => ForgePair;
     /** The operator's log, scrubbed of secrets (main.ts); MCP's internal errors go here. */
     log?: (msg: string) => void;
   },
@@ -116,6 +130,19 @@ export function createApp(
       details,
       outbox: listOutbox(db, ['unknown', 'failed']),
       briefings: listBriefings(db, { state: 'open' }),
+      sticks: listSticks(db).map(
+        (s): StickLine => ({
+          id: s.id,
+          name: s.name,
+          version: s.version,
+          lastSeenAt: s.lastSeenAt,
+          capabilities: s.capabilities,
+          imagePolicy: s.imagePolicy,
+          cannotRun: config.dropZones
+            .map((z) => ({ zoneId: z.id, missing: missingFor(s, zoneRequirements(z, config)) }))
+            .filter((c) => c.missing.length > 0),
+        }),
+      ),
       crew: config.dropZones.map((z): CrewLine => {
         const last = db
           .prepare(
@@ -168,6 +195,18 @@ export function createApp(
     });
     return reply.type('text/html; charset=utf-8').send(html);
   });
+
+  app.get<{ Params: { id: string } }>('/zones/:id/intake', async (req, reply) => {
+    const zone = deps.config.dropZones.find((z) => z.id === req.params.id);
+    if (!zone) return reply.code(404).type('text/plain').send('not found');
+    return reply.type('text/html; charset=utf-8').send(renderIntake(zone));
+  });
+
+  app.get('/doctor', async (_req, reply) =>
+    reply
+      .type('text/html; charset=utf-8')
+      .send(renderDoctor(latestDoctorRun(deps.db), deps.config.dropZones)),
+  );
 
   app.get('/observations', async (_req, reply) =>
     reply.type('text/html; charset=utf-8').send(renderObservations(listObservations(deps.db))),

@@ -12,6 +12,7 @@ import {
   REPORT_MAX_CHARS,
   RESULT_PREFIX,
 } from '@jumpmaster/protocol';
+import { applyEgress } from './egress-env.js';
 import { runGates } from './gates.js';
 import * as gitOps from './git.js';
 import {
@@ -24,6 +25,7 @@ import {
 } from './privilege.js';
 import { redact } from './redact.js';
 import { runCrew } from './roles/crew.js';
+import { runDoctorRole } from './roles/doctor.js';
 import { runHeal } from './roles/heal.js';
 import { runImplement } from './roles/implement.js';
 import { runResolve } from './roles/resolve.js';
@@ -57,6 +59,7 @@ const ROLES: Partial<Record<DropPayload['role'], RoleRunner>> = {
   'crew-lead': runCrew,
   refute: runCrew,
   diagnose: runCrew,
+  doctor: runDoctorRole,
 };
 
 export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promise<DropResult> {
@@ -80,6 +83,12 @@ export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promi
   if (!runner) return fail('role not implemented');
 
   const ids = deps.ids ?? null;
+  // Before anything is spawned: every environment built from here on carries the proxy.
+  try {
+    await applyEgress(payload, ids);
+  } catch (err) {
+    return fail(`egress setup failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
   let work: string;
   try {
     work = mkdtempSync(join(workRoot(), 'trooper-'));

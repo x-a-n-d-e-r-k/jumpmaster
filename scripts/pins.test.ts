@@ -294,7 +294,12 @@ function yamlRefs(text: string): YamlRef[] | { error: string; line: number } {
 
 const isActionFile = (file: string): boolean => /(^|\/)action\.ya?ml$/.test(file);
 
-export function scanYaml(file: string, text: string): Finding[] {
+export function scanYaml(
+  file: string,
+  text: string,
+  local: typeof LOCAL_IMAGE_FILES = LOCAL_IMAGE_FILES,
+): Finding[] {
+  const allowed = new Set(local[file]?.images ?? []);
   const refs = yamlRefs(text);
   if (!Array.isArray(refs)) return [{ file, line: refs.line, message: refs.error }];
   const findings: Finding[] = [];
@@ -311,7 +316,7 @@ export function scanYaml(file: string, text: string): Finding[] {
       else if (!IS_SHA.test(value)) message = `uses: ${value} is not a full 40-hex commit SHA`;
     } else if (isActionImage(file, path) && !value.startsWith('docker://')) {
       continue; // a Docker action's own Dockerfile: scanRepo scans that file
-    } else message = yamlImage(key, value);
+    } else message = key === 'image' && allowed.has(value) ? undefined : yamlImage(key, value);
     if (message) findings.push({ file, line, message });
   }
   return findings.sort((a, b) => a.line - b.line);
@@ -477,7 +482,8 @@ function dockerCommands(line: string, isDocker: (word: string) => boolean): Dock
  * Image references and downloads in a shell script (or a workflow `run:` block):
  * - the image argument of docker run/create/pull, in every form `dockerCommands` knows;
  * - every JSON `"image":"…"` field;
- * - `--build-arg BASE=…` and `--build-arg *_IMAGE=…` values of docker build;
+ * - `--build-arg BASE=…` and `--build-arg *_IMAGE=…` values of docker build, which must be digests
+ *   or a tag this script built on an earlier line (from its own scanned Dockerfile);
  * - an inline Dockerfile (`docker build … - <<EOF` or `-f-`), scanned as a Dockerfile;
  * - curl and wget, which need a checksum check nearby.
  * An image must be an @sha256 digest, an image the script builds itself (`docker build -t`), or one
@@ -520,10 +526,13 @@ export function scanShell(
     const r = word.startsWith('$') ? resolve(word) : { value: word };
     return 'value' in r && (r.value === 'docker' || r.value.endsWith('/docker'));
   };
+  // Tags built on lines already passed: a BASE build-arg may name only these.
+  const builtBefore = new Set<string>();
   const check = (line: number, what: string, ref: string, localOk = true) => {
     const r = resolve(ref);
     if ('error' in r) return findings.push({ file, line, message: `${what} ${ref}: ${r.error}` });
-    if (!IS_DIGEST.test(r.value) && !(localOk && allowed.has(r.value)))
+    const ok = localOk ? allowed.has(r.value) : builtBefore.has(r.value);
+    if (!IS_DIGEST.test(r.value) && !ok)
       findings.push({
         file,
         line,
@@ -566,6 +575,11 @@ export function scanShell(
             findings.push({ ...f, line: f.line + end });
           skipThrough = bodyEnd + 1;
         }
+        c.args.forEach((t, i) => {
+          if ((t === '-t' || t === '--tag') && c.args[i + 1])
+            builtBefore.add(c.args[i + 1] as string);
+          else if (t.startsWith('--tag=')) builtBefore.add(t.slice(6));
+        });
         continue;
       }
       const bools = BOOLEAN_FLAGS[c.sub] as Set<string>;
@@ -632,6 +646,13 @@ export function scanRepo(root: string): Finding[] {
       }
       // A local action is scanned wherever it lives, with everything in its directory.
       for (const { target, line } of localUses(text)) {
+        // A reusable workflow (a job-level uses: of a .yml file) is scanned as a workflow.
+        if (/\.ya?ml$/.test(target)) {
+          if (!exists(target))
+            findings.push({ file, line, message: `uses: ./${target} does not exist` });
+          else scanFile(target);
+          continue;
+        }
         const action = [`${target}/action.yml`, `${target}/action.yaml`].find(exists);
         if (!action) {
           findings.push({
@@ -767,6 +788,19 @@ describe('pin scan', () => {
     expect(scanYaml('deploy/compose.yml', text)).toEqual([
       { file: 'deploy/compose.yml', line: 5, message: expect.stringMatching(/image:.*digest/) },
     ]);
+  });
+
+  test('a compose file listed in LOCAL_IMAGE_FILES may name only its own local images', () => {
+    const local = { 'deploy/dev.yaml': { images: ['jm-server:dev'], reason: 'test' } };
+    const text = [
+      'services:',
+      '  a:',
+      '    image: jm-server:dev',
+      '  b:',
+      '    image: other:dev',
+    ].join('\n');
+    expect(scanYaml('deploy/dev.yaml', text, local).map((f) => f.line)).toEqual([5]);
+    expect(scanYaml('deploy/other.yaml', text, local).map((f) => f.line)).toEqual([3, 5]);
   });
 
   test('a download line without a checksum within three lines is reported', () => {
@@ -1004,6 +1038,36 @@ describe('pin scan: review bypasses', () => {
     ]);
   });
 
+  test('a job-level uses: of a local reusable workflow scans that workflow; a missing one is reported', () => {
+    const root = mkdtempSync(join(tmpdir(), 'jm-pins-'));
+    const put = (file: string, text: string) => {
+      mkdirSync(dirname(join(root, file)), { recursive: true });
+      writeFileSync(join(root, file), text);
+    };
+    put('package.json', '{"workspaces":[]}');
+    put('scripts/fixtures/pre-m4-deps.json', '{}');
+    put(
+      '.github/workflows/w.yml',
+      [
+        'jobs:',
+        '  a:',
+        '    uses: ./.github/workflows/called.yml',
+        '  b:',
+        '    uses: ./.github/workflows/missing.yml',
+      ].join('\n'),
+    );
+    // Outside the scanned roots, so only the uses: reaches it.
+    put('other/called.yml', 'jobs:\n  x:\n    steps:\n      - uses: foo/bar@v1\n');
+    put(
+      '.github/workflows/called.yml',
+      'on: workflow_call\njobs:\n  x:\n    steps:\n      - uses: foo/bar@v1\n',
+    );
+    expect(scanRepo(root).map((f) => `${f.file}:${f.line} ${f.message}`)).toEqual([
+      '.github/workflows/called.yml:5 uses: foo/bar@v1 is not a full 40-hex commit SHA',
+      '.github/workflows/w.yml:5 uses: ./.github/workflows/missing.yml does not exist',
+    ]);
+  });
+
   test('shell scripts that name images need digests (or images they build themselves)', () => {
     const S = 'images/x/run.sh';
     const text = [
@@ -1086,6 +1150,22 @@ describe('pin scan: re-review', () => {
       'docker buildx build --build-arg "BASE=$B" -t e .',
     ].join('\n');
     expect(lines(scanShell(S, text))).toEqual([1, 2, 6]);
+  });
+
+  test('shell scripts: a BASE build-arg may name an image the script itself builds earlier', () => {
+    // Preset images build FROM the trooper image the same script just built from its own
+    // (scanned, digest-pinned) Dockerfile. A listed local image the script doesn't build, an image
+    // built only later, and a remote tag all still fail.
+    const local = { [S]: { images: ['listed:dev'], reason: 'test' } };
+    const text = [
+      'docker build -t base:dev -f images/trooper/Dockerfile .',
+      'docker build --build-arg BASE=base:dev -t p1 -f images/trooper/presets/go/Dockerfile .',
+      'docker build --build-arg BASE=listed:dev -t p2 .',
+      'docker build --build-arg BASE=later:dev -t p3 .',
+      'docker build -t later:dev .',
+      'docker build --build-arg BASE=node:24 -t p4 .',
+    ].join('\n');
+    expect(lines(scanShell(S, text, local))).toEqual([3, 4, 6]);
   });
 
   test('shell scripts: other docker command forms are recognised', () => {

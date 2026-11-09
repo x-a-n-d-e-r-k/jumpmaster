@@ -1,0 +1,2 @@
+
+[{"critical":{"identity":{"docker-reference":"127.0.0.1:5101/o/jumpmaster-demo@sha256:b8c2e9670841320829510a0a6536cb558b5265de1e1f085f3824de7a68e41c5c"},"image":{"docker-manifest-digest":"sha256:b8c2e9670841320829510a0a6536cb558b5265de1e1f085f3824de7a68e41c5c"},"type":"https://sigstore.dev/cosign/sign/v1"},"optional":{}}]

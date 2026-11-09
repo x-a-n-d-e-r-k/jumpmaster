@@ -957,7 +957,7 @@ test('the cosign commands in SECURITY.md and install.md use the same identity as
 
 The stick log shows signed, verified images and enforced egress for every drop, and one run uses starter mode.
 
-**The spec's gate ("2 design partners reach a first PR unaided") stays the owner's.** It needs real people the owner recruits. This plan prepares it and does not claim it.
+**The spec's gate ("2 design partners reach a first PR unaided") stays the owner's.** It needs real people the owner recruits. This plan prepares it and does not claim it. When it runs, it is recorded on M4.5's sheet (`2026-11-09-jumpmaster-m4-5-operable.md`, Task 16): prelude commands and minutes, file edits and shell commands after `docker compose up`, questions (blocking and other), hesitations over a minute, hands-on minutes. That recording is M4.5's baseline.
 
 The claims listed under Review Focus as resting on unit tests are accepted on those tests.
 
@@ -1029,7 +1029,11 @@ The claims listed under Review Focus as resting on unit tests are accepted on th
 2. **T16/T17:** rootless Docker is **out of scope for M4** (decision). Its uid model contradicts the host-uid install. The install runbook says so in its prerequisites, `init` detects rootless and refuses with that message, and T11's `config.uid` check reports `skip: rootless unsupported in this release` rather than warn. Rootless support is added to the Deferred table.
 3. **T16:** after a mid-drop restart in step 4, run `PRAGMA integrity_check` and a WAL checkpoint, and assert `ok`. On macOS, if the bind-mounted `./data` misbehaves, the compose file uses a named volume for `data` (`JM_DATA_VOLUME=named`) and the runbook documents the backup path for both.
 4. **T1:** the pin scan exempts build-stage references (`COPY --from=<stage>`, where `<stage>` names an earlier `FROM ... AS <stage>`) and an explicit list of local-image files (`images/trooper/e2e/Dockerfile`, `examples/Dockerfile.pnpm`), each listed with a reason comment. Test: a stage reference passes, and an unlisted local tag fails.
-5. **T4:** the python preset sets `UV_PYTHON_INSTALL_DIR=/opt/uv/python` (world-readable) and links `python3.12` onto PATH. Its e2e runs `uv python find 3.12` and `python3.12 -V` as the agent user.
+5. **T4:** the python preset installs Python 3.12 with `UV_PYTHON_INSTALL_DIR=/opt/uv/python` set **for that build step only**. The directory is root-owned and world-readable, with no group or world write, and `python3.12` is linked onto PATH. The variable is deliberately **not** left in the image's `ENV`:
+   - left set, a run-time download (a `requires-python` the image doesn't ship) fails with a permission error;
+   - made writable, the agent could replace the interpreter the gate runs.
+
+   At run time each user's uv finds 3.12 through PATH and downloads any other Python into its own home. The e2e runs `uv python find 3.12` and `python3.12 -V` as the agent user, and checks that the agent can write nothing in any preset's toolchain directories.
 6. **T8:** the trooper derives the proxy URL from `payload.egress` (the fixed `http://jm-egress:3128`). `ContainerDriver.start` is unchanged.
 7. **T11/T16:** `forge.private-clone` fails a private repo unless `reviewReadToken: true` and the read token are set. `init` sets `reviewReadToken: true` when `GET /repos/{repo}` reports private.
 8. **T8:** the T8 e2e builds the proxy image locally. Pulling by digest arrives with T10.

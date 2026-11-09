@@ -1,6 +1,6 @@
 import type { ArtifactRow } from '../artifacts.js';
 import { type Briefing, optionsDigest, type Ruling, WAITS_FOR_CREW } from '../briefings.js';
-import type { DropZoneConfig } from '../config.js';
+import { type DropZoneConfig, STARTER_WARNING } from '../config.js';
 import type { CrewIssue } from '../crew/store.js';
 import type {
   AttemptKey,
@@ -12,6 +12,7 @@ import type {
   WorkItem,
 } from '../db/repo.js';
 import type { GoalRow } from '../goals.js';
+import { forgetSubmitKey, submitKey } from '../intake.js';
 import type { Gate } from '../usage.js';
 
 export const escapeHtml = (v: unknown): string =>
@@ -51,6 +52,19 @@ export interface HomeState {
   briefings?: Briefing[];
   /** One line per zone about its crew. */
   crew?: CrewLine[];
+  /** Every enrolled stick, and the zones each can't run. */
+  sticks?: StickLine[];
+}
+
+export interface StickLine {
+  id: string;
+  name: string;
+  version: string | null;
+  lastSeenAt: string | null;
+  capabilities: string[];
+  imagePolicy: string;
+  /** Zones whose requirements this stick lacks, and what it lacks for each. */
+  cannotRun: { zoneId: string; missing: string[] }[];
 }
 
 export interface CrewLine {
@@ -150,10 +164,30 @@ function crewSection(lines: CrewLine[] | undefined): string {
   const rows = lines
     .map(
       (c) =>
-        `<tr><td>${escapeHtml(c.zoneId)}</td><td>${c.enabled ? 'on' : 'off'}</td><td>${escapeHtml(c.lastCycle ?? '-')}</td><td>${escapeHtml(c.enabled ? (c.nextDue ?? 'now') : '-')}</td><td>${escapeHtml(c.fable)}</td><td><a href="/zones/${encodeURIComponent(c.zoneId)}/goals">Goals</a></td></tr>`,
+        `<tr><td>${escapeHtml(c.zoneId)}</td><td>${c.enabled ? 'on' : 'off'}</td><td>${escapeHtml(c.lastCycle ?? '-')}</td><td>${escapeHtml(c.enabled ? (c.nextDue ?? 'now') : '-')}</td><td>${escapeHtml(c.fable)}</td><td><a href="/zones/${encodeURIComponent(c.zoneId)}/goals">Goals</a> <a href="/zones/${encodeURIComponent(c.zoneId)}/intake">Intake</a></td></tr>`,
     )
     .join('');
   return `<h2>Crew</h2><table><tr><th>Zone</th><th>Crew</th><th>Last cycle</th><th>Next due</th><th>Fable</th><th></th></tr>${rows}</table>`;
+}
+
+function sticksSection(lines: StickLine[] | undefined): string {
+  if (!lines) return '';
+  if (lines.length === 0) return '<h2>Sticks</h2><p>No stick has enrolled.</p>';
+  const rows = lines
+    .map((s) => {
+      const runs =
+        s.cannotRun.length === 0
+          ? 'all zones'
+          : s.cannotRun
+              .map(
+                (c) =>
+                  `cannot run ${escapeHtml(c.zoneId)}: lacks ${escapeHtml(c.missing.join(', '))}`,
+              )
+              .join('<br>');
+      return `<tr><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.version ?? '-')}</td><td>${escapeHtml(s.lastSeenAt ?? 'never')}</td><td>${escapeHtml(s.capabilities.join(', ') || '-')}</td><td>${escapeHtml(s.imagePolicy)}</td><td>${runs}</td></tr>`;
+    })
+    .join('');
+  return `<h2>Sticks</h2><table><tr><th>Stick</th><th>Version</th><th>Last seen</th><th>Capabilities</th><th>Image policy</th><th>Zones</th></tr>${rows}</table>`;
 }
 
 /** One shared handler for every rule form: the operator token comes from a password field. */
@@ -328,6 +362,13 @@ function gateSummary(drop: Drop): string {
 
 export function renderHome(state: HomeState): string {
   const now = state.now ?? new Date();
+  const starterBanner = state.zones
+    .filter((z) => z.identity === 'starter')
+    .map(
+      (z) =>
+        `<p class="warn"><strong>Starter mode in zone ${escapeHtml(z.id)}.</strong> ${escapeHtml(STARTER_WARNING)}</p>`,
+    )
+    .join('');
   const repoOf = new Map(state.zones.map((z) => [z.id, z.repo]));
   const itemById = new Map(state.items.map((i) => [i.id, i]));
 
@@ -354,7 +395,14 @@ export function renderHome(state: HomeState): string {
   const drops = state.drops
     .map((d) => {
       const wi = d.workItemId === null ? undefined : itemById.get(d.workItemId);
-      const target = d.workItemId === null ? 'crew' : wi ? `#${escapeHtml(wi.issueNumber)}` : '-';
+      const target =
+        d.workItemId === null
+          ? d.role === 'doctor'
+            ? 'doctor'
+            : 'crew'
+          : wi
+            ? `#${escapeHtml(wi.issueNumber)}`
+            : '-';
       return `<tr><td><a href="/drops/${encodeURIComponent(d.id)}">${escapeHtml(d.id)}</a></td><td>${target}</td><td>${escapeHtml(d.role)}</td><td>${escapeHtml(d.state)}</td><td>${escapeHtml(elapsed(d, now))}</td><td>${gateSummary(d)}</td></tr>`;
     })
     .join('');
@@ -364,10 +412,12 @@ export function renderHome(state: HomeState): string {
     : '<p>None seen.</p>';
 
   return page(
-    killSection(state.killed ?? false) +
+    starterBanner +
+      killSection(state.killed ?? false) +
       (state.briefings ? waitingOnYou(state.briefings) : '') +
       usageSection(state.usage) +
       crewSection(state.crew) +
+      sticksSection(state.sticks) +
       `<h2>Drop zones</h2><table><tr><th>Id</th><th>Repo</th><th>Label</th><th>Model</th><th>Mode</th></tr>${zones}</table>` +
       `<h2>Work items</h2><table><tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>${items}</table>` +
       `<h2>Drops</h2><table><tr><th>Drop</th><th>Issue</th><th>Role</th><th>State</th><th>Elapsed</th><th>Gates</th></tr>${drops}</table>` +
@@ -398,6 +448,40 @@ function modelLines(drop: Drop): string {
   return `<p>Requested model: ${escapeHtml(requested ?? '-')}<br>Served model: ${escapeHtml(served ?? '-')}${mismatch}</p>`;
 }
 
+/** Denied first, then hosts monitor let through unlisted, then allowed; busiest first within each. */
+const EGRESS_ORDER: Record<string, number> = { deny: 0, unlisted: 1, allow: 2 };
+const MAX_EGRESS_ROWS = 200;
+
+/** The drop's egress events summed per host and decision, or nothing when it had none. */
+function egressSection(events: StoredEvent[]): string {
+  const totals = new Map<string, { host: string; decision: string; count: number }>();
+  for (const e of events) {
+    if (e.kind !== 'egress') continue;
+    const host = typeof e.data.host === 'string' ? e.data.host : '';
+    const decision = typeof e.data.decision === 'string' ? e.data.decision : 'allow';
+    const count = typeof e.data.count === 'number' && e.data.count > 0 ? e.data.count : 0;
+    const key = `${decision}\u0000${host}`;
+    const t = totals.get(key) ?? { host, decision, count: 0 };
+    t.count += count;
+    totals.set(key, t);
+  }
+  if (totals.size === 0) return '';
+  const rows = [...totals.values()]
+    .sort(
+      (a, b) =>
+        (EGRESS_ORDER[a.decision] ?? 3) - (EGRESS_ORDER[b.decision] ?? 3) ||
+        b.count - a.count ||
+        a.host.localeCompare(b.host),
+    )
+    .slice(0, MAX_EGRESS_ROWS)
+    .map(
+      (t) =>
+        `<tr class="egress"><td>${escapeHtml(t.host)}</td><td>${escapeHtml(t.decision)}</td><td>${t.count}</td></tr>`,
+    )
+    .join('');
+  return `<h3>Egress</h3><table><tr><th>Host</th><th>Decision</th><th>Connections</th></tr>${rows}</table>`;
+}
+
 export function renderDrop(
   drop: Drop,
   events: StoredEvent[],
@@ -412,6 +496,7 @@ export function renderDrop(
   return page(
     `<p><a href="/">Back</a></p><h2>Drop ${escapeHtml(drop.id)}</h2><p>State: ${escapeHtml(drop.state)}</p>` +
       modelLines(drop) +
+      egressSection(events) +
       `<table><tr><th>Seq</th><th>Time</th><th>Kind</th><th>Data</th></tr>${rows}</table>` +
       artifactsSection(artifacts),
   );
@@ -427,5 +512,128 @@ export function renderObservations(rows: Observation[]): string {
     .join('');
   return page(
     `<h2>Observations</h2><table><tr><th>Zone</th><th>Item</th><th>Would do</th><th>Detail</th><th>Count</th><th>First</th><th>Last</th></tr>${body}</table>`,
+  );
+}
+
+/** The doctor page's actions: each posts with the operator token typed into the page. */
+const DOCTOR_SCRIPT = `<script>for(const b of document.querySelectorAll('button[data-doctor]'))b.addEventListener('click',async()=>{const t=document.querySelector('#doctor-token').value;if(!t){alert('Enter the operator token');return;}b.disabled=true;const r=await fetch(b.dataset.doctor,{method:'POST',headers:{authorization:'Bearer '+t,'content-type':'application/json'},body:b.dataset.body||'{}'});b.disabled=false;if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});</script>`;
+
+/** The readiness doctor's latest run: every check, with its fix for any that did not pass. */
+export function renderDoctor(
+  run: { id: number; finishedAt: string | null; checks: DoctorCheckView[] } | null,
+  zones: DropZoneConfig[],
+): string {
+  const controls = `<p><label>Operator token <input type="password" id="doctor-token" autocomplete="off"></label> <button data-doctor="/api/control/doctor">Run the doctor</button></p><p>A doctor drop proves the Claude token, the clone, services and gates on a stick; it spends one turn of usage.${zones
+    .map(
+      (z) =>
+        ` <button data-doctor="/api/control/doctor/drop" data-body="${escapeHtml(JSON.stringify({ zone: z.id }))}">Doctor drop: ${escapeHtml(z.id)}</button>`,
+    )
+    .join('')}</p>`;
+  if (!run)
+    return page(
+      `<h2>Doctor</h2><p>No doctor run has finished yet. Run one here or with <code>jumpmaster ctl doctor</code>.</p>${controls}${DOCTOR_SCRIPT}`,
+    );
+  const n = (s: string) => run.checks.filter((c) => c.status === s).length;
+  const rows = run.checks
+    .map((c) => {
+      const help =
+        c.status === 'pass'
+          ? ''
+          : `${c.fix ? `<pre>${escapeHtml(c.fix)}</pre>` : ''}${c.doc ? `<div>See ${escapeHtml(c.doc)}</div>` : ''}`;
+      return `<tr class="${escapeHtml(c.status)}"><td>${escapeHtml(c.status.toUpperCase())}</td><td>${escapeHtml(c.zoneId ?? '')}</td><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.summary)}${help}</td></tr>`;
+    })
+    .join('');
+  return page(
+    `<h2>Doctor</h2><p>Run ${run.id}, finished ${escapeHtml(run.finishedAt ?? '-')}: ${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip.</p>${controls}<table><tr><th>Status</th><th>Zone</th><th>Check</th><th>Finding</th></tr>${rows}</table>${DOCTOR_SCRIPT}`,
+  );
+}
+
+export type DoctorCheckView = {
+  id: string;
+  zoneId: string | null;
+  status: string;
+  summary: string;
+  fix?: string;
+  doc?: string;
+};
+
+/**
+ * The intake page's script. The idempotency key is minted per submit and kept in sessionStorage
+ * under a hash of the form's content until the server confirms, so a retry or a reload and
+ * resubmit of the same content reuses it; the helpers are the tested ones, embedded by source.
+ * Server text is shown with textContent only.
+ */
+const INTAKE_SCRIPT = `<script>
+const submitKey = ${submitKey.toString()};
+const forgetSubmitKey = ${forgetSubmitKey.toString()};
+const root = document.getElementById('intake');
+const base = root.dataset.base;
+const lines = (id) => document.getElementById(id).value.split('\\n').map((s) => s.trim()).filter(Boolean);
+const val = (id) => document.getElementById(id).value.trim();
+const say = (id, text) => { document.getElementById(id).textContent = text; };
+async function call(path, body) {
+  const token = val('intake-token');
+  if (!token) { alert('Enter the operator token'); return null; }
+  const r = await fetch(base + path, { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  return { status: r.status, body: await r.json().catch(() => ({})) };
+}
+document.getElementById('stub-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const body = { template: val('stub-template'), lighthouse: val('stub-lighthouse'), objectives: lines('stub-objectives') };
+  const nonGoals = lines('stub-nongoals'); if (nonGoals.length) body.nonGoals = nonGoals;
+  const constraints = lines('stub-constraints'); if (constraints.length) body.constraints = constraints;
+  const r = await call('/goal-stub', body);
+  if (!r) return;
+  if (r.status !== 200) { say('stub-status', 'Refused: ' + r.status + ' ' + (r.body.error ?? '')); return; }
+  document.getElementById('stub-out').value = r.body.markdown;
+  say('stub-status', 'Rendered. Copy it into GOAL.md and open a pull request (step 2).');
+});
+document.getElementById('stub-copy').addEventListener('click', () => navigator.clipboard.writeText(document.getElementById('stub-out').value));
+document.getElementById('issue-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const issue = { title: val('issue-title'), context: val('issue-context'), acceptance: lines('issue-acceptance'), tests: lines('issue-tests') };
+  const out = lines('issue-out'); if (out.length) issue.outOfScope = out;
+  const content = JSON.stringify(issue);
+  const idempotencyKey = submitKey(sessionStorage, content, () => crypto.randomUUID());
+  const button = e.submitter; if (button) button.disabled = true;
+  const r = await call('/issue', { idempotencyKey, ...issue });
+  if (button) button.disabled = false;
+  if (!r) return;
+  if (r.status === 200 || r.status === 201) {
+    forgetSubmitKey(sessionStorage, content);
+    say('issue-status', r.body.number != null ? 'Filed as issue #' + r.body.number + ', ready. It starts on the next pass.' : 'Already filed (' + r.body.state + ').');
+  } else if (r.status === 502) {
+    forgetSubmitKey(sessionStorage, content);
+    say('issue-status', 'Nothing was filed: ' + (r.body.error ?? 'GitHub refused it') + ' Submitting again starts a fresh filing.');
+  } else if (r.status === 202) {
+    say('issue-status', 'The forge has not confirmed the issue yet. Submit again: the same key is reused, so it is never filed twice.');
+  } else {
+    say('issue-status', 'Refused: ' + r.status + ' ' + (r.body.error ?? ''));
+  }
+});
+</script>`;
+
+/** The minimal intake: the GOAL.md stub, how to commit it, and the first ready issue. */
+export function renderIntake(zone: Pick<DropZoneConfig, 'id' | 'repo'>): string {
+  const base = `/api/control/zones/${encodeURIComponent(zone.id)}/intake`;
+  const field = (id: string, label: string, input: string) =>
+    `<p><label for="${id}">${label}</label><br>${input}</p>`;
+  const area = (id: string, rows: number, required = false) =>
+    `<textarea id="${id}" rows="${rows}" cols="80"${required ? ' required' : ''}></textarea>`;
+  const goal = `<h3>Step 1: the goal</h3><form id="stub-form">${field(
+    'stub-template',
+    'Where the project starts',
+    `<select id="stub-template">${[
+      ['existing', 'An existing codebase'],
+      ['idea', 'An idea, nothing built yet'],
+      ['partial', 'Partly built'],
+    ]
+      .map(([v, l]) => `<option value="${v}">${l}</option>`)
+      .join('')}</select>`,
+  )}${field('stub-lighthouse', 'Lighthouse: what the project is for, in a few sentences', area('stub-lighthouse', 4, true))}${field('stub-objectives', 'Objectives, one per line, first first (at most 5)', area('stub-objectives', 5, true))}${field('stub-nongoals', 'Non-goals, one per line (optional)', area('stub-nongoals', 3))}${field('stub-constraints', 'Constraints, one per line (optional)', area('stub-constraints', 3))}<button>Render the stub</button> <span id="stub-status"></span></form>`;
+  const commit = `<h3>Step 2: commit it by pull request</h3><p>GOAL.md is a protected path, so no agent may write it and Jumpmaster doesn't commit it either. Copy the stub, then on a branch of ${escapeHtml(zone.repo)}: save it as GOAL.md, commit, push, open a pull request, and merge it yourself. The crew reads it once it is on the default branch.</p><p><textarea id="stub-out" rows="16" cols="80" readonly></textarea><br><button type="button" id="stub-copy">Copy</button></p>`;
+  const first = `<h3>Step 3: the first issue</h3><p>Filed ready, under objective 1, as soon as you submit: the first issue doesn't need GOAL.md merged first.</p><form id="issue-form">${field('issue-title', 'Title (at most 120 characters)', '<input id="issue-title" size="80" maxlength="120" required>')}${field('issue-context', 'Context', area('issue-context', 6, true))}${field('issue-acceptance', 'Acceptance criteria, one per line', area('issue-acceptance', 5, true))}${field('issue-tests', 'Required tests, one per line', area('issue-tests', 3, true))}${field('issue-out', 'Out of scope, one per line (optional)', area('issue-out', 3))}<button>File the issue</button> <span id="issue-status"></span></form>`;
+  return page(
+    `<h2>Intake: ${escapeHtml(zone.id)}</h2><div id="intake" data-base="${escapeHtml(base)}"><p><label>Operator token <input type="password" id="intake-token" autocomplete="off"></label></p>${goal}${commit}${first}</div>${INTAKE_SCRIPT}`,
   );
 }

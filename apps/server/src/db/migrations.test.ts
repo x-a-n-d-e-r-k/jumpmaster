@@ -412,7 +412,7 @@ test('v14 widens briefings.source to mcp, keeps every briefing and ruling, and a
   raw.close();
 
   const db = openDb(f);
-  expect(maxVersion(db)).toBe(14);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(db.pragma('foreign_key_check')).toEqual([]);
   expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
   const rows = db
@@ -481,4 +481,198 @@ test('v14 widens briefings.source to mcp, keeps every briefing and ruling, and a
   expect(
     db.prepare('SELECT choice_label AS label, choice_effect AS effect FROM rulings').all(),
   ).toEqual([{ label: null, effect: null }]);
+});
+
+test('v15 adds the stick columns, keeping every stick row', () => {
+  const f = tmpDbFile();
+  const raw = new Database(f);
+  raw.exec('CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+  for (const m of MIGRATIONS.filter((m) => m.version <= 14)) {
+    raw.exec(m.sql);
+    m.after?.(raw as unknown as Db);
+    raw.prepare('INSERT INTO schema_version VALUES (?, ?)').run(m.version, 'x');
+  }
+  raw.exec(
+    `INSERT INTO sticks (id, name, token_hash, slots, last_seen_at, created_at)
+       VALUES ('s1', 'one', 'h1', 2, NULL, 'a'), ('s2', 'two', 'h2', 1, 'b', 'c');`,
+  );
+  raw.close();
+
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.pragma('foreign_key_check')).toEqual([]);
+  const rows = db
+    .prepare(
+      `SELECT id, name, token_hash AS hash, slots, last_seen_at AS seen, created_at AS created,
+         capabilities_json AS caps, image_policy AS policy, version, pinned_json AS pinned
+       FROM sticks ORDER BY id`,
+    )
+    .all();
+  expect(rows).toEqual([
+    {
+      id: 's1',
+      name: 'one',
+      hash: 'h1',
+      slots: 2,
+      seen: null,
+      created: 'a',
+      caps: '[]',
+      policy: 'allowlist',
+      version: null,
+      pinned: '[]',
+    },
+    {
+      id: 's2',
+      name: 'two',
+      hash: 'h2',
+      slots: 1,
+      seen: 'b',
+      created: 'c',
+      caps: '[]',
+      policy: 'allowlist',
+      version: null,
+      pinned: '[]',
+    },
+  ]);
+  // An M3 binary's insert (no new columns) still works against v15.
+  db.prepare(
+    "INSERT INTO sticks (id, name, token_hash, slots, created_at) VALUES ('s3', 'm3', 'h3', 1, 'd')",
+  ).run();
+  expect(
+    db
+      .prepare("SELECT image_policy AS p, capabilities_json AS c FROM sticks WHERE id = 's3'")
+      .get(),
+  ).toEqual({ p: 'allowlist', c: '[]' });
+});
+
+/** A database built by every migration up to and including `version`, closed. */
+function dbAt(version: number, seed?: (raw: Database.Database) => void): string {
+  const f = tmpDbFile();
+  const raw = new Database(f);
+  raw.exec('CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+  for (const m of MIGRATIONS.filter((m) => m.version <= version)) {
+    raw.exec(m.sql);
+    m.after?.(raw as unknown as Db);
+    raw.prepare('INSERT INTO schema_version VALUES (?, ?)').run(m.version, 'x');
+  }
+  seed?.(raw);
+  raw.close();
+  return f;
+}
+
+test('v16 adds doctor_runs and keeps the last 20', () => {
+  const f = dbAt(15, (raw) =>
+    raw.exec(
+      `INSERT INTO sticks (id, name, token_hash, slots, created_at) VALUES ('s1', 'one', 'h1', 1, 'a');`,
+    ),
+  );
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(count(db, 'sticks')).toBe(1);
+  const insert = db.prepare(
+    'INSERT INTO doctor_runs (started_at, finished_at, results_json, drop_ids_json) VALUES (?, ?, ?, ?)',
+  );
+  for (let i = 1; i <= 25; i++) insert.run(`t${i}`, `f${i}`, `[{"n":${i}}]`, '[]');
+  const rows = db.prepare('SELECT id, started_at AS s FROM doctor_runs ORDER BY id').all() as {
+    id: number;
+    s: string;
+  }[];
+  expect(rows).toHaveLength(20);
+  expect(rows[0]?.s).toBe('t6');
+  expect(rows.at(-1)?.s).toBe('t25');
+  // A run still in progress has no finish and no results yet.
+  db.prepare('INSERT INTO doctor_runs (started_at) VALUES (?)').run('t26');
+  expect(
+    db
+      .prepare(
+        "SELECT finished_at AS f, results_json AS r, drop_ids_json AS d FROM doctor_runs WHERE started_at = 't26'",
+      )
+      .get(),
+  ).toEqual({ f: null, r: '[]', d: '[]' });
+  // Reopening runs nothing again.
+  db.close();
+  const again = openDb(f);
+  expect(maxVersion(again)).toBe(MIGRATIONS.length);
+  expect(count(again, 'doctor_runs')).toBe(20);
+});
+
+/** A v16 database with a zone, a work item, an item drop, a crew drop with events, and an artifact. */
+function v16Db(): string {
+  return dbAt(16, (raw) =>
+    raw.exec(`
+      INSERT INTO drop_zones (id, repo, default_branch, config_json) VALUES ('main', 'o/r', 'main', '{}');
+      INSERT INTO sticks (id, name, token_hash, slots, created_at) VALUES ('s1', 'one', 'h1', 1, 'a');
+      INSERT INTO work_items (id, drop_zone_id, issue_number, title, body, author, priority, is_fix,
+        issue_created_at, state, updated_at)
+        VALUES (1, 'main', 7, 't', 'b', 'a', 0, 0, 'x', 'in_flight', 'x');
+      INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, stick_id, epoch, created_at,
+        result_json, requested_model, served_model, charged_key, hard_cancel)
+        VALUES ('i1', 'main', 1, 'implement', 'running', 's1', 2, 'x', NULL, 'm', NULL, 'k', 0),
+               ('c1', 'main', NULL, 'crew-lead', 'queued', NULL, 0, 'y', NULL, NULL, NULL, NULL, 0),
+               ('c0', 'main', NULL, 'diagnose', 'succeeded', 's1', 1, 'w', '{"status":"completed"}', 'm', 'm', NULL, 1);
+      INSERT INTO drop_events (drop_id, seq, ts, kind, data_json) VALUES ('c0', 1, 't', 'log', '{}');
+    `),
+  );
+}
+
+const insDrop = (db: Db, id: string, role: string, item: number | null, state = 'queued') =>
+  db
+    .prepare(
+      `INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, created_at)
+       VALUES (?, 'main', ?, ?, ?, 'z')`,
+    )
+    .run(id, item, role, state);
+
+test('v17 rebuilds drops keeping every row and column, with foreign keys intact', () => {
+  const f = v16Db();
+  const before = new Database(f);
+  const all = (db: Db | Database.Database) => db.prepare('SELECT * FROM drops ORDER BY id').all();
+  const old = all(before);
+  before.close();
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(all(db)).toEqual(old);
+  expect(db.pragma('foreign_key_check')).toEqual([]);
+  expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
+  expect(count(db, 'drop_events')).toBe(1);
+  // Reopening is a no-op.
+  db.close();
+  expect(all(openDb(f))).toEqual(old);
+});
+
+test('v17 lets a doctor drop and a crew drop be active in one zone at once', () => {
+  const db = openDb(v16Db());
+  insDrop(db, 'doc1', 'doctor', null);
+  expect(
+    db
+      .prepare("SELECT COUNT(*) AS n FROM drops WHERE state = 'queued' AND work_item_id IS NULL")
+      .get(),
+  ).toEqual({ n: 2 });
+  // The crew index still allows one active crew drop per zone.
+  expect(() => insDrop(db, 'c2', 'refute', null)).toThrow(/UNIQUE/);
+  // A doctor drop has no work item; item roles still need one, crew roles still have none.
+  expect(() => insDrop(db, 'doc-item', 'doctor', 1, 'succeeded')).toThrow(/CHECK/);
+  expect(() => insDrop(db, 'impl-none', 'implement', null, 'succeeded')).toThrow(/CHECK/);
+  expect(() => insDrop(db, 'crew-item', 'diagnose', 1, 'succeeded')).toThrow(/CHECK/);
+  expect(() => insDrop(db, 'i2', 'heal', 1)).toThrow(/UNIQUE/);
+});
+
+test('v17 refuses a second active doctor drop per zone', () => {
+  const db = openDb(v16Db());
+  insDrop(db, 'doc1', 'doctor', null, 'running');
+  expect(() => insDrop(db, 'doc2', 'doctor', null)).toThrow(/UNIQUE/);
+  insDrop(db, 'doc3', 'doctor', null, 'succeeded');
+  db.prepare("UPDATE drops SET state = 'failed' WHERE id = 'doc1'").run();
+  insDrop(db, 'doc4', 'doctor', null);
+});
+
+test('an M3-era statement set still runs against v16 (the new table is ignored)', () => {
+  const db = openDb(dbAt(16));
+  db.prepare(
+    "INSERT INTO sticks (id, name, token_hash, slots, created_at) VALUES ('s3', 'm3', 'h3', 1, 'd')",
+  ).run();
+  db.prepare(
+    "INSERT INTO drop_zones (id, repo, default_branch, config_json) VALUES ('z', 'o/r', 'main', '{}')",
+  ).run();
+  expect(count(db, 'sticks')).toBe(1);
 });

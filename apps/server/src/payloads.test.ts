@@ -13,7 +13,14 @@ import {
   upsertWorkItem,
 } from './db/repo.js';
 import { zonePass } from './flow/snapshot.js';
-import { buildPayload, crewTemplate, promptVersions, renderFeedback } from './payloads.js';
+import {
+  BASE_EGRESS,
+  buildPayload,
+  crewTemplate,
+  promptVersions,
+  renderFeedback,
+} from './payloads.js';
+import { PRESET_EGRESS } from './presets.js';
 import { crewWorld } from './test/crew.js';
 import { usageCfg } from './test/fixtures.js';
 import { plus, seedQueuedDrop, t0 } from './test/helpers.js';
@@ -89,6 +96,16 @@ describe('buildPayload', () => {
     const s = JSON.stringify(build(review));
     expect(s).not.toContain(secrets.githubAuthorToken);
     expect(s).not.toContain(secrets.githubReviewerToken);
+  });
+
+  test('starter review payloads carry no write token: the read token or none', () => {
+    const { githubReviewerToken: _r, ...starterSecrets } = secrets;
+    const starter = { ...zone, identity: 'starter' } as DropZoneConfig;
+    for (const z of [starter, { ...starter, reviewReadToken: true }]) {
+      const p = buildPayload(db, z, review, starterSecrets);
+      expect(JSON.stringify(p)).not.toContain(secrets.githubAuthorToken);
+      expect(p.credentials.forgeToken ?? null).toBe(z.reviewReadToken ? 'read-secret' : null);
+    }
   });
 
   test('review carries the read token only when reviewReadToken', () => {
@@ -326,6 +343,46 @@ describe('author reports in the review prompt', () => {
   });
 });
 
+describe('the doctor payload', () => {
+  const doctorDrop: Drop = { ...base, id: 'doc', workItemId: null, role: 'doctor' };
+  const full = {
+    ...zone,
+    services: [{ name: 'db', image: 'pg@sha256:x', port: 5432, readyTimeoutSeconds: 30 }],
+    egress: { mode: 'monitor', allow: ['pypi.org'] },
+  } as unknown as DropZoneConfig;
+
+  test('carries the gates, services, gate secrets and egress, and no write token, issue or prompt', () => {
+    const s = { ...secrets, zoneSecrets: { main: { DB_URL: 'postgres://x' } } };
+    const p = buildPayload(db, full, doctorDrop, s);
+    expect(DropPayloadSchema.parse(p)).toEqual(p);
+    expect(p).toMatchObject({
+      role: 'doctor',
+      dropId: 'doc',
+      repo: { owner: 'octo', name: 'demo', defaultBranch: 'main' },
+      image: 'jm-trooper:test',
+      gates: zone.gates,
+      services: full.services,
+      gateSecrets: { DB_URL: 'postgres://x' },
+      egress: { mode: 'monitor' },
+      credentials: { claudeToken: 'claude-secret' },
+    });
+    const text = JSON.stringify(p);
+    for (const t of [
+      secrets.githubAuthorToken,
+      secrets.githubReviewerToken,
+      secrets.githubReadToken,
+    ])
+      expect(text).not.toContain(t);
+    for (const k of ['issue', 'branch', 'prompt', 'protectedPaths', 'maxTurns'])
+      expect(Object.keys(p)).not.toContain(k);
+  });
+
+  test('carries the read token, as readToken, only when reviewReadToken', () => {
+    const p = buildPayload(db, { ...zone, reviewReadToken: true }, doctorDrop, secrets);
+    expect(p.credentials).toEqual({ claudeToken: 'claude-secret', readToken: 'read-secret' });
+  });
+});
+
 describe('gate secrets', () => {
   test('a zone secret reaches the payload and only for its zone', () => {
     const drop = impl;
@@ -468,5 +525,53 @@ describe('crew payloads', () => {
       role: 'diagnose',
       checkout: { number: 3, branch: 'agent/issue-3', headSha: 'h3' },
     });
+  });
+});
+
+describe('egress', () => {
+  test('egress off leaves the payload without egress', () => {
+    for (const egress of [undefined, { mode: 'off', allow: ['example.com'] }]) {
+      const z = { ...zone, ...(egress ? { egress } : {}) } as DropZoneConfig;
+      for (const d of [impl, review, heal, resolve])
+        expect(build(d, z)).not.toHaveProperty('egress');
+    }
+  });
+
+  test('enforce builds the allow list from base, preset and zone entries, sorted and unique', () => {
+    expect(BASE_EGRESS).toEqual(['api.anthropic.com', 'github.com']);
+    const z = {
+      ...zone,
+      preset: 'python',
+      egress: {
+        mode: 'enforce',
+        allow: ['GitHub.com.', '*.internal-mirror.example', 'pypi.org', 'files.example.net'],
+      },
+    } as DropZoneConfig;
+    const expected = [
+      ...new Set([
+        ...BASE_EGRESS,
+        ...PRESET_EGRESS.python,
+        '*.internal-mirror.example',
+        'files.example.net',
+      ]),
+    ].sort();
+    for (const d of [impl, review, heal, resolve]) {
+      const p = build(d, z);
+      expect(p.egress).toEqual({ mode: 'enforce', allow: expected });
+      expect(DropPayloadSchema.parse(p).egress).toEqual(p.egress);
+    }
+    // A zone with its own image and no preset gets the base and its own entries only.
+    const plain = { ...zone, egress: { mode: 'monitor', allow: [] } } as DropZoneConfig;
+    expect(build(impl, plain).egress).toEqual({ mode: 'monitor', allow: [...BASE_EGRESS] });
+  });
+
+  test('a crew drop carries the zone egress too', async () => {
+    const w = await crewWorld();
+    const z = { ...w.zone, egress: { mode: 'enforce', allow: [] } } as DropZoneConfig;
+    const pass = await zonePass(w.forges, z, 'main');
+    const id = await enqueueCrew(w.db, w.forges, z, pass, promptVersions(), usageCfg, t0);
+    const p = buildPayload(w.db, z, getDrop(w.db, id ?? '') as Drop, secrets);
+    expect(p.egress).toEqual({ mode: 'enforce', allow: [...BASE_EGRESS] });
+    expect(DropPayloadSchema.safeParse(p).success).toBe(true);
   });
 });

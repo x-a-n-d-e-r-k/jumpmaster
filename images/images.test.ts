@@ -18,6 +18,7 @@ const SHIPPED = [
   'images/server/Dockerfile',
   'images/stick/Dockerfile',
   'images/trooper/Dockerfile',
+  'images/egress/Dockerfile',
 ];
 const dockerfiles = () =>
   walk(ROOT, ['images']).filter((f) => /(^|\/)Dockerfile(\.[^/]*)?$|\.Dockerfile$/.test(f));
@@ -62,6 +63,18 @@ describe('Dockerfiles', () => {
     expect(env).toMatch(/\bJM_CONTAINER=1\b/);
   });
 
+  test('the egress proxy image runs as a non-root user with no npm install in its final stage', () => {
+    const final = finalStage(instructions(read('images/egress/Dockerfile')));
+    const user = final.filter((i) => i.op === 'USER').at(-1)?.args ?? '';
+    expect(user).toMatch(/^\d+:\d+$/);
+    expect(user.split(':')[0]).not.toBe('0');
+    expect(final.some((i) => i.op === 'RUN' && /\bnpm\b/.test(i.args))).toBe(false);
+    expect(final.some((i) => i.op === 'RUN' && SETUID_SWEEP.test(i.args))).toBe(true);
+    // Only the stdlib egress module of the protocol package loads: it must not import zod.
+    expect(read('packages/protocol/src/egress.ts')).not.toMatch(/from '(zod|\.\/index\.js)'/);
+    expect(read('apps/egress/package.json')).not.toMatch(/"zod"/);
+  });
+
   test('no Dockerfile passes a JM_ secret as ARG or ENV', () => {
     const secretish = /\bJM_\w*(TOKEN|SECRET|PASSWORD|KEY)\w*/;
     const offenders = dockerfiles().flatMap((file) =>
@@ -95,6 +108,412 @@ describe('Dockerfiles', () => {
   });
 });
 
+const PRESET_FILES = {
+  python: 'images/trooper/presets/python/Dockerfile',
+  go: 'images/trooper/presets/go/Dockerfile',
+  jvm: 'images/trooper/presets/jvm/Dockerfile',
+} as const;
+const SETUID_SWEEP = /find \/ -xdev -type f -perm \/6000 -exec chmod a-s \{\} \+/;
+const IS_DIGEST_REF = /@sha256:[0-9a-f]{64}$/;
+
+describe('stack presets', () => {
+  test('preset Dockerfiles take a digest ARG BASE, keep the setuid sweep and set no USER', () => {
+    for (const file of Object.values(PRESET_FILES)) {
+      expect(existsSync(join(ROOT, file)), file).toBe(true);
+      const all = instructions(read(file));
+      const first = all.findIndex((i) => i.op === 'FROM');
+      const base = all.slice(0, first).find((i) => i.op === 'ARG' && i.args.startsWith('BASE='));
+      expect(base?.args.slice(5), file).toMatch(IS_DIGEST_REF);
+      const final = finalStage(all);
+      expect(final[0]?.args, file).toMatch(/^\$\{?BASE\}?$/);
+      expect(
+        all.filter((i) => i.op === 'USER'),
+        file,
+      ).toEqual([]);
+      // The sweep is the final stage's last RUN, so nothing added after it keeps a setuid bit.
+      const runs = final.filter((i) => i.op === 'RUN');
+      expect(runs.at(-1)?.args, file).toMatch(SETUID_SWEEP);
+      // Every toolchain directory the preset adds loses group and world write, so the agent
+      // (uid 10001) can't change a binary the gate (uid 10002) runs.
+      const added = final
+        .filter((i) => i.op === 'COPY' && i.args.startsWith('--from='))
+        .map((i) => i.args.split(/\s+/).at(-1) as string)
+        .filter((dst) => dst !== '/usr/local/bin/');
+      const writeSweep = runs.map((r) => r.args).join('\n');
+      for (const dir of [...added, ...(file.includes('python') ? ['/opt/uv'] : [])]) {
+        const sweep = writeSweep
+          .split(/&&|\n/)
+          .find((cmd) => /chmod -R \S*go-w/.test(cmd) && cmd.split(/\s+/).includes(dir));
+        expect(sweep, `${file} ${dir}`).toBeDefined();
+      }
+      // Image pins live on named FROM stages (which Dependabot bumps), never inline in COPY.
+      for (const c of final.filter((i) => i.op === 'COPY'))
+        expect(c.args, file).not.toMatch(/--from=\S*@sha256:/);
+      // A build from the wrong base (the default is the plain Node image) fails loudly.
+      expect(
+        final.some((i) => i.op === 'RUN' && i.args.includes('test -f /opt/trooper/main.js')),
+        file,
+      ).toBe(true);
+    }
+    // The base trooper (the node preset) keeps its own sweep after the Claude CLI install.
+    const trooper = finalStage(instructions(read('images/trooper/Dockerfile')));
+    const sweep = trooper.findIndex((i) => i.op === 'RUN' && SETUID_SWEEP.test(i.args));
+    const install = trooper.findIndex((i) => i.op === 'RUN' && /\bnpm ci\b/.test(i.args));
+    expect(install).toBeGreaterThanOrEqual(0);
+    expect(sweep).toBeGreaterThan(install);
+  });
+
+  test('every toolchain directory a preset puts on PATH is put back for login shells', () => {
+    // /etc/profile resets PATH in a login shell; each preset's /etc/profile.d snippet restores it.
+    for (const file of Object.values(PRESET_FILES)) {
+      const final = finalStage(instructions(read(file)));
+      const dirs = final
+        .filter((i) => i.op === 'ENV')
+        .flatMap((i) => /(?:^|\s)PATH=(\S+)/.exec(i.args)?.[1]?.split(':') ?? [])
+        .filter((d) => d.startsWith('/'));
+      const runs = final
+        .filter((i) => i.op === 'RUN')
+        .map((i) => i.args)
+        .join('\n');
+      const snippet = /printf[^\n]*>\s*\/etc\/profile\.d\/jm-[\w-]+\.sh/.exec(runs)?.[0] ?? '';
+      if (file.includes('python')) expect(dirs, file).toEqual([]);
+      for (const dir of dirs) expect(snippet, `${file} ${dir}`).toContain(`${dir}:`);
+    }
+  });
+
+  test('the pnpm example zone image is pinned and leaves the Corepack shims where they are', () => {
+    const text = read('images/trooper/examples/Dockerfile.pnpm');
+    const runs = instructions(text)
+      .filter((i) => i.op === 'RUN')
+      .map((i) => i.args);
+    const all = runs.join('\n');
+    // A bare `corepack enable` would put shims back into /usr/local/bin; @latest isn't a pin.
+    expect(all).not.toMatch(/\bcorepack (enable|prepare|install)\b/);
+    expect(all).not.toMatch(/@latest\b/);
+    const pack = /npm pack\b[^\n&]*\bpnpm@(\d+\.\d+\.\d+)\b/.exec(all);
+    expect(pack).not.toBeNull();
+    const version = pack?.[1] as string;
+    expect(all).toMatch(
+      new RegExp(`[0-9a-f]{128}\\s+pnpm-${version}\\.tgz"\\s*\\|\\s*sha512sum -c -`),
+    );
+    expect(all).toMatch(new RegExp(`npm i -g [^\\n&]*\\./pnpm-${version}\\.tgz`));
+    expect(runs.at(-1)).toMatch(SETUID_SWEEP);
+    // The preset e2e builds it and runs its pnpm.
+    expect(read('images/trooper/e2e/presets.sh')).toMatch(
+      /-t jumpmaster-trooper-example-pnpm:dev -f images\/trooper\/examples\/Dockerfile\.pnpm/,
+    );
+  });
+
+  test('the trooper installs the Claude CLI with npm ci from a lockfile with an integrity hash', () => {
+    const text = read('images/trooper/Dockerfile');
+    expect(text).not.toMatch(/npm (i|install)\b[^\n]*claude-code/);
+    expect(text).toMatch(
+      /COPY images\/trooper\/claude\/package\.json images\/trooper\/claude\/package-lock\.json /,
+    );
+    expect(text).toMatch(/\bnpm ci\b/);
+    const manifest = JSON.parse(read('images/trooper/claude/package.json')) as {
+      dependencies: Record<string, string>;
+    };
+    const version = manifest.dependencies['@anthropic-ai/claude-code'];
+    expect(version).toMatch(/^\d+\.\d+\.\d+$/);
+    const lock = JSON.parse(read('images/trooper/claude/package-lock.json')) as {
+      lockfileVersion: number;
+      packages: Record<string, { version?: string; integrity?: string; resolved?: string }>;
+    };
+    expect(lock.lockfileVersion).toBe(3);
+    const cli = lock.packages['node_modules/@anthropic-ai/claude-code'];
+    expect(cli?.version).toBe(version);
+    expect(cli?.integrity).toMatch(/^sha512-[A-Za-z0-9+/]+=*$/);
+    // Every locked package (the platform binaries too) carries its own integrity hash.
+    for (const [name, p] of Object.entries(lock.packages)) {
+      if (name === '') continue;
+      expect(p.integrity, name).toMatch(/^sha512-/);
+      expect(p.resolved, name).toMatch(/^https:\/\/registry\.npmjs\.org\//);
+    }
+    expect(Object.keys(lock.packages)).toEqual(
+      expect.arrayContaining([
+        'node_modules/@anthropic-ai/claude-code-linux-x64',
+        'node_modules/@anthropic-ai/claude-code-linux-arm64',
+      ]),
+    );
+  });
+
+  test("the trooper's Corepack shims sit on PATH after /usr/local/bin, so a global npm install wins", () => {
+    // Shims in /usr/local/bin made `npm i -g pnpm` in a zone image fail with EEXIST; in their own
+    // directory, last on PATH, they still serve `packageManager` repos and detected gates.
+    const final = finalStage(instructions(read('images/trooper/Dockerfile')));
+    const runs = final.filter((i) => i.op === 'RUN').map((i) => i.args);
+    const enable = runs.flatMap((r) => r.split(/&&/)).find((c) => /\bcorepack enable\b/.test(c));
+    expect(enable).toMatch(/--install-directory[= ]\/opt\/corepack\/bin\b/);
+    expect(enable).toMatch(/\bpnpm\b/);
+    expect(enable).toMatch(/\byarn\b/);
+    const path = final
+      .filter((i) => i.op === 'ENV')
+      .map((i) => /(?:^|\s)PATH=(\S+)/.exec(i.args)?.[1])
+      .filter((p) => p !== undefined)
+      .at(-1);
+    expect(path).toMatch(/^\$\{?PATH\}?:\/opt\/corepack\/bin$/);
+    // A login shell resets PATH from /etc/profile; the profile.d snippet puts the shims back.
+    expect(runs.join('\n')).toMatch(/\/etc\/profile\.d\/\S*corepack\S*\.sh/);
+    // The Node image's bundled Yarn 1 would shadow Corepack's yarn (and block `npm i -g yarn`).
+    expect(runs.join('\n')).toMatch(/\brm -rf [^&\n]*\/usr\/local\/bin\/yarn\b/);
+  });
+
+  test('the trooper declares egress support in an image label the stick checks', () => {
+    // FROM-derived zone images inherit it; one built on an older trooper lacks it, and the stick
+    // refuses to run that image under egress (it would ignore payload.egress).
+    const final = finalStage(instructions(read('images/trooper/Dockerfile')));
+    const labels = final
+      .filter((i) => i.op === 'LABEL')
+      .map((i) => i.args)
+      .join(' ');
+    expect(labels).toMatch(/(^|\s)org\.jumpmaster\.trooper\.egress="1"(\s|$)/);
+    const stick = read('apps/stick/src/egress.ts');
+    expect(stick).toContain("TROOPER_EGRESS_LABEL = 'org.jumpmaster.trooper.egress'");
+    expect(stick).toContain("TROOPER_EGRESS_VERSION = '1'");
+    // The egress e2e runs an unlabelled image under egress.
+    expect(read('images/trooper/e2e/egress.sh')).toMatch(
+      /LABEL org\.jumpmaster\.trooper\.egress=""[\s\S]*-t jumpmaster-trooper:e2e-pre-egress/,
+    );
+  });
+
+  test('the python preset ships 3.11 and a uv-installed 3.12 every user can find', () => {
+    const final = finalStage(instructions(read(PRESET_FILES.python)));
+    const env = final
+      .filter((i) => i.op === 'ENV')
+      .map((i) => i.args)
+      .join(' ');
+    expect(env).toMatch(/\bUV_PYTHON_DOWNLOADS=automatic\b/);
+    // The shipped 3.12 goes to a world-readable root-owned directory, but the variable is not
+    // left set: a run-time download into that shared directory fails (or, if it were writable,
+    // would let the agent swap the gate's interpreter). Each user's uv downloads into its home.
+    expect(env).not.toMatch(/UV_PYTHON_INSTALL_DIR/);
+    const runs = final.filter((i) => i.op === 'RUN').map((i) => i.args);
+    expect(runs.join('\n')).toMatch(/python3-venv/);
+    expect(runs.join('\n')).toMatch(
+      /UV_PYTHON_INSTALL_DIR=\/opt\/uv\/python uv python install --no-bin 3\.12\.\d+/,
+    );
+    expect(runs.join('\n')).toMatch(/ln -s[^\n]*\/usr\/local\/bin\/python3\.12/);
+    // uv is copied from a stage that checked its checksum.
+    const text = read(PRESET_FILES.python);
+    expect(text).toMatch(/uv-\$\{?\w+\}?-unknown-linux-gnu\.tar\.gz/);
+    expect(text).toMatch(/sha256sum -c/);
+  });
+
+  test('the go preset copies Go from a digest-pinned image; jvm a JDK and a checked Maven', () => {
+    const go = read(PRESET_FILES.go);
+    expect(go).toMatch(/^FROM golang:[\w.-]+@sha256:[0-9a-f]{64} AS go$/m);
+    // The shipped toolchain only: go never downloads another one (that would need an egress host).
+    const goEnv = finalStage(instructions(go))
+      .filter((i) => i.op === 'ENV')
+      .map((i) => i.args)
+      .join(' ');
+    expect(goEnv).toMatch(/\bGOTOOLCHAIN=local\b/);
+    expect(go).toMatch(/COPY --from=go \/usr\/local\/go \/usr\/local\/go/);
+    expect(go).toMatch(/ENV [^\n]*PATH=\/usr\/local\/go\/bin:/);
+    const jvm = read(PRESET_FILES.jvm);
+    expect(jvm).toMatch(/^FROM eclipse-temurin:21[\w.-]*@sha256:[0-9a-f]{64} AS jdk$/m);
+    expect(jvm).toMatch(/COPY --from=jdk \/opt\/java\/openjdk \/opt\/java\/openjdk/);
+    expect(jvm).toMatch(/apache-maven-[\d.]+-bin\.tar\.gz/);
+    expect(jvm).toMatch(/sha512sum -c/);
+    expect(jvm).toMatch(/JAVA_HOME=\/opt\/java\/openjdk/);
+  });
+
+  test('the image e2e builds every preset and runs its toolchain as the agent and gate users', () => {
+    const e2e = read('images/trooper/e2e/presets.sh');
+    for (const [preset, file] of Object.entries(PRESET_FILES))
+      expect(e2e, preset).toMatch(
+        new RegExp(`-t jumpmaster-trooper-${preset}:dev -f ${file.replace(/\//g, '\\/')}`),
+      );
+    expect(e2e).toMatch(/--build-arg BASE=jumpmaster-trooper:dev/);
+    for (const probe of [
+      'python3 --version && python3.12 --version && uv --version',
+      'uv python find 3.12',
+      'python3.12 -V',
+      'go version',
+      'java -version && mvn -v',
+    ])
+      expect(e2e).toContain(probe);
+    // The agent can't write any toolchain directory the gate runs from.
+    for (const dir of ['/opt/uv', '/usr/local/go', '/opt/java/openjdk', '/opt/maven'])
+      expect(e2e).toContain(dir);
+    expect(e2e).toMatch(/-writable/);
+    // The agent user runs the probes directly, and the gate user runs them as a drop's gate.
+    expect(e2e).toMatch(/--user 10001:10001/);
+    expect(e2e).toMatch(/gates: \[\{ name: "toolchain", run/);
+    // The node preset: a zone image with a global npm pnpm builds, and that pnpm wins for both
+    // users, while Corepack still serves a repository's `packageManager`.
+    expect(e2e).toMatch(
+      /-t jumpmaster-trooper-globalpnpm:dev -f images\/trooper\/e2e\/global-pnpm\.Dockerfile/,
+    );
+    for (const probe of ['pnpm@10.18.3+sha512.', 'yarn@1.22.22+sha512.', '/opt/corepack/bin/'])
+      expect(e2e).toContain(probe);
+    expect(e2e).toMatch(/'node as agent'/);
+    expect(e2e).toMatch(/'node as gate'/);
+    expect(e2e).toMatch(/'global pnpm as agent'/);
+    expect(e2e).toMatch(/'global pnpm as gate'/);
+    // Login shells (which reset PATH from /etc/profile) still find every preset's toolchain.
+    expect(e2e).toContain('"$1 in a login shell"');
+    for (const [preset, image] of [
+      ['python', 'python'],
+      ['go', 'go'],
+      ['jvm', 'jvm'],
+      ['example pnpm', 'example-pnpm'],
+    ]) {
+      expect(e2e).toMatch(new RegExp(`jumpmaster-trooper-${image}:dev -lc `));
+      expect(e2e).toContain(`in_login '${preset}' `);
+    }
+  });
+});
+
+describe('image verification in the stick image', () => {
+  test('the stick image ships cosign at the pinned version, checked with sha256sum -c, and sets the signed policy', () => {
+    const text = read('images/stick/Dockerfile');
+    const version = /export const COSIGN_VERSION = '(v[\d.]+)'/.exec(
+      read('apps/stick/src/verify.ts'),
+    )?.[1];
+    expect(version).toBeDefined();
+    // From Sigstore's own image, pinned by digest, as a named stage.
+    expect(text).toMatch(
+      new RegExp(
+        `^FROM ghcr\\.io/sigstore/cosign/cosign:${version?.replace(/\./g, '\\.')}@sha256:[0-9a-f]{64} AS cosign$`,
+        'm',
+      ),
+    );
+    const final = finalStage(instructions(text));
+    expect(
+      final.some(
+        (i) => i.op === 'COPY' && i.args === '--from=cosign /ko-app/cosign /usr/local/bin/cosign',
+      ),
+    ).toBe(true);
+    const runs = final
+      .filter((i) => i.op === 'RUN')
+      .map((i) => i.args)
+      .join('\n');
+    // Each platform's binary is checked against its own SHA-256, and the version is asserted.
+    expect(runs).toMatch(/amd64\) sum=[0-9a-f]{64}/);
+    expect(runs).toMatch(/arm64\) sum=[0-9a-f]{64}/);
+    expect(runs).toMatch(/sha256sum -c -/);
+    // cosign checks TLS against the system store, which the slim base lacks.
+    expect(runs).toMatch(/apt-get install -y --no-install-recommends ca-certificates/);
+    expect(runs).toContain(`gitVersion !== '${version}'`);
+    const env = final
+      .filter((i) => i.op === 'ENV')
+      .map((i) => i.args)
+      .join(' ');
+    expect(env).toMatch(/\bJM_IMAGE_POLICY=signed\b/);
+    expect(env).toMatch(/\bJM_EGRESS_IMAGE=\$\{EGRESS_IMAGE\}/);
+    expect(final.some((i) => i.op === 'ARG' && i.args === 'EGRESS_IMAGE')).toBe(true);
+    // The setuid sweep runs after cosign is in place.
+    const sweep = final.findIndex((i) => i.op === 'RUN' && SETUID_SWEEP.test(i.args));
+    const copy = final.findIndex(
+      (i) => i.op === 'COPY' && i.args.includes('/usr/local/bin/cosign'),
+    );
+    expect(sweep).toBeGreaterThan(copy);
+  });
+
+  test('images.yml builds the stick with a trusted signer, and runs the verification e2e', () => {
+    const text = read('.github/workflows/images.yml');
+    expect(text).toMatch(
+      /--build-arg RELEASE_REPOSITORY="\$RELEASE_REPOSITORY"[^\n]*-t jumpmaster-stick:dev/,
+    );
+    expect(text).toContain('images/trooper/e2e/verify.sh');
+    const e2e = read('images/trooper/e2e/verify.sh');
+    // An unsigned local image is refused under signed, and the same image runs once pinned.
+    expect(e2e).toContain('verify-drop.mjs');
+    const drop = read('images/trooper/e2e/verify-drop.mjs');
+    for (const s of ['image not verified', "via: 'pinned'", 'image-verify-v1', 'a tag reference'])
+      expect(drop, s).toContain(s);
+  });
+});
+
+test('every e2e script records the engine architecture it ran on', () => {
+  for (const f of [
+    'images/smoke.sh',
+    'images/trooper/e2e/run.sh',
+    'images/trooper/e2e/egress.sh',
+    'images/trooper/e2e/verify.sh',
+    'images/trooper/e2e/presets.sh',
+  ])
+    expect(read(f), f).toContain('{{.Server.Os}}/{{.Server.Arch}}');
+});
+
+describe('release metadata in the images', () => {
+  test('the server image bakes images.lock.json from IMAGES_LOCK only when given, and checks it', () => {
+    const final = finalStage(instructions(read('images/server/Dockerfile')));
+    // No default: a build without the argument has no lock, and a preset zone then needs
+    // JM_DEV_IMAGES=1 or an explicit image.
+    expect(final.some((i) => i.op === 'ARG' && i.args === 'IMAGES_LOCK')).toBe(true);
+    const write = final.find((i) => i.op === 'RUN' && i.args.includes('/app/images.lock.json'));
+    expect(write?.args).toMatch(/if \[ -n "\$IMAGES_LOCK" \]/);
+    // The build parses it with the server's own loader, so a malformed lock fails the build.
+    expect(write?.args).toMatch(/loadImageLock\('\/app\/images\.lock\.json'\)/);
+    expect(read('apps/server/src/presets.ts')).toContain(
+      "export const IMAGE_LOCK_PATH = '/app/images.lock.json'",
+    );
+  });
+
+  test('the server image exports its release version (JM_RELEASE_VERSION) from a build argument', () => {
+    const final = finalStage(instructions(read('images/server/Dockerfile')));
+    expect(final.some((i) => i.op === 'ARG' && i.args === 'RELEASE_VERSION')).toBe(true);
+    const env = final
+      .filter((i) => i.op === 'ENV')
+      .map((i) => i.args)
+      .join(' ');
+    expect(env).toMatch(/JM_RELEASE_VERSION=\$\{RELEASE_VERSION\}/);
+  });
+
+  test('the stick image records its release version and repository from build arguments', () => {
+    const final = finalStage(instructions(read('images/stick/Dockerfile')));
+    for (const arg of ['RELEASE_VERSION', 'RELEASE_REPOSITORY'])
+      expect(
+        final.some((i) => i.op === 'ARG' && i.args === arg),
+        arg,
+      ).toBe(true);
+    const write = final.find((i) => i.op === 'RUN' && i.args.includes('/app/release.json'));
+    expect(write?.args).toContain('RELEASE_VERSION');
+    expect(write?.args).toContain('RELEASE_REPOSITORY');
+  });
+
+  test('each preset ARG BASE default is the published trooper digest, or the marked placeholder before the first release', () => {
+    const published = JSON.parse(read('images/published.json')) as {
+      version: string | null;
+      registry: string | null;
+      images: Record<string, string>;
+    };
+    const trooper = published.images['jumpmaster-trooper'];
+    const nodeBase = /^FROM (node:24-bookworm-slim@sha256:[0-9a-f]{64})/m.exec(
+      read('images/server/Dockerfile'),
+    )?.[1];
+    for (const file of Object.values(PRESET_FILES)) {
+      const text = read(file);
+      const base = /^ARG BASE=(\S+)$/m.exec(text)?.[1];
+      if (trooper) {
+        expect(published.registry, 'images/published.json names its registry').toMatch(
+          /^ghcr\.io\//,
+        );
+        expect(base, file).toBe(`${published.registry}/jumpmaster-trooper@${trooper}`);
+      } else {
+        // Nothing published yet: the plain Node image, which the build's own check refuses.
+        expect(published.version).toBeNull();
+        expect(base, file).toBe(nodeBase);
+        expect(text, file).toContain('images/published.json');
+      }
+    }
+  });
+});
+
+test('dependabot watches the preset Dockerfiles and the Claude CLI lockfile', () => {
+  type Update = { 'package-ecosystem': string; directory?: string; directories?: string[] };
+  const updates = (load(read('.github/dependabot.yml')) as { updates: Update[] }).updates;
+  const dirs = (eco: string) =>
+    updates
+      .filter((u) => u['package-ecosystem'] === eco)
+      .flatMap((u) => [...(u.directories ?? []), ...(u.directory ? [u.directory] : [])]);
+  expect(dirs('docker')).toContain('/images/trooper/presets/*');
+  expect(dirs('npm')).toContain('/images/trooper/claude');
+});
+
 type Workflow = {
   on: Record<string, unknown>;
   permissions?: Record<string, string>;
@@ -109,6 +528,59 @@ type Workflow = {
 };
 
 describe('images.yml', () => {
+  type FullJob = Workflow['jobs'][string] & {
+    services?: Record<string, { image?: string }>;
+    permissions?: unknown;
+    steps: {
+      id?: string;
+      uses?: string;
+      run?: string;
+      env?: Record<string, string>;
+      with?: Record<string, unknown>;
+    }[];
+  };
+  const job = (name: string) =>
+    (load(read('.github/workflows/images.yml')) as { jobs: Record<string, FullJob> }).jobs[name];
+
+  test('a PR job runs the real release-index.sh on two real per-arch builds, without emulation or GHCR', () => {
+    const j = job('release-index') as FullJob;
+    expect(j).toBeDefined();
+    expect(j['runs-on']).toBe('ubuntu-24.04');
+    // A job-local registry, pinned; no login, no write token.
+    expect(j.services?.registry?.image).toMatch(/^registry:[\d.]+@sha256:[0-9a-f]{64}$/);
+    const text = JSON.stringify(j);
+    expect(text).not.toMatch(/docker login|login-action|ghcr\.io|id-token|qemu|binfmt/i);
+    // FROM scratch with COPY only: nothing of the other arch executes, so no emulation is needed.
+    const runs = j.steps.map((s) => s.run ?? '').join('\n');
+    expect(runs).toMatch(/FROM scratch/);
+    expect(runs).not.toMatch(/^RUN /m);
+    const builds = j.steps.filter((s) => s.uses?.startsWith('docker/build-push-action@'));
+    expect(builds.map((b) => b.with?.platforms).sort()).toEqual(['linux/amd64', 'linux/arm64']);
+    for (const b of builds) {
+      expect(b.with?.provenance).toBe('mode=max');
+      expect(b.with?.sbom).toBe(true);
+      expect(String(b.with?.outputs)).toMatch(
+        /^type=image,name=localhost:5000\/ci\/jumpmaster-ci,push-by-digest=true,name-canonical=true,push=true$/,
+      );
+    }
+    // The real script, as a release runs it, then the result checked as a four-manifest index.
+    const index = j.steps.find((s) => s.run?.includes('scripts/release-index.sh'));
+    expect(index?.env?.RELEASE).toBe('true');
+    expect(runs).toMatch(/imagetools inspect "localhost:5000\/ci\/jumpmaster-ci@\$digest" --raw/);
+    expect(runs).toContain('linux/amd64,linux/arm64,unknown/unknown,unknown/unknown');
+  });
+
+  test('a PR job builds the trooper and the stick natively on arm64 and runs verify.sh and run.sh there', () => {
+    const j = job('arm64') as FullJob;
+    expect(j).toBeDefined();
+    expect(j['runs-on']).toBe('ubuntu-24.04-arm');
+    const runs = j.steps.map((s) => s.run ?? '').join('\n');
+    expect(runs).toMatch(/images\/trooper\/e2e\/verify\.sh/);
+    expect(runs).toMatch(/images\/trooper\/e2e\/run\.sh/);
+    expect(runs).toMatch(/docker version/);
+    expect(JSON.stringify(j)).not.toMatch(/docker login|login-action|id-token|qemu|binfmt/i);
+  });
+
   const workflow = () => load(read('.github/workflows/images.yml')) as Workflow;
 
   test('runs on pull requests and main, read-only', () => {
@@ -126,6 +598,36 @@ describe('images.yml', () => {
     expect(summary).toMatch(/GITHUB_STEP_SUMMARY/);
     expect(runs.some((r) => /images\/trooper\/e2e\/run\.sh/.test(r))).toBe(true);
     expect(runs.some((r) => /images\/smoke\.sh/.test(r))).toBe(true);
+  });
+
+  test('images.yml runs the egress e2e after building the egress image, in the job that records the Engine', () => {
+    const jobs = Object.values(workflow().jobs);
+    const job = jobs.find((j) =>
+      j.steps.some((s) => /images\/trooper\/e2e\/egress\.sh/.test(s.run ?? '')),
+    );
+    expect(job).toBeDefined();
+    const runs = job?.steps.map((s) => s.run ?? '') ?? [];
+    expect(runs.find((r) => /docker version/.test(r))).toMatch(/GITHUB_STEP_SUMMARY/);
+    const build = runs.findIndex((r) =>
+      /-t jumpmaster-egress:dev -f images\/egress\/Dockerfile/.test(r),
+    );
+    const e2e = runs.findIndex((r) => /egress\.sh/.test(r));
+    expect(build).toBeGreaterThanOrEqual(0);
+    expect(build).toBeLessThan(e2e);
+    // The e2e builds the proxy locally (pulling by digest arrives with image verification).
+    expect(read('images/trooper/e2e/egress.sh')).toMatch(
+      /-t jumpmaster-egress:dev -f images\/egress\/Dockerfile/,
+    );
+  });
+
+  test('images.yml runs the preset e2e in its own job, recording the Engine there too', () => {
+    const jobs = Object.values(workflow().jobs);
+    const job = jobs.find((j) =>
+      j.steps.some((s) => /images\/trooper\/e2e\/presets\.sh/.test(s.run ?? '')),
+    );
+    expect(job).toBeDefined();
+    const runs = job?.steps.map((s) => s.run ?? '') ?? [];
+    expect(runs.find((r) => /docker version/.test(r))).toMatch(/GITHUB_STEP_SUMMARY/);
   });
 
   test('builds each shipped image by name and never pushes or logs in', () => {
@@ -146,7 +648,8 @@ describe('images.yml', () => {
 
   test('checkout keeps no credentials and every job has a timeout', () => {
     for (const job of Object.values(workflow().jobs)) {
-      expect(job['timeout-minutes']).toBe(30);
+      expect(job['timeout-minutes']).toBeGreaterThan(0);
+      expect(job['timeout-minutes']).toBeLessThanOrEqual(45);
       for (const step of job.steps.filter((s) => s.uses?.startsWith('actions/checkout@')))
         expect(step.with?.['persist-credentials']).toBe(false);
     }

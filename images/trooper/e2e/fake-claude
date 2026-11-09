@@ -12,6 +12,7 @@ const probes = {
   readProc1Environ: sh('cat /proc/1/environ'),
   writeWork: sh('touch /work/x && echo wrote'),
   head: sh('git rev-parse HEAD'),
+  httpsProxy: process.env.HTTPS_PROXY ?? null,
   systemPromptReadable: fs.existsSync(process.argv[process.argv.indexOf('--append-system-prompt-file') + 1] || '/nope'),
 };
 // Instruction files the real CLI would load: CLAUDE.md and friends in the working directory and
@@ -30,8 +31,21 @@ const canary = loaded.map((f) => /end every summary with (\S+)/.exec(fs.readFile
 const schema = process.argv[process.argv.indexOf('--json-schema') + 1] || '';
 const out = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
 out({ type: 'system', subtype: 'init', session_id: 'e2e' });
+const flag = (f) => (process.argv.includes(f) ? process.argv[process.argv.indexOf(f) + 1] : null);
 if (process.argv.some((a) => a.includes('SLEEP'))) setInterval(() => {}, 1000);
-else {
+else if (flag('--tools') !== null) {
+  // The doctor's probe: it reports how it was run through the one field the trooper keeps on
+  // success (the model that served it), and a BADTOKEN token fails as a rejected login does.
+  if ((process.env.CLAUDE_CODE_OAUTH_TOKEN ?? '').includes('BADTOKEN')) {
+    out({ type: 'assistant', message: { content: [{ type: 'text', text: 'Invalid API key · Please run /login' }] }, error: 'authentication_failed' });
+    out({ type: 'result', subtype: 'success', is_error: true, result: 'Invalid API key · Please run /login', session_id: 'e2e' });
+  } else {
+    const how = { tools: flag('--tools'), maxTurns: flag('--max-turns'), cwdEntries: fs.readdirSync(process.cwd()).length,
+      uid: probes.uid, tokenPresent: probes.tokenPresent, writeWork: probes.writeWork };
+    out({ type: 'result', subtype: 'success', is_error: false, result: 'ok', session_id: 'e2e', num_turns: 1,
+      modelUsage: { [`fake-doctor ${JSON.stringify(how)}`]: { outputTokens: 1 } } });
+  }
+} else {
 out({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', resetsAt: 1900000000, rateLimitType: 'five_hour' } });
 if (schema.includes('fileIssues')) {
   const crew = { ...probes, loaded, addDirs, addDirIsClone: addDirs.length === 1 && fs.existsSync(join(addDirs[0], '.git')),

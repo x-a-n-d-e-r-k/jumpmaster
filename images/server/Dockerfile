@@ -39,7 +39,20 @@ RUN ln -s /app/apps/server/dist/cli.js /usr/local/bin/jumpmaster \
  && install -d -o 10000 -g 10000 -m 0700 /data \
  && install -d -o root -g root -m 0755 /config \
  && find / -xdev -type f -perm /6000 -exec chmod a-s {} +
+# The release's image lock (the release workflow passes it): preset zones resolve to these
+# digests. Without it a preset zone needs an explicit image, or JM_DEV_IMAGES=1 for local :dev
+# builds. The server's own loader checks it here, so a malformed lock fails the build.
+ARG IMAGES_LOCK
+RUN if [ -n "$IMAGES_LOCK" ]; then \
+      printf '%s\n' "$IMAGES_LOCK" > /app/images.lock.json \
+      && chmod 0444 /app/images.lock.json \
+      && node --input-type=module -e "const m = await import('/app/apps/server/dist/presets.js'); if (!m.loadImageLock('/app/images.lock.json')) process.exit(1);"; \
+    fi
+# The release this image belongs to (the release workflow passes it): the doctor's links point at
+# that tag's install runbook. Empty in other builds, which link to main.
+ARG RELEASE_VERSION
 ENV NODE_ENV=production \
+    JM_RELEASE_VERSION=${RELEASE_VERSION} \
     JM_CONTAINER=1 \
     TMPDIR=/tmp
 WORKDIR /app

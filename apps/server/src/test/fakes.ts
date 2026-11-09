@@ -8,6 +8,8 @@ import type {
   ForgeReview,
   PullFacts,
   PullFiles,
+  ReadProbe,
+  RepoAccess,
 } from '../forge/github.js';
 
 /** A fake's issue: `authorType` defaults to `User`. */
@@ -71,7 +73,47 @@ export interface FakeForgeState {
   pullFiles: Map<number, PullFiles>;
   rules: Record<Identity, BranchRulesRead>;
   merges: { number: number; sha: string; title: string; message: string }[];
+  /** Each identity's access to the repository (default: push, not admin, public repo). */
+  access: Record<Identity, RepoAccess>;
+  /** Label names on the repository (default: none). */
+  labels: string[];
+  /** Directory listings, keyed `ref:path` (path '' is the root); absent is a missing path. */
+  dirs: Map<string, string[]>;
+  /** Each identity's read probes (default: every read 200). */
+  probes: Record<Identity, ReadProbe[]>;
+  /** What `probeAdministration` answers; by default refused (no Administration permission). */
+  adminProbe: Record<Identity, ReadProbe>;
 }
+
+/** The forge's methods that write; a doctor run must call none of them. */
+export const FORGE_WRITES: readonly (keyof Forge)[] = [
+  'createIssue',
+  'updateIssue',
+  'setLabels',
+  'findOrCreatePullRequest',
+  'createReview',
+  'merge',
+];
+
+export const READ_PERMISSIONS = [
+  'Contents: read',
+  'Issues: read',
+  'Pull requests: read',
+  'Checks: read',
+  'Actions: read',
+  'Commit statuses: read',
+] as const;
+
+export const okProbes = (): ReadProbe[] =>
+  READ_PERMISSIONS.map((permission) => ({ permission, status: 200, accepted: null }));
+
+const okAccess = (): RepoAccess => ({
+  private: false,
+  defaultBranch: 'main',
+  permissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
+  scopes: null,
+  tokenExpiresAt: null,
+});
 
 const STATE_EPOCH = Date.parse('2026-01-01T00:00:00.000Z');
 
@@ -229,6 +271,14 @@ function createState(opts: {
     pullFiles: new Map(),
     rules: { author: okRules(), reviewer: okRules() },
     merges: [],
+    access: { author: okAccess(), reviewer: okAccess() },
+    labels: [],
+    dirs: new Map(),
+    probes: { author: okProbes(), reviewer: okProbes() },
+    adminProbe: {
+      author: { permission: 'Administration: read', status: 403, accepted: null },
+      reviewer: { permission: 'Administration: read', status: 403, accepted: null },
+    },
   };
   return state;
 }
@@ -391,6 +441,14 @@ function forgeFor(
       state.merges.push({ number: n, sha: input.sha, title: input.title, message: input.message });
       return { merged: true, sha: `merge-${n}` };
     },
+    repoAccess: async () => structuredClone(state.access[identity]),
+    listLabels: async () => [...state.labels],
+    listDir: async (ref, path) => {
+      const d = state.dirs.get(`${ref}:${path}`);
+      return d ? [...d] : null;
+    },
+    probeReads: async () => structuredClone(state.probes[identity]),
+    probeAdministration: async () => structuredClone(state.adminProbe[identity]),
   };
 
   const failures = new Map<string, FailMode[]>();

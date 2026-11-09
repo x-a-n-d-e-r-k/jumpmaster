@@ -2,6 +2,7 @@ import { writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
 import { join } from 'node:path';
 import {
+  type CrewDropPayload,
   type DropPayload,
   type DropResult,
   EVENT_PREFIX,
@@ -20,6 +21,9 @@ import { scrubEnv } from '../gates.js';
 import type { TrooperDeps } from '../main.js';
 import { sweepUid, type TrooperIdentities } from '../privilege.js';
 import { redact } from '../redact.js';
+
+/** A payload for a role that runs the agent: every role but `doctor`. */
+export type AgentPayload = ItemDropPayload | CrewDropPayload;
 
 export type RoleCtx = { workdir: string; secrets: string[]; ids: TrooperIdentities | null };
 export type RoleRunner = (
@@ -69,7 +73,7 @@ export function repoDirOf(ctx: RoleCtx): string {
 
 /** Clones through the root mirror at `<workdir>/mirror`; returns the working copy. */
 export async function cloneAndPrepare(
-  payload: DropPayload,
+  payload: AgentPayload,
   deps: TrooperDeps,
   ctx: RoleCtx,
 ): Promise<string> {
@@ -92,7 +96,7 @@ function stripUndefined<T extends object>(o: T): T {
 }
 
 /** The `--settings` file for the agent: no hooks, and no attribution when the zone says so. */
-export function agentSettings(payload: DropPayload): Record<string, unknown> {
+export function agentSettings(payload: AgentPayload): Record<string, unknown> {
   if (payload.attribution !== false) return { hooks: {} };
   return { hooks: {}, includeCoAuthoredBy: false, attribution: { commit: '', pr: '' } };
 }
@@ -109,7 +113,7 @@ export function crewSystemPrompt(addDirs: string[]): string {
  * the clone's own instructions are never loaded).
  */
 export async function runAgent(
-  payload: DropPayload,
+  payload: AgentPayload,
   deps: TrooperDeps,
   ctx: RoleCtx,
   o: { prompt: string; outputSchema: object; gateResults?: GateResult[]; addDirs?: string[] },
@@ -216,9 +220,12 @@ export function stoppedEarly(o: AgentOutcome): 'rate_limited' | 'interrupted' | 
   return reason !== undefined && reason !== 'completed' ? 'interrupted' : null;
 }
 
+/** What a gate step's extra environment comes from (an item drop's payload, or a doctor drop's). */
+export type GateEnvSource = { gateSecrets?: Record<string, string>; services?: ServiceSpec[] };
+
 /** Gate secrets and service addresses, set for a gate step after its environment is scrubbed. */
 export function gateExtraEnv(
-  payload: ItemDropPayload,
+  payload: GateEnvSource,
   hostOf: (service: ServiceSpec) => string = (s) => s.name,
 ): NodeJS.ProcessEnv {
   return { ...payload.gateSecrets, ...serviceEnv(payload, hostOf) };
@@ -226,7 +233,7 @@ export function gateExtraEnv(
 
 /** Service addresses. Unlike gate secrets, the agent gets these too. */
 function serviceEnv(
-  payload: ItemDropPayload,
+  payload: GateEnvSource,
   hostOf: (service: ServiceSpec) => string = (s) => s.name,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};

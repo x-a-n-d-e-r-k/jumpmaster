@@ -1,5 +1,13 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { ArtifactUploadSchema, DropResultSchema, TrooperEventSchema } from '@jumpmaster/protocol';
+import {
+  ArtifactUploadSchema,
+  DropResultSchema,
+  type LeaseSkip,
+  SKIPPED_HEADER,
+  type StickInfo,
+  StickInfoSchema,
+  TrooperEventSchema,
+} from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { storeArtifact } from '../artifacts.js';
@@ -13,9 +21,10 @@ import {
   getStickByTokenHash,
   insertStick,
   type Stick,
+  stampStick,
   updateDrop,
 } from '../db/repo.js';
-import { heartbeat, leaseNextDrop } from '../leases.js';
+import { heartbeat, leaseNextDrop, missingFor, zoneRequirements, zonesWaiting } from '../leases.js';
 import type { ForgePair } from '../outbox.js';
 import { buildPayload } from '../payloads.js';
 import { applyResult } from '../results.js';
@@ -34,7 +43,12 @@ export interface StickRouteDeps {
   leasePollMs?: number;
   /** Starts a pass without waiting for it (a credits stop briefs Command at once). */
   kick?: () => void;
+  /** Where a refused lease is logged; defaults to the server's stderr log. */
+  log?: (line: string) => void;
 }
+
+/** A refusal is logged at most this often per stick, zone and reason. */
+const SKIP_LOG_MS = 60_000;
 
 const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex');
 
@@ -43,12 +57,19 @@ const safeEqual = (a: string, b: string): boolean =>
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-const EnrollBody = z.object({
+const EnrollBody = StickInfoSchema.extend({
   joinToken: z.string(),
   name: z.string().min(1),
   slots: z.number().int().min(1),
 });
-const LeaseBody = z.object({ freeSlots: z.number().int() });
+const LeaseBody = StickInfoSchema.extend({ freeSlots: z.number().int() });
+
+const advertOf = (info: StickInfo) => ({
+  capabilities: info.capabilities,
+  imagePolicy: info.imagePolicy,
+  version: info.version ?? null,
+  pinnedImages: info.pinnedImages,
+});
 const HeartbeatBody = z.object({ epoch: z.number() });
 const EventsBody = z.object({ epoch: z.number(), events: z.array(TrooperEventSchema) });
 const ResultBody = z.object({ epoch: z.number(), result: DropResultSchema });
@@ -57,6 +78,39 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
   const { db, config, now } = deps;
   const waitMs = deps.leaseWaitMs ?? 25_000;
   const pollMs = deps.leasePollMs ?? 1000;
+  // The app runs with Fastify's logger off; the server's own log is stderr.
+  const log = deps.log ?? ((line: string) => console.error(`[jumpmaster] ${line}`));
+  const lastLogged = new Map<string, number>();
+
+  /** Zones this stick can't run, with what it lacks for each (config order). */
+  const incapable = (info: StickInfo): LeaseSkip[] =>
+    config.dropZones
+      .map((zone) => ({
+        zoneId: zone.id,
+        missing: missingFor(info, zoneRequirements(zone, config)),
+      }))
+      .filter((s) => s.missing.length > 0);
+
+  /** Names the skipped zones on the response, and logs each refusal at most once a minute. */
+  const reportSkips = (reply: FastifyReply, stick: Stick, cannot: LeaseSkip[]) => {
+    const waiting = zonesWaiting(
+      db,
+      cannot.map((c) => c.zoneId),
+    );
+    const skipped = cannot.filter((c) => waiting.has(c.zoneId));
+    if (skipped.length === 0) return;
+    reply.header(SKIPPED_HEADER, encodeURIComponent(JSON.stringify(skipped)));
+    const at = Date.now();
+    for (const s of skipped) {
+      const key = `${stick.id}\n${s.zoneId}\n${s.missing.join(',')}`;
+      const last = lastLogged.get(key);
+      if (last !== undefined && at - last < SKIP_LOG_MS) continue;
+      lastLogged.set(key, at);
+      log(
+        `lease: stick ${stick.id} ${JSON.stringify(stick.name)} skipped zone ${s.zoneId}: it lacks ${s.missing.join(', ')}`,
+      );
+    }
+  };
 
   const authStick = (req: FastifyRequest): Stick | undefined => {
     const m = /^Bearer (.+)$/.exec(req.headers.authorization ?? '');
@@ -109,6 +163,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         name: body.data.name,
         tokenHash: sha256(stickToken),
         slots: body.data.slots,
+        ...advertOf(body.data),
       });
       return { stickId, stickToken };
     });
@@ -118,7 +173,11 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       if (!stick) return reply.code(401).send({ error: 'unauthorized' });
       const body = LeaseBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: 'invalid body' });
+      // Every lease call says what the stick can do now, and that it is alive.
+      stampStick(db, stick.id, advertOf(body.data), now());
       if (body.data.freeSlots < 1) return reply.code(204).send();
+      const cannot = incapable(body.data);
+      const exclude = cannot.map((c) => c.zoneId);
 
       let closed = false;
       // Not req.raw: IncomingMessage 'close' fires once the body is consumed, not on disconnect.
@@ -128,8 +187,9 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       const deadline = Date.now() + waitMs;
       for (;;) {
         const at = now();
-        const leased = leaseNextDrop(db, stick.id, at, dispatchGate(db, config.usage, at));
+        const leased = leaseNextDrop(db, stick.id, at, dispatchGate(db, config.usage, at), exclude);
         if (leased) {
+          reportSkips(reply, stick, cannot);
           const drop = getDrop(db, leased.dropId) as Drop;
           const zone = config.dropZones.find((z) => z.id === drop.dropZoneId);
           if (!zone) {
@@ -139,7 +199,10 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
           }
           return buildPayload(db, zone, drop, config.secrets, { claude: config.claude, now: at });
         }
-        if (closed || Date.now() + pollMs > deadline) return reply.code(204).send();
+        if (closed || Date.now() + pollMs > deadline) {
+          reportSkips(reply, stick, cannot);
+          return reply.code(204).send();
+        }
         await sleep(pollMs);
       }
     });
