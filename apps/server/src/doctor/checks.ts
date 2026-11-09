@@ -211,7 +211,7 @@ function listenCheck(d: DoctorDeps): DoctorCheck {
 }
 
 /** The identity map: no user namespace (a rootful engine, or no container). */
-const identityMap = (map: string): boolean => {
+export const identityMap = (map: string): boolean => {
   const rows = map
     .trim()
     .split('\n')
@@ -1085,6 +1085,16 @@ async function privateCloneCheck(
   };
 }
 
+/**
+ * How to turn a tag into a digest reference. `imagetools inspect` asks the registry, so it works
+ * only for an image that is in one; a locally built image has no registry digest until it is
+ * pushed (install.md, "Pinning an image by digest").
+ */
+function pinHow(ref: string): string {
+  const name = ref.replace(/:[^/:@]+$/, '');
+  return `for an image in a registry, docker buildx imagetools inspect ${ref} prints its digest (the Digest: line); for an image you built locally, push it to a registry the stick can pull from (docker push ${ref}) and read the pushed digest with docker image inspect --format '{{index .RepoDigests 0}}' ${ref}. The pin is ${name}@sha256:<digest>.`;
+}
+
 async function presetCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck> {
   const base = { id: 'zone.preset', zoneId: zone.id, doc: doc('presets') };
   const notes: string[] = [];
@@ -1101,9 +1111,7 @@ async function presetCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCh
   } else if (!DIGEST_REF.test(zone.image)) {
     status = 'warn';
     notes.push(`the image ${zone.image} is a tag: whoever moves the tag changes what drops run`);
-    fixes.push(
-      `Pin it by digest: docker buildx imagetools inspect ${zone.image} prints the digest; set image to name@sha256:<digest>.`,
-    );
+    fixes.push(`Pin it by digest: ${pinHow(zone.image)} Then set image to that reference.`);
   }
   if (!zone.preset) {
     notes.unshift(`explicit image ${zone.image} (no preset)`);
@@ -1165,12 +1173,7 @@ function servicesCheck(d: DoctorDeps, zone: DropZoneConfig, sticks: Stick[]): Do
       ...base,
       status: 'fail',
       summary: `service image(s) by tag, not digest: ${tagged.map((s) => `${s.name} (${s.image})`).join(', ')}`,
-      fix: tagged
-        .map(
-          (s) =>
-            `Run docker buildx imagetools inspect ${s.image}, and set ${s.name}'s image to ${s.image.replace(/:[^/:@]+$/, '')}@sha256:<the digest it prints>.`,
-        )
-        .join(' '),
+      fix: tagged.map((s) => `${s.name}: ${pinHow(s.image)} Set its image to that.`).join(' '),
     };
   const need = zoneRequirements(zone, d.config);
   if (!need.signed)

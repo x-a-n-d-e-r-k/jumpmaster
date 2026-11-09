@@ -3,6 +3,7 @@
 //   jumpmaster [serve] <config>   run the server (the default)
 //   jumpmaster ctl …              control commands against the running server
 //   jumpmaster doctor …           alias of `ctl doctor …`
+//   jumpmaster init --repo o/n …  write a compose install's config and secrets (init.ts)
 // In the server container run ctl as `docker compose exec jumpmaster jumpmaster ctl …`, never
 // `compose run`: a new container's loopback is not the server.
 import { realpathSync } from 'node:fs';
@@ -11,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 export type CliDeps = {
   serve: (configPath: string) => Promise<number>;
   ctl: (args: string[]) => Promise<number>;
+  init: (args: string[]) => Promise<number>;
   err?: (line: string) => void;
 };
 
@@ -18,6 +20,7 @@ const USAGE = [
   'usage: jumpmaster [serve] <config>',
   '       jumpmaster ctl <command> …   (see `jumpmaster ctl` for commands)',
   '       jumpmaster doctor …          (alias of `jumpmaster ctl doctor …`)',
+  '       jumpmaster init --repo owner/name …   (see `jumpmaster init --help`)',
 ].join('\n');
 
 /** Command words that are never read as a config path. */
@@ -28,11 +31,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   const [command, ...rest] = argv;
   if (command === 'ctl') return deps.ctl(rest);
   if (command === 'doctor') return deps.ctl(['doctor', ...rest]);
-  if (command === 'init') {
-    err('jumpmaster init is not in this build');
-    err(USAGE);
-    return 2;
-  }
+  if (command === 'init') return deps.init(rest);
   const config = command === 'serve' ? rest[0] : command;
   if (!config || RESERVED.has(config)) {
     err(USAGE);
@@ -57,6 +56,11 @@ async function serve(configPath: string): Promise<number> {
   }
 }
 
+async function init(args: string[]): Promise<number> {
+  const { initMain } = await import('./init.js');
+  return initMain(args);
+}
+
 async function ctl(args: string[]): Promise<number> {
   const { runCtl } = await import('./ctl.js');
   return runCtl(args);
@@ -73,6 +77,6 @@ const isMain = (): boolean => {
   }
 };
 if (isMain()) {
-  const code = await runCli(process.argv.slice(2), { serve, ctl });
+  const code = await runCli(process.argv.slice(2), { serve, ctl, init });
   if (code !== 0) process.exit(code);
 }

@@ -441,6 +441,26 @@ describe('zone checks', () => {
     expect(one(await pinned.run(), 'zone.services').status).toBe('pass');
   });
 
+  // `imagetools inspect` reads a registry: a locally built image has no registry digest until it
+  // is pushed, so the fix must say how to get one for both.
+  test('a tag pin fix covers registry images and locally built ones', async () => {
+    const zoneImage = world({ zone: { image: 'registry.example.com/team/trooper:1' } });
+    const z = one(await zoneImage.run(), 'zone.preset');
+    expect(z.status).toBe('warn');
+    expect(z.fix).toContain('docker buildx imagetools inspect registry.example.com/team/trooper:1');
+    expect(z.fix).toContain('docker push registry.example.com/team/trooper:1');
+    expect(z.fix).toContain("docker image inspect --format '{{index .RepoDigests 0}}'");
+    expect(z.fix).toContain('registry.example.com/team/trooper@sha256:<digest>');
+    const service = world({
+      zone: {
+        services: [{ name: 'db', image: 'postgres:16', port: 5432, readyTimeoutSeconds: 60 }],
+      },
+    });
+    const s = one(await service.run(), 'zone.services');
+    expect(s.fix).toContain('docker push postgres:16');
+    expect(s.fix).toContain('postgres@sha256:<digest>');
+  });
+
   test('egress monitor warns with observed hosts missing from the allow list', async () => {
     const w = world({ zone: { egress: { mode: 'monitor', allow: ['pypi.org'] } } });
     insertDrop(

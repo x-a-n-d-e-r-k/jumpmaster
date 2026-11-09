@@ -3,17 +3,21 @@
 # by its @sha256 index digest, and rendering fails if any image is left unpinned. The template is
 # not a .yaml file so the repository's pin scan never mistakes its placeholders for images.
 #
-# Next to the rendered compose.yaml: ./config/jumpmaster.config.json, ./secrets/* (mode 0600,
-# owned by the host user) and a .env with JM_UID and JM_GID. `jumpmaster init` (Task 16) writes
-# them; the install runbook (Task 17) walks through it.
+# Next to compose.yaml (docs/runbooks/install.md walks through each):
+#   .env                              JM_UID and JM_GID: the host user who owns the files below
+#   secrets/*                         one token per file, mode 0600, owned by that user
+#   config/jumpmaster.config.json     written by `jumpmaster init` (the init service below)
+#   data/                             the database, written by the server as that user
+#   compose.override.yaml             written by init for starter mode or a private repository
 #
 # Only the stick mounts the Docker socket, which is root on the host. The UI is on 127.0.0.1 only.
 name: jumpmaster
 
 services:
-  server:
-    image: {{image jumpmaster-server}}
-    user: "${JM_UID:?set JM_UID (run jumpmaster init)}:${JM_GID:?set JM_GID (run jumpmaster init)}"
+  jumpmaster:
+    image: "{{image jumpmaster-server}}"
+    user: "${JM_UID:?set JM_UID in .env (see the install runbook)}:${JM_GID:?set JM_GID in .env (see the install runbook)}"
+    command: ["serve", "/config/jumpmaster.config.json"]
     read_only: true
     tmpfs:
       - /tmp
@@ -41,22 +45,51 @@ services:
     restart: unless-stopped
 
   stick:
-    image: {{image jumpmaster-stick}}
+    image: "{{image jumpmaster-stick}}"
     read_only: true
     tmpfs:
       - /tmp
     environment:
-      JM_SERVER_URL: http://server:7420
+      JM_SERVER_URL: http://jumpmaster:7420
       JM_JOIN_TOKEN_FILE: /run/secrets/join_token
       JM_STICK_NAME: stick
+      JM_SLOTS: ${JM_SLOTS:-1}
+      # Images only by digest, each verified with cosign against this repository's release
+      # workflow, or pinned by the operator in JM_ALLOWED_IMAGES (name@sha256:…, comma-separated).
+      JM_IMAGE_POLICY: signed
+      JM_ALLOWED_IMAGES: ${JM_ALLOWED_IMAGES:-}
+      JM_EGRESS_IMAGE: "{{image jumpmaster-egress}}"
+      # Each egress-controlled drop takes a /28 from this pool (empty: the stick's default).
+      JM_DROP_SUBNET_POOL: ${JM_DROP_SUBNET_POOL:-}
+      # The enrollment, the Sigstore trust root and the verify cache.
+      JM_STATE_DIR: /state
     secrets:
       - join_token
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - stick-state:/state
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - jm-stick:/state
     depends_on:
-      - server
+      - jumpmaster
     restart: unless-stopped
+
+  # `docker compose --profile init run --rm init --repo owner/name`: writes config/ and the
+  # generated secrets into this directory, as the host user. Never started by `up`.
+  init:
+    image: "{{image jumpmaster-server}}"
+    profiles: ["init"]
+    user: "${JM_UID:?set JM_UID in .env (see the install runbook)}:${JM_GID:?set JM_GID in .env (see the install runbook)}"
+    entrypoint: ["jumpmaster", "init"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      JM_INSTALL_DIR: /install
+    volumes:
+      - .:/install
 
 secrets:
   claude_token:
@@ -71,4 +104,4 @@ secrets:
     file: ./secrets/operator_token
 
 volumes:
-  stick-state:
+  jm-stick:

@@ -431,10 +431,16 @@ async function runContainer(
 const MAX_STDERR_REASON = 500;
 /** Stack frames and the lines Node prints after a crash: they say nothing about its cause. */
 const NODE_FOOTER = /^(at |Node\.js v\d|\(Use `node --trace-)/;
+/** zod's words for a discriminator value its schema doesn't list (v3 and v4). */
+const ROLE_REJECTED = /Invalid discriminator value|No matching discriminator/;
 
 /** Names the exit and, when the trooper said why on stderr, its last line with every credential scrubbed. */
 function noResultReason(exitCode: number, stderr: string, payload: DropPayload): string {
   const base = `trooper exited ${exitCode} without result`;
+  // A trooper built before this role existed rejects the payload's role. Its own words (zod's
+  // discriminator error, on one line or as raw JSON) don't say what to do; this does.
+  if (ROLE_REJECTED.test(stderr) && /\brole\b/.test(stderr))
+    return `${base}: the zone's image ${payload.image} is older than the ${payload.role} role (its trooper rejected the payload's role); rebuild the zone image on the current trooper (FROM the release's preset), or use the release's preset image`;
   const last = stderr
     .split('\n')
     .map((l) => l.trim())

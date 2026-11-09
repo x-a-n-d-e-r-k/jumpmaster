@@ -44,6 +44,9 @@ jobs:
           docker build --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-egress:dev -f images/egress/Dockerfile .
       - name: Image smoke test
         run: images/smoke.sh
+      # The compose install (release template plus the from-source override) on the same images.
+      - name: Compose install smoke test
+        run: deploy/smoke.sh
       - name: Trooper e2e
         env:
           E2E_REPO: ${{ github.repository }}

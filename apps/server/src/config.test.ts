@@ -537,7 +537,24 @@ describe('crew config', () => {
 describe('shipped example config', () => {
   test('parses, declares the default plan, and ships crew and MCP disabled', () => {
     const example = new URL('../../../examples/jumpmaster.config.json', import.meta.url).pathname;
-    const config = loadConfig(example, fullEnv);
+    const lock = join(mkdtempSync(join(tmpdir(), 'jm-lock-')), 'images.lock.json');
+    writeFileSync(
+      lock,
+      JSON.stringify({
+        registry: 'ghcr.io/x-a-n-d-e-r-k',
+        images: { 'jumpmaster-trooper': `sha256:${'1'.repeat(64)}` },
+      }),
+    );
+    const config = loadConfig(example, fullEnv, { imageLockPath: lock });
+    // Preset-based, never a tag: the release lock gives the image by digest.
+    const raw = JSON.parse(readFileSync(example, 'utf8'));
+    expect(raw.dropZones[0].image).toBeUndefined();
+    expect(config.dropZones[0]?.preset).toBe('node');
+    expect(config.dropZones[0]?.image).toBe(
+      `ghcr.io/x-a-n-d-e-r-k/jumpmaster-trooper@sha256:${'1'.repeat(64)}`,
+    );
+    expect(config.dropZones[0]?.egress?.mode).toBe('monitor');
+    expect(config.requireSignedImages).toBe(true);
     expect(config.claude.plan).toBe('pro');
     expect(config.claude.fableModel).toBeUndefined();
     expect(config.dropZones[0]?.crew.enabled).toBe(false);
