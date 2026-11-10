@@ -22,6 +22,10 @@ updates:
       # (Node 25 dropped Corepack, which the trooper's pnpm/yarn shims come from), not a bump.
       - dependency-name: node
         update-types: ["version-update:semver-major"]
+      # The jvm preset ships an LTS JDK (21). Dependabot offers the newest major, LTS or not
+      # (24 is not); moving to the next LTS is a deliberate change to the preset and its test.
+      - dependency-name: eclipse-temurin
+        update-types: ["version-update:semver-major"]
     groups:
       images:
         patterns: ["*"]
