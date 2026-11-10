@@ -330,6 +330,12 @@ describe('ctl config', () => {
       [['settings', 'set', 'pollseconds=30'], /not an install setting/],
       [['settings', 'set'], /usage: ctl settings set/],
       [['settings', 'show'], /usage: ctl settings set/],
+      // A --note value is never read as a path, even one that looks like a flag (review M1).
+      [
+        ['settings', 'set', '--note', '--note', 'dropZones.main.readyLabel=go', 'pollSeconds=30'],
+        /ctl zones set/,
+      ],
+      [['settings', 'set', 'pollSeconds=30', '--note'], /usage: ctl settings set/],
     ] as const) {
       const r = await run([...args], '', s.fetch);
       expect([args, r.code]).toEqual([args, 2]);

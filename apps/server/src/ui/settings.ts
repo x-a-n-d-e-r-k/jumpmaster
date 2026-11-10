@@ -335,7 +335,8 @@ function installSettings(config: Config): Setting[] {
       label: 'the share of the Claude usage window at which dispatch slows (0 to 1)',
       kind: 'number',
       value: config.usage.throttleUtilization,
-      attrs: 'min="0" max="1" step="0.01"',
+      // Any value: a stored 0.855 must not make the browser refuse the whole form.
+      attrs: 'min="0" max="1" step="any"',
     },
     {
       path: 'usage.stopOnOverage',

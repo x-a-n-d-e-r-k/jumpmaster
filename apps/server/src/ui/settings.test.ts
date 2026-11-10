@@ -956,6 +956,20 @@ describe('settings, part two: browser findings (Task 13, fix round 1)', () => {
     expect(after).toContain('restart-pending');
   });
 
+  test('a stored value with more decimals than a step allows still saves: every number input takes any value (review M2)', async () => {
+    const w = await world({
+      dbMode: true,
+      doc: { usage: { throttleUtilization: 0.855 }, dropZones: [ZONE] },
+    });
+    const html = (await w.get('/settings/install')).body;
+    expect(settingRow(html, 'usage.throttleUtilization')).toMatch(
+      /<input type="number" min="0" max="1" step="any" id="setting-usage-throttleUtilization"[^>]* value="0.855">/,
+    );
+    // No fractional step anywhere that a stored value could fall between.
+    for (const m of html.matchAll(/<input type="number"[^>]*>/g))
+      expect(m[0]).toMatch(/step="(any|1)"/);
+  });
+
   test('B4: every Install control and the MCP form fields have an accessible name', async () => {
     const w = await world({ dbMode: true, doc: { mcp: { enabled: true }, dropZones: [ZONE] } });
     const html = (await w.get('/settings/install')).body;

@@ -550,7 +550,17 @@ async function runSettings(
     return 2;
   };
   if (verb !== 'set') return usage();
-  const words = rest.filter((a, i) => a !== '--note' && rest[i - 1] !== '--note');
+  // Flags first: `--note` takes the next word whatever it is, so a note is never read as a path.
+  let note: string | undefined;
+  const words: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i] as string;
+    if (a === '--note') {
+      if (i + 1 >= rest.length) return usage();
+      note = rest[i + 1];
+      i++;
+    } else words.push(a);
+  }
   if (words.length === 0) return usage();
   for (const w of words) {
     const eq = w.indexOf('=');
@@ -571,7 +581,13 @@ async function runSettings(
       return 2;
     }
   }
-  return runConfig(['config', 'set', ...rest], call, out, err);
+  // Every word was checked above; the note goes last, after the words it can't be mistaken for.
+  return runConfig(
+    ['config', 'set', ...words, ...(note !== undefined ? ['--note', note] : [])],
+    call,
+    out,
+    err,
+  );
 }
 
 /** `ctl mcp-tokens mint | list` as lines: the minted value once, the list never a value. */
