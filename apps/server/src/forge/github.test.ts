@@ -1,8 +1,26 @@
+import dns from 'node:dns';
 import nock from 'nock';
-import { afterEach, beforeAll, describe, expect, test } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import { bufferedResponse, GitHubForge } from './github.js';
 
 const api = 'https://api.github.com';
+
+// Every request here is mocked. A real DNS lookup means a request went to the network: nock 15's
+// interceptor passes a request through for real when it is aborted before the mock answers, and
+// that real connection stays in fetch's pool for api.github.com, where the next mocked request
+// can land on it and fail with "SocketError: closed" once GitHub drops it.
+const lookups: string[] = [];
+const realLookup = dns.lookup;
+beforeAll(() => {
+  vi.spyOn(dns, 'lookup').mockImplementation(((host: string, ...rest: unknown[]) => {
+    lookups.push(host);
+    return (realLookup as (...a: unknown[]) => unknown)(host, ...rest);
+  }) as typeof dns.lookup);
+});
+afterAll(() => {
+  vi.restoreAllMocks();
+  expect(lookups, 'no forge test reaches the network').toEqual([]);
+});
 const forge = new GitHubForge('o', 'r', 'tok');
 
 function issue(n: number, extra: Record<string, unknown> = {}) {
@@ -947,17 +965,25 @@ describe('GitHubForge doctor reads', () => {
   });
 
   test('I-3: with a request timeout, a read that never answers is aborted', async () => {
-    // The reply function holds the response back: no status line, no headers.
-    nock(api)
-      .get('/repos/o/r')
-      .reply(async () => {
-        await new Promise((r) => setTimeout(r, 2000));
-        return [200, { default_branch: 'main' }];
+    // A fetch that never answers (no status line, no headers) and only honours its signal. Not a
+    // nock reply that waits: nock 15 sends a request aborted before its mock answers to the real
+    // network, which the file-level lookup check catches.
+    const seen: string[] = [];
+    vi.stubGlobal('fetch', (input: string | URL | Request, init: RequestInit = {}) => {
+      seen.push(String(input instanceof Request ? input.url : input));
+      return new Promise<Response>((_, reject) => {
+        init.signal?.addEventListener('abort', () => reject(init.signal?.reason));
       });
-    const f = new GitHubForge('o', 'r', 'tok', { requestTimeoutMs: 50 });
-    const started = Date.now();
-    await expect(f.repoAccess()).rejects.toThrow();
-    expect(Date.now() - started).toBeLessThan(1500);
+    });
+    try {
+      const f = new GitHubForge('o', 'r', 'tok', { requestTimeoutMs: 50 });
+      const started = Date.now();
+      await expect(f.repoAccess()).rejects.toThrow();
+      expect(Date.now() - started).toBeLessThan(1500);
+      expect(seen).toEqual(['https://api.github.com/repos/o/r']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   test('I-3: a body that stalls after the headers is aborted, never read as an empty answer', async () => {
