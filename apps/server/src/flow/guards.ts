@@ -5,6 +5,7 @@ import {
   binaryTag,
   boolCoreTag,
   CORE_SCHEMA,
+  EVENT_ID,
   FAILSAFE_SCHEMA,
   floatYaml11Tag,
   intYaml11Tag,
@@ -13,6 +14,7 @@ import {
   nullCoreTag,
   omapTag,
   pairsTag,
+  parseEvents,
   Schema,
   setTag,
   timestampTag,
@@ -528,10 +530,13 @@ function unexpectedSyntax(text: string): boolean {
 }
 
 /**
- * The schema pnpm reads lockfiles with: js-yaml 4's default. Core booleans and nulls; integers and
- * floats in the wider YAML 1.1 forms (`_` separators, `0b`); timestamps, merge keys, binary,
- * omap, pairs and set. js-yaml 5 dropped it (its `load` defaults to the YAML 1.2 core schema,
- * and its YAML 1.1 schema also reads `y`, `n`, `on` and `off` as booleans), so it is rebuilt here.
+ * A stand-in for the schema pnpm reads its YAML with (js-yaml's default): core booleans and
+ * nulls, plus the types that default adds over core (timestamps, merge keys, binary, omap,
+ * pairs, set). Its numbers are YAML 1.1's (`0b`, `_`, leading-zero octal, sexagesimal), wider
+ * than any js-yaml default's, so they are not an exact copy; that doesn't matter, because a
+ * reading is used only when it agrees with the core schema's, and anything they read
+ * differently is refused. js-yaml 5's own YAML 1.1 schema can't stand in: it reads `y`, `n`,
+ * `on` and `off` as booleans, so a package named `n` would be a boolean key.
  */
 const PNPM_READER_SCHEMA = new Schema([
   ...FAILSAFE_SCHEMA.tags,
@@ -554,9 +559,10 @@ const PNPM_READER_SCHEMA = new Schema([
  */
 export function parsePnpmLock(text: string): PnpmLock | null {
   if (unexpectedSyntax(text)) return null;
-  // The text check above is hygiene; this is the boundary. pnpm's schema has merge keys,
-  // timestamps, binary and wider number forms: the tree must be plain and the same under the
-  // core schema, so no schema-specific feature can mean something the checks below don't see.
+  // The text check above is hygiene; this is the boundary. The reader schema has merge keys,
+  // timestamps, binary and YAML 1.1 numbers: the tree must be plain and the same under the core
+  // schema, else unreadable, so no schema-specific feature can mean something the checks below
+  // don't see.
   let doc: unknown;
   try {
     doc = load(text, { schema: PNPM_READER_SCHEMA });
@@ -639,6 +645,31 @@ function depVersions(block: unknown): Map<string, { dep: string; version: string
   return out;
 }
 
+/**
+ * pnpm-workspace.yaml as pnpm reads it, or null when the guard can't be sure it reads it the same
+ * way: a parse error, more than one document, an anchor, alias or explicit tag anywhere, or a
+ * tree that pnpm's schema and the core schema read differently (a merge key, which pnpm
+ * resolves, among them). Comments and quoted `&`, `*` and `!` are fine: this looks at the parse
+ * events, not the text.
+ */
+function workspaceSettings(text: string): YamlMap | null {
+  try {
+    const events = parseEvents(text, {});
+    if (events.filter((e) => e.type === EVENT_ID.DOCUMENT).length !== 1) return null;
+    for (const e of events) {
+      if (e.type === EVENT_ID.ALIAS) return null;
+      if ('anchorStart' in e && e.anchorStart >= 0) return null;
+      if ('tagStart' in e && e.tagStart >= 0) return null;
+    }
+    const doc: unknown = load(text, { schema: PNPM_READER_SCHEMA });
+    const core: unknown = load(text, { schema: CORE_SCHEMA });
+    if (!plainTree(doc) || JSON.stringify(doc) !== JSON.stringify(core)) return null;
+    return isMap(doc) ? doc : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Which packages pnpm 10 still lets build: read from package.json and pnpm-workspace.yaml. */
 export type PnpmBuildPolicy = { allowAll: boolean; allowed: string[] };
 
@@ -653,7 +684,8 @@ type LockOptions = {
 
 /**
  * The union of build allow-lists over the given package.json, pnpm-workspace.yaml and .npmrc
- * texts (base and head). An allow-list file, an allow-all setting or an unreadable workspace file allow all.
+ * texts (base and head). An allow-list file, an allow-all setting or a workspace file the guard
+ * can't read as pnpm does (see workspaceSettings) allow all.
  */
 export function pnpmBuildPolicy(
   pkgTexts: (string | null)[],
@@ -678,15 +710,10 @@ export function pnpmBuildPolicy(
     if (isMap(pnpm)) read(pnpm);
   }
   for (const t of workspaceTexts) {
-    if (t === null) continue;
-    let doc: unknown;
-    try {
-      doc = load(t, { schema: CORE_SCHEMA }); // read as pnpm reads it
-    } catch {
-      doc = undefined;
-    }
-    if (isMap(doc)) read(doc);
-    else if (t.trim() !== '') allowAll = true;
+    if (t === null || t.trim() === '') continue;
+    const doc = workspaceSettings(t);
+    if (doc) read(doc);
+    else allowAll = true;
   }
   for (const t of npmrcTexts) {
     for (const raw of (t ?? '').split(/\r?\n/)) {

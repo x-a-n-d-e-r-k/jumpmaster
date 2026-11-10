@@ -271,6 +271,36 @@ describe('pnpmBuildPolicy', () => {
       expect(pnpmBuildPolicy(pkgs, ws).allowAll).toBe(true);
     }
   });
+
+  // pnpm reads pnpm-workspace.yaml with merge keys resolved: pnpm 11.15.1 reports
+  // dangerouslyAllowAllBuilds=true for the first file below. A setting the guard can't read the
+  // way pnpm does counts as allow-all, so the new dependency is still reported.
+  const ws = {
+    'merge key from an anchor':
+      "packages: ['.']\nx: &a\n  dangerouslyAllowAllBuilds: true\n<<: *a\n",
+    'inline merge key': "packages: ['.']\n<<: {dangerouslyAllowAllBuilds: true}\n",
+    'alias of a scalar': "packages: ['.']\nx: &t true\ndangerouslyAllowAllBuilds: *t\n",
+    'alias of an allow-list': 'x: &l [esbuild]\nonlyBuiltDependencies: *l\n',
+    'anchor alone': 'onlyBuiltDependencies: &l [esbuild]\n',
+    'explicit tag': 'onlyBuiltDependencies: !!seq [esbuild]\n',
+    'second document': 'onlyBuiltDependencies: [esbuild]\n---\ndangerouslyAllowAllBuilds: true\n',
+  };
+  for (const [name, text] of Object.entries(ws))
+    test(`a pnpm-workspace.yaml with ${name} allows every build`, () =>
+      expect(pnpmBuildPolicy([], [text])).toEqual({
+        allowAll: true,
+        allowed: expect.any(Array),
+      }));
+
+  test('comments and quoted & * ! characters in a workspace file are still read', () =>
+    expect(
+      pnpmBuildPolicy(
+        [],
+        [
+          "# build allow-list\npackages: ['.', 'a&b', '*']\nonlyBuiltDependencies:\n  - esbuild # !x\n",
+        ],
+      ),
+    ).toEqual({ allowAll: false, allowed: ['esbuild'] }));
 });
 
 describe('pnpmBuildPolicy: .npmrc', () => {
@@ -833,10 +863,11 @@ ${snapshotEntry}`;
         ),
       ).toEqual(['lockfile unreadable']));
 
-    // pnpm reads with js-yaml 4's default schema, whose integers and floats also take `_`
-    // separators and `0b`; js-yaml 5's core schema reads those as strings.
-    for (const value of ['1_000', '0b11'])
-      test(`a number pnpm reads differently from the core schema (${value}) is refused`, () =>
+    // The reader schema's numbers are YAML 1.1's (`_`, `0b`, leading-zero octal), the core
+    // schema's are YAML 1.2's: a scalar the two read differently is refused, whichever way the
+    // js-yaml pnpm bundles happens to read it.
+    for (const value of ['1_000', '0b11', '010', '1e3'])
+      test(`a scalar the reader and core schemas read differently (${value}) is refused`, () =>
         expect(
           pnpm(
             base,
@@ -848,7 +879,7 @@ ${snapshotEntry}`;
           ),
         ).toEqual(['lockfile unreadable']));
 
-    // ...but its booleans are the core ones: a package named like a YAML 1.1 boolean is a name.
+    // Its booleans are the core ones: a package named like a YAML 1.1 boolean is a name.
     for (const name of ['n', 'yes', 'off'])
       test(`a dependency named ${name} is read as a name`, () =>
         expect(
@@ -871,17 +902,26 @@ ${snapshotEntry}`;
           `dependency added: ${name}@1.0.0 (verified: registry integrity only; install scripts may run)`,
         ));
 
-    test('an unreadable pnpm-workspace.yaml allows every build, so a new dependency is reported', () => {
-      const policy = pnpmBuildPolicy([], ['not: [valid']);
-      expect(policy.allowAll).toBe(true);
-      expect(
-        pnpm(base, head('', '  vitest@3.0.1:\n    dependencies:\n      vite: 5.0.0\n'), {
-          ...pnpm10,
-          allowAllBuilds: policy.allowAll,
-          allowedBuilds: policy.allowed,
-        }),
-      ).toContain('dependency added: evil@1.0.0 (all builds allowed: its install script runs)');
-    });
+    // The second file is how pnpm turns on every build through a merge key the core schema
+    // doesn't resolve: the dependency it adds must still be reported.
+    for (const [what, text] of [
+      ['an unreadable pnpm-workspace.yaml', 'not: [valid'],
+      [
+        'a merge key in pnpm-workspace.yaml',
+        "packages: ['.']\nx: &a\n  dangerouslyAllowAllBuilds: true\n<<: *a\n",
+      ],
+    ])
+      test(`${what} allows every build, so a new dependency is reported`, () => {
+        const policy = pnpmBuildPolicy([], [text ?? '']);
+        expect(policy.allowAll).toBe(true);
+        expect(
+          pnpm(base, head('', '  vitest@3.0.1:\n    dependencies:\n      vite: 5.0.0\n'), {
+            ...pnpm10,
+            allowAllBuilds: policy.allowAll,
+            allowedBuilds: policy.allowed,
+          }),
+        ).toContain('dependency added: evil@1.0.0 (all builds allowed: its install script runs)');
+      });
 
     test('a dependency value with whitespace in it is not a plain version', () =>
       expect(
