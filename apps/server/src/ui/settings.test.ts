@@ -11,9 +11,16 @@ import { SetupMode, setOperatorPassphrase } from '../auth/operator.js';
 import { loadBoot } from '../config/boot.js';
 import { ConfigStore } from '../config/store.js';
 import { openDb } from '../db/open.js';
+import { insertDrop, setZoneMode, upsertDropZone } from '../db/repo.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import { fingerprintOf, openVault } from '../vault/vault.js';
-import { CREDENTIALS_SCRIPT, TOKEN_BANNER_DAYS } from './settings.js';
+import {
+  CREDENTIALS_SCRIPT,
+  HISTORY_SCRIPT,
+  INSTALL_SCRIPT,
+  MCP_TOKENS_SCRIPT,
+  TOKEN_BANNER_DAYS,
+} from './settings.js';
 
 const TOKEN = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
@@ -35,7 +42,16 @@ afterEach(async () => {
  * two-bot zone on a private repository (so the missing read token is a zone problem).
  */
 async function world(
-  o: { env?: Record<string, string>; now?: Date; dbMode?: boolean; dbFile?: string } = {},
+  o: {
+    env?: Record<string, string>;
+    now?: Date;
+    dbMode?: boolean;
+    dbFile?: string;
+    /** File mode: more keys in the config file. */
+    file?: Record<string, unknown>;
+    /** Db mode: a document applied with the token before the app starts. */
+    doc?: Record<string, unknown>;
+  } = {},
 ) {
   const dbFile = o.dbFile ?? tmpDbFile();
   const db = openDb(dbFile);
@@ -61,6 +77,7 @@ async function world(
             reviewReadToken: true,
           },
         ],
+        ...o.file,
       }),
     );
   const env = {
@@ -80,6 +97,10 @@ async function world(
     now: () => clock,
     imageLockPath: join(dir, 'no-lock.json'),
   });
+  if (o.doc) {
+    const r = store.apply(o.doc, { via: 'ctl', principal: BEARER });
+    if (!r.ok) throw new Error(`the fixture document was refused: ${JSON.stringify(r)}`);
+  }
   const a = createApp({
     db,
     config: store,
@@ -112,10 +133,26 @@ async function world(
       s = operatorSession(db, clock);
     },
     get: (url: string) => a.inject({ method: 'GET', url, headers: browser() }),
-    call: (method: 'POST' | 'PUT', url: string, body: unknown) =>
+    call: (method: 'POST' | 'PUT' | 'PATCH' | 'DELETE', url: string, body: unknown) =>
       a.inject({ method, url, headers: api(), payload: body as object }),
+    /** `ctl`: the operator token. */
+    token: (method: 'GET' | 'POST' | 'PATCH' | 'DELETE', url: string, body?: unknown) =>
+      a.inject({
+        method,
+        url,
+        headers: { host: HOST, authorization: `Bearer ${TOKEN}` },
+        ...(body === undefined ? {} : { payload: body as object }),
+      }),
   };
 }
+
+const BEARER = { kind: 'operator', via: 'token', sudo: true } as const;
+const ZONE = {
+  id: 'main',
+  repo: 'octo/demo',
+  gates: [{ name: 'test', run: 'npm test' }],
+  image: 'jm-trooper:dev',
+};
 
 /** The row of one credential, from `<tr data-credential="name">` to its `</tr>`. */
 const rowOf = (html: string, name: string): string => {
@@ -357,6 +394,473 @@ describe('the credentials tab, round 2', () => {
     expect(tested.appended).toContain('<a href="/settings/credentials">Refresh the list</a>');
   });
 });
+
+/** The row of one install setting, from `<tr data-setting="path">` to its `</tr>`. */
+const settingRow = (html: string, path: string): string => {
+  const at = html.indexOf(`<tr data-setting="${path}"`);
+  if (at < 0) throw new Error(`no row for ${path}`);
+  return html.slice(at, html.indexOf('</tr>', at));
+};
+
+describe('settings, part two (Task 13)', () => {
+  test('the install tab marks mcp.enabled as restart-needed, shows the boot settings read-only with their source, and applies the rest live', async () => {
+    const w = await world({ dbMode: true, doc: { dropZones: [ZONE] } });
+    const r = await w.get('/settings/install');
+    expect(r.statusCode).toBe(200);
+    const html = r.body;
+    // Each tab a path, the current one in bold; /settings goes to the first.
+    expect(html).toContain('<strong>Install</strong>');
+    for (const tab of ['credentials', 'mcp-tokens', 'history'])
+      expect(html).toContain(`<a href="/settings/${tab}">`);
+    const s = await w.get('/settings');
+    expect([s.statusCode, s.headers.location]).toEqual([302, '/settings/credentials']);
+
+    // mcp.enabled (and the body limit) only apply at the next start: said beside each.
+    expect(settingRow(html, 'mcp.enabled')).toContain('takes effect at the next restart');
+    expect(settingRow(html, 'mcp.maxBodyBytes')).toContain('takes effect at the next restart');
+    expect(settingRow(html, 'pollSeconds')).not.toContain('restart');
+    for (const path of [
+      'pollSeconds',
+      'usage.throttleUtilization',
+      'usage.stopOnOverage',
+      'claude.plan',
+      'claude.fableModel',
+      'claude.fableWeeklyDropCap',
+      'requireSignedImages',
+      'mcp.writesPerHour',
+      'mcp.callsPerHour',
+      'mcp.maxOpenBriefings',
+    ])
+      expect(settingRow(html, path)).toContain(`data-path="${path}"`);
+
+    // Boot settings: values and where each is set (db mode: the environment), never an input.
+    const boot = html.slice(html.indexOf('<h3>Boot settings</h3>'));
+    expect(boot).toContain('127.0.0.1');
+    expect(boot).toContain('./data');
+    for (const name of [
+      'JM_LISTEN_HOST',
+      'JM_LISTEN_PORT',
+      'JM_ALLOWED_HOSTS',
+      'JM_TLS_TERMINATED',
+      'JM_DATA_DIR',
+    ])
+      expect(boot).toContain(name);
+    expect(html).not.toMatch(/data-path="(listen|dataDir)/);
+    expect(html).not.toContain('restart-pending');
+
+    // A session's change applies live: the next pass reads it, no restart.
+    const live = await w.call('PATCH', '/api/control/config', {
+      patch: { pollSeconds: 30 },
+      expectRevision: w.store.revision(),
+    });
+    expect(live.statusCode, live.body).toBe(200);
+    expect(live.json()).toMatchObject({ restartNeeded: [] });
+    expect(w.store.current().pollSeconds).toBe(30);
+    // mcp.enabled from ctl: accepted, then the tab carries the restart-pending badge.
+    const mcp = await w.token('PATCH', '/api/control/config', {
+      patch: { mcp: { enabled: true } },
+      expectRevision: w.store.revision(),
+    });
+    expect(mcp.json()).toMatchObject({ restartNeeded: ['mcp.enabled'] });
+    const after = (await w.get('/settings/install')).body;
+    expect(after).toMatch(/class="warn restart-pending"[^>]*>.*Restart pending.*mcp\.enabled/s);
+    expect(after).toContain('docker compose restart jumpmaster');
+
+    // The page's save: only what changed, conditional on the revision drawn, back to this tab.
+    const { ctx, calls } = pageScript(INSTALL_SCRIPT, () => ({ ok: true, status: 200, json: {} }));
+    const patch = (ctx.jmInstallPatch as (f: unknown[]) => unknown)([
+      { path: 'pollSeconds', kind: 'number', value: '45', original: 30 },
+      { path: 'usage.throttleUtilization', kind: 'number', value: '0.9', original: 0.9 },
+      { path: 'claude.fableModel', kind: 'text', value: '', original: null },
+      { path: 'claude.plan', kind: 'select', value: 'max', original: 'pro' },
+      { path: 'mcp.callsPerHour', kind: 'number', value: '120', original: 120 },
+    ]);
+    expect(patch).toEqual({ pollSeconds: 45, claude: { plan: 'max' } });
+    const out = stubStatus();
+    const saved = await (ctx.jmSaveInstall as (...a: unknown[]) => Promise<string>)(
+      patch,
+      7,
+      out,
+      () => {},
+    );
+    expect(saved).toBe('saved');
+    expect(calls).toEqual([
+      {
+        method: 'PATCH',
+        path: '/api/control/config',
+        body: {
+          patch: { pollSeconds: 45, claude: { plan: 'max' } },
+          expectRevision: 7,
+          returnTo: '/settings/install',
+          cancelTo: '/settings/install',
+        },
+      },
+    ]);
+    const none = await (ctx.jmSaveInstall as (...a: unknown[]) => Promise<string>)(
+      {},
+      7,
+      out,
+      () => {},
+    );
+    expect(none).toBe('unchanged');
+    expect(calls).toHaveLength(1);
+
+    // File mode: every value read-only where the file sets it, with the reader's warnings.
+    const f = await world({ file: { pollSeconds: 1 } });
+    const file = (await f.get('/settings/install')).body;
+    expect(file).toContain('set in the config file');
+    expect(file).toMatch(/<fieldset disabled>/);
+    expect(file).toContain('pollSeconds 1 is outside 5..86400: running with 5; set it in range');
+    expect(file.slice(file.indexOf('<h3>Boot settings</h3>'))).toContain(
+      join(f.secrets, '..', 'jumpmaster.config.json'),
+    );
+    for (const secret of [TOKEN, 'join-secret-value-4', REVIEWER]) {
+      expect(html).not.toContain(secret);
+      expect(file).not.toContain(secret);
+    }
+  });
+
+  test('requireSignedImages weakening is offered only as the ctl-or-file note, and stopOnOverage to false goes to the confirmation page', async () => {
+    const w = await world({ dbMode: true, doc: { requireSignedImages: true } });
+    const html = (await w.get('/settings/install')).body;
+    const signed = settingRow(html, 'requireSignedImages');
+    // On, and not a control a session can turn off: the note says where it is turned off.
+    expect(signed).toMatch(
+      /<input type="checkbox" data-path="requireSignedImages"[^>]* checked disabled>/,
+    );
+    expect(signed).toContain(
+      'to turn it off, set with <code>jumpmaster ctl</code> or in the config file',
+    );
+    // The guarded ones say they ask first.
+    expect(settingRow(html, 'usage.stopOnOverage')).toContain(
+      'turning it off asks for confirmation',
+    );
+    expect(settingRow(html, 'mcp.enabled')).toContain('turning it on asks for confirmation');
+
+    // The route agrees: a session may never weaken it.
+    const weaken = await w.call('PATCH', '/api/control/config', {
+      patch: { requireSignedImages: false },
+      expectRevision: w.store.revision(),
+    });
+    expect(weaken.statusCode).toBe(403);
+    expect(weaken.json()).toMatchObject({ sessionForbidden: ['requireSignedImages'] });
+    // stopOnOverage to false: held for the confirmation page, which then returns to this tab.
+    const stop = await w.call('PATCH', '/api/control/config', {
+      patch: { usage: { stopOnOverage: false } },
+      expectRevision: w.store.revision(),
+      returnTo: '/settings/install',
+      cancelTo: '/settings/install',
+    });
+    expect(stop.statusCode).toBe(409);
+    const j = stop.json() as { needsConfirmation: boolean; confirm: string };
+    expect(j.needsConfirmation).toBe(true);
+    const confirm = await w.get(j.confirm);
+    expect(confirm.statusCode).toBe(200);
+    expect(confirm.body).toContain('Dispatch will continue on usage credits');
+    expect(confirm.body).toContain('<a href="/settings/install">Cancel</a>');
+    expect(w.store.current().usage.stopOnOverage).not.toBe(false);
+
+    // The page follows the route's answer: to the confirmation page, or the ctl-or-file note.
+    let went = '';
+    const held = pageScript(INSTALL_SCRIPT, () => ({
+      ok: false,
+      status: 409,
+      json: { needsConfirmation: true, confirm: '/config/confirm/abc' },
+    }));
+    const r1 = await (held.ctx.jmSaveInstall as (...a: unknown[]) => Promise<string>)(
+      { usage: { stopOnOverage: false } },
+      3,
+      stubStatus(),
+      (to: string) => {
+        went = to;
+      },
+    );
+    expect([r1, went]).toEqual(['confirm', '/config/confirm/abc']);
+    const forbidden = pageScript(INSTALL_SCRIPT, () => ({
+      ok: false,
+      status: 403,
+      json: { sessionForbidden: ['requireSignedImages'] },
+    }));
+    const out = stubStatus();
+    const r2 = await (forbidden.ctx.jmSaveInstall as (...a: unknown[]) => Promise<string>)(
+      { requireSignedImages: false },
+      3,
+      out,
+      () => {},
+    );
+    expect(r2).toBe('forbidden');
+    expect(out.textContent).toContain('set with jumpmaster ctl or in the config file');
+  });
+
+  test('the MCP tokens tab mints a token shown once, lists tokens without values and revokes one', async () => {
+    const w = await world({ dbMode: true, doc: { mcp: { enabled: true }, dropZones: [ZONE] } });
+    const first = await w.token('POST', '/api/control/mcp-tokens', {
+      zoneId: 'main',
+      scope: 'write',
+      days: 30,
+      label: 'laptop <one>',
+    });
+    expect(first.statusCode).toBe(200);
+    const value = (first.json() as { token: string }).token;
+    const html = (await w.get('/settings/mcp-tokens')).body;
+    expect(html).toContain('<strong>MCP tokens</strong>');
+    // The mint form: the zone, the scope, the days (1 to 90) and a label.
+    expect(html).toMatch(/<form id="mint">/);
+    expect(html).toContain('<option value="main">main</option>');
+    expect(html).toMatch(
+      /<select name="scope"><option value="read"[^>]*>read<\/option><option value="write">/,
+    );
+    expect(html).toMatch(/<input type="number" name="days" min="1" max="90"/);
+    expect(html).toContain('data-sudo="0"');
+    // The list: id, zone, scope, label (escaped), dates, and Revoke; never the value or its hash.
+    const row = html.slice(html.indexOf('<tr data-token="1"'));
+    expect(row).toContain('laptop &lt;one&gt;');
+    expect(row).toContain('<button type="button" class="revoke" data-id="1">Revoke</button>');
+    expect(html).not.toContain(value);
+    expect(html).not.toMatch(/token_hash|tokenHash/);
+
+    // The script: no sudo and no passphrase asks for it and sends nothing.
+    const s = mcpScript();
+    const out = stubStatus();
+    const reveal = { textContent: '', hidden: true };
+    const c = { zoneId: 'main', scope: 'read', days: '7', label: '' };
+    expect(
+      await (s.ctx.jmMintToken as (...a: unknown[]) => Promise<string>)(
+        c,
+        { sudo: false, passphrase: '' },
+        out,
+        reveal,
+      ),
+    ).toBe('sudo');
+    expect(s.calls).toEqual([]);
+    expect(reveal.textContent).toBe('');
+    // With the passphrase: sudo first, then the mint; the value is shown once, in its own element.
+    const done = await (s.ctx.jmMintToken as (...a: unknown[]) => Promise<string>)(
+      c,
+      { sudo: false, passphrase: PASS },
+      out,
+      reveal,
+    );
+    expect(done).toBe('minted');
+    expect(s.calls.map((x) => `${x.method} ${x.path}`)).toEqual([
+      'POST /api/control/sudo',
+      'POST /api/control/mcp-tokens',
+    ]);
+    expect(s.calls[1]?.body).toEqual({ zoneId: 'main', scope: 'read', days: 7 });
+    expect(reveal).toEqual({ textContent: 'jmm_shownonce', hidden: false });
+    expect(out.textContent).toContain('shown this once');
+    // Revoke: one DELETE, no sudo needed (it shows nothing).
+    const revoked = await (s.ctx.jmRevokeToken as (...a: unknown[]) => Promise<string>)(
+      '1',
+      stubStatus(),
+    );
+    expect(revoked).toBe('revoked');
+    expect(s.calls.at(-1)).toMatchObject({ method: 'DELETE', path: '/api/control/mcp-tokens/1' });
+
+    // Through the real routes: a session mints after sudo, and revokes.
+    expect((await w.call('POST', '/api/control/sudo', { passphrase: PASS })).statusCode).toBe(200);
+    const minted = await w.call('POST', '/api/control/mcp-tokens', {
+      zoneId: 'main',
+      scope: 'read',
+      days: 7,
+    });
+    expect(minted.statusCode).toBe(200);
+    expect((await w.call('DELETE', '/api/control/mcp-tokens/1', {})).statusCode).toBe(200);
+    const listed = (await w.get('/settings/mcp-tokens')).body;
+    expect(listed).toContain('data-sudo="1"');
+    expect(listed.slice(listed.indexOf('<tr data-token="1"'))).toMatch(/revoked/);
+    expect(listed).not.toContain((minted.json() as { token: string }).token);
+
+    // With the MCP server off, the tab says how to turn it on instead.
+    const off = await world({ dbMode: true, doc: { dropZones: [ZONE] } });
+    const offHtml = (await off.get('/settings/mcp-tokens')).body;
+    expect(offHtml).toContain('<a href="/settings/install">');
+    expect(offHtml).not.toContain('<form id="mint">');
+  });
+
+  test('history lists revisions with their changes, guarded and re-add marks, and Revert posts a rollback with the id', async () => {
+    const w = await world({ dbMode: true, doc: { dropZones: [ZONE] } });
+    const added = w.store.revision();
+    expect(
+      (
+        await w.token('PATCH', '/api/control/config', {
+          patch: { pollSeconds: 30 },
+          expectRevision: added,
+        })
+      ).statusCode,
+    ).toBe(200);
+    const poll = w.store.revision();
+    // The zone has history, is drained in observe, and is removed.
+    upsertDropZone(w.db, {
+      id: 'main',
+      repo: 'octo/demo',
+      defaultBranch: 'main',
+      configJson: '{}',
+    });
+    insertDrop(w.db, {
+      id: 'h1',
+      dropZoneId: 'main',
+      workItemId: null,
+      role: 'doctor',
+      state: 'succeeded',
+      createdAt: t0.toISOString(),
+    });
+    setZoneMode(w.db, 'main', 'observe', t0);
+    expect((await w.token('DELETE', '/api/control/zones/main')).statusCode).toBe(200);
+    const removed = w.store.revision();
+
+    const html = (await w.get('/settings/history')).body;
+    expect(html).toContain('<strong>History</strong>');
+    const rev = (id: number) => rowIn(html, id);
+    // Its changes, path by path; the zone add was guarded (its code runs with the Claude token).
+    expect(rev(poll)).toContain('pollSeconds');
+    expect(rev(poll)).not.toContain('class="mark guarded"');
+    expect(rev(added)).toContain('class="mark guarded"');
+    expect(rev(removed)).toContain('remove zone main');
+    // Reverting to the revision that held the zone re-adds it: said on the button before it runs.
+    expect(rev(added)).toMatch(
+      /<button type="button" class="revert" data-id="\d+" data-readds="\[&quot;main&quot;\]">Revert<\/button>/,
+    );
+    expect(rev(added)).toContain('re-adds zone main');
+    // The current revision has no Revert.
+    expect(rev(removed)).not.toContain('class="revert"');
+
+    // From a session this re-add sets a zone's image, which a session never does: refused, with
+    // where to do it (the page says the same).
+    const back = await w.call('POST', '/api/control/config/rollback', {
+      id: added,
+      expectRevision: removed,
+      returnTo: '/settings/history',
+      cancelTo: '/settings/history',
+    });
+    expect(back.statusCode).toBe(403);
+    expect(back.json()).toMatchObject({ sessionForbidden: ['dropZones[main].image'] });
+    // From ctl it applies, and history marks the re-add.
+    expect((await w.token('POST', '/api/control/config/rollback', { id: added })).statusCode).toBe(
+      200,
+    );
+    const again = (await w.get('/settings/history')).body;
+    const top = again.slice(again.indexOf(`<tr data-revision="${w.store.revision()}"`));
+    expect(top.slice(0, top.indexOf('</tr>'))).toContain('class="mark readds"');
+    expect(top.slice(0, top.indexOf('</tr>'))).toContain('re-added main');
+
+    // A revert that weakens a guard goes through the confirmation page, then back to History.
+    const patch = (stopOnOverage: boolean) =>
+      w.token('PATCH', '/api/control/config', {
+        patch: { usage: { stopOnOverage } },
+        expectRevision: w.store.revision(),
+      });
+    expect((await patch(false)).statusCode).toBe(200);
+    const weak = w.store.revision();
+    expect((await patch(true)).statusCode).toBe(200);
+    expect(rowIn((await w.get('/settings/history')).body, weak)).toContain('class="mark guarded"');
+    const held = await w.call('POST', '/api/control/config/rollback', {
+      id: weak,
+      expectRevision: w.store.revision(),
+      returnTo: '/settings/history',
+      cancelTo: '/settings/history',
+    });
+    expect(held.statusCode).toBe(409);
+    const confirm = await w.get((held.json() as { confirm: string }).confirm);
+    expect(confirm.statusCode).toBe(200);
+    expect(confirm.body).toContain('<a href="/settings/history">Cancel</a>');
+    expect(w.store.current().usage.stopOnOverage).toBe(true);
+
+    // The page's Revert: asks first (naming the re-add), then posts the rollback with the id.
+    let asked = '';
+    let went = '';
+    const s = pageScript(HISTORY_SCRIPT, () => ({
+      ok: false,
+      status: 409,
+      json: { needsConfirmation: true, confirm: '/config/confirm/xyz' },
+    }));
+    const result = await (s.ctx.jmRevert as (...a: unknown[]) => Promise<string>)(
+      { id: 2, revision: 4, readds: ['main'] },
+      stubStatus(),
+      (q: string) => {
+        asked = q;
+        return true;
+      },
+      (to: string) => {
+        went = to;
+      },
+    );
+    expect(asked).toContain('re-adds zone main');
+    expect(s.calls).toEqual([
+      {
+        method: 'POST',
+        path: '/api/control/config/rollback',
+        body: {
+          id: 2,
+          expectRevision: 4,
+          returnTo: '/settings/history',
+          cancelTo: '/settings/history',
+        },
+      },
+    ]);
+    expect([result, went]).toEqual(['confirm', '/config/confirm/xyz']);
+    // Cancelled at the question: nothing is sent.
+    const no = pageScript(HISTORY_SCRIPT, () => ({ ok: true, status: 200, json: {} }));
+    expect(
+      await (no.ctx.jmRevert as (...a: unknown[]) => Promise<string>)(
+        { id: 2, revision: 4, readds: [] },
+        stubStatus(),
+        () => false,
+        () => {},
+      ),
+    ).toBe('cancelled');
+    expect(no.calls).toEqual([]);
+  });
+});
+
+/** One revision's row on the History tab. */
+const rowIn = (html: string, id: number): string => {
+  const at = html.indexOf(`<tr data-revision="${id}"`);
+  if (at < 0) throw new Error(`no revision ${id}`);
+  return html.slice(at, html.indexOf('</tr>', at));
+};
+
+/** A page script run against a recording `jmFetch` that answers with `answer()`. */
+function pageScript(
+  script: string,
+  answer: (call: Call) => { ok: boolean; status: number; json: unknown },
+) {
+  const calls: Call[] = [];
+  const ctx = vm.createContext({
+    document: { addEventListener: () => {}, querySelectorAll: () => [] },
+    encodeURIComponent,
+    jmFetch: async (path: string, body: unknown, method?: string) => {
+      const call = { method: method ?? 'POST', path, body };
+      calls.push(call);
+      const a = answer(call);
+      return { ok: a.ok, status: a.status, json: async () => a.json };
+    },
+  });
+  vm.runInContext(script.replace(/^<script>|<\/script>$/g, ''), ctx);
+  return { ctx, calls };
+}
+
+/** The MCP tokens script: sudo answers, then the mint returns a value once. */
+function mcpScript() {
+  return pageScript(MCP_TOKENS_SCRIPT, (c) =>
+    c.path === '/api/control/sudo'
+      ? { ok: true, status: 200, json: { sudo: true } }
+      : c.method === 'DELETE'
+        ? { ok: true, status: 200, json: { id: 1, revoked: true } }
+        : {
+            ok: true,
+            status: 200,
+            json: {
+              id: 2,
+              token: 'jmm_shownonce',
+              expiresAt: '2026-01-08T00:00:00.000Z',
+              zoneId: 'main',
+              scope: 'read',
+              label: '',
+            },
+          },
+  );
+}
 
 type Call = { method: string; path: string; body: unknown };
 

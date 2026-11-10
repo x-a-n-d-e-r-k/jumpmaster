@@ -1,9 +1,15 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify from 'fastify';
 import { describe, expect, test } from 'vitest';
+import { createApp } from '../app.js';
+import { loadBoot } from '../config/boot.js';
+import { ConfigStore } from '../config/store.js';
+import { openDb } from '../db/open.js';
 import { patTemplateUrl, repoOf, zoneGuidance } from '../github/guidance.js';
 import { makeZone } from '../test/fixtures.js';
+import { t0, tmpDbFile } from '../test/helpers.js';
 import { ACTION_IDS, actionFor, NO_ACTION, PAGES_M45A, type Pages, pagesOf } from './actions.js';
 import { CHECK_IDS, DOC, type DoctorCheck } from './checks.js';
 
@@ -162,6 +168,34 @@ describe('where each fail leads', () => {
       undefined,
     );
   });
+});
+
+test('install and history doctor checks now link to their tabs', async () => {
+  const db = openDb(tmpDbFile());
+  const dir = mkdtempSync(join(tmpdir(), 'jm-actions-'));
+  const store = ConfigStore.open({
+    db,
+    boot: loadBoot({}, undefined),
+    env: { JM_OPERATOR_TOKEN: 'o'.repeat(32), JM_JOIN_TOKEN: 'join-secret-value-4' },
+    now: () => t0,
+    imageLockPath: join(dir, 'no-lock.json'),
+  });
+  const app = createApp({ db, config: store, now: () => t0 });
+  await app.ready();
+  // The running app registers the tabs, so the flag is true with no one flipping it.
+  const pages = pagesOf(app);
+  expect(pages).toEqual({ zones: true, settings: true, credentials: true });
+  for (const id of ['config.listen', 'claude.plan', 'usage.gate', 'config.restart'])
+    expect([id, actionFor(fail(id), { pages })]).toEqual([
+      id,
+      { kind: 'app', label: 'Open Settings, Install', href: '/settings/install' },
+    ]);
+  expect(actionFor(fail('config.file'), { pages })).toEqual({
+    kind: 'app',
+    label: 'Open Settings, History',
+    href: '/settings/history',
+  });
+  await app.close();
 });
 
 test('pagesOf reads which pages are registered, so a later task cannot forget to flip a flag', async () => {

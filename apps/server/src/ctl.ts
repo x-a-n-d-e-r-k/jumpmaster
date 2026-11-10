@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { PRESETS } from '@jumpmaster/protocol';
-import { ZONE_KEYS } from './config.js';
+import { BOOT_KEYS, EditableSchema, ZONE_KEYS } from './config.js';
 import type { DoctorCheck } from './doctor/checks.js';
 import { EXPIRATION_NOTE, REPOSITORY_ACCESS_NOTE, RESOURCE_OWNER_NOTE } from './github/guidance.js';
 import { readSecret, readSecretFile } from './secrets.js';
@@ -183,10 +183,39 @@ function zonesRequest(args: string[]): CtlRequest | null {
   return null;
 }
 
+/**
+ * `ctl mcp-tokens mint <zone> <read|write> --days N [--label <text>] | list | revoke <id>`: the
+ * MCP token routes (M3). The minted value comes back once, to the operator token's holder.
+ */
+function mcpTokensRequest(args: string[]): CtlRequest | null {
+  const [, verb, ...rest] = args;
+  const path = '/api/control/mcp-tokens';
+  if (verb === 'list') return rest.length === 0 ? { path, method: 'GET' } : null;
+  if (verb === 'revoke')
+    return rest.length === 1 && /^[1-9]\d*$/.test(rest[0] ?? '')
+      ? { path: `${path}/${rest[0]}`, method: 'DELETE' }
+      : null;
+  if (verb !== 'mint') return null;
+  const [zoneId, scope, ...flags] = rest;
+  if (!zoneId || zoneId.startsWith('--') || (scope !== 'read' && scope !== 'write')) return null;
+  let days: number | undefined;
+  let label: string | undefined;
+  for (let i = 0; i < flags.length; i += 2) {
+    const value = flags[i + 1];
+    if (value === undefined) return null;
+    if (flags[i] === '--days' && /^[1-9]\d*$/.test(value)) days = Number(value);
+    else if (flags[i] === '--label') label = value;
+    else return null;
+  }
+  if (days === undefined) return null;
+  return { path, body: { zoneId, scope, days, ...(label !== undefined ? { label } : {}) } };
+}
+
 /** The control request for a command line, or null when it isn't one. */
 export function ctlRequest(args: string[]): CtlRequest | null {
   const [command, zone] = args;
   if (command === 'config') return configRequest(args);
+  if (command === 'mcp-tokens') return mcpTokensRequest(args);
   if (command === 'github') return githubRequest(args);
   if (command === 'detect')
     return args.length === 2 && zone && REPO_ARG.test(zone)
@@ -332,7 +361,13 @@ const CONFIG_USAGE =
 export const SECRETS_USAGE =
   'ctl secrets list | ctl secrets set <name> [--from-file <path>] [--created YYYY-MM-DD] (the value on stdin or in the file, never in argv) | ctl secrets test <name> | ctl secrets remove <name> | ctl secrets reload';
 
-const USAGE = `usage: ctl status [--json] | ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] [--artifacts <dir>] | ctl labels <zone> | ctl doctor <zone> --drop | ctl doctor <zone> --cancel | ctl setup-code | ctl setup reopen | ctl detect <owner/name> | ctl github <zone> recommend | pat <author|reviewer|read> | ruleset | codeowners [--reviewer <login>]… | checklist | ctl zones add <owner/name> [--id <id>] [--preset <p>] [--identity starter] [--egress off|monitor|enforce] [--resume] | ctl passphrase set (the passphrase on stdin) | ${CONFIG_USAGE} | ${SECRETS_USAGE}`;
+const SETTINGS_USAGE = 'usage: ctl settings set <path>=<json>… [--note <text>]';
+const MCP_TOKENS_USAGE =
+  'ctl mcp-tokens mint <zone> <read|write> --days N [--label <text>] | ctl mcp-tokens list | ctl mcp-tokens revoke <id>';
+/** The install-wide settings: the editable document's keys other than the zones. */
+const INSTALL_KEYS = Object.keys(EditableSchema.shape).filter((k) => k !== 'dropZones');
+
+const USAGE = `usage: ctl status [--json] | ctl settings set <path>=<json>… [--note <text>] | ${MCP_TOKENS_USAGE} | ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] [--artifacts <dir>] | ctl labels <zone> | ctl doctor <zone> --drop | ctl doctor <zone> --cancel | ctl setup-code | ctl setup reopen | ctl detect <owner/name> | ctl github <zone> recommend | pat <author|reviewer|read> | ruleset | codeowners [--reviewer <login>]… | checklist | ctl zones add <owner/name> [--id <id>] [--preset <p>] [--identity starter] [--egress off|monitor|enforce] [--resume] | ctl passphrase set (the passphrase on stdin) | ${CONFIG_USAGE} | ${SECRETS_USAGE}`;
 
 type Call = (
   method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
@@ -500,6 +535,74 @@ function appliedLine(body: { revision: number; changed: string[]; restartNeeded:
 }
 
 /**
+ * `ctl settings set <path>=<json>… [--note <text>]`: `ctl config set` limited to the install-wide
+ * paths (the Install tab's), so a zone or a boot setting is a usage error before any request.
+ */
+async function runSettings(
+  args: string[],
+  call: Call,
+  out: (line: string) => void,
+  err: (line: string) => void,
+): Promise<number> {
+  const [, verb, ...rest] = args;
+  const usage = () => {
+    err(SETTINGS_USAGE);
+    return 2;
+  };
+  if (verb !== 'set') return usage();
+  const words = rest.filter((a, i) => a !== '--note' && rest[i - 1] !== '--note');
+  if (words.length === 0) return usage();
+  for (const w of words) {
+    const eq = w.indexOf('=');
+    if (eq <= 0) return usage();
+    const key = w.slice(0, eq).split('.')[0] as string;
+    if (key === 'dropZones') {
+      err('a zone is not an install setting: change it with ctl zones set <zone> <path>=<json>');
+      return 2;
+    }
+    if ((BOOT_KEYS as readonly string[]).includes(key)) {
+      err(
+        `${key} is a boot setting, read at start: set it in the config file or the environment (JM_LISTEN_HOST, JM_LISTEN_PORT, JM_ALLOWED_HOSTS, JM_TLS_TERMINATED, JM_DATA_DIR), then restart`,
+      );
+      return 2;
+    }
+    if (!INSTALL_KEYS.includes(key)) {
+      err(`${key} is not an install setting; the install settings are: ${INSTALL_KEYS.join(', ')}`);
+      return 2;
+    }
+  }
+  return runConfig(['config', 'set', ...rest], call, out, err);
+}
+
+/** `ctl mcp-tokens mint | list` as lines: the minted value once, the list never a value. */
+function mcpTokenLines(verb: string | undefined, body: Record<string, unknown>): string[] {
+  if (verb === 'mint')
+    return [
+      `MCP token ${body.id} for zone ${body.zoneId} (${body.scope}), expires ${body.expiresAt}`,
+      String(body.token),
+      `It is shown this once: store it now (a password manager), or revoke it with jumpmaster ctl mcp-tokens revoke ${body.id}.`,
+    ];
+  if (verb === 'list') {
+    const tokens = (body.tokens ?? []) as {
+      id: number;
+      zoneId: string;
+      scope: string;
+      label: string;
+      expiresAt: string;
+      revokedAt: string | null;
+      lastUsedAt: string | null;
+    }[];
+    if (tokens.length === 0)
+      return ['no MCP tokens: ctl mcp-tokens mint <zone> <read|write> --days N'];
+    return tokens.map(
+      (t) =>
+        `#${t.id}  ${t.zoneId}  ${t.scope}  ${JSON.stringify(t.label)}  ${t.revokedAt ? `revoked ${t.revokedAt}` : `expires ${t.expiresAt}`}  last used ${t.lastUsedAt ?? 'never'}`,
+    );
+  }
+  return [`revoked MCP token ${body.id}`];
+}
+
+/**
  * `ctl config …`. `set` reads the current document and revision, then sends one merge patch
  * conditional on that revision (a zone path `dropZones.<id>.<key>` edits that zone and sends the
  * zone list whole, as a merge patch replaces arrays). `import` reads a local file. `export` writes
@@ -648,6 +751,7 @@ async function runConfig(
       revision: number;
       config: unknown;
       restartPending: string[];
+      warnings?: string[];
     };
     if (rest.includes('--json')) {
       out(JSON.stringify(body, null, 2));
@@ -656,6 +760,7 @@ async function runConfig(
     const pending =
       body.restartPending.length > 0 ? `, restart pending: ${body.restartPending.join(', ')}` : '';
     out(`config: ${body.mode} mode, revision ${body.revision}${pending}`);
+    for (const w of body.warnings ?? []) out(plain(`warning: ${w}`));
     out(JSON.stringify(body.config, null, 2));
     return 0;
   }
@@ -800,7 +905,12 @@ export async function runCtl(
   err: (line: string) => void = console.error,
   readStdin: () => Promise<string> = readStdinLine,
 ): Promise<number> {
-  if (args[0] === 'config' || args[0] === 'secrets' || (args[0] === 'zones' && args[1] === 'set')) {
+  if (
+    args[0] === 'config' ||
+    args[0] === 'secrets' ||
+    args[0] === 'settings' ||
+    (args[0] === 'zones' && args[1] === 'set')
+  ) {
     const token = operatorToken(env, err);
     if (token === null) return 2;
     const base = env.JM_SERVER_URL ?? 'http://127.0.0.1:7420';
@@ -814,6 +924,7 @@ export async function runCtl(
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
     if (args[0] === 'zones') return runZonesSet(args, call, out, err);
+    if (args[0] === 'settings') return runSettings(args, call, out, err);
     return args[0] === 'secrets'
       ? runSecrets(args, call, out, err, readStdin)
       : runConfig(args, call, out, err);
@@ -875,6 +986,10 @@ export async function runCtl(
     if (st.detail) say(st.detail);
     for (const a of st.also ?? []) say(`- ${a.text}${a.href ? ` (fix: ${a.href})` : ''}`);
     if (st.action) say(`next: ${st.action.label}: ${st.action.href}`);
+    return 0;
+  }
+  if (args[0] === 'mcp-tokens' && res.ok) {
+    for (const line of mcpTokenLines(args[1], JSON.parse(text))) out(plain(line));
     return 0;
   }
   if (args[0] === 'github' && res.ok) {

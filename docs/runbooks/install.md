@@ -735,8 +735,10 @@ Where the config comes from. With a config file the install is in file mode: the
 config, and after editing it `jumpmaster ctl config reload` applies it without a restart. A `fail`
 means the last reload found the file invalid: the server keeps running the revision it had, and
 the fix lists each problem by path. `jumpmaster ctl config adopt` moves the config into the
-database (db mode), where the UI and `ctl config set` change it; from then on the file is
-ignored except for `listen` and `dataDir`, read at start. A `warn` in db mode means the file no
+database (db mode), where the UI (Settings, Install for the install-wide settings) and
+`ctl settings set` / `ctl config set` change it; from then on the file is ignored except for
+`listen` and `dataDir`, read at start. Settings, History lists every revision with what it
+changed and reverts one (`jumpmaster ctl config rollback <id>`). A `warn` in db mode means the file no
 longer mirrors the database: refresh it with
 `docker compose exec -T jumpmaster jumpmaster ctl config export > config/jumpmaster.config.json.tmp && mv config/jumpmaster.config.json.tmp config/jumpmaster.config.json`
 (`-T` keeps the file free of carriage returns). That export is also how to go back to file
@@ -747,7 +749,8 @@ to write before running an older release, which reads only the file.
 
 A setting changed since the server started that only a restart applies (`mcp.enabled` and
 `mcp.maxBodyBytes`, or a `listen` or `dataDir` changed in the file). Every other change applies at
-the next pass. Run `docker compose restart jumpmaster`.
+the next pass. Settings, Install shows it as "restart pending". Run
+`docker compose restart jumpmaster`.
 
 ### `credential.install`
 

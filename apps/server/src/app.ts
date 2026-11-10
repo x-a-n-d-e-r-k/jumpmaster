@@ -140,8 +140,9 @@ export function createApp(
       now: deps.now,
       ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
     });
-    // Settings, part one: the Credentials tab, a page over the secret routes (Task 9).
+    // Settings: Credentials (Task 9), Install, MCP tokens and History (Task 13).
     registerSettingsPages(app, {
+      db: deps.db,
       store: deps.config,
       now: deps.now,
       runningSince: (since) => runningSince(deps.db, since),

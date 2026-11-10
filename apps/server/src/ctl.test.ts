@@ -298,6 +298,133 @@ describe('ctl config', () => {
     expect(ctlRequest(['config', 'mode', 'db'])).toBeNull();
     await s.app.close();
   });
+
+  test('ctl settings set and ctl mcp-tokens map to the routes', async () => {
+    const s = server();
+    s.store.apply(
+      { dropZones: [zoneDoc()] },
+      { via: 'ctl', principal: { kind: 'operator', via: 'token', sudo: true } },
+    );
+    // `settings set` is `config set` for the install-wide paths: one read, one conditional patch.
+    const set = await run(
+      ['settings', 'set', 'pollSeconds=30', 'mcp.enabled=true', '--note', 'tune'],
+      '',
+      s.fetch,
+    );
+    expect(set.code).toBe(0);
+    expect(s.fetch.calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      'GET /api/control/config',
+      'PATCH /api/control/config',
+    ]);
+    expect(s.fetch.calls[1]?.body).toEqual({
+      patch: { pollSeconds: 30, mcp: { enabled: true } },
+      expectRevision: 2,
+      note: 'tune',
+    });
+    expect(set.out.join('\n')).toMatch(/revision 3: .*; restart to apply mcp.enabled/);
+    // A zone path, a boot setting or an unknown key is not an install setting: no request.
+    const before = s.fetch.calls.length;
+    for (const [args, says] of [
+      [['settings', 'set', 'dropZones.main.readyLabel=go'], /ctl zones set/],
+      [['settings', 'set', 'listen.port=8080'], /boot setting/],
+      [['settings', 'set', 'pollseconds=30'], /not an install setting/],
+      [['settings', 'set'], /usage: ctl settings set/],
+      [['settings', 'show'], /usage: ctl settings set/],
+    ] as const) {
+      const r = await run([...args], '', s.fetch);
+      expect([args, r.code]).toEqual([args, 2]);
+      expect(r.err.join('\n')).toMatch(says);
+    }
+    expect(s.fetch.calls).toHaveLength(before);
+
+    // MCP tokens over the routes that exist since M3.
+    expect(ctlRequest(['mcp-tokens', 'mint', 'main', 'write', '--days', '30'])).toEqual({
+      path: '/api/control/mcp-tokens',
+      body: { zoneId: 'main', scope: 'write', days: 30 },
+    });
+    expect(
+      ctlRequest(['mcp-tokens', 'mint', 'main', 'read', '--label', 'my laptop', '--days', '7']),
+    ).toEqual({
+      path: '/api/control/mcp-tokens',
+      body: { zoneId: 'main', scope: 'read', days: 7, label: 'my laptop' },
+    });
+    expect(ctlRequest(['mcp-tokens', 'list'])).toEqual({
+      path: '/api/control/mcp-tokens',
+      method: 'GET',
+    });
+    expect(ctlRequest(['mcp-tokens', 'revoke', '3'])).toEqual({
+      path: '/api/control/mcp-tokens/3',
+      method: 'DELETE',
+    });
+    for (const bad of [
+      ['mcp-tokens', 'mint', 'main', 'write'],
+      ['mcp-tokens', 'mint', 'main', 'admin', '--days', '7'],
+      ['mcp-tokens', 'mint', 'main', 'read', '--days', 'x'],
+      ['mcp-tokens', 'mint', 'main', 'read', '--days', '7', '--extra', 'y'],
+      ['mcp-tokens', 'revoke', 'x'],
+      ['mcp-tokens', 'list', 'more'],
+      ['mcp-tokens'],
+    ])
+      expect([bad, ctlRequest(bad)]).toEqual([bad, null]);
+
+    // Through the real routes: mcp is off in this server, so they are not registered.
+    const off = await run(['mcp-tokens', 'list'], '', s.fetch);
+    expect(off.code).toBe(1);
+    // Printed: mint shows the token once with its id and expiry; list never a value.
+    const minted = fakeFetch(200, {
+      id: 4,
+      token: 'jmm_abc',
+      expiresAt: '2026-02-01T00:00:00.000Z',
+      zoneId: 'main',
+      scope: 'write',
+      label: '',
+    });
+    const m = await run(['mcp-tokens', 'mint', 'main', 'write', '--days', '30'], '', minted);
+    expect(m.code).toBe(0);
+    expect(m.out).toEqual([
+      'MCP token 4 for zone main (write), expires 2026-02-01T00:00:00.000Z',
+      'jmm_abc',
+      'It is shown this once: store it now (a password manager), or revoke it with jumpmaster ctl mcp-tokens revoke 4.',
+    ]);
+    const listed = fakeFetch(200, {
+      tokens: [
+        {
+          id: 4,
+          zoneId: 'main',
+          scope: 'write',
+          label: 'laptop',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          expiresAt: '2026-02-01T00:00:00.000Z',
+          revokedAt: null,
+          lastUsedAt: null,
+        },
+      ],
+    });
+    const l = await run(['mcp-tokens', 'list'], '', listed);
+    expect(l.out).toEqual([
+      '#4  main  write  "laptop"  expires 2026-02-01T00:00:00.000Z  last used never',
+    ]);
+    // The usage line names the new verbs.
+    const u = await run(['nope'], '', s.fetch);
+    expect(u.err.join('\n')).toMatch(/ctl settings set <path>=<json>/);
+    expect(u.err.join('\n')).toMatch(/ctl mcp-tokens mint <zone> <read\|write> --days N/);
+    await s.app.close();
+  });
+
+  test('ctl config show prints the warnings of a lenient file read', async () => {
+    const answer = fakeFetch(200, {
+      mode: 'file',
+      revision: 1,
+      config: { pollSeconds: 5 },
+      restartPending: [],
+      warnings: ['pollSeconds 1 is outside 5..86400: running with 5; set it in range'],
+    });
+    const r = await run(['config', 'show'], '', answer);
+    expect(r.out[0]).toBe('config: file mode, revision 1');
+    expect(r.out[1]).toBe(
+      'warning: pollSeconds 1 is outside 5..86400: running with 5; set it in range',
+    );
+  });
 });
 
 describe('ctl secrets (Task 4)', () => {

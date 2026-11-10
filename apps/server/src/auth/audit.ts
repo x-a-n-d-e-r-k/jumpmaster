@@ -49,6 +49,31 @@ export function recordAudit(db: Db, e: AuditEntry, now: Date, secrets: string[] 
   );
 }
 
+/**
+ * The zones each of these config revisions re-added with their history, as the apply recorded
+ * them (`readds` beside `revision` in the row's detail). A row the 5000-row window dropped is gone.
+ */
+export function auditedReadds(db: Db, revisions: number[]): Map<number, string[]> {
+  const out = new Map<number, string[]>();
+  if (revisions.length === 0) return out;
+  const rows = db
+    .prepare(
+      `SELECT json_extract(detail_json, '$.revision') AS rev, json_extract(detail_json, '$.readds') AS readds
+       FROM control_audit
+       WHERE json_extract(detail_json, '$.readds') IS NOT NULL
+         AND json_extract(detail_json, '$.revision') IN (${revisions.map(() => '?').join(', ')})`,
+    )
+    .all(...revisions) as { rev: number; readds: string }[];
+  for (const r of rows)
+    out.set(
+      r.rev,
+      String(r.readds)
+        .split(', ')
+        .filter((id) => id !== ''),
+    );
+  return out;
+}
+
 /** The newest rows first. */
 export function listAudit(db: Db, limit = 100): AuditRow[] {
   const rows = db
