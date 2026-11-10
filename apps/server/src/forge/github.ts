@@ -280,6 +280,21 @@ type CheckRunFacts = { name: string; status: string; conclusion: string | null }
  */
 const NOT_STARTED = new Set(['queued', 'requested']);
 
+/**
+ * `res` with its body read into memory (a read that fails or times out rejects here). Status,
+ * status text, headers and url are kept; content-encoding and content-length are dropped, since
+ * fetch has already decoded the body they describe.
+ */
+export async function bufferedResponse(res: Response): Promise<Response> {
+  const body = res.body === null ? null : await res.arrayBuffer();
+  const headers = new Headers(res.headers);
+  headers.delete('content-encoding');
+  headers.delete('content-length');
+  const copy = new Response(body, { status: res.status, statusText: res.statusText, headers });
+  Object.defineProperty(copy, 'url', { value: res.url });
+  return copy;
+}
+
 export class GitHubForge implements Forge {
   private readonly octokit: Octokit;
   private viewer: Promise<string> | undefined;
@@ -305,18 +320,10 @@ export class GitHubForge implements Forge {
               fetch: async (url: string | URL | Request, init: RequestInit = {}) => {
                 const timeout = AbortSignal.timeout(ms);
                 const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
-                const res = await fetch(url, { ...init, signal });
                 // Read the body here, under the same deadline: Octokit swallows a failed body
                 // read and returns "" as the data, so a body that stalls after the headers
                 // would come back as an empty answer instead of an error.
-                const body = res.body === null ? null : await res.arrayBuffer();
-                const copy = new Response(body, {
-                  status: res.status,
-                  statusText: res.statusText,
-                  headers: res.headers,
-                });
-                Object.defineProperty(copy, 'url', { value: res.url });
-                return copy;
+                return bufferedResponse(await fetch(url, { ...init, signal }));
               },
             },
           }),
