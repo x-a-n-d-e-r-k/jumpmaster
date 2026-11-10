@@ -526,7 +526,7 @@ describe('settings, part two (Task 13)', () => {
     const signed = settingRow(html, 'requireSignedImages');
     // On, and not a control a session can turn off: the note says where it is turned off.
     expect(signed).toMatch(
-      /<input type="checkbox" data-path="requireSignedImages"[^>]* checked disabled>/,
+      /<input type="checkbox" id="setting-requireSignedImages" data-path="requireSignedImages"[^>]* checked disabled>/,
     );
     expect(signed).toContain(
       'to turn it off, set with <code>jumpmaster ctl</code> or in the config file',
@@ -813,6 +813,167 @@ describe('settings, part two (Task 13)', () => {
   });
 });
 
+describe('settings, part two: browser findings (Task 13, fix round 1)', () => {
+  test('B1: after a mint the token list is refreshed in place, so the new token is listed while its value stays shown', async () => {
+    const listed = {
+      tokens: [
+        {
+          id: 2,
+          zoneId: 'main',
+          scope: 'read',
+          label: 'my <laptop>',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          expiresAt: '2099-01-08T00:00:00.000Z',
+          revokedAt: null,
+          lastUsedAt: null,
+        },
+      ],
+    };
+    const gets: string[] = [];
+    const s = mcpScript({
+      fetch: async (path: string) => {
+        gets.push(path);
+        return { ok: true, status: 200, json: async () => listed };
+      },
+    });
+    const reveal = { textContent: '', hidden: true };
+    const list = { innerHTML: '<p>No MCP tokens yet.</p>' };
+    const done = await (s.ctx.jmMintToken as (...a: unknown[]) => Promise<string>)(
+      { zoneId: 'main', scope: 'read', days: '7', label: 'my <laptop>' },
+      { sudo: true, passphrase: '' },
+      stubStatus(),
+      reveal,
+      list,
+    );
+    expect(done).toBe('minted');
+    expect(gets).toEqual(['/api/control/mcp-tokens']);
+    expect(list.innerHTML).toContain('<tr data-token="2">');
+    expect(list.innerHTML).toContain('my &lt;laptop&gt;');
+    expect(list.innerHTML).toContain(
+      '<button type="button" class="revoke" data-id="2">Revoke</button>',
+    );
+    expect(list.innerHTML).not.toContain('No MCP tokens yet');
+    expect(list.innerHTML).not.toContain('jmm_shownonce');
+    expect(reveal).toEqual({ textContent: 'jmm_shownonce', hidden: false });
+    // The page holds the list in that container, so the script can replace it.
+    const w = await world({ dbMode: true, doc: { mcp: { enabled: true }, dropZones: [ZONE] } });
+    expect((await w.get('/settings/mcp-tokens')).body).toMatch(
+      /<div id="token-list"><p>No MCP tokens yet.<\/p><\/div>/,
+    );
+  });
+
+  test('B2: each boot setting names where its value really comes from, the default included', async () => {
+    const bootRow = (html: string, path: string) => {
+      const at = html.indexOf(`<tr data-boot="${path}"`);
+      if (at < 0) throw new Error(`no boot row ${path}`);
+      return html.slice(at, html.indexOf('</tr>', at));
+    };
+    // Db mode, no listen or data variable set: every row is the default, with how to set it.
+    const none = (await (await world({ dbMode: true })).get('/settings/install')).body;
+    for (const [path, env] of [
+      ['listen.host', 'JM_LISTEN_HOST'],
+      ['listen.port', 'JM_LISTEN_PORT'],
+      ['listen.allowedHosts', 'JM_ALLOWED_HOSTS'],
+      ['listen.tlsTerminated', 'JM_TLS_TERMINATED=1'],
+      ['dataDir', 'JM_DATA_DIR'],
+    ] as const) {
+      const row = bootRow(none, path);
+      expect([path, row]).toEqual([
+        path,
+        expect.stringContaining(`the default; set <code>${env}</code>`),
+      ]);
+      expect(row).not.toContain('the environment:');
+    }
+    // Set in the environment: said so, for each.
+    const set = await world({
+      dbMode: true,
+      env: {
+        JM_LISTEN_HOST: '0.0.0.0',
+        JM_LISTEN_PORT: '7420',
+        JM_ALLOWED_HOSTS: '127.0.0.1:7420',
+        JM_TLS_TERMINATED: '1',
+        JM_DATA_DIR: '/data',
+      },
+    });
+    const env = (await set.get('/settings/install')).body;
+    for (const name of ['JM_LISTEN_HOST', 'JM_LISTEN_PORT', 'JM_ALLOWED_HOSTS', 'JM_DATA_DIR'])
+      expect(env).toContain(`the environment: <code>${name}</code>`);
+    expect(bootRow(env, 'listen.tlsTerminated')).toContain(
+      'the environment: <code>JM_TLS_TERMINATED=1</code>',
+    );
+    // File mode, a file with dataDir and no listen: dataDir from the file, the listen rows default.
+    const f = await world();
+    const file = (await f.get('/settings/install')).body;
+    expect(bootRow(file, 'dataDir')).toContain('the config file');
+    for (const path of ['listen.host', 'listen.port', 'listen.allowedHosts'])
+      expect(bootRow(file, path)).toContain(
+        `the default; set <code>${path}</code> in the config file`,
+      );
+    expect(bootRow(file, 'listen.tlsTerminated')).toContain(
+      'the default; set <code>JM_TLS_TERMINATED=1</code> or <code>listen.tlsTerminated</code> in the config file',
+    );
+    // And a file that sets listen: the file.
+    const g = await world({
+      file: { listen: { host: '127.0.0.1', port: 7420, tlsTerminated: true } },
+    });
+    const gHtml = (await g.get('/settings/install')).body;
+    for (const path of ['listen.host', 'listen.port', 'listen.tlsTerminated'])
+      expect(bootRow(gHtml, path)).toContain('the config file');
+    expect(bootRow(gHtml, 'listen.allowedHosts')).toContain('the default');
+  });
+
+  test('B3: Install Save says the revision it saved, and the restart note when one applies', async () => {
+    let went = '';
+    const s = pageScript(INSTALL_SCRIPT, () => ({
+      ok: true,
+      status: 200,
+      json: { revision: 9, changed: ['pollSeconds'], restartNeeded: [] },
+    }));
+    const r = await (s.ctx.jmSaveInstall as (...a: unknown[]) => Promise<string>)(
+      { pollSeconds: 45 },
+      8,
+      stubStatus(),
+      (to: string) => {
+        went = to;
+      },
+    );
+    expect([r, went]).toEqual(['saved', '/settings/install?saved=9']);
+    const w = await world({ dbMode: true, doc: { dropZones: [ZONE] } });
+    const saved = (await w.get('/settings/install?saved=2')).body;
+    expect(saved).toContain(
+      '<p class="saved" role="status">Saved as revision 2: it takes effect at the next pass.</p>',
+    );
+    // Only a revision number is echoed; anything else says nothing.
+    for (const q of ['?saved=<b>', '?saved=1e3', '?saved=', ''])
+      expect((await w.get(`/settings/install${q}`)).body).not.toContain('class="saved"');
+    // A save that needs a restart: the badge on the reloaded page says it.
+    await w.token('PATCH', '/api/control/config', {
+      patch: { mcp: { enabled: true } },
+      expectRevision: w.store.revision(),
+    });
+    const after = (await w.get(`/settings/install?saved=${w.store.revision()}`)).body;
+    expect(after).toContain(`Saved as revision ${w.store.revision()}`);
+    expect(after).toContain('restart-pending');
+  });
+
+  test('B4: every Install control and the MCP form fields have an accessible name', async () => {
+    const w = await world({ dbMode: true, doc: { mcp: { enabled: true }, dropZones: [ZONE] } });
+    const html = (await w.get('/settings/install')).body;
+    const controls = [...html.matchAll(/<(input|select)[^>]*data-path="([^"]+)"[^>]*>/g)];
+    expect(controls.length).toBe(12);
+    for (const [tag, , path] of controls) {
+      const id = /id="([^"]+)"/.exec(tag as string)?.[1];
+      expect([path, id]).toEqual([path, expect.any(String)]);
+      expect(html).toContain(`<label for="${id}"><code>${path}</code></label>`);
+    }
+    const mcp = (await w.get('/settings/mcp-tokens')).body;
+    const start = mcp.indexOf('<form id="mint">');
+    const form = mcp.slice(start, mcp.indexOf('</form>', start));
+    for (const name of ['zoneId', 'scope', 'days', 'label'])
+      expect(form).toMatch(new RegExp(`<label>[A-Z][a-z]+ <(input|select)[^>]* name="${name}"`));
+  });
+});
+
 /** One revision's row on the History tab. */
 const rowIn = (html: string, id: number): string => {
   const at = html.indexOf(`<tr data-revision="${id}"`);
@@ -824,11 +985,14 @@ const rowIn = (html: string, id: number): string => {
 function pageScript(
   script: string,
   answer: (call: Call) => { ok: boolean; status: number; json: unknown },
+  globals: Record<string, unknown> = {},
 ) {
   const calls: Call[] = [];
   const ctx = vm.createContext({
     document: { addEventListener: () => {}, querySelectorAll: () => [] },
     encodeURIComponent,
+    Date,
+    ...globals,
     jmFetch: async (path: string, body: unknown, method?: string) => {
       const call = { method: method ?? 'POST', path, body };
       calls.push(call);
@@ -841,24 +1005,27 @@ function pageScript(
 }
 
 /** The MCP tokens script: sudo answers, then the mint returns a value once. */
-function mcpScript() {
-  return pageScript(MCP_TOKENS_SCRIPT, (c) =>
-    c.path === '/api/control/sudo'
-      ? { ok: true, status: 200, json: { sudo: true } }
-      : c.method === 'DELETE'
-        ? { ok: true, status: 200, json: { id: 1, revoked: true } }
-        : {
-            ok: true,
-            status: 200,
-            json: {
-              id: 2,
-              token: 'jmm_shownonce',
-              expiresAt: '2026-01-08T00:00:00.000Z',
-              zoneId: 'main',
-              scope: 'read',
-              label: '',
+function mcpScript(globals: Record<string, unknown> = {}) {
+  return pageScript(
+    MCP_TOKENS_SCRIPT,
+    (c) =>
+      c.path === '/api/control/sudo'
+        ? { ok: true, status: 200, json: { sudo: true } }
+        : c.method === 'DELETE'
+          ? { ok: true, status: 200, json: { id: 1, revoked: true } }
+          : {
+              ok: true,
+              status: 200,
+              json: {
+                id: 2,
+                token: 'jmm_shownonce',
+                expiresAt: '2026-01-08T00:00:00.000Z',
+                zoneId: 'main',
+                scope: 'read',
+                label: '',
+              },
             },
-          },
+    globals,
   );
 }
 

@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { type GuidanceForge, githubGuidanceForge } from '../api/github.js';
 import { withCsrf } from '../auth/guard.js';
+import type { BootOrigin } from '../config/boot.js';
 import { type ConfigStore, type RevisionView, VAULT_DISABLED } from '../config/store.js';
 import { type Config, MAX_POLL_SECONDS, MIN_POLL_SECONDS, mcpConfigOf } from '../config.js';
 import type { Db } from '../db/open.js';
@@ -415,8 +416,11 @@ function installSettings(config: Config): Setting[] {
 /** Where a session may never weaken a guard (§7.5): words for the page. */
 const SESSION_FORBIDDEN_NOTE = 'set with <code>jumpmaster ctl</code> or in the config file';
 
+/** The id that ties a setting's control to its `<label for>`. */
+const settingId = (path: string): string => `setting-${path.replaceAll('.', '-')}`;
+
 function settingControl(s: Setting): string {
-  const data = `data-path="${s.path}" data-kind="${s.kind}" data-original="${escapeHtml(JSON.stringify(s.value))}"`;
+  const data = `id="${settingId(s.path)}" data-path="${s.path}" data-kind="${s.kind}" data-original="${escapeHtml(JSON.stringify(s.value))}"`;
   const lock = s.locked ? ' disabled' : '';
   if (s.kind === 'bool')
     return `<input type="checkbox" ${data}${s.value ? ' checked' : ''}${lock}>`;
@@ -432,35 +436,50 @@ function settingControl(s: Setting): string {
   return `<input ${type} ${data} value="${escapeHtml(value)}"${lock}>`;
 }
 
-/** The boot settings, read before the database opens: each value and where it is set. */
+/** The boot settings, read before the database opens: each value and where it really comes from. */
 function bootSection(store: ConfigStore): string {
   const b = store.boot();
   const file = store.status().filePath;
-  const where = (source: 'file' | 'env', env: string) =>
-    source === 'file'
-      ? `the config file <code>${escapeHtml(file ?? '?')}</code>`
-      : `the environment: <code>${env}</code>`;
-  const rows: [string, unknown, string][] = [
-    ['listen.host', b.listen.host, where(b.source.listen, 'JM_LISTEN_HOST')],
-    ['listen.port', b.listen.port, where(b.source.listen, 'JM_LISTEN_PORT')],
+  const fileMode = b.source.listen === 'file';
+  // A hand-built boot without origins: the old reading, by the whole section's source.
+  const origin =
+    b.origin ??
+    ({
+      host: b.source.listen,
+      port: b.source.listen,
+      allowedHosts: b.source.listen,
+      tlsTerminated: b.listen.tlsTerminated ? 'env' : 'default',
+      dataDir: b.source.dataDir,
+    } as const);
+  const where = (o: BootOrigin, env: string, key: string): string => {
+    if (o === 'file') return `the config file <code>${escapeHtml(file ?? '?')}</code>`;
+    if (o === 'env') return `the environment: <code>${env}</code>`;
+    if (key === 'listen.tlsTerminated')
+      return fileMode
+        ? `the default; set <code>${env}</code> or <code>${key}</code> in the config file`
+        : `the default; set <code>${env}</code>`;
+    return fileMode
+      ? `the default; set <code>${key}</code> in the config file`
+      : `the default; set <code>${env}</code>`;
+  };
+  const rows: [string, unknown, BootOrigin, string][] = [
+    ['listen.host', b.listen.host, origin.host, 'JM_LISTEN_HOST'],
+    ['listen.port', b.listen.port, origin.port, 'JM_LISTEN_PORT'],
     [
       'listen.allowedHosts',
       b.listen.allowedHosts.join(', '),
-      where(b.source.listen, 'JM_ALLOWED_HOSTS'),
+      origin.allowedHosts,
+      'JM_ALLOWED_HOSTS',
     ],
-    [
-      'listen.tlsTerminated',
-      b.listen.tlsTerminated,
-      `${b.source.listen === 'file' ? `${where('file', '')}, or ` : ''}the environment: <code>JM_TLS_TERMINATED=1</code>`,
-    ],
-    ['dataDir', b.dataDir, where(b.source.dataDir, 'JM_DATA_DIR')],
+    ['listen.tlsTerminated', b.listen.tlsTerminated, origin.tlsTerminated, 'JM_TLS_TERMINATED=1'],
+    ['dataDir', b.dataDir, origin.dataDir, 'JM_DATA_DIR'],
   ];
   return `<h3>Boot settings</h3>
 <p>Read once, before the database opens: change each where it is set, then restart (<code>docker compose restart jumpmaster</code>).</p>
 <table><tr><th>Setting</th><th>Value</th><th>Set in</th></tr>${rows
     .map(
-      ([path, value, set]) =>
-        `<tr data-boot="${path}"><td><code>${path}</code></td><td>${escapeHtml(value)}</td><td>${set}</td></tr>`,
+      ([path, value, o, env]) =>
+        `<tr data-boot="${path}"><td><code>${path}</code></td><td>${escapeHtml(value)}</td><td>${where(o, env, path)}</td></tr>`,
     )
     .join('')}</table>`;
 }
@@ -497,6 +516,8 @@ async function jmConfigAnswer(r, status, go) {
   if (r.ok) {
     const restart = j.restartNeeded && j.restartNeeded.length ? ' ' + j.restartNeeded.join(', ') + ' ${RESTART_NOTE}.' : '';
     status.textContent = 'Applied as revision ' + j.revision + ': it takes effect at the next pass.' + restart;
+    // Drawn again with the saved values, saying which revision it saved (and any restart badge).
+    go('/settings/install?saved=' + encodeURIComponent(j.revision));
     return 'saved';
   }
   if (r.status === 409 && j.needsConfirmation) { go(j.confirm); return 'confirm'; }
@@ -523,15 +544,23 @@ document.addEventListener('DOMContentLoaded', () => {
       original: JSON.parse(el.dataset.original),
     }));
     const out = document.getElementById('install-out');
-    const outcome = await jmSaveInstall(jmInstallPatch(fields), Number(form.dataset.revision), out, (to) => { location.href = to; });
-    if (outcome === 'saved') location.reload();
+    await jmSaveInstall(jmInstallPatch(fields), Number(form.dataset.revision), out, (to) => { location.href = to; });
   });
 });
 </script>`;
 
-export function renderInstall(o: { store: ConfigStore; config: Config }): string {
+export function renderInstall(o: {
+  store: ConfigStore;
+  config: Config;
+  /** The revision a Save just applied (`?saved=N`), said at the top. */
+  saved?: number;
+}): string {
   const { store, config } = o;
   const status = store.status();
+  const saved =
+    o.saved === undefined
+      ? ''
+      : `<p class="saved" role="status">Saved as revision ${o.saved}: it takes effect at the next pass.</p>`;
   const fileMode = store.mode() === 'file';
   const restart =
     status.restartPending.length > 0
@@ -546,7 +575,7 @@ export function renderInstall(o: { store: ConfigStore; config: Config }): string
   const rows = installSettings(config)
     .map(
       (s) =>
-        `<tr data-setting="${s.path}"><td><code>${s.path}</code><br><small>${escapeHtml(s.label)}</small></td><td>${settingControl(s)}</td><td><small>${s.note ?? ''}</small></td></tr>`,
+        `<tr data-setting="${s.path}"><td><label for="${settingId(s.path)}"><code>${s.path}</code></label><br><small>${escapeHtml(s.label)}</small></td><td>${settingControl(s)}</td><td><small>${s.note ?? ''}</small></td></tr>`,
     )
     .join('');
   const save = fileMode
@@ -554,7 +583,7 @@ export function renderInstall(o: { store: ConfigStore; config: Config }): string
     : '<p><button>Save</button> <span id="install-out" role="status"></span></p>';
   return page(
     `<h2>Settings</h2>${tabs('install')}
-${restart}${warnings}${banner}
+${saved}${restart}${warnings}${banner}
 <form id="install" data-revision="${store.revision()}" data-readonly="${fileMode ? '1' : '0'}"><fieldset${fileMode ? ' disabled' : ''}>
 <table><tr><th>Setting</th><th>Value</th><th></th></tr>${rows}</table>
 </fieldset>${save}</form>
@@ -566,15 +595,41 @@ ${INSTALL_SCRIPT}`,
 // ---------------------------------------------------------------------------------------------
 // MCP tokens (§7.5): Command's tokens, made here with a zone, a scope and an expiry.
 
+/** The token table's frame, shared by the server's render and the script's redraw (no quotes). */
+const NO_TOKENS = '<p>No MCP tokens yet.</p>';
+const TOKENS_HEAD =
+  '<table><tr><th>#</th><th>Zone</th><th>Scope</th><th>Label</th><th>Made</th><th>Expires</th><th>Last used</th><th></th></tr>';
+const TOKENS_TAIL =
+  '</table><p><small>A last use you do not recognise means the token is in someone else&#39;s hands: revoke it.</small></p>';
+
 /**
  * The MCP tokens tab's script. `jmMintToken` takes the sudo state (`{ sudo, passphrase }`), a
  * status element and the element the value is shown in once: without sudo and with no passphrase
  * it answers `'sudo'` and sends nothing; the value never reaches the page before the route
- * answers, and only that element holds it. `jmRevokeToken` sends one `DELETE`.
+ * answers, and only that element holds it. After a mint the list (`list`, the `#token-list`
+ * container) is read again and redrawn by `jmTokenTable`, the client's copy of the server's table,
+ * so the new token is listed while its value stays shown. `jmRevokeToken` sends one `DELETE`.
  */
 export const MCP_TOKENS_SCRIPT = `<script>
 ${SUDO_FN}
-async function jmMintToken(c, state, out, reveal) {
+function jmEsc(v) {
+  return String(v).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
+function jmTokenTable(tokens, now) {
+  if (tokens.length === 0) return '${NO_TOKENS}';
+  const day = (iso) => (iso ? jmEsc(String(iso).slice(0, 10)) : '-');
+  const state = (t) => t.revokedAt ? 'revoked ' + day(t.revokedAt) : Date.parse(t.expiresAt) <= now ? 'expired' : '<button type="button" class="revoke" data-id="' + Number(t.id) + '">Revoke</button>';
+  const rows = tokens.map((t) => '<tr data-token="' + Number(t.id) + '"><td>' + Number(t.id) + '</td><td>' + jmEsc(t.zoneId) + '</td><td>' + jmEsc(t.scope) + '</td><td>' + (t.label ? jmEsc(t.label) : '-') + '</td><td>' + day(t.createdAt) + '</td><td>' + day(t.expiresAt) + '</td><td>' + (t.lastUsedAt ? day(t.lastUsedAt) : 'never') + '</td><td>' + state(t) + '</td></tr>').join('');
+  return '${TOKENS_HEAD}' + rows + '${TOKENS_TAIL}';
+}
+async function jmRefreshTokens(list) {
+  if (!list) return;
+  const r = await fetch('/api/control/mcp-tokens');
+  if (!r.ok) return;
+  const j = await r.json();
+  list.innerHTML = jmTokenTable(j.tokens || [], Date.now());
+}
+async function jmMintToken(c, state, out, reveal, list) {
   if (!(await jmSudo(state, out, 'An MCP token is shown once, so making one asks for your passphrase again.'))) return 'sudo';
   const body = { zoneId: c.zoneId, scope: c.scope, days: Number(c.days) };
   if (c.label) body.label = c.label;
@@ -586,6 +641,7 @@ async function jmMintToken(c, state, out, reveal) {
   reveal.textContent = j.token;
   reveal.hidden = false;
   out.textContent = 'Token ' + j.id + ' for zone ' + j.zoneId + ' (' + j.scope + '), expires ' + String(j.expiresAt).slice(0, 10) + '. It is shown this once: copy it into a password manager now. Reloading the page clears it.';
+  try { await jmRefreshTokens(list); } catch (e) {}
   return 'minted';
 }
 async function jmRevokeToken(id, status) {
@@ -605,15 +661,19 @@ document.addEventListener('DOMContentLoaded', () => {
       e.preventDefault();
       const s = { sudo: root.dataset.sudo === '1', passphrase: pass.value };
       const c = { zoneId: form.zoneId.value, scope: form.scope.value, days: form.days.value, label: form.label.value };
-      const outcome = await jmMintToken(c, s, document.getElementById('mint-out'), document.getElementById('mint-value'));
+      const outcome = await jmMintToken(c, s, document.getElementById('mint-out'), document.getElementById('mint-value'), document.getElementById('token-list'));
       pass.value = '';
       if (s.sudo) root.dataset.sudo = '1'; else root.dataset.sudo = '0';
       if (outcome === 'sudo') { prompt.hidden = false; pass.focus(); } else prompt.hidden = true;
     });
   }
-  for (const b of document.querySelectorAll('button.revoke')) b.addEventListener('click', async () => {
+  // Delegated, so a row drawn after a mint has a working Revoke too.
+  const list = document.getElementById('token-list');
+  list.addEventListener('click', async (e) => {
+    const b = e.target.closest('button.revoke');
+    if (!b) return;
     if (!confirm('Revoke MCP token ' + b.dataset.id + '? Its next call is refused.')) return;
-    if ((await jmRevokeToken(b.dataset.id, status)) === 'revoked') location.reload();
+    if ((await jmRevokeToken(b.dataset.id, status)) === 'revoked') await jmRefreshTokens(list);
   });
 });
 </script>`;
@@ -663,15 +723,12 @@ ${SUDO_PROMPT('making a token')}
         `<tr data-token="${t.id}"><td>${t.id}</td><td>${escapeHtml(t.zoneId)}</td><td>${escapeHtml(t.scope)}</td><td>${t.label ? escapeHtml(t.label) : '-'}</td><td>${day(t.createdAt)}</td><td>${day(t.expiresAt)}</td><td>${t.lastUsedAt ? day(t.lastUsedAt) : 'never'}</td><td>${state(t)}</td></tr>`,
     )
     .join('');
-  const list =
-    tokens.length === 0
-      ? '<p>No MCP tokens yet.</p>'
-      : `<table><tr><th>#</th><th>Zone</th><th>Scope</th><th>Label</th><th>Made</th><th>Expires</th><th>Last used</th><th></th></tr>${rows}</table><p><small>A last use you do not recognise means the token is in someone else's hands: revoke it.</small></p>`;
+  const list = tokens.length === 0 ? NO_TOKENS : `${TOKENS_HEAD}${rows}${TOKENS_TAIL}`;
   return page(
     `<h2>Settings</h2>${tabs('mcp-tokens')}
 <div id="mcp-tokens" data-sudo="${o.sudo ? '1' : '0'}">
 ${intro}${off}${mint}
-<h3>Tokens</h3>${list}
+<h3>Tokens</h3><div id="token-list">${list}</div>
 <p id="tokens-status" role="status"></p>
 <p><small>The same from a terminal: <code>jumpmaster ctl mcp-tokens mint &lt;zone&gt; &lt;read|write&gt; --days N</code>, <code>list</code>, <code>revoke &lt;id&gt;</code>.</small></p>
 </div>
@@ -810,9 +867,20 @@ export function registerSettingsPages(
   const forgeOf = deps.guidanceForge ?? githubGuidanceForge;
   // Each tab is a path; Settings opens on the first.
   app.get('/settings', async (_req, reply) => reply.redirect('/settings/credentials', 302));
-  app.get('/settings/install', async (req, reply) =>
-    html(req, reply, renderInstall({ store, config: req.jmConfig ?? store.current() })),
-  );
+  app.get<{ Querystring: { saved?: string } }>('/settings/install', async (req, reply) => {
+    // Only a revision number is echoed back: anything else says nothing.
+    const raw = req.query.saved;
+    const saved = typeof raw === 'string' && /^[1-9]\d{0,9}$/.test(raw) ? Number(raw) : undefined;
+    return html(
+      req,
+      reply,
+      renderInstall({
+        store,
+        config: req.jmConfig ?? store.current(),
+        ...(saved !== undefined ? { saved } : {}),
+      }),
+    );
+  });
   app.get('/settings/mcp-tokens', async (req, reply) =>
     html(
       req,
