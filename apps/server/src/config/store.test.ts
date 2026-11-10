@@ -5,7 +5,13 @@ import { describe, expect, test } from 'vitest';
 import type { Principal } from '../auth/guard.js';
 import { loadConfig, parseEditable, secretList } from '../config.js';
 import { type Db, openDb } from '../db/open.js';
-import { getZoneMode } from '../db/repo.js';
+import {
+  getZoneMode,
+  insertDrop,
+  setZoneMode,
+  upsertDropZone,
+  upsertWorkItem,
+} from '../db/repo.js';
 import { plus, t0, tmpDbFile } from '../test/helpers.js';
 import { type BootConfig, loadBoot, RESTART_PATHS } from './boot.js';
 import { mergePatch } from './diff.js';
@@ -235,7 +241,9 @@ describe('file mode', () => {
     expect(next.current().pollSeconds).toBe(60);
     expect(w.logs).toContain(`config file ignored: adopted on ${t0.toISOString()}`);
     // A UI apply now works.
-    expect(next.apply({ pollSeconds: 5 }, { via: 'ui', principal: session }).ok).toBe(true);
+    expect(
+      next.apply({ pollSeconds: 5, dropZones: [zone()] }, { via: 'ui', principal: session }).ok,
+    ).toBe(true);
   });
 
   test('adopt takes the file as it is now, and refuses an invalid one', () => {
@@ -259,7 +267,7 @@ describe('back to file mode and export', () => {
     const w = world({ dropZones: [zone()] });
     const store = w.open();
     store.adopt({ principal: token });
-    store.apply({ pollSeconds: 7 }, { via: 'ctl', principal: token });
+    store.apply({ pollSeconds: 7, dropZones: [zone()] }, { via: 'ctl', principal: token });
     expect(store.toFileMode({ principal: session })).toEqual({
       ok: false,
       issues: [{ path: '', message: 'this needs the operator token: run it with jumpmaster ctl' }],
@@ -468,6 +476,7 @@ describe('apply', () => {
       revision: 2,
       changed: ['mcp'],
       restartNeeded: ['mcp.enabled'],
+      guarded: ['mcp.enabled'],
     });
     expect(getSetting(w.db, 'config.restart_pending')).toEqual(['mcp.enabled']);
     expect(store.status().restartPending).toEqual(['mcp.enabled']);
@@ -616,8 +625,10 @@ describe('history', () => {
     const w = world();
     const store = w.open();
     store.apply({ pollSeconds: 10 }, { via: 'ctl', principal: token });
-    store.apply({ pollSeconds: 20, dropZones: [zone()] }, { via: 'ui', principal: session });
+    store.apply({ pollSeconds: 20, dropZones: [zone()] }, { via: 'ui', principal: token });
     w.clock.now = plus(t0, 60_000);
+    // Removing the zone needs it drained in observe (Task 3).
+    setZoneMode(w.db, 'main', 'observe', t0);
     const r = store.rollback(2, { principal: token });
     expect(r).toEqual({
       ok: true,
@@ -830,5 +841,406 @@ describe('pollSeconds out of range in an M4 file', () => {
     writeConfig(w.file, { pollSeconds: 2.5, dropZones: [zone()] });
     expect(store.adopt({ principal: token }).ok).toBe(false);
     expect(store.mode()).toBe('file');
+  });
+});
+
+describe('guarded paths and confirmation (Task 3)', () => {
+  const sessionB: Principal = { kind: 'operator', via: 'session', sessionId: 'other', sudo: true };
+  const enforced = (extra: Record<string, unknown> = {}) =>
+    zone('main', { egress: { mode: 'enforce', allow: [] }, ...extra });
+  /** A db-mode store with zone main, put there by the token. */
+  function seeded() {
+    const w = world();
+    const store = w.open();
+    expect(store.apply({ dropZones: [enforced()] }, { via: 'ctl', principal: token }).ok).toBe(
+      true,
+    );
+    return { w, store };
+  }
+  const weakened = () => ({ dropZones: [enforced({ ciRequired: false })] });
+  const needs = (r: ReturnType<ConfigStore['apply']>) => {
+    if (r.ok || !('needsConfirmation' in r))
+      throw new Error(`expected needsConfirmation: ${JSON.stringify(r)}`);
+    return r.needsConfirmation;
+  };
+  const confirmFor = (store: ConfigStore, pendingId: string, sessionId = 'h') => {
+    const p = store.confirmations.pending(pendingId, sessionId);
+    if (!p) throw new Error('no pending');
+    return { pending: p, token: store.confirmations.mintConfirmation(p, sessionId) };
+  };
+
+  test('a session cannot change a guarded path without the confirmation page, and the token can', () => {
+    const { store } = seeded();
+    const r = store.apply(weakened(), { via: 'ui', principal: session, expectRevision: 2 });
+    expect(needs(r).guarded).toEqual([
+      {
+        path: 'dropZones[main].ciRequired',
+        consequence: 'Agent PRs in main will merge without CI',
+      },
+    ]);
+    expect(store.revision()).toBe(2);
+    expect(store.current().dropZones[0]?.ciRequired).toBe(true);
+    const t = store.apply(weakened(), { via: 'ctl', principal: token, expectRevision: 2 });
+    expect(t).toMatchObject({ ok: true, revision: 3, guarded: ['dropZones[main].ciRequired'] });
+    // A change that weakens nothing goes straight through from a session.
+    const plain = store.apply(
+      { dropZones: [enforced({ ciRequired: false, maxTurns: 9 })] },
+      { via: 'ui', principal: session },
+    );
+    expect(plain).toEqual({
+      ok: true,
+      revision: 4,
+      changed: ['dropZones[main].maxTurns'],
+      restartNeeded: [],
+    });
+  });
+
+  test('a minted confirmation applies the pending change once; a replay is refused as used', () => {
+    const { store } = seeded();
+    const { pendingId } = needs(store.apply(weakened(), { via: 'ui', principal: session }));
+    const { pending, token: t } = confirmFor(store, pendingId);
+    const meta = {
+      ...pending.meta,
+      expectRevision: pending.expectRevision,
+      confirmation: { pendingId, token: t },
+    };
+    const ok = store.apply(pending.patch, meta);
+    expect(ok).toMatchObject({ ok: true, revision: 3, guarded: ['dropZones[main].ciRequired'] });
+    expect(store.current().dropZones[0]?.ciRequired).toBe(false);
+    expect(store.apply(pending.patch, meta)).toEqual({ ok: false, confirmation: 'used' });
+  });
+
+  test('a made-up token, another session, a changed set and a stale revision are each refused', () => {
+    const { store } = seeded();
+    const { pendingId } = needs(store.apply(weakened(), { via: 'ui', principal: session }));
+    const { pending, token: t } = confirmFor(store, pendingId);
+    const meta = (over: Record<string, unknown> = {}) => ({
+      ...pending.meta,
+      expectRevision: pending.expectRevision,
+      confirmation: { pendingId, token: t },
+      ...over,
+    });
+    expect(
+      store.apply(pending.patch, meta({ confirmation: { pendingId, token: 'x'.repeat(43) } })),
+    ).toEqual({
+      ok: false,
+      confirmation: 'unknown',
+    });
+    expect(store.apply(pending.patch, meta({ principal: sessionB }))).toEqual({
+      ok: false,
+      confirmation: 'session',
+    });
+    // The same confirmation offered for a different change set.
+    const swapped = { dropZones: [enforced({ ciRequired: false, gateCi: false })] };
+    expect(store.apply(swapped, meta())).toEqual({ ok: false, confirmation: 'changed' });
+    expect(store.revision()).toBe(2);
+    // Another apply moves the revision: the confirmation was for revision 2.
+    store.apply({ dropZones: [enforced()], pollSeconds: 30 }, { via: 'ctl', principal: token });
+    expect(store.apply(pending.patch, meta())).toEqual({ ok: false, confirmation: 'stale' });
+    expect(store.current().dropZones[0]?.ciRequired).toBe(true);
+  });
+
+  test('an expired confirmation and an expired pending change are refused', () => {
+    const { w, store } = seeded();
+    const { pendingId } = needs(store.apply(weakened(), { via: 'ui', principal: session }));
+    const { pending, token: t } = confirmFor(store, pendingId);
+    w.clock.now = plus(t0, 5 * 60_000);
+    const meta = { ...pending.meta, expectRevision: 2, confirmation: { pendingId, token: t } };
+    expect(store.apply(pending.patch, meta)).toEqual({ ok: false, confirmation: 'expired' });
+    w.clock.now = plus(t0, 10 * 60_000);
+    expect(store.confirmations.pending(pendingId, 'h')).toBeUndefined();
+  });
+
+  test('requireSignedImages weakening and a zone image, on an existing or an added zone, are refused from a session with or without a confirmation', () => {
+    const w = world();
+    const store = w.open();
+    store.apply(
+      {
+        requireSignedImages: true,
+        dropZones: [enforced({ image: `jm-trooper@sha256:${'a'.repeat(64)}` })],
+      },
+      { via: 'ctl', principal: token },
+    );
+    const forbidden = [
+      [
+        { dropZones: [enforced({ image: `jm-trooper@sha256:${'a'.repeat(64)}` })] },
+        ['requireSignedImages', 'dropZones[main].requireSignedImages'],
+      ],
+      [
+        {
+          requireSignedImages: true,
+          dropZones: [enforced({ image: `other@sha256:${'b'.repeat(64)}` })],
+        },
+        ['dropZones[main].image'],
+      ],
+      [
+        {
+          requireSignedImages: true,
+          dropZones: [
+            enforced({ image: `jm-trooper@sha256:${'a'.repeat(64)}` }),
+            zone('new', {
+              image: `x@sha256:${'c'.repeat(64)}`,
+              egress: { mode: 'monitor', allow: [] },
+            }),
+          ],
+        },
+        ['dropZones[new].image'],
+      ],
+    ] as const;
+    for (const [next, paths] of forbidden) {
+      expect(store.apply(next, { via: 'ui', principal: session })).toEqual({
+        ok: false,
+        sessionForbidden: paths,
+      });
+      // A confirmation from another pending change does not open it.
+      const { pendingId } = needs(
+        store.apply(
+          {
+            requireSignedImages: true,
+            dropZones: [
+              enforced({ image: `jm-trooper@sha256:${'a'.repeat(64)}`, ciRequired: false }),
+            ],
+          },
+          { via: 'ui', principal: session },
+        ),
+      );
+      const { token: t } = confirmFor(store, pendingId);
+      expect(
+        store.apply(next, { via: 'ui', principal: session, confirmation: { pendingId, token: t } }),
+      ).toEqual({ ok: false, sessionForbidden: paths });
+    }
+    expect(store.revision()).toBe(2);
+    // The token may.
+    expect(store.apply(forbidden[1][0], { via: 'ctl', principal: token }).ok).toBe(true);
+  });
+
+  test('repo on an existing zone is refused for every principal with the remove-and-re-add message', () => {
+    const { store } = seeded();
+    for (const principal of [token, session]) {
+      expect(
+        store.apply(
+          { dropZones: [enforced({ repo: 'octo/elsewhere' })] },
+          { via: 'ctl', principal },
+        ),
+      ).toEqual({
+        ok: false,
+        issues: [
+          {
+            path: 'dropZones[main].repo',
+            message: "the repository of a zone can't change: remove the zone and add a new one",
+          },
+        ],
+      });
+    }
+  });
+
+  test('a rollback that weakens a guarded path needs the confirmation page, and one that sets an image is refused from a session', () => {
+    const { store } = seeded();
+    store.apply(weakened(), { via: 'ctl', principal: token }); // 3: ciRequired false
+    store.apply({ dropZones: [enforced()] }, { via: 'ctl', principal: token }); // 4
+    const r = store.rollback(3, { principal: session });
+    expect(needs(r).guarded.map((g) => g.path)).toEqual(['dropZones[main].ciRequired']);
+    const p = store.confirmations.pending(needs(r).pendingId, 'h');
+    expect(p?.meta).toMatchObject({ via: 'rollback', note: 'rollback to 3' });
+    store.apply(
+      { dropZones: [enforced({ image: 'jm-trooper:other' })] },
+      { via: 'ctl', principal: token },
+    ); // 5
+    expect(store.rollback(4, { principal: session })).toEqual({
+      ok: false,
+      sessionForbidden: ['dropZones[main].image'],
+    });
+  });
+});
+
+describe('zone removal, history and Resume (Task 3)', () => {
+  const needsOf = (r: ReturnType<ConfigStore['apply']>) =>
+    !r.ok && 'needsConfirmation' in r ? r.needsConfirmation.guarded : r;
+  function seeded(zones = [zone('main')]) {
+    const w = world();
+    const store = w.open();
+    expect(store.apply({ dropZones: zones }, { via: 'ctl', principal: token }).ok).toBe(true);
+    upsertDropZone(w.db, {
+      id: 'main',
+      repo: 'octo/main',
+      defaultBranch: 'main',
+      configJson: '{}',
+    });
+    return { w, store };
+  }
+  const work = (db: Db, state: 'running' | 'succeeded') => {
+    const wi = upsertWorkItem(db, {
+      dropZoneId: 'main',
+      issueNumber: 1,
+      title: 't',
+      body: 'b',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    insertDrop(db, {
+      id: `d-${state}`,
+      dropZoneId: 'main',
+      workItemId: wi.id,
+      role: 'implement',
+      state,
+      createdAt: t0.toISOString(),
+    });
+  };
+  const modeRow = (db: Db) =>
+    db.prepare("SELECT mode FROM zone_controls WHERE zone_id = 'main'").get();
+  const count = (db: Db, table: string) =>
+    (
+      db.prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE drop_zone_id = 'main'`).get() as {
+        c: number;
+      }
+    ).c;
+
+  test('removing a zone with active work, or not in observe, is refused; a drained observe zone is removed with its mode row only', () => {
+    const { w, store } = seeded();
+    work(w.db, 'running');
+    const refusal = {
+      ok: false,
+      issues: [
+        {
+          path: 'dropZones',
+          message:
+            "zone main can't be removed until it is drained: set it to observe and let its drops and forge writes finish",
+        },
+      ],
+    };
+    // Active, with a running drop.
+    expect(store.apply({ dropZones: [] }, { via: 'ctl', principal: token })).toEqual(refusal);
+    setZoneMode(w.db, 'main', 'observe', t0);
+    expect(store.apply({ dropZones: [] }, { via: 'ctl', principal: token })).toEqual(refusal);
+    w.db.prepare("UPDATE drops SET state = 'succeeded'").run();
+    const r = store.apply({ dropZones: [] }, { via: 'ui', principal: session });
+    expect(r).toMatchObject({ ok: true, changed: ['dropZones[main]'] });
+    expect(modeRow(w.db)).toBeUndefined();
+    // Its history stays.
+    expect(count(w.db, 'work_items')).toBe(1);
+    expect(count(w.db, 'drops')).toBe(1);
+  });
+
+  test('re-adding an id with history is refused without resume, and resumed with it', () => {
+    const { w, store } = seeded();
+    work(w.db, 'succeeded');
+    setZoneMode(w.db, 'main', 'observe', t0);
+    expect(store.apply({ dropZones: [] }, { via: 'ctl', principal: token }).ok).toBe(true);
+    const back = { dropZones: [zone('main')] };
+    expect(store.apply(back, { via: 'ctl', principal: token })).toEqual({
+      ok: false,
+      issues: [
+        { path: 'dropZones.0.id', message: 'this zone has history: pick another id, or resume it' },
+      ],
+    });
+    const r = store.apply(back, { via: 'ctl', principal: token, resume: ['main'] });
+    expect(r).toMatchObject({ ok: true, readds: ['main'] });
+    expect(modeRow(w.db)).toEqual({ mode: 'active' });
+    expect(count(w.db, 'work_items')).toBe(1);
+  });
+
+  test('resume is refused when the history belongs to another repository', () => {
+    const { w, store } = seeded();
+    work(w.db, 'succeeded');
+    setZoneMode(w.db, 'main', 'observe', t0);
+    store.apply({ dropZones: [] }, { via: 'ctl', principal: token });
+    expect(
+      store.apply(
+        { dropZones: [zone('main', { repo: 'octo/other' })] },
+        { via: 'ctl', principal: token, resume: ['main'] },
+      ),
+    ).toEqual({
+      ok: false,
+      issues: [
+        {
+          path: 'dropZones.0.id',
+          message:
+            "zone main's history is for octo/main: resume it with that repository, or pick another id",
+        },
+      ],
+    });
+  });
+
+  test('a rollback that re-adds a zone runs the add path and lists it in readds', () => {
+    const { w, store } = seeded();
+    work(w.db, 'succeeded');
+    setZoneMode(w.db, 'main', 'observe', t0);
+    expect(store.apply({ dropZones: [] }, { via: 'ctl', principal: token }).ok).toBe(true);
+    const r = store.rollback(2, { principal: token });
+    expect(r).toMatchObject({ ok: true, revision: 4, readds: ['main'] });
+    expect(modeRow(w.db)).toEqual({ mode: 'active' });
+    // From a session the re-added zone is judged against the add baseline: its image is refused.
+    setZoneMode(w.db, 'main', 'observe', t0);
+    store.apply({ dropZones: [] }, { via: 'ctl', principal: token });
+    expect(store.rollback(2, { principal: session })).toEqual({
+      ok: false,
+      sessionForbidden: ['dropZones[main].image'],
+    });
+  });
+
+  test('an added zone is judged against the add baseline through the PATCH route, Resume, rollback and an import alike', () => {
+    // A zone added with egress off (the baseline is monitor) and no image (a preset): guarded.
+    const added = zone('main', {
+      image: undefined,
+      preset: 'node',
+      egress: { mode: 'off', allow: [] },
+    });
+    const expected = [
+      {
+        path: 'dropZones[main].egress.mode',
+        consequence: 'Drops in main will be able to reach any host on the internet',
+      },
+    ];
+    const fresh = () => {
+      const w = world();
+      return { w, store: w.open({ env: { ...env, JM_DEV_IMAGES: '1' } }) };
+    };
+    // The wizard's PATCH.
+    const a = fresh();
+    expect(
+      needsOf(a.store.apply({ dropZones: [added] }, { via: 'ui', principal: session })),
+    ).toEqual(expected);
+    // An import of the advanced JSON.
+    const b = fresh();
+    expect(
+      needsOf(b.store.importDoc({ dropZones: [added] }, { via: 'import', principal: session })),
+    ).toEqual(expected);
+    // Resume and rollback, after the zone ran and was removed.
+    const c = fresh();
+    c.store.apply({ dropZones: [added] }, { via: 'ctl', principal: token }); // 2
+    upsertDropZone(c.w.db, {
+      id: 'main',
+      repo: 'octo/main',
+      defaultBranch: 'main',
+      configJson: '{}',
+    });
+    work(c.w.db, 'succeeded');
+    setZoneMode(c.w.db, 'main', 'observe', t0);
+    c.store.apply({ dropZones: [] }, { via: 'ctl', principal: token }); // 3
+    expect(
+      needsOf(
+        c.store.apply({ dropZones: [added] }, { via: 'ui', principal: session, resume: ['main'] }),
+      ),
+    ).toEqual(expected);
+    expect(needsOf(c.store.rollback(2, { principal: session }))).toEqual(expected);
+  });
+
+  test('a file reload is the file: it removes and re-adds zones without the drained or history rules', () => {
+    const w = world({ dropZones: [zone('main')] });
+    const store = w.open();
+    upsertDropZone(w.db, {
+      id: 'main',
+      repo: 'octo/main',
+      defaultBranch: 'main',
+      configJson: '{}',
+    });
+    work(w.db, 'running');
+    writeConfig(w.file, { dropZones: [] });
+    expect(store.reload().ok).toBe(true);
+    writeConfig(w.file, { dropZones: [zone('main', { ciRequired: false })] });
+    expect(store.reload().ok).toBe(true);
+    expect(store.current().dropZones[0]?.ciRequired).toBe(false);
   });
 });

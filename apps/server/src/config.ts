@@ -119,7 +119,8 @@ const CrewSchema = z
   })
   .default(CREW_DEFAULTS);
 
-const DropZoneObject = z.object({
+/** A zone's fields with their defaults, without the cross-field rules (the add baseline parses with it). */
+export const DropZoneObject = z.object({
   id: z.string().min(1),
   repo: z.string().regex(/^[^/\s]+\/[^/\s]+$/, 'repo must be "owner/name"'),
   readyLabel: z.string().default('agent-ready'),

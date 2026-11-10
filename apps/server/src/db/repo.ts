@@ -942,6 +942,45 @@ export function zoneIsDrained(db: Db, zoneId: string): boolean {
   return activeWorkCount(db, zoneId) === 0;
 }
 
+/**
+ * A zone that may be removed: in observe (the stored mode; a zone with no mode row is not known
+ * to be), with no drop in flight and no forge write unsettled. The same guard as the move to
+ * observe, plus the mode.
+ */
+export function zoneDrained(db: Db, zoneId: string): boolean {
+  const row = db.prepare('SELECT mode FROM zone_controls WHERE zone_id = ?').get(zoneId) as
+    | { mode: ZoneMode }
+    | undefined;
+  return row?.mode === 'observe' && zoneIsDrained(db, zoneId);
+}
+
+/** Whether a zone id has a past: work items, drops, outbox rows, crew issues or goals. */
+export function zoneHasHistory(db: Db, zoneId: string): boolean {
+  const row = db
+    .prepare(
+      `SELECT EXISTS (SELECT 1 FROM work_items WHERE drop_zone_id = @zone)
+           OR EXISTS (SELECT 1 FROM drops WHERE drop_zone_id = @zone)
+           OR EXISTS (SELECT 1 FROM outbox WHERE zone_id = @zone)
+           OR EXISTS (SELECT 1 FROM crew_issues WHERE zone_id = @zone)
+           OR EXISTS (SELECT 1 FROM goals WHERE zone_id = @zone) AS h`,
+    )
+    .get({ zone: zoneId }) as { h: number };
+  return row.h === 1;
+}
+
+/** The repository a zone id's history was recorded against, when the sync ever saw it. */
+export function zoneHistoryRepo(db: Db, zoneId: string): string | undefined {
+  const row = db.prepare('SELECT repo FROM drop_zones WHERE id = ?').get(zoneId) as
+    | { repo: string }
+    | undefined;
+  return row?.repo;
+}
+
+/** A removed zone loses its mode row only; its history stays. */
+export function deleteZoneControls(db: Db, zoneId: string): void {
+  db.prepare('DELETE FROM zone_controls WHERE zone_id = ?').run(zoneId);
+}
+
 /** Stores the config's starting mode the first time a zone is seen; a stored mode then wins. */
 export function ensureZoneMode(db: Db, zoneId: string, mode: ZoneMode, now: Date): void {
   db.prepare(

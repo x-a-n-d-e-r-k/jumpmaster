@@ -24,14 +24,14 @@ afterEach(async () => {
 
 type Headers = Record<string, string>;
 
-async function world(o: { operator?: boolean } = {}) {
+async function world(o: { operator?: boolean; tlsTerminated?: boolean } = {}) {
   const db = openDb(tmpDbFile());
   upsertDropZone(db, { id: 'main', repo: 'o/r', defaultBranch: 'main', configJson: '{}' });
   let clock = t0;
   const printed: string[] = [];
   const setup = new SetupMode((code) => printed.push(code));
   const config = {
-    listen: { host: '127.0.0.1', port: 7420 },
+    listen: { host: '127.0.0.1', port: 7420, ...(o.tlsTerminated ? { tlsTerminated: true } : {}) },
     dataDir: '.',
     pollSeconds: 60,
     dropZones: [makeZone({ id: 'main' })],
@@ -357,6 +357,37 @@ describe('login and sessions', () => {
       }
     }
     expect(loadSession(w.db, s.id, t0)).not.toBeNull();
+  });
+});
+
+describe('cookies behind a declared TLS terminator', () => {
+  test('with tlsTerminated the session and setup cookies are Secure, and without it they are not', async () => {
+    const w = await world({ tlsTerminated: true });
+    const code = await w.post('/setup/code', { code: w.printed.at(-1) });
+    expect(cookieOf(code, 'jm_setup')).toMatch(/; Secure$/);
+    const setupCookie = `jm_setup=${valueOf(cookieOf(code, 'jm_setup'))}`;
+    const done = await w.post(
+      '/setup/passphrase',
+      { passphrase: PASS, confirm: PASS },
+      { cookie: setupCookie },
+    );
+    expect(cookieOf(done, 'jm_session')).toMatch(
+      /^jm_session=[\w-]+; HttpOnly; SameSite=Strict; Path=\/; Max-Age=604800; Secure$/,
+    );
+    expect(cookieOf(done, 'jm_setup')).toBe(
+      'jm_setup=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure',
+    );
+    const login = await w.post('/login', { passphrase: PASS });
+    expect(cookieOf(login, 'jm_session')).toMatch(/; Secure$/);
+    const out = await w.post(
+      '/logout',
+      {},
+      { cookie: `jm_session=${valueOf(cookieOf(login, 'jm_session'))}` },
+    );
+    expect(cookieOf(out, 'jm_session')).toMatch(/Max-Age=0; Secure$/);
+    const plain = await world({ operator: true });
+    const l2 = await plain.post('/login', { passphrase: PASS });
+    expect(cookieOf(l2, 'jm_session')).not.toContain('Secure');
   });
 });
 

@@ -23,7 +23,7 @@ import {
   SETUP_COOKIE,
   setCookie,
 } from '../auth/sessions.js';
-import type { LiveConfig } from '../config/source.js';
+import { configReader, type LiveConfig } from '../config/source.js';
 import type { Db } from '../db/open.js';
 import { escapeHtml, page } from './pages.js';
 
@@ -95,6 +95,9 @@ const html = (reply: FastifyReply, status: number, body: string) =>
  */
 export function registerAuthPages(app: FastifyInstance, deps: AuthPageDeps): void {
   const { db, now, setup, backoff } = deps;
+  const live = configReader(deps.config);
+  /** Behind a declared TLS terminator the cookies are `Secure`. */
+  const secure = () => live().listen.tlsTerminated === true;
 
   /** Refuses a source still waiting; true when the request may go on. */
   const admitted = (req: FastifyRequest, reply: FastifyReply, render: () => string): boolean => {
@@ -107,8 +110,8 @@ export function registerAuthPages(app: FastifyInstance, deps: AuthPageDeps): voi
   const startSession = (reply: FastifyReply): void => {
     const s = createSession(db, now());
     reply.header('set-cookie', [
-      setCookie(SESSION_COOKIE, s.id, SESSION_ABSOLUTE_MS / 1000),
-      clearCookie(SETUP_COOKIE),
+      setCookie(SESSION_COOKIE, s.id, SESSION_ABSOLUTE_MS / 1000, secure()),
+      clearCookie(SETUP_COOKIE, secure()),
     ]);
   };
 
@@ -155,7 +158,9 @@ export function registerAuthPages(app: FastifyInstance, deps: AuthPageDeps): voi
   app.post('/logout', async (req, reply) => {
     const held = parseCookies(req.headers.cookie)[SESSION_COOKIE];
     if (held) deleteSession(db, held);
-    return reply.header('set-cookie', clearCookie(SESSION_COOKIE)).redirect('/login', 303);
+    return reply
+      .header('set-cookie', clearCookie(SESSION_COOKIE, secure()))
+      .redirect('/login', 303);
   });
 
   const claimOf = (req: FastifyRequest): string =>
@@ -188,7 +193,7 @@ export function registerAuthPages(app: FastifyInstance, deps: AuthPageDeps): voi
     }
     backoff.reset(req.ip);
     return reply
-      .header('set-cookie', setCookie(SETUP_COOKIE, claim, SETUP_CLAIM_MS / 1000))
+      .header('set-cookie', setCookie(SETUP_COOKIE, claim, SETUP_CLAIM_MS / 1000, secure()))
       .redirect('/setup', 303);
   });
 

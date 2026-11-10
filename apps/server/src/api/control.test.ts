@@ -5,6 +5,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
 import { listAudit } from '../auth/audit.js';
 import { registerGuard } from '../auth/guard.js';
+import { sha256Hex } from '../auth/sessions.js';
 import { listRulings, raiseBriefing } from '../briefings.js';
 import { loadBoot } from '../config/boot.js';
 import { ConfigStore } from '../config/store.js';
@@ -36,6 +37,9 @@ import { type ControlDeps, registerControlRoutes } from './control.js';
 const TOKEN = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
 const auth = { authorization: `Bearer ${TOKEN}`, host: HOST };
+/** The stored id of the session a header set carries. */
+const operatorHashOf = (h: Record<string, string>) =>
+  sha256Hex((h.cookie ?? '').replace(/^jm_session=/, ''));
 
 let app: FastifyInstance | undefined;
 afterEach(async () => {
@@ -184,6 +188,27 @@ describe('control routes', () => {
     expect(isKilled(db)).toBe(true);
     expect((await post('/api/control/kill', { engaged: false })).statusCode).toBe(200);
     expect(isKilled(db)).toBe(false);
+  });
+});
+
+describe('one config snapshot per request', () => {
+  test('a control request reads the config source once, in the guard, and every later read in the handler sees that snapshot', async () => {
+    const db = openDb(tmpDbFile());
+    upsertDropZone(db, { id: 'main', repo: 'o/r', defaultBranch: 'main', configJson: '{}' });
+    let reads = 0;
+    const base = {
+      listen: { host: '127.0.0.1', port: 7420 },
+      dropZones: [makeZone({ id: 'main' })],
+      secrets: { operatorToken: TOKEN },
+    } as unknown as Config;
+    // A fresh object per read, as a store swapping revisions would hand out.
+    const source = { current: () => ({ ...base, _read: ++reads }) as unknown as Config };
+    app = controlApp({ db, config: source, now: () => t0 });
+    await app.ready();
+    reads = 0;
+    const r = await post('/api/control/zones/main', { mode: 'paused' });
+    expect(r.statusCode).toBe(200);
+    expect(reads).toBe(1);
   });
 });
 
@@ -860,36 +885,157 @@ describe('config routes', () => {
     for (const s of Object.values(env)) expect(r.body).not.toContain(s);
   });
 
-  test('until guarded paths land (Task 3), PATCH, rollback and import need the token: a session gets 403 and changes nothing', async () => {
+  test('a session cannot change a guarded path without the confirmation page, and the token can', async () => {
     const { db, store, asSession } = configApp();
-    const tries = [
-      [
+    const z = zoneDoc('main', { egress: { mode: 'enforce', allow: [] } });
+    store.apply(
+      { dropZones: [z] },
+      { via: 'ctl', principal: { kind: 'operator', via: 'token', sudo: true } },
+    );
+    // Not guarded: straight through from a session, recorded via ui.
+    const plain = await req(
+      'PATCH',
+      '/api/control/config',
+      { patch: { pollSeconds: 30 }, expectRevision: 2 },
+      asSession,
+    );
+    expect(plain.statusCode).toBe(200);
+    expect(revVia(db)).toEqual(['setup', 'ctl', 'ui']);
+    // Guarded: held for the confirmation page.
+    const weaken = { dropZones: [{ ...z, ciRequired: false }] };
+    const held = await req(
+      'PATCH',
+      '/api/control/config',
+      { patch: weaken, expectRevision: 3, returnTo: '/setup/doctor' },
+      asSession,
+    );
+    expect(held.statusCode).toBe(409);
+    const body = held.json();
+    expect(body).toEqual({
+      needsConfirmation: true,
+      pendingId: expect.any(String),
+      confirm: `/config/confirm/${body.pendingId}`,
+      guarded: [
+        {
+          path: 'dropZones[main].ciRequired',
+          consequence: 'Agent PRs in main will merge without CI',
+        },
+      ],
+    });
+    expect(store.revision()).toBe(3);
+    expect(store.confirmations.pending(body.pendingId, operatorHashOf(asSession))?.returnTo).toBe(
+      '/setup/doctor',
+    );
+    // A body cannot carry a confirmation: only the confirm page's POST does, with the passphrase.
+    const forged = await req(
+      'PATCH',
+      '/api/control/config',
+      { patch: weaken, expectRevision: 3, confirmation: { pendingId: body.pendingId, token: 'x' } },
+      asSession,
+    );
+    expect(forged.statusCode).toBe(400);
+    // The token applies it at once, and the audit row says it was guarded.
+    const t = await req('PATCH', '/api/control/config', { patch: weaken, expectRevision: 3 });
+    expect(t.statusCode).toBe(200);
+    expect(t.json()).toMatchObject({ revision: 4, guarded: ['dropZones[main].ciRequired'] });
+    const row = listAudit(db).find((a) => a.action === 'config.apply' && a.detail.revision === 4);
+    expect(row?.detail).toMatchObject({ guarded: 1, guardedPaths: 'dropZones[main].ciRequired' });
+  });
+
+  test('requireSignedImages weakening and a zone image are a 403 for a session, with the ctl hint, and nothing else applies', async () => {
+    const { db, store, asSession } = configApp();
+    const image = await req(
+      'PATCH',
+      '/api/control/config',
+      {
+        patch: {
+          pollSeconds: 30,
+          dropZones: [zoneDoc('new', { egress: { mode: 'monitor', allow: [] } })],
+        },
+        expectRevision: 1,
+      },
+      asSession,
+    );
+    expect(image.statusCode).toBe(403);
+    expect(image.json()).toEqual({
+      sessionForbidden: ['dropZones[new].image'],
+      hint: 'set with jumpmaster ctl or in the config file',
+    });
+    // Turning it on is a strengthening, open to a session; turning it off is not.
+    const on = await req(
+      'PATCH',
+      '/api/control/config',
+      { patch: { requireSignedImages: true }, expectRevision: 1 },
+      asSession,
+    );
+    expect(on.statusCode).toBe(200);
+    const off = await req(
+      'PATCH',
+      '/api/control/config',
+      { patch: { requireSignedImages: false, pollSeconds: 30 }, expectRevision: 2 },
+      asSession,
+    );
+    expect(off.statusCode).toBe(403);
+    expect(off.json().sessionForbidden).toEqual(['requireSignedImages']);
+    expect(store.current().pollSeconds).toBe(60);
+    expect(revVia(db)).toEqual(['setup', 'ui']);
+  });
+
+  test('a session rollback and import go through the classifier, and a dry run shows what would be guarded', async () => {
+    const { store, asSession } = configApp();
+    const token = { kind: 'operator', via: 'token', sudo: true } as const;
+    store.apply({ usage: { stopOnOverage: false } }, { via: 'ctl', principal: token }); // 2
+    store.apply({}, { via: 'ctl', principal: token }); // 3
+    const rb = await req('POST', '/api/control/config/rollback', { id: 2 }, asSession);
+    expect(rb.statusCode).toBe(409);
+    expect(rb.json().guarded.map((g: { path: string }) => g.path)).toEqual(['usage.stopOnOverage']);
+    const dry = await req(
+      'POST',
+      '/api/control/config/import',
+      { config: { mcp: { enabled: true } }, dryRun: true },
+      asSession,
+    );
+    expect(dry.statusCode).toBe(200);
+    expect(dry.json()).toMatchObject({
+      dryRun: true,
+      issues: [],
+      guarded: [{ path: 'mcp.enabled' }],
+      sessionForbidden: [],
+    });
+    const imp = await req(
+      'POST',
+      '/api/control/config/import',
+      { config: { mcp: { enabled: true } } },
+      asSession,
+    );
+    expect(imp.statusCode).toBe(409);
+    expect(
+      store.confirmations.pending(imp.json().pendingId, operatorHashOf(asSession))?.meta.via,
+    ).toBe('import');
+    expect(store.revision()).toBe(3);
+  });
+
+  test('repo on an existing zone is a 400 for the token and a session alike', async () => {
+    const { store, asSession } = configApp();
+    store.apply(
+      { dropZones: [zoneDoc()] },
+      { via: 'ctl', principal: { kind: 'operator', via: 'token', sudo: true } },
+    );
+    for (const headers of [auth, asSession]) {
+      const r = await req(
         'PATCH',
         '/api/control/config',
-        { patch: { requireSignedImages: false }, expectRevision: 1 },
-      ],
-      ['POST', '/api/control/config/rollback', { id: 1 }],
-      ['POST', '/api/control/config/import', { config: { dropZones: [] } }],
-      ['POST', '/api/control/config/import', { config: { pollSeconds: 30 }, dryRun: true }],
-    ] as const;
-    for (const [method, url, body] of tries) {
-      const r = await req(method, url, body, asSession);
-      expect(r.statusCode).toBe(403);
-      expect(r.json()).toEqual({
-        error: 'this needs the operator token: run it with jumpmaster ctl',
-      });
+        { patch: { dropZones: [zoneDoc('main', { repo: 'octo/elsewhere' })] }, expectRevision: 2 },
+        headers,
+      );
+      expect(r.statusCode).toBe(400);
+      expect(r.json().issues).toEqual([
+        {
+          path: 'dropZones[main].repo',
+          message: "the repository of a zone can't change: remove the zone and add a new one",
+        },
+      ]);
     }
-    expect(store.revision()).toBe(1);
-    expect(revVia(db)).toEqual(['setup']);
-    expect(listAudit(db).filter((a) => a.action.startsWith('config.'))).toEqual([]);
-    // The reads stay open to a session.
-    expect((await req('GET', '/api/control/config', undefined, asSession)).statusCode).toBe(200);
-    expect(
-      (await req('GET', '/api/control/config/revisions', undefined, asSession)).statusCode,
-    ).toBe(200);
-    expect((await req('GET', '/api/control/config/export', undefined, asSession)).statusCode).toBe(
-      200,
-    );
   });
 
   test('PATCH applies a merge patch as ctl from the token, audited, and conflicts on a stale revision', async () => {
@@ -904,6 +1050,8 @@ describe('config routes', () => {
       revision: 2,
       changed: ['dropZones[main]', 'pollSeconds'],
       restartNeeded: [],
+      // An added zone without egress is judged against the add baseline (monitor): guarded.
+      guarded: ['dropZones[main].egress.mode'],
     });
     // null removes a key (RFC 7396): pollSeconds goes back to its default.
     const two = await req('PATCH', '/api/control/config', {
@@ -1071,6 +1219,8 @@ describe('config routes', () => {
       // An absent side is absent in JSON too.
       changes: [{ path: 'pollSeconds', to: 15 }],
       issues: [],
+      guarded: [],
+      sessionForbidden: [],
     });
     expect(store.revision()).toBe(2);
     const done = await req('POST', '/api/control/config/import', {

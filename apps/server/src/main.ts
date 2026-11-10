@@ -122,6 +122,8 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
   // Forge pairs are built from the config as it is when they are asked for, and rebuilt only
   // when the zone's repository, identity or credentials change.
   const pairs = new ForgePairs();
+  // A removed zone (drained first) gives up its forge pairs with the revision that removes it.
+  live.subscribe((c) => pairs.retain(c.dropZones.map((z) => z.id)));
   const pairOf = (zoneId: string, opts: { requestTimeoutMs?: number } = {}): ForgePair => {
     const config = live.current();
     const zone = config.dropZones.find((z) => z.id === zoneId);

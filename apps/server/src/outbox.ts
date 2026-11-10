@@ -96,6 +96,13 @@ export class ForgePairs {
     return pair;
   }
 
+  /** Drops the pairs of zones not in `zoneIds` (removed from the config; drained first, T3). */
+  retain(zoneIds: readonly string[]): void {
+    const keep = new Set(zoneIds);
+    for (const slot of this.cache.keys())
+      if (!keep.has(slot.slice(0, slot.indexOf('\n')))) this.cache.delete(slot);
+  }
+
   size(): number {
     return this.cache.size;
   }

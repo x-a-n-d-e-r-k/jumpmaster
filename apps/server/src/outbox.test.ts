@@ -162,6 +162,20 @@ describe('FakeForgeState', () => {
     expect(pairs.size()).toBeLessThanOrEqual(2);
   });
 
+  test('ForgePairs forgets the pairs of zones no longer configured (a removed zone is drained first)', () => {
+    const pairs = new ForgePairs();
+    const tokens = { githubAuthorToken: 'a1', githubReviewerToken: 'r1' };
+    const zone = (id: string) => ({ id, repo: `o/${id}`, authorMayBeAdmin: false });
+    const kept = pairs.for(zone('a'), tokens);
+    pairs.for(zone('a'), tokens, { requestTimeoutMs: 5 });
+    pairs.for(zone('b'), tokens);
+    pairs.for(zone('b'), tokens, { requestTimeoutMs: 5 });
+    expect(pairs.size()).toBe(4);
+    pairs.retain(['a']);
+    expect(pairs.size()).toBe(2);
+    expect(pairs.for(zone('a'), tokens)).toBe(kept);
+  });
+
   test('credentialFingerprint is a short hash that changes with any forge token and holds none', () => {
     const s = { githubAuthorToken: 'ghp_author', githubReviewerToken: 'ghp_rev' };
     const fp = credentialFingerprint(s);
