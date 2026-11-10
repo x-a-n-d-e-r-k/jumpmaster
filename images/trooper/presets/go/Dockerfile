@@ -6,7 +6,7 @@
 # release, that default is a placeholder: once images/published.json lists the released trooper,
 # the default becomes its digest (images/images.test.ts checks the two agree; see
 # docs/runbooks/release.md).
-ARG BASE=node:24-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5
+ARG BASE=node:24-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9
 
 # Go 1.27.3 (released 2026-10-20). A named stage, so Dependabot bumps the digest.
 FROM golang:1.27.3-bookworm@sha256:dc0963f32053e4bc451d24d87e3892d42d01021b61f093e98eb95c0352bb84b0 AS go
