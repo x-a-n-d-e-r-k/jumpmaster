@@ -50,6 +50,7 @@ export function makeZone(o: Partial<DropZoneConfig> = {}): DropZoneConfig {
     trustPnpmBuildBlocking: false,
     reviewReadToken: false,
     attribution: true,
+    gateCi: true,
     crew: {
       enabled: false,
       goalPath: 'GOAL.md',

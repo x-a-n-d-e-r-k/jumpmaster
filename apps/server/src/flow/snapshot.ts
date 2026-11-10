@@ -319,12 +319,13 @@ async function gateChanges(
       );
       if (listings.some((l) => l === undefined)) continue; // marked unavailable: decide waits
       const entries = listings.map((l) => l ?? []);
-      if (pnpmfileInPlay(entries, headLock.text)) policy = { ...policy, allowAll: true };
+      if (pnpmfileInPlay(entries, headLock.text)) policy = { ...policy, pnpmfile: true };
     }
     const opts = {
       pnpmBlocksBuilds: blocks,
       allowAllBuilds: policy.allowAll,
       allowedBuilds: policy.allowed,
+      pnpmfile: policy.pnpmfile === true,
       gateBins: gateBins(zone.gates, basePkg.text, headPkg.text),
       detail,
     };

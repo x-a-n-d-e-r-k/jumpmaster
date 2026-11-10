@@ -178,13 +178,26 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   package that may build is still reported: one named in `onlyBuiltDependencies` or
   `allowBuilds`, or any package when `dangerouslyAllowAllBuilds` or an allow-list file is set,
   in `package.json`, `pnpm-workspace.yaml` or `.npmrc` (`dangerously-allow-all-builds`), at
-  base or head. A pnpmfile pnpm may load counts as allowing every build, since its
-  `hooks.updateConfig` can: a `.pnpmfile.*` or `pnpmfile.*` at the workspace root of the head, a
-  `pnpmfile` setting in `pnpm-workspace.yaml`, `package.json` or `.npmrc`, or a
-  `pnpmfileChecksum` in the head lockfile. Gates run with `CI=true`, so `pnpm install` in a gate
-  is frozen and refuses a lockfile that does not match.
+  base or head. A pnpmfile pnpm may load makes every new package park as `(pnpmfile present:
+  build policy not verifiable)`, since its `hooks.updateConfig` can allow every build: a
+  `.pnpmfile.*` or `pnpmfile.*` at the workspace root of the head, a `pnpmfile` setting in
+  `pnpm-workspace.yaml`, `package.json` or `.npmrc`, or a `pnpmfileChecksum` in the head
+  lockfile.
   - yarn and bun lockfiles are not read: a dependency change parks `lockfile format not
     supported: <file>`. Anything the reader does not expect parks `lockfile unreadable`.
+- `gateCi` (default `true`): gates (and the doctor's and verification's gate runs) get
+  `CI=true`. That changes what common tools do in a gate:
+  - `pnpm install` is frozen: a lockfile that disagrees with `package.json`, or with a pnpmfile
+    it doesn't record, fails the gate instead of being rewritten and installed;
+  - yarn berry and bun installs are immutable or frozen the same way;
+  - jest runs as `--ci`: a snapshot with no stored file fails instead of being written;
+  - test runners (vitest, jest, Create React App) don't start in watch mode;
+  - Create React App's build treats lint warnings as errors;
+  - anything else keyed on `process.env.CI` (Playwright configs, for one) takes its CI branch.
+  Set `"gateCi": false` to run gates with `CI=false`. That weakens the lockfile review: a gate's
+  plain install may then resolve afresh and run what it resolved. `CI` can't be a gate secret
+  (the server refuses one): the values that turn CI off are too short to be secrets, and secret
+  values are redacted from gate logs.
 - `overrideApprovers` (default `[]`): to let a gate script or gate tool change through, a
   person with maintain or admin on the repository approves the PR on GitHub. Write access is
   not enough unless the login is listed here. The approval must be their latest decisive review

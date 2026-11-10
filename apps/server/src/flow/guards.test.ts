@@ -341,16 +341,24 @@ describe('pnpmBuildPolicy: .npmrc', () => {
 // pnpm 11 applies a pnpmfile's hooks.updateConfig to build gating: returning
 // dangerouslyAllowAllBuilds: true runs every install script. The guard does not run the hook, so
 // any pnpmfile pnpm could load counts as allowing every build.
-describe('pnpmfile routes allow every build', () => {
+describe('pnpmfile routes make the build policy unverifiable', () => {
+  const pnpmfileOnly = { allowAll: false, allowed: [], pnpmfile: true };
   test('a pnpmfile key in pnpm-workspace.yaml (a path or a list)', () => {
-    expect(pnpmBuildPolicy([], ["packages: ['.']\npnpmfile: ./hooks.cjs\n"]).allowAll).toBe(true);
-    expect(pnpmBuildPolicy([], ["pnpmfile: ['./hooks.cjs']\n"]).allowAll).toBe(true);
+    expect(pnpmBuildPolicy([], ["packages: ['.']\npnpmfile: ./hooks.cjs\n"])).toEqual(pnpmfileOnly);
+    expect(pnpmBuildPolicy([], ["pnpmfile: ['./hooks.cjs']\n"])).toEqual(pnpmfileOnly);
+    expect(pnpmBuildPolicy([], ['globalPnpmfile: ./g.cjs\n'])).toEqual(pnpmfileOnly);
   });
 
   test('a pnpmfile or global-pnpmfile setting in .npmrc', () => {
-    expect(pnpmBuildPolicy([], [], ['pnpmfile=./hooks.cjs\n']).allowAll).toBe(true);
-    expect(pnpmBuildPolicy([], [], ['global-pnpmfile = /x.cjs\n']).allowAll).toBe(true);
+    expect(pnpmBuildPolicy([], [], ['pnpmfile=./hooks.cjs\n'])).toEqual(pnpmfileOnly);
+    expect(pnpmBuildPolicy([], [], ['global-pnpmfile = /x.cjs\n'])).toEqual(pnpmfileOnly);
   });
+
+  test('no pnpmfile anywhere leaves the field out', () =>
+    expect(pnpmBuildPolicy([], ["packages: ['.']\n"], [''])).toStrictEqual({
+      allowAll: false,
+      allowed: [],
+    }));
 
   test('a pnpmfile at the workspace root of the head', () => {
     for (const name of [
@@ -567,6 +575,18 @@ describe('pnpm lockfile', () => {
 
   test('with pnpm 10 pinned a new registry package is accepted', () =>
     expect(pnpm(sample, typesNode26(sample), pnpm10)).toEqual([]));
+
+  test('with a pnpmfile in play a new package is reported as unverifiable, ahead of allow-all', () => {
+    const head = withEntry(
+      sample,
+      'packages',
+      '  zz-new@1.0.0:\n    resolution: {integrity: sha512-bmV3}\n',
+    );
+    for (const extra of [{}, { allowAllBuilds: true }])
+      expect(pnpm(sample, head, { ...pnpm10, ...extra, pnpmfile: true })).toContain(
+        'dependency added: zz-new@1.0.0 (pnpmfile present: build policy not verifiable)',
+      );
+  });
 
   test('accepted builds still report a package allowed to build', () => {
     const head = typesNode26(sample);

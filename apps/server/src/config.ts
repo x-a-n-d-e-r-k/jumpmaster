@@ -220,6 +220,14 @@ const DropZoneObject = z.object({
    * runs that pnpm: an older pnpm runs install scripts with only a warning.
    */
   trustPnpmBuildBlocking: z.boolean().default(false),
+  /**
+   * Gates run with CI=true (frozen pnpm, immutable yarn berry and bun installs, jest --ci, no
+   * watch mode). `false` runs them with CI=false instead. A plain setting, not a gate secret:
+   * the values that turn CI off are too short to be secrets, and secrets are redacted from logs.
+   * Turning it off weakens the guard's lockfile review, since a gate install may then resolve
+   * afresh and run what it resolved.
+   */
+  gateCi: z.boolean().default(true),
   reviewReadToken: z.boolean().default(false),
   /** `false`: the agent adds no Claude co-author trailer or PR attribution. */
   attribution: z.boolean().default(true),
@@ -440,6 +448,11 @@ function loadZoneSecrets(
     }
     const values: Record<string, string> = {};
     for (const name of zone.gateSecrets) {
+      if (name === 'CI') {
+        throw new Error(
+          `zone ${zone.id}: gate secret CI is not allowed; gates run with CI=true, and the zone's "gateCi": false turns it off`,
+        );
+      }
       if (!GATE_SECRET_NAME.test(name) || RESERVED_NAME.test(name)) {
         throw new Error(`Invalid gate secret name: ${name}`);
       }

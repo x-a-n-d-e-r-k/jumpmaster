@@ -221,19 +221,27 @@ export function stoppedEarly(o: AgentOutcome): 'rate_limited' | 'interrupted' | 
 }
 
 /** What a gate step's extra environment comes from (an item drop's payload, or a doctor drop's). */
-export type GateEnvSource = { gateSecrets?: Record<string, string>; services?: ServiceSpec[] };
+export type GateEnvSource = {
+  gateSecrets?: Record<string, string>;
+  services?: ServiceSpec[];
+  gateCi?: boolean;
+};
 
 /**
- * CI=true, gate secrets and service addresses, set for a gate step after its environment is
- * scrubbed. CI=true makes `pnpm install` frozen: it refuses a lockfile that disagrees with
- * package.json, or with a pnpmfile the lockfile doesn't record, instead of rewriting it and
- * running what it resolved. A gate secret named CI (zone config) overrides it.
+ * Gate secrets, service addresses and CI, set for a gate step after its environment is scrubbed.
+ * CI=true makes `pnpm install` frozen: it refuses a lockfile that disagrees with package.json, or
+ * with a pnpmfile the lockfile doesn't record, instead of rewriting it and running what it
+ * resolved. The zone's `gateCi: false` (payload `gateCi`) sets CI=false; a gate secret can't.
  */
 export function gateExtraEnv(
   payload: GateEnvSource,
   hostOf: (service: ServiceSpec) => string = (s) => s.name,
 ): NodeJS.ProcessEnv {
-  return { CI: 'true', ...payload.gateSecrets, ...serviceEnv(payload, hostOf) };
+  return {
+    ...payload.gateSecrets,
+    ...serviceEnv(payload, hostOf),
+    CI: payload.gateCi === false ? 'false' : 'true',
+  };
 }
 
 /** Service addresses. Unlike gate secrets, the agent gets these too. */

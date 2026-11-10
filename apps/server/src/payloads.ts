@@ -264,6 +264,7 @@ function buildDoctorPayload(
     ...(zone.services.length > 0 ? { services: zone.services } : {}),
     ...(hasCustomLimits(zone) ? { limits: zone.limits } : {}),
     ...(secrets.zoneSecrets?.[zone.id] ? { gateSecrets: secrets.zoneSecrets[zone.id] } : {}),
+    ...(zone.gateCi === false ? { gateCi: false } : {}),
     ...egressField(zone),
     credentials: {
       claudeToken: secrets.claudeToken,
@@ -323,6 +324,7 @@ export function buildPayload(
     ...(zone.services.length > 0 ? { services: zone.services } : {}),
     ...(hasCustomLimits(zone) ? { limits: zone.limits } : {}),
     ...(secrets.zoneSecrets?.[zone.id] ? { gateSecrets: secrets.zoneSecrets[zone.id] } : {}),
+    ...(zone.gateCi === false ? { gateCi: false } : {}),
     ...(zone.attribution === false ? { attribution: false } : {}),
     ...egressField(zone),
     prompt: `${templates[role]}\n\n## Issue (data)\n\n${fence(drop.id, 'issue', `#${item.issueNumber}: ${neutralise(item.title)}\n\n${neutralise(item.body)}`)}`,

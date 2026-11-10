@@ -280,7 +280,7 @@ describe('buildSnapshot', () => {
     // pnpm runs a pnpmfile's hooks.updateConfig, which can allow every build: each route by which
     // pnpm finds one makes the new dependency reported.
     const allBuilds =
-      'dependency added: @types/node@26.6.5 (all builds allowed: its install script runs)';
+      'dependency added: @types/node@26.6.5 (pnpmfile present: build policy not verifiable)';
 
     test('trusted build blocking still reports when the head has a root .pnpmfile.mjs', async () => {
       w.zone.trustPnpmBuildBlocking = true;

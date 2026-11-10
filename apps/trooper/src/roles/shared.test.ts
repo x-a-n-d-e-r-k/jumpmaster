@@ -245,8 +245,16 @@ describe('gate secrets', () => {
     expect(r.state.gateExtraEnv).toEqual({ CI: 'true' });
   });
 
-  test('a gate secret named CI, set by the zone, wins over the default', () =>
-    expect(gateExtraEnv({ gateSecrets: { CI: '' } })).toEqual({ CI: '' }));
+  test('gateCi: false in the payload runs the gates with CI=false', async () => {
+    const r = recorder();
+    await runGatesPhase({ ...impl, gateCi: false }, r.deps, ctx, '/work/w1/repo');
+    expect(r.state.gateExtraEnv).toEqual({ CI: 'false' });
+  });
+
+  test('CI never comes from gate secrets: the zone setting decides', () => {
+    expect(gateExtraEnv({ gateSecrets: { CI: 'disabled-ci' } }).CI).toBe('true');
+    expect(gateExtraEnv({ gateSecrets: { CI: 'x'.repeat(8) }, gateCi: false }).CI).toBe('false');
+  });
 });
 
 describe('services', () => {
