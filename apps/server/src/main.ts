@@ -5,7 +5,13 @@ import { createApp } from './app.js';
 import { SetupMode, setupActive, setupCodeLine } from './auth/operator.js';
 import { configPathOf, loadBoot } from './config/boot.js';
 import { ConfigStore } from './config/store.js';
-import { type Config, secretList, startupWarnings } from './config.js';
+import {
+  type Config,
+  MAX_POLL_SECONDS,
+  MIN_POLL_SECONDS,
+  secretList,
+  startupWarnings,
+} from './config.js';
 import { creditsPass } from './credits.js';
 import { openDb } from './db/open.js';
 import { reconcileZone } from './flow/reconcile.js';
@@ -36,6 +42,15 @@ const realTimers: Timers = {
 };
 
 /**
+ * The interval for `pollSeconds`, clamped to the schema's bounds whatever reaches it: above
+ * 2^31-1 ms `setInterval` fires every millisecond, and a sub-second value is a busy loop.
+ */
+function pollMs(seconds: number): number {
+  if (!Number.isFinite(seconds)) return 60_000;
+  return Math.min(Math.max(seconds, MIN_POLL_SECONDS), MAX_POLL_SECONDS) * 1000;
+}
+
+/**
  * The poll timer, re-armed whenever an applied revision changes `pollSeconds`: the only consumer
  * that is not read at the top of a pass, since it decides when the pass runs.
  */
@@ -48,12 +63,12 @@ export function pollTimer(
   timers: Timers = realTimers,
 ): { stop(): void } {
   let seconds = source.current().pollSeconds;
-  let handle = timers.setInterval(run, seconds * 1000);
+  let handle = timers.setInterval(run, pollMs(seconds));
   const off = source.subscribe((c) => {
     if (c.pollSeconds === seconds) return;
     seconds = c.pollSeconds;
     timers.clearInterval(handle);
-    handle = timers.setInterval(run, seconds * 1000);
+    handle = timers.setInterval(run, pollMs(seconds));
   });
   return {
     stop() {

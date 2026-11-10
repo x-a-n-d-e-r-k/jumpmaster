@@ -223,7 +223,28 @@ describe('ctl config', () => {
     expect(s.store.revision()).toBe(3);
     const done = await run(['config', 'import', file], '', s.fetch);
     expect(done.code).toBe(0);
+    expect(s.fetch.calls.at(-1)?.body).toMatchObject({ expectRevision: 3 });
     expect(s.store.current().pollSeconds).toBe(90);
+    await s.app.close();
+  });
+
+  test('ctl config rollback and import refuse to overwrite a revision applied after they read', async () => {
+    const s = server();
+    await run(['config', 'set', 'pollSeconds=30'], '', s.fetch);
+    // Another editor applies between this ctl's read and its write.
+    const racing: typeof fetch = async (url, init) => {
+      const res = await s.fetch.impl(url, init);
+      if (String(url).endsWith('/api/control/config') && (init?.method ?? 'GET') === 'GET')
+        s.store.apply(
+          { pollSeconds: 45 },
+          { via: 'ctl', principal: { kind: 'operator', via: 'token', sudo: true } },
+        );
+      return res;
+    };
+    const back = await run(['config', 'rollback', '1'], '', { calls: [], impl: racing });
+    expect(back.code).toBe(1);
+    expect(back.out.join('\n')).toMatch(/^409 .*conflict/);
+    expect(s.store.current().pollSeconds).toBe(45);
     await s.app.close();
   });
 
@@ -256,7 +277,12 @@ describe('ctl config', () => {
     expect(revs.out).toContain('    pollSeconds: (unset) -> 30');
     const back = await run(['config', 'rollback', '1', 'undo', 'it'], '', s.fetch);
     expect(back.code).toBe(0);
-    expect(s.fetch.calls.at(-1)?.body).toEqual({ id: 1, note: 'undo it' });
+    // Conditional on the revision it read first: a newer change elsewhere is a conflict.
+    expect(s.fetch.calls.slice(-2).map((c) => `${c.method} ${c.url}`)).toEqual([
+      'GET /api/control/config',
+      'POST /api/control/config/rollback',
+    ]);
+    expect(s.fetch.calls.at(-1)?.body).toEqual({ id: 1, note: 'undo it', expectRevision: 2 });
     expect(s.store.current().pollSeconds).toBe(60);
     for (const [args, path, body] of [
       [['config', 'reload'], '/api/control/config/reload', {}],

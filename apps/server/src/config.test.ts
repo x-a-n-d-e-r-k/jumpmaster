@@ -9,6 +9,7 @@ import {
   parseEditable,
   STARTER_WARNING,
   secretList,
+  splitConfigFile,
   startupWarnings,
   zoneSecrets,
 } from './config.js';
@@ -570,6 +571,9 @@ describe('shipped example config', () => {
     expect(config.dropZones[0]?.crew.enabled).toBe(false);
     expect(config.mcp?.enabled).toBe(false);
     expect(JSON.parse(readFileSync(example, 'utf8')).mcp).toEqual({ enabled: false });
+    // Every key it ships is one the store knows (adopting it reports no unknown key).
+    const { editable } = splitConfigFile(example, readFileSync(example, 'utf8'));
+    expect(parseEditable(editable, { imageLockPath: lock, strict: true }).ok).toBe(true);
   });
 });
 
@@ -897,5 +901,66 @@ describe('parseEditable', () => {
       parseEditable({ dropZones: [{ ...rest, preset: 'python' }] }, { ...noLock, devImages: true })
         .ok,
     ).toBe(true);
+  });
+});
+
+describe('pollSeconds bounds', () => {
+  const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json') };
+  test('is a whole number of seconds from 5 to 86400', () => {
+    for (const ok of [5, 60, 86400])
+      expect(parseEditable({ pollSeconds: ok }, noLock).ok).toBe(true);
+    for (const bad of [0.001, 4, 2.5, 86401, 3_600_000]) {
+      const r = parseEditable({ pollSeconds: bad }, noLock);
+      expect(r.ok).toBe(false);
+      if (r.ok) continue;
+      expect(r.issues.map((i) => i.path)).toEqual(['pollSeconds']);
+    }
+  });
+});
+
+describe('unknown keys', () => {
+  const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json') };
+  const zone = { ...baseZone, protectedPaths: ['GOAL.md'] };
+
+  test('strict validation names every key the schema does not know, at any depth', () => {
+    const r = parseEditable(
+      {
+        pollseconds: 10,
+        usage: { throttleUtilisation: 0.5 },
+        dropZones: [{ ...zone, readylabel: 'x', crew: { enabled: false, goalpath: 'G' } }],
+        mcp: { enabled: false },
+        claude: { plan: 'pro' },
+      },
+      { ...noLock, strict: true },
+    );
+    expect(r).toEqual({
+      ok: false,
+      issues: [
+        { path: 'pollseconds', message: 'unknown key: it would have no effect' },
+        { path: 'usage.throttleUtilisation', message: 'unknown key: it would have no effect' },
+        { path: 'dropZones.0.readylabel', message: 'unknown key: it would have no effect' },
+        { path: 'dropZones.0.crew.goalpath', message: 'unknown key: it would have no effect' },
+      ],
+    });
+  });
+
+  test('records of free keys (per-role models) are not unknown keys', () => {
+    const r = parseEditable(
+      { dropZones: [{ ...zone, models: { review: 'm2' } }] },
+      { ...noLock, strict: true },
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  test('a key starting with _ is a comment, at any depth', () => {
+    const r = parseEditable(
+      { _about: 'my install', dropZones: [{ ...zone, _note: 'the main repo' }] },
+      { ...noLock, strict: true },
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  test('without strict, as an M4 file is read, unknown keys are ignored as before', () => {
+    expect(parseEditable({ pollseconds: 10 }, noLock).ok).toBe(true);
   });
 });

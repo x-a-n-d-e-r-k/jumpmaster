@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createApp } from '../app.js';
 import { SetupMode, setupActive } from '../auth/operator.js';
+import type { LiveConfig } from '../config/source.js';
 import type { Config } from '../config.js';
 import { openDb } from '../db/open.js';
 import {
@@ -81,7 +82,7 @@ function setup(
     leaseWaitMs?: number;
     leasePollMs?: number;
     now?: () => Date;
-    config?: Config;
+    config?: LiveConfig;
     logs?: string[];
   } = {},
 ) {
@@ -583,6 +584,29 @@ describe('stick capabilities, per zone', () => {
       expect((await leaseWith(stickToken, bad)).statusCode, JSON.stringify(bad).slice(0, 40)).toBe(
         400,
       );
+  });
+
+  test('a long poll judges what the stick can run afresh each poll: a zone whose egress turns off mid-poll is leased', async () => {
+    const off = { ...locked, egress: { mode: 'off' as const } };
+    let armed = false;
+    let reads = 0;
+    const source = {
+      current: (): Config => {
+        if (armed) reads += 1;
+        // The first poll sees the enforce zone; a revision then turns its egress off.
+        return armed && reads > 1
+          ? twoZones({ dropZones: [config.dropZones[0]!, off] })
+          : twoZones();
+      },
+    };
+    const { db } = setup({ queued: false, config: source, leaseWaitMs: 5000, leasePollMs: 1 });
+    lockedDrop(db);
+    const { stickToken } = await enroll();
+    armed = true;
+    const res = await lease(stickToken);
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { dropId: string }).dropId).toBe('x1');
+    expect(skippedOf(res)).toBeUndefined();
   });
 
   test('a stick without egress-v1 skips an enforce zone drop and leases a drop from an off zone', async () => {

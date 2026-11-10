@@ -179,9 +179,6 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       // Every lease call says what the stick can do now, and that it is alive.
       stampStick(db, stick.id, advertOf(body.data), now());
       if (body.data.freeSlots < 1) return reply.code(204).send();
-      const cannot = incapable(body.data, live());
-      const exclude = cannot.map((c) => c.zoneId);
-
       let closed = false;
       // Not req.raw: IncomingMessage 'close' fires once the body is consumed, not on disconnect.
       reply.raw.on('close', () => {
@@ -190,8 +187,11 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       const deadline = Date.now() + waitMs;
       for (;;) {
         const at = now();
-        // Each poll reads the config afresh: the payload is built from the one the lease saw.
+        // Each poll reads the config afresh, and judges what the stick can run against it: the
+        // payload is built from the config the lease saw.
         const config = live();
+        const cannot = incapable(body.data, config);
+        const exclude = cannot.map((c) => c.zoneId);
         const leased = leaseNextDrop(db, stick.id, at, dispatchGate(db, config.usage, at), exclude);
         if (leased) {
           reportSkips(reply, stick, cannot);

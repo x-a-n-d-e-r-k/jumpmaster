@@ -120,6 +120,22 @@ describe('modes at start', () => {
     expect(() => w.open()).toThrow(/Invalid config .*dropZones\.0\.repo/);
   });
 
+  test('db mode whose current revision is missing or dangling stops the server rather than starting empty', () => {
+    for (const damage of [
+      "DELETE FROM settings WHERE key = 'config.current'",
+      "UPDATE settings SET value_json = '99' WHERE key = 'config.current'",
+    ]) {
+      const w = world();
+      const store = w.open();
+      store.apply({ dropZones: [zone()] }, { via: 'ctl', principal: token });
+      w.db.exec(damage);
+      expect(() => w.open()).toThrow(
+        /config mode is db, but the current revision is missing: restore the data directory/,
+      );
+      expect(revCount(w.db)).toBe(2);
+    }
+  });
+
   test('file mode with its file gone stops the server rather than starting empty', () => {
     const w = world({ dropZones: [zone()] });
     w.open();
@@ -512,6 +528,85 @@ describe('apply', () => {
     });
     store.apply({ pollSeconds: 5 }, { via: 'ctl', principal: token, note: '<script>x</script>' });
     expect(store.revisions(10)[0]?.note).toBe('<script>x</script>');
+  });
+});
+
+describe('unknown keys', () => {
+  test('an apply carrying an unknown key is refused at its path: nothing is stored without effect', () => {
+    const w = world();
+    const store = w.open();
+    expect(store.apply({ pollseconds: 10 }, { via: 'ctl', principal: token })).toEqual({
+      ok: false,
+      issues: [{ path: 'pollseconds', message: 'unknown key: it would have no effect' }],
+    });
+    expect(revCount(w.db)).toBe(1);
+  });
+
+  test('a file with an unknown key still runs in file mode, as in M4, but adopting it names the key', () => {
+    const w = world({ dropZones: [zone('main', { readylabel: 'x' })] });
+    const store = w.open();
+    expect(store.mode()).toBe('file');
+    const r = store.adopt({ principal: token });
+    expect(r).toEqual({
+      ok: false,
+      issues: [{ path: 'dropZones.0.readylabel', message: 'unknown key: it would have no effect' }],
+    });
+    expect(store.mode()).toBe('file');
+    expect(revVia(w.db)).toEqual(['file']);
+  });
+});
+
+describe('seams for Tasks 3 and 4', () => {
+  test('validateOnly judges a document as apply would and changes nothing', () => {
+    const w = world();
+    const store = w.open();
+    const ok = store.validateOnly({ dropZones: [zone('a')] });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ok.config.dropZones.map((z) => z.id)).toEqual(['a']);
+    expect(store.validateOnly({ pollseconds: 9 })).toEqual({
+      ok: false,
+      issues: [{ path: 'pollseconds', message: 'unknown key: it would have no effect' }],
+    });
+    expect(store.revision()).toBe(1);
+    expect(store.current().dropZones).toEqual([]);
+  });
+
+  test('refreshSecrets swaps in re-read secrets with no new revision, tells subscribers, and keeps the old ones on failure', () => {
+    const w = world();
+    let author = 'author-before-0001';
+    let fail = false;
+    const secrets = () => {
+      if (fail) throw new Error('JM_GITHUB_AUTHOR_TOKEN_FILE is unreadable');
+      return {
+        claudeToken: 'claude-x-0001',
+        githubAuthorToken: author,
+        githubReviewerToken: 'reviewer-x-0001',
+        joinToken: 'join-x-0001',
+        operatorToken: 'o'.repeat(32),
+      };
+    };
+    const store = w.open({ secretsFor: secrets });
+    const seen: { rev: number; author: string; changes: number }[] = [];
+    store.subscribe((c, rev, changes) =>
+      seen.push({ rev, author: c.secrets.githubAuthorToken, changes: changes.length }),
+    );
+    author = 'author-after-0002';
+    expect(store.refreshSecrets()).toEqual({
+      ok: true,
+      revision: 1,
+      changed: [],
+      restartNeeded: [],
+    });
+    expect(store.current().secrets.githubAuthorToken).toBe('author-after-0002');
+    expect(seen).toEqual([{ rev: 1, author: 'author-after-0002', changes: 0 }]);
+    expect(revCount(w.db)).toBe(1);
+    fail = true;
+    expect(store.refreshSecrets()).toEqual({
+      ok: false,
+      issues: [{ path: '', message: 'JM_GITHUB_AUTHOR_TOKEN_FILE is unreadable' }],
+    });
+    expect(store.current().secrets.githubAuthorToken).toBe('author-after-0002');
+    expect(seen).toHaveLength(1);
   });
 });
 

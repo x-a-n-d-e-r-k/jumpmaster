@@ -21,6 +21,7 @@ import {
   canonicalJson,
   deleteSetting,
   getRevision,
+  getRevisions,
   getSetting,
   hashOf,
   insertRevision,
@@ -93,6 +94,8 @@ const refused = (message: string, path = ''): ApplyResult => ({
   ok: false,
   issues: [{ path, message }],
 });
+const tooLong = (note: string | undefined): boolean => note !== undefined && note.length > MAX_NOTE;
+const noteRefused = (): ApplyResult => refused(`a note is at most ${MAX_NOTE} characters`, 'note');
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 
@@ -151,6 +154,11 @@ export class ConfigStore implements ConfigSource {
       s.load(doc, v);
     } else {
       let cur = s.storedCurrent();
+      // An install already in db mode never starts empty: that would drop every zone.
+      if (!cur && stored === 'db')
+        throw new Error(
+          'config mode is db, but the current revision is missing: restore the data directory from a backup, or the config file from `ctl config export`',
+        );
       if (!cur) {
         db.transaction(() => {
           const id = insertRevision(db, { parentId: null, doc: {}, via: 'setup' }, now);
@@ -234,15 +242,14 @@ export class ConfigStore implements ConfigSource {
 
   /** Validates `next` as the whole editable document and stores it as a new revision. */
   apply(next: unknown, meta: ApplyMeta): ApplyResult {
-    if (meta.note !== undefined && meta.note.length > MAX_NOTE)
-      return refused(`a note is at most ${MAX_NOTE} characters`, 'note');
+    if (tooLong(meta.note)) return noteRefused();
     if (this.modeValue === 'file')
       return refused(
         `config is managed by the file at ${this.o.filePath}: edit it and run \`jumpmaster ctl config reload\`, or adopt it into the UI`,
       );
     if (meta.expectRevision !== undefined && meta.expectRevision !== this.rev)
       return { ok: false, conflict: { expected: meta.expectRevision, actual: this.rev } };
-    const v = this.validate(next);
+    const v = this.validate(next, true);
     if ('issues' in v) return { ok: false, issues: v.issues };
     const doc = next as Record<string, unknown>;
     if (hashOf(canonicalJson(doc)) === hashOf(canonicalJson(this.doc))) return unchanged(this.rev);
@@ -263,7 +270,7 @@ export class ConfigStore implements ConfigSource {
   preview(json: unknown): { changes: Change[]; issues: ConfigIssue[] } {
     const s = this.withoutBoot(json);
     if ('issues' in s) return { changes: [], issues: s.issues };
-    const v = this.validate(s.doc);
+    const v = this.validate(s.doc, true);
     return { changes: diff(this.doc, s.doc), issues: 'issues' in v ? v.issues : [] };
   }
 
@@ -278,6 +285,31 @@ export class ConfigStore implements ConfigSource {
     if (dataDir !== undefined && dataDir !== exported.dataDir)
       issues.push({ path: 'dataDir', message: BOOT_MESSAGE });
     return issues.length > 0 ? { issues } : { doc };
+  }
+
+  /**
+   * Judges `next` exactly as `apply` would (strict schema, rules, secrets) and changes nothing:
+   * the seam for a caller that must look at the validated document before applying it (Task 3's
+   * guarded-path classifier).
+   */
+  validateOnly(
+    next: unknown,
+  ): { ok: true; config: EditableConfig } | { ok: false; issues: ConfigIssue[] } {
+    const v = this.validate(next, true);
+    return 'issues' in v ? { ok: false, issues: v.issues } : { ok: true, config: v.editable };
+  }
+
+  /**
+   * Re-reads the secrets for the current zones (Task 4: a credential replaced or a secrets
+   * reload) and swaps them in with no new revision; subscribers hear it with no changes, so the
+   * forge pairs rebuild at the next pass. A failed read keeps the old secrets.
+   */
+  refreshSecrets(): ApplyResult {
+    const v = this.validate(this.doc);
+    if ('issues' in v) return { ok: false, issues: v.issues };
+    this.load(this.doc, v);
+    this.notify([]);
+    return unchanged(this.rev);
   }
 
   /** A new revision with an old revision's content; history is never deleted. */
@@ -327,9 +359,11 @@ export class ConfigStore implements ConfigSource {
   /** File mode → db mode: the file as it is now becomes a revision `via: 'adopt'`. */
   adopt(meta: OpMeta): ApplyResult {
     if (this.modeValue === 'db') return refused('config is already in the database (db mode)');
+    // Before the reload, which may itself record a revision.
+    if (tooLong(meta.note)) return noteRefused();
     const r = this.reload();
     if (!r.ok) return r;
-    const v = this.validate(this.doc);
+    const v = this.validate(this.doc, true);
     if ('issues' in v) return { ok: false, issues: v.issues };
     const done = this.commit(this.doc, v, 'adopt', meta.note, 'db');
     if (done.ok) done.restartNeeded = r.restartNeeded;
@@ -356,7 +390,7 @@ export class ConfigStore implements ConfigSource {
       return refused(
         'the file differs from the current config: write `ctl config export` to it first',
       );
-    const v = this.validate(this.doc);
+    const v = this.validate(this.doc, true);
     if ('issues' in v) return { ok: false, issues: v.issues };
     return this.commit(this.doc, v, 'ctl', 'to file mode', 'file');
   }
@@ -368,20 +402,37 @@ export class ConfigStore implements ConfigSource {
 
   revisions(limit: number): RevisionView[] {
     const { db } = this.o;
-    return listRevisions(db, limit).map((r) => {
-      const parent = r.parentId === null ? undefined : getRevision(db, r.parentId);
+    const list = listRevisions(db, limit);
+    // Parents in one query: most are in the list itself, the oldest one's usually is not.
+    const parents = new Map(list.map((r) => [r.id, r.doc]));
+    const missing = list.flatMap((r) =>
+      r.parentId !== null && !parents.has(r.parentId) ? [r.parentId] : [],
+    );
+    for (const p of getRevisions(db, missing)) parents.set(p.id, p.doc);
+    return list.map((r) => {
+      const parent = r.parentId === null ? undefined : parents.get(r.parentId);
       return {
         id: r.id,
         parentId: r.parentId,
         createdAt: r.createdAt,
         via: r.via,
         note: r.note,
-        changes: diff(parent?.doc ?? {}, r.doc),
+        changes: diff(parent ?? {}, r.doc),
       };
     });
   }
 
   // -------------------------------------------------------------------------------------------
+
+  private notify(changes: Change[]): void {
+    for (const fn of this.subscribers) {
+      try {
+        fn(this.cfg, this.rev, changes);
+      } catch (e) {
+        this.o.log?.(`config subscriber failed: ${(e as Error).message}`);
+      }
+    }
+  }
 
   private exportDoc(): Record<string, unknown> {
     const { listen, dataDir } = this.o.boot;
@@ -411,10 +462,16 @@ export class ConfigStore implements ConfigSource {
     return typeof id === 'number' ? getRevision(this.o.db, id) : undefined;
   }
 
-  private validate(doc: unknown): Valid | { issues: ConfigIssue[] } {
+  /**
+   * `strict` (every write from the UI, ctl, an import or an adopt) refuses keys the schema does
+   * not know. The file as file mode reads it, and a stored revision at start, are read as M4 read
+   * the file: unknown keys ignored.
+   */
+  private validate(doc: unknown, strict = false): Valid | { issues: ConfigIssue[] } {
     const parsed = parseEditable(doc, {
       ...(this.o.imageLockPath ? { imageLockPath: this.o.imageLockPath } : {}),
       devImages: this.o.env.JM_DEV_IMAGES === '1',
+      strict,
     });
     if (!parsed.ok) return { issues: parsed.issues };
     try {
@@ -479,6 +536,8 @@ export class ConfigStore implements ConfigSource {
     note?: string,
     mode?: ConfigMode,
   ): ApplyResult {
+    // Every path checks the note first; this keeps a long one a refusal, never a storage error.
+    if (tooLong(note)) return noteRefused();
     const { db } = this.o;
     const now = this.o.now();
     const before = this.cfg.dropZones.map((z) => z.id);
@@ -501,13 +560,7 @@ export class ConfigStore implements ConfigSource {
     this.load(doc, v);
     const after = restartValues(v.editable);
     const restartNeeded = RESTART_PATHS.filter((p) => was[p] !== after[p]);
-    for (const fn of this.subscribers) {
-      try {
-        fn(this.cfg, id, changes);
-      } catch (e) {
-        this.o.log?.(`config subscriber failed: ${(e as Error).message}`);
-      }
-    }
+    this.notify(changes);
     return { ok: true, revision: id, changed: changes.map((c) => c.path), restartNeeded };
   }
 }

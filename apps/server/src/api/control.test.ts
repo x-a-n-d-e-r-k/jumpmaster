@@ -860,14 +860,45 @@ describe('config routes', () => {
     for (const s of Object.values(env)) expect(r.body).not.toContain(s);
   });
 
-  test('PATCH applies a merge patch as ui from a session and ctl from the token, audited, and conflicts on a stale revision', async () => {
+  test('until guarded paths land (Task 3), PATCH, rollback and import need the token: a session gets 403 and changes nothing', async () => {
     const { db, store, asSession } = configApp();
-    const one = await req(
-      'PATCH',
-      '/api/control/config',
-      { patch: { pollSeconds: 30, dropZones: [zoneDoc()] }, expectRevision: 1, note: 'first' },
-      asSession,
+    const tries = [
+      [
+        'PATCH',
+        '/api/control/config',
+        { patch: { requireSignedImages: false }, expectRevision: 1 },
+      ],
+      ['POST', '/api/control/config/rollback', { id: 1 }],
+      ['POST', '/api/control/config/import', { config: { dropZones: [] } }],
+      ['POST', '/api/control/config/import', { config: { pollSeconds: 30 }, dryRun: true }],
+    ] as const;
+    for (const [method, url, body] of tries) {
+      const r = await req(method, url, body, asSession);
+      expect(r.statusCode).toBe(403);
+      expect(r.json()).toEqual({
+        error: 'this needs the operator token: run it with jumpmaster ctl',
+      });
+    }
+    expect(store.revision()).toBe(1);
+    expect(revVia(db)).toEqual(['setup']);
+    expect(listAudit(db).filter((a) => a.action.startsWith('config.'))).toEqual([]);
+    // The reads stay open to a session.
+    expect((await req('GET', '/api/control/config', undefined, asSession)).statusCode).toBe(200);
+    expect(
+      (await req('GET', '/api/control/config/revisions', undefined, asSession)).statusCode,
+    ).toBe(200);
+    expect((await req('GET', '/api/control/config/export', undefined, asSession)).statusCode).toBe(
+      200,
     );
+  });
+
+  test('PATCH applies a merge patch as ctl from the token, audited, and conflicts on a stale revision', async () => {
+    const { db, store } = configApp();
+    const one = await req('PATCH', '/api/control/config', {
+      patch: { pollSeconds: 30, dropZones: [zoneDoc()] },
+      expectRevision: 1,
+      note: 'first',
+    });
     expect(one.statusCode).toBe(200);
     expect(one.json()).toEqual({
       revision: 2,
@@ -882,7 +913,7 @@ describe('config routes', () => {
     expect(two.statusCode).toBe(200);
     expect(store.current().pollSeconds).toBe(60);
     expect(store.document()).toEqual({ dropZones: [zoneDoc()] });
-    expect(revVia(db)).toEqual(['setup', 'ui', 'ctl']);
+    expect(revVia(db)).toEqual(['setup', 'ctl', 'ctl']);
     const stale = await req('PATCH', '/api/control/config', {
       patch: { pollSeconds: 5 },
       expectRevision: 2,
@@ -892,9 +923,19 @@ describe('config routes', () => {
     const audits = listAudit(db).filter((a) => a.action === 'config.apply');
     expect(audits.map((a) => [a.via, a.detail.revision])).toEqual([
       ['token', 3],
-      ['session', 2],
+      ['token', 2],
     ]);
     expect(audits[1]?.detail.changed).toBe('dropZones[main], pollSeconds');
+  });
+
+  test('adopt with a note over 500 characters is a 400 naming the note, not a storage error', async () => {
+    const { store } = configApp({ dropZones: [zoneDoc()] });
+    const r = await req('POST', '/api/control/config/adopt', { note: 'x'.repeat(501) });
+    expect(r.statusCode).toBe(400);
+    expect(r.json()).toEqual({
+      issues: [{ path: 'note', message: 'a note is at most 500 characters' }],
+    });
+    expect(store.mode()).toBe('file');
   });
 
   test('PATCH refuses an invalid document by path, a boot setting, a long note and a missing revision, changing nothing', async () => {

@@ -86,6 +86,18 @@ export function getRevision(db: Db, id: number): Revision | undefined {
   return row ? fromRow(row) : undefined;
 }
 
+/** The revisions with these ids, in one query (order unspecified). */
+export function getRevisions(db: Db, ids: number[]): Revision[] {
+  if (ids.length === 0) return [];
+  return (
+    db
+      .prepare(
+        `SELECT ${COLUMNS} FROM config_revisions WHERE id IN (${ids.map(() => '?').join(', ')})`,
+      )
+      .all(...ids) as Row[]
+  ).map(fromRow);
+}
+
 /** The newest first. */
 export function listRevisions(db: Db, limit: number): Revision[] {
   return (

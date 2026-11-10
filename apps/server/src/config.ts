@@ -54,6 +54,8 @@ export const DEFAULT_PROTECTED_PATHS = [
 ];
 
 export const DEFAULT_PIDS_LIMIT = 512;
+export const MIN_POLL_SECONDS = 5;
+export const MAX_POLL_SECONDS = 86_400;
 export const EGRESS_MODES = ['off', 'monitor', 'enforce'] as const;
 /**
  * `two-bot`: an author and a reviewer account. `starter`: the author account alone; the reviewer
@@ -305,7 +307,8 @@ export const BOOT_MESSAGE = 'set in the config file or the environment; restart 
 
 /** Everything the UI and `ctl` may edit: the config without boot settings and without secrets. */
 export const EditableSchema = z.object({
-  pollSeconds: z.number().positive().default(60),
+  /** Seconds between passes: a cadence, never a busy loop or past setInterval's 2^31-1 ms. */
+  pollSeconds: z.number().int().min(MIN_POLL_SECONDS).max(MAX_POLL_SECONDS).default(60),
   dropZones: z.array(DropZoneSchema).default([]),
   usage: z
     .object({
@@ -500,6 +503,24 @@ const isPlainObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 
 /**
+ * Keys in `input` that the schema dropped from `output` (zod strips what it doesn't know), at
+ * any depth: a typo such as `pollseconds` would otherwise be stored and exported with no effect.
+ * Records of free keys (per-role `models`) keep their keys and are never reported. A key starting
+ * with `_` is a comment (JSON has none; the shipped example carries `_about`): kept, not reported.
+ */
+function unknownKeys(input: unknown, output: unknown, path: string): ConfigIssue[] {
+  const at = (k: string) => (path === '' ? k : `${path}.${k}`);
+  if (Array.isArray(input) && Array.isArray(output))
+    return input.flatMap((v, i) => unknownKeys(v, output[i], at(String(i))));
+  if (!isPlainObject(input) || !isPlainObject(output)) return [];
+  return Object.keys(input).flatMap((k) =>
+    k.startsWith('_') || k in output
+      ? unknownKeys(input[k], output[k], at(k))
+      : [{ path: at(k), message: 'unknown key: it would have no effect' }],
+  );
+}
+
+/**
  * Validates an editable document (the config without `listen`, `dataDir` and secrets) with every
  * rule the config can judge alone: the schema, duplicate zone ids, image resolution, digest refs
  * for signed zones, and a zone never weakening `requireSignedImages`. The rules that need a
@@ -507,7 +528,8 @@ const isPlainObject = (v: unknown): v is Record<string, unknown> =>
  */
 export function parseEditable(
   json: unknown,
-  opts: { imageLockPath?: string; devImages?: boolean } = {},
+  /** `strict`: a key the schema doesn't know is an issue (every write from the UI or ctl). */
+  opts: { imageLockPath?: string; devImages?: boolean; strict?: boolean } = {},
 ): { ok: true; config: EditableConfig } | { ok: false; issues: ConfigIssue[] } {
   if (!isPlainObject(json))
     return { ok: false, issues: [{ path: '', message: 'the config must be a JSON object' }] };
@@ -520,6 +542,10 @@ export function parseEditable(
       ok: false,
       issues: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
     };
+  if (opts.strict) {
+    const unknown = unknownKeys(json, parsed.data, '');
+    if (unknown.length > 0) return { ok: false, issues: unknown };
+  }
   const issues: ConfigIssue[] = [];
   const seen = new Set<string>();
   for (const [i, zone] of parsed.data.dropZones.entries()) {

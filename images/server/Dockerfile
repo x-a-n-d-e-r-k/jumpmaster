@@ -69,6 +69,9 @@ ENV NODE_ENV=production \
     TMPDIR=/tmp
 WORKDIR /app
 USER 10000:10000
+# Publish it on loopback (compose does: 127.0.0.1:7420). Run by hand, use
+# `docker run -p 127.0.0.1:7420:7420 …`: without a config file the server starts in db mode on
+# 0.0.0.0, and a bare `-p 7420:7420` would offer the setup page to the network.
 EXPOSE 7420
 ENTRYPOINT ["jumpmaster"]
 CMD ["serve"]

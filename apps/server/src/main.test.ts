@@ -159,3 +159,28 @@ test('a changed pollSeconds re-arms the poll timer', () => {
   timer.stop();
   expect(events).toEqual(['set 1 60000', 'clear 1', 'set 2 15000', 'clear 2']);
 });
+
+test('the poll timer clamps what it arms to 5 seconds and a day, whatever it is given', () => {
+  const armed: number[] = [];
+  const timers = {
+    setInterval: (_fn: () => void, ms: number) => {
+      armed.push(ms);
+      return armed.length as unknown as NodeJS.Timeout;
+    },
+    clearInterval: () => undefined,
+  };
+  let fire: (c: { pollSeconds: number }) => void = () => undefined;
+  const source = {
+    current: () => ({ pollSeconds: 3_000_000 }),
+    subscribe: (fn: (c: { pollSeconds: number }) => void) => {
+      fire = fn;
+      return () => undefined;
+    },
+  };
+  const timer = pollTimer(source, () => undefined, timers);
+  fire({ pollSeconds: 0.001 });
+  fire({ pollSeconds: Number.NaN });
+  timer.stop();
+  // Never past setInterval's 2^31-1 ms limit (which Node turns into 1 ms), never a busy loop.
+  expect(armed).toEqual([86_400_000, 5_000, 60_000]);
+});

@@ -546,9 +546,15 @@ const pathsOf = (changed: string[]): string => {
 };
 
 /**
- * The config store's routes (§10.3 live config). Both principals reach them; a session's apply is
+ * The config store's routes (§10.3 live config). Both principals read; a session's apply is
  * recorded `via: 'ui'`, the token's `via: 'ctl'`. `mode file` is the token's alone. Every
  * successful write is audited from named fields: the revision and the paths, never a value.
+ *
+ * Until Task 3: PATCH, rollback and import (dry runs included) take the operator token only. They
+ * can weaken `requireSignedImages`, set a zone's image, turn egress off or remove a zone with work
+ * running, and the guarded-path classifier, the confirmation page and the drained-zone rule that
+ * make those safe from a browser land with Task 3, which lifts this `tokenOnly` for sessions.
+ * Adopt and reload stay open to a session: they apply what the operator's own file says.
  */
 function registerConfigRoutes(
   scope: FastifyInstance,
@@ -556,8 +562,11 @@ function registerConfigRoutes(
   audit: (req: FastifyRequest, action: string, detail: AuditDetail, target?: string) => void,
   tokenOnly: (req: FastifyRequest, reply: FastifyReply) => boolean,
 ): void {
-  const principalOf = (req: FastifyRequest): Principal =>
-    req.principal ?? { kind: 'operator', via: 'token', sudo: true };
+  // The guard sets a principal on every control route or answers 401; never assume one.
+  const principalOf = (req: FastifyRequest): Principal => {
+    if (!req.principal) throw new Error('a config route was reached without a principal');
+    return req.principal;
+  };
   const viaOf = (req: FastifyRequest): 'ui' | 'ctl' =>
     req.principal?.via === 'session' ? 'ui' : 'ctl';
   /** An apply's answer: 200 with the revision, 400 with issues by path, 409 on a stale revision. */
@@ -594,6 +603,7 @@ function registerConfigRoutes(
   });
 
   scope.patch('/api/control/config', async (req, reply) => {
+    if (!tokenOnly(req, reply)) return reply; // Task 3 lifts this (see above).
     const body = PatchBody.safeParse(req.body ?? {});
     if (!body.success)
       return invalid(reply, '{"patch": {…}, "expectRevision": <revision>, "note"?: "…"}');
@@ -614,6 +624,7 @@ function registerConfigRoutes(
   });
 
   scope.post('/api/control/config/rollback', async (req, reply) => {
+    if (!tokenOnly(req, reply)) return reply; // Task 3 lifts this (see above).
     const body = RollbackBody.safeParse(req.body ?? {});
     if (!body.success) return invalid(reply, '{"id": <revision>, "note"?: "…"}');
     const { id, note, expectRevision } = body.data;
@@ -660,6 +671,7 @@ function registerConfigRoutes(
   );
 
   scope.post('/api/control/config/import', async (req, reply) => {
+    if (!tokenOnly(req, reply)) return reply; // Task 3 lifts this (see above).
     const body = ImportBody.safeParse(req.body ?? {});
     if (!body.success) return invalid(reply, '{"config": {…}, "dryRun"?: true}');
     const { config, dryRun, note, expectRevision } = body.data;

@@ -259,9 +259,16 @@ async function runConfig(
       err(`cannot read ${words[0]}: ${e instanceof Error ? e.message : String(e)}`);
       return 2;
     }
+    // A real import is conditional on the revision read just before it, as `set` is.
+    let expectRevision: number | undefined;
+    if (!dry) {
+      const cur = await call('GET', '/api/control/config');
+      if (!cur.ok) return fail(cur);
+      expectRevision = ((await cur.json()) as { revision: number }).revision;
+    }
     const res = await call('POST', '/api/control/config/import', {
       config,
-      ...(dry ? { dryRun: true } : {}),
+      ...(dry ? { dryRun: true } : { expectRevision }),
       ...(n.value !== undefined ? { note: n.value } : {}),
     });
     if (!res.ok) return fail(res);
@@ -280,10 +287,18 @@ async function runConfig(
 
   const request = configRequest(args);
   if (!request) return usage();
+  let body = request.method === 'GET' ? undefined : request.body;
+  if (verb === 'rollback') {
+    // Conditional on the revision read just before it: a change made meanwhile is a conflict.
+    const cur = await call('GET', '/api/control/config');
+    if (!cur.ok) return fail(cur);
+    const { revision } = (await cur.json()) as { revision: number };
+    body = { ...(body as object), expectRevision: revision };
+  }
   const res =
     request.method === 'GET'
       ? await call('GET', request.path)
-      : await call('POST', request.path, request.body);
+      : await call('POST', request.path, body);
   if (!res.ok) return fail(res);
   if (verb === 'export') {
     // Exactly the JSON: `out` ends the line the JSON's own trailing newline would.
