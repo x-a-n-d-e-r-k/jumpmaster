@@ -46,6 +46,7 @@ import {
   revokeMcpToken,
 } from '../mcp/tokens.js';
 import type { ForgePair } from '../outbox.js';
+import { safeNext } from '../ui/auth-pages.js';
 
 export interface ControlDeps {
   db: Db;
@@ -130,6 +131,8 @@ export function originAllowed(origin: string | undefined, allowed: string[]): bo
 export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): void {
   const { db, now } = deps;
   const live = configReader(deps.config);
+  /** The request's snapshot (taken by the guard), so a handler that awaits sees one revision. */
+  const cfg = (req: FastifyRequest): Config => req.jmConfig ?? live();
   const setup = deps.setup ?? stderrSetupMode(live().listen);
   const backoff = deps.backoff ?? new Backoff();
   const audit = (req: FastifyRequest, action: string, detail: AuditDetail, target?: string) =>
@@ -142,7 +145,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         detail,
       },
       now(),
-      secretList(live().secrets),
+      secretList(cfg(req).secrets),
     );
   /** Routes for `ctl` alone: a session is refused, whatever its sudo. */
   const tokenOnly = (req: FastifyRequest, reply: FastifyReply): boolean => {
@@ -249,7 +252,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
     });
 
     scope.post<{ Params: { id: string } }>('/api/control/zones/:id', async (req, reply) => {
-      const zone = live().dropZones.find((z) => z.id === req.params.id);
+      const zone = cfg(req).dropZones.find((z) => z.id === req.params.id);
       if (!zone) return reply.code(404).send({ error: 'unknown zone' });
       const body = ZoneBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: 'invalid mode' });
@@ -305,7 +308,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
     scope.post<{ Params: { id: string } }>(
       '/api/control/zones/:id/crew-cycle',
       async (req, reply) => {
-        const zone = live().dropZones.find((z) => z.id === req.params.id);
+        const zone = cfg(req).dropZones.find((z) => z.id === req.params.id);
         if (!zone) return reply.code(404).send({ error: 'unknown zone' });
         if (!zone.crew?.enabled) return reply.code(409).send({ error: 'crew is not enabled' });
         requestCrewCycle(zone.id, now());
@@ -321,7 +324,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         const body = MintBody.safeParse(req.body);
         if (!body.success) return reply.code(400).send({ error: 'invalid body' });
         const { zoneId, scope: tokenScope, days, label } = body.data;
-        if (!live().dropZones.some((z) => z.id === zoneId)) {
+        if (!cfg(req).dropZones.some((z) => z.id === zoneId)) {
           return reply.code(404).send({ error: 'unknown zone' });
         }
         const minted = mintMcpToken(
@@ -356,7 +359,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         const body = DoctorBody.safeParse(req.body ?? {});
         if (!body.success) return reply.code(400).send({ error: 'invalid body' });
         const zoneId = body.data.zone;
-        if (zoneId !== undefined && !live().dropZones.some((z) => z.id === zoneId)) {
+        if (zoneId !== undefined && !cfg(req).dropZones.some((z) => z.id === zoneId)) {
           return reply.code(404).send({ error: 'unknown zone' });
         }
         const configStatus = statusOf(deps.config);
@@ -364,7 +367,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
           const run = await runDoctor(
             {
               db,
-              config: live(),
+              config: cfg(req),
               now,
               env,
               forges: deps.doctorForgesFor ?? forgesFor,
@@ -388,7 +391,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
     scope.post('/api/control/doctor/drop', async (req, reply) => {
       const body = DoctorDropBody.safeParse(req.body ?? {});
       if (!body.success) return reply.code(400).send({ error: 'invalid body: {"zone": "<id>"}' });
-      const zone = live().dropZones.find((z) => z.id === body.data.zone);
+      const zone = cfg(req).dropZones.find((z) => z.id === body.data.zone);
       if (!zone) return reply.code(404).send({ error: 'unknown zone' });
       // Cancel: only a queued doctor drop, which nothing has started (a running one finishes).
       if (body.data.cancel) {
@@ -440,7 +443,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       );
       audit(req, 'doctor.drop', { dropId }, zone.id);
       deps.kick?.();
-      const waiting = doctorDropWait(db, live(), zone, now());
+      const waiting = doctorDropWait(db, cfg(req), zone, now());
       return reply.code(202).send({
         dropId,
         zone: zone.id,
@@ -455,7 +458,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
     scope.post<{ Params: { id: string } }>(
       '/api/control/zones/:id/intake/goal-stub',
       async (req, reply) => {
-        const zone = live().dropZones.find((z) => z.id === req.params.id);
+        const zone = cfg(req).dropZones.find((z) => z.id === req.params.id);
         if (!zone) return reply.code(404).send({ error: 'unknown zone' });
         const body = GoalStubSchema.safeParse(req.body ?? {});
         if (!body.success) return reply.code(400).send({ error: 'invalid answers' });
@@ -467,7 +470,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
     scope.post<{ Params: { id: string } }>(
       '/api/control/zones/:id/intake/issue',
       async (req, reply) => {
-        const zone = live().dropZones.find((z) => z.id === req.params.id);
+        const zone = cfg(req).dropZones.find((z) => z.id === req.params.id);
         if (!zone) return reply.code(404).send({ error: 'unknown zone' });
         const forgesFor = deps.intakeForgesFor ?? deps.forgesFor;
         if (!forgesFor)
@@ -482,7 +485,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
           forgesFor(zone.id),
           zone,
           body.data,
-          secretList(live().secrets),
+          secretList(cfg(req).secrets),
           now(),
         );
         const { status, ...rest } = out;
@@ -519,15 +522,28 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
   });
 }
 
+/** Zone ids with history to resume (`ctl zones add --resume`, T11). */
+const Resume = z.array(z.string().min(1)).max(100).optional();
+/** Where the confirmation page goes after a guarded change is applied: a path on this host. */
+const ReturnTo = z.string().max(2048).optional();
+
+// A body naming `__proto__` or `constructor.prototype` never reaches these schemas: Fastify's
+// default JSON parser (secure-json-parse) answers 400 first. Behind it, `z.record` would drop an
+// own `__proto__` key silently, and the store refuses such keys by name (parseEditable).
+// None of these bodies carries a confirmation: only the confirm page's POST does, after the
+// passphrase.
 const PatchBody = z.strictObject({
   patch: z.record(z.string(), z.unknown()),
   expectRevision: z.number().int().nonnegative(),
   note: z.string().optional(),
+  resume: Resume,
+  returnTo: ReturnTo,
 });
 const RollbackBody = z.strictObject({
   id: z.number().int().positive(),
   note: z.string().optional(),
   expectRevision: z.number().int().nonnegative().optional(),
+  returnTo: ReturnTo,
 });
 const NoteBody = z.strictObject({ note: z.string().optional() });
 const ModeBody = z.strictObject({ mode: z.literal('file') });
@@ -536,8 +552,23 @@ const ImportBody = z.strictObject({
   dryRun: z.boolean().optional(),
   note: z.string().optional(),
   expectRevision: z.number().int().nonnegative().optional(),
+  resume: Resume,
+  returnTo: ReturnTo,
 });
+const SESSION_FORBIDDEN_HINT = 'set with jumpmaster ctl or in the config file';
 const MAX_REVISIONS = 500;
+
+/** A `returnTo` kept only as a path on this host. */
+const returnToOf = (returnTo: string | undefined): { returnTo?: string } =>
+  returnTo === undefined ? {} : { returnTo: safeNext(returnTo) };
+
+/** An applied revision's audit fields: the revision and the paths, and whether it was guarded. */
+export const appliedDetail = (r: Extract<ApplyResult, { ok: true }>): AuditDetail => ({
+  revision: r.revision,
+  changed: pathsOf(r.changed),
+  ...(r.guarded ? { guarded: 1, guardedPaths: pathsOf(r.guarded) } : {}),
+  ...(r.readds ? { readds: r.readds.join(', ') } : {}),
+});
 
 /** The paths an apply changed, for the audit row: names only, never a value. */
 const pathsOf = (changed: string[]): string => {
@@ -546,15 +577,14 @@ const pathsOf = (changed: string[]): string => {
 };
 
 /**
- * The config store's routes (§10.3 live config). Both principals read; a session's apply is
- * recorded `via: 'ui'`, the token's `via: 'ctl'`. `mode file` is the token's alone. Every
+ * The config store's routes (§10.3 live config). Both principals read and write; a session's
+ * apply is recorded `via: 'ui'`, the token's `via: 'ctl'`. `mode file` is the token's alone. Every
  * successful write is audited from named fields: the revision and the paths, never a value.
  *
- * Until Task 3: PATCH, rollback and import (dry runs included) take the operator token only. They
- * can weaken `requireSignedImages`, set a zone's image, turn egress off or remove a zone with work
- * running, and the guarded-path classifier, the confirmation page and the drained-zone rule that
- * make those safe from a browser land with Task 3, which lifts this `tokenOnly` for sessions.
- * Adopt and reload stay open to a session: they apply what the operator's own file says.
+ * PATCH, rollback and import go through the store's classifier (§7.5, config/guarded.ts): from a
+ * session a guarded change is answered 409 `needsConfirmation` and held until the confirmation
+ * page (ui/confirm.ts) confirms it with the passphrase; a session-forbidden one is 403 whatever
+ * else the set carries. A removed zone must be drained in observe, for every principal.
  */
 function registerConfigRoutes(
   scope: FastifyInstance,
@@ -579,10 +609,37 @@ function registerConfigRoutes(
   ) => {
     if (!r.ok) {
       if ('conflict' in r) return reply.code(409).send({ conflict: r.conflict });
+      if ('needsConfirmation' in r) {
+        const { pendingId, guarded, expectRevision } = r.needsConfirmation;
+        // An attempt never confirmed still shows in the audit: the paths and the base, never the
+        // pending id (the confirm page's key) and never a value.
+        audit(req, 'config.propose', {
+          kind: action.replace(/^config\./, ''),
+          base: expectRevision,
+          guardedPaths: pathsOf([...new Set(guarded.map((g) => g.path))]),
+        });
+        return reply.code(409).send({
+          needsConfirmation: true,
+          pendingId,
+          confirm: `/config/confirm/${pendingId}`,
+          guarded,
+        });
+      }
+      if ('sessionForbidden' in r)
+        return reply
+          .code(403)
+          .send({ sessionForbidden: r.sessionForbidden, hint: SESSION_FORBIDDEN_HINT });
+      if ('confirmation' in r) return reply.code(409).send({ confirmation: r.confirmation });
       return reply.code(400).send({ issues: r.issues });
     }
-    audit(req, action, { revision: r.revision, changed: pathsOf(r.changed), ...extra });
-    return { revision: r.revision, changed: r.changed, restartNeeded: r.restartNeeded };
+    audit(req, action, { ...appliedDetail(r), ...extra });
+    return {
+      revision: r.revision,
+      changed: r.changed,
+      restartNeeded: r.restartNeeded,
+      ...(r.readds ? { readds: r.readds } : {}),
+      ...(r.guarded ? { guarded: r.guarded } : {}),
+    };
   };
   const invalid = (reply: FastifyReply, shape: string) =>
     reply.code(400).send({ issues: [{ path: '', message: `invalid body: ${shape}` }] });
@@ -603,16 +660,17 @@ function registerConfigRoutes(
   });
 
   scope.patch('/api/control/config', async (req, reply) => {
-    if (!tokenOnly(req, reply)) return reply; // Task 3 lifts this (see above).
     const body = PatchBody.safeParse(req.body ?? {});
     if (!body.success)
       return invalid(reply, '{"patch": {…}, "expectRevision": <revision>, "note"?: "…"}');
-    const { patch, expectRevision, note } = body.data;
+    const { patch, expectRevision, note, resume, returnTo } = body.data;
     const r = store.apply(mergePatch(store.document(), patch), {
       via: viaOf(req),
       principal: principalOf(req),
       expectRevision,
       ...(note !== undefined ? { note } : {}),
+      ...(resume ? { resume } : {}),
+      ...returnToOf(returnTo),
     });
     return answer(req, reply, 'config.apply', r);
   });
@@ -624,14 +682,14 @@ function registerConfigRoutes(
   });
 
   scope.post('/api/control/config/rollback', async (req, reply) => {
-    if (!tokenOnly(req, reply)) return reply; // Task 3 lifts this (see above).
     const body = RollbackBody.safeParse(req.body ?? {});
     if (!body.success) return invalid(reply, '{"id": <revision>, "note"?: "…"}');
-    const { id, note, expectRevision } = body.data;
+    const { id, note, expectRevision, returnTo } = body.data;
     const r = store.rollback(id, {
       principal: principalOf(req),
       ...(note !== undefined ? { note } : {}),
       ...(expectRevision !== undefined ? { expectRevision } : {}),
+      ...returnToOf(returnTo),
     });
     return answer(req, reply, 'config.rollback', r, { from: id });
   });
@@ -671,10 +729,9 @@ function registerConfigRoutes(
   );
 
   scope.post('/api/control/config/import', async (req, reply) => {
-    if (!tokenOnly(req, reply)) return reply; // Task 3 lifts this (see above).
     const body = ImportBody.safeParse(req.body ?? {});
     if (!body.success) return invalid(reply, '{"config": {…}, "dryRun"?: true}');
-    const { config, dryRun, note, expectRevision } = body.data;
+    const { config, dryRun, note, expectRevision, resume, returnTo } = body.data;
     const preview = store.preview(config);
     if (dryRun) return { dryRun: true, ...preview };
     const r = store.importDoc(config, {
@@ -682,6 +739,8 @@ function registerConfigRoutes(
       principal: principalOf(req),
       ...(note !== undefined ? { note } : {}),
       ...(expectRevision !== undefined ? { expectRevision } : {}),
+      ...(resume ? { resume } : {}),
+      ...returnToOf(returnTo),
     });
     const out = answer(req, reply, 'config.import', r);
     return r.ok ? { ...(out as object), changes: preview.changes } : out;

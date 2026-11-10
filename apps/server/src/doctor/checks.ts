@@ -8,7 +8,7 @@
  */
 import { DoctorResultSchema, type DropResult, hostAllowed } from '@jumpmaster/protocol';
 import type { ConfigStatus } from '../config/source.js';
-import { type Config, type DropZoneConfig, STARTER_WARNING } from '../config.js';
+import { allowedHostsOf, type Config, type DropZoneConfig, STARTER_WARNING } from '../config.js';
 import { creditsStopInForce } from '../credits.js';
 import { crewDropsToday } from '../crew/schedule.js';
 import type { Db } from '../db/open.js';
@@ -200,9 +200,32 @@ function readFailed(
 // ---------------------------------------------------------------------------------------------
 // Global checks
 
+/** The host name of an allowed `Host` value (`name`, `name:port`, `[v6]:port`). */
+const hostOf = (entry: string): string =>
+  entry.startsWith('[') ? entry.slice(1, entry.indexOf(']')) : (entry.split(':')[0] ?? entry);
+const isLoopback = (host: string): boolean =>
+  LOOPBACK.has(host.toLowerCase()) || /^127\.\d+\.\d+\.\d+$/.test(host);
+
 function listenCheck(d: DoctorDeps): DoctorCheck {
-  const { host, port } = d.config.listen;
+  const { host, port, tlsTerminated } = d.config.listen;
   const base = { id: 'config.listen', zoneId: null };
+  // A browser that names a non-loopback host reaches the login across a network: without a TLS
+  // terminator the operator declared, the passphrase and the session cookie cross it in clear.
+  const remote = allowedHostsOf(d.config).filter((h) => !isLoopback(hostOf(h)));
+  if (remote.length > 0 && !tlsTerminated)
+    return {
+      ...base,
+      status: 'fail',
+      summary: `the UI accepts ${remote.join(', ')}, a host other than loopback, without TLS: the login passphrase and the session cookie would cross the network in clear`,
+      fix: `put a TLS terminator in front and set JM_TLS_TERMINATED=1, or remove ${remote.join(', ')} from JM_ALLOWED_HOSTS`,
+      doc: doc('listen'),
+    };
+  if (remote.length > 0)
+    return {
+      ...base,
+      status: 'pass',
+      summary: `the UI accepts ${remote.join(', ')} behind the TLS terminator you declared (JM_TLS_TERMINATED); its session cookie is Secure`,
+    };
   if (LOOPBACK.has(host))
     return {
       ...base,

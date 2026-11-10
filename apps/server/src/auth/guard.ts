@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { originAllowed, tokenMatches } from '../api/control.js';
 import { configReader, type LiveConfig } from '../config/source.js';
-import { allowedHostsOf } from '../config.js';
+import { allowedHostsOf, type Config } from '../config.js';
 import type { Db } from '../db/open.js';
 import { setupActive } from './operator.js';
 import { loadSession, parseCookies, SESSION_COOKIE } from './sessions.js';
@@ -20,6 +20,12 @@ declare module 'fastify' {
   interface FastifyRequest {
     /** Set by the guard on control routes and pages; null elsewhere. */
     principal: Principal | null;
+    /**
+     * The config as it was when the guard ran: one snapshot per request, so a handler that awaits
+     * never acts on two revisions (or authenticates on one token and audits with another).
+     * Null on stick routes, which read their own.
+     */
+    jmConfig: Config | null;
   }
 }
 
@@ -54,9 +60,13 @@ export function routeClass(path: string): RouteClass {
  * The operator behind a request: a matching Bearer token (always sudo), or else a live session
  * cookie. A request that presents a Bearer header is judged on it alone.
  */
-export function authenticate(req: FastifyRequest, deps: GuardDeps): Principal | null {
+export function authenticate(
+  req: FastifyRequest,
+  deps: GuardDeps,
+  config: Config = configReader(deps.config)(),
+): Principal | null {
   if (req.headers.authorization !== undefined) {
-    return tokenMatches(req, configReader(deps.config)().secrets.operatorToken)
+    return tokenMatches(req, config.secrets.operatorToken)
       ? { kind: 'operator', via: 'token', sudo: true }
       : null;
   }
@@ -111,12 +121,16 @@ function refuse(reply: FastifyReply, cls: RouteClass, status: number, error: str
  */
 export function registerGuard(app: FastifyInstance, deps: GuardDeps): void {
   const allowed = allowedHostsOf(configReader(deps.config)());
+  const live = configReader(deps.config);
   app.decorateRequest('principal', null);
+  app.decorateRequest('jmConfig', null);
   app.addHook('onRequest', async (req, reply) => {
     const path = req.url.split('?')[0] ?? '';
     // The matched pattern where there is one, so the class follows the route that will run.
     const cls = routeClass(req.routeOptions.url ?? path);
     if (cls === 'stick') return;
+    const config = live();
+    req.jmConfig = config;
     if (!allowed.includes(req.headers.host ?? '')) {
       return refuse(
         reply,
@@ -138,7 +152,7 @@ export function registerGuard(app: FastifyInstance, deps: GuardDeps): void {
     }
     if (cls === 'auth') return;
     if (cls === 'control') {
-      const principal = authenticate(req, deps);
+      const principal = authenticate(req, deps, config);
       if (!principal) return reply.code(401).send({ error: 'unauthorized' });
       if (!requireCsrf(req, principal)) {
         return reply.code(403).send({ error: 'missing or wrong x-jm-csrf header' });
@@ -147,7 +161,7 @@ export function registerGuard(app: FastifyInstance, deps: GuardDeps): void {
       return;
     }
     // A page: a browser session only (a page never takes the token).
-    const principal = req.headers.cookie ? authenticate(withoutBearer(req), deps) : null;
+    const principal = req.headers.cookie ? authenticate(withoutBearer(req), deps, config) : null;
     if (principal?.via === 'session') {
       req.principal = principal;
       return;

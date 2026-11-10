@@ -91,10 +91,16 @@ export function parseCookies(header: string | undefined): Record<string, string>
 }
 
 /**
- * A cookie the scripts cannot read and no other site's request carries. No `Secure`: the UI is
- * loopback or a tunnel by default, and `config.listen` refuses a plaintext non-loopback login.
+ * A cookie the scripts cannot read and no other site's request carries. `Secure` only behind a
+ * TLS terminator the operator declared (`listen.tlsTerminated`): the UI is loopback or a tunnel
+ * by default, plain HTTP there, and `config.listen` fails a non-loopback login without TLS.
  */
-export const setCookie = (name: string, value: string, maxAgeSeconds: number): string =>
-  `${name}=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}`;
+export const setCookie = (
+  name: string,
+  value: string,
+  maxAgeSeconds: number,
+  secure = false,
+): string =>
+  `${name}=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}${secure ? '; Secure' : ''}`;
 
-export const clearCookie = (name: string): string => setCookie(name, '', 0);
+export const clearCookie = (name: string, secure = false): string => setCookie(name, '', 0, secure);

@@ -671,7 +671,10 @@ release's preset), or use the release's preset.
 
 The server listens on `0.0.0.0:7420` inside its container, and compose publishes it on
 `127.0.0.1:7420` only. Its pages need the operator login, but the login crosses the wire in clear,
-so don't publish it on another interface; reach it through an SSH tunnel. A browser on another host name must be listed in `listen.allowedHosts`.
+so don't publish it on another interface; reach it through an SSH tunnel. A browser on another host name must be listed in `listen.allowedHosts`
+(`JM_ALLOWED_HOSTS`), and only behind a TLS terminator you run and declare with
+`JM_TLS_TERMINATED=1` (or `listen.tlsTerminated: true` in the file): without it the doctor fails,
+because the passphrase would cross the network in clear. Declared, the login cookies are `Secure`.
 Doctor check: `config.listen`.
 
 ## UID
@@ -698,8 +701,9 @@ Each check prints its own fix; this says what it means.
 
 ### `config.listen`
 
-Where the UI listens. Inside the container `0.0.0.0` passes: compose publishes `127.0.0.1` only.
-See [Listen](#listen).
+Where the UI listens and which host names it accepts. Inside the container `0.0.0.0` passes:
+compose publishes `127.0.0.1` only. It fails when `allowedHosts` names a host other than loopback
+and no TLS terminator is declared (`JM_TLS_TERMINATED=1`). See [Listen](#listen).
 
 ### `config.uid`
 

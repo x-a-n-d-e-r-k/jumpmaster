@@ -7,6 +7,8 @@ import {
   activeDropFor,
   appendEvents,
   deleteFailedOutbox,
+  deleteZoneControls,
+  ensureZoneMode,
   getAttempts,
   getDrop,
   getOutbox,
@@ -14,6 +16,7 @@ import {
   getStickByTokenHash,
   getUsageState,
   getWorkItem,
+  getZoneMode,
   insertDrop,
   insertOutbox,
   insertStick,
@@ -29,6 +32,7 @@ import {
   setUsageState,
   setWaitingSince,
   setWorkItemState,
+  setZoneMode,
   updateDrop,
   updateOutbox,
   upsertDropZone,
@@ -36,6 +40,9 @@ import {
   upsertWorkItem,
   type VerdictRow,
   verdictsForHead,
+  zoneDrained,
+  zoneHasHistory,
+  zoneHistoryRepo,
 } from './repo.js';
 
 const tmpFile = () => join(mkdtempSync(join(tmpdir(), 'jm-db-')), 'jm.sqlite');
@@ -348,5 +355,122 @@ describe('M1 repo', () => {
       fiveHourUtil: 0.5,
       updatedAt: plus(t0, MIN).toISOString(),
     });
+  });
+});
+
+describe('zone removal and history', () => {
+  const at = new Date('2026-02-01T00:00:00.000Z');
+  const fresh = () => {
+    const d = openDb(tmpFile());
+    upsertDropZone(d, { id: 'z', repo: 'octo/z', defaultBranch: 'main', configJson: '{}' });
+    ensureZoneMode(d, 'z', 'active', at);
+    return d;
+  };
+
+  test('zoneDrained needs observe, no active drop and no pending forge write', () => {
+    const d = fresh();
+    expect(zoneDrained(d, 'z')).toBe(false); // active
+    setZoneMode(d, 'z', 'observe', at);
+    expect(zoneDrained(d, 'z')).toBe(true);
+    const wi = upsertWorkItem(d, {
+      dropZoneId: 'z',
+      issueNumber: 1,
+      title: 't',
+      body: 'b',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: at.toISOString(),
+    });
+    insertDrop(d, { ...drop('d-run', { state: 'running' }), dropZoneId: 'z', workItemId: wi.id });
+    expect(zoneDrained(d, 'z')).toBe(false);
+    d.prepare("UPDATE drops SET state = 'succeeded' WHERE id = 'd-run'").run();
+    expect(zoneDrained(d, 'z')).toBe(true);
+    insertOutbox(d, {
+      id: 'o1',
+      opKey: 'k1',
+      kind: 'merge',
+      workItemId: wi.id,
+      zoneId: 'z',
+      payloadJson: '{}',
+      state: 'pending',
+      createdAt: at.toISOString(),
+    });
+    expect(zoneDrained(d, 'z')).toBe(false);
+    // A zone with no mode row at all is not known to be drained.
+    expect(zoneDrained(d, 'nobody')).toBe(false);
+  });
+
+  test('zoneHasHistory sees work items, drops, outbox rows, crew issues and goals, each alone', () => {
+    const cases: [string, (d: Db) => void][] = [
+      [
+        'work item',
+        (d) =>
+          upsertWorkItem(d, {
+            dropZoneId: 'z',
+            issueNumber: 1,
+            title: 't',
+            body: 'b',
+            author: 'a',
+            priority: 0,
+            isFix: false,
+            issueCreatedAt: at.toISOString(),
+          }),
+      ],
+      [
+        'drop',
+        (d) =>
+          insertDrop(d, { ...drop('d1', { workItemId: null, role: 'doctor' }), dropZoneId: 'z' }),
+      ],
+      [
+        'outbox',
+        (d) =>
+          insertOutbox(d, {
+            id: 'o1',
+            opKey: 'k1',
+            kind: 'merge',
+            workItemId: null,
+            zoneId: 'z',
+            payloadJson: '{}',
+            state: 'done',
+            createdAt: at.toISOString(),
+          }),
+      ],
+      [
+        'crew issue',
+        (d) =>
+          d
+            .prepare(
+              `INSERT INTO crew_issues (zone_id, key, source, objective, title, title_norm, body, state, created_at, updated_at)
+               VALUES ('z', 'k', 'crew', 'o', 't', 't', 'b', 'staged', ?, ?)`,
+            )
+            .run(at.toISOString(), at.toISOString()),
+      ],
+      [
+        'goals',
+        (d) =>
+          d
+            .prepare(
+              "INSERT INTO goals (zone_id, parser_version, parse_json, read_at) VALUES ('z', 1, '{}', ?)",
+            )
+            .run(at.toISOString()),
+      ],
+    ];
+    for (const [name, seed] of cases) {
+      const d = fresh();
+      expect(zoneHasHistory(d, 'z'), name).toBe(false);
+      seed(d);
+      expect(zoneHasHistory(d, 'z'), name).toBe(true);
+      expect(zoneHasHistory(d, 'other'), name).toBe(false);
+    }
+  });
+
+  test('deleteZoneControls removes the mode row only, and zoneHistoryRepo names the repository the history is for', () => {
+    const d = fresh();
+    setZoneMode(d, 'z', 'observe', at);
+    deleteZoneControls(d, 'z');
+    expect(getZoneMode(d, 'z', 'active')).toBe('active');
+    expect(zoneHistoryRepo(d, 'z')).toBe('octo/z');
+    expect(zoneHistoryRepo(d, 'none')).toBeUndefined();
   });
 });

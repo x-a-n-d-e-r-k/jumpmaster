@@ -49,6 +49,36 @@ describe('global checks', () => {
     expect(one(await w.run(), 'config.listen').status).toBe('pass');
   });
 
+  test('config.listen fails on a non-loopback allowed host without tlsTerminated, passes with it, and a non-loopback listen host alone stays a warning', async () => {
+    const lan = { host: '0.0.0.0', port: 7420, allowedHosts: ['127.0.0.1:7420', 'jm.lan:7420'] };
+    const w = world({ config: { listen: lan } });
+    w.deps.env.inContainer = true;
+    expect(one(await w.run(), 'config.listen')).toMatchObject({
+      status: 'fail',
+      summary: expect.stringContaining('jm.lan:7420'),
+      fix: 'put a TLS terminator in front and set JM_TLS_TERMINATED=1, or remove jm.lan:7420 from JM_ALLOWED_HOSTS',
+    });
+    // Declared behind a TLS terminator: the passphrase does not cross the network in clear.
+    const tls = world({ config: { listen: { ...lan, tlsTerminated: true } } });
+    tls.deps.env.inContainer = true;
+    expect(one(await tls.run(), 'config.listen').status).toBe('pass');
+    // Loopback names in any form never fail.
+    for (const h of ['localhost:7420', '[::1]:7420', '127.0.0.1'])
+      expect(
+        one(
+          await world({
+            config: { listen: { host: '127.0.0.1', port: 7420, allowedHosts: [h] } },
+          }).run(),
+          'config.listen',
+        ).status,
+        h,
+      ).toBe('pass');
+    // A non-loopback listen host with loopback-only allowed hosts: the warning it was.
+    const bare = world({ config: { listen: { host: '0.0.0.0', port: 7420 } } });
+    bare.deps.env.inContainer = false;
+    expect(one(await bare.run(), 'config.listen').status).toBe('warn');
+  });
+
   test('config.uid warns as root, and skips under rootless Docker (unsupported in this release)', async () => {
     const w = world();
     w.deps.env.uid = 0;

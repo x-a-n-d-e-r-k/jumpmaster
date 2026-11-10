@@ -13,10 +13,19 @@ import {
   splitConfigFile,
 } from '../config.js';
 import type { Db } from '../db/open.js';
-import { ensureZoneMode } from '../db/repo.js';
+import {
+  deleteZoneControls,
+  ensureZoneMode,
+  setZoneMode,
+  zoneDrained,
+  zoneHasHistory,
+  zoneHistoryRepo,
+} from '../db/repo.js';
 import type { BootConfig } from './boot.js';
 import { RESTART_PATHS } from './boot.js';
+import { Confirmations, type ConsumeFailure } from './confirm.js';
 import { type Change, diff } from './diff.js';
+import { type Classification, classify } from './guarded.js';
 import {
   canonicalJson,
   deleteSetting,
@@ -51,15 +60,45 @@ export type ApplyMeta = {
   principal: Principal;
   note?: string;
   expectRevision?: number;
+  /**
+   * A session's confirmation of a pending guarded change: the token the confirmation page minted,
+   * naming the pending change it confirms. Only the confirm page's POST sets it, after the
+   * passphrase; no API body carries it.
+   */
+  confirmation?: { pendingId: string; token: string };
+  /** Zone ids with history the operator chose to resume (`ctl zones add --resume`). */
+  resume?: string[];
+  /** Where the confirm page goes after applying a pending change (a path on this host). */
+  returnTo?: string;
 };
 
 /** Mode switches and rollbacks: the via is the operation's own. */
 export type OpMeta = { principal: Principal; note?: string; expectRevision?: number };
 
 export type ApplyResult =
-  | { ok: true; revision: number; changed: string[]; restartNeeded: string[] }
+  | {
+      ok: true;
+      revision: number;
+      changed: string[];
+      restartNeeded: string[];
+      /** Zones added back with their history (resumed, or re-added by a rollback); when any. */
+      readds?: string[];
+      /** The guarded paths this apply changed (token, file or confirmed); when any. */
+      guarded?: string[];
+    }
   | { ok: false; issues: ConfigIssue[] }
-  | { ok: false; conflict: { expected: number; actual: number } };
+  | { ok: false; conflict: { expected: number; actual: number } }
+  | {
+      ok: false;
+      needsConfirmation: {
+        pendingId: string;
+        guarded: Classification['guarded'];
+        /** The revision the change was judged against. */
+        expectRevision: number;
+      };
+    }
+  | { ok: false; sessionForbidden: string[] }
+  | { ok: false; confirmation: ConsumeFailure };
 
 export type RevisionView = {
   id: number;
@@ -128,8 +167,12 @@ export class ConfigStore implements ConfigSource {
   /** What the lenient read of the file adjusted (an out-of-range pollSeconds), while it runs. */
   private warnings: string[] | undefined;
   private readonly subscribers = new Set<(c: Config, rev: number, changes: Change[]) => void>();
+  /** Guarded changes from sessions waiting for the confirmation page (in memory only). */
+  readonly confirmations: Confirmations;
 
-  private constructor(private readonly o: StoreOptions) {}
+  private constructor(private readonly o: StoreOptions) {
+    this.confirmations = new Confirmations(o.now);
+  }
 
   /**
    * Decides the mode and loads the current revision. The mode is the stored one; else a config
@@ -251,20 +294,119 @@ export class ConfigStore implements ConfigSource {
     return () => this.subscribers.delete(fn);
   }
 
-  /** Validates `next` as the whole editable document and stores it as a new revision. */
+  /**
+   * Validates `next` as the whole editable document and stores it as a new revision. Before it
+   * commits, the change is classified (guarded.ts): a `repo` change on an existing zone is refused
+   * for everyone; a removed zone must be drained in observe; an added id with history needs
+   * `resume` (a rollback implies it). From a session, a session-forbidden change is refused
+   * whatever else the set carries, and a guarded one is held as a pending change until the
+   * confirmation page confirms it (`meta.confirmation`). The token is the operator's business.
+   */
   apply(next: unknown, meta: ApplyMeta): ApplyResult {
     if (tooLong(meta.note)) return noteRefused();
     if (this.modeValue === 'file')
       return refused(
         `config is managed by the file at ${this.o.filePath}: edit it and run \`jumpmaster ctl config reload\`, or adopt it into the UI`,
       );
-    if (meta.expectRevision !== undefined && meta.expectRevision !== this.rev)
+    // A confirmed change reports a moved revision as a stale confirmation, below.
+    if (!meta.confirmation && meta.expectRevision !== undefined && meta.expectRevision !== this.rev)
       return { ok: false, conflict: { expected: meta.expectRevision, actual: this.rev } };
     const doc = asStored(next) as Record<string, unknown>;
     const v = this.validate(doc, true);
     if ('issues' in v) return { ok: false, issues: v.issues };
+    let c: Classification;
+    try {
+      c = classify(this.doc, doc);
+    } catch (e) {
+      // Fail closed: what cannot be judged is not applied.
+      return refused(`the change could not be judged: ${(e as Error).message}`);
+    }
+    if (c.refused.length > 0) return { ok: false, issues: c.refused };
+    const zones = this.zoneRules(doc, c, meta);
+    if ('issues' in zones) return { ok: false, issues: zones.issues };
+    const p = meta.principal;
+    if (p.via === 'session') {
+      if (c.sessionForbidden.length > 0) return { ok: false, sessionForbidden: c.sessionForbidden };
+      const sid = p.sessionId;
+      if ((meta.confirmation || c.guarded.length > 0) && !sid)
+        return refused('a session without an id cannot confirm a change');
+      if (meta.confirmation && sid) {
+        // Spent whether or not the change still weakens anything: a confirmation is single-use.
+        const used = this.confirmations.consumeFor(meta.confirmation, doc, sid, this.rev);
+        if (!used.ok) return { ok: false, confirmation: used.reason };
+      } else if (c.guarded.length > 0 && sid) {
+        const { confirmation: _c, returnTo, ...kept } = meta;
+        const pending = this.confirmations.addPending({
+          sessionIdHash: sid,
+          patch: doc,
+          expectRevision: this.rev,
+          meta: kept,
+          ...(returnTo ? { returnTo } : {}),
+          guarded: c.guarded,
+          notes: c.notes,
+        });
+        return {
+          ok: false,
+          needsConfirmation: {
+            pendingId: pending.id,
+            guarded: c.guarded,
+            expectRevision: pending.expectRevision,
+          },
+        };
+      }
+    }
     if (hashOf(canonicalJson(doc)) === hashOf(canonicalJson(this.doc))) return unchanged(this.rev);
-    return this.commit(doc, v, meta.via, meta.note);
+    const r = this.commit(doc, v, meta.via, meta.note, undefined, c.removed, zones.readds);
+    if (r.ok) {
+      if (zones.readds.length > 0) r.readds = zones.readds;
+      const guarded = [...new Set(c.guarded.map((g) => g.path))];
+      if (guarded.length > 0) r.guarded = guarded;
+    }
+    return r;
+  }
+
+  /**
+   * The zone rules every principal meets: a removed zone is drained in observe; an added id with
+   * history is resumed (`meta.resume`, or a rollback, which re-adds what it restores) and only with
+   * the repository its history was recorded against.
+   */
+  private zoneRules(
+    doc: Record<string, unknown>,
+    c: Classification,
+    meta: ApplyMeta,
+  ): { readds: string[] } | { issues: ConfigIssue[] } {
+    const { db } = this.o;
+    const issues: ConfigIssue[] = [];
+    for (const id of c.removed)
+      if (!zoneDrained(db, id))
+        issues.push({
+          path: 'dropZones',
+          message: `zone ${id} can't be removed until it is drained: set it to observe and let its drops and forge writes finish`,
+        });
+    const zones = (Array.isArray(doc.dropZones) ? doc.dropZones : []) as {
+      id?: unknown;
+      repo?: unknown;
+    }[];
+    const readds: string[] = [];
+    for (const id of c.added) {
+      if (!zoneHasHistory(db, id)) continue;
+      const i = zones.findIndex((z) => z.id === id);
+      const at = `dropZones.${i}.id`;
+      if (meta.via !== 'rollback' && !meta.resume?.includes(id)) {
+        issues.push({ path: at, message: 'this zone has history: pick another id, or resume it' });
+        continue;
+      }
+      const repo = zoneHistoryRepo(db, id);
+      if (repo !== undefined && repo !== zones[i]?.repo) {
+        issues.push({
+          path: at,
+          message: `zone ${id}'s history is for ${repo}: resume it with that repository, or pick another id`,
+        });
+        continue;
+      }
+      readds.push(id);
+    }
+    return issues.length > 0 ? { issues } : { readds };
   }
 
   /**
@@ -277,12 +419,29 @@ export class ConfigStore implements ConfigSource {
     return this.apply(s.doc, meta);
   }
 
-  /** What an import would change, and why it would be refused, without applying anything. */
-  preview(json: unknown): { changes: Change[]; issues: ConfigIssue[] } {
+  /**
+   * What an import would change, why it would be refused, and what of it is guarded or
+   * session-forbidden (judged only when it is valid), without applying anything.
+   */
+  preview(json: unknown): {
+    changes: Change[];
+    issues: ConfigIssue[];
+    guarded: Classification['guarded'];
+    sessionForbidden: string[];
+  } {
+    const none = { guarded: [], sessionForbidden: [] };
     const s = this.withoutBoot(json);
-    if ('issues' in s) return { changes: [], issues: s.issues };
-    const v = this.validate(s.doc, true);
-    return { changes: diff(this.doc, s.doc), issues: 'issues' in v ? v.issues : [] };
+    if ('issues' in s) return { changes: [], issues: s.issues, ...none };
+    const doc = asStored(s.doc) as Record<string, unknown>;
+    const v = this.validate(doc, true);
+    if ('issues' in v) return { changes: diff(this.doc, doc), issues: v.issues, ...none };
+    const c = classify(this.doc, doc);
+    return {
+      changes: diff(this.doc, doc),
+      issues: c.refused,
+      guarded: c.guarded,
+      sessionForbidden: c.sessionForbidden,
+    };
   }
 
   private withoutBoot(json: unknown): { doc: Record<string, unknown> } | { issues: ConfigIssue[] } {
@@ -552,6 +711,10 @@ export class ConfigStore implements ConfigSource {
     via: RevisionVia,
     note?: string,
     mode?: ConfigMode,
+    /** Zones this revision removes: their mode rows go with it (their history stays). */
+    removed: string[] = [],
+    /** Zones re-added with their history: they come back paused, never dispatching at once. */
+    readds: string[] = [],
   ): ApplyResult {
     // Every path checks the note first; this keeps a long one a refusal, never a storage error.
     if (tooLong(note)) return noteRefused();
@@ -568,6 +731,10 @@ export class ConfigStore implements ConfigSource {
       setSetting(db, 'config.current', rid, now);
       for (const zone of v.editable.dropZones)
         if (!before.includes(zone.id)) ensureZoneMode(db, zone.id, zone.mode, now);
+      // A re-added zone is paused whatever row it left behind: a file-mode removal (or an M4
+      // hand edit) keeps a stale row, which ensureZoneMode would leave as it is.
+      for (const id of readds) setZoneMode(db, id, 'paused', now);
+      for (const id of removed) deleteZoneControls(db, id);
       this.storePending(v.editable);
       if (mode) setSetting(db, 'config.mode', mode, now);
       return rid;
