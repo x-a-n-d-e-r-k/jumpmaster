@@ -3,11 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { Principal } from '../auth/guard.js';
-import { loadConfig, secretList } from '../config.js';
+import { loadConfig, parseEditable, secretList } from '../config.js';
 import { type Db, openDb } from '../db/open.js';
 import { getZoneMode } from '../db/repo.js';
 import { plus, t0, tmpDbFile } from '../test/helpers.js';
 import { type BootConfig, loadBoot, RESTART_PATHS } from './boot.js';
+import { mergePatch } from './diff.js';
 import { canonicalJson, getSetting, hashOf } from './revisions.js';
 import { ConfigStore, type StoreOptions } from './store.js';
 
@@ -727,5 +728,107 @@ describe('boot settings', () => {
     const m4 = loadConfig(w.file, env, { imageLockPath: noLock });
     expect(store.current()).toEqual({ ...m4, listen: { ...m4.listen, tlsTerminated: false } });
     expect(readFileSync(w.file, 'utf8')).toContain('"pollSeconds":45');
+  });
+});
+
+describe('prototype keys', () => {
+  const probes = [
+    '{"__proto__":{"pollSeconds":86400}}',
+    `{"__proto__":{"dropZones":[${JSON.stringify(zone('phantom'))}]}}`,
+  ];
+
+  test("the review's probes are refused, directly and through a merge patch, and leave nothing behind", () => {
+    const w = world();
+    const store = w.open();
+    for (const probe of probes) {
+      for (const doc of [JSON.parse(probe), mergePatch(store.document(), JSON.parse(probe))]) {
+        const r = store.apply(doc, { via: 'ctl', principal: token });
+        expect(r).toEqual({
+          ok: false,
+          issues: [
+            { path: '__proto__', message: 'a key named __proto__ is not allowed in the config' },
+          ],
+        });
+      }
+    }
+    expect(store.revision()).toBe(1);
+    expect(store.current().pollSeconds).toBe(60);
+    expect(store.current().dropZones).toEqual([]);
+    // Nested, and the other two names.
+    for (const [doc, path] of [
+      [JSON.parse('{"usage":{"__proto__":{"stopOnOverage":false}}}'), 'usage.__proto__'],
+      [{ dropZones: [{ ...zone(), constructor: { x: 1 } }] }, 'dropZones.0.constructor'],
+      [{ claude: { prototype: 1 } }, 'claude.prototype'],
+    ] as const) {
+      const r = store.apply(doc, { via: 'ctl', principal: token });
+      expect(r.ok).toBe(false);
+      if (!r.ok && 'issues' in r) expect(r.issues[0]?.path).toBe(path);
+    }
+    // The prototype of plain objects is untouched.
+    expect(({} as Record<string, unknown>).pollSeconds).toBeUndefined();
+  });
+
+  test('a merge patch never sets a prototype: the key stays an own property for validation to refuse', () => {
+    const merged = mergePatch(
+      { a: 1 },
+      JSON.parse('{"__proto__":{"pollSeconds":86400}}'),
+    ) as Record<string, unknown>;
+    expect(Object.getPrototypeOf(merged)).toBe(Object.prototype);
+    expect(merged.pollSeconds).toBeUndefined();
+    expect(Object.hasOwn(merged, '__proto__')).toBe(true);
+  });
+
+  test('invariant: after any apply, current() is a fresh parse of the stored canonical document', () => {
+    const w = world();
+    const store = w.open();
+    const docs: unknown[] = [
+      { pollSeconds: 30, dropZones: [zone('a'), zone('b', { readyLabel: 'go' })] },
+      { usage: { throttleUtilization: 0.5 }, mcp: { enabled: true } },
+      ...probes.map((p) => JSON.parse(p)),
+      // As PATCH builds it: the probe merged into the current document, beside a real change (an
+      // unchanged document is a no-op before validation).
+      ...probes.map(
+        (p, i) => () =>
+          mergePatch(
+            store.document(),
+            JSON.parse(`${p.slice(0, -1)},"usage":{"throttleUtilization":0.${6 + i}}}`),
+          ),
+      ),
+      { dropZones: [zone('c', { egress: { mode: 'monitor', allow: ['x.example.com'] } })] },
+    ];
+    for (const d of docs) {
+      store.apply(typeof d === 'function' ? d() : d, { via: 'ctl', principal: token });
+      const row = w.db
+        .prepare('SELECT config_json AS j FROM config_revisions WHERE id = ?')
+        .get(store.revision()) as { j: string };
+      const fresh = parseEditable(JSON.parse(row.j), { imageLockPath: noLock });
+      expect(fresh.ok).toBe(true);
+      if (!fresh.ok) continue;
+      const { listen, dataDir, secrets, ...editable } = store.current();
+      expect(editable).toEqual(fresh.config);
+      expect(row.j).toBe(canonicalJson(store.document()));
+    }
+  });
+});
+
+describe('pollSeconds out of range in an M4 file', () => {
+  test('the file still starts, clamped and warned; a write with the same value is refused', () => {
+    const w = world({ pollSeconds: 1, dropZones: [zone()] });
+    const store = w.open();
+    expect(store.current().pollSeconds).toBe(5);
+    const warning = 'pollSeconds 1 is outside 5..86400: running with 5; set it in range';
+    expect(w.logs).toContain(`config: ${warning}`);
+    expect(store.status().warnings).toEqual([warning]);
+    // A reload of a file with the value in range clears it.
+    writeConfig(w.file, { pollSeconds: 100000, dropZones: [zone()] });
+    expect(store.reload().ok).toBe(true);
+    expect(store.current().pollSeconds).toBe(86400);
+    writeConfig(w.file, { pollSeconds: 30, dropZones: [zone()] });
+    store.reload();
+    expect(store.status().warnings).toBeUndefined();
+    // Writes stay strict: adopting the out-of-range file names the value.
+    writeConfig(w.file, { pollSeconds: 2.5, dropZones: [zone()] });
+    expect(store.adopt({ principal: token }).ok).toBe(false);
+    expect(store.mode()).toBe('file');
   });
 });

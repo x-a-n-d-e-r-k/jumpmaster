@@ -65,8 +65,20 @@ export function mergePatch(target: unknown, patch: unknown): unknown {
   if (!isObject(patch)) return structuredClone(patch);
   const out: Record<string, unknown> = isObject(target) ? structuredClone(target) : {};
   for (const [key, value] of Object.entries(patch)) {
-    if (value === null) delete out[key];
-    else out[key] = mergePatch(out[key], value);
+    if (value === null) {
+      delete out[key];
+      continue;
+    }
+    // Own properties only, read and written: `out[key] = …` with key `__proto__` would set the
+    // prototype, and zod would then read values the stored document does not hold. The key stays
+    // an own property, which validation refuses by name.
+    const current = Object.hasOwn(out, key) ? out[key] : undefined;
+    Object.defineProperty(out, key, {
+      value: mergePatch(current, value),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
   }
   return out;
 }

@@ -237,6 +237,13 @@ function configFileCheck(s: ConfigStatus): DoctorCheck {
         'Fix the file, then run jumpmaster ctl config reload.',
       ].join('\n'),
     };
+  if (s.warnings && s.warnings.length > 0)
+    return {
+      ...base,
+      status: 'warn',
+      summary: `the config file at ${s.filePath} runs, but only after an adjustment (revision ${s.revision}); a write with the same value would be refused`,
+      fix: [...s.warnings, 'Fix the file, then run jumpmaster ctl config reload.'].join('\n'),
+    };
   if (s.mode === 'file')
     return {
       ...base,

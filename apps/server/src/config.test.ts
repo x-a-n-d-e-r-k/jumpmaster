@@ -906,15 +906,33 @@ describe('parseEditable', () => {
 
 describe('pollSeconds bounds', () => {
   const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json') };
-  test('is a whole number of seconds from 5 to 86400', () => {
+  test('a write takes a whole number of seconds from 5 to 86400', () => {
+    const strict = { ...noLock, strict: true };
     for (const ok of [5, 60, 86400])
-      expect(parseEditable({ pollSeconds: ok }, noLock).ok).toBe(true);
+      expect(parseEditable({ pollSeconds: ok }, strict).ok).toBe(true);
     for (const bad of [0.001, 4, 2.5, 86401, 3_600_000]) {
-      const r = parseEditable({ pollSeconds: bad }, noLock);
+      const r = parseEditable({ pollSeconds: bad }, strict);
       expect(r.ok).toBe(false);
       if (r.ok) continue;
       expect(r.issues.map((i) => i.path)).toEqual(['pollSeconds']);
     }
+  });
+
+  test('a lenient read (an M4 file) clamps it to the bounds and says so', () => {
+    const at = (p: number) => {
+      const r = parseEditable({ pollSeconds: p }, noLock);
+      return r.ok ? [r.config.pollSeconds, r.warnings ?? []] : ['refused', []];
+    };
+    expect(at(1)).toEqual([
+      5,
+      ['pollSeconds 1 is outside 5..86400: running with 5; set it in range'],
+    ]);
+    expect(at(3_600_000)[0]).toBe(86400);
+    expect(at(2.5)[0]).toBe(5);
+    expect(at(90.4)[0]).toBe(90);
+    expect(at(60)).toEqual([60, []]);
+    // Not a positive number: still refused, as M4 refused it.
+    expect(at(-1)[0]).toBe('refused');
   });
 });
 
@@ -944,6 +962,20 @@ describe('unknown keys', () => {
     });
   });
 
+  test('names of Object.prototype members are unknown keys too', () => {
+    const r = parseEditable(
+      { toString: 1, usage: { hasOwnProperty: true } },
+      { ...noLock, strict: true },
+    );
+    expect(r).toEqual({
+      ok: false,
+      issues: [
+        { path: 'toString', message: 'unknown key: it would have no effect' },
+        { path: 'usage.hasOwnProperty', message: 'unknown key: it would have no effect' },
+      ],
+    });
+  });
+
   test('records of free keys (per-role models) are not unknown keys', () => {
     const r = parseEditable(
       { dropZones: [{ ...zone, models: { review: 'm2' } }] },
@@ -962,5 +994,29 @@ describe('unknown keys', () => {
 
   test('without strict, as an M4 file is read, unknown keys are ignored as before', () => {
     expect(parseEditable({ pollseconds: 10 }, noLock).ok).toBe(true);
+  });
+});
+
+describe('names that reach Object.prototype', () => {
+  const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json') };
+  const zone = { ...baseZone, protectedPaths: ['GOAL.md'] };
+
+  test('a zone id may not be __proto__, constructor or prototype', () => {
+    for (const id of ['__proto__', 'constructor', 'prototype']) {
+      const r = parseEditable({ dropZones: [{ ...zone, id }] }, noLock);
+      expect(r).toEqual({
+        ok: false,
+        issues: [{ path: 'dropZones.0.id', message: `a zone id may not be ${id}` }],
+      });
+    }
+  });
+
+  test('a zone named like an Object.prototype member has no gate secrets but its own', () => {
+    const secrets = { zoneSecrets: { main: { TOKEN_A: 'value-aaaa' } } } as unknown as Parameters<
+      typeof zoneSecrets
+    >[0]['secrets'];
+    expect(zoneSecrets({ secrets }, 'toString')).toEqual({});
+    expect(zoneSecrets({ secrets }, 'hasOwnProperty')).toEqual({});
+    expect(zoneSecrets({ secrets }, 'main')).toEqual({ TOKEN_A: 'value-aaaa' });
   });
 });

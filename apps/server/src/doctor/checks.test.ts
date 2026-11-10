@@ -1167,6 +1167,21 @@ describe('config store checks', () => {
     });
   });
 
+  test('config.file warns when the file runs only after an adjustment (an out-of-range pollSeconds)', async () => {
+    const w = world();
+    const warning = 'pollSeconds 1 is outside 5..86400: running with 5; set it in range';
+    w.deps.configStatus = status({
+      mode: 'file',
+      filePath: '/config/jm.json',
+      warnings: [warning],
+    });
+    expect(one(await w.run(), 'config.file')).toMatchObject({
+      status: 'warn',
+      summary: expect.stringContaining('/config/jm.json'),
+      fix: expect.stringContaining(warning),
+    });
+  });
+
   test('config.restart warns while a restart-only setting waits for a restart', async () => {
     const w = world();
     w.deps.configStatus = status();

@@ -87,3 +87,10 @@ test('cookies are HttpOnly, SameSite=Strict and Path=/, without Secure', () => {
   expect(parseCookies('a=1; jm_session=abc=; b')).toEqual({ a: '1', jm_session: 'abc=' });
   expect(parseCookies(undefined)).toEqual({});
 });
+
+test('cookie names never reach an object prototype', () => {
+  const c = parseCookies('__proto__=x; constructor=y; jm_session=abc');
+  expect(Object.getPrototypeOf(c)).toBeNull();
+  expect(c.jm_session).toBe('abc');
+  expect(parseCookies('jm_other=1').toString).toBeUndefined();
+});

@@ -105,7 +105,15 @@ const restartValues = (c: EditableConfig): Record<(typeof RESTART_PATHS)[number]
   'mcp.maxBodyBytes': mcpConfigOf(c).maxBodyBytes,
 });
 
-type Valid = { editable: EditableConfig; secrets: Config['secrets'] };
+type Valid = { editable: EditableConfig; secrets: Config['secrets']; warnings?: string[] };
+
+/**
+ * The document as it will be stored, read back from its canonical JSON: own data properties
+ * only, so what is validated, what is stored and what runs are one document (nothing can come
+ * from a prototype the stored text does not hold).
+ */
+const asStored = (doc: unknown): unknown =>
+  doc === undefined ? undefined : (JSON.parse(canonicalJson(doc)) as unknown);
 
 export class ConfigStore implements ConfigSource {
   private modeValue: ConfigMode = 'db';
@@ -117,6 +125,8 @@ export class ConfigStore implements ConfigSource {
   /** Boot settings a reload found changed in the file (a restart applies them). */
   private bootPending: string[] = [];
   private fileProblem: ConfigIssue[] | undefined;
+  /** What the lenient read of the file adjusted (an out-of-range pollSeconds), while it runs. */
+  private warnings: string[] | undefined;
   private readonly subscribers = new Set<(c: Config, rev: number, changes: Change[]) => void>();
 
   private constructor(private readonly o: StoreOptions) {}
@@ -231,6 +241,7 @@ export class ConfigStore implements ConfigSource {
       ...(filePath ? { filePath } : {}),
       ...(this.fileProblem ? { fileProblem: this.fileProblem } : {}),
       ...(ignored ?? {}),
+      ...(this.warnings ? { warnings: this.warnings } : {}),
       restartPending: this.pending(this.cfg),
     };
   }
@@ -249,9 +260,9 @@ export class ConfigStore implements ConfigSource {
       );
     if (meta.expectRevision !== undefined && meta.expectRevision !== this.rev)
       return { ok: false, conflict: { expected: meta.expectRevision, actual: this.rev } };
-    const v = this.validate(next, true);
+    const doc = asStored(next) as Record<string, unknown>;
+    const v = this.validate(doc, true);
     if ('issues' in v) return { ok: false, issues: v.issues };
-    const doc = next as Record<string, unknown>;
     if (hashOf(canonicalJson(doc)) === hashOf(canonicalJson(this.doc))) return unchanged(this.rev);
     return this.commit(doc, v, meta.via, meta.note);
   }
@@ -295,7 +306,7 @@ export class ConfigStore implements ConfigSource {
   validateOnly(
     next: unknown,
   ): { ok: true; config: EditableConfig } | { ok: false; issues: ConfigIssue[] } {
-    const v = this.validate(next, true);
+    const v = this.validate(asStored(next), true);
     return 'issues' in v ? { ok: false, issues: v.issues } : { ok: true, config: v.editable };
   }
 
@@ -476,7 +487,11 @@ export class ConfigStore implements ConfigSource {
     if (!parsed.ok) return { issues: parsed.issues };
     try {
       const secretsFor = this.o.secretsFor ?? ((zones) => loadSecrets(this.o.env, zones));
-      return { editable: parsed.config, secrets: secretsFor(parsed.config.dropZones) };
+      return {
+        editable: parsed.config,
+        secrets: secretsFor(parsed.config.dropZones),
+        ...(parsed.warnings ? { warnings: parsed.warnings } : {}),
+      };
     } catch (e) {
       return { issues: [{ path: '', message: (e as Error).message }] };
     }
@@ -486,6 +501,8 @@ export class ConfigStore implements ConfigSource {
     const id = getSetting(this.o.db, 'config.current');
     this.rev = typeof id === 'number' ? id : 0;
     this.doc = doc;
+    this.warnings = v.warnings;
+    for (const w of v.warnings ?? []) this.o.log?.(`config: ${w}`);
     const { listen, dataDir } = this.o.boot;
     this.cfg = { listen, dataDir, ...v.editable, secrets: v.secrets };
   }

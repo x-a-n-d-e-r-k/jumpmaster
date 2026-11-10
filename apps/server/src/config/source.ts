@@ -12,6 +12,8 @@ export type ConfigStatus = {
   fileIgnored?: string;
   /** With `fileIgnored`: whether the file's bytes equal `ctl config export` (a current mirror). */
   fileMatchesExport?: boolean;
+  /** What the lenient read of the file adjusted to run (doctor `config.file`). */
+  warnings?: string[];
   /** Settings changed since this process started that only a restart applies. */
   restartPending: string[];
 };

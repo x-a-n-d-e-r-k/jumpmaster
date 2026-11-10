@@ -443,7 +443,9 @@ export function zoneSecrets(
   config: Pick<Config, 'secrets'>,
   zoneId: string,
 ): Record<string, string> {
-  return config.secrets.zoneSecrets?.[zoneId] ?? {};
+  const all = config.secrets.zoneSecrets;
+  // Own entries only: a zone named toString must not read Object.prototype's.
+  return all && Object.hasOwn(all, zoneId) ? (all[zoneId] ?? {}) : {};
 }
 
 const GATE_SECRET_NAME = /^[A-Z][A-Z0-9_]*$/;
@@ -486,7 +488,7 @@ function loadZoneSecrets(
       }
       values[name] = value;
     }
-    out[zone.id] = values;
+    Object.defineProperty(out, zone.id, { value: values, enumerable: true, writable: true });
   }
   return out;
 }
@@ -502,6 +504,41 @@ const SECRET_VARS = {
 const isPlainObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 
+/** Names that reach an object's prototype machinery when assigned: never config keys. */
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/** Every own key named in FORBIDDEN_KEYS, at any depth. */
+function forbiddenKeys(input: unknown, path: string): ConfigIssue[] {
+  const at = (k: string) => (path === '' ? k : `${path}.${k}`);
+  if (Array.isArray(input)) return input.flatMap((v, i) => forbiddenKeys(v, at(String(i))));
+  if (!isPlainObject(input)) return [];
+  return Object.keys(input).flatMap((k) =>
+    FORBIDDEN_KEYS.has(k)
+      ? [{ path: at(k), message: `a key named ${k} is not allowed in the config` }]
+      : forbiddenKeys(input[k], at(k)),
+  );
+}
+
+/**
+ * The lenient read of an M4 file (strict off): a `pollSeconds` outside the bounds the schema now
+ * has is clamped to them and said, so an install that ran with it still starts. Writes refuse it.
+ */
+function clampPoll(json: Record<string, unknown>): {
+  json: Record<string, unknown>;
+  warnings: string[];
+} {
+  const p = json.pollSeconds;
+  if (typeof p !== 'number' || !Number.isFinite(p) || p <= 0) return { json, warnings: [] };
+  const fixed = Math.min(Math.max(Math.round(p), MIN_POLL_SECONDS), MAX_POLL_SECONDS);
+  if (fixed === p) return { json, warnings: [] };
+  return {
+    json: { ...json, pollSeconds: fixed },
+    warnings: [
+      `pollSeconds ${p} is outside ${MIN_POLL_SECONDS}..${MAX_POLL_SECONDS}: running with ${fixed}; set it in range`,
+    ],
+  };
+}
+
 /**
  * Keys in `input` that the schema dropped from `output` (zod strips what it doesn't know), at
  * any depth: a typo such as `pollseconds` would otherwise be stored and exported with no effect.
@@ -514,7 +551,7 @@ function unknownKeys(input: unknown, output: unknown, path: string): ConfigIssue
     return input.flatMap((v, i) => unknownKeys(v, output[i], at(String(i))));
   if (!isPlainObject(input) || !isPlainObject(output)) return [];
   return Object.keys(input).flatMap((k) =>
-    k.startsWith('_') || k in output
+    k.startsWith('_') || Object.hasOwn(output, k)
       ? unknownKeys(input[k], output[k], at(k))
       : [{ path: at(k), message: 'unknown key: it would have no effect' }],
   );
@@ -530,25 +567,34 @@ export function parseEditable(
   json: unknown,
   /** `strict`: a key the schema doesn't know is an issue (every write from the UI or ctl). */
   opts: { imageLockPath?: string; devImages?: boolean; strict?: boolean } = {},
-): { ok: true; config: EditableConfig } | { ok: false; issues: ConfigIssue[] } {
+):
+  | { ok: true; config: EditableConfig; warnings?: string[] }
+  | { ok: false; issues: ConfigIssue[] } {
   if (!isPlainObject(json))
     return { ok: false, issues: [{ path: '', message: 'the config must be a JSON object' }] };
-  const boot = BOOT_KEYS.filter((k) => k in json);
+  const forbidden = forbiddenKeys(json, '');
+  if (forbidden.length > 0) return { ok: false, issues: forbidden };
+  const lenient = opts.strict ? { json, warnings: [] } : clampPoll(json);
+  const doc: Record<string, unknown> = lenient.json;
+  const boot = BOOT_KEYS.filter((k) => Object.hasOwn(doc, k));
   if (boot.length > 0)
     return { ok: false, issues: boot.map((path) => ({ path, message: BOOT_MESSAGE })) };
-  const parsed = EditableSchema.safeParse(json);
+  const parsed = EditableSchema.safeParse(doc);
   if (!parsed.success)
     return {
       ok: false,
       issues: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
     };
   if (opts.strict) {
-    const unknown = unknownKeys(json, parsed.data, '');
+    const unknown = unknownKeys(doc, parsed.data, '');
     if (unknown.length > 0) return { ok: false, issues: unknown };
   }
   const issues: ConfigIssue[] = [];
   const seen = new Set<string>();
   for (const [i, zone] of parsed.data.dropZones.entries()) {
+    // Zone ids key plain objects (gate secrets, modes by zone): never a prototype name.
+    if (FORBIDDEN_KEYS.has(zone.id))
+      issues.push({ path: `dropZones.${i}.id`, message: `a zone id may not be ${zone.id}` });
     if (seen.has(zone.id))
       issues.push({ path: `dropZones.${i}.id`, message: `duplicate zone id: ${zone.id}` });
     seen.add(zone.id);
@@ -598,7 +644,11 @@ export function parseEditable(
     dropZones.push({ ...zone, image });
   }
   if (issues.length > 0) return { ok: false, issues };
-  return { ok: true, config: { ...parsed.data, dropZones } };
+  return {
+    ok: true,
+    config: { ...parsed.data, dropZones },
+    ...(lenient.warnings.length > 0 ? { warnings: lenient.warnings } : {}),
+  };
 }
 
 /** One line per issue, as a startup error says it. */

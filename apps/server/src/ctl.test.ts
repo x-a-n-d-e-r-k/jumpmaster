@@ -255,6 +255,8 @@ describe('ctl config', () => {
       ['config', 'set', 'pollSeconds'],
       ['config', 'set'],
       ['config', 'set', '=1'],
+      ['config', 'set', '__proto__.pollSeconds=86400'],
+      ['config', 'set', 'usage.constructor.x=1'],
     ]) {
       const r = await run(args, '', s.fetch);
       expect(r.code).toBe(2);

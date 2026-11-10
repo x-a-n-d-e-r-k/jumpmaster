@@ -211,8 +211,10 @@ async function runConfig(
       const eq = a.indexOf('=');
       return eq <= 0 ? null : { path: a.slice(0, eq).split('.'), value: valueOf(a.slice(eq + 1)) };
     });
-    if (pairs.length === 0 || pairs.some((p) => p === null || p.path.some((s) => s === '')))
-      return usage();
+    // A path segment naming the prototype machinery would set a prototype, here or in the patch.
+    const bad = (seg: string) =>
+      seg === '' || ['__proto__', 'constructor', 'prototype'].includes(seg);
+    if (pairs.length === 0 || pairs.some((p) => p === null || p.path.some(bad))) return usage();
     const cur = await call('GET', '/api/control/config');
     if (!cur.ok) return fail(cur);
     const { revision, config } = (await cur.json()) as {

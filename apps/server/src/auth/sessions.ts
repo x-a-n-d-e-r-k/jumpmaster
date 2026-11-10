@@ -79,7 +79,8 @@ export function deleteAllSessions(db: Db): number {
 
 /** The cookies a browser sent, by name. */
 export function parseCookies(header: string | undefined): Record<string, string> {
-  const out: Record<string, string> = {};
+  // No prototype: a cookie named __proto__ or toString is just a name here.
+  const out: Record<string, string> = Object.create(null);
   for (const part of (header ?? '').split(';')) {
     const eq = part.indexOf('=');
     if (eq <= 0) continue;

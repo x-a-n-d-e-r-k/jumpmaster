@@ -48,6 +48,15 @@ export const crewTemplate = (role: CrewRole): string => templates[role];
  * Quotes heading lines and breaks up code fences and data-fence markers so text from a forge
  * cannot forge prompt structure.
  */
+/** A zone's own gate secrets: never an inherited member (a zone named toString has none). */
+function ownZoneSecrets(
+  secrets: { zoneSecrets?: Record<string, Record<string, string>> },
+  zoneId: string,
+): Record<string, string> | undefined {
+  const all = secrets.zoneSecrets;
+  return all && Object.hasOwn(all, zoneId) ? all[zoneId] : undefined;
+}
+
 export function neutralise(text: string): string {
   return text
     .split('\n')
@@ -263,7 +272,7 @@ function buildDoctorPayload(
     gates: zone.gates,
     ...(zone.services.length > 0 ? { services: zone.services } : {}),
     ...(hasCustomLimits(zone) ? { limits: zone.limits } : {}),
-    ...(secrets.zoneSecrets?.[zone.id] ? { gateSecrets: secrets.zoneSecrets[zone.id] } : {}),
+    ...(ownZoneSecrets(secrets, zone.id) ? { gateSecrets: ownZoneSecrets(secrets, zone.id) } : {}),
     ...(zone.gateCi === false ? { gateCi: false } : {}),
     ...egressField(zone),
     credentials: {
@@ -323,7 +332,7 @@ export function buildPayload(
     ...(zone.verification.length > 0 ? { verification: zone.verification } : {}),
     ...(zone.services.length > 0 ? { services: zone.services } : {}),
     ...(hasCustomLimits(zone) ? { limits: zone.limits } : {}),
-    ...(secrets.zoneSecrets?.[zone.id] ? { gateSecrets: secrets.zoneSecrets[zone.id] } : {}),
+    ...(ownZoneSecrets(secrets, zone.id) ? { gateSecrets: ownZoneSecrets(secrets, zone.id) } : {}),
     ...(zone.gateCi === false ? { gateCi: false } : {}),
     ...(zone.attribution === false ? { attribution: false } : {}),
     ...egressField(zone),

@@ -928,6 +928,27 @@ describe('config routes', () => {
     expect(audits[1]?.detail.changed).toBe('dropZones[main], pollSeconds');
   });
 
+  test('a PATCH carrying a prototype key over HTTP is refused and changes nothing', async () => {
+    const { db, store } = configApp();
+    for (const body of [
+      '{"patch":{"__proto__":{"pollSeconds":86400}},"expectRevision":1}',
+      '{"patch":{"constructor":{"prototype":{"pollSeconds":86400}}},"expectRevision":1}',
+      '{"patch":{"usage":{"__proto__":{"stopOnOverage":false}}},"expectRevision":1}',
+    ]) {
+      const r = await (app as FastifyInstance).inject({
+        method: 'PATCH',
+        url: '/api/control/config',
+        headers: { ...auth, 'content-type': 'application/json' },
+        payload: body,
+      });
+      expect(r.statusCode, body).toBe(400);
+    }
+    expect(store.revision()).toBe(1);
+    expect(store.current().pollSeconds).toBe(60);
+    expect(store.current().usage.stopOnOverage).not.toBe(false);
+    expect(revVia(db)).toEqual(['setup']);
+  });
+
   test('adopt with a note over 500 characters is a 400 naming the note, not a storage error', async () => {
     const { store } = configApp({ dropZones: [zoneDoc()] });
     const r = await req('POST', '/api/control/config/adopt', { note: 'x'.repeat(501) });
