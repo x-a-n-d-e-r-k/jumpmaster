@@ -345,6 +345,60 @@ describe('doctor routes', () => {
     return w;
   }
 
+  test('forge.labels offers the create action, which runs through the outbox as the author and is idempotent', async () => {
+    const w = doctorApp();
+    w.f.state.labels = ['bug'];
+    const ran = await post('/api/control/doctor', {});
+    const labels = (ran?.json().run.checks as { id: string; action?: unknown }[]).find(
+      (c) => c.id === 'forge.labels',
+    );
+    expect(labels?.action).toEqual({
+      kind: 'app',
+      label: 'Create the missing labels',
+      href: '/api/control/zones/main/labels',
+      method: 'POST',
+    });
+    const r = await post('/api/control/zones/main/labels', {});
+    expect(r?.statusCode).toBe(200);
+    expect(r?.json()).toMatchObject({
+      created: ['agent-ready', 'agent-retry'],
+      check: { id: 'forge.labels', status: 'pass' },
+    });
+    expect(w.f.author.calls.filter((c) => c.method === 'createLabel')).toHaveLength(2);
+    expect(w.f.reviewer.calls.filter((c) => c.method === 'createLabel')).toHaveLength(0);
+    const kinds = w.db.prepare('SELECT kind, state FROM outbox').all();
+    expect(kinds).toEqual([{ kind: 'create_labels', state: 'done' }]);
+    const again = await post('/api/control/zones/main/labels', {});
+    expect(again?.json()).toMatchObject({ created: [], check: { status: 'pass' } });
+    expect(w.f.author.calls.filter((c) => c.method === 'createLabel')).toHaveLength(2);
+    // A GET never writes.
+    const get = await app?.inject({
+      method: 'GET',
+      url: '/api/control/zones/main/labels',
+      headers: auth,
+    });
+    expect(get?.statusCode).toBe(404);
+    expect((await post('/api/control/zones/nope/labels', {}))?.statusCode).toBe(404);
+  });
+
+  test('the label action works in observe mode and is refused when killed, with an audit row either way', async () => {
+    const w = doctorApp();
+    w.f.state.labels = [];
+    setZoneMode(w.db, 'main', 'observe', NOW);
+    const ok = await post('/api/control/zones/main/labels', {});
+    expect(ok?.statusCode).toBe(200);
+    w.f.state.labels = [];
+    setKilled(w.db, true, NOW);
+    const killed = await post('/api/control/zones/main/labels', {});
+    expect(killed?.statusCode).toBe(409);
+    expect(killed?.json()).toEqual({ error: 'the kill switch is engaged: no forge write' });
+    const rows = listAudit(w.db).filter((a) => a.action === 'labels.create');
+    expect(rows.map((a) => [a.target, a.detail.result])).toEqual([
+      ['main', 'refused: killed'],
+      ['main', 'created: agent-ready, agent-retry'],
+    ]);
+  });
+
   test('the doctor routes need the operator token and an allowed Origin', async () => {
     const w = doctorApp();
     const get = (headers: Record<string, string>) =>

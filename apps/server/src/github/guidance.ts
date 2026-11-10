@@ -321,6 +321,8 @@ export type ZoneGuidance = {
   checklist: { url: string; items: string[] };
   /** The repository's rulesets page, where the ruleset file is imported. */
   rulesUrl: string;
+  /** The CI job names detected on the default branch (the ruleset's required checks). */
+  ciJobs: string[];
 };
 
 export type GuidanceZone = Pick<
@@ -367,5 +369,6 @@ export function zoneGuidance(
     },
     checklist: collaboratorChecklist(zone, logins),
     rulesUrl: `${GITHUB}/${repo.owner}/${repo.name}/settings/rules`,
+    ciJobs: [...new Set(detection.ciJobs.map((j) => j.job))],
   };
 }

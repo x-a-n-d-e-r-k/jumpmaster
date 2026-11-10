@@ -605,6 +605,35 @@ CREATE TABLE vault (
 );
 `;
 
+/**
+ * v21: the label action (§10.3, doctor fix links): the outbox may hold `create_labels`, the one op
+ * the operator starts from the doctor, allowed in observe. SQLite cannot widen a CHECK in place:
+ * the twelve-step rebuild of `outbox`, rows and columns kept, with foreign keys off. An older
+ * binary still reads the table (an unknown kind is never one it writes).
+ */
+const V21_SQL = `
+CREATE TABLE new_outbox (
+  id           TEXT PRIMARY KEY,
+  op_key       TEXT NOT NULL UNIQUE,
+  kind         TEXT NOT NULL CHECK (kind IN ('create_pr','post_review','merge',
+                 'create_issue','update_issue','set_labels','create_labels')),
+  work_item_id INTEGER REFERENCES work_items(id),
+  zone_id      TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL,
+  state        TEXT NOT NULL CHECK (state IN ('pending','done','unknown','failed')),
+  result_json  TEXT,
+  error        TEXT,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+INSERT INTO new_outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state, result_json,
+  error, created_at, updated_at)
+SELECT id, op_key, kind, work_item_id, zone_id, payload_json, state, result_json, error,
+  created_at, updated_at FROM outbox;
+DROP TABLE outbox;
+ALTER TABLE new_outbox RENAME TO outbox;
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -634,6 +663,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 18, sql: V18_SQL },
   { version: 19, sql: V19_SQL },
   { version: 20, sql: V20_SQL },
+  { version: 21, sql: V21_SQL, foreignKeysOff: true },
 ];
 
 /**

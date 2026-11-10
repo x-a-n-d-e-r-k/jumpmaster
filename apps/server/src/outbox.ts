@@ -125,6 +125,10 @@ export type PostReviewPayload = {
   body: string;
   commitId: string;
 };
+/** The labels a zone's config names, to create where missing (the doctor's label action). */
+export type CreateLabelsPayload = {
+  labels: { name: string; color: string; description: string }[];
+};
 export type MergePayload = { pr: number; sha: string; title: string; message: string };
 /** `since`: the crew intent's creation time; the marker search looks at issues updated after it. */
 export type CreateIssuePayload = { title: string; body: string; labels: string[]; since: string };
@@ -241,6 +245,12 @@ async function lookup(forges: ForgePair, kind: OpKind, opKey: string, payload: u
       if (p.state === 'closed') return issue.state === 'closed' ? { number: p.number } : null;
       return lastLine(issue.body) === opMarker(opKey) ? { number: p.number } : null;
     }
+    case 'create_labels': {
+      // Read-back: done when every label exists (by name, as GitHub compares them).
+      const p = payload as CreateLabelsPayload;
+      const have = new Set((await forges.author.listLabels()).map((l) => l.toLowerCase()));
+      return p.labels.every((l) => have.has(l.name.toLowerCase())) ? { created: [] } : null;
+    }
     case 'set_labels': {
       const p = payload as SetLabelsPayload;
       const issue = await forges.author.getIssue(p.number);
@@ -324,6 +334,18 @@ async function write(forges: ForgePair, kind: OpKind, opKey: string, payload: un
       const p = payload as SetLabelsPayload;
       await forges.author.setLabels(p.number, { add: p.add, remove: p.remove });
       return { number: p.number };
+    }
+    case 'create_labels': {
+      // GET, then create only what is missing, as the author bot: idempotent by name.
+      const p = payload as CreateLabelsPayload;
+      const have = new Set((await forges.author.listLabels()).map((l) => l.toLowerCase()));
+      const created: string[] = [];
+      for (const l of p.labels) {
+        if (have.has(l.name.toLowerCase())) continue;
+        const r = await forges.author.createLabel(l.name, l.color, l.description);
+        if (r.created) created.push(l.name);
+      }
+      return { created };
     }
   }
 }
@@ -444,10 +466,21 @@ function zoneMode(db: Db, zoneId: string): string | undefined {
 }
 
 /** Runs one forge write at most once per `opKey` (§5.2). */
-export async function runOp(db: Db, forges: ForgePair, op: Op, now: Date): Promise<OpResult> {
+export async function runOp(
+  db: Db,
+  forges: ForgePair,
+  op: Op,
+  now: Date,
+  /**
+   * `allowInObserve`: the operator's own label action from the doctor (Task 8), and nothing
+   * else: any other kind is still suppressed in observe whatever the caller asks.
+   */
+  opts: { allowInObserve?: boolean } = {},
+): Promise<OpResult> {
   if (isKilled(db)) throw new Error(`kill switch engaged: forge write ${op.kind} refused`);
   // Before any insert: a row left behind would later become `unknown` and park the item.
-  if (zoneMode(db, op.zoneId) === 'observe') {
+  const exempt = opts.allowInObserve === true && op.kind === 'create_labels';
+  if (!exempt && zoneMode(db, op.zoneId) === 'observe') {
     throw new Error(`observe mode: forge write ${op.kind} suppressed`);
   }
   const existing = getOutbox(db, op.opKey);

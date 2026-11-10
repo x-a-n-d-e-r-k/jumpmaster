@@ -1,7 +1,13 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { raiseBriefing, ruleBriefing } from '../briefings.js';
+import { DEFAULT_PROTECTED_PATHS } from '../config.js';
 import { insertCrewIssue } from '../crew/store.js';
 import { insertDrop, insertStick, updateDrop } from '../db/repo.js';
+import { actionFor, PAGES_M45A, pagesOf } from '../doctor/actions.js';
+import { CHECK_IDS, DOC } from '../doctor/checks.js';
+import { zoneGuidance } from '../github/guidance.js';
 import { opMarker } from '../outbox.js';
 import { crewOn, GOAL } from '../test/crew.js';
 import { harness } from '../test/flowHarness.js';
@@ -192,4 +198,124 @@ describe('UI routes', () => {
       expect(res.statusCode).toBe(403);
     },
   );
+});
+
+describe('doctor fix links (Task 8)', () => {
+  test('in the M4.5a configuration every action href is a registered page, a github.com page or a runbook anchor', async () => {
+    const h = await harness({ live: true, zone: { protectedPaths: [...DEFAULT_PROTECTED_PATHS] } });
+    const runbook = readFileSync(
+      join(import.meta.dirname, '../../../../docs/runbooks/install.md'),
+      'utf8',
+    );
+    // GitHub's heading anchors: lower case, punctuation dropped, spaces to dashes.
+    const anchors = new Set(
+      [...runbook.matchAll(/^#+ (.+)$/gm)].map((m) =>
+        (m[1] as string)
+          .toLowerCase()
+          .replace(/[^\w\- ]/g, '')
+          .replace(/ /g, '-'),
+      ),
+    );
+    const guidance = zoneGuidance(
+      h.zone,
+      { defaultBranch: 'main', ciJobs: [], ownerType: 'User', visibility: 'public' },
+      {},
+    );
+    const seen = new Set<string>();
+    for (const id of CHECK_IDS)
+      for (const g of [undefined, guidance])
+        for (const summary of ['claudeToken: no Claude token', 'githubAuthorToken: none']) {
+          const a = actionFor(
+            {
+              id,
+              zoneId: h.zone.id,
+              status: 'fail',
+              summary,
+              credentials: [summary.split(':')[0] as string],
+            },
+            { zone: h.zone, pages: PAGES_M45A, ...(g ? { guidance: g } : {}) },
+          );
+          if (!a) continue;
+          const key = `${a.method ?? 'GET'} ${a.href}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          if (a.kind === 'forge') expect(a.href, id).toMatch(/^https:\/\/github\.com\//);
+          else if (a.kind === 'docs') {
+            const [base, anchor] = a.href.split('#');
+            expect(base, id).toBe(DOC);
+            expect(anchors.has(anchor as string), `${id} #${anchor}`).toBe(true);
+          } else if (a.method === 'POST') {
+            const pattern = a.href.replace(`/${h.zone.id}/`, '/:id/');
+            expect(h.app.hasRoute({ method: 'POST', url: pattern }), `${id} ${pattern}`).toBe(true);
+          } else {
+            // Registered: the page answers (a GitHub page may say GitHub is unreadable here).
+            const r = await h.view(a.href.split('#')[0] as string);
+            expect([id, a.href, r.statusCode]).not.toEqual([id, a.href, 404]);
+          }
+        }
+    expect(seen.size).toBeGreaterThan(10);
+    // This build's pages, as the doctor route derives them.
+    expect(pagesOf(h.app)).toEqual(PAGES_M45A);
+  });
+
+  test('the doctor page renders fails first with their action links escaped and artifact downloads', async () => {
+    const h = await harness();
+    const checks = [
+      { id: 'config.listen', zoneId: null, status: 'pass', summary: 'loopback only' },
+      { id: 'zone.egress', zoneId: 'main', status: 'warn', summary: 'monitor' },
+      {
+        id: 'forge.branch-rules',
+        zoneId: 'main',
+        status: 'fail',
+        summary: 'no rules',
+        action: {
+          kind: 'forge',
+          label: 'Import <the> ruleset',
+          href: 'https://github.com/octo/demo/settings/rules?a=1&b=2',
+          artifact: { filename: 'rules "x".json', text: '{"rules": ["<x>"]}' },
+        },
+      },
+      {
+        id: 'forge.labels',
+        zoneId: 'main',
+        status: 'fail',
+        summary: 'missing',
+        action: {
+          kind: 'app',
+          label: 'Create the missing labels',
+          href: '/api/control/zones/main/labels',
+          method: 'POST',
+        },
+      },
+      {
+        id: 'config.uid',
+        zoneId: null,
+        status: 'fail',
+        summary: 'bad',
+        action: { kind: 'docs', label: 'Read', href: 'javascript:alert(1)' },
+      },
+    ];
+    h.db
+      .prepare(
+        "INSERT INTO doctor_runs (started_at, finished_at, results_json) VALUES ('a', 'b', ?)",
+      )
+      .run(JSON.stringify(checks));
+    const html = (await get(h, '/doctor')).body;
+    const order = [...html.matchAll(/<tr class="(\w+)">/g)].map((m) => m[1]);
+    expect(order).toEqual(['fail', 'fail', 'fail', 'warn', 'pass']);
+    expect(html).toContain(
+      '<a href="https://github.com/octo/demo/settings/rules?a=1&amp;b=2" rel="noopener noreferrer" target="_blank">Import &lt;the&gt; ruleset</a>',
+    );
+    // The artifact as a download, its name and text escaped and encoded.
+    expect(html).toContain(
+      `<a download="rules &quot;x&quot;.json" href="data:text/plain;charset=utf-8,${encodeURIComponent('{"rules": ["<x>"]}')}">Download rules &quot;x&quot;.json</a>`,
+    );
+    // A write is a button behind the CSRF header, never a link.
+    expect(html).toContain(
+      '<button data-doctor="/api/control/zones/main/labels" data-body="{}">Create the missing labels</button>',
+    );
+    expect(html).not.toContain('href="/api/control/zones/main/labels"');
+    // An href that is neither a path here nor https is not rendered as a link.
+    expect(html).not.toContain('javascript:alert');
+  });
 });

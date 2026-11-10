@@ -1,5 +1,5 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { PRESETS } from '@jumpmaster/protocol';
+import { PRESETS, redact } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { type AuditDetail, recordAudit } from '../auth/audit.js';
@@ -34,7 +34,14 @@ import {
   setZoneMode,
   ZONE_MODES,
 } from '../db/repo.js';
-import { type DoctorDeps, type DoctorEnv, doctorDropWait } from '../doctor/checks.js';
+import { pagesOf } from '../doctor/actions.js';
+import {
+  type DoctorDeps,
+  type DoctorEnv,
+  doctorDropWait,
+  labelsCheckOn,
+  wantedLabels,
+} from '../doctor/checks.js';
 import { DoctorBusyError, latestDoctorRun, processEnv, runDoctor } from '../doctor/run.js';
 import { type Forge, GitHubForge } from '../forge/github.js';
 import { fileIntakeIssue, GoalStubSchema, IntakeIssueSchema, renderGoalStub } from '../intake.js';
@@ -46,7 +53,7 @@ import {
   mintMcpToken,
   revokeMcpToken,
 } from '../mcp/tokens.js';
-import type { ForgePair } from '../outbox.js';
+import { type ForgePair, runOp } from '../outbox.js';
 import { safeNext } from '../ui/auth-pages.js';
 import { credentialCreatedAt, shadowedCredentials, type TestDeps } from '../vault/credentials.js';
 import {
@@ -61,7 +68,13 @@ import {
 
 export { detectFailure } from '../zones/detect.js';
 
-import { type GuidanceForge, registerGuidanceRoutes } from './github.js';
+import type { ZoneGuidance } from '../github/guidance.js';
+import {
+  type GuidanceForge,
+  githubGuidanceForge,
+  guidanceFor,
+  registerGuidanceRoutes,
+} from './github.js';
 import { registerSecretRoutes } from './secrets.js';
 
 export interface ControlDeps {
@@ -101,6 +114,21 @@ export interface ControlDeps {
 /** A setup mode whose codes go to stderr, alone on their line (main.ts passes its own). */
 export function stderrSetupMode(listen: Config['listen']): SetupMode {
   return new SetupMode((code) => process.stderr.write(`${setupCodeLine(code, listen)}\n`));
+}
+
+/** A zone's generated GitHub files, or undefined when GitHub can't be read just now. */
+function guidanceReader(
+  store: ConfigStore,
+  config: Config,
+  forgeOf: ((repo: string, token: string) => GuidanceForge) | undefined,
+  now: () => Date,
+): (zoneId: string) => Promise<ZoneGuidance | undefined> {
+  return async (zoneId) => {
+    const zone = config.dropZones.find((z) => z.id === zoneId);
+    if (!zone) return undefined;
+    const r = await guidanceFor(store, config, zone, forgeOf ?? githubGuidanceForge, { now });
+    return r.ok ? r.guidance : undefined;
+  };
 }
 
 /** What the doctor's credential checks read from the store (Task 4). */
@@ -434,6 +462,12 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
               ...(deps.readForgeFor ? { readForge: deps.readForgeFor } : {}),
               ...(configStatus ? { configStatus } : {}),
               ...(credentials ? { credentials } : {}),
+              // The pages this app registers decide where the fix links go.
+              pages: pagesOf(app),
+              // The zone's generated GitHub files, for the fix links that bring one along.
+              ...(deps.config instanceof ConfigStore
+                ? { guidance: guidanceReader(deps.config, cfg(req), deps.guidanceForge, now) }
+                : {}),
             },
             zoneId !== undefined ? { zoneId } : {},
           );
@@ -445,6 +479,59 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         }
       });
       scope.get('/api/control/doctor', async () => ({ run: latestDoctorRun(db) }));
+
+      // The doctor's label action (forge.labels): the configured labels that are missing,
+      // created as the author bot through the outbox. Allowed in observe (it touches no issue),
+      // refused while killed, audited either way, then forge.labels runs again.
+      scope.post<{ Params: { id: string } }>(
+        '/api/control/zones/:id/labels',
+        async (req, reply) => {
+          const zone = cfg(req).dropZones.find((z) => z.id === req.params.id);
+          if (!zone) return reply.code(404).send({ error: 'unknown zone' });
+          if (isKilled(db)) {
+            audit(req, 'labels.create', { result: 'refused: killed' }, zone.id);
+            return reply.code(409).send({ error: 'the kill switch is engaged: no forge write' });
+          }
+          const forges = (deps.intakeForgesFor ?? forgesFor)(zone.id);
+          const at = now();
+          let created: string[];
+          try {
+            const r = await runOp(
+              db,
+              forges,
+              {
+                kind: 'create_labels',
+                // One op per request: each request looks again, by name.
+                opKey: `create_labels:${zone.id}:${randomUUID()}`,
+                zoneId: zone.id,
+                itemId: null,
+                payload: { labels: wantedLabels(zone) },
+              },
+              at,
+              { allowInObserve: true },
+            );
+            if (r.state !== 'done') {
+              audit(req, 'labels.create', { result: `failed: ${r.state}` }, zone.id);
+              return reply
+                .code(502)
+                .send({ error: `GitHub did not create the labels (${r.state})` });
+            }
+            created = ((r.result as { created?: string[] } | undefined)?.created ?? []).slice();
+          } catch (e) {
+            audit(req, 'labels.create', { result: 'refused' }, zone.id);
+            // Fixed strings today (killed, a vanished row); scrubbed anyway, as audit rows are.
+            return reply.code(409).send({ error: redact((e as Error).message, scrubList(req)) });
+          }
+          audit(
+            req,
+            'labels.create',
+            { result: created.length > 0 ? `created: ${created.join(', ')}` : 'none missing' },
+            zone.id,
+          );
+          const check = await labelsCheckOn(zone, forges.author);
+          return { created, check };
+        },
+      );
     }
 
     // A doctor drop spends a turn of usage, so it runs only on request, one per zone, and is

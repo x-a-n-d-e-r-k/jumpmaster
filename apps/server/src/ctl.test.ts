@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -528,4 +528,122 @@ describe('ctl github (Task 7)', () => {
     expect(r.code).toBe(2);
     expect(r.err.join('\n')).toContain('ctl github <zone> recommend');
   });
+});
+
+describe('ctl doctor actions (Task 8)', () => {
+  const doctorRunValue = {
+    id: 3,
+    finishedAt: '2026-01-01T00:00:00.000Z',
+    checks: [
+      { id: 'config.listen', zoneId: null, status: 'pass', summary: 'loopback' },
+      {
+        id: 'forge.branch-rules',
+        zoneId: 'main',
+        status: 'fail',
+        summary: 'no rules',
+        action: {
+          kind: 'forge',
+          label: 'Import the ruleset file on GitHub',
+          href: 'https://github.com/octo/demo/settings/rules',
+          artifact: { filename: 'jumpmaster-main-ruleset.json', text: '{"name":"jumpmaster"}\n' },
+        },
+      },
+      {
+        id: 'forge.labels',
+        zoneId: 'main',
+        status: 'fail',
+        summary: 'missing',
+        action: {
+          kind: 'app',
+          label: 'Create the missing labels',
+          href: '/api/control/zones/main/labels',
+          method: 'POST',
+        },
+      },
+      {
+        id: 'forge.codeowners',
+        zoneId: '../x',
+        status: 'fail',
+        summary: 'none',
+        action: {
+          kind: 'forge',
+          label: 'Create CODEOWNERS',
+          href: 'https://github.com/octo/demo/new/main',
+          artifact: { filename: '../../CODEOWNERS', text: '* @bot\n' },
+        },
+      },
+    ],
+  };
+
+  test('ctl doctor prints the action for each fail and writes artifacts to the given directory', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'jm-artifacts-'));
+    const r = await run(['doctor', '--artifacts', dir], '', fakeFetch(200, { run: doctorRun }));
+    expect(r.calls[0]?.url).toBe('http://127.0.0.1:7420/api/control/doctor');
+    expect(JSON.parse(String(r.calls[0]?.init.body))).toEqual({});
+    const out = r.out.join('\n');
+    expect(out).toContain(
+      'action: Import the ruleset file on GitHub: https://github.com/octo/demo/settings/rules',
+    );
+    expect(out).toContain(
+      'action: Create the missing labels: POST /api/control/zones/main/labels (jumpmaster ctl labels main)',
+    );
+    expect(out).not.toMatch(/action: .*loopback/);
+    // Each file under the directory, by its base name only.
+    expect(readdirSync(dir).sort()).toEqual(['CODEOWNERS', 'jumpmaster-main-ruleset.json']);
+    expect(readFileSync(join(dir, 'jumpmaster-main-ruleset.json'), 'utf8')).toBe(
+      '{"name":"jumpmaster"}\n',
+    );
+    expect(out).toContain(`wrote ${join(dir, 'jumpmaster-main-ruleset.json')}`);
+    // Without --artifacts nothing is written, and the line says how to get them.
+    const plain = await run(['doctor'], '', fakeFetch(200, { run: doctorRun }));
+    expect(plain.out.join('\n')).toContain(
+      'file: jumpmaster-main-ruleset.json (jumpmaster ctl doctor --artifacts <dir> writes it)',
+    );
+  });
+
+  test('ctl labels <zone> posts the label action', async () => {
+    const r = await run(['labels', 'main']);
+    expect(r.calls[0]?.url).toBe('http://127.0.0.1:7420/api/control/zones/main/labels');
+    expect(r.calls[0]?.init.method).toBe('POST');
+  });
+  const doctorRun = doctorRunValue;
+});
+
+test('ctl doctor strips control characters from every line, and says overwrote when it replaces a file', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'jm-artifacts-'));
+  writeFileSync(join(dir, 'CODEOWNERS'), 'old\n');
+  const hostile = {
+    id: 1,
+    finishedAt: 'x',
+    checks: [
+      {
+        id: 'forge.ci',
+        zoneId: 'main',
+        status: 'fail',
+        summary: 'bad \u001b[2Jsummary',
+        action: {
+          kind: 'forge',
+          label: 'Open GitHub Actions (detected jobs: a\u001b[31mred\nrm -rf)',
+          href: 'https://github.com/octo/demo/actions',
+          artifact: { filename: 'CODEOWNERS', text: '* @bot\n' },
+        },
+      },
+    ],
+  };
+  const out: string[] = [];
+  await runCtl(
+    ['doctor', '--artifacts', dir],
+    env,
+    fakeFetch(200, { run: hostile }).impl,
+    (l) => out.push(l),
+    () => {},
+    async () => '',
+  );
+  const text = out.join('\n');
+  for (const line of out) expect(line).not.toMatch(/[\u0000-\u001f\u007f]/);
+  expect(text).toContain(
+    'action: Open GitHub Actions (detected jobs: a[31mredrm -rf): https://github.com/octo/demo/actions',
+  );
+  expect(text).toContain(`overwrote ${join(dir, 'CODEOWNERS')}`);
+  expect(readFileSync(join(dir, 'CODEOWNERS'), 'utf8')).toBe('* @bot\n');
 });

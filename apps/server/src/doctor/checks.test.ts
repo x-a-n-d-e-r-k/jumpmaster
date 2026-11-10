@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -14,7 +14,7 @@ import {
 } from '../db/repo.js';
 import { AUTHOR_TOKEN, ago, NOW, one, PG, world } from '../test/doctorWorld.js';
 import { okProbes } from '../test/fakes.js';
-import { type DoctorDeps, installDocUrl } from './checks.js';
+import { CHECK_IDS, type DoctorDeps, installDocUrl } from './checks.js';
 import { processEnv } from './run.js';
 
 describe('a healthy install', () => {
@@ -1329,7 +1329,11 @@ describe('credential checks (Task 4)', () => {
       status: 'fail',
       summary: 'githubAuthorToken: zone main is a starter zone, which merges with the author token',
     });
-    expect(one(checks, 'credential.same')).toMatchObject({ status: 'fail' });
+    expect(one(checks, 'credential.same')).toMatchObject({
+      status: 'fail',
+      credentials: ['githubReviewerToken'],
+    });
+    expect(one(checks, 'credential.kind').credentials).toEqual(['githubAuthorToken']);
     expect(one(checks, 'credential.missing').status).toBe('pass');
   });
 
@@ -1468,4 +1472,12 @@ describe('install-wide credentials', () => {
     expect(c.fix).toContain('“Made on”');
     expect(c.fix).toContain('/setup/claude');
   });
+});
+
+test('CHECK_IDS names exactly the check ids this file reports', () => {
+  const src = readFileSync(join(import.meta.dirname, 'checks.ts'), 'utf8');
+  const ids = new Set([...src.matchAll(/\bid: '([a-z]+\.[a-z-]+)'/g)].map((m) => m[1] as string));
+  for (const m of src.matchAll(/\bg\('([a-z]+\.[a-z-]+)'/g)) ids.add(m[1] as string);
+  for (const who of ['author', 'reviewer']) ids.add(`forge.${who}`).add(`forge.${who}-reads`);
+  expect([...ids].sort()).toEqual([...CHECK_IDS].sort());
 });

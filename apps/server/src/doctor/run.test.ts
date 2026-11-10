@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { secretList } from '../config.js';
+import { zoneGuidance } from '../github/guidance.js';
 import {
   AUTHOR_TOKEN,
   CLAUDE_TOKEN,
@@ -8,6 +9,7 @@ import {
   world,
 } from '../test/doctorWorld.js';
 import { FORGE_WRITES } from '../test/fakes.js';
+import { makeZone } from '../test/fixtures.js';
 import { DoctorBusyError, latestDoctorRun, runDoctor, summarize } from './run.js';
 
 describe('runDoctor', () => {
@@ -101,5 +103,53 @@ describe('runDoctor', () => {
     expect(forge.every((c) => /could not/.test(c.summary))).toBe(true);
     expect(JSON.stringify(run)).not.toContain(AUTHOR_TOKEN);
     expect(run.checks.find((c) => c.id === 'config.listen')?.status).toBe('pass');
+  });
+});
+
+describe('actions on a run (Task 8)', () => {
+  const guidanceWith = (_text: string) =>
+    zoneGuidance(
+      makeZone({ id: 'main', repo: 'octo/demo' }),
+      { defaultBranch: 'main', ciJobs: [], ownerType: 'User', visibility: 'public' },
+      { reviewer: 'jm-reviewer' },
+    );
+
+  test('each fail carries its action, and a pass none; guidance is read only for a zone that needs it', async () => {
+    const w = world();
+    w.f.state.labels = [];
+    let asked = 0;
+    w.deps.guidance = async () => {
+      asked++;
+      return guidanceWith('');
+    };
+    const run = await runDoctor(w.deps);
+    const labels = run.checks.find((c) => c.id === 'forge.labels');
+    expect(labels?.status).toBe('fail');
+    expect(labels?.action).toMatchObject({
+      kind: 'app',
+      method: 'POST',
+      label: 'Create the missing labels',
+    });
+    for (const c of run.checks.filter((x) => x.status === 'pass')) expect(c.action).toBeUndefined();
+    // forge.branch-rules, forge.codeowners and forge.ci all pass in this world: no guidance read.
+    expect(asked).toBe(0);
+  });
+
+  test('an artifact the doctor offers never carries a secret value, stored or returned', async () => {
+    const w = world();
+    w.f.state.rules = { author: { kind: 'none' }, reviewer: { kind: 'none' } };
+    const g = guidanceWith('');
+    g.ruleset = { ...g.ruleset, text: `{"leak": "${AUTHOR_TOKEN}"}` };
+    g.codeowners = { ...g.codeowners, text: `* @x ${REVIEWER_TOKEN}` };
+    w.deps.guidance = async () => g;
+    const run = await runDoctor(w.deps);
+    const rules = run.checks.find((c) => c.id === 'forge.branch-rules');
+    expect(rules?.status).not.toBe('pass');
+    expect(rules?.action?.artifact?.filename).toBe(g.ruleset.filename);
+    const stored = w.db.prepare('SELECT results_json AS r FROM doctor_runs').all() as {
+      r: string;
+    }[];
+    for (const text of [JSON.stringify(run), ...stored.map((s) => s.r)])
+      for (const secret of secretList(w.config.secrets)) expect(text).not.toContain(secret);
   });
 });
