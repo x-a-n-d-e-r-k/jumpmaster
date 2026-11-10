@@ -185,6 +185,14 @@ describe('loadConfig', () => {
       ),
     );
 
+    test('a gate secret named CI is refused, pointing at gateCi', () =>
+      expect(() =>
+        loadConfig(withZone({ gateSecrets: ['CI'] }), {
+          ...fullEnv,
+          JM_ZONE_SECRET_MAIN_CI: 'disabled-ci',
+        }),
+      ).toThrow(/gate secret CI.*gateCi/));
+
     test('values reach zoneSecrets and the redaction list', () => {
       const c = loadConfig(declared(), { ...fullEnv, ...value });
       expect(zoneSecrets(c, 'main')).toEqual({ TEST_DB_URL: 'postgres://local/test' });

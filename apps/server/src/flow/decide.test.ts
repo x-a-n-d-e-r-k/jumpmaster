@@ -662,6 +662,12 @@ describe('rules in order', () => {
     expect(decide(mergeable({ checks: pending }))).toEqual({ kind: 'wait', on: 'ci' }));
 });
 
+test('a denied directory listing names the permission to grant', () =>
+  expect(decide(snap({ forgeDenied: 'listDir' }))).toEqual({
+    kind: 'park',
+    reason: 'forge read denied: listDir (grant the author token Contents: read)',
+  }));
+
 describe('overlaps', () => {
   test('head change invalidates approval', () =>
     expect(decide(snap({ verdictsOnHead: [], pr: pr('sha2'), checks: ok, mergeOp: null }))).toEqual(

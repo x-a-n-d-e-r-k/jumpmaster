@@ -190,7 +190,10 @@ before it. With one free slot, crew drops wait until no finishing or implement d
 - **pnpm:** pin pnpm 10 or later in the root `package.json` (`packageManager`), run that
   version in the image, and set `"trustPnpmBuildBlocking": true`. Otherwise every new package in
   `pnpm-lock.yaml` parks `gate tool changed: dependency added: …`. Packages allowed to build are
-  still reported. `pnpm-workspace.yaml`, `.pnpmfile.cjs` and `patches/**` are protected
+  still reported, and every new package parks as unverifiable when a pnpmfile is present.
+  Gates run with `CI=true` (frozen installs, `jest --ci`, no watch mode; `"gateCi": false` turns it
+  off, see the M1 runbook). `pnpm-workspace.yaml`,
+  `.pnpmfile.*`, `pnpmfile.*` and `patches/**` are protected
   paths: a PR that touches them always waits for a person.
 - **Gate-change override:** a PR that parks `gate script changed` or `gate tool changed` goes on
   once someone with maintain or admin (or a login in `overrideApprovers` with write access)

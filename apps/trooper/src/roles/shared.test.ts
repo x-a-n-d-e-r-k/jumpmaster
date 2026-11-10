@@ -13,6 +13,7 @@ import { runImplement } from './implement.js';
 import {
   agentSettings,
   agentSystemPrompt,
+  gateExtraEnv,
   type RoleCtx,
   runAgent,
   runGatesPhase,
@@ -236,10 +237,23 @@ describe('gate secrets', () => {
     expect(r.state.systemPrompt).not.toMatch(/only in the gate step/i);
   });
 
-  test('a zone with no secrets changes the gate env by nothing', async () => {
+  test('a zone with no secrets adds only CI=true to the gate env', async () => {
+    // CI=true makes pnpm install frozen (it refuses a lockfile that disagrees with package.json
+    // or with a pnpmfile it doesn't record) and keeps test runners out of watch mode.
     const r = recorder();
     await runGatesPhase(impl, r.deps, ctx, '/work/w1/repo');
-    expect(r.state.gateExtraEnv).toEqual({});
+    expect(r.state.gateExtraEnv).toEqual({ CI: 'true' });
+  });
+
+  test('gateCi: false in the payload runs the gates with CI=false', async () => {
+    const r = recorder();
+    await runGatesPhase({ ...impl, gateCi: false }, r.deps, ctx, '/work/w1/repo');
+    expect(r.state.gateExtraEnv).toEqual({ CI: 'false' });
+  });
+
+  test('CI never comes from gate secrets: the zone setting decides', () => {
+    expect(gateExtraEnv({ gateSecrets: { CI: 'disabled-ci' } }).CI).toBe('true');
+    expect(gateExtraEnv({ gateSecrets: { CI: 'x'.repeat(8) }, gateCi: false }).CI).toBe('false');
   });
 });
 

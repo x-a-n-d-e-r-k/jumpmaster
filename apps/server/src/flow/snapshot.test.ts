@@ -277,6 +277,49 @@ describe('buildSnapshot', () => {
       ]);
     });
 
+    // pnpm runs a pnpmfile's hooks.updateConfig, which can allow every build: each route by which
+    // pnpm finds one makes the new dependency reported.
+    const allBuilds =
+      'dependency added: @types/node@26.6.5 (pnpmfile present: build policy not verifiable)';
+
+    test('trusted build blocking still reports when the head has a root .pnpmfile.mjs', async () => {
+      w.zone.trustPnpmBuildBlocking = true;
+      addTypesNode(pinned);
+      w.f.state.dirs.set('sha1:', ['package.json', 'pnpm-lock.yaml', '.pnpmfile.mjs']);
+      expect((await snapshotOf()).gateToolChanges).toEqual([allBuilds]);
+    });
+
+    test('trusted build blocking still reports when pnpm-workspace.yaml names a pnpmfile', async () => {
+      w.zone.trustPnpmBuildBlocking = true;
+      addTypesNode(pinned);
+      w.f.state.files.set(
+        'sha1:pnpm-workspace.yaml',
+        "packages: ['packages/*']\npnpmfile: ./hooks.cjs\n",
+      );
+      expect((await snapshotOf()).gateToolChanges).toEqual([allBuilds]);
+    });
+
+    test('trusted build blocking still reports when the head lockfile has a pnpmfileChecksum', async () => {
+      w.zone.trustPnpmBuildBlocking = true;
+      addTypesNode(pinned);
+      w.f.state.files.set(
+        'sha1:pnpm-lock.yaml',
+        `${lockV9('vitest@4.1.0', '@types/node@26.6.5')}\npnpmfileChecksum: sha256-abc`,
+      );
+      w.f.state.files.set(
+        'base0:pnpm-lock.yaml',
+        `${lockV9('vitest@4.1.0')}\npnpmfileChecksum: sha256-abc`,
+      );
+      expect((await snapshotOf()).gateToolChanges).toEqual([allBuilds]);
+    });
+
+    test('a root directory listing that fails leaves the pass waiting, not passing', async () => {
+      w.zone.trustPnpmBuildBlocking = true;
+      addTypesNode(pinned);
+      w.f.author.failNext('listDir', { status: 500 });
+      expect((await snapshotOf()).forgeUnavailable).toBe('listDir');
+    });
+
     test('a dependency change with no lockfile anywhere fails closed', async () => {
       w.f.state.pullFiles.set(1, { files: [{ path: 'packages/a/package.json' }], complete: true });
       w.f.state.files.set('base0:packages/a/package.json', deps({}));

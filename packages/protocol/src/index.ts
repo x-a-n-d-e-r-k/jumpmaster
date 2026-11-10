@@ -165,6 +165,8 @@ const dropPayloadBase = {
   credentials: z.object({ claudeToken: z.string(), forgeToken: z.string().optional() }),
   /** Environment for gate steps only, never the agent. Redacted like every credential. */
   gateSecrets: z.record(z.string(), z.string()).optional(),
+  /** `false`: gates run with CI=false instead of CI=true. Absent keeps CI=true. */
+  gateCi: z.boolean().optional(),
   services: z.array(ServiceSpecSchema).optional(),
   limits: ContainerLimitsSchema.optional(),
   verification: z.array(VerificationSpecSchema).optional(),
@@ -229,6 +231,7 @@ export const DropPayloadSchema = z.discriminatedUnion('role', [
     services: dropPayloadBase.services,
     limits: dropPayloadBase.limits,
     gateSecrets: dropPayloadBase.gateSecrets,
+    gateCi: dropPayloadBase.gateCi,
     egress: dropPayloadBase.egress,
     /** At most the read token, for a private repository's clone. Never a write token. */
     credentials: z.strictObject({

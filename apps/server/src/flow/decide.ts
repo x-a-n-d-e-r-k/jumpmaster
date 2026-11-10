@@ -95,6 +95,7 @@ const READ_PERMISSION: Record<string, string> = {
   listPullFiles: 'Pull requests: read',
   branchSha: 'Contents: read',
   getFileAt: 'Contents: read',
+  listDir: 'Contents: read',
 };
 
 export const DENIED_PREFIX = 'forge read denied: ';

@@ -1,8 +1,10 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { DropPayloadSchema } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
 import { syncParkBriefings } from './briefings.js';
-import type { Config, DropZoneConfig } from './config.js';
+import { type Config, type DropZoneConfig, loadConfig } from './config.js';
 import { enqueueCrew } from './crew/schedule.js';
 import {
   type Drop,
@@ -120,6 +122,36 @@ describe('buildPayload', () => {
       expect(build(d).attribution).toBeUndefined();
       expect(build(d, { ...zone, attribution: false }).attribution).toBe(false);
     }
+  });
+
+  test('gateCi: false in the config file reaches every gate-running payload; the default sends nothing', () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'jm-config-')), 'jumpmaster.config.json');
+    const zoneJson = { id: 'main', repo: 'octo/demo', image: 'jm-trooper:dev' };
+    const gates = [{ name: 'test', run: 'npm test' }];
+    const env = {
+      JM_CLAUDE_TOKEN: 'a',
+      JM_GITHUB_AUTHOR_TOKEN: 'b',
+      JM_GITHUB_REVIEWER_TOKEN: 'r',
+      JM_JOIN_TOKEN: 'c',
+      JM_OPERATOR_TOKEN: 'o'.repeat(32),
+    };
+    const load = (extra: Record<string, unknown>) => {
+      writeFileSync(
+        file,
+        JSON.stringify({ dataDir: './data', dropZones: [{ ...zoneJson, gates, ...extra }] }),
+      );
+      return loadConfig(file, env).dropZones[0] as DropZoneConfig;
+    };
+    const off = load({ gateCi: false });
+    const doctor: Drop = { ...base, id: 'doc', workItemId: null, role: 'doctor' };
+    for (const d of [impl, heal, resolve, doctor]) {
+      const p = DropPayloadSchema.parse(buildPayload(db, off, d, secrets));
+      expect((p as { gateCi?: boolean }).gateCi, d.role).toBe(false);
+    }
+    const on = load({});
+    expect(on.gateCi).toBe(true);
+    for (const d of [impl, doctor])
+      expect((buildPayload(db, on, d, secrets) as { gateCi?: boolean }).gateCi).toBeUndefined();
   });
 
   test('implement, heal and resolve carry the author token', () => {
