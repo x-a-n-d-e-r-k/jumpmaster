@@ -36,6 +36,7 @@ import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import { credentialCreatedAt } from '../vault/credentials.js';
 import { fingerprintOf, openVault } from '../vault/vault.js';
 import { type ControlDeps, registerControlRoutes } from './control.js';
+import { guidanceFor, recommendFor } from './github.js';
 
 const TOKEN = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
@@ -1916,5 +1917,297 @@ describe('detect and zone add routes', () => {
         })
       ).statusCode,
     ).toBe(400);
+  });
+});
+
+describe('GitHub guidance routes (Task 7)', () => {
+  const AUTHOR = 'github_pat_GUIDEAUTHORDUMMY0123456789';
+  const REVIEWER = 'github_pat_GUIDEREVIEWERDUMMY012345678';
+  const genv = {
+    JM_CLAUDE_TOKEN: 'sk-ant-oat01-GUIDECLAUDEDUMMY0123456789',
+    JM_GITHUB_AUTHOR_TOKEN: AUTHOR,
+    JM_GITHUB_REVIEWER_TOKEN: REVIEWER,
+    JM_JOIN_TOKEN: 'join-secret-value-7',
+    JM_OPERATOR_TOKEN: TOKEN,
+    JM_DEV_IMAGES: '1',
+  };
+  const CI_YML =
+    'on:\n  pull_request:\njobs:\n  test:\n    runs-on: x\n  lint:\n    name: Lint\n    runs-on: x\n';
+
+  /** A forge per token that answers as GitHub would, recording each call (all reads). */
+  function guideApp(
+    o: {
+      env?: Record<string, string>;
+      ownerType?: 'User' | 'Organization';
+      private?: boolean;
+      /** Without a token GitHub hides a private repository: 404. */
+      anonymous404?: boolean;
+      /** The clock the guidance cache reads (default t0). */
+      clock?: { now: Date };
+    } = {},
+  ) {
+    const db = openDb(tmpDbFile());
+    const dir = mkdtempSync(join(tmpdir(), 'jm-guide-'));
+    const store = ConfigStore.open({
+      db,
+      boot: loadBoot({}, undefined),
+      env: o.env ?? genv,
+      now: () => t0,
+      imageLockPath: join(dir, 'no-lock.json'),
+    });
+    const calls: string[] = [];
+    const tokens: string[] = [];
+    const ownerType = o.ownerType ?? 'Organization';
+    app = controlApp({
+      db,
+      config: store,
+      now: () => o.clock?.now ?? t0,
+      guidanceForge: (repo, token) => {
+        tokens.push(token);
+        const who = token === AUTHOR ? 'jm-author' : token === REVIEWER ? 'jm-reviewer' : '';
+        return {
+          async repoAccess() {
+            calls.push(`repoAccess ${repo}`);
+            if (token === '' && o.anonymous404)
+              throw Object.assign(new Error('Not Found'), { status: 404 });
+            return {
+              private: o.private ?? false,
+              defaultBranch: 'main',
+              permissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
+              scopes: null,
+              tokenExpiresAt: null,
+              ownerType,
+            };
+          },
+          async ownerType() {
+            calls.push(`ownerType ${repo}`);
+            return ownerType;
+          },
+          async viewerLogin() {
+            calls.push('viewerLogin');
+            if (!who) throw Object.assign(new Error('Requires authentication'), { status: 401 });
+            return who;
+          },
+          async listDir(_ref: string, path: string) {
+            calls.push(`listDir ${path}`);
+            return path === '.github/workflows' ? ['ci.yml'] : [];
+          },
+          async getFileAt(_ref: string, path: string) {
+            calls.push(`getFileAt ${path}`);
+            return path === '.github/workflows/ci.yml' ? CI_YML : null;
+          },
+        };
+      },
+    });
+    return { db, store, calls, tokens };
+  }
+  const get = (url: string, headers: Record<string, string> = auth) =>
+    (app as FastifyInstance).inject({ method: 'GET', url, headers });
+  const addZone = async (identity: 'two-bot' | 'starter' = 'two-bot') =>
+    post('/api/control/zones', {
+      zone: {
+        repo: 'octo-org/demo',
+        identity,
+        preset: 'node',
+        gates: [{ name: 'test', run: 'npm test' }],
+        egress: { mode: 'monitor' },
+      },
+    });
+
+  test('GET zones/:id/github holds the five for the zone, from GET-only reads, the logins resolved and no token', async () => {
+    const { calls } = guideApp();
+    const added = await addZone();
+    expect(added.statusCode, added.body).toBe(200);
+    const r = await get('/api/control/zones/demo/github?reviewer=alice');
+    expect(r.statusCode, r.body).toBe(200);
+    const g = r.json();
+    expect(g.recommendation.identity).toBe('two-bot');
+    expect(Object.keys(g.pat)).toEqual(['author', 'reviewer', 'read']);
+    expect(g.pat.author).toMatch(/^https:\/\/github\.com\/settings\/personal-access-tokens\/new\?/);
+    const ruleset = JSON.parse(g.ruleset.text);
+    expect(
+      ruleset.rules.find((x: { type: string }) => x.type === 'required_status_checks').parameters
+        .required_status_checks,
+    ).toEqual([
+      { context: 'test', integration_id: 15368 },
+      { context: 'Lint', integration_id: 15368 },
+    ]);
+    expect(g.codeowners.text).toContain('.github/** @alice');
+    expect(g.codeowners.newFileUrl).toBe(
+      'https://github.com/octo-org/demo/new/main?filename=.github%2FCODEOWNERS',
+    );
+    expect(g.checklist.items).toEqual([
+      'invite jm-author with the Write role',
+      'accept the invitation as jm-author',
+      'invite jm-reviewer with the Write role',
+      'accept the invitation as jm-reviewer',
+    ]);
+    expect(r.body).not.toContain(AUTHOR);
+    expect(r.body).not.toContain(REVIEWER);
+    expect(
+      calls.every((c) => /^(repoAccess|listDir|getFileAt|viewerLogin|ownerType)\b/.test(c)),
+    ).toBe(true);
+    // A reviewer that is not a login is refused before any read; an unknown zone is 404.
+    expect((await get('/api/control/zones/demo/github?reviewer=a%20b')).statusCode).toBe(400);
+    expect((await get('/api/control/zones/nope/github')).statusCode).toBe(404);
+  });
+
+  test('GET zones/:id/github without an author token says to set it first', async () => {
+    const { JM_GITHUB_AUTHOR_TOKEN: _a, ...noAuthor } = genv;
+    const { store } = guideApp({ env: noAuthor });
+    // The zone is in the store, added directly: the add route itself needs no token here.
+    const added = await addZone('starter');
+    expect(added.statusCode, added.body).toBe(200);
+    expect(store.current().dropZones).toHaveLength(1);
+    const r = await get('/api/control/zones/demo/github');
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).toMatch(/author token/);
+  });
+
+  test('POST github/recommend before any token reads the owner type without one, and asks about the plan of a private repository', async () => {
+    const { JM_GITHUB_AUTHOR_TOKEN: _a, JM_GITHUB_REVIEWER_TOKEN: _r, ...none } = genv;
+    const { tokens, calls } = guideApp({ env: none, ownerType: 'User', anonymous404: true });
+    const r = await post('/api/control/github/recommend', { repo: 'octo/secret' });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(tokens.every((t) => t === '')).toBe(true);
+    expect(calls).toEqual(['repoAccess octo/secret', 'ownerType octo/secret']);
+    const j = r.json();
+    expect(j).toMatchObject({ ownerType: 'User', visibility: 'private', visible: false });
+    expect(j.recommendation).toMatchObject({ identity: 'starter', authorMayBeAdmin: true });
+    expect(j.recommendation.ask).toMatch(/paid GitHub plan/);
+    expect(j.pat.author).toMatch(/target_name=octo&/);
+    expect(j.guidance).toBeUndefined();
+    const free = await post('/api/control/github/recommend', {
+      repo: 'octo/secret',
+      paidPlan: false,
+    });
+    expect(free.json().recommendation.stop).toMatch(/need a paid plan/);
+    const bad = await post('/api/control/github/recommend', { repo: 'octo/se cret' });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  test('POST github/recommend with the author token returns the proposed zone guidance (ruleset and CODEOWNERS) and the checklist', async () => {
+    guideApp({ ownerType: 'Organization' });
+    const r = await post('/api/control/github/recommend', {
+      repo: 'octo-org/demo',
+      identity: 'two-bot',
+      reviewers: ['alice'],
+    });
+    expect(r.statusCode, r.body).toBe(200);
+    const j = r.json();
+    expect(j).toMatchObject({ ownerType: 'Organization', visibility: 'public', visible: true });
+    expect(j.recommendation.identity).toBe('two-bot');
+    expect(j.guidance.ruleset.filename).toBe('jumpmaster-demo-ruleset.json');
+    expect(j.guidance.codeowners.text).toContain('CLAUDE.md @alice');
+    expect(j.checklist.items[0]).toBe('invite jm-author with the Write role');
+    expect(r.body).not.toContain(AUTHOR);
+    expect(r.body).not.toContain(REVIEWER);
+  });
+
+  test('without a token the recommendation reads only the repository, never its workflows', async () => {
+    const { JM_GITHUB_AUTHOR_TOKEN: _a, JM_GITHUB_REVIEWER_TOKEN: _r, ...none } = genv;
+    const { calls } = guideApp({ env: none, ownerType: 'User' });
+    const r = await post('/api/control/github/recommend', { repo: 'octo/public' });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json()).toMatchObject({ visibility: 'public', visible: true });
+    expect(calls).toEqual(['repoAccess octo/public']);
+  });
+
+  test('the reads are cached five minutes per repository and token, a 404 one minute, fifty at most, and dropped when the secrets change', async () => {
+    const clock = { now: t0 };
+    const later = (ms: number) => {
+      clock.now = new Date(clock.now.getTime() + ms);
+    };
+    const { calls, store } = guideApp({ clock });
+    const ask = (repo = 'octo-org/demo') => post('/api/control/github/recommend', { repo });
+    expect((await ask()).statusCode).toBe(200);
+    const first = calls.length;
+    expect(first).toBeGreaterThan(0);
+    later(4 * 60_000);
+    expect((await ask()).statusCode).toBe(200);
+    expect(calls.length).toBe(first);
+    later(60_001);
+    await ask();
+    expect(calls.length).toBeGreaterThan(first);
+    // A secrets refresh (a token replaced, a file reloaded) forgets everything read.
+    const beforeRefresh = calls.length;
+    store.refreshSecrets();
+    await ask();
+    expect(calls.length).toBeGreaterThan(beforeRefresh);
+    // Fifty entries at most: the oldest goes first.
+    for (let i = 0; i < 50; i++) await ask(`octo-org/r${i}`);
+    const full = calls.length;
+    await ask('octo-org/r49');
+    expect(calls.length).toBe(full);
+    await ask();
+    expect(calls.length).toBeGreaterThan(full);
+  });
+
+  test('an anonymous 404 is cached one minute', async () => {
+    const clock = { now: t0 };
+    const { JM_GITHUB_AUTHOR_TOKEN: _a, JM_GITHUB_REVIEWER_TOKEN: _r, ...none } = genv;
+    const { calls } = guideApp({ env: none, ownerType: 'User', anonymous404: true, clock });
+    const ask = () => post('/api/control/github/recommend', { repo: 'octo/secret' });
+    expect((await ask()).json().visible).toBe(false);
+    expect(calls).toHaveLength(2);
+    clock.now = new Date(t0.getTime() + 59_000);
+    expect((await ask()).json().visible).toBe(false);
+    expect(calls).toHaveLength(2);
+    clock.now = new Date(t0.getTime() + 61_000);
+    await ask();
+    expect(calls).toHaveLength(4);
+  });
+
+  test('a repository the config allows but detection refuses is a 400 naming it; unknown query keys are ignored', async () => {
+    const { store } = guideApp();
+    const added = await addZone();
+    expect(added.statusCode, added.body).toBe(200);
+    const config = store.current();
+    const zone = config.dropZones[0];
+    if (!zone) throw new Error('no zone');
+    const odd = await guidanceFor(store, config, { ...zone, repo: 'octo/app@v2' }, () => {
+      throw new Error('no forge for a refused name');
+    });
+    expect(odd).toEqual({
+      ok: false,
+      status: 400,
+      error: expect.stringContaining('the repository must be owner/name'),
+    });
+    const r = await get('/api/control/zones/demo/github?reviewer=alice&utm_source=pasted');
+    expect(r.statusCode, r.body).toBe(200);
+  });
+
+  test('the cache key is the token the request read with, not the live store\u2019s', async () => {
+    const { store, calls } = guideApp();
+    const config = store.current();
+    const ask = (c: typeof config) =>
+      recommendFor(store, c, { repo: 'octo-org/demo' }, (repo, token) => ({
+        repoAccess: async () => {
+          calls.push(`repoAccess ${repo} ${token === AUTHOR ? 'author' : 'other'}`);
+          return {
+            private: false,
+            defaultBranch: 'main',
+            permissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
+            scopes: null,
+            tokenExpiresAt: null,
+            ownerType: 'Organization' as const,
+          };
+        },
+        ownerType: async () => 'Organization' as const,
+        viewerLogin: async () => 'jm-author',
+        listDir: async () => [],
+        getFileAt: async () => null,
+      }));
+    await ask(config);
+    const n = calls.length;
+    await ask(config);
+    expect(calls.length).toBe(n);
+    // A snapshot read with another author token (a rotation mid-request) is another key.
+    await ask({
+      ...config,
+      secrets: { ...config.secrets, githubAuthorToken: 'github_pat_OTHERDUMMY012345678901234' },
+    });
+    expect(calls.length).toBeGreaterThan(n);
+    expect(calls.at(-1)).toBe('repoAccess octo-org/demo other');
   });
 });

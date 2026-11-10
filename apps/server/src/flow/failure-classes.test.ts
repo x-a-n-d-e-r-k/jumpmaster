@@ -840,6 +840,30 @@ describe('§16 server-side parks', () => {
     expect(count(h, 'createReview')).toBe(0);
   });
 
+  test('a required code owner review the reviewer bot cannot give parks with the named fix, before any merge call', async () => {
+    const h = await harness();
+    for (const id of ['author', 'reviewer'] as const) {
+      const r = h.forge.state.rules[id];
+      if (r.kind === 'ok') r.rules.requireCodeOwnerReview = true;
+    }
+    h.forge.state.files.set('main:.github/CODEOWNERS', '* @human\n.github/** @human\n');
+    await toPrOpen(h, 'sha1');
+    await h.reconcile();
+    expect(item(h).state).toBe('parked');
+    expect(item(h).reason).toContain(
+      'code owner review blocks the reviewer bot: CODEOWNERS line 1 (*) does not name @reviewer-bot',
+    );
+    expect(item(h).reason).toContain('name @reviewer-bot on that line');
+    expect(count(h, 'merge')).toBe(0);
+    // Named on the catch-all, with the protected line people-only: it merges as before.
+    h.forge.state.files.set(
+      'main:.github/CODEOWNERS',
+      '* @human @reviewer-bot\n.github/** @human\n',
+    );
+    await h.reconcile();
+    expect(item(h).reason ?? '').not.toContain('code owner review blocks');
+  });
+
   test('unsafe protection park is cleared by the cause going away', async () => {
     const h = await harness();
     const r = h.forge.state.rules.author;

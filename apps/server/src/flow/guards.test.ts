@@ -6,6 +6,8 @@ import type { BranchRules, BranchRulesRead } from '../forge/github.js';
 import {
   ADMINISTRATION_PROBLEM,
   branchProtectionProblems,
+  codeownersFindings,
+  codeownersRules,
   dependenciesChanged,
   gateBins,
   gateScriptChanges,
@@ -1037,6 +1039,128 @@ describe('branchProtectionProblems', () => {
 
   test('safe rules give no problems', () =>
     expect(branchProtectionProblems({ author: rules(), reviewer: rules() }, zone)).toEqual([]));
+  describe('a required code owner review the reviewer bot cannot give', () => {
+    const owned = {
+      ...zone,
+      identity: 'two-bot',
+      protectedPaths: ['.github/**', 'CLAUDE.md'],
+    } as DropZoneConfig;
+    const on = { author: rules({ requireCodeOwnerReview: true }), reviewer: rules() };
+    const check = (text: string | null, z: DropZoneConfig = owned) =>
+      branchProtectionProblems(on, z, { codeowners: { text, reviewer: 'rb' } });
+
+    test('a catch-all naming only people parks the zone with the named fix', () => {
+      const p = check('# owners\n* @human\n.github/** @human\n');
+      expect(p).toEqual([
+        'code owner review blocks the reviewer bot: CODEOWNERS line 2 (*) does not name @rb, so every pull request it covers waits for a person: name @rb on that line (the protected lines after it stay people-only; the last match wins), or turn off Require review from Code Owners',
+      ]);
+    });
+
+    test('the bot on the catch-all with people-only protected lines is fine; the flag off or no file is not this problem', () => {
+      expect(check('* @human @rb\n.github/** @human\nCLAUDE.md @human\n')).toEqual([]);
+      expect(check('* @Human @RB\n')).toEqual([]);
+      expect(
+        branchProtectionProblems({ author: rules(), reviewer: rules() }, owned, {
+          codeowners: { text: '* @human\n', reviewer: 'rb' },
+        }),
+      ).toEqual([]);
+      // No file: GitHub has no code owner to require; the doctor says so, the merge is not blocked.
+      expect(check(null)).toEqual([]);
+      // A line with no owner un-owns its files: nothing to approve.
+      expect(check('src/generated/**\n')).toEqual([]);
+      // A team may include the bot, which Jumpmaster cannot see: no park on a guess.
+      expect(check('* @octo/devs\n.github/** @human\n')).toEqual([]);
+    });
+
+    test('starter mode is judged as before', () => {
+      const starterZone = { ...owned, identity: 'starter' } as DropZoneConfig;
+      expect(
+        branchProtectionProblems(
+          {
+            author: rules({
+              requiredApprovals: 0,
+              requiresPullRequest: true,
+              requireCodeOwnerReview: true,
+            }),
+            reviewer: null,
+          },
+          starterZone,
+          {
+            codeowners: { text: '* @human\n', reviewer: 'rb' },
+          },
+        )?.some((p) => p.startsWith('code owner review blocks')),
+      ).toBe(false);
+    });
+  });
+
+  describe('codeownersFindings: effective ownership, the last match winning', () => {
+    const z = { protectedPaths: ['.github/**', 'CLAUDE.md'] };
+    const none = { fail: [], unknown: [], warn: [] };
+
+    test('a people-only catch-all fails; the bot on it with people after it on each protected path is clean', () => {
+      expect(codeownersFindings('* @human\n', z, 'rb')).toMatchObject({
+        fail: [{ line: 1, pattern: '*' }],
+      });
+      expect(codeownersFindings('* @h @rb\n.github/** @h\nCLAUDE.md @h\n', z, 'rb')).toEqual(none);
+    });
+
+    test('a people-only line a later bot rule covers does not block: the later rule wins there', () => {
+      expect(
+        codeownersFindings('docs/** @docs-team\n* @h @rb\n.github/** @h\nCLAUDE.md @h\n', z, 'rb'),
+      ).toEqual(none);
+      // A later line with no owner un-owns it too: nothing to approve.
+      expect(
+        codeownersFindings('docs/** @h\ndocs/\n* @h @rb\n.github/** @h\nCLAUDE.md @h\n', z, 'rb'),
+      ).toEqual(none);
+      // Only a covering rule counts: a later bot rule for another directory does not.
+      expect(
+        codeownersFindings('docs/** @h\nsrc/** @h @rb\n.github/** @h\nCLAUDE.md @h\n', z, 'rb')
+          .fail,
+      ).toEqual([{ line: 1, pattern: 'docs/**' }]);
+    });
+
+    test('a protected path whose last match names the bot, or no one, is a warn', () => {
+      // The catch-all after the protected line wins there: the bot owns CLAUDE.md.
+      expect(codeownersFindings('CLAUDE.md @h\n* @h @rb\n.github/** @h\n', z, 'rb')).toEqual({
+        ...none,
+        warn: [{ glob: 'CLAUDE.md', line: 2, pattern: '*', why: 'bot-owns-protected' }],
+      });
+      // No people-only line after the bot's: the bot owns .github/**.
+      expect(codeownersFindings('* @h @rb\nCLAUDE.md @h\n', z, 'rb').warn).toEqual([
+        { glob: '.github/**', line: 1, pattern: '*', why: 'bot-owns-protected' },
+      ]);
+      // A later line with no owner, or no line at all: GitHub asks no one.
+      expect(
+        codeownersFindings('* @h @rb\n.github/** @h\n.github/\nCLAUDE.md @h\n', z, 'rb').warn,
+      ).toEqual([{ glob: '.github/**', line: 3, pattern: '.github/', why: 'unowned' }]);
+      expect(codeownersFindings('src/** @rb\n', z, 'rb').warn).toEqual([
+        { glob: '.github/**', why: 'unowned' },
+        { glob: 'CLAUDE.md', why: 'unowned' },
+      ]);
+    });
+
+    test('a team or an e-mail owner may include the bot: unknown, never a fail', () => {
+      const r = codeownersFindings(
+        '* @octo/devs\nsrc/** dev@example.com\n.github/** @h\nCLAUDE.md @h\n',
+        z,
+        'rb',
+      );
+      expect(r.fail).toEqual([]);
+      expect(r.unknown).toEqual([
+        { line: 1, pattern: '*' },
+        { line: 2, pattern: 'src/**' },
+      ]);
+    });
+
+    test('negated lines are skipped as GitHub skips them; escaped spaces stay in the pattern; trailing comments are comments', () => {
+      expect(
+        codeownersFindings('!*.md @h\n* @h @rb # everyone\n.github/** @h\nCLAUDE.md @h\n', z, 'rb'),
+      ).toEqual(none);
+      expect(codeownersRules('my\\ dir/** @h\n')).toEqual([
+        { line: 1, pattern: 'my\\ dir/**', owners: ['@h'] },
+      ]);
+    });
+  });
 
   test('an admin author is unsafe unless the zone opts in', () =>
     expect(

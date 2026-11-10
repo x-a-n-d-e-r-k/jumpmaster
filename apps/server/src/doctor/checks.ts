@@ -23,7 +23,7 @@ import {
   type Stick,
 } from '../db/repo.js';
 import { FABLE_PLANS } from '../fable.js';
-import { branchProtectionProblems } from '../flow/guards.js';
+import { branchProtectionProblems, codeownersFindings } from '../flow/guards.js';
 import {
   type BranchRulesRead,
   type Forge,
@@ -1136,16 +1136,23 @@ async function codeownersCheck(zone: DropZoneConfig, r: ZoneReads): Promise<Doct
   const required = [rules.author, rules.reviewer].some(
     (x) => x?.kind === 'ok' && x.rules.requireCodeOwnerReview === true,
   );
+  const parks =
+    'Jumpmaster parks every pull request that touches a protected path for you to review and merge by hand';
+  if (zone.identity === 'starter')
+    return required
+      ? {
+          ...base,
+          status: 'warn',
+          summary: `the rules require a code owner's review, which starter mode can never give: you are the author and the only code owner, and GitHub never lets an author approve their own pull request, so a pull request touching owned paths waits for good. ${parks}, which is the human review in starter mode`,
+          fix: 'Turn off Require review from Code Owners in the ruleset (the generated starter ruleset has it off), or add a reviewer identity.',
+        }
+      : {
+          ...base,
+          status: 'pass',
+          summary: `the rules do not require a code owner review, as starter mode needs: ${parks}`,
+        };
   if (!required)
     return { ...base, status: 'pass', summary: 'the rules do not require a code owner review' };
-  if (zone.identity === 'starter')
-    return {
-      ...base,
-      status: 'warn',
-      summary:
-        "the rules require a code owner's review, and starter mode has no reviewer identity: a pull request touching owned paths waits for a human code owner",
-      fix: 'Turn off Require review from Code Owners, if a human review of those paths is not what you want, or add a reviewer identity named in CODEOWNERS.',
-    };
   const branch = await r.branch();
   const reviewer = await r.logins.reviewer();
   if (!reviewer.ok)
@@ -1159,21 +1166,59 @@ async function codeownersCheck(zone: DropZoneConfig, r: ZoneReads): Promise<Doct
       break;
     }
   }
-  const mention = new RegExp(
-    `(^|\\s)@${reviewer.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$)`,
-    'im',
-  );
-  if (text !== null && mention.test(text))
+  const github = `/zones/${encodeURIComponent(zone.id)}/github`;
+  if (text === null)
     return {
       ...base,
-      status: 'pass',
-      summary: `code owner review is required, and the reviewer ${reviewer.value} is named in CODEOWNERS`,
+      status: 'warn',
+      summary:
+        "the rules require a code owner's review, and there is no CODEOWNERS file: nobody owns the protected paths on GitHub, so GitHub asks no person to review them",
+      fix: `Create .github/CODEOWNERS naming people (you, and anyone else who may approve) for the protected paths, and the reviewer bot for everything else: the text is on ${github}.`,
+    };
+  // By path (§7.4): a protected path's owners are the human review, so people only; every other
+  // owned path needs the reviewer bot, or GitHub refuses the merge of any pull request touching it.
+  const found = codeownersFindings(text, zone, reviewer.value);
+  const at = (f: { line: number; pattern: string }) => `line ${f.line} (${f.pattern})`;
+  if (found.fail.length > 0)
+    return {
+      ...base,
+      status: 'fail',
+      summary: `the rules require a code owner's review, and CODEOWNERS ${found.fail.map(at).join(', ')} names only people: every pull request touching those paths waits for a person, so nothing Jumpmaster approves can merge`,
+      fix: `In CODEOWNERS, name @${reviewer.value} on ${found.fail.length === 1 ? 'that line' : 'those lines'} (the protected lines after it stay people-only; the last match wins), or turn code-owner review off. The generated text is on ${github}.`,
+    };
+  const notes = [
+    ...found.unknown.map(
+      (u) =>
+        `${at(u)} names a team or an e-mail: if @${reviewer.value} is not a member, nothing merges; name @${reviewer.value} on the line to be sure`,
+    ),
+    ...found.warn
+      .filter((w) => w.why === 'bot-owns-protected')
+      .map(
+        (w) =>
+          `the reviewer account ${reviewer.value} owns ${w.glob} through line ${w.line} (${w.pattern}): its approval would satisfy the review GitHub requires from a person there`,
+      ),
+    ...(found.warn.some((w) => w.why === 'unowned')
+      ? [
+          `no line owns ${found.warn
+            .filter((w) => w.why === 'unowned')
+            .map((w) => w.glob)
+            .join(
+              ', ',
+            )} (or the last line that matches names no owner): GitHub asks no person for those protected paths`,
+        ]
+      : []),
+  ];
+  if (notes.length > 0)
+    return {
+      ...base,
+      status: 'warn',
+      summary: notes.join('; '),
+      fix: `Keep each protected path's last matching line people-only, after the line that names @${reviewer.value} (the last match wins), and name @${reviewer.value} on lines owned by a team. The generated text is on ${github}.`,
     };
   return {
     ...base,
-    status: 'warn',
-    summary: `the rules require a code owner's review, and the reviewer account ${reviewer.value} is ${text === null ? 'not a code owner (no CODEOWNERS file)' : 'not named in CODEOWNERS'}: a pull request touching owned paths waits for a human code owner`,
-    fix: `Add @${reviewer.value} as an owner for the paths agents change, or turn off Require review from Code Owners, if a human review of those paths is not what you want.`,
+    status: 'pass',
+    summary: `code owner review is required: the protected paths are owned by people, and the reviewer ${reviewer.value} owns the rest, so GitHub holds a protected-path pull request for a person and merges the others`,
   };
 }
 

@@ -394,19 +394,65 @@ describe('forge checks', () => {
     expect(one(await w.run(), 'forge.branch-rules').status).toBe('warn');
   });
 
-  test('forge.codeowners warns when code-owner review is required and the reviewer owns nothing', async () => {
+  test('forge.codeowners in two-bot reads CODEOWNERS by path: the bot must own what is not protected, and people only what is', async () => {
     const w = world();
     for (const id of ['author', 'reviewer'] as const) {
       const r = w.f.state.rules[id];
       if (r.kind === 'ok') r.rules.requireCodeOwnerReview = true;
     }
-    w.f.state.files.set('main:.github/CODEOWNERS', '* @someone-else\n');
+    // A catch-all naming only people: GitHub would refuse every merge.
+    w.f.state.files.set('main:.github/CODEOWNERS', '# owners\n* @someone-else\n');
+    expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
+      status: 'fail',
+      summary: expect.stringContaining('line 2 (*)'),
+      fix: expect.stringContaining(
+        'name @reviewer-bot on that line (the protected lines after it stay people-only; the last match wins), or turn code-owner review off',
+      ),
+    });
+    // The bot on the catch-all and people only on the protected lines after it: pass.
+    w.f.state.files.set(
+      'main:.github/CODEOWNERS',
+      '* @someone-else @reviewer-bot\n.github/** @someone-else\nCODEOWNERS @someone-else\npnpm-workspace.yaml @someone-else\n',
+    );
+    expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
+      status: 'pass',
+      summary: expect.stringContaining('people'),
+    });
+    // The bot on a protected line: its approval would stand in for a person's.
+    w.f.state.files.set(
+      'main:.github/CODEOWNERS',
+      '* @someone-else @reviewer-bot\n.github/** @reviewer-bot\nCODEOWNERS @someone-else\npnpm-workspace.yaml @someone-else\n',
+    );
     expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
       status: 'warn',
-      summary: expect.stringContaining('reviewer-bot'),
+      summary: expect.stringContaining('.github/** through line 2 (.github/**)'),
     });
-    w.f.state.files.set('main:.github/CODEOWNERS', '* @reviewer-bot\n');
-    expect(one(await w.run(), 'forge.codeowners').status).toBe('pass');
+    // A protected path no line owns: GitHub asks no person for it.
+    w.f.state.files.set(
+      'main:.github/CODEOWNERS',
+      '* @someone-else @reviewer-bot\n.github/** @someone-else\nCODEOWNERS @someone-else\npnpm-workspace.yaml\n',
+    );
+    expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
+      status: 'warn',
+      summary: expect.stringContaining('pnpm-workspace.yaml'),
+    });
+    // A team owner may include the bot, which Jumpmaster cannot see: a warn, not a fail.
+    w.f.state.files.set(
+      'main:.github/CODEOWNERS',
+      '* @octo/devs\n.github/** @someone-else\nCODEOWNERS @someone-else\npnpm-workspace.yaml @someone-else\n',
+    );
+    expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
+      status: 'warn',
+      summary: expect.stringContaining(
+        'line 1 (*) names a team or an e-mail: if @reviewer-bot is not a member, nothing merges; name @reviewer-bot on the line to be sure',
+      ),
+    });
+    // Required, with no CODEOWNERS file: nobody owns the protected paths on GitHub.
+    w.f.state.files.delete('main:.github/CODEOWNERS');
+    expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
+      status: 'warn',
+      summary: expect.stringContaining('no CODEOWNERS'),
+    });
   });
 
   test('no workflows and no required checks fails forge.ci under ciRequired and hints ciRequired false', async () => {
@@ -794,13 +840,19 @@ describe('starter identity', () => {
     }
   });
 
-  test('forge.codeowners warns: a required code owner review needs a human in starter mode', async () => {
+  test('forge.codeowners in starter mode: a required code owner review could never be given; Jumpmaster parks those pull requests instead', async () => {
     const w = starter();
+    expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
+      status: 'pass',
+      summary: expect.stringContaining('parks every pull request'),
+    });
     const r = w.f.state.rules.author;
     if (r.kind === 'ok') r.rules.requireCodeOwnerReview = true;
     expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
       status: 'warn',
-      summary: expect.stringContaining('starter mode'),
+      summary: expect.stringMatching(
+        /starter mode.*never lets an author approve.*parks every pull request/,
+      ),
     });
   });
 });

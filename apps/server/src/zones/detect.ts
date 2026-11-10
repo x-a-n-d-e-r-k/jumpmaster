@@ -1,12 +1,13 @@
 import type { GateSpec, Preset } from '@jumpmaster/protocol';
 import type { Forge } from '../forge/github.js';
+import { jobNames, runsOnPullRequest } from '../github/workflows.js';
 import { DETECT_FILES, detectAs, detectPreset } from '../presets.js';
 
 /**
  * Repository detection, shared by `init`, the setup wizard's project step and `ctl zones add`:
  * GET-only reads, on the default branch root, after the repository name passes `REPO`. The result
- * is a proposal the operator confirms; repository content stays data (§7.1). Task 7 adds the owner
- * type and the CI job names.
+ * is a proposal the operator confirms; repository content stays data (§7.1). The owner type and
+ * the CI job names (from `.github/workflows/` on the default branch) feed the GitHub guidance.
  */
 
 /** `owner/name` as GitHub spells them; anything else is refused before a request is made. */
@@ -32,7 +33,38 @@ export type Detection = {
   problems: string[];
   /** Whether the token's account is an admin of the repository (a personal repository's owner). */
   admin: boolean;
+  /** The repository owner's account type. */
+  ownerType: 'User' | 'Organization';
+  /** The jobs of the workflows that run on pull requests: the checks a ruleset should require. */
+  ciJobs: { workflow: string; job: string }[];
 };
+
+const WORKFLOWS = '.github/workflows';
+
+/**
+ * The jobs of `.github/workflows/*.yml` and `*.yaml` on `branch` whose workflow runs on
+ * `pull_request`, and the workflows left out for not running on pull requests.
+ */
+export async function workflowJobs(
+  forge: Pick<Forge, 'listDir' | 'getFileAt'>,
+  branch: string,
+): Promise<{ ciJobs: Detection['ciJobs']; skipped: string[] }> {
+  const names = ((await forge.listDir(branch, WORKFLOWS)) ?? [])
+    .filter((n) => /^[\w.-]+\.ya?ml$/.test(n))
+    .sort();
+  const ciJobs: Detection['ciJobs'] = [];
+  const skipped: string[] = [];
+  for (const workflow of names) {
+    const text = await forge.getFileAt(branch, `${WORKFLOWS}/${workflow}`);
+    if (text === null) continue;
+    if (!runsOnPullRequest(text)) {
+      skipped.push(workflow);
+      continue;
+    }
+    for (const job of jobNames(text)) ciJobs.push({ workflow, job });
+  }
+  return { ciJobs, skipped };
+}
 
 /** A zone id from the repository name: lower case, letters, digits and dashes. */
 export const zoneIdOf = (repo: string): string =>
@@ -68,14 +100,54 @@ export async function detectRepo(
   const access = await forge.repoAccess();
   const files = await rootFiles(forge, access.defaultBranch);
   const found = opts.preset ? detectAs(opts.preset, files) : detectPreset(files);
+  const ci = await workflowJobs(forge, access.defaultBranch);
   return {
     visibility: access.private ? 'private' : 'public',
     defaultBranch: access.defaultBranch,
     ...(found.preset ? { preset: found.preset } : {}),
     candidates: found.candidates,
     gates: found.gates,
-    evidence: found.evidence,
+    evidence: [
+      ...found.evidence,
+      ...(ci.skipped.length > 0
+        ? [`${ci.skipped.join(', ')} not run on pull requests, so not proposed as required checks`]
+        : []),
+    ],
     problems: found.problems,
     admin: access.permissions.admin,
+    ownerType: access.ownerType,
+    ciJobs: ci.ciJobs,
+  };
+}
+
+/** Why detection could not read the repository, by HTTP status: never GitHub's text or a token. */
+export function detectFailure(e: unknown, repo: string): string {
+  const status = (e as { status?: unknown }).status;
+  if (status === 401)
+    return 'GitHub rejected the author token (401): it is expired, revoked or mistyped';
+  if (status === 403 || status === 404)
+    return `the author token can't read ${repo} (HTTP ${status}): check the repository name, and that the token's repository access includes it with Contents and Metadata read`;
+  return `could not read ${repo} from GitHub (${typeof status === 'number' ? `HTTP ${status}` : 'no HTTP answer'}): check this host reaches api.github.com`;
+}
+
+export const NO_AUTHOR =
+  "set the GitHub author token first (the setup wizard's forge step, or jumpmaster ctl secrets set githubAuthorToken): detection reads the repository with it";
+
+/** What the GitHub guidance reads about a repository: GET-only, after the REPO pattern. */
+export async function detectGuidance(
+  forge: Pick<Forge, 'repoAccess' | 'listDir' | 'getFileAt'>,
+  repo: string,
+  opts: { workflows?: boolean } = {},
+): Promise<Pick<Detection, 'visibility' | 'defaultBranch' | 'ownerType' | 'ciJobs'>> {
+  if (!REPO.test(repo)) throw new RepoNameError(repo);
+  const access = await forge.repoAccess();
+  // Without a token nothing uses the job names: two reads instead of one per workflow.
+  const { ciJobs } =
+    opts.workflows === false ? { ciJobs: [] } : await workflowJobs(forge, access.defaultBranch);
+  return {
+    visibility: access.private ? 'private' : 'public',
+    defaultBranch: access.defaultBranch,
+    ownerType: access.ownerType,
+    ciJobs,
   };
 }

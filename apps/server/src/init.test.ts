@@ -48,8 +48,9 @@ function fakeForge(repo: Repo, seen: { token?: string; repo?: string } = {}) {
       },
       async listDir(ref: string, path: string) {
         expect(ref).toBe('main');
-        expect(path).toBe('');
-        return Object.keys(repo.files);
+        // The root, and (Task 7) the workflows directory for the CI job names.
+        expect(['', '.github/workflows']).toContain(path);
+        return path === '' ? Object.keys(repo.files) : null;
       },
       async getFileAt(ref: string, path: string) {
         expect(ref).toBe('main');

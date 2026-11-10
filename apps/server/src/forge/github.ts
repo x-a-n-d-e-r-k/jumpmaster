@@ -118,6 +118,8 @@ export type RepoAccess = {
   scopes: string[] | null;
   /** When the token expires, if GitHub said (`github-authentication-token-expiration`). */
   tokenExpiresAt: string | null;
+  /** The repository owner's account type (`owner.type`): a person's or an organization's. */
+  ownerType: 'User' | 'Organization';
 };
 
 /**
@@ -191,6 +193,11 @@ export interface Forge {
   repoAccess(): Promise<RepoAccess>;
   /** Every label name on the repository. */
   listLabels(): Promise<string[]>;
+  /**
+   * The repository owner's account type (`GET /users/<owner>`), which needs no token: the setup
+   * wizard asks it before any token exists, when the repository itself may not be readable yet.
+   */
+  ownerType(): Promise<'User' | 'Organization'>;
   /** Entry names in a directory at `ref`; null when the path is missing or is not a directory. */
   listDir(ref: string, path: string): Promise<string[] | null>;
   /** Tries each read the server relies on (one GET each) and reports the status. */
@@ -311,7 +318,8 @@ export class GitHubForge implements Forge {
   ) {
     const ms = opts.requestTimeoutMs;
     this.octokit = new Octokit({
-      auth: token,
+      // No token: unauthenticated reads (the wizard's owner-type read before any token exists).
+      ...(token ? { auth: token } : {}),
       baseUrl: 'https://api.github.com',
       ...(ms === undefined
         ? {}
@@ -927,7 +935,16 @@ export class GitHubForge implements Forge {
               .filter(Boolean)
           : null,
       tokenExpiresAt: Number.isFinite(expiresAt) ? new Date(expiresAt).toISOString() : null,
+      ownerType:
+        (data.owner as { type?: string } | undefined)?.type === 'Organization'
+          ? 'Organization'
+          : 'User',
     };
+  }
+
+  async ownerType(): Promise<'User' | 'Organization'> {
+    const { data } = await this.octokit.rest.users.getByUsername({ username: this.owner });
+    return data.type === 'Organization' ? 'Organization' : 'User';
   }
 
   async listLabels(): Promise<string[]> {

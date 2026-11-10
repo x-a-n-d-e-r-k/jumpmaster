@@ -856,15 +856,107 @@ export function administrationOf(p: {
   return 'unknown';
 }
 
+// ---- code owners -------------------------------------------------------------------------------
+
+/** One CODEOWNERS rule: its 1-based line, its pattern and its owners as written. */
+export type CodeownersRule = { line: number; pattern: string; owners: string[] };
+
+/**
+ * The rules of a CODEOWNERS file, as GitHub reads them: blank lines and comments dropped (a whole
+ * line, or after an owner: GitHub's own example has an inline comment), a `!` line skipped (GitHub
+ * has no negation and skips it as invalid), and a space escaped with `\` kept in the pattern.
+ */
+export function codeownersRules(text: string): CodeownersRule[] {
+  const out: CodeownersRule[] = [];
+  text.split('\n').forEach((raw, i) => {
+    const line = raw
+      .replace(/\r$/, '')
+      .replace(/(^|\s)#.*$/, '')
+      .trim();
+    if (line === '' || line.startsWith('!')) return;
+    const [pattern = '', ...owners] = line.split(/(?<!\\)\s+/);
+    out.push({ line: i + 1, pattern, owners });
+  });
+  return out;
+}
+
+/** A CODEOWNERS pattern read as a path, as `protectedMatch` reads a changed file. */
+const asPath = (pattern: string): string => pattern.replace(/^\//, '').replace(/\/$/, '/**');
+
+/** Whether rule `outer` covers everything rule-or-glob `inner` names (the later one wins there). */
+const covers = (outerPattern: string, innerPattern: string): boolean =>
+  protectedMatch(asPath(innerPattern), asPath(outerPattern));
+
+/** An owner that may stand for an account Jumpmaster cannot see into: a team or an e-mail. */
+const opaque = (o: string): boolean => o.includes('/') || /^[^@].*@/.test(o);
+
+export type CodeownersFindings = {
+  /** Lines whose owners are people only, for paths the reviewer bot must own: nothing merges. */
+  fail: { line: number; pattern: string }[];
+  /** Lines owned by a team or an e-mail: the bot may be among them, which Jumpmaster cannot tell. */
+  unknown: { line: number; pattern: string }[];
+  /** Protected paths the bot owns, or nobody does: GitHub asks no person for them. */
+  warn: { glob: string; line?: number; pattern?: string; why: 'bot-owns-protected' | 'unowned' }[];
+};
+
+/**
+ * How a CODEOWNERS file sits with a required code owner review in two-bot mode (§7.4), by
+ * effective ownership (the last matching line wins):
+ * - each protected glob's last covering line must name people only; the bot there, or no line or
+ *   a line with no owner, is a warn (GitHub then asks no person for it);
+ * - any other line that names owners must name the reviewer bot, unless a later line covering it
+ *   names the bot or no one; else nothing touching those paths merges (fail), or, when a team or
+ *   an e-mail is among its owners, perhaps nothing does (unknown: the bot may be a member).
+ */
+export function codeownersFindings(
+  text: string,
+  zone: Pick<DropZoneConfig, 'protectedPaths'>,
+  reviewer: string,
+): CodeownersFindings {
+  const bot = reviewer.toLowerCase();
+  const names = (r: CodeownersRule) =>
+    r.owners.some((o) => o.replace(/^@/, '').toLowerCase() === bot);
+  const isProtected = (r: CodeownersRule) =>
+    zone.protectedPaths.some((g) => protectedMatch(asPath(r.pattern), g));
+  const rules = codeownersRules(text);
+  const out: CodeownersFindings = { fail: [], unknown: [], warn: [] };
+  rules.forEach((r, i) => {
+    if (r.owners.length === 0 || isProtected(r) || names(r)) return;
+    const later = rules.slice(i + 1).filter((l) => covers(l.pattern, r.pattern));
+    if (later.some((l) => l.owners.length === 0 || names(l))) return;
+    const where = { line: r.line, pattern: r.pattern };
+    if (r.owners.some(opaque)) out.unknown.push(where);
+    else out.fail.push(where);
+  });
+  for (const glob of zone.protectedPaths) {
+    const last = rules.filter((r) => covers(r.pattern, glob)).at(-1);
+    if (!last) out.warn.push({ glob, why: 'unowned' });
+    else if (last.owners.length === 0)
+      out.warn.push({ glob, line: last.line, pattern: last.pattern, why: 'unowned' });
+    else if (names(last))
+      out.warn.push({ glob, line: last.line, pattern: last.pattern, why: 'bot-owns-protected' });
+  }
+  return out;
+}
+
+/** The park reason and fix for a rule that holds every pull request it covers for a person. */
+export const codeownerBlocks = (f: { line: number; pattern: string }, reviewer: string): string =>
+  `code owner review blocks the reviewer bot: CODEOWNERS line ${f.line} (${f.pattern}) does not name @${reviewer}, so every pull request it covers waits for a person: name @${reviewer} on that line (the protected lines after it stay people-only; the last match wins), or turn off Require review from Code Owners`;
+
 /**
  * Problems with the branch rules both bot identities see (the author alone in starter mode, where
  * `reviewer` is null). `[]` when protection is not required; null when a read is unavailable
- * (judged on a later pass).
+ * (judged on a later pass). With a required code owner review in two-bot mode and the CODEOWNERS
+ * text read (`probe.codeowners`), a rule the reviewer bot cannot satisfy is a problem too: GitHub
+ * would refuse every merge.
  */
 export function branchProtectionProblems(
   rules: { author: BranchRulesRead; reviewer: BranchRulesRead | null },
   zone: DropZoneConfig,
-  probe: { authorAdministration?: AdministrationRead } = {},
+  probe: {
+    authorAdministration?: AdministrationRead;
+    codeowners?: { text: string | null; reviewer: string };
+  } = {},
 ): string[] | null {
   if (!zone.requireBranchProtection) return [];
   if (zone.identity === 'starter')
@@ -887,6 +979,13 @@ export function branchProtectionProblems(
     if (zone.ciRequired && r.requiredChecks.length === 0) out.add('no required checks');
     for (const t of r.unsupportedRules ?? []) out.add(`unsupported rule: ${t}`);
   }
+  const ownersRequired = [rules.author, rules.reviewer].some(
+    (x) => x.kind === 'ok' && x.rules.requireCodeOwnerReview === true,
+  );
+  const co = probe.codeowners;
+  if (ownersRequired && co && co.text !== null)
+    for (const f of codeownersFindings(co.text, zone, co.reviewer).fail)
+      out.add(codeownerBlocks(f, co.reviewer));
   return [...out];
 }
 

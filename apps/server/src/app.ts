@@ -40,6 +40,7 @@ import type { ForgePair } from './outbox.js';
 import { lastSyncResult } from './sync.js';
 import { registerAuthPages } from './ui/auth-pages.js';
 import { registerConfirmPages } from './ui/confirm.js';
+import { registerGithubPages } from './ui/github.js';
 import {
   type CrewLine,
   type HomeState,
@@ -99,6 +100,8 @@ export function createApp(
     backoff?: Backoff;
     /** The forge detection reads through (tests); default GitHub on the author token. */
     detectForge?: ControlDeps['detectForge'];
+    /** The forge the GitHub guidance reads through (tests); default GitHub. */
+    guidanceForge?: ControlDeps['guidanceForge'];
     /** The forge a credential test reads through (tests); default GitHub. */
     credentialForge?: ControlDeps['credentialForge'];
   },
@@ -126,7 +129,18 @@ export function createApp(
   if (deps.config instanceof ConfigStore) {
     registerConfirmPages(app, { db: deps.db, store: deps.config, now: deps.now, backoff });
     // The setup wizard: thin frames over the secret, zone, config and doctor routes.
-    registerSetupPages(app, { db: deps.db, store: deps.config, now: deps.now });
+    registerSetupPages(app, {
+      db: deps.db,
+      store: deps.config,
+      now: deps.now,
+      ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
+    });
+    // The GitHub half of setup for a zone: links and generated files, never a forge write.
+    registerGithubPages(app, {
+      store: deps.config,
+      now: deps.now,
+      ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
+    });
   }
 
   app.get('/', async (req, reply) => {

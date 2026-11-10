@@ -77,15 +77,65 @@ export async function zonePass(
           .catch(() => ({ status: null as number | null, rateLimited: false })),
       )
     : undefined;
+  // A required code owner review in two-bot mode: GitHub refuses the merge unless the reviewer
+  // bot owns what it approves, so the CODEOWNERS file is read (as GitHub finds it, first of the
+  // three places) and judged with the rules. A failed read leaves that judgement out this pass.
+  const ownersRequired =
+    zone.identity !== 'starter' &&
+    reviewerLogin !== null &&
+    [authorRules, reviewerRules].some(
+      (x) => x?.kind === 'ok' && x.rules.requireCodeOwnerReview === true,
+    );
+  const codeownersText = ownersRequired ? await readCodeowners(forges, baseBranch) : undefined;
+  if (ownersRequired) noteCodeownersRead(zone.id, codeownersText !== undefined);
   return {
     botLogins: reviewerLogin === null ? [authorLogin] : [authorLogin, reviewerLogin],
     requiredChecks: authorRules.kind === 'ok' ? authorRules.rules.requiredChecks : [],
     protectionProblems: branchProtectionProblems(
       { author: authorRules, reviewer: reviewerRules },
       zone,
-      authorAdministration ? { authorAdministration } : {},
+      {
+        ...(authorAdministration ? { authorAdministration } : {}),
+        ...(codeownersText !== undefined && reviewerLogin !== null
+          ? { codeowners: { text: codeownersText, reviewer: reviewerLogin } }
+          : {}),
+      },
     ),
   };
+}
+
+/** Zones whose last CODEOWNERS read failed and was said: said once until a read succeeds. */
+const codeownersUnread = new Set<string>();
+
+function noteCodeownersRead(zoneId: string, ok: boolean): void {
+  if (ok) {
+    codeownersUnread.delete(zoneId);
+    return;
+  }
+  if (codeownersUnread.has(zoneId)) return;
+  codeownersUnread.add(zoneId);
+  console.warn(
+    `zone ${zoneId}: the CODEOWNERS read failed, so this pass did not check that the reviewer bot can satisfy the required code owner review`,
+  );
+}
+
+/** Where GitHub looks for CODEOWNERS, in its order. */
+export const CODEOWNERS_PATHS = ['.github/CODEOWNERS', 'CODEOWNERS', 'docs/CODEOWNERS'];
+
+/** The CODEOWNERS file GitHub uses on `branch`: its text, null when none, undefined when unread. */
+async function readCodeowners(
+  forges: ForgePair,
+  branch: string,
+): Promise<string | null | undefined> {
+  try {
+    for (const p of CODEOWNERS_PATHS) {
+      const text = await forges.author.getFileAt(branch, p);
+      if (text !== null) return text;
+    }
+    return null;
+  } catch {
+    return undefined;
+  }
 }
 
 export function toOpResult(row: OutboxRow | undefined): OpResult | null {

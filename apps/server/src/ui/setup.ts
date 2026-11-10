@@ -1,6 +1,12 @@
 import { PRESETS } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import {
+  type GuidanceForge,
+  githubGuidanceForge,
+  type RecommendAnswer,
+  recommendFor,
+} from '../api/github.js';
 import { withCsrf } from '../auth/guard.js';
 import { getSetting, setSetting } from '../config/revisions.js';
 import type { ConfigStore } from '../config/store.js';
@@ -11,6 +17,15 @@ import { latestDoctorRun } from '../doctor/run.js';
 import { BASE_EGRESS } from '../payloads.js';
 import { PRESET_EGRESS } from '../presets.js';
 import type { CredentialName, ResolvedCredential } from '../vault/credentials.js';
+import {
+  COPY_SCRIPT,
+  checklistSection,
+  codeownersSection,
+  recommendationSection,
+  reviewersOf,
+  rulesetSection,
+  tokensSection,
+} from './github.js';
 import { escapeHtml, page } from './pages.js';
 
 /**
@@ -209,8 +224,40 @@ document.getElementById('claude').addEventListener('submit', async (e) => {
   );
 }
 
-function forgePage(store: ConfigStore, sudo: boolean, wizard: Wizard): string {
+/** What the forge step shows for a named repository: the recommendation, or why it could not. */
+type ForgeGuide = { repo: string; paidPlan: string; answer?: RecommendAnswer; error?: string };
+
+/**
+ * The forge step's first part: which repository, then the accounts to use and the pre-filled
+ * token links (unless the recommendation stops first), and the collaborator checklist once the
+ * author token resolves a login. All of it is read from GitHub without writing, and escaped.
+ */
+function guideSection(guide: ForgeGuide | undefined): string {
+  const repo = guide?.repo ?? '';
+  const plan = guide?.paidPlan ?? '';
+  const option = (v: string, label: string) =>
+    `<option value="${v}"${plan === v ? ' selected' : ''}>${label}</option>`;
+  const form = `<form method="get" action="/setup/forge" id="recommend-form"><p><label>Repository <input name="repo" value="${escapeHtml(repo)}" placeholder="owner/name" pattern="[A-Za-z0-9\\-]+/[A-Za-z0-9._\\-]+" required></label> <label>Paid GitHub plan (matters for a private repository) <select name="paidPlan">${option('', 'I don’t know')}${option('yes', 'Yes')}${option('no', 'No')}</select></label> <button>Recommend</button></p></form>`;
+  if (!guide)
+    return `<h4>Which repository?</h4><p>Name the repository first: Jumpmaster reads its owner and visibility (without a token if it has none yet) to recommend the accounts and fill in the token pages.</p>${form}`;
+  if (guide.error) return `${form}<p class="warn">${escapeHtml(guide.error)}</p>`;
+  const a = guide.answer;
+  if (!a) return form;
+  const roles = [
+    'author' as const,
+    ...(a.recommendation.identity === 'starter' ? [] : (['reviewer'] as const)),
+    ...(a.visibility === 'private' ? (['read'] as const) : []),
+  ];
+  return `${form}<p>${escapeHtml(a.repo)}: ${a.visible ? escapeHtml(a.visibility) : 'not visible without a token (private, or not there)'}, owned by ${a.ownerType === 'Organization' ? 'an organization' : 'a personal account'}.</p>
+${recommendationSection(a.recommendation)}
+${a.recommendation.stop ? '' : tokensSection(a.pat, roles)}
+${a.logins.author ? checklistSection(a.checklist) : ''}`;
+}
+
+function forgePage(store: ConfigStore, sudo: boolean, wizard: Wizard, guide?: ForgeGuide): string {
   const r = store.resolved();
+  const recommended = guide?.answer?.recommendation.identity;
+  const starter = wizard.starter ?? recommended === 'starter';
   const fields = [
     credentialField('githubAuthorToken', 'Author token', r.githubAuthorToken),
     credentialField('githubReviewerToken', 'Reviewer token (two-bot mode)', r.githubReviewerToken),
@@ -223,13 +270,15 @@ function forgePage(store: ConfigStore, sudo: boolean, wizard: Wizard): string {
   return frame(
     'forge',
     `<h3>Connect GitHub</h3>
+${guideSection(guide)}
+<h4>The tokens</h4>
 <p>Jumpmaster works on GitHub as an <strong>author</strong> account (opens and merges the agents' pull requests) and, in two-bot mode, a separate <strong>reviewer</strong> account (approves them). Use fine-grained tokens limited to your repositories. Each token is tested with GitHub before it is saved, and never shown back.</p>
 <h4>Author</h4>${credentialLine('githubAuthorToken', r.githubAuthorToken)}
 <h4>Reviewer</h4>${credentialLine('githubReviewerToken', r.githubReviewerToken)}
 <h4>Read token</h4>${credentialLine('githubReadToken', r.githubReadToken)}
 <form id="forge">${fields}
 ${fields ? sudoField(sudo) : ''}<p><button>Save</button> <span id="forge-out" role="status"></span></p></form>
-<p class="warn" id="starter-warning"><strong>What starter mode costs:</strong> ${escapeHtml(STARTER_WARNING)}</p>
+${guide?.answer?.recommendation.identity === 'starter' ? '' : `<p class="warn" id="starter-warning"><strong>What starter mode costs:</strong> ${escapeHtml(STARTER_WARNING)}</p>`}
 ${SAVE_CREDENTIALS}
 <script>
 document.getElementById('forge').addEventListener('submit', async (e) => {
@@ -241,7 +290,7 @@ document.getElementById('forge').addEventListener('submit', async (e) => {
       // The account choice goes with Continue (the project step offers it), never with Save.
       advance: advanceForm(
         'forge',
-        `<p><label><input type="checkbox" name="starter" value="1"${wizard.starter ? ' checked' : ''}> Starter mode: one GitHub account, no reviewer</label></p>`,
+        `<p><label><input type="checkbox" name="starter" value="1"${starter ? ' checked' : ''}> Starter mode: one GitHub account, no reviewer</label></p>`,
       ),
     },
   );
@@ -293,6 +342,11 @@ document.getElementById('adopt').addEventListener('click', async () => {
 <p>Accounts: <label><input type="radio" name="identity" value="two-bot"${identity === 'two-bot' ? ' checked' : ''}> two bots (author and reviewer)</label> <label><input type="radio" name="identity" value="starter"${identity === 'starter' ? ' checked' : ''}> starter (one account)</label></p>
 <p><label><input type="checkbox" name="authorMayBeAdmin" value="1"> The author token belongs to the repository's owner (a personal repository)</label></p>
 <p><button>Create the project</button> <span id="project-out" role="status"></span></p></form>
+<div id="guidance-box" hidden><h4>On GitHub: the ruleset and the code owners</h4>
+<p>Jumpmaster merges only under a branch ruleset, and the protected paths need a person's review. Both files are made from what was detected; nothing is written to GitHub.</p>
+<p><label>Your GitHub login (a code owner) <input id="codeowners-reviewer" placeholder="your-github-login" pattern="[A-Za-z0-9@,._ \\/\\-]+"></label> <button type="button" id="guidance-refresh">Show</button></p>
+<div id="guidance"></div></div>
+${COPY_SCRIPT}
 <script>
 const HOSTS = ${scriptJson(presetHosts())};
 let found = null;
@@ -330,7 +384,21 @@ document.getElementById('detect').addEventListener('submit', async (e) => {
   gates.textContent = ''; (j.gates && j.gates.length ? j.gates : [{}]).forEach(gateRow);
   showHosts();
   document.getElementById('project').hidden = false;
+  loadGuidance();
 });
+// The ruleset file and CODEOWNERS for the detected repository and the chosen accounts, rendered
+// (and escaped) by the server.
+async function loadGuidance() {
+  if (!found) return;
+  const identity = document.querySelector('input[name=identity]:checked').value;
+  const reviewer = document.getElementById('codeowners-reviewer').value.trim();
+  const q = new URLSearchParams({ repo: found.repo, identity, reviewer });
+  const r = await fetch('/setup/project/github?' + q.toString());
+  document.getElementById('guidance').innerHTML = await r.text();
+  document.getElementById('guidance-box').hidden = false;
+}
+document.getElementById('guidance-refresh').addEventListener('click', loadGuidance);
+for (const radio of document.querySelectorAll('input[name=identity]')) radio.addEventListener('change', loadGuidance);
 document.getElementById('project').addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.target; const out = document.getElementById('project-out');
@@ -386,6 +454,17 @@ document.getElementById('run').addEventListener('click', async () => {
   );
 }
 
+const REPO_PARAM = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
+const ForgeQuery = z.object({
+  repo: z.string().max(200).optional(),
+  paidPlan: z.enum(['', 'yes', 'no']).optional(),
+});
+const ProjectGuideQuery = z.object({
+  repo: z.string().max(200).regex(REPO_PARAM),
+  identity: z.enum(['two-bot', 'starter']),
+  reviewer: z.string().max(400).optional(),
+});
+
 const AdvanceBody = z.object({
   from: z.enum(STEPS),
   starter: z.string().max(1).optional(),
@@ -397,9 +476,16 @@ const html = (req: FastifyRequest, reply: FastifyReply, body: string) =>
 
 export function registerSetupPages(
   app: FastifyInstance,
-  deps: { db: Db; store: ConfigStore; now(): Date },
+  deps: {
+    db: Db;
+    store: ConfigStore;
+    now(): Date;
+    /** The forge the GitHub guidance reads through (tests); default GitHub. */
+    guidanceForge?: (repo: string, token: string) => GuidanceForge;
+  },
 ): void {
   const { db, store, now } = deps;
+  const forgeOf = deps.guidanceForge ?? githubGuidanceForge;
   const sudoOf = (req: FastifyRequest) => req.principal?.sudo === true;
 
   // Resumes at the first step the install still lacks, judged from its state: a deferred step
@@ -413,9 +499,71 @@ export function registerSetupPages(
   // A GET never moves the progress: only Continue and Do this later do (and a page may be
   // prefetched). Landing on a step through a link is just a visit.
   app.get('/setup/claude', async (req, reply) => html(req, reply, claudePage(store, sudoOf(req))));
-  app.get('/setup/forge', async (req, reply) =>
-    html(req, reply, forgePage(store, sudoOf(req), getWizard(db))),
-  );
+  // A named repository: the recommendation and the token links, read from GitHub (GET only).
+  app.get('/setup/forge', async (req, reply) => {
+    const q = ForgeQuery.safeParse(req.query ?? {});
+    const repo = q.success ? q.data.repo : undefined;
+    if (!q.success || repo === undefined || repo === '')
+      return html(req, reply, forgePage(store, sudoOf(req), getWizard(db)));
+    const paidPlan = q.data.paidPlan ?? '';
+    if (!REPO_PARAM.test(repo))
+      return html(
+        req,
+        reply,
+        forgePage(store, sudoOf(req), getWizard(db), {
+          repo,
+          paidPlan,
+          error: 'the repository must be owner/name',
+        }),
+      );
+    const r = await recommendFor(
+      store,
+      req.jmConfig ?? store.current(),
+      { repo, ...(paidPlan ? { paidPlan: paidPlan === 'yes' } : {}) },
+      forgeOf,
+      now,
+    );
+    const guide: ForgeGuide = r.ok
+      ? { repo, paidPlan, answer: r.answer }
+      : { repo, paidPlan, error: r.error };
+    return html(req, reply, forgePage(store, sudoOf(req), getWizard(db), guide));
+  });
+
+  // The project step's GitHub files for the repository it detected: an HTML fragment, escaped here.
+  app.get('/setup/project/github', async (req, reply) => {
+    const q = ProjectGuideQuery.safeParse(req.query ?? {});
+    const reviewers = q.success ? reviewersOf(q.data.reviewer) : null;
+    const frag = (status: number, body: string) =>
+      reply.code(status).type('text/html; charset=utf-8').send(body);
+    if (!q.success || reviewers === null)
+      return frag(
+        400,
+        '<p class="warn">Name the repository as owner/name, and code owners as GitHub logins.</p>',
+      );
+    let r: Awaited<ReturnType<typeof recommendFor>>;
+    try {
+      r = await recommendFor(
+        store,
+        req.jmConfig ?? store.current(),
+        { repo: q.data.repo, identity: q.data.identity, reviewers },
+        forgeOf,
+        now,
+      );
+    } catch (e) {
+      return frag(400, `<p class="warn">${escapeHtml((e as Error).message)}</p>`);
+    }
+    if (!r.ok) return frag(r.status, `<p class="warn">${escapeHtml(r.error)}</p>`);
+    const g = r.answer.guidance;
+    if (!g)
+      return frag(
+        200,
+        '<p>Set the author token in the <a href="/setup/forge">GitHub step</a> to get the ruleset file and CODEOWNERS for this repository.</p>',
+      );
+    return frag(
+      200,
+      `${rulesetSection(g.ruleset, g.rulesUrl, q.data.identity)}${codeownersSection(g.codeowners, null, q.data.identity)}`,
+    );
+  });
   app.get('/setup/stick', async (req, reply) => html(req, reply, stickPage(db)));
   app.get('/setup/project', async (req, reply) =>
     html(req, reply, projectPage(store, getWizard(db))),

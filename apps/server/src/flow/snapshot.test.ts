@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from 'vitest';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { getWorkItem, insertVerdict, recordGateAllowance, type VerdictRow } from '../db/repo.js';
 import { zoneWorld } from '../test/fixtures.js';
 import { decide } from './decide.js';
@@ -41,6 +41,35 @@ describe('zonePass', () => {
     expect(p.botLogins).toEqual(['author-bot', 'reviewer-bot']);
     expect(p.requiredChecks).toEqual(['ci']);
     expect(p.protectionProblems).toEqual([]);
+  });
+});
+
+describe('the CODEOWNERS read behind a required code owner review', () => {
+  test('a skipped read is logged once per zone until a read succeeds, and parks nothing', async () => {
+    for (const id of ['author', 'reviewer'] as const) {
+      const r = w.f.state.rules[id];
+      if (r.kind === 'ok') r.rules.requireCodeOwnerReview = true;
+    }
+    const warned: string[] = [];
+    const spy = vi.spyOn(console, 'warn').mockImplementation((m: unknown) => {
+      warned.push(String(m));
+    });
+    try {
+      for (let i = 0; i < 2; i++) {
+        w.f.author.failNext('getFileAt', '5xx');
+        expect((await zonePass(w.forges, w.zone, 'main')).protectionProblems).toEqual([]);
+      }
+      expect(warned.filter((m) => m.includes('CODEOWNERS'))).toEqual([
+        `zone ${w.zone.id}: the CODEOWNERS read failed, so this pass did not check that the reviewer bot can satisfy the required code owner review`,
+      ]);
+      // A good read resets it: the next failure is said again.
+      await zonePass(w.forges, w.zone, 'main');
+      w.f.author.failNext('getFileAt', '5xx');
+      await zonePass(w.forges, w.zone, 'main');
+      expect(warned.filter((m) => m.includes('CODEOWNERS'))).toHaveLength(2);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
