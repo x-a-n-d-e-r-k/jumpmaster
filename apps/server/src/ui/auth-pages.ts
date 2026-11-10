@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { recordAudit } from '../auth/audit.js';
 import type { Backoff } from '../auth/backoff.js';
 import {
+  OperatorExistsError,
   operatorHash,
   passphraseProblem,
   ScryptBusyError,
@@ -123,18 +124,25 @@ export function registerAuthPages(app: FastifyInstance, deps: AuthPageDeps): voi
     const wait = 'Too many wrong passphrases from here: wait a moment and try again.';
     if (!admitted(req, reply, () => renderLogin(next, wait))) return reply;
     const stored = operatorHash(db);
+    // Charged before the check, so one source holds at most one scrypt run at a time and cannot
+    // fill the queue alone; a right passphrase resets it below.
+    backoff.fail(req.ip, now());
     let right = false;
     try {
       right =
         body.success && stored !== null && (await verifyPassphrase(body.data.passphrase, stored));
     } catch (e) {
       if (!(e instanceof ScryptBusyError)) throw e;
-      // A full queue is nobody's wrong guess: no backoff is charged.
       return html(reply.header('retry-after', '1'), 503, renderLogin(next, e.message));
     }
-    if (!right) {
-      backoff.fail(req.ip, now());
-      return html(reply, 401, renderLogin(next, 'That passphrase is not right.'));
+    if (!right) return html(reply, 401, renderLogin(next, 'That passphrase is not right.'));
+    // The passphrase may have changed while this check waited: the old one no longer logs in.
+    if (operatorHash(db) !== stored) {
+      return html(
+        reply,
+        401,
+        renderLogin(next, 'The passphrase changed while you were logging in. Log in again.'),
+      );
     }
     backoff.reset(req.ip);
     // The id is rotated: whatever session the browser held ends here.
@@ -209,8 +217,10 @@ export function registerAuthPages(app: FastifyInstance, deps: AuthPageDeps): voi
       return html(reply, 400, renderSetupPassphrase('The two passphrases differ.'));
     }
     try {
-      await setOperatorPassphrase(db, body.data.passphrase, now());
+      await setOperatorPassphrase(db, body.data.passphrase, now(), { expect: 'claim' });
     } catch (e) {
+      // A double submit, or `ctl passphrase set`, claimed the install while this one hashed.
+      if (e instanceof OperatorExistsError) return html(reply, 409, complete());
       if (!(e instanceof ScryptBusyError)) throw e;
       return html(reply.header('retry-after', '1'), 503, renderSetupPassphrase(e.message));
     }

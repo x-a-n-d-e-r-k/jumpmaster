@@ -8,7 +8,7 @@ import { makeZone } from '../test/fixtures.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import { Backoff } from './backoff.js';
 import { authenticate, requireCsrf, routeClass } from './guard.js';
-import { SetupMode, setOperatorPassphrase, setupActive } from './operator.js';
+import { SetupMode, scryptStats, setOperatorPassphrase, setupActive } from './operator.js';
 import { createSession, loadSession, SUDO_MS } from './sessions.js';
 
 const TOKEN = 'o'.repeat(32);
@@ -623,7 +623,7 @@ describe('round 2', () => {
     expect(await stick).toBe(200);
     expect(await Promise.all(guesses)).toEqual([401, 401, 401, 401, 401, 401]);
     // The stick did not wait behind the six scrypt runs.
-    expect(order.indexOf('stick')).toBeLessThan(order.length - 1);
+    expect(order[0]).toBe('stick');
   });
 
   test('a setup claim is audited as system, before any session exists', async () => {
@@ -646,5 +646,60 @@ describe('round 2', () => {
     ]) {
       expect(res.headers['cache-control']).toBe('no-store');
     }
+  });
+});
+
+describe('round 3', () => {
+  const bearer = { authorization: `Bearer ${TOKEN}` };
+
+  test('one address firing 33 parallel guesses is refused from the second on, so it cannot fill the queue', async () => {
+    const w = await world({ operator: true });
+    const statuses = await Promise.all(
+      Array.from({ length: 33 }, (_, i) => w.post('/login', { passphrase: `guess number ${i}` })),
+    );
+    expect(statuses.filter((r) => r.statusCode === 401)).toHaveLength(1);
+    expect(statuses.filter((r) => r.statusCode === 429)).toHaveLength(32);
+    expect(statuses.some((r) => r.statusCode === 503)).toBe(false);
+    // The same holds for sudo, from a session on another address.
+    const s = operatorSession(w.db, t0);
+    const sudo = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        w
+          .post('/api/control/sudo', { passphrase: 'not the passphrase' }, s.headers, '10.1.1.1')
+          .then((r) => r.statusCode),
+      ),
+    );
+    expect(sudo.sort()).toEqual([401, 429, 429, 429, 429]);
+  });
+
+  test('a double submit of the setup passphrase claims once and keeps the first session', async () => {
+    const w = await world();
+    const ok = await w.post('/setup/code', { code: w.printed[0] });
+    const cookie = `jm_setup=${valueOf(cookieOf(ok, 'jm_setup'))}`;
+    const [a, b] = await Promise.all([
+      w.post('/setup/passphrase', { passphrase: PASS, confirm: PASS }, { cookie }),
+      w.post('/setup/passphrase', { passphrase: `${PASS}!`, confirm: `${PASS}!` }, { cookie }),
+    ]);
+    expect([a.statusCode, b.statusCode].sort()).toEqual([303, 409]);
+    const won = a.statusCode === 303 ? a : b;
+    const session = `jm_session=${valueOf(cookieOf(won, 'jm_session'))}`;
+    expect((await w.get('/', { cookie: session })).statusCode).toBe(200);
+  });
+
+  test('a login with the old passphrase that was waiting during a rotation is refused', async () => {
+    const w = await world({ operator: true });
+    const rotate = w.put(
+      '/api/control/passphrase',
+      { passphrase: 'the new long passphrase' },
+      bearer,
+    );
+    // The rotation's hash is running; the login reads the old hash now and waits behind it.
+    while (scryptStats().running === 0) await new Promise((r) => setImmediate(r));
+    const login = w.post('/login', { passphrase: PASS });
+    const [r, l] = await Promise.all([rotate, login]);
+    expect(r.statusCode).toBe(200);
+    expect(l.statusCode).toBe(401);
+    expect(cookieOf(l, 'jm_session')).toBeUndefined();
+    expect((w.db.prepare('SELECT COUNT(*) AS c FROM sessions').get() as { c: number }).c).toBe(0);
   });
 });

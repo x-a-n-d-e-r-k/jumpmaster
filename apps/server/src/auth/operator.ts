@@ -121,10 +121,14 @@ export async function setOperatorPassphrase(
   db: Db,
   passphrase: string,
   now: Date,
+  opts: { expect?: 'claim' } = {},
 ): Promise<{ result: 'claimed' | 'replaced'; sessionsDeleted: number }> {
   const hash = await hashPassphrase(passphrase);
   const at = now.toISOString();
   return db.transaction(() => {
+    // Judged after the hash, in the write's own transaction: the await may have let another
+    // claim (a double submit, `ctl passphrase set`) land first.
+    if (opts.expect === 'claim' && !setupActive(db)) throw new OperatorExistsError();
     const sessionsDeleted = deleteAllSessions(db);
     const replaced = db
       .prepare('UPDATE operator SET passphrase_hash = ?, rotated_at = ? WHERE id = 1')
@@ -136,6 +140,13 @@ export async function setOperatorPassphrase(
     );
     return { result: 'claimed' as const, sessionsDeleted };
   })();
+}
+
+/** A claim found an operator already there (`expect: 'claim'`). */
+export class OperatorExistsError extends Error {
+  constructor() {
+    super('this install already has an operator');
+  }
 }
 
 /** Reopens setup: the operator row and every session go. */

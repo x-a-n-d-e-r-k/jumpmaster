@@ -7,6 +7,7 @@ import {
   MAX_PASSPHRASE,
   MIN_PASSPHRASE,
   newSetupCode,
+  OperatorExistsError,
   passphraseProblem,
   SCRYPT_QUEUE,
   ScryptBusyError,
@@ -51,20 +52,19 @@ describe('passphrases', () => {
 
   test('hashing and checking run off the event loop, one at a time, with a bounded queue', async () => {
     const stored = await hashPassphrase('a long operator passphrase');
-    let ticks = 0;
-    const timer = setInterval(() => ticks++, 1);
-    const started = performance.now();
+    // No clock: the loop reaching its check phase before the first result is "off the loop".
+    let loopTurned = false;
+    setImmediate(() => {
+      loopTurned = true;
+    });
     const pending = Array.from({ length: 4 }, (_, i) =>
       verifyPassphrase(i === 0 ? 'a long operator passphrase' : `wrong ${i}`, stored),
     );
-    // Starting four checks costs the loop nothing: scrypt runs on the thread pool.
-    expect(performance.now() - started).toBeLessThan(15);
+    expect(loopTurned).toBe(false); // the four calls returned at once
     expect(scryptStats()).toEqual({ running: 1, queued: 3 });
-    const results = await Promise.all(pending);
-    clearInterval(timer);
-    expect(results).toEqual([true, false, false, false]);
-    // The timer kept firing while four scrypt runs (tens of ms each) went by.
-    expect(ticks).toBeGreaterThan(4);
+    expect(await pending[0]).toBe(true);
+    expect(loopTurned).toBe(true); // the loop turned while scrypt ran
+    expect(await Promise.all(pending)).toEqual([true, false, false, false]);
     expect(scryptStats()).toEqual({ running: 0, queued: 0 });
   });
 
@@ -107,8 +107,16 @@ describe('the operator row', () => {
       c: t0.toISOString(),
       r: plus(t0, 1000).toISOString(),
     });
+    // The setup page only claims: an operator already there is never replaced from it.
+    await expect(
+      setOperatorPassphrase(db, 'third passphrase', t0, { expect: 'claim' }),
+    ).rejects.toThrow(OperatorExistsError);
     deleteOperator(db);
     expect(setupActive(db)).toBe(true);
+    expect(await setOperatorPassphrase(db, 'third passphrase', t0, { expect: 'claim' })).toEqual({
+      result: 'claimed',
+      sessionsDeleted: 0,
+    });
   });
 });
 

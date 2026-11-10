@@ -169,6 +169,8 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       const body = SudoBody.safeParse(req.body ?? {});
       const stored = operatorHash(db);
       const given = body.success ? body.data.passphrase : undefined;
+      // Charged before the check (one scrypt run per source at a time); reset when right.
+      backoff.fail(req.ip, now());
       let right = false;
       try {
         right =
@@ -178,11 +180,10 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
           (await verifyPassphrase(given, stored));
       } catch (e) {
         if (!(e instanceof ScryptBusyError)) throw e;
-        // A full queue is nobody's wrong guess: no backoff is charged.
         return reply.code(503).header('retry-after', '1').send({ error: e.message });
       }
-      if (!right || !p?.sessionId) {
-        backoff.fail(req.ip, now());
+      // A passphrase changed during the wait ended every session, this one included.
+      if (!right || !p?.sessionId || operatorHash(db) !== stored) {
         audit(req, 'sudo', { result: 'refused' });
         return reply.code(401).send({ error: 'wrong passphrase' });
       }
