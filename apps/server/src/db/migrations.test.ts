@@ -733,7 +733,6 @@ test('v19 adds config_revisions with a 500-character note cap and settings', () 
   );
   const db = openDb(f);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
-  expect(MIGRATIONS.at(-1)?.version).toBe(19);
   expect(count(db, 'operator')).toBe(1);
   const rev = db.prepare(
     `INSERT INTO config_revisions (parent_id, config_json, source_hash, via, note, created_at)
@@ -765,4 +764,44 @@ test('an M4.5a-era statement set still runs against v19 (the new tables are igno
     "INSERT INTO control_audit (at, via, action, detail_json) VALUES ('t', 'token', 'kill', '{}')",
   ).run();
   expect(count(db, 'control_audit')).toBe(1);
+});
+
+test('v20 adds vault: ciphertext and metadata by name, never a plaintext column', () => {
+  const db = openDb(dbAt(19));
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(MIGRATIONS.at(-1)?.version).toBe(20);
+  const cols = (
+    db.prepare('SELECT name, "notnull" AS nn, pk FROM pragma_table_info(\'vault\')').all() as {
+      name: string;
+      nn: number;
+      pk: number;
+    }[]
+  ).map((c) => `${c.name}${c.pk ? ' pk' : ''}${c.nn ? ' notnull' : ''}`);
+  expect(cols).toEqual([
+    'name pk',
+    'ciphertext notnull',
+    'nonce notnull',
+    'key_id notnull',
+    'fingerprint notnull',
+    'created_at notnull',
+    'declared_created_at',
+    'tested_at',
+    'test_result',
+    'login',
+    'note',
+  ]);
+  const put = db.prepare(
+    'INSERT INTO vault (name, ciphertext, nonce, key_id, fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+  );
+  put.run('claudeToken', Buffer.from('c'), Buffer.alloc(12), 'k', 'f', 't');
+  expect(() => put.run('claudeToken', Buffer.from('c'), Buffer.alloc(12), 'k', 'f', 't')).toThrow(
+    /UNIQUE|PRIMARY/,
+  );
+  db.close();
+});
+
+test('an M4.5a-era statement set still runs against v20 (the vault is ignored)', () => {
+  const db = openDb(dbAt(20));
+  db.prepare("INSERT INTO settings (key, value_json, updated_at) VALUES ('k', '1', 't')").run();
+  expect(count(db, 'settings')).toBe(1);
 });

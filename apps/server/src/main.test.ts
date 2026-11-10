@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, test, vi } from 'vitest';
@@ -202,4 +202,48 @@ test('an unreadable secret file is named before the data directory is touched, a
       JM_LISTEN_PORT: '0',
     }),
   ).rejects.toThrow(/JM_CLAUDE_TOKEN_FILE: .*claude is not readable by uid/);
+});
+
+test('a credential file under the secrets directory, and the vault key file, are named before the data directory is touched', async () => {
+  if (process.getuid?.() === 0) return; // root reads a 0000 file
+  const dir = mkdtempSync(join(tmpdir(), 'jm-main-dir-'));
+  const blocked = join(dir, 'blocked');
+  writeFileSync(blocked, 'not a directory');
+  writeFileSync(join(dir, 'github_author_token'), 'author-token-value', { mode: 0o000 });
+  const { JM_GITHUB_AUTHOR_TOKEN: _a, ...rest } = env;
+  await expect(
+    start(undefined, {
+      ...rest,
+      JM_SECRETS_DIR: dir,
+      JM_DATA_DIR: join(blocked, 'data'),
+      JM_LISTEN_PORT: '0',
+    }),
+  ).rejects.toThrow(
+    `github_author_token: ${join(dir, 'github_author_token')} is not readable by uid`,
+  );
+  const key = join(dir, 'vault_key');
+  writeFileSync(key, 'x', { mode: 0o000 });
+  await expect(
+    start(undefined, {
+      ...env,
+      JM_VAULT_KEY_FILE: key,
+      JM_DATA_DIR: join(blocked, 'data'),
+      JM_LISTEN_PORT: '0',
+    }),
+  ).rejects.toThrow(`JM_VAULT_KEY_FILE: ${key} is not readable by uid`);
+});
+
+test('a missing key file with a non-empty vault refuses startup with the travel-together message', async () => {
+  const dataDir = join(mkdtempSync(join(tmpdir(), 'jm-main-vault-')), 'data');
+  mkdirSync(dataDir);
+  const db = openDb(join(dataDir, 'jumpmaster.sqlite'));
+  db.prepare(
+    "INSERT INTO vault (name, ciphertext, nonce, key_id, fingerprint, created_at) VALUES ('claudeToken', x'00', zeroblob(12), 'k', 'f', 't')",
+  ).run();
+  db.close();
+  await expect(
+    start(undefined, { ...env, JM_DATA_DIR: dataDir, JM_LISTEN_PORT: '0' }),
+  ).rejects.toThrow(
+    `the vault at ${dataDir} holds 1 credentials but JM_VAULT_KEY_FILE is unset: the key and the data travel together`,
+  );
 });

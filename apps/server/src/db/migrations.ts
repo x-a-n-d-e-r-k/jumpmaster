@@ -584,6 +584,27 @@ CREATE TABLE settings (
 );
 `;
 
+/**
+ * v20: the credential vault (§7.5). Values only as AES-256-GCM ciphertext under a key file kept
+ * outside the data directory, with the metadata the Credentials tab shows. New table only, so an
+ * M4 binary still runs against v20.
+ */
+const V20_SQL = `
+CREATE TABLE vault (
+  name                 TEXT PRIMARY KEY,
+  ciphertext           BLOB NOT NULL,
+  nonce                BLOB NOT NULL,
+  key_id               TEXT NOT NULL,
+  fingerprint          TEXT NOT NULL,
+  created_at           TEXT NOT NULL,
+  declared_created_at  TEXT,
+  tested_at            TEXT,
+  test_result          TEXT,
+  login                TEXT,
+  note                 TEXT
+);
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -612,6 +633,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 17, sql: V17_SQL, foreignKeysOff: true },
   { version: 18, sql: V18_SQL },
   { version: 19, sql: V19_SQL },
+  { version: 20, sql: V20_SQL },
 ];
 
 /**

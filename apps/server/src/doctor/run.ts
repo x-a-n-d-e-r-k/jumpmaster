@@ -1,4 +1,5 @@
-import { readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { redact } from '@jumpmaster/protocol';
 import { secretList } from '../config.js';
 import type { Db } from '../db/open.js';
@@ -131,6 +132,28 @@ export function processEnv(env: NodeJS.ProcessEnv = process.env): DoctorEnv {
       }
       return { variable, path: path as string, mode };
     });
+  // Every file under the secrets directory (credentials by name, the machine secrets, the vault
+  // key), once, beside the *_FILE variables that point elsewhere.
+  const dir = env.JM_SECRETS_DIR;
+  if (dir) {
+    let names: string[] = [];
+    try {
+      names = readdirSync(dir).sort();
+    } catch {
+      names = [];
+    }
+    for (const name of names) {
+      const path = join(dir, name);
+      if (secretFiles.some((f) => f.path === path)) continue;
+      try {
+        const st = statSync(path);
+        if (st.isFile())
+          secretFiles.push({ variable: `secrets/${name}`, path, mode: st.mode & 0o777 });
+      } catch {
+        // gone between the listing and the stat
+      }
+    }
+  }
   return {
     uid: typeof process.getuid === 'function' ? process.getuid() : null,
     inContainer: env.JM_CONTAINER === '1',

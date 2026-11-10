@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import type { DoctorCheck } from './doctor/checks.js';
-import { readSecret } from './secrets.js';
+import { readSecret, readSecretFile } from './secrets.js';
 
 const MODES: Record<string, string> = { pause: 'paused', resume: 'active', observe: 'observe' };
 
@@ -132,9 +132,16 @@ export function formatDoctor(run: {
 
 const CONFIG_USAGE =
   'ctl config show [--json] | ctl config revisions | ctl config set <path>=<json>… [--note <text>] | ctl config rollback <id> [note] | ctl config import <file> [--dry-run] [--note <text>] | ctl config export | ctl config reload | ctl config adopt | ctl config mode file';
-const USAGE = `usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] | ctl doctor <zone> --drop | ctl doctor <zone> --cancel | ctl setup-code | ctl setup reopen | ctl passphrase set (the passphrase on stdin) | ${CONFIG_USAGE}`;
+export const SECRETS_USAGE =
+  'ctl secrets list | ctl secrets set <name> [--from-file <path>] [--created YYYY-MM-DD] (the value on stdin or in the file, never in argv) | ctl secrets test <name> | ctl secrets remove <name> | ctl secrets reload';
 
-type Call = (method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown) => Promise<Response>;
+const USAGE = `usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] | ctl doctor <zone> --drop | ctl doctor <zone> --cancel | ctl setup-code | ctl setup reopen | ctl passphrase set (the passphrase on stdin) | ${CONFIG_USAGE} | ${SECRETS_USAGE}`;
+
+type Call = (
+  method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
+  path: string,
+  body?: unknown,
+) => Promise<Response>;
 type Change = { path: string; from?: unknown; to?: unknown };
 type Issue = { path: string; message: string };
 
@@ -344,6 +351,67 @@ async function runConfig(
   return 0;
 }
 
+/**
+ * `ctl secrets`: the credential routes. `set` takes the value from `--from-file` or stdin, never
+ * from argv (the shell history and the process list would keep it), and prints no value.
+ */
+async function runSecrets(
+  args: string[],
+  call: Call,
+  out: (line: string) => void,
+  err: (line: string) => void,
+  readStdin: () => Promise<string>,
+): Promise<number> {
+  const [, verb, name, ...rest] = args;
+  const at = (n: string) => `/api/control/secrets/${encodeURIComponent(n)}`;
+  const show = async (res: Response) => {
+    out(`${res.status} ${await res.text()}`);
+    return res.ok ? 0 : 1;
+  };
+  const usage = () => {
+    err(SECRETS_USAGE);
+    return 2;
+  };
+  if (verb === 'list' && !name) return show(await call('GET', '/api/control/secrets'));
+  if (verb === 'reload' && !name)
+    return show(await call('POST', '/api/control/secrets/reload', {}));
+  if (!name) return usage();
+  if (verb === 'test' && rest.length === 0) return show(await call('POST', `${at(name)}/test`, {}));
+  if (verb === 'remove' && rest.length === 0) return show(await call('DELETE', at(name)));
+  if (verb !== 'set') return usage();
+  let file: string | undefined;
+  let created: string | undefined;
+  for (let i = 0; i < rest.length; i++) {
+    const flag = rest[i];
+    const v = rest[i + 1];
+    if (flag === '--from-file' && v) file = v;
+    else if (flag === '--created' && v && /^\d{4}-\d{2}-\d{2}$/.test(v)) created = v;
+    else {
+      err(
+        `ctl secrets set takes the value from stdin or --from-file, never from argv. ${SECRETS_USAGE}`,
+      );
+      return 2;
+    }
+    i++;
+  }
+  let value: string;
+  try {
+    value = file
+      ? readSecretFile(file, '--from-file')
+      : ((await readStdin()).split('\n')[0]?.replace(/\r$/, '') ?? '');
+  } catch (e) {
+    err((e as Error).message);
+    return 2;
+  }
+  if (!value) {
+    err(`ctl secrets set reads the value from stdin or --from-file. ${SECRETS_USAGE}`);
+    return 2;
+  }
+  return show(
+    await call('PUT', at(name), { value, ...(created ? { declaredCreatedAt: created } : {}) }),
+  );
+}
+
 /** The first line of stdin, without its line ending (`ctl passphrase set`). */
 async function readStdinLine(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -380,7 +448,7 @@ export async function runCtl(
   err: (line: string) => void = console.error,
   readStdin: () => Promise<string> = readStdinLine,
 ): Promise<number> {
-  if (args[0] === 'config') {
+  if (args[0] === 'config' || args[0] === 'secrets') {
     const token = operatorToken(env, err);
     if (token === null) return 2;
     const base = env.JM_SERVER_URL ?? 'http://127.0.0.1:7420';
@@ -393,7 +461,9 @@ export async function runCtl(
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
-    return runConfig(args, call, out, err);
+    return args[0] === 'secrets'
+      ? runSecrets(args, call, out, err, readStdin)
+      : runConfig(args, call, out, err);
   }
   const request = ctlRequest(args);
   if (!request) {

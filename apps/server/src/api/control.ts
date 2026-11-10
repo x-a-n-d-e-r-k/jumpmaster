@@ -33,7 +33,7 @@ import {
   setZoneMode,
   ZONE_MODES,
 } from '../db/repo.js';
-import { type DoctorEnv, doctorDropWait } from '../doctor/checks.js';
+import { type DoctorDeps, type DoctorEnv, doctorDropWait } from '../doctor/checks.js';
 import { DoctorBusyError, latestDoctorRun, processEnv, runDoctor } from '../doctor/run.js';
 import type { Forge } from '../forge/github.js';
 import { fileIntakeIssue, GoalStubSchema, IntakeIssueSchema, renderGoalStub } from '../intake.js';
@@ -47,6 +47,8 @@ import {
 } from '../mcp/tokens.js';
 import type { ForgePair } from '../outbox.js';
 import { safeNext } from '../ui/auth-pages.js';
+import { credentialCreatedAt, shadowedCredentials, type TestDeps } from '../vault/credentials.js';
+import { registerSecretRoutes } from './secrets.js';
 
 export interface ControlDeps {
   db: Db;
@@ -72,11 +74,33 @@ export interface ControlDeps {
   setup?: SetupMode;
   /** Per-source backoff for passphrase guesses, shared with the login page. */
   backoff?: Backoff;
+  /** A forge on a token, for the credential tests on entry (default: GitHub with a deadline). */
+  credentialForge?: TestDeps['forge'];
+  /** The operator's log (scrubbed); the secret routes never write a value to it. */
+  log?: (msg: string) => void;
 }
 
 /** A setup mode whose codes go to stderr, alone on their line (main.ts passes its own). */
 export function stderrSetupMode(listen: Config['listen']): SetupMode {
   return new SetupMode((code) => process.stderr.write(`${setupCodeLine(code, listen)}\n`));
+}
+
+/** What the doctor's credential checks read from the store (Task 4). */
+function credentialsOf(store: ConfigStore): NonNullable<DoctorDeps['credentials']> {
+  const resolved = store.resolved();
+  const vault = store.vault();
+  const created = credentialCreatedAt(
+    'claudeToken',
+    resolved,
+    store.mode(),
+    store.current().claude,
+  );
+  return {
+    problems: store.problems(),
+    shadowed: shadowedCredentials(resolved, vault),
+    vaultKey: vault === 'disabled' ? { status: 'disabled' } : vault.keyStatus(),
+    ...(created ? { claudeTokenCreatedAt: created } : {}),
+  };
 }
 
 const DoctorBody = z.strictObject({ zone: z.string().min(1).optional() });
@@ -135,6 +159,18 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
   const cfg = (req: FastifyRequest): Config => req.jmConfig ?? live();
   const setup = deps.setup ?? stderrSetupMode(live().listen);
   const backoff = deps.backoff ?? new Backoff();
+  // The scrub list: the request's snapshot (the secrets before a rotation it made), the secrets
+  // now (after it) and every value a rotation retired while this process ran.
+  const scrubList = (req: FastifyRequest): string[] => {
+    const store = deps.config instanceof ConfigStore ? deps.config : undefined;
+    return [
+      ...new Set([
+        ...secretList(cfg(req).secrets),
+        // Only a store rotates credentials while a request runs.
+        ...(store ? [...secretList(store.current().secrets), ...store.retired()] : []),
+      ]),
+    ];
+  };
   const audit = (req: FastifyRequest, action: string, detail: AuditDetail, target?: string) =>
     recordAudit(
       db,
@@ -145,7 +181,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         detail,
       },
       now(),
-      secretList(cfg(req).secrets),
+      scrubList(req),
     );
   /** Routes for `ctl` alone: a session is refused, whatever its sudo. */
   const tokenOnly = (req: FastifyRequest, reply: FastifyReply): boolean => {
@@ -363,6 +399,8 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
           return reply.code(404).send({ error: 'unknown zone' });
         }
         const configStatus = statusOf(deps.config);
+        const credentials =
+          deps.config instanceof ConfigStore ? credentialsOf(deps.config) : undefined;
         try {
           const run = await runDoctor(
             {
@@ -373,6 +411,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
               forges: deps.doctorForgesFor ?? forgesFor,
               ...(deps.readForgeFor ? { readForge: deps.readForgeFor } : {}),
               ...(configStatus ? { configStatus } : {}),
+              ...(credentials ? { credentials } : {}),
             },
             zoneId !== undefined ? { zoneId } : {},
           );
@@ -517,8 +556,16 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       return { engaged: true, ...done };
     });
 
-    if (deps.config instanceof ConfigStore)
+    if (deps.config instanceof ConfigStore) {
       registerConfigRoutes(scope, deps.config, audit, tokenOnly);
+      registerSecretRoutes(scope, {
+        db,
+        store: deps.config,
+        now,
+        audit,
+        ...(deps.credentialForge ? { credentialForge: deps.credentialForge } : {}),
+      });
+    }
   });
 }
 

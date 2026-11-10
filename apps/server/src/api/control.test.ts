@@ -1,4 +1,5 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -31,7 +32,9 @@ import { intakeKey } from '../intake.js';
 import { AUTHOR_TOKEN, CLAUDE_TOKEN, NOW, world } from '../test/doctorWorld.js';
 import { fakeForgePair } from '../test/fakes.js';
 import { makeZone } from '../test/fixtures.js';
-import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
+import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
+import { credentialCreatedAt } from '../vault/credentials.js';
+import { fingerprintOf, openVault } from '../vault/vault.js';
 import { type ControlDeps, registerControlRoutes } from './control.js';
 
 const TOKEN = 'o'.repeat(32);
@@ -1293,5 +1296,316 @@ describe('config routes', () => {
       ['config.adopt', 'session'],
       ['config.reload', 'token'],
     ]);
+  });
+});
+
+describe('secret routes (Task 4)', () => {
+  const env = {
+    JM_JOIN_TOKEN: 'join-secret-value-4',
+    JM_OPERATOR_TOKEN: TOKEN,
+  };
+  const CLAUDE = 'sk-ant-oat01-ROUTECLAUDE-0001';
+  const AUTHOR_OLD = 'github_pat_ROUTEAUTHOROLD_0002';
+  const AUTHOR_NEW = 'github_pat_ROUTEAUTHORNEW_0003';
+  const REVIEWER = 'github_pat_ROUTEREVIEWER_0004';
+  const FAILED = 'github_pat_FAILEDFIXTURE_distinct_from_all_0005';
+  const zoneDoc = (id: string) => ({
+    id,
+    repo: `octo/${id}`,
+    gates: [{ name: 'test', run: 'npm test' }],
+    image: 'jm-trooper:dev',
+  });
+
+  /** Two zones over a store with a vault; `files` are written under the secrets directory. */
+  function secretsApp(files: Record<string, string> = {}) {
+    const db = openDb(tmpDbFile());
+    const dir = mkdtempSync(join(tmpdir(), 'jm-secrets-route-'));
+    const secretsDir = join(dir, 'secrets');
+    mkdirSync(secretsDir);
+    for (const [name, value] of Object.entries(files))
+      writeFileSync(join(secretsDir, name), `${value}\n`, { mode: 0o600 });
+    const keyFile = join(dir, 'vault_key');
+    writeFileSync(keyFile, randomBytes(32).toString('base64url'), { mode: 0o600 });
+    const vault = openVault(keyFile, db);
+    const clock = { now: t0 };
+    const store = ConfigStore.open({
+      db,
+      boot: { ...loadBoot({}, undefined), secretsDir },
+      env,
+      vault,
+      now: () => clock.now,
+      imageLockPath: join(dir, 'no-lock.json'),
+    });
+    store.apply(
+      { dropZones: [zoneDoc('web'), zoneDoc('api')] },
+      { via: 'ctl', principal: { kind: 'operator', via: 'token', sudo: true } },
+    );
+    for (const z of ['web', 'api'])
+      upsertDropZone(db, { id: z, repo: `octo/${z}`, defaultBranch: 'main', configJson: '{}' });
+    const calls: string[] = [];
+    let gate: Promise<void> = Promise.resolve();
+    const forge = {
+      fail: undefined as unknown,
+      setGate(p: Promise<void>) {
+        gate = p;
+      },
+    };
+    const logs: string[] = [];
+    app = controlApp({
+      db,
+      config: store,
+      now: () => clock.now,
+      log: (l) => logs.push(l),
+      forgesFor: () => {
+        throw new Error('no forge in this test');
+      },
+      doctorEnv: { uid: 1000, inContainer: true, uidMap: null },
+      credentialForge: (token, repo) => ({
+        viewerLogin: async () => {
+          calls.push(`login ${repo} ${token === FAILED ? 'failed' : 'ok'}`);
+          await gate;
+          if (token === FAILED) throw forge.fail;
+          return token === REVIEWER ? 'reviewer-bot' : 'author-bot';
+        },
+        repoAccess: async () => {
+          calls.push(`access ${repo}`);
+          return {};
+        },
+      }),
+    });
+    const session = operatorSession(db);
+    const asSession = { ...session.headers, host: HOST };
+    return { db, store, clock, calls, forge, logs, asSession, secretsDir, session };
+  }
+  const put = (name: string, body: unknown, headers: Record<string, string> = auth) =>
+    (app as FastifyInstance).inject({
+      method: 'PUT',
+      url: `/api/control/secrets/${name}`,
+      headers,
+      payload: body as object,
+    });
+  const get = (headers: Record<string, string> = auth) =>
+    (app as FastifyInstance).inject({ method: 'GET', url: '/api/control/secrets', headers });
+
+  test('PUT secrets needs sudo for a session, never for the Bearer token, and is refused for a file-managed credential with its path', async () => {
+    const w = secretsApp({ claude_token: CLAUDE });
+    const s1 = await put('githubAuthorToken', { value: AUTHOR_OLD }, w.asSession);
+    expect(s1.statusCode).toBe(403);
+    expect(s1.json()).toEqual({
+      error: 'replacing a credential needs sudo: re-enter the passphrase (POST /api/control/sudo)',
+    });
+    w.db.prepare('UPDATE sessions SET sudo_until = ?').run(plus(t0, 60_000).toISOString());
+    expect((await put('githubAuthorToken', { value: AUTHOR_OLD }, w.asSession)).statusCode).toBe(
+      200,
+    );
+    expect((await put('githubReviewerToken', { value: REVIEWER })).statusCode).toBe(200);
+    const file = await put('claudeToken', { value: CLAUDE });
+    expect(file.statusCode).toBe(409);
+    expect(file.json()).toEqual({
+      error: `managed by ${join(w.secretsDir, 'claude_token')}: replace the file and run \`ctl secrets reload\``,
+    });
+    const bad = await put('githubAuthorToken', { value: 'two\nlines' });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.body).not.toContain('two');
+    expect((await put('nonsense', { value: AUTHOR_OLD })).statusCode).toBe(404);
+  });
+
+  test('a rotated author token is tested against every zone, swapped in for the next drop, and the running drops still carrying the old one are counted until they finish', async () => {
+    const w = secretsApp({ claude_token: CLAUDE });
+    await put('githubReviewerToken', { value: REVIEWER });
+    expect((await put('githubAuthorToken', { value: AUTHOR_OLD })).statusCode).toBe(200);
+    // A drop leased with the old token.
+    const wi = upsertWorkItem(w.db, {
+      dropZoneId: 'web',
+      issueNumber: 1,
+      title: 't',
+      body: 'b',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    insertDrop(w.db, {
+      id: 'd-old',
+      dropZoneId: 'web',
+      workItemId: wi.id,
+      role: 'implement',
+      state: 'queued',
+      createdAt: t0.toISOString(),
+    });
+    w.db
+      .prepare("UPDATE drops SET state = 'running', started_at = ? WHERE id = 'd-old'")
+      .run(plus(t0, 1000).toISOString());
+    w.clock.now = plus(t0, 5000);
+    w.calls.length = 0;
+    const r = await put('githubAuthorToken', { value: AUTHOR_NEW });
+    expect(r.statusCode).toBe(200);
+    expect(w.calls).toEqual(['login octo/web ok', 'access octo/web', 'access octo/api']);
+    expect(r.json()).toEqual({
+      fingerprint: fingerprintOf(AUTHOR_NEW),
+      tested: true,
+      problems: [],
+      runningDropsWithPrevious: 1,
+    });
+    // The next pass and payload read the new value; the list shows the count until the drop ends.
+    expect(w.store.current().secrets.githubAuthorToken).toBe(AUTHOR_NEW);
+    const listed = () =>
+      get().then((x) =>
+        x.json().credentials.find((c: { name: string }) => c.name === 'githubAuthorToken'),
+      );
+    expect((await listed()).runningDropsWithPrevious).toBe(1);
+    w.db.prepare("UPDATE drops SET state = 'succeeded' WHERE id = 'd-old'").run();
+    expect((await listed()).runningDropsWithPrevious).toBe(0);
+    // The old value is still redacted from what the server logs and audits.
+    expect(w.store.retired()).toContain(AUTHOR_OLD);
+  });
+
+  test('a failed test stores nothing, returns only the status and permission, and the distinct value reaches no log line, audit row or response', async () => {
+    const w = secretsApp();
+    w.forge.fail = Object.assign(new Error(`Bad credentials ${FAILED}`), {
+      status: 401,
+      response: {
+        headers: { 'x-accepted-github-permissions': 'metadata=read' },
+        data: { message: FAILED },
+      },
+    });
+    const r = await put('githubAuthorToken', { value: FAILED });
+    expect(r.statusCode).toBe(422);
+    expect(r.json()).toEqual({ tested: false, status: 401, permission: 'metadata=read' });
+    expect(w.store.resolved().githubAuthorToken.source).toBe('missing');
+    expect(w.store.vault() !== 'disabled' && w.store.vault().meta('githubAuthorToken')).toBe(
+      undefined,
+    );
+    const rows = JSON.stringify(listAudit(w.db));
+    expect(rows).toContain('secret.set');
+    for (const where of [r.body, rows, w.logs.join('\n'), (await get()).body])
+      expect(where).not.toContain(FAILED);
+  });
+
+  test('two PUTs for one name are serialized: the second test starts after the first is stored', async () => {
+    const w = secretsApp();
+    let release!: () => void;
+    w.forge.setGate(new Promise<void>((r) => (release = r)));
+    const first = put('githubReviewerToken', { value: REVIEWER });
+    const second = put('githubReviewerToken', { value: AUTHOR_NEW });
+    // Let both requests reach their handlers.
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    expect(w.calls).toEqual(['login octo/web ok']);
+    release();
+    await first;
+    await second;
+    expect(w.calls.filter((c) => c.startsWith('login'))).toHaveLength(2);
+    expect(w.store.resolved().githubReviewerToken.fingerprint).toBe(fingerprintOf(AUTHOR_NEW));
+  });
+
+  test('the list carries fingerprint, source, path for a file, login and dates, and no value, prefix, suffix or length', async () => {
+    const w = secretsApp({ claude_token: CLAUDE });
+    await put('githubReviewerToken', { value: REVIEWER, declaredCreatedAt: '2026-01-02' });
+    const r = await get(w.asSession);
+    expect(r.statusCode).toBe(200);
+    const body = r.json();
+    expect(body.vault).toBe('on');
+    const byName = Object.fromEntries(body.credentials.map((c: { name: string }) => [c.name, c]));
+    expect(byName.claudeToken).toMatchObject({
+      source: 'file',
+      path: join(w.secretsDir, 'claude_token'),
+      fingerprint: fingerprintOf(CLAUDE),
+    });
+    expect(byName.githubReviewerToken).toMatchObject({
+      source: 'vault',
+      fingerprint: fingerprintOf(REVIEWER),
+      login: 'reviewer-bot',
+      setAt: t0.toISOString(),
+      declaredCreatedAt: '2026-01-02',
+      testResult: 'ok',
+    });
+    expect(byName.githubAuthorToken).toMatchObject({ source: 'missing' });
+    expect(body.problems.map((p: { credential: string }) => p.credential)).toEqual([
+      'githubAuthorToken',
+      'githubAuthorToken',
+    ]);
+    for (const v of [CLAUDE, REVIEWER]) {
+      expect(r.body).not.toContain(v);
+      expect(r.body).not.toContain(v.slice(0, 12));
+      expect(r.body).not.toContain(v.slice(-6));
+      expect(r.body).not.toMatch(new RegExp(`"length":\\s*${v.length}`));
+    }
+  });
+
+  test('a Claude token set in the UI is dated today unless a date is given', async () => {
+    const w = secretsApp();
+    await put('claudeToken', { value: CLAUDE });
+    expect(credentialCreatedAt('claudeToken', w.store.resolved(), 'db', {})).toBe(
+      t0.toISOString().slice(0, 10),
+    );
+    await put('claudeToken', { value: CLAUDE, declaredCreatedAt: '2026-01-15' });
+    expect(credentialCreatedAt('claudeToken', w.store.resolved(), 'db', {})).toBe('2026-01-15');
+    expect(
+      (await put('claudeToken', { value: CLAUDE, declaredCreatedAt: 'soon' })).statusCode,
+    ).toBe(400);
+  });
+
+  test('a credential change that invalidates a zone answers with the problem, parks it, and the doctor fails credential.kind', async () => {
+    const w = secretsApp({ claude_token: CLAUDE });
+    const token = { kind: 'operator', via: 'token', sudo: true } as const;
+    w.store.apply(
+      { dropZones: [{ ...zoneDoc('web'), identity: 'starter' }, zoneDoc('api')] },
+      { via: 'ctl', principal: token },
+    );
+    await put('githubReviewerToken', { value: REVIEWER });
+    const r = await put('githubAuthorToken', { value: 'ghp_CLASSICAUTHOR_0007' });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().problems).toEqual([
+      expect.objectContaining({ zoneId: 'web', kind: 'kind', credential: 'githubAuthorToken' }),
+    ]);
+    const doc = await (app as FastifyInstance).inject({
+      method: 'POST',
+      url: '/api/control/doctor',
+      headers: auth,
+      payload: { zone: 'web' },
+    });
+    const checks = doc.json().run.checks as { id: string; zoneId: string; status: string }[];
+    expect(checks.find((c) => c.id === 'credential.kind' && c.zoneId === 'web')?.status).toBe(
+      'fail',
+    );
+    expect(checks.find((c) => c.id === 'vault.key')?.status).toBe('pass');
+    expect(doc.body).not.toContain('ghp_CLASSICAUTHOR_0007');
+  });
+
+  test('DELETE of a credential a zone needs is refused with the problem it would create; reload re-reads the files', async () => {
+    const w = secretsApp();
+    await put('githubReviewerToken', { value: REVIEWER });
+    const del = await (app as FastifyInstance).inject({
+      method: 'DELETE',
+      url: '/api/control/secrets/githubReviewerToken',
+      headers: auth,
+    });
+    expect(del.statusCode).toBe(409);
+    expect(
+      del.json().problems.map((p: { zoneId: string; kind: string }) => [p.zoneId, p.kind]),
+    ).toEqual([
+      ['web', 'missing'],
+      ['api', 'missing'],
+    ]);
+    expect(w.store.resolved().githubReviewerToken.source).toBe('vault');
+    // A file appears: reload picks it up.
+    writeFileSync(join(w.secretsDir, 'github_author_token'), `${AUTHOR_OLD}\n`, { mode: 0o600 });
+    const reload = await (app as FastifyInstance).inject({
+      method: 'POST',
+      url: '/api/control/secrets/reload',
+      headers: auth,
+      payload: {},
+    });
+    expect(reload.statusCode).toBe(200);
+    expect(w.store.resolved().githubAuthorToken.source).toBe('file');
+    // The read token no zone needs can go.
+    await put('githubReadToken', { value: 'github_pat_READ_0006' });
+    const ok = await (app as FastifyInstance).inject({
+      method: 'DELETE',
+      url: '/api/control/secrets/githubReadToken',
+      headers: auth,
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(w.store.resolved().githubReadToken.source).toBe('missing');
   });
 });

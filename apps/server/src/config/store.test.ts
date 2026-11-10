@@ -1,6 +1,8 @@
+import { randomBytes } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { payloadSecrets } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
 import type { Principal } from '../auth/guard.js';
 import { loadConfig, parseEditable, secretList } from '../config.js';
@@ -13,6 +15,7 @@ import {
   upsertWorkItem,
 } from '../db/repo.js';
 import { plus, t0, tmpDbFile } from '../test/helpers.js';
+import { openVault } from '../vault/vault.js';
 import { type BootConfig, loadBoot, RESTART_PATHS } from './boot.js';
 import { mergePatch } from './diff.js';
 import { canonicalJson, getSetting, hashOf } from './revisions.js';
@@ -370,16 +373,27 @@ describe('apply', () => {
     expect(store.current().dropZones).toEqual([]);
     expect(revCount(w.db)).toBe(1);
     expect(seen).toEqual([]);
-    // A rule that needs a credential is an issue too (until Task 4 makes it a dispatch refusal).
+    // A rule that needs a credential is no apply-time issue (Task 4): the zone is stored, and its
+    // problem is a dispatch refusal.
     const starter = store.apply(
       { dropZones: [zone('a', { identity: 'starter' })] },
       { via: 'ctl', principal: token },
     );
-    expect(starter).toEqual({
-      ok: false,
-      issues: [{ path: '', message: expect.stringMatching(/starter identity/) }],
-    });
-    expect(revCount(w.db)).toBe(1);
+    expect(starter).toMatchObject({ ok: true, revision: 2 });
+    expect(store.problems().map((p) => [p.zoneId, p.kind, p.credential])).toEqual([
+      ['a', 'kind', 'githubAuthorToken'],
+    ]);
+  });
+
+  test('a two-bot zone can be added before its reviewer token exists: the problem waits, the apply does not', () => {
+    const { JM_GITHUB_REVIEWER_TOKEN: _r, ...noReviewer } = env;
+    const w = world();
+    const store = w.open({ env: noReviewer });
+    expect(store.apply({ dropZones: [zone('a')] }, { via: 'ctl', principal: token }).ok).toBe(true);
+    expect(store.problems()).toEqual([
+      expect.objectContaining({ zoneId: 'a', kind: 'missing', credential: 'githubReviewerToken' }),
+    ]);
+    expect(store.current().secrets.githubReviewerToken).toBeUndefined();
   });
 
   test('apply with a stale expectRevision returns a conflict and changes nothing', () => {
@@ -1280,5 +1294,46 @@ describe('zone removal, history and Resume (Task 3)', () => {
     writeConfig(w.file, { dropZones: [zone('main', { ciRequired: false })] });
     expect(store.reload().ok).toBe(true);
     expect(store.current().dropZones[0]?.ciRequired).toBe(false);
+  });
+});
+
+describe('credentials in the store (Task 4)', () => {
+  const VAULT_CLAUDE = 'sk-ant-oat01-VAULTCLAUDE-store-0001';
+  function withVault() {
+    const w = world();
+    const key = join(dir(), 'vault_key');
+    writeFileSync(key, randomBytes(32).toString('base64url'), { mode: 0o600 });
+    const vault = openVault(key, w.db);
+    const { JM_CLAUDE_TOKEN: _c, ...noClaude } = env;
+    const store = w.open({ env: noClaude, vault });
+    return { w, store, vault };
+  }
+
+  test('vault values reach config.secrets, so the log scrub and payload redaction see them', () => {
+    const { store } = withVault();
+    expect(store.current().secrets.claudeToken).toBe('');
+    expect(store.putCredential('claudeToken', VAULT_CLAUDE, {}).ok).toBe(true);
+    expect(store.current().secrets.claudeToken).toBe(VAULT_CLAUDE);
+    expect(secretList(store.current().secrets)).toContain(VAULT_CLAUDE);
+    expect(
+      payloadSecrets({ credentials: { claudeToken: store.current().secrets.claudeToken } }),
+    ).toContain(VAULT_CLAUDE);
+    // Replaced, it stays on the scrub list for the life of the process.
+    expect(store.putCredential('claudeToken', `${VAULT_CLAUDE}-2`, {}).ok).toBe(true);
+    expect(store.retired()).toContain(VAULT_CLAUDE);
+  });
+
+  test('a rotation that does not load leaves the old credential in effect and the old vault row in place', () => {
+    const { store, vault } = withVault();
+    store.putCredential('claudeToken', VAULT_CLAUDE, {});
+    const before = vault !== 'disabled' ? vault.snapshot('claudeToken') : undefined;
+    // The operator token may not be reused as a credential.
+    const r = store.putCredential('claudeToken', 'o'.repeat(32), {});
+    expect(r).toEqual({
+      ok: false,
+      issues: [{ path: '', message: 'JM_OPERATOR_TOKEN must differ from every other token' }],
+    });
+    expect(store.current().secrets.claudeToken).toBe(VAULT_CLAUDE);
+    expect(vault !== 'disabled' ? vault.snapshot('claudeToken') : undefined).toEqual(before);
   });
 });

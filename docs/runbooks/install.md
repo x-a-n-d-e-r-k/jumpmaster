@@ -732,6 +732,37 @@ A setting changed since the server started that only a restart applies (`mcp.ena
 `mcp.maxBodyBytes`, or a `listen` or `dataDir` changed in the file). Every other change applies at
 the next pass. Run `docker compose restart jumpmaster`.
 
+### `credential.missing`
+
+A zone needs a credential nobody has set: the Claude token, the author token, a two-bot zone's
+reviewer token, the read token when `reviewReadToken` is on, or a gate secret it declares. The zone
+is parked until it arrives (its queue reason says `credentials: …`). Enter it under Settings,
+Credentials, or `jumpmaster ctl secrets set <name>` (the value on stdin), or write its file under
+`secrets/` and run `jumpmaster ctl secrets reload`.
+
+### `credential.kind`
+
+A credential of the wrong kind for its zone: a starter zone, or one with `authorMayBeAdmin`, needs a
+fine-grained author token (`github_pat_`); a gate secret needs at least 8 characters. The zone is
+parked until it is replaced.
+
+### `credential.same`
+
+The reviewer token belongs to the author's account (the same token, or the same login when both
+were tested on entry). A review must come from a second account: replace the reviewer token.
+
+### `credential.shadowed`
+
+A credential is set both by a file under `secrets/` (or a variable) and in the vault, with different
+values. The file wins. Remove whichever you do not mean: the file (then `jumpmaster ctl secrets
+reload`), or the vault entry (`jumpmaster ctl secrets remove <name>`).
+
+### `vault.key`
+
+The vault's entries do not decrypt with the key `JM_VAULT_KEY_FILE` names (`secrets/vault_key`).
+The key and the data travel together: restore the key file from the backup taken with `data/`, or
+re-enter each credential. A server with a non-empty vault and no key file does not start.
+
 ### `config.secret-files`
 
 Every secret file must be readable by its owner only. A `fail` names the files others can read;

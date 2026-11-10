@@ -277,6 +277,20 @@ describe('jumpmaster init', () => {
     expect(readFileSync(join(dir, 'secrets', 'github_author_token'), 'utf8')).toBe(`${AUTHOR}\n`);
   });
 
+  test('init writes secrets/vault_key with mode 0600: 32 random bytes, base64url, kept on a rerun, never printed', async () => {
+    const dir = installDir();
+    const first = await run(dir, ['--repo', 'octo/demo']);
+    expect(first.code).toBe(0);
+    const key = join(dir, 'secrets', 'vault_key');
+    expect(mode(key)).toBe(0o600);
+    const text = readFileSync(key, 'utf8').trim();
+    expect(Buffer.from(text, 'base64url')).toHaveLength(32);
+    expect(first.all).toContain('secrets/vault_key');
+    expect(first.all).not.toContain(text);
+    expect((await run(dir, ['--repo', 'octo/demo', '--force'])).code).toBe(0);
+    expect(readFileSync(key, 'utf8').trim()).toBe(text);
+  });
+
   test('a missing author token is named by its file, and nothing is written', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'jm-init-'));
     const r = await run(dir, ['--repo', 'octo/demo']);

@@ -34,6 +34,9 @@ import type { ForgePair } from '../outbox.js';
 import { egressFor } from '../payloads.js';
 import { DETECT_FILES, detectPreset } from '../presets.js';
 import { dispatchGate } from '../usage.js';
+import type { Shadowed } from '../vault/credentials.js';
+import type { CredentialProblem } from '../vault/problems.js';
+import { KEY_CHANGED } from '../vault/vault.js';
 
 export type DoctorStatus = 'pass' | 'warn' | 'fail' | 'skip';
 
@@ -73,6 +76,14 @@ export type DoctorDeps = {
   readForge?(zoneId: string): Forge | undefined;
   /** The config store's status (mode, file problems, restart-pending settings), when there is one. */
   configStatus?: ConfigStatus;
+  /** The credentials as the store resolved them (Task 4); absent, the credential checks don't run. */
+  credentials?: {
+    problems: CredentialProblem[];
+    shadowed: Shadowed[];
+    vaultKey: { status: 'ok' | 'empty' | 'disabled' } | { status: 'mismatch'; names: string[] };
+    /** The Claude token's creation date (`credentialCreatedAt`), for `claude.token-age`. */
+    claudeTokenCreatedAt?: string;
+  };
 };
 
 /**
@@ -367,7 +378,8 @@ function secretFilesCheck(d: DoctorDeps): DoctorCheck {
 
 function tokenAgeCheck(d: DoctorDeps): DoctorCheck {
   const base = { id: 'claude.token-age', zoneId: null, doc: doc('claude-token') };
-  const created = d.config.claude.tokenCreatedAt;
+  // A token entered in the UI is dated by the vault; a file's by claude.tokenCreatedAt.
+  const created = d.credentials?.claudeTokenCreatedAt ?? d.config.claude.tokenCreatedAt;
   if (!created)
     return {
       ...base,
@@ -1799,6 +1811,94 @@ export async function zoneChecks(
   ];
 }
 
+const CREDENTIAL_KINDS = {
+  missing: {
+    id: 'credential.missing',
+    fix: 'Enter it under Settings, Credentials (or write its file under secrets/ and run jumpmaster ctl secrets reload); the zone stays parked until then.',
+  },
+  kind: {
+    id: 'credential.kind',
+    fix: 'Replace the token with a fine-grained one (github_pat_) limited to the repository, under Settings, Credentials.',
+  },
+  same: {
+    id: 'credential.same',
+    fix: 'The reviewer token must belong to a second account: replace it under Settings, Credentials.',
+  },
+} as const;
+
+/** One check per problem kind and zone: what parks the zone's dispatch, and its fix. */
+function credentialChecks(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck[] {
+  const problems = (d.credentials?.problems ?? []).filter((p) => p.zoneId === zone.id);
+  return (Object.keys(CREDENTIAL_KINDS) as (keyof typeof CREDENTIAL_KINDS)[]).map((kind) => {
+    const { id, fix } = CREDENTIAL_KINDS[kind];
+    const hits = problems.filter((p) => p.kind === kind);
+    if (hits.length === 0)
+      return {
+        id,
+        zoneId: zone.id,
+        status: 'pass',
+        summary: `no ${kind === 'missing' ? 'missing credential' : kind === 'kind' ? 'credential of the wrong kind' : 'shared account'} for ${zone.id}`,
+      };
+    return {
+      id,
+      zoneId: zone.id,
+      status: 'fail',
+      summary: hits.map((p) => `${p.credential}: ${p.message}`).join('; '),
+      fix,
+      doc: doc('tokens'),
+    };
+  });
+}
+
+function shadowedCheck(d: DoctorDeps): DoctorCheck {
+  const base = { id: 'credential.shadowed', zoneId: null, doc: doc('tokens') };
+  const list = d.credentials?.shadowed ?? [];
+  if (list.length === 0)
+    return {
+      ...base,
+      status: 'pass',
+      summary: 'no credential is set both in a file and in the vault',
+    };
+  return {
+    ...base,
+    status: 'warn',
+    summary: list
+      .map(
+        (s) =>
+          `${s.name} is set by ${s.path} (${s.fileFingerprint}) and in the vault (${s.vaultFingerprint}): the file is in use`,
+      )
+      .join('; '),
+    fix: 'Remove the one you do not mean: delete the file (then jumpmaster ctl secrets reload), or remove the vault entry with jumpmaster ctl secrets remove <name>.',
+  };
+}
+
+function vaultKeyCheck(d: DoctorDeps): DoctorCheck {
+  const base = { id: 'vault.key', zoneId: null, doc: doc('tokens') };
+  const k = d.credentials?.vaultKey ?? { status: 'disabled' as const };
+  if (k.status === 'mismatch')
+    return {
+      ...base,
+      status: 'fail',
+      summary: `${KEY_CHANGED} (${k.names.join(', ')})`,
+      fix: 'Put back the key file JM_VAULT_KEY_FILE names (secrets/vault_key) from the backup taken with the data, or re-enter each credential under Settings, Credentials.',
+    };
+  if (k.status === 'disabled')
+    return {
+      ...base,
+      status: 'skip',
+      summary:
+        'no vault key (JM_VAULT_KEY_FILE is unset): credentials come from files and the environment only',
+    };
+  return {
+    ...base,
+    status: 'pass',
+    summary:
+      k.status === 'empty'
+        ? 'the vault key is set; the vault is empty'
+        : 'every vault entry decrypts with the key',
+  };
+}
+
 /** Every check, global ones first, then each zone's (zones in parallel). */
 export async function runChecks(
   d: DoctorDeps,
@@ -1822,8 +1922,15 @@ export async function runChecks(
           g('config.restart', null, () => restartCheck(d.configStatus as ConfigStatus)),
         ]
       : []),
+    ...(d.credentials
+      ? [
+          g('credential.shadowed', null, () => shadowedCheck(d)),
+          g('vault.key', null, () => vaultKeyCheck(d)),
+        ]
+      : []),
   ]);
   const zones = d.config.dropZones.filter((z) => opts.zoneId === undefined || z.id === opts.zoneId);
   const perZone = await Promise.all(zones.map((z) => zoneChecks(d, z, sticks)));
-  return [...global, ...perZone.flat()];
+  const creds = d.credentials ? zones.flatMap((z) => credentialChecks(d, z)) : [];
+  return [...global, ...perZone.flat(), ...creds];
 }

@@ -14,6 +14,12 @@ import { z } from 'zod';
 import { ZONE_MODES } from './db/repo.js';
 import { IMAGE_LOCK_PATH, loadImageLock, resolveImage } from './presets.js';
 import { readSecret } from './secrets.js';
+import {
+  gateSecretName,
+  type Resolved,
+  type ResolvedCredential,
+  resolveCredentials,
+} from './vault/credentials.js';
 
 /** An image by digest (`name@sha256:<64 hex>`), the only form a signed zone runs. */
 const DIGEST_REF = /^[^\s@-][^\s@]*@sha256:[0-9a-f]{64}$/;
@@ -452,55 +458,36 @@ export function zoneSecrets(
 const GATE_SECRET_NAME = /^[A-Z][A-Z0-9_]*$/;
 const RESERVED_NAME =
   /^(GH_TOKEN|GITHUB_TOKEN|PATH|HOME|USER|SHELL|NODE_OPTIONS|NODE_PATH|(GIT|CLAUDE|ANTHROPIC|JM|LD|DYLD)_.*)$/;
-const MIN_SECRET_LENGTH = 8; // Shorter values can't be redacted without mangling ordinary output.
 
-const zoneSecretVar = (zoneId: string, name: string): string =>
-  `JM_ZONE_SECRET_${zoneId.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_${name}`;
-
-function loadZoneSecrets(
-  zones: readonly { id: string; gateSecrets: string[] }[],
-  env: NodeJS.ProcessEnv,
-): Record<string, Record<string, string>> {
-  const out: Record<string, Record<string, string>> = {};
-  for (const zone of zones) {
-    if (zone.gateSecrets.length === 0) continue;
+/**
+ * The config-only rules for a zone's gate secret names (the values are credentials, judged as
+ * problems at dispatch: vault/problems.ts).
+ */
+function gateSecretNameIssues(
+  zone: { id: string; gateSecrets: string[] },
+  at: string,
+): ConfigIssue[] {
+  const issues: ConfigIssue[] = [];
+  for (const name of zone.gateSecrets) {
     // NAME_FILE names the file holding NAME, so a zone can't also declare NAME_FILE as a secret.
-    for (const name of zone.gateSecrets) {
-      if (zone.gateSecrets.includes(`${name}_FILE`))
-        throw new Error(
-          `zone ${zone.id} declares gate secrets ${name} and ${name}_FILE; ${name}_FILE collides with the file variable for ${name}. Rename one.`,
-        );
-    }
-    const values: Record<string, string> = {};
-    for (const name of zone.gateSecrets) {
-      if (name === 'CI') {
-        throw new Error(
-          `zone ${zone.id}: gate secret CI is not allowed; gates run with CI=true, and the zone's "gateCi": false turns it off`,
-        );
-      }
-      if (!GATE_SECRET_NAME.test(name) || RESERVED_NAME.test(name)) {
-        throw new Error(`Invalid gate secret name: ${name}`);
-      }
-      const variable = zoneSecretVar(zone.id, name);
-      const value = readSecret(env, variable);
-      if (!value) throw new Error(`Missing required environment variables: ${variable}`);
-      if (value.length < MIN_SECRET_LENGTH) {
-        throw new Error(`${variable} must be at least ${MIN_SECRET_LENGTH} characters`);
-      }
-      values[name] = value;
-    }
-    Object.defineProperty(out, zone.id, { value: values, enumerable: true, writable: true });
+    if (zone.gateSecrets.includes(`${name}_FILE`))
+      issues.push({
+        path: at,
+        message: `zone ${zone.id} declares gate secrets ${name} and ${name}_FILE; ${name}_FILE collides with the file variable for ${name}. Rename one.`,
+      });
+    if (name === 'CI')
+      issues.push({
+        path: at,
+        message: `zone ${zone.id}: gate secret CI is not allowed; gates run with CI=true, and the zone's "gateCi": false turns it off`,
+      });
+    else if (!GATE_SECRET_NAME.test(name) || RESERVED_NAME.test(name))
+      issues.push({ path: at, message: `Invalid gate secret name: ${name}` });
   }
-  return out;
+  return issues;
 }
 
-const SECRET_VARS = {
-  claudeToken: 'JM_CLAUDE_TOKEN',
-  githubAuthorToken: 'JM_GITHUB_AUTHOR_TOKEN',
-  githubReviewerToken: 'JM_GITHUB_REVIEWER_TOKEN',
-  joinToken: 'JM_JOIN_TOKEN',
-  operatorToken: 'JM_OPERATOR_TOKEN',
-} as const;
+/** The machine secrets: generated for the install, never entered in the UI, read from variables. */
+const MACHINE_VARS = { joinToken: 'JM_JOIN_TOKEN', operatorToken: 'JM_OPERATOR_TOKEN' } as const;
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -599,6 +586,7 @@ export function parseEditable(
     if (seen.has(zone.id))
       issues.push({ path: `dropZones.${i}.id`, message: `duplicate zone id: ${zone.id}` });
     seen.add(zone.id);
+    issues.push(...gateSecretNameIssues(zone, `dropZones.${i}.gateSecrets`));
   }
   // A zone without an explicit image runs its preset's: the release lock's digest when the
   // image ships one, else the local `:dev` build.
@@ -692,6 +680,11 @@ export function splitConfigFile(
   };
 }
 
+/**
+ * The config file with its secrets, as `ctl` tools and tests read it: the credentials from their
+ * variables and the files named for them under `JM_SECRETS_DIR` (no vault). No credential rule
+ * refuses it: those are dispatch refusals (vault/problems.ts).
+ */
 export function loadConfig(
   path: string,
   rawEnv: NodeJS.ProcessEnv,
@@ -703,82 +696,86 @@ export function loadConfig(
     devImages: rawEnv.JM_DEV_IMAGES === '1',
   });
   if (!parsed.ok) throw new Error(`Invalid config ${path}: ${formatIssues(parsed.issues)}`);
-  return { ...boot, ...parsed.config, secrets: loadSecrets(rawEnv, parsed.config.dropZones) };
+  const zones = parsed.config.dropZones;
+  const resolved = resolveCredentials(rawEnv, rawEnv.JM_SECRETS_DIR || undefined, 'disabled', {
+    gateSecrets: gateSecretsOf(zones),
+  });
+  return {
+    ...boot,
+    ...parsed.config,
+    secrets: assembleSecrets(resolved, loadMachineSecrets(rawEnv, resolved), zones),
+  };
+}
+
+/** Every gate secret the zones declare, for `resolveCredentials`. */
+export const gateSecretsOf = (zones: readonly { id: string; gateSecrets: string[] }[]) =>
+  zones.flatMap((z) => z.gateSecrets.map((name) => ({ zoneId: z.id, name })));
+
+/**
+ * Reads every install-wide secret once (`NAME` or `NAME_FILE`, and the credential files named
+ * under `secretsDir`) and throws naming the first one that cannot be read, or that is set both
+ * ways. Run before the data directory is touched, so an unreadable secret file is reported by
+ * name rather than as a database error, as M4's loader did.
+ */
+export function preflightSecrets(rawEnv: NodeJS.ProcessEnv, secretsDir?: string): void {
+  for (const name of Object.values(MACHINE_VARS)) readSecret(rawEnv, name);
+  // Warnings (the /run/secrets fallback) are said once, by the store.
+  resolveCredentials(rawEnv, secretsDir, 'disabled', { warn: () => {} });
 }
 
 /**
- * Reads every install-wide secret variable once (`NAME` or `NAME_FILE`) and throws naming the
- * first one that cannot be read, or that is set both ways. Run before the data directory is
- * touched, so an unreadable secret file is reported by name rather than as a database error, as
- * M4's loader did. Whether each is required depends on the zones, which `loadSecrets` judges later.
+ * The join and operator tokens, required at every start, with the operator token's rules: at
+ * least 32 characters and different from every other secret. Throws naming the variable.
  */
-export function preflightSecrets(rawEnv: NodeJS.ProcessEnv): void {
-  for (const name of [...Object.values(SECRET_VARS), 'JM_GITHUB_READ_TOKEN'])
-    readSecret(rawEnv, name);
-}
-
-/**
- * The secrets from the environment (`NAME` or `NAME_FILE`), with the rules that span config and
- * credentials (M4.5 Task 4 moves those to dispatch refusals). Throws naming the variable, never a
- * value.
- */
-export function loadSecrets(
+export function loadMachineSecrets(
   rawEnv: NodeJS.ProcessEnv,
-  zones: readonly DropZoneConfig[],
-): Config['secrets'] {
-  // Every secret may come from NAME or from the file named by NAME_FILE (never both).
-  const env: Record<string, string | undefined> = {};
-  for (const name of [...Object.values(SECRET_VARS), 'JM_GITHUB_READ_TOKEN'])
-    env[name] = readSecret(rawEnv, name);
-  // The reviewer token is optional only when no zone has a reviewer identity.
-  const allStarter = zones.length > 0 && zones.every((z) => z.identity === 'starter');
-  const missing = Object.values(SECRET_VARS).filter(
-    (name) => !env[name] && !(allStarter && name === SECRET_VARS.githubReviewerToken),
-  );
-  if (missing.length > 0)
+  resolved?: Resolved,
+): { joinToken: string; operatorToken: string } {
+  const joinToken = readSecret(rawEnv, MACHINE_VARS.joinToken);
+  const operatorToken = readSecret(rawEnv, MACHINE_VARS.operatorToken);
+  const missing = Object.values(MACHINE_VARS).filter((v) => !readSecret(rawEnv, v));
+  if (missing.length > 0 || !joinToken || !operatorToken)
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
-  if (
-    env[SECRET_VARS.githubReviewerToken] !== undefined &&
-    env[SECRET_VARS.githubReviewerToken] === env[SECRET_VARS.githubAuthorToken]
-  )
-    throw new Error('JM_GITHUB_REVIEWER_TOKEN must differ from JM_GITHUB_AUTHOR_TOKEN');
-  // Starter mode merges with the author token: one limited to this repository, never a classic one.
-  const starters = zones.filter((z) => z.identity === 'starter').map((z) => z.id);
-  if (starters.length > 0 && !env[SECRET_VARS.githubAuthorToken]?.startsWith('github_pat_'))
-    throw new Error(
-      `starter identity (zone(s): ${starters.join(', ')}) requires a fine-grained JM_GITHUB_AUTHOR_TOKEN (github_pat_), limited to the repository, with no Workflows or Administration permission. On a personal repository, create it with your own account (the owner) and set authorMayBeAdmin: true on the zone: the owner is always an admin, and the fine-grained token is what keeps it from changing the ruleset`,
-    );
-  // An admin's classic token could edit the ruleset. A fine-grained one can be limited to one repo.
-  if (
-    zones.some((z) => z.authorMayBeAdmin) &&
-    !env[SECRET_VARS.githubAuthorToken]?.startsWith('github_pat_')
-  )
-    throw new Error('authorMayBeAdmin requires a fine-grained JM_GITHUB_AUTHOR_TOKEN');
-  const operatorToken = env[SECRET_VARS.operatorToken] as string;
   if (operatorToken.length < 32)
     throw new Error('JM_OPERATOR_TOKEN must be at least 32 characters');
-  const others = Object.values(SECRET_VARS)
-    .filter((name) => name !== SECRET_VARS.operatorToken)
-    .map((name) => env[name])
-    .filter((v) => v !== undefined);
+  const others = [
+    joinToken,
+    ...Object.values(resolved ?? {}).map((r) => (r as ResolvedCredential).value),
+  ];
   if (others.includes(operatorToken))
     throw new Error('JM_OPERATOR_TOKEN must differ from every other token');
-  const readToken = env.JM_GITHUB_READ_TOKEN;
-  const needsRead = zones.filter((z) => z.reviewReadToken).map((z) => z.id);
-  if (needsRead.length > 0 && !readToken)
-    throw new Error(
-      `JM_GITHUB_READ_TOKEN is required because reviewReadToken is true for zone(s): ${needsRead.join(', ')}`,
-    );
-  const zoneValues = loadZoneSecrets(zones, rawEnv);
+  return { joinToken, operatorToken };
+}
+
+/**
+ * `config.secrets` from the resolved credentials and the machine secrets. A missing Claude or
+ * author token is the empty string here (`secretList` skips it): the zones that need it are
+ * parked with the problem as their reason, so no drop or forge write uses it.
+ */
+export function assembleSecrets(
+  resolved: Resolved,
+  machine: { joinToken: string; operatorToken: string },
+  zones: readonly { id: string; gateSecrets: string[] }[],
+): Config['secrets'] {
+  const zoneValues: Record<string, Record<string, string>> = {};
+  for (const z of zones) {
+    if (z.gateSecrets.length === 0) continue;
+    const values: Record<string, string> = {};
+    for (const name of z.gateSecrets) {
+      const v = resolved[gateSecretName(z.id, name)]?.value;
+      if (v) values[name] = v;
+    }
+    Object.defineProperty(zoneValues, z.id, { value: values, enumerable: true, writable: true });
+  }
+  const reviewer = resolved.githubReviewerToken.value;
+  const read = resolved.githubReadToken.value;
   return {
-    claudeToken: env[SECRET_VARS.claudeToken] as string,
-    githubAuthorToken: env[SECRET_VARS.githubAuthorToken] as string,
-    ...(env[SECRET_VARS.githubReviewerToken]
-      ? { githubReviewerToken: env[SECRET_VARS.githubReviewerToken] }
-      : {}),
-    joinToken: env[SECRET_VARS.joinToken] as string,
-    operatorToken,
-    ...(readToken ? { githubReadToken: readToken } : {}),
+    claudeToken: resolved.claudeToken.value ?? '',
+    githubAuthorToken: resolved.githubAuthorToken.value ?? '',
+    ...(reviewer ? { githubReviewerToken: reviewer } : {}),
+    joinToken: machine.joinToken,
+    operatorToken: machine.operatorToken,
+    ...(read ? { githubReadToken: read } : {}),
     ...(Object.keys(zoneValues).length > 0 ? { zoneSecrets: zoneValues } : {}),
   };
 }

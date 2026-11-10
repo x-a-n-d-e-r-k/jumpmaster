@@ -12,9 +12,9 @@ import {
   setZoneMode,
   stampStick,
 } from '../db/repo.js';
-import { ago, NOW, one, PG, world } from '../test/doctorWorld.js';
+import { AUTHOR_TOKEN, ago, NOW, one, PG, world } from '../test/doctorWorld.js';
 import { okProbes } from '../test/fakes.js';
-import { installDocUrl } from './checks.js';
+import { type DoctorDeps, installDocUrl } from './checks.js';
 import { processEnv } from './run.js';
 
 describe('a healthy install', () => {
@@ -1223,4 +1223,123 @@ describe('config store checks', () => {
       fix: expect.stringContaining('docker compose restart jumpmaster'),
     });
   });
+});
+
+describe('credential checks (Task 4)', () => {
+  const problem = (kind: 'missing' | 'kind' | 'same', credential: string, message: string) => ({
+    zoneId: 'main',
+    kind,
+    credential: credential as never,
+    message,
+  });
+  const creds = (o: Partial<NonNullable<DoctorDeps['credentials']>> = {}) => ({
+    problems: [],
+    shadowed: [],
+    vaultKey: { status: 'empty' as const },
+    ...o,
+  });
+
+  test('without credential information the checks are not run', async () => {
+    const ids = (await world().run()).map((c) => c.id);
+    for (const id of [
+      'credential.missing',
+      'credential.kind',
+      'credential.same',
+      'credential.shadowed',
+      'vault.key',
+    ])
+      expect(ids).not.toContain(id);
+  });
+
+  test('a credential change that invalidates a zone fails credential.kind or credential.same for that zone', async () => {
+    const w = world();
+    w.deps.credentials = creds();
+    let checks = await w.run();
+    for (const id of ['credential.missing', 'credential.kind', 'credential.same'])
+      expect(one(checks, id)).toMatchObject({ zoneId: 'main', status: 'pass' });
+    w.deps.credentials = creds({
+      problems: [
+        problem(
+          'kind',
+          'githubAuthorToken',
+          'zone main is a starter zone, which merges with the author token',
+        ),
+        problem(
+          'same',
+          'githubReviewerToken',
+          "the reviewer token belongs to the author's account (bot)",
+        ),
+      ],
+    });
+    checks = await w.run();
+    expect(one(checks, 'credential.kind')).toMatchObject({
+      zoneId: 'main',
+      status: 'fail',
+      summary: 'githubAuthorToken: zone main is a starter zone, which merges with the author token',
+    });
+    expect(one(checks, 'credential.same')).toMatchObject({ status: 'fail' });
+    expect(one(checks, 'credential.missing').status).toBe('pass');
+  });
+
+  test('credential.shadowed warns naming the file and both fingerprints, never a value', async () => {
+    const w = world();
+    w.deps.credentials = creds({
+      shadowed: [
+        {
+          name: 'githubAuthorToken',
+          path: '/secrets/github_author_token',
+          fileFingerprint: 'aaaa1111',
+          vaultFingerprint: 'bbbb2222',
+        },
+      ],
+    });
+    const c = one(await w.run(), 'credential.shadowed');
+    expect(c).toMatchObject({ status: 'warn', zoneId: null });
+    expect(c.summary).toBe(
+      'githubAuthorToken is set by /secrets/github_author_token (aaaa1111) and in the vault (bbbb2222): the file is in use',
+    );
+    expect(JSON.stringify(c)).not.toContain(AUTHOR_TOKEN);
+  });
+
+  test('a wrong key fails vault.key, naming no value', async () => {
+    const w = world();
+    w.deps.credentials = creds({ vaultKey: { status: 'mismatch', names: ['claudeToken'] } });
+    expect(one(await w.run(), 'vault.key')).toMatchObject({
+      status: 'fail',
+      summary:
+        'the vault key changed: restore the key file or re-enter each credential (claudeToken)',
+    });
+    w.deps.credentials = creds({ vaultKey: { status: 'disabled' } });
+    expect(one(await w.run(), 'vault.key')).toMatchObject({ status: 'skip' });
+    w.deps.credentials = creds({ vaultKey: { status: 'ok' } });
+    expect(one(await w.run(), 'vault.key').status).toBe('pass');
+  });
+
+  test('a Claude token set in the UI dates claude.token-age from the vault, not claude.tokenCreatedAt', async () => {
+    const w = world();
+    w.deps.credentials = creds({ claudeTokenCreatedAt: NOW.toISOString().slice(0, 10) });
+    expect(one(await w.run(), 'claude.token-age')).toMatchObject({ status: 'pass' });
+  });
+});
+
+test('config.secret-files checks every file under the secrets directory, the four credential names included', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'jm-secrets-'));
+  for (const [name, mode] of [
+    ['claude_token', 0o644],
+    ['github_author_token', 0o600],
+    ['vault_key', 0o600],
+  ] as const) {
+    writeFileSync(join(dir, name), 'x', { mode });
+    chmodSync(join(dir, name), mode);
+  }
+  const env = processEnv({ JM_SECRETS_DIR: dir, JM_JOIN_TOKEN_FILE: join(dir, 'vault_key') });
+  expect(env.secretFiles).toEqual([
+    { variable: 'JM_JOIN_TOKEN_FILE', path: join(dir, 'vault_key'), mode: 0o600 },
+    { variable: 'secrets/claude_token', path: join(dir, 'claude_token'), mode: 0o644 },
+    {
+      variable: 'secrets/github_author_token',
+      path: join(dir, 'github_author_token'),
+      mode: 0o600,
+    },
+  ]);
 });
