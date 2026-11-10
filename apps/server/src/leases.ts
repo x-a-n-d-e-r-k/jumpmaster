@@ -67,8 +67,8 @@ const NOT_EXCLUDED = 'AND drop_zone_id NOT IN (SELECT value FROM json_each(@excl
 /**
  * Leases the oldest queued drop the usage gate allows, bumping its epoch and stamping started_at.
  * `probe` leases exactly one drop (preferring one not on the pause's cause item) and records it.
- * `credits_resume` leases only the resumed work item's drops; with none queued, nothing. A Resume
- * with no work item (a crew drop's) is never `credits_resume`: dispatchGate resumes it open. The gate is required: a caller that forgets it must not lease while stopped. All time
+ * `credits_resume` leases only the resumed work item's drops; with none queued, nothing. A stop
+ * with no work item (a crew drop's) offers no Resume (credits.ts), so none binds to nothing. The gate is required: a caller that forgets it must not lease while stopped. All time
  * comes from `now`. Drops of the `exclude` zones (ones the stick can't run) are never picked, under
  * any gate: they stay queued, untouched, for a capable stick.
  */

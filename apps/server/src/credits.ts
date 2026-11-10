@@ -219,8 +219,10 @@ export function noteOverage(
   /** When the drop reported it (a live event's `ts`); defaults to `now`. */
   reportedAt: Date = now,
 ): boolean {
-  // A doctor drop observes usage (its report still feeds the usage state) but never becomes the
-  // credits stop: it has no work item, so a Resume bound to it would resume nothing.
+  // A doctor drop observes usage (its report still feeds the usage state via ingestRateLimit) but
+  // never touches the credits stop: it has no work item, so it could only bind a Resume to nothing.
+  // So it neither starts a stop nor ends a credits probe: under the probe gate a doctor drop never
+  // leases, and only the probe drop's own in-plan report ends probing.
   if (drop.role === 'doctor') return false;
   if (data.isUsingOverage === false && outcome === null) {
     db.transaction(() => {
@@ -347,6 +349,10 @@ export function resumeAfterCredits(db: Db, dropId: string, now: Date): void {
     if (!creditsStopInForce(u, now) || u.overageDropId !== dropId) {
       throw new Error('stale: not the current credits stop');
     }
+    // Its briefing offers no Resume; one ruled on an older briefing must not bind nothing.
+    if ((creditSignal(u)?.workItemId ?? null) === null) {
+      throw new Error('this credits stop came from a drop with no work item: nothing to resume');
+    }
     setUsageState(
       db,
       {
@@ -400,6 +406,10 @@ function stopBriefing(db: Db, u: UsageStateRow, now: Date): NewBriefing {
   const win = (label: string, w: { utilization: number; resetsAt?: string } | undefined) =>
     `${label}: ${pct(w?.utilization)}, resets ${w?.resetsAt ?? 'unknown'}`;
   const horizon = resumeHorizon(u, now);
+  // A stop from a drop with no work item (a crew drop: a doctor drop never stops) has no follow-on
+  // drops for a Resume to run, so it offers none rather than one that would lease nothing.
+  const workItemId = s ? s.workItemId : (getDrop(db, dropId)?.workItemId ?? null);
+  const resumable = workItemId !== null;
   const lines = [
     `Drop ${dropId} (${role}) reported running on usage credits at ${u.overageStoppedAt}; outcome: ${s?.outcome ?? 'still running'}.`,
     ...(s?.secondDrop ? ['This stop was confirmed by a second drop during a Resume.'] : []),
@@ -408,13 +418,21 @@ function stopBriefing(db: Db, u: UsageStateRow, now: Date): NewBriefing {
     win('7-day window', rl?.unifiedWindows?.seven_day),
     `Reported limit: ${rl?.rateLimitType ?? 'not reported'}, resets ${rl?.resetsAt ?? 'unknown'}; account overage status: ${rl?.overageStatus ?? 'not reported'}.`,
     '',
-    'Nothing leases, reviews included; running drops finish. Run on credits buys usage credits for',
-    horizon.atReset
-      ? `this drop's work item until the 5-hour window resets (${minute(horizon.until)}): only its`
-      : "this drop's work item for at most five hours from the ruling: only its",
-    'follow-on drops (review, heal, resolve) lease; nothing else does, and no new work is queued.',
-    'Another drop on credits stops dispatch again. When the time is up, one drop probes until a',
-    'drop reports running in plan.',
+    'Nothing leases, reviews included; running drops finish.',
+    ...(resumable
+      ? [
+          'Run on credits buys usage credits for',
+          horizon.atReset
+            ? `this drop's work item until the 5-hour window resets (${minute(horizon.until)}): only its`
+            : "this drop's work item for at most five hours from the ruling: only its",
+          'follow-on drops (review, heal, resolve) lease; nothing else does, and no new work is queued.',
+          'Another drop on credits stops dispatch again. When the time is up, one drop probes until a',
+          'drop reports running in plan.',
+        ]
+      : [
+          `This stop came from a crew drop (${role}), which has no follow-on work: there is nothing to run on credits.`,
+          `Work resumes when the window resets at ${u.overageUntil}.`,
+        ]),
   ];
   return {
     zoneId: s?.zoneId ?? getDrop(db, dropId)?.dropZoneId ?? '',
@@ -423,13 +441,17 @@ function stopBriefing(db: Db, u: UsageStateRow, now: Date): NewBriefing {
     decision: `Dispatch is stopped: a drop ran on usage credits. It resumes by itself at ${u.overageUntil}, when the exhausted window resets.`,
     why: lines.join('\n'),
     options: [
-      {
-        id: 'resume',
-        label: horizon.atReset
-          ? `Run on credits now (until ${minute(horizon.until)})`
-          : 'Run on credits now (at most 5 hours)',
-        effect: 'resume_after_credits',
-      },
+      ...(resumable
+        ? [
+            {
+              id: 'resume',
+              label: horizon.atReset
+                ? `Run on credits now (until ${minute(horizon.until)})`
+                : 'Run on credits now (at most 5 hours)',
+              effect: 'resume_after_credits' as const,
+            },
+          ]
+        : []),
       { id: 'noted', label: 'Noted', effect: 'none' },
     ],
     onHold: 'All dispatch',

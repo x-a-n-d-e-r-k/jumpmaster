@@ -190,8 +190,9 @@ probe with no report hands the slot to the next drop); a probe on credits stops 
 credits lasts until the five-hour window resets when that is the exhausted window (the time is
 shown), otherwise five hours. During that time only the drop's own work item's follow-on drops
 (review, heal, resolve) lease; nothing else leases and no new work is queued, so the time idles
-until that work is queued (a Resume on a crew drop, which has no work item, resumes dispatch
-open instead). Any other drop on credits
+until that work is queued. A stop from a crew drop, which has no work item and so no follow-on
+work, offers no Run on credits: its briefing says so, and work resumes when the window resets.
+Any other drop on credits
 stops dispatch again, and when the time is up one drop probes as above. Set
 `usage.stopOnOverage: false` and restart the server to keep the old behaviour (a briefing only);
 the config is read once at start, and a stop or probe already recorded then no longer holds. A drop that outlives its lease (a server outage longer than the

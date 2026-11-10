@@ -494,7 +494,7 @@ describe('review fixes', () => {
     expect(getUsageState(db).overageResumeUntil).toBe(iso(MIN + 5 * H));
 
     const b = zoneWorld();
-    const d = { id: 'e1', dropZoneId: 'main', workItemId: null, role: 'x' } as Drop;
+    const d = { id: 'e1', dropZoneId: 'main', workItemId: b.item(9), role: 'implement' } as Drop;
     noteOverage(b.db, cfg, d, fiveHourOut(), null, t0);
     creditsPass(b.db, t0);
     const [open] = listBriefings(b.db, { state: 'open' });
@@ -598,7 +598,7 @@ describe('review fixes', () => {
     expect(gateQueuesImplement(dispatchGate(db, cfg, now))).toBe(false);
   });
 
-  test("N1: a Resume of a crew drop's stop (no work item) resumes open, not a queue that leases nothing", () => {
+  test("N1: a crew drop's stop offers no Run on credits: it has no follow-on work, and says so", () => {
     insertStick(db, { id: 's1', name: 's', tokenHash: 'h', slots: 4 });
     noteOverage(db, cfg, drop('c1', 'crew-lead'), onCredits(), null, t0);
     insertDrop(db, {
@@ -609,11 +609,40 @@ describe('review fixes', () => {
       state: 'queued',
     });
     creditsPass(db, t0);
-    ruleBriefing(db, openStop()[0]?.id ?? -1, 'resume', '', t0);
-    creditsPass(db, at(MIN));
-    expect(getUsageState(db).overageResumeWorkItemId).toBeNull();
-    expect(dispatchGate(db, cfg, at(MIN))).toBe('open');
-    expect(leaseNextDrop(db, 's1', at(MIN), dispatchGate(db, cfg, at(MIN)))?.dropId).toBe('q');
+    const [b] = openStop();
+    expect(b?.options.map((o) => o.id)).toEqual(['noted']);
+    expect(b?.why).toContain(
+      'This stop came from a crew drop (crew-lead), which has no follow-on work: there is nothing to run on credits.',
+    );
+    expect(b?.why).toContain('Work resumes when the window resets at 2026-03-05T10:00:00.000Z.');
+    expect(b?.why).not.toContain('Run on credits buys');
+    // A Resume ruled on an older briefing that still offered it is refused, not a silent no-op.
+    expect(() => resumeAfterCredits(db, 'c1', at(MIN))).toThrow(/no work item/);
+    expect(dispatchGate(db, cfg, at(MIN))).toBe('stopped');
+    expect(leaseNextDrop(db, 's1', at(MIN), dispatchGate(db, cfg, at(MIN)))).toBeNull();
+  });
+
+  test('N1b: a Resume row bound to no work item (from before this check) still leases nothing', () => {
+    insertStick(db, { id: 's1', name: 's', tokenHash: 'h', slots: 4 });
+    insertDrop(db, {
+      id: 'q',
+      dropZoneId: 'main',
+      workItemId: w.item(2),
+      role: 'review',
+      state: 'queued',
+    });
+    setUsageState(
+      db,
+      {
+        overageResumeUntil: iso(H),
+        overageResumeDropId: 'c1',
+        overageResumeWorkItemId: null,
+        overageResumedAt: iso(0),
+      },
+      t0,
+    );
+    expect(dispatchGate(db, cfg, at(MIN))).toBe('credits_resume');
+    expect(leaseNextDrop(db, 's1', at(MIN), 'credits_resume')).toBeNull();
   });
 
   test('N2: the probe drop finishing off credits ends probing', () => {
