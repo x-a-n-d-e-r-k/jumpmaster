@@ -282,9 +282,9 @@ docker compose exec jumpmaster jumpmaster ctl doctor <zone> --drop
 ```
 
 Wait for it to finish: usually a few minutes, longer when the gates install many packages. While
-it runs, the doctor's `zone.doctor-drop` line says `doctor drop … is queued for N minutes` or
-`… is running`; once it has finished, the line reports what the drop proved (a `PASS`) or what
-failed. Then run the doctor again:
+it runs, the doctor's `zone.doctor-drop` line says `doctor drop … is queued for N minutes`, with
+what it waits for, or `… is running`; once it has finished, the line reports what the drop proved
+(a `PASS`) or what failed. Then run the doctor again:
 
 ```sh
 docker compose exec jumpmaster jumpmaster ctl doctor
@@ -619,8 +619,12 @@ agent's Claude token reaches `api.anthropic.com`.
 `jumpmaster ctl doctor <zone> --drop` asks for one doctor drop: on the zone's real stick, image,
 egress and services, it clones the default branch, starts the services, runs the gates and makes
 one Claude call. It holds no write token, never writes to GitHub, and spends one turn of usage, so
-it runs only when you ask (`--cancel` withdraws a queued one). The zone must be active. Doctor
-check: `zone.doctor-drop`.
+it runs only when you ask (`--cancel` withdraws a queued one). The zone must be active. It leases
+after any other queued work, and it still runs near the usage limit (see [Usage](#usage)). It waits
+while usage is paused at the limit, during a credits stop, while the kill switch is on, and until a
+stick that can run the zone is free. The reply to `--drop`, and the `zone.doctor-drop` line while it
+is queued, say which: `held: usage paused until …`, `held: credits stop`, `waiting for a stick that
+can run zone …`, or `waiting for a free stick slot`. Doctor check: `zone.doctor-drop`.
 
 ## Stick
 
@@ -674,7 +678,7 @@ that user (`ls -ln secrets`). Doctor check: `config.uid`.
 ## Usage
 
 Jumpmaster watches your Claude usage. Near the limit it runs only finishing work (review, heal,
-resolve); at the limit it pauses until the window resets; if a drop runs on extra-usage credits it
+resolve) and doctor drops you asked for; at the limit it pauses until the window resets; if a drop runs on extra-usage credits it
 stops dispatch and raises a briefing for you to rule on (`/briefings`). Doctor check: `usage.gate`.
 
 ## Crew

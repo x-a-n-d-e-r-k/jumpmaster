@@ -110,7 +110,10 @@ export function leaseNextDrop(
       }
       case 'open':
       case 'finishing_only': {
-        const roleFilter = gate === 'finishing_only' ? ` AND role IN ${FINISHING}` : '';
+        // Above the throttle only finishing work starts, and doctor drops: an operator-asked
+        // readiness check with one small Claude call, still last by ROLE_CLASS.
+        const roleFilter =
+          gate === 'finishing_only' ? ` AND (role IN ${FINISHING} OR role = 'doctor')` : '';
         next = db
           .prepare(
             `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE} ${NOT_EXCLUDED}${roleFilter}

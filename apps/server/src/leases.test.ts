@@ -254,13 +254,13 @@ describe('doctor drops', () => {
       createdAt: plus(t0, at).toISOString(),
     });
 
-  test('a doctor drop leases after crew drops and never while paused, observe, killed or usage-gated', () => {
+  test('a doctor drop leases after crew drops and never while paused, observe, killed or usage-paused', () => {
     // The oldest is the doctor drop; it still goes last.
     queue('doc', 'doctor', -9000);
     queue('c1', 'crew-lead', 5000);
     expect(leaseNextDrop(db, 's1', t0, 'open')?.dropId).toBe('d1');
     expect(leaseNextDrop(db, 's1', t0, 'open')?.dropId).toBe('c1');
-    for (const gate of ['closed', 'stopped', 'finishing_only', 'probe', 'credits_resume'] as const)
+    for (const gate of ['closed', 'stopped', 'probe', 'credits_resume'] as const)
       expect(leaseNextDrop(db, 's1', t0, gate)).toBeNull();
     for (const mode of ['paused', 'observe']) {
       db.prepare(
@@ -273,6 +273,36 @@ describe('doctor drops', () => {
     expect(leaseNextDrop(db, 's1', t0, 'open')).toBeNull();
     setKilled(db, false, t0);
     expect(leaseNextDrop(db, 's1', t0, 'open')?.dropId).toBe('doc');
+  });
+
+  test('under finishing_only a doctor drop leases after finishing work; implement and crew wait', () => {
+    // An operator-requested readiness check with one small Claude call: the throttle holds new
+    // work, not the check that tells the operator whether the zone can run it.
+    queue('doc', 'doctor', -9000);
+    queue('c1', 'crew-lead', -8000);
+    const item = upsertWorkItem(db, {
+      dropZoneId: 'main',
+      issueNumber: 77,
+      title: 't',
+      body: 'b',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    insertDrop(db, {
+      id: 'r1',
+      dropZoneId: 'main',
+      workItemId: item.id,
+      role: 'review',
+      state: 'queued',
+      createdAt: plus(t0, 5000).toISOString(),
+    });
+    expect(leaseNextDrop(db, 's1', t0, 'finishing_only')?.dropId).toBe('r1');
+    expect(leaseNextDrop(db, 's1', t0, 'finishing_only')?.dropId).toBe('doc');
+    expect(leaseNextDrop(db, 's1', t0, 'finishing_only')).toBeNull();
+    expect(getDrop(db, 'd1')?.state).toBe('queued');
+    expect(getDrop(db, 'c1')?.state).toBe('queued');
   });
 
   test('the usage probe never selects a doctor drop', () => {

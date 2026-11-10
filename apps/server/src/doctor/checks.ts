@@ -346,6 +346,40 @@ const liveSticks = (sticks: Stick[], now: Date): Stick[] =>
     (s) => s.lastSeenAt !== null && now.getTime() - Date.parse(s.lastSeenAt) <= STICK_LIVE_MS,
   );
 
+/**
+ * Why a queued doctor drop in `zone` has not started, from what the lease route goes by: the kill
+ * switch, the zone's mode, the usage gate (dispatchGate) and the live sticks' capabilities. A doctor
+ * drop leases under `open` and `finishing_only`, never as the usage probe.
+ */
+export function doctorDropWait(db: Db, config: Config, zone: DropZoneConfig, now: Date): string {
+  if (isKilled(db)) return 'held: the kill switch is engaged (jumpmaster ctl unkill)';
+  const mode = getZoneMode(db, zone.id, zone.mode);
+  if (mode !== 'active')
+    return `held: zone ${zone.id} is ${mode} (jumpmaster ctl resume ${zone.id})`;
+  const gate = dispatchGate(db, config.usage, now);
+  const u = getUsageState(db);
+  switch (gate) {
+    case 'stopped':
+      return `held: credits stop (a drop ran on usage credits); nothing new runs until the credits briefing is ruled on${u.overageUntil ? ` or the window resets at ${u.overageUntil}` : ''}`;
+    case 'closed':
+      return `held: usage paused until ${u.pausedUntil ?? u.probeNotBefore}`;
+    case 'probe':
+      return 'held: the usage limit was hit, and a doctor drop is never the probe; it starts once a work drop shows the limit has cleared';
+    case 'credits_resume':
+      return `held: resuming after a credits stop, only the bound work item runs until ${u.overageResumeUntil}`;
+    case 'open':
+    case 'finishing_only':
+      break;
+    default:
+      return `held: unknown usage gate ${String(gate)}`;
+  }
+  const need = zoneRequirements(zone, config);
+  const capable = liveSticks(listSticks(db), now).filter((s) => missingFor(s, need).length === 0);
+  if (capable.length === 0)
+    return `waiting for a stick that can run zone ${zone.id} (see stick.capabilities)`;
+  return 'waiting for a free stick slot';
+}
+
 function stickSeenCheck(d: DoctorDeps, sticks: Stick[]): DoctorCheck {
   const base = { id: 'stick.seen', zoneId: null, doc: doc('stick') };
   const now = d.now();
@@ -1474,8 +1508,8 @@ function doctorDropCheck(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck {
     return {
       ...at,
       status: 'skip',
-      summary: `doctor drop ${row.id} is ${row.state === 'queued' ? `queued for ${Math.round((d.now().getTime() - Date.parse(row.createdAt)) / 60_000)} minutes` : row.state} (asked for at ${row.createdAt})`,
-      fix: `Run the doctor again when it finishes. A queued drop waits for a free stick that can run this zone (see stick.capabilities and usage.gate); to give up on it: jumpmaster ctl doctor ${zone.id} --cancel`,
+      summary: `doctor drop ${row.id} is ${row.state === 'queued' ? `queued for ${Math.round((d.now().getTime() - Date.parse(row.createdAt)) / 60_000)} minutes, ${doctorDropWait(d.db, d.config, zone, d.now())}` : row.state} (asked for at ${row.createdAt})`,
+      fix: `Run the doctor again when it finishes. To give up on a queued drop: jumpmaster ctl doctor ${zone.id} --cancel`,
     };
   let result: DropResult | null = null;
   try {

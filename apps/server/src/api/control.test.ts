@@ -12,6 +12,7 @@ import {
   insertDrop,
   isKilled,
   setKilled,
+  setUsageState,
   setWorkItemState,
   setZoneMode,
   upsertDropZone,
@@ -356,6 +357,7 @@ describe('doctor routes', () => {
 
     const queued = await ask();
     expect(queued?.statusCode).toBe(202);
+    expect(queued?.json().next).toContain('waiting for a free stick slot');
     const { dropId } = queued?.json() as { dropId: string };
     expect(doctorDrops()).toEqual([{ id: dropId, state: 'queued', item: null }]);
     // One per zone: a second is refused while the first is active.
@@ -367,6 +369,14 @@ describe('doctor routes', () => {
     expect(
       (await post('/api/control/doctor/drop', { zone: 'main' }, { host: HOST }))?.statusCode,
     ).toBe(401);
+  });
+
+  test('ctl doctor --drop under a usage pause queues it and says what holds it', async () => {
+    const w = doctorApp();
+    setUsageState(w.db, { pausedUntil: new Date(NOW.getTime() + 3_600_000).toISOString() }, NOW);
+    const r = await post('/api/control/doctor/drop', { zone: 'main' });
+    expect(r?.statusCode).toBe(202);
+    expect(r?.json().next).toContain('held: usage paused until 2026-11-09T13:00:00.000Z');
   });
 
   test('I-4: a queued doctor drop does not block observe, and --cancel cancels it', async () => {
