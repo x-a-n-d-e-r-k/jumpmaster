@@ -161,12 +161,13 @@ const TABLE: Record<string, Rule> = {
       : docs(check),
   'zone.mode': (_c, ctx) =>
     ctx.pages.zones ? app('Open the zones', '/zones') : app('Open home (zone modes)', '/'),
-  'zone.preset': zoneSection('preset', 'preset'),
-  'zone.services': zoneSection('services', 'services'),
+  // The zone page's sections (Task 11): Stack, Egress, Merging, and Advanced for the rest.
+  'zone.preset': zoneSection('stack', 'preset'),
+  'zone.services': zoneSection('stack', 'services'),
   'zone.egress': zoneSection('egress', 'egress'),
-  'zone.identity': zoneSection('identity', 'identity'),
-  'zone.goals': zoneSection('goals', 'goals'),
-  'zone.crew-cap': zoneSection('crew', 'crew'),
+  'zone.identity': zoneSection('merging', 'identity'),
+  'zone.goals': zoneSection('advanced', 'goals'),
+  'zone.crew-cap': zoneSection('advanced', 'crew'),
   'zone.doctor-drop': (check, ctx) =>
     ctx.zone
       ? {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { diff, mergePatch } from './diff.js';
+import { diff, mergeConfigPatch, mergePatch } from './diff.js';
 
 const zone = (id: string, extra: Record<string, unknown> = {}) => ({
   id,
@@ -75,5 +75,46 @@ describe('mergePatch (RFC 7396)', () => {
 
   test('null inside a new object is dropped', () => {
     expect(mergePatch({}, { a: { b: null, c: 1 } })).toEqual({ a: { c: 1 } });
+  });
+});
+
+describe('mergeConfigPatch (zones by id)', () => {
+  const doc = {
+    pollSeconds: 60,
+    dropZones: [
+      { id: 'a', repo: 'o/a', readyLabel: 'x', egress: { mode: 'monitor', allow: ['h'] } },
+      { id: 'b', repo: 'o/b' },
+    ],
+  };
+
+  test('a zone element merges into the zone with its id, and the others are kept in order', () => {
+    expect(
+      mergeConfigPatch(doc, { dropZones: [{ id: 'a', readyLabel: null, egress: { allow: [] } }] }),
+    ).toEqual({
+      pollSeconds: 60,
+      dropZones: [
+        { id: 'a', repo: 'o/a', egress: { mode: 'monitor', allow: [] } },
+        { id: 'b', repo: 'o/b' },
+      ],
+    });
+  });
+
+  test('a new id is appended (an add), and the rest of the patch merges as RFC 7396', () => {
+    expect(
+      mergeConfigPatch(doc, { pollSeconds: 30, dropZones: [{ id: 'c', repo: 'o/c' }] }),
+    ).toEqual({
+      pollSeconds: 30,
+      dropZones: [...doc.dropZones, { id: 'c', repo: 'o/c' }],
+    });
+  });
+
+  test('zones are never removed by a patch: an empty list or a missing zone changes nothing', () => {
+    expect(mergeConfigPatch(doc, { dropZones: [] })).toEqual(doc);
+  });
+
+  test('a zone element without a string id, or a list that is not one, is passed on for the schema to refuse', () => {
+    const odd = mergeConfigPatch(doc, { dropZones: [{ repo: 'o/z' }] }) as { dropZones: unknown[] };
+    expect(odd.dropZones.at(-1)).toEqual({ repo: 'o/z' });
+    expect(mergeConfigPatch(doc, { dropZones: 'nope' })).toMatchObject({ dropZones: 'nope' });
   });
 });

@@ -1,5 +1,5 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { PRESETS, redact } from '@jumpmaster/protocol';
+import { PRESETS, redact, validAllowEntry } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { type AuditDetail, recordAudit } from '../auth/audit.js';
@@ -19,7 +19,7 @@ import {
 } from '../auth/operator.js';
 import { grantSudo } from '../auth/sessions.js';
 import { listBriefings, optionsDigest, ruleBriefing } from '../briefings.js';
-import { mergePatch } from '../config/diff.js';
+import { mergeConfigPatch, mergePatch } from '../config/diff.js';
 import { configReader, type LiveConfig, statusOf } from '../config/source.js';
 import { type ApplyResult, ConfigStore } from '../config/store.js';
 import { type Config, mcpConfigOf, secretList } from '../config.js';
@@ -33,12 +33,14 @@ import {
   setKilled,
   setZoneMode,
   ZONE_MODES,
+  zoneHistoryCounts,
 } from '../db/repo.js';
 import { pagesOf } from '../doctor/actions.js';
 import {
   type DoctorDeps,
   type DoctorEnv,
   doctorDropWait,
+  egressSeen,
   labelsCheckOn,
   wantedLabels,
 } from '../doctor/checks.js';
@@ -55,6 +57,7 @@ import {
 } from '../mcp/tokens.js';
 import { type ForgePair, runOp } from '../outbox.js';
 import { safeNext } from '../ui/auth-pages.js';
+import { MODE_LABELS } from '../ui/pages.js';
 import { credentialCreatedAt, shadowedCredentials, type TestDeps } from '../vault/credentials.js';
 import {
   type DetectForge,
@@ -667,6 +670,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         audit,
         tokenOnly,
         deps.detectForge ?? githubDetectForge,
+        { db, now },
       );
       // GitHub guidance (Task 7): reads only, never a forge write.
       registerGuidanceRoutes(scope, {
@@ -699,6 +703,11 @@ const ZoneAddBody = z.strictObject({
   resume: z.boolean().optional(),
   returnTo: z.string().max(2048).optional(),
   /** Where the confirmation page's Cancel goes (the wizard: back to the project step). */
+  cancelTo: z.string().max(2048).optional(),
+});
+const AdoptBody = z.strictObject({
+  hosts: z.array(z.string().max(253)).max(100),
+  returnTo: z.string().max(2048).optional(),
   cancelTo: z.string().max(2048).optional(),
 });
 const NO_GATES = 'add at least one check (gate): every change must pass one';
@@ -777,7 +786,9 @@ function registerConfigRoutes(
   audit: (req: FastifyRequest, action: string, detail: AuditDetail, target?: string) => void,
   tokenOnly: (req: FastifyRequest, reply: FastifyReply) => boolean,
   detectForge: (repo: string, token: string) => DetectForge,
+  ctx: { db: Db; now(): Date },
 ): void {
+  const { db, now } = ctx;
   // The guard sets a principal on every control route or answers 401; never assume one.
   const principalOf = (req: FastifyRequest): Principal => {
     if (!req.principal) throw new Error('a config route was reached without a principal');
@@ -945,6 +956,13 @@ function registerConfigRoutes(
         ...cancelToOf(cancelTo),
       },
     );
+    // An id with history: say what Resume would bring back, beside the store's issue.
+    if (
+      !r.ok &&
+      'issues' in r &&
+      r.issues.some((i) => i.message.startsWith('this zone has history'))
+    )
+      return reply.code(400).send({ issues: r.issues, history: zoneHistoryCounts(db, id) });
     const out = answer(req, reply, 'zone.add', r, {}, id);
     if (!r.ok) return out;
     // What was written, so `ctl zones add` (and the page) can say it.
@@ -957,6 +975,148 @@ function registerConfigRoutes(
       gates: written?.gates ?? [],
     };
   });
+
+  /** A zone in the document: its raw entry and its index (where schema issues point). */
+  const zoneAt = (id: string) => {
+    const doc = store.document();
+    const zones = (Array.isArray(doc.dropZones) ? doc.dropZones : []) as Record<string, unknown>[];
+    const index = zones.findIndex((z) => z.id === id);
+    return index < 0 ? undefined : { zone: zones[index] as Record<string, unknown>, index };
+  };
+
+  // The zones page's reads, and `ctl zones list | show`: never a secret, only what the config and
+  // the database say about each zone.
+  scope.get('/api/control/zones', async (req) => {
+    const config = req.jmConfig ?? store.current();
+    const problems = store.problems();
+    return {
+      zones: config.dropZones.map((z) => {
+        const mode = getZoneMode(db, z.id, z.mode);
+        const last = db
+          .prepare(
+            'SELECT id, role, state, created_at AS createdAt FROM drops WHERE drop_zone_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1',
+          )
+          .get(z.id) as { id: string; role: string; state: string; createdAt: string } | undefined;
+        const run = latestDoctorRun(db);
+        return {
+          id: z.id,
+          repo: z.repo,
+          mode,
+          modeLabel: MODE_LABELS[mode] ?? mode,
+          ...(z.preset ? { preset: z.preset } : {}),
+          image: z.image,
+          egress: z.egress?.mode ?? 'off',
+          identity: z.identity,
+          ...(last ? { lastDrop: last } : {}),
+          doctorFails: run
+            ? run.checks.filter((c) => c.zoneId === z.id && c.status === 'fail').length
+            : null,
+          problems: problems.filter((p) => p.zoneId === z.id).map((p) => p.message),
+        };
+      }),
+    };
+  });
+
+  scope.get<{ Params: { id: string } }>('/api/control/zones/:id', async (req, reply) => {
+    const at = zoneAt(req.params.id);
+    if (!at) return reply.code(404).send({ error: 'unknown zone' });
+    const z = (req.jmConfig ?? store.current()).dropZones.find((x) => x.id === req.params.id);
+    const mode = getZoneMode(db, req.params.id, z?.mode ?? 'active');
+    return {
+      zone: at.zone,
+      index: at.index,
+      mode,
+      modeLabel: MODE_LABELS[mode] ?? mode,
+      revision: store.revision(),
+      problems: store.problems().filter((p) => p.zoneId === req.params.id),
+    };
+  });
+
+  // Removal: the zone leaves the document through the apply path, whose rule is that it is drained
+  // in observe; only its mode row goes, and its history stays for a later Resume.
+  scope.delete<{ Params: { id: string }; Querystring: { returnTo?: string } }>(
+    '/api/control/zones/:id',
+    async (req, reply) => {
+      const id = req.params.id;
+      if (!zoneAt(id)) return reply.code(404).send({ error: 'unknown zone' });
+      const doc = store.document();
+      const zones = (doc.dropZones as Record<string, unknown>[]).filter((z) => z.id !== id);
+      const r = store.apply(
+        { ...doc, dropZones: zones },
+        {
+          via: viaOf(req),
+          principal: principalOf(req),
+          expectRevision: store.revision(),
+          note: `remove zone ${id}`,
+          returnTo: '/zones',
+          cancelTo: `/zones/${encodeURIComponent(id)}`,
+        },
+      );
+      const out = answer(req, reply, 'zone.remove', r, {}, id);
+      return r.ok ? { ...(out as object), removed: id } : out;
+    },
+  );
+
+  const EGRESS_WINDOW_MS = 14 * 86_400_000;
+  scope.get<{ Params: { id: string } }>(
+    '/api/control/zones/:id/egress/observed',
+    async (req, reply) => {
+      if (!zoneAt(req.params.id)) return reply.code(404).send({ error: 'unknown zone' });
+      const since = new Date(now().getTime() - EGRESS_WINDOW_MS);
+      return { since: since.toISOString(), hosts: egressSeen(db, req.params.id, since).hosts };
+    },
+  );
+
+  // Adopting observed hosts into the allow list: each entry checked as `egress.allow` checks it,
+  // only the ones not already allowed added, and the change is guarded (more reach for drops), so
+  // from a browser it goes through the confirmation page.
+  scope.post<{ Params: { id: string } }>(
+    '/api/control/zones/:id/egress/adopt',
+    async (req, reply) => {
+      const body = AdoptBody.safeParse(req.body ?? {});
+      if (!body.success) return invalid(reply, '{"hosts": ["host", …]}');
+      const at = zoneAt(req.params.id);
+      if (!at) return reply.code(404).send({ error: 'unknown zone' });
+      const { hosts, returnTo, cancelTo } = body.data;
+      if (hosts.length === 0)
+        return reply
+          .code(400)
+          .send({ issues: [{ path: 'hosts', message: 'tick at least one host' }] });
+      const bad = hosts.flatMap((h, i) =>
+        validAllowEntry(h)
+          ? []
+          : [{ path: `hosts.${i}`, message: `not a host name or *.name: ${h}` }],
+      );
+      if (bad.length > 0) return reply.code(400).send({ issues: bad });
+      const egress = (at.zone.egress ?? {}) as { mode?: string; allow?: string[] };
+      const allow = Array.isArray(egress.allow) ? egress.allow : [];
+      const fresh = [...new Set(hosts)].filter((h) => !allow.includes(h));
+      if (fresh.length === 0)
+        return reply.code(400).send({
+          issues: [{ path: 'hosts', message: 'every ticked host is already allowed' }],
+        });
+      const note = `adopt observed hosts: ${fresh.join(', ')}`;
+      const r = store.apply(
+        mergeConfigPatch(store.document(), {
+          dropZones: [
+            {
+              id: req.params.id,
+              egress: { mode: egress.mode ?? 'monitor', allow: [...allow, ...fresh] },
+            },
+          ],
+        }),
+        {
+          via: viaOf(req),
+          principal: principalOf(req),
+          expectRevision: store.revision(),
+          note: note.length > 500 ? `${note.slice(0, 497)}...` : note,
+          ...returnToOf(returnTo),
+          ...cancelToOf(cancelTo),
+        },
+      );
+      return answer(req, reply, 'zone.egress-adopt', r, { hosts: fresh.join(', ') }, req.params.id);
+    },
+  );
 
   scope.get('/api/control/config', async () => {
     const b = store.boot();
@@ -978,7 +1138,8 @@ function registerConfigRoutes(
     if (!body.success)
       return invalid(reply, '{"patch": {…}, "expectRevision": <revision>, "note"?: "…"}');
     const { patch, expectRevision, note, resume, returnTo, cancelTo } = body.data;
-    const r = store.apply(mergePatch(store.document(), patch), {
+    // Zones are matched by id: a section's `{ dropZones: [{ id, … }] }` edits that zone alone.
+    const r = store.apply(mergeConfigPatch(store.document(), patch), {
       via: viaOf(req),
       principal: principalOf(req),
       expectRevision,

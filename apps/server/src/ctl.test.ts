@@ -205,7 +205,8 @@ describe('ctl config', () => {
       patch: {
         pollSeconds: 30,
         usage: { stopOnOverage: false },
-        dropZones: [zoneDoc('main', { readyLabel: 'go' })],
+        // Only what changed, for that zone: the PATCH matches zones by id (Task 11).
+        dropZones: [{ id: 'main', readyLabel: 'go' }],
       },
       expectRevision: 2,
       note: 'tune',
@@ -396,7 +397,7 @@ describe('ctl detect and ctl zones add', () => {
       ['zones', 'add', 'octo/demo', '--identity', 'admin'],
       ['zones', 'add', 'octo/demo', '--id'],
       ['zones', 'add', 'octo/demo', '--unknown'],
-      ['zones', 'remove', 'demo'],
+      ['zones', 'rename', 'demo'],
       ['zones', 'add', 'octo/demo', '--preset', 'cobol'],
       ['zones', 'add', 'octo/demo', '--id', 'Not_Valid'],
     ])
@@ -646,4 +647,92 @@ test('ctl doctor strips control characters from every line, and says overwrote w
   );
   expect(text).toContain(`overwrote ${join(dir, 'CODEOWNERS')}`);
   expect(readFileSync(join(dir, 'CODEOWNERS'), 'utf8')).toBe('* @bot\n');
+});
+
+describe('ctl zones', () => {
+  test('ctl zones list, show, remove and egress map to the routes', () => {
+    expect(ctlRequest(['zones', 'list'])).toEqual({ path: '/api/control/zones', method: 'GET' });
+    expect(ctlRequest(['zones', 'list', '--json'])).toEqual({
+      path: '/api/control/zones',
+      method: 'GET',
+    });
+    expect(ctlRequest(['zones', 'show', 'web'])).toEqual({
+      path: '/api/control/zones/web',
+      method: 'GET',
+    });
+    expect(ctlRequest(['zones', 'remove', 'web'])).toEqual({
+      path: '/api/control/zones/web',
+      method: 'DELETE',
+    });
+    expect(ctlRequest(['zones', 'egress', 'observed', 'web'])).toEqual({
+      path: '/api/control/zones/web/egress/observed',
+      method: 'GET',
+    });
+    expect(
+      ctlRequest(['zones', 'egress', 'adopt', 'web', 'a.example.com', '*.b.example.com']),
+    ).toEqual({
+      path: '/api/control/zones/web/egress/adopt',
+      body: { hosts: ['a.example.com', '*.b.example.com'] },
+    });
+    for (const bad of [
+      ['zones', 'show'],
+      ['zones', 'remove'],
+      ['zones', 'egress', 'adopt', 'web'],
+      ['zones', 'egress', 'observed'],
+      ['zones', 'list', 'extra'],
+    ])
+      expect(ctlRequest(bad), bad.join(' ')).toBeNull();
+  });
+
+  test('ctl zones set, remove and egress adopt map to the routes and refuse an unknown path', async () => {
+    const calls: { method: string; url: string; body: unknown }[] = [];
+    const impl = (async (url: URL | string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      calls.push({
+        method,
+        url: new URL(String(url)).pathname,
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      });
+      if (method === 'GET')
+        return new Response(
+          JSON.stringify({ revision: 7, config: { dropZones: [{ id: 'web' }] } }),
+        );
+      return new Response(
+        JSON.stringify({ revision: 8, changed: ['dropZones[web].readyLabel'], restartNeeded: [] }),
+      );
+    }) as typeof fetch;
+    const r = await run(
+      ['zones', 'set', 'web', 'readyLabel="go"', 'egress.mode=enforce', 'retryLabel=null'],
+      '',
+      { calls, impl },
+    );
+    expect(r.code).toBe(0);
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      'GET /api/control/config',
+      'PATCH /api/control/config',
+    ]);
+    expect(calls[1]?.body).toEqual({
+      patch: {
+        dropZones: [{ id: 'web', readyLabel: 'go', egress: { mode: 'enforce' }, retryLabel: null }],
+      },
+      expectRevision: 7,
+    });
+    expect(r.out.join('\n')).toMatch(/revision 8/);
+    // An unknown key, an unknown zone, and a missing value: refused before any write.
+    calls.length = 0;
+    for (const args of [
+      ['zones', 'set', 'web', 'readylabel=go'],
+      ['zones', 'set', 'web', 'id=other'],
+      ['zones', 'set', 'web', 'repo="o/x"'],
+      ['zones', 'set', 'web'],
+      ['zones', 'set', 'web', 'egress'],
+    ]) {
+      const bad = await run(args, '', { calls, impl });
+      expect(bad.code, args.join(' ')).toBe(2);
+    }
+    expect(calls.filter((c) => c.method !== 'GET')).toEqual([]);
+    const ghost = await run(['zones', 'set', 'nope', 'readyLabel=go'], '', { calls, impl });
+    expect(ghost.code).toBe(2);
+    expect(ghost.err.join('\n')).toMatch(/no zone nope/);
+  });
 });
