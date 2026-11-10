@@ -413,7 +413,7 @@ describe('added, removed and renamed zones', () => {
     ]);
   });
 
-  test("repo on an existing zone is refused with the remove-and-re-add message; an added zone's repo is free", () => {
+  test("repo on an existing zone is refused with the remove-and-re-add message; an added zone's repo is not refused (it is guarded)", () => {
     expect(edit({}, { repo: 'octo/other' }).refused).toEqual([
       {
         path: 'dropZones[web].repo',

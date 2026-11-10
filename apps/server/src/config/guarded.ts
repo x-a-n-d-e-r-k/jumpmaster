@@ -388,6 +388,9 @@ export function ADD_BASELINE(zone: { id?: unknown; repo?: unknown; preset?: unkn
   return { ...base, egress: { mode: 'monitor', allow: [] } };
 }
 
+/** The template prefix of a zone setting's path. */
+const ZONE_PREFIX = 'dropZones[].';
+
 const isPlain = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 
@@ -522,8 +525,8 @@ export function classify(
       out.added.push(id);
       // The new project itself (review I1): its code runs with the Claude token.
       for (const r of REFUSED_PATHS)
-        if (r.onAdd) {
-          const leaf = r.path.slice('dropZones[].'.length);
+        if (r.onAdd && r.path.startsWith(ZONE_PREFIX)) {
+          const leaf = r.path.slice(ZONE_PREFIX.length);
           out.guarded.push({
             path: `dropZones[${id}].${leaf}`,
             consequence: r.onAdd(zone[leaf], { zoneId: id, install: a, added: true }),

@@ -1164,6 +1164,37 @@ describe('zone removal, history and Resume (Task 3)', () => {
     });
   });
 
+  test('a zone re-added over a stale active mode row (removed in the file, then adopted) still comes back paused', () => {
+    const w = world({ dropZones: [zone('main')] });
+    const store = w.open();
+    upsertDropZone(w.db, {
+      id: 'main',
+      repo: 'octo/main',
+      defaultBranch: 'main',
+      configJson: '{}',
+    });
+    work(w.db, 'succeeded');
+    // The file removes the zone: file mode keeps its mode row, as M4 did.
+    writeConfig(w.file, { dropZones: [] });
+    expect(store.reload().ok).toBe(true);
+    expect(modeRow(w.db)).toEqual({ mode: 'active' });
+    expect(store.adopt({ principal: token }).ok).toBe(true);
+    // Resume over that row: the upsert sets it paused.
+    const r = store.apply(
+      { dropZones: [zone('main')] },
+      { via: 'ctl', principal: token, resume: ['main'] },
+    );
+    expect(r).toMatchObject({ ok: true, readds: ['main'] });
+    expect(modeRow(w.db)).toEqual({ mode: 'paused' });
+    // A rollback re-adding it over a stale row does the same.
+    setZoneMode(w.db, 'main', 'observe', t0);
+    store.apply({ dropZones: [] }, { via: 'ctl', principal: token });
+    setZoneMode(w.db, 'main', 'active', t0); // a stale row, as an M4 hand edit leaves one
+    const back = store.rollback(store.revision() - 1, { principal: token });
+    expect(back).toMatchObject({ ok: true, readds: ['main'] });
+    expect(modeRow(w.db)).toEqual({ mode: 'paused' });
+  });
+
   test('a rollback that re-adds a zone runs the add path and lists it in readds', () => {
     const { w, store } = seeded();
     work(w.db, 'succeeded');

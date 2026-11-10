@@ -16,6 +16,7 @@ import type { Db } from '../db/open.js';
 import {
   deleteZoneControls,
   ensureZoneMode,
+  setZoneMode,
   zoneDrained,
   zoneHasHistory,
   zoneHistoryRepo,
@@ -729,8 +730,10 @@ export class ConfigStore implements ConfigSource {
       );
       setSetting(db, 'config.current', rid, now);
       for (const zone of v.editable.dropZones)
-        if (!before.includes(zone.id))
-          ensureZoneMode(db, zone.id, readds.includes(zone.id) ? 'paused' : zone.mode, now);
+        if (!before.includes(zone.id)) ensureZoneMode(db, zone.id, zone.mode, now);
+      // A re-added zone is paused whatever row it left behind: a file-mode removal (or an M4
+      // hand edit) keeps a stale row, which ensureZoneMode would leave as it is.
+      for (const id of readds) setZoneMode(db, id, 'paused', now);
       for (const id of removed) deleteZoneControls(db, id);
       this.storePending(v.editable);
       if (mode) setSetting(db, 'config.mode', mode, now);
