@@ -51,6 +51,24 @@ describe('Dockerfiles', () => {
     expect(read('apps/server/src/payloads.ts')).toContain('../../trooper/prompts/');
   });
 
+  test('the server image runs a better-sqlite3 compiled in the image, not a shipped prebuild', () => {
+    // better-sqlite3 13 ships prebuilt binaries in its tarball and loads them ahead of
+    // build/Release, so the build stage deletes them, compiles against the image's own Node
+    // headers (no header download) and fails unless the compiled addon is the one left.
+    const runs = instructions(read('images/server/Dockerfile'))
+      .filter((i) => i.op === 'RUN')
+      .map((i) => i.args)
+      .join('\n');
+    const rm = runs.search(/rm -rf [^\n&]*better-sqlite3\/prebuilds/);
+    const gyp = runs.search(
+      /node-gyp(\.js)? rebuild --release --force_build=1 --nodedir=\/usr\/local/,
+    );
+    expect(rm, 'removes the shipped prebuilds').toBeGreaterThanOrEqual(0);
+    expect(gyp, 'compiles with force_build against /usr/local').toBeGreaterThan(rm);
+    expect(runs).toMatch(/test -f [^\n&]*better-sqlite3\/build\/Release\/better_sqlite3\.node/);
+    expect(runs).toMatch(/test ! -e [^\n&]*better-sqlite3\/prebuilds/);
+  });
+
   test('the stick image runs as root with its writable state under /state', () => {
     const final = finalStage(instructions(read('images/stick/Dockerfile')));
     expect(final.filter((i) => i.op === 'USER').at(-1)?.args).toBe('root');

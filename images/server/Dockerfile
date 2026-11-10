@@ -4,7 +4,7 @@
 # passed as *_FILE paths. Compose overrides the user with the host uid that owns the secret files.
 FROM node:24-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5 AS build
 # better-sqlite3 is compiled here from source against the image's own Node headers, so nothing
-# is downloaded outside npm's integrity-checked lockfile.
+# is downloaded outside npm's integrity-checked lockfile and no prebuilt binary runs.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 make g++ \
  && rm -rf /var/lib/apt/lists/*
@@ -17,16 +17,23 @@ COPY apps/trooper/prompts apps/trooper/prompts
 RUN npm ci --ignore-scripts \
  && npx tsc -b packages/protocol apps/server \
  && cp apps/server/src/db/schema.sql apps/server/dist/db/schema.sql
-# The runtime tree: production dependencies of the server workspace only.
+# The runtime tree: production dependencies of the server workspace only. better-sqlite3 13 ships
+# prebuilt binaries in its tarball and loads them ahead of build/Release (its implicit install
+# build is a no-op when one fits), so they are deleted and the addon is compiled explicitly.
 WORKDIR /out
 RUN cp /src/package.json /src/package-lock.json ./ \
  && mkdir -p packages/protocol apps/server apps/trooper \
  && cp -r /src/packages/protocol/package.json /src/packages/protocol/dist packages/protocol/ \
  && cp -r /src/apps/server/package.json /src/apps/server/dist apps/server/ \
  && cp -r /src/apps/trooper/prompts apps/trooper/prompts \
- && npm_config_build_from_source=true npm_config_nodedir=/usr/local \
-    npm ci --omit=dev --workspace=@jumpmaster/server --include-workspace-root=false --foreground-scripts \
+ && npm ci --omit=dev --workspace=@jumpmaster/server --include-workspace-root=false --ignore-scripts \
  && npm cache clean --force \
+ && rm -rf node_modules/better-sqlite3/prebuilds node_modules/better-sqlite3/build \
+ && (cd node_modules/better-sqlite3 \
+     && node /usr/local/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js rebuild --release --force_build=1 --nodedir=/usr/local \
+     && rm -rf build/Release/obj build/Release/obj.target build/Release/.deps build/Release/sqlite3.a) \
+ && test -f node_modules/better-sqlite3/build/Release/better_sqlite3.node \
+ && test ! -e node_modules/better-sqlite3/prebuilds \
  && node -e "new (require('better-sqlite3'))(':memory:').close()" \
  && chmod 0755 apps/server/dist/cli.js
 
