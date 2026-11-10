@@ -244,7 +244,11 @@ describe('CODEOWNERS and collaborators', () => {
     // The comment just before the catch-all says why it is there.
     const lines = text.split('\n');
     expect(lines[lines.indexOf('* @jm-reviewer') - 1]).toMatch(/^# .*reviewer bot/);
-    expect(codeownersFindings(text, zone, 'jm-reviewer')).toEqual({ fail: [], warn: [] });
+    expect(codeownersFindings(text, zone, 'jm-reviewer')).toEqual({
+      fail: [],
+      unknown: [],
+      warn: [],
+    });
     // Starter has no reviewer bot and leaves the review off: no catch-all.
     const st = codeownersText(makeZone({ identity: 'starter' }), ['octo'], { reviewerBot: 'x' });
     expect(st.split('\n').some((l) => l.startsWith('* '))).toBe(false);

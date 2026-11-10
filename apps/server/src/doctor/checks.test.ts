@@ -412,7 +412,7 @@ describe('forge checks', () => {
     // The bot on the catch-all and people only on the protected lines after it: pass.
     w.f.state.files.set(
       'main:.github/CODEOWNERS',
-      '* @someone-else @reviewer-bot\n.github/** @someone-else\n',
+      '* @someone-else @reviewer-bot\n.github/** @someone-else\nCODEOWNERS @someone-else\npnpm-workspace.yaml @someone-else\n',
     );
     expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
       status: 'pass',
@@ -421,11 +421,31 @@ describe('forge checks', () => {
     // The bot on a protected line: its approval would stand in for a person's.
     w.f.state.files.set(
       'main:.github/CODEOWNERS',
-      '* @someone-else @reviewer-bot\n.github/** @reviewer-bot\n',
+      '* @someone-else @reviewer-bot\n.github/** @reviewer-bot\nCODEOWNERS @someone-else\npnpm-workspace.yaml @someone-else\n',
     );
     expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
       status: 'warn',
-      summary: expect.stringContaining('line 2 (.github/**)'),
+      summary: expect.stringContaining('.github/** through line 2 (.github/**)'),
+    });
+    // A protected path no line owns: GitHub asks no person for it.
+    w.f.state.files.set(
+      'main:.github/CODEOWNERS',
+      '* @someone-else @reviewer-bot\n.github/** @someone-else\nCODEOWNERS @someone-else\npnpm-workspace.yaml\n',
+    );
+    expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
+      status: 'warn',
+      summary: expect.stringContaining('pnpm-workspace.yaml'),
+    });
+    // A team owner may include the bot, which Jumpmaster cannot see: a warn, not a fail.
+    w.f.state.files.set(
+      'main:.github/CODEOWNERS',
+      '* @octo/devs\n.github/** @someone-else\nCODEOWNERS @someone-else\npnpm-workspace.yaml @someone-else\n',
+    );
+    expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
+      status: 'warn',
+      summary: expect.stringContaining(
+        'line 1 (*) names a team or an e-mail: if @reviewer-bot is not a member, nothing merges; name @reviewer-bot on the line to be sure',
+      ),
     });
     // Required, with no CODEOWNERS file: nobody owns the protected paths on GitHub.
     w.f.state.files.delete('main:.github/CODEOWNERS');

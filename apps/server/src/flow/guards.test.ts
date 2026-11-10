@@ -7,6 +7,7 @@ import {
   ADMINISTRATION_PROBLEM,
   branchProtectionProblems,
   codeownersFindings,
+  codeownersRules,
   dependenciesChanged,
   gateBins,
   gateScriptChanges,
@@ -1067,6 +1068,8 @@ describe('branchProtectionProblems', () => {
       expect(check(null)).toEqual([]);
       // A line with no owner un-owns its files: nothing to approve.
       expect(check('src/generated/**\n')).toEqual([]);
+      // A team may include the bot, which Jumpmaster cannot see: no park on a guess.
+      expect(check('* @octo/devs\n.github/** @human\n')).toEqual([]);
     });
 
     test('starter mode is judged as before', () => {
@@ -1090,20 +1093,72 @@ describe('branchProtectionProblems', () => {
     });
   });
 
-  test('codeownersFindings: protected lines must be people only, others must name the bot, and a later catch-all overrides', () => {
+  describe('codeownersFindings: effective ownership, the last match winning', () => {
     const z = { protectedPaths: ['.github/**', 'CLAUDE.md'] };
-    expect(codeownersFindings('* @human\n', z, 'rb')).toEqual({
-      fail: [{ line: 1, pattern: '*' }],
-      warn: [],
+    const none = { fail: [], unknown: [], warn: [] };
+
+    test('a people-only catch-all fails; the bot on it with people after it on each protected path is clean', () => {
+      expect(codeownersFindings('* @human\n', z, 'rb')).toMatchObject({
+        fail: [{ line: 1, pattern: '*' }],
+      });
+      expect(codeownersFindings('* @h @rb\n.github/** @h\nCLAUDE.md @h\n', z, 'rb')).toEqual(none);
     });
-    expect(codeownersFindings('* @h @rb\n.github/** @h @rb\nCLAUDE.md @h\n', z, 'rb')).toEqual({
-      fail: [],
-      warn: [{ line: 2, pattern: '.github/**', why: 'bot-owns-protected' }],
+
+    test('a people-only line a later bot rule covers does not block: the later rule wins there', () => {
+      expect(
+        codeownersFindings('docs/** @docs-team\n* @h @rb\n.github/** @h\nCLAUDE.md @h\n', z, 'rb'),
+      ).toEqual(none);
+      // A later line with no owner un-owns it too: nothing to approve.
+      expect(
+        codeownersFindings('docs/** @h\ndocs/\n* @h @rb\n.github/** @h\nCLAUDE.md @h\n', z, 'rb'),
+      ).toEqual(none);
+      // Only a covering rule counts: a later bot rule for another directory does not.
+      expect(
+        codeownersFindings('docs/** @h\nsrc/** @h @rb\n.github/** @h\nCLAUDE.md @h\n', z, 'rb')
+          .fail,
+      ).toEqual([{ line: 1, pattern: 'docs/**' }]);
     });
-    // The catch-all after a protected line wins there, handing the bot that path too.
-    expect(codeownersFindings('CLAUDE.md @h\n* @h @rb # all\n', z, 'rb')).toEqual({
-      fail: [],
-      warn: [{ line: 2, pattern: '*', why: 'overrides-protected' }],
+
+    test('a protected path whose last match names the bot, or no one, is a warn', () => {
+      // The catch-all after the protected line wins there: the bot owns CLAUDE.md.
+      expect(codeownersFindings('CLAUDE.md @h\n* @h @rb\n.github/** @h\n', z, 'rb')).toEqual({
+        ...none,
+        warn: [{ glob: 'CLAUDE.md', line: 2, pattern: '*', why: 'bot-owns-protected' }],
+      });
+      // No people-only line after the bot's: the bot owns .github/**.
+      expect(codeownersFindings('* @h @rb\nCLAUDE.md @h\n', z, 'rb').warn).toEqual([
+        { glob: '.github/**', line: 1, pattern: '*', why: 'bot-owns-protected' },
+      ]);
+      // A later line with no owner, or no line at all: GitHub asks no one.
+      expect(
+        codeownersFindings('* @h @rb\n.github/** @h\n.github/\nCLAUDE.md @h\n', z, 'rb').warn,
+      ).toEqual([{ glob: '.github/**', line: 3, pattern: '.github/', why: 'unowned' }]);
+      expect(codeownersFindings('src/** @rb\n', z, 'rb').warn).toEqual([
+        { glob: '.github/**', why: 'unowned' },
+        { glob: 'CLAUDE.md', why: 'unowned' },
+      ]);
+    });
+
+    test('a team or an e-mail owner may include the bot: unknown, never a fail', () => {
+      const r = codeownersFindings(
+        '* @octo/devs\nsrc/** dev@example.com\n.github/** @h\nCLAUDE.md @h\n',
+        z,
+        'rb',
+      );
+      expect(r.fail).toEqual([]);
+      expect(r.unknown).toEqual([
+        { line: 1, pattern: '*' },
+        { line: 2, pattern: 'src/**' },
+      ]);
+    });
+
+    test('negated lines are skipped as GitHub skips them; escaped spaces stay in the pattern; trailing comments are comments', () => {
+      expect(
+        codeownersFindings('!*.md @h\n* @h @rb # everyone\n.github/** @h\nCLAUDE.md @h\n', z, 'rb'),
+      ).toEqual(none);
+      expect(codeownersRules('my\\ dir/** @h\n')).toEqual([
+        { line: 1, pattern: 'my\\ dir/**', owners: ['@h'] },
+      ]);
     });
   });
 

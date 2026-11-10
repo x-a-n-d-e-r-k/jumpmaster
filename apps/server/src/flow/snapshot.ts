@@ -87,6 +87,7 @@ export async function zonePass(
       (x) => x?.kind === 'ok' && x.rules.requireCodeOwnerReview === true,
     );
   const codeownersText = ownersRequired ? await readCodeowners(forges, baseBranch) : undefined;
+  if (ownersRequired) noteCodeownersRead(zone.id, codeownersText !== undefined);
   return {
     botLogins: reviewerLogin === null ? [authorLogin] : [authorLogin, reviewerLogin],
     requiredChecks: authorRules.kind === 'ok' ? authorRules.rules.requiredChecks : [],
@@ -101,6 +102,21 @@ export async function zonePass(
       },
     ),
   };
+}
+
+/** Zones whose last CODEOWNERS read failed and was said: said once until a read succeeds. */
+const codeownersUnread = new Set<string>();
+
+function noteCodeownersRead(zoneId: string, ok: boolean): void {
+  if (ok) {
+    codeownersUnread.delete(zoneId);
+    return;
+  }
+  if (codeownersUnread.has(zoneId)) return;
+  codeownersUnread.add(zoneId);
+  console.warn(
+    `zone ${zoneId}: the CODEOWNERS read failed, so this pass did not check that the reviewer bot can satisfy the required code owner review`,
+  );
 }
 
 /** Where GitHub looks for CODEOWNERS, in its order. */

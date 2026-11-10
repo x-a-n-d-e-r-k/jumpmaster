@@ -865,7 +865,10 @@ The ruleset on the default branch, as the tokens see it; the summary names each 
 Two-bot: with Require review from Code Owners on, `.github/CODEOWNERS` must exist; its lines for
 the protected paths must name people, not the reviewer bot (a warn otherwise), and every other line
 that names owners must name the reviewer bot (a fail otherwise: GitHub would refuse every merge of
-a pull request touching those paths, and Jumpmaster parks the items with the same fix). Starter mode: the option must stay off (GitHub never lets an author
+a pull request touching those paths, and Jumpmaster parks the items with the same fix). The last
+matching line decides: a later line that names the reviewer bot (or no owner) covers an earlier
+people-only one, and each protected path's last matching line must name people. A line owned by a
+team or an e-mail is a warn, not a park: Jumpmaster cannot tell whether the bot is a member. Starter mode: the option must stay off (GitHub never lets an author
 approve their own pull request); Jumpmaster parks those pull requests for you to merge by hand
 ([Branch rules](#branch-rules)).
 

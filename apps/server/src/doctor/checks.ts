@@ -1186,12 +1186,34 @@ async function codeownersCheck(zone: DropZoneConfig, r: ZoneReads): Promise<Doct
       summary: `the rules require a code owner's review, and CODEOWNERS ${found.fail.map(at).join(', ')} names only people: every pull request touching those paths waits for a person, so nothing Jumpmaster approves can merge`,
       fix: `In CODEOWNERS, name @${reviewer.value} on ${found.fail.length === 1 ? 'that line' : 'those lines'} (the protected lines after it stay people-only; the last match wins), or turn code-owner review off. The generated text is on ${github}.`,
     };
-  if (found.warn.length > 0)
+  const notes = [
+    ...found.unknown.map(
+      (u) =>
+        `${at(u)} names a team or an e-mail: if @${reviewer.value} is not a member, nothing merges; name @${reviewer.value} on the line to be sure`,
+    ),
+    ...found.warn
+      .filter((w) => w.why === 'bot-owns-protected')
+      .map(
+        (w) =>
+          `the reviewer account ${reviewer.value} owns ${w.glob} through line ${w.line} (${w.pattern}): its approval would satisfy the review GitHub requires from a person there`,
+      ),
+    ...(found.warn.some((w) => w.why === 'unowned')
+      ? [
+          `no line owns ${found.warn
+            .filter((w) => w.why === 'unowned')
+            .map((w) => w.glob)
+            .join(
+              ', ',
+            )} (or the last line that matches names no owner): GitHub asks no person for those protected paths`,
+        ]
+      : []),
+  ];
+  if (notes.length > 0)
     return {
       ...base,
       status: 'warn',
-      summary: `the reviewer account ${reviewer.value} owns protected paths through CODEOWNERS ${found.warn.map(at).join(', ')}: its approval would satisfy the review GitHub requires from a person there`,
-      fix: `Keep the protected-path lines people-only, after the line that names @${reviewer.value} (the last match wins). The generated text is on ${github}.`,
+      summary: notes.join('; '),
+      fix: `Keep each protected path's last matching line people-only, after the line that names @${reviewer.value} (the last match wins), and name @${reviewer.value} on lines owned by a team. The generated text is on ${github}.`,
     };
   return {
     ...base,
