@@ -67,9 +67,12 @@ function listPage(store: ConfigStore, db: Db): string {
       const problem = mine.length
         ? `<span class="problem">${escapeHtml(mine[0]?.message)}</span> <a href="/settings/credentials">Fix in Settings, Credentials</a>`
         : '-';
+      // Only the moves that apply from the zone's current mode.
       const button = (m: string, label: string) =>
-        `<button class="mode" data-zone="${escapeHtml(z.id)}" data-mode="${m}"${mode === m ? ' disabled' : ''}>${label}</button>`;
-      return `<tr><td><a href="${zoneHref(z.id)}">${escapeHtml(z.id)}</a></td><td>${escapeHtml(z.repo)}</td><td>${escapeHtml(MODE_LABELS[mode] ?? mode)}</td><td>${escapeHtml(z.preset ?? z.image)}</td><td>${escapeHtml(z.egress?.mode ?? 'off')}</td><td>${escapeHtml(z.identity)}</td><td>${last ? `<a href="/drops/${encodeURIComponent(last.id)}">${escapeHtml(last.role)}, ${escapeHtml(last.state)}</a>` : '-'}</td><td>${fails === undefined ? '-' : `<a href="/doctor">${fails}</a>`}</td><td>${problem}</td><td>${button('paused', 'Pause')} ${button('active', 'Resume')} ${button('observe', 'Observe')} <a href="${zoneHref(z.id)}/github">GitHub</a></td></tr>`;
+        mode === m
+          ? ''
+          : `<button class="mode" data-zone="${escapeHtml(z.id)}" data-mode="${m}">${label}</button> `;
+      return `<tr><td><a href="${zoneHref(z.id)}">${escapeHtml(z.id)}</a></td><td>${escapeHtml(z.repo)}</td><td>${escapeHtml(MODE_LABELS[mode] ?? mode)}</td><td>${escapeHtml(z.preset ?? z.image)}</td><td>${escapeHtml(z.egress?.mode ?? 'off')}</td><td>${escapeHtml(z.identity)}</td><td>${last ? `<a href="/drops/${encodeURIComponent(last.id)}">${escapeHtml(last.role)}, ${escapeHtml(last.state)}</a>` : '-'}</td><td>${fails === undefined ? '-' : `<a href="/doctor">${fails}</a>`}</td><td>${problem}</td><td>${button('paused', 'Pause')}${button('active', 'Resume')}${button('observe', 'Observe')}<a href="${zoneHref(z.id)}/github">GitHub</a></td></tr>`;
     })
     .join('');
   return page(
@@ -132,23 +135,33 @@ function zonePage(store: ConfigStore, db: Db, id: string, now: Date): string | u
       ? `<p>Image: <code>${escapeHtml(raw.image)}</code> <small>(${FORBIDDEN_NOTE}: the image decides what runs with your credentials)</small></p>`
       : '';
   const seen = egressSeen(db, id, new Date(now.getTime() - EGRESS_WINDOW_MS)).hosts;
-  const allowed = new Set(
-    ((raw.egress as { allow?: string[] } | undefined)?.allow ?? []).map(String),
-  );
+  const own = ((raw.egress as { allow?: string[] } | undefined)?.allow ?? []).map(String);
+  const egressMode = resolved.egress?.mode ?? 'off';
+  /**
+   * Which of this zone's lists a host is on, as `egressFor` builds the drop's list: the base, the
+   * zone's own preset, the zone's own entries (`*.name` covers subdomains). Another preset's host
+   * is not on it, and gets a tick box.
+   */
   const listedBy = (host: string): string | undefined => {
     if (BASE_EGRESS.includes(host)) return 'every drop (the base list)';
-    const p = PRESETS.find((x) => PRESET_EGRESS[x].includes(host));
-    return p ? `the ${p} preset` : undefined;
+    if (resolved.preset && PRESET_EGRESS[resolved.preset].includes(host))
+      return `the ${resolved.preset} preset`;
+    if (own.some((e) => e === host || (e.startsWith('*.') && host.endsWith(e.slice(1)))))
+      return "this zone's allow list";
+    return undefined;
   };
+  const adoptControls = readOnly
+    ? ''
+    : egressMode === 'off'
+      ? '<p><small>Egress is off for this zone, so no allow list is used: set the mode to monitor or enforce before adopting hosts.</small></p>'
+      : '<p><button type="button" id="adopt-ticked">Adopt ticked</button> <small>Each host you tick is added to the allow list: drops will be able to send data to it, so it asks for confirmation. Each host was reached by one of this zone\'s drops, and a drop that misbehaved may have reached it: adopt only hosts you recognise.</small></p>';
   const observed = seen.length
     ? `<table><tr><th>Host</th><th>Drops that reached it</th><th>Listed</th><th>Adopt</th></tr>${seen
         .map((h) => {
           const by = listedBy(h.host);
-          return `<tr><td>${escapeHtml(h.host)} <small>(${escapeHtml(h.decision)}, ${h.count}x)</small></td><td>${h.drops.map((d) => `<a href="/drops/${encodeURIComponent(d)}">${escapeHtml(d.slice(0, 8))}</a>`).join(' ')}</td><td>${by ? `listed by ${escapeHtml(by)}` : '<strong>no preset lists it</strong>'}</td><td>${allowed.has(h.host) || by ? '-' : `<input type="checkbox" name="adopt" value="${escapeHtml(h.host)}">`}</td></tr>`;
+          return `<tr><td>${escapeHtml(h.host)} <small>(${escapeHtml(h.decision)}, ${h.count}x)</small></td><td>${h.drops.map((d) => `<a href="/drops/${encodeURIComponent(d)}">${escapeHtml(d.slice(0, 8))}</a>`).join(' ')}</td><td>${by ? `listed by ${escapeHtml(by)}` : `<strong>${escapeHtml("not in this zone's lists")}</strong>`}</td><td>${by ? '-' : `<input type="checkbox" name="adopt" value="${escapeHtml(h.host)}">`}</td></tr>`;
         })
-        .join(
-          '',
-        )}</table>${readOnly ? '' : '<p><button type="button" id="adopt-ticked">Adopt ticked</button> <small>Each host you tick is added to the allow list: drops will be able to send data to it, so it asks for confirmation.</small></p>'}`
+        .join('')}</table>${adoptControls}`
     : '<p>Nothing observed yet.</p>';
   const identityOptions = ['two-bot', 'starter']
     .map((i) => `<option value="${i}"${f.identity === i ? ' selected' : ''}>${i}</option>`)
@@ -287,8 +300,8 @@ document.getElementById('remove').addEventListener('click', async () => {
   const out = document.getElementById('remove-out');
   const r = await jmFetch('/api/control/zones/' + encodeURIComponent(ZONE_ID), {}, 'DELETE');
   const j = await r.json().catch(() => ({}));
+  // A removal is not a guarded change (the drained rule is the guard): applied, or refused.
   if (r.ok) { location.href = '/zones'; return; }
-  if (r.status === 409 && j.needsConfirmation) { location.href = j.confirm; return; }
   out.textContent = j.error || (j.issues || []).map((i) => i.message).join('; ') || ('Refused (' + r.status + ')');
 });
 </script>`

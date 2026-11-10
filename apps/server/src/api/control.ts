@@ -710,6 +710,11 @@ const AdoptBody = z.strictObject({
   returnTo: z.string().max(2048).optional(),
   cancelTo: z.string().max(2048).optional(),
 });
+/** The removal's revision note, within the note limit whatever the id (an M4 file's may be long). */
+export const removalNote = (id: string): string => {
+  const note = `remove zone ${id}`;
+  return note.length > 500 ? `${note.slice(0, 497)}...` : note;
+};
 const NO_GATES = 'add at least one check (gate): every change must pass one';
 const Resume = z.array(z.string().min(1)).max(100).optional();
 /** Where the confirmation page goes after a guarded change is applied: a path on this host. */
@@ -989,6 +994,7 @@ function registerConfigRoutes(
   scope.get('/api/control/zones', async (req) => {
     const config = req.jmConfig ?? store.current();
     const problems = store.problems();
+    const run = latestDoctorRun(db);
     return {
       zones: config.dropZones.map((z) => {
         const mode = getZoneMode(db, z.id, z.mode);
@@ -997,7 +1003,6 @@ function registerConfigRoutes(
             'SELECT id, role, state, created_at AS createdAt FROM drops WHERE drop_zone_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1',
           )
           .get(z.id) as { id: string; role: string; state: string; createdAt: string } | undefined;
-        const run = latestDoctorRun(db);
         return {
           id: z.id,
           repo: z.repo,
@@ -1047,7 +1052,7 @@ function registerConfigRoutes(
           via: viaOf(req),
           principal: principalOf(req),
           expectRevision: store.revision(),
-          note: `remove zone ${id}`,
+          note: removalNote(id),
           returnTo: '/zones',
           cancelTo: `/zones/${encodeURIComponent(id)}`,
         },
@@ -1082,12 +1087,39 @@ function registerConfigRoutes(
         return reply
           .code(400)
           .send({ issues: [{ path: 'hosts', message: 'tick at least one host' }] });
+      const egressNow = (at.zone.egress ?? {}) as { mode?: string };
+      // Adopting never turns egress on: with it off, no allow list is used at all.
+      if ((egressNow.mode ?? 'off') === 'off')
+        return reply.code(409).send({
+          error: `egress is off for zone ${req.params.id}: set it to monitor or enforce first, so the allow list is used`,
+        });
       const bad = hosts.flatMap((h, i) =>
         validAllowEntry(h)
           ? []
           : [{ path: `hosts.${i}`, message: `not a host name or *.name: ${h}` }],
       );
       if (bad.length > 0) return reply.code(400).send({ issues: bad });
+      // Only what this zone's drops reached in the window: the page offers nothing else.
+      const observed = new Set(
+        egressSeen(db, req.params.id, new Date(now().getTime() - EGRESS_WINDOW_MS)).hosts.map(
+          (h) => h.host,
+        ),
+      );
+      // An entry already on the list is a no-op, observed or not.
+      const listed = new Set(
+        ((at.zone.egress as { allow?: string[] } | undefined)?.allow ?? []).map(String),
+      );
+      const unseen = hosts.flatMap((h, i) =>
+        observed.has(h) || listed.has(h)
+          ? []
+          : [
+              {
+                path: `hosts.${i}`,
+                message: `${h} was not observed for zone ${req.params.id} in the last 14 days`,
+              },
+            ],
+      );
+      if (unseen.length > 0) return reply.code(400).send({ issues: unseen });
       const egress = (at.zone.egress ?? {}) as { mode?: string; allow?: string[] };
       const allow = Array.isArray(egress.allow) ? egress.allow : [];
       const fresh = [...new Set(hosts)].filter((h) => !allow.includes(h));
@@ -1101,7 +1133,7 @@ function registerConfigRoutes(
           dropZones: [
             {
               id: req.params.id,
-              egress: { mode: egress.mode ?? 'monitor', allow: [...allow, ...fresh] },
+              egress: { mode: egress.mode, allow: [...allow, ...fresh] },
             },
           ],
         }),

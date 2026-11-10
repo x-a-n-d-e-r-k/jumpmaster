@@ -736,3 +736,24 @@ describe('ctl zones', () => {
     expect(ghost.err.join('\n')).toMatch(/no zone nope/);
   });
 });
+
+describe('ctl config set and the zone list', () => {
+  test('ctl config set refuses the whole zone list and a zone by id, naming the verbs to use', async () => {
+    for (const args of [
+      ['config', 'set', 'dropZones=[]'],
+      ['config', 'set', 'dropZones.web=null'],
+      ['config', 'set', 'dropZones.web={"repo":"o/x"}'],
+    ]) {
+      const calls: string[] = [];
+      const impl = (async (url: URL | string) => {
+        calls.push(String(url));
+        return new Response('{}');
+      }) as typeof fetch;
+      const r = await run(args, '', { calls, impl });
+      expect(r.code, args.join(' ')).toBe(2);
+      expect(r.err.join('\n')).toMatch(/ctl zones remove/);
+      expect(r.err.join('\n')).toMatch(/ctl config import/);
+      expect(calls).toEqual([]);
+    }
+  });
+});

@@ -529,6 +529,14 @@ async function runConfig(
     const bad = (seg: string) =>
       seg === '' || ['__proto__', 'constructor', 'prototype'].includes(seg);
     if (pairs.length === 0 || pairs.some((p) => p === null || p.path.some(bad))) return usage();
+    // The PATCH matches zones by id and never removes one: the list as a whole, or a zone as a
+    // whole, is not something `set` can mean.
+    if (pairs.some((p) => p?.path[0] === 'dropZones' && p.path.length < 3)) {
+      err(
+        'dropZones is not set whole or a zone at a time here: add one with ctl zones add, change it with ctl zones set <zone> <path>=<json>, remove one with ctl zones remove <zone>, or replace the whole config with ctl config import <file>',
+      );
+      return 2;
+    }
     const cur = await call('GET', '/api/control/config');
     if (!cur.ok) return fail(cur);
     const { revision, config } = (await cur.json()) as {

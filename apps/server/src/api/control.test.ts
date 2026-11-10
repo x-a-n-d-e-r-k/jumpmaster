@@ -35,7 +35,7 @@ import { makeZone } from '../test/fixtures.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import { credentialCreatedAt } from '../vault/credentials.js';
 import { fingerprintOf, openVault } from '../vault/vault.js';
-import { type ControlDeps, registerControlRoutes } from './control.js';
+import { type ControlDeps, registerControlRoutes, removalNote } from './control.js';
 import { guidanceFor, recommendFor } from './github.js';
 
 const TOKEN = 'o'.repeat(32);
@@ -2425,6 +2425,28 @@ describe('zones page routes', () => {
     expect(store.current().dropZones.map((z) => z.id)).toContain('old');
   });
 
+  test("adopt is refused while the zone's egress is off, rather than turning it on", async () => {
+    const { db, store } = pageApp();
+    const off = await call('PATCH', '/api/control/config', {
+      patch: { dropZones: [{ id: 'b', egress: null }] },
+      expectRevision: store.revision(),
+    });
+    expect(off.statusCode, off.body).toBe(200);
+    seen(db, 'd9', 'b', 'x.example.com');
+    const r = await call('POST', '/api/control/zones/b/egress/adopt', { hosts: ['x.example.com'] });
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).toBe(
+      'egress is off for zone b: set it to monitor or enforce first, so the allow list is used',
+    );
+    expect(store.current().dropZones[1]?.egress).toBeUndefined();
+  });
+
+  test('a removal note stays within the note limit whatever the id', () => {
+    // An M4 file may carry a long id; the lenient read keeps it (with a warning).
+    expect(removalNote(`z${'x'.repeat(600)}`).length).toBeLessThanOrEqual(500);
+    expect(removalNote('c')).toBe('remove zone c');
+  });
+
   test('the egress section lists observed hosts with their drops', async () => {
     const { db } = pageApp();
     seen(db, 'd1', 'a', 'new.example.com', 3);
@@ -2453,6 +2475,17 @@ describe('zones page routes', () => {
     expect(
       (await call('POST', '/api/control/zones/a/egress/adopt', { hosts: [] })).statusCode,
     ).toBe(400);
+    // Only hosts this zone's drops reached in the window can be adopted.
+    const unseen = await call('POST', '/api/control/zones/a/egress/adopt', {
+      hosts: ['new.example.com', 'never.example.com'],
+    });
+    expect(unseen.statusCode).toBe(400);
+    expect(unseen.json().issues).toEqual([
+      {
+        path: 'hosts.1',
+        message: 'never.example.com was not observed for zone a in the last 14 days',
+      },
+    ]);
     // From a session the addition is guarded: the confirmation page, nothing applied yet.
     const s = await call(
       'POST',

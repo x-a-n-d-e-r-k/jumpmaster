@@ -133,8 +133,17 @@ describe('the zones page', () => {
     expect(r.body).toContain('starter');
     // main is two-bot with no reviewer token: its problem, linked to the Credentials tab.
     expect(r.body).toMatch(/reviewer token[^<]*<\/span> <a href="\/settings\/credentials">/);
-    for (const mode of ['paused', 'active', 'observe'])
-      expect(r.body).toContain(`data-mode="${mode}"`);
+    // Only the transitions that apply: main is active (Pause, Observe), img observes (Resume, Pause).
+    const row = (id: string) => {
+      const at = r.body.indexOf(`href="/zones/${id}"`);
+      return r.body.slice(at, r.body.indexOf('</tr>', at));
+    };
+    expect(row('main')).toContain('data-mode="paused"');
+    expect(row('main')).toContain('data-mode="observe"');
+    expect(row('main')).not.toContain('data-mode="active"');
+    expect(row('img')).toContain('data-mode="active"');
+    expect(row('img')).toContain('data-mode="paused"');
+    expect(row('img')).not.toContain('data-mode="observe"');
     expect(r.body).toContain('href="/zones/new"');
     const home = await w.get('/');
     expect(home.body).toContain('<a href="/zones/new">Add a project</a>');
@@ -301,10 +310,60 @@ describe('the zones page', () => {
     }
     const egress = section((await w.get('/zones/main')).body, 'egress');
     expect(egress).toContain('Observed in the last 14 days');
-    expect(egress).toMatch(/new\.example\.com[\s\S]*?href="\/drops\/d1"[\s\S]*?no preset lists it/);
+    expect(egress).toMatch(
+      /new\.example\.com[\s\S]*?href="\/drops\/d1"[\s\S]*?not in this zone&#39;s lists/,
+    );
     expect(egress).toMatch(/registry\.npmjs\.org[\s\S]*?listed by the node preset/);
     expect(egress).toContain('name="adopt" value="new.example.com"');
     expect(egress).toContain('Adopt ticked');
+    // The residual, beside the button: a host may have been reached by a hostile drop.
+    expect(egress).toContain(
+      'a drop that misbehaved may have reached it: adopt only hosts you recognise',
+    );
+  });
+
+  test("a host is judged against this zone's own lists: another preset's host gets a tick box", async () => {
+    const w = await world();
+    // A jvm zone reached npm's registry: the node preset lists it, but this zone's drops are
+    // allowed only the base, the jvm preset's hosts and the zone's own entries.
+    const r = await w.api(
+      'PATCH',
+      '/api/control/config',
+      { patch: { dropZones: [{ id: 'main', preset: 'jvm' }] }, expectRevision: w.store.revision() },
+      true,
+    );
+    expect(r.statusCode, r.body).toBe(200);
+    insertDrop(w.db, {
+      id: 'j1',
+      dropZoneId: 'main',
+      workItemId: null,
+      role: 'doctor',
+      state: 'succeeded',
+      createdAt: t0.toISOString(),
+    });
+    for (const [seq, host] of [
+      [1, 'registry.npmjs.org'],
+      [2, 'repo.maven.apache.org'],
+      [3, 'known.example.com'],
+      [4, 'github.com'],
+    ] as const)
+      w.db
+        .prepare(
+          `INSERT INTO drop_events (drop_id, seq, ts, kind, data_json) VALUES ('j1', ?, ?, 'egress', ?)`,
+        )
+        .run(seq, t0.toISOString(), JSON.stringify({ host, decision: 'allowed', count: 1 }));
+    const egress = section((await w.get('/zones/main')).body, 'egress');
+    expect(egress).toContain('name="adopt" value="registry.npmjs.org"');
+    expect(egress).toMatch(/repo\.maven\.apache\.org[\s\S]*?listed by the jvm preset/);
+    expect(egress).not.toContain('name="adopt" value="repo.maven.apache.org"');
+    expect(egress).toMatch(/known\.example\.com[\s\S]*?listed by this zone&#39;s allow list/);
+    expect(egress).toMatch(/github\.com[\s\S]*?listed by every drop/);
+  });
+
+  test('the Remove button has no confirmation branch: removal is not a guarded change', async () => {
+    const page = (await (await world()).get('/zones/main')).body;
+    const remove = page.slice(page.indexOf("getElementById('remove')"));
+    expect(remove.slice(0, remove.indexOf('});'))).not.toContain('needsConfirmation');
   });
 
   test('pause, resume and observe from the zones page keep the existing guards', async () => {
