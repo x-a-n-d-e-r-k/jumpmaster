@@ -51,7 +51,14 @@ export function routeClass(path: string): RouteClass {
   if (path.startsWith('/api/sticks/') || path.startsWith('/api/drops/')) return 'stick';
   if (path === '/mcp') return 'mcp';
   if (path.startsWith('/api/')) return 'control';
-  if (path === '/login' || path === '/logout' || path === '/setup' || path.startsWith('/setup/'))
+  // Only the claim itself needs no session; the wizard's steps under /setup/ are pages.
+  if (
+    path === '/login' ||
+    path === '/logout' ||
+    path === '/setup' ||
+    path === '/setup/code' ||
+    path === '/setup/passphrase'
+  )
     return 'auth';
   return 'page';
 }

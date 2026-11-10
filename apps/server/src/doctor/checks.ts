@@ -88,6 +88,8 @@ export type DoctorDeps = {
     vaultKey: { status: 'ok' | 'empty' | 'disabled' } | { status: 'mismatch'; names: string[] };
     /** The Claude token's creation date (`credentialCreatedAt`), for `claude.token-age`. */
     claudeTokenCreatedAt?: string;
+    /** Whether each install-wide credential is set, for `credential.install`. */
+    install?: { claudeToken: boolean; githubAuthorToken: boolean };
   };
 };
 
@@ -309,6 +311,53 @@ function configFileCheck(s: ConfigStatus): DoctorCheck {
   };
 }
 
+/**
+ * The Claude token and the GitHub author token, needed by every zone: before any zone exists, the
+ * per-zone `credential.missing` has nothing to judge, so this says it. With zones it defers to them,
+ * so a missing token is reported once per zone and not again here.
+ */
+function installCredentialCheck(d: DoctorDeps): DoctorCheck {
+  const base = { id: 'credential.install', zoneId: null, doc: doc('tokens') };
+  if (d.config.dropZones.length > 0)
+    return {
+      ...base,
+      status: 'pass',
+      summary:
+        "judged per zone: each zone's credential checks (credential.missing) name what it lacks",
+    };
+  const set = d.credentials?.install ?? { claudeToken: true, githubAuthorToken: true };
+  const missing = [
+    ...(set.claudeToken
+      ? []
+      : [
+          {
+            what: 'the Claude token',
+            fix: 'the Claude step (/setup/claude), or jumpmaster ctl secrets set claudeToken (the value on stdin)',
+          },
+        ]),
+    ...(set.githubAuthorToken
+      ? []
+      : [
+          {
+            what: 'the GitHub author token',
+            fix: 'the GitHub step (/setup/forge), or jumpmaster ctl secrets set githubAuthorToken (the value on stdin)',
+          },
+        ]),
+  ];
+  if (missing.length === 0)
+    return {
+      ...base,
+      status: 'pass',
+      summary: 'the Claude token and the GitHub author token are set',
+    };
+  return {
+    ...base,
+    status: 'fail',
+    summary: `not set: ${missing.map((m) => m.what).join(' and ')}; no zone can run without ${missing.length === 1 ? 'it' : 'them'}`,
+    fix: missing.map((m) => `Set ${m.what}: ${m.fix}.`).join('\n'),
+  };
+}
+
 /** Settings accepted live that only a restart applies. */
 function restartCheck(s: ConfigStatus): DoctorCheck {
   const base = { id: 'config.restart', zoneId: null };
@@ -390,7 +439,7 @@ function tokenAgeCheck(d: DoctorDeps): DoctorCheck {
       ...base,
       status: 'skip',
       summary: "claude.tokenCreatedAt is not set, so the Claude token's age is unknown",
-      fix: 'Set claude.tokenCreatedAt (YYYY-MM-DD) to the day you ran claude setup-token: tokens last a year, and the doctor warns a month before.',
+      fix: "Enter the day you ran claude setup-token in the Claude step's “Made on” field (/setup/claude), or set claude.tokenCreatedAt (YYYY-MM-DD) in the config file: tokens last a year, and the doctor warns a month before.",
     };
   const t = Date.parse(created);
   if (!Number.isFinite(t))
@@ -1946,6 +1995,9 @@ export async function runChecks(
       : []),
     ...(d.credentials
       ? [
+          ...(d.credentials.install
+            ? [g('credential.install', null, () => installCredentialCheck(d))]
+            : []),
           g('credential.shadowed', null, () => shadowedCheck(d)),
           g('vault.key', null, () => vaultKeyCheck(d)),
         ]

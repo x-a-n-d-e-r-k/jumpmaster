@@ -353,3 +353,86 @@ describe('ctl secrets (Task 4)', () => {
     expect((await run(['secrets', 'nope'])).code).toBe(2);
   });
 });
+
+describe('ctl detect and ctl zones add', () => {
+  test('ctl detect and ctl zones add map to the routes', () => {
+    expect(ctlRequest(['detect', 'octo/demo'])).toEqual({
+      path: '/api/control/detect',
+      body: { repo: 'octo/demo' },
+    });
+    expect(
+      ctlRequest([
+        'zones',
+        'add',
+        'octo/demo',
+        '--id',
+        'web',
+        '--preset',
+        'node',
+        '--identity',
+        'starter',
+        '--egress',
+        'enforce',
+        '--resume',
+      ]),
+    ).toEqual({
+      path: '/api/control/zones',
+      body: {
+        zone: {
+          repo: 'octo/demo',
+          id: 'web',
+          preset: 'node',
+          identity: 'starter',
+          egress: { mode: 'enforce' },
+        },
+        resume: true,
+      },
+    });
+    for (const bad of [
+      ['detect'],
+      ['detect', 'octo/demo', 'extra'],
+      ['zones', 'add'],
+      ['zones', 'add', 'octo/demo', '--egress', 'wide'],
+      ['zones', 'add', 'octo/demo', '--identity', 'admin'],
+      ['zones', 'add', 'octo/demo', '--id'],
+      ['zones', 'add', 'octo/demo', '--unknown'],
+      ['zones', 'remove', 'demo'],
+      ['zones', 'add', 'octo/demo', '--preset', 'cobol'],
+      ['zones', 'add', 'octo/demo', '--id', 'Not_Valid'],
+    ])
+      expect(ctlRequest(bad), bad.join(' ')).toBeNull();
+  });
+
+  test('ctl zones add without --egress writes monitor', () => {
+    expect(ctlRequest(['zones', 'add', 'octo/demo'])).toEqual({
+      path: '/api/control/zones',
+      body: { zone: { repo: 'octo/demo', egress: { mode: 'monitor' } } },
+    });
+  });
+});
+
+describe('ctl zones add output', () => {
+  test('ctl zones add prints the zone, preset and gates it wrote', async () => {
+    const r = await run(
+      ['zones', 'add', 'octo/demo'],
+      '',
+      fakeFetch(200, {
+        revision: 2,
+        changed: ['dropZones[demo]'],
+        restartNeeded: [],
+        zone: 'demo',
+        preset: 'node',
+        gates: [
+          { name: 'test', run: 'npm test' },
+          { name: 'lint', run: 'npm run lint' },
+        ],
+      }),
+    );
+    expect(r.code).toBe(0);
+    expect(r.out).toEqual([
+      'added zone demo (revision 2), preset node, egress monitor',
+      '  gate test: npm test',
+      '  gate lint: npm run lint',
+    ]);
+  });
+});

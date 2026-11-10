@@ -493,6 +493,9 @@ const MACHINE_VARS = { joinToken: 'JM_JOIN_TOKEN', operatorToken: 'JM_OPERATOR_T
 const isPlainObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 
+/** A zone id as `zoneIdOf` makes it: lower case letters, digits and inner dashes, at most 63. */
+export const ZONE_ID = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
 /** Names that reach an object's prototype machinery when assigned: never config keys. */
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
@@ -563,7 +566,9 @@ export function parseEditable(
     return { ok: false, issues: [{ path: '', message: 'the config must be a JSON object' }] };
   const forbidden = forbiddenKeys(json, '');
   if (forbidden.length > 0) return { ok: false, issues: forbidden };
-  const lenient = opts.strict ? { json, warnings: [] } : clampPoll(json);
+  const lenient: { json: Record<string, unknown>; warnings: string[] } = opts.strict
+    ? { json, warnings: [] }
+    : clampPoll(json);
   const doc: Record<string, unknown> = lenient.json;
   const boot = BOOT_KEYS.filter((k) => Object.hasOwn(doc, k));
   if (boot.length > 0)
@@ -584,6 +589,18 @@ export function parseEditable(
     // Zone ids key plain objects (gate secrets, modes by zone): never a prototype name.
     if (FORBIDDEN_KEYS.has(zone.id))
       issues.push({ path: `dropZones.${i}.id`, message: `a zone id may not be ${zone.id}` });
+    // The charset `zoneIdOf` makes. A write keeps to it; an M4 file that doesn't still loads.
+    else if (!ZONE_ID.test(zone.id)) {
+      if (opts.strict)
+        issues.push({
+          path: `dropZones.${i}.id`,
+          message: `a zone id is lower case letters, digits and inner dashes, at most 63: not ${zone.id}`,
+        });
+      else
+        lenient.warnings.push(
+          `zone id ${zone.id} is not lower case letters, digits and inner dashes: a write from the UI or ctl would refuse it; rename it in the file`,
+        );
+    }
     if (seen.has(zone.id))
       issues.push({ path: `dropZones.${i}.id`, message: `duplicate zone id: ${zone.id}` });
     seen.add(zone.id);

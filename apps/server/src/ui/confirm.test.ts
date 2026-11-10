@@ -258,3 +258,15 @@ describe('the confirmation page', () => {
     );
   });
 });
+
+describe('cancelTo', () => {
+  test('a PATCH can name where Cancel goes, under the same path-only rule as returnTo', async () => {
+    const w = await world();
+    const id = await w.propose(weaken, w.one, { cancelTo: '/zones' });
+    expect((await w.page(id)).body).toContain('<a href="/zones">Cancel</a>');
+    const id2 = await w.propose(weaken, w.one, { cancelTo: 'https://evil.example/' });
+    const body = (await w.page(id2)).body;
+    expect(body).toContain('<a href="/">Cancel</a>');
+    expect(body).not.toContain('evil.example');
+  });
+});

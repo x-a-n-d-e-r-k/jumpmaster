@@ -167,7 +167,8 @@ export function registerAuthPages(app: FastifyInstance, deps: AuthPageDeps): voi
     parseCookies(req.headers.cookie)[SETUP_COOKIE] ?? '';
 
   app.get('/setup', async (req, reply) => {
-    if (!setupActive(db)) return reply.redirect('/', 302);
+    // Claimed already: the wizard, which sends home once there is nothing left to set up.
+    if (!setupActive(db)) return reply.redirect('/setup/next', 302);
     return html(
       reply,
       200,
@@ -233,7 +234,7 @@ export function registerAuthPages(app: FastifyInstance, deps: AuthPageDeps): voi
     // No session exists yet: the claim is the system's act on the setup code's word.
     recordAudit(db, { via: 'system', action: 'setup.claim', detail: { result: 'claimed' } }, now());
     startSession(reply);
-    // T6's wizard lives at /setup/next; until it lands, home.
-    return reply.redirect('/', 303);
+    // On to the wizard, which resumes where the operator left it.
+    return reply.redirect('/setup/next', 303);
   });
 }
