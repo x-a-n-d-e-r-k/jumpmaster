@@ -16,6 +16,7 @@ import { IMAGE_LOCK_PATH, loadImageLock, resolveImage } from './presets.js';
 import { readSecret } from './secrets.js';
 import {
   gateSecretName,
+  MIN_GATE_SECRET,
   type Resolved,
   type ResolvedCredential,
   resolveCredentials,
@@ -485,9 +486,6 @@ function gateSecretNameIssues(
   }
   return issues;
 }
-
-/** Shorter gate secrets can't be redacted without mangling ordinary output. */
-const MIN_GATE_SECRET = 8;
 
 /** The machine secrets: generated for the install, never entered in the UI, read from variables. */
 const MACHINE_VARS = { joinToken: 'JM_JOIN_TOKEN', operatorToken: 'JM_OPERATOR_TOKEN' } as const;

@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { resolve as resolvePath, sep } from 'node:path';
 /**
  * The readiness doctor's server-side checks (spec §8.0). Every check is a read: the database, the
@@ -1894,8 +1895,16 @@ function vaultKeyCheck(d: DoctorDeps): DoctorCheck {
         'no vault key (JM_VAULT_KEY_FILE is unset): credentials come from files and the environment only',
     };
   const keyFile = d.env.vaultKeyFile;
-  const data = resolvePath(d.config.dataDir);
-  if (keyFile && resolvePath(keyFile).startsWith(data + sep))
+  // Real paths on both sides: a symlinked data directory or key path can't hide the overlap.
+  const real = (p: string): string => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return resolvePath(p);
+    }
+  };
+  const data = real(d.config.dataDir);
+  if (keyFile && real(keyFile).startsWith(data + sep))
     return {
       ...base,
       status: 'warn',

@@ -1,12 +1,4 @@
-import {
-  closeSync,
-  constants,
-  existsSync,
-  fstatSync,
-  lstatSync,
-  openSync,
-  readSync,
-} from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 
 const errno = (e: unknown): string | undefined =>
@@ -97,7 +89,7 @@ export function readSecretFile(path: string, label: string): string {
     // A symbolic link is followed (Kubernetes-style `..data` mounts, a hand-made link) and held to
     // the plain-file rule: every check below runs on what the descriptor opened, never on the
     // path. A readable-by-others target loads, as a plain file does; the doctor fails it.
-    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOCTTY ?? 0));
   } catch (e) {
     const code = errno(e);
     if (code === 'EACCES' || code === 'EPERM')

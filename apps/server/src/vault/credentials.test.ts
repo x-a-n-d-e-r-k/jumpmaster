@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -97,6 +97,14 @@ describe('resolveCredentials', () => {
       `claude_token: ${join(dir, 'claude_token')} is group- or world-writable; chmod go-w it`,
     );
     expect(msg).not.toContain(CLAUDE);
+  });
+
+  test('a dangling link named for a credential is reported by name at start, as a dangling _FILE path is', () => {
+    const dir = secretsDir({});
+    symlinkSync(join(dir, 'gone'), join(dir, 'github_author_token'));
+    expect(() => resolveCredentials({}, dir, 'disabled')).toThrow(
+      `github_author_token: ${join(dir, 'github_author_token')} does not exist`,
+    );
   });
 
   test('a _FILE variable or a plain variable still wins over the file by name and the vault', () => {

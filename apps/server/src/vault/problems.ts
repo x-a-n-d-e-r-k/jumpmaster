@@ -3,6 +3,7 @@ import {
   type CredentialName,
   gateSecretName,
   gateSecretVar,
+  MIN_GATE_SECRET,
   type Resolved,
   type ResolvedCredential,
 } from './credentials.js';
@@ -22,7 +23,6 @@ export type CredentialProblem = {
   message: string;
 };
 
-const MIN_GATE_SECRET = 8;
 const fine = (r: ResolvedCredential | undefined): boolean =>
   r?.value?.startsWith('github_pat_') === true;
 const present = (r: ResolvedCredential | undefined): boolean =>

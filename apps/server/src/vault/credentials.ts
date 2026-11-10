@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { readSecret, readSecretFile } from '@jumpmaster/protocol';
 import { fingerprintOf, type Vault, VaultKeyError, type VaultMeta } from './vault.js';
@@ -45,6 +45,9 @@ export const CREDENTIAL_ROLES: Record<InstallCredential, string> = {
   githubReviewerToken: 'GitHub reviewer token: posts reviews (two-bot zones)',
   githubReadToken: 'GitHub read token: lets review drops read a private repository',
 };
+
+/** Shorter gate secrets can't be redacted without mangling ordinary output. */
+export const MIN_GATE_SECRET = 8;
 
 export const gateSecretName = (zoneId: string, name: string): CredentialName =>
   `zone:${zoneId}:${name}`;
@@ -129,6 +132,16 @@ function fromEnv(
   return { value, source: 'env', path: variable, fingerprint: fingerprintOf(value) };
 }
 
+/** Whether a name exists in the directory at all, a dangling link included. */
+const present = (path: string): boolean => {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const installOfVar = (variable: string): InstallCredential | undefined =>
   INSTALL_CREDENTIALS.find((n) => CREDENTIAL_VARS[n] === variable);
 
@@ -154,7 +167,9 @@ export function resolveCredentials(
       continue;
     }
     const path = secretsDir ? join(secretsDir, SECRET_FILES[name]) : undefined;
-    if (path && existsSync(path)) {
+    // lstat, not exists: a dangling link named for a credential is the operator's file, broken,
+    // and the read below names it, as it names a dangling `*_FILE` path.
+    if (path && present(path)) {
       const value = readSecretFile(path, SECRET_FILES[name]);
       set({ value, source: 'file', path, fingerprint: fingerprintOf(value) });
       continue;
@@ -236,8 +251,6 @@ export type TestDeps = {
     repoAccess(): Promise<unknown>;
   };
 };
-
-const MIN_GATE_SECRET = 8;
 
 /** The status GitHub answered and the permission it says the endpoint accepts; nothing else. */
 function refusalOf(e: unknown): { ok: false; status: number | null; permission?: string } {
