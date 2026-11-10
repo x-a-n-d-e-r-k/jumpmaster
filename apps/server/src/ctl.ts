@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { PRESETS } from '@jumpmaster/protocol';
 import type { DoctorCheck } from './doctor/checks.js';
@@ -170,10 +171,22 @@ export function ctlRequest(args: string[]): CtlRequest | null {
     return args.length === 2 && zone === 'set'
       ? { path: '/api/control/passphrase', method: 'PUT', body: {} }
       : null;
+  if (command === 'labels')
+    return args.length === 2 && zone
+      ? { path: `/api/control/zones/${encodeURIComponent(zone)}/labels`, body: {} }
+      : null;
   if (command === 'doctor') {
     const drop = args.includes('--drop');
     const cancel = args.includes('--cancel');
-    const words = args.slice(1).filter((a) => a !== '--json' && a !== '--drop' && a !== '--cancel');
+    // `--artifacts <dir>` is ctl's own (where the fails' files go): not part of the request.
+    const rest = args.slice(1);
+    const at = rest.indexOf('--artifacts');
+    if (at >= 0) {
+      const dir = rest[at + 1];
+      if (!dir || dir.startsWith('--')) return null;
+      rest.splice(at, 2);
+    }
+    const words = rest.filter((a) => a !== '--json' && a !== '--drop' && a !== '--cancel');
     if (words.some((w) => w.startsWith('--')) || words.length > 1) return null;
     const [only] = words;
     // A doctor drop is for one zone, and spends a turn of usage: never all zones at once.
@@ -219,11 +232,15 @@ const STATUS_WORD: Record<DoctorCheck['status'], string> = {
 };
 
 /** The doctor's run as lines a person reads: each check, then its fix and doc for any not passing. */
-export function formatDoctor(run: {
-  id: number;
-  finishedAt: string | null;
-  checks: DoctorCheck[];
-}) {
+export function formatDoctor(
+  run: {
+    id: number;
+    finishedAt: string | null;
+    checks: DoctorCheck[];
+  },
+  /** The artifacts `--artifacts` wrote, by check. */
+  opts: { written?: Map<DoctorCheck, string> } = {},
+) {
   const lines = [`Jumpmaster doctor, run ${run.id} (${run.finishedAt ?? 'unfinished'})`, ''];
   const zoneWidth = Math.max(4, ...run.checks.map((c) => (c.zoneId ?? '').length));
   const idWidth = Math.max(...run.checks.map((c) => c.id.length));
@@ -237,6 +254,24 @@ export function formatDoctor(run: {
       for (const [i, l] of c.fix.split('\n').entries())
         lines.push(`${indent}${i === 0 ? 'fix: ' : '     '}${l}`);
     if (c.status !== 'pass' && c.doc) lines.push(`${indent}see: ${c.doc}`);
+    const a = c.status === 'pass' || c.status === 'skip' ? undefined : c.action;
+    if (a) {
+      const verb =
+        a.href.endsWith('/labels') && c.zoneId
+          ? ` (jumpmaster ctl labels ${c.zoneId})`
+          : a.href === '/api/control/doctor/drop' && c.zoneId
+            ? ` (jumpmaster ctl doctor ${c.zoneId} --drop)`
+            : '';
+      lines.push(`${indent}action: ${a.label}: ${a.method ? `${a.method} ` : ''}${a.href}${verb}`);
+      if (a.artifact) {
+        const written = opts.written?.get(c);
+        lines.push(
+          written
+            ? `${indent}wrote ${written}`
+            : `${indent}file: ${a.artifact.filename} (jumpmaster ctl doctor --artifacts <dir> writes it)`,
+        );
+      }
+    }
   }
   const n = (s: DoctorCheck['status']) => run.checks.filter((c) => c.status === s).length;
   lines.push(
@@ -251,7 +286,7 @@ const CONFIG_USAGE =
 export const SECRETS_USAGE =
   'ctl secrets list | ctl secrets set <name> [--from-file <path>] [--created YYYY-MM-DD] (the value on stdin or in the file, never in argv) | ctl secrets test <name> | ctl secrets remove <name> | ctl secrets reload';
 
-const USAGE = `usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] | ctl doctor <zone> --drop | ctl doctor <zone> --cancel | ctl setup-code | ctl setup reopen | ctl detect <owner/name> | ctl github <zone> recommend | pat <author|reviewer|read> | ruleset | codeowners [--reviewer <login>]… | checklist | ctl zones add <owner/name> [--id <id>] [--preset <p>] [--identity starter] [--egress off|monitor|enforce] [--resume] | ctl passphrase set (the passphrase on stdin) | ${CONFIG_USAGE} | ${SECRETS_USAGE}`;
+const USAGE = `usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] [--artifacts <dir>] | ctl labels <zone> | ctl doctor <zone> --drop | ctl doctor <zone> --cancel | ctl setup-code | ctl setup reopen | ctl detect <owner/name> | ctl github <zone> recommend | pat <author|reviewer|read> | ruleset | codeowners [--reviewer <login>]… | checklist | ctl zones add <owner/name> [--id <id>] [--preset <p>] [--identity starter] [--egress off|monitor|enforce] [--resume] | ctl passphrase set (the passphrase on stdin) | ${CONFIG_USAGE} | ${SECRETS_USAGE}`;
 
 type Call = (
   method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
@@ -528,6 +563,26 @@ async function runSecrets(
   );
 }
 
+/**
+ * The generated files of the fails (a ruleset, CODEOWNERS) written into `dir`, each by its base
+ * name only, so a name can never place a file elsewhere. They hold no secret (the doctor redacts
+ * them before they are stored).
+ */
+function writeArtifacts(checks: DoctorCheck[], dir: string): Map<DoctorCheck, string> {
+  const written = new Map<DoctorCheck, string>();
+  mkdirSync(dir, { recursive: true });
+  for (const c of checks) {
+    const a = c.status === 'pass' || c.status === 'skip' ? undefined : c.action?.artifact;
+    if (!a) continue;
+    const name = basename(a.filename);
+    if (!name || name === '.' || name === '..') continue;
+    const path = join(dir, name);
+    writeFileSync(path, a.text, { mode: 0o644 });
+    written.set(c, path);
+  }
+  return written;
+}
+
 /** The first line of stdin, without its line ending (`ctl passphrase set`). */
 async function readStdinLine(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -615,8 +670,10 @@ export async function runCtl(
     const { run } = JSON.parse(text) as {
       run: { id: number; finishedAt: string | null; checks: DoctorCheck[] };
     };
+    const at = args.indexOf('--artifacts');
+    const written = at >= 0 ? writeArtifacts(run.checks, args[at + 1] as string) : new Map();
     if (args.includes('--json')) out(JSON.stringify({ run }, null, 2));
-    else for (const line of formatDoctor(run)) out(line);
+    else for (const line of formatDoctor(run, { written })) out(line);
     return run.checks.some((c) => c.status === 'fail') ? 1 : 0;
   }
   if (args[0] === 'github' && res.ok) {

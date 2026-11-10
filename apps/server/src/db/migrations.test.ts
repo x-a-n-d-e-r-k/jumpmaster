@@ -769,7 +769,6 @@ test('an M4.5a-era statement set still runs against v19 (the new tables are igno
 test('v20 adds vault: ciphertext and metadata by name, never a plaintext column', () => {
   const db = openDb(dbAt(19));
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
-  expect(MIGRATIONS.at(-1)?.version).toBe(20);
   const cols = (
     db.prepare('SELECT name, "notnull" AS nn, pk FROM pragma_table_info(\'vault\')').all() as {
       name: string;
@@ -804,4 +803,27 @@ test('an M4.5a-era statement set still runs against v20 (the vault is ignored)',
   const db = openDb(dbAt(20));
   db.prepare("INSERT INTO settings (key, value_json, updated_at) VALUES ('k', '1', 't')").run();
   expect(count(db, 'settings')).toBe(1);
+});
+
+test('v21 lets the outbox hold create_labels, keeping every row and the kind check', () => {
+  const f = dbAt(20, (raw) =>
+    raw
+      .prepare(
+        `INSERT INTO outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state, created_at, updated_at)
+         VALUES ('o1', 'issue:z:o:k', 'create_issue', NULL, 'z', '{}', 'done', 't', 't')`,
+      )
+      .run(),
+  );
+  const db = openDb(f);
+  expect(MIGRATIONS.at(-1)?.version).toBe(21);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(count(db, 'outbox')).toBe(1);
+  const put = db.prepare(
+    `INSERT INTO outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state, created_at, updated_at)
+     VALUES (?, ?, ?, NULL, 'z', '{}', 'pending', 't', 't')`,
+  );
+  put.run('o2', 'create_labels:z:1', 'create_labels');
+  expect(() => put.run('o3', 'x', 'delete_repo')).toThrow(/CHECK/);
+  expect(() => put.run('o4', 'issue:z:o:k', 'create_issue')).toThrow(/UNIQUE/);
+  db.close();
 });

@@ -30,6 +30,7 @@ import {
   isRateLimited,
   type ReadProbe,
 } from '../forge/github.js';
+import type { ZoneGuidance } from '../github/guidance.js';
 import { getGoals } from '../goals.js';
 import { doctorMayLease, missingFor, zoneRequirements } from '../leases.js';
 import type { ForgePair } from '../outbox.js';
@@ -52,7 +53,63 @@ export type DoctorCheck = {
   doc?: string;
   /** The doctor drop a check reports on, if any. */
   dropId?: string;
+  /** The control that fixes a fail or a warn (doctor/actions.ts); `fix` stays for `ctl`. */
+  action?: DoctorAction;
 };
+
+/**
+ * Where a fail is fixed: `app` a path in this UI (a POST, with `method`, for an action button),
+ * `forge` a page on the repository, `docs` the install runbook. `artifact` is a generated file the
+ * page offers for download (never a secret).
+ */
+export type DoctorAction = {
+  kind: 'app' | 'forge' | 'docs';
+  label: string;
+  href: string;
+  method?: 'POST';
+  body?: Record<string, string>;
+  artifact?: { filename: string; text: string };
+};
+
+/** Every check id the doctor reports (a test keeps it equal to the ids in this file). */
+export const CHECK_IDS = [
+  'claude.plan',
+  'claude.token-age',
+  'config.file',
+  'config.listen',
+  'config.restart',
+  'config.secret-files',
+  'config.uid',
+  'control.kill',
+  'credential.install',
+  'credential.kind',
+  'credential.missing',
+  'credential.same',
+  'credential.shadowed',
+  'forge.admin',
+  'forge.author',
+  'forge.author-reads',
+  'forge.branch-rules',
+  'forge.ci',
+  'forge.codeowners',
+  'forge.labels',
+  'forge.private-clone',
+  'forge.reviewer',
+  'forge.reviewer-reads',
+  'stick.capabilities',
+  'stick.image-policy',
+  'stick.seen',
+  'usage.gate',
+  'vault.key',
+  'zone.crew-cap',
+  'zone.doctor-drop',
+  'zone.egress',
+  'zone.goals',
+  'zone.identity',
+  'zone.mode',
+  'zone.preset',
+  'zone.services',
+] as const;
 
 /** What the doctor knows about the process it runs in. */
 export type DoctorEnv = {
@@ -81,6 +138,13 @@ export type DoctorDeps = {
   readForge?(zoneId: string): Forge | undefined;
   /** The config store's status (mode, file problems, restart-pending settings), when there is one. */
   configStatus?: ConfigStatus;
+  /** Which pages exist, for the fix links (default: this build's, `PAGES_M45A`). */
+  pages?: { zones: boolean; settings: boolean; credentials: boolean };
+  /**
+   * The generated GitHub files for a zone (the ruleset, CODEOWNERS, the token links), read only
+   * when one of its checks needs them for a fix link; undefined when GitHub can't be read.
+   */
+  guidance?(zoneId: string): Promise<ZoneGuidance | undefined>;
   /** The credentials as the store resolved them (Task 4); absent, the credential checks don't run. */
   credentials?: {
     problems: CredentialProblem[];
@@ -1271,36 +1335,52 @@ const LABEL_SPEC: Record<string, { color: string; description: string }> = {
   staged: { color: 'C5DEF5', description: 'Filed by the crew, waiting for Command' },
 };
 
-async function labelsCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck> {
-  const base = { id: 'forge.labels', zoneId: zone.id, doc: doc('labels') };
-  const got = await attempt(() => r.pair.author.listLabels());
-  if (!got.ok) return readFailed(base, 'author', 'list the labels', 'Issues: read', got);
+/** The labels a zone's config names, each with its colour and description. */
+export function wantedLabels(
+  zone: Pick<DropZoneConfig, 'readyLabel' | 'retryLabel' | 'crew'>,
+): { name: string; color: string; description: string }[] {
   const want: [string, keyof typeof LABEL_SPEC][] = [
     [zone.readyLabel, 'ready'],
     [zone.retryLabel, 'retry'],
     ...(zone.crew.enabled ? ([[zone.crew.stagedLabel, 'staged']] as [string, 'staged'][]) : []),
   ];
+  return want.map(([name, kind]) => ({
+    name,
+    color: LABEL_SPEC[kind]?.color ?? 'EDEDED',
+    description: LABEL_SPEC[kind]?.description ?? '',
+  }));
+}
+
+/** `forge.labels` on the author's forge (the doctor run, and again after the label action). */
+export async function labelsCheckOn(zone: DropZoneConfig, author: Forge): Promise<DoctorCheck> {
+  const base = { id: 'forge.labels', zoneId: zone.id, doc: doc('labels') };
+  const got = await attempt(() => author.listLabels());
+  if (!got.ok) return readFailed(base, 'author', 'list the labels', 'Issues: read', got);
+  const want = wantedLabels(zone);
   const have = new Set(got.value.map((l) => l.toLowerCase()));
-  const missing = want.filter(([name]) => !have.has(name.toLowerCase()));
+  const missing = want.filter((l) => !have.has(l.name.toLowerCase()));
   if (missing.length === 0)
     return {
       ...base,
       status: 'pass',
-      summary: `the labels exist: ${want.map(([n]) => n).join(', ')}`,
+      summary: `the labels exist: ${want.map((l) => l.name).join(', ')}`,
     };
   const q = (s: string) => (/^[\w.:-]+$/.test(s) ? s : JSON.stringify(s));
   return {
     ...base,
     status: 'fail',
-    summary: `missing label(s) on ${zone.repo}: ${missing.map(([n]) => n).join(', ')}`,
-    fix: `Create them (with the GitHub CLI, as an account with write access):\n${missing
+    summary: `missing label(s) on ${zone.repo}: ${missing.map((l) => l.name).join(', ')}`,
+    fix: `Use the doctor page's Create the missing labels (or POST /api/control/zones/${zone.id}/labels), or create them with the GitHub CLI, as an account with write access:\n${missing
       .map(
-        ([name, kind]) =>
-          `gh label create ${q(name)} --repo ${zone.repo} --color ${LABEL_SPEC[kind]?.color} --description ${JSON.stringify(LABEL_SPEC[kind]?.description)}`,
+        (l) =>
+          `gh label create ${q(l.name)} --repo ${zone.repo} --color ${l.color} --description ${JSON.stringify(l.description)}`,
       )
       .join('\n')}`,
   };
 }
+
+const labelsCheck = (zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck> =>
+  labelsCheckOn(zone, r.pair.author);
 
 async function privateCloneCheck(
   d: DoctorDeps,

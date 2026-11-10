@@ -696,7 +696,14 @@ export type OutboxState = 'pending' | 'done' | 'unknown' | 'failed';
 export interface OutboxRow {
   id: string;
   opKey: string;
-  kind: 'create_pr' | 'post_review' | 'merge' | 'create_issue' | 'update_issue' | 'set_labels';
+  kind:
+    | 'create_pr'
+    | 'post_review'
+    | 'merge'
+    | 'create_issue'
+    | 'update_issue'
+    | 'set_labels'
+    | 'create_labels';
   /** Null for a zone-level op (issue and label writes). */
   workItemId: number | null;
   zoneId: string;

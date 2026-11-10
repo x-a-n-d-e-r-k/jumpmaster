@@ -1093,6 +1093,34 @@ describe('GitHubForge doctor reads', () => {
     expect(await new GitHubForge('octo', 'r', 'tok').ownerType()).toBe('User');
   });
 
+  test('createLabel posts the name, colour and description, and an existing name (422) is no error', async () => {
+    let body: unknown;
+    nock(api)
+      .post('/repos/o/r/labels', (b) => {
+        body = b;
+        return true;
+      })
+      .reply(201, { name: 'agent-ready' });
+    const f = new GitHubForge('o', 'r', 'tok');
+    expect(await f.createLabel('agent-ready', '0e8a16', 'Ready for an agent')).toEqual({
+      created: true,
+    });
+    expect(body).toEqual({
+      name: 'agent-ready',
+      color: '0e8a16',
+      description: 'Ready for an agent',
+    });
+    nock(api)
+      .post('/repos/o/r/labels')
+      .reply(422, {
+        message: 'Validation Failed',
+        errors: [{ resource: 'Label', code: 'already_exists', field: 'name' }],
+      });
+    expect(await f.createLabel('agent-ready', '0e8a16', 'Ready')).toEqual({ created: false });
+    nock(api).post('/repos/o/r/labels').reply(403, { message: 'Resource not accessible' });
+    await expect(f.createLabel('x', '000000', 'd')).rejects.toMatchObject({ status: 403 });
+  });
+
   test('listLabels pages past 100', async () => {
     const page1 = Array.from({ length: 100 }, (_, i) => ({ name: `l${i}` }));
     nock(api)

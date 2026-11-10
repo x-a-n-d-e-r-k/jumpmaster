@@ -93,6 +93,7 @@ export const FORGE_WRITES: readonly (keyof Forge)[] = [
   'findOrCreatePullRequest',
   'createReview',
   'merge',
+  'createLabel',
 ];
 
 export const READ_PERMISSIONS = [
@@ -444,6 +445,12 @@ function forgeFor(
     },
     repoAccess: async () => structuredClone(state.access[identity]),
     listLabels: async () => [...state.labels],
+    createLabel: async (name: string) => {
+      if (state.labels.some((l) => l.toLowerCase() === name.toLowerCase()))
+        return { created: false };
+      state.labels.push(name);
+      return { created: true };
+    },
     ownerType: async () => state.access[identity].ownerType,
     listDir: async (ref, path) => {
       const d = state.dirs.get(`${ref}:${path}`);

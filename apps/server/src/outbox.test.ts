@@ -21,7 +21,7 @@ import {
   runOp,
   sanitizeForgeText,
 } from './outbox.js';
-import { fakeForgePair } from './test/fakes.js';
+import { FORGE_WRITES, fakeForgePair } from './test/fakes.js';
 import { plus, t0, tmpDbFile } from './test/helpers.js';
 
 const MIN = 60_000;
@@ -560,5 +560,62 @@ describe('zone-level ops', () => {
     });
     expect(listOutbox(db, ['unknown'], 'main').map((r) => r.opKey)).toEqual(['issue:main:o:a']);
     expect(listOutbox(db, ['unknown'], 'other')).toEqual([]);
+  });
+});
+
+describe('the label op (Task 8)', () => {
+  const labelOp = (key = 'create_labels:main:1') => ({
+    kind: 'create_labels' as const,
+    opKey: key,
+    zoneId: 'main',
+    itemId: null,
+    payload: {
+      labels: [
+        { name: 'agent-ready', color: '0e8a16', description: 'Ready for an agent' },
+        { name: 'agent-retry', color: 'fbca04', description: 'Retry' },
+      ],
+    },
+  });
+
+  test('creates the missing labels as the author, idempotent by name', async () => {
+    f.state.labels = ['Agent-Ready'];
+    const r = await runOp(db, forges, labelOp(), t1);
+    expect(r).toMatchObject({ state: 'done', result: { created: ['agent-retry'] } });
+    expect(f.author.calls.filter((c) => c.method === 'createLabel').map((c) => c.args[0])).toEqual([
+      'agent-retry',
+    ]);
+    expect(f.reviewer.calls.filter((c) => c.method === 'createLabel')).toEqual([]);
+    // A second request (a new op) finds them all and writes nothing.
+    const again = await runOp(db, forges, labelOp('create_labels:main:2'), t1);
+    expect(again).toMatchObject({ state: 'done', result: { created: [] } });
+    expect(f.author.calls.filter((c) => c.method === 'createLabel')).toHaveLength(1);
+  });
+
+  test('the label op works in observe mode with allowInObserve, and is refused when killed', async () => {
+    setZoneMode(db, 'main', 'observe', t0);
+    f.state.labels = [];
+    await expect(runOp(db, forges, labelOp(), t1)).rejects.toThrow(/observe mode/);
+    expect(await runOp(db, forges, labelOp(), t1, { allowInObserve: true })).toMatchObject({
+      state: 'done',
+    });
+    setKilled(db, true, t0);
+    await expect(
+      runOp(db, forges, labelOp('create_labels:main:3'), t1, { allowInObserve: true }),
+    ).rejects.toThrow(/kill switch/);
+  });
+
+  test('no other outbox op bypasses the observe suppression', async () => {
+    setZoneMode(db, 'main', 'observe', t0);
+    const crew = {
+      kind: 'create_issue' as const,
+      opKey: 'issue:main:obj:k',
+      zoneId: 'main',
+      itemId: null,
+      payload: { title: 't', body: 'b', labels: [], since: t0.toISOString() },
+    };
+    await expect(runOp(db, forges, crew, t1, { allowInObserve: true })).rejects.toThrow(
+      /observe mode/,
+    );
+    expect(f.author.calls.filter((c) => FORGE_WRITES.includes(c.method as never))).toEqual([]);
   });
 });

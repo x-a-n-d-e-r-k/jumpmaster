@@ -3,6 +3,8 @@ import { join } from 'node:path';
 import { redact } from '@jumpmaster/protocol';
 import { secretList } from '../config.js';
 import type { Db } from '../db/open.js';
+import type { ZoneGuidance } from '../github/guidance.js';
+import { actionFor, PAGES_M45A } from './actions.js';
 import {
   type DoctorCheck,
   type DoctorDeps,
@@ -34,12 +36,60 @@ export class DoctorBusyError extends Error {
 const LOCK_MS = 10 * 60_000;
 let running: { since: number } | null = null;
 
-const redactCheck = (c: DoctorCheck, secrets: string[]): DoctorCheck => ({
-  ...c,
-  summary: redact(c.summary, secrets),
-  ...(c.fix !== undefined ? { fix: redact(c.fix, secrets) } : {}),
-  ...(c.doc !== undefined ? { doc: redact(c.doc, secrets) } : {}),
-});
+const redactCheck = (c: DoctorCheck, secrets: string[]): DoctorCheck => {
+  const r = (s: string) => redact(s, secrets);
+  const a = c.action;
+  return {
+    ...c,
+    summary: r(c.summary),
+    ...(c.fix !== undefined ? { fix: r(c.fix) } : {}),
+    ...(c.doc !== undefined ? { doc: r(c.doc) } : {}),
+    // The action too, its generated file included: an artifact is never a carrier for a secret.
+    ...(a
+      ? {
+          action: {
+            ...a,
+            label: r(a.label),
+            href: r(a.href),
+            ...(a.artifact
+              ? { artifact: { filename: r(a.artifact.filename), text: r(a.artifact.text) } }
+              : {}),
+          },
+        }
+      : {}),
+  };
+};
+
+/** The checks whose fix link needs the zone's generated GitHub files. */
+const NEEDS_GUIDANCE = new Set(['forge.branch-rules', 'forge.codeowners', 'forge.ci']);
+
+/** Each fail and warn gets the control that fixes it (doctor/actions.ts). */
+async function withActions(d: DoctorDeps, checks: DoctorCheck[]): Promise<DoctorCheck[]> {
+  const pages = d.pages ?? PAGES_M45A;
+  const guidance = new Map<string, Promise<ZoneGuidance | undefined>>();
+  const guidanceOf = (zoneId: string) => {
+    if (!d.guidance) return Promise.resolve(undefined);
+    let g = guidance.get(zoneId);
+    if (!g) {
+      g = d.guidance(zoneId).catch(() => undefined);
+      guidance.set(zoneId, g);
+    }
+    return g;
+  };
+  return Promise.all(
+    checks.map(async (c) => {
+      if (c.status === 'pass' || c.status === 'skip') return c;
+      const zone = c.zoneId ? d.config.dropZones.find((z) => z.id === c.zoneId) : undefined;
+      const g = zone && NEEDS_GUIDANCE.has(c.id) ? await guidanceOf(zone.id) : undefined;
+      const action = actionFor(c, {
+        pages,
+        ...(zone ? { zone } : {}),
+        ...(g ? { guidance: g } : {}),
+      });
+      return action ? { ...c, action } : c;
+    }),
+  );
+}
 
 /**
  * Runs every check (zones in parallel), stores the run (the last 20 are kept), and returns it.
@@ -57,7 +107,9 @@ export async function runDoctor(d: DoctorDeps, opts: { zoneId?: string } = {}): 
       .run(startedAt);
     const id = Number(lastInsertRowid);
     const secrets = secretList(d.config.secrets);
-    const checks = (await runChecks(d, opts)).map((c) => redactCheck(c, secrets));
+    const checks = (await withActions(d, await runChecks(d, opts))).map((c) =>
+      redactCheck(c, secrets),
+    );
     const dropIds = checks.flatMap((c) => (c.dropId ? [c.dropId] : []));
     const finishedAt = d.now().toISOString();
     d.db

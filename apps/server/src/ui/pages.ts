@@ -11,6 +11,7 @@ import type {
   UsageStateRow,
   WorkItem,
 } from '../db/repo.js';
+import type { DoctorAction } from '../doctor/checks.js';
 import type { GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import type { Gate } from '../usage.js';
@@ -561,12 +562,18 @@ export function renderDoctor(
       `<h2>Doctor</h2><p>No doctor run has finished yet. Run one here or with <code>jumpmaster ctl doctor</code>.</p>${controls}${DOCTOR_SCRIPT}`,
     );
   const n = (s: string) => run.checks.filter((c) => c.status === s).length;
-  const rows = run.checks
+  // Fails first, then warns, then the rest, each group in the run's order.
+  const rank: Record<string, number> = { fail: 0, warn: 1 };
+  const ordered = run.checks
+    .map((c, i) => ({ c, i }))
+    .sort((a, b) => (rank[a.c.status] ?? 2) - (rank[b.c.status] ?? 2) || a.i - b.i)
+    .map((x) => x.c);
+  const rows = ordered
     .map((c) => {
       const help =
         c.status === 'pass'
           ? ''
-          : `${c.fix ? `<pre>${escapeHtml(c.fix)}</pre>` : ''}${c.doc ? `<div>See ${escapeHtml(c.doc)}</div>` : ''}`;
+          : `${c.action ? renderAction(c.action) : ''}${c.fix ? `<pre>${escapeHtml(c.fix)}</pre>` : ''}${c.doc ? `<div>See ${escapeHtml(c.doc)}</div>` : ''}`;
       return `<tr class="${escapeHtml(c.status)}"><td>${escapeHtml(c.status.toUpperCase())}</td><td>${escapeHtml(c.zoneId ?? '')}</td><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.summary)}${help}</td></tr>`;
     })
     .join('');
@@ -582,7 +589,32 @@ export type DoctorCheckView = {
   summary: string;
   fix?: string;
   doc?: string;
+  action?: DoctorAction;
 };
+
+/** A path on this server (one leading slash), or an https page: nothing else becomes a link. */
+const safeHref = (href: string): boolean =>
+  (href.startsWith('/') && !href.startsWith('//') && !href.includes('\\')) ||
+  /^https:\/\/[^\s"'<>]+$/.test(href);
+
+/**
+ * A fail's fix control: a link to a page here or on GitHub (a new tab), or, for a write, a
+ * button that POSTs with the session's CSRF header; never a link that writes on GET. A generated
+ * file is offered as a download beside it.
+ */
+function renderAction(a: DoctorAction): string {
+  let control = '';
+  if (a.method === 'POST' && safeHref(a.href) && a.href.startsWith('/'))
+    control = `<button data-doctor="${escapeHtml(a.href)}" data-body="${escapeHtml(JSON.stringify(a.body ?? {}))}">${escapeHtml(a.label)}</button>`;
+  else if (!a.method && safeHref(a.href))
+    control = a.href.startsWith('/')
+      ? `<a href="${escapeHtml(a.href)}">${escapeHtml(a.label)}</a>`
+      : `<a href="${escapeHtml(a.href)}" rel="noopener noreferrer" target="_blank">${escapeHtml(a.label)}</a>`;
+  const file = a.artifact
+    ? ` <a download="${escapeHtml(a.artifact.filename)}" href="data:text/plain;charset=utf-8,${encodeURIComponent(a.artifact.text)}">Download ${escapeHtml(a.artifact.filename)}</a>`
+    : '';
+  return control || file ? `<div class="action">${control}${file}</div>` : '';
+}
 
 /**
  * The intake page's script. The idempotency key is minted per submit and kept in sessionStorage

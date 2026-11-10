@@ -193,6 +193,8 @@ export interface Forge {
   repoAccess(): Promise<RepoAccess>;
   /** Every label name on the repository. */
   listLabels(): Promise<string[]>;
+  /** A write: creates a label; a name that already exists is `{ created: false }`, not an error. */
+  createLabel(name: string, color: string, description: string): Promise<{ created: boolean }>;
   /**
    * The repository owner's account type (`GET /users/<owner>`), which needs no token: the setup
    * wizard asks it before any token exists, when the repository itself may not be readable yet.
@@ -945,6 +947,33 @@ export class GitHubForge implements Forge {
   async ownerType(): Promise<'User' | 'Organization'> {
     const { data } = await this.octokit.rest.users.getByUsername({ username: this.owner });
     return data.type === 'Organization' ? 'Organization' : 'User';
+  }
+
+  async createLabel(
+    name: string,
+    color: string,
+    description: string,
+  ): Promise<{ created: boolean }> {
+    try {
+      await this.octokit.rest.issues.createLabel({
+        owner: this.owner,
+        repo: this.repo,
+        name,
+        color,
+        description,
+      });
+      return { created: true };
+    } catch (e) {
+      // GitHub answers 422 already_exists for a name taken (case-insensitively): idempotent.
+      const errors = (e as { response?: { data?: { errors?: { code?: string }[] } } }).response
+        ?.data?.errors;
+      if (
+        (e as { status?: number }).status === 422 &&
+        errors?.some((x) => x.code === 'already_exists')
+      )
+        return { created: false };
+      throw e;
+    }
   }
 
   async listLabels(): Promise<string[]> {
