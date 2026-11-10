@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { redact } from '@jumpmaster/protocol';
 import { secretList } from '../config.js';
@@ -125,12 +125,15 @@ export function processEnv(env: NodeJS.ProcessEnv = process.env): DoctorEnv {
     .filter(([k, v]) => /^JM_[A-Z0-9_]+_FILE$/.test(k) && typeof v === 'string' && v !== '')
     .map(([variable, path]) => {
       let mode: number | null = null;
+      let link = false;
       try {
+        // The target's mode: a link is followed, as the server reads it.
         mode = statSync(path as string).mode & 0o777;
+        link = lstatSync(path as string).isSymbolicLink();
       } catch {
         mode = null; // startup already refused an unreadable secret
       }
-      return { variable, path: path as string, mode };
+      return { variable, path: path as string, mode, ...(link ? { link } : {}) };
     });
   // Every file under the secrets directory (credentials by name, the machine secrets, the vault
   // key), once, beside the *_FILE variables that point elsewhere.
@@ -147,8 +150,14 @@ export function processEnv(env: NodeJS.ProcessEnv = process.env): DoctorEnv {
       if (secretFiles.some((f) => f.path === path)) continue;
       try {
         const st = statSync(path);
+        const link = lstatSync(path).isSymbolicLink();
         if (st.isFile())
-          secretFiles.push({ variable: `secrets/${name}`, path, mode: st.mode & 0o777 });
+          secretFiles.push({
+            variable: `secrets/${name}`,
+            path,
+            mode: st.mode & 0o777,
+            ...(link ? { link } : {}),
+          });
       } catch {
         // gone between the listing and the stat
       }

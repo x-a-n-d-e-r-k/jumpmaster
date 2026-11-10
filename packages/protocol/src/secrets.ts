@@ -12,14 +12,6 @@ import { join } from 'node:path';
 const errno = (e: unknown): string | undefined =>
   e && typeof e === 'object' && 'code' in e ? String((e as { code: unknown }).code) : undefined;
 
-const isLink = (path: string): boolean => {
-  try {
-    return lstatSync(path).isSymbolicLink();
-  } catch {
-    return false;
-  }
-};
-
 /** The largest secret file read; tokens are well under 1 KiB. */
 export const MAX_SECRET_FILE_BYTES = 64 * 1024;
 
@@ -102,8 +94,9 @@ export function readSecretFile(path: string, label: string): string {
   const fileVar = label;
   let fd: number;
   try {
-    // A symbolic link is followed (Kubernetes-style `..data` mounts, a hand-made link): every
-    // check below runs on what the descriptor opened, never on the path.
+    // A symbolic link is followed (Kubernetes-style `..data` mounts, a hand-made link) and held to
+    // the plain-file rule: every check below runs on what the descriptor opened, never on the
+    // path. A readable-by-others target loads, as a plain file does; the doctor fails it.
     fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
   } catch (e) {
     const code = errno(e);
@@ -116,12 +109,6 @@ export function readSecretFile(path: string, label: string): string {
   try {
     const stat = fstatSync(fd);
     if (!stat.isFile()) throw new Error(`${fileVar}: ${path} is not a regular file`);
-    // Through a link, the target must be its owner's alone: the link hides its mode from a
-    // glance at the directory (a plain 0644 file still loads, as in M4, and the doctor fails it).
-    if (isLink(path) && (stat.mode & 0o077) !== 0)
-      throw new Error(
-        `${fileVar}: ${path} is group- or world-readable; chmod 600 the file it points to`,
-      );
     if ((stat.mode & 0o022) !== 0)
       throw new Error(`${fileVar}: ${path} is group- or world-writable; chmod go-w it`);
     if (stat.size > MAX_SECRET_FILE_BYTES)

@@ -62,7 +62,8 @@ export type DoctorEnv = {
   /** `/proc/self/uid_map`, or null off Linux: anything but the identity map is a user namespace. */
   uidMap: string | null;
   /** Each secret read from a file (`JM_*_FILE`), with its mode (null when it can't be read). */
-  secretFiles?: { variable: string; path: string; mode: number | null }[];
+  /** `mode` is the target's (a link is followed); `link` when the path itself is a symlink. */
+  secretFiles?: { variable: string; path: string; mode: number | null; link?: boolean }[];
   /** `JM_VAULT_KEY_FILE`, to warn when it lies under the data directory. */
   vaultKeyFile?: string;
 };
@@ -374,7 +375,7 @@ function secretFilesCheck(d: DoctorDeps): DoctorCheck {
   return {
     ...base,
     status: 'fail',
-    summary: `secret file(s) other users on the host can read: ${open.map((f) => `${f.path} (${f.variable}, mode ${(f.mode as number).toString(8).padStart(3, '0')})`).join(', ')}`,
+    summary: `secret file(s) other users on the host can read: ${open.map((f) => `${f.path} (${f.variable}, mode ${(f.mode as number).toString(8).padStart(3, '0')}${f.link ? '; a link: chmod 600 the file it points to' : ''})`).join(', ')}`,
     fix: 'In the install directory: chmod 700 secrets && chmod 600 secrets/*, then docker compose restart jumpmaster.',
   };
 }

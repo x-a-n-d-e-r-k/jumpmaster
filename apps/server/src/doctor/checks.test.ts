@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -1357,5 +1357,22 @@ test('vault.key warns when the key file lies under the data directory', async ()
   expect(one(await w.run(), 'vault.key').status).toBe('pass');
   expect(processEnv({ JM_VAULT_KEY_FILE: '/secrets/vault_key' }).vaultKeyFile).toBe(
     '/secrets/vault_key',
+  );
+});
+
+test('config.secret-files fails a group- or world-readable target reached through a link, saying to chmod the file it points to', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'jm-secret-link-'));
+  writeFileSync(join(dir, 'real'), 'x', { mode: 0o644 });
+  chmodSync(join(dir, 'real'), 0o644);
+  symlinkSync(join(dir, 'real'), join(dir, 'link'));
+  const w = world();
+  w.deps.env = processEnv({ JM_CLAUDE_TOKEN_FILE: join(dir, 'link') });
+  expect(w.deps.env.secretFiles).toEqual([
+    { variable: 'JM_CLAUDE_TOKEN_FILE', path: join(dir, 'link'), mode: 0o644, link: true },
+  ]);
+  const c = one(await w.run(), 'config.secret-files');
+  expect(c.status).toBe('fail');
+  expect(c.summary).toBe(
+    `secret file(s) other users on the host can read: ${join(dir, 'link')} (JM_CLAUDE_TOKEN_FILE, mode 644; a link: chmod 600 the file it points to)`,
   );
 });

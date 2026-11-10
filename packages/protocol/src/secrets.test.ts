@@ -82,12 +82,11 @@ test('a symlink to a 0600 file loads (a Kubernetes-style ..data mount works)', (
   expect(readSecretFile(join(dir, 'link'), 'claude_token')).toBe(VALUE);
 });
 
-test('a symlink to a 0644 file, or to a directory, is refused by name on what the descriptor opened', () => {
+test('a symlink is held to the plain-file rule: a link to a 0644 file loads, a link to a directory is refused', () => {
   const dir = dirWith({ real: VALUE }, 0o644);
   symlinkSync(join(dir, 'real'), join(dir, 'link'));
-  expect(() => readSecretFile(join(dir, 'link'), 'claude_token')).toThrow(
-    `claude_token: ${join(dir, 'link')} is group- or world-readable; chmod 600 the file it points to`,
-  );
+  // As Kubernetes projects secrets (0644): it loads, and the doctor's config.secret-files fails it.
+  expect(readSecretFile(join(dir, 'link'), 'claude_token')).toBe(VALUE);
   symlinkSync(dir, join(dir, 'dirlink'));
   expect(() => readSecretFile(join(dir, 'dirlink'), 'claude_token')).toThrow(
     `claude_token: ${join(dir, 'dirlink')} is not a regular file`,
