@@ -137,10 +137,13 @@ export const NO_AUTHOR =
 export async function detectGuidance(
   forge: Pick<Forge, 'repoAccess' | 'listDir' | 'getFileAt'>,
   repo: string,
+  opts: { workflows?: boolean } = {},
 ): Promise<Pick<Detection, 'visibility' | 'defaultBranch' | 'ownerType' | 'ciJobs'>> {
   if (!REPO.test(repo)) throw new RepoNameError(repo);
   const access = await forge.repoAccess();
-  const { ciJobs } = await workflowJobs(forge, access.defaultBranch);
+  // Without a token nothing uses the job names: two reads instead of one per workflow.
+  const { ciJobs } =
+    opts.workflows === false ? { ciJobs: [] } : await workflowJobs(forge, access.defaultBranch);
   return {
     visibility: access.private ? 'private' : 'public',
     defaultBranch: access.defaultBranch,

@@ -7,6 +7,7 @@ import {
   codeownersNewFileUrl,
   codeownersText,
   collaboratorChecklist,
+  EXPIRATION_NOTE,
   PAT_PERMISSIONS,
   PLAN_QUESTION,
   PRIVATE_PLAN_STOP,
@@ -63,25 +64,59 @@ describe('pre-filled token links', () => {
       const get = (k: string) => new URL(url).searchParams.get(k);
       expect(get('target_name')).toBe('octo-org');
       expect(get('expires_in')).toBe('90');
-      expect((get('name') ?? '').length).toBeLessThanOrEqual(40);
+      // The token's name: short and readable; the full repository is in the description.
+      expect(get('name')).toBe(`jumpmaster-${role}-demo`);
       expect(get('description')).toContain('octo-org/demo');
       expect(get('description')).toContain('Only select repositories');
     }
     // Without an expiry the parameter is left out (GitHub's default, or the owner's policy).
     expect(new URL(patTemplateUrl('read', repo, {})).searchParams.has('expires_in')).toBe(false);
     expect(() => patTemplateUrl('read', repo, { expirationDays: 400 })).toThrow();
-    expect(RESOURCE_OWNER_NOTE).toBe(
+    expect(RESOURCE_OWNER_NOTE).toContain(
       'check the Resource owner field: for an organization it may not pre-fill',
+    );
+    // The link may set only the dropdown's display (a reported GitHub bug): re-select it.
+    expect(RESOURCE_OWNER_NOTE).toContain('re-select the organization');
+    expect(EXPIRATION_NOTE).toContain('token lifetime policy');
+    expect(EXPIRATION_NOTE).toContain('90 days');
+  });
+
+  test('a long repository name is cut on a readable boundary, never mid-word, within 40 characters', () => {
+    const long = { owner: 'octo', name: 'customer-portal-backend-service-v2' };
+    const name = new URL(patTemplateUrl('reviewer', long)).searchParams.get('name') ?? '';
+    expect(name.length).toBeLessThanOrEqual(40);
+    expect(name).toBe('jumpmaster-reviewer-customer-portal');
+    const one = { owner: 'octo', name: 'averyveryveryverylongsinglewordrepositoryname' };
+    const cut = new URL(patTemplateUrl('author', one)).searchParams.get('name') ?? '';
+    expect(cut.length).toBeLessThanOrEqual(40);
+    expect(cut.startsWith('jumpmaster-author-averyvery')).toBe(true);
+    expect(new URL(patTemplateUrl('author', long)).searchParams.get('description')).toContain(
+      'octo/customer-portal-backend-service-v2',
     );
   });
 });
 
 describe('the ruleset file', () => {
   test('the ruleset JSON equals the runbook field for field, lists each detected job as a required check, and needs 1 approval for two-bot and 0 for starter', () => {
-    const one = JSON.parse(
-      rulesetJson(twoBot, { defaultBranch: 'main', ciJobs: [{ workflow: 'ci.yml', job: 'test' }] }),
-    );
+    const ci = { defaultBranch: 'main', ciJobs: [{ workflow: 'ci.yml', job: 'test' }] };
+    // Two-bot: the runbook's JSON as it stands, a code owner's review required.
+    const one = JSON.parse(rulesetJson(twoBot, ci));
     expect(one).toEqual(runbookRuleset());
+    expect(one.rules[0].parameters.require_code_owner_review).toBe(true);
+    // Starter: the runbook's own variant (it says which two fields change, and to what).
+    const runbookStarter = runbookRuleset() as { rules: { parameters: Record<string, unknown> }[] };
+    const pr0 = runbookStarter.rules[0];
+    if (!pr0) throw new Error('no pull_request rule in the runbook');
+    pr0.parameters.required_approving_review_count = 0;
+    pr0.parameters.require_code_owner_review = false;
+    expect(JSON.parse(rulesetJson(starter, ci))).toEqual(runbookStarter);
+    const md = readFileSync(
+      new URL('../../../../docs/runbooks/install.md', import.meta.url),
+      'utf8',
+    );
+    expect(md).toContain(
+      'for starter mode set `required_approving_review_count` to 0 and `require_code_owner_review` to false',
+    );
     const jobs = [
       { workflow: 'ci.yml', job: 'test' },
       { workflow: 'ci.yml', job: 'Lint' },
@@ -103,6 +138,14 @@ describe('the ruleset file', () => {
     // No detected job: no empty rule GitHub would refuse; the page says to add the checks.
     const none = JSON.parse(rulesetJson(twoBot, { defaultBranch: 'main', ciJobs: [] }));
     expect(none.rules.map((x: { type: string }) => x.type)).toEqual(['pull_request']);
+    // And the guidance says what the file then protects.
+    const g = zoneGuidance(
+      starter,
+      { defaultBranch: 'main', ciJobs: [], ownerType: 'User', visibility: 'public' },
+      {},
+    );
+    expect(g.ruleset.note).toContain('a pull request must exist');
+    expect(g.ruleset.note).toContain('zero approvals');
   });
 });
 
@@ -170,6 +213,17 @@ describe('CODEOWNERS and collaborators', () => {
     expect(odd).toContain('# not expressible in CODEOWNERS: !x, src/[ab].ts, a b');
     // No login yet: a placeholder the step asks to replace.
     expect(codeownersText(zone, [])).toContain(`.github/** ${CODEOWNERS_PLACEHOLDER}`);
+    // A newline in a zone id or a protected path (a lenient file load can carry one) never
+    // starts a rule line of its own.
+    const forged = codeownersText(
+      makeZone({ id: 'web\n* @stranger', protectedPaths: ['GOAL.md\r\n* @stranger', 'ok'] }),
+      ['alice'],
+    );
+    for (const line of forged.split('\n'))
+      expect(line === '' || line.startsWith('#') || line === 'ok @alice', line).toBe(true);
+    // Starter: GitHub cannot require the owner's review, so the file says what stands in for it.
+    const starterText = codeownersText(makeZone({ identity: 'starter' }), ['octo']);
+    expect(starterText).toMatch(/^# .*parks every pull request/m);
     // A login that is not one is refused, so nothing but logins reaches the file.
     expect(() => codeownersText(zone, ['alice bob'])).toThrow();
     expect(() => codeownersText(zone, ['al\nice'])).toThrow();

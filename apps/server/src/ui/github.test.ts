@@ -9,7 +9,11 @@ import { setOperatorPassphrase } from '../auth/operator.js';
 import { loadBoot } from '../config/boot.js';
 import { ConfigStore } from '../config/store.js';
 import { openDb } from '../db/open.js';
-import { RESOURCE_OWNER_NOTE } from '../github/guidance.js';
+import {
+  EXPIRATION_NOTE,
+  RESOURCE_OWNER_NOTE,
+  STARTER_CODEOWNERS_NOTE,
+} from '../github/guidance.js';
 import { MATRIX_AND_REUSABLE_NOTE } from '../github/workflows.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
 import { escapeHtml } from './pages.js';
@@ -30,7 +34,14 @@ afterEach(async () => {
 const HOSTILE_JOB = '<img src=x onerror=alert(1)>';
 const CI_YML = `on: pull_request\njobs:\n  test:\n    name: "${HOSTILE_JOB}"\n    runs-on: x\n`;
 
-function forgeFor(o: { ownerType?: 'User' | 'Organization'; fail?: number } = {}) {
+type Opts = {
+  ownerType?: 'User' | 'Organization';
+  fail?: number;
+  noCi?: boolean;
+  identity?: 'two-bot' | 'starter';
+};
+
+function forgeFor(o: Opts = {}) {
   return (_repo: string, token: string): GuidanceForge => ({
     repoAccess: async () => {
       if (o.fail) throw Object.assign(new Error('Bad credentials <b>'), { status: o.fail });
@@ -45,13 +56,14 @@ function forgeFor(o: { ownerType?: 'User' | 'Organization'; fail?: number } = {}
     },
     ownerType: async () => o.ownerType ?? 'Organization',
     viewerLogin: async () => (token === AUTHOR ? 'jm-author' : 'jm-reviewer'),
-    listDir: async (_ref: string, path: string) => (path === '.github/workflows' ? ['ci.yml'] : []),
+    listDir: async (_ref: string, path: string) =>
+      path === '.github/workflows' && !o.noCi ? ['ci.yml'] : [],
     getFileAt: async (_ref: string, path: string) =>
       path === '.github/workflows/ci.yml' ? CI_YML : null,
   });
 }
 
-async function world(o: { ownerType?: 'User' | 'Organization'; fail?: number } = {}) {
+async function world(o: Opts = {}) {
   const db = openDb(tmpDbFile());
   const dir = mkdtempSync(join(tmpdir(), 'jm-ghpage-'));
   const store = ConfigStore.open({
@@ -89,7 +101,7 @@ async function world(o: { ownerType?: 'User' | 'Organization'; fail?: number } =
     payload: {
       zone: {
         repo: 'octo-org/demo',
-        identity: 'two-bot',
+        identity: o.identity ?? 'two-bot',
         preset: 'node',
         gates: [{ name: 'test', run: 'npm test' }],
         egress: { mode: 'monitor' },
@@ -151,6 +163,37 @@ describe('the GitHub page of a zone', () => {
         true,
       );
     for (const secret of [AUTHOR, REVIEWER, CLAUDE, TOKEN]) expect(html).not.toContain(secret);
+  });
+
+  test('the token step is short numbered steps, in the order they are done, with the lifetime note', async () => {
+    const html = (await (await world()).get('/zones/demo/github')).body;
+    const steps = /<ol id="token-steps">([\s\S]*?)<\/ol>/.exec(html)?.[1] ?? '';
+    const order = [
+      'Sign in as',
+      'Resource owner',
+      'Only select repositories',
+      'Generate token',
+      'Paste it',
+    ];
+    const at = order.map((w) => steps.indexOf(w));
+    expect(
+      at.every((i) => i >= 0),
+      steps,
+    ).toBe(true);
+    expect([...at].sort((a, b) => a - b)).toEqual(at);
+    expect(steps).toContain('re-select the organization');
+    expect(html).toContain(escapeHtml(EXPIRATION_NOTE));
+  });
+
+  test('with no CI the warning comes before the download and says what the file still requires; starter says Jumpmaster parks protected paths', async () => {
+    const html = (
+      await (await world({ noCi: true, identity: 'starter' })).get('/zones/demo/github')
+    ).body;
+    const note = html.indexOf('a pull request must exist');
+    expect(note).toBeGreaterThan(-1);
+    expect(note).toBeLessThan(html.indexOf('download="'));
+    expect(html).toContain('with zero approvals');
+    expect(html).toContain(escapeHtml(STARTER_CODEOWNERS_NOTE));
   });
 
   test('an unknown zone is 404; a refused read says why, escaped, and links the GitHub step', async () => {

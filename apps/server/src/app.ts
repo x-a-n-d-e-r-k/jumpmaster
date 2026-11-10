@@ -138,6 +138,7 @@ export function createApp(
     // The GitHub half of setup for a zone: links and generated files, never a forge write.
     registerGithubPages(app, {
       store: deps.config,
+      now: deps.now,
       ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
     });
   }

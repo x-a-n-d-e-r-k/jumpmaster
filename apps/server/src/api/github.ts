@@ -13,7 +13,14 @@ import {
   type ZoneGuidance,
   zoneGuidance,
 } from '../github/guidance.js';
-import { detectFailure, detectGuidance, NO_AUTHOR, REPO, zoneIdOf } from '../zones/detect.js';
+import {
+  detectFailure,
+  detectGuidance,
+  NO_AUTHOR,
+  REPO,
+  RepoNameError,
+  zoneIdOf,
+} from '../zones/detect.js';
 
 /**
  * The GitHub guidance routes (§10.3, M4.5 Task 7): reads only, never audited, never a forge
@@ -72,9 +79,123 @@ async function loginsOf(
   return { ...(author ? { author } : {}), ...(reviewer ? { reviewer } : {}) };
 }
 
+type GuidanceRead = Awaited<ReturnType<typeof detectGuidance>>;
+
+/** What one read of a repository found: the repository (null: GitHub answered 404), and the logins. */
+type ReadEntry =
+  | {
+      ok: true;
+      read: GuidanceRead | null;
+      ownerType: 'User' | 'Organization';
+      logins: { author?: string; reviewer?: string };
+    }
+  | { ok: false; error: string };
+
+const READ_TTL_MS = 5 * 60_000;
+const MISSING_TTL_MS = 60_000;
+const READ_ENTRIES = 50;
+
+/**
+ * Reads of a repository for the guidance, kept a few minutes in this process: the wizard's steps
+ * and the zone page ask again on every view, and without a token GitHub allows an address 60
+ * requests an hour. Keyed by the repository and the author token's fingerprint ("anonymous"
+ * without one); a 404 is kept a minute; at most fifty entries, the oldest dropped first; emptied
+ * whenever the config or the secrets change. Nothing is persisted.
+ */
+class ReadCache {
+  private readonly entries = new Map<string, { until: number; value: ReadEntry }>();
+  get(key: string, now: number): ReadEntry | undefined {
+    const e = this.entries.get(key);
+    if (!e) return undefined;
+    if (now >= e.until) {
+      this.entries.delete(key);
+      return undefined;
+    }
+    return e.value;
+  }
+  set(key: string, value: ReadEntry, ttlMs: number, now: number): void {
+    this.entries.delete(key);
+    while (this.entries.size >= READ_ENTRIES) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest === undefined) break;
+      this.entries.delete(oldest);
+    }
+    this.entries.set(key, { until: now + ttlMs, value });
+  }
+  clear(): void {
+    this.entries.clear();
+  }
+}
+
+const caches = new WeakMap<ConfigStore, ReadCache>();
+function cacheOf(store: ConfigStore): ReadCache {
+  let c = caches.get(store);
+  if (!c) {
+    const cache = new ReadCache();
+    caches.set(store, cache);
+    store.subscribe(() => cache.clear());
+    c = cache;
+  }
+  return c;
+}
+
+/** The repository as the guidance needs it, through the cache; a refused name throws. */
+async function readRepo(
+  store: ConfigStore,
+  config: Config,
+  repo: string,
+  forgeOf: (repo: string, token: string) => GuidanceForge,
+  now: () => Date,
+): Promise<ReadEntry> {
+  if (!REPO.test(repo)) throw new RepoNameError(repo);
+  const token = config.secrets.githubAuthorToken ?? '';
+  const key = `${repo}\u0000${token ? (store.resolved().githubAuthorToken.fingerprint ?? 'token') : 'anonymous'}`;
+  const cache = cacheOf(store);
+  const t = now().getTime();
+  const hit = cache.get(key, t);
+  if (hit) return hit;
+  const forge = forgeOf(repo, token);
+  try {
+    const read = await detectGuidance(forge, repo, { workflows: token !== '' });
+    const entry: ReadEntry = {
+      ok: true,
+      read,
+      ownerType: read.ownerType,
+      logins: await loginsOf(store, config, repo, forgeOf),
+    };
+    cache.set(key, entry, READ_TTL_MS, t);
+    return entry;
+  } catch (e) {
+    if (e instanceof RepoNameError) throw e;
+    if ((e as { status?: unknown }).status !== 404)
+      return { ok: false, error: detectFailure(e, repo) };
+    // A token that cannot see it is an answer to keep a minute.
+    if (token !== '') {
+      const entry: ReadEntry = { ok: false, error: detectFailure(e, repo) };
+      cache.set(key, entry, MISSING_TTL_MS, t);
+      return entry;
+    }
+    // Without a token GitHub answers 404 for a private repository: the owner is still public.
+    try {
+      const entry: ReadEntry = {
+        ok: true,
+        read: null,
+        ownerType: await forge.ownerType(),
+        logins: {},
+      };
+      cache.set(key, entry, MISSING_TTL_MS, t);
+      return entry;
+    } catch (e2) {
+      return { ok: false, error: detectFailure(e2, repo) };
+    }
+  }
+}
+
 export type GuidanceResult =
   | { ok: true; guidance: ZoneGuidance }
-  | { ok: false; status: 409 | 502; error: string };
+  | { ok: false; status: 400 | 409 | 502; error: string };
+
+const systemNow = () => new Date();
 
 /** The five for `zone`, read through the author token. */
 export async function guidanceFor(
@@ -82,17 +203,20 @@ export async function guidanceFor(
   config: Config,
   zone: DropZoneConfig,
   forgeOf: (repo: string, token: string) => GuidanceForge,
-  opts: { reviewers?: string[]; paidPlan?: boolean } = {},
+  opts: { reviewers?: string[]; paidPlan?: boolean; now?: () => Date } = {},
 ): Promise<GuidanceResult> {
+  // A name the config allows but GitHub's does not (owner/name only): said as such, not as a
+  // network failure.
+  if (!REPO.test(zone.repo))
+    return { ok: false, status: 400, error: new RepoNameError(zone.repo).message };
   const token = config.secrets.githubAuthorToken;
   if (!token) return { ok: false, status: 409, error: NO_AUTHOR };
-  let detection: Awaited<ReturnType<typeof detectGuidance>>;
-  try {
-    detection = await detectGuidance(forgeOf(zone.repo, token), zone.repo);
-  } catch (e) {
-    return { ok: false, status: 502, error: detectFailure(e, zone.repo) };
-  }
-  const logins = await loginsOf(store, config, zone.repo, forgeOf);
+  const entry = await readRepo(store, config, zone.repo, forgeOf, opts.now ?? systemNow);
+  if (!entry.ok) return { ok: false, status: 502, error: entry.error };
+  const detection = entry.read;
+  if (!detection)
+    return { ok: false, status: 502, error: detectFailure({ status: 404 }, zone.repo) };
+  const logins = entry.logins;
   return {
     ok: true,
     guidance: zoneGuidance(
@@ -104,7 +228,8 @@ export async function guidanceFor(
   };
 }
 
-const GuideQuery = z.strictObject({
+// Unknown keys (a pasted link's `utm_source`) are ignored.
+const GuideQuery = z.object({
   reviewer: z.string().max(400).optional(),
   paidPlan: z.enum(['true', 'false']).optional(),
 });
@@ -149,6 +274,7 @@ export async function recommendFor(
   config: Config,
   input: RecommendInput,
   forgeOf: (repo: string, token: string) => GuidanceForge,
+  now: () => Date = systemNow,
 ): Promise<
   { ok: true; answer: RecommendAnswer } | { ok: false; status: 400 | 502; error: string }
 > {
@@ -156,23 +282,9 @@ export async function recommendFor(
   if (!REPO.test(repo))
     return { ok: false, status: 400, error: 'the repository must be owner/name' };
   const token = config.secrets.githubAuthorToken ?? '';
-  const forge = forgeOf(repo, token);
-  let read: Awaited<ReturnType<typeof detectGuidance>> | null = null;
-  let ownerType: 'User' | 'Organization';
-  try {
-    read = await detectGuidance(forge, repo);
-    ownerType = read.ownerType;
-  } catch (e) {
-    const status = (e as { status?: unknown }).status;
-    // Without a token GitHub answers 404 for a private repository: the owner is still public.
-    if (token !== '' || status !== 404)
-      return { ok: false, status: 502, error: detectFailure(e, repo) };
-    try {
-      ownerType = await forge.ownerType();
-    } catch (e2) {
-      return { ok: false, status: 502, error: detectFailure(e2, repo) };
-    }
-  }
+  const entry = await readRepo(store, config, repo, forgeOf, now);
+  if (!entry.ok) return { ok: false, status: 502, error: entry.error };
+  const { read, ownerType } = entry;
   const visibility = read?.visibility ?? 'private';
   const [owner = '', name = ''] = repo.split('/');
   const recommendation = recommendIdentity({
@@ -188,7 +300,7 @@ export async function recommendFor(
     protectedPaths: DEFAULT_PROTECTED_PATHS,
     reviewReadToken: visibility === 'private',
   };
-  const logins = await loginsOf(store, config, repo, forgeOf);
+  const logins = entry.logins;
   const days = { expirationDays: PAT_EXPIRATION_DAYS };
   return {
     ok: true,
@@ -221,9 +333,13 @@ export async function recommendFor(
 
 export function registerGuidanceRoutes(
   scope: FastifyInstance,
-  deps: { store: ConfigStore; guidanceForge?: (repo: string, token: string) => GuidanceForge },
+  deps: {
+    store: ConfigStore;
+    now(): Date;
+    guidanceForge?: (repo: string, token: string) => GuidanceForge;
+  },
 ): void {
-  const { store } = deps;
+  const { store, now } = deps;
   const forgeOf = deps.guidanceForge ?? githubGuidanceForge;
 
   scope.get<{ Params: { id: string } }>('/api/control/zones/:id/github', async (req, reply) => {
@@ -242,6 +358,7 @@ export function registerGuidanceRoutes(
     if (!q.success || !reviewers?.success)
       return reply.code(400).send({ error: 'reviewer is a comma-separated list of GitHub logins' });
     const r = await guidanceFor(store, config, zone, forgeOf, {
+      now,
       reviewers: reviewers.data,
       ...(q.data.paidPlan ? { paidPlan: q.data.paidPlan === 'true' } : {}),
     });
@@ -253,7 +370,7 @@ export function registerGuidanceRoutes(
     const body = RecommendBody.safeParse(req.body ?? {});
     if (!body.success || !REPO.test(body.data.repo))
       return reply.code(400).send({ error: 'the repository must be owner/name' });
-    const r = await recommendFor(store, req.jmConfig ?? store.current(), body.data, forgeOf);
+    const r = await recommendFor(store, req.jmConfig ?? store.current(), body.data, forgeOf, now);
     if (!r.ok) return reply.code(r.status).send({ error: r.error });
     return r.answer;
   });

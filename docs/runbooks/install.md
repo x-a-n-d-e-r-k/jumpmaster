@@ -488,10 +488,16 @@ GitHub Team for an organization. On a free plan there is no Rulesets page for a 
 - **Require status checks to pass:** add each check your CI workflow reports (a job name, such
   as `test`), and for each one **select GitHub Actions as the source** (not "any source"), so no
   other app can report it green.
-- Leave **Require review from Code Owners** off unless the reviewer account is a code owner of the
-  paths agents change (`forge.codeowners`).
+- **Require review from Code Owners:**
+  - two-bot: on. The code owners in `.github/CODEOWNERS` are people (you, and anyone else who may
+    approve), never the bots; Jumpmaster never merges a pull request that touches a protected path,
+    so this changes no automation: GitHub blocks the hand merge until a named person approves;
+  - starter mode: off. You are the author and the only code owner, and GitHub never lets an author
+    approve their own pull request, so it would block those pull requests for good. Jumpmaster parks
+    every pull request that touches a protected path for you to review and merge by hand instead
+    (`forge.codeowners`).
 
-The same with `gh` (two-bot; for starter mode set `required_approving_review_count` to 0). Each
+The same with `gh` (two-bot; for starter mode set `required_approving_review_count` to 0 and `require_code_owner_review` to false). Each
 `context` is a check name your CI reports; `integration_id` 15368 is GitHub Actions:
 
 ```sh
@@ -506,7 +512,7 @@ gh api -X POST repos/your-org/your-repo/rulesets --input - <<'JSON'
     { "type": "pull_request", "parameters": {
         "required_approving_review_count": 1,
         "dismiss_stale_reviews_on_push": true,
-        "require_code_owner_review": false,
+        "require_code_owner_review": true,
         "require_last_push_approval": false,
         "required_review_thread_resolution": false } },
     { "type": "required_status_checks", "parameters": {
@@ -850,8 +856,11 @@ The ruleset on the default branch, as the tokens see it; the summary names each 
 
 ### `forge.codeowners`
 
-A required code-owner review the reviewer account can't give: pull requests touching owned paths
-would wait for a human ([Branch rules](#branch-rules)).
+Two-bot: with Require review from Code Owners on, `.github/CODEOWNERS` must exist and name people,
+not the reviewer bot, so GitHub holds the hand merge of a pull request touching a protected path
+for a person's approval. Starter mode: the option must stay off (GitHub never lets an author
+approve their own pull request); Jumpmaster parks those pull requests for you to merge by hand
+([Branch rules](#branch-rules)).
 
 ### `forge.ci`
 

@@ -36,6 +36,7 @@ import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import { credentialCreatedAt } from '../vault/credentials.js';
 import { fingerprintOf, openVault } from '../vault/vault.js';
 import { type ControlDeps, registerControlRoutes } from './control.js';
+import { guidanceFor } from './github.js';
 
 const TOKEN = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
@@ -1941,6 +1942,8 @@ describe('GitHub guidance routes (Task 7)', () => {
       private?: boolean;
       /** Without a token GitHub hides a private repository: 404. */
       anonymous404?: boolean;
+      /** The clock the guidance cache reads (default t0). */
+      clock?: { now: Date };
     } = {},
   ) {
     const db = openDb(tmpDbFile());
@@ -1958,7 +1961,7 @@ describe('GitHub guidance routes (Task 7)', () => {
     app = controlApp({
       db,
       config: store,
-      now: () => t0,
+      now: () => o.clock?.now ?? t0,
       guidanceForge: (repo, token) => {
         tokens.push(token);
         const who = token === AUTHOR ? 'jm-author' : token === REVIEWER ? 'jm-reviewer' : '';
@@ -2099,5 +2102,78 @@ describe('GitHub guidance routes (Task 7)', () => {
     expect(j.checklist.items[0]).toBe('invite jm-author with the Write role');
     expect(r.body).not.toContain(AUTHOR);
     expect(r.body).not.toContain(REVIEWER);
+  });
+
+  test('without a token the recommendation reads only the repository, never its workflows', async () => {
+    const { JM_GITHUB_AUTHOR_TOKEN: _a, JM_GITHUB_REVIEWER_TOKEN: _r, ...none } = genv;
+    const { calls } = guideApp({ env: none, ownerType: 'User' });
+    const r = await post('/api/control/github/recommend', { repo: 'octo/public' });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json()).toMatchObject({ visibility: 'public', visible: true });
+    expect(calls).toEqual(['repoAccess octo/public']);
+  });
+
+  test('the reads are cached five minutes per repository and token, a 404 one minute, fifty at most, and dropped when the secrets change', async () => {
+    const clock = { now: t0 };
+    const later = (ms: number) => {
+      clock.now = new Date(clock.now.getTime() + ms);
+    };
+    const { calls, store } = guideApp({ clock });
+    const ask = (repo = 'octo-org/demo') => post('/api/control/github/recommend', { repo });
+    expect((await ask()).statusCode).toBe(200);
+    const first = calls.length;
+    expect(first).toBeGreaterThan(0);
+    later(4 * 60_000);
+    expect((await ask()).statusCode).toBe(200);
+    expect(calls.length).toBe(first);
+    later(60_001);
+    await ask();
+    expect(calls.length).toBeGreaterThan(first);
+    // A secrets refresh (a token replaced, a file reloaded) forgets everything read.
+    const beforeRefresh = calls.length;
+    store.refreshSecrets();
+    await ask();
+    expect(calls.length).toBeGreaterThan(beforeRefresh);
+    // Fifty entries at most: the oldest goes first.
+    for (let i = 0; i < 50; i++) await ask(`octo-org/r${i}`);
+    const full = calls.length;
+    await ask('octo-org/r49');
+    expect(calls.length).toBe(full);
+    await ask();
+    expect(calls.length).toBeGreaterThan(full);
+  });
+
+  test('an anonymous 404 is cached one minute', async () => {
+    const clock = { now: t0 };
+    const { JM_GITHUB_AUTHOR_TOKEN: _a, JM_GITHUB_REVIEWER_TOKEN: _r, ...none } = genv;
+    const { calls } = guideApp({ env: none, ownerType: 'User', anonymous404: true, clock });
+    const ask = () => post('/api/control/github/recommend', { repo: 'octo/secret' });
+    expect((await ask()).json().visible).toBe(false);
+    expect(calls).toHaveLength(2);
+    clock.now = new Date(t0.getTime() + 59_000);
+    expect((await ask()).json().visible).toBe(false);
+    expect(calls).toHaveLength(2);
+    clock.now = new Date(t0.getTime() + 61_000);
+    await ask();
+    expect(calls).toHaveLength(4);
+  });
+
+  test('a repository the config allows but detection refuses is a 400 naming it; unknown query keys are ignored', async () => {
+    const { store } = guideApp();
+    const added = await addZone();
+    expect(added.statusCode, added.body).toBe(200);
+    const config = store.current();
+    const zone = config.dropZones[0];
+    if (!zone) throw new Error('no zone');
+    const odd = await guidanceFor(store, config, { ...zone, repo: 'octo/app@v2' }, () => {
+      throw new Error('no forge for a refused name');
+    });
+    expect(odd).toEqual({
+      ok: false,
+      status: 400,
+      error: expect.stringContaining('the repository must be owner/name'),
+    });
+    const r = await get('/api/control/zones/demo/github?reviewer=alice&utm_source=pasted');
+    expect(r.statusCode, r.body).toBe(200);
   });
 });

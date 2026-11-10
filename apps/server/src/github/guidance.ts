@@ -36,12 +36,25 @@ const FORBIDDEN = new Set(['workflows', 'administration']);
 
 /** What the token step says beside every link. */
 export const RESOURCE_OWNER_NOTE =
-  'check the Resource owner field: for an organization it may not pre-fill';
+  'check the Resource owner field: for an organization it may not pre-fill, and the link may set only what it shows, so re-select the organization even when it looks selected';
 export const REPOSITORY_ACCESS_NOTE =
   'set Repository access to Only select repositories and choose the repository: the link cannot choose it';
 
 /** How long a template's token lasts: the doctor warns two weeks before it expires. */
 export const PAT_EXPIRATION_DAYS = 90;
+export const EXPIRATION_NOTE = `each link asks for ${PAT_EXPIRATION_DAYS} days; an organization's token lifetime policy may cap it at less, and the doctor warns two weeks before a token expires`;
+
+/** At most 40 characters (GitHub's limit), cut where a reader still sees the repository. */
+function tokenName(role: PatRole, name: string): string {
+  const full = `jumpmaster-${role}-${name}`;
+  if (full.length <= 40) return full;
+  const head = full.slice(0, 40);
+  const prefix = `jumpmaster-${role}-`.length;
+  // The last separator after the role, when cutting there keeps a readable part of the name.
+  const at = Math.max(head.lastIndexOf('-'), head.lastIndexOf('_'), head.lastIndexOf('.'));
+  const cut = at >= prefix + 4 ? head.slice(0, at) : head;
+  return cut.replace(/[-_.]+$/, '');
+}
 
 const ROLE_WORDS: Record<PatRole, string> = {
   author: 'author (opens and merges pull requests)',
@@ -64,7 +77,7 @@ export function patTemplateUrl(
 ): string {
   const full = `${repo.owner}/${repo.name}`;
   const q = new URLSearchParams();
-  q.set('name', `Jumpmaster ${role} ${full}`.slice(0, 40));
+  q.set('name', tokenName(role, repo.name));
   q.set(
     'description',
     `Jumpmaster ${ROLE_WORDS[role]} for ${full}. Repository access: Only select repositories, then ${full}. No Workflows or Administration permission.`,
@@ -110,7 +123,12 @@ export function rulesetJson(
         parameters: {
           required_approving_review_count: zone.identity === 'starter' ? 0 : 1,
           dismiss_stale_reviews_on_push: true,
-          require_code_owner_review: false,
+          // Two-bot: GitHub requires a named person's approval for the protected paths (the
+          // code owners are people, and Jumpmaster never merges those pull requests itself).
+          // Starter: off. The operator is the author and the only code owner, and GitHub never
+          // lets an author approve their own pull request; Jumpmaster parks every pull request
+          // touching a protected path for a human merge instead (§7.4's "or equivalent").
+          require_code_owner_review: zone.identity !== 'starter',
           require_last_push_approval: false,
           required_review_thread_resolution: false,
         },
@@ -217,20 +235,28 @@ const expressible = (p: string): boolean =>
  * so a change to them asks a human (§7.4). The reviewers are people (the operator types their
  * own login), never the bots.
  */
+/** What a comment line may carry: never a line break, which would start a rule of its own. */
+const oneLine = (v: string): string => v.replace(/[\r\n]+/g, ' ');
+
+/** What the starter-mode CODEOWNERS and ruleset say in place of GitHub's code-owner review. */
+export const STARTER_CODEOWNERS_NOTE =
+  'In starter mode GitHub cannot require this review: you are the author and the only code owner, and GitHub never lets an author approve their own pull request. Jumpmaster parks every pull request that touches these paths for you to review and merge by hand.';
+
 export function codeownersText(
-  zone: Pick<DropZoneConfig, 'id' | 'protectedPaths'>,
+  zone: Pick<DropZoneConfig, 'id' | 'protectedPaths' | 'identity'>,
   reviewers: string[],
 ): string {
   const owners = reviewers.length > 0 ? reviewers.map(owner) : [CODEOWNERS_PLACEHOLDER];
   const ok = zone.protectedPaths.filter(expressible);
   const not = zone.protectedPaths.filter((p) => !expressible(p));
   return [
-    `# Jumpmaster zone ${zone.id}: changes to these paths need a human code owner's review.`,
+    `# Jumpmaster zone ${oneLine(zone.id)}: changes to these paths need a human code owner's review.`,
+    ...(zone.identity === 'starter' ? [`# ${STARTER_CODEOWNERS_NOTE}`] : []),
     ...(reviewers.length === 0
       ? [`# Replace ${CODEOWNERS_PLACEHOLDER} with your GitHub login before committing.`]
       : []),
     ...ok.map((p) => `${p} ${owners.join(' ')}`),
-    ...(not.length > 0 ? [`# not expressible in CODEOWNERS: ${not.join(', ')}`] : []),
+    ...(not.length > 0 ? [`# not expressible in CODEOWNERS: ${not.map(oneLine).join(', ')}`] : []),
     '',
   ].join('\n');
 }
@@ -304,7 +330,7 @@ export function zoneGuidance(
       text: rulesetJson(zone, detection),
       ...(detection.ciJobs.length === 0
         ? {
-            note: 'No workflow that runs on pull requests was found: after importing, add your CI checks under Require status checks to pass, with GitHub Actions as the source.',
+            note: `No workflow that runs on pull requests was found, so this file requires only that a pull request must exist (${zone.identity === 'starter' ? 'with zero approvals' : 'with one approval'}) and no CI check: after importing, add your CI checks under Require status checks to pass, with GitHub Actions as the source.`,
           }
         : {}),
     },

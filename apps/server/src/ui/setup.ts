@@ -278,7 +278,7 @@ ${guideSection(guide)}
 <h4>Read token</h4>${credentialLine('githubReadToken', r.githubReadToken)}
 <form id="forge">${fields}
 ${fields ? sudoField(sudo) : ''}<p><button>Save</button> <span id="forge-out" role="status"></span></p></form>
-<p class="warn" id="starter-warning"><strong>What starter mode costs:</strong> ${escapeHtml(STARTER_WARNING)}</p>
+${guide?.answer?.recommendation.identity === 'starter' ? '' : `<p class="warn" id="starter-warning"><strong>What starter mode costs:</strong> ${escapeHtml(STARTER_WARNING)}</p>`}
 ${SAVE_CREDENTIALS}
 <script>
 document.getElementById('forge').addEventListener('submit', async (e) => {
@@ -521,6 +521,7 @@ export function registerSetupPages(
       req.jmConfig ?? store.current(),
       { repo, ...(paidPlan ? { paidPlan: paidPlan === 'yes' } : {}) },
       forgeOf,
+      now,
     );
     const guide: ForgeGuide = r.ok
       ? { repo, paidPlan, answer: r.answer }
@@ -546,6 +547,7 @@ export function registerSetupPages(
         req.jmConfig ?? store.current(),
         { repo: q.data.repo, identity: q.data.identity, reviewers },
         forgeOf,
+        now,
       );
     } catch (e) {
       return frag(400, `<p class="warn">${escapeHtml((e as Error).message)}</p>`);
@@ -559,7 +561,7 @@ export function registerSetupPages(
       );
     return frag(
       200,
-      `${rulesetSection(g.ruleset, g.rulesUrl)}${codeownersSection(g.codeowners, null)}`,
+      `${rulesetSection(g.ruleset, g.rulesUrl, q.data.identity)}${codeownersSection(g.codeowners, null)}`,
     );
   });
   app.get('/setup/stick', async (req, reply) => html(req, reply, stickPage(db)));

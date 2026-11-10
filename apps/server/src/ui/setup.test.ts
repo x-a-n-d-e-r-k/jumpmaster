@@ -537,7 +537,9 @@ describe('GitHub guidance in the wizard (Task 7)', () => {
     expect(rec).toBeLessThan(forge.indexOf('id="tokens"'));
     expect(forge.indexOf('id="tokens"')).toBeLessThan(forge.indexOf('name="githubAuthorToken"'));
     expect(forge).toContain('Starter: your own account as the author');
-    expect(forge).toContain(STARTER_WARNING.replaceAll("'", '&#39;').replaceAll('"', '&quot;'));
+    // The starter cost, once on the step: in the recommendation, not again beside the box.
+    const escaped = STARTER_WARNING.replaceAll("'", '&#39;').replaceAll('"', '&quot;');
+    expect(forge.split(escaped)).toHaveLength(2);
     expect(forge).toContain('href="https://github.com/settings/personal-access-tokens/new?');
     expect(forge).toContain(
       'check the Resource owner field: for an organization it may not pre-fill',

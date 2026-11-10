@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { PRESETS } from '@jumpmaster/protocol';
 import type { DoctorCheck } from './doctor/checks.js';
-import { REPOSITORY_ACCESS_NOTE, RESOURCE_OWNER_NOTE } from './github/guidance.js';
+import { EXPIRATION_NOTE, REPOSITORY_ACCESS_NOTE, RESOURCE_OWNER_NOTE } from './github/guidance.js';
 import { readSecret, readSecretFile } from './secrets.js';
 
 const MODES: Record<string, string> = { pause: 'paused', resume: 'active', observe: 'observe' };
@@ -131,7 +131,12 @@ function githubLines(args: string[], g: GuidanceView): string[] {
   if (what === 'ruleset') return text(g.ruleset.text);
   if (what === 'codeowners') return text(g.codeowners.text);
   if (what === 'pat')
-    return [g.pat[role ?? ''] ?? '', `${RESOURCE_OWNER_NOTE}.`, `Then ${REPOSITORY_ACCESS_NOTE}.`];
+    return [
+      g.pat[role ?? ''] ?? '',
+      `${RESOURCE_OWNER_NOTE}.`,
+      `Then ${REPOSITORY_ACCESS_NOTE}.`,
+      `Expiry: ${EXPIRATION_NOTE}.`,
+    ];
   if (what === 'checklist') return [g.checklist.url, ...g.checklist.items.map((i) => `- ${i}`)];
   const r = g.recommendation;
   return [

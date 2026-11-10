@@ -6,11 +6,12 @@ import type { ConfigStore } from '../config/store.js';
 import type { DropZoneConfig } from '../config.js';
 import {
   CODEOWNERS_PLACEHOLDER,
+  EXPIRATION_NOTE,
   PAT_PERMISSIONS,
   type PatRole,
-  REPOSITORY_ACCESS_NOTE,
   RESOURCE_OWNER_NOTE,
   type Recommendation,
+  STARTER_CODEOWNERS_NOTE,
   type ZoneGuidance,
 } from '../github/guidance.js';
 import { MATRIX_AND_REUSABLE_NOTE } from '../github/workflows.js';
@@ -72,7 +73,15 @@ export function tokensSection(pat: ZoneGuidance['pat'], roles: PatRole[]): strin
     )
     .join('');
   return `<section id="tokens"><h3>Create the tokens</h3>
-<p>Each link opens GitHub's fine-grained token page, filled in. Sign in as the account the token is for, then ${escapeHtml(RESOURCE_OWNER_NOTE)}, and ${escapeHtml(REPOSITORY_ACCESS_NOTE)}. Click Generate token and paste it into Jumpmaster's <a href="/setup/forge">GitHub step</a>; it is tested before it is saved, and never shown back.</p>
+<p>Each link opens GitHub's fine-grained token page, filled in. For each token:</p>
+<ol id="token-steps">
+<li>Sign in as the account the token is for, then open its link below.</li>
+<li>Resource owner: ${escapeHtml(RESOURCE_OWNER_NOTE)}.</li>
+<li>Repository access: choose Only select repositories, then the repository (the link cannot choose it).</li>
+<li>Click Generate token.</li>
+<li>Paste it into Jumpmaster's <a href="/setup/forge">GitHub step</a>: it is tested before it is saved, and never shown back.</li>
+</ol>
+<p><small>Expiry: ${escapeHtml(EXPIRATION_NOTE)}.</small></p>
 <ul>${items}</ul></section>`;
 }
 
@@ -84,13 +93,18 @@ export function checklistSection(checklist: ZoneGuidance['checklist']): string {
 }
 
 /** The ruleset file: shown, downloadable, copyable, and the two lines that import it. */
-export function rulesetSection(ruleset: ZoneGuidance['ruleset'], rulesUrl: string): string {
+export function rulesetSection(
+  ruleset: ZoneGuidance['ruleset'],
+  rulesUrl: string,
+  identity: 'two-bot' | 'starter',
+): string {
   const data = `data:application/json;charset=utf-8,${encodeURIComponent(ruleset.text)}`;
   return `<section id="ruleset"><h3>The branch ruleset</h3>
-<p>Jumpmaster merges only under a ruleset that requires a pull request and your CI, with no bypass. This file is one, with the checks your workflows report:</p>
+${ruleset.note ? `<p class="warn">${escapeHtml(ruleset.note)}</p>` : ''}
+<p>Jumpmaster merges only under a ruleset that requires a pull request and your CI, with no bypass. This file is one, with the checks your workflows report${identity === 'starter' ? '' : ", and a code owner's review on the protected paths"}:</p>
+${identity === 'starter' ? `<p>${escapeHtml(STARTER_CODEOWNERS_NOTE)}</p>` : ''}
 <ol><li>Open the repository's <a href="${gh(rulesUrl)}" rel="noreferrer">Rulesets</a>, then New ruleset → Import a ruleset, and choose <code>${escapeHtml(ruleset.filename)}</code>.</li>
 <li>Review it and click Create.</li></ol>
-${ruleset.note ? `<p class="warn">${escapeHtml(ruleset.note)}</p>` : ''}
 <p><small>${escapeHtml(MATRIX_AND_REUSABLE_NOTE)}</small></p>
 <p><a href="${escapeHtml(data)}" download="${escapeHtml(ruleset.filename)}">Download ${escapeHtml(ruleset.filename)}</a> <button type="button" data-copy="ruleset-text">Copy</button></p>
 <pre id="ruleset-text">${escapeHtml(ruleset.text)}</pre></section>`;
@@ -133,7 +147,7 @@ ${recommendationSection(g.recommendation)}
 <p>This zone runs as ${escapeHtml(zone.identity)}${zone.authorMayBeAdmin ? ' with authorMayBeAdmin' : ''}${zone.identity === g.recommendation.identity ? '' : ': not the recommendation above. Changing it changes which tokens and rules it needs'}.</p>
 ${tokensSection(g.pat, rolesOf(zone))}
 ${checklistSection(g.checklist)}
-${rulesetSection(g.ruleset, g.rulesUrl)}
+${rulesetSection(g.ruleset, g.rulesUrl, zone.identity)}
 ${codeownersSection(g.codeowners, { action: `/zones/${encodeURIComponent(zone.id)}/github`, reviewer })}
 ${COPY_SCRIPT}`,
   );
@@ -154,9 +168,13 @@ export const reviewersOf = (text: string | undefined): string[] | null => {
 
 export function registerGithubPages(
   app: FastifyInstance,
-  deps: { store: ConfigStore; guidanceForge?: (repo: string, token: string) => GuidanceForge },
+  deps: {
+    store: ConfigStore;
+    now(): Date;
+    guidanceForge?: (repo: string, token: string) => GuidanceForge;
+  },
 ): void {
-  const { store } = deps;
+  const { store, now } = deps;
   const forgeOf = deps.guidanceForge ?? githubGuidanceForge;
   app.get<{ Params: { id: string } }>('/zones/:id/github', async (req, reply) => {
     const config = req.jmConfig ?? store.current();
@@ -171,7 +189,7 @@ export function registerGithubPages(
       r =
         reviewers === null
           ? { ok: false, status: 400, error: 'a code owner is a GitHub login or an org/team name' }
-          : await guidanceFor(store, config, zone, forgeOf, { reviewers });
+          : await guidanceFor(store, config, zone, forgeOf, { reviewers, now });
     } catch (e) {
       r = { ok: false, status: 400, error: (e as Error).message };
     }

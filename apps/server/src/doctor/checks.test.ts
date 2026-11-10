@@ -394,19 +394,30 @@ describe('forge checks', () => {
     expect(one(await w.run(), 'forge.branch-rules').status).toBe('warn');
   });
 
-  test('forge.codeowners warns when code-owner review is required and the reviewer owns nothing', async () => {
+  test('forge.codeowners: a required code-owner review passes with people as owners, and warns on a bot owner or no CODEOWNERS', async () => {
     const w = world();
     for (const id of ['author', 'reviewer'] as const) {
       const r = w.f.state.rules[id];
       if (r.kind === 'ok') r.rules.requireCodeOwnerReview = true;
     }
+    // Two-bot with people as code owners: GitHub holds the hand merge for a person's approval.
     w.f.state.files.set('main:.github/CODEOWNERS', '* @someone-else\n');
+    expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
+      status: 'pass',
+      summary: expect.stringContaining('people'),
+    });
+    // The reviewer bot as a code owner: its approval would stand in for a person's.
+    w.f.state.files.set('main:.github/CODEOWNERS', '* @reviewer-bot\n');
     expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
       status: 'warn',
       summary: expect.stringContaining('reviewer-bot'),
     });
-    w.f.state.files.set('main:.github/CODEOWNERS', '* @reviewer-bot\n');
-    expect(one(await w.run(), 'forge.codeowners').status).toBe('pass');
+    // Required, with no CODEOWNERS file: nobody owns the protected paths on GitHub.
+    w.f.state.files.delete('main:.github/CODEOWNERS');
+    expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
+      status: 'warn',
+      summary: expect.stringContaining('no CODEOWNERS'),
+    });
   });
 
   test('no workflows and no required checks fails forge.ci under ciRequired and hints ciRequired false', async () => {
@@ -794,13 +805,19 @@ describe('starter identity', () => {
     }
   });
 
-  test('forge.codeowners warns: a required code owner review needs a human in starter mode', async () => {
+  test('forge.codeowners in starter mode: a required code owner review could never be given; Jumpmaster parks those pull requests instead', async () => {
     const w = starter();
+    expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
+      status: 'pass',
+      summary: expect.stringContaining('parks every pull request'),
+    });
     const r = w.f.state.rules.author;
     if (r.kind === 'ok') r.rules.requireCodeOwnerReview = true;
     expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
       status: 'warn',
-      summary: expect.stringContaining('starter mode'),
+      summary: expect.stringMatching(
+        /starter mode.*never lets an author approve.*parks every pull request/,
+      ),
     });
   });
 });

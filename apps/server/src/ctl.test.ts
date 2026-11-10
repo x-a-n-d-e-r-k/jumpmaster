@@ -499,6 +499,7 @@ describe('ctl github (Task 7)', () => {
     expect(pat.out[0]).toBe(GUIDANCE.pat.reviewer);
     expect(pat.out.join('\n')).toContain('check the Resource owner field');
     expect(pat.out.join('\n')).toContain('Only select repositories');
+    expect(pat.out.join('\n')).toContain('token lifetime policy');
     const rec = await run(['github', 'demo', 'recommend'], '', fakeFetch(200, GUIDANCE));
     expect(rec.out).toEqual([
       'identity: two-bot',

@@ -589,6 +589,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       // GitHub guidance (Task 7): reads only, never a forge write.
       registerGuidanceRoutes(scope, {
         store: deps.config,
+        now,
         ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
       });
       registerSecretRoutes(scope, {
