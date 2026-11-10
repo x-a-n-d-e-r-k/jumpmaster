@@ -111,13 +111,13 @@ describe('artifact routes', () => {
     const { h, dropId, epoch, post } = await reviewing();
     await post(upload(epoch));
     const [row] = listArtifacts(h.db, dropId);
-    const res = await h.app.inject({ method: 'GET', url: `/artifacts/${row?.id}` });
+    const res = await h.view(`/artifacts/${row?.id}`);
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toBe('image/png');
     expect(res.headers['x-content-type-options']).toBe('nosniff');
     expect(res.headers['content-security-policy']).toContain('sandbox');
     expect(res.rawPayload.equals(PNG)).toBe(true);
-    expect((await h.app.inject({ method: 'GET', url: '/artifacts/999' })).statusCode).toBe(404);
+    expect((await h.view('/artifacts/999')).statusCode).toBe(404);
   });
 });
 
@@ -126,7 +126,7 @@ describe('the drop page', () => {
     const { h, dropId, epoch, post } = await reviewing();
     await post(upload(epoch, { name: '<b>a</b>.png' }));
     const [row] = listArtifacts(h.db, dropId);
-    const res = await h.app.inject({ method: 'GET', url: `/drops/${dropId}` });
+    const res = await h.view(`/drops/${dropId}`);
     expect(res.body).toContain(`href="/artifacts/${row?.id}"`);
     expect(res.body).toContain('&lt;b&gt;a');
   });

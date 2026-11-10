@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
+import { createApp } from '../app.js';
+import { SetupMode, setupActive } from '../auth/operator.js';
 import type { Config } from '../config.js';
 import { openDb } from '../db/open.js';
 import {
@@ -687,5 +689,69 @@ describe('stick capabilities, per zone', () => {
     expect(res.statusCode).toBe(200);
     expect((res.json() as { dropId: string }).dropId).toBe('d1');
     expect(skippedOf(res)).toBeUndefined();
+  });
+});
+
+describe('setup mode', () => {
+  test('a stick enrolls and heartbeats while setup is active', async () => {
+    const db = openDb(tmpDbFile());
+    upsertDropZone(db, { id: 'main', repo: 'octo/demo', defaultBranch: 'main', configJson: '{}' });
+    const wi = upsertWorkItem(db, {
+      dropZoneId: 'main',
+      issueNumber: 7,
+      title: 't',
+      body: 'b',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    setWorkItemState(db, wi.id, 'in_flight');
+    insertDrop(db, {
+      id: 'd1',
+      dropZoneId: 'main',
+      workItemId: wi.id,
+      role: 'implement',
+      state: 'queued',
+      createdAt: t0.toISOString(),
+    });
+    const forge = fakeForge({ issues: [], trusted: [] });
+    // The whole app, guard included, on a database with no operator; a stick may use any address.
+    const whole = createApp({
+      db,
+      config,
+      forgesFor: () => ({ author: forge, reviewer: forge }),
+      now: () => t0,
+      setup: new SetupMode(() => {}),
+      leaseWaitMs: 0,
+      leasePollMs: 0,
+    });
+    expect(setupActive(db)).toBe(true);
+    const at = { ...proto, host: 'jumpmaster:7420' };
+    const enrolled = await whole.inject({
+      method: 'POST',
+      url: '/api/sticks/enroll',
+      headers: at,
+      payload: { joinToken: 'join-me', name: 's', slots: 1 },
+    });
+    expect(enrolled.statusCode).toBe(200);
+    const { stickToken } = enrolled.json() as { stickToken: string };
+    const auth = { ...at, authorization: `Bearer ${stickToken}` };
+    const leased = await whole.inject({
+      method: 'POST',
+      url: '/api/sticks/lease',
+      headers: auth,
+      payload: { freeSlots: 1 },
+    });
+    expect(leased.statusCode).toBe(200);
+    const hb = await whole.inject({
+      method: 'POST',
+      url: '/api/drops/d1/heartbeat',
+      headers: auth,
+      payload: { epoch: 1 },
+    });
+    expect(hb.statusCode).toBe(200);
+    expect(getDrop(db, 'd1')?.state).toBe('running');
+    await whole.close();
   });
 });

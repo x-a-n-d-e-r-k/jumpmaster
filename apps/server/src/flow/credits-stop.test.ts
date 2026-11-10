@@ -90,7 +90,7 @@ describe('a drop on usage credits stops dispatch', () => {
     const [b, ...more] = openStop(h);
     expect(more).toEqual([]);
     expect(b?.subject).toBe(`credits:stop:${d1.dropId}`);
-    const home = await h.app.inject({ method: 'GET', url: '/' });
+    const home = await h.view('/');
     expect(home.body).toContain(`stopped: drop ${d1.dropId} ran on usage credits`);
     expect(home.body).toContain('Overage status');
 
@@ -113,7 +113,7 @@ describe('a drop on usage credits stops dispatch', () => {
     h.at(1);
     expect(await postEvents(h, next.dropId, next.epoch, [creditsEvent(h)])).toBe(204);
     expect(getUsageState(h.db).overageStoppedAt).toBeNull();
-    const page = await h.app.inject({ method: 'GET', url: '/' });
+    const page = await h.view('/');
     expect(page.body).toContain('resumed on credits until 2026-01-01T05:03:00.000Z; 1 drop');
   });
 

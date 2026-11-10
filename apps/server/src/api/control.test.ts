@@ -1,7 +1,9 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
+import { listAudit } from '../auth/audit.js';
+import { registerGuard } from '../auth/guard.js';
 import { listRulings, raiseBriefing } from '../briefings.js';
-import type { Config } from '../config.js';
+import { type Config, secretList } from '../config.js';
 import { nextCrewWork } from '../crew/schedule.js';
 import { listCrewIssues } from '../crew/store.js';
 import { ctlRequest } from '../ctl.js';
@@ -20,11 +22,11 @@ import {
   zoneIsDrained,
 } from '../db/repo.js';
 import { intakeKey } from '../intake.js';
-import { NOW, world } from '../test/doctorWorld.js';
+import { AUTHOR_TOKEN, CLAUDE_TOKEN, NOW, world } from '../test/doctorWorld.js';
 import { fakeForgePair } from '../test/fakes.js';
 import { makeZone } from '../test/fixtures.js';
-import { t0, tmpDbFile } from '../test/helpers.js';
-import { registerControlRoutes } from './control.js';
+import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
+import { type ControlDeps, registerControlRoutes } from './control.js';
 
 const TOKEN = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
@@ -44,9 +46,16 @@ function setup(allowedHosts?: string[], zone = makeZone({ id: 'main' })) {
     dropZones: [zone],
     secrets: { operatorToken: TOKEN },
   } as unknown as Config;
-  app = Fastify();
-  registerControlRoutes(app, { db, config, now: () => t0 });
+  app = controlApp({ db, config, now: () => t0 });
   return db;
+}
+
+/** The control routes behind the guard, as `createApp` mounts them. */
+function controlApp(deps: ControlDeps): FastifyInstance {
+  const a = Fastify();
+  registerGuard(a, deps);
+  registerControlRoutes(a, deps);
+  return a;
 }
 
 const post = (url: string, payload: unknown, headers: Record<string, string> = auth) =>
@@ -292,8 +301,7 @@ describe('rule route', () => {
 describe('doctor routes', () => {
   function doctorApp() {
     const w = world();
-    app = Fastify();
-    registerControlRoutes(app, {
+    app = controlApp({
       db: w.db,
       config: { ...w.config, secrets: { ...w.config.secrets, operatorToken: TOKEN } },
       now: () => NOW,
@@ -433,8 +441,7 @@ describe('intake routes', () => {
       dropZones: [zone],
       secrets: { operatorToken: TOKEN, githubAuthorToken: 'github_pat_secretsecret' },
     } as unknown as Config;
-    app = Fastify();
-    registerControlRoutes(app, {
+    app = controlApp({
       db,
       config,
       now: () => t0,
@@ -486,6 +493,20 @@ describe('intake routes', () => {
       }),
     ]);
     expect(getOutbox(db, `issue:main:1:${key}`)?.state).toBe('done');
+  });
+
+  test('intake/issue is audited by its outcome, never its text', async () => {
+    const { db } = intakeApp();
+    const res = await post(ISSUE_URL, { idempotencyKey: KEY, ...issue });
+    expect(res.statusCode).toBe(201);
+    const [row] = listAudit(db);
+    expect(row).toMatchObject({
+      action: 'intake.issue',
+      via: 'token',
+      target: 'main',
+      detail: { status: 201, number: expect.any(Number) },
+    });
+    expect(JSON.stringify(row)).not.toContain('sum');
   });
 
   test('the same idempotencyKey twice files exactly once', async () => {
@@ -633,5 +654,115 @@ describe('intake routes', () => {
     ).toBe(400);
     expect(f.author.calls).toEqual([]);
     expect(listCrewIssues(db, 'main')).toEqual([]);
+  });
+});
+
+describe('control audit', () => {
+  test('every mutating control route writes a control_audit row from named fields, with its via and no secret value', async () => {
+    const crew = { ...makeZone().crew, enabled: true, cycleMinutes: 60 };
+    const w = world({ zone: { crew }, config: { mcp: { enabled: true } } as Partial<Config> });
+    const db = w.db;
+    app = controlApp({
+      db,
+      config: w.config,
+      now: () => NOW,
+      forgesFor: w.deps.forges,
+      doctorEnv: w.deps.env,
+    });
+    const session = operatorSession(db, NOW);
+    const briefing = (subject: string) =>
+      raiseBriefing(
+        db,
+        {
+          zoneId: 'main',
+          kind: 'crew',
+          subject,
+          decision: 'd',
+          why: 'w',
+          options: [
+            { id: 'yes', label: 'Yes', effect: 'none' },
+            { id: 'no', label: 'No', effect: 'none' },
+          ],
+          source: 'crew',
+        },
+        NOW,
+      );
+    const send = (
+      method: 'POST' | 'DELETE',
+      url: string,
+      payload: unknown,
+      via: 'token' | 'session',
+    ) =>
+      (app as FastifyInstance).inject({
+        method,
+        url,
+        headers: via === 'token' ? auth : { host: HOST, ...session.headers },
+        ...(method === 'POST' ? { payload: payload as object } : {}),
+      });
+    // A pasted secret in a free-text field (a ruling note) must not reach the audit.
+    const note = `see ${AUTHOR_TOKEN} and ${CLAUDE_TOKEN}`;
+    const calls: [string, 'POST' | 'DELETE', string, unknown, 'token' | 'session'][] = [
+      ['zone.mode', 'POST', '/api/control/zones/main', { mode: 'paused' }, 'session'],
+      ['zone.mode', 'POST', '/api/control/zones/main', { mode: 'active' }, 'token'],
+      [
+        'briefing.rule',
+        'POST',
+        `/api/control/briefings/${briefing('a')}/rule`,
+        { optionId: 'yes', note },
+        'session',
+      ],
+      ['zone.crew-cycle', 'POST', '/api/control/zones/main/crew-cycle', {}, 'token'],
+      [
+        'mcp-token.mint',
+        'POST',
+        '/api/control/mcp-tokens',
+        { zoneId: 'main', scope: 'read', days: 7, label: `x ${CLAUDE_TOKEN}` },
+        'session',
+      ],
+      ['doctor.run', 'POST', '/api/control/doctor', {}, 'token'],
+      ['doctor.drop', 'POST', '/api/control/doctor/drop', { zone: 'main' }, 'session'],
+      [
+        'doctor.drop-cancel',
+        'POST',
+        '/api/control/doctor/drop',
+        { zone: 'main', cancel: true },
+        'token',
+      ],
+      ['kill', 'POST', '/api/control/kill', { engaged: true }, 'session'],
+      ['kill', 'POST', '/api/control/kill', { engaged: false }, 'token'],
+    ];
+    const minted: string[] = [];
+    for (const [action, method, url, payload, via] of calls) {
+      const res = await send(method, url, payload, via);
+      expect([action, res.statusCode]).toEqual([action, res.statusCode < 300 ? res.statusCode : 0]);
+      if (action === 'mcp-token.mint') minted.push((res.json() as { token: string }).token);
+    }
+    const revoke = await send('DELETE', '/api/control/mcp-tokens/1', undefined, 'token');
+    expect(revoke.statusCode).toBe(200);
+    const rows = listAudit(db).reverse();
+    expect(rows.map((r) => [r.action, r.via])).toEqual([
+      ...calls.map(([action, , , , via]) => [action, via]),
+      ['mcp-token.revoke', 'token'],
+    ]);
+    expect(rows[0]).toMatchObject({ target: 'main', detail: { mode: 'paused' }, guarded: false });
+    expect(rows[2]?.detail).toEqual({ optionId: 'yes', rulingId: expect.any(Number) });
+    expect(rows[4]?.detail).toEqual({ id: 1, scope: 'read', days: 7 });
+    const all = JSON.stringify(db.prepare('SELECT * FROM control_audit').all());
+    for (const secret of [
+      ...secretList(w.config.secrets),
+      ...minted,
+      session.id,
+      session.csrf,
+      'note',
+    ]) {
+      expect(all).not.toContain(secret);
+    }
+    // A GET writes nothing.
+    await (app as FastifyInstance).inject({
+      method: 'GET',
+      url: '/api/control/briefings',
+      headers: auth,
+    });
+    expect(listAudit(db)).toHaveLength(rows.length);
   });
 });

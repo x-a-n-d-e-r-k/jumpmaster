@@ -40,7 +40,10 @@ describe('global checks', () => {
     expect(one(await w.run(), 'config.listen')).toMatchObject({
       status: 'warn',
       fix: expect.stringContaining('127.0.0.1'),
+      // The pages have a login now; what crosses the network in clear is the passphrase.
+      summary: expect.stringContaining('the login passphrase crosses it in clear'),
     });
+    expect(one(await w.run(), 'config.listen').summary).not.toContain('no login');
     w.deps.env.inContainer = true;
     expect(one(await w.run(), 'config.listen').status).toBe('pass');
   });

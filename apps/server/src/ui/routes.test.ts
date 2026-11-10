@@ -6,8 +6,7 @@ import { opMarker } from '../outbox.js';
 import { crewOn, GOAL } from '../test/crew.js';
 import { harness } from '../test/flowHarness.js';
 
-const get = async (h: Awaited<ReturnType<typeof harness>>, url: string) =>
-  h.app.inject({ method: 'GET', url });
+const get = async (h: Awaited<ReturnType<typeof harness>>, url: string) => h.view(url);
 
 async function crewHarness() {
   const h = await harness({
@@ -38,11 +37,7 @@ async function crewHarness() {
 describe('UI routes', () => {
   test('/doctor shows the latest run, escaped, and refuses a foreign Host', async () => {
     const h = await harness();
-    const foreign = await h.app.inject({
-      method: 'GET',
-      url: '/doctor',
-      headers: { host: 'evil.test' },
-    });
+    const foreign = await h.view('/doctor', { host: 'evil.test' });
     expect(foreign.statusCode).toBe(403);
     expect((await get(h, '/doctor')).body).toContain('No doctor run has finished yet');
     const checks = [
@@ -193,7 +188,7 @@ describe('UI routes', () => {
     'a foreign Host cannot read %s',
     async (url) => {
       const h = await crewHarness();
-      const res = await h.app.inject({ method: 'GET', url, headers: { host: 'evil.test' } });
+      const res = await h.view(url, { host: 'evil.test' });
       expect(res.statusCode).toBe(403);
     },
   );

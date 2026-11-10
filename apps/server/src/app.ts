@@ -1,9 +1,12 @@
 import Fastify, { type FastifyInstance } from 'fastify';
-import { registerControlRoutes } from './api/control.js';
+import { registerControlRoutes, stderrSetupMode } from './api/control.js';
 import { registerStickRoutes, type StickRouteDeps } from './api/sticks.js';
 import { getArtifact, listArtifacts, readArtifact } from './artifacts.js';
+import { Backoff } from './auth/backoff.js';
+import { registerGuard, withCsrf } from './auth/guard.js';
+import type { SetupMode } from './auth/operator.js';
 import { listBriefings, listRulings } from './briefings.js';
-import { allowedHostsOf, type Config } from './config.js';
+import type { Config } from './config.js';
 import { creditDropsSince, creditSignal } from './credits.js';
 import { listCrewIssues } from './crew/store.js';
 import type { Db } from './db/open.js';
@@ -33,6 +36,7 @@ import { missingFor, zoneRequirements } from './leases.js';
 import { registerMcpRoute } from './mcp/server.js';
 import type { ForgePair } from './outbox.js';
 import { lastSyncResult } from './sync.js';
+import { registerAuthPages } from './ui/auth-pages.js';
 import {
   type CrewLine,
   type HomeState,
@@ -85,23 +89,29 @@ export function createApp(
     intakeForgesFor?: (zoneId: string) => ForgePair;
     /** The operator's log, scrubbed of secrets (main.ts); MCP's internal errors go here. */
     log?: (msg: string) => void;
+    /** The in-memory setup code (main.ts prints the first at start); default prints to stderr. */
+    setup?: SetupMode;
+    /** Per-source backoff shared by the setup code, the login and sudo. */
+    backoff?: Backoff;
   },
 ): FastifyInstance {
   const app = Fastify({ logger: false });
-  // Pages have no login, so a foreign Host could read them through DNS rebinding. Stick routes
-  // authenticate with their own token and may arrive on any address a stick can reach.
-  const allowedHosts = allowedHostsOf(deps.config);
-  app.addHook('onRequest', async (req, reply) => {
-    if (req.url.startsWith('/api/')) return;
-    if (!allowedHosts.includes(req.headers.host ?? '')) {
-      return reply.code(403).type('text/plain').send('forbidden host');
-    }
-  });
+  // The login and setup pages post plain HTML forms.
+  app.addContentTypeParser(
+    'application/x-www-form-urlencoded',
+    { parseAs: 'string' },
+    (_req, body, done) => done(null, Object.fromEntries(new URLSearchParams(String(body)))),
+  );
+  // Host, Origin, session, CSRF and token: one hook decides for every route (auth/guard.ts).
+  registerGuard(app, deps);
+  const setup = deps.setup ?? stderrSetupMode(deps.config.listen);
+  const backoff = deps.backoff ?? new Backoff();
+  registerAuthPages(app, { ...deps, setup, backoff });
   registerStickRoutes(app, deps);
-  registerControlRoutes(app, deps);
+  registerControlRoutes(app, { ...deps, setup, backoff });
   registerMcpRoute(app, deps);
 
-  app.get('/', async (_req, reply) => {
+  app.get('/', async (req, reply) => {
     const { db, config, now } = deps;
     const at = now();
     const items = config.dropZones.flatMap((z) => listWorkItems(db, z.id));
@@ -162,10 +172,10 @@ export function createApp(
         };
       }),
     });
-    return reply.type('text/html; charset=utf-8').send(html);
+    return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
 
-  app.get('/briefings', async (_req, reply) => {
+  app.get('/briefings', async (req, reply) => {
     const { db, config } = deps;
     const holds = new Map<string, string>();
     for (const z of config.dropZones) {
@@ -179,7 +189,7 @@ export function createApp(
       zones: config.dropZones,
       holds,
     });
-    return reply.type('text/html; charset=utf-8').send(html);
+    return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
 
   app.get<{ Params: { id: string } }>('/zones/:id/goals', async (req, reply) => {
@@ -193,23 +203,25 @@ export function createApp(
       items: listWorkItems(db, zone.id),
       skippedCrewUnpromoted: lastSyncResult(zone.id)?.skippedCrewUnpromoted ?? [],
     });
-    return reply.type('text/html; charset=utf-8').send(html);
+    return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
 
   app.get<{ Params: { id: string } }>('/zones/:id/intake', async (req, reply) => {
     const zone = deps.config.dropZones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).type('text/plain').send('not found');
-    return reply.type('text/html; charset=utf-8').send(renderIntake(zone));
+    return reply.type('text/html; charset=utf-8').send(withCsrf(req, renderIntake(zone)));
   });
 
-  app.get('/doctor', async (_req, reply) =>
+  app.get('/doctor', async (req, reply) =>
     reply
       .type('text/html; charset=utf-8')
-      .send(renderDoctor(latestDoctorRun(deps.db), deps.config.dropZones)),
+      .send(withCsrf(req, renderDoctor(latestDoctorRun(deps.db), deps.config.dropZones))),
   );
 
-  app.get('/observations', async (_req, reply) =>
-    reply.type('text/html; charset=utf-8').send(renderObservations(listObservations(deps.db))),
+  app.get('/observations', async (req, reply) =>
+    reply
+      .type('text/html; charset=utf-8')
+      .send(withCsrf(req, renderObservations(listObservations(deps.db)))),
   );
 
   app.get<{ Params: { id: string } }>('/artifacts/:id', async (req, reply) => {
@@ -227,7 +239,12 @@ export function createApp(
     if (!drop) return reply.code(404).type('text/plain').send('not found');
     return reply
       .type('text/html; charset=utf-8')
-      .send(renderDrop(drop, listEvents(deps.db, drop.id), listArtifacts(deps.db, drop.id)));
+      .send(
+        withCsrf(
+          req,
+          renderDrop(drop, listEvents(deps.db, drop.id), listArtifacts(deps.db, drop.id)),
+        ),
+      );
   });
 
   return app;

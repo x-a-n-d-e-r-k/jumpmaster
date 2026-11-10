@@ -8,7 +8,9 @@ import type { GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import {
   escapeHtml,
+  page,
   renderBriefings,
+  renderDoctor,
   renderDrop,
   renderGoals,
   renderHome,
@@ -454,13 +456,13 @@ describe('briefings', () => {
     expect(html).toContain('Promotes at 2026-01-01T00:01:00.000Z unless you reject it.');
   });
 
-  test('a rule form posts optionId with the operator token from a password field', () => {
+  test('a rule form posts optionId through jmFetch, with no token field', () => {
     const html = renderBriefings({ open: [briefing()], rulings: [], zones: [z] });
     expect(html).toMatch(/<form class="rule" data-briefing="4" data-options="[0-9a-f]{16}">/);
-    expect(html).toContain('type="password"');
-    expect(html).toContain("'/api/control/briefings/'+f.dataset.briefing+'/rule'");
-    expect(html).toContain("authorization:'Bearer '+");
-    expect(html).toContain('JSON.stringify({optionId:o.value,optionsDigest:f.dataset.options');
+    expect(html).not.toContain('type="password"');
+    expect(html).toContain(
+      "jmFetch('/api/control/briefings/'+f.dataset.briefing+'/rule',{optionId:o.value,optionsDigest:f.dataset.options",
+    );
     expect(html).toContain('location.reload()');
     // A refusal names its reason (already ruled, options changed), not only the status.
     expect(html).toContain(
@@ -671,7 +673,8 @@ describe('renderIntake', () => {
     expect(html).toMatch(/Step 1/);
     expect(html).toMatch(/Step 2/);
     expect(html).toMatch(/Step 3/);
-    expect(html).toContain('type="password"');
+    expect(html).not.toContain('type="password"');
+    expect(html).toContain('const r = await jmFetch(base + path, body);');
     expect(html).not.toMatch(/github_pat_|ghp_|sk-ant-/);
     // The page reuses the tested helpers, not a copy of them.
     expect(html).toContain(submitKey.toString());
@@ -680,5 +683,36 @@ describe('renderIntake', () => {
     // A refused filing starts afresh: the stored key is dropped, and the page says so.
     expect(html).toMatch(/r\.status === 502\) \{\s*forgetSubmitKey\(sessionStorage, content\)/);
     expect(html).not.toContain('innerHTML');
+  });
+});
+
+describe('the page shell and its forms', () => {
+  test('the kill, rule, doctor and intake forms carry no token field and send the CSRF header', () => {
+    const pages = {
+      kill: renderHome({ zones: [z], items: [], drops: [], sticks: [] }),
+      killed: renderHome({ zones: [z], items: [], drops: [], sticks: [], killed: true }),
+      rule: renderBriefings({ open: [briefing()], rulings: [], zones: [z] }),
+      doctor: renderDoctor(null, [z]),
+      intake: renderIntake(z),
+    };
+    for (const [name, html] of Object.entries(pages)) {
+      expect([name, html]).not.toEqual([name, expect.stringMatching(/type="password"/)]);
+      expect([name, html]).not.toEqual([name, expect.stringMatching(/Operator token|Bearer/)]);
+      // The shell: an empty meta the guard fills per session, the helper, and the logout button.
+      expect(html).toContain('<meta name="jm-csrf" content="">');
+      expect(html).toContain("'x-jm-csrf':document.querySelector('meta[name=jm-csrf]').content");
+      expect(html).toContain('<form method="post" action="/logout"');
+      expect(html).toMatch(/jmFetch\(/);
+    }
+    expect(pages.kill).toContain("jmFetch('/api/control/kill',{engaged:true})");
+    expect(pages.killed).toContain("jmFetch('/api/control/kill',{engaged:false})");
+    expect(pages.doctor).toContain("jmFetch(b.dataset.doctor,JSON.parse(b.dataset.body||'{}'))");
+  });
+
+  test('the login and setup shell has no CSRF meta, helper or logout', () => {
+    const html = page('<p>x</p>', { chrome: false });
+    expect(html).not.toContain('jm-csrf');
+    expect(html).not.toContain('jmFetch');
+    expect(html).not.toContain('/logout');
   });
 });

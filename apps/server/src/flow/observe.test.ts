@@ -238,7 +238,7 @@ describe('the observations page', () => {
     const h = await observing();
     await h.sync();
     recordObservation(h.db, h.zone.id, 1, 'would_park', '<script>x</script>', h.now());
-    const res = await h.app.inject({ method: 'GET', url: '/observations' });
+    const res = await h.view('/observations');
     expect(res.body).toContain('&lt;script&gt;');
     expect(res.body).not.toContain('<script>x');
   });

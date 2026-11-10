@@ -243,7 +243,12 @@ docker compose logs stick | tail -5    # its image policy and capabilities, then
 ```
 
 The UI is at <http://127.0.0.1:7420/>, on the host only. From another machine, tunnel it:
-`ssh -L 7420:127.0.0.1:7420 user@host`. Doctor checks: `config.listen`, `stick.seen`,
+`ssh -L 7420:127.0.0.1:7420 user@host`. On its first start the server prints a line beginning
+`JUMPMASTER SETUP CODE:` (`docker compose logs jumpmaster` shows it). Open
+<http://127.0.0.1:7420/setup>, enter the code and choose the operator passphrase you will log in
+with (at least 12 characters). Without a browser, `printf %s "$PASSPHRASE" | docker compose exec -T
+jumpmaster jumpmaster ctl passphrase set` does the same; `ctl setup-code` prints a fresh code.
+Doctor checks: `config.listen`, `stick.seen`,
 `stick.capabilities`, `stick.image-policy`.
 
 ### Step 8: Run the doctor to zero fails
@@ -312,8 +317,7 @@ repeat. See [Egress](#egress) and [Doctor drop](#doctor-drop). Doctor checks: `z
 
 ### Step 10: File the first issue from the intake page
 
-Open `http://127.0.0.1:7420/zones/<zone>/intake`. Paste the operator token (the contents of
-`secrets/operator_token`) into the **Operator token** field; it stays in the page. Then:
+Log in, then open `http://127.0.0.1:7420/zones/<zone>/intake`. Then:
 
 1. **The goal.** Fill in what the project is for and its objectives, and render the `GOAL.md`
    stub. Jumpmaster doesn't commit it: `GOAL.md` is a protected path no agent may write. Commit
@@ -666,8 +670,8 @@ release's preset), or use the release's preset.
 ## Listen
 
 The server listens on `0.0.0.0:7420` inside its container, and compose publishes it on
-`127.0.0.1:7420` only. Its pages have no login, so don't publish it on another interface; reach it
-through an SSH tunnel. A browser on another host name must be listed in `listen.allowedHosts`.
+`127.0.0.1:7420` only. Its pages need the operator login, but the login crosses the wire in clear,
+so don't publish it on another interface; reach it through an SSH tunnel. A browser on another host name must be listed in `listen.allowedHosts`.
 Doctor check: `config.listen`.
 
 ## UID

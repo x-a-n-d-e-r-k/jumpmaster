@@ -1,6 +1,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createSession } from '../auth/sessions.js';
 import { type Db, openDb } from '../db/open.js';
 import {
   insertDrop,
@@ -43,6 +44,22 @@ export function seedQueuedDrop(): Db {
     createdAt: t0.toISOString(),
   });
   return db;
+}
+
+/**
+ * A logged-in browser: an operator row (a placeholder hash, so no scrypt cost; nothing here logs in
+ * with a passphrase) and a live session. `headers` carry the cookie and the CSRF header.
+ */
+export function operatorSession(
+  db: Db,
+  now: Date = t0,
+): { id: string; csrf: string; cookie: string; headers: { cookie: string; 'x-jm-csrf': string } } {
+  db.prepare(
+    "INSERT OR IGNORE INTO operator (id, passphrase_hash, created_at) VALUES (1, 'scrypt$seeded', ?)",
+  ).run(now.toISOString());
+  const { id, csrf } = createSession(db, now);
+  const cookie = `jm_session=${id}`;
+  return { id, csrf, cookie, headers: { cookie, 'x-jm-csrf': csrf } };
 }
 
 export function workItem(db: Db, id: number): WorkItem {

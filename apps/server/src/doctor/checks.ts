@@ -215,7 +215,7 @@ function listenCheck(d: DoctorDeps): DoctorCheck {
   return {
     ...base,
     status: 'warn',
-    summary: `the UI listens on ${host}:${port}, reachable from your network, and its pages have no login`,
+    summary: `the UI listens on ${host}:${port}, reachable from your network, and the login passphrase crosses it in clear`,
     fix: 'Set listen.host to 127.0.0.1 in the config (and reach the UI over an SSH tunnel), unless you mean to expose it.',
     doc: doc('listen'),
   };

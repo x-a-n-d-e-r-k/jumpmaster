@@ -1,5 +1,5 @@
 import type { DropPayload, DropResult, Role } from '@jumpmaster/protocol';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { createApp } from '../app.js';
 import type { Config, DropZoneConfig, UsageConfig } from '../config.js';
 import { creditsPass } from '../credits.js';
@@ -10,7 +10,7 @@ import { promptVersions } from '../payloads.js';
 import { syncDropZone } from '../sync.js';
 import { type FakeForge, type FakeForgeState, type FakeIssue, fakeForgePair } from './fakes.js';
 import { makeZone, usageCfg } from './fixtures.js';
-import { tmpDbFile } from './helpers.js';
+import { operatorSession, tmpDbFile } from './helpers.js';
 
 const PROTO = { 'x-jumpmaster-protocol': '1' };
 const START = new Date('2026-01-01T00:00:00Z');
@@ -38,6 +38,8 @@ export interface Harness {
   postResult(dropId: string, epoch: number, result: DropResult): Promise<number>;
   /** Leases the next drop (it must have `role`), simulates its push, and posts `result`. */
   finishDrop(role: Role, result: DropResult): Promise<number>;
+  /** GETs a page as the logged-in operator (a session made at the current clock). */
+  view(url: string, headers?: Record<string, string>): Promise<LightMyRequestResponse>;
 }
 
 export async function harness(
@@ -118,6 +120,13 @@ export async function harness(
   const auth = { ...PROTO, authorization: `Bearer ${stickToken}` };
 
   const h: Harness = {
+    view(url, headers = {}) {
+      return app.inject({
+        method: 'GET',
+        url,
+        headers: { cookie: operatorSession(db, clock).cookie, ...headers },
+      });
+    },
     db,
     forge: f,
     zone,

@@ -527,6 +527,40 @@ CREATE UNIQUE INDEX one_active_doctor_drop
   ON drops(drop_zone_id) WHERE role = 'doctor' AND state IN ('queued','leased','running');
 `;
 
+/**
+ * v18: the operator login (§7.5). One operator row (its scrypt passphrase hash), browser sessions
+ * (only the SHA-256 of each session id is stored) and the control audit, which keeps the last 5000
+ * rows. New tables only, so an M4 binary still runs against v18.
+ */
+const V18_SQL = `
+CREATE TABLE operator (
+  id               INTEGER PRIMARY KEY CHECK (id = 1),
+  passphrase_hash  TEXT NOT NULL,
+  created_at       TEXT NOT NULL,
+  rotated_at       TEXT
+);
+CREATE TABLE sessions (
+  id_hash       TEXT PRIMARY KEY,
+  csrf          TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  last_seen_at  TEXT NOT NULL,
+  sudo_until    TEXT
+);
+CREATE TABLE control_audit (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  at           TEXT NOT NULL,
+  via          TEXT NOT NULL CHECK (via IN ('token','session','system')),
+  action       TEXT NOT NULL,
+  target       TEXT,
+  guarded      INTEGER NOT NULL DEFAULT 0,
+  detail_json  TEXT NOT NULL
+);
+CREATE TRIGGER control_audit_keep_5000 AFTER INSERT ON control_audit
+BEGIN
+  DELETE FROM control_audit WHERE id <= NEW.id - 5000;
+END;
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -553,6 +587,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 15, sql: V15_SQL },
   { version: 16, sql: V16_SQL },
   { version: 17, sql: V17_SQL, foreignKeysOff: true },
+  { version: 18, sql: V18_SQL },
 ];
 
 /**

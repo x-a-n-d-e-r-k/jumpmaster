@@ -76,7 +76,8 @@ the zone's intake page.
   [SECURITY.md](SECURITY.md#verifying-a-release).
 - **Secrets are files.** Tokens live in `secrets/` (mode `0600`) and reach containers as Docker
   secrets; none is ever printed, logged or stored in the database. The UI listens on `127.0.0.1`
-  only, and its control routes need the operator token.
+  only, its pages need the operator's login, and its control routes the operator token or a
+  logged-in session.
 - **Your rules stay in charge.** Jumpmaster refuses to merge unless the default branch's ruleset
   requires a pull request and CI, with no bypass, and it parks any agent change to a protected path
   (`.github/**`, `GOAL.md` and others).
