@@ -21,7 +21,7 @@ export type Action = DoctorAction;
 export type Pages = {
   /** `/zones` and `/zones/:id` (Task 11). */
   zones: boolean;
-  /** `/settings/install` and `/settings/history` (Task 13). */
+  /** `/settings/install` and `/settings/history` (Task 13, with `/settings/mcp-tokens`). */
   settings: boolean;
   /** `/settings/credentials` (Task 9). */
   credentials: boolean;
@@ -105,7 +105,8 @@ const TABLE: Record<string, Rule> = {
   'config.file': settings('/settings/history', 'Open Settings, History'),
   'config.uid': docs,
   'config.secret-files': docs,
-  'config.restart': docs,
+  // The Install tab carries the restart-pending badge and the restart command.
+  'config.restart': settings('/settings/install', 'Open Settings, Install'),
   'claude.token-age': credentials,
   'forge.author': credentials,
   'forge.reviewer': credentials,

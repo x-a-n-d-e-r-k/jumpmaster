@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
+import { auditedReadds } from '../auth/audit.js';
 import type { Principal } from '../auth/guard.js';
 import {
   assembleSecrets,
@@ -120,6 +121,12 @@ export type RevisionView = {
   via: RevisionVia;
   note: string | null;
   changes: Change[];
+  /** The guarded paths this revision changed against its parent (the classifier's judgement). */
+  guarded: string[];
+  /** Zones this revision re-added with their history, as its apply recorded them. */
+  readds: string[];
+  /** Zones a revert to this revision would re-add with their history, judged now. */
+  revertReadds: string[];
 };
 
 export type StoreOptions = {
@@ -672,8 +679,23 @@ export class ConfigStore implements ConfigSource {
       r.parentId !== null && !parents.has(r.parentId) ? [r.parentId] : [],
     );
     for (const p of getRevisions(db, missing)) parents.set(p.id, p.doc);
+    const readds = auditedReadds(
+      db,
+      list.map((r) => r.id),
+    );
+    const zoneIds = (doc: Record<string, unknown>): string[] =>
+      (Array.isArray(doc.dropZones) ? (doc.dropZones as { id?: unknown }[]) : []).map((z) =>
+        String(z.id),
+      );
+    const here = new Set(zoneIds(this.doc));
     return list.map((r) => {
       const parent = r.parentId === null ? undefined : parents.get(r.parentId);
+      let guarded: string[] = [];
+      try {
+        guarded = [...new Set(classify(parent ?? {}, r.doc).guarded.map((g) => g.path))];
+      } catch {
+        // A document an older schema accepted and this one cannot read: no marks; the changes stay.
+      }
       return {
         id: r.id,
         parentId: r.parentId,
@@ -681,6 +703,10 @@ export class ConfigStore implements ConfigSource {
         via: r.via,
         note: r.note,
         changes: diff(parent ?? {}, r.doc),
+        guarded,
+        readds: readds.get(r.id) ?? [],
+        // A rollback re-adds what it restores (zoneRules): the ids not here now that have a past.
+        revertReadds: zoneIds(r.doc).filter((id) => !here.has(id) && zoneHasHistory(db, id)),
       };
     });
   }

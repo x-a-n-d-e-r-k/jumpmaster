@@ -416,8 +416,15 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
     );
 
     // MCP tokens: minted only here, the plain token returned once; registered only with mcp on.
+    // The value is shown, so a session mints only with sudo (the passphrase re-entered within five
+    // minutes), as for a credential; the token is always sudo. List and revoke show no value.
     if (mcpConfigOf(live()).enabled) {
       scope.post('/api/control/mcp-tokens', async (req, reply) => {
+        if (req.principal?.via === 'session' && !req.principal.sudo)
+          return reply.code(403).send({
+            error: 'an MCP token is shown once, so minting one needs sudo: re-enter the passphrase',
+            sudo: 'required',
+          });
         const body = MintBody.safeParse(req.body);
         if (!body.success) return reply.code(400).send({ error: 'invalid body' });
         const { zoneId, scope: tokenScope, days, label } = body.data;
@@ -1175,6 +1182,8 @@ function registerConfigRoutes(
       ...(status.filePath ? { filePath: status.filePath } : {}),
       ...(status.fileProblem ? { fileProblem: status.fileProblem } : {}),
       ...(status.fileIgnored ? { fileIgnored: status.fileIgnored } : {}),
+      // What the lenient read of the file adjusted to run (ctl config show, the Install tab).
+      ...(status.warnings ? { warnings: status.warnings } : {}),
     };
   });
 

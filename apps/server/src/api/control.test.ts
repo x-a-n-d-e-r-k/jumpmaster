@@ -6,7 +6,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
 import { listAudit } from '../auth/audit.js';
 import { registerGuard } from '../auth/guard.js';
-import { sha256Hex } from '../auth/sessions.js';
+import { grantSudo, SUDO_MS, sha256Hex } from '../auth/sessions.js';
 import { listRulings, raiseBriefing } from '../briefings.js';
 import { loadBoot } from '../config/boot.js';
 import { ConfigStore } from '../config/store.js';
@@ -758,6 +758,8 @@ describe('control audit', () => {
       doctorEnv: w.deps.env,
     });
     const session = operatorSession(db, NOW);
+    // Minting shows an MCP token's value: a session needs sudo for it (Task 13).
+    grantSudo(db, sha256Hex(session.id), NOW);
     const briefing = (subject: string) =>
       raiseBriefing(
         db,
@@ -855,6 +857,71 @@ describe('control audit', () => {
   });
 });
 
+describe('MCP tokens and sudo (Task 13)', () => {
+  test('a session older than the sudo window that mints is sent to re-authenticate first, and no value is made or shown before that', async () => {
+    const w = world({ config: { mcp: { enabled: true } } as Partial<Config> });
+    let clock = NOW;
+    app = controlApp({ db: w.db, config: w.config, now: () => clock });
+    const session = operatorSession(w.db, NOW);
+    const headers = { host: HOST, ...session.headers };
+    const mint = () =>
+      (app as FastifyInstance).inject({
+        method: 'POST',
+        url: '/api/control/mcp-tokens',
+        headers,
+        payload: { zoneId: 'main', scope: 'write', days: 7 },
+      });
+    const count = () =>
+      (w.db.prepare('SELECT COUNT(*) AS n FROM mcp_tokens').get() as { n: number }).n;
+
+    // Never re-authenticated: refused, pointed at sudo, nothing minted.
+    const never = await mint();
+    expect(never.statusCode).toBe(403);
+    expect(never.json()).toEqual({
+      error: 'an MCP token is shown once, so minting one needs sudo: re-enter the passphrase',
+      sudo: 'required',
+    });
+    expect(count()).toBe(0);
+
+    // Re-authenticated: minted, the value returned once.
+    grantSudo(w.db, sha256Hex(session.id), clock);
+    const ok = await mint();
+    expect(ok.statusCode).toBe(200);
+    expect((ok.json() as { token: string }).token).toMatch(/^jmm_/);
+    expect(count()).toBe(1);
+
+    // Past the five minutes: sent back to re-authenticate, and still nothing is made.
+    clock = plus(NOW, SUDO_MS + 1000);
+    const stale = await mint();
+    expect(stale.statusCode).toBe(403);
+    expect(stale.body).not.toMatch(/jmm_/);
+    expect(count()).toBe(1);
+
+    // The list never carries a value; revoke needs no sudo (it shows nothing).
+    const list = await (app as FastifyInstance).inject({
+      method: 'GET',
+      url: '/api/control/mcp-tokens',
+      headers,
+    });
+    expect(list.body).not.toMatch(/jmm_|token_hash|tokenHash/);
+    const revoke = await (app as FastifyInstance).inject({
+      method: 'DELETE',
+      url: '/api/control/mcp-tokens/1',
+      headers,
+    });
+    expect(revoke.statusCode).toBe(200);
+
+    // The operator token (ctl) is not a browser session: always sudo.
+    const bearer = await (app as FastifyInstance).inject({
+      method: 'POST',
+      url: '/api/control/mcp-tokens',
+      headers: auth,
+      payload: { zoneId: 'main', scope: 'read', days: 1 },
+    });
+    expect(bearer.statusCode).toBe(200);
+  });
+});
+
 describe('config routes', () => {
   const env = {
     JM_CLAUDE_TOKEN: 'claude-secret-value-1',
@@ -941,6 +1008,16 @@ describe('config routes', () => {
       filePath: expect.stringMatching(/jumpmaster\.config\.json$/),
     });
     for (const s of Object.values(env)) expect(r.body).not.toContain(s);
+  });
+
+  test("GET config carries the lenient read's warnings, so ctl and the Install tab can show them", async () => {
+    configApp({ pollSeconds: 1, dropZones: [zoneDoc()] });
+    const r = await req('GET', '/api/control/config');
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toMatchObject({
+      mode: 'file',
+      warnings: ['pollSeconds 1 is outside 5..86400: running with 5; set it in range'],
+    });
   });
 
   test('a session cannot change a guarded path without the confirmation page, and the token can', async () => {
@@ -1221,6 +1298,10 @@ describe('config routes', () => {
           via: 'ctl',
           note: null,
           changes: [{ path: 'pollSeconds', from: 30, to: 40 }],
+          // Task 13's marks: nothing guarded, no zone re-added, none a revert would bring back.
+          guarded: [],
+          readds: [],
+          revertReadds: [],
         },
         expect.objectContaining({ id: 2 }),
       ],
