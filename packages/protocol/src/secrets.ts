@@ -86,9 +86,15 @@ export function readSecretFile(path: string, label: string): string {
   const fileVar = label;
   let fd: number;
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    // Never through a symbolic link: the file the variable names is the one read (where the
+    // platform has O_NOFOLLOW; Linux and macOS do).
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0));
   } catch (e) {
     const code = errno(e);
+    if (code === 'ELOOP')
+      throw new Error(
+        `${fileVar}: ${path} is a symbolic link; point the variable at the file itself`,
+      );
     if (code === 'EACCES' || code === 'EPERM')
       throw new Error(`${fileVar}: ${path} is not readable by uid ${process.getuid?.() ?? '?'}`);
     if (code === 'ENOENT') throw new Error(`${fileVar}: ${path} does not exist`);

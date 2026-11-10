@@ -1017,3 +1017,37 @@ describe('names that reach Object.prototype', () => {
     expect(zoneSecrets({ secrets }, 'main')).toEqual({ TOKEN_A: 'value-aaaa' });
   });
 });
+
+describe('gate secret values and names (Task 4 review)', () => {
+  test('a gate secret under 8 characters never reaches the scrub lists, and the zone stays parked on it', () => {
+    const file = withZone({ gateSecrets: ['FLAG'] });
+    const env = { ...fullEnv, JM_ZONE_SECRET_MAIN_FLAG: 'e' };
+    const c = loadConfig(file, env);
+    expect(secretList(c.secrets)).not.toContain('e');
+    expect(zoneSecrets(c, 'main')).toEqual({});
+    expect(problemsOf(file, env)).toEqual([['kind', 'zone:main:FLAG']]);
+  });
+
+  test('zone ids that fold to the same JM_ZONE_SECRET_ prefix are refused', () => {
+    const r = parseEditable({
+      dropZones: [
+        { ...baseZone, id: 'web' },
+        { ...baseZone, id: 'WEB' },
+        { ...baseZone, id: 'a-b' },
+        { ...baseZone, id: 'a_b' },
+      ],
+    });
+    expect(r.ok ? [] : r.issues).toEqual([
+      {
+        path: 'dropZones.1.id',
+        message:
+          'zone ids web and WEB share the gate secret variables JM_ZONE_SECRET_WEB_<NAME>: rename one',
+      },
+      {
+        path: 'dropZones.3.id',
+        message:
+          'zone ids a-b and a_b share the gate secret variables JM_ZONE_SECRET_A_B_<NAME>: rename one',
+      },
+    ]);
+  });
+});

@@ -1337,3 +1337,19 @@ describe('credentials in the store (Task 4)', () => {
     expect(vault !== 'disabled' ? vault.snapshot('claudeToken') : undefined).toEqual(before);
   });
 });
+
+test('a retired value that leaves the redaction list is logged, never with its value', () => {
+  const w = world();
+  const key = join(dir(), 'vault_key');
+  writeFileSync(key, randomBytes(32).toString('base64url'), { mode: 0o600 });
+  const { JM_CLAUDE_TOKEN: _c, ...noClaude } = env;
+  const store = w.open({ env: noClaude, vault: openVault(key, w.db) });
+  const value = (i: number) => `sk-ant-oat01-ROTATION-${String(i).padStart(4, '0')}`;
+  for (let i = 0; i <= 33; i++) store.putCredential('claudeToken', value(i), {});
+  expect(store.retired()).toHaveLength(32);
+  expect(store.retired()).not.toContain(value(0));
+  expect(w.logs).toEqual([
+    'warning: a replaced secret left the redaction list (it keeps the latest 32); restart the server once the drops that carried it are done',
+  ]);
+  for (const l of w.logs) expect(l).not.toContain('ROTATION');
+});

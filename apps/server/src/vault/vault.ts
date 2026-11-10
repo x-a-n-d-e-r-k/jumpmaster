@@ -144,10 +144,16 @@ export class Vault {
     return this.meta(name) as VaultMeta;
   }
 
-  /** The result of testing an entry's value: a status word and, for a forge token, its login. */
+  /**
+   * The result of testing an entry's value: a status word and, for a forge token, its login. A
+   * test without a login (a failed one: GitHub down, a rate limit) keeps the login the last passing
+   * test found, since the `same` rule parks a zone on it; only a passing test replaces it.
+   */
   recordTest(name: string, t: { at: Date; result: string; login?: string }): void {
     this.db
-      .prepare('UPDATE vault SET tested_at = ?, test_result = ?, login = ? WHERE name = ?')
+      .prepare(
+        'UPDATE vault SET tested_at = ?, test_result = ?, login = COALESCE(?, login) WHERE name = ?',
+      )
       .run(t.at.toISOString(), t.result, t.login ?? null, name);
   }
 

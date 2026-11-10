@@ -1343,3 +1343,19 @@ test('config.secret-files checks every file under the secrets directory, the fou
     },
   ]);
 });
+
+test('vault.key warns when the key file lies under the data directory', async () => {
+  const w = world();
+  w.deps.credentials = { problems: [], shadowed: [], vaultKey: { status: 'ok' } };
+  w.deps.env.vaultKeyFile = '/tmp/x/keys/vault_key';
+  expect(one(await w.run(), 'vault.key')).toMatchObject({
+    status: 'warn',
+    summary:
+      'the vault key /tmp/x/keys/vault_key is under the data directory /tmp/x: a copy of the data carries the key beside the ciphertext',
+  });
+  w.deps.env.vaultKeyFile = '/secrets/vault_key';
+  expect(one(await w.run(), 'vault.key').status).toBe('pass');
+  expect(processEnv({ JM_VAULT_KEY_FILE: '/secrets/vault_key' }).vaultKeyFile).toBe(
+    '/secrets/vault_key',
+  );
+});

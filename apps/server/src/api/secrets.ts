@@ -176,11 +176,14 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
         return reply.code(400).send({ issues: stored.issues });
       }
       audit(req, 'secret.set', { name, fingerprint, result: 'stored' });
+      const running = runningSince(db, stored.meta.createdAt);
       return {
         fingerprint,
         tested: true,
         problems: store.problems(),
-        runningDropsWithPrevious: runningSince(db, stored.meta.createdAt),
+        runningDropsWithPrevious: running,
+        // A pass in flight keeps the forge pair it started with until it ends.
+        hint: `${running} running drops still carry the previous token, and the pass running now keeps it until it ends: revoke it on GitHub after they finish`,
       };
     });
   });
@@ -190,6 +193,12 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
     async (req, reply) => {
       const name = nameOf(req, reply);
       if (!name) return reply;
+      // A test rewrites what the list and the rules read (the result, the login): sudo, as a replace.
+      if (req.principal?.via === 'session' && !req.principal.sudo)
+        return reply.code(403).send({
+          error:
+            'testing a credential needs sudo: re-enter the passphrase (POST /api/control/sudo)',
+        });
       return serialized(name, async () => {
         const r = store.resolved()[name];
         if (!r?.value) return reply.code(409).send({ error: 'the credential is not set' });

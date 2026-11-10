@@ -1,3 +1,4 @@
+import { resolve as resolvePath, sep } from 'node:path';
 /**
  * The readiness doctor's server-side checks (spec §8.0). Every check is a read: the database, the
  * config, this process, and GET requests to the forge. None writes anywhere, and none prints a
@@ -62,6 +63,8 @@ export type DoctorEnv = {
   uidMap: string | null;
   /** Each secret read from a file (`JM_*_FILE`), with its mode (null when it can't be read). */
   secretFiles?: { variable: string; path: string; mode: number | null }[];
+  /** `JM_VAULT_KEY_FILE`, to warn when it lies under the data directory. */
+  vaultKeyFile?: string;
 };
 
 export type DoctorDeps = {
@@ -1888,6 +1891,15 @@ function vaultKeyCheck(d: DoctorDeps): DoctorCheck {
       status: 'skip',
       summary:
         'no vault key (JM_VAULT_KEY_FILE is unset): credentials come from files and the environment only',
+    };
+  const keyFile = d.env.vaultKeyFile;
+  const data = resolvePath(d.config.dataDir);
+  if (keyFile && resolvePath(keyFile).startsWith(data + sep))
+    return {
+      ...base,
+      status: 'warn',
+      summary: `the vault key ${keyFile} is under the data directory ${d.config.dataDir}: a copy of the data carries the key beside the ciphertext`,
+      fix: 'Move the key file to secrets/vault_key (outside the data directory), point JM_VAULT_KEY_FILE at it, and restart.',
     };
   return {
     ...base,

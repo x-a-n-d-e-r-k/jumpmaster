@@ -486,6 +486,9 @@ function gateSecretNameIssues(
   return issues;
 }
 
+/** Shorter gate secrets can't be redacted without mangling ordinary output. */
+const MIN_GATE_SECRET = 8;
+
 /** The machine secrets: generated for the install, never entered in the UI, read from variables. */
 const MACHINE_VARS = { joinToken: 'JM_JOIN_TOKEN', operatorToken: 'JM_OPERATOR_TOKEN' } as const;
 
@@ -587,6 +590,17 @@ export function parseEditable(
       issues.push({ path: `dropZones.${i}.id`, message: `duplicate zone id: ${zone.id}` });
     seen.add(zone.id);
     issues.push(...gateSecretNameIssues(zone, `dropZones.${i}.gateSecrets`));
+    // Gate secret variables key on the id folded to upper case and underscores: two ids that fold
+    // alike would read each other's.
+    const fold = zone.id.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+    const twin = parsed.data.dropZones
+      .slice(0, i)
+      .find((z) => z.id !== zone.id && z.id.toUpperCase().replace(/[^A-Z0-9]/g, '_') === fold);
+    if (twin)
+      issues.push({
+        path: `dropZones.${i}.id`,
+        message: `zone ids ${twin.id} and ${zone.id} share the gate secret variables JM_ZONE_SECRET_${fold}_<NAME>: rename one`,
+      });
   }
   // A zone without an explicit image runs its preset's: the release lock's digest when the
   // image ships one, else the local `:dev` build.
@@ -763,7 +777,9 @@ export function assembleSecrets(
     const values: Record<string, string> = {};
     for (const name of z.gateSecrets) {
       const v = resolved[gateSecretName(z.id, name)]?.value;
-      if (v) values[name] = v;
+      // A value too short to redact stays out of every scrub list (a one-letter value would mask
+      // that letter in every line); the zone is parked on its `kind` problem, so no gate gets it.
+      if (v && v.length >= MIN_GATE_SECRET) values[name] = v;
     }
     Object.defineProperty(zoneValues, z.id, { value: values, enumerable: true, writable: true });
   }

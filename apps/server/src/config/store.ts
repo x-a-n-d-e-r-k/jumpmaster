@@ -779,8 +779,12 @@ export class ConfigStore implements ConfigSource {
       const now = new Set(secretList(v.secrets));
       for (const old of secretList(this.cfg.secrets))
         if (!now.has(old)) this.retiredValues.add(old);
-      while (this.retiredValues.size > MAX_RETIRED)
+      while (this.retiredValues.size > MAX_RETIRED) {
         this.retiredValues.delete(this.retiredValues.values().next().value as string);
+        this.o.log?.(
+          `warning: a replaced secret left the redaction list (it keeps the latest ${MAX_RETIRED}); restart the server once the drops that carried it are done`,
+        );
+      }
     }
     this.resolvedValue = v.resolved;
     this.cfg = { listen, dataDir, ...v.editable, secrets: v.secrets };

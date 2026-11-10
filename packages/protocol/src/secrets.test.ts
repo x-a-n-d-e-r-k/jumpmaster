@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -74,4 +74,12 @@ describe('file secrets by name', () => {
       ),
     ).toThrow('does not exist');
   });
+});
+
+test('a secret file that is a symbolic link is refused, never followed', () => {
+  const dir = dirWith({ real: VALUE });
+  symlinkSync(join(dir, 'real'), join(dir, 'link'));
+  expect(() => readSecretFile(join(dir, 'link'), 'claude_token')).toThrow(
+    `claude_token: ${join(dir, 'link')} is a symbolic link; point the variable at the file itself`,
+  );
 });

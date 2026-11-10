@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   statSync,
   writeFileSync,
@@ -11,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { loadConfig, parseEditable, splitConfigFile } from './config.js';
-import { type InitDeps, type InitForge, runInit } from './init.js';
+import { createSecretOnce, type InitDeps, type InitForge, runInit } from './init.js';
 
 const AUTHOR = 'github_pat_INITAUTHORDUMMY0123456789';
 const CLASSIC = 'ghp_INITCLASSICDUMMY0123456789';
@@ -493,4 +494,18 @@ describe('jumpmaster init', () => {
       expect(r.err).toMatch(/usage: jumpmaster init/);
     }
   });
+});
+
+test('createSecretOnce falls back to an exclusive write where hard links are not supported', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'jm-nolink-'));
+  const path = join(dir, 'vault_key');
+  const noLinks = () => {
+    throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+  };
+  expect(createSecretOnce(path, 'k1\n', noLinks)).toBe(true);
+  expect(readFileSync(path, 'utf8')).toBe('k1\n');
+  expect(mode(path)).toBe(0o600);
+  expect(createSecretOnce(path, 'k2\n', noLinks)).toBe(false);
+  expect(readFileSync(path, 'utf8')).toBe('k1\n');
+  expect(readdirSync(dir)).toEqual(['vault_key']);
 });

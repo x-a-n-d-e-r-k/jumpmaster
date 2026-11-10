@@ -110,6 +110,15 @@ describe('the vault', () => {
       login: 'rev-bot',
       note: 'n',
     });
+    // A failed test records its result and keeps the login the last passing test found.
+    v.recordTest('githubReviewerToken', { at: plus(t0, 9), result: 'failed (503)' });
+    expect(v.meta('githubReviewerToken')).toMatchObject({
+      login: 'rev-bot',
+      testResult: 'failed (503)',
+    });
+    v.recordTest('githubReviewerToken', { at: plus(t0, 10), result: 'ok', login: 'rev-bot-2' });
+    expect(v.meta('githubReviewerToken')?.login).toBe('rev-bot-2');
+    v.recordTest('githubReviewerToken', { at: plus(t0, 5), result: 'ok', login: 'rev-bot' });
     expect(v.list().map((m) => m.name)).toEqual(['githubReviewerToken']);
     expect(v.count()).toBe(1);
     expect(v.delete('githubReviewerToken')).toBe(true);

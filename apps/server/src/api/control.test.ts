@@ -1346,6 +1346,8 @@ describe('secret routes (Task 4)', () => {
     let gate: Promise<void> = Promise.resolve();
     const forge = {
       fail: undefined as unknown,
+      /** When set, every test call fails with it (a GitHub outage). */
+      outage: undefined as unknown,
       setGate(p: Promise<void>) {
         gate = p;
       },
@@ -1364,6 +1366,7 @@ describe('secret routes (Task 4)', () => {
         viewerLogin: async () => {
           calls.push(`login ${repo} ${token === FAILED ? 'failed' : 'ok'}`);
           await gate;
+          if (forge.outage) throw forge.outage;
           if (token === FAILED) throw forge.fail;
           return token === REVIEWER ? 'reviewer-bot' : 'author-bot';
         },
@@ -1441,7 +1444,7 @@ describe('secret routes (Task 4)', () => {
     const r = await put('githubAuthorToken', { value: AUTHOR_NEW });
     expect(r.statusCode).toBe(200);
     expect(w.calls).toEqual(['login octo/web ok', 'access octo/web', 'access octo/api']);
-    expect(r.json()).toEqual({
+    expect(r.json()).toMatchObject({
       fingerprint: fingerprintOf(AUTHOR_NEW),
       tested: true,
       problems: [],
@@ -1480,6 +1483,47 @@ describe('secret routes (Task 4)', () => {
     expect(rows).toContain('secret.set');
     for (const where of [r.body, rows, w.logs.join('\n'), (await get()).body])
       expect(where).not.toContain(FAILED);
+  });
+
+  test('a failed re-test keeps the recorded login, so a zone parked as same stays parked; the test needs sudo from a session', async () => {
+    const w = secretsApp({ claude_token: CLAUDE });
+    await put('githubAuthorToken', { value: AUTHOR_OLD });
+    // The reviewer token's account is the author's: the fake answers author-bot for it.
+    await put('githubReviewerToken', { value: AUTHOR_NEW });
+    const same = () =>
+      w.store
+        .problems()
+        .filter((p) => p.kind === 'same')
+        .map((p) => p.zoneId);
+    expect(same()).toEqual(['web', 'api']);
+    w.forge.outage = Object.assign(new Error('Service Unavailable'), { status: 503 });
+    const test = (headers: Record<string, string> = auth) =>
+      (app as FastifyInstance).inject({
+        method: 'POST',
+        url: '/api/control/secrets/githubReviewerToken/test',
+        headers,
+        payload: {},
+      });
+    const r = await test();
+    expect(r.json()).toEqual({ tested: false, status: 503 });
+    expect(w.store.resolved().githubReviewerToken.login).toBe('author-bot');
+    expect(w.store.resolved().githubReviewerToken.testResult).toBe('failed (503)');
+    expect(same()).toEqual(['web', 'api']);
+    // A session needs sudo to test, as to replace.
+    const s = await test(w.asSession);
+    expect(s.statusCode).toBe(403);
+    // A passing test replaces the login.
+    w.forge.outage = undefined;
+    w.db.prepare('UPDATE sessions SET sudo_until = ?').run(plus(t0, 60_000).toISOString());
+    expect((await test(w.asSession)).statusCode).toBe(200);
+  });
+
+  test('the answer to a rotation says the pass in flight keeps the previous token too', async () => {
+    secretsApp({ claude_token: CLAUDE });
+    const r = await put('githubAuthorToken', { value: AUTHOR_OLD });
+    expect(r.json().hint).toBe(
+      '0 running drops still carry the previous token, and the pass running now keeps it until it ends: revoke it on GitHub after they finish',
+    );
   });
 
   test('two PUTs for one name are serialized: the second test starts after the first is stored', async () => {

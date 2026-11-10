@@ -226,17 +226,34 @@ function writeAtomic(path: string, text: string, mode: number): void {
  * beside it, which is then linked into place (refused when the name exists), so no reader ever
  * sees a partial key and a rerun never replaces one. Returns whether it was created.
  */
-function createSecretOnce(path: string, text: string): boolean {
+export function createSecretOnce(
+  path: string,
+  text: string,
+  link: (from: string, to: string) => void = linkSync,
+): boolean {
   const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
   writeFileSync(tmp, text, { mode: 0o600, flag: 'wx' });
+  let linked = false;
   try {
-    linkSync(tmp, path);
-    return true;
+    link(tmp, path);
+    linked = true;
   } catch (e) {
-    if (errno(e) !== 'EEXIST') throw e;
-    return false;
+    const code = errno(e);
+    if (code === 'EEXIST') return false;
+    // A filesystem without hard links (some network and FUSE mounts): an exclusive write, which
+    // still never replaces a key, though a crash mid-write could leave a short one.
+    if (code !== 'EPERM' && code !== 'ENOTSUP' && code !== 'EOPNOTSUPP' && code !== 'ENOSYS')
+      throw e;
   } finally {
     unlinkSync(tmp);
+  }
+  if (linked) return true;
+  try {
+    writeFileSync(path, text, { mode: 0o600, flag: 'wx' });
+    return true;
+  } catch (e) {
+    if (errno(e) === 'EEXIST') return false;
+    throw e;
   }
 }
 

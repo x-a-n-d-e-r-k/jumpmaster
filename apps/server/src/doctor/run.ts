@@ -159,5 +159,6 @@ export function processEnv(env: NodeJS.ProcessEnv = process.env): DoctorEnv {
     inContainer: env.JM_CONTAINER === '1',
     uidMap,
     secretFiles,
+    ...(env.JM_VAULT_KEY_FILE ? { vaultKeyFile: env.JM_VAULT_KEY_FILE } : {}),
   };
 }
