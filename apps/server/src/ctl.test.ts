@@ -608,3 +608,42 @@ describe('ctl doctor actions (Task 8)', () => {
   });
   const doctorRun = doctorRunValue;
 });
+
+test('ctl doctor strips control characters from every line, and says overwrote when it replaces a file', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'jm-artifacts-'));
+  writeFileSync(join(dir, 'CODEOWNERS'), 'old\n');
+  const hostile = {
+    id: 1,
+    finishedAt: 'x',
+    checks: [
+      {
+        id: 'forge.ci',
+        zoneId: 'main',
+        status: 'fail',
+        summary: 'bad \u001b[2Jsummary',
+        action: {
+          kind: 'forge',
+          label: 'Open GitHub Actions (detected jobs: a\u001b[31mred\nrm -rf)',
+          href: 'https://github.com/octo/demo/actions',
+          artifact: { filename: 'CODEOWNERS', text: '* @bot\n' },
+        },
+      },
+    ],
+  };
+  const out: string[] = [];
+  await runCtl(
+    ['doctor', '--artifacts', dir],
+    env,
+    fakeFetch(200, { run: hostile }).impl,
+    (l) => out.push(l),
+    () => {},
+    async () => '',
+  );
+  const text = out.join('\n');
+  for (const line of out) expect(line).not.toMatch(/[\u0000-\u001f\u007f]/);
+  expect(text).toContain(
+    'action: Open GitHub Actions (detected jobs: a[31mredrm -rf): https://github.com/octo/demo/actions',
+  );
+  expect(text).toContain(`overwrote ${join(dir, 'CODEOWNERS')}`);
+  expect(readFileSync(join(dir, 'CODEOWNERS'), 'utf8')).toBe('* @bot\n');
+});

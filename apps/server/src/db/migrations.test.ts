@@ -823,6 +823,16 @@ test('v21 lets the outbox hold create_labels, keeping every row and the kind che
      VALUES (?, ?, ?, NULL, 'z', '{}', 'pending', 't', 't')`,
   );
   put.run('o2', 'create_labels:z:1', 'create_labels');
+  // The rebuilt table keeps the work item foreign key and zone_id's default.
+  expect(
+    db.prepare('SELECT "table", "from", "to" FROM pragma_foreign_key_list(\'outbox\')').all(),
+  ).toEqual([{ table: 'work_items', from: 'work_item_id', to: 'id' }]);
+  const zoneCol = db
+    .prepare(
+      "SELECT dflt_value AS d, \"notnull\" AS nn FROM pragma_table_info('outbox') WHERE name = 'zone_id'",
+    )
+    .get();
+  expect(zoneCol).toEqual({ d: "''", nn: 1 });
   expect(() => put.run('o3', 'x', 'delete_repo')).toThrow(/CHECK/);
   expect(() => put.run('o4', 'issue:z:o:k', 'create_issue')).toThrow(/UNIQUE/);
   db.close();

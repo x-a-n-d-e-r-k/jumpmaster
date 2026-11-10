@@ -1,9 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import Fastify from 'fastify';
 import { describe, expect, test } from 'vitest';
 import { patTemplateUrl, repoOf, zoneGuidance } from '../github/guidance.js';
 import { makeZone } from '../test/fixtures.js';
-import { ACTION_IDS, actionFor, NO_ACTION, PAGES_M45A, type Pages } from './actions.js';
+import { ACTION_IDS, actionFor, NO_ACTION, PAGES_M45A, type Pages, pagesOf } from './actions.js';
 import { CHECK_IDS, DOC, type DoctorCheck } from './checks.js';
 
 const zone = makeZone({ id: 'web', repo: 'octo/web' });
@@ -81,10 +82,20 @@ describe('where each fail leads', () => {
         href: '/settings/credentials',
       });
     expect(
-      actionFor(fail('credential.missing', { summary: 'claudeToken: no Claude token is set' }), {
+      actionFor(fail('credential.missing', { credentials: ['claudeToken'] }), {
         pages: PAGES_M45A,
       })?.href,
     ).toBe('/setup/claude');
+    // The check's credential decides, never the wording of its summary.
+    expect(
+      actionFor(
+        fail('credential.missing', {
+          summary: 'claudeToken: reworded',
+          credentials: ['githubAuthorToken'],
+        }),
+        { pages: PAGES_M45A },
+      )?.href,
+    ).toBe('/setup/forge');
     expect(actionFor(fail('claude.token-age'), { pages: PAGES_M45A })?.href).toBe('/setup/claude');
     expect(actionFor(fail('forge.reviewer'), { zone, pages: PAGES_M45A })?.href).toBe(
       '/setup/forge',
@@ -150,4 +161,13 @@ describe('where each fail leads', () => {
       undefined,
     );
   });
+});
+
+test('pagesOf reads which pages are registered, so a later task cannot forget to flip a flag', async () => {
+  const app = Fastify();
+  app.get('/zones', async () => '');
+  app.get('/settings/credentials', async () => '');
+  await app.ready();
+  expect(pagesOf(app)).toEqual({ zones: true, settings: false, credentials: true });
+  await app.close();
 });

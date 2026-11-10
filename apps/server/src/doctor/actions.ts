@@ -1,3 +1,4 @@
+import type { FastifyInstance } from 'fastify';
 import type { DropZoneConfig } from '../config.js';
 import {
   PAT_EXPIRATION_DAYS,
@@ -26,8 +27,21 @@ export type Pages = {
   credentials: boolean;
 };
 
-/** The pages this build registers (M4.5a, before Tasks 9, 11 and 13). */
+/** The pages this build registers (M4.5a, before Tasks 9, 11 and 13); `pagesOf` derives them. */
 export const PAGES_M45A: Pages = { zones: false, settings: false, credentials: false };
+
+/**
+ * Which pages the running app registers, read from its routes after registration: Tasks 9, 11
+ * and 13 bring a page and its links together, with no flag to flip early or forget.
+ */
+export function pagesOf(app: Pick<FastifyInstance, 'hasRoute'>): Pages {
+  const has = (url: string) => app.hasRoute({ method: 'GET', url });
+  return {
+    zones: has('/zones'),
+    settings: has('/settings/install') && has('/settings/history'),
+    credentials: has('/settings/credentials'),
+  };
+}
 
 export type ActionCtx = { zone?: DropZoneConfig; guidance?: ZoneGuidance; pages: Pages };
 
@@ -45,7 +59,8 @@ const app = (label: string, href: string): Action => ({ kind: 'app', label, href
 /** Before the Credentials tab, the wizard step that sets the credential. */
 function credentials(check: DoctorCheck, ctx: ActionCtx): Action {
   if (ctx.pages.credentials) return app('Open Settings, Credentials', '/settings/credentials');
-  const claude = check.id === 'claude.token-age' || check.summary.startsWith('claudeToken');
+  // The check names its credentials (the first is the one the wizard reaches first).
+  const claude = check.id === 'claude.token-age' || check.credentials?.[0] === 'claudeToken';
   if (check.id === 'vault.key' || check.id === 'credential.shadowed') return docs(check);
   return claude
     ? app('Set the Claude token (setup step)', '/setup/claude')

@@ -879,7 +879,12 @@ every pull request wait forever ([CI](#ci)).
 
 ### `forge.labels`
 
-Missing labels; the fix prints the `gh label create` commands ([Labels](#labels)).
+Missing labels ([Labels](#labels)). The doctor page's **Create the missing labels** (or
+`jumpmaster ctl labels <zone>`) creates them as the author bot, in observe mode too; the fix also
+prints the `gh label create` commands. If GitHub does not answer, the request is left `unknown`
+and counts as an active forge write, so a mode change or a zone removal waits, until a later pass
+reads it back or it ages out after the outbox deadline. Before a downgrade to an older release,
+make sure no label action is in flight.
 
 ### `forge.private-clone`
 

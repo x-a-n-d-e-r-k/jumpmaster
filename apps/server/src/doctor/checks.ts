@@ -55,6 +55,8 @@ export type DoctorCheck = {
   dropId?: string;
   /** The control that fixes a fail or a warn (doctor/actions.ts); `fix` stays for `ctl`. */
   action?: DoctorAction;
+  /** The credentials a credential check is about, by name (its fix link follows them). */
+  credentials?: string[];
 };
 
 /**
@@ -395,6 +397,7 @@ function installCredentialCheck(d: DoctorDeps): DoctorCheck {
       ? []
       : [
           {
+            name: 'claudeToken',
             what: 'the Claude token',
             fix: 'the Claude step (/setup/claude), or jumpmaster ctl secrets set claudeToken (the value on stdin)',
           },
@@ -403,6 +406,7 @@ function installCredentialCheck(d: DoctorDeps): DoctorCheck {
       ? []
       : [
           {
+            name: 'githubAuthorToken',
             what: 'the GitHub author token',
             fix: 'the GitHub step (/setup/forge), or jumpmaster ctl secrets set githubAuthorToken (the value on stdin)',
           },
@@ -418,6 +422,7 @@ function installCredentialCheck(d: DoctorDeps): DoctorCheck {
     ...base,
     status: 'fail',
     summary: `not set: ${missing.map((m) => m.what).join(' and ')}; no zone can run without ${missing.length === 1 ? 'it' : 'them'}`,
+    credentials: missing.map((m) => m.name),
     fix: missing.map((m) => `Set ${m.what}: ${m.fix}.`).join('\n'),
   };
 }
@@ -2023,6 +2028,7 @@ function credentialChecks(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck[] {
       zoneId: zone.id,
       status: 'fail',
       summary: hits.map((p) => `${p.credential}: ${p.message}`).join('; '),
+      credentials: hits.map((p) => p.credential),
       fix,
       doc: doc('tokens'),
     };
@@ -2041,6 +2047,7 @@ function shadowedCheck(d: DoctorDeps): DoctorCheck {
   return {
     ...base,
     status: 'warn',
+    credentials: list.map((x) => x.name),
     summary: list
       .map(
         (s) =>

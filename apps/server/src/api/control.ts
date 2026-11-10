@@ -1,5 +1,5 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { PRESETS } from '@jumpmaster/protocol';
+import { PRESETS, redact } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { type AuditDetail, recordAudit } from '../auth/audit.js';
@@ -34,6 +34,7 @@ import {
   setZoneMode,
   ZONE_MODES,
 } from '../db/repo.js';
+import { pagesOf } from '../doctor/actions.js';
 import {
   type DoctorDeps,
   type DoctorEnv,
@@ -461,6 +462,8 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
               ...(deps.readForgeFor ? { readForge: deps.readForgeFor } : {}),
               ...(configStatus ? { configStatus } : {}),
               ...(credentials ? { credentials } : {}),
+              // The pages this app registers decide where the fix links go.
+              pages: pagesOf(app),
               // The zone's generated GitHub files, for the fix links that bring one along.
               ...(deps.config instanceof ConfigStore
                 ? { guidance: guidanceReader(deps.config, cfg(req), deps.guidanceForge, now) }
@@ -516,7 +519,8 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
             created = ((r.result as { created?: string[] } | undefined)?.created ?? []).slice();
           } catch (e) {
             audit(req, 'labels.create', { result: 'refused' }, zone.id);
-            return reply.code(409).send({ error: (e as Error).message });
+            // Fixed strings today (killed, a vanished row); scrubbed anyway, as audit rows are.
+            return reply.code(409).send({ error: redact((e as Error).message, scrubList(req)) });
           }
           audit(
             req,

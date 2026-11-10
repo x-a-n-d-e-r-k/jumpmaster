@@ -1329,7 +1329,11 @@ describe('credential checks (Task 4)', () => {
       status: 'fail',
       summary: 'githubAuthorToken: zone main is a starter zone, which merges with the author token',
     });
-    expect(one(checks, 'credential.same')).toMatchObject({ status: 'fail' });
+    expect(one(checks, 'credential.same')).toMatchObject({
+      status: 'fail',
+      credentials: ['githubReviewerToken'],
+    });
+    expect(one(checks, 'credential.kind').credentials).toEqual(['githubAuthorToken']);
     expect(one(checks, 'credential.missing').status).toBe('pass');
   });
 

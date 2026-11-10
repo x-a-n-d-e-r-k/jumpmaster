@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { PRESETS } from '@jumpmaster/protocol';
@@ -239,7 +239,7 @@ export function formatDoctor(
     checks: DoctorCheck[];
   },
   /** The artifacts `--artifacts` wrote, by check. */
-  opts: { written?: Map<DoctorCheck, string> } = {},
+  opts: { written?: Map<DoctorCheck, { path: string; overwrote: boolean }> } = {},
 ) {
   const lines = [`Jumpmaster doctor, run ${run.id} (${run.finishedAt ?? 'unfinished'})`, ''];
   const zoneWidth = Math.max(4, ...run.checks.map((c) => (c.zoneId ?? '').length));
@@ -267,7 +267,7 @@ export function formatDoctor(
         const written = opts.written?.get(c);
         lines.push(
           written
-            ? `${indent}wrote ${written}`
+            ? `${indent}${written.overwrote ? 'overwrote' : 'wrote'} ${written.path}`
             : `${indent}file: ${a.artifact.filename} (jumpmaster ctl doctor --artifacts <dir> writes it)`,
         );
       }
@@ -278,7 +278,9 @@ export function formatDoctor(
     '',
     `${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip${n('fail') > 0 ? ': fix each FAIL, then run the doctor again' : ''}`,
   );
-  return lines;
+  // Forge text (summaries, CI job names in a label) reaches the terminal: no control character,
+  // so an escape sequence or a newline in a workflow file can't paint or forge a line.
+  return lines.map((l) => l.replace(/[\u0000-\u001f\u007f]/g, ''));
 }
 
 const CONFIG_USAGE =
@@ -568,8 +570,11 @@ async function runSecrets(
  * name only, so a name can never place a file elsewhere. They hold no secret (the doctor redacts
  * them before they are stored).
  */
-function writeArtifacts(checks: DoctorCheck[], dir: string): Map<DoctorCheck, string> {
-  const written = new Map<DoctorCheck, string>();
+function writeArtifacts(
+  checks: DoctorCheck[],
+  dir: string,
+): Map<DoctorCheck, { path: string; overwrote: boolean }> {
+  const written = new Map<DoctorCheck, { path: string; overwrote: boolean }>();
   mkdirSync(dir, { recursive: true });
   for (const c of checks) {
     const a = c.status === 'pass' || c.status === 'skip' ? undefined : c.action?.artifact;
@@ -577,8 +582,9 @@ function writeArtifacts(checks: DoctorCheck[], dir: string): Map<DoctorCheck, st
     const name = basename(a.filename);
     if (!name || name === '.' || name === '..') continue;
     const path = join(dir, name);
+    const existed = existsSync(path);
     writeFileSync(path, a.text, { mode: 0o644 });
-    written.set(c, path);
+    written.set(c, { path, overwrote: existed });
   }
   return written;
 }

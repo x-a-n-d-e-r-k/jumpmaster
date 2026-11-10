@@ -5,7 +5,7 @@ import { raiseBriefing, ruleBriefing } from '../briefings.js';
 import { DEFAULT_PROTECTED_PATHS } from '../config.js';
 import { insertCrewIssue } from '../crew/store.js';
 import { insertDrop, insertStick, updateDrop } from '../db/repo.js';
-import { actionFor, PAGES_M45A } from '../doctor/actions.js';
+import { actionFor, PAGES_M45A, pagesOf } from '../doctor/actions.js';
 import { CHECK_IDS, DOC } from '../doctor/checks.js';
 import { zoneGuidance } from '../github/guidance.js';
 import { opMarker } from '../outbox.js';
@@ -226,7 +226,13 @@ describe('doctor fix links (Task 8)', () => {
       for (const g of [undefined, guidance])
         for (const summary of ['claudeToken: no Claude token', 'githubAuthorToken: none']) {
           const a = actionFor(
-            { id, zoneId: h.zone.id, status: 'fail', summary },
+            {
+              id,
+              zoneId: h.zone.id,
+              status: 'fail',
+              summary,
+              credentials: [summary.split(':')[0] as string],
+            },
             { zone: h.zone, pages: PAGES_M45A, ...(g ? { guidance: g } : {}) },
           );
           if (!a) continue;
@@ -248,6 +254,8 @@ describe('doctor fix links (Task 8)', () => {
           }
         }
     expect(seen.size).toBeGreaterThan(10);
+    // This build's pages, as the doctor route derives them.
+    expect(pagesOf(h.app)).toEqual(PAGES_M45A);
   });
 
   test('the doctor page renders fails first with their action links escaped and artifact downloads', async () => {
