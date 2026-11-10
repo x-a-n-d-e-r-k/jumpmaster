@@ -975,6 +975,28 @@ export function zoneHasHistory(db: Db, zoneId: string): boolean {
   return row.h === 1;
 }
 
+/** What a zone id's history holds, by kind: what Resume brings back. */
+export function zoneHistoryCounts(
+  db: Db,
+  zoneId: string,
+): { workItems: number; drops: number; outbox: number; crewIssues: number; goals: number } {
+  return db
+    .prepare(
+      `SELECT (SELECT COUNT(*) FROM work_items WHERE drop_zone_id = @zone) AS workItems,
+              (SELECT COUNT(*) FROM drops WHERE drop_zone_id = @zone) AS drops,
+              (SELECT COUNT(*) FROM outbox WHERE zone_id = @zone) AS outbox,
+              (SELECT COUNT(*) FROM crew_issues WHERE zone_id = @zone) AS crewIssues,
+              (SELECT COUNT(*) FROM goals WHERE zone_id = @zone) AS goals`,
+    )
+    .get({ zone: zoneId }) as {
+    workItems: number;
+    drops: number;
+    outbox: number;
+    crewIssues: number;
+    goals: number;
+  };
+}
+
 /** The repository a zone id's history was recorded against, when the sync ever saw it. */
 export function zoneHistoryRepo(db: Db, zoneId: string): string | undefined {
   const row = db.prepare('SELECT repo FROM drop_zones WHERE id = ?').get(zoneId) as

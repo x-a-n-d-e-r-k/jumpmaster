@@ -28,6 +28,13 @@ export interface RateLimitSeen extends StoredEvent {
   dropId: string;
 }
 
+/** Each zone mode with its plain-English meaning (§4), as the pages and `ctl zones` say it. */
+export const MODE_LABELS: Record<string, string> = {
+  active: 'active: takes ready issues and runs drops',
+  paused: 'paused: starts nothing new; running drops finish',
+  observe: 'observe: plans and records, but writes nothing to GitHub',
+};
+
 export interface HomeState {
   /** The setup wizard's frame on home, and the "Add a project" link. */
   setup?: { active: boolean; addProject: boolean };
@@ -451,7 +458,7 @@ export function renderHome(state: HomeState): string {
     ? `<div class="warn setup-frame"><p><strong>Finish setting up Jumpmaster.</strong> <a href="/setup/next">Continue where you left off</a>: connect Claude and GitHub, check the runner, add a project and run the doctor.</p><form method="post" action="/setup/dismiss"><button>Dismiss</button></form></div>`
     : '';
   const addProject = state.setup?.addProject
-    ? '<p><a href="/setup/project">Add a project</a></p>'
+    ? '<p><a href="/zones">Zones</a> · <a href="/zones/new">Add a project</a></p>'
     : '';
   const settingsLink = state.settings ? '<p><a href="/settings">Settings</a></p>' : '';
   return page(

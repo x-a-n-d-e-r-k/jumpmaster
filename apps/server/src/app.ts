@@ -57,6 +57,7 @@ import {
 } from './ui/pages.js';
 import { claudeTokenDays, registerSettingsPages } from './ui/settings.js';
 import { registerSetupPages, wizardActive } from './ui/setup.js';
+import { registerZonesPages } from './ui/zones.js';
 import { dispatchGate } from './usage.js';
 
 const ATTEMPT_KEYS: AttemptKey[] = [
@@ -150,6 +151,8 @@ export function createApp(
       now: deps.now,
       ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
     });
+    // The zones page (Task 11): every zone, a page per zone, and the add page.
+    registerZonesPages(app, { db: deps.db, store: deps.config, now: deps.now });
   }
 
   app.get('/', async (req, reply) => {

@@ -1574,14 +1574,20 @@ function servicesCheck(d: DoctorDeps, zone: DropZoneConfig, sticks: Stick[]): Do
   };
 }
 
-type HostSeen = { host: string; decision: string; count: number };
+/** One host a zone's drops reached (or were refused), the times, and the drops that did. */
+export type HostSeen = { host: string; decision: string; count: number; drops: string[] };
 
-function egressSeen(db: Db, zoneId: string, since: Date): { drops: number; hosts: HostSeen[] } {
+export function egressSeen(
+  db: Db,
+  zoneId: string,
+  since: Date,
+): { drops: number; hosts: HostSeen[] } {
   const rows = db
     .prepare(
       `SELECT e.drop_id AS dropId, e.data_json AS data FROM drop_events e
          JOIN drops d ON d.id = e.drop_id
-       WHERE d.drop_zone_id = ? AND e.kind = 'egress' AND d.created_at > ?`,
+       WHERE d.drop_zone_id = ? AND e.kind = 'egress' AND d.created_at > ?
+       ORDER BY d.created_at, e.drop_id, e.seq`,
     )
     .all(zoneId, since.toISOString()) as { dropId: string; data: string }[];
   const totals = new Map<string, HostSeen>();
@@ -1594,8 +1600,9 @@ function egressSeen(db: Db, zoneId: string, since: Date): { drops: number; hosts
     }
     if (typeof data.host !== 'string' || typeof data.decision !== 'string') continue;
     const key = `${data.decision}\u0000${data.host}`;
-    const t = totals.get(key) ?? { host: data.host, decision: data.decision, count: 0 };
+    const t = totals.get(key) ?? { host: data.host, decision: data.decision, count: 0, drops: [] };
     t.count += typeof data.count === 'number' ? data.count : 0;
+    if (!t.drops.includes(row.dropId)) t.drops.push(row.dropId);
     totals.set(key, t);
   }
   return {

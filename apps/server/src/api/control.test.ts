@@ -35,7 +35,7 @@ import { makeZone } from '../test/fixtures.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import { credentialCreatedAt } from '../vault/credentials.js';
 import { fingerprintOf, openVault } from '../vault/vault.js';
-import { type ControlDeps, registerControlRoutes } from './control.js';
+import { type ControlDeps, registerControlRoutes, removalNote } from './control.js';
 import { guidanceFor, recommendFor } from './github.js';
 
 const TOKEN = 'o'.repeat(32);
@@ -2263,5 +2263,249 @@ describe('GitHub guidance routes (Task 7)', () => {
     });
     expect(calls.length).toBeGreaterThan(n);
     expect(calls.at(-1)).toBe('repoAccess octo-org/demo other');
+  });
+});
+
+describe('zones page routes', () => {
+  const zenv = {
+    JM_CLAUDE_TOKEN: 'sk-ant-oat01-ZPAGECLAUDEDUMMY0123456789',
+    JM_GITHUB_AUTHOR_TOKEN: 'github_pat_ZPAGEAUTHORDUMMY0123456789',
+    JM_GITHUB_REVIEWER_TOKEN: 'github_pat_ZPAGEREVIEWERDUMMY0123456789',
+    JM_JOIN_TOKEN: 'join-secret-value-4',
+    JM_OPERATOR_TOKEN: TOKEN,
+  };
+  const zd = (id: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    repo: `octo/${id}`,
+    gates: [{ name: 'test', run: 'npm test' }],
+    image: 'jm-trooper:dev',
+    egress: { mode: 'monitor', allow: ['known.example.com'] },
+    ...extra,
+  });
+  const token = { kind: 'operator' as const, via: 'token' as const, sudo: true };
+
+  function pageApp() {
+    const db = openDb(tmpDbFile());
+    const dir = mkdtempSync(join(tmpdir(), 'jm-zpage-'));
+    const store = ConfigStore.open({
+      db,
+      boot: loadBoot({}, undefined),
+      env: zenv,
+      now: () => t0,
+      imageLockPath: join(dir, 'no-lock.json'),
+    });
+    store.apply({ dropZones: [zd('a'), zd('b')] }, { via: 'ctl', principal: token });
+    for (const id of ['a', 'b'])
+      upsertDropZone(db, { id, repo: `octo/${id}`, defaultBranch: 'main', configJson: '{}' });
+    app = controlApp({ db, config: store, now: () => t0 });
+    const session = operatorSession(db);
+    return { db, store, asSession: { ...session.headers, host: HOST } };
+  }
+  const call = (
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+    url: string,
+    payload?: unknown,
+    headers: Record<string, string> = auth,
+  ) =>
+    (app as FastifyInstance).inject({
+      method,
+      url,
+      headers,
+      ...(payload === undefined ? {} : { payload: payload as object }),
+    });
+  /** An egress event a monitor drop reported. */
+  function seen(db: ReturnType<typeof openDb>, dropId: string, zone: string, host: string, n = 1) {
+    insertDrop(db, {
+      id: dropId,
+      dropZoneId: zone,
+      workItemId: null,
+      role: 'doctor',
+      state: 'succeeded',
+      createdAt: t0.toISOString(),
+    });
+    db.prepare(
+      `INSERT INTO drop_events (drop_id, seq, ts, kind, data_json) VALUES (?, 1, ?, 'egress', ?)`,
+    ).run(dropId, t0.toISOString(), JSON.stringify({ host, decision: 'allowed', count: n }));
+  }
+
+  test('a PATCH names one zone by id and leaves the others alone', async () => {
+    const { store } = pageApp();
+    const r = await call('PATCH', '/api/control/config', {
+      patch: { dropZones: [{ id: 'b', readyLabel: 'go' }] },
+      expectRevision: store.revision(),
+    });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(store.current().dropZones.map((z) => [z.id, z.readyLabel])).toEqual([
+      ['a', 'agent-ready'],
+      ['b', 'go'],
+    ]);
+  });
+
+  test('list and show give every zone with its mode and plain label, never a secret', async () => {
+    pageApp();
+    const list = await call('GET', '/api/control/zones');
+    expect(list.statusCode).toBe(200);
+    expect(list.json().zones.map((z: { id: string; mode: string }) => [z.id, z.mode])).toEqual([
+      ['a', 'active'],
+      ['b', 'active'],
+    ]);
+    expect(list.json().zones[0]).toMatchObject({
+      repo: 'octo/a',
+      modeLabel: 'active: takes ready issues and runs drops',
+      egress: 'monitor',
+      identity: 'two-bot',
+      image: 'jm-trooper:dev',
+    });
+    const show = await call('GET', '/api/control/zones/b');
+    expect(show.json()).toMatchObject({ zone: zd('b'), mode: 'active', index: 1 });
+    expect((await call('GET', '/api/control/zones/nope')).statusCode).toBe(404);
+    for (const v of Object.values(zenv)) {
+      expect(list.body).not.toContain(v);
+      expect(show.body).not.toContain(v);
+    }
+  });
+
+  test('remove needs the zone drained in observe, deletes its mode row only, and keeps its history', async () => {
+    const { db, store } = pageApp();
+    const busy = await call('DELETE', '/api/control/zones/a');
+    expect(busy.statusCode).toBe(400);
+    expect(busy.json().issues[0].message).toMatch(/can't be removed until it is drained/);
+    upsertWorkItem(db, {
+      dropZoneId: 'a',
+      issueNumber: 3,
+      title: 't',
+      body: 'b',
+      author: 'x',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    setZoneMode(db, 'a', 'observe', t0);
+    const r = await call('DELETE', '/api/control/zones/a');
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json()).toMatchObject({ removed: 'a' });
+    expect(store.current().dropZones.map((z) => z.id)).toEqual(['b']);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM zone_controls WHERE zone_id = 'a'").get()).toEqual(
+      { n: 0 },
+    );
+    expect(
+      db.prepare("SELECT COUNT(*) AS n FROM work_items WHERE drop_zone_id = 'a'").get(),
+    ).toEqual({ n: 1 });
+    expect(listAudit(db)[0]).toMatchObject({ action: 'zone.remove', target: 'a' });
+    expect((await call('DELETE', '/api/control/zones/zzz')).statusCode).toBe(404);
+  });
+
+  test('an id with history answers with what Resume would bring back, and resume brings it back paused', async () => {
+    const { db, store } = pageApp();
+    upsertDropZone(db, { id: 'old', repo: 'octo/old', defaultBranch: 'main', configJson: '{}' });
+    upsertWorkItem(db, {
+      dropZoneId: 'old',
+      issueNumber: 9,
+      title: 't',
+      body: 'b',
+      author: 'x',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    seen(db, 'old-d1', 'old', 'x.example.com');
+    const zone = { repo: 'octo/old', id: 'old', gates: [{ name: 't', run: 'true' }], image: 'i:1' };
+    const refused = await call('POST', '/api/control/zones', { zone });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().history).toEqual({
+      workItems: 1,
+      drops: 1,
+      outbox: 0,
+      crewIssues: 0,
+      goals: 0,
+    });
+    const resumed = await call('POST', '/api/control/zones', { zone, resume: true });
+    expect(resumed.statusCode, resumed.body).toBe(200);
+    expect(getZoneMode(db, 'old', 'active')).toBe('paused');
+    expect(store.current().dropZones.map((z) => z.id)).toContain('old');
+  });
+
+  test("adopt is refused while the zone's egress is off, rather than turning it on", async () => {
+    const { db, store } = pageApp();
+    const off = await call('PATCH', '/api/control/config', {
+      patch: { dropZones: [{ id: 'b', egress: null }] },
+      expectRevision: store.revision(),
+    });
+    expect(off.statusCode, off.body).toBe(200);
+    seen(db, 'd9', 'b', 'x.example.com');
+    const r = await call('POST', '/api/control/zones/b/egress/adopt', { hosts: ['x.example.com'] });
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).toBe(
+      'egress is off for zone b: set it to monitor or enforce first, so the allow list is used',
+    );
+    expect(store.current().dropZones[1]?.egress).toBeUndefined();
+  });
+
+  test('a removal note stays within the note limit whatever the id', () => {
+    // An M4 file may carry a long id; the lenient read keeps it (with a warning).
+    expect(removalNote(`z${'x'.repeat(600)}`).length).toBeLessThanOrEqual(500);
+    expect(removalNote('c')).toBe('remove zone c');
+  });
+
+  test('the egress section lists observed hosts with their drops', async () => {
+    const { db } = pageApp();
+    seen(db, 'd1', 'a', 'new.example.com', 3);
+    seen(db, 'd2', 'a', 'new.example.com', 2);
+    seen(db, 'd3', 'a', 'registry.npmjs.org', 1);
+    seen(db, 'd4', 'b', 'other.example.com', 1);
+    const r = await call('GET', '/api/control/zones/a/egress/observed');
+    expect(r.statusCode).toBe(200);
+    expect(r.json().since).toBe(new Date(t0.getTime() - 14 * 86_400_000).toISOString());
+    expect(r.json().hosts).toEqual([
+      { host: 'new.example.com', decision: 'allowed', count: 5, drops: ['d1', 'd2'] },
+      { host: 'registry.npmjs.org', decision: 'allowed', count: 1, drops: ['d3'] },
+    ]);
+  });
+
+  test('adopt adds only ticked, valid entries, is guarded, and records the revision note', async () => {
+    const { db, store, asSession } = pageApp();
+    seen(db, 'd1', 'a', 'new.example.com');
+    const bad = await call('POST', '/api/control/zones/a/egress/adopt', {
+      hosts: ['new.example.com', '10.0.0.1'],
+    });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.json().issues).toEqual([
+      { path: 'hosts.1', message: 'not a host name or *.name: 10.0.0.1' },
+    ]);
+    expect(
+      (await call('POST', '/api/control/zones/a/egress/adopt', { hosts: [] })).statusCode,
+    ).toBe(400);
+    // Only hosts this zone's drops reached in the window can be adopted.
+    const unseen = await call('POST', '/api/control/zones/a/egress/adopt', {
+      hosts: ['new.example.com', 'never.example.com'],
+    });
+    expect(unseen.statusCode).toBe(400);
+    expect(unseen.json().issues).toEqual([
+      {
+        path: 'hosts.1',
+        message: 'never.example.com was not observed for zone a in the last 14 days',
+      },
+    ]);
+    // From a session the addition is guarded: the confirmation page, nothing applied yet.
+    const s = await call(
+      'POST',
+      '/api/control/zones/a/egress/adopt',
+      { hosts: ['new.example.com'] },
+      asSession,
+    );
+    expect(s.statusCode).toBe(409);
+    expect(s.json().guarded.map((g: { path: string }) => g.path)).toEqual([
+      'dropZones[a].egress.allow',
+    ]);
+    // With the token: applied, an allowed host is not added twice, and the note says what.
+    const r = await call('POST', '/api/control/zones/a/egress/adopt', {
+      hosts: ['new.example.com', 'known.example.com'],
+    });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(store.current().dropZones[0]?.egress?.allow).toEqual([
+      'known.example.com',
+      'new.example.com',
+    ]);
+    expect(store.revisions(1)[0]?.note).toBe('adopt observed hosts: new.example.com');
   });
 });

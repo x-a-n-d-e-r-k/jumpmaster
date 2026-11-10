@@ -358,15 +358,32 @@ document.getElementById('adopt').addEventListener('click', async () => {
 </script>`,
     );
   }
-  const identity = wizard.starter ? 'starter' : 'two-bot';
-  const presets = PRESETS.map((p) => `<option value="${p}">${p}</option>`).join('');
   return frame(
     'project',
-    `<h3>Add a project</h3>
+    projectBody(wizard.starter ? 'starter' : 'two-bot', {
+      returnTo: '/setup/doctor',
+      cancelTo: '/setup/project',
+      done: '/setup/doctor',
+    }),
+  );
+}
+
+/**
+ * The add-a-project form, shared by the wizard's project step and the zones page's `/zones/new`:
+ * detect, review, create through `POST /api/control/zones`. A guarded add goes to the confirmation
+ * page (back to `returnTo`, or `cancelTo`); an id with history shows what Resume brings back.
+ */
+export function projectBody(
+  identity: 'two-bot' | 'starter',
+  opts: { returnTo: string; cancelTo: string; done: string },
+): string {
+  const presets = PRESETS.map((p) => `<option value="${p}">${p}</option>`).join('');
+  return `<h3>Add a project</h3>
 <p>Name the GitHub repository. Jumpmaster reads its default branch's root (nothing else, and writes nothing) to propose a stack and the checks to run, for you to review.</p>
 <form id="detect"><p><label>Repository <input name="repo" placeholder="owner/name" pattern="[A-Za-z0-9\\-]+/[A-Za-z0-9._\\-]+" required></label> <button>Detect</button> <span id="detect-out" role="status"></span></p></form>
 <form id="project" hidden>
 <p id="found"></p>
+<p><label>Zone id <input name="id" placeholder="from the repository name" pattern="[a-z0-9](?:[a-z0-9\\-]{0,61}[a-z0-9])?"></label> <small>lower case letters, digits and dashes; blank takes the repository's name</small></p>
 <p><label>Stack <select name="preset">${presets}</select></label></p>
 <p><small>For information: drops in this project are expected to reach <span id="hosts"></span>. Egress starts in <strong>monitor</strong>: nothing is blocked, and the doctor shows what drops reached before you enforce a list.</small></p>
 <h4>Checks (gates) every change must pass</h4><div id="gates"></div><p><button type="button" id="add-gate">Add a check</button></p>
@@ -446,16 +463,28 @@ document.getElementById('project').addEventListener('submit', async (e) => {
   };
   if (form.authorMayBeAdmin.checked) zone.authorMayBeAdmin = true;
   if (found.visibility === 'private') zone.reviewReadToken = true;
+  if (form.id.value.trim()) zone.id = form.id.value.trim();
   if (zone.gates.length === 0) { out.textContent = 'Add at least one check.'; return; }
-  const r = await jmFetch('/api/control/zones', { zone, returnTo: '/setup/doctor', cancelTo: '/setup/project' });
+  await createZone(zone, false, out);
+});
+async function createZone(zone, resume, out) {
+  const r = await jmFetch('/api/control/zones', { zone, returnTo: ${scriptJson(opts.returnTo)}, cancelTo: ${scriptJson(opts.cancelTo)}, ...(resume ? { resume: true } : {}) });
   const j = await r.json().catch(() => ({}));
-  if (r.ok) { location.href = '/setup/doctor'; return; }
-  // A guarded add (every new project, from a browser): the confirmation page, then the doctor.
+  if (r.ok) { location.href = ${scriptJson(opts.done)}; return; }
+  // A guarded add (every new project, from a browser): the confirmation page, then on.
   if (r.status === 409 && j.needsConfirmation) { location.href = j.confirm; return; }
   out.textContent = j.error || (j.issues || []).map((i) => (i.path ? i.path + ': ' : '') + i.message).join('; ') || ('Refused (' + r.status + ')');
-});
-</script>`,
-  );
+  // An id with history: what Resume brings back, and the button to bring it back (paused).
+  if (j.history) {
+    const h = j.history;
+    const p = document.createElement('p');
+    p.textContent = ' Resume brings back its history (paused): ' + h.workItems + ' issues, ' + h.drops + ' drops, ' + h.outbox + ' GitHub writes, ' + h.crewIssues + ' crew issues, ' + h.goals + ' goals. ';
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = 'Resume ' + (zone.id || 'it');
+    b.addEventListener('click', () => createZone(zone, true, out));
+    p.append(b); out.append(p);
+  }
+}
+</script>`;
 }
 
 function doctorPage(db: Db): string {

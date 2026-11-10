@@ -83,6 +83,33 @@ export function mergePatch(target: unknown, patch: unknown): unknown {
   return out;
 }
 
+/**
+ * The config's PATCH: RFC 7396 everywhere except `dropZones`, whose elements are matched by `id`.
+ * A zone element is a merge patch for the zone with that id (nulls remove its keys); an id not in
+ * the document is appended, an add; zones the patch does not name are kept. A patch never removes
+ * a zone: that is `DELETE /api/control/zones/:id`, with its drained rule. Anything that is not a
+ * list of objects with string ids is passed on as given, for the schema to refuse by path.
+ */
+export function mergeConfigPatch(target: unknown, patch: unknown): unknown {
+  if (!isObject(patch) || !Object.hasOwn(patch, 'dropZones')) return mergePatch(target, patch);
+  const { dropZones: zonesPatch, ...rest } = patch;
+  const out = mergePatch(target, rest) as Record<string, unknown>;
+  const current = isObject(target) && Array.isArray(target.dropZones) ? target.dropZones : [];
+  if (!Array.isArray(zonesPatch)) {
+    out.dropZones = structuredClone(zonesPatch);
+    return out;
+  }
+  const zones = structuredClone(current) as unknown[];
+  for (const z of zonesPatch) {
+    const id = isObject(z) && typeof z.id === 'string' ? z.id : undefined;
+    const at = id === undefined ? -1 : zones.findIndex((x) => isObject(x) && x.id === id);
+    if (at < 0) zones.push(mergePatch(undefined, z));
+    else zones[at] = mergePatch(zones[at], z);
+  }
+  out.dropZones = zones;
+  return out;
+}
+
 export function diff(a: unknown, b: unknown): Change[] {
   const out: Change[] = [];
   walk('', a, b, out);

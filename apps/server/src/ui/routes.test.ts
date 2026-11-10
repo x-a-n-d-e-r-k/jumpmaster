@@ -221,9 +221,10 @@ describe('doctor fix links (Task 8)', () => {
       { defaultBranch: 'main', ciJobs: [], ownerType: 'User', visibility: 'public' },
       {},
     );
-    // This build's pages, as the doctor route derives them: Task 9 adds the Credentials tab.
+    // This build's pages, as the doctor route derives them: Task 9 adds the Credentials tab and
+    // Task 11 the zones page.
     const pages = pagesOf(h.app);
-    expect(pages).toEqual({ ...PAGES_M45A, credentials: true });
+    expect(pages).toEqual({ ...PAGES_M45A, credentials: true, zones: true });
     const seen = new Set<string>();
     for (const id of CHECK_IDS)
       for (const g of [undefined, guidance])

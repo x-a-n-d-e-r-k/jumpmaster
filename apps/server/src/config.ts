@@ -246,6 +246,9 @@ export const DropZoneObject = z.object({
   botLogins: z.array(z.string()).default([]),
 });
 
+/** Every key a zone may carry, for `ctl zones set` to refuse a path the schema does not know. */
+export const ZONE_KEYS: readonly string[] = Object.keys(DropZoneObject.shape);
+
 const DropZoneSchema = DropZoneObject.superRefine((zone, ctx) => {
   if (!zone.image && !zone.preset)
     ctx.addIssue({ code: 'custom', path: ['image'], message: 'a zone needs image or preset' });

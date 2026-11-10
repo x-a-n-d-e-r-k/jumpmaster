@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { PRESETS } from '@jumpmaster/protocol';
+import { ZONE_KEYS } from './config.js';
 import type { DoctorCheck } from './doctor/checks.js';
 import { EXPIRATION_NOTE, REPOSITORY_ACCESS_NOTE, RESOURCE_OWNER_NOTE } from './github/guidance.js';
 import { readSecret, readSecretFile } from './secrets.js';
@@ -10,7 +11,7 @@ const MODES: Record<string, string> = { pause: 'paused', resume: 'active', obser
 
 export type CtlRequest =
   | { path: string; body: unknown; method?: 'PUT' | 'PATCH' }
-  | { path: string; method: 'GET' };
+  | { path: string; method: 'GET' | 'DELETE' };
 
 /**
  * `ctl config …` verbs that are one request. `set` (a read, then a conditional patch) and
@@ -149,6 +150,39 @@ function githubLines(args: string[], g: GuidanceView): string[] {
   ];
 }
 
+/**
+ * `ctl zones …`: `add` (Task 6), `list [--json]`, `show <zone> [--json]`, `remove <zone>`,
+ * `egress observed <zone>`, `egress adopt <zone> <host>…`. `set` reads first, so `runZonesSet`
+ * builds it.
+ */
+function zonesRequest(args: string[]): CtlRequest | null {
+  const [, verb, ...rest] = args;
+  const id = (s: string | undefined) => (s && !s.startsWith('--') ? encodeURIComponent(s) : null);
+  if (verb === 'add') return zonesAddRequest(args);
+  if (verb === 'list')
+    return rest.every((a) => a === '--json') ? { path: '/api/control/zones', method: 'GET' } : null;
+  if (verb === 'show') {
+    const z = id(rest[0]);
+    return z && rest.slice(1).every((a) => a === '--json')
+      ? { path: `/api/control/zones/${z}`, method: 'GET' }
+      : null;
+  }
+  if (verb === 'remove') {
+    const z = id(rest[0]);
+    return z && rest.length === 1 ? { path: `/api/control/zones/${z}`, method: 'DELETE' } : null;
+  }
+  if (verb === 'egress') {
+    const [what, zoneId, ...hosts] = rest;
+    const z = id(zoneId);
+    if (!z) return null;
+    if (what === 'observed' && hosts.length === 0)
+      return { path: `/api/control/zones/${z}/egress/observed`, method: 'GET' };
+    if (what === 'adopt' && hosts.length > 0)
+      return { path: `/api/control/zones/${z}/egress/adopt`, body: { hosts } };
+  }
+  return null;
+}
+
 /** The control request for a command line, or null when it isn't one. */
 export function ctlRequest(args: string[]): CtlRequest | null {
   const [command, zone] = args;
@@ -158,7 +192,7 @@ export function ctlRequest(args: string[]): CtlRequest | null {
     return args.length === 2 && zone && REPO_ARG.test(zone)
       ? { path: '/api/control/detect', body: { repo: zone } }
       : null;
-  if (command === 'zones') return zone === 'add' ? zonesAddRequest(args) : null;
+  if (command === 'zones') return zonesRequest(args);
   if (command === 'briefings') return { path: '/api/control/briefings', method: 'GET' };
   // Setup and the passphrase. The passphrase itself comes from stdin, never argv.
   if (command === 'setup-code')
@@ -325,6 +359,126 @@ function setPath(obj: Record<string, unknown>, path: string[], value: unknown): 
   setPath(next, rest, value);
 }
 
+/** Sets `value` at `path`, keeping `null` (a merge patch's removal) rather than deleting. */
+function setPatchPath(obj: Record<string, unknown>, path: string[], value: unknown): void {
+  const [head, ...rest] = path as [string, ...string[]];
+  if (rest.length === 0) {
+    obj[head] = value;
+    return;
+  }
+  const next = isObject(obj[head]) ? (obj[head] as Record<string, unknown>) : {};
+  obj[head] = next;
+  setPatchPath(next, rest, value);
+}
+
+const ZONES_SET_USAGE = 'usage: ctl zones set <zone> <path>=<json>… [--note <text>]';
+
+/**
+ * `ctl zones set <zone> <path>=<json>…`: one merge patch for that zone, conditional on the
+ * revision it read. The first segment of each path must be a zone key; `id` and `repo` are not
+ * changed here (a zone is renamed or moved by removing and re-adding it).
+ */
+async function runZonesSet(
+  args: string[],
+  call: Call,
+  out: (line: string) => void,
+  err: (line: string) => void,
+): Promise<number> {
+  const [, , zoneId, ...rest] = args;
+  let note: string | undefined;
+  const words: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] === '--note') {
+      note = rest[i + 1];
+      if (note === undefined) return (err(ZONES_SET_USAGE), 2);
+      i += 1;
+    } else words.push(rest[i] as string);
+  }
+  const bad = (seg: string) =>
+    seg === '' || ['__proto__', 'constructor', 'prototype'].includes(seg);
+  const pairs = words.map((a) => {
+    const eq = a.indexOf('=');
+    return eq <= 0 ? null : { path: a.slice(0, eq).split('.'), value: valueOf(a.slice(eq + 1)) };
+  });
+  if (!zoneId || pairs.length === 0 || pairs.some((p) => p === null || p.path.some(bad))) {
+    err(ZONES_SET_USAGE);
+    return 2;
+  }
+  for (const p of pairs as { path: string[] }[]) {
+    const key = p.path[0] as string;
+    if (key === 'id' || key === 'repo') {
+      err(`${key} can't be set: remove the zone (ctl zones remove) and add it again`);
+      return 2;
+    }
+    if (!ZONE_KEYS.includes(key)) {
+      err(`${key} is not a zone setting; the zone's keys are: ${ZONE_KEYS.join(', ')}`);
+      return 2;
+    }
+  }
+  const cur = await call('GET', '/api/control/config');
+  if (!cur.ok) {
+    out(`${cur.status} ${await cur.text()}`);
+    return 1;
+  }
+  const { revision, config } = (await cur.json()) as {
+    revision: number;
+    config: { dropZones?: { id?: unknown }[] };
+  };
+  if (!(config.dropZones ?? []).some((z) => z.id === zoneId)) {
+    err(`no zone ${zoneId} in the config: ctl zones list lists them`);
+    return 2;
+  }
+  const zone: Record<string, unknown> = { id: zoneId };
+  for (const p of pairs as { path: string[]; value: unknown }[])
+    setPatchPath(zone, p.path, p.value);
+  const res = await call('PATCH', '/api/control/config', {
+    patch: { dropZones: [zone] },
+    expectRevision: revision,
+    ...(note !== undefined ? { note } : {}),
+  });
+  if (!res.ok) {
+    out(`${res.status} ${await res.text()}`);
+    return 1;
+  }
+  out(appliedLine(await res.json()));
+  return 0;
+}
+
+/** `ctl zones list | show | remove | egress …` as lines a person reads. */
+function zonesLines(args: string[], body: Record<string, unknown>): string[] {
+  const [, verb] = args;
+  if (verb === 'list') {
+    const zones = (body.zones ?? []) as {
+      id: string;
+      repo: string;
+      modeLabel: string;
+      egress: string;
+      identity: string;
+      problems: string[];
+    }[];
+    if (zones.length === 0) return ['no zones: ctl zones add <owner/name>'];
+    return zones.map(
+      (z) =>
+        `${z.id}  ${z.repo}  ${z.modeLabel}; egress ${z.egress}; ${z.identity}${z.problems.length ? `; needs: ${z.problems.join('; ')}` : ''}`,
+    );
+  }
+  if (verb === 'show') return [`${body.modeLabel}`, JSON.stringify(body.zone, null, 2)];
+  if (verb === 'remove')
+    return [`removed zone ${body.removed} (revision ${body.revision}); its history is kept`];
+  if (verb === 'egress' && args[2] === 'observed') {
+    const hosts = (body.hosts ?? []) as {
+      host: string;
+      decision: string;
+      count: number;
+      drops: string[];
+    }[];
+    if (hosts.length === 0) return [`nothing observed since ${body.since}`];
+    return hosts.map((h) => `${h.host}  ${h.decision} ${h.count}x  drops: ${h.drops.join(', ')}`);
+  }
+  if (verb === 'egress') return [appliedLine(body as never)];
+  return [JSON.stringify(body)];
+}
+
 /** The applied revision as a line: what changed, and what waits for a restart. */
 function appliedLine(body: { revision: number; changed: string[]; restartNeeded: string[] }) {
   const changed = body.changed.length > 0 ? body.changed.join(', ') : 'nothing changed';
@@ -375,6 +529,14 @@ async function runConfig(
     const bad = (seg: string) =>
       seg === '' || ['__proto__', 'constructor', 'prototype'].includes(seg);
     if (pairs.length === 0 || pairs.some((p) => p === null || p.path.some(bad))) return usage();
+    // The PATCH matches zones by id and never removes one: the list as a whole, or a zone as a
+    // whole, is not something `set` can mean.
+    if (pairs.some((p) => p?.path[0] === 'dropZones' && p.path.length < 3)) {
+      err(
+        'dropZones is not set whole or a zone at a time here: add one with ctl zones add, change it with ctl zones set <zone> <path>=<json>, remove one with ctl zones remove <zone>, or replace the whole config with ctl config import <file>',
+      );
+      return 2;
+    }
     const cur = await call('GET', '/api/control/config');
     if (!cur.ok) return fail(cur);
     const { revision, config } = (await cur.json()) as {
@@ -383,21 +545,24 @@ async function runConfig(
     };
     const patch: Record<string, unknown> = {};
     const zones = Array.isArray(config.dropZones)
-      ? (structuredClone(config.dropZones) as Record<string, unknown>[])
+      ? (config.dropZones as Record<string, unknown>[])
       : [];
-    let zonesTouched = false;
+    // The PATCH matches zones by id: each touched zone is sent as its own partial patch (a null
+    // still removes a key), and the others are left alone.
+    const zonePatches = new Map<string, Record<string, unknown>>();
     for (const p of pairs as { path: string[]; value: unknown }[]) {
       if (p.path[0] === 'dropZones' && p.path.length >= 3) {
-        const zone = zones.find((z) => z.id === p.path[1]);
-        if (!zone) {
-          err(`no zone ${p.path[1]} in the config: ctl config show lists the zones`);
+        const id = p.path[1] as string;
+        if (!zones.some((z) => z.id === id)) {
+          err(`no zone ${id} in the config: ctl config show lists the zones`);
           return 2;
         }
-        setPath(zone, p.path.slice(2), p.value);
-        zonesTouched = true;
+        const zp = zonePatches.get(id) ?? { id };
+        zonePatches.set(id, zp);
+        setPatchPath(zp, p.path.slice(2), p.value);
       } else setPath(patch, p.path, p.value);
     }
-    if (zonesTouched) patch.dropZones = zones;
+    if (zonePatches.size > 0) patch.dropZones = [...zonePatches.values()];
     const res = await call('PATCH', '/api/control/config', {
       patch,
       expectRevision: revision,
@@ -449,7 +614,7 @@ async function runConfig(
 
   const request = configRequest(args);
   if (!request) return usage();
-  let body = request.method === 'GET' ? undefined : request.body;
+  let body = 'body' in request ? request.body : undefined;
   if (verb === 'rollback') {
     // Conditional on the revision read just before it: a change made meanwhile is a conflict.
     const cur = await call('GET', '/api/control/config');
@@ -625,7 +790,7 @@ export async function runCtl(
   err: (line: string) => void = console.error,
   readStdin: () => Promise<string> = readStdinLine,
 ): Promise<number> {
-  if (args[0] === 'config' || args[0] === 'secrets') {
+  if (args[0] === 'config' || args[0] === 'secrets' || (args[0] === 'zones' && args[1] === 'set')) {
     const token = operatorToken(env, err);
     if (token === null) return 2;
     const base = env.JM_SERVER_URL ?? 'http://127.0.0.1:7420';
@@ -638,6 +803,7 @@ export async function runCtl(
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
+    if (args[0] === 'zones') return runZonesSet(args, call, out, err);
     return args[0] === 'secrets'
       ? runSecrets(args, call, out, err, readStdin)
       : runConfig(args, call, out, err);
@@ -647,7 +813,7 @@ export async function runCtl(
     err(USAGE);
     return 2;
   }
-  let body = request.method === 'GET' ? undefined : request.body;
+  let body = 'body' in request ? request.body : undefined;
   if (request.path === '/api/control/passphrase') {
     const line = (await readStdin()).split('\n')[0]?.replace(/\r$/, '') ?? '';
     if (!line) {
@@ -663,8 +829,8 @@ export async function runCtl(
   const base = env.JM_SERVER_URL ?? 'http://127.0.0.1:7420';
   const res = await fetchImpl(
     new URL(request.path, base),
-    request.method === 'GET'
-      ? { method: 'GET', headers: { authorization: `Bearer ${token}` } }
+    request.method === 'GET' || request.method === 'DELETE'
+      ? { method: request.method, headers: { authorization: `Bearer ${token}` } }
       : {
           method: request.method ?? 'POST',
           headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
@@ -686,7 +852,11 @@ export async function runCtl(
     for (const line of githubLines(args, JSON.parse(text) as GuidanceView)) out(line);
     return 0;
   }
-  if (args[0] === 'zones' && res.ok) {
+  if (args[0] === 'zones' && args[1] !== 'add' && res.ok && !args.includes('--json')) {
+    for (const line of zonesLines(args, JSON.parse(text))) out(line);
+    return 0;
+  }
+  if (args[0] === 'zones' && args[1] === 'add' && res.ok) {
     // What was written, as `init` says it: the zone, its preset and each gate.
     const added = JSON.parse(text) as {
       zone: string;
