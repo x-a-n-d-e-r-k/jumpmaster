@@ -546,14 +546,19 @@ test('every Node base in the images is one pinned image, on the Node major CI te
   expect([...distinct][0]).toMatch(new RegExp(`^node:${major}-bookworm-slim@sha256:[0-9a-f]{64}$`));
 });
 
-test('dependabot keeps the Node base on its major: digest bumps only', () => {
-  type Ignore = { 'dependency-name': string; 'update-types'?: string[] };
-  type Update = { 'package-ecosystem': string; ignore?: Ignore[] };
-  const updates = (load(read('.github/dependabot.yml')) as { updates: Update[] }).updates;
-  const docker = updates.find((u) => u['package-ecosystem'] === 'docker');
-  const node = docker?.ignore?.find((i) => i['dependency-name'] === 'node');
-  expect(node?.['update-types'] ?? []).toContain('version-update:semver-major');
-});
+// Images whose major is a support line the project chose: Node (the major CI tests with) and the
+// jvm preset's Temurin JDK (an LTS). A new major is a deliberate migration, not a bump; Dependabot
+// still brings digest, minor and patch updates. golang has no such line (its major is always 1,
+// and the go preset tracks current releases), and the python preset has no base image.
+for (const image of ['node', 'eclipse-temurin'])
+  test(`dependabot keeps ${image} on its major: no major-version updates`, () => {
+    type Ignore = { 'dependency-name': string; 'update-types'?: string[] };
+    type Update = { 'package-ecosystem': string; ignore?: Ignore[] };
+    const updates = (load(read('.github/dependabot.yml')) as { updates: Update[] }).updates;
+    const docker = updates.find((u) => u['package-ecosystem'] === 'docker');
+    const rule = docker?.ignore?.find((i) => i['dependency-name'] === image);
+    expect(rule?.['update-types'] ?? []).toContain('version-update:semver-major');
+  });
 
 test('dependabot watches the preset Dockerfiles and the Claude CLI lockfile', () => {
   type Update = { 'package-ecosystem': string; directory?: string; directories?: string[] };
