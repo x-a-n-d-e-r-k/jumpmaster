@@ -4,7 +4,7 @@ import { describe, expect, test } from 'vitest';
 import { raiseBriefing, ruleBriefing } from '../briefings.js';
 import { DEFAULT_PROTECTED_PATHS } from '../config.js';
 import { insertCrewIssue } from '../crew/store.js';
-import { insertDrop, insertStick, updateDrop } from '../db/repo.js';
+import { insertDrop, insertStick, setWorkItemState, stampStick, updateDrop } from '../db/repo.js';
 import { actionFor, PAGES_M45A, pagesOf } from '../doctor/actions.js';
 import { CHECK_IDS, DOC } from '../doctor/checks.js';
 import { zoneGuidance } from '../github/guidance.js';
@@ -327,5 +327,88 @@ describe('doctor fix links (Task 8)', () => {
     expect(html).not.toContain('href="/api/control/zones/main/labels"');
     // An href that is neither a path here nor https is not rendered as a link.
     expect(html).not.toContain('javascript:alert');
+  });
+});
+
+describe('the status line (Task 12)', () => {
+  test('the home page opens with the status banner and its action link, and titles the page with the headline', async () => {
+    const h = await harness({ live: true, zone: { protectedPaths: [...DEFAULT_PROTECTED_PATHS] } });
+    // A live stick and a parked item whose reason carries markup.
+    insertStick(h.db, { id: 'live', name: 'stick-live', tokenHash: 'hl', slots: 1 });
+    stampStick(
+      h.db,
+      'live',
+      { capabilities: ['egress-v1'], imagePolicy: 'allowlist', version: '1', pinnedImages: [] },
+      h.now(),
+    );
+    await h.sync();
+    const [first] = h.db.prepare('SELECT id FROM work_items').all() as { id: number }[];
+    setWorkItemState(h.db, first?.id as number, 'parked', 'no CI result: <ci> & friends');
+    const api = await h.view('/api/control/status');
+    expect(api.statusCode).toBe(200);
+    const status = api.json() as { headline: string; action?: { href: string } };
+    expect(status.headline).toBe('1 parked: no CI result: <ci> & friends');
+    const home = (await h.view('/')).body;
+    const body = home.slice(home.indexOf('<h1>Jumpmaster</h1>') + '<h1>Jumpmaster</h1>'.length);
+    expect(body.startsWith('<div class="status" data-waiting-on="you">')).toBe(true);
+    expect(body).toContain('<strong>1 parked: no CI result: &lt;ci&gt; &amp; friends</strong>');
+    expect(body).toContain(`<a href="${status.action?.href}">`);
+    expect(home).toContain(
+      '<title>Jumpmaster: 1 parked: no CI result: &lt;ci&gt; &amp; friends</title>',
+    );
+    expect(home).not.toContain('<ci>');
+    // Redacted where it is built (M5): a reason that quotes a secret value never shows it.
+    setWorkItemState(h.db, first?.id as number, 'parked', 'merge refused for author-token');
+    const redacted = (await h.view('/api/control/status')).json() as { headline: string };
+    expect(redacted.headline).toBe('1 parked: merge refused for [REDACTED]');
+    // No secret of the install reaches the line, the page or the route.
+    for (const secret of ['claude-token', 'author-token', 'reviewer-token', 'o'.repeat(32), 'join'])
+      for (const text of [
+        api.body,
+        home.slice(
+          home.indexOf('<div class="status"'),
+          home.indexOf('</div>', home.indexOf('<div class="status"')),
+        ),
+      ])
+        expect(text).not.toContain(secret);
+  });
+
+  test('queued work no live stick can run names the missing capability, read the way the lease route reads it', async () => {
+    const h = await harness({
+      live: true,
+      zone: { protectedPaths: [...DEFAULT_PROTECTED_PATHS], egress: { mode: 'enforce' } },
+    });
+    // The harness stick enrolled without capabilities; keep it live.
+    for (const { id } of h.db.prepare('SELECT id FROM sticks').all() as { id: string }[])
+      stampStick(
+        h.db,
+        id,
+        { capabilities: [], imagePolicy: 'allowlist', version: '1', pinnedImages: [] },
+        h.now(),
+      );
+    await h.sync();
+    const [first] = h.db.prepare('SELECT id FROM work_items').all() as { id: number }[];
+    setWorkItemState(h.db, first?.id as number, 'in_flight');
+    insertDrop(h.db, {
+      id: 'q1',
+      dropZoneId: 'main',
+      workItemId: first?.id as number,
+      role: 'implement',
+      state: 'queued',
+    });
+    const status = (await h.view('/api/control/status')).json() as { headline: string };
+    expect(status.headline).toBe(
+      'Queued: 1 issue; no stick can run zone main: no live stick has egress-v1',
+    );
+  });
+
+  test('the status route needs the operator, as every control route does', async () => {
+    const h = await harness({ live: true, zone: { protectedPaths: [...DEFAULT_PROTECTED_PATHS] } });
+    const anon = await h.app.inject({
+      method: 'GET',
+      url: '/api/control/status',
+      headers: { host: 'localhost:80' },
+    });
+    expect(anon.statusCode).toBe(401);
   });
 });

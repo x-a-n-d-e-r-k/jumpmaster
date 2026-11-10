@@ -31,6 +31,7 @@ import {
   listSticks,
   listWorkItems,
 } from './db/repo.js';
+import { pagesOf } from './doctor/actions.js';
 import { latestDoctorRun } from './doctor/run.js';
 import { fableStatus } from './fable.js';
 import type { Forge } from './forge/github.js';
@@ -38,6 +39,7 @@ import { getGoals } from './goals.js';
 import { missingFor, zoneRequirements } from './leases.js';
 import { registerMcpRoute } from './mcp/server.js';
 import type { ForgePair } from './outbox.js';
+import { buildStatus } from './status.js';
 import { lastSyncResult } from './sync.js';
 import { registerAuthPages } from './ui/auth-pages.js';
 import { registerConfirmPages } from './ui/confirm.js';
@@ -181,6 +183,13 @@ export function createApp(
         addProject: deps.config instanceof ConfigStore,
       },
       settings: deps.config instanceof ConfigStore,
+      status: buildStatus({
+        db,
+        config,
+        ...(deps.config instanceof ConfigStore ? { store: deps.config } : {}),
+        now: at,
+        pages: pagesOf(app),
+      }),
       ...(deps.config instanceof ConfigStore
         ? { claudeTokenDays: claudeTokenDays(deps.config, at) }
         : {}),

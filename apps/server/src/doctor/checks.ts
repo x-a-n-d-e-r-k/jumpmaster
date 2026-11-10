@@ -561,7 +561,7 @@ function planCheck(d: DoctorDeps): DoctorCheck {
   };
 }
 
-const liveSticks = (sticks: Stick[], now: Date): Stick[] =>
+export const liveSticks = (sticks: Stick[], now: Date): Stick[] =>
   sticks.filter(
     (s) => s.lastSeenAt !== null && now.getTime() - Date.parse(s.lastSeenAt) <= STICK_LIVE_MS,
   );

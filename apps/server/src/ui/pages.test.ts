@@ -15,6 +15,7 @@ import {
   renderGoals,
   renderHome,
   renderIntake,
+  statusBanner,
   waitingOnYou,
 } from './pages.js';
 
@@ -91,7 +92,7 @@ describe('renderHome', () => {
         },
       ],
     });
-    expect(html).toContain('<h2>Sticks</h2>');
+    expect(html).toContain('<h2 id="sticks">Sticks</h2>');
     expect(html).toContain('old&lt;stick&gt;');
     expect(html).not.toContain('old<stick>');
     expect(html).toContain('cannot run locked: lacks egress-v1, image-policy:signed');
@@ -715,4 +716,41 @@ describe('the page shell and its forms', () => {
     expect(html).not.toContain('jmFetch');
     expect(html).not.toContain('/logout');
   });
+});
+
+describe('the status banner (Task 12, round 2)', () => {
+  test('code renders as <code>, other blockers as a list with Fix links, and an unsafe href is no link', () => {
+    const html = statusBanner({
+      headline: 'No runner: <it> & `x`',
+      detail: 'check `docker compose logs stick` <now>',
+      waitingOn: 'stick',
+      action: { label: 'See the sticks', href: '/' },
+      also: [
+        { text: 'demo: no Claude token', href: '/settings/credentials' },
+        { text: 'docs is paused', href: '/zones/docs' },
+        { text: 'evil', href: 'javascript:alert(1)' },
+        { text: 'no pass yet since start' },
+      ],
+    });
+    expect(html).toContain('<strong>No runner: &lt;it&gt; &amp; <code>x</code></strong>');
+    expect(html).toContain('<p>check <code>docker compose logs stick</code> &lt;now&gt;</p>');
+    expect(html).not.toContain('`');
+    expect(html).toContain(
+      '<ul class="also"><li>demo: no Claude token <a href="/settings/credentials">Fix</a></li><li>docs is paused <a href="/zones/docs">Fix</a></li><li>evil</li><li>no pass yet since start</li></ul>',
+    );
+    expect(html).not.toContain('javascript:');
+    // The action link goes through the same check.
+    const unsafe = statusBanner({
+      headline: 'h',
+      detail: '',
+      waitingOn: 'you',
+      action: { label: 'x', href: '//evil.test/' },
+    });
+    expect(unsafe).not.toContain('evil.test');
+  });
+});
+
+test('the home page sticks section has an anchor the status links to', () => {
+  const html = renderHome({ zones: [], items: [], drops: [], sticks: [] });
+  expect(html).toContain('<h2 id="sticks">Sticks</h2>');
 });

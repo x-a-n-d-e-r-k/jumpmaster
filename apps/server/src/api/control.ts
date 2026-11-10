@@ -56,6 +56,7 @@ import {
   revokeMcpToken,
 } from '../mcp/tokens.js';
 import { type ForgePair, runOp } from '../outbox.js';
+import { buildStatus } from '../status.js';
 import { safeNext } from '../ui/auth-pages.js';
 import { MODE_LABELS } from '../ui/pages.js';
 import { credentialCreatedAt, shadowedCredentials, type TestDeps } from '../vault/credentials.js';
@@ -352,6 +353,18 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       audit(req, 'zone.mode', { mode: body.data.mode }, zone.id);
       return { zone: zone.id, mode: body.data.mode };
     });
+
+    // What Jumpmaster is doing and why it waits (§10.3): the home banner's line, for `ctl status`.
+    // Task 14's manifest: GET /api/control/status, ctl verb `ctl status`.
+    scope.get('/api/control/status', async (req) =>
+      buildStatus({
+        db,
+        config: cfg(req),
+        ...(deps.config instanceof ConfigStore ? { store: deps.config } : {}),
+        now: now(),
+        pages: pagesOf(app),
+      }),
+    );
 
     // Open briefings with their option ids, for `ctl rule` without the UI.
     scope.get('/api/control/briefings', async () => ({

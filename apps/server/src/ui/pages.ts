@@ -14,6 +14,7 @@ import type {
 import type { DoctorAction } from '../doctor/checks.js';
 import type { GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
+import type { Status } from '../status.js';
 import type { Gate } from '../usage.js';
 
 export const escapeHtml = (v: unknown): string =>
@@ -40,6 +41,8 @@ export interface HomeState {
   setup?: { active: boolean; addProject: boolean };
   /** The settings pages exist (a store install): home links to them. */
   settings?: boolean;
+  /** What Jumpmaster is doing and why it waits (status.ts): the page opens with it. */
+  status?: Status;
   /** The Claude token's age in days, when dated: a banner from day 330. */
   claudeTokenDays?: number;
   zones: DropZoneConfig[];
@@ -186,7 +189,7 @@ function crewSection(lines: CrewLine[] | undefined): string {
 
 function sticksSection(lines: StickLine[] | undefined): string {
   if (!lines) return '';
-  if (lines.length === 0) return '<h2>Sticks</h2><p>No stick has enrolled.</p>';
+  if (lines.length === 0) return '<h2 id="sticks">Sticks</h2><p>No stick has enrolled.</p>';
   const rows = lines
     .map((s) => {
       const runs =
@@ -201,7 +204,7 @@ function sticksSection(lines: StickLine[] | undefined): string {
       return `<tr><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.version ?? '-')}</td><td>${escapeHtml(s.lastSeenAt ?? 'never')}</td><td>${escapeHtml(s.capabilities.join(', ') || '-')}</td><td>${escapeHtml(s.imagePolicy)}</td><td>${runs}</td></tr>`;
     })
     .join('');
-  return `<h2>Sticks</h2><table><tr><th>Stick</th><th>Version</th><th>Last seen</th><th>Capabilities</th><th>Image policy</th><th>Zones</th></tr>${rows}</table>`;
+  return `<h2 id="sticks">Sticks</h2><table><tr><th>Stick</th><th>Version</th><th>Last seen</th><th>Capabilities</th><th>Image policy</th><th>Zones</th></tr>${rows}</table>`;
 }
 
 /** One shared handler for every rule form: it posts with the session's CSRF header. */
@@ -357,9 +360,10 @@ const LOGOUT = `<form method="post" action="/logout" style="float:right;margin-t
  * `jm-csrf` meta for the guard to fill, `jmFetch` and the logout button; the login and setup pages
  * go without.
  */
-export const page = (body: string, opts: { chrome?: boolean } = {}): string => {
+export const page = (body: string, opts: { chrome?: boolean; title?: string } = {}): string => {
   const chrome = opts.chrome ?? true;
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8">${chrome ? `<meta name="jm-csrf" content="">` : ''}<title>Jumpmaster</title><style>${STYLE}</style>${chrome ? JM_FETCH : ''}</head><body>${chrome ? LOGOUT : ''}<h1>Jumpmaster</h1>${body}</body></html>`;
+  const title = opts.title ? `Jumpmaster: ${escapeHtml(opts.title)}` : 'Jumpmaster';
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">${chrome ? `<meta name="jm-csrf" content="">` : ''}<title>${title}</title><style>${STYLE}</style>${chrome ? JM_FETCH : ''}</head><body>${chrome ? LOGOUT : ''}<h1>Jumpmaster</h1>${body}</body></html>`;
 };
 
 function elapsed(drop: Drop, now: Date): string {
@@ -462,7 +466,8 @@ export function renderHome(state: HomeState): string {
     : '';
   const settingsLink = state.settings ? '<p><a href="/settings">Settings</a></p>' : '';
   return page(
-    tokenAgeBanner(state.claudeTokenDays) +
+    statusBanner(state.status) +
+      tokenAgeBanner(state.claudeTokenDays) +
       setupFrame +
       addProject +
       settingsLink +
@@ -477,7 +482,36 @@ export function renderHome(state: HomeState): string {
       `<h2>Drops</h2><table><tr><th>Drop</th><th>Issue</th><th>Role</th><th>State</th><th>Elapsed</th><th>Gates</th></tr>${drops}</table>` +
       outboxSection(state.outbox) +
       `<h2>Last rate limit</h2>${rl}`,
+    state.status ? { title: state.status.headline } : {},
   );
+}
+
+/** Plain status text as HTML: escaped, with `code` in backticks rendered as <code>. */
+const codeHtml = (text: string): string =>
+  escapeHtml(text).replace(/`([^`]+)`/g, '<code>$1</code>');
+
+/**
+ * The status line: the headline, the detail behind it, every other blocker as a short item with
+ * its Fix link, and the control that moves it on. Every href passes `safeHref`, as the doctor's.
+ */
+export function statusBanner(s: Status | undefined): string {
+  if (!s) return '';
+  const detail = s.detail ? `<p>${codeHtml(s.detail)}</p>` : '';
+  const since = s.since ? ` <small>since ${escapeHtml(s.since)}</small>` : '';
+  const also =
+    s.also && s.also.length > 0
+      ? `<ul class="also">${s.also
+          .map(
+            (a) =>
+              `<li>${codeHtml(a.text)}${a.href && safeHref(a.href) ? ` <a href="${escapeHtml(a.href)}">Fix</a>` : ''}</li>`,
+          )
+          .join('')}</ul>`
+      : '';
+  const action =
+    s.action && safeHref(s.action.href)
+      ? `<p><a href="${escapeHtml(s.action.href)}">${escapeHtml(s.action.label)}</a></p>`
+      : '';
+  return `<div class="status" data-waiting-on="${escapeHtml(s.waitingOn)}"><p><strong>${codeHtml(s.headline)}</strong>${since}</p>${detail}${also}${action}</div>`;
 }
 
 function artifactsSection(artifacts: ArtifactRow[]): string {

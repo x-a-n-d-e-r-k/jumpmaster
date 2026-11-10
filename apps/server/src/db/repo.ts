@@ -492,6 +492,16 @@ export function listSticks(db: Db): Stick[] {
   ).map(toStick);
 }
 
+/** A zone's active drops (queued, leased or running), oldest first. */
+export function listActiveDrops(db: Db, zoneId: string): Drop[] {
+  return db
+    .prepare(
+      `SELECT ${DROP_COLS} FROM drops WHERE drop_zone_id = ? AND state IN ('queued','leased','running')
+       ORDER BY created_at, id`,
+    )
+    .all(zoneId) as Drop[];
+}
+
 export function listRecentDrops(db: Db, limit = 50): Drop[] {
   return db
     .prepare(`SELECT ${DROP_COLS} FROM drops ORDER BY created_at DESC, id LIMIT ?`)
