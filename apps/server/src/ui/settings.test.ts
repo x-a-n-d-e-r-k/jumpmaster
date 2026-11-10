@@ -34,8 +34,11 @@ afterEach(async () => {
  * An install with a vault, a secrets directory holding the reviewer token as a file, and one
  * two-bot zone on a private repository (so the missing read token is a zone problem).
  */
-async function world(o: { env?: Record<string, string>; now?: Date; dbMode?: boolean } = {}) {
-  const db = openDb(tmpDbFile());
+async function world(
+  o: { env?: Record<string, string>; now?: Date; dbMode?: boolean; dbFile?: string } = {},
+) {
+  const dbFile = o.dbFile ?? tmpDbFile();
+  const db = openDb(dbFile);
   const dir = mkdtempSync(join(tmpdir(), 'jm-tab-'));
   const secrets = join(dir, 'secrets');
   mkdirSync(secrets, { mode: 0o700 });
@@ -100,6 +103,7 @@ async function world(o: { env?: Record<string, string>; now?: Date; dbMode?: boo
   const api = () => ({ host: HOST, cookie: s.cookie, 'x-jm-csrf': s.csrf });
   return {
     db,
+    dbFile,
     store,
     secrets,
     /** Moves the clock; the operator logs in again (a session idles out after 12 hours). */
@@ -293,6 +297,67 @@ describe('the credentials tab', () => {
   });
 });
 
+describe('the credentials tab, round 2', () => {
+  test('Replace with an empty field says to enter a token first, inline, and sends nothing', async () => {
+    const empty = await runReplace({ name: 'claudeToken', value: '', sudo: true });
+    expect(empty.result).toBe('empty');
+    expect(empty.status).toBe('Enter a token first.');
+    expect(empty.calls).toEqual([]);
+    // Inline: each Replace form carries its own status beside the button.
+    const w = await world();
+    const claude = rowOf((await w.get('/settings/credentials')).body, 'claudeToken');
+    expect(claude).toMatch(
+      /<button>Replace<\/button> <span class="replace-out" role="status"><\/span><\/form>/,
+    );
+  });
+
+  test('a file-mode install dates a vault Claude token by the vault: the row and the banner agree', async () => {
+    const w = await world(); // file mode: the zone is in the config file
+    expect(w.store.mode()).toBe('file');
+    await w.call('POST', '/api/control/sudo', { passphrase: PASS });
+    const made = new Date(t0.getTime() - 331 * DAY).toISOString().slice(0, 10);
+    await w.call('PUT', '/api/control/secrets/claudeToken', {
+      value: CLAUDE,
+      declaredCreatedAt: made,
+    });
+    const tab = (await w.get('/settings/credentials')).body;
+    expect(rowOf(tab, 'claudeToken')).toContain(`<td data-col="created">${made}</td>`);
+    for (const body of [tab, (await w.get('/')).body])
+      expect(body).toContain('The Claude token is 331 days old');
+  });
+
+  test('the Remove dialog says the removal is refused while a zone needs the credential', () => {
+    expect(CREDENTIALS_SCRIPT).toContain(
+      'Jumpmaster refuses to remove it while a zone still needs it',
+    );
+    expect(CREDENTIALS_SCRIPT).not.toMatch(/park until/);
+  });
+
+  test('an undecryptable vault entry can be removed', async () => {
+    const first = await world({ dbMode: true });
+    await first.call('POST', '/api/control/sudo', { passphrase: PASS });
+    await first.call('PUT', '/api/control/secrets/claudeToken', { value: CLAUDE });
+    // The same database under another vault key: the stored value no longer decrypts.
+    const w = await world({ dbMode: true, dbFile: first.dbFile });
+    const row = rowOf((await w.get('/settings/credentials')).body, 'claudeToken');
+    expect(row).toContain('does not decrypt');
+    expect(row).toContain(
+      '<button type="button" class="remove" data-name="claudeToken">Remove</button>',
+    );
+  });
+
+  test('no running-drops line when no drop carries the old value; Test and Replace both offer a refresh', async () => {
+    const none = await runReplace({ name: 'claudeToken', value: CLAUDE, sudo: true, running: 0 });
+    expect(none.status).toBe('Saved and tested.');
+    expect(none.appended).toContain('Refresh the list');
+    const some = await runReplace({ name: 'claudeToken', value: CLAUDE, sudo: true, running: 2 });
+    expect(some.status).toContain('2 running drops still carry the previous token');
+    const tested = await runAction('test', 'claudeToken');
+    expect(tested.result).toBe('ok');
+    expect(tested.appended).toContain('<a href="/settings/credentials">Refresh the list</a>');
+  });
+});
+
 type Call = { method: string; path: string; body: unknown };
 
 /** Runs the tab's script against stubs: `jmReplaceCredential` with a recording fetch. */
@@ -302,9 +367,10 @@ async function runReplace(o: {
   declaredCreatedAt?: string;
   sudo: boolean;
   passphrase?: string;
+  running?: number;
 }) {
-  const { ctx, calls } = scriptContext();
-  const status = { textContent: '' };
+  const { ctx, calls } = scriptContext(o.running ?? 2);
+  const status = stubStatus();
   const result = await (ctx.jmReplaceCredential as (...a: unknown[]) => Promise<string>)(
     {
       name: o.name,
@@ -314,20 +380,32 @@ async function runReplace(o: {
     { sudo: o.sudo, passphrase: o.passphrase ?? '' },
     status,
   );
-  return { result, calls, status: status.textContent };
+  return { result, calls, status: status.textContent, appended: status.appended };
+}
+
+/** A status element: its text, and the HTML the script appends after it. */
+function stubStatus() {
+  const s = {
+    textContent: '',
+    appended: '',
+    insertAdjacentHTML(_where: string, html: string) {
+      s.appended += html;
+    },
+  };
+  return s;
 }
 
 async function runAction(kind: 'test' | 'remove', name: string) {
-  const { ctx, calls } = scriptContext();
-  const status = { textContent: '' };
+  const { ctx, calls } = scriptContext(2);
+  const status = stubStatus();
   const fn = (kind === 'test' ? ctx.jmTestCredential : ctx.jmRemoveCredential) as (
     ...a: unknown[]
   ) => Promise<string>;
   const result = await fn(name, { sudo: true, passphrase: '' }, status);
-  return { result, calls, status: status.textContent };
+  return { result, calls, status: status.textContent, appended: status.appended };
 }
 
-function scriptContext() {
+function scriptContext(running: number) {
   const calls: Call[] = [];
   const ctx = vm.createContext({
     document: { addEventListener: () => {}, querySelectorAll: () => [] },
@@ -338,8 +416,8 @@ function scriptContext() {
         method === 'PUT'
           ? {
               tested: true,
-              runningDropsWithPrevious: 2,
-              hint: '2 running drops still carry the previous token, and the pass running now keeps it until it ends: revoke it on GitHub after they finish',
+              runningDropsWithPrevious: running,
+              hint: `${running} running drops still carry the previous token, and the pass running now keeps it until it ends: revoke it on GitHub after they finish`,
             }
           : { tested: true, result: 'ok' };
       return { ok: true, status: 200, json: async () => json };

@@ -221,17 +221,17 @@ export function credentialFingerprint(resolved: Resolved): string {
 }
 
 /**
- * When a credential was created, for its age: in db mode the vault's declared date (else the day
- * it was set); in file mode, or for a credential the vault does not hold, `claude.tokenCreatedAt`.
+ * When a credential was created, for its age: a vault credential's declared date (else the day it
+ * was set), whatever the config mode; for one the vault does not hold, `claude.tokenCreatedAt`.
+ * The Credentials tab, its banner and the doctor all read it here, so they agree.
  */
 export function credentialCreatedAt(
   name: CredentialName,
   resolved: Resolved,
-  mode: 'file' | 'db',
   claude: { tokenCreatedAt?: string },
 ): string | undefined {
   const r = resolved[name];
-  if (mode === 'db' && r?.source === 'vault') return r.declaredCreatedAt ?? r.setAt?.slice(0, 10);
+  if (r?.source === 'vault') return r.declaredCreatedAt ?? r.setAt?.slice(0, 10);
   return name === 'claudeToken' ? claude.tokenCreatedAt : undefined;
 }
 

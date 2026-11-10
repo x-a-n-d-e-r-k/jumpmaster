@@ -30,7 +30,7 @@ const DAY_MS = 86_400_000;
 export function claudeTokenDays(store: ConfigStore, now: Date): number | undefined {
   const resolved = store.resolved();
   if (resolved.claudeToken.source === 'missing') return undefined;
-  const made = credentialCreatedAt('claudeToken', resolved, store.mode(), store.current().claude);
+  const made = credentialCreatedAt('claudeToken', resolved, store.current().claude);
   const t = made === undefined ? Number.NaN : Date.parse(made);
   return Number.isFinite(t) ? Math.floor((now.getTime() - t) / DAY_MS) : undefined;
 }
@@ -82,17 +82,17 @@ function actionsCell(
   const made = claudeDated
     ? ' <label>Made on <input type="date" name="declaredCreatedAt"></label>'
     : '';
+  // A vault entry that no longer decrypts can be removed too (then entered again).
   const remove =
-    c.source === 'vault'
+    c.source === 'vault' || c.undecryptable
       ? ` <button type="button" class="remove" data-name="${n}">Remove</button>`
       : '';
-  return `<form class="replace" data-name="${n}"><input type="password" name="value" autocomplete="off" spellcheck="false" aria-label="New value for ${n}">${made} <button>Replace</button></form>${test}${remove}`;
+  return `<form class="replace" data-name="${n}"><input type="password" name="value" autocomplete="off" spellcheck="false" aria-label="New value for ${n}">${made} <button>Replace</button> <span class="replace-out" role="status"></span></form>${test}${remove}`;
 }
 
 function rowFor(name: CredentialName, c: ResolvedCredential, store: ConfigStore, vaultOn: boolean) {
   const created =
-    credentialCreatedAt(name, store.resolved(), store.mode(), store.current().claude) ??
-    c.declaredCreatedAt;
+    credentialCreatedAt(name, store.resolved(), store.current().claude) ?? c.declaredCreatedAt;
   const test = c.testResult ? `${escapeHtml(c.testResult)} <small>${day(c.testedAt)}</small>` : '-';
   return `<tr data-credential="${escapeHtml(name)}"><td><code>${escapeHtml(name)}</code><br><small>${escapeHtml(roleOf(name))}</small></td><td data-col="source">${sourceCell(c)}</td><td data-col="fingerprint">${c.fingerprint ? `<code>${escapeHtml(c.fingerprint)}</code>` : '-'}</td><td data-col="login">${c.login ? escapeHtml(c.login) : '-'}</td><td data-col="set">${day(c.setAt)}</td><td data-col="created">${day(created)}</td><td data-col="test">${test}</td><td data-col="actions">${actionsCell(name, c, vaultOn, name === 'claudeToken')}</td></tr>`;
 }
@@ -135,8 +135,11 @@ async function jmWhy(r) {
   } catch (e) {}
   return '';
 }
+function jmRefreshLink(status) {
+  status.insertAdjacentHTML('beforeend', ' <a href="/settings/credentials">Refresh the list</a>');
+}
 async function jmReplaceCredential(c, state, status) {
-  if (!c.value) { status.textContent = 'Enter the new value first.'; return 'empty'; }
+  if (!c.value) { status.textContent = 'Enter a token first.'; return 'empty'; }
   if (!(await jmSudo(state, status))) return 'sudo';
   const body = { value: c.value };
   if (c.declaredCreatedAt) body.declaredCreatedAt = c.declaredCreatedAt;
@@ -147,7 +150,9 @@ async function jmReplaceCredential(c, state, status) {
     return 'refused';
   }
   const j = await r.json();
-  status.textContent = 'Saved and tested. ' + (j.hint || '');
+  // The route's running-drops line, only when a drop still carries the previous value.
+  status.textContent = 'Saved and tested.' + (j.runningDropsWithPrevious > 0 && j.hint ? ' ' + j.hint : '');
+  jmRefreshLink(status);
   return 'saved';
 }
 async function jmTestCredential(name, state, status) {
@@ -156,6 +161,7 @@ async function jmTestCredential(name, state, status) {
   if (!r.ok) { if (r.status === 403) state.sudo = false; status.textContent = name + ': ' + r.status + ' ' + (await jmWhy(r)); return 'refused'; }
   const j = await r.json();
   status.textContent = j.tested ? name + ': ' + j.result + (j.login ? ' (' + j.login + ')' : '') : name + ': ' + (await jmWhy({ json: async () => j }));
+  jmRefreshLink(status);
   return j.tested ? 'ok' : 'failed';
 }
 async function jmRemoveCredential(name, state, status) {
@@ -183,16 +189,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const date = form.querySelector('input[name=declaredCreatedAt]');
     const s = state();
     const c = { name: form.dataset.name, value: field.value, declaredCreatedAt: date ? date.value : '' };
-    const outcome = await jmReplaceCredential(c, s, status);
+    // Beside the button, so an empty field's "Enter a token first." is seen where it was pressed.
+    const out = form.querySelector('.replace-out');
+    const outcome = await jmReplaceCredential(c, s, out);
     if (outcome !== 'sudo') field.value = '';
     after(s, outcome);
-    if (outcome === 'saved') status.insertAdjacentHTML('beforeend', ' <a href="/settings/credentials">Refresh the list</a>');
   });
   for (const b of document.querySelectorAll('button.test')) b.addEventListener('click', async () => {
     const s = state(); after(s, await jmTestCredential(b.dataset.name, s, status));
   });
   for (const b of document.querySelectorAll('button.remove')) b.addEventListener('click', async () => {
-    if (!confirm('Remove ' + b.dataset.name + ' from the vault? Zones that need it park until it is set again.')) return;
+    if (!confirm('Remove ' + b.dataset.name + ' from the vault? Jumpmaster refuses to remove it while a zone still needs it.')) return;
     const s = state(); const outcome = await jmRemoveCredential(b.dataset.name, s, status); after(s, outcome);
     if (outcome === 'removed') location.reload();
   });

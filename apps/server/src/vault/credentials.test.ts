@@ -201,21 +201,23 @@ describe('shadowing, fingerprints and dates', () => {
     );
   });
 
-  test('credentialCreatedAt: the vault date (declared, else set) in db mode; claude.tokenCreatedAt in file mode or for a file', () => {
+  test("credentialCreatedAt: a vault credential's date (declared, else set) in either mode; claude.tokenCreatedAt for one the vault does not hold", () => {
     const v = vault();
     v.put('claudeToken', CLAUDE, { now: t0 });
     const r = resolveCredentials({}, undefined, v);
-    expect(credentialCreatedAt('claudeToken', r, 'db', { tokenCreatedAt: '2025-01-01' })).toBe(
+    expect(credentialCreatedAt('claudeToken', r, { tokenCreatedAt: '2025-01-01' })).toBe(
       t0.toISOString().slice(0, 10),
     );
     v.put('claudeToken', CLAUDE, { now: t0, declaredCreatedAt: '2026-01-15' });
     const r2 = resolveCredentials({}, undefined, v);
-    expect(credentialCreatedAt('claudeToken', r2, 'db', {})).toBe('2026-01-15');
-    expect(credentialCreatedAt('claudeToken', r2, 'file', { tokenCreatedAt: '2025-01-01' })).toBe(
-      '2025-01-01',
+    expect(credentialCreatedAt('claudeToken', r2, {})).toBe('2026-01-15');
+    // The source decides, not the config mode: a file-mode install's vault token is dated by the
+    // vault, as its row, the banner and the doctor all read it.
+    expect(credentialCreatedAt('claudeToken', r2, { tokenCreatedAt: '2025-01-01' })).toBe(
+      '2026-01-15',
     );
     const f = resolveCredentials({}, secretsDir({ claude_token: CLAUDE }), 'disabled');
-    expect(credentialCreatedAt('claudeToken', f, 'db', { tokenCreatedAt: '2025-02-02' })).toBe(
+    expect(credentialCreatedAt('claudeToken', f, { tokenCreatedAt: '2025-02-02' })).toBe(
       '2025-02-02',
     );
   });
