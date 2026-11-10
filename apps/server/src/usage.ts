@@ -259,7 +259,10 @@ export function dispatchGate(db: Db, cfg: UsageConfig, now: Date): Gate {
   const until = ms(u.pausedUntil);
   const notBefore = ms(u.probeNotBefore);
   if ((until !== null && t < until) || (notBefore !== null && t < notBefore)) return 'closed';
-  if (credits && creditsResumeInForce(u, now)) return 'credits_resume';
+  // A Resume bound to no work item (a crew drop's stop) resumes open: binding it to nothing would
+  // lease nothing until its horizon. Credit use by any drop then stops dispatch again.
+  if (credits && creditsResumeInForce(u, now) && u.overageResumeWorkItemId !== null)
+    return 'credits_resume';
   if (u.status === 'rejected' || (credits && creditsProbing(u, now))) return 'probe';
   return throttled(u, cfg, t) ? 'finishing_only' : 'open';
 }

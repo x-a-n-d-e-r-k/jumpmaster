@@ -219,6 +219,9 @@ export function noteOverage(
   /** When the drop reported it (a live event's `ts`); defaults to `now`. */
   reportedAt: Date = now,
 ): boolean {
+  // A doctor drop observes usage (its report still feeds the usage state) but never becomes the
+  // credits stop: it has no work item, so a Resume bound to it would resume nothing.
+  if (drop.role === 'doctor') return false;
   if (data.isUsingOverage === false && outcome === null) {
     db.transaction(() => {
       const u = getUsageState(db);

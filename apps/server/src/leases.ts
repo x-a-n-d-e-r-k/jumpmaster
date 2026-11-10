@@ -19,6 +19,16 @@ const FINISHING = "('review','heal','resolve')";
 const ROLE_CLASS = `CASE WHEN role IN ${FINISHING} THEN 0 WHEN role = 'implement' THEN 1
   WHEN role = 'doctor' THEN 3 ELSE 2 END`;
 
+/**
+ * Whether a doctor drop may lease under `gate`: when dispatch is open and above the throttle
+ * (finishing_only). A doctor drop runs one Claude call plus the zone's gates, which spend no usage;
+ * it never leases during a pause or a credits stop, as the probe, or on a credits Resume. Shared
+ * with the doctor's account of why a queued one waits (doctorDropWait).
+ */
+export function doctorMayLease(gate: Gate): boolean {
+  return gate === 'open' || gate === 'finishing_only';
+}
+
 /** Queued drops wait while their zone is paused or observing. */
 const ZONE_ACTIVE = `AND drop_zone_id NOT IN (SELECT zone_id FROM zone_controls WHERE mode <> 'active')`;
 
@@ -57,8 +67,8 @@ const NOT_EXCLUDED = 'AND drop_zone_id NOT IN (SELECT value FROM json_each(@excl
 /**
  * Leases the oldest queued drop the usage gate allows, bumping its epoch and stamping started_at.
  * `probe` leases exactly one drop (preferring one not on the pause's cause item) and records it.
- * `credits_resume` leases only the resumed work item's drops; with none queued (or a crew drop
- * resumed), nothing. The gate is required: a caller that forgets it must not lease while stopped. All time
+ * `credits_resume` leases only the resumed work item's drops; with none queued, nothing. A Resume
+ * with no work item (a crew drop's) is never `credits_resume`: dispatchGate resumes it open. The gate is required: a caller that forgets it must not lease while stopped. All time
  * comes from `now`. Drops of the `exclude` zones (ones the stick can't run) are never picked, under
  * any gate: they stay queued, untouched, for a capable stick.
  */
@@ -110,10 +120,13 @@ export function leaseNextDrop(
       }
       case 'open':
       case 'finishing_only': {
-        // Above the throttle only finishing work starts, and doctor drops: an operator-asked
-        // readiness check with one small Claude call, still last by ROLE_CLASS.
+        // Above the throttle only finishing work starts, and doctor drops (doctorMayLease): an
+        // operator-asked readiness check, still last by ROLE_CLASS.
+        const doctor = doctorMayLease(gate) ? '' : " AND role <> 'doctor'";
         const roleFilter =
-          gate === 'finishing_only' ? ` AND (role IN ${FINISHING} OR role = 'doctor')` : '';
+          gate === 'finishing_only'
+            ? ` AND (role IN ${FINISHING} OR role = 'doctor')${doctor}`
+            : doctor;
         next = db
           .prepare(
             `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE} ${NOT_EXCLUDED}${roleFilter}

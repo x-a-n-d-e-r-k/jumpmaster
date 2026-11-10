@@ -620,11 +620,13 @@ agent's Claude token reaches `api.anthropic.com`.
 egress and services, it clones the default branch, starts the services, runs the gates and makes
 one Claude call. It holds no write token, never writes to GitHub, and spends one turn of usage, so
 it runs only when you ask (`--cancel` withdraws a queued one). The zone must be active. It leases
-after any other queued work, and it still runs near the usage limit (see [Usage](#usage)). It waits
+after any other queued work, and it still runs near the usage limit (see [Usage](#usage)): its one
+Claude call is small, but it holds a stick slot for the whole gate run. Its usage report never
+starts a credits stop. It waits
 while usage is paused at the limit, during a credits stop, while the kill switch is on, and until a
 stick that can run the zone is free. The reply to `--drop`, and the `zone.doctor-drop` line while it
-is queued, say which: `held: usage paused until …`, `held: credits stop`, `waiting for a stick that
-can run zone …`, or `waiting for a free stick slot`. Doctor check: `zone.doctor-drop`.
+is queued, say which: `held: usage paused until …`, `held: credits stop`, `waiting for a stick: no
+stick is connected`, `waiting for a stick that can run zone …`, or `waiting for a free stick slot`. Doctor check: `zone.doctor-drop`.
 
 ## Stick
 

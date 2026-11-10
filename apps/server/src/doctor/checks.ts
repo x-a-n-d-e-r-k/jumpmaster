@@ -28,7 +28,7 @@ import {
   type ReadProbe,
 } from '../forge/github.js';
 import { getGoals } from '../goals.js';
-import { missingFor, zoneRequirements } from '../leases.js';
+import { doctorMayLease, missingFor, zoneRequirements } from '../leases.js';
 import type { ForgePair } from '../outbox.js';
 import { egressFor } from '../payloads.js';
 import { DETECT_FILES, detectPreset } from '../presets.js';
@@ -357,25 +357,25 @@ export function doctorDropWait(db: Db, config: Config, zone: DropZoneConfig, now
   if (mode !== 'active')
     return `held: zone ${zone.id} is ${mode} (jumpmaster ctl resume ${zone.id})`;
   const gate = dispatchGate(db, config.usage, now);
-  const u = getUsageState(db);
-  switch (gate) {
-    case 'stopped':
-      return `held: credits stop (a drop ran on usage credits); nothing new runs until the credits briefing is ruled on${u.overageUntil ? ` or the window resets at ${u.overageUntil}` : ''}`;
-    case 'closed':
-      return `held: usage paused until ${u.pausedUntil ?? u.probeNotBefore}`;
-    case 'probe':
-      return 'held: the usage limit was hit, and a doctor drop is never the probe; it starts once a work drop shows the limit has cleared';
-    case 'credits_resume':
-      return `held: resuming after a credits stop, only the bound work item runs until ${u.overageResumeUntil}`;
-    case 'open':
-    case 'finishing_only':
-      break;
-    default:
-      return `held: unknown usage gate ${String(gate)}`;
+  if (!doctorMayLease(gate)) {
+    const u = getUsageState(db);
+    switch (gate) {
+      case 'stopped':
+        return `held: credits stop (a drop ran on usage credits); nothing new runs until the credits briefing is ruled on${u.overageUntil ? ` or the window resets at ${u.overageUntil}` : ''}`;
+      case 'closed':
+        return `held: usage paused until ${u.pausedUntil ?? u.probeNotBefore}`;
+      case 'probe':
+        return 'held: the usage limit was hit, and a doctor drop is never the probe; it starts once a work drop shows the limit has cleared';
+      case 'credits_resume':
+        return `held: resuming after a credits stop, only work item ${u.overageResumeWorkItemId} runs until ${u.overageResumeUntil}`;
+      default:
+        return `held: usage gate ${gate}`;
+    }
   }
+  const live = liveSticks(listSticks(db), now);
+  if (live.length === 0) return 'waiting for a stick: no stick is connected (see stick.seen)';
   const need = zoneRequirements(zone, config);
-  const capable = liveSticks(listSticks(db), now).filter((s) => missingFor(s, need).length === 0);
-  if (capable.length === 0)
+  if (!live.some((s) => missingFor(s, need).length === 0))
     return `waiting for a stick that can run zone ${zone.id} (see stick.capabilities)`;
   return 'waiting for a free stick slot';
 }

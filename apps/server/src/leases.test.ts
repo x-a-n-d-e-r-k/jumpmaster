@@ -11,6 +11,7 @@ import {
   upsertWorkItem,
 } from './db/repo.js';
 import {
+  doctorMayLease,
   expireLeases,
   heartbeat,
   leaseExpirer,
@@ -276,7 +277,7 @@ describe('doctor drops', () => {
   });
 
   test('under finishing_only a doctor drop leases after finishing work; implement and crew wait', () => {
-    // An operator-requested readiness check with one small Claude call: the throttle holds new
+    // An operator-requested readiness check (one Claude call plus the zone's gates): the throttle holds new
     // work, not the check that tells the operator whether the zone can run it.
     queue('doc', 'doctor', -9000);
     queue('c1', 'crew-lead', -8000);
@@ -303,6 +304,18 @@ describe('doctor drops', () => {
     expect(leaseNextDrop(db, 's1', t0, 'finishing_only')).toBeNull();
     expect(getDrop(db, 'd1')?.state).toBe('queued');
     expect(getDrop(db, 'c1')?.state).toBe('queued');
+  });
+
+  test('doctorMayLease: open and finishing_only only', () => {
+    const gates = [
+      'open',
+      'finishing_only',
+      'closed',
+      'stopped',
+      'probe',
+      'credits_resume',
+    ] as const;
+    expect(gates.filter(doctorMayLease)).toEqual(['open', 'finishing_only']);
   });
 
   test('the usage probe never selects a doctor drop', () => {
