@@ -194,6 +194,11 @@ export function ctlRequest(args: string[]): CtlRequest | null {
       : null;
   if (command === 'zones') return zonesRequest(args);
   if (command === 'briefings') return { path: '/api/control/briefings', method: 'GET' };
+  // What Jumpmaster is doing and why it waits: the home banner's line.
+  if (command === 'status')
+    return args.length === 1 || (args.length === 2 && args[1] === '--json')
+      ? { path: '/api/control/status', method: 'GET' }
+      : null;
   // Setup and the passphrase. The passphrase itself comes from stdin, never argv.
   if (command === 'setup-code')
     return args.length === 1 ? { path: '/api/control/setup/code', body: {} } : null;
@@ -322,7 +327,7 @@ const CONFIG_USAGE =
 export const SECRETS_USAGE =
   'ctl secrets list | ctl secrets set <name> [--from-file <path>] [--created YYYY-MM-DD] (the value on stdin or in the file, never in argv) | ctl secrets test <name> | ctl secrets remove <name> | ctl secrets reload';
 
-const USAGE = `usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] [--artifacts <dir>] | ctl labels <zone> | ctl doctor <zone> --drop | ctl doctor <zone> --cancel | ctl setup-code | ctl setup reopen | ctl detect <owner/name> | ctl github <zone> recommend | pat <author|reviewer|read> | ruleset | codeowners [--reviewer <login>]… | checklist | ctl zones add <owner/name> [--id <id>] [--preset <p>] [--identity starter] [--egress off|monitor|enforce] [--resume] | ctl passphrase set (the passphrase on stdin) | ${CONFIG_USAGE} | ${SECRETS_USAGE}`;
+const USAGE = `usage: ctl status [--json] | ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] [--artifacts <dir>] | ctl labels <zone> | ctl doctor <zone> --drop | ctl doctor <zone> --cancel | ctl setup-code | ctl setup reopen | ctl detect <owner/name> | ctl github <zone> recommend | pat <author|reviewer|read> | ruleset | codeowners [--reviewer <login>]… | checklist | ctl zones add <owner/name> [--id <id>] [--preset <p>] [--identity starter] [--egress off|monitor|enforce] [--resume] | ctl passphrase set (the passphrase on stdin) | ${CONFIG_USAGE} | ${SECRETS_USAGE}`;
 
 type Call = (
   method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
@@ -847,6 +852,21 @@ export async function runCtl(
     if (args.includes('--json')) out(JSON.stringify({ run }, null, 2));
     else for (const line of formatDoctor(run, { written })) out(line);
     return run.checks.some((c) => c.status === 'fail') ? 1 : 0;
+  }
+  if (args[0] === 'status' && res.ok) {
+    if (args.includes('--json')) {
+      out(JSON.stringify(JSON.parse(text), null, 2));
+      return 0;
+    }
+    const st = JSON.parse(text) as {
+      headline: string;
+      detail?: string;
+      action?: { label: string; href: string };
+    };
+    out(st.headline);
+    if (st.detail) out(st.detail);
+    if (st.action) out(`next: ${st.action.label}: ${st.action.href}`);
+    return 0;
   }
   if (args[0] === 'github' && res.ok) {
     for (const line of githubLines(args, JSON.parse(text) as GuidanceView)) out(line);

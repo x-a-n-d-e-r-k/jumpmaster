@@ -757,3 +757,42 @@ describe('ctl config set and the zone list', () => {
     }
   });
 });
+
+describe('ctl status', () => {
+  const status = {
+    headline: 'Waiting on CI for PR #12 (20 of 45 min)',
+    detail: 'After the deadline the item parks with the reason CI gave, or that it gave none.',
+    waitingOn: 'ci',
+    since: '2026-01-01T00:40:00.000Z',
+    action: { label: 'Open PR #12', href: 'https://github.com/octo/demo/pull/12' },
+  };
+
+  test('ctl status prints the headline and detail, and --json the object', async () => {
+    expect(ctlRequest(['status'])).toEqual({ path: '/api/control/status', method: 'GET' });
+    expect(ctlRequest(['status', '--json'])).toEqual({
+      path: '/api/control/status',
+      method: 'GET',
+    });
+    expect(ctlRequest(['status', 'extra'])).toBeNull();
+    const text = await run(['status'], '', fakeFetch(200, status));
+    expect(text.code).toBe(0);
+    expect(text.calls[0]?.url).toBe('http://127.0.0.1:7420/api/control/status');
+    expect(text.out).toEqual([
+      status.headline,
+      status.detail,
+      `next: ${status.action.label}: ${status.action.href}`,
+    ]);
+    const json = await run(['status', '--json'], '', fakeFetch(200, status));
+    expect(JSON.parse(json.out.join('\n'))).toEqual(status);
+    // Nothing more to say: the headline alone.
+    const idle = await run(
+      ['status'],
+      '',
+      fakeFetch(200, { headline: 'Idle', detail: '', waitingOn: 'you' }),
+    );
+    expect(idle.out).toEqual(['Idle']);
+    // A refusal is printed as it came, and fails.
+    const refused = await run(['status'], '', fakeFetch(401, { error: 'unauthorized' }));
+    expect(refused.code).toBe(1);
+  });
+});

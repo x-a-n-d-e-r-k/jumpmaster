@@ -14,6 +14,7 @@ import type {
 import type { DoctorAction } from '../doctor/checks.js';
 import type { GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
+import type { Status } from '../status.js';
 import type { Gate } from '../usage.js';
 
 export const escapeHtml = (v: unknown): string =>
@@ -40,6 +41,8 @@ export interface HomeState {
   setup?: { active: boolean; addProject: boolean };
   /** The settings pages exist (a store install): home links to them. */
   settings?: boolean;
+  /** What Jumpmaster is doing and why it waits (status.ts): the page opens with it. */
+  status?: Status;
   /** The Claude token's age in days, when dated: a banner from day 330. */
   claudeTokenDays?: number;
   zones: DropZoneConfig[];
@@ -357,9 +360,10 @@ const LOGOUT = `<form method="post" action="/logout" style="float:right;margin-t
  * `jm-csrf` meta for the guard to fill, `jmFetch` and the logout button; the login and setup pages
  * go without.
  */
-export const page = (body: string, opts: { chrome?: boolean } = {}): string => {
+export const page = (body: string, opts: { chrome?: boolean; title?: string } = {}): string => {
   const chrome = opts.chrome ?? true;
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8">${chrome ? `<meta name="jm-csrf" content="">` : ''}<title>Jumpmaster</title><style>${STYLE}</style>${chrome ? JM_FETCH : ''}</head><body>${chrome ? LOGOUT : ''}<h1>Jumpmaster</h1>${body}</body></html>`;
+  const title = opts.title ? `Jumpmaster: ${escapeHtml(opts.title)}` : 'Jumpmaster';
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">${chrome ? `<meta name="jm-csrf" content="">` : ''}<title>${title}</title><style>${STYLE}</style>${chrome ? JM_FETCH : ''}</head><body>${chrome ? LOGOUT : ''}<h1>Jumpmaster</h1>${body}</body></html>`;
 };
 
 function elapsed(drop: Drop, now: Date): string {
@@ -462,7 +466,8 @@ export function renderHome(state: HomeState): string {
     : '';
   const settingsLink = state.settings ? '<p><a href="/settings">Settings</a></p>' : '';
   return page(
-    tokenAgeBanner(state.claudeTokenDays) +
+    statusBanner(state.status) +
+      tokenAgeBanner(state.claudeTokenDays) +
       setupFrame +
       addProject +
       settingsLink +
@@ -477,7 +482,19 @@ export function renderHome(state: HomeState): string {
       `<h2>Drops</h2><table><tr><th>Drop</th><th>Issue</th><th>Role</th><th>State</th><th>Elapsed</th><th>Gates</th></tr>${drops}</table>` +
       outboxSection(state.outbox) +
       `<h2>Last rate limit</h2>${rl}`,
+    state.status ? { title: state.status.headline } : {},
   );
+}
+
+/** The status line: the headline, the detail behind it and the control that moves it on. */
+export function statusBanner(s: Status | undefined): string {
+  if (!s) return '';
+  const detail = s.detail ? `<p>${escapeHtml(s.detail)}</p>` : '';
+  const since = s.since ? ` <small>since ${escapeHtml(s.since)}</small>` : '';
+  const action = s.action
+    ? `<p><a href="${escapeHtml(s.action.href)}">${escapeHtml(s.action.label)}</a></p>`
+    : '';
+  return `<div class="status" data-waiting-on="${escapeHtml(s.waitingOn)}"><p><strong>${escapeHtml(s.headline)}</strong>${since}</p>${detail}${action}</div>`;
 }
 
 function artifactsSection(artifacts: ArtifactRow[]): string {
