@@ -47,11 +47,17 @@ const PassphraseBody = z.object({
   confirm: z.string().max(MAX_FIELD),
 });
 
-/** `next` only as a path on this server: one leading slash, no scheme, no `//host`, no backslash. */
+/**
+ * `next` only as a path on this server: one leading slash, no scheme, no `//host`, no backslash,
+ * only printable ASCII (`\x21`-`\x7e`: anything else would make the Location header throw), and no
+ * dot segment in the path, written plainly or percent-encoded (`/../`, `/%2e%2e/`, `/a%2f..`).
+ */
 export function safeNext(next: unknown): string {
   if (typeof next !== 'string' || !next.startsWith('/') || next.startsWith('//')) return '/';
-  // No backslash (some browsers read it as a slash) and no control character.
-  if (/[\\\u0000-\u001f\u007f]/.test(next)) return '/';
+  // No backslash (some browsers read it as a slash), no space, control or non-ASCII character.
+  if (/[^\x21-\x7e]|\\/.test(next)) return '/';
+  const path = (next.split(/[?#]/, 1)[0] ?? '').replace(/%2e/gi, '.').replace(/%2f/gi, '/');
+  if (path.split('/').some((seg) => seg === '.' || seg === '..')) return '/';
   return next;
 }
 

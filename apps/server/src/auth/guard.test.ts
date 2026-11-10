@@ -6,6 +6,7 @@ import { type Db, openDb } from '../db/open.js';
 import { isKilled, upsertDropZone } from '../db/repo.js';
 import { makeZone } from '../test/fixtures.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
+import { safeNext } from '../ui/auth-pages.js';
 import { Backoff } from './backoff.js';
 import { authenticate, requireCsrf, routeClass } from './guard.js';
 import { SetupMode, scryptStats, setOperatorPassphrase, setupActive } from './operator.js';
@@ -313,6 +314,38 @@ describe('login and sessions', () => {
       const r = await w.post('/login', { passphrase: PASS, next });
       expect([next, r.headers.location]).toEqual([next, to]);
     }
+  });
+
+  test('next refuses a character outside printable ASCII (never a 500 from the Location header) and any dot segment, encoded or not', async () => {
+    for (const bad of [
+      '/settings/ä',
+      '/doctor?x=é',
+      '/a b',
+      '/settings ',
+      '/./settings',
+      '/../settings',
+      '/settings/..',
+      '/settings/.',
+      '/a/../../b',
+      '/%2e/settings',
+      '/%2E%2E/settings',
+      '/.%2e/settings',
+      '/%2e./x',
+      '/a%2f..%2fb',
+      '/a/%2E%2e?x=1',
+    ])
+      expect([bad, safeNext(bad)]).toEqual([bad, '/']);
+    for (const good of [
+      '/settings/install',
+      '/settings/history?x=1',
+      '/zones/web#egress',
+      '/a.b/c..d/.e',
+      '/doctor?next=/../x',
+    ])
+      expect([good, safeNext(good)]).toEqual([good, good]);
+    const w = await world({ operator: true });
+    const r = await w.post('/login', { passphrase: PASS, next: '/settings/ä' });
+    expect([r.statusCode, r.headers.location]).toEqual([303, '/']);
   });
 
   test('a wrong passphrase is 401 and makes no session', async () => {
