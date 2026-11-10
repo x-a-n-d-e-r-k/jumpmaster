@@ -9,12 +9,19 @@ updates:
       actions:
         patterns: ["*"]
   # Base-image digests in the shipped Dockerfiles (FROM ...@sha256:...).
+  # Dependabot rewrites FROM lines only: a Node digest bump also needs each preset's
+  # `ARG BASE=` placeholder updated by hand (images/images.test.ts says which).
   - package-ecosystem: docker
     directories:
       - "/images/*"
       - "/images/trooper/presets/*"
     schedule:
       interval: weekly
+    ignore:
+      # The images run the Node major CI tests with. A new major is a deliberate migration
+      # (Node 25 dropped Corepack, which the trooper's pnpm/yarn shims come from), not a bump.
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
     groups:
       images:
         patterns: ["*"]

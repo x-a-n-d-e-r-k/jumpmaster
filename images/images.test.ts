@@ -51,6 +51,24 @@ describe('Dockerfiles', () => {
     expect(read('apps/server/src/payloads.ts')).toContain('../../trooper/prompts/');
   });
 
+  test('the server image runs a better-sqlite3 compiled in the image, not a shipped prebuild', () => {
+    // better-sqlite3 13 ships prebuilt binaries in its tarball and loads them ahead of
+    // build/Release, so the build stage deletes them, compiles against the image's own Node
+    // headers (no header download) and fails unless the compiled addon is the one left.
+    const runs = instructions(read('images/server/Dockerfile'))
+      .filter((i) => i.op === 'RUN')
+      .map((i) => i.args)
+      .join('\n');
+    const rm = runs.search(/rm -rf [^\n&]*better-sqlite3\/prebuilds/);
+    const gyp = runs.search(
+      /node-gyp(\.js)? rebuild --release --force_build=1 --nodedir=\/usr\/local/,
+    );
+    expect(rm, 'removes the shipped prebuilds').toBeGreaterThanOrEqual(0);
+    expect(gyp, 'compiles with force_build against /usr/local').toBeGreaterThan(rm);
+    expect(runs).toMatch(/test -f [^\n&]*better-sqlite3\/build\/Release\/better_sqlite3\.node/);
+    expect(runs).toMatch(/test ! -e [^\n&]*better-sqlite3\/prebuilds/);
+  });
+
   test('the stick image runs as root with its writable state under /state', () => {
     const final = finalStage(instructions(read('images/stick/Dockerfile')));
     expect(final.filter((i) => i.op === 'USER').at(-1)?.args).toBe('root');
@@ -482,9 +500,11 @@ describe('release metadata in the images', () => {
       images: Record<string, string>;
     };
     const trooper = published.images['jumpmaster-trooper'];
-    const nodeBase = /^FROM (node:24-bookworm-slim@sha256:[0-9a-f]{64})/m.exec(
+    // The server's Node base, whatever its tag: the comparison below then names both sides.
+    const nodeBase = /^FROM (node:\S+@sha256:[0-9a-f]{64})/m.exec(
       read('images/server/Dockerfile'),
     )?.[1];
+    expect(nodeBase, 'images/server/Dockerfile has a digest-pinned node FROM').toBeDefined();
     for (const file of Object.values(PRESET_FILES)) {
       const text = read(file);
       const base = /^ARG BASE=(\S+)$/m.exec(text)?.[1];
@@ -495,12 +515,44 @@ describe('release metadata in the images', () => {
         expect(base, file).toBe(`${published.registry}/jumpmaster-trooper@${trooper}`);
       } else {
         // Nothing published yet: the plain Node image, which the build's own check refuses.
+        // Dependabot rewrites FROM lines but not ARG defaults, so a Node digest bump has to
+        // carry this line by hand.
         expect(published.version).toBeNull();
-        expect(base, file).toBe(nodeBase);
+        expect(base, `${file} (ARG BASE, which Dependabot does not rewrite)`).toBe(nodeBase);
         expect(text, file).toContain('images/published.json');
       }
     }
   });
+});
+
+test('every Node base in the images is one pinned image, on the Node major CI tests with', () => {
+  // CI runs the suite on one Node major; the images must ship that same runtime. A newer major
+  // is a deliberate migration (Node 25 dropped Corepack, which the trooper's pnpm/yarn use).
+  const ciNode = (load(read('.github/workflows/ci.yml')) as Workflow).jobs;
+  const majors = Object.values(ciNode).flatMap((j) =>
+    j.steps
+      .filter((s) => s.uses?.startsWith('actions/setup-node@'))
+      .map((s) => s.with?.['node-version']),
+  );
+  expect(majors.length).toBeGreaterThan(0);
+  const major = String(majors[0]);
+  const refs = new Map<string, string>();
+  for (const file of [...SHIPPED, ...Object.values(PRESET_FILES)])
+    for (const m of read(file).matchAll(/^(?:FROM|ARG BASE=)\s*(node:\S+)/gm))
+      refs.set(`${file}: ${m[0]}`, m[1] ?? '');
+  expect(refs.size).toBeGreaterThan(0);
+  const distinct = new Set(refs.values());
+  expect([...distinct], [...refs.keys()].join('\n')).toHaveLength(1);
+  expect([...distinct][0]).toMatch(new RegExp(`^node:${major}-bookworm-slim@sha256:[0-9a-f]{64}$`));
+});
+
+test('dependabot keeps the Node base on its major: digest bumps only', () => {
+  type Ignore = { 'dependency-name': string; 'update-types'?: string[] };
+  type Update = { 'package-ecosystem': string; ignore?: Ignore[] };
+  const updates = (load(read('.github/dependabot.yml')) as { updates: Update[] }).updates;
+  const docker = updates.find((u) => u['package-ecosystem'] === 'docker');
+  const node = docker?.ignore?.find((i) => i['dependency-name'] === 'node');
+  expect(node?.['update-types'] ?? []).toContain('version-update:semver-major');
 });
 
 test('dependabot watches the preset Dockerfiles and the Claude CLI lockfile', () => {

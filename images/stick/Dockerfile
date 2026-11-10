@@ -8,7 +8,7 @@
 # so Dependabot bumps the digest; the binary is also checked against its SHA-256 below.
 FROM ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d AS cosign
 
-FROM node:24-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5 AS build
+FROM node:24-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9 AS build
 WORKDIR /src
 COPY package.json package-lock.json tsconfig.base.json tsconfig.json ./
 COPY packages/protocol packages/protocol
@@ -26,7 +26,7 @@ RUN cp /src/package.json /src/package-lock.json ./ \
  && npm cache clean --force \
  && node -e "require('dockerode')"
 
-FROM node:24-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5
+FROM node:24-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9
 ARG SOURCE_URL
 LABEL org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.title="jumpmaster-stick"
