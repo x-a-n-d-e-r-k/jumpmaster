@@ -4,9 +4,12 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import {
   loadConfig,
+  MCP_DEFAULTS,
   modelFor,
+  parseEditable,
   STARTER_WARNING,
   secretList,
+  splitConfigFile,
   startupWarnings,
   zoneSecrets,
 } from './config.js';
@@ -568,6 +571,9 @@ describe('shipped example config', () => {
     expect(config.dropZones[0]?.crew.enabled).toBe(false);
     expect(config.mcp?.enabled).toBe(false);
     expect(JSON.parse(readFileSync(example, 'utf8')).mcp).toEqual({ enabled: false });
+    // Every key it ships is one the store knows (adopting it reports no unknown key).
+    const { editable } = splitConfigFile(example, readFileSync(example, 'utf8'));
+    expect(parseEditable(editable, { imageLockPath: lock, strict: true }).ok).toBe(true);
   });
 });
 
@@ -791,5 +797,226 @@ describe('egress and signed-image settings', () => {
         },
       ),
     ).toThrow(/its image jumpmaster-trooper-python:dev is a tag.*release image lock/);
+  });
+});
+
+describe('parseEditable', () => {
+  const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json') };
+  const zone = { ...baseZone, protectedPaths: ['GOAL.md'] };
+
+  test('an empty document is the defaults with no zones', () => {
+    const r = parseEditable({}, noLock);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.config.dropZones).toEqual([]);
+    expect(r.config.pollSeconds).toBe(60);
+    expect(r.config.requireSignedImages).toBe(false);
+    expect(r.config.mcp).toEqual(MCP_DEFAULTS);
+  });
+
+  test('returns issues by path and keeps the rules the config judges alone', () => {
+    const bad = parseEditable(
+      {
+        pollSeconds: -1,
+        requireSignedImages: true,
+        dropZones: [
+          { ...zone, repo: 'nope' },
+          { ...zone, id: 'b', requireSignedImages: false },
+          { ...zone, id: 'c', egress: { mode: 'enforce', allow: ['10.0.0.1'] } },
+        ],
+      },
+      noLock,
+    );
+    expect(bad.ok).toBe(false);
+    if (bad.ok || !('issues' in bad)) return;
+    const paths = bad.issues.map((i) => i.path);
+    expect(paths).toContain('pollSeconds');
+    expect(paths).toContain('dropZones.0.repo');
+    expect(paths).toContain('dropZones.2.egress.allow.0');
+    // A schema error stops before the cross-field rules; fix it and the next ones show.
+    const signed = parseEditable(
+      {
+        requireSignedImages: true,
+        dropZones: [{ ...zone, id: 'b', requireSignedImages: false }],
+      },
+      noLock,
+    );
+    expect(signed.ok).toBe(false);
+    if (signed.ok || !('issues' in signed)) return;
+    expect(signed.issues).toEqual([
+      expect.objectContaining({
+        path: 'dropZones.0.requireSignedImages',
+        message: expect.stringMatching(/zone b sets requireSignedImages: false/),
+      }),
+      // A signed zone's tag image is refused too.
+      expect.objectContaining({
+        path: 'dropZones.0.image',
+        message: expect.stringMatching(/is a tag/),
+      }),
+    ]);
+  });
+
+  test('refuses duplicate zone ids', () => {
+    const r = parseEditable({ dropZones: [zone, zone] }, noLock);
+    expect(r.ok).toBe(false);
+    if (r.ok || !('issues' in r)) return;
+    expect(r.issues).toEqual([{ path: 'dropZones.1.id', message: 'duplicate zone id: main' }]);
+  });
+
+  test('refuses listen and dataDir at their paths: they are boot settings', () => {
+    const r = parseEditable({ listen: { port: 1 }, dataDir: '/x', dropZones: [] }, noLock);
+    expect(r.ok).toBe(false);
+    if (r.ok || !('issues' in r)) return;
+    expect(r.issues).toEqual([
+      { path: 'listen', message: 'set in the config file or the environment; restart to change' },
+      { path: 'dataDir', message: 'set in the config file or the environment; restart to change' },
+    ]);
+  });
+
+  test('drops the credential rules: a starter zone parses without looking at any token', () => {
+    const r = parseEditable(
+      { dropZones: [{ ...zone, identity: 'starter', authorMayBeAdmin: true }] },
+      noLock,
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  test('a non-object document is one issue at the root', () => {
+    for (const doc of [null, [], 'x', 3]) {
+      const r = parseEditable(doc, noLock);
+      expect(r.ok).toBe(false);
+      if (r.ok || !('issues' in r)) continue;
+      expect(r.issues).toEqual([{ path: '', message: 'the config must be a JSON object' }]);
+    }
+  });
+
+  test('a preset zone without the lock is an issue at its preset, not a throw', () => {
+    const { image: _i, ...rest } = zone;
+    const r = parseEditable({ dropZones: [{ ...rest, preset: 'python' }] }, noLock);
+    expect(r.ok).toBe(false);
+    if (r.ok || !('issues' in r)) return;
+    expect(r.issues[0]?.path).toBe('dropZones.0.preset');
+    expect(r.issues[0]?.message).toMatch(/zone main: preset python needs the release image lock/);
+    expect(
+      parseEditable({ dropZones: [{ ...rest, preset: 'python' }] }, { ...noLock, devImages: true })
+        .ok,
+    ).toBe(true);
+  });
+});
+
+describe('pollSeconds bounds', () => {
+  const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json') };
+  test('a write takes a whole number of seconds from 5 to 86400', () => {
+    const strict = { ...noLock, strict: true };
+    for (const ok of [5, 60, 86400])
+      expect(parseEditable({ pollSeconds: ok }, strict).ok).toBe(true);
+    for (const bad of [0.001, 4, 2.5, 86401, 3_600_000]) {
+      const r = parseEditable({ pollSeconds: bad }, strict);
+      expect(r.ok).toBe(false);
+      if (r.ok) continue;
+      expect(r.issues.map((i) => i.path)).toEqual(['pollSeconds']);
+    }
+  });
+
+  test('a lenient read (an M4 file) clamps it to the bounds and says so', () => {
+    const at = (p: number) => {
+      const r = parseEditable({ pollSeconds: p }, noLock);
+      return r.ok ? [r.config.pollSeconds, r.warnings ?? []] : ['refused', []];
+    };
+    expect(at(1)).toEqual([
+      5,
+      ['pollSeconds 1 is outside 5..86400: running with 5; set it in range'],
+    ]);
+    expect(at(3_600_000)[0]).toBe(86400);
+    expect(at(2.5)[0]).toBe(5);
+    expect(at(90.4)[0]).toBe(90);
+    expect(at(60)).toEqual([60, []]);
+    // Not a positive number: still refused, as M4 refused it.
+    expect(at(-1)[0]).toBe('refused');
+  });
+});
+
+describe('unknown keys', () => {
+  const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json') };
+  const zone = { ...baseZone, protectedPaths: ['GOAL.md'] };
+
+  test('strict validation names every key the schema does not know, at any depth', () => {
+    const r = parseEditable(
+      {
+        pollseconds: 10,
+        usage: { throttleUtilisation: 0.5 },
+        dropZones: [{ ...zone, readylabel: 'x', crew: { enabled: false, goalpath: 'G' } }],
+        mcp: { enabled: false },
+        claude: { plan: 'pro' },
+      },
+      { ...noLock, strict: true },
+    );
+    expect(r).toEqual({
+      ok: false,
+      issues: [
+        { path: 'pollseconds', message: 'unknown key: it would have no effect' },
+        { path: 'usage.throttleUtilisation', message: 'unknown key: it would have no effect' },
+        { path: 'dropZones.0.readylabel', message: 'unknown key: it would have no effect' },
+        { path: 'dropZones.0.crew.goalpath', message: 'unknown key: it would have no effect' },
+      ],
+    });
+  });
+
+  test('names of Object.prototype members are unknown keys too', () => {
+    const r = parseEditable(
+      { toString: 1, usage: { hasOwnProperty: true } },
+      { ...noLock, strict: true },
+    );
+    expect(r).toEqual({
+      ok: false,
+      issues: [
+        { path: 'toString', message: 'unknown key: it would have no effect' },
+        { path: 'usage.hasOwnProperty', message: 'unknown key: it would have no effect' },
+      ],
+    });
+  });
+
+  test('records of free keys (per-role models) are not unknown keys', () => {
+    const r = parseEditable(
+      { dropZones: [{ ...zone, models: { review: 'm2' } }] },
+      { ...noLock, strict: true },
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  test('a key starting with _ is a comment, at any depth', () => {
+    const r = parseEditable(
+      { _about: 'my install', dropZones: [{ ...zone, _note: 'the main repo' }] },
+      { ...noLock, strict: true },
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  test('without strict, as an M4 file is read, unknown keys are ignored as before', () => {
+    expect(parseEditable({ pollseconds: 10 }, noLock).ok).toBe(true);
+  });
+});
+
+describe('names that reach Object.prototype', () => {
+  const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json') };
+  const zone = { ...baseZone, protectedPaths: ['GOAL.md'] };
+
+  test('a zone id may not be __proto__, constructor or prototype', () => {
+    for (const id of ['__proto__', 'constructor', 'prototype']) {
+      const r = parseEditable({ dropZones: [{ ...zone, id }] }, noLock);
+      expect(r).toEqual({
+        ok: false,
+        issues: [{ path: 'dropZones.0.id', message: `a zone id may not be ${id}` }],
+      });
+    }
+  });
+
+  test('a zone named like an Object.prototype member has no gate secrets but its own', () => {
+    const secrets = { zoneSecrets: { main: { TOKEN_A: 'value-aaaa' } } } as unknown as Parameters<
+      typeof zoneSecrets
+    >[0]['secrets'];
+    expect(zoneSecrets({ secrets }, 'toString')).toEqual({});
+    expect(zoneSecrets({ secrets }, 'hasOwnProperty')).toEqual({});
+    expect(zoneSecrets({ secrets }, 'main')).toEqual({ TOKEN_A: 'value-aaaa' });
   });
 });

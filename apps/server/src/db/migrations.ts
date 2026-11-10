@@ -561,6 +561,29 @@ BEGIN
 END;
 `;
 
+/**
+ * v19: the config store (§10.3 live config). Every revision holds the whole validated editable
+ * document (never a secret), kept in full and never deleted; `settings` holds `config.mode`,
+ * `config.current`, `config.restart_pending` and `setup.step`. New tables only, so an M4 binary
+ * still runs against v19 (and reads its config file).
+ */
+const V19_SQL = `
+CREATE TABLE config_revisions (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  parent_id    INTEGER,
+  config_json  TEXT NOT NULL,
+  source_hash  TEXT NOT NULL,
+  via          TEXT NOT NULL CHECK (via IN ('file','ui','ctl','rollback','adopt','import','setup')),
+  note         TEXT CHECK (length(note) <= 500),
+  created_at   TEXT NOT NULL
+);
+CREATE TABLE settings (
+  key         TEXT PRIMARY KEY,
+  value_json  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -588,6 +611,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 16, sql: V16_SQL },
   { version: 17, sql: V17_SQL, foreignKeysOff: true },
   { version: 18, sql: V18_SQL },
+  { version: 19, sql: V19_SQL },
 ];
 
 /**

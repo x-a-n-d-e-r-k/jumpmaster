@@ -265,3 +265,52 @@ describe('parked-item recovery (sync)', () => {
     expect(workItem(h.db, 1)).toMatchObject({ state: 'done', reason: 'merged' });
   });
 });
+
+describe('hot apply', () => {
+  test('the next scheduler pass dispatches with the new config while a running drop keeps its payload', async () => {
+    const ready = (n: number) => ({
+      number: n,
+      title: `Issue ${n}`,
+      body: 'b',
+      author: 'human',
+      labels: ['agent-ready'],
+      createdAt: `2026-01-01T00:0${n}:00.000Z`,
+    });
+    const live = await harness({
+      live: true,
+      issues: [ready(1), ready(2)],
+      zone: { protectedPaths: ['.github/**', 'CODEOWNERS', 'GOAL.md'], model: 'model-before' },
+    });
+    const store = live.store as NonNullable<Harness['store']>;
+    const token = { kind: 'operator' as const, via: 'token' as const, sudo: true };
+    // One implement at a time: the first pass dispatches issue 1 only.
+    await live.reconcile();
+    expect(live.queuedRoles()).toEqual(['implement']);
+    const first = await live.lease();
+    expect(first.payload.model).toBe('model-before');
+
+    // A revision between passes: a second slot and another model.
+    const doc = store.document();
+    const zones = doc.dropZones as Record<string, unknown>[];
+    const r = store.apply(
+      { ...doc, dropZones: [{ ...zones[0], model: 'model-after', maxConcurrentImplement: 2 }] },
+      { via: 'ctl', principal: token, expectRevision: store.revision() },
+    );
+    expect(r.ok).toBe(true);
+
+    // The next pass reads it: issue 2 is dispatched in the new slot, with the new model.
+    await live.reconcile();
+    expect(live.queuedRoles()).toEqual(['implement']);
+    const second = await live.lease();
+    expect(second.payload.model).toBe('model-after');
+    // The drop already running kept what it was leased with, and finishes as it was.
+    expect(first.payload.model).toBe('model-before');
+    expect(
+      await live.postResult(first.dropId, first.epoch, {
+        status: 'completed',
+        headSha: 'sha1',
+        gates: [gateOk],
+      }),
+    ).toBe(204);
+  });
+});

@@ -1,7 +1,8 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { originAllowed, tokenMatches } from '../api/control.js';
-import { allowedHostsOf, type Config } from '../config.js';
+import { configReader, type LiveConfig } from '../config/source.js';
+import { allowedHostsOf } from '../config.js';
 import type { Db } from '../db/open.js';
 import { setupActive } from './operator.js';
 import { loadSession, parseCookies, SESSION_COOKIE } from './sessions.js';
@@ -24,7 +25,8 @@ declare module 'fastify' {
 
 export interface GuardDeps {
   db: Db;
-  config: Config;
+  /** Read per request (the operator token); the allowed hosts are boot settings. */
+  config: LiveConfig;
   now(): Date;
 }
 
@@ -54,7 +56,7 @@ export function routeClass(path: string): RouteClass {
  */
 export function authenticate(req: FastifyRequest, deps: GuardDeps): Principal | null {
   if (req.headers.authorization !== undefined) {
-    return tokenMatches(req, deps.config.secrets.operatorToken)
+    return tokenMatches(req, configReader(deps.config)().secrets.operatorToken)
       ? { kind: 'operator', via: 'token', sudo: true }
       : null;
   }
@@ -108,7 +110,7 @@ function refuse(reply: FastifyReply, cls: RouteClass, status: number, error: str
  * A request refused here never reaches a handler, so it charges no backoff.
  */
 export function registerGuard(app: FastifyInstance, deps: GuardDeps): void {
-  const allowed = allowedHostsOf(deps.config);
+  const allowed = allowedHostsOf(configReader(deps.config)());
   app.decorateRequest('principal', null);
   app.addHook('onRequest', async (req, reply) => {
     const path = req.url.split('?')[0] ?? '';

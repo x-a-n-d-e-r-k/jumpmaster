@@ -52,6 +52,7 @@ async function setup(
     mcp?: Partial<McpConfig>;
     dropZonesWithoutMain?: boolean;
     port?: number;
+    live?: boolean;
   } = {},
 ) {
   const w = await crewWorld({
@@ -83,9 +84,11 @@ async function setup(
   } as Config;
   let clock = t0;
   const logs: string[] = [];
+  // `live`: the app reads a config source (as main.ts passes the store), swapped by `setLive`.
+  let live = config;
   app = createApp({
     db: w.db,
-    config,
+    config: o.live ? { current: () => live } : config,
     forgesFor: () => w.forges as never,
     now: () => clock,
     log: (msg: string) => logs.push(msg),
@@ -102,6 +105,9 @@ async function setup(
     logs,
     at(d: Date) {
       clock = d;
+    },
+    setLive(c: Config) {
+      live = c;
     },
   };
 }
@@ -281,6 +287,18 @@ describe('transport', () => {
     const r = await post(s.write, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
     expect(r.statusCode).toBe(401);
     expect(audit(s).at(-1)).toMatchObject({ tokenId: s.writeId, outcome: 'refused' });
+  });
+
+  test('a zone added live is visible to the MCP route without a restart', async () => {
+    const s = await setup({ dropZonesWithoutMain: true, live: true });
+    const list = { jsonrpc: '2.0', id: 1, method: 'tools/list' };
+    expect((await post(s.write, list)).statusCode).toBe(401);
+    // The config store swaps in a config that has the zone: the next request sees it.
+    s.setLive({ ...s.config, dropZones: [s.zone, ...s.config.dropZones] });
+    expect((await post(s.write, list)).statusCode).toBe(200);
+    // And removing it again refuses the token at once.
+    s.setLive(s.config);
+    expect((await post(s.write, list)).statusCode).toBe(401);
   });
 
   test('initialize works statelessly and names the server', async () => {

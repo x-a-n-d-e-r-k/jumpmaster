@@ -10,7 +10,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { loadConfig } from './config.js';
+import { loadConfig, parseEditable, splitConfigFile } from './config.js';
 import { type InitDeps, type InitForge, runInit } from './init.js';
 
 const AUTHOR = 'github_pat_INITAUTHORDUMMY0123456789';
@@ -140,6 +140,12 @@ describe('jumpmaster init', () => {
       imageLockPath: lockFile(),
     });
     expect(config.dataDir).toBe('/data');
+    // Every key init writes is one the store knows: adopting it into db mode is refused for none.
+    const { editable } = splitConfigFile(
+      'jumpmaster.config.json',
+      readFileSync(join(dir, 'config', 'jumpmaster.config.json'), 'utf8'),
+    );
+    expect(parseEditable(editable, { imageLockPath: lockFile(), strict: true }).ok).toBe(true);
     expect(config.listen).toEqual({
       host: '0.0.0.0',
       port: 7420,

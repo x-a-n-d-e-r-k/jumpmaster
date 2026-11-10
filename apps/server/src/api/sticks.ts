@@ -11,6 +11,7 @@ import {
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { storeArtifact } from '../artifacts.js';
+import { configReader, type LiveConfig } from '../config/source.js';
 import { type Config, secretList } from '../config.js';
 import { noteOverage } from '../credits.js';
 import type { Db } from '../db/open.js';
@@ -34,7 +35,8 @@ const ArtifactBody = ArtifactUploadSchema.extend({ epoch: z.number() });
 
 export interface StickRouteDeps {
   db: Db;
-  config: Config;
+  /** Read per request: a lease builds its payload from the config as it is at that moment. */
+  config: LiveConfig;
   forgesFor(zoneId: string): ForgePair;
   now(): Date;
   /** Jitter source for usage pauses; defaults to `Math.random`. */
@@ -75,7 +77,8 @@ const EventsBody = z.object({ epoch: z.number(), events: z.array(TrooperEventSch
 const ResultBody = z.object({ epoch: z.number(), result: DropResultSchema });
 
 export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps): void {
-  const { db, config, now } = deps;
+  const { db, now } = deps;
+  const live = configReader(deps.config);
   const waitMs = deps.leaseWaitMs ?? 25_000;
   const pollMs = deps.leasePollMs ?? 1000;
   // The app runs with Fastify's logger off; the server's own log is stderr.
@@ -83,7 +86,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
   const lastLogged = new Map<string, number>();
 
   /** Zones this stick can't run, with what it lacks for each (config order). */
-  const incapable = (info: StickInfo): LeaseSkip[] =>
+  const incapable = (info: StickInfo, config: Config): LeaseSkip[] =>
     config.dropZones
       .map((zone) => ({
         zoneId: zone.id,
@@ -153,7 +156,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
     scope.post('/api/sticks/enroll', async (req, reply) => {
       const body = EnrollBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: 'invalid body' });
-      if (!safeEqual(body.data.joinToken, config.secrets.joinToken)) {
+      if (!safeEqual(body.data.joinToken, live().secrets.joinToken)) {
         return reply.code(401).send({ error: 'unauthorized' });
       }
       const stickId = randomUUID();
@@ -176,9 +179,6 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       // Every lease call says what the stick can do now, and that it is alive.
       stampStick(db, stick.id, advertOf(body.data), now());
       if (body.data.freeSlots < 1) return reply.code(204).send();
-      const cannot = incapable(body.data);
-      const exclude = cannot.map((c) => c.zoneId);
-
       let closed = false;
       // Not req.raw: IncomingMessage 'close' fires once the body is consumed, not on disconnect.
       reply.raw.on('close', () => {
@@ -187,6 +187,11 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       const deadline = Date.now() + waitMs;
       for (;;) {
         const at = now();
+        // Each poll reads the config afresh, and judges what the stick can run against it: the
+        // payload is built from the config the lease saw.
+        const config = live();
+        const cannot = incapable(body.data, config);
+        const exclude = cannot.map((c) => c.zoneId);
         const leased = leaseNextDrop(db, stick.id, at, dispatchGate(db, config.usage, at), exclude);
         if (leased) {
           reportSkips(reply, stick, cannot);
@@ -229,7 +234,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         const hash = createHash('sha256').update(bytes).digest('hex');
         if (hash !== body.data.sha256) return reply.code(400).send({ error: 'hash mismatch' });
         try {
-          storeArtifact(db, config.dataDir, drop.id, { ...body.data, bytes });
+          storeArtifact(db, live().dataDir, drop.id, { ...body.data, bytes });
         } catch (e) {
           return reply.code(400).send({ error: e instanceof Error ? e.message : 'refused' });
         }
@@ -243,6 +248,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       const drop = liveDrop(req, reply, req.params.id, body.data.epoch, { requireLive: true });
       if (!drop) return reply;
       appendEvents(db, drop.id, body.data.events);
+      const config = live();
       let stopped = false;
       for (const ev of body.data.events) {
         if (ev.kind !== 'rate_limit') continue;
@@ -276,6 +282,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       if (!body.success) return reply.code(400).send({ error: 'invalid body' });
       const drop = liveDrop(req, reply, req.params.id, body.data.epoch, { requireLive: true });
       if (!drop) return reply;
+      const config = live();
       const zone = config.dropZones.find((z) => z.id === drop.dropZoneId);
       if (!zone) return reply.code(500).send({ error: `unknown drop zone ${drop.dropZoneId}` });
       const at = now();

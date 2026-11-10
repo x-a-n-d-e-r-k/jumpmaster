@@ -1,6 +1,7 @@
 import type { DropPayload, DropResult, Role } from '@jumpmaster/protocol';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { createApp } from '../app.js';
+import { ConfigStore } from '../config/store.js';
 import type { Config, DropZoneConfig, UsageConfig } from '../config.js';
 import { creditsPass } from '../credits.js';
 import type { Db } from '../db/open.js';
@@ -40,6 +41,8 @@ export interface Harness {
   finishDrop(role: Role, result: DropResult): Promise<number>;
   /** GETs a page as the logged-in operator (a session made at the current clock). */
   view(url: string, headers?: Record<string, string>): Promise<LightMyRequestResponse>;
+  /** With `live`: the config store the app and every pass read (db mode, applied as `ctl`). */
+  store?: ConfigStore;
 }
 
 export async function harness(
@@ -51,6 +54,12 @@ export async function harness(
     usage?: Partial<UsageConfig>;
     /** Called when a route asks for a pass at once. */
     kick?: () => void;
+    /**
+     * Run on a config store, as the server does: the app reads it per request and `reconcile` once
+     * per pass, so a revision applied between passes is the next pass's. The zone must be one
+     * `parseEditable` accepts (its protectedPaths must cover crew.goalPath).
+     */
+    live?: boolean;
   } = {},
 ): Promise<Harness> {
   const db = openDb(tmpDbFile());
@@ -100,9 +109,14 @@ export async function harness(
   };
   let clock = START;
   const rand = () => 0;
+  const store = opts.live ? liveStore(db, config, () => clock) : undefined;
+  /** The config a pass or request reads: the store's current one when live. */
+  const current = (): Config => store?.current() ?? config;
+  const zoneNow = (): DropZoneConfig =>
+    store ? (current().dropZones.find((z) => z.id === zone.id) ?? zone) : zone;
   const app = createApp({
     db,
-    config,
+    config: store ?? config,
     forgesFor: () => forges,
     now: () => clock,
     rand,
@@ -131,18 +145,22 @@ export async function harness(
     forge: f,
     zone,
     app,
+    ...(store ? { store } : {}),
     now: () => clock,
     at(minutes) {
       clock = new Date(clock.getTime() + minutes * 60_000);
       return clock;
     },
     async sync() {
-      await syncDropZone(db, forges, zone, clock);
+      await syncDropZone(db, forges, zoneNow(), clock);
     },
     async reconcile() {
+      // One config per pass, read at its start, as main.ts does.
+      const c = current();
+      const z = zoneNow();
       creditsPass(db, clock);
-      const { pass } = await syncDropZone(db, forges, zone, clock);
-      return reconcileZone(db, forges, zone, pass, promptVersions(), config.usage, [], clock);
+      const { pass } = await syncDropZone(db, forges, z, clock);
+      return reconcileZone(db, forges, z, pass, promptVersions(), c.usage, [], clock);
     },
     stickHeaders: () => auth,
     queuedRoles() {
@@ -230,4 +248,31 @@ export async function toPrOpen(h: Harness, sha: string): Promise<void> {
     gates: [{ name: 'test', exitCode: 0, durationMs: 10, timedOut: false, outputTail: '' }],
   });
   if (status !== 204) throw new Error(`implement result returned ${status}`);
+}
+
+/** A db-mode store holding `config`'s editable part as revision 2, with `config`'s secrets. */
+function liveStore(db: Db, config: Config, now: () => Date): ConfigStore {
+  const store = ConfigStore.open({
+    db,
+    boot: {
+      listen: {
+        host: config.listen.host,
+        port: config.listen.port,
+        allowedHosts: config.listen.allowedHosts ?? [],
+        tlsTerminated: false,
+      },
+      dataDir: config.dataDir,
+      source: { listen: 'env', dataDir: 'env' },
+    },
+    env: {},
+    now,
+    secretsFor: () => config.secrets,
+  });
+  const { listen: _l, dataDir: _d, secrets: _s, ...editable } = config;
+  const r = store.apply(editable, {
+    via: 'ctl',
+    principal: { kind: 'operator', via: 'token', sudo: true },
+  });
+  if (!r.ok) throw new Error(`harness config refused: ${JSON.stringify(r)}`);
+  return store;
 }

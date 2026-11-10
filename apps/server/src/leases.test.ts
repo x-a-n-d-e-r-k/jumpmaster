@@ -190,6 +190,22 @@ describe('leaseExpirer', () => {
     expect(lost).toBe(1);
     expect(getDrop(db, 'd1')!.state).toBe('lost');
   });
+
+  test('the lease expirer reads the current usage settings on each run', () => {
+    leaseNextDrop(db, 's1', t0, 'open');
+    const reads: number[] = [];
+    let current = { throttleUtilization: 0.9, probeJitterSeconds: [30, 90] as [number, number] };
+    const expire = leaseExpirer(db, () => {
+      reads.push(current.throttleUtilization);
+      return current;
+    });
+    expire(plus(t0, 10_000));
+    current = { ...current, throttleUtilization: 0.5 };
+    expire(plus(t0, 20_000));
+    expire(plus(t0, 30_000));
+    // Read once per run, after the startup run, and the second run already saw the new value.
+    expect(reads).toEqual([0.5, 0.5]);
+  });
 });
 
 describe('crew drops', () => {

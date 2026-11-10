@@ -258,12 +258,15 @@ export function extendLiveLeases(db: Db, now: Date): number {
  * `expireLeases` that knows when the server itself was away: on its first run (startup) and after
  * any gap longer than the lease TTL (a slow restart, a sleeping laptop) the sticks could not have
  * heartbeated, so live leases get a fresh TTL instead of being declared lost all at once.
+ *
+ * `usageCfg` may be a getter (the config store's current usage settings), read once per run.
  */
 export function leaseExpirer(
   db: Db,
-  usageCfg: UsageConfig = DEFAULT_USAGE_CONFIG,
+  usageCfg: UsageConfig | (() => UsageConfig) = DEFAULT_USAGE_CONFIG,
   rand: () => number = Math.random,
 ): (now: Date) => number {
+  const usage = typeof usageCfg === 'function' ? usageCfg : () => usageCfg;
   let last: number | null = null;
   return (now) => {
     const t = now.getTime();
@@ -273,7 +276,7 @@ export function leaseExpirer(
       extendLiveLeases(db, now);
       return 0;
     }
-    return expireLeases(db, now, usageCfg, rand);
+    return expireLeases(db, now, usage(), rand);
   };
 }
 

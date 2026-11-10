@@ -1,9 +1,9 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, test, vi } from 'vitest';
 import { openDb } from './db/open.js';
-import { start } from './main.js';
+import { pollTimer, start } from './main.js';
 
 const env: Record<string, string> = {
   JM_CLAUDE_TOKEN: 'claude-token-value',
@@ -103,4 +103,103 @@ test('a restart prints a new code', async () => {
   expect(codeOf(a.stderr)).toBeDefined();
   expect(codeOf(b.stderr)).toBeDefined();
   expect(codeOf(a.stderr)).not.toBe(codeOf(b.stderr));
+});
+
+test('jumpmaster serve without a path starts in db mode from JM_DATA_DIR', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'jm-main-db-'));
+  const dataDir = join(dir, 'data');
+  const written: string[] = [];
+  vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
+    written.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+    return true;
+  });
+  vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
+    written.push(`${a.map(String).join(' ')}\n`);
+  });
+  const srv = await start(undefined, { ...env, JM_DATA_DIR: dataDir, JM_LISTEN_PORT: '0' });
+  vi.restoreAllMocks();
+  expect(srv.store.mode()).toBe('db');
+  expect(srv.store.revision()).toBe(1);
+  expect(srv.store.current().dropZones).toEqual([]);
+  expect(written.join('')).toContain('SETUP CODE');
+  expect(existsSync(join(dataDir, 'jumpmaster.sqlite'))).toBe(true);
+  await srv.stop();
+});
+
+test('a changed pollSeconds re-arms the poll timer', () => {
+  const events: string[] = [];
+  let next = 0;
+  const timers = {
+    setInterval: (_fn: () => void, ms: number) => {
+      next += 1;
+      events.push(`set ${next} ${ms}`);
+      return next as unknown as NodeJS.Timeout;
+    },
+    clearInterval: (h: NodeJS.Timeout) => {
+      events.push(`clear ${h as unknown as number}`);
+    },
+  };
+  let poll = 60;
+  const listeners: ((c: { pollSeconds: number }) => void)[] = [];
+  const source = {
+    current: () => ({ pollSeconds: poll }),
+    subscribe: (fn: (c: { pollSeconds: number }) => void) => {
+      listeners.push(fn);
+      return () => undefined;
+    },
+  };
+  const change = (p: number) => {
+    poll = p;
+    for (const l of listeners) l({ pollSeconds: p });
+  };
+  const timer = pollTimer(source, () => undefined, timers);
+  change(60);
+  change(15);
+  change(15);
+  timer.stop();
+  expect(events).toEqual(['set 1 60000', 'clear 1', 'set 2 15000', 'clear 2']);
+});
+
+test('the poll timer clamps what it arms to 5 seconds and a day, whatever it is given', () => {
+  const armed: number[] = [];
+  const timers = {
+    setInterval: (_fn: () => void, ms: number) => {
+      armed.push(ms);
+      return armed.length as unknown as NodeJS.Timeout;
+    },
+    clearInterval: () => undefined,
+  };
+  let fire: (c: { pollSeconds: number }) => void = () => undefined;
+  const source = {
+    current: () => ({ pollSeconds: 3_000_000 }),
+    subscribe: (fn: (c: { pollSeconds: number }) => void) => {
+      fire = fn;
+      return () => undefined;
+    },
+  };
+  const timer = pollTimer(source, () => undefined, timers);
+  fire({ pollSeconds: 0.001 });
+  fire({ pollSeconds: Number.NaN });
+  timer.stop();
+  // Never past setInterval's 2^31-1 ms limit (which Node turns into 1 ms), never a busy loop.
+  expect(armed).toEqual([86_400_000, 5_000, 60_000]);
+});
+
+test('an unreadable secret file is named before the data directory is touched, as in M4', async () => {
+  if (process.getuid?.() === 0) return; // root reads a 0000 file
+  const dir = mkdtempSync(join(tmpdir(), 'jm-main-secret-'));
+  const secret = join(dir, 'claude');
+  writeFileSync(secret, 'claude-token-value', { mode: 0o000 });
+  // A data directory the server cannot create: the database would fail first if it were opened first.
+  const blocked = join(dir, 'blocked');
+  writeFileSync(blocked, 'not a directory');
+  const { JM_CLAUDE_TOKEN: _c, ...rest } = env;
+  await expect(
+    start(undefined, {
+      ...rest,
+      JM_CLAUDE_TOKEN_FILE: secret,
+      JM_DATA_DIR: join(blocked, 'data'),
+      JM_LISTEN_PORT: '0',
+    }),
+  ).rejects.toThrow(/JM_CLAUDE_TOKEN_FILE: .*claude is not readable by uid/);
 });
