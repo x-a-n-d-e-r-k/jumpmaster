@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { PRESETS } from '@jumpmaster/protocol';
 import type { DoctorCheck } from './doctor/checks.js';
+import { REPOSITORY_ACCESS_NOTE, RESOURCE_OWNER_NOTE } from './github/guidance.js';
 import { readSecret, readSecretFile } from './secrets.js';
 
 const MODES: Record<string, string> = { pause: 'paused', resume: 'active', observe: 'observe' };
@@ -81,10 +82,72 @@ function zonesAddRequest(args: string[]): CtlRequest | null {
   return { path: '/api/control/zones', body: { zone, ...(resume ? { resume: true } : {}) } };
 }
 
+const GITHUB_LOGIN = /^@?[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$|^@?[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
+
+/**
+ * `ctl github <zone> recommend | pat <author|reviewer|read> | ruleset | codeowners [--reviewer
+ * <login>]… | checklist`: one read of the zone's guidance, printed per artifact by `runCtl`.
+ */
+function githubRequest(args: string[]): CtlRequest | null {
+  const [, zone, what, ...rest] = args;
+  if (!zone || !what) return null;
+  const path = `/api/control/zones/${encodeURIComponent(zone)}/github`;
+  if (what === 'recommend' || what === 'ruleset' || what === 'checklist')
+    return rest.length === 0 ? { path, method: 'GET' } : null;
+  if (what === 'pat')
+    return rest.length === 1 && ['author', 'reviewer', 'read'].includes(rest[0] ?? '')
+      ? { path, method: 'GET' }
+      : null;
+  if (what !== 'codeowners') return null;
+  const reviewers: string[] = [];
+  for (let i = 0; i < rest.length; i += 2) {
+    const login = rest[i + 1];
+    if (rest[i] !== '--reviewer' || !login || !GITHUB_LOGIN.test(login)) return null;
+    reviewers.push(login);
+  }
+  return reviewers.length === 0
+    ? { path, method: 'GET' }
+    : { path: `${path}?${new URLSearchParams({ reviewer: reviewers.join(',') })}`, method: 'GET' };
+}
+
+type GuidanceView = {
+  recommendation: {
+    identity: string;
+    authorMayBeAdmin: boolean;
+    reason: string;
+    stop?: string;
+    ask?: string;
+  };
+  pat: Record<string, string>;
+  ruleset: { text: string; note?: string };
+  codeowners: { text: string };
+  checklist: { url: string; items: string[] };
+};
+
+/** One artifact of the guidance, as lines: a file alone (for a redirect), or a link and its notes. */
+function githubLines(args: string[], g: GuidanceView): string[] {
+  const [, , what, role] = args;
+  const text = (t: string) => t.replace(/\n$/, '').split('\n');
+  if (what === 'ruleset') return text(g.ruleset.text);
+  if (what === 'codeowners') return text(g.codeowners.text);
+  if (what === 'pat')
+    return [g.pat[role ?? ''] ?? '', `${RESOURCE_OWNER_NOTE}.`, `Then ${REPOSITORY_ACCESS_NOTE}.`];
+  if (what === 'checklist') return [g.checklist.url, ...g.checklist.items.map((i) => `- ${i}`)];
+  const r = g.recommendation;
+  return [
+    `identity: ${r.identity}`,
+    `authorMayBeAdmin: ${r.authorMayBeAdmin}`,
+    r.reason,
+    ...(r.stop ? [`stop: ${r.stop}`] : []),
+    ...(r.ask ? [`first: ${r.ask}`] : []),
+  ];
+}
+
 /** The control request for a command line, or null when it isn't one. */
 export function ctlRequest(args: string[]): CtlRequest | null {
   const [command, zone] = args;
   if (command === 'config') return configRequest(args);
+  if (command === 'github') return githubRequest(args);
   if (command === 'detect')
     return args.length === 2 && zone && REPO_ARG.test(zone)
       ? { path: '/api/control/detect', body: { repo: zone } }
@@ -183,7 +246,7 @@ const CONFIG_USAGE =
 export const SECRETS_USAGE =
   'ctl secrets list | ctl secrets set <name> [--from-file <path>] [--created YYYY-MM-DD] (the value on stdin or in the file, never in argv) | ctl secrets test <name> | ctl secrets remove <name> | ctl secrets reload';
 
-const USAGE = `usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] | ctl doctor <zone> --drop | ctl doctor <zone> --cancel | ctl setup-code | ctl setup reopen | ctl detect <owner/name> | ctl zones add <owner/name> [--id <id>] [--preset <p>] [--identity starter] [--egress off|monitor|enforce] [--resume] | ctl passphrase set (the passphrase on stdin) | ${CONFIG_USAGE} | ${SECRETS_USAGE}`;
+const USAGE = `usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] | ctl doctor <zone> --drop | ctl doctor <zone> --cancel | ctl setup-code | ctl setup reopen | ctl detect <owner/name> | ctl github <zone> recommend | pat <author|reviewer|read> | ruleset | codeowners [--reviewer <login>]… | checklist | ctl zones add <owner/name> [--id <id>] [--preset <p>] [--identity starter] [--egress off|monitor|enforce] [--resume] | ctl passphrase set (the passphrase on stdin) | ${CONFIG_USAGE} | ${SECRETS_USAGE}`;
 
 type Call = (
   method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
@@ -550,6 +613,10 @@ export async function runCtl(
     if (args.includes('--json')) out(JSON.stringify({ run }, null, 2));
     else for (const line of formatDoctor(run)) out(line);
     return run.checks.some((c) => c.status === 'fail') ? 1 : 0;
+  }
+  if (args[0] === 'github' && res.ok) {
+    for (const line of githubLines(args, JSON.parse(text) as GuidanceView)) out(line);
+    return 0;
   }
   if (args[0] === 'zones' && res.ok) {
     // What was written, as `init` says it: the zone, its preset and each gate.

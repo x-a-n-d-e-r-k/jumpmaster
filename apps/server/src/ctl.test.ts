@@ -436,3 +436,95 @@ describe('ctl zones add output', () => {
     ]);
   });
 });
+
+describe('ctl github (Task 7)', () => {
+  const GUIDANCE = {
+    recommendation: {
+      identity: 'two-bot',
+      authorMayBeAdmin: false,
+      reason: 'This repository belongs to an organization.',
+      ask: 'Is the owner on a paid plan?',
+    },
+    pat: {
+      author: 'https://github.com/settings/personal-access-tokens/new?name=a',
+      reviewer: 'https://github.com/settings/personal-access-tokens/new?name=r',
+      read: 'https://github.com/settings/personal-access-tokens/new?name=d',
+    },
+    ruleset: { filename: 'jumpmaster-demo-ruleset.json', text: '{\n  "name": "jumpmaster"\n}\n' },
+    codeowners: {
+      filename: '.github/CODEOWNERS',
+      text: '# zone demo\n.github/** @alice\n',
+      newFileUrl: 'https://github.com/octo/demo/new/main?filename=.github%2FCODEOWNERS',
+    },
+    checklist: {
+      url: 'https://github.com/octo/demo/settings/access',
+      items: ['invite jm-author with the Write role', 'accept the invitation as jm-author'],
+    },
+    rulesUrl: 'https://github.com/octo/demo/settings/rules',
+  };
+
+  test('ctl github maps to the routes and prints each artifact', async () => {
+    expect(ctlRequest(['github', 'demo', 'ruleset'])).toEqual({
+      path: '/api/control/zones/demo/github',
+      method: 'GET',
+    });
+    expect(ctlRequest(['github', 'demo', 'codeowners', '--reviewer', 'alice'])).toEqual({
+      path: '/api/control/zones/demo/github?reviewer=alice',
+      method: 'GET',
+    });
+    expect(
+      ctlRequest(['github', 'demo', 'codeowners', '--reviewer', 'alice', '--reviewer', 'bob']),
+    ).toEqual({ path: '/api/control/zones/demo/github?reviewer=alice%2Cbob', method: 'GET' });
+    for (const bad of [
+      ['github'],
+      ['github', 'demo'],
+      ['github', 'demo', 'nope'],
+      ['github', 'demo', 'pat'],
+      ['github', 'demo', 'pat', 'admin'],
+      ['github', 'demo', 'codeowners', '--reviewer'],
+      ['github', 'demo', 'ruleset', '--reviewer', 'alice'],
+    ])
+      expect(ctlRequest(bad), bad.join(' ')).toBeNull();
+
+    // The ruleset and CODEOWNERS print as the file alone, for the host to redirect.
+    const ruleset = await run(['github', 'demo', 'ruleset'], '', fakeFetch(200, GUIDANCE));
+    expect(ruleset.code).toBe(0);
+    expect(ruleset.out.join('\n')).toBe(GUIDANCE.ruleset.text.trimEnd());
+    expect(ruleset.calls[0]?.url).toBe('http://127.0.0.1:7420/api/control/zones/demo/github');
+    expect(ruleset.calls[0]?.init.method).toBe('GET');
+    const co = await run(['github', 'demo', 'codeowners'], '', fakeFetch(200, GUIDANCE));
+    expect(co.out.join('\n')).toBe(GUIDANCE.codeowners.text.trimEnd());
+    // A link, with what the step says beside it.
+    const pat = await run(['github', 'demo', 'pat', 'reviewer'], '', fakeFetch(200, GUIDANCE));
+    expect(pat.out[0]).toBe(GUIDANCE.pat.reviewer);
+    expect(pat.out.join('\n')).toContain('check the Resource owner field');
+    expect(pat.out.join('\n')).toContain('Only select repositories');
+    const rec = await run(['github', 'demo', 'recommend'], '', fakeFetch(200, GUIDANCE));
+    expect(rec.out).toEqual([
+      'identity: two-bot',
+      'authorMayBeAdmin: false',
+      'This repository belongs to an organization.',
+      'first: Is the owner on a paid plan?',
+    ]);
+    const list = await run(['github', 'demo', 'checklist'], '', fakeFetch(200, GUIDANCE));
+    expect(list.out).toEqual([
+      GUIDANCE.checklist.url,
+      '- invite jm-author with the Write role',
+      '- accept the invitation as jm-author',
+    ]);
+    // A refusal prints the status and the server's answer, and fails.
+    const no = await run(
+      ['github', 'demo', 'ruleset'],
+      '',
+      fakeFetch(409, { error: 'set the author token first' }),
+    );
+    expect(no.code).toBe(1);
+    expect(no.out.join('\n')).toContain('409');
+  });
+
+  test('the usage line names ctl github', async () => {
+    const r = await run(['github']);
+    expect(r.code).toBe(2);
+    expect(r.err.join('\n')).toContain('ctl github <zone> recommend');
+  });
+});

@@ -113,6 +113,7 @@ const okAccess = (): RepoAccess => ({
   permissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
   scopes: null,
   tokenExpiresAt: null,
+  ownerType: 'User',
 });
 
 const STATE_EPOCH = Date.parse('2026-01-01T00:00:00.000Z');
@@ -443,6 +444,7 @@ function forgeFor(
     },
     repoAccess: async () => structuredClone(state.access[identity]),
     listLabels: async () => [...state.labels],
+    ownerType: async () => state.access[identity].ownerType,
     listDir: async (ref, path) => {
       const d = state.dirs.get(`${ref}:${path}`);
       return d ? [...d] : null;

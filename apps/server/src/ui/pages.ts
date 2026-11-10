@@ -392,7 +392,7 @@ export function renderHome(state: HomeState): string {
   const zones = state.zones
     .map(
       (z) =>
-        `<tr><td>${escapeHtml(z.id)}</td><td>${escapeHtml(z.repo)}</td><td>${escapeHtml(z.readyLabel)}</td><td>${escapeHtml(z.model)}</td><td>${escapeHtml(state.modes?.[z.id] ?? 'active')}</td></tr>`,
+        `<tr><td>${escapeHtml(z.id)}</td><td>${escapeHtml(z.repo)}</td><td>${escapeHtml(z.readyLabel)}</td><td>${escapeHtml(z.model)}</td><td>${escapeHtml(state.modes?.[z.id] ?? 'active')}</td><td><a href="/zones/${encodeURIComponent(z.id)}/github">GitHub</a></td></tr>`,
     )
     .join('');
 
@@ -443,7 +443,7 @@ export function renderHome(state: HomeState): string {
       usageSection(state.usage) +
       crewSection(state.crew) +
       sticksSection(state.sticks) +
-      `<h2>Drop zones</h2><table><tr><th>Id</th><th>Repo</th><th>Label</th><th>Model</th><th>Mode</th></tr>${zones}</table>` +
+      `<h2>Drop zones</h2><table><tr><th>Id</th><th>Repo</th><th>Label</th><th>Model</th><th>Mode</th><th>GitHub setup</th></tr>${zones}</table>` +
       `<h2>Work items</h2><table><tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>${items}</table>` +
       `<h2>Drops</h2><table><tr><th>Drop</th><th>Issue</th><th>Role</th><th>State</th><th>Elapsed</th><th>Gates</th></tr>${drops}</table>` +
       outboxSection(state.outbox) +
@@ -553,7 +553,9 @@ export function renderDoctor(
       (z) =>
         ` <button data-doctor="/api/control/doctor/drop" data-body="${escapeHtml(JSON.stringify({ zone: z.id }))}">Doctor drop: ${escapeHtml(z.id)}</button>`,
     )
-    .join('')}</p>`;
+    .join(
+      '',
+    )}</p>${zones.length > 0 ? `<p>GitHub setup (token links, the ruleset file, CODEOWNERS): ${zones.map((z) => `<a href="/zones/${encodeURIComponent(z.id)}/github">${escapeHtml(z.id)}</a>`).join(', ')}</p>` : ''}`;
   if (!run)
     return page(
       `<h2>Doctor</h2><p>No doctor run has finished yet. Run one here or with <code>jumpmaster ctl doctor</code>.</p>${controls}${DOCTOR_SCRIPT}`,

@@ -49,7 +49,19 @@ import {
 import type { ForgePair } from '../outbox.js';
 import { safeNext } from '../ui/auth-pages.js';
 import { credentialCreatedAt, shadowedCredentials, type TestDeps } from '../vault/credentials.js';
-import { type DetectForge, type Detection, detectRepo, REPO, zoneIdOf } from '../zones/detect.js';
+import {
+  type DetectForge,
+  type Detection,
+  detectFailure,
+  detectRepo,
+  NO_AUTHOR,
+  REPO,
+  zoneIdOf,
+} from '../zones/detect.js';
+
+export { detectFailure } from '../zones/detect.js';
+
+import { type GuidanceForge, registerGuidanceRoutes } from './github.js';
 import { registerSecretRoutes } from './secrets.js';
 
 export interface ControlDeps {
@@ -80,6 +92,8 @@ export interface ControlDeps {
   credentialForge?: TestDeps['forge'];
   /** The forge detection reads through, on the author token (default: GitHub, timed out). */
   detectForge?(repo: string, token: string): DetectForge;
+  /** The forge the GitHub guidance reads through; an empty token reads anonymously (tests). */
+  guidanceForge?(repo: string, token: string): GuidanceForge;
   /** The operator's log (scrubbed); the secret routes never write a value to it. */
   log?: (msg: string) => void;
 }
@@ -572,6 +586,11 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         tokenOnly,
         deps.detectForge ?? githubDetectForge,
       );
+      // GitHub guidance (Task 7): reads only, never a forge write.
+      registerGuidanceRoutes(scope, {
+        store: deps.config,
+        ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
+      });
       registerSecretRoutes(scope, {
         db,
         store: deps.config,
@@ -591,16 +610,6 @@ const githubDetectForge = (repo: string, token: string): DetectForge => {
   return new GitHubForge(owner, name, token, { requestTimeoutMs: DETECT_REQUEST_MS });
 };
 
-/** Why detection could not read the repository, by HTTP status: never GitHub's text or a token. */
-export function detectFailure(e: unknown, repo: string): string {
-  const status = (e as { status?: unknown }).status;
-  if (status === 401)
-    return 'GitHub rejected the author token (401): it is expired, revoked or mistyped';
-  if (status === 403 || status === 404)
-    return `the author token can't read ${repo} (HTTP ${status}): check the repository name, and that the token's repository access includes it with Contents and Metadata read`;
-  return `could not read ${repo} from GitHub (${typeof status === 'number' ? `HTTP ${status}` : 'no HTTP answer'}): check this host reaches api.github.com`;
-}
-
 const DetectBody = z.strictObject({ repo: z.string().max(200) });
 const ZoneAddBody = z.strictObject({
   zone: z.record(z.string(), z.unknown()),
@@ -610,9 +619,6 @@ const ZoneAddBody = z.strictObject({
   cancelTo: z.string().max(2048).optional(),
 });
 const NO_GATES = 'add at least one check (gate): every change must pass one';
-const NO_AUTHOR =
-  "set the GitHub author token first (the setup wizard's forge step, or jumpmaster ctl secrets set githubAuthorToken): detection reads the repository with it";
-
 const Resume = z.array(z.string().min(1)).max(100).optional();
 /** Where the confirmation page goes after a guarded change is applied: a path on this host. */
 const ReturnTo = z.string().max(2048).optional();

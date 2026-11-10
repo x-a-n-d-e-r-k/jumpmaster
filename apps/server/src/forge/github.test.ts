@@ -1054,6 +1054,7 @@ describe('GitHubForge doctor reads', () => {
         {
           private: true,
           default_branch: 'trunk',
+          owner: { login: 'octo-org', type: 'Organization' },
           permissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
         },
         {
@@ -1067,6 +1068,7 @@ describe('GitHubForge doctor reads', () => {
       permissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
       scopes: ['repo', 'workflow'],
       tokenExpiresAt: '2026-12-01T10:00:00.000Z',
+      ownerType: 'Organization',
     });
   });
 
@@ -1078,7 +1080,17 @@ describe('GitHubForge doctor reads', () => {
       permissions: { admin: false, maintain: false, push: false, triage: false, pull: false },
       scopes: null,
       tokenExpiresAt: null,
+      ownerType: 'User',
     });
+  });
+
+  test('ownerType reads the owner account, with no token at all for a forge without one', async () => {
+    nock(api, { badheaders: ['authorization'] })
+      .get('/users/octo-org')
+      .reply(200, { login: 'octo-org', type: 'Organization' });
+    expect(await new GitHubForge('octo-org', 'r', '').ownerType()).toBe('Organization');
+    nock(api).get('/users/octo').reply(200, { login: 'octo', type: 'User' });
+    expect(await new GitHubForge('octo', 'r', 'tok').ownerType()).toBe('User');
   });
 
   test('listLabels pages past 100', async () => {

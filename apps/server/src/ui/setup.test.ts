@@ -39,7 +39,14 @@ const NODE_FILES: Record<string, string> = {
 };
 
 /** A fresh db-mode install with a vault (as compose runs it), and an app over it. */
-async function world(o: { operator?: boolean; file?: Record<string, unknown> } = {}) {
+async function world(
+  o: {
+    operator?: boolean;
+    file?: Record<string, unknown>;
+    /** What GitHub says of the repository the guidance asks about. */
+    github?: { ownerType?: 'User' | 'Organization'; private?: boolean };
+  } = {},
+) {
   const db = openDb(tmpDbFile());
   const dir = mkdtempSync(join(tmpdir(), 'jm-wizard-'));
   const keyFile = join(dir, 'vault_key');
@@ -87,6 +94,29 @@ async function world(o: { operator?: boolean; file?: Record<string, unknown> } =
       }),
       listDir: async () => Object.keys(NODE_FILES),
       getFileAt: async (_ref: string, path: string) => NODE_FILES[path] ?? null,
+    }),
+    guidanceForge: (_repo: string, token: string) => ({
+      repoAccess: async () => {
+        // Without a token GitHub hides a private repository.
+        if (token === '' && o.github?.private)
+          throw Object.assign(new Error('Not Found'), { status: 404 });
+        return {
+          private: o.github?.private ?? false,
+          defaultBranch: 'main',
+          permissions: { admin: true, maintain: true, push: true, triage: true, pull: true },
+          scopes: null,
+          tokenExpiresAt: null,
+          ownerType: o.github?.ownerType ?? 'User',
+        };
+      },
+      ownerType: async () => o.github?.ownerType ?? 'User',
+      viewerLogin: async () => 'octo-owner',
+      listDir: async (_ref: string, path: string) =>
+        path === '.github/workflows' ? ['ci.yml'] : Object.keys(NODE_FILES),
+      getFileAt: async (_ref: string, path: string) =>
+        path === '.github/workflows/ci.yml'
+          ? 'on: pull_request\njobs:\n  test:\n    runs-on: x\n'
+          : (NODE_FILES[path] ?? null),
     }),
   });
   app = a;
@@ -488,5 +518,77 @@ describe('the wizard, round 2', () => {
     expect(page2.body).toContain('<a href="/">Cancel</a>');
     expect(page2.body).not.toContain('part of setting up');
     expect(page2.body).not.toContain('evil.example');
+  });
+});
+
+describe('GitHub guidance in the wizard (Task 7)', () => {
+  test('the forge step shows the recommendation before the fields and the project step shows the ruleset file and CODEOWNERS', async () => {
+    const w = await world({ operator: true });
+    // Before a repository is named: the question comes before the token fields.
+    const blank = (await w.get('/setup/forge')).body;
+    expect(blank.indexOf('id="recommend-form"')).toBeGreaterThan(-1);
+    expect(blank.indexOf('id="recommend-form"')).toBeLessThan(
+      blank.indexOf('name="githubAuthorToken"'),
+    );
+    // A personal public repository, before any token: starter, read without a token.
+    const forge = (await w.get('/setup/forge?repo=octo%2Fdemo')).body;
+    const rec = forge.indexOf('id="recommendation"');
+    expect(rec).toBeGreaterThan(-1);
+    expect(rec).toBeLessThan(forge.indexOf('id="tokens"'));
+    expect(forge.indexOf('id="tokens"')).toBeLessThan(forge.indexOf('name="githubAuthorToken"'));
+    expect(forge).toContain('Starter: your own account as the author');
+    expect(forge).toContain(STARTER_WARNING.replaceAll("'", '&#39;').replaceAll('"', '&quot;'));
+    expect(forge).toContain('href="https://github.com/settings/personal-access-tokens/new?');
+    expect(forge).toContain(
+      'check the Resource owner field: for an organization it may not pre-fill',
+    );
+    // The recommendation chooses the starter box until the operator chooses otherwise.
+    expect(forge).toMatch(/name="starter" value="1" checked/);
+    // The checklist, once the author token resolves a login.
+    expect(forge).not.toContain('id="checklist"');
+    expect((await w.call('POST', '/api/control/sudo', { passphrase: PASS })).statusCode).toBe(200);
+    expect(
+      (await w.call('PUT', '/api/control/secrets/githubAuthorToken', { value: AUTHOR })).statusCode,
+    ).toBe(200);
+    const after = (await w.get('/setup/forge?repo=octo%2Fdemo')).body;
+    expect(after).toContain('id="checklist"');
+    expect(after).toContain('invite octo-owner with the Write role');
+    expect(after).not.toContain(AUTHOR);
+
+    // The project step loads the ruleset and CODEOWNERS for the repository it detected.
+    const project = (await w.get('/setup/project')).body;
+    expect(project).toContain('id="guidance"');
+    expect(project).toContain("'/setup/project/github?'");
+    const frag = await w.get(
+      '/setup/project/github?repo=octo%2Fdemo&identity=two-bot&reviewer=alice',
+    );
+    expect(frag.statusCode, frag.body).toBe(200);
+    expect(frag.body).toContain('id="ruleset"');
+    expect(frag.body).toContain('Import a ruleset');
+    expect(frag.body).toContain('&quot;required_approving_review_count&quot;: 1');
+    expect(frag.body).toContain('id="codeowners"');
+    expect(frag.body).toContain('.github/** @alice');
+    expect(frag.body).not.toContain(AUTHOR);
+    expect((await w.get('/setup/project/github?repo=octo%2Fde%20mo')).statusCode).toBe(400);
+  });
+
+  test('a private repository asks about the plan first, and a free plan stops before any token', async () => {
+    const w = await world({ github: { ownerType: 'Organization', private: true } });
+    const ask = (await w.get('/setup/forge?repo=octo-org%2Fsecret')).body;
+    expect(ask).toContain('data-ask');
+    expect(ask).toContain('name="paidPlan"');
+    expect(ask).toContain('Two bot accounts');
+    const stop = (await w.get('/setup/forge?repo=octo-org%2Fsecret&paidPlan=no')).body;
+    expect(stop).toContain('data-stop');
+    expect(stop).toContain(
+      'need a paid plan: make it public or upgrade before any token is created',
+    );
+    // Stopped: no token links to follow yet.
+    expect(stop).not.toContain('id="tokens"');
+    const paid = (await w.get('/setup/forge?repo=octo-org%2Fsecret&paidPlan=yes')).body;
+    expect(paid).not.toContain('data-stop');
+    expect(paid).toContain('id="tokens"');
+    // The read token joins the links for a private repository.
+    expect(paid).toContain('The read token');
   });
 });
