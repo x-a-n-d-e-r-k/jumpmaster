@@ -35,7 +35,7 @@ import {
 } from '../db/repo.js';
 import { type DoctorDeps, type DoctorEnv, doctorDropWait } from '../doctor/checks.js';
 import { DoctorBusyError, latestDoctorRun, processEnv, runDoctor } from '../doctor/run.js';
-import type { Forge } from '../forge/github.js';
+import { type Forge, GitHubForge } from '../forge/github.js';
 import { fileIntakeIssue, GoalStubSchema, IntakeIssueSchema, renderGoalStub } from '../intake.js';
 import { engageKill } from '../leases.js';
 import {
@@ -48,6 +48,7 @@ import {
 import type { ForgePair } from '../outbox.js';
 import { safeNext } from '../ui/auth-pages.js';
 import { credentialCreatedAt, shadowedCredentials, type TestDeps } from '../vault/credentials.js';
+import { type DetectForge, type Detection, detectRepo, REPO, zoneIdOf } from '../zones/detect.js';
 import { registerSecretRoutes } from './secrets.js';
 
 export interface ControlDeps {
@@ -76,6 +77,8 @@ export interface ControlDeps {
   backoff?: Backoff;
   /** A forge on a token, for the credential tests on entry (default: GitHub with a deadline). */
   credentialForge?: TestDeps['forge'];
+  /** The forge detection reads through, on the author token (default: GitHub, timed out). */
+  detectForge?(repo: string, token: string): DetectForge;
   /** The operator's log (scrubbed); the secret routes never write a value to it. */
   log?: (msg: string) => void;
 }
@@ -557,7 +560,13 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
     });
 
     if (deps.config instanceof ConfigStore) {
-      registerConfigRoutes(scope, deps.config, audit, tokenOnly);
+      registerConfigRoutes(
+        scope,
+        deps.config,
+        audit,
+        tokenOnly,
+        deps.detectForge ?? githubDetectForge,
+      );
       registerSecretRoutes(scope, {
         db,
         store: deps.config,
@@ -570,6 +579,32 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
 }
 
 /** Zone ids with history to resume (`ctl zones add --resume`, T11). */
+/** How long one detection request on GitHub may take. */
+const DETECT_REQUEST_MS = 30_000;
+const githubDetectForge = (repo: string, token: string): DetectForge => {
+  const [owner = '', name = ''] = repo.split('/');
+  return new GitHubForge(owner, name, token, { requestTimeoutMs: DETECT_REQUEST_MS });
+};
+
+/** Why detection could not read the repository, by HTTP status: never GitHub's text or a token. */
+export function detectFailure(e: unknown, repo: string): string {
+  const status = (e as { status?: unknown }).status;
+  if (status === 401)
+    return 'GitHub rejected the author token (401): it is expired, revoked or mistyped';
+  if (status === 403 || status === 404)
+    return `the author token can't read ${repo} (HTTP ${status}): check the repository name, and that the token's repository access includes it with Contents and Metadata read`;
+  return `could not read ${repo} from GitHub (${typeof status === 'number' ? `HTTP ${status}` : 'no HTTP answer'}): check this host reaches api.github.com`;
+}
+
+const DetectBody = z.strictObject({ repo: z.string().max(200) });
+const ZoneAddBody = z.strictObject({
+  zone: z.record(z.string(), z.unknown()),
+  resume: z.boolean().optional(),
+  returnTo: z.string().max(2048).optional(),
+});
+const NO_AUTHOR =
+  "set the GitHub author token first (the setup wizard's forge step, or jumpmaster ctl secrets set githubAuthorToken): detection reads the repository with it";
+
 const Resume = z.array(z.string().min(1)).max(100).optional();
 /** Where the confirmation page goes after a guarded change is applied: a path on this host. */
 const ReturnTo = z.string().max(2048).optional();
@@ -638,6 +673,7 @@ function registerConfigRoutes(
   store: ConfigStore,
   audit: (req: FastifyRequest, action: string, detail: AuditDetail, target?: string) => void,
   tokenOnly: (req: FastifyRequest, reply: FastifyReply) => boolean,
+  detectForge: (repo: string, token: string) => DetectForge,
 ): void {
   // The guard sets a principal on every control route or answers 401; never assume one.
   const principalOf = (req: FastifyRequest): Principal => {
@@ -653,6 +689,7 @@ function registerConfigRoutes(
     action: string,
     r: ApplyResult,
     extra: AuditDetail = {},
+    target?: string,
   ) => {
     if (!r.ok) {
       if ('conflict' in r) return reply.code(409).send({ conflict: r.conflict });
@@ -679,7 +716,7 @@ function registerConfigRoutes(
       if ('confirmation' in r) return reply.code(409).send({ confirmation: r.confirmation });
       return reply.code(400).send({ issues: r.issues });
     }
-    audit(req, action, { ...appliedDetail(r), ...extra });
+    audit(req, action, { ...appliedDetail(r), ...extra }, target);
     return {
       revision: r.revision,
       changed: r.changed,
@@ -690,6 +727,103 @@ function registerConfigRoutes(
   };
   const invalid = (reply: FastifyReply, shape: string) =>
     reply.code(400).send({ issues: [{ path: '', message: `invalid body: ${shape}` }] });
+
+  /** Detection on the author token, or the reason it cannot run (409 no token, 502 GitHub). */
+  const detect = async (
+    req: FastifyRequest,
+    reply: FastifyReply,
+    repo: string,
+    preset?: string,
+  ): Promise<Detection | undefined> => {
+    const token = (req.jmConfig ?? store.current()).secrets.githubAuthorToken;
+    if (!token) {
+      void reply.code(409).send({ error: NO_AUTHOR });
+      return undefined;
+    }
+    try {
+      return await detectRepo(
+        detectForge(repo, token),
+        repo,
+        preset ? { preset: preset as Detection['candidates'][number] } : {},
+      );
+    } catch (e) {
+      void reply.code(502).send({ error: detectFailure(e, repo) });
+      return undefined;
+    }
+  };
+
+  // Detection for the project step and `ctl detect`: GET-only reads, after the REPO pattern. A read
+  // changes nothing, so it is not audited.
+  scope.post('/api/control/detect', async (req, reply) => {
+    const body = DetectBody.safeParse(req.body ?? {});
+    if (!body.success || !REPO.test(body.data.repo))
+      return reply.code(400).send({ error: 'the repository must be owner/name' });
+    const d = await detect(req, reply, body.data.repo);
+    return d ?? reply;
+  });
+
+  // Adds one zone through the apply path, as the wizard's project step, `ctl zones add` and (later)
+  // the zones page do: classified against the add baseline, so a guarded add from a session goes
+  // to the confirmation page with `returnTo` kept. Without gates the server detects them.
+  scope.post('/api/control/zones', async (req, reply) => {
+    const body = ZoneAddBody.safeParse(req.body ?? {});
+    if (!body.success)
+      return invalid(reply, '{"zone": {"repo": "owner/name", …}, "resume"?: true}');
+    const { zone, resume, returnTo } = body.data;
+    const repo = zone.repo;
+    if (typeof repo !== 'string' || !REPO.test(repo))
+      return reply
+        .code(400)
+        .send({ issues: [{ path: 'zone.repo', message: 'the repository must be owner/name' }] });
+    const id = typeof zone.id === 'string' && zone.id !== '' ? zone.id : zoneIdOf(repo);
+    const config = req.jmConfig ?? store.current();
+    const sameRepo = config.dropZones.find((z) => z.repo.toLowerCase() === repo.toLowerCase());
+    if (sameRepo)
+      return reply.code(409).send({
+        error: `${repo} is already zone ${sameRepo.id}: a repository has one zone`,
+      });
+    if (config.dropZones.some((z) => z.id === id))
+      return reply.code(409).send({ error: `zone ${id} exists: pick another id` });
+    const add: Record<string, unknown> = { ...zone, id };
+    // The add baseline (and the generated install) starts in monitor, never the schema's off.
+    if (add.egress === undefined) add.egress = { mode: 'monitor' };
+    if (add.gates === undefined) {
+      const d = await detect(
+        req,
+        reply,
+        repo,
+        typeof add.preset === 'string' ? add.preset : undefined,
+      );
+      if (!d) return reply;
+      if (!d.preset && add.preset === undefined)
+        return reply.code(400).send({
+          issues: [
+            {
+              path: 'zone.preset',
+              message: `can't choose a stack preset for ${repo}: ${d.problems.join('; ')}; choose one${d.candidates.length ? ` of ${d.candidates.join(', ')}` : ''}`,
+            },
+          ],
+        });
+      if (add.preset === undefined) add.preset = d.preset;
+      add.gates = d.gates;
+      if (d.visibility === 'private' && add.reviewReadToken === undefined)
+        add.reviewReadToken = true;
+    }
+    const doc = store.document();
+    const zones = Array.isArray(doc.dropZones) ? doc.dropZones : [];
+    const r = store.apply(
+      { ...doc, dropZones: [...zones, add] },
+      {
+        via: viaOf(req),
+        principal: principalOf(req),
+        expectRevision: store.revision(),
+        ...(resume ? { resume: [id] } : {}),
+        ...returnToOf(returnTo),
+      },
+    );
+    const out = answer(req, reply, 'zone.add', r, {}, id);
+    return r.ok ? { ...(out as object), zone: id } : out;
+  });
 
   scope.get('/api/control/config', async () => {
     const b = store.boot();

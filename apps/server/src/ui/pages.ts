@@ -28,6 +28,8 @@ export interface RateLimitSeen extends StoredEvent {
 }
 
 export interface HomeState {
+  /** The setup wizard's frame on home, and the "Add a project" link. */
+  setup?: { active: boolean; addProject: boolean };
   zones: DropZoneConfig[];
   /** Each zone's current mode; absent means active. */
   modes?: Record<string, string>;
@@ -426,8 +428,16 @@ export function renderHome(state: HomeState): string {
     ? `<p>Drop ${escapeHtml(state.lastRateLimit.dropId)} at ${escapeHtml(state.lastRateLimit.ts)}: <code>${escapeHtml(JSON.stringify(state.lastRateLimit.data))}</code></p>`
     : '<p>None seen.</p>';
 
+  const setupFrame = state.setup?.active
+    ? `<div class="warn setup-frame"><p><strong>Finish setting up Jumpmaster.</strong> <a href="/setup/next">Continue where you left off</a>: connect Claude and GitHub, check the runner, add a project and run the doctor.</p><form method="post" action="/setup/dismiss"><button>Dismiss</button></form></div>`
+    : '';
+  const addProject = state.setup?.addProject
+    ? '<p><a href="/setup/project">Add a project</a></p>'
+    : '';
   return page(
-    starterBanner +
+    setupFrame +
+      addProject +
+      starterBanner +
       killSection(state.killed ?? false) +
       (state.briefings ? waitingOnYou(state.briefings) : '') +
       usageSection(state.usage) +

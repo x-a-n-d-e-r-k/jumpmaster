@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1651,5 +1651,238 @@ describe('secret routes (Task 4)', () => {
     });
     expect(ok.statusCode).toBe(200);
     expect(w.store.resolved().githubReadToken.source).toBe('missing');
+  });
+});
+
+describe('detect and zone add routes', () => {
+  const AUTHOR = 'github_pat_ZONEAUTHORDUMMY0123456789';
+  const zenv = {
+    JM_CLAUDE_TOKEN: 'sk-ant-oat01-ZONECLAUDEDUMMY0123456789',
+    JM_GITHUB_AUTHOR_TOKEN: AUTHOR,
+    JM_GITHUB_REVIEWER_TOKEN: 'github_pat_ZONEREVIEWERDUMMY0123456789',
+    JM_JOIN_TOKEN: 'join-secret-value-4',
+    JM_OPERATOR_TOKEN: TOKEN,
+    JM_DEV_IMAGES: '1',
+  };
+  const NODE_FILES: Record<string, string> = {
+    'package.json': JSON.stringify({ scripts: { test: 'vitest run' } }),
+    'package-lock.json': '{}',
+  };
+
+  function zoneApp(o: { env?: Record<string, string>; failWith?: number; admin?: boolean } = {}) {
+    const db = openDb(tmpDbFile());
+    const dir = mkdtempSync(join(tmpdir(), 'jm-zones-'));
+    const store = ConfigStore.open({
+      db,
+      boot: loadBoot({}, undefined),
+      env: o.env ?? zenv,
+      now: () => t0,
+      imageLockPath: join(dir, 'no-lock.json'),
+    });
+    const seen: { repo?: string; token?: string; calls: string[] } = { calls: [] };
+    app = controlApp({
+      db,
+      config: store,
+      now: () => t0,
+      detectForge: (repo, token) => {
+        seen.repo = repo;
+        seen.token = token;
+        return {
+          async repoAccess() {
+            seen.calls.push('repoAccess');
+            if (o.failWith)
+              throw Object.assign(new Error('Bad credentials'), { status: o.failWith });
+            return {
+              private: false,
+              defaultBranch: 'main',
+              permissions: {
+                admin: o.admin ?? false,
+                maintain: false,
+                push: true,
+                triage: true,
+                pull: true,
+              },
+              scopes: null,
+              tokenExpiresAt: null,
+            };
+          },
+          async listDir() {
+            seen.calls.push('listDir');
+            return Object.keys(NODE_FILES);
+          },
+          async getFileAt(_ref: string, path: string) {
+            seen.calls.push(`get ${path}`);
+            return NODE_FILES[path] ?? null;
+          },
+        };
+      },
+    });
+    const session = operatorSession(db);
+    return {
+      db,
+      store,
+      seen,
+      sessionId: session.id,
+      asSession: { ...session.headers, host: HOST },
+    };
+  }
+  const post = (url: string, payload: unknown, headers: Record<string, string> = auth) =>
+    (app as FastifyInstance).inject({ method: 'POST', url, headers, payload: payload as object });
+
+  test('detect runs after the REPO regexp with the author token and returns the proposal, never the token', async () => {
+    const { seen } = zoneApp();
+    const r = await post('/api/control/detect', { repo: 'octo/demo' });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toMatchObject({
+      visibility: 'public',
+      defaultBranch: 'main',
+      preset: 'node',
+      admin: false,
+    });
+    expect(seen).toMatchObject({ repo: 'octo/demo', token: AUTHOR });
+    expect(r.body).not.toContain(AUTHOR);
+    const bad = zoneApp();
+    const refused = await post('/api/control/detect', { repo: 'octo/de mo' });
+    expect(refused.statusCode).toBe(400);
+    expect(bad.seen.calls).toEqual([]);
+  });
+
+  test('detect says why GitHub refused, by status, and without a token', async () => {
+    zoneApp({ failWith: 401 });
+    const r = await post('/api/control/detect', { repo: 'octo/demo' });
+    expect(r.statusCode).toBe(502);
+    expect(r.json().error).toMatch(/GitHub rejected the author token \(401\)/);
+    expect(r.body).not.toContain(AUTHOR);
+  });
+
+  test('detect without an author token says to set it first', async () => {
+    const { JM_GITHUB_AUTHOR_TOKEN: _a, ...noAuthor } = zenv;
+    const { seen } = zoneApp({ env: noAuthor });
+    const r = await post('/api/control/detect', { repo: 'octo/demo' });
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).toMatch(/author token/);
+    expect(seen.calls).toEqual([]);
+  });
+
+  test('zones add by the token: id from the repository name, detected gates and preset, egress monitor', async () => {
+    const { store, db } = zoneApp();
+    const r = await post('/api/control/zones', { zone: { repo: 'Octo/My.Demo' } });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json()).toMatchObject({ zone: 'my-demo', revision: 2 });
+    const z = store.current().dropZones[0];
+    expect(z).toMatchObject({
+      id: 'my-demo',
+      repo: 'Octo/My.Demo',
+      preset: 'node',
+      egress: { mode: 'monitor', allow: [] },
+    });
+    expect(z?.gates.map((g) => g.name)).toContain('test');
+    expect(listAudit(db)[0]).toMatchObject({ action: 'zone.add', target: 'my-demo', via: 'token' });
+    // An explicit egress and given gates are kept as sent; nothing is detected then.
+    const { store: s2, seen } = zoneApp();
+    const r2 = await post('/api/control/zones', {
+      zone: {
+        repo: 'octo/other',
+        id: 'x',
+        preset: 'node',
+        gates: [{ name: 'unit', run: 'make test' }],
+        egress: { mode: 'off' },
+      },
+    });
+    expect(r2.statusCode, r2.body).toBe(200);
+    expect(s2.current().dropZones[0]).toMatchObject({ id: 'x', egress: { mode: 'off' } });
+    expect(seen.calls).toEqual([]);
+  });
+
+  test('adding a zone whose repo is already in another zone is refused, and an id with history is refused without resume', async () => {
+    const { db, store } = zoneApp();
+    expect((await post('/api/control/zones', { zone: { repo: 'octo/demo' } })).statusCode).toBe(
+      200,
+    );
+    const again = await post('/api/control/zones', { zone: { repo: 'OCTO/demo', id: 'two' } });
+    expect(again.statusCode).toBe(409);
+    expect(again.json().error).toMatch(/octo\/demo is already zone demo/i);
+    const sameId = await post('/api/control/zones', {
+      zone: { repo: 'octo/elsewhere', id: 'demo' },
+    });
+    expect(sameId.statusCode).toBe(409);
+    expect(sameId.json().error).toMatch(/zone demo exists/);
+    // History left by a zone that was removed: refused without resume, kept with it.
+    upsertDropZone(db, { id: 'old', repo: 'octo/old', defaultBranch: 'main', configJson: '{}' });
+    upsertWorkItem(db, {
+      dropZoneId: 'old',
+      issueNumber: 1,
+      title: 't',
+      body: 'b',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    const hist = await post('/api/control/zones', { zone: { repo: 'octo/old', id: 'old' } });
+    expect(hist.statusCode).toBe(400);
+    expect(hist.json().issues[0].message).toBe(
+      'this zone has history: pick another id, or resume it',
+    );
+    const resumed = await post('/api/control/zones', {
+      zone: { repo: 'octo/old', id: 'old' },
+      resume: true,
+    });
+    expect(resumed.statusCode, resumed.body).toBe(200);
+    expect(store.current().dropZones.map((z) => z.id)).toEqual(['demo', 'old']);
+  });
+
+  test('from a session every add goes to the confirmation page (a new project is guarded), with its consequences and returnTo kept', async () => {
+    const { store, asSession, sessionId } = zoneApp({ admin: true });
+    const plain = await post(
+      '/api/control/zones',
+      { zone: { repo: 'octo/demo' }, returnTo: '/setup/doctor' },
+      asSession,
+    );
+    expect(plain.statusCode, plain.body).toBe(409);
+    expect(plain.json().guarded.map((g: { path: string }) => g.path)).toEqual([
+      'dropZones[demo].repo',
+    ]);
+    const r = await post(
+      '/api/control/zones',
+      {
+        zone: {
+          repo: 'octo/starter',
+          identity: 'starter',
+          authorMayBeAdmin: true,
+          services: [{ name: 'db', image: 'postgres@sha256:'.padEnd(80, 'a'), port: 5432 }],
+        },
+        returnTo: '/setup/doctor',
+      },
+      asSession,
+    );
+    expect(r.statusCode, r.body).toBe(409);
+    const body = r.json();
+    expect(body).toMatchObject({
+      needsConfirmation: true,
+      confirm: `/config/confirm/${body.pendingId}`,
+    });
+    // The pending change keeps where the confirm page goes next (setup.test follows it there).
+    const sessionHash = createHash('sha256').update(sessionId).digest('hex');
+    expect(store.confirmations.pending(body.pendingId, sessionHash)?.returnTo).toBe(
+      '/setup/doctor',
+    );
+    const paths = body.guarded.map((g: { path: string }) => g.path);
+    expect(paths).toContain('dropZones[starter].identity');
+    expect(paths).toContain('dropZones[starter].services');
+    expect(store.current().dropZones).toEqual([]);
+  });
+
+  test('zones add refuses a bad repository name, an unknown key and a boot setting in the zone', async () => {
+    zoneApp();
+    expect((await post('/api/control/zones', { zone: { repo: 'nope' } })).statusCode).toBe(400);
+    expect((await post('/api/control/zones', { zone: {} })).statusCode).toBe(400);
+    expect(
+      (
+        await post('/api/control/zones', {
+          zone: { repo: 'octo/demo', gates: [], readylabel: 'x' },
+        })
+      ).statusCode,
+    ).toBe(400);
   });
 });

@@ -1,5 +1,5 @@
 import Fastify, { type FastifyInstance } from 'fastify';
-import { registerControlRoutes, stderrSetupMode } from './api/control.js';
+import { type ControlDeps, registerControlRoutes, stderrSetupMode } from './api/control.js';
 import { registerStickRoutes, type StickRouteDeps } from './api/sticks.js';
 import { getArtifact, listArtifacts, readArtifact } from './artifacts.js';
 import { Backoff } from './auth/backoff.js';
@@ -53,6 +53,7 @@ import {
   renderObservations,
   type StickLine,
 } from './ui/pages.js';
+import { registerSetupPages, wizardActive } from './ui/setup.js';
 import { dispatchGate } from './usage.js';
 
 const ATTEMPT_KEYS: AttemptKey[] = [
@@ -96,6 +97,10 @@ export function createApp(
     setup?: SetupMode;
     /** Per-source backoff shared by the setup code, the login and sudo. */
     backoff?: Backoff;
+    /** The forge detection reads through (tests); default GitHub on the author token. */
+    detectForge?: ControlDeps['detectForge'];
+    /** The forge a credential test reads through (tests); default GitHub. */
+    credentialForge?: ControlDeps['credentialForge'];
   },
 ): FastifyInstance {
   const app = Fastify({ logger: false });
@@ -118,8 +123,11 @@ export function createApp(
   registerControlRoutes(app, { ...deps, setup, backoff });
   registerMcpRoute(app, deps);
   // The confirmation page for a session's guarded config change (§7.5): with the store only.
-  if (deps.config instanceof ConfigStore)
+  if (deps.config instanceof ConfigStore) {
     registerConfirmPages(app, { db: deps.db, store: deps.config, now: deps.now, backoff });
+    // The setup wizard: thin frames over the secret, zone, config and doctor routes.
+    registerSetupPages(app, { db: deps.db, store: deps.config, now: deps.now });
+  }
 
   app.get('/', async (req, reply) => {
     const { db, now } = deps;
@@ -140,6 +148,12 @@ export function createApp(
       });
     }
     const html = renderHome({
+      setup: {
+        // The frame shows until a zone exists or it is dismissed (a store install only).
+        active: deps.config instanceof ConfigStore && wizardActive(db, config),
+        // "Add a project" lives at the wizard's step until the zones page takes the link over.
+        addProject: deps.config instanceof ConfigStore,
+      },
       zones: config.dropZones,
       killed: isKilled(db),
       modes: Object.fromEntries(config.dropZones.map((z) => [z.id, getZoneMode(db, z.id, z.mode)])),

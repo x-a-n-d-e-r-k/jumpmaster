@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { loadConfig, parseEditable, splitConfigFile } from './config.js';
 import { createSecretOnce, type InitDeps, type InitForge, runInit } from './init.js';
+import { detectRepo, REPO, zoneIdOf } from './zones/detect.js';
 
 const AUTHOR = 'github_pat_INITAUTHORDUMMY0123456789';
 const CLASSIC = 'ghp_INITCLASSICDUMMY0123456789';
@@ -132,6 +133,45 @@ function serverEnv(dir: string, opts: { reviewer?: boolean; read?: boolean } = {
     JM_OPERATOR_TOKEN_FILE: s('operator_token'),
   };
 }
+
+describe('init and the shared detection', () => {
+  test('init uses the shared detection and its output is unchanged', async () => {
+    const dir = installDir();
+    const repo: Repo = { private: true, files: NODE_REPO.files };
+    // What the wizard and `ctl zones add` would propose for the same repository.
+    const proposal = await detectRepo(fakeForge(repo)('octo/demo', AUTHOR), 'octo/demo');
+    const r = await run(dir, ['--repo', 'octo/demo'], {}, repo);
+    expect(r.code, r.all).toBe(0);
+    const zone = configOf(dir).dropZones[0];
+    expect(zone).toEqual({
+      id: zoneIdOf('octo/demo'),
+      repo: 'octo/demo',
+      preset: proposal.preset,
+      gates: proposal.gates,
+      egress: { mode: 'monitor' },
+      identity: 'two-bot',
+      ciRequired: true,
+      reviewReadToken: true,
+      crew: { enabled: false },
+    });
+    // The lines init has always printed.
+    expect(r.out).toContain(
+      'wrote config/jumpmaster.config.json: zone demo for octo/demo, preset node',
+    );
+    expect(r.out).toContain(`  evidence: ${proposal.evidence.join(', ')}`);
+    expect(r.out).toContain('  the repository is private: reviewReadToken is on');
+    // A name that fails the shared pattern is a usage error, before GitHub is read.
+    const bad = await run(installDir(), ['--repo', 'octo/de mo']);
+    expect(bad.code).toBe(2);
+    expect(bad.err).toContain('--repo must be owner/name');
+  });
+
+  test('init and detection share the one REPO pattern and the one zone id rule', async () => {
+    const init = await import('./init.js');
+    expect(init.REPO).toBe(REPO);
+    expect(init.zoneIdOf).toBe(zoneIdOf);
+  });
+});
 
 describe('jumpmaster init', () => {
   test('init writes a config loadConfig accepts with the generated secret files', async () => {

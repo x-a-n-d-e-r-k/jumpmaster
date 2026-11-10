@@ -35,8 +35,9 @@ import { runBootstrap } from './bootstrap.js';
 import { IDENTITIES, type Identity, STARTER_WARNING } from './config.js';
 import { DOC, identityMap } from './doctor/checks.js';
 import type { Forge } from './forge/github.js';
-import { DETECT_FILES, type Detection, detectAs, detectPreset } from './presets.js';
+import { type Detection, detectAs } from './presets.js';
 import { readSecret } from './secrets.js';
+import { detectRepo, REPO, zoneIdOf } from './zones/detect.js';
 
 export type InitForge = Pick<Forge, 'repoAccess' | 'listDir' | 'getFileAt'>;
 
@@ -62,7 +63,10 @@ const USAGE = [
   '       jumpmaster init --secrets-only [--allow-root]   (the same as jumpmaster bootstrap)',
 ].join('\n');
 const PLANS = ['pro', 'max', 'team_standard', 'team_premium', 'enterprise'] as const;
-const REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
+
+/** Shared with the wizard's detection: the same pattern, the same zone id rule. */
+export { REPO, zoneIdOf };
+
 const CONFIG = 'config/jumpmaster.config.json';
 
 type Args = {
@@ -177,27 +181,6 @@ function parseArgs(argv: string[]): Args {
 const errno = (e: unknown): string | undefined =>
   e && typeof e === 'object' && 'code' in e ? String((e as { code: unknown }).code) : undefined;
 
-/** A zone id from the repository name: lower case, letters, digits and dashes. */
-const zoneIdOf = (repo: string): string =>
-  (repo.split('/')[1] ?? 'main')
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/^-+|-+$/g, '') || 'main';
-
-/** The repository's root build files, as detection reads them. */
-async function rootFiles(forge: InitForge, branch: string): Promise<Record<string, string | null>> {
-  const names = new Set((await forge.listDir(branch, '')) ?? []);
-  const wanted = [
-    ...DETECT_FILES.filter((f) => names.has(f)),
-    ...[...names].filter(
-      (n) => /^requirements[\w.-]*\.txt$/.test(n) && !DETECT_FILES.includes(n as never),
-    ),
-  ];
-  const files: Record<string, string | null> = {};
-  for (const f of wanted) files[f] = await forge.getFileAt(branch, f);
-  return files;
-}
-
 /** Writes a file through a temporary name, so a crash never leaves half a config. */
 function writeAtomic(path: string, text: string, mode: number): void {
   const tmp = `${path}.init-${process.pid}`;
@@ -309,21 +292,30 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
       `starter mode requires a fine-grained author token (github_pat_…), limited to ${args.repo}, with no Workflows or Administration permission; secrets/github_author_token holds another kind (${DOC}#starter-mode)`,
     );
 
-  // The repository: visibility and its root build files, on the default branch.
+  // The repository: visibility and its root build files, on the default branch (the detection the
+  // wizard and `ctl zones add` share).
   let access: { private: boolean; defaultBranch: string; permissions: { admin: boolean } };
-  let files: Record<string, string | null>;
+  let found: Detection;
   if (args.offline) {
     access = {
       private: args.privateRepo,
       defaultBranch: '(not read)',
       permissions: { admin: false },
     };
-    files = {};
+    found = detectAs(args.preset as Preset, {});
   } else
     try {
-      const forge = deps.forge(args.repo, authorToken);
-      access = await forge.repoAccess();
-      files = await rootFiles(forge, access.defaultBranch);
+      const d = await detectRepo(
+        deps.forge(args.repo, authorToken),
+        args.repo,
+        args.preset ? { preset: args.preset } : {},
+      );
+      access = {
+        private: d.visibility === 'private',
+        defaultBranch: d.defaultBranch,
+        permissions: { admin: d.admin },
+      };
+      found = { ...d, preset: d.preset ?? null };
     } catch (e) {
       const status = (e as { status?: unknown }).status;
       const why =
@@ -334,16 +326,11 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
             : `could not read ${args.repo} from GitHub (${typeof status === 'number' ? `HTTP ${status}` : 'no HTTP answer'}): check this host reaches api.github.com`;
       return fail(`${why} (${DOC}#tokens)`);
     }
-  let found: Detection;
-  if (args.preset) found = detectAs(args.preset, files);
-  else {
-    found = detectPreset(files);
-    if (found.preset === null)
-      return fail(
-        `can't choose a stack preset for ${args.repo} on ${access.defaultBranch}: ${found.problems.join('; ')}. Rerun with --preset ${found.candidates.length ? found.candidates.join('|') : PRESETS.join('|')} (${DOC}#presets)`,
-        2,
-      );
-  }
+  if (found.preset === null)
+    return fail(
+      `can't choose a stack preset for ${args.repo} on ${access.defaultBranch}: ${found.problems.join('; ')}. Rerun with --preset ${found.candidates.length ? found.candidates.join('|') : PRESETS.join('|')} (${DOC}#presets)`,
+      2,
+    );
   const preset = found.preset as Preset;
 
   // Write the config (bootstrap wrote the generated secrets above).

@@ -38,10 +38,52 @@ function configRequest(args: string[]): CtlRequest | null {
   return null;
 }
 
+const REPO_ARG = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
+const EGRESS = ['off', 'monitor', 'enforce'];
+
+/**
+ * `ctl zones add <owner/name> [--id <id>] [--preset <p>] [--identity starter] [--egress <mode>]
+ * [--resume]`: the same route as the wizard's project step. `--egress` defaults to monitor, the
+ * wizard's and the add baseline's, never the schema's off. Gates are detected by the server.
+ */
+function zonesAddRequest(args: string[]): CtlRequest | null {
+  const [, , repo, ...rest] = args;
+  if (!repo || !REPO_ARG.test(repo)) return null;
+  const zone: Record<string, unknown> = { repo };
+  let egress = 'monitor';
+  let resume = false;
+  for (let i = 0; i < rest.length; i++) {
+    const flag = rest[i];
+    if (flag === '--resume') {
+      resume = true;
+      continue;
+    }
+    const value = rest[i + 1];
+    if (value === undefined || value.startsWith('--')) return null;
+    i += 1;
+    if (flag === '--id') zone.id = value;
+    else if (flag === '--preset') zone.preset = value;
+    else if (flag === '--identity') {
+      if (value !== 'starter' && value !== 'two-bot') return null;
+      zone.identity = value;
+    } else if (flag === '--egress') {
+      if (!EGRESS.includes(value)) return null;
+      egress = value;
+    } else return null;
+  }
+  zone.egress = { mode: egress };
+  return { path: '/api/control/zones', body: { zone, ...(resume ? { resume: true } : {}) } };
+}
+
 /** The control request for a command line, or null when it isn't one. */
 export function ctlRequest(args: string[]): CtlRequest | null {
   const [command, zone] = args;
   if (command === 'config') return configRequest(args);
+  if (command === 'detect')
+    return args.length === 2 && zone && REPO_ARG.test(zone)
+      ? { path: '/api/control/detect', body: { repo: zone } }
+      : null;
+  if (command === 'zones') return zone === 'add' ? zonesAddRequest(args) : null;
   if (command === 'briefings') return { path: '/api/control/briefings', method: 'GET' };
   // Setup and the passphrase. The passphrase itself comes from stdin, never argv.
   if (command === 'setup-code')
@@ -135,7 +177,7 @@ const CONFIG_USAGE =
 export const SECRETS_USAGE =
   'ctl secrets list | ctl secrets set <name> [--from-file <path>] [--created YYYY-MM-DD] (the value on stdin or in the file, never in argv) | ctl secrets test <name> | ctl secrets remove <name> | ctl secrets reload';
 
-const USAGE = `usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] | ctl doctor <zone> --drop | ctl doctor <zone> --cancel | ctl setup-code | ctl setup reopen | ctl passphrase set (the passphrase on stdin) | ${CONFIG_USAGE} | ${SECRETS_USAGE}`;
+const USAGE = `usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] | ctl doctor <zone> --drop | ctl doctor <zone> --cancel | ctl setup-code | ctl setup reopen | ctl detect <owner/name> | ctl zones add <owner/name> [--id <id>] [--preset <p>] [--identity starter] [--egress off|monitor|enforce] [--resume] | ctl passphrase set (the passphrase on stdin) | ${CONFIG_USAGE} | ${SECRETS_USAGE}`;
 
 type Call = (
   method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',

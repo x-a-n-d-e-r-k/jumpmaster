@@ -353,3 +353,58 @@ describe('ctl secrets (Task 4)', () => {
     expect((await run(['secrets', 'nope'])).code).toBe(2);
   });
 });
+
+describe('ctl detect and ctl zones add', () => {
+  test('ctl detect and ctl zones add map to the routes', () => {
+    expect(ctlRequest(['detect', 'octo/demo'])).toEqual({
+      path: '/api/control/detect',
+      body: { repo: 'octo/demo' },
+    });
+    expect(
+      ctlRequest([
+        'zones',
+        'add',
+        'octo/demo',
+        '--id',
+        'web',
+        '--preset',
+        'node',
+        '--identity',
+        'starter',
+        '--egress',
+        'enforce',
+        '--resume',
+      ]),
+    ).toEqual({
+      path: '/api/control/zones',
+      body: {
+        zone: {
+          repo: 'octo/demo',
+          id: 'web',
+          preset: 'node',
+          identity: 'starter',
+          egress: { mode: 'enforce' },
+        },
+        resume: true,
+      },
+    });
+    for (const bad of [
+      ['detect'],
+      ['detect', 'octo/demo', 'extra'],
+      ['zones', 'add'],
+      ['zones', 'add', 'octo/demo', '--egress', 'wide'],
+      ['zones', 'add', 'octo/demo', '--identity', 'admin'],
+      ['zones', 'add', 'octo/demo', '--id'],
+      ['zones', 'add', 'octo/demo', '--unknown'],
+      ['zones', 'remove', 'demo'],
+    ])
+      expect(ctlRequest(bad), bad.join(' ')).toBeNull();
+  });
+
+  test('ctl zones add without --egress writes monitor', () => {
+    expect(ctlRequest(['zones', 'add', 'octo/demo'])).toEqual({
+      path: '/api/control/zones',
+      body: { zone: { repo: 'octo/demo', egress: { mode: 'monitor' } } },
+    });
+  });
+});

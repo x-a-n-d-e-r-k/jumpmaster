@@ -117,6 +117,17 @@ describe('route classes', () => {
       expect(routeClass(p)).toBe('auth');
     for (const p of ['/', '/doctor', '/drops/:id', '/artifacts/:id', '/setupx', '/loginx'])
       expect(routeClass(p)).toBe('page');
+    // The wizard's steps need a session: only the claim itself is an auth route.
+    for (const p of [
+      '/setup/next',
+      '/setup/claude',
+      '/setup/forge',
+      '/setup/project',
+      '/setup/advance',
+      '/setup/dismiss',
+      '/setup/anything',
+    ])
+      expect(routeClass(p), p).toBe('page');
   });
 });
 
@@ -167,7 +178,8 @@ describe('setup mode', () => {
     expect(setupActive(w.db)).toBe(true);
     const done = await w.post('/setup/passphrase', { passphrase: PASS, confirm: PASS }, { cookie });
     expect(done.statusCode).toBe(303);
-    expect(done.headers.location).toBe('/');
+    // On to the setup wizard (Task 6), which resumes where the operator left it.
+    expect(done.headers.location).toBe('/setup/next');
     expect(cookieOf(done, 'jm_session')).toMatch(
       /^jm_session=[\w-]+; HttpOnly; SameSite=Strict; Path=\/; Max-Age=604800$/,
     );
