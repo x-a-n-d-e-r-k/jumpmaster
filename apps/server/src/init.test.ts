@@ -85,7 +85,8 @@ function run(dir: string, args: string[], over: Partial<InitDeps> = {}, repo: Re
   const err: string[] = [];
   const deps: InitDeps = {
     dir,
-    uid: 1000,
+    // The running uid: bootstrap, which init calls, checks the files are owned by it.
+    uid: process.getuid?.() ?? 1000,
     uidMap: IDENTITY_MAP,
     forge: fakeForge(repo),
     out: (l) => out.push(l),
@@ -229,7 +230,7 @@ describe('jumpmaster init', () => {
   });
 
   test('init as a non-root uid against a writable mount succeeds; as uid 0 it refuses without --allow-root', async () => {
-    const user = await run(installDir(), ['--repo', 'octo/demo'], { uid: 1000 });
+    const user = await run(installDir(), ['--repo', 'octo/demo']);
     expect(user.code, user.all).toBe(0);
     const rootDir = installDir();
     const root = await run(rootDir, ['--repo', 'octo/demo'], { uid: 0 });
@@ -321,16 +322,12 @@ describe('jumpmaster init', () => {
 
   const envOf = (dir: string) => readFileSync(join(dir, '.env'), 'utf8');
 
-  test('a private repository turns on reviewReadToken and wires the read token in .env', async () => {
+  test('a private repository turns on reviewReadToken; the read token is a file by name, not a .env line', async () => {
     const dir = installDir({ read: true });
     const r = await run(dir, ['--repo', 'octo/demo'], {}, { ...NODE_REPO, private: true });
     expect(r.code, r.all).toBe(0);
     expect(configOf(dir).dropZones[0].reviewReadToken).toBe(true);
-    const env = envOf(dir);
-    expect(env.startsWith(ENV_FILE)).toBe(true);
-    expect(env).toContain('JM_READ_TOKEN_FILE=/run/secrets/github_read_token\n');
-    expect(env).toContain('JM_READ_TOKEN_SRC=./secrets/github_read_token\n');
-    expect(env).not.toContain('JM_REVIEWER_TOKEN');
+    expect(envOf(dir)).toBe(ENV_FILE);
     expect(existsSync(join(dir, 'compose.override.yaml'))).toBe(false);
     expect(() =>
       loadConfig(join(dir, 'config', 'jumpmaster.config.json'), serverEnv(dir, { read: true }), {
@@ -344,15 +341,13 @@ describe('jumpmaster init', () => {
     expect(m.out).toContain('secrets/github_read_token');
   });
 
-  test('starter mode needs no reviewer token, unwires it in .env and states the cost', async () => {
+  test('starter mode needs no reviewer token, writes nothing into .env and states the cost', async () => {
     const dir = installDir({ reviewer: false });
     const r = await run(dir, ['--repo', 'octo/demo', '--identity', 'starter']);
     expect(r.code, r.all).toBe(0);
     expect(configOf(dir).dropZones[0].identity).toBe('starter');
     expect(r.out).toContain('the author token can merge any green PR');
-    const env = envOf(dir);
-    expect(env).toContain('JM_REVIEWER_TOKEN_FILE=\n');
-    expect(env).toContain('JM_REVIEWER_TOKEN_SRC=/dev/null\n');
+    expect(envOf(dir)).toBe(ENV_FILE);
     expect(() =>
       loadConfig(
         join(dir, 'config', 'jumpmaster.config.json'),
@@ -360,14 +355,13 @@ describe('jumpmaster init', () => {
         { imageLockPath: lockFile() },
       ),
     ).not.toThrow();
-    // Rerunning keeps one block; a two-bot rerun removes it and keeps the operator's own lines.
+    // An M4 init block left in .env is the operator's file now: init leaves .env alone.
+    const m4 = `${ENV_FILE}# jumpmaster init: begin (rerun init to change these lines)\nJM_REVIEWER_TOKEN_FILE=\nJM_REVIEWER_TOKEN_SRC=/dev/null\n# jumpmaster init: end\n`;
+    writeFileSync(join(dir, '.env'), m4);
     expect((await run(dir, ['--repo', 'octo/demo', '--identity', 'starter', '--force'])).code).toBe(
       0,
     );
-    expect(envOf(dir).match(/JM_REVIEWER_TOKEN_FILE/g)).toHaveLength(1);
-    writeFileSync(join(dir, 'secrets', 'github_reviewer_token'), `${REVIEWER}\n`, { mode: 0o600 });
-    expect((await run(dir, ['--repo', 'octo/demo', '--force'])).code).toBe(0);
-    expect(envOf(dir)).toBe(ENV_FILE);
+    expect(envOf(dir)).toBe(m4);
   });
 
   test('starter mode refuses a classic author token', async () => {
@@ -508,4 +502,43 @@ test('createSecretOnce falls back to an exclusive write where hard links are not
   expect(createSecretOnce(path, 'k2\n', noLinks)).toBe(false);
   expect(readFileSync(path, 'utf8')).toBe('k1\n');
   expect(readdirSync(dir)).toEqual(['vault_key']);
+});
+
+describe('init --secrets-only', () => {
+  test('init --secrets-only equals bootstrap and init no longer writes compose variables into .env', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'jm-init-'));
+    const r = await run(dir, ['--secrets-only'], {
+      forge: () => {
+        throw new Error('no forge');
+      },
+    });
+    expect(r.code, r.all).toBe(0);
+    for (const d of ['secrets', 'data']) expect(mode(join(dir, d))).toBe(0o700);
+    for (const n of ['join_token', 'operator_token', 'vault_key']) {
+      expect(mode(join(dir, 'secrets', n))).toBe(0o600);
+      expect(r.out).toContain(`secrets/${n}`);
+    }
+    expect(existsSync(join(dir, 'config', 'jumpmaster.config.json'))).toBe(false);
+    expect(existsSync(join(dir, '.env'))).toBe(false);
+    // The same refusals as bootstrap: uid 0, and arguments beside it.
+    expect(
+      (await run(mkdtempSync(join(tmpdir(), 'jm-init-')), ['--secrets-only'], { uid: 0 })).code,
+    ).toBe(1);
+    expect((await run(dir, ['--secrets-only', '--repo', 'o/r'])).code).toBe(2);
+    // A full init writes no .env, and generates the same three secrets through bootstrap.
+    const full = installDir({ reviewer: false });
+    const before = readFileSync(join(full, '.env'), 'utf8');
+    const f = await run(
+      full,
+      ['--repo', 'octo/demo', '--identity', 'starter'],
+      {},
+      { ...NODE_REPO, private: true },
+    );
+    expect(f.code, f.all).toBe(0);
+    expect(readFileSync(join(full, '.env'), 'utf8')).toBe(before);
+    expect(f.all).not.toMatch(/JM_(REVIEWER|READ)_TOKEN/);
+    for (const n of ['join_token', 'operator_token', 'vault_key'])
+      expect(mode(join(full, 'secrets', n))).toBe(0o600);
+    expect(mode(join(full, 'data'))).toBe(0o700);
+  });
 });

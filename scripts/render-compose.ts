@@ -1,6 +1,6 @@
 // Renders the release's compose.yaml from deploy/compose.yaml.tmpl and the release's image lock.
 // Every `{{image NAME}}` becomes `<registry>/NAME@<digest>`; anything left unpinned is an error,
-// so a published compose file never runs a tag. The release workflow runs it with plain Node
+// so a published compose file never runs a tag; so is a port published beyond 127.0.0.1. The release workflow runs it with plain Node
 // (type stripping), so it imports only Node's own modules:
 //   node scripts/render-compose.ts deploy/compose.yaml.tmpl images.lock.json > compose.yaml
 import { readFileSync, realpathSync } from 'node:fs';
@@ -38,6 +38,21 @@ export function renderCompose(template: string, lock: Lock): string {
   });
   const left = /\{\{[^\n]*?\}\}/.exec(out);
   if (left) throw new Error(`leftover placeholder ${left[0]}`);
+  // Every published port is on loopback: the UI and its setup page are for this host only.
+  let inPorts = false;
+  for (const line of out.split('\n')) {
+    if (/^\s*ports:\s*$/.test(line)) {
+      inPorts = true;
+      continue;
+    }
+    const item = /^\s*-\s*(\S.*?)\s*$/.exec(line);
+    if (inPorts && item) {
+      const port = (item[1] as string).replace(/^(['"])(.*)\1$/, '$2');
+      if (!port.startsWith('127.0.0.1:')) throw new Error(`port ${port} is not bound to 127.0.0.1`);
+      continue;
+    }
+    inPorts = false;
+  }
   for (const line of out.split('\n')) {
     const m = /^\s*(?:-\s*)?image:\s*(\S.*?)\s*$/.exec(line);
     if (!m) continue;

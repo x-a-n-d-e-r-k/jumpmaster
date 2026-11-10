@@ -4,6 +4,7 @@
 //   jumpmaster ctl …              control commands against the running server
 //   jumpmaster doctor …           alias of `ctl doctor …`
 //   jumpmaster init --repo o/n …  write a compose install's config and secrets (init.ts)
+//   jumpmaster bootstrap [dir]    make secrets/, data/ and the machine secrets (bootstrap.ts)
 // In the server container run ctl as `docker compose exec jumpmaster jumpmaster ctl …`, never
 // `compose run`: a new container's loopback is not the server.
 import { realpathSync } from 'node:fs';
@@ -13,6 +14,7 @@ export type CliDeps = {
   serve: (configPath: string | undefined) => Promise<number>;
   ctl: (args: string[]) => Promise<number>;
   init: (args: string[]) => Promise<number>;
+  bootstrap: (args: string[]) => Promise<number>;
   err?: (line: string) => void;
 };
 
@@ -22,10 +24,11 @@ const USAGE = [
   '       jumpmaster ctl <command> …   (see `jumpmaster ctl` for commands)',
   '       jumpmaster doctor …          (alias of `jumpmaster ctl doctor …`)',
   '       jumpmaster init --repo owner/name …   (see `jumpmaster init --help`)',
+  '       jumpmaster bootstrap [install-dir]   (compose runs it before the server)',
 ].join('\n');
 
 /** Command words that are never read as a config path. */
-const RESERVED = new Set(['serve', 'ctl', 'doctor', 'init', 'help', '--help', '-h']);
+const RESERVED = new Set(['serve', 'ctl', 'doctor', 'init', 'bootstrap', 'help', '--help', '-h']);
 
 export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   const err = deps.err ?? console.error;
@@ -33,6 +36,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   if (command === 'ctl') return deps.ctl(rest);
   if (command === 'doctor') return deps.ctl(['doctor', ...rest]);
   if (command === 'init') return deps.init(rest);
+  if (command === 'bootstrap') return deps.bootstrap(rest);
   // `serve` alone: the path comes from JM_CONFIG, or there is none (db mode).
   if (command === 'serve' && rest.length === 0) return deps.serve(undefined);
   const config = command === 'serve' ? rest[0] : command;
@@ -64,6 +68,11 @@ async function init(args: string[]): Promise<number> {
   return initMain(args);
 }
 
+async function bootstrap(args: string[]): Promise<number> {
+  const { bootstrapMain } = await import('./bootstrap.js');
+  return bootstrapMain(args);
+}
+
 async function ctl(args: string[]): Promise<number> {
   const { runCtl } = await import('./ctl.js');
   return runCtl(args);
@@ -80,6 +89,6 @@ const isMain = (): boolean => {
   }
 };
 if (isMain()) {
-  const code = await runCli(process.argv.slice(2), { serve, ctl, init });
+  const code = await runCli(process.argv.slice(2), { serve, ctl, init, bootstrap });
   if (code !== 0) process.exit(code);
 }

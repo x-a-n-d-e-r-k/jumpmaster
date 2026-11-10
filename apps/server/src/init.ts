@@ -5,35 +5,33 @@
 //   docker compose --profile init run --rm init --repo owner/name [--preset p]
 //     [--identity two-bot|starter] [--author-may-be-admin] [--plan p] [--force] [--allow-root]
 //     [--offline --preset p [--private]]
+//   docker compose --profile init run --rm init --secrets-only   (the same as `bootstrap`)
 //
-// It reads the author token from secrets/github_author_token and, with it, the repository's
-// visibility and root build files (GET requests only; `--offline` skips GitHub and takes the
-// preset and visibility from the flags), then writes:
-//   - config/jumpmaster.config.json (the stack preset and its gates, egress monitor, signed images);
-//   - secrets/join_token, secrets/operator_token and secrets/vault_key (0600), only when absent;
-//   - a block of compose variables in .env, only for starter mode (no reviewer token is mounted)
-//     or a private repository (the read token is), removed again when neither applies.
+// It runs `bootstrap` first (secrets/ and data/ 0700; secrets/join_token, secrets/operator_token
+// and secrets/vault_key 0600, only when absent), then reads the author token from
+// secrets/github_author_token and, with it, the repository's visibility and root build files (GET
+// requests only; `--offline` skips GitHub and takes the preset and visibility from the flags), and
+// writes config/jumpmaster.config.json (the stack preset and its gates, egress monitor, signed
+// images). It writes nothing into .env: the server reads every credential from secrets/ by name.
 // Token files others can read are tightened to 0600.
 //
 // Exit codes: 0 done, 1 refused or failed (the reason is printed), 2 usage or ambiguous detection
 // without --preset, 3 an existing config without --force, 4 the install directory is not
 // writable. No secret value is ever printed.
-import { randomBytes } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
-  linkSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
   rmSync,
   statSync,
-  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { PRESETS, type Preset } from '@jumpmaster/protocol';
+import { runBootstrap } from './bootstrap.js';
 import { IDENTITIES, type Identity, STARTER_WARNING } from './config.js';
 import { DOC, identityMap } from './doctor/checks.js';
 import type { Forge } from './forge/github.js';
@@ -49,6 +47,8 @@ export type InitDeps = {
   uid: number | null;
   /** `/proc/self/uid_map`, or null off Linux. */
   uidMap: string | null;
+  /** `process.getgid()`, for bootstrap's chown fix (defaults to the uid). */
+  gid?: number | null;
   forge(repo: string, token: string): InitForge;
   out(line: string): void;
   err(line: string): void;
@@ -59,13 +59,11 @@ const USAGE = [
   '         [--identity two-bot|starter] [--author-may-be-admin]',
   '         [--plan pro|max|team_standard|team_premium|enterprise] [--force] [--allow-root]',
   '         [--offline --preset p [--private]]   (write the config without reading GitHub)',
+  '       jumpmaster init --secrets-only [--allow-root]   (the same as jumpmaster bootstrap)',
 ].join('\n');
 const PLANS = ['pro', 'max', 'team_standard', 'team_premium', 'enterprise'] as const;
 const REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 const CONFIG = 'config/jumpmaster.config.json';
-/** init's own lines in .env, between these markers; everything else in .env is the operator's. */
-const ENV_BEGIN = '# jumpmaster init: begin (rerun init to change these lines)';
-const ENV_END = '# jumpmaster init: end';
 
 type Args = {
   repo: string;
@@ -77,6 +75,7 @@ type Args = {
   allowRoot: boolean;
   offline: boolean;
   privateRepo: boolean;
+  secretsOnly: boolean;
   help: boolean;
 };
 
@@ -84,13 +83,23 @@ class UsageError extends Error {}
 
 function parseArgs(argv: string[]): Args {
   const args: Partial<Args> &
-    Pick<Args, 'authorMayBeAdmin' | 'force' | 'allowRoot' | 'offline' | 'privateRepo' | 'help'> = {
+    Pick<
+      Args,
+      | 'authorMayBeAdmin'
+      | 'force'
+      | 'allowRoot'
+      | 'offline'
+      | 'privateRepo'
+      | 'secretsOnly'
+      | 'help'
+    > = {
     identity: 'two-bot',
     authorMayBeAdmin: false,
     force: false,
     allowRoot: false,
     offline: false,
     privateRepo: false,
+    secretsOnly: false,
     help: false,
   };
   const value = (i: number, flag: string): string => {
@@ -141,6 +150,9 @@ function parseArgs(argv: string[]): Args {
       case '--private':
         args.privateRepo = true;
         break;
+      case '--secrets-only':
+        args.secretsOnly = true;
+        break;
       case '--help':
       case '-h':
         args.help = true;
@@ -148,6 +160,11 @@ function parseArgs(argv: string[]): Args {
       default:
         throw new UsageError(`unknown argument ${a}`);
     }
+  }
+  if (args.secretsOnly) {
+    if (argv.some((a) => a !== '--secrets-only' && a !== '--allow-root'))
+      throw new UsageError('--secrets-only takes no other argument but --allow-root');
+    return args as Args;
   }
   if (!args.repo) throw new UsageError('--repo is required');
   if (args.privateRepo && !args.offline)
@@ -181,39 +198,6 @@ async function rootFiles(forge: InitForge, branch: string): Promise<Record<strin
   return files;
 }
 
-/**
- * The compose variables init keeps in .env: the template mounts the reviewer token and no read
- * token by default; starter mode unmounts the first, a private repository mounts the second.
- * Plain `.env` interpolation, so any Compose v2 reads it.
- */
-export function composeEnv(o: { starter: boolean; privateRepo: boolean }): string[] {
-  return [
-    ...(o.starter ? ['JM_REVIEWER_TOKEN_FILE=', 'JM_REVIEWER_TOKEN_SRC=/dev/null'] : []),
-    ...(o.privateRepo
-      ? [
-          'JM_READ_TOKEN_FILE=/run/secrets/github_read_token',
-          'JM_READ_TOKEN_SRC=./secrets/github_read_token',
-        ]
-      : []),
-  ];
-}
-
-/** .env with init's block replaced by `lines` (removed when empty); other lines untouched. */
-export function withEnvBlock(env: string, lines: string[]): string {
-  const kept: string[] = [];
-  let inside = false;
-  // A CRLF .env (edited on Windows, say) still has init's markers: compare without the \r.
-  for (const line of env.split('\n')) {
-    const bare = line.replace(/\r$/, '');
-    if (bare === ENV_BEGIN) inside = true;
-    else if (bare === ENV_END) inside = false;
-    else if (!inside) kept.push(line);
-  }
-  let text = kept.join('\n');
-  if (text !== '' && !text.endsWith('\n')) text += '\n';
-  return lines.length === 0 ? text : `${text}${[ENV_BEGIN, ...lines, ENV_END].join('\n')}\n`;
-}
-
 /** Writes a file through a temporary name, so a crash never leaves half a config. */
 function writeAtomic(path: string, text: string, mode: number): void {
   const tmp = `${path}.init-${process.pid}`;
@@ -221,41 +205,8 @@ function writeAtomic(path: string, text: string, mode: number): void {
   renameSync(tmp, path);
 }
 
-/**
- * Writes a generated secret only when absent, atomically: the whole value goes to a 0600 file
- * beside it, which is then linked into place (refused when the name exists), so no reader ever
- * sees a partial key and a rerun never replaces one. Returns whether it was created.
- */
-export function createSecretOnce(
-  path: string,
-  text: string,
-  link: (from: string, to: string) => void = linkSync,
-): boolean {
-  const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-  writeFileSync(tmp, text, { mode: 0o600, flag: 'wx' });
-  let linked = false;
-  try {
-    link(tmp, path);
-    linked = true;
-  } catch (e) {
-    const code = errno(e);
-    if (code === 'EEXIST') return false;
-    // A filesystem without hard links (some network and FUSE mounts): an exclusive write, which
-    // still never replaces a key, though a crash mid-write could leave a short one.
-    if (code !== 'EPERM' && code !== 'ENOTSUP' && code !== 'EOPNOTSUPP' && code !== 'ENOSYS')
-      throw e;
-  } finally {
-    unlinkSync(tmp);
-  }
-  if (linked) return true;
-  try {
-    writeFileSync(path, text, { mode: 0o600, flag: 'wx' });
-    return true;
-  } catch (e) {
-    if (errno(e) === 'EEXIST') return false;
-    throw e;
-  }
-}
+/** Generated secrets are written by bootstrap; re-exported for the tests that use it here. */
+export { createSecretOnce } from './bootstrap.js';
 
 export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
   const { dir, out, err } = deps;
@@ -287,9 +238,20 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
     return fail(
       `refusing to run as root (uid 0): the server holds your GitHub and Claude tokens and runs as the user that owns the install's files, so a bug in it would act as root on the host's files. Set JM_UID and JM_GID in .env to an ordinary user (id -u, id -g). On a host where you only have root, create one first (adduser jumpmaster && usermod -aG docker jumpmaster, then do the install as that user; ${DOC}#step-1-write-env). --allow-root runs as root anyway, and the doctor's config.uid then warns for good.`,
     );
-  // Every directory init writes, probed before anything is written: a directory Docker created
-  // as root (`up` before `init`) is exit 4 with the fix, not a stack trace halfway through.
-  for (const d of ['', 'config', 'data', 'secrets']) {
+  // bootstrap first: secrets/, data/ and the machine secrets, with the fix for a directory owned
+  // by root or another uid (exit 4 here, as for any directory init cannot write).
+  const boot = runBootstrap(deps.uid === 0 && args.allowRoot ? ['--allow-root'] : [], {
+    dir,
+    uid: deps.uid,
+    gid: deps.gid ?? deps.uid,
+    out,
+    err,
+  });
+  if (args.secretsOnly) return boot;
+  if (boot !== 0) return 4;
+  // The other directories init writes, probed before anything is written: a directory Docker
+  // created as root is exit 4 with the fix, not a stack trace halfway through.
+  for (const d of ['', 'config']) {
     const at = join(dir, d);
     try {
       mkdirSync(at, { recursive: true, mode: 0o700 });
@@ -383,18 +345,8 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
       );
   }
   const preset = found.preset as Preset;
-  const envLines = composeEnv({
-    starter: args.identity === 'starter',
-    privateRepo: access.private,
-  });
 
-  // Write: generated secrets (only when absent), the config, init's .env block.
-  const generated: string[] = [];
-  // The vault key (Task 4) beside the join and operator tokens; T5's bootstrap takes all three over.
-  for (const name of ['join_token', 'operator_token', 'vault_key']) {
-    if (createSecretOnce(secretPath(name), `${randomBytes(32).toString('base64url')}\n`))
-      generated.push(`secrets/${name}`);
-  }
+  // Write the config (bootstrap wrote the generated secrets above).
   let tokenCreatedAt: string | undefined;
   try {
     tokenCreatedAt = statSync(secretPath('claude_token')).mtime.toISOString().slice(0, 10);
@@ -424,11 +376,6 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
     dropZones: [zone],
   };
   writeAtomic(configPath, `${JSON.stringify(config, null, 2)}\n`, 0o644);
-  const envPath = join(dir, '.env');
-  const envBefore = existsSync(envPath) ? readFileSync(envPath, 'utf8') : '';
-  const envAfter = withEnvBlock(envBefore, envLines);
-  if (envAfter !== envBefore)
-    writeAtomic(envPath, envAfter, existsSync(envPath) ? statSync(envPath).mode & 0o777 : 0o644);
 
   // Report: what was written and what is left, never a value.
   if (args.offline)
@@ -447,13 +394,6 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
   out('  egress: monitor (the doctor drop shows the hosts to allow before you switch to enforce)');
   out('  images: signed releases only (requireSignedImages: true)');
   if (access.private) out('  the repository is private: reviewReadToken is on');
-  if (generated.length) out(`generated ${generated.join(', ')} (mode 0600)`);
-  if (envAfter !== envBefore)
-    out(
-      envLines.length
-        ? `wrote init's lines in .env (${envLines.map((l) => l.split('=')[0]).join(', ')})`
-        : "removed init's lines from .env",
-    );
   if (tokenCreatedAt)
     out(
       `claude.tokenCreatedAt is ${tokenCreatedAt} (the date of secrets/claude_token); correct it in the config if you ran claude setup-token on another day`,
@@ -491,6 +431,7 @@ export async function initMain(argv: string[]): Promise<number> {
   return runInit(argv, {
     dir: process.env.JM_INSTALL_DIR || '/install',
     uid: process.getuid?.() ?? null,
+    gid: process.getgid?.() ?? null,
     uidMap,
     forge: (repo, token) => {
       const [owner, name] = repo.split('/') as [string, string];

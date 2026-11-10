@@ -47,6 +47,22 @@ describe('renderCompose', () => {
     expect(() => renderCompose(tmpl, { registry: 'ghcr.io/o?x', images: {} })).toThrow(/registry/);
   });
 
+  test('renderCompose refuses a published port that is not bound to 127.0.0.1', () => {
+    const lock = { registry: 'ghcr.io/o', images: { 'jumpmaster-server': digest('1') } };
+    const svc = (ports: string) =>
+      `services:\n  a:\n    image: {{image jumpmaster-server}}\n    ports:\n${ports}`;
+    expect(() => renderCompose(svc('      - "127.0.0.1:7420:7420"\n'), lock)).not.toThrow();
+    for (const bad of [
+      '      - "7420:7420"\n',
+      '      - 0.0.0.0:7420:7420\n',
+      '      - "[::]:1:1"\n',
+    ])
+      expect(() => renderCompose(svc(bad), lock), bad).toThrow(/not bound to 127\.0\.0\.1/);
+    // The frozen M4 template (the upgrade smoke renders it) still renders.
+    const m4 = readFileSync(join(ROOT, 'deploy/fixtures/m4-compose.yaml.tmpl'), 'utf8');
+    expect(() => renderCompose(m4, fullLock())).not.toThrow();
+  });
+
   test('the shipped template renders to a compose file with every service image by digest', () => {
     const tmpl = readFileSync(join(ROOT, TEMPLATE), 'utf8');
     for (const name of ['jumpmaster-server', 'jumpmaster-stick'])
