@@ -57,8 +57,9 @@ If the server itself is unreachable, stop containers on the stick's host with `d
 ### Lease order
 
 Since M3, queued drops lease by role class first and age second: finishing work (`review`, `heal`,
-`resolve`), then `implement`, then crew roles. So a review queued after an implement drop can lease
-before it. With one free slot, crew drops wait until no finishing or implement drop is queued.
+`resolve`), then `implement`, then crew roles, then doctor drops. So a review queued after an
+implement drop can lease before it. With one free slot, crew drops wait until no finishing or
+implement drop is queued. Near the usage limit only finishing work and doctor drops lease.
 
 ## Zone settings for a real project
 

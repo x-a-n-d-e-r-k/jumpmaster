@@ -822,6 +822,75 @@ describe('zone.doctor-drop', () => {
     });
   });
 
+  test('a queued doctor drop says what holds it: the usage pause, a credits stop, or no capable stick', async () => {
+    const w = world();
+    withDrop(w, { state: 'queued', at: ago(46 * 60_000) });
+    const summary = async () => one(await w.run(), 'zone.doctor-drop').summary;
+    expect(await summary()).toContain('waiting for a free stick slot');
+    // The throttle (finishing_only) no longer holds a doctor drop.
+    setUsageState(w.db, { status: 'allowed_warning', observedAt: ago(60_000).toISOString() }, NOW);
+    expect(await summary()).toContain('waiting for a free stick slot');
+    setUsageState(w.db, { pausedUntil: new Date(NOW.getTime() + 3_600_000).toISOString() }, NOW);
+    expect(await summary()).toContain('held: usage paused until 2026-11-09T13:00:00.000Z');
+    setUsageState(
+      w.db,
+      {
+        pausedUntil: null,
+        overageStoppedAt: ago(60_000).toISOString(),
+        overageDropId: 'd9',
+        overageUntil: new Date(NOW.getTime() + 7_200_000).toISOString(),
+      },
+      NOW,
+    );
+    expect(await summary()).toContain('held: credits stop');
+  });
+
+  test('a queued doctor drop under the usage probe or a credits Resume says it is held', async () => {
+    const w = world();
+    withDrop(w, { state: 'queued', at: ago(5 * 60_000) });
+    const summary = async () => one(await w.run(), 'zone.doctor-drop').summary;
+    setUsageState(w.db, { status: 'rejected' }, NOW);
+    expect(await summary()).toContain(
+      'held: the usage limit was hit, and a doctor drop is never the probe',
+    );
+    setUsageState(
+      w.db,
+      {
+        status: 'allowed',
+        overageResumeUntil: new Date(NOW.getTime() + 3_600_000).toISOString(),
+        overageResumeDropId: 'd9',
+        overageResumeWorkItemId: 4,
+      },
+      NOW,
+    );
+    expect(await summary()).toContain(
+      'held: resuming after a credits stop, only work item 4 runs until 2026-11-09T13:00:00.000Z',
+    );
+  });
+
+  test('a queued doctor drop with no stick connected says so', async () => {
+    const w = world();
+    w.db.prepare('DELETE FROM sticks').run();
+    withDrop(w, { state: 'queued', at: ago(5 * 60_000) });
+    expect(one(await w.run(), 'zone.doctor-drop').summary).toContain(
+      'waiting for a stick: no stick is connected',
+    );
+  });
+
+  test('a queued doctor drop no live stick can take says so', async () => {
+    const w = world({ config: { requireSignedImages: true } });
+    stampStick(
+      w.db,
+      's1',
+      { capabilities: [], imagePolicy: 'allowlist', version: '0.3.0', pinnedImages: [] },
+      ago(10_000),
+    );
+    withDrop(w, { state: 'queued', at: ago(5 * 60_000) });
+    expect(one(await w.run(), 'zone.doctor-drop').summary).toContain(
+      'waiting for a stick that can run zone main',
+    );
+  });
+
   test('a passing doctor drop passes, reporting claude, clone, services and each gate', async () => {
     const w = world();
     withDrop(w, { result: ok });

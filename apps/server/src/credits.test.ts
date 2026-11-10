@@ -13,6 +13,7 @@ import {
   creditsStopInForce,
   noteOverage,
   noteProbeResult,
+  resumeAfterCredits,
   syncCreditsBriefing,
 } from './credits.js';
 import type { Db } from './db/open.js';
@@ -63,7 +64,9 @@ beforeEach(() => {
 });
 
 function drop(id: string, role = 'implement', workItemId: number | null = null): Drop {
-  const item = workItemId ?? (role.startsWith('crew') || role === 'diagnose' ? null : w.item(9));
+  const item =
+    workItemId ??
+    (role.startsWith('crew') || role === 'diagnose' || role === 'doctor' ? null : w.item(9));
   insertDrop(db, { id, dropZoneId: 'main', workItemId: item, role, state: 'running' }, t0);
   return {
     id,
@@ -84,6 +87,15 @@ describe('the credits stop', () => {
     expect(noteOverage(db, cfg, d, onCredits(), null, t0)).toBe(true);
     expect(dispatchGate(db, cfg, t0)).toBe('stopped');
     expect(getUsageState(db)).toMatchObject({ overageDropId: 'd1', overageStoppedAt: iso(0) });
+  });
+
+  test("a doctor drop's credit use never becomes the stop: the doctor observes usage, it binds no Resume", () => {
+    const doc = drop('doc1', 'doctor');
+    expect(doc.workItemId).toBeNull();
+    expect(noteOverage(db, cfg, doc, onCredits(), null, t0)).toBe(false);
+    expect(noteOverage(db, cfg, doc, onCredits(), 'succeeded', t0)).toBe(false);
+    expect(dispatchGate(db, cfg, t0)).toBe('open');
+    expect(getUsageState(db).overageDropId).toBeNull();
   });
 
   test('stopOnOverage false never stops, but the drop is still recorded', () => {
@@ -482,7 +494,7 @@ describe('review fixes', () => {
     expect(getUsageState(db).overageResumeUntil).toBe(iso(MIN + 5 * H));
 
     const b = zoneWorld();
-    const d = { id: 'e1', dropZoneId: 'main', workItemId: null, role: 'x' } as Drop;
+    const d = { id: 'e1', dropZoneId: 'main', workItemId: b.item(9), role: 'implement' } as Drop;
     noteOverage(b.db, cfg, d, fiveHourOut(), null, t0);
     creditsPass(b.db, t0);
     const [open] = listBriefings(b.db, { state: 'open' });
@@ -586,7 +598,7 @@ describe('review fixes', () => {
     expect(gateQueuesImplement(dispatchGate(db, cfg, now))).toBe(false);
   });
 
-  test('N1: a Resume bound to a crew drop leases nothing', () => {
+  test("N1: a crew drop's stop offers no Run on credits: it has no follow-on work, and says so", () => {
     insertStick(db, { id: 's1', name: 's', tokenHash: 'h', slots: 4 });
     noteOverage(db, cfg, drop('c1', 'crew-lead'), onCredits(), null, t0);
     insertDrop(db, {
@@ -597,9 +609,40 @@ describe('review fixes', () => {
       state: 'queued',
     });
     creditsPass(db, t0);
-    ruleBriefing(db, openStop()[0]?.id ?? -1, 'resume', '', t0);
-    creditsPass(db, at(MIN));
+    const [b] = openStop();
+    expect(b?.options.map((o) => o.id)).toEqual(['noted']);
+    expect(b?.why).toContain(
+      'This stop came from a crew drop (crew-lead), which has no follow-on work: there is nothing to run on credits.',
+    );
+    expect(b?.why).toContain('Work resumes when the window resets at 2026-03-05T10:00:00.000Z.');
+    expect(b?.why).not.toContain('Run on credits buys');
+    // A Resume ruled on an older briefing that still offered it is refused, not a silent no-op.
+    expect(() => resumeAfterCredits(db, 'c1', at(MIN))).toThrow(/no work item/);
+    expect(dispatchGate(db, cfg, at(MIN))).toBe('stopped');
     expect(leaseNextDrop(db, 's1', at(MIN), dispatchGate(db, cfg, at(MIN)))).toBeNull();
+  });
+
+  test('N1b: a Resume row bound to no work item (from before this check) still leases nothing', () => {
+    insertStick(db, { id: 's1', name: 's', tokenHash: 'h', slots: 4 });
+    insertDrop(db, {
+      id: 'q',
+      dropZoneId: 'main',
+      workItemId: w.item(2),
+      role: 'review',
+      state: 'queued',
+    });
+    setUsageState(
+      db,
+      {
+        overageResumeUntil: iso(H),
+        overageResumeDropId: 'c1',
+        overageResumeWorkItemId: null,
+        overageResumedAt: iso(0),
+      },
+      t0,
+    );
+    expect(dispatchGate(db, cfg, at(MIN))).toBe('credits_resume');
+    expect(leaseNextDrop(db, 's1', at(MIN), 'credits_resume')).toBeNull();
   });
 
   test('N2: the probe drop finishing off credits ends probing', () => {

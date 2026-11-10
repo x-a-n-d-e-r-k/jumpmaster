@@ -265,7 +265,9 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   and the briefing is asked again on the next pass. During that horizon (gate `credits_resume`)
   only that work item's drops lease (its review, heal or resolve once queued); nothing else
   leases and no new implement work is queued, so the horizon idles until that work is queued. A
-  Resume on a crew drop lets nothing lease. Another drop on credits stops dispatch again ("confirmed by a second drop"); the Usage
+  stop from a crew drop (it has no work item, so no follow-on work) offers no Run on credits: its
+  briefing says so, and work resumes when the window resets. A doctor drop's credit use never stops
+  dispatch. Another drop on credits stops dispatch again ("confirmed by a second drop"); the Usage
   section counts the drops on credits since. When the horizon ends, one drop probes as above.
   Rulings on credits briefings apply in any zone mode, but not while the kill switch is on: a Run
   on credits ruled while killed applies after unkill. Without the UI: `ctl briefings` lists the

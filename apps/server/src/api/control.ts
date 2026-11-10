@@ -14,7 +14,7 @@ import {
   setZoneMode,
   ZONE_MODES,
 } from '../db/repo.js';
-import type { DoctorEnv } from '../doctor/checks.js';
+import { type DoctorEnv, doctorDropWait } from '../doctor/checks.js';
 import { DoctorBusyError, latestDoctorRun, processEnv, runDoctor } from '../doctor/run.js';
 import type { Forge } from '../forge/github.js';
 import { fileIntakeIssue, GoalStubSchema, IntakeIssueSchema, renderGoalStub } from '../intake.js';
@@ -286,11 +286,13 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         now(),
       );
       deps.kick?.();
+      const waiting = doctorDropWait(db, config, zone, now());
       return reply.code(202).send({
         dropId,
         zone: zone.id,
         state: 'queued',
-        next: `It runs on the next free stick slot. Then: jumpmaster ctl doctor ${zone.id}`,
+        waiting,
+        next: `It runs when a stick can take it (${waiting}). Then: jumpmaster ctl doctor ${zone.id}`,
       });
     });
 
