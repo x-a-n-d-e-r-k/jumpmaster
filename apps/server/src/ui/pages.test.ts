@@ -92,7 +92,7 @@ describe('renderHome', () => {
         },
       ],
     });
-    expect(html).toContain('<h2>Sticks</h2>');
+    expect(html).toContain('<h2 id="sticks">Sticks</h2>');
     expect(html).toContain('old&lt;stick&gt;');
     expect(html).not.toContain('old<stick>');
     expect(html).toContain('cannot run locked: lacks egress-v1, image-policy:signed');
@@ -748,4 +748,9 @@ describe('the status banner (Task 12, round 2)', () => {
     });
     expect(unsafe).not.toContain('evil.test');
   });
+});
+
+test('the home page sticks section has an anchor the status links to', () => {
+  const html = renderHome({ zones: [], items: [], drops: [], sticks: [] });
+  expect(html).toContain('<h2 id="sticks">Sticks</h2>');
 });

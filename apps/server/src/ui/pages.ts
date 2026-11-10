@@ -189,7 +189,7 @@ function crewSection(lines: CrewLine[] | undefined): string {
 
 function sticksSection(lines: StickLine[] | undefined): string {
   if (!lines) return '';
-  if (lines.length === 0) return '<h2>Sticks</h2><p>No stick has enrolled.</p>';
+  if (lines.length === 0) return '<h2 id="sticks">Sticks</h2><p>No stick has enrolled.</p>';
   const rows = lines
     .map((s) => {
       const runs =
@@ -204,7 +204,7 @@ function sticksSection(lines: StickLine[] | undefined): string {
       return `<tr><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.version ?? '-')}</td><td>${escapeHtml(s.lastSeenAt ?? 'never')}</td><td>${escapeHtml(s.capabilities.join(', ') || '-')}</td><td>${escapeHtml(s.imagePolicy)}</td><td>${runs}</td></tr>`;
     })
     .join('');
-  return `<h2>Sticks</h2><table><tr><th>Stick</th><th>Version</th><th>Last seen</th><th>Capabilities</th><th>Image policy</th><th>Zones</th></tr>${rows}</table>`;
+  return `<h2 id="sticks">Sticks</h2><table><tr><th>Stick</th><th>Version</th><th>Last seen</th><th>Capabilities</th><th>Image policy</th><th>Zones</th></tr>${rows}</table>`;
 }
 
 /** One shared handler for every rule form: it posts with the session's CSRF header. */

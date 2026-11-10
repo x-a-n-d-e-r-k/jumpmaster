@@ -3,6 +3,7 @@ import { openDb } from './db/open.js';
 import type { Drop, OutboxRow, WorkItem } from './db/repo.js';
 import type { DoctorCheck } from './doctor/checks.js';
 import {
+  cannotRunText,
   lastPassAt,
   recordPass,
   type StatusInput,
@@ -151,10 +152,11 @@ function everything(): StatusInput {
         ],
         drops: [drop(), drop({ id: 'q1', workItemId: 4, state: 'queued', startedAt: null })],
         parked: 1,
-        credentialProblems: [problem()],
         prs: [{ workItemId: 2, number: 12, headFirstSeenAt: plus(NOW, -20 * MIN).toISOString() }],
         gateEvents: { d1: 1 },
       }),
+      // The credential problem is another zone's: a zone parked for one has no held work.
+      zone({ id: 'docs', credentialProblems: [problem({ zoneId: 'docs' })] }),
     ],
   });
 }
@@ -190,7 +192,7 @@ const STEPS: Step[] = [
     (i) => void (i.sticks = { live: 1, slots: 1, busy: 1 }),
     "No runner: the stick hasn't checked in",
     'stick',
-    '/',
+    '/#sticks',
   ],
   [
     'running',
@@ -212,6 +214,7 @@ const STEPS: Step[] = [
       // The gate opens, and the zone is paused: the states below it read a paused zone.
       i.usage = { gate: 'open' };
       z0(i).mode = 'paused';
+      (i.zones[1] as StatusZone).mode = 'paused';
     },
     "Held by Claude's usage throttle: 2 issues wait; only finishing work starts",
     'claude',
@@ -219,8 +222,8 @@ const STEPS: Step[] = [
   ],
   [
     'credentials',
-    (i) => void (z0(i).credentialProblems = []),
-    'Blocked: main needs claudeToken: no Claude token is set: enter it under Settings, Credentials',
+    (i) => void ((i.zones[1] as StatusZone).credentialProblems = []),
+    'Blocked: docs needs claudeToken: no Claude token is set: enter it under Settings, Credentials',
     'credentials',
     '/settings/credentials',
   ],
@@ -238,7 +241,13 @@ const STEPS: Step[] = [
     'you',
     '/briefings',
   ],
-  ['paused', (i) => void (z0(i).mode = 'active'), 'Paused by you: main (paused)', 'you', '/zones'],
+  [
+    'paused',
+    (i) => void (z0(i).mode = 'active'),
+    'Paused by you: main (paused), docs (paused)',
+    'you',
+    '/zones',
+  ],
   [
     'outbox',
     (i) => void (i.outboxRetrying = []),
@@ -541,5 +550,91 @@ describe('the last pass (round 2, M3)', () => {
     recordPass(db, NOW);
     db.close();
     expect(lastPassAt(openDb(file))).toBe(NOW.toISOString());
+  });
+});
+
+describe('round 3', () => {
+  const blocked = (id: number, by: string[]) =>
+    item({ id, issueNumber: id + 10, state: 'ready', blockedBy: by });
+
+  test('a ready issue blocked by another says what it waits on, and never counts as held', () => {
+    const one = statusOf(base({ zones: [zone({ items: [blocked(5, ['#5'])] })] }), NOW);
+    expect(one.headline).toBe('1 ready issue waits on the issues it is blocked by (#5)');
+    const two = statusOf(
+      base({ zones: [zone({ items: [blocked(5, ['#5']), blocked(6, ['#5', 'octo/lib#2'])] })] }),
+      NOW,
+    );
+    expect(two.headline).toBe(
+      '2 ready issues wait on the issues they are blocked by (#5, octo/lib#2)',
+    );
+    // Under the throttle, a blocked item is not work the gate holds.
+    const throttled = statusOf(
+      base({ usage: { gate: 'finishing_only' }, zones: [zone({ items: [blocked(5, ['#5'])] })] }),
+      NOW,
+    );
+    expect(throttled.headline).toBe('1 ready issue waits on the issues it is blocked by (#5)');
+    const mixed = statusOf(
+      base({
+        usage: { gate: 'finishing_only' },
+        zones: [zone({ items: [blocked(5, ['#5']), item({ id: 9, state: 'ready' })] })],
+      }),
+      NOW,
+    );
+    expect(mixed.headline).toBe(
+      "Held by Claude's usage throttle: 1 issue waits; only finishing work starts",
+    );
+  });
+
+  test('a zone parked for a credential is not throttled work: the credential takes the headline', () => {
+    const s = statusOf(
+      base({
+        usage: { gate: 'finishing_only' },
+        zones: [zone({ items: [item({ state: 'ready' })], credentialProblems: [problem()] })],
+      }),
+      NOW,
+    );
+    expect(s.headline).toMatch(/^Blocked: main needs claudeToken/);
+  });
+
+  test('a queued crew-lead drop under the throttle is held, not about to start', () => {
+    const s = statusOf(
+      base({
+        usage: { gate: 'finishing_only' },
+        zones: [
+          zone({
+            drops: [
+              drop({
+                id: 'c1',
+                role: 'crew-lead',
+                workItemId: null,
+                state: 'queued',
+                startedAt: null,
+              }),
+            ],
+          }),
+        ],
+      }),
+      NOW,
+    );
+    expect(s.headline).toBe(
+      "Held by Claude's usage throttle: 1 drop waits; only finishing work starts",
+    );
+  });
+
+  test('a missing capability is named for every stick, or as shared only when every stick lacks it', () => {
+    const egress = 'egress-v1';
+    expect(
+      cannotRunText([
+        { name: 'a', missing: [egress] },
+        { name: 'b', missing: [egress, 'image-verify-v1'] },
+      ]),
+    ).toBe('no live stick has egress-v1');
+    expect(
+      cannotRunText([
+        { name: 'a', missing: [egress] },
+        { name: 'b', missing: ['image-verify-v1'] },
+      ]),
+    ).toBe('no live stick can run it (a lacks egress-v1; b lacks image-verify-v1)');
+    expect(cannotRunText([{ name: 'a', missing: [] }])).toBeUndefined();
   });
 });

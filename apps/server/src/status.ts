@@ -22,6 +22,7 @@ import type { Pages } from './doctor/actions.js';
 import { type DoctorCheck, doctorDropWait, liveSticks } from './doctor/checks.js';
 import { latestDoctorRun } from './doctor/run.js';
 import { missingFor, zoneRequirements } from './leases.js';
+import { isBlocked } from './scheduler.js';
 import { wizardActive } from './ui/setup.js';
 import { dispatchGate, type Gate } from './usage.js';
 import { type CredentialProblem, credentialProblems } from './vault/problems.js';
@@ -113,6 +114,8 @@ export type StatusInput = {
 
 const ALL_PAGES: Pages = { zones: true, settings: true, credentials: true };
 const ACTIVE = new Set(['leased', 'running']);
+/** The roles that still lease under the throttle (leases.ts FINISHING). */
+const FINISHING = new Set(['review', 'heal', 'resolve']);
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 /** "1 issue waits", "2 issues wait". */
 const wait = (n: number, word: string) => `${plural(n, word)} wait${n === 1 ? 's' : ''}`;
@@ -164,15 +167,23 @@ export function statusOf(input: StatusInput, now: Date): Status {
         : '/setup/forge';
   const zoneHref = (id: string) => (pages.zones ? `/zones/${encodeURIComponent(id)}` : '/');
   const activeZones = zones.filter((z) => z.mode === 'active');
-  // Work that waits to start: ready items, and queued issue drops, in active zones.
-  const readyCount = activeZones.reduce(
-    (n, z) => n + z.items.filter((i) => i.state === 'ready').length,
+  // Work the next pass would take: ready items the scheduler does not skip as blocked, in active
+  // zones not parked for a credential (a paused or parked zone's work is held by that, not the gate).
+  const heldZones = activeZones.filter((z) => z.credentialProblems.length === 0);
+  const readyCount = heldZones.reduce(
+    (n, z) => n + z.items.filter((i) => i.state === 'ready' && !isBlocked(i)).length,
     0,
+  );
+  const blockedReady = activeZones.flatMap((z) =>
+    z.items.filter((i) => i.state === 'ready' && isBlocked(i)),
   );
   const queued = activeZones.flatMap((z) =>
     z.drops.filter((d) => d.state === 'queued').map((d) => ({ z, d })),
   );
-  const queuedIssues = queued.filter((q) => q.d.workItemId !== null).length;
+  const heldQueued = queued.filter((q) => heldZones.includes(q.z));
+  const queuedIssues = heldQueued.filter((q) => q.d.workItemId !== null).length;
+  // Under the throttle only finishing roles and the doctor lease (leases.ts): the rest waits.
+  const throttled = heldQueued.filter((q) => !FINISHING.has(q.d.role) && q.d.role !== 'doctor');
 
   /** The status, with every other blocker listed short, each with its fix. */
   const said = (s: Status, uses: { problem?: CredentialProblem; doctor?: boolean } = {}) => {
@@ -241,7 +252,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
       detail:
         'No stick has asked for work in the last two minutes: check `docker compose logs stick`.',
       waitingOn: 'stick',
-      action: { label: 'See the sticks on home', href: '/' },
+      action: { label: 'See the sticks on home', href: '/#sticks' },
     });
 
   const first = working.sort(
@@ -296,9 +307,10 @@ export function statusOf(input: StatusInput, now: Date): Status {
   // Held by the usage gate: work waits that the gate, not a slot, keeps from starting. The words
   // are doctorDropWait's and the home page's credits line.
   const waiting = readyCount + queuedIssues;
-  if (waiting > 0 && usage.gate === 'finishing_only')
+  const underThrottle = readyCount + throttled.length;
+  if (underThrottle > 0 && usage.gate === 'finishing_only')
     return said({
-      headline: `Held by Claude's usage throttle: ${wait(waiting, 'issue')}; only finishing work starts`,
+      headline: `Held by Claude's usage throttle: ${wait(underThrottle, throttled.every((q) => q.d.workItemId !== null) ? 'issue' : 'drop')}; only finishing work starts`,
       detail:
         "Claude's usage is above the throttle: reviews, heals and merges go on; new work starts once usage falls back.",
       waitingOn: 'claude',
@@ -426,6 +438,17 @@ export function statusOf(input: StatusInput, now: Date): Status {
       waitingOn: 'nothing',
     });
 
+  // Ready, but each waits on an open issue it is blocked by: the pass skips it (isBlocked).
+  if (blockedReady.length > 0) {
+    const by = [...new Set(blockedReady.flatMap((i) => i.blockedBy))];
+    const n = blockedReady.length;
+    return said({
+      headline: `${plural(n, 'ready issue')} wait${n === 1 ? 's' : ''} on the issues ${n === 1 ? 'it is' : 'they are'} blocked by (${by.join(', ')})`,
+      detail: 'Each starts once the issues blocking it are closed.',
+      waitingOn: 'nothing',
+    });
+  }
+
   const zoneOne = activeZones[0] ?? zones[0];
   return said({
     headline: 'Idle: no ready issues. Label one agent-ready or file one from Intake',
@@ -435,6 +458,19 @@ export function statusOf(input: StatusInput, now: Date): Status {
       ? { label: 'Open Intake', href: `/zones/${encodeURIComponent(zoneOne.id)}/intake` }
       : { label: 'Add a project', href: pages.zones ? '/zones' : '/setup/project' },
   });
+}
+
+/**
+ * Why no live stick can run a zone, or undefined when one can: what they all lack, or what each
+ * one lacks when they differ (the lease route's `missingFor`, per stick).
+ */
+export function cannotRunText(sticks: { name: string; missing: string[] }[]): string | undefined {
+  if (sticks.length === 0 || sticks.some((s) => s.missing.length === 0)) return undefined;
+  const shared = (sticks[0]?.missing ?? []).filter((m) =>
+    sticks.every((s) => s.missing.includes(m)),
+  );
+  if (shared.length > 0) return `no live stick has ${shared.join(', ')}`;
+  return `no live stick can run it (${sticks.map((s) => `${s.name} lacks ${s.missing.join(', ')}`).join('; ')})`;
 }
 
 /** Stamps the end of a pass (main.ts), so the status knows it across a restart. */
@@ -532,8 +568,8 @@ export function statusInputOf(o: {
       const doctorQueued = drops.some((d) => d.role === 'doctor' && d.state === 'queued');
       const need = zoneRequirements(zone, config);
       const cannotRun =
-        live.length > 0 && !live.some((s) => missingFor(s, need).length === 0)
-          ? `no live stick has ${missingFor(live[0] as (typeof live)[number], need).join(', ')}`
+        live.length > 0
+          ? cannotRunText(live.map((s) => ({ name: s.name, missing: missingFor(s, need) })))
           : undefined;
       return {
         id: zone.id,
