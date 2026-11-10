@@ -10,9 +10,9 @@ import {
   upsertWorkItem,
 } from './db/repo.js';
 import {
-  credentialFingerprint,
   type ForgePair,
   ForgePairs,
+  forgeTokenFingerprint,
   markPendingUnknown,
   opKeys,
   opMarker,
@@ -176,12 +176,12 @@ describe('FakeForgeState', () => {
     expect(pairs.for(zone('a'), tokens)).toBe(kept);
   });
 
-  test('credentialFingerprint is a short hash that changes with any forge token and holds none', () => {
+  test('forgeTokenFingerprint is a short hash that changes with any forge token and holds none', () => {
     const s = { githubAuthorToken: 'ghp_author', githubReviewerToken: 'ghp_rev' };
-    const fp = credentialFingerprint(s);
+    const fp = forgeTokenFingerprint(s);
     expect(fp).toMatch(/^[0-9a-f]{16}$/);
-    expect(credentialFingerprint({ ...s })).toBe(fp);
-    expect(credentialFingerprint({ ...s, githubReviewerToken: 'other' })).not.toBe(fp);
+    expect(forgeTokenFingerprint({ ...s })).toBe(fp);
+    expect(forgeTokenFingerprint({ ...s, githubReviewerToken: 'other' })).not.toBe(fp);
     expect(fp).not.toContain('ghp_');
   });
 

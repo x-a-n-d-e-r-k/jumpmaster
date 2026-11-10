@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import {
+  gateSecretsOf,
   loadConfig,
   MCP_DEFAULTS,
   modelFor,
@@ -13,6 +14,17 @@ import {
   startupWarnings,
   zoneSecrets,
 } from './config.js';
+import { resolveCredentials } from './vault/credentials.js';
+import { credentialProblems } from './vault/problems.js';
+
+/** The credential problems of every zone of a loaded config (what used to refuse it). */
+const problemsOf = (file: string, env: Record<string, string | undefined>) => {
+  const c = loadConfig(file, env);
+  const r = resolveCredentials(env, undefined, 'disabled', {
+    gateSecrets: gateSecretsOf(c.dropZones),
+  });
+  return c.dropZones.flatMap((z) => credentialProblems(z, r)).map((p) => [p.kind, p.credential]);
+};
 
 const fullEnv: Record<string, string | undefined> = {
   JM_CLAUDE_TOKEN: 'a',
@@ -56,22 +68,21 @@ const minimal = fixture({
 });
 
 describe('loadConfig', () => {
-  test('reviewReadToken without JM_GITHUB_READ_TOKEN is a config error', () => {
+  test('loadConfig no longer refuses a config for a credential rule: reviewReadToken without a read token is a problem', () => {
     const file = withZone({ reviewReadToken: true });
-    expect(() => loadConfig(file, fullEnv)).toThrow(/JM_GITHUB_READ_TOKEN/);
+    expect(problemsOf(file, fullEnv)).toEqual([['missing', 'githubReadToken']]);
     expect(
       loadConfig(file, { ...fullEnv, JM_GITHUB_READ_TOKEN: 'rd' }).secrets.githubReadToken,
     ).toBe('rd');
   });
 
-  test('missing JM_CLAUDE_TOKEN is a config error', () =>
-    expect(() =>
-      loadConfig(minimal, {
-        JM_GITHUB_AUTHOR_TOKEN: 'x',
-        JM_GITHUB_REVIEWER_TOKEN: 'z',
-        JM_JOIN_TOKEN: 'y',
-      }),
-    ).toThrow(/JM_CLAUDE_TOKEN/));
+  test('a missing JM_CLAUDE_TOKEN is a problem, not a refusal; a missing machine secret still stops the start', () => {
+    const { JM_CLAUDE_TOKEN: _c, ...noClaude } = fullEnv;
+    expect(loadConfig(minimal, noClaude).secrets.claudeToken).toBe('');
+    expect(problemsOf(minimal, noClaude)).toEqual([['missing', 'claudeToken']]);
+    const { JM_JOIN_TOKEN: _j, ...noJoin } = fullEnv;
+    expect(() => loadConfig(minimal, noJoin)).toThrow(/JM_JOIN_TOKEN/);
+  });
 
   test('applies defaults', () => {
     const c = loadConfig(minimal, fullEnv);
@@ -128,10 +139,10 @@ describe('loadConfig', () => {
   test('a zone mode defaults to active', () =>
     expect(loadConfig(minimal, fullEnv).dropZones[0]?.mode).toBe('active'));
 
-  test('reviewer token is required', () =>
-    expect(() => loadConfig(minimal, { ...fullEnv, JM_GITHUB_REVIEWER_TOKEN: undefined })).toThrow(
-      /JM_GITHUB_REVIEWER_TOKEN/,
-    ));
+  test('a two-bot zone without a reviewer token loads, with the problem', () =>
+    expect(problemsOf(minimal, { ...fullEnv, JM_GITHUB_REVIEWER_TOKEN: undefined })).toEqual([
+      ['missing', 'githubReviewerToken'],
+    ]));
 
   describe('services and limits', () => {
     test('default to none and the 512 process limit', () =>
@@ -163,13 +174,14 @@ describe('loadConfig', () => {
     const declared = () => withZone({ gateSecrets: ['TEST_DB_URL'] });
     const value = { JM_ZONE_SECRET_MAIN_TEST_DB_URL: 'postgres://local/test' };
 
-    test('a declared secret with no env value stops the server at startup', () =>
-      expect(() => loadConfig(declared(), fullEnv)).toThrow(/JM_ZONE_SECRET_MAIN_TEST_DB_URL/));
+    test('a declared secret with no value is a problem naming its variable, not a refusal', () => {
+      expect(problemsOf(declared(), fullEnv)).toEqual([['missing', 'zone:main:TEST_DB_URL']]);
+    });
 
-    test('a value under 8 characters is refused', () =>
-      expect(() =>
-        loadConfig(declared(), { ...fullEnv, JM_ZONE_SECRET_MAIN_TEST_DB_URL: 'short' }),
-      ).toThrow(/at least 8/));
+    test('a value under 8 characters is a problem of kind', () =>
+      expect(
+        problemsOf(declared(), { ...fullEnv, JM_ZONE_SECRET_MAIN_TEST_DB_URL: 'short' }),
+      ).toEqual([['kind', 'zone:main:TEST_DB_URL']]));
 
     test.each([
       'GH_TOKEN',
@@ -204,7 +216,12 @@ describe('loadConfig', () => {
 
     test('a zone id with punctuation maps to an underscored variable', () => {
       const file = withZone({ id: 'my-zone', gateSecrets: ['A_B'] });
-      expect(() => loadConfig(file, fullEnv)).toThrow(/JM_ZONE_SECRET_MY_ZONE_A_B/);
+      expect(
+        zoneSecrets(
+          loadConfig(file, { ...fullEnv, JM_ZONE_SECRET_MY_ZONE_A_B: 'value-1234' }),
+          'my-zone',
+        ),
+      ).toEqual({ A_B: 'value-1234' });
     });
 
     test('a zone declaring both X and X_FILE as gate secrets stops startup naming both', () => {
@@ -270,14 +287,14 @@ describe('loadConfig', () => {
         /JM_CLAUDE_TOKEN and JM_CLAUDE_TOKEN_FILE/,
       ));
 
-    test('the cross-token checks see file values', () => {
+    test('the cross-token checks see file values: the same token twice is a problem', () => {
       const env = fileEnv();
-      expect(() =>
-        loadConfig(minimal, {
+      expect(
+        problemsOf(minimal, {
           ...env,
           JM_GITHUB_REVIEWER_TOKEN_FILE: env.JM_GITHUB_AUTHOR_TOKEN_FILE,
         }),
-      ).toThrow(/must differ/);
+      ).toEqual([['same', 'githubReviewerToken']]);
     });
 
     test.skipIf(process.getuid?.() === 0)(
@@ -296,10 +313,10 @@ describe('loadConfig', () => {
   describe('authorMayBeAdmin', () => {
     const optedIn = () => withZone({ authorMayBeAdmin: true });
 
-    test('refuses an author token that is not fine-grained', () =>
-      expect(() =>
-        loadConfig(optedIn(), { ...fullEnv, JM_GITHUB_AUTHOR_TOKEN: 'ghp_classic' }),
-      ).toThrow(/fine-grained/));
+    test('an author token that is not fine-grained is a problem of kind', () =>
+      expect(problemsOf(optedIn(), { ...fullEnv, JM_GITHUB_AUTHOR_TOKEN: 'ghp_classic' })).toEqual([
+        ['kind', 'githubAuthorToken'],
+      ]));
 
     test('accepts a fine-grained author token', () =>
       expect(
@@ -319,7 +336,8 @@ describe('loadConfig', () => {
       const c = loadConfig(withZone({ identity: 'starter' }), starterEnv);
       expect(c.dropZones[0]?.identity).toBe('starter');
       expect(c.secrets.githubReviewerToken).toBeUndefined();
-      expect(() => loadConfig(minimal, starterEnv)).toThrow(/JM_GITHUB_REVIEWER_TOKEN/);
+      expect(problemsOf(withZone({ identity: 'starter' }), starterEnv)).toEqual([]);
+      expect(problemsOf(minimal, starterEnv)).toEqual([['missing', 'githubReviewerToken']]);
       // One two-bot zone among starter zones still needs the reviewer token.
       const mixed = fixture({
         dataDir: './data',
@@ -328,19 +346,19 @@ describe('loadConfig', () => {
           { ...baseZone, id: 'other' },
         ],
       });
-      expect(() => loadConfig(mixed, starterEnv)).toThrow(/JM_GITHUB_REVIEWER_TOKEN/);
+      expect(problemsOf(mixed, starterEnv)).toEqual([['missing', 'githubReviewerToken']]);
     });
 
-    test('starter with ciRequired false, or with a classic author token, is a config error', () => {
+    test('starter with ciRequired false is a config error; with a classic author token, a problem', () => {
       expect(() =>
         loadConfig(withZone({ identity: 'starter', ciRequired: false }), starterEnv),
       ).toThrow(/starter.*ciRequired/);
-      expect(() =>
-        loadConfig(withZone({ identity: 'starter' }), {
+      expect(
+        problemsOf(withZone({ identity: 'starter' }), {
           ...starterEnv,
           JM_GITHUB_AUTHOR_TOKEN: 'ghp_classic',
         }),
-      ).toThrow(/starter.*fine-grained/);
+      ).toEqual([['kind', 'githubAuthorToken']]);
     });
 
     test('starter with authorMayBeAdmin loads: the personal-repository path', () => {
@@ -348,41 +366,20 @@ describe('loadConfig', () => {
       expect(c.dropZones[0]).toMatchObject({ identity: 'starter', authorMayBeAdmin: true });
     });
 
-    test('the classic-token error explains the personal-repository path', () =>
-      expect(() =>
-        loadConfig(withZone({ identity: 'starter' }), {
-          ...starterEnv,
-          JM_GITHUB_AUTHOR_TOKEN: 'ghp_classic',
-        }),
-      ).toThrow(/personal repository.*your own account.*authorMayBeAdmin: true/));
-
-    test('a config with no zones still needs the reviewer token', () =>
-      expect(() => loadConfig(fixture({ dataDir: './data', dropZones: [] }), starterEnv)).toThrow(
-        /JM_GITHUB_REVIEWER_TOKEN/,
-      ));
+    test('a config with no zones loads with no problem, reviewer token or not', () =>
+      expect(problemsOf(fixture({ dataDir: './data', dropZones: [] }), starterEnv)).toEqual([]));
 
     test('startupWarnings names each starter zone with the warning, and nothing for two-bot', () => {
       const c = loadConfig(withZone({ identity: 'starter' }), starterEnv);
       expect(startupWarnings(c)).toEqual([`zone main: ${STARTER_WARNING}`]);
       expect(startupWarnings(loadConfig(minimal, fullEnv))).toEqual([]);
     });
-
-    test('a starter install with a reviewer token set still checks it differs', () =>
-      expect(() =>
-        loadConfig(withZone({ identity: 'starter' }), {
-          ...starterEnv,
-          JM_GITHUB_REVIEWER_TOKEN: starterEnv.JM_GITHUB_AUTHOR_TOKEN,
-        }),
-      ).toThrow(/must differ/));
   });
 
-  test('reviewer and author must differ', () =>
-    expect(() =>
-      loadConfig(minimal, {
-        ...fullEnv,
-        JM_GITHUB_REVIEWER_TOKEN: fullEnv.JM_GITHUB_AUTHOR_TOKEN,
-      }),
-    ).toThrow(/must differ/));
+  test('reviewer and author must differ: the same token is a problem', () =>
+    expect(
+      problemsOf(minimal, { ...fullEnv, JM_GITHUB_REVIEWER_TOKEN: fullEnv.JM_GITHUB_AUTHOR_TOKEN }),
+    ).toEqual([['same', 'githubReviewerToken']]));
 
   test('M1 defaults', () =>
     expect(loadConfig(minimal, fullEnv).dropZones[0]).toMatchObject({
@@ -1018,5 +1015,39 @@ describe('names that reach Object.prototype', () => {
     expect(zoneSecrets({ secrets }, 'toString')).toEqual({});
     expect(zoneSecrets({ secrets }, 'hasOwnProperty')).toEqual({});
     expect(zoneSecrets({ secrets }, 'main')).toEqual({ TOKEN_A: 'value-aaaa' });
+  });
+});
+
+describe('gate secret values and names (Task 4 review)', () => {
+  test('a gate secret under 8 characters never reaches the scrub lists, and the zone stays parked on it', () => {
+    const file = withZone({ gateSecrets: ['FLAG'] });
+    const env = { ...fullEnv, JM_ZONE_SECRET_MAIN_FLAG: 'e' };
+    const c = loadConfig(file, env);
+    expect(secretList(c.secrets)).not.toContain('e');
+    expect(zoneSecrets(c, 'main')).toEqual({});
+    expect(problemsOf(file, env)).toEqual([['kind', 'zone:main:FLAG']]);
+  });
+
+  test('zone ids that fold to the same JM_ZONE_SECRET_ prefix are refused', () => {
+    const r = parseEditable({
+      dropZones: [
+        { ...baseZone, id: 'web' },
+        { ...baseZone, id: 'WEB' },
+        { ...baseZone, id: 'a-b' },
+        { ...baseZone, id: 'a_b' },
+      ],
+    });
+    expect(r.ok ? [] : r.issues).toEqual([
+      {
+        path: 'dropZones.1.id',
+        message:
+          'zone ids web and WEB share the gate secret variables JM_ZONE_SECRET_WEB_<NAME>: rename one',
+      },
+      {
+        path: 'dropZones.3.id',
+        message:
+          'zone ids a-b and a_b share the gate secret variables JM_ZONE_SECRET_A_B_<NAME>: rename one',
+      },
+    ]);
   });
 });

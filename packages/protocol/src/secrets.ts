@@ -1,4 +1,5 @@
-import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, openSync, readSync } from 'node:fs';
+import { join } from 'node:path';
 
 const errno = (e: unknown): string | undefined =>
   e && typeof e === 'object' && 'code' in e ? String((e as { code: unknown }).code) : undefined;
@@ -24,15 +25,71 @@ export const MAX_SECRET_FILE_BYTES = 64 * 1024;
  *   same token read from a file; a server and stick sharing the join token should use the same
  *   source, or a value with no trailing newline.
  */
-export function readSecret(env: NodeJS.ProcessEnv, name: string): string | undefined {
+export function readSecret(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  /** Where the one-release `/run/secrets` fallback says what it did (default: stderr). */
+  warn: (msg: string) => void = (msg) => process.stderr.write(`[jumpmaster] warning: ${msg}\n`),
+): string | undefined {
   const fileVar = `${name}_FILE`;
   const path = env[fileVar];
   if (path === undefined || path === '') return env[name];
   if (env[name] !== undefined && env[name] !== '')
     throw new Error(`${name} and ${fileVar} are both set; set only one`);
+  const fallback = runSecretsFallback(env, name, path);
+  if (fallback) {
+    warn(
+      `${fileVar}: ${path} does not exist; reading ${fallback} instead (remove the variable: the secrets directory is read by name)`,
+    );
+    return readSecretFile(fallback, fileVar);
+  }
+  return readSecretFile(path, fileVar);
+}
+
+/**
+ * The credential variables whose value may be a file named for it under the secrets directory
+ * (`JM_SECRETS_DIR`, `/secrets` in the compose install).
+ */
+export const CREDENTIAL_FILES: Readonly<Record<string, string>> = {
+  JM_CLAUDE_TOKEN: 'claude_token',
+  JM_GITHUB_AUTHOR_TOKEN: 'github_author_token',
+  JM_GITHUB_REVIEWER_TOKEN: 'github_reviewer_token',
+  JM_GITHUB_READ_TOKEN: 'github_read_token',
+};
+
+/**
+ * A one-release shim, removed in M5: an M4 compose file hand-edited to keep a credential's
+ * `*_FILE` under `/run/secrets/` names a path that no longer exists once the compose mounts the
+ * secrets directory instead. Then the same credential is read from `JM_SECRETS_DIR` by its name
+ * (not by the path's basename). Inert where `JM_SECRETS_DIR` is unset (the stick).
+ */
+function runSecretsFallback(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  path: string,
+): string | undefined {
+  const dir = env.JM_SECRETS_DIR;
+  const file = Object.hasOwn(CREDENTIAL_FILES, name) ? CREDENTIAL_FILES[name] : undefined;
+  if (!dir || !file || !path.startsWith('/run/secrets/') || existsSync(path)) return undefined;
+  return join(dir, file);
+}
+
+/**
+ * A secret file, with every check a `*_FILE` secret gets. `label` (the variable, or the file's
+ * credential name) and the path are in every error; the value never is.
+ *
+ * The file is opened non-blocking, so a FIFO or device can't stall startup, and `fstat` on that
+ * descriptor must show a regular file that is not group- or world-writable and at most 64 KiB
+ * before anything is read. Exactly one trailing newline is trimmed; any other whitespace refuses.
+ */
+export function readSecretFile(path: string, label: string): string {
+  const fileVar = label;
   let fd: number;
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    // A symbolic link is followed (Kubernetes-style `..data` mounts, a hand-made link) and held to
+    // the plain-file rule: every check below runs on what the descriptor opened, never on the
+    // path. A readable-by-others target loads, as a plain file does; the doctor fails it.
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOCTTY ?? 0));
   } catch (e) {
     const code = errno(e);
     if (code === 'EACCES' || code === 'EPERM')

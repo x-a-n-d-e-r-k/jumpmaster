@@ -20,17 +20,27 @@ import { GitHubForge } from './forge/github.js';
 import { leaseExpirer } from './leases.js';
 import { type ForgePair, ForgePairs, markPendingUnknown } from './outbox.js';
 import { promptVersions } from './payloads.js';
+import { zonePass } from './scheduler.js';
+import { readSecretFile } from './secrets.js';
 import { syncDropZone } from './sync.js';
+import { credentialProblems } from './vault/problems.js';
+import { openVault } from './vault/vault.js';
 
 /** How long one request on the timed forges (doctor reads, intake writes) may take. */
 const TIMED_REQUEST_MS = 30_000;
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-/** Redacts configured secrets from a message before it is logged. */
-function scrub(msg: string, config: Config | undefined): string {
+/**
+ * Redacts configured secrets from a message before it is logged, and the values a rotation
+ * replaced while this process ran (a running drop may still print one).
+ */
+function scrub(msg: string, config: Config | undefined, retired: readonly string[] = []): string {
   if (!config) return msg;
-  return secretList(config.secrets).reduce((m, s) => m.split(s).join('[redacted]'), msg);
+  return [...secretList(config.secrets), ...retired].reduce(
+    (m, s) => m.split(s).join('[redacted]'),
+    msg,
+  );
 }
 
 type Timers = {
@@ -86,21 +96,27 @@ export function pollTimer(
 export async function start(configPath?: string, env: NodeJS.ProcessEnv = process.env) {
   const filePath = configPathOf(env, configPath);
   const boot = loadBoot(env, filePath);
-  // An unreadable secret file is named before the data directory or the database is touched.
-  preflightSecrets(env);
+  // An unreadable secret file (a variable's, one named under the secrets directory, or the vault
+  // key) is named before the data directory or the database is touched.
+  preflightSecrets(env, boot.secretsDir);
+  if (env.JM_VAULT_KEY_FILE) readSecretFile(env.JM_VAULT_KEY_FILE, 'JM_VAULT_KEY_FILE');
   mkdirSync(boot.dataDir, { recursive: true });
   const db = openDb(join(boot.dataDir, 'jumpmaster.sqlite'));
   // A write in flight when the process died has an unknown outcome: resolve it by read-back.
   markPendingUnknown(db, new Date());
 
   let store: ConfigStore | undefined;
-  const log = (msg: string) => console.error(`[jumpmaster] ${scrub(msg, store?.current())}`);
+  const log = (msg: string) =>
+    console.error(`[jumpmaster] ${scrub(msg, store?.current(), store?.retired())}`);
   try {
+    // The key and the data travel together: a non-empty vault without its key stops the start.
+    const vault = openVault(env.JM_VAULT_KEY_FILE || undefined, db, boot.dataDir);
     store = ConfigStore.open({
       db,
       boot,
       ...(filePath ? { filePath } : {}),
       env,
+      vault,
       now: () => new Date(),
       log,
     });
@@ -184,19 +200,28 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     } catch (e) {
       log(`credits step failed: ${errorMessage(e)}`);
     }
+    const resolved = live.resolved();
     for (const zone of config.dropZones) {
       try {
-        const forgePair = pairs.for(zone, config.secrets);
-        const synced = await syncDropZone(db, forgePair, zone, new Date());
-        await reconcileZone(
-          db,
-          forgePair,
+        // A zone with a credential problem is parked with it as the reason (vault/problems.ts).
+        await zonePass(
           zone,
-          synced.pass,
-          promptVersions(),
-          config.usage,
-          secrets,
-          new Date(),
+          credentialProblems(zone, resolved),
+          async () => {
+            const forgePair = pairs.for(zone, config.secrets);
+            const synced = await syncDropZone(db, forgePair, zone, new Date());
+            await reconcileZone(
+              db,
+              forgePair,
+              zone,
+              synced.pass,
+              promptVersions(),
+              config.usage,
+              secrets,
+              new Date(),
+            );
+          },
+          log,
         );
       } catch (e) {
         log(`pass failed for zone ${zone.id}: ${errorMessage(e)}`);

@@ -57,7 +57,7 @@ type PairTokens = {
  * A short SHA-256 over the forge tokens, for caching what was built from them. Never shown: it
  * names no token, and a 64-bit prefix of a hash over high-entropy tokens reveals nothing.
  */
-export function credentialFingerprint(secrets: PairTokens): string {
+export function forgeTokenFingerprint(secrets: PairTokens): string {
   return createHash('sha256')
     .update(
       JSON.stringify([
@@ -87,7 +87,7 @@ export class ForgePairs {
       zone.repo,
       zone.identity ?? 'two-bot',
       zone.authorMayBeAdmin,
-      credentialFingerprint(secrets),
+      forgeTokenFingerprint(secrets),
     ]);
     const hit = this.cache.get(slot);
     if (hit && hit.key === key) return hit.pair;

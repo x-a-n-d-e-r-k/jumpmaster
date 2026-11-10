@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   statSync,
   writeFileSync,
@@ -11,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { loadConfig, parseEditable, splitConfigFile } from './config.js';
-import { type InitDeps, type InitForge, runInit } from './init.js';
+import { createSecretOnce, type InitDeps, type InitForge, runInit } from './init.js';
 
 const AUTHOR = 'github_pat_INITAUTHORDUMMY0123456789';
 const CLASSIC = 'ghp_INITCLASSICDUMMY0123456789';
@@ -277,6 +278,20 @@ describe('jumpmaster init', () => {
     expect(readFileSync(join(dir, 'secrets', 'github_author_token'), 'utf8')).toBe(`${AUTHOR}\n`);
   });
 
+  test('init writes secrets/vault_key with mode 0600: 32 random bytes, base64url, kept on a rerun, never printed', async () => {
+    const dir = installDir();
+    const first = await run(dir, ['--repo', 'octo/demo']);
+    expect(first.code).toBe(0);
+    const key = join(dir, 'secrets', 'vault_key');
+    expect(mode(key)).toBe(0o600);
+    const text = readFileSync(key, 'utf8').trim();
+    expect(Buffer.from(text, 'base64url')).toHaveLength(32);
+    expect(first.all).toContain('secrets/vault_key');
+    expect(first.all).not.toContain(text);
+    expect((await run(dir, ['--repo', 'octo/demo', '--force'])).code).toBe(0);
+    expect(readFileSync(key, 'utf8').trim()).toBe(text);
+  });
+
   test('a missing author token is named by its file, and nothing is written', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'jm-init-'));
     const r = await run(dir, ['--repo', 'octo/demo']);
@@ -479,4 +494,18 @@ describe('jumpmaster init', () => {
       expect(r.err).toMatch(/usage: jumpmaster init/);
     }
   });
+});
+
+test('createSecretOnce falls back to an exclusive write where hard links are not supported', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'jm-nolink-'));
+  const path = join(dir, 'vault_key');
+  const noLinks = () => {
+    throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+  };
+  expect(createSecretOnce(path, 'k1\n', noLinks)).toBe(true);
+  expect(readFileSync(path, 'utf8')).toBe('k1\n');
+  expect(mode(path)).toBe(0o600);
+  expect(createSecretOnce(path, 'k2\n', noLinks)).toBe(false);
+  expect(readFileSync(path, 'utf8')).toBe('k1\n');
+  expect(readdirSync(dir)).toEqual(['vault_key']);
 });

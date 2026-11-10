@@ -143,7 +143,14 @@ export function registerConfirmPages(app: FastifyInstance, deps: ConfirmPageDeps
         db,
         { via: 'session', action: ACTION_OF[pending.meta.via], detail: appliedDetail(r) },
         now(),
-        secretList(store.current().secrets),
+        // The request's snapshot, the secrets now and the retired ones (T3 review M6).
+        [
+          ...new Set([
+            ...secretList((req.jmConfig ?? store.current()).secrets),
+            ...secretList(store.current().secrets),
+            ...store.retired(),
+          ]),
+        ],
       );
       if (pending.returnTo) return reply.redirect(safeNext(pending.returnTo), 303);
       return html(

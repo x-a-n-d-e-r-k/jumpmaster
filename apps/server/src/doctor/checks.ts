@@ -1,3 +1,5 @@
+import { realpathSync } from 'node:fs';
+import { resolve as resolvePath, sep } from 'node:path';
 /**
  * The readiness doctor's server-side checks (spec §8.0). Every check is a read: the database, the
  * config, this process, and GET requests to the forge. None writes anywhere, and none prints a
@@ -34,6 +36,9 @@ import type { ForgePair } from '../outbox.js';
 import { egressFor } from '../payloads.js';
 import { DETECT_FILES, detectPreset } from '../presets.js';
 import { dispatchGate } from '../usage.js';
+import type { Shadowed } from '../vault/credentials.js';
+import type { CredentialProblem } from '../vault/problems.js';
+import { KEY_CHANGED } from '../vault/vault.js';
 
 export type DoctorStatus = 'pass' | 'warn' | 'fail' | 'skip';
 
@@ -58,7 +63,10 @@ export type DoctorEnv = {
   /** `/proc/self/uid_map`, or null off Linux: anything but the identity map is a user namespace. */
   uidMap: string | null;
   /** Each secret read from a file (`JM_*_FILE`), with its mode (null when it can't be read). */
-  secretFiles?: { variable: string; path: string; mode: number | null }[];
+  /** `mode` is the target's (a link is followed); `link` when the path itself is a symlink. */
+  secretFiles?: { variable: string; path: string; mode: number | null; link?: boolean }[];
+  /** `JM_VAULT_KEY_FILE`, to warn when it lies under the data directory. */
+  vaultKeyFile?: string;
 };
 
 export type DoctorDeps = {
@@ -73,6 +81,14 @@ export type DoctorDeps = {
   readForge?(zoneId: string): Forge | undefined;
   /** The config store's status (mode, file problems, restart-pending settings), when there is one. */
   configStatus?: ConfigStatus;
+  /** The credentials as the store resolved them (Task 4); absent, the credential checks don't run. */
+  credentials?: {
+    problems: CredentialProblem[];
+    shadowed: Shadowed[];
+    vaultKey: { status: 'ok' | 'empty' | 'disabled' } | { status: 'mismatch'; names: string[] };
+    /** The Claude token's creation date (`credentialCreatedAt`), for `claude.token-age`. */
+    claudeTokenCreatedAt?: string;
+  };
 };
 
 /**
@@ -360,14 +376,15 @@ function secretFilesCheck(d: DoctorDeps): DoctorCheck {
   return {
     ...base,
     status: 'fail',
-    summary: `secret file(s) other users on the host can read: ${open.map((f) => `${f.path} (${f.variable}, mode ${(f.mode as number).toString(8).padStart(3, '0')})`).join(', ')}`,
+    summary: `secret file(s) other users on the host can read: ${open.map((f) => `${f.path} (${f.variable}, mode ${(f.mode as number).toString(8).padStart(3, '0')}${f.link ? '; a link: chmod 600 the file it points to' : ''})`).join(', ')}`,
     fix: 'In the install directory: chmod 700 secrets && chmod 600 secrets/*, then docker compose restart jumpmaster.',
   };
 }
 
 function tokenAgeCheck(d: DoctorDeps): DoctorCheck {
   const base = { id: 'claude.token-age', zoneId: null, doc: doc('claude-token') };
-  const created = d.config.claude.tokenCreatedAt;
+  // A token entered in the UI is dated by the vault; a file's by claude.tokenCreatedAt.
+  const created = d.credentials?.claudeTokenCreatedAt ?? d.config.claude.tokenCreatedAt;
   if (!created)
     return {
       ...base,
@@ -1799,6 +1816,111 @@ export async function zoneChecks(
   ];
 }
 
+const CREDENTIAL_KINDS = {
+  missing: {
+    id: 'credential.missing',
+    fix: 'Enter it under Settings, Credentials (or write its file under secrets/ and run jumpmaster ctl secrets reload); the zone stays parked until then.',
+  },
+  kind: {
+    id: 'credential.kind',
+    fix: 'Replace the token with a fine-grained one (github_pat_) limited to the repository, under Settings, Credentials.',
+  },
+  same: {
+    id: 'credential.same',
+    fix: 'The reviewer token must belong to a second account: replace it under Settings, Credentials.',
+  },
+} as const;
+
+/** One check per problem kind and zone: what parks the zone's dispatch, and its fix. */
+function credentialChecks(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck[] {
+  const problems = (d.credentials?.problems ?? []).filter((p) => p.zoneId === zone.id);
+  return (Object.keys(CREDENTIAL_KINDS) as (keyof typeof CREDENTIAL_KINDS)[]).map((kind) => {
+    const { id, fix } = CREDENTIAL_KINDS[kind];
+    const hits = problems.filter((p) => p.kind === kind);
+    if (hits.length === 0)
+      return {
+        id,
+        zoneId: zone.id,
+        status: 'pass',
+        summary: `no ${kind === 'missing' ? 'missing credential' : kind === 'kind' ? 'credential of the wrong kind' : 'shared account'} for ${zone.id}`,
+      };
+    return {
+      id,
+      zoneId: zone.id,
+      status: 'fail',
+      summary: hits.map((p) => `${p.credential}: ${p.message}`).join('; '),
+      fix,
+      doc: doc('tokens'),
+    };
+  });
+}
+
+function shadowedCheck(d: DoctorDeps): DoctorCheck {
+  const base = { id: 'credential.shadowed', zoneId: null, doc: doc('tokens') };
+  const list = d.credentials?.shadowed ?? [];
+  if (list.length === 0)
+    return {
+      ...base,
+      status: 'pass',
+      summary: 'no credential is set both in a file and in the vault',
+    };
+  return {
+    ...base,
+    status: 'warn',
+    summary: list
+      .map(
+        (s) =>
+          `${s.name} is set by ${s.path} (${s.fileFingerprint}) and in the vault (${s.vaultFingerprint}): the file is in use`,
+      )
+      .join('; '),
+    fix: 'Remove the one you do not mean: delete the file (then jumpmaster ctl secrets reload), or remove the vault entry with jumpmaster ctl secrets remove <name>.',
+  };
+}
+
+function vaultKeyCheck(d: DoctorDeps): DoctorCheck {
+  const base = { id: 'vault.key', zoneId: null, doc: doc('tokens') };
+  const k = d.credentials?.vaultKey ?? { status: 'disabled' as const };
+  if (k.status === 'mismatch')
+    return {
+      ...base,
+      status: 'fail',
+      summary: `${KEY_CHANGED} (${k.names.join(', ')})`,
+      fix: 'Put back the key file JM_VAULT_KEY_FILE names (secrets/vault_key) from the backup taken with the data, or re-enter each credential under Settings, Credentials.',
+    };
+  if (k.status === 'disabled')
+    return {
+      ...base,
+      status: 'skip',
+      summary:
+        'no vault key (JM_VAULT_KEY_FILE is unset): credentials come from files and the environment only',
+    };
+  const keyFile = d.env.vaultKeyFile;
+  // Real paths on both sides: a symlinked data directory or key path can't hide the overlap.
+  const real = (p: string): string => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return resolvePath(p);
+    }
+  };
+  const data = real(d.config.dataDir);
+  if (keyFile && real(keyFile).startsWith(data + sep))
+    return {
+      ...base,
+      status: 'warn',
+      summary: `the vault key ${keyFile} is under the data directory ${d.config.dataDir}: a copy of the data carries the key beside the ciphertext`,
+      fix: 'Move the key file to secrets/vault_key (outside the data directory), point JM_VAULT_KEY_FILE at it, and restart.',
+    };
+  return {
+    ...base,
+    status: 'pass',
+    summary:
+      k.status === 'empty'
+        ? 'the vault key is set; the vault is empty'
+        : 'every vault entry decrypts with the key',
+  };
+}
+
 /** Every check, global ones first, then each zone's (zones in parallel). */
 export async function runChecks(
   d: DoctorDeps,
@@ -1822,8 +1944,15 @@ export async function runChecks(
           g('config.restart', null, () => restartCheck(d.configStatus as ConfigStatus)),
         ]
       : []),
+    ...(d.credentials
+      ? [
+          g('credential.shadowed', null, () => shadowedCheck(d)),
+          g('vault.key', null, () => vaultKeyCheck(d)),
+        ]
+      : []),
   ]);
   const zones = d.config.dropZones.filter((z) => opts.zoneId === undefined || z.id === opts.zoneId);
   const perZone = await Promise.all(zones.map((z) => zoneChecks(d, z, sticks)));
-  return [...global, ...perZone.flat()];
+  const creds = d.credentials ? zones.flatMap((z) => credentialChecks(d, z)) : [];
+  return [...global, ...perZone.flat(), ...creds];
 }

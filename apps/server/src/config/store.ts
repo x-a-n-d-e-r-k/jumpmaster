@@ -1,15 +1,18 @@
 import { existsSync, readFileSync } from 'node:fs';
 import type { Principal } from '../auth/guard.js';
 import {
+  assembleSecrets,
   BOOT_MESSAGE,
   type Config,
   type ConfigIssue,
   type DropZoneConfig,
   type EditableConfig,
   formatIssues,
-  loadSecrets,
+  gateSecretsOf,
+  loadMachineSecrets,
   mcpConfigOf,
   parseEditable,
+  secretList,
   splitConfigFile,
 } from '../config.js';
 import type { Db } from '../db/open.js';
@@ -21,6 +24,14 @@ import {
   zoneHasHistory,
   zoneHistoryRepo,
 } from '../db/repo.js';
+import {
+  type CredentialName,
+  type Resolved,
+  type ResolvedCredential,
+  resolveCredentials,
+} from '../vault/credentials.js';
+import { type CredentialProblem, credentialProblems } from '../vault/problems.js';
+import { fingerprintOf, type Vault, type VaultMeta } from '../vault/vault.js';
 import type { BootConfig } from './boot.js';
 import { RESTART_PATHS } from './boot.js';
 import { Confirmations, type ConsumeFailure } from './confirm.js';
@@ -118,9 +129,20 @@ export type StoreOptions = {
   now(): Date;
   imageLockPath?: string;
   log?: (msg: string) => void;
-  /** The secrets for a set of zones; throws naming a variable (default: `loadSecrets(env, …)`). */
+  /**
+   * The vault (Task 4): credentials neither a variable nor a file under the secrets directory
+   * supplies. Absent: `'disabled'`.
+   */
+  vault?: Vault | 'disabled';
+  /**
+   * A test seam: the secrets for a set of zones, instead of resolving them from the environment,
+   * the secrets directory and the vault.
+   */
   secretsFor?: (zones: readonly DropZoneConfig[]) => Config['secrets'];
 };
+
+/** How many replaced secret values the log and audit scrub keep redacting. */
+const MAX_RETIRED = 32;
 
 const TOKEN_ONLY = 'this needs the operator token: run it with jumpmaster ctl';
 const unchanged = (revision: number, restartNeeded: string[] = []): ApplyResult => ({
@@ -144,7 +166,12 @@ const restartValues = (c: EditableConfig): Record<(typeof RESTART_PATHS)[number]
   'mcp.maxBodyBytes': mcpConfigOf(c).maxBodyBytes,
 });
 
-type Valid = { editable: EditableConfig; secrets: Config['secrets']; warnings?: string[] };
+type Valid = {
+  editable: EditableConfig;
+  resolved: Resolved;
+  secrets: Config['secrets'];
+  warnings?: string[];
+};
 
 /**
  * The document as it will be stored, read back from its canonical JSON: own data properties
@@ -169,6 +196,9 @@ export class ConfigStore implements ConfigSource {
   private readonly subscribers = new Set<(c: Config, rev: number, changes: Change[]) => void>();
   /** Guarded changes from sessions waiting for the confirmation page (in memory only). */
   readonly confirmations: Confirmations;
+  private resolvedValue!: Resolved;
+  private readonly retiredValues = new Set<string>();
+  private readonly warned = new Set<string>();
 
   private constructor(private readonly o: StoreOptions) {
     this.confirmations = new Confirmations(o.now);
@@ -482,6 +512,66 @@ export class ConfigStore implements ConfigSource {
     return unchanged(this.rev);
   }
 
+  /** Every credential as it resolved: source, path, fingerprint, dates and the value. */
+  resolved(): Resolved {
+    return this.resolvedValue;
+  }
+
+  /** The vault, or `'disabled'` when there is no key file. */
+  vault(): Vault | 'disabled' {
+    return this.o.vault ?? 'disabled';
+  }
+
+  /** The credential problems of every zone (dispatch refusals; doctor `credential.*`). */
+  problems(): CredentialProblem[] {
+    return this.cfg.dropZones.flatMap((z) => credentialProblems(z, this.resolvedValue));
+  }
+
+  /** Secret values replaced while this process ran: logs and audit rows keep redacting them. */
+  retired(): string[] {
+    return [...this.retiredValues];
+  }
+
+  /**
+   * Stores a credential in the vault and swaps it in. When the new set does not load (a value
+   * equal to the operator token, say), the previous entry is put back exactly as it was and the
+   * old credential stays in effect.
+   */
+  putCredential(
+    name: CredentialName,
+    value: string,
+    o: { declaredCreatedAt?: string; note?: string; test?: { result: string; login?: string } },
+  ): { ok: true; meta: VaultMeta } | { ok: false; issues: ConfigIssue[] } {
+    const vault = this.vault();
+    if (vault === 'disabled') return { ok: false, issues: [{ path: '', message: VAULT_DISABLED }] };
+    const before = vault.snapshot(name);
+    const now = this.o.now();
+    const meta = vault.put(name, value, { now, ...o });
+    if (o.test) vault.recordTest(name, { at: now, ...o.test });
+    const r = this.refreshSecrets();
+    if (!r.ok) {
+      vault.restore(name, before);
+      return { ok: false, issues: 'issues' in r ? r.issues : [] };
+    }
+    return { ok: true, meta: vault.meta(name) ?? meta };
+  }
+
+  /** Removes a vault entry and swaps the credentials; refused when the vault is off. */
+  deleteCredential(
+    name: CredentialName,
+  ): { ok: true; deleted: boolean } | { ok: false; issues: ConfigIssue[] } {
+    const vault = this.vault();
+    if (vault === 'disabled') return { ok: false, issues: [{ path: '', message: VAULT_DISABLED }] };
+    const before = vault.snapshot(name);
+    const deleted = vault.delete(name);
+    const r = this.refreshSecrets();
+    if (!r.ok) {
+      vault.restore(name, before);
+      return { ok: false, issues: 'issues' in r ? r.issues : [] };
+    }
+    return { ok: true, deleted };
+  }
+
   /** A new revision with an old revision's content; history is never deleted. */
   rollback(id: number, meta: OpMeta): ApplyResult {
     const old = getRevision(this.o.db, id);
@@ -644,16 +734,37 @@ export class ConfigStore implements ConfigSource {
       strict,
     });
     if (!parsed.ok) return { issues: parsed.issues };
+    // No credential rule here (they are dispatch refusals: vault/problems.ts). Only a secret that
+    // cannot be read at all (a file's mode, a variable set both ways) stops the change.
     try {
-      const secretsFor = this.o.secretsFor ?? ((zones) => loadSecrets(this.o.env, zones));
+      const zones = parsed.config.dropZones;
+      let resolved: Resolved;
+      let secrets: Config['secrets'];
+      if (this.o.secretsFor) {
+        secrets = this.o.secretsFor(zones);
+        resolved = resolvedFromSecrets(secrets, zones);
+      } else {
+        resolved = resolveCredentials(this.o.env, this.o.boot.secretsDir, this.vault(), {
+          gateSecrets: gateSecretsOf(zones),
+          warn: (m) => this.warnOnce(m),
+        });
+        secrets = assembleSecrets(resolved, loadMachineSecrets(this.o.env, resolved), zones);
+      }
       return {
         editable: parsed.config,
-        secrets: secretsFor(parsed.config.dropZones),
+        resolved,
+        secrets,
         ...(parsed.warnings ? { warnings: parsed.warnings } : {}),
       };
     } catch (e) {
       return { issues: [{ path: '', message: (e as Error).message }] };
     }
+  }
+
+  private warnOnce(msg: string): void {
+    if (this.warned.has(msg)) return;
+    this.warned.add(msg);
+    this.o.log?.(`warning: ${msg}`);
   }
 
   private load(doc: Record<string, unknown>, v: Valid): void {
@@ -663,6 +774,19 @@ export class ConfigStore implements ConfigSource {
     this.warnings = v.warnings;
     for (const w of v.warnings ?? []) this.o.log?.(`config: ${w}`);
     const { listen, dataDir } = this.o.boot;
+    // A replaced value stays in the scrub lists: a running drop and a log line may still carry it.
+    if (this.cfg) {
+      const now = new Set(secretList(v.secrets));
+      for (const old of secretList(this.cfg.secrets))
+        if (!now.has(old)) this.retiredValues.add(old);
+      while (this.retiredValues.size > MAX_RETIRED) {
+        this.retiredValues.delete(this.retiredValues.values().next().value as string);
+        this.o.log?.(
+          `warning: a replaced secret left the redaction list (it keeps the latest ${MAX_RETIRED}); restart the server once the drops that carried it are done`,
+        );
+      }
+    }
+    this.resolvedValue = v.resolved;
     this.cfg = { listen, dataDir, ...v.editable, secrets: v.secrets };
   }
 
@@ -747,4 +871,33 @@ export class ConfigStore implements ConfigSource {
     this.notify(changes);
     return { ok: true, revision: id, changed: changes.map((c) => c.path), restartNeeded };
   }
+}
+
+export const VAULT_DISABLED =
+  'the vault is off: set JM_VAULT_KEY_FILE (a 32-byte key file under ./secrets), or write the credential to its file under secrets/';
+
+/** The test seam's secrets as resolved credentials (source `env`). */
+function resolvedFromSecrets(
+  s: Config['secrets'],
+  zones: readonly { id: string; gateSecrets: string[] }[],
+): Resolved {
+  const one = (value: string | undefined, path: string): ResolvedCredential =>
+    value
+      ? { value, source: 'env', path, fingerprint: fingerprintOf(value) }
+      : { source: 'missing' };
+  const out = {
+    claudeToken: one(s.claudeToken, 'JM_CLAUDE_TOKEN'),
+    githubAuthorToken: one(s.githubAuthorToken, 'JM_GITHUB_AUTHOR_TOKEN'),
+    githubReviewerToken: one(s.githubReviewerToken, 'JM_GITHUB_REVIEWER_TOKEN'),
+    githubReadToken: one(s.githubReadToken, 'JM_GITHUB_READ_TOKEN'),
+  } as Resolved;
+  for (const z of zones)
+    for (const name of z.gateSecrets) {
+      const v =
+        s.zoneSecrets && Object.hasOwn(s.zoneSecrets, z.id)
+          ? s.zoneSecrets[z.id]?.[name]
+          : undefined;
+      Object.defineProperty(out, `zone:${z.id}:${name}`, { value: one(v, name), enumerable: true });
+    }
+  return out;
 }

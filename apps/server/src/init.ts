@@ -10,7 +10,7 @@
 // visibility and root build files (GET requests only; `--offline` skips GitHub and takes the
 // preset and visibility from the flags), then writes:
 //   - config/jumpmaster.config.json (the stack preset and its gates, egress monitor, signed images);
-//   - secrets/join_token and secrets/operator_token (0600), only when absent;
+//   - secrets/join_token, secrets/operator_token and secrets/vault_key (0600), only when absent;
 //   - a block of compose variables in .env, only for starter mode (no reviewer token is mounted)
 //     or a private repository (the read token is), removed again when neither applies.
 // Token files others can read are tightened to 0600.
@@ -22,12 +22,14 @@ import { randomBytes } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
@@ -219,6 +221,42 @@ function writeAtomic(path: string, text: string, mode: number): void {
   renameSync(tmp, path);
 }
 
+/**
+ * Writes a generated secret only when absent, atomically: the whole value goes to a 0600 file
+ * beside it, which is then linked into place (refused when the name exists), so no reader ever
+ * sees a partial key and a rerun never replaces one. Returns whether it was created.
+ */
+export function createSecretOnce(
+  path: string,
+  text: string,
+  link: (from: string, to: string) => void = linkSync,
+): boolean {
+  const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  writeFileSync(tmp, text, { mode: 0o600, flag: 'wx' });
+  let linked = false;
+  try {
+    link(tmp, path);
+    linked = true;
+  } catch (e) {
+    const code = errno(e);
+    if (code === 'EEXIST') return false;
+    // A filesystem without hard links (some network and FUSE mounts): an exclusive write, which
+    // still never replaces a key, though a crash mid-write could leave a short one.
+    if (code !== 'EPERM' && code !== 'ENOTSUP' && code !== 'EOPNOTSUPP' && code !== 'ENOSYS')
+      throw e;
+  } finally {
+    unlinkSync(tmp);
+  }
+  if (linked) return true;
+  try {
+    writeFileSync(path, text, { mode: 0o600, flag: 'wx' });
+    return true;
+  } catch (e) {
+    if (errno(e) === 'EEXIST') return false;
+    throw e;
+  }
+}
+
 export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
   const { dir, out, err } = deps;
   let args: Args;
@@ -352,16 +390,10 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
 
   // Write: generated secrets (only when absent), the config, init's .env block.
   const generated: string[] = [];
-  for (const name of ['join_token', 'operator_token']) {
-    try {
-      writeFileSync(secretPath(name), `${randomBytes(32).toString('base64url')}\n`, {
-        mode: 0o600,
-        flag: 'wx',
-      });
+  // The vault key (Task 4) beside the join and operator tokens; T5's bootstrap takes all three over.
+  for (const name of ['join_token', 'operator_token', 'vault_key']) {
+    if (createSecretOnce(secretPath(name), `${randomBytes(32).toString('base64url')}\n`))
       generated.push(`secrets/${name}`);
-    } catch (e) {
-      if (errno(e) !== 'EEXIST') throw e;
-    }
   }
   let tokenCreatedAt: string | undefined;
   try {
@@ -415,7 +447,7 @@ export async function runInit(argv: string[], deps: InitDeps): Promise<number> {
   out('  egress: monitor (the doctor drop shows the hosts to allow before you switch to enforce)');
   out('  images: signed releases only (requireSignedImages: true)');
   if (access.private) out('  the repository is private: reviewReadToken is on');
-  if (generated.length) out(`generated ${generated.join(' and ')} (mode 0600)`);
+  if (generated.length) out(`generated ${generated.join(', ')} (mode 0600)`);
   if (envAfter !== envBefore)
     out(
       envLines.length

@@ -298,3 +298,58 @@ describe('ctl config', () => {
     await s.app.close();
   });
 });
+
+describe('ctl secrets (Task 4)', () => {
+  const VALUE = 'github_pat_CTLSECRETVALUE_0001';
+  const bodyOf = (r: { calls: { init: RequestInit }[] }) =>
+    JSON.parse(String(r.calls[0]?.init.body));
+
+  test('ctl secrets set reads the value from stdin or a file and refuses one in argv', async () => {
+    const fromStdin = await run(['secrets', 'set', 'githubAuthorToken'], `${VALUE}\n`);
+    expect(fromStdin.code).toBe(0);
+    expect(fromStdin.calls[0]?.url).toBe(
+      'http://127.0.0.1:7420/api/control/secrets/githubAuthorToken',
+    );
+    expect(fromStdin.calls[0]?.init.method).toBe('PUT');
+    expect(bodyOf(fromStdin)).toEqual({ value: VALUE });
+    const file = join(mkdtempSync(join(tmpdir(), 'jm-ctl-secret-')), 'v');
+    writeFileSync(file, `${VALUE}\n`, { mode: 0o600 });
+    const fromFile = await run(
+      ['secrets', 'set', 'claudeToken', '--from-file', file, '--created', '2026-01-02'],
+      '',
+    );
+    expect(fromFile.code).toBe(0);
+    expect(bodyOf(fromFile)).toEqual({ value: VALUE, declaredCreatedAt: '2026-01-02' });
+    // A value in argv would sit in the shell history and the process list.
+    const argv = await run(['secrets', 'set', 'githubAuthorToken', VALUE]);
+    expect(argv.code).toBe(2);
+    expect(argv.calls).toHaveLength(0);
+    expect(argv.err.join('\n')).toMatch(/stdin or --from-file/);
+    const empty = await run(['secrets', 'set', 'githubAuthorToken'], '\n');
+    expect(empty.code).toBe(2);
+    for (const r of [fromStdin, fromFile, argv, empty]) {
+      expect(`${r.out.join('\n')}${r.err.join('\n')}`).not.toContain(VALUE);
+      expect(r.calls[0]?.url ?? '').not.toContain(VALUE);
+    }
+  });
+
+  test('list, test, remove and reload reach their routes', async () => {
+    expect((await run(['secrets', 'list'])).calls[0]).toMatchObject({
+      url: 'http://127.0.0.1:7420/api/control/secrets',
+      init: { method: 'GET' },
+    });
+    expect((await run(['secrets', 'test', 'claudeToken'])).calls[0]).toMatchObject({
+      url: 'http://127.0.0.1:7420/api/control/secrets/claudeToken/test',
+      init: { method: 'POST' },
+    });
+    expect((await run(['secrets', 'remove', 'githubReadToken'])).calls[0]).toMatchObject({
+      url: 'http://127.0.0.1:7420/api/control/secrets/githubReadToken',
+      init: { method: 'DELETE' },
+    });
+    expect((await run(['secrets', 'reload'])).calls[0]).toMatchObject({
+      url: 'http://127.0.0.1:7420/api/control/secrets/reload',
+      init: { method: 'POST' },
+    });
+    expect((await run(['secrets', 'nope'])).code).toBe(2);
+  });
+});

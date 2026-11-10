@@ -11,6 +11,7 @@ import {
 } from './db/repo.js';
 import { rankItems } from './sync.js';
 import { dispatchGate, gateQueuesImplement } from './usage.js';
+import type { CredentialProblem } from './vault/problems.js';
 
 const isUniqueViolation = (e: unknown): boolean =>
   e instanceof Error && /UNIQUE constraint failed/.test(e.message);
@@ -88,4 +89,33 @@ export function enqueueNext(
     usageCfg,
     now,
   );
+}
+
+/** Zones parked for a credential problem, with the reason (the queue reason; T12's status). */
+const holds = new Map<string, string>();
+
+/** Why a zone's dispatch waits on its credentials, or undefined. */
+export const zoneHold = (zoneId: string): string | undefined => holds.get(zoneId);
+
+/**
+ * One zone's turn in a pass. A zone with a credential problem is parked: nothing of it runs (no
+ * sync, no dispatch, no forge write), with `credentials: <message>` as its reason, said once when
+ * it starts and once when it ends. Its drops already running keep their payloads.
+ */
+export async function zonePass(
+  zone: Pick<DropZoneConfig, 'id'>,
+  problems: readonly CredentialProblem[],
+  run: () => Promise<void>,
+  log: (line: string) => void = () => {},
+): Promise<{ held: string | null }> {
+  const first = problems[0];
+  if (first) {
+    const reason = `credentials: ${first.message}`;
+    if (holds.get(zone.id) !== reason) log(`zone ${zone.id} parked: ${reason}`);
+    holds.set(zone.id, reason);
+    return { held: reason };
+  }
+  if (holds.delete(zone.id)) log(`zone ${zone.id}: credentials in order, dispatch resumes`);
+  await run();
+  return { held: null };
 }
