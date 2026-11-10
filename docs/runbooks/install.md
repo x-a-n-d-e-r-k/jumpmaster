@@ -737,6 +737,14 @@ A setting changed since the server started that only a restart applies (`mcp.ena
 `mcp.maxBodyBytes`, or a `listen` or `dataDir` changed in the file). Every other change applies at
 the next pass. Run `docker compose restart jumpmaster`.
 
+### `credential.install`
+
+The two credentials every zone needs, the Claude token and the GitHub author token, judged for
+the install before any zone exists (a fresh install that skipped the wizard's first steps). A
+`fail` names the missing ones: enter them in the setup wizard (`/setup/claude`, `/setup/forge`) or
+with `jumpmaster ctl secrets set claudeToken` / `githubAuthorToken` (the value on stdin). Once a
+zone exists, each zone's `credential.missing` reports them instead, so this passes.
+
 ### `credential.missing`
 
 A zone needs a credential nobody has set: the Claude token, the author token, a two-bot zone's

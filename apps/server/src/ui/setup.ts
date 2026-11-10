@@ -68,6 +68,15 @@ export function wizardActive(db: Db, config: Pick<Config, 'dropZones'>): boolean
   return config.dropZones.length === 0 && getWizard(db).dismissed !== true;
 }
 
+/** The first step whose work the install still lacks (the wizard is active, so no zone exists). */
+export function firstUnfinished(store: ConfigStore, db: Db): Step {
+  const r = store.resolved();
+  if (r.claudeToken.source === 'missing') return 'claude';
+  if (r.githubAuthorToken.source === 'missing') return 'forge';
+  if (!listSticks(db).some((s) => s.lastSeenAt !== null)) return 'stick';
+  return 'project';
+}
+
 /** JSON inside a `<script>`: no `</script>` or comment opener can close it early. */
 const scriptJson = (v: unknown): string =>
   JSON.stringify(v)
@@ -108,11 +117,15 @@ const sudoField = (sudo: boolean): string =>
 /**
  * The script that saves the filled credential fields: sudo first when asked for, then one `PUT`
  * per field to the secret routes, which test each before storing it. A failure shows the status
- * and the route's message; the value never leaves the field except in the request body.
+ * and the route's message; the value never leaves the field except in the request body. It answers
+ * `'empty'` (nothing was filled: "Enter a token first."), `'saved'` or `false`. Save never moves
+ * the wizard on: only Continue and Do this later do.
  */
-const SAVE_CREDENTIALS = `<script>
+export const SAVE_CREDENTIALS = `<script>
 async function jmSaveCredentials(form, out) {
   out.textContent = '';
+  const filled = [...form.querySelectorAll('input[type=password]:not([name=sudo])')].filter((f) => f.value);
+  if (filled.length === 0) { out.textContent = 'Enter a token first.'; return 'empty'; }
   const sudo = form.querySelector('input[name=sudo]');
   if (sudo && sudo.value) {
     const r = await jmFetch('/api/control/sudo', { passphrase: sudo.value });
@@ -133,7 +146,8 @@ async function jmSaveCredentials(form, out) {
       return false;
     }
   }
-  return true;
+  out.textContent = 'Saved and tested.';
+  return 'saved';
 }
 </script>`;
 
@@ -176,13 +190,20 @@ ${SAVE_CREDENTIALS}
 document.getElementById('claude').addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.target; const out = document.getElementById('claude-out');
-  if (!(await jmSaveCredentials(form, out))) return;
   const plan = form.querySelector('select[name=plan]');
-  if (plan && plan.value !== ${scriptJson(config.claude.plan)}) {
-    const r = await jmFetch('/api/control/config', { patch: { claude: { plan: plan.value } }, expectRevision: ${store.revision()} }, 'PATCH');
-    if (!r.ok) { out.textContent = 'The plan was not saved (' + r.status + ').'; return; }
+  let planSaved = false;
+  if (plan) {
+    // The revision and the plan as they are now, not as they were when the page was drawn.
+    const now = await (await fetch('/api/control/config')).json();
+    const current = (now.config && now.config.claude && now.config.claude.plan) || 'pro';
+    if (plan.value !== current) {
+      const r = await jmFetch('/api/control/config', { patch: { claude: { plan: plan.value } }, expectRevision: now.revision }, 'PATCH');
+      if (!r.ok) { out.textContent = 'The plan was not saved (' + r.status + ').'; return; }
+      planSaved = true;
+    }
   }
-  document.getElementById('advance').querySelector('button[value=continue]').click();
+  const saved = await jmSaveCredentials(form, out);
+  if (saved === 'empty' && planSaved) out.textContent = 'Plan saved.';
 });
 </script>`,
   );
@@ -207,24 +228,20 @@ function forgePage(store: ConfigStore, sudo: boolean, wizard: Wizard): string {
 <h4>Reviewer</h4>${credentialLine('githubReviewerToken', r.githubReviewerToken)}
 <h4>Read token</h4>${credentialLine('githubReadToken', r.githubReadToken)}
 <form id="forge">${fields}
-<p><label><input type="checkbox" name="starter" value="1"${wizard.starter ? ' checked' : ''}> Starter mode: one GitHub account, no reviewer</label></p>
-<p class="warn" id="starter-warning"><strong>What starter mode costs:</strong> ${escapeHtml(STARTER_WARNING)}</p>
 ${fields ? sudoField(sudo) : ''}<p><button>Save</button> <span id="forge-out" role="status"></span></p></form>
+<p class="warn" id="starter-warning"><strong>What starter mode costs:</strong> ${escapeHtml(STARTER_WARNING)}</p>
 ${SAVE_CREDENTIALS}
 <script>
 document.getElementById('forge').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const form = e.target; const out = document.getElementById('forge-out');
-  if (!(await jmSaveCredentials(form, out))) return;
-  const adv = document.getElementById('advance');
-  adv.querySelector('input[name=starter]').value = form.querySelector('input[name=starter]').checked ? '1' : '';
-  adv.querySelector('button[value=continue]').click();
+  await jmSaveCredentials(e.target, document.getElementById('forge-out'));
 });
 </script>`,
     {
+      // The account choice goes with Continue (the project step offers it), never with Save.
       advance: advanceForm(
         'forge',
-        `<input type="hidden" name="starter" value="${wizard.starter ? '1' : ''}">`,
+        `<p><label><input type="checkbox" name="starter" value="1"${wizard.starter ? ' checked' : ''}> Starter mode: one GitHub account, no reviewer</label></p>`,
       ),
     },
   );
@@ -267,7 +284,7 @@ document.getElementById('adopt').addEventListener('click', async () => {
     'project',
     `<h3>Add a project</h3>
 <p>Name the GitHub repository. Jumpmaster reads its default branch's root (nothing else, and writes nothing) to propose a stack and the checks to run, for you to review.</p>
-<form id="detect"><p><label>Repository <input name="repo" placeholder="owner/name" pattern="[A-Za-z0-9-]+/[A-Za-z0-9._-]+" required></label> <button>Detect</button> <span id="detect-out" role="status"></span></p></form>
+<form id="detect"><p><label>Repository <input name="repo" placeholder="owner/name" pattern="[A-Za-z0-9\\-]+/[A-Za-z0-9._\\-]+" required></label> <button>Detect</button> <span id="detect-out" role="status"></span></p></form>
 <form id="project" hidden>
 <p id="found"></p>
 <p><label>Stack <select name="preset">${presets}</select></label></p>
@@ -300,7 +317,11 @@ document.getElementById('detect').addEventListener('submit', async (e) => {
   const repo = e.target.repo.value.trim();
   const r = await jmFetch('/api/control/detect', { repo });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) { out.textContent = j.error || ('Not read (' + r.status + ')'); return; }
+  if (!r.ok) {
+    out.textContent = (j.error || ('Not read (' + r.status + ')')) + ' ';
+    if (r.status === 409) { const a = document.createElement('a'); a.href = '/setup/forge'; a.textContent = 'Go to the GitHub step'; out.append(a); }
+    return;
+  }
   out.textContent = '';
   found = { repo, ...j };
   document.getElementById('found').textContent = repo + ': ' + j.visibility + ', default branch ' + j.defaultBranch + (j.evidence && j.evidence.length ? '; found ' + j.evidence.join(', ') : '') + (j.problems && j.problems.length ? '. Note: ' + j.problems.join('; ') : '');
@@ -326,7 +347,8 @@ document.getElementById('project').addEventListener('submit', async (e) => {
   };
   if (form.authorMayBeAdmin.checked) zone.authorMayBeAdmin = true;
   if (found.visibility === 'private') zone.reviewReadToken = true;
-  const r = await jmFetch('/api/control/zones', { zone, returnTo: '/setup/doctor' });
+  if (zone.gates.length === 0) { out.textContent = 'Add at least one check.'; return; }
+  const r = await jmFetch('/api/control/zones', { zone, returnTo: '/setup/doctor', cancelTo: '/setup/project' });
   const j = await r.json().catch(() => ({}));
   if (r.ok) { location.href = '/setup/doctor'; return; }
   // A guarded add (every new project, from a browser): the confirmation page, then the doctor.
@@ -380,11 +402,12 @@ export function registerSetupPages(
   const { db, store, now } = deps;
   const sudoOf = (req: FastifyRequest) => req.principal?.sudo === true;
 
+  // Resumes at the first step the install still lacks, judged from its state: a deferred step
+  // whose work is not done comes back first, and one done elsewhere (ctl, a file) is passed.
   app.get('/setup/next', async (req, reply) => {
     const config = req.jmConfig ?? store.current();
-    const w = getWizard(db);
-    if (!wizardActive(db, config) || w.step === 'done') return reply.redirect('/', 302);
-    return reply.redirect(`/setup/${w.step}`, 302);
+    if (!wizardActive(db, config)) return reply.redirect('/', 302);
+    return reply.redirect(`/setup/${firstUnfinished(store, db)}`, 302);
   });
 
   // A GET never moves the progress: only Continue and Do this later do (and a page may be

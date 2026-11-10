@@ -1,4 +1,5 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { PRESETS } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { type AuditDetail, recordAudit } from '../auth/audit.js';
@@ -103,6 +104,10 @@ function credentialsOf(store: ConfigStore): NonNullable<DoctorDeps['credentials'
     shadowed: shadowedCredentials(resolved, vault),
     vaultKey: vault === 'disabled' ? { status: 'disabled' } : vault.keyStatus(),
     ...(created ? { claudeTokenCreatedAt: created } : {}),
+    install: {
+      claudeToken: resolved.claudeToken.source !== 'missing',
+      githubAuthorToken: resolved.githubAuthorToken.source !== 'missing',
+    },
   };
 }
 
@@ -601,7 +606,10 @@ const ZoneAddBody = z.strictObject({
   zone: z.record(z.string(), z.unknown()),
   resume: z.boolean().optional(),
   returnTo: z.string().max(2048).optional(),
+  /** Where the confirmation page's Cancel goes (the wizard: back to the project step). */
+  cancelTo: z.string().max(2048).optional(),
 });
+const NO_GATES = 'add at least one check (gate): every change must pass one';
 const NO_AUTHOR =
   "set the GitHub author token first (the setup wizard's forge step, or jumpmaster ctl secrets set githubAuthorToken): detection reads the repository with it";
 
@@ -620,12 +628,14 @@ const PatchBody = z.strictObject({
   note: z.string().optional(),
   resume: Resume,
   returnTo: ReturnTo,
+  cancelTo: ReturnTo,
 });
 const RollbackBody = z.strictObject({
   id: z.number().int().positive(),
   note: z.string().optional(),
   expectRevision: z.number().int().nonnegative().optional(),
   returnTo: ReturnTo,
+  cancelTo: ReturnTo,
 });
 const NoteBody = z.strictObject({ note: z.string().optional() });
 const ModeBody = z.strictObject({ mode: z.literal('file') });
@@ -636,6 +646,7 @@ const ImportBody = z.strictObject({
   expectRevision: z.number().int().nonnegative().optional(),
   resume: Resume,
   returnTo: ReturnTo,
+  cancelTo: ReturnTo,
 });
 const SESSION_FORBIDDEN_HINT = 'set with jumpmaster ctl or in the config file';
 const MAX_REVISIONS = 500;
@@ -643,6 +654,9 @@ const MAX_REVISIONS = 500;
 /** A `returnTo` kept only as a path on this host. */
 const returnToOf = (returnTo: string | undefined): { returnTo?: string } =>
   returnTo === undefined ? {} : { returnTo: safeNext(returnTo) };
+/** Where the confirmation page's Cancel goes: a path on this host, under `returnTo`'s rule. */
+const cancelToOf = (cancelTo: string | undefined): { cancelTo?: string } =>
+  cancelTo === undefined ? {} : { cancelTo: safeNext(cancelTo) };
 
 /** An applied revision's audit fields: the revision and the paths, and whether it was guarded. */
 export const appliedDetail = (r: Extract<ApplyResult, { ok: true }>): AuditDetail => ({
@@ -765,11 +779,14 @@ function registerConfigRoutes(
   // Adds one zone through the apply path, as the wizard's project step, `ctl zones add` and (later)
   // the zones page do: classified against the add baseline, so a guarded add from a session goes
   // to the confirmation page with `returnTo` kept. Without gates the server detects them.
+  // The revision is the store's own, read and applied without an await between: an add lands on
+  // whatever is current. A session's add is a pending change carrying that revision, and the
+  // confirm refuses it as `stale` if anything was applied meanwhile, so no client revision is sent.
   scope.post('/api/control/zones', async (req, reply) => {
     const body = ZoneAddBody.safeParse(req.body ?? {});
     if (!body.success)
       return invalid(reply, '{"zone": {"repo": "owner/name", …}, "resume"?: true}');
-    const { zone, resume, returnTo } = body.data;
+    const { zone, resume, returnTo, cancelTo } = body.data;
     const repo = zone.repo;
     if (typeof repo !== 'string' || !REPO.test(repo))
       return reply
@@ -784,6 +801,14 @@ function registerConfigRoutes(
       });
     if (config.dropZones.some((z) => z.id === id))
       return reply.code(409).send({ error: `zone ${id} exists: pick another id` });
+    if (zone.preset !== undefined && !(PRESETS as readonly unknown[]).includes(zone.preset))
+      return reply.code(400).send({
+        issues: [
+          { path: 'zone.preset', message: `the stack preset is one of ${PRESETS.join(', ')}` },
+        ],
+      });
+    if (Array.isArray(zone.gates) && zone.gates.length === 0)
+      return reply.code(400).send({ issues: [{ path: 'zone.gates', message: NO_GATES }] });
     const add: Record<string, unknown> = { ...zone, id };
     // The add baseline (and the generated install) starts in monitor, never the schema's off.
     if (add.egress === undefined) add.egress = { mode: 'monitor' };
@@ -804,6 +829,15 @@ function registerConfigRoutes(
             },
           ],
         });
+      if (d.gates.length === 0)
+        return reply.code(400).send({
+          issues: [
+            {
+              path: 'zone.gates',
+              message: `${NO_GATES}; nothing was detected for ${repo}${d.problems.length ? ` (${d.problems.join('; ')})` : ''}: give the gates`,
+            },
+          ],
+        });
       if (add.preset === undefined) add.preset = d.preset;
       add.gates = d.gates;
       if (d.visibility === 'private' && add.reviewReadToken === undefined)
@@ -819,10 +853,20 @@ function registerConfigRoutes(
         expectRevision: store.revision(),
         ...(resume ? { resume: [id] } : {}),
         ...returnToOf(returnTo),
+        ...cancelToOf(cancelTo),
       },
     );
     const out = answer(req, reply, 'zone.add', r, {}, id);
-    return r.ok ? { ...(out as object), zone: id } : out;
+    if (!r.ok) return out;
+    // What was written, so `ctl zones add` (and the page) can say it.
+    const written = store.current().dropZones.find((z) => z.id === id);
+    return {
+      ...(out as object),
+      zone: id,
+      ...(written?.preset ? { preset: written.preset } : {}),
+      egress: written?.egress?.mode ?? 'off',
+      gates: written?.gates ?? [],
+    };
   });
 
   scope.get('/api/control/config', async () => {
@@ -844,7 +888,7 @@ function registerConfigRoutes(
     const body = PatchBody.safeParse(req.body ?? {});
     if (!body.success)
       return invalid(reply, '{"patch": {…}, "expectRevision": <revision>, "note"?: "…"}');
-    const { patch, expectRevision, note, resume, returnTo } = body.data;
+    const { patch, expectRevision, note, resume, returnTo, cancelTo } = body.data;
     const r = store.apply(mergePatch(store.document(), patch), {
       via: viaOf(req),
       principal: principalOf(req),
@@ -852,6 +896,7 @@ function registerConfigRoutes(
       ...(note !== undefined ? { note } : {}),
       ...(resume ? { resume } : {}),
       ...returnToOf(returnTo),
+      ...cancelToOf(cancelTo),
     });
     return answer(req, reply, 'config.apply', r);
   });
@@ -865,12 +910,13 @@ function registerConfigRoutes(
   scope.post('/api/control/config/rollback', async (req, reply) => {
     const body = RollbackBody.safeParse(req.body ?? {});
     if (!body.success) return invalid(reply, '{"id": <revision>, "note"?: "…"}');
-    const { id, note, expectRevision, returnTo } = body.data;
+    const { id, note, expectRevision, returnTo, cancelTo } = body.data;
     const r = store.rollback(id, {
       principal: principalOf(req),
       ...(note !== undefined ? { note } : {}),
       ...(expectRevision !== undefined ? { expectRevision } : {}),
       ...returnToOf(returnTo),
+      ...cancelToOf(cancelTo),
     });
     return answer(req, reply, 'config.rollback', r, { from: id });
   });
@@ -912,7 +958,7 @@ function registerConfigRoutes(
   scope.post('/api/control/config/import', async (req, reply) => {
     const body = ImportBody.safeParse(req.body ?? {});
     if (!body.success) return invalid(reply, '{"config": {…}, "dryRun"?: true}');
-    const { config, dryRun, note, expectRevision, resume, returnTo } = body.data;
+    const { config, dryRun, note, expectRevision, resume, returnTo, cancelTo } = body.data;
     const preview = store.preview(config);
     if (dryRun) return { dryRun: true, ...preview };
     const r = store.importDoc(config, {
@@ -922,6 +968,7 @@ function registerConfigRoutes(
       ...(expectRevision !== undefined ? { expectRevision } : {}),
       ...(resume ? { resume } : {}),
       ...returnToOf(returnTo),
+      ...cancelToOf(cancelTo),
     });
     const out = answer(req, reply, 'config.import', r);
     return r.ok ? { ...(out as object), changes: preview.changes } : out;

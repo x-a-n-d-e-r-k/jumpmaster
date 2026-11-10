@@ -167,7 +167,8 @@ export function registerAuthPages(app: FastifyInstance, deps: AuthPageDeps): voi
     parseCookies(req.headers.cookie)[SETUP_COOKIE] ?? '';
 
   app.get('/setup', async (req, reply) => {
-    if (!setupActive(db)) return reply.redirect('/', 302);
+    // Claimed already: the wizard, which sends home once there is nothing left to set up.
+    if (!setupActive(db)) return reply.redirect('/setup/next', 302);
     return html(
       reply,
       200,

@@ -1376,3 +1376,44 @@ test('config.secret-files fails a group- or world-readable target reached throug
     `secret file(s) other users on the host can read: ${join(dir, 'link')} (JM_CLAUDE_TOKEN_FILE, mode 644; a link: chmod 600 the file it points to)`,
   );
 });
+
+describe('install-wide credentials', () => {
+  const creds = (o: { claude?: boolean; author?: boolean }) => ({
+    problems: [],
+    shadowed: [],
+    vaultKey: { status: 'ok' as const },
+    install: { claudeToken: o.claude ?? true, githubAuthorToken: o.author ?? true },
+  });
+
+  test('with no zone, a missing Claude or author token fails, pointing at the wizard step and ctl', async () => {
+    const w = world();
+    w.deps.config = { ...w.deps.config, dropZones: [] };
+    w.deps.credentials = creds({ claude: false, author: false });
+    const c = one(await w.run(), 'credential.install');
+    expect(c).toMatchObject({ status: 'fail', zoneId: null });
+    expect(c.summary).toMatch(/Claude token/);
+    expect(c.summary).toMatch(/GitHub author token/);
+    expect(c.fix).toContain('/setup/claude');
+    expect(c.fix).toContain('/setup/forge');
+    expect(c.fix).toContain('jumpmaster ctl secrets set claudeToken');
+    expect(c.fix).toContain('jumpmaster ctl secrets set githubAuthorToken');
+    w.deps.credentials = creds({});
+    expect(one(await w.run(), 'credential.install').status).toBe('pass');
+  });
+
+  test('once zones exist the per-zone checks report credentials and this one does not repeat them', async () => {
+    const w = world();
+    w.deps.credentials = creds({ claude: false });
+    const c = one(await w.run(), 'credential.install');
+    expect(c.status).toBe('pass');
+    expect(c.summary).toMatch(/each zone's credential checks/);
+  });
+
+  test("claude.token-age names the Claude step's Made on field, with its link", async () => {
+    const w = world({ config: { claude: { plan: 'max', fableWeeklyDropCap: 5 } } });
+    const c = one(await w.run(), 'claude.token-age');
+    expect(c.status).toBe('skip');
+    expect(c.fix).toContain('“Made on”');
+    expect(c.fix).toContain('/setup/claude');
+  });
+});

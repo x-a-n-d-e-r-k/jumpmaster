@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import vm from 'node:vm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createApp } from '../app.js';
@@ -15,7 +16,7 @@ import { insertStick, stampStick } from '../db/repo.js';
 import { PRESET_EGRESS } from '../presets.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
 import { openVault } from '../vault/vault.js';
-import { getWizard } from './setup.js';
+import { getWizard, SAVE_CREDENTIALS } from './setup.js';
 
 const TOKEN = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
@@ -160,15 +161,13 @@ describe('the setup wizard', () => {
       expect(r.body, step).toContain('Do this later');
       expect(r.body, step).toContain(`name="from" value="${step}"`);
     }
-    // Skipping moves on and is remembered: the next visit resumes there.
+    // Skipping moves on and is remembered, but resuming judges the install: the Claude token is
+    // still unset, so the next visit comes back to it (round 2, B4).
     const later = await w2.form('/setup/advance', { from: 'claude' });
     expect(later.statusCode).toBe(303);
     expect(later.headers.location).toBe('/setup/forge');
-    expect((await w2.get('/setup/next')).headers.location).toBe('/setup/forge');
     expect(getWizard(w2.db)).toMatchObject({ step: 'forge' });
-    // Visiting an earlier step never moves the progress back.
-    await w2.get('/setup/claude');
-    expect((await w2.get('/setup/next')).headers.location).toBe('/setup/forge');
+    expect((await w2.get('/setup/next')).headers.location).toBe('/setup/claude');
     // A cross-site form cannot move it.
     const forged = await w2.form('/setup/advance', { from: 'forge' }, {
       host: HOST,
@@ -368,5 +367,126 @@ describe('the setup wizard', () => {
       expect(r.body, step).not.toContain(CLAUDE);
       expect(r.body, step).not.toContain(TOKEN);
     }
+  });
+});
+
+/** Runs the page's credential-saving script against stub fields: the browser path, without one. */
+function runSave(fields: Record<string, string>) {
+  const fetched: string[] = [];
+  const out = { textContent: '' };
+  const inputs = Object.entries(fields).map(([name, value]) => ({ name, value, type: 'password' }));
+  const form = {
+    querySelector: (sel: string) =>
+      sel === 'input[name=sudo]' ? (inputs.find((i) => i.name === 'sudo') ?? null) : null,
+    querySelectorAll: () => inputs.filter((i) => i.name !== 'sudo'),
+  };
+  const ctx = vm.createContext({
+    jmFetch: async (path: string) => {
+      fetched.push(path);
+      return { ok: true, status: 200, json: async () => ({}) };
+    },
+  });
+  vm.runInContext(SAVE_CREDENTIALS.replace(/^<script>|<\/script>$/g, ''), ctx);
+  return {
+    fetched,
+    out,
+    result: (ctx.jmSaveCredentials as (f: unknown, o: unknown) => Promise<unknown>)(form, out),
+  };
+}
+
+describe('the wizard, round 2', () => {
+  test('Save with no value says to enter a token first and never moves on; only Continue and Do this later do', async () => {
+    const empty = runSave({ claudeToken: '', sudo: '' });
+    expect(await empty.result).toBe('empty');
+    expect(empty.out.textContent).toBe('Enter a token first.');
+    expect(empty.fetched).toEqual([]);
+    const filled = runSave({ githubAuthorToken: AUTHOR, githubReviewerToken: '', sudo: PASS });
+    expect(await filled.result).toBe('saved');
+    expect(filled.fetched).toEqual(['/api/control/sudo', '/api/control/secrets/githubAuthorToken']);
+    expect(filled.out.textContent).toBe('Saved and tested.');
+    // No step's script clicks Continue for the operator.
+    const w = await world();
+    for (const step of STEPS) {
+      const body = (await w.get(`/setup/${step}`)).body;
+      expect(body, step).not.toContain('.click()');
+    }
+    // The starter choice is part of Continue, not of Save.
+    const forge = (await w.get('/setup/forge')).body;
+    const advance = forge.slice(forge.indexOf('id="advance"'));
+    expect(advance.slice(0, advance.indexOf('</form>'))).toContain('name="starter"');
+  });
+
+  test('every pattern attribute in the pages compiles under the v flag, as browsers compile it', async () => {
+    const w = await world();
+    const pages = [...STEPS.map((s) => `/setup/${s}`), '/', '/doctor'];
+    const found: string[] = [];
+    for (const url of pages) {
+      const body = (await w.get(url)).body;
+      for (const m of body.matchAll(/pattern="([^"]*)"/g)) {
+        const p = (m[1] as string).replaceAll('&amp;', '&').replaceAll('&quot;', '"');
+        found.push(p);
+        expect(() => new RegExp(`^(?:${p})$`, 'v'), `${url}: ${p}`).not.toThrow();
+      }
+    }
+    expect(found.length).toBeGreaterThan(0);
+    const repo = new RegExp(`^(?:${found[0]})$`, 'v');
+    expect(repo.test('octo/demo.js')).toBe(true);
+    expect(repo.test('octo/de mo')).toBe(false);
+  });
+
+  test('/setup/next resumes at the first step the install still lacks, and a bare /setup after the claim goes there', async () => {
+    const w = await world();
+    // Every step deferred: still Claude, since there is no Claude token.
+    for (const from of STEPS) await w.form('/setup/advance', { from });
+    expect((await w.get('/setup/next')).headers.location).toBe('/setup/claude');
+    expect((await w.get('/setup')).headers.location).toBe('/setup/next');
+    await w.call('POST', '/api/control/sudo', { passphrase: PASS });
+    await w.call('PUT', '/api/control/secrets/claudeToken', { value: CLAUDE });
+    expect((await w.get('/setup/next')).headers.location).toBe('/setup/forge');
+    await w.call('PUT', '/api/control/secrets/githubAuthorToken', { value: AUTHOR });
+    expect((await w.get('/setup/next')).headers.location).toBe('/setup/stick');
+    insertStick(w.db, { id: 's1', name: 's', tokenHash: 'h', slots: 1 });
+    stampStick(
+      w.db,
+      's1',
+      { capabilities: [], imagePolicy: 'signed', version: null, pinnedImages: [] },
+      t0,
+    );
+    expect((await w.get('/setup/next')).headers.location).toBe('/setup/project');
+    w.store.apply({ dropZones: [zoneDoc('main')] }, { via: 'ctl', principal: token });
+    // A zone exists: the wizard is over, and next is home.
+    expect((await w.get('/setup/next')).headers.location).toBe('/');
+  });
+
+  test('the project step links the forge step from a detection that needs the token, refuses no checks, and the plan save reads the revision', async () => {
+    const w = await world();
+    const project = (await w.get('/setup/project')).body;
+    expect(project).toContain("a.href = '/setup/forge'");
+    expect(project).toContain('Add at least one check.');
+    const claude = (await w.get('/setup/claude')).body;
+    // The revision is read when the plan is saved, not when the page was rendered.
+    expect(claude).toContain("await fetch('/api/control/config')");
+    expect(claude).not.toMatch(/expectRevision: \d/);
+  });
+
+  test('a wizard add says it is part of setup, and Cancel goes back to the project step', async () => {
+    const w = await world();
+    const add = await w.call('POST', '/api/control/zones', {
+      zone: { repo: 'octo/demo', preset: 'node', gates: [{ name: 'test', run: 'npm test' }] },
+      returnTo: '/setup/doctor',
+      cancelTo: '/setup/project',
+    });
+    const page = await w.get(add.json().confirm);
+    expect(page.body).toContain('This is part of setting up Jumpmaster.');
+    expect(page.body).toContain('<a href="/setup/project">Cancel</a>');
+    // A cancelTo off this host is ignored for the home page.
+    const other = await w.call('POST', '/api/control/zones', {
+      zone: { repo: 'octo/other', preset: 'node', gates: [{ name: 'test', run: 'npm test' }] },
+      cancelTo: '//evil.example/x',
+    });
+    const page2 = await w.get(other.json().confirm);
+    expect(page2.body).toContain('<a href="/">Cancel</a>');
+    expect(page2.body).not.toContain('part of setting up');
+    expect(page2.body).not.toContain('evil.example');
   });
 });

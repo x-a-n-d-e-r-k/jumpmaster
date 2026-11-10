@@ -57,8 +57,16 @@ const GONE = notice(
   'This change is not waiting for confirmation: it was confirmed, it expired (after ten minutes), the server restarted, or it belongs to another session. Start the change again. <a href="/">Home</a>',
 );
 
+/** Where Cancel (and a refusal's way back) goes: the change's `cancelTo`, else home. */
+const cancelOf = (pending: Pending): string =>
+  pending.cancelTo ? safeNext(pending.cancelTo) : '/';
+
 /** Each consequence verbatim, the notes beside them, the passphrase and the minted token. */
 export function renderConfirm(pending: Pending, token: string, error?: string): string {
+  // A change proposed by the setup wizard says so, so the operator knows where they are.
+  const setup = pending.returnTo?.startsWith('/setup/')
+    ? '<p><strong>This is part of setting up Jumpmaster.</strong> Confirm to continue to the next step, or cancel to go back.</p>'
+    : '';
   const items = pending.guarded.map((g) => `<li>${escapeHtml(g.consequence)}</li>`).join('');
   const notes =
     pending.notes.length > 0
@@ -66,7 +74,7 @@ export function renderConfirm(pending: Pending, token: string, error?: string): 
       : '';
   const err = error ? `<p class="error"><strong>${escapeHtml(error)}</strong></p>` : '';
   return page(
-    `<h2>Confirm a guarded change</h2><p>This change weakens a guard (§7.5). If you confirm it:</p><ul>${items}</ul>${notes}${err}<form method="post" action="/config/confirm/${escapeHtml(pending.id)}"><input type="hidden" name="token" value="${escapeHtml(token)}"><p><label>Operator passphrase <input type="password" name="passphrase" autocomplete="current-password" required autofocus></label></p><p><button>Confirm</button> <a href="/">Cancel</a></p></form><p><small>The confirmation is good for five minutes and once. <code>jumpmaster ctl</code> makes the same change with the operator token.</small></p>`,
+    `<h2>Confirm a guarded change</h2>${setup}<p>This change weakens a guard (§7.5). If you confirm it:</p><ul>${items}</ul>${notes}${err}<form method="post" action="/config/confirm/${escapeHtml(pending.id)}"><input type="hidden" name="token" value="${escapeHtml(token)}"><p><label>Operator passphrase <input type="password" name="passphrase" autocomplete="current-password" required autofocus></label></p><p><button>Confirm</button> <a href="${escapeHtml(cancelOf(pending))}">Cancel</a></p></form><p><small>The confirmation is good for five minutes and once. <code>jumpmaster ctl</code> makes the same change with the operator token.</small></p>`,
   );
 }
 
@@ -169,7 +177,13 @@ export function registerConfirmPages(app: FastifyInstance, deps: ConfirmPageDeps
       return html(
         reply,
         409,
-        withCsrf(req, notice('Not applied', escapeHtml(REASON[r.confirmation](store.revision())))),
+        withCsrf(
+          req,
+          notice(
+            'Not applied',
+            `${escapeHtml(REASON[r.confirmation](store.revision()))} <a href="${escapeHtml(cancelOf(pending))}">Back</a>`,
+          ),
+        ),
       );
     if ('sessionForbidden' in r)
       return html(

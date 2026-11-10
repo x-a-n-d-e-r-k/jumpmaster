@@ -1104,3 +1104,27 @@ describe('preflightSecrets', () => {
     expect(() => preflightSecrets(env(full), full)).not.toThrow();
   });
 });
+
+describe('zone id charset', () => {
+  const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json') };
+  const zone = { ...baseZone, protectedPaths: ['GOAL.md'] };
+  test('a write takes ids as zoneIdOf makes them: lower case letters, digits and inner dashes', () => {
+    const strict = { ...noLock, strict: true };
+    for (const id of ['main', 'ref', 'shadow', 'web-2', 'a'])
+      expect(parseEditable({ dropZones: [{ ...zone, id }] }, strict).ok, id).toBe(true);
+    for (const id of ['WEB', 'a_b', '-a', 'a-', 'a.b', 'x'.repeat(64), 'main"><script>']) {
+      const r = parseEditable({ dropZones: [{ ...zone, id }] }, strict);
+      expect(r.ok, id).toBe(false);
+      if (!r.ok) expect(r.issues[0]?.path).toBe('dropZones.0.id');
+    }
+  });
+
+  test('an M4 file with another id still loads, with a warning to rename it', () => {
+    const r = parseEditable({ dropZones: [{ ...zone, id: 'My_Zone' }] }, noLock);
+    expect(r.ok).toBe(true);
+    if (r.ok)
+      expect(r.warnings).toEqual([
+        'zone id My_Zone is not lower case letters, digits and inner dashes: a write from the UI or ctl would refuse it; rename it in the file',
+      ]);
+  });
+});

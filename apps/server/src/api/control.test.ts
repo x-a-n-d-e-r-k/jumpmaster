@@ -1873,6 +1873,38 @@ describe('detect and zone add routes', () => {
     expect(store.current().dropZones).toEqual([]);
   });
 
+  test('zones add refuses an empty gates list and an unknown preset before any detection, and answers with what it wrote', async () => {
+    const { seen } = zoneApp();
+    const empty = await post('/api/control/zones', { zone: { repo: 'octo/demo', gates: [] } });
+    expect(empty.statusCode).toBe(400);
+    expect(empty.json()).toEqual({
+      issues: [
+        {
+          path: 'zone.gates',
+          message: 'add at least one check (gate): every change must pass one',
+        },
+      ],
+    });
+    const preset = await post('/api/control/zones', {
+      zone: { repo: 'octo/demo', preset: 'cobol' },
+    });
+    expect(preset.statusCode).toBe(400);
+    expect(preset.json().issues[0]).toMatchObject({ path: 'zone.preset' });
+    expect(preset.json().issues[0].message).toMatch(/one of node/);
+    expect(seen.calls).toEqual([]);
+    const ok = await post('/api/control/zones', { zone: { repo: 'octo/demo' } });
+    expect(ok.json()).toMatchObject({ zone: 'demo', preset: 'node', egress: 'monitor' });
+    expect(ok.json().gates.map((g: { name: string }) => g.name)).toEqual(['install', 'test']);
+  });
+
+  test('zones add refuses a detection that proposes no checks', async () => {
+    zoneApp();
+    // The fake repository's files hold no test script for a python preset: no gates.
+    const r = await post('/api/control/zones', { zone: { repo: 'octo/demo', preset: 'python' } });
+    expect(r.statusCode).toBe(400);
+    expect(r.json().issues[0]).toMatchObject({ path: 'zone.gates' });
+  });
+
   test('zones add refuses a bad repository name, an unknown key and a boot setting in the zone', async () => {
     zoneApp();
     expect((await post('/api/control/zones', { zone: { repo: 'nope' } })).statusCode).toBe(400);

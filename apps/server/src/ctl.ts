@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { PRESETS } from '@jumpmaster/protocol';
 import type { DoctorCheck } from './doctor/checks.js';
 import { readSecret, readSecretFile } from './secrets.js';
 
@@ -61,9 +62,14 @@ function zonesAddRequest(args: string[]): CtlRequest | null {
     const value = rest[i + 1];
     if (value === undefined || value.startsWith('--')) return null;
     i += 1;
-    if (flag === '--id') zone.id = value;
-    else if (flag === '--preset') zone.preset = value;
-    else if (flag === '--identity') {
+    if (flag === '--id') {
+      // The schema's zone id rule (`ZONE_ID`), so a typo is a usage error here, not a refusal.
+      if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(value)) return null;
+      zone.id = value;
+    } else if (flag === '--preset') {
+      if (!(PRESETS as readonly string[]).includes(value)) return null;
+      zone.preset = value;
+    } else if (flag === '--identity') {
       if (value !== 'starter' && value !== 'two-bot') return null;
       zone.identity = value;
     } else if (flag === '--egress') {
@@ -544,6 +550,21 @@ export async function runCtl(
     if (args.includes('--json')) out(JSON.stringify({ run }, null, 2));
     else for (const line of formatDoctor(run)) out(line);
     return run.checks.some((c) => c.status === 'fail') ? 1 : 0;
+  }
+  if (args[0] === 'zones' && res.ok) {
+    // What was written, as `init` says it: the zone, its preset and each gate.
+    const added = JSON.parse(text) as {
+      zone: string;
+      revision: number;
+      preset?: string;
+      egress?: string;
+      gates?: { name: string; run: string }[];
+    };
+    out(
+      `added zone ${added.zone} (revision ${added.revision}), preset ${added.preset ?? '(image)'}, egress ${added.egress ?? 'monitor'}`,
+    );
+    for (const g of added.gates ?? []) out(`  gate ${g.name}: ${g.run}`);
+    return 0;
   }
   out(`${res.status} ${text}`);
   return res.ok ? 0 : 1;

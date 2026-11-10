@@ -397,6 +397,8 @@ describe('ctl detect and ctl zones add', () => {
       ['zones', 'add', 'octo/demo', '--id'],
       ['zones', 'add', 'octo/demo', '--unknown'],
       ['zones', 'remove', 'demo'],
+      ['zones', 'add', 'octo/demo', '--preset', 'cobol'],
+      ['zones', 'add', 'octo/demo', '--id', 'Not_Valid'],
     ])
       expect(ctlRequest(bad), bad.join(' ')).toBeNull();
   });
@@ -406,5 +408,31 @@ describe('ctl detect and ctl zones add', () => {
       path: '/api/control/zones',
       body: { zone: { repo: 'octo/demo', egress: { mode: 'monitor' } } },
     });
+  });
+});
+
+describe('ctl zones add output', () => {
+  test('ctl zones add prints the zone, preset and gates it wrote', async () => {
+    const r = await run(
+      ['zones', 'add', 'octo/demo'],
+      '',
+      fakeFetch(200, {
+        revision: 2,
+        changed: ['dropZones[demo]'],
+        restartNeeded: [],
+        zone: 'demo',
+        preset: 'node',
+        gates: [
+          { name: 'test', run: 'npm test' },
+          { name: 'lint', run: 'npm run lint' },
+        ],
+      }),
+    );
+    expect(r.code).toBe(0);
+    expect(r.out).toEqual([
+      'added zone demo (revision 2), preset node, egress monitor',
+      '  gate test: npm test',
+      '  gate lint: npm run lint',
+    ]);
   });
 });

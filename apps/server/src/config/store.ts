@@ -81,6 +81,8 @@ export type ApplyMeta = {
   resume?: string[];
   /** Where the confirm page goes after applying a pending change (a path on this host). */
   returnTo?: string;
+  /** Where its Cancel goes (a path on this host); home when absent. */
+  cancelTo?: string;
 };
 
 /** Mode switches and rollbacks: the via is the operation's own. */
@@ -365,13 +367,14 @@ export class ConfigStore implements ConfigSource {
         const used = this.confirmations.consumeFor(meta.confirmation, doc, sid, this.rev);
         if (!used.ok) return { ok: false, confirmation: used.reason };
       } else if (c.guarded.length > 0 && sid) {
-        const { confirmation: _c, returnTo, ...kept } = meta;
+        const { confirmation: _c, returnTo, cancelTo, ...kept } = meta;
         const pending = this.confirmations.addPending({
           sessionIdHash: sid,
           patch: doc,
           expectRevision: this.rev,
           meta: kept,
           ...(returnTo ? { returnTo } : {}),
+          ...(cancelTo ? { cancelTo } : {}),
           guarded: c.guarded,
           notes: c.notes,
         });

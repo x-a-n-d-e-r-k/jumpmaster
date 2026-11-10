@@ -31,6 +31,8 @@ export type Pending = {
   meta: ApplyMeta;
   /** A path on this host the confirm POST redirects to after applying (the wizard's next step). */
   returnTo?: string;
+  /** Where the page's Cancel goes (a path on this host); home when absent. */
+  cancelTo?: string;
   expiresAt: Date;
   /** What the page states verbatim, and the notes it shows beside them. */
   guarded: Classification['guarded'];

@@ -190,7 +190,8 @@ describe('setup mode', () => {
     const session = `jm_session=${valueOf(cookieOf(done, 'jm_session'))}`;
     expect((await w.get('/', { cookie: session })).statusCode).toBe(200);
     const after = await w.get('/setup', { cookie: session });
-    expect([after.statusCode, after.headers.location]).toEqual([302, '/']);
+    // Claimed: a bare /setup goes on to the wizard (Task 6), which sends home when nothing is left.
+    expect([after.statusCode, after.headers.location]).toEqual([302, '/setup/next']);
   });
 
   test('/setup/passphrase without the claim cookie is refused', async () => {

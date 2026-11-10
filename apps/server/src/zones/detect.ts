@@ -39,6 +39,7 @@ export const zoneIdOf = (repo: string): string =>
   (repo.split('/')[1] ?? 'main')
     .toLowerCase()
     .replace(/[^a-z0-9-]+/g, '-')
+    .slice(0, 63)
     .replace(/^-+|-+$/g, '') || 'main';
 
 /** The repository's root build files, as detection reads them. */
