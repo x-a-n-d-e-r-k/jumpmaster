@@ -796,3 +796,27 @@ describe('ctl status', () => {
     expect(refused.code).toBe(1);
   });
 });
+
+describe('ctl status, round 2', () => {
+  test('ctl status prints the other blockers as plain lines, without backticks or control characters', async () => {
+    const st = {
+      headline: '1 parked: no CI result: \u001b[31mred\u001b[0m\u0007',
+      detail: 'check `docker compose logs stick`',
+      waitingOn: 'you',
+      also: [
+        { text: 'demo: no Claude token', href: '/settings/credentials' },
+        { text: 'no pass yet since \u001b]0;title\u0007start' },
+      ],
+      action: { label: 'See the items on home', href: '/' },
+    };
+    const r = await run(['status'], '', fakeFetch(200, st));
+    expect(r.out).toEqual([
+      '1 parked: no CI result: [31mred[0m',
+      'check docker compose logs stick',
+      '- demo: no Claude token (fix: /settings/credentials)',
+      '- no pass yet since ]0;titlestart',
+      'next: See the items on home: /',
+    ]);
+    for (const line of r.out) expect(line).not.toMatch(/[\u0000-\u001f\u007f]/);
+  });
+});

@@ -486,15 +486,32 @@ export function renderHome(state: HomeState): string {
   );
 }
 
-/** The status line: the headline, the detail behind it and the control that moves it on. */
+/** Plain status text as HTML: escaped, with `code` in backticks rendered as <code>. */
+const codeHtml = (text: string): string =>
+  escapeHtml(text).replace(/`([^`]+)`/g, '<code>$1</code>');
+
+/**
+ * The status line: the headline, the detail behind it, every other blocker as a short item with
+ * its Fix link, and the control that moves it on. Every href passes `safeHref`, as the doctor's.
+ */
 export function statusBanner(s: Status | undefined): string {
   if (!s) return '';
-  const detail = s.detail ? `<p>${escapeHtml(s.detail)}</p>` : '';
+  const detail = s.detail ? `<p>${codeHtml(s.detail)}</p>` : '';
   const since = s.since ? ` <small>since ${escapeHtml(s.since)}</small>` : '';
-  const action = s.action
-    ? `<p><a href="${escapeHtml(s.action.href)}">${escapeHtml(s.action.label)}</a></p>`
-    : '';
-  return `<div class="status" data-waiting-on="${escapeHtml(s.waitingOn)}"><p><strong>${escapeHtml(s.headline)}</strong>${since}</p>${detail}${action}</div>`;
+  const also =
+    s.also && s.also.length > 0
+      ? `<ul class="also">${s.also
+          .map(
+            (a) =>
+              `<li>${codeHtml(a.text)}${a.href && safeHref(a.href) ? ` <a href="${escapeHtml(a.href)}">Fix</a>` : ''}</li>`,
+          )
+          .join('')}</ul>`
+      : '';
+  const action =
+    s.action && safeHref(s.action.href)
+      ? `<p><a href="${escapeHtml(s.action.href)}">${escapeHtml(s.action.label)}</a></p>`
+      : '';
+  return `<div class="status" data-waiting-on="${escapeHtml(s.waitingOn)}"><p><strong>${codeHtml(s.headline)}</strong>${since}</p>${detail}${also}${action}</div>`;
 }
 
 function artifactsSection(artifacts: ArtifactRow[]): string {

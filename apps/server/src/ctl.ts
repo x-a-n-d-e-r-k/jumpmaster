@@ -317,10 +317,15 @@ export function formatDoctor(
     '',
     `${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip${n('fail') > 0 ? ': fix each FAIL, then run the doctor again' : ''}`,
   );
-  // Forge text (summaries, CI job names in a label) reaches the terminal: no control character,
-  // so an escape sequence or a newline in a workflow file can't paint or forge a line.
-  return lines.map((l) => l.replace(/[\u0000-\u001f\u007f]/g, ''));
+  return lines.map(plain);
 }
+
+/**
+ * A line for the terminal. Forge text (summaries, CI job names in a park reason) reaches it: no
+ * control character, so an escape sequence or a newline in a workflow file can't paint or forge
+ * a line.
+ */
+const plain = (line: string): string => line.replace(/[\u0000-\u001f\u007f]/g, '');
 
 const CONFIG_USAGE =
   'ctl config show [--json] | ctl config revisions | ctl config set <path>=<json>… [--note <text>] | ctl config rollback <id> [note] | ctl config import <file> [--dry-run] [--note <text>] | ctl config export | ctl config reload | ctl config adopt | ctl config mode file';
@@ -861,11 +866,15 @@ export async function runCtl(
     const st = JSON.parse(text) as {
       headline: string;
       detail?: string;
+      also?: { text: string; href?: string }[];
       action?: { label: string; href: string };
     };
-    out(st.headline);
-    if (st.detail) out(st.detail);
-    if (st.action) out(`next: ${st.action.label}: ${st.action.href}`);
+    // Code is in backticks for the page; the terminal gets the words.
+    const say = (line: string) => out(plain(line.replace(/`([^`]*)`/g, '$1')));
+    say(st.headline);
+    if (st.detail) say(st.detail);
+    for (const a of st.also ?? []) say(`- ${a.text}${a.href ? ` (fix: ${a.href})` : ''}`);
+    if (st.action) say(`next: ${st.action.label}: ${st.action.href}`);
     return 0;
   }
   if (args[0] === 'github' && res.ok) {

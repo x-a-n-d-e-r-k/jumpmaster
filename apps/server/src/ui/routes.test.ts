@@ -357,6 +357,10 @@ describe('the status line (Task 12)', () => {
       '<title>Jumpmaster: 1 parked: no CI result: &lt;ci&gt; &amp; friends</title>',
     );
     expect(home).not.toContain('<ci>');
+    // Redacted where it is built (M5): a reason that quotes a secret value never shows it.
+    setWorkItemState(h.db, first?.id as number, 'parked', 'merge refused for author-token');
+    const redacted = (await h.view('/api/control/status')).json() as { headline: string };
+    expect(redacted.headline).toBe('1 parked: merge refused for [REDACTED]');
     // No secret of the install reaches the line, the page or the route.
     for (const secret of ['claude-token', 'author-token', 'reviewer-token', 'o'.repeat(32), 'join'])
       for (const text of [
@@ -367,6 +371,35 @@ describe('the status line (Task 12)', () => {
         ),
       ])
         expect(text).not.toContain(secret);
+  });
+
+  test('queued work no live stick can run names the missing capability, read the way the lease route reads it', async () => {
+    const h = await harness({
+      live: true,
+      zone: { protectedPaths: [...DEFAULT_PROTECTED_PATHS], egress: { mode: 'enforce' } },
+    });
+    // The harness stick enrolled without capabilities; keep it live.
+    for (const { id } of h.db.prepare('SELECT id FROM sticks').all() as { id: string }[])
+      stampStick(
+        h.db,
+        id,
+        { capabilities: [], imagePolicy: 'allowlist', version: '1', pinnedImages: [] },
+        h.now(),
+      );
+    await h.sync();
+    const [first] = h.db.prepare('SELECT id FROM work_items').all() as { id: number }[];
+    setWorkItemState(h.db, first?.id as number, 'in_flight');
+    insertDrop(h.db, {
+      id: 'q1',
+      dropZoneId: 'main',
+      workItemId: first?.id as number,
+      role: 'implement',
+      state: 'queued',
+    });
+    const status = (await h.view('/api/control/status')).json() as { headline: string };
+    expect(status.headline).toBe(
+      'Queued: 1 issue; no stick can run zone main: no live stick has egress-v1',
+    );
   });
 
   test('the status route needs the operator, as every control route does', async () => {

@@ -22,6 +22,7 @@ import { type ForgePair, ForgePairs, markPendingUnknown } from './outbox.js';
 import { promptVersions } from './payloads.js';
 import { zonePass } from './scheduler.js';
 import { readSecretFile } from './secrets.js';
+import { recordPass } from './status.js';
 import { syncDropZone } from './sync.js';
 import { credentialProblems } from './vault/problems.js';
 import { openVault } from './vault/vault.js';
@@ -234,6 +235,8 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     passRunning = true;
     try {
       await pass();
+      // The status line compares the doctor's last run with this, across restarts too.
+      recordPass(db, new Date());
     } catch (e) {
       log(`poll pass failed: ${errorMessage(e)}`);
     } finally {

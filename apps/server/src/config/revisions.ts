@@ -115,7 +115,12 @@ export function latestRevisionVia(db: Db, via: RevisionVia): Revision | undefine
   return row ? fromRow(row) : undefined;
 }
 
-export type SettingKey = 'config.mode' | 'config.current' | 'config.restart_pending' | 'setup.step';
+export type SettingKey =
+  | 'config.mode'
+  | 'config.current'
+  | 'config.restart_pending'
+  | 'setup.step'
+  | 'status.last_pass';
 
 export function getSetting(db: Db, key: SettingKey): unknown {
   const row = db.prepare('SELECT value_json AS v FROM settings WHERE key = ?').get(key) as

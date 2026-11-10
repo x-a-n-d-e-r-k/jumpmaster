@@ -108,19 +108,6 @@ const lastSyncs = new Map<string, SyncResult>();
 /** The zone's last sync result in this process, if any. */
 export const lastSyncResult = (zoneId: string): SyncResult | undefined => lastSyncs.get(zoneId);
 
-/** When each zone last synced, in this process. */
-const syncedAt = new Map<string, string>();
-
-/**
- * The last pass, as the newest zone sync in this process (the status line compares the doctor's
- * last run against it); undefined until the first sync after a start.
- */
-export function lastPassAt(): string | undefined {
-  let last: string | undefined;
-  for (const at of syncedAt.values()) if (last === undefined || at > last) last = at;
-  return last;
-}
-
 export async function syncDropZone(
   db: Db,
   forges: ForgePair,
@@ -238,7 +225,6 @@ export async function syncDropZone(
     pass,
   };
   lastSyncs.set(zone.id, result);
-  syncedAt.set(zone.id, now.toISOString());
   return result;
 }
 

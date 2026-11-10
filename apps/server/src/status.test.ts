@@ -1,8 +1,16 @@
 import { describe, expect, test } from 'vitest';
+import { openDb } from './db/open.js';
 import type { Drop, OutboxRow, WorkItem } from './db/repo.js';
 import type { DoctorCheck } from './doctor/checks.js';
-import { type StatusInput, type StatusZone, statusOf } from './status.js';
-import { plus, t0 } from './test/helpers.js';
+import {
+  lastPassAt,
+  recordPass,
+  type StatusInput,
+  type StatusZone,
+  statusOf,
+  type UsageFacts,
+} from './status.js';
+import { plus, t0, tmpDbFile } from './test/helpers.js';
 import type { CredentialProblem } from './vault/problems.js';
 
 const NOW = plus(t0, 60 * 60_000);
@@ -88,18 +96,28 @@ const zone = (o: Partial<StatusZone> = {}): StatusZone => ({
   ...o,
 });
 
-/** A healthy, idle install: a live stick, one active zone, nothing to do. */
+/** A healthy, idle install: a live stick with a free slot, one active zone, nothing to do. */
 const base = (o: Partial<StatusInput> = {}): StatusInput => ({
   setupActive: false,
   killed: false,
-  sticks: { live: 1 },
+  sticks: { live: 1, slots: 1, busy: 0 },
   doctor: { fails: [] },
+  lastPassAt: plus(NOW, -MIN).toISOString(),
   openBriefings: 0,
   zones: [zone()],
   outboxRetrying: [],
   restartPending: false,
   ...o,
 });
+
+const STOP_AT = plus(NOW, -10 * MIN).toISOString();
+const RESET_AT = plus(NOW, 4 * 60 * MIN).toISOString();
+const stopped: UsageFacts = {
+  gate: 'stopped',
+  overageDropId: 'cd9',
+  overageStoppedAt: STOP_AT,
+  overageUntil: RESET_AT,
+};
 
 /**
  * Every state at once, highest first: removing the top condition each time must surface the next
@@ -110,8 +128,9 @@ function everything(): StatusInput {
     setupActive: true,
     killed: true,
     killedSince: plus(NOW, -5 * MIN).toISOString(),
+    usage: stopped,
     usagePausedUntil: plus(NOW, 30 * MIN).toISOString(),
-    sticks: { live: 0 },
+    sticks: { live: 0, slots: 0, busy: 0 },
     doctor: { fails: [fail('forge.labels'), fail('stick.seen')], finishedAt: NOW.toISOString() },
     lastPassAt: plus(NOW, -MIN).toISOString(),
     openBriefings: 2,
@@ -127,7 +146,8 @@ function everything(): StatusInput {
             state: 'parked',
             reason: 'CODEOWNERS does not cover GOAL.md',
           }),
-          item({ id: 4, issueNumber: 10, state: 'ready' }),
+          item({ id: 4, issueNumber: 10, state: 'in_flight' }),
+          item({ id: 5, issueNumber: 11, state: 'ready' }),
         ],
         drops: [drop(), drop({ id: 'q1', workItemId: 4, state: 'queued', startedAt: null })],
         parked: 1,
@@ -140,6 +160,7 @@ function everything(): StatusInput {
 }
 
 type Step = [string, (i: StatusInput) => void, string, string, string | undefined];
+const z0 = (i: StatusInput) => i.zones[0] as StatusZone;
 
 const STEPS: Step[] = [
   ['setup', (i) => void (i.setupActive = false), 'Finish setup', 'setup', '/setup'],
@@ -151,7 +172,14 @@ const STEPS: Step[] = [
     '/',
   ],
   [
-    'usage',
+    'credits stop',
+    (i) => void (i.usage = { gate: 'finishing_only' }),
+    `Stopped: drop cd9 ran on usage credits at ${STOP_AT}; nothing new runs until you rule on the credits briefing or the window resets at ${RESET_AT}`,
+    'you',
+    '/briefings',
+  ],
+  [
+    'usage pause',
     (i) => void delete i.usagePausedUntil,
     `Paused by Claude's usage limit until ${plus(NOW, 30 * MIN).toISOString()}`,
     'claude',
@@ -159,28 +187,39 @@ const STEPS: Step[] = [
   ],
   [
     'stick',
-    (i) => void (i.sticks = { live: 1 }),
+    (i) => void (i.sticks = { live: 1, slots: 1, busy: 1 }),
     "No runner: the stick hasn't checked in",
     'stick',
     '/',
   ],
   [
     'running',
-    (i) => void (i.zones[0] as StatusZone).drops.shift(),
+    (i) => void z0(i).drops.shift(),
     'Working: implement #7 in main, 12m 0s, gate 1 of 3',
     'nothing',
     '/drops/d1',
   ],
   [
     'ci',
-    (i) => void delete (i.zones[0] as StatusZone).prs,
+    (i) => void delete z0(i).prs,
     'Waiting on CI for PR #12 (20 of 45 min)',
     'ci',
     'https://github.com/octo/demo/pull/12',
   ],
   [
+    'held',
+    (i) => {
+      // The gate opens, and the zone is paused: the states below it read a paused zone.
+      i.usage = { gate: 'open' };
+      z0(i).mode = 'paused';
+    },
+    "Held by Claude's usage throttle: 2 issues wait; only finishing work starts",
+    'claude',
+    '/',
+  ],
+  [
     'credentials',
-    (i) => void ((i.zones[0] as StatusZone).credentialProblems = []),
+    (i) => void (z0(i).credentialProblems = []),
     'Blocked: main needs claudeToken: no Claude token is set: enter it under Settings, Credentials',
     'credentials',
     '/settings/credentials',
@@ -188,7 +227,7 @@ const STEPS: Step[] = [
   [
     'doctor',
     (i) => void (i.doctor = { fails: [] }),
-    'Blocked: 2 doctor fails, first forge.labels',
+    '2 doctor fails, first forge.labels',
     'doctor',
     '/doctor',
   ],
@@ -199,13 +238,7 @@ const STEPS: Step[] = [
     'you',
     '/briefings',
   ],
-  [
-    'paused',
-    (i) => void ((i.zones[0] as StatusZone).mode = 'active'),
-    'Paused by you: main (paused)',
-    'you',
-    '/zones',
-  ],
+  ['paused', (i) => void (z0(i).mode = 'active'), 'Paused by you: main (paused)', 'you', '/zones'],
   [
     'outbox',
     (i) => void (i.outboxRetrying = []),
@@ -215,16 +248,23 @@ const STEPS: Step[] = [
   ],
   [
     'parked',
-    (i) => void ((i.zones[0] as StatusZone).parked = 0),
+    (i) => void (z0(i).parked = 0),
     '1 parked: CODEOWNERS does not cover GOAL.md',
     'you',
     '/',
   ],
   [
     'queued',
-    (i) => void ((i.zones[0] as StatusZone).drops = []),
+    (i) => void (z0(i).drops = []),
     'Queued: 1 issue; every slot is busy',
     'stick',
+    undefined,
+  ],
+  [
+    'ready, waiting for the pass',
+    (i) => void (z0(i).items = z0(i).items.filter((it) => it.state !== 'ready')),
+    '1 ready issue waits for the next pass',
+    'nothing',
     undefined,
   ],
   [
@@ -239,10 +279,8 @@ const STEPS: Step[] = [
 describe('statusOf', () => {
   test('statusOf returns one headline per state, in priority order, over the fixture table', () => {
     const input = everything();
-    // The paused state needs every zone paused; it sits under the headlines above it all along.
-    (input.zones[0] as StatusZone).mode = 'paused';
     const seen: [string, string, string, string | undefined][] = [];
-    for (const [name, remove, , ,] of STEPS) {
+    for (const [name, remove] of STEPS) {
       const s = statusOf(input, NOW);
       seen.push([name, s.headline, s.waitingOn, s.action?.href]);
       remove(input);
@@ -250,7 +288,7 @@ describe('statusOf', () => {
     expect(seen).toEqual(STEPS.map(([name, , h, w, href]) => [name, h, w, href]));
   });
 
-  test('running work outranks a doctor fail older than the last pass and a credential problem in another zone, which move to the detail', () => {
+  test('running work outranks a doctor fail older than the last pass and a credential problem in another zone, which move to the list of other blockers', () => {
     const s = statusOf(
       base({
         doctor: { fails: [fail('forge.labels')], finishedAt: plus(NOW, -10 * MIN).toISOString() },
@@ -265,19 +303,24 @@ describe('statusOf', () => {
     );
     expect(s.headline).toBe('Working: implement #7 in main, 12m 0s, gate 0 of 3');
     expect(s.since).toBe(plus(NOW, -12 * MIN).toISOString());
-    expect(s.detail).toContain('Also blocked: docs needs claudeToken');
-    expect(s.detail).toContain('1 doctor fail (forge.labels) from a run before the last pass');
-    expect(s.detail).toContain('takes effect at the next restart');
+    // The detail explains the headline only; every other cause is a short item with its fix.
+    expect(s.detail).toBe('');
+    expect(s.also).toEqual([
+      { text: 'docs: no Claude token', href: '/settings/credentials' },
+      { text: '1 doctor fail (forge.labels), from a run before the last pass', href: '/doctor' },
+      { text: 'a setting takes effect at the next restart' },
+    ]);
     // An older doctor fail alone never takes the headline.
     const idle = statusOf(
       base({
         doctor: { fails: [fail('forge.labels')], finishedAt: plus(NOW, -10 * MIN).toISOString() },
-        lastPassAt: plus(NOW, -MIN).toISOString(),
       }),
       NOW,
     );
     expect(idle.headline).toMatch(/^Idle/);
-    expect(idle.detail).toContain('forge.labels');
+    expect(idle.also?.map((a) => a.text)).toEqual([
+      '1 doctor fail (forge.labels), from a run before the last pass',
+    ]);
   });
 
   test('a credential problem takes the headline only when no zone is working, naming the zone and the credential', () => {
@@ -287,6 +330,11 @@ describe('statusOf', () => {
           zone({
             credentialProblems: [
               problem({ credential: 'githubAuthorToken', message: 'no author token' }),
+              problem({
+                credential: 'githubReviewerToken',
+                kind: 'same',
+                message: 'same as author',
+              }),
             ],
           }),
         ],
@@ -299,6 +347,10 @@ describe('statusOf', () => {
       label: 'Open Settings, Credentials',
       href: '/settings/credentials',
     });
+    // The other problem is listed, in the short form; the headline's own is not repeated.
+    expect(blocked.also).toEqual([
+      { text: 'main: the reviewer token is the same as another', href: '/settings/credentials' },
+    ]);
     // Before the Credentials tab exists, the wizard step that sets it.
     const early = statusOf(
       base({
@@ -340,34 +392,154 @@ describe('statusOf', () => {
         zones: [
           zone({
             drops: [drop({ role: 'doctor', workItemId: null, state: 'queued', startedAt: null })],
-            doctorWait: 'waiting for a stick that can run zone main (see stick.capabilities)',
+            doctorWait: 'waiting for a free stick slot',
           }),
         ],
-        usageGate: 'finishing_only',
       }),
       NOW,
     );
-    expect(doctorQueued.headline).toBe('Queued: 1 issue; every slot is busy');
+    // A doctor drop is not an issue (M7), and a free slot is not "busy".
+    expect(doctorQueued.headline).toBe('Queued: 1 drop; it starts when a stick next asks for work');
     expect(doctorQueued.detail).toContain(
-      'The doctor drop in main: waiting for a stick that can run zone main',
+      'The doctor drop in main: waiting for a free stick slot.',
     );
-    expect(doctorQueued.detail).toContain('only finishing work starts');
   });
 
   test('the status names zones, issues and PRs and never a token', () => {
     const token = 'github_pat_STATUSNEVERSHOWN0123456789';
     const s = statusOf(everything(), NOW);
-    const all = JSON.stringify([s, ...STEPS.map(() => s)]);
-    expect(all).not.toContain(token);
-    // Text is plain: the page escapes it. A zone id with markup comes back as written.
+    expect(JSON.stringify(s)).not.toContain(token);
+    // Text is plain: the page escapes it.
     const odd = statusOf(
+      base({ zones: [zone({ parked: 1, items: [item({ state: 'parked', reason: 'r <x>' })] })] }),
+      NOW,
+    );
+    expect(odd.headline).toBe('1 parked: r <x>');
+  });
+});
+
+describe('usage holds (round 2, I1 and I2)', () => {
+  const ready = () => [item({ id: 5, issueNumber: 11, state: 'ready' })];
+
+  test('the credits stop has its own headline after the kill switch, with the two rulings in the detail', () => {
+    const s = statusOf(
+      base({ usage: stopped, openBriefings: 1, zones: [zone({ items: ready() })] }),
+      NOW,
+    );
+    expect(s.headline).toBe(
+      `Stopped: drop cd9 ran on usage credits at ${STOP_AT}; nothing new runs until you rule on the credits briefing or the window resets at ${RESET_AT}`,
+    );
+    expect(s.waitingOn).toBe('you');
+    expect(s.since).toBe(STOP_AT);
+    expect(s.action).toEqual({ label: 'Rule on it', href: '/briefings' });
+    expect(s.detail).toContain('Run on credits now');
+    expect(s.detail).toContain('Noted');
+    expect(s.detail).toContain('reviews included');
+    // Above a usage pause too; below the kill switch.
+    expect(statusOf(base({ usage: stopped, usagePausedUntil: RESET_AT }), NOW).headline).toMatch(
+      /^Stopped: drop cd9/,
+    );
+    expect(statusOf(base({ usage: stopped, killed: true }), NOW).headline).toMatch(
+      /^Stopped by the kill switch/,
+    );
+  });
+
+  test('the throttle holds ready work: the line names it instead of Idle', () => {
+    const s = statusOf(
+      base({ usage: { gate: 'finishing_only' }, zones: [zone({ items: ready() })] }),
+      NOW,
+    );
+    expect(s.headline).toBe(
+      "Held by Claude's usage throttle: 1 issue waits; only finishing work starts",
+    );
+    expect(s.waitingOn).toBe('claude');
+    // Nothing ready or queued: the throttle holds nothing, so the line is Idle.
+    expect(statusOf(base({ usage: { gate: 'finishing_only' } }), NOW).headline).toMatch(/^Idle/);
+  });
+
+  test('a probe after a pause or a credits stop says one drop runs until the limit shows clear', () => {
+    const s = statusOf(
       base({
+        usage: { gate: 'probe', overageProbeSince: STOP_AT },
+        zones: [zone({ items: ready() })],
+      }),
+      NOW,
+    );
+    expect(s.headline).toBe(
+      'Probing the usage limit: one drop runs until it shows the limit cleared; 1 issue waits',
+    );
+    expect(s.detail).toContain(`The credits stop ended at ${STOP_AT}`);
+    expect(s.waitingOn).toBe('claude');
+  });
+
+  test('a credits Resume names the work item that runs and until when', () => {
+    const s = statusOf(
+      base({
+        usage: { gate: 'credits_resume', overageResumeWorkItemId: 4, overageResumeUntil: RESET_AT },
         zones: [
-          zone({ id: 'a<b', parked: 1, items: [item({ state: 'parked', reason: 'r <x>' })] }),
+          zone({
+            items: [...ready(), item({ id: 4, issueNumber: 10, state: 'in_flight' })],
+            drops: [drop({ id: 'q2', workItemId: 5, state: 'queued', startedAt: null })],
+          }),
         ],
       }),
       NOW,
     );
-    expect(odd.headline).toBe('1 parked: r <x>');
+    expect(s.headline).toBe(`Resuming after a credits stop: only #10 runs until ${RESET_AT}`);
+    expect(s.waitingOn).toBe('claude');
+  });
+
+  test('queued work no live stick can run says which capability is missing, and every-slot-busy only when it is', () => {
+    const q = () => [drop({ id: 'q1', workItemId: 5, state: 'queued', startedAt: null })];
+    const items = [item({ id: 5, issueNumber: 11, state: 'in_flight' })];
+    const capability = statusOf(
+      base({ zones: [zone({ items, drops: q(), cannotRun: 'no live stick has egress-v1' })] }),
+      NOW,
+    );
+    expect(capability.headline).toBe(
+      'Queued: 1 issue; no stick can run zone main: no live stick has egress-v1',
+    );
+    expect(capability.waitingOn).toBe('stick');
+    const busy = statusOf(
+      base({ sticks: { live: 1, slots: 2, busy: 2 }, zones: [zone({ items, drops: q() })] }),
+      NOW,
+    );
+    expect(busy.headline).toBe('Queued: 1 issue; every slot is busy');
+    const free = statusOf(
+      base({ sticks: { live: 1, slots: 2, busy: 1 }, zones: [zone({ items, drops: q() })] }),
+      NOW,
+    );
+    expect(free.headline).toBe('Queued: 1 issue; it starts when a stick next asks for work');
+  });
+});
+
+describe('the detail and its list (round 2: S1, M2, M3)', () => {
+  test('a paused zone among active ones is listed with a link to it', () => {
+    const s = statusOf(base({ zones: [zone(), zone({ id: 'docs', mode: 'paused' })] }), NOW);
+    expect(s.headline).toMatch(/^Idle/);
+    expect(s.also).toEqual([{ text: 'docs is paused', href: '/zones/docs' }]);
+  });
+
+  test('before the first pass the list says so, and fails count as new', () => {
+    const s = statusOf(
+      base({
+        lastPassAt: undefined,
+        doctor: { fails: [fail('forge.labels')], finishedAt: STOP_AT },
+      }),
+      NOW,
+    );
+    expect(s.headline).toBe('1 doctor fail, first forge.labels');
+    expect(s.also).toEqual([{ text: 'no pass yet since start' }]);
+  });
+});
+
+describe('the last pass (round 2, M3)', () => {
+  test('the end of a pass is stamped in the database, so a restart keeps it', () => {
+    const file = tmpDbFile();
+    const db = openDb(file);
+    expect(lastPassAt(db)).toBeUndefined();
+    recordPass(db, NOW);
+    db.close();
+    expect(lastPassAt(openDb(file))).toBe(NOW.toISOString());
   });
 });
