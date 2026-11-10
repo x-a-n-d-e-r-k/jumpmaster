@@ -135,12 +135,7 @@ function guidanceReader(
 function credentialsOf(store: ConfigStore): NonNullable<DoctorDeps['credentials']> {
   const resolved = store.resolved();
   const vault = store.vault();
-  const created = credentialCreatedAt(
-    'claudeToken',
-    resolved,
-    store.mode(),
-    store.current().claude,
-  );
+  const created = credentialCreatedAt('claudeToken', resolved, store.current().claude);
   return {
     problems: store.problems(),
     shadowed: shadowedCredentials(resolved, vault),

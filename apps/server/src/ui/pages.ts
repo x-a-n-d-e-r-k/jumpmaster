@@ -31,6 +31,10 @@ export interface RateLimitSeen extends StoredEvent {
 export interface HomeState {
   /** The setup wizard's frame on home, and the "Add a project" link. */
   setup?: { active: boolean; addProject: boolean };
+  /** The settings pages exist (a store install): home links to them. */
+  settings?: boolean;
+  /** The Claude token's age in days, when dated: a banner from day 330. */
+  claudeTokenDays?: number;
   zones: DropZoneConfig[];
   /** Each zone's current mode; absent means active. */
   modes?: Record<string, string>;
@@ -378,6 +382,20 @@ function gateSummary(drop: Drop): string {
   }
 }
 
+/** From this day the Claude token's age is a banner on home and the Credentials tab. */
+export const TOKEN_BANNER_DAYS = 330;
+const TOKEN_LIFE_DAYS = 365;
+
+/** The Claude token's expiry banner, or nothing before day 330 (or when its age is unknown). */
+export function tokenAgeBanner(days: number | undefined): string {
+  if (days === undefined || days < TOKEN_BANNER_DAYS) return '';
+  const when =
+    days >= TOKEN_LIFE_DAYS
+      ? 'past its one-year life: drops fail to authenticate until it is replaced'
+      : `and expires around day ${TOKEN_LIFE_DAYS}`;
+  return `<p class="warn token-age"><strong>The Claude token is ${days} days old</strong> ${when}. Run <code>claude setup-token</code> on your own computer and replace it under <a href="/settings/credentials">Settings, Credentials</a>.</p>`;
+}
+
 export function renderHome(state: HomeState): string {
   const now = state.now ?? new Date();
   const starterBanner = state.zones
@@ -435,9 +453,12 @@ export function renderHome(state: HomeState): string {
   const addProject = state.setup?.addProject
     ? '<p><a href="/setup/project">Add a project</a></p>'
     : '';
+  const settingsLink = state.settings ? '<p><a href="/settings">Settings</a></p>' : '';
   return page(
-    setupFrame +
+    tokenAgeBanner(state.claudeTokenDays) +
+      setupFrame +
       addProject +
+      settingsLink +
       starterBanner +
       killSection(state.killed ?? false) +
       (state.briefings ? waitingOnYou(state.briefings) : '') +

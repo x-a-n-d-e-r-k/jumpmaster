@@ -1634,11 +1634,11 @@ describe('secret routes (Task 4)', () => {
   test('a Claude token set in the UI is dated today unless a date is given', async () => {
     const w = secretsApp();
     await put('claudeToken', { value: CLAUDE });
-    expect(credentialCreatedAt('claudeToken', w.store.resolved(), 'db', {})).toBe(
+    expect(credentialCreatedAt('claudeToken', w.store.resolved(), {})).toBe(
       t0.toISOString().slice(0, 10),
     );
     await put('claudeToken', { value: CLAUDE, declaredCreatedAt: '2026-01-15' });
-    expect(credentialCreatedAt('claudeToken', w.store.resolved(), 'db', {})).toBe('2026-01-15');
+    expect(credentialCreatedAt('claudeToken', w.store.resolved(), {})).toBe('2026-01-15');
     expect(
       (await put('claudeToken', { value: CLAUDE, declaredCreatedAt: 'soon' })).statusCode,
     ).toBe(400);
