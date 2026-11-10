@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -8,6 +8,7 @@ import {
   MCP_DEFAULTS,
   modelFor,
   parseEditable,
+  preflightSecrets,
   STARTER_WARNING,
   secretList,
   splitConfigFile,
@@ -1049,5 +1050,57 @@ describe('gate secret values and names (Task 4 review)', () => {
           'zone ids a-b and a_b share the gate secret variables JM_ZONE_SECRET_A_B_<NAME>: rename one',
       },
     ]);
+  });
+});
+
+describe('preflightSecrets', () => {
+  const dirWith = (files: string[]) => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'jm-preflight-')), 'secrets');
+    mkdirSync(dir);
+    for (const f of files) writeFileSync(join(dir, f), 'x'.repeat(40), { mode: 0o600 });
+    return dir;
+  };
+  const env = (dir: string) => ({
+    JM_SECRETS_DIR: dir,
+    JM_JOIN_TOKEN_FILE: join(dir, 'join_token'),
+    JM_OPERATOR_TOKEN_FILE: join(dir, 'operator_token'),
+  });
+
+  test('a missing machine secret in an empty secrets directory names the empty bind and the down-then-up fix', () => {
+    const dir = dirWith([]);
+    let message = '';
+    try {
+      preflightSecrets(env(dir), dir);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain('JM_JOIN_TOKEN_FILE');
+    expect(message).toContain(`${dir} is empty`);
+    expect(message).toMatch(/Docker Desktop/);
+    expect(message).toMatch(/\/var\/folders/);
+    expect(message).toContain('docker compose down');
+    expect(message).toMatch(/home directory/);
+  });
+
+  test('the hint is only for an empty directory: one holding files, or no secrets directory, gets the plain error', () => {
+    const some = dirWith(['claude_token']);
+    expect(() => preflightSecrets(env(some), some)).toThrow(/join_token does not exist/);
+    let message = '';
+    try {
+      preflightSecrets(env(some), some);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).not.toContain('docker compose down');
+    const none = dirWith([]);
+    try {
+      preflightSecrets({ JM_JOIN_TOKEN_FILE: join(none, 'join_token') }, undefined);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).not.toContain('docker compose down');
+    // A full directory passes.
+    const full = dirWith(['join_token', 'operator_token']);
+    expect(() => preflightSecrets(env(full), full)).not.toThrow();
   });
 });

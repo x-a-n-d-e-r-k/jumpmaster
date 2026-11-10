@@ -18,6 +18,7 @@ function deps() {
     serve: vi.fn(async (_config: string | undefined) => 0),
     ctl: vi.fn(async (_args: string[]) => 0),
     init: vi.fn(async (_args: string[]) => 0),
+    bootstrap: vi.fn(async (_args: string[]) => 0),
     err: vi.fn((_line: string) => undefined),
   };
 }
@@ -62,6 +63,20 @@ describe('jumpmaster command', () => {
     expect(await runCli(['init', '--repo', 'octo/demo'], d)).toBe(3);
     expect(d.init.mock.calls).toEqual([[['--repo', 'octo/demo']]]);
     expect(d.serve).not.toHaveBeenCalled();
+  });
+});
+
+describe('jumpmaster bootstrap', () => {
+  test('jumpmaster bootstrap is a reserved command, not a config path', async () => {
+    const d = deps();
+    d.bootstrap.mockResolvedValueOnce(1);
+    expect(await runCli(['bootstrap'], d)).toBe(1);
+    expect(await runCli(['bootstrap', '/install'], d)).toBe(0);
+    expect(d.bootstrap.mock.calls).toEqual([[[]], [['/install']]]);
+    // Never a config path, not even after serve.
+    expect(await runCli(['serve', 'bootstrap'], d)).toBe(2);
+    expect(d.serve).not.toHaveBeenCalled();
+    expect(d.err.mock.calls.flat().join('\n')).toMatch(/jumpmaster bootstrap/);
   });
 });
 

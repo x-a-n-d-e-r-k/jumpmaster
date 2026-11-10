@@ -395,6 +395,11 @@ files back, then `chmod 700 secrets && chmod 600 secrets/*`, put the backup in p
 5. `docker compose up -d`, then `docker compose exec jumpmaster jumpmaster ctl resume <zone>` and
    run the doctor.
 
+From M4, replacing `compose.yaml` is the whole upgrade: `secrets/`, `config/`, `data/` and `.env`
+keep working, and the new `bootstrap` service adds `secrets/vault_key`. The block `jumpmaster
+init` wrote into `.env` (between its `# jumpmaster init` markers) is no longer read and may be
+deleted, as may a `secrets/github_reviewer_token` left beside a starter zone, which never uses it.
+
 A new release may migrate the database; to go back to an older release, restore the backup you
 took before upgrading.
 

@@ -5,10 +5,10 @@
 #   export JM_SOURCE=/path/to/jumpmaster-checkout
 #   C="docker compose -f $JM_SOURCE/deploy/compose.yaml.tmpl -f $JM_SOURCE/deploy/compose.build.yaml --project-directory ."
 #   $C --profile build build            # the four :dev images
-#   $C --profile init run --rm init --repo owner/name
-#   # then set "requireSignedImages": false in config/jumpmaster.config.json: :dev tags are
-#   # mutable and unsigned, and a signed install refuses them
-#   $C up -d
+#   $C up -d                            # bootstrap, then the server (db mode) and the stick
+#   # or first, for file mode: $C --profile init run --rm init --repo owner/name, then set
+#   # "requireSignedImages": false in config/jumpmaster.config.json: :dev tags are mutable and
+#   # unsigned, and a signed install refuses them
 #
 # What differs from a release: the server has no image lock, so presets resolve to local
 # jumpmaster-trooper[-<preset>]:dev builds (JM_DEV_IMAGES=1); the stick runs the allowlist policy
@@ -21,6 +21,9 @@ services:
       dockerfile: images/server/Dockerfile
     environment:
       JM_DEV_IMAGES: "1"
+
+  bootstrap:
+    image: jumpmaster-server:dev
 
   init:
     image: jumpmaster-server:dev

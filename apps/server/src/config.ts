@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import {
   ContainerLimitsSchema,
   GateSpecSchema,
@@ -730,10 +730,27 @@ export const gateSecretsOf = (zones: readonly { id: string; gateSecrets: string[
  * name rather than as a database error, as M4's loader did.
  */
 export function preflightSecrets(rawEnv: NodeJS.ProcessEnv, secretsDir?: string): void {
-  for (const name of Object.values(MACHINE_VARS)) readSecret(rawEnv, name);
-  // Warnings (the /run/secrets fallback) are said once, by the store.
-  resolveCredentials(rawEnv, secretsDir, 'disabled', { warn: () => {} });
+  try {
+    for (const name of Object.values(MACHINE_VARS)) readSecret(rawEnv, name);
+    // Warnings (the /run/secrets fallback) are said once, by the store.
+    resolveCredentials(rawEnv, secretsDir, 'disabled', { warn: () => {} });
+  } catch (e) {
+    if (!(e instanceof Error) || !secretsDir || !isEmptyDir(secretsDir)) throw e;
+    // Bootstrap always writes the machine secrets there: an empty directory is a bind that came
+    // up empty, not an install without secrets.
+    throw new Error(
+      `${e.message}. ${secretsDir} is empty: the bind of ./secrets came up empty (seen with Docker Desktop when the install directory is under a symlinked parent such as macOS's /var/folders). Run  docker compose down  then  docker compose up, or install under your home directory`,
+    );
+  }
 }
+
+const isEmptyDir = (dir: string): boolean => {
+  try {
+    return readdirSync(dir).length === 0;
+  } catch {
+    return false;
+  }
+};
 
 /**
  * The join and operator tokens, required at every start, with the operator token's rules: at
