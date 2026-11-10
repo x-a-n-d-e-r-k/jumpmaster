@@ -1,8 +1,22 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import { type AuditDetail, recordAudit } from '../auth/audit.js';
+import { Backoff } from '../auth/backoff.js';
+import {
+  deleteOperator,
+  MAX_PASSPHRASE,
+  operatorHash,
+  passphraseProblem,
+  SetupMode,
+  setOperatorPassphrase,
+  setupActive,
+  setupCodeLine,
+  verifyPassphrase,
+} from '../auth/operator.js';
+import { deleteAllSessions, grantSudo } from '../auth/sessions.js';
 import { listBriefings, optionsDigest, ruleBriefing } from '../briefings.js';
-import { allowedHostsOf, type Config, mcpConfigOf, secretList } from '../config.js';
+import { type Config, mcpConfigOf, secretList } from '../config.js';
 import { requestCrewCycle } from '../crew/schedule.js';
 import type { Db } from '../db/open.js';
 import {
@@ -47,6 +61,15 @@ export interface ControlDeps {
   readForgeFor?(zoneId: string): Forge | undefined;
   /** This process as the doctor sees it (default: read from the process). */
   doctorEnv?: DoctorEnv;
+  /** The in-memory setup code, shared with the setup pages (default: one printing to stderr). */
+  setup?: SetupMode;
+  /** Per-source backoff for passphrase guesses, shared with the login page. */
+  backoff?: Backoff;
+}
+
+/** A setup mode whose codes go to stderr, alone on their line (main.ts passes its own). */
+export function stderrSetupMode(listen: Config['listen']): SetupMode {
+  return new SetupMode((code) => process.stderr.write(`${setupCodeLine(code, listen)}\n`));
 }
 
 const DoctorBody = z.strictObject({ zone: z.string().min(1).optional() });
@@ -63,6 +86,13 @@ const RuleBody = z.object({
   optionsDigest: z.string().max(64).optional(),
 });
 const KillBody = z.object({ engaged: z.boolean() });
+const PassphraseBody = z.strictObject({ passphrase: z.string().max(4 * MAX_PASSPHRASE) });
+const SudoBody = z.object({
+  passphrase: z
+    .string()
+    .max(4 * MAX_PASSPHRASE)
+    .optional(),
+});
 const MintBody = z.strictObject({
   zoneId: z.string().min(1),
   scope: z.enum(MCP_SCOPES),
@@ -70,7 +100,7 @@ const MintBody = z.strictObject({
   label: z.string().max(80).optional(),
 });
 
-function tokenMatches(req: FastifyRequest, expected: string): boolean {
+export function tokenMatches(req: FastifyRequest, expected: string): boolean {
   const given = Buffer.from(req.headers.authorization ?? '');
   const want = Buffer.from(`Bearer ${expected}`);
   return given.length === want.length && timingSafeEqual(given, want);
@@ -86,22 +116,111 @@ export function originAllowed(origin: string | undefined, allowed: string[]): bo
   }
 }
 
-/** Operator routes. The token is required because a container can reach the host's loopback. */
+/**
+ * Operator routes. The guard (`auth/guard.ts`) decides who reaches them: the operator token or a
+ * browser session with its CSRF header, after the Host and Origin checks, because a container can
+ * reach the host's loopback. Every mutating handler records a `control_audit` row from named fields.
+ */
 export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): void {
   const { db, config, now } = deps;
-  const allowed = allowedHostsOf(config);
+  const setup = deps.setup ?? stderrSetupMode(config.listen);
+  const backoff = deps.backoff ?? new Backoff();
+  const secrets = secretList(config.secrets);
+  const audit = (req: FastifyRequest, action: string, detail: AuditDetail, target?: string) =>
+    recordAudit(
+      db,
+      {
+        via: req.principal?.via ?? 'token',
+        action,
+        ...(target === undefined ? {} : { target }),
+        detail,
+      },
+      now(),
+      secrets,
+    );
+  /** Routes for `ctl` alone: a session is refused, whatever its sudo. */
+  const tokenOnly = (req: FastifyRequest, reply: FastifyReply): boolean => {
+    if (req.principal?.via === 'token') return true;
+    void reply
+      .code(403)
+      .send({ error: 'this needs the operator token: run it with jumpmaster ctl' });
+    return false;
+  };
 
   void app.register(async (scope) => {
+    // The guard sets the principal; without one (the guard not registered) nothing gets through.
     scope.addHook('onRequest', async (req, reply) => {
-      if (!tokenMatches(req, config.secrets.operatorToken)) {
-        return reply.code(401).send({ error: 'unauthorized' });
+      if (!req.principal) return reply.code(401).send({ error: 'unauthorized' });
+    });
+
+    // Sudo: a session re-enters the passphrase to write a credential for five minutes. The token is
+    // always sudo, since whoever holds it holds the secrets directory.
+    scope.post('/api/control/sudo', async (req, reply) => {
+      const p = req.principal;
+      if (p?.via === 'token') return { sudo: true, until: null };
+      const c = backoff.check(req.ip, now());
+      if (!c.allowed) {
+        return reply
+          .code(429)
+          .header('retry-after', String(Math.ceil(c.retryAfterMs / 1000)))
+          .send({ error: 'too many wrong passphrases from here: wait and try again' });
       }
-      if (
-        !allowed.includes(req.headers.host ?? '') ||
-        !originAllowed(req.headers.origin, allowed)
-      ) {
-        return reply.code(403).send({ error: 'forbidden host or origin' });
+      const body = SudoBody.safeParse(req.body ?? {});
+      const stored = operatorHash(db);
+      const given = body.success ? body.data.passphrase : undefined;
+      if (!p?.sessionId || !stored || given === undefined || !verifyPassphrase(given, stored)) {
+        backoff.fail(req.ip, now());
+        audit(req, 'sudo', { result: 'refused' });
+        return reply.code(401).send({ error: 'wrong passphrase' });
       }
+      backoff.reset(req.ip);
+      const until = grantSudo(db, p.sessionId, now());
+      audit(req, 'sudo', { result: 'granted', until });
+      return { sudo: true, until };
+    });
+
+    // Recovery: the operator row and every session go, and a new setup code is printed.
+    scope.post('/api/control/setup/reopen', async (req, reply) => {
+      if (!tokenOnly(req, reply)) return reply;
+      deleteOperator(db);
+      setup.clear();
+      setup.rotateSetupCode();
+      audit(req, 'setup.reopen', { result: 'reopened' });
+      return {
+        setup: 'open',
+        next: "a new setup code is on the server's output (docker compose logs jumpmaster)",
+      };
+    });
+
+    // A fresh setup code, printed on the server's stderr: never returned to the caller.
+    scope.post('/api/control/setup/code', async (req, reply) => {
+      if (!tokenOnly(req, reply)) return reply;
+      if (!setupActive(db)) {
+        return reply.code(409).send({
+          error: 'setup is complete: log in, or run jumpmaster ctl setup reopen to start over',
+        });
+      }
+      setup.rotateSetupCode();
+      audit(req, 'setup.code', { result: 'printed' });
+      return {
+        printed: true,
+        next: "the new setup code is on the server's output (docker compose logs jumpmaster)",
+      };
+    });
+
+    // Claims a headless install or replaces the passphrase; every session ends either way.
+    scope.put('/api/control/passphrase', async (req, reply) => {
+      if (!tokenOnly(req, reply)) return reply;
+      const body = PassphraseBody.safeParse(req.body ?? {});
+      if (!body.success)
+        return reply.code(400).send({ error: 'invalid body: {"passphrase": "…"}' });
+      const problem = passphraseProblem(body.data.passphrase);
+      if (problem) return reply.code(400).send({ error: problem });
+      const sessionsDeleted = deleteAllSessions(db);
+      const operator = setOperatorPassphrase(db, body.data.passphrase, now());
+      setup.clear();
+      audit(req, 'passphrase.set', { result: operator, sessionsDeleted });
+      return { operator, sessionsDeleted };
     });
 
     scope.post<{ Params: { id: string } }>('/api/control/zones/:id', async (req, reply) => {
@@ -118,6 +237,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         }
       }
       setZoneMode(db, zone.id, body.data.mode, now());
+      audit(req, 'zone.mode', { mode: body.data.mode }, zone.id);
       return { zone: zone.id, mode: body.data.mode };
     });
 
@@ -151,6 +271,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
           const error = { 404: 'unknown briefing', 409: 'already ruled', 400: 'unknown option' };
           return reply.code(r.status).send({ error: r.reason ?? error[r.status] });
         }
+        audit(req, 'briefing.rule', { optionId, rulingId: r.rulingId }, `briefing:${id}`);
         deps.kick?.();
         return { briefing: id, rulingId: r.rulingId };
       },
@@ -163,6 +284,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         if (!zone) return reply.code(404).send({ error: 'unknown zone' });
         if (!zone.crew?.enabled) return reply.code(409).send({ error: 'crew is not enabled' });
         requestCrewCycle(zone.id, now());
+        audit(req, 'zone.crew-cycle', {}, zone.id);
         deps.kick?.();
         return { zone: zone.id, crewCycle: 'due' };
       },
@@ -182,6 +304,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
           { zoneId, scope: tokenScope, days, ...(label ? { label } : {}) },
           now(),
         );
+        audit(req, 'mcp-token.mint', { id: minted.id, scope: tokenScope, days }, zoneId);
         return { ...minted, zoneId, scope: tokenScope, label: label ?? '' };
       });
 
@@ -194,6 +317,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
           if (!Number.isInteger(id) || id <= 0 || !revokeMcpToken(db, id, now())) {
             return reply.code(404).send({ error: 'unknown or revoked token' });
           }
+          audit(req, 'mcp-token.revoke', { id });
           return { id, revoked: true };
         },
       );
@@ -222,6 +346,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
             },
             zoneId !== undefined ? { zoneId } : {},
           );
+          audit(req, 'doctor.run', { runId: run.id }, zoneId);
           return { run };
         } catch (e) {
           if (e instanceof DoctorBusyError) return reply.code(409).send({ error: e.message });
@@ -258,6 +383,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
           .run(now().toISOString(), mine.id);
         if (done.changes === 0)
           return reply.code(409).send({ error: `doctor drop ${mine.id} has just started` });
+        audit(req, 'doctor.drop-cancel', { dropId: mine.id }, zone.id);
         return { dropId: mine.id, zone: zone.id, state: 'cancelled' };
       }
       if (isKilled(db))
@@ -285,6 +411,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         { id: dropId, dropZoneId: zone.id, workItemId: null, role: 'doctor', state: 'queued' },
         now(),
       );
+      audit(req, 'doctor.drop', { dropId }, zone.id);
       deps.kick?.();
       const waiting = doctorDropWait(db, config, zone, now());
       return reply.code(202).send({
@@ -332,6 +459,16 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
           now(),
         );
         const { status, ...rest } = out;
+        // Named fields only: the issue's text is the caller's and stays out of the audit.
+        audit(
+          req,
+          'intake.issue',
+          {
+            status,
+            number: 'number' in rest && typeof rest.number === 'number' ? rest.number : null,
+          },
+          zone.id,
+        );
         if (status === 201) deps.kick?.();
         return reply.code(status).send(rest);
       },
@@ -342,9 +479,12 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       if (!body.success) return reply.code(400).send({ error: 'invalid body' });
       if (!body.data.engaged) {
         setKilled(db, false, now());
+        audit(req, 'kill', { engaged: false });
         return { engaged: false, cancelled: 0 };
       }
-      return { engaged: true, ...engageKill(db, now()) };
+      const done = engageKill(db, now());
+      audit(req, 'kill', { engaged: true, cancelled: done.cancelled });
+      return { engaged: true, ...done };
     });
   });
 }

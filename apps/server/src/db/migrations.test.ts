@@ -676,3 +676,51 @@ test('an M3-era statement set still runs against v16 (the new table is ignored)'
   ).run();
   expect(count(db, 'sticks')).toBe(1);
 });
+
+test('v18 adds operator, sessions and control_audit, and control_audit keeps the last 5000 rows', () => {
+  const f = dbAt(17, (raw) =>
+    raw.exec(
+      `INSERT INTO sticks (id, name, token_hash, slots, created_at) VALUES ('s1', 'one', 'h1', 1, 'a');`,
+    ),
+  );
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(MIGRATIONS.at(-1)?.version).toBe(18);
+  expect(count(db, 'sticks')).toBe(1);
+  // One operator row at most.
+  const op = db.prepare('INSERT INTO operator (id, passphrase_hash, created_at) VALUES (?, ?, ?)');
+  op.run(1, 'h', 'a');
+  expect(() => op.run(1, 'h', 'b')).toThrow(/UNIQUE|PRIMARY/);
+  expect(() => op.run(2, 'h', 'b')).toThrow(/CHECK/);
+  db.prepare(
+    "INSERT INTO sessions (id_hash, csrf, created_at, last_seen_at) VALUES ('x', 'c', 'a', 'a')",
+  ).run();
+  expect(db.prepare('SELECT sudo_until AS s FROM sessions').get()).toEqual({ s: null });
+  const audit = db.prepare(
+    "INSERT INTO control_audit (at, via, action, detail_json) VALUES ('t', ?, 'kill', '{}')",
+  );
+  expect(() => audit.run('browser')).toThrow(/CHECK/);
+  for (let i = 0; i < 5003; i++) audit.run(['token', 'session', 'system'][i % 3]);
+  expect(count(db, 'control_audit')).toBe(5000);
+  const ids = db.prepare('SELECT MIN(id) AS lo, MAX(id) AS hi FROM control_audit').get() as {
+    lo: number;
+    hi: number;
+  };
+  // The first valid insert was id 1 (the refused one consumed none): the oldest three are gone.
+  expect(ids.hi - ids.lo + 1).toBe(5000);
+  expect(db.prepare('SELECT guarded AS g, target AS t FROM control_audit LIMIT 1').get()).toEqual({
+    g: 0,
+    t: null,
+  });
+  db.close();
+  expect(maxVersion(openDb(f))).toBe(MIGRATIONS.length);
+});
+
+test('an M4-era statement set still runs against v18 (the new tables are ignored)', () => {
+  const db = openDb(dbAt(18));
+  db.prepare(
+    "INSERT INTO sticks (id, name, token_hash, slots, created_at) VALUES ('s3', 'm4', 'h3', 1, 'd')",
+  ).run();
+  db.prepare('INSERT INTO doctor_runs (started_at) VALUES (?)').run('t');
+  expect(count(db, 'doctor_runs')).toBe(1);
+});

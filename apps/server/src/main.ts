@@ -2,6 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
+import { SetupMode, setupActive, setupCodeLine } from './auth/operator.js';
 import { type Config, loadConfig, secretList, startupWarnings } from './config.js';
 import { creditsPass } from './credits.js';
 import { openDb } from './db/open.js';
@@ -73,8 +74,14 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
   const doctorForgesFor = timedForgesFor;
   const intakeForgesFor = timedForgesFor;
 
+  // The setup code goes to stderr alone on its line, unscrubbed and unprefixed (it is no
+  // configured secret), naming the port actually bound.
+  let bound = { host: config.listen.host, port: config.listen.port };
+  const setup = new SetupMode((code) => process.stderr.write(`${setupCodeLine(code, bound)}\n`));
+
   // A ruling starts a pass at once; `guardedPass` is defined below and only called after listen.
   const app = createApp({
+    setup,
     db,
     config,
     forgesFor,
@@ -140,7 +147,11 @@ export async function start(configPath: string, env: NodeJS.ProcessEnv = process
   ];
 
   await app.listen({ host: config.listen.host, port: config.listen.port });
-  log(`listening on ${config.listen.host}:${config.listen.port}`);
+  const address = app.server.address();
+  if (address && typeof address === 'object') bound = { ...bound, port: address.port };
+  log(`listening on ${config.listen.host}:${bound.port}`);
+  // No operator yet: one setup code per start (§7.5), printed once the URL it names answers.
+  if (setupActive(db)) setup.rotateSetupCode();
   void guardedPass();
 
   return {

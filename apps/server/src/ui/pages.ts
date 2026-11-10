@@ -88,13 +88,13 @@ export interface ItemDetail {
 
 const pct = (v: number | null): string => (v === null ? '-' : `${Math.round(v * 100)}%`);
 
-/** The kill control. The token field keeps a page visit from being able to trigger it. */
+/** The kill control. It posts with the session's CSRF header, so a page visit cannot trigger it. */
 function killSection(killed: boolean): string {
   const notice = killed
     ? '<p><strong>The kill switch is engaged.</strong> No work runs and no forge writes happen. Forge and Claude tokens stay valid until you revoke them with their providers.</p>'
     : '';
   const label = killed ? 'Reset kill switch' : 'Engage kill switch';
-  return `<h2>Kill switch</h2>${notice}<form id="kill"><input id="kill-token" type="password" placeholder="Operator token" autocomplete="off" required> <button>${label}</button></form><script>document.getElementById('kill').addEventListener('submit',async(e)=>{e.preventDefault();const r=await fetch('/api/control/kill',{method:'POST',headers:{authorization:'Bearer '+document.getElementById('kill-token').value,'content-type':'application/json'},body:JSON.stringify({engaged:${killed ? 'false' : 'true'}})});if(r.ok)location.reload();else alert('Refused: '+r.status);});</script>`;
+  return `<h2>Kill switch</h2>${notice}<form id="kill"><button>${label}</button></form><script>document.getElementById('kill').addEventListener('submit',async(e)=>{e.preventDefault();const r=await jmFetch('/api/control/kill',{engaged:${killed ? 'false' : 'true'}});if(r.ok)location.reload();else alert('Refused: '+r.status);});</script>`;
 }
 
 /** The credits stop, in words: why nothing leases, or the Resume in force. */
@@ -190,8 +190,8 @@ function sticksSection(lines: StickLine[] | undefined): string {
   return `<h2>Sticks</h2><table><tr><th>Stick</th><th>Version</th><th>Last seen</th><th>Capabilities</th><th>Image policy</th><th>Zones</th></tr>${rows}</table>`;
 }
 
-/** One shared handler for every rule form: the operator token comes from a password field. */
-const RULE_SCRIPT = `<script>for(const f of document.querySelectorAll('form.rule'))f.addEventListener('submit',async(e)=>{e.preventDefault();const o=f.querySelector('input[name=option]:checked');if(!o){alert('Choose an option');return;}const r=await fetch('/api/control/briefings/'+f.dataset.briefing+'/rule',{method:'POST',headers:{authorization:'Bearer '+f.querySelector('input[type=password]').value,'content-type':'application/json'},body:JSON.stringify({optionId:o.value,optionsDigest:f.dataset.options,note:f.querySelector('textarea').value})});if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});</script>`;
+/** One shared handler for every rule form: it posts with the session's CSRF header. */
+const RULE_SCRIPT = `<script>for(const f of document.querySelectorAll('form.rule'))f.addEventListener('submit',async(e)=>{e.preventDefault();const o=f.querySelector('input[name=option]:checked');if(!o){alert('Choose an option');return;}const r=await jmFetch('/api/control/briefings/'+f.dataset.briefing+'/rule',{optionId:o.value,optionsDigest:f.dataset.options,note:f.querySelector('textarea').value});if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});</script>`;
 
 function briefingBlock(b: Briefing, holds: Map<string, string> | undefined): string {
   const hold = b.kind === 'promote_held' ? holds?.get(b.subject) : undefined;
@@ -207,7 +207,7 @@ function briefingBlock(b: Briefing, holds: Map<string, string> | undefined): str
     `<h3>${escapeHtml(b.decision)}</h3>` +
     `<table>${row('Zone', b.zoneId)}${row('Kind', b.kind)}${row('About', b.subject)}${b.why ? `<tr><th>Why</th><td><pre>${escapeHtml(b.why)}</pre></td></tr>` : ''}${b.diagnosis ? `<tr><th>Diagnosis</th><td><pre>${escapeHtml(b.diagnosis)}</pre></td></tr>` : ''}${row('Recommendation', b.recommendation)}${row('On hold', b.onHold)}${row('Raised by', b.source === 'mcp' ? 'assistant (MCP)' : b.source)}${row('Raised', b.createdAt)}</table>` +
     (hold ? `<p>Promotes at ${escapeHtml(hold)} unless you reject it.</p>` : '') +
-    `<form class="rule" data-briefing="${escapeHtml(b.id)}" data-options="${optionsDigest(b)}">${options}<textarea name="note" maxlength="2000" placeholder="Note (optional)"></textarea><br><input type="password" placeholder="Operator token" autocomplete="off" required> <button>Rule</button></form>`
+    `<form class="rule" data-briefing="${escapeHtml(b.id)}" data-options="${optionsDigest(b)}">${options}<textarea name="note" maxlength="2000" placeholder="Note (optional)"></textarea><br><button>Rule</button></form>`
   );
 }
 
@@ -330,8 +330,23 @@ const STYLE = `body{font:14px/1.4 system-ui,sans-serif;margin:2rem auto;max-widt
 table{border-collapse:collapse;width:100%;margin-bottom:1.5rem}th,td{border-bottom:1px solid #ddd;padding:.3rem .5rem;text-align:left;vertical-align:top}
 h1,h2{margin:1rem 0 .5rem}pre{white-space:pre-wrap;margin:0}`;
 
-const page = (body: string): string =>
-  `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Jumpmaster</title><style>${STYLE}</style></head><body><h1>Jumpmaster</h1>${body}</body></html>`;
+/**
+ * Every write from a page goes through `jmFetch`: JSON, with the session's CSRF token (from the
+ * `jm-csrf` meta the guard fills per session) in `x-jm-csrf`. The session cookie rides along.
+ */
+const JM_FETCH = `<script>function jmFetch(path,body,method){return fetch(path,{method:method||'POST',headers:{'content-type':'application/json','x-jm-csrf':document.querySelector('meta[name=jm-csrf]').content},body:JSON.stringify(body===undefined?{}:body)});}</script>`;
+
+const LOGOUT = `<form method="post" action="/logout" style="float:right;margin-top:1rem"><button>Log out</button></form>`;
+
+/**
+ * The page shell. With `chrome` (the default, for pages behind the login) it carries an empty
+ * `jm-csrf` meta for the guard to fill, `jmFetch` and the logout button; the login and setup pages
+ * go without.
+ */
+export const page = (body: string, opts: { chrome?: boolean } = {}): string => {
+  const chrome = opts.chrome ?? true;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">${chrome ? `<meta name="jm-csrf" content="">` : ''}<title>Jumpmaster</title><style>${STYLE}</style>${chrome ? JM_FETCH : ''}</head><body>${chrome ? LOGOUT : ''}<h1>Jumpmaster</h1>${body}</body></html>`;
+};
 
 function elapsed(drop: Drop, now: Date): string {
   if (!drop.startedAt) return '-';
@@ -515,15 +530,15 @@ export function renderObservations(rows: Observation[]): string {
   );
 }
 
-/** The doctor page's actions: each posts with the operator token typed into the page. */
-const DOCTOR_SCRIPT = `<script>for(const b of document.querySelectorAll('button[data-doctor]'))b.addEventListener('click',async()=>{const t=document.querySelector('#doctor-token').value;if(!t){alert('Enter the operator token');return;}b.disabled=true;const r=await fetch(b.dataset.doctor,{method:'POST',headers:{authorization:'Bearer '+t,'content-type':'application/json'},body:b.dataset.body||'{}'});b.disabled=false;if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});</script>`;
+/** The doctor page's actions: each posts with the session's CSRF header. */
+const DOCTOR_SCRIPT = `<script>for(const b of document.querySelectorAll('button[data-doctor]'))b.addEventListener('click',async()=>{b.disabled=true;const r=await jmFetch(b.dataset.doctor,JSON.parse(b.dataset.body||'{}'));b.disabled=false;if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});</script>`;
 
 /** The readiness doctor's latest run: every check, with its fix for any that did not pass. */
 export function renderDoctor(
   run: { id: number; finishedAt: string | null; checks: DoctorCheckView[] } | null,
   zones: DropZoneConfig[],
 ): string {
-  const controls = `<p><label>Operator token <input type="password" id="doctor-token" autocomplete="off"></label> <button data-doctor="/api/control/doctor">Run the doctor</button></p><p>A doctor drop proves the Claude token, the clone, services and gates on a stick; it spends one turn of usage.${zones
+  const controls = `<p><button data-doctor="/api/control/doctor">Run the doctor</button></p><p>A doctor drop proves the Claude token, the clone, services and gates on a stick; it spends one turn of usage.${zones
     .map(
       (z) =>
         ` <button data-doctor="/api/control/doctor/drop" data-body="${escapeHtml(JSON.stringify({ zone: z.id }))}">Doctor drop: ${escapeHtml(z.id)}</button>`,
@@ -572,9 +587,7 @@ const lines = (id) => document.getElementById(id).value.split('\\n').map((s) => 
 const val = (id) => document.getElementById(id).value.trim();
 const say = (id, text) => { document.getElementById(id).textContent = text; };
 async function call(path, body) {
-  const token = val('intake-token');
-  if (!token) { alert('Enter the operator token'); return null; }
-  const r = await fetch(base + path, { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await jmFetch(base + path, body);
   return { status: r.status, body: await r.json().catch(() => ({})) };
 }
 document.getElementById('stub-form').addEventListener('submit', async (e) => {
@@ -583,7 +596,6 @@ document.getElementById('stub-form').addEventListener('submit', async (e) => {
   const nonGoals = lines('stub-nongoals'); if (nonGoals.length) body.nonGoals = nonGoals;
   const constraints = lines('stub-constraints'); if (constraints.length) body.constraints = constraints;
   const r = await call('/goal-stub', body);
-  if (!r) return;
   if (r.status !== 200) { say('stub-status', 'Refused: ' + r.status + ' ' + (r.body.error ?? '')); return; }
   document.getElementById('stub-out').value = r.body.markdown;
   say('stub-status', 'Rendered. Copy it into GOAL.md and open a pull request (step 2).');
@@ -598,7 +610,6 @@ document.getElementById('issue-form').addEventListener('submit', async (e) => {
   const button = e.submitter; if (button) button.disabled = true;
   const r = await call('/issue', { idempotencyKey, ...issue });
   if (button) button.disabled = false;
-  if (!r) return;
   if (r.status === 200 || r.status === 201) {
     forgetSubmitKey(sessionStorage, content);
     say('issue-status', r.body.number != null ? 'Filed as issue #' + r.body.number + ', ready. It starts on the next pass.' : 'Already filed (' + r.body.state + ').');
@@ -634,6 +645,6 @@ export function renderIntake(zone: Pick<DropZoneConfig, 'id' | 'repo'>): string 
   const commit = `<h3>Step 2: commit it by pull request</h3><p>GOAL.md is a protected path, so no agent may write it and Jumpmaster doesn't commit it either. Copy the stub, then on a branch of ${escapeHtml(zone.repo)}: save it as GOAL.md, commit, push, open a pull request, and merge it yourself. The crew reads it once it is on the default branch.</p><p><textarea id="stub-out" rows="16" cols="80" readonly></textarea><br><button type="button" id="stub-copy">Copy</button></p>`;
   const first = `<h3>Step 3: the first issue</h3><p>Filed ready, under objective 1, as soon as you submit: the first issue doesn't need GOAL.md merged first.</p><form id="issue-form">${field('issue-title', 'Title (at most 120 characters)', '<input id="issue-title" size="80" maxlength="120" required>')}${field('issue-context', 'Context', area('issue-context', 6, true))}${field('issue-acceptance', 'Acceptance criteria, one per line', area('issue-acceptance', 5, true))}${field('issue-tests', 'Required tests, one per line', area('issue-tests', 3, true))}${field('issue-out', 'Out of scope, one per line (optional)', area('issue-out', 3))}<button>File the issue</button> <span id="issue-status"></span></form>`;
   return page(
-    `<h2>Intake: ${escapeHtml(zone.id)}</h2><div id="intake" data-base="${escapeHtml(base)}"><p><label>Operator token <input type="password" id="intake-token" autocomplete="off"></label></p>${goal}${commit}${first}</div>${INTAKE_SCRIPT}`,
+    `<h2>Intake: ${escapeHtml(zone.id)}</h2><div id="intake" data-base="${escapeHtml(base)}">${goal}${commit}${first}</div>${INTAKE_SCRIPT}`,
   );
 }

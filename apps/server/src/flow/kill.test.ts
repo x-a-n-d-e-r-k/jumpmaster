@@ -152,7 +152,7 @@ describe('kill switch', () => {
   test('the home page warns that tokens stay valid while engaged', async () => {
     const h = await harness();
     engageKill(h.db, h.now());
-    const res = await h.app.inject({ method: 'GET', url: '/' });
+    const res = await h.view('/');
     expect(res.body).toMatch(/kill switch is engaged/i);
     expect(res.body).toMatch(/revoke/i);
   });

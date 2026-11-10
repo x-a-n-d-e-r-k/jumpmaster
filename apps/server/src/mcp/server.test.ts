@@ -28,7 +28,7 @@ import {
 import { opMarker } from '../outbox.js';
 import { crewOn, crewWorld, ISSUE_BODY } from '../test/crew.js';
 import { makeZone, usageCfg } from '../test/fixtures.js';
-import { plus, t0 } from '../test/helpers.js';
+import { operatorSession, plus, t0 } from '../test/helpers.js';
 import { mintMcpToken, revokeMcpToken } from './tokens.js';
 
 const OP = 'o'.repeat(32);
@@ -662,7 +662,11 @@ describe('write tools', () => {
     expect(mine?.options.every((o) => o.effect === 'none')).toBe(true);
 
     // The briefings page names the assistant, not the crew.
-    const page = await app?.inject({ method: 'GET', url: '/briefings', headers: { host: HOST } });
+    const page = await app?.inject({
+      method: 'GET',
+      url: '/briefings',
+      headers: { host: HOST, cookie: operatorSession(s.db, t0).cookie },
+    });
     expect(page?.body).toContain('Raised by</th><td>assistant (MCP)');
 
     // A ruling on it applies no effect.
@@ -960,7 +964,11 @@ describe('review fixes', () => {
     };
     const seen = await digestOf();
     expect(seen.digest).toMatch(/^[0-9a-f]{16}$/);
-    const page = await app?.inject({ method: 'GET', url: '/briefings', headers: { host: HOST } });
+    const page = await app?.inject({
+      method: 'GET',
+      url: '/briefings',
+      headers: { host: HOST, cookie: operatorSession(s.db, t0).cookie },
+    });
     expect(page?.body).toContain(`data-options="${seen.digest}"`);
 
     expect((await raise(['B first', 'A first'])).isError).toBeFalsy();

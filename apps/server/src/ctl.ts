@@ -4,12 +4,25 @@ import { readSecret } from './secrets.js';
 
 const MODES: Record<string, string> = { pause: 'paused', resume: 'active', observe: 'observe' };
 
-export type CtlRequest = { path: string; body: unknown } | { path: string; method: 'GET' };
+export type CtlRequest =
+  | { path: string; body: unknown; method?: 'PUT' }
+  | { path: string; method: 'GET' };
 
 /** The control request for a command line, or null when it isn't one. */
 export function ctlRequest(args: string[]): CtlRequest | null {
   const [command, zone] = args;
   if (command === 'briefings') return { path: '/api/control/briefings', method: 'GET' };
+  // Setup and the passphrase. The passphrase itself comes from stdin, never argv.
+  if (command === 'setup-code')
+    return args.length === 1 ? { path: '/api/control/setup/code', body: {} } : null;
+  if (command === 'setup')
+    return args.length === 2 && zone === 'reopen'
+      ? { path: '/api/control/setup/reopen', body: {} }
+      : null;
+  if (command === 'passphrase')
+    return args.length === 2 && zone === 'set'
+      ? { path: '/api/control/passphrase', method: 'PUT', body: {} }
+      : null;
   if (command === 'doctor') {
     const drop = args.includes('--drop');
     const cancel = args.includes('--cancel');
@@ -87,7 +100,18 @@ export function formatDoctor(run: {
 }
 
 const USAGE =
-  'usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] | ctl doctor <zone> --drop | ctl doctor <zone> --cancel';
+  'usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] | ctl doctor <zone> --drop | ctl doctor <zone> --cancel | ctl setup-code | ctl setup reopen | ctl passphrase set (the passphrase on stdin)';
+
+/** The first line of stdin, without its line ending (`ctl passphrase set`). */
+async function readStdinLine(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+    chunks.push(b);
+    if (b.includes(10)) break;
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
 
 /** Runs one control command against the server. Returns the process exit code. */
 export async function runCtl(
@@ -96,11 +120,23 @@ export async function runCtl(
   fetchImpl: typeof fetch = fetch,
   out: (line: string) => void = console.log,
   err: (line: string) => void = console.error,
+  readStdin: () => Promise<string> = readStdinLine,
 ): Promise<number> {
   const request = ctlRequest(args);
   if (!request) {
     err(USAGE);
     return 2;
+  }
+  let body = request.method === 'GET' ? undefined : request.body;
+  if (request.path === '/api/control/passphrase') {
+    const line = (await readStdin()).split('\n')[0]?.replace(/\r$/, '') ?? '';
+    if (!line) {
+      err(
+        'ctl passphrase set reads the passphrase from stdin: printf %s "$PASSPHRASE" | jumpmaster ctl passphrase set',
+      );
+      return 2;
+    }
+    body = { passphrase: line };
   }
   let token: string | undefined;
   try {
@@ -116,12 +152,12 @@ export async function runCtl(
   const base = env.JM_SERVER_URL ?? 'http://127.0.0.1:7420';
   const res = await fetchImpl(
     new URL(request.path, base),
-    'method' in request
+    request.method === 'GET'
       ? { method: 'GET', headers: { authorization: `Bearer ${token}` } }
       : {
-          method: 'POST',
+          method: request.method ?? 'POST',
           headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-          body: JSON.stringify(request.body),
+          body: JSON.stringify(body),
         },
   );
   const text = await res.text();
