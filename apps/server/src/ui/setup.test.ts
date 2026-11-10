@@ -247,6 +247,8 @@ describe('the setup wizard', () => {
     expect(page.body).toContain("'/api/control/detect'");
     expect(page.body).toContain("'/api/control/zones'");
     expect(page.body).toContain('needsConfirmation');
+    // A detected gate's timeout travels with its reviewed row.
+    expect(page.body).toContain('p.dataset.extra = JSON.stringify(rest)');
     expect((await w.call('POST', '/api/control/detect', { repo: 'octo/x y' })).statusCode).toBe(
       400,
     );

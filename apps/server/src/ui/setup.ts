@@ -282,6 +282,8 @@ let found = null;
 const gates = document.getElementById('gates');
 function gateRow(g) {
   const p = document.createElement('p');
+  // What the review does not show (a detected timeout) travels with the row.
+  const { name: _n, run: _r, ...rest } = g; p.dataset.extra = JSON.stringify(rest);
   const name = document.createElement('input'); name.name = 'gate-name'; name.value = g.name || ''; name.placeholder = 'name';
   const run = document.createElement('input'); run.name = 'gate-run'; run.value = g.run || ''; run.size = 50; run.placeholder = 'command';
   p.append(name, ' ', run); gates.append(p);
@@ -311,12 +313,14 @@ document.getElementById('detect').addEventListener('submit', async (e) => {
 document.getElementById('project').addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.target; const out = document.getElementById('project-out');
-  const names = [...form.querySelectorAll('input[name=gate-name]')].map((i) => i.value.trim());
-  const runs = [...form.querySelectorAll('input[name=gate-run]')].map((i) => i.value.trim());
+  const rows = [...gates.querySelectorAll('p')];
+  const names = rows.map((p) => p.querySelector('input[name=gate-name]').value.trim());
+  const runs = rows.map((p) => p.querySelector('input[name=gate-run]').value.trim());
+  const extras = rows.map((p) => JSON.parse(p.dataset.extra || '{}'));
   const zone = {
     repo: found.repo,
     preset: form.preset.value,
-    gates: names.map((name, i) => ({ name, run: runs[i] })).filter((g) => g.name && g.run),
+    gates: names.map((name, i) => ({ ...extras[i], name, run: runs[i] })).filter((g) => g.name && g.run),
     identity: form.querySelector('input[name=identity]:checked').value,
     egress: { mode: 'monitor' },
   };
