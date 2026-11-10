@@ -1,0 +1,513 @@
+import { existsSync, readFileSync } from 'node:fs';
+import type { Principal } from '../auth/guard.js';
+import {
+  BOOT_MESSAGE,
+  type Config,
+  type ConfigIssue,
+  type DropZoneConfig,
+  type EditableConfig,
+  formatIssues,
+  loadSecrets,
+  mcpConfigOf,
+  parseEditable,
+  splitConfigFile,
+} from '../config.js';
+import type { Db } from '../db/open.js';
+import { ensureZoneMode } from '../db/repo.js';
+import type { BootConfig } from './boot.js';
+import { RESTART_PATHS } from './boot.js';
+import { type Change, diff } from './diff.js';
+import {
+  canonicalJson,
+  deleteSetting,
+  getRevision,
+  getSetting,
+  hashOf,
+  insertRevision,
+  latestRevisionVia,
+  listRevisions,
+  MAX_NOTE,
+  type RevisionVia,
+  setSetting,
+} from './revisions.js';
+import type { ConfigMode, ConfigSource, ConfigStatus } from './source.js';
+
+/**
+ * The config store (§10.3 live config). The database holds config revisions; the running system
+ * reads `current()` at the top of every pass and request, so a change applies without a restart.
+ *
+ * An install is in **file mode** (the config file is the truth, re-read on `reload`; the UI and
+ * `ctl` cannot write) or **db mode** (no file, or the file was adopted: `apply` writes revisions).
+ * Every write validates the whole document first and then changes the revision row and the
+ * current pointer in one transaction, and only then swaps the in-memory config: a revision that
+ * fails validation or storage changes nothing.
+ */
+
+export type { ConfigMode, ConfigSource, ConfigStatus } from './source.js';
+
+export type ApplyMeta = {
+  via: 'ui' | 'ctl' | 'import' | 'rollback';
+  principal: Principal;
+  note?: string;
+  expectRevision?: number;
+};
+
+/** Mode switches and rollbacks: the via is the operation's own. */
+export type OpMeta = { principal: Principal; note?: string; expectRevision?: number };
+
+export type ApplyResult =
+  | { ok: true; revision: number; changed: string[]; restartNeeded: string[] }
+  | { ok: false; issues: ConfigIssue[] }
+  | { ok: false; conflict: { expected: number; actual: number } };
+
+export type RevisionView = {
+  id: number;
+  parentId: number | null;
+  createdAt: string;
+  via: RevisionVia;
+  note: string | null;
+  changes: Change[];
+};
+
+export type StoreOptions = {
+  db: Db;
+  boot: BootConfig;
+  /** The config file's path (`serve <path>` or `JM_CONFIG`); it need not exist. */
+  filePath?: string;
+  env: NodeJS.ProcessEnv;
+  now(): Date;
+  imageLockPath?: string;
+  log?: (msg: string) => void;
+  /** The secrets for a set of zones; throws naming a variable (default: `loadSecrets(env, …)`). */
+  secretsFor?: (zones: readonly DropZoneConfig[]) => Config['secrets'];
+};
+
+const TOKEN_ONLY = 'this needs the operator token: run it with jumpmaster ctl';
+const unchanged = (revision: number, restartNeeded: string[] = []): ApplyResult => ({
+  ok: true,
+  revision,
+  changed: [],
+  restartNeeded,
+});
+const refused = (message: string, path = ''): ApplyResult => ({
+  ok: false,
+  issues: [{ path, message }],
+});
+const isObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/** The effective value of each restart-only path. */
+const restartValues = (c: EditableConfig): Record<(typeof RESTART_PATHS)[number], unknown> => ({
+  'mcp.enabled': mcpConfigOf(c).enabled,
+  'mcp.maxBodyBytes': mcpConfigOf(c).maxBodyBytes,
+});
+
+type Valid = { editable: EditableConfig; secrets: Config['secrets'] };
+
+export class ConfigStore implements ConfigSource {
+  private modeValue: ConfigMode = 'db';
+  private rev = 0;
+  private doc: Record<string, unknown> = {};
+  private cfg!: Config;
+  /** The editable config this process started with: restart-only paths are judged against it. */
+  private running!: EditableConfig;
+  /** Boot settings a reload found changed in the file (a restart applies them). */
+  private bootPending: string[] = [];
+  private fileProblem: ConfigIssue[] | undefined;
+  private readonly subscribers = new Set<(c: Config, rev: number, changes: Change[]) => void>();
+
+  private constructor(private readonly o: StoreOptions) {}
+
+  /**
+   * Decides the mode and loads the current revision. The mode is the stored one; else a config
+   * file present means file mode (revision 1 recorded `via: 'file'` when its content is new) and
+   * no file means db mode (revision 1 = the defaults with no zones, `via: 'setup'`). An invalid
+   * file, or file mode without its file, stops the start.
+   */
+  static open(o: StoreOptions): ConfigStore {
+    const s = new ConfigStore(o);
+    const { db } = o;
+    const stored = getSetting(db, 'config.mode');
+    const fileExists = s.fileExists();
+    const now = o.now();
+    if (stored === 'file' || (stored === undefined && fileExists)) {
+      if (!fileExists)
+        throw new Error(
+          `config mode is file, but ${o.filePath ?? 'the config file'} does not exist: restore it, or start with the file it was exported to`,
+        );
+      const doc = s.readFileDoc();
+      const v = s.validate(doc);
+      if ('issues' in v) throw new Error(`Invalid config ${o.filePath}: ${formatIssues(v.issues)}`);
+      const cur = s.storedCurrent();
+      const hash = hashOf(canonicalJson(doc));
+      db.transaction(() => {
+        if (!cur || cur.sourceHash !== hash) {
+          const id = insertRevision(db, { parentId: cur?.id ?? null, doc, via: 'file' }, now);
+          setSetting(db, 'config.current', id, now);
+        }
+        setSetting(db, 'config.mode', 'file', now);
+      })();
+      s.modeValue = 'file';
+      s.load(doc, v);
+    } else {
+      let cur = s.storedCurrent();
+      if (!cur) {
+        db.transaction(() => {
+          const id = insertRevision(db, { parentId: null, doc: {}, via: 'setup' }, now);
+          setSetting(db, 'config.current', id, now);
+          setSetting(db, 'config.mode', 'db', now);
+        })();
+        cur = s.storedCurrent();
+      }
+      if (!cur) throw new Error('the config store could not record its first revision');
+      if (stored === undefined) setSetting(db, 'config.mode', 'db', now);
+      const v = s.validate(cur.doc);
+      if ('issues' in v)
+        throw new Error(
+          `the stored config (revision ${cur.id}) is invalid: ${formatIssues(v.issues)}; roll back with jumpmaster ctl config rollback once the server runs, or restore the data directory`,
+        );
+      s.modeValue = 'db';
+      s.load(cur.doc, v);
+      const ignored = s.status().fileIgnored;
+      if (ignored) o.log?.(ignored);
+    }
+    s.running = s.cfg;
+    // A fresh start runs with every setting: nothing waits for a restart.
+    deleteSetting(db, 'config.restart_pending');
+    for (const zone of s.cfg.dropZones) ensureZoneMode(db, zone.id, zone.mode, now);
+    return s;
+  }
+
+  current(): Config {
+    return this.cfg;
+  }
+
+  mode(): ConfigMode {
+    return this.modeValue;
+  }
+
+  revision(): number {
+    return this.rev;
+  }
+
+  /** The current editable document as stored (what a merge patch applies to). */
+  document(): Record<string, unknown> {
+    return structuredClone(this.doc);
+  }
+
+  boot(): BootConfig {
+    return this.o.boot;
+  }
+
+  status(): ConfigStatus {
+    const { filePath } = this.o;
+    let ignored: { fileIgnored: string; fileMatchesExport: boolean } | undefined;
+    if (this.modeValue === 'db' && this.fileExists()) {
+      const adopted = latestRevisionVia(this.o.db, 'adopt');
+      let mirror = false;
+      try {
+        mirror = hashOf(readFileSync(filePath as string, 'utf8')) === hashOf(this.exportJson());
+      } catch {
+        mirror = false;
+      }
+      ignored = {
+        fileIgnored: adopted
+          ? `config file ignored: adopted on ${adopted.createdAt}`
+          : 'config file ignored: this install keeps its config in the database',
+        fileMatchesExport: mirror,
+      };
+    }
+    return {
+      mode: this.modeValue,
+      revision: this.rev,
+      ...(filePath ? { filePath } : {}),
+      ...(this.fileProblem ? { fileProblem: this.fileProblem } : {}),
+      ...(ignored ?? {}),
+      restartPending: this.pending(this.cfg),
+    };
+  }
+
+  subscribe(fn: (c: Config, rev: number, changes: Change[]) => void): () => void {
+    this.subscribers.add(fn);
+    return () => this.subscribers.delete(fn);
+  }
+
+  /** Validates `next` as the whole editable document and stores it as a new revision. */
+  apply(next: unknown, meta: ApplyMeta): ApplyResult {
+    if (meta.note !== undefined && meta.note.length > MAX_NOTE)
+      return refused(`a note is at most ${MAX_NOTE} characters`, 'note');
+    if (this.modeValue === 'file')
+      return refused(
+        `config is managed by the file at ${this.o.filePath}: edit it and run \`jumpmaster ctl config reload\`, or adopt it into the UI`,
+      );
+    if (meta.expectRevision !== undefined && meta.expectRevision !== this.rev)
+      return { ok: false, conflict: { expected: meta.expectRevision, actual: this.rev } };
+    const v = this.validate(next);
+    if ('issues' in v) return { ok: false, issues: v.issues };
+    const doc = next as Record<string, unknown>;
+    if (hashOf(canonicalJson(doc)) === hashOf(canonicalJson(this.doc))) return unchanged(this.rev);
+    return this.commit(doc, v, meta.via, meta.note);
+  }
+
+  /**
+   * An import: the exported document, boot settings included. A boot setting equal to the running
+   * one is dropped; a different one is refused at its path.
+   */
+  importDoc(json: unknown, meta: ApplyMeta): ApplyResult {
+    const s = this.withoutBoot(json);
+    if ('issues' in s) return { ok: false, issues: s.issues };
+    return this.apply(s.doc, meta);
+  }
+
+  /** What an import would change, and why it would be refused, without applying anything. */
+  preview(json: unknown): { changes: Change[]; issues: ConfigIssue[] } {
+    const s = this.withoutBoot(json);
+    if ('issues' in s) return { changes: [], issues: s.issues };
+    const v = this.validate(s.doc);
+    return { changes: diff(this.doc, s.doc), issues: 'issues' in v ? v.issues : [] };
+  }
+
+  private withoutBoot(json: unknown): { doc: Record<string, unknown> } | { issues: ConfigIssue[] } {
+    if (!isObject(json))
+      return { issues: [{ path: '', message: 'the config must be a JSON object' }] };
+    const { listen, dataDir, ...doc } = json;
+    const exported = this.exportDoc();
+    const issues: ConfigIssue[] = [];
+    if (listen !== undefined && canonicalJson(listen) !== canonicalJson(exported.listen))
+      issues.push({ path: 'listen', message: BOOT_MESSAGE });
+    if (dataDir !== undefined && dataDir !== exported.dataDir)
+      issues.push({ path: 'dataDir', message: BOOT_MESSAGE });
+    return issues.length > 0 ? { issues } : { doc };
+  }
+
+  /** A new revision with an old revision's content; history is never deleted. */
+  rollback(id: number, meta: OpMeta): ApplyResult {
+    const old = getRevision(this.o.db, id);
+    if (!old) return refused(`no revision ${id}`, 'id');
+    return this.apply(old.doc, {
+      ...meta,
+      via: 'rollback',
+      note: meta.note ?? `rollback to ${id}`,
+    });
+  }
+
+  /**
+   * File mode: re-reads the file. Invalid → the old config stays and the doctor reports it; valid
+   * and changed → a new revision; a changed boot setting is listed as needing a restart. In db
+   * mode the file is ignored and this changes nothing.
+   */
+  reload(): ApplyResult {
+    if (this.modeValue === 'db') return unchanged(this.rev);
+    let text: string;
+    let split: ReturnType<typeof splitConfigFile>;
+    try {
+      text = readFileSync(this.o.filePath as string, 'utf8');
+      split = splitConfigFile(this.o.filePath as string, text);
+    } catch (e) {
+      this.fileProblem = [{ path: '', message: (e as Error).message }];
+      return { ok: false, issues: this.fileProblem };
+    }
+    const v = this.validate(split.editable);
+    if ('issues' in v) {
+      this.fileProblem = v.issues;
+      return { ok: false, issues: v.issues };
+    }
+    this.fileProblem = undefined;
+    this.bootPending = this.bootChanges(split.boot);
+    const doc = split.editable;
+    if (hashOf(canonicalJson(doc)) === hashOf(canonicalJson(this.doc))) {
+      this.storePending(this.cfg);
+      return unchanged(this.rev, [...this.bootPending]);
+    }
+    const r = this.commit(doc, v, 'file');
+    if (r.ok) r.restartNeeded = [...this.bootPending, ...r.restartNeeded];
+    return r;
+  }
+
+  /** File mode → db mode: the file as it is now becomes a revision `via: 'adopt'`. */
+  adopt(meta: OpMeta): ApplyResult {
+    if (this.modeValue === 'db') return refused('config is already in the database (db mode)');
+    const r = this.reload();
+    if (!r.ok) return r;
+    const v = this.validate(this.doc);
+    if ('issues' in v) return { ok: false, issues: v.issues };
+    const done = this.commit(this.doc, v, 'adopt', meta.note, 'db');
+    if (done.ok) done.restartNeeded = r.restartNeeded;
+    return done;
+  }
+
+  /**
+   * Db mode → file mode, with the operator token only: refused unless the file's bytes equal
+   * `exportJson()`, so nothing in the database is lost on the way.
+   */
+  toFileMode(meta: OpMeta): ApplyResult {
+    if (meta.principal.via !== 'token') return refused(TOKEN_ONLY);
+    if (this.modeValue === 'file') return refused('config is already managed by the file');
+    if (!this.o.filePath)
+      return refused(
+        'no config file path is set (JM_CONFIG, or jumpmaster serve <path>): set one and write `ctl config export` to it first',
+      );
+    if (!this.fileExists())
+      return refused(
+        `there is no config file at ${this.o.filePath}: write \`ctl config export\` to it first`,
+      );
+    const text = readFileSync(this.o.filePath, 'utf8');
+    if (hashOf(text) !== hashOf(this.exportJson()))
+      return refused(
+        'the file differs from the current config: write `ctl config export` to it first',
+      );
+    const v = this.validate(this.doc);
+    if ('issues' in v) return { ok: false, issues: v.issues };
+    return this.commit(this.doc, v, 'ctl', 'to file mode', 'file');
+  }
+
+  /** The editable document plus the boot settings, without secrets, as byte-stable JSON. */
+  exportJson(): string {
+    return canonicalJson(this.exportDoc());
+  }
+
+  revisions(limit: number): RevisionView[] {
+    const { db } = this.o;
+    return listRevisions(db, limit).map((r) => {
+      const parent = r.parentId === null ? undefined : getRevision(db, r.parentId);
+      return {
+        id: r.id,
+        parentId: r.parentId,
+        createdAt: r.createdAt,
+        via: r.via,
+        note: r.note,
+        changes: diff(parent?.doc ?? {}, r.doc),
+      };
+    });
+  }
+
+  // -------------------------------------------------------------------------------------------
+
+  private exportDoc(): Record<string, unknown> {
+    const { listen, dataDir } = this.o.boot;
+    return {
+      ...this.doc,
+      listen: {
+        host: listen.host,
+        port: listen.port,
+        allowedHosts: listen.allowedHosts,
+        ...(listen.tlsTerminated ? { tlsTerminated: true } : {}),
+      },
+      dataDir,
+    };
+  }
+
+  private fileExists(): boolean {
+    return this.o.filePath !== undefined && existsSync(this.o.filePath);
+  }
+
+  private readFileDoc(): Record<string, unknown> {
+    const path = this.o.filePath as string;
+    return splitConfigFile(path, readFileSync(path, 'utf8')).editable;
+  }
+
+  private storedCurrent() {
+    const id = getSetting(this.o.db, 'config.current');
+    return typeof id === 'number' ? getRevision(this.o.db, id) : undefined;
+  }
+
+  private validate(doc: unknown): Valid | { issues: ConfigIssue[] } {
+    const parsed = parseEditable(doc, {
+      ...(this.o.imageLockPath ? { imageLockPath: this.o.imageLockPath } : {}),
+      devImages: this.o.env.JM_DEV_IMAGES === '1',
+    });
+    if (!parsed.ok) return { issues: parsed.issues };
+    try {
+      const secretsFor = this.o.secretsFor ?? ((zones) => loadSecrets(this.o.env, zones));
+      return { editable: parsed.config, secrets: secretsFor(parsed.config.dropZones) };
+    } catch (e) {
+      return { issues: [{ path: '', message: (e as Error).message }] };
+    }
+  }
+
+  private load(doc: Record<string, unknown>, v: Valid): void {
+    const id = getSetting(this.o.db, 'config.current');
+    this.rev = typeof id === 'number' ? id : 0;
+    this.doc = doc;
+    const { listen, dataDir } = this.o.boot;
+    this.cfg = { listen, dataDir, ...v.editable, secrets: v.secrets };
+  }
+
+  /** Restart-only paths whose new value differs from the one this process runs with. */
+  private pending(c: EditableConfig): string[] {
+    if (!this.running) return [...this.bootPending];
+    const was = restartValues(this.running);
+    const now = restartValues(c);
+    return [...this.bootPending, ...RESTART_PATHS.filter((p) => was[p] !== now[p])];
+  }
+
+  private storePending(c: EditableConfig): void {
+    const list = this.pending(c);
+    if (list.length > 0) setSetting(this.o.db, 'config.restart_pending', list, this.o.now());
+    else deleteSetting(this.o.db, 'config.restart_pending');
+  }
+
+  private bootChanges(file: Pick<Config, 'listen' | 'dataDir'>): string[] {
+    const run = this.o.boot;
+    const out: string[] = [];
+    const listen = {
+      host: file.listen.host,
+      port: file.listen.port,
+      allowedHosts: file.listen.allowedHosts,
+      tlsTerminated: run.listen.tlsTerminated || file.listen.tlsTerminated === true,
+    };
+    const running = {
+      host: run.listen.host,
+      port: run.listen.port,
+      allowedHosts: run.listen.allowedHosts,
+      tlsTerminated: run.listen.tlsTerminated,
+    };
+    if (run.source.listen !== 'file' || canonicalJson(listen) !== canonicalJson(running))
+      out.push('listen');
+    if (run.source.dataDir !== 'file' || file.dataDir !== run.dataDir) out.push('dataDir');
+    return out;
+  }
+
+  /**
+   * One transaction: the revision row, the current pointer, the new zones' mode rows, the
+   * restart marker and (for a mode switch) the mode. Then the in-memory swap, then subscribers.
+   */
+  private commit(
+    doc: Record<string, unknown>,
+    v: Valid,
+    via: RevisionVia,
+    note?: string,
+    mode?: ConfigMode,
+  ): ApplyResult {
+    const { db } = this.o;
+    const now = this.o.now();
+    const before = this.cfg.dropZones.map((z) => z.id);
+    const was = restartValues(this.cfg);
+    const id = db.transaction(() => {
+      const rid = insertRevision(
+        db,
+        { parentId: this.rev || null, doc, via, ...(note !== undefined ? { note } : {}) },
+        now,
+      );
+      setSetting(db, 'config.current', rid, now);
+      for (const zone of v.editable.dropZones)
+        if (!before.includes(zone.id)) ensureZoneMode(db, zone.id, zone.mode, now);
+      this.storePending(v.editable);
+      if (mode) setSetting(db, 'config.mode', mode, now);
+      return rid;
+    })();
+    const changes = diff(this.doc, doc);
+    if (mode) this.modeValue = mode;
+    this.load(doc, v);
+    const after = restartValues(v.editable);
+    const restartNeeded = RESTART_PATHS.filter((p) => was[p] !== after[p]);
+    for (const fn of this.subscribers) {
+      try {
+        fn(this.cfg, id, changes);
+      } catch (e) {
+        this.o.log?.(`config subscriber failed: ${(e as Error).message}`);
+      }
+    }
+    return { ok: true, revision: id, changed: changes.map((c) => c.path), restartNeeded };
+  }
+}

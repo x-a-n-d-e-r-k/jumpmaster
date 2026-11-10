@@ -685,7 +685,7 @@ test('v18 adds operator, sessions and control_audit, and control_audit keeps the
   );
   const db = openDb(f);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
-  expect(MIGRATIONS.at(-1)?.version).toBe(18);
+  expect(MIGRATIONS.some((m) => m.version === 18)).toBe(true);
   expect(count(db, 'sticks')).toBe(1);
   // One operator row at most.
   const op = db.prepare('INSERT INTO operator (id, passphrase_hash, created_at) VALUES (?, ?, ?)');
@@ -723,4 +723,46 @@ test('an M4-era statement set still runs against v18 (the new tables are ignored
   ).run();
   db.prepare('INSERT INTO doctor_runs (started_at) VALUES (?)').run('t');
   expect(count(db, 'doctor_runs')).toBe(1);
+});
+
+test('v19 adds config_revisions with a 500-character note cap and settings', () => {
+  const f = dbAt(18, (raw) =>
+    raw
+      .prepare("INSERT INTO operator (id, passphrase_hash, created_at) VALUES (1, 'h', 'a')")
+      .run(),
+  );
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(MIGRATIONS.at(-1)?.version).toBe(19);
+  expect(count(db, 'operator')).toBe(1);
+  const rev = db.prepare(
+    `INSERT INTO config_revisions (parent_id, config_json, source_hash, via, note, created_at)
+     VALUES (?, '{}', 'h', ?, ?, 't')`,
+  );
+  const first = rev.run(null, 'setup', null);
+  expect(Number(first.lastInsertRowid)).toBe(1);
+  for (const via of ['file', 'ui', 'ctl', 'rollback', 'adopt', 'import', 'setup'])
+    rev.run(1, via, 'n');
+  expect(() => rev.run(1, 'browser', null)).toThrow(/CHECK/);
+  expect(() => rev.run(1, 'ui', 'x'.repeat(501))).toThrow(/CHECK/);
+  rev.run(1, 'ui', 'x'.repeat(500));
+  expect(() =>
+    db
+      .prepare(
+        "INSERT INTO config_revisions (config_json, source_hash, via, created_at) VALUES (NULL, 'h', 'ui', 't')",
+      )
+      .run(),
+  ).toThrow(/NOT NULL/);
+  const set = db.prepare('INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)');
+  set.run('config.mode', '"db"', 't');
+  expect(() => set.run('config.mode', '"file"', 't')).toThrow(/UNIQUE|PRIMARY/);
+  db.close();
+});
+
+test('an M4.5a-era statement set still runs against v19 (the new tables are ignored)', () => {
+  const db = openDb(dbAt(19));
+  db.prepare(
+    "INSERT INTO control_audit (at, via, action, detail_json) VALUES ('t', 'token', 'kill', '{}')",
+  ).run();
+  expect(count(db, 'control_audit')).toBe(1);
 });

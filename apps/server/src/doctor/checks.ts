@@ -7,6 +7,7 @@
  * `fail` when the cause is a setting, such as a refused permission). It is never a `pass`.
  */
 import { DoctorResultSchema, type DropResult, hostAllowed } from '@jumpmaster/protocol';
+import type { ConfigStatus } from '../config/source.js';
 import { type Config, type DropZoneConfig, STARTER_WARNING } from '../config.js';
 import { creditsStopInForce } from '../credits.js';
 import { crewDropsToday } from '../crew/schedule.js';
@@ -70,6 +71,8 @@ export type DoctorDeps = {
   checkTimeoutMs?: number;
   /** A forge on the read token (`JM_GITHUB_READ_TOKEN`), when one is configured. */
   readForge?(zoneId: string): Forge | undefined;
+  /** The config store's status (mode, file problems, restart-pending settings), when there is one. */
+  configStatus?: ConfigStatus;
 };
 
 /**
@@ -218,6 +221,58 @@ function listenCheck(d: DoctorDeps): DoctorCheck {
     summary: `the UI listens on ${host}:${port}, reachable from your network, and the login passphrase crosses it in clear`,
     fix: 'Set listen.host to 127.0.0.1 in the config (and reach the UI over an SSH tunnel), unless you mean to expose it.',
     doc: doc('listen'),
+  };
+}
+
+/** Where the config comes from, and whether the file says something the server is not running. */
+function configFileCheck(s: ConfigStatus): DoctorCheck {
+  const base = { id: 'config.file', zoneId: null };
+  if (s.fileProblem)
+    return {
+      ...base,
+      status: 'fail',
+      summary: `the config file at ${s.filePath} is invalid, so its last reload was refused; the server keeps running revision ${s.revision}`,
+      fix: [
+        ...s.fileProblem.map((i) => `${i.path || '(root)'}: ${i.message}`),
+        'Fix the file, then run jumpmaster ctl config reload.',
+      ].join('\n'),
+    };
+  if (s.mode === 'file')
+    return {
+      ...base,
+      status: 'pass',
+      summary: `the config file at ${s.filePath} is the config (file mode, revision ${s.revision}): edit it and run jumpmaster ctl config reload`,
+    };
+  if (s.fileIgnored && !s.fileMatchesExport)
+    return {
+      ...base,
+      status: 'warn',
+      summary: `${s.fileIgnored}; the database holds the config (db mode, revision ${s.revision}) and the file differs from it (only its listen and dataDir are read, at start)`,
+      fix: 'Keep the file a current mirror: docker compose exec -T jumpmaster jumpmaster ctl config export > config/jumpmaster.config.json.tmp && mv config/jumpmaster.config.json.tmp config/jumpmaster.config.json',
+    };
+  if (s.fileIgnored)
+    return {
+      ...base,
+      status: 'pass',
+      summary: `${s.fileIgnored}; the database holds the config (db mode, revision ${s.revision}) and the file mirrors it`,
+    };
+  return {
+    ...base,
+    status: 'pass',
+    summary: `the config is kept in the database (db mode, revision ${s.revision})`,
+  };
+}
+
+/** Settings accepted live that only a restart applies. */
+function restartCheck(s: ConfigStatus): DoctorCheck {
+  const base = { id: 'config.restart', zoneId: null };
+  if (s.restartPending.length === 0)
+    return { ...base, status: 'pass', summary: 'every config change is in effect' };
+  return {
+    ...base,
+    status: 'warn',
+    summary: `changed since the server started, in effect at the next restart: ${s.restartPending.join(', ')}`,
+    fix: 'Restart the server: docker compose restart jumpmaster',
   };
 }
 
@@ -1731,6 +1786,12 @@ export async function runChecks(
     g('usage.gate', null, () => usageCheck(d)),
     g('stick.seen', null, () => stickSeenCheck(d, sticks)),
     g('stick.image-policy', null, () => imagePolicyCheck(d, sticks)),
+    ...(d.configStatus
+      ? [
+          g('config.file', null, () => configFileCheck(d.configStatus as ConfigStatus)),
+          g('config.restart', null, () => restartCheck(d.configStatus as ConfigStatus)),
+        ]
+      : []),
   ]);
   const zones = d.config.dropZones.filter((z) => opts.zoneId === undefined || z.id === opts.zoneId);
   const perZone = await Promise.all(zones.map((z) => zoneChecks(d, z, sticks)));

@@ -10,7 +10,9 @@ import {
   upsertWorkItem,
 } from './db/repo.js';
 import {
+  credentialFingerprint,
   type ForgePair,
+  ForgePairs,
   markPendingUnknown,
   opKeys,
   opMarker,
@@ -135,6 +137,38 @@ describe('FakeForgeState', () => {
     const owner = pairFor({ repo: 'o/r', authorMayBeAdmin: true }, tokens);
     expect(owner.merger).toBe(owner.reviewer);
     expect(pairFor({ repo: 'o/r', authorMayBeAdmin: false }, tokens).merger).toBeUndefined();
+  });
+
+  test('a changed author token fingerprint rebuilds the forge pair and an unchanged one keeps it', () => {
+    const pairs = new ForgePairs();
+    const zone = { id: 'main', repo: 'o/r', authorMayBeAdmin: false, identity: 'two-bot' as const };
+    const tokens = { githubAuthorToken: 'a1', githubReviewerToken: 'r1' };
+    const first = pairs.for(zone, tokens);
+    // An equal config object rebuilt by the store (a new revision elsewhere) keeps the pair.
+    expect(pairs.for({ ...zone }, { ...tokens })).toBe(first);
+    const rotated = pairs.for(zone, { ...tokens, githubAuthorToken: 'a2' });
+    expect(rotated).not.toBe(first);
+    expect(pairs.for(zone, { ...tokens, githubAuthorToken: 'a2' })).toBe(rotated);
+    // The reviewer token, the identity and the admin setting decide the pair too.
+    expect(pairs.for(zone, { githubAuthorToken: 'a2', githubReviewerToken: 'r2' })).not.toBe(
+      rotated,
+    );
+    const starter = pairs.for({ ...zone, identity: 'starter' }, { githubAuthorToken: 'a2' });
+    expect(starter.reviewer).toBeNull();
+    expect(pairs.for({ ...zone, authorMayBeAdmin: true }, tokens).merger).toBeDefined();
+    // Timed pairs are cached apart from untimed ones.
+    expect(pairs.for(zone, tokens, { requestTimeoutMs: 5 })).not.toBe(pairs.for(zone, tokens));
+    // Only the latest pair per zone and kind is kept.
+    expect(pairs.size()).toBeLessThanOrEqual(2);
+  });
+
+  test('credentialFingerprint is a short hash that changes with any forge token and holds none', () => {
+    const s = { githubAuthorToken: 'ghp_author', githubReviewerToken: 'ghp_rev' };
+    const fp = credentialFingerprint(s);
+    expect(fp).toMatch(/^[0-9a-f]{16}$/);
+    expect(credentialFingerprint({ ...s })).toBe(fp);
+    expect(credentialFingerprint({ ...s, githubReviewerToken: 'other' })).not.toBe(fp);
+    expect(fp).not.toContain('ghp_');
   });
 
   test("create_pr refuses to track an open PR without this item's marker", async () => {

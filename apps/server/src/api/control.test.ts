@@ -1,8 +1,13 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
 import { listAudit } from '../auth/audit.js';
 import { registerGuard } from '../auth/guard.js';
 import { listRulings, raiseBriefing } from '../briefings.js';
+import { loadBoot } from '../config/boot.js';
+import { ConfigStore } from '../config/store.js';
 import { type Config, secretList } from '../config.js';
 import { nextCrewWork } from '../crew/schedule.js';
 import { listCrewIssues } from '../crew/store.js';
@@ -764,5 +769,309 @@ describe('control audit', () => {
       headers: auth,
     });
     expect(listAudit(db)).toHaveLength(rows.length);
+  });
+});
+
+describe('config routes', () => {
+  const env = {
+    JM_CLAUDE_TOKEN: 'claude-secret-value-1',
+    JM_GITHUB_AUTHOR_TOKEN: 'author-secret-value-2',
+    JM_GITHUB_REVIEWER_TOKEN: 'reviewer-secret-value-3',
+    JM_JOIN_TOKEN: 'join-secret-value-4',
+    JM_OPERATOR_TOKEN: TOKEN,
+  };
+  const zoneDoc = (id = 'main', extra: Record<string, unknown> = {}) => ({
+    id,
+    repo: `octo/${id}`,
+    gates: [{ name: 'test', run: 'npm test' }],
+    image: 'jm-trooper:dev',
+    ...extra,
+  });
+
+  /** The control routes over a real store: db mode, or file mode when `file` is given. */
+  function configApp(file?: Record<string, unknown>) {
+    const db = openDb(tmpDbFile());
+    const dir = mkdtempSync(join(tmpdir(), 'jm-cfg-'));
+    const filePath = join(dir, 'jumpmaster.config.json');
+    if (file) writeFileSync(filePath, JSON.stringify({ dataDir: './data', ...file }));
+    const store = ConfigStore.open({
+      db,
+      boot: loadBoot({}, filePath),
+      filePath,
+      env,
+      now: () => t0,
+      imageLockPath: join(dir, 'no-lock.json'),
+    });
+    app = controlApp({
+      db,
+      config: store,
+      now: () => t0,
+      forgesFor: () => {
+        throw new Error('no zone, no forge');
+      },
+      doctorEnv: { uid: 1000, inContainer: true, uidMap: null },
+    });
+    const session = operatorSession(db);
+    const asSession = { ...session.headers, host: HOST };
+    return { db, store, filePath, asSession };
+  }
+  const req = (
+    method: 'GET' | 'POST' | 'PATCH',
+    url: string,
+    payload?: unknown,
+    headers: Record<string, string> = auth,
+  ) =>
+    (app as FastifyInstance).inject({
+      method,
+      url,
+      headers,
+      ...(payload === undefined ? {} : { payload: payload as object }),
+    });
+  const revVia = (db: ReturnType<typeof openDb>) =>
+    (db.prepare('SELECT via FROM config_revisions ORDER BY id').all() as { via: string }[]).map(
+      (r) => r.via,
+    );
+
+  test('GET config shows the mode, revision, document, boot settings and restart state, never a secret', async () => {
+    const { store } = configApp();
+    store.apply(
+      { dropZones: [zoneDoc()] },
+      { via: 'ctl', principal: { kind: 'operator', via: 'token', sudo: true } },
+    );
+    const r = await req('GET', '/api/control/config');
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toEqual({
+      mode: 'db',
+      revision: 2,
+      config: { dropZones: [zoneDoc()] },
+      boot: {
+        listen: {
+          host: '127.0.0.1',
+          port: 7420,
+          allowedHosts: ['127.0.0.1:7420', 'localhost:7420'],
+          tlsTerminated: false,
+        },
+        dataDir: './data',
+        source: { listen: 'env', dataDir: 'env' },
+      },
+      restartPending: [],
+      filePath: expect.stringMatching(/jumpmaster\.config\.json$/),
+    });
+    for (const s of Object.values(env)) expect(r.body).not.toContain(s);
+  });
+
+  test('PATCH applies a merge patch as ui from a session and ctl from the token, audited, and conflicts on a stale revision', async () => {
+    const { db, store, asSession } = configApp();
+    const one = await req(
+      'PATCH',
+      '/api/control/config',
+      { patch: { pollSeconds: 30, dropZones: [zoneDoc()] }, expectRevision: 1, note: 'first' },
+      asSession,
+    );
+    expect(one.statusCode).toBe(200);
+    expect(one.json()).toEqual({
+      revision: 2,
+      changed: ['dropZones[main]', 'pollSeconds'],
+      restartNeeded: [],
+    });
+    // null removes a key (RFC 7396): pollSeconds goes back to its default.
+    const two = await req('PATCH', '/api/control/config', {
+      patch: { pollSeconds: null },
+      expectRevision: 2,
+    });
+    expect(two.statusCode).toBe(200);
+    expect(store.current().pollSeconds).toBe(60);
+    expect(store.document()).toEqual({ dropZones: [zoneDoc()] });
+    expect(revVia(db)).toEqual(['setup', 'ui', 'ctl']);
+    const stale = await req('PATCH', '/api/control/config', {
+      patch: { pollSeconds: 5 },
+      expectRevision: 2,
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json()).toEqual({ conflict: { expected: 2, actual: 3 } });
+    const audits = listAudit(db).filter((a) => a.action === 'config.apply');
+    expect(audits.map((a) => [a.via, a.detail.revision])).toEqual([
+      ['token', 3],
+      ['session', 2],
+    ]);
+    expect(audits[1]?.detail.changed).toBe('dropZones[main], pollSeconds');
+  });
+
+  test('PATCH refuses an invalid document by path, a boot setting, a long note and a missing revision, changing nothing', async () => {
+    const { db, store } = configApp();
+    const bad = await req('PATCH', '/api/control/config', {
+      patch: { dropZones: [zoneDoc('main', { repo: 'nope' })] },
+      expectRevision: 1,
+    });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.json()).toEqual({
+      issues: [expect.objectContaining({ path: 'dropZones.0.repo' })],
+    });
+    const boot = await req('PATCH', '/api/control/config', {
+      patch: { listen: { port: 1 } },
+      expectRevision: 1,
+    });
+    expect(boot.statusCode).toBe(400);
+    expect(boot.json()).toEqual({
+      issues: [
+        { path: 'listen', message: 'set in the config file or the environment; restart to change' },
+      ],
+    });
+    const note = await req('PATCH', '/api/control/config', {
+      patch: { pollSeconds: 5 },
+      expectRevision: 1,
+      note: 'x'.repeat(501),
+    });
+    expect(note.statusCode).toBe(400);
+    const noRev = await req('PATCH', '/api/control/config', { patch: { pollSeconds: 5 } });
+    expect(noRev.statusCode).toBe(400);
+    expect(store.revision()).toBe(1);
+    expect(revVia(db)).toEqual(['setup']);
+    expect(listAudit(db).filter((a) => a.action.startsWith('config.'))).toEqual([]);
+  });
+
+  test('revisions list their changes, and rollback makes a new revision with the old content', async () => {
+    const { db, store } = configApp();
+    await req('PATCH', '/api/control/config', { patch: { pollSeconds: 30 }, expectRevision: 1 });
+    await req('PATCH', '/api/control/config', { patch: { pollSeconds: 40 }, expectRevision: 2 });
+    const list = await req('GET', '/api/control/config/revisions?limit=2');
+    expect(list.statusCode).toBe(200);
+    expect(list.json()).toEqual({
+      revisions: [
+        {
+          id: 3,
+          parentId: 2,
+          createdAt: t0.toISOString(),
+          via: 'ctl',
+          note: null,
+          changes: [{ path: 'pollSeconds', from: 30, to: 40 }],
+        },
+        expect.objectContaining({ id: 2 }),
+      ],
+    });
+    const back = await req('POST', '/api/control/config/rollback', { id: 2, note: 'too slow' });
+    expect(back.statusCode).toBe(200);
+    expect(back.json()).toMatchObject({ revision: 4, changed: ['pollSeconds'] });
+    expect(store.current().pollSeconds).toBe(30);
+    expect(revVia(db)).toEqual(['setup', 'ctl', 'ctl', 'rollback']);
+    expect((await req('POST', '/api/control/config/rollback', { id: 99 })).statusCode).toBe(400);
+    expect(listAudit(db)[0]).toMatchObject({
+      action: 'config.rollback',
+      detail: { revision: 4, from: 2 },
+    });
+  });
+
+  test('the doctor run from the route reports where the config comes from and what waits for a restart', async () => {
+    const { store } = configApp();
+    store.apply(
+      { mcp: { enabled: true } },
+      { via: 'ctl', principal: { kind: 'operator', via: 'token', sudo: true } },
+    );
+    const r = await req('POST', '/api/control/doctor', {});
+    expect(r.statusCode).toBe(200);
+    const checks = (r.json() as { run: { checks: { id: string; status: string }[] } }).run.checks;
+    expect(checks.find((c) => c.id === 'config.file')).toMatchObject({ status: 'pass' });
+    expect(checks.find((c) => c.id === 'config.restart')).toMatchObject({ status: 'warn' });
+  });
+
+  test('a note keeps its text as data: the API returns it as JSON, never as markup', async () => {
+    configApp();
+    const note = '<img src=x onerror=alert(1)>';
+    await req('PATCH', '/api/control/config', {
+      patch: { pollSeconds: 30 },
+      expectRevision: 1,
+      note,
+    });
+    const r = await req('GET', '/api/control/config/revisions');
+    expect(r.headers['content-type']).toMatch(/^application\/json/);
+    expect((r.json() as { revisions: { note: string }[] }).revisions[0]?.note).toBe(note);
+  });
+
+  test('export is the byte-stable JSON as an attachment; import --dry-run returns the diff and applies nothing', async () => {
+    const { db, store } = configApp();
+    store.apply(
+      { dropZones: [zoneDoc()] },
+      { via: 'ctl', principal: { kind: 'operator', via: 'token', sudo: true } },
+    );
+    const ex = await req('GET', '/api/control/config/export');
+    expect(ex.statusCode).toBe(200);
+    expect(ex.headers['content-disposition']).toBe('attachment; filename="jumpmaster.config.json"');
+    expect(ex.body).toBe(store.exportJson());
+    for (const s of Object.values(env)) expect(ex.body).not.toContain(s);
+    const doc = JSON.parse(ex.body) as Record<string, unknown>;
+    const dry = await req('POST', '/api/control/config/import', {
+      config: { ...doc, pollSeconds: 15 },
+      dryRun: true,
+    });
+    expect(dry.statusCode).toBe(200);
+    expect(dry.json()).toEqual({
+      dryRun: true,
+      // An absent side is absent in JSON too.
+      changes: [{ path: 'pollSeconds', to: 15 }],
+      issues: [],
+    });
+    expect(store.revision()).toBe(2);
+    const done = await req('POST', '/api/control/config/import', {
+      config: { ...doc, pollSeconds: 15 },
+    });
+    expect(done.statusCode).toBe(200);
+    expect(done.json()).toMatchObject({ revision: 3, changed: ['pollSeconds'] });
+    expect(revVia(db).at(-1)).toBe('import');
+    const badDry = await req('POST', '/api/control/config/import', {
+      config: { pollSeconds: -1 },
+      dryRun: true,
+    });
+    expect(badDry.json()).toMatchObject({
+      dryRun: true,
+      issues: [expect.objectContaining({ path: 'pollSeconds' })],
+    });
+  });
+
+  test('file mode: a PATCH is refused with the reload-or-adopt message; reload and adopt work; mode file is the token only', async () => {
+    const { db, store, filePath, asSession } = configApp({ dropZones: [zoneDoc()] });
+    const p = await req('PATCH', '/api/control/config', {
+      patch: { pollSeconds: 5 },
+      expectRevision: 1,
+    });
+    expect(p.statusCode).toBe(400);
+    expect((p.json() as { issues: { message: string }[] }).issues[0]?.message).toMatch(
+      /config is managed by the file at .*: edit it and run `jumpmaster ctl config reload`, or adopt it into the UI/,
+    );
+    writeFileSync(
+      filePath,
+      JSON.stringify({ dataDir: './data', pollSeconds: 20, dropZones: [zoneDoc()] }),
+    );
+    const rl = await req('POST', '/api/control/config/reload', {});
+    expect(rl.statusCode).toBe(200);
+    expect(rl.json()).toMatchObject({ revision: 2, changed: ['pollSeconds'] });
+    const ad = await req('POST', '/api/control/config/adopt', {}, asSession);
+    expect(ad.statusCode).toBe(200);
+    expect(store.mode()).toBe('db');
+    // In db mode a reload changes nothing and says why.
+    const ignored = await req('POST', '/api/control/config/reload', {});
+    expect(ignored.json()).toMatchObject({
+      revision: 3,
+      changed: [],
+      note: expect.stringMatching(/config file ignored/),
+    });
+    const bySession = await req('POST', '/api/control/config/mode', { mode: 'file' }, asSession);
+    expect(bySession.statusCode).toBe(403);
+    const differs = await req('POST', '/api/control/config/mode', { mode: 'file' });
+    expect(differs.statusCode).toBe(400);
+    writeFileSync(filePath, store.exportJson());
+    const back = await req('POST', '/api/control/config/mode', { mode: 'file' });
+    expect(back.statusCode).toBe(200);
+    expect(store.mode()).toBe('file');
+    expect(
+      listAudit(db)
+        .map((a) => [a.action, a.via])
+        .filter(([a]) => String(a).startsWith('config.')),
+    ).toEqual([
+      ['config.mode', 'token'],
+      // The reload in db mode changed nothing, and is on record all the same.
+      ['config.reload', 'token'],
+      ['config.adopt', 'session'],
+      ['config.reload', 'token'],
+    ]);
   });
 });

@@ -4,7 +4,9 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import {
   loadConfig,
+  MCP_DEFAULTS,
   modelFor,
+  parseEditable,
   STARTER_WARNING,
   secretList,
   startupWarnings,
@@ -791,5 +793,109 @@ describe('egress and signed-image settings', () => {
         },
       ),
     ).toThrow(/its image jumpmaster-trooper-python:dev is a tag.*release image lock/);
+  });
+});
+
+describe('parseEditable', () => {
+  const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json') };
+  const zone = { ...baseZone, protectedPaths: ['GOAL.md'] };
+
+  test('an empty document is the defaults with no zones', () => {
+    const r = parseEditable({}, noLock);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.config.dropZones).toEqual([]);
+    expect(r.config.pollSeconds).toBe(60);
+    expect(r.config.requireSignedImages).toBe(false);
+    expect(r.config.mcp).toEqual(MCP_DEFAULTS);
+  });
+
+  test('returns issues by path and keeps the rules the config judges alone', () => {
+    const bad = parseEditable(
+      {
+        pollSeconds: -1,
+        requireSignedImages: true,
+        dropZones: [
+          { ...zone, repo: 'nope' },
+          { ...zone, id: 'b', requireSignedImages: false },
+          { ...zone, id: 'c', egress: { mode: 'enforce', allow: ['10.0.0.1'] } },
+        ],
+      },
+      noLock,
+    );
+    expect(bad.ok).toBe(false);
+    if (bad.ok || !('issues' in bad)) return;
+    const paths = bad.issues.map((i) => i.path);
+    expect(paths).toContain('pollSeconds');
+    expect(paths).toContain('dropZones.0.repo');
+    expect(paths).toContain('dropZones.2.egress.allow.0');
+    // A schema error stops before the cross-field rules; fix it and the next ones show.
+    const signed = parseEditable(
+      {
+        requireSignedImages: true,
+        dropZones: [{ ...zone, id: 'b', requireSignedImages: false }],
+      },
+      noLock,
+    );
+    expect(signed.ok).toBe(false);
+    if (signed.ok || !('issues' in signed)) return;
+    expect(signed.issues).toEqual([
+      expect.objectContaining({
+        path: 'dropZones.0.requireSignedImages',
+        message: expect.stringMatching(/zone b sets requireSignedImages: false/),
+      }),
+      // A signed zone's tag image is refused too.
+      expect.objectContaining({
+        path: 'dropZones.0.image',
+        message: expect.stringMatching(/is a tag/),
+      }),
+    ]);
+  });
+
+  test('refuses duplicate zone ids', () => {
+    const r = parseEditable({ dropZones: [zone, zone] }, noLock);
+    expect(r.ok).toBe(false);
+    if (r.ok || !('issues' in r)) return;
+    expect(r.issues).toEqual([{ path: 'dropZones.1.id', message: 'duplicate zone id: main' }]);
+  });
+
+  test('refuses listen and dataDir at their paths: they are boot settings', () => {
+    const r = parseEditable({ listen: { port: 1 }, dataDir: '/x', dropZones: [] }, noLock);
+    expect(r.ok).toBe(false);
+    if (r.ok || !('issues' in r)) return;
+    expect(r.issues).toEqual([
+      { path: 'listen', message: 'set in the config file or the environment; restart to change' },
+      { path: 'dataDir', message: 'set in the config file or the environment; restart to change' },
+    ]);
+  });
+
+  test('drops the credential rules: a starter zone parses without looking at any token', () => {
+    const r = parseEditable(
+      { dropZones: [{ ...zone, identity: 'starter', authorMayBeAdmin: true }] },
+      noLock,
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  test('a non-object document is one issue at the root', () => {
+    for (const doc of [null, [], 'x', 3]) {
+      const r = parseEditable(doc, noLock);
+      expect(r.ok).toBe(false);
+      if (r.ok || !('issues' in r)) continue;
+      expect(r.issues).toEqual([{ path: '', message: 'the config must be a JSON object' }]);
+    }
+  });
+
+  test('a preset zone without the lock is an issue at its preset, not a throw', () => {
+    const { image: _i, ...rest } = zone;
+    const r = parseEditable({ dropZones: [{ ...rest, preset: 'python' }] }, noLock);
+    expect(r.ok).toBe(false);
+    if (r.ok || !('issues' in r)) return;
+    expect(r.issues[0]?.path).toBe('dropZones.0.preset');
+    expect(r.issues[0]?.message).toMatch(/zone main: preset python needs the release image lock/);
+    expect(
+      parseEditable({ dropZones: [{ ...rest, preset: 'python' }] }, { ...noLock, devImages: true })
+        .ok,
+    ).toBe(true);
   });
 });

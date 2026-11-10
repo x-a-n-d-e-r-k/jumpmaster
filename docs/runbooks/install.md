@@ -708,6 +708,26 @@ The uid the server runs as. `warn` as root: set `JM_UID`/`JM_GID` in `.env` to a
 keeps this warning for good. `skip` with "rootless unsupported": use a rootful engine
 ([Prerequisites](#prerequisites)).
 
+### `config.file`
+
+Where the config comes from. With a config file the install is in file mode: the file is the
+config, and after editing it `jumpmaster ctl config reload` applies it without a restart. A `fail`
+means the last reload found the file invalid: the server keeps running the revision it had, and
+the fix lists each problem by path. `jumpmaster ctl config adopt` moves the config into the
+database (db mode), where the UI and `ctl config set` change it; from then on the file is
+ignored except for `listen` and `dataDir`, read at start. A `warn` in db mode means the file no
+longer mirrors the database: refresh it with
+`docker compose exec -T jumpmaster jumpmaster ctl config export > config/jumpmaster.config.json.tmp && mv config/jumpmaster.config.json.tmp config/jumpmaster.config.json`
+(`-T` keeps the file free of carriage returns). That export is also how to go back to file
+mode (`jumpmaster ctl config mode file`, refused unless the file equals the export) and what
+to write before running an older release, which reads only the file.
+
+### `config.restart`
+
+A setting changed since the server started that only a restart applies (`mcp.enabled` and
+`mcp.maxBodyBytes`, or a `listen` or `dataDir` changed in the file). Every other change applies at
+the next pass. Run `docker compose restart jumpmaster`.
+
 ### `config.secret-files`
 
 Every secret file must be readable by its owner only. A `fail` names the files others can read;

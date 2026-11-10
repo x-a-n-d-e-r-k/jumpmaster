@@ -58,12 +58,17 @@ RUN if [ -n "$IMAGES_LOCK" ]; then \
 # The release this image belongs to (the release workflow passes it): the doctor's links point at
 # that tag's install runbook. Empty in other builds, which link to main.
 ARG RELEASE_VERSION
+# The config file, when there is one (file mode); without it the config lives in the database
+# (db mode) and the boot settings below apply. A file's own listen and dataDir take precedence.
 ENV NODE_ENV=production \
     JM_RELEASE_VERSION=${RELEASE_VERSION} \
     JM_CONTAINER=1 \
+    JM_CONFIG=/config/jumpmaster.config.json \
+    JM_LISTEN_HOST=0.0.0.0 \
+    JM_DATA_DIR=/data \
     TMPDIR=/tmp
 WORKDIR /app
 USER 10000:10000
 EXPOSE 7420
 ENTRYPOINT ["jumpmaster"]
-CMD ["serve", "/config/jumpmaster.config.json"]
+CMD ["serve"]

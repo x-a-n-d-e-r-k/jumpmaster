@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { redactTokenShapes } from '@jumpmaster/protocol';
 import type { Db } from './db/open.js';
 import {
@@ -45,6 +45,60 @@ export function pairFor(
     throw new Error('JM_GITHUB_REVIEWER_TOKEN is required for a two-bot zone');
   const reviewer = new GitHubForge(owner, name, secrets.githubReviewerToken, opts);
   return zone.authorMayBeAdmin ? { author, reviewer, merger: reviewer } : { author, reviewer };
+}
+
+type PairTokens = {
+  githubAuthorToken: string;
+  githubReviewerToken?: string;
+  githubReadToken?: string;
+};
+
+/**
+ * A short SHA-256 over the forge tokens, for caching what was built from them. Never shown: it
+ * names no token, and a 64-bit prefix of a hash over high-entropy tokens reveals nothing.
+ */
+export function credentialFingerprint(secrets: PairTokens): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        secrets.githubAuthorToken,
+        secrets.githubReviewerToken ?? null,
+        secrets.githubReadToken ?? null,
+      ]),
+    )
+    .digest('hex')
+    .slice(0, 16);
+}
+
+type PairZone = Parameters<typeof pairFor>[0] & { id: string };
+
+/**
+ * The forge pairs, built on first use and rebuilt only when what they were built from changes:
+ * the zone's repository, identity and admin setting, and the credential fingerprint. A config
+ * revision that leaves those alone keeps the pair (and its connections); a rotated token gets a
+ * new one at the next pass. Only the latest pair per zone (timed or not) is kept.
+ */
+export class ForgePairs {
+  private readonly cache = new Map<string, { key: string; pair: ForgePair }>();
+
+  for(zone: PairZone, secrets: PairTokens, opts: { requestTimeoutMs?: number } = {}): ForgePair {
+    const slot = `${zone.id}\n${opts.requestTimeoutMs ?? ''}`;
+    const key = JSON.stringify([
+      zone.repo,
+      zone.identity ?? 'two-bot',
+      zone.authorMayBeAdmin,
+      credentialFingerprint(secrets),
+    ]);
+    const hit = this.cache.get(slot);
+    if (hit && hit.key === key) return hit.pair;
+    const pair = pairFor(zone, secrets, opts);
+    this.cache.set(slot, { key, pair });
+    return pair;
+  }
+
+  size(): number {
+    return this.cache.size;
+  }
 }
 
 export type OpKind = OutboxRow['kind'];

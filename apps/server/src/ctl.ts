@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import type { DoctorCheck } from './doctor/checks.js';
 import { readSecret } from './secrets.js';
@@ -5,12 +6,42 @@ import { readSecret } from './secrets.js';
 const MODES: Record<string, string> = { pause: 'paused', resume: 'active', observe: 'observe' };
 
 export type CtlRequest =
-  | { path: string; body: unknown; method?: 'PUT' }
+  | { path: string; body: unknown; method?: 'PUT' | 'PATCH' }
   | { path: string; method: 'GET' };
+
+/**
+ * `ctl config …` verbs that are one request. `set` (a read, then a conditional patch) and
+ * `import` (a local file) are built by `runConfig`.
+ */
+function configRequest(args: string[]): CtlRequest | null {
+  const [, verb, ...rest] = args;
+  if (verb === 'show' && rest.every((a) => a === '--json'))
+    return { path: '/api/control/config', method: 'GET' };
+  if (verb === 'revisions' && rest.length === 0)
+    return { path: '/api/control/config/revisions', method: 'GET' };
+  if (verb === 'export' && rest.length === 0)
+    return { path: '/api/control/config/export', method: 'GET' };
+  if ((verb === 'reload' || verb === 'adopt') && rest.length === 0)
+    return { path: `/api/control/config/${verb}`, body: {} };
+  if (verb === 'mode')
+    return rest.length === 1 && rest[0] === 'file'
+      ? { path: '/api/control/config/mode', body: { mode: 'file' } }
+      : null;
+  if (verb === 'rollback') {
+    const [id, ...note] = rest;
+    if (!id || !/^\d+$/.test(id)) return null;
+    return {
+      path: '/api/control/config/rollback',
+      body: { id: Number(id), ...(note.length > 0 ? { note: note.join(' ') } : {}) },
+    };
+  }
+  return null;
+}
 
 /** The control request for a command line, or null when it isn't one. */
 export function ctlRequest(args: string[]): CtlRequest | null {
   const [command, zone] = args;
+  if (command === 'config') return configRequest(args);
   if (command === 'briefings') return { path: '/api/control/briefings', method: 'GET' };
   // Setup and the passphrase. The passphrase itself comes from stdin, never argv.
   if (command === 'setup-code')
@@ -99,8 +130,202 @@ export function formatDoctor(run: {
   return lines;
 }
 
-const USAGE =
-  'usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] | ctl doctor <zone> --drop | ctl doctor <zone> --cancel | ctl setup-code | ctl setup reopen | ctl passphrase set (the passphrase on stdin)';
+const CONFIG_USAGE =
+  'ctl config show [--json] | ctl config revisions | ctl config set <path>=<json>… [--note <text>] | ctl config rollback <id> [note] | ctl config import <file> [--dry-run] [--note <text>] | ctl config export | ctl config reload | ctl config adopt | ctl config mode file';
+const USAGE = `usage: ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] | ctl doctor <zone> --drop | ctl doctor <zone> --cancel | ctl setup-code | ctl setup reopen | ctl passphrase set (the passphrase on stdin) | ${CONFIG_USAGE}`;
+
+type Call = (method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown) => Promise<Response>;
+type Change = { path: string; from?: unknown; to?: unknown };
+type Issue = { path: string; message: string };
+
+const shown = (v: unknown): string => (v === undefined ? '(unset)' : JSON.stringify(v));
+const changeLine = (c: Change): string => `${c.path}: ${shown(c.from)} -> ${shown(c.to)}`;
+const issueLine = (i: Issue): string => `issue: ${i.path || '(root)'}: ${i.message}`;
+/** A value as typed: JSON when it parses, else the text itself (`readyLabel=go`). */
+const valueOf = (text: string): unknown => {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text;
+  }
+};
+const isObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/** Sets `value` at `path` in `obj` (null removes, as a merge patch would). */
+function setPath(obj: Record<string, unknown>, path: string[], value: unknown): void {
+  const [head, ...rest] = path as [string, ...string[]];
+  if (rest.length === 0) {
+    if (value === null) delete obj[head];
+    else obj[head] = value;
+    return;
+  }
+  const next = isObject(obj[head]) ? (obj[head] as Record<string, unknown>) : {};
+  obj[head] = next;
+  setPath(next, rest, value);
+}
+
+/** The applied revision as a line: what changed, and what waits for a restart. */
+function appliedLine(body: { revision: number; changed: string[]; restartNeeded: string[] }) {
+  const changed = body.changed.length > 0 ? body.changed.join(', ') : 'nothing changed';
+  const restart =
+    body.restartNeeded.length > 0
+      ? `; restart to apply ${body.restartNeeded.join(', ')} (docker compose restart jumpmaster)`
+      : '';
+  return `revision ${body.revision}: ${changed}${restart}`;
+}
+
+/**
+ * `ctl config …`. `set` reads the current document and revision, then sends one merge patch
+ * conditional on that revision (a zone path `dropZones.<id>.<key>` edits that zone and sends the
+ * zone list whole, as a merge patch replaces arrays). `import` reads a local file. `export` writes
+ * the JSON alone to stdout, for the host to redirect.
+ */
+async function runConfig(
+  args: string[],
+  call: Call,
+  out: (line: string) => void,
+  err: (line: string) => void,
+): Promise<number> {
+  const [, verb, ...rest] = args;
+  const usage = () => {
+    err(`usage: ${CONFIG_USAGE}`);
+    return 2;
+  };
+  const fail = async (res: Response) => {
+    out(`${res.status} ${await res.text()}`);
+    return 1;
+  };
+  const flag = (name: string): { value?: string; rest: string[] } | null => {
+    const i = rest.indexOf(name);
+    if (i < 0) return { rest };
+    const value = rest[i + 1];
+    if (value === undefined) return null;
+    return { value, rest: [...rest.slice(0, i), ...rest.slice(i + 2)] };
+  };
+
+  if (verb === 'set') {
+    const n = flag('--note');
+    if (!n) return usage();
+    const pairs = n.rest.map((a) => {
+      const eq = a.indexOf('=');
+      return eq <= 0 ? null : { path: a.slice(0, eq).split('.'), value: valueOf(a.slice(eq + 1)) };
+    });
+    if (pairs.length === 0 || pairs.some((p) => p === null || p.path.some((s) => s === '')))
+      return usage();
+    const cur = await call('GET', '/api/control/config');
+    if (!cur.ok) return fail(cur);
+    const { revision, config } = (await cur.json()) as {
+      revision: number;
+      config: Record<string, unknown>;
+    };
+    const patch: Record<string, unknown> = {};
+    const zones = Array.isArray(config.dropZones)
+      ? (structuredClone(config.dropZones) as Record<string, unknown>[])
+      : [];
+    let zonesTouched = false;
+    for (const p of pairs as { path: string[]; value: unknown }[]) {
+      if (p.path[0] === 'dropZones' && p.path.length >= 3) {
+        const zone = zones.find((z) => z.id === p.path[1]);
+        if (!zone) {
+          err(`no zone ${p.path[1]} in the config: ctl config show lists the zones`);
+          return 2;
+        }
+        setPath(zone, p.path.slice(2), p.value);
+        zonesTouched = true;
+      } else setPath(patch, p.path, p.value);
+    }
+    if (zonesTouched) patch.dropZones = zones;
+    const res = await call('PATCH', '/api/control/config', {
+      patch,
+      expectRevision: revision,
+      ...(n.value !== undefined ? { note: n.value } : {}),
+    });
+    if (!res.ok) return fail(res);
+    out(appliedLine(await res.json()));
+    return 0;
+  }
+
+  if (verb === 'import') {
+    const dry = rest.includes('--dry-run');
+    const n = flag('--note');
+    if (!n) return usage();
+    const words = n.rest.filter((a) => a !== '--dry-run');
+    if (words.length !== 1) return usage();
+    let config: unknown;
+    try {
+      config = JSON.parse(readFileSync(words[0] as string, 'utf8')) as unknown;
+    } catch (e) {
+      err(`cannot read ${words[0]}: ${e instanceof Error ? e.message : String(e)}`);
+      return 2;
+    }
+    const res = await call('POST', '/api/control/config/import', {
+      config,
+      ...(dry ? { dryRun: true } : {}),
+      ...(n.value !== undefined ? { note: n.value } : {}),
+    });
+    if (!res.ok) return fail(res);
+    if (dry) {
+      const body = (await res.json()) as { changes: Change[]; issues: Issue[] };
+      for (const c of body.changes) out(changeLine(c));
+      for (const i of body.issues) out(issueLine(i));
+      out(
+        body.issues.length > 0 ? 'dry run: refused, nothing applied' : 'dry run: nothing applied',
+      );
+      return body.issues.length > 0 ? 1 : 0;
+    }
+    out(appliedLine(await res.json()));
+    return 0;
+  }
+
+  const request = configRequest(args);
+  if (!request) return usage();
+  const res =
+    request.method === 'GET'
+      ? await call('GET', request.path)
+      : await call('POST', request.path, request.body);
+  if (!res.ok) return fail(res);
+  if (verb === 'export') {
+    // Exactly the JSON: `out` ends the line the JSON's own trailing newline would.
+    out((await res.text()).replace(/\n$/, ''));
+    return 0;
+  }
+  if (verb === 'show') {
+    const body = (await res.json()) as {
+      mode: string;
+      revision: number;
+      config: unknown;
+      restartPending: string[];
+    };
+    if (rest.includes('--json')) {
+      out(JSON.stringify(body, null, 2));
+      return 0;
+    }
+    const pending =
+      body.restartPending.length > 0 ? `, restart pending: ${body.restartPending.join(', ')}` : '';
+    out(`config: ${body.mode} mode, revision ${body.revision}${pending}`);
+    out(JSON.stringify(body.config, null, 2));
+    return 0;
+  }
+  if (verb === 'revisions') {
+    const { revisions } = (await res.json()) as {
+      revisions: {
+        id: number;
+        createdAt: string;
+        via: string;
+        note: string | null;
+        changes: Change[];
+      }[];
+    };
+    for (const r of revisions) {
+      out(`#${r.id} ${r.createdAt} ${r.via}${r.note ? ` ${JSON.stringify(r.note)}` : ''}`);
+      for (const c of r.changes) out(`    ${changeLine(c)}`);
+    }
+    return 0;
+  }
+  out(`${res.status} ${await res.text()}`);
+  return 0;
+}
 
 /** The first line of stdin, without its line ending (`ctl passphrase set`). */
 async function readStdinLine(): Promise<string> {
@@ -113,6 +338,22 @@ async function readStdinLine(): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+/** The operator token from the environment or its file; null (said on `err`) when absent. */
+function operatorToken(env: NodeJS.ProcessEnv, err: (line: string) => void): string | null {
+  let token: string | undefined;
+  try {
+    token = readSecret(env, 'JM_OPERATOR_TOKEN');
+  } catch (e) {
+    err(e instanceof Error ? e.message : String(e));
+    return null;
+  }
+  if (!token) {
+    err('JM_OPERATOR_TOKEN or JM_OPERATOR_TOKEN_FILE is required');
+    return null;
+  }
+  return token;
+}
+
 /** Runs one control command against the server. Returns the process exit code. */
 export async function runCtl(
   args: string[],
@@ -122,6 +363,21 @@ export async function runCtl(
   err: (line: string) => void = console.error,
   readStdin: () => Promise<string> = readStdinLine,
 ): Promise<number> {
+  if (args[0] === 'config') {
+    const token = operatorToken(env, err);
+    if (token === null) return 2;
+    const base = env.JM_SERVER_URL ?? 'http://127.0.0.1:7420';
+    const call: Call = (method, path, body) =>
+      fetchImpl(new URL(path, base), {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    return runConfig(args, call, out, err);
+  }
   const request = ctlRequest(args);
   if (!request) {
     err(USAGE);
@@ -138,17 +394,8 @@ export async function runCtl(
     }
     body = { passphrase: line };
   }
-  let token: string | undefined;
-  try {
-    token = readSecret(env, 'JM_OPERATOR_TOKEN');
-  } catch (e) {
-    err(e instanceof Error ? e.message : String(e));
-    return 2;
-  }
-  if (!token) {
-    err('JM_OPERATOR_TOKEN or JM_OPERATOR_TOKEN_FILE is required');
-    return 2;
-  }
+  const token = operatorToken(env, err);
+  if (token === null) return 2;
   const base = env.JM_SERVER_URL ?? 'http://127.0.0.1:7420';
   const res = await fetchImpl(
     new URL(request.path, base),

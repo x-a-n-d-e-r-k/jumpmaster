@@ -2,6 +2,7 @@ import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import type { ConfigStatus } from '../config/source.js';
 import { STARTER_WARNING } from '../config.js';
 import {
   appendEvents,
@@ -1106,5 +1107,75 @@ describe('fix pass', () => {
     expect(c.status).toBe('pass');
     expect(c.summary).toContain('pypi.org');
     expect(c.summary).toContain('refused, as enforce means');
+  });
+});
+
+describe('config store checks', () => {
+  const status = (o: Partial<ConfigStatus> = {}): ConfigStatus => ({
+    mode: 'db',
+    revision: 4,
+    restartPending: [],
+    ...o,
+  });
+
+  test('without the store status the config checks are not run', async () => {
+    const ids = (await world().run()).map((c) => c.id);
+    expect(ids).not.toContain('config.file');
+    expect(ids).not.toContain('config.restart');
+  });
+
+  test('config.file passes in either mode, and fails while the file is invalid, keeping the old config', async () => {
+    const w = world();
+    w.deps.configStatus = status();
+    expect(one(await w.run(), 'config.file')).toMatchObject({
+      status: 'pass',
+      summary: expect.stringContaining('db mode, revision 4'),
+    });
+    w.deps.configStatus = status({ mode: 'file', filePath: '/config/jm.json' });
+    expect(one(await w.run(), 'config.file')).toMatchObject({
+      status: 'pass',
+      summary: expect.stringContaining('/config/jm.json'),
+    });
+    w.deps.configStatus = status({
+      mode: 'file',
+      filePath: '/config/jm.json',
+      fileProblem: [{ path: 'pollSeconds', message: 'Too small' }],
+    });
+    expect(one(await w.run(), 'config.file')).toMatchObject({
+      status: 'fail',
+      summary: expect.stringMatching(/invalid.*revision 4/),
+      fix: expect.stringMatching(/pollSeconds: Too small[\s\S]*jumpmaster ctl config reload/),
+    });
+  });
+
+  test('config.file notes a file ignored in db mode, and warns when it no longer mirrors the config', async () => {
+    const w = world();
+    w.deps.configStatus = status({
+      filePath: '/config/jm.json',
+      fileIgnored: 'config file ignored: adopted on 2026-11-01T00:00:00.000Z',
+      fileMatchesExport: true,
+    });
+    expect(one(await w.run(), 'config.file')).toMatchObject({
+      status: 'pass',
+      summary: expect.stringMatching(/config file ignored: adopted on 2026-11-01.*mirrors/),
+    });
+    w.deps.configStatus = { ...w.deps.configStatus, fileMatchesExport: false };
+    expect(one(await w.run(), 'config.file')).toMatchObject({
+      status: 'warn',
+      summary: expect.stringContaining('config file ignored: adopted on 2026-11-01'),
+      fix: expect.stringContaining('ctl config export'),
+    });
+  });
+
+  test('config.restart warns while a restart-only setting waits for a restart', async () => {
+    const w = world();
+    w.deps.configStatus = status();
+    expect(one(await w.run(), 'config.restart').status).toBe('pass');
+    w.deps.configStatus = status({ restartPending: ['mcp.enabled'] });
+    expect(one(await w.run(), 'config.restart')).toMatchObject({
+      status: 'warn',
+      summary: expect.stringContaining('mcp.enabled'),
+      fix: expect.stringContaining('docker compose restart jumpmaster'),
+    });
   });
 });

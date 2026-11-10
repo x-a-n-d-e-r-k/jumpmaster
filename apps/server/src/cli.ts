@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // The `jumpmaster` command:
-//   jumpmaster [serve] <config>   run the server (the default)
+//   jumpmaster [serve] [config]   run the server (the default); no path: JM_CONFIG, else db mode
 //   jumpmaster ctl …              control commands against the running server
 //   jumpmaster doctor …           alias of `ctl doctor …`
 //   jumpmaster init --repo o/n …  write a compose install's config and secrets (init.ts)
@@ -10,14 +10,15 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 export type CliDeps = {
-  serve: (configPath: string) => Promise<number>;
+  serve: (configPath: string | undefined) => Promise<number>;
   ctl: (args: string[]) => Promise<number>;
   init: (args: string[]) => Promise<number>;
   err?: (line: string) => void;
 };
 
 const USAGE = [
-  'usage: jumpmaster [serve] <config>',
+  'usage: jumpmaster serve [config]   (no config: JM_CONFIG, else the config lives in the database)',
+  '       jumpmaster <config>',
   '       jumpmaster ctl <command> …   (see `jumpmaster ctl` for commands)',
   '       jumpmaster doctor …          (alias of `jumpmaster ctl doctor …`)',
   '       jumpmaster init --repo owner/name …   (see `jumpmaster init --help`)',
@@ -32,8 +33,10 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   if (command === 'ctl') return deps.ctl(rest);
   if (command === 'doctor') return deps.ctl(['doctor', ...rest]);
   if (command === 'init') return deps.init(rest);
+  // `serve` alone: the path comes from JM_CONFIG, or there is none (db mode).
+  if (command === 'serve' && rest.length === 0) return deps.serve(undefined);
   const config = command === 'serve' ? rest[0] : command;
-  if (!config || RESERVED.has(config)) {
+  if (!config || RESERVED.has(config) || (command === 'serve' && rest.length > 1)) {
     err(USAGE);
     return 2;
   }
@@ -42,7 +45,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-async function serve(configPath: string): Promise<number> {
+async function serve(configPath: string | undefined): Promise<number> {
   const { start } = await import('./main.js');
   try {
     const srv = await start(configPath);

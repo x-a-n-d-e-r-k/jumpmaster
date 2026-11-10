@@ -23,13 +23,13 @@ import {
   SETUP_COOKIE,
   setCookie,
 } from '../auth/sessions.js';
-import type { Config } from '../config.js';
+import type { LiveConfig } from '../config/source.js';
 import type { Db } from '../db/open.js';
 import { escapeHtml, page } from './pages.js';
 
 export interface AuthPageDeps {
   db: Db;
-  config: Config;
+  config: LiveConfig;
   now(): Date;
   setup: SetupMode;
   backoff: Backoff;

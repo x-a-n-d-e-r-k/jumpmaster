@@ -7,6 +7,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { originAllowed } from '../api/control.js';
+import { configReader, type LiveConfig } from '../config/source.js';
 import { allowedHostsOf, type Config, type DropZoneConfig, mcpConfigOf } from '../config.js';
 import type { Db } from '../db/open.js';
 import { auditMcp, auditRefusedAuth, checkMcpToken, type McpPrincipal } from './tokens.js';
@@ -14,13 +15,15 @@ import { callBudgetSpent, callTool, errorMessage, listTools } from './tools.js';
 
 export interface McpDeps {
   db: Db;
-  config: Config;
+  /** Read per request: a zone added or removed live is seen by the next call. */
+  config: LiveConfig;
   now(): Date;
   /** The operator's scrubbed log: the caller sees a generic error, the operator the cause. */
   log?: (msg: string) => void;
 }
 
-type Caller = { principal: McpPrincipal; zone: DropZoneConfig };
+/** The request's config, read once when it is authenticated, with the token's zone in it. */
+type Caller = { principal: McpPrincipal; zone: DropZoneConfig; config: Config };
 
 const bearer = (req: FastifyRequest): string | undefined => {
   const h = req.headers.authorization;
@@ -47,16 +50,20 @@ const rpcError = (code: number, message: string) =>
 /**
  * The MCP server for Command's own Claude Code, at `POST /mcp`: stateless streamable HTTP with
  * JSON responses, one SDK server per request bound to its token's zone and scope. Registered only
- * with `mcp.enabled` (read at start), so with it off `/mcp` is Fastify's 404.
+ * with `mcp.enabled` (read at start), so with it off `/mcp` is Fastify's 404. The body limit is
+ * the route's, also read at start; the zones and every other setting are read per request.
  *
  * Order: Host (the app's hook) → Origin → bearer, both before the body is parsed → Content-Type
  * (415) and body limit (413) → batch refusal (400) → the SDK (Accept, 406) → the tool, which audits.
  */
 export function registerMcpRoute(app: FastifyInstance, deps: McpDeps): void {
-  const { db, config, now } = deps;
-  const mcp = mcpConfigOf(config);
+  const { db, now } = deps;
+  const live = configReader(deps.config);
+  const atStart = live();
+  const mcp = mcpConfigOf(atStart);
   if (!mcp.enabled) return;
-  const allowed = allowedHostsOf(config);
+  // Boot settings: they change only with a restart.
+  const allowed = allowedHostsOf(atStart);
   const callers = new WeakMap<FastifyRequest, Caller>();
 
   void app.register(async (scope) => {
@@ -71,18 +78,19 @@ export function registerMcpRoute(app: FastifyInstance, deps: McpDeps): void {
         auditRefusedAuth(db, c.reason, c.tokenId, at);
         return reply.code(401).header('www-authenticate', 'Bearer').send({ error: 'unauthorized' });
       }
+      const config = live();
       const zone = config.dropZones.find((z) => z.id === c.principal.zoneId);
       if (!zone) {
         auditRefusedAuth(db, 'zone not configured', c.principal.tokenId, at);
         return reply.code(401).header('www-authenticate', 'Bearer').send({ error: 'unauthorized' });
       }
-      callers.set(req, { principal: c.principal, zone });
+      callers.set(req, { principal: c.principal, zone, config });
     });
 
     scope.post('/mcp', { bodyLimit: mcp.maxBodyBytes }, async (req, reply) => {
       const caller = callers.get(req);
       if (!caller) return reply.code(401).send({ error: 'unauthorized' });
-      const { principal, zone } = caller;
+      const { principal, zone, config } = caller;
       // The MCP revision of 2025-06-18 removed batching; one request would otherwise carry
       // hundreds of tool calls past the write budget's check.
       if (Array.isArray(req.body)) {

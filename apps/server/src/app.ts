@@ -6,6 +6,7 @@ import { Backoff } from './auth/backoff.js';
 import { registerGuard, withCsrf } from './auth/guard.js';
 import type { SetupMode } from './auth/operator.js';
 import { listBriefings, listRulings } from './briefings.js';
+import { configReader } from './config/source.js';
 import type { Config } from './config.js';
 import { creditDropsSince, creditSignal } from './credits.js';
 import { listCrewIssues } from './crew/store.js';
@@ -96,6 +97,8 @@ export function createApp(
   },
 ): FastifyInstance {
   const app = Fastify({ logger: false });
+  // Every page reads the config once per request: the store swaps it on each applied revision.
+  const live = configReader(deps.config);
   // The login and setup pages post plain HTML forms.
   app.addContentTypeParser(
     'application/x-www-form-urlencoded',
@@ -104,7 +107,7 @@ export function createApp(
   );
   // Host, Origin, session, CSRF and token: one hook decides for every route (auth/guard.ts).
   registerGuard(app, deps);
-  const setup = deps.setup ?? stderrSetupMode(deps.config.listen);
+  const setup = deps.setup ?? stderrSetupMode(live().listen);
   const backoff = deps.backoff ?? new Backoff();
   registerAuthPages(app, { ...deps, setup, backoff });
   registerStickRoutes(app, deps);
@@ -112,7 +115,8 @@ export function createApp(
   registerMcpRoute(app, deps);
 
   app.get('/', async (req, reply) => {
-    const { db, config, now } = deps;
+    const { db, now } = deps;
+    const config = live();
     const at = now();
     const items = config.dropZones.flatMap((z) => listWorkItems(db, z.id));
     const details = new Map<number, ItemDetail>();
@@ -176,7 +180,8 @@ export function createApp(
   });
 
   app.get('/briefings', async (req, reply) => {
-    const { db, config } = deps;
+    const { db } = deps;
+    const config = live();
     const holds = new Map<string, string>();
     for (const z of config.dropZones) {
       for (const c of listCrewIssues(db, z.id, ['promote_held'])) {
@@ -193,7 +198,8 @@ export function createApp(
   });
 
   app.get<{ Params: { id: string } }>('/zones/:id/goals', async (req, reply) => {
-    const { db, config } = deps;
+    const { db } = deps;
+    const config = live();
     const zone = config.dropZones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).type('text/plain').send('not found');
     const html = renderGoals({
@@ -207,7 +213,7 @@ export function createApp(
   });
 
   app.get<{ Params: { id: string } }>('/zones/:id/intake', async (req, reply) => {
-    const zone = deps.config.dropZones.find((z) => z.id === req.params.id);
+    const zone = live().dropZones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).type('text/plain').send('not found');
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, renderIntake(zone)));
   });
@@ -215,7 +221,7 @@ export function createApp(
   app.get('/doctor', async (req, reply) =>
     reply
       .type('text/html; charset=utf-8')
-      .send(withCsrf(req, renderDoctor(latestDoctorRun(deps.db), deps.config.dropZones))),
+      .send(withCsrf(req, renderDoctor(latestDoctorRun(deps.db), live().dropZones))),
   );
 
   app.get('/observations', async (req, reply) =>
@@ -231,7 +237,7 @@ export function createApp(
       .header('x-content-type-options', 'nosniff')
       .header('content-security-policy', "sandbox; default-src 'none'")
       .type(row.mediaType)
-      .send(readArtifact(deps.config.dataDir, row));
+      .send(readArtifact(live().dataDir, row));
   });
 
   app.get<{ Params: { id: string } }>('/drops/:id', async (req, reply) => {
