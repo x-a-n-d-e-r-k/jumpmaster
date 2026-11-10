@@ -856,15 +856,92 @@ export function administrationOf(p: {
   return 'unknown';
 }
 
+// ---- code owners -------------------------------------------------------------------------------
+
+/** One CODEOWNERS rule: its 1-based line, its pattern and its owners as written. */
+export type CodeownersRule = { line: number; pattern: string; owners: string[] };
+
+/** The rules of a CODEOWNERS file: comments (whole-line and trailing) and blank lines dropped. */
+export function codeownersRules(text: string): CodeownersRule[] {
+  const out: CodeownersRule[] = [];
+  text.split('\n').forEach((raw, i) => {
+    const line = raw
+      .replace(/\r$/, '')
+      .replace(/(^|\s)#.*$/, '')
+      .trim();
+    if (line === '') return;
+    const [pattern = '', ...owners] = line.split(/\s+/);
+    out.push({ line: i + 1, pattern, owners });
+  });
+  return out;
+}
+
+/** A CODEOWNERS pattern read as a path, as `protectedMatch` reads a changed file. */
+const asPath = (pattern: string): string => pattern.replace(/^\//, '').replace(/\/$/, '/**');
+
+/**
+ * How a CODEOWNERS file sits with a required code owner review in two-bot mode (§7.4): a rule for a
+ * protected path must name people only (the reviewer bot there would stand in for a person: warn);
+ * any other rule that names owners must name the reviewer bot, or every pull request it covers
+ * waits for a person and no merge happens (fail). A rule naming the bot that comes after a
+ * protected rule it also covers wins there (the last match wins), handing the bot that path: warn.
+ */
+export function codeownersFindings(
+  text: string,
+  zone: Pick<DropZoneConfig, 'protectedPaths'>,
+  reviewer: string,
+): {
+  fail: { line: number; pattern: string }[];
+  warn: { line: number; pattern: string; why: 'bot-owns-protected' | 'overrides-protected' }[];
+} {
+  const bot = reviewer.toLowerCase();
+  const names = (r: CodeownersRule) =>
+    r.owners.some((o) => o.replace(/^@/, '').toLowerCase() === bot);
+  const isProtected = (r: CodeownersRule) =>
+    zone.protectedPaths.some((g) => protectedMatch(asPath(r.pattern), g));
+  const rules = codeownersRules(text);
+  const fail: { line: number; pattern: string }[] = [];
+  const warn: {
+    line: number;
+    pattern: string;
+    why: 'bot-owns-protected' | 'overrides-protected';
+  }[] = [];
+  rules.forEach((r, i) => {
+    if (r.owners.length === 0) return;
+    if (isProtected(r)) {
+      if (names(r)) warn.push({ line: r.line, pattern: r.pattern, why: 'bot-owns-protected' });
+      return;
+    }
+    if (!names(r)) {
+      fail.push({ line: r.line, pattern: r.pattern });
+      return;
+    }
+    const covers = rules
+      .slice(0, i)
+      .some((p) => isProtected(p) && pathMatches(asPath(p.pattern), asPath(r.pattern)));
+    if (covers) warn.push({ line: r.line, pattern: r.pattern, why: 'overrides-protected' });
+  });
+  return { fail, warn };
+}
+
+/** The park reason and fix for a rule that holds every pull request it covers for a person. */
+export const codeownerBlocks = (f: { line: number; pattern: string }, reviewer: string): string =>
+  `code owner review blocks the reviewer bot: CODEOWNERS line ${f.line} (${f.pattern}) does not name @${reviewer}, so every pull request it covers waits for a person: name @${reviewer} on that line (the protected lines after it stay people-only; the last match wins), or turn off Require review from Code Owners`;
+
 /**
  * Problems with the branch rules both bot identities see (the author alone in starter mode, where
  * `reviewer` is null). `[]` when protection is not required; null when a read is unavailable
- * (judged on a later pass).
+ * (judged on a later pass). With a required code owner review in two-bot mode and the CODEOWNERS
+ * text read (`probe.codeowners`), a rule the reviewer bot cannot satisfy is a problem too: GitHub
+ * would refuse every merge.
  */
 export function branchProtectionProblems(
   rules: { author: BranchRulesRead; reviewer: BranchRulesRead | null },
   zone: DropZoneConfig,
-  probe: { authorAdministration?: AdministrationRead } = {},
+  probe: {
+    authorAdministration?: AdministrationRead;
+    codeowners?: { text: string | null; reviewer: string };
+  } = {},
 ): string[] | null {
   if (!zone.requireBranchProtection) return [];
   if (zone.identity === 'starter')
@@ -887,6 +964,13 @@ export function branchProtectionProblems(
     if (zone.ciRequired && r.requiredChecks.length === 0) out.add('no required checks');
     for (const t of r.unsupportedRules ?? []) out.add(`unsupported rule: ${t}`);
   }
+  const ownersRequired = [rules.author, rules.reviewer].some(
+    (x) => x.kind === 'ok' && x.rules.requireCodeOwnerReview === true,
+  );
+  const co = probe.codeowners;
+  if (ownersRequired && co && co.text !== null)
+    for (const f of codeownersFindings(co.text, zone, co.reviewer).fail)
+      out.add(codeownerBlocks(f, co.reviewer));
   return [...out];
 }
 

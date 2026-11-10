@@ -36,7 +36,7 @@ import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import { credentialCreatedAt } from '../vault/credentials.js';
 import { fingerprintOf, openVault } from '../vault/vault.js';
 import { type ControlDeps, registerControlRoutes } from './control.js';
-import { guidanceFor } from './github.js';
+import { guidanceFor, recommendFor } from './github.js';
 
 const TOKEN = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
@@ -2175,5 +2175,39 @@ describe('GitHub guidance routes (Task 7)', () => {
     });
     const r = await get('/api/control/zones/demo/github?reviewer=alice&utm_source=pasted');
     expect(r.statusCode, r.body).toBe(200);
+  });
+
+  test('the cache key is the token the request read with, not the live store\u2019s', async () => {
+    const { store, calls } = guideApp();
+    const config = store.current();
+    const ask = (c: typeof config) =>
+      recommendFor(store, c, { repo: 'octo-org/demo' }, (repo, token) => ({
+        repoAccess: async () => {
+          calls.push(`repoAccess ${repo} ${token === AUTHOR ? 'author' : 'other'}`);
+          return {
+            private: false,
+            defaultBranch: 'main',
+            permissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
+            scopes: null,
+            tokenExpiresAt: null,
+            ownerType: 'Organization' as const,
+          };
+        },
+        ownerType: async () => 'Organization' as const,
+        viewerLogin: async () => 'jm-author',
+        listDir: async () => [],
+        getFileAt: async () => null,
+      }));
+    await ask(config);
+    const n = calls.length;
+    await ask(config);
+    expect(calls.length).toBe(n);
+    // A snapshot read with another author token (a rotation mid-request) is another key.
+    await ask({
+      ...config,
+      secrets: { ...config.secrets, githubAuthorToken: 'github_pat_OTHERDUMMY012345678901234' },
+    });
+    expect(calls.length).toBeGreaterThan(n);
+    expect(calls.at(-1)).toBe('repoAccess octo-org/demo other');
   });
 });

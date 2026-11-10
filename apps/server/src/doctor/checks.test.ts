@@ -394,23 +394,38 @@ describe('forge checks', () => {
     expect(one(await w.run(), 'forge.branch-rules').status).toBe('warn');
   });
 
-  test('forge.codeowners: a required code-owner review passes with people as owners, and warns on a bot owner or no CODEOWNERS', async () => {
+  test('forge.codeowners in two-bot reads CODEOWNERS by path: the bot must own what is not protected, and people only what is', async () => {
     const w = world();
     for (const id of ['author', 'reviewer'] as const) {
       const r = w.f.state.rules[id];
       if (r.kind === 'ok') r.rules.requireCodeOwnerReview = true;
     }
-    // Two-bot with people as code owners: GitHub holds the hand merge for a person's approval.
-    w.f.state.files.set('main:.github/CODEOWNERS', '* @someone-else\n');
+    // A catch-all naming only people: GitHub would refuse every merge.
+    w.f.state.files.set('main:.github/CODEOWNERS', '# owners\n* @someone-else\n');
+    expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
+      status: 'fail',
+      summary: expect.stringContaining('line 2 (*)'),
+      fix: expect.stringContaining(
+        'name @reviewer-bot on that line (the protected lines after it stay people-only; the last match wins), or turn code-owner review off',
+      ),
+    });
+    // The bot on the catch-all and people only on the protected lines after it: pass.
+    w.f.state.files.set(
+      'main:.github/CODEOWNERS',
+      '* @someone-else @reviewer-bot\n.github/** @someone-else\n',
+    );
     expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
       status: 'pass',
       summary: expect.stringContaining('people'),
     });
-    // The reviewer bot as a code owner: its approval would stand in for a person's.
-    w.f.state.files.set('main:.github/CODEOWNERS', '* @reviewer-bot\n');
+    // The bot on a protected line: its approval would stand in for a person's.
+    w.f.state.files.set(
+      'main:.github/CODEOWNERS',
+      '* @someone-else @reviewer-bot\n.github/** @reviewer-bot\n',
+    );
     expect(one(await w.run(), 'forge.codeowners')).toMatchObject({
       status: 'warn',
-      summary: expect.stringContaining('reviewer-bot'),
+      summary: expect.stringContaining('line 2 (.github/**)'),
     });
     // Required, with no CODEOWNERS file: nobody owns the protected paths on GitHub.
     w.f.state.files.delete('main:.github/CODEOWNERS');

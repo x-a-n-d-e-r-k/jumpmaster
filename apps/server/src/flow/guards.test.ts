@@ -6,6 +6,7 @@ import type { BranchRules, BranchRulesRead } from '../forge/github.js';
 import {
   ADMINISTRATION_PROBLEM,
   branchProtectionProblems,
+  codeownersFindings,
   dependenciesChanged,
   gateBins,
   gateScriptChanges,
@@ -1037,6 +1038,74 @@ describe('branchProtectionProblems', () => {
 
   test('safe rules give no problems', () =>
     expect(branchProtectionProblems({ author: rules(), reviewer: rules() }, zone)).toEqual([]));
+  describe('a required code owner review the reviewer bot cannot give', () => {
+    const owned = {
+      ...zone,
+      identity: 'two-bot',
+      protectedPaths: ['.github/**', 'CLAUDE.md'],
+    } as DropZoneConfig;
+    const on = { author: rules({ requireCodeOwnerReview: true }), reviewer: rules() };
+    const check = (text: string | null, z: DropZoneConfig = owned) =>
+      branchProtectionProblems(on, z, { codeowners: { text, reviewer: 'rb' } });
+
+    test('a catch-all naming only people parks the zone with the named fix', () => {
+      const p = check('# owners\n* @human\n.github/** @human\n');
+      expect(p).toEqual([
+        'code owner review blocks the reviewer bot: CODEOWNERS line 2 (*) does not name @rb, so every pull request it covers waits for a person: name @rb on that line (the protected lines after it stay people-only; the last match wins), or turn off Require review from Code Owners',
+      ]);
+    });
+
+    test('the bot on the catch-all with people-only protected lines is fine; the flag off or no file is not this problem', () => {
+      expect(check('* @human @rb\n.github/** @human\nCLAUDE.md @human\n')).toEqual([]);
+      expect(check('* @Human @RB\n')).toEqual([]);
+      expect(
+        branchProtectionProblems({ author: rules(), reviewer: rules() }, owned, {
+          codeowners: { text: '* @human\n', reviewer: 'rb' },
+        }),
+      ).toEqual([]);
+      // No file: GitHub has no code owner to require; the doctor says so, the merge is not blocked.
+      expect(check(null)).toEqual([]);
+      // A line with no owner un-owns its files: nothing to approve.
+      expect(check('src/generated/**\n')).toEqual([]);
+    });
+
+    test('starter mode is judged as before', () => {
+      const starterZone = { ...owned, identity: 'starter' } as DropZoneConfig;
+      expect(
+        branchProtectionProblems(
+          {
+            author: rules({
+              requiredApprovals: 0,
+              requiresPullRequest: true,
+              requireCodeOwnerReview: true,
+            }),
+            reviewer: null,
+          },
+          starterZone,
+          {
+            codeowners: { text: '* @human\n', reviewer: 'rb' },
+          },
+        )?.some((p) => p.startsWith('code owner review blocks')),
+      ).toBe(false);
+    });
+  });
+
+  test('codeownersFindings: protected lines must be people only, others must name the bot, and a later catch-all overrides', () => {
+    const z = { protectedPaths: ['.github/**', 'CLAUDE.md'] };
+    expect(codeownersFindings('* @human\n', z, 'rb')).toEqual({
+      fail: [{ line: 1, pattern: '*' }],
+      warn: [],
+    });
+    expect(codeownersFindings('* @h @rb\n.github/** @h @rb\nCLAUDE.md @h\n', z, 'rb')).toEqual({
+      fail: [],
+      warn: [{ line: 2, pattern: '.github/**', why: 'bot-owns-protected' }],
+    });
+    // The catch-all after a protected line wins there, handing the bot that path too.
+    expect(codeownersFindings('CLAUDE.md @h\n* @h @rb # all\n', z, 'rb')).toEqual({
+      fail: [],
+      warn: [{ line: 2, pattern: '*', why: 'overrides-protected' }],
+    });
+  });
 
   test('an admin author is unsafe unless the zone opts in', () =>
     expect(

@@ -152,6 +152,9 @@ describe('the GitHub page of a zone', () => {
     expect(html).toContain(escapeHtml(MATRIX_AND_REUSABLE_NOTE));
     // CODEOWNERS with the typed login, and its new-file link.
     expect(html).toContain('.github/** @alice');
+    // Two-bot: the reviewer bot opens the file, and an existing catch-all must name it too.
+    expect(html).toContain('* @jm-reviewer');
+    expect(html).toContain('add the reviewer bot to it, or nothing will merge');
     expect(links(html)).toContain(
       'https://github.com/octo-org/demo/new/main?filename=.github%2FCODEOWNERS',
     );

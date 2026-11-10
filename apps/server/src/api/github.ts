@@ -13,6 +13,7 @@ import {
   type ZoneGuidance,
   zoneGuidance,
 } from '../github/guidance.js';
+import { fingerprintOf } from '../vault/vault.js';
 import {
   detectFailure,
   detectGuidance,
@@ -149,7 +150,9 @@ async function readRepo(
 ): Promise<ReadEntry> {
   if (!REPO.test(repo)) throw new RepoNameError(repo);
   const token = config.secrets.githubAuthorToken ?? '';
-  const key = `${repo}\u0000${token ? (store.resolved().githubAuthorToken.fingerprint ?? 'token') : 'anonymous'}`;
+  // The token this request read with (its snapshot), never the live store's: a read and its key
+  // are always the same token's.
+  const key = `${repo}\u0000${token ? fingerprintOf(token) : 'anonymous'}`;
   const cache = cacheOf(store);
   const t = now().getTime();
   const hit = cache.get(key, t);

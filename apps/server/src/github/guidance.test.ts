@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
 import { DEFAULT_PROTECTED_PATHS, STARTER_WARNING } from '../config.js';
+import { codeownersFindings } from '../flow/guards.js';
 import { makeZone } from '../test/fixtures.js';
 import {
   CODEOWNERS_PLACEHOLDER,
@@ -233,6 +234,35 @@ describe('CODEOWNERS and collaborators', () => {
     expect(codeownersNewFileUrl(repo, 'release/v1')).toBe(
       'https://github.com/octo-org/demo/new/release/v1?filename=.github%2FCODEOWNERS',
     );
+  });
+
+  test('two-bot CODEOWNERS opens with the reviewer bot on everything, then people on the protected paths, and passes the merge guard', () => {
+    const zone = makeZone({ identity: 'two-bot', protectedPaths: ['.github/**', 'CLAUDE.md'] });
+    const text = codeownersText(zone, ['alice'], { reviewerBot: 'jm-reviewer' });
+    const rules = text.split('\n').filter((l) => l !== '' && !l.startsWith('#'));
+    expect(rules).toEqual(['* @jm-reviewer', '.github/** @alice', 'CLAUDE.md @alice']);
+    // The comment just before the catch-all says why it is there.
+    const lines = text.split('\n');
+    expect(lines[lines.indexOf('* @jm-reviewer') - 1]).toMatch(/^# .*reviewer bot/);
+    expect(codeownersFindings(text, zone, 'jm-reviewer')).toEqual({ fail: [], warn: [] });
+    // Starter has no reviewer bot and leaves the review off: no catch-all.
+    const st = codeownersText(makeZone({ identity: 'starter' }), ['octo'], { reviewerBot: 'x' });
+    expect(st.split('\n').some((l) => l.startsWith('* '))).toBe(false);
+    // A catch-all among the protected paths is never written as a people-only line.
+    const all = codeownersText(makeZone({ protectedPaths: ['*', '**', 'GOAL.md'] }), ['alice']);
+    expect(all.split('\n').filter((l) => !l.startsWith('#') && l !== '')).toEqual([
+      'GOAL.md @alice',
+    ]);
+    expect(all).toContain(
+      '# not written: a catch-all (*, **) would hold every pull request for a person',
+    );
+    // zoneGuidance names the bot once its login resolves.
+    const g = zoneGuidance(
+      zone,
+      { defaultBranch: 'main', ciJobs: [], ownerType: 'Organization', visibility: 'public' },
+      { author: 'jm-author', reviewer: 'jm-reviewer', codeowners: ['alice'] },
+    );
+    expect(g.codeowners.text).toContain('* @jm-reviewer');
   });
 
   test('the collaborator checklist names the resolved bot logins with the Write role', () => {

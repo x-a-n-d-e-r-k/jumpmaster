@@ -489,9 +489,15 @@ GitHub Team for an organization. On a free plan there is no Rulesets page for a 
   as `test`), and for each one **select GitHub Actions as the source** (not "any source"), so no
   other app can report it green.
 - **Require review from Code Owners:**
-  - two-bot: on. The code owners in `.github/CODEOWNERS` are people (you, and anyone else who may
-    approve), never the bots; Jumpmaster never merges a pull request that touches a protected path,
-    so this changes no automation: GitHub blocks the hand merge until a named person approves;
+  - two-bot: on. The code owners of the protected paths in `.github/CODEOWNERS` are people (you,
+    and anyone else who may approve), never the bots; Jumpmaster never merges a pull request that
+    touches a protected path, so GitHub blocks only the hand merge until a named person approves.
+    This changes no automation **only if the reviewer bot owns every other owned path**: GitHub
+    merges a pull request only when a code owner of each file it touches approved. The generated
+    file starts with `* @<reviewer-bot>` and gives the protected paths back to people on the lines
+    after it (the last match wins). If your file already has a `*` line (or any line for other
+    paths), name the reviewer bot on it, or nothing will merge; Jumpmaster parks the zone's items
+    with that fix, and `forge.codeowners` fails, until you do;
   - starter mode: off. You are the author and the only code owner, and GitHub never lets an author
     approve their own pull request, so it would block those pull requests for good. Jumpmaster parks
     every pull request that touches a protected path for you to review and merge by hand instead
@@ -856,9 +862,10 @@ The ruleset on the default branch, as the tokens see it; the summary names each 
 
 ### `forge.codeowners`
 
-Two-bot: with Require review from Code Owners on, `.github/CODEOWNERS` must exist and name people,
-not the reviewer bot, so GitHub holds the hand merge of a pull request touching a protected path
-for a person's approval. Starter mode: the option must stay off (GitHub never lets an author
+Two-bot: with Require review from Code Owners on, `.github/CODEOWNERS` must exist; its lines for
+the protected paths must name people, not the reviewer bot (a warn otherwise), and every other line
+that names owners must name the reviewer bot (a fail otherwise: GitHub would refuse every merge of
+a pull request touching those paths, and Jumpmaster parks the items with the same fix). Starter mode: the option must stay off (GitHub never lets an author
 approve their own pull request); Jumpmaster parks those pull requests for you to merge by hand
 ([Branch rules](#branch-rules)).
 

@@ -77,15 +77,49 @@ export async function zonePass(
           .catch(() => ({ status: null as number | null, rateLimited: false })),
       )
     : undefined;
+  // A required code owner review in two-bot mode: GitHub refuses the merge unless the reviewer
+  // bot owns what it approves, so the CODEOWNERS file is read (as GitHub finds it, first of the
+  // three places) and judged with the rules. A failed read leaves that judgement out this pass.
+  const ownersRequired =
+    zone.identity !== 'starter' &&
+    reviewerLogin !== null &&
+    [authorRules, reviewerRules].some(
+      (x) => x?.kind === 'ok' && x.rules.requireCodeOwnerReview === true,
+    );
+  const codeownersText = ownersRequired ? await readCodeowners(forges, baseBranch) : undefined;
   return {
     botLogins: reviewerLogin === null ? [authorLogin] : [authorLogin, reviewerLogin],
     requiredChecks: authorRules.kind === 'ok' ? authorRules.rules.requiredChecks : [],
     protectionProblems: branchProtectionProblems(
       { author: authorRules, reviewer: reviewerRules },
       zone,
-      authorAdministration ? { authorAdministration } : {},
+      {
+        ...(authorAdministration ? { authorAdministration } : {}),
+        ...(codeownersText !== undefined && reviewerLogin !== null
+          ? { codeowners: { text: codeownersText, reviewer: reviewerLogin } }
+          : {}),
+      },
     ),
   };
+}
+
+/** Where GitHub looks for CODEOWNERS, in its order. */
+export const CODEOWNERS_PATHS = ['.github/CODEOWNERS', 'CODEOWNERS', 'docs/CODEOWNERS'];
+
+/** The CODEOWNERS file GitHub uses on `branch`: its text, null when none, undefined when unread. */
+async function readCodeowners(
+  forges: ForgePair,
+  branch: string,
+): Promise<string | null | undefined> {
+  try {
+    for (const p of CODEOWNERS_PATHS) {
+      const text = await forges.author.getFileAt(branch, p);
+      if (text !== null) return text;
+    }
+    return null;
+  } catch {
+    return undefined;
+  }
 }
 
 export function toOpResult(row: OutboxRow | undefined): OpResult | null {

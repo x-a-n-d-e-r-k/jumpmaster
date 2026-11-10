@@ -561,7 +561,7 @@ export function registerSetupPages(
       );
     return frag(
       200,
-      `${rulesetSection(g.ruleset, g.rulesUrl, q.data.identity)}${codeownersSection(g.codeowners, null)}`,
+      `${rulesetSection(g.ruleset, g.rulesUrl, q.data.identity)}${codeownersSection(g.codeowners, null, q.data.identity)}`,
     );
   });
   app.get('/setup/stick', async (req, reply) => html(req, reply, stickPage(db)));

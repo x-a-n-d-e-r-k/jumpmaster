@@ -242,18 +242,42 @@ const oneLine = (v: string): string => v.replace(/[\r\n]+/g, ' ');
 export const STARTER_CODEOWNERS_NOTE =
   'In starter mode GitHub cannot require this review: you are the author and the only code owner, and GitHub never lets an author approve their own pull request. Jumpmaster parks every pull request that touches these paths for you to review and merge by hand.';
 
+/** A pattern that owns everything: never written people-only (every pull request would wait). */
+const CATCH_ALL = new Set(['*', '**', '/', '/*', '/**', '**/*']);
+
 export function codeownersText(
   zone: Pick<DropZoneConfig, 'id' | 'protectedPaths' | 'identity'>,
   reviewers: string[],
+  opts: { reviewerBot?: string } = {},
 ): string {
   const owners = reviewers.length > 0 ? reviewers.map(owner) : [CODEOWNERS_PLACEHOLDER];
-  const ok = zone.protectedPaths.filter(expressible);
-  const not = zone.protectedPaths.filter((p) => !expressible(p));
+  const catchAll = zone.protectedPaths.filter((p) => CATCH_ALL.has(p.trim()));
+  const rest = zone.protectedPaths.filter((p) => !CATCH_ALL.has(p.trim()));
+  const ok = rest.filter(expressible);
+  const not = rest.filter((p) => !expressible(p));
+  // Two-bot with a required code owner review: GitHub merges a pull request only when a code
+  // owner of every file it touches approved, so the reviewer bot owns everything first and the
+  // protected lines after it (the last match wins) take those paths back for people.
+  const bot =
+    zone.identity !== 'starter' && opts.reviewerBot && LOGIN.test(opts.reviewerBot)
+      ? opts.reviewerBot
+      : undefined;
   return [
     `# Jumpmaster zone ${oneLine(zone.id)}: changes to these paths need a human code owner's review.`,
     ...(zone.identity === 'starter' ? [`# ${STARTER_CODEOWNERS_NOTE}`] : []),
     ...(reviewers.length === 0
       ? [`# Replace ${CODEOWNERS_PLACEHOLDER} with your GitHub login before committing.`]
+      : []),
+    ...(bot
+      ? [
+          '# The reviewer bot owns everything else, so its approval merges an ordinary pull request; the lines after this one give the protected paths back to people.',
+          `* @${bot}`,
+        ]
+      : []),
+    ...(catchAll.length > 0
+      ? [
+          `# not written: a catch-all (${catchAll.map(oneLine).join(', ')}) would hold every pull request for a person`,
+        ]
       : []),
     ...ok.map((p) => `${p} ${owners.join(' ')}`),
     ...(not.length > 0 ? [`# not expressible in CODEOWNERS: ${not.map(oneLine).join(', ')}`] : []),
@@ -336,7 +360,9 @@ export function zoneGuidance(
     },
     codeowners: {
       filename: '.github/CODEOWNERS',
-      text: codeownersText(zone, logins.codeowners ?? []),
+      text: codeownersText(zone, logins.codeowners ?? [], {
+        ...(logins.reviewer ? { reviewerBot: logins.reviewer } : {}),
+      }),
       newFileUrl: codeownersNewFileUrl(repo, detection.defaultBranch),
     },
     checklist: collaboratorChecklist(zone, logins),

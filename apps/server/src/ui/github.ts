@@ -115,9 +115,11 @@ export function codeownersSection(
   codeowners: ZoneGuidance['codeowners'],
   /** The login form, or null where the page has its own (the wizard's project step). */
   form: { action: string; reviewer: string } | null,
+  identity: 'two-bot' | 'starter',
 ): string {
   return `<section id="codeowners"><h3>Code owners for the protected paths</h3>
 <p>Changes to the protected paths need a person's review. Name yourself (and anyone else who may approve them) as code owners: each needs the Write role.</p>
+${identity === 'starter' ? '' : '<p class="warn">The file starts with the reviewer bot on <code>*</code>, so its approval still merges ordinary pull requests. If your file already has a <code>*</code> line, add the reviewer bot to it, or nothing will merge.</p>'}
 ${form ? `<form method="get" action="${escapeHtml(form.action)}"><label>Your GitHub login <input name="reviewer" value="${escapeHtml(form.reviewer)}" placeholder="${escapeHtml(CODEOWNERS_PLACEHOLDER.slice(1))}" pattern="[A-Za-z0-9@,._ \\/\\-]+"></label> <button>Show</button></form>` : ''}
 <p><a href="${gh(codeowners.newFileUrl)}" rel="noreferrer" target="_blank">Create <code>${escapeHtml(codeowners.filename)}</code> on GitHub</a>, paste the text, and commit it. <button type="button" data-copy="codeowners-text">Copy</button></p>
 <pre id="codeowners-text">${escapeHtml(codeowners.text)}</pre></section>`;
@@ -148,7 +150,7 @@ ${recommendationSection(g.recommendation)}
 ${tokensSection(g.pat, rolesOf(zone))}
 ${checklistSection(g.checklist)}
 ${rulesetSection(g.ruleset, g.rulesUrl, zone.identity)}
-${codeownersSection(g.codeowners, { action: `/zones/${encodeURIComponent(zone.id)}/github`, reviewer })}
+${codeownersSection(g.codeowners, { action: `/zones/${encodeURIComponent(zone.id)}/github`, reviewer }, zone.identity)}
 ${COPY_SCRIPT}`,
   );
 }
