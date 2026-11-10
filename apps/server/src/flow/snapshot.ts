@@ -38,6 +38,7 @@ import {
   type PnpmBuildPolicy,
   pnpmBlocksBuilds,
   pnpmBuildPolicy,
+  pnpmfileInPlay,
   protectedPathHits,
 } from './guards.js';
 
@@ -207,6 +208,21 @@ function remember(forge: object, key: string, text: string | null): void {
   }
 }
 
+/** Entry names of a directory at `sha` (null when missing); undefined when the read failed. */
+async function listDir(
+  forges: ForgePair,
+  sha: string,
+  path: string,
+  unavailable: (method: string, err?: unknown) => void,
+): Promise<string[] | null | undefined> {
+  try {
+    return await forges.author.listDir(sha, path);
+  } catch (err) {
+    unavailable('listDir', err);
+    return undefined;
+  }
+}
+
 /** A 404 is `text: null`; a thrown read is the forge being unavailable (the pass waits). */
 async function readFile(
   forges: ForgePair,
@@ -296,6 +312,14 @@ async function gateChanges(
       if (reads.some((r) => !r.ok)) continue;
       const texts = reads.map((r) => (r.ok ? r.text : null));
       policy = pnpmBuildPolicy([basePkg.text, headPkg.text], texts.slice(0, 2), texts.slice(2));
+      // A pnpmfile pnpm may load at the head can allow every build (hooks.updateConfig).
+      const roots = [...new Set([dirname(path) === '.' ? '' : dirname(path), ''])];
+      const listings = await Promise.all(
+        roots.map((r) => listDir(forges, headSha, r, unavailable)),
+      );
+      if (listings.some((l) => l === undefined)) continue; // marked unavailable: decide waits
+      const entries = listings.map((l) => l ?? []);
+      if (pnpmfileInPlay(entries, headLock.text)) policy = { ...policy, allowAll: true };
     }
     const opts = {
       pnpmBlocksBuilds: blocks,

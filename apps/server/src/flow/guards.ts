@@ -670,6 +670,23 @@ function workspaceSettings(text: string): YamlMap | null {
   }
 }
 
+/** `.pnpmfile.*` or `pnpmfile.*`: any name a pnpm version could load as the workspace pnpmfile. */
+const PNPMFILE_NAME = /^\.?pnpmfile\./;
+
+/**
+ * Whether pnpm may load a pnpmfile at the head: one at a workspace root (`rootEntries`, the
+ * entry names of each root directory), or a `pnpmfileChecksum` in the head lockfile. pnpm 11
+ * applies the pnpmfile's hooks.updateConfig to build gating, so a pnpmfile counts as allowing
+ * every build. A plain `pnpm install` (no CI, no --frozen-lockfile) also takes a pnpmfile the
+ * lockfile doesn't record, hence the directory check as well as the checksum.
+ */
+export function pnpmfileInPlay(rootEntries: string[][], headLockText: string | null): boolean {
+  if (rootEntries.some((names) => names.some((n) => PNPMFILE_NAME.test(n)))) return true;
+  if (headLockText === null) return false;
+  const lock = parsePnpmLock(headLockText);
+  return lock !== null && lock.doc.pnpmfileChecksum !== undefined;
+}
+
 /** Which packages pnpm 10 still lets build: read from package.json and pnpm-workspace.yaml. */
 export type PnpmBuildPolicy = { allowAll: boolean; allowed: string[] };
 
@@ -696,6 +713,8 @@ export function pnpmBuildPolicy(
   let allowAll = false;
   const read = (settings: YamlMap) => {
     if (settings.dangerouslyAllowAllBuilds || settings.onlyBuiltDependenciesFile) allowAll = true;
+    // A pnpmfile's hooks.updateConfig can allow every build; the guard doesn't run it.
+    if (settings.pnpmfile !== undefined || settings.globalPnpmfile !== undefined) allowAll = true;
     const only = settings.onlyBuiltDependencies;
     if (Array.isArray(only)) for (const n of only) allowed.add(String(n));
     else if (only !== undefined && only !== null) allowAll = true;
@@ -724,6 +743,7 @@ export function pnpmBuildPolicy(
       const value = eq < 0 ? 'true' : line.slice(eq + 1).trim();
       if (key === 'dangerously-allow-all-builds' && value !== 'false') allowAll = true;
       if (key === 'only-built-dependencies-file') allowAll = true;
+      if (key === 'pnpmfile' || key === 'global-pnpmfile') allowAll = true;
       if (key === 'only-built-dependencies[]') allowed.add(value);
       else if (key === 'only-built-dependencies') allowAll = true;
     }

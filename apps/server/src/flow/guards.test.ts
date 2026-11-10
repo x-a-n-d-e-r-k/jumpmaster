@@ -15,6 +15,7 @@ import {
   parsePnpmLock,
   pnpmBlocksBuilds,
   pnpmBuildPolicy,
+  pnpmfileInPlay,
   protectedPathHits,
 } from './guards.js';
 
@@ -49,6 +50,25 @@ describe('protectedPathHits', () => {
       '.claude',
       '.github',
     ]));
+
+  test('every pnpmfile name pnpm could load is protected (.mjs and no-dot names included)', () => {
+    const names = [
+      '.pnpmfile.cjs',
+      '.pnpmfile.mjs',
+      '.pnpmfile.js',
+      'pnpmfile.cjs',
+      'pnpmfile.mjs',
+    ];
+    expect(
+      protectedPathHits(
+        names.map((path) => ({ path })),
+        defaults,
+      ),
+    ).toEqual(names);
+    expect(protectedPathHits([{ path: 'packages/a/.pnpmfile.mjs' }], defaults)).toEqual([
+      'packages/a/.pnpmfile.mjs',
+    ]);
+  });
 
   test('a rename out of a protected path is a hit', () =>
     expect(
@@ -315,6 +335,41 @@ describe('pnpmBuildPolicy: .npmrc', () => {
       allowAll: false,
       allowed: ['esbuild'],
     });
+  });
+});
+
+// pnpm 11 applies a pnpmfile's hooks.updateConfig to build gating: returning
+// dangerouslyAllowAllBuilds: true runs every install script. The guard does not run the hook, so
+// any pnpmfile pnpm could load counts as allowing every build.
+describe('pnpmfile routes allow every build', () => {
+  test('a pnpmfile key in pnpm-workspace.yaml (a path or a list)', () => {
+    expect(pnpmBuildPolicy([], ["packages: ['.']\npnpmfile: ./hooks.cjs\n"]).allowAll).toBe(true);
+    expect(pnpmBuildPolicy([], ["pnpmfile: ['./hooks.cjs']\n"]).allowAll).toBe(true);
+  });
+
+  test('a pnpmfile or global-pnpmfile setting in .npmrc', () => {
+    expect(pnpmBuildPolicy([], [], ['pnpmfile=./hooks.cjs\n']).allowAll).toBe(true);
+    expect(pnpmBuildPolicy([], [], ['global-pnpmfile = /x.cjs\n']).allowAll).toBe(true);
+  });
+
+  test('a pnpmfile at the workspace root of the head', () => {
+    for (const name of [
+      '.pnpmfile.cjs',
+      '.pnpmfile.mjs',
+      '.pnpmfile.js',
+      'pnpmfile.cjs',
+      'pnpmfile.mts',
+    ])
+      expect(pnpmfileInPlay([['package.json', name]], null), name).toBe(true);
+    expect(pnpmfileInPlay([['package.json', 'pnpm-lock.yaml', 'my-pnpmfile.cjs']], null)).toBe(
+      false,
+    );
+  });
+
+  test('a head lockfile that records a pnpmfileChecksum', () => {
+    const lock = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n";
+    expect(pnpmfileInPlay([], lock)).toBe(false);
+    expect(pnpmfileInPlay([], `${lock}\npnpmfileChecksum: sha256-abc\n`)).toBe(true);
   });
 });
 

@@ -148,7 +148,7 @@ Start from the M0 config. The zone gains these fields (defaults shown):
 - `protectedPaths` defaults to CI and agent configuration (`.github/**`, `.claude/**`,
   `CODEOWNERS`, `CLAUDE.md`, `AGENTS.md`, `.mcp.json`, `GOAL.md`, `jumpmaster*.json`), git
   settings (`.gitattributes`, `.gitmodules`), package-manager settings, hooks and patches
-  (`.npmrc`, `npm-shrinkwrap.json`, `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `pnpmfile.cjs`,
+  (`.npmrc`, `npm-shrinkwrap.json`, `pnpm-workspace.yaml`, `.pnpmfile.*`, `pnpmfile.*`,
   `patches/**`, `.yarnrc`, `.yarnrc.yml`), installed code and package-manager state
   (`node_modules/**`, `**/node_modules/**`, `.pnp.*`, `.yarn/**`, `.pnpm-store/**`) and test-runner configs (`vitest.config.*`,
   `vite.config.*`, `jest.config.*`, `.mocharc*`, …); the full list is
@@ -178,7 +178,11 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   package that may build is still reported: one named in `onlyBuiltDependencies` or
   `allowBuilds`, or any package when `dangerouslyAllowAllBuilds` or an allow-list file is set,
   in `package.json`, `pnpm-workspace.yaml` or `.npmrc` (`dangerously-allow-all-builds`), at
-  base or head.
+  base or head. A pnpmfile pnpm may load counts as allowing every build, since its
+  `hooks.updateConfig` can: a `.pnpmfile.*` or `pnpmfile.*` at the workspace root of the head, a
+  `pnpmfile` setting in `pnpm-workspace.yaml`, `package.json` or `.npmrc`, or a
+  `pnpmfileChecksum` in the head lockfile. Gates run with `CI=true`, so `pnpm install` in a gate
+  is frozen and refuses a lockfile that does not match.
   - yarn and bun lockfiles are not read: a dependency change parks `lockfile format not
     supported: <file>`. Anything the reader does not expect parks `lockfile unreadable`.
 - `overrideApprovers` (default `[]`): to let a gate script or gate tool change through, a

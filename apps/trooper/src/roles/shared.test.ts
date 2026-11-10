@@ -13,6 +13,7 @@ import { runImplement } from './implement.js';
 import {
   agentSettings,
   agentSystemPrompt,
+  gateExtraEnv,
   type RoleCtx,
   runAgent,
   runGatesPhase,
@@ -236,11 +237,16 @@ describe('gate secrets', () => {
     expect(r.state.systemPrompt).not.toMatch(/only in the gate step/i);
   });
 
-  test('a zone with no secrets changes the gate env by nothing', async () => {
+  test('a zone with no secrets adds only CI=true to the gate env', async () => {
+    // CI=true makes pnpm install frozen (it refuses a lockfile that disagrees with package.json
+    // or with a pnpmfile it doesn't record) and keeps test runners out of watch mode.
     const r = recorder();
     await runGatesPhase(impl, r.deps, ctx, '/work/w1/repo');
-    expect(r.state.gateExtraEnv).toEqual({});
+    expect(r.state.gateExtraEnv).toEqual({ CI: 'true' });
   });
+
+  test('a gate secret named CI, set by the zone, wins over the default', () =>
+    expect(gateExtraEnv({ gateSecrets: { CI: '' } })).toEqual({ CI: '' }));
 });
 
 describe('services', () => {

@@ -27,8 +27,9 @@ export const DEFAULT_PROTECTED_PATHS = [
   // Package-manager config, hooks and patches can swap the tools the gates run.
   'npm-shrinkwrap.json',
   'pnpm-workspace.yaml',
-  '.pnpmfile.cjs',
-  'pnpmfile.cjs',
+  // Any pnpmfile pnpm could load (.cjs, .mjs, .js, with or without the dot).
+  '.pnpmfile.*',
+  'pnpmfile.*',
   'patches/**',
   '.yarnrc',
   '.yarnrc.yml',
