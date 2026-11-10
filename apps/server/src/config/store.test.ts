@@ -1137,7 +1137,8 @@ describe('zone removal, history and Resume (Task 3)', () => {
     });
     const r = store.apply(back, { via: 'ctl', principal: token, resume: ['main'] });
     expect(r).toMatchObject({ ok: true, readds: ['main'] });
-    expect(modeRow(w.db)).toEqual({ mode: 'active' });
+    // A resumed zone comes back paused, whatever its config mode: the operator resumes it.
+    expect(modeRow(w.db)).toEqual({ mode: 'paused' });
     expect(count(w.db, 'work_items')).toBe(1);
   });
 
@@ -1170,7 +1171,8 @@ describe('zone removal, history and Resume (Task 3)', () => {
     expect(store.apply({ dropZones: [] }, { via: 'ctl', principal: token }).ok).toBe(true);
     const r = store.rollback(2, { principal: token });
     expect(r).toMatchObject({ ok: true, revision: 4, readds: ['main'] });
-    expect(modeRow(w.db)).toEqual({ mode: 'active' });
+    // A rollback never restarts work as a side effect: the re-added zone is paused.
+    expect(modeRow(w.db)).toEqual({ mode: 'paused' });
     // From a session the re-added zone is judged against the add baseline: its image is refused.
     setZoneMode(w.db, 'main', 'observe', t0);
     store.apply({ dropZones: [] }, { via: 'ctl', principal: token });
@@ -1188,6 +1190,11 @@ describe('zone removal, history and Resume (Task 3)', () => {
       egress: { mode: 'off', allow: [] },
     });
     const expected = [
+      {
+        path: 'dropZones[main].repo',
+        consequence:
+          'A new project, octo/main: its code will run in drops with your Claude credentials, and Jumpmaster will act on its issues and PRs with the forge tokens',
+      },
       {
         path: 'dropZones[main].egress.mode',
         consequence: 'Drops in main will be able to reach any host on the internet',

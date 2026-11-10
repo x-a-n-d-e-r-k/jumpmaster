@@ -16,6 +16,21 @@ import { canonicalJson } from './revisions.js';
  * zone is judged against `ADD_BASELINE`; list paths are set differences. It fails closed: a changed
  * path that no table names is guarded, and a test walks the schema so a new field can't be
  * missing from every table.
+ *
+ * An added zone's `repo` is itself guarded (review I1): a new project's code runs in drops with
+ * the Claude token, and any public repository's owner is a trusted author of their own issues
+ * (§7.1). On an existing zone `repo` is refused, so changing a repository is remove-and-re-add,
+ * and the re-add asks.
+ *
+ * Known residual of "a rename is a removal plus an add": a zone-level `requireSignedImages: true`
+ * under an install-level `false` is not carried to the renamed zone, since the add baseline takes
+ * the install's level by definition. It is bounded: the removal needs the old zone drained in
+ * observe; the added zone's `repo` is guarded (the confirmation names it); an explicit `image` on
+ * it is session-forbidden, so it can only run a preset's image, pinned by digest in the release
+ * lock; and the generated install sets the top-level `requireSignedImages: true`, where a zone
+ * cannot be weaker and the case cannot arise. Matching an add to a removal to forbid it would be a
+ * guess (an unrelated add and remove in one change look the same) and is split into two applies
+ * anyway.
  */
 
 /** A document as the schema parses it: defaults filled, `image` as the operator wrote it. */
@@ -45,7 +60,11 @@ export type ForbiddenPath = {
   applies: (from: unknown, to: unknown, ctx: GuardCtx) => boolean;
 };
 
-export type RefusedPath = ForbiddenPath & { message: string };
+export type RefusedPath = ForbiddenPath & {
+  message: string;
+  /** What the same path means on an added zone, where it is not refused but guarded. */
+  onAdd?: (to: unknown, ctx: GuardCtx) => string;
+};
 
 export type FreePath = {
   path: string;
@@ -104,7 +123,13 @@ function becomes(path: string, bad: unknown, say: (ctx: GuardCtx) => string): Gu
 }
 
 type Service = { name?: unknown; image?: unknown };
-/** Services keyed by name: new names and changed images, as `name → image`. */
+/**
+ * Services keyed by name: new names and changed images, as `name → image`. A service's `env`,
+ * `port` and `readyTimeoutSeconds` change freely on the same image: the image is what decides
+ * what runs beside the drop (bounded like any image the operator chose), `env` is plain config,
+ * never a secret (secrets reach gate steps only through `gateSecrets`, which is guarded), and the
+ * port and timeout only say where and how long to wait for it on the drop's private network.
+ */
 function servicesAdded(from: unknown, to: unknown): string[] {
   const was = new Map(list(from).map((s) => [(s as Service).name, (s as Service).image]));
   return list(to)
@@ -246,6 +271,8 @@ export const REFUSED_PATHS: RefusedPath[] = [
     path: 'dropZones[].repo',
     applies: (from, to, ctx) => !ctx.added && from !== to,
     message: "the repository of a zone can't change: remove the zone and add a new one",
+    onAdd: (to) =>
+      `A new project, ${String(to)}: its code will run in drops with your Claude credentials, and Jumpmaster will act on its issues and PRs with the forge tokens`,
   },
 ];
 
@@ -283,7 +310,7 @@ export const NOT_GUARDED: FreePath[] = [
   ),
   free(
     'dropZones[].gates',
-    'gate commands run credential-less inside drops (§7.2); CI and review still guard the merge',
+    'gate commands run credential-less inside drops (§7.2), and the repository they run from can already change its own scripts and code, the larger surface; CI and review still guard the merge',
   ),
   free('dropZones[].verification', 'reviewer verification steps, run inside drops like gates'),
   free('dropZones[].limits.pids', 'a container resource limit, not an access'),
@@ -491,7 +518,18 @@ export function classify(
     const id = String(zone.id);
     const was = beforeZones.get(id);
     const isAdded = was === undefined;
-    if (isAdded) out.added.push(id);
+    if (isAdded) {
+      out.added.push(id);
+      // The new project itself (review I1): its code runs with the Claude token.
+      for (const r of REFUSED_PATHS)
+        if (r.onAdd) {
+          const leaf = r.path.slice('dropZones[].'.length);
+          out.guarded.push({
+            path: `dropZones[${id}].${leaf}`,
+            consequence: r.onAdd(zone[leaf], { zoneId: id, install: a, added: true }),
+          });
+        }
+    }
     const ctx: GuardCtx = { zoneId: id, install: a, added: isAdded };
     // The baseline's requireSignedImages falls back to the install as it will be.
     const from = zoneLeaves(

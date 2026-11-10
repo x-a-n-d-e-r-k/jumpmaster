@@ -89,7 +89,12 @@ export type ApplyResult =
   | { ok: false; conflict: { expected: number; actual: number } }
   | {
       ok: false;
-      needsConfirmation: { pendingId: string; guarded: Classification['guarded'] };
+      needsConfirmation: {
+        pendingId: string;
+        guarded: Classification['guarded'];
+        /** The revision the change was judged against. */
+        expectRevision: number;
+      };
     }
   | { ok: false; sessionForbidden: string[] }
   | { ok: false; confirmation: ConsumeFailure };
@@ -339,11 +344,18 @@ export class ConfigStore implements ConfigSource {
           guarded: c.guarded,
           notes: c.notes,
         });
-        return { ok: false, needsConfirmation: { pendingId: pending.id, guarded: c.guarded } };
+        return {
+          ok: false,
+          needsConfirmation: {
+            pendingId: pending.id,
+            guarded: c.guarded,
+            expectRevision: pending.expectRevision,
+          },
+        };
       }
     }
     if (hashOf(canonicalJson(doc)) === hashOf(canonicalJson(this.doc))) return unchanged(this.rev);
-    const r = this.commit(doc, v, meta.via, meta.note, undefined, c.removed);
+    const r = this.commit(doc, v, meta.via, meta.note, undefined, c.removed, zones.readds);
     if (r.ok) {
       if (zones.readds.length > 0) r.readds = zones.readds;
       const guarded = [...new Set(c.guarded.map((g) => g.path))];
@@ -700,6 +712,8 @@ export class ConfigStore implements ConfigSource {
     mode?: ConfigMode,
     /** Zones this revision removes: their mode rows go with it (their history stays). */
     removed: string[] = [],
+    /** Zones re-added with their history: they come back paused, never dispatching at once. */
+    readds: string[] = [],
   ): ApplyResult {
     // Every path checks the note first; this keeps a long one a refusal, never a storage error.
     if (tooLong(note)) return noteRefused();
@@ -715,7 +729,8 @@ export class ConfigStore implements ConfigSource {
       );
       setSetting(db, 'config.current', rid, now);
       for (const zone of v.editable.dropZones)
-        if (!before.includes(zone.id)) ensureZoneMode(db, zone.id, zone.mode, now);
+        if (!before.includes(zone.id))
+          ensureZoneMode(db, zone.id, readds.includes(zone.id) ? 'paused' : zone.mode, now);
       for (const id of removed) deleteZoneControls(db, id);
       this.storePending(v.editable);
       if (mode) setSetting(db, 'config.mode', mode, now);

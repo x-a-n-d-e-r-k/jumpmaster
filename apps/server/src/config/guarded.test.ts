@@ -28,6 +28,10 @@ const doc = (zones: unknown[], extra: Record<string, unknown> = {}) => ({
 const edit = (before: Record<string, unknown>, after: Record<string, unknown>, top = {}) =>
   classify(doc([zone('web', before)], top), doc([zone('web', after)], top));
 const paths = (c: ReturnType<typeof classify>) => c.guarded.map((g) => g.path);
+const newProject = (zone: string, repo: string) => ({
+  path: `dropZones[${zone}].repo`,
+  consequence: `A new project, ${repo}: its code will run in drops with your Claude credentials, and Jumpmaster will act on its issues and PRs with the forge tokens`,
+});
 
 describe('the schema walk', () => {
   /** Every leaf of the editable schema, as the rule tables name paths. */
@@ -343,9 +347,15 @@ describe('added, removed and renamed zones', () => {
     const base = ADD_BASELINE(zone('new', { preset: 'python' }));
     expect(base).toMatchObject({ preset: 'python', egress: { mode: 'monitor', allow: [] } });
     expect(base.image).toBeUndefined();
-    // As the wizard adds it: monitor, the preset's defaults. Nothing guarded, the preset included.
+    // As the wizard adds it: monitor, the preset's defaults. Only the new project itself is guarded:
+    // its code runs with the Claude token (the reviewer's I1); the preset is not.
     const plain = classify(doc([]), doc([zone('new', { egress: { mode: 'monitor', allow: [] } })]));
-    expect(plain).toMatchObject({ guarded: [], sessionForbidden: [], refused: [], added: ['new'] });
+    expect(plain).toMatchObject({
+      guarded: [newProject('new', 'octo/new')],
+      sessionForbidden: [],
+      refused: [],
+      added: ['new'],
+    });
     // With egress off, a hand-added protected-path removal and a gate secret: each guarded.
     const risky = classify(
       doc([]),
@@ -358,6 +368,7 @@ describe('added, removed and renamed zones', () => {
       ]),
     );
     expect(risky.guarded.map((g) => g.path)).toEqual([
+      'dropZones[new].repo',
       'dropZones[new].egress.mode',
       'dropZones[new].gateSecrets',
       ...Array(DEFAULT_PROTECTED_PATHS.length - 1).fill('dropZones[new].protectedPaths'),
@@ -369,6 +380,26 @@ describe('added, removed and renamed zones', () => {
     expect(c).toMatchObject({ guarded: [], sessionForbidden: [], removed: ['b'], added: [] });
   });
 
+  test("an added zone's repository is guarded: the reviewer's probe of any public repository needs the confirmation", () => {
+    const c = classify(
+      doc([zone('web')]),
+      doc([
+        zone('web'),
+        {
+          id: 'new',
+          repo: 'attacker/public-repo',
+          gates: [{ name: 'x', run: 'bash ./exfil.sh' }],
+          preset: 'node',
+          egress: { mode: 'monitor' },
+        },
+      ]),
+    );
+    expect(c.guarded).toEqual([newProject('new', 'attacker/public-repo')]);
+    expect(c.refused).toEqual([]);
+    // An existing zone's repository is still refused, never guarded.
+    expect(edit({}, { repo: 'octo/x' }).guarded).toEqual([]);
+  });
+
   test('a rename is a removal plus an add, and the add is classified', () => {
     const c = classify(
       doc([zone('old', { egress: { mode: 'off', allow: [] } })]),
@@ -376,7 +407,10 @@ describe('added, removed and renamed zones', () => {
     );
     expect(c.removed).toEqual(['old']);
     expect(c.added).toEqual(['new']);
-    expect(c.guarded.map((g) => g.path)).toEqual(['dropZones[new].egress.mode']);
+    expect(c.guarded.map((g) => g.path)).toEqual([
+      'dropZones[new].repo',
+      'dropZones[new].egress.mode',
+    ]);
   });
 
   test("repo on an existing zone is refused with the remove-and-re-add message; an added zone's repo is free", () => {
@@ -419,6 +453,6 @@ describe('added, removed and renamed zones', () => {
       expect(
         classify(doc([]), doc([zone('new', { preset, egress: { mode: 'monitor', allow: [] } })]))
           .guarded,
-      ).toEqual([]);
+      ).toEqual([newProject('new', 'octo/new')]);
   });
 });

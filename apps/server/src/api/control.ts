@@ -610,7 +610,14 @@ function registerConfigRoutes(
     if (!r.ok) {
       if ('conflict' in r) return reply.code(409).send({ conflict: r.conflict });
       if ('needsConfirmation' in r) {
-        const { pendingId, guarded } = r.needsConfirmation;
+        const { pendingId, guarded, expectRevision } = r.needsConfirmation;
+        // An attempt never confirmed still shows in the audit: the paths and the base, never the
+        // pending id (the confirm page's key) and never a value.
+        audit(req, 'config.propose', {
+          kind: action.replace(/^config\./, ''),
+          base: expectRevision,
+          guardedPaths: pathsOf([...new Set(guarded.map((g) => g.path))]),
+        });
         return reply.code(409).send({
           needsConfirmation: true,
           pendingId,

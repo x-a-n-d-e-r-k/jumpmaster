@@ -926,6 +926,14 @@ describe('config routes', () => {
     expect(store.confirmations.pending(body.pendingId, operatorHashOf(asSession))?.returnTo).toBe(
       '/setup/doctor',
     );
+    // The proposal is audited, with its paths and never the pending id's confirmation.
+    const proposed = listAudit(db).filter((a) => a.action === 'config.propose');
+    expect(proposed).toHaveLength(1);
+    expect(proposed[0]).toMatchObject({
+      via: 'session',
+      detail: { guardedPaths: 'dropZones[main].ciRequired', base: 3, kind: 'apply' },
+    });
+    expect(JSON.stringify(proposed[0])).not.toContain(body.pendingId);
     // A body cannot carry a confirmation: only the confirm page's POST does, with the passphrase.
     const forged = await req(
       'PATCH',
@@ -1051,7 +1059,7 @@ describe('config routes', () => {
       changed: ['dropZones[main]', 'pollSeconds'],
       restartNeeded: [],
       // An added zone without egress is judged against the add baseline (monitor): guarded.
-      guarded: ['dropZones[main].egress.mode'],
+      guarded: ['dropZones[main].repo', 'dropZones[main].egress.mode'],
     });
     // null removes a key (RFC 7396): pollSeconds goes back to its default.
     const two = await req('PATCH', '/api/control/config', {

@@ -103,11 +103,12 @@ export function registerConfirmPages(app: FastifyInstance, deps: ConfirmPageDeps
   app.post<{ Params: { id: string } }>('/config/confirm/:id', async (req, reply) => {
     const principal = req.principal;
     const pending = pendingOf(req);
+    if (!principal) return html(reply, 404, withCsrf(req, GONE));
     const token = (req.body as { token?: unknown } | undefined)?.token;
     // A replay of a confirmation already used says so, rather than that nothing waits.
     if (!pending && typeof token === 'string' && store.confirmations.wasUsed(token))
       return html(reply, 409, withCsrf(req, notice('Not applied', escapeHtml(REASON.used(0)))));
-    if (!principal || !pending) return html(reply, 404, withCsrf(req, GONE));
+    if (!pending) return html(reply, 404, withCsrf(req, GONE));
     const c = backoff.check(req.ip, now());
     if (!c.allowed)
       return html(
