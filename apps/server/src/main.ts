@@ -9,6 +9,7 @@ import {
   type Config,
   MAX_POLL_SECONDS,
   MIN_POLL_SECONDS,
+  preflightSecrets,
   secretList,
   startupWarnings,
 } from './config.js';
@@ -85,6 +86,8 @@ export function pollTimer(
 export async function start(configPath?: string, env: NodeJS.ProcessEnv = process.env) {
   const filePath = configPathOf(env, configPath);
   const boot = loadBoot(env, filePath);
+  // An unreadable secret file is named before the data directory or the database is touched.
+  preflightSecrets(env);
   mkdirSync(boot.dataDir, { recursive: true });
   const db = openDb(join(boot.dataDir, 'jumpmaster.sqlite'));
   // A write in flight when the process died has an unknown outcome: resolve it by read-back.

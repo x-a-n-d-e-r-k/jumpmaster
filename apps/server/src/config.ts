@@ -706,6 +706,17 @@ export function loadConfig(
 }
 
 /**
+ * Reads every install-wide secret variable once (`NAME` or `NAME_FILE`) and throws naming the
+ * first one that cannot be read, or that is set both ways. Run before the data directory is
+ * touched, so an unreadable secret file is reported by name rather than as a database error, as
+ * M4's loader did. Whether each is required depends on the zones, which `loadSecrets` judges later.
+ */
+export function preflightSecrets(rawEnv: NodeJS.ProcessEnv): void {
+  for (const name of [...Object.values(SECRET_VARS), 'JM_GITHUB_READ_TOKEN'])
+    readSecret(rawEnv, name);
+}
+
+/**
  * The secrets from the environment (`NAME` or `NAME_FILE`), with the rules that span config and
  * credentials (M4.5 Task 4 moves those to dispatch refusals). Throws naming the variable, never a
  * value.

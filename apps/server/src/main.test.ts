@@ -184,3 +184,22 @@ test('the poll timer clamps what it arms to 5 seconds and a day, whatever it is 
   // Never past setInterval's 2^31-1 ms limit (which Node turns into 1 ms), never a busy loop.
   expect(armed).toEqual([86_400_000, 5_000, 60_000]);
 });
+
+test('an unreadable secret file is named before the data directory is touched, as in M4', async () => {
+  if (process.getuid?.() === 0) return; // root reads a 0000 file
+  const dir = mkdtempSync(join(tmpdir(), 'jm-main-secret-'));
+  const secret = join(dir, 'claude');
+  writeFileSync(secret, 'claude-token-value', { mode: 0o000 });
+  // A data directory the server cannot create: the database would fail first if it were opened first.
+  const blocked = join(dir, 'blocked');
+  writeFileSync(blocked, 'not a directory');
+  const { JM_CLAUDE_TOKEN: _c, ...rest } = env;
+  await expect(
+    start(undefined, {
+      ...rest,
+      JM_CLAUDE_TOKEN_FILE: secret,
+      JM_DATA_DIR: join(blocked, 'data'),
+      JM_LISTEN_PORT: '0',
+    }),
+  ).rejects.toThrow(/JM_CLAUDE_TOKEN_FILE: .*claude is not readable by uid/);
+});
