@@ -8,13 +8,14 @@ import {
   MAX_PASSPHRASE,
   operatorHash,
   passphraseProblem,
+  ScryptBusyError,
   SetupMode,
   setOperatorPassphrase,
   setupActive,
   setupCodeLine,
   verifyPassphrase,
 } from '../auth/operator.js';
-import { deleteAllSessions, grantSudo } from '../auth/sessions.js';
+import { grantSudo } from '../auth/sessions.js';
 import { listBriefings, optionsDigest, ruleBriefing } from '../briefings.js';
 import { type Config, mcpConfigOf, secretList } from '../config.js';
 import { requestCrewCycle } from '../crew/schedule.js';
@@ -168,7 +169,19 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       const body = SudoBody.safeParse(req.body ?? {});
       const stored = operatorHash(db);
       const given = body.success ? body.data.passphrase : undefined;
-      if (!p?.sessionId || !stored || given === undefined || !verifyPassphrase(given, stored)) {
+      let right = false;
+      try {
+        right =
+          p?.sessionId !== undefined &&
+          stored !== null &&
+          given !== undefined &&
+          (await verifyPassphrase(given, stored));
+      } catch (e) {
+        if (!(e instanceof ScryptBusyError)) throw e;
+        // A full queue is nobody's wrong guess: no backoff is charged.
+        return reply.code(503).header('retry-after', '1').send({ error: e.message });
+      }
+      if (!right || !p?.sessionId) {
         backoff.fail(req.ip, now());
         audit(req, 'sudo', { result: 'refused' });
         return reply.code(401).send({ error: 'wrong passphrase' });
@@ -216,8 +229,14 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         return reply.code(400).send({ error: 'invalid body: {"passphrase": "…"}' });
       const problem = passphraseProblem(body.data.passphrase);
       if (problem) return reply.code(400).send({ error: problem });
-      const sessionsDeleted = deleteAllSessions(db);
-      const operator = setOperatorPassphrase(db, body.data.passphrase, now());
+      let set: Awaited<ReturnType<typeof setOperatorPassphrase>>;
+      try {
+        set = await setOperatorPassphrase(db, body.data.passphrase, now());
+      } catch (e) {
+        if (!(e instanceof ScryptBusyError)) throw e;
+        return reply.code(503).header('retry-after', '1').send({ error: e.message });
+      }
+      const { result: operator, sessionsDeleted } = set;
       setup.clear();
       audit(req, 'passphrase.set', { result: operator, sessionsDeleted });
       return { operator, sessionsDeleted };

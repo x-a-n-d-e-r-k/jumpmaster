@@ -124,6 +124,8 @@ export function registerGuard(app: FastifyInstance, deps: GuardDeps): void {
       );
     }
     if (cls === 'mcp') return;
+    // Login, setup and logged-in pages (which carry the CSRF meta) are never cached.
+    if (cls === 'auth' || cls === 'page') reply.header('cache-control', 'no-store');
     if (!SAFE_METHODS.has(req.method) && !originAllowed(req.headers.origin, allowed)) {
       return refuse(
         reply,

@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomInt, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomInt, scrypt, timingSafeEqual } from 'node:crypto';
 import type { Db } from '../db/open.js';
 import { deleteAllSessions, sha256Hex } from './sessions.js';
 
@@ -10,37 +10,94 @@ const SCRYPT = { N: 2 ** 15, r: 8, p: 1, saltBytes: 32, keyBytes: 32 } as const;
 /** 128·N·r is 32 MiB at these costs, Node's default ceiling: room above it. */
 const SCRYPT_MAXMEM = 64 * 1024 * 1024;
 
-/** Why a passphrase cannot be used, or null. */
+/** Why a passphrase cannot be used, or null. Lengths count code points, not UTF-16 units. */
 export function passphraseProblem(p: string): string | null {
-  if (p.length < MIN_PASSPHRASE)
+  const length = [...p].length;
+  if (length < MIN_PASSPHRASE)
     return `the passphrase must be at least ${MIN_PASSPHRASE} characters`;
-  if (p.length > MAX_PASSPHRASE)
-    return `the passphrase must be at most ${MAX_PASSPHRASE} characters`;
+  if (length > MAX_PASSPHRASE) return `the passphrase must be at most ${MAX_PASSPHRASE} characters`;
   return null;
 }
 
-/** `scrypt$N$r$p$<salt b64>$<hash b64>`, with a fresh salt each time. */
-export function hashPassphrase(p: string): string {
-  const { N, r, p: par, saltBytes, keyBytes } = SCRYPT;
-  const salt = randomBytes(saltBytes);
-  const hash = scryptSync(p, salt, keyBytes, { N, r, p: par, maxmem: SCRYPT_MAXMEM });
-  return ['scrypt', N, r, par, salt.toString('base64'), hash.toString('base64')].join('$');
+/** How many scrypt runs may wait behind the one running; past it a guess is refused as busy. */
+export const SCRYPT_QUEUE = 32;
+
+/** The scrypt queue is full: the caller answers 503 and charges no backoff. */
+export class ScryptBusyError extends Error {
+  constructor() {
+    super('busy checking passphrases: try again in a moment');
+  }
 }
 
-/** Whether `p` is the passphrase `stored` was made from, compared in constant time. */
-export function verifyPassphrase(p: string, stored: string): boolean {
+let running = 0;
+const waiting: (() => void)[] = [];
+
+/**
+ * One scrypt at a time, on libuv's thread pool, so a burst of guesses (from as many source
+ * addresses as an attacker can rotate) queues instead of stalling the event loop that serves the
+ * sticks, leases and `/mcp`. The queue is bounded; it is not a lockout: each guess still runs or
+ * is refused at once.
+ */
+async function singleFlight<T>(task: () => Promise<T>): Promise<T> {
+  if (running > 0) {
+    if (waiting.length >= SCRYPT_QUEUE) throw new ScryptBusyError();
+    await new Promise<void>((resolve) => waiting.push(resolve));
+  }
+  running++;
+  try {
+    return await task();
+  } finally {
+    running--;
+    waiting.shift()?.();
+  }
+}
+
+/** The scrypt queue's state, for tests. */
+export function scryptStats(): { running: number; queued: number } {
+  return { running, queued: waiting.length };
+}
+
+function scryptAsync(p: string, salt: Buffer, keyBytes: number): Promise<Buffer> {
+  return singleFlight(
+    () =>
+      new Promise<Buffer>((resolve, reject) =>
+        scrypt(
+          p,
+          salt,
+          keyBytes,
+          { N: SCRYPT.N, r: SCRYPT.r, p: SCRYPT.p, maxmem: SCRYPT_MAXMEM },
+          (err, key) => (err ? reject(err) : resolve(key)),
+        ),
+      ),
+  );
+}
+
+/** `scrypt$N$r$p$<salt b64>$<hash b64>`, with a fresh salt each time. */
+export async function hashPassphrase(p: string): Promise<string> {
+  const salt = randomBytes(SCRYPT.saltBytes);
+  const hash = await scryptAsync(p, salt, SCRYPT.keyBytes);
+  return [
+    'scrypt',
+    SCRYPT.N,
+    SCRYPT.r,
+    SCRYPT.p,
+    salt.toString('base64'),
+    hash.toString('base64'),
+  ].join('$');
+}
+
+/**
+ * Whether `p` is the passphrase `stored` was made from, compared in constant time. Throws
+ * `ScryptBusyError` when the queue is full.
+ */
+export async function verifyPassphrase(p: string, stored: string): Promise<boolean> {
   const [kind, n, r, par, salt64, hash64] = stored.split('$');
   if (kind !== 'scrypt' || !salt64 || !hash64) return false;
   // Only the parameters this build writes: a tampered row cannot ask for a huge or tiny cost.
   if (Number(n) !== SCRYPT.N || Number(r) !== SCRYPT.r || Number(par) !== SCRYPT.p) return false;
   const want = Buffer.from(hash64, 'base64');
   if (want.length !== SCRYPT.keyBytes) return false;
-  const got = scryptSync(p, Buffer.from(salt64, 'base64'), want.length, {
-    N: SCRYPT.N,
-    r: SCRYPT.r,
-    p: SCRYPT.p,
-    maxmem: SCRYPT_MAXMEM,
-  });
+  const got = await scryptAsync(p, Buffer.from(salt64, 'base64'), want.length);
   return timingSafeEqual(got, want);
 }
 
@@ -58,26 +115,26 @@ export function operatorHash(db: Db): string | null {
 
 /**
  * Claims the install (no operator yet) or replaces the passphrase. Either way every session ends,
- * in the same transaction. The caller has checked `passphraseProblem`.
+ * in the same transaction; the count is returned. The caller has checked `passphraseProblem`.
  */
-export function setOperatorPassphrase(
+export async function setOperatorPassphrase(
   db: Db,
   passphrase: string,
   now: Date,
-): 'claimed' | 'replaced' {
-  const hash = hashPassphrase(passphrase);
+): Promise<{ result: 'claimed' | 'replaced'; sessionsDeleted: number }> {
+  const hash = await hashPassphrase(passphrase);
   const at = now.toISOString();
   return db.transaction(() => {
-    deleteAllSessions(db);
+    const sessionsDeleted = deleteAllSessions(db);
     const replaced = db
       .prepare('UPDATE operator SET passphrase_hash = ?, rotated_at = ? WHERE id = 1')
       .run(hash, at).changes;
-    if (replaced > 0) return 'replaced' as const;
+    if (replaced > 0) return { result: 'replaced' as const, sessionsDeleted };
     db.prepare('INSERT INTO operator (id, passphrase_hash, created_at) VALUES (1, ?, ?)').run(
       hash,
       at,
     );
-    return 'claimed' as const;
+    return { result: 'claimed' as const, sessionsDeleted };
   })();
 }
 
@@ -134,10 +191,12 @@ export class SetupMode {
 
   constructor(private readonly print: (code: string) => void) {}
 
-  /** A fresh code replaces any earlier one and is printed. */
+  /** A fresh code replaces any earlier one and every claim, and is printed. */
   rotateSetupCode(): void {
     const { code, state } = newSetupCode();
     this.state = state;
+    // A claim from an earlier (perhaps leaked) code ends too: only the new code leads anywhere.
+    this.claims.clear();
     this.print(code);
   }
 

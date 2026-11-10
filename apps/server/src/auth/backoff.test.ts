@@ -41,3 +41,26 @@ test('reset clears a source', () => {
   b.fail('a', t0);
   expect(b.check('a', t0)).toEqual({ allowed: false, retryAfterMs: 1000 });
 });
+
+test('the map is bounded: past its size the oldest source is evicted first', () => {
+  const b = new Backoff({ maxTracked: 3 });
+  for (let i = 0; i < 1000; i++) b.fail(`10.0.${i >> 8}.${i & 255}`, t0);
+  expect(b.size).toBe(3);
+  // The newest three are still held; the oldest are forgotten.
+  expect(b.check('10.0.3.231', t0).allowed).toBe(false);
+  expect(b.check('10.0.0.0', t0).allowed).toBe(true);
+  // A repeat offender moves to the newest end and survives eviction.
+  const c = new Backoff({ maxTracked: 2 });
+  c.fail('a', t0);
+  c.fail('b', t0);
+  c.fail('a', t0);
+  c.fail('c', t0);
+  expect(c.check('a', t0).allowed).toBe(false);
+  expect(c.check('b', t0).allowed).toBe(true);
+});
+
+test('the default bound is 10 000 sources', () => {
+  const b = new Backoff();
+  for (let i = 0; i < 10_500; i++) b.fail(`k${i}`, t0);
+  expect(b.size).toBe(10_000);
+});

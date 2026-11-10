@@ -24,7 +24,7 @@ afterEach(async () => {
 
 type Headers = Record<string, string>;
 
-function world(o: { operator?: boolean } = {}) {
+async function world(o: { operator?: boolean } = {}) {
   const db = openDb(tmpDbFile());
   upsertDropZone(db, { id: 'main', repo: 'o/r', defaultBranch: 'main', configJson: '{}' });
   let clock = t0;
@@ -39,7 +39,7 @@ function world(o: { operator?: boolean } = {}) {
     usage: { throttleUtilization: 0.9, probeJitterSeconds: [30, 90] },
     secrets: { operatorToken: TOKEN, joinToken: 'join' },
   } as unknown as Config;
-  if (o.operator) setOperatorPassphrase(db, PASS, t0);
+  if (o.operator) await setOperatorPassphrase(db, PASS, t0);
   const backoff = new Backoff();
   const a = createApp({
     db,
@@ -94,7 +94,7 @@ const valueOf = (cookie: string | undefined) =>
   cookie?.split(';')[0]?.split('=').slice(1).join('=');
 
 /** Enters the printed code and chooses the passphrase; returns the session cookie. */
-async function claim(w: ReturnType<typeof world>): Promise<string> {
+async function claim(w: Awaited<ReturnType<typeof world>>): Promise<string> {
   const code = await w.post('/setup/code', { code: w.printed.at(-1) });
   const setupCookie = `jm_setup=${valueOf(cookieOf(code, 'jm_setup'))}`;
   const done = await w.post(
@@ -122,7 +122,7 @@ describe('route classes', () => {
 
 describe('setup mode', () => {
   test('with no operator every page redirects to /setup, and /setup accepts only the printed code', async () => {
-    const w = world();
+    const w = await world();
     expect(w.printed).toHaveLength(1);
     for (const url of ['/', '/doctor', '/briefings', '/zones/main/intake', '/login']) {
       const res = await w.get(url);
@@ -182,7 +182,7 @@ describe('setup mode', () => {
   });
 
   test('/setup/passphrase without the claim cookie is refused', async () => {
-    const w = world();
+    const w = await world();
     const res = await w.post('/setup/passphrase', { passphrase: PASS, confirm: PASS });
     expect(res.statusCode).toBe(403);
     expect(
@@ -198,7 +198,7 @@ describe('setup mode', () => {
   });
 
   test('the claim cookie lasts ten minutes', async () => {
-    const w = world();
+    const w = await world();
     const ok = await w.post('/setup/code', { code: w.printed[0] });
     const cookie = `jm_setup=${valueOf(cookieOf(ok, 'jm_setup'))}`;
     w.tick(10 * 60_000);
@@ -208,7 +208,7 @@ describe('setup mode', () => {
   });
 
   test('wrong codes back off per source, 1 s doubling to 5 min, with 429 and Retry-After, and never lock', async () => {
-    const w = world();
+    const w = await world();
     const seconds: string[] = [];
     for (let i = 0; i < 11; i++) {
       expect((await w.post('/setup/code', { code: 'WRONG' })).statusCode).toBe(401);
@@ -226,7 +226,7 @@ describe('setup mode', () => {
   });
 
   test('an Origin-refused or Host-refused POST does not advance backoff', async () => {
-    const w = world();
+    const w = await world();
     for (let i = 0; i < 5; i++) {
       const foreign = await w.post(
         '/setup/code',
@@ -245,7 +245,7 @@ describe('setup mode', () => {
   });
 
   test('a code accepted once is refused the second time and after a passphrase exists', async () => {
-    const w = world();
+    const w = await world();
     const code = w.printed[0] as string;
     expect((await w.post('/setup/code', { code })).statusCode).toBe(303);
     w.tick(60_000);
@@ -262,7 +262,7 @@ describe('setup mode', () => {
 
 describe('login and sessions', () => {
   test('login sets an HttpOnly SameSite=Strict cookie, rotates the session id and follows next only to a single-slash path', async () => {
-    const w = world({ operator: true });
+    const w = await world({ operator: true });
     const anon = await w.get('/doctor?x=1');
     expect([anon.statusCode, anon.headers.location]).toEqual([
       302,
@@ -303,7 +303,7 @@ describe('login and sessions', () => {
   });
 
   test('a wrong passphrase is 401 and makes no session', async () => {
-    const w = world({ operator: true });
+    const w = await world({ operator: true });
     const res = await w.post('/login', { passphrase: 'not the passphrase' });
     expect(res.statusCode).toBe(401);
     expect(cookieOf(res, 'jm_session')).toBeUndefined();
@@ -311,7 +311,7 @@ describe('login and sessions', () => {
   });
 
   test('failed logins back off per source and never lock the operator out', async () => {
-    const w = world({ operator: true });
+    const w = await world({ operator: true });
     for (const wait of [1, 2, 4]) {
       expect((await w.post('/login', { passphrase: 'wrong passphrase!' })).statusCode).toBe(401);
       const held = await w.post('/login', { passphrase: PASS });
@@ -328,7 +328,7 @@ describe('login and sessions', () => {
   });
 
   test('an expired session is sent to the login page', async () => {
-    const w = world({ operator: true });
+    const w = await world({ operator: true });
     const s = operatorSession(w.db, t0);
     expect((await w.get('/', { cookie: s.cookie })).statusCode).toBe(200);
     w.tick(12 * 3_600_000);
@@ -337,7 +337,7 @@ describe('login and sessions', () => {
   });
 
   test('logout deletes the session and clears the cookie', async () => {
-    const w = world({ operator: true });
+    const w = await world({ operator: true });
     const s = operatorSession(w.db, t0);
     const res = await w.post('/logout', {}, { cookie: s.cookie });
     expect([res.statusCode, res.headers.location]).toEqual([303, '/login']);
@@ -348,7 +348,7 @@ describe('login and sessions', () => {
   });
 
   test('a POST to /login, /setup/code, /setup/passphrase or /logout with a foreign Origin is 403', async () => {
-    const w = world({ operator: true });
+    const w = await world({ operator: true });
     const s = operatorSession(w.db, t0);
     for (const url of ['/login', '/setup/code', '/setup/passphrase', '/logout']) {
       for (const origin of ['http://evil.test', 'null']) {
@@ -362,7 +362,7 @@ describe('login and sessions', () => {
 
 describe('control routes with a session', () => {
   test('a POST with a valid session but without the matching x-jm-csrf header is 403', async () => {
-    const w = world({ operator: true });
+    const w = await world({ operator: true });
     const s = operatorSession(w.db, t0);
     const bare = await w.post('/api/control/kill', { engaged: true }, { cookie: s.cookie });
     expect(bare.statusCode).toBe(403);
@@ -383,7 +383,7 @@ describe('control routes with a session', () => {
   });
 
   test('a control route accepts the Bearer token without CSRF and a session only with CSRF', async () => {
-    const w = world({ operator: true });
+    const w = await world({ operator: true });
     const s = operatorSession(w.db, t0);
     expect((await w.post('/api/control/kill', { engaged: true })).statusCode).toBe(401);
     const bearer = { authorization: `Bearer ${TOKEN}` };
@@ -410,14 +410,14 @@ describe('control routes with a session', () => {
   });
 
   test('control routes work with the token while setup is active', async () => {
-    const w = world();
+    const w = await world();
     const bearer = { authorization: `Bearer ${TOKEN}` };
     expect((await w.post('/api/control/kill', { engaged: true }, bearer)).statusCode).toBe(200);
     expect(isKilled(w.db)).toBe(true);
   });
 
   test('a wrong Host or foreign Origin is refused with a valid session and the header', async () => {
-    const w = world({ operator: true });
+    const w = await world({ operator: true });
     const s = operatorSession(w.db, t0);
     const host = await w.post(
       '/api/control/kill',
@@ -437,10 +437,10 @@ describe('control routes with a session', () => {
   });
 
   test('sudo lasts five minutes after re-entering the passphrase and the Bearer token is always sudo', async () => {
-    const w = world({ operator: true });
+    const w = await world({ operator: true });
     const s = operatorSession(w.db, t0);
     // The seeded row has no real hash: give it one.
-    setOperatorPassphrase(w.db, PASS, t0);
+    await setOperatorPassphrase(w.db, PASS, t0);
     const fresh = createSession(w.db, t0);
     const headers = { cookie: `jm_session=${fresh.id}`, 'x-jm-csrf': fresh.csrf };
     const req = (h: Headers, method = 'POST') =>
@@ -481,7 +481,7 @@ describe('Bearer-only setup routes', () => {
   const bearer = { authorization: `Bearer ${TOKEN}` };
 
   test('ctl setup reopen needs the Bearer token, deletes every session and reopens setup with a new code', async () => {
-    const w = world({ operator: true });
+    const w = await world({ operator: true });
     const s = operatorSession(w.db, t0);
     const viaSession = await w.post('/api/control/setup/reopen', {}, s.headers);
     expect(viaSession.statusCode).toBe(403);
@@ -499,7 +499,7 @@ describe('Bearer-only setup routes', () => {
   });
 
   test('ctl setup-code prints a fresh code to stderr and returns nothing to the caller', async () => {
-    const w = world();
+    const w = await world();
     const first = w.printed[0] as string;
     const res = await w.post('/api/control/setup/code', {}, bearer);
     expect(res.statusCode).toBe(200);
@@ -511,7 +511,7 @@ describe('Bearer-only setup routes', () => {
     w.tick(1000);
     expect((await w.post('/setup/code', { code: fresh })).statusCode).toBe(303);
     // Setup is complete: no code to print.
-    const done = world({ operator: true });
+    const done = await world({ operator: true });
     expect((await done.post('/api/control/setup/code', {}, bearer)).statusCode).toBe(409);
     expect(done.printed).toHaveLength(0);
     // Not a session's to ask for.
@@ -520,7 +520,7 @@ describe('Bearer-only setup routes', () => {
   });
 
   test('PUT passphrase claims or replaces the operator with no browser, ends setup mode and deletes every session', async () => {
-    const w = world();
+    const w = await world();
     expect(
       (await w.put('/api/control/passphrase', { passphrase: 'short' }, bearer)).statusCode,
     ).toBe(400);
@@ -550,7 +550,7 @@ describe('Bearer-only setup routes', () => {
 
 describe('the setup code stays out of every surface', () => {
   test('never in a page, a cookie, a URL or the database', async () => {
-    const w = world();
+    const w = await world();
     const code = w.printed[0] as string;
     const bare = code.replaceAll('-', '');
     const responses = [
@@ -586,3 +586,65 @@ function dumpDb(db: Db): string {
     .map((t) => JSON.stringify(db.prepare(`SELECT * FROM "${t.name}"`).all()))
     .join('\n');
 }
+
+describe('round 2', () => {
+  const bearer = { authorization: `Bearer ${TOKEN}` };
+
+  test('a claim from a spent code cannot set the passphrase after ctl setup-code', async () => {
+    const w = await world();
+    const ok = await w.post('/setup/code', { code: w.printed[0] });
+    const cookie = `jm_setup=${valueOf(cookieOf(ok, 'jm_setup'))}`;
+    expect((await w.post('/api/control/setup/code', {}, bearer)).statusCode).toBe(200);
+    const res = await w.post('/setup/passphrase', { passphrase: PASS, confirm: PASS }, { cookie });
+    expect(res.statusCode).toBe(403);
+    expect(setupActive(w.db)).toBe(true);
+  });
+
+  test('stick routes answer while passphrase guesses from many sources are running', async () => {
+    const w = await world({ operator: true });
+    const enroll = () =>
+      (app as FastifyInstance).inject({
+        method: 'POST',
+        url: '/api/sticks/enroll',
+        headers: { 'x-jumpmaster-protocol': '1', host: 'jumpmaster:7420' },
+        payload: { joinToken: 'join', name: 's', slots: 1 },
+      });
+    const order: string[] = [];
+    const guesses = Array.from({ length: 6 }, (_, i) =>
+      w.post('/login', { passphrase: `guess number ${i}` }, {}, `127.0.0.${i + 2}`).then((r) => {
+        order.push('guess');
+        return r.statusCode;
+      }),
+    );
+    const stick = enroll().then((r) => {
+      order.push('stick');
+      return r.statusCode;
+    });
+    expect(await stick).toBe(200);
+    expect(await Promise.all(guesses)).toEqual([401, 401, 401, 401, 401, 401]);
+    // The stick did not wait behind the six scrypt runs.
+    expect(order.indexOf('stick')).toBeLessThan(order.length - 1);
+  });
+
+  test('a setup claim is audited as system, before any session exists', async () => {
+    const w = await world();
+    await claim(w);
+    const row = w.db.prepare("SELECT via FROM control_audit WHERE action = 'setup.claim'").get();
+    expect(row).toEqual({ via: 'system' });
+  });
+
+  test('the login, setup and logged-in pages are never cached', async () => {
+    const open = await world();
+    expect((await open.get('/setup')).headers['cache-control']).toBe('no-store');
+    const w = await world({ operator: true });
+    const s = operatorSession(w.db, t0);
+    for (const res of [
+      await w.get('/login'),
+      await w.post('/login', { passphrase: 'not the passphrase' }),
+      await w.get('/', { cookie: s.cookie }),
+      await w.get('/doctor', { cookie: s.cookie }),
+    ]) {
+      expect(res.headers['cache-control']).toBe('no-store');
+    }
+  });
+});

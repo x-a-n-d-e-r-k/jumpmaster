@@ -5,6 +5,7 @@ import type { Backoff } from '../auth/backoff.js';
 import {
   operatorHash,
   passphraseProblem,
+  ScryptBusyError,
   SETUP_CLAIM_MS,
   type SetupMode,
   setOperatorPassphrase,
@@ -122,7 +123,16 @@ export function registerAuthPages(app: FastifyInstance, deps: AuthPageDeps): voi
     const wait = 'Too many wrong passphrases from here: wait a moment and try again.';
     if (!admitted(req, reply, () => renderLogin(next, wait))) return reply;
     const stored = operatorHash(db);
-    if (!body.success || !stored || !verifyPassphrase(body.data.passphrase, stored)) {
+    let right = false;
+    try {
+      right =
+        body.success && stored !== null && (await verifyPassphrase(body.data.passphrase, stored));
+    } catch (e) {
+      if (!(e instanceof ScryptBusyError)) throw e;
+      // A full queue is nobody's wrong guess: no backoff is charged.
+      return html(reply.header('retry-after', '1'), 503, renderLogin(next, e.message));
+    }
+    if (!right) {
       backoff.fail(req.ip, now());
       return html(reply, 401, renderLogin(next, 'That passphrase is not right.'));
     }
@@ -198,13 +208,15 @@ export function registerAuthPages(app: FastifyInstance, deps: AuthPageDeps): voi
     if (body.data.passphrase !== body.data.confirm) {
       return html(reply, 400, renderSetupPassphrase('The two passphrases differ.'));
     }
-    setOperatorPassphrase(db, body.data.passphrase, now());
+    try {
+      await setOperatorPassphrase(db, body.data.passphrase, now());
+    } catch (e) {
+      if (!(e instanceof ScryptBusyError)) throw e;
+      return html(reply.header('retry-after', '1'), 503, renderSetupPassphrase(e.message));
+    }
     setup.clear();
-    recordAudit(
-      db,
-      { via: 'session', action: 'setup.claim', detail: { result: 'claimed' } },
-      now(),
-    );
+    // No session exists yet: the claim is the system's act on the setup code's word.
+    recordAudit(db, { via: 'system', action: 'setup.claim', detail: { result: 'claimed' } }, now());
     startSession(reply);
     // T6's wizard lives at /setup/next; until it lands, home.
     return reply.redirect('/', 303);
