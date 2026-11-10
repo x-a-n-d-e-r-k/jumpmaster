@@ -271,6 +271,36 @@ describe('pnpmBuildPolicy', () => {
       expect(pnpmBuildPolicy(pkgs, ws).allowAll).toBe(true);
     }
   });
+
+  // pnpm reads pnpm-workspace.yaml with merge keys resolved: pnpm 11.15.1 reports
+  // dangerouslyAllowAllBuilds=true for the first file below. A setting the guard can't read the
+  // way pnpm does counts as allow-all, so the new dependency is still reported.
+  const ws = {
+    'merge key from an anchor':
+      "packages: ['.']\nx: &a\n  dangerouslyAllowAllBuilds: true\n<<: *a\n",
+    'inline merge key': "packages: ['.']\n<<: {dangerouslyAllowAllBuilds: true}\n",
+    'alias of a scalar': "packages: ['.']\nx: &t true\ndangerouslyAllowAllBuilds: *t\n",
+    'alias of an allow-list': 'x: &l [esbuild]\nonlyBuiltDependencies: *l\n',
+    'anchor alone': 'onlyBuiltDependencies: &l [esbuild]\n',
+    'explicit tag': 'onlyBuiltDependencies: !!seq [esbuild]\n',
+    'second document': 'onlyBuiltDependencies: [esbuild]\n---\ndangerouslyAllowAllBuilds: true\n',
+  };
+  for (const [name, text] of Object.entries(ws))
+    test(`a pnpm-workspace.yaml with ${name} allows every build`, () =>
+      expect(pnpmBuildPolicy([], [text])).toEqual({
+        allowAll: true,
+        allowed: expect.any(Array),
+      }));
+
+  test('comments and quoted & * ! characters in a workspace file are still read', () =>
+    expect(
+      pnpmBuildPolicy(
+        [],
+        [
+          "# build allow-list\npackages: ['.', 'a&b', '*']\nonlyBuiltDependencies:\n  - esbuild # !x\n",
+        ],
+      ),
+    ).toEqual({ allowAll: false, allowed: ['esbuild'] }));
 });
 
 describe('pnpmBuildPolicy: .npmrc', () => {
@@ -438,8 +468,11 @@ describe('pnpm lockfile', () => {
   const sample = readFileSync(new URL('../test/pnpm-lock.v9.yaml', import.meta.url), 'utf8');
   const unpinned = { pnpmBlocksBuilds: false };
   const pnpm10 = { pnpmBlocksBuilds: true };
-  const pnpm = (base: string | null, head: string | null, opts = unpinned) =>
-    lockfileChanges('pnpm-lock.yaml', base, head, opts);
+  const pnpm = (
+    base: string | null,
+    head: string | null,
+    opts: Parameters<typeof lockfileChanges>[3] = unpinned,
+  ) => lockfileChanges('pnpm-lock.yaml', base, head, opts);
   /** The sample with an entry added after a section header. */
   const withEntry = (text: string, section: string, entry: string): string =>
     text.replace(`\n${section}:\n\n`, `\n${section}:\n\n${entry}\n`);
@@ -829,6 +862,66 @@ ${snapshotEntry}`;
           pnpm10,
         ),
       ).toEqual(['lockfile unreadable']));
+
+    // The reader schema's numbers are YAML 1.1's (`_`, `0b`, leading-zero octal), the core
+    // schema's are YAML 1.2's: a scalar the two read differently is refused, whichever way the
+    // js-yaml pnpm bundles happens to read it.
+    for (const value of ['1_000', '0b11', '010', '1e3'])
+      test(`a scalar the reader and core schemas read differently (${value}) is refused`, () =>
+        expect(
+          pnpm(
+            base,
+            head(
+              `    deprecated: ${value}\n`,
+              '  vitest@3.0.1:\n    dependencies:\n      vite: 5.0.0\n',
+            ),
+            pnpm10,
+          ),
+        ).toEqual(['lockfile unreadable']));
+
+    // Its booleans are the core ones: a package named like a YAML 1.1 boolean is a name.
+    for (const name of ['n', 'yes', 'off'])
+      test(`a dependency named ${name} is read as a name`, () =>
+        expect(
+          pnpm(
+            base,
+            head(
+              '',
+              `  vitest@3.0.1:\n    dependencies:\n      vite: 5.0.0\n      ${name}: 1.0.0\n`,
+            )
+              .replace(
+                'importers:\n\n  .:\n',
+                `importers:\n\n  .:\n    dependencies:\n      ${name}:\n        specifier: 1.0.0\n        version: 1.0.0\n`,
+              )
+              .replace(
+                'packages:\n\n',
+                `packages:\n\n  ${name}@1.0.0:\n    resolution: {integrity: sha512-NNNN}\n\n`,
+              ),
+          ),
+        ).toContain(
+          `dependency added: ${name}@1.0.0 (verified: registry integrity only; install scripts may run)`,
+        ));
+
+    // The second file is how pnpm turns on every build through a merge key the core schema
+    // doesn't resolve: the dependency it adds must still be reported.
+    for (const [what, text] of [
+      ['an unreadable pnpm-workspace.yaml', 'not: [valid'],
+      [
+        'a merge key in pnpm-workspace.yaml',
+        "packages: ['.']\nx: &a\n  dangerouslyAllowAllBuilds: true\n<<: *a\n",
+      ],
+    ])
+      test(`${what} allows every build, so a new dependency is reported`, () => {
+        const policy = pnpmBuildPolicy([], [text ?? '']);
+        expect(policy.allowAll).toBe(true);
+        expect(
+          pnpm(base, head('', '  vitest@3.0.1:\n    dependencies:\n      vite: 5.0.0\n'), {
+            ...pnpm10,
+            allowAllBuilds: policy.allowAll,
+            allowedBuilds: policy.allowed,
+          }),
+        ).toContain('dependency added: evil@1.0.0 (all builds allowed: its install script runs)');
+      });
 
     test('a dependency value with whitespace in it is not a plain version', () =>
       expect(
