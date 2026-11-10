@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { type ControlDeps, registerControlRoutes, stderrSetupMode } from './api/control.js';
+import { runningSince } from './api/secrets.js';
 import { registerStickRoutes, type StickRouteDeps } from './api/sticks.js';
 import { getArtifact, listArtifacts, readArtifact } from './artifacts.js';
 import { Backoff } from './auth/backoff.js';
@@ -54,6 +55,7 @@ import {
   renderObservations,
   type StickLine,
 } from './ui/pages.js';
+import { claudeTokenDays, registerSettingsPages } from './ui/settings.js';
 import { registerSetupPages, wizardActive } from './ui/setup.js';
 import { dispatchGate } from './usage.js';
 
@@ -135,6 +137,13 @@ export function createApp(
       now: deps.now,
       ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
     });
+    // Settings, part one: the Credentials tab, a page over the secret routes (Task 9).
+    registerSettingsPages(app, {
+      store: deps.config,
+      now: deps.now,
+      runningSince: (since) => runningSince(deps.db, since),
+      ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
+    });
     // The GitHub half of setup for a zone: links and generated files, never a forge write.
     registerGithubPages(app, {
       store: deps.config,
@@ -168,6 +177,10 @@ export function createApp(
         // "Add a project" lives at the wizard's step until the zones page takes the link over.
         addProject: deps.config instanceof ConfigStore,
       },
+      settings: deps.config instanceof ConfigStore,
+      ...(deps.config instanceof ConfigStore
+        ? { claudeTokenDays: claudeTokenDays(deps.config, at) }
+        : {}),
       zones: config.dropZones,
       killed: isKilled(db),
       modes: Object.fromEntries(config.dropZones.map((z) => [z.id, getZoneMode(db, z.id, z.mode)])),

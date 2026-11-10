@@ -51,7 +51,7 @@ const defaultForge: TestDeps['forge'] = (token, repo) => {
 };
 
 /** Active drops leased before `since`: they carry the credential as it was then. */
-function runningSince(db: Db, since: string | undefined): number {
+export function runningSince(db: Db, since: string | undefined): number {
   if (!since) return 0;
   return (
     db

@@ -225,19 +225,50 @@ document.getElementById('claude').addEventListener('submit', async (e) => {
 }
 
 /** What the forge step shows for a named repository: the recommendation, or why it could not. */
-type ForgeGuide = { repo: string; paidPlan: string; answer?: RecommendAnswer; error?: string };
+export type ForgeGuide = {
+  repo: string;
+  paidPlan: string;
+  answer?: RecommendAnswer;
+  error?: string;
+};
+
+/**
+ * The recommendation for the repository a GET names (`repo`, `paidPlan`), read from GitHub without
+ * writing; undefined when none is named. The forge step and the Credentials tab share it.
+ */
+export async function forgeGuideFor(
+  store: ConfigStore,
+  config: Config,
+  query: unknown,
+  forgeOf: (repo: string, token: string) => GuidanceForge,
+  now: () => Date,
+): Promise<ForgeGuide | undefined> {
+  const q = ForgeQuery.safeParse(query ?? {});
+  const repo = q.success ? q.data.repo : undefined;
+  if (!q.success || repo === undefined || repo === '') return undefined;
+  const paidPlan = q.data.paidPlan ?? '';
+  if (!REPO_PARAM.test(repo)) return { repo, paidPlan, error: 'the repository must be owner/name' };
+  const r = await recommendFor(
+    store,
+    config,
+    { repo, ...(paidPlan ? { paidPlan: paidPlan === 'yes' } : {}) },
+    forgeOf,
+    now,
+  );
+  return r.ok ? { repo, paidPlan, answer: r.answer } : { repo, paidPlan, error: r.error };
+}
 
 /**
  * The forge step's first part: which repository, then the accounts to use and the pre-filled
  * token links (unless the recommendation stops first), and the collaborator checklist once the
  * author token resolves a login. All of it is read from GitHub without writing, and escaped.
  */
-function guideSection(guide: ForgeGuide | undefined): string {
+export function guideSection(guide: ForgeGuide | undefined, action = '/setup/forge'): string {
   const repo = guide?.repo ?? '';
   const plan = guide?.paidPlan ?? '';
   const option = (v: string, label: string) =>
     `<option value="${v}"${plan === v ? ' selected' : ''}>${label}</option>`;
-  const form = `<form method="get" action="/setup/forge" id="recommend-form"><p><label>Repository <input name="repo" value="${escapeHtml(repo)}" placeholder="owner/name" pattern="[A-Za-z0-9\\-]+/[A-Za-z0-9._\\-]+" required></label> <label>Paid GitHub plan (matters for a private repository) <select name="paidPlan">${option('', 'I don’t know')}${option('yes', 'Yes')}${option('no', 'No')}</select></label> <button>Recommend</button></p></form>`;
+  const form = `<form method="get" action="${action}" id="recommend-form"><p><label>Repository <input name="repo" value="${escapeHtml(repo)}" placeholder="owner/name" pattern="[A-Za-z0-9\\-]+/[A-Za-z0-9._\\-]+" required></label> <label>Paid GitHub plan (matters for a private repository) <select name="paidPlan">${option('', 'I don’t know')}${option('yes', 'Yes')}${option('no', 'No')}</select></label> <button>Recommend</button></p></form>`;
   if (!guide)
     return `<h4>Which repository?</h4><p>Name the repository first: Jumpmaster reads its owner and visibility (without a token if it has none yet) to recommend the accounts and fill in the token pages.</p>${form}`;
   if (guide.error) return `${form}<p class="warn">${escapeHtml(guide.error)}</p>`;
@@ -501,31 +532,13 @@ export function registerSetupPages(
   app.get('/setup/claude', async (req, reply) => html(req, reply, claudePage(store, sudoOf(req))));
   // A named repository: the recommendation and the token links, read from GitHub (GET only).
   app.get('/setup/forge', async (req, reply) => {
-    const q = ForgeQuery.safeParse(req.query ?? {});
-    const repo = q.success ? q.data.repo : undefined;
-    if (!q.success || repo === undefined || repo === '')
-      return html(req, reply, forgePage(store, sudoOf(req), getWizard(db)));
-    const paidPlan = q.data.paidPlan ?? '';
-    if (!REPO_PARAM.test(repo))
-      return html(
-        req,
-        reply,
-        forgePage(store, sudoOf(req), getWizard(db), {
-          repo,
-          paidPlan,
-          error: 'the repository must be owner/name',
-        }),
-      );
-    const r = await recommendFor(
+    const guide = await forgeGuideFor(
       store,
       req.jmConfig ?? store.current(),
-      { repo, ...(paidPlan ? { paidPlan: paidPlan === 'yes' } : {}) },
+      req.query,
       forgeOf,
       now,
     );
-    const guide: ForgeGuide = r.ok
-      ? { repo, paidPlan, answer: r.answer }
-      : { repo, paidPlan, error: r.error };
     return html(req, reply, forgePage(store, sudoOf(req), getWizard(db), guide));
   });
 

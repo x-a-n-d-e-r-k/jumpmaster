@@ -221,6 +221,9 @@ describe('doctor fix links (Task 8)', () => {
       { defaultBranch: 'main', ciJobs: [], ownerType: 'User', visibility: 'public' },
       {},
     );
+    // This build's pages, as the doctor route derives them: Task 9 adds the Credentials tab.
+    const pages = pagesOf(h.app);
+    expect(pages).toEqual({ ...PAGES_M45A, credentials: true });
     const seen = new Set<string>();
     for (const id of CHECK_IDS)
       for (const g of [undefined, guidance])
@@ -233,7 +236,7 @@ describe('doctor fix links (Task 8)', () => {
               summary,
               credentials: [summary.split(':')[0] as string],
             },
-            { zone: h.zone, pages: PAGES_M45A, ...(g ? { guidance: g } : {}) },
+            { zone: h.zone, pages, ...(g ? { guidance: g } : {}) },
           );
           if (!a) continue;
           const key = `${a.method ?? 'GET'} ${a.href}`;
@@ -254,8 +257,14 @@ describe('doctor fix links (Task 8)', () => {
           }
         }
     expect(seen.size).toBeGreaterThan(10);
-    // This build's pages, as the doctor route derives them.
-    expect(pagesOf(h.app)).toEqual(PAGES_M45A);
+    // Every credential check now links to the tab, and the tab answers.
+    for (const id of ['credential.missing', 'forge.author', 'claude.token-age', 'vault.key'])
+      expect(
+        actionFor({ id, zoneId: null, status: 'fail', summary: 'x' }, { pages })?.href,
+        id,
+      ).toBe('/settings/credentials');
+    expect(seen.has('GET /settings/credentials')).toBe(true);
+    expect((await h.view('/settings/credentials')).statusCode).toBe(200);
   });
 
   test('the doctor page renders fails first with their action links escaped and artifact downloads', async () => {
