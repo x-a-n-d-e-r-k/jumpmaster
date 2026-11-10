@@ -39,12 +39,24 @@ export const MACHINE_SECRETS = ['join_token', 'operator_token', 'vault_key'] as 
 
 export const USAGE = 'usage: jumpmaster bootstrap [install-dir] [--allow-root]';
 
-/** The fix when root owns what bootstrap must write. */
-export const CHOWN_FIX = (uid: number, gid: number): string =>
-  `the directories were created as root (docker compose run with sudo, or by the engine): run  sudo chown -R ${uid}:${gid} secrets data  and start again`;
+/** The directories bootstrap owns, in the order the chown line names them. */
+const OWNED_DIRS = ['secrets', 'data', 'config'];
 
-/** The fix when another user owns it: run the containers as the directory's owner. */
-export const ENV_FIX = `set JM_UID and JM_GID in .env to your user: printf 'JM_UID=%s\\nJM_GID=%s\\n' "$(id -u)" "$(id -g)" > .env`;
+/** The fix when root owns what bootstrap must write: only the directories that exist, so it runs. */
+export const CHOWN_FIX = (uid: number, gid: number, dirs: string[] = OWNED_DIRS): string =>
+  `the directories were created as root (docker compose run with sudo, or by the engine): run  sudo chown -R ${uid}:${gid} ${dirs.join(' ')}  and start again`;
+
+/**
+ * The fix when another user owns it: run the containers as the directory's owner. An existing
+ * .env (JM_SLOTS, JM_ALLOWED_IMAGES…) is appended to, never replaced: Compose takes the last
+ * assignment.
+ */
+export const ENV_FIX = (append = false): string =>
+  `set JM_UID and JM_GID in .env to your user: printf 'JM_UID=%s\\nJM_GID=%s\\n' "$(id -u)" "$(id -g)" ${append ? '>>' : '>'} .env`;
+
+/** Said when a new vault key meets a database that may hold vault entries under another key. */
+export const VAULT_KEY_WARNING =
+  "data/ already holds a database: if it kept credentials in the vault, restore secrets/vault_key from the same backup; the doctor's vault.key check names them";
 
 const errno = (e: unknown): string | undefined =>
   e && typeof e === 'object' && 'code' in e ? String((e as { code: unknown }).code) : undefined;
@@ -119,6 +131,15 @@ export function runBootstrap(argv: string[], deps: BootstrapDeps): number {
   }
 
   const done: string[] = [];
+  const warnings: string[] = [];
+  const exists = (rel: string): boolean => {
+    try {
+      lstat(join(dir, rel));
+      return true;
+    } catch {
+      return false;
+    }
+  };
   /** Root (only with --allow-root) may write anything: ownership is not its to check. */
   const owns = (st: Stats): boolean => uid === 0 || st.uid === uid;
   /** The fix for `rel`, owned by `owner` (or by this user and still not writable). */
@@ -127,9 +148,9 @@ export function runBootstrap(argv: string[], deps: BootstrapDeps): number {
       owner === 0
         ? rel === '.'
           ? `the install directory is owned by root: run  sudo chown ${uid}:${gid} .  in it, and start again`
-          : CHOWN_FIX(uid ?? 0, gid ?? 0)
+          : CHOWN_FIX(uid ?? 0, gid ?? 0, OWNED_DIRS.filter(exists))
         : owner !== undefined && owner !== uid
-          ? ENV_FIX
+          ? ENV_FIX(exists('.env'))
           : 'mount /install read-write (compose mounts the install directory as .:/install), owned by the JM_UID user';
     const where = rel === '.' ? 'the install directory' : rel;
     return new Refusal(`${where} ${why}: ${fix}`);
@@ -162,8 +183,9 @@ export function runBootstrap(argv: string[], deps: BootstrapDeps): number {
       return;
     }
     if (!st.isDirectory()) throw new Refusal(`${rel} is not a directory: move it aside`);
-    if (!tighten) return;
+    // config/ too: init writes it and the host export line redirects into it.
     if (!owns(st)) throw fixFor(rel, st.uid, `is owned by uid ${st.uid}, not ${uid}`);
+    if (!tighten) return;
     if ((st.mode & 0o777) !== 0o700) {
       chmodSync(path, 0o700);
       done.push(`tightened ${rel}/ to 0700`);
@@ -185,6 +207,9 @@ export function runBootstrap(argv: string[], deps: BootstrapDeps): number {
       try {
         if (createSecretOnce(path, `${randomBytes(32).toString('base64url')}\n`)) {
           done.push(`generated ${rel} (0600)`);
+          // Not a refusal: an M4 install has a database and never had a key.
+          if (name === 'vault_key' && exists('data/jumpmaster.sqlite'))
+            warnings.push(VAULT_KEY_WARNING);
           return;
         }
       } catch (e) {
@@ -212,6 +237,7 @@ export function runBootstrap(argv: string[], deps: BootstrapDeps): number {
     return 1;
   }
   for (const d of done) out(`jumpmaster bootstrap: ${d}`);
+  for (const w of warnings) out(`jumpmaster bootstrap: warning: ${w}`);
   if (done.length === 0)
     out(
       'jumpmaster bootstrap: nothing to do: secrets/, data/ and the machine secrets are in place',

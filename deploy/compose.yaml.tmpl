@@ -28,6 +28,8 @@ services:
     command: ["bootstrap"]
     restart: "no"
     read_only: true
+    tmpfs:
+      - /tmp
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -72,8 +74,9 @@ services:
         - node
         - -e
         - "fetch('http://127.0.0.1:7420/login',{redirect:'manual'}).then((r)=>process.exit(r.status<500?0:1),()=>process.exit(1))"
-      # No start_interval: Compose refuses it on an Engine before v25.
-      interval: 5s
+      # Add start_interval: 2s once Docker Engine 25 is the floor (Compose refuses the key on older
+      # engines); until then the stick waits up to one interval after the server is ready.
+      interval: 15s
       timeout: 5s
       retries: 3
       start_period: 120s

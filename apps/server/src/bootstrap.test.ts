@@ -119,16 +119,24 @@ describe('jumpmaster bootstrap', () => {
 
   test('bootstrap on a root-owned directory prints the chown line, on another uid the .env line, and exits 1 either way', () => {
     expect(CHOWN_FIX(1000, 1000)).toBe(
-      'the directories were created as root (docker compose run with sudo, or by the engine): run  sudo chown -R 1000:1000 secrets data  and start again',
+      'the directories were created as root (docker compose run with sudo, or by the engine): run  sudo chown -R 1000:1000 secrets data config  and start again',
     );
-    expect(ENV_FIX).toBe(
+    // Only the directories that exist, so the printed command runs as printed.
+    expect(CHOWN_FIX(1000, 1000, ['secrets', 'data'])).toContain(
+      'sudo chown -R 1000:1000 secrets data  and',
+    );
+    expect(ENV_FIX()).toBe(
       `set JM_UID and JM_GID in .env to your user: printf 'JM_UID=%s\\nJM_GID=%s\\n' "$(id -u)" "$(id -g)" > .env`,
+    );
+    // An existing .env keeps its other lines: append (Compose takes the last assignment).
+    expect(ENV_FIX(true)).toBe(
+      `set JM_UID and JM_GID in .env to your user: printf 'JM_UID=%s\\nJM_GID=%s\\n' "$(id -u)" "$(id -g)" >> .env`,
     );
     for (const [owner, line] of [
       [0, CHOWN_FIX(ME, MY_GID)],
-      [ME + 1, ENV_FIX],
+      [ME + 1, ENV_FIX()],
     ] as const) {
-      for (const which of ['secrets', 'data', 'secrets/vault_key']) {
+      for (const which of ['secrets', 'data', 'config', 'secrets/vault_key']) {
         const dir = empty();
         expect(run(dir).code).toBe(0);
         const r = run(dir, [], {}, { [which]: owner });
@@ -144,16 +152,39 @@ describe('jumpmaster bootstrap', () => {
       const r = run(dir, [], {}, { secrets: 0 });
       chmodSync(join(dir, 'secrets'), 0o700);
       expect(r.code).toBe(1);
-      expect(r.err).toContain(CHOWN_FIX(ME, MY_GID));
+      expect(r.err).toContain(CHOWN_FIX(ME, MY_GID, ['secrets']));
       expect(readdirSync(join(dir, 'secrets'))).toEqual([]);
     }
+    // Another uid's directory with a .env already there: the line appends to it.
+    const withEnv = empty();
+    expect(run(withEnv).code).toBe(0);
+    writeFileSync(join(withEnv, '.env'), 'JM_SLOTS=2\n');
+    const appended = run(withEnv, [], {}, { data: ME + 1 });
+    expect(appended.code).toBe(1);
+    expect(appended.err).toContain(ENV_FIX(true));
+  });
+
+  test('a vault key minted beside an existing database prints one warning; an existing key or no database prints none', () => {
+    const warning =
+      "data/ already holds a database: if it kept credentials in the vault, restore secrets/vault_key from the same backup; the doctor's vault.key check names them";
+    const dir = empty();
+    mkdirSync(join(dir, 'data'), { mode: 0o700 });
+    writeFileSync(join(dir, 'data', 'jumpmaster.sqlite'), '');
+    const r = run(dir);
+    expect(r.code, r.all).toBe(0);
+    expect(r.all.split(warning)).toHaveLength(2);
+    expect(r.out).toContain('generated secrets/vault_key (0600)');
+    // The key exists now: no warning on a rerun.
+    expect(run(dir).all).not.toContain(warning);
+    // A fresh install has no database: no warning.
+    expect(run(empty()).all).not.toContain(warning);
   });
 
   test('an install directory it cannot write is named with the fix for its owner', () => {
     if (ME === 0) return; // root writes anyway
     for (const [owner, line] of [
       [0, 'sudo chown'],
-      [ME + 1, ENV_FIX],
+      [ME + 1, ENV_FIX()],
       [ME, 'mount /install read-write'],
     ] as const) {
       const dir = empty();
@@ -167,7 +198,7 @@ describe('jumpmaster bootstrap', () => {
     // One it cannot even search (another user's 0700 directory): the same fix, not a stack trace.
     for (const [owner, line] of [
       [0, 'sudo chown'],
-      [ME + 1, ENV_FIX],
+      [ME + 1, ENV_FIX()],
     ] as const) {
       const dir = empty();
       mkdirSync(join(dir, 'secrets'), { mode: 0o700 });

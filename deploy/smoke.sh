@@ -19,7 +19,7 @@
 #   env-only    a directory holding only .env
 #   empty       an empty directory: on a uid-1000 host (or Docker Desktop, whose file sharing maps
 #               every owner) `up` alone; elsewhere bootstrap stops with the .env line, which is run
-#   root-owned  secrets/ and data/ made by root: the first `up` (with `sudo` where it needs no
+#   root-owned  secrets/, data/ and config/ made by root: the first `up` (with `sudo` where it needs no
 #               password) stops in bootstrap with the chown line; that command is run, and the
 #               second `up` reaches the setup page. Skipped, by name, on an engine that reports
 #               every file as owned by its reader (Docker Desktop's file sharing)
@@ -220,6 +220,7 @@ check_layout() {
   [ "$(mode_of secrets)" = 700 ] || fail "secrets/ is mode $(mode_of secrets)"
   [ "$(mode_of data)" = 700 ] || fail "data/ is mode $(mode_of data)"
   [ -d config ] || fail "no config/ directory"
+  [ "$(owner_of config)" = "$HOST_UID" ] || fail "config/ is not owned by $HOST_UID"
   for f in join_token operator_token vault_key; do
     [ "$(mode_of "secrets/$f")" = 600 ] || fail "secrets/$f is mode $(mode_of "secrets/$f")"
     [ "$(owner_of "secrets/$f")" = "$HOST_UID" ] || fail "secrets/$f is not owned by $HOST_UID"
@@ -408,20 +409,26 @@ case_root_owned() {
     return 0
   fi
   as_root DAC_OVERRIDE rmdir /install/.probe >/dev/null 2>&1
-  out="$(as_root DAC_OVERRIDE mkdir -m 0755 /install/secrets /install/data 2>&1)" || fail "make root's directories: $out"
-  [ "$(owner_of secrets)" = 0 ] && [ "$(owner_of data)" = 0 ] || fail "secrets/ and data/ are not root's"
+  out="$(as_root DAC_OVERRIDE mkdir -m 0755 /install/secrets /install/data /install/config 2>&1)" \
+    || fail "make root's directories: $out"
+  [ "$(owner_of secrets)$(owner_of data)$(owner_of config)" = 000 ] || fail "secrets/, data/ and config/ are not root's"
   if sudo -n true 2>/dev/null; then sudo=(sudo -n env "JM_SOURCE=${JM_SOURCE:-}" "JM_ALLOWED_IMAGES=${JM_ALLOWED_IMAGES:-}"); fi
   if out="$("${sudo[@]}" "${C[@]}" up -d 2>&1)"; then fail "up over root-owned directories did not stop"; fi
-  fix="$(printed_fix 's/.*: run  (sudo chown -R [0-9]+:[0-9]+ secrets data)  and start again$/\1/p')"
-  [ "$fix" = "sudo chown -R $HOST_UID:$HOST_GID secrets data" ] \
+  fix="$(printed_fix 's/.*: run  (sudo chown -R [0-9]+:[0-9]+ secrets data( config)?)  and start again$/\1/p')"
+  # The line names only the directories that exist, so it runs as printed.
+  local dirs="secrets data"
+  [ ! -e config ] || dirs="$dirs config"
+  [ "$fix" = "sudo chown -R $HOST_UID:$HOST_GID $dirs" ] \
     || fail "bootstrap did not print the chown line: $("${C[@]}" logs --no-log-prefix bootstrap 2>&1 | tail -3)"
-  echo "up${sudo[*]:+ with sudo} over root-owned secrets/ and data/: stopped in bootstrap with the chown line: ok"
+  echo "up${sudo[*]:+ with sudo} over root-owned secrets/, data/ and config/: stopped in bootstrap with the chown line: ok"
   [ "$(state_of jumpmaster)" != "running 0" ] || fail "the server started over a failed bootstrap"
   if [ ${#sudo[@]} -gt 0 ]; then
     bash -c "${fix/sudo /sudo -n }" || fail "run $fix"
     echo "ran: $fix"
   else
-    out="$(as_root CHOWN,DAC_OVERRIDE chown -R "$HOST_UID:$HOST_GID" /install/secrets /install/data 2>&1)" \
+    local paths=()
+    for d in $dirs; do paths+=("/install/$d"); done
+    out="$(as_root CHOWN,DAC_OVERRIDE chown -R "$HOST_UID:$HOST_GID" "${paths[@]}" 2>&1)" \
       || fail "chown in a root container: $out"
     echo "no sudo without a password here: ran the same chown in a root container"
   fi

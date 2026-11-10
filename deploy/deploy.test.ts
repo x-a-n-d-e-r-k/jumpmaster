@@ -35,9 +35,15 @@ type Service = {
   secrets?: string[];
   build?: unknown;
   depends_on?: Record<string, { condition: string }>;
-  healthcheck?: { test: string[] };
+  healthcheck?: {
+    test: string[];
+    interval?: string;
+    start_period?: string;
+    start_interval?: string;
+  };
 };
 type Compose = {
+  name?: string;
   services: Record<string, Service>;
   secrets?: unknown;
   volumes?: Record<string, unknown>;
@@ -112,6 +118,7 @@ describe('the released compose file', () => {
     expect(b.cap_drop).toEqual(['ALL']);
     expect(b.security_opt).toEqual(['no-new-privileges:true']);
     expect(b.volumes).toEqual(['.:/install']);
+    expect(b.tmpfs).toEqual(['/tmp']);
     expect(b.environment).toEqual({ JM_INSTALL_DIR: '/install' });
     expect(b.ports).toBeUndefined();
     expect(b.profiles).toBeUndefined();
@@ -142,6 +149,15 @@ describe('the released compose file', () => {
     expect(env).not.toMatch(/^JM_[A-Z_]*TOKEN/m);
   });
 
+  test('the frozen M4 template has the same project name and volume names, so replacing compose.yaml keeps them', () => {
+    const m4 = load(renderCompose(read('deploy/fixtures/m4-compose.yaml.tmpl'), LOCK)) as Compose;
+    expect(compose.name).toBe('jumpmaster');
+    expect(m4.name).toBe(compose.name);
+    expect(Object.keys(m4.volumes ?? {})).toEqual(Object.keys(compose.volumes ?? {}));
+    // The fixture is M4's file byte for byte below its header.
+    expect(read('deploy/fixtures/m4-compose.yaml.tmpl')).toMatch(/^# FROZEN: /);
+  });
+
   test('the template needs no override file and no Compose YAML tags', () => {
     expect(TEMPLATE).not.toMatch(/!override|!reset/);
     expect(TEMPLATE).not.toMatch(/compose\.override/);
@@ -163,6 +179,12 @@ describe('the released compose file', () => {
     expect(j.security_opt).toEqual(['no-new-privileges:true']);
     // Health is an HTTP answer on the loopback the image listens on, with the image's own node.
     expect(j.healthcheck?.test.join(' ')).toMatch(/fetch\('http:\/\/127\.0\.0\.1:7420\/login'/);
+    // Every 15 s for the server's life; start_interval waits for an Engine 25 floor (Compose
+    // refuses the key on older engines), and the template says so.
+    expect(j.healthcheck?.interval).toBe('15s');
+    expect(j.healthcheck?.start_period).toBe('120s');
+    expect(j.healthcheck?.start_interval).toBeUndefined();
+    expect(TEMPLATE).toMatch(/#.*start_interval: 2s.*Engine 25/);
     for (const s of Object.values(compose.services))
       for (const p of s.ports ?? []) expect(p).toMatch(/^127\.0\.0\.1:/);
   });
