@@ -79,8 +79,8 @@ cosign verify-blob --bundle SHA256SUMS.sigstore.json \
 sha256sum -c SHA256SUMS        # macOS: shasum -a 256 -c SHA256SUMS
 ```
 
-For a particular release (a release candidate, say), replace `latest/download` with
-`download/<version>`, for example `download/v0.4.0-rc.1`.
+To install a release candidate (a prerelease, which `latest` skips), replace `latest/download` with
+`download/<tag>`.
 
 Optionally, check the images the compose file names: the server, the stick and the egress proxy
 (the stick checks every trooper and proxy image itself before it runs one; see
@@ -450,9 +450,22 @@ From M4, or any earlier release with Compose, replacing `compose.yaml` is the wh
 
 1. **Drain.** `docker compose exec jumpmaster jumpmaster ctl pause <zone>` for each zone, then wait
    until the home page shows nothing running.
-2. **Replace `compose.yaml`.** Download and verify the new release's four files into the same
-   directory, as in [step 1](#step-1-download-and-verify-the-release) (with `cosign_docker`, only
-   the two release files are mounted, never `secrets/`).
+2. **Replace `compose.yaml`.** From inside the install directory, download the new release's four
+   files over the old ones and verify them (with `cosign_docker` from
+   [step 1](#step-1-download-and-verify-the-release), only the two release files are mounted,
+   never `secrets/`):
+
+   ```sh
+   for f in compose.yaml images.lock.json SHA256SUMS SHA256SUMS.sigstore.json; do curl -fsSLO "https://github.com/x-a-n-d-e-r-k/jumpmaster/releases/latest/download/$f"; done
+   cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+     --certificate-identity-regexp '^https://github\.com/x-a-n-d-e-r-k/jumpmaster/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' \
+     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+     --certificate-github-workflow-trigger push \
+     --certificate-github-workflow-repository x-a-n-d-e-r-k/jumpmaster \
+     SHA256SUMS
+   sha256sum -c SHA256SUMS        # macOS: shasum -a 256 -c SHA256SUMS
+   ```
+
 3. **`docker compose up -d`.** Then `docker compose exec jumpmaster jumpmaster ctl resume <zone>`
    for each zone (a paused zone stays paused across the restart).
 4. **Claim the login.** An install from before M4.5 has no operator: open the UI and enter the
@@ -464,7 +477,13 @@ What carries over, and what may go:
 
 - The config file means file mode, as before, read-only in the UI until you adopt it.
 - The token files in `secrets/` are read by name; the new `bootstrap` service adds
-  `secrets/vault_key`. The block `jumpmaster init` wrote into `.env` (between its
+  `secrets/vault_key`. Because `data/` already holds a database, that first start prints a
+  warning, which is expected (an install from before M4.5 has no vault entries to restore):
+
+  ```text
+  jumpmaster bootstrap: warning: data/ already holds a database: if it kept credentials in the vault, restore secrets/vault_key from the same backup; the doctor's vault.key check names them
+  ```
+ The block `jumpmaster init` wrote into `.env` (between its
   `# jumpmaster init` markers, the `JM_REVIEWER_TOKEN_*` and `JM_READ_TOKEN_*` lines) is no longer
   read and may be deleted, as may a `secrets/github_reviewer_token` left beside a starter zone,
   which never uses it.

@@ -6,7 +6,7 @@ import { dirname, join, normalize, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import { CONTROL_ROUTES, CTL_VERBS, PAGES } from '../apps/server/src/api/manifest.js';
-import { ENV_FIX } from '../apps/server/src/bootstrap.js';
+import { ENV_FIX, VAULT_KEY_WARNING } from '../apps/server/src/bootstrap.js';
 import { STARTER_WARNING } from '../apps/server/src/config.js';
 import { actionFor, type Pages } from '../apps/server/src/doctor/actions.js';
 import { CHECK_IDS, DOC } from '../apps/server/src/doctor/checks.js';
@@ -419,5 +419,34 @@ describe('M4.5 docs (Task 15)', () => {
     expect(read(OPERATE).replace(/\s*\n\s*/g, ' ')).toContain(
       'Upgrade the sticks and the zone images before you set `gateCi: false`',
     );
+  });
+
+  test('the prelude says how to install a release candidate, and no doc names a particular tag or a diagnostics export', () => {
+    const rc =
+      'To install a release candidate (a prerelease, which `latest` skips), replace `latest/download` with `download/<tag>`.';
+    for (const file of ['README.md', INSTALL]) {
+      const text = read(file).replace(/\s*\n\s*/g, ' ');
+      expect(text, file).toContain(rc);
+    }
+    for (const file of ['README.md', INSTALL, OPERATE, 'SECURITY.md']) {
+      expect(read(file), file).not.toMatch(/rc\.1/);
+      expect(read(file), file).not.toMatch(/diagnostics export/i);
+    }
+  });
+
+  test("the upgrade says what bootstrap warns on the first start, and runs the download in the existing directory; SECURITY.md gives the audit table's size", () => {
+    const up = section(read(INSTALL), /^## Upgrade/);
+    expect(up.replace(/\s*\n\s*/g, ' ')).toContain(
+      `jumpmaster bootstrap: warning: ${VAULT_KEY_WARNING}`,
+    );
+    expect(up).not.toMatch(/mkdir jumpmaster/);
+    // Step 2's own commands (an indented fence inside the list), for the directory you are in.
+    for (const cmd of [
+      /^ {3}for f in compose\.yaml .*curl -fsSLO/m,
+      /^ {3}cosign verify-blob /m,
+      /^ {3}sha256sum -c SHA256SUMS/m,
+    ])
+      expect(up).toMatch(cmd);
+    expect(read('SECURITY.md').replace(/\s*\n\s*/g, ' ')).toContain('keeps the latest 5000 rows');
   });
 });

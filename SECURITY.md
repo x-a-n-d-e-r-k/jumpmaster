@@ -80,7 +80,8 @@ zone's digest) rather than expecting old signatures to stop working.
 One operator, two credentials: the passphrase chosen in the browser (a session) and the machine
 token `jumpmaster ctl` reads from `secrets/operator_token` (a Bearer token). Both reach the same
 control routes, and every write through them is recorded in an audit table that holds named
-fields only, never a request body or a value.
+fields only, never a request body or a value. The table keeps the latest 5000 rows; older ones
+are deleted as new ones arrive.
 
 ### Sessions and CSRF
 
@@ -126,8 +127,8 @@ the operator's own; each is audited.
 A credential entered in the browser (or with `ctl secrets set`) is tested, then encrypted with
 AES-256-GCM under a 32-byte key in `secrets/vault_key` (`JM_VAULT_KEY_FILE`), which the
 `bootstrap` service creates beside the other machine secrets, outside `data/`. The database keeps
-only the ciphertext, so `data/` alone holds only ciphertext: a copy of the database, a backup of
-`data/` or a diagnostics export reveals no credential without the key. Keep `secrets/` and
+only the ciphertext, so `data/` alone holds only ciphertext: a copy of the database or a backup
+of `data/` reveals no credential without the key. Keep `secrets/` and
 `data/` together and back them up together. A server whose vault holds entries and whose key
 file is missing refuses to start; a key that does not open the entries is the doctor's
 `vault.key`, and those credentials must be entered again.

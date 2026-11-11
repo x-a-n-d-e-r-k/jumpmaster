@@ -41,6 +41,9 @@ sha256sum -c SHA256SUMS
 docker compose up
 ```
 
+To install a release candidate (a prerelease, which `latest` skips), replace `latest/download` with
+`download/<tag>`.
+
 (On macOS, `shasum -a 256 -c SHA256SUMS` in place of `sha256sum -c SHA256SUMS`.) `docker compose
 up` stays in the foreground so you can read its output; `docker compose up -d` followed by
 `docker compose logs -f jumpmaster` does the same in the background.
