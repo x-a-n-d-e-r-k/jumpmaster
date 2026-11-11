@@ -45,8 +45,13 @@ async function run<C = ReturnType<typeof fakeFetch>['calls']>(
 
 describe('ctl setup and passphrase verbs', () => {
   test('the setup and passphrase verbs map to their routes; a passphrase in argv is refused', () => {
-    expect(ctlRequest(['setup-code'])).toEqual({ path: '/api/control/setup/code', body: {} });
+    expect(ctlRequest(['setup-code'])).toEqual({
+      method: 'POST',
+      path: '/api/control/setup/code',
+      body: {},
+    });
     expect(ctlRequest(['setup', 'reopen'])).toEqual({
+      method: 'POST',
       path: '/api/control/setup/reopen',
       body: {},
     });
@@ -345,12 +350,14 @@ describe('ctl config', () => {
 
     // MCP tokens over the routes that exist since M3.
     expect(ctlRequest(['mcp-tokens', 'mint', 'main', 'write', '--days', '30'])).toEqual({
+      method: 'POST',
       path: '/api/control/mcp-tokens',
       body: { zoneId: 'main', scope: 'write', days: 30 },
     });
     expect(
       ctlRequest(['mcp-tokens', 'mint', 'main', 'read', '--label', 'my laptop', '--days', '7']),
     ).toEqual({
+      method: 'POST',
       path: '/api/control/mcp-tokens',
       body: { zoneId: 'main', scope: 'read', days: 7, label: 'my laptop' },
     });
@@ -491,6 +498,7 @@ describe('ctl secrets (Task 4)', () => {
 describe('ctl detect and ctl zones add', () => {
   test('ctl detect and ctl zones add map to the routes', () => {
     expect(ctlRequest(['detect', 'octo/demo'])).toEqual({
+      method: 'POST',
       path: '/api/control/detect',
       body: { repo: 'octo/demo' },
     });
@@ -510,6 +518,7 @@ describe('ctl detect and ctl zones add', () => {
         '--resume',
       ]),
     ).toEqual({
+      method: 'POST',
       path: '/api/control/zones',
       body: {
         zone: {
@@ -539,6 +548,7 @@ describe('ctl detect and ctl zones add', () => {
 
   test('ctl zones add without --egress writes monitor', () => {
     expect(ctlRequest(['zones', 'add', 'octo/demo'])).toEqual({
+      method: 'POST',
       path: '/api/control/zones',
       body: { zone: { repo: 'octo/demo', egress: { mode: 'monitor' } } },
     });
@@ -804,6 +814,7 @@ describe('ctl zones', () => {
     expect(
       ctlRequest(['zones', 'egress', 'adopt', 'web', 'a.example.com', '*.b.example.com']),
     ).toEqual({
+      method: 'POST',
       path: '/api/control/zones/web/egress/adopt',
       body: { hosts: ['a.example.com', '*.b.example.com'] },
     });
@@ -951,5 +962,58 @@ describe('ctl status, round 2', () => {
       'next: See the items on home: /',
     ]);
     for (const line of r.out) expect(line).not.toMatch(/[\u0000-\u001f\u007f]/);
+  });
+});
+
+describe('the verbs Task 14 adds for parity', () => {
+  test('ctl intake sends the answers from a file (a fresh idempotency key per issue), github recommend posts the repository, and doctor --last reads the latest run', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'jm-intake-'));
+    const issue = join(dir, 'issue.json');
+    const spec = { title: 't', context: 'c', acceptance: ['a'], tests: ['b'] };
+    writeFileSync(issue, JSON.stringify(spec));
+    const filed = await run(['intake', 'web', 'issue', issue], '', fakeFetch(201, { number: 7 }));
+    expect(filed.code).toBe(0);
+    expect(filed.calls[0]?.url).toBe('http://127.0.0.1:7420/api/control/zones/web/intake/issue');
+    const sent = JSON.parse(String(filed.calls[0]?.init.body)) as Record<string, unknown>;
+    expect(sent).toMatchObject(spec);
+    expect(sent.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
+    const stubFile = join(dir, 'goal.json');
+    writeFileSync(
+      stubFile,
+      JSON.stringify({ template: 'idea', lighthouse: 'l', objectives: ['o'] }),
+    );
+    const stub = await run(
+      ['intake', 'web', 'stub', stubFile],
+      '',
+      fakeFetch(200, { markdown: '# Goal\n' }),
+    );
+    expect(stub.out).toEqual(['# Goal']);
+    const missing = await run(['intake', 'web', 'issue', join(dir, 'nope.json')]);
+    expect(missing.code).toBe(2);
+    expect(missing.calls).toEqual([]);
+
+    expect(
+      ctlRequest(['github', 'recommend', 'octo/demo', '--paid-plan', '--identity', 'starter']),
+    ).toEqual({
+      path: '/api/control/github/recommend',
+      method: 'POST',
+      body: { repo: 'octo/demo', paidPlan: true, identity: 'starter' },
+    });
+    // A zone named like the verb keeps its own form.
+    expect(ctlRequest(['github', 'recommend', 'ruleset'])).toEqual({
+      path: '/api/control/zones/recommend/github',
+      method: 'GET',
+    });
+
+    expect(ctlRequest(['doctor', '--last', '--json'])).toEqual({
+      path: '/api/control/doctor',
+      method: 'GET',
+    });
+    expect(ctlRequest(['doctor', 'web', '--last'])).toBeNull();
+    const none = await run(['doctor', '--last'], '', fakeFetch(200, { run: null }));
+    expect([none.code, none.out]).toEqual([
+      0,
+      ['no doctor run yet: jumpmaster ctl doctor runs one'],
+    ]);
   });
 });

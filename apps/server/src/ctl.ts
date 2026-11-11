@@ -1,24 +1,64 @@
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { PRESETS } from '@jumpmaster/protocol';
-import { BOOT_KEYS, EditableSchema, ZONE_KEYS } from './config.js';
+import { type ControlMethod, CTL_VERBS, PAGES, routeFor, SWITCHES } from './api/manifest.js';
+import { BOOT_KEYS, EditableSchema, ZONE_ID, ZONE_KEYS } from './config.js';
 import type { DoctorCheck } from './doctor/checks.js';
 import { EXPIRATION_NOTE, REPOSITORY_ACCESS_NOTE, RESOURCE_OWNER_NOTE } from './github/guidance.js';
 import { readSecret, readSecretFile } from './secrets.js';
 
 const MODES: Record<string, string> = { pause: 'paused', resume: 'active', observe: 'observe' };
 
-export type CtlRequest =
-  | { path: string; body: unknown; method?: 'PUT' | 'PATCH' }
-  | { path: string; method: 'GET' | 'DELETE' };
+/** One control request: a GET or DELETE carries no body; the others carry JSON. */
+export type CtlRequest = { path: string; method: ControlMethod; body?: unknown };
+
+/** As the parsers below build it: POST unless said otherwise. */
+type Raw = { path: string; method?: ControlMethod; body?: unknown };
+
+/** The schema's zone id rule, from its one definition: a typo is a usage error, not a refusal. */
+export const CTL_ZONE_ID = ZONE_ID;
+
+/** `<path>=<json>` words, each path free of the prototype machinery; null when any is not one. */
+function pathPairs(words: string[]): { path: string[]; value: unknown }[] | null {
+  const bad = (seg: string) =>
+    seg === '' || ['__proto__', 'constructor', 'prototype'].includes(seg);
+  const pairs = words.map((a) => {
+    const eq = a.indexOf('=');
+    return eq <= 0 ? null : { path: a.slice(0, eq).split('.'), value: valueOf(a.slice(eq + 1)) };
+  });
+  if (pairs.length === 0 || pairs.some((p) => p === null || p.path.some(bad))) return null;
+  return pairs as { path: string[]; value: unknown }[];
+}
+
+/** The words of a `set`, with `--note <text>` taken out (null when `--note` has no text). */
+function withoutNote(rest: string[]): string[] | null {
+  const words: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] === '--note') {
+      if (i + 1 >= rest.length) return null;
+      i++;
+    } else words.push(rest[i] as string);
+  }
+  return words;
+}
 
 /**
  * `ctl config …` verbs that are one request. `set` (a read, then a conditional patch) and
  * `import` (a local file) are built by `runConfig`.
  */
-function configRequest(args: string[]): CtlRequest | null {
+function configRequest(args: string[]): Raw | null {
   const [, verb, ...rest] = args;
+  // `set` reads the revision first and `import` reads a file: `runConfig` sends the body.
+  if (verb === 'set') {
+    const words = withoutNote(rest);
+    return words && pathPairs(words) ? { path: '/api/control/config', method: 'PATCH' } : null;
+  }
+  if (verb === 'import') {
+    const words = withoutNote(rest.filter((a) => a !== '--dry-run'));
+    return words?.length === 1 ? { path: '/api/control/config/import' } : null;
+  }
   if (verb === 'show' && rest.every((a) => a === '--json'))
     return { path: '/api/control/config', method: 'GET' };
   if (verb === 'revisions' && rest.length === 0)
@@ -50,7 +90,7 @@ const EGRESS = ['off', 'monitor', 'enforce'];
  * [--resume]`: the same route as the wizard's project step. `--egress` defaults to monitor, the
  * wizard's and the add baseline's, never the schema's off. Gates are detected by the server.
  */
-function zonesAddRequest(args: string[]): CtlRequest | null {
+function zonesAddRequest(args: string[]): Raw | null {
   const [, , repo, ...rest] = args;
   if (!repo || !REPO_ARG.test(repo)) return null;
   const zone: Record<string, unknown> = { repo };
@@ -66,8 +106,8 @@ function zonesAddRequest(args: string[]): CtlRequest | null {
     if (value === undefined || value.startsWith('--')) return null;
     i += 1;
     if (flag === '--id') {
-      // The schema's zone id rule (`ZONE_ID`), so a typo is a usage error here, not a refusal.
-      if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(value)) return null;
+      // The schema's zone id rule, so a typo is a usage error here, not a refusal.
+      if (!CTL_ZONE_ID.test(value)) return null;
       zone.id = value;
     } else if (flag === '--preset') {
       if (!(PRESETS as readonly string[]).includes(value)) return null;
@@ -90,8 +130,19 @@ const GITHUB_LOGIN = /^@?[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$|^@?[A-Za-z0-9-]+\/[A
  * `ctl github <zone> recommend | pat <author|reviewer|read> | ruleset | codeowners [--reviewer
  * <login>]… | checklist`: one read of the zone's guidance, printed per artifact by `runCtl`.
  */
-function githubRequest(args: string[]): CtlRequest | null {
+function githubRequest(args: string[]): Raw | null {
   const [, zone, what, ...rest] = args;
+  // `ctl github recommend <owner/name>`: the wizard's recommendation, before a zone exists.
+  if (zone === 'recommend' && what && REPO_ARG.test(what)) {
+    const body: Record<string, unknown> = { repo: what };
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === '--paid-plan') body.paidPlan = true;
+      else if (rest[i] === '--identity' && (rest[i + 1] === 'starter' || rest[i + 1] === 'two-bot'))
+        body.identity = rest[++i];
+      else return null;
+    }
+    return { path: '/api/control/github/recommend', body };
+  }
   if (!zone || !what) return null;
   const path = `/api/control/zones/${encodeURIComponent(zone)}/github`;
   if (what === 'recommend' || what === 'ruleset' || what === 'checklist')
@@ -155,10 +206,17 @@ function githubLines(args: string[], g: GuidanceView): string[] {
  * `egress observed <zone>`, `egress adopt <zone> <host>…`. `set` reads first, so `runZonesSet`
  * builds it.
  */
-function zonesRequest(args: string[]): CtlRequest | null {
+function zonesRequest(args: string[]): Raw | null {
   const [, verb, ...rest] = args;
   const id = (s: string | undefined) => (s && !s.startsWith('--') ? encodeURIComponent(s) : null);
   if (verb === 'add') return zonesAddRequest(args);
+  // `set` reads the zone's revision first: `runZonesSet` sends the patch.
+  if (verb === 'set') {
+    const words = withoutNote(rest.slice(1));
+    return id(rest[0]) && words && pathPairs(words)
+      ? { path: '/api/control/config', method: 'PATCH' }
+      : null;
+  }
   if (verb === 'list')
     return rest.every((a) => a === '--json') ? { path: '/api/control/zones', method: 'GET' } : null;
   if (verb === 'show') {
@@ -187,7 +245,7 @@ function zonesRequest(args: string[]): CtlRequest | null {
  * `ctl mcp-tokens mint <zone> <read|write> --days N [--label <text>] | list | revoke <id>`: the
  * MCP token routes (M3). The minted value comes back once, to the operator token's holder.
  */
-function mcpTokensRequest(args: string[]): CtlRequest | null {
+function mcpTokensRequest(args: string[]): Raw | null {
   const [, verb, ...rest] = args;
   const path = '/api/control/mcp-tokens';
   if (verb === 'list') return rest.length === 0 ? { path, method: 'GET' } : null;
@@ -211,10 +269,57 @@ function mcpTokensRequest(args: string[]): CtlRequest | null {
   return { path, body: { zoneId, scope, days, ...(label !== undefined ? { label } : {}) } };
 }
 
+/**
+ * `ctl secrets list | set <name> | test <name> | remove <name> | reload`. `set` takes its value
+ * from stdin or a file, never argv: `runSecrets` sends it.
+ */
+function secretsRequest(args: string[]): Raw | null {
+  const [, verb, name, ...rest] = args;
+  const path = '/api/control/secrets';
+  if (verb === 'list') return name === undefined ? { path, method: 'GET' } : null;
+  if (verb === 'reload') return name === undefined ? { path: `${path}/reload`, body: {} } : null;
+  if (!name || name.startsWith('--')) return null;
+  const at = `${path}/${encodeURIComponent(name)}`;
+  if (verb === 'test' && rest.length === 0) return { path: `${at}/test`, body: {} };
+  if (verb === 'remove' && rest.length === 0) return { path: at, method: 'DELETE' };
+  if (verb === 'set') return { path: at, method: 'PUT' };
+  return null;
+}
+
+/** `ctl settings set <path>=<json>…`: `config set` for the install-wide paths (`runSettings`). */
+function settingsRequest(args: string[]): Raw | null {
+  const [, verb, ...rest] = args;
+  if (verb !== 'set') return null;
+  const words = withoutNote(rest);
+  return words && pathPairs(words) ? { path: '/api/control/config', method: 'PATCH' } : null;
+}
+
+/** `ctl intake <zone> stub|issue <file.json>`: the intake page's two forms, the answers in a file. */
+function intakeRequest(args: string[]): Raw | null {
+  const [, zone, what, file, ...rest] = args;
+  if (!zone || !file || rest.length > 0) return null;
+  if (what !== 'stub' && what !== 'issue') return null;
+  return {
+    path: `/api/control/zones/${encodeURIComponent(zone)}/intake/${what === 'stub' ? 'goal-stub' : 'issue'}`,
+  };
+}
+
 /** The control request for a command line, or null when it isn't one. */
 export function ctlRequest(args: string[]): CtlRequest | null {
+  const r = rawRequest(args);
+  if (!r) return null;
+  const method = r.method ?? 'POST';
+  return method === 'GET' || method === 'DELETE'
+    ? { path: r.path, method }
+    : { path: r.path, method, ...('body' in r ? { body: r.body } : {}) };
+}
+
+function rawRequest(args: string[]): Raw | null {
   const [command, zone] = args;
   if (command === 'config') return configRequest(args);
+  if (command === 'secrets') return secretsRequest(args);
+  if (command === 'settings') return settingsRequest(args);
+  if (command === 'intake') return intakeRequest(args);
   if (command === 'mcp-tokens') return mcpTokensRequest(args);
   if (command === 'github') return githubRequest(args);
   if (command === 'detect')
@@ -244,6 +349,11 @@ export function ctlRequest(args: string[]): CtlRequest | null {
       ? { path: `/api/control/zones/${encodeURIComponent(zone)}/labels`, body: {} }
       : null;
   if (command === 'doctor') {
+    // The latest run, as the doctor page shows it: a read, nothing runs.
+    if (args.includes('--last'))
+      return args.slice(1).every((a) => a === '--last' || a === '--json')
+        ? { path: '/api/control/doctor', method: 'GET' }
+        : null;
     const drop = args.includes('--drop');
     const cancel = args.includes('--cancel');
     // `--artifacts <dir>` is ctl's own (where the fails' files go): not part of the request.
@@ -356,18 +466,26 @@ export function formatDoctor(
  */
 const plain = (line: string): string => line.replace(/[\u0000-\u001f\u007f]/g, '');
 
-const CONFIG_USAGE =
-  'ctl config show [--json] | ctl config revisions | ctl config set <path>=<json>… [--note <text>] | ctl config rollback <id> [note] | ctl config import <file> [--dry-run] [--note <text>] | ctl config export | ctl config reload | ctl config adopt | ctl config mode file';
-export const SECRETS_USAGE =
-  'ctl secrets list | ctl secrets set <name> [--from-file <path>] [--created YYYY-MM-DD] (the value on stdin or in the file, never in argv) | ctl secrets test <name> | ctl secrets remove <name> | ctl secrets reload';
-
-const SETTINGS_USAGE = 'usage: ctl settings set <path>=<json>… [--note <text>]';
-const MCP_TOKENS_USAGE =
-  'ctl mcp-tokens mint <zone> <read|write> --days N [--label <text>] | ctl mcp-tokens list | ctl mcp-tokens revoke <id>';
+const formsOf = (verb: string): string[] => CTL_VERBS.find((v) => v.verb === verb)?.forms ?? [];
+const CONFIG_USAGE = formsOf('config').join(' | ');
+export const SECRETS_USAGE = formsOf('secrets').join(' | ');
+const SETTINGS_USAGE = `usage: ${formsOf('settings').join(' | ')}`;
 /** The install-wide settings: the editable document's keys other than the zones. */
 const INSTALL_KEYS = Object.keys(EditableSchema.shape).filter((k) => k !== 'dropZones');
 
-const USAGE = `usage: ctl status [--json] | ctl settings set <path>=<json>… [--note <text>] | ${MCP_TOKENS_USAGE} | ctl <pause|resume|observe> <zone> | ctl <kill|unkill> | ctl briefings | ctl rule <briefing> <option> [--options <digest>] [note] | ctl crew-cycle <zone> | ctl doctor [zone] [--json] [--artifacts <dir>] | ctl labels <zone> | ctl doctor <zone> --drop | ctl doctor <zone> --cancel | ctl setup-code | ctl setup reopen | ctl detect <owner/name> | ctl github <zone> recommend | pat <author|reviewer|read> | ruleset | codeowners [--reviewer <login>]… | checklist | ctl zones add <owner/name> [--id <id>] [--preset <p>] [--identity starter] [--egress off|monitor|enforce] [--resume] | ctl passphrase set (the passphrase on stdin) | ${CONFIG_USAGE} | ${SECRETS_USAGE}`;
+/** Every form of every verb, from the manifest. */
+const USAGE = `usage: ctl help | ctl <verb> --help | ${CTL_VERBS.flatMap((v) => v.forms).join(' | ')}`;
+
+/** `ctl help`: every verb's forms, grouped by the page that does the same. */
+export function ctlHelp(): string {
+  const lines = ['usage: ctl <verb> …  (ctl <verb> --help for one verb)', ''];
+  for (const page of PAGES) {
+    lines.push(`${page}:`);
+    for (const v of CTL_VERBS.filter((x) => x.page === page))
+      for (const f of v.forms) lines.push(`  ${f}`);
+  }
+  return lines.join('\n');
+}
 
 type Call = (
   method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
@@ -912,6 +1030,39 @@ function operatorToken(env: NodeJS.ProcessEnv, err: (line: string) => void): str
   return token;
 }
 
+/** A request that never reached the server: said in one line, never as a stack. */
+class Unreachable extends Error {}
+
+/** Why a fetch failed, as the system says it (`ECONNREFUSED`, `ENOTFOUND`, …). */
+function causeOf(e: unknown): string {
+  const cause = (e as { cause?: { code?: string; message?: string; errors?: { code?: string }[] } })
+    .cause;
+  return (
+    cause?.code ??
+    cause?.errors?.find((x) => x.code)?.code ??
+    cause?.message ??
+    (e instanceof Error ? e.message : String(e))
+  );
+}
+
+/**
+ * A route missing because its switch is off answers with the router's own 404: say which switch
+ * instead (the manifest's `requires`). A handler's 404 (an unknown id) passes through as it is.
+ */
+function switchOff(method: string, path: string, status: number, text: string): string | null {
+  if (status !== 404) return null;
+  const route = routeFor(method, path);
+  if (!route?.requires) return null;
+  try {
+    const j = JSON.parse(text) as { message?: unknown; error?: unknown };
+    if (j.error === 'Not Found' && typeof j.message === 'string' && j.message.startsWith('Route '))
+      return SWITCHES[route.requires];
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 /** Runs one control command against the server. Returns the process exit code. */
 export async function runCtl(
   args: string[],
@@ -921,6 +1072,42 @@ export async function runCtl(
   err: (line: string) => void = console.error,
   readStdin: () => Promise<string> = readStdinLine,
 ): Promise<number> {
+  // Help needs no server and no token.
+  if (args[0] === 'help' && args.length === 1) {
+    out(ctlHelp());
+    return 0;
+  }
+  const verb = CTL_VERBS.find((v) => v.verb === args[0]);
+  if (verb && args.includes('--help')) {
+    for (const f of verb.forms) out(f);
+    return 0;
+  }
+  const base = env.JM_SERVER_URL ?? 'http://127.0.0.1:7420';
+  const reach: typeof fetch = async (url, init) => {
+    try {
+      return await fetchImpl(url, init);
+    } catch (e) {
+      throw new Unreachable(`cannot reach ${base}: ${causeOf(e)}`);
+    }
+  };
+  try {
+    return await runCtlOn(args, env, base, reach, out, err, readStdin);
+  } catch (e) {
+    if (!(e instanceof Unreachable)) throw e;
+    err(e.message);
+    return 1;
+  }
+}
+
+async function runCtlOn(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  base: string,
+  fetchImpl: typeof fetch,
+  out: (line: string) => void,
+  err: (line: string) => void,
+  readStdin: () => Promise<string>,
+): Promise<number> {
   if (
     args[0] === 'config' ||
     args[0] === 'secrets' ||
@@ -929,7 +1116,6 @@ export async function runCtl(
   ) {
     const token = operatorToken(env, err);
     if (token === null) return 2;
-    const base = env.JM_SERVER_URL ?? 'http://127.0.0.1:7420';
     const call: Call = (method, path, body) =>
       fetchImpl(new URL(path, base), {
         method,
@@ -961,24 +1147,45 @@ export async function runCtl(
     }
     body = { passphrase: line };
   }
+  if (args[0] === 'intake') {
+    // The answers come from a file, as the intake page's form would send them.
+    const file = args[3] as string;
+    try {
+      body = JSON.parse(readFileSync(file, 'utf8')) as unknown;
+    } catch (e) {
+      err(`cannot read ${file}: ${e instanceof Error ? e.message : String(e)}`);
+      return 2;
+    }
+    // One filing per run: a fresh idempotency key unless the file names one (to retry it).
+    if (args[2] === 'issue' && isObject(body) && body.idempotencyKey === undefined)
+      body = { ...body, idempotencyKey: randomUUID() };
+  }
   const token = operatorToken(env, err);
   if (token === null) return 2;
-  const base = env.JM_SERVER_URL ?? 'http://127.0.0.1:7420';
   const res = await fetchImpl(
     new URL(request.path, base),
     request.method === 'GET' || request.method === 'DELETE'
       ? { method: request.method, headers: { authorization: `Bearer ${token}` } }
       : {
-          method: request.method ?? 'POST',
+          method: request.method,
           headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-          body: JSON.stringify(body),
+          body: JSON.stringify(body ?? {}),
         },
   );
   const text = await res.text();
+  const off = switchOff(request.method, request.path, res.status, text);
+  if (off) {
+    err(off);
+    return 1;
+  }
   if (args[0] === 'doctor' && !args.includes('--drop') && !args.includes('--cancel') && res.ok) {
     const { run } = JSON.parse(text) as {
-      run: { id: number; finishedAt: string | null; checks: DoctorCheck[] };
+      run: { id: number; finishedAt: string | null; checks: DoctorCheck[] } | null;
     };
+    if (run === null) {
+      out('no doctor run yet: jumpmaster ctl doctor runs one');
+      return 0;
+    }
     const at = args.indexOf('--artifacts');
     const written = at >= 0 ? writeArtifacts(run.checks, args[at + 1] as string) : new Map();
     if (args.includes('--json')) out(JSON.stringify({ run }, null, 2));
@@ -1008,7 +1215,11 @@ export async function runCtl(
     for (const line of mcpTokenLines(args[1], JSON.parse(text))) out(plain(line));
     return 0;
   }
-  if (args[0] === 'github' && res.ok) {
+  if (args[0] === 'intake' && args[2] === 'stub' && res.ok) {
+    out((JSON.parse(text) as { markdown: string }).markdown.replace(/\n$/, ''));
+    return 0;
+  }
+  if (args[0] === 'github' && !request.path.endsWith('/github/recommend') && res.ok) {
     for (const line of githubLines(args, JSON.parse(text) as GuidanceView)) out(line);
     return 0;
   }

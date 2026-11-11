@@ -219,16 +219,22 @@ describe('one config snapshot per request', () => {
 describe('ctl', () => {
   test('commands map to control requests', () => {
     expect(ctlRequest(['pause', 'main'])).toEqual({
+      method: 'POST',
       path: '/api/control/zones/main',
       body: { mode: 'paused' },
     });
     expect(ctlRequest(['resume', 'main'])?.body).toEqual({ mode: 'active' });
     expect(ctlRequest(['observe', 'main'])?.body).toEqual({ mode: 'observe' });
-    expect(ctlRequest(['kill'])).toEqual({ path: '/api/control/kill', body: { engaged: true } });
+    expect(ctlRequest(['kill'])).toEqual({
+      method: 'POST',
+      path: '/api/control/kill',
+      body: { engaged: true },
+    });
     expect(ctlRequest(['unkill'])?.body).toEqual({ engaged: false });
     expect(ctlRequest(['pause'])).toBeNull();
     expect(ctlRequest(['nonsense', 'main'])).toBeNull();
     expect(ctlRequest(['crew-cycle', 'main'])).toEqual({
+      method: 'POST',
       path: '/api/control/zones/main/crew-cycle',
       body: {},
     });
@@ -315,6 +321,7 @@ describe('rule route', () => {
 
   test('ctl rule builds the rule request', () => {
     expect(ctlRequest(['rule', '7', 'retry'])).toEqual({
+      method: 'POST',
       path: '/api/control/briefings/7/rule',
       body: { optionId: 'retry' },
     });
@@ -422,12 +429,18 @@ describe('doctor routes', () => {
   });
 
   test('ctl doctor builds the doctor request', () => {
-    expect(ctlRequest(['doctor'])).toEqual({ path: '/api/control/doctor', body: {} });
+    expect(ctlRequest(['doctor'])).toEqual({
+      method: 'POST',
+      path: '/api/control/doctor',
+      body: {},
+    });
     expect(ctlRequest(['doctor', 'main', '--json'])).toEqual({
+      method: 'POST',
       path: '/api/control/doctor',
       body: { zone: 'main' },
     });
     expect(ctlRequest(['doctor', 'main', '--drop'])).toEqual({
+      method: 'POST',
       path: '/api/control/doctor/drop',
       body: { zone: 'main' },
     });
@@ -500,6 +513,7 @@ describe('doctor routes', () => {
     expect(running?.statusCode).toBe(409);
     expect(running?.json().error).toContain('running');
     expect(ctlRequest(['doctor', 'main', '--cancel'])).toEqual({
+      method: 'POST',
       path: '/api/control/doctor/drop',
       body: { zone: 'main', cancel: true },
     });

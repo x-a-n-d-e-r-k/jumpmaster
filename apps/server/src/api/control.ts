@@ -200,6 +200,9 @@ export function originAllowed(origin: string | undefined, allowed: string[]): bo
  * Operator routes. The guard (`auth/guard.ts`) decides who reaches them: the operator token or a
  * browser session with its CSRF header, after the Host and Origin checks, because a container can
  * reach the host's loopback. Every mutating handler records a `control_audit` row from named fields.
+ *
+ * Every route here is listed in `api/manifest.ts` with the `ctl` invocation that reaches it; a test
+ * fails when a route is added without its entry (or its verb).
  */
 export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): void {
   const { db, now } = deps;
@@ -355,7 +358,6 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
     });
 
     // What Jumpmaster is doing and why it waits (§10.3): the home banner's line, for `ctl status`.
-    // Task 14's manifest: GET /api/control/status, ctl verb `ctl status`.
     scope.get('/api/control/status', async (req) =>
       buildStatus({
         db,

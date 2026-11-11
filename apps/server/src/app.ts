@@ -88,6 +88,13 @@ function usageView(db: Db, config: Config, at: Date): NonNullable<HomeState['usa
   };
 }
 
+const ROUTES = new WeakMap<FastifyInstance, { method: string; url: string }[]>();
+
+/** The routes an app from `createApp` registered (HEAD included, as Fastify adds it). */
+export function routesOf(app: FastifyInstance): { method: string; url: string }[] {
+  return [...(ROUTES.get(app) ?? [])];
+}
+
 export function createApp(
   deps: StickRouteDeps & {
     kick?: () => void;
@@ -112,6 +119,12 @@ export function createApp(
   },
 ): FastifyInstance {
   const app = Fastify({ logger: false });
+  // Every route as registered, for the control manifest's test (api/manifest.ts).
+  const routes: { method: string; url: string }[] = [];
+  app.addHook('onRoute', (r) => {
+    for (const method of [r.method].flat()) routes.push({ method, url: r.url });
+  });
+  ROUTES.set(app, routes);
   // Every page reads the config once per request: the store swaps it on each applied revision.
   const live = configReader(deps.config);
   /** The request's snapshot (taken by the guard). */
