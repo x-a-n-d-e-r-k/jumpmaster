@@ -137,6 +137,8 @@ describe('global checks', () => {
       summary: expect.stringContaining('stick-1'),
       fix: expect.stringContaining('logs'),
     });
+    // After a host restart the stick is only back if Docker starts at boot.
+    expect(one(await w.run(), 'stick.seen').fix).toContain('Docker start at boot');
     const empty = world();
     empty.db.prepare('DELETE FROM sticks').run();
     expect(one(await empty.run(), 'stick.seen')).toMatchObject({

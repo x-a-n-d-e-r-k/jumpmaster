@@ -116,6 +116,27 @@ describe('the README and runbooks', () => {
     expect([...new Set(missing)]).toEqual([]);
   });
 
+  test('Start at boot covers each host, and the from-source supervisors', () => {
+    const md = read(INSTALL);
+    const at = md.indexOf('\n## Start at boot\n');
+    expect(at).toBeGreaterThan(0);
+    const section = md.slice(at + 1, md.indexOf('\n## ', at + 1));
+    for (const s of [
+      'restart: unless-stopped',
+      'systemctl enable',
+      'Start Docker Desktop when you sign in',
+      'Automatically log in as',
+      // A foreground `up` ended with Ctrl+C is a manual stop: the services then stay down at boot.
+      'Ctrl+C',
+      'docker compose up -d',
+      // Host-process installs: launchd, a systemd user unit kept alive without a login, Task Scheduler.
+      '<key>KeepAlive</key>',
+      'loginctl enable-linger',
+      'schtasks',
+    ])
+      expect(section, s).toContain(s);
+  });
+
   test('every doctor check id exists as an anchor in install.md', () => {
     const src = read('apps/server/src/doctor/checks.ts');
     const ids = new Set([...src.matchAll(/\bid: '([a-z]+\.[a-z-]+)'/g)].map((m) => m[1] as string));
