@@ -15,52 +15,52 @@ credentials), and a _stick_ that starts the drops.
 - **Docker:** a rootful Docker Engine 27.0 or later on Linux (Engine 29.9.2 is the tested
   version), or Docker Desktop on macOS, with Docker Compose v2. Rootless Docker is not
   supported in this release.
+- **cosign** v3, to verify the release (the [install runbook](docs/runbooks/install.md#step-1-download-and-verify-the-release)
+  shows how to run it from its image instead).
 - **Claude:** a Claude Pro, Max, Team or Enterprise plan, and the Claude CLI on any machine with a
   browser, to run `claude setup-token` once.
 - **GitHub:** a repository with a GitHub Actions workflow that runs its tests on pull requests,
   plus either two bot accounts (an author and a reviewer) or starter mode (your account alone; see
-  below).
-- **`gh`** (the GitHub CLI) or the GitHub web UI, for the labels and the branch ruleset.
-- **cosign**, or Docker to run cosign from its image, to verify the release.
+  below). The setup wizard recommends which, and links each token page pre-filled.
 
 ## Quickstart
 
-The [install runbook](docs/runbooks/install.md) is the full procedure, with every token permission
-and every doctor check explained; this is its outline. Replace `your-org/your-repo` with your
-repository.
+Five commands, copied as they are: make a directory, download the release, check its signature,
+check the files, and start it.
 
 ```bash
-mkdir -p ~/jumpmaster && cd ~/jumpmaster
-printf 'JM_UID=%s\nJM_GID=%s\n' "$(id -u)" "$(id -g)" > .env
-mkdir -m 700 secrets
-
-# Download the release (the first is v0.4.0-rc.1), then verify it (install runbook, step 2).
-VERSION=v0.4.0-rc.1
-BASE="https://github.com/x-a-n-d-e-r-k/jumpmaster/releases/download/$VERSION"
-for f in compose.yaml images.lock.json SHA256SUMS SHA256SUMS.sigstore.json; do curl -fsSLO "$BASE/$f"; done
-
-# Set the branch ruleset (install runbook, step 4), then write each token to its own file,
-# without echo (it would land in your shell history): this bash/zsh helper reads it silently.
-put() {
-  local t
-  printf 'Paste the %s, then press Enter: ' "$1" >&2
-  if ! IFS= read -rs t || [ -z "$t" ]; then echo >&2; echo "nothing written to secrets/$1" >&2; return 1; fi
-  echo >&2
-  ( umask 077 && printf '%s\n' "$t" > "secrets/$1" && chmod 600 "secrets/$1" ) && echo "wrote secrets/$1" >&2
-}
-put claude_token; put github_author_token; put github_reviewer_token
-# (a token already in a file: install -m 0600 /path/to/file secrets/<name>)
-
-docker compose --profile init run --rm init --repo your-org/your-repo
-gh label create agent-ready --repo your-org/your-repo --color 0E8A16 --description "Ready for a Jumpmaster agent"
-gh label create agent-retry --repo your-org/your-repo --color FBCA04 --description "Ask Jumpmaster to retry a parked issue"
-docker compose up -d
-docker compose exec jumpmaster jumpmaster ctl doctor
+mkdir jumpmaster && cd jumpmaster
+for f in compose.yaml images.lock.json SHA256SUMS SHA256SUMS.sigstore.json; do curl -fsSLO "https://github.com/x-a-n-d-e-r-k/jumpmaster/releases/latest/download/$f"; done
+cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity-regexp '^https://github\.com/x-a-n-d-e-r-k/jumpmaster/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-github-workflow-trigger push \
+  --certificate-github-workflow-repository x-a-n-d-e-r-k/jumpmaster \
+  SHA256SUMS
+sha256sum -c SHA256SUMS
+docker compose up
 ```
 
-Fix what the doctor reports until it shows `0 fail`, run the doctor drop and move egress from
-`monitor` to `enforce` (step 9), then open `http://127.0.0.1:7420/` and file your first issue from
-the zone's intake page.
+(On macOS, `shasum -a 256 -c SHA256SUMS` in place of `sha256sum -c SHA256SUMS`.) `docker compose
+up` stays in the foreground so you can read its output; `docker compose up -d` followed by
+`docker compose logs -f jumpmaster` does the same in the background.
+
+Then open `http://127.0.0.1:7420` and enter the setup code from the line that starts
+`JUMPMASTER SETUP CODE:`. You choose a passphrase, and the setup wizard takes you through the
+Claude token, the GitHub tokens and your repository (`your-org/your-repo`), the ruleset and
+CODEOWNERS files it generates for GitHub, and the doctor. Everything after `docker compose up`
+happens in the browser.
+
+On a server, reach the page through an SSH tunnel from your own machine:
+`ssh -L 7420:127.0.0.1:7420 <host>`. If the first `up` stops with
+`set JM_UID and JM_GID in .env to your user`, your user is not uid 1000: run the line it prints
+and `docker compose up` again.
+
+Every page has a command too: `docker compose exec jumpmaster jumpmaster ctl help` lists every
+verb by page, and `ctl <verb> --help` shows one verb's forms. The
+[install runbook](docs/runbooks/install.md) has the scripted install (`init`, config as code),
+upgrades and troubleshooting by doctor check; the [operate runbook](docs/runbooks/operate.md)
+covers running it day to day.
 
 ## Security model
 
@@ -74,10 +74,12 @@ the zone's intake page.
   repository's release workflow, from a version tag on `main`. The stick verifies each trooper and
   proxy image against that identity, by digest, before it runs it, and never runs a tag. See
   [SECURITY.md](SECURITY.md#verifying-a-release).
-- **Secrets are files.** Tokens live in `secrets/` (mode `0600`) and reach containers as Docker
-  secrets; none is ever printed, logged or stored in the database. The UI listens on `127.0.0.1`
-  only, its pages need the operator's login, and its control routes the operator token or a
-  logged-in session.
+- **Secrets stay secret.** A credential you enter in the browser is tested, encrypted at rest
+  (AES-256-GCM, under `secrets/vault_key`, outside `data/`) and never shown back: pages show its
+  fingerprint and dates. A file under `secrets/` named for the credential works too, and wins.
+  No token is ever printed, logged or stored in clear. The UI listens on `127.0.0.1` only, its
+  pages need the operator's login, and its control routes the operator token or a logged-in
+  session. See [SECURITY.md](SECURITY.md#how-jumpmaster-guards-the-operator-and-the-secrets).
 - **Your rules stay in charge.** Jumpmaster refuses to merge unless the default branch's ruleset
   requires a pull request and CI, with no bypass, and it parks any agent change to a protected path
   (`.github/**`, `GOAL.md` and others).
@@ -96,15 +98,18 @@ What remains, stated plainly:
 
 ## Documentation
 
-- [Install runbook](docs/runbooks/install.md): the install, tokens, ruleset, egress, upgrades,
-  backups, and troubleshooting by doctor check.
+- [Install runbook](docs/runbooks/install.md): the browser install, the scripted install, config
+  as code, tokens, ruleset, egress, upgrades, and troubleshooting by doctor check.
+- [Operate runbook](docs/runbooks/operate.md): zones, settings, the GitHub page, the status line,
+  the doctor's actions, every `ctl` verb, backup and restore, and the operability session.
 - [Release runbook](docs/runbooks/release.md): how releases are built and signed, and what a stick
   needs to verify images.
 - [M2 cutover runbook](docs/runbooks/m2-cutover.md): moving an existing project's agent work onto
   Jumpmaster, and the zone settings for a real project.
 - [M3 crew runbook](docs/runbooks/m3-crew.md): the crew that plans issues from `GOAL.md`, and the
   MCP server.
-- [SECURITY.md](SECURITY.md): reporting a vulnerability and verifying a release.
+- [SECURITY.md](SECURITY.md): reporting a vulnerability, verifying a release, and how the login,
+  the guarded changes and the vault protect the install.
 
 ## Claude
 
