@@ -13,6 +13,7 @@ import type { ConfigStore } from '../config/store.js';
 import { type Config, STARTER_WARNING } from '../config.js';
 import type { Db } from '../db/open.js';
 import { listSticks } from '../db/repo.js';
+import { DOC } from '../doctor/checks.js';
 import { latestDoctorRun } from '../doctor/run.js';
 import { BASE_EGRESS } from '../payloads.js';
 import { PRESET_EGRESS } from '../presets.js';
@@ -503,6 +504,7 @@ function doctorPage(db: Db): string {
     `<h3>Check everything</h3><p>The doctor reads your setup (it never changes anything) and says what is missing, with the fix for each.</p>
 <p><button id="run">Run the doctor</button> <span id="run-out" role="status"></span></p>
 ${run ? `<p>Run ${run.id} (${escapeHtml(run.finishedAt ?? 'unfinished')}): ${fails ? `${fails} to fix` : 'nothing to fix'}.</p><ul>${rows}</ul>` : ''}
+<p>Jumpmaster comes back after the host restarts only if Docker starts at boot: <a href="${DOC}#start-at-boot" rel="noreferrer">how, on each host</a>.</p>
 <form method="post" action="/setup/dismiss"><button>Go to the factory floor</button></form>
 <script>
 document.getElementById('run').addEventListener('click', async () => {

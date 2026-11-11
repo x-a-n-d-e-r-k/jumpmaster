@@ -135,6 +135,9 @@ code (`docker compose logs jumpmaster` shows it again), and
 The UI is at <http://127.0.0.1:7420/>, on the host only. From another machine, tunnel it:
 `ssh -L 7420:127.0.0.1:7420 <host>`, then open the same address on your machine.
 
+The services come back by themselves after a host restart only if the Docker engine starts at boot;
+[Start at boot](#start-at-boot) says how on each host.
+
 **If your user is not uid 1000** (compose runs the server as uid 1000 unless `.env` says
 otherwise), the first `up` can stop with `bootstrap` saying the install directory is not
 writable, and the line to run:
@@ -277,6 +280,107 @@ images, and `egress` with `"mode":"enforce","proxy":"ready"`.
 
 The [operate runbook](operate.md) covers what comes next: zones, settings, rotation, the status
 line, backups.
+
+## Start at boot
+
+Both long-running services, `jumpmaster` and `stick`, are `restart: unless-stopped` in
+`compose.yaml`, so Docker brings them back whenever the Docker engine starts. What makes an install
+survive a host restart is therefore the engine starting at boot, which differs per host:
+
+- **Linux (Docker Engine):** enable the engine's units once:
+  `sudo systemctl enable --now docker.service containerd.service`. `systemctl is-enabled docker`
+  then says `enabled`. No one needs to sign in.
+- **macOS (Docker Desktop):** Docker Desktop, Settings, General, turn on
+  **Start Docker Desktop when you sign in to your computer**. Docker Desktop runs only in a
+  signed-in session, so an unattended Mac also needs automatic login: System Settings, Users &
+  Groups, **Automatically log in as** (not offered while FileVault is on; then someone signs in
+  after each restart). On a Mac mini or Studio, System Settings, Energy, **Start up automatically
+  after a power failure** covers power cuts.
+- **Windows (Docker Desktop with WSL 2):** not a host Jumpmaster is tested on. The equivalent is
+  the same Docker Desktop setting, **Start Docker Desktop when you sign in to your computer**, plus
+  automatic sign-in (for example Sysinternals Autologon) for an unattended machine.
+
+`unless-stopped` remembers a stop you made: a service stopped with `docker compose stop` or
+`docker compose down` stays stopped across restarts until you run `docker compose up -d` in the
+install directory again.
+
+To check, restart the host, wait a minute, then run `docker compose ps` (both services `running`)
+and the doctor: `stick.seen` passes once the stick has asked for work.
+
+### Running from source
+
+If you run the server and the stick as host processes (`node apps/server/dist/main.js <config>`
+and `node apps/stick/dist/main.js` from a checkout, as for development), nothing restarts them:
+give each one to the host's service manager. Each runs in the foreground from a small script that
+sets its environment and `exec`s node, for example `run-server.sh`:
+
+```sh
+#!/bin/bash
+set -euo pipefail
+export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin   # service managers start with a bare PATH
+cd "$HOME/jumpmaster"
+set -a; . "$HOME/.config/jumpmaster/server.env"; set +a      # the server's variables; the stick's script loads its own
+exec node apps/server/dist/main.js "$HOME/.config/jumpmaster/jumpmaster.config.json"
+```
+
+The stick's script is the same shape, with its own variables (`JM_SERVER_URL`, `JM_JOIN_TOKEN` or
+`JM_JOIN_TOKEN_FILE`, `JM_SLOTS`) and `exec node apps/stick/dist/main.js`. It needs the Docker
+engine; each service manager below starts it again if it exits, so starting before Docker is ready
+costs a retry, not the stick.
+
+**macOS, launchd.** One LaunchAgent per process, in
+`~/Library/LaunchAgents/com.example.jumpmaster.server.plist` (and `.stick.plist`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.example.jumpmaster.server</string>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>/path/to/run-server.sh</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>15</integer>
+  <key>StandardOutPath</key><string>/path/to/server.log</string>
+  <key>StandardErrorPath</key><string>/path/to/server.log</string>
+</dict></plist>
+```
+
+Load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.jumpmaster.server.plist`
+(`plutil -lint` checks the file first). After a new build, `launchctl kickstart -k gui/$(id -u)/com.example.jumpmaster.server`
+restarts it; a plain `kill` also works, since launchd starts it again. A LaunchAgent starts at sign-in,
+so the automatic-login note above applies.
+
+**Linux, systemd user units.** `~/.config/systemd/user/jumpmaster-server.service` (and
+`jumpmaster-stick.service`):
+
+```ini
+[Unit]
+Description=Jumpmaster server
+After=network-online.target
+
+[Service]
+ExecStart=%h/jumpmaster/run-server.sh
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target
+```
+
+Then `systemctl --user daemon-reload`, `systemctl --user enable --now jumpmaster-server jumpmaster-stick`,
+and `sudo loginctl enable-linger "$USER"` so your user's units start at boot without a sign-in.
+`journalctl --user -u jumpmaster-server` shows the output.
+
+**Windows, Task Scheduler** (untested, as above). A task per process that starts at sign-in, after
+Docker Desktop:
+
+```bat
+schtasks /Create /TN "Jumpmaster server" /SC ONLOGON /TR "C:\jumpmaster\run-server.cmd"
+schtasks /Create /TN "Jumpmaster stick" /SC ONLOGON /TR "C:\jumpmaster\run-stick.cmd"
+```
+
+Task Scheduler does not restart a process that exits unless you ask: in each task's Settings tab,
+turn on **If the task fails, restart every** with a short interval.
 
 ## The scripted install
 
@@ -1015,7 +1119,8 @@ The kill switch stops every drop. Release it when safe:
 **Action:** See the sticks on home (`/`).
 
 No stick has asked for work lately. `docker compose ps`, then `docker compose logs stick`: a wrong
-join token, or a server it can't reach ([Stick](#stick)).
+join token, or a server it can't reach ([Stick](#stick)). If the host restarted and the services
+did not come back, Docker is not starting at boot ([Start at boot](#start-at-boot)).
 
 ### `stick.capabilities`
 

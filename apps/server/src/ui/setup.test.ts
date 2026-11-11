@@ -13,6 +13,7 @@ import { ConfigStore } from '../config/store.js';
 import { STARTER_WARNING } from '../config.js';
 import { openDb } from '../db/open.js';
 import { insertStick, stampStick } from '../db/repo.js';
+import { DOC } from '../doctor/checks.js';
 import { PRESET_EGRESS } from '../presets.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
 import { openVault } from '../vault/vault.js';
@@ -339,6 +340,8 @@ describe('the setup wizard', () => {
     const doctor = await w.get('/setup/doctor');
     expect(doctor.statusCode).toBe(200);
     expect(doctor.body).toContain('Go to the factory floor');
+    // The last step says how the install survives a reboot.
+    expect(doctor.body).toContain(`${DOC}#start-at-boot`);
     expect(w.store.current().dropZones[0]).toMatchObject({ identity: 'starter' });
   });
 
