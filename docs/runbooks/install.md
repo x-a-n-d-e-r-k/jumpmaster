@@ -1035,7 +1035,7 @@ The same for the reviewer; it must be another account than the author, with Writ
 
 ### `forge.author-reads`
 
-**Action:** Make a author token with the right permissions (GitHub's token page, pre-filled with the [Tokens](#tokens) permissions).
+**Action:** Make an author token with the right permissions (GitHub's token page, pre-filled with the [Tokens](#tokens) permissions).
 
 Tries each read the server relies on with the author token: Contents, Issues, Pull requests,
 Commit statuses, and CI results (Actions). A refusal names the permission to add ([Tokens](#tokens)).
