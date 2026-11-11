@@ -1,5 +1,5 @@
 {
-  "_about": "A config like the one `jumpmaster init` writes for a compose install (docs/runbooks/install.md). Secrets are never in this file: the server reads JM_CLAUDE_TOKEN, JM_GITHUB_AUTHOR_TOKEN, JM_GITHUB_REVIEWER_TOKEN (a different account from the author; not needed with identity starter), JM_JOIN_TOKEN and JM_OPERATOR_TOKEN, each from the file its *_FILE variable names. JM_GITHUB_READ_TOKEN is needed when reviewReadToken is true. The preset's image comes from the release image lock in the server image, by digest.",
+  "_about": "A config like the one `jumpmaster init` writes for a compose install: a file here means file mode (docs/runbooks/install.md, The scripted install, and Config as code; `jumpmaster ctl config export` writes the same shape from a db-mode install). Secrets are never in this file: the server reads each credential from secrets/ by name (claude_token, github_author_token, github_reviewer_token for two-bot only, github_read_token when reviewReadToken is true), from a JM_*_FILE variable, or from the vault (Settings, Credentials); the machine secrets (join_token, operator_token, vault_key) are made by the bootstrap service. The preset's image comes from the release image lock in the server image, by digest.",
   "listen": {
     "host": "0.0.0.0",
     "port": 7420,

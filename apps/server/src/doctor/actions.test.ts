@@ -139,10 +139,14 @@ describe('where each fail leads', () => {
   });
 
   test('forge.author-reads and forge.reviewer-reads link the template URL for that role', () => {
-    for (const role of ['author', 'reviewer'] as const)
+    // The article follows the word: an author token, a reviewer token.
+    for (const [role, label] of [
+      ['author', 'Make an author token with the right permissions'],
+      ['reviewer', 'Make a reviewer token with the right permissions'],
+    ] as const)
       expect(actionFor(fail(`forge.${role}-reads`), { zone, pages: PAGES_M45A })).toEqual({
         kind: 'forge',
-        label: `Make a ${role} token with the right permissions`,
+        label,
         href: patTemplateUrl(role, repoOf(zone), { expirationDays: 90 }),
       });
   });

@@ -79,12 +79,15 @@ function settings(path: string, label: string) {
     ctx.pages.settings ? app(label, path) : docs(check);
 }
 
+/** The indefinite article for a word: "an" before a vowel sound's letter, else "a". */
+const article = (word: string): string => (/^[aeiou]/i.test(word) ? 'an' : 'a');
+
 function reads(role: 'author' | 'reviewer') {
   return (check: DoctorCheck, ctx: ActionCtx): Action =>
     ctx.zone
       ? {
           kind: 'forge',
-          label: `Make a ${role} token with the right permissions`,
+          label: `Make ${article(role)} ${role} token with the right permissions`,
           href:
             ctx.guidance?.pat[role] ??
             patTemplateUrl(role, repoOf(ctx.zone), { expirationDays: PAT_EXPIRATION_DAYS }),

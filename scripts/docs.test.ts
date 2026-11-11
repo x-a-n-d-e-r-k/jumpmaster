@@ -5,7 +5,12 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, normalize, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
+import { CONTROL_ROUTES, CTL_VERBS, PAGES } from '../apps/server/src/api/manifest.js';
+import { ENV_FIX, VAULT_KEY_WARNING } from '../apps/server/src/bootstrap.js';
 import { STARTER_WARNING } from '../apps/server/src/config.js';
+import { actionFor, type Pages } from '../apps/server/src/doctor/actions.js';
+import { CHECK_IDS, DOC } from '../apps/server/src/doctor/checks.js';
+import { makeZone } from '../apps/server/src/test/fixtures.js';
 import { GITHUB_ISSUER, identityRegexp } from '../apps/stick/src/verify.js';
 import { walk } from './repo-files.js';
 
@@ -13,6 +18,7 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const read = (p: string) => readFileSync(join(ROOT, p), 'utf8');
 const REPOSITORY = 'x-a-n-d-e-r-k/jumpmaster';
 const INSTALL = 'docs/runbooks/install.md';
+const OPERATE = 'docs/runbooks/operate.md';
 
 const DOCS = [
   'README.md',
@@ -168,15 +174,14 @@ describe('the README and runbooks', () => {
   });
 
   test('the public docs name no personal path, and use placeholders for the user’s repository', () => {
-    for (const file of ['README.md', INSTALL]) {
-      const text = read(file);
-      expect(text, file).not.toMatch(/\/Users\/|\/home\/[a-z]/);
-      expect(text, file).toContain('your-org/your-repo');
-    }
+    for (const file of DOCS) expect(read(file), file).not.toMatch(/\/Users\/|\/home\/[a-z]/);
+    for (const file of ['README.md', INSTALL, OPERATE])
+      expect(read(file), file).toContain('your-org/your-repo');
   });
 
   test('the token helper is safe: bash fence, a prompt on stderr, nothing written on empty input', () => {
-    for (const file of ['README.md', INSTALL]) {
+    // The scripted install's helper; the README's browser path writes no token file.
+    for (const file of [INSTALL]) {
       const text = read(file);
       const fence = /```(\w*)\n(?:(?!```)[\s\S])*?^put\(\) \{[\s\S]*?^```/m.exec(text);
       expect(fence, file).not.toBeNull();
@@ -234,5 +239,214 @@ describe('the README and runbooks', () => {
     ])
       expect(read(file), file).toMatch(/install\.md/);
     expect(relative(ROOT, join(ROOT, INSTALL))).toBe(INSTALL);
+  });
+});
+
+/** The fenced blocks of a markdown text, with their info string. */
+const fences = (md: string): { lang: string; body: string }[] =>
+  [...md.matchAll(/^(```|~~~)(\w*)[^\n]*\n([\s\S]*?)^\1[^\n]*$/gm)].map((m) => ({
+    lang: m[2] as string,
+    body: m[3] as string,
+  }));
+
+/** Shell commands in a block: continuation lines joined, comments and blank lines dropped. */
+const commands = (body: string): string[] =>
+  body
+    .replace(/\\\n\s*/g, ' ')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l !== '' && !l.startsWith('#'));
+
+/** A section of a markdown text: from its heading to the next heading of the same or a higher level. */
+function section(md: string, heading: RegExp): string {
+  const lines = md.split('\n');
+  const start = lines.findIndex((l) => heading.test(l));
+  if (start < 0) throw new Error(`no heading ${heading}`);
+  const level = (lines[start]?.match(/^#+/)?.[0] ?? '#').length;
+  const end = lines.findIndex(
+    (l, i) => i > start && /^#+ /.test(l) && (l.match(/^#+/)?.[0] ?? '').length <= level,
+  );
+  return lines.slice(start, end < 0 ? undefined : end).join('\n');
+}
+
+/** The `ctl` table operate.md carries, generated from the manifest. */
+export function ctlTable(): string {
+  const routesOf = (verb: string): string[] =>
+    CONTROL_ROUTES.filter((r) =>
+      [r.ctl, ...(r.also ?? [])].some((e) => e !== null && e.split(' ')[1] === verb),
+    ).map((r) => `\`${r.method} ${r.path}\``);
+  const rows = PAGES.flatMap((page) =>
+    CTL_VERBS.filter((v) => v.page === page).map(
+      (v) =>
+        `| ${page} | ${v.forms.map((f) => `\`${f.replaceAll('|', '\\|')}\``).join('<br>')} | ${routesOf(v.verb).join('<br>')} |`,
+    ),
+  );
+  return ['| Page | `ctl` | Route |', '|---|---|---|', ...rows].join('\n');
+}
+
+describe('M4.5 docs (Task 15)', () => {
+  test("the README's prelude is at most six commands and names no .env, secrets/ or token file", () => {
+    const quick = section(read('README.md'), /^## Quickstart/);
+    const block = fences(quick)[0];
+    expect(block?.lang).toMatch(/^(sh|bash)$/);
+    const cmds = commands(block?.body ?? '');
+    expect(cmds.length).toBeGreaterThanOrEqual(5);
+    expect(cmds.length).toBeLessThanOrEqual(6);
+    expect(cmds.join('\n')).not.toMatch(/\.env|secrets\/|_token|put /);
+    expect(cmds[0]).toMatch(/^mkdir .* && cd /);
+    expect(cmds[1]).toMatch(
+      /compose\.yaml images\.lock\.json SHA256SUMS SHA256SUMS\.sigstore\.json/,
+    );
+    expect(cmds[2]).toMatch(/^cosign verify-blob /);
+    expect(cmds[3]).toMatch(/^sha256sum -c SHA256SUMS/);
+    expect(cmds[4]).toBe('docker compose up');
+    // Then the browser: the setup code's line, the tunnel for a server, and the alternative.
+    for (const t of [
+      'JUMPMASTER SETUP CODE:',
+      'http://127.0.0.1:7420',
+      'ssh -L 7420:127.0.0.1:7420 <host>',
+      'docker compose up -d',
+      'docker compose logs -f jumpmaster',
+      'jumpmaster ctl help',
+    ])
+      expect(quick, t).toContain(t);
+    // The scripted install lives in the runbook.
+    expect(quick).not.toContain('--profile init');
+  });
+
+  test('every ctl verb in the manifest appears in operate.md, whose ctl table is the manifest', () => {
+    const text = read(OPERATE);
+    for (const v of CTL_VERBS) expect(text, v.verb).toContain(`ctl ${v.verb}`);
+    const at = text.indexOf('<!-- ctl-table:start -->');
+    const end = text.indexOf('<!-- ctl-table:end -->');
+    expect(at).toBeGreaterThan(0);
+    expect(text.slice(at + '<!-- ctl-table:start -->'.length, end).trim()).toBe(ctlTable());
+    expect(text).toContain('jumpmaster ctl help');
+    expect(text).toContain('ctl <verb> --help');
+  });
+
+  test('every docs action anchor exists, and each troubleshooting entry names its action', () => {
+    const md = read(INSTALL);
+    const have = anchors(md);
+    const zone = makeZone({ id: '<zone>', repo: 'your-org/your-repo' });
+    const none: Pages = { zones: false, settings: false, credentials: false };
+    const all: Pages = { zones: true, settings: true, credentials: true };
+    for (const id of CHECK_IDS) {
+      for (const pages of [none, all]) {
+        const a = actionFor(
+          { id, zoneId: '<zone>', status: 'fail', summary: 's' },
+          { zone, pages },
+        );
+        if (a?.kind !== 'docs') continue;
+        const [base, anchor] = a.href.split('#');
+        expect(base, id).toBe(DOC.split('#')[0]);
+        expect(have.has(anchor as string), `${id}: #${anchor}`).toBe(true);
+      }
+      // This build registers every page: its action is named in the entry, word for word.
+      const a = actionFor(
+        { id, zoneId: '<zone>', status: 'fail', summary: 's' },
+        { zone, pages: all },
+      );
+      const entry = section(md, new RegExp(`^### \`${id.replace('.', '\\.')}\`$`));
+      if (a && a.kind !== 'docs') expect(entry, id).toContain(`**Action:** ${a.label}`);
+    }
+  });
+
+  test('SECURITY.md says why the setup code goes to stderr and that a forwarded log carries it until it is claimed', () => {
+    const text = read('SECURITY.md').replace(/\s*\n\s*/g, ' ');
+    for (const t of [
+      'JUMPMASTER SETUP CODE:',
+      "printed once per start on the server's stderr",
+      'a log you forward elsewhere carries the code until it is claimed',
+      'HttpOnly',
+      'SameSite=Strict',
+      'x-jm-csrf',
+      'AES-256-GCM',
+      'secrets/vault_key',
+      '`data/` alone holds only ciphertext',
+      'Guarded changes',
+    ])
+      expect(text, t).toContain(t);
+  });
+
+  test('the upgrade section names the three steps plus the login claim, and nothing else', () => {
+    const up = section(read(INSTALL), /^## Upgrade/);
+    const steps = [...up.matchAll(/^(\d+)\. (.+)$/gm)].map((m) => m[2] as string);
+    expect(steps).toHaveLength(4);
+    expect(steps[0]).toMatch(/^\*\*Drain\.\*\*/);
+    expect(steps[1]).toMatch(/^\*\*Replace `compose\.yaml`\.\*\*/);
+    expect(steps[2]).toMatch(/^\*\*`docker compose up -d`\.\*\*/);
+    expect(steps[3]).toMatch(/^\*\*Claim the login\.\*\*/);
+    for (const t of [
+      'may be deleted',
+      'secrets/github_reviewer_token',
+      'write the export to the config file before you downgrade',
+      'returns to file mode with the file',
+      'code owner review blocks the reviewer bot',
+      '* @<reviewer-bot>',
+    ])
+      expect(up, t).toContain(t);
+  });
+
+  test('every export line in the runbooks carries exec -T, and every passphrase command reads it with read -rs', () => {
+    let exports = 0;
+    let passphrases = 0;
+    for (const file of DOCS) {
+      for (const f of fences(read(file)))
+        for (const c of commands(f.body)) {
+          if (/ctl config export\s*>/.test(c)) {
+            exports++;
+            expect(c, file).toContain('exec -T');
+          }
+          if (/ctl passphrase set/.test(c)) {
+            passphrases++;
+            expect(c, file).toMatch(
+              /^read -rs JM_PASS && printf '%s' "\$JM_PASS" \| docker compose exec -T jumpmaster jumpmaster ctl passphrase set/,
+            );
+          }
+        }
+      for (const line of read(file).split('\n'))
+        if (/ctl config export >/.test(line)) expect(line, file).toContain('exec -T');
+    }
+    expect(exports).toBeGreaterThanOrEqual(2);
+    expect(passphrases).toBeGreaterThanOrEqual(2);
+  });
+
+  test("install.md quotes bootstrap's .env fix for a host whose uid is not 1000, and the gateCi order", () => {
+    const text = read(INSTALL).replace(/\s*\n\s*/g, ' ');
+    expect(text).toContain(ENV_FIX(false));
+    expect(text).toMatch(/symlink/);
+    expect(read(OPERATE).replace(/\s*\n\s*/g, ' ')).toContain(
+      'Upgrade the sticks and the zone images before you set `gateCi: false`',
+    );
+  });
+
+  test('the prelude says how to install a release candidate, and no doc names a particular tag or a diagnostics export', () => {
+    const rc =
+      'To install a release candidate (a prerelease, which `latest` skips), replace `latest/download` with `download/<tag>`.';
+    for (const file of ['README.md', INSTALL]) {
+      const text = read(file).replace(/\s*\n\s*/g, ' ');
+      expect(text, file).toContain(rc);
+    }
+    for (const file of ['README.md', INSTALL, OPERATE, 'SECURITY.md']) {
+      expect(read(file), file).not.toMatch(/rc\.1/);
+      expect(read(file), file).not.toMatch(/diagnostics export/i);
+    }
+  });
+
+  test("the upgrade says what bootstrap warns on the first start, and runs the download in the existing directory; SECURITY.md gives the audit table's size", () => {
+    const up = section(read(INSTALL), /^## Upgrade/);
+    expect(up.replace(/\s*\n\s*/g, ' ')).toContain(
+      `jumpmaster bootstrap: warning: ${VAULT_KEY_WARNING}`,
+    );
+    expect(up).not.toMatch(/mkdir jumpmaster/);
+    // Step 2's own commands (an indented fence inside the list), for the directory you are in.
+    for (const cmd of [
+      /^ {3}for f in compose\.yaml .*curl -fsSLO/m,
+      /^ {3}cosign verify-blob /m,
+      /^ {3}sha256sum -c SHA256SUMS/m,
+    ])
+      expect(up).toMatch(cmd);
+    expect(read('SECURITY.md').replace(/\s*\n\s*/g, ' ')).toContain('keeps the latest 5000 rows');
   });
 });
