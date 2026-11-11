@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -276,5 +276,126 @@ describe('carried into Task 14', () => {
       ['mcp-tokens', 'revoke', '3'],
     ])
       expect([argv, ctlRequest(argv) !== null]).toEqual([argv, true]);
+  });
+});
+
+describe('Task 14, fix round 1', () => {
+  /** runCtl with recording output and a recording fetch answering `status` with `body`. */
+  async function ctl(
+    argv: string[],
+    o: { env?: Record<string, string>; fetch?: typeof fetch } = {},
+  ) {
+    const out: string[] = [];
+    const err: string[] = [];
+    const sent: { url: string; body: unknown }[] = [];
+    const impl =
+      o.fetch ??
+      ((async (url: URL | string, init?: RequestInit) => {
+        sent.push({
+          url: String(url),
+          body: init?.body ? JSON.parse(String(init.body)) : undefined,
+        });
+        return new Response('{"number":7}', { status: 201 });
+      }) as typeof fetch);
+    const code = await runCtl(
+      argv,
+      { ...env, ...o.env },
+      impl,
+      (l) => out.push(l),
+      (l) => err.push(l),
+    );
+    return { code, out, err, sent };
+  }
+
+  test('I1: a rerun of ctl intake issue with the same file sends the same idempotency key; a changed file a new one', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'jm-intake-key-'));
+    const file = join(dir, 'issue.json');
+    const spec = { title: 't', context: 'c', acceptance: ['a'], tests: ['b'] };
+    writeFileSync(file, JSON.stringify(spec));
+    const keyOf = async (zone = 'web') =>
+      ((await ctl(['intake', zone, 'issue', file])).sent[0]?.body as { idempotencyKey: string })
+        .idempotencyKey;
+    const first = await keyOf();
+    expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    // The server's schema takes it.
+    const { IntakeIssueSchema } = await import('../intake.js');
+    expect(IntakeIssueSchema.safeParse({ ...spec, idempotencyKey: first }).success).toBe(true);
+    expect(await keyOf()).toBe(first);
+    // Another zone, or another file: another key.
+    expect(await keyOf('api')).not.toBe(first);
+    writeFileSync(file, JSON.stringify({ ...spec, title: 'u' }));
+    expect(await keyOf()).not.toBe(first);
+    // A key the file names is used as it is.
+    const own = '0b0f7d1c-2f1e-4e6b-9a51-0b6c5e9a1d2f';
+    writeFileSync(file, JSON.stringify({ ...spec, idempotencyKey: own }));
+    expect(await keyOf()).toBe(own);
+  });
+
+  test('M1: a server url without a scheme, and a server that dies mid-answer, are one line and exit 1', async () => {
+    for (const url of ['localhost:7420', 'ftp://127.0.0.1:7420', 'not a url']) {
+      const r = await ctl(['status'], { env: { JM_SERVER_URL: url }, fetch });
+      expect([url, r.code, r.out, r.err]).toEqual([
+        url,
+        1,
+        [],
+        [`bad server url ${url}: JM_SERVER_URL is http://host:port or https://host:port`],
+      ]);
+    }
+    // Headers, then half a body, then the connection is cut.
+    const port = await new Promise<number>((resolve) => {
+      const s = createServer((sock) => {
+        sock.once('data', () => {
+          sock.write(
+            'HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{"headline":',
+          );
+          setTimeout(() => sock.destroy(), 20);
+        });
+      });
+      s.listen(0, '127.0.0.1', () => resolve((s.address() as { port: number }).port));
+      close = () => new Promise((done) => s.close(() => done()));
+    });
+    const url = `http://127.0.0.1:${port}`;
+    for (const argv of [['status'], ['config', 'show']]) {
+      const r = await ctl(argv, { env: { JM_SERVER_URL: url }, fetch });
+      expect([argv, r.code, r.out]).toEqual([argv, 1, []]);
+      expect(r.err).toHaveLength(1);
+      expect(r.err[0]).toMatch(new RegExp(`^cannot reach ${url}: `));
+    }
+  });
+
+  test('M2: --help is help only right after the verb words, never a value of a flag', async () => {
+    const r = await ctl(['mcp-tokens', 'mint', 'web', 'read', '--days', '7', '--label', '--help']);
+    expect(r.code).toBe(0);
+    expect(r.sent).toEqual([
+      {
+        url: 'http://127.0.0.1:7420/api/control/mcp-tokens',
+        body: { zoneId: 'web', scope: 'read', days: 7, label: '--help' },
+      },
+    ]);
+    const forms = (verb: string) => CTL_VERBS.find((v) => v.verb === verb)?.forms;
+    for (const argv of [
+      ['mcp-tokens', '--help'],
+      ['mcp-tokens', 'mint', '--help'],
+      ['config', 'set', '--help'],
+      ['zones', 'egress', '--help'],
+      ['pause', '--help'],
+    ]) {
+      const h = await ctl(argv);
+      expect([argv, h.code, h.out, h.sent]).toEqual([argv, 0, forms(argv[0] as string), []]);
+    }
+  });
+
+  test('M7: bare ctl, --help, -h and help print the grouped help; help <verb> that verb', async () => {
+    const help = ctlHelp().split('\n');
+    const bare = await ctl([]);
+    expect([bare.code, bare.out, bare.err]).toEqual([2, [], help]);
+    for (const argv of [['--help'], ['-h'], ['help']]) {
+      const r = await ctl(argv);
+      expect([argv, r.code, r.out, r.err]).toEqual([argv, 0, help, []]);
+    }
+    const one = await ctl(['help', 'secrets']);
+    expect([one.code, one.out]).toEqual([0, CTL_VERBS.find((v) => v.verb === 'secrets')?.forms]);
+    const unknown = await ctl(['help', 'nope']);
+    expect([unknown.code, unknown.err]).toEqual([2, help]);
   });
 });

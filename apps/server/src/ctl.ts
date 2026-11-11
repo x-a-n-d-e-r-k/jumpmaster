@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -1030,6 +1030,31 @@ function operatorToken(env: NodeJS.ProcessEnv, err: (line: string) => void): str
   return token;
 }
 
+/**
+ * `--help` asks for a verb's forms only right after its words: `ctl <verb> --help`, or
+ * `ctl <verb> <subcommand> --help` (a subcommand is a fixed second word of one of its forms).
+ * Anywhere else it is an argument, such as a label.
+ */
+function helpAsked(verb: { forms: string[] }, args: string[]): boolean {
+  if (args[1] === '--help') return args.length === 2;
+  const subs = new Set(
+    verb.forms
+      .map((f) => f.split(' ')[2])
+      .filter((w): w is string => !!w && /^[a-z][a-z-]*$/.test(w)),
+  );
+  return args[2] === '--help' && args.length === 3 && subs.has(args[1] as string);
+}
+
+/**
+ * The default idempotency key of an intake issue: a UUID (version 8) from the zone and the file's
+ * bytes, so running the same file again is the same filing and the server deduplicates it.
+ */
+export function intakeKey(zone: string, bytes: Buffer): string {
+  const h = createHash('sha256').update(zone).update('\0').update(bytes).digest('hex');
+  const variant = ((Number.parseInt(h[16] as string, 16) & 0x3) | 0x8).toString(16);
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-8${h.slice(13, 16)}-${variant}${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
 /** A request that never reached the server: said in one line, never as a stack. */
 class Unreachable extends Error {}
 
@@ -1073,19 +1098,52 @@ export async function runCtl(
   readStdin: () => Promise<string> = readStdinLine,
 ): Promise<number> {
   // Help needs no server and no token.
-  if (args[0] === 'help' && args.length === 1) {
-    out(ctlHelp());
+  const lines = (to: (line: string) => void, text: string) => {
+    for (const l of text.split('\n')) to(l);
+  };
+  if (args.length === 0) {
+    lines(err, ctlHelp());
+    return 2;
+  }
+  if (args.length === 1 && ['help', '--help', '-h'].includes(args[0] as string)) {
+    lines(out, ctlHelp());
+    return 0;
+  }
+  if (args[0] === 'help') {
+    const named = CTL_VERBS.find((v) => v.verb === args[1]);
+    if (!named || args.length > 2) {
+      lines(err, ctlHelp());
+      return 2;
+    }
+    for (const f of named.forms) out(f);
     return 0;
   }
   const verb = CTL_VERBS.find((v) => v.verb === args[0]);
-  if (verb && args.includes('--help')) {
+  if (verb && helpAsked(verb, args)) {
     for (const f of verb.forms) out(f);
     return 0;
   }
   const base = env.JM_SERVER_URL ?? 'http://127.0.0.1:7420';
+  let parsed: URL | undefined;
+  try {
+    parsed = new URL(base);
+  } catch {
+    parsed = undefined;
+  }
+  if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+    err(`bad server url ${base}: JM_SERVER_URL is http://host:port or https://host:port`);
+    return 1;
+  }
+  // The whole answer is read here, so a connection cut mid-body is "cannot reach" too.
   const reach: typeof fetch = async (url, init) => {
     try {
-      return await fetchImpl(url, init);
+      const res = await fetchImpl(url, init);
+      const body = await res.arrayBuffer();
+      return new Response(res.status === 204 || res.status === 304 ? null : body, {
+        status: res.status,
+        statusText: res.statusText,
+        headers: res.headers,
+      });
     } catch (e) {
       throw new Unreachable(`cannot reach ${base}: ${causeOf(e)}`);
     }
@@ -1150,15 +1208,18 @@ async function runCtlOn(
   if (args[0] === 'intake') {
     // The answers come from a file, as the intake page's form would send them.
     const file = args[3] as string;
+    let bytes: Buffer;
     try {
-      body = JSON.parse(readFileSync(file, 'utf8')) as unknown;
+      bytes = readFileSync(file);
+      body = JSON.parse(bytes.toString('utf8')) as unknown;
     } catch (e) {
       err(`cannot read ${file}: ${e instanceof Error ? e.message : String(e)}`);
       return 2;
     }
-    // One filing per run: a fresh idempotency key unless the file names one (to retry it).
+    // The same file run again is the same filing: the key comes from the zone and the bytes,
+    // unless the file names its own.
     if (args[2] === 'issue' && isObject(body) && body.idempotencyKey === undefined)
-      body = { ...body, idempotencyKey: randomUUID() };
+      body = { ...body, idempotencyKey: intakeKey(args[1] as string, bytes) };
   }
   const token = operatorToken(env, err);
   if (token === null) return 2;
