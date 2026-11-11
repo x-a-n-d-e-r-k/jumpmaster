@@ -342,6 +342,7 @@ describe('the setup wizard', () => {
     expect(doctor.body).toContain('Go to the factory floor');
     // The last step says how the install survives a reboot.
     expect(doctor.body).toContain(`${DOC}#start-at-boot`);
+    expect(doctor.body).toContain('docker compose up -d');
     expect(w.store.current().dropZones[0]).toMatchObject({ identity: 'starter' });
   });
 

@@ -125,7 +125,9 @@ describe('the README and runbooks', () => {
       'restart: unless-stopped',
       'systemctl enable',
       'Start Docker Desktop when you sign in',
-      'Windows',
+      'Automatically log in as',
+      // A foreground `up` ended with Ctrl+C is a manual stop: the services then stay down at boot.
+      'Ctrl+C',
       'docker compose up -d',
       // Host-process installs: launchd, a systemd user unit kept alive without a login, Task Scheduler.
       '<key>KeepAlive</key>',

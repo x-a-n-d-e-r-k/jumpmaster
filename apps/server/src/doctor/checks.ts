@@ -619,7 +619,7 @@ function stickSeenCheck(d: DoctorDeps, sticks: Stick[]): DoctorCheck {
       ...base,
       status: 'fail',
       summary: `no stick has asked for work in the last ${STICK_LIVE_MS / 60_000} minutes: ${stale.map(seen).join('; ')}`,
-      fix: 'Check that the stick is running and can reach the server: docker compose ps, then docker compose logs stick. If the host restarted and nothing came back, make Docker start at boot (install runbook, Start at boot).',
+      fix: 'Check that the stick is running and can reach the server: docker compose ps, then docker compose logs stick. If the host restarted and the stick did not come back, make Docker start at boot and start the services with docker compose up -d (install runbook, Start at boot).',
     };
   return {
     ...base,
