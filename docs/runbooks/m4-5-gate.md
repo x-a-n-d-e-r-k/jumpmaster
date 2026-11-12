@@ -13,7 +13,9 @@ M4's partner session is run with the same sheet and counters, and its numbers ar
 The only inputs, ready before the partner sits down:
 
 - **A supported host:** Linux with a rootful Docker Engine, or macOS with Docker Desktop. It has an
-  empty directory and `cosign`. Note its OS and `docker version`.
+  empty directory and `cosign`, and the partner's user is uid 1000 on Linux. Another uid needs the
+  README's extra `.env` line, which is a seventh prelude command, so it can't meet the bar. Note
+  the host's OS and `docker version`.
 - **A published full release.** The README's prelude downloads from `releases/latest`, which skips
   prereleases. With only a release candidate out, the prelude as written fails; don't edit it for
   the partner.
@@ -36,7 +38,8 @@ hesitation over a minute is recorded, with what the partner was looking for.
 ## Two clocks
 
 - **The prelude:** the README's commands, copied without edits, up to and including
-  `docker compose up`. Count the commands and the minutes.
+  `docker compose up`. Count the commands and the minutes. A variant the README itself names, such
+  as `shasum -a 256 -c` on macOS, counts as unedited.
 - **The session** starts when the setup page appears. The author's stopwatch counts the partner's
   **hands-on** time and is paused while CI or a drop runs.
 
@@ -62,13 +65,20 @@ Each step names what is measured or asserted. The steps follow the operability s
    to merge, which is excluded from hands-on time. **Status question 1** is asked while this step
    waits on CI.
 4. **Change a running zone.** Pause the zone. **Status question 2** is asked here. Then change a
-   gate's timeout in Stack, and resume. *Assert:* the next drop runs with the new timeout, with no
-   restart (see [Reading the stick's drop-start line](#reading-the-sticks-drop-start-line)).
+   gate's timeout in Stack (to a value other than 20, the default), and resume.
 5. **Rotate a token.** In Settings, Credentials, replace the author token with the second one.
-   Revoke the old one on GitHub once the page no longer says a running drop carries it. *Assert:*
-   - the settings row shows the new date and fingerprint;
-   - the next drop's `forgeToken` equals the new fingerprint;
-   - that drop's pull request is pushed and opened. It could not be with the revoked token.
+   Revoke the old one on GitHub once the page no longer says a running drop carries it.
+
+   Then, as a scripted prompt that is not counted as a question, the author asks the partner to file
+   a second issue from Intake. The order matters: revoke first, then file, so the drop is leased
+   after the old token stops working. That one implement drop proves steps 4 and 5 (see
+   [Reading the stick's drop-start line](#reading-the-sticks-drop-start-line)). *Assert:*
+   - its `timeoutMinutes` is the value set in step 4, with no restart;
+   - the settings row shows the new date and fingerprint, and the drop's `forgeToken` equals it;
+   - the drop pushes its branch. The trooper pushes with the payload's token, so a push after the
+     revoke proves the new one.
+   - The server then opens the pull request with its own author client, which is rebuilt on
+     rotation, so the open proves the server's side too.
 6. **A second repository.** Add it, import its ruleset file, create its labels, and run the doctor.
    *Measure:* the time to a doctor with no fail.
 7. **Recover.** The author deletes the `agent-ready` label on the second repository and asks the
@@ -84,7 +94,7 @@ These are the author's checks, not the partner's, so they don't count as the par
 commands. At the start of each drop, the stick logs one JSON line:
 
 ```sh
-docker compose logs stick | grep '"event":"drop-start"' | tail -1
+docker compose logs stick | grep '"event":"drop-start"' | grep '"role":"implement"' | tail -1
 ```
 
 ```json
@@ -93,8 +103,11 @@ docker compose logs stick | grep '"event":"drop-start"' | tail -1
 
 - `timeoutMinutes` is the gate's timeout as this drop received it (step 4).
 - `forgeToken` is the first 8 hex characters of the SHA-256 of the token the drop carries. That is
-  the same form Settings, Credentials shows. A crew or doctor drop carries no forge token and has
-  no `forgeToken` field.
+  the same form Settings, Credentials shows.
+- Only implement, heal and resolve drops carry the author token. Filter for `implement`: the review
+  drop that follows an implement drop is usually the last line, and it shows the read token's
+  fingerprint (when `reviewReadToken` is set) or no `forgeToken`. Crew drops behave the same way.
+  Doctor drops carry no forge token.
 
 ## Counted per partner
 
@@ -130,9 +143,11 @@ operability steps, so leave a row blank where it doesn't apply.
 | Step 2: fails seen (check id, link followed?) | | |
 | Step 3: minutes to merge (excluded) | | |
 | Step 4: new timeout in drop-start, no restart | | |
-| Step 5: new fingerprint in drop-start, PR pushed | | |
+| Step 5: new fingerprint in drop-start, branch pushed, PR opened | | |
 | Step 6: minutes to a doctor with no fail | | |
+| Step 6: fails seen (check id, link followed?) | | |
 | Step 7: reached the fix through the action | | |
+| Step 7: fails seen (check id, link followed?) | | |
 | Step 8: answers vs the status line | | |
 | File edits after `up` | | |
 | Shell commands after `up` (beyond `logs`) | | |

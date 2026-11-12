@@ -475,6 +475,51 @@ describe('runDrop', () => {
     );
   });
 
+  test('drop-start is logged before an early refusal, and a doctor drop logs no forgeToken or read token', async () => {
+    const refused: string[] = [];
+    await runDrop(
+      { ...payload, image: 'evil/trooper:1' },
+      {
+        client: fakeClient(),
+        driver: fakeDriver([]).driver,
+        stickId: 's1',
+        allowedImages: new Set(['jumpmaster-trooper:dev']),
+        log: (l) => refused.push(l),
+      },
+    );
+    expect(JSON.parse(refused[0] as string)).toMatchObject({
+      event: 'drop-start',
+      dropId: payload.dropId,
+    });
+    const read = 'read-token-value-0987654321';
+    const doctor = DropPayloadSchema.parse({
+      protocol: 1,
+      dropId: 'd2',
+      epoch: 1,
+      role: 'doctor',
+      repo: { owner: 'o', name: 'r', defaultBranch: 'main' },
+      model: 'm',
+      image: 'jumpmaster-trooper:test',
+      gates: [{ name: 'lint', run: 'npm run lint', timeoutMinutes: 5 }],
+      credentials: { claudeToken: TOKEN, readToken: read },
+    });
+    const logged: string[] = [];
+    await runDrop(doctor, {
+      client: fakeClient(),
+      driver: fakeDriver([], { exitCode: 1 }).driver,
+      heartbeatMs: 10,
+      stickId: 's1',
+      log: (l) => logged.push(l),
+    });
+    expect(logged.map((l) => JSON.parse(l)).find((l) => l.event === 'drop-start')).toEqual({
+      event: 'drop-start',
+      dropId: 'd2',
+      role: 'doctor',
+      gates: [{ name: 'lint', timeoutMinutes: 5 }],
+    });
+    for (const l of logged) expect(l).not.toContain(read);
+  });
+
   test('a stderr tail containing the read token is redacted in noResultReason', async () => {
     const read = 'read-token-value-1234567890';
     const doctor = DropPayloadSchema.parse({

@@ -150,8 +150,15 @@ describe('the README and runbooks', () => {
       '"event":"drop-start"',
       'timeoutMinutes',
       'forgeToken',
+      // Only the implement drop carries the author token; the review drop that follows does not.
+      `grep '"role":"implement"'`,
+      // Steps 4 and 5 need a drop: the author scripts a second issue after the revoke.
+      'second issue',
       // M4's session is the baseline column.
       'Before (M4)',
+      // The rerun rule and the two-part split.
+      'That run counts only for the',
+      'M4.5a gate is steps 1–3 and 7',
     ])
       expect(md, s).toContain(s);
   });
