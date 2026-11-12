@@ -1124,6 +1124,33 @@ describe('image trust: verify, then pull, then create', () => {
     ]);
   });
 
+  test('runDrop logs the gates with their timeouts and the forge token fingerprint, never the token', async () => {
+    const d = fakeDriver([done], { present: () => false });
+    const c = cosignFor([dg('1'), dg('2'), dg('3')], d.order);
+    const log: string[] = [];
+    // A changed timeout (7, not the default 20) is what the operator looks for.
+    const p = {
+      ...signedPayload,
+      gates: [{ name: 'test', run: 'npm test', timeoutMinutes: 7 }],
+    } as typeof signedPayload & {
+      gates: { name: string; timeoutMinutes: number }[];
+      credentials: { forgeToken?: string };
+    };
+    const token = p.credentials.forgeToken as string;
+    expect(token).toBeTruthy();
+    await runDrop(p, deps(d, trust(c.cosign), fakeClient(), log));
+    // One line an operator reads with docker compose logs stick: the gate timeouts this drop runs
+    // with, and which token it carries, in the 8-character form Settings shows.
+    expect(log.map((l) => JSON.parse(l)).find((l) => l.event === 'drop-start')).toEqual({
+      event: 'drop-start',
+      dropId: 'd1',
+      role: signedPayload.role,
+      gates: p.gates.map((g) => ({ name: g.name, timeoutMinutes: g.timeoutMinutes })),
+      forgeToken: createHash('sha256').update(token).digest('hex').slice(0, 8),
+    });
+    for (const l of log) expect(l).not.toContain(token);
+  });
+
   test.each([
     ['trooper', dg('1')],
     ['egress proxy', dg('2')],

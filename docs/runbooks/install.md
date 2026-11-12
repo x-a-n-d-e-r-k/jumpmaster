@@ -963,6 +963,11 @@ What it needs, in short (the full account is the release runbook's
 A zone's drops wait while no live stick can run them; `stick.capabilities` says what the stick
 lacks. Doctor checks: `stick.seen`, `stick.capabilities`.
 
+Each drop starts with one `drop-start` line in `docker compose logs stick`: the drop's role, its
+gates with the `timeoutMinutes` it received, and `forgeToken`, the 8-character fingerprint of the
+forge token it carries (the form Settings, Credentials shows). It is how to confirm, with no
+restart, that a changed gate timeout or a rotated token reached the next drop.
+
 ## Image trust
 
 The config written by `init` sets `requireSignedImages: true` (dispatch only to a stick that

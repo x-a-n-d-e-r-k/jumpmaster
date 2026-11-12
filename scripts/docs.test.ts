@@ -137,6 +137,25 @@ describe('the README and runbooks', () => {
       expect(section, s).toContain(s);
   });
 
+  test('the M4.5 gate runbook states the bar and points at the session it measures', () => {
+    const md = read('docs/runbooks/m4-5-gate.md');
+    for (const s of [
+      'at most 6 commands and 10 minutes',
+      'zero file edits',
+      'zero shell commands after `docker compose up`',
+      'zero blocking questions',
+      'under 60 minutes',
+      'operate.md#the-operability-session',
+      // The two assertions read from the stick's drop-start line.
+      '"event":"drop-start"',
+      'timeoutMinutes',
+      'forgeToken',
+      // M4's session is the baseline column.
+      'Before (M4)',
+    ])
+      expect(md, s).toContain(s);
+  });
+
   test('every doctor check id exists as an anchor in install.md', () => {
     const src = read('apps/server/src/doctor/checks.ts');
     const ids = new Set([...src.matchAll(/\bid: '([a-z]+\.[a-z-]+)'/g)].map((m) => m[1] as string));
