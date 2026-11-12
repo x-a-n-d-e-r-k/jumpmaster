@@ -168,6 +168,24 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
     allowed: deps.allowedImages ?? allowedImages(process.env),
   };
   const log = deps.log ?? ((line: string) => console.log(line));
+  // What an operator checks after a change, with no restart: the gate timeouts this drop runs with
+  // and which forge token it carries, as the 8-character SHA-256 prefix Settings shows.
+  const forgeToken =
+    'forgeToken' in payload.credentials ? payload.credentials.forgeToken : undefined;
+  log(
+    JSON.stringify({
+      event: 'drop-start',
+      dropId,
+      role: payload.role,
+      gates: ('gates' in payload ? (payload.gates ?? []) : []).map((g) => ({
+        name: g.name,
+        timeoutMinutes: g.timeoutMinutes,
+      })),
+      ...(forgeToken
+        ? { forgeToken: createHash('sha256').update(forgeToken).digest('hex').slice(0, 8) }
+        : {}),
+    }),
+  );
   const services = ('services' in payload ? payload.services : undefined) ?? [];
   const egress = payload.egress;
   const fail = (reason: string) =>
