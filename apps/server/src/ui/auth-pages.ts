@@ -8,6 +8,7 @@ import {
   passphraseProblem,
   ScryptBusyError,
   SETUP_CLAIM_MS,
+  SETUP_CODE_SPENT,
   type SetupMode,
   setOperatorPassphrase,
   setupActive,
@@ -75,7 +76,7 @@ export function renderSetupCode(e?: string): string {
 
 export function renderSetupPassphrase(e?: string): string {
   return page(
-    `<h2>Choose the operator passphrase</h2><p>At least 12 characters. It is the browser login for this install; <code>jumpmaster ctl</code> keeps using the operator token.</p>${error(e)}<form method="post" action="/setup/passphrase"><p><label>Passphrase <input type="password" name="passphrase" autocomplete="new-password" minlength="12" maxlength="256" required></label></p><p><label>Again <input type="password" name="confirm" autocomplete="new-password" minlength="12" maxlength="256" required></label></p><p><button>Save and log in</button></p></form>`,
+    `<h2>Choose the operator passphrase</h2><p>This step stays open for ten minutes after the code was entered. At least 12 characters. It is the browser login for this install; <code>jumpmaster ctl</code> keeps using the operator token.</p>${error(e)}<form method="post" action="/setup/passphrase"><p><label>Passphrase <input type="password" name="passphrase" autocomplete="new-password" minlength="12" maxlength="256" required></label></p><p><label>Again <input type="password" name="confirm" autocomplete="new-password" minlength="12" maxlength="256" required></label></p><p><button>Save and log in</button></p></form>`,
     { chrome: false },
   );
 }
@@ -196,7 +197,12 @@ export function registerAuthPages(app: FastifyInstance, deps: AuthPageDeps): voi
     const claim = body.success ? setup.accept(body.data.code, now()) : null;
     if (!claim) {
       backoff.fail(req.ip, now());
-      return html(reply, 401, renderSetupCode('That is not the current setup code.'));
+      // A spent code (the back button, a second tab) gets the way forward, not "wrong code".
+      return html(
+        reply,
+        401,
+        renderSetupCode(setup.hasCode() ? 'That is not the current setup code.' : SETUP_CODE_SPENT),
+      );
     }
     backoff.reset(req.ip);
     return reply
