@@ -69,21 +69,21 @@ const error = (e?: string) => (e ? `<p class="error"><strong>${escapeHtml(e)}</s
 
 export function renderSetupCode(e?: string): string {
   return page(
-    `<h2>Set up Jumpmaster</h2><p>This install has no operator yet. Enter the setup code to claim it, then choose the passphrase you will log in with.</p>${error(e)}${CODE_HELP}<form method="post" action="/setup/code"><p><label>Setup code <input name="code" autocomplete="off" required placeholder="XXXX-XXXX-XXXX"></label> <button>Continue</button></p></form>`,
+    `<h2>Set up Jumpmaster</h2><p>This install has no operator yet. Enter the setup code to claim it, then choose the passphrase you will log in with.</p>${error(e)}${CODE_HELP}<form method="post" action="/setup/code"><p><label>Setup code <input name="code" autocomplete="off" required placeholder="XXXX-XXXX-XXXX"></label> <button class="primary">Continue</button></p></form>`,
     { chrome: false },
   );
 }
 
 export function renderSetupPassphrase(e?: string): string {
   return page(
-    `<h2>Choose the operator passphrase</h2><p>This step stays open for ten minutes after the code was entered. At least 12 characters. It is the browser login for this install; <code>jumpmaster ctl</code> keeps using the operator token.</p>${error(e)}<form method="post" action="/setup/passphrase"><p><label>Passphrase <input type="password" name="passphrase" autocomplete="new-password" minlength="12" maxlength="256" required></label></p><p><label>Again <input type="password" name="confirm" autocomplete="new-password" minlength="12" maxlength="256" required></label></p><p><button>Save and log in</button></p></form>`,
+    `<h2>Choose the operator passphrase</h2><p>This step stays open for ten minutes after the code was entered. At least 12 characters. It is the browser login for this install; <code>jumpmaster ctl</code> keeps using the operator token.</p>${error(e)}<form method="post" action="/setup/passphrase"><p><label>Passphrase <input type="password" name="passphrase" autocomplete="new-password" minlength="12" maxlength="256" required></label></p><p><label>Again <input type="password" name="confirm" autocomplete="new-password" minlength="12" maxlength="256" required></label></p><p><button class="primary">Save and log in</button></p></form>`,
     { chrome: false },
   );
 }
 
 export function renderLogin(next: string, e?: string): string {
   return page(
-    `<h2>Log in</h2>${error(e)}<form method="post" action="/login"><input type="hidden" name="next" value="${escapeHtml(next)}"><p><label>Operator passphrase <input type="password" name="passphrase" autocomplete="current-password" required autofocus></label> <button>Log in</button></p></form><p><small>Forgot it? With the operator token, <code>jumpmaster ctl passphrase set</code> sets a new one.</small></p>`,
+    `<h2>Log in</h2>${error(e)}<form method="post" action="/login"><input type="hidden" name="next" value="${escapeHtml(next)}"><p><label>Operator passphrase <input type="password" name="passphrase" autocomplete="current-password" required autofocus></label> <button class="primary">Log in</button></p></form><p><small>Forgot it? With the operator token, <code>jumpmaster ctl passphrase set</code> sets a new one.</small></p>`,
     { chrome: false },
   );
 }

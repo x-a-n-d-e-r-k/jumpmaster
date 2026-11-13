@@ -349,8 +349,11 @@ describe('the status line (Task 12)', () => {
     const status = api.json() as { headline: string; action?: { href: string } };
     expect(status.headline).toBe('1 parked: no CI result: <ci> & friends');
     const home = (await h.view('/')).body;
-    const body = home.slice(home.indexOf('<h1>Jumpmaster</h1>') + '<h1>Jumpmaster</h1>'.length);
-    expect(body.startsWith('<div class="status" data-waiting-on="you">')).toBe(true);
+    // The status line is the first thing in the page's content, beside the kill switch.
+    const body = home.slice(home.indexOf('<main id="main">') + '<main id="main">'.length);
+    expect(
+      body.startsWith('<div class="floor-head"><div class="status" data-waiting-on="you">'),
+    ).toBe(true);
     expect(body).toContain('<strong>1 parked: no CI result: &lt;ci&gt; &amp; friends</strong>');
     expect(body).toContain(`<a href="${status.action?.href}">`);
     expect(home).toContain(
