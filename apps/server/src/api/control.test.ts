@@ -1626,7 +1626,14 @@ describe('secret routes (Task 4)', () => {
     });
     const r = await put('githubAuthorToken', { value: FAILED });
     expect(r.statusCode).toBe(422);
-    expect(r.json()).toEqual({ tested: false, status: 401, permission: 'metadata=read' });
+    // GitHub's status in words (T10 finding 4): a 401 is an expired, revoked or mistyped token.
+    expect(r.json()).toEqual({
+      tested: false,
+      status: 401,
+      permission: 'metadata=read',
+      error:
+        'GitHub rejected this token (401): it is expired, revoked or mistyped. Make a new one from the link.',
+    });
     expect(w.store.resolved().githubAuthorToken.source).toBe('missing');
     expect(w.store.vault() !== 'disabled' && w.store.vault().meta('githubAuthorToken')).toBe(
       undefined,
@@ -1657,7 +1664,11 @@ describe('secret routes (Task 4)', () => {
         payload: {},
       });
     const r = await test();
-    expect(r.json()).toEqual({ tested: false, status: 503 });
+    expect(r.json()).toEqual({
+      tested: false,
+      status: 503,
+      error: 'GitHub did not accept the test (HTTP 503): try again in a moment.',
+    });
     expect(w.store.resolved().githubReviewerToken.login).toBe('author-bot');
     expect(w.store.resolved().githubReviewerToken.testResult).toBe('failed (503)');
     expect(same()).toEqual(['web', 'api']);

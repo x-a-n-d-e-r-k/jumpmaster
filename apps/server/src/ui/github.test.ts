@@ -142,6 +142,9 @@ describe('the GitHub page of a zone', () => {
     expect(html).toContain('This zone runs as two-bot');
     expect(html).toContain(RESOURCE_OWNER_NOTE);
     expect(html).toContain('Only select repositories');
+    // T10 finding 4: a new token per install, and a later project is added by editing it.
+    expect(html).toContain('Make a new token here, not one made for another project');
+    expect(html).toContain("edit this token's repository access on GitHub to add it");
     expect(html).toContain('invite jm-author with the Write role');
     expect(html).toContain('accept the invitation as jm-reviewer');
     // The ruleset: shown, downloadable, and the two-line import with the rulesets link.

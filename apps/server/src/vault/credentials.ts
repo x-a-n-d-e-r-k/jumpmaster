@@ -253,6 +253,21 @@ export type TestDeps = {
 };
 
 /** The status GitHub answered and the permission it says the endpoint accepts; nothing else. */
+/**
+ * A refused test in words a page can show: what GitHub's status means and what to do next.
+ * Built from the status and the permission GitHub names, never from GitHub's message or the value.
+ */
+export function refusalWords(status: number | null, permission?: string): string {
+  if (status === 401)
+    return 'GitHub rejected this token (401): it is expired, revoked or mistyped. Make a new one from the link.';
+  if (status === 403)
+    return `GitHub refused it (403): the token lacks a permission${permission ? ` (it needs ${permission})` : ''}. Edit the token on GitHub to add it.`;
+  if (status === 404)
+    return "The token can't see a project's repository (404): on GitHub, add the repository to the token's repository access.";
+  if (status === null) return 'GitHub did not answer: check this host reaches api.github.com.';
+  return `GitHub did not accept the test (HTTP ${status}): try again in a moment.`;
+}
+
 function refusalOf(e: unknown): { ok: false; status: number | null; permission?: string } {
   const status =
     e && typeof e === 'object' && 'status' in e && typeof e.status === 'number' ? e.status : null;

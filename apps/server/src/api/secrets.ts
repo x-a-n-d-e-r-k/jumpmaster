@@ -12,6 +12,7 @@ import {
   isInstallCredential,
   parseGateSecretName,
   type Resolved,
+  refusalWords,
   type TestDeps,
   testCredential,
 } from '../vault/credentials.js';
@@ -163,6 +164,7 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
           status: t.status,
           ...(t.permission ? { permission: t.permission } : {}),
           ...(t.problem ? { problem: t.problem } : {}),
+          error: t.problem ?? refusalWords(t.status, t.permission),
         });
       }
       const stored = store.putCredential(name, value, {
@@ -224,6 +226,7 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
               status: t.status,
               ...(t.permission ? { permission: t.permission } : {}),
               ...(t.problem ? { problem: t.problem } : {}),
+              error: t.problem ?? refusalWords(t.status, t.permission),
             };
       });
     },
