@@ -48,9 +48,10 @@ broker in the server [call]:
 
 What it buys: zero tokens to make for GitHub; two-bot mode on personal repositories (no more
 owner-as-author starter mode by necessity); a drop credential that lives at most an hour, reaches
-one repository and is revocable; and no expiry to renew. What it does **not** buy: a drop token
-that can't merge. `contents: write` includes the merge endpoint (F19), so the ruleset, not the
-token, still stops a drop from merging (§5).
+one repository and is revocable; and no expiry to renew. What it does **not** buy: a container
+token that can push but not merge. GitHub's push permission also allows merging (F19), so the
+repository's ruleset, not the token, keeps a drop from merging its own work (§5). Jumpmaster's own
+merges are unaffected: the author app merges once the review and checks pass.
 
 ## 3. GitHub facts this rests on
 
@@ -227,8 +228,10 @@ still needs a named person, and Jumpmaster never merges those anyway (§7.4 of t
 repository whose own CODEOWNERS owns other paths by people blocks every PR touching those paths;
 `forge.codeowners` fails with that fix, as it does today for a line that misses the bot.
 
-**What a drop token can do.** `contents: write` merges (F19), and also pushes tags and deletes
-branches. In two-bot mode the ruleset's required approval stops a drop from merging an unreviewed
+**What a drop token can do.** This is the container's token, not the server's: Jumpmaster's own
+merges use the author app's server-side token and go ahead as soon as the review and checks pass.
+The container token's `contents: write` also merges (F19), and pushes tags and deletes branches,
+so the question is only what stops a drop merging its own work. In two-bot mode the ruleset's required approval stops a drop from merging an unreviewed
 PR, as it stops a PAT today. In **starter mode** (approvals 0) nothing on GitHub would, so with an
 app author starter mode requires one more ruleset entry [call]: a required status check
 `jumpmaster/verdict` whose source is the **author app** (its integration id), which the server
@@ -295,8 +298,9 @@ app-backed starter zones; the CODEOWNERS text follows §5.
 - **Better than PATs:** no long-lived credential in any drop; drop tokens per drop, one repository,
   revocable, and the kill switch can finally revoke them; no owner-admin account in starter mode;
   no `workflows`, so an agent push to CI config fails at GitHub, not only at Jumpmaster's guard.
-- **Same as PATs:** a drop token can merge (F19); the ruleset is what stops it, now in starter mode
-  too (§5).
+- **Same as PATs:** a drop's container token could merge its own work (F19); the ruleset is what
+  stops it, now in starter mode too (§5). Jumpmaster's own merges, by the author app on the server,
+  are unchanged.
 - **New:** the private key is the install's most powerful GitHub secret. It mints `contents: write`
   (merge included) on every repository the app is installed on, without expiry. It lives only in
   the vault and the server process, is redacted by body and line, and an install on all
@@ -365,7 +369,7 @@ comparison. M5's gate (two zones on two forges) then runs with an app on the Git
 
 An independent review on 2026-11-13 found 1 blocker, 9 major and 9 minor issues in the first draft;
 all were accepted. The blocker: `getBranchRules` reads the token's own collaborator role, so an app
-token would read as "no ruleset" (now §4.3). The majors: a drop token can merge (§5, §8); the
+token would read as "no ruleset" (now §4.3). The majors: a drop's container token can merge its own work (§5, §8); the
 reviewer's `contents` permission may decide whether its approval counts (§5 spike matrix); the
 `SameSite=Strict` session cookie never reaches the callback (§4.1 two-step callback);
 `authorMayBeAdmin` routes merges to a reviewer that can't merge (§4.4, §7); minted tokens and the
