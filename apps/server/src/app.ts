@@ -55,6 +55,8 @@ import {
   renderHome,
   renderIntake,
   renderObservations,
+  STORE_NAV,
+  STORE_NAV_SLOT,
   type StickLine,
 } from './ui/pages.js';
 import { claudeTokenDays, registerSettingsPages } from './ui/settings.js';
@@ -145,6 +147,12 @@ export function createApp(
   registerMcpRoute(app, deps);
   // The confirmation page for a session's guarded config change (§7.5): with the store only.
   if (deps.config instanceof ConfigStore) {
+    // Every page's navigation gains the store-only pages (Zones, Settings).
+    app.addHook('onSend', async (_req, reply, payload) =>
+      typeof payload === 'string' && String(reply.getHeader('content-type')).startsWith('text/html')
+        ? payload.replace(STORE_NAV_SLOT, STORE_NAV)
+        : payload,
+    );
     registerConfirmPages(app, { db: deps.db, store: deps.config, now: deps.now, backoff });
     // The setup wizard: thin frames over the secret, zone, config and doctor routes.
     registerSetupPages(app, {

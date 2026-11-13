@@ -16,6 +16,7 @@ import type { GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import type { Status } from '../status.js';
 import type { Gate } from '../usage.js';
+import { STYLE } from './theme.js';
 
 export const escapeHtml = (v: unknown): string =>
   String(v)
@@ -105,14 +106,41 @@ export interface ItemDetail {
 
 const pct = (v: number | null): string => (v === null ? '-' : `${Math.round(v * 100)}%`);
 
+/** A state word as an AlignUI StatusBadge; the tone says how much attention it wants. */
+const TONES: Record<string, string> = {
+  running: 'info',
+  leased: 'info',
+  in_flight: 'info',
+  observe: 'info',
+  pr_open: 'crew',
+  succeeded: 'ok',
+  done: 'ok',
+  active: 'ok',
+  parked: 'warn-b',
+  paused: 'warn-b',
+  unknown: 'warn-b',
+  failed: 'bad',
+  lost: 'bad',
+};
+export const badge = (state: string): string =>
+  `<span class="badge ${TONES[state] ?? ''}">${escapeHtml(state)}</span>`;
+
+/**
+ * A floor card: an eyebrow with the plain-English name (§4: the UI says each airborne term in
+ * plain words too), the section's heading, and its body.
+ */
+const card = (plain: string, heading: string, body: string, cls = ''): string =>
+  `<section class="card${cls ? ` ${cls}` : ''}"><span class="term">${plain}</span>${heading}${body}</section>`;
+
 /** The kill control. It posts with the session's CSRF header, so a page visit cannot trigger it. */
 function killSection(killed: boolean): string {
-  const notice = killed
-    ? '<p><strong>The kill switch is engaged.</strong> No work runs and no forge writes happen. Forge and Claude tokens stay valid until you revoke them with their providers.</p>'
-    : '';
   const label = killed ? 'Reset kill switch' : 'Engage kill switch';
-  return `<h2>Kill switch</h2>${notice}<form id="kill"><button>${label}</button></form><script>document.getElementById('kill').addEventListener('submit',async(e)=>{e.preventDefault();const r=await jmFetch('/api/control/kill',{engaged:${killed ? 'false' : 'true'}});if(r.ok)location.reload();else alert('Refused: '+r.status);});</script>`;
+  return `<div class="kill"><h2>Kill switch</h2><form id="kill"><button class="${killed ? 'primary' : 'danger'}">${label}</button></form><script>document.getElementById('kill').addEventListener('submit',async(e)=>{e.preventDefault();const r=await jmFetch('/api/control/kill',{engaged:${killed ? 'false' : 'true'}});if(r.ok)location.reload();else alert('Refused: '+r.status);});</script></div>`;
 }
+
+/** The engaged kill switch, said first and in red: nothing else on the floor matters as much. */
+const KILLED_NOTICE =
+  '<div class="kill-on" role="alert"><p><strong>The kill switch is engaged.</strong> No work runs and no forge writes happen. Forge and Claude tokens stay valid until you revoke them with their providers.</p></div>';
 
 /** The credits stop, in words: why nothing leases, or the Resume in force. */
 function creditsLine(u: NonNullable<HomeState['usage']>): string | null {
@@ -131,23 +159,32 @@ function creditsLine(u: NonNullable<HomeState['usage']>): string | null {
   return null;
 }
 
+/** A utilisation meter: the figure, and a bar that warms at 80% and goes red at 95%. */
+function meter(label: string, v: number | null): string {
+  const w = v === null ? 0 : Math.min(100, Math.max(0, Math.round(v * 100)));
+  const tone = v === null ? '' : v >= 0.95 ? ' class="full"' : v >= 0.8 ? ' class="hot"' : '';
+  return `<div class="meter"><div class="meter-row"><span>${label}</span><b>${pct(v)}</b></div><div class="bar" role="presentation"><i${tone} style="width:${w}%"></i></div></div>`;
+}
+
 function usageSection(u: HomeState['usage']): string {
   if (!u) return '';
   const s = u.state;
-  const row = (k: string, v: unknown) => `<tr><th>${k}</th><td>${escapeHtml(v ?? '-')}</td></tr>`;
+  const row = (k: string, v: unknown) => `<dt>${k}</dt><dd>${escapeHtml(v ?? '-')}</dd>`;
   const credits = creditsLine(u);
-  return (
-    `<h2>Usage</h2><table>` +
-    row('Gate', u.gate) +
-    (credits ? row('Credits', credits) : '') +
-    row('Overage status', u.overageStatus) +
-    row('Status', s.status) +
-    row('Paused until', s.pausedUntil) +
-    row('5-hour', pct(s.fiveHourUtil)) +
-    row('7-day', pct(s.sevenDayUtil)) +
-    row('Observed', s.observedAt) +
-    row('Cause drop', s.causeDropId) +
-    `</table>`
+  return card(
+    'Claude subscription',
+    '<h2>Usage</h2>',
+    meter('5-hour', s.fiveHourUtil) +
+      meter('7-day', s.sevenDayUtil) +
+      '<dl class="kv">' +
+      row('Gate', u.gate) +
+      (credits ? row('Credits', credits) : '') +
+      row('Overage status', u.overageStatus) +
+      row('Status', s.status) +
+      row('Paused until', s.pausedUntil) +
+      row('Observed', s.observedAt) +
+      row('Cause drop', s.causeDropId) +
+      '</dl>',
   );
 }
 
@@ -159,13 +196,22 @@ function outboxSection(ops: OutboxRow[] | undefined): string {
         `<tr><td>${escapeHtml(o.id)}</td><td>${escapeHtml(o.kind)}</td><td>${escapeHtml(o.workItemId ?? `zone ${o.zoneId}`)}</td><td>${escapeHtml(o.state)}</td><td>${escapeHtml(o.error ?? '')}</td><td>${escapeHtml(o.updatedAt)}</td></tr>`,
     )
     .join('');
-  return `<h2>Outbox</h2><table><tr><th>Op</th><th>Kind</th><th>Item</th><th>State</th><th>Error</th><th>Updated</th></tr>${rows}</table>`;
+  return card(
+    'Forge writes that need a look',
+    '<h2>Outbox</h2>',
+    `<table><tr><th>Op</th><th>Kind</th><th>Item</th><th>State</th><th>Error</th><th>Updated</th></tr>${rows}</table>`,
+    'attention',
+  );
 }
 
 /** The home page's list of open briefings, each linking to where it is answered. */
 export function waitingOnYou(open: Briefing[]): string {
   if (open.length === 0) {
-    return '<h2>Waiting on you</h2><p>Nothing is waiting on you. <a href="/briefings">Briefings and rulings</a></p>';
+    return card(
+      'Briefings',
+      '<h2>Waiting on you</h2>',
+      '<p class="empty">Nothing is waiting on you. <a href="/briefings">Briefings and rulings</a></p>',
+    );
   }
   const rows = open
     .map(
@@ -173,7 +219,12 @@ export function waitingOnYou(open: Briefing[]): string {
         `<li>${escapeHtml(b.zoneId)}: ${escapeHtml(b.decision)} <small>(${escapeHtml(b.kind)})</small></li>`,
     )
     .join('');
-  return `<h2>Waiting on you</h2><p>${open.length} decision${open.length === 1 ? '' : 's'} waiting. <a href="/briefings">Answer them on the briefings page</a>.</p><ul>${rows}</ul>`;
+  return card(
+    'Briefings',
+    '<h2>Waiting on you</h2>',
+    `<p>${open.length} decision${open.length === 1 ? '' : 's'} waiting. <a href="/briefings">Answer them on the briefings page</a>.</p><ul>${rows}</ul>`,
+    'attention',
+  );
 }
 
 function crewSection(lines: CrewLine[] | undefined): string {
@@ -184,12 +235,18 @@ function crewSection(lines: CrewLine[] | undefined): string {
         `<tr><td>${escapeHtml(c.zoneId)}</td><td>${c.enabled ? 'on' : 'off'}</td><td>${escapeHtml(c.lastCycle ?? '-')}</td><td>${escapeHtml(c.enabled ? (c.nextDue ?? 'now') : '-')}</td><td>${escapeHtml(c.fable)}</td><td><a href="/zones/${encodeURIComponent(c.zoneId)}/goals">Goals</a> <a href="/zones/${encodeURIComponent(c.zoneId)}/intake">Intake</a></td></tr>`,
     )
     .join('');
-  return `<h2>Crew</h2><table><tr><th>Zone</th><th>Crew</th><th>Last cycle</th><th>Next due</th><th>Fable</th><th></th></tr>${rows}</table>`;
+  return card(
+    'Per-project judgment agents',
+    '<h2>Crew</h2>',
+    `<table><tr><th>Zone</th><th>Crew</th><th>Last cycle</th><th>Next due</th><th>Fable</th><th></th></tr>${rows}</table>`,
+  );
 }
 
 function sticksSection(lines: StickLine[] | undefined): string {
   if (!lines) return '';
-  if (lines.length === 0) return '<h2 id="sticks">Sticks</h2><p>No stick has enrolled.</p>';
+  const plain = 'Runner hosts';
+  if (lines.length === 0)
+    return card(plain, '<h2 id="sticks">Sticks</h2>', '<p class="empty">No stick has enrolled.</p>');
   const rows = lines
     .map((s) => {
       const runs =
@@ -204,7 +261,11 @@ function sticksSection(lines: StickLine[] | undefined): string {
       return `<tr><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.version ?? '-')}</td><td>${escapeHtml(s.lastSeenAt ?? 'never')}</td><td>${escapeHtml(s.capabilities.join(', ') || '-')}</td><td>${escapeHtml(s.imagePolicy)}</td><td>${runs}</td></tr>`;
     })
     .join('');
-  return `<h2 id="sticks">Sticks</h2><table><tr><th>Stick</th><th>Version</th><th>Last seen</th><th>Capabilities</th><th>Image policy</th><th>Zones</th></tr>${rows}</table>`;
+  return card(
+    plain,
+    '<h2 id="sticks">Sticks</h2>',
+    `<table><tr><th>Stick</th><th>Version</th><th>Last seen</th><th>Capabilities</th><th>Image policy</th><th>Zones</th></tr>${rows}</table>`,
+  );
 }
 
 /** One shared handler for every rule form: it posts with the session's CSRF header. */
@@ -340,12 +401,8 @@ function detailCells(d: ItemDetail | undefined): string {
         .map(([k, n]) => `${escapeHtml(k)} ${escapeHtml(n)}`)
         .join(', ') || '-'
     : '-';
-  return `<td><code>${head}</code>${allowed}</td><td>${verdict}</td><td>${attempts}</td>`;
+  return `<td>${d?.headSha ? `<code>${head}</code>` : '-'}${allowed}</td><td>${verdict}</td><td>${attempts}</td>`;
 }
-
-const STYLE = `body{font:14px/1.4 system-ui,sans-serif;margin:2rem auto;max-width:60rem;padding:0 1rem;color:#222}
-table{border-collapse:collapse;width:100%;margin-bottom:1.5rem}th,td{border-bottom:1px solid #ddd;padding:.3rem .5rem;text-align:left;vertical-align:top}
-h1,h2{margin:1rem 0 .5rem}pre{white-space:pre-wrap;margin:0}`;
 
 /**
  * Every write from a page goes through `jmFetch`: JSON, with the session's CSRF token (from the
@@ -353,17 +410,39 @@ h1,h2{margin:1rem 0 .5rem}pre{white-space:pre-wrap;margin:0}`;
  */
 const JM_FETCH = `<script>function jmFetch(path,body,method){return fetch(path,{method:method||'POST',headers:{'content-type':'application/json','x-jm-csrf':document.querySelector('meta[name=jm-csrf]').content},body:JSON.stringify(body===undefined?{}:body)});}</script>`;
 
-const LOGOUT = `<form method="post" action="/logout" style="float:right;margin-top:1rem"><button>Log out</button></form>`;
+const LOGOUT = `<form method="post" action="/logout" class="logout"><button>Log out</button></form>`;
+
+/** The mark: a canopy over a trooper's lines, after the airborne vocabulary (§4). */
+const MARK = `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M2 9a8 8 0 0 1 16 0" fill="currentColor"/><path d="M2.5 9.5 10 17l7.5-7.5M7 9.5l3 7.5 3-7.5" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><circle cx="10" cy="17" r="1.6" fill="currentColor"/></svg>`;
+
+/**
+ * Where the store-only links (Zones, Settings) go. `page()` cannot know the install's mode, so
+ * the app fills this in for a store install (`withStoreNav`); a config-file install keeps the
+ * comment, and links nowhere that would 404.
+ */
+export const STORE_NAV_SLOT = '<!--jm-store-nav-->';
+export const STORE_NAV = `<a href="/zones">Zones</a><a href="/settings">Settings</a>`;
+
+/** The pages every install has, in the order the operator reaches for them. */
+const NAV = `<a href="/">Floor</a><a href="/briefings">Briefings</a>${STORE_NAV_SLOT}<a href="/doctor">Doctor</a><a href="/observations">Observations</a>`;
+
+/** Marks the link for the current page; the longest matching prefix wins. */
+const NAV_SCRIPT = `<script>(()=>{const p=location.pathname;let best=null,len=-1;for(const a of document.querySelectorAll('.topnav a')){const h=a.getAttribute('href');const hit=h==='/'?p==='/':p===h||p.startsWith(h+'/');if(hit&&h.length>len){best=a;len=h.length;}}if(best)best.setAttribute('aria-current','page');})();</script>`;
 
 /**
  * The page shell. With `chrome` (the default, for pages behind the login) it carries an empty
- * `jm-csrf` meta for the guard to fill, `jmFetch` and the logout button; the login and setup pages
- * go without.
+ * `jm-csrf` meta for the guard to fill, `jmFetch`, the navigation and the logout button; the login
+ * and setup pages go without.
  */
 export const page = (body: string, opts: { chrome?: boolean; title?: string } = {}): string => {
   const chrome = opts.chrome ?? true;
   const title = opts.title ? `Jumpmaster: ${escapeHtml(opts.title)}` : 'Jumpmaster';
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8">${chrome ? `<meta name="jm-csrf" content="">` : ''}<title>${title}</title><style>${STYLE}</style>${chrome ? JM_FETCH : ''}</head><body>${chrome ? LOGOUT : ''}<h1>Jumpmaster</h1>${body}</body></html>`;
+  const nav = chrome ? `<nav class="topnav" aria-label="Main">${NAV}</nav>${LOGOUT}` : '';
+  return (
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${chrome ? `<meta name="jm-csrf" content="">` : ''}<title>${title}</title><style>${STYLE}</style>${chrome ? JM_FETCH : ''}</head>` +
+    `<body><a class="skip" href="#main">Skip to content</a><header class="topbar"><div class="topbar-in"><h1 class="brand">${MARK}Jumpmaster</h1>${nav}</div></header>` +
+    `<main id="main">${body}</main>${chrome ? NAV_SCRIPT : ''}</body></html>`
+  );
 };
 
 function elapsed(drop: Drop, now: Date): string {
@@ -390,6 +469,21 @@ function gateSummary(drop: Drop): string {
       .join('<br>');
   } catch {
     return '-';
+  }
+}
+
+/** How a drop's gates stand so far, or nothing when it has reported none. */
+function gateCount(drop: Drop): { total: number; passed: number; failed: number } | null {
+  if (!drop.resultJson) return null;
+  try {
+    const gates =
+      (JSON.parse(drop.resultJson) as { gates?: { exitCode: number | null; timedOut: boolean }[] })
+        .gates ?? [];
+    if (gates.length === 0) return null;
+    const passed = gates.filter((g) => !g.timedOut && g.exitCode === 0).length;
+    return { total: gates.length, passed, failed: gates.length - passed };
+  } catch {
+    return null;
   }
 }
 
@@ -422,66 +516,126 @@ export function renderHome(state: HomeState): string {
   const zones = state.zones
     .map(
       (z) =>
-        `<tr><td>${escapeHtml(z.id)}</td><td>${escapeHtml(z.repo)}</td><td>${escapeHtml(z.readyLabel)}</td><td>${escapeHtml(z.model)}</td><td>${escapeHtml(state.modes?.[z.id] ?? 'active')}</td><td><a href="/zones/${encodeURIComponent(z.id)}/github">GitHub</a></td></tr>`,
+        `<tr><td>${escapeHtml(z.id)}</td><td>${escapeHtml(z.repo)}</td><td>${escapeHtml(z.readyLabel)}</td><td>${escapeHtml(z.model)}</td><td>${badge(state.modes?.[z.id] ?? 'active')}</td><td><a href="/zones/${encodeURIComponent(z.id)}/github">GitHub</a></td></tr>`,
     )
     .join('');
 
+  const prLink = (i: WorkItem): string => {
+    const repo = repoOf.get(i.dropZoneId);
+    return i.prNumber !== null && repo
+      ? `<a href="${escapeHtml(`https://github.com/${repo}/pull/${i.prNumber}`)}">#${escapeHtml(i.prNumber)}</a>`
+      : '-';
+  };
+  const waitingOf = (i: WorkItem): string =>
+    i.state === 'ready' && i.blockedBy.length > 0 ? `waiting on ${i.blockedBy.join(', ')}` : '';
   const items = state.items
-    .map((i) => {
-      const repo = repoOf.get(i.dropZoneId);
-      const pr =
-        i.prNumber !== null && repo
-          ? `<a href="${escapeHtml(`https://github.com/${repo}/pull/${i.prNumber}`)}">#${escapeHtml(i.prNumber)}</a>`
-          : '-';
-      const waiting =
-        i.state === 'ready' && i.blockedBy.length > 0 ? `waiting on ${i.blockedBy.join(', ')}` : '';
-      return `<tr><td>${escapeHtml(i.dropZoneId)}</td><td>#${escapeHtml(i.issueNumber)}</td><td>${escapeHtml(i.title)}</td><td>${escapeHtml(i.state)}</td><td>${escapeHtml(i.reason ?? waiting)}</td><td>${pr}</td>${detailCells(state.details?.get(i.id))}</tr>`;
-    })
+    .map(
+      (i) =>
+        `<tr><td>${escapeHtml(i.dropZoneId)}</td><td>#${escapeHtml(i.issueNumber)}</td><td>${escapeHtml(i.title)}</td><td>${badge(i.state)}</td><td>${escapeHtml(i.reason ?? waitingOf(i))}</td><td>${prLink(i)}</td>${detailCells(state.details?.get(i.id))}</tr>`,
+    )
     .join('');
 
+  const targetOf = (d: Drop): string => {
+    if (d.workItemId === null) return d.role === 'doctor' ? 'doctor' : 'crew';
+    const wi = itemById.get(d.workItemId);
+    return wi ? `#${escapeHtml(wi.issueNumber)}` : '-';
+  };
   const drops = state.drops
-    .map((d) => {
-      const wi = d.workItemId === null ? undefined : itemById.get(d.workItemId);
-      const target =
-        d.workItemId === null
-          ? d.role === 'doctor'
-            ? 'doctor'
-            : 'crew'
-          : wi
-            ? `#${escapeHtml(wi.issueNumber)}`
-            : '-';
-      return `<tr><td><a href="/drops/${encodeURIComponent(d.id)}">${escapeHtml(d.id)}</a></td><td>${target}</td><td>${escapeHtml(d.role)}</td><td>${escapeHtml(d.state)}</td><td>${escapeHtml(elapsed(d, now))}</td><td>${gateSummary(d)}</td></tr>`;
-    })
+    .map(
+      (d) =>
+        `<tr><td><a href="/drops/${encodeURIComponent(d.id)}">${escapeHtml(d.id)}</a></td><td>${targetOf(d)}</td><td>${escapeHtml(d.role)}</td><td>${badge(d.state)}</td><td class="num">${escapeHtml(elapsed(d, now))}</td><td>${gateSummary(d)}</td></tr>`,
+    )
     .join('');
+
+  // The slots (§10.1): what each trooper is doing right now, one card per live drop.
+  const live = state.drops.filter((d) => d.state === 'running' || d.state === 'leased');
+  const slotCard = (d: Drop): string => {
+    const wi = d.workItemId === null ? undefined : itemById.get(d.workItemId);
+    const what = wi ? `${escapeHtml(wi.dropZoneId)} ${targetOf(d)}` : `${escapeHtml(d.dropZoneId)} ${targetOf(d)}`;
+    const title = wi ? `<span class="muted">${escapeHtml(wi.title)}</span>` : '';
+    const g = gateCount(d);
+    const gates = g ? ` · gates ${g.passed}/${g.total} passed${g.failed ? `, ${g.failed} failed` : ''}` : '';
+    return `<article class="card slot"><div>${badge(d.state)} <small>${escapeHtml(d.role)}</small></div><a class="what" href="/drops/${encodeURIComponent(d.id)}">${what}</a>${title}<span class="meta">${escapeHtml(elapsed(d, now))}${gates} · ${escapeHtml(d.id)}</span></article>`;
+  };
+  const slots =
+    live.length === 0
+      ? '<p class="empty">No drop is running.</p>'
+      : `<div class="grid">${live.map(slotCard).join('')}</div>`;
+
+  // Up next: ready work in the order the floor holds it, with what each waits on.
+  const ready = state.items.filter((i) => i.state === 'ready');
+  const QUEUE_SHOWN = 6;
+  const queue =
+    ready.length === 0
+      ? '<p class="empty">Nothing is ready to start.</p>'
+      : `<table><tr><th>Issue</th><th>Title</th><th>Waiting on</th></tr>${ready
+          .slice(0, QUEUE_SHOWN)
+          .map(
+            (i) =>
+              `<tr><td class="num">${escapeHtml(i.dropZoneId)} #${escapeHtml(i.issueNumber)}</td><td>${escapeHtml(i.title)}</td><td>${escapeHtml(waitingOf(i) || '-')}</td></tr>`,
+          )
+          .join(
+            '',
+          )}</table>${ready.length > QUEUE_SHOWN ? `<p class="muted">${ready.length - QUEUE_SHOWN} more under Work items.</p>` : ''}`;
 
   const rl = state.lastRateLimit
     ? `<p>Drop ${escapeHtml(state.lastRateLimit.dropId)} at ${escapeHtml(state.lastRateLimit.ts)}: <code>${escapeHtml(JSON.stringify(state.lastRateLimit.data))}</code></p>`
-    : '<p>None seen.</p>';
+    : '<p class="empty">None seen.</p>';
 
   const setupFrame = state.setup?.active
     ? `<div class="warn setup-frame"><p><strong>Finish setting up Jumpmaster.</strong> <a href="/setup/next">Continue where you left off</a>: connect Claude and GitHub, check the runner, add a project and run the doctor.</p><form method="post" action="/setup/dismiss"><button>Dismiss</button></form></div>`
     : '';
   const addProject = state.setup?.addProject
-    ? '<p><a href="/zones">Zones</a> · <a href="/zones/new">Add a project</a></p>'
+    ? '<p class="quick"><a href="/zones/new">Add a project</a></p>'
     : '';
-  const settingsLink = state.settings ? '<p><a href="/settings">Settings</a></p>' : '';
+  const ledger = (
+    plain: string,
+    heading: string,
+    head: string,
+    rows: string,
+    none: string,
+    after = '',
+  ) =>
+    card(
+      plain,
+      heading,
+      (rows ? `<table>${head}${rows}</table>` : `<p class="empty">${none}</p>`) + after,
+    );
   return page(
-    statusBanner(state.status) +
+    (state.killed ? KILLED_NOTICE : '') +
+      `<div class="floor-head">${statusBanner(state.status) || '<div class="status" data-waiting-on="nothing"><p><strong>Factory floor</strong></p></div>'}${killSection(state.killed ?? false)}</div>` +
       tokenAgeBanner(state.claudeTokenDays) +
       setupFrame +
-      addProject +
-      settingsLink +
       starterBanner +
-      killSection(state.killed ?? false) +
-      (state.briefings ? waitingOnYou(state.briefings) : '') +
-      usageSection(state.usage) +
-      crewSection(state.crew) +
-      sticksSection(state.sticks) +
-      `<h2>Drop zones</h2><table><tr><th>Id</th><th>Repo</th><th>Label</th><th>Model</th><th>Mode</th><th>GitHub setup</th></tr>${zones}</table>` +
-      `<h2>Work items</h2><table><tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>${items}</table>` +
-      `<h2>Drops</h2><table><tr><th>Drop</th><th>Issue</th><th>Role</th><th>State</th><th>Elapsed</th><th>Gates</th></tr>${drops}</table>` +
-      outboxSection(state.outbox) +
-      `<h2>Last rate limit</h2>${rl}`,
+      (state.briefings ? `<div class="grid">${waitingOnYou(state.briefings)}</div>` : '') +
+      `<h2 class="section-h">Running now <small class="muted">Troopers: one job slot each</small></h2>${slots}` +
+      `<div class="grid wide">${card('Ready work', '<h2>Up next</h2>', queue)}${usageSection(state.usage) || card('Claude subscription', '<h2>Usage</h2>', '<p class="empty">No usage reported yet.</p>')}</div>` +
+      `<div class="grid">${ledger(
+        'Issues Jumpmaster is working',
+        '<h2>Work items</h2>',
+        '<tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>',
+        items,
+        'No work items yet.',
+      )}</div>` +
+      `<div class="grid">${ledger(
+        'Jobs, newest first',
+        '<h2>Drops</h2>',
+        '<tr><th>Drop</th><th>Issue</th><th>Role</th><th>State</th><th>Elapsed</th><th>Gates</th></tr>',
+        drops,
+        'No drops yet.',
+      )}</div>` +
+      `<div class="grid">${ledger(
+        'Projects',
+        '<h2>Drop zones</h2>',
+        '<tr><th>Id</th><th>Repo</th><th>Label</th><th>Model</th><th>Mode</th><th>GitHub setup</th></tr>',
+        zones,
+        'No project yet.',
+        addProject,
+      )}</div>` +
+      (state.crew && state.crew.length > 0 ? `<div class="grid">${crewSection(state.crew)}</div>` : '') +
+      `<div class="grid">${sticksSection(state.sticks)}</div>` +
+      (state.outbox && state.outbox.length > 0 ? `<div class="grid">${outboxSection(state.outbox)}</div>` : '') +
+      `<div class="grid">${card('Claude API', '<h2>Last rate limit</h2>', rl)}</div>`,
     state.status ? { title: state.status.headline } : {},
   );
 }
