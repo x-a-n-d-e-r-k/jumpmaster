@@ -1,6 +1,6 @@
 # GitHub App authentication — design proposal
 
-*Status: proposal, not decided · 2026-11-13 · red-teamed three times (§12) · extends §7.3 of the
+*Status: proposal, not decided · 2026-11-13 · red-teamed four times (§12) · extends §7.3 of the
 [design](2026-10-19-jumpmaster-design.md)*
 
 Markers as in the design: **[call]** is the designer's choice for the owner to confirm or
@@ -42,8 +42,8 @@ server [call]. **Starter mode stays on PATs, as today** [owner decision, 2026-11
    narrowed to one repository when it is minted (item 3).
 3. The broker mints **one-hour installation tokens narrowed to one repository and to the
    permissions the use needs**. **No write token enters a drop**: a drop gets a `contents: read`
-   token for its own repository at its start, and its branch is pushed by the server, which holds
-   the only write tokens (§4.2) [call].
+   token for its own repository at its start, and its branch is pushed by a separate, agent-free
+   **push container** with a write token the stick asks the server for (§4.2) [owner decision].
 4. **PATs keep working** as a second credential kind per role. Existing installs migrate role by
    role from Settings, Credentials.
 5. It lands in **M5** (§10), which already brings per-zone forge credentials; it is behind a
@@ -51,8 +51,8 @@ server [call]. **Starter mode stays on PATs, as today** [owner decision, 2026-11
    approval satisfies a ruleset's required approvals.
 
 What it buys: zero tokens to make for GitHub in two-bot mode; two-bot mode on personal
-repositories (no more owner-as-author starter mode by necessity); a drop credential that can only
-read, lives at most an hour and reaches one repository; and no expiry to renew. Jumpmaster's own
+repositories (no more owner-as-author starter mode by necessity); no write token in any container an
+agent ran in, and the agent's read token lives at most an hour and reaches one repository; and no expiry to renew. Jumpmaster's own
 merges are unaffected: the author app merges from the server once the review and checks pass, with
 no person involved (§5.1 says per mode what that rests on).
 
@@ -188,54 +188,132 @@ across GitHub, so the name carries a short install id; the operator may edit it.
 | Use | App | Permissions in the token | Lifetime |
 |---|---|---|---|
 | Server: issues, labels, PR open, merge, status and check reads | author | the author manifest's set | cached, re-minted under ten minutes left |
-| Server: **push of a drop's branch** (below) | author | `contents: write` | minted per push, revoked after it |
 | Server: review posting, dismissing reviews | reviewer | `pull_requests: write` | cached |
-| Implement, heal and resolve drops (fetch at start) | author | `contents: read` | **per drop**, minted at lease, never shared, revoked at drop end |
+| Implement, heal and resolve **agent containers** (fetch at start) | author | `contents: read` | **per drop**, minted at lease, never shared, revoked at drop end |
+| **Push containers** (below), asked for by the stick | author | `contents: write` | per push, minted on the stick's request, revoked when the push result arrives |
 | Review, crew and doctor drops on a private repository | reviewer | `contents: read` | per drop, revoked at drop end |
 
-- **Pushes leave the drop, not the token** [call]. A drop's payload goes in once on stdin and the
-  stick closes it (`StdinOnce: true`, `stream.end(o.payload)` in `apps/stick/src/docker.ts`); the
-  trooper only writes events to stdout. A token minted at lease time can therefore never be
-  replaced inside a running drop, and an implement drop, with an agent run and gates of up to 20
-  minutes each (`GateSpecSchema` in `packages/protocol/src/index.ts`), routinely outlives an hour
-  before it pushes. Three ways out were weighed:
-  - *A two-way channel into the container* (`credential.refresh`, as the first draft had it) is a
-    new transport across the stick and into a container on an internal network, not a message
-    type. Rejected: the most new attack surface for the least gain.
-  - *Capping drops under an hour* would cut the gates and the agent's budget to fit GitHub's token
-    lifetime. Rejected.
-  - *Moving the push out of the container* (chosen). The trooper's network use of the forge is
-    already front-loaded: `mirrorFetch` and `remoteBranchSha` run before the agent starts, the
-    working clone fetches from the local mirror (`file://`), and only the push reaches GitHub at
-    the end (`apps/trooper/src/git.ts`). So the trooper keeps everything it does before a push
-    (protected-path refusal, secret sweep, size limit and the `expectSha` check in `prePushCheck`
-    and its push directory), and then, instead of pushing, writes a **git bundle** of the one ref
-    to stdout through the existing chunked-artifact path that the stick reassembles and
-    hash-checks (`ArtifactAssembler`, `apps/stick/src/runner.ts`). The stick posts it to the server
-    with the result. The server checks that the bundle holds exactly the agent branch at the gated
-    SHA the result names, re-runs the protected-path diff against the base, mints a `contents:
-    write` token for the zone's repository, pushes with `--force-with-lease` against the lease SHA
-    it already knows (none for a new branch, `resumeSha` for a resumed one), and revokes the token.
-    The server image gains a `git` binary for this.
-
-  What it buys beyond solving the refresh: **no write token is ever inside a container**, so a
-  drop can't push anywhere but through the server's checks, can't merge (F19 needs `contents:
-  write`), and can't push tags or delete branches. The drop's read token is used within the first
-  minutes; one minted at lease time has the hour it needs. If a future role must read from GitHub
-  later in a drop, it reads at the start or asks the server through its result, never through a
-  new channel. The PAT path is unchanged: a PAT drop still pushes from inside, as today.
-- **Revocation.** Each drop token is written to the vault (encrypted like every vault entry,
+- **Why the push can't stay in the agent's container.** A drop's payload goes in once on stdin
+  and the stick closes it (`StdinOnce: true`, `stream.end(o.payload)` in
+  `apps/stick/src/docker.ts`); the trooper only writes events to stdout. A token minted at lease
+  time can never be replaced inside a running drop, and an implement drop, with an agent run and
+  gates of up to 20 minutes each (`GateSpecSchema` in `packages/protocol/src/index.ts`), routinely
+  outlives an hour before it pushes. The trooper's own use of the forge is already front-loaded:
+  `mirrorFetch` and `remoteBranchSha` run before the agent starts, the working clone fetches from
+  the local root mirror (`file://`), and only the push reaches GitHub at the end
+  (`apps/trooper/src/git.ts`).
+- **The push container** [owner decision, 2026-11-13]. When the agent's container exits with work
+  to push, the stick asks the server for a fresh `contents: write` token for the zone's repository
+  and starts a **second, agent-free trooper container** on the same drop workspace. It runs
+  today's `guardedPush` unchanged: the agent-side fetch into a fresh root-owned push directory,
+  `mirrorFetch` of the base, `prePushCheck` (protected paths, secrets in added lines and messages,
+  commit identities), the `expectSha` check against the gated commit, and the `--force-with-lease`
+  push. Properties:
+  - **No write token ever sits in a container an agent ran in.** The agent container holds a
+    `contents: read` token, used at its start (a minted one has the hour it needs).
+  - **No channel into a container.** The one-hour refresh is the stick's request to the server, on
+    the stick's existing authenticated connection, made when the token is needed.
+  - **One push path for PAT and app modes.** In PAT mode the server answers the same request with
+    the author PAT; the agent container then fetches with `githubReadToken` where one is
+    configured, and with the author PAT where none is, as today.
+  - **No `git` in the server image, and no new size limit**: the push is the trooper's, bounded by
+    today's `PUSH_FETCH_MAX_BYTES` (1 GiB) and fetch timeout.
+  - **What it gives up**: the earlier draft's second, server-side check of the pushed diff. The
+    trooper's `prePushCheck` stays the single pre-push check; the server's own protected-path check
+    still runs on the PR's file list from the forge before any merge (`protectedPathHits` in
+    `apps/server/src/flow/snapshot.ts:603`, parking in `flow/decide.ts:234`). (`results.ts:269`
+    uses the same matcher, but to pick which verification artifacts a PR needs.)
+- **The workspace must outlive the agent container: today it doesn't.** Trooper containers have
+  no mounts and run with `AutoRemove: true` (`apps/stick/src/docker.ts:498-512`); the root mirror
+  (under `JM_WORK_ROOT=/work`) and the agent's working copy (`/home/agent/repo`,
+  `images/trooper/Dockerfile`) live in the container's own filesystem and vanish when it exits. So
+  for implement, heal and resolve drops the stick creates **two per-drop Docker volumes** [call],
+  labelled with the drop id like its networks: one at `/work` (root's mirror and push
+  directories) and one at `/home/agent/repo` (the working copy). The image creates
+  `/home/agent/repo` owned by the agent, so Docker initialises the empty volume with that owner
+  (root in the trooper has no `CHOWN`). Nothing secret is written there: the payload's tokens stay
+  on stdin and in process environments (`docker.ts:544`), and `system.md` and `settings.json`
+  hold no credentials. The stick removes both volumes after a successful push or a terminal
+  result, and its startup sweep (`reapOrphans`, extended to volumes) removes volumes no live or pending drop holds,
+  after a retention window (below). Copying the files out with Docker's archive API instead
+  (keeping the stopped container) was weighed: it streams up to a gigabyte through the stick and
+  relies on Docker's tar extraction of agent-written content; volumes avoid both.
+- **Nothing the agent left can run in the push container.** `guardedPush` never runs root's git in
+  the agent's repository: root's git works only in its own bare `pushDir` (`GIT_DIR` set,
+  `assertRootOwnedDir`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
+  `core.hooksPath=/dev/null`, a fixed `config` written before and again after the agent fetch,
+  `hooks` removed), and reads the agent's repository only through `--upload-pack` run **as the
+  agent's uid**. Repository settings such as `core.fsmonitor`, filters, `core.sshCommand` and
+  `includeIf` are read only by that agent-uid process, and none applies to `upload-pack` over
+  `file://` (no index, no checkout, no SSH; `uploadpack.packObjectsHook` is honoured only from
+  system or global config). Then `sweep` kills every process the trooper can signal before the
+  token is used. The push container keeps all of that and tightens it:
+  - the agent uid runs nothing but that one `upload-pack`, invoked with
+    `-c core.fsmonitor=false -c core.hooksPath=/dev/null` on its command line (which outranks the
+    repository's config), and the push stops if any agent-uid process survives the sweep;
+  - it runs the **base trooper image** pinned by the stick's release, never the zone's stack image,
+    so no project tooling is present; no agent CLI is started;
+  - it gets the same resource limits, `CapDrop`, `no-new-privileges` and, under egress, a proxy
+    that allows only the forge's host;
+  - its payload carries only what the push needs: the token, branch, base, lease, `expectSha`,
+    protected paths and the secrets to sweep for.
+  C1 of the focused review: `guardedPush` calls `mirrorFetch` with its token right before
+  `prePushCheck` (`apps/trooper/src/git.ts:680`); in the push container that is the fresh write
+  token, which includes read, and this happens after the sweep.
+- **The token request.** A new stick route, `POST /api/sticks/push-token { dropId, epoch }`, uses
+  the same `liveDrop` check as the other drop routes (`apps/server/src/api/sticks.ts:124-146`):
+  the stick's bearer token (stored hashed, `getStickByTokenHash`), the drop belonging to that
+  stick, the current epoch, and a live lease. On top of that the server refuses unless the drop's
+  role pushes (implement, heal, resolve), the kill switch is off, the zone is `active` (not
+  `paused` or `observe`), and the zone's repository is the drop's. It mints with `repository_ids:
+  [the zone's repository]` and `permissions: { contents: write }`, records the token in the vault
+  for revocation, audits the mint, allows one live push token per drop, and revokes it when the
+  stick posts the push result or the drop ends. The lease is the drop's: the agent container's
+  exit doesn't end it, and the stick keeps the heartbeat going through the push.
+- **Leases on the remote branch.** The push container gets the same lease the agent container
+  would have used: none for a new branch, `resumeSha` for a resumed one, and
+  `payload.pr.headSha` for heal and resolve (`apps/trooper/src/roles/heal.ts:44`, `resolve.ts:49`),
+  so a branch someone else moved is never overwritten.
+- **Checkpoints.** A stopped or rate-limited agent commits a checkpoint and pushes it without
+  gates or `expectSha` (`checkpoint` in `roles/shared.ts:392-404`, called from `implement.ts:116`),
+  and the `interrupted` and `rate_limited` results carry that `headSha` to the replacement drop
+  (`apps/server/src/results.ts:158-171`, `:231`), whose `checkoutBranch(resumeSha)` needs the branch
+  on GitHub. With no write token in the agent container, the agent container commits the checkpoint
+  and exits with a *push requested, checkpoint* result; the stick runs a push container for it
+  exactly as for a final push (no `expectSha`, no gates, as today), then posts the result with the
+  pushed SHA as `headSha`. So each checkpoint is one push container, and a resumed drop still finds
+  its branch.
+- **When the server is unreachable or refuses.** The work is never discarded for want of a token.
+  If the request fails (server down, restart) or is refused while the kill switch is on or the zone
+  isn't active, the stick keeps both volumes and the agent container's result, retries with
+  backoff, and reports the drop as *push pending* on its heartbeat. The stick's lost-server rule
+  (three missed beats, `apps/stick/src/runner.ts`) kills running *agent* containers, which
+  checkpoint on the stop signal, but never a pending push. The server, for its part, holds a drop
+  that is push pending: it doesn't expire its lease into a replacement while the stick still
+  reports it, and on restart it accepts the stick's request for that drop and epoch again. If the
+  stick itself is gone past the retention window (default 24 hours [call]), the volumes are
+  removed and the server requeues the item from the last pushed SHA, which loses only the unpushed
+  work, as a stick crash does today.
+- **Kill switch and observe mode.** The kill switch refuses every push-token request, revokes the
+  live ones and suspends the installations (below); a push container already running is stopped
+  with the drop, and its volumes are kept, so the work pushes once the switch is released. A zone
+  in `observe` or `paused` gets no push token either, which is what those modes promise (nothing
+  written to GitHub); its pending pushes go out when the zone is active again, or are discarded
+  with the drop if the operator cancels it.
+- **Rejected: the stick pushes directly.** Handing the write token to the stick to push from the
+  host would run `git` on agent-written content on the host, beside the Docker socket, outside the
+  container isolation the push container keeps. Rejected for that.
+- **Revocation.** Each minted token is written to the vault (encrypted like every vault entry,
   keyed by drop id) when minted and deleted when revoked, so `DELETE /installation/token` (F6b),
-  which needs the token itself, still works after a server restart. Revocation happens at drop end,
-  when its lease is lost, and by the kill switch. If the spike shows F6b doesn't revoke a stateless
-  token (F21), a drop token simply expires within its hour; it can only read.
-- **Kill switch** [call]. Besides revoking every drop token the vault holds, the kill switch
-  **suspends each installation** with the app JWT (F22). That needs no record of which tokens are
-  live and also halts the server's own GitHub work, which the kill switch stops anyway; resuming
-  unsuspends them. If the spike shows suspension doesn't kill live tokens, it still stops new mints
-  and the vault-held revocation covers the rest. A server restart that lasts longer than the
-  stick's lost-server window (three 15-second beats, `apps/stick/src/runner.ts`) also kills the
-  running drops.
+  which needs the token itself, still works after a server restart. Read tokens are revoked at drop
+  end and when the lease is lost; push tokens when the push result arrives; all of them by the kill
+  switch. If the spike shows F6b doesn't revoke a stateless token (F21), a token simply expires
+  within its hour.
+- **Kill switch** [call]. Besides refusing and revoking tokens, the kill switch **suspends each
+  installation** with the app JWT (F22). That needs no record of which tokens are live and also
+  halts the server's own GitHub work, which the kill switch stops anyway; resuming unsuspends them.
+  If the spike shows suspension doesn't kill live tokens, it still stops new mints and the
+  vault-held revocation covers the rest.
 - **Redaction.** Minted tokens exist in no configured secret list, so the broker registers each one
   in a process-lifetime scrub set (bounded, kept past its expiry) that feeds the server's `scrub`
   (`apps/server/src/main.ts`), together with the base64 of `x-access-token:<token>`, the form git
@@ -328,6 +406,13 @@ they don't, the hybrid isn't available there (a fine-grained PAT can't serve a c
 a personal repository, §1), so it **falls back to PAT starter mode, as today**; nothing it has now
 is lost. An organization repository falls back to the hybrid.
 
+The push container doesn't change who merges, and it keeps the requirement in the two cases the
+earlier draft put at risk. **Large branches**: the push is today's `guardedPush`, bounded only by
+today's `PUSH_FETCH_MAX_BYTES` (1 GiB), so no new cap (the bundle design would have put branches
+through the stick's artifact limits). **Server restarts**: a push whose token request fails is held
+on the stick and retried, and the server keeps the drop until the push lands (§4.2); checkpoints go
+the same way, so a resumed drop finds its branch. The merge itself is the outbox's, as before.
+
 ### 5.2 CODEOWNERS and who else can approve
 
 An app can't be a code owner (F14), so the generated file's `* @<reviewer-bot>` line can't name a
@@ -377,7 +462,8 @@ owner, with `* @<reviewer-bot>` kept. `forge.codeowners`' fix text says exactly 
 telling a repository with real team ownership to delete it.
 
 **What a drop's token can do.** It can read its zone's repository for under an hour, and nothing
-else (§4.2). Pushing goes through the server, and merging is the author app's, on the server.
+else (§4.2). Pushing is the push container's, with its own short-lived token, and merging is the
+author app's, on the server.
 
 **Two-bot on personal repositories.** The owner registers both apps under their own account and
 installs them on their own repository (F11). Neither bot is the owner or an admin, so
@@ -423,7 +509,7 @@ files gain `jumpmaster-merge` for two-app zones; the CODEOWNERS text follows §5
   2. The doctor runs §6's app column against the app *as a candidate*, before it is used.
   3. **Author:** promotion waits until no running drop holds the old author PAT (new leases for
      the zone hold off meanwhile), then promotes: the role resolves to the app on the next pass.
-     Open agent PRs keep working: the server pushes to branches the old bot made and the author app
+     Open agent PRs keep working: push containers push to branches the old bot made and the author app
      merges PRs it didn't open, and adoption recognises both logins (§4.3). `forge.retired-author`
      then fails until the old account's access is removed and its PAT deleted (§5.2).
   4. **Reviewer, before promoting it:** a person applies the `jumpmaster-merge` ruleset and merges
@@ -444,10 +530,13 @@ files gain `jumpmaster-merge` for two-app zones; the CODEOWNERS text follows §5
 
 ## 8. Security summary
 
-- **Better than PATs:** no write token in any drop, and the read token a drop holds lives under an
-  hour, reaches one repository and is revocable, by the kill switch too; no `workflows`, so a push
-  to CI config fails at GitHub, not only at Jumpmaster's guard; pushes pass the server's own checks
-  before reaching GitHub.
+- **Better than PATs:** no write token in any container an agent ran in; the agent's read token
+  lives under an hour, reaches one repository and is revocable, by the kill switch too; the push
+  container's write token is minted per push, for one repository, and revoked after it; no
+  `workflows`, so a push to CI config fails at GitHub, not only at Jumpmaster's guard.
+- **Given up:** the earlier draft's server-side re-check of the pushed diff. The trooper's
+  `prePushCheck`, now in the push container, is the single pre-push check, and the server's
+  protected-path check on the PR's file list still runs before every merge (§4.2).
 - **Unchanged:** Jumpmaster's own merges, by the author app on the server; starter mode, on PATs.
 - **New:** the private key is the install's most powerful GitHub secret for its owner. It mints
   `contents: write` (merge included) on every repository the app is installed on, without expiry.
@@ -457,9 +546,10 @@ files gain `jumpmaster-merge` for two-app zones; the CODEOWNERS text follows §5
   by body and line. `SECURITY.md` states the reach beside the vault key. Rotation: generate a new
   key on the app's settings page, paste it, delete the old one there (the spike checks whether an
   API exists).
-- **Blast radius of a drop stays one repository either way.** Every drop token is minted with
-  `repository_ids: [the zone's repository]` and `contents: read` (F6), so what the installation
-  reaches never widens what a drop can touch. Server-side tokens are narrowed the same way, per
+- **Blast radius of a drop stays one repository either way.** Every drop token, the agent
+  container's `contents: read` and the push container's `contents: write`, is minted with
+  `repository_ids: [the zone's repository]` (F6), so what the installation reaches never widens
+  what a drop can touch. Server-side tokens are narrowed the same way, per
   zone.
 
 **Restrictions kept, and why.** Only those needed for safety or correctness:
@@ -469,7 +559,9 @@ files gain `jumpmaster-merge` for two-app zones; the CODEOWNERS text follows §5
 | No `administration` permission | An admin-level app could edit or bypass the rulesets that keep merges behind the review and checks (§5.2). |
 | No `workflows` permission | Agent code pushed to `.github/workflows` could run arbitrary CI with the repository's secrets; GitHub refuses it without this permission (F8). |
 | Every token narrowed to one repository at minting | Keeps a drop's, and each server use's, reach to its zone's repository, whatever the installation reaches. |
-| Drops get `contents: read` only; pushes go through the server | A drop can't merge, push tags, delete branches or skip the server's push checks (§4.2). |
+| Agent containers get `contents: read` only; pushes run in an agent-free push container | Agent code never shares a container with a write token, so it can't merge, push tags, delete branches or skip `prePushCheck` (§4.2). |
+| The push container runs only the base trooper image, the agent uid only for `upload-pack`, and a sweep before the token is used | Nothing the agent left in the workspace can run beside the write token (§4.2). |
+| Push tokens only for a live drop of a pushing role, zone active, kill switch off | Observe, paused and killed states write nothing to GitHub (§4.2). |
 | Per-drop tokens, never shared, revoked at drop end | A drop can't use another drop's credential, and the kill switch takes effect. |
 | Reviewer is a different app from the author | A pull request's author can't approve it (GitHub's rule for users; for an app, F15 in the spike), so one app can't be both author and approver. |
 | `jumpmaster-merge`: only the author app and admins update the default branch | Without `* @reviewer-bot`, other write-access actors' approvals count (§5.2). |
@@ -510,8 +602,8 @@ to per zone (M4.5 plan, deferrals). This design gives that change its shape: a z
 each role is a reference of one kind, `github-app` (by owner, §4.4), `github-pat`,
 `gitlab-project-token` or `gitlab-pat`; the broker answers "a token for role R on zone Z for use U"
 whichever kind is behind it. GitHub apps are per repository owner (one pair per owner, shared by
-that owner's zones); GitLab tokens are per project or group. Server-side pushes (§4.2) apply to
-every kind whose tokens can't be refreshed into a drop.
+that owner's zones); GitLab tokens are per project or group. The push container (§4.2)
+serves every kind: the stick asks for "a push token for this drop", whatever is behind it.
 
 ## 10. Milestone
 
@@ -521,7 +613,8 @@ and credential kinds, and the broker is credential work the M4 plan explicitly d
 measures the current path; changing setup under that gate would cost its before-and-after
 comparison. M5's gate (two zones on two forges) then runs with an app on the GitHub side. The
 **spike (Task 1) can run now**, independent of M5, so its answer is in hand when M5 is planned.
-The redaction fix for the new token format (§4.2, F21) is not app-specific and can land at once.
+The redaction fix for the new token format (§4.2, F21) and the shared protected-path matcher
+(Task 2) are not app-specific and can land at once.
 
 ## 11. Open risks
 
@@ -544,9 +637,14 @@ The redaction fix for the new token format (§4.2, F21) is not app-specific and 
    M5's weighted scheduler should count it per installation.
 8. **Identity-dependent code (§4.3).** A caller missed there turns into a silent "no ruleset", a
    parked zone or a lost adoption; the broker test against the fake GitHub is the guard.
-9. **Server-side push.** The server gains `git` and a new input (a bundle from a drop). The bundle
-   is reassembled and hash-checked by the stick, size-capped, and checked again by the server (one
-   ref, the gated SHA, protected paths) before any push.
+9. **The push container.** It runs beside a workspace the agent wrote, with a write token. The
+   isolation of §4.2 (agent uid only for `upload-pack`, root git only in its own bare directory,
+   the sweep, the base image) is what keeps the two apart; the tests in Task 5 guard it. Per-drop
+   volumes also mean drop data now sits on the host's disk until the push or the retention window
+   ends.
+10. **Pending pushes.** Work held while the server is unreachable or the kill switch is on waits
+    on the stick's disk for up to the retention window; a stick lost for longer loses its unpushed
+    work, as a crashed stick does today.
 
 ## 12. Red-team record
 
@@ -582,12 +680,36 @@ none is rejected. Each change and the finding it answers:
 | Adoption takes a set of author logins in `flow/reconcile.ts` too (§4.3) | Fable I6 |
 | Redaction pattern widened for the stateless token format (F21), and the basic-auth form scrubbed (§4.2) | Fable I7 |
 | Hybrid named as the route for repositories with human code owners; `forge.codeowners` fix text (§5.2, §6) | Fable I9; Mythos minor (fix text) |
-| Pushes moved out of the container: the trooper sends a git bundle, the server pushes; no refresh channel needed (§4.2) | Mythos M1 |
+| Pushes moved out of the agent's container, so no refresh channel is needed (§4.2); first as a git bundle the server pushed, replaced in the fourth review by the push container | Mythos M1 |
 | Conversion response: `client_secret` dropped and scrubbed, `owner` and `permissions` checked (§4.1) | minors (both) |
 | Manifest `code` redeemed at once, scrubbed from logs, plain-HTTP warning (§4.1) | minors (both) |
 | Doctor compares the `GET /app` slug with the vault's (§6) | minors (both) |
 | F14's unowned-path reading marked inferred and kept in the spike matrix (§3, §13) | minors (both) |
 | Spike additions: private app outside its owner, suspension and live tokens, `code` single use, `github-actions[bot]` approval on an unowned path (§13) | Mythos (spike list) |
+
+**Fourth review (Fable, focused on §4.2's push, 2026-11-13): SOUND WITH CHANGES.** The owner
+chose its alternative, the push container ("Yes, push container"). Checking it against
+`origin/main` turned up one thing the alternative assumed: a drop's workspace does **not** survive
+its container today (no mounts, `AutoRemove`), so the design adds per-drop volumes. It also
+corrected one citation: the server's protected-path check before a merge is
+`flow/snapshot.ts:603` with `flow/decide.ts:234`; `results.ts:269` picks verification artifacts.
+Nothing is rejected except, as the review itself advised, the stick pushing directly.
+
+| Change | Answers |
+|---|---|
+| The push runs in a second, agent-free trooper container with a write token the stick requests; the bundle-to-server design and its `git` in the server image are dropped (§4.2) | the review's recommended alternative [owner decision] |
+| Per-drop volumes at `/work` and `/home/agent/repo` so the workspace outlives the agent container; cleanup and retention (§4.2) | found in verification (workspace lifetime) |
+| Push container isolation kept from `guardedPush` and tightened: agent uid only for `upload-pack` with `core.fsmonitor`/hooks overridden, a failed sweep stops the push, base image only, forge-only egress (§4.2) | found in verification (agent leftovers) |
+| `mirrorFetch` before `prePushCheck` uses the push container's fresh write token, after the sweep (§4.2) | C1 |
+| A failed or refused token request keeps the volumes and the result, retries, and holds the drop as push pending; agent containers checkpoint on the lost-server kill, pending pushes are never killed (§4.2, §5.1) | I4 |
+| Each checkpoint is a push container (no `expectSha`, no gates), and the result's `headSha` is the pushed SHA, so `checkoutBranch(resumeSha)` finds the branch (§4.2) | I6 |
+| Heal and resolve keep their lease on `payload.pr.headSha` in the push container (§4.2) | I7 |
+| One protected-path matcher in `packages/protocol` for `globHit` and `protectedMatch` (Task 2) | I8 |
+| The token route: `liveDrop` (stick bearer token, drop owner, epoch, live lease) plus role, kill switch, zone mode and repository checks; one live token per drop; revocation on the push result; refused under the kill switch and in observe or paused zones (§4.2) | the request's checks |
+| The server's re-check of the pushed diff is given up and said so; the protected-path check on the PR's file list before merge remains (§4.2, §8) | the review's stated cost |
+| Rejected: handing the write token to the stick to push from the host, beside the Docker socket (§4.2) | the review's weaker option |
+| Unattended merging restated for large branches (1 GiB, as today) and server restarts (§5.1) | owner's requirement |
+| Stick, protocol, server route and trooper changes, with tests for isolation, a lapsed read token, server-unreachable retry, kill switch and observe, checkpoints and leases (Task 5) | task outline |
 
 ## 13. Task outline
 
@@ -613,34 +735,59 @@ none is rejected. Each change and the finding it answers:
    - F6b on a stateless token (F21); F22: does suspending an installation kill its live tokens;
    - a workflow-file push refused without `workflows`; key rotation by API.
    Output: `docs/spikes/<date>-github-app.md`. Gate for everything below.
-2. **Redaction for the new token format** (can land now): the widened `ghs_` pattern in
+2. **One protected-path matcher** (can land now): the trooper's `globHit`
+   (`apps/trooper/src/git.ts:538`) and the server's `protectedMatch` (`flow/guards.ts:30`) differ
+   (the trooper adds the bare-`dir` and basename cases, the server the dotfile handling); one
+   function in `packages/protocol` with the union of both behaviours and shared tests, so the push
+   check and the review check always agree.
+3. **Redaction for the new token format** (can land now): the widened `ghs_` pattern in
    `packages/protocol/src/redact.ts`, and the basic-auth form of registered tokens, with tests.
-3. **Broker and JWT** (`forge/github-app.ts`): sign, mint narrowed tokens, cache server-side uses,
+4. **Broker and JWT** (`forge/github-app.ts`): sign, mint narrowed tokens, cache server-side uses,
    per-drop read tokens held in the vault with revocation, installation suspension for the kill
    switch, scrub registration; tests with a fake GitHub.
-4. **Server-side push**: the trooper's bundle output after its existing push checks; the stick
-   forwarding it; the server's bundle checks, minted push token and `--force-with-lease` push;
-   `git` in the server image.
-5. **Forge identity** (§4.3): token provider and identity in `GitHubForge`; every caller that
+5. **Push container** (§4.2):
+   - **stick**: per-drop volumes at `/work` and `/home/agent/repo` (the trooper image creates the
+     latter owned by the agent), the second container from the base trooper image with the push
+     payload, heartbeat state *push pending*, retry with backoff, retention window, volume cleanup
+     in `reapOrphans`; the token request on its authenticated client;
+   - **protocol**: a `push` role payload (token, branch, base, lease, optional `expectSha`,
+     protected paths, secrets), an agent result *push requested* (final or checkpoint, with the
+     gated SHA and lease), and the `push-token` request and response;
+   - **server**: `POST /api/sticks/push-token` behind `liveDrop`, plus role, kill switch, zone mode
+     and repository checks, minting `contents: write` for one repository (the PAT in PAT mode), one
+     live token per drop, vault record, audit, revocation on the push result; holding a push
+     pending drop's lease and refusing a replacement meanwhile; the checkpoint result's `headSha`
+     taken from the push;
+   - **trooper**: the `push` role running `guardedPush` unchanged, `upload-pack` with
+     `core.fsmonitor=false` and `core.hooksPath=/dev/null`, and a refusal if an agent-uid process
+     survives the sweep; implement, heal and resolve ending in *push requested* instead of pushing;
+   - **tests**: the push container's isolation (a planted hook, `core.fsmonitor`, a filter,
+     `core.sshCommand`, `includeIf` and a lingering agent process in the workspace, none of which
+     runs or sees the token); a lapsed read token in an agent container failing clearly at its
+     start; the server unreachable at push time, then back (the push lands, nothing lost); a
+     refusal under the kill switch and in observe mode, then release; a checkpoint pushed by a push
+     container and resumed by a replacement drop; heal and resolve refused on a moved PR head;
+     a branch near the 1 GiB limit.
+6. **Forge identity** (§4.3): token provider and identity in `GitHubForge`; every caller that
    reads the token's account; `viewerIsAdmin`; bypass per ruleset with the absent-field fallback;
    `repoAccess`; adoption of a login set in `ours()` and `flow/reconcile.ts`; check-runs read.
-6. **Vault and resolution**: `github-app/<owner>/<role>` entries, credential references,
+7. **Vault and resolution**: `github-app/<owner>/<role>` entries, credential references,
    app-first resolution, `testCredential`, fingerprint, PEM scrubbing; `pairFor` by credential
    kind; the read source.
-7. **Manifest flow**: owner choice (personal or organization, preselected from the repository),
+8. **Manifest flow**: owner choice (personal or organization, preselected from the repository),
    one pair per owner, manifest builder (with the no-`administration`/`workflows` refusal), state,
    immediate redemption with log scrubbing, conversion checks, Finish confirmation, install link,
    installation discovery; the wizard and Settings, Credentials buttons; the paste fallback if F5
    failed.
-8. **Doctor and guidance**: §6's app column, `forge.retired-author`, `forge.actions-approval`, the
+9. **Doctor and guidance**: §6's app column, `forge.retired-author`, `forge.actions-approval`, the
    slug check, the `jumpmaster-merge` ruleset file, CODEOWNERS text without the `*` line for app
    reviewers and the hybrid fix for human-owned paths, `recommendIdentity` for apps, token links
    for starter and under "Use tokens instead".
-9. **Migration**: candidate validation (the `*` line and `jumpmaster-merge`), drain before author
+10. **Migration**: candidate validation (the `*` line and `jumpmaster-merge`), drain before author
    promotion, promote and roll back per role, dismissing the old reviewer's change requests, the
    retired-author fail.
-10. **Runbooks and SECURITY.md**: install (GitHub Apps first for two-bot, tokens for starter and as
+11. **Runbooks and SECURITY.md**: install (GitHub Apps first for two-bot, tokens for starter and as
     the alternative), operate (key rotation, adding a repository or an owner), troubleshooting by
     check id, the key's reach.
-11. **GitLab** (M5's adapter track): bootstrap token, project-token minting with `self_rotate`,
+12. **GitLab** (M5's adapter track): bootstrap token, project-token minting with `self_rotate`,
     the per-zone credential kinds of §9.
