@@ -1544,8 +1544,10 @@ describe('secret routes (Task 4)', () => {
     const w = secretsApp({ claude_token: CLAUDE });
     const s1 = await put('githubAuthorToken', { value: AUTHOR_OLD }, w.asSession);
     expect(s1.statusCode).toBe(403);
+    // Said as a page can show it: no API path, "saving" (a first save needs it too), and a flag.
     expect(s1.json()).toEqual({
-      error: 'replacing a credential needs sudo: re-enter the passphrase (POST /api/control/sudo)',
+      error: 'saving a credential asks for your passphrase again',
+      sudo: 'required',
     });
     w.db.prepare('UPDATE sessions SET sudo_until = ?').run(plus(t0, 60_000).toISOString());
     expect((await put('githubAuthorToken', { value: AUTHOR_OLD }, w.asSession)).statusCode).toBe(
@@ -1624,7 +1626,14 @@ describe('secret routes (Task 4)', () => {
     });
     const r = await put('githubAuthorToken', { value: FAILED });
     expect(r.statusCode).toBe(422);
-    expect(r.json()).toEqual({ tested: false, status: 401, permission: 'metadata=read' });
+    // GitHub's status in words (T10 finding 4): a 401 is an expired, revoked or mistyped token.
+    expect(r.json()).toEqual({
+      tested: false,
+      status: 401,
+      permission: 'metadata=read',
+      error:
+        "GitHub rejected this token (401): it is expired, revoked or mistyped. Make a new one (the GitHub step and each project's GitHub page have the links).",
+    });
     expect(w.store.resolved().githubAuthorToken.source).toBe('missing');
     expect(w.store.vault() !== 'disabled' && w.store.vault().meta('githubAuthorToken')).toBe(
       undefined,
@@ -1655,13 +1664,21 @@ describe('secret routes (Task 4)', () => {
         payload: {},
       });
     const r = await test();
-    expect(r.json()).toEqual({ tested: false, status: 503 });
+    expect(r.json()).toEqual({
+      tested: false,
+      status: 503,
+      error: 'GitHub did not accept the test (HTTP 503): try again in a moment.',
+    });
     expect(w.store.resolved().githubReviewerToken.login).toBe('author-bot');
     expect(w.store.resolved().githubReviewerToken.testResult).toBe('failed (503)');
     expect(same()).toEqual(['web', 'api']);
     // A session needs sudo to test, as to replace.
     const s = await test(w.asSession);
     expect(s.statusCode).toBe(403);
+    expect(s.json()).toEqual({
+      error: 'testing a credential asks for your passphrase again',
+      sudo: 'required',
+    });
     // A passing test replaces the login.
     w.forge.outage = undefined;
     w.db.prepare('UPDATE sessions SET sudo_until = ?').run(plus(t0, 60_000).toISOString());

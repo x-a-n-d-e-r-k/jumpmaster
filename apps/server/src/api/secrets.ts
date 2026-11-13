@@ -12,6 +12,7 @@ import {
   isInstallCredential,
   parseGateSecretName,
   type Resolved,
+  refusalWords,
   type TestDeps,
   testCredential,
 } from '../vault/credentials.js';
@@ -21,7 +22,8 @@ import { fingerprintOf } from '../vault/vault.js';
 /**
  * The credential routes (§7.5): list, replace, test, remove and reload. No route ever returns,
  * logs or audits a value: the list carries fingerprints and dates; a failed test returns the HTTP
- * status and the permission GitHub names, and nothing else; audit details are built from named
+ * status, the permission GitHub names and `refusalWords`' sentence built from those two (never
+ * GitHub's message); audit details are built from named
  * fields only (`{ name, fingerprint, result }`), never from the request body.
  */
 
@@ -130,8 +132,8 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
     // Proof of presence: the token holds the secrets directory; a session re-enters the passphrase.
     if (req.principal?.via === 'session' && !req.principal.sudo)
       return reply.code(403).send({
-        error:
-          'replacing a credential needs sudo: re-enter the passphrase (POST /api/control/sudo)',
+        error: 'saving a credential asks for your passphrase again',
+        sudo: 'required',
       });
     const body = PutBody.safeParse(req.body ?? {});
     // The message is ours: a zod issue could quote the value.
@@ -163,6 +165,7 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
           status: t.status,
           ...(t.permission ? { permission: t.permission } : {}),
           ...(t.problem ? { problem: t.problem } : {}),
+          error: t.problem ?? refusalWords(t.status, t.permission),
         });
       }
       const stored = store.putCredential(name, value, {
@@ -196,8 +199,8 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
       // A test rewrites what the list and the rules read (the result, the login): sudo, as a replace.
       if (req.principal?.via === 'session' && !req.principal.sudo)
         return reply.code(403).send({
-          error:
-            'testing a credential needs sudo: re-enter the passphrase (POST /api/control/sudo)',
+          error: 'testing a credential asks for your passphrase again',
+          sudo: 'required',
         });
       return serialized(name, async () => {
         const r = store.resolved()[name];
@@ -224,6 +227,7 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
               status: t.status,
               ...(t.permission ? { permission: t.permission } : {}),
               ...(t.problem ? { problem: t.problem } : {}),
+              error: t.problem ?? refusalWords(t.status, t.permission),
             };
       });
     },
@@ -234,7 +238,8 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
     if (!name) return reply;
     if (req.principal?.via === 'session' && !req.principal.sudo)
       return reply.code(403).send({
-        error: 'removing a credential needs sudo: re-enter the passphrase (POST /api/control/sudo)',
+        error: 'removing a credential asks for your passphrase again',
+        sudo: 'required',
       });
     return serialized(name, async () => {
       const r = store.resolved()[name];

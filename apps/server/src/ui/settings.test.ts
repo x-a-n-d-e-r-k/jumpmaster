@@ -1045,6 +1045,33 @@ function mcpScript(globals: Record<string, unknown> = {}) {
 
 type Call = { method: string; path: string; body: unknown };
 
+describe('Credentials tab after sudo lapses (T10 finding 3, red team I1)', () => {
+  const lapsed = {
+    status: 403,
+    body: { error: 'saving a credential asks for your passphrase again', sudo: 'required' },
+  };
+  test('replace, test and remove answer sudo on a lapsed-sudo refusal, so the page opens the prompt', async () => {
+    const { ctx } = scriptContext(0, lapsed);
+    const fn = (n: string) => ctx[n] as (...a: unknown[]) => Promise<string>;
+    for (const [name, args] of [
+      ['jmReplaceCredential', [{ name: 'githubAuthorToken', value: 'v-123456789' }]],
+      ['jmTestCredential', ['githubAuthorToken']],
+      ['jmRemoveCredential', ['githubAuthorToken']],
+    ] as const) {
+      const state = { sudo: true, passphrase: '' };
+      const status = stubStatus();
+      expect(await fn(name)(...args, state, status), name).toBe('sudo');
+      expect(state.sudo, name).toBe(false);
+      expect(status.textContent, name).toContain('passphrase');
+    }
+  });
+
+  test('the page records a lapse, and keeps a typed token unless it was saved', () => {
+    expect(CREDENTIALS_SCRIPT).toContain("root.dataset.sudo = s.sudo ? '1' : '0';");
+    expect(CREDENTIALS_SCRIPT).toContain("if (outcome === 'saved') field.value = '';");
+  });
+});
+
 /** Runs the tab's script against stubs: `jmReplaceCredential` with a recording fetch. */
 async function runReplace(o: {
   name: string;
@@ -1090,13 +1117,18 @@ async function runAction(kind: 'test' | 'remove', name: string) {
   return { result, calls, status: status.textContent, appended: status.appended };
 }
 
-function scriptContext(running: number) {
+function scriptContext(
+  running: number,
+  refuse?: { status: number; body: Record<string, unknown> },
+) {
   const calls: Call[] = [];
   const ctx = vm.createContext({
     document: { addEventListener: () => {}, querySelectorAll: () => [] },
     encodeURIComponent,
     jmFetch: async (path: string, body: unknown, method?: string) => {
       calls.push({ method: method ?? 'POST', path, body });
+      if (refuse && path !== '/api/control/sudo')
+        return { ok: false, status: refuse.status, json: async () => refuse.body };
       const json =
         method === 'PUT'
           ? {

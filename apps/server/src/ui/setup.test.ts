@@ -404,11 +404,25 @@ describe('the setup wizard', () => {
   });
 });
 
+type Answer = { status: number; body: Record<string, unknown> };
 /** Runs the page's credential-saving script against stub fields: the browser path, without one. */
-function runSave(fields: Record<string, string>) {
+function runSave(
+  fields: Record<string, string>,
+  answer: (path: string) => Answer = () => ({ status: 200, body: {} }),
+  sudoHidden = false,
+) {
   const fetched: string[] = [];
   const out = { textContent: '' };
-  const inputs = Object.entries(fields).map(([name, value]) => ({ name, value, type: 'password' }));
+  const wrap = { hidden: true };
+  const focused: string[] = [];
+  const inputs = Object.entries(fields).map(([name, value]) => ({
+    name,
+    value,
+    type: 'password',
+    disabled: name === 'sudo' && sudoHidden,
+    closest: () => wrap,
+    focus: () => focused.push(name),
+  }));
   const form = {
     querySelector: (sel: string) =>
       sel === 'input[name=sudo]' ? (inputs.find((i) => i.name === 'sudo') ?? null) : null,
@@ -417,16 +431,92 @@ function runSave(fields: Record<string, string>) {
   const ctx = vm.createContext({
     jmFetch: async (path: string) => {
       fetched.push(path);
-      return { ok: true, status: 200, json: async () => ({}) };
+      const a = answer(path);
+      return { ok: a.status < 300, status: a.status, json: async () => a.body };
     },
   });
   vm.runInContext(SAVE_CREDENTIALS.replace(/^<script>|<\/script>$/g, ''), ctx);
   return {
     fetched,
     out,
+    wrap,
+    focused,
+    value: (name: string) => inputs.find((i) => i.name === name)?.value,
     result: (ctx.jmSaveCredentials as (f: unknown, o: unknown) => Promise<unknown>)(form, out),
   };
 }
+
+describe('the wizard after the sudo window lapses (T10 finding 3)', () => {
+  test('a sudo refusal shows the passphrase field, says why, and keeps every token typed', async () => {
+    const s = runSave(
+      { githubAuthorToken: AUTHOR, githubReviewerToken: 'reviewer-value-123456', sudo: '' },
+      () => ({
+        status: 403,
+        body: { error: 'saving a credential asks for your passphrase again', sudo: 'required' },
+      }),
+    );
+    expect(await s.result).toBe('sudo');
+    expect(s.wrap.hidden).toBe(false);
+    expect(s.focused).toEqual(['sudo']);
+    expect(s.out.textContent).toBe(
+      'Saving a credential asks for your passphrase again: enter it above, then Save.',
+    );
+    // Nothing the operator typed is lost.
+    expect(s.value('githubAuthorToken')).toBe(AUTHOR);
+    expect(s.value('githubReviewerToken')).toBe('reviewer-value-123456');
+  });
+
+  test('a refused token keeps its value and the ones after it; a saved one is cleared', async () => {
+    const s = runSave(
+      { githubAuthorToken: AUTHOR, githubReviewerToken: 'reviewer-value-123456', sudo: PASS },
+      (path) =>
+        path.endsWith('githubReviewerToken')
+          ? { status: 422, body: { tested: false, status: 401 } }
+          : { status: 200, body: {} },
+    );
+    expect(await s.result).toBe(false);
+    expect(s.value('githubAuthorToken')).toBe('');
+    expect(s.value('githubReviewerToken')).toBe('reviewer-value-123456');
+  });
+
+  test('the forge step always carries the passphrase field, hidden and disabled while sudo is fresh', async () => {
+    const w = await world();
+    await w.call('POST', '/api/control/sudo', { passphrase: PASS });
+    const body = (await w.get('/setup/forge')).body;
+    // Disabled while hidden, so a password manager cannot fill it unseen.
+    expect(body).toMatch(
+      /<p class="sudo" hidden><label>Your passphrase[^<]*<input type="password" name="sudo" autocomplete="current-password" disabled>/,
+    );
+  });
+
+  test('a hidden, autofilled passphrase field is not sent; a refused passphrase shows the field', async () => {
+    const hidden = runSave({ githubAuthorToken: AUTHOR, sudo: 'autofilled' }, undefined, true);
+    expect(await hidden.result).toBe('saved');
+    expect(hidden.fetched).toEqual(['/api/control/secrets/githubAuthorToken']);
+    const wrong = runSave({ githubAuthorToken: AUTHOR, sudo: 'wrong-passphrase' }, (path) =>
+      path === '/api/control/sudo' ? { status: 401, body: {} } : { status: 200, body: {} },
+    );
+    expect(await wrong.result).toBe(false);
+    expect(wrong.wrap.hidden).toBe(false);
+    expect(wrong.focused).toEqual(['sudo']);
+    expect(wrong.value('githubAuthorToken')).toBe(AUTHOR);
+  });
+
+  test("a refusal names the field by its label once, without the route's status beside GitHub's", async () => {
+    const s = runSave({ githubAuthorToken: AUTHOR, sudo: PASS }, (path) =>
+      path.endsWith('githubAuthorToken')
+        ? {
+            status: 422,
+            body: { tested: false, status: 401, error: 'GitHub rejected this token (401): x.' },
+          }
+        : { status: 200, body: {} },
+    );
+    expect(await s.result).toBe(false);
+    expect(s.out.textContent).toBe(
+      'The author token was not saved: GitHub rejected this token (401): x.',
+    );
+  });
+});
 
 describe('the wizard, round 2', () => {
   test('Save with no value says to enter a token first and never moves on; only Continue and Do this later do', async () => {
