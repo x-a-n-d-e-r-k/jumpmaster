@@ -178,6 +178,12 @@ export function setupCodeMatches(state: SetupState, given: string): boolean {
 }
 
 export const SETUP_CODE_PREFIX = 'JUMPMASTER SETUP CODE: ';
+/** Where a printed code is read, for any install: compose or not. */
+export const SETUP_CODE_WHERE =
+  "the server's output, on a line beginning JUMPMASTER SETUP CODE: (under Docker Compose, docker compose logs jumpmaster run in the install directory; otherwise the server's log or terminal)";
+/** The claim page's answer when no code is waiting: the last one was entered already. */
+export const SETUP_CODE_SPENT =
+  'That code was already used: each code works once. For a new one, run jumpmaster ctl setup-code (under Docker Compose: docker compose exec jumpmaster jumpmaster ctl setup-code), or restart the server, and read the newest JUMPMASTER SETUP CODE: line.';
 /** How long the `jm_setup` claim lasts once the code was entered. */
 export const SETUP_CLAIM_MS = 10 * 60_000;
 
@@ -218,6 +224,11 @@ export class SetupMode {
     const claim = randomBytes(32).toString('base64url');
     this.claims.set(sha256Hex(claim), now.getTime() + SETUP_CLAIM_MS);
     return claim;
+  }
+
+  /** Whether a code is waiting to be entered (false once the last one was used). */
+  hasCode(): boolean {
+    return this.state !== null;
   }
 
   claimValid(claim: string, now: Date): boolean {

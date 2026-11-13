@@ -152,13 +152,27 @@ const SUDO_PROMPT = (what: string) =>
 
 export const CREDENTIALS_SCRIPT = `<script>
 ${SUDO_FN}
+// A response's JSON, read once and kept: jmLapsed and jmWhy may both need it.
+async function jmBody(r) {
+  if (!('jmBody' in r)) { try { r.jmBody = await r.json(); } catch (e) { r.jmBody = {}; } }
+  return r.jmBody;
+}
 async function jmWhy(r) {
   try {
-    const j = await r.json();
+    const j = await jmBody(r);
     if (j.error) return j.error;
     if (j.tested === false) return 'the test failed (' + (j.status == null ? 'no answer' : j.status) + ')' + (j.permission ? ': needs ' + j.permission : '') + (j.problem ? ': ' + j.problem : '');
   } catch (e) {}
   return '';
+}
+// A refusal because sudo lapsed (five minutes): the page opens the passphrase prompt.
+async function jmLapsed(r, state, status) {
+  if (r.status !== 403) return false;
+  const j = await jmBody(r);
+  if (!j.sudo) return false;
+  state.sudo = false;
+  status.textContent = 'This asks for your passphrase again: enter it below, then press the button again.';
+  return true;
 }
 function jmRefreshLink(status) {
   status.insertAdjacentHTML('beforeend', ' <a href="/settings/credentials">Refresh the list</a>');
@@ -170,6 +184,7 @@ async function jmReplaceCredential(c, state, status) {
   if (c.declaredCreatedAt) body.declaredCreatedAt = c.declaredCreatedAt;
   const r = await jmFetch('/api/control/secrets/' + encodeURIComponent(c.name), body, 'PUT');
   if (!r.ok) {
+    if (await jmLapsed(r, state, status)) return 'sudo';
     if (r.status === 403) state.sudo = false;
     status.textContent = c.name + ' was not saved (' + r.status + '): ' + (await jmWhy(r));
     return 'refused';
@@ -183,7 +198,7 @@ async function jmReplaceCredential(c, state, status) {
 async function jmTestCredential(name, state, status) {
   if (!(await jmSudo(state, status))) return 'sudo';
   const r = await jmFetch('/api/control/secrets/' + encodeURIComponent(name) + '/test', {});
-  if (!r.ok) { if (r.status === 403) state.sudo = false; status.textContent = name + ': ' + r.status + ' ' + (await jmWhy(r)); return 'refused'; }
+  if (!r.ok) { if (await jmLapsed(r, state, status)) return 'sudo'; if (r.status === 403) state.sudo = false; status.textContent = name + ': ' + r.status + ' ' + (await jmWhy(r)); return 'refused'; }
   const j = await r.json();
   status.textContent = j.tested ? name + ': ' + j.result + (j.login ? ' (' + j.login + ')' : '') : name + ': ' + (await jmWhy({ json: async () => j }));
   jmRefreshLink(status);
@@ -192,7 +207,7 @@ async function jmTestCredential(name, state, status) {
 async function jmRemoveCredential(name, state, status) {
   if (!(await jmSudo(state, status))) return 'sudo';
   const r = await jmFetch('/api/control/secrets/' + encodeURIComponent(name), {}, 'DELETE');
-  if (!r.ok) { if (r.status === 403) state.sudo = false; status.textContent = name + ' was not removed (' + r.status + '): ' + (await jmWhy(r)); return 'refused'; }
+  if (!r.ok) { if (await jmLapsed(r, state, status)) return 'sudo'; if (r.status === 403) state.sudo = false; status.textContent = name + ' was not removed (' + r.status + '): ' + (await jmWhy(r)); return 'refused'; }
   status.textContent = name + ' removed.';
   return 'removed';
 }
@@ -204,7 +219,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const state = () => ({ sudo: root.dataset.sudo === '1', passphrase: pass.value });
   const after = (s, outcome) => {
     pass.value = '';
-    if (s.sudo) root.dataset.sudo = '1';
+    root.dataset.sudo = s.sudo ? '1' : '0';
     if (outcome === 'sudo') { prompt.hidden = false; pass.focus(); }
     else prompt.hidden = true;
   };
@@ -217,7 +232,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Beside the button, so an empty field's "Enter a token first." is seen where it was pressed.
     const out = form.querySelector('.replace-out');
     const outcome = await jmReplaceCredential(c, s, out);
-    if (outcome !== 'sudo') field.value = '';
+    if (outcome === 'saved') field.value = '';
     after(s, outcome);
   });
   for (const b of document.querySelectorAll('button.test')) b.addEventListener('click', async () => {

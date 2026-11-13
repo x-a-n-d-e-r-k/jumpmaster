@@ -9,6 +9,7 @@ import {
   credentialCreatedAt,
   credentialFingerprint,
   gateSecretName,
+  refusalWords,
   resolveCredentials,
   SECRET_FILES,
   shadowedCredentials,
@@ -294,5 +295,28 @@ describe('testing a credential on entry', () => {
       await testCredential(gateSecretName('web', 'NPM'), 'short', { zones, forge: none.forge }),
     ).toEqual({ ok: false, status: null, problem: 'a gate secret is at least 8 characters' });
     expect(none.calls).toEqual([]);
+  });
+});
+
+describe('refusalWords: what a refused token test says (T10 finding 4)', () => {
+  test('each GitHub status gets its meaning and the next step, never only "refused"', () => {
+    expect(refusalWords(401)).toBe(
+      "GitHub rejected this token (401): it is expired, revoked or mistyped. Make a new one (the GitHub step and each project's GitHub page have the links).",
+    );
+    expect(refusalWords(403, 'contents=write')).toBe(
+      'GitHub refused it (403): the token lacks a permission (it needs contents=write), or an organization policy or a rate limit refused it. Edit the token on GitHub to add the permission, or wait and try again.',
+    );
+    expect(refusalWords(403)).toBe(
+      'GitHub refused it (403): the token lacks a permission, or an organization policy or a rate limit refused it. Edit the token on GitHub to add the permission, or wait and try again.',
+    );
+    expect(refusalWords(404)).toBe(
+      "The token can't see a project's repository (404): on GitHub, add the repository to the token's repository access.",
+    );
+    expect(refusalWords(null)).toBe(
+      'GitHub did not answer: check this host reaches api.github.com.',
+    );
+    expect(refusalWords(503)).toBe(
+      'GitHub did not accept the test (HTTP 503): try again in a moment.',
+    );
   });
 });

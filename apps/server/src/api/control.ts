@@ -11,6 +11,7 @@ import {
   operatorHash,
   passphraseProblem,
   ScryptBusyError,
+  SETUP_CODE_WHERE,
   SetupMode,
   setOperatorPassphrase,
   setupActive,
@@ -298,7 +299,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       audit(req, 'setup.reopen', { result: 'reopened' });
       return {
         setup: 'open',
-        next: "a new setup code is on the server's output (docker compose logs jumpmaster)",
+        next: `a new setup code is on ${SETUP_CODE_WHERE}`,
       };
     });
 
@@ -314,7 +315,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       audit(req, 'setup.code', { result: 'printed' });
       return {
         printed: true,
-        next: "the new setup code is on the server's output (docker compose logs jumpmaster)",
+        next: `the new setup code is on ${SETUP_CODE_WHERE}`,
       };
     });
 

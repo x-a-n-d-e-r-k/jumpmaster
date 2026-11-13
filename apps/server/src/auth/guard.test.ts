@@ -554,6 +554,33 @@ describe('control routes with a session', () => {
   });
 });
 
+describe('a spent setup code', () => {
+  test('entering a used code again says it was used and how to get a new one; a wrong code says so', async () => {
+    const w = await world();
+    const code = w.printed[0] as string;
+    const wrong = await w.post('/setup/code', { code: 'AAAA-BBBB-CCCC' });
+    expect(wrong.body).toContain('not the current setup code');
+    w.tick(60_000);
+    const ok = await w.post('/setup/code', { code });
+    expect(ok.statusCode).toBe(303);
+    w.tick(60_000);
+    // The back button or a second tab: the code is spent, and the page says what to do.
+    const again = await w.post('/setup/code', { code });
+    expect(again.statusCode).toBe(401);
+    expect(again.body).toContain('already used');
+    expect(again.body).toContain('ctl setup-code');
+    expect(again.body).toContain('docker compose exec jumpmaster jumpmaster ctl setup-code');
+    expect(again.body).not.toContain('not the current setup code');
+  });
+
+  test('the passphrase page says how long the claim lasts', async () => {
+    const w = await world();
+    const ok = await w.post('/setup/code', { code: w.printed[0] as string });
+    const cookie = `jm_setup=${valueOf(cookieOf(ok, 'jm_setup'))}`;
+    expect((await w.get('/setup', { cookie })).body).toContain('ten minutes');
+  });
+});
+
 describe('Bearer-only setup routes', () => {
   const bearer = { authorization: `Bearer ${TOKEN}` };
 
@@ -583,6 +610,11 @@ describe('Bearer-only setup routes', () => {
     expect(w.printed).toHaveLength(2);
     const fresh = w.printed[1] as string;
     expect(res.body).not.toContain(fresh);
+    // Where to read it, for any install: the line's prefix, compose in its directory, else the log.
+    const next = (res.json() as { next: string }).next;
+    expect(next).toContain('JUMPMASTER SETUP CODE:');
+    expect(next).toContain('in the install directory');
+    expect(next).toContain('log');
     expect(res.body).not.toContain(fresh.replaceAll('-', ''));
     expect((await w.post('/setup/code', { code: first })).statusCode).toBe(401);
     w.tick(1000);
