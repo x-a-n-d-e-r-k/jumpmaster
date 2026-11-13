@@ -1544,8 +1544,10 @@ describe('secret routes (Task 4)', () => {
     const w = secretsApp({ claude_token: CLAUDE });
     const s1 = await put('githubAuthorToken', { value: AUTHOR_OLD }, w.asSession);
     expect(s1.statusCode).toBe(403);
+    // Said as a page can show it: no API path, "saving" (a first save needs it too), and a flag.
     expect(s1.json()).toEqual({
-      error: 'replacing a credential needs sudo: re-enter the passphrase (POST /api/control/sudo)',
+      error: 'saving a credential asks for your passphrase again',
+      sudo: 'required',
     });
     w.db.prepare('UPDATE sessions SET sudo_until = ?').run(plus(t0, 60_000).toISOString());
     expect((await put('githubAuthorToken', { value: AUTHOR_OLD }, w.asSession)).statusCode).toBe(
@@ -1662,6 +1664,10 @@ describe('secret routes (Task 4)', () => {
     // A session needs sudo to test, as to replace.
     const s = await test(w.asSession);
     expect(s.statusCode).toBe(403);
+    expect(s.json()).toEqual({
+      error: 'testing a credential asks for your passphrase again',
+      sudo: 'required',
+    });
     // A passing test replaces the login.
     w.forge.outage = undefined;
     w.db.prepare('UPDATE sessions SET sudo_until = ?').run(plus(t0, 60_000).toISOString());

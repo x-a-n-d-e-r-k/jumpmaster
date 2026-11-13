@@ -124,11 +124,13 @@ function credentialField(
   return `<p><label>${escapeHtml(label)} <input type="password" name="${name}" autocomplete="off" spellcheck="false"></label></p>`;
 }
 
-/** The re-entered passphrase a credential write needs from a session without sudo. */
+/**
+ * The re-entered passphrase a credential write needs from a session without sudo. Always on the
+ * page: hidden while sudo is fresh, and shown by the save script when sudo lapses while the
+ * operator is away making a token (sudo lasts five minutes).
+ */
 const sudoField = (sudo: boolean): string =>
-  sudo
-    ? ''
-    : '<p><label>Your passphrase (saving a credential asks for it again) <input type="password" name="sudo" autocomplete="current-password"></label></p>';
+  `<p class="sudo"${sudo ? ' hidden' : ''}><label>Your passphrase (saving a credential asks for it again) <input type="password" name="sudo" autocomplete="current-password"></label></p>`;
 
 /**
  * The script that saves the filled credential fields: sudo first when asked for, then one `PUT`
@@ -154,13 +156,20 @@ async function jmSaveCredentials(form, out) {
     const created = form.querySelector('input[name=declaredCreatedAt]');
     if (field.name === 'claudeToken' && created && created.value) body.declaredCreatedAt = created.value;
     const r = await jmFetch('/api/control/secrets/' + field.name, body, 'PUT');
-    field.value = '';
     if (!r.ok) {
-      let why = '';
-      try { const j = await r.json(); why = j.error || (j.tested === false ? 'GitHub refused it' + (j.permission ? ' (needs ' + j.permission + ')' : '') : ''); } catch (e) {}
+      // A refused value stays in its field, as do the ones after it: nothing typed is lost.
+      let j = {};
+      try { j = await r.json(); } catch (e) {}
+      if (r.status === 403 && j.sudo) {
+        if (sudo) { const p = sudo.closest('p'); if (p) p.hidden = false; sudo.focus(); }
+        out.textContent = 'Saving a credential asks for your passphrase again: enter it above, then Save.';
+        return 'sudo';
+      }
+      const why = j.error || (j.tested === false ? 'GitHub refused it' + (j.permission ? ' (needs ' + j.permission + ')' : '') : '');
       out.textContent = field.name + ' was not saved (' + r.status + '): ' + why;
       return false;
     }
+    field.value = '';
   }
   out.textContent = 'Saved and tested.';
   return 'saved';
