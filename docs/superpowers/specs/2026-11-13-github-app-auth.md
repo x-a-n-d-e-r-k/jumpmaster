@@ -27,15 +27,18 @@ may not pre-fill the resource owner, and expires in at most 366 days. The owner'
 
 ## 2. Recommendation
 
-Replace the GitHub PATs with **two GitHub Apps per install, registered from a manifest** in one
-click each, and **installation access tokens minted per repository and per use** by a credential
+Replace the GitHub PATs with **two GitHub Apps per repository owner (a personal account or an
+organization), registered from a manifest** in one click each, and **installation access tokens minted per repository and per use** by a credential
 broker in the server [call]:
 
 1. **Author app** and **reviewer app**, each registered from the setup wizard through GitHub's
-   manifest flow. Jumpmaster stores each app's id, slug and private key in the vault. No token is
-   ever made or pasted by hand.
-2. The operator **installs** each app on the repositories it should reach (GitHub's own install
-   page, "Only select repositories"). Adding a repository later is ticking it there.
+   manifest flow, under the account that owns the zone's repository: a personal account or an
+   organization, both supported. An install whose zones span several owners has one pair per owner
+   (§4.1). Jumpmaster stores each app's id, slug and private key in the vault. No token is ever
+   made or pasted by hand.
+2. The operator **installs** each app on its owner's repositories, on **All repositories** or
+   **Only select repositories**, whichever they prefer; both are supported. Every token is still
+   narrowed to one repository when it is minted (item 3).
 3. The broker mints **one-hour installation tokens narrowed to one repository and to the
    permissions the use needs**. A drop gets its own `contents: write` token for its zone's
    repository, never shared with another drop, **revoked at drop end and by the kill switch**.
@@ -69,7 +72,7 @@ merges are unaffected: the author app merges once the review and checks pass.
 | F8 | Git over HTTPS takes the token as the password (`x-access-token:TOKEN`) with `contents` permission; editing files in `.github/workflows` needs the separate **Workflows** permission. | confirmed | [Choosing permissions for a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app) |
 | F9 | When the app's permissions change, each installation's owner "will be prompted to approve the new permissions", and until they do the installation keeps the old ones. | confirmed | same page |
 | F10 | "The success of an API request with an installation access token only depends on the app's permissions" (not on a collaborator role). | confirmed | same page |
-| F11 | An app owned by a personal account can be installed on that account, with "Only select repositories". | confirmed | [Installing your own GitHub App](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app) |
+| F11 | An app owned by a personal account can be installed on that account, on "All repositories" or "Only select repositories". | confirmed | [Installing your own GitHub App](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app) |
 | F12 | A ruleset's pull request rule counts approving reviews from those with write access; the docs never say whether an **app's** APPROVE review counts, nor what "write access" means for an app (its `contents: write` grant is the likely reading). | **unknown** (apps) | [Available rules for rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets); [About protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches) |
 | F13 | Community answers disagree: one says a dedicated app's reviews "will count toward merge requirements", another that GitHub "only counts real user" approvals. Only `github-actions[bot]` is clearly excluded. | unknown | [community discussion 181487](https://github.com/orgs/community/discussions/181487) |
 | F14 | Code owners are "individuals or teams" that "must have write permissions", with "explicit write access". An app is neither, so it **can't be a code owner**. A path with no owner can be changed with the approval of any user with write access. | confirmed (who may be one; unowned paths); inferred (apps excluded) | [About code owners](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners) |
@@ -78,6 +81,7 @@ merges are unaffected: the author app merges once the review and checks pass.
 | F17 | Ruleset bypass actors include `Integration` (an app). A caller without admin rights may not see `bypass_actors`, but gets `current_user_can_bypass`. | confirmed (actor type); inferred (visibility); spike | [REST API endpoints for rules](https://docs.github.com/en/rest/repos/rules); [changelog 2023-06-27](https://github.blog/changelog/2023-06-27-repository-rules-public-beta-updates/) |
 | F18 | `GET /user` is not available to an installation token. The bot's login is `<slug>[bot]`. | confirmed (endpoint); inferred (login string); spike | [Endpoints available for installation access tokens](https://docs.github.com/en/rest/authentication/endpoints-available-for-github-app-installation-access-tokens) |
 | F19 | `PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge` needs **Contents: write** for an app. | confirmed | [Permissions required for GitHub Apps](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps) |
+| F20 | A private app "can only be installed on the account that owns the app", personal or organization; a public app can be installed by "any user on GitHub", and has a landing page with an Install button. | confirmed | [Making a GitHub App public or private](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/making-a-github-app-public-or-private) |
 
 F12, F13 and F15 decide the two-identity model (§5). F5 and F5b decide whether a private install
 can use the one-click flow at all (§4.1).
@@ -87,8 +91,8 @@ can use the one-click flow at all (§4.1).
 ### 4.1 Registering the apps (manifest flow)
 
 The wizard's GitHub step replaces the three token links with **Create the author app** and, for
-two-bot, **Create the reviewer app**. Each is an HTML form that POSTs to F1's URL, for the
-repository's owner when it is an organization, else the personal URL:
+two-bot, **Create the reviewer app**. Each is an HTML form that POSTs to F1's URL for the
+owner chosen below: the personal URL or the organization's.
 
 ```json
 {
@@ -133,10 +137,28 @@ names are unique across GitHub, so the name carries a short install id; the oper
   operator pastes the URL the browser failed to load (it carries the code) into the wizard. That is
   no token to make, but it is one paste. If F5b fails with no public placeholder accepted, the
   manifest flow is out and the design falls back to PATs; the spike is the gate.
+- **Which owner.** The app is registered under the account that owns the zone's repository. The
+  wizard reads the owner's type from the repository URL the operator already entered (an
+  unauthenticated `GET /users/{owner}` gives `User` or `Organization`) and preselects it, showing
+  both choices: **My personal account** (`https://github.com/settings/apps/new`) or **The
+  organization `<org>`** (`https://github.com/organizations/<org>/settings/apps/new`). The operator
+  can override it, for instance to register on their own account and test before an org owner
+  repeats it; the doctor's install check (§6) then says plainly if the app can't reach the zone.
 - **Organizations.** Registering an app under an organization needs an owner or app manager of
   that organization; installing it on the organization's repositories needs an owner, or an
   owner's approval of a member's request. The wizard says so where it says today that an
   organization may have to approve each fine-grained token.
+- **Zones under several owners: one app pair per owner** [call]. A private app installs only on
+  the account that owns it (F20), so one private pair can't serve both a personal account and an
+  organization. The alternative, one **public** pair installed on each, is rejected: a public app
+  has an install page anyone on GitHub can use, so Jumpmaster would have to treat every unknown
+  installation as hostile; and an organization's repositories would then hang on an app, and a
+  private key, that belongs to someone's personal account, which the organization's owners can't
+  manage, rotate or remove when that person leaves. One pair per owner keeps each app private,
+  lets each owner's admins manage their own, and bounds a leaked key to one owner's
+  installation. The cost is one more create-and-install per extra owner, which the wizard offers
+  when a zone's repository has an owner with no app yet. `public: false` is therefore a kept
+  restriction (§8).
 
 ### 4.2 Installing and the broker
 
@@ -191,8 +213,10 @@ runs `getBranchRules`, the marker reads and adoption on an app token against the
 ### 4.4 Vault and credential resolution
 
 `apps/server/src/vault/credentials.ts` gains two install credentials, `githubAuthorApp` and
-`githubReviewerApp` (a JSON value with the pem; also accepted as a file for config as code,
-`secrets/github_author_app.json`). Per role the resolution is: **app if present, else PAT**.
+`githubReviewerApp`, each a JSON map keyed by owner login, `{ "<owner>": { appId, slug, clientId,
+pem, importedAt } }` (also accepted as a file for config as code, `secrets/github_author_app.json`).
+A zone uses the entry for its repository's owner. Per role the resolution is: **app for this owner
+if present, else PAT**.
 `credentialFingerprint` includes the app entries, so the forge pair cache refreshes when one
 changes. `testCredential` for an app entry signs a JWT and calls `GET /app`: a 401 means a wrong
 or revoked key.
@@ -252,10 +276,10 @@ verdict held in Jumpmaster.
 
 | Check | With a PAT (today, unchanged) | With an app |
 |---|---|---|
-| `forge.author` | the token's account, its Write role, not Admin, expiry | the key signs a JWT `GET /app` accepts; `GET /repos/{o}/{r}/installation` finds the zone's repository; the granted permissions equal the manifest's (an unapproved permission update, F9, is a warn naming the account owner who must approve); no expiry; a key older than a year (from `importedAt`) is a warn |
+| `forge.author` | the token's account, its Write role, not Admin, expiry | the key for the repository's owner signs a JWT `GET /app` accepts; `GET /repos/{o}/{r}/installation` finds the zone's repository (a 404 names the owner and the install page); an informational note says what the installation reaches (All repositories, or the count of selected ones), never a warn or fail; the granted permissions equal the manifest's (an unapproved permission update, F9, is a warn naming the account owner who must approve); no expiry; a key older than a year (from `importedAt`) is a warn |
 | `forge.reviewer` | another account, Write, not Admin; `skip` in starter mode | the same for the reviewer app; it must be a different app; `skip` in starter mode |
 | `forge.author-reads` | probes each read; a refusal names the permission | the same probes with a minted token, plus check runs (`checks: read`), which apps have and fine-grained PATs lack |
-| `forge.admin` | neither account is a repository admin | neither installation was granted `administration` or `workflows`; `current_user_can_bypass` read with **each** app's token is `never` (the full `bypass_actors` list is likely hidden without admin rights, F17); an installation on **All repositories** is a **fail** with the install-page fix; `authorMayBeAdmin` on an app-author zone is a pass with a note to clear it |
+| `forge.admin` | neither account is a repository admin | neither installation was granted `administration` or `workflows`; `current_user_can_bypass` read with **each** app's token is `never` (the full `bypass_actors` list is likely hidden without admin rights, F17); `authorMayBeAdmin` on an app-author zone is a pass with a note to clear it |
 | `forge.branch-rules` | the ruleset as today | read with the author app's token through §4.3's `viewerIsAdmin` change; app-backed starter zones also need the `jumpmaster/verdict` check with the author app as its source |
 | `forge.codeowners` | two-bot: every owned non-protected path names the reviewer bot | two-bot: no non-protected path may have an owner (F14); protected paths name people; starter unchanged |
 | `forge.private-clone` | the read token | the reviewer app (author app in starter) covers the repository |
@@ -302,11 +326,31 @@ app-backed starter zones; the CODEOWNERS text follows §5.
   stops it, now in starter mode too (§5). Jumpmaster's own merges, by the author app on the server,
   are unchanged.
 - **New:** the private key is the install's most powerful GitHub secret. It mints `contents: write`
-  (merge included) on every repository the app is installed on, without expiry. It lives only in
-  the vault and the server process, is redacted by body and line, and an install on all
-  repositories is a doctor fail. `SECURITY.md` states this beside the vault key. Rotation: generate a
-  new key on the app's settings page, paste it, delete the old one there (the spike checks whether
-  an API exists).
+  (merge included) on every repository the app is installed on, without expiry. On **All repositories**
+  that is every repository of that owner, including ones created later; on selected repositories,
+  those. Both are supported [owner decision, 2026-11-13]; the doctor reports the reach as
+  information. The key lives only in the vault and the server process and is redacted by body and
+  line. `SECURITY.md` states the reach beside the vault key.
+- **Blast radius of a drop stays one repository either way.** Every drop token is minted with
+  `repository_ids: [the zone's repository]` (F6), so what the installation reaches never widens
+  what a drop can touch. Server-side tokens are narrowed the same way, per zone. Rotation: generate a new key on the app's settings page, paste it,
+  delete the old one there (the spike checks whether an API exists).
+
+**Restrictions kept, and why.** Only those needed for safety or correctness:
+
+| Restriction | Why it is needed |
+|---|---|
+| No `administration` permission | An admin-level app could edit or bypass the ruleset that is the only thing stopping a drop merging its own work (§5). |
+| No `workflows` permission | An agent push to `.github/workflows` could run arbitrary CI with the repository's secrets; GitHub refuses it without this permission (F8). |
+| Every token narrowed to one repository at minting | Keeps a drop's blast radius to its zone's repository, whatever the installation reaches. |
+| Per-drop tokens, never shared, revoked at drop end | A drop can't use another drop's credential, and the kill switch takes effect. |
+| Drop tokens carry no `statuses` | A drop can't post `jumpmaster/verdict` and so merge itself in starter mode (§5). |
+| Reviewer is a different app from the author | A pull request's author can't approve it (GitHub's rule for users; for an app, F15 in the spike), so one app can't be both author and approver in two-bot mode. |
+| `public: false`, one pair per owner | A public app can be installed by anyone (F20); §4.1. |
+| The private key never leaves the server | It mints write tokens for the owner's whole installation. |
+
+Not restricted: personal or organization owner, All or selected repositories, and how many
+repositories an installation covers.
 
 ## 9. GitLab (M5)
 
@@ -335,8 +379,9 @@ Proposed shape for M5 [call]:
 **Fit with M5's per-zone forge credentials.** M5 already moves forge credentials from install-wide
 to per zone (M4.5 plan, deferrals). This design gives that change its shape: a zone's credential for
 each role is one of `github-app`, `github-pat`, `gitlab-project-token`, `gitlab-pat`; the broker
-answers "a token for role R on zone Z for use U" whichever kind is behind it. GitHub apps stay
-install-wide (one pair, many installations); GitLab tokens are per project or group.
+answers "a token for role R on zone Z for use U" whichever kind is behind it. GitHub apps are per
+repository owner (one pair per owner, shared by that owner's zones); GitLab tokens are per project
+or group.
 
 ## 10. Milestone
 
@@ -357,9 +402,9 @@ comparison. M5's gate (two zones on two forges) then runs with an app on the Git
    the doctor's checks catch a change at the next pass.
 4. **The private key** (§8).
 5. **Organization policy.** An organization may forbid members to register or install apps; then
-   the operator needs an owner, or falls back to PATs. The wizard asks who owns the organization
-   before showing the buttons.
-6. **Rate limits (F16).** One installation shares its budget across all zones on that account, as
+   the operator needs an owner, or falls back to PATs. The wizard says this when the owner is an
+   organization (§4.1).
+6. **Rate limits (F16).** One installation shares its budget across all zones of that owner, as
    one bot account's PATs share theirs today; the installation's budget grows with repositories.
    M5's weighted scheduler should count it per installation.
 7. **Identity-dependent code (§4.3).** A caller missed there turns into a silent "no ruleset" or a
@@ -376,8 +421,12 @@ reviewer's `contents` permission may decide whether its approval counts (§5 spi
 PEM escaped redaction (§4.2); drop tokens were shared and never revoked (§4.2); bypass actors
 aren't visible without admin rights (§6 `forge.admin`); the migration order stalled merges (§7);
 the webhook URL was an untested reachability risk (F5b). The minors corrected F12, F16, F18,
-installation discovery, the starter read token, key age, workflow-file merges and the
-all-repositories install, and widened the spike.
+installation discovery, the starter read token, key age and workflow-file merges, and widened the
+spike. One minor is **reversed by the owner's decision**: the review asked that an installation on
+All repositories fail the doctor; the owner decided on 2026-11-13 that the design should work with
+a personal or an organization installation and not restrict what isn't necessary. All
+repositories is now supported and reported as information (§6, §8), since every token is narrowed
+to one repository at minting and a drop's reach is one repository either way.
 
 ## 13. Task outline
 
@@ -395,9 +444,10 @@ all-repositories install, and widened the spike.
    per-drop tokens with revocation, scrub registration; tests with a fake GitHub.
 3. **Forge identity** (§4.3): token provider and identity in `GitHubForge`; every `viewerLogin()`
    caller; `viewerIsAdmin`; adoption of both logins; check-runs read.
-4. **Vault and resolution**: `githubAuthorApp` / `githubReviewerApp`, app-first resolution,
+4. **Vault and resolution**: `githubAuthorApp` / `githubReviewerApp` keyed by owner, app-first resolution,
    `testCredential`, fingerprint, PEM scrubbing; `pairFor` by credential kind; the read source.
-5. **Manifest flow**: manifest builder (with the no-`administration`/`workflows` refusal), state,
+5. **Manifest flow**: owner choice (personal or organization, preselected from the repository),
+   one pair per owner, manifest builder (with the no-`administration`/`workflows` refusal), state,
    two-step callback, conversion, install link, installation discovery; the wizard and Settings,
    Credentials buttons; the paste fallback if F5 failed.
 6. **Drops**: per-drop narrowed tokens in payloads; `credential.refresh` over the stick channel with
