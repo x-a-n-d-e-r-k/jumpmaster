@@ -246,7 +246,11 @@ function sticksSection(lines: StickLine[] | undefined): string {
   if (!lines) return '';
   const plain = 'Runner hosts';
   if (lines.length === 0)
-    return card(plain, '<h2 id="sticks">Sticks</h2>', '<p class="empty">No stick has enrolled.</p>');
+    return card(
+      plain,
+      '<h2 id="sticks">Sticks</h2>',
+      '<p class="empty">No stick has enrolled.</p>',
+    );
   const rows = lines
     .map((s) => {
       const runs =
@@ -551,10 +555,14 @@ export function renderHome(state: HomeState): string {
   const live = state.drops.filter((d) => d.state === 'running' || d.state === 'leased');
   const slotCard = (d: Drop): string => {
     const wi = d.workItemId === null ? undefined : itemById.get(d.workItemId);
-    const what = wi ? `${escapeHtml(wi.dropZoneId)} ${targetOf(d)}` : `${escapeHtml(d.dropZoneId)} ${targetOf(d)}`;
+    const what = wi
+      ? `${escapeHtml(wi.dropZoneId)} ${targetOf(d)}`
+      : `${escapeHtml(d.dropZoneId)} ${targetOf(d)}`;
     const title = wi ? `<span class="muted">${escapeHtml(wi.title)}</span>` : '';
     const g = gateCount(d);
-    const gates = g ? ` · gates ${g.passed}/${g.total} passed${g.failed ? `, ${g.failed} failed` : ''}` : '';
+    const gates = g
+      ? ` · gates ${g.passed}/${g.total} passed${g.failed ? `, ${g.failed} failed` : ''}`
+      : '';
     return `<article class="card slot"><div>${badge(d.state)} <small>${escapeHtml(d.role)}</small></div><a class="what" href="/drops/${encodeURIComponent(d.id)}">${what}</a>${title}<span class="meta">${escapeHtml(elapsed(d, now))}${gates} · ${escapeHtml(d.id)}</span></article>`;
   };
   const slots =
@@ -632,9 +640,13 @@ export function renderHome(state: HomeState): string {
         'No project yet.',
         addProject,
       )}</div>` +
-      (state.crew && state.crew.length > 0 ? `<div class="grid">${crewSection(state.crew)}</div>` : '') +
+      (state.crew && state.crew.length > 0
+        ? `<div class="grid">${crewSection(state.crew)}</div>`
+        : '') +
       `<div class="grid">${sticksSection(state.sticks)}</div>` +
-      (state.outbox && state.outbox.length > 0 ? `<div class="grid">${outboxSection(state.outbox)}</div>` : '') +
+      (state.outbox && state.outbox.length > 0
+        ? `<div class="grid">${outboxSection(state.outbox)}</div>`
+        : '') +
       `<div class="grid">${card('Claude API', '<h2>Last rate limit</h2>', rl)}</div>`,
     state.status ? { title: state.status.headline } : {},
   );
