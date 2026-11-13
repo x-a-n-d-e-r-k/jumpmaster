@@ -130,7 +130,9 @@ starts, and the stick pairs with it using the join token. Nothing needs to be wr
 
 The server prints one line you need, beginning `JUMPMASTER SETUP CODE:`. Each start prints a new
 code (`docker compose logs jumpmaster` shows it again), and
-`docker compose exec jumpmaster jumpmaster ctl setup-code` prints a fresh one.
+`docker compose exec jumpmaster jumpmaster ctl setup-code` prints a fresh one. A code works once:
+after you enter it you have ten minutes to choose the passphrase, and if you go back or that time
+runs out, print a fresh code and use the newest line.
 
 The UI is at <http://127.0.0.1:7420/>, on the host only. From another machine, tunnel it:
 `ssh -L 7420:127.0.0.1:7420 <host>`, then open the same address on your machine.
