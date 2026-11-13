@@ -569,6 +569,7 @@ describe('a spent setup code', () => {
     expect(again.statusCode).toBe(401);
     expect(again.body).toContain('already used');
     expect(again.body).toContain('ctl setup-code');
+    expect(again.body).toContain('docker compose exec jumpmaster jumpmaster ctl setup-code');
     expect(again.body).not.toContain('not the current setup code');
   });
 

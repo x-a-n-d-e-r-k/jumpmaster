@@ -75,7 +75,7 @@ export function tokensSection(pat: ZoneGuidance['pat'], roles: PatRole[]): strin
   return `<section id="tokens"><h3>Create the tokens</h3>
 <p>Each link opens GitHub's fine-grained token page, filled in. For each token:</p>
 <ol id="token-steps">
-<li>Sign in as the account the token is for, then open its link below. Make a new token here, not one made for another project: an older token may have expired, and its permissions or repositories may not fit.</li>
+<li>Sign in as the account the token is for, then open its link below. Make a new token here rather than reusing one made for another tool or install: an older token may have expired, and its permissions may not fit. If this install already has this account's token, edit its repository access instead (the next step).</li>
 <li>Resource owner: ${escapeHtml(RESOURCE_OWNER_NOTE)}.</li>
 <li>Repository access: choose Only select repositories, then the repository (the link cannot choose it). For another project later, edit this token's repository access on GitHub to add it: no new token, and no account-wide access.</li>
 <li>Click Generate token.</li>

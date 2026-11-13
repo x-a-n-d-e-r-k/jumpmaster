@@ -22,7 +22,8 @@ import { fingerprintOf } from '../vault/vault.js';
 /**
  * The credential routes (§7.5): list, replace, test, remove and reload. No route ever returns,
  * logs or audits a value: the list carries fingerprints and dates; a failed test returns the HTTP
- * status and the permission GitHub names, and nothing else; audit details are built from named
+ * status, the permission GitHub names and `refusalWords`' sentence built from those two (never
+ * GitHub's message); audit details are built from named
  * fields only (`{ name, fingerprint, result }`), never from the request body.
  */
 

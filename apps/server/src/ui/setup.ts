@@ -130,25 +130,35 @@ function credentialField(
  * operator is away making a token (sudo lasts five minutes).
  */
 const sudoField = (sudo: boolean): string =>
-  `<p class="sudo"${sudo ? ' hidden' : ''}><label>Your passphrase (saving a credential asks for it again) <input type="password" name="sudo" autocomplete="current-password"></label></p>`;
+  `<p class="sudo"${sudo ? ' hidden' : ''}><label>Your passphrase (saving a credential asks for it again) <input type="password" name="sudo" autocomplete="current-password"${sudo ? ' disabled' : ''}></label></p>`;
 
 /**
  * The script that saves the filled credential fields: sudo first when asked for, then one `PUT`
- * per field to the secret routes, which test each before storing it. A failure shows the status
- * and the route's message; the value never leaves the field except in the request body. It answers
- * `'empty'` (nothing was filled: "Enter a token first."), `'saved'` or `false`. Save never moves
- * the wizard on: only Continue and Do this later do.
+ * per field to the secret routes, which test each before storing it. A failure shows the field's
+ * label and the route's sentence, and keeps the refused value and the ones after it; a field is
+ * cleared once saved. The value never leaves the field except in the request body. It answers
+ * `'empty'` (nothing was filled: "Enter a token first."), `'saved'`, `'sudo'` (sudo lapsed: the
+ * passphrase field is shown) or `false`. Save never moves the wizard on: only Continue and Do this
+ * later do.
  */
 export const SAVE_CREDENTIALS = `<script>
+const JM_CREDENTIAL_LABELS = { claudeToken: 'The Claude token', githubAuthorToken: 'The author token', githubReviewerToken: 'The reviewer token', githubReadToken: 'The read token' };
+// The passphrase field: shown and enabled when sudo has lapsed or the passphrase was refused.
+function jmAskPassphrase(sudo) {
+  if (!sudo) return;
+  const p = sudo.closest('p'); if (p) p.hidden = false;
+  sudo.disabled = false; sudo.focus();
+}
 async function jmSaveCredentials(form, out) {
   out.textContent = '';
   const filled = [...form.querySelectorAll('input[type=password]:not([name=sudo])')].filter((f) => f.value);
   if (filled.length === 0) { out.textContent = 'Enter a token first.'; return 'empty'; }
   const sudo = form.querySelector('input[name=sudo]');
-  if (sudo && sudo.value) {
+  // A hidden field is disabled: a password manager's unseen fill is never sent.
+  if (sudo && sudo.value && !sudo.disabled) {
     const r = await jmFetch('/api/control/sudo', { passphrase: sudo.value });
     sudo.value = '';
-    if (!r.ok) { out.textContent = 'The passphrase was not accepted (' + r.status + ').'; return false; }
+    if (!r.ok) { jmAskPassphrase(sudo); out.textContent = 'The passphrase was not accepted (' + r.status + ').'; return false; }
   }
   for (const field of form.querySelectorAll('input[type=password]:not([name=sudo])')) {
     if (!field.value) continue;
@@ -161,12 +171,14 @@ async function jmSaveCredentials(form, out) {
       let j = {};
       try { j = await r.json(); } catch (e) {}
       if (r.status === 403 && j.sudo) {
-        if (sudo) { const p = sudo.closest('p'); if (p) p.hidden = false; sudo.focus(); }
+        jmAskPassphrase(sudo);
         out.textContent = 'Saving a credential asks for your passphrase again: enter it above, then Save.';
         return 'sudo';
       }
-      const why = j.error || (j.tested === false ? 'GitHub refused it' + (j.permission ? ' (needs ' + j.permission + ')' : '') : '');
-      out.textContent = field.name + ' was not saved (' + r.status + '): ' + why;
+      const label = JM_CREDENTIAL_LABELS[field.name] || field.name;
+      out.textContent = j.error
+        ? label + ' was not saved: ' + j.error
+        : label + ' was not saved (' + r.status + ')' + (j.permission ? ': it needs ' + j.permission : '') + '.';
       return false;
     }
     field.value = '';

@@ -143,7 +143,12 @@ describe('the GitHub page of a zone', () => {
     expect(html).toContain(RESOURCE_OWNER_NOTE);
     expect(html).toContain('Only select repositories');
     // T10 finding 4: a new token per install, and a later project is added by editing it.
-    expect(html).toContain('Make a new token here, not one made for another project');
+    // One token per account per install: a second project edits it rather than making another.
+    expect(html).toContain('rather than reusing one made for another tool or install');
+    expect(html).toContain(
+      "If this install already has this account's token, edit its repository access instead",
+    );
+    expect(html).not.toContain('not one made for another project');
     expect(html).toContain("edit this token's repository access on GitHub to add it");
     expect(html).toContain('invite jm-author with the Write role');
     expect(html).toContain('accept the invitation as jm-reviewer');

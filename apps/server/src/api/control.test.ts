@@ -1632,7 +1632,7 @@ describe('secret routes (Task 4)', () => {
       status: 401,
       permission: 'metadata=read',
       error:
-        'GitHub rejected this token (401): it is expired, revoked or mistyped. Make a new one from the link.',
+        "GitHub rejected this token (401): it is expired, revoked or mistyped. Make a new one (the GitHub step and each project's GitHub page have the links).",
     });
     expect(w.store.resolved().githubAuthorToken.source).toBe('missing');
     expect(w.store.vault() !== 'disabled' && w.store.vault().meta('githubAuthorToken')).toBe(

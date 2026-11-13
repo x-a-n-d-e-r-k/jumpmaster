@@ -183,7 +183,7 @@ export const SETUP_CODE_WHERE =
   "the server's output, on a line beginning JUMPMASTER SETUP CODE: (under Docker Compose, docker compose logs jumpmaster run in the install directory; otherwise the server's log or terminal)";
 /** The claim page's answer when no code is waiting: the last one was entered already. */
 export const SETUP_CODE_SPENT =
-  'That code was already used: each code works once. For a new one, run jumpmaster ctl setup-code (or restart the server) and read the newest JUMPMASTER SETUP CODE: line.';
+  'That code was already used: each code works once. For a new one, run jumpmaster ctl setup-code (under Docker Compose: docker compose exec jumpmaster jumpmaster ctl setup-code), or restart the server, and read the newest JUMPMASTER SETUP CODE: line.';
 /** How long the `jm_setup` claim lasts once the code was entered. */
 export const SETUP_CLAIM_MS = 10 * 60_000;
 

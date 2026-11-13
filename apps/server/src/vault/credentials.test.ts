@@ -301,13 +301,13 @@ describe('testing a credential on entry', () => {
 describe('refusalWords: what a refused token test says (T10 finding 4)', () => {
   test('each GitHub status gets its meaning and the next step, never only "refused"', () => {
     expect(refusalWords(401)).toBe(
-      'GitHub rejected this token (401): it is expired, revoked or mistyped. Make a new one from the link.',
+      "GitHub rejected this token (401): it is expired, revoked or mistyped. Make a new one (the GitHub step and each project's GitHub page have the links).",
     );
     expect(refusalWords(403, 'contents=write')).toBe(
-      'GitHub refused it (403): the token lacks a permission (it needs contents=write). Edit the token on GitHub to add it.',
+      'GitHub refused it (403): the token lacks a permission (it needs contents=write), or an organization policy or a rate limit refused it. Edit the token on GitHub to add the permission, or wait and try again.',
     );
     expect(refusalWords(403)).toBe(
-      'GitHub refused it (403): the token lacks a permission. Edit the token on GitHub to add it.',
+      'GitHub refused it (403): the token lacks a permission, or an organization policy or a rate limit refused it. Edit the token on GitHub to add the permission, or wait and try again.',
     );
     expect(refusalWords(404)).toBe(
       "The token can't see a project's repository (404): on GitHub, add the repository to the token's repository access.",

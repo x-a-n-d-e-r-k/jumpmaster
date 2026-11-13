@@ -409,6 +409,7 @@ type Answer = { status: number; body: Record<string, unknown> };
 function runSave(
   fields: Record<string, string>,
   answer: (path: string) => Answer = () => ({ status: 200, body: {} }),
+  sudoHidden = false,
 ) {
   const fetched: string[] = [];
   const out = { textContent: '' };
@@ -418,6 +419,7 @@ function runSave(
     name,
     value,
     type: 'password',
+    disabled: name === 'sudo' && sudoHidden,
     closest: () => wrap,
     focus: () => focused.push(name),
   }));
@@ -477,12 +479,41 @@ describe('the wizard after the sudo window lapses (T10 finding 3)', () => {
     expect(s.value('githubReviewerToken')).toBe('reviewer-value-123456');
   });
 
-  test('the forge step always carries the passphrase field, hidden while sudo is fresh', async () => {
+  test('the forge step always carries the passphrase field, hidden and disabled while sudo is fresh', async () => {
     const w = await world();
     await w.call('POST', '/api/control/sudo', { passphrase: PASS });
     const body = (await w.get('/setup/forge')).body;
+    // Disabled while hidden, so a password manager cannot fill it unseen.
     expect(body).toMatch(
-      /<p class="sudo" hidden><label>Your passphrase[^<]*<input type="password" name="sudo"/,
+      /<p class="sudo" hidden><label>Your passphrase[^<]*<input type="password" name="sudo" autocomplete="current-password" disabled>/,
+    );
+  });
+
+  test('a hidden, autofilled passphrase field is not sent; a refused passphrase shows the field', async () => {
+    const hidden = runSave({ githubAuthorToken: AUTHOR, sudo: 'autofilled' }, undefined, true);
+    expect(await hidden.result).toBe('saved');
+    expect(hidden.fetched).toEqual(['/api/control/secrets/githubAuthorToken']);
+    const wrong = runSave({ githubAuthorToken: AUTHOR, sudo: 'wrong-passphrase' }, (path) =>
+      path === '/api/control/sudo' ? { status: 401, body: {} } : { status: 200, body: {} },
+    );
+    expect(await wrong.result).toBe(false);
+    expect(wrong.wrap.hidden).toBe(false);
+    expect(wrong.focused).toEqual(['sudo']);
+    expect(wrong.value('githubAuthorToken')).toBe(AUTHOR);
+  });
+
+  test("a refusal names the field by its label once, without the route's status beside GitHub's", async () => {
+    const s = runSave({ githubAuthorToken: AUTHOR, sudo: PASS }, (path) =>
+      path.endsWith('githubAuthorToken')
+        ? {
+            status: 422,
+            body: { tested: false, status: 401, error: 'GitHub rejected this token (401): x.' },
+          }
+        : { status: 200, body: {} },
+    );
+    expect(await s.result).toBe(false);
+    expect(s.out.textContent).toBe(
+      'The author token was not saved: GitHub rejected this token (401): x.',
     );
   });
 });
