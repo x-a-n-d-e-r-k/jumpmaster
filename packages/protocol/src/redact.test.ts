@@ -36,7 +36,8 @@ test('payloadSecrets includes credentials.readToken, and its git basic-auth form
 });
 
 // A stateless installation token (F21): `ghs_<app id>_<JWT>`, hundreds of characters with `.`, `-`, `_`.
-const jwtPart = (n: number) => 'eyJhbGciOiJSUzI1NiJ9.' + 'aB3-_x'.repeat(n) + '.' + 'Zz9_-q'.repeat(n);
+const jwtPart = (n: number) =>
+  'eyJhbGciOiJSUzI1NiJ9.' + 'aB3-_x'.repeat(n) + '.' + 'Zz9_-q'.repeat(n);
 const stateless = `ghs_5761534_${jwtPart(40)}`;
 
 test('redacts a stateless installation token whole, however long', () => {
