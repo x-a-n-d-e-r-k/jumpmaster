@@ -2,14 +2,14 @@
 
 The by-hand spike that §13 Task 1 of
 [the GitHub App design](../superpowers/specs/2026-11-13-github-app-auth.md) puts before any app
-work. It ran on a **personal-account repository only**; the organization half of part A, F20 and a
-write-role user against `jumpmaster-merge` were not run (no organization or second account was
-used). Probes used `scripts/spike/github-app.ts` and throwaway scripts that printed only statuses
-and chosen fields.
+work. Part A ran on a personal-account repository (P) and then an organization repository (O, a
+free organization); part B ran on P. Probes used `scripts/spike/github-app.ts` and throwaway
+scripts that printed only statuses and chosen fields.
 
 ## Setup
 
-- A public personal repository, default branch `master`.
+- P: a public personal repository, default branch `master`. O: a public repository in a free
+  organization, default branch `main`, with its own pair of apps owned by the organization.
 - An author app: Contents and Pull requests read and write.
 - A reviewer app: Pull requests read and write; Contents read-only, then read and write (A6).
 - Both apps are private ("only on this account") and installed on that one repository.
@@ -18,8 +18,8 @@ and chosen fields.
 
 ## Outcome
 
-**Two-app unattended merging works on a personal repository**, so personal repositories are not
-held to PAT starter mode (§5.1). One condition: **the reviewer app needs `contents: write` at
+**Two-app unattended merging works on both a personal and an organization repository**, with the
+same results at every step, so personal repositories are not held to PAT starter mode (§5.1). One condition: **the reviewer app needs `contents: write` at
 install**, which §4.1 already provides for ("unless the spike finds an app approval counts only with
 `contents: write`").
 
@@ -32,6 +32,17 @@ install**, which §4.1 already provides for ("unless the spike finds an app appr
 | A7 | REST accepted `{"actor_type":"Integration","actor_id":<author app>}` as a bypass actor on the personal repository. It was created by API; the UI picker wasn't checked. | **F23**: an app can be a bypass actor here. |
 | A8 | Approved PR: author merge 200. Unapproved: author 405 (the approval rule; bypassing `jumpmaster-merge` doesn't lift `jumpmaster`). Reviewer merge of an approved PR: 405 "Cannot update this protected ref". Admin merge of an unapproved PR: 405. Admin merge of an approved PR: 200. | **F23**: a PR merge counts as an update under Restrict updates, and bypass applies per ruleset. |
 | A9 | Author: `jumpmaster` `never`, `jumpmaster-merge` `always`. Reviewer: `never` for both. | **F17**: an installation token gets `current_user_can_bypass`, per ruleset. |
+
+**Organization (O).** A5–A9 gave the same results as P, step for step:
+- the read-only reviewer's approval didn't count ("reviewers with write access");
+- with contents write it counted, and the author merged;
+- `jumpmaster-merge` accepted the author app as a bypass actor;
+- the author's unapproved merge, the reviewer's merge and the admin's unapproved merge were refused, and the admin's approved merge succeeded;
+- `current_user_can_bypass` was the same per app and per ruleset.
+
+On both P and O, the ruleset editor's **Add bypass** picker lists the account's own apps.
+
+**F20.** Installing P's private app on the organization was refused: the install page for that target returns 404, and the app's install flow offers no account picker. This holds even though the same person administers both. An install covers one owner (§4.1's one pair per owner).
 
 ## Part B
 
@@ -56,10 +67,6 @@ install**, which §4.1 already provides for ("unless the spike finds an app appr
 
 ## Not run
 
-- The organization half of part A.
-- F20: a private app refused outside its owner account.
 - A write-role **user** against `jumpmaster-merge`. The write `GITHUB_TOKEN` case covers the same rule.
-- F5b's non-public-hook variant.
-- Checking the UI bypass picker for an app.
-
-These need an organization or a second account. Run them before app mode is offered for organization repositories (Task 9's `recommendIdentity`).
+- F5b's variant with a non-public hook URL.
+- Part B on the organization. Nothing in it depends on the owner type, as far as the documentation says.
