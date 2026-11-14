@@ -63,3 +63,9 @@ test('redacts the git basic-auth form of any token, registered or not', () => {
 test('leaves short ghs_-prefixed words alone', () => {
   expect(redact('see ghs_short and ghs_ alone', [])).toBe('see ghs_short and ghs_ alone');
 });
+
+test('a snake_case name containing ghs_ is not a token', () => {
+  const line = '+const highs_and_lows_for_each_trading_day_in_range = 1;';
+  expect(containsSecret(line, [])).toBe(false);
+  expect(redact(line, [])).toBe(line);
+});

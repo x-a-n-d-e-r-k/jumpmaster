@@ -2,7 +2,8 @@ const TOKEN_SHAPES = [
   /github_pat_[A-Za-z0-9_]{20,}/g,
   // Installation tokens: stateless since 2026 (`ghs_<app id>_<JWT>`, ~520 characters with `.`, `-`
   // and `_`), the pattern GitHub suggests. Before the generic shape, which stops at the first `_`.
-  /ghs_[A-Za-z0-9._-]{36,}/g,
+  // Not inside a longer identifier (`highs_and_lows_…`), which would refuse an ordinary push.
+  /(?<![A-Za-z0-9_])ghs_[A-Za-z0-9._-]{36,}/g,
   /gh[pousr]_[A-Za-z0-9]{20,}/g,
   // Git's basic-auth form of any GitHub token: base64 of `x-access-token:<token>`. The prefix is
   // fixed because `x-access-token:` is 15 bytes, a whole number of base64 groups.
