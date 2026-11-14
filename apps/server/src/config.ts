@@ -3,7 +3,7 @@ import {
   ContainerLimitsSchema,
   GateSpecSchema,
   PresetSchema,
-  pathMatches,
+  protectedPathMatches,
   type Role,
   RoleSchema,
   ServiceSpecSchema,
@@ -277,7 +277,7 @@ const DropZoneSchema = DropZoneObject.superRefine((zone, ctx) => {
   }
   // The goal file is read every pass, crew on or off, and served as Command's text: it must be a
   // path no drop can change.
-  if (!zone.protectedPaths.some((g) => pathMatches(zone.crew.goalPath, g))) {
+  if (!zone.protectedPaths.some((g) => protectedPathMatches(zone.crew.goalPath, g))) {
     ctx.addIssue({
       code: 'custom',
       path: ['crew', 'goalPath'],

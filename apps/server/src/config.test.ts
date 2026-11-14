@@ -449,6 +449,17 @@ describe('crew config', () => {
     expect(z?.botLogins).toEqual([]);
   });
 
+  test('a dotfile goalPath under a protected glob is accepted, as the review check protects it', () => {
+    const cfg = loadConfig(
+      withZone({
+        crew: { enabled: true, goalPath: '.goals/GOAL.md' },
+        protectedPaths: ['**/*.md'],
+      }),
+      fullEnv,
+    );
+    expect(cfg.dropZones[0]?.crew.goalPath).toBe('.goals/GOAL.md');
+  });
+
   test('crew.enabled with an unprotected goalPath is a config error', () => {
     expect(() =>
       loadConfig(withZone({ crew: { enabled: true, goalPath: 'docs/GOALS.md' } }), fullEnv),

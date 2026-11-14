@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { CrewLeadOutputSchema, containsSecret, pathMatches, redact } from '@jumpmaster/protocol';
+import {
+  CrewLeadOutputSchema,
+  containsSecret,
+  protectedPathMatches,
+  redact,
+} from '@jumpmaster/protocol';
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
@@ -109,7 +114,9 @@ const getGoalsTool: ToolDef = {
   run({ db, zone }, _args, fx) {
     // Trusted only while the goal file is a protected path no drop can change (config requires it;
     // checked again here so a hand-built zone can't promote repo text to trusted).
-    const trust: Trust = zone.protectedPaths.some((g) => pathMatches(zone.crew.goalPath, g))
+    const trust: Trust = zone.protectedPaths.some((g) =>
+      protectedPathMatches(zone.crew.goalPath, g),
+    )
       ? 'trusted'
       : 'untrusted';
     const row = getGoals(db, zone.id);
