@@ -10,8 +10,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, matchesGlob, sep } from 'node:path';
-import type { MergeOutcome } from '@jumpmaster/protocol';
+import { dirname, join, sep } from 'node:path';
+import { type MergeOutcome, protectedPathMatches } from '@jumpmaster/protocol';
 import { scrubEnv } from './gates.js';
 import { type AgentIdentity, asAgentArgv, type TrooperIdentities } from './privilege.js';
 import { containsSecret } from './redact.js';
@@ -534,14 +534,9 @@ function dirSize(path: string): number {
 
 const shellQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
 
-/** `dir/**` also covers the bare `dir` entry itself (a file or symlink named like the directory). */
+/** The server's review check uses the same matcher, so a path one refuses the other refuses too. */
 const globHit = (p: string, globs: string[]): boolean =>
-  globs.some(
-    (g) =>
-      matchesGlob(p, g) ||
-      (g.endsWith('/**') && p === g.slice(0, -3)) ||
-      (!g.includes('/') && matchesGlob(basename(p), g)),
-  );
+  globs.some((g) => protectedPathMatches(p, g));
 
 /**
  * Root, in the root-owned bare repo only: refuses protected-path changes against the trusted base

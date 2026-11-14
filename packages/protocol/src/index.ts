@@ -15,6 +15,18 @@ export function pathMatches(p: string, glob: string): boolean {
   return !glob.includes('/') && matchesGlob(basename(p), glob);
 }
 
+/** Segment-leading dots made plain, so `**` and `*` also cover dotfiles (`node_modules/.bin`). */
+const undot = (s: string): string => s.replace(/(^|\/)\./g, '$1\u0001');
+
+/**
+ * Whether a changed path falls under a protected glob. The one matcher for the trooper's push
+ * check and the server's review check, so the two always agree: `pathMatches`, and the same with
+ * dotfiles visible to `*` and `**`.
+ */
+export function protectedPathMatches(p: string, glob: string): boolean {
+  return pathMatches(p, glob) || pathMatches(undot(p), undot(glob));
+}
+
 /** The only place the agent branch name is built. */
 export function agentBranch(issueNumber: number): string {
   return `agent/issue-${issueNumber}`;

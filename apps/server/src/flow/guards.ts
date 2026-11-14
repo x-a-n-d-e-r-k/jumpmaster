@@ -1,6 +1,6 @@
 import { basename, matchesGlob } from 'node:path';
 import type { GateSpec } from '@jumpmaster/protocol';
-import { pathMatches } from '@jumpmaster/protocol';
+import { protectedPathMatches as protectedMatch } from '@jumpmaster/protocol';
 import {
   binaryTag,
   boolCoreTag,
@@ -23,12 +23,7 @@ import type { DropZoneConfig } from '../config.js';
 import type { BranchRulesRead, PullFiles } from '../forge/github.js';
 
 // ---- protected paths ---------------------------------------------------------------------------
-
-/** Segment-leading dots made plain, so `**` and `*` also cover dotfiles (`node_modules/.bin`). */
-const undot = (s: string): string => s.replace(/(^|\/)\./g, '$1\u0001');
-
-const protectedMatch = (p: string, glob: string): boolean =>
-  pathMatches(p, glob) || pathMatches(undot(p), undot(glob));
+// `protectedMatch` is the protocol's `protectedPathMatches`, the trooper's push check's matcher too.
 
 /** Changed paths, and rename sources, that match any protected glob (each reported once). */
 export function protectedPathHits(files: PullFiles['files'], globs: string[]): string[] {

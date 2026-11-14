@@ -254,6 +254,20 @@ describe('the pre-push guard', () => {
     ).rejects.toThrow(/^protected path \.claude$/);
   });
 
+  test('a protected dotfile path is refused, as the server review check refuses it', async () => {
+    const w = await world('dotfile');
+    mkdirSync(join(w.dir, 'node_modules', '.bin'), { recursive: true });
+    writeFileSync(join(w.dir, 'node_modules', '.bin', 'tool'), '#!/bin/sh\n');
+    await commitIfDirty(w.dir, 'chore: add tool');
+    await expect(
+      pushExistingBranch(w.dir, B, 't', w.target, w.s0, undefined, {
+        base: 'main',
+        protectedPaths: ['node_modules/**'],
+      }),
+    ).rejects.toThrow(/^protected path node_modules\/\.bin\/tool/);
+    expect(w.remoteTip()).toBe(w.s0);
+  });
+
   test('a secret in the pushed diff is refused', async () => {
     const w = await world('secret-file');
     writeFileSync(join(w.dir, 'leak.txt'), 'token=sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUVWX\n');

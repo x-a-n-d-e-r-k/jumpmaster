@@ -10,6 +10,7 @@ import {
   IMPLEMENT_OUTPUT_SCHEMA,
   isCrewRole,
   parseCrewOutput,
+  protectedPathMatches,
   RateLimitEventDataSchema,
   RESULT_PREFIX,
   REVIEW_OUTPUT_SCHEMA,
@@ -317,5 +318,28 @@ describe('the doctor role', () => {
     expect(DoctorResultSchema.safeParse({ ...findings, claude: { ok: 'yes' } }).success).toBe(
       false,
     );
+  });
+});
+
+describe('protectedPathMatches (the one matcher for push and review checks)', () => {
+  test.each([
+    ['node_modules/.bin/x', 'node_modules/**'],
+    ['.github/workflows/ci.yml', '**/*.yml'],
+    ['a/.env', '**/*'],
+    ['.claude', '.claude/**'],
+    ['.github', '.github/**'],
+    ['deep/dir/key.pem', '*.pem'],
+    ['deep/.secret.pem', '*.pem'],
+    ['.github/x.yml', '.github/**'],
+  ])('%s is covered by %s', (p, g) => {
+    expect(protectedPathMatches(p, g)).toBe(true);
+  });
+  test.each([
+    ['src/a.ts', 'docs/**'],
+    ['docsx/a.md', 'docs/**'],
+    ['.githubx/a', '.github/**'],
+    ['a/b.yml', 'b/*.yml'],
+  ])('%s is not covered by %s', (p, g) => {
+    expect(protectedPathMatches(p, g)).toBe(false);
   });
 });
