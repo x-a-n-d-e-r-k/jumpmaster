@@ -7,6 +7,7 @@ import {
   ACTIVE_DROP_STATES,
   activeDropFor,
   appendEvents,
+  clearZoneStopping,
   deleteFailedOutbox,
   deleteZoneControls,
   ensureZoneMode,
@@ -29,6 +30,7 @@ import {
   listOutbox,
   listWorkItems,
   markMinted,
+  markZoneStopping,
   type NewDrop,
   reserveGrant,
   resetAttempts,
@@ -40,6 +42,7 @@ import {
   setWaitingSince,
   setWorkItemState,
   setZoneMode,
+  stoppingZones,
   updateDrop,
   updateOutbox,
   upsertDropZone,
@@ -50,6 +53,8 @@ import {
   zoneDrained,
   zoneHasHistory,
   zoneHistoryRepo,
+  zoneStopping,
+  zoneWaits,
 } from './repo.js';
 
 const tmpFile = () => join(mkdtempSync(join(tmpdir(), 'jm-db-')), 'jm.sqlite');
@@ -479,6 +484,65 @@ describe('zone removal and history', () => {
     expect(getZoneMode(d, 'z', 'active')).toBe('active');
     expect(zoneHistoryRepo(d, 'z')).toBe('octo/z');
     expect(zoneHistoryRepo(d, 'none')).toBeUndefined();
+  });
+});
+
+describe('stopping a zone (v24)', () => {
+  const at = new Date('2026-02-01T00:00:00.000Z');
+  test('markZoneStopping sets observe and records who asked and when, once; clearing keeps the mode', () => {
+    const d = openDb(tmpFile());
+    ensureZoneMode(d, 'z', 'active', at);
+    expect(zoneStopping(d, 'z')).toBeUndefined();
+    markZoneStopping(d, 'z', 'ui', at);
+    expect(getZoneMode(d, 'z', 'active')).toBe('observe');
+    expect(zoneStopping(d, 'z')).toEqual({ since: at.toISOString(), via: 'ui' });
+    markZoneStopping(d, 'z', 'ctl', new Date(at.getTime() + 1000));
+    expect(zoneStopping(d, 'z')).toEqual({ since: at.toISOString(), via: 'ui' });
+    // A zone with no mode row yet gets one.
+    markZoneStopping(d, 'y', 'ctl', at);
+    expect(stoppingZones(d).sort()).toEqual(['y', 'z']);
+    clearZoneStopping(d, 'z');
+    expect(zoneStopping(d, 'z')).toBeUndefined();
+    expect(getZoneMode(d, 'z', 'active')).toBe('observe');
+    expect(stoppingZones(d)).toEqual(['y']);
+  });
+
+  test('zoneWaits counts drops in flight, pending pushes and unsettled outbox writes apart', () => {
+    const d = db;
+    expect(zoneWaits(d, 'main')).toEqual({ drops: 0, pushes: 0, outbox: 0 });
+    insertDrop(d, drop('r', { state: 'running', role: 'review' }));
+    const other = upsertWorkItem(d, {
+      dropZoneId: 'main',
+      issueNumber: 8,
+      title: 't',
+      body: 'b',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: at.toISOString(),
+    });
+    insertDrop(d, drop('p', { state: 'push_pending', workItemId: other.id }));
+    insertDrop(d, drop('s', { state: 'succeeded' }));
+    // A queued doctor drop never blocks a mode change, nor a removal.
+    insertDrop(d, {
+      ...drop('q', { state: 'queued', workItemId: null, role: 'doctor' }),
+    });
+    for (const [id, state] of [
+      ['o1', 'pending'],
+      ['o2', 'unknown'],
+      ['o3', 'done'],
+    ] as const)
+      insertOutbox(d, {
+        id,
+        opKey: id,
+        kind: 'merge',
+        workItemId: null,
+        zoneId: 'main',
+        payloadJson: '{}',
+        state,
+        createdAt: at.toISOString(),
+      });
+    expect(zoneWaits(d, 'main')).toEqual({ drops: 1, pushes: 1, outbox: 2 });
   });
 });
 

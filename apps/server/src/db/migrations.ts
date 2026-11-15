@@ -716,6 +716,15 @@ const V23_SQL = `
 ALTER TABLE drops ADD COLUMN rate_limit_requeue INTEGER;
 `;
 
+/**
+ * v24: a zone the operator asked to stop managing (§ issue #100): set to observe, and removed by
+ * the server once drained, across restarts. `stopping_via` is the removal's revision via.
+ */
+const V24_SQL = `
+ALTER TABLE zone_controls ADD COLUMN stopping_since TEXT;
+ALTER TABLE zone_controls ADD COLUMN stopping_via TEXT CHECK (stopping_via IN ('ui','ctl'));
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -748,6 +757,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 21, sql: V21_SQL, foreignKeysOff: true },
   { version: 22, sql: V22_SQL, foreignKeysOff: true },
   { version: 23, sql: V23_SQL },
+  { version: 24, sql: V24_SQL },
 ];
 
 /**

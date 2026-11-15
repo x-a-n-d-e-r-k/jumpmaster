@@ -27,6 +27,7 @@ import {
   setUsageState,
   setWorkItemState,
   setZoneMode,
+  updateDrop,
   upsertDropZone,
   upsertWorkItem,
   zoneIsDrained,
@@ -2483,12 +2484,9 @@ describe('zones page routes', () => {
     }
   });
 
-  test('remove needs the zone drained in observe, deletes its mode row only, and keeps its history', async () => {
+  test('remove stops managing in one call: a busy zone goes to observe and is marked stopping, a drained one is removed with its mode row only, and its history is kept', async () => {
     const { db, store } = pageApp();
-    const busy = await call('DELETE', '/api/control/zones/a');
-    expect(busy.statusCode).toBe(400);
-    expect(busy.json().issues[0].message).toMatch(/can't be removed until it is drained/);
-    upsertWorkItem(db, {
+    const item = upsertWorkItem(db, {
       dropZoneId: 'a',
       issueNumber: 3,
       title: 't',
@@ -2498,7 +2496,28 @@ describe('zones page routes', () => {
       isFix: false,
       issueCreatedAt: t0.toISOString(),
     });
-    setZoneMode(db, 'a', 'observe', t0);
+    insertDrop(db, {
+      id: 'busy-1',
+      dropZoneId: 'a',
+      workItemId: item.id,
+      role: 'implement',
+      state: 'running',
+      createdAt: t0.toISOString(),
+    });
+    const busy = await call('DELETE', '/api/control/zones/a');
+    expect(busy.statusCode, busy.body).toBe(202);
+    expect(busy.json()).toEqual({ stopping: 'a', waits: { drops: 1, pushes: 0, outbox: 0 } });
+    expect(getZoneMode(db, 'a', 'active')).toBe('observe');
+    expect(store.current().dropZones.map((z) => z.id)).toEqual(['a', 'b']);
+    expect((await call('GET', '/api/control/zones/a')).json().stopping).toEqual({
+      since: t0.toISOString(),
+      waits: { drops: 1, pushes: 0, outbox: 0 },
+    });
+    expect(listAudit(db)[0]).toMatchObject({ action: 'zone.stop', target: 'a' });
+    // Choosing a mode withdraws the stop.
+    expect((await call('POST', '/api/control/zones/a', { mode: 'paused' })).statusCode).toBe(200);
+    expect((await call('GET', '/api/control/zones/a')).json().stopping).toBeUndefined();
+    updateDrop(db, 'busy-1', { state: 'succeeded' });
     const r = await call('DELETE', '/api/control/zones/a');
     expect(r.statusCode, r.body).toBe(200);
     expect(r.json()).toMatchObject({ removed: 'a' });

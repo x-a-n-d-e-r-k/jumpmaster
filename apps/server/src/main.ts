@@ -25,6 +25,7 @@ import { readSecretFile } from './secrets.js';
 import { recordPass } from './status.js';
 import { syncDropZone } from './sync.js';
 import { credentialProblems } from './vault/problems.js';
+import { sweepStopping } from './zones/stop.js';
 
 /** How long one request on the timed forges (doctor reads, intake writes) may take. */
 const TIMED_REQUEST_MS = 30_000;
@@ -189,9 +190,26 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
   });
 
   const expireLeases = leaseExpirer(db, () => live.current().usage);
+  // A zone the operator stopped managing is removed once drained, even when asked before a restart.
+  // A refusal that repeats every tick is said once, until it changes.
+  let lastRefusal = '';
+  const onceLog = (msg: string) => {
+    if (msg !== lastRefusal) log(msg);
+    lastRefusal = msg;
+  };
+  const sweepStops = () => {
+    try {
+      for (const id of sweepStopping(db, live, new Date(), onceLog))
+        log(`zone ${id} drained and removed (stopped managing)`);
+    } catch (e) {
+      log(`stopping sweep failed: ${errorMessage(e)}`);
+    }
+  };
+  sweepStops();
   // One config per pass, read at its start: a revision applied mid-pass is the next pass's. A
   // running drop keeps the payload it was leased with.
   const pass = async () => {
+    sweepStops();
     const config = live.current();
     const secrets = secretList(config.secrets);
     expireLeases(new Date());
@@ -251,6 +269,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     } catch (e) {
       log(`lease expiry failed: ${errorMessage(e)}`);
     }
+    sweepStops();
   }, 10_000);
 
   await app.listen({ host: boot.listen.host, port: boot.listen.port });
