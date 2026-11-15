@@ -1,9 +1,21 @@
 import { mkdtempSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { type DropPayload, DropPayloadSchema, type GateResult } from '@jumpmaster/protocol';
+import {
+  type DropPayload,
+  DropPayloadSchema,
+  EGRESS_PROXY_URL,
+  type GateResult,
+  PushPayloadSchema,
+} from '@jumpmaster/protocol';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { applyEgress, PROXY_ENV_KEYS, proxyEnv, writeToolProxyConfig } from './egress-env.js';
+import {
+  applyEgress,
+  applyPushEgress,
+  PROXY_ENV_KEYS,
+  proxyEnv,
+  writeToolProxyConfig,
+} from './egress-env.js';
 import { scrubEnv } from './gates.js';
 import * as git from './git.js';
 import { runTrooper, type TrooperDeps } from './main.js';
@@ -205,6 +217,26 @@ describe('the trooper under egress', () => {
     expect(envs[0]?.https_proxy).toBe(URL_);
     expect(envs[0]?.HTTPS_PROXY).toBe(URL_);
     expect(envs[0]?.NO_PROXY).toBe('localhost,127.0.0.1,db,cache-1');
+  });
+});
+
+describe('the push container under egress', () => {
+  const push = { protocol: 1, role: 'push', dropId: 'd1', epoch: 3, branch: 'b', salvage: false };
+
+  test('payload.egress routes git through the proxy: the proxy variables are set', () => {
+    const env: NodeJS.ProcessEnv = {};
+    applyPushEgress(PushPayloadSchema.parse({ ...push, egress: true }), env);
+    expect(env.https_proxy).toBe(EGRESS_PROXY_URL);
+    expect(env.HTTPS_PROXY).toBe(EGRESS_PROXY_URL);
+    expect(env.NO_PROXY).toContain('localhost');
+    // runGit builds git's environment from scrubEnv: the proxy must survive it.
+    expect(scrubEnv(env).https_proxy).toBe(EGRESS_PROXY_URL);
+  });
+
+  test('without payload.egress the environment is untouched', () => {
+    const env: NodeJS.ProcessEnv = { PATH: '/bin' };
+    applyPushEgress(PushPayloadSchema.parse(push), env);
+    expect(env).toEqual({ PATH: '/bin' });
   });
 });
 

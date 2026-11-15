@@ -202,6 +202,7 @@ export async function pushOnce(entry: PushEntry, deps: PushDeps): Promise<PushOu
       epoch,
       branch: plan.branch,
       salvage: plan.salvage,
+      ...(net ? { egress: true } : {}),
     });
     handle = await driver.start({
       image: deps.image,

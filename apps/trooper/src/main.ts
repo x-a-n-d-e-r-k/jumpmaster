@@ -15,7 +15,7 @@ import {
   REPORT_MAX_CHARS,
   RESULT_PREFIX,
 } from '@jumpmaster/protocol';
-import { applyEgress } from './egress-env.js';
+import { applyEgress, applyPushEgress } from './egress-env.js';
 import { runGates } from './gates.js';
 import * as gitOps from './git.js';
 import {
@@ -253,6 +253,7 @@ async function main(): Promise<void> {
   // The push role keeps stdin open for its grant line; every other role is done with stdin once
   // it has the payload.
   if (payload.role === 'push') {
+    applyPushEgress(payload);
     const ids = trooperIdentities(process.env);
     const result = await runPush(payload, {
       stdin: process.stdin,
