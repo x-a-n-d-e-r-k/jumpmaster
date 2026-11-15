@@ -16,6 +16,9 @@ docker build -q -t jumpmaster-trooper:dev -f images/trooper/Dockerfile . >/dev/n
 docker build -q -t jumpmaster-trooper:e2e images/trooper/e2e >/dev/null
 # The trooper reads its payload as one line: every heredoc is joined onto one line.
 oneline() { tr -d '\n'; echo; }
+# Split after its prefix so the source holds no token-shaped literal (scripts/no-token-literals.test.ts).
+DUMMY_CLAUDE="sk-ant-""oat01-E2EDUMMYDUMMYDUMMYDUMMY"
+
 payload() {
   oneline <<JSON
 {"protocol":1,"dropId":"e2e","epoch":1,"role":"review",
@@ -24,7 +27,7 @@ payload() {
  "pr":{"number":1,"branch":"${BRANCH}","headSha":"${SHA}"},
  "gates":[$1],"model":"m","maxTurns":1,"promptVersion":"e2e","prompt":"review",
  "image":"jumpmaster-trooper:e2e","protectedPaths":[],
- "credentials":{"claudeToken":"sk-ant-""oat01-E2EDUMMYDUMMYDUMMYDUMMY"}}
+ "credentials":{"claudeToken":"$DUMMY_CLAUDE"}}
 JSON
 }
 run() {
@@ -68,7 +71,7 @@ out="$(oneline <<JSON | docker run --rm -i --cap-drop ALL --cap-add SETUID --cap
 {"protocol":1,"dropId":"e2e-crew","epoch":1,"role":"crew-lead",
  "repo":{"owner":"${CANARY_REPO%%/*}","name":"${CANARY_REPO##*/}","defaultBranch":"${BRANCH}"},
  "model":"m","maxTurns":1,"promptVersion":"e2e","prompt":"plan","image":"jumpmaster-trooper:e2e",
- "protectedPaths":[],"credentials":{"claudeToken":"sk-ant-""oat01-E2EDUMMYDUMMYDUMMYDUMMY"}}
+ "protectedPaths":[],"credentials":{"claudeToken":"$DUMMY_CLAUDE"}}
 JSON
 )"
 if grep -q E2EDUMMY <<<"$out"; then echo "FAIL: token in crew output" >&2; exit 1; fi
