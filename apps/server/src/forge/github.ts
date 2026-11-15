@@ -312,7 +312,7 @@ const OWNER_NAME = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/;
 /** A GitHub repository name: letters, digits, `.`, `_` and `-`, at most 100 characters. */
 const REPO_NAME = /^[A-Za-z0-9._-]{1,100}$/;
 
-function isOwnerName(owner: string): boolean {
+export function isOwnerName(owner: string): boolean {
   return OWNER_NAME.test(owner) && owner.length <= 39;
 }
 
