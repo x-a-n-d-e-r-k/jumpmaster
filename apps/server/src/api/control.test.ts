@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -9,7 +9,7 @@ import { registerGuard } from '../auth/guard.js';
 import { grantSudo, SUDO_MS, sha256Hex } from '../auth/sessions.js';
 import { listRulings, raiseBriefing } from '../briefings.js';
 import { loadBoot } from '../config/boot.js';
-import { ConfigStore } from '../config/store.js';
+import { ConfigStore, startVault } from '../config/store.js';
 import { type Config, secretList } from '../config.js';
 import { nextCrewWork } from '../crew/schedule.js';
 import { listCrewIssues } from '../crew/store.js';
@@ -2749,5 +2749,153 @@ describe('pending pushes: extend-retention and cancel', () => {
       ['drops', 'cancel', 'd1', 'x'],
     ])
       expect(ctlRequest(bad), bad.join(' ')).toBeNull();
+  });
+});
+
+describe('vault routes: turn on, prefer, copy, turn off (#101)', () => {
+  const READ_ENV = 'github_pat_' + 'ROUTEREADFROMENV_101';
+  const READ_VAULT = 'github_pat_' + 'ROUTEREADFROMVAULT_101';
+  const env = {
+    JM_JOIN_TOKEN: 'join-secret-value-4',
+    JM_OPERATOR_TOKEN: TOKEN,
+    JM_GITHUB_READ_TOKEN: READ_ENV,
+  };
+
+  /** A store with the vault off, a secrets directory, and the read token from the environment. */
+  function vaultOffApp() {
+    const db = openDb(tmpDbFile());
+    const dir = mkdtempSync(join(tmpdir(), 'jm-vault-route-'));
+    const secretsDir = join(dir, 'secrets');
+    mkdirSync(secretsDir);
+    const store = ConfigStore.open({
+      db,
+      boot: { ...loadBoot({}, undefined), secretsDir },
+      env,
+      vault: startVault(env, db),
+      now: () => t0,
+      imageLockPath: join(dir, 'no-lock.json'),
+    });
+    const logs: string[] = [];
+    app = controlApp({
+      db,
+      config: store,
+      now: () => t0,
+      log: (l) => logs.push(l),
+      forgesFor: () => {
+        throw new Error('no forge in this test');
+      },
+      doctorEnv: { uid: 1000, inContainer: true, uidMap: null },
+      credentialForge: () => ({
+        viewerLogin: async () => 'reader-bot',
+        repoAccess: async () => ({}),
+      }),
+    });
+    const session = operatorSession(db);
+    return { db, store, secretsDir, logs, asSession: { ...session.headers, host: HOST } };
+  }
+  const post = (url: string, body: unknown = {}, headers: Record<string, string> = auth) =>
+    (app as FastifyInstance).inject({ method: 'POST', url, headers, payload: body as object });
+  const list = async () =>
+    (
+      await (app as FastifyInstance).inject({
+        method: 'GET',
+        url: '/api/control/secrets',
+        headers: auth,
+      })
+    ).json() as {
+      vault: string;
+      preferVault: boolean;
+      vaultKeyFrom?: string;
+      credentials: { name: string; source: string; overriding?: unknown[] }[];
+    };
+  const read = async () => (await list()).credentials.find((c) => c.name === 'githubReadToken');
+
+  test('turn on needs sudo for a session, writes the key, opens the vault and answers without the key', async () => {
+    const w = vaultOffApp();
+    expect((await list()).vault).toBe('disabled');
+    const s = await post('/api/control/secrets/vault/on', {}, w.asSession);
+    expect(s.statusCode).toBe(403);
+    expect(s.json()).toMatchObject({ sudo: 'required' });
+    const r = await post('/api/control/secrets/vault/on');
+    expect(r.statusCode).toBe(200);
+    const key = readFileSync(join(w.secretsDir, 'vault_key'), 'utf8').trim();
+    expect(statSync(join(w.secretsDir, 'vault_key')).mode & 0o777).toBe(0o600);
+    expect(r.body).not.toContain(key);
+    expect(r.json()).toMatchObject({ vault: 'on' });
+    expect(await list()).toMatchObject({
+      vault: 'on',
+      vaultKeyFrom: 'settings',
+      preferVault: false,
+    });
+    // Again: refused, and the key is not overwritten.
+    const again = await post('/api/control/secrets/vault/on');
+    expect(again.statusCode).toBe(409);
+    expect(readFileSync(join(w.secretsDir, 'vault_key'), 'utf8').trim()).toBe(key);
+    for (const l of w.logs) expect(l).not.toContain(key);
+    const audit = JSON.stringify(w.db.prepare('SELECT * FROM control_audit').all());
+    expect(audit).not.toContain(key);
+  });
+
+  test('copy into the vault stores the variable value and no response body carries it; prefer flips the source live', async () => {
+    const w = vaultOffApp();
+    const off = await post('/api/control/secrets/githubReadToken/copy-to-vault');
+    expect(off.statusCode).toBe(409);
+    await post('/api/control/secrets/vault/on');
+    expect(await read()).toMatchObject({ source: 'env' });
+    const c = await post('/api/control/secrets/githubReadToken/copy-to-vault');
+    expect(c.statusCode).toBe(200);
+    expect(c.body).not.toContain(READ_ENV);
+    expect(c.json()).toMatchObject({ from: 'JM_GITHUB_READ_TOKEN' });
+    const v = w.store.vault();
+    expect(v !== 'disabled' && v.get('githubReadToken')).toBe(READ_ENV);
+    expect(await read()).toMatchObject({ source: 'env', overriding: [{ source: 'vault' }] });
+    // Prefer the vault, then put a different value: the vault's is in use at once.
+    expect((await post('/api/control/secrets/vault/prefer', { prefer: true })).statusCode).toBe(
+      200,
+    );
+    expect(
+      (
+        await (app as FastifyInstance).inject({
+          method: 'PUT',
+          url: '/api/control/secrets/githubReadToken',
+          headers: auth,
+          payload: { value: READ_VAULT },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(await read()).toMatchObject({
+      source: 'vault',
+      overriding: [{ source: 'env', variable: 'JM_GITHUB_READ_TOKEN' }],
+    });
+    expect(w.store.current().secrets.githubReadToken).toBe(READ_VAULT);
+    expect((await list()).preferVault).toBe(true);
+    await post('/api/control/secrets/vault/prefer', { prefer: false });
+    expect(await read()).toMatchObject({ source: 'env' });
+    expect(w.store.current().secrets.githubReadToken).toBe(READ_ENV);
+    const bad = await post('/api/control/secrets/vault/prefer', { prefer: 'yes' });
+    expect(bad.statusCode).toBe(400);
+    // No list, no answer, no audit row carries a value.
+    const everything =
+      JSON.stringify(await list()) +
+      JSON.stringify(w.db.prepare('SELECT * FROM control_audit').all());
+    expect(everything).toContain('secret.copy');
+    expect(everything).toContain('vault.prefer');
+    expect(everything).not.toContain(READ_ENV);
+    expect(everything).not.toContain(READ_VAULT);
+  });
+
+  test('turn off is refused while the vault holds entries', async () => {
+    const w = vaultOffApp();
+    await post('/api/control/secrets/vault/on');
+    await post('/api/control/secrets/githubReadToken/copy-to-vault');
+    const r = await post('/api/control/secrets/vault/off');
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).toContain('remove them first');
+    expect(w.store.vault()).not.toBe('disabled');
+    const v = w.store.vault();
+    if (v !== 'disabled') v.delete('githubReadToken');
+    const ok = await post('/api/control/secrets/vault/off');
+    expect(ok.statusCode).toBe(200);
+    expect((await list()).vault).toBe('disabled');
   });
 });

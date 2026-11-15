@@ -11,6 +11,7 @@ import {
   type CredentialName,
   credentialCreatedAt,
   isInstallCredential,
+  type OtherSource,
   parseGateSecretName,
   type ResolvedCredential,
 } from '../vault/credentials.js';
@@ -64,10 +65,20 @@ function roleOf(name: CredentialName): string {
   return `gate secret ${g?.name ?? '?'} for zone ${g?.zoneId ?? '?'}: gate steps can read it`;
 }
 
+/** Another source that holds a value too, in a few words (never the value). */
+function otherWords(o: OtherSource): string {
+  if (o.source === 'vault') return 'the vault';
+  return `<code>${escapeHtml(o.path ?? '?')}</code>`;
+}
+
 function sourceCell(c: ResolvedCredential): string {
-  if (c.source === 'vault') return 'vault (encrypted)';
-  if (c.source === 'file') return `file <code>${escapeHtml(c.path ?? '?')}</code>`;
-  if (c.source === 'env') return `environment variable <code>${escapeHtml(c.path ?? '?')}</code>`;
+  const overriding = c.overriding?.length
+    ? `, overriding ${c.overriding.map(otherWords).join(' and ')}`
+    : '';
+  if (c.source === 'vault') return `vault (encrypted)${overriding}`;
+  if (c.source === 'file') return `file <code>${escapeHtml(c.path ?? '?')}</code>${overriding}`;
+  if (c.source === 'env')
+    return `environment variable <code>${escapeHtml(c.path ?? '?')}</code>${overriding}`;
   return c.undecryptable
     ? 'not set: the stored value does not decrypt with the vault key (enter it again)'
     : 'not set';
@@ -77,13 +88,22 @@ function sourceCell(c: ResolvedCredential): string {
 function actionsCell(
   name: CredentialName,
   c: ResolvedCredential,
-  vaultOn: boolean,
+  vault: { on: boolean; prefer: boolean },
   claudeDated: boolean,
 ): string {
   const n = escapeHtml(name);
+  const vaultOn = vault.on;
+  // A variable's or file's value is copied server-side: the button sends only the name.
+  const copy =
+    vaultOn && (c.source === 'file' || c.source === 'env')
+      ? ` <button type="button" class="copy" data-name="${n}">Copy into the vault</button>`
+      : '';
   const test = c.value ? ` <button type="button" class="test" data-name="${n}">Test</button>` : '';
   const disabled = (why: string) =>
-    `<button type="button" disabled>Replace</button>${test} <small>${why}</small>`;
+    `<button type="button" disabled>Replace</button>${test}${copy} <small>${why}</small>`;
+  // With the vault preferred, a value entered here wins over the variable or file.
+  if ((c.source === 'file' || c.source === 'env') && vaultOn && vault.prefer)
+    return `${replaceForm(n, claudeDated)}${test}${copy}`;
   if (c.source === 'file')
     return disabled(
       `managed by ${escapeHtml(c.path ?? '?')}: replace that file and run <code>jumpmaster ctl secrets reload</code> to change it`,
@@ -93,22 +113,57 @@ function actionsCell(
       `set by the environment variable ${escapeHtml(c.path ?? '?')}: change it where the server's environment is set, and restart the server`,
     );
   if (!vaultOn) return disabled(escapeHtml(VAULT_DISABLED));
-  const made = claudeDated
-    ? ' <label>Made on <input type="date" name="declaredCreatedAt"></label>'
-    : '';
   // A vault entry that no longer decrypts can be removed too (then entered again).
   const remove =
     c.source === 'vault' || c.undecryptable
       ? ` <button type="button" class="remove" data-name="${n}">Remove</button>`
       : '';
-  return `<form class="replace" data-name="${n}"><input type="password" name="value" autocomplete="off" spellcheck="false" aria-label="New value for ${n}">${made} <button>Replace</button> <span class="replace-out" role="status"></span></form>${test}${remove}`;
+  return `${replaceForm(n, claudeDated)}${test}${remove}`;
 }
 
-function rowFor(name: CredentialName, c: ResolvedCredential, store: ConfigStore, vaultOn: boolean) {
+/** The Replace form for one (escaped) name: the value goes in a PUT body only. */
+function replaceForm(n: string, claudeDated: boolean): string {
+  const made = claudeDated
+    ? ' <label>Made on <input type="date" name="declaredCreatedAt"></label>'
+    : '';
+  return `<form class="replace" data-name="${n}"><input type="password" name="value" autocomplete="off" spellcheck="false" aria-label="New value for ${n}">${made} <button>Replace</button> <span class="replace-out" role="status"></span></form>`;
+}
+
+/**
+ * The vault's switches: Turn on while it is off; Prefer the vault while it is on; Turn off only
+ * for an empty vault Settings turned on (else what to do first).
+ */
+function vaultSection(store: ConfigStore): string {
+  const vault = store.vault();
+  if (vault === 'disabled')
+    return `<p class="warn">${escapeHtml(VAULT_DISABLED)}</p>
+<p><button type="button" id="vault-on">Turn on the vault</button> <small>Writes a new random key to <code>vault_key</code> under the secrets directory (mode 0600, never over an existing file) and opens the vault now, with no restart; it stays on across restarts. Keep that file with your backups: the database holds only ciphertext.</small></p>`;
+  const prefer = store.preferVault();
+  const order = prefer
+    ? 'A credential in the vault wins over its variable or file.'
+    : 'A variable, or a file under <code>secrets/</code> with the credential’s name, wins over the vault.';
+  const n = vault.count();
+  const off =
+    store.vaultKeyFrom() === 'env'
+      ? '<small>The key is set by <code>JM_VAULT_KEY_FILE</code>: to turn the vault off, empty it, unset that variable and restart.</small>'
+      : n > 0
+        ? `<small>The vault holds ${n} credential${n === 1 ? '' : 's'}: to turn it off, remove them first.</small>`
+        : '<button type="button" id="vault-off">Turn off the vault</button>';
+  return `<p>The vault is on: a credential entered here is tested, encrypted and never shown back. ${order}</p>
+<p><label><input type="checkbox" id="prefer-vault"${prefer ? ' checked' : ''}> Prefer the vault</label> <small>On, a vault entry wins over a variable or file for the same credential; it applies at once.</small></p>
+<p>${off}</p>`;
+}
+
+function rowFor(
+  name: CredentialName,
+  c: ResolvedCredential,
+  store: ConfigStore,
+  vault: { on: boolean; prefer: boolean },
+) {
   const created =
     credentialCreatedAt(name, store.resolved(), store.current().claude) ?? c.declaredCreatedAt;
   const test = c.testResult ? `${escapeHtml(c.testResult)} <small>${day(c.testedAt)}</small>` : '-';
-  return `<tr data-credential="${escapeHtml(name)}"><td><code>${escapeHtml(name)}</code><br><small>${escapeHtml(roleOf(name))}</small></td><td data-col="source">${sourceCell(c)}</td><td data-col="fingerprint">${c.fingerprint ? `<code>${escapeHtml(c.fingerprint)}</code>` : '-'}</td><td data-col="login">${c.login ? escapeHtml(c.login) : '-'}</td><td data-col="set">${day(c.setAt)}</td><td data-col="created">${day(created)}</td><td data-col="test">${test}</td><td data-col="actions">${actionsCell(name, c, vaultOn, name === 'claudeToken')}</td></tr>`;
+  return `<tr data-credential="${escapeHtml(name)}"><td><code>${escapeHtml(name)}</code><br><small>${escapeHtml(roleOf(name))}</small></td><td data-col="source">${sourceCell(c)}</td><td data-col="fingerprint">${c.fingerprint ? `<code>${escapeHtml(c.fingerprint)}</code>` : '-'}</td><td data-col="login">${c.login ? escapeHtml(c.login) : '-'}</td><td data-col="set">${day(c.setAt)}</td><td data-col="created">${day(created)}</td><td data-col="test">${test}</td><td data-col="actions">${actionsCell(name, c, vault, name === 'claudeToken')}</td></tr>`;
 }
 
 /** The Claude plan, as the wizard's Claude step offers it: a choice in db mode, the file's otherwise. */
@@ -211,6 +266,13 @@ async function jmRemoveCredential(name, state, status) {
   status.textContent = name + ' removed.';
   return 'removed';
 }
+// The vault's switches and Copy into the vault: each sends no value, only the name or the choice.
+async function jmVaultPost(url, body, state, status, what) {
+  if (!(await jmSudo(state, status))) return 'sudo';
+  const r = await jmFetch(url, body);
+  if (!r.ok) { if (await jmLapsed(r, state, status)) return 'sudo'; if (r.status === 403) state.sudo = false; status.textContent = what + ' was refused (' + r.status + '): ' + (await jmWhy(r)); return 'refused'; }
+  return 'done';
+}
 document.addEventListener('DOMContentLoaded', () => {
   const root = document.getElementById('credentials');
   const status = document.getElementById('credentials-status');
@@ -243,6 +305,27 @@ document.addEventListener('DOMContentLoaded', () => {
     const s = state(); const outcome = await jmRemoveCredential(b.dataset.name, s, status); after(s, outcome);
     if (outcome === 'removed') location.reload();
   });
+  const vaultOn = document.getElementById('vault-on');
+  if (vaultOn) vaultOn.addEventListener('click', async () => {
+    const s = state(); const outcome = await jmVaultPost('/api/control/secrets/vault/on', {}, s, status, 'Turning the vault on'); after(s, outcome);
+    if (outcome === 'done') location.reload();
+  });
+  const vaultOff = document.getElementById('vault-off');
+  if (vaultOff) vaultOff.addEventListener('click', async () => {
+    if (!confirm('Turn the vault off? Its key file is removed; credentials then come from variables and files only.')) return;
+    const s = state(); const outcome = await jmVaultPost('/api/control/secrets/vault/off', {}, s, status, 'Turning the vault off'); after(s, outcome);
+    if (outcome === 'done') location.reload();
+  });
+  const prefer = document.getElementById('prefer-vault');
+  if (prefer) prefer.addEventListener('change', async () => {
+    const want = prefer.checked;
+    const s = state(); const outcome = await jmVaultPost('/api/control/secrets/vault/prefer', { prefer: want }, s, status, 'Prefer the vault'); after(s, outcome);
+    if (outcome === 'done') location.reload(); else prefer.checked = !want;
+  });
+  for (const b of document.querySelectorAll('button.copy')) b.addEventListener('click', async () => {
+    const s = state(); const outcome = await jmVaultPost('/api/control/secrets/' + encodeURIComponent(b.dataset.name) + '/copy-to-vault', {}, s, status, 'Copying ' + b.dataset.name); after(s, outcome);
+    if (outcome === 'done') location.reload();
+  });
   const plan = document.getElementById('plan');
   if (plan) plan.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -262,11 +345,10 @@ export function renderCredentials(o: {
   guide?: Awaited<ReturnType<typeof forgeGuideFor>>;
 }): string {
   const { store, config } = o;
-  const vault = store.vault();
-  const vaultOn = vault !== 'disabled';
+  const vault = { on: store.vault() !== 'disabled', prefer: store.preferVault() };
   const resolved = store.resolved();
   const rows = (Object.entries(resolved) as [CredentialName, ResolvedCredential][])
-    .map(([name, c]) => rowFor(name, c, store, vaultOn))
+    .map(([name, c]) => rowFor(name, c, store, vault))
     .join('');
   // Active drops leased before a vault credential was replaced still carry the previous value.
   const running = (Object.entries(resolved) as [CredentialName, ResolvedCredential][])
@@ -288,9 +370,7 @@ export function renderCredentials(o: {
               `<li><strong>${escapeHtml(p.zoneId)}</strong> (${escapeHtml(p.credential)}, ${escapeHtml(p.kind)}): ${escapeHtml(p.message)}</li>`,
           )
           .join('')}</ul>`;
-  const vaultLine = vaultOn
-    ? '<p>The vault is on: a credential entered here is tested, encrypted and never shown back. A file under <code>secrets/</code> with the credential’s name wins over the vault.</p>'
-    : `<p class="warn">${escapeHtml(VAULT_DISABLED)}</p>`;
+  const vaultLine = vaultSection(store);
   return page(
     `<h2>Settings</h2>${tabs('credentials')}${tokenAgeBanner(claudeTokenDays(store, o.now))}
 <div id="credentials" data-sudo="${o.sudo ? '1' : '0'}">

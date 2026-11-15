@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
 import { SetupMode, setupActive, setupCodeLine } from './auth/operator.js';
 import { configPathOf, loadBoot } from './config/boot.js';
-import { ConfigStore } from './config/store.js';
+import { ConfigStore, startVault } from './config/store.js';
 import {
   type Config,
   MAX_POLL_SECONDS,
@@ -25,7 +25,6 @@ import { readSecretFile } from './secrets.js';
 import { recordPass } from './status.js';
 import { syncDropZone } from './sync.js';
 import { credentialProblems } from './vault/problems.js';
-import { openVault } from './vault/vault.js';
 
 /** How long one request on the timed forges (doctor reads, intake writes) may take. */
 const TIMED_REQUEST_MS = 30_000;
@@ -111,7 +110,8 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     console.error(`[jumpmaster] ${scrub(msg, store?.current(), store?.retired())}`);
   try {
     // The key and the data travel together: a non-empty vault without its key stops the start.
-    const vault = openVault(env.JM_VAULT_KEY_FILE || undefined, db, boot.dataDir);
+    // JM_VAULT_KEY_FILE wins; else the key file Settings wrote when it turned the vault on.
+    const vault = startVault(env, db, boot.dataDir);
     store = ConfigStore.open({
       db,
       boot,

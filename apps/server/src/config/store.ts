@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { auditedReadds } from '../auth/audit.js';
 import type { Principal } from '../auth/guard.js';
 import {
@@ -32,7 +32,13 @@ import {
   resolveCredentials,
 } from '../vault/credentials.js';
 import { type CredentialProblem, credentialProblems } from '../vault/problems.js';
-import { fingerprintOf, type Vault, type VaultMeta } from '../vault/vault.js';
+import {
+  createVaultKey,
+  fingerprintOf,
+  openVault,
+  type Vault,
+  type VaultMeta,
+} from '../vault/vault.js';
 import type { BootConfig } from './boot.js';
 import { RESTART_PATHS } from './boot.js';
 import { Confirmations, type ConsumeFailure } from './confirm.js';
@@ -206,11 +212,14 @@ export class ConfigStore implements ConfigSource {
   /** Guarded changes from sessions waiting for the confirmation page (in memory only). */
   readonly confirmations: Confirmations;
   private resolvedValue!: Resolved;
+  /** The vault as it is now: Settings can turn it on (and off, empty) while the server runs. */
+  private vaultValue: Vault | 'disabled';
   private readonly retiredValues = new Set<string>();
   private readonly warned = new Set<string>();
 
   private constructor(private readonly o: StoreOptions) {
     this.confirmations = new Confirmations(o.now);
+    this.vaultValue = o.vault ?? 'disabled';
   }
 
   /**
@@ -529,7 +538,107 @@ export class ConfigStore implements ConfigSource {
 
   /** The vault, or `'disabled'` when there is no key file. */
   vault(): Vault | 'disabled' {
-    return this.o.vault ?? 'disabled';
+    return this.vaultValue;
+  }
+
+  /**
+   * Where the vault key comes from: `JM_VAULT_KEY_FILE` (`'env'`, which wins), the key file
+   * Settings wrote (`'settings'`), or nowhere (the vault is off).
+   */
+  vaultKeyFrom(): 'env' | 'settings' | undefined {
+    if (this.vaultValue === 'disabled') return undefined;
+    return this.o.env.JM_VAULT_KEY_FILE ? 'env' : 'settings';
+  }
+
+  /** Whether a vault entry wins over a variable or a file for the same credential. */
+  preferVault(): boolean {
+    return getSetting(this.o.db, 'vault.prefer') === true;
+  }
+
+  /** Records "Prefer the vault" and swaps the credentials in at once; a failed swap undoes it. */
+  setPreferVault(on: boolean): { ok: true } | { ok: false; issues: ConfigIssue[] } {
+    const was = this.preferVault();
+    if (was === on) return { ok: true };
+    setSetting(this.o.db, 'vault.prefer', on, this.o.now());
+    const r = this.refreshSecrets();
+    if (r.ok) return { ok: true };
+    setSetting(this.o.db, 'vault.prefer', was, this.o.now());
+    return { ok: false, issues: 'issues' in r ? r.issues : [] };
+  }
+
+  /**
+   * Turns the vault on with no restart: a new key file (32 random bytes, base64url, 0600) under the
+   * secrets directory, never over an existing file; its path recorded so a restart opens it
+   * without `JM_VAULT_KEY_FILE`. No answer carries the key.
+   */
+  turnOnVault(): { ok: true; keyId: string; keyFile: string } | { ok: false; message: string } {
+    if (this.vaultValue !== 'disabled') return { ok: false, message: 'the vault is already on' };
+    const dir = this.o.boot.secretsDir;
+    if (!dir)
+      return {
+        ok: false,
+        message:
+          'there is no secrets directory to write the key to: set JM_SECRETS_DIR (or JM_VAULT_KEY_FILE) and restart',
+      };
+    let keyFile: string;
+    let vault: Vault | 'disabled';
+    try {
+      keyFile = createVaultKey(dir);
+      vault = openVault(keyFile, this.o.db, this.o.boot.dataDir, SETTINGS_KEY_LABEL);
+    } catch (e) {
+      return { ok: false, message: (e as Error).message };
+    }
+    if (vault === 'disabled') return { ok: false, message: 'the vault did not open' };
+    setSetting(this.o.db, 'vault.key_file', keyFile, this.o.now());
+    this.vaultValue = vault;
+    this.refreshSecrets();
+    return { ok: true, keyId: vault.keyId, keyFile };
+  }
+
+  /**
+   * Turns off a vault Settings turned on, only while it holds no entries; the key file it wrote
+   * protects nothing then and is removed, so Turn on can write a new one.
+   */
+  turnOffVault(): { ok: true } | { ok: false; message: string } {
+    const vault = this.vaultValue;
+    if (vault === 'disabled') return { ok: false, message: 'the vault is already off' };
+    if (this.o.env.JM_VAULT_KEY_FILE)
+      return {
+        ok: false,
+        message:
+          'the vault key is set by JM_VAULT_KEY_FILE: unset it where the server environment is set, and restart',
+      };
+    const n = vault.count();
+    if (n > 0)
+      return {
+        ok: false,
+        message: `the vault holds ${n} credential${n === 1 ? '' : 's'}: remove them first`,
+      };
+    const keyFile = getSetting(this.o.db, 'vault.key_file');
+    deleteSetting(this.o.db, 'vault.key_file');
+    this.vaultValue = 'disabled';
+    this.refreshSecrets();
+    if (typeof keyFile === 'string') rmSync(keyFile, { force: true });
+    return { ok: true };
+  }
+
+  /**
+   * Copies a credential's value from the variable or file in use into the vault, server-side:
+   * the answer names where it came from and its fingerprint, never the value.
+   */
+  copyToVault(
+    name: CredentialName,
+  ):
+    | { ok: true; from: string; fingerprint: string; meta: VaultMeta }
+    | { ok: false; message: string } {
+    const r = this.resolvedValue[name];
+    if (this.vaultValue === 'disabled') return { ok: false, message: VAULT_DISABLED };
+    if (!r || (r.source !== 'env' && r.source !== 'file') || !r.value)
+      return { ok: false, message: `${name} does not come from a variable or a file` };
+    const from = r.path ?? r.source;
+    const put = this.putCredential(name, r.value, { note: `copied from ${from}` });
+    if (!put.ok) return { ok: false, message: formatIssues(put.issues) };
+    return { ok: true, from, fingerprint: put.meta.fingerprint, meta: put.meta };
   }
 
   /** The credential problems of every zone (dispatch refusals; doctor `credential.*`). */
@@ -775,6 +884,7 @@ export class ConfigStore implements ConfigSource {
       } else {
         resolved = resolveCredentials(this.o.env, this.o.boot.secretsDir, this.vault(), {
           gateSecrets: gateSecretsOf(zones),
+          preferVault: this.preferVault(),
           warn: (m) => this.warnOnce(m),
         });
         secrets = assembleSecrets(resolved, loadMachineSecrets(this.o.env, resolved), zones);
@@ -903,7 +1013,22 @@ export class ConfigStore implements ConfigSource {
 }
 
 export const VAULT_DISABLED =
-  'the vault is off: set JM_VAULT_KEY_FILE (a 32-byte key file under ./secrets), or write the credential to its file under secrets/';
+  'the vault is off: turn it on under Settings, Credentials (or set JM_VAULT_KEY_FILE, a 32-byte key file under ./secrets), or write the credential to its file under secrets/';
+
+/** How a start's errors name the key file Settings wrote (no variable names it). */
+const SETTINGS_KEY_LABEL = 'the vault key file turned on in Settings';
+
+/**
+ * The vault at start: the key file `JM_VAULT_KEY_FILE` names, which wins, else the one Settings
+ * wrote and recorded (`vault.key_file`), else none (`openVault`'s rules for an empty vault).
+ */
+export function startVault(env: NodeJS.ProcessEnv, db: Db, dataDir?: string): Vault | 'disabled' {
+  if (env.JM_VAULT_KEY_FILE) return openVault(env.JM_VAULT_KEY_FILE, db, dataDir);
+  const stored = getSetting(db, 'vault.key_file');
+  return typeof stored === 'string'
+    ? openVault(stored, db, dataDir, SETTINGS_KEY_LABEL)
+    : openVault(undefined, db, dataDir);
+}
 
 /** The test seam's secrets as resolved credentials (source `env`). */
 function resolvedFromSecrets(

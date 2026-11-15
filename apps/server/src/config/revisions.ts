@@ -120,7 +120,9 @@ export type SettingKey =
   | 'config.current'
   | 'config.restart_pending'
   | 'setup.step'
-  | 'status.last_pass';
+  | 'status.last_pass'
+  | 'vault.key_file'
+  | 'vault.prefer';
 
 export function getSetting(db: Db, key: SettingKey): unknown {
   const row = db.prepare('SELECT value_json AS v FROM settings WHERE key = ?').get(key) as
