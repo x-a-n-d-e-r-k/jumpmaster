@@ -1249,3 +1249,48 @@ describe('GitHubForge doctor reads', () => {
     });
   });
 });
+
+describe('constructor names', () => {
+  const alnum = (n: number) => 'aB3'.repeat(Math.ceil(n / 3)).slice(0, n);
+  const tokens = [`ghp_${alnum(36)}`, `github_pat_${alnum(82)}`];
+
+  test.each(tokens)('refuses a token as owner without echoing it (%#)', (token) => {
+    let error: unknown;
+    try {
+      new GitHubForge(token, 'r', 'tok');
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect(String((error as Error).message)).not.toContain(token);
+    expect(String((error as Error).stack)).not.toContain(token);
+  });
+
+  test.each(tokens)('refuses a token as repo without echoing it (%#)', (token) => {
+    let error: unknown;
+    try {
+      new GitHubForge('o', token, 'tok');
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect(String((error as Error).message)).not.toContain(token);
+    expect(String((error as Error).stack)).not.toContain(token);
+  });
+
+  test.each(['', '-octo', 'octo-', 'oc--to', 'o/r', 'a'.repeat(40), 'oc_to'])(
+    'refuses owner %j',
+    (owner) => {
+      expect(() => new GitHubForge(owner, 'r', 'tok')).toThrow(/owner/);
+    },
+  );
+
+  test.each(['', '.', '..', 'a/b', 'a b', 'a'.repeat(101)])('refuses repo %j', (repo) => {
+    expect(() => new GitHubForge('o', repo, 'tok')).toThrow(/repository/);
+  });
+
+  test('constructs with a valid owner and repository', () => {
+    expect(() => new GitHubForge('octo-org', 'my_repo.js-2', 'tok')).not.toThrow();
+    expect(() => new GitHubForge('a'.repeat(39), 'b'.repeat(100), '')).not.toThrow();
+  });
+});
