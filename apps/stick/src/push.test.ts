@@ -220,6 +220,7 @@ describe('pushOnce', () => {
       epoch: 3,
       branch: 'agent/issue-1',
       salvage: false,
+      egress: true,
     });
     expect(started?.payload).not.toContain(GRANT.token);
     expect(s.pending.networks()).toEqual(new Set());
@@ -231,6 +232,8 @@ describe('pushOnce', () => {
     await pushOnce(s.entry, s.deps);
     expect(s.d.starts[0]?.network).toBeUndefined();
     expect(s.d.starts[0]?.egress).toBeUndefined();
+    const payload = PushPayloadSchema.parse(JSON.parse(s.d.starts[0]?.payload ?? ''));
+    expect(payload).not.toHaveProperty('egress');
   });
 
   test('writes the grant only after ready, only to the container it started, then ends stdin', async () => {
