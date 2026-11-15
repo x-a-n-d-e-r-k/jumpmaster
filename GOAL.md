@@ -15,6 +15,12 @@ results in `docs/spikes/2026-11-14-github-app.md`, and the push container alread
 (spec Task 4) are the ground truth. File issues small enough for one drop each, in dependency
 order, each naming the spec sections it implements.
 
+### Vault and credential resolution (spec Task 7)
+
+§4.4: `github-app/<owner>/<role>` vault entries, credential references, app-first resolution,
+`testCredential` and fingerprints for apps, PEM scrubbing, `pairFor` by credential kind, the read
+source.
+
 ### Broker and JWT (spec Task 5)
 
 `apps/server/src/forge/github-app.ts`: sign the app JWT, mint installation tokens narrowed to the
@@ -25,17 +31,15 @@ switch, and register every minted token and the key with redaction. The spike fo
 suspension kills live tokens within seconds, so minted tokens are not stored in the vault (§4.2).
 Tests run against a fake GitHub; nothing calls github.com.
 
+The broker (#105), the scrub set (#106) and the server-token cache (#111) come first; the
+lease, push and kill-switch hookup waits for Task 7's credential resolution (Command rulings 23,
+26 and 28).
+
 ### Forge identity (spec Task 6)
 
 §4.3: a token provider and the forge's identity in `GitHubForge`; every caller that reads the
 token's account; `viewerIsAdmin`; ruleset bypass per ruleset with the absent-field fallback;
 `repoAccess`; the bot login set in `ours()` and `flow/reconcile.ts`; the check-runs read.
-
-### Vault and credential resolution (spec Task 7)
-
-§4.4: `github-app/<owner>/<role>` vault entries, credential references, app-first resolution,
-`testCredential` and fingerprints for apps, PEM scrubbing, `pairFor` by credential kind, the read
-source.
 
 ### Manifest flow (spec Task 8)
 
