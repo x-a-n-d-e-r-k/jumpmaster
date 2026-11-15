@@ -336,8 +336,9 @@ across GitHub, so the name carries a short install id; the operator may edit it.
   authenticates as the other drop routes do (`apps/server/src/api/sticks.ts:124-146`: the stick's
   bearer token, stored hashed, and the drop belonging to that stick at that epoch), but accepts a
   drop in `push_pending` rather than requiring a live lease. The server refuses unless the drop's
-  role pushes (implement, heal, resolve), the kill switch is off, the zone is `active` (not `paused`
-  or `observe`), and the zone's repository is the drop's. It **reserves** the drop's one push token
+  role pushes (implement, heal, resolve), the kill switch is off, the zone is not in `observe`
+  (a `paused` zone still pushes: pause lets running work finish, and the push is its end), and
+  the zone's repository is the drop's. It **reserves** the drop's one push token
   in the database (a row inserted in the same transaction as the checks) before the asynchronous
   mint, so two concurrent requests can't both mint; it mints with `repository_ids: [the zone's
   repository]` and `permissions: { contents: write }` (the PAT in PAT mode), records the token for
@@ -410,9 +411,10 @@ across GitHub, so the name carries a short install id; the operator may edit it.
   which is what a kill switch is for, and their volumes are salvaged into `push_pending` after
   release. This keeps the kill switch's promise (nothing more reaches GitHub while it is on) and
   the owner's (no work lost through a kill). Discarding pending pushes and their volumes at kill was
-  the alternative, rejected because it loses work. A zone in `observe` or `paused` gets no push
-  token either (nothing written to GitHub); its pending pushes go out when it is active again, or
-  are discarded with the drop if the operator cancels it.
+  the alternative, rejected because it loses work. A zone in `observe` gets no push token either
+  (nothing written to GitHub); its pending pushes go out when it is active again, or are discarded
+  with the drop if the operator cancels it. A `paused` zone does get one: pause means running work
+  finishes, and refusing would let the retention deadline discard a whole gated run.
 - **Disk and hold time are bounded.** Volumes have no size limit of their own, so:
   - every pending push has a **retention deadline** (default 24 hours [call]), not only when its
     stick is gone; the clock pauses while the kill switch is on, and the operator can extend one
@@ -420,8 +422,8 @@ across GitHub, so the name carries a short install id; the operator may edit it.
     the stick removes the volume; *[as built: `ctl drops extend-retention <dropId> <hours>`, 1 to
     168. Expiry, and the operator's `ctl drops cancel <dropId>` (Ruling 16), send an implement item
     to `ready`, so its next drop resumes from the branch and is charged as a resume; heal and
-    resolve items stay `pr_open`. No replacement drop is inserted. A paused zone and server
-    downtime count against the deadline (rulings made during execution)]*
+    resolve items stay `pr_open`. No replacement drop is inserted. Server downtime counts against
+    the deadline; a paused zone no longer holds a push back (rulings made during execution)]*
   - a **free-space floor** on each stick (default 10 GiB [call]) below which it takes no lease;
     *[as built: only a value measured below the floor stops all leasing. A stick that can't
     measure, whose self-check fails, or whose trooper image fails verification still starts and
@@ -465,9 +467,9 @@ across GitHub, so the name carries a short install id; the operator may edit it.
     final; a transport failure or timeout is retryable. A final failure fails a `final` push and,
     for a checkpoint or salvage, applies the stored status with the drop's prior `head_sha` (Ruling
     7). A grant the server refuses for good (role, repository, kind, branch) fails the push
-    rather than retrying; a refusal for the kill switch, a paused or observed zone, or a held
-    reservation is retried. A push container whose stdin closes before the grant arrives reports a
-    retryable failure.
+    rather than retrying; a refusal for the kill switch, an observed zone, or a held reservation
+    is retried (the push plan refuses the first two up front, so no push container starts). A
+    push container whose stdin closes before the grant arrives reports a retryable failure.
   - *The lost-server rule.* The stick stops the agent container with a 60-second grace
     (`LOST_SERVER_GRACE_MS`), sends no heartbeat after it, and posts the drop's result only when it
     carries a push request (Ruling 14); any other exit keeps the volume for rediscovery.
@@ -739,7 +741,7 @@ files gain `jumpmaster-merge` for two-app zones; the CODEOWNERS text follows §5
 | Every token narrowed to one repository at minting | Keeps a drop's, and each server use's, reach to its zone's repository, whatever the installation reaches. |
 | Agent containers get `contents: read` only; pushes run in an agent-free push container | Agent code never shares a container with a write token, so it can't merge, push tags, delete branches or skip `prePushCheck` (§4.2). |
 | The push container runs only the base trooper image, the agent uid only for `upload-pack`, and a sweep before the token is used | Nothing the agent left in the workspace can run beside the write token (§4.2). |
-| Push tokens only for a `push_pending` drop of a pushing role held by the asking stick, zone active, kill switch off, one per drop reserved before minting | Observe, paused and killed states write nothing to GitHub; a compromised stick mints only for drops it holds (§4.2). |
+| Push tokens only for a `push_pending` drop of a pushing role held by the asking stick, zone not observing, kill switch off, one per drop reserved before minting | Observe and killed states write nothing to GitHub (a paused zone finishes its running work, pushes included); a compromised stick mints only for drops it holds (§4.2). |
 | The push container gets only the agent's working copy, never the mirror, and fetches the base itself | Files root's git reads with the token can't have been written in the agent's container (§4.2). |
 | The token reaches the push container only after the agent-side fetch, the sweep and a check for surviving agent processes | No agent-uid process is alive when the token exists in the container (§4.2). |
 | Retention deadline, free-space floor and pending-push cap per stick | Held work can't fill a host's disk or wait forever (§4.2). |
@@ -898,7 +900,7 @@ Nothing is rejected except, as the review itself advised, the stick pushing dire
 | Each checkpoint is a push container (no `expectSha`, no gates), and the result's `headSha` is the pushed SHA, so `checkoutBranch(resumeSha)` finds the branch (§4.2) | I6 |
 | Heal and resolve keep their lease on `payload.pr.headSha` in the push container (§4.2) | I7 |
 | One protected-path matcher in `packages/protocol` for `globHit` and `protectedMatch` (Task 2) | I8 |
-| The token route: `liveDrop` (stick bearer token, drop owner, epoch, live lease) plus role, kill switch, zone mode and repository checks; one live token per drop; revocation on the push result; refused under the kill switch and in observe or paused zones (§4.2) | the request's checks |
+| The token route: `liveDrop` (stick bearer token, drop owner, epoch, live lease) plus role, kill switch, zone mode and repository checks; one live token per drop; revocation on the push result; refused under the kill switch and in observe zones, granted in paused ones (§4.2) | the request's checks |
 | The server's re-check of the pushed diff is given up and said so; the protected-path check on the PR's file list before merge remains (§4.2, §8) | the review's stated cost |
 | Rejected: handing the write token to the stick to push from the host, beside the Docker socket (§4.2) | the review's weaker option |
 | Unattended merging restated for large branches (1 GiB, as today) and server restarts (§5.1) | owner's requirement |
@@ -1016,11 +1018,11 @@ PAT mode, then apps.
      at an agent container's start; the server unreachable at push time, then back; a server
      restart with drops running and pending; a stick restart with a pending push and with a
      running drop (salvaged within the reclaim window); the kill switch with agent containers,
-     pending pushes and a running push container, then release (nothing lost); observe and paused
-     zones; a checkpoint pushed by a push container and resumed by a replacement; heal and resolve
-     refused on a moved PR head; a retry after a push whose result was lost; two concurrent token
-     requests; a reused volume name; a branch near the 1 GiB limit; the probe released on *push
-     requested*.
+     pending pushes and a running push container, then release (nothing lost); observe zones
+     (refused) and paused zones (pushed); a checkpoint pushed by a push container and resumed by
+     a replacement; heal and resolve refused on a moved PR head; a retry after a push whose result
+     was lost; two concurrent token requests; a reused volume name; a branch near the 1 GiB limit;
+     the probe released on *push requested*.
 
    **Apps, in M5 (Tasks 5–12):**
 5. **Broker and JWT** (`forge/github-app.ts`): sign, mint narrowed tokens, cache server-side uses,

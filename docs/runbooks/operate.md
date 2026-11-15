@@ -84,8 +84,8 @@ to set them with `jumpmaster ctl` or in the config file, for example
 
 The mode is runtime state, separate from the config: a config change never flips it.
 
-- **Pause** (`ctl pause <zone>`): starts nothing new; running drops finish. Their
-  [pending pushes](#pending-pushes) wait until the zone is active again.
+- **Pause** (`ctl pause <zone>`): starts nothing new; running drops finish, and their
+  [pending pushes](#pending-pushes) still go out (a push is how a drop finishes).
 - **Observe** (`ctl observe <zone>`): plans and records, but writes nothing to GitHub. It is
   refused while the zone has active drops (a pending push counts) or GitHub writes: pause it and
   let them drain first.
@@ -228,15 +228,16 @@ Where the fix is a file (the ruleset, CODEOWNERS), it is offered as a download b
 An implement, heal or resolve drop that finished its agent run with work to push is
 `push_pending` until a push container on its stick has pushed it. It shows on home as a slot with
 its drop id, and it holds its item: nothing else starts on that issue meanwhile. Normally it lasts
-seconds. It lasts longer while the stick can't push: the server is unreachable, the zone is paused,
-the kill switch is on, or the stick is down (it finds its pending pushes again when it restarts).
+seconds. It lasts longer while the stick can't push: the server is unreachable, the zone is
+observing, the kill switch is on, or the stick is down (it finds its pending pushes again when it
+restarts).
 
 - **Retention.** A pending push expires 24 hours after it was requested. Expiry marks the drop
   lost (its event log says `push retention expired`) and revokes its credential. An implement
   issue goes back to `ready`, and its next drop resumes from whatever the branch already has on
   GitHub, charged as a resume. A heal or resolve item stays `pr_open` and is picked up again from
   the pull request. The stick removes the volume the next time it asks about the push. Time with
-  the zone paused, or with the server down, counts; time with the kill switch on doesn't.
+  the server down counts; time with the kill switch on doesn't.
 - **More time:** `ctl drops extend-retention <dropId> <hours>` (1 to 168 hours) moves the
   deadline, for example while you fix a stick that is down. It is audited, and refused for a drop
   that isn't pending.
@@ -249,12 +250,18 @@ the kill switch is on, or the stick is down (it finds its pending pushes again w
   place. While it is on, no push credential is issued and a running push container is stopped
   with its volume kept, so nothing reaches GitHub. An agent run the kill stopped leaves its
   uncommitted work on its volume, and the stick salvages it into a pending push, even while the
-  switch is on. The retention clock stops for the duration. `ctl unkill` adds the time back to
+  switch is on, or up to 15 minutes after `ctl unkill` (a stick that was down longer, or an issue
+  that has moved on since, gets its volume removed instead). The retention clock stops for the
+  duration. `ctl unkill` adds the time back to
   every deadline, and the pending pushes, salvaged ones included, go out.
 - **A refused push.** GitHub refusing the push (branch protection, a pre-receive hook, secret
   scanning) is final, as is the trooper's own pre-push check (a protected path, a secret, a
   commit that isn't the gated one). The drop then fails, or for a checkpoint resumes from the last
   pushed commit. A network failure or timeout is retried.
+- **A refused credential.** A push credential the server refuses for good (the drop's role, the
+  zone's repository no longer the drop's, the push kind, or the branch) fails the push, as a final
+  refusal would. A refusal for the kill switch, an observing zone, or another attempt's
+  reservation is retried with backoff, the volume kept; a paused zone is not refused.
 
 ## ctl
 
