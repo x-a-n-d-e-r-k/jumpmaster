@@ -172,6 +172,8 @@ function fakeDriver(
             d.killed = true;
             release();
           },
+          async writeLine() {},
+          endStdin() {},
         };
       },
       async listByLabel() {
@@ -192,6 +194,21 @@ function fakeDriver(
       },
       async removeNetworksByLabel() {
         return 0;
+      },
+      async createVolume() {},
+      async inspectVolume() {
+        return undefined;
+      },
+      async listVolumesByLabel() {
+        return [];
+      },
+      async removeVolume() {},
+      async initVolume() {
+        return 0;
+      },
+      async removeAndWait() {},
+      async freeBytes() {
+        return 100 * 2 ** 30;
       },
     } satisfies ContainerDriver,
   };

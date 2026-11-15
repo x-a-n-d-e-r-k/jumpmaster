@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { statfs } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { EGRESS_PROXY_ALIAS, type ServiceSpec } from '@jumpmaster/protocol';
 import Docker from 'dockerode';
@@ -8,9 +9,12 @@ import type {
   DropNet,
   IsolationFacts,
   ProxyHandle,
+  RepoMount,
+  VolumeInfo,
 } from './driver.js';
 import { allocateSubnet, dropLayout } from './subnets.js';
 import { canonicalRef } from './verify.js';
+import { REMOVE_TIMEOUT_MS, REPO_MOUNT } from './volumes.js';
 
 const SERVICE_LABEL = 'jumpmaster.service';
 /** `drop` on a drop network, `proxy` on a proxy container, `out` on the shared exit network. */
@@ -102,6 +106,33 @@ const DEFAULT_PIDS = 512;
 const NETWORK_REMOVE_ATTEMPTS = 5;
 const MB = 1024 * 1024;
 const STDERR_TAIL_CHARS = 4000;
+const REMOVE_POLL_MS = 250;
+/** The init container only chowns a directory: a minute is far more than it needs. */
+const INIT_TIMEOUT_MS = 60_000;
+const INIT_PIDS = 64;
+/**
+ * Root owns the mount point while it sets the mode (chmod on a file it doesn't own would need
+ * FOWNER), then gives it to the agent. Only CHOWN is needed for that.
+ */
+const INIT_SCRIPT = `chown 0:0 ${REPO_MOUNT} && chmod 0700 ${REPO_MOUNT} && chown 10001:10001 ${REPO_MOUNT}`;
+
+const statusOf = (e: unknown): number | undefined => (e as { statusCode?: number }).statusCode;
+
+/**
+ * The drop's volume as the container's one mount; nothing from the image is copied into it. (The
+ * typings demand volume Labels and DriverConfig the API leaves optional.)
+ */
+const volumeMounts = (m: RepoMount): { Mounts: Docker.MountSettings[] } => ({
+  Mounts: [
+    {
+      Type: 'volume',
+      Source: m.volume,
+      Target: m.target,
+      ReadOnly: false,
+      VolumeOptions: { NoCopy: true },
+    } as Docker.MountSettings,
+  ],
+});
 
 /** Splits a byte stream into lines. */
 async function* lines(stream: Readable): AsyncIterable<string> {
@@ -122,8 +153,102 @@ async function* lines(stream: Readable): AsyncIterable<string> {
 export class DockerDriver implements ContainerDriver {
   constructor(
     private readonly docker = new Docker(),
-    private readonly opts: { networkRetryMs?: number } = {},
+    private readonly opts: { networkRetryMs?: number; removePollMs?: number } = {},
   ) {}
+
+  async createVolume(name: string, labels: Record<string, string>): Promise<void> {
+    await this.docker.createVolume({ Name: name, Driver: 'local', Labels: labels });
+  }
+
+  async inspectVolume(name: string): Promise<VolumeInfo | undefined> {
+    try {
+      const v = (await this.docker.getVolume(name).inspect()) as {
+        Name: string;
+        Labels?: Record<string, string> | null;
+      };
+      return { name: v.Name, labels: v.Labels ?? {} };
+    } catch (e) {
+      if (statusOf(e) === 404) return undefined;
+      throw e;
+    }
+  }
+
+  async listVolumesByLabel(key: string, value: string): Promise<VolumeInfo[]> {
+    const found = (await this.docker.listVolumes({
+      filters: { label: [`${key}=${value}`] },
+    })) as { Volumes?: { Name: string; Labels?: Record<string, string> | null }[] | null };
+    return (found.Volumes ?? []).map((v) => ({ name: v.Name, labels: v.Labels ?? {} }));
+  }
+
+  async removeVolume(name: string): Promise<void> {
+    try {
+      await this.docker.getVolume(name).remove();
+    } catch (e) {
+      if (statusOf(e) !== 404) throw e;
+    }
+  }
+
+  async initVolume(o: Parameters<ContainerDriver['initVolume']>[0]): Promise<number> {
+    const container = await this.docker.createContainer({
+      Image: o.image,
+      name: o.name,
+      Labels: o.labels,
+      User: '0:0',
+      Entrypoint: ['/bin/sh', '-c', INIT_SCRIPT],
+      HostConfig: {
+        NetworkMode: 'none',
+        Privileged: false,
+        CapDrop: ['ALL'],
+        CapAdd: ['CHOWN'],
+        SecurityOpt: ['no-new-privileges'],
+        ReadonlyRootfs: true,
+        PidsLimit: INIT_PIDS,
+        Ulimits: [{ Name: 'core', Soft: 0, Hard: 0 }],
+        ...volumeMounts({ volume: o.volume, target: REPO_MOUNT }),
+      },
+    });
+    try {
+      const waited = container.wait({ condition: 'next-exit' });
+      await container.start();
+      let timer: NodeJS.Timeout | undefined;
+      const r = await Promise.race([
+        waited as Promise<{ StatusCode: number }>,
+        new Promise<'timeout'>((res) => {
+          timer = setTimeout(() => res('timeout'), INIT_TIMEOUT_MS);
+        }),
+      ]).finally(() => clearTimeout(timer));
+      if (r === 'timeout') throw new Error(`volume init container ${o.name} timed out`);
+      return r.StatusCode;
+    } finally {
+      // The volume is not handed on (or removed) while the init container still holds it.
+      await this.removeAndWait(o.name, REMOVE_TIMEOUT_MS);
+    }
+  }
+
+  async removeAndWait(name: string, timeoutMs: number): Promise<void> {
+    const c = this.docker.getContainer(name);
+    // Already gone, or a removal already in progress: either way, the inspect below decides.
+    await c.remove({ force: true }).catch(() => {});
+    const pollMs = this.opts.removePollMs ?? REMOVE_POLL_MS;
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      try {
+        await c.inspect();
+      } catch (e) {
+        if (statusOf(e) === 404) return;
+        // Any other failure proves nothing: keep asking until the deadline.
+      }
+      if (Date.now() >= deadline) throw new Error(`container not removed: ${name}`);
+      await new Promise((r) => setTimeout(r, Math.min(pollMs, Math.max(0, deadline - Date.now()))));
+    }
+  }
+
+  async freeBytes(): Promise<number> {
+    const info = (await this.docker.info()) as { DockerRootDir?: string };
+    if (!info.DockerRootDir) throw new Error('docker info reports no DockerRootDir');
+    const s = await statfs(info.DockerRootDir);
+    return s.bavail * s.bsize;
+  }
 
   async listByLabel(key: string, value: string): Promise<string[]> {
     const found = await this.docker.listContainers({
@@ -525,6 +650,7 @@ export class DockerDriver implements ContainerDriver {
         Ulimits: [{ Name: 'core', Soft: 0, Hard: 0 }],
         // Egress: created on the drop network only, so it never touches a network with a route.
         ...(o.egress ? egressHostConfig(o.egress) : {}),
+        ...(o.mount ? volumeMounts(o.mount) : {}),
       },
       ...(o.egress
         ? {
@@ -581,16 +707,41 @@ export class DockerDriver implements ContainerDriver {
       await container.remove({ force: true }).catch(() => {});
       throw e;
     }
+    // One newline-terminated line. A held stdin stays open for later lines (the grant).
+    const payloadLine = o.payload.endsWith('\n') ? o.payload : `${o.payload}\n`;
+    let stdinEnded = false;
+    const endStdin = () => {
+      if (stdinEnded) return;
+      stdinEnded = true;
+      try {
+        stream.end();
+      } catch {
+        // container already gone
+      }
+    };
     try {
-      stream.end(o.payload);
+      stream.write(payloadLine);
     } catch {
       // container already gone; exit code surfaces via wait()
     }
+    if (!o.holdStdin) endStdin();
 
     return {
       logs: () => lines(out),
       wait: () => waited,
       stderrTail: () => errTail,
+      writeLine(line: string) {
+        if (line.includes('\n')) return Promise.reject(new Error('writeLine takes one line'));
+        if (stdinEnded) return Promise.reject(new Error('stdin has ended'));
+        return new Promise<void>((resolve, reject) => {
+          try {
+            stream.write(`${line}\n`, (e?: Error | null) => (e ? reject(e) : resolve()));
+          } catch (e) {
+            reject(e);
+          }
+        });
+      },
+      endStdin,
       async kill() {
         await container.kill({ signal: 'SIGKILL' }).catch(() => {});
       },

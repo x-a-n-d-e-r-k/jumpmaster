@@ -8,7 +8,20 @@ export type ContainerHandle = {
   stop(graceMs: number): Promise<void>;
   /** SIGKILL with no grace: the trooper gets no chance to checkpoint or push. */
   kill(): Promise<void>;
+  /**
+   * Writes one more line to stdin (a `holdStdin` container); rejects on an embedded newline and
+   * once stdin has ended.
+   */
+  writeLine(line: string): Promise<void>;
+  /** Closes stdin. Safe to call more than once. */
+  endStdin(): void;
 };
+
+/** The per-drop repo volume, mounted at the one place the trooper uses it. */
+export type RepoMount = { volume: string; target: '/home/agent/repo' };
+
+/** A volume this engine holds: its name and labels. */
+export type VolumeInfo = { name: string; labels: Record<string, string> };
 
 /** A drop's internal /28 network under egress and its fixed addresses (see subnets.ts). */
 export type DropNet = {
@@ -56,7 +69,40 @@ export interface ContainerDriver {
     /** Egress on: the trooper joins only this drop network, at `.3`, with the dead DNS. */
     egress?: DropNet;
     limits?: ContainerLimits;
+    /** The drop's repo volume: the container's only mount (no binds). */
+    mount?: RepoMount;
+    /**
+     * Keep stdin open after the payload line, for `writeLine`/`endStdin`. Otherwise stdin ends
+     * right after the payload.
+     */
+    holdStdin?: boolean;
   }): Promise<ContainerHandle>;
+  /** Creates a local volume with these labels. */
+  createVolume(name: string, labels: Record<string, string>): Promise<void>;
+  /** The volume, or undefined when the engine has none by that name. */
+  inspectVolume(name: string): Promise<VolumeInfo | undefined>;
+  /** Volumes whose label `key` equals `value`. */
+  listVolumesByLabel(key: string, value: string): Promise<VolumeInfo[]>;
+  /** Removes one volume; gone already is fine, anything else (in use) throws. */
+  removeVolume(name: string): Promise<void>;
+  /**
+   * Runs the locked-down init container on a fresh volume: from `image`, as root with only
+   * CHOWN, no network, the volume its only mount. It gives the mount point to the agent (0700)
+   * and is removed (confirmed) before this returns its exit code.
+   */
+  initVolume(o: {
+    name: string;
+    image: string;
+    volume: string;
+    labels: Record<string, string>;
+  }): Promise<number>;
+  /**
+   * Force-removes the container, then resolves once the engine answers 404 for it; throws
+   * `container not removed` when it still exists (or can't be checked) after `timeoutMs`.
+   */
+  removeAndWait(name: string, timeoutMs: number): Promise<void>;
+  /** Free bytes on the filesystem of the engine's root directory (`DockerRootDir`). */
+  freeBytes(): Promise<number>;
   /**
    * Starts sidecars and returns the network name. Without `net`, on a new internal network; with
    * `net` (egress), on that drop network with the dead DNS, like the trooper.
