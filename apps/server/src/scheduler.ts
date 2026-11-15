@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { DropZoneConfig, UsageConfig } from './config.js';
 import type { Db } from './db/open.js';
 import {
+  ACTIVE_STATES_SQL,
   getZoneMode,
   insertDrop,
   isKilled,
@@ -37,7 +38,7 @@ export function enqueueImplement(
     const { n } = db
       .prepare(
         `SELECT COUNT(*) AS n FROM drops WHERE drop_zone_id = ? AND role = 'implement'
-           AND state IN ('queued', 'leased', 'running')`,
+           AND state IN (${ACTIVE_STATES_SQL})`,
       )
       .get(zone.id) as { n: number };
     if (n >= (zone.maxConcurrentImplement ?? 1)) return null;

@@ -626,7 +626,19 @@ const insDrop = (db: Db, id: string, role: string, item: number | null, state = 
 test('v17 rebuilds drops keeping every row and column, with foreign keys intact', () => {
   const f = v16Db();
   const before = new Database(f);
-  const all = (db: Db | Database.Database) => db.prepare('SELECT * FROM drops ORDER BY id').all();
+  // v22 adds columns; the rows as v17 left them are what must survive.
+  const NEW_V22 = [
+    'push_kind',
+    'push_expect_sha',
+    'push_deadline',
+    'running_at',
+    'usage_applied',
+    'was_probe',
+  ];
+  const all = (db: Db | Database.Database) =>
+    (db.prepare('SELECT * FROM drops ORDER BY id').all() as Record<string, unknown>[]).map((r) =>
+      Object.fromEntries(Object.entries(r).filter(([k]) => !NEW_V22.includes(k))),
+    );
   const old = all(before);
   before.close();
   const db = openDb(f);
@@ -815,7 +827,7 @@ test('v21 lets the outbox hold create_labels, keeping every row and the kind che
       .run(),
   );
   const db = openDb(f);
-  expect(MIGRATIONS.at(-1)?.version).toBe(21);
+  expect(MIGRATIONS.some((m) => m.version === 21)).toBe(true);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(count(db, 'outbox')).toBe(1);
   const put = db.prepare(
@@ -835,5 +847,61 @@ test('v21 lets the outbox hold create_labels, keeping every row and the kind che
   expect(zoneCol).toEqual({ d: "''", nn: 1 });
   expect(() => put.run('o3', 'x', 'delete_repo')).toThrow(/CHECK/);
   expect(() => put.run('o4', 'issue:z:o:k', 'create_issue')).toThrow(/UNIQUE/);
+  db.close();
+});
+
+test('v22 migrates a v21 database and keeps every drop and index', () => {
+  const f = dbAt(21, (raw) => {
+    raw.exec(
+      `INSERT INTO drop_zones (id, repo, default_branch, config_json) VALUES ('z', 'o/r', 'main', '{}');
+       INSERT INTO work_items (drop_zone_id, issue_number, title, body, author, priority, is_fix,
+         issue_created_at, state, updated_at) VALUES ('z', 1, 't', 'b', 'a', 0, 0, 't', 'in_flight', 't');
+       INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, created_at, head_sha, hard_cancel)
+         VALUES ('d1', 'z', 1, 'implement', 'running', 't', 'abc', 1);
+       INSERT INTO kill_switch (id, engaged, updated_at) VALUES (1, 1, 't');`,
+    );
+  });
+  const db = openDb(f);
+  expect(MIGRATIONS.at(-1)?.version).toBe(22);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(
+    db
+      .prepare(
+        'SELECT id, state, head_sha AS h, hard_cancel AS hc, usage_applied AS ua, was_probe AS wp, push_kind AS pk, running_at AS ra FROM drops',
+      )
+      .all(),
+  ).toEqual([{ id: 'd1', state: 'running', h: 'abc', hc: 1, ua: 0, wp: 0, pk: null, ra: null }]);
+  expect(db.prepare('SELECT engaged, engaged_at AS e FROM kill_switch').get()).toEqual({
+    engaged: 1,
+    e: null,
+  });
+  const idx = db
+    .prepare(
+      "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'drops' AND name LIKE 'one_active%' ORDER BY name",
+    )
+    .all() as { name: string; sql: string }[];
+  expect(idx.map((i) => i.name)).toEqual([
+    'one_active_crew_drop',
+    'one_active_doctor_drop',
+    'one_active_drop',
+  ]);
+  for (const i of idx) expect(i.sql).toContain("'push_pending'");
+  db.prepare(
+    "UPDATE drops SET state = 'push_pending', push_kind = 'checkpoint' WHERE id = 'd1'",
+  ).run();
+  expect(() => db.prepare("UPDATE drops SET push_kind = 'bogus' WHERE id = 'd1'").run()).toThrow(
+    /CHECK/,
+  );
+  expect(() => db.prepare("UPDATE drops SET state = 'nope' WHERE id = 'd1'").run()).toThrow(
+    /CHECK/,
+  );
+  expect(db.pragma('foreign_key_check')).toEqual([]);
+  expect(
+    db.prepare('SELECT "table" AS t FROM pragma_foreign_key_list(\'drops\') ORDER BY t').all(),
+  ).toEqual([{ t: 'drop_zones' }, { t: 'sticks' }, { t: 'work_items' }]);
+  const pk = db
+    .prepare("SELECT name FROM pragma_table_info('push_tokens') WHERE pk > 0 ORDER BY pk")
+    .all();
+  expect(pk).toEqual([{ name: 'drop_id' }, { name: 'epoch' }, { name: 'seq' }]);
   db.close();
 });

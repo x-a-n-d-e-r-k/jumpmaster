@@ -4,11 +4,13 @@ import { join } from 'node:path';
 import { beforeEach, describe, expect, test } from 'vitest';
 import { type Db, openDb } from './open.js';
 import {
+  ACTIVE_DROP_STATES,
   activeDropFor,
   appendEvents,
   deleteFailedOutbox,
   deleteZoneControls,
   ensureZoneMode,
+  GRANT_HOLD_MS,
   getAttempts,
   getDrop,
   getOutbox,
@@ -21,13 +23,18 @@ import {
   insertOutbox,
   insertStick,
   insertVerdict,
+  isKilled,
   latestVerdict,
   listEvents,
   listOutbox,
   listWorkItems,
+  markMinted,
   type NewDrop,
+  reserveGrant,
   resetAttempts,
+  revokeGrants,
   setAttempts,
+  setKilled,
   setRetryLabelSeen,
   setUsageState,
   setWaitingSince,
@@ -472,5 +479,97 @@ describe('zone removal and history', () => {
     expect(getZoneMode(d, 'z', 'active')).toBe('active');
     expect(zoneHistoryRepo(d, 'z')).toBe('octo/z');
     expect(zoneHistoryRepo(d, 'none')).toBeUndefined();
+  });
+});
+
+describe('push_pending (v22)', () => {
+  test('push_pending blocks a second active drop for the item', () => {
+    insertDrop(db, drop('d1', { state: 'running' }));
+    updateDrop(db, 'd1', { state: 'push_pending' });
+    expect(() => insertDrop(db, drop('d2'))).toThrow(/UNIQUE/);
+    expect(activeDropFor(db, workItemId)?.id).toBe('d1');
+    expect(ACTIVE_DROP_STATES).toContain('push_pending');
+    updateDrop(db, 'd1', { state: 'succeeded' });
+    expect(() => insertDrop(db, drop('d2'))).not.toThrow();
+  });
+
+  test('the new drop columns round-trip', () => {
+    insertDrop(db, drop('d1'));
+    expect(getDrop(db, 'd1')).toMatchObject({
+      pushKind: null,
+      pushExpectSha: null,
+      pushDeadline: null,
+      runningAt: null,
+      usageApplied: 0,
+      wasProbe: 0,
+    });
+    updateDrop(db, 'd1', {
+      pushKind: 'final',
+      pushExpectSha: 'abc',
+      pushDeadline: 'dl',
+      runningAt: 'ra',
+      usageApplied: 1,
+      wasProbe: 1,
+    });
+    expect(getDrop(db, 'd1')).toMatchObject({
+      pushKind: 'final',
+      pushExpectSha: 'abc',
+      pushDeadline: 'dl',
+      runningAt: 'ra',
+      usageApplied: 1,
+      wasProbe: 1,
+    });
+  });
+});
+
+describe('push grant reservations', () => {
+  const t = (ms: number) => new Date(Date.UTC(2026, 0, 1) + ms);
+  const rows = () =>
+    db
+      .prepare(
+        'SELECT seq, minted_at AS m, revoked_at AS r FROM push_tokens WHERE drop_id = ? ORDER BY seq',
+      )
+      .all('d1') as { seq: number; m: string | null; r: string | null }[];
+
+  test('reserveGrant: one live reservation; a stale one is replaced', () => {
+    expect(reserveGrant(db, 'd1', 1, t(0))).toBe('ok');
+    expect(reserveGrant(db, 'd1', 1, t(GRANT_HOLD_MS - 1))).toBe('reserved');
+    expect(rows()).toHaveLength(1);
+    expect(reserveGrant(db, 'd1', 1, t(GRANT_HOLD_MS))).toBe('ok');
+    const r = rows();
+    expect(r.map((x) => x.seq)).toEqual([1, 2]);
+    expect(r[0]?.r).not.toBeNull();
+    expect(r[1]?.r).toBeNull();
+  });
+
+  test('markMinted stamps the live reservation; revokeGrants frees the drop', () => {
+    reserveGrant(db, 'd1', 1, t(0));
+    markMinted(db, 'd1', 1, t(5));
+    expect(rows()[0]?.m).toBe(t(5).toISOString());
+    revokeGrants(db, 'd1', t(10));
+    expect(rows()[0]?.r).toBe(t(10).toISOString());
+    expect(reserveGrant(db, 'd1', 1, t(11))).toBe('ok');
+  });
+});
+
+describe('kill switch time', () => {
+  const t = (ms: number) => new Date(Date.UTC(2026, 0, 1) + ms);
+  const engagedAt = () =>
+    (
+      db.prepare('SELECT engaged_at AS e FROM kill_switch WHERE id = 1').get() as {
+        e: string | null;
+      }
+    ).e;
+
+  test('setKilled records engaged_at once and returns the paused time', () => {
+    expect(setKilled(db, true, t(1000))).toBe(0);
+    expect(engagedAt()).toBe(t(1000).toISOString());
+    expect(setKilled(db, true, t(5000))).toBe(0);
+    expect(engagedAt()).toBe(t(1000).toISOString());
+    expect(isKilled(db)).toBe(true);
+    expect(setKilled(db, false, t(9000))).toBe(8000);
+    expect(isKilled(db)).toBe(false);
+    expect(engagedAt()).toBeNull();
+    expect(setKilled(db, false, t(10000))).toBe(0);
   });
 });

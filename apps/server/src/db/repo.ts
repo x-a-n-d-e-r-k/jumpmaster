@@ -6,10 +6,25 @@ export type DropState =
   | 'queued'
   | 'leased'
   | 'running'
+  | 'push_pending'
   | 'succeeded'
   | 'failed'
   | 'lost'
   | 'cancelled';
+
+/**
+ * The states in which a drop holds its item (and its branch): nothing else may start on it. A pending
+ * push is one of them.
+ */
+export const ACTIVE_DROP_STATES = ['queued', 'leased', 'running', 'push_pending'] as const;
+
+/** `ACTIVE_DROP_STATES` as an SQL list, e.g. for `state IN (${ACTIVE_STATES_SQL})`. */
+export const ACTIVE_STATES_SQL = ACTIVE_DROP_STATES.map((s) => `'${s}'`).join(', ');
+
+/** How long an unrevoked grant reservation blocks another grant for the same drop. */
+export const GRANT_HOLD_MS = 15 * 60_000;
+
+export type PushKind = 'final' | 'checkpoint' | 'salvage';
 
 export interface DropZoneRow {
   id: string;
@@ -68,6 +83,17 @@ export interface Drop {
   requestedModel: string | null;
   /** The model that actually served the drop, as its result reported. */
   servedModel: string | null;
+  /** Set when the drop went `push_pending`: what its push container is to push. */
+  pushKind: PushKind | null;
+  pushExpectSha: string | null;
+  /** ISO time after which a pending push is given up on. */
+  pushDeadline: string | null;
+  /** Stamped on the first heartbeat that moved the drop to `running`. */
+  runningAt: string | null;
+  /** 1 once the result's usage has been applied (a push-requested result applies it early). */
+  usageApplied: number;
+  /** 1 when the drop held the usage probe at the time its usage was applied. */
+  wasProbe: number;
 }
 
 export type NewDrop = Pick<Drop, 'id' | 'dropZoneId' | 'workItemId' | 'role' | 'state'> &
@@ -122,7 +148,9 @@ const DROP_COLS = `id, drop_zone_id AS dropZoneId, work_item_id AS workItemId, r
   epoch, lease_expires_at AS leaseExpiresAt, prompt_version AS promptVersion, image,
   result_json AS resultJson, created_at AS createdAt, started_at AS startedAt, finished_at AS finishedAt,
   fingerprint, pr_number AS prNumber, head_sha AS headSha, input_json AS inputJson, charged_key AS chargedKey,
-  requested_model AS requestedModel, served_model AS servedModel`;
+  requested_model AS requestedModel, served_model AS servedModel, push_kind AS pushKind,
+  push_expect_sha AS pushExpectSha, push_deadline AS pushDeadline, running_at AS runningAt,
+  usage_applied AS usageApplied, was_probe AS wasProbe`;
 
 type WorkItemRow = Omit<WorkItem, 'isFix' | 'retryLabelSeen' | 'blockedBy'> & {
   isFix: number;
@@ -380,6 +408,12 @@ const DROP_COLUMN: Record<keyof DropPatch, string> = {
   chargedKey: 'charged_key',
   requestedModel: 'requested_model',
   servedModel: 'served_model',
+  pushKind: 'push_kind',
+  pushExpectSha: 'push_expect_sha',
+  pushDeadline: 'push_deadline',
+  runningAt: 'running_at',
+  usageApplied: 'usage_applied',
+  wasProbe: 'was_probe',
 };
 
 export function updateDrop(db: Db, id: string, patch: DropPatch): void {
@@ -492,11 +526,11 @@ export function listSticks(db: Db): Stick[] {
   ).map(toStick);
 }
 
-/** A zone's active drops (queued, leased or running), oldest first. */
+/** A zone's active drops (queued, leased, running or push_pending), oldest first. */
 export function listActiveDrops(db: Db, zoneId: string): Drop[] {
   return db
     .prepare(
-      `SELECT ${DROP_COLS} FROM drops WHERE drop_zone_id = ? AND state IN ('queued','leased','running')
+      `SELECT ${DROP_COLS} FROM drops WHERE drop_zone_id = ? AND state IN (${ACTIVE_STATES_SQL})
        ORDER BY created_at, id`,
     )
     .all(zoneId) as Drop[];
@@ -526,7 +560,7 @@ export function activeDropFor(db: Db, itemId: number): Drop | undefined {
   return db
     .prepare(
       `SELECT ${DROP_COLS} FROM drops
-       WHERE work_item_id = ? AND state IN ('queued','leased','running')`,
+       WHERE work_item_id = ? AND state IN (${ACTIVE_STATES_SQL})`,
     )
     .get(itemId) as Drop | undefined;
 }
@@ -932,11 +966,64 @@ export function isKilled(db: Db): boolean {
   return row?.engaged === 1;
 }
 
-export function setKilled(db: Db, engaged: boolean, now: Date): void {
+/**
+ * Engages or releases the kill switch. `engaged_at` is set only on an off-to-on transition (a repeat
+ * engage keeps it); on on-to-off it is cleared and the paused milliseconds are returned (0 otherwise).
+ */
+export function setKilled(db: Db, engaged: boolean, now: Date): number {
+  return db.transaction((): number => {
+    const prev = db
+      .prepare('SELECT engaged, engaged_at AS at FROM kill_switch WHERE id = 1')
+      .get() as { engaged: number; at: string | null } | undefined;
+    const was = prev?.engaged === 1;
+    const at = engaged ? (was && prev?.at ? prev.at : now.toISOString()) : null;
+    db.prepare(
+      `INSERT INTO kill_switch (id, engaged, updated_at, engaged_at) VALUES (1, ?, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET engaged = excluded.engaged, updated_at = excluded.updated_at,
+           engaged_at = excluded.engaged_at`,
+    ).run(engaged ? 1 : 0, now.toISOString(), at);
+    if (engaged || !was || !prev?.at) return 0;
+    return Math.max(0, now.getTime() - new Date(prev.at).getTime());
+  })();
+}
+
+/**
+ * Reserves a push grant for a drop. One unrevoked reservation younger than `GRANT_HOLD_MS` blocks
+ * another (`reserved`); otherwise older ones are revoked and a new row, `seq + 1`, is inserted.
+ */
+export function reserveGrant(db: Db, dropId: string, epoch: number, now: Date): 'ok' | 'reserved' {
+  return db.transaction((): 'ok' | 'reserved' => {
+    const live = db
+      .prepare('SELECT reserved_at AS at FROM push_tokens WHERE drop_id = ? AND revoked_at IS NULL')
+      .all(dropId) as { at: string }[];
+    if (live.some((r) => now.getTime() - new Date(r.at).getTime() < GRANT_HOLD_MS))
+      return 'reserved';
+    db.prepare(
+      'UPDATE push_tokens SET revoked_at = ? WHERE drop_id = ? AND revoked_at IS NULL',
+    ).run(now.toISOString(), dropId);
+    const { m } = db
+      .prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM push_tokens WHERE drop_id = ? AND epoch = ?')
+      .get(dropId, epoch) as { m: number };
+    db.prepare(
+      'INSERT INTO push_tokens (drop_id, epoch, seq, reserved_at) VALUES (?, ?, ?, ?)',
+    ).run(dropId, epoch, m + 1, now.toISOString());
+    return 'ok';
+  })();
+}
+
+/** Marks the drop's live reservation for this epoch as minted. */
+export function markMinted(db: Db, dropId: string, epoch: number, now: Date): void {
   db.prepare(
-    `INSERT INTO kill_switch (id, engaged, updated_at) VALUES (1, ?, ?)
-       ON CONFLICT (id) DO UPDATE SET engaged = excluded.engaged, updated_at = excluded.updated_at`,
-  ).run(engaged ? 1 : 0, now.toISOString());
+    `UPDATE push_tokens SET minted_at = ? WHERE drop_id = ? AND epoch = ? AND revoked_at IS NULL`,
+  ).run(now.toISOString(), dropId, epoch);
+}
+
+/** Revokes every unrevoked reservation of the drop, so the next grant is allowed at once. */
+export function revokeGrants(db: Db, dropId: string, now: Date): void {
+  db.prepare('UPDATE push_tokens SET revoked_at = ? WHERE drop_id = ? AND revoked_at IS NULL').run(
+    now.toISOString(),
+    dropId,
+  );
 }
 
 /** Drops in flight plus forge writes not yet settled in the zone. */
@@ -945,7 +1032,7 @@ export function activeWorkCount(db: Db, zoneId: string): number {
     .prepare(
       `SELECT
          (SELECT COUNT(*) FROM drops
-            WHERE drop_zone_id = @zone AND state IN ('queued', 'leased', 'running')
+            WHERE drop_zone_id = @zone AND state IN (${ACTIVE_STATES_SQL})
               -- A queued doctor drop has done nothing yet: it never blocks a mode change.
               AND NOT (role = 'doctor' AND state = 'queued'))
        + (SELECT COUNT(*) FROM outbox o

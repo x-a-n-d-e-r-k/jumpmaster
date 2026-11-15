@@ -15,6 +15,7 @@ import { creditsStopInForce } from '../credits.js';
 import { crewDropsToday } from '../crew/schedule.js';
 import type { Db } from '../db/open.js';
 import {
+  ACTIVE_DROP_STATES,
   getDropZoneDefaultBranch,
   getUsageState,
   getZoneMode,
@@ -1792,7 +1793,7 @@ function doctorDropCheck(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck {
       fix: `Run one: ${ask} (it spends one turn of usage), then run the doctor again once it has finished.`,
     };
   const at = { ...base, dropId: row.id };
-  if (['queued', 'leased', 'running'].includes(row.state))
+  if ((ACTIVE_DROP_STATES as readonly string[]).includes(row.state))
     return {
       ...at,
       status: 'skip',

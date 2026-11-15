@@ -11,6 +11,7 @@ import type {
   UsageStateRow,
   WorkItem,
 } from '../db/repo.js';
+import { ACTIVE_DROP_STATES } from '../db/repo.js';
 import type { DoctorAction } from '../doctor/checks.js';
 import type { GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
@@ -110,6 +111,7 @@ const pct = (v: number | null): string => (v === null ? '-' : `${Math.round(v * 
 const TONES: Record<string, string> = {
   running: 'info',
   leased: 'info',
+  push_pending: 'info',
   in_flight: 'info',
   observe: 'info',
   pr_open: 'crew',
@@ -552,7 +554,10 @@ export function renderHome(state: HomeState): string {
     .join('');
 
   // The slots (§10.1): what each trooper is doing right now, one card per live drop.
-  const live = state.drops.filter((d) => d.state === 'running' || d.state === 'leased');
+  // Everything active but still queued, which nothing has started; a pending push still holds its slot.
+  const live = state.drops.filter(
+    (d) => (ACTIVE_DROP_STATES as readonly string[]).includes(d.state) && d.state !== 'queued',
+  );
   const slotCard = (d: Drop): string => {
     const wi = d.workItemId === null ? undefined : itemById.get(d.workItemId);
     const what = wi

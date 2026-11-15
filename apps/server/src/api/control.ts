@@ -27,6 +27,7 @@ import { type Config, mcpConfigOf, secretList } from '../config.js';
 import { requestCrewCycle } from '../crew/schedule.js';
 import type { Db } from '../db/open.js';
 import {
+  ACTIVE_STATES_SQL,
   activeWorkCount,
   getZoneMode,
   insertDrop,
@@ -567,7 +568,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         const mine = db
           .prepare(
             `SELECT id, state FROM drops WHERE drop_zone_id = ? AND role = 'doctor'
-               AND state IN ('queued','leased','running')`,
+               AND state IN (${ACTIVE_STATES_SQL})`,
           )
           .get(zone.id) as { id: string; state: string } | undefined;
         if (!mine) return reply.code(404).send({ error: `no doctor drop is queued in ${zone.id}` });
@@ -597,7 +598,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       const active = db
         .prepare(
           `SELECT id, state FROM drops WHERE drop_zone_id = ? AND role = 'doctor'
-             AND state IN ('queued','leased','running')`,
+             AND state IN (${ACTIVE_STATES_SQL})`,
         )
         .get(zone.id) as { id: string; state: string } | undefined;
       if (active)

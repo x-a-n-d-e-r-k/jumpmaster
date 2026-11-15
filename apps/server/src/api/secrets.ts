@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { AuditDetail } from '../auth/audit.js';
 import { type ConfigStore, VAULT_DISABLED } from '../config/store.js';
 import type { Db } from '../db/open.js';
+import { ACTIVE_STATES_SQL } from '../db/repo.js';
 import { GitHubForge } from '../forge/github.js';
 import { MAX_SECRET_FILE_BYTES } from '../secrets.js';
 import {
@@ -58,7 +59,7 @@ export function runningSince(db: Db, since: string | undefined): number {
   return (
     db
       .prepare(
-        `SELECT COUNT(*) AS n FROM drops WHERE state IN ('leased', 'running')
+        `SELECT COUNT(*) AS n FROM drops WHERE state IN (${ACTIVE_STATES_SQL})
            AND started_at IS NOT NULL AND started_at < ?`,
       )
       .get(since) as { n: number }
