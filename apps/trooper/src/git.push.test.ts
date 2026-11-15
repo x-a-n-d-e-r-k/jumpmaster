@@ -247,6 +247,20 @@ describe('stageFromAgent', () => {
     expect(w.remoteTip()).toBe(w.s0);
   });
 
+  test('a slow agent fetch times out before the token, and the sweep still runs', async () => {
+    const w = await world('slow');
+    const order: string[] = [];
+    await expect(
+      stageFromAgent(w.dir, B, {
+        sweep: () => void order.push('sweep'),
+        limits: { timeoutMs: 1, maxBytes: 1e12 },
+      }),
+    ).rejects.toThrow(/^push fetch timed out$/);
+    expect(order).toEqual(['sweep', 'sweep']);
+    expect(leftovers()).toEqual([]);
+    expect(w.remoteTip()).toBe(w.s0);
+  });
+
   test('a missing branch is nothing', async () => {
     const w = await world('missing');
     await expect(stageFromAgent(w.dir, 'agent/issue-404', { sweep: noSweep })).resolves.toEqual({
