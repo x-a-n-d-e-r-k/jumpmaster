@@ -9,7 +9,7 @@ import {
   type StickInfo,
 } from '@jumpmaster/protocol';
 import { MAX_PENDING_PUSHES } from './push.js';
-import { allowedImages, type VolumeHealth } from './runner.js';
+import { allowedImages, type StickHealth, type VolumeHealth } from './runner.js';
 import type { ReleaseInfo } from './verify.js';
 import { VOLUME_FREE_FLOOR_BYTES } from './volumes.js';
 
@@ -154,4 +154,16 @@ export function stickVersion(release: ReleaseInfo | undefined = loadRelease()): 
   } catch {
     return 'unknown';
   }
+}
+
+/** The one line that says what the latest health check means, naming the real cause. */
+export function healthLine(h: StickHealth): string {
+  const space = freeSpace(h);
+  if (space === 'below') return `free space ${h.freeBytes} bytes is below the floor: not leasing`;
+  if (!h.base.ok) return `push-v1 withheld: ${h.base.reason}; non-pushing roles still lease`;
+  if (space === 'unmeasured')
+    return 'push-v1 withheld: free space could not be measured; non-pushing roles still lease';
+  return h.selfCheck
+    ? 'volume self-check passed: push-v1 advertised'
+    : 'push-v1 withheld: the volume self-check failed';
 }

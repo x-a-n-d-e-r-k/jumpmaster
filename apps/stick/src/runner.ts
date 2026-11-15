@@ -101,6 +101,12 @@ export const SELFCHECK_LABEL = 'jumpmaster.selfcheck';
  */
 export type VolumeHealth = { selfCheck: boolean; freeBytes: number | null };
 
+/** The latest verdict on the stick's own trooper image (Ruling 17). */
+export type BaseVerdict = { ok: true } | { ok: false; reason: string };
+
+/** What a health check found: the base image's verdict, then the volume self-check's. */
+export type StickHealth = VolumeHealth & { base: BaseVerdict };
+
 /**
  * The volume self-check, at startup and in every sweep (Ruling 18): the trooper image carries
  * the push label, a fresh volume takes the init container, and the agent can write to it. The
@@ -148,10 +154,55 @@ export async function volumeSelfCheck(
 export async function stickHealth(
   driver: ContainerDriver,
   o: { image: string; stickId: string; trust: ImageTrust; log: (line: string) => void },
-): Promise<VolumeHealth> {
+): Promise<StickHealth> {
   const base = await verifyBaseImage(o.image, { trust: o.trust, driver, log: o.log });
-  if (!base.ok) return { selfCheck: false, freeBytes: null };
-  return volumeSelfCheck(driver, o.image, o.stickId);
+  if (!base.ok) return { selfCheck: false, freeBytes: null, base };
+  return { ...(await volumeSelfCheck(driver, o.image, o.stickId)), base };
+}
+
+/**
+ * The stick's health over time: single-flight checks (a sweep and a floor wait never run two at
+ * once), the latest result, and whether a check is in flight (so the sweep leaves its self-check
+ * volume alone).
+ */
+export class HealthMonitor {
+  private current: StickHealth = {
+    selfCheck: false,
+    freeBytes: null,
+    base: { ok: false, reason: 'base image not checked yet' },
+  };
+  private inFlight: Promise<StickHealth> | undefined;
+
+  constructor(
+    private readonly driver: ContainerDriver,
+    private readonly o: {
+      image: string;
+      stickId: string;
+      trust: ImageTrust;
+      log: (line: string) => void;
+    },
+  ) {}
+
+  latest(): StickHealth {
+    return this.current;
+  }
+
+  busy(): boolean {
+    return this.inFlight !== undefined;
+  }
+
+  /** Runs a check, or joins the one in flight. */
+  check(): Promise<StickHealth> {
+    this.inFlight ??= stickHealth(this.driver, this.o)
+      .then((h) => {
+        this.current = h;
+        return h;
+      })
+      .finally(() => {
+        this.inFlight = undefined;
+      });
+    return this.inFlight;
+  }
 }
 
 /**
@@ -244,7 +295,7 @@ export async function rediscoverPending(
 /**
  * The 10-minute sweep's volumes. A volume a live drop (`dropId:epoch`) or a pending push holds
  * stays. Any other drop volume is reconciled as at startup (refused: removed). A leaked
- * self-check volume is removed.
+ * self-check volume is removed, unless a self-check is in flight (it may be that check's).
  */
 export async function sweepVolumes(
   driver: ContainerDriver,
@@ -253,10 +304,15 @@ export async function sweepVolumes(
   pending: PendingPushes,
   live: ReadonlySet<string>,
   log: (line: string) => void = (line) => console.log(line),
+  o: { selfCheckBusy?: () => boolean } = {},
 ): Promise<void> {
-  for (const v of await driver.listVolumesByLabel(STICK_LABEL, stickId)) {
+  const listed = await driver.listVolumesByLabel(STICK_LABEL, stickId);
+  // Read after the listing: a self-check that started since may own a listed volume. One that
+  // starts later creates a volume this listing doesn't hold.
+  const checking = o.selfCheckBusy?.() ?? false;
+  for (const v of listed) {
     if (v.labels[SELFCHECK_LABEL] === '1') {
-      await driver.removeVolume(v.name).catch(() => {});
+      if (!checking) await driver.removeVolume(v.name).catch(() => {});
       continue;
     }
     if (v.labels[VOLUME_LABEL] !== '1') continue;
@@ -373,6 +429,11 @@ type RunDeps = {
   trooperImage?: string;
   /** Where a pushing drop's volume goes once its agent container is gone. */
   pending?: PendingPushes;
+  /**
+   * The latest verdict on `trooperImage`. Refused: a pushing drop fails before its volume's init
+   * container (or anything else) starts.
+   */
+  baseImage?: () => BaseVerdict;
   /** First wait before re-sending a held result (doubling, capped). */
   resultRetryMs?: number;
 };
@@ -422,6 +483,12 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
   const egress = payload.egress;
   const fail = (reason: string) =>
     client.postResult(dropId, epoch, { status: 'failed', role: payload.role, reason, gates: [] });
+  const base = pushes ? deps.baseImage?.() : undefined;
+  if (base && !base.ok) {
+    log(JSON.stringify({ event: 'drop-refused', dropId, epoch, reason: base.reason }));
+    await fail(base.reason);
+    return;
+  }
   const proxyImage = egress ? (deps.egressImage ?? egressImage(process.env)) : undefined;
   // Every image this drop would create a container from: the trooper, its proxy, its services.
   const images: { ref: string; proxy?: true }[] = [

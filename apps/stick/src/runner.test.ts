@@ -16,6 +16,7 @@ import type { ContainerDriver, DropNet } from './driver.js';
 import { PendingPushes } from './push.js';
 import {
   allowedImages,
+  HealthMonitor,
   LOST_SERVER_GRACE_MS,
   reapOrphans,
   recoverAtStartup,
@@ -1095,7 +1096,14 @@ describe('startup recovery and health', () => {
       trust: { policy: 'allowlist', allowed: new Set(['other:1']) },
       log: (l) => log.push(l),
     });
-    expect(refused).toEqual({ selfCheck: false, freeBytes: null });
+    expect(refused).toEqual({
+      selfCheck: false,
+      freeBytes: null,
+      base: {
+        ok: false,
+        reason: 'base image jumpmaster-trooper:dev: image not allowed: jumpmaster-trooper:dev',
+      },
+    });
     expect(w.log).toEqual([]);
     expect(log.join('\n')).toMatch(/push-v1 withheld/);
     // Fixed (here: now allowed), the next check recovers.
@@ -1105,7 +1113,50 @@ describe('startup recovery and health', () => {
       trust: { policy: 'allowlist', allowed: new Set(['jumpmaster-trooper:dev']) },
       log: () => {},
     });
-    expect(fixed).toEqual({ selfCheck: true, freeBytes: 100 * 2 ** 30 });
+    expect(fixed).toEqual({ selfCheck: true, freeBytes: 100 * 2 ** 30, base: { ok: true } });
+  });
+
+  test('a sweep never removes the volume of a self-check in flight', async () => {
+    const w = volumeWorld([]);
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    // The probe waits until the sweep has run, as a floor-wait check racing a sweep would.
+    const driver: ContainerDriver = {
+      ...w.driver,
+      async probeVolume(p) {
+        await held;
+        if (![...w.volumes.keys()].some((n) => n.startsWith('jm-selfcheck-')))
+          throw new Error('volume gone');
+        return w.driver.probeVolume(p);
+      },
+    };
+    const monitor = new HealthMonitor(driver, {
+      image: 'jumpmaster-trooper:dev',
+      stickId: 's1',
+      trust: { policy: 'allowlist', allowed: new Set(['jumpmaster-trooper:dev']) },
+      log: () => {},
+    });
+    const check = monitor.check();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(monitor.busy()).toBe(true);
+    await sweepVolumes(driver, salvager({}), 's1', new PendingPushes(), new Set(), () => {}, {
+      selfCheckBusy: () => monitor.busy(),
+    });
+    release();
+    expect(await check).toMatchObject({ selfCheck: true, freeBytes: 100 * 2 ** 30 });
+    expect(monitor.latest().freeBytes).toBe(100 * 2 ** 30);
+    expect(monitor.busy()).toBe(false);
+    // With no check in flight, a leaked self-check volume goes.
+    w.volumes.set('jm-selfcheck-s1-deadbeef', {
+      'jumpmaster.stick': 's1',
+      'jumpmaster.selfcheck': '1',
+    });
+    await sweepVolumes(driver, salvager({}), 's1', new PendingPushes(), new Set(), () => {}, {
+      selfCheckBusy: () => monitor.busy(),
+    });
+    expect(w.volumes.size).toBe(0);
   });
 });
 
@@ -1721,6 +1772,21 @@ describe('push containers: the agent run on a volume', () => {
     trooperImage: 'trooper:base',
     pending: queue(d.order),
     resultRetryMs: 1,
+  });
+
+  test('a refused base image fails a pushing drop before anything starts from it', async () => {
+    const d = fakeDriver([PUSH_RESULT]);
+    const client = fakeClient();
+    await runDrop(payload, {
+      ...deps(d, client),
+      baseImage: () => ({ ok: false, reason: 'base image trooper:base: image not allowed' }),
+    });
+    expect(d.order).toEqual([]);
+    expect(d.started).toBeUndefined();
+    expect(client.result).toMatchObject({
+      status: 'failed',
+      reason: 'base image trooper:base: image not allowed',
+    });
   });
 
   test('the volume is prepared from the base image before the agent container, its only mount', async () => {

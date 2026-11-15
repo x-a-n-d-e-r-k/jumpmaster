@@ -3,17 +3,16 @@ import { DockerDriver } from './docker.js';
 import { egressCapability } from './egress.js';
 import { createPushLoop, PendingPushes, PUSH_LOOP_MS, pushOnce } from './push.js';
 import {
+  HealthMonitor,
   recoverAtStartup,
   runDrop,
-  stickHealth,
   sweepDropNetworks,
   sweepVolumes,
   TROOPER_IMAGE,
-  type VolumeHealth,
 } from './runner.js';
 import {
   advertisedCapabilities,
-  freeSpace,
+  healthLine,
   joinToken,
   leaseTerms,
   loadEnrollment,
@@ -98,43 +97,36 @@ async function main() {
   if (pending.size() > 0) console.log(`rediscovered ${pending.size()} pending push(es)`);
   // Health: the base image and the volume self-check, at startup, in every sweep and in each
   // wait below the floor; push-v1 follows the latest result.
-  let health: VolumeHealth = { selfCheck: false, freeBytes: null };
+  const health = new HealthMonitor(driver, {
+    image: TROOPER_IMAGE,
+    stickId: id,
+    trust,
+    log: (line) => console.error(line),
+  });
   const leaseTermsNow = () =>
-    leaseTerms({ egress: egress.ok, policy: trust.policy, health, pending: pending.size() });
-  let lastState = '';
-  let checking: Promise<void> | undefined;
-  const checkVolumes = (): Promise<void> => {
-    checking ??= (async () => {
-      health = await stickHealth(driver, {
-        image: TROOPER_IMAGE,
-        stickId: id,
-        trust,
-        log: (line) => console.error(line),
-      });
-      const space = freeSpace(health);
-      const state =
-        space === 'below'
-          ? `free space ${health.freeBytes} bytes is below the floor: not leasing`
-          : space === 'unmeasured'
-            ? 'free space could not be measured: push-v1 withheld, non-pushing roles still lease'
-            : health.selfCheck
-              ? 'volume self-check passed: push-v1 advertised'
-              : 'push-v1 withheld: the volume self-check failed';
-      // Logged when it changes, not on every re-check.
-      if (state !== lastState) console.log(state);
-      lastState = state;
-    })().finally(() => {
-      checking = undefined;
+    leaseTerms({
+      egress: egress.ok,
+      policy: trust.policy,
+      health: health.latest(),
+      pending: pending.size(),
     });
-    return checking;
+  let lastState = '';
+  const checkVolumes = async (): Promise<void> => {
+    const state = healthLine(await health.check());
+    // Logged when it changes, not on every re-check.
+    if (state !== lastState) console.log(state);
+    lastState = state;
   };
   await checkVolumes();
   const active = new Set<string>();
   /** `dropId:epoch` of every drop in a lease slot: the sweep leaves their volumes alone. */
   const live = new Set<string>();
   // Pending pushes run in their own loop, never in a lease slot (Ruling 15).
-  const pushLoop = createPushLoop(pending, (entry) =>
-    pushOnce(entry, { client, driver, stickId: id, image: TROOPER_IMAGE, pending }),
+  // No push container runs from a base image the latest check refused: entries wait, queued.
+  const pushLoop = createPushLoop(
+    pending,
+    (entry) => pushOnce(entry, { client, driver, stickId: id, image: TROOPER_IMAGE, pending }),
+    { ready: () => health.latest().base.ok },
   );
   setInterval(() => void pushLoop.tick(), PUSH_LOOP_MS);
   let sweeping = false;
@@ -143,7 +135,9 @@ async function main() {
     sweeping = true;
     (async () => {
       await checkVolumes();
-      await sweepVolumes(driver, client, id, pending, live).catch(() => {});
+      await sweepVolumes(driver, client, id, pending, live, undefined, {
+        selfCheckBusy: () => health.busy(),
+      }).catch(() => {});
       const n = await sweepDropNetworks(driver, id, new Set([...active, ...pending.networks()]));
       if (n > 0) console.log(`removed ${n} leaked drop network(s)`);
     })()
@@ -182,6 +176,7 @@ async function main() {
         trust,
         pending,
         trooperImage: TROOPER_IMAGE,
+        baseImage: () => health.latest().base,
         heartbeatMs: 15_000,
         ...(process.env.JM_LOST_SERVER_KILL_BEATS
           ? { lostServerKillBeats: Number(process.env.JM_LOST_SERVER_KILL_BEATS) }

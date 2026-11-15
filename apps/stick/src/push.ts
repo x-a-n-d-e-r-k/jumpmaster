@@ -407,7 +407,15 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export function createPushLoop(
   pending: PendingPushes,
   run: (entry: PushEntry) => Promise<PushOutcome>,
-  o: { max?: number; now?: () => number } = {},
+  o: {
+    max?: number;
+    now?: () => number;
+    /**
+     * Whether push containers may start: false while the base image is refused, so no push runs
+     * from an unverified image. Entries (and their volumes) stay queued until it verifies.
+     */
+    ready?: () => boolean;
+  } = {},
 ) {
   const max = o.max ?? MAX_CONCURRENT_PUSHES;
   const now = o.now ?? Date.now;
@@ -415,6 +423,7 @@ export function createPushLoop(
   return {
     running: () => live.size,
     tick(): Promise<void> {
+      if (o.ready && !o.ready()) return Promise.resolve();
       const started: Promise<void>[] = [];
       for (const entry of pending.due(now())) {
         if (live.size >= max) break;

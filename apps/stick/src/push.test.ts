@@ -390,6 +390,29 @@ describe('PendingPushes and the push loop', () => {
     expect(p.networks()).toEqual(new Set(['jm-push-d2-1']));
   });
 
+  test('pending pushes wait while the base image is refused, then run once it verifies', async () => {
+    const pending = new PendingPushes();
+    pending.add('d7', { epoch: 4, volume: 'jm-drop-d7-4-0123abcd' }, 0);
+    let verified = false;
+    const ran: string[] = [];
+    const loop = createPushLoop(
+      pending,
+      async (e) => {
+        ran.push(e.dropId);
+        return 'done';
+      },
+      { now: () => 0, ready: () => verified },
+    );
+    await loop.tick();
+    // Refused: nothing runs (no push container from an unverified image), the entry stays queued.
+    expect(ran).toEqual([]);
+    expect(pending.get('d7')).toMatchObject({ attempts: 0, volume: 'jm-drop-d7-4-0123abcd' });
+    verified = true;
+    await loop.tick();
+    expect(ran).toEqual(['d7']);
+    expect(pending.size()).toBe(0);
+  });
+
   test('the push loop runs at most two at a time and never holds a lease slot', async () => {
     const pending = new PendingPushes();
     for (const id of ['a', 'b', 'c', 'd']) pending.add(id, { epoch: 1, volume: `v-${id}` }, 0);

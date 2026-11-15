@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import { MAX_PENDING_PUSHES } from './push.js';
-import { advertisedCapabilities, leaseTerms } from './state.js';
+import { advertisedCapabilities, healthLine, leaseTerms } from './state.js';
 import { VOLUME_FREE_FLOOR_BYTES } from './volumes.js';
 
 const healthy = { selfCheck: true, freeBytes: VOLUME_FREE_FLOOR_BYTES };
@@ -46,4 +46,29 @@ test('at the cap the lease says noPush', () => {
   expect(terms(MAX_PENDING_PUSHES - 1)).toEqual({ capabilities: ['push-v1'] });
   expect(terms(MAX_PENDING_PUSHES)).toEqual({ capabilities: ['push-v1'], noPush: true });
   expect(terms(MAX_PENDING_PUSHES + 1)?.noPush).toBe(true);
+});
+
+test('the health line names the real cause', () => {
+  const ok = { ok: true } as const;
+  expect(
+    healthLine({
+      selfCheck: false,
+      freeBytes: null,
+      base: { ok: false, reason: 'base image t:dev: image not verified: a tag reference' },
+    }),
+  ).toBe(
+    'push-v1 withheld: base image t:dev: image not verified: a tag reference; non-pushing roles still lease',
+  );
+  expect(healthLine({ selfCheck: false, freeBytes: null, base: ok })).toBe(
+    'push-v1 withheld: free space could not be measured; non-pushing roles still lease',
+  );
+  expect(healthLine({ selfCheck: true, freeBytes: 5, base: ok })).toBe(
+    'free space 5 bytes is below the floor: not leasing',
+  );
+  expect(healthLine({ selfCheck: false, freeBytes: VOLUME_FREE_FLOOR_BYTES, base: ok })).toBe(
+    'push-v1 withheld: the volume self-check failed',
+  );
+  expect(healthLine({ selfCheck: true, freeBytes: VOLUME_FREE_FLOOR_BYTES, base: ok })).toBe(
+    'volume self-check passed: push-v1 advertised',
+  );
 });
