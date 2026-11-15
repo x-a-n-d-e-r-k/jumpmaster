@@ -3,11 +3,14 @@ import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
+import type { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import {
   type DropPayload,
   DropPayloadSchema,
   type DropResult,
+  type PushPayload,
+  PushPayloadSchema,
   payloadSecrets,
   REPORT_MAX_CHARS,
   RESULT_PREFIX,
@@ -31,6 +34,7 @@ import { runImplement } from './roles/implement.js';
 import { runResolve } from './roles/resolve.js';
 import { runReview } from './roles/review.js';
 import type { RoleCtx, RoleRunner } from './roles/shared.js';
+import { readLine } from './stdin.js';
 
 export interface TrooperDeps {
   git: typeof import('./git.js');
@@ -153,16 +157,22 @@ async function* spawnClaude(
 
 const PAYLOAD_START = '{"protocol":';
 
+/** A payload carries a task prompt and its context, so the bound is generous. */
+const PAYLOAD_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Read the payload: from a file, or as the first line of stdin. Stdin is left open and unread
+ * past that line; the caller closes it (agent roles) or keeps it for the grant (push role).
+ * A sender that closes stdin without a trailing newline is accepted: the stick does so today.
+ */
 export async function readPayload(
   file: string | undefined,
-  stdin: AsyncIterable<string | Buffer>,
-): Promise<DropPayload> {
+  stdin: Readable,
+): Promise<DropPayload | PushPayload> {
   let text: string;
   if (file) text = readFileSync(file, 'utf8');
   else {
-    const chunks: Buffer[] = [];
-    for await (const c of stdin) chunks.push(typeof c === 'string' ? Buffer.from(c) : c);
-    text = Buffer.concat(chunks).toString('utf8');
+    text = await readLine(stdin, PAYLOAD_MAX_BYTES, true);
   }
   // Docker can pass the attach request's body to stdin ahead of the payload. The payload is
   // serialised in schema order, so it starts with its protocol field: parse from there.
@@ -174,6 +184,9 @@ export async function readPayload(
   } catch {
     // V8's parse errors quote the text around the fault, which may be a credential.
     throw new Error('payload is not valid JSON');
+  }
+  if (typeof raw === 'object' && raw !== null && (raw as { role?: unknown }).role === 'push') {
+    return PushPayloadSchema.parse(raw);
   }
   return DropPayloadSchema.parse(raw);
 }
@@ -198,6 +211,10 @@ export function describeFatal(err: unknown): string {
 
 async function main(): Promise<void> {
   const payload = await readPayload(process.argv[2], process.stdin);
+  // The push role keeps stdin open for its grant line (built with the role); every other role is
+  // done with stdin once it has the payload.
+  if (payload.role === 'push') throw new Error('the push role is not available yet');
+  process.stdin.destroy();
   if (process.env.JM_WORK_ROOT) gitOps.setWorkRoot(process.env.JM_WORK_ROOT);
   const stopping = new AbortController();
   for (const sig of ['SIGTERM', 'SIGINT'] as const) {

@@ -1,4 +1,4 @@
-import { Readable } from 'node:stream';
+import { PassThrough, Readable } from 'node:stream';
 import type { DropPayload, GateResult } from '@jumpmaster/protocol';
 import { expect, test } from 'vitest';
 import type { TrooperDeps } from './main.js';
@@ -279,6 +279,34 @@ test('claude non-zero exit code is included in the failed reason', async () => {
   const r = await runTrooper(payload, f.deps);
   expect(r.status).toBe('failed');
   expect(r.reason).toContain('exit 3');
+});
+
+test('readPayload reads one line and leaves the stream open', async () => {
+  const s = new PassThrough();
+  s.write(`${JSON.stringify(payload)}\n`);
+  expect((await readPayload(undefined, s)).dropId).toBe('d1');
+  expect(s.destroyed).toBe(false);
+});
+
+test('readPayload strips a Docker prefix', async () => {
+  const s = Readable.from([
+    `\u0001\u0000\u0000\u0000\u0000\u0000\u0001\u0000${JSON.stringify(payload)}\n`,
+  ]);
+  expect((await readPayload(undefined, s)).dropId).toBe('d1');
+});
+
+test('readPayload accepts a push payload and leaves the grant line unread', async () => {
+  const push = {
+    protocol: 1,
+    role: 'push',
+    dropId: 'd1',
+    epoch: 1,
+    branch: 'jm/x',
+    salvage: false,
+  };
+  const s = Readable.from([`${JSON.stringify(push)}\nnext\n`]);
+  const p = await readPayload(undefined, s);
+  expect(p.role).toBe('push');
 });
 
 test('readPayload parses the payload from stdin', async () => {
