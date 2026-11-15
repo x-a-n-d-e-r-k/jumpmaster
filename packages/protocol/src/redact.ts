@@ -55,3 +55,22 @@ export function payloadSecrets(p: {
     ...withBasicAuth(readToken),
   ];
 }
+
+/**
+ * Every secret a push grant may redact with: the drop's own forge token and the author token, each
+ * with its git basic-auth form, the Claude token, and the drop's gate secrets. Deliberately
+ * narrower than the server's whole secret list: other zones' secrets never leave the server.
+ */
+export function dropSecrets(o: {
+  forgeToken?: string;
+  authorToken: string;
+  claudeToken: string;
+  gateSecrets?: Record<string, string>;
+}): string[] {
+  return [
+    ...Object.values(o.gateSecrets ?? {}),
+    o.claudeToken,
+    ...withBasicAuth(o.forgeToken),
+    ...withBasicAuth(o.authorToken),
+  ];
+}

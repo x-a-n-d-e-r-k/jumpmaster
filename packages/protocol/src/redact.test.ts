@@ -1,5 +1,11 @@
 import { expect, test } from 'vitest';
-import { containsSecret, payloadSecrets, redact, redactTokenShapes } from './redact.js';
+import {
+  containsSecret,
+  dropSecrets,
+  payloadSecrets,
+  redact,
+  redactTokenShapes,
+} from './redact.js';
 
 test('redacts known secrets and token shapes', () => {
   expect(redact('a sekret b ghp_' + 'x'.repeat(36), ['sekret'])).toBe('a [REDACTED] b [REDACTED]');
@@ -68,4 +74,24 @@ test('a snake_case name containing ghs_ is not a token', () => {
   const line = '+const highs_and_lows_for_each_trading_day_in_range = 1;';
   expect(containsSecret(line, [])).toBe(false);
   expect(redact(line, [])).toBe(line);
+});
+
+test('dropSecrets lists basic-auth forms and nothing else', () => {
+  const b64 = (t: string) => Buffer.from(`x-access-token:${t}`).toString('base64');
+  expect(
+    dropSecrets({
+      forgeToken: 'forge-tok',
+      authorToken: 'author-tok',
+      claudeToken: 'claude-tok',
+      gateSecrets: { A: 'gate-a' },
+    }),
+  ).toEqual([
+    'gate-a',
+    'claude-tok',
+    'forge-tok',
+    b64('forge-tok'),
+    'author-tok',
+    b64('author-tok'),
+  ]);
+  expect(dropSecrets({ authorToken: 'a', claudeToken: 'c' })).toEqual(['c', 'a', b64('a')]);
 });

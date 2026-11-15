@@ -7,14 +7,23 @@ import {
   DropPayloadSchema,
   DropResultSchema,
   EVENT_PREFIX,
+  FEATURES_HEADER,
   IMPLEMENT_OUTPUT_SCHEMA,
   isCrewRole,
+  PushGrantSchema,
+  PushPayloadSchema,
+  PushPlanSchema,
+  PushRequestSchema,
+  PushResultSchema,
   parseCrewOutput,
   protectedPathMatches,
+  pushRequestValid,
   RateLimitEventDataSchema,
+  READY_LINE,
   RESULT_PREFIX,
   REVIEW_OUTPUT_SCHEMA,
   RoleSchema,
+  STICK_CAPABILITIES,
   VerdictSchema,
 } from './index.js';
 
@@ -341,5 +350,128 @@ describe('protectedPathMatches (the one matcher for push and review checks)', ()
     ['a/b.yml', 'b/*.yml'],
   ])('%s is not covered by %s', (p, g) => {
     expect(protectedPathMatches(p, g)).toBe(false);
+  });
+});
+
+const SHA_A = 'a'.repeat(40);
+const SHA_B = 'b'.repeat(40);
+const doneResult = (over: Record<string, unknown>) =>
+  DropResultSchema.parse({ status: 'completed', gates: [], ...over });
+
+describe('push protocol', () => {
+  test('push-v1 is a capability and the wire constants are fixed', () => {
+    expect(STICK_CAPABILITIES).toContain('push-v1');
+    expect(READY_LINE).toBe('JM_READY');
+    expect(FEATURES_HEADER).toBe('x-jumpmaster-features');
+  });
+
+  test('push request: final needs expectSha; checkpoint forbids it', () => {
+    expect(PushRequestSchema.safeParse({ kind: 'final', expectSha: SHA_A }).success).toBe(true);
+    expect(PushRequestSchema.safeParse({ kind: 'final' }).success).toBe(false);
+    expect(PushRequestSchema.safeParse({ kind: 'final', expectSha: 'abc' }).success).toBe(false);
+    expect(PushRequestSchema.safeParse({ kind: 'checkpoint' }).success).toBe(true);
+    expect(PushRequestSchema.safeParse({ kind: 'checkpoint', expectSha: SHA_A }).success).toBe(
+      false,
+    );
+    expect(PushRequestSchema.safeParse({ kind: 'salvage' }).success).toBe(false);
+    expect(
+      DropResultSchema.safeParse({
+        status: 'completed',
+        gates: [],
+        push: { kind: 'final' },
+      }).success,
+    ).toBe(false);
+  });
+
+  test('pushRequestValid: final only with completed and matching headSha; checkpoint only interrupted or rate_limited; never for resolve checkpoints or non-pushing roles', () => {
+    const fin = { kind: 'final', expectSha: SHA_A };
+    const cp = { kind: 'checkpoint' };
+    expect(pushRequestValid(doneResult({ headSha: SHA_A, push: fin }), 'implement')).toBe(true);
+    expect(pushRequestValid(doneResult({ headSha: SHA_A, push: fin }), 'heal')).toBe(true);
+    expect(pushRequestValid(doneResult({ headSha: SHA_A, push: fin }), 'resolve')).toBe(true);
+    expect(pushRequestValid(doneResult({ headSha: SHA_B, push: fin }), 'implement')).toBe(false);
+    expect(pushRequestValid(doneResult({ push: fin }), 'implement')).toBe(false);
+    expect(
+      pushRequestValid(doneResult({ status: 'failed', headSha: SHA_A, push: fin }), 'implement'),
+    ).toBe(false);
+    expect(pushRequestValid(doneResult({ status: 'interrupted', push: cp }), 'implement')).toBe(
+      true,
+    );
+    expect(pushRequestValid(doneResult({ status: 'rate_limited', push: cp }), 'heal')).toBe(true);
+    expect(pushRequestValid(doneResult({ status: 'completed', push: cp }), 'implement')).toBe(
+      false,
+    );
+    expect(pushRequestValid(doneResult({ status: 'interrupted', push: cp }), 'resolve')).toBe(
+      false,
+    );
+    for (const role of ['review', 'crew-lead', 'refute', 'diagnose', 'doctor'] as const) {
+      expect(pushRequestValid(doneResult({ headSha: SHA_A, push: fin }), role)).toBe(false);
+      expect(pushRequestValid(doneResult({ status: 'interrupted', push: cp }), role)).toBe(false);
+    }
+    // No request is nothing to refuse.
+    expect(pushRequestValid(doneResult({}), 'review')).toBe(true);
+  });
+
+  const payload = {
+    protocol: 1,
+    role: 'push',
+    dropId: 'd1',
+    epoch: 2,
+    branch: 'agent/x',
+    salvage: false,
+  };
+
+  test('push payload is strict and has no token field', () => {
+    expect(PushPayloadSchema.safeParse(payload).success).toBe(true);
+    expect(PushPayloadSchema.safeParse({ ...payload, token: 't' }).success).toBe(false);
+    expect(PushPayloadSchema.safeParse({ ...payload, credentials: {} }).success).toBe(false);
+    expect(PushPayloadSchema.safeParse({ ...payload, branch: '' }).success).toBe(false);
+    expect(Object.keys(PushPayloadSchema.shape)).not.toContain('token');
+  });
+
+  test('grant and plan reject unknown keys', () => {
+    const plan = { branch: 'agent/x', salvage: false };
+    expect(PushPlanSchema.safeParse(plan).success).toBe(true);
+    expect(
+      PushPlanSchema.safeParse({
+        ...plan,
+        limits: { pids: 100 },
+        egress: { mode: 'enforce', allow: ['github.com'] },
+      }).success,
+    ).toBe(true);
+    expect(PushPlanSchema.safeParse({ ...plan, extra: 1 }).success).toBe(false);
+    const grant = {
+      token: 't',
+      owner: 'o',
+      name: 'n',
+      branch: 'agent/x',
+      base: 'main',
+      lease: 'l',
+      protectedPaths: ['.github/**'],
+      secrets: ['s'],
+    };
+    expect(PushGrantSchema.safeParse(grant).success).toBe(true);
+    expect(PushGrantSchema.safeParse({ ...grant, expectSha: SHA_A }).success).toBe(true);
+    expect(PushGrantSchema.safeParse({ ...grant, extra: 1 }).success).toBe(false);
+  });
+
+  test('push result variants', () => {
+    expect(
+      PushResultSchema.safeParse({ status: 'pushed', headSha: SHA_A, alreadyThere: false }).success,
+    ).toBe(true);
+    expect(
+      PushResultSchema.safeParse({ status: 'pushed', headSha: 'x', alreadyThere: false }).success,
+    ).toBe(false);
+    expect(
+      PushResultSchema.safeParse({ status: 'failed', reason: 'net', retryable: true }).success,
+    ).toBe(true);
+    expect(PushResultSchema.safeParse({ status: 'failed', reason: 'net' }).success).toBe(false);
+    expect(
+      PushResultSchema.safeParse({ status: 'failed', reason: 'x'.repeat(2001), retryable: false })
+        .success,
+    ).toBe(false);
+    expect(PushResultSchema.safeParse({ status: 'nothing', reason: 'empty' }).success).toBe(true);
+    expect(PushResultSchema.safeParse({ status: 'nothing' }).success).toBe(false);
+    expect(PushResultSchema.safeParse({ status: 'other', reason: 'x' }).success).toBe(false);
   });
 });

@@ -48,7 +48,7 @@ export const PresetSchema = z.enum(PRESETS);
  * What a stick can enforce. A stick advertises a capability only once its code really does it,
  * and the server never leases it a drop from a zone that needs one it lacks.
  */
-export const STICK_CAPABILITIES = ['egress-v1', 'image-verify-v1'] as const;
+export const STICK_CAPABILITIES = ['egress-v1', 'image-verify-v1', 'push-v1'] as const;
 export type StickCapability = (typeof STICK_CAPABILITIES)[number];
 export const ImagePolicySchema = z.enum(['allowlist', 'signed']);
 export type ImagePolicy = z.infer<typeof ImagePolicySchema>;
@@ -440,7 +440,22 @@ export type DoctorResult = z.infer<typeof DoctorResultSchema>;
 /** Longest author report a result may carry; the trooper truncates to this. */
 export const REPORT_MAX_CHARS = 8000;
 
+const sha40 = z.string().regex(/^[0-9a-f]{40}$/, 'a full 40-hex commit SHA');
+
+/**
+ * What the agent container asks the push container to do with its work. `final` pushes the tip it
+ * names; `checkpoint` pushes whatever the volume holds. Salvage comes only from the server.
+ */
+export const PushRequestSchema = z
+  .object({ kind: z.enum(['final', 'checkpoint']), expectSha: sha40.optional() })
+  .refine((p) => (p.kind === 'final') === (p.expectSha !== undefined), {
+    message: 'final requires expectSha and checkpoint forbids it',
+  });
+export type PushRequest = z.infer<typeof PushRequestSchema>;
+
 export const DropResultSchema = z.object({
+  /** Asks for the work on the volume to be pushed by the push container. */
+  push: PushRequestSchema.optional(),
   status: z.enum(['completed', 'no_changes', 'blocked', 'failed', 'interrupted', 'rate_limited']),
   role: RoleSchema.optional(),
   verdict: VerdictSchema.optional(),
@@ -463,7 +478,13 @@ export const DropResultSchema = z.object({
 });
 export type DropResult = z.infer<typeof DropResultSchema>;
 export * from './egress.js';
-export { containsSecret, payloadSecrets, redact, redactTokenShapes } from './redact.js';
+export {
+  containsSecret,
+  dropSecrets,
+  payloadSecrets,
+  redact,
+  redactTokenShapes,
+} from './redact.js';
 export { CREDENTIAL_FILES, MAX_SECRET_FILE_BYTES, readSecret, readSecretFile } from './secrets.js';
 
 /**
@@ -484,3 +505,75 @@ export function servedModel(modelUsage: unknown): string | null {
   }
   return best;
 }
+
+const PUSHING_ROLES: readonly Role[] = ['implement', 'heal', 'resolve'];
+
+/**
+ * Whether the push a result asks for is one its role may ask for. A result without a push request
+ * has nothing to refuse. `final` needs a completed run whose head is the SHA named; `checkpoint`
+ * needs an interrupted or rate-limited run, and resolve never checkpoints.
+ */
+export function pushRequestValid(result: DropResult, role: Role): boolean {
+  const push = result.push;
+  if (push === undefined) return true;
+  if (!PUSHING_ROLES.includes(role)) return false;
+  if (push.kind === 'final') {
+    return result.status === 'completed' && result.headSha === push.expectSha;
+  }
+  return (
+    role !== 'resolve' && (result.status === 'interrupted' || result.status === 'rate_limited')
+  );
+}
+
+/** The one line the push container prints, alone, once its volume is mounted and it is ready. */
+export const READY_LINE = 'JM_READY';
+
+/** The response header through which the server announces the features it supports. */
+export const FEATURES_HEADER = 'x-jumpmaster-features';
+
+/** The push container's payload. Strict, and carries no token: the grant arrives after ready. */
+export const PushPayloadSchema = z
+  .object({
+    protocol: z.literal(1),
+    role: z.literal('push'),
+    dropId: dropPayloadBase.dropId,
+    epoch: dropPayloadBase.epoch,
+    branch: z.string().min(1),
+    salvage: z.boolean(),
+  })
+  .strict();
+export type PushPayload = z.infer<typeof PushPayloadSchema>;
+
+/** What the stick learns from the server before it starts a push container. */
+export const PushPlanSchema = z
+  .object({
+    branch: z.string().min(1),
+    salvage: z.boolean(),
+    limits: ContainerLimitsSchema.optional(),
+    egress: EgressPayloadSchema.optional(),
+  })
+  .strict();
+export type PushPlan = z.infer<typeof PushPlanSchema>;
+
+/** The credential and rules for one push, handed over only after the container reports ready. */
+export const PushGrantSchema = z
+  .object({
+    token: z.string(),
+    owner: z.string(),
+    name: z.string(),
+    branch: z.string().min(1),
+    base: z.string(),
+    lease: z.string(),
+    expectSha: sha40.optional(),
+    protectedPaths: z.array(z.string()),
+    secrets: z.array(z.string()),
+  })
+  .strict();
+export type PushGrant = z.infer<typeof PushGrantSchema>;
+
+export const PushResultSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('pushed'), headSha: sha40, alreadyThere: z.boolean() }),
+  z.object({ status: z.literal('failed'), reason: z.string().max(2000), retryable: z.boolean() }),
+  z.object({ status: z.literal('nothing'), reason: z.string().max(2000) }),
+]);
+export type PushResult = z.infer<typeof PushResultSchema>;
