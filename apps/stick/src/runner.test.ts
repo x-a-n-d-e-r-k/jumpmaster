@@ -18,8 +18,10 @@ import {
   allowedImages,
   LOST_SERVER_GRACE_MS,
   reapOrphans,
+  recoverAtStartup,
   rediscoverPending,
   runDrop,
+  stickHealth,
   sweepDropNetworks,
   sweepVolumes,
   volumeSelfCheck,
@@ -1059,6 +1061,51 @@ describe('rediscovery', () => {
     // d8's agent container was never confirmed gone: the server is not even asked.
     expect(client.asked).toEqual(['d7:4']);
     expect(w.volumes.size).toBe(2);
+  });
+});
+
+describe('startup recovery and health', () => {
+  test('an unconfirmed orphan blocks only its own drop: other volumes are still rediscovered', async () => {
+    const w = volumeWorld([dropVolume('s1', 'd7', 4), dropVolume('s1', 'd8', 2)], {
+      unremovable: ['orphan-x', 'jumpmaster-drop-d8-2'],
+    });
+    const driver: ContainerDriver = {
+      ...w.driver,
+      async listByLabel() {
+        return ['orphan-x'];
+      },
+    };
+    const client = salvager({ d7: 'ok', d8: 'ok' });
+    const pending = new PendingPushes();
+    const reaped = await recoverAtStartup(driver, client, 's1', pending, () => {});
+    expect(reaped.unconfirmed).toEqual(['orphan-x']);
+    expect(pending.get('d7')?.volume).toBe('jm-drop-d7-4-0123abcd');
+    expect(pending.get('d8')).toBeUndefined();
+    expect(client.asked).toEqual(['d7:4']);
+    // The reap ran first.
+    expect(w.log[0]).toBe('removeAndWait orphan-x');
+  });
+
+  test('a base image that fails verification withholds push-v1 and runs nothing from it', async () => {
+    const w = volumeWorld([]);
+    const log: string[] = [];
+    const refused = await stickHealth(w.driver, {
+      image: 'jumpmaster-trooper:dev',
+      stickId: 's1',
+      trust: { policy: 'allowlist', allowed: new Set(['other:1']) },
+      log: (l) => log.push(l),
+    });
+    expect(refused).toEqual({ selfCheck: false, freeBytes: null });
+    expect(w.log).toEqual([]);
+    expect(log.join('\n')).toMatch(/push-v1 withheld/);
+    // Fixed (here: now allowed), the next check recovers.
+    const fixed = await stickHealth(w.driver, {
+      image: 'jumpmaster-trooper:dev',
+      stickId: 's1',
+      trust: { policy: 'allowlist', allowed: new Set(['jumpmaster-trooper:dev']) },
+      log: () => {},
+    });
+    expect(fixed).toEqual({ selfCheck: true, freeBytes: 100 * 2 ** 30 });
   });
 });
 

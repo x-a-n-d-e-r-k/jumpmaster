@@ -29,7 +29,7 @@ import {
   TROOPER_PUSH_VERSION,
 } from './push.js';
 import { dropSubnetPool } from './subnets.js';
-import { digestOf, type ImageTrust, verifyImage } from './verify.js';
+import { digestOf, type ImageTrust, verifyBaseImage, verifyImage } from './verify.js';
 import { prepareVolume, REMOVE_TIMEOUT_MS, REPO_MOUNT, VOLUME_LABEL } from './volumes.js';
 
 /** Services a drop network holds under egress: `.8` to `.14` of its /28. */
@@ -138,6 +138,37 @@ export async function volumeSelfCheck(
   } catch {
     return { selfCheck: false, freeBytes: null };
   }
+}
+
+/**
+ * The stick's health, at startup and in every sweep: the base image is verified (and pulled)
+ * first, and only a verified image runs the volume self-check. A refused base image withholds
+ * push-v1 and leaves the free space unmeasured (which never stops leasing on its own).
+ */
+export async function stickHealth(
+  driver: ContainerDriver,
+  o: { image: string; stickId: string; trust: ImageTrust; log: (line: string) => void },
+): Promise<VolumeHealth> {
+  const base = await verifyBaseImage(o.image, { trust: o.trust, driver, log: o.log });
+  if (!base.ok) return { selfCheck: false, freeBytes: null };
+  return volumeSelfCheck(driver, o.image, o.stickId);
+}
+
+/**
+ * Before the first lease: reap this stick's orphans, then rediscover its pending pushes. Each
+ * volume waits only on its own drop's containers (Ruling 14 is per drop): an orphan the engine
+ * can't confirm gone keeps its own drop's volume back, never another's.
+ */
+export async function recoverAtStartup(
+  driver: ContainerDriver,
+  client: Pick<DropClient, 'salvage'>,
+  stickId: string,
+  pending: PendingPushes,
+  log: (line: string) => void = (line) => console.log(line),
+): Promise<{ removed: string[]; unconfirmed: string[] }> {
+  const reaped = await reapOrphans(driver, stickId);
+  await rediscoverPending(driver, client, stickId, pending, log);
+  return reaped;
 }
 
 /**

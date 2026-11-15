@@ -67,13 +67,20 @@ export function advertisedCapabilities(o: {
   ];
 }
 
-/** Whether the latest measurement (null: it failed) is at or above the free floor. */
-export const aboveFloor = (h: VolumeHealth): boolean =>
-  h.freeBytes !== null && h.freeBytes >= VOLUME_FREE_FLOOR_BYTES;
+/**
+ * The latest free-space reading, in three states: `unmeasured` (the probe failed or never ran),
+ * `below` the floor, or `ok`.
+ */
+export function freeSpace(h: VolumeHealth): 'unmeasured' | 'below' | 'ok' {
+  if (h.freeBytes === null) return 'unmeasured';
+  return h.freeBytes >= VOLUME_FREE_FLOOR_BYTES ? 'ok' : 'below';
+}
 
 /**
- * What the next lease says, from the latest health check: null below the free floor (the stick
- * doesn't lease at all), else its capabilities, with `noPush` at `MAX_PENDING_PUSHES`.
+ * What the next lease says, from the latest health check. A measured value below the free floor:
+ * null (the stick doesn't lease at all). Unmeasured: a lease without push-v1 (non-pushing roles
+ * still run). At or above the floor: push-v1 when the self-check passed. `noPush` at
+ * `MAX_PENDING_PUSHES`.
  */
 export function leaseTerms(o: {
   egress: boolean;
@@ -81,11 +88,12 @@ export function leaseTerms(o: {
   health: VolumeHealth;
   pending: number;
 }): { capabilities: StickCapability[]; noPush?: true } | null {
-  if (!aboveFloor(o.health)) return null;
+  const space = freeSpace(o.health);
+  if (space === 'below') return null;
   const capabilities = advertisedCapabilities({
     egress: o.egress,
     policy: o.policy,
-    push: o.health.selfCheck,
+    push: space === 'ok' && o.health.selfCheck,
   });
   return o.pending >= MAX_PENDING_PUSHES ? { capabilities, noPush: true } : { capabilities };
 }

@@ -3,17 +3,17 @@ import { DockerDriver } from './docker.js';
 import { egressCapability } from './egress.js';
 import { createPushLoop, PendingPushes, PUSH_LOOP_MS, pushOnce } from './push.js';
 import {
-  reapOrphans,
-  rediscoverPending,
+  recoverAtStartup,
   runDrop,
+  stickHealth,
   sweepDropNetworks,
   sweepVolumes,
   TROOPER_IMAGE,
   type VolumeHealth,
-  volumeSelfCheck,
 } from './runner.js';
 import {
   advertisedCapabilities,
+  freeSpace,
   joinToken,
   leaseTerms,
   loadEnrollment,
@@ -27,7 +27,7 @@ import { execCosign, prepareImageTrust } from './verify.js';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const SWEEP_MS = 10 * 60_000;
-/** How long a stick below the free floor waits before it looks again (the sweep re-measures). */
+/** How long a stick below the free floor waits between re-measurements. */
 const FLOOR_WAIT_MS = 30_000;
 
 function need(name: string): string {
@@ -47,13 +47,12 @@ async function main() {
   const driver = new DockerDriver();
   const release = loadRelease();
   // Under the signed policy this refuses to start (with the reason) unless cosign is the pinned
-  // version, every pin is a digest and there is a trusted signer.
-  // The trooper image the stick runs its own containers from is verified and pulled first.
+  // version, every pin is a digest and there is a trusted signer. The trooper image is verified
+  // with the health check below: a refused one withholds push-v1, never startup.
   const trust = await prepareImageTrust(process.env, {
     cosign: execCosign('cosign', process.env),
     ...(release ? { release } : {}),
     log: (line) => console.log(line),
-    base: { image: TROOPER_IMAGE, driver },
   });
   // Advertised only when this engine really can enforce it; the server then never leases this
   // stick a drop from a zone that restricts egress.
@@ -85,31 +84,50 @@ async function main() {
     console.log(`enrolled as ${stickId}`);
   }
 
-  // Before leasing: kill troopers a previous run of this stick left behind.
-  const reaped = await reapOrphans(driver, stickId);
-  if (reaped.removed.length > 0)
-    console.log(`removed ${reaped.removed.length} orphaned trooper container(s)`);
   const id = stickId;
   const pending = new PendingPushes();
-  // Volumes: the self-check at startup and in every sweep; push-v1 follows the latest result.
+  // Before leasing: kill troopers a previous run of this stick left behind, then rediscover its
+  // pending pushes, each volume once its own drop's containers are confirmed gone (Ruling 14).
+  const reaped = await recoverAtStartup(driver, client, id, pending);
+  if (reaped.removed.length > 0)
+    console.log(`removed ${reaped.removed.length} orphaned trooper container(s)`);
+  if (reaped.unconfirmed.length > 0)
+    console.log(
+      `${reaped.unconfirmed.length} orphaned container(s) not confirmed removed: their drops' volumes wait for the sweep`,
+    );
+  if (pending.size() > 0) console.log(`rediscovered ${pending.size()} pending push(es)`);
+  // Health: the base image and the volume self-check, at startup, in every sweep and in each
+  // wait below the floor; push-v1 follows the latest result.
   let health: VolumeHealth = { selfCheck: false, freeBytes: null };
   const leaseTermsNow = () =>
     leaseTerms({ egress: egress.ok, policy: trust.policy, health, pending: pending.size() });
-  const checkVolumes = async () => {
-    health = await volumeSelfCheck(driver, TROOPER_IMAGE, id);
-    if (!health.selfCheck) console.log('push-v1 not advertised: the volume self-check failed');
-    if (health.freeBytes === null) console.log('free space could not be measured: not leasing');
-    else if (!leaseTermsNow())
-      console.log(`free space ${health.freeBytes} bytes is below the floor: not leasing`);
+  let lastState = '';
+  let checking: Promise<void> | undefined;
+  const checkVolumes = (): Promise<void> => {
+    checking ??= (async () => {
+      health = await stickHealth(driver, {
+        image: TROOPER_IMAGE,
+        stickId: id,
+        trust,
+        log: (line) => console.error(line),
+      });
+      const space = freeSpace(health);
+      const state =
+        space === 'below'
+          ? `free space ${health.freeBytes} bytes is below the floor: not leasing`
+          : space === 'unmeasured'
+            ? 'free space could not be measured: push-v1 withheld, non-pushing roles still lease'
+            : health.selfCheck
+              ? 'volume self-check passed: push-v1 advertised'
+              : 'push-v1 withheld: the volume self-check failed';
+      // Logged when it changes, not on every re-check.
+      if (state !== lastState) console.log(state);
+      lastState = state;
+    })().finally(() => {
+      checking = undefined;
+    });
+    return checking;
   };
-  // Only once every orphan is confirmed gone are its volumes asked about (Ruling 14); otherwise
-  // the sweep does it, container by container.
-  if (reaped.unconfirmed.length > 0)
-    console.log(
-      `${reaped.unconfirmed.length} orphaned container(s) not confirmed removed: rediscovery waits for the sweep`,
-    );
-  else await rediscoverPending(driver, client, id, pending);
-  if (pending.size() > 0) console.log(`rediscovered ${pending.size()} pending push(es)`);
   await checkVolumes();
   const active = new Set<string>();
   /** `dropId:epoch` of every drop in a lease slot: the sweep leaves their volumes alone. */
@@ -140,11 +158,14 @@ async function main() {
       await sleep(500);
       continue;
     }
-    const terms = leaseTermsNow();
-    if (!terms) {
-      await sleep(FLOOR_WAIT_MS);
+    if (!leaseTermsNow()) {
+      // Measured below the floor: look again now, so leasing resumes once space is freed.
+      await checkVolumes().catch(() => {});
+      if (!leaseTermsNow()) await sleep(FLOOR_WAIT_MS);
       continue;
     }
+    const terms = leaseTermsNow();
+    if (!terms) continue;
     try {
       const { drop, skipped } = await client.lease(slots - running, terms);
       leaseLog.skipped(skipped);

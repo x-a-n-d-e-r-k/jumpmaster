@@ -332,31 +332,36 @@ const isDigestRef = (ref: string) => digestOf(ref) !== null;
  */
 export async function prepareImageTrust(
   env: NodeJS.ProcessEnv,
-  deps: {
-    cosign: Cosign;
-    release?: ReleaseInfo;
-    log: (line: string) => void;
-    /**
-     * The stick's own trooper image (`TROOPER_IMAGE`) and the engine to pull it into. It runs the
-     * init, self-check and push containers, so it is verified under the policy, like a drop's
-     * image, and pulled before the stick starts (Ruling 17); either failing refuses startup.
-     */
-    base?: { image: string; driver: PullDeps['driver'] };
-  },
+  deps: { cosign: Cosign; release?: ReleaseInfo; log: (line: string) => void },
 ): Promise<ImageTrust> {
-  const trust = await buildTrust(env, deps);
-  if (deps.base) {
-    const { image, driver } = deps.base;
-    const v = await verifyImage(image, trust);
-    if (!v.ok) throw new Error(`base image ${image}: ${v.reason}`);
-    try {
-      await pullImage(image, { driver, log: deps.log });
-    } catch (e) {
-      throw new Error(`base image ${image}: ${e instanceof Error ? e.message : String(e)}`);
-    }
-    deps.log(JSON.stringify({ event: 'base-image', image, via: v.via }));
+  return buildTrust(env, deps);
+}
+
+/**
+ * The stick's own trooper image (`TROOPER_IMAGE`) runs its init, self-check and push containers,
+ * so it is verified under the image policy like a drop's image, then pulled (Ruling 17). A failure
+ * never stops the stick: it is logged loudly and push-v1 is withheld while it stands (the stick
+ * still leases non-pushing roles); every sweep checks again, so a fixed image recovers.
+ */
+export async function verifyBaseImage(
+  image: string,
+  deps: { trust: ImageTrust; driver: PullDeps['driver']; log: (line: string) => void },
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const refuse = (why: string) => {
+    const reason = `base image ${image}: ${why}`;
+    deps.log(
+      JSON.stringify({ event: 'base-image', image, ok: false, effect: 'push-v1 withheld', reason }),
+    );
+    return { ok: false as const, reason };
+  };
+  const v = await verifyImage(image, deps.trust);
+  if (!v.ok) return refuse(v.reason);
+  try {
+    await pullImage(image, { driver: deps.driver, log: deps.log });
+  } catch (e) {
+    return refuse(e instanceof Error ? e.message : String(e));
   }
-  return trust;
+  return { ok: true };
 }
 
 async function buildTrust(

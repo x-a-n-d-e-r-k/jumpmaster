@@ -950,6 +950,35 @@ test('probeVolume measures free space on the volume from a locked-down, no-netwo
   ).toEqual({ freeBytes: 2560, writable: false });
 });
 
+test('probeVolume keeps a measured value when the final removal cannot be confirmed', async () => {
+  const e = probeEngine('1000 4096\nwritable\n');
+  const stuck = {
+    ...e.docker,
+    getContainer: () => ({
+      async remove() {},
+      async inspect() {
+        return {};
+      },
+    }),
+  };
+  const errors: unknown[] = [];
+  const orig = console.error;
+  console.error = (...a: unknown[]) => errors.push(a.join(' '));
+  try {
+    expect(
+      await new DockerDriver(stuck as never, { removePollMs: 1, removeTimeoutMs: 20 }).probeVolume({
+        name: 'p',
+        image: 'i',
+        volume: 'v',
+        labels: {},
+      }),
+    ).toEqual({ freeBytes: 4096000, writable: true });
+  } finally {
+    console.error = orig;
+  }
+  expect(String(errors[0])).toMatch(/volume probe p.*container not removed/);
+});
+
 test('probeVolume throws when the free space cannot be read, and still removes its container', async () => {
   for (const out of ['', 'stat: cannot read file system information\n', 'x y\n']) {
     const e = probeEngine(out, 1);

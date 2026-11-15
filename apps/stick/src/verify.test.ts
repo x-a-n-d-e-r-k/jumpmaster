@@ -30,6 +30,7 @@ import {
   releaseSigner,
   signerKey,
   VerifyCache,
+  verifyBaseImage,
   verifyImage,
 } from './verify.js';
 
@@ -559,40 +560,47 @@ describe('startup under the signed policy', () => {
       },
     };
     const digest = `ghcr.io/o/jumpmaster-trooper@sha256:${'a'.repeat(64)}`;
-    // Allowed: pulled by digest (a tag is never pulled) and the trust is returned.
-    const t = await prepareImageTrust(
-      { JM_STATE_DIR: fresh(), JM_ALLOWED_IMAGES: `${digest},b:2` },
-      { cosign: f.cosign, log: () => {}, base: { image: digest, driver } },
-    );
-    expect(t.policy).toBe('allowlist');
-    expect(pulled).toEqual([digest]);
-    // Not allowed under the policy: the stick refuses to start, and nothing is pulled.
-    await expect(
+    const trust = (allowed: string) =>
       prepareImageTrust(
-        { JM_STATE_DIR: fresh(), JM_ALLOWED_IMAGES: 'b:2' },
-        { cosign: f.cosign, log: () => {}, base: { image: digest, driver } },
-      ),
-    ).rejects.toThrow(`base image ${digest}: image not allowed: ${digest}`);
-    expect(pulled).toEqual([digest]);
-    // A failed pull refuses startup too.
-    await expect(
-      prepareImageTrust(
-        { JM_STATE_DIR: fresh(), JM_ALLOWED_IMAGES: digest },
+        { JM_STATE_DIR: fresh(), JM_ALLOWED_IMAGES: allowed },
         {
           cosign: f.cosign,
           log: () => {},
-          base: {
-            image: digest,
-            driver: {
-              ...driver,
-              async pullImage() {
-                throw new Error('manifest unknown');
-              },
-            },
-          },
         },
-      ),
-    ).rejects.toThrow(/base image .*image pull failed: .*manifest unknown/);
+      );
+    const log: string[] = [];
+    // Allowed: pulled by digest (a tag is never pulled).
+    expect(
+      await verifyBaseImage(digest, {
+        trust: await trust(`${digest},b:2`),
+        driver,
+        log: (l) => log.push(l),
+      }),
+    ).toEqual({ ok: true });
+    expect(pulled).toEqual([digest]);
+    // Not allowed under the policy: never a throw (the stick still starts), nothing pulled, and
+    // the reason is logged loudly.
+    log.length = 0;
+    expect(
+      await verifyBaseImage(digest, { trust: await trust('b:2'), driver, log: (l) => log.push(l) }),
+    ).toEqual({ ok: false, reason: `base image ${digest}: image not allowed: ${digest}` });
+    expect(pulled).toEqual([digest]);
+    expect(log.join('\n')).toMatch(/base-image.*push-v1 withheld.*image not allowed/);
+    // A failed pull: not ok either, and no throw.
+    const failed = await verifyBaseImage(digest, {
+      trust: await trust(digest),
+      driver: {
+        ...driver,
+        async pullImage() {
+          throw new Error('manifest unknown');
+        },
+      },
+      log: () => {},
+    });
+    expect(failed.ok).toBe(false);
+    expect(failed.ok ? '' : failed.reason).toMatch(
+      /base image .*image pull failed: .*manifest unknown/,
+    );
     expect(f.calls).toEqual([]);
   });
 
@@ -605,19 +613,23 @@ describe('startup under the signed policy', () => {
     };
     const digest = `ghcr.io/o/jumpmaster-trooper@sha256:${'a'.repeat(64)}`;
     const cosign = cosignVersion(COSIGN_VERSION).cosign;
-    const t = await prepareImageTrust(
+    const pinned = await prepareImageTrust(
       { ...base(fresh()), JM_ALLOWED_IMAGES: digest },
-      { cosign, release, log: () => {}, base: { image: digest, driver } },
+      { cosign, release, log: () => {} },
     );
-    expect(t.policy).toBe('signed');
-    await expect(
-      prepareImageTrust(base(fresh()), {
-        cosign,
-        release,
-        log: () => {},
-        base: { image: 'jumpmaster-trooper:dev', driver },
-      }),
-    ).rejects.toThrow(/base image jumpmaster-trooper:dev: image not verified: .*a tag reference/);
+    expect(await verifyBaseImage(digest, { trust: pinned, driver, log: () => {} })).toEqual({
+      ok: true,
+    });
+    // A tag under signed (a build without TROOPER_IMAGE): refused, but startup goes on.
+    const plain = await prepareImageTrust(base(fresh()), { cosign, release, log: () => {} });
+    const tag = await verifyBaseImage('jumpmaster-trooper:dev', {
+      trust: plain,
+      driver,
+      log: () => {},
+    });
+    expect(tag.ok ? '' : tag.reason).toMatch(
+      /base image jumpmaster-trooper:dev: image not verified: .*a tag reference/,
+    );
   });
 });
 

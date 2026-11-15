@@ -158,7 +158,12 @@ async function* lines(stream: Readable): AsyncIterable<string> {
 export class DockerDriver implements ContainerDriver {
   constructor(
     private readonly docker = new Docker(),
-    private readonly opts: { networkRetryMs?: number; removePollMs?: number } = {},
+    private readonly opts: {
+      networkRetryMs?: number;
+      removePollMs?: number;
+      /** How long the probe's removal may take to confirm (default `REMOVE_TIMEOUT_MS`). */
+      removeTimeoutMs?: number;
+    } = {},
   ) {}
 
   async createVolume(name: string, labels: Record<string, string>): Promise<void> {
@@ -296,6 +301,7 @@ export class DockerDriver implements ContainerDriver {
         ...volumeMounts({ volume: o.volume, target: REPO_MOUNT }),
       },
     });
+    let measured: { freeBytes: number; writable: boolean } | undefined;
     try {
       const waited = (container.wait({ condition: 'next-exit' }) as Promise<unknown>).then(
         () => 'exited' as const,
@@ -314,12 +320,22 @@ export class DockerDriver implements ContainerDriver {
       const [first, ...rest] = out.split(/\r?\n/).map((l) => l.trim());
       const m = /^(\d+) (\d+)$/.exec(first ?? '');
       if (!m) throw new Error(`volume probe ${o.name} could not read the free space`);
-      return {
+      measured = {
         freeBytes: Number(m[1]) * Number(m[2]),
         writable: rest.includes('writable'),
       };
+      return measured;
     } finally {
-      await this.removeAndWait(o.name, REMOVE_TIMEOUT_MS);
+      try {
+        await this.removeAndWait(o.name, this.opts.removeTimeoutMs ?? REMOVE_TIMEOUT_MS);
+      } catch (e) {
+        // A measurement already taken stands; the leaked probe is reaped at the next start and its
+        // volume removed by the sweep. Without one, the removal failure is the error.
+        if (!measured) throw e;
+        console.error(
+          `volume probe ${o.name}: ${e instanceof Error ? e.message : String(e)} (measurement kept)`,
+        );
+      }
     }
   }
 

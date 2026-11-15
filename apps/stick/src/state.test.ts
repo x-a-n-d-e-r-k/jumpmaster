@@ -12,6 +12,8 @@ test('push-v1 is advertised only after a passing self-check above the floor', ()
   expect(caps({ selfCheck: false, freeBytes: 100 * 2 ** 30 })).toEqual([]);
   // Below the floor there is no lease at all, so nothing is advertised either.
   expect(caps({ selfCheck: true, freeBytes: VOLUME_FREE_FLOOR_BYTES - 1 })).toBeUndefined();
+  // Unmeasured: a lease, but never push-v1, whatever the self-check said.
+  expect(caps({ selfCheck: true, freeBytes: null })).toEqual([]);
   expect(advertisedCapabilities({ egress: true, policy: 'signed', push: true })).toEqual([
     'egress-v1',
     'image-verify-v1',
@@ -29,8 +31,9 @@ test('below the floor the stick does not lease', () => {
       pending: 0,
     });
   expect(terms(VOLUME_FREE_FLOOR_BYTES - 1)).toBeNull();
-  // A measurement that failed counts as below the floor.
-  expect(terms(null)).toBeNull();
+  expect(terms(0)).toBeNull();
+  // Unmeasured is not below the floor: the stick leases non-pushing roles, without push-v1.
+  expect(terms(null)).toEqual({ capabilities: ['egress-v1', 'image-verify-v1'] });
   expect(terms(VOLUME_FREE_FLOOR_BYTES)).toEqual({
     capabilities: ['egress-v1', 'image-verify-v1', 'push-v1'],
   });
