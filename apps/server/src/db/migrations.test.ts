@@ -929,7 +929,6 @@ test('v24 adds the stopping marker, unset on every existing zone', () => {
     raw.exec("INSERT INTO zone_controls (zone_id, mode, updated_at) VALUES ('z', 'paused', 't');");
   });
   const db = openDb(f);
-  expect(MIGRATIONS.at(-1)?.version).toBe(24);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(
     db
@@ -942,4 +941,49 @@ test('v24 adds the stopping marker, unset on every existing zone', () => {
     /CHECK constraint/,
   );
   db.close();
+});
+
+test('v25 lets a briefing be dismissed, keeping every briefing and ruling', () => {
+  const f = dbAt(24, (raw) => {
+    raw.exec(
+      `INSERT INTO briefings (id, zone_id, kind, subject, decision, why, options_json, source,
+       source_ref, state, diagnosis, diagnosis_basis, created_at, updated_at)
+     VALUES (1, 'main', 'parked', 'item:1', 'd1', 'w1', '[]', 'server', NULL, 'ruled', 'diag',
+       'basis', 'a', 'b'),
+            (2, 'main', 'crew', 'crew:x', 'd2', 'w2', '[]', 'mcp', 'drop-1', 'open', NULL, NULL,
+       'c', 'd');
+     INSERT INTO rulings (zone_id, briefing_id, choice, note, created_at)
+       VALUES ('main', 1, 'o1', 'my note', 'e');`,
+    );
+    expect(() => raw.exec(`UPDATE briefings SET state = 'dismissed' WHERE id = 2`)).toThrow(
+      /CHECK/,
+    );
+  });
+
+  const db = openDb(f);
+  expect(MIGRATIONS.at(-1)?.version).toBe(25);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.pragma('foreign_key_check')).toEqual([]);
+  expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
+  db.exec(`UPDATE briefings SET state = 'dismissed' WHERE id = 2`);
+  expect(
+    db.prepare('SELECT id, source, state, diagnosis FROM briefings ORDER BY id').all(),
+  ).toEqual([
+    { id: 1, source: 'server', state: 'ruled', diagnosis: 'diag' },
+    { id: 2, source: 'mcp', state: 'dismissed', diagnosis: null },
+  ]);
+  expect(db.prepare('SELECT briefing_id AS b, note FROM rulings').all()).toEqual([
+    { b: 1, note: 'my note' },
+  ]);
+  // Still one open briefing per subject.
+  db.exec(
+    `INSERT INTO briefings (zone_id, kind, subject, decision, why, options_json, source, state,
+       created_at, updated_at) VALUES ('main', 'crew', 'crew:x', 'd', 'w', '[]', 'crew', 'open', 'a', 'a')`,
+  );
+  expect(() =>
+    db.exec(
+      `INSERT INTO briefings (zone_id, kind, subject, decision, why, options_json, source, state,
+         created_at, updated_at) VALUES ('main', 'crew', 'crew:x', 'd', 'w', '[]', 'crew', 'open', 'a', 'a')`,
+    ),
+  ).toThrow(/UNIQUE/);
 });

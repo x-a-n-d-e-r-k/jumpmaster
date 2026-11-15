@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { createApp } from '../app.js';
 import { Backoff } from '../auth/backoff.js';
 import { SetupMode, setOperatorPassphrase } from '../auth/operator.js';
+import { raiseBriefing } from '../briefings.js';
 import { loadBoot } from '../config/boot.js';
 import { ConfigStore } from '../config/store.js';
 import { STARTER_WARNING } from '../config.js';
@@ -178,6 +179,26 @@ describe('the zones page', () => {
     });
     expect(res.statusCode, res.body).toBe(200);
     expect(w.store.current().dropZones.map((z) => z.readyLabel)).toEqual(['go', 'agent-ready']);
+  });
+
+  test("the zone page links to the zone's briefings with their count", async () => {
+    const w = await world();
+    for (const subject of ['crew:a', 'crew:b'])
+      raiseBriefing(
+        w.db,
+        {
+          zoneId: 'main',
+          kind: 'crew',
+          subject,
+          decision: 'd',
+          why: 'w',
+          options: [{ id: 'ok', label: 'OK', effect: 'none' }],
+          source: 'crew',
+        },
+        t0,
+      );
+    const page = (await w.get('/zones/main')).body;
+    expect(page).toContain('<a href="/briefings?zone=main">Briefings (2 open)</a>');
   });
 
   test('a schema issue is rendered beside the field its path names', async () => {
