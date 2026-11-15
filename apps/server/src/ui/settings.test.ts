@@ -13,12 +13,14 @@ import { ConfigStore } from '../config/store.js';
 import { openDb } from '../db/open.js';
 import { insertDrop, setZoneMode, upsertDropZone } from '../db/repo.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
+import { gateSecretName } from '../vault/credentials.js';
 import { fingerprintOf, openVault } from '../vault/vault.js';
 import {
   CREDENTIALS_SCRIPT,
   HISTORY_SCRIPT,
   INSTALL_SCRIPT,
   MCP_TOKENS_SCRIPT,
+  roleOf,
   TOKEN_BANNER_DAYS,
 } from './settings.js';
 
@@ -215,6 +217,8 @@ describe('the credentials tab', () => {
     expect(problems.some((p) => p.credential === 'githubReadToken')).toBe(true);
     expect(html).toContain('<h3>Zone problems</h3>');
     for (const p of problems) expect(html).toContain(p.message.replaceAll("'", '&#39;'));
+    // Each problem names its zone by repository (#99).
+    expect(html).toContain('<li><strong>octo/demo</strong> (');
 
     for (const secret of [CLAUDE, AUTHOR, REVIEWER, TOKEN, 'join-secret-value-4'])
       expect(html).not.toContain(secret);
@@ -646,7 +650,8 @@ describe('settings, part two (Task 13)', () => {
     expect(html).toContain('<strong>MCP tokens</strong>');
     // The mint form: the zone, the scope, the days (1 to 90) and a label.
     expect(html).toMatch(/<form id="mint">/);
-    expect(html).toContain('<option value="main">main</option>');
+    // The zone is named by its repository; the value sent stays the id (#99).
+    expect(html).toContain('<option value="main">octo/demo</option>');
     expect(html).toMatch(
       /<select name="scope"><option value="read"[^>]*>read<\/option><option value="write">/,
     );
@@ -654,6 +659,8 @@ describe('settings, part two (Task 13)', () => {
     expect(html).toContain('data-sudo="0"');
     // The list: id, zone, scope, label (escaped), dates, and Revoke; never the value or its hash.
     const row = html.slice(html.indexOf('<tr data-token="1"'));
+    expect(row).toContain('<td>1</td><td>octo/demo</td>');
+    expect(html).toContain('data-zones="{&quot;main&quot;:&quot;octo/demo&quot;}"');
     expect(row).toContain('laptop &lt;one&gt;');
     expect(row).toContain('<button type="button" class="revoke" data-id="1">Revoke</button>');
     expect(html).not.toContain(value);
@@ -663,7 +670,7 @@ describe('settings, part two (Task 13)', () => {
     const s = mcpScript();
     const out = stubStatus();
     const reveal = { textContent: '', hidden: true };
-    const c = { zoneId: 'main', scope: 'read', days: '7', label: '' };
+    const c = { zoneId: 'main', zoneName: 'octo/demo', scope: 'read', days: '7', label: '' };
     expect(
       await (s.ctx.jmMintToken as (...a: unknown[]) => Promise<string>)(
         c,
@@ -689,6 +696,7 @@ describe('settings, part two (Task 13)', () => {
     expect(s.calls[1]?.body).toEqual({ zoneId: 'main', scope: 'read', days: 7 });
     expect(reveal).toEqual({ textContent: 'jmm_shownonce', hidden: false });
     expect(out.textContent).toContain('shown this once');
+    expect(out.textContent).toContain('Token 2 for octo/demo (read)');
     // Revoke: one DELETE, no sudo needed (it shows nothing).
     const revoked = await (s.ctx.jmRevokeToken as (...a: unknown[]) => Promise<string>)(
       '1',
@@ -877,7 +885,10 @@ describe('settings, part two: browser findings (Task 13, fix round 1)', () => {
       },
     });
     const reveal = { textContent: '', hidden: true };
-    const list = { innerHTML: '<p>No MCP tokens yet.</p>' };
+    const list = {
+      innerHTML: '<p>No MCP tokens yet.</p>',
+      dataset: { zones: JSON.stringify({ main: 'octo/demo' }) },
+    };
     const done = await (s.ctx.jmMintToken as (...a: unknown[]) => Promise<string>)(
       { zoneId: 'main', scope: 'read', days: '7', label: 'my <laptop>' },
       { sudo: true, passphrase: '' },
@@ -888,6 +899,8 @@ describe('settings, part two: browser findings (Task 13, fix round 1)', () => {
     expect(done).toBe('minted');
     expect(gets).toEqual(['/api/control/mcp-tokens']);
     expect(list.innerHTML).toContain('<tr data-token="2">');
+    // The redrawn row names the zone as the server's does (#99).
+    expect(list.innerHTML).toContain('<td>2</td><td>octo/demo</td>');
     expect(list.innerHTML).toContain('my &lt;laptop&gt;');
     expect(list.innerHTML).toContain(
       '<button type="button" class="revoke" data-id="2">Revoke</button>',
@@ -898,7 +911,7 @@ describe('settings, part two: browser findings (Task 13, fix round 1)', () => {
     // The page holds the list in that container, so the script can replace it.
     const w = await world({ dbMode: true, doc: { mcp: { enabled: true }, dropZones: [ZONE] } });
     expect((await w.get('/settings/mcp-tokens')).body).toMatch(
-      /<div id="token-list"><p>No MCP tokens yet.<\/p><\/div>/,
+      /<div id="token-list" data-zones="[^"]*"><p>No MCP tokens yet.<\/p><\/div>/,
     );
   });
 
@@ -1183,3 +1196,10 @@ function scriptContext(
   vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
   return { ctx, calls };
 }
+
+test("a gate secret's role names its zone by repository (#99)", () => {
+  const zones = [{ id: 'ref', repo: 'octo/reference' }];
+  expect(roleOf(gateSecretName('ref', 'NPM'), zones)).toBe(
+    'gate secret NPM for octo/reference: gate steps can read it',
+  );
+});

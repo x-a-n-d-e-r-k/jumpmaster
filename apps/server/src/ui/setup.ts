@@ -28,6 +28,7 @@ import {
   tokensSection,
 } from './github.js';
 import { escapeHtml, page } from './pages.js';
+import { type ZoneRef, zoneName, zoneNamer } from './zone-name.js';
 
 /**
  * The setup wizard (§10.3, M4.5): after the passphrase, five steps, each a thin frame over a
@@ -369,7 +370,7 @@ function projectPage(store: ConfigStore, wizard: Wizard): string {
     const zones = store.current().dropZones;
     return frame(
       'project',
-      `<h3>Your project</h3><p>Your config file holds ${zones.length} zone${zones.length === 1 ? '' : 's'}${zones.length ? `: ${zones.map((z) => `${escapeHtml(z.id)} (${escapeHtml(z.repo)})`).join(', ')}` : ''}. In file mode the file is the config: edit it and run <code>jumpmaster ctl config reload</code>.</p>
+      `<h3>Your project</h3><p>Your config file holds ${zones.length} zone${zones.length === 1 ? '' : 's'}${zones.length ? `: ${zones.map((z) => zoneName(z, zones)).join(', ')}` : ''}. In file mode the file is the config: edit it and run <code>jumpmaster ctl config reload</code>.</p>
 <p>To manage the config here instead, adopt it: the file's contents become the first revision in the database, and from then on this page and <code>jumpmaster ctl config</code> change it. <code>jumpmaster ctl config mode file</code> goes back.</p>
 <p><button id="adopt">Adopt the config file</button> <span id="adopt-out" role="status"></span></p>
 <script>
@@ -509,14 +510,15 @@ async function createZone(zone, resume, out) {
 </script>`;
 }
 
-function doctorPage(db: Db): string {
+function doctorPage(db: Db, zones: readonly ZoneRef[]): string {
+  const name = zoneNamer(zones);
   const run = latestDoctorRun(db);
   const order = { fail: 0, warn: 1, skip: 2, pass: 3 } as const;
   const checks = run ? [...run.checks].sort((a, b) => order[a.status] - order[b.status]) : [];
   const rows = checks
     .map(
       (c) =>
-        `<li class="${c.status}"><strong>${c.status.toUpperCase()}</strong> ${escapeHtml(c.zoneId ?? '')} <code>${escapeHtml(c.id)}</code>: ${escapeHtml(c.summary)}${c.status !== 'pass' && c.fix ? `<br><small>Fix: ${escapeHtml(c.fix)}</small>` : ''}${c.status !== 'pass' && c.doc ? ` <a href="${escapeHtml(c.doc)}" rel="noreferrer">how</a>` : ''}</li>`,
+        `<li class="${c.status}"><strong>${c.status.toUpperCase()}</strong> ${c.zoneId ? name(c.zoneId) : ''} <code>${escapeHtml(c.id)}</code>: ${escapeHtml(c.summary)}${c.status !== 'pass' && c.fix ? `<br><small>Fix: ${escapeHtml(c.fix)}</small>` : ''}${c.status !== 'pass' && c.doc ? ` <a href="${escapeHtml(c.doc)}" rel="noreferrer">how</a>` : ''}</li>`,
     )
     .join('');
   const fails = checks.filter((c) => c.status === 'fail').length;
@@ -633,7 +635,9 @@ export function registerSetupPages(
   app.get('/setup/project', async (req, reply) =>
     html(req, reply, projectPage(store, getWizard(db))),
   );
-  app.get('/setup/doctor', async (req, reply) => html(req, reply, doctorPage(db)));
+  app.get('/setup/doctor', async (req, reply) =>
+    html(req, reply, doctorPage(db, store.current().dropZones)),
+  );
 
   // "Continue" and "Do this later" both move on: the step is optional either way.
   app.post('/setup/advance', async (req, reply) => {

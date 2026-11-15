@@ -381,11 +381,22 @@ describe('the setup wizard', () => {
     expect(withZone.body).toContain('href="/zones/new"');
   });
 
+  test("the doctor step names a check's zone by repository (#99)", async () => {
+    const w = await world({ file: { dropZones: [zoneDoc('a')] } });
+    w.db
+      .prepare(
+        "INSERT INTO doctor_runs (started_at, finished_at, results_json) VALUES ('a', 'b', ?)",
+      )
+      .run(JSON.stringify([{ id: 'zone.clone', zoneId: 'a', status: 'fail', summary: 's' }]));
+    const r = (await w.get('/setup/doctor')).body;
+    expect(r).toContain('<strong>FAIL</strong> octo/a <code>zone.clone</code>');
+  });
+
   test('a file-mode install sees its zones in the wizard with the adopt offer', async () => {
     const w = await world({ file: { dropZones: [zoneDoc('a'), zoneDoc('b')] } });
     expect(w.store.mode()).toBe('file');
     const r = await w.get('/setup/project');
-    expect(r.body).toContain('Your config file holds 2 zones');
+    expect(r.body).toContain('Your config file holds 2 zones: octo/a, octo/b.');
     expect(r.body).toContain("'/api/control/config/adopt'");
     expect(r.body).not.toContain("'/api/control/detect'");
   });
