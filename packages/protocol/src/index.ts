@@ -545,6 +545,11 @@ export const PushPayloadSchema = z
     epoch: dropPayloadBase.epoch,
     branch: z.string().min(1),
     salvage: z.boolean(),
+    /**
+     * Set when the container runs on a drop network behind the egress proxy, its only route out:
+     * the trooper then routes git through the proxy.
+     */
+    egress: z.literal(true).optional(),
   })
   .strict();
 export type PushPayload = z.infer<typeof PushPayloadSchema>;
