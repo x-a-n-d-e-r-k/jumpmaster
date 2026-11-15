@@ -1,3 +1,4 @@
+import { containsSecret } from '@jumpmaster/protocol';
 import { Octokit } from '@octokit/rest';
 
 export type ForgeIssue = {
@@ -306,6 +307,20 @@ export async function bufferedResponse(res: Response): Promise<Response> {
   return copy;
 }
 
+/** A GitHub user or organisation login: letters, digits and single inner hyphens, at most 39 characters. */
+const OWNER_NAME = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/;
+/** A GitHub repository name: letters, digits, `.`, `_` and `-`, at most 100 characters. */
+const REPO_NAME = /^[A-Za-z0-9._-]{1,100}$/;
+
+function isOwnerName(owner: string): boolean {
+  return OWNER_NAME.test(owner) && owner.length <= 39;
+}
+
+// A token's characters are all legal in a repository name, so token shapes are refused by shape.
+function isRepoName(repo: string): boolean {
+  return REPO_NAME.test(repo) && repo !== '.' && repo !== '..' && !containsSecret(repo, []);
+}
+
 export class GitHubForge implements Forge {
   private readonly octokit: Octokit;
   private viewer: Promise<string> | undefined;
@@ -320,6 +335,11 @@ export class GitHubForge implements Forge {
     token: string,
     opts: { requestTimeoutMs?: number } = {},
   ) {
+    // A value in the wrong slot (a token as `owner`) would end up in every request path, and
+    // Octokit logs request paths. Refuse it here, and never echo it in the error.
+    if (!isOwnerName(owner)) throw new Error('GitHubForge: owner is not a valid GitHub owner name');
+    if (!isRepoName(repo))
+      throw new Error('GitHubForge: repository is not a valid GitHub repository name');
     const ms = opts.requestTimeoutMs;
     this.octokit = new Octokit({
       // No token: unauthenticated reads (the wizard's owner-type read before any token exists).
