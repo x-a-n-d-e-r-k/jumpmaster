@@ -150,7 +150,9 @@ describe('spawning as another uid', () => {
   });
 
   test('spawn options set HOME and CLAUDE_CONFIG_DIR', () => {
-    expect(agentSpawnOptions(ids.agent, { PATH: '/bin', HOME: '/root' })).toEqual({
+    // A tmp root with no jm-<uid> directory: the trooper image ships /tmp/jm-<uid>, which adds TMPDIR.
+    const noTmp = join(tmpdir(), 'jm-no-such-tmproot');
+    expect(agentSpawnOptions(ids.agent, { PATH: '/bin', HOME: '/root' }, noTmp)).toEqual({
       env: { PATH: '/bin', HOME: '/home/agent', CLAUDE_CONFIG_DIR: '/home/agent/.claude' },
     });
     expect(agentSpawnOptions(null, { HOME: '/root' })).toEqual({ env: { HOME: '/root' } });
