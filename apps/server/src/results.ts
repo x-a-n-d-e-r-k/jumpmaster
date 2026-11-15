@@ -116,42 +116,27 @@ const park = (c: Ctx, reason: string, dropState: DropState) => {
   finish(c, dropState);
 };
 
-/**
- * Inserts a queued replacement for `drop`, which must already be terminal: same role, item,
- * fingerprint, PR and input, starting from `headSha`. `image` is recorded on the row only (a lease
- * builds its payload from the zone config of that moment).
- */
-export function replaceDrop(
-  db: Db,
-  drop: Drop,
-  r: { image: string | null; headSha: string | null; chargedKey: string | null },
-  now: Date,
-): void {
-  if (drop.workItemId === null) throw new Error(`drop ${drop.id} has no work item to replace for`);
-  const role = drop.role as Role;
+/** Inserts the replacement for `c.drop`, which must already be terminal. */
+function insertReplacement(c: Ctx, headSha: string | null, chargedKey: string | null): void {
+  const role = c.drop.role as Role;
   insertDrop(
-    db,
+    c.db,
     {
       id: randomUUID(),
-      dropZoneId: drop.dropZoneId,
-      workItemId: drop.workItemId,
+      dropZoneId: c.drop.dropZoneId,
+      workItemId: c.item.id,
       role,
       state: 'queued',
       promptVersion: promptVersions()[role],
-      image: r.image,
-      fingerprint: drop.fingerprint,
-      prNumber: drop.prNumber,
-      inputJson: drop.inputJson,
-      headSha: r.headSha,
-      chargedKey: r.chargedKey,
+      image: c.deps.zone.image,
+      fingerprint: c.drop.fingerprint,
+      prNumber: c.drop.prNumber,
+      inputJson: c.drop.inputJson,
+      headSha,
+      chargedKey,
     },
-    now,
+    c.now,
   );
-}
-
-/** Inserts the replacement for `c.drop`, which must already be terminal. */
-function insertReplacement(c: Ctx, headSha: string | null, chargedKey: string | null): void {
-  replaceDrop(c.db, c.drop, { image: c.deps.zone.image, headSha, chargedKey }, c.now);
 }
 
 /** Continuation of an interrupted drop: charged to `resume`, parked when that is exhausted. */

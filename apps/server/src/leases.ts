@@ -18,7 +18,6 @@ import {
   updateDrop,
 } from './db/repo.js';
 import { refundCharge } from './flow/budgets.js';
-import { replaceDrop } from './results.js';
 import { DEFAULT_USAGE_CONFIG, type Gate, releaseProbe, unreachable } from './usage.js';
 
 const LEASE_TTL_MS = 60_000;
@@ -231,8 +230,9 @@ export function releaseKill(db: Db, now: Date): number {
 /**
  * Gives up on a pending push whose retention ran out (Ruling 12: never while the switch is on): it
  * goes `lost`, with `running_at` cleared so no salvage brings it back, and its grants are revoked.
- * An implement item resumes from the last pushed commit (`head_sha`) when there is one, and is
- * otherwise ready again; a heal or resolve item stays `pr_open` for the reconciler.
+ * An implement item goes back to `ready`, as for any lost drop: the reconciler's resume picks up
+ * the last pushed commit from the branch, charged to `resume` and parked when that is exhausted
+ * (a fresh start when nothing was pushed). A heal or resolve item stays `pr_open`.
  */
 function expireRetention(db: Db, now: Date): number {
   if (isKilled(db)) return 0;
@@ -253,11 +253,7 @@ function expireRetention(db: Db, now: Date): number {
     ]);
     if (drop.role !== 'implement' || drop.workItemId === null) continue;
     if (getWorkItem(db, drop.workItemId)?.state !== 'in_flight') continue;
-    if (drop.headSha !== null) {
-      replaceDrop(db, drop, { image: drop.image, headSha: drop.headSha, chargedKey: null }, now);
-    } else {
-      setWorkItemState(db, drop.workItemId, 'ready', undefined, now);
-    }
+    setWorkItemState(db, drop.workItemId, 'ready', undefined, now);
   }
   return ids.length;
 }

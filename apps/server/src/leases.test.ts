@@ -523,7 +523,7 @@ describe('pending pushes', () => {
     expect(getDrop(db, 'd1')?.pushDeadline).toBe(plus(t0, 6 * HOUR).toISOString());
   });
 
-  test('retention expiry requeues from the last pushed sha', () => {
+  test('retention expiry requeues the item for a charged resume', () => {
     pendingPush({ headSha: 'prior1', deadlineMs: HOUR });
     reserveGrant(db, 'd1', 1, t0);
     expect(expireLeases(db, plus(t0, HOUR + 1))).toBe(1);
@@ -534,13 +534,9 @@ describe('pending pushes', () => {
     expect(listEvents(db, 'd1').map((e) => e.data)).toContainEqual({
       message: 'push retention expired',
     });
-    // The replacement resumes from the last pushed commit; the item stays in flight.
-    expect(activeDropFor(db, 1)).toMatchObject({
-      role: 'implement',
-      state: 'queued',
-      headSha: 'prior1',
-    });
-    expect(workItem(db, 1).state).toBe('in_flight');
+    // Back to ready: the reconciler's charged resume picks the pushed commit up from the branch.
+    expect(activeDropFor(db, 1)).toBeUndefined();
+    expect(workItem(db, 1).state).toBe('ready');
     // Given up on: never reclaimable, so a salvage can't bring it back.
     expect(reclaimableDropFor(db, 1, plus(t0, HOUR + 2))).toBeUndefined();
   });
