@@ -10,6 +10,61 @@ they wouldn't.
 It runs on one host with Docker Compose: a server (the queue, the UI and the GitHub and Claude
 credentials), and a _stick_ that starts the drops.
 
+## Glossary
+
+Jumpmaster borrows its vocabulary from parachuting. The terms below come up in this README, the
+runbooks and the UI.
+
+**Places and machines**
+
+| Term                        | Meaning                                                                                                                                                                                                       |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Drop zone** (or **zone**) | One project: a single repository on a single forge (GitHub today). Settings, credentials, budgets and pausing all apply per zone.                                                                             |
+| **Drop**                    | One job: a single agent run on a single issue or pull request, in a throwaway Docker container that is deleted when the job ends.                                                                             |
+| **Trooper**                 | The container a drop runs in, and the job slot it takes up. It holds a fresh clone of the repository and the Claude CLI.                                                                                      |
+| **Stick**                   | A machine that runs drops: a separate process that holds the Docker socket, takes drops from the server and starts a trooper for each one. The compose install runs one stick on the same host as the server. |
+| **Server**                  | The process that holds the queue, the UI, the credentials and the merge decision. It has no Docker access.                                                                                                    |
+
+**Kinds of drop**
+
+| Term                  | Meaning                                                                                                                                                                               |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **implement**         | Writes the change for an issue and opens a pull request from an `agent/issue-*` branch.                                                                                               |
+| **review**            | A second agent reviews the pull request and gives a **verdict**.                                                                                                                      |
+| **heal**              | Fixes a pull request whose CI checks fail.                                                                                                                                            |
+| **resolve-conflicts** | Brings a pull request up to date when the default branch moves, by merging the default branch into it. It tries a plain merge first and calls an agent only when the merge conflicts. |
+| **doctor drop**       | A test drop the readiness doctor runs to check that your build works inside a trooper.                                                                                                |
+
+**People and decisions**
+
+| Term             | Meaning                                                                                                                                                     |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Operator**     | You, signed in to the Jumpmaster UI.                                                                                                                        |
+| **Command**      | You in your planning role, usually through a Claude Code session of your own that is connected to Jumpmaster's MCP server.                                  |
+| **Crew**         | The planning agents for a zone. They turn `GOAL.md` into issues, check specs before agents pick them up, and escalate what needs you.                       |
+| **Briefing**     | A decision the crew puts to you, with a fixed set of options.                                                                                               |
+| **Ruling**       | Your answer to a briefing, recorded and passed back to the crew.                                                                                            |
+| **Parked**       | Stopped and waiting on a human. The item's page says why; fix it, then add the `agent-retry` label.                                                         |
+| **Starter mode** | Running with your own GitHub account alone instead of separate author and reviewer bot accounts. See [Starter mode](docs/runbooks/install.md#starter-mode). |
+
+**Planning**
+
+| Term              | Meaning                                                                                                                                            |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`GOAL.md`**     | A file in your repository that holds the long-term goal, the objectives that lead to it, your decisions and the non-goals. The crew plans from it. |
+| **Lighthouse**    | The long-term end state at the top of `GOAL.md`.                                                                                                   |
+| **Objective**     | One milestone on the way to the lighthouse.                                                                                                        |
+| **Staged**        | An issue the crew has written but not yet approved for agents.                                                                                     |
+| **`agent-ready`** | The label that queues an issue for an implement drop. You can add it yourself.                                                                     |
+
+**Safety**
+
+| Term                 | Meaning                                                                                                                     |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| **Readiness doctor** | The checks that say whether an install, a zone and its repository are set up correctly. Each failed check links to its fix. |
+| **Egress**           | Network traffic leaving a drop. In `monitor` mode it is recorded; in `enforce` mode only the hosts you list are allowed.    |
+| **Protected path**   | A file an agent may not change without your review, such as `.github/**` or `GOAL.md`.                                      |
+
 ## Prerequisites
 
 - **Docker:** a rootful Docker Engine 27.0 or later on Linux (Engine 29.9.2 is the tested
