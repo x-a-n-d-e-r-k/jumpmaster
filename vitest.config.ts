@@ -1,4 +1,9 @@
 import { defineConfig } from 'vitest/config';
+import { clearDropEnv } from './vitest.setup.js';
+
+// Before any worker starts, so workers inherit an environment without the drop's settings (a
+// Node version may read NODE_USE_ENV_PROXY only at startup).
+clearDropEnv();
 
 export default defineConfig({
   test: {
