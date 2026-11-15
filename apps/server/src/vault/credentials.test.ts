@@ -349,3 +349,63 @@ describe('refusalWords: what a refused token test says (T10 finding 4)', () => {
     expect(refusalWords(404, undefined, env)).toBe(refusalWords(404));
   });
 });
+
+describe('preferring the vault', () => {
+  test('off (the default): a variable wins over the vault and says it overrides it; on: the vault wins and says which variable it overrides', () => {
+    const v = vault();
+    v.put('githubReadToken', 'github_pat_VAULTREAD_0006', { now: t0 });
+    const env = { JM_GITHUB_READ_TOKEN: READ };
+    const off = resolveCredentials(env, undefined, v);
+    expect(off.githubReadToken).toMatchObject({
+      value: READ,
+      source: 'env',
+      overriding: [{ source: 'vault' }],
+    });
+    const on = resolveCredentials(env, undefined, v, { preferVault: true });
+    expect(on.githubReadToken).toMatchObject({
+      value: 'github_pat_VAULTREAD_0006',
+      source: 'vault',
+      overriding: [{ source: 'env', path: 'JM_GITHUB_READ_TOKEN' }],
+    });
+    // A credential the vault does not hold still comes from its variable or file.
+    const dir = secretsDir({ github_author_token: AUTHOR });
+    const r = resolveCredentials({}, dir, v, { preferVault: true });
+    expect(r.githubAuthorToken).toEqual({
+      value: AUTHOR,
+      source: 'file',
+      path: join(dir, 'github_author_token'),
+      fingerprint: fingerprintOf(AUTHOR),
+    });
+  });
+
+  test('on: a vault entry wins over a file by name and over a gate secret variable', () => {
+    const v = vault();
+    v.put('githubAuthorToken', VAULT_AUTHOR, { now: t0 });
+    v.put(gateSecretName('web', 'NPM_TOKEN'), 'npm-vault-value-1', { now: t0 });
+    const dir = secretsDir({ github_author_token: AUTHOR });
+    const env = { JM_ZONE_SECRET_WEB_NPM_TOKEN: 'npm-env-value-22' };
+    const gateSecrets = [{ zoneId: 'web', name: 'NPM_TOKEN' }];
+    const on = resolveCredentials(env, dir, v, { preferVault: true, gateSecrets });
+    expect(on.githubAuthorToken).toMatchObject({
+      value: VAULT_AUTHOR,
+      source: 'vault',
+      overriding: [{ source: 'file', path: join(dir, 'github_author_token') }],
+    });
+    expect(on['zone:web:NPM_TOKEN']).toMatchObject({
+      value: 'npm-vault-value-1',
+      overriding: [{ source: 'env', path: 'JM_ZONE_SECRET_WEB_NPM_TOKEN' }],
+    });
+    const off = resolveCredentials(env, dir, v, { gateSecrets });
+    expect(off.githubAuthorToken).toMatchObject({ value: AUTHOR, source: 'file' });
+    expect(off['zone:web:NPM_TOKEN']).toMatchObject({ value: 'npm-env-value-22', source: 'env' });
+  });
+
+  test('on: an entry that does not decrypt falls back to the variable', () => {
+    const v = vault();
+    v.put('claudeToken', 'sk-ant-' + 'oat01-OTHER-0007', { now: t0 });
+    const db = (v as unknown as { db: ReturnType<typeof openDb> }).db;
+    db.prepare("UPDATE vault SET nonce = zeroblob(12) WHERE name = 'claudeToken'").run();
+    const r = resolveCredentials({ JM_CLAUDE_TOKEN: CLAUDE }, undefined, v, { preferVault: true });
+    expect(r.claudeToken).toMatchObject({ value: CLAUDE, source: 'env' });
+  });
+});

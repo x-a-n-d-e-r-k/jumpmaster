@@ -9,7 +9,7 @@ import { fingerprintOf, type Vault, VaultKeyError, type VaultMeta } from './vaul
  * A credential is read, in order, from its variable (`NAME_FILE` or `NAME`, as M4 read it), from
  * a file named for it under the secrets directory (the four install-wide ones), from the vault, or
  * it is missing. A file or a variable is the operator's and wins; the vault serves what is not
- * there. Values never leave this module except as `Resolved[name].value`.
+ * there. With Settings' "Prefer the vault" on, a vault entry wins instead. Values never leave this module except as `Resolved[name].value`.
  */
 
 export const INSTALL_CREDENTIALS = [
@@ -81,6 +81,8 @@ export type ResolvedCredential = {
   login?: string;
   /** A vault entry that does not decrypt under the current key (doctor `vault.key`). */
   undecryptable?: true;
+  /** The other sources that also hold a value, which this one overrides (never their values). */
+  overriding?: OtherSource[];
 };
 
 export type Resolved = Record<CredentialName, ResolvedCredential> &
@@ -145,40 +147,85 @@ const present = (path: string): boolean => {
 const installOfVar = (variable: string): InstallCredential | undefined =>
   INSTALL_CREDENTIALS.find((n) => CREDENTIAL_VARS[n] === variable);
 
+/** Another source that also holds a value for a credential: the one in use overrides it. */
+export type OtherSource = { source: 'file' | 'env' | 'vault'; path?: string };
+
+/**
+ * Picks the source in use among those that hold a value, in order: the variable, the file by
+ * name, the vault; or the vault first when `preferVault` is on. The rest are listed as
+ * `overriding` (by source and variable or path, never a value). The file by name is read only
+ * when it is the one in use.
+ */
+function pick(
+  viaEnv: ResolvedCredential | undefined,
+  filePath: string | undefined,
+  readFile: () => ResolvedCredential,
+  viaVault: ResolvedCredential,
+  preferVault: boolean,
+): ResolvedCredential {
+  const vaultHolds = viaVault.source === 'vault';
+  const candidates: (OtherSource & { take(): ResolvedCredential })[] = [];
+  if (viaEnv)
+    candidates.push({
+      source: viaEnv.source as 'file' | 'env',
+      ...(viaEnv.path ? { path: viaEnv.path } : {}),
+      take: () => viaEnv,
+    });
+  if (filePath) candidates.push({ source: 'file', path: filePath, take: readFile });
+  if (vaultHolds) {
+    const v = { source: 'vault' as const, take: () => viaVault };
+    if (preferVault) candidates.unshift(v);
+    else candidates.push(v);
+  }
+  const [first, ...rest] = candidates;
+  if (!first) return viaVault;
+  const chosen = first.take();
+  const overriding = rest.map(({ source, path }) => ({ source, ...(path ? { path } : {}) }));
+  return overriding.length > 0 ? { ...chosen, overriding } : chosen;
+}
+
 /**
  * Every install-wide credential, and the gate secrets named, resolved from their variable, the
- * file named for them under `secretsDir`, the vault, or missing. An unreadable file or variable
- * throws naming it (never the value), so the start says which; a vault entry that does not
- * decrypt is `missing` with `undecryptable` (the doctor's `vault.key`).
+ * file named for them under `secretsDir`, the vault, or missing; with `preferVault`, a vault entry
+ * comes first. An unreadable file or variable throws naming it (never the value), so the start
+ * says which; a vault entry that does not decrypt is `missing` with `undecryptable` (the doctor's
+ * `vault.key`) when nothing else holds a value.
  */
 export function resolveCredentials(
   env: NodeJS.ProcessEnv,
   secretsDir: string | undefined,
   vault: Vault | 'disabled',
-  o: { gateSecrets?: { zoneId: string; name: string }[]; warn?: (msg: string) => void } = {},
+  o: {
+    gateSecrets?: { zoneId: string; name: string }[];
+    warn?: (msg: string) => void;
+    preferVault?: boolean;
+  } = {},
 ): Resolved {
   const out = {} as Resolved;
+  const prefer = o.preferVault === true;
   for (const name of INSTALL_CREDENTIALS) {
-    const set = (r: ResolvedCredential) =>
-      Object.defineProperty(out, name, { value: r, enumerable: true });
     const viaEnv = fromEnv(env, CREDENTIAL_VARS[name], o.warn);
-    if (viaEnv) {
-      set(viaEnv);
-      continue;
-    }
     const path = secretsDir ? join(secretsDir, SECRET_FILES[name]) : undefined;
     // lstat, not exists: a dangling link named for a credential is the operator's file, broken,
-    // and the read below names it, as it names a dangling `*_FILE` path.
-    if (path && present(path)) {
-      const value = readSecretFile(path, SECRET_FILES[name]);
-      set({ value, source: 'file', path, fingerprint: fingerprintOf(value) });
-      continue;
-    }
-    set(fromVault(vault, name));
+    // and the read names it, as it names a dangling `*_FILE` path.
+    const filePath = path && present(path) ? path : undefined;
+    const readFile = (): ResolvedCredential => {
+      const value = readSecretFile(filePath as string, SECRET_FILES[name]);
+      return { value, source: 'file', path: filePath, fingerprint: fingerprintOf(value) };
+    };
+    const r = pick(viaEnv, filePath, readFile, fromVault(vault, name), prefer);
+    Object.defineProperty(out, name, { value: r, enumerable: true });
   }
   for (const g of o.gateSecrets ?? []) {
     const name = gateSecretName(g.zoneId, g.name);
-    const r = fromEnv(env, gateSecretVar(g.zoneId, g.name), o.warn) ?? fromVault(vault, name);
+    const viaEnv = fromEnv(env, gateSecretVar(g.zoneId, g.name), o.warn);
+    const r = pick(
+      viaEnv,
+      undefined,
+      () => ({ source: 'missing' }),
+      fromVault(vault, name),
+      prefer,
+    );
     Object.defineProperty(out, name, { value: r, enumerable: true });
   }
   return out;
