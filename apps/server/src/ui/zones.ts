@@ -13,6 +13,7 @@ import { PRESET_EGRESS } from '../presets.js';
 import { FORM_SCRIPT, zoneToForm } from '../zones/form.js';
 import { escapeHtml, MODE_LABELS, page, zoneBriefingsHref } from './pages.js';
 import { getWizard, projectBody } from './setup.js';
+import { zoneName, zoneNameText } from './zone-name.js';
 
 /**
  * The zones page (§10.3): every zone with its mode, egress, identity, last drop, doctor fails and
@@ -60,9 +61,9 @@ const stoppingLine = (db: Db, id: string): string | undefined =>
  * Stop managing: one confirmed click. The confirmation names the repository and what happens;
  * the click is the removal's DELETE, which sets observe and removes the zone once drained.
  */
-const stopButton = (id: string, repo: string): string => {
-  const confirm = `Stop managing ${repo}? Jumpmaster takes no new work for it and sets it to observe, then removes it as soon as its running drops, pending pushes and outbox writes have finished. Open pull requests are left as they are. Its history is kept, for a later Resume.`;
-  return `<button class="stop" data-zone="${escapeHtml(id)}" data-confirm="${escapeHtml(confirm)}">Stop managing</button> `;
+const stopButton = (id: string, name: string): string => {
+  const confirm = `Stop managing ${name}? Jumpmaster takes no new work for it and sets it to observe, then removes it as soon as its running drops, pending pushes and outbox writes have finished. Open pull requests are left as they are. Its history is kept, for a later Resume.`;
+  return `<button class="stop" data-zone="${escapeHtml(id)}" data-name="${escapeHtml(name)}" data-confirm="${escapeHtml(confirm)}">Stop managing</button> `;
 };
 
 /** The Stop managing buttons' handler; `#stop-out` holds a refusal. */
@@ -73,7 +74,7 @@ const STOP_SCRIPT = `for (const b of document.querySelectorAll('button.stop')) b
   // 200: removed now; 202: stopping, removed by the server once drained.
   if (r.status === 200) { location.href = '/zones'; return; }
   if (r.status === 202) { location.reload(); return; }
-  document.getElementById('stop-out').textContent = b.dataset.zone + ': ' + (j.error || (j.issues || []).map((i) => i.message).join('; ') || ('refused (' + r.status + ')'));
+  document.getElementById('stop-out').textContent = b.dataset.name + ': ' + (j.error || (j.issues || []).map((i) => i.message).join('; ') || ('refused (' + r.status + ')'));
 });`;
 
 const FORBIDDEN_NOTE = 'set with <code>jumpmaster ctl</code> or in the config file';
@@ -97,6 +98,7 @@ function listPage(store: ConfigStore, db: Db): string {
         : undefined;
       const mine = problems.filter((p) => p.zoneId === z.id);
       const stopping = stoppingLine(db, z.id);
+      const name = zoneNameText(z, config.dropZones);
       const problem = mine.length
         ? `<span class="problem">${escapeHtml(mine[0]?.message)}</span> <a href="/settings/credentials">Fix in Settings, Credentials</a>`
         : '-';
@@ -104,14 +106,14 @@ function listPage(store: ConfigStore, db: Db): string {
       const button = (m: string, label: string) =>
         mode === m
           ? ''
-          : `<button class="mode" data-zone="${escapeHtml(z.id)}" data-mode="${m}">${label}</button> `;
-      return `<tr><td><a href="${zoneHref(z.id)}">${escapeHtml(z.id)}</a></td><td>${escapeHtml(z.repo)}</td><td>${escapeHtml(MODE_LABELS[mode] ?? mode)}${stopping ? `<br><strong>${escapeHtml(stopping)}</strong>` : ''}</td><td>${escapeHtml(z.preset ?? z.image)}</td><td>${escapeHtml(z.egress?.mode ?? 'off')}</td><td>${escapeHtml(z.identity)}</td><td>${last ? `<a href="/drops/${encodeURIComponent(last.id)}">${escapeHtml(last.role)}, ${escapeHtml(last.state)}</a>` : '-'}</td><td>${fails === undefined ? '-' : `<a href="/doctor">${fails}</a>`}</td><td>${problem}</td><td>${button('paused', 'Pause')}${button('active', 'Resume')}${button('observe', 'Observe')}${fileMode || stopping ? '' : stopButton(z.id, z.repo)}<a href="${zoneHref(z.id)}/github">GitHub</a></td></tr>`;
+          : `<button class="mode" data-zone="${escapeHtml(z.id)}" data-name="${escapeHtml(name)}" data-mode="${m}">${label}</button> `;
+      return `<tr><td><a href="${zoneHref(z.id)}">${zoneName(z, config.dropZones)}</a></td><td>${escapeHtml(MODE_LABELS[mode] ?? mode)}${stopping ? `<br><strong>${escapeHtml(stopping)}</strong>` : ''}</td><td>${escapeHtml(z.preset ?? z.image)}</td><td>${escapeHtml(z.egress?.mode ?? 'off')}</td><td>${escapeHtml(z.identity)}</td><td>${last ? `<a href="/drops/${encodeURIComponent(last.id)}">${escapeHtml(last.role)}, ${escapeHtml(last.state)}</a>` : '-'}</td><td>${fails === undefined ? '-' : `<a href="/doctor">${fails}</a>`}</td><td>${problem}</td><td>${button('paused', 'Pause')}${button('active', 'Resume')}${button('observe', 'Observe')}${fileMode || stopping ? '' : stopButton(z.id, name)}<a href="${zoneHref(z.id)}/github">GitHub</a></td></tr>`;
     })
     .join('');
   return page(
     `<p><a href="/">Home</a></p><h2>Zones</h2><p>A zone is one project: one repository Jumpmaster works on.</p>
 ${fileMode ? ADOPT_BANNER : '<p><a href="/zones/new">Add a project</a></p>'}
-<table><tr><th>Zone</th><th>Repository</th><th>Mode</th><th>Stack</th><th>Egress</th><th>Accounts</th><th>Last drop</th><th>Doctor fails</th><th>Needs</th><th></th></tr>${rows || '<tr><td colspan="10">No zones yet.</td></tr>'}</table>
+<table><tr><th>Project</th><th>Mode</th><th>Stack</th><th>Egress</th><th>Accounts</th><th>Last drop</th><th>Doctor fails</th><th>Needs</th><th></th></tr>${rows || '<tr><td colspan="9">No zones yet.</td></tr>'}</table>
 <p id="mode-out" role="status"></p><p id="stop-out" role="status"></p>
 <script>
 ${STOP_SCRIPT}
@@ -119,7 +121,7 @@ for (const b of document.querySelectorAll('button.mode')) b.addEventListener('cl
   const r = await jmFetch('/api/control/zones/' + encodeURIComponent(b.dataset.zone), { mode: b.dataset.mode });
   if (r.ok) { location.reload(); return; }
   const j = await r.json().catch(() => ({}));
-  document.getElementById('mode-out').textContent = b.dataset.zone + ': ' + (j.error || ('refused (' + r.status + ')'));
+  document.getElementById('mode-out').textContent = b.dataset.name + ': ' + (j.error || ('refused (' + r.status + ')'));
 });
 </script>`,
   );
@@ -149,6 +151,7 @@ function zonePage(store: ConfigStore, db: Db, id: string, now: Date): string | u
   const raw = zones[index];
   const resolved = store.current().dropZones.find((z) => z.id === id);
   if (!raw || !resolved) return undefined;
+  const all = store.current().dropZones;
   const readOnly = store.mode() === 'file';
   // The forms show what is in effect (defaults filled); the Advanced editor what is stored.
   const f = zoneToForm(resolved);
@@ -249,16 +252,16 @@ ${field('overrideApprovers', 'Override approvers (logins)', textarea(f, 'overrid
   const advanced = sectionForm(
     'advanced',
     'Advanced',
-    `<p>The zone as JSON: models, budgets, crew and every other setting. It is checked as the sections are.</p><div id="goals"></div><div id="crew"></div><textarea name="json" rows="24" cols="90">${escapeHtml(JSON.stringify(raw, null, 2))}</textarea><span class="issue" data-issues="advanced"></span>`,
+    `<p>Zone id: <code>${escapeHtml(id)}</code> <small>(the zone's key in URLs, the API and <code>jumpmaster ctl</code>)</small></p><p>The zone as JSON: models, budgets, crew and every other setting. It is checked as the sections are.</p><div id="goals"></div><div id="crew"></div><textarea name="json" rows="24" cols="90">${escapeHtml(JSON.stringify(raw, null, 2))}</textarea><span class="issue" data-issues="advanced"></span>`,
     readOnly,
   );
   const base = zoneHref(id);
   const briefings = listBriefings(db, { zoneId: id, state: 'open' }).length;
   return page(
     `<p><a href="/">Home</a> · <a href="/zones">Zones</a> · <a href="${base}/github">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${briefings} open)</a></p>
-<h2>Zone ${escapeHtml(id)}</h2><p>${escapeHtml(MODE_LABELS[mode] ?? mode)}</p>
+<h2>${zoneName(resolved, all)}</h2><p>${escapeHtml(MODE_LABELS[mode] ?? mode)}</p>
 ${stopping ? `<p><strong>${escapeHtml(stopping)}</strong> <small>Resume or Pause from the Zones list withdraws it.</small></p>` : ''}
-${readOnly || stopping ? '' : `<p>${stopButton(id, String(raw.repo))}<small>No new work, then removed once drained; open pull requests and history stay.</small> <span id="stop-out" role="status"></span></p>`}
+${readOnly || stopping ? '' : `<p>${stopButton(id, zoneNameText(resolved, all))}<small>No new work, then removed once drained; open pull requests and history stay.</small> <span id="stop-out" role="status"></span></p>`}
 ${readOnly ? ADOPT_BANNER : ''}
 <p id="form-out" role="status"></p>
 ${project}${stack}${egress}${merging}${advanced}
@@ -336,6 +339,7 @@ if (adopt) adopt.addEventListener('click', async () => {
 });
 </script>`
 }`,
+    { title: zoneNameText(resolved, all) },
   );
 }
 

@@ -124,6 +124,8 @@ describe('the GitHub page of a zone', () => {
     const r = await w.get('/zones/demo/github?reviewer=alice');
     expect(r.statusCode, r.body).toBe(200);
     const html = r.body;
+    // Named by its repository, not its zone id (#99).
+    expect(html).toContain('<h2>GitHub for octo-org/demo</h2>');
     // The order the operator works in: accounts, tokens, collaborators, ruleset, CODEOWNERS.
     const at = (s: string) => html.indexOf(s);
     for (const s of [
@@ -213,6 +215,7 @@ describe('the GitHub page of a zone', () => {
     const r = await w.get('/zones/demo/github');
     expect(r.statusCode).toBe(502);
     expect(r.body).toContain('GitHub rejected the author token (401)');
+    expect(r.body).toContain('<h2>GitHub for octo-org/demo</h2>');
     expect(r.body).not.toContain('<b>');
     expect(r.body).toContain('href="/setup/forge"');
   });
