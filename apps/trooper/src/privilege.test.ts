@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import {
+  agentProcessesAlive,
   agentSpawnOptions,
   asAgentArgv,
   readAgentFile,
@@ -78,6 +79,21 @@ describe('sweepUid', () => {
       throw Object.assign(new Error('gone'), { code: 'ESRCH' });
     };
     expect(sweepUid(10001, kill, proc)).toBe(0);
+  });
+});
+
+describe('agentProcessesAlive', () => {
+  test('agentProcessesAlive counts real and effective uids', () => {
+    const proc = fakeProc({
+      30: { ruid: 10001, euid: 10001 },
+      31: { ruid: 0, euid: 10001 },
+      32: { ruid: 10001, euid: 0 },
+      33: { ruid: 10002, euid: 10002 },
+      1: { ruid: 0, euid: 0 },
+    });
+    expect(agentProcessesAlive(10001, proc)).toBe(3);
+    expect(agentProcessesAlive(10003, proc)).toBe(0);
+    expect(agentProcessesAlive(10001, join(proc, 'missing'))).toBe(0);
   });
 });
 

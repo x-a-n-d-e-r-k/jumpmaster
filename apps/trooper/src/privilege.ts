@@ -32,19 +32,15 @@ export function trooperIdentities(
   return { agent, gate };
 }
 
-/** SIGKILLs every process whose real or effective uid is `uid`; returns how many were signalled. */
-export function sweepUid(
-  uid: number,
-  kill: (pid: number, signal: NodeJS.Signals) => void = (pid, sig) => process.kill(pid, sig),
-  procRoot = '/proc',
-): number {
-  let killed = 0;
+/** Pids under `procRoot` whose real or effective uid is `uid`. */
+function pidsOfUid(uid: number, procRoot: string): number[] {
   let entries: string[];
   try {
     entries = readdirSync(procRoot);
   } catch {
-    return 0;
+    return [];
   }
+  const pids: number[] = [];
   for (const entry of entries) {
     if (!/^\d+$/.test(entry)) continue;
     let status: string;
@@ -55,14 +51,32 @@ export function sweepUid(
     }
     const m = /^Uid:\s+(\d+)\s+(\d+)/m.exec(status);
     if (!m || (Number(m[1]) !== uid && Number(m[2]) !== uid)) continue;
+    pids.push(Number(entry));
+  }
+  return pids;
+}
+
+/** SIGKILLs every process whose real or effective uid is `uid`; returns how many were signalled. */
+export function sweepUid(
+  uid: number,
+  kill: (pid: number, signal: NodeJS.Signals) => void = (pid, sig) => process.kill(pid, sig),
+  procRoot = '/proc',
+): number {
+  let killed = 0;
+  for (const pid of pidsOfUid(uid, procRoot)) {
     try {
-      kill(Number(entry), 'SIGKILL');
+      kill(pid, 'SIGKILL');
       killed++;
     } catch {
       // already gone
     }
   }
   return killed;
+}
+
+/** How many processes still run with `uid` as their real or effective uid. */
+export function agentProcessesAlive(uid: number, procRoot = '/proc'): number {
+  return pidsOfUid(uid, procRoot).length;
 }
 
 /**

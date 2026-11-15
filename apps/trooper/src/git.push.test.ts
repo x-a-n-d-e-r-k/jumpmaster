@@ -1,0 +1,429 @@
+import { execFileSync, type SpawnOptions, spawn } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { PushGrant } from '@jumpmaster/protocol';
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest';
+import {
+  authHeader,
+  cloneRepo,
+  commitIfDirty,
+  headSha,
+  prepareBranch,
+  pushNewBranch,
+  pushStaged,
+  setSpawn,
+  setWorkRoot,
+  stageFromAgent,
+} from './git.js';
+
+let tmp: string;
+let work: string;
+const B = 'agent/issue-1';
+const TOKEN = 'tok-0123456789abcdef-push';
+const HARDENED =
+  'env GIT_NO_LAZY_FETCH=1 git -c core.fsmonitor=false -c core.hooksPath=/dev/null upload-pack';
+const git = (cwd: string, ...args: string[]): string =>
+  execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+const noSweep = () => undefined;
+
+type Call = { argv: string[]; cwd: string | undefined; env: NodeJS.ProcessEnv };
+function recordSpawn(cb?: (c: Call) => void): { calls: Call[] } {
+  const calls: Call[] = [];
+  setSpawn((cmd, args, opts: SpawnOptions) => {
+    const c: Call = {
+      argv: [cmd, ...args],
+      cwd: opts.cwd as string | undefined,
+      env: (opts.env ?? {}) as NodeJS.ProcessEnv,
+    };
+    calls.push(c);
+    cb?.(c);
+    return spawn(cmd, args, opts);
+  });
+  return { calls };
+}
+
+beforeAll(() => {
+  tmp = mkdtempSync(join(realpathSync(tmpdir()), 'gitpush-'));
+  work = join(tmp, 'work');
+  mkdirSync(work);
+  setWorkRoot(work);
+});
+afterAll(() => rmSync(tmp, { recursive: true, force: true }));
+afterEach(() => setSpawn(null));
+
+const leftovers = () => readdirSync(work).filter((e) => e.startsWith('push-'));
+
+/** Own origin (main: a.txt, .github/x.yml by a human), a working copy with B pushed at s0. */
+async function world(name: string) {
+  const base = join(tmp, name);
+  mkdirSync(base);
+  const origin = join(base, 'origin.git');
+  const seed = join(base, 'seed');
+  git(base, 'init', '--bare', '-q', '-b', 'main', origin);
+  git(base, 'init', '-q', '-b', 'main', seed);
+  git(seed, 'config', 'user.name', 'Human');
+  git(seed, 'config', 'user.email', 'human@example.com');
+  mkdirSync(join(seed, '.github'));
+  writeFileSync(join(seed, 'a.txt'), 'a\n');
+  writeFileSync(join(seed, '.github/x.yml'), 'x: 1\n');
+  git(seed, 'add', '.');
+  git(seed, 'commit', '-q', '-m', 'init');
+  git(seed, 'push', '-q', origin, 'main');
+  const target = { owner: 'o', name: 'r', url: `file://${origin}` };
+  const dir = join(base, 'repo');
+  const mirror = join(base, 'mirror');
+  await cloneRepo({ owner: 'o', name: 'r', token: 't', dir, mirrorDir: mirror, url: target.url });
+  await prepareBranch(dir, B, 'main');
+  writeFileSync(join(dir, 'b.txt'), 'b\n');
+  await commitIfDirty(dir, 'feat: b');
+  const s0 = await pushNewBranch(dir, B, 't', target);
+  const remoteTip = (b = B) => git(origin, 'rev-parse', `refs/heads/${b}`);
+  /** A human clone of origin, for moving the remote. */
+  const human = () => {
+    const h = join(base, `human-${Math.random().toString(36).slice(2)}`);
+    git(base, 'clone', '-q', origin, h);
+    git(h, 'config', 'user.name', 'Human');
+    git(h, 'config', 'user.email', 'human@example.com');
+    return h;
+  };
+  return { base, origin, seed, target, dir, mirror, s0, remoteTip, human };
+}
+
+type World = Awaited<ReturnType<typeof world>>;
+
+const grantFor = (w: World, over: Partial<PushGrant> = {}): PushGrant => ({
+  token: TOKEN,
+  owner: 'o',
+  name: 'r',
+  branch: B,
+  base: 'main',
+  lease: w.s0,
+  protectedPaths: ['.github/**'],
+  secrets: [],
+  ...over,
+});
+
+async function stage(w: World, branch = B) {
+  const r = await stageFromAgent(w.dir, branch, { sweep: noSweep });
+  if ('nothing' in r) throw new Error(`staged nothing: ${r.nothing}`);
+  return r;
+}
+
+/** Stage B from the working copy, then push it with a grant against the world's origin. */
+async function stageAndPush(w: World, over: Partial<PushGrant> = {}) {
+  const grant = grantFor(w, over);
+  const r = await stage(w, grant.branch);
+  return pushStaged(r.pushDir, grant, { remoteUrl: w.target.url });
+}
+
+function markerScript(w: World, marker: string, name = 'evil.sh'): string {
+  const script = join(w.base, name);
+  writeFileSync(script, `#!/bin/sh\necho ran >> ${marker}\ncat\n`);
+  chmodSync(script, 0o755);
+  return script;
+}
+
+describe('stageFromAgent', () => {
+  test('staging never runs root git in the working copy', async () => {
+    const w = await world('planted');
+    writeFileSync(join(w.dir, 'c.txt'), 'c\n');
+    await commitIfDirty(w.dir, 'feat: c');
+    const head = await headSha(w.dir);
+    const marker = join(w.base, 'marker');
+    const script = markerScript(w, marker);
+    git(w.dir, 'config', 'core.fsmonitor', script);
+    git(w.dir, 'config', 'filter.x.clean', script);
+    git(w.dir, 'config', 'core.sshCommand', script);
+    writeFileSync(join(w.dir, '.git/info/attributes'), '* filter=x\n');
+    const evilHooks = join(w.base, 'evil-hooks');
+    mkdirSync(evilHooks);
+    for (const h of ['pre-commit', 'post-checkout', 'reference-transaction', 'post-upload-pack']) {
+      for (const d of [evilHooks, join(w.dir, '.git/hooks')]) {
+        writeFileSync(join(d, h), `#!/bin/sh\necho ran >> ${marker}\n`);
+        chmodSync(join(d, h), 0o755);
+      }
+    }
+    const included = join(w.base, 'included.gitconfig');
+    writeFileSync(included, `[core]\n\thooksPath = ${evilHooks}\n\tfsmonitor = ${script}\n`);
+    git(w.dir, 'config', 'includeIf.gitdir:/.path', included);
+    const rec = recordSpawn();
+    const r = await stage(w);
+    expect(r.head).toBe(head);
+    expect(existsSync(marker)).toBe(false);
+    for (const c of rec.calls) {
+      expect(c.cwd?.startsWith(w.dir) ?? false).toBe(false);
+      expect(c.env.GIT_DIR?.startsWith(w.dir) ?? false).toBe(false);
+    }
+    rmSync(r.pushDir, { recursive: true, force: true });
+  });
+
+  test("upload-pack's fsmonitor and hooks are disabled", async () => {
+    const w = await world('uploadpack');
+    writeFileSync(join(w.dir, 'u.txt'), 'u\n');
+    await commitIfDirty(w.dir, 'feat: u');
+    const marker = join(w.base, 'marker');
+    const script = markerScript(w, marker);
+    git(w.dir, 'config', 'core.fsmonitor', script);
+    for (const h of ['post-upload-pack', 'pre-upload-pack', 'reference-transaction']) {
+      writeFileSync(join(w.dir, '.git/hooks', h), `#!/bin/sh\necho ran >> ${marker}\n`);
+      chmodSync(join(w.dir, '.git/hooks', h), 0o755);
+    }
+    const rec = recordSpawn();
+    const r = await stage(w);
+    expect(existsSync(marker)).toBe(false);
+    const fetch = rec.calls.find((c) => c.argv.includes(`file://${w.dir}`));
+    const up = fetch?.argv.find((a) => a.startsWith('--upload-pack='));
+    expect(up).toContain(HARDENED);
+    expect(fetch?.argv.filter((a) => a.includes('refs/'))).toEqual([
+      `+refs/heads/${B}:refs/heads/${B}`,
+    ]);
+    rmSync(r.pushDir, { recursive: true, force: true });
+  });
+
+  test('a promisor remote in the working copy is never fetched', async () => {
+    const w = await world('promisor');
+    writeFileSync(join(w.dir, 'p.txt'), 'promised blob\n');
+    await commitIfDirty(w.dir, 'feat: p');
+    const blob = git(w.dir, 'rev-parse', 'HEAD:p.txt');
+    // A full copy that still has the blob, served through a marker upload-pack.
+    const promisor = join(w.base, 'promisor.git');
+    git(w.base, 'clone', '-q', '--bare', '--no-local', w.dir, promisor);
+    git(promisor, 'fetch', '-q', `file://${w.dir}`, `+refs/heads/${B}:refs/heads/${B}`);
+    const marker = join(w.base, 'marker');
+    const up = join(w.base, 'marker-upload-pack.sh');
+    writeFileSync(up, `#!/bin/sh\necho ran >> ${marker}\nexec git-upload-pack "$@"\n`);
+    chmodSync(up, 0o755);
+    git(w.dir, 'config', 'core.repositoryformatversion', '1');
+    git(w.dir, 'config', 'extensions.partialClone', 'evil');
+    git(w.dir, 'config', 'remote.evil.url', `file://${promisor}`);
+    git(w.dir, 'config', 'remote.evil.promisor', 'true');
+    git(w.dir, 'config', 'remote.evil.uploadpack', up);
+    unlinkSync(join(w.dir, '.git/objects', blob.slice(0, 2), blob.slice(2)));
+    await stageFromAgent(w.dir, B, { sweep: noSweep }).then(
+      (r) => {
+        if ('pushDir' in r) rmSync(r.pushDir, { recursive: true, force: true });
+      },
+      () => undefined,
+    );
+    expect(existsSync(marker)).toBe(false);
+    expect(leftovers()).toEqual([]);
+  });
+
+  test('an oversized working copy fails before the token', async () => {
+    const w = await world('oversized');
+    writeFileSync(
+      join(w.dir, 'big.bin'),
+      Buffer.from(Array.from({ length: 1_000_000 }, () => Math.floor(Math.random() * 256))),
+    );
+    await commitIfDirty(w.dir, 'feat: big');
+    const rec = recordSpawn();
+    await expect(
+      stageFromAgent(w.dir, B, {
+        sweep: noSweep,
+        limits: { timeoutMs: 120_000, maxBytes: 10_000 },
+      }),
+    ).rejects.toThrow(/^push fetch too large/);
+    for (const c of rec.calls) {
+      expect(Object.values(c.env).some((v) => String(v).includes('AUTHORIZATION'))).toBe(false);
+    }
+    expect(leftovers()).toEqual([]);
+    expect(w.remoteTip()).toBe(w.s0);
+  });
+
+  test('a missing branch is nothing', async () => {
+    const w = await world('missing');
+    await expect(stageFromAgent(w.dir, 'agent/issue-404', { sweep: noSweep })).resolves.toEqual({
+      nothing: 'branch not in the working copy',
+    });
+    expect(leftovers()).toEqual([]);
+  });
+
+  test('the sweep runs before and after the agent fetch', async () => {
+    const w = await world('order');
+    const order: string[] = [];
+    recordSpawn((c) => {
+      if (c.argv.includes(`file://${w.dir}`)) order.push('agent-fetch');
+    });
+    const r = await stageFromAgent(w.dir, B, { sweep: () => void order.push('sweep') });
+    expect(order).toEqual(['sweep', 'agent-fetch', 'sweep']);
+    if ('pushDir' in r) rmSync(r.pushDir, { recursive: true, force: true });
+  });
+});
+
+describe('pushStaged', () => {
+  test('new branch', async () => {
+    const w = await world('newbranch');
+    git(w.dir, 'switch', '-q', '-c', 'agent/issue-2');
+    writeFileSync(join(w.dir, 'n.txt'), 'n\n');
+    await commitIfDirty(w.dir, 'feat: n');
+    const head = await headSha(w.dir);
+    const rec = recordSpawn();
+    expect(await stageAndPush(w, { branch: 'agent/issue-2', lease: '', expectSha: head })).toEqual({
+      status: 'pushed',
+      headSha: head,
+      alreadyThere: false,
+    });
+    expect(w.remoteTip('agent/issue-2')).toBe(head);
+    // The token rides only in the env of root calls in a root-owned bare repo.
+    const tokenCalls = rec.calls.filter((c) =>
+      Object.values(c.env).some((v) => String(v).includes(authHeader(TOKEN))),
+    );
+    expect(tokenCalls.length).toBeGreaterThan(0);
+    for (const c of tokenCalls) {
+      expect(c.argv.join(' ')).not.toContain(TOKEN);
+      expect(c.env.GIT_DIR?.startsWith(w.dir) ?? true).toBe(false);
+    }
+    expect(leftovers()).toEqual([]);
+  });
+
+  test('protected path and rename source', async () => {
+    const w = await world('protected');
+    git(w.dir, 'mv', '.github/x.yml', 'y.yml');
+    await commitIfDirty(w.dir, 'chore: move');
+    const r = await stageAndPush(w);
+    expect(r).toEqual({
+      status: 'failed',
+      reason: 'protected path .github/x.yml',
+      retryable: false,
+    });
+    expect(w.remoteTip()).toBe(w.s0);
+    expect(leftovers()).toEqual([]);
+  });
+
+  test('protected dotfile', async () => {
+    const w = await world('dotfile');
+    mkdirSync(join(w.dir, 'node_modules', '.bin'), { recursive: true });
+    writeFileSync(join(w.dir, 'node_modules', '.bin', 'tool'), '#!/bin/sh\n');
+    await commitIfDirty(w.dir, 'chore: add tool');
+    const r = await stageAndPush(w, { protectedPaths: ['node_modules/**'] });
+    expect(r).toEqual({
+      status: 'failed',
+      reason: 'protected path node_modules/.bin/tool',
+      retryable: false,
+    });
+    expect(w.remoteTip()).toBe(w.s0);
+  });
+
+  test('secret in an added line', async () => {
+    const w = await world('secret');
+    writeFileSync(join(w.dir, 'leak.txt'), 'value=plain-looking-secret-1234\n');
+    await commitIfDirty(w.dir, 'feat: leak');
+    const r = await stageAndPush(w, { secrets: ['plain-looking-secret-1234'] });
+    expect(r).toEqual({ status: 'failed', reason: 'secret in diff', retryable: false });
+    expect(w.remoteTip()).toBe(w.s0);
+  });
+
+  test('non-agent author', async () => {
+    const w = await world('foreign');
+    git(
+      w.dir,
+      '-c',
+      'user.name=Mallory',
+      '-c',
+      'user.email=m@x',
+      'commit',
+      '-q',
+      '--allow-empty',
+      '-m',
+      'x',
+    );
+    const r = await stageAndPush(w);
+    expect(r).toEqual({ status: 'failed', reason: 'foreign commit identity', retryable: false });
+    expect(w.remoteTip()).toBe(w.s0);
+  });
+
+  test('expectSha mismatch', async () => {
+    const w = await world('gated');
+    const gated = await headSha(w.dir);
+    writeFileSync(join(w.dir, 'late.txt'), 'after the gates\n');
+    await commitIfDirty(w.dir, 'feat: late');
+    const r = await stageAndPush(w, { expectSha: gated });
+    expect(r.status).toBe('failed');
+    if (r.status !== 'failed') return;
+    expect(r.reason).toMatch(/^pushed branch is not the gated commit/);
+    expect(r.retryable).toBe(false);
+    expect(w.remoteTip()).toBe(w.s0);
+  });
+
+  test('stale remote', async () => {
+    const w = await world('stale');
+    const h = w.human();
+    git(h, 'switch', '-q', B);
+    git(h, 'commit', '-q', '--allow-empty', '-m', 'move');
+    git(h, 'push', '-q', 'origin', B);
+    const moved = w.remoteTip();
+    writeFileSync(join(w.dir, 'm.txt'), 'm\n');
+    await commitIfDirty(w.dir, 'feat: m');
+    const r = await stageAndPush(w);
+    expect(r.status).toBe('failed');
+    if (r.status !== 'failed') return;
+    expect(r.reason).toMatch(/^stale info: /);
+    expect(r.retryable).toBe(false);
+    expect(w.remoteTip()).toBe(moved);
+  });
+
+  test('already there', async () => {
+    const w = await world('already');
+    writeFileSync(join(w.dir, 'al.txt'), 'al\n');
+    await commitIfDirty(w.dir, 'feat: al');
+    const head = await headSha(w.dir);
+    // An earlier attempt pushed it and died before reporting.
+    git(w.dir, 'push', '-q', w.origin, `HEAD:refs/heads/${B}`);
+    expect(await stageAndPush(w, { expectSha: head })).toEqual({
+      status: 'pushed',
+      headSha: head,
+      alreadyThere: true,
+    });
+  });
+
+  test('checkpoint with nothing ahead', async () => {
+    const w = await world('nothingahead');
+    expect(await stageAndPush(w)).toEqual({ status: 'nothing', reason: 'nothing ahead' });
+    expect(leftovers()).toEqual([]);
+  });
+
+  test('base fetch network failure is retryable', async () => {
+    const w = await world('network');
+    writeFileSync(join(w.dir, 'net.txt'), 'net\n');
+    await commitIfDirty(w.dir, 'feat: net');
+    const secret = 'secret-in-the-url-0987';
+    const grant = grantFor(w, { secrets: [secret] });
+    const r = await stage(w);
+    const res = await pushStaged(r.pushDir, grant, {
+      remoteUrl: `file://${join(w.base, `gone-${secret}.git`)}`,
+    });
+    expect(res.status).toBe('failed');
+    if (res.status !== 'failed') return;
+    expect(res.retryable).toBe(true);
+    expect(res.reason).not.toContain(secret);
+    expect(res.reason).not.toContain(TOKEN);
+    expect(res.reason.length).toBeLessThanOrEqual(2000);
+    expect(w.remoteTip()).toBe(w.s0);
+    expect(leftovers()).toEqual([]);
+  });
+
+  test('nothing is read from a mirror', async () => {
+    const w = await world('nomirror');
+    writeFileSync(join(w.dir, 'nm.txt'), 'nm\n');
+    await commitIfDirty(w.dir, 'feat: nm');
+    const head = await headSha(w.dir);
+    const rec = recordSpawn();
+    expect(await stageAndPush(w, { expectSha: head })).toMatchObject({ status: 'pushed' });
+    expect(rec.calls.length).toBeGreaterThan(0);
+    for (const c of rec.calls) {
+      const all = [...c.argv, c.cwd ?? '', ...Object.values(c.env).map(String)];
+      expect(all.some((a) => a.includes(w.mirror))).toBe(false);
+    }
+  });
+});
