@@ -271,15 +271,19 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
       });
     return serialized(name, async () => {
       const r = store.resolved()[name];
-      if (r?.source !== 'vault' && !r?.undecryptable)
+      const vault = store.vault();
+      // The vault's own entry, in use or behind a variable or file (a copy, #101).
+      const entry = vault === 'disabled' ? undefined : vault.meta(name);
+      if (!entry && r?.source !== 'vault' && !r?.undecryptable)
         return reply.code(409).send({
           error:
             r?.source === 'missing'
               ? 'the vault holds no such credential'
               : `managed by ${r?.path}: remove the file and run \`ctl secrets reload\``,
         });
-      // Refused when it would leave a zone without a credential it needs.
-      const without = { ...store.resolved(), [name]: { source: 'missing' } } as Resolved;
+      // Refused when it would leave a zone without a credential it needs; a variable or file that
+      // also holds it takes over, so its zones keep it.
+      const without = store.resolvedWithoutVaultEntry(name);
       const created = store
         .current()
         .dropZones.flatMap((z) => credentialProblems(z, without))
@@ -291,7 +295,11 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
         });
       const done = store.deleteCredential(name);
       if (!done.ok) return reply.code(400).send({ issues: done.issues });
-      audit(req, 'secret.remove', { name, fingerprint: r.fingerprint ?? null, result: 'removed' });
+      audit(req, 'secret.remove', {
+        name,
+        fingerprint: entry?.fingerprint ?? r?.fingerprint ?? null,
+        result: 'removed',
+      });
       return { removed: done.deleted, problems: store.problems() };
     });
   });

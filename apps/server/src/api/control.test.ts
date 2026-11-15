@@ -2814,6 +2814,8 @@ describe('vault routes: turn on, prefer, copy, turn off (#101)', () => {
   }
   const post = (url: string, body: unknown = {}, headers: Record<string, string> = auth) =>
     (app as FastifyInstance).inject({ method: 'POST', url, headers, payload: body as object });
+  const del = (url: string) =>
+    (app as FastifyInstance).inject({ method: 'DELETE', url, headers: auth });
   const list = async () =>
     (
       await (app as FastifyInstance).inject({
@@ -2911,10 +2913,73 @@ describe('vault routes: turn on, prefer, copy, turn off (#101)', () => {
     expect(r.statusCode).toBe(409);
     expect(r.json().error).toContain('remove them first');
     expect(w.store.vault()).not.toBe('disabled');
-    const v = w.store.vault();
-    if (v !== 'disabled') v.delete('githubReadToken');
+    // Removed through the route, as the page does: the variable takes over again.
+    const rm = await del('/api/control/secrets/githubReadToken');
+    expect(rm.statusCode).toBe(200);
+    expect(rm.json()).toMatchObject({ removed: true });
+    expect(await read()).toMatchObject({ source: 'env' });
     const ok = await post('/api/control/secrets/vault/off');
     expect(ok.statusCode).toBe(200);
     expect((await list()).vault).toBe('disabled');
+  });
+
+  test('a copied entry is removed through the route with Prefer on, for a credential a zone needs, and the vault turns off', async () => {
+    const w = vaultOffApp();
+    w.store.apply(
+      {
+        dropZones: [
+          {
+            id: 'main',
+            repo: 'octo/main',
+            gates: [{ name: 'test', run: 'npm test' }],
+            image: 'jm-trooper:dev',
+            reviewReadToken: true,
+          },
+        ],
+      },
+      { via: 'ctl', principal: { kind: 'operator', via: 'token', sudo: true } },
+    );
+    await post('/api/control/secrets/vault/on');
+    await post('/api/control/secrets/githubReadToken/copy-to-vault');
+    await post('/api/control/secrets/vault/prefer', { prefer: true });
+    expect(await read()).toMatchObject({ source: 'vault' });
+    // The variable takes over once the entry is gone: no zone goes without it.
+    const rm = await del('/api/control/secrets/githubReadToken');
+    expect(rm.statusCode).toBe(200);
+    expect(rm.body).not.toContain(READ_ENV);
+    expect(await read()).toMatchObject({ source: 'env' });
+    expect(w.store.current().secrets.githubReadToken).toBe(READ_ENV);
+    const ok = await post('/api/control/secrets/vault/off');
+    expect(ok.statusCode).toBe(200);
+    expect((await list()).vault).toBe('disabled');
+  });
+
+  test('removing a vault entry nothing else holds is still refused when a zone needs it', async () => {
+    const w = vaultOffApp();
+    w.store.apply(
+      {
+        dropZones: [
+          {
+            id: 'main',
+            repo: 'octo/main',
+            gates: [{ name: 'test', run: 'npm test' }],
+            image: 'jm-trooper:dev',
+            reviewReadToken: true,
+          },
+        ],
+      },
+      { via: 'ctl', principal: { kind: 'operator', via: 'token', sudo: true } },
+    );
+    await post('/api/control/secrets/vault/on');
+    const put = await (app as FastifyInstance).inject({
+      method: 'PUT',
+      url: '/api/control/secrets/githubAuthorToken',
+      headers: auth,
+      payload: { value: 'github_pat_' + 'ROUTEAUTHORONLYVAULT_101' },
+    });
+    expect(put.statusCode).toBe(200);
+    const rm = await del('/api/control/secrets/githubAuthorToken');
+    expect(rm.statusCode).toBe(409);
+    expect(rm.json().error).toContain('would park');
   });
 });

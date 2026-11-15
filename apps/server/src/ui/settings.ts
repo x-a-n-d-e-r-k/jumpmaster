@@ -99,11 +99,17 @@ function actionsCell(
       ? ` <button type="button" class="copy" data-name="${n}">Copy into the vault</button>`
       : '';
   const test = c.value ? ` <button type="button" class="test" data-name="${n}">Test</button>` : '';
+  // A vault entry behind the variable or file in use (a copy) can be removed: the variable or
+  // file stays in use, and an empty vault can be turned off.
+  const hidden =
+    vaultOn && c.overriding?.some((o) => o.source === 'vault')
+      ? ` <button type="button" class="remove" data-name="${n}">Remove from the vault</button>`
+      : '';
   const disabled = (why: string) =>
-    `<button type="button" disabled>Replace</button>${test}${copy} <small>${why}</small>`;
+    `<button type="button" disabled>Replace</button>${test}${copy}${hidden} <small>${why}</small>`;
   // With the vault preferred, a value entered here wins over the variable or file.
   if ((c.source === 'file' || c.source === 'env') && vaultOn && vault.prefer)
-    return `${replaceForm(n, claudeDated)}${test}${copy}`;
+    return `${replaceForm(n, claudeDated)}${test}${copy}${hidden}`;
   if (c.source === 'file')
     return disabled(
       `managed by ${escapeHtml(c.path ?? '?')}: replace that file and run <code>jumpmaster ctl secrets reload</code> to change it`,

@@ -641,6 +641,21 @@ export class ConfigStore implements ConfigSource {
     return { ok: true, from, fingerprint: put.meta.fingerprint, meta: put.meta };
   }
 
+  /**
+   * The credentials as they would resolve with `name`'s vault entry gone: the variable or file
+   * that holds it takes over, or it goes missing. The vault is not changed.
+   */
+  resolvedWithoutVaultEntry(name: CredentialName): Resolved {
+    let fallback: ResolvedCredential = { source: 'missing' };
+    if (!this.o.secretsFor) {
+      const without = resolveCredentials(this.o.env, this.o.boot.secretsDir, 'disabled', {
+        gateSecrets: gateSecretsOf(this.cfg.dropZones),
+      });
+      fallback = without[name] ?? fallback;
+    }
+    return { ...this.resolvedValue, [name]: fallback } as Resolved;
+  }
+
   /** The credential problems of every zone (dispatch refusals; doctor `credential.*`). */
   problems(): CredentialProblem[] {
     return this.cfg.dropZones.flatMap((z) => credentialProblems(z, this.resolvedValue));

@@ -1241,6 +1241,28 @@ describe('turning the vault on and preferring it (#101)', () => {
     expect(html).not.toContain(READ);
   });
 
+  test('a copied entry behind a variable has Remove, and once removed the vault can be turned off', async () => {
+    const w = await world({ vaultOff: true, env: { JM_GITHUB_READ_TOKEN: READ } });
+    await w.call('POST', '/api/control/sudo', { passphrase: PASS });
+    await w.call('POST', '/api/control/secrets/vault/on', {});
+    await w.call('POST', '/api/control/secrets/githubReadToken/copy-to-vault', {});
+    let html = (await w.get('/settings/credentials')).body;
+    expect(rowOf(html, 'githubReadToken')).toContain(
+      '<button type="button" class="remove" data-name="githubReadToken">Remove from the vault</button>',
+    );
+    // The page's Remove sends a DELETE; the variable stays in use, and Turn off comes back.
+    const rm = await w.call('DELETE', '/api/control/secrets/githubReadToken', undefined);
+    expect(rm.statusCode).toBe(200);
+    expect(rm.body).not.toContain(READ);
+    html = (await w.get('/settings/credentials')).body;
+    expect(rowOf(html, 'githubReadToken')).not.toContain('class="remove"');
+    expect(rowOf(html, 'githubReadToken')).toContain(
+      'environment variable <code>JM_GITHUB_READ_TOKEN</code>',
+    );
+    expect(html).toContain('<button type="button" id="vault-off">Turn off the vault</button>');
+    expect(html).not.toContain(READ);
+  });
+
   test('the page script posts the switches with sudo and never sends a value', () => {
     expect(CREDENTIALS_SCRIPT).toContain("'/api/control/secrets/vault/on'");
     expect(CREDENTIALS_SCRIPT).toContain("'/api/control/secrets/vault/off'");
