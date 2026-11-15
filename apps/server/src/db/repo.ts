@@ -549,6 +549,29 @@ export function listActiveDrops(db: Db, zoneId: string): Drop[] {
     .all(zoneId) as Drop[];
 }
 
+/** Drops newest first, optionally of one zone and of some states, at most `limit`. */
+export function listDrops(
+  db: Db,
+  f: { zoneId?: string; states?: readonly DropState[]; limit: number },
+): Drop[] {
+  const where: string[] = [];
+  const args: (string | number)[] = [];
+  if (f.zoneId !== undefined) {
+    where.push('drop_zone_id = ?');
+    args.push(f.zoneId);
+  }
+  if (f.states !== undefined) {
+    where.push(`state IN (${f.states.map(() => '?').join(', ') || 'NULL'})`);
+    args.push(...f.states);
+  }
+  return db
+    .prepare(
+      `SELECT ${DROP_COLS} FROM drops ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+       ORDER BY created_at DESC, id LIMIT ?`,
+    )
+    .all(...args, f.limit) as Drop[];
+}
+
 export function listRecentDrops(db: Db, limit = 50): Drop[] {
   return db
     .prepare(`SELECT ${DROP_COLS} FROM drops ORDER BY created_at DESC, id LIMIT ?`)

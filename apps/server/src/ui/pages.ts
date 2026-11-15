@@ -11,11 +11,13 @@ import type { CrewIssue } from '../crew/store.js';
 import type {
   AttemptKey,
   Drop,
+  DropState,
   Observation,
   OutboxRow,
   StoredEvent,
   UsageStateRow,
   WorkItem,
+  WorkItemState,
 } from '../db/repo.js';
 import { ACTIVE_DROP_STATES } from '../db/repo.js';
 import type { DoctorAction } from '../doctor/checks.js';
@@ -24,7 +26,7 @@ import { forgetSubmitKey, submitKey } from '../intake.js';
 import type { Status } from '../status.js';
 import type { Gate } from '../usage.js';
 import { STYLE } from './theme.js';
-import { type ZoneRef, zoneName, zoneNamer, zoneTextNamer } from './zone-name.js';
+import { type ZoneRef, zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
 
 export const escapeHtml = (v: unknown): string =>
   String(v)
@@ -481,7 +483,7 @@ export const STORE_NAV_SLOT = '<!--jm-store-nav-->';
 export const STORE_NAV = `<a href="/zones">Zones</a><a href="/settings">Settings</a>`;
 
 /** The pages every install has, in the order the operator reaches for them. */
-const NAV = `<a href="/">Floor</a><a href="/briefings">Briefings</a>${STORE_NAV_SLOT}<a href="/doctor">Doctor</a><a href="/observations">Observations</a>`;
+const NAV = `<a href="/">Floor</a><a href="/work">Work</a><a href="/drops">Drops</a><a href="/briefings">Briefings</a>${STORE_NAV_SLOT}<a href="/doctor">Doctor</a><a href="/observations">Observations</a>`;
 
 /** Marks the link for the current page; the longest matching prefix wins. */
 const NAV_SCRIPT = `<script>(()=>{const p=location.pathname;let best=null,len=-1;for(const a of document.querySelectorAll('.topnav a')){const h=a.getAttribute('href');const hit=h==='/'?p==='/':p===h||p.startsWith(h+'/');if(hit&&h.length>len){best=a;len=h.length;}}if(best)best.setAttribute('aria-current','page');})();</script>`;
@@ -544,6 +546,195 @@ function gateCount(drop: Drop): { total: number; passed: number; failed: number 
   }
 }
 
+/** The work-item ledger's header row, on the floor and on /work. */
+export const WORK_HEAD =
+  '<tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>';
+
+/** The drop ledger's header row, on the floor and on /drops. */
+export const DROP_HEAD =
+  '<tr><th>Drop</th><th>Issue</th><th>Role</th><th>State</th><th>Elapsed</th><th>Gates</th></tr>';
+
+/** What a ready item waits on, in words, or nothing. */
+const waitingOn = (i: WorkItem): string =>
+  i.state === 'ready' && i.blockedBy.length > 0 ? `waiting on ${i.blockedBy.join(', ')}` : '';
+
+/** The work-item ledger's rows (the floor's and /work's), zones named by repository. */
+export function workItemRows(
+  items: readonly WorkItem[],
+  zones: readonly Pick<DropZoneConfig, 'id' | 'repo'>[],
+  details?: Map<number, ItemDetail>,
+): string {
+  const name = zoneNamer(zones);
+  const repoOf = new Map(zones.map((z) => [z.id, z.repo]));
+  const prLink = (i: WorkItem): string => {
+    const repo = repoOf.get(i.dropZoneId);
+    return i.prNumber !== null && repo
+      ? `<a href="${escapeHtml(`https://github.com/${repo}/pull/${i.prNumber}`)}">#${escapeHtml(i.prNumber)}</a>`
+      : '-';
+  };
+  return items
+    .map(
+      (i) =>
+        `<tr><td>${name(i.dropZoneId)}</td><td>#${escapeHtml(i.issueNumber)}</td><td>${escapeHtml(i.title)}</td><td>${badge(i.state)}</td><td>${escapeHtml(i.reason ?? waitingOn(i))}</td><td>${prLink(i)}</td>${detailCells(details?.get(i.id))}</tr>`,
+    )
+    .join('');
+}
+
+/** What a drop works on: its issue, or the crew or doctor. */
+function dropTarget(d: Drop, itemById: Map<number, WorkItem>): string {
+  if (d.workItemId === null) return d.role === 'doctor' ? 'doctor' : 'crew';
+  const wi = itemById.get(d.workItemId);
+  return wi ? `#${escapeHtml(wi.issueNumber)}` : '-';
+}
+
+/** The drop ledger's rows (the floor's and /drops'); `items` resolve each drop's issue. */
+export function dropRows(drops: readonly Drop[], items: readonly WorkItem[], now: Date): string {
+  const itemById = new Map(items.map((i) => [i.id, i]));
+  return drops
+    .map(
+      (d) =>
+        `<tr><td><a href="/drops/${encodeURIComponent(d.id)}">${escapeHtml(d.id)}</a></td><td>${dropTarget(d, itemById)}</td><td>${escapeHtml(d.role)}</td><td>${badge(d.state)}</td><td class="num">${escapeHtml(elapsed(d, now))}</td><td>${gateSummary(d)}</td></tr>`,
+    )
+    .join('');
+}
+
+export const WORK_STATES = ['ready', 'in_flight', 'pr_open', 'parked', 'done'] as const;
+export type WorkFilter = WorkItemState | 'active';
+export const DROP_STATES = [
+  'queued',
+  'leased',
+  'running',
+  'push_pending',
+  'succeeded',
+  'failed',
+  'lost',
+  'cancelled',
+] as const satisfies readonly DropState[];
+export type DropFilter = DropState | 'active' | 'all';
+/** The most drops /drops lists. */
+export const DROP_LIST_LIMIT = 200;
+
+/** A state in words, as headings and filter links say it. */
+const stateWords = (s: string): string =>
+  s === 'pr_open' ? 'PR open' : s.replaceAll('_', ' ').replace('in flight', 'in-flight');
+const capital = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
+
+/**
+ * A list page: back link, heading, the zone and state filter links, then the table or the empty
+ * line. `zone`/`state` absent from a link's query mean "all projects" and the page's default.
+ */
+function listPage(p: {
+  path: string;
+  /** The heading, as HTML. */
+  title: string;
+  /** The heading as plain text, for the document title. */
+  titleText: string;
+  zones: readonly ZoneRef[];
+  zone: string | undefined;
+  state: string;
+  defaultState: string;
+  states: { value: string; label: string }[];
+  head: string;
+  rows: string;
+  empty: string;
+  note?: string;
+}): string {
+  const href = (zone: string | undefined, state: string): string => {
+    const q = new URLSearchParams();
+    if (zone !== undefined) q.set('zone', zone);
+    if (state !== p.defaultState) q.set('state', state);
+    const qs = q.toString();
+    return escapeHtml(qs ? `${p.path}?${qs}` : p.path);
+  };
+  const link = (to: string, label: string, current: boolean): string =>
+    `<a href="${to}"${current ? ' aria-current="page"' : ''}>${label}</a>`;
+  const zoneLinks = [
+    link(href(undefined, p.state), 'All projects', p.zone === undefined),
+    ...p.zones.map((z) => link(href(z.id, p.state), zoneName(z, p.zones), p.zone === z.id)),
+  ].join(' · ');
+  const stateLinks = p.states
+    .map((s) => link(href(p.zone, s.value), escapeHtml(s.label), p.state === s.value))
+    .join(' · ');
+  const body = p.rows
+    ? `<table>${p.head}${p.rows}</table>${p.note ? `<p class="muted">${p.note}</p>` : ''}`
+    : `<p class="empty">${p.empty}</p>`;
+  return page(
+    `<p><a href="/">Back</a></p><h2>${p.title}</h2>` +
+      `<nav class="filters" aria-label="Project"><p>${zoneLinks}</p></nav>` +
+      `<nav class="filters" aria-label="State"><p>${stateLinks}</p></nav>${body}`,
+    { title: p.titleText },
+  );
+}
+
+/** /work: work items of one zone or all, in one state or every state but done. */
+export function renderWorkList(s: {
+  zones: readonly ZoneRef[];
+  zone?: string;
+  state: WorkFilter;
+  /** Already filtered. */
+  items: readonly WorkItem[];
+  details?: Map<number, ItemDetail>;
+}): string {
+  const z = s.zone === undefined ? undefined : s.zones.find((x) => x.id === s.zone);
+  const words = stateWords(s.state);
+  const where = z ? ` in ${zoneName(z, s.zones)}` : '';
+  const heading = (w: string): string => (z ? `${capital(words)} work${w}` : `All ${words} work`);
+  return listPage({
+    path: '/work',
+    title: heading(where),
+    titleText: heading(z ? ` in ${zoneNameText(z, s.zones)}` : ''),
+    zones: s.zones,
+    zone: z?.id,
+    state: s.state,
+    defaultState: 'active',
+    states: [
+      { value: 'active', label: 'Active' },
+      ...WORK_STATES.map((v) => ({ value: v, label: capital(stateWords(v)) })),
+    ],
+    head: WORK_HEAD,
+    rows: workItemRows(s.items, s.zones, s.details),
+    empty: `No ${words} work${where}.`,
+  });
+}
+
+/** /drops: drops newest first, of one zone or all, in one state, the active ones or any. */
+export function renderDropList(s: {
+  zones: readonly ZoneRef[];
+  zone?: string;
+  state: DropFilter;
+  /** Already filtered, newest first, at most DROP_LIST_LIMIT. */
+  drops: readonly Drop[];
+  /** Work items, to name each drop's issue. */
+  items: readonly WorkItem[];
+  /** More drops matched than are shown. */
+  limited: boolean;
+  now?: Date;
+}): string {
+  const z = s.zone === undefined ? undefined : s.zones.find((x) => x.id === s.zone);
+  const words = s.state === 'all' ? '' : `${stateWords(s.state)} `;
+  const where = z ? ` in ${zoneName(z, s.zones)}` : '';
+  const heading = (w: string): string =>
+    z ? `${capital(`${words}drops`)}${w}` : `All ${words}drops`;
+  return listPage({
+    path: '/drops',
+    title: heading(where),
+    titleText: heading(z ? ` in ${zoneNameText(z, s.zones)}` : ''),
+    zones: s.zones,
+    zone: z?.id,
+    state: s.state,
+    defaultState: 'all',
+    states: [
+      { value: 'all', label: 'All states' },
+      { value: 'active', label: 'Active' },
+      ...DROP_STATES.map((v) => ({ value: v, label: capital(stateWords(v)) })),
+    ],
+    head: DROP_HEAD,
+    rows: dropRows(s.drops, s.items, s.now ?? new Date()),
+    empty: `No ${words}drops${where}.`,
+    ...(s.limited ? { note: `Showing the newest ${DROP_LIST_LIMIT}.` } : {}),
+  });
+}
+
 /** From this day the Claude token's age is a banner on home and the Credentials tab. */
 export const TOKEN_BANNER_DAYS = 330;
 const TOKEN_LIFE_DAYS = 365;
@@ -568,7 +759,6 @@ export function renderHome(state: HomeState): string {
         `<p class="warn"><strong>Starter mode in ${name(z.id)}.</strong> ${escapeHtml(STARTER_WARNING)}</p>`,
     )
     .join('');
-  const repoOf = new Map(state.zones.map((z) => [z.id, z.repo]));
   const itemById = new Map(state.items.map((i) => [i.id, i]));
 
   const zones = state.zones
@@ -578,32 +768,9 @@ export function renderHome(state: HomeState): string {
     )
     .join('');
 
-  const prLink = (i: WorkItem): string => {
-    const repo = repoOf.get(i.dropZoneId);
-    return i.prNumber !== null && repo
-      ? `<a href="${escapeHtml(`https://github.com/${repo}/pull/${i.prNumber}`)}">#${escapeHtml(i.prNumber)}</a>`
-      : '-';
-  };
-  const waitingOf = (i: WorkItem): string =>
-    i.state === 'ready' && i.blockedBy.length > 0 ? `waiting on ${i.blockedBy.join(', ')}` : '';
-  const items = state.items
-    .map(
-      (i) =>
-        `<tr><td>${name(i.dropZoneId)}</td><td>#${escapeHtml(i.issueNumber)}</td><td>${escapeHtml(i.title)}</td><td>${badge(i.state)}</td><td>${escapeHtml(i.reason ?? waitingOf(i))}</td><td>${prLink(i)}</td>${detailCells(state.details?.get(i.id))}</tr>`,
-    )
-    .join('');
-
-  const targetOf = (d: Drop): string => {
-    if (d.workItemId === null) return d.role === 'doctor' ? 'doctor' : 'crew';
-    const wi = itemById.get(d.workItemId);
-    return wi ? `#${escapeHtml(wi.issueNumber)}` : '-';
-  };
-  const drops = state.drops
-    .map(
-      (d) =>
-        `<tr><td><a href="/drops/${encodeURIComponent(d.id)}">${escapeHtml(d.id)}</a></td><td>${targetOf(d)}</td><td>${escapeHtml(d.role)}</td><td>${badge(d.state)}</td><td class="num">${escapeHtml(elapsed(d, now))}</td><td>${gateSummary(d)}</td></tr>`,
-    )
-    .join('');
+  const items = workItemRows(state.items, state.zones, state.details);
+  const targetOf = (d: Drop): string => dropTarget(d, itemById);
+  const drops = dropRows(state.drops, state.items, now);
 
   // The slots (§10.1): what each trooper is doing right now, one card per live drop.
   // Everything active but still queued, which nothing has started; a pending push still holds its slot.
@@ -635,7 +802,7 @@ export function renderHome(state: HomeState): string {
           .slice(0, QUEUE_SHOWN)
           .map(
             (i) =>
-              `<tr><td class="num">${name(i.dropZoneId)} #${escapeHtml(i.issueNumber)}</td><td>${escapeHtml(i.title)}</td><td>${escapeHtml(waitingOf(i) || '-')}</td></tr>`,
+              `<tr><td class="num">${name(i.dropZoneId)} #${escapeHtml(i.issueNumber)}</td><td>${escapeHtml(i.title)}</td><td>${escapeHtml(waitingOn(i) || '-')}</td></tr>`,
           )
           .join(
             '',
@@ -678,16 +845,18 @@ export function renderHome(state: HomeState): string {
       `<div class="grid">${ledger(
         'Issues Jumpmaster is working',
         '<h2>Work items</h2>',
-        '<tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>',
+        WORK_HEAD,
         items,
         'No work items yet.',
+        '<p><a href="/work">All work items</a></p>',
       )}</div>` +
       `<div class="grid">${ledger(
         'Jobs, newest first',
         '<h2>Drops</h2>',
-        '<tr><th>Drop</th><th>Issue</th><th>Role</th><th>State</th><th>Elapsed</th><th>Gates</th></tr>',
+        DROP_HEAD,
         drops,
         'No drops yet.',
+        '<p><a href="/drops">All drops</a></p>',
       )}</div>` +
       `<div class="grid">${ledger(
         'Projects',

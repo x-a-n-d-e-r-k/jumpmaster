@@ -8,17 +8,21 @@ import type { GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import { statusOf } from '../status.js';
 import {
+  dropRows,
   escapeHtml,
   page,
   renderBriefings,
   renderDoctor,
   renderDrop,
+  renderDropList,
   renderGoals,
   renderHome,
   renderIntake,
   renderObservations,
+  renderWorkList,
   statusBanner,
   waitingOnYou,
+  workItemRows,
 } from './pages.js';
 import { zoneTextNamer } from './zone-name.js';
 
@@ -958,5 +962,78 @@ describe('zones are named by their repository (#99)', () => {
     );
     expect(obs).toContain('<td>acme/widgets</td>');
     expectNoBareId(obs);
+  });
+});
+
+describe('renderWorkList and renderDropList (#119)', () => {
+  const ref: DropZoneConfig = { ...z, id: 'ref', repo: 'octo/ref' };
+  const zones = [z, ref];
+
+  test('the floor and /work render work rows through workItemRows', () => {
+    const items = [item, { ...item, id: 2, dropZoneId: 'ref', title: 'other <b>' }];
+    const rows = workItemRows(items, zones);
+    expect(rows).toContain('other &lt;b&gt;');
+    expect(renderHome({ zones, items, drops: [] })).toContain(rows);
+    expect(renderWorkList({ zones, state: 'active', items })).toContain(rows);
+  });
+
+  test('the floor and /drops render drop rows through dropRows', () => {
+    const now = new Date('2026-01-01T00:02:00.000Z');
+    const rows = dropRows([drop], [item], now);
+    expect(rows).toContain('>d1</a>');
+    expect(renderHome({ zones, items: [item], drops: [drop], now })).toContain(rows);
+    expect(
+      renderDropList({ zones, state: 'all', drops: [drop], items: [item], limited: false, now }),
+    ).toContain(rows);
+  });
+
+  test('the heading names the filter in words, the zone by repository', () => {
+    expect(renderWorkList({ zones, zone: 'main', state: 'parked', items: [] })).toContain(
+      'Parked work in octo/demo',
+    );
+    expect(renderWorkList({ zones, state: 'active', items: [item] })).toContain('All active work');
+    expect(
+      renderDropList({ zones, zone: 'ref', state: 'active', drops: [], items: [], limited: false }),
+    ).toContain('Active drops in octo/ref');
+    expect(
+      renderDropList({ zones, state: 'all', drops: [drop], items: [], limited: false }),
+    ).toContain('All drops');
+  });
+
+  test('filter links keep the other parameter and mark the current choice', () => {
+    const html = renderWorkList({ zones, zone: 'ref', state: 'ready', items: [] });
+    expect(html).toContain(
+      '<a href="/work?zone=ref&amp;state=ready" aria-current="page">octo/ref</a>',
+    );
+    expect(html).toContain('<a href="/work?zone=main&amp;state=ready">octo/demo</a>');
+    expect(html).toContain('<a href="/work?state=ready">All projects</a>');
+    expect(html).toContain('<a href="/work?zone=ref&amp;state=parked">Parked</a>');
+    expect(html).toContain('<a href="/work?zone=ref">Active</a>');
+    const drops = renderDropList({ zones, state: 'failed', drops: [], items: [], limited: false });
+    expect(drops).toContain('<a href="/drops?state=failed" aria-current="page">All projects</a>');
+    expect(drops).toContain('<a href="/drops?zone=main&amp;state=failed">octo/demo</a>');
+    expect(drops).toContain('<a href="/drops?state=active">Active</a>');
+    expect(drops).toContain('<a href="/drops">All states</a>');
+  });
+
+  test('empty results: the page-specific line and no table', () => {
+    const work = renderWorkList({ zones, zone: 'main', state: 'parked', items: [] });
+    expect(work).toContain('No parked work in octo/demo.');
+    expect(work).not.toContain('<table');
+    const drops = renderDropList({ zones, state: 'active', drops: [], items: [], limited: false });
+    expect(drops).toContain('No active drops.');
+    expect(drops).not.toContain('<table');
+  });
+
+  test('the limit line shows only when limited', () => {
+    const args = { zones, state: 'all' as const, drops: [drop], items: [] };
+    expect(renderDropList({ ...args, limited: true })).toContain('Showing the newest 200');
+    expect(renderDropList({ ...args, limited: false })).not.toContain('Showing the newest 200');
+  });
+
+  test('the page nav links Work and Drops', () => {
+    const html = page('x');
+    expect(html).toContain('<a href="/work">Work</a>');
+    expect(html).toContain('<a href="/drops">Drops</a>');
   });
 });
