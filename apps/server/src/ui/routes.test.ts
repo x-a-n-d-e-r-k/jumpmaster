@@ -4,7 +4,17 @@ import { describe, expect, test } from 'vitest';
 import { raiseBriefing, ruleBriefing } from '../briefings.js';
 import { DEFAULT_PROTECTED_PATHS } from '../config.js';
 import { insertCrewIssue } from '../crew/store.js';
-import { insertDrop, insertStick, setWorkItemState, stampStick, updateDrop } from '../db/repo.js';
+import {
+  type DropState,
+  insertDrop,
+  insertStick,
+  setWorkItemState,
+  stampStick,
+  updateDrop,
+  upsertDropZone,
+  upsertWorkItem,
+  type WorkItemState,
+} from '../db/repo.js';
 import { actionFor, PAGES_M45A, pagesOf } from '../doctor/actions.js';
 import { CHECK_IDS, DOC } from '../doctor/checks.js';
 import { zoneGuidance } from '../github/guidance.js';
@@ -422,5 +432,180 @@ describe('the status line (Task 12)', () => {
       headers: { host: 'localhost:80' },
     });
     expect(anon.statusCode).toBe(401);
+  });
+});
+
+describe('/work and /drops list pages (#119)', () => {
+  async function lists() {
+    const h = await harness({ extraZones: [{ id: 'ref', repo: 'octo/ref' }] });
+    for (const z of [h.zone, { id: 'ref', repo: 'octo/ref' }])
+      upsertDropZone(h.db, { id: z.id, repo: z.repo, defaultBranch: 'main', configJson: '{}' });
+    let n = 100;
+    const item = (zoneId: string, state: WorkItemState, title = `${zoneId}-${state}-${n}`) => {
+      const w = upsertWorkItem(
+        h.db,
+        {
+          dropZoneId: zoneId,
+          issueNumber: n++,
+          title,
+          body: 'b',
+          author: 'human',
+          priority: 2,
+          isFix: false,
+          issueCreatedAt: '2026-01-01T00:00:00.000Z',
+        },
+        h.now(),
+      );
+      if (state !== 'ready') setWorkItemState(h.db, w.id, state, undefined, h.now());
+      return w;
+    };
+    return { h, item };
+  }
+  const drop = (
+    h: Awaited<ReturnType<typeof harness>>,
+    id: string,
+    state: DropState,
+    zoneId = 'main',
+    createdAt = '2026-01-01T00:00:00.000Z',
+    workItemId: number | null = null,
+  ) =>
+    insertDrop(h.db, {
+      id,
+      dropZoneId: zoneId,
+      workItemId,
+      role: workItemId === null ? 'crew-lead' : 'implement',
+      state,
+      createdAt,
+    });
+
+  test('?zone= keeps that zone’s rows only, and names the zone by repository', async () => {
+    const { h, item } = await lists();
+    item('main', 'parked', 'main parked one');
+    item('main', 'parked', 'main parked two');
+    item('ref', 'parked', 'ref parked');
+    const res = await h.view('/work?zone=main&state=parked');
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('main parked one');
+    expect(res.body).toContain('main parked two');
+    expect(res.body).not.toContain('ref parked');
+    expect(res.body).toContain('Parked work in octo/demo');
+    expect(res.body).not.toContain('zone main');
+    // Filter links name each zone by its repository and keep the state.
+    expect(res.body).toContain('href="/work?zone=ref&amp;state=parked">octo/ref</a>');
+    expect(res.body).toMatch(/href="\/work\?state=parked"[^>]*>All projects<\/a>/);
+    expect(res.body).toMatch(
+      /<a href="\/work\?zone=main&amp;state=parked" aria-current="page">octo\/demo<\/a>/,
+    );
+    expect(res.body).toMatch(
+      /<a href="\/work\?zone=main&amp;state=parked" aria-current="page">Parked<\/a>/,
+    );
+  });
+
+  test('?state=parked drops a ready row; the default shows everything but done', async () => {
+    const { h, item } = await lists();
+    item('main', 'ready', 'is ready');
+    item('main', 'in_flight', 'is in flight');
+    item('main', 'pr_open', 'is pr open');
+    item('ref', 'parked', 'is parked');
+    item('main', 'done', 'is done');
+    const parked = (await h.view('/work?state=parked')).body;
+    expect(parked).toContain('is parked');
+    expect(parked).not.toContain('is ready');
+    const all = await h.view('/work');
+    expect(all.statusCode).toBe(200);
+    for (const t of ['is ready', 'is in flight', 'is pr open', 'is parked'])
+      expect(all.body).toContain(t);
+    expect(all.body).not.toContain('is done');
+    expect(all.body).toContain('All active work');
+  });
+
+  test('an issue title is escaped on /work', async () => {
+    const { h, item } = await lists();
+    item('main', 'ready', '<script>x</script>');
+    const body = (await h.view('/work')).body;
+    expect(body).toContain('&lt;script&gt;x&lt;/script&gt;');
+    expect(body).not.toContain('<script>x</script>');
+  });
+
+  test('no matching rows: the empty line, and no table', async () => {
+    const { h, item } = await lists();
+    item('ref', 'parked');
+    const work = (await h.view('/work?zone=main&state=parked')).body;
+    expect(work).toContain('No parked work in octo/demo.');
+    expect(work).not.toContain('<table');
+    const drops = (await h.view('/drops?zone=ref')).body;
+    expect(drops).toContain('No drops in octo/ref.');
+    expect(drops).not.toContain('<table');
+  });
+
+  test('/drops?state=active keeps queued, leased, running and push_pending', async () => {
+    const { h, item } = await lists();
+    for (const s of ['queued', 'leased', 'running', 'push_pending', 'succeeded'] as const)
+      drop(h, `drop-${s}`, s, 'main', '2026-01-01T00:00:00.000Z', item('main', 'in_flight').id);
+    const body = (await h.view('/drops?state=active')).body;
+    for (const s of ['queued', 'leased', 'running', 'push_pending'])
+      expect(body).toContain(`>drop-${s}</a>`);
+    expect(body).not.toContain('drop-succeeded');
+    expect(body).toContain('All active drops');
+  });
+
+  test('/drops?zone= keeps that zone’s drops, newest first', async () => {
+    const { h } = await lists();
+    drop(h, 'old-main', 'succeeded', 'main', '2026-01-01T00:00:00.000Z');
+    drop(h, 'new-main', 'failed', 'main', '2026-01-02T00:00:00.000Z');
+    drop(h, 'ref-drop', 'succeeded', 'ref');
+    const body = (await h.view('/drops?zone=main')).body;
+    expect(body).not.toContain('ref-drop');
+    expect(body.indexOf('>new-main<')).toBeGreaterThan(-1);
+    expect(body.indexOf('>new-main<')).toBeLessThan(body.indexOf('>old-main<'));
+    expect(body).toContain('Drops in octo/demo');
+  });
+
+  test('/drops shows the newest 200, and says so only when more exist', async () => {
+    const { h } = await lists();
+    const at = (i: number) => new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString();
+    for (let i = 0; i < 200; i++)
+      drop(h, `d${String(i).padStart(3, '0')}`, 'succeeded', 'main', at(i));
+    const two = (await h.view('/drops')).body;
+    expect(two.match(/<a href="\/drops\/d\d+">/g)).toHaveLength(200);
+    expect(two).not.toContain('Showing the newest 200');
+    drop(h, 'd200', 'succeeded', 'main', at(200));
+    const more = (await h.view('/drops')).body;
+    expect(more.match(/<a href="\/drops\/d\d+">/g)).toHaveLength(200);
+    expect(more).toContain('Showing the newest 200');
+    expect(more).toContain('>d200<');
+    expect(more).not.toContain('>d000<');
+  });
+
+  test.each([
+    ['/work?zone=nope', 'no such zone'],
+    ['/drops?zone=nope', 'no such zone'],
+    ['/work?state=bogus', 'no such state'],
+    ['/drops?state=bogus', 'no such state'],
+    ['/work?state=cancelled', 'no such state'],
+  ])('%s is 404 %s', async (url, text) => {
+    const { h } = await lists();
+    const res = await h.view(url);
+    expect(res.statusCode).toBe(404);
+    expect(res.headers['content-type']).toMatch(/^text\/plain/);
+    expect(res.body).toBe(text);
+  });
+
+  test('anonymous: /work and /drops are refused as /briefings is', async () => {
+    const { h } = await lists();
+    const anon = async (url: string) => (await h.app.inject({ method: 'GET', url })).statusCode;
+    const briefings = await anon('/briefings');
+    expect(briefings).not.toBe(200);
+    expect(await anon('/work')).toBe(briefings);
+    expect(await anon('/drops')).toBe(briefings);
+  });
+
+  test('the floor links its two ledgers to the list pages, and the nav has Work and Drops', async () => {
+    const { h } = await lists();
+    const home = (await h.view('/')).body;
+    expect(home).toContain('<a href="/work">All work items</a>');
+    expect(home).toContain('<a href="/drops">All drops</a>');
+    expect(home).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/work">Work<\/a>.*<\/nav>/);
+    expect(home).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/drops">Drops<\/a>.*<\/nav>/);
   });
 });

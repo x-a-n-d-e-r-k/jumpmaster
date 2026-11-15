@@ -14,6 +14,7 @@ import { creditDropsSince, creditSignal } from './credits.js';
 import { listCrewIssues } from './crew/store.js';
 import type { Db } from './db/open.js';
 import {
+  ACTIVE_DROP_STATES,
   type AttemptKey,
   getAttempts,
   getDrop,
@@ -24,12 +25,14 @@ import {
   isKilled,
   latestRateLimitEvent,
   latestVerdict,
+  listDrops,
   listEvents,
   listObservations,
   listOutbox,
   listRecentDrops,
   listSticks,
   listWorkItems,
+  type WorkItem,
 } from './db/repo.js';
 import { pagesOf } from './doctor/actions.js';
 import { latestDoctorRun } from './doctor/run.js';
@@ -46,18 +49,23 @@ import { registerConfirmPages } from './ui/confirm.js';
 import { registerGithubPages } from './ui/github.js';
 import {
   type CrewLine,
+  DROP_LIST_LIMIT,
+  DROP_STATES,
   type HomeState,
   type ItemDetail,
   renderBriefings,
   renderDoctor,
   renderDrop,
+  renderDropList,
   renderGoals,
   renderHome,
   renderIntake,
   renderObservations,
+  renderWorkList,
   STORE_NAV,
   STORE_NAV_SLOT,
   type StickLine,
+  WORK_STATES,
 } from './ui/pages.js';
 import { claudeTokenDays, registerSettingsPages } from './ui/settings.js';
 import { registerSetupPages, wizardActive } from './ui/setup.js';
@@ -75,6 +83,43 @@ const ATTEMPT_KEYS: AttemptKey[] = [
   'heal_no_change',
   'rate_limit',
 ];
+
+/** Per work item: its PR head, whether Command allowed its gate change, verdict and attempts. */
+function itemDetails(db: Db, items: readonly WorkItem[]): Map<number, ItemDetail> {
+  const details = new Map<number, ItemDetail>();
+  for (const i of items) {
+    const v = latestVerdict(db, i.id);
+    const pr = getPullRequest(db, i.id);
+    details.set(i.id, {
+      ...(pr ? { headSha: pr.headSha } : {}),
+      ...(pr && getGateAllowance(db, i.id, pr.number, pr.headSha)
+        ? { gateAllowedSha: pr.headSha }
+        : {}),
+      ...(v ? { verdict: { decision: v.decision, forced: v.forced, summary: v.summary } } : {}),
+      attempts: Object.fromEntries(ATTEMPT_KEYS.map((k) => [k, getAttempts(db, i.id, k).count])),
+    });
+  }
+  return details;
+}
+
+/**
+ * The list pages' filters: `zone` among the configured zones, `state` among `states`. A missing
+ * parameter stays unset; an unknown one (or a repeated one) is refused, answered 404 as /briefings.
+ */
+function listFilter<S extends string>(
+  query: { zone?: unknown; state?: unknown },
+  zones: readonly { id: string }[],
+  states: readonly S[],
+): { zone?: string; state?: S } | { refuse: string } {
+  const { zone, state } = query;
+  if (zone !== undefined && !zones.some((z) => z.id === zone)) return { refuse: 'no such zone' };
+  if (state !== undefined && !(states as readonly unknown[]).includes(state))
+    return { refuse: 'no such state' };
+  return {
+    ...(typeof zone === 'string' ? { zone } : {}),
+    ...(state !== undefined ? { state: state as S } : {}),
+  };
+}
 
 /** Fastify instance with stick and UI routes registered; the caller listens. Logger stays off: payloads carry tokens. */
 /** The home page's usage section: the gate, the stored state and the credits stop's counts. */
@@ -185,19 +230,7 @@ export function createApp(
     const config = cfg(req);
     const at = now();
     const items = config.dropZones.flatMap((z) => listWorkItems(db, z.id));
-    const details = new Map<number, ItemDetail>();
-    for (const i of items) {
-      const v = latestVerdict(db, i.id);
-      const pr = getPullRequest(db, i.id);
-      details.set(i.id, {
-        ...(pr ? { headSha: pr.headSha } : {}),
-        ...(pr && getGateAllowance(db, i.id, pr.number, pr.headSha)
-          ? { gateAllowedSha: pr.headSha }
-          : {}),
-        ...(v ? { verdict: { decision: v.decision, forced: v.forced, summary: v.summary } } : {}),
-        attempts: Object.fromEntries(ATTEMPT_KEYS.map((k) => [k, getAttempts(db, i.id, k).count])),
-      });
-    }
+    const details = itemDetails(db, items);
     const floor = floorBriefings(db, config.dropZones);
     const html = renderHome({
       setup: {
@@ -288,6 +321,49 @@ export function createApp(
       zones: config.dropZones,
       holds,
       ...(zone ? { zone: { id: zone.id, mode: getZoneMode(db, zone.id, zone.mode) } } : {}),
+    });
+    return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
+  });
+
+  app.get<{ Querystring: { zone?: string; state?: string } }>('/work', async (req, reply) => {
+    const { db } = deps;
+    const config = cfg(req);
+    const f = listFilter(req.query, config.dropZones, ['active', ...WORK_STATES] as const);
+    if ('refuse' in f) return reply.code(404).type('text/plain').send(f.refuse);
+    const state = f.state ?? 'active';
+    const items = config.dropZones
+      .filter((z) => f.zone === undefined || z.id === f.zone)
+      .flatMap((z) => listWorkItems(db, z.id))
+      .filter((i) => (state === 'active' ? i.state !== 'done' : i.state === state));
+    const html = renderWorkList({
+      zones: config.dropZones,
+      ...(f.zone !== undefined ? { zone: f.zone } : {}),
+      state,
+      items,
+      details: itemDetails(db, items),
+    });
+    return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
+  });
+
+  app.get<{ Querystring: { zone?: string; state?: string } }>('/drops', async (req, reply) => {
+    const { db } = deps;
+    const config = cfg(req);
+    const f = listFilter(req.query, config.dropZones, ['all', 'active', ...DROP_STATES] as const);
+    if ('refuse' in f) return reply.code(404).type('text/plain').send(f.refuse);
+    const state = f.state ?? 'all';
+    const found = listDrops(db, {
+      ...(f.zone !== undefined ? { zoneId: f.zone } : {}),
+      ...(state === 'all' ? {} : { states: state === 'active' ? ACTIVE_DROP_STATES : [state] }),
+      limit: DROP_LIST_LIMIT + 1,
+    });
+    const html = renderDropList({
+      zones: config.dropZones,
+      ...(f.zone !== undefined ? { zone: f.zone } : {}),
+      state,
+      drops: found.slice(0, DROP_LIST_LIMIT),
+      items: config.dropZones.flatMap((z) => listWorkItems(db, z.id)),
+      limited: found.length > DROP_LIST_LIMIT,
+      now: deps.now(),
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
