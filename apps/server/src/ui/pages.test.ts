@@ -15,6 +15,7 @@ import {
   renderGoals,
   renderHome,
   renderIntake,
+  renderObservations,
   statusBanner,
   waitingOnYou,
 } from './pages.js';
@@ -489,6 +490,7 @@ describe('briefings', () => {
       renderHome({ zones: [z], items: [], drops: [], briefings: [evil] }) +
       renderGoals({
         zone: z,
+        zones: [z],
         goals: undefined,
         crewIssues: [
           crewIssue({ title: X, key: X, objective: X, findingsJson: JSON.stringify([X]) }),
@@ -537,6 +539,7 @@ describe('goal ladder', () => {
   test('the ladder marks done objectives and the current one, and lists crew issues with their state and work item', () => {
     const html = renderGoals({
       zone: z,
+      zones: [z],
       goals: goals({
         ok: true,
         lighthouse: 'Every endpoint is documented.',
@@ -571,6 +574,7 @@ describe('goal ladder', () => {
   test('marker-bearing issues skipped at intake are listed on the zone page', () => {
     const html = renderGoals({
       zone: z,
+      zones: [z],
       goals: undefined,
       crewIssues: [],
       items: [],
@@ -584,6 +588,7 @@ describe('goal ladder', () => {
   test('a skipped issue on a rejected or failed crew row is listed with its remedy', () => {
     const html = renderGoals({
       zone: z,
+      zones: [z],
       goals: undefined,
       crewIssues: [
         crewIssue({ id: 5, number: 24, state: 'rejected' }),
@@ -606,6 +611,7 @@ describe('goal ladder', () => {
   test('an unparsed GOAL.md shows its parse error', () => {
     const html = renderGoals({
       zone: z,
+      zones: [z],
       goals: goals({ ok: false, error: 'no ## Objectives section' }),
       crewIssues: [],
       items: [],
@@ -647,7 +653,7 @@ describe('home crew line', () => {
     });
     expect(html).toContain('<h2>Crew</h2>');
     expect(html).toMatch(
-      /main<\/td><td>on<\/td><td>2026-01-01T00:00:00.000Z<\/td><td>2026-01-01T01:00:00.000Z<\/td><td>plan pro does not include Fable/,
+      /octo\/demo<\/td><td>on<\/td><td>2026-01-01T00:00:00.000Z<\/td><td>2026-01-01T01:00:00.000Z<\/td><td>plan pro does not include Fable/,
     );
   });
 });
@@ -656,19 +662,23 @@ describe('starter banner', () => {
   test('the home page warns about each starter zone, and says nothing for two-bot', () => {
     const starter = { ...z, id: 'solo', identity: 'starter' } as DropZoneConfig;
     const html = renderHome({ zones: [z, starter], items: [], drops: [] });
-    expect(html).toContain('Starter mode in zone solo');
+    // The starter shares main's repository, so its id follows.
+    expect(html).toContain('Starter mode in octo/demo <small>(solo)</small>');
     expect(html).toContain(escapeHtml(STARTER_WARNING));
     expect(renderHome({ zones: [z], items: [], drops: [] })).not.toContain('Starter mode');
   });
 });
 
 describe('renderIntake', () => {
-  const zone = { id: 'main"><script>x</script>', repo: 'octo/demo' } as DropZoneConfig;
+  const zone = {
+    id: 'main"><script>x</script>',
+    repo: 'octo/<script>x</script>',
+  } as DropZoneConfig;
 
   test('three steps, every value escaped, no secret, and the first issue needs no merged GOAL.md', () => {
     const html = renderIntake(zone);
     expect(html).not.toContain('<script>x</script>');
-    expect(html).toContain('main&quot;&gt;&lt;script&gt;x&lt;/script&gt;');
+    expect(html).toContain('Intake: octo/&lt;script&gt;x&lt;/script&gt;');
     expect(html).toContain("the first issue doesn't need GOAL.md merged first");
     for (const t of ['existing', 'idea', 'partial']) expect(html).toContain(`value="${t}"`);
     expect(html).toMatch(/Step 1/);
@@ -753,4 +763,133 @@ describe('the status banner (Task 12, round 2)', () => {
 test('the home page sticks section has an anchor the status links to', () => {
   const html = renderHome({ zones: [], items: [], drops: [], sticks: [] });
   expect(html).toContain('<h2 id="sticks">Sticks</h2>');
+});
+
+describe('zones are named by their repository (#99)', () => {
+  const solo: DropZoneConfig = { ...z, id: 'zid-solo', repo: 'acme/widgets', identity: 'starter' };
+  const a: DropZoneConfig = { ...z, id: 'zid-a', repo: 'acme/shared' };
+  const b: DropZoneConfig = { ...z, id: 'zid-b', repo: 'acme/shared' };
+  const zones = [solo, a, b];
+  /** The page with every URL, and the attributes that carry ids to the API, taken out. */
+  const outsideUrls = (html: string) =>
+    html.replace(/(href|action|data-[a-z-]+)="[^"]*"/g, '').replace(/\/zones\/[^\s"'<]*/g, '');
+  /** No zone id anywhere but in a shared-repository suffix. */
+  const expectNoBareId = (html: string) => {
+    const text = outsideUrls(html).replaceAll(/<small>\(zid-[ab]\)<\/small>/g, '');
+    expect(text).not.toMatch(/zid-/);
+  };
+
+  test('the floor names every zone by repository, and adds the id where a repository is shared', () => {
+    const html = renderHome({
+      zones,
+      items: [
+        { ...item, dropZoneId: 'zid-solo', state: 'ready', prNumber: null },
+        { ...item, id: 2, dropZoneId: 'zid-a' },
+      ],
+      drops: [
+        { ...drop, dropZoneId: 'zid-solo', workItemId: 1, state: 'running' },
+        {
+          ...drop,
+          id: 'd2',
+          dropZoneId: 'zid-b',
+          workItemId: null,
+          role: 'crew-lead',
+          state: 'running',
+        },
+      ],
+      briefings: [briefing({ zoneId: 'zid-b' })],
+      crew: zones.map((zz) => ({
+        zoneId: zz.id,
+        enabled: true,
+        lastCycle: null,
+        nextDue: null,
+        fable: 'ok',
+      })),
+      sticks: [
+        {
+          id: 's1',
+          name: 'st',
+          version: null,
+          lastSeenAt: null,
+          capabilities: [],
+          imagePolicy: 'allowlist',
+          cannotRun: [{ zoneId: 'zid-solo', missing: ['egress-v1'] }],
+        },
+      ],
+      outbox: [
+        {
+          id: 1,
+          kind: 'comment',
+          zoneId: 'zid-a',
+          workItemId: null,
+          state: 'failed',
+          error: null,
+          updatedAt: 't',
+        } as never,
+      ],
+    });
+    expect(html).toContain('acme/widgets');
+    expect(html).toContain('acme/shared <small>(zid-a)</small>');
+    expect(html).toContain('acme/shared <small>(zid-b)</small>');
+    expect(html).toContain('Starter mode in acme/widgets');
+    expect(html).toContain('cannot run acme/widgets: lacks egress-v1');
+    // The ids stay in the URLs.
+    expect(html).toContain('href="/zones/zid-solo/goals"');
+    expectNoBareId(html);
+  });
+
+  test('the briefings page names the zone of each briefing and ruling by repository', () => {
+    const html = renderBriefings({
+      open: [briefing({ zoneId: 'zid-solo' }), briefing({ id: 5, zoneId: 'zid-a' })],
+      rulings: [ruling({ zoneId: 'zid-b' })],
+      zones,
+    });
+    expect(html).toContain('<th>Zone</th><td>acme/widgets</td>');
+    expect(html).toContain('<th>Zone</th><td>acme/shared <small>(zid-a)</small></td>');
+    expect(html).toContain('<td>acme/shared <small>(zid-b)</small></td>');
+    expectNoBareId(html);
+  });
+
+  test('the goals, intake, doctor and observations pages name the zone by repository', () => {
+    const goals = renderGoals({
+      zone: solo,
+      zones,
+      goals: undefined,
+      crewIssues: [],
+      items: [],
+      skippedCrewUnpromoted: [],
+    });
+    expect(goals).toContain('acme/widgets');
+    expectNoBareId(goals);
+    const intake = renderIntake(a, zones);
+    expect(intake).toContain('Intake: acme/shared <small>(zid-a)</small>');
+    expectNoBareId(intake);
+    const doctor = renderDoctor(
+      {
+        id: 1,
+        finishedAt: 't',
+        checks: [{ id: 'c1', zoneId: 'zid-b', status: 'fail', summary: 's' }],
+      },
+      zones,
+    );
+    expect(doctor).toContain('Doctor drop: acme/widgets');
+    expect(doctor).toContain('<td>acme/shared <small>(zid-b)</small></td>');
+    expectNoBareId(doctor);
+    const obs = renderObservations(
+      [
+        {
+          zoneId: 'zid-solo',
+          itemId: null,
+          action: 'x',
+          detail: 'y',
+          count: 1,
+          firstAt: 't',
+          lastAt: 't',
+        } as never,
+      ],
+      zones,
+    );
+    expect(obs).toContain('<td>acme/widgets</td>');
+    expectNoBareId(obs);
+  });
 });

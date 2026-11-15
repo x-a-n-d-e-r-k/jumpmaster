@@ -83,7 +83,7 @@ describe('UI routes', () => {
       capabilities: ['egress-v1'],
     });
     const html = (await get(h, '/')).body;
-    expect(html).toMatch(/m3-stick<\/td>.*cannot run main: lacks egress-v1/);
+    expect(html).toMatch(/m3-stick<\/td>.*cannot run octo\/demo: lacks egress-v1/);
     expect(html).toMatch(/new-stick<\/td>.*all zones/);
   });
 

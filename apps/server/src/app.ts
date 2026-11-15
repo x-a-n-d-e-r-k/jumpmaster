@@ -286,6 +286,7 @@ export function createApp(
     if (!zone) return reply.code(404).type('text/plain').send('not found');
     const html = renderGoals({
       zone,
+      zones: config.dropZones,
       goals: getGoals(db, zone.id),
       crewIssues: listCrewIssues(db, zone.id),
       items: listWorkItems(db, zone.id),
@@ -295,9 +296,10 @@ export function createApp(
   });
 
   app.get<{ Params: { id: string } }>('/zones/:id/intake', async (req, reply) => {
-    const zone = cfg(req).dropZones.find((z) => z.id === req.params.id);
+    const zones = cfg(req).dropZones;
+    const zone = zones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).type('text/plain').send('not found');
-    return reply.type('text/html; charset=utf-8').send(withCsrf(req, renderIntake(zone)));
+    return reply.type('text/html; charset=utf-8').send(withCsrf(req, renderIntake(zone, zones)));
   });
 
   app.get('/doctor', async (req, reply) =>
@@ -309,7 +311,7 @@ export function createApp(
   app.get('/observations', async (req, reply) =>
     reply
       .type('text/html; charset=utf-8')
-      .send(withCsrf(req, renderObservations(listObservations(deps.db)))),
+      .send(withCsrf(req, renderObservations(listObservations(deps.db), cfg(req).dropZones))),
   );
 
   app.get<{ Params: { id: string } }>('/artifacts/:id', async (req, reply) => {
