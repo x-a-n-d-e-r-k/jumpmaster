@@ -156,6 +156,8 @@ async function* spawnClaude(
 }
 
 const PAYLOAD_START = '{"protocol":';
+const LEAKED_OPTIONS = /"(?:hijack|stream)":/;
+const PREFIX_MAX_LINES = 4;
 
 /** A payload carries a task prompt and its context, so the bound is generous. */
 const PAYLOAD_MAX_BYTES = 16 * 1024 * 1024;
@@ -164,6 +166,7 @@ const PAYLOAD_MAX_BYTES = 16 * 1024 * 1024;
  * Read the payload: from a file, or as the first line of stdin. Stdin is left open and unread
  * past that line; the caller closes it (agent roles) or keeps it for the grant (push role).
  * A sender that closes stdin without a trailing newline is accepted: the stick does so today.
+ * The grant sender must end its line with a newline (readGrant waits for one).
  */
 export async function readPayload(
   file: string | undefined,
@@ -173,6 +176,20 @@ export async function readPayload(
   if (file) text = readFileSync(file, 'utf8');
   else {
     text = await readLine(stdin, PAYLOAD_MAX_BYTES, true);
+    // A leaked attach-options prefix can itself end in a newline, putting the payload on a later
+    // line. Look a few lines further, but only past a line that looks like those options, so a
+    // bad payload on an open stdin is refused rather than waited on.
+    for (
+      let i = 0;
+      i < PREFIX_MAX_LINES && LEAKED_OPTIONS.test(text) && !text.includes(PAYLOAD_START);
+      i++
+    ) {
+      try {
+        text = await readLine(stdin, PAYLOAD_MAX_BYTES, true);
+      } catch {
+        break;
+      }
+    }
   }
   // Docker can pass the attach request's body to stdin ahead of the payload. The payload is
   // serialised in schema order, so it starts with its protocol field: parse from there.

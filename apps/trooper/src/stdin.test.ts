@@ -56,3 +56,11 @@ test('readGrant never echoes the line on a bad grant', async () => {
   const err2 = await readGrant(notJson).catch((e) => e);
   expect(String(err2.message)).not.toContain('tok-SECRET');
 });
+
+test('readLine returns two lines written in one chunk of a byte stream, leaving it open', async () => {
+  const s = new PassThrough();
+  s.write('one\ntwo\n');
+  expect(await readLine(s, 100)).toBe('one');
+  expect(await readLine(s, 100)).toBe('two');
+  expect(s.destroyed).toBe(false);
+});

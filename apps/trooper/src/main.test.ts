@@ -3,6 +3,7 @@ import type { DropPayload, GateResult } from '@jumpmaster/protocol';
 import { expect, test } from 'vitest';
 import type { TrooperDeps } from './main.js';
 import { describeFatal, readPayload, runTrooper } from './main.js';
+import { readGrant } from './stdin.js';
 
 const payload: DropPayload = {
   protocol: 1,
@@ -295,18 +296,46 @@ test('readPayload strips a Docker prefix', async () => {
   expect((await readPayload(undefined, s)).dropId).toBe('d1');
 });
 
-test('readPayload accepts a push payload and leaves the grant line unread', async () => {
-  const push = {
-    protocol: 1,
-    role: 'push',
-    dropId: 'd1',
-    epoch: 1,
-    branch: 'jm/x',
-    salvage: false,
-  };
-  const s = Readable.from([`${JSON.stringify(push)}\nnext\n`]);
-  const p = await readPayload(undefined, s);
-  expect(p.role).toBe('push');
+const pushPayload = {
+  protocol: 1,
+  role: 'push',
+  dropId: 'd1',
+  epoch: 1,
+  branch: 'jm/x',
+  salvage: false,
+};
+const grantLine = JSON.stringify({
+  token: 't',
+  owner: 'o',
+  name: 'n',
+  branch: 'jm/x',
+  base: 'main',
+  lease: 'l',
+  protectedPaths: [],
+  secrets: [],
+});
+
+test('readPayload leaves the grant line unread when both arrive in one chunk', async () => {
+  const s = new PassThrough();
+  s.write(`${JSON.stringify(pushPayload)}\n${grantLine}\n`);
+  expect((await readPayload(undefined, s)).role).toBe('push');
+  expect((await readGrant(s)).branch).toBe('jm/x');
+  expect(s.destroyed).toBe(false);
+});
+
+test('readPayload then readGrant works when the grant is written later', async () => {
+  const s = new PassThrough();
+  s.write(`${JSON.stringify(pushPayload)}\n`);
+  expect((await readPayload(undefined, s)).role).toBe('push');
+  const g = readGrant(s);
+  setTimeout(() => s.write(`${grantLine}\n`), 10);
+  expect((await g).branch).toBe('jm/x');
+});
+
+test('readPayload finds the payload after a leaked prefix that ends in a newline', async () => {
+  const leak = '{"stream":true,"stdin":true,"stdout":true,"stderr":true,"hijack":true}';
+  const s = Readable.from([`${leak}\n${JSON.stringify(payload)}\n`]);
+  expect((await readPayload(undefined, s)).dropId).toBe('d1');
 });
 
 test('readPayload parses the payload from stdin', async () => {
