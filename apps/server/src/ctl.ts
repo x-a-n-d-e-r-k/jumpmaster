@@ -402,6 +402,15 @@ function rawRequest(args: string[]): Raw | null {
       },
     };
   }
+  if (command === 'dismiss') {
+    // The zone's briefings named, as its briefings page dismisses the ones it shows.
+    const ids = args.slice(2);
+    if (!zone || ids.length === 0 || !ids.every((i) => /^[1-9][0-9]*$/.test(i))) return null;
+    return {
+      path: `/api/control/zones/${encodeURIComponent(zone)}/briefings/dismiss`,
+      body: { ids: ids.map(Number) },
+    };
+  }
   if (command === 'crew-cycle') {
     if (!zone) return null;
     return { path: `/api/control/zones/${encodeURIComponent(zone)}/crew-cycle`, body: {} };

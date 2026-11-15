@@ -6,7 +6,7 @@ import { getArtifact, listArtifacts, readArtifact } from './artifacts.js';
 import { Backoff } from './auth/backoff.js';
 import { registerGuard, withCsrf } from './auth/guard.js';
 import type { SetupMode } from './auth/operator.js';
-import { listBriefings, listRulings } from './briefings.js';
+import { floorBriefings, listBriefings, listRulings } from './briefings.js';
 import { configReader } from './config/source.js';
 import { ConfigStore } from './config/store.js';
 import type { Config } from './config.js';
@@ -197,6 +197,7 @@ export function createApp(
         attempts: Object.fromEntries(ATTEMPT_KEYS.map((k) => [k, getAttempts(db, i.id, k).count])),
       });
     }
+    const floor = floorBriefings(db, config.dropZones);
     const html = renderHome({
       setup: {
         // The frame shows until a zone exists or it is dismissed (a store install only).
@@ -225,7 +226,8 @@ export function createApp(
       usage: usageView(db, config, at),
       details,
       outbox: listOutbox(db, ['unknown', 'failed']),
-      briefings: listBriefings(db, { state: 'open' }),
+      briefings: floor.listed,
+      heldBriefings: floor.held,
       sticks: listSticks(db).map(
         (s): StickLine => ({
           id: s.id,
@@ -261,20 +263,28 @@ export function createApp(
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
 
-  app.get('/briefings', async (req, reply) => {
+  // Every open briefing, or one zone's (`?zone=`: where the floor's held line and the zone page
+  // link, with that zone's bulk dismiss).
+  app.get<{ Querystring: { zone?: string } }>('/briefings', async (req, reply) => {
     const { db } = deps;
     const config = cfg(req);
+    const zoneId = typeof req.query.zone === 'string' ? req.query.zone : undefined;
+    const zone = zoneId === undefined ? undefined : config.dropZones.find((z) => z.id === zoneId);
+    if (zoneId !== undefined && !zone)
+      return reply.code(404).type('text/plain').send('no such zone');
+    const zones = zone ? [zone] : config.dropZones;
     const holds = new Map<string, string>();
-    for (const z of config.dropZones) {
+    for (const z of zones) {
       for (const c of listCrewIssues(db, z.id, ['promote_held'])) {
         if (c.holdUntil) holds.set(`issue:${c.id}`, c.holdUntil);
       }
     }
     const html = renderBriefings({
-      open: listBriefings(db, { state: 'open' }),
-      rulings: config.dropZones.flatMap((z) => listRulings(db, z.id)),
+      open: listBriefings(db, { state: 'open', ...(zone ? { zoneId: zone.id } : {}) }),
+      rulings: zones.flatMap((z) => listRulings(db, z.id)),
       zones: config.dropZones,
       holds,
+      ...(zone ? { zone: { id: zone.id, mode: getZoneMode(db, zone.id, zone.mode) } } : {}),
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
