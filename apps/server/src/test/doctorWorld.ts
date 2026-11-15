@@ -69,7 +69,7 @@ export function world(
     db,
     's1',
     {
-      capabilities: ['egress-v1', 'image-verify-v1'],
+      capabilities: ['egress-v1', 'image-verify-v1', 'push-v1'],
       imagePolicy: 'signed',
       version: '0.4.0',
       pinnedImages: [PG],

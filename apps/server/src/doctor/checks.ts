@@ -102,6 +102,7 @@ export const CHECK_IDS = [
   'stick.capabilities',
   'stick.image-policy',
   'stick.seen',
+  'stick.volumes',
   'usage.gate',
   'vault.key',
   'zone.crew-cap',
@@ -691,6 +692,38 @@ function imagePolicyCheck(d: DoctorDeps, sticks: Stick[]): DoctorCheck {
     status: 'warn',
     summary: `${names} runs images by allowlist: an image is trusted by name, not by a verified signature`,
     fix: 'Use the published stick image (JM_IMAGE_POLICY=signed) and set requireSignedImages: true.',
+  };
+}
+
+/** Whether the live sticks can hold a drop's repository in a volume (`push-v1`, advertised only
+ * once the stick's own volume self-check passes). Without it a stick takes no implement, heal or
+ * resolve work. */
+export function stickVolumesCheck(d: DoctorDeps, sticks: Stick[]): DoctorCheck {
+  const base = { id: 'stick.volumes', zoneId: null, doc: doc('sticks') };
+  const live = liveSticks(sticks, d.now());
+  if (live.length === 0)
+    return { ...base, status: 'skip', summary: 'no live stick to judge (see stick.seen)' };
+  const lacking = live.filter((s) => !s.capabilities.includes('push-v1'));
+  if (lacking.length === 0)
+    return {
+      ...base,
+      status: 'pass',
+      summary: `every live stick can hold a drop's work in a volume (${live.map((s) => s.name).join(', ')})`,
+    };
+  const fix =
+    'Update the stick, and check that it can create Docker volumes and has 10 GiB free: without that it takes no implement, heal or resolve work.';
+  if (lacking.length < live.length)
+    return {
+      ...base,
+      status: 'warn',
+      summary: `${lacking.map((s) => s.name).join(', ')} does not advertise push-v1, so it takes no implement, heal or resolve work (${live.length - lacking.length} of ${live.length} live sticks do)`,
+      fix,
+    };
+  return {
+    ...base,
+    status: 'fail',
+    summary: `no live stick advertises push-v1, so no implement, heal or resolve drop can run: ${lacking.map((s) => s.name).join(', ')}`,
+    fix,
   };
 }
 
@@ -2127,6 +2160,7 @@ export async function runChecks(
     g('usage.gate', null, () => usageCheck(d)),
     g('stick.seen', null, () => stickSeenCheck(d, sticks)),
     g('stick.image-policy', null, () => imagePolicyCheck(d, sticks)),
+    g('stick.volumes', null, () => stickVolumesCheck(d, sticks)),
     ...(d.configStatus
       ? [
           g('config.file', null, () => configFileCheck(d.configStatus as ConfigStatus)),

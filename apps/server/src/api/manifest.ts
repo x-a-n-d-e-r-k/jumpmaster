@@ -142,6 +142,13 @@ export const CONTROL_ROUTES: ControlRoute[] = [
   // Briefings
   { method: 'GET', path: '/api/control/briefings', ctl: 'ctl briefings' },
   { method: 'POST', path: '/api/control/briefings/:id/rule', ctl: 'ctl rule 3 yes' },
+  // Drops
+  {
+    method: 'POST',
+    path: '/api/control/drops/:id/extend-retention',
+    ctl: 'ctl drops extend-retention d1 6',
+  },
+  { method: 'POST', path: '/api/control/drops/:id/cancel', ctl: 'ctl drops cancel d1' },
   // Kill
   { method: 'POST', path: '/api/control/kill', ctl: 'ctl kill', also: ['ctl unkill'] },
 ];
@@ -156,6 +163,7 @@ export type Page =
   | 'Config'
   | 'Doctor'
   | 'Briefings'
+  | 'Drops'
   | 'Kill';
 
 export const PAGES: Page[] = [
@@ -168,6 +176,7 @@ export const PAGES: Page[] = [
   'Config',
   'Doctor',
   'Briefings',
+  'Drops',
   'Kill',
 ];
 
@@ -267,6 +276,11 @@ export const CTL_VERBS: { verb: string; page: Page; forms: string[] }[] = [
     verb: 'rule',
     page: 'Briefings',
     forms: ['ctl rule <briefing> <option> [--options <digest>] [note]'],
+  },
+  {
+    verb: 'drops',
+    page: 'Drops',
+    forms: ['ctl drops extend-retention <dropId> <hours>', 'ctl drops cancel <dropId>'],
   },
   { verb: 'kill', page: 'Kill', forms: ['ctl kill'] },
   { verb: 'unkill', page: 'Kill', forms: ['ctl unkill'] },

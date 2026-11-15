@@ -97,6 +97,18 @@ describe('the control manifest', () => {
     expect([...methods].sort()).toEqual(['DELETE', 'GET', 'PATCH', 'POST', 'PUT']);
   });
 
+  test('ctl help lists drops extend-retention and drops cancel', () => {
+    const help = ctlHelp();
+    expect(help).toContain('  ctl drops extend-retention <dropId> <hours>');
+    expect(help).toContain('  ctl drops cancel <dropId>');
+    expect(CONTROL_ROUTES.map((r) => r.path)).toEqual(
+      expect.arrayContaining([
+        '/api/control/drops/:id/extend-retention',
+        '/api/control/drops/:id/cancel',
+      ]),
+    );
+  });
+
   test('a manifest entry without a ctl verb carries a reason', () => {
     for (const r of CONTROL_ROUTES)
       if (r.ctl === null) expect([r.path, (r.reason ?? '').length > 10]).toEqual([r.path, true]);
@@ -137,6 +149,7 @@ describe('the control manifest', () => {
       'Config',
       'Doctor',
       'Briefings',
+      'Drops',
       'Kill',
     ]);
     // `ctl help` prints it; `ctl <verb> --help` prints that verb's forms; usage is the same text.

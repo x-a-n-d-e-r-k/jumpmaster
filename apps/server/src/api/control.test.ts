@@ -16,9 +16,12 @@ import { listCrewIssues } from '../crew/store.js';
 import { ctlRequest } from '../ctl.js';
 import { openDb } from '../db/open.js';
 import {
+  getDrop,
   getOutbox,
+  getWorkItem,
   getZoneMode,
   insertDrop,
+  insertStick,
   isKilled,
   setKilled,
   setUsageState,
@@ -2619,5 +2622,129 @@ describe('zones page routes', () => {
       'new.example.com',
     ]);
     expect(store.revisions(1)[0]?.note).toBe('adopt observed hosts: new.example.com');
+  });
+});
+
+describe('pending pushes: extend-retention and cancel', () => {
+  const HOUR = 3_600_000;
+  const deadline = new Date(t0.getTime() + 24 * HOUR).toISOString();
+
+  /** A drop as the result route leaves it: push_pending with a live grant, its item as given. */
+  function pending(role: 'implement' | 'heal', itemState: 'in_flight' | 'pr_open') {
+    const db = setup();
+    insertStick(db, { id: 's1', name: 'stick-1', tokenHash: 'h1', slots: 1 });
+    const wi = upsertWorkItem(db, {
+      dropZoneId: 'main',
+      issueNumber: 7,
+      title: 't',
+      body: 'b',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    setWorkItemState(db, wi.id, itemState);
+    insertDrop(db, {
+      id: 'd1',
+      dropZoneId: 'main',
+      workItemId: wi.id,
+      role,
+      state: 'push_pending',
+      createdAt: t0.toISOString(),
+    });
+    db.prepare(
+      "UPDATE drops SET push_deadline = ?, push_kind = 'final', stick_id = 's1', epoch = 1 WHERE id = 'd1'",
+    ).run(deadline);
+    db.prepare(
+      `INSERT INTO push_tokens (drop_id, epoch, seq, reserved_at) VALUES ('d1', 1, 1, ?)`,
+    ).run(t0.toISOString());
+    return { db, itemId: wi.id };
+  }
+  const liveGrants = (db: ReturnType<typeof openDb>) =>
+    (
+      db.prepare('SELECT COUNT(*) AS n FROM push_tokens WHERE revoked_at IS NULL').get() as {
+        n: number;
+      }
+    ).n;
+
+  test('extend-retention moves the deadline and audits', async () => {
+    const { db } = pending('implement', 'in_flight');
+    const r = await post('/api/control/drops/d1/extend-retention', { hours: 6 });
+    expect(r?.statusCode).toBe(200);
+    expect(r?.json()).toMatchObject({
+      dropId: 'd1',
+      pushDeadline: new Date(t0.getTime() + 30 * HOUR).toISOString(),
+    });
+    expect(getDrop(db, 'd1')?.pushDeadline).toBe(new Date(t0.getTime() + 30 * HOUR).toISOString());
+    expect(listAudit(db).map((a) => [a.action, a.target, a.detail])).toEqual([
+      ['extend-retention', 'd1', { dropId: 'd1', hours: 6 }],
+    ]);
+    for (const hours of [0, 169, 1.5, 'x'])
+      expect((await post('/api/control/drops/d1/extend-retention', { hours }))?.statusCode).toBe(
+        400,
+      );
+    expect(
+      (await post('/api/control/drops/d1/extend-retention', { hours: 1 }, { host: HOST }))
+        ?.statusCode,
+    ).toBe(401);
+    expect((await post('/api/control/drops/nope/extend-retention', { hours: 1 }))?.statusCode).toBe(
+      404,
+    );
+  });
+
+  test("extend-retention refuses a drop that isn't pending", async () => {
+    const { db } = pending('implement', 'in_flight');
+    db.prepare("UPDATE drops SET state = 'succeeded' WHERE id = 'd1'").run();
+    const r = await post('/api/control/drops/d1/extend-retention', { hours: 6 });
+    expect(r?.statusCode).toBe(409);
+    expect(getDrop(db, 'd1')?.pushDeadline).toBe(deadline);
+    expect(listAudit(db)).toEqual([]);
+  });
+
+  test('cancel of a pending implement push sets the item ready and revokes; heal stays pr_open', async () => {
+    const impl = pending('implement', 'in_flight');
+    const r = await post('/api/control/drops/d1/cancel', {});
+    expect(r?.statusCode).toBe(200);
+    expect(r?.json()).toMatchObject({ dropId: 'd1', state: 'cancelled' });
+    expect(getDrop(impl.db, 'd1')).toMatchObject({
+      state: 'cancelled',
+      finishedAt: t0.toISOString(),
+    });
+    expect(getWorkItem(impl.db, impl.itemId)?.state).toBe('ready');
+    expect(liveGrants(impl.db)).toBe(0);
+    expect(listAudit(impl.db).map((a) => [a.action, a.target])).toEqual([['cancel-push', 'd1']]);
+    // Cancelled now: a second cancel is refused.
+    expect((await post('/api/control/drops/d1/cancel', {}))?.statusCode).toBe(409);
+    await app?.close();
+    const heal = pending('heal', 'pr_open');
+    expect((await post('/api/control/drops/d1/cancel', {}))?.statusCode).toBe(200);
+    expect(getDrop(heal.db, 'd1')?.state).toBe('cancelled');
+    expect(getWorkItem(heal.db, heal.itemId)?.state).toBe('pr_open');
+    expect(liveGrants(heal.db)).toBe(0);
+    expect((await post('/api/control/drops/nope/cancel', {}))?.statusCode).toBe(404);
+  });
+
+  test('ctlRequest maps drops extend-retention and drops cancel', () => {
+    expect(ctlRequest(['drops', 'extend-retention', 'd1', '6'])).toEqual({
+      method: 'POST',
+      path: '/api/control/drops/d1/extend-retention',
+      body: { hours: 6 },
+    });
+    expect(ctlRequest(['drops', 'cancel', 'd1'])).toEqual({
+      method: 'POST',
+      path: '/api/control/drops/d1/cancel',
+      body: {},
+    });
+    for (const bad of [
+      ['drops'],
+      ['drops', 'cancel'],
+      ['drops', 'extend-retention', 'd1'],
+      ['drops', 'extend-retention', 'd1', 'x'],
+      ['drops', 'extend-retention', 'd1', '0'],
+      ['drops', 'extend-retention', 'd1', '169'],
+      ['drops', 'extend-retention', 'd1', '1.5'],
+      ['drops', 'cancel', 'd1', 'x'],
+    ])
+      expect(ctlRequest(bad), bad.join(' ')).toBeNull();
   });
 });

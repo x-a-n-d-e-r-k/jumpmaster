@@ -29,10 +29,16 @@ import type { Db } from '../db/open.js';
 import {
   ACTIVE_STATES_SQL,
   activeWorkCount,
+  appendEvents,
+  getDrop,
+  getWorkItem,
   getZoneMode,
   insertDrop,
   isKilled,
+  revokeGrants,
+  setWorkItemState,
   setZoneMode,
+  updateDrop,
   ZONE_MODES,
   zoneHistoryCounts,
 } from '../db/repo.js';
@@ -154,6 +160,8 @@ function credentialsOf(store: ConfigStore): NonNullable<DoctorDeps['credentials'
 }
 
 const DoctorBody = z.strictObject({ zone: z.string().min(1).optional() });
+const ExtendRetentionBody = z.object({ hours: z.number().int().min(1).max(168) }).strict();
+
 const DoctorDropBody = z.strictObject({
   zone: z.string().min(1),
   cancel: z.literal(true).optional(),
@@ -620,6 +628,72 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         waiting,
         next: `It runs when a stick can take it (${waiting}). Then: jumpmaster ctl doctor ${zone.id}`,
       });
+    });
+
+    // A pending push (state push_pending) holds a volume on the stick until its deadline. The
+    // operator can give it more time or give it up; both act on push_pending alone.
+    scope.post<{ Params: { id: string } }>(
+      '/api/control/drops/:id/extend-retention',
+      async (req, reply) => {
+        const body = ExtendRetentionBody.safeParse(req.body);
+        if (!body.success)
+          return reply.code(400).send({ error: 'invalid body: {"hours": 1..168}' });
+        const { hours } = body.data;
+        const at = now();
+        const out = db.transaction(() => {
+          const drop = getDrop(db, req.params.id);
+          if (!drop) return { code: 404 as const, error: 'unknown drop' };
+          if (drop.state !== 'push_pending' || drop.pushDeadline === null)
+            return {
+              code: 409 as const,
+              error: `drop ${drop.id} is ${drop.state}, not a pending push: only a pending push has a retention to extend`,
+            };
+          const pushDeadline = new Date(
+            Date.parse(drop.pushDeadline) + hours * 3_600_000,
+          ).toISOString();
+          updateDrop(db, drop.id, { pushDeadline });
+          return { code: 200 as const, dropId: drop.id, pushDeadline };
+        })();
+        if (out.code !== 200) return reply.code(out.code).send({ error: out.error });
+        audit(req, 'extend-retention', { dropId: out.dropId, hours }, out.dropId);
+        return { dropId: out.dropId, pushDeadline: out.pushDeadline };
+      },
+    );
+
+    // Cancel a pending push (Ruling 16): the drop is cancelled and its grants revoked, so the stick
+    // learns it from the heartbeat and removes its volume. An implement item goes back to ready
+    // (as for a lost drop); a heal or resolve item stays pr_open.
+    scope.post<{ Params: { id: string } }>('/api/control/drops/:id/cancel', async (req, reply) => {
+      const at = now();
+      const out = db.transaction(() => {
+        const drop = getDrop(db, req.params.id);
+        if (!drop) return { code: 404 as const, error: 'unknown drop' };
+        if (drop.state !== 'push_pending')
+          return {
+            code: 409 as const,
+            error: `drop ${drop.id} is ${drop.state}, not a pending push: only a pending push is cancelled here`,
+          };
+        updateDrop(db, drop.id, { state: 'cancelled', finishedAt: at.toISOString() });
+        revokeGrants(db, drop.id, at);
+        appendEvents(db, drop.id, [
+          {
+            ts: at.toISOString(),
+            kind: 'log',
+            data: { message: 'pending push cancelled by operator' },
+          },
+        ]);
+        if (
+          drop.role === 'implement' &&
+          drop.workItemId !== null &&
+          getWorkItem(db, drop.workItemId)?.state === 'in_flight'
+        )
+          setWorkItemState(db, drop.workItemId, 'ready', undefined, at);
+        return { code: 200 as const, dropId: drop.id };
+      })();
+      if (out.code !== 200) return reply.code(out.code).send({ error: out.error });
+      audit(req, 'cancel-push', { dropId: out.dropId }, out.dropId);
+      deps.kick?.();
+      return { dropId: out.dropId, state: 'cancelled' };
     });
 
     // The minimal intake. The stub is rendered only; the first issue is filed ready through the

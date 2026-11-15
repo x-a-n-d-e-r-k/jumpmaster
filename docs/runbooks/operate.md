@@ -252,6 +252,7 @@ token is always allowed.
 | Doctor | `ctl labels <zone>` | `POST /api/control/zones/:id/labels` |
 | Briefings | `ctl briefings` | `GET /api/control/briefings` |
 | Briefings | `ctl rule <briefing> <option> [--options <digest>] [note]` | `POST /api/control/briefings/:id/rule` |
+| Drops | `ctl drops extend-retention <dropId> <hours>`<br>`ctl drops cancel <dropId>` | `POST /api/control/drops/:id/extend-retention`<br>`POST /api/control/drops/:id/cancel` |
 | Kill | `ctl kill` | `POST /api/control/kill` |
 | Kill | `ctl unkill` | `POST /api/control/kill` |
 <!-- ctl-table:end -->

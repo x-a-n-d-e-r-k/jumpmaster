@@ -971,6 +971,13 @@ forge token it carries (the form Settings, Credentials shows). Implement, heal a
 carry the author token; a review or crew drop shows the read token's fingerprint or none. It is how to confirm, with no
 restart, that a changed gate timeout or a rotated token reached the next drop.
 
+### Sticks
+
+A stick holds each finished drop's work in a Docker volume on its host until the push result
+arrives (24 hours by default, `ctl drops extend-retention <dropId> <hours>` to add more,
+`ctl drops cancel <dropId>` to give up). It advertises `push-v1` only while it can create volumes
+and has 10 GiB free. Doctor check: `stick.volumes`.
+
 ## Image trust
 
 The config written by `init` sets `requireSignedImages: true` (dispatch only to a stick that
@@ -1164,6 +1171,13 @@ signed policy). See [Stick](#stick).
 
 A stick runs images by allowlist, not verified signatures. Use the release's stick, which runs
 `JM_IMAGE_POLICY=signed` ([Image trust](#image-trust)).
+
+### `stick.volumes`
+
+**Action:** See the sticks on home (`/`).
+
+A live stick does not advertise `push-v1`, so it takes no implement, heal or resolve work. Update
+the stick, and check that it can create Docker volumes and has 10 GiB free ([Sticks](#sticks)).
 
 ### `usage.gate`
 
