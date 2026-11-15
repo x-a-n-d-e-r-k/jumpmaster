@@ -338,7 +338,13 @@ export function buildPayload(
     ...egressField(zone),
     prompt: `${templates[role]}\n\n## Issue (data)\n\n${fence(drop.id, 'issue', `#${item.issueNumber}: ${neutralise(item.title)}\n\n${neutralise(item.body)}`)}`,
   };
-  const author = { claudeToken: secrets.claudeToken, forgeToken: secrets.githubAuthorToken };
+  // Ruling 1: the agent container only fetches (the push container pushes with a grant), so it
+  // gets the read token when one is configured. In PAT mode without one it still holds the author
+  // token for its fetch; it never pushes with it.
+  const fetchCredentials = {
+    claudeToken: secrets.claudeToken,
+    forgeToken: secrets.githubReadToken ?? secrets.githubAuthorToken,
+  };
   const pr = () => {
     if (drop.prNumber === null || drop.headSha === null) {
       throw new Error(`${role} drop ${drop.id} has no pull request`);
@@ -351,7 +357,7 @@ export function buildPayload(
       return {
         ...common,
         role,
-        credentials: author,
+        credentials: fetchCredentials,
         resume: drop.headSha !== null,
         resumeSha: drop.headSha ?? undefined,
       };
@@ -375,12 +381,12 @@ export function buildPayload(
         ...common,
         role,
         pr: pr(),
-        credentials: author,
+        credentials: fetchCredentials,
         feedback: renderFeedback(input.feedback, drop.id),
       };
     }
     case 'resolve':
-      return { ...common, role, pr: pr(), credentials: author };
+      return { ...common, role, pr: pr(), credentials: fetchCredentials };
     default:
       throw new Error(`unknown drop role ${String(drop.role)}`);
   }

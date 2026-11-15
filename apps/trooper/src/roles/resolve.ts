@@ -6,10 +6,9 @@ import {
   type AgentOutcome,
   acceptOutcome,
   cloneAndPrepare,
+  completedWith,
   emitEvent,
   guarded,
-  mirrorDirOf,
-  pushSweep,
   type RoleCtx,
   resultMeta,
   runAgent,
@@ -21,7 +20,9 @@ type ResolvePayload = Extract<DropPayload, { role: 'resolve' }>;
 
 /**
  * Resolve: merge the base into the PR branch. A clean merge needs no agent; conflicts go to Claude,
- * and the merge must be concluded with no markers left before gates and a leased push.
+ * and the merge must be concluded with no markers left before the gates. It never pushes: a
+ * completed result asks the push container for a final push, leased on the PR head. An early stop
+ * asks for nothing (never a checkpoint).
  */
 export async function runResolve(
   payload: DropPayload,
@@ -104,28 +105,11 @@ async function resolveSteps(
     }
   }
 
-  // Gates test HEAD; the push must carry exactly that commit.
+  // Gates test HEAD; the push container must push exactly that commit.
   const gatedSha = await deps.git.headSha(dir, as);
   gates.push(...(await runGatesPhase(payload, deps, ctx, dir)));
   const failed = gates.find((g) => g.timedOut || g.exitCode !== 0);
   if (failed) return done({ status: 'failed', reason: `gate ${failed.name} failed` });
 
-  emitEvent(deps, ctx, 'phase', { phase: 'push' });
-  const headSha = await deps.git.pushExistingBranch(
-    dir,
-    branch,
-    forgeToken,
-    target,
-    prHead,
-    pushSweep(deps, ctx),
-    {
-      mirrorDir: mirrorDirOf(ctx),
-      as,
-      base,
-      protectedPaths: payload.protectedPaths,
-      secrets: ctx.secrets,
-      expectSha: gatedSha,
-    },
-  );
-  return done({ status: 'completed', headSha });
+  return done(completedWith(gatedSha));
 }

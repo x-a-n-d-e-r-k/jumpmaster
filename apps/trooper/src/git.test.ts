@@ -22,7 +22,6 @@ import {
   headSha,
   mergeInProgress,
   prepareBranch,
-  pushNewBranch,
   remoteBranchExists,
   removeInstructionFiles,
   runGit,
@@ -164,20 +163,6 @@ test('branch, commit, ahead count, head sha', async () => {
   expect(await headSha(dir)).toBe(git(dir, 'rev-parse', 'HEAD'));
 });
 
-test('pushNewBranch refuses to overwrite an existing remote branch', async () => {
-  const dirA = await clone('pa');
-  const dirB = await clone('pb');
-  for (const d of [dirA, dirB]) {
-    await prepareBranch(d, 'agent/issue-1', 'main');
-    writeFileSync(join(d, `${d.includes('/pa/') ? 'x' : 'y'}.txt`), 'z\n');
-    await commitIfDirty(d, 'feat: z');
-  }
-  await pushNewBranch(dirA, 'agent/issue-1', '', target());
-  await expect(pushNewBranch(dirB, 'agent/issue-1', '', target())).rejects.toThrow(
-    /stale info|rejected/,
-  );
-});
-
 test('a silent git failure leaks neither the token nor its base64 form', async () => {
   const dir = await clone('silent');
   const token = 'ghp_SILENTTOKEN1234567890abcdef';
@@ -201,7 +186,7 @@ test('git children never see agent or claude credentials', async () => {
   const dir = await clone('envleak');
   await prepareBranch(dir, 'agent/issue-9', 'main');
   const dump = join(tmp, 'env-dump');
-  for (const hook of ['pre-commit', 'pre-push']) {
+  for (const hook of ['pre-commit']) {
     const f = join(dir, '.git/hooks', hook);
     writeFileSync(f, `#!/bin/sh\nenv >> '${dump}'\n`);
     chmodSync(f, 0o755);
@@ -215,7 +200,6 @@ test('git children never see agent or claude credentials', async () => {
     // A plain runGit commit still runs project hooks (commitIfDirty deliberately doesn't).
     await runGit(dir, ['add', '-A']);
     await runGit(dir, ['commit', '-q', '-m', 'feat: c']);
-    await pushNewBranch(dir, 'agent/issue-9', 'forge-tok', target());
   } finally {
     process.env = saved;
   }
@@ -224,83 +208,8 @@ test('git children never see agent or claude credentials', async () => {
   expect(seen).not.toContain('CLAUDE_CODE_OAUTH_TOKEN');
 });
 
-function bare(name: string): string {
-  const d = join(tmp, name);
-  git(tmp, 'init', '--bare', '-q', '-b', 'main', d);
-  return d;
-}
 const hasBranch = (repo: string, b: string): boolean =>
   git(repo, 'for-each-ref', '--format=%(refname)', `refs/heads/${b}`) !== '';
-
-test('push runs from a pristine repo: planted hooks, hooksPath and redirects never run or see the token', async () => {
-  const dir = await clone('planted');
-  await prepareBranch(dir, 'agent/issue-11', 'main');
-  writeFileSync(join(dir, 'p.txt'), 'p\n');
-  await commitIfDirty(dir, 'feat: p');
-  const decoy = bare('decoy.git');
-  const dump = join(tmp, 'planted-dump');
-  const hookBody = `#!/bin/sh\n{ env; echo "ARGS $*"; } >> ${dump}\n`;
-  const hookDir = join(tmp, 'evil-hooks');
-  mkdirSync(hookDir);
-  for (const f of [join(dir, '.git/hooks/pre-push'), join(hookDir, 'pre-push')]) {
-    writeFileSync(f, hookBody);
-    chmodSync(f, 0o755);
-  }
-  git(dir, 'config', 'core.hooksPath', hookDir);
-  git(dir, 'config', 'remote.origin.pushurl', `file://${decoy}`);
-  git(dir, 'config', `url.file://${decoy}.insteadOf`, url());
-
-  const sha = await pushNewBranch(
-    dir,
-    'agent/issue-11',
-    'ghp_PLANTEDTOKEN1234567890abcd',
-    target(),
-  );
-
-  expect(existsSync(dump)).toBe(false);
-  expect(hasBranch(decoy, 'agent/issue-11')).toBe(false);
-  expect(git(origin, 'rev-parse', 'refs/heads/agent/issue-11')).toBe(git(dir, 'rev-parse', 'HEAD'));
-  expect(sha).toBe(git(dir, 'rev-parse', 'HEAD'));
-});
-
-test('push ignores inherited GIT_* config and the global gitconfig', async () => {
-  const dir = await clone('globalcfg');
-  await prepareBranch(dir, 'agent/issue-12', 'main');
-  writeFileSync(join(dir, 'g.txt'), 'g\n');
-  await commitIfDirty(dir, 'feat: g');
-  const decoy = bare('decoy2.git');
-  const home = join(tmp, 'evil-home');
-  mkdirSync(home);
-  const evil = `[url "file://${decoy}"]\n\tinsteadOf = ${url()}\n`;
-  writeFileSync(join(home, '.gitconfig'), evil);
-  const saved = { ...process.env };
-  process.env.HOME = home;
-  process.env.GIT_CONFIG_GLOBAL = join(home, '.gitconfig');
-  process.env.GIT_CONFIG_COUNT = '1';
-  process.env.GIT_CONFIG_KEY_0 = `url.file://${decoy}.insteadOf`;
-  process.env.GIT_CONFIG_VALUE_0 = url();
-  try {
-    await pushNewBranch(dir, 'agent/issue-12', 'tok', target());
-  } finally {
-    process.env = saved;
-  }
-  expect(hasBranch(decoy, 'agent/issue-12')).toBe(false);
-  expect(hasBranch(origin, 'agent/issue-12')).toBe(true);
-});
-
-test('push sweeps other processes before the token is used', async () => {
-  const dir = await clone('sweep');
-  await prepareBranch(dir, 'agent/issue-13', 'main');
-  writeFileSync(join(dir, 's.txt'), 's\n');
-  await commitIfDirty(dir, 'feat: s');
-  let sweeps = 0;
-  await pushNewBranch(dir, 'agent/issue-13', 'tok', target(), () => {
-    sweeps++;
-    expect(hasBranch(origin, 'agent/issue-13')).toBe(false);
-  });
-  expect(sweeps).toBeGreaterThan(0);
-  expect(hasBranch(origin, 'agent/issue-13')).toBe(true);
-});
 
 test('the auth header is scoped to https://github.com/ only', async () => {
   const dir = await clone('scoped');
@@ -322,7 +231,7 @@ test('remoteBranchExists reports whether the branch is on the remote', async () 
   writeFileSync(join(dir, 'l.txt'), 'l\n');
   await commitIfDirty(dir, 'feat: l');
   expect(await remoteBranchExists(target(), 'agent/issue-14', 'tok')).toBe(false);
-  await pushNewBranch(dir, 'agent/issue-14', 'tok', target());
+  git(dir, 'push', '-q', origin, 'HEAD:refs/heads/agent/issue-14');
   expect(await remoteBranchExists(target(), 'agent/issue-14', 'tok')).toBe(true);
   expect(await remoteBranchExists(target(), 'agent/issue-1', 'tok')).toBe(
     hasBranch(origin, 'agent/issue-1'),

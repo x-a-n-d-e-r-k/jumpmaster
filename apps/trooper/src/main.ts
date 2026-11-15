@@ -104,13 +104,18 @@ export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promi
     return fail(`trooper setup failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   const ctx: RoleCtx = { workdir: work, secrets, ids };
+  let result: DropResult | undefined;
   try {
-    return finish(await runner(payload, deps, ctx));
+    result = finish(await runner(payload, deps, ctx));
+    return result;
   } catch (err) {
     return fail(err instanceof Error ? err.message : String(err));
   } finally {
     if (ids) {
-      await deps.git.removeTree(join(ids.agent.home, 'repo'), ids.agent).catch(() => undefined);
+      // A push request hands the working copy (the drop's volume) to the push container: keep it.
+      if (result?.push === undefined) {
+        await deps.git.removeTree(join(ids.agent.home, 'repo'), ids.agent).catch(() => undefined);
+      }
       await deps.git.removeTree(join(ids.gate.home, 'repo'), ids.gate).catch(() => undefined);
     }
     rmSync(work, { recursive: true, force: true });

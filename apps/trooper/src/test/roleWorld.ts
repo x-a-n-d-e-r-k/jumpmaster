@@ -6,8 +6,11 @@ export function roleWorld(
   o: {
     dirty?: boolean;
     agentCommits?: string;
-    pushError?: string;
     checkoutError?: string;
+    /** cloneRepo throws this message (e.g. a refused read token). */
+    cloneError?: string;
+    /** remoteBranchSha's answer (implement's fresh-branch check). */
+    remoteSha?: string | null;
     rateLimited?: boolean;
     merge?: MergeOutcome;
     markers?: string[];
@@ -27,7 +30,11 @@ export function roleWorld(
     };
   const deps = {
     git: {
-      cloneRepo: rec('cloneRepo', () => undefined),
+      cloneRepo: rec('cloneRepo', () => {
+        if (o.cloneError) throw new Error(o.cloneError);
+      }),
+      remoteBranchSha: rec('remoteBranchSha', () => o.remoteSha ?? null),
+      prepareBranch: rec('prepareBranch', () => undefined),
       mirrorFetch: rec('mirrorFetch', () => undefined),
       checkoutBranch: rec('checkoutBranch', () => {
         if (o.checkoutError) throw new Error(o.checkoutError);
@@ -42,11 +49,6 @@ export function roleWorld(
       }),
       headSha: rec('headSha', () => head),
       aheadOfBase: rec('aheadOfBase', () => 1),
-      pushExistingBranch: rec('pushExistingBranch', () => {
-        if (o.pushError) throw new Error(o.pushError);
-        return 'pushed';
-      }),
-      pushNewBranch: rec('pushNewBranch', () => 'pushed'),
       sweepProcesses: () => false,
       cloneForGates: rec('cloneForGates', () => undefined),
       removeTree: rec('removeTree', () => undefined),

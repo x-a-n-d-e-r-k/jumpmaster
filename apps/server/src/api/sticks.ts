@@ -509,7 +509,8 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         secrets: [
           ...new Set(
             dropSecrets({
-              forgeToken: secrets.githubAuthorToken,
+              // The forge token the drop's agent container held (Ruling 1), and the author token.
+              forgeToken: secrets.githubReadToken ?? secrets.githubAuthorToken,
               authorToken: secrets.githubAuthorToken,
               claudeToken: secrets.claudeToken,
               ...(gateSecrets ? { gateSecrets } : {}),

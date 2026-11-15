@@ -1177,6 +1177,25 @@ describe('push container routes', () => {
     }
   });
 
+  test("the grant's secrets include the read token the agent container held", async () => {
+    const withRead: Config = {
+      ...config,
+      secrets: { ...config.secrets, githubReadToken: 'gh-read' },
+    };
+    const { db } = setup({ queued: false, config: withRead });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    const res = await grant(stickToken);
+    expect(res.statusCode).toBe(200);
+    const g = PushGrantSchema.parse((res.json() as { grant: unknown }).grant);
+    // The push itself still uses the author token; the read token is only refused in the diff.
+    expect(g.token).toBe('gh-secret');
+    const b64 = (t: string) => Buffer.from(`x-access-token:${t}`).toString('base64');
+    for (const t of ['gh-read', b64('gh-read'), 'gh-secret', b64('gh-secret')]) {
+      expect(g.secrets).toContain(t);
+    }
+  });
+
   test('the grant leases on the resumed sha for implement and the PR head for heal', async () => {
     const { db } = setup({ queued: false });
     const { stickId, stickToken } = await enroll();

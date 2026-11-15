@@ -58,7 +58,6 @@ function fakeDeps(o: {
 }) {
   const state = {
     lines: [] as string[],
-    pushed: false,
     calls: [] as string[],
     sweeps: 0,
     claudeRan: false,
@@ -81,12 +80,6 @@ function fakeDeps(o: {
         state.calls.push('ls-remote');
         state.lsRemote = { t, b, tok };
         return o.remoteHasBranch ? 'remote-sha' : null;
-      },
-      pushNewBranch: async (_dir, _branch, _tok, t, sweep) => {
-        state.pushTarget = t;
-        state.pushSweep = sweep;
-        state.pushed = true;
-        return 'abc123';
       },
       sweepProcesses: () => {
         state.sweeps++;
@@ -115,11 +108,18 @@ function fakeDeps(o: {
   return Object.assign(state, { deps });
 }
 
-test('happy path pushes and completes with headSha', async () => {
+test('happy path completes with a final push request for the gated head', async () => {
   const f = fakeDeps({ claude: [completeResult] });
   const r = await runTrooper(payload, f.deps);
-  expect(r).toMatchObject({ status: 'completed', headSha: 'abc123', numTurns: 3 });
-  expect(f.pushed).toBe(true);
+  expect(r).toMatchObject({
+    status: 'completed',
+    headSha: 'working-copy-sha',
+    push: { kind: 'final', expectSha: 'working-copy-sha' },
+    numTurns: 3,
+  });
+  const line = f.lines.at(-1) ?? '';
+  expect(JSON.parse(line.slice('JM_RESULT '.length)).push).toEqual(r.push);
+  expect(line).not.toContain(payload.credentials.forgeToken);
   expect(f.claudeEnv.CLAUDE_CODE_OAUTH_TOKEN).toBe(payload.credentials.claudeToken);
   expect(JSON.stringify(f.claudeEnv)).not.toContain(payload.credentials.forgeToken);
   expect(f.lines.at(-1)).toMatch(/^JM_RESULT /);
@@ -127,8 +127,9 @@ test('happy path pushes and completes with headSha', async () => {
 
 test('no commits → no_changes and no push', async () => {
   const f = fakeDeps({ ahead: 0, claude: [completeResult] });
-  expect((await runTrooper(payload, f.deps)).status).toBe('no_changes');
-  expect(f.pushed).toBe(false);
+  const r = await runTrooper(payload, f.deps);
+  expect(r.status).toBe('no_changes');
+  expect(r.push).toBeUndefined();
 });
 
 test('the report summary is redacted before it is serialised, even a secret JSON would escape', async () => {
@@ -154,21 +155,21 @@ test('BLOCKED → blocked with summary, no push', async () => {
   const f = fakeDeps({ claude: [blockedResult] });
   const r = await runTrooper(payload, f.deps);
   expect(r).toMatchObject({ status: 'blocked', reason: 'need a decision' });
-  expect(f.pushed).toBe(false);
+  expect(r.push).toBeUndefined();
 });
 
 test('failing gate → failed, no push', async () => {
   const f = fakeDeps({ claude: [completeResult], gateExit: 1 });
   const r = await runTrooper(payload, f.deps);
   expect(r).toMatchObject({ status: 'failed', reason: 'gate test failed' });
-  expect(f.pushed).toBe(false);
+  expect(r.push).toBeUndefined();
 });
 
 test('no result line → failed', async () => {
   const f = fakeDeps({ claude: ['{"type":"assistant"}'] });
   const r = await runTrooper(payload, f.deps);
   expect(r.status).toBe('failed');
-  expect(f.pushed).toBe(false);
+  expect(r.push).toBeUndefined();
 });
 
 test('error result → failed', async () => {
@@ -360,14 +361,42 @@ test('readPayload still refuses text with no payload in it', async () => {
   );
 });
 
-test('push goes to the explicit repo target with the process sweep, and reports the pushed sha', async () => {
-  const f = fakeDeps({ claude: [completeResult] });
-  const r = await runTrooper(payload, f.deps);
-  expect(f.pushTarget).toEqual({ owner: 'o', name: 'r' });
-  expect(typeof f.pushSweep).toBe('function');
-  f.pushSweep();
-  expect(f.sweeps).toBe(1);
-  expect(r.headSha).toBe('abc123');
+test('runTrooper keeps the repo only when a push is requested', async () => {
+  const ids = {
+    agent: { uid: 10001, gid: 10001, home: '/home/agent' },
+    gate: { uid: 10002, gid: 10002, home: '/home/gate' },
+  };
+  const run = async (o: Parameters<typeof fakeDeps>[0]) => {
+    const f = fakeDeps(o);
+    const removed: string[] = [];
+    f.deps.ids = ids;
+    f.deps.privilege = { sweepUid: () => 0 };
+    f.deps.git = {
+      ...f.deps.git,
+      cloneForGates: async () => undefined,
+      removeTree: async (dir: string) => void removed.push(dir),
+    } as TrooperDeps['git'];
+    const r = await runTrooper(payload, f.deps);
+    return { r, removed };
+  };
+  // Completed: the volume at <agent.home>/repo is the hand-off to the push container.
+  const done = await run({ claude: [completeResult] });
+  expect(done.r.push).toEqual({ kind: 'final', expectSha: 'working-copy-sha' });
+  expect(done.removed).toEqual(['/home/gate/repo']);
+  // Checkpoint: kept too.
+  const stopped = await run({ claude: [rateLimitRejectedLine] });
+  expect(stopped.r).toMatchObject({ status: 'rate_limited', push: { kind: 'checkpoint' } });
+  expect(stopped.removed).toEqual(['/home/gate/repo']);
+  // No push requested: both working copies go.
+  for (const o of [{ ahead: 0, claude: [completeResult] }, { claude: [blockedResult] }]) {
+    const none = await run(o);
+    expect(none.r.push).toBeUndefined();
+    expect(none.removed).toEqual(['/home/agent/repo', '/home/gate/repo']);
+  }
+  // A thrown failure: removed as well.
+  const thrown = await run({ claude: [], throwOn: 'clone' });
+  expect(thrown.r.status).toBe('failed');
+  expect(thrown.removed).toEqual(['/home/agent/repo', '/home/gate/repo']);
 });
 
 test('existing remote branch → failed before claude runs', async () => {
@@ -378,7 +407,7 @@ test('existing remote branch → failed before claude runs', async () => {
     reason: 'branch agent/issue-5 already exists on remote',
   });
   expect(f.claudeRan).toBe(false);
-  expect(f.pushed).toBe(false);
+  expect(r.push).toBeUndefined();
   expect(f.lsRemote).toEqual({
     t: { owner: 'o', name: 'r' },
     b: 'agent/issue-5',
@@ -485,7 +514,7 @@ test('each crew role runs through the crew runner and its output is redacted', a
     } as DropPayload;
     const r = await runTrooper(crew, f.deps);
     expect(r, role).toMatchObject({ status: 'completed', role });
-    expect(f.pushed).toBe(false);
+    expect(r.push).toBeUndefined();
     expect(f.lines.at(-1)).not.toContain(payload.credentials.claudeToken);
     expect(f.claudeCwd).toMatch(/crew-cwd$/);
   }

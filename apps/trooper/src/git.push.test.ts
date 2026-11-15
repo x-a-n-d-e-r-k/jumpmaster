@@ -8,6 +8,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -17,11 +18,13 @@ import type { PushGrant } from '@jumpmaster/protocol';
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest';
 import {
   authHeader,
+  checkoutBranch,
   cloneRepo,
   commitIfDirty,
   headSha,
+  mergeBase,
+  mirrorFetch,
   prepareBranch,
-  pushNewBranch,
   pushStaged,
   setSpawn,
   setWorkRoot,
@@ -88,7 +91,9 @@ async function world(name: string) {
   await prepareBranch(dir, B, 'main');
   writeFileSync(join(dir, 'b.txt'), 'b\n');
   await commitIfDirty(dir, 'feat: b');
-  const s0 = await pushNewBranch(dir, B, 't', target);
+  // Seed the remote branch with plain git: the agent's first commit, as an earlier push left it.
+  git(dir, 'push', '-q', origin, `HEAD:refs/heads/${B}`);
+  const s0 = git(dir, 'rev-parse', 'HEAD');
   const remoteTip = (b = B) => git(origin, 'rev-parse', `refs/heads/${b}`);
   /** A human clone of origin, for moving the remote. */
   const human = () => {
@@ -534,5 +539,184 @@ describe('pushStaged', () => {
       const all = [...c.argv, c.cwd ?? '', ...Object.values(c.env).map(String)];
       expect(all.some((a) => a.includes(w.mirror))).toBe(false);
     }
+  });
+});
+
+/** Carried over from the deleted in-container push suites: the same refusals, now on the push path. */
+describe('pushStaged: guard cases carried over from the in-container push', () => {
+  test('a protected path git would C-quote (non-ASCII) is still refused', async () => {
+    const w = await world('quoted');
+    mkdirSync(join(w.dir, '.github', 'workflows'), { recursive: true });
+    writeFileSync(join(w.dir, '.github', 'workflows', 'é.yml'), 'on: push\n');
+    await commitIfDirty(w.dir, 'ci: add');
+    expect(await stageAndPush(w)).toEqual({
+      status: 'failed',
+      reason: 'protected path .github/workflows/é.yml',
+      retryable: false,
+    });
+    expect(w.remoteTip()).toBe(w.s0);
+  });
+
+  test('a bare protected directory entry (e.g. a .claude symlink) is refused', async () => {
+    const w = await world('bare-dir');
+    symlinkSync('docs', join(w.dir, '.claude'));
+    await commitIfDirty(w.dir, 'chore: link');
+    expect(await stageAndPush(w, { protectedPaths: ['.claude/**'] })).toEqual({
+      status: 'failed',
+      reason: 'protected path .claude',
+      retryable: false,
+    });
+    expect(w.remoteTip()).toBe(w.s0);
+  });
+
+  test('a known secret value in a commit message is refused', async () => {
+    const w = await world('secret-msg');
+    writeFileSync(join(w.dir, 'ok.txt'), 'fine\n');
+    await commitIfDirty(w.dir, 'feat: plain-looking-secret-1234');
+    expect(await stageAndPush(w, { secrets: ['plain-looking-secret-1234'] })).toEqual({
+      status: 'failed',
+      reason: 'secret in diff',
+      retryable: false,
+    });
+    expect(w.remoteTip()).toBe(w.s0);
+  });
+
+  test('a resolve merge of human base commits passes the identity check', async () => {
+    const w = await world('resolvemerge');
+    const h = w.human();
+    writeFileSync(join(h, 'h.txt'), 'h\n');
+    git(h, 'add', '.');
+    git(h, 'commit', '-q', '-m', 'human work');
+    git(h, 'push', '-q', 'origin', 'main');
+    await mirrorFetch(w.mirror, 't', w.target, ['main']);
+    expect(await mergeBase(w.dir, 'main', null)).toBe('clean');
+    const head = await headSha(w.dir);
+    expect(await stageAndPush(w, { expectSha: head })).toMatchObject({
+      status: 'pushed',
+      headSha: head,
+    });
+    expect(w.remoteTip()).toBe(head);
+  });
+
+  test('an agent origin/<base> pointing at its own tip does not bypass the guard', async () => {
+    const w = await world('fakebase');
+    git(w.dir, 'mv', '.github/x.yml', 'y.yml');
+    await commitIfDirty(w.dir, 'chore: move');
+    git(w.dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    git(w.dir, 'update-ref', 'refs/heads/main', 'HEAD');
+    expect(await stageAndPush(w)).toMatchObject({
+      status: 'failed',
+      reason: 'protected path .github/x.yml',
+    });
+    expect(w.remoteTip()).toBe(w.s0);
+  });
+
+  test('human commits already on the remote pass the identity check', async () => {
+    const w = await world('humanonremote');
+    const h = w.human();
+    git(h, 'switch', '-q', B);
+    writeFileSync(join(h, 'hh.txt'), 'hh\n');
+    git(h, 'add', '.');
+    git(h, 'commit', '-q', '-m', 'human fix');
+    git(h, 'push', '-q', 'origin', B);
+    const s1 = w.remoteTip();
+    await mirrorFetch(w.mirror, 't', w.target, [B]);
+    await checkoutBranch(w.dir, B, s1, null);
+    writeFileSync(join(w.dir, 'ag.txt'), 'ag\n');
+    await commitIfDirty(w.dir, 'feat: agent on top');
+    const head = await headSha(w.dir);
+    expect(await stageAndPush(w, { lease: s1, expectSha: head })).toMatchObject({
+      status: 'pushed',
+      headSha: head,
+    });
+  });
+
+  test('a new-branch lease never overwrites a branch that already exists', async () => {
+    const w = await world('exists');
+    writeFileSync(join(w.dir, 'z.txt'), 'z\n');
+    await commitIfDirty(w.dir, 'feat: z');
+    const r = await stageAndPush(w, { lease: '' });
+    expect(r.status).toBe('failed');
+    if (r.status !== 'failed') return;
+    expect(r.reason).toMatch(/^stale info: /);
+    expect(r.retryable).toBe(false);
+    expect(w.remoteTip()).toBe(w.s0);
+  });
+
+  test("the working copy's pushurl and insteadOf never redirect the push", async () => {
+    const w = await world('redirect');
+    writeFileSync(join(w.dir, 'p.txt'), 'p\n');
+    await commitIfDirty(w.dir, 'feat: p');
+    const decoy = join(w.base, 'decoy.git');
+    git(w.base, 'init', '--bare', '-q', decoy);
+    git(w.dir, 'config', 'remote.origin.pushurl', `file://${decoy}`);
+    git(w.dir, 'config', `url.file://${decoy}.insteadOf`, w.target.url);
+    expect(await stageAndPush(w)).toMatchObject({ status: 'pushed' });
+    expect(git(decoy, 'for-each-ref')).toBe('');
+    expect(w.remoteTip()).toBe(await headSha(w.dir));
+  });
+
+  test('every token-bearing call names a root bare repo as both GIT_DIR and GIT_COMMON_DIR', async () => {
+    const w = await world('tokencalls');
+    writeFileSync(join(w.dir, 'd.txt'), 'd\n');
+    await commitIfDirty(w.dir, 'feat: d');
+    const rec = recordSpawn();
+    expect(await stageAndPush(w)).toMatchObject({ status: 'pushed' });
+    const tokenCalls = rec.calls.filter((c) =>
+      Object.values(c.env).some((v) => String(v).includes(authHeader(TOKEN))),
+    );
+    expect(tokenCalls.length).toBeGreaterThan(0);
+    for (const c of tokenCalls) {
+      expect(c.env.GIT_DIR).toBeTruthy();
+      expect(c.env.GIT_DIR?.startsWith(w.dir)).toBe(false);
+      expect(c.env.GIT_COMMON_DIR).toBe(c.env.GIT_DIR);
+      expect(c.cwd?.startsWith(w.dir) ?? false).toBe(false);
+    }
+  });
+
+  test('a commondir planted during the agent fetch does not redirect the push', async () => {
+    const w = await world('commondir');
+    writeFileSync(join(w.dir, 'k.txt'), 'k\n');
+    await commitIfDirty(w.dir, 'feat: k');
+    const decoy = join(w.base, 'decoy.git');
+    git(w.base, 'init', '--bare', '-q', decoy);
+    const evil = join(w.base, 'evil-common');
+    git(w.base, 'init', '--bare', '-q', evil);
+    git(evil, 'config', `url.file://${decoy}.insteadOf`, w.target.url);
+    recordSpawn((c) => {
+      if (c.argv.includes(`file://${w.dir}`) && c.env.GIT_DIR) {
+        writeFileSync(join(c.env.GIT_DIR, 'commondir'), `${evil}\n`);
+      }
+    });
+    expect(await stageAndPush(w)).toMatchObject({ status: 'pushed' });
+    expect(w.remoteTip()).toBe(await headSha(w.dir));
+    expect(git(decoy, 'for-each-ref')).toBe('');
+  });
+
+  test('inherited GIT_* config and a global gitconfig never redirect the push', async () => {
+    const w = await world('globalcfg');
+    writeFileSync(join(w.dir, 'g.txt'), 'g\n');
+    await commitIfDirty(w.dir, 'feat: g');
+    const decoy = join(w.base, 'decoy2.git');
+    git(w.base, 'init', '--bare', '-q', decoy);
+    const home = join(w.base, 'evil-home');
+    mkdirSync(home);
+    writeFileSync(
+      join(home, '.gitconfig'),
+      `[url "file://${decoy}"]\n\tinsteadOf = ${w.target.url}\n`,
+    );
+    const saved = { ...process.env };
+    process.env.HOME = home;
+    process.env.GIT_CONFIG_GLOBAL = join(home, '.gitconfig');
+    process.env.GIT_CONFIG_COUNT = '1';
+    process.env.GIT_CONFIG_KEY_0 = `url.file://${decoy}.insteadOf`;
+    process.env.GIT_CONFIG_VALUE_0 = w.target.url;
+    try {
+      expect(await stageAndPush(w)).toMatchObject({ status: 'pushed' });
+    } finally {
+      process.env = saved;
+    }
+    expect(git(decoy, 'for-each-ref')).toBe('');
+    expect(w.remoteTip()).toBe(await headSha(w.dir));
   });
 });

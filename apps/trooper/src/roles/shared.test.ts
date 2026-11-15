@@ -4,12 +4,15 @@ import { type AddressInfo, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { DropPayload, GateResult } from '@jumpmaster/protocol';
+import { type DropPayload, type GateResult, pushRequestValid } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
 import type { TrooperDeps } from '../main.js';
 import { runTrooper } from '../main.js';
 import type { TrooperIdentities } from '../privilege.js';
+import { roleWorld } from '../test/roleWorld.js';
+import { runHeal } from './heal.js';
 import { runImplement } from './implement.js';
+import { runResolve } from './resolve.js';
 import {
   agentSettings,
   agentSystemPrompt,
@@ -67,7 +70,6 @@ function recorder(o: { claude?: string[] } = {}) {
     lines: [] as string[],
     swept: [] as number[],
     m0Sweeps: 0,
-    pushSweep: undefined as undefined | (() => void),
     gateEnv: undefined as NodeJS.ProcessEnv | undefined,
     gateExtraEnv: undefined as NodeJS.ProcessEnv | undefined,
     gateRedactions: undefined as string[] | undefined,
@@ -82,16 +84,6 @@ function recorder(o: { claude?: string[] } = {}) {
       headSha: async () => 'h',
       aheadOfBase: async () => 1,
       remoteBranchSha: async () => null,
-      pushNewBranch: async (
-        _d: string,
-        _b: string,
-        _t: string,
-        _tg: unknown,
-        sweep: () => void,
-      ) => {
-        state.pushSweep = sweep;
-        return 'abc';
-      },
       sweepProcesses: () => {
         state.m0Sweeps++;
         return false;
@@ -305,12 +297,84 @@ describe('services', () => {
 });
 
 describe('runImplement', () => {
-  test('the push sweep kills both the agent and gate uids', async () => {
+  test('in container mode the gated commit is handed over as a push request', async () => {
     const r = recorder();
-    await runImplement(impl, r.deps, ctxWithIds);
-    r.state.pushSweep?.();
-    expect(r.state.swept).toEqual(expect.arrayContaining([10001, 10002]));
-    expect(r.state.m0Sweeps).toBe(1);
+    const out = await runImplement(impl, r.deps, ctxWithIds);
+    expect(out).toMatchObject({
+      status: 'completed',
+      headSha: 'h',
+      push: { kind: 'final', expectSha: 'h' },
+    });
+    // The gates still run after an agent sweep; nothing pushes, so no push sweep runs.
+    expect(r.state.swept).toEqual([10001]);
+    expect(r.state.m0Sweeps).toBe(0);
+  });
+});
+
+describe('push requests', () => {
+  type Pushing = 'implement' | 'heal' | 'resolve';
+  const pr = { number: 9, branch: 'agent/issue-5', headSha: 'sha1' };
+  const payloads: Record<Pushing, DropPayload> = {
+    implement: impl,
+    heal: { ...impl, role: 'heal', pr, feedback: 'fix it' } as DropPayload,
+    resolve: { ...impl, role: 'resolve', pr } as DropPayload,
+  };
+  const runners: Record<Pushing, typeof runImplement> = {
+    implement: runImplement,
+    heal: runHeal,
+    resolve: runResolve,
+  };
+  const cases: { name: string; o: Parameters<typeof roleWorld>[0] }[] = [
+    { name: 'completed', o: { dirty: true, merge: 'conflicts' } },
+    { name: 'rate limited with work', o: { dirty: true, merge: 'conflicts', rateLimited: true } },
+    { name: 'not dirty', o: { merge: 'up_to_date' } },
+    { name: 'failed', o: { checkoutError: 'head moved', remoteSha: 'x' } },
+  ];
+
+  for (const role of ['implement', 'heal', 'resolve'] as const) {
+    for (const c of cases) {
+      test(`${role}, ${c.name}: the result is a valid push request for its role`, async () => {
+        const w = roleWorld(c.o);
+        const r = await runners[role](payloads[role], w.deps, ctx);
+        expect(pushRequestValid(r, role), JSON.stringify(r)).toBe(true);
+        if (r.push?.kind === 'final') expect(r.push.expectSha).toBe(r.headSha);
+        if (r.push !== undefined) expect(r.headSha).toBeDefined();
+        if (r.status === 'completed') expect(r.push?.kind).toBe('final');
+        else if (r.push !== undefined) expect(r.push.kind).toBe('checkpoint');
+      });
+    }
+  }
+
+  test('implement and heal early stops carry checkpoint', async () => {
+    for (const role of ['implement', 'heal'] as const) {
+      const w = roleWorld({ dirty: true, rateLimited: true });
+      const r = await runners[role](payloads[role], w.deps, ctx);
+      expect(r, role).toMatchObject({ status: 'rate_limited', push: { kind: 'checkpoint' } });
+    }
+  });
+
+  test('a lapsed read token fails clearly at the start', async () => {
+    const refused =
+      "git fetch failed (exit 128): fatal: could not read Username for 'https://github.com': terminal prompts disabled";
+    for (const role of ['implement', 'heal', 'resolve'] as const) {
+      const w = roleWorld({ cloneError: refused });
+      const r = await runners[role](payloads[role], w.deps, ctx);
+      expect(r, role).toMatchObject({
+        status: 'failed',
+        reason: 'the read token was refused (401): renew it',
+      });
+      expect(r.push).toBeUndefined();
+      expect(w.claude.runs).toBe(0);
+    }
+  });
+
+  test('other clone failures keep their own reason', async () => {
+    const w = roleWorld({ cloneError: 'git fetch failed (exit 128): fatal: unable to access' });
+    const r = await runImplement(impl, w.deps, ctx);
+    expect(r).toMatchObject({
+      status: 'failed',
+      reason: expect.stringMatching(/unable to access/),
+    });
   });
 });
 

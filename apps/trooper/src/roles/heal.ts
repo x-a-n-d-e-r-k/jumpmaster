@@ -6,10 +6,10 @@ import {
   acceptOutcome,
   checkpoint,
   cloneAndPrepare,
+  completedWith,
+  earlyStop,
   emitEvent,
   guarded,
-  mirrorDirOf,
-  pushSweep,
   type RoleCtx,
   reportOf,
   resultMeta,
@@ -20,7 +20,10 @@ import {
 
 type HealPayload = Extract<DropPayload, { role: 'heal' }>;
 
-/** Heal: address feedback on the PR head and push onto it, leased on that head. */
+/**
+ * Heal: address feedback on the PR head. It never pushes: the result asks the push container to
+ * push onto the PR branch, leased on that head (final when completed, checkpoint on an early stop).
+ */
 export async function runHeal(
   payload: DropPayload,
   deps: TrooperDeps,
@@ -48,26 +51,6 @@ async function healSteps(
   emitEvent(deps, ctx, 'phase', { phase: 'checkout', branch });
   await deps.git.checkoutBranch(dir, branch, prHead, as);
 
-  const push = (expectSha?: string): Promise<string> => {
-    emitEvent(deps, ctx, 'phase', { phase: 'push' });
-    return deps.git.pushExistingBranch(
-      dir,
-      branch,
-      forgeToken,
-      target,
-      prHead,
-      pushSweep(deps, ctx),
-      {
-        mirrorDir: mirrorDirOf(ctx),
-        as,
-        base,
-        protectedPaths: payload.protectedPaths,
-        secrets: ctx.secrets,
-        ...(expectSha === undefined ? {} : { expectSha }),
-      },
-    );
-  };
-
   // The server renders the feedback under its own heading; it follows the role prompt as data.
   const prompt = `${payload.prompt}\n\n${payload.feedback}`;
   const outcome = await runAgent(
@@ -86,8 +69,7 @@ async function healSteps(
 
   const early = stoppedEarly(outcome);
   if (early !== null) {
-    const headSha = await checkpoint(deps, ctx, dir, base, () => push());
-    return done(headSha === undefined ? { status: early } : { status: early, headSha });
+    return done(earlyStop(early, await checkpoint(deps, ctx, dir, base)));
   }
   const accepted = acceptOutcome(outcome);
   if (!accepted.ok) return done({ status: 'failed', reason: accepted.reason });
@@ -117,15 +99,11 @@ async function healSteps(
     });
   }
 
-  // Gates test HEAD; the push must carry exactly that commit.
+  // Gates test HEAD; the push container must push exactly that commit.
   const gatedSha = await deps.git.headSha(dir, as);
   gates.push(...(await runGatesPhase(payload, deps, ctx, dir)));
   const failed = gates.find((g) => g.timedOut || g.exitCode !== 0);
   if (failed) return done({ status: 'failed', reason: `gate ${failed.name} failed` });
 
-  return done({
-    status: 'completed',
-    headSha: await push(gatedSha),
-    ...reportOf(structured.summary),
-  });
+  return done({ ...completedWith(gatedSha), ...reportOf(structured.summary) });
 }
