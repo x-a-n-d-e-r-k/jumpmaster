@@ -584,3 +584,18 @@ export function sanitizeForgeText(text: string, secrets: string[], maxLen = 60_0
   out = out.replace(/(^|[^\w])(www)\./gi, `$1$2${ZWJ}.`);
   return truncate(out, maxLen);
 }
+
+/**
+ * Undoes the joiners `sanitizeForgeText` and `sanitizeCrewText` insert, so a value quoted in an
+ * issue (a URL, an `@scope/pkg` import, `#12`) reaches an agent as written. For drop input only:
+ * never apply it to text posted to the forge, where the joiners keep mentions and links dead. Any
+ * other zero-width joiner (an emoji sequence, say) is kept.
+ */
+export function unsanitizeForgeText(text: string): string {
+  return text
+    .replace(/@\u200d(?=[A-Za-z0-9])/g, '@')
+    .replaceAll(':\u200d//', '://')
+    .replace(/(www)\u200d\./gi, '$1.')
+    .replace(/#\u200d(?=\d)/g, '#')
+    .replace(/(gh-)\u200d(?=\d)/gi, '$1');
+}

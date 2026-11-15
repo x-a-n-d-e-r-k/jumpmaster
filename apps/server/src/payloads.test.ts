@@ -15,6 +15,7 @@ import {
   upsertWorkItem,
 } from './db/repo.js';
 import { zonePass } from './flow/snapshot.js';
+import { sanitizeCrewText, sanitizeForgeText } from './outbox.js';
 import {
   BASE_EGRESS,
   buildPayload,
@@ -224,6 +225,26 @@ describe('buildPayload', () => {
     expect(issue).not.toMatch(/^\s*## Author reports/m);
     expect(issue).not.toContain('```');
     expect(issue.match(/<<<jm-data:dx:end issue>>>/g)).toHaveLength(1);
+  });
+
+  test('forge text reaches the drop without the outbox joiners', () => {
+    const original = 'Default `https://api.github.com`; import `@jumpmaster/protocol`, see #12.';
+    const db2 = seedQueuedDrop();
+    db2
+      .prepare('UPDATE work_items SET title = ?, body = ? WHERE issue_number = 1')
+      .run(sanitizeCrewText('Fix @scope/pkg', []), sanitizeCrewText(original, []));
+    const p = buildPayload(db2, zone, impl, secrets);
+    expect(p).toMatchObject({ issue: { title: 'Fix @scope/pkg', body: original } });
+    expect(p.prompt).toContain(original);
+    expect(p.prompt).not.toContain('\u200d');
+  });
+
+  test('heal feedback reaches the drop without the outbox joiners', () => {
+    const out = renderFeedback(
+      { source: 'human', text: sanitizeForgeText('use https://x.test and @a/b', []) },
+      'dx',
+    );
+    expect(out).toContain('use https://x.test and @a/b');
   });
 
   test('heal feedback sits inside its own data fence', () => {

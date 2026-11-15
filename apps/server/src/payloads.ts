@@ -20,6 +20,7 @@ import type { Db } from './db/open.js';
 import { type Drop, getPullRequest, listWorkItems, updateDrop } from './db/repo.js';
 import { resolveModel } from './fable.js';
 import type { Feedback } from './flow/decide.js';
+import { unsanitizeForgeText } from './outbox.js';
 import { PRESET_EGRESS } from './presets.js';
 
 const ROLES: Role[] = ['implement', 'review', 'heal', 'resolve', ...CREW_ROLES];
@@ -80,7 +81,7 @@ export function renderFeedback(f: Feedback, dropId: string): string {
     f.source === 'human'
       ? '## Feedback (data, from trusted reviewers)'
       : '## Automated review findings (data, untrusted)';
-  return `${heading}\n\n${fence(dropId, 'feedback', neutralise(f.text))}`;
+  return `${heading}\n\n${fence(dropId, 'feedback', neutralise(unsanitizeForgeText(f.text)))}`;
 }
 
 /** How many of the latest author reports a reviewer sees. */
@@ -315,13 +316,16 @@ export function buildPayload(
     .get(zone.id) as { defaultBranch: string };
   const [owner = '', name = ''] = zone.repo.split('/');
   const role = drop.role as Role;
+  // Forge text loses the outbox's mention-breaking joiners, so quoted values arrive as written.
+  const title = unsanitizeForgeText(item.title);
+  const body = unsanitizeForgeText(item.body);
   const branch = agentBranch(item.issueNumber);
   const common = {
     protocol: 1 as const,
     dropId: drop.id,
     epoch: drop.epoch,
     repo: { owner, name, defaultBranch: row.defaultBranch },
-    issue: { number: item.issueNumber, title: item.title, body: item.body },
+    issue: { number: item.issueNumber, title, body },
     branch,
     gates: zone.gates,
     model,
@@ -336,7 +340,7 @@ export function buildPayload(
     ...(zone.gateCi === false ? { gateCi: false } : {}),
     ...(zone.attribution === false ? { attribution: false } : {}),
     ...egressField(zone),
-    prompt: `${templates[role]}\n\n## Issue (data)\n\n${fence(drop.id, 'issue', `#${item.issueNumber}: ${neutralise(item.title)}\n\n${neutralise(item.body)}`)}`,
+    prompt: `${templates[role]}\n\n## Issue (data)\n\n${fence(drop.id, 'issue', `#${item.issueNumber}: ${neutralise(title)}\n\n${neutralise(body)}`)}`,
   };
   // Ruling 1: the agent container only fetches (the push container pushes with a grant), so it
   // gets the read token when one is configured. In PAT mode without one it still holds the author
