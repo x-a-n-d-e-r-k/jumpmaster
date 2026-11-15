@@ -654,6 +654,24 @@ describe('zone checks', () => {
     expect(one(await pub.run(), 'forge.branch-rules').fix).not.toContain('GitHub Pro');
   });
 
+  test('branch rules the token reads but whose repository it cannot reach say so, not "no ruleset"', async () => {
+    const w = world();
+    w.f.state.rules.reviewer = { kind: 'unreachable' };
+    const c = one(await w.run(), 'forge.branch-rules');
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain("can't reach");
+    expect(c.summary).not.toContain('no ruleset');
+    expect(c.fix).toContain('repository access');
+    expect(c.fix).not.toContain('Create a branch ruleset');
+    // Starter mode reads the author alone, and says the same.
+    const s = world();
+    s.f.state.rules.author = { kind: 'unreachable' };
+    const sc = one(await s.run(), 'forge.branch-rules');
+    expect(sc.status).toBe('fail');
+    expect(sc.summary).not.toContain('no ruleset');
+    expect(sc.fix).toContain('repository access');
+  });
+
   test('config.secret-files fails on a secret file others can read, with the chmod fix', async () => {
     const w = world();
     w.deps.env = {

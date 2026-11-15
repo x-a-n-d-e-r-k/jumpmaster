@@ -19,6 +19,7 @@ import {
   pnpmBuildPolicy,
   pnpmfileInPlay,
   protectedPathHits,
+  REPO_UNREACHABLE,
 } from './guards.js';
 
 const defaults = DEFAULT_PROTECTED_PATHS;
@@ -1224,6 +1225,11 @@ describe('branchProtectionProblems', () => {
       ['no ruleset'],
     ));
 
+  test('a token that cannot reach the repository is reported as that, not as no ruleset', () =>
+    expect(
+      branchProtectionProblems({ author: rules(), reviewer: { kind: 'unreachable' } }, zone),
+    ).toEqual([REPO_UNREACHABLE]));
+
   test('branchProtectionProblems returns null when a read is unavailable', () =>
     expect(
       branchProtectionProblems({ author: rules(), reviewer: { kind: 'unavailable' } }, zone),
@@ -1313,6 +1319,11 @@ describe('branchProtectionProblems', () => {
       expect(
         branchProtectionProblems({ author: ok({ requiredChecks: [] }), reviewer: null }, starter),
       ).toEqual(['no required checks']));
+
+    test('an unreachable author read is reported as that', () =>
+      expect(
+        branchProtectionProblems({ author: { kind: 'unreachable' }, reviewer: null }, starter),
+      ).toEqual([REPO_UNREACHABLE]));
 
     test('an unavailable author read is still null', () =>
       expect(

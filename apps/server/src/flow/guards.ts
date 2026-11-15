@@ -938,6 +938,9 @@ export function codeownersFindings(
 export const codeownerBlocks = (f: { line: number; pattern: string }, reviewer: string): string =>
   `code owner review blocks the reviewer bot: CODEOWNERS line ${f.line} (${f.pattern}) does not name @${reviewer}, so every pull request it covers waits for a person: name @${reviewer} on that line (the protected lines after it stay people-only; the last match wins), or turn off Require review from Code Owners`;
 
+/** A token that reads the branch rules but is refused the repository's collaborator-permission read. */
+export const REPO_UNREACHABLE = "token can't reach the repository";
+
 /**
  * Problems with the branch rules both bot identities see (the author alone in starter mode, where
  * `reviewer` is null). `[]` when protection is not required; null when a read is unavailable
@@ -963,6 +966,10 @@ export function branchProtectionProblems(
     const adminAllowed = zone.authorMayBeAdmin && read === rules.author;
     if (read.kind === 'none') {
       out.add('no ruleset');
+      continue;
+    }
+    if (read.kind === 'unreachable') {
+      out.add(REPO_UNREACHABLE);
       continue;
     }
     const r = read.rules;
@@ -996,6 +1003,7 @@ function starterProblems(
 ): string[] | null {
   if (read.kind === 'unavailable') return null;
   if (read.kind === 'none') return ['no ruleset'];
+  if (read.kind === 'unreachable') return [REPO_UNREACHABLE];
   const r = read.rules;
   const out = new Set<string>();
   // Unknown counts as missing: the author must not be able to push straight to the branch.
