@@ -37,6 +37,8 @@ import {
   insertStick,
   isKilled,
   isReclaimable,
+  killHeldOrRecent,
+  latestDropFor,
   markMinted,
   PUSH_RETENTION_MS,
   reserveGrant,
@@ -598,7 +600,17 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
           hard: number;
         };
         const reclaimable = isReclaimable(db, d.id, at);
-        const killed = d.state === 'cancelled' && hard === 1;
+        // A kill-cancelled drop is bounded too: it must still be its item's latest drop on an
+        // open item, and the switch on or released within the reclaim window. A volume found
+        // days later must not reopen work that has moved on.
+        const item = d.workItemId === null ? undefined : getWorkItem(db, d.workItemId);
+        const killed =
+          d.state === 'cancelled' &&
+          hard === 1 &&
+          item !== undefined &&
+          (item.state === 'in_flight' || item.state === 'pr_open') &&
+          latestDropFor(db, item.id)?.id === d.id &&
+          killHeldOrRecent(db, at);
         if (!reclaimable && !killed) return 'state';
         if (d.workItemId !== null && activeDropFor(db, d.workItemId)) return 'active drop';
         const synthetic: DropResult = {

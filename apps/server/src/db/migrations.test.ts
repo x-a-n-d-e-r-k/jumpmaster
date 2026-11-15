@@ -626,7 +626,7 @@ const insDrop = (db: Db, id: string, role: string, item: number | null, state = 
 test('v17 rebuilds drops keeping every row and column, with foreign keys intact', () => {
   const f = v16Db();
   const before = new Database(f);
-  // v22 adds columns; the rows as v17 left them are what must survive.
+  // v22 and v23 add columns; the rows as v17 left them are what must survive.
   const NEW_V22 = [
     'push_kind',
     'push_expect_sha',
@@ -634,6 +634,7 @@ test('v17 rebuilds drops keeping every row and column, with foreign keys intact'
     'running_at',
     'usage_applied',
     'was_probe',
+    'rate_limit_requeue',
   ];
   const all = (db: Db | Database.Database) =>
     (db.prepare('SELECT * FROM drops ORDER BY id').all() as Record<string, unknown>[]).map((r) =>
@@ -862,7 +863,6 @@ test('v22 migrates a v21 database and keeps every drop and index', () => {
     );
   });
   const db = openDb(f);
-  expect(MIGRATIONS.at(-1)?.version).toBe(22);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(
     db
@@ -903,5 +903,24 @@ test('v22 migrates a v21 database and keeps every drop and index', () => {
     .prepare("SELECT name FROM pragma_table_info('push_tokens') WHERE pk > 0 ORDER BY pk")
     .all();
   expect(pk).toEqual([{ name: 'drop_id' }, { name: 'epoch' }, { name: 'seq' }]);
+  db.close();
+});
+
+test('v23 adds rate_limit_requeue, undecided on every existing drop', () => {
+  const f = dbAt(22, (raw) => {
+    raw.exec(
+      `INSERT INTO drop_zones (id, repo, default_branch, config_json) VALUES ('z', 'o/r', 'main', '{}');
+       INSERT INTO work_items (drop_zone_id, issue_number, title, body, author, priority, is_fix,
+         issue_created_at, state, updated_at) VALUES ('z', 1, 't', 'b', 'a', 0, 0, 't', 'in_flight', 't');
+       INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, created_at, push_kind)
+         VALUES ('d1', 'z', 1, 'implement', 'push_pending', 't', 'checkpoint');`,
+    );
+  });
+  const db = openDb(f);
+  expect(MIGRATIONS.at(-1)?.version).toBe(23);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.prepare('SELECT id, state, rate_limit_requeue AS r FROM drops').all()).toEqual([
+    { id: 'd1', state: 'push_pending', r: null },
+  ]);
   db.close();
 });

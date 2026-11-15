@@ -116,8 +116,21 @@ const park = (c: Ctx, reason: string, dropState: DropState) => {
   finish(c, dropState);
 };
 
-/** Inserts the replacement for `c.drop`, which must already be terminal. */
+/**
+ * Whether the item still takes new drops: in flight or with its PR open. A result that arrives
+ * after the item moved on (a late salvage, say) must not reopen it.
+ */
+function itemOpen(c: Ctx): boolean {
+  const state = getWorkItem(c.db, c.item.id)?.state;
+  return state === 'in_flight' || state === 'pr_open';
+}
+
+/**
+ * Inserts the replacement for `c.drop`, which must already be terminal; none for an item that is
+ * no longer open (`itemOpen`).
+ */
 function insertReplacement(c: Ctx, headSha: string | null, chargedKey: string | null): void {
+  if (!itemOpen(c)) return;
   const role = c.drop.role as Role;
   insertDrop(
     c.db,
@@ -142,6 +155,8 @@ function insertReplacement(c: Ctx, headSha: string | null, chargedKey: string | 
 /** Continuation of an interrupted drop: charged to `resume`, parked when that is exhausted. */
 function continueInterrupted(c: Ctx, headSha: string | null): void {
   c.db.transaction(() => {
+    // The item moved on while this drop's work was saved: nothing continues, nothing is charged.
+    if (!itemOpen(c)) return finish(c, 'succeeded');
     const charge = chargeBudget(
       c.db,
       c.item.id,
@@ -155,14 +170,27 @@ function continueInterrupted(c: Ctx, headSha: string | null): void {
   })();
 }
 
+/**
+ * Whether a rate-limited drop's requeue is due at `now`: usage paused (rejected, or a pause not
+ * yet over), or a Fable-only limit, which pauses Fable, not dispatch (the replacement runs on
+ * another model).
+ */
+function requeueDue(db: Db, result: DropResult, now: Date): boolean {
+  const usage = getUsageState(db);
+  return (
+    isFableRateLimit(result.rateLimit) ||
+    usage.status === 'rejected' ||
+    (usage.pausedUntil !== null && Date.parse(usage.pausedUntil) > now.getTime())
+  );
+}
+
 function rateLimited(c: Ctx, wasProbe: boolean, result: DropResult): void {
   c.db.transaction(() => {
-    const usage = getUsageState(c.db);
-    // A Fable-only limit pauses Fable, not dispatch: the replacement runs on another model.
-    const paused =
-      isFableRateLimit(result.rateLimit) ||
-      usage.status === 'rejected' ||
-      (usage.pausedUntil !== null && Date.parse(usage.pausedUntil) > c.now.getTime());
+    if (!itemOpen(c)) return finish(c, 'cancelled');
+    // Decided when the usage was applied (`rate_limit_requeue`), so a push that outlasts the
+    // pause doesn't turn a due requeue into a park; older rows decide now.
+    const decided = c.drop.rateLimitRequeue;
+    const paused = decided === null ? requeueDue(c.db, result, c.now) : decided === 1;
     if (!paused || !(wasProbe || chargeRateLimitRequeue(c.db, c.item.id))) {
       return park(c, 'rate limit: requeue refused', 'cancelled');
     }
@@ -490,6 +518,10 @@ export function applyUsage(
     }
   } finally {
     releaseProbe(db, drop.id, deps.usageCfg, now, rand);
+  }
+  // After the report is ingested and the probe released, as the outcome would have seen it.
+  if (result.status === 'rate_limited') {
+    updateDrop(db, drop.id, { rateLimitRequeue: requeueDue(db, result, now) ? 1 : 0 });
   }
 }
 

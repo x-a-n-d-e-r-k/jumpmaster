@@ -707,6 +707,15 @@ CREATE TABLE push_tokens (
 );
 `;
 
+/**
+ * v23: whether a rate-limited drop's requeue was due when its usage was applied
+ * (`rate_limit_requeue`: 1 paused, 0 not, NULL not decided). A push-requested result applies usage
+ * early and its outcome after the push: the outcome must judge the pause as it was then.
+ */
+const V23_SQL = `
+ALTER TABLE drops ADD COLUMN rate_limit_requeue INTEGER;
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -738,6 +747,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 20, sql: V20_SQL },
   { version: 21, sql: V21_SQL, foreignKeysOff: true },
   { version: 22, sql: V22_SQL, foreignKeysOff: true },
+  { version: 23, sql: V23_SQL },
 ];
 
 /**

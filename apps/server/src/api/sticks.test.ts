@@ -1487,6 +1487,62 @@ describe('push container routes', () => {
     expect((await salvage(other.stickToken)).statusCode).toBe(409);
   });
 
+  test('a kill-cancelled drop is salvaged only while it is the item open drop, until the reclaim window after release', async () => {
+    let clock = t0;
+    const killedDrop = async (o: { release?: number; itemState?: 'done' | 'parked' } = {}) => {
+      const w = setup({ queued: false, now: () => clock });
+      const s = await enroll();
+      pending(w.db, s.stickId);
+      updateDrop(w.db, 'd1', { state: 'cancelled', pushKind: null });
+      w.db.prepare('UPDATE drops SET hard_cancel = 1 WHERE id = ?').run('d1');
+      setKilled(w.db, true, t0);
+      if (o.release !== undefined) setKilled(w.db, false, plus(t0, o.release));
+      if (o.itemState) setWorkItemState(w.db, 1, o.itemState, undefined, t0);
+      return { ...w, ...s };
+    };
+    const MIN = 60_000;
+
+    // Released ten minutes ago: still within the reclaim window.
+    clock = plus(t0, HOUR + 10 * MIN);
+    let w = await killedDrop({ release: HOUR });
+    expect((await salvage(w.stickToken)).json()).toEqual({ state: 'push_pending' });
+
+    // Released sixteen minutes ago: refused.
+    clock = plus(t0, HOUR + 16 * MIN);
+    w = await killedDrop({ release: HOUR });
+    let res = await salvage(w.stickToken);
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ refused: 'state' });
+    expect(getDrop(w.db, 'd1')?.state).toBe('cancelled');
+
+    // Still killed, days later: accepted (nothing has replaced it).
+    clock = plus(t0, 72 * HOUR);
+    w = await killedDrop();
+    expect((await salvage(w.stickToken)).json()).toEqual({ state: 'push_pending' });
+
+    // The item finished meanwhile: refused, even with the switch on.
+    for (const itemState of ['done', 'parked'] as const) {
+      w = await killedDrop({ itemState });
+      res = await salvage(w.stickToken);
+      expect(res.statusCode, itemState).toBe(409);
+      expect(getDrop(w.db, 'd1')?.state, itemState).toBe('cancelled');
+    }
+
+    // A later drop on the item (finished): this one is no longer the item's latest.
+    w = await killedDrop();
+    insertDrop(w.db, {
+      id: 'd2',
+      dropZoneId: 'main',
+      workItemId: 1,
+      role: 'implement',
+      state: 'succeeded',
+      createdAt: plus(t0, MIN).toISOString(),
+    });
+    res = await salvage(w.stickToken);
+    expect(res.statusCode).toBe(409);
+    expect(getDrop(w.db, 'd1')?.state).toBe('cancelled');
+  });
+
   test('a drop lost after a long run is still salvageable within the window', async () => {
     const { db } = setup({ queued: false });
     const { stickId, stickToken } = await enroll();

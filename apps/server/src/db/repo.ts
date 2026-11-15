@@ -100,6 +100,11 @@ export interface Drop {
   usageApplied: number;
   /** 1 when the drop held the usage probe at the time its usage was applied. */
   wasProbe: number;
+  /**
+   * For a rate-limited result: 1 when usage was paused as its usage was applied (a requeue is
+   * due), 0 when not; null when not decided (any other result, or applied before v23).
+   */
+  rateLimitRequeue: number | null;
 }
 
 export type NewDrop = Pick<Drop, 'id' | 'dropZoneId' | 'workItemId' | 'role' | 'state'> &
@@ -156,7 +161,8 @@ const DROP_COLS = `id, drop_zone_id AS dropZoneId, work_item_id AS workItemId, r
   fingerprint, pr_number AS prNumber, head_sha AS headSha, input_json AS inputJson, charged_key AS chargedKey,
   requested_model AS requestedModel, served_model AS servedModel, push_kind AS pushKind,
   push_expect_sha AS pushExpectSha, push_deadline AS pushDeadline, running_at AS runningAt,
-  usage_applied AS usageApplied, was_probe AS wasProbe`;
+  usage_applied AS usageApplied, was_probe AS wasProbe,
+  rate_limit_requeue AS rateLimitRequeue`;
 
 type WorkItemRow = Omit<WorkItem, 'isFix' | 'retryLabelSeen' | 'blockedBy'> & {
   isFix: number;
@@ -420,6 +426,7 @@ const DROP_COLUMN: Record<keyof DropPatch, string> = {
   runningAt: 'running_at',
   usageApplied: 'usage_applied',
   wasProbe: 'was_probe',
+  rateLimitRequeue: 'rate_limit_requeue',
 };
 
 export function updateDrop(db: Db, id: string, patch: DropPatch): void {
@@ -1014,6 +1021,28 @@ export function isKilled(db: Db): boolean {
     | { engaged: number }
     | undefined;
   return row?.engaged === 1;
+}
+
+/**
+ * Whether the kill switch is engaged, or was released no more than `RECLAIM_WINDOW_MS` before
+ * `now` (its `updated_at` is the release): how long a kill-cancelled drop may still be salvaged.
+ */
+export function killHeldOrRecent(db: Db, now: Date): boolean {
+  const row = db.prepare('SELECT engaged, updated_at AS at FROM kill_switch WHERE id = 1').get() as
+    | { engaged: number; at: string }
+    | undefined;
+  if (!row) return false;
+  return row.engaged === 1 || row.at >= reclaimCutoff(now);
+}
+
+/** The item's most recent drop, whatever its state. */
+export function latestDropFor(db: Db, itemId: number): Drop | undefined {
+  return db
+    .prepare(
+      `SELECT ${DROP_COLS} FROM drops WHERE work_item_id = ?
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(itemId) as Drop | undefined;
 }
 
 /**
