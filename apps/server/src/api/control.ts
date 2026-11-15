@@ -19,7 +19,7 @@ import {
   verifyPassphrase,
 } from '../auth/operator.js';
 import { grantSudo } from '../auth/sessions.js';
-import { listBriefings, optionsDigest, ruleBriefing } from '../briefings.js';
+import { dismissZoneBriefings, listBriefings, optionsDigest, ruleBriefing } from '../briefings.js';
 import { mergeConfigPatch, mergePatch } from '../config/diff.js';
 import { configReader, type LiveConfig, statusOf } from '../config/source.js';
 import { type ApplyResult, ConfigStore } from '../config/store.js';
@@ -172,6 +172,8 @@ const DoctorDropBody = z.strictObject({
 });
 
 const ZoneBody = z.object({ mode: z.enum(ZONE_MODES) });
+/** The ids of the zone's briefings Command was shown and confirmed dismissing. */
+const DismissBody = z.object({ ids: z.array(z.number().int().positive()).max(5000) });
 const RuleBody = z.object({
   optionId: z.string().min(1),
   note: z.string().max(2000).optional(),
@@ -371,6 +373,23 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       audit(req, 'zone.mode', { mode: body.data.mode }, zone.id);
       return { zone: zone.id, mode: body.data.mode };
     });
+
+    // Dismisses the zone's open briefings Command was shown (issue #98), each recorded as one
+    // dismissal. No ruling: nothing is ruled, promoted, rejected or closed, on the forge or here.
+    scope.post<{ Params: { id: string } }>(
+      '/api/control/zones/:id/briefings/dismiss',
+      async (req, reply) => {
+        const zone = cfg(req).dropZones.find((z) => z.id === req.params.id);
+        if (!zone) return reply.code(404).send({ error: 'unknown zone' });
+        const body = DismissBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: 'invalid body' });
+        const dismissed = dismissZoneBriefings(db, zone.id, body.data.ids, now());
+        for (const id of dismissed) {
+          audit(req, 'briefing.dismiss', { zone: zone.id, bulk: true }, `briefing:${id}`);
+        }
+        return { zone: zone.id, dismissed };
+      },
+    );
 
     // What Jumpmaster is doing and why it waits (§10.3): the home banner's line, for `ctl status`.
     scope.get('/api/control/status', async (req) =>

@@ -1,5 +1,5 @@
 import { redact } from '@jumpmaster/protocol';
-import { listBriefings } from './briefings.js';
+import { floorBriefings } from './briefings.js';
 import { getSetting, setSetting } from './config/revisions.js';
 import type { ConfigStore } from './config/store.js';
 import { type Config, secretList } from './config.js';
@@ -104,6 +104,7 @@ export type StatusInput = {
   doctor: { fails: DoctorCheck[]; finishedAt?: string };
   /** The end of the last pass (stamped in the database); undefined before the first. */
   lastPassAt?: string;
+  /** Open briefings the floor lists: a paused or observing zone's are held off it. */
   openBriefings: number;
   zones: StatusZone[];
   outboxRetrying: OutboxRow[];
@@ -550,7 +551,8 @@ export function statusInputOf(o: {
       ...(run?.finishedAt ? { finishedAt: run.finishedAt } : {}),
     },
     ...(last ? { lastPassAt: last } : {}),
-    openBriefings: listBriefings(db, { state: 'open' }).length,
+    // A paused or observing zone's briefings are held off the floor, so they don't count here.
+    openBriefings: floorBriefings(db, config.dropZones).listed.length,
     zones: config.dropZones.map((zone): StatusZone => {
       const items = listWorkItems(db, zone.id);
       const drops = listActiveDrops(db, zone.id);
