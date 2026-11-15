@@ -72,6 +72,8 @@ function fakeDriver(
     pullError?: string;
     /** `removeAndWait` throws `container not removed`. */
     removeError?: boolean;
+    /** How long a stopped container takes to exit (its grace in use). */
+    stopDelayMs?: number;
   } = {},
 ) {
   const order: string[] = [];
@@ -178,7 +180,8 @@ function fakeDriver(
           async stop(grace: number) {
             d.stopped = true;
             d.stopGrace = grace;
-            release();
+            if (opts.stopDelayMs) setTimeout(release, opts.stopDelayMs);
+            else release();
           },
           async kill() {
             d.killed = true;
@@ -1532,6 +1535,41 @@ describe('push containers: the agent run on a volume', () => {
     expect(d.stopped).toBe(true);
     expect(d.stopGrace).toBe(LOST_SERVER_GRACE_MS);
     expect(d.killed).toBe(false);
+  });
+
+  test('the server returns during the grace: no beat, no result, the volume kept', async () => {
+    const d = fakeDriver([], { hang: true, stopDelayMs: 60 });
+    const client = fakeClient();
+    let beats = 0;
+    client.heartbeat = async () => {
+      beats++;
+      if (beats <= 3) throw new Error('network down');
+      return 'ok';
+    };
+    const o = deps(d, client);
+    await runDrop(payload, { ...o, lostServerKillBeats: 3 });
+    expect(d.stopGrace).toBe(LOST_SERVER_GRACE_MS);
+    // The lease is never refreshed after the stop, and no synthetic failure is posted.
+    expect(beats).toBe(3);
+    expect(client.result).toBeUndefined();
+    // The server's answer is unknown: the volume stays for rediscovery, with no entry.
+    expect(o.pending.size()).toBe(0);
+    expect(d.order).not.toContain(VOL);
+  });
+
+  test('a push result after a lost-server stop is still held and posted', async () => {
+    const d = fakeDriver([PUSH_RESULT], { hang: true, stopDelayMs: 20 });
+    const client = fakeClient();
+    let beats = 0;
+    client.heartbeat = async () => {
+      beats++;
+      throw new Error('network down');
+    };
+    const o = deps(d, client);
+    await runDrop(payload, { ...o, lostServerKillBeats: 3 });
+    expect(beats).toBe(3);
+    expect(client.result?.push).toEqual({ kind: 'final', expectSha: SHA });
+    expect(o.pending.size()).toBe(1);
   });
 
   test('hard cancel kills, then salvages', async () => {

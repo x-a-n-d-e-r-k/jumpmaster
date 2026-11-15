@@ -442,6 +442,8 @@ async function runContainer(
   let stale = false;
   let cancelled = false;
   let hard = false;
+  /** Stopped by the lost-server rule: the epoch is fenced, as a kill used to fence it. */
+  let lost = false;
   let stopping: Promise<void> | undefined;
   let killing: Promise<void> | undefined;
   const stop = (graceMs = STOP_GRACE_MS) => {
@@ -485,7 +487,9 @@ async function runContainer(
   const lostLimit = deps.lostServerKillBeats ?? DEFAULT_LOST_SERVER_KILL_BEATS;
   let failedBeats = 0;
   const hb = setInterval(async () => {
-    if (killing) return;
+    // After the lost-server stop no beat goes out: a server back inside the grace must not see a
+    // live lease, and must find the drop lost (or salvage it from the push result).
+    if (killing || lost) return;
     try {
       const r = await client.heartbeat(dropId, epoch);
       failedBeats = 0;
@@ -500,9 +504,12 @@ async function runContainer(
       void stop();
     } catch {
       // Keep going through a blip. Past the limit the lease is ending anyway: stop with a grace
-      // (Ruling 14), and hold the result until the server answers again.
+      // (Ruling 14). Only a push-requested result is posted after that (held, then salvaged).
       failedBeats++;
-      if (failedBeats >= lostLimit) void stop(LOST_SERVER_GRACE_MS);
+      if (failedBeats >= lostLimit && !lost) {
+        lost = true;
+        void stop(LOST_SERVER_GRACE_MS);
+      }
     }
   }, deps.heartbeatMs ?? 15_000);
   const flusher = setInterval(() => void flush(), FLUSH_MS);
@@ -545,6 +552,12 @@ async function runContainer(
     // A hard cancel (the kill switch) still asks to save the killed agent's work.
     if (hard && volume) fate.decide = () => salvaged(client, dropId, epoch);
     if (stale || cancelled) return;
+    if (lost && !(result?.push && volume)) {
+      // Fenced like the old kill: nothing posted, so a server that answers again sees the drop
+      // lost. Its answer about the volume is unknown, so it stays for rediscovery to salvage.
+      fate.decide = async () => 'keep';
+      return;
+    }
     if (result) {
       postedReal = true;
       if (result.push && volume) {
@@ -568,7 +581,8 @@ async function runContainer(
     // A real result that could not be delivered must not be replaced by a synthetic failure
     // (the server would lose result_json); surface the error to the caller instead.
     if (postedReal) throw e;
-    if (!stale && !cancelled) {
+    if (lost && volume) fate.decide = async () => 'keep';
+    if (!stale && !cancelled && !lost) {
       const reason = `stick runner error: ${e instanceof Error ? e.message : String(e)}`;
       await client
         .postResult(dropId, epoch, { status: 'failed', role: payload.role, reason, gates: [] })

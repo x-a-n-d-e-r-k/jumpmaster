@@ -49,7 +49,7 @@ const PUSHED = resultLine({ status: 'pushed', headSha: SHA, alreadyThere: false 
 /** One push container's script: lines before the grant, and (when it waits) after it. */
 type Script = { before: string[]; after?: string[]; hang?: boolean; exitCode?: number };
 
-function fakeDriver(scripts: Script[]) {
+function fakeDriver(scripts: Script[], opts: { proxyStopError?: boolean } = {}) {
   const order: string[] = [];
   const starts: Parameters<ContainerDriver['start']>[0][] = [];
   /** Lines written to each started container's stdin, by start index. */
@@ -141,6 +141,7 @@ function fakeDriver(scripts: Script[]) {
           },
           async stop() {
             done();
+            if (opts.proxyStopError) throw new Error('proxy stop failed');
           },
         };
       },
@@ -444,5 +445,68 @@ describe('PendingPushes and the push loop', () => {
     });
     await loop.tick();
     expect(pending.get('a')?.attempts).toBe(1);
+  });
+});
+
+describe('fix round 1', () => {
+  test('a final grant refusal stops the container, posts a final failure and removes the volume', async () => {
+    const s = setup([{ before: [READY_LINE], hang: true }], {
+      grants: [{ refused: 'repo mismatch', retryable: false }],
+    });
+    expect(await pushOnce(s.entry, s.deps)).toBe('done');
+    expect(s.client.posted).toEqual([
+      { status: 'failed', reason: 'repo mismatch', retryable: false },
+    ]);
+    expect(s.d.writes).toEqual([[]]);
+    expect(s.d.removedVolumes).toEqual([VOLUME]);
+    expect(s.pending.size()).toBe(0);
+    expect(s.logs.join('\n')).toContain('repo mismatch');
+  });
+
+  test('a retryable refusal is logged and keeps backing off', async () => {
+    const s = setup([{ before: [READY_LINE], hang: true }], {
+      grants: [{ refused: 'reserved', retryable: true }],
+    });
+    expect(await pushOnce(s.entry, s.deps)).toBe('retry');
+    expect(s.client.posted).toEqual([]);
+    expect(s.d.removedVolumes).toEqual([]);
+    expect(s.logs.join('\n')).toContain('reserved');
+  });
+
+  test("an older epoch's attempt never removes or backs off a newer epoch's entry", async () => {
+    const s = setup([{ before: [] }], { plan: 'stale' });
+    const old = s.entry;
+    s.pending.add('d1', { epoch: 4, volume: 'jm-drop-d1-4-0123abcd' }, 0);
+    expect(await pushOnce(old, s.deps)).toBe('done');
+    expect(s.pending.get('d1')?.epoch).toBe(4);
+    s.pending.remove('d1', 3);
+    s.pending.backoff('d1', 1_000, 3);
+    expect(s.pending.get('d1')).toMatchObject({ epoch: 4, attempts: 0, nextAt: 0 });
+
+    const loop = createPushLoop(s.pending, async () => 'done');
+    const pending = new PendingPushes();
+    pending.add('x', { epoch: 1, volume: 'v1' }, 0);
+    const replaced = createPushLoop(pending, async () => {
+      pending.add('x', { epoch: 2, volume: 'v2' }, 0);
+      return 'retry';
+    });
+    await replaced.tick();
+    expect(pending.get('x')).toMatchObject({ epoch: 2, attempts: 0 });
+    await loop.tick();
+    expect(s.pending.size()).toBe(0);
+  });
+
+  test('a failing proxy stop still tears down the network and settles the entry', async () => {
+    const d = fakeDriver([{ before: [READY_LINE], after: [PUSHED] }], { proxyStopError: true });
+    const s = setup([]);
+    const deps = { ...s.deps, driver: d.driver, egressImage: 'egress:1' };
+    s.client.pushPlan = async () => ({
+      ...PLAN,
+      egress: { mode: 'allowlist' as const, allow: ['github.com'] },
+    });
+    expect(await pushOnce(s.entry, deps)).toBe('done');
+    expect(d.order).toContain('teardown jm-push-d1-3');
+    expect(d.removedVolumes).toEqual([VOLUME]);
+    expect(s.pending.size()).toBe(0);
   });
 });

@@ -81,7 +81,10 @@ export class PendingPushes {
     });
   }
 
-  remove(dropId: string): void {
+  /** With `epoch`, only that epoch's entry: an older attempt never removes a newer one. */
+  remove(dropId: string, epoch?: number): void {
+    const e = this.entries.get(dropId);
+    if (!e || (epoch !== undefined && e.epoch !== epoch)) return;
     this.entries.delete(dropId);
   }
 
@@ -93,9 +96,9 @@ export class PendingPushes {
   }
 
   /** Puts an entry off by its backoff, then counts the attempt. */
-  backoff(dropId: string, now: number): void {
+  backoff(dropId: string, now: number, epoch?: number): void {
     const e = this.entries.get(dropId);
-    if (!e) return;
+    if (!e || (epoch !== undefined && e.epoch !== epoch)) return;
     e.nextAt = now + backoffMs(e.attempts);
     e.attempts++;
   }
@@ -149,7 +152,7 @@ export async function pushOnce(entry: PushEntry, deps: PushDeps): Promise<PushOu
   if (plan === 'stale') {
     say('stale');
     await removeVolume(driver, volume, say);
-    pending.remove(dropId);
+    pending.remove(dropId, epoch);
     return 'done';
   }
 
@@ -215,7 +218,15 @@ export async function pushOnce(entry: PushEntry, deps: PushDeps): Promise<PushOu
     if (run === 'retry') return 'retry';
 
     let result: PushResult;
-    if (run === 'no-result') {
+    if (typeof run === 'object' && 'refused' in run) {
+      // Server strings, safe to log; scrubbed anyway.
+      say('grant refused', { refused: redactTokenShapes(run.refused), retryable: run.retryable });
+      handle.endStdin();
+      await handle.stop(STOP_GRACE_MS).catch(() => {});
+      if (run.retryable) return 'retry';
+      // Final (role, repo, kind, branch): the server applies Ruling 7 to this failure.
+      result = { status: 'failed', reason: run.refused, retryable: false };
+    } else if (run === 'no-result') {
       entry.noResult++;
       say('no result', { count: entry.noResult });
       if (entry.noResult < NO_RESULT_RETRIES) return 'retry';
@@ -249,17 +260,24 @@ export async function pushOnce(entry: PushEntry, deps: PushDeps): Promise<PushOu
       gone = false;
       say('push container not removed', { error: message(e) });
     });
-    if (session) await session.stop();
+    if (session) await session.stop().catch(() => {});
     if (net) await driver.removeServices(network, labels).catch(() => {});
     if (finished) {
       // A container still holding the volume makes this fail; the sweep finds the volume later.
       if (gone) await removeVolume(driver, volume, say);
-      pending.remove(dropId);
+      pending.remove(dropId, epoch);
     }
   }
 }
 
-type Run = { result: PushResult } | 'no-result' | 'retry' | 'killed' | 'cancelled' | 'stale';
+type Run =
+  | { result: PushResult }
+  | { refused: string; retryable: boolean }
+  | 'no-result'
+  | 'retry'
+  | 'killed'
+  | 'cancelled'
+  | 'stale';
 
 /** Reads the container through ready, the grant and its result, under its heartbeat. */
 async function drive(
@@ -346,8 +364,8 @@ async function drive(
     if (reply === 'aborted') return abort ?? 'retry';
     if ('stale' in reply) return 'stale';
     if ('refused' in reply) {
-      // Stopped in the finally; the grant never reaches this container.
-      return 'retry';
+      // The grant never reaches this container; pushOnce stops it.
+      return { refused: reply.refused, retryable: reply.retryable };
     }
     if (abort) return abort;
     const { grant } = reply;
@@ -403,8 +421,9 @@ export function createPushLoop(
           run(entry)
             .catch((): PushOutcome => 'retry')
             .then((outcome) => {
-              if (outcome === 'done' || outcome === 'cancelled') pending.remove(entry.dropId);
-              else pending.backoff(entry.dropId, now());
+              if (outcome === 'done' || outcome === 'cancelled') {
+                pending.remove(entry.dropId, entry.epoch);
+              } else pending.backoff(entry.dropId, now(), entry.epoch);
             })
             .finally(() => live.delete(entry.dropId)),
         );
