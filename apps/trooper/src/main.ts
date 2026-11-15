@@ -20,6 +20,7 @@ import { runGates } from './gates.js';
 import * as gitOps from './git.js';
 import {
   type AgentIdentity,
+  agentProcessesAlive,
   agentSpawnOptions,
   asAgentArgv,
   sweepUid,
@@ -31,6 +32,7 @@ import { runCrew } from './roles/crew.js';
 import { runDoctorRole } from './roles/doctor.js';
 import { runHeal } from './roles/heal.js';
 import { runImplement } from './roles/implement.js';
+import { runPush } from './roles/push.js';
 import { runResolve } from './roles/resolve.js';
 import { runReview } from './roles/review.js';
 import type { RoleCtx, RoleRunner } from './roles/shared.js';
@@ -228,11 +230,26 @@ export function describeFatal(err: unknown): string {
 
 async function main(): Promise<void> {
   const payload = await readPayload(process.argv[2], process.stdin);
-  // The push role keeps stdin open for its grant line (built with the role); every other role is
-  // done with stdin once it has the payload.
-  if (payload.role === 'push') throw new Error('the push role is not available yet');
-  process.stdin.destroy();
   if (process.env.JM_WORK_ROOT) gitOps.setWorkRoot(process.env.JM_WORK_ROOT);
+  // The push role keeps stdin open for its grant line; every other role is done with stdin once
+  // it has the payload.
+  if (payload.role === 'push') {
+    const ids = trooperIdentities(process.env);
+    const result = await runPush(payload, {
+      stdin: process.stdin,
+      emit: (l) => process.stdout.write(`${l}\n`),
+      ids,
+      sweep: () => {
+        if (ids) sweepUid(ids.agent.uid);
+      },
+      alive: (uid) => agentProcessesAlive(uid),
+      git: gitOps,
+    });
+    process.stdin.destroy();
+    process.exitCode = result.status === 'failed' ? 1 : 0;
+    return;
+  }
+  process.stdin.destroy();
   const stopping = new AbortController();
   for (const sig of ['SIGTERM', 'SIGINT'] as const) {
     process.on(sig, () => stopping.abort());

@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   unlinkSync,
@@ -259,6 +260,30 @@ describe('stageFromAgent', () => {
     expect(order).toEqual(['sweep', 'agent-fetch', 'sweep']);
     if ('pushDir' in r) rmSync(r.pushDir, { recursive: true, force: true });
   });
+
+  test('the sweep also runs after a failed or empty agent fetch', async () => {
+    const w = await world('order-fail');
+    writeFileSync(
+      join(w.dir, 'big2.bin'),
+      Buffer.from(Array.from({ length: 200_000 }, () => Math.floor(Math.random() * 256))),
+    );
+    await commitIfDirty(w.dir, 'feat: big2');
+    const order: string[] = [];
+    recordSpawn((c) => {
+      if (c.argv.includes(`file://${w.dir}`)) order.push('agent-fetch');
+    });
+    const sweep = () => void order.push('sweep');
+    await expect(
+      stageFromAgent(w.dir, B, { sweep, limits: { timeoutMs: 120_000, maxBytes: 10_000 } }),
+    ).rejects.toThrow(/too large/);
+    expect(order).toEqual(['sweep', 'agent-fetch', 'sweep']);
+    order.length = 0;
+    await expect(stageFromAgent(w.dir, 'agent/issue-404', { sweep })).resolves.toHaveProperty(
+      'nothing',
+    );
+    expect(order).toEqual(['sweep', 'agent-fetch', 'sweep']);
+    expect(leftovers()).toEqual([]);
+  });
 });
 
 describe('pushStaged', () => {
@@ -448,6 +473,54 @@ describe('pushStaged', () => {
     expect(w.remoteTip()).toBe(w.s0);
     expect(leftovers()).toEqual([]);
   }, 30_000);
+
+  test('a timeout kills the whole process group, not only git', async () => {
+    const w = await world('group');
+    writeFileSync(join(w.dir, 'gr.txt'), 'gr\n');
+    await commitIfDirty(w.dir, 'feat: gr');
+    // The hook stands in for git-remote-https: a grandchild of git push that could hold the token.
+    const pidFile = join(w.base, 'hook.pid');
+    const hook = join(w.origin, 'hooks', 'pre-receive');
+    writeFileSync(hook, `#!/bin/sh\necho $$ > ${pidFile}\nexec sleep 30\n`);
+    chmodSync(hook, 0o755);
+    const r = await stage(w);
+    const res = await pushStaged(r.pushDir, grantFor(w), {
+      remoteUrl: w.target.url,
+      timeoutMs: 3_000,
+    });
+    expect(res).toMatchObject({ status: 'failed', retryable: true });
+    const pid = Number(readFileSync(pidFile, 'utf8').trim());
+    const gone = () => {
+      try {
+        const st = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });
+        return st.trim() === '' || st.trim().startsWith('Z');
+      } catch {
+        return true; // ps exits 1 when the pid does not exist
+      }
+    };
+    const t0 = Date.now();
+    while (!gone() && Date.now() - t0 < 5_000) await new Promise((ok) => setTimeout(ok, 100));
+    const dead = gone();
+    if (!dead) process.kill(pid, 'SIGKILL');
+    expect(dead).toBe(true);
+  }, 30_000);
+
+  test('an exit 1 with no porcelain rejection is retryable', async () => {
+    const w = await world('noporcelain');
+    writeFileSync(join(w.dir, 'np.txt'), 'np\n');
+    await commitIfDirty(w.dir, 'feat: np');
+    const r = await stage(w);
+    // A push that fails with git's generic summary but no `[rejected]` line from the remote.
+    setSpawn((cmd, args, opts: SpawnOptions) =>
+      args.includes('--porcelain')
+        ? spawn('sh', ['-c', `echo "error: failed to push some refs to 'x'" >&2; exit 1`], opts)
+        : spawn(cmd, args, opts),
+    );
+    const res = await pushStaged(r.pushDir, grantFor(w), { remoteUrl: w.target.url });
+    expect(res).toMatchObject({ status: 'failed', retryable: true });
+    expect(w.remoteTip()).toBe(w.s0);
+    expect(leftovers()).toEqual([]);
+  });
 
   test('nothing is read from a mirror', async () => {
     const w = await world('nomirror');

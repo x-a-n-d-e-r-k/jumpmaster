@@ -67,9 +67,12 @@ type ExecOpts = {
 function exec(argv: string[], o: ExecOpts): Promise<string> {
   return new Promise((resolve, reject) => {
     const [cmd, ...args] = argv as [string, ...string[]];
+    // Its own process group: an abort kills git and everything it started (a transport helper
+    // that inherited the token in its env, a remote hook), not only the direct child.
     const child = spawnImpl(cmd, args, {
       cwd: o.cwd,
       env: o.env,
+      detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -78,7 +81,7 @@ function exec(argv: string[], o: ExecOpts): Promise<string> {
     const abort = (msg: string) => {
       if (aborted) return;
       aborted = msg;
-      child.kill('SIGKILL');
+      killGroup(child);
       // Settle now: a grandchild (a remote hook, a transport helper) can hold the pipes open, and
       // 'close' would wait for it.
       done();
@@ -116,9 +119,25 @@ function exec(argv: string[], o: ExecOpts): Promise<string> {
       if (code === 0) return resolve(stdout.trim());
       // Never echo the command line: it may carry the upload-pack wrapper or paths.
       const detail = stderr.trim();
-      reject(new Error(`${o.label} failed (exit ${code})${detail ? `: ${detail}` : ''}`));
+      // stdout rides on the error for callers that classify by it (push --porcelain), never in
+      // the message.
+      reject(
+        Object.assign(new Error(`${o.label} failed (exit ${code})${detail ? `: ${detail}` : ''}`), {
+          stdout,
+        }),
+      );
     });
   });
+}
+
+function killGroup(child: ChildProcess): void {
+  try {
+    if (child.pid === undefined) throw new Error('no pid');
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    // No group (spawn failed, or already gone): kill the child itself.
+    child.kill('SIGKILL');
+  }
 }
 
 /** The git subcommand, skipping leading `-c k=v` pairs and other global options. */
@@ -341,11 +360,44 @@ export async function prepareBranch(
   await runGit(dir, ['switch', '-q', '-c', branch, `origin/${base}`], '', { as });
 }
 
+/** How long a hardened (salvage) status, add or commit may take. */
+export const HARDENED_COMMIT_TIMEOUT_MS = 60_000;
+
+/**
+ * Commits everything in `dir` when it is dirty. `hardened` (salvage, in the push container, on a
+ * working copy the agent left behind): no fsmonitor, no hooks, the Jumpmaster Agent identity
+ * whatever the repo config says, a bound on every call, and git is pointed at `dir` with `-C`
+ * from `/` (root never enters the agent's directory).
+ */
 export async function commitIfDirty(
   dir: string,
   message: string,
   as: AgentIdentity | null = null,
+  o: { hardened?: boolean } = {},
 ): Promise<boolean> {
+  if (o.hardened) {
+    const run = (args: string[]) =>
+      runGit(
+        '/',
+        ['-C', dir, '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', ...args],
+        '',
+        { as, timeoutMs: HARDENED_COMMIT_TIMEOUT_MS },
+      );
+    if ((await run(['status', '--porcelain'])) === '') return false;
+    await run(['add', '-A']);
+    await run([
+      '-c',
+      `user.name=${AGENT_NAME}`,
+      '-c',
+      `user.email=${AGENT_EMAIL}`,
+      'commit',
+      '-q',
+      '--no-verify',
+      '-m',
+      message,
+    ]);
+    return true;
+  }
   if ((await runGit(dir, ['status', '--porcelain'], '', { as })) === '') return false;
   await runGit(dir, ['add', '-A'], '', { as });
   // The trooper's own housekeeping commit: project hooks (husky, lint-staged) must not fail it.
@@ -832,9 +884,11 @@ export async function stageFromAgent(
       if (/couldn't find remote ref/.test(msg))
         return { nothing: 'branch not in the working copy' };
       throw e;
+    } finally {
+      // On every outcome: an aborted fetch can leave the agent-uid upload-pack running.
+      o.sweep();
     }
     if (tooLarge()) throw new Error('push fetch too large');
-    o.sweep();
     // Nothing the agent fetch could have touched survives.
     writeFileSync(join(pushDir, 'config'), BARE_CONFIG);
     rmSync(join(pushDir, 'hooks'), { recursive: true, force: true });
@@ -849,12 +903,18 @@ export async function stageFromAgent(
 }
 
 /**
- * git push exits 1 with `failed to push some refs` when the remote refused a ref (`[rejected]`,
- * `[remote rejected]`). A transport failure exits 128 with a `fatal:` line of git's own (a
- * remote hook's output is prefixed `remote: `), and a timeout carries no git output at all.
+ * A refusal is only what git's porcelain output (stdout) reports per ref: `!<TAB><ref><TAB>
+ * [rejected]` or `[remote rejected]`, with exit 1. stderr is not trusted for this (a remote hook
+ * writes there), and a transport failure or timeout has no such line, so it stays retryable.
  */
-const pushRejected = (msg: string): boolean =>
-  msg.includes('(exit 1)') && msg.includes('failed to push some refs') && !/^fatal:/m.test(msg);
+const pushRejected = (e: unknown): boolean => {
+  const out = (e as { stdout?: unknown }).stdout;
+  return (
+    (e as Error).message.includes('(exit 1)') &&
+    typeof out === 'string' &&
+    /^!\t[^\t]*\t\[(?:remote )?rejected\]/m.test(out)
+  );
+};
 
 /** A failure carrying its retry classification; its message is redacted before it leaves. */
 class PushFailure extends Error {
@@ -964,8 +1024,7 @@ export async function pushStaged(
       }
       // The remote is untouched: a decline (protection rule, hook, push protection) is final; a
       // transport failure or timeout may succeed next time.
-      const msg = (e as Error).message;
-      if (pushRejected(msg)) throw new PushFailure(`push rejected: ${msg}`, false);
+      if (pushRejected(e)) throw new PushFailure(`push rejected: ${(e as Error).message}`, false);
       throw failure(e, true);
     }
     const upToDate = out.split('\n').some((l) => l.startsWith('=\t') && l.includes(ref));

@@ -123,6 +123,30 @@ test("commitIfDirty ignores the project's own git hooks", async () => {
   expect(await aheadOfBase(dir, 'main')).toBe(1);
 });
 
+test("commitIfDirty hardened doesn't run a planted fsmonitor", async () => {
+  const dir = await clone('fsmon');
+  await prepareBranch(dir, 'agent/issue-8', 'main');
+  const marker = join(tmp, 'fsmon-marker');
+  const script = join(tmp, 'fsmon.sh');
+  writeFileSync(script, `#!/bin/sh\necho ran >> ${marker}\nexit 1\n`);
+  chmodSync(script, 0o755);
+  git(dir, 'config', 'core.fsmonitor', script);
+  const hooks = join(dir, '.planted-hooks');
+  mkdirSync(hooks);
+  writeFileSync(join(hooks, 'pre-commit'), `#!/bin/sh\necho hook >> ${marker}\nexit 1\n`);
+  chmodSync(join(hooks, 'pre-commit'), 0o755);
+  git(dir, 'config', 'core.hooksPath', hooks);
+  // The agent can rewrite its identity; the salvage commit is still the Jumpmaster Agent's.
+  git(dir, 'config', 'user.name', 'Somebody Else');
+  writeFileSync(join(dir, 'salvage.txt'), 's\n');
+  expect(await commitIfDirty(dir, 'wip: salvage', null, { hardened: true })).toBe(true);
+  expect(existsSync(marker)).toBe(false);
+  expect(git(dir, 'log', '-1', '--format=%an <%ae>')).toBe(
+    'Jumpmaster Agent <jumpmaster-agent@users.noreply.github.com>',
+  );
+  expect(await commitIfDirty(dir, 'wip: salvage', null, { hardened: true })).toBe(false);
+});
+
 test('branch, commit, ahead count, head sha', async () => {
   const dir = await clone('flow');
   await prepareBranch(dir, 'agent/issue-7', 'main');
