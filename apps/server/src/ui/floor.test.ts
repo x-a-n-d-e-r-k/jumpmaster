@@ -48,7 +48,9 @@ test('the floor lists only an active zone’s briefings; a paused zone gets one 
   expect(view).toContain('Decide crew:s1 in shadow?');
   expect(view).toContain('Decide crew:s2 in shadow?');
   expect(view).not.toContain('Decide crew:m1 in main?');
-  expect(view).toContain('Dismiss all 2 briefings of shadow');
+  expect(view).toContain('Dismiss all 2 briefings of octo/shadow');
+  expect(view).toContain('data-ask="Dismiss 2 briefings of octo/shadow?');
+  expect(view).toContain('data-zone="shadow"');
 });
 
 test('a zone in observe is collapsed too', async () => {

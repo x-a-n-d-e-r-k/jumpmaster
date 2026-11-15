@@ -576,8 +576,7 @@ export const liveSticks = (sticks: Stick[], now: Date): Stick[] =>
 export function doctorDropWait(db: Db, config: Config, zone: DropZoneConfig, now: Date): string {
   if (isKilled(db)) return 'held: the kill switch is engaged (jumpmaster ctl unkill)';
   const mode = getZoneMode(db, zone.id, zone.mode);
-  if (mode !== 'active')
-    return `held: zone ${zone.id} is ${mode} (jumpmaster ctl resume ${zone.id})`;
+  if (mode !== 'active') return `held: the zone is ${mode} (jumpmaster ctl resume ${zone.id})`;
   const gate = dispatchGate(db, config.usage, now);
   if (!doctorMayLease(gate)) {
     const u = getUsageState(db);

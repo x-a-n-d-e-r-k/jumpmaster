@@ -24,7 +24,7 @@ import { forgetSubmitKey, submitKey } from '../intake.js';
 import type { Status } from '../status.js';
 import type { Gate } from '../usage.js';
 import { STYLE } from './theme.js';
-import { type ZoneRef, zoneName, zoneNamer } from './zone-name.js';
+import { type ZoneRef, zoneName, zoneNamer, zoneTextNamer } from './zone-name.js';
 
 export const escapeHtml = (v: unknown): string =>
   String(v)
@@ -332,10 +332,10 @@ function briefingBlock(
  * Dismisses the zone's briefings shown here, after a confirmation that states the count. It posts
  * the ids shown, so a briefing raised since is not dismissed unseen.
  */
-function dismissAllForm(zoneId: string, open: Briefing[]): string {
-  const what = `${plural(open.length, 'briefing')} of ${zoneId}`;
-  const ask = `Dismiss ${what}? Each is taken off the floor without a ruling: nothing it is about is ruled on, and nothing is written to GitHub.`;
-  return `<form id="dismiss-all" data-zone="${escapeHtml(zoneId)}" data-ids="${escapeHtml(JSON.stringify(open.map((b) => b.id)))}" data-ask="${escapeHtml(ask)}"><button class="danger">Dismiss all ${escapeHtml(what)}</button></form><script>{const f=document.getElementById('dismiss-all');f.addEventListener('submit',async(e)=>{e.preventDefault();if(!confirm(f.dataset.ask))return;const r=await jmFetch('/api/control/zones/'+encodeURIComponent(f.dataset.zone)+'/briefings/dismiss',{ids:JSON.parse(f.dataset.ids)});if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});}</script>`;
+function dismissAllForm(zoneId: string, open: Briefing[], zones: readonly ZoneRef[]): string {
+  const what = `${plural(open.length, 'briefing')} of`;
+  const ask = `Dismiss ${what} ${zoneTextNamer(zones)(zoneId)}? Each is taken off the floor without a ruling: nothing it is about is ruled on, and nothing is written to GitHub.`;
+  return `<form id="dismiss-all" data-zone="${escapeHtml(zoneId)}" data-ids="${escapeHtml(JSON.stringify(open.map((b) => b.id)))}" data-ask="${escapeHtml(ask)}"><button class="danger">Dismiss all ${escapeHtml(what)} ${zoneNamer(zones)(zoneId)}</button></form><script>{const f=document.getElementById('dismiss-all');f.addEventListener('submit',async(e)=>{e.preventDefault();if(!confirm(f.dataset.ask))return;const r=await jmFetch('/api/control/zones/'+encodeURIComponent(f.dataset.zone)+'/briefings/dismiss',{ids:JSON.parse(f.dataset.ids)});if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});}</script>`;
 }
 
 /** Briefings waiting on Command, with a rule form each, and the rulings recorded so far. */
@@ -354,7 +354,7 @@ export function renderBriefings(s: {
       ? '<p>Nothing is waiting on you.</p>'
       : s.open.map((b) => briefingBlock(b, s.holds, name)).join('') + RULE_SCRIPT;
   const head = s.zone
-    ? `<p><a href="/">Back</a> · <a href="/briefings">All briefings</a></p><h2>Briefings of ${name(s.zone.id)} <small>(${escapeHtml(s.zone.mode)})</small></h2>${s.open.length > 0 ? dismissAllForm(s.zone.id, s.open) : ''}`
+    ? `<p><a href="/">Back</a> · <a href="/briefings">All briefings</a></p><h2>Briefings of ${name(s.zone.id)} <small>(${escapeHtml(s.zone.mode)})</small></h2>${s.open.length > 0 ? dismissAllForm(s.zone.id, s.open, s.zones) : ''}`
     : '<p><a href="/">Back</a></p><h2>Briefings (decisions waiting on you)</h2>';
   const crewOff = new Set(s.zones.filter((z) => !z.crew?.enabled).map((z) => z.id));
   // Recorded, and held until the zone's crew is enabled again (applyPendingRulings).

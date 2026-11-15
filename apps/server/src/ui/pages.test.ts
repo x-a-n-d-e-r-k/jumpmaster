@@ -896,6 +896,27 @@ describe('zones are named by their repository (#99)', () => {
     expectNoBareId(html);
   });
 
+  test("one zone's briefings page names the zone by repository in its bulk dismiss", () => {
+    const html = renderBriefings({
+      open: [briefing({ zoneId: 'zid-a' }), briefing({ id: 5, zoneId: 'zid-a' })],
+      rulings: [],
+      zones,
+      zone: { id: 'zid-a', mode: 'paused' },
+    });
+    expect(html).toContain('Dismiss all 2 briefings of acme/shared <small>(zid-a)</small>');
+    expect(html).toContain('data-ask="Dismiss 2 briefings of acme/shared (zid-a)?');
+    expect(html).toContain('data-zone="zid-a"');
+    expectNoBareId(html);
+    const solo1 = renderBriefings({
+      open: [briefing({ zoneId: 'zid-solo' })],
+      rulings: [],
+      zones,
+      zone: { id: 'zid-solo', mode: 'active' },
+    });
+    expect(solo1).toContain('Dismiss all 1 briefing of acme/widgets</button>');
+    expectNoBareId(solo1);
+  });
+
   test('the goals, intake, doctor and observations pages name the zone by repository', () => {
     const goals = renderGoals({
       zone: solo,
