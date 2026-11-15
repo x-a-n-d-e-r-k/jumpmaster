@@ -14,8 +14,10 @@ SHA="$(git ls-remote "https://github.com/${REPO}.git" "refs/heads/${BRANCH}" | c
 [ -n "$SHA" ] || { echo "cannot resolve ${REPO}@${BRANCH}" >&2; exit 1; }
 docker build -q -t jumpmaster-trooper:dev -f images/trooper/Dockerfile . >/dev/null
 docker build -q -t jumpmaster-trooper:e2e images/trooper/e2e >/dev/null
+# The trooper reads its payload as one line: every heredoc is joined onto one line.
+oneline() { tr -d '\n'; echo; }
 payload() {
-  cat <<JSON
+  oneline <<JSON
 {"protocol":1,"dropId":"e2e","epoch":1,"role":"review",
  "repo":{"owner":"${REPO%%/*}","name":"${REPO##*/}","defaultBranch":"${BRANCH}"},
  "issue":{"number":1,"title":"e2e","body":"e2e"},"branch":"${BRANCH}",
@@ -61,7 +63,7 @@ process.exit(ok ? 0 : 1);' "$out"
 # for which instruction files load, and ends its summary with any canary it was given. The trooper
 # also strips CLAUDE*.md, .claude/ and .mcp.json from the clone, so none may remain in the add-dir.
 CANARY_REPO="${E2E_CANARY_REPO:-$REPO}"
-out="$(cat <<JSON | docker run --rm -i --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add KILL \
+out="$(oneline <<JSON | docker run --rm -i --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add KILL \
   --security-opt no-new-privileges --pids-limit 512 --ulimit core=0:0 jumpmaster-trooper:e2e || true
 {"protocol":1,"dropId":"e2e-crew","epoch":1,"role":"crew-lead",
  "repo":{"owner":"${CANARY_REPO%%/*}","name":"${CANARY_REPO##*/}","defaultBranch":"${BRANCH}"},
@@ -84,7 +86,7 @@ process.exit(ok ? 0 : 1);' "$out" "${E2E_CANARY_REPO:-}"
 # A doctor drop: clones the default branch with no write token, asks the (fake) CLI one line with
 # every tool off from an empty directory, and runs every gate, a red one not stopping the next.
 doctor() {
-  cat <<JSON | docker run --rm -i --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add KILL \
+  oneline <<JSON | docker run --rm -i --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add KILL \
     --security-opt no-new-privileges --pids-limit 512 --ulimit core=0:0 jumpmaster-trooper:e2e || true
 {"protocol":1,"dropId":"e2e-doctor","epoch":1,"role":"doctor",
  "repo":{"owner":"${REPO%%/*}","name":"${REPO##*/}","defaultBranch":"${BRANCH}"},

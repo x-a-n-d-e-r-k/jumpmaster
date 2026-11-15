@@ -50,7 +50,7 @@ async function leaseStatus(h: Harness): Promise<number> {
     method: 'POST',
     url: '/api/sticks/lease',
     headers: h.stickHeaders(),
-    payload: { freeSlots: 1 },
+    payload: { freeSlots: 1, capabilities: ['push-v1'] },
   });
   return res.statusCode;
 }

@@ -127,6 +127,7 @@ const TABLE: Record<string, Rule> = {
   'stick.seen': () => app('See the sticks on home', '/'),
   'stick.image-policy': () => app('See the sticks on home', '/'),
   'stick.capabilities': () => app('See the sticks on home', '/'),
+  'stick.volumes': () => app('See the sticks on home', '/'),
   'forge.branch-rules': (check, ctx) =>
     ctx.guidance
       ? {

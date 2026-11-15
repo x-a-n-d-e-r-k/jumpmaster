@@ -295,6 +295,67 @@ describe('stack presets', () => {
     );
   });
 
+  test('the trooper carries the push label and an agent-owned repo directory', () => {
+    const final = finalStage(instructions(read('images/trooper/Dockerfile')));
+    const labels = final
+      .filter((i) => i.op === 'LABEL')
+      .map((i) => i.args)
+      .join(' ');
+    expect(labels).toMatch(/(^|\s)org\.jumpmaster\.trooper\.push="1"(\s|$)/);
+    const runs = final
+      .filter((i) => i.op === 'RUN')
+      .map((i) => i.args)
+      .join('\n');
+    expect(runs).toMatch(/install -d -o agent -g agent -m 0700 \/home\/agent\/repo\b/);
+    // The presets build FROM the trooper and must not reset the label.
+    for (const file of Object.values(PRESET_FILES)) {
+      expect(read(file), file).not.toMatch(/org\.jumpmaster\.trooper\.push/);
+    }
+  });
+
+  test('the lazy-fetch e2e drives the real stageFromAgent offline as the agent', () => {
+    const e2e = read('images/trooper/e2e/lazy-fetch.sh');
+    expect(read('apps/trooper/src/git.ts')).toContain(
+      'GIT_NO_LAZY_FETCH=1 git -c core.fsmonitor=false',
+    );
+    expect(e2e).toContain('import { stageFromAgent, setWorkRoot } from "/opt/trooper/git.js"');
+    expect(e2e).toMatch(/--network none/);
+    expect(e2e).toMatch(/setpriv --reuid=10001 --regid=10001/);
+    expect(e2e).toContain('as = { uid: 10001, gid: 10001');
+    expect(e2e).toContain('lazy fetching disabled');
+    expect(e2e).toContain('already refuses lazy fetch inside upload-pack');
+    expect(read('.github/workflows/images.yml')).toContain('images/trooper/e2e/lazy-fetch.sh');
+  });
+
+  test('the push e2e drives the real runDrop, pushOnce and DockerDriver, hermetic', () => {
+    const sh = read('images/trooper/e2e/push.sh');
+    const drop = read('images/trooper/e2e/push-drop.mjs');
+    const image = read('images/trooper/e2e/push.Dockerfile');
+    // The stick's own code, with a fake server client, against a local bare remote.
+    expect(drop).toContain("import('/app/apps/stick/dist/runner.js')");
+    expect(drop).toContain("import('/app/apps/stick/dist/push.js')");
+    expect(drop).toContain('class E2EDriver extends DockerDriver');
+    expect(drop).toMatch(/await runDrop\(/);
+    expect(drop).toMatch(/await pushOnce\(/);
+    expect(sh).toContain('git daemon');
+    // No GitHub: the only github.com in the script is in its comments.
+    expect(sh.split('\n').filter((l) => !l.startsWith('#') && /github\.com/.test(l))).toEqual([]);
+    expect(image).toMatch(/^FROM jumpmaster-trooper:dev$/m);
+    expect(image).toContain('git://REMOTE_HOST/');
+    // What it proves.
+    for (const s of [
+      'the write token never reached the agent container',
+      'ready came first, then the grant was asked for and written',
+      "the agent container's only mount is the drop's volume",
+      'the planted fsmonitor never ran in the push container',
+      'no agent-uid process alive in the push container at ready',
+      'the volume is removed and no container is left',
+      'push e2e: ok',
+    ])
+      expect(drop, s).toContain(s);
+    expect(read('.github/workflows/images.yml')).toContain('images/trooper/e2e/push.sh');
+  });
+
   test('the python preset ships 3.11 and a uv-installed 3.12 every user can find', () => {
     const final = finalStage(instructions(read(PRESET_FILES.python)));
     const env = final
@@ -422,6 +483,8 @@ describe('image verification in the stick image', () => {
     expect(env).toMatch(/\bJM_IMAGE_POLICY=signed\b/);
     expect(env).toMatch(/\bJM_EGRESS_IMAGE=\$\{EGRESS_IMAGE\}/);
     expect(final.some((i) => i.op === 'ARG' && i.args === 'EGRESS_IMAGE')).toBe(true);
+    expect(env).toMatch(/\bJM_TROOPER_IMAGE=\$\{TROOPER_IMAGE\}/);
+    expect(final.some((i) => i.op === 'ARG' && i.args === 'TROOPER_IMAGE')).toBe(true);
     // The setuid sweep runs after cosign is in place.
     const sweep = final.findIndex((i) => i.op === 'RUN' && SETUID_SWEEP.test(i.args));
     const copy = final.findIndex(
@@ -452,6 +515,7 @@ test('every e2e script records the engine architecture it ran on', () => {
     'images/trooper/e2e/egress.sh',
     'images/trooper/e2e/verify.sh',
     'images/trooper/e2e/presets.sh',
+    'images/trooper/e2e/push.sh',
   ])
     expect(read(f), f).toContain('{{.Server.Os}}/{{.Server.Arch}}');
 });

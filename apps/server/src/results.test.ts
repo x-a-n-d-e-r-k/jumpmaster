@@ -5,10 +5,12 @@ import type { Db } from './db/open.js';
 import { openDb } from './db/open.js';
 import {
   activeDropFor,
+  type Drop,
   getAttempts,
   getDrop,
   getOutbox,
   getPullRequest,
+  getUsageState,
   insertDrop,
   insertVerdict,
   latestVerdict,
@@ -17,13 +19,14 @@ import {
   setAttempts,
   setUsageState,
   setWorkItemState,
+  updateDrop,
   upsertDropZone,
   upsertPullRequest,
   upsertWorkItem,
   verdictsForHead,
 } from './db/repo.js';
 import { promptVersions } from './payloads.js';
-import { applyResult, type ResultDeps, renderReviewBody } from './results.js';
+import { applyResult, applyUsage, type ResultDeps, renderReviewBody } from './results.js';
 import { fakeForgePair } from './test/fakes.js';
 import { plus, t0, tmpDbFile, workItem } from './test/helpers.js';
 
@@ -142,6 +145,7 @@ function setup(role: Role = 'implement', drop: Partial<NewDrop> = {}) {
 const count = (db: Db, table: string): number =>
   (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
 
+const HOUR_MS = 3_600_000;
 const seedPaused = (db: Db) => setUsageState(db, { status: 'rejected' }, t0);
 
 /** Finishes the active drop with `result`, as a stick would. */
@@ -725,6 +729,91 @@ describe('applyResult: rate_limited', () => {
     await applyResult(db, deps, 'd1', { status: 'rate_limited', gates: [] }, t0);
     expect(getAttempts(db, 1, 'rate_limit').count).toBe(3);
     expect(activeDropFor(db, 1)?.role).toBe('implement');
+  });
+
+  test('a rate-limited probe is judged as the probe after the usage split', async () => {
+    const rateLimited: DropResult = { status: 'rate_limited', gates: [] };
+    // An ordinary result: usage and outcome in one call; the probe is released all the same.
+    const plain = setup();
+    seedPaused(plain.db);
+    setAttempts(plain.db, 1, 'rate_limit', 3, null);
+    setUsageState(plain.db, { probeDropId: 'd1' }, t0);
+    await applyResult(plain.db, plain.deps, 'd1', rateLimited, t0);
+    expect(getDrop(plain.db, 'd1')).toMatchObject({ state: 'cancelled', wasProbe: 1 });
+    expect(getUsageState(plain.db).probeDropId).toBeNull();
+    expect(getAttempts(plain.db, 1, 'rate_limit').count).toBe(3);
+    expect(activeDropFor(plain.db, 1)?.role).toBe('implement');
+
+    // A push-requested one: usage first (releasing the probe), the outcome later, read from the drop.
+    const { db, deps } = setup();
+    seedPaused(db);
+    setAttempts(db, 1, 'rate_limit', 3, null);
+    setUsageState(db, { probeDropId: 'd1' }, t0);
+    applyUsage(db, deps, getDrop(db, 'd1') as Drop, rateLimited, t0);
+    updateDrop(db, 'd1', { usageApplied: 1 });
+    expect(getUsageState(db).probeDropId).toBeNull();
+    expect(getDrop(db, 'd1')?.wasProbe).toBe(1);
+    await applyResult(db, deps, 'd1', rateLimited, plus(t0, 60_000));
+    expect(getDrop(db, 'd1')?.state).toBe('cancelled');
+    expect(getAttempts(db, 1, 'rate_limit').count).toBe(3);
+    expect(activeDropFor(db, 1)?.role).toBe('implement');
+  });
+
+  test('a rate-limited push outcome is judged by the pause when its usage was applied', async () => {
+    const rateLimited: DropResult = { status: 'rate_limited', headSha: 'ck', gates: [] };
+    // Paused when the agent's result came in; the pause is over by the time the push reports.
+    const { db, deps } = setup();
+    seedPaused(db);
+    applyUsage(db, deps, getDrop(db, 'd1') as Drop, rateLimited, t0);
+    updateDrop(db, 'd1', { usageApplied: 1 });
+    setUsageState(db, { status: 'allowed', pausedUntil: null }, plus(t0, HOUR_MS));
+    await applyResult(db, deps, 'd1', rateLimited, plus(t0, 2 * HOUR_MS));
+    expect(getDrop(db, 'd1')?.state).toBe('cancelled');
+    expect(activeDropFor(db, 1)).toMatchObject({ role: 'implement', headSha: 'ck' });
+    expect(workItem(db, 1).state).toBe('in_flight');
+
+    // Not paused then: parked, even though a pause began while the push ran.
+    const later = setup();
+    applyUsage(later.db, later.deps, getDrop(later.db, 'd1') as Drop, rateLimited, t0);
+    updateDrop(later.db, 'd1', { usageApplied: 1 });
+    seedPaused(later.db);
+    await applyResult(later.db, later.deps, 'd1', rateLimited, plus(t0, HOUR_MS));
+    expect(workItem(later.db, 1)).toMatchObject({
+      state: 'parked',
+      reason: 'rate limit: requeue refused',
+    });
+  });
+
+  test('no replacement is queued for an item that is no longer open', async () => {
+    for (const result of [
+      { status: 'interrupted', headSha: 'ck', gates: [] },
+      { status: 'rate_limited', headSha: 'ck', gates: [] },
+    ] as DropResult[]) {
+      const { db, deps } = setup();
+      seedPaused(db);
+      setWorkItemState(db, 1, 'done', undefined, t0);
+      await applyResult(db, deps, 'd1', result, t0);
+      expect(activeDropFor(db, 1), result.status).toBeUndefined();
+      expect(getDrop(db, 'd1')?.state, result.status).not.toBe('running');
+      expect(workItem(db, 1).state, result.status).toBe('done');
+      expect(getAttempts(db, 1, 'resume').count, result.status).toBe(0);
+    }
+  });
+
+  test('applyResult skips usage already applied', async () => {
+    const { db, deps } = setup();
+    const result: DropResult = {
+      status: 'interrupted',
+      gates: [],
+      rateLimit: { status: 'allowed', unifiedWindows: { seven_day: { utilization: 0.42 } } },
+    };
+    applyUsage(db, deps, getDrop(db, 'd1') as Drop, result, t0);
+    updateDrop(db, 'd1', { usageApplied: 1 });
+    expect(getUsageState(db).sevenDayUtil).toBe(0.42);
+    setUsageState(db, { sevenDayUtil: 0.1 }, t0);
+    await applyResult(db, deps, 'd1', result, t0);
+    expect(getUsageState(db).sevenDayUtil).toBe(0.1);
+    expect(getDrop(db, 'd1')?.state).toBe('succeeded');
   });
 });
 

@@ -634,6 +634,88 @@ DROP TABLE outbox;
 ALTER TABLE new_outbox RENAME TO outbox;
 `;
 
+/**
+ * v22: the push container (pending pushes). The twelve-step rebuild of `drops` with foreign keys off
+ * (events and artifacts reference it): the state CHECK admits `push_pending` (an active state, so the
+ * three active-drop indexes include it), and new columns hold the push request (`push_kind`,
+ * `push_expect_sha`, `push_deadline`), the first heartbeat that ran the drop (`running_at`, for the
+ * reclaim window), whether usage was already applied (`usage_applied`) and whether the drop held the
+ * probe (`was_probe`). `kill_switch.engaged_at` times a pause so deadlines can be extended on release,
+ * and `push_tokens` records grant reservations. An older binary does not run against v22 (the CHECK
+ * changed); rolling back past it is a database restore.
+ */
+const V22_SQL = `
+CREATE TABLE new_drops (
+  id               TEXT PRIMARY KEY,
+  drop_zone_id     TEXT NOT NULL REFERENCES drop_zones(id),
+  work_item_id     INTEGER REFERENCES work_items(id),
+  role             TEXT NOT NULL,
+  state            TEXT NOT NULL
+                   CHECK (state IN ('queued','leased','running','push_pending','succeeded','failed','lost','cancelled')),
+  stick_id         TEXT REFERENCES sticks(id),
+  epoch            INTEGER NOT NULL DEFAULT 0,
+  lease_expires_at TEXT,
+  prompt_version   TEXT,
+  image            TEXT,
+  result_json      TEXT,
+  created_at       TEXT NOT NULL,
+  started_at       TEXT,
+  finished_at      TEXT,
+  fingerprint      TEXT,
+  pr_number        INTEGER,
+  head_sha         TEXT,
+  input_json       TEXT,
+  charged_key      TEXT,
+  hard_cancel      INTEGER NOT NULL DEFAULT 0,
+  requested_model  TEXT,
+  served_model     TEXT,
+  push_kind        TEXT CHECK (push_kind IN ('final','checkpoint','salvage')),
+  push_expect_sha  TEXT,
+  push_deadline    TEXT,
+  running_at       TEXT,
+  usage_applied    INTEGER NOT NULL DEFAULT 0,
+  was_probe        INTEGER NOT NULL DEFAULT 0,
+  CHECK ((work_item_id IS NULL) = (role IN ('crew-lead','refute','diagnose','doctor')))
+);
+INSERT INTO new_drops (id, drop_zone_id, work_item_id, role, state, stick_id, epoch, lease_expires_at,
+  prompt_version, image, result_json, created_at, started_at, finished_at, fingerprint, pr_number,
+  head_sha, input_json, charged_key, hard_cancel, requested_model, served_model)
+SELECT id, drop_zone_id, work_item_id, role, state, stick_id, epoch, lease_expires_at,
+  prompt_version, image, result_json, created_at, started_at, finished_at, fingerprint, pr_number,
+  head_sha, input_json, charged_key, hard_cancel, requested_model, served_model FROM drops;
+DROP TABLE drops;
+ALTER TABLE new_drops RENAME TO drops;
+CREATE UNIQUE INDEX one_active_drop
+  ON drops(work_item_id) WHERE state IN ('queued','leased','running','push_pending');
+CREATE UNIQUE INDEX one_active_crew_drop
+  ON drops(drop_zone_id) WHERE role IN ('crew-lead','refute','diagnose')
+    AND state IN ('queued','leased','running','push_pending');
+CREATE UNIQUE INDEX one_active_doctor_drop
+  ON drops(drop_zone_id) WHERE role = 'doctor'
+    AND state IN ('queued','leased','running','push_pending');
+
+ALTER TABLE kill_switch ADD COLUMN engaged_at TEXT;
+
+CREATE TABLE push_tokens (
+  drop_id      TEXT NOT NULL,
+  epoch        INTEGER NOT NULL,
+  seq          INTEGER NOT NULL,
+  reserved_at  TEXT NOT NULL,
+  minted_at    TEXT,
+  revoked_at   TEXT,
+  PRIMARY KEY (drop_id, epoch, seq)
+);
+`;
+
+/**
+ * v23: whether a rate-limited drop's requeue was due when its usage was applied
+ * (`rate_limit_requeue`: 1 paused, 0 not, NULL not decided). A push-requested result applies usage
+ * early and its outcome after the push: the outcome must judge the pause as it was then.
+ */
+const V23_SQL = `
+ALTER TABLE drops ADD COLUMN rate_limit_requeue INTEGER;
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -664,6 +746,8 @@ export const MIGRATIONS: Migration[] = [
   { version: 19, sql: V19_SQL },
   { version: 20, sql: V20_SQL },
   { version: 21, sql: V21_SQL, foreignKeysOff: true },
+  { version: 22, sql: V22_SQL, foreignKeysOff: true },
+  { version: 23, sql: V23_SQL },
 ];
 
 /**

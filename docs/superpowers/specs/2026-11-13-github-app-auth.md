@@ -209,8 +209,8 @@ across GitHub, so the name carries a short install id; the operator may edit it.
 | Review, crew and doctor drops on a private repository | reviewer | `contents: read` | per drop, revoked at drop end |
 
 - **Why the push can't stay in the agent's container.** A drop's payload goes in once on stdin
-  and the stick closes it (`StdinOnce: true`, `stream.end(o.payload)` in
-  `apps/stick/src/docker.ts`); the trooper only writes events to stdout. A token minted at lease
+  and the stick closes it (`StdinOnce: true`, `stream.end(o.payload)` at
+  `apps/stick/src/docker.ts:585` when this was written); the trooper only writes events to stdout. A token minted at lease
   time can never be replaced inside a running drop, and an implement drop, with an agent run and
   gates of up to 20 minutes each (`GateSpecSchema` in `packages/protocol/src/index.ts`), routinely
   outlives an hour before it pushes. The trooper's own use of the forge is already front-loaded:
@@ -230,7 +230,12 @@ across GitHub, so the name carries a short install id; the operator may edit it.
     to the server on the stick's existing authenticated connection, made when the token is needed.
   - **One push path for PAT and app modes.** In PAT mode the server answers the same request with
     the author PAT; the agent container then fetches with `githubReadToken` where one is
-    configured, and with the author PAT where none is, as today.
+    configured, and with the author PAT where none is. *[Corrected, as built: this is new, not "as
+    today". Before the push container, implement, heal and resolve always carried the author token
+    (`payloads.ts:341`); the plan's Ruling 1 fills `credentials.forgeToken` with
+    `githubReadToken ?? githubAuthorToken` for those roles, whatever the zone's `reviewReadToken`,
+    and the grant's secrets include that token. Without a read token the author PAT is still in
+    the agent container for its fetch; SECURITY.md states this PAT-mode caveat.]*
   - **No `git` in the server image, and no new size limit**: the push is the trooper's, bounded by
     today's `PUSH_FETCH_MAX_BYTES` (1 GiB) and fetch timeout.
   - **What it gives up**: the earlier draft's second, server-side check of the pushed diff. The
@@ -261,11 +266,23 @@ across GitHub, so the name carries a short install id; the operator may edit it.
     volume with a one-shot container from the **base trooper image**, no network, `CapAdd: CHOWN`
     only, which creates the directory owned by the agent (uid 10001, mode 0700) and exits. The base
     image also gains the directory. The doctor's new `stick.volumes` check creates, initialises,
-    inspects and removes a test volume on each stick.
+    inspects and removes a test volume on each stick. *[Corrected, as built: the doctor runs no
+    container. The **stick** runs that self-check (a test volume, the init container, then free
+    space measured and a write made from inside a locked-down container on the volume) at startup
+    and in every ten-minute sweep, and advertises `push-v1` on each lease from the latest result
+    (the plan's Ruling 18). `stick.volumes` reads what each live stick advertises: pass when all
+    advertise `push-v1`, warn when some do, fail when none do. Free space is measured inside the
+    container because `statfs` on the engine's root directory fails when the stick itself runs in
+    a container or under Docker Desktop (a ruling made during execution). A 0700 directory that
+    root can't enter also means every agent-uid process (git, Claude, the instruction strip) now
+    starts in `/` and changes directory after the uid drop, as gates already did.]*
   - **The trooper keeps the working copy when a push is requested**: its `finally` cleanup skips
     the agent's `repo` in that case and still removes `/work`.
   - **Nothing secret is written there.** The payload's tokens stay on stdin and in process
-    environments (`docker.ts:544`), and the working copy holds only the repository.
+    environments (`stream.end(o.payload)` at `docker.ts:585` when this was written; the stick sets
+    no container environment), and the working copy holds only the repository. *[As built: the
+    stick writes the payload as one line and, for the push container only, holds stdin open for
+    the grant line (`holdStdin`, `writeLine`, `endStdin` in `DockerDriver.start`).]*
   - **Removal** after a successful push, a terminal result, or the end of the retention window
     (below). The stick's ten-minute sweep (`apps/stick/src/main.ts:18`) and its startup reap
     (`reapOrphans`) count pending pushes as live and remove only volumes no live or pending drop of
@@ -283,7 +300,13 @@ across GitHub, so the name carries a short install id; the operator may edit it.
   `file://`. Symlinks, a `.git` file, alternates and setuid tricks in the working copy reach only
   that agent-uid process: it can read nothing the agent couldn't. The push container's own PID
   namespace makes the sweep complete: `sweep` (`kill(-1, SIGKILL)`, `sweepProcesses`) kills every
-  process but the trooper. The push container tightens it:
+  process but the trooper. *[Corrected, as built: trooper containers run with `Init: true`, so
+  Docker's init is PID 1 and the trooper is its child, not PID 1. The sweep is `sweepUid`, which
+  SIGKILLs every process whose real or effective uid is the agent's, and the push role then
+  re-checks `agentProcessesAlive` for up to two seconds and refuses (retryable) if any survives.
+  The private PID namespace is still what makes that list complete; an agent process left in the
+  agent's container is gone with that container, which the stick removes first.]* The push
+  container tightens it:
   - **The token arrives last.** The stick starts the push container with a payload that holds no
     token; the trooper runs the agent-side fetch, sweeps, checks that no agent-uid process
     survives, and only then writes *ready* on stdout. The stick then asks the server for the token
@@ -313,8 +336,9 @@ across GitHub, so the name carries a short install id; the operator may edit it.
   authenticates as the other drop routes do (`apps/server/src/api/sticks.ts:124-146`: the stick's
   bearer token, stored hashed, and the drop belonging to that stick at that epoch), but accepts a
   drop in `push_pending` rather than requiring a live lease. The server refuses unless the drop's
-  role pushes (implement, heal, resolve), the kill switch is off, the zone is `active` (not `paused`
-  or `observe`), and the zone's repository is the drop's. It **reserves** the drop's one push token
+  role pushes (implement, heal, resolve), the kill switch is off, the zone is not in `observe`
+  (a `paused` zone still pushes: pause lets running work finish, and the push is its end), and
+  the zone's repository is the drop's. It **reserves** the drop's one push token
   in the database (a row inserted in the same transaction as the checks) before the asynchronous
   mint, so two concurrent requests can't both mint; it mints with `repository_ids: [the zone's
   repository]` and `permissions: { contents: write }` (the PAT in PAT mode), records the token for
@@ -330,7 +354,9 @@ across GitHub, so the name carries a short install id; the operator may edit it.
   checkpoint, at the working copy's head) is a **success**: the earlier push landed and only its
   result was lost.
 - **Checkpoints.** A stopped or rate-limited agent commits a checkpoint and pushes it without
-  gates or `expectSha` (`checkpoint` in `roles/shared.ts:392-404`, called from `implement.ts:116`),
+  gates or `expectSha` (`checkpoint` in `roles/shared.ts:392-404`, called from `implement.ts:116`
+  *[corrected: and from `heal.ts`; resolve never checkpoints, and the server refuses a resolve
+  `checkpoint` request with 422 (the plan's Ruling 3)]*),
   and the `interrupted` and `rate_limited` results carry that `headSha` to the replacement drop
   (`apps/server/src/results.ts:158-171`, `:231`), whose `checkoutBranch(resumeSha)` needs the branch
   on GitHub. Now the agent container commits the checkpoint and reports *push requested,
@@ -352,17 +378,29 @@ across GitHub, so the name carries a short install id; the operator may edit it.
   - *Server restart*: `push_pending` is in the database, so it survives. Drops still `running`
     when the server went down would expire within 60 seconds of its return (`LEASE_TTL_MS`,
     `leases.ts:8`) before their sticks reconnect, so `expireLeases` waits one lease period after
-    server start before it marks anything lost.
+    server start before it marks anything lost. *[Corrected: this needed no change. `leaseExpirer`
+    already gives every live lease a fresh TTL on its first run and after any gap longer than the
+    TTL; it extends only `leased` and `running`, and a `push_pending` drop has no lease.]*
   - *Stick restart*: the stick keeps no state (`apps/stick/src/runner.ts`), so it **rediscovers**
     its pending work from its volumes' labels (drop id, epoch) at startup, before it leases
     anything, and reports them. A drop already `push_pending` simply continues: the push-token
-    response names every parameter. A drop that was still `running` (the agent's container died
+    response names every parameter. *[Corrected, as built: the stick reads only the labels
+    (stick, drop, epoch) and the server's plan. For each volume it confirms the drop's agent and
+    push containers are gone, then calls `POST /api/sticks/salvage`; refused removes the volume.
+    Before each push container it calls `push-plan` for the branch, limits, egress and whether to
+    salvage (the plan's Ruling 4), and only after *ready* `push-token` for the grant, whose branch
+    the trooper checks against the plan's. Either answers 409 `stale` for a drop that has left
+    `push_pending`, and the stick removes the volume (Ruling 19). The same reconciliation runs on
+    unheld volumes in every ten-minute sweep.]* A drop that was still `running` (the agent's container died
     with the stick) has gone `lost` in 60 seconds, and today it is requeued after a two-minute
     grace (`LOST_GRACE_MS`, `leases.ts:9`). So a lost drop that had reached `running` holds its
     item's replacement for a **reclaim window** (default 15 minutes [call]); a stick that reports
     the drop's volume within it moves the drop to `push_pending` as a salvage, and the replacement
     then starts from the pushed SHA. After the window the item is requeued from the last pushed
-    SHA and a late report is refused and its volume removed. A stick restart is minutes; a stick
+    SHA and a late report is refused and its volume removed. *[As built: the window is measured
+    from the loss (`finished_at`), with `running_at` required, not from `running_at` (a ruling made
+    during execution; Ruling 10's literal text would make a drop that ran over 15 minutes
+    unsalvageable).]* A stick restart is minutes; a stick
     gone longer than the window loses its unpushed work, as a crashed stick does today.
 - **Kill switch and observe mode.** `engageKill` cancels every `queued`, `leased` and `running`
   drop with `hard_cancel=1` (`apps/server/src/leases.ts:161-178`), after which their routes answer
@@ -373,15 +411,25 @@ across GitHub, so the name carries a short install id; the operator may edit it.
   which is what a kill switch is for, and their volumes are salvaged into `push_pending` after
   release. This keeps the kill switch's promise (nothing more reaches GitHub while it is on) and
   the owner's (no work lost through a kill). Discarding pending pushes and their volumes at kill was
-  the alternative, rejected because it loses work. A zone in `observe` or `paused` gets no push
-  token either (nothing written to GitHub); its pending pushes go out when it is active again, or
-  are discarded with the drop if the operator cancels it.
+  the alternative, rejected because it loses work. A zone in `observe` gets no push token either
+  (nothing written to GitHub); its pending pushes go out when it is active again, or are discarded
+  with the drop if the operator cancels it. A `paused` zone does get one: pause means running work
+  finishes, and refusing would let the retention deadline discard a whole gated run.
 - **Disk and hold time are bounded.** Volumes have no size limit of their own, so:
   - every pending push has a **retention deadline** (default 24 hours [call]), not only when its
     stick is gone; the clock pauses while the kill switch is on, and the operator can extend one
     (`ctl`). Past it the server marks the push lost, requeues the item from the last pushed SHA, and
-    the stick removes the volume;
+    the stick removes the volume; *[as built: `ctl drops extend-retention <dropId> <hours>`, 1 to
+    168. Expiry, and the operator's `ctl drops cancel <dropId>` (Ruling 16), send an implement item
+    to `ready`, so its next drop resumes from the branch and is charged as a resume; heal and
+    resolve items stay `pr_open`. No replacement drop is inserted. Server downtime counts against
+    the deadline; a paused zone no longer holds a push back (rulings made during execution)]*
   - a **free-space floor** on each stick (default 10 GiB [call]) below which it takes no lease;
+    *[as built: only a value measured below the floor stops all leasing. A stick that can't
+    measure, whose self-check fails, or whose trooper image fails verification still starts and
+    leases review, crew and doctor drops, but withholds `push-v1`; operators must allow the
+    trooper image (`JM_ALLOWED_IMAGES` under the allow-list policy, cosign under `signed`)
+    (Rulings 17 and 18, as refined during execution)]*
   - a **per-stick cap on pending pushes** (default 8 [call]), past which it takes no lease of a
     pushing role.
 - **Rejected: the stick pushes directly.** Handing the write token to the stick to push from the
@@ -410,6 +458,31 @@ across GitHub, so the name carries a short install id; the operator may edit it.
   vault entry's scrub list carries the PEM body and its long base64 lines separately from the JSON.
   Nothing stores a token in a fixed-width field: the new tokens are about 520 characters.
 - **The private key never leaves the server process.** It is never in a payload or a drop.
+- **Corrections as built** (the push-container plan, `docs/superpowers/plans/2026-11-14-push-container.md`,
+  PAT mode only; its numbered rulings, and rulings made while executing it). Beyond the bracketed
+  notes above:
+  - *Push results.* `pushed` applies the stored result with the pushed SHA. GitHub refusing the
+    push (branch protection, a pre-receive hook, secret scanning: a `[rejected]` or
+    `[remote rejected]` line in `git push --porcelain`) and the trooper's own pre-push refusals are
+    final; a transport failure or timeout is retryable. A final failure fails a `final` push and,
+    for a checkpoint or salvage, applies the stored status with the drop's prior `head_sha` (Ruling
+    7). A grant the server refuses for good (role, repository, kind, branch) fails the push
+    rather than retrying; a refusal for the kill switch, an observed zone, or a held reservation
+    is retried (the push plan refuses the first two up front, so no push container starts). A
+    push container whose stdin closes before the grant arrives reports a retryable failure.
+  - *The lost-server rule.* The stick stops the agent container with a 60-second grace
+    (`LOST_SERVER_GRACE_MS`), sends no heartbeat after it, and posts the drop's result only when it
+    carries a push request (Ruling 14); any other exit keeps the volume for rediscovery.
+  - *Version handshake.* The server announces `push-v1` in `x-jumpmaster-features` on every lease
+    answer; a stick without it gets no pushing roles, and a new stick runs no pushing drop from a
+    server that doesn't announce it (Ruling 11). Deploy the server first.
+  - *Push network.* Under egress the push container gets its own `jm-push-<dropId>-<epoch>` network
+    and proxy allowing `github.com`; without egress it uses the plain network the agent container
+    would have had.
+  - *Tested on a real engine* by `images/trooper/e2e/push.sh`: implement drops (final and
+    interrupted) pushed by push containers onto a local bare remote, with the write token never in
+    the agent container, the grant written only after *ready*, a planted `core.fsmonitor` never run
+    in the push container, no agent-uid process alive there, and the volume removed.
 
 ### 4.3 The forge's own identity (every caller that reads the token's account)
 
@@ -668,7 +741,7 @@ files gain `jumpmaster-merge` for two-app zones; the CODEOWNERS text follows §5
 | Every token narrowed to one repository at minting | Keeps a drop's, and each server use's, reach to its zone's repository, whatever the installation reaches. |
 | Agent containers get `contents: read` only; pushes run in an agent-free push container | Agent code never shares a container with a write token, so it can't merge, push tags, delete branches or skip `prePushCheck` (§4.2). |
 | The push container runs only the base trooper image, the agent uid only for `upload-pack`, and a sweep before the token is used | Nothing the agent left in the workspace can run beside the write token (§4.2). |
-| Push tokens only for a `push_pending` drop of a pushing role held by the asking stick, zone active, kill switch off, one per drop reserved before minting | Observe, paused and killed states write nothing to GitHub; a compromised stick mints only for drops it holds (§4.2). |
+| Push tokens only for a `push_pending` drop of a pushing role held by the asking stick, zone not observing, kill switch off, one per drop reserved before minting | Observe and killed states write nothing to GitHub (a paused zone finishes its running work, pushes included); a compromised stick mints only for drops it holds (§4.2). |
 | The push container gets only the agent's working copy, never the mirror, and fetches the base itself | Files root's git reads with the token can't have been written in the agent's container (§4.2). |
 | The token reaches the push container only after the agent-side fetch, the sweep and a check for surviving agent processes | No agent-uid process is alive when the token exists in the container (§4.2). |
 | Retention deadline, free-space floor and pending-push cap per stick | Held work can't fill a host's disk or wait forever (§4.2). |
@@ -827,7 +900,7 @@ Nothing is rejected except, as the review itself advised, the stick pushing dire
 | Each checkpoint is a push container (no `expectSha`, no gates), and the result's `headSha` is the pushed SHA, so `checkoutBranch(resumeSha)` finds the branch (§4.2) | I6 |
 | Heal and resolve keep their lease on `payload.pr.headSha` in the push container (§4.2) | I7 |
 | One protected-path matcher in `packages/protocol` for `globHit` and `protectedMatch` (Task 2) | I8 |
-| The token route: `liveDrop` (stick bearer token, drop owner, epoch, live lease) plus role, kill switch, zone mode and repository checks; one live token per drop; revocation on the push result; refused under the kill switch and in observe or paused zones (§4.2) | the request's checks |
+| The token route: `liveDrop` (stick bearer token, drop owner, epoch, live lease) plus role, kill switch, zone mode and repository checks; one live token per drop; revocation on the push result; refused under the kill switch and in observe zones, granted in paused ones (§4.2) | the request's checks |
 | The server's re-check of the pushed diff is given up and said so; the protected-path check on the PR's file list before merge remains (§4.2, §8) | the review's stated cost |
 | Rejected: handing the write token to the stick to push from the host, beside the Docker socket (§4.2) | the review's weaker option |
 | Unattended merging restated for large branches (1 GiB, as today) and server restarts (§5.1) | owner's requirement |
@@ -945,11 +1018,11 @@ PAT mode, then apps.
      at an agent container's start; the server unreachable at push time, then back; a server
      restart with drops running and pending; a stick restart with a pending push and with a
      running drop (salvaged within the reclaim window); the kill switch with agent containers,
-     pending pushes and a running push container, then release (nothing lost); observe and paused
-     zones; a checkpoint pushed by a push container and resumed by a replacement; heal and resolve
-     refused on a moved PR head; a retry after a push whose result was lost; two concurrent token
-     requests; a reused volume name; a branch near the 1 GiB limit; the probe released on *push
-     requested*.
+     pending pushes and a running push container, then release (nothing lost); observe zones
+     (refused) and paused zones (pushed); a checkpoint pushed by a push container and resumed by
+     a replacement; heal and resolve refused on a moved PR head; a retry after a push whose result
+     was lost; two concurrent token requests; a reused volume name; a branch near the 1 GiB limit;
+     the probe released on *push requested*.
 
    **Apps, in M5 (Tasks 5–12):**
 5. **Broker and JWT** (`forge/github-app.ts`): sign, mint narrowed tokens, cache server-side uses,

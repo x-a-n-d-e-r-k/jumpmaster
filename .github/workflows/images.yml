@@ -61,6 +61,13 @@ jobs:
           E2E_REPO: ${{ github.repository }}
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
         run: images/trooper/e2e/egress.sh
+      # The push container's hardened upload-pack against an agent-planted promisor remote, offline.
+      - name: Lazy-fetch e2e
+        run: images/trooper/e2e/lazy-fetch.sh
+      # The push container end to end, hermetic (a local bare remote, no GitHub): an implement drop
+      # and an interrupted one pushed by the agent-free push container, token last.
+      - name: Push e2e
+        run: images/trooper/e2e/push.sh
 
   # Image verification under the stick's own signed policy, cosign and read-only root: a tag, an
   # unsigned image and an image signed by another identity are refused, and the unsigned image

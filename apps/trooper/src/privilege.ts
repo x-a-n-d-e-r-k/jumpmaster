@@ -32,19 +32,15 @@ export function trooperIdentities(
   return { agent, gate };
 }
 
-/** SIGKILLs every process whose real or effective uid is `uid`; returns how many were signalled. */
-export function sweepUid(
-  uid: number,
-  kill: (pid: number, signal: NodeJS.Signals) => void = (pid, sig) => process.kill(pid, sig),
-  procRoot = '/proc',
-): number {
-  let killed = 0;
+/** Pids under `procRoot` whose real or effective uid is `uid`. */
+function pidsOfUid(uid: number, procRoot: string): number[] {
   let entries: string[];
   try {
     entries = readdirSync(procRoot);
   } catch {
-    return 0;
+    return [];
   }
+  const pids: number[] = [];
   for (const entry of entries) {
     if (!/^\d+$/.test(entry)) continue;
     let status: string;
@@ -55,14 +51,32 @@ export function sweepUid(
     }
     const m = /^Uid:\s+(\d+)\s+(\d+)/m.exec(status);
     if (!m || (Number(m[1]) !== uid && Number(m[2]) !== uid)) continue;
+    pids.push(Number(entry));
+  }
+  return pids;
+}
+
+/** SIGKILLs every process whose real or effective uid is `uid`; returns how many were signalled. */
+export function sweepUid(
+  uid: number,
+  kill: (pid: number, signal: NodeJS.Signals) => void = (pid, sig) => process.kill(pid, sig),
+  procRoot = '/proc',
+): number {
+  let killed = 0;
+  for (const pid of pidsOfUid(uid, procRoot)) {
     try {
-      kill(Number(entry), 'SIGKILL');
+      kill(pid, 'SIGKILL');
       killed++;
     } catch {
       // already gone
     }
   }
   return killed;
+}
+
+/** How many processes still run with `uid` as their real or effective uid. */
+export function agentProcessesAlive(uid: number, procRoot = '/proc'): number {
+  return pidsOfUid(uid, procRoot).length;
 }
 
 /**
@@ -104,6 +118,28 @@ export function asAgentArgv(id: AgentIdentity | null, argv: string[]): string[] 
     '-c',
     'umask 022; exec "$@"',
     'jm-agent',
+    ...argv,
+  ];
+}
+
+/**
+ * `asAgentArgv`, run in `dir`. Root (no DAC_OVERRIDE) cannot chdir into the agent's 0700 working
+ * copy (the drop volume's mount point), so the caller spawns from `/` and the directory is entered
+ * only after the uid drop. Without an identity, argv is unchanged (the caller keeps its cwd).
+ */
+export function asAgentInDirArgv(id: AgentIdentity | null, dir: string, argv: string[]): string[] {
+  if (!id) return argv;
+  return [
+    'setpriv',
+    `--reuid=${id.uid}`,
+    `--regid=${id.gid}`,
+    '--clear-groups',
+    '--',
+    'sh',
+    '-c',
+    'umask 022; cd -- "$1" && shift && exec "$@"',
+    'jm-agent',
+    dir,
     ...argv,
   ];
 }

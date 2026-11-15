@@ -3,11 +3,14 @@ import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
+import type { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import {
   type DropPayload,
   DropPayloadSchema,
   type DropResult,
+  type PushPayload,
+  PushPayloadSchema,
   payloadSecrets,
   REPORT_MAX_CHARS,
   RESULT_PREFIX,
@@ -17,8 +20,9 @@ import { runGates } from './gates.js';
 import * as gitOps from './git.js';
 import {
   type AgentIdentity,
+  agentProcessesAlive,
   agentSpawnOptions,
-  asAgentArgv,
+  asAgentInDirArgv,
   sweepUid,
   type TrooperIdentities,
   trooperIdentities,
@@ -28,9 +32,11 @@ import { runCrew } from './roles/crew.js';
 import { runDoctorRole } from './roles/doctor.js';
 import { runHeal } from './roles/heal.js';
 import { runImplement } from './roles/implement.js';
+import { runPush } from './roles/push.js';
 import { runResolve } from './roles/resolve.js';
 import { runReview } from './roles/review.js';
 import type { RoleCtx, RoleRunner } from './roles/shared.js';
+import { readLine } from './stdin.js';
 
 export interface TrooperDeps {
   git: typeof import('./git.js');
@@ -98,13 +104,18 @@ export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promi
     return fail(`trooper setup failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   const ctx: RoleCtx = { workdir: work, secrets, ids };
+  let result: DropResult | undefined;
   try {
-    return finish(await runner(payload, deps, ctx));
+    result = finish(await runner(payload, deps, ctx));
+    return result;
   } catch (err) {
     return fail(err instanceof Error ? err.message : String(err));
   } finally {
     if (ids) {
-      await deps.git.removeTree(join(ids.agent.home, 'repo'), ids.agent).catch(() => undefined);
+      // A push request hands the working copy (the drop's volume) to the push container: keep it.
+      if (result?.push === undefined) {
+        await deps.git.removeTree(join(ids.agent.home, 'repo'), ids.agent).catch(() => undefined);
+      }
       await deps.git.removeTree(join(ids.gate.home, 'repo'), ids.gate).catch(() => undefined);
     }
     rmSync(work, { recursive: true, force: true });
@@ -117,6 +128,20 @@ function workRoot(): string {
 
 export { capEventData } from './events.js';
 
+/**
+ * How Claude is spawned. As the agent it starts from / and enters `cwd` after the uid drop: root
+ * (no DAC_OVERRIDE) cannot chdir into the agent's 0700 working copy.
+ */
+export function claudeSpawnArgs(
+  args: string[],
+  cwd: string,
+  as: AgentIdentity | null,
+): { cmd: string; argv: string[]; cwd: string } {
+  if (!as) return { cmd: 'claude', argv: args, cwd };
+  const [cmd, ...argv] = asAgentInDirArgv(as, cwd, ['claude', ...args]) as [string, ...string[]];
+  return { cmd, argv, cwd: '/' };
+}
+
 async function* spawnClaude(
   args: string[],
   env: NodeJS.ProcessEnv,
@@ -124,10 +149,10 @@ async function* spawnClaude(
   as: AgentIdentity | null = null,
   signal?: AbortSignal,
 ): AsyncIterable<string> {
-  const [cmd, ...argv] = asAgentArgv(as, ['claude', ...args]) as [string, ...string[]];
-  const child = spawn(cmd, argv, {
+  const s = claudeSpawnArgs(args, cwd, as);
+  const child = spawn(s.cmd, s.argv, {
     env: agentSpawnOptions(as, env).env,
-    cwd,
+    cwd: s.cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   // On a stop, kill the agent and everything it started; the stream then ends.
@@ -152,17 +177,40 @@ async function* spawnClaude(
 }
 
 const PAYLOAD_START = '{"protocol":';
+const LEAKED_OPTIONS = /"(?:hijack|stream)":/;
+const PREFIX_MAX_LINES = 4;
 
+/** A payload carries a task prompt and its context, so the bound is generous. */
+const PAYLOAD_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Read the payload: from a file, or as the first line of stdin. Stdin is left open and unread
+ * past that line; the caller closes it (agent roles) or keeps it for the grant (push role).
+ * A sender that closes stdin without a trailing newline is accepted: the stick does so today.
+ * The grant sender must end its line with a newline (readGrant waits for one).
+ */
 export async function readPayload(
   file: string | undefined,
-  stdin: AsyncIterable<string | Buffer>,
-): Promise<DropPayload> {
+  stdin: Readable,
+): Promise<DropPayload | PushPayload> {
   let text: string;
   if (file) text = readFileSync(file, 'utf8');
   else {
-    const chunks: Buffer[] = [];
-    for await (const c of stdin) chunks.push(typeof c === 'string' ? Buffer.from(c) : c);
-    text = Buffer.concat(chunks).toString('utf8');
+    text = await readLine(stdin, PAYLOAD_MAX_BYTES, true);
+    // A leaked attach-options prefix can itself end in a newline, putting the payload on a later
+    // line. Look a few lines further, but only past a line that looks like those options, so a
+    // bad payload on an open stdin is refused rather than waited on.
+    for (
+      let i = 0;
+      i < PREFIX_MAX_LINES && LEAKED_OPTIONS.test(text) && !text.includes(PAYLOAD_START);
+      i++
+    ) {
+      try {
+        text = await readLine(stdin, PAYLOAD_MAX_BYTES, true);
+      } catch {
+        break;
+      }
+    }
   }
   // Docker can pass the attach request's body to stdin ahead of the payload. The payload is
   // serialised in schema order, so it starts with its protocol field: parse from there.
@@ -174,6 +222,9 @@ export async function readPayload(
   } catch {
     // V8's parse errors quote the text around the fault, which may be a credential.
     throw new Error('payload is not valid JSON');
+  }
+  if (typeof raw === 'object' && raw !== null && (raw as { role?: unknown }).role === 'push') {
+    return PushPayloadSchema.parse(raw);
   }
   return DropPayloadSchema.parse(raw);
 }
@@ -199,6 +250,25 @@ export function describeFatal(err: unknown): string {
 async function main(): Promise<void> {
   const payload = await readPayload(process.argv[2], process.stdin);
   if (process.env.JM_WORK_ROOT) gitOps.setWorkRoot(process.env.JM_WORK_ROOT);
+  // The push role keeps stdin open for its grant line; every other role is done with stdin once
+  // it has the payload.
+  if (payload.role === 'push') {
+    const ids = trooperIdentities(process.env);
+    const result = await runPush(payload, {
+      stdin: process.stdin,
+      emit: (l) => process.stdout.write(`${l}\n`),
+      ids,
+      sweep: () => {
+        if (ids) sweepUid(ids.agent.uid);
+      },
+      alive: (uid) => agentProcessesAlive(uid),
+      git: gitOps,
+    });
+    process.stdin.destroy();
+    process.exitCode = result.status === 'failed' ? 1 : 0;
+    return;
+  }
+  process.stdin.destroy();
   const stopping = new AbortController();
   for (const sig of ['SIGTERM', 'SIGINT'] as const) {
     process.on(sig, () => stopping.abort());

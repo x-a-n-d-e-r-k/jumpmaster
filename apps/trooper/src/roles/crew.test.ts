@@ -75,8 +75,6 @@ function world(
       prepareBranch: rec('prepareBranch', () => undefined),
       treeState: rec('treeState', () => tree),
       commitIfDirty: rec('commitIfDirty', () => false),
-      pushNewBranch: rec('pushNewBranch', () => 'x'),
-      pushExistingBranch: rec('pushExistingBranch', () => 'x'),
       sweepProcesses: () => false,
       removeTree: rec('removeTree', () => undefined),
       removeInstructionFiles: (async (dir: string, as: unknown) => {
@@ -225,8 +223,7 @@ describe('runCrew', () => {
     const w = world({ commits: true });
     const r = await runCrew(lead, w.deps, newCtx());
     expect(r.status).toBe('failed');
-    expect(w.names()).not.toContain('pushNewBranch');
-    expect(w.names()).not.toContain('pushExistingBranch');
+    expect(r.push).toBeUndefined();
     expect(w.names()).not.toContain('commitIfDirty');
   });
 

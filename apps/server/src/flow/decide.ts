@@ -11,6 +11,7 @@ export interface Snapshot {
   item: WorkItem;
   zone: DropZoneConfig;
   now: Date;
+  /** The drop holding the item: active, or lost and still reclaimable (`holdingDropFor`). */
   activeDrop: Drop | null;
   pr: PullFacts | null;
   /** null = read failed. */
@@ -191,7 +192,7 @@ function ciSatisfied(s: Snapshot): boolean {
 
 /** The PR lifecycle state machine: first matching rule wins. Pure; reads no clock but `s.now`. */
 export function decide(s: Snapshot): Action {
-  // 1
+  // 1: an active drop, or a lost one its stick may still salvage (`holdingDropFor`, Ruling 10).
   if (s.activeDrop) return { kind: 'wait', on: 'drop' };
   // 2: a failed read never becomes an empty list or a deleted branch.
   if (s.pr === null) return waitForge(s, 'pr');

@@ -10,8 +10,10 @@ import {
   listObservations,
   setAttempts,
   setWorkItemState,
+  updateDrop,
   updateOutbox,
 } from '../db/repo.js';
+import { expireLeases } from '../leases.js';
 import { opKeys, opMarker } from '../outbox.js';
 import { promptVersions } from '../payloads.js';
 import { usageCfg, zoneWorld } from '../test/fixtures.js';
@@ -432,6 +434,59 @@ describe('reconcileZone — adoption and resume', () => {
     expect(item(id).state).not.toBe('pr_open');
   });
 
+  test('reconcile adopts no branch during the reclaim window', async () => {
+    const id = w.item(1, 'in_flight');
+    w.f.state.branches.set('agent/issue-1', 'wip1');
+    w.f.state.addPull({
+      number: 9,
+      headRef: 'agent/issue-1',
+      headSha: 'wip1',
+      author: 'author-bot',
+      body: `work\n${opMarker(opKeys.pr(id, 'wip1'))}`,
+    });
+    // Lost a minute ago after it had run: its stick may still salvage it.
+    insertDrop(w.db, {
+      id: 'lost1',
+      dropZoneId: 'main',
+      workItemId: id,
+      role: 'implement',
+      state: 'queued',
+    });
+    updateDrop(w.db, 'lost1', {
+      state: 'lost',
+      runningAt: new Date(t.getTime() - 30 * 60_000).toISOString(),
+      finishedAt: new Date(t.getTime() - 60_000).toISOString(),
+    });
+    await pass();
+    expect(item(id).state).toBe('in_flight');
+    expect(activeDropFor(w.db, id)).toBeUndefined();
+    expect(getAttempts(w.db, id, 'resume').count).toBe(0);
+    // The window has passed: the branch's PR is adopted as today.
+    await pass(new Date(t.getTime() + 15 * 60_000));
+    expect(item(id)).toMatchObject({ state: 'pr_open', prNumber: 9 });
+  });
+
+  test('reconcile resumes no branch during the reclaim window', async () => {
+    const id = w.item(1, 'in_flight');
+    w.f.state.branches.set('agent/issue-1', 'wip1');
+    insertDrop(w.db, {
+      id: 'lost1',
+      dropZoneId: 'main',
+      workItemId: id,
+      role: 'implement',
+      state: 'queued',
+    });
+    updateDrop(w.db, 'lost1', {
+      state: 'lost',
+      runningAt: new Date(t.getTime() - 30 * 60_000).toISOString(),
+      finishedAt: new Date(t.getTime() - 60_000).toISOString(),
+    });
+    await pass();
+    expect(activeDropFor(w.db, id)).toBeUndefined();
+    await pass(new Date(t.getTime() + 15 * 60_000));
+    expect(activeDropFor(w.db, id)).toMatchObject({ role: 'implement', headSha: 'wip1' });
+  });
+
   test('a ready item with an existing branch resumes with resumeSha', async () => {
     const id = w.item(1, 'ready');
     w.f.state.branches.set('agent/issue-1', 'wip1');
@@ -488,6 +543,49 @@ describe('reconcileZone — adoption and resume', () => {
     expect(active).toHaveLength(1);
     // the refused resume charged nothing
     expect(getAttempts(w.db, a, 'resume').count + getAttempts(w.db, b, 'resume').count).toBe(1);
+  });
+
+  /** Item 1 in flight with a pending push of `wip1` whose retention ran out a minute before `t`. */
+  function expiredPush(): number {
+    const id = w.item(1, 'in_flight');
+    w.f.state.branches.set('agent/issue-1', 'wip1');
+    insertDrop(w.db, {
+      id: 'p1',
+      dropZoneId: 'main',
+      workItemId: id,
+      role: 'implement',
+      state: 'queued',
+    });
+    updateDrop(w.db, 'p1', {
+      state: 'push_pending',
+      headSha: 'wip1',
+      fingerprint: 'fp',
+      pushKind: 'final',
+      pushDeadline: new Date(t.getTime() - 60_000).toISOString(),
+      runningAt: new Date(t.getTime() - 2 * 3_600_000).toISOString(),
+      finishedAt: new Date(t.getTime() - 3_600_000).toISOString(),
+    });
+    expireLeases(w.db, t);
+    return id;
+  }
+
+  test('retention expiry resumes from the branch through the charged resume', async () => {
+    const id = expiredPush();
+    await pass();
+    expect(activeDropFor(w.db, id)).toMatchObject({
+      role: 'implement',
+      headSha: 'wip1',
+      chargedKey: 'resume',
+    });
+    expect(getAttempts(w.db, id, 'resume').count).toBe(1);
+  });
+
+  test('retention expiry with an exhausted resume budget parks the item', async () => {
+    const id = expiredPush();
+    setAttempts(w.db, id, 'resume', 2, null);
+    await pass();
+    expect(item(id)).toMatchObject({ state: 'parked', reason: 'budget exhausted: resume' });
+    expect(activeDropFor(w.db, id)).toBeUndefined();
   });
 
   test('an exhausted resume budget parks the item', async () => {

@@ -63,8 +63,6 @@ function world(
       checkoutBranch: rec('checkoutBranch', () => undefined),
       treeState: rec('treeState', () => tree),
       commitIfDirty: rec('commitIfDirty', () => false),
-      pushNewBranch: rec('pushNewBranch', () => 'x'),
-      pushExistingBranch: rec('pushExistingBranch', () => 'x'),
       sweepProcesses: () => false,
       cloneForGates: rec('cloneForGates', () => undefined),
       removeTree: rec('removeTree', () => undefined),
@@ -102,8 +100,7 @@ test('review never pushes and returns the verdict', async () => {
   });
   expect(r.gates).toHaveLength(1);
   expect(w.calls).toContainEqual(['checkoutBranch', repoDir, 'agent/issue-1', 'h9', null]);
-  expect(w.names()).not.toContain('pushExistingBranch');
-  expect(w.names()).not.toContain('pushNewBranch');
+  expect(r.push).toBeUndefined();
   expect(w.names()).not.toContain('commitIfDirty');
 });
 

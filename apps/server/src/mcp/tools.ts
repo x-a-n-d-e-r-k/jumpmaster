@@ -14,6 +14,7 @@ import { applyCrewActions, type CrewActionInput } from '../crew/actions.js';
 import { getCrewIssueByNumber, listCrewIssues } from '../crew/store.js';
 import type { Db } from '../db/open.js';
 import {
+  ACTIVE_DROP_STATES,
   getPullRequest,
   getUsageState,
   getZoneMode,
@@ -244,7 +245,7 @@ const listRulingsTool: ToolDef = {
   },
 };
 
-const ACTIVE_DROPS = ['queued', 'leased', 'running'];
+const ACTIVE_DROPS: readonly string[] = ACTIVE_DROP_STATES;
 
 const getQueueTool: ToolDef = {
   name: 'get_queue',

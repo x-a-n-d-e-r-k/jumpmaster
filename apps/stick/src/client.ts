@@ -3,8 +3,14 @@ import {
   type DropPayload,
   DropPayloadSchema,
   type DropResult,
+  FEATURES_HEADER,
   type LeaseSkip,
   LeaseSkipSchema,
+  type PushGrant,
+  PushGrantSchema,
+  type PushPlan,
+  PushPlanSchema,
+  type PushResult,
   SKIPPED_HEADER,
   type StickInfo,
   type TrooperEvent,
@@ -12,12 +18,46 @@ import {
 
 export type Ack = 'ok' | 'stale';
 
+/** `killed` only for a pending push while the kill switch is on: stop, keep the volume. */
+export type Beat = 'ok' | 'cancel' | 'hard_cancel' | 'stale' | 'killed';
+
+/** The server's answer to a grant request; a refusal is told apart from stale by its body. */
+/** A push plan, `stale`, or why pushes are held back for now. */
+export type PlanReply = PushPlan | 'stale' | { refused: string; retryable: boolean };
+
+export type GrantReply =
+  | { grant: PushGrant }
+  | { refused: string; retryable: boolean }
+  | { stale: true };
+
 /** The per-drop calls the runner needs. */
 export interface DropClient {
-  heartbeat(dropId: string, epoch: number): Promise<'ok' | 'cancel' | 'hard_cancel' | 'stale'>;
+  /** What the server announced on its last lease answer (`push-v1`); none when unknown. */
+  readonly features?: ReadonlySet<string>;
+  heartbeat(dropId: string, epoch: number): Promise<Beat>;
   postEvents(dropId: string, epoch: number, events: TrooperEvent[]): Promise<Ack>;
   postResult(dropId: string, epoch: number, result: DropResult): Promise<Ack>;
   postArtifact(dropId: string, epoch: number, artifact: ArtifactUpload): Promise<Ack>;
+  /** Asks the server to keep this drop's volume for a push: `refused` means remove it. */
+  salvage(dropId: string, epoch: number): Promise<'ok' | 'refused'>;
+}
+
+/** The calls the push loop needs. */
+export interface PushClient {
+  heartbeat(dropId: string, epoch: number): Promise<Beat>;
+  pushPlan(dropId: string, epoch: number): Promise<PlanReply>;
+  pushGrant(dropId: string, epoch: number): Promise<GrantReply>;
+  postPushResult(dropId: string, epoch: number, result: PushResult): Promise<Ack>;
+}
+
+/** A request the server answered with an error status (never thrown for a network failure). */
+export class HttpStatusError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
 }
 
 /** Shorter than the 15-second beat, so beats never overlap. */
@@ -74,7 +114,10 @@ export function leaseLogger(
   };
 }
 
-export class StickClient implements DropClient {
+export class StickClient implements DropClient, PushClient {
+  /** The features the server announced on its latest lease answer. */
+  features: ReadonlySet<string> = new Set();
+
   constructor(
     private readonly baseUrl: string,
     private token?: string,
@@ -123,10 +166,15 @@ export class StickClient implements DropClient {
 
   /**
    * Long-polls. `drop` is null when the server has nothing (204). `skipped` names zones with work
-   * waiting that this stick can't run, and what it lacks for each.
+   * waiting that this stick can't run, and what it lacks for each. `terms` override what the
+   * stick advertised at startup: the capabilities of its latest checks, and `noPush` at the cap.
    */
-  async lease(freeSlots: number): Promise<{ drop: DropPayload | null; skipped: LeaseSkip[] }> {
-    const res = await this.req('/api/sticks/lease', { freeSlots, ...this.info });
+  async lease(
+    freeSlots: number,
+    terms: { capabilities?: string[]; noPush?: boolean } = {},
+  ): Promise<{ drop: DropPayload | null; skipped: LeaseSkip[] }> {
+    const res = await this.req('/api/sticks/lease', { freeSlots, ...this.info, ...terms });
+    this.features = featuresOf(res);
     const skipped = skippedOf(res);
     if (res.status === 204) return { drop: null, skipped };
     // A refusal's body is the server's error JSON, never a payload: safe to show.
@@ -137,10 +185,7 @@ export class StickClient implements DropClient {
     return { drop: parsed.data, skipped };
   }
 
-  async heartbeat(
-    dropId: string,
-    epoch: number,
-  ): Promise<'ok' | 'cancel' | 'hard_cancel' | 'stale'> {
+  async heartbeat(dropId: string, epoch: number): Promise<Beat> {
     // A hung server must count as a failed beat, or a stick cut off from it never fences itself.
     const res = await this.req(
       `/api/drops/${dropId}/heartbeat`,
@@ -150,7 +195,8 @@ export class StickClient implements DropClient {
     );
     if (res.status === 409) return 'stale';
     if (!res.ok) throw new Error(`heartbeat failed: ${res.status}`);
-    const out = (await res.json()) as { cancel: boolean; hard?: boolean };
+    const out = (await res.json()) as { cancel: boolean; hard?: boolean; killed?: boolean };
+    if (out.killed === true) return 'killed';
     if (!out.cancel) return 'ok';
     return out.hard ? 'hard_cancel' : 'cancel';
   }
@@ -180,6 +226,86 @@ export class StickClient implements DropClient {
       last = res.status;
       if (res.status < 500) break;
     }
-    throw new Error(`result failed: ${last}`);
+    throw new HttpStatusError(`result failed: ${last}`, last);
   }
+
+  /**
+   * The plan for a push container; `stale` when the drop is no longer this stick's pending push; a
+   * refusal (403 `{refused, retryable}`) while pushes are held back (the kill switch, observe).
+   */
+  async pushPlan(dropId: string, epoch: number): Promise<PlanReply> {
+    const res = await this.req('/api/sticks/push-plan', { dropId, epoch });
+    if (res.status === 409) return 'stale';
+    if (res.status === 403) {
+      const body = (await res
+        .clone()
+        .json()
+        .catch(() => null)) as { refused?: unknown; retryable?: unknown } | null;
+      if (typeof body?.refused === 'string') {
+        return { refused: body.refused, retryable: body.retryable === true };
+      }
+    }
+    if (!res.ok) throw await failure('push-plan', res);
+    const parsed = PushPlanSchema.safeParse(await res.json());
+    if (!parsed.success) throw new Error('push-plan failed: invalid plan');
+    return parsed.data;
+  }
+
+  /**
+   * The grant, or why not. A refusal is 403 `{refused, retryable}`, except `reserved`, which is
+   * 409 like stale: the body tells them apart. A grant's body is never echoed (it holds a token).
+   */
+  async pushGrant(dropId: string, epoch: number): Promise<GrantReply> {
+    const res = await this.req('/api/sticks/push-token', { dropId, epoch });
+    if (res.ok) {
+      const body = (await res.json().catch(() => null)) as { grant?: unknown } | null;
+      const parsed = PushGrantSchema.safeParse(body?.grant);
+      if (!parsed.success) throw new Error('push-token failed: invalid grant');
+      return { grant: parsed.data };
+    }
+    if (res.status === 403 || res.status === 409) {
+      const body = (await res.json().catch(() => null)) as {
+        stale?: unknown;
+        refused?: unknown;
+        retryable?: unknown;
+      } | null;
+      if (typeof body?.refused === 'string') {
+        return { refused: body.refused, retryable: body.retryable === true };
+      }
+      if (res.status === 409) return { stale: true };
+    }
+    throw new HttpStatusError(`push-token failed: ${res.status}`, res.status);
+  }
+
+  /** 200 is ok, a retry after a lost response included (Ruling 13); 409 is stale; 5xx retried. */
+  async postPushResult(dropId: string, epoch: number, result: PushResult): Promise<Ack> {
+    let last = 0;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (attempt > 0) await sleep(500 * 2 ** (attempt - 1));
+      const res = await this.req(`/api/drops/${dropId}/push-result`, { epoch, result });
+      if (res.status === 409) return 'stale';
+      if (res.ok) return 'ok';
+      last = res.status;
+      if (res.status < 500) break;
+    }
+    throw new HttpStatusError(`push-result failed: ${last}`, last);
+  }
+
+  async salvage(dropId: string, epoch: number): Promise<'ok' | 'refused'> {
+    const res = await this.req('/api/sticks/salvage', { dropId, epoch });
+    if (res.status === 409) return 'refused';
+    if (!res.ok) throw await failure('salvage', res);
+    return 'ok';
+  }
+}
+
+/** The features a lease answer announces (a comma list); none when the header is missing. */
+function featuresOf(res: Response): ReadonlySet<string> {
+  const raw = res.headers.get(FEATURES_HEADER) ?? '';
+  return new Set(
+    raw
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s !== ''),
+  );
 }

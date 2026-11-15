@@ -1,10 +1,22 @@
 import { describe, expect, test } from 'vitest';
 import type { DropZoneConfig } from '../config.js';
-import type { Drop, VerdictRow, WorkItem } from '../db/repo.js';
+import {
+  activeDropFor,
+  type Drop,
+  insertDrop,
+  reclaimableDropFor,
+  updateDrop,
+  type VerdictRow,
+  type WorkItem,
+} from '../db/repo.js';
 import type { ChecksFacts, CompareFacts, ForgeReview, PullFacts } from '../forge/github.js';
+import { promptVersions } from '../payloads.js';
+import { usageCfg, zoneWorld } from '../test/fixtures.js';
 import { t0 } from '../test/helpers.js';
 import { fingerprint } from './budgets.js';
 import { decide, gateParkAllowable, HOLD_REASON, OVERRIDE_HINT, type Snapshot } from './decide.js';
+import { reconcileZone } from './reconcile.js';
+import { zonePass } from './snapshot.js';
 
 const now = t0;
 const minutesAgo = (m: number): string => new Date(now.getTime() - m * 60_000).toISOString();
@@ -794,5 +806,47 @@ describe('purity', () => {
     const before = JSON.stringify(s);
     expect(decide(s)).toEqual(decide(s));
     expect(JSON.stringify(s)).toBe(before);
+  });
+});
+
+describe('reclaim window', () => {
+  test('decide waits on a reclaimable heal drop', async () => {
+    const at = new Date('2026-01-01T01:00:00Z');
+    const w = zoneWorld();
+    const id = w.prItem(1, 'sha1');
+    const pass = async (when: Date) =>
+      reconcileZone(
+        w.db,
+        w.forges,
+        w.zone,
+        await zonePass(w.forges, w.zone, 'main'),
+        promptVersions(),
+        usageCfg,
+        [],
+        when,
+      );
+    insertDrop(w.db, {
+      id: 'heal1',
+      dropZoneId: 'main',
+      workItemId: id,
+      role: 'heal',
+      state: 'queued',
+      prNumber: 1,
+      headSha: 'sha1',
+    });
+    updateDrop(w.db, 'heal1', {
+      state: 'lost',
+      runningAt: new Date(at.getTime() - 10 * 60_000).toISOString(),
+      finishedAt: new Date(at.getTime() - 60_000).toISOString(),
+    });
+    expect(reclaimableDropFor(w.db, id, at)?.id).toBe('heal1');
+    await pass(at);
+    // Nothing starts on the PR while the lost heal may still be salvaged.
+    expect(activeDropFor(w.db, id)).toBeUndefined();
+    // Once the window has passed, the PR is decided as today (its head gets a review).
+    const later = new Date(at.getTime() + 15 * 60_000);
+    expect(reclaimableDropFor(w.db, id, later)).toBeUndefined();
+    await pass(later);
+    expect(activeDropFor(w.db, id)).toMatchObject({ role: 'review', headSha: 'sha1' });
   });
 });

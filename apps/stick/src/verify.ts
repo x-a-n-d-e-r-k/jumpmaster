@@ -17,6 +17,7 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { type ImagePolicy, ImagePolicySchema } from '@jumpmaster/protocol';
+import { type PullDeps, pullImage } from './pull.js';
 import { allowedImages } from './runner.js';
 import { stateDir } from './state.js';
 
@@ -330,6 +331,40 @@ const isDigestRef = (ref: string) => digestOf(ref) !== null;
  * repository built into the image, and is logged.
  */
 export async function prepareImageTrust(
+  env: NodeJS.ProcessEnv,
+  deps: { cosign: Cosign; release?: ReleaseInfo; log: (line: string) => void },
+): Promise<ImageTrust> {
+  return buildTrust(env, deps);
+}
+
+/**
+ * The stick's own trooper image (`TROOPER_IMAGE`) runs its init, self-check and push containers,
+ * so it is verified under the image policy like a drop's image, then pulled (Ruling 17). A failure
+ * never stops the stick: it is logged loudly and push-v1 is withheld while it stands (the stick
+ * still leases non-pushing roles); every sweep checks again, so a fixed image recovers.
+ */
+export async function verifyBaseImage(
+  image: string,
+  deps: { trust: ImageTrust; driver: PullDeps['driver']; log: (line: string) => void },
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const refuse = (why: string) => {
+    const reason = `base image ${image}: ${why}`;
+    deps.log(
+      JSON.stringify({ event: 'base-image', image, ok: false, effect: 'push-v1 withheld', reason }),
+    );
+    return { ok: false as const, reason };
+  };
+  const v = await verifyImage(image, deps.trust);
+  if (!v.ok) return refuse(v.reason);
+  try {
+    await pullImage(image, { driver: deps.driver, log: deps.log });
+  } catch (e) {
+    return refuse(e instanceof Error ? e.message : String(e));
+  }
+  return { ok: true };
+}
+
+async function buildTrust(
   env: NodeJS.ProcessEnv,
   deps: { cosign: Cosign; release?: ReleaseInfo; log: (line: string) => void },
 ): Promise<ImageTrust> {

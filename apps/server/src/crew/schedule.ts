@@ -3,7 +3,13 @@ import type { Role } from '@jumpmaster/protocol';
 import { raiseBriefing, whyBasis } from '../briefings.js';
 import type { DropZoneConfig, UsageConfig } from '../config.js';
 import type { Db } from '../db/open.js';
-import { getZoneMode, insertDrop, isKilled, recordObservation } from '../db/repo.js';
+import {
+  ACTIVE_STATES_SQL,
+  getZoneMode,
+  insertDrop,
+  isKilled,
+  recordObservation,
+} from '../db/repo.js';
 import type { ZonePass } from '../flow/snapshot.js';
 import { getGoals } from '../goals.js';
 import type { ForgePair } from '../outbox.js';
@@ -125,7 +131,7 @@ const hasActiveCrewDrop = (db: Db, zoneId: string): boolean =>
   db
     .prepare(
       `SELECT 1 FROM drops WHERE drop_zone_id = ? AND work_item_id IS NULL AND role <> 'doctor'
-         AND state IN ('queued', 'leased', 'running') LIMIT 1`,
+         AND state IN (${ACTIVE_STATES_SQL}) LIMIT 1`,
     )
     .get(zoneId) !== undefined;
 

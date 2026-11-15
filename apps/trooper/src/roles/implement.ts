@@ -5,9 +5,9 @@ import {
   acceptOutcome,
   checkpoint,
   cloneAndPrepare,
+  completedWith,
+  earlyStop,
   emitEvent,
-  mirrorDirOf,
-  pushSweep,
   type RoleCtx,
   reportOf,
   resultMeta,
@@ -17,8 +17,9 @@ import {
 } from './shared.js';
 
 /**
- * Implement: a fresh branch (or the resumed one), one Claude run, then commit, gates and a guarded
- * push. A limit or turn cap checkpoints the work instead so the server can resume it.
+ * Implement: a fresh branch (or the resumed one), one Claude run, then commit and gates. It never
+ * pushes: a completed result asks for a final push of the gated commit, and a limit or turn cap
+ * asks for a checkpoint push so the server can resume it. The push container does the push.
  */
 export async function runImplement(
   payload: DropPayload,
@@ -68,36 +69,6 @@ async function implementSteps(
     await deps.git.prepareBranch(repoDir, payload.branch, base, as);
   }
 
-  const guard = {
-    mirrorDir: mirrorDirOf(ctx),
-    as,
-    base,
-    protectedPaths: payload.protectedPaths,
-    secrets: ctx.secrets,
-  };
-  const push = (expectSha?: string): Promise<string> => {
-    emitEvent(deps, ctx, 'phase', { phase: 'push' });
-    const o = expectSha === undefined ? guard : { ...guard, expectSha };
-    return resumeSha !== undefined
-      ? deps.git.pushExistingBranch(
-          repoDir,
-          payload.branch,
-          forgeToken,
-          target,
-          resumeSha,
-          pushSweep(deps, ctx),
-          o,
-        )
-      : deps.git.pushNewBranch(
-          repoDir,
-          payload.branch,
-          forgeToken,
-          target,
-          pushSweep(deps, ctx),
-          o,
-        );
-  };
-
   const outcome = await runAgent(
     payload,
     deps,
@@ -113,8 +84,7 @@ async function implementSteps(
 
   const early = stoppedEarly(outcome);
   if (early !== null) {
-    const headSha = await checkpoint(deps, ctx, repoDir, base, () => push());
-    return done(headSha === undefined ? { status: early } : { status: early, headSha });
+    return done(earlyStop(early, await checkpoint(deps, ctx, repoDir, base)));
   }
 
   const accepted = acceptOutcome(outcome);
@@ -140,15 +110,11 @@ async function implementSteps(
     return done({ status: 'no_changes', reason: structured.summary });
   }
 
-  // Gates test HEAD; the push must carry exactly that commit.
+  // Gates test HEAD; the push container must push exactly that commit.
   const gatedSha = await deps.git.headSha(repoDir, as);
   gates.push(...(await runGatesPhase(payload, deps, ctx, repoDir)));
   const failed = gates.find((g) => g.timedOut || g.exitCode !== 0);
   if (failed) return done({ status: 'failed', reason: `gate ${failed.name} failed` });
 
-  return done({
-    status: 'completed',
-    headSha: await push(gatedSha),
-    ...reportOf(structured.summary),
-  });
+  return done({ ...completedWith(gatedSha), ...reportOf(structured.summary) });
 }

@@ -7,6 +7,7 @@ import { STARTER_WARNING } from '../config.js';
 import {
   appendEvents,
   insertDrop,
+  insertStick,
   setKilled,
   setUsageState,
   setZoneMode,
@@ -174,6 +175,39 @@ describe('global checks', () => {
     expect(one(await w.run(), 'stick.image-policy').status).toBe('warn');
     w.config.requireSignedImages = true;
     expect(one(await w.run(), 'stick.image-policy').status).toBe('fail');
+  });
+
+  test('stick.volumes passes, warns and fails', async () => {
+    const w = world();
+    const stamp = (id: string, name: string, caps: string[]) => {
+      insertStick(w.db, { id, name, tokenHash: `h-${id}`, slots: 1 });
+      stampStick(
+        w.db,
+        id,
+        { capabilities: caps, imagePolicy: 'signed', version: null, pinnedImages: [] },
+        ago(10_000),
+      );
+    };
+    // The world's own stick-1 advertises push-v1 (see the world's stampStick).
+    expect(one(await w.run(), 'stick.volumes').status).toBe('pass');
+    stamp('s2', 'stick-2', ['egress-v1']);
+    const warn = one(await w.run(), 'stick.volumes');
+    expect(warn.status).toBe('warn');
+    expect(warn.summary).toContain('stick-2');
+    expect(warn.summary).not.toContain('stick-1');
+    w.db.prepare("UPDATE sticks SET capabilities_json = '[]' WHERE id = 's1'").run();
+    const fail = one(await w.run(), 'stick.volumes');
+    expect(fail.status).toBe('fail');
+    expect(fail.fix).toBe(
+      'Update the stick, and check that it can create Docker volumes and has 10 GiB free: without that it takes no implement, heal or resolve work.',
+    );
+    expect(fail.doc).toMatch(/install\.md#sticks$/);
+  });
+
+  test('stick.volumes skips with no live stick', async () => {
+    const w = world();
+    w.db.prepare('DELETE FROM sticks').run();
+    expect(one(await w.run(), 'stick.volumes').status).toBe('skip');
   });
 
   test('usage.gate fails during a credits stop and warns while the usage limit pauses dispatch', async () => {

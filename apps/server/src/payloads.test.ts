@@ -154,9 +154,21 @@ describe('buildPayload', () => {
       expect((buildPayload(db, on, d, secrets) as { gateCi?: boolean }).gateCi).toBeUndefined();
   });
 
-  test('implement, heal and resolve carry the author token', () => {
+  test('implement payloads carry the read token when configured', () => {
+    // Ruling 1: the agent container only fetches; the push container pushes with the grant.
     for (const d of [impl, heal, resolve]) {
-      expect(build(d).credentials.forgeToken).toBe('author-secret');
+      const p = build(d);
+      expect(p.credentials.forgeToken, d.role).toBe('read-secret');
+      expect(JSON.stringify(p), d.role).not.toContain(secrets.githubAuthorToken);
+    }
+  });
+
+  test('without a read token, implement, heal and resolve fall back to the author token', () => {
+    const { githubReadToken: _r, ...noRead } = secrets;
+    for (const d of [impl, heal, resolve]) {
+      expect(buildPayload(db, zone, d, noRead).credentials.forgeToken, d.role).toBe(
+        'author-secret',
+      );
     }
   });
 

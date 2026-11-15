@@ -407,6 +407,15 @@ describe('release.yml', () => {
     expect(apps).not.toMatch(/needs\.troopers\.outputs/);
   });
 
+  test('the release stick image sets JM_TROOPER_IMAGE', () => {
+    const stick = steps(buildWorkflow().jobs.apps).find((s) => s.id === 'stick');
+    const args = String(stick?.with?.['build-args'] ?? '');
+    // This release's trooper, by its index digest (Ruling 17), as the egress proxy is.
+    expect(args).toContain(
+      'TROOPER_IMAGE=${{ needs.target.outputs.registry }}/jumpmaster-trooper@${{ needs.troopers-index.outputs.trooper }}',
+    );
+  });
+
   test('id-token: write appears only on the sign job; top-level permissions are read-only', () => {
     const w = release();
     expect(w.permissions).toEqual({ contents: 'read' });

@@ -81,9 +81,12 @@ describe('capabilities and lease logging', () => {
       }),
     );
     await client.lease(1);
+    // Each lease carries the capabilities of the latest health check, and noPush at the cap.
+    await client.lease(2, { capabilities: ['push-v1'], noPush: true });
     expect(bodies).toEqual([
       { joinToken: 'join', name: 'n', slots: 2, ...info },
       { freeSlots: 1, ...info },
+      { freeSlots: 2, ...info, capabilities: ['push-v1'], noPush: true },
     ]);
   });
 
@@ -169,5 +172,125 @@ describe('capabilities and lease logging', () => {
     expect(stickInfo({ JM_IMAGE_POLICY: 'signed' }, '1').imagePolicy).toBe('signed');
     expect(() => stickInfo({ JM_IMAGE_POLICY: 'open' }, '1')).toThrow(/JM_IMAGE_POLICY/);
     expect(stickInfo({ JM_IMAGE_POLICY: '' }, '1').imagePolicy).toBe('allowlist');
+  });
+});
+
+describe('push calls', () => {
+  const sha = 'a'.repeat(40);
+  const grant = {
+    token: 'ghp_secret',
+    owner: 'o',
+    name: 'r',
+    branch: 'agent/issue-1',
+    base: 'main',
+    lease: '',
+    protectedPaths: [],
+    secrets: [],
+  };
+  const reply = (status: number, body?: unknown, headers: Record<string, string> = {}) =>
+    new Response(body === undefined ? null : JSON.stringify(body), { status, headers });
+  const calls: { url: string; body: unknown }[] = [];
+  const serve = (...replies: Response[]) => {
+    calls.length = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: URL, init: { body: string }) => {
+        calls.push({ url: String(url), body: JSON.parse(init.body) });
+        const r = replies.shift();
+        if (!r) throw new Error('no reply');
+        return r;
+      }),
+    );
+  };
+  const client = () => new StickClient('http://server.test', 't');
+
+  test('features come from the lease response header, on a payload and on a 204', async () => {
+    const c = client();
+    expect(c.features.has('push-v1')).toBe(false);
+    serve(reply(204, undefined, { 'x-jumpmaster-features': 'push-v1' }));
+    await c.lease(1);
+    expect(c.features.has('push-v1')).toBe(true);
+    serve(reply(200, valid));
+    await c.lease(1);
+    expect(c.features.has('push-v1')).toBe(false);
+  });
+
+  test('heartbeat answers killed for a pending push under the kill switch', async () => {
+    serve(reply(200, { cancel: false, hard: false, killed: true }));
+    expect(await client().heartbeat('d1', 1)).toBe('killed');
+  });
+
+  test('pushPlan parses the plan; 409 is stale; 403 is a refusal', async () => {
+    serve(
+      reply(200, { branch: 'agent/issue-1', salvage: false }),
+      reply(409, { stale: true }),
+      reply(403, { refused: 'killed', retryable: true }),
+      reply(403, { error: 'nope' }),
+    );
+    const c = client();
+    expect(await c.pushPlan('d1', 2)).toEqual({ branch: 'agent/issue-1', salvage: false });
+    expect(calls[0]).toEqual({
+      url: 'http://server.test/api/sticks/push-plan',
+      body: { dropId: 'd1', epoch: 2 },
+    });
+    expect(await c.pushPlan('d1', 2)).toBe('stale');
+    expect(await c.pushPlan('d1', 2)).toEqual({ refused: 'killed', retryable: true });
+    await expect(c.pushPlan('d1', 2)).rejects.toThrow('push-plan failed: 403');
+  });
+
+  test('pushGrant tells a grant, a refusal, reserved and stale apart by the body', async () => {
+    serve(
+      reply(200, { grant }),
+      reply(403, { refused: 'killed', retryable: true }),
+      reply(409, { refused: 'reserved', retryable: true }),
+      reply(409, { stale: true }),
+    );
+    const c = client();
+    expect(await c.pushGrant('d1', 2)).toEqual({ grant });
+    expect(await c.pushGrant('d1', 2)).toEqual({ refused: 'killed', retryable: true });
+    expect(await c.pushGrant('d1', 2)).toEqual({ refused: 'reserved', retryable: true });
+    expect(await c.pushGrant('d1', 2)).toEqual({ stale: true });
+    expect(calls[0]?.url).toBe('http://server.test/api/sticks/push-token');
+  });
+
+  test('a malformed grant is refused without echoing the body', async () => {
+    serve(reply(200, { grant: { token: 'ghp_secret' } }));
+    const err = await client()
+      .pushGrant('d1', 2)
+      .catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(String(err)).not.toContain('ghp_secret');
+  });
+
+  test('postPushResult: 200 is ok (Ruling 13), 409 stale, 5xx retried', async () => {
+    const result = { status: 'pushed' as const, headSha: sha, alreadyThere: false };
+    serve(reply(200, { state: 'done' }), reply(409, { stale: true }), reply(503), reply(200, {}));
+    const c = client();
+    expect(await c.postPushResult('d1', 2, result)).toBe('ok');
+    expect(calls[0]).toEqual({
+      url: 'http://server.test/api/drops/d1/push-result',
+      body: { epoch: 2, result },
+    });
+    expect(await c.postPushResult('d1', 2, result)).toBe('stale');
+    expect(await c.postPushResult('d1', 2, result)).toBe('ok');
+  });
+
+  test('salvage: 200 ok, 409 refused', async () => {
+    serve(reply(200, { state: 'push_pending' }), reply(409, { refused: 'state' }));
+    const c = client();
+    expect(await c.salvage('d1', 2)).toBe('ok');
+    expect(calls[0]).toEqual({
+      url: 'http://server.test/api/sticks/salvage',
+      body: { dropId: 'd1', epoch: 2 },
+    });
+    expect(await c.salvage('d1', 2)).toBe('refused');
+  });
+
+  test('a refused result carries its status, so a 422 is told apart from an outage', async () => {
+    serve(reply(422, { error: 'invalid push request' }));
+    const err = await client()
+      .postResult('d1', 2, { status: 'completed', gates: [] })
+      .catch((e: Error & { status?: number }) => e);
+    expect((err as { status?: number }).status).toBe(422);
   });
 });

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from 'vitest';
 import type { DropZoneConfig } from './config.js';
 import { type Db, openDb } from './db/open.js';
-import { getDrop, listWorkItems, upsertDropZone, upsertWorkItem } from './db/repo.js';
+import { getDrop, listWorkItems, updateDrop, upsertDropZone, upsertWorkItem } from './db/repo.js';
 import { enqueueNext, zoneHold, zonePass } from './scheduler.js';
 import { t0, tmpDbFile } from './test/helpers.js';
 import { DEFAULT_USAGE_CONFIG } from './usage.js';
@@ -113,5 +113,26 @@ describe('credential problems park dispatch (Task 4)', () => {
     expect(zoneHold('main')).toBeUndefined();
     expect(drops()).toBe(1);
     expect(logs.at(-1)).toBe('zone main: credentials in order, dispatch resumes');
+  });
+});
+
+describe('push_pending', () => {
+  test('scheduler counts pending pushes toward maxConcurrentImplement', () => {
+    add(1, 2);
+    add(2, 2);
+    const first = enqueueNext(
+      db,
+      { ...zone, maxConcurrentImplement: 1 },
+      'v1',
+      DEFAULT_USAGE_CONFIG,
+      t0,
+    )!;
+    updateDrop(db, first, { state: 'push_pending' });
+    expect(
+      enqueueNext(db, { ...zone, maxConcurrentImplement: 1 }, 'v1', DEFAULT_USAGE_CONFIG, t0),
+    ).toBeNull();
+    expect(
+      enqueueNext(db, { ...zone, maxConcurrentImplement: 2 }, 'v1', DEFAULT_USAGE_CONFIG, t0),
+    ).not.toBeNull();
   });
 });

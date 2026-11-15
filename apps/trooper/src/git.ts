@@ -11,10 +11,20 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
-import { type MergeOutcome, protectedPathMatches } from '@jumpmaster/protocol';
+import {
+  type MergeOutcome,
+  type PushGrant,
+  type PushResult,
+  protectedPathMatches,
+} from '@jumpmaster/protocol';
 import { scrubEnv } from './gates.js';
-import { type AgentIdentity, asAgentArgv, type TrooperIdentities } from './privilege.js';
-import { containsSecret } from './redact.js';
+import {
+  type AgentIdentity,
+  asAgentArgv,
+  asAgentInDirArgv,
+  type TrooperIdentities,
+} from './privilege.js';
+import { containsSecret, redact } from './redact.js';
 
 /** The only URL prefix the forge auth header is ever sent to. */
 export const AUTH_SCOPE = 'https://github.com/';
@@ -62,9 +72,12 @@ type ExecOpts = {
 function exec(argv: string[], o: ExecOpts): Promise<string> {
   return new Promise((resolve, reject) => {
     const [cmd, ...args] = argv as [string, ...string[]];
+    // Its own process group: an abort kills git and everything it started (a transport helper
+    // that inherited the token in its env, a remote hook), not only the direct child.
     const child = spawnImpl(cmd, args, {
       cwd: o.cwd,
       env: o.env,
+      detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -73,7 +86,13 @@ function exec(argv: string[], o: ExecOpts): Promise<string> {
     const abort = (msg: string) => {
       if (aborted) return;
       aborted = msg;
-      child.kill('SIGKILL');
+      killGroup(child);
+      // Settle now: a grandchild (a remote hook, a transport helper) can hold the pipes open, and
+      // 'close' would wait for it.
+      done();
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      reject(new Error(msg));
     };
     const timer =
       o.timeoutMs !== undefined ? setTimeout(() => abort('timeout'), o.timeoutMs) : null;
@@ -105,9 +124,25 @@ function exec(argv: string[], o: ExecOpts): Promise<string> {
       if (code === 0) return resolve(stdout.trim());
       // Never echo the command line: it may carry the upload-pack wrapper or paths.
       const detail = stderr.trim();
-      reject(new Error(`${o.label} failed (exit ${code})${detail ? `: ${detail}` : ''}`));
+      // stdout rides on the error for callers that classify by it (push --porcelain), never in
+      // the message.
+      reject(
+        Object.assign(new Error(`${o.label} failed (exit ${code})${detail ? `: ${detail}` : ''}`), {
+          stdout,
+        }),
+      );
     });
   });
+}
+
+function killGroup(child: ChildProcess): void {
+  try {
+    if (child.pid === undefined) throw new Error('no pid');
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    // No group (spawn failed, or already gone): kill the child itself.
+    child.kill('SIGKILL');
+  }
 }
 
 /** The git subcommand, skipping leading `-c k=v` pairs and other global options. */
@@ -232,8 +267,9 @@ export function runGit(
     env.GIT_CEILING_DIRECTORIES = dirname(opts.gitDir);
     dir = dirname(opts.gitDir);
   }
-  return exec(asAgentArgv(opts.as ?? null, ['git', ...args]), {
-    cwd: dir,
+  // As the agent, start from / and enter `dir` after the uid drop: root can't chdir into 0700.
+  return exec(opts.as ? asAgentInDirArgv(opts.as, dir, ['git', ...args]) : ['git', ...args], {
+    cwd: opts.as ? '/' : dir,
     env,
     label: `git ${subcommand(args)}`,
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
@@ -252,11 +288,14 @@ function ensureRootDir(path: string): void {
   if (!existsSync(path)) mkdirSync(path, { mode: 0o755 });
 }
 
+/** The fixed config of every root-owned bare repo: nothing an earlier process wrote survives. */
+const BARE_CONFIG = '[core]\n\trepositoryformatversion = 0\n\tbare = true\n';
+
 async function initBare(gitDir: string): Promise<void> {
   ensureRootDir(gitDir);
   await runGit(undefined, ['init', '--bare', '-q', '--template='], '', { gitDir });
   // Fixed config: nothing an earlier process wrote survives.
-  writeFileSync(join(gitDir, 'config'), '[core]\n\trepositoryformatversion = 0\n\tbare = true\n');
+  writeFileSync(join(gitDir, 'config'), BARE_CONFIG);
   rmSync(join(gitDir, 'hooks'), { recursive: true, force: true });
 }
 
@@ -327,11 +366,47 @@ export async function prepareBranch(
   await runGit(dir, ['switch', '-q', '-c', branch, `origin/${base}`], '', { as });
 }
 
+/** How long a hardened (salvage) status, add or commit may take. */
+export const HARDENED_COMMIT_TIMEOUT_MS = 60_000;
+
+/**
+ * Commits everything in `dir` when it is dirty. `hardened` (salvage, in the push container, on a
+ * working copy the agent left behind): no fsmonitor, no hooks, the Jumpmaster Agent identity
+ * whatever the repo config says, a bound on every call, and git is pointed at `dir` with `-C`
+ * from `/` (root never enters the agent's directory).
+ */
 export async function commitIfDirty(
   dir: string,
   message: string,
   as: AgentIdentity | null = null,
+  o: { hardened?: boolean } = {},
 ): Promise<boolean> {
+  if (o.hardened) {
+    const run = (args: string[]) =>
+      runGit(
+        '/',
+        ['-C', dir, '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', ...args],
+        '',
+        { as, timeoutMs: HARDENED_COMMIT_TIMEOUT_MS },
+      );
+    if ((await run(['status', '--porcelain'])) === '') return false;
+    await run(['add', '-A']);
+    await run([
+      '-c',
+      `user.name=${AGENT_NAME}`,
+      '-c',
+      `user.email=${AGENT_EMAIL}`,
+      // No signing: an agent-configured gpg.program never runs.
+      '-c',
+      'commit.gpgSign=false',
+      'commit',
+      '-q',
+      '--no-verify',
+      '-m',
+      message,
+    ]);
+    return true;
+  }
   if ((await runGit(dir, ['status', '--porcelain'], '', { as })) === '') return false;
   await runGit(dir, ['add', '-A'], '', { as });
   // The trooper's own housekeeping commit: project hooks (husky, lint-staged) must not fail it.
@@ -372,6 +447,7 @@ export async function remoteBranchSha(
   target: RemoteTarget,
   branch: string,
   token: string,
+  timeoutMs?: number,
 ): Promise<string | null> {
   const scratch = mkdtempSync(join(workRoot, 'jm-lsremote-'));
   try {
@@ -381,7 +457,7 @@ export async function remoteBranchSha(
       undefined,
       [...PRISTINE, ...protocolFor(url), 'ls-remote', '--heads', url, `refs/heads/${branch}`],
       token,
-      { gitDir: scratch },
+      { gitDir: scratch, ...(timeoutMs !== undefined ? { timeoutMs } : {}) },
     );
     const line = out.split('\n').find((l) => l.endsWith(`\trefs/heads/${branch}`));
     return line ? (line.split('\t')[0] as string) : null;
@@ -499,20 +575,6 @@ export async function mergeInProgress(
   }
 }
 
-export type PushOptions = {
-  as?: AgentIdentity | null;
-  /** Base branch for the pre-push guard; without it no guard runs. */
-  base?: string;
-  protectedPaths?: string[];
-  /** Credential values the push must not carry (in added lines or commit messages). */
-  secrets?: string[];
-  /** The commit the gates tested: the pushed branch tip must be exactly this. */
-  expectSha?: string;
-  limits?: { timeoutMs: number; maxBytes: number };
-  /** Root mirror; defaults to `<dirname(dir)>/mirror`. */
-  mirrorDir?: string;
-};
-
 function dirSize(path: string): number {
   let total = 0;
   const walk = (p: string) => {
@@ -616,28 +678,44 @@ export async function prePushCheck(
   return null;
 }
 
-async function guardedPush(
+/**
+ * The upload-pack the root fetch runs in the agent's working copy, as the agent uid: no
+ * fsmonitor, no hooks, and no lazy fetch from a promisor remote the agent configured.
+ */
+export const HARDENED_UPLOAD_PACK =
+  'env GIT_NO_LAZY_FETCH=1 git -c core.fsmonitor=false -c core.hooksPath=/dev/null upload-pack';
+
+export type StageOptions = {
+  as?: AgentIdentity | null;
+  /** Kills every agent-uid process; runs before and after the agent's upload-pack. */
+  sweep: () => void;
+  limits?: { timeoutMs: number; maxBytes: number };
+};
+
+/**
+ * Push container, before any grant: root copies `refs/heads/<branch>` out of the agent's working
+ * copy into a fresh root-owned bare repo. The only process that touches the working copy is the
+ * hardened upload-pack, run as the agent; root git runs only in the bare repo. Takes no token.
+ * The caller owns the returned `pushDir` (`pushStaged` removes it).
+ */
+export async function stageFromAgent(
   dir: string,
   branch: string,
-  token: string,
-  target: RemoteTarget,
-  lease: string,
-  sweep: () => void,
-  o: PushOptions,
-): Promise<string> {
-  // Root must never work beside the agent's repo: that directory is the agent's to control.
-  if (o.as && !o.mirrorDir) throw new Error('mirrorDir required with an agent identity');
+  o: StageOptions,
+): Promise<{ pushDir: string; head: string } | { nothing: string }> {
   const ref = `refs/heads/${branch}`;
-  const mirrorDir = o.mirrorDir ?? join(dirname(dir), 'mirror');
   const limits = o.limits ?? { timeoutMs: PUSH_FETCH_TIMEOUT_MS, maxBytes: PUSH_FETCH_MAX_BYTES };
-  const pushDir = mkdtempSync(join(dirname(mirrorDir), 'push-'));
+  const pushDir = mkdtempSync(join(workRoot, 'push-'));
+  let keep = false;
   try {
     await initBare(pushDir);
-    const uploadPack = asAgentArgv(o.as ?? null, ['git-upload-pack'])
-      .map(shellQuote)
-      .join(' ');
+    // git appends the quoted repo path; the hardened command's words need no quoting.
+    const uploadPack = [
+      ...asAgentArgv(o.as ?? null, []).map(shellQuote),
+      HARDENED_UPLOAD_PACK,
+    ].join(' ');
     const tooLarge = () => (dirSize(pushDir) > limits.maxBytes ? 'push fetch too large' : null);
-    sweep();
+    o.sweep();
     try {
       await runGit(
         undefined,
@@ -659,102 +737,165 @@ async function guardedPush(
     } catch (e) {
       const msg = (e as Error).message;
       if (msg === 'timeout') throw new Error('push fetch timed out');
-      if (msg === 'push fetch too large') throw e;
+      if (msg === 'push fetch too large' || tooLarge()) throw new Error('push fetch too large');
+      if (/couldn't find remote ref/.test(msg))
+        return { nothing: 'branch not in the working copy' };
       throw e;
+    } finally {
+      // On every outcome: an aborted fetch can leave the agent-uid upload-pack running.
+      o.sweep();
     }
     if (tooLarge()) throw new Error('push fetch too large');
-    sweep();
     // Nothing the agent fetch could have touched survives.
-    writeFileSync(
-      join(pushDir, 'config'),
-      '[core]\n\trepositoryformatversion = 0\n\tbare = true\n',
-    );
+    writeFileSync(join(pushDir, 'config'), BARE_CONFIG);
     rmSync(join(pushDir, 'hooks'), { recursive: true, force: true });
-
-    if (o.base !== undefined) {
-      await mirrorFetch(mirrorDir, token, target, [o.base]);
-      await runGit(
-        undefined,
-        [
-          ...PRISTINE,
-          '-c',
-          'protocol.file.allow=always',
-          'fetch',
-          '-q',
-          '--no-tags',
-          '--no-write-fetch-head',
-          `file://${mirrorDir}`,
-          `+refs/heads/${o.base}:refs/jm/base`,
-        ],
-        '',
-        { gitDir: pushDir },
-      );
-      const refusal = await prePushCheck(
-        pushDir,
-        branch,
-        o.protectedPaths ?? [],
-        lease === '' ? 'refs/jm/base' : lease,
-        o.secrets ?? [],
-      );
-      if (refusal) throw new Error(refusal);
-    }
-
-    const sha = await runGit(undefined, ['rev-parse', '--verify', `${ref}^{commit}`], '', {
+    const head = await runGit(undefined, ['rev-parse', '--verify', `${ref}^{commit}`], '', {
       gitDir: pushDir,
     });
-    if (o.expectSha !== undefined && sha !== o.expectSha) {
-      throw new Error(`pushed branch is not the gated commit: ${sha} != ${o.expectSha}`);
-    }
-    const url = remoteUrl(target);
+    keep = true;
+    return { pushDir, head };
+  } finally {
+    if (!keep) rmSync(pushDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A refusal is only what git's porcelain output (stdout) reports per ref: `!<TAB><ref><TAB>
+ * [rejected]` or `[remote rejected]`, with exit 1. stderr is not trusted for this (a remote hook
+ * writes there), and a transport failure or timeout has no such line, so it stays retryable.
+ */
+const pushRejected = (e: unknown): boolean => {
+  const out = (e as { stdout?: unknown }).stdout;
+  return (
+    (e as Error).message.includes('(exit 1)') &&
+    typeof out === 'string' &&
+    /^!\t[^\t]*\t\[(?:remote )?rejected\]/m.test(out)
+  );
+};
+
+/** A failure carrying its retry classification; its message is redacted before it leaves. */
+class PushFailure extends Error {
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+  ) {
+    super(message);
+  }
+}
+
+const failure = (e: unknown, retryable: boolean): PushFailure =>
+  e instanceof PushFailure ? e : new PushFailure((e as Error).message, retryable);
+
+/**
+ * Push container, after the grant: fetches the trusted base from the forge, runs the pre-push
+ * check against it, and pushes the staged branch with a lease. Always removes `pushDir`. The
+ * token rides only in the env of root git calls in `pushDir`, and every reason is redacted.
+ */
+export async function pushStaged(
+  pushDir: string,
+  grant: PushGrant,
+  o: { remoteUrl?: string; timeoutMs?: number } = {},
+): Promise<PushResult> {
+  const { token, branch, lease } = grant;
+  // Every network call is bounded: a stalled connection fails (retryable), never hangs.
+  const timeoutMs = o.timeoutMs ?? PUSH_FETCH_TIMEOUT_MS;
+  const ref = `refs/heads/${branch}`;
+  const target: RemoteTarget = {
+    owner: grant.owner,
+    name: grant.name,
+    ...(o.remoteUrl !== undefined ? { url: o.remoteUrl } : {}),
+  };
+  const url = remoteUrl(target);
+  const secrets = [...grant.secrets, token, authHeader(token)];
+  try {
     try {
       await runGit(
         undefined,
         [
           ...PRISTINE,
           ...protocolFor(url),
-          'push',
+          'fetch',
           '-q',
+          '--no-tags',
+          '--no-write-fetch-head',
+          url,
+          `+refs/heads/${grant.base}:refs/jm/base`,
+        ],
+        token,
+        { gitDir: pushDir, timeoutMs },
+      );
+    } catch (e) {
+      throw failure(e, true);
+    }
+    const refusal = await prePushCheck(
+      pushDir,
+      branch,
+      grant.protectedPaths,
+      lease || 'refs/jm/base',
+      grant.secrets,
+    );
+    if (refusal) throw new PushFailure(refusal, false);
+    const head = await runGit(undefined, ['rev-parse', '--verify', `${ref}^{commit}`], '', {
+      gitDir: pushDir,
+    });
+    if (grant.expectSha !== undefined && head !== grant.expectSha) {
+      throw new PushFailure(
+        `pushed branch is not the gated commit: ${head} != ${grant.expectSha}`,
+        false,
+      );
+    }
+    // A checkpoint or salvage (no gated commit) still at its lease has nothing to push.
+    if (grant.expectSha === undefined && lease !== '' && lease === head) {
+      return { status: 'nothing', reason: 'nothing ahead' };
+    }
+    let out: string;
+    try {
+      // --porcelain: an up-to-date ref is reported as `=` (git skips the lease check for it).
+      out = await runGit(
+        undefined,
+        [
+          ...PRISTINE,
+          ...protocolFor(url),
+          'push',
+          '--porcelain',
           `--force-with-lease=${ref}:${lease}`,
           url,
           `${ref}:${ref}`,
         ],
         token,
-        { gitDir: pushDir },
+        { gitDir: pushDir, timeoutMs },
       );
     } catch (e) {
-      const msg = (e as Error).message;
-      if (/stale info|rejected/.test(msg)) throw new Error(`stale info: ${msg.slice(-300)}`);
-      throw e;
+      // The remote decides: our own earlier push that died before reporting, a remote that moved
+      // past the lease (stale), or a push that never landed (retry).
+      const want = grant.expectSha ?? head;
+      const tip = await remoteBranchSha(target, branch, token, timeoutMs).catch((le: unknown) => {
+        throw failure(le, true);
+      });
+      if (tip === want) return { status: 'pushed', headSha: want, alreadyThere: true };
+      if (tip !== (lease === '' ? null : lease)) {
+        throw new PushFailure(
+          `stale info: remote ${branch} is at ${tip ?? 'nothing'}, lease ${lease || 'none'}`,
+          false,
+        );
+      }
+      // The remote is untouched: a decline (protection rule, hook, push protection) is final; a
+      // transport failure or timeout may succeed next time.
+      if (pushRejected(e)) throw new PushFailure(`push rejected: ${(e as Error).message}`, false);
+      throw failure(e, true);
     }
-    return sha;
+    const upToDate = out.split('\n').some((l) => l.startsWith('=\t') && l.includes(ref));
+    return { status: 'pushed', headSha: head, alreadyThere: upToDate };
+  } catch (e) {
+    const f = failure(e, false);
+    return {
+      status: 'failed',
+      reason: redact(f.message, secrets).slice(0, 2000),
+      retryable: f.retryable,
+    };
   } finally {
     rmSync(pushDir, { recursive: true, force: true });
   }
-}
-
-/** Pushes a branch that must not exist on the remote yet. Returns the pushed sha. */
-export function pushNewBranch(
-  dir: string,
-  branch: string,
-  token: string,
-  target: RemoteTarget,
-  sweep: () => void = () => {},
-  o: PushOptions = {},
-): Promise<string> {
-  return guardedPush(dir, branch, token, target, '', sweep, o);
-}
-
-/** Pushes onto an existing branch, leased on its expected remote tip. Returns the pushed sha. */
-export function pushExistingBranch(
-  dir: string,
-  branch: string,
-  token: string,
-  target: RemoteTarget,
-  expectedRemoteSha: string,
-  sweep: () => void = () => {},
-  o: PushOptions = {},
-): Promise<string> {
-  return guardedPush(dir, branch, token, target, expectedRemoteSha, sweep, o);
 }
 
 /**
@@ -796,8 +937,9 @@ export async function removeInstructionFiles(
     '{}',
     '+',
   ];
-  const out = await exec(asAgentArgv(as, find), {
-    cwd: dir,
+  // As the agent, enter `dir` after the uid drop: root can't chdir into its 0700 working copy.
+  const out = await exec(as ? asAgentInDirArgv(as, dir, find) : find, {
+    cwd: as ? '/' : dir,
     env: scrubEnv(process.env),
     label: 'strip',
   });

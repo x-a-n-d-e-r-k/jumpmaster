@@ -4,6 +4,7 @@ import { openDb } from '../db/open.js';
 import {
   activeDropFor,
   getAttempts,
+  getDrop,
   getWorkItem,
   insertDrop,
   isKilled,
@@ -12,7 +13,7 @@ import {
 } from '../db/repo.js';
 import { engageKill } from '../leases.js';
 import { runOp } from '../outbox.js';
-import { harness, toPrOpen } from '../test/flowHarness.js';
+import { type Harness, harness, toPrOpen } from '../test/flowHarness.js';
 import { tmpDbFile } from '../test/helpers.js';
 
 const WRITES = ['findOrCreatePullRequest', 'createReview', 'merge'];
@@ -175,5 +176,75 @@ describe('kill switch and crew drops', () => {
       state: 'cancelled',
     });
     expect(db.prepare('SELECT COUNT(*) AS c FROM attempts').get()).toEqual({ c: 0 });
+  });
+});
+
+describe('kill switch and pending pushes', () => {
+  const SHA = 'a'.repeat(40);
+  const OPERATOR = { authorization: `Bearer ${'o'.repeat(32)}` };
+  const stickPost = (h: Harness, url: string, payload: Record<string, unknown>) =>
+    h.app.inject({ method: 'POST', url, headers: h.stickHeaders(), payload });
+  const control = (h: Harness, url: string, payload: Record<string, unknown>) =>
+    h.app.inject({ method: 'POST', url, headers: OPERATOR, payload });
+
+  /** Leases the implement drop and moves it to running with one heartbeat. */
+  async function running(h: Harness): Promise<{ dropId: string; epoch: number }> {
+    await h.reconcile();
+    const { dropId, epoch } = await h.lease();
+    await stickPost(h, `/api/drops/${dropId}/heartbeat`, { epoch });
+    return { dropId, epoch };
+  }
+
+  test('kill, salvage, release: the pending push gets a grant after release', async () => {
+    const h = await harness();
+    const { dropId, epoch } = await running(h);
+    expect((await control(h, '/api/control/kill', { engaged: true })).json()).toMatchObject({
+      engaged: true,
+      cancelled: 1,
+    });
+    // The stick hard-kills the agent container, then salvages its work, switch still on.
+    const salvaged = await stickPost(h, '/api/sticks/salvage', { dropId, epoch });
+    expect(salvaged.json()).toEqual({ state: 'push_pending' });
+    const deadline = getDrop(h.db, dropId)?.pushDeadline;
+    let res = await stickPost(h, '/api/sticks/push-token', { dropId, epoch });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ refused: 'killed', retryable: true });
+    // Engaged for an hour: retention never runs out meanwhile, and the release credits the hour.
+    h.at(60);
+    await control(h, '/api/control/kill', { engaged: false });
+    expect(getDrop(h.db, dropId)?.pushDeadline).toBe(
+      new Date(Date.parse(deadline ?? '') + 60 * 60_000).toISOString(),
+    );
+    // The reset reconcile starts nothing on the item: its pending push holds it.
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual([]);
+    res = await stickPost(h, '/api/sticks/push-plan', { dropId, epoch });
+    expect(res.json()).toMatchObject({ branch: 'agent/issue-1', salvage: true });
+    res = await stickPost(h, '/api/sticks/push-token', { dropId, epoch });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().grant).toMatchObject({ branch: 'agent/issue-1' });
+  });
+
+  test("a paused zone's pending push still gets its grant: pause lets running work finish", async () => {
+    const h = await harness();
+    const { dropId, epoch } = await running(h);
+    const status = await h.postResult(dropId, epoch, {
+      status: 'completed',
+      role: 'implement',
+      headSha: SHA,
+      gates: [gateOk],
+      push: { kind: 'final', expectSha: SHA },
+    } as DropResult);
+    expect(status).toBe(200);
+    expect(getDrop(h.db, dropId)?.state).toBe('push_pending');
+    expect((await control(h, '/api/control/zones/main', { mode: 'paused' })).statusCode).toBe(200);
+    h.at(10);
+    await h.reconcile();
+    expect(getDrop(h.db, dropId)?.state).toBe('push_pending');
+    let res = await stickPost(h, '/api/sticks/push-plan', { dropId, epoch });
+    expect(res.json()).toMatchObject({ branch: 'agent/issue-1', salvage: false });
+    res = await stickPost(h, '/api/sticks/push-token', { dropId, epoch });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().grant).toMatchObject({ branch: 'agent/issue-1' });
   });
 });

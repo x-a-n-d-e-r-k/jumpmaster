@@ -1,7 +1,22 @@
-import type { ImagePolicy, StickCapability } from '@jumpmaster/protocol';
+import type { ImagePolicy, Role, StickCapability } from '@jumpmaster/protocol';
 import type { Config, DropZoneConfig, UsageConfig } from './config.js';
 import type { Db } from './db/open.js';
-import { getUsageState, isKilled, setKilled, setUsageState } from './db/repo.js';
+import {
+  ACTIVE_STATES_SQL,
+  appendEvents,
+  type Drop,
+  getDrop,
+  getUsageState,
+  getWorkItem,
+  isKilled,
+  reclaimableSql,
+  reclaimCutoff,
+  revokeGrants,
+  setKilled,
+  setUsageState,
+  setWorkItemState,
+  updateDrop,
+} from './db/repo.js';
 import { refundCharge } from './flow/budgets.js';
 import { DEFAULT_USAGE_CONFIG, type Gate, releaseProbe, unreachable } from './usage.js';
 
@@ -61,16 +76,21 @@ export function missingFor(
   return missing;
 }
 
-/** Excludes queued drops of zones the stick can't run (a JSON array of zone ids). */
-const NOT_EXCLUDED = 'AND drop_zone_id NOT IN (SELECT value FROM json_each(@exclude))';
+/**
+ * Excludes queued drops of zones the stick can't run (a JSON array of zone ids), and of roles it
+ * must not be given (a JSON array of roles).
+ */
+const NOT_EXCLUDED = `AND drop_zone_id NOT IN (SELECT value FROM json_each(@exclude))
+  AND role NOT IN (SELECT value FROM json_each(@excludeRoles))`;
 
 /**
  * Leases the oldest queued drop the usage gate allows, bumping its epoch and stamping started_at.
  * `probe` leases exactly one drop (preferring one not on the pause's cause item) and records it.
  * `credits_resume` leases only the resumed work item's drops; with none queued, nothing. A stop
  * with no work item (a crew drop's) offers no Resume (credits.ts), so none binds to nothing. The gate is required: a caller that forgets it must not lease while stopped. All time
- * comes from `now`. Drops of the `exclude` zones (ones the stick can't run) are never picked, under
- * any gate: they stay queued, untouched, for a capable stick.
+ * comes from `now`. Drops of the `exclude` zones (ones the stick can't run), and of the
+ * `excludeRoles` (pushing roles, for a stick that can't take them), are never picked, under any
+ * gate: they stay queued, untouched, for a capable stick.
  */
 export function leaseNextDrop(
   db: Db,
@@ -78,8 +98,10 @@ export function leaseNextDrop(
   now: Date,
   gate: Gate,
   exclude: readonly string[] = [],
+  excludeRoles: readonly Role[] = [],
 ): { dropId: string; epoch: number } | null {
   const ex = JSON.stringify(exclude);
+  const exRoles = JSON.stringify(excludeRoles);
   return db.transaction(() => {
     if (isKilled(db)) return null;
     let next: { id: string } | undefined;
@@ -95,7 +117,9 @@ export function leaseNextDrop(
            ORDER BY CASE WHEN work_item_id = @cause THEN 1 ELSE 0 END, ${ROLE_CLASS}, created_at, rowid
            LIMIT 1`,
         )
-        .get({ cause: u.causeWorkItemId, exclude: ex }) as { id: string } | undefined;
+        .get({ cause: u.causeWorkItemId, exclude: ex, excludeRoles: exRoles }) as
+        | { id: string }
+        | undefined;
     };
     switch (gate) {
       case 'closed':
@@ -115,7 +139,7 @@ export function leaseNextDrop(
                      AND work_item_id = @bound
                    ORDER BY ${ROLE_CLASS}, created_at, rowid LIMIT 1`,
                 )
-                .get({ bound, exclude: ex }) as { id: string } | undefined);
+                .get({ bound, exclude: ex, excludeRoles: exRoles }) as { id: string } | undefined);
         break;
       }
       case 'open':
@@ -132,7 +156,7 @@ export function leaseNextDrop(
             `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE} ${NOT_EXCLUDED}${roleFilter}
              ORDER BY ${ROLE_CLASS}, created_at, rowid LIMIT 1`,
           )
-          .get({ exclude: ex }) as { id: string } | undefined;
+          .get({ exclude: ex, excludeRoles: exRoles }) as { id: string } | undefined;
         break;
       }
       default:
@@ -155,8 +179,10 @@ export function leaseNextDrop(
 }
 
 /**
- * Engages the kill switch: refuses all new work and cancels every active drop, refunding its
- * charge so a later reset doesn't count cancelled work as a repeat.
+ * Engages the kill switch: refuses all new work and cancels every queued, leased and running drop,
+ * refunding its charge so a later reset doesn't count cancelled work as a repeat. A pending push is
+ * left as it is: its agent has finished, and the switch only withholds its grant (and its
+ * retention clock) until release.
  */
 export function engageKill(db: Db, now: Date): { cancelled: number } {
   return db.transaction(() => {
@@ -178,14 +204,72 @@ export function engageKill(db: Db, now: Date): { cancelled: number } {
   })();
 }
 
-/** Extends a live lease and moves leased to running; reports stale/cancelled drops. */
+/**
+ * Releases the kill switch and credits the time it was engaged to every pending push's deadline
+ * (Ruling 12), so retention counts only time a push could have run. Returns the paused ms (0 when
+ * the switch was already off).
+ */
+export function releaseKill(db: Db, now: Date): number {
+  return db.transaction((): number => {
+    const paused = setKilled(db, false, now);
+    if (paused <= 0) return 0;
+    const rows = db
+      .prepare(
+        `SELECT id, push_deadline AS deadline FROM drops
+         WHERE state = 'push_pending' AND push_deadline IS NOT NULL`,
+      )
+      .all() as { id: string; deadline: string }[];
+    for (const r of rows) {
+      const moved = new Date(Date.parse(r.deadline) + paused).toISOString();
+      updateDrop(db, r.id, { pushDeadline: moved });
+    }
+    return paused;
+  })();
+}
+
+/**
+ * Gives up on a pending push whose retention ran out (Ruling 12: never while the switch is on): it
+ * goes `lost`, with `running_at` cleared so no salvage brings it back, and its grants are revoked.
+ * An implement item goes back to `ready`, as for any lost drop: the reconciler's resume picks up
+ * the last pushed commit from the branch, charged to `resume` and parked when that is exhausted
+ * (a fresh start when nothing was pushed). A heal or resolve item stays `pr_open`.
+ */
+function expireRetention(db: Db, now: Date): number {
+  if (isKilled(db)) return 0;
+  const ids = (
+    db
+      .prepare(
+        `SELECT id FROM drops WHERE state = 'push_pending' AND push_deadline < ?
+         ORDER BY push_deadline, rowid`,
+      )
+      .all(iso(now)) as { id: string }[]
+  ).map((r) => r.id);
+  for (const id of ids) {
+    const drop = getDrop(db, id) as Drop;
+    updateDrop(db, id, { state: 'lost', finishedAt: iso(now), runningAt: null });
+    revokeGrants(db, id, now);
+    appendEvents(db, id, [
+      { ts: iso(now), kind: 'log', data: { message: 'push retention expired' } },
+    ]);
+    if (drop.role !== 'implement' || drop.workItemId === null) continue;
+    if (getWorkItem(db, drop.workItemId)?.state !== 'in_flight') continue;
+    setWorkItemState(db, drop.workItemId, 'ready', undefined, now);
+  }
+  return ids.length;
+}
+
+/**
+ * Extends a live lease and moves leased to running, stamping `running_at` on the first such move;
+ * reports stale/cancelled drops. A pending push has no lease to extend: it answers `killed` while
+ * the kill switch is on, so its push container stops and keeps the volume, and `ok` otherwise.
+ */
 export function heartbeat(
   db: Db,
   dropId: string,
   stickId: string,
   epoch: number,
   now: Date,
-): 'ok' | 'stale' | 'cancel' | 'hard_cancel' {
+): 'ok' | 'stale' | 'cancel' | 'hard_cancel' | 'killed' {
   return db.transaction(() => {
     const d = db
       .prepare(
@@ -197,18 +281,22 @@ export function heartbeat(
     if (!d || d.stickId !== stickId || d.epoch !== epoch) return 'stale';
     // Hard stays hard after a reset: a trooper told to stop gracefully would checkpoint and push.
     if (d.state === 'cancelled') return d.hardCancel === 1 ? 'hard_cancel' : 'cancel';
+    if (d.state === 'push_pending') return isKilled(db) ? 'killed' : 'ok';
     if (d.state !== 'leased' && d.state !== 'running') return 'stale';
     db.prepare(
       `UPDATE drops SET state = 'running', lease_expires_at = @expires,
-         started_at = COALESCE(started_at, @now) WHERE id = @id`,
+         started_at = COALESCE(started_at, @now), running_at = COALESCE(running_at, @now)
+       WHERE id = @id`,
     ).run({ id: dropId, expires: iso(now, LEASE_TTL_MS), now: iso(now) });
     return 'ok';
   })();
 }
 
 /**
- * Marks drops with expired leases `lost` (finished_at = now), then returns in_flight work items
- * to `ready` once their latest drop has been lost for the grace period and no drop is active.
+ * Marks drops with expired leases `lost` (finished_at = now), and pending pushes past their
+ * retention (`expireRetention`, not while killed). Then returns in_flight work items to `ready`
+ * once their latest drop has been lost for the grace period, no drop is active, and none may still
+ * be salvaged (`reclaimableSql`: a drop that had run holds its item for the reclaim window).
  * Only implement items are `in_flight`, so a lost review/heal/resolve drop leaves its item
  * `pr_open` for the reconciler to re-decide. Lost probes are released.
  * Returns the number of drops newly marked lost.
@@ -229,22 +317,24 @@ export function expireLeases(
         .all({ now: iso(now) }) as { id: string }[]
     ).map((r) => r.id);
     for (const id of lostIds) releaseProbe(db, id, usageCfg, now, rand);
-    const lost = lostIds.length;
+    const lost = lostIds.length + expireRetention(db, now);
     db.prepare(
       `UPDATE work_items SET state = 'ready', updated_at = @now
        WHERE state = 'in_flight'
          AND NOT EXISTS (SELECT 1 FROM drops a WHERE a.work_item_id = work_items.id
-                         AND a.state IN ('queued','leased','running'))
+                         AND a.state IN (${ACTIVE_STATES_SQL}))
+         AND NOT EXISTS (SELECT 1 FROM drops r WHERE r.work_item_id = work_items.id
+                         AND ${reclaimableSql('r')})
          AND (SELECT l.state FROM drops l WHERE l.work_item_id = work_items.id
               ORDER BY l.created_at DESC, l.rowid DESC LIMIT 1) = 'lost'
          AND (SELECT l.finished_at FROM drops l WHERE l.work_item_id = work_items.id
               ORDER BY l.created_at DESC, l.rowid DESC LIMIT 1) <= @cutoff`,
-    ).run({ now: iso(now), cutoff: iso(now, -LOST_GRACE_MS) });
+    ).run({ now: iso(now), cutoff: iso(now, -LOST_GRACE_MS), reclaimCutoff: reclaimCutoff(now) });
     return lost;
   })();
 }
 
-/** Pushes every live lease out to a full TTL from `now`. */
+/** Pushes every live lease out to a full TTL from `now`. A pending push has no lease: untouched. */
 export function extendLiveLeases(db: Db, now: Date): number {
   return db
     .prepare(

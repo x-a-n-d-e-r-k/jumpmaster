@@ -623,3 +623,373 @@ test('the isolation probe runs the host side from the host image as nobody, the 
     ['sha256:stick', 'host', '65534:65534'],
   ]);
 });
+
+/** A container whose attach stream records what reaches stdin and whether stdin ended. */
+function stdinDocker() {
+  const created: Record<string, unknown>[] = [];
+  const stdin = { written: '', ended: false };
+  const docker = {
+    async createContainer(o: Record<string, unknown>) {
+      created.push(o);
+      const { Duplex } = await import('node:stream');
+      const stream = new Duplex({
+        read() {},
+        write(c: Buffer, _e, cb) {
+          stdin.written += c.toString('utf8');
+          cb();
+        },
+        final(cb) {
+          stdin.ended = true;
+          cb();
+        },
+      });
+      return {
+        id: 'c1',
+        modem: { demuxStream() {} },
+        async attach() {
+          return stream;
+        },
+        async start() {},
+        async wait() {
+          return new Promise(() => {});
+        },
+      };
+    },
+    getNetwork() {
+      return { async connect() {} };
+    },
+  };
+  return { docker, created, stdin };
+}
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+test('start with mount passes a single volume mount and no binds', async () => {
+  const { docker, created } = stdinDocker();
+  await new DockerDriver(docker as never).start({
+    image: 'i',
+    name: 'n',
+    labels: {},
+    payload: '{}',
+    mount: { volume: 'jm-drop-d1-3-0123abcd', target: '/home/agent/repo' },
+  });
+  const hc = created[0]?.HostConfig as Record<string, unknown>;
+  expect(hc.Mounts).toEqual([
+    {
+      Type: 'volume',
+      Source: 'jm-drop-d1-3-0123abcd',
+      Target: '/home/agent/repo',
+      ReadOnly: false,
+      VolumeOptions: { NoCopy: true },
+    },
+  ]);
+  expect(hc.Binds).toBeUndefined();
+  expect(hc.CapAdd).toEqual(['SETUID', 'SETGID', 'KILL']);
+  // Without a mount, nothing is mounted.
+  const plain = stdinDocker();
+  await new DockerDriver(plain.docker as never).start({
+    image: 'i',
+    name: 'n',
+    labels: {},
+    payload: '{}',
+  });
+  expect((plain.created[0]?.HostConfig as Record<string, unknown>).Mounts).toBeUndefined();
+});
+
+test('the payload is written newline-terminated and stdin ends after it by default', async () => {
+  const { docker, stdin } = stdinDocker();
+  await new DockerDriver(docker as never).start({
+    image: 'i',
+    name: 'n',
+    labels: {},
+    payload: '{"a":1}',
+  });
+  await tick();
+  expect(stdin.written).toBe('{"a":1}\n');
+  expect(stdin.ended).toBe(true);
+});
+
+test('holdStdin keeps stdin open until endStdin', async () => {
+  const { docker, stdin } = stdinDocker();
+  const h = await new DockerDriver(docker as never).start({
+    image: 'i',
+    name: 'n',
+    labels: {},
+    payload: '{"a":1}',
+    holdStdin: true,
+  });
+  await tick();
+  expect(stdin.written).toBe('{"a":1}\n');
+  expect(stdin.ended).toBe(false);
+  await h.writeLine('{"grant":"t"}');
+  expect(stdin.written).toBe('{"a":1}\n{"grant":"t"}\n');
+  expect(stdin.ended).toBe(false);
+  // One line only: an embedded newline is refused before anything is written.
+  await expect(h.writeLine('a\nb')).rejects.toThrow(/one line/);
+  h.endStdin();
+  await tick();
+  expect(stdin.ended).toBe(true);
+  await expect(h.writeLine('late')).rejects.toThrow();
+});
+
+/** A fake engine for volumes and container removal. */
+function volumeDocker(
+  o: { volumes?: { Name: string; Labels: Record<string, string> | null }[] } = {},
+) {
+  const calls: { kind: string; o?: unknown; id?: string }[] = [];
+  const notFound = () => Object.assign(new Error('no such volume'), { statusCode: 404 });
+  const docker = {
+    async createVolume(c: unknown) {
+      calls.push({ kind: 'createVolume', o: c });
+      return {};
+    },
+    async listVolumes(q: unknown) {
+      calls.push({ kind: 'listVolumes', o: q });
+      return { Volumes: o.volumes ?? null, Warnings: null };
+    },
+    getVolume(name: string) {
+      return {
+        async inspect() {
+          const v = (o.volumes ?? []).find((x) => x.Name === name);
+          if (!v) throw notFound();
+          return { Name: v.Name, Labels: v.Labels, Mountpoint: '/x' };
+        },
+        async remove() {
+          calls.push({ kind: 'removeVolume', id: name });
+          if (name === 'gone') throw notFound();
+          if (name === 'busy')
+            throw Object.assign(new Error('volume is in use'), { statusCode: 409 });
+        },
+      };
+    },
+  };
+  return { docker, calls };
+}
+
+test('createVolume labels the volume; inspect and list read names and labels', async () => {
+  const { docker, calls } = volumeDocker({
+    volumes: [{ Name: 'v1', Labels: { 'jumpmaster.drop': 'd1' } }],
+  });
+  const d = new DockerDriver(docker as never);
+  await d.createVolume('v2', { 'jumpmaster.volume': '1' });
+  expect(calls[0]).toEqual({
+    kind: 'createVolume',
+    o: { Name: 'v2', Driver: 'local', Labels: { 'jumpmaster.volume': '1' } },
+  });
+  expect(await d.inspectVolume('v1')).toEqual({ name: 'v1', labels: { 'jumpmaster.drop': 'd1' } });
+  expect(await d.inspectVolume('nope')).toBeUndefined();
+  expect(await d.listVolumesByLabel('jumpmaster.drop', 'd1')).toEqual([
+    { name: 'v1', labels: { 'jumpmaster.drop': 'd1' } },
+  ]);
+  expect(calls.at(-1)).toEqual({
+    kind: 'listVolumes',
+    o: { filters: { label: ['jumpmaster.drop=d1'] } },
+  });
+  // The engine answers null when there are none.
+  expect(
+    await new DockerDriver(volumeDocker().docker as never).listVolumesByLabel('k', 'v'),
+  ).toEqual([]);
+});
+
+test('removeVolume ignores 404', async () => {
+  const { docker, calls } = volumeDocker();
+  const d = new DockerDriver(docker as never);
+  await expect(d.removeVolume('gone')).resolves.toBeUndefined();
+  await expect(d.removeVolume('v1')).resolves.toBeUndefined();
+  expect(calls.map((c) => c.id)).toEqual(['gone', 'v1']);
+  // Anything else is an error the caller must see: the volume is still there.
+  await expect(d.removeVolume('busy')).rejects.toThrow('in use');
+});
+
+/** A container that is removed (inspect 404) after `goneAfter` inspects; never, when undefined. */
+function removalDocker(goneAfter?: number) {
+  const calls: string[] = [];
+  let inspects = 0;
+  const docker = {
+    getContainer(id: string) {
+      return {
+        async remove(o: unknown) {
+          calls.push(`remove ${id} ${JSON.stringify(o)}`);
+          throw Object.assign(new Error('removal already in progress'), { statusCode: 409 });
+        },
+        async inspect() {
+          inspects++;
+          calls.push('inspect');
+          if (goneAfter !== undefined && inspects >= goneAfter)
+            throw Object.assign(new Error('no such container'), { statusCode: 404 });
+          return { Id: id };
+        },
+      };
+    },
+  };
+  return { docker, calls };
+}
+
+test('removeAndWait force-removes, then resolves once inspect answers 404', async () => {
+  const { docker, calls } = removalDocker(3);
+  await new DockerDriver(docker as never, { removePollMs: 1 }).removeAndWait('c1', 1000);
+  expect(calls).toEqual(['remove c1 {"force":true}', 'inspect', 'inspect', 'inspect']);
+});
+
+test('removeAndWait times out with a clear error', async () => {
+  const { docker } = removalDocker();
+  await expect(
+    new DockerDriver(docker as never, { removePollMs: 1 }).removeAndWait('c1', 30),
+  ).rejects.toThrow('container not removed');
+  // An inspect error other than 404 is not proof of removal either.
+  const odd = removalDocker();
+  odd.docker.getContainer = (() => ({
+    async remove() {},
+    async inspect() {
+      throw Object.assign(new Error('engine down'), { statusCode: 500 });
+    },
+  })) as never;
+  await expect(
+    new DockerDriver(odd.docker as never, { removePollMs: 1 }).removeAndWait('c1', 30),
+  ).rejects.toThrow('container not removed');
+});
+
+test('removeAndWait enforces its deadline when the engine hangs', async () => {
+  const never = () => new Promise<never>(() => {});
+  const hangingInspect = { getContainer: () => ({ remove: async () => {}, inspect: never }) };
+  const t0 = Date.now();
+  await expect(
+    new DockerDriver(hangingInspect as never, { removePollMs: 1 }).removeAndWait('c1', 50),
+  ).rejects.toThrow('container not removed');
+  // The force-remove hanging too: still the deadline, not forever.
+  const hangingBoth = { getContainer: () => ({ remove: never, inspect: never }) };
+  await expect(
+    new DockerDriver(hangingBoth as never, { removePollMs: 1 }).removeAndWait('c1', 50),
+  ).rejects.toThrow('container not removed');
+  expect(Date.now() - t0).toBeLessThan(1000);
+});
+
+/** A fake engine for the volume probe: its container prints `out` and exits `exitCode`. */
+function probeEngine(out: string, exitCode = 0) {
+  const created: Record<string, unknown>[] = [];
+  const calls: string[] = [];
+  const docker = {
+    async createContainer(c: Record<string, unknown>) {
+      created.push(c);
+      calls.push('create');
+      return {
+        async wait() {
+          return { StatusCode: exitCode };
+        },
+        async start() {
+          calls.push('start');
+        },
+        async logs(o: Record<string, unknown>) {
+          calls.push(`logs ${JSON.stringify(o)}`);
+          return Buffer.from(out);
+        },
+      };
+    },
+    getContainer(name: string) {
+      return {
+        async remove() {
+          calls.push(`remove ${name}`);
+        },
+        async inspect() {
+          throw Object.assign(new Error('gone'), { statusCode: 404 });
+        },
+      };
+    },
+  };
+  return { docker, created, calls };
+}
+
+test('probeVolume measures free space on the volume from a locked-down, no-network container', async () => {
+  const e = probeEngine('1000 4096\r\nwritable\r\n');
+  const got = await new DockerDriver(e.docker as never, { removePollMs: 1 }).probeVolume({
+    name: 'jm-selfcheck-s1-0123abcd-probe',
+    image: 'trooper@x',
+    volume: 'jm-selfcheck-s1-0123abcd',
+    labels: { 'jumpmaster.stick': 's1' },
+  });
+  expect(got).toEqual({ freeBytes: 1000 * 4096, writable: true });
+  const c = e.created[0] as {
+    Image: string;
+    User: string;
+    Tty: boolean;
+    Entrypoint: string[];
+    HostConfig: Record<string, unknown>;
+  };
+  expect(c.Image).toBe('trooper@x');
+  // As the agent, which owns the mount point after init: no capability is needed.
+  expect(c.User).toBe('10001:10001');
+  expect(c.Entrypoint.join(' ')).toContain("stat -f -c '%a %S' /home/agent/repo");
+  expect(c.HostConfig).toEqual({
+    NetworkMode: 'none',
+    Privileged: false,
+    CapDrop: ['ALL'],
+    SecurityOpt: ['no-new-privileges'],
+    ReadonlyRootfs: true,
+    PidsLimit: 64,
+    Ulimits: [{ Name: 'core', Soft: 0, Hard: 0 }],
+    Mounts: [
+      {
+        Type: 'volume',
+        Source: 'jm-selfcheck-s1-0123abcd',
+        Target: '/home/agent/repo',
+        ReadOnly: false,
+        VolumeOptions: { NoCopy: true },
+      },
+    ],
+  });
+  // Removed (and confirmed gone) before it returns.
+  expect(e.calls.at(-1)).toBe('remove jm-selfcheck-s1-0123abcd-probe');
+  // Free space without a writable volume: measured, but not writable.
+  const ro = probeEngine('5 512\n', 1);
+  expect(
+    await new DockerDriver(ro.docker as never, { removePollMs: 1 }).probeVolume({
+      name: 'p',
+      image: 'i',
+      volume: 'v',
+      labels: {},
+    }),
+  ).toEqual({ freeBytes: 2560, writable: false });
+});
+
+test('probeVolume keeps a measured value when the final removal cannot be confirmed', async () => {
+  const e = probeEngine('1000 4096\nwritable\n');
+  const stuck = {
+    ...e.docker,
+    getContainer: () => ({
+      async remove() {},
+      async inspect() {
+        return {};
+      },
+    }),
+  };
+  const errors: unknown[] = [];
+  const orig = console.error;
+  console.error = (...a: unknown[]) => errors.push(a.join(' '));
+  try {
+    expect(
+      await new DockerDriver(stuck as never, { removePollMs: 1, removeTimeoutMs: 20 }).probeVolume({
+        name: 'p',
+        image: 'i',
+        volume: 'v',
+        labels: {},
+      }),
+    ).toEqual({ freeBytes: 4096000, writable: true });
+  } finally {
+    console.error = orig;
+  }
+  expect(String(errors[0])).toMatch(/volume probe p.*container not removed/);
+});
+
+test('probeVolume throws when the free space cannot be read, and still removes its container', async () => {
+  for (const out of ['', 'stat: cannot read file system information\n', 'x y\n']) {
+    const e = probeEngine(out, 1);
+    await expect(
+      new DockerDriver(e.docker as never, { removePollMs: 1 }).probeVolume({
+        name: 'p',
+        image: 'i',
+        volume: 'v',
+        labels: {},
+      }),
+    ).rejects.toThrow(/free space/);
+    expect(e.calls.at(-1)).toBe('remove p');
+  }
+});

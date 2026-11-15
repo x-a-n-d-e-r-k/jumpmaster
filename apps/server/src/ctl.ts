@@ -314,6 +314,17 @@ export function ctlRequest(args: string[]): CtlRequest | null {
     : { path: r.path, method, ...('body' in r ? { body: r.body } : {}) };
 }
 
+/** `drops extend-retention <dropId> <hours>` and `drops cancel <dropId>`: a pending push's. */
+function dropsRequest(args: string[]): Raw | null {
+  const [, what, dropId, hours, ...rest] = args;
+  if (!dropId || rest.length > 0) return null;
+  const path = `/api/control/drops/${encodeURIComponent(dropId)}`;
+  if (what === 'cancel') return hours === undefined ? { path: `${path}/cancel`, body: {} } : null;
+  if (what !== 'extend-retention' || hours === undefined || !/^[0-9]+$/.test(hours)) return null;
+  const n = Number(hours);
+  return n >= 1 && n <= 168 ? { path: `${path}/extend-retention`, body: { hours: n } } : null;
+}
+
 function rawRequest(args: string[]): Raw | null {
   const [command, zone] = args;
   if (command === 'config') return configRequest(args);
@@ -327,6 +338,7 @@ function rawRequest(args: string[]): Raw | null {
       ? { path: '/api/control/detect', body: { repo: zone } }
       : null;
   if (command === 'zones') return zonesRequest(args);
+  if (command === 'drops') return dropsRequest(args);
   if (command === 'briefings') return { path: '/api/control/briefings', method: 'GET' };
   // What Jumpmaster is doing and why it waits: the home banner's line.
   if (command === 'status')

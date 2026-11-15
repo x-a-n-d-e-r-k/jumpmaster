@@ -1,7 +1,7 @@
 import { mkdtempSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { DropPayload, GateResult } from '@jumpmaster/protocol';
+import { type DropPayload, type GateResult, pushRequestValid } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
 import type { ParsedLine } from '../claude.js';
 import type { TrooperDeps } from '../main.js';
@@ -57,7 +57,7 @@ const complete = [init('s'), resultLine()];
 
 function world(
   stream: string[],
-  o: { remoteSha?: string | null; dirty?: boolean; ahead?: number; pushError?: string } = {},
+  o: { remoteSha?: string | null; dirty?: boolean; ahead?: number } = {},
 ) {
   const calls: unknown[][] = [];
   let committed = false;
@@ -67,11 +67,6 @@ function world(
       calls.push([name, ...a]);
       return ret(...a);
     };
-  const push = (name: string) =>
-    rec(name, () => {
-      if (o.pushError) throw new Error(o.pushError);
-      return 'ck1';
-    });
   const deps = {
     git: {
       cloneRepo: rec('cloneRepo', () => undefined),
@@ -84,10 +79,8 @@ function world(
         committed = o.dirty ?? false;
         return committed;
       }),
-      headSha: rec('headSha', () => 'h'),
+      headSha: rec('headSha', () => (committed ? 'ck1' : 'h')),
       aheadOfBase: rec('aheadOfBase', () => o.ahead ?? (committed ? 1 : 0)),
-      pushNewBranch: push('pushNewBranch'),
-      pushExistingBranch: push('pushExistingBranch'),
       sweepProcesses: () => false,
       cloneForGates: rec('cloneForGates', () => undefined),
       removeTree: rec('removeTree', () => undefined),
@@ -122,15 +115,7 @@ describe('runImplement', () => {
     ]);
     expect(w.names()).not.toContain('remoteBranchSha');
     expect(w.names()).not.toContain('prepareBranch');
-    const push = w.calls.find((c) => c[0] === 'pushExistingBranch');
-    expect(push?.slice(1, 6)).toEqual([
-      repoDir,
-      'agent/issue-1',
-      impl.credentials.forgeToken,
-      { owner: 'o', name: 'r' },
-      'ck0',
-    ]);
-    expect(r.status).toBe('completed');
+    expect(r).toMatchObject({ status: 'completed', push: { kind: 'final', expectSha: 'h' } });
   });
 
   test('resume:false with an existing branch fails fast', async () => {
@@ -144,26 +129,26 @@ describe('runImplement', () => {
     expect(w.names()).not.toContain('prepareBranch');
   });
 
-  test('rate_limited implement pushes a checkpoint and reports headSha', async () => {
+  test('rate_limited implement asks for a checkpoint push and reports its headSha', async () => {
     const w = world([init('s'), rateLimit('rejected')], { ahead: 1 });
     const r = await runImplement(impl, w.deps, ctx);
-    expect(r).toMatchObject({ status: 'rate_limited', headSha: 'ck1' });
+    expect(r).toMatchObject({ status: 'rate_limited', headSha: 'h', push: { kind: 'checkpoint' } });
+    expect(r.push).toEqual({ kind: 'checkpoint' });
     expect(w.calls).toContainEqual(['commitIfDirty', repoDir, 'wip: checkpoint', null]);
-    const push = w.calls.find((c) => c[0] === 'pushNewBranch');
-    expect(push?.[6]).toEqual({
-      mirrorDir: join(ctx.workdir, 'mirror'),
-      as: null,
-      base: 'main',
-      protectedPaths: ['.github/**'],
-      secrets: ctx.secrets,
-    });
+    expect(pushRequestValid(r, 'implement')).toBe(true);
   });
 
-  test('a completed implement pushes exactly the commit its gates tested', async () => {
+  test('implement completed carries push final and pushes nothing', async () => {
     const w = world(complete, { ahead: 1 });
-    await runImplement(impl, w.deps, ctx);
-    const push = w.calls.find((c) => c[0] === 'pushNewBranch');
-    expect(push?.[6]).toMatchObject({ expectSha: 'h' });
+    const r = await runImplement(impl, w.deps, ctx);
+    expect(r).toMatchObject({
+      status: 'completed',
+      headSha: 'h',
+      push: { kind: 'final', expectSha: 'h' },
+    });
+    expect(pushRequestValid(r, 'implement')).toBe(true);
+    // The agent container holds no push path at all: no git call takes the forge token to push.
+    expect(w.names().filter((n) => /push/i.test(String(n)))).toEqual([]);
   });
 
   test('a completed implement carries the agent summary as its report', async () => {
@@ -193,15 +178,19 @@ describe('runImplement', () => {
   test('a dirty tree with nothing committed is still checkpointed', async () => {
     const w = world([init('s'), rateLimit('rejected')], { dirty: true });
     const r = await runImplement(impl, w.deps, ctx);
-    expect(r).toMatchObject({ status: 'rate_limited', headSha: 'ck1' });
+    expect(r).toMatchObject({
+      status: 'rate_limited',
+      headSha: 'ck1',
+      push: { kind: 'checkpoint' },
+    });
   });
 
-  test('nothing to checkpoint gives the status without headSha', async () => {
+  test('nothing to checkpoint gives the status with no headSha and no push', async () => {
     const w = world([init('s'), rateLimit('rejected')]);
     const r = await runImplement(impl, w.deps, ctx);
     expect(r.status).toBe('rate_limited');
     expect(r.headSha).toBeUndefined();
-    expect(w.names()).not.toContain('pushNewBranch');
+    expect(r.push).toBeUndefined();
   });
 
   test('max turns gives interrupted with a checkpoint', async () => {
@@ -209,23 +198,28 @@ describe('runImplement', () => {
       dirty: true,
     });
     const r = await runImplement(impl, w.deps, ctx);
-    expect(r).toMatchObject({ status: 'interrupted', headSha: 'ck1' });
-  });
-
-  test('a resumed checkpoint is pushed onto the existing branch', async () => {
-    const w = world([init('s'), rateLimit('rejected')], { dirty: true });
-    await runImplement({ ...impl, resume: true, resumeSha: 'ck0' }, w.deps, ctx);
-    expect(w.calls.find((c) => c[0] === 'pushExistingBranch')?.[5]).toBe('ck0');
-    expect(w.names()).not.toContain('pushNewBranch');
-  });
-
-  test('a protected-path change is never pushed and fails', async () => {
-    const w = world(complete, { ahead: 1, pushError: 'protected path .github/workflows/ci.yml' });
-    const r = await runImplement(impl, w.deps, ctx);
     expect(r).toMatchObject({
-      status: 'failed',
-      reason: 'protected path .github/workflows/ci.yml',
+      status: 'interrupted',
+      headSha: 'ck1',
+      push: { kind: 'checkpoint' },
     });
+    expect(pushRequestValid(r, 'implement')).toBe(true);
+  });
+
+  test('a resumed checkpoint asks for a checkpoint push too', async () => {
+    const w = world([init('s'), rateLimit('rejected')], { dirty: true });
+    const r = await runImplement({ ...impl, resume: true, resumeSha: 'ck0' }, w.deps, ctx);
+    expect(r).toMatchObject({ status: 'rate_limited', push: { kind: 'checkpoint' } });
+  });
+
+  test('failed, blocked and no_changes results carry no push', async () => {
+    const failing = world([...complete, JSON.stringify({ type: 'claude_stderr', exitCode: 2 })]);
+    const blocked = world([init('s'), resultLine({ status: 'BLOCKED' })]);
+    const none = world(complete);
+    for (const w of [failing, blocked, none]) {
+      const r = await runImplement(impl, w.deps, ctx);
+      expect(r.push).toBeUndefined();
+    }
   });
 
   test('a non-zero claude exit is failed even with a result line', async () => {
@@ -235,7 +229,7 @@ describe('runImplement', () => {
     ]);
     const r = await runImplement(impl, w.deps, ctx);
     expect(r).toMatchObject({ status: 'failed', reason: 'claude exit 2' });
-    expect(w.names()).not.toContain('pushNewBranch');
+    expect(r.push).toBeUndefined();
   });
 
   test('a claude killed by a signal is not a clean exit', async () => {
@@ -255,7 +249,11 @@ describe('runImplement', () => {
       stop.abort(); // SIGTERM arrives; the agent is killed, so the stream just ends
     };
     const r = await runImplement(impl, { ...w.deps, signal: stop.signal }, ctx);
-    expect(r).toMatchObject({ status: 'interrupted', headSha: 'ck1' });
+    expect(r).toMatchObject({
+      status: 'interrupted',
+      headSha: 'ck1',
+      push: { kind: 'checkpoint' },
+    });
     expect(w.calls).toContainEqual(['commitIfDirty', repoDir, 'wip: checkpoint', null]);
   });
 

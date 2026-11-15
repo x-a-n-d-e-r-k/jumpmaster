@@ -9,7 +9,6 @@ import type { Db } from '../db/open.js';
 import { appendEvents, type Drop, type DropState, updateDrop } from '../db/repo.js';
 import type { CrewInputJson } from '../payloads.js';
 import type { ResultDeps } from '../results.js';
-import { ingestRateLimit, releaseProbe } from '../usage.js';
 import { applyCrewActions, validateIssueSpec } from './actions.js';
 import { PROMOTE_OPTIONS, subjectOf } from './flush.js';
 import { type CrewIssue, getCrewIssue, setCrewIssue } from './store.js';
@@ -152,7 +151,7 @@ function applyDiagnose(
 
 /**
  * A crew drop's result. The output is validated per role; only then is it recorded as intents in
- * the database (never a forge write). Every result releases the usage probe if the drop held it.
+ * the database (never a forge write). Its usage, the probe's release included, is `applyUsage`'s.
  */
 export async function applyCrewResult(
   db: Db,
@@ -161,52 +160,37 @@ export async function applyCrewResult(
   result: DropResult,
   now: Date,
 ): Promise<void> {
-  const rand = deps.rand ?? Math.random;
-  try {
-    if (result.rateLimit) {
-      ingestRateLimit(
-        db,
-        result.rateLimit,
-        { dropId: drop.id, workItemId: null, startedAt: drop.startedAt, outcome: result.status },
-        deps.usageCfg,
-        now,
-        rand,
-      );
+  db.transaction(() => {
+    const role = drop.role;
+    if (!isCrewRole(role)) return finish(db, drop, 'failed', now, `unknown crew role ${role}`);
+    if (result.status === 'rate_limited') return finish(db, drop, 'cancelled', now);
+    if (result.status !== 'completed') {
+      return finish(db, drop, 'failed', now, result.reason ?? result.status);
     }
-    db.transaction(() => {
-      const role = drop.role;
-      if (!isCrewRole(role)) return finish(db, drop, 'failed', now, `unknown crew role ${role}`);
-      if (result.status === 'rate_limited') return finish(db, drop, 'cancelled', now);
-      if (result.status !== 'completed') {
-        return finish(db, drop, 'failed', now, result.reason ?? result.status);
-      }
-      const parsed =
-        result.crew === undefined
-          ? ({ ok: false, reason: 'missing' } as const)
-          : parseCrewOutput(role, result.crew);
-      if (!parsed.ok) {
-        return finish(db, drop, 'failed', now, `invalid crew output: ${parsed.reason}`);
-      }
-      const work = storedWork(drop);
-      if (role === 'crew-lead') {
-        const out = parsed.value as CrewOutput['crew-lead'];
-        const report = applyCrewActions(db, deps.zone, out, { kind: 'drop', dropId: drop.id }, now);
-        updateDrop(db, drop.id, {
-          state: 'succeeded',
-          resultJson: JSON.stringify({ ...result, crewReport: report }),
-        });
-        return;
-      }
-      if (role === 'refute' && work?.role === 'refute') {
-        const issue = getCrewIssue(db, work.crewIssueId);
-        if (issue) applyRefute(db, deps, issue, parsed.value as CrewOutput['refute'], now);
-      } else if (role === 'diagnose' && work?.role === 'diagnose') {
-        const discarded = applyDiagnose(db, work, parsed.value as CrewOutput['diagnose'], now);
-        return finish(db, drop, 'succeeded', now, discarded);
-      }
-      finish(db, drop, 'succeeded', now);
-    })();
-  } finally {
-    releaseProbe(db, drop.id, deps.usageCfg, now, rand);
-  }
+    const parsed =
+      result.crew === undefined
+        ? ({ ok: false, reason: 'missing' } as const)
+        : parseCrewOutput(role, result.crew);
+    if (!parsed.ok) {
+      return finish(db, drop, 'failed', now, `invalid crew output: ${parsed.reason}`);
+    }
+    const work = storedWork(drop);
+    if (role === 'crew-lead') {
+      const out = parsed.value as CrewOutput['crew-lead'];
+      const report = applyCrewActions(db, deps.zone, out, { kind: 'drop', dropId: drop.id }, now);
+      updateDrop(db, drop.id, {
+        state: 'succeeded',
+        resultJson: JSON.stringify({ ...result, crewReport: report }),
+      });
+      return;
+    }
+    if (role === 'refute' && work?.role === 'refute') {
+      const issue = getCrewIssue(db, work.crewIssueId);
+      if (issue) applyRefute(db, deps, issue, parsed.value as CrewOutput['refute'], now);
+    } else if (role === 'diagnose' && work?.role === 'diagnose') {
+      const discarded = applyDiagnose(db, work, parsed.value as CrewOutput['diagnose'], now);
+      return finish(db, drop, 'succeeded', now, discarded);
+    }
+    finish(db, drop, 'succeeded', now);
+  })();
 }

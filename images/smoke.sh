@@ -7,7 +7,8 @@
 #   - on Linux, the default uid 10000 cannot read a host-owned 0600 secret and says so by name;
 #   - the stick, read-only with only /state writable, enrolls from a join-token file and keeps
 #     stick.json at mode 0600 under /state; it starts under its signed image policy (its cosign is
-#     the pinned version) and advertises image-verify-v1.
+#     the pinned version) and advertises image-verify-v1; its unverified dev-tag base image
+#     withholds push-v1 without stopping it.
 # Prints one line per check; exits non-zero on the first failure.
 set -euo pipefail
 SERVER_IMAGE="${SMOKE_SERVER_IMAGE:-jumpmaster-server:dev}"
@@ -113,6 +114,11 @@ wait_log "$STICK" "enrolled as" 60 || fail "stick did not enroll"
 # The stick image runs the signed policy with its shipped cosign, so it advertises image-verify-v1.
 docker logs "$STICK" 2>&1 | grep -qE "image policy signed, capabilities (egress-v1, )?image-verify-v1" \
   || fail "stick did not start under the signed policy with image-verify-v1"
+# Built without TROOPER_IMAGE, its trooper is the dev tag, which signed refuses: the stick still
+# starts and enrolls, and withholds push-v1 (Ruling 17: verify, never refuse to start).
+wait_log "$STICK" "push-v1 withheld" 60 || fail "stick did not withhold push-v1 for an unverified base image"
+docker logs "$STICK" 2>&1 | grep -q 'base image jumpmaster-trooper:dev: image not verified' \
+  || fail "stick did not log why its base image was refused"
 mode="$(docker exec "$STICK" stat -c '%a %U' /state/stick.json)"
 [ "$mode" = "600 root" ] || fail "stick.json is $mode"
 if docker exec "$STICK" sh -c 'touch /app/x' 2>/dev/null; then fail "stick root is writable"; fi
@@ -121,5 +127,5 @@ for name in "$SERVER" "$STICK"; do
     fail "a secret value appears in the $name logs"
   fi
 done
-echo "stick: read-only root, enrolled from a join-token file, /state/stick.json 0600, signed policy: ok"
+echo "stick: read-only root, enrolled from a join-token file, /state/stick.json 0600, signed policy, push-v1 withheld for an unverified base image: ok"
 echo "smoke: pass"

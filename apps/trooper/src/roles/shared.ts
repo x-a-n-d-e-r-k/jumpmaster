@@ -71,6 +71,16 @@ export function repoDirOf(ctx: RoleCtx): string {
   return ctx.ids ? join(ctx.ids.agent.home, 'repo') : join(ctx.workdir, 'repo');
 }
 
+/** What a pushing role reports when the forge refuses its read token at the first fetch. */
+export const READ_TOKEN_REFUSED = 'the read token was refused (401): renew it';
+
+/**
+ * git's words for a 401: with prompts off, a refused token ends in a failed credential prompt.
+ * Never a network failure or a missing repository, which keep their own reason.
+ */
+const AUTH_REFUSED =
+  /could not read Username|Authentication failed|Invalid username or (password|token)|returned error: 401/i;
+
 /** Clones through the root mirror at `<workdir>/mirror`; returns the working copy. */
 export async function cloneAndPrepare(
   payload: AgentPayload,
@@ -78,16 +88,25 @@ export async function cloneAndPrepare(
   ctx: RoleCtx,
 ): Promise<string> {
   const dir = repoDirOf(ctx);
+  // Review may run without a forge token (public repo); git then clones anonymously.
+  const token = payload.credentials.forgeToken ?? '';
   emitEvent(deps, ctx, 'phase', { phase: 'clone' });
-  await deps.git.cloneRepo({
-    owner: payload.repo.owner,
-    name: payload.repo.name,
-    // Review may run without a forge token (public repo); git then clones anonymously.
-    token: payload.credentials.forgeToken ?? '',
-    dir,
-    mirrorDir: mirrorDirOf(ctx),
-    as: ctx.ids?.agent ?? null,
-  });
+  try {
+    await deps.git.cloneRepo({
+      owner: payload.repo.owner,
+      name: payload.repo.name,
+      token,
+      dir,
+      mirrorDir: mirrorDirOf(ctx),
+      as: ctx.ids?.agent ?? null,
+    });
+  } catch (err) {
+    // A lapsed read token fails here, before the agent runs, rather than as a later push refusal.
+    if (token !== '' && AUTH_REFUSED.test(err instanceof Error ? err.message : String(err))) {
+      throw new Error(READ_TOKEN_REFUSED);
+    }
+    throw err;
+  }
   return dir;
 }
 
@@ -374,33 +393,42 @@ export async function runGatesPhase(
   return results;
 }
 
-/** The sweep every push runs: the M0 sweep plus, in container mode, both unprivileged uids. */
-export function pushSweep(deps: TrooperDeps, ctx: RoleCtx): () => void {
-  return () => {
-    deps.git.sweepProcesses();
-    if (!ctx.ids) return;
-    const sweep = deps.privilege?.sweepUid ?? sweepUid;
-    sweep(ctx.ids.agent.uid);
-    sweep(ctx.ids.gate.uid);
-  };
-}
-
 /**
- * Commits whatever the agent left as a checkpoint and pushes it when the branch is ahead of base.
- * Returns the pushed sha, or undefined when there was nothing to checkpoint.
+ * Commits whatever the agent left as a checkpoint. Returns the branch head when it is ahead of
+ * base (the commit the push container is asked to push), or undefined when there is nothing.
  */
 export async function checkpoint(
   deps: TrooperDeps,
   ctx: RoleCtx,
   dir: string,
   base: string,
-  push: () => Promise<string>,
 ): Promise<string | undefined> {
   const as = ctx.ids?.agent ?? null;
   emitEvent(deps, ctx, 'phase', { phase: 'checkpoint' });
   await deps.git.commitIfDirty(dir, 'wip: checkpoint', as);
   if ((await deps.git.aheadOfBase(dir, base, as)) === 0) return undefined;
-  return push();
+  return deps.git.headSha(dir, as);
+}
+
+/**
+ * An early stop (`interrupted` or `rate_limited`): with a checkpoint, the result asks the push
+ * container to push it; without one, nothing is pushed. Valid under `pushRequestValid`.
+ */
+export function earlyStop(
+  status: 'interrupted' | 'rate_limited',
+  checkpointSha: string | undefined,
+): Pick<DropResult, 'status' | 'headSha' | 'push'> {
+  return checkpointSha === undefined
+    ? { status }
+    : { status, headSha: checkpointSha, push: { kind: 'checkpoint' } };
+}
+
+/**
+ * A completed role's work: the agent container never pushes. The working copy stays on the drop's
+ * volume and the push container pushes exactly the commit the gates tested.
+ */
+export function completedWith(gatedSha: string): Pick<DropResult, 'status' | 'headSha' | 'push'> {
+  return { status: 'completed', headSha: gatedSha, push: { kind: 'final', expectSha: gatedSha } };
 }
 
 /** Catches a role's thrown error as `failed`, keeping the gates already run. */

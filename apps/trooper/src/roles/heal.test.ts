@@ -1,7 +1,7 @@
 import { mkdtempSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { DropPayload } from '@jumpmaster/protocol';
+import { type DropPayload, pushRequestValid } from '@jumpmaster/protocol';
 import { expect, test } from 'vitest';
 import { roleWorld } from '../test/roleWorld.js';
 import { runHeal } from './heal.js';
@@ -33,26 +33,16 @@ const ctx: RoleCtx = {
 };
 const repoDir = join(ctx.workdir, 'repo');
 
-test('heal pushes with lease on the PR head', async () => {
+test('a completed heal asks for a final push of the gated commit', async () => {
   const w = roleWorld({ dirty: true });
   const r = await runHeal(heal, w.deps, ctx);
-  expect(r).toMatchObject({ status: 'completed', role: 'heal', headSha: 'pushed' });
-  expect(w.calls).toContainEqual([
-    'pushExistingBranch',
-    repoDir,
-    'agent/issue-1',
-    heal.credentials.forgeToken,
-    { owner: 'o', name: 'r' },
-    'sha1',
-    expect.any(Function),
-    expect.objectContaining({
-      base: 'main',
-      protectedPaths: ['.github/**'],
-      as: null,
-      secrets: ctx.secrets,
-      expectSha: 'sha-new',
-    }),
-  ]);
+  expect(r).toMatchObject({
+    status: 'completed',
+    role: 'heal',
+    headSha: 'sha-new',
+    push: { kind: 'final', expectSha: 'sha-new' },
+  });
+  expect(pushRequestValid(r, 'heal')).toBe(true);
   expect(w.calls).toContainEqual(['checkoutBranch', repoDir, 'agent/issue-1', 'sha1', null]);
   expect(w.names().indexOf('mirrorFetch')).toBeLessThan(w.names().indexOf('checkoutBranch'));
 });
@@ -93,29 +83,29 @@ test('heal that changes nothing is no_changes', async () => {
   const w = roleWorld();
   const r = await runHeal(heal, w.deps, ctx);
   expect(r.status).toBe('no_changes');
-  expect(w.names()).not.toContain('pushExistingBranch');
+  expect(r.push).toBeUndefined();
   expect(w.names()).not.toContain('runGates');
-});
-
-test('heal lease rejection fails with stale info', async () => {
-  const w = roleWorld({ dirty: true, pushError: 'stale info: remote moved' });
-  expect((await runHeal(heal, w.deps, ctx)).reason).toMatch(/^stale info/);
 });
 
 test('heal on a moved head fails with head moved', async () => {
   const w = roleWorld({ checkoutError: 'head moved: expected sha1 got sha9' });
   const r = await runHeal(heal, w.deps, ctx);
   expect(r).toMatchObject({ status: 'failed' });
+  expect(r.push).toBeUndefined();
   expect(r.reason).toMatch(/^head moved/);
   expect(w.claude.runs).toBe(0);
 });
 
-test('heal stopped by a limit checkpoints onto the PR branch', async () => {
+test('heal stopped by a limit asks for a checkpoint push of the PR branch', async () => {
   const w = roleWorld({ dirty: true, rateLimited: true });
   const r = await runHeal(heal, w.deps, ctx);
-  expect(r).toMatchObject({ status: 'rate_limited', headSha: 'pushed' });
+  expect(r).toMatchObject({
+    status: 'rate_limited',
+    role: 'heal',
+    headSha: 'sha-new',
+    push: { kind: 'checkpoint' },
+  });
+  expect(r.push).toEqual({ kind: 'checkpoint' });
+  expect(pushRequestValid(r, 'heal')).toBe(true);
   expect(w.calls).toContainEqual(['commitIfDirty', repoDir, 'wip: checkpoint', null]);
-  const push = w.calls.find((c) => c[0] === 'pushExistingBranch');
-  expect(push?.[5]).toBe('sha1');
-  expect(push?.[7]).toMatchObject({ mirrorDir: join(ctx.workdir, 'mirror') });
 });

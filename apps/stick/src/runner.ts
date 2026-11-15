@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   ARTIFACT_PREFIX,
   ArtifactChunkSchema,
@@ -7,25 +7,39 @@ import {
   type DropResult,
   DropResultSchema,
   EVENT_PREFIX,
+  isPushingRole,
   MAX_ARTIFACT_BYTES,
   MAX_ARTIFACTS,
   payloadSecrets,
   RESULT_PREFIX,
   redact,
+  redactTokenShapes,
   type TrooperEvent,
   TrooperEventSchema,
 } from '@jumpmaster/protocol';
-import type { DropClient } from './client.js';
-import type { ContainerDriver, DropNet } from './driver.js';
+import type { Ack, DropClient } from './client.js';
+import type { ContainerDriver, DropNet, VolumeInfo } from './driver.js';
 import { type EgressSession, egressImage, startEgress, trooperEgressRefusal } from './egress.js';
 import { pullImage } from './pull.js';
+import {
+  type PendingPushes,
+  PUSH_BACKOFF_MAX_MS,
+  pushContainer,
+  TROOPER_PUSH_LABEL,
+  TROOPER_PUSH_VERSION,
+} from './push.js';
 import { dropSubnetPool } from './subnets.js';
-import { digestOf, type ImageTrust, verifyImage } from './verify.js';
+import { digestOf, type ImageTrust, verifyBaseImage, verifyImage } from './verify.js';
+import { prepareVolume, REMOVE_TIMEOUT_MS, REPO_MOUNT, VOLUME_LABEL } from './volumes.js';
 
 /** Services a drop network holds under egress: `.8` to `.14` of its /28. */
 const MAX_EGRESS_SERVICES = 6;
 
-export const TROOPER_IMAGE = process.env.JM_TROOPER_IMAGE ?? 'jumpmaster-trooper:dev';
+/**
+ * The stick's own trooper image: it runs the volume init, self-check and push containers, never a
+ * drop's agent. The release stick image bakes it by digest; an empty value is the dev default.
+ */
+export const TROOPER_IMAGE = process.env.JM_TROOPER_IMAGE || 'jumpmaster-trooper:dev';
 const STOP_GRACE_MS = 30_000;
 const MAX_BATCH = 50;
 /** Keeps an events POST far below the server's 1 MB body limit (each event is ≤ 64 KB). */
@@ -50,19 +64,263 @@ export function allowedImages(env: NodeJS.ProcessEnv): Set<string> {
 /**
  * Force-removes trooper containers this stick left behind (e.g. it crashed mid-drop), so a
  * re-leased drop never runs alongside a still-live agent. Other sticks' containers are untouched.
+ * Each removal is confirmed (`removeAndWait`); `unconfirmed` are those the engine never showed
+ * gone, so no pending push may be rediscovered yet (Ruling 14). Volumes are never removed here.
  */
-export async function reapOrphans(driver: ContainerDriver, stickId: string): Promise<string[]> {
+export async function reapOrphans(
+  driver: ContainerDriver,
+  stickId: string,
+): Promise<{ removed: string[]; unconfirmed: string[] }> {
   const removed: string[] = [];
+  const unconfirmed: string[] = [];
   for (const id of await driver.listByLabel(STICK_LABEL, stickId)) {
+    let ours = false;
     try {
       await driver.remove(id);
-      removed.push(id);
+      ours = true;
     } catch {
-      // already gone (AutoRemove) or racing another cleanup
+      // already gone (AutoRemove) or racing another cleanup: the confirmation below decides
+    }
+    try {
+      await driver.removeAndWait(id, REMOVE_TIMEOUT_MS);
+      if (ours) removed.push(id);
+    } catch {
+      unconfirmed.push(id);
     }
   }
   await driver.removeNetworksByLabel(STICK_LABEL, stickId).catch(() => 0);
-  return removed;
+  return { removed, unconfirmed };
+}
+
+/** Marks the self-check's own short-lived volume (never a drop's). */
+export const SELFCHECK_LABEL = 'jumpmaster.selfcheck';
+
+/**
+ * The latest volume self-check. `freeBytes` is null when it couldn't be measured, which counts as
+ * below the floor.
+ */
+export type VolumeHealth = { selfCheck: boolean; freeBytes: number | null };
+
+/** The latest verdict on the stick's own trooper image (Ruling 17). */
+export type BaseVerdict = { ok: true } | { ok: false; reason: string };
+
+/** What a health check found: the base image's verdict, then the volume self-check's. */
+export type StickHealth = VolumeHealth & { base: BaseVerdict };
+
+/**
+ * The volume self-check, at startup and in every sweep (Ruling 18): the trooper image carries
+ * the push label, a fresh volume takes the init container, and the agent can write to it. The
+ * free space is measured from inside a container on that volume, so it is the engine's volume
+ * filesystem wherever the stick itself runs. Never throws; the volume is removed after.
+ */
+export async function volumeSelfCheck(
+  driver: ContainerDriver,
+  image: string,
+  stickId: string,
+): Promise<VolumeHealth> {
+  const name = `jm-selfcheck-${stickId}-${randomBytes(4).toString('hex')}`;
+  const labels = { [STICK_LABEL]: stickId, [SELFCHECK_LABEL]: '1' };
+  try {
+    const pushLabel = await driver
+      .imageLabels(image)
+      .then((l) => l[TROOPER_PUSH_LABEL] === TROOPER_PUSH_VERSION)
+      .catch(() => false);
+    await driver.createVolume(name, labels);
+    try {
+      const init = await driver
+        .initVolume({ name: `${name}-init`, image, volume: name, labels })
+        .catch(() => -1);
+      const probe = await driver
+        .probeVolume({ name: `${name}-probe`, image, volume: name, labels })
+        .catch(() => undefined);
+      return {
+        selfCheck: pushLabel && init === 0 && probe?.writable === true,
+        freeBytes: probe?.freeBytes ?? null,
+      };
+    } finally {
+      // A leaked self-check volume is the sweep's to remove.
+      await driver.removeVolume(name).catch(() => {});
+    }
+  } catch {
+    return { selfCheck: false, freeBytes: null };
+  }
+}
+
+/**
+ * The stick's health, at startup and in every sweep: the base image is verified (and pulled)
+ * first, and only a verified image runs the volume self-check. A refused base image withholds
+ * push-v1 and leaves the free space unmeasured (which never stops leasing on its own).
+ */
+export async function stickHealth(
+  driver: ContainerDriver,
+  o: { image: string; stickId: string; trust: ImageTrust; log: (line: string) => void },
+): Promise<StickHealth> {
+  const base = await verifyBaseImage(o.image, { trust: o.trust, driver, log: o.log });
+  if (!base.ok) return { selfCheck: false, freeBytes: null, base };
+  return { ...(await volumeSelfCheck(driver, o.image, o.stickId)), base };
+}
+
+/**
+ * The stick's health over time: single-flight checks (a sweep and a floor wait never run two at
+ * once), the latest result, and whether a check is in flight (so the sweep leaves its self-check
+ * volume alone).
+ */
+export class HealthMonitor {
+  private current: StickHealth = {
+    selfCheck: false,
+    freeBytes: null,
+    base: { ok: false, reason: 'base image not checked yet' },
+  };
+  private inFlight: Promise<StickHealth> | undefined;
+
+  constructor(
+    private readonly driver: ContainerDriver,
+    private readonly o: {
+      image: string;
+      stickId: string;
+      trust: ImageTrust;
+      log: (line: string) => void;
+    },
+  ) {}
+
+  latest(): StickHealth {
+    return this.current;
+  }
+
+  busy(): boolean {
+    return this.inFlight !== undefined;
+  }
+
+  /** Runs a check, or joins the one in flight. */
+  check(): Promise<StickHealth> {
+    this.inFlight ??= stickHealth(this.driver, this.o)
+      .then((h) => {
+        this.current = h;
+        return h;
+      })
+      .finally(() => {
+        this.inFlight = undefined;
+      });
+    return this.inFlight;
+  }
+}
+
+/**
+ * Before the first lease: reap this stick's orphans, then rediscover its pending pushes. Each
+ * volume waits only on its own drop's containers (Ruling 14 is per drop): an orphan the engine
+ * can't confirm gone keeps its own drop's volume back, never another's.
+ */
+export async function recoverAtStartup(
+  driver: ContainerDriver,
+  client: Pick<DropClient, 'salvage'>,
+  stickId: string,
+  pending: PendingPushes,
+  log: (line: string) => void = (line) => console.log(line),
+): Promise<{ removed: string[]; unconfirmed: string[] }> {
+  const reaped = await reapOrphans(driver, stickId);
+  await rediscoverPending(driver, client, stickId, pending, log);
+  return reaped;
+}
+
+/**
+ * One drop volume no live drop or pending push holds: once both containers that could hold it
+ * (the agent's and the push container) are confirmed gone, the server decides. `salvage` ok: it
+ * joins `PendingPushes`; refused: it is removed; no answer: it stays for the next sweep.
+ */
+async function reconcileVolume(
+  driver: ContainerDriver,
+  client: Pick<DropClient, 'salvage'>,
+  pending: PendingPushes,
+  v: VolumeInfo,
+  log: (line: string) => void,
+): Promise<void> {
+  const dropId = v.labels['jumpmaster.drop'];
+  const epoch = Number(v.labels['jumpmaster.epoch']);
+  const say = (what: string, extra: Record<string, unknown> = {}) =>
+    log(JSON.stringify({ event: 'volume', dropId, epoch, volume: v.name, what, ...extra }));
+  if (!dropId || !Number.isInteger(epoch)) return;
+  try {
+    await driver.removeAndWait(agentName(dropId, epoch), REMOVE_TIMEOUT_MS);
+    await driver.removeAndWait(pushContainer(dropId, epoch), REMOVE_TIMEOUT_MS);
+  } catch (e) {
+    say('container not removed: volume kept', { error: message(e) });
+    return;
+  }
+  let answer: 'ok' | 'refused';
+  try {
+    answer = await client.salvage(dropId, epoch);
+  } catch (e) {
+    say('salvage unanswered: volume kept', { error: redactTokenShapes(message(e)) });
+    return;
+  }
+  if (answer === 'ok') {
+    const held = pending.get(dropId);
+    if (held && held.volume !== v.name) {
+      say('another volume holds this drop: volume kept');
+      return;
+    }
+    pending.add(dropId, { epoch, volume: v.name });
+    say('rediscovered: push pending');
+    return;
+  }
+  await driver.removeVolume(v.name).then(
+    () => say('salvage refused: volume removed'),
+    (e: unknown) => say('volume not removed', { error: message(e) }),
+  );
+}
+
+/** This stick's drop volumes (not the self-check's), as the engine lists them. */
+async function dropVolumes(driver: ContainerDriver, stickId: string): Promise<VolumeInfo[]> {
+  return (await driver.listVolumesByLabel(STICK_LABEL, stickId)).filter(
+    (v) => v.labels[VOLUME_LABEL] === '1',
+  );
+}
+
+/**
+ * At startup, after `reapOrphans` has confirmed every container gone and before the first lease:
+ * every drop volume of this stick is asked about (`salvage`), so a push the stick was holding (or
+ * a volume it kept for want of an answer) is not lost with the process.
+ */
+export async function rediscoverPending(
+  driver: ContainerDriver,
+  client: Pick<DropClient, 'salvage'>,
+  stickId: string,
+  pending: PendingPushes,
+  log: (line: string) => void = (line) => console.log(line),
+): Promise<void> {
+  for (const v of await dropVolumes(driver, stickId))
+    await reconcileVolume(driver, client, pending, v, log);
+}
+
+/**
+ * The 10-minute sweep's volumes. A volume a live drop (`dropId:epoch`) or a pending push holds
+ * stays. Any other drop volume is reconciled as at startup (refused: removed). A leaked
+ * self-check volume is removed, unless a self-check is in flight (it may be that check's).
+ */
+export async function sweepVolumes(
+  driver: ContainerDriver,
+  client: Pick<DropClient, 'salvage'>,
+  stickId: string,
+  pending: PendingPushes,
+  live: ReadonlySet<string>,
+  log: (line: string) => void = (line) => console.log(line),
+  o: { selfCheckBusy?: () => boolean } = {},
+): Promise<void> {
+  const listed = await driver.listVolumesByLabel(STICK_LABEL, stickId);
+  // Read after the listing: a self-check that started since may own a listed volume. One that
+  // starts later creates a volume this listing doesn't hold.
+  const checking = o.selfCheckBusy?.() ?? false;
+  for (const v of listed) {
+    if (v.labels[SELFCHECK_LABEL] === '1') {
+      if (!checking) await driver.removeVolume(v.name).catch(() => {});
+      continue;
+    }
+    if (v.labels[VOLUME_LABEL] !== '1') continue;
+    const dropId = v.labels['jumpmaster.drop'] ?? '';
+    if (live.has(`${dropId}:${v.labels['jumpmaster.epoch']}`)) continue;
+    if (pending.get(dropId)?.volume === v.name) continue;
+    await reconcileVolume(driver, client, pending, v, log);
+  }
 }
 
 /**
@@ -96,6 +354,16 @@ export async function sweepDropNetworks(
 
 /** At the 15-second beat this is inside the server's 60-second lease. */
 const DEFAULT_LOST_SERVER_KILL_BEATS = 3;
+/**
+ * The grace a stick that lost its server gives the agent container before it kills it (Ruling 14):
+ * long enough to checkpoint onto the volume. The container never holds a write token, so the
+ * lease running out meanwhile lets nothing reach the forge.
+ */
+export const LOST_SERVER_GRACE_MS = 60_000;
+/** First wait before re-sending a result the server could not be reached for. */
+const RESULT_RETRY_MS = 5_000;
+const OLD_SERVER = 'server too old for push containers: deploy the server first';
+const OLD_IMAGE = 'trooper image too old for push containers';
 
 /** Rebuilds artifacts from their stdout chunks. A file that fails its hash is dropped. */
 class ArtifactAssembler {
@@ -157,7 +425,25 @@ type RunDeps = {
   subnetPool?: string;
   /** Drop networks in use, so the periodic sweep leaves them alone. */
   active?: Set<string>;
+  /** `TROOPER_IMAGE`: runs the volume's init container (never a drop's image). */
+  trooperImage?: string;
+  /** Where a pushing drop's volume goes once its agent container is gone. */
+  pending?: PendingPushes;
+  /**
+   * The latest verdict on `trooperImage`. Refused: a pushing drop fails before its volume's init
+   * container (or anything else) starts.
+   */
+  baseImage?: () => BaseVerdict;
+  /** First wait before re-sending a held result (doubling, capped). */
+  resultRetryMs?: number;
 };
+
+/**
+ * What becomes of a pushing drop's volume once its agent container is confirmed gone: queued for
+ * the push loop, removed, or (when the answer is unknown) kept for rediscovery.
+ */
+type Disposition = 'push' | 'remove' | 'keep';
+type VolumeFate = { decide: () => Promise<Disposition> };
 
 export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void> {
   const { client, driver } = deps;
@@ -168,6 +454,13 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
     allowed: deps.allowedImages ?? allowedImages(process.env),
   };
   const log = deps.log ?? ((line: string) => console.log(line));
+  const pushes = isPushingRole(payload.role);
+  // Ruling 11: a server without push-v1 expects the trooper to push. Run nothing, post nothing and
+  // never heartbeat, so it sees the drop lost and requeues it rather than parking the item.
+  if (pushes && !client.features?.has('push-v1')) {
+    log(OLD_SERVER);
+    return;
+  }
   // What an operator checks after a change, with no restart: the gate timeouts this drop runs with
   // and which forge token it carries, as the 8-character SHA-256 prefix Settings shows.
   const forgeToken =
@@ -190,6 +483,12 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
   const egress = payload.egress;
   const fail = (reason: string) =>
     client.postResult(dropId, epoch, { status: 'failed', role: payload.role, reason, gates: [] });
+  const base = pushes ? deps.baseImage?.() : undefined;
+  if (base && !base.ok) {
+    log(JSON.stringify({ event: 'drop-refused', dropId, epoch, reason: base.reason }));
+    await fail(base.reason);
+    return;
+  }
   const proxyImage = egress ? (deps.egressImage ?? egressImage(process.env)) : undefined;
   // Every image this drop would create a container from: the trooper, its proxy, its services.
   const images: { ref: string; proxy?: true }[] = [
@@ -237,12 +536,18 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
       return;
     }
   }
+  // Inspected once, for whichever of egress and push support this drop needs.
+  let labelsOf: Promise<Record<string, string>> | undefined;
+  const trooperLabels = () => {
+    labelsOf ??= driver.imageLabels(image);
+    return labelsOf;
+  };
   if (egress) {
     // A trooper older than egress ignores payload.egress: refuse it before anything is created,
     // with a reason the operator can act on, rather than a drop that fails for want of a network.
     let refusal: string | null;
     try {
-      refusal = trooperEgressRefusal(image, await driver.imageLabels(image));
+      refusal = trooperEgressRefusal(image, await trooperLabels());
     } catch (e) {
       refusal = `cannot inspect image ${image} for egress support: ${e instanceof Error ? e.message : String(e)}`;
     }
@@ -251,6 +556,34 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
       return;
     }
   }
+  let volume: string | undefined;
+  if (pushes) {
+    // The push container stages from this image's agent home: one without the label can't.
+    let labels: Record<string, string>;
+    try {
+      labels = await trooperLabels();
+    } catch (e) {
+      await fail(`cannot inspect image ${image} for push support: ${message(e)}`);
+      return;
+    }
+    if (labels[TROOPER_PUSH_LABEL] !== TROOPER_PUSH_VERSION) {
+      await fail(OLD_IMAGE);
+      return;
+    }
+    try {
+      volume = await prepareVolume(driver, {
+        dropId,
+        epoch,
+        stickId: deps.stickId,
+        image: deps.trooperImage ?? TROOPER_IMAGE,
+      });
+    } catch (e) {
+      await fail(`repo volume failed: ${message(e)}`);
+      return;
+    }
+  }
+  // Until the agent's run says otherwise, the volume goes once its container is gone.
+  const fate: VolumeFate = { decide: async () => 'remove' };
   const labels = {
     'jumpmaster.drop': dropId,
     'jumpmaster.epoch': String(epoch),
@@ -289,13 +622,58 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
         return;
       }
     }
-    await runContainer(payload, deps, image, labels, network, net, session);
+    await runContainer(payload, deps, image, labels, network, net, session, volume, fate);
   } finally {
     if (session) await session.stop();
     if (network) await driver.removeServices(network, labels).catch(() => {});
     if (network) deps.active?.delete(network);
+    if (volume) await settleVolume(payload, deps, volume, fate, log);
   }
 }
+
+/**
+ * The end of a pushing drop's agent run. Nothing joins `PendingPushes`, and no volume is removed,
+ * until `removeAndWait` has confirmed the agent container gone (Ruling 14). Only then is the
+ * volume's fate decided (a salvage call included) and carried out.
+ */
+async function settleVolume(
+  payload: DropPayload,
+  deps: RunDeps,
+  volume: string,
+  fate: VolumeFate,
+  log: (line: string) => void,
+): Promise<void> {
+  const { driver } = deps;
+  const { dropId, epoch } = payload;
+  const say = (what: string, extra: Record<string, unknown> = {}) =>
+    log(JSON.stringify({ event: 'volume', dropId, epoch, what, ...extra }));
+  try {
+    await driver.removeAndWait(agentName(dropId, epoch), REMOVE_TIMEOUT_MS);
+  } catch (e) {
+    say('agent container not removed: volume kept, no push', { error: message(e) });
+    return;
+  }
+  let fateIs: Disposition;
+  try {
+    fateIs = await fate.decide();
+  } catch (e) {
+    say('salvage unanswered: volume kept', { error: redactTokenShapes(message(e)) });
+    return;
+  }
+  if (fateIs === 'keep') return;
+  if (fateIs === 'push' && deps.pending) {
+    deps.pending.add(dropId, { epoch, volume });
+    say('push pending');
+    return;
+  }
+  if (fateIs === 'push') say('no push queue: volume removed');
+  await driver.removeVolume(volume).catch((e: unknown) => {
+    say('volume not removed', { error: message(e) });
+  });
+}
+
+const agentName = (dropId: string, epoch: number) => `jumpmaster-drop-${dropId}-${epoch}`;
+const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 async function runContainer(
   payload: DropPayload,
@@ -305,25 +683,31 @@ async function runContainer(
   network: string | undefined,
   net: DropNet | undefined,
   session: EgressSession | undefined,
+  volume: string | undefined,
+  fate: VolumeFate,
 ): Promise<void> {
   const { client, driver } = deps;
   const { dropId, epoch } = payload;
   const handle = await driver.start({
     image,
     payload: JSON.stringify(payload),
-    name: `jumpmaster-drop-${dropId}-${epoch}`,
+    name: agentName(dropId, epoch),
     labels,
     ...(network ? { network } : {}),
     ...(net ? { egress: net } : {}),
     ...(payload.limits ? { limits: payload.limits } : {}),
+    ...(volume ? { mount: { volume, target: REPO_MOUNT } } : {}),
   });
 
   let stale = false;
   let cancelled = false;
+  let hard = false;
+  /** Stopped by the lost-server rule: the epoch is fenced, as a kill used to fence it. */
+  let lost = false;
   let stopping: Promise<void> | undefined;
   let killing: Promise<void> | undefined;
-  const stop = () => {
-    stopping ??= handle.stop(STOP_GRACE_MS).catch(() => {});
+  const stop = (graceMs = STOP_GRACE_MS) => {
+    stopping ??= handle.stop(graceMs).catch(() => {});
     return stopping;
   };
 
@@ -356,17 +740,21 @@ async function runContainer(
 
   const hardKill = () => {
     cancelled = true;
+    hard = true;
     killing ??= handle.kill().catch(() => {});
     return killing;
   };
   const lostLimit = deps.lostServerKillBeats ?? DEFAULT_LOST_SERVER_KILL_BEATS;
   let failedBeats = 0;
   const hb = setInterval(async () => {
-    if (killing) return;
+    // After the lost-server stop no beat goes out: a server back inside the grace must not see a
+    // live lease, and must find the drop lost (or salvage it from the push result).
+    if (killing || lost) return;
     try {
       const r = await client.heartbeat(dropId, epoch);
       failedBeats = 0;
-      if (r === 'ok') return;
+      // `killed` is for a pending push only; a running drop under the kill switch is hard-cancelled.
+      if (r === 'ok' || r === 'killed') return;
       if (r === 'hard_cancel') {
         void hardKill();
         return;
@@ -375,9 +763,13 @@ async function runContainer(
       else cancelled = true;
       void stop();
     } catch {
-      // Keep going through a blip. Past the limit the lease is ending anyway.
+      // Keep going through a blip. Past the limit the lease is ending anyway: stop with a grace
+      // (Ruling 14). Only a push-requested result is posted after that (held, then salvaged).
       failedBeats++;
-      if (failedBeats >= lostLimit) void hardKill();
+      if (failedBeats >= lostLimit && !lost) {
+        lost = true;
+        void stop(LOST_SERVER_GRACE_MS);
+      }
     }
   }, deps.heartbeatMs ?? 15_000);
   const flusher = setInterval(() => void flush(), FLUSH_MS);
@@ -417,10 +809,35 @@ async function runContainer(
     await Promise.allSettled(uploads);
     await stopping;
     // The server no longer owns this epoch (stale) or already cancelled it: it would 409 a result.
+    // A hard cancel (the kill switch) still asks to save the killed agent's work.
+    // A stale drop (a 409: the lease went past the server's grace) was stopped gracefully and may
+    // have checkpointed onto the volume: the server salvages it while the item is still reclaimable
+    // and refuses otherwise, and only then is the volume removed (Ruling 14 holds either way).
+    if ((hard || stale) && volume) fate.decide = () => salvaged(client, dropId, epoch);
     if (stale || cancelled) return;
+    if (lost && !(result?.push && volume)) {
+      // Fenced like the old kill: nothing posted, so a server that answers again sees the drop
+      // lost. Its answer about the volume is unknown, so it stays for rediscovery to salvage.
+      fate.decide = async () => 'keep';
+      return;
+    }
     if (result) {
       postedReal = true;
-      await client.postResult(dropId, epoch, result);
+      if (result.push && volume) {
+        const ack = await holdResult(client, dropId, epoch, result, deps.resultRetryMs);
+        // Accepted: the push loop takes the volume. Refused 409 (the drop went lost while the
+        // result was held): ask to salvage it before anything is removed (Ruling 14). Given up on
+        // a lasting server error: heartbeats stop with this run, the lease lapses, and the volume
+        // stays for the sweep to salvage.
+        fate.decide =
+          ack === 'ok'
+            ? async () => 'push'
+            : ack === 'gave_up'
+              ? async () => 'keep'
+              : () => salvaged(client, dropId, epoch);
+      } else {
+        await client.postResult(dropId, epoch, result);
+      }
     } else {
       await client.postResult(dropId, epoch, {
         status: 'failed',
@@ -434,7 +851,8 @@ async function runContainer(
     // A real result that could not be delivered must not be replaced by a synthetic failure
     // (the server would lose result_json); surface the error to the caller instead.
     if (postedReal) throw e;
-    if (!stale && !cancelled) {
+    if (lost && volume) fate.decide = async () => 'keep';
+    if (!stale && !cancelled && !lost) {
       const reason = `stick runner error: ${e instanceof Error ? e.message : String(e)}`;
       await client
         .postResult(dropId, epoch, { status: 'failed', role: payload.role, reason, gates: [] })
@@ -443,6 +861,46 @@ async function runContainer(
   } finally {
     clearInterval(hb);
     clearInterval(flusher);
+  }
+}
+
+/** `push` when the server accepts a salvage of this drop's volume, else `remove`. */
+async function salvaged(client: DropClient, dropId: string, epoch: number): Promise<Disposition> {
+  return (await client.salvage(dropId, epoch)) === 'ok' ? 'push' : 'remove';
+}
+
+/**
+ * Consecutive 5xx answers after which a held push result is given up: a server that answers but
+ * keeps failing (say, a drop zone it no longer knows) would otherwise hold the item for ever while
+ * heartbeats renew its lease. With the result backoff that is about 15 minutes.
+ */
+export const HELD_RESULT_MAX_5XX = 8;
+
+/**
+ * Posts a push-requested result, re-sending it from memory while the server can't be reached (a
+ * network error, retried for as long as it lasts) or answers with a 5xx (given up after
+ * HELD_RESULT_MAX_5XX in a row: `gave_up`). Any other refusal (a 422 push request) is thrown.
+ */
+async function holdResult(
+  client: DropClient,
+  dropId: string,
+  epoch: number,
+  result: DropResult,
+  firstMs = RESULT_RETRY_MS,
+): Promise<Ack | 'gave_up'> {
+  let serverErrors = 0;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await client.postResult(dropId, epoch, result);
+    } catch (e) {
+      const status = (e as { status?: unknown }).status;
+      if (typeof status === 'number' && status < 500) throw e;
+      if (typeof status === 'number') {
+        if (++serverErrors >= HELD_RESULT_MAX_5XX) return 'gave_up';
+      } else serverErrors = 0;
+      const ms = Math.min(PUSH_BACKOFF_MAX_MS, firstMs * 2 ** attempt);
+      await new Promise((r) => setTimeout(r, ms));
+    }
   }
 }
 

@@ -3,8 +3,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import {
+  agentProcessesAlive,
   agentSpawnOptions,
   asAgentArgv,
+  asAgentInDirArgv,
   readAgentFile,
   sweepUid,
   trooperIdentities,
@@ -81,6 +83,21 @@ describe('sweepUid', () => {
   });
 });
 
+describe('agentProcessesAlive', () => {
+  test('agentProcessesAlive counts real and effective uids', () => {
+    const proc = fakeProc({
+      30: { ruid: 10001, euid: 10001 },
+      31: { ruid: 0, euid: 10001 },
+      32: { ruid: 10001, euid: 0 },
+      33: { ruid: 10002, euid: 10002 },
+      1: { ruid: 0, euid: 0 },
+    });
+    expect(agentProcessesAlive(10001, proc)).toBe(3);
+    expect(agentProcessesAlive(10003, proc)).toBe(0);
+    expect(agentProcessesAlive(10001, join(proc, 'missing'))).toBe(0);
+  });
+});
+
 describe('spawning as another uid', () => {
   const ids = trooperIdentities(containerEnv, () => 0);
   if (!ids) throw new Error('no identities');
@@ -102,6 +119,27 @@ describe('spawning as another uid', () => {
 
   test('without an identity argv is unchanged', () =>
     expect(asAgentArgv(null, ['git', 'status'])).toEqual(['git', 'status']));
+
+  // Root without DAC_OVERRIDE cannot chdir into the agent's 0700 working copy (the volume's mount
+  // point): the process starts elsewhere and changes directory only after the uid drop.
+  test('asAgentInDirArgv changes directory after the uid drop', () =>
+    expect(asAgentInDirArgv(ids.agent, '/home/agent/repo', ['git', 'status'])).toEqual([
+      'setpriv',
+      '--reuid=10001',
+      '--regid=10001',
+      '--clear-groups',
+      '--',
+      'sh',
+      '-c',
+      'umask 022; cd -- "$1" && shift && exec "$@"',
+      'jm-agent',
+      '/home/agent/repo',
+      'git',
+      'status',
+    ]));
+
+  test('asAgentInDirArgv without an identity leaves argv unchanged', () =>
+    expect(asAgentInDirArgv(null, '/x', ['git', 'status'])).toEqual(['git', 'status']));
 
   test('the agent argv sets umask 0022 and no supplementary group', () => {
     const a = asAgentArgv(ids.agent, ['x']);

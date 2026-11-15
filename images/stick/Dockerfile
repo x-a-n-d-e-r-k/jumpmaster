@@ -67,12 +67,16 @@ RUN install -d -o root -g root -m 0700 /state \
  && find / -xdev -type f -perm /6000 -exec chmod a-s {} +
 # The release's egress proxy, by digest (the release workflow passes it); empty in other builds.
 ARG EGRESS_IMAGE
+# The release's trooper, by digest: the stick's own init, self-check and push containers run it
+# (verified and pulled at startup). Empty in other builds, which use the dev default.
+ARG TROOPER_IMAGE
 ENV NODE_ENV=production \
     JM_CONTAINER=1 \
     JM_STATE_DIR=/state \
     TUF_ROOT=/state/sigstore \
     JM_IMAGE_POLICY=signed \
     JM_EGRESS_IMAGE=${EGRESS_IMAGE} \
+    JM_TROOPER_IMAGE=${TROOPER_IMAGE} \
     TMPDIR=/tmp
 WORKDIR /app
 USER root
