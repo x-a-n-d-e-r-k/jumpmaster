@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
@@ -9,7 +9,7 @@ import { createApp } from '../app.js';
 import { Backoff } from '../auth/backoff.js';
 import { SetupMode, setOperatorPassphrase } from '../auth/operator.js';
 import { loadBoot } from '../config/boot.js';
-import { ConfigStore } from '../config/store.js';
+import { ConfigStore, startVault } from '../config/store.js';
 import { openDb } from '../db/open.js';
 import { insertDrop, setZoneMode, upsertDropZone } from '../db/repo.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
@@ -55,6 +55,8 @@ async function world(
     doc?: Record<string, unknown>;
     /** The HTTP status GitHub refuses every credential test with. */
     forgeRefuses?: number;
+    /** No JM_VAULT_KEY_FILE: the vault starts as the settings leave it (off, at first). */
+    vaultOff?: boolean;
   } = {},
 ) {
   const dbFile = o.dbFile ?? tmpDbFile();
@@ -97,7 +99,7 @@ async function world(
     boot: loadBoot(env, filePath),
     filePath,
     env,
-    vault: openVault(keyFile, db),
+    vault: o.vaultOff ? startVault(env, db) : openVault(keyFile, db),
     now: () => clock,
     imageLockPath: join(dir, 'no-lock.json'),
   });
@@ -1202,4 +1204,89 @@ test("a gate secret's role names its zone by repository (#99)", () => {
   expect(roleOf(gateSecretName('ref', 'NPM'), zones)).toBe(
     'gate secret NPM for octo/reference: gate steps can read it',
   );
+});
+
+describe('turning the vault on and preferring it (#101)', () => {
+  test('with the vault off the tab offers Turn on the vault; turned on, it offers Prefer the vault and Copy into the vault', async () => {
+    const w = await world({ vaultOff: true, env: { JM_GITHUB_READ_TOKEN: READ } });
+    let html = (await w.get('/settings/credentials')).body;
+    expect(html).toContain('<button type="button" id="vault-on">Turn on the vault</button>');
+    expect(html).not.toContain('id="prefer-vault"');
+    expect(rowOf(html, 'githubReadToken')).not.toContain('Copy into the vault');
+    // The page's button POSTs here (with sudo); the key never reaches the page.
+    expect((await w.call('POST', '/api/control/sudo', { passphrase: PASS })).statusCode).toBe(200);
+    expect((await w.call('POST', '/api/control/secrets/vault/on', {})).statusCode).toBe(200);
+    const key = readFileSync(join(w.secrets, 'vault_key'), 'utf8').trim();
+    html = (await w.get('/settings/credentials')).body;
+    expect(html).not.toContain(key);
+    expect(html).not.toContain('id="vault-on"');
+    expect(html).toMatch(
+      /<input type="checkbox" id="prefer-vault"(?! checked)[^>]*> Prefer the vault/,
+    );
+    // An empty vault turned on here can be turned off.
+    expect(html).toContain('<button type="button" id="vault-off">Turn off the vault</button>');
+    const read = rowOf(html, 'githubReadToken');
+    expect(read).toContain('environment variable <code>JM_GITHUB_READ_TOKEN</code>');
+    expect(read).toContain(
+      '<button type="button" class="copy" data-name="githubReadToken">Copy into the vault</button>',
+    );
+    const reviewer = rowOf(html, 'githubReviewerToken');
+    expect(reviewer).toContain('Copy into the vault');
+    expect(html).not.toContain(READ);
+    expect(html).not.toContain(REVIEWER);
+  });
+
+  test('each row says which source is in use and which it overrides; prefer flips it live; turn off waits for the entries to go', async () => {
+    const w = await world({ vaultOff: true, env: { JM_GITHUB_READ_TOKEN: READ } });
+    await w.call('POST', '/api/control/sudo', { passphrase: PASS });
+    await w.call('POST', '/api/control/secrets/vault/on', {});
+    const copy = await w.call('POST', '/api/control/secrets/githubReadToken/copy-to-vault', {});
+    expect(copy.statusCode).toBe(200);
+    expect(copy.body).not.toContain(READ);
+    let html = (await w.get('/settings/credentials')).body;
+    expect(rowOf(html, 'githubReadToken')).toContain(
+      'environment variable <code>JM_GITHUB_READ_TOKEN</code>, overriding the vault',
+    );
+    expect(html).not.toContain('id="vault-off"');
+    expect(html).toContain('remove them first');
+    expect(
+      (await w.call('POST', '/api/control/secrets/vault/prefer', { prefer: true })).statusCode,
+    ).toBe(200);
+    html = (await w.get('/settings/credentials')).body;
+    expect(html).toMatch(/<input type="checkbox" id="prefer-vault" checked[^>]*> Prefer the vault/);
+    expect(rowOf(html, 'githubReadToken')).toContain(
+      'vault (encrypted), overriding <code>JM_GITHUB_READ_TOKEN</code>',
+    );
+    expect(rowOf(html, 'githubReadToken')).not.toContain('Copy into the vault');
+    expect(html).not.toContain(READ);
+  });
+
+  test('a copied entry behind a variable has Remove, and once removed the vault can be turned off', async () => {
+    const w = await world({ vaultOff: true, env: { JM_GITHUB_READ_TOKEN: READ } });
+    await w.call('POST', '/api/control/sudo', { passphrase: PASS });
+    await w.call('POST', '/api/control/secrets/vault/on', {});
+    await w.call('POST', '/api/control/secrets/githubReadToken/copy-to-vault', {});
+    let html = (await w.get('/settings/credentials')).body;
+    expect(rowOf(html, 'githubReadToken')).toContain(
+      '<button type="button" class="remove" data-name="githubReadToken">Remove from the vault</button>',
+    );
+    // The page's Remove sends a DELETE; the variable stays in use, and Turn off comes back.
+    const rm = await w.call('DELETE', '/api/control/secrets/githubReadToken', undefined);
+    expect(rm.statusCode).toBe(200);
+    expect(rm.body).not.toContain(READ);
+    html = (await w.get('/settings/credentials')).body;
+    expect(rowOf(html, 'githubReadToken')).not.toContain('class="remove"');
+    expect(rowOf(html, 'githubReadToken')).toContain(
+      'environment variable <code>JM_GITHUB_READ_TOKEN</code>',
+    );
+    expect(html).toContain('<button type="button" id="vault-off">Turn off the vault</button>');
+    expect(html).not.toContain(READ);
+  });
+
+  test('the page script posts the switches with sudo and never sends a value', () => {
+    expect(CREDENTIALS_SCRIPT).toContain("'/api/control/secrets/vault/on'");
+    expect(CREDENTIALS_SCRIPT).toContain("'/api/control/secrets/vault/off'");
+    expect(CREDENTIALS_SCRIPT).toContain("'/api/control/secrets/vault/prefer', { prefer:");
+    expect(CREDENTIALS_SCRIPT).toContain("'/copy-to-vault', {}");
+  });
 });

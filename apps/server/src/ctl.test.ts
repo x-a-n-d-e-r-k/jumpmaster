@@ -493,6 +493,29 @@ describe('ctl secrets (Task 4)', () => {
     });
     expect((await run(['secrets', 'nope'])).code).toBe(2);
   });
+
+  test('vault on, off, prefer and copy-to-vault reach their routes and send no value', async () => {
+    const on = await run(['secrets', 'vault', 'on']);
+    expect(on.calls[0]).toMatchObject({
+      url: 'http://127.0.0.1:7420/api/control/secrets/vault/on',
+      init: { method: 'POST' },
+    });
+    expect((await run(['secrets', 'vault', 'off'])).calls[0]?.url).toBe(
+      'http://127.0.0.1:7420/api/control/secrets/vault/off',
+    );
+    const prefer = await run(['secrets', 'vault', 'prefer', 'on']);
+    expect(prefer.calls[0]?.url).toBe('http://127.0.0.1:7420/api/control/secrets/vault/prefer');
+    expect(bodyOf(prefer)).toEqual({ prefer: true });
+    expect(bodyOf(await run(['secrets', 'vault', 'prefer', 'off']))).toEqual({ prefer: false });
+    const copy = await run(['secrets', 'copy-to-vault', 'githubReadToken']);
+    expect(copy.calls[0]).toMatchObject({
+      url: 'http://127.0.0.1:7420/api/control/secrets/githubReadToken/copy-to-vault',
+      init: { method: 'POST' },
+    });
+    expect(bodyOf(copy)).toEqual({});
+    expect((await run(['secrets', 'vault', 'prefer'])).code).toBe(2);
+    expect((await run(['secrets', 'vault', 'maybe'])).code).toBe(2);
+  });
 });
 
 describe('ctl detect and ctl zones add', () => {

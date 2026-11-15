@@ -2128,7 +2128,7 @@ function vaultKeyCheck(d: DoctorDeps): DoctorCheck {
       ...base,
       status: 'skip',
       summary:
-        'no vault key (JM_VAULT_KEY_FILE is unset): credentials come from files and the environment only',
+        'no vault key (the vault is off: turn it on under Settings, Credentials, or set JM_VAULT_KEY_FILE): credentials come from files and the environment only',
     };
   const keyFile = d.env.vaultKeyFile;
   // Real paths on both sides: a symlinked data directory or key path can't hide the overlap.

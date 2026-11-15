@@ -120,6 +120,19 @@ export const CONTROL_ROUTES: ControlRoute[] = [
   },
   { method: 'DELETE', path: '/api/control/secrets/:name', ctl: 'ctl secrets remove claudeToken' },
   { method: 'POST', path: '/api/control/secrets/reload', ctl: 'ctl secrets reload' },
+  { method: 'POST', path: '/api/control/secrets/vault/on', ctl: 'ctl secrets vault on' },
+  { method: 'POST', path: '/api/control/secrets/vault/off', ctl: 'ctl secrets vault off' },
+  {
+    method: 'POST',
+    path: '/api/control/secrets/vault/prefer',
+    ctl: 'ctl secrets vault prefer on',
+    also: ['ctl secrets vault prefer off'],
+  },
+  {
+    method: 'POST',
+    path: '/api/control/secrets/:name/copy-to-vault',
+    ctl: 'ctl secrets copy-to-vault githubReadToken',
+  },
   // Config
   { method: 'GET', path: '/api/control/config', ctl: 'ctl config show' },
   { method: 'GET', path: '/api/control/config/revisions', ctl: 'ctl config revisions' },
@@ -248,6 +261,9 @@ export const CTL_VERBS: { verb: string; page: Page; forms: string[] }[] = [
       'ctl secrets test <name>',
       'ctl secrets remove <name>',
       'ctl secrets reload',
+      'ctl secrets vault on|off',
+      'ctl secrets vault prefer on|off',
+      'ctl secrets copy-to-vault <name>',
     ],
   },
   {

@@ -143,7 +143,21 @@ like, or its `_FILE` form naming a file), then a file under `secrets/` with the 
 vault (what you enter here). A file's or the
 environment's credential is read-only here, with where it comes from: replace the file and run
 `ctl secrets reload`, or change the environment and restart. The doctor's `credential.shadowed`
-warns when a file and a vault entry both exist and differ.
+warns when a file and a vault entry both exist and differ. Each row says which source is in use
+and, when another also holds a value, which one it overrides (for example "vault (encrypted),
+overriding `JM_GITHUB_READ_TOKEN`").
+
+**The vault's switches.** With the vault off, **Turn on the vault** writes a new random key (32
+bytes, base64url) to `secrets/vault_key`, mode 0600 (never over an existing file), records that
+the vault is on so a restart keeps it on, and opens it at once. `JM_VAULT_KEY_FILE`, when set,
+still names the key and wins. Keep the key file with your backups: the database holds only
+ciphertext. **Prefer the vault** (off by default) makes a vault entry win over its variable or
+file, at once; with it on, **Replace** stores a value in the vault even for a credential a
+variable sets. **Copy into the vault** reads a variable's or file's value on the server and
+stores it in the vault; the value never reaches the browser. Unsetting the variable is yours to
+do where the server's environment is set. **Turn off the vault** is offered only while it holds
+no entries (and removes the key file it wrote). From a terminal: `ctl secrets vault on|off`,
+`ctl secrets vault prefer on|off`, `ctl secrets copy-to-vault <name>`.
 
 **Rotate** a credential: paste the new value into its row and press **Replace**. The first change
 asks for your passphrase again (good for five minutes). The value is tested with GitHub (a Claude
@@ -304,7 +318,7 @@ token is always allowed.
 | GitHub | `ctl github <zone> recommend \| pat <author\|reviewer\|read> \| ruleset \| codeowners [--reviewer <login>]… \| checklist`<br>`ctl github recommend <owner/name> [--paid-plan] [--identity starter\|two-bot]` | `GET /api/control/zones/:id/github`<br>`POST /api/control/github/recommend` |
 | Settings | `ctl settings set <path>=<json>… [--note <text>]` | `PATCH /api/control/config` |
 | Settings | `ctl mcp-tokens mint <zone> <read\|write> --days N [--label <text>]`<br>`ctl mcp-tokens list`<br>`ctl mcp-tokens revoke <id>` | `POST /api/control/mcp-tokens`<br>`GET /api/control/mcp-tokens`<br>`DELETE /api/control/mcp-tokens/:id` |
-| Credentials | `ctl secrets list`<br>`ctl secrets set <name> [--from-file <path>] [--created YYYY-MM-DD] (the value on stdin or in the file, never in argv)`<br>`ctl secrets test <name>`<br>`ctl secrets remove <name>`<br>`ctl secrets reload` | `GET /api/control/secrets`<br>`PUT /api/control/secrets/:name`<br>`POST /api/control/secrets/:name/test`<br>`DELETE /api/control/secrets/:name`<br>`POST /api/control/secrets/reload` |
+| Credentials | `ctl secrets list`<br>`ctl secrets set <name> [--from-file <path>] [--created YYYY-MM-DD] (the value on stdin or in the file, never in argv)`<br>`ctl secrets test <name>`<br>`ctl secrets remove <name>`<br>`ctl secrets reload`<br>`ctl secrets vault on\|off`<br>`ctl secrets vault prefer on\|off`<br>`ctl secrets copy-to-vault <name>` | `GET /api/control/secrets`<br>`PUT /api/control/secrets/:name`<br>`POST /api/control/secrets/:name/test`<br>`DELETE /api/control/secrets/:name`<br>`POST /api/control/secrets/reload`<br>`POST /api/control/secrets/vault/on`<br>`POST /api/control/secrets/vault/off`<br>`POST /api/control/secrets/vault/prefer`<br>`POST /api/control/secrets/:name/copy-to-vault` |
 | Config | `ctl config show [--json]`<br>`ctl config revisions`<br>`ctl config set <path>=<json>… [--note <text>]`<br>`ctl config rollback <id> [note]`<br>`ctl config import <file> [--dry-run] [--note <text>]`<br>`ctl config export`<br>`ctl config reload`<br>`ctl config adopt`<br>`ctl config mode file` | `PATCH /api/control/config`<br>`GET /api/control/config`<br>`GET /api/control/config/revisions`<br>`POST /api/control/config/rollback`<br>`POST /api/control/config/reload`<br>`POST /api/control/config/adopt`<br>`POST /api/control/config/mode`<br>`GET /api/control/config/export`<br>`POST /api/control/config/import` |
 | Doctor | `ctl doctor [zone] [--json] [--artifacts <dir>]`<br>`ctl doctor --last [--json]`<br>`ctl doctor <zone> --drop`<br>`ctl doctor <zone> --cancel` | `POST /api/control/doctor`<br>`GET /api/control/doctor`<br>`POST /api/control/doctor/drop` |
 | Doctor | `ctl labels <zone>` | `POST /api/control/zones/:id/labels` |

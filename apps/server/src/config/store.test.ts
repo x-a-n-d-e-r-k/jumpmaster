@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { payloadSecrets } from '@jumpmaster/protocol';
@@ -19,7 +19,7 @@ import { openVault } from '../vault/vault.js';
 import { type BootConfig, loadBoot, RESTART_PATHS } from './boot.js';
 import { mergePatch } from './diff.js';
 import { canonicalJson, getSetting, hashOf } from './revisions.js';
-import { ConfigStore, type StoreOptions } from './store.js';
+import { ConfigStore, type StoreOptions, startVault } from './store.js';
 
 const env: NodeJS.ProcessEnv = {
   JM_CLAUDE_TOKEN: 'claude-secret-value-1',
@@ -1352,4 +1352,141 @@ test('a retired value that leaves the redaction list is logged, never with its v
     'warning: a replaced secret left the redaction list (it keeps the latest 32); restart the server once the drops that carried it are done',
   ]);
   for (const l of w.logs) expect(l).not.toContain('ROTATION');
+});
+
+describe('turning the vault on and preferring it from Settings (#101)', () => {
+  const READ_ENV = 'github_pat_READFROMENV_101';
+  const READ_VAULT = 'github_pat_READFROMVAULT_101';
+  function noVault(extraEnv: NodeJS.ProcessEnv = {}) {
+    const w = world();
+    const secrets = dir();
+    const e = { ...env, JM_SECRETS_DIR: secrets, ...extraEnv };
+    const store = w.open({ env: e, boot: loadBoot(e, w.file), vault: startVault(e, w.db, 'data') });
+    return { w, store, secrets, e };
+  }
+
+  test('turn on writes a 0600 key of 32 random bytes, opens the vault at once and survives a restart', () => {
+    const { w, store, secrets, e } = noVault();
+    expect(store.vault()).toBe('disabled');
+    const r = store.turnOnVault();
+    expect(r).toMatchObject({ ok: true });
+    const keyPath = join(secrets, 'vault_key');
+    expect(statSync(keyPath).mode & 0o777).toBe(0o600);
+    const text = readFileSync(keyPath, 'utf8').trim();
+    expect(Buffer.from(text, 'base64url')).toHaveLength(32);
+    expect(JSON.stringify(r)).not.toContain(text);
+    expect(store.vault()).not.toBe('disabled');
+    expect(store.vaultKeyFrom()).toBe('settings');
+    // No restart: the vault takes an entry now.
+    expect(store.putCredential('githubReadToken', READ_VAULT, {}).ok).toBe(true);
+    expect(store.resolved().githubReadToken).toMatchObject({ source: 'vault' });
+    // A restart without JM_VAULT_KEY_FILE keeps it on, with its entries.
+    const again = w.open({ env: e, boot: loadBoot(e, w.file), vault: startVault(e, w.db, 'data') });
+    expect(again.vault()).not.toBe('disabled');
+    expect(again.resolved().githubReadToken).toMatchObject({ value: READ_VAULT, source: 'vault' });
+    for (const l of w.logs) expect(l).not.toContain(text);
+  });
+
+  test('turn on refuses to overwrite an existing key file, and refuses while the vault is on', () => {
+    const { store, secrets } = noVault();
+    writeFileSync(join(secrets, 'vault_key'), 'kept\n', { mode: 0o600 });
+    const r = store.turnOnVault();
+    expect(r).toMatchObject({ ok: false });
+    expect(JSON.stringify(r)).toContain('already exists');
+    expect(readFileSync(join(secrets, 'vault_key'), 'utf8')).toBe('kept\n');
+    expect(store.vault()).toBe('disabled');
+    rmSync(join(secrets, 'vault_key'));
+    expect(store.turnOnVault().ok).toBe(true);
+    expect(store.turnOnVault()).toMatchObject({ ok: false, message: 'the vault is already on' });
+  });
+
+  test('turn on without a secrets directory says to set JM_SECRETS_DIR', () => {
+    const w = world();
+    const store = w.open({ vault: 'disabled' });
+    expect(store.turnOnVault()).toMatchObject({ ok: false });
+    expect(JSON.stringify(store.turnOnVault())).toContain('JM_SECRETS_DIR');
+  });
+
+  test('JM_VAULT_KEY_FILE still takes precedence over the key turned on in Settings', () => {
+    const { w, store, e } = noVault();
+    store.turnOnVault();
+    const other = join(dir(), 'vault_key');
+    writeFileSync(other, randomBytes(32).toString('base64url'), { mode: 0o600 });
+    const withEnv = { ...e, JM_VAULT_KEY_FILE: other };
+    const v = startVault(withEnv, w.db, 'data');
+    const s = w.open({ env: withEnv, boot: loadBoot(withEnv, w.file), vault: v });
+    expect(s.vaultKeyFrom()).toBe('env');
+    expect(v !== 'disabled' && openVault(other, w.db) !== 'disabled').toBe(true);
+    expect((v as Exclude<typeof v, 'disabled'>).keyId).toBe(
+      (openVault(other, w.db) as Exclude<typeof v, 'disabled'>).keyId,
+    );
+  });
+
+  test('prefer the vault flips the source in use live, and is kept across a restart', () => {
+    const { w, store, e } = noVault({ JM_GITHUB_READ_TOKEN: READ_ENV });
+    store.turnOnVault();
+    // With the variable set, a vault entry is stored only once the vault is preferred.
+    expect(store.preferVault()).toBe(false);
+    expect(store.setPreferVault(true).ok).toBe(true);
+    expect(store.putCredential('githubReadToken', READ_VAULT, {}).ok).toBe(true);
+    expect(store.resolved().githubReadToken).toMatchObject({
+      value: READ_VAULT,
+      source: 'vault',
+      overriding: [{ source: 'env', path: 'JM_GITHUB_READ_TOKEN' }],
+    });
+    expect(store.current().secrets.githubReadToken).toBe(READ_VAULT);
+    expect(store.setPreferVault(false).ok).toBe(true);
+    expect(store.resolved().githubReadToken).toMatchObject({
+      value: READ_ENV,
+      source: 'env',
+      overriding: [{ source: 'vault' }],
+    });
+    expect(store.current().secrets.githubReadToken).toBe(READ_ENV);
+    store.setPreferVault(true);
+    const again = w.open({ env: e, boot: loadBoot(e, w.file), vault: startVault(e, w.db, 'data') });
+    expect(again.preferVault()).toBe(true);
+    expect(again.resolved().githubReadToken?.source).toBe('vault');
+  });
+
+  test('copy into the vault stores the variable value server-side', () => {
+    const { store } = noVault({ JM_GITHUB_READ_TOKEN: READ_ENV });
+    expect(store.copyToVault('githubReadToken')).toMatchObject({ ok: false });
+    store.turnOnVault();
+    const r = store.copyToVault('githubReadToken');
+    expect(r).toMatchObject({ ok: true, from: 'JM_GITHUB_READ_TOKEN' });
+    expect(JSON.stringify(r)).not.toContain(READ_ENV);
+    const v = store.vault();
+    expect(v !== 'disabled' && v.get('githubReadToken')).toBe(READ_ENV);
+    // The variable still wins until the vault is preferred.
+    expect(store.resolved().githubReadToken?.source).toBe('env');
+    // Once the vault entry is in use, there is nothing to copy.
+    store.setPreferVault(true);
+    expect(store.copyToVault('githubReadToken')).toMatchObject({ ok: false });
+  });
+
+  test('turn off is refused while the vault holds entries, then removes the key it wrote', () => {
+    const { w, store, secrets, e } = noVault();
+    store.turnOnVault();
+    store.putCredential('githubReadToken', READ_VAULT, {});
+    const r = store.turnOffVault();
+    expect(r).toMatchObject({ ok: false });
+    expect(JSON.stringify(r)).toContain('remove them first');
+    expect(store.vault()).not.toBe('disabled');
+    store.deleteCredential('githubReadToken');
+    expect(store.turnOffVault().ok).toBe(true);
+    expect(store.vault()).toBe('disabled');
+    expect(existsSync(join(secrets, 'vault_key'))).toBe(false);
+    const again = w.open({ env: e, boot: loadBoot(e, w.file), vault: startVault(e, w.db, 'data') });
+    expect(again.vault()).toBe('disabled');
+  });
+
+  test('turn off is refused while JM_VAULT_KEY_FILE sets the key', () => {
+    const w = world();
+    const key = join(dir(), 'vault_key');
+    writeFileSync(key, randomBytes(32).toString('base64url'), { mode: 0o600 });
+    const e = { ...env, JM_VAULT_KEY_FILE: key };
+    const store = w.open({ env: e, vault: startVault(e, w.db, 'data') });
+    expect(store.vaultKeyFrom()).toBe('env');
+    expect(JSON.stringify(store.turnOffVault())).toContain('JM_VAULT_KEY_FILE');
+  });
 });

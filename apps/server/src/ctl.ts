@@ -270,7 +270,8 @@ function mcpTokensRequest(args: string[]): Raw | null {
 }
 
 /**
- * `ctl secrets list | set <name> | test <name> | remove <name> | reload`. `set` takes its value
+ * `ctl secrets list | set <name> | test <name> | remove <name> | reload | vault on|off |
+ * vault prefer on|off | copy-to-vault <name>`. `set` takes its value
  * from stdin or a file, never argv: `runSecrets` sends it.
  */
 function secretsRequest(args: string[]): Raw | null {
@@ -278,11 +279,25 @@ function secretsRequest(args: string[]): Raw | null {
   const path = '/api/control/secrets';
   if (verb === 'list') return name === undefined ? { path, method: 'GET' } : null;
   if (verb === 'reload') return name === undefined ? { path: `${path}/reload`, body: {} } : null;
+  if (verb === 'vault') return vaultRequest(name, rest);
   if (!name || name.startsWith('--')) return null;
   const at = `${path}/${encodeURIComponent(name)}`;
   if (verb === 'test' && rest.length === 0) return { path: `${at}/test`, body: {} };
   if (verb === 'remove' && rest.length === 0) return { path: at, method: 'DELETE' };
+  if (verb === 'copy-to-vault' && rest.length === 0)
+    return { path: `${at}/copy-to-vault`, body: {} };
   if (verb === 'set') return { path: at, method: 'PUT' };
+  return null;
+}
+
+/** `ctl secrets vault on | off | prefer on|off`. */
+function vaultRequest(what: string | undefined, rest: string[]): Raw | null {
+  const path = '/api/control/secrets/vault';
+  if ((what === 'on' || what === 'off') && rest.length === 0)
+    return { path: `${path}/${what}`, body: {} };
+  const [onOff, ...more] = rest;
+  if (what === 'prefer' && (onOff === 'on' || onOff === 'off') && more.length === 0)
+    return { path: `${path}/prefer`, body: { prefer: onOff === 'on' } };
   return null;
 }
 
@@ -963,7 +978,13 @@ async function runSecrets(
   if (verb === 'list' && !name) return show(await call('GET', '/api/control/secrets'));
   if (verb === 'reload' && !name)
     return show(await call('POST', '/api/control/secrets/reload', {}));
+  if (verb === 'vault') {
+    const r = vaultRequest(name, rest);
+    return r ? show(await call('POST', r.path, r.body ?? {})) : usage();
+  }
   if (!name) return usage();
+  if (verb === 'copy-to-vault' && rest.length === 0)
+    return show(await call('POST', `${at(name)}/copy-to-vault`, {}));
   if (verb === 'test' && rest.length === 0) return show(await call('POST', `${at(name)}/test`, {}));
   if (verb === 'remove' && rest.length === 0) return show(await call('DELETE', at(name)));
   if (verb !== 'set') return usage();
