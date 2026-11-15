@@ -165,7 +165,7 @@ test('branch, commit, ahead count, head sha', async () => {
 
 test('a silent git failure leaks neither the token nor its base64 form', async () => {
   const dir = await clone('silent');
-  const token = 'ghp_SILENTTOKEN1234567890abcdef';
+  const token = 'ghp_' + 'SILENTTOKEN1234567890abcdef';
   const mirror = join(dir, '..', 'mirror');
   const err = await runGit(
     undefined,
@@ -213,7 +213,7 @@ const hasBranch = (repo: string, b: string): boolean =>
 
 test('the auth header is scoped to https://github.com/ only', async () => {
   const dir = await clone('scoped');
-  const token = 'ghp_SCOPEDTOKEN1234567890abcd';
+  const token = 'ghp_' + 'SCOPEDTOKEN1234567890abcd';
   const gitDir = realpathSync(join(dir, '..', 'mirror'));
   expect(
     await runGit(undefined, ['config', '--get', 'http.https://github.com/.extraheader'], token, {

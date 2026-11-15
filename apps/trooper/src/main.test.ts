@@ -21,8 +21,8 @@ const payload: DropPayload = {
   image: 'jumpmaster-trooper:test',
   protectedPaths: [],
   credentials: {
-    claudeToken: 'sk-ant-oat-SECRETSECRETSECRET1234',
-    forgeToken: 'ghp_FORGESECRETFORGESECRET1234',
+    claudeToken: 'sk-ant-' + 'oat-SECRETSECRETSECRET1234',
+    forgeToken: 'ghp_' + 'FORGESECRETFORGESECRET1234',
   },
 };
 

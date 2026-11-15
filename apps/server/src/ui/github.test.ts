@@ -20,9 +20,9 @@ import { escapeHtml } from './pages.js';
 
 const TOKEN = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
-const AUTHOR = 'github_pat_PAGEAUTHORDUMMY01234567890';
-const REVIEWER = 'github_pat_PAGEREVIEWERDUMMY0123456789';
-const CLAUDE = 'sk-ant-oat01-PAGECLAUDEDUMMY0123456789';
+const AUTHOR = 'github_pat_' + 'PAGEAUTHORDUMMY01234567890';
+const REVIEWER = 'github_pat_' + 'PAGEREVIEWERDUMMY0123456789';
+const CLAUDE = 'sk-ant-' + 'oat01-PAGECLAUDEDUMMY0123456789';
 
 let app: FastifyInstance | undefined;
 afterEach(async () => {

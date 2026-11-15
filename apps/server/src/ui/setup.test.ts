@@ -23,9 +23,9 @@ const TOKEN = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
 const ORIGIN = `http://${HOST}`;
 const PASS = 'a long operator passphrase';
-const AUTHOR = 'github_pat_WIZARDAUTHORDUMMY0123456789';
-const CLAUDE = 'sk-ant-oat01-WIZARDCLAUDEDUMMY0123456789';
-const BAD = 'github_pat_WIZARDREFUSEDDUMMY0123456789';
+const AUTHOR = 'github_pat_' + 'WIZARDAUTHORDUMMY0123456789';
+const CLAUDE = 'sk-ant-' + 'oat01-WIZARDCLAUDEDUMMY0123456789';
+const BAD = 'github_pat_' + 'WIZARDREFUSEDDUMMY0123456789';
 const STEPS = ['claude', 'forge', 'stick', 'project', 'doctor'] as const;
 
 let app: FastifyInstance | undefined;

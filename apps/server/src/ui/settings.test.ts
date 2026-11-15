@@ -25,10 +25,10 @@ import {
 const TOKEN = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
 const PASS = 'a long operator passphrase';
-const CLAUDE = 'sk-ant-oat01-TABCLAUDEDUMMY0123456789';
-const AUTHOR = 'github_pat_TABAUTHORDUMMY0123456789';
-const REVIEWER = 'github_pat_TABREVIEWERFILEDUMMY0123456789';
-const READ = 'github_pat_TABREADENVDUMMY0123456789';
+const CLAUDE = 'sk-ant-' + 'oat01-TABCLAUDEDUMMY0123456789';
+const AUTHOR = 'github_pat_' + 'TABAUTHORDUMMY0123456789';
+const REVIEWER = 'github_pat_' + 'TABREVIEWERFILEDUMMY0123456789';
+const READ = 'github_pat_' + 'TABREADENVDUMMY0123456789';
 const DAY = 86_400_000;
 
 let app: FastifyInstance | undefined;

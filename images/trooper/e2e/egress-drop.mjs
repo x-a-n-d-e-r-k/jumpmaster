@@ -99,7 +99,7 @@ function payload(dropId, mode, allow, image = TROOPER) {
     prompt: 'review',
     image,
     protectedPaths: [],
-    credentials: { claudeToken: 'sk-ant-oat01-E2EDUMMYDUMMYDUMMYDUMMY' },
+    credentials: { claudeToken: 'sk-ant-' + 'oat01-E2EDUMMYDUMMYDUMMYDUMMY' },
     services: [{ name: 'db', image: SERVICE, port: 5432, readyTimeoutSeconds: 30 }],
     egress: { mode, allow },
   };

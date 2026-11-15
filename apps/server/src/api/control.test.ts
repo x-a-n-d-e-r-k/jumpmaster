@@ -1457,11 +1457,11 @@ describe('secret routes (Task 4)', () => {
     JM_JOIN_TOKEN: 'join-secret-value-4',
     JM_OPERATOR_TOKEN: TOKEN,
   };
-  const CLAUDE = 'sk-ant-oat01-ROUTECLAUDE-0001';
+  const CLAUDE = 'sk-ant-' + 'oat01-ROUTECLAUDE-0001';
   const AUTHOR_OLD = 'github_pat_ROUTEAUTHOROLD_0002';
   const AUTHOR_NEW = 'github_pat_ROUTEAUTHORNEW_0003';
   const REVIEWER = 'github_pat_ROUTEREVIEWER_0004';
-  const FAILED = 'github_pat_FAILEDFIXTURE_distinct_from_all_0005';
+  const FAILED = 'github_pat_' + 'FAILEDFIXTURE_distinct_from_all_0005';
   const zoneDoc = (id: string) => ({
     id,
     repo: `octo/${id}`,
@@ -1825,11 +1825,11 @@ describe('secret routes (Task 4)', () => {
 });
 
 describe('detect and zone add routes', () => {
-  const AUTHOR = 'github_pat_ZONEAUTHORDUMMY0123456789';
+  const AUTHOR = 'github_pat_' + 'ZONEAUTHORDUMMY0123456789';
   const zenv = {
-    JM_CLAUDE_TOKEN: 'sk-ant-oat01-ZONECLAUDEDUMMY0123456789',
+    JM_CLAUDE_TOKEN: 'sk-ant-' + 'oat01-ZONECLAUDEDUMMY0123456789',
     JM_GITHUB_AUTHOR_TOKEN: AUTHOR,
-    JM_GITHUB_REVIEWER_TOKEN: 'github_pat_ZONEREVIEWERDUMMY0123456789',
+    JM_GITHUB_REVIEWER_TOKEN: 'github_pat_' + 'ZONEREVIEWERDUMMY0123456789',
     JM_JOIN_TOKEN: 'join-secret-value-4',
     JM_OPERATOR_TOKEN: TOKEN,
     JM_DEV_IMAGES: '1',
@@ -2090,10 +2090,10 @@ describe('detect and zone add routes', () => {
 });
 
 describe('GitHub guidance routes (Task 7)', () => {
-  const AUTHOR = 'github_pat_GUIDEAUTHORDUMMY0123456789';
-  const REVIEWER = 'github_pat_GUIDEREVIEWERDUMMY012345678';
+  const AUTHOR = 'github_pat_' + 'GUIDEAUTHORDUMMY0123456789';
+  const REVIEWER = 'github_pat_' + 'GUIDEREVIEWERDUMMY012345678';
   const genv = {
-    JM_CLAUDE_TOKEN: 'sk-ant-oat01-GUIDECLAUDEDUMMY0123456789',
+    JM_CLAUDE_TOKEN: 'sk-ant-' + 'oat01-GUIDECLAUDEDUMMY0123456789',
     JM_GITHUB_AUTHOR_TOKEN: AUTHOR,
     JM_GITHUB_REVIEWER_TOKEN: REVIEWER,
     JM_JOIN_TOKEN: 'join-secret-value-7',
@@ -2374,7 +2374,10 @@ describe('GitHub guidance routes (Task 7)', () => {
     // A snapshot read with another author token (a rotation mid-request) is another key.
     await ask({
       ...config,
-      secrets: { ...config.secrets, githubAuthorToken: 'github_pat_OTHERDUMMY012345678901234' },
+      secrets: {
+        ...config.secrets,
+        githubAuthorToken: 'github_pat_' + 'OTHERDUMMY012345678901234',
+      },
     });
     expect(calls.length).toBeGreaterThan(n);
     expect(calls.at(-1)).toBe('repoAccess octo-org/demo other');
@@ -2383,9 +2386,9 @@ describe('GitHub guidance routes (Task 7)', () => {
 
 describe('zones page routes', () => {
   const zenv = {
-    JM_CLAUDE_TOKEN: 'sk-ant-oat01-ZPAGECLAUDEDUMMY0123456789',
-    JM_GITHUB_AUTHOR_TOKEN: 'github_pat_ZPAGEAUTHORDUMMY0123456789',
-    JM_GITHUB_REVIEWER_TOKEN: 'github_pat_ZPAGEREVIEWERDUMMY0123456789',
+    JM_CLAUDE_TOKEN: 'sk-ant-' + 'oat01-ZPAGECLAUDEDUMMY0123456789',
+    JM_GITHUB_AUTHOR_TOKEN: 'github_pat_' + 'ZPAGEAUTHORDUMMY0123456789',
+    JM_GITHUB_REVIEWER_TOKEN: 'github_pat_' + 'ZPAGEREVIEWERDUMMY0123456789',
     JM_JOIN_TOKEN: 'join-secret-value-4',
     JM_OPERATOR_TOKEN: TOKEN,
   };

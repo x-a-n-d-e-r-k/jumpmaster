@@ -193,7 +193,7 @@ describe('transport', () => {
     const s = await setup();
     const list = { jsonrpc: '2.0', id: 1, method: 'tools/list' };
     expect((await post(undefined, list)).statusCode).toBe(401);
-    expect((await post('jmm_wrongwrongwrongwrongwrong', list)).statusCode).toBe(401);
+    expect((await post('jmm_' + 'wrongwrongwrongwrongwrong', list)).statusCode).toBe(401);
     expect((await post(OP, list)).statusCode).toBe(401);
     revokeMcpToken(s.db, s.readId, t0);
     expect((await post(s.read, list)).statusCode).toBe(401);
@@ -208,7 +208,7 @@ describe('transport', () => {
       [s.writeId, 'auth', 'refused', 'expired'],
     ]);
     const dump = JSON.stringify(s.db.prepare('SELECT * FROM mcp_audit').all());
-    expect(dump).not.toContain(sha256('jmm_wrongwrongwrongwrongwrong'));
+    expect(dump).not.toContain(sha256('jmm_' + 'wrongwrongwrongwrongwrong'));
     expect(dump).not.toContain('wrongwrong');
   });
 
@@ -245,7 +245,7 @@ describe('transport', () => {
       params: { pad: 'x'.repeat(300 * 1024) },
     };
     expect((await post(undefined, big)).statusCode).toBe(401);
-    expect((await post('jmm_nottherightoneatallxx', big)).statusCode).toBe(401);
+    expect((await post('jmm_' + 'nottherightoneatallxx', big)).statusCode).toBe(401);
   });
 
   // Red team §7.4.

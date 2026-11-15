@@ -297,9 +297,9 @@ describe('CODEOWNERS and collaborators', () => {
 
 describe('zoneGuidance', () => {
   const SECRETS = [
-    'github_pat_11AAAAAAA0secretsecretsecret',
-    'ghp_classicclassicclassicclassic',
-    'sk-ant-oat01-claudeclaudeclaude',
+    'github_pat_' + '11AAAAAAA0secretsecretsecret',
+    'ghp_' + 'classicclassicclassicclassic',
+    'sk-ant-' + 'oat01-claudeclaudeclaude',
   ];
 
   test('every generated URL is under github.com and no generated text carries a credential', () => {

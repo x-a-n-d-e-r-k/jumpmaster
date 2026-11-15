@@ -415,7 +415,7 @@ describe('statusOf', () => {
   });
 
   test('the status names zones, issues and PRs and never a token', () => {
-    const token = 'github_pat_STATUSNEVERSHOWN0123456789';
+    const token = 'github_pat_' + 'STATUSNEVERSHOWN0123456789';
     const s = statusOf(everything(), NOW);
     expect(JSON.stringify(s)).not.toContain(token);
     // Text is plain: the page escapes it.

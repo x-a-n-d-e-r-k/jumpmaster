@@ -11,10 +11,10 @@ export const ago = (ms: number) => new Date(NOW.getTime() - ms);
 export const DIGEST = `sha256:${'a'.repeat(64)}`;
 export const IMAGE = `ghcr.io/acme/jumpmaster-trooper@${DIGEST}`;
 export const PG = `postgres@sha256:${'b'.repeat(64)}`;
-export const AUTHOR_TOKEN = 'github_pat_AUTHORAUTHORAUTHORAUTHOR1234';
-export const REVIEWER_TOKEN = 'github_pat_REVIEWERREVIEWERREVIEWER5678';
-export const READ_TOKEN = 'github_pat_READREADREADREADREADREAD9012';
-export const CLAUDE_TOKEN = 'sk-ant-oat01-CLAUDECLAUDECLAUDECLAUDE';
+export const AUTHOR_TOKEN = 'github_pat_' + 'AUTHORAUTHORAUTHORAUTHOR1234';
+export const REVIEWER_TOKEN = 'github_pat_' + 'REVIEWERREVIEWERREVIEWER5678';
+export const READ_TOKEN = 'github_pat_' + 'READREADREADREADREADREAD9012';
+export const CLAUDE_TOKEN = 'sk-ant-' + 'oat01-CLAUDECLAUDECLAUDECLAUDE';
 
 type Pair = ReturnType<typeof fakeForgePair>;
 
