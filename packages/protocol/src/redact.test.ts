@@ -95,3 +95,12 @@ test('dropSecrets lists basic-auth forms and nothing else', () => {
   ]);
   expect(dropSecrets({ authorToken: 'a', claudeToken: 'c' })).toEqual(['c', 'a', b64('a')]);
 });
+
+test('withBasicAuth is exported from the package and pairs a token with its git basic-auth form', async () => {
+  const { withBasicAuth } = await import('./index.js');
+  expect(withBasicAuth('ghs_abc')).toEqual([
+    'ghs_abc',
+    Buffer.from('x-access-token:ghs_abc').toString('base64'),
+  ]);
+  expect(withBasicAuth(undefined)).toEqual([]);
+});
