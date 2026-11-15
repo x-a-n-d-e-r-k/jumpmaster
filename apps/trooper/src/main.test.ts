@@ -2,7 +2,7 @@ import { PassThrough, Readable } from 'node:stream';
 import type { DropPayload, GateResult } from '@jumpmaster/protocol';
 import { expect, test } from 'vitest';
 import type { TrooperDeps } from './main.js';
-import { describeFatal, readPayload, runTrooper } from './main.js';
+import { claudeSpawnArgs, describeFatal, readPayload, runTrooper } from './main.js';
 import { readGrant } from './stdin.js';
 
 const payload: DropPayload = {
@@ -518,4 +518,28 @@ test('each crew role runs through the crew runner and its output is redacted', a
     expect(f.lines.at(-1)).not.toContain(payload.credentials.claudeToken);
     expect(f.claudeCwd).toMatch(/crew-cwd$/);
   }
+});
+
+// Root without DAC_OVERRIDE cannot chdir into the agent's 0700 working copy (the drop volume's
+// mount point), so Claude starts in / and changes directory after the uid drop.
+test('Claude as the agent starts in / and enters its working copy after the uid drop', () => {
+  const agent = { uid: 10001, gid: 10001, home: '/home/agent' };
+  const s = claudeSpawnArgs(['-p', 'x'], '/home/agent/repo', agent);
+  expect(s.cwd).toBe('/');
+  expect([s.cmd, ...s.argv]).toEqual([
+    'setpriv',
+    '--reuid=10001',
+    '--regid=10001',
+    '--clear-groups',
+    '--',
+    'sh',
+    '-c',
+    'umask 022; cd -- "$1" && shift && exec "$@"',
+    'jm-agent',
+    '/home/agent/repo',
+    'claude',
+    '-p',
+    'x',
+  ]);
+  expect(claudeSpawnArgs(['-p'], '/w', null)).toEqual({ cmd: 'claude', argv: ['-p'], cwd: '/w' });
 });

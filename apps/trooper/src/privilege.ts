@@ -122,6 +122,28 @@ export function asAgentArgv(id: AgentIdentity | null, argv: string[]): string[] 
   ];
 }
 
+/**
+ * `asAgentArgv`, run in `dir`. Root (no DAC_OVERRIDE) cannot chdir into the agent's 0700 working
+ * copy (the drop volume's mount point), so the caller spawns from `/` and the directory is entered
+ * only after the uid drop. Without an identity, argv is unchanged (the caller keeps its cwd).
+ */
+export function asAgentInDirArgv(id: AgentIdentity | null, dir: string, argv: string[]): string[] {
+  if (!id) return argv;
+  return [
+    'setpriv',
+    `--reuid=${id.uid}`,
+    `--regid=${id.gid}`,
+    '--clear-groups',
+    '--',
+    'sh',
+    '-c',
+    'umask 022; cd -- "$1" && shift && exec "$@"',
+    'jm-agent',
+    dir,
+    ...argv,
+  ];
+}
+
 function runAs(argv: string[], maxBytes: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const [cmd, ...args] = argv as [string, ...string[]];

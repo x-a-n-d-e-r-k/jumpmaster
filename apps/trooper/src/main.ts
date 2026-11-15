@@ -22,7 +22,7 @@ import {
   type AgentIdentity,
   agentProcessesAlive,
   agentSpawnOptions,
-  asAgentArgv,
+  asAgentInDirArgv,
   sweepUid,
   type TrooperIdentities,
   trooperIdentities,
@@ -128,6 +128,20 @@ function workRoot(): string {
 
 export { capEventData } from './events.js';
 
+/**
+ * How Claude is spawned. As the agent it starts from / and enters `cwd` after the uid drop: root
+ * (no DAC_OVERRIDE) cannot chdir into the agent's 0700 working copy.
+ */
+export function claudeSpawnArgs(
+  args: string[],
+  cwd: string,
+  as: AgentIdentity | null,
+): { cmd: string; argv: string[]; cwd: string } {
+  if (!as) return { cmd: 'claude', argv: args, cwd };
+  const [cmd, ...argv] = asAgentInDirArgv(as, cwd, ['claude', ...args]) as [string, ...string[]];
+  return { cmd, argv, cwd: '/' };
+}
+
 async function* spawnClaude(
   args: string[],
   env: NodeJS.ProcessEnv,
@@ -135,10 +149,10 @@ async function* spawnClaude(
   as: AgentIdentity | null = null,
   signal?: AbortSignal,
 ): AsyncIterable<string> {
-  const [cmd, ...argv] = asAgentArgv(as, ['claude', ...args]) as [string, ...string[]];
-  const child = spawn(cmd, argv, {
+  const s = claudeSpawnArgs(args, cwd, as);
+  const child = spawn(s.cmd, s.argv, {
     env: agentSpawnOptions(as, env).env,
-    cwd,
+    cwd: s.cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   // On a stop, kill the agent and everything it started; the stream then ends.

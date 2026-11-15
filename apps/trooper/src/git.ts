@@ -18,7 +18,12 @@ import {
   protectedPathMatches,
 } from '@jumpmaster/protocol';
 import { scrubEnv } from './gates.js';
-import { type AgentIdentity, asAgentArgv, type TrooperIdentities } from './privilege.js';
+import {
+  type AgentIdentity,
+  asAgentArgv,
+  asAgentInDirArgv,
+  type TrooperIdentities,
+} from './privilege.js';
 import { containsSecret, redact } from './redact.js';
 
 /** The only URL prefix the forge auth header is ever sent to. */
@@ -262,8 +267,9 @@ export function runGit(
     env.GIT_CEILING_DIRECTORIES = dirname(opts.gitDir);
     dir = dirname(opts.gitDir);
   }
-  return exec(asAgentArgv(opts.as ?? null, ['git', ...args]), {
-    cwd: dir,
+  // As the agent, start from / and enter `dir` after the uid drop: root can't chdir into 0700.
+  return exec(opts.as ? asAgentInDirArgv(opts.as, dir, ['git', ...args]) : ['git', ...args], {
+    cwd: opts.as ? '/' : dir,
     env,
     label: `git ${subcommand(args)}`,
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
@@ -931,8 +937,9 @@ export async function removeInstructionFiles(
     '{}',
     '+',
   ];
-  const out = await exec(asAgentArgv(as, find), {
-    cwd: dir,
+  // As the agent, enter `dir` after the uid drop: root can't chdir into its 0700 working copy.
+  const out = await exec(as ? asAgentInDirArgv(as, dir, find) : find, {
+    cwd: as ? '/' : dir,
     env: scrubEnv(process.env),
     label: 'strip',
   });

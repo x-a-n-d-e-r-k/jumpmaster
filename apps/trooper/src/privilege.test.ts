@@ -6,6 +6,7 @@ import {
   agentProcessesAlive,
   agentSpawnOptions,
   asAgentArgv,
+  asAgentInDirArgv,
   readAgentFile,
   sweepUid,
   trooperIdentities,
@@ -118,6 +119,27 @@ describe('spawning as another uid', () => {
 
   test('without an identity argv is unchanged', () =>
     expect(asAgentArgv(null, ['git', 'status'])).toEqual(['git', 'status']));
+
+  // Root without DAC_OVERRIDE cannot chdir into the agent's 0700 working copy (the volume's mount
+  // point): the process starts elsewhere and changes directory only after the uid drop.
+  test('asAgentInDirArgv changes directory after the uid drop', () =>
+    expect(asAgentInDirArgv(ids.agent, '/home/agent/repo', ['git', 'status'])).toEqual([
+      'setpriv',
+      '--reuid=10001',
+      '--regid=10001',
+      '--clear-groups',
+      '--',
+      'sh',
+      '-c',
+      'umask 022; cd -- "$1" && shift && exec "$@"',
+      'jm-agent',
+      '/home/agent/repo',
+      'git',
+      'status',
+    ]));
+
+  test('asAgentInDirArgv without an identity leaves argv unchanged', () =>
+    expect(asAgentInDirArgv(null, '/x', ['git', 'status'])).toEqual(['git', 'status']));
 
   test('the agent argv sets umask 0022 and no supplementary group', () => {
     const a = asAgentArgv(ids.agent, ['x']);

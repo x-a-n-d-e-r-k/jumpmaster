@@ -24,6 +24,7 @@ import {
   mirrorFetch,
   prepareBranch,
   remoteBranchSha,
+  removeInstructionFiles,
   runGit,
   setSpawn,
 } from './git.js';
@@ -219,6 +220,34 @@ describe('working copy and helpers', () => {
     }
     expect(rootCalls.length).toBeGreaterThan(0);
     for (const c of rootCalls) expect(c.env.GIT_CONFIG_GLOBAL).toBe('/dev/null');
+  });
+
+  test('an agent git call starts in / and enters its 0700 working copy after the uid drop', async () => {
+    const agent = { uid: 10001, gid: 10001, home: '/home/agent' };
+    const calls: Call[] = [];
+    setSpawn((cmd, args, opts) => {
+      calls.push({ argv: [cmd, ...args], cwd: opts.cwd as string, env: {} });
+      const child = new EventEmitter() as ReturnType<typeof spawn>;
+      Object.assign(child, {
+        stdout: new EventEmitter(),
+        stderr: new EventEmitter(),
+        kill: () => true,
+      });
+      setImmediate(() => child.emit('close', 0));
+      return child;
+    });
+    await commitIfDirty('/home/agent/repo', 'm', agent);
+    await removeInstructionFiles('/home/agent/repo', agent);
+    expect(calls.length).toBe(2);
+    for (const c of calls) {
+      expect(c.cwd).toBe('/');
+      const at = c.argv.indexOf('jm-agent');
+      expect(c.argv.slice(at - 1, at + 2)).toEqual([
+        'umask 022; cd -- "$1" && shift && exec "$@"',
+        'jm-agent',
+        '/home/agent/repo',
+      ]);
+    }
   });
 
   test('cloneForGates runs no git in the agent repo as the gate uid', async () => {
