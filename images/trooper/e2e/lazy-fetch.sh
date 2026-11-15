@@ -5,7 +5,8 @@
 # /home/agent/repo2 that plant everything an agent could use to make the staging fetch act:
 #   - a partial clone (blob:none) whose promisor remote is an observer that records every call, with
 #     the staged branch's blob missing, so only a lazy fetch could supply it;
-#   - core.fsmonitor and hooks (core.hooksPath and .git/hooks) that write a marker if run.
+#   - core.fsmonitor and real hooks (reference-transaction, pre-commit, post-commit, post-checkout, via
+#     core.hooksPath) that write a marker if run; a control proves they fire when git runs them.
 # Asserted: the observer, fsmonitor and hook markers are never written; the partial copy's staging
 # fails with the lazy-fetch refusal (explicit text); the complete copy stages and the head equals the
 # agent's commit. A raw `git cat-file` lazy fetch is the positive control: it does reach the
@@ -40,9 +41,9 @@ printf "#!/bin/sh\necho called >> %s/hook\nexit 0\n" "$M" > "$T/hook.sh"
 chmod +x "$T/rec.sh" "$T/fsm.sh" "$T/hook.sh"
 plant() { # repo
   git -C "$1" config core.fsmonitor "$T/fsm.sh"
-  mkdir -p "$1/.git/hooks" "$T/hooks"
-  for h in pre-upload-pack post-upload-pack reference-transaction pre-auto-gc; do
-    cp "$T/hook.sh" "$1/.git/hooks/$h"; cp "$T/hook.sh" "$T/hooks/$h"
+  mkdir -p "$T/hooks"
+  for h in reference-transaction pre-commit post-commit post-checkout; do
+    cp "$T/hook.sh" "$T/hooks/$h"
   done
   git -C "$1" config core.hooksPath "$T/hooks"
 }
@@ -69,6 +70,13 @@ R2=/home/agent/repo2
 git clone -q "file://$T/origin.git" "$R2"
 git -C "$R2" checkout -q -b work2 origin/work
 plant "$R2"
+# Controls: the planted fsmonitor and hooks do fire when git runs them in the agent copy, so their
+# absence after staging means something. status runs the fsmonitor; a commit runs the hooks.
+git -C "$R2" status >/dev/null 2>&1 || true
+[ -f "$M/fsmonitor" ] || { echo "FAIL: control: the planted fsmonitor never ran" >&2; exit 1; }
+git -C "$R2" commit -q --allow-empty -m control
+[ -f "$M/hook" ] || { echo "FAIL: control: the planted hooks never ran" >&2; exit 1; }
+echo "control: planted fsmonitor and hooks fire in the agent copy: ok"
 rm -f "$M"/*
 git -C "$R2" rev-parse work2 > "$T/head2"
 '
@@ -88,6 +96,7 @@ const msg = String(err.message);
 if (!/lazy fetching disabled/.test(msg)) fail("unexpected staging failure: " + msg.slice(0, 400));
 if (!/\(exit 128\)/.test(msg)) fail("expected exit 128, got: " + msg.slice(0, 400));
 if (markers().length) fail("staging the partial clone ran planted code or the promisor: " + markers());
+console.log("observed staging error: " + msg.replace(/\s+/g, " ").slice(0, 300));
 console.log("partial clone: staging refused (exit 128, lazy fetching disabled), no marker: ok");
 // Complete copy: staging succeeds with the agent head, and plants stay dormant.
 const want = readFileSync("/tmp/jm-10001/t/head2", "utf8").trim();
