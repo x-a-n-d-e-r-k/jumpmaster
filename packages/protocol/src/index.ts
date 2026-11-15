@@ -506,7 +506,12 @@ export function servedModel(modelUsage: unknown): string | null {
   return best;
 }
 
-const PUSHING_ROLES: readonly Role[] = ['implement', 'heal', 'resolve'];
+/** The roles whose work is pushed to a branch, by the push container. */
+export const PUSHING_ROLES: readonly Role[] = ['implement', 'heal', 'resolve'];
+
+export function isPushingRole(role: Role): boolean {
+  return PUSHING_ROLES.includes(role);
+}
 
 /**
  * Whether the push a result asks for is one its role may ask for. A result without a push request

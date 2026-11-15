@@ -7,20 +7,29 @@ import {
   type DropResult,
   DropResultSchema,
   EVENT_PREFIX,
+  isPushingRole,
   MAX_ARTIFACT_BYTES,
   MAX_ARTIFACTS,
   payloadSecrets,
   RESULT_PREFIX,
   redact,
+  redactTokenShapes,
   type TrooperEvent,
   TrooperEventSchema,
 } from '@jumpmaster/protocol';
-import type { DropClient } from './client.js';
+import type { Ack, DropClient } from './client.js';
 import type { ContainerDriver, DropNet } from './driver.js';
 import { type EgressSession, egressImage, startEgress, trooperEgressRefusal } from './egress.js';
 import { pullImage } from './pull.js';
+import {
+  type PendingPushes,
+  PUSH_BACKOFF_MAX_MS,
+  TROOPER_PUSH_LABEL,
+  TROOPER_PUSH_VERSION,
+} from './push.js';
 import { dropSubnetPool } from './subnets.js';
 import { digestOf, type ImageTrust, verifyImage } from './verify.js';
+import { prepareVolume, REMOVE_TIMEOUT_MS, REPO_MOUNT } from './volumes.js';
 
 /** Services a drop network holds under egress: `.8` to `.14` of its /28. */
 const MAX_EGRESS_SERVICES = 6;
@@ -96,6 +105,16 @@ export async function sweepDropNetworks(
 
 /** At the 15-second beat this is inside the server's 60-second lease. */
 const DEFAULT_LOST_SERVER_KILL_BEATS = 3;
+/**
+ * The grace a stick that lost its server gives the agent container before it kills it (Ruling 14):
+ * long enough to checkpoint onto the volume. The container never holds a write token, so the
+ * lease running out meanwhile lets nothing reach the forge.
+ */
+export const LOST_SERVER_GRACE_MS = 60_000;
+/** First wait before re-sending a result the server could not be reached for. */
+const RESULT_RETRY_MS = 5_000;
+const OLD_SERVER = 'server too old for push containers: deploy the server first';
+const OLD_IMAGE = 'trooper image too old for push containers';
 
 /** Rebuilds artifacts from their stdout chunks. A file that fails its hash is dropped. */
 class ArtifactAssembler {
@@ -157,7 +176,20 @@ type RunDeps = {
   subnetPool?: string;
   /** Drop networks in use, so the periodic sweep leaves them alone. */
   active?: Set<string>;
+  /** `TROOPER_IMAGE`: runs the volume's init container (never a drop's image). */
+  trooperImage?: string;
+  /** Where a pushing drop's volume goes once its agent container is gone. */
+  pending?: PendingPushes;
+  /** First wait before re-sending a held result (doubling, capped). */
+  resultRetryMs?: number;
 };
+
+/**
+ * What becomes of a pushing drop's volume once its agent container is confirmed gone: queued for
+ * the push loop, removed, or (when the answer is unknown) kept for rediscovery.
+ */
+type Disposition = 'push' | 'remove' | 'keep';
+type VolumeFate = { decide: () => Promise<Disposition> };
 
 export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void> {
   const { client, driver } = deps;
@@ -168,6 +200,13 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
     allowed: deps.allowedImages ?? allowedImages(process.env),
   };
   const log = deps.log ?? ((line: string) => console.log(line));
+  const pushes = isPushingRole(payload.role);
+  // Ruling 11: a server without push-v1 expects the trooper to push. Run nothing, post nothing and
+  // never heartbeat, so it sees the drop lost and requeues it rather than parking the item.
+  if (pushes && !client.features?.has('push-v1')) {
+    log(OLD_SERVER);
+    return;
+  }
   // What an operator checks after a change, with no restart: the gate timeouts this drop runs with
   // and which forge token it carries, as the 8-character SHA-256 prefix Settings shows.
   const forgeToken =
@@ -237,12 +276,18 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
       return;
     }
   }
+  // Inspected once, for whichever of egress and push support this drop needs.
+  let labelsOf: Promise<Record<string, string>> | undefined;
+  const trooperLabels = () => {
+    labelsOf ??= driver.imageLabels(image);
+    return labelsOf;
+  };
   if (egress) {
     // A trooper older than egress ignores payload.egress: refuse it before anything is created,
     // with a reason the operator can act on, rather than a drop that fails for want of a network.
     let refusal: string | null;
     try {
-      refusal = trooperEgressRefusal(image, await driver.imageLabels(image));
+      refusal = trooperEgressRefusal(image, await trooperLabels());
     } catch (e) {
       refusal = `cannot inspect image ${image} for egress support: ${e instanceof Error ? e.message : String(e)}`;
     }
@@ -251,6 +296,34 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
       return;
     }
   }
+  let volume: string | undefined;
+  if (pushes) {
+    // The push container stages from this image's agent home: one without the label can't.
+    let labels: Record<string, string>;
+    try {
+      labels = await trooperLabels();
+    } catch (e) {
+      await fail(`cannot inspect image ${image} for push support: ${message(e)}`);
+      return;
+    }
+    if (labels[TROOPER_PUSH_LABEL] !== TROOPER_PUSH_VERSION) {
+      await fail(OLD_IMAGE);
+      return;
+    }
+    try {
+      volume = await prepareVolume(driver, {
+        dropId,
+        epoch,
+        stickId: deps.stickId,
+        image: deps.trooperImage ?? TROOPER_IMAGE,
+      });
+    } catch (e) {
+      await fail(`repo volume failed: ${message(e)}`);
+      return;
+    }
+  }
+  // Until the agent's run says otherwise, the volume goes once its container is gone.
+  const fate: VolumeFate = { decide: async () => 'remove' };
   const labels = {
     'jumpmaster.drop': dropId,
     'jumpmaster.epoch': String(epoch),
@@ -289,13 +362,58 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
         return;
       }
     }
-    await runContainer(payload, deps, image, labels, network, net, session);
+    await runContainer(payload, deps, image, labels, network, net, session, volume, fate);
   } finally {
     if (session) await session.stop();
     if (network) await driver.removeServices(network, labels).catch(() => {});
     if (network) deps.active?.delete(network);
+    if (volume) await settleVolume(payload, deps, volume, fate, log);
   }
 }
+
+/**
+ * The end of a pushing drop's agent run. Nothing joins `PendingPushes`, and no volume is removed,
+ * until `removeAndWait` has confirmed the agent container gone (Ruling 14). Only then is the
+ * volume's fate decided (a salvage call included) and carried out.
+ */
+async function settleVolume(
+  payload: DropPayload,
+  deps: RunDeps,
+  volume: string,
+  fate: VolumeFate,
+  log: (line: string) => void,
+): Promise<void> {
+  const { driver } = deps;
+  const { dropId, epoch } = payload;
+  const say = (what: string, extra: Record<string, unknown> = {}) =>
+    log(JSON.stringify({ event: 'volume', dropId, epoch, what, ...extra }));
+  try {
+    await driver.removeAndWait(agentName(dropId, epoch), REMOVE_TIMEOUT_MS);
+  } catch (e) {
+    say('agent container not removed: volume kept, no push', { error: message(e) });
+    return;
+  }
+  let fateIs: Disposition;
+  try {
+    fateIs = await fate.decide();
+  } catch (e) {
+    say('salvage unanswered: volume kept', { error: redactTokenShapes(message(e)) });
+    return;
+  }
+  if (fateIs === 'keep') return;
+  if (fateIs === 'push' && deps.pending) {
+    deps.pending.add(dropId, { epoch, volume });
+    say('push pending');
+    return;
+  }
+  if (fateIs === 'push') say('no push queue: volume removed');
+  await driver.removeVolume(volume).catch((e: unknown) => {
+    say('volume not removed', { error: message(e) });
+  });
+}
+
+const agentName = (dropId: string, epoch: number) => `jumpmaster-drop-${dropId}-${epoch}`;
+const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 async function runContainer(
   payload: DropPayload,
@@ -305,25 +423,29 @@ async function runContainer(
   network: string | undefined,
   net: DropNet | undefined,
   session: EgressSession | undefined,
+  volume: string | undefined,
+  fate: VolumeFate,
 ): Promise<void> {
   const { client, driver } = deps;
   const { dropId, epoch } = payload;
   const handle = await driver.start({
     image,
     payload: JSON.stringify(payload),
-    name: `jumpmaster-drop-${dropId}-${epoch}`,
+    name: agentName(dropId, epoch),
     labels,
     ...(network ? { network } : {}),
     ...(net ? { egress: net } : {}),
     ...(payload.limits ? { limits: payload.limits } : {}),
+    ...(volume ? { mount: { volume, target: REPO_MOUNT } } : {}),
   });
 
   let stale = false;
   let cancelled = false;
+  let hard = false;
   let stopping: Promise<void> | undefined;
   let killing: Promise<void> | undefined;
-  const stop = () => {
-    stopping ??= handle.stop(STOP_GRACE_MS).catch(() => {});
+  const stop = (graceMs = STOP_GRACE_MS) => {
+    stopping ??= handle.stop(graceMs).catch(() => {});
     return stopping;
   };
 
@@ -356,6 +478,7 @@ async function runContainer(
 
   const hardKill = () => {
     cancelled = true;
+    hard = true;
     killing ??= handle.kill().catch(() => {});
     return killing;
   };
@@ -366,7 +489,8 @@ async function runContainer(
     try {
       const r = await client.heartbeat(dropId, epoch);
       failedBeats = 0;
-      if (r === 'ok') return;
+      // `killed` is for a pending push only; a running drop under the kill switch is hard-cancelled.
+      if (r === 'ok' || r === 'killed') return;
       if (r === 'hard_cancel') {
         void hardKill();
         return;
@@ -375,9 +499,10 @@ async function runContainer(
       else cancelled = true;
       void stop();
     } catch {
-      // Keep going through a blip. Past the limit the lease is ending anyway.
+      // Keep going through a blip. Past the limit the lease is ending anyway: stop with a grace
+      // (Ruling 14), and hold the result until the server answers again.
       failedBeats++;
-      if (failedBeats >= lostLimit) void hardKill();
+      if (failedBeats >= lostLimit) void stop(LOST_SERVER_GRACE_MS);
     }
   }, deps.heartbeatMs ?? 15_000);
   const flusher = setInterval(() => void flush(), FLUSH_MS);
@@ -417,10 +542,19 @@ async function runContainer(
     await Promise.allSettled(uploads);
     await stopping;
     // The server no longer owns this epoch (stale) or already cancelled it: it would 409 a result.
+    // A hard cancel (the kill switch) still asks to save the killed agent's work.
+    if (hard && volume) fate.decide = () => salvaged(client, dropId, epoch);
     if (stale || cancelled) return;
     if (result) {
       postedReal = true;
-      await client.postResult(dropId, epoch, result);
+      if (result.push && volume) {
+        const ack = await holdResult(client, dropId, epoch, result, deps.resultRetryMs);
+        // Accepted: the push loop takes the volume. Refused 409 (the drop went lost while the
+        // result was held): ask to salvage it before anything is removed (Ruling 14).
+        fate.decide = ack === 'ok' ? async () => 'push' : () => salvaged(client, dropId, epoch);
+      } else {
+        await client.postResult(dropId, epoch, result);
+      }
     } else {
       await client.postResult(dropId, epoch, {
         status: 'failed',
@@ -443,6 +577,34 @@ async function runContainer(
   } finally {
     clearInterval(hb);
     clearInterval(flusher);
+  }
+}
+
+/** `push` when the server accepts a salvage of this drop's volume, else `remove`. */
+async function salvaged(client: DropClient, dropId: string, epoch: number): Promise<Disposition> {
+  return (await client.salvage(dropId, epoch)) === 'ok' ? 'push' : 'remove';
+}
+
+/**
+ * Posts a push-requested result, re-sending it from memory while the server can't be reached (a
+ * network error or a 5xx). Any other refusal (a 422 push request) is thrown.
+ */
+async function holdResult(
+  client: DropClient,
+  dropId: string,
+  epoch: number,
+  result: DropResult,
+  firstMs = RESULT_RETRY_MS,
+): Promise<Ack> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await client.postResult(dropId, epoch, result);
+    } catch (e) {
+      const status = (e as { status?: unknown }).status;
+      if (typeof status === 'number' && status < 500) throw e;
+      const ms = Math.min(PUSH_BACKOFF_MAX_MS, firstMs * 2 ** attempt);
+      await new Promise((r) => setTimeout(r, ms));
+    }
   }
 }
 

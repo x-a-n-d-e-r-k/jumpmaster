@@ -1,7 +1,8 @@
 import { leaseLogger, StickClient } from './client.js';
 import { DockerDriver } from './docker.js';
 import { egressCapability } from './egress.js';
-import { reapOrphans, runDrop, sweepDropNetworks } from './runner.js';
+import { createPushLoop, PendingPushes, PUSH_LOOP_MS, pushOnce } from './push.js';
+import { reapOrphans, runDrop, sweepDropNetworks, TROOPER_IMAGE } from './runner.js';
 import {
   advertisedCapabilities,
   joinToken,
@@ -71,8 +72,14 @@ async function main() {
   if (reaped.length > 0) console.log(`removed ${reaped.length} orphaned trooper container(s)`);
   const active = new Set<string>();
   const id = stickId;
+  // Pending pushes run in their own loop, never in a lease slot (Ruling 15).
+  const pending = new PendingPushes();
+  const pushLoop = createPushLoop(pending, (entry) =>
+    pushOnce(entry, { client, driver, stickId: id, image: TROOPER_IMAGE, pending }),
+  );
+  setInterval(() => void pushLoop.tick(), PUSH_LOOP_MS);
   setInterval(() => {
-    sweepDropNetworks(driver, id, active)
+    sweepDropNetworks(driver, id, new Set([...active, ...pending.networks()]))
       .then((n) => {
         if (n > 0) console.log(`removed ${n} leaked drop network(s)`);
       })
@@ -96,6 +103,8 @@ async function main() {
         stickId,
         active,
         trust,
+        pending,
+        trooperImage: TROOPER_IMAGE,
         heartbeatMs: 15_000,
         ...(process.env.JM_LOST_SERVER_KILL_BEATS
           ? { lostServerKillBeats: Number(process.env.JM_LOST_SERVER_KILL_BEATS) }

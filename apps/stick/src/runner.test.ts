@@ -13,7 +13,14 @@ import {
 import { describe, expect, test } from 'vitest';
 import type { DropClient } from './client.js';
 import type { ContainerDriver, DropNet } from './driver.js';
-import { allowedImages, reapOrphans, runDrop, sweepDropNetworks } from './runner.js';
+import { PendingPushes } from './push.js';
+import {
+  allowedImages,
+  LOST_SERVER_GRACE_MS,
+  reapOrphans,
+  runDrop,
+  sweepDropNetworks,
+} from './runner.js';
 import { type Cosign, type ImageTrust, releaseSigner, VerifyCache } from './verify.js';
 
 const NET: DropNet = {
@@ -63,6 +70,8 @@ function fakeDriver(
     /** Which images are on the engine already (default: all of them). */
     present?: (ref: string) => boolean;
     pullError?: string;
+    /** `removeAndWait` throws `container not removed`. */
+    removeError?: boolean;
   } = {},
 ) {
   const order: string[] = [];
@@ -85,7 +94,10 @@ function fakeDriver(
     driver: {
       async imageLabels(image) {
         d.inspected.push(image);
-        const l = opts.imageLabels ?? { 'org.jumpmaster.trooper.egress': '1' };
+        const l = opts.imageLabels ?? {
+          'org.jumpmaster.trooper.egress': '1',
+          'org.jumpmaster.trooper.push': '1',
+        };
         if (l instanceof Error) throw l;
         return l;
       },
@@ -195,18 +207,26 @@ function fakeDriver(
       async removeNetworksByLabel() {
         return 0;
       },
-      async createVolume() {},
+      async createVolume(name) {
+        order.push(`volume ${name.replace(/-[0-9a-f]{8}$/, '')}`);
+      },
       async inspectVolume() {
         return undefined;
       },
       async listVolumesByLabel() {
         return [];
       },
-      async removeVolume() {},
-      async initVolume() {
+      async removeVolume(name) {
+        order.push(`removeVolume ${name.replace(/-[0-9a-f]{8}$/, '')}`);
+      },
+      async initVolume(o) {
+        order.push(`init ${o.image}`);
         return 0;
       },
-      async removeAndWait() {},
+      async removeAndWait(name) {
+        order.push(`removeAndWait ${name}`);
+        if (opts.removeError) throw new Error('container not removed');
+      },
       async freeBytes() {
         return 100 * 2 ** 30;
       },
@@ -217,8 +237,15 @@ function fakeDriver(
 
 function fakeClient(heartbeatReply: 'ok' | 'cancel' | 'hard_cancel' | 'stale' = 'ok') {
   return {
+    features: new Set(['push-v1']) as ReadonlySet<string>,
     events: [] as TrooperEvent[][],
     result: undefined as DropResult | undefined,
+    salvageReply: 'refused' as 'ok' | 'refused',
+    salvaged: 0,
+    async salvage() {
+      this.salvaged++;
+      return this.salvageReply;
+    },
     heartbeatReply,
     async postArtifact(
       _dropId: string,
@@ -240,6 +267,10 @@ function fakeClient(heartbeatReply: 'ok' | 'cancel' | 'hard_cancel' | 'stale' = 
     },
   } satisfies DropClient & Record<string, unknown>;
 }
+
+/** What a pushing drop's agent run adds around its container (the volume, then its removal). */
+const VOLUME_START = ['volume jm-drop-d1-3', 'init jumpmaster-trooper:dev'];
+const VOLUME_END = ['removeAndWait jumpmaster-drop-d1-3', 'removeVolume jm-drop-d1-3'];
 
 // The fixture image is not in the default allow-list; every legacy test runs with it allowed.
 process.env.JM_ALLOWED_IMAGES = 'jumpmaster-trooper:test';
@@ -649,7 +680,7 @@ describe('runDrop', () => {
     expect(d.killed).toBe(false);
   });
 
-  test('a stick that loses the server hard-kills its drop after the limit', async () => {
+  test('a stick that loses the server stops its drop, with a grace, after the limit', async () => {
     const d = fakeDriver([], { hang: true });
     const client = fakeClient();
     let beats = 0;
@@ -664,8 +695,9 @@ describe('runDrop', () => {
       stickId: 's1',
       lostServerKillBeats: 3,
     });
-    expect(beats).toBe(3);
-    expect(d.killed).toBe(true);
+    expect(beats).toBeGreaterThanOrEqual(3);
+    expect(d.stopGrace).toBe(LOST_SERVER_GRACE_MS);
+    expect(d.killed).toBe(false);
   });
 
   test('a heartbeat recovering before the limit resets the count', async () => {
@@ -862,7 +894,7 @@ describe('egress', () => {
     expect(d.proxy).toBeUndefined();
     expect(d.started?.egress).toBeUndefined();
     expect(d.started?.network).toBeUndefined();
-    expect(d.order).toEqual(['trooper']);
+    expect(d.order).toEqual([...VOLUME_START, 'trooper', ...VOLUME_END]);
   });
 
   test('the proxy gets the static .2 address and JM_EGRESS_BIND equal to it', async () => {
@@ -886,7 +918,16 @@ describe('egress', () => {
       },
     });
     // Ready before services and the trooper; everything torn down after, proxy included.
-    expect(d.order).toEqual(['network', 'proxy', 'services', 'trooper', 'proxy-stop', 'teardown']);
+    expect(d.order).toEqual([
+      ...VOLUME_START,
+      'network',
+      'proxy',
+      'services',
+      'trooper',
+      'proxy-stop',
+      'teardown',
+      ...VOLUME_END,
+    ]);
     expect(d.servicesNet).toEqual(NET);
     expect(d.started?.egress).toEqual(NET);
     expect(d.started?.network).toBe('jm-drop-d1-3');
@@ -898,7 +939,15 @@ describe('egress', () => {
   test('a drop under egress without services still gets its own network and proxy', async () => {
     const d = fakeDriver([done]);
     await runDrop(enforce, deps(d));
-    expect(d.order).toEqual(['network', 'proxy', 'trooper', 'proxy-stop', 'teardown']);
+    expect(d.order).toEqual([
+      ...VOLUME_START,
+      'network',
+      'proxy',
+      'trooper',
+      'proxy-stop',
+      'teardown',
+      ...VOLUME_END,
+    ]);
     expect(d.services).toBeUndefined();
   });
 
@@ -983,16 +1032,24 @@ describe('egress', () => {
       await runDrop(monitor, deps(d, client));
       expect(d.inspected).toEqual(['trooper']);
       expect(client.result).toMatchObject({ status: 'completed' });
-      expect(d.order).toEqual(['network', 'proxy', 'trooper', 'proxy-stop', 'teardown']);
+      expect(d.order).toEqual([
+        ...VOLUME_START,
+        'network',
+        'proxy',
+        'trooper',
+        'proxy-stop',
+        'teardown',
+        ...VOLUME_END,
+      ]);
     });
 
-    test('egress off never inspects the image: an older image still runs', async () => {
-      const d = fakeDriver([done], { imageLabels: {} });
+    test('egress off never checks egress support: an image without it still runs', async () => {
+      const d = fakeDriver([done], { imageLabels: { 'org.jumpmaster.trooper.push': '1' } });
       const client = fakeClient();
       await runDrop({ ...payload, image: 'trooper' }, deps(d, client));
-      expect(d.inspected).toEqual([]);
+      expect(d.inspected).toEqual(['trooper']); // for push support only
       expect(client.result).toMatchObject({ status: 'completed' });
-      expect(d.order).toEqual(['trooper']);
+      expect(d.order).toEqual([...VOLUME_START, 'trooper', ...VOLUME_END]);
     });
   });
 
@@ -1169,12 +1226,14 @@ describe('image trust: verify, then pull, then create', () => {
       `pull ${TROOPER}`,
       `pull ${EGRESS}`,
       `pull ${DB}`,
+      ...VOLUME_START,
       'network',
       'proxy',
       'services',
       'trooper',
       'proxy-stop',
       'teardown',
+      ...VOLUME_END,
     ]);
     // Every container is created from the verified digest reference itself.
     expect(d.started?.image).toBe(TROOPER);
@@ -1315,7 +1374,7 @@ describe('image trust: verify, then pull, then create', () => {
       },
     );
     expect(client.result).toMatchObject({ status: 'completed' });
-    expect(d.order).toEqual(['trooper']);
+    expect(d.order).toEqual([...VOLUME_START, 'trooper', ...VOLUME_END]);
     // A digest the allow-list names is pulled when it's missing (the only change: it can run).
     const pin = `reg.example/trooper@${dg('9')}`;
     const e = fakeDriver([done], { present: () => false });
@@ -1328,6 +1387,240 @@ describe('image trust: verify, then pull, then create', () => {
         trust: { policy: 'allowlist', allowed: new Set([pin]) },
       },
     );
-    expect(e.order).toEqual([`pull ${pin}`, 'trooper']);
+    expect(e.order).toEqual([`pull ${pin}`, ...VOLUME_START, 'trooper', ...VOLUME_END]);
+  });
+});
+
+describe('push containers: the agent run on a volume', () => {
+  const SHA = 'c'.repeat(40);
+  const PUSH_RESULT = `JM_RESULT ${JSON.stringify({
+    status: 'completed',
+    headSha: SHA,
+    push: { kind: 'final', expectSha: SHA },
+    gates: [],
+  })}`;
+  const AGENT = 'jumpmaster-drop-d1-3';
+  const VOL = 'removeVolume jm-drop-d1-3';
+
+  /** A pending-push queue that records, in the driver's order, when an entry is added. */
+  function queue(order: string[]) {
+    const pending = new PendingPushes();
+    const add = pending.add.bind(pending);
+    pending.add = (dropId, o, now) => {
+      order.push(`add ${dropId}`);
+      expect(o.volume).toMatch(/^jm-drop-d1-3-[0-9a-f]{8}$/);
+      add(dropId, o, now);
+    };
+    return pending;
+  }
+
+  const deps = (d: ReturnType<typeof fakeDriver>, client: ReturnType<typeof fakeClient>) => ({
+    client,
+    driver: d.driver,
+    heartbeatMs: 5,
+    stickId: 's1',
+    trooperImage: 'trooper:base',
+    pending: queue(d.order),
+    resultRetryMs: 1,
+  });
+
+  test('the volume is prepared from the base image before the agent container, its only mount', async () => {
+    const d = fakeDriver([PUSH_RESULT]);
+    await runDrop(payload, deps(d, fakeClient()));
+    expect(d.order.slice(0, 3)).toEqual(['volume jm-drop-d1-3', 'init trooper:base', 'trooper']);
+    expect(d.started?.image).toBe('jumpmaster-trooper:test');
+    expect(d.started?.mount?.volume).toMatch(/^jm-drop-d1-3-[0-9a-f]{8}$/);
+    expect(d.started?.mount?.target).toBe('/home/agent/repo');
+  });
+
+  test('posts the push-requested result before any push container', async () => {
+    const d = fakeDriver([PUSH_RESULT]);
+    const client = fakeClient();
+    const o = deps(d, client);
+    await runDrop(payload, o);
+    expect(client.result?.push).toEqual({ kind: 'final', expectSha: SHA });
+    // runDrop starts only the agent container: the push loop owns the rest.
+    expect(d.order.filter((x) => x === 'trooper')).toHaveLength(1);
+    expect(o.pending.size()).toBe(1);
+    expect(d.order).not.toContain(VOL);
+  });
+
+  test('starts the push container only after the agent container is removed', async () => {
+    const d = fakeDriver([PUSH_RESULT]);
+    const o = deps(d, fakeClient());
+    await runDrop(payload, o);
+    const removed = d.order.indexOf(`removeAndWait ${AGENT}`);
+    expect(removed).toBeGreaterThan(-1);
+    expect(d.order.indexOf('add d1')).toBeGreaterThan(removed);
+  });
+
+  test('an agent container that is not confirmed gone gets no entry and keeps its volume', async () => {
+    const d = fakeDriver([PUSH_RESULT], { removeError: true });
+    const o = deps(d, fakeClient());
+    await runDrop(payload, o);
+    expect(o.pending.size()).toBe(0);
+    expect(d.order).not.toContain(VOL);
+  });
+
+  test('a result without push removes the volume', async () => {
+    const d = fakeDriver(['JM_RESULT {"status":"no_changes","gates":[]}']);
+    const o = deps(d, fakeClient());
+    await runDrop(payload, o);
+    expect(o.pending.size()).toBe(0);
+    expect(d.order.indexOf(VOL)).toBeGreaterThan(d.order.indexOf(`removeAndWait ${AGENT}`));
+  });
+
+  test('holds the result in memory while the server is unreachable', async () => {
+    const d = fakeDriver([PUSH_RESULT]);
+    const client = fakeClient();
+    let tries = 0;
+    client.postResult = async (_d, _e, r) => {
+      tries++;
+      if (tries < 4) throw new Error('fetch failed');
+      client.result = r;
+      return 'ok';
+    };
+    const o = deps(d, client);
+    await runDrop(payload, o);
+    expect(tries).toBe(4);
+    expect(o.pending.size()).toBe(1);
+  });
+
+  test('a 409 on a held result triggers salvage, not removal', async () => {
+    const d = fakeDriver([PUSH_RESULT]);
+    const client = fakeClient();
+    client.salvageReply = 'ok';
+    client.postResult = async () => 'stale';
+    const o = deps(d, client);
+    await runDrop(payload, o);
+    expect(client.salvaged).toBe(1);
+    expect(o.pending.size()).toBe(1);
+    expect(d.order).not.toContain(VOL);
+
+    // Refused: now the volume goes.
+    const d2 = fakeDriver([PUSH_RESULT]);
+    const refused = fakeClient();
+    refused.postResult = async () => 'stale';
+    const o2 = deps(d2, refused);
+    await runDrop(payload, o2);
+    expect(refused.salvaged).toBe(1);
+    expect(o2.pending.size()).toBe(0);
+    expect(d2.order).toContain(VOL);
+  });
+
+  test('a push request the server refuses (422) removes the volume', async () => {
+    const d = fakeDriver([PUSH_RESULT]);
+    const client = fakeClient();
+    client.postResult = async () => {
+      throw Object.assign(new Error('result failed: 422'), { status: 422 });
+    };
+    const o = deps(d, client);
+    await expect(runDrop(payload, o)).rejects.toThrow('422');
+    expect(client.salvaged).toBe(0);
+    expect(o.pending.size()).toBe(0);
+    expect(d.order).toContain(VOL);
+  });
+
+  test('lost server stops with a 60 s grace', async () => {
+    expect(LOST_SERVER_GRACE_MS).toBe(60_000);
+    const d = fakeDriver([], { hang: true });
+    const client = fakeClient();
+    client.heartbeat = async () => {
+      throw new Error('network down');
+    };
+    await runDrop(payload, { ...deps(d, client), lostServerKillBeats: 3 });
+    expect(d.stopped).toBe(true);
+    expect(d.stopGrace).toBe(LOST_SERVER_GRACE_MS);
+    expect(d.killed).toBe(false);
+  });
+
+  test('hard cancel kills, then salvages', async () => {
+    const d = fakeDriver([], { hang: true });
+    const client = fakeClient('hard_cancel');
+    client.salvageReply = 'ok';
+    let salvagedAt = -1;
+    const salvage = client.salvage.bind(client);
+    client.salvage = async () => {
+      salvagedAt = d.order.length;
+      d.order.push('salvage');
+      return salvage();
+    };
+    const o = deps(d, client);
+    await runDrop(payload, o);
+    expect(d.killed).toBe(true);
+    expect(d.stopped).toBe(false);
+    expect(client.result).toBeUndefined();
+    expect(salvagedAt).toBeGreaterThan(d.order.indexOf(`removeAndWait ${AGENT}`));
+    expect(d.order.indexOf('add d1')).toBeGreaterThan(salvagedAt);
+    expect(d.order).not.toContain(VOL);
+  });
+
+  test('salvage starts no push container until the killed agent container is removed', async () => {
+    const d = fakeDriver([], { hang: true, removeError: true });
+    const client = fakeClient('hard_cancel');
+    client.salvageReply = 'ok';
+    const o = deps(d, client);
+    await runDrop(payload, o);
+    expect(d.killed).toBe(true);
+    expect(o.pending.size()).toBe(0);
+    expect(d.order).not.toContain(VOL);
+  });
+
+  test('a stale or cancelled drop removes its volume without salvage', async () => {
+    for (const reply of ['stale', 'cancel'] as const) {
+      const d = fakeDriver([], { hang: true });
+      const client = fakeClient(reply);
+      const o = deps(d, client);
+      await runDrop(payload, o);
+      expect(client.salvaged).toBe(0);
+      expect(o.pending.size()).toBe(0);
+      expect(d.order.indexOf(VOL)).toBeGreaterThan(d.order.indexOf(`removeAndWait ${AGENT}`));
+    }
+  });
+
+  test('a pushing role from a server without push-v1 is never started and gets no result', async () => {
+    const d = fakeDriver([PUSH_RESULT]);
+    const client = fakeClient();
+    client.features = new Set();
+    let beats = 0;
+    client.heartbeat = async () => {
+      beats++;
+      return 'ok';
+    };
+    const lines: string[] = [];
+    await runDrop(payload, { ...deps(d, client), log: (l) => lines.push(l) });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(d.order).toEqual([]);
+    expect(client.result).toBeUndefined();
+    expect(beats).toBe(0);
+    expect(lines).toContain('server too old for push containers: deploy the server first');
+  });
+
+  test('a non-pushing role runs on a server without push-v1, with no volume', async () => {
+    const review = DropPayloadSchema.parse({
+      ...payload,
+      role: 'review',
+      pr: { number: 2, branch: 'agent/issue-1', headSha: 'a'.repeat(40) },
+    });
+    const d = fakeDriver(['JM_RESULT {"status":"completed","gates":[]}']);
+    const client = fakeClient();
+    client.features = new Set();
+    await runDrop(review, deps(d, client));
+    expect(d.order).toEqual(['trooper']);
+    expect(d.started?.mount).toBeUndefined();
+    expect(client.result?.status).toBe('completed');
+  });
+
+  test('refuses an image without the push label', async () => {
+    const d = fakeDriver([PUSH_RESULT], {
+      imageLabels: { 'org.jumpmaster.trooper.egress': '1' },
+    });
+    const client = fakeClient();
+    await runDrop(payload, deps(d, client));
+    expect(client.result).toMatchObject({
+      status: 'failed',
+      reason: 'trooper image too old for push containers',
+    });
+    expect(d.order).toEqual([]);
   });
 });
