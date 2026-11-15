@@ -4,7 +4,7 @@ import type { Db } from '../db/open.js';
 import { getPullRequest, getWorkItem } from '../db/repo.js';
 import type { ZonePass } from '../flow/snapshot.js';
 import { currentObjective, getGoals } from '../goals.js';
-import type { ForgePair } from '../outbox.js';
+import { type ForgePair, unsanitizeForgeText } from '../outbox.js';
 import { crewTemplate, fence, neutralise } from '../payloads.js';
 import { isCrewFiled } from '../sync.js';
 import { crewIssueSlots } from './actions.js';
@@ -53,7 +53,11 @@ const CUT_MARK = '\n[cut to fit the prompt limit]';
  */
 function assemble(role: CrewRole, dropId: string, raw: Section[]): string {
   const budget = MAX_CREW_PROMPT_BYTES - bytes(`${crewTemplate(role)}\n\n`);
-  const sections = raw.map((s) => ({ ...s, text: neutralise(s.text) }));
+  // Forge and crew text (data) loses the outbox's mention-breaking joiners first.
+  const sections = raw.map((s) => ({
+    ...s,
+    text: neutralise(s.kind === 'data' ? unsanitizeForgeText(s.text) : s.text),
+  }));
   const render = (list: Section[]) => list.map((s) => renderSection(dropId, s)).join('\n\n');
   let out = render(sections);
   if (bytes(out) <= budget) return out;

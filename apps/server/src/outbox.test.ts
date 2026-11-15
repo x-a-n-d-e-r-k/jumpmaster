@@ -19,7 +19,9 @@ import {
   pairFor,
   resolveUnknown,
   runOp,
+  sanitizeCrewText,
   sanitizeForgeText,
+  unsanitizeForgeText,
 } from './outbox.js';
 import { FORGE_WRITES, fakeForgePair } from './test/fakes.js';
 import { plus, t0, tmpDbFile } from './test/helpers.js';
@@ -524,6 +526,36 @@ describe('sanitizeForgeText', () => {
     expect(sanitizeForgeText('x'.repeat(100), [], 10)).toHaveLength(10);
     expect(sanitizeForgeText('ab `code span` cd', [], 8)).toBe('ab ');
     expect(sanitizeForgeText('ab `c` `d e`', [], 9)).toBe('ab `c` ');
+  });
+});
+
+describe('unsanitizeForgeText', () => {
+  test('undoes sanitizeCrewText in prose and code spans', () => {
+    for (const x of [
+      'Import @scope/pkg from https://host/path, see www.example.com, #12 and GH-34.',
+      'Use `@scope/pkg`, `https://host/path`, `www.example.com`, `#12` and `GH-34` verbatim.',
+      '@scope/pkg\nhttps://host/path\nWWW.example.com\n#12\ngh-34\n',
+      '```ts\nimport x from "@scope/pkg"; // https://host/path #12 GH-34 www.example.com\n```',
+    ]) {
+      const sanitized = sanitizeCrewText(x, []);
+      expect(sanitized).not.toBe(x);
+      expect(unsanitizeForgeText(sanitized)).toBe(x);
+    }
+  });
+
+  test('undoes sanitizeForgeText too', () => {
+    const x = 'cc @org/team at https://a.test and www.b.test';
+    expect(unsanitizeForgeText(sanitizeForgeText(x, []))).toBe(x);
+  });
+
+  test('keeps every other zero-width joiner, such as an emoji sequence', () => {
+    for (const x of [
+      '\u{1F468}\u200d\u{1F469}\u200d\u{1F467} family',
+      '\u{1F3F3}\u{FE0F}\u200d\u{1F308}',
+      'a\u200db @\u200d- #\u200dx gh-\u200dy :\u200d/',
+    ]) {
+      expect(unsanitizeForgeText(x)).toBe(x);
+    }
   });
 });
 
