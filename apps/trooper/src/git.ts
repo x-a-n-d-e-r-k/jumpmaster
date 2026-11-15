@@ -79,6 +79,12 @@ function exec(argv: string[], o: ExecOpts): Promise<string> {
       if (aborted) return;
       aborted = msg;
       child.kill('SIGKILL');
+      // Settle now: a grandchild (a remote hook, a transport helper) can hold the pipes open, and
+      // 'close' would wait for it.
+      done();
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      reject(new Error(msg));
     };
     const timer =
       o.timeoutMs !== undefined ? setTimeout(() => abort('timeout'), o.timeoutMs) : null;
@@ -257,11 +263,14 @@ function ensureRootDir(path: string): void {
   if (!existsSync(path)) mkdirSync(path, { mode: 0o755 });
 }
 
+/** The fixed config of every root-owned bare repo: nothing an earlier process wrote survives. */
+const BARE_CONFIG = '[core]\n\trepositoryformatversion = 0\n\tbare = true\n';
+
 async function initBare(gitDir: string): Promise<void> {
   ensureRootDir(gitDir);
   await runGit(undefined, ['init', '--bare', '-q', '--template='], '', { gitDir });
   // Fixed config: nothing an earlier process wrote survives.
-  writeFileSync(join(gitDir, 'config'), '[core]\n\trepositoryformatversion = 0\n\tbare = true\n');
+  writeFileSync(join(gitDir, 'config'), BARE_CONFIG);
   rmSync(join(gitDir, 'hooks'), { recursive: true, force: true });
 }
 
@@ -377,6 +386,7 @@ export async function remoteBranchSha(
   target: RemoteTarget,
   branch: string,
   token: string,
+  timeoutMs?: number,
 ): Promise<string | null> {
   const scratch = mkdtempSync(join(workRoot, 'jm-lsremote-'));
   try {
@@ -386,7 +396,7 @@ export async function remoteBranchSha(
       undefined,
       [...PRISTINE, ...protocolFor(url), 'ls-remote', '--heads', url, `refs/heads/${branch}`],
       token,
-      { gitDir: scratch },
+      { gitDir: scratch, ...(timeoutMs !== undefined ? { timeoutMs } : {}) },
     );
     const line = out.split('\n').find((l) => l.endsWith(`\trefs/heads/${branch}`));
     return line ? (line.split('\t')[0] as string) : null;
@@ -670,10 +680,7 @@ async function guardedPush(
     if (tooLarge()) throw new Error('push fetch too large');
     sweep();
     // Nothing the agent fetch could have touched survives.
-    writeFileSync(
-      join(pushDir, 'config'),
-      '[core]\n\trepositoryformatversion = 0\n\tbare = true\n',
-    );
+    writeFileSync(join(pushDir, 'config'), BARE_CONFIG);
     rmSync(join(pushDir, 'hooks'), { recursive: true, force: true });
 
     if (o.base !== undefined) {
@@ -769,8 +776,6 @@ export function pushExistingBranch(
 export const HARDENED_UPLOAD_PACK =
   'env GIT_NO_LAZY_FETCH=1 git -c core.fsmonitor=false -c core.hooksPath=/dev/null upload-pack';
 
-const BARE_CONFIG = '[core]\n\trepositoryformatversion = 0\n\tbare = true\n';
-
 export type StageOptions = {
   as?: AgentIdentity | null;
   /** Kills every agent-uid process; runs before and after the agent's upload-pack. */
@@ -843,6 +848,14 @@ export async function stageFromAgent(
   }
 }
 
+/**
+ * git push exits 1 with `failed to push some refs` when the remote refused a ref (`[rejected]`,
+ * `[remote rejected]`). A transport failure exits 128 with a `fatal:` line of git's own (a
+ * remote hook's output is prefixed `remote: `), and a timeout carries no git output at all.
+ */
+const pushRejected = (msg: string): boolean =>
+  msg.includes('(exit 1)') && msg.includes('failed to push some refs') && !/^fatal:/m.test(msg);
+
 /** A failure carrying its retry classification; its message is redacted before it leaves. */
 class PushFailure extends Error {
   constructor(
@@ -864,9 +877,11 @@ const failure = (e: unknown, retryable: boolean): PushFailure =>
 export async function pushStaged(
   pushDir: string,
   grant: PushGrant,
-  o: { remoteUrl?: string } = {},
+  o: { remoteUrl?: string; timeoutMs?: number } = {},
 ): Promise<PushResult> {
   const { token, branch, lease } = grant;
+  // Every network call is bounded: a stalled connection fails (retryable), never hangs.
+  const timeoutMs = o.timeoutMs ?? PUSH_FETCH_TIMEOUT_MS;
   const ref = `refs/heads/${branch}`;
   const target: RemoteTarget = {
     owner: grant.owner,
@@ -890,7 +905,7 @@ export async function pushStaged(
           `+refs/heads/${grant.base}:refs/jm/base`,
         ],
         token,
-        { gitDir: pushDir, timeoutMs: PUSH_FETCH_TIMEOUT_MS },
+        { gitDir: pushDir, timeoutMs },
       );
     } catch (e) {
       throw failure(e, true);
@@ -931,13 +946,13 @@ export async function pushStaged(
           `${ref}:${ref}`,
         ],
         token,
-        { gitDir: pushDir },
+        { gitDir: pushDir, timeoutMs },
       );
     } catch (e) {
       // The remote decides: our own earlier push that died before reporting, a remote that moved
       // past the lease (stale), or a push that never landed (retry).
       const want = grant.expectSha ?? head;
-      const tip = await remoteBranchSha(target, branch, token).catch((le: unknown) => {
+      const tip = await remoteBranchSha(target, branch, token, timeoutMs).catch((le: unknown) => {
         throw failure(le, true);
       });
       if (tip === want) return { status: 'pushed', headSha: want, alreadyThere: true };
@@ -947,6 +962,10 @@ export async function pushStaged(
           false,
         );
       }
+      // The remote is untouched: a decline (protection rule, hook, push protection) is final; a
+      // transport failure or timeout may succeed next time.
+      const msg = (e as Error).message;
+      if (pushRejected(msg)) throw new PushFailure(`push rejected: ${msg}`, false);
       throw failure(e, true);
     }
     const upToDate = out.split('\n').some((l) => l.startsWith('=\t') && l.includes(ref));

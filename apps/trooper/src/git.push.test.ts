@@ -413,6 +413,42 @@ describe('pushStaged', () => {
     expect(leftovers()).toEqual([]);
   });
 
+  test('a remote decline with the branch unchanged is not retryable', async () => {
+    const w = await world('declined');
+    writeFileSync(join(w.dir, 'dc.txt'), 'dc\n');
+    await commitIfDirty(w.dir, 'feat: dc');
+    const secret = 'hook-echoed-secret-5678';
+    const hook = join(w.origin, 'hooks', 'pre-receive');
+    writeFileSync(hook, `#!/bin/sh\necho "denied by policy ${secret}" >&2\nexit 1\n`);
+    chmodSync(hook, 0o755);
+    const r = await stageAndPush(w, { secrets: [secret] });
+    expect(r.status).toBe('failed');
+    if (r.status !== 'failed') return;
+    expect(r.retryable).toBe(false);
+    expect(r.reason).toContain('denied by policy');
+    expect(r.reason).not.toContain(secret);
+    expect(r.reason.length).toBeLessThanOrEqual(2000);
+    expect(w.remoteTip()).toBe(w.s0);
+    expect(leftovers()).toEqual([]);
+  });
+
+  test('a stalled push times out and is retryable', async () => {
+    const w = await world('stalled');
+    writeFileSync(join(w.dir, 'st.txt'), 'st\n');
+    await commitIfDirty(w.dir, 'feat: st');
+    const hook = join(w.origin, 'hooks', 'pre-receive');
+    writeFileSync(hook, '#!/bin/sh\nexec sleep 20\n');
+    chmodSync(hook, 0o755);
+    const grant = grantFor(w);
+    const r = await stage(w);
+    const t0 = Date.now();
+    const res = await pushStaged(r.pushDir, grant, { remoteUrl: w.target.url, timeoutMs: 3_000 });
+    expect(Date.now() - t0).toBeLessThan(15_000);
+    expect(res).toMatchObject({ status: 'failed', retryable: true });
+    expect(w.remoteTip()).toBe(w.s0);
+    expect(leftovers()).toEqual([]);
+  }, 30_000);
+
   test('nothing is read from a mirror', async () => {
     const w = await world('nomirror');
     writeFileSync(join(w.dir, 'nm.txt'), 'nm\n');
