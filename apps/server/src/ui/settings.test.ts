@@ -51,6 +51,8 @@ async function world(
     file?: Record<string, unknown>;
     /** Db mode: a document applied with the token before the app starts. */
     doc?: Record<string, unknown>;
+    /** The HTTP status GitHub refuses every credential test with. */
+    forgeRefuses?: number;
   } = {},
 ) {
   const dbFile = o.dbFile ?? tmpDbFile();
@@ -113,7 +115,11 @@ async function world(
     leaseWaitMs: 0,
     leasePollMs: 0,
     credentialForge: () => ({
-      viewerLogin: async () => 'octo-<author>',
+      viewerLogin: async () => {
+        if (o.forgeRefuses)
+          throw Object.assign(new Error('Bad credentials'), { status: o.forgeRefuses });
+        return 'octo-<author>';
+      },
       repoAccess: async () => ({}),
     }),
   });
@@ -275,6 +281,40 @@ describe('the credentials tab', () => {
     expect(removed.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
       'DELETE /api/control/secrets/claudeToken',
     ]);
+  });
+
+  test('a refused test (401) of an environment or file credential says where to change it and to restart, without the value', async () => {
+    const w = await world({ env: { JM_GITHUB_READ_TOKEN: READ }, forgeRefuses: 401 });
+    // The page's script, its fetch answered by the real route.
+    const ctx = vm.createContext({
+      document: { addEventListener: () => {}, querySelectorAll: () => [] },
+      encodeURIComponent,
+      jmFetch: async (path: string, body: unknown, method?: string) => {
+        const r = await w.call((method ?? 'POST') as 'POST', path, body);
+        return { ok: r.statusCode < 300, status: r.statusCode, json: async () => r.json() };
+      },
+    });
+    vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
+    const testOf = async (name: string) => {
+      const status = stubStatus();
+      const fn = ctx.jmTestCredential as (...a: unknown[]) => Promise<string>;
+      const result = await fn(name, { sudo: false, passphrase: PASS }, status);
+      return { result, text: status.textContent };
+    };
+    const env = await testOf('githubReadToken');
+    expect(env.result).toBe('failed');
+    expect(env.text).toBe(
+      "githubReadToken: GitHub rejected this token (401): it is expired, revoked or mistyped. It comes from the environment variable JM_GITHUB_READ_TOKEN: make a new token on GitHub, set JM_GITHUB_READ_TOKEN to it where the server's environment is set, and restart the server.",
+    );
+    const file = await testOf('githubReviewerToken');
+    expect(file.text).toBe(
+      `githubReviewerToken: GitHub rejected this token (401): it is expired, revoked or mistyped. It is read from the file ${join(w.secrets, 'github_reviewer_token')}: make a new token on GitHub, replace the file's contents with it, and restart the server.`,
+    );
+    for (const t of [env.text, file.text]) {
+      expect(t).not.toContain(READ);
+      expect(t).not.toContain(REVIEWER);
+      expect(t).not.toContain('/api/');
+    }
   });
 
   test('a Claude token past day 330 shows the expiry banner on the tab and on home', async () => {

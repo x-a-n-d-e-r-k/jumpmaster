@@ -319,4 +319,33 @@ describe('refusalWords: what a refused token test says (T10 finding 4)', () => {
       'GitHub did not accept the test (HTTP 503): try again in a moment.',
     );
   });
+
+  const VAULT_401 =
+    "GitHub rejected this token (401): it is expired, revoked or mistyped. Make a new one (the GitHub step and each project's GitHub page have the links).";
+
+  test('a 401 for an environment variable names it and says to change it where the server environment is set, then restart', () => {
+    const words = refusalWords(401, undefined, { source: 'env', path: 'JM_GITHUB_READ_TOKEN' });
+    expect(words).toBe(
+      "GitHub rejected this token (401): it is expired, revoked or mistyped. It comes from the environment variable JM_GITHUB_READ_TOKEN: make a new token on GitHub, set JM_GITHUB_READ_TOKEN to it where the server's environment is set, and restart the server.",
+    );
+    expect(words).not.toContain('/api/');
+  });
+
+  test('a 401 for a file names the path and says to replace its contents, then restart', () => {
+    const words = refusalWords(401, undefined, {
+      source: 'file',
+      path: '/run/secrets/github_reviewer_token',
+    });
+    expect(words).toBe(
+      "GitHub rejected this token (401): it is expired, revoked or mistyped. It is read from the file /run/secrets/github_reviewer_token: make a new token on GitHub, replace the file's contents with it, and restart the server.",
+    );
+  });
+
+  test("a vault credential's 401, and 403 and 404 from any source, keep today's words", () => {
+    expect(refusalWords(401, undefined, { source: 'vault' })).toBe(VAULT_401);
+    expect(refusalWords(401)).toBe(VAULT_401);
+    const env = { source: 'env', path: 'JM_GITHUB_READ_TOKEN' } as const;
+    expect(refusalWords(403, 'contents=write', env)).toBe(refusalWords(403, 'contents=write'));
+    expect(refusalWords(404, undefined, env)).toBe(refusalWords(404));
+  });
 });

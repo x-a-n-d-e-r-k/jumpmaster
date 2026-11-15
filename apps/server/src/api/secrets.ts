@@ -228,7 +228,7 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
               status: t.status,
               ...(t.permission ? { permission: t.permission } : {}),
               ...(t.problem ? { problem: t.problem } : {}),
-              error: t.problem ?? refusalWords(t.status, t.permission),
+              error: t.problem ?? refusalWords(t.status, t.permission, r),
             };
       });
     },

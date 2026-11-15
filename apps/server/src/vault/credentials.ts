@@ -252,13 +252,25 @@ export type TestDeps = {
   };
 };
 
+const REJECTED = 'GitHub rejected this token (401): it is expired, revoked or mistyped.';
+
 /**
  * A refused test in words a page can show: what GitHub's status means and what to do next.
- * Built from the status and the permission GitHub names, never from GitHub's message or the value.
+ * Built from the status, the permission GitHub names and where the credential comes from (its
+ * variable or file, so a 401 says where to change it), never from GitHub's message or the value.
  */
-export function refusalWords(status: number | null, permission?: string): string {
-  if (status === 401)
-    return "GitHub rejected this token (401): it is expired, revoked or mistyped. Make a new one (the GitHub step and each project's GitHub page have the links).";
+export function refusalWords(
+  status: number | null,
+  permission?: string,
+  from?: Pick<ResolvedCredential, 'source' | 'path'>,
+): string {
+  if (status === 401) {
+    if (from?.source === 'env' && from.path)
+      return `${REJECTED} It comes from the environment variable ${from.path}: make a new token on GitHub, set ${from.path} to it where the server's environment is set, and restart the server.`;
+    if (from?.source === 'file' && from.path)
+      return `${REJECTED} It is read from the file ${from.path}: make a new token on GitHub, replace the file's contents with it, and restart the server.`;
+    return `${REJECTED} Make a new one (the GitHub step and each project's GitHub page have the links).`;
+  }
   if (status === 403)
     return `GitHub refused it (403): the token lacks a permission${permission ? ` (it needs ${permission})` : ''}, or an organization policy or a rate limit refused it. Edit the token on GitHub to add the permission, or wait and try again.`;
   if (status === 404)
