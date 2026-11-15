@@ -160,6 +160,51 @@ let only people you trust read those logs.
 `jumpmaster ctl setup reopen` (the machine token only) starts over: it removes the operator,
 ends every session and prints a new code.
 
+## Where the write token goes
+
+An agent reads whatever is in its container, so Jumpmaster keeps the credential that can push out
+of every container an agent runs in.
+
+- **The agent's container never pushes.** An implement, heal or resolve drop clones with a read
+  credential, runs the agent and its gates, and ends with a push request: the gated commit, or a
+  checkpoint of an interrupted run. Its working copy is on a per-drop Docker volume, the
+  container's only mount, and nothing secret is written there: the payload's credentials arrive on
+  stdin.
+- **The push container is agent-free.** The stick posts the result first (the server records
+  `push_pending`), confirms the agent's container is removed, and then starts a push container on
+  the volume. It runs the stick's own trooper image, verified under the stick's image policy (never
+  the zone's image, so no project tooling), starts no agent, and keeps the trooper's dropped
+  capabilities, `no-new-privileges` and limits. Under egress it gets its own proxy that allows only
+  `github.com`.
+- **The token arrives last.** The push container's payload carries no credential. It copies the
+  branch out of the agent's working copy into a root-owned bare repository through `upload-pack`,
+  run as the agent's uid and hardened (`core.fsmonitor=false`, `core.hooksPath=/dev/null`,
+  `GIT_NO_LAZY_FETCH=1`), so hooks, a planted fsmonitor or a promisor remote in the working copy
+  never run with root or near the token. It then kills every agent-uid process, refuses to continue
+  if any survive, and only then prints a ready line. The stick asks the server for the grant only
+  after that line, and writes it on the container's stdin.
+- **The server decides the push.** The grant (credential, branch, base, lease, the gated SHA,
+  protected paths and the secrets to sweep for) comes from the server, which re-checks the drop's
+  role, the push kind, the branch, the repository, the zone's mode and the kill switch on every
+  request, and holds one reservation per drop. The secrets list is the drop's own; the reviewer
+  token, the join token and other zones' secrets never leave the server. The grant is revoked when
+  the push result arrives, and nothing from it is written on the stick's host.
+- **The pre-push check** in the push container refuses protected paths, secrets in added lines or
+  messages, unexpected commit identities, and a head that isn't the gated commit. It pushes with
+  `--force-with-lease`, so a branch someone else moved is never overwritten.
+
+**The PAT-mode caveat.** Jumpmaster runs in PAT mode today: the grant carries the author token.
+"No write token in a container an agent ran in" holds fully only once GitHub App mode mints a
+`contents: read` token per drop. In PAT mode the agent's container clones with `githubReadToken`
+when one is configured, and with the author token when none is. Without a read token, the author
+token is still inside the agent's container for its clone (as before this release); what changes is
+that the push happens only in the push container. Configure a read token (Contents: Read-only) to
+keep the author token out of agent containers, on a public repository too. The Claude token is
+always readable by the agent (see the install runbook's Claude token section).
+
+The stick holds the Docker socket, which is root on its host: a compromised stick can ask for a
+grant only for drops it holds, one repository each, and only after their agent run.
+
 ## Supported versions
 
 Jumpmaster is pre-release. Until 1.0, only the latest commit on `main` is supported.

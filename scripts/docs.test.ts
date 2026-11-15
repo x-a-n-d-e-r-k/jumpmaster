@@ -11,6 +11,7 @@ import { STARTER_WARNING } from '../apps/server/src/config.js';
 import { actionFor, type Pages } from '../apps/server/src/doctor/actions.js';
 import { CHECK_IDS, DOC } from '../apps/server/src/doctor/checks.js';
 import { makeZone } from '../apps/server/src/test/fixtures.js';
+import { healthLine } from '../apps/stick/src/state.js';
 import { GITHUB_ISSUER, identityRegexp } from '../apps/stick/src/verify.js';
 import { walk } from './repo-files.js';
 
@@ -495,5 +496,78 @@ describe('M4.5 docs (Task 15)', () => {
     ])
       expect(up).toMatch(cmd);
     expect(read('SECURITY.md').replace(/\s*\n\s*/g, ' ')).toContain('keeps the latest 5000 rows');
+  });
+});
+
+describe('push container docs (push-container Task 14)', () => {
+  const flat = (md: string) => md.replace(/\s*\n\s*/g, ' ');
+
+  test("install.md quotes the stick's own push-v1 health lines and the old-server refusal", () => {
+    const md = read(INSTALL);
+    const sticks = section(md, /^### Sticks$/);
+    const ok = { ok: true as const };
+    const big = 20 * 2 ** 30;
+    for (const line of [
+      healthLine({ selfCheck: true, freeBytes: big, base: ok }),
+      healthLine({ selfCheck: false, freeBytes: big, base: ok }),
+      healthLine({ selfCheck: true, freeBytes: null, base: ok }),
+      healthLine({
+        selfCheck: false,
+        freeBytes: null,
+        base: { ok: false, reason: 'base image <ref>: <reason>' },
+      }),
+      healthLine({ selfCheck: true, freeBytes: 1, base: ok }).replace('1 bytes', '<n> bytes'),
+    ])
+      expect(sticks, line).toContain(`\`${line}\``);
+    const oldServer = /const OLD_SERVER = '([^']+)'/.exec(read('apps/stick/src/runner.ts'))?.[1];
+    expect(oldServer).toBeDefined();
+    expect(flat(sticks)).toContain(`\`${oldServer}\``);
+    for (const s of ['**Deploy order.** Upgrade the server first', 'JM_ALLOWED_IMAGES', '10 GiB'])
+      expect(flat(sticks), s).toContain(s);
+  });
+
+  test('operate.md covers pending pushes: retention, extension, cancel, the kill switch', () => {
+    const pending = flat(section(read(OPERATE), /^## Pending pushes$/));
+    for (const s of [
+      'ctl drops extend-retention <dropId> <hours>',
+      'ctl drops cancel <dropId>',
+      '24 hours',
+      '**Kill switch.**',
+      'ctl unkill',
+      'charged as a resume',
+    ])
+      expect(pending, s).toContain(s);
+  });
+
+  test('SECURITY.md describes the push container and the PAT-mode caveat', () => {
+    const sec = flat(section(read('SECURITY.md'), /^## Where the write token goes$/));
+    for (const s of [
+      '**The token arrives last.**',
+      '**The PAT-mode caveat.**',
+      'GIT_NO_LAZY_FETCH=1',
+      'githubReadToken',
+    ])
+      expect(sec, s).toContain(s);
+  });
+
+  test('the GitHub App spec §4.2 carries the corrections as built', () => {
+    const spec = flat(
+      section(
+        read('docs/superpowers/specs/2026-11-13-github-app-auth.md'),
+        /^### 4\.2 Installing, the broker and drops$/,
+      ),
+    );
+    for (const s of [
+      'docker.ts:585',
+      '`leaseExpirer` already',
+      'resolve never checkpoints',
+      'not "as today"',
+      '`Init: true`',
+      'advertises `push-v1` on each lease',
+      'the stick reads only the labels',
+      '**Corrections as built**',
+      'Ruling',
+    ])
+      expect(spec, s).toContain(s);
   });
 });

@@ -748,7 +748,10 @@ only on a plan that includes it and only with `claude.fableModel` set; `claude.p
 ### Read token
 
 A private repository needs `secrets/github_read_token` (Contents: Read-only, Metadata: Read-only):
-review, crew and doctor drops clone with it, since they never get a write token. Detection (the
+review, crew and doctor drops clone with it, since they never get a write token. Implement, heal
+and resolve drops clone with it too when it is set, so the author token never enters a container an
+agent runs in; set one on a public repository as well for that (see
+[SECURITY.md](../../SECURITY.md#where-the-write-token-goes)). Detection (the
 wizard's project step, or `init`) sees the repository is private and sets `reviewReadToken: true`;
 enter the token as `githubReadToken` under Settings, Credentials, or write the file. A zone with
 `reviewReadToken` and no read token is parked until one arrives. Doctor check:
@@ -968,15 +971,77 @@ lacks. Doctor checks: `stick.seen`, `stick.capabilities`.
 Each drop starts with one `drop-start` line in `docker compose logs stick`: the drop's role, its
 gates with the `timeoutMinutes` it received, and `forgeToken`, the 8-character fingerprint of the
 forge token it carries (the form Settings, Credentials shows). Implement, heal and resolve drops
-carry the author token; a review or crew drop shows the read token's fingerprint or none. It is how to confirm, with no
+carry the read token when one is set and the author token otherwise; they clone with it and never
+push with it (the push container gets its own credential). A review or crew drop shows the read
+token's fingerprint or none. It is how to confirm, with no
 restart, that a changed gate timeout or a rotated token reached the next drop.
 
 ### Sticks
 
-A stick holds each finished drop's work in a Docker volume on its host until the push result
-arrives (24 hours by default, `ctl drops extend-retention <dropId> <hours>` to add more,
-`ctl drops cancel <dropId>` to give up). It advertises `push-v1` only while it can create volumes
-and has 10 GiB free. Doctor check: `stick.volumes`.
+**Who pushes.** An implement, heal or resolve drop never pushes from the container the agent ran
+in. Its working copy lives on a Docker volume, `jm-drop-<dropId>-<epoch>-<nonce>`, which is that
+container's only mount. When the agent's container ends with work to push (a gated commit, or a
+checkpoint of an interrupted run), the stick posts the result first, so the server records the
+drop as `push_pending`, then removes the agent's container and starts a **push container** on the
+volume. The push container runs from the stick's own trooper image (`JM_TROOPER_IMAGE`, a digest
+in the release's stick), never the zone's image, and starts no agent. Only after it reports ready
+does the stick ask the server for the push credential and hand it over. Then it pushes and the
+volume is removed. [SECURITY.md](../../SECURITY.md#where-the-write-token-goes) has the details.
+
+**`push-v1`.** A stick takes pushing roles only while it advertises `push-v1` on its lease. It
+checks at startup and in every ten-minute sweep, and the latest check decides:
+
+- **The trooper image.** The stick verifies and pulls `JM_TROOPER_IMAGE` under its image policy,
+  as it does a drop's image. Under the `signed` policy the release's trooper verifies with cosign.
+  Under `allowlist`, a `JM_ALLOWED_IMAGES` that doesn't list the trooper image refuses it: list it
+  there, or `push-v1` stays withheld. The image must also carry the
+  `org.jumpmaster.trooper.push="1"` label, which every trooper from this release has.
+- **The volume self-check.** The stick creates a test volume, initialises it (owner uid 10001,
+  mode 0700) with a one-shot container from the trooper image (no network, only `CHOWN`), and
+  measures the free space and writes a file from inside a second locked-down container on that
+  volume. Measuring from inside a container is what works when the stick itself runs in a
+  container or under Docker Desktop. The test volume is removed afterwards.
+- **Free space.** The floor is 10 GiB, measured on the volume.
+
+What the stick does with the result (one line in `docker compose logs stick` when it changes):
+
+| Check result | Log line | Effect |
+|---|---|---|
+| All pass | `volume self-check passed: push-v1 advertised` | takes every role |
+| Trooper image refused | `push-v1 withheld: base image <ref>: <reason>; non-pushing roles still lease` | still starts, and leases review, crew and doctor drops; no push container runs until the image verifies |
+| Free space unmeasured | `push-v1 withheld: free space could not be measured; non-pushing roles still lease` | leases non-pushing roles |
+| Self-check failed | `push-v1 withheld: the volume self-check failed` | leases non-pushing roles |
+| Free space measured below 10 GiB | `free space <n> bytes is below the floor: not leasing` | leases nothing, and re-checks about every 30 seconds |
+
+A stick also takes no pushing role while it holds 8 pending pushes, until some go out. Doctor
+check: `stick.volumes`, which reads what each live stick advertises.
+
+**Pending pushes.** Each one holds a volume (the size of the repository's working copy) on the
+stick's host until its push result arrives. The stick keeps nothing else on the host: a restarted
+stick finds its volumes by their labels (stick, drop and epoch), asks the server whether each is
+still wanted, and asks again for the push's branch and limits before it runs a push container.
+A volume the server no longer wants is removed, at startup or in the next sweep. A pending push
+the server can't reach is retried with backoff, up to 5 minutes apart; nothing is discarded for
+want of a server. The server's side is in the
+[operate runbook](operate.md#pending-pushes): 24 hours of retention by default,
+`ctl drops extend-retention <dropId> <hours>` to add more, `ctl drops cancel <dropId>` to give
+up, and what the kill switch does.
+
+**When the stick loses the server** during a drop, it stops the agent's container with a
+60-second grace, in which the trooper checkpoints into the volume. After the stop the stick sends
+no more heartbeats, and it posts the drop's result only if that result asks for a push. A drop
+whose agent's container died with the stick (a host restart, say) is reclaimable for 15 minutes
+from when the server marked it lost: a stick back within that window salvages the uncommitted
+work on the volume and pushes it as a checkpoint. After that the item is requeued, as before.
+
+**Deploy order.** Upgrade the server first, then the stick and the images from the same release.
+A server from this release announces `push-v1` on every lease answer. A stick from this release
+that gets a pushing drop from an older server never starts it: it logs
+`server too old for push containers: deploy the server first`, posts nothing and stops
+heartbeating, so the older server sees the drop lost and requeues it. Nothing is opened for an
+unpushed branch. An older stick on a newer server gets no implement, heal or resolve drops (it
+doesn't advertise `push-v1`), only review, crew and doctor drops. With Compose, the
+[Upgrade](#upgrade) restarts both together, which is fine: a drop leased in between is requeued.
 
 ## Image trust
 
@@ -1178,6 +1243,8 @@ A stick runs images by allowlist, not verified signatures. Use the release's sti
 
 A live stick does not advertise `push-v1`, so it takes no implement, heal or resolve work. Update
 the stick, and check that it can create Docker volumes and has 10 GiB free ([Sticks](#sticks)).
+Its log names the cause on the line starting `push-v1 withheld:`. A refused trooper image under
+`allowlist` means `JM_ALLOWED_IMAGES` doesn't list `JM_TROOPER_IMAGE`; add it.
 
 ### `usage.gate`
 
