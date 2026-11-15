@@ -1,0 +1,41 @@
+#!/usr/bin/env node
+// Stand-in for the Claude CLI in the push e2e. It runs as the agent, in the working copy on the
+// drop's volume, and does what a hostile agent could do there before the push container runs:
+//   - writes a change (the trooper commits it, as after a real session);
+//   - plants core.fsmonitor in the working copy: a script that appends its container's hostname to
+//     .git/jm-fsm-marker whenever git runs it (the agent container's own git runs it: the control);
+//   - leaves a detached agent-uid process behind that keeps appending its hostname to .git/jm-linger.
+// E2E_MODE=final in the prompt answers COMPLETE; E2E_MODE=interrupt stops at the turn cap, so the
+// trooper checkpoints the change instead.
+const { spawn, execFileSync } = require('node:child_process');
+const fs = require('node:fs');
+const { join } = require('node:path');
+
+const repo = process.cwd();
+const prompt = process.argv.join(' ');
+const mode = /E2E_MODE=interrupt/.test(prompt) ? 'interrupt' : 'final';
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+fs.writeFileSync(join(repo, 'feature.txt'), `e2e ${mode}\n`);
+const fsm = join(repo, '.git', 'jm-fsm.sh');
+fs.writeFileSync(fsm, `#!/bin/sh\ncat /etc/hostname >> ${join(repo, '.git', 'jm-fsm-marker')}\nexit 0\n`, {
+  mode: 0o755,
+});
+execFileSync('git', ['config', 'core.fsmonitor', fsm], { cwd: repo });
+spawn('sh', ['-c', `while :; do cat /etc/hostname >> ${join(repo, '.git', 'jm-linger')}; sleep 1; done`], {
+  detached: true,
+  stdio: 'ignore',
+}).unref();
+// Long enough for the lingering process to have written at least once.
+sleep(1500);
+
+const out = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
+out({ type: 'system', subtype: 'init', session_id: 'e2e' });
+out({
+  type: 'result',
+  is_error: false,
+  terminal_reason: mode === 'interrupt' ? 'max_turns' : 'completed',
+  session_id: 'e2e',
+  num_turns: 1,
+  ...(mode === 'interrupt' ? {} : { structured_output: { status: 'COMPLETE', summary: 'e2e' } }),
+});

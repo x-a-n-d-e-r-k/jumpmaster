@@ -327,6 +327,35 @@ describe('stack presets', () => {
     expect(read('.github/workflows/images.yml')).toContain('images/trooper/e2e/lazy-fetch.sh');
   });
 
+  test('the push e2e drives the real runDrop, pushOnce and DockerDriver, hermetic', () => {
+    const sh = read('images/trooper/e2e/push.sh');
+    const drop = read('images/trooper/e2e/push-drop.mjs');
+    const image = read('images/trooper/e2e/push.Dockerfile');
+    // The stick's own code, with a fake server client, against a local bare remote.
+    expect(drop).toContain("import('/app/apps/stick/dist/runner.js')");
+    expect(drop).toContain("import('/app/apps/stick/dist/push.js')");
+    expect(drop).toContain('class E2EDriver extends DockerDriver');
+    expect(drop).toMatch(/await runDrop\(/);
+    expect(drop).toMatch(/await pushOnce\(/);
+    expect(sh).toContain('git daemon');
+    // No GitHub: the only github.com in the script is in its comments.
+    expect(sh.split('\n').filter((l) => !l.startsWith('#') && /github\.com/.test(l))).toEqual([]);
+    expect(image).toMatch(/^FROM jumpmaster-trooper:dev$/m);
+    expect(image).toContain('git://REMOTE_HOST/');
+    // What it proves.
+    for (const s of [
+      'the write token never reached the agent container',
+      'ready came first, then the grant was asked for and written',
+      "the agent container's only mount is the drop's volume",
+      'the planted fsmonitor never ran in the push container',
+      'no agent-uid process alive in the push container at ready',
+      'the volume is removed and no container is left',
+      'push e2e: ok',
+    ])
+      expect(drop, s).toContain(s);
+    expect(read('.github/workflows/images.yml')).toContain('images/trooper/e2e/push.sh');
+  });
+
   test('the python preset ships 3.11 and a uv-installed 3.12 every user can find', () => {
     const final = finalStage(instructions(read(PRESET_FILES.python)));
     const env = final
@@ -486,6 +515,7 @@ test('every e2e script records the engine architecture it ran on', () => {
     'images/trooper/e2e/egress.sh',
     'images/trooper/e2e/verify.sh',
     'images/trooper/e2e/presets.sh',
+    'images/trooper/e2e/push.sh',
   ])
     expect(read(f), f).toContain('{{.Server.Os}}/{{.Server.Arch}}');
 });
