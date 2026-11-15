@@ -24,6 +24,7 @@ import { forgetSubmitKey, submitKey } from '../intake.js';
 import type { Status } from '../status.js';
 import type { Gate } from '../usage.js';
 import { STYLE } from './theme.js';
+import { type ZoneRef, zoneName, zoneNamer, zoneTextNamer } from './zone-name.js';
 
 export const escapeHtml = (v: unknown): string =>
   String(v)
@@ -198,12 +199,12 @@ function usageSection(u: HomeState['usage']): string {
   );
 }
 
-function outboxSection(ops: OutboxRow[] | undefined): string {
+function outboxSection(ops: OutboxRow[] | undefined, name: (id: string) => string): string {
   if (!ops || ops.length === 0) return '';
   const rows = ops
     .map(
       (o) =>
-        `<tr><td>${escapeHtml(o.id)}</td><td>${escapeHtml(o.kind)}</td><td>${escapeHtml(o.workItemId ?? `zone ${o.zoneId}`)}</td><td>${escapeHtml(o.state)}</td><td>${escapeHtml(o.error ?? '')}</td><td>${escapeHtml(o.updatedAt)}</td></tr>`,
+        `<tr><td>${escapeHtml(o.id)}</td><td>${escapeHtml(o.kind)}</td><td>${o.workItemId === null ? name(o.zoneId) : escapeHtml(o.workItemId)}</td><td>${escapeHtml(o.state)}</td><td>${escapeHtml(o.error ?? '')}</td><td>${escapeHtml(o.updatedAt)}</td></tr>`,
     )
     .join('');
   return card(
@@ -224,14 +225,19 @@ export const zoneBriefingsHref = (zoneId: string): string =>
  * The home page's list of open briefings, each linking to where it is answered. A paused or
  * observing zone's briefings are not listed or counted: the zone gets one line linking to them.
  */
-export function waitingOnYou(open: Briefing[], held: HeldZone[] = []): string {
+export function waitingOnYou(
+  open: Briefing[],
+  held: HeldZone[] = [],
+  zones: readonly ZoneRef[] = [],
+): string {
+  const name = zoneNamer(zones);
   const heldLines =
     held.length === 0
       ? ''
       : `<ul class="held">${held
           .map(
             (z) =>
-              `<li><a href="${escapeHtml(zoneBriefingsHref(z.zoneId))}">${escapeHtml(z.repo)}: ${escapeHtml(z.mode)}, ${plural(z.count, 'briefing')} held</a></li>`,
+              `<li><a href="${escapeHtml(zoneBriefingsHref(z.zoneId))}">${name(z.zoneId, z.repo)}: ${escapeHtml(z.mode)}, ${plural(z.count, 'briefing')} held</a></li>`,
           )
           .join('')}</ul>`;
   if (open.length === 0) {
@@ -244,7 +250,7 @@ export function waitingOnYou(open: Briefing[], held: HeldZone[] = []): string {
   const rows = open
     .map(
       (b) =>
-        `<li>${escapeHtml(b.zoneId)}: ${escapeHtml(b.decision)} <small>(${escapeHtml(b.kind)})</small></li>`,
+        `<li>${name(b.zoneId)}: ${escapeHtml(b.decision)} <small>(${escapeHtml(b.kind)})</small></li>`,
     )
     .join('');
   return card(
@@ -255,12 +261,12 @@ export function waitingOnYou(open: Briefing[], held: HeldZone[] = []): string {
   );
 }
 
-function crewSection(lines: CrewLine[] | undefined): string {
+function crewSection(lines: CrewLine[] | undefined, name: (id: string) => string): string {
   if (!lines || lines.length === 0) return '';
   const rows = lines
     .map(
       (c) =>
-        `<tr><td>${escapeHtml(c.zoneId)}</td><td>${c.enabled ? 'on' : 'off'}</td><td>${escapeHtml(c.lastCycle ?? '-')}</td><td>${escapeHtml(c.enabled ? (c.nextDue ?? 'now') : '-')}</td><td>${escapeHtml(c.fable)}</td><td><a href="/zones/${encodeURIComponent(c.zoneId)}/goals">Goals</a> <a href="/zones/${encodeURIComponent(c.zoneId)}/intake">Intake</a></td></tr>`,
+        `<tr><td>${name(c.zoneId)}</td><td>${c.enabled ? 'on' : 'off'}</td><td>${escapeHtml(c.lastCycle ?? '-')}</td><td>${escapeHtml(c.enabled ? (c.nextDue ?? 'now') : '-')}</td><td>${escapeHtml(c.fable)}</td><td><a href="/zones/${encodeURIComponent(c.zoneId)}/goals">Goals</a> <a href="/zones/${encodeURIComponent(c.zoneId)}/intake">Intake</a></td></tr>`,
     )
     .join('');
   return card(
@@ -270,7 +276,7 @@ function crewSection(lines: CrewLine[] | undefined): string {
   );
 }
 
-function sticksSection(lines: StickLine[] | undefined): string {
+function sticksSection(lines: StickLine[] | undefined, name: (id: string) => string): string {
   if (!lines) return '';
   const plain = 'Runner hosts';
   if (lines.length === 0)
@@ -285,10 +291,7 @@ function sticksSection(lines: StickLine[] | undefined): string {
         s.cannotRun.length === 0
           ? 'all zones'
           : s.cannotRun
-              .map(
-                (c) =>
-                  `cannot run ${escapeHtml(c.zoneId)}: lacks ${escapeHtml(c.missing.join(', '))}`,
-              )
+              .map((c) => `cannot run ${name(c.zoneId)}: lacks ${escapeHtml(c.missing.join(', '))}`)
               .join('<br>');
       return `<tr><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.version ?? '-')}</td><td>${escapeHtml(s.lastSeenAt ?? 'never')}</td><td>${escapeHtml(s.capabilities.join(', ') || '-')}</td><td>${escapeHtml(s.imagePolicy)}</td><td>${runs}</td></tr>`;
     })
@@ -303,7 +306,11 @@ function sticksSection(lines: StickLine[] | undefined): string {
 /** One shared handler for every rule form: it posts with the session's CSRF header. */
 const RULE_SCRIPT = `<script>for(const f of document.querySelectorAll('form.rule'))f.addEventListener('submit',async(e)=>{e.preventDefault();const o=f.querySelector('input[name=option]:checked');if(!o){alert('Choose an option');return;}const r=await jmFetch('/api/control/briefings/'+f.dataset.briefing+'/rule',{optionId:o.value,optionsDigest:f.dataset.options,note:f.querySelector('textarea').value});if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});</script>`;
 
-function briefingBlock(b: Briefing, holds: Map<string, string> | undefined): string {
+function briefingBlock(
+  b: Briefing,
+  holds: Map<string, string> | undefined,
+  name: (id: string) => string,
+): string {
   const hold = b.kind === 'promote_held' ? holds?.get(b.subject) : undefined;
   const options = b.options
     .map(
@@ -315,7 +322,7 @@ function briefingBlock(b: Briefing, holds: Map<string, string> | undefined): str
     v ? `<tr><th>${k}</th><td>${escapeHtml(v)}</td></tr>` : '';
   return (
     `<h3>${escapeHtml(b.decision)}</h3>` +
-    `<table>${row('Zone', b.zoneId)}${row('Kind', b.kind)}${row('About', b.subject)}${b.why ? `<tr><th>Why</th><td><pre>${escapeHtml(b.why)}</pre></td></tr>` : ''}${b.diagnosis ? `<tr><th>Diagnosis</th><td><pre>${escapeHtml(b.diagnosis)}</pre></td></tr>` : ''}${row('Recommendation', b.recommendation)}${row('On hold', b.onHold)}${row('Raised by', b.source === 'mcp' ? 'assistant (MCP)' : b.source)}${row('Raised', b.createdAt)}</table>` +
+    `<table><tr><th>Zone</th><td>${name(b.zoneId)}</td></tr>${row('Kind', b.kind)}${row('About', b.subject)}${b.why ? `<tr><th>Why</th><td><pre>${escapeHtml(b.why)}</pre></td></tr>` : ''}${b.diagnosis ? `<tr><th>Diagnosis</th><td><pre>${escapeHtml(b.diagnosis)}</pre></td></tr>` : ''}${row('Recommendation', b.recommendation)}${row('On hold', b.onHold)}${row('Raised by', b.source === 'mcp' ? 'assistant (MCP)' : b.source)}${row('Raised', b.createdAt)}</table>` +
     (hold ? `<p>Promotes at ${escapeHtml(hold)} unless you reject it.</p>` : '') +
     `<form class="rule" data-briefing="${escapeHtml(b.id)}" data-options="${optionsDigest(b)}">${options}<textarea name="note" maxlength="2000" placeholder="Note (optional)"></textarea><br><button>Rule</button></form>`
   );
@@ -325,10 +332,10 @@ function briefingBlock(b: Briefing, holds: Map<string, string> | undefined): str
  * Dismisses the zone's briefings shown here, after a confirmation that states the count. It posts
  * the ids shown, so a briefing raised since is not dismissed unseen.
  */
-function dismissAllForm(zoneId: string, open: Briefing[]): string {
-  const what = `${plural(open.length, 'briefing')} of ${zoneId}`;
-  const ask = `Dismiss ${what}? Each is taken off the floor without a ruling: nothing it is about is ruled on, and nothing is written to GitHub.`;
-  return `<form id="dismiss-all" data-zone="${escapeHtml(zoneId)}" data-ids="${escapeHtml(JSON.stringify(open.map((b) => b.id)))}" data-ask="${escapeHtml(ask)}"><button class="danger">Dismiss all ${escapeHtml(what)}</button></form><script>{const f=document.getElementById('dismiss-all');f.addEventListener('submit',async(e)=>{e.preventDefault();if(!confirm(f.dataset.ask))return;const r=await jmFetch('/api/control/zones/'+encodeURIComponent(f.dataset.zone)+'/briefings/dismiss',{ids:JSON.parse(f.dataset.ids)});if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});}</script>`;
+function dismissAllForm(zoneId: string, open: Briefing[], zones: readonly ZoneRef[]): string {
+  const what = `${plural(open.length, 'briefing')} of`;
+  const ask = `Dismiss ${what} ${zoneTextNamer(zones)(zoneId)}? Each is taken off the floor without a ruling: nothing it is about is ruled on, and nothing is written to GitHub.`;
+  return `<form id="dismiss-all" data-zone="${escapeHtml(zoneId)}" data-ids="${escapeHtml(JSON.stringify(open.map((b) => b.id)))}" data-ask="${escapeHtml(ask)}"><button class="danger">Dismiss all ${escapeHtml(what)} ${zoneNamer(zones)(zoneId)}</button></form><script>{const f=document.getElementById('dismiss-all');f.addEventListener('submit',async(e)=>{e.preventDefault();if(!confirm(f.dataset.ask))return;const r=await jmFetch('/api/control/zones/'+encodeURIComponent(f.dataset.zone)+'/briefings/dismiss',{ids:JSON.parse(f.dataset.ids)});if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});}</script>`;
 }
 
 /** Briefings waiting on Command, with a rule form each, and the rulings recorded so far. */
@@ -341,12 +348,13 @@ export function renderBriefings(s: {
   /** One zone's view (`open` and `rulings` are that zone's): it offers the bulk dismiss. */
   zone?: { id: string; mode: string };
 }): string {
+  const name = zoneNamer(s.zones);
   const open =
     s.open.length === 0
       ? '<p>Nothing is waiting on you.</p>'
-      : s.open.map((b) => briefingBlock(b, s.holds)).join('') + RULE_SCRIPT;
+      : s.open.map((b) => briefingBlock(b, s.holds, name)).join('') + RULE_SCRIPT;
   const head = s.zone
-    ? `<p><a href="/">Back</a> · <a href="/briefings">All briefings</a></p><h2>Briefings of ${escapeHtml(s.zone.id)} <small>(${escapeHtml(s.zone.mode)})</small></h2>${s.open.length > 0 ? dismissAllForm(s.zone.id, s.open) : ''}`
+    ? `<p><a href="/">Back</a> · <a href="/briefings">All briefings</a></p><h2>Briefings of ${name(s.zone.id)} <small>(${escapeHtml(s.zone.mode)})</small></h2>${s.open.length > 0 ? dismissAllForm(s.zone.id, s.open, s.zones) : ''}`
     : '<p><a href="/">Back</a></p><h2>Briefings (decisions waiting on you)</h2>';
   const crewOff = new Set(s.zones.filter((z) => !z.crew?.enabled).map((z) => z.id));
   // Recorded, and held until the zone's crew is enabled again (applyPendingRulings).
@@ -359,7 +367,7 @@ export function renderBriefings(s: {
   const rulings = s.rulings
     .map(
       (r) =>
-        `<tr><td>${escapeHtml(r.id)}</td><td>${escapeHtml(r.zoneId)}</td><td>${escapeHtml(r.briefingId)}</td><td>${escapeHtml(r.choice)}</td><td>${escapeHtml(r.note)}</td><td>${escapeHtml(r.createdAt)}</td><td>${escapeHtml(r.appliedAt ?? (waiting(r) ? 'waiting: crew disabled' : '-'))}</td><td>${escapeHtml(r.applyError ?? '')}</td><td>${escapeHtml(r.diagnosis ?? '')}</td></tr>`,
+        `<tr><td>${escapeHtml(r.id)}</td><td>${name(r.zoneId)}</td><td>${escapeHtml(r.briefingId)}</td><td>${escapeHtml(r.choice)}</td><td>${escapeHtml(r.note)}</td><td>${escapeHtml(r.createdAt)}</td><td>${escapeHtml(r.appliedAt ?? (waiting(r) ? 'waiting: crew disabled' : '-'))}</td><td>${escapeHtml(r.applyError ?? '')}</td><td>${escapeHtml(r.diagnosis ?? '')}</td></tr>`,
     )
     .join('');
   return page(
@@ -371,6 +379,8 @@ export function renderBriefings(s: {
 /** A zone's goal ladder, its crew issues, and marker-bearing issues intake did not start. */
 export function renderGoals(s: {
   zone: DropZoneConfig;
+  /** Every zone, to tell apart zones sharing a repository. */
+  zones: readonly ZoneRef[];
   goals: GoalRow | undefined;
   crewIssues: CrewIssue[];
   items: WorkItem[];
@@ -427,7 +437,7 @@ export function renderGoals(s: {
       ? '<p>None.</p>'
       : `<ul>${s.skippedCrewUnpromoted.map((n) => `<li>${skippedLine(n)}</li>`).join('')}</ul>`;
   return page(
-    `<p><a href="/">Back</a></p><h2>Objectives (goal ladder): ${escapeHtml(s.zone.id)}</h2>${ladder}` +
+    `<p><a href="/">Back</a></p><h2>Objectives (goal ladder): ${zoneName(s.zone, s.zones)}</h2>${ladder}` +
       `<h2>Crew issues</h2><table><tr><th>Objective</th><th>Key</th><th>Title</th><th>State</th><th>Issue</th><th>Work item</th><th>Findings</th></tr>${issues}</table>` +
       `<h2>Crew issues not started (no recorded promotion)</h2>${skipped}`,
   );
@@ -550,11 +560,12 @@ export function tokenAgeBanner(days: number | undefined): string {
 
 export function renderHome(state: HomeState): string {
   const now = state.now ?? new Date();
+  const name = zoneNamer(state.zones);
   const starterBanner = state.zones
     .filter((z) => z.identity === 'starter')
     .map(
       (z) =>
-        `<p class="warn"><strong>Starter mode in zone ${escapeHtml(z.id)}.</strong> ${escapeHtml(STARTER_WARNING)}</p>`,
+        `<p class="warn"><strong>Starter mode in ${name(z.id)}.</strong> ${escapeHtml(STARTER_WARNING)}</p>`,
     )
     .join('');
   const repoOf = new Map(state.zones.map((z) => [z.id, z.repo]));
@@ -563,7 +574,7 @@ export function renderHome(state: HomeState): string {
   const zones = state.zones
     .map(
       (z) =>
-        `<tr><td>${escapeHtml(z.id)}</td><td>${escapeHtml(z.repo)}</td><td>${escapeHtml(z.readyLabel)}</td><td>${escapeHtml(z.model)}</td><td>${badge(state.modes?.[z.id] ?? 'active')}</td><td><a href="/zones/${encodeURIComponent(z.id)}/github">GitHub</a></td></tr>`,
+        `<tr><td>${name(z.id)}</td><td>${escapeHtml(z.readyLabel)}</td><td>${escapeHtml(z.model)}</td><td>${badge(state.modes?.[z.id] ?? 'active')}</td><td><a href="/zones/${encodeURIComponent(z.id)}/github">GitHub</a></td></tr>`,
     )
     .join('');
 
@@ -578,7 +589,7 @@ export function renderHome(state: HomeState): string {
   const items = state.items
     .map(
       (i) =>
-        `<tr><td>${escapeHtml(i.dropZoneId)}</td><td>#${escapeHtml(i.issueNumber)}</td><td>${escapeHtml(i.title)}</td><td>${badge(i.state)}</td><td>${escapeHtml(i.reason ?? waitingOf(i))}</td><td>${prLink(i)}</td>${detailCells(state.details?.get(i.id))}</tr>`,
+        `<tr><td>${name(i.dropZoneId)}</td><td>#${escapeHtml(i.issueNumber)}</td><td>${escapeHtml(i.title)}</td><td>${badge(i.state)}</td><td>${escapeHtml(i.reason ?? waitingOf(i))}</td><td>${prLink(i)}</td>${detailCells(state.details?.get(i.id))}</tr>`,
     )
     .join('');
 
@@ -601,9 +612,7 @@ export function renderHome(state: HomeState): string {
   );
   const slotCard = (d: Drop): string => {
     const wi = d.workItemId === null ? undefined : itemById.get(d.workItemId);
-    const what = wi
-      ? `${escapeHtml(wi.dropZoneId)} ${targetOf(d)}`
-      : `${escapeHtml(d.dropZoneId)} ${targetOf(d)}`;
+    const what = `${name(wi ? wi.dropZoneId : d.dropZoneId)} ${targetOf(d)}`;
     const title = wi ? `<span class="muted">${escapeHtml(wi.title)}</span>` : '';
     const g = gateCount(d);
     const gates = g
@@ -626,7 +635,7 @@ export function renderHome(state: HomeState): string {
           .slice(0, QUEUE_SHOWN)
           .map(
             (i) =>
-              `<tr><td class="num">${escapeHtml(i.dropZoneId)} #${escapeHtml(i.issueNumber)}</td><td>${escapeHtml(i.title)}</td><td>${escapeHtml(waitingOf(i) || '-')}</td></tr>`,
+              `<tr><td class="num">${name(i.dropZoneId)} #${escapeHtml(i.issueNumber)}</td><td>${escapeHtml(i.title)}</td><td>${escapeHtml(waitingOf(i) || '-')}</td></tr>`,
           )
           .join(
             '',
@@ -662,7 +671,7 @@ export function renderHome(state: HomeState): string {
       setupFrame +
       starterBanner +
       (state.briefings
-        ? `<div class="grid">${waitingOnYou(state.briefings, state.heldBriefings)}</div>`
+        ? `<div class="grid">${waitingOnYou(state.briefings, state.heldBriefings, state.zones)}</div>`
         : '') +
       `<h2 class="section-h">Running now <small class="muted">Troopers: one job slot each</small></h2>${slots}` +
       `<div class="grid wide">${card('Ready work', '<h2>Up next</h2>', queue)}${usageSection(state.usage) || card('Claude subscription', '<h2>Usage</h2>', '<p class="empty">No usage reported yet.</p>')}</div>` +
@@ -683,17 +692,17 @@ export function renderHome(state: HomeState): string {
       `<div class="grid">${ledger(
         'Projects',
         '<h2>Drop zones</h2>',
-        '<tr><th>Id</th><th>Repo</th><th>Label</th><th>Model</th><th>Mode</th><th>GitHub setup</th></tr>',
+        '<tr><th>Project</th><th>Label</th><th>Model</th><th>Mode</th><th>GitHub setup</th></tr>',
         zones,
         'No project yet.',
         addProject,
       )}</div>` +
       (state.crew && state.crew.length > 0
-        ? `<div class="grid">${crewSection(state.crew)}</div>`
+        ? `<div class="grid">${crewSection(state.crew, name)}</div>`
         : '') +
-      `<div class="grid">${sticksSection(state.sticks)}</div>` +
+      `<div class="grid">${sticksSection(state.sticks, name)}</div>` +
       (state.outbox && state.outbox.length > 0
-        ? `<div class="grid">${outboxSection(state.outbox)}</div>`
+        ? `<div class="grid">${outboxSection(state.outbox, name)}</div>`
         : '') +
       `<div class="grid">${card('Claude API', '<h2>Last rate limit</h2>', rl)}</div>`,
     state.status ? { title: state.status.headline } : {},
@@ -805,11 +814,12 @@ export function renderDrop(
 }
 
 /** Observe mode's would-do list, newest first. */
-export function renderObservations(rows: Observation[]): string {
+export function renderObservations(rows: Observation[], zones: readonly ZoneRef[] = []): string {
+  const name = zoneNamer(zones);
   const body = rows
     .map(
       (o) =>
-        `<tr><td>${escapeHtml(o.zoneId)}</td><td>${escapeHtml(o.itemId ?? '')}</td><td>${escapeHtml(o.action)}</td><td>${escapeHtml(o.detail)}</td><td>${o.count}</td><td>${escapeHtml(o.firstAt)}</td><td>${escapeHtml(o.lastAt)}</td></tr>`,
+        `<tr><td>${name(o.zoneId)}</td><td>${escapeHtml(o.itemId ?? '')}</td><td>${escapeHtml(o.action)}</td><td>${escapeHtml(o.detail)}</td><td>${o.count}</td><td>${escapeHtml(o.firstAt)}</td><td>${escapeHtml(o.lastAt)}</td></tr>`,
     )
     .join('');
   return page(
@@ -825,14 +835,15 @@ export function renderDoctor(
   run: { id: number; finishedAt: string | null; checks: DoctorCheckView[] } | null,
   zones: DropZoneConfig[],
 ): string {
+  const name = zoneNamer(zones);
   const controls = `<p><button data-doctor="/api/control/doctor">Run the doctor</button></p><p>A doctor drop proves the Claude token, the clone, services and gates on a stick; it spends one turn of usage.${zones
     .map(
       (z) =>
-        ` <button data-doctor="/api/control/doctor/drop" data-body="${escapeHtml(JSON.stringify({ zone: z.id }))}">Doctor drop: ${escapeHtml(z.id)}</button>`,
+        ` <button data-doctor="/api/control/doctor/drop" data-body="${escapeHtml(JSON.stringify({ zone: z.id }))}">Doctor drop: ${name(z.id)}</button>`,
     )
     .join(
       '',
-    )}</p>${zones.length > 0 ? `<p>GitHub setup (token links, the ruleset file, CODEOWNERS): ${zones.map((z) => `<a href="/zones/${encodeURIComponent(z.id)}/github">${escapeHtml(z.id)}</a>`).join(', ')}</p>` : ''}`;
+    )}</p>${zones.length > 0 ? `<p>GitHub setup (token links, the ruleset file, CODEOWNERS): ${zones.map((z) => `<a href="/zones/${encodeURIComponent(z.id)}/github">${name(z.id)}</a>`).join(', ')}</p>` : ''}`;
   if (!run)
     return page(
       `<h2>Doctor</h2><p>No doctor run has finished yet. Run one here or with <code>jumpmaster ctl doctor</code>.</p>${controls}${DOCTOR_SCRIPT}`,
@@ -850,7 +861,7 @@ export function renderDoctor(
         c.status === 'pass'
           ? ''
           : `${c.action ? renderAction(c.action) : ''}${c.fix ? `<pre>${escapeHtml(c.fix)}</pre>` : ''}${c.doc ? `<div>See ${escapeHtml(c.doc)}</div>` : ''}`;
-      return `<tr class="${escapeHtml(c.status)}"><td>${escapeHtml(c.status.toUpperCase())}</td><td>${escapeHtml(c.zoneId ?? '')}</td><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.summary)}${help}</td></tr>`;
+      return `<tr class="${escapeHtml(c.status)}"><td>${escapeHtml(c.status.toUpperCase())}</td><td>${c.zoneId === null ? '' : name(c.zoneId)}</td><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.summary)}${help}</td></tr>`;
     })
     .join('');
   return page(
@@ -945,7 +956,7 @@ document.getElementById('issue-form').addEventListener('submit', async (e) => {
 </script>`;
 
 /** The minimal intake: the GOAL.md stub, how to commit it, and the first ready issue. */
-export function renderIntake(zone: Pick<DropZoneConfig, 'id' | 'repo'>): string {
+export function renderIntake(zone: ZoneRef, zones: readonly ZoneRef[] = [zone]): string {
   const base = `/api/control/zones/${encodeURIComponent(zone.id)}/intake`;
   const field = (id: string, label: string, input: string) =>
     `<p><label for="${id}">${label}</label><br>${input}</p>`;
@@ -965,6 +976,6 @@ export function renderIntake(zone: Pick<DropZoneConfig, 'id' | 'repo'>): string 
   const commit = `<h3>Step 2: commit it by pull request</h3><p>GOAL.md is a protected path, so no agent may write it and Jumpmaster doesn't commit it either. Copy the stub, then on a branch of ${escapeHtml(zone.repo)}: save it as GOAL.md, commit, push, open a pull request, and merge it yourself. The crew reads it once it is on the default branch.</p><p><textarea id="stub-out" rows="16" cols="80" readonly></textarea><br><button type="button" id="stub-copy">Copy</button></p>`;
   const first = `<h3>Step 3: the first issue</h3><p>Filed ready, under objective 1, as soon as you submit: the first issue doesn't need GOAL.md merged first.</p><form id="issue-form">${field('issue-title', 'Title (at most 120 characters)', '<input id="issue-title" size="80" maxlength="120" required>')}${field('issue-context', 'Context', area('issue-context', 6, true))}${field('issue-acceptance', 'Acceptance criteria, one per line', area('issue-acceptance', 5, true))}${field('issue-tests', 'Required tests, one per line', area('issue-tests', 3, true))}${field('issue-out', 'Out of scope, one per line (optional)', area('issue-out', 3))}<button>File the issue</button> <span id="issue-status"></span></form>`;
   return page(
-    `<h2>Intake: ${escapeHtml(zone.id)}</h2><div id="intake" data-base="${escapeHtml(base)}">${goal}${commit}${first}</div>${INTAKE_SCRIPT}`,
+    `<h2>Intake: ${zoneName(zone, zones)}</h2><div id="intake" data-base="${escapeHtml(base)}">${goal}${commit}${first}</div>${INTAKE_SCRIPT}`,
   );
 }

@@ -985,6 +985,15 @@ describe('zone.doctor-drop', () => {
     expect(await summary()).toContain('held: credits stop');
   });
 
+  test('a queued doctor drop in a paused zone names the zone id only inside the ctl command (#99)', async () => {
+    const w = world();
+    withDrop(w, { state: 'queued', at: ago(5 * 60_000) });
+    setZoneMode(w.db, 'main', 'paused', NOW);
+    const summary = one(await w.run(), 'zone.doctor-drop').summary;
+    expect(summary).toContain('held: the zone is paused (jumpmaster ctl resume main)');
+    expect(summary).not.toContain('zone main');
+  });
+
   test('a queued doctor drop under the usage probe or a credits Resume says it is held', async () => {
     const w = world();
     withDrop(w, { state: 'queued', at: ago(5 * 60_000) });

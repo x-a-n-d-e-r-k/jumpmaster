@@ -537,3 +537,25 @@ describe('the zones page', () => {
     expect(ORIGIN).toBeDefined();
   });
 });
+
+describe('zones are named by their repository (#99)', () => {
+  test('the Zones list names each zone by repository, and its messages use that name', async () => {
+    const w = await world();
+    const r = (await w.get('/zones')).body;
+    expect(r).toContain('<th>Project</th>');
+    expect(r).toContain('<a href="/zones/main">octo/main</a>');
+    expect(r).toContain('<a href="/zones/img">octo/img</a>');
+    expect(r).not.toMatch(/>main</);
+    expect(r).toContain('data-name="octo/main"');
+    expect(r).toContain("b.dataset.name + ': '");
+    expect(r).not.toContain("b.dataset.zone + ': '");
+  });
+
+  test('a zone page heads with the repository and keeps the zone id on a detail line', async () => {
+    const page = (await (await world()).get('/zones/main')).body;
+    expect(page).toContain('<title>Jumpmaster: octo/main</title>');
+    expect(page).toContain('<h2>octo/main</h2>');
+    expect(page).not.toContain('<h2>Zone main</h2>');
+    expect(section(page, 'advanced')).toContain('Zone id: <code>main</code>');
+  });
+});

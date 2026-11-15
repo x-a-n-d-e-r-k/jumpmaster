@@ -61,6 +61,7 @@ import {
 } from './ui/pages.js';
 import { claudeTokenDays, registerSettingsPages } from './ui/settings.js';
 import { registerSetupPages, wizardActive } from './ui/setup.js';
+import { zoneTextNamer } from './ui/zone-name.js';
 import { registerZonesPages } from './ui/zones.js';
 import { dispatchGate } from './usage.js';
 
@@ -212,6 +213,8 @@ export function createApp(
         ...(deps.config instanceof ConfigStore ? { store: deps.config } : {}),
         now: at,
         pages: pagesOf(app),
+        // The floor names zones by repository (#99); `ctl status` keeps the id.
+        zoneName: zoneTextNamer(config.dropZones),
       }),
       ...(deps.config instanceof ConfigStore
         ? { claudeTokenDays: claudeTokenDays(deps.config, at) }
@@ -296,6 +299,7 @@ export function createApp(
     if (!zone) return reply.code(404).type('text/plain').send('not found');
     const html = renderGoals({
       zone,
+      zones: config.dropZones,
       goals: getGoals(db, zone.id),
       crewIssues: listCrewIssues(db, zone.id),
       items: listWorkItems(db, zone.id),
@@ -305,9 +309,10 @@ export function createApp(
   });
 
   app.get<{ Params: { id: string } }>('/zones/:id/intake', async (req, reply) => {
-    const zone = cfg(req).dropZones.find((z) => z.id === req.params.id);
+    const zones = cfg(req).dropZones;
+    const zone = zones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).type('text/plain').send('not found');
-    return reply.type('text/html; charset=utf-8').send(withCsrf(req, renderIntake(zone)));
+    return reply.type('text/html; charset=utf-8').send(withCsrf(req, renderIntake(zone, zones)));
   });
 
   app.get('/doctor', async (req, reply) =>
@@ -319,7 +324,7 @@ export function createApp(
   app.get('/observations', async (req, reply) =>
     reply
       .type('text/html; charset=utf-8')
-      .send(withCsrf(req, renderObservations(listObservations(deps.db)))),
+      .send(withCsrf(req, renderObservations(listObservations(deps.db), cfg(req).dropZones))),
   );
 
   app.get<{ Params: { id: string } }>('/artifacts/:id', async (req, reply) => {

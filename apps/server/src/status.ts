@@ -111,6 +111,11 @@ export type StatusInput = {
   restartPending: boolean;
   /** Which pages exist (pagesOf): links fall back while a page is missing. Default: all. */
   pages?: Pages;
+  /**
+   * How a line names a zone to its reader, as plain text. Default: the zone id, as `ctl status`
+   * shows it; the UI passes the repository name (ui/zone-name.ts). Links keep the id.
+   */
+  zoneName?: (id: string) => string;
 };
 
 const ALL_PAGES: Pages = { zones: true, settings: true, credentials: true };
@@ -132,11 +137,12 @@ const credentialWords = (name: string) =>
   CREDENTIAL_WORDS[name] ?? `gate secret ${name.split(':').at(-1)}`;
 
 /** "demo: no Claude token": the short form of a credential problem. */
-function shortProblem(p: CredentialProblem): string {
+function shortProblem(p: CredentialProblem, name: (id: string) => string): string {
   const what = credentialWords(p.credential);
-  if (p.kind === 'missing') return `${p.zoneId}: no ${what}`;
-  if (p.kind === 'kind') return `${p.zoneId}: the ${what} is the wrong kind`;
-  return `${p.zoneId}: the ${what} is the same as another`;
+  const zone = name(p.zoneId);
+  if (p.kind === 'missing') return `${zone}: no ${what}`;
+  if (p.kind === 'kind') return `${zone}: the ${what} is the wrong kind`;
+  return `${zone}: the ${what} is the same as another`;
 }
 
 function elapsed(from: string | null, now: Date): string {
@@ -148,6 +154,7 @@ function elapsed(from: string | null, now: Date): string {
 
 export function statusOf(input: StatusInput, now: Date): Status {
   const pages = input.pages ?? ALL_PAGES;
+  const name = input.zoneName ?? ((id: string) => id);
   const zones = input.zones;
   const usage = input.usage ?? { gate: 'open' };
   const problems = zones.flatMap((z) => z.credentialProblems);
@@ -190,7 +197,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
   const said = (s: Status, uses: { problem?: CredentialProblem; doctor?: boolean } = {}) => {
     const also: NonNullable<Status['also']> = [];
     for (const p of problems)
-      if (p !== uses.problem) also.push({ text: shortProblem(p), href: credentialsHref(p) });
+      if (p !== uses.problem) also.push({ text: shortProblem(p, name), href: credentialsHref(p) });
     if (!uses.doctor && fails.length > 0)
       also.push({
         text: `${plural(fails.length, 'doctor fail')} (${fails.map((f) => f.id).join(', ')}), from a run ${failsAreNew ? 'after' : 'before'} the last pass`,
@@ -201,7 +208,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
       for (const z of zones)
         if (z.mode !== 'active')
           also.push({
-            text: `${z.id} is ${z.mode === 'observe' ? 'observing' : z.mode}`,
+            text: `${name(z.id)} is ${z.mode === 'observe' ? 'observing' : z.mode}`,
             href: zoneHref(z.id),
           });
     if (input.restartPending) also.push({ text: 'a setting takes effect at the next restart' });
@@ -267,7 +274,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
     const k = z.gateEvents?.[d.id] ?? 0;
     const more = working.length - 1;
     return said({
-      headline: `Working: ${d.role}${issue !== undefined ? ` #${issue}` : ''} in ${z.id}, ${elapsed(d.startedAt, now)}${n > 0 ? `, gate ${k} of ${n}` : ''}`,
+      headline: `Working: ${d.role}${issue !== undefined ? ` #${issue}` : ''} in ${name(z.id)}, ${elapsed(d.startedAt, now)}${n > 0 ? `, gate ${k} of ${n}` : ''}`,
       detail: more > 0 ? `${plural(more, 'more drop')} running.` : '',
       waitingOn: 'nothing',
       ...(d.startedAt ? { since: d.startedAt } : {}),
@@ -340,7 +347,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
   if (problem) {
     return said(
       {
-        headline: `Blocked: ${problem.zoneId} needs ${problem.credential}: ${problem.message}`,
+        headline: `Blocked: ${name(problem.zoneId)} needs ${problem.credential}: ${problem.message}`,
         detail: 'The zone stays parked until it is fixed.',
         waitingOn: 'credentials',
         action: {
@@ -375,9 +382,9 @@ export function statusOf(input: StatusInput, now: Date): Status {
   if (zones.length > 0 && activeZones.length === 0) {
     const draining = zones
       .filter((z) => z.drops.length > 0)
-      .map((z) => `${z.id} is still draining ${plural(z.drops.length, 'drop')}.`);
+      .map((z) => `${name(z.id)} is still draining ${plural(z.drops.length, 'drop')}.`);
     return said({
-      headline: `Paused by you: ${zones.map((z) => `${z.id} (${z.mode})`).join(', ')}`,
+      headline: `Paused by you: ${zones.map((z) => `${name(z.id)} (${z.mode})`).join(', ')}`,
       detail: draining.join(' '),
       waitingOn: 'you',
       action: { label: 'Open the zones', href: pages.zones ? '/zones' : '/' },
@@ -387,7 +394,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
   const retrying = input.outboxRetrying[0];
   if (retrying)
     return said({
-      headline: `Retrying a GitHub call: ${retrying.kind} in ${retrying.zoneId}`,
+      headline: `Retrying a GitHub call: ${retrying.kind} in ${name(retrying.zoneId)}`,
       detail:
         'Its outcome is unknown; Jumpmaster reads GitHub back before it writes again, so nothing is done twice.',
       waitingOn: 'forge',
@@ -416,7 +423,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
     const slots = input.sticks.slots ?? 0;
     const busy = input.sticks.busy ?? 0;
     const hold = cannot
-      ? `no stick can run zone ${cannot.id}: ${cannot.cannotRun}`
+      ? `no stick can run zone ${name(cannot.id)}: ${cannot.cannotRun}`
       : slots > 0 && busy >= slots
         ? 'every slot is busy'
         : 'it starts when a stick next asks for work';
@@ -424,7 +431,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
       .filter(
         (z) => z.doctorWait && z.drops.some((d) => d.role === 'doctor' && d.state === 'queued'),
       )
-      .map((z) => `The doctor drop in ${z.id}: ${z.doctorWait}.`);
+      .map((z) => `The doctor drop in ${name(z.id)}: ${z.doctorWait}.`);
     return said({
       headline: `Queued: ${count}; ${hold}`,
       detail: why.join(' '),
@@ -619,6 +626,12 @@ function redactStatus(s: Status, secrets: string[]): Status {
  * The status the home page and `GET /api/control/status` show: built once, here, and redacted
  * of the install's secrets so no future reason text can carry one.
  */
-export function buildStatus(o: Parameters<typeof statusInputOf>[0]): Status {
-  return redactStatus(statusOf(statusInputOf(o), o.now), secretList(o.config.secrets));
+export function buildStatus(
+  o: Parameters<typeof statusInputOf>[0] & { zoneName?: (id: string) => string },
+): Status {
+  const input = statusInputOf(o);
+  return redactStatus(
+    statusOf(o.zoneName ? { ...input, zoneName: o.zoneName } : input, o.now),
+    secretList(o.config.secrets),
+  );
 }

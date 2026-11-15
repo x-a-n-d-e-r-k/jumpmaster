@@ -17,6 +17,7 @@ import {
 } from '../vault/credentials.js';
 import { escapeHtml, page, tokenAgeBanner } from './pages.js';
 import { forgeGuideFor, guideSection } from './setup.js';
+import { type ZoneRef, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
 
 /**
  * Settings, part one: the Credentials tab (§7.5, §10.3). A page over Task 4's secret routes, with
@@ -59,10 +60,12 @@ const tabs = (current: string): string =>
 
 const day = (iso: string | undefined): string => (iso ? escapeHtml(iso.slice(0, 10)) : '-');
 
-function roleOf(name: CredentialName): string {
+/** What a credential is for; a gate secret's zone is named by its repository. */
+export function roleOf(name: CredentialName, zones: readonly ZoneRef[]): string {
   if (isInstallCredential(name)) return CREDENTIAL_ROLES[name];
   const g = parseGateSecretName(name);
-  return `gate secret ${g?.name ?? '?'} for zone ${g?.zoneId ?? '?'}: gate steps can read it`;
+  const zone = g ? zoneTextNamer(zones)(g.zoneId) : '?';
+  return `gate secret ${g?.name ?? '?'} for ${zone}: gate steps can read it`;
 }
 
 /** Another source that holds a value too, in a few words (never the value). */
@@ -169,7 +172,7 @@ function rowFor(
   const created =
     credentialCreatedAt(name, store.resolved(), store.current().claude) ?? c.declaredCreatedAt;
   const test = c.testResult ? `${escapeHtml(c.testResult)} <small>${day(c.testedAt)}</small>` : '-';
-  return `<tr data-credential="${escapeHtml(name)}"><td><code>${escapeHtml(name)}</code><br><small>${escapeHtml(roleOf(name))}</small></td><td data-col="source">${sourceCell(c)}</td><td data-col="fingerprint">${c.fingerprint ? `<code>${escapeHtml(c.fingerprint)}</code>` : '-'}</td><td data-col="login">${c.login ? escapeHtml(c.login) : '-'}</td><td data-col="set">${day(c.setAt)}</td><td data-col="created">${day(created)}</td><td data-col="test">${test}</td><td data-col="actions">${actionsCell(name, c, vault, name === 'claudeToken')}</td></tr>`;
+  return `<tr data-credential="${escapeHtml(name)}"><td><code>${escapeHtml(name)}</code><br><small>${escapeHtml(roleOf(name, store.current().dropZones))}</small></td><td data-col="source">${sourceCell(c)}</td><td data-col="fingerprint">${c.fingerprint ? `<code>${escapeHtml(c.fingerprint)}</code>` : '-'}</td><td data-col="login">${c.login ? escapeHtml(c.login) : '-'}</td><td data-col="set">${day(c.setAt)}</td><td data-col="created">${day(created)}</td><td data-col="test">${test}</td><td data-col="actions">${actionsCell(name, c, vault, name === 'claudeToken')}</td></tr>`;
 }
 
 /** The Claude plan, as the wizard's Claude step offers it: a choice in db mode, the file's otherwise. */
@@ -367,13 +370,14 @@ export function renderCredentials(o: {
     )
     .join('');
   const problems = store.problems();
+  const zoneName = zoneNamer(config.dropZones);
   const problemList =
     problems.length === 0
       ? '<p>No zone is missing a credential it needs.</p>'
       : `<ul class="problems">${problems
           .map(
             (p) =>
-              `<li><strong>${escapeHtml(p.zoneId)}</strong> (${escapeHtml(p.credential)}, ${escapeHtml(p.kind)}): ${escapeHtml(p.message)}</li>`,
+              `<li><strong>${zoneName(p.zoneId)}</strong> (${escapeHtml(p.credential)}, ${escapeHtml(p.kind)}): ${escapeHtml(p.message)}</li>`,
           )
           .join('')}</ul>`;
   const vaultLine = vaultSection(store);
@@ -717,11 +721,12 @@ ${SUDO_FN}
 function jmEsc(v) {
   return String(v).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
-function jmTokenTable(tokens, now) {
+function jmTokenTable(tokens, now, names) {
+  const zone = (id) => (names && Object.hasOwn(names, id) ? String(names[id]) : jmEsc(id));
   if (tokens.length === 0) return '${NO_TOKENS}';
   const day = (iso) => (iso ? jmEsc(String(iso).slice(0, 10)) : '-');
   const state = (t) => t.revokedAt ? 'revoked ' + day(t.revokedAt) : Date.parse(t.expiresAt) <= now ? 'expired' : '<button type="button" class="revoke" data-id="' + Number(t.id) + '">Revoke</button>';
-  const rows = tokens.map((t) => '<tr data-token="' + Number(t.id) + '"><td>' + Number(t.id) + '</td><td>' + jmEsc(t.zoneId) + '</td><td>' + jmEsc(t.scope) + '</td><td>' + (t.label ? jmEsc(t.label) : '-') + '</td><td>' + day(t.createdAt) + '</td><td>' + day(t.expiresAt) + '</td><td>' + (t.lastUsedAt ? day(t.lastUsedAt) : 'never') + '</td><td>' + state(t) + '</td></tr>').join('');
+  const rows = tokens.map((t) => '<tr data-token="' + Number(t.id) + '"><td>' + Number(t.id) + '</td><td>' + zone(t.zoneId) + '</td><td>' + jmEsc(t.scope) + '</td><td>' + (t.label ? jmEsc(t.label) : '-') + '</td><td>' + day(t.createdAt) + '</td><td>' + day(t.expiresAt) + '</td><td>' + (t.lastUsedAt ? day(t.lastUsedAt) : 'never') + '</td><td>' + state(t) + '</td></tr>').join('');
   return '${TOKENS_HEAD}' + rows + '${TOKENS_TAIL}';
 }
 async function jmRefreshTokens(list) {
@@ -729,7 +734,9 @@ async function jmRefreshTokens(list) {
   const r = await fetch('/api/control/mcp-tokens');
   if (!r.ok) return;
   const j = await r.json();
-  list.innerHTML = jmTokenTable(j.tokens || [], Date.now());
+  // Each zone's name as the server renders it (escaped HTML), by id.
+  const names = list.dataset && list.dataset.zones ? JSON.parse(list.dataset.zones) : {};
+  list.innerHTML = jmTokenTable(j.tokens || [], Date.now(), names);
 }
 async function jmMintToken(c, state, out, reveal, list) {
   if (!(await jmSudo(state, out, 'An MCP token is shown once, so making one asks for your passphrase again.'))) return 'sudo';
@@ -742,7 +749,7 @@ async function jmMintToken(c, state, out, reveal, list) {
   if (!r.ok) { out.textContent = 'No token was made (' + r.status + '): ' + (j.error || ''); return 'refused'; }
   reveal.textContent = j.token;
   reveal.hidden = false;
-  out.textContent = 'Token ' + j.id + ' for zone ' + j.zoneId + ' (' + j.scope + '), expires ' + String(j.expiresAt).slice(0, 10) + '. It is shown this once: copy it into a password manager now. Reloading the page clears it.';
+  out.textContent = 'Token ' + j.id + ' for ' + (c.zoneName || j.zoneId) + ' (' + j.scope + '), expires ' + String(j.expiresAt).slice(0, 10) + '. It is shown this once: copy it into a password manager now. Reloading the page clears it.';
   try { await jmRefreshTokens(list); } catch (e) {}
   return 'minted';
 }
@@ -762,7 +769,7 @@ document.addEventListener('DOMContentLoaded', () => {
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const s = { sudo: root.dataset.sudo === '1', passphrase: pass.value };
-      const c = { zoneId: form.zoneId.value, scope: form.scope.value, days: form.days.value, label: form.label.value };
+      const c = { zoneId: form.zoneId.value, zoneName: form.zoneId.selectedOptions[0].textContent, scope: form.scope.value, days: form.days.value, label: form.label.value };
       const outcome = await jmMintToken(c, s, document.getElementById('mint-out'), document.getElementById('mint-value'), document.getElementById('token-list'));
       pass.value = '';
       if (s.sudo) root.dataset.sudo = '1'; else root.dataset.sudo = '0';
@@ -800,7 +807,10 @@ export function renderMcpTokens(o: {
           : 'Turn on <code>mcp.enabled</code> under <a href="/settings/install">Install</a>; it takes effect at the next restart.'
       }</p>`;
   const zones = config.dropZones
-    .map((z) => `<option value="${escapeHtml(z.id)}">${escapeHtml(z.id)}</option>`)
+    .map(
+      (z) =>
+        `<option value="${escapeHtml(z.id)}">${escapeHtml(zoneNameText(z, config.dropZones))}</option>`,
+    )
     .join('');
   const mint = !routes
     ? ''
@@ -811,6 +821,8 @@ export function renderMcpTokens(o: {
 ${SUDO_PROMPT('making a token')}
 <p id="mint-out" role="status"></p>
 <p><code id="mint-value" hidden></code></p>`;
+  const zoneName = zoneNamer(config.dropZones);
+  const names = Object.fromEntries(config.dropZones.map((z) => [z.id, zoneName(z.id)]));
   const at = o.now.getTime();
   const state = (t: McpTokenInfo): string => {
     if (t.revokedAt) return `revoked ${day(t.revokedAt)}`;
@@ -822,7 +834,7 @@ ${SUDO_PROMPT('making a token')}
   const rows = tokens
     .map(
       (t) =>
-        `<tr data-token="${t.id}"><td>${t.id}</td><td>${escapeHtml(t.zoneId)}</td><td>${escapeHtml(t.scope)}</td><td>${t.label ? escapeHtml(t.label) : '-'}</td><td>${day(t.createdAt)}</td><td>${day(t.expiresAt)}</td><td>${t.lastUsedAt ? day(t.lastUsedAt) : 'never'}</td><td>${state(t)}</td></tr>`,
+        `<tr data-token="${t.id}"><td>${t.id}</td><td>${zoneName(t.zoneId)}</td><td>${escapeHtml(t.scope)}</td><td>${t.label ? escapeHtml(t.label) : '-'}</td><td>${day(t.createdAt)}</td><td>${day(t.expiresAt)}</td><td>${t.lastUsedAt ? day(t.lastUsedAt) : 'never'}</td><td>${state(t)}</td></tr>`,
     )
     .join('');
   const list = tokens.length === 0 ? NO_TOKENS : `${TOKENS_HEAD}${rows}${TOKENS_TAIL}`;
@@ -830,7 +842,7 @@ ${SUDO_PROMPT('making a token')}
     `<h2>Settings</h2>${tabs('mcp-tokens')}
 <div id="mcp-tokens" data-sudo="${o.sudo ? '1' : '0'}">
 ${intro}${off}${mint}
-<h3>Tokens</h3><div id="token-list">${list}</div>
+<h3>Tokens</h3><div id="token-list" data-zones="${escapeHtml(JSON.stringify(names))}">${list}</div>
 <p id="tokens-status" role="status"></p>
 <p><small>The same from a terminal: <code>jumpmaster ctl mcp-tokens mint &lt;zone&gt; &lt;read|write&gt; --days N</code>, <code>list</code>, <code>revoke &lt;id&gt;</code>.</small></p>
 </div>

@@ -16,6 +16,7 @@ import {
 } from '../github/guidance.js';
 import { MATRIX_AND_REUSABLE_NOTE } from '../github/workflows.js';
 import { escapeHtml, page } from './pages.js';
+import { type ZoneRef, zoneName } from './zone-name.js';
 
 /**
  * The GitHub half of setup, as a page per zone (`/zones/:id/github`) and as sections the setup
@@ -141,9 +142,14 @@ export const rolesOf = (zone: Pick<DropZoneConfig, 'identity' | 'reviewReadToken
   ...(zone.reviewReadToken ? (['read'] as const) : []),
 ];
 
-function zonePage(zone: DropZoneConfig, g: ZoneGuidance, reviewer: string): string {
+function zonePage(
+  zone: DropZoneConfig,
+  zones: readonly ZoneRef[],
+  g: ZoneGuidance,
+  reviewer: string,
+): string {
   return page(
-    `<h2>GitHub for ${escapeHtml(zone.id)} (${escapeHtml(zone.repo)})</h2>
+    `<h2>GitHub for ${zoneName(zone, zones)}</h2>
 <p>What Jumpmaster needs on GitHub, as links and files: nothing here changes GitHub; the clicks and the commit are yours. The doctor checks each part.</p>
 ${recommendationSection(g.recommendation)}
 <p>This zone runs as ${escapeHtml(zone.identity)}${zone.authorMayBeAdmin ? ' with authorMayBeAdmin' : ''}${zone.identity === g.recommendation.identity ? '' : ': not the recommendation above. Changing it changes which tokens and rules it needs'}.</p>
@@ -199,9 +205,12 @@ export function registerGithubPages(
       return send(
         r.status,
         page(
-          `<h2>GitHub for ${escapeHtml(zone.id)}</h2><p class="warn">${escapeHtml(r.error)}</p><p>Set or replace the tokens in the <a href="/setup/forge">GitHub step</a>, then come back.</p>`,
+          `<h2>GitHub for ${zoneName(zone, config.dropZones)}</h2><p class="warn">${escapeHtml(r.error)}</p><p>Set or replace the tokens in the <a href="/setup/forge">GitHub step</a>, then come back.</p>`,
         ),
       );
-    return send(200, zonePage(zone, r.guidance, q.success ? (q.data.reviewer ?? '') : ''));
+    return send(
+      200,
+      zonePage(zone, config.dropZones, r.guidance, q.success ? (q.data.reviewer ?? '') : ''),
+    );
   });
 }
