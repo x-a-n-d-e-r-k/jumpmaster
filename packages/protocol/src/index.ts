@@ -484,6 +484,7 @@ export {
   payloadSecrets,
   redact,
   redactTokenShapes,
+  withBasicAuth,
 } from './redact.js';
 export { CREDENTIAL_FILES, MAX_SECRET_FILE_BYTES, readSecret, readSecretFile } from './secrets.js';
 

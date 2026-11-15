@@ -6,7 +6,6 @@ import { SetupMode, setupActive, setupCodeLine } from './auth/operator.js';
 import { configPathOf, loadBoot } from './config/boot.js';
 import { ConfigStore, startVault } from './config/store.js';
 import {
-  type Config,
   MAX_POLL_SECONDS,
   MIN_POLL_SECONDS,
   preflightSecrets,
@@ -21,6 +20,7 @@ import { leaseExpirer } from './leases.js';
 import { type ForgePair, ForgePairs, markPendingUnknown } from './outbox.js';
 import { promptVersions } from './payloads.js';
 import { zonePass } from './scheduler.js';
+import { scrub } from './scrub.js';
 import { readSecretFile } from './secrets.js';
 import { recordPass } from './status.js';
 import { syncDropZone } from './sync.js';
@@ -31,18 +31,6 @@ import { sweepStopping } from './zones/stop.js';
 const TIMED_REQUEST_MS = 30_000;
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
-
-/**
- * Redacts configured secrets from a message before it is logged, and the values a rotation
- * replaced while this process ran (a running drop may still print one).
- */
-function scrub(msg: string, config: Config | undefined, retired: readonly string[] = []): string {
-  if (!config) return msg;
-  return [...secretList(config.secrets), ...retired].reduce(
-    (m, s) => m.split(s).join('[redacted]'),
-    msg,
-  );
-}
 
 type Timers = {
   setInterval: (fn: () => void, ms: number) => NodeJS.Timeout;

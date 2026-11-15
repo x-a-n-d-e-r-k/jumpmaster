@@ -36,7 +36,8 @@ export function containsSecret(text: string, secrets: string[]): boolean {
   return TOKEN_SHAPES.some((re) => new RegExp(re.source).test(text));
 }
 
-const withBasicAuth = (token: string | undefined): string[] =>
+/** A GitHub token and its git basic-auth form (base64 of `x-access-token:<token>`); none when absent. */
+export const withBasicAuth = (token: string | undefined): string[] =>
   token === undefined ? [] : [token, Buffer.from(`x-access-token:${token}`).toString('base64')];
 
 /**
