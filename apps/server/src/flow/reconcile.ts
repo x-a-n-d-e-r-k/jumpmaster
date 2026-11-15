@@ -6,13 +6,13 @@ import { flushCrewOps } from '../crew/flush.js';
 import { enqueueCrew } from '../crew/schedule.js';
 import type { Db } from '../db/open.js';
 import {
-  activeDropFor,
   deleteFailedOutbox,
   ensureZoneMode,
   getPullRequest,
   getWorkItem,
   getZoneMode,
   hasOpenCreatePr,
+  holdingDropFor,
   insertDrop,
   isKilled,
   listObservations,
@@ -99,7 +99,8 @@ async function adopt(
       continue;
     // The author login alone isn't proof: it may be a person who also opens PRs by hand.
     if (!isServerPrBody(pr.body, item.id) && !listed(pr.number)) continue;
-    if (activeDropFor(db, item.id) || hasLivePr(db, item.id)) continue;
+    // No branch is adopted under a drop that may still salvage onto it (Ruling 10).
+    if (holdingDropFor(db, item.id, now) || hasLivePr(db, item.id)) continue;
     upsertPullRequest(
       db,
       {
@@ -137,7 +138,7 @@ async function resume(
   const candidates = listWorkItems(db, zone.id).filter(
     (i) =>
       (i.state === 'in_flight' || (i.state === 'ready' && !isBlocked(i))) &&
-      !activeDropFor(db, i.id) &&
+      !holdingDropFor(db, i.id, now) &&
       !hasLivePr(db, i.id) &&
       !hasOpenCreatePr(db, i.id),
   );

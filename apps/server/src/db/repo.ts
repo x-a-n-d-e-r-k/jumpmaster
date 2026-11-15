@@ -571,6 +571,50 @@ export function activeDropFor(db: Db, itemId: number): Drop | undefined {
     .get(itemId) as Drop | undefined;
 }
 
+/**
+ * The one reclaim predicate (Ruling 10, as ledgered): a `lost` drop that had reached `running` and
+ * was lost no more than `RECLAIM_WINDOW_MS` ago, so its stick may still salvage it. `alias` names
+ * the `drops` row; the statement binds `@reclaimCutoff` to `reclaimCutoff(now)`. A drop given up on
+ * (retention expiry, a salvage that found nothing) has `running_at` cleared and never matches.
+ */
+export const reclaimableSql = (alias: string): string =>
+  `(${alias}.state = 'lost' AND ${alias}.running_at IS NOT NULL
+    AND ${alias}.finished_at >= @reclaimCutoff)`;
+
+/** The `@reclaimCutoff` binding for `reclaimableSql` at `now`. */
+export const reclaimCutoff = (now: Date): string =>
+  new Date(now.getTime() - RECLAIM_WINDOW_MS).toISOString();
+
+/** Whether this drop may still be salvaged at `now` (`reclaimableSql`). */
+export function isReclaimable(db: Db, dropId: string, now: Date): boolean {
+  return (
+    db
+      .prepare(`SELECT 1 FROM drops d WHERE d.id = @id AND ${reclaimableSql('d')}`)
+      .get({ id: dropId, reclaimCutoff: reclaimCutoff(now) }) !== undefined
+  );
+}
+
+/**
+ * The item's most recent drop that may still be salvaged (`reclaimableSql`). Callers deciding
+ * whether to start work on an item treat it like `activeDropFor`: nothing else starts under it.
+ */
+export function reclaimableDropFor(db: Db, itemId: number, now: Date): Drop | undefined {
+  return db
+    .prepare(
+      `SELECT ${DROP_COLS} FROM drops d WHERE d.work_item_id = @itemId AND ${reclaimableSql('d')}
+       ORDER BY d.finished_at DESC, d.rowid DESC LIMIT 1`,
+    )
+    .get({ itemId, reclaimCutoff: reclaimCutoff(now) }) as Drop | undefined;
+}
+
+/**
+ * The drop that keeps anything else from starting on the item at `now`: its active drop, or else
+ * a lost one that may still be salvaged (Ruling 10). What `decide` and the reconciler wait on.
+ */
+export function holdingDropFor(db: Db, itemId: number, now: Date): Drop | undefined {
+  return activeDropFor(db, itemId) ?? reclaimableDropFor(db, itemId, now);
+}
+
 // ---- M1: pull requests -------------------------------------------------------------------------
 
 export type AttemptKey =

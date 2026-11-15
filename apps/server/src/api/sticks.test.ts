@@ -18,6 +18,7 @@ import {
   getUsageState,
   insertDrop,
   listEvents,
+  reclaimableDropFor,
   reserveGrant,
   setAttempts,
   setKilled,
@@ -1477,6 +1478,28 @@ describe('push container routes', () => {
       finishedAt: plus(t0, -60_000).toISOString(),
     });
     expect((await salvage(stickToken)).json()).toEqual({ state: 'push_pending' });
+  });
+
+  test('a salvage that found nothing is not salvageable again', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    updateDrop(db, 'd1', {
+      state: 'lost',
+      runningAt: plus(t0, -5 * 60_000).toISOString(),
+      finishedAt: plus(t0, -60_000).toISOString(),
+    });
+    expect((await salvage(stickToken)).json()).toEqual({ state: 'push_pending' });
+    expect(
+      (await pushResult(stickToken, { status: 'nothing', reason: 'nothing ahead' })).json(),
+    ).toEqual({
+      state: 'lost',
+    });
+    expect(getDrop(db, 'd1')).toMatchObject({ state: 'lost', runningAt: null });
+    expect(reclaimableDropFor(db, 1, t0)).toBeUndefined();
+    const again = await salvage(stickToken);
+    expect(again.statusCode).toBe(409);
+    expect(again.json()).toMatchObject({ refused: 'state' });
   });
 
   test('heartbeat answers killed and cancel for pending pushes', async () => {

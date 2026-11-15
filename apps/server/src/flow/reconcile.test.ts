@@ -10,6 +10,7 @@ import {
   listObservations,
   setAttempts,
   setWorkItemState,
+  updateDrop,
   updateOutbox,
 } from '../db/repo.js';
 import { opKeys, opMarker } from '../outbox.js';
@@ -430,6 +431,59 @@ describe('reconcileZone — adoption and resume', () => {
     });
     await pass();
     expect(item(id).state).not.toBe('pr_open');
+  });
+
+  test('reconcile adopts no branch during the reclaim window', async () => {
+    const id = w.item(1, 'in_flight');
+    w.f.state.branches.set('agent/issue-1', 'wip1');
+    w.f.state.addPull({
+      number: 9,
+      headRef: 'agent/issue-1',
+      headSha: 'wip1',
+      author: 'author-bot',
+      body: `work\n${opMarker(opKeys.pr(id, 'wip1'))}`,
+    });
+    // Lost a minute ago after it had run: its stick may still salvage it.
+    insertDrop(w.db, {
+      id: 'lost1',
+      dropZoneId: 'main',
+      workItemId: id,
+      role: 'implement',
+      state: 'queued',
+    });
+    updateDrop(w.db, 'lost1', {
+      state: 'lost',
+      runningAt: new Date(t.getTime() - 30 * 60_000).toISOString(),
+      finishedAt: new Date(t.getTime() - 60_000).toISOString(),
+    });
+    await pass();
+    expect(item(id).state).toBe('in_flight');
+    expect(activeDropFor(w.db, id)).toBeUndefined();
+    expect(getAttempts(w.db, id, 'resume').count).toBe(0);
+    // The window has passed: the branch's PR is adopted as today.
+    await pass(new Date(t.getTime() + 15 * 60_000));
+    expect(item(id)).toMatchObject({ state: 'pr_open', prNumber: 9 });
+  });
+
+  test('reconcile resumes no branch during the reclaim window', async () => {
+    const id = w.item(1, 'in_flight');
+    w.f.state.branches.set('agent/issue-1', 'wip1');
+    insertDrop(w.db, {
+      id: 'lost1',
+      dropZoneId: 'main',
+      workItemId: id,
+      role: 'implement',
+      state: 'queued',
+    });
+    updateDrop(w.db, 'lost1', {
+      state: 'lost',
+      runningAt: new Date(t.getTime() - 30 * 60_000).toISOString(),
+      finishedAt: new Date(t.getTime() - 60_000).toISOString(),
+    });
+    await pass();
+    expect(activeDropFor(w.db, id)).toBeUndefined();
+    await pass(new Date(t.getTime() + 15 * 60_000));
+    expect(activeDropFor(w.db, id)).toMatchObject({ role: 'implement', headSha: 'wip1' });
   });
 
   test('a ready item with an existing branch resumes with resumeSha', async () => {

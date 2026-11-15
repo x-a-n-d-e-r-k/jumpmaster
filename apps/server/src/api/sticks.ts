@@ -36,9 +36,9 @@ import {
   getZoneMode,
   insertStick,
   isKilled,
+  isReclaimable,
   markMinted,
   PUSH_RETENTION_MS,
-  RECLAIM_WINDOW_MS,
   reserveGrant,
   revokeGrants,
   type Stick,
@@ -563,8 +563,9 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       } else if (r.status === 'failed' && r.retryable) {
         return { state: 'push_pending' };
       } else if (r.status === 'nothing' && drop.pushKind === 'salvage') {
-        // No work to save: lost, and the item requeues as for any lost drop.
-        updateDrop(db, drop.id, { state: 'lost', finishedAt: at.toISOString() });
+        // No work to save: lost, and the item requeues as for any lost drop. Its salvage is
+        // done, so it is not reclaimable again (no running_at).
+        updateDrop(db, drop.id, { state: 'lost', finishedAt: at.toISOString(), runningAt: null });
         return { state: 'lost' };
       } else if (drop.pushKind === 'final') {
         outcome = { ...stored, status: 'failed', reason: r.reason };
@@ -595,9 +596,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
           .get(d.id) as {
           hard: number;
         };
-        const lostAt = d.finishedAt === null ? Number.NaN : Date.parse(d.finishedAt);
-        const reclaimable =
-          d.state === 'lost' && d.runningAt !== null && at.getTime() - lostAt <= RECLAIM_WINDOW_MS;
+        const reclaimable = isReclaimable(db, d.id, at);
         const killed = d.state === 'cancelled' && hard === 1;
         if (!reclaimable && !killed) return 'state';
         if (d.workItemId !== null && activeDropFor(db, d.workItemId)) return 'active drop';

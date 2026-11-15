@@ -4,11 +4,11 @@ import { agentBranch } from '@jumpmaster/protocol';
 import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import {
-  activeDropFor,
   getDropZoneDefaultBranch,
   getGateAllowance,
   getOutbox,
   getPullRequest,
+  holdingDropFor,
   type OutboxRow,
   recordGatePark,
   setWaitingSince,
@@ -585,7 +585,8 @@ export async function buildSnapshot(
     item,
     zone,
     now,
-    activeDrop: activeDropFor(db, item.id) ?? null,
+    // A lost drop its stick may still salvage holds the item like an active one (Ruling 10).
+    activeDrop: holdingDropFor(db, item.id, now) ?? null,
     pr,
     issueState,
     branchSha,

@@ -32,7 +32,6 @@ import {
   getZoneMode,
   insertDrop,
   isKilled,
-  setKilled,
   setZoneMode,
   ZONE_MODES,
   zoneHistoryCounts,
@@ -49,7 +48,7 @@ import {
 import { DoctorBusyError, latestDoctorRun, processEnv, runDoctor } from '../doctor/run.js';
 import { type Forge, GitHubForge } from '../forge/github.js';
 import { fileIntakeIssue, GoalStubSchema, IntakeIssueSchema, renderGoalStub } from '../intake.js';
-import { engageKill } from '../leases.js';
+import { engageKill, releaseKill } from '../leases.js';
 import {
   listMcpTokens,
   MAX_TOKEN_DAYS,
@@ -678,7 +677,8 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       const body = KillBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: 'invalid body' });
       if (!body.data.engaged) {
-        setKilled(db, false, now());
+        // The pause is credited to every pending push's retention (Ruling 12).
+        releaseKill(db, now());
         audit(req, 'kill', { engaged: false });
         return { engaged: false, cancelled: 0 };
       }

@@ -1,8 +1,24 @@
 import type { ImagePolicy, Role, StickCapability } from '@jumpmaster/protocol';
 import type { Config, DropZoneConfig, UsageConfig } from './config.js';
 import type { Db } from './db/open.js';
-import { getUsageState, isKilled, setKilled, setUsageState } from './db/repo.js';
+import {
+  ACTIVE_STATES_SQL,
+  appendEvents,
+  type Drop,
+  getDrop,
+  getUsageState,
+  getWorkItem,
+  isKilled,
+  reclaimableSql,
+  reclaimCutoff,
+  revokeGrants,
+  setKilled,
+  setUsageState,
+  setWorkItemState,
+  updateDrop,
+} from './db/repo.js';
 import { refundCharge } from './flow/budgets.js';
+import { replaceDrop } from './results.js';
 import { DEFAULT_USAGE_CONFIG, type Gate, releaseProbe, unreachable } from './usage.js';
 
 const LEASE_TTL_MS = 60_000;
@@ -164,8 +180,10 @@ export function leaseNextDrop(
 }
 
 /**
- * Engages the kill switch: refuses all new work and cancels every active drop, refunding its
- * charge so a later reset doesn't count cancelled work as a repeat.
+ * Engages the kill switch: refuses all new work and cancels every queued, leased and running drop,
+ * refunding its charge so a later reset doesn't count cancelled work as a repeat. A pending push is
+ * left as it is: its agent has finished, and the switch only withholds its grant (and its
+ * retention clock) until release.
  */
 export function engageKill(db: Db, now: Date): { cancelled: number } {
   return db.transaction(() => {
@@ -185,6 +203,63 @@ export function engageKill(db: Db, now: Date): { cancelled: number } {
     }
     return { cancelled: active.length };
   })();
+}
+
+/**
+ * Releases the kill switch and credits the time it was engaged to every pending push's deadline
+ * (Ruling 12), so retention counts only time a push could have run. Returns the paused ms (0 when
+ * the switch was already off).
+ */
+export function releaseKill(db: Db, now: Date): number {
+  return db.transaction((): number => {
+    const paused = setKilled(db, false, now);
+    if (paused <= 0) return 0;
+    const rows = db
+      .prepare(
+        `SELECT id, push_deadline AS deadline FROM drops
+         WHERE state = 'push_pending' AND push_deadline IS NOT NULL`,
+      )
+      .all() as { id: string; deadline: string }[];
+    for (const r of rows) {
+      const moved = new Date(Date.parse(r.deadline) + paused).toISOString();
+      updateDrop(db, r.id, { pushDeadline: moved });
+    }
+    return paused;
+  })();
+}
+
+/**
+ * Gives up on a pending push whose retention ran out (Ruling 12: never while the switch is on): it
+ * goes `lost`, with `running_at` cleared so no salvage brings it back, and its grants are revoked.
+ * An implement item resumes from the last pushed commit (`head_sha`) when there is one, and is
+ * otherwise ready again; a heal or resolve item stays `pr_open` for the reconciler.
+ */
+function expireRetention(db: Db, now: Date): number {
+  if (isKilled(db)) return 0;
+  const ids = (
+    db
+      .prepare(
+        `SELECT id FROM drops WHERE state = 'push_pending' AND push_deadline < ?
+         ORDER BY push_deadline, rowid`,
+      )
+      .all(iso(now)) as { id: string }[]
+  ).map((r) => r.id);
+  for (const id of ids) {
+    const drop = getDrop(db, id) as Drop;
+    updateDrop(db, id, { state: 'lost', finishedAt: iso(now), runningAt: null });
+    revokeGrants(db, id, now);
+    appendEvents(db, id, [
+      { ts: iso(now), kind: 'log', data: { message: 'push retention expired' } },
+    ]);
+    if (drop.role !== 'implement' || drop.workItemId === null) continue;
+    if (getWorkItem(db, drop.workItemId)?.state !== 'in_flight') continue;
+    if (drop.headSha !== null) {
+      replaceDrop(db, drop, { image: drop.image, headSha: drop.headSha, chargedKey: null }, now);
+    } else {
+      setWorkItemState(db, drop.workItemId, 'ready', undefined, now);
+    }
+  }
+  return ids.length;
 }
 
 /**
@@ -222,8 +297,10 @@ export function heartbeat(
 }
 
 /**
- * Marks drops with expired leases `lost` (finished_at = now), then returns in_flight work items
- * to `ready` once their latest drop has been lost for the grace period and no drop is active.
+ * Marks drops with expired leases `lost` (finished_at = now), and pending pushes past their
+ * retention (`expireRetention`, not while killed). Then returns in_flight work items to `ready`
+ * once their latest drop has been lost for the grace period, no drop is active, and none may still
+ * be salvaged (`reclaimableSql`: a drop that had run holds its item for the reclaim window).
  * Only implement items are `in_flight`, so a lost review/heal/resolve drop leaves its item
  * `pr_open` for the reconciler to re-decide. Lost probes are released.
  * Returns the number of drops newly marked lost.
@@ -244,22 +321,24 @@ export function expireLeases(
         .all({ now: iso(now) }) as { id: string }[]
     ).map((r) => r.id);
     for (const id of lostIds) releaseProbe(db, id, usageCfg, now, rand);
-    const lost = lostIds.length;
+    const lost = lostIds.length + expireRetention(db, now);
     db.prepare(
       `UPDATE work_items SET state = 'ready', updated_at = @now
        WHERE state = 'in_flight'
          AND NOT EXISTS (SELECT 1 FROM drops a WHERE a.work_item_id = work_items.id
-                         AND a.state IN ('queued','leased','running'))
+                         AND a.state IN (${ACTIVE_STATES_SQL}))
+         AND NOT EXISTS (SELECT 1 FROM drops r WHERE r.work_item_id = work_items.id
+                         AND ${reclaimableSql('r')})
          AND (SELECT l.state FROM drops l WHERE l.work_item_id = work_items.id
               ORDER BY l.created_at DESC, l.rowid DESC LIMIT 1) = 'lost'
          AND (SELECT l.finished_at FROM drops l WHERE l.work_item_id = work_items.id
               ORDER BY l.created_at DESC, l.rowid DESC LIMIT 1) <= @cutoff`,
-    ).run({ now: iso(now), cutoff: iso(now, -LOST_GRACE_MS) });
+    ).run({ now: iso(now), cutoff: iso(now, -LOST_GRACE_MS), reclaimCutoff: reclaimCutoff(now) });
     return lost;
   })();
 }
 
-/** Pushes every live lease out to a full TTL from `now`. */
+/** Pushes every live lease out to a full TTL from `now`. A pending push has no lease: untouched. */
 export function extendLiveLeases(db: Db, now: Date): number {
   return db
     .prepare(
