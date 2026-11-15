@@ -91,11 +91,18 @@ The mode is runtime state, separate from the config: a config change never flips
   let them drain first.
 - **Resume** (`ctl resume <zone>`): takes ready issues and runs drops again.
 
-### Remove a zone
+### Stop managing a zone
 
-**Remove &lt;zone&gt;** at the bottom of the zone page (`ctl zones remove <zone>`). A zone is
-removed once it is drained: set it to observe and let its drops and GitHub writes finish. Only
-its mode goes; its history stays, for a later Resume.
+**Stop managing** on the zone's row in the Zones list, or near the top of its page
+(`ctl zones remove <zone>`), after one confirmation naming the repository. The zone takes no new
+work and goes to observe at once; it is removed as soon as it is drained, with no further visit
+(the server checks every few seconds, and after a restart too). Until then it shows as
+*stopping* with what it waits for, by count: running drops, pending pushes and outbox writes. In
+observe a pending push is held, so it waits until its retention runs out or you cancel it
+(`ctl drops cancel <drop>`). Pause or Resume withdraws the stop. Open pull requests and branches
+are left as they are; only the zone's mode goes, and its history stays for a later Resume. The
+API answers `200 {"removed": …}` when the zone went at once and `202 {"stopping": …, "waits": …}`
+otherwise. A file-mode config shows no control: edit the file.
 
 ### Egress adoption
 

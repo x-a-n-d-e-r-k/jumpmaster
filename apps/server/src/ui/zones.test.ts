@@ -360,10 +360,78 @@ describe('the zones page', () => {
     expect(egress).toMatch(/github\.com[\s\S]*?listed by every drop/);
   });
 
-  test('the Remove button has no confirmation branch: removal is not a guarded change', async () => {
+  test('the Zones list shows Stop managing on each zone row, with a confirmation naming the repository and what happens', async () => {
+    const w = await world();
+    const r = (await w.get('/zones')).body;
+    for (const id of ['main', 'img']) {
+      const at = r.indexOf(`href="/zones/${id}"`);
+      const row = r.slice(at, r.indexOf('</tr>', at));
+      expect(row).toContain(`<button class="stop" data-zone="${id}"`);
+      expect(row).toContain('Stop managing</button>');
+      const confirm = row.match(/data-confirm="([^"]*)"/)?.[1] ?? '';
+      expect(confirm).toContain(`octo/${id}`);
+      expect(confirm).toContain('no new work');
+      expect(confirm).toContain('Open pull requests are left as they are');
+      expect(confirm).toContain('history is kept, for a later Resume');
+    }
+    // One confirmed click, one call: the removal's DELETE, no guarded-change branch.
+    const script = r.slice(r.indexOf("querySelectorAll('button.stop')"));
+    expect(script).toContain('if (!confirm(b.dataset.confirm)) return;');
+    expect(script).toContain("encodeURIComponent(b.dataset.zone), {}, 'DELETE')");
+    expect(script.slice(0, script.indexOf('});'))).not.toContain('needsConfirmation');
+  });
+
+  test('the zone page offers Stop managing near its top, and none at the bottom any more', async () => {
     const page = (await (await world()).get('/zones/main')).body;
-    const remove = page.slice(page.indexOf("getElementById('remove')"));
-    expect(remove.slice(0, remove.indexOf('});'))).not.toContain('needsConfirmation');
+    const stop = page.indexOf('<button class="stop" data-zone="main"');
+    expect(stop).toBeGreaterThanOrEqual(0);
+    expect(stop).toBeLessThan(page.indexOf('<form id="project"'));
+    expect(page).toContain("querySelectorAll('button.stop')");
+    expect(page).not.toContain('<h3>Remove</h3>');
+  });
+
+  test('a stopping zone shows as stopping with what it waits for, by count, on the list and its page', async () => {
+    const w = await world();
+    upsertWorkItem(w.db, {
+      dropZoneId: 'main',
+      issueNumber: 2,
+      title: 't',
+      body: 'b',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    insertDrop(w.db, {
+      id: 'busy',
+      dropZoneId: 'main',
+      workItemId: 1,
+      role: 'implement',
+      state: 'running',
+      createdAt: t0.toISOString(),
+    });
+    const r = await w.api('DELETE', '/api/control/zones/main');
+    expect(r.statusCode, r.body).toBe(202);
+    const waiting = 'stopping: waiting for 1 running drop, 0 pending pushes, 0 outbox writes';
+    const list = (await w.get('/zones')).body;
+    const at = list.indexOf('href="/zones/main"');
+    const row = list.slice(at, list.indexOf('</tr>', at));
+    expect(row).toContain(waiting);
+    // Already stopping: no second Stop, and no mode button but Resume (which withdraws it).
+    expect(row).not.toContain('class="stop"');
+    expect(row).toContain('data-mode="active"');
+    expect((await w.get('/zones/main')).body).toContain(waiting);
+    // Not removed while the drop runs; the already-drained zone goes at once.
+    expect(w.store.current().dropZones.map((z) => z.id)).toEqual(['main', 'img']);
+    expect((await w.api('DELETE', '/api/control/zones/img')).json()).toMatchObject({
+      removed: 'img',
+    });
+  });
+
+  test('a read-only (file-mode) config shows no Stop managing control', async () => {
+    const w = await world({ file: true });
+    expect((await w.get('/zones')).body).not.toContain('class="stop"');
+    expect((await w.get('/zones/main')).body).not.toContain('class="stop"');
   });
 
   test('pause, resume and observe from the zones page keep the existing guards', async () => {
