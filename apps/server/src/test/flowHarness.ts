@@ -187,7 +187,7 @@ export async function harness(
         method: 'POST',
         url: '/api/sticks/lease',
         headers: auth,
-        payload: { freeSlots: 1 },
+        payload: { freeSlots: 1, capabilities: ['push-v1'] },
       });
       if (res.statusCode !== 200) throw new Error(`lease returned ${res.statusCode}`);
       const payload = res.json() as DropPayload;

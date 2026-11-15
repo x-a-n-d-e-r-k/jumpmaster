@@ -1,12 +1,15 @@
 import { createHash } from 'node:crypto';
+import { FEATURES_HEADER, PushGrantSchema, PushPlanSchema } from '@jumpmaster/protocol';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createApp } from '../app.js';
+import { listAudit } from '../auth/audit.js';
 import { SetupMode, setupActive } from '../auth/operator.js';
 import type { LiveConfig } from '../config/source.js';
 import type { Config } from '../config.js';
-import { openDb } from '../db/open.js';
+import { type Db, openDb } from '../db/open.js';
 import {
+  activeDropFor,
   getAttempts,
   getDrop,
   getOutbox,
@@ -15,9 +18,15 @@ import {
   getUsageState,
   insertDrop,
   listEvents,
+  reserveGrant,
+  setAttempts,
+  setKilled,
   setUsageState,
   setWorkItemState,
+  setZoneMode,
+  updateDrop,
   upsertDropZone,
+  upsertPullRequest,
   upsertWorkItem,
 } from '../db/repo.js';
 import { buildPayload, promptVersions } from '../payloads.js';
@@ -137,12 +146,13 @@ async function enroll(name = 'stick-1') {
   return res.json() as { stickId: string; stickToken: string };
 }
 
+/** A lease from a current stick: it runs push containers. */
 const lease = (token: string) =>
   app.inject({
     method: 'POST',
     url: '/api/sticks/lease',
     headers: bearer(token),
-    payload: { freeSlots: 1 },
+    payload: { freeSlots: 1, capabilities: ['push-v1'] },
   });
 
 afterEach(() => app.close());
@@ -417,7 +427,7 @@ describe('stick API', () => {
     const pending = fetch(`http://127.0.0.1:${port}/api/sticks/lease`, {
       method: 'POST',
       headers: { ...bearer(stickToken), 'content-type': 'application/json' },
-      body: JSON.stringify({ freeSlots: 1 }),
+      body: JSON.stringify({ freeSlots: 1, capabilities: ['push-v1'] }),
     });
     setTimeout(() => {
       insertDrop(db, {
@@ -545,7 +555,7 @@ describe('stick capabilities, per zone', () => {
       pinnedImages: [pin],
     });
     // An M3 body stamps the defaults, so a downgraded stick doesn't keep its old claims.
-    await lease(stickToken);
+    await leaseWith(stickToken, {});
     expect(getStickByTokenHash(db, hash)).toMatchObject({
       capabilities: [],
       imagePolicy: 'allowlist',
@@ -619,7 +629,7 @@ describe('stick capabilities, per zone', () => {
     expect(getDrop(db, 'x1')).toMatchObject({ state: 'queued', stickId: null, epoch: 0 });
     // A capable stick takes the enforce zone's drop.
     const capable = await enroll('stick-2');
-    const res2 = await leaseWith(capable.stickToken, { capabilities: ['egress-v1'] });
+    const res2 = await leaseWith(capable.stickToken, { capabilities: ['egress-v1', 'push-v1'] });
     expect((res2.json() as { dropId: string }).dropId).toBe('x1');
   });
 
@@ -638,7 +648,7 @@ describe('stick capabilities, per zone', () => {
     expect(getStickByTokenHash(db, hash)?.capabilities).toEqual(['egress-v1']);
     lockedDrop(db);
     // The same stick now sends a bare M3 body: the enforce zone's drop is not leased to it.
-    const res = await lease(stickToken);
+    const res = await leaseWith(stickToken, {});
     expect(res.statusCode).toBe(204);
     expect(skippedOf(res)).toEqual([{ zoneId: 'locked', missing: ['egress-v1'] }]);
     expect(getDrop(db, 'x1')).toMatchObject({ state: 'queued', stickId: null, epoch: 0 });
@@ -648,7 +658,7 @@ describe('stick capabilities, per zone', () => {
     const { db } = setup({ queued: false, config: twoZones({ requireSignedImages: true }) });
     lockedDrop(db);
     const { stickToken } = await enroll();
-    const caps = ['egress-v1', 'image-verify-v1'];
+    const caps = ['egress-v1', 'image-verify-v1', 'push-v1'];
     const res = await leaseWith(stickToken, { capabilities: caps, imagePolicy: 'allowlist' });
     expect(res.statusCode).toBe(204);
     expect(skippedOf(res)).toEqual([{ zoneId: 'locked', missing: ['image-policy:signed'] }]);
@@ -705,14 +715,16 @@ describe('stick capabilities, per zone', () => {
     expect(skippedOf(await lease(stickToken))).toBeUndefined();
   });
 
-  test('with no zone needing a capability, an M3 stick still leases', async () => {
+  test('with no zone needing a capability, an M3 stick skips no zone but gets no pushing role', async () => {
     // The reference zone: image set, egress and signed images left at their defaults.
-    setup({ config: { ...config, requireSignedImages: false } });
+    const { db } = setup({ config: { ...config, requireSignedImages: false } });
     const { stickToken } = await enroll();
-    const res = await lease(stickToken); // body { freeSlots } only, as an M3 stick sends
-    expect(res.statusCode).toBe(200);
-    expect((res.json() as { dropId: string }).dropId).toBe('d1');
+    const res = await leaseWith(stickToken, {}); // body { freeSlots } only, as an M3 stick sends
+    expect(res.statusCode).toBe(204);
     expect(skippedOf(res)).toBeUndefined();
+    expect(getDrop(db, 'd1')?.state).toBe('queued');
+    const current = await lease(stickToken);
+    expect((current.json() as { dropId: string }).dropId).toBe('d1');
   });
 });
 
@@ -765,7 +777,7 @@ describe('setup mode', () => {
       method: 'POST',
       url: '/api/sticks/lease',
       headers: auth,
-      payload: { freeSlots: 1 },
+      payload: { freeSlots: 1, capabilities: ['push-v1'] },
     });
     expect(leased.statusCode).toBe(200);
     const hb = await whole.inject({
@@ -777,5 +789,736 @@ describe('setup mode', () => {
     expect(hb.statusCode).toBe(200);
     expect(getDrop(db, 'd1')?.state).toBe('running');
     await whole.close();
+  });
+});
+
+describe('push container routes', () => {
+  const SHA_A = 'a'.repeat(40);
+  const SHA_B = 'b'.repeat(40);
+  const PRIOR = 'c'.repeat(40);
+  const HOUR = 3_600_000;
+
+  const post = (url: string, token: string, payload: Record<string, unknown>) =>
+    app.inject({ method: 'POST', url, headers: bearer(token), payload });
+  const leasePush = (token: string, body: Record<string, unknown> = {}) =>
+    post('/api/sticks/lease', token, { freeSlots: 1, capabilities: ['push-v1'], ...body });
+  const postResult = (token: string, result: Record<string, unknown>, epoch = 1) =>
+    post('/api/drops/d1/result', token, { epoch, result });
+  const plan = (token: string, dropId = 'd1', epoch = 1) =>
+    post('/api/sticks/push-plan', token, { dropId, epoch });
+  const grant = (token: string, dropId = 'd1', epoch = 1) =>
+    post('/api/sticks/push-token', token, { dropId, epoch });
+  const pushResult = (token: string, result: Record<string, unknown>, dropId = 'd1', epoch = 1) =>
+    post(`/api/drops/${dropId}/push-result`, token, { epoch, result });
+  const salvage = (token: string, dropId = 'd1', epoch = 1) =>
+    post('/api/sticks/salvage', token, { dropId, epoch });
+
+  const liveGrants = (db: Db): number =>
+    (
+      db.prepare('SELECT COUNT(*) AS n FROM push_tokens WHERE revoked_at IS NULL').get() as {
+        n: number;
+      }
+    ).n;
+
+  type PendingOpts = {
+    id?: string;
+    role?: 'implement' | 'review' | 'heal' | 'resolve';
+    kind?: 'final' | 'checkpoint' | 'salvage';
+    result?: Record<string, unknown>;
+    headSha?: string | null;
+    prNumber?: number | null;
+    expectSha?: string | null;
+  };
+
+  /** A drop of `stickId` at epoch 1, parked in `push_pending` as the result route leaves it. */
+  function pending(db: Db, stickId: string, o: PendingOpts = {}): string {
+    const id = o.id ?? 'd1';
+    const kind = o.kind ?? 'final';
+    const role = o.role ?? 'implement';
+    insertDrop(db, {
+      id,
+      dropZoneId: 'main',
+      workItemId: 1,
+      role,
+      state: 'queued',
+      headSha: o.headSha ?? null,
+      prNumber: o.prNumber ?? null,
+      createdAt: t0.toISOString(),
+    });
+    const result =
+      o.result ??
+      (kind === 'final'
+        ? { status: 'completed', role, headSha: SHA_A, gates: [] }
+        : { status: 'interrupted', role, headSha: SHA_B, gates: [] });
+    updateDrop(db, id, {
+      state: 'push_pending',
+      stickId,
+      epoch: 1,
+      pushKind: kind,
+      pushExpectSha: o.expectSha !== undefined ? o.expectSha : kind === 'final' ? SHA_A : null,
+      pushDeadline: plus(t0, 24 * HOUR).toISOString(),
+      resultJson: JSON.stringify(result),
+      usageApplied: 1,
+      runningAt: t0.toISOString(),
+      finishedAt: t0.toISOString(),
+    });
+    return id;
+  }
+
+  /** An open PR for item 1, as heal and resolve drops need. */
+  function openPr(db: Db) {
+    upsertPullRequest(
+      db,
+      { workItemId: 1, number: 1, headRef: 'agent/issue-7', headSha: PRIOR, state: 'open' },
+      t0,
+    );
+    setWorkItemState(db, 1, 'pr_open', undefined, t0);
+  }
+
+  test('lease announces push-v1 and gives pushing roles only to push-v1 sticks without noPush', async () => {
+    const { db } = setup();
+    const { stickToken } = await enroll();
+    const leaseOld = () => post('/api/sticks/lease', stickToken, { freeSlots: 1 });
+    const old = await leaseOld(); // an older stick: no push-v1
+    expect(old.statusCode).toBe(204);
+    expect(old.headers[FEATURES_HEADER]).toBe('push-v1');
+    const full = await leasePush(stickToken, { noPush: true });
+    expect(full.statusCode).toBe(204);
+    expect(full.headers[FEATURES_HEADER]).toBe('push-v1');
+    expect(getDrop(db, 'd1')?.state).toBe('queued');
+    // Review drops still go to it.
+    const other = upsertWorkItem(db, {
+      dropZoneId: 'main',
+      issueNumber: 8,
+      title: 'Other',
+      body: 'b',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    insertDrop(db, {
+      id: 'r1',
+      dropZoneId: 'main',
+      workItemId: other.id,
+      role: 'review',
+      state: 'queued',
+      prNumber: 1,
+      headSha: PRIOR,
+      createdAt: t0.toISOString(),
+    });
+    const review = await leaseOld();
+    expect(review.statusCode).toBe(200);
+    expect(review.json()).toMatchObject({ dropId: 'r1', role: 'review' });
+    const implement = await leasePush(stickToken);
+    expect(implement.statusCode).toBe(200);
+    expect(implement.headers[FEATURES_HEADER]).toBe('push-v1');
+    expect(implement.json()).toMatchObject({ dropId: 'd1', role: 'implement' });
+  });
+
+  test('a push-requested result parks the drop, applies usage once and releases the probe', async () => {
+    const { db, forge } = setup();
+    const { stickToken } = await enroll();
+    await leasePush(stickToken);
+    setUsageState(db, { probeDropId: 'd1' }, t0);
+    const result = {
+      status: 'completed',
+      headSha: SHA_A,
+      gates: [gateOk],
+      push: { kind: 'final', expectSha: SHA_A },
+      rateLimit: { status: 'allowed', unifiedWindows: { seven_day: { utilization: 0.42 } } },
+    };
+    const res = await postResult(stickToken, result);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ state: 'push_pending' });
+    const drop = getDrop(db, 'd1');
+    expect(drop).toMatchObject({
+      state: 'push_pending',
+      pushKind: 'final',
+      pushExpectSha: SHA_A,
+      pushDeadline: plus(t0, 24 * HOUR).toISOString(),
+      usageApplied: 1,
+      wasProbe: 1,
+    });
+    expect(JSON.parse(drop?.resultJson ?? 'null')).toMatchObject(result);
+    expect(getUsageState(db)).toMatchObject({ probeDropId: null, sevenDayUtil: 0.42 });
+    // Nothing of the outcome yet: no PR, the item still in flight.
+    expect(forge.created).toHaveLength(0);
+    expect(workItem(db, 1).state).toBe('in_flight');
+    // Usage is not applied again.
+    setUsageState(db, { sevenDayUtil: 0.1 }, t0);
+    expect((await postResult(stickToken, result)).statusCode).toBe(200);
+    expect(getUsageState(db).sevenDayUtil).toBe(0.1);
+  });
+
+  test('a repeated push-requested result is idempotent', async () => {
+    let clock = t0;
+    const { db } = setup({ now: () => clock });
+    const { stickToken } = await enroll();
+    await leasePush(stickToken);
+    const result = {
+      status: 'interrupted',
+      headSha: SHA_B,
+      gates: [],
+      push: { kind: 'checkpoint' },
+    };
+    expect((await postResult(stickToken, result)).json()).toEqual({ state: 'push_pending' });
+    const before = getDrop(db, 'd1');
+    clock = plus(t0, HOUR);
+    const again = await postResult(stickToken, result);
+    expect(again.statusCode).toBe(200);
+    expect(again.json()).toEqual({ state: 'push_pending' });
+    expect(getDrop(db, 'd1')).toEqual(before);
+    // Another epoch is still stale.
+    expect((await postResult(stickToken, result, 2)).statusCode).toBe(409);
+  });
+
+  test('an invalid push request is 422', async () => {
+    const cases: [string, 'implement' | 'resolve', Record<string, unknown>][] = [
+      [
+        'final on interrupted',
+        'implement',
+        {
+          status: 'interrupted',
+          headSha: SHA_A,
+          gates: [],
+          push: { kind: 'final', expectSha: SHA_A },
+        },
+      ],
+      [
+        'a mismatched headSha',
+        'implement',
+        {
+          status: 'completed',
+          headSha: SHA_B,
+          gates: [],
+          push: { kind: 'final', expectSha: SHA_A },
+        },
+      ],
+      [
+        'a resolve checkpoint',
+        'resolve',
+        { status: 'interrupted', headSha: SHA_B, gates: [], push: { kind: 'checkpoint' } },
+      ],
+      [
+        'salvage from the agent',
+        'implement',
+        { status: 'interrupted', headSha: SHA_B, gates: [], push: { kind: 'salvage' } },
+      ],
+    ];
+    for (const [name, role, result] of cases) {
+      const { db } = setup({ queued: false });
+      if (role === 'resolve') openPr(db);
+      insertDrop(db, {
+        id: 'd1',
+        dropZoneId: 'main',
+        workItemId: 1,
+        role,
+        state: 'queued',
+        ...(role === 'resolve' ? { prNumber: 1, headSha: PRIOR } : {}),
+        createdAt: t0.toISOString(),
+      });
+      const { stickToken } = await enroll();
+      expect((await leasePush(stickToken)).statusCode, name).toBe(200);
+      const res = await postResult(stickToken, result);
+      expect(res.statusCode, name).toBe(422);
+      expect(getDrop(db, 'd1')?.state, name).toBe('leased');
+      await app.close();
+    }
+  });
+
+  test('push-plan answers the branch and egress and revokes stale reservations', async () => {
+    const egressed: Config = {
+      ...config,
+      dropZones: [
+        {
+          ...config.dropZones[0]!,
+          egress: { mode: 'enforce', allow: ['registry.npmjs.org'] },
+          limits: { pids: 256, memoryMb: 2048 },
+        },
+      ],
+    };
+    const { db } = setup({ queued: false, config: egressed });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId, { kind: 'checkpoint' });
+    expect(reserveGrant(db, 'd1', 1, t0)).toBe('ok');
+    const res = await plan(stickToken);
+    expect(res.statusCode).toBe(200);
+    expect(PushPlanSchema.parse(res.json())).toEqual({
+      branch: 'agent/issue-7',
+      salvage: false,
+      limits: { pids: 256, memoryMb: 2048 },
+      egress: { mode: 'enforce', allow: ['github.com'] },
+    });
+    expect(liveGrants(db)).toBe(0);
+    expect((await grant(stickToken)).statusCode).toBe(200);
+  });
+
+  test('push-plan without egress names none, and salvage only for a salvage', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId, { kind: 'salvage' });
+    expect((await plan(stickToken)).json()).toEqual({
+      branch: 'agent/issue-7',
+      salvage: true,
+      limits: { pids: 512 },
+    });
+  });
+
+  test('push-token refuses killed, paused, observe, another stick, another epoch, a non-pushing role', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    const other = await enroll('other');
+    pending(db, stickId);
+
+    setKilled(db, true, t0);
+    let res = await grant(stickToken);
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ refused: 'killed', retryable: true });
+    setKilled(db, false, t0);
+
+    for (const mode of ['paused', 'observe'] as const) {
+      setZoneMode(db, 'main', mode, t0);
+      res = await grant(stickToken);
+      expect(res.statusCode, mode).toBe(403);
+      expect(res.json(), mode).toEqual({ refused: `zone ${mode}`, retryable: true });
+    }
+    setZoneMode(db, 'main', 'active', t0);
+
+    res = await grant(other.stickToken);
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ stale: true });
+    res = await grant(stickToken, 'd1', 2);
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ stale: true });
+    expect(liveGrants(db)).toBe(0);
+
+    const { db: db2 } = setup({ queued: false });
+    const s2 = await enroll();
+    openPr(db2);
+    pending(db2, s2.stickId, { id: 'r1', role: 'review', prNumber: 1, headSha: PRIOR });
+    res = await grant(s2.stickToken, 'r1');
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ refused: 'role', retryable: false });
+    expect(liveGrants(db2)).toBe(0);
+  });
+
+  test('push-token refuses a zone whose repository is no longer the drop zone one', async () => {
+    const moved: Config = {
+      ...config,
+      dropZones: [{ ...config.dropZones[0]!, repo: 'octo/elsewhere' }],
+    };
+    const { db } = setup({ queued: false, config: moved });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    const res = await grant(stickToken);
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ refused: 'repo mismatch', retryable: false });
+    expect(liveGrants(db)).toBe(0);
+  });
+
+  test('one live reservation per drop', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    const [a, b] = await Promise.all([grant(stickToken), grant(stickToken)]);
+    const codes = [a.statusCode, b.statusCode].sort();
+    expect(codes).toEqual([200, 409]);
+    const refused = a.statusCode === 409 ? a : b;
+    expect(refused.json()).toEqual({ refused: 'reserved', retryable: true });
+    expect(liveGrants(db)).toBe(1);
+  });
+
+  test('rediscovery revokes a stale reservation', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    expect((await grant(stickToken)).statusCode).toBe(200);
+    expect((await grant(stickToken)).statusCode).toBe(409);
+    const s = await salvage(stickToken);
+    expect(s.statusCode).toBe(200);
+    expect(s.json()).toEqual({ state: 'push_pending' });
+    expect(getDrop(db, 'd1')?.pushKind).toBe('final');
+    expect((await grant(stickToken)).statusCode).toBe(200);
+  });
+
+  test("the grant carries the drop's own secrets only", async () => {
+    const secrets: Config['secrets'] = {
+      ...config.secrets,
+      zoneSecrets: { main: { NPM_TOKEN: 'npm-main' }, other: { NPM_TOKEN: 'npm-other' } },
+    };
+    const withSecrets: Config = {
+      ...config,
+      dropZones: [{ ...config.dropZones[0]!, protectedPaths: ['.github/**'] }],
+      secrets,
+    };
+    const { db } = setup({ queued: false, config: withSecrets });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    const res = await grant(stickToken);
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { grant: unknown };
+    const g = PushGrantSchema.parse(body.grant);
+    expect(g).toMatchObject({
+      token: 'gh-secret',
+      owner: 'octo',
+      name: 'demo',
+      branch: 'agent/issue-7',
+      base: 'main',
+      lease: '',
+      expectSha: SHA_A,
+      protectedPaths: ['.github/**'],
+    });
+    const basic = Buffer.from('x-access-token:gh-secret').toString('base64');
+    expect([...g.secrets].sort()).toEqual([basic, 'claude-secret', 'gh-secret', 'npm-main'].sort());
+    for (const absent of ['gh-reviewer', 'join-me', 'npm-other', 'o'.repeat(32)]) {
+      expect(JSON.stringify(body), absent).not.toContain(absent);
+    }
+  });
+
+  test('the grant leases on the resumed sha for implement and the PR head for heal', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId, { kind: 'checkpoint', headSha: PRIOR });
+    const res = await grant(stickToken);
+    expect(res.json()).toMatchObject({ grant: { lease: PRIOR } });
+    expect((res.json() as { grant: object }).grant).not.toHaveProperty('expectSha');
+
+    const { db: db2 } = setup({ queued: false });
+    const s2 = await enroll();
+    openPr(db2);
+    pending(db2, s2.stickId, { role: 'heal', prNumber: 1, headSha: PRIOR });
+    const heal = await grant(s2.stickToken);
+    expect(heal.json()).toMatchObject({ grant: { lease: PRIOR, expectSha: SHA_A } });
+    void db;
+  });
+
+  test('the audit row never contains the token', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    expect((await grant(stickToken)).statusCode).toBe(200);
+    const rows = listAudit(db).filter((a) => a.action === 'push-token');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      via: 'system',
+      detail: { drop: 'd1', epoch: 1, kind: 'final' },
+    });
+    expect(JSON.stringify(rows)).not.toContain('gh-secret');
+    const minted = db
+      .prepare('SELECT minted_at AS m FROM push_tokens WHERE drop_id = ?')
+      .get('d1') as { m: string | null };
+    expect(minted.m).toBe(t0.toISOString());
+  });
+
+  test('push-result pushed applies the outcome with the pushed sha and skips usage', async () => {
+    const { db, forge } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId, {
+      result: {
+        status: 'completed',
+        headSha: SHA_A,
+        gates: [],
+        rateLimit: { status: 'allowed', unifiedWindows: { seven_day: { utilization: 0.42 } } },
+      },
+    });
+    setUsageState(db, { sevenDayUtil: 0.1 }, t0);
+    expect((await grant(stickToken)).statusCode).toBe(200);
+    const res = await pushResult(stickToken, {
+      status: 'pushed',
+      headSha: SHA_A,
+      alreadyThere: false,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ state: 'succeeded' });
+    expect(forge.created).toHaveLength(1);
+    expect(getPullRequest(db, 1)).toMatchObject({ headSha: SHA_A });
+    expect(workItem(db, 1).state).toBe('pr_open');
+    expect(getUsageState(db).sevenDayUtil).toBe(0.1);
+    expect(liveGrants(db)).toBe(0);
+  });
+
+  test('push-result pushed for a checkpoint resumes from the pushed sha', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId, { kind: 'checkpoint', headSha: PRIOR });
+    const res = await pushResult(stickToken, {
+      status: 'pushed',
+      headSha: SHA_B,
+      alreadyThere: true,
+    });
+    expect(res.json()).toEqual({ state: 'succeeded' });
+    expect(activeDropFor(db, 1)).toMatchObject({
+      role: 'implement',
+      state: 'queued',
+      headSha: SHA_B,
+    });
+  });
+
+  test('a failed final push fails the drop', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    const res = await pushResult(stickToken, {
+      status: 'failed',
+      reason: 'push touches a protected path',
+      retryable: false,
+    });
+    expect(res.json()).toEqual({ state: 'failed' });
+    expect(workItem(db, 1)).toMatchObject({
+      state: 'parked',
+      reason: 'push touches a protected path',
+    });
+  });
+
+  test('a failed checkpoint push resumes from the prior sha', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId, { kind: 'checkpoint', headSha: PRIOR });
+    const res = await pushResult(stickToken, {
+      status: 'failed',
+      reason: 'rejected',
+      retryable: false,
+    });
+    expect(res.json()).toEqual({ state: 'succeeded' });
+    expect(activeDropFor(db, 1)).toMatchObject({
+      role: 'implement',
+      state: 'queued',
+      headSha: PRIOR,
+    });
+    expect(getAttempts(db, 1, 'resume').count).toBe(1);
+  });
+
+  test('a retryable failure stays pending', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    expect((await grant(stickToken)).statusCode).toBe(200);
+    const res = await pushResult(stickToken, {
+      status: 'failed',
+      reason: 'HTTP 502',
+      retryable: true,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ state: 'push_pending' });
+    expect(getDrop(db, 'd1')?.state).toBe('push_pending');
+    expect(liveGrants(db)).toBe(0);
+    expect((await grant(stickToken)).statusCode).toBe(200);
+  });
+
+  test('nothing returns the drop to lost', async () => {
+    let clock = t0;
+    const { db } = setup({ queued: false, now: () => clock });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId, { kind: 'salvage' });
+    clock = plus(t0, 60_000);
+    const res = await pushResult(stickToken, { status: 'nothing', reason: 'nothing ahead' });
+    expect(res.json()).toEqual({ state: 'lost' });
+    expect(getDrop(db, 'd1')).toMatchObject({ state: 'lost', finishedAt: clock.toISOString() });
+    expect(workItem(db, 1).state).toBe('in_flight');
+    expect(activeDropFor(db, 1)).toBeUndefined();
+  });
+
+  test('a checkpoint with nothing new spends the resume budget', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId, { kind: 'checkpoint', headSha: PRIOR });
+    let res = await pushResult(stickToken, { status: 'nothing', reason: 'nothing new' });
+    expect(res.json()).toEqual({ state: 'succeeded' });
+    expect(getAttempts(db, 1, 'resume').count).toBe(1);
+    expect(activeDropFor(db, 1)).toMatchObject({ headSha: PRIOR, chargedKey: 'resume' });
+    // With the budget spent, the item parks.
+    db.prepare("DELETE FROM drops WHERE state = 'queued'").run();
+    setAttempts(db, 1, 'resume', 2, null);
+    pending(db, stickId, { id: 'd2', kind: 'checkpoint', headSha: PRIOR });
+    res = await pushResult(stickToken, { status: 'nothing', reason: 'nothing new' }, 'd2');
+    expect(workItem(db, 1)).toMatchObject({ state: 'parked', reason: 'budget exhausted: resume' });
+  });
+
+  test('push-result is idempotent after it applied', async () => {
+    const { db, forge } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    const pushed = { status: 'pushed', headSha: SHA_A, alreadyThere: false };
+    expect((await pushResult(stickToken, pushed)).json()).toEqual({ state: 'succeeded' });
+    const again = await pushResult(stickToken, pushed);
+    expect(again.statusCode).toBe(200);
+    expect(again.json()).toEqual({ state: 'succeeded' });
+    expect(forge.created).toHaveLength(1);
+    // Another epoch, or a drop that never asked for a push, is stale.
+    expect((await pushResult(stickToken, pushed, 'd1', 2)).statusCode).toBe(409);
+    void db;
+  });
+
+  test('salvage accepts pending, recently lost running and kill-cancelled drops; refuses resolve, old lost, and items with another active drop', async () => {
+    const lostAt = (db: Db, id: string, runningMsAgo: number, lostMsAgo: number) =>
+      updateDrop(db, id, {
+        state: 'lost',
+        runningAt: plus(t0, -runningMsAgo).toISOString(),
+        finishedAt: plus(t0, -lostMsAgo).toISOString(),
+        pushKind: null,
+        pushExpectSha: null,
+        pushDeadline: null,
+        resultJson: null,
+        usageApplied: 0,
+      });
+
+    // Pending: continues as it is.
+    let w = setup({ queued: false });
+    let s = await enroll();
+    pending(w.db, s.stickId);
+    let res = await salvage(s.stickToken);
+    expect(res.json()).toEqual({ state: 'push_pending' });
+    expect(getDrop(w.db, 'd1')?.pushKind).toBe('final');
+
+    // Recently lost while running: a salvage with a synthetic interrupted result.
+    w = setup({ queued: false });
+    s = await enroll();
+    pending(w.db, s.stickId);
+    lostAt(w.db, 'd1', 5 * 60_000, 60_000);
+    res = await salvage(s.stickToken);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ state: 'push_pending' });
+    const d = getDrop(w.db, 'd1');
+    expect(d).toMatchObject({
+      state: 'push_pending',
+      pushKind: 'salvage',
+      pushExpectSha: null,
+      pushDeadline: plus(t0, 24 * HOUR).toISOString(),
+      usageApplied: 1,
+    });
+    expect(JSON.parse(d?.resultJson ?? 'null')).toEqual({
+      status: 'interrupted',
+      role: 'implement',
+      gates: [],
+      reason: 'salvaged',
+    });
+
+    // Cancelled by the kill switch, while the switch is still on.
+    w = setup({ queued: false });
+    s = await enroll();
+    pending(w.db, s.stickId);
+    updateDrop(w.db, 'd1', { state: 'cancelled', pushKind: null });
+    w.db.prepare('UPDATE drops SET hard_cancel = 1 WHERE id = ?').run('d1');
+    setKilled(w.db, true, t0);
+    res = await salvage(s.stickToken);
+    expect(res.json()).toEqual({ state: 'push_pending' });
+    expect(getDrop(w.db, 'd1')?.pushKind).toBe('salvage');
+
+    // Refused: an operator cancel (not hard).
+    w = setup({ queued: false });
+    s = await enroll();
+    pending(w.db, s.stickId);
+    updateDrop(w.db, 'd1', { state: 'cancelled' });
+    res = await salvage(s.stickToken);
+    expect(res.statusCode).toBe(409);
+    expect(getDrop(w.db, 'd1')?.state).toBe('cancelled');
+
+    // Refused: resolve.
+    w = setup({ queued: false });
+    s = await enroll();
+    openPr(w.db);
+    pending(w.db, s.stickId, { role: 'resolve', prNumber: 1, headSha: PRIOR });
+    lostAt(w.db, 'd1', 5 * 60_000, 60_000);
+    res = await salvage(s.stickToken);
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ refused: 'role' });
+    expect(getDrop(w.db, 'd1')?.state).toBe('lost');
+
+    // Refused: lost too long ago.
+    w = setup({ queued: false });
+    s = await enroll();
+    pending(w.db, s.stickId);
+    lostAt(w.db, 'd1', 30 * 60_000, 16 * 60_000);
+    res = await salvage(s.stickToken);
+    expect(res.statusCode).toBe(409);
+    expect(getDrop(w.db, 'd1')?.state).toBe('lost');
+
+    // Refused: lost before it ever ran.
+    w = setup({ queued: false });
+    s = await enroll();
+    pending(w.db, s.stickId);
+    lostAt(w.db, 'd1', 0, 60_000);
+    updateDrop(w.db, 'd1', { runningAt: null });
+    expect((await salvage(s.stickToken)).statusCode).toBe(409);
+
+    // Refused: the item already has another active drop.
+    w = setup({ queued: false });
+    s = await enroll();
+    pending(w.db, s.stickId);
+    lostAt(w.db, 'd1', 5 * 60_000, 60_000);
+    insertDrop(w.db, {
+      id: 'd2',
+      dropZoneId: 'main',
+      workItemId: 1,
+      role: 'implement',
+      state: 'queued',
+    });
+    res = await salvage(s.stickToken);
+    expect(res.statusCode).toBe(409);
+    expect(getDrop(w.db, 'd1')?.state).toBe('lost');
+
+    // Refused: another stick's drop.
+    w = setup({ queued: false });
+    s = await enroll();
+    const other = await enroll('other');
+    pending(w.db, s.stickId);
+    lostAt(w.db, 'd1', 5 * 60_000, 60_000);
+    expect((await salvage(other.stickToken)).statusCode).toBe(409);
+  });
+
+  test('a drop lost after a long run is still salvageable within the window', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    updateDrop(db, 'd1', {
+      state: 'lost',
+      runningAt: plus(t0, -3 * HOUR).toISOString(),
+      finishedAt: plus(t0, -60_000).toISOString(),
+    });
+    expect((await salvage(stickToken)).json()).toEqual({ state: 'push_pending' });
+  });
+
+  test('heartbeat answers killed and cancel for pending pushes', async () => {
+    let clock = t0;
+    const { db } = setup({ now: () => clock });
+    const { stickToken } = await enroll();
+    await leasePush(stickToken);
+    const hb = () => post('/api/drops/d1/heartbeat', stickToken, { epoch: 1 });
+    expect((await hb()).json()).toEqual({ cancel: false, hard: false });
+    expect(getDrop(db, 'd1')?.runningAt).toBe(t0.toISOString());
+    clock = plus(t0, 30_000);
+    await hb();
+    expect(getDrop(db, 'd1')?.runningAt).toBe(t0.toISOString());
+
+    await postResult(stickToken, {
+      status: 'completed',
+      headSha: SHA_A,
+      gates: [],
+      push: { kind: 'final', expectSha: SHA_A },
+    });
+    const ok = await hb();
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toEqual({ cancel: false, hard: false });
+    expect(getDrop(db, 'd1')?.state).toBe('push_pending');
+    setKilled(db, true, clock);
+    expect((await hb()).json()).toEqual({ cancel: false, hard: false, killed: true });
+    setKilled(db, false, clock);
+    updateDrop(db, 'd1', { state: 'cancelled' });
+    expect((await hb()).json()).toEqual({ cancel: true, hard: false });
+  });
+
+  test('push-plan and push-token answer stale for a drop that left push_pending', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    for (const state of ['lost', 'cancelled', 'succeeded'] as const) {
+      updateDrop(db, 'd1', { state });
+      for (const res of [await plan(stickToken), await grant(stickToken)]) {
+        expect(res.statusCode, state).toBe(409);
+        expect(res.json(), state).toMatchObject({ stale: true });
+      }
+    }
+    expect(liveGrants(db)).toBe(0);
   });
 });

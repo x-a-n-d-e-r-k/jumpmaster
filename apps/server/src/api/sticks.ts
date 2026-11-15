@@ -1,8 +1,17 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   ArtifactUploadSchema,
+  agentBranch,
+  type DropResult,
   DropResultSchema,
+  dropSecrets,
+  FEATURES_HEADER,
   type LeaseSkip,
+  type PushGrant,
+  type PushPlan,
+  PushResultSchema,
+  pushRequestValid,
+  type Role,
   SKIPPED_HEADER,
   type StickInfo,
   StickInfoSchema,
@@ -11,24 +20,35 @@ import {
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { storeArtifact } from '../artifacts.js';
+import { recordAudit } from '../auth/audit.js';
 import { configReader, type LiveConfig } from '../config/source.js';
-import { type Config, secretList } from '../config.js';
+import { type Config, type DropZoneConfig, secretList } from '../config.js';
 import { noteOverage } from '../credits.js';
 import type { Db } from '../db/open.js';
 import {
+  activeDropFor,
   appendEvents,
   type Drop,
+  type DropState,
   getDrop,
   getStickByTokenHash,
+  getWorkItem,
+  getZoneMode,
   insertStick,
+  isKilled,
+  markMinted,
+  PUSH_RETENTION_MS,
+  RECLAIM_WINDOW_MS,
+  reserveGrant,
+  revokeGrants,
   type Stick,
   stampStick,
   updateDrop,
 } from '../db/repo.js';
 import { heartbeat, leaseNextDrop, missingFor, zoneRequirements, zonesWaiting } from '../leases.js';
 import type { ForgePair } from '../outbox.js';
-import { buildPayload } from '../payloads.js';
-import { applyResult } from '../results.js';
+import { buildPayload, egressFor, ownZoneSecrets } from '../payloads.js';
+import { applyResult, applyUsage, type ResultDeps } from '../results.js';
 import { dispatchGate, ingestRateLimit, rateLimitFromEvent } from '../usage.js';
 
 const ArtifactBody = ArtifactUploadSchema.extend({ epoch: z.number() });
@@ -64,7 +84,11 @@ const EnrollBody = StickInfoSchema.extend({
   name: z.string().min(1),
   slots: z.number().int().min(1),
 });
-const LeaseBody = StickInfoSchema.extend({ freeSlots: z.number().int() });
+/** `noPush`: the stick has no room for another pending push, so it takes no pushing role now. */
+const LeaseBody = StickInfoSchema.extend({
+  freeSlots: z.number().int(),
+  noPush: z.boolean().optional(),
+});
 
 const advertOf = (info: StickInfo) => ({
   capabilities: info.capabilities,
@@ -75,6 +99,43 @@ const advertOf = (info: StickInfo) => ({
 const HeartbeatBody = z.object({ epoch: z.number() });
 const EventsBody = z.object({ epoch: z.number(), events: z.array(TrooperEventSchema) });
 const ResultBody = z.object({ epoch: z.number(), result: DropResultSchema });
+const PushCallBody = z.object({ dropId: z.string().min(1), epoch: z.number() });
+const PushResultBody = z.object({ epoch: z.number(), result: PushResultSchema });
+
+/** The roles whose work a push container pushes. */
+const PUSHING_ROLES: readonly Role[] = ['implement', 'heal', 'resolve'];
+/** A push container reaches GitHub and nothing else. */
+const PUSH_EGRESS = ['github.com'];
+
+const LIVE: readonly DropState[] = ['leased', 'running'];
+const PENDING: readonly DropState[] = ['push_pending'];
+const STALE = { error: 'stale', stale: true } as const;
+
+type Refusal = { refused: string; retryable: boolean };
+
+/** The result body without its push request, when it has one (to tell a refused push from junk). */
+function withoutPush(body: unknown): { body: unknown; hadPush: boolean } {
+  if (typeof body !== 'object' || body === null) return { body, hadPush: false };
+  const result = (body as { result?: unknown }).result;
+  if (typeof result !== 'object' || result === null || !('push' in result)) {
+    return { body, hadPush: false };
+  }
+  const { push: _push, ...rest } = result as Record<string, unknown>;
+  return { body: { ...body, result: rest }, hadPush: true };
+}
+
+/** What a pending push of this drop may push: the kind its role may ask for, with its SHA. */
+function pushKindValid(drop: Drop): boolean {
+  switch (drop.pushKind) {
+    case 'final':
+      return drop.pushExpectSha !== null;
+    case 'checkpoint':
+    case 'salvage':
+      return drop.role !== 'resolve';
+    default:
+      return false;
+  }
+}
 
 export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps): void {
   const { db, now } = deps;
@@ -120,13 +181,12 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
     return m?.[1] ? getStickByTokenHash(db, sha256(m[1])) : undefined;
   };
 
-  /** Authenticates, checks the drop belongs to the caller, and the lease is live with this epoch. */
-  const liveDrop = (
+  /** Authenticates and checks the drop belongs to the caller at this epoch, in any state. */
+  const ownDrop = (
     req: FastifyRequest,
     reply: FastifyReply,
     dropId: string,
     epoch: number,
-    opts: { requireLive: boolean },
   ): Drop | undefined => {
     const stick = authStick(req);
     if (!stick) {
@@ -138,13 +198,65 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       reply.code(404).send({ error: 'unknown drop' });
       return undefined;
     }
-    const live = drop.state === 'leased' || drop.state === 'running';
-    if (drop.stickId !== stick.id || drop.epoch !== epoch || (opts.requireLive && !live)) {
-      reply.code(409).send({ error: 'stale' });
+    if (drop.stickId !== stick.id || drop.epoch !== epoch) {
+      reply.code(409).send(STALE);
       return undefined;
     }
     return drop;
   };
+
+  /** `ownDrop`, and the drop is in one of `states` (by default: its lease is live). */
+  const liveDrop = (
+    req: FastifyRequest,
+    reply: FastifyReply,
+    dropId: string,
+    epoch: number,
+    states: readonly DropState[] = LIVE,
+  ): Drop | undefined => {
+    const drop = ownDrop(req, reply, dropId, epoch);
+    if (!drop) return undefined;
+    if (!states.includes(drop.state)) {
+      reply.code(409).send(STALE);
+      return undefined;
+    }
+    return drop;
+  };
+
+  const resultDeps = (config: Config, zone: DropZoneConfig): ResultDeps => ({
+    forges: deps.forgesFor(zone.id),
+    zone,
+    secrets: secretList(config.secrets),
+    usageCfg: config.usage,
+    rand: deps.rand ?? Math.random,
+    claude: config.claude,
+  });
+
+  /**
+   * Every check a push grant needs, made afresh (Ruling 20), then the drop's one reservation. Runs
+   * in one transaction, so two requests can't both reserve.
+   */
+  const checkGrant = (
+    drop: Drop,
+    zone: DropZoneConfig,
+    at: Date,
+  ): Refusal | { branch: string; base: string } =>
+    db.transaction((): Refusal | { branch: string; base: string } => {
+      if (isKilled(db)) return { refused: 'killed', retryable: true };
+      const mode = getZoneMode(db, zone.id, 'active');
+      if (mode !== 'active') return { refused: `zone ${mode}`, retryable: true };
+      if (!PUSHING_ROLES.includes(drop.role as Role)) return { refused: 'role', retryable: false };
+      const row = db
+        .prepare('SELECT repo, default_branch AS base FROM drop_zones WHERE id = ?')
+        .get(drop.dropZoneId) as { repo: string; base: string } | undefined;
+      if (!row || row.repo !== zone.repo) return { refused: 'repo mismatch', retryable: false };
+      if (!pushKindValid(drop)) return { refused: 'kind', retryable: false };
+      const item = drop.workItemId === null ? undefined : getWorkItem(db, drop.workItemId);
+      if (!item) return { refused: 'branch', retryable: false };
+      if (reserveGrant(db, drop.id, drop.epoch, at) === 'reserved') {
+        return { refused: 'reserved', retryable: true };
+      }
+      return { branch: agentBranch(item.issueNumber), base: row.base };
+    })();
 
   app.register(async (scope) => {
     scope.addHook('onRequest', async (req, reply) => {
@@ -174,8 +286,14 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
     scope.post('/api/sticks/lease', async (req, reply) => {
       const stick = authStick(req);
       if (!stick) return reply.code(401).send({ error: 'unauthorized' });
+      // Announced on every answer: a stick refuses pushing roles from a server without it.
+      reply.header(FEATURES_HEADER, 'push-v1');
       const body = LeaseBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: 'invalid body' });
+      // A stick that can't run push containers, or has no room for another pending push, gets no
+      // pushing role; review, crew and doctor drops still go to it.
+      const noPush = body.data.noPush === true || !body.data.capabilities.includes('push-v1');
+      const excludeRoles = noPush ? PUSHING_ROLES : [];
       // Every lease call says what the stick can do now, and that it is alive.
       stampStick(db, stick.id, advertOf(body.data), now());
       if (body.data.freeSlots < 1) return reply.code(204).send();
@@ -192,7 +310,14 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         const config = live();
         const cannot = incapable(body.data, config);
         const exclude = cannot.map((c) => c.zoneId);
-        const leased = leaseNextDrop(db, stick.id, at, dispatchGate(db, config.usage, at), exclude);
+        const leased = leaseNextDrop(
+          db,
+          stick.id,
+          at,
+          dispatchGate(db, config.usage, at),
+          exclude,
+          excludeRoles,
+        );
         if (leased) {
           reportSkips(reply, stick, cannot);
           const drop = getDrop(db, leased.dropId) as Drop;
@@ -218,7 +343,9 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       const body = HeartbeatBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: 'invalid body' });
       const out = heartbeat(db, req.params.id, stick.id, body.data.epoch, now());
-      if (out === 'stale') return reply.code(409).send({ error: 'stale' });
+      if (out === 'stale') return reply.code(409).send(STALE);
+      // `cancel` stays false for `killed`: the push container stops and its volume is kept.
+      if (out === 'killed') return { cancel: false, hard: false, killed: true };
       return { cancel: out !== 'ok', hard: out === 'hard_cancel' };
     });
 
@@ -228,7 +355,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       async (req, reply) => {
         const body = ArtifactBody.safeParse(req.body);
         if (!body.success) return reply.code(400).send({ error: 'invalid body' });
-        const drop = liveDrop(req, reply, req.params.id, body.data.epoch, { requireLive: true });
+        const drop = liveDrop(req, reply, req.params.id, body.data.epoch);
         if (!drop) return reply;
         const bytes = Buffer.from(body.data.dataBase64, 'base64');
         const hash = createHash('sha256').update(bytes).digest('hex');
@@ -245,7 +372,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
     scope.post<{ Params: { id: string } }>('/api/drops/:id/events', async (req, reply) => {
       const body = EventsBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: 'invalid body' });
-      const drop = liveDrop(req, reply, req.params.id, body.data.epoch, { requireLive: true });
+      const drop = liveDrop(req, reply, req.params.id, body.data.epoch);
       if (!drop) return reply;
       appendEvents(db, drop.id, body.data.events);
       const config = live();
@@ -278,33 +405,223 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
     });
 
     scope.post<{ Params: { id: string } }>('/api/drops/:id/result', async (req, reply) => {
-      const body = ResultBody.safeParse(req.body);
+      let body = ResultBody.safeParse(req.body);
+      // A push the schema refuses (salvage from the agent, a final without its SHA) is a refused
+      // push request (422), not a malformed body.
+      let pushRefused = false;
+      if (!body.success) {
+        const bare = withoutPush(req.body);
+        const rest = ResultBody.safeParse(bare.body);
+        if (!bare.hadPush || !rest.success) {
+          return reply.code(400).send({ error: 'invalid body' });
+        }
+        body = rest;
+        pushRefused = true;
+      }
+      const drop = ownDrop(req, reply, req.params.id, body.data.epoch);
+      if (!drop) return reply;
+      // A repeat of a push-requested result from this stick and epoch (Ruling 13).
+      if (drop.state === 'push_pending') return { state: 'push_pending' };
+      if (!LIVE.includes(drop.state)) return reply.code(409).send(STALE);
+      const result = body.data.result;
+      if (pushRefused || !pushRequestValid(result, drop.role as Role)) {
+        return reply.code(422).send({ error: 'invalid push request' });
+      }
+      const config = live();
+      const zone = config.dropZones.find((z) => z.id === drop.dropZoneId);
+      if (!zone) return reply.code(500).send({ error: `unknown drop zone ${drop.dropZoneId}` });
+      const at = now();
+      const rdeps = resultDeps(config, zone);
+      const push = result.push;
+      if (push) {
+        // The agent's run is over: its usage counts now (the probe is released), and the outcome
+        // waits for the push container's result.
+        db.transaction(() => {
+          updateDrop(db, drop.id, {
+            state: 'push_pending',
+            resultJson: JSON.stringify(result),
+            finishedAt: at.toISOString(),
+            pushKind: push.kind,
+            pushExpectSha: push.expectSha ?? null,
+            pushDeadline: new Date(at.getTime() + PUSH_RETENTION_MS).toISOString(),
+          });
+          applyUsage(db, rdeps, drop, result, at);
+          updateDrop(db, drop.id, { usageApplied: 1 });
+        })();
+        return { state: 'push_pending' };
+      }
+      updateDrop(db, drop.id, {
+        resultJson: JSON.stringify(result),
+        finishedAt: at.toISOString(),
+      });
+      await applyResult(db, rdeps, drop.id, result, at);
+      return reply.code(204).send();
+    });
+
+    scope.post('/api/sticks/push-plan', async (req, reply) => {
+      const body = PushCallBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: 'invalid body' });
-      const drop = liveDrop(req, reply, req.params.id, body.data.epoch, { requireLive: true });
+      const drop = liveDrop(req, reply, body.data.dropId, body.data.epoch, PENDING);
+      if (!drop) return reply;
+      const zone = live().dropZones.find((z) => z.id === drop.dropZoneId);
+      if (!zone) return reply.code(500).send({ error: `unknown drop zone ${drop.dropZoneId}` });
+      const item = drop.workItemId === null ? undefined : getWorkItem(db, drop.workItemId);
+      if (!item) return reply.code(500).send({ error: `drop ${drop.id} has no work item` });
+      // A new attempt: a reservation left by one that died is no longer held against it.
+      revokeGrants(db, drop.id, now());
+      const egress = egressFor(zone);
+      const plan: PushPlan = {
+        branch: agentBranch(item.issueNumber),
+        salvage: drop.pushKind === 'salvage',
+        limits: zone.limits,
+        ...(egress ? { egress: { mode: egress.mode, allow: PUSH_EGRESS } } : {}),
+      };
+      return plan;
+    });
+
+    scope.post('/api/sticks/push-token', async (req, reply) => {
+      const body = PushCallBody.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: 'invalid body' });
+      const drop = liveDrop(req, reply, body.data.dropId, body.data.epoch, PENDING);
       if (!drop) return reply;
       const config = live();
       const zone = config.dropZones.find((z) => z.id === drop.dropZoneId);
       if (!zone) return reply.code(500).send({ error: `unknown drop zone ${drop.dropZoneId}` });
       const at = now();
-      updateDrop(db, drop.id, {
-        resultJson: JSON.stringify(body.data.result),
-        finishedAt: at.toISOString(),
-      });
-      await applyResult(
+      const checked = checkGrant(drop, zone, at);
+      if ('refused' in checked) {
+        return reply.code(checked.refused === 'reserved' ? 409 : 403).send(checked);
+      }
+      const { secrets } = config;
+      const [owner = '', name = ''] = zone.repo.split('/');
+      const gateSecrets = ownZoneSecrets(secrets, zone.id);
+      const grant: PushGrant = {
+        token: secrets.githubAuthorToken,
+        owner,
+        name,
+        branch: checked.branch,
+        base: checked.base,
+        // The lease the agent would have pushed with: none for a new branch, the resumed SHA, or
+        // the PR head a heal or resolve started from.
+        lease: drop.headSha ?? '',
+        ...(drop.pushExpectSha !== null ? { expectSha: drop.pushExpectSha } : {}),
+        protectedPaths: zone.protectedPaths,
+        secrets: [
+          ...new Set(
+            dropSecrets({
+              forgeToken: secrets.githubAuthorToken,
+              authorToken: secrets.githubAuthorToken,
+              claudeToken: secrets.claudeToken,
+              ...(gateSecrets ? { gateSecrets } : {}),
+            }),
+          ),
+        ],
+      };
+      markMinted(db, drop.id, drop.epoch, at);
+      // Names and ids only: never the token.
+      recordAudit(
         db,
         {
-          forges: deps.forgesFor(zone.id),
-          zone,
-          secrets: secretList(config.secrets),
-          usageCfg: config.usage,
-          rand: deps.rand ?? Math.random,
-          claude: config.claude,
+          via: 'system',
+          action: 'push-token',
+          target: drop.id,
+          detail: { drop: drop.id, epoch: drop.epoch, kind: drop.pushKind },
         },
-        drop.id,
-        body.data.result,
         at,
+        secretList(secrets),
       );
-      return reply.code(204).send();
+      return { grant };
+    });
+
+    scope.post<{ Params: { id: string } }>('/api/drops/:id/push-result', async (req, reply) => {
+      const body = PushResultBody.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: 'invalid body' });
+      const drop = ownDrop(req, reply, req.params.id, body.data.epoch);
+      if (!drop) return reply;
+      const at = now();
+      revokeGrants(db, drop.id, at);
+      if (drop.state !== 'push_pending') {
+        // A retry after a lost response: the drop left push_pending through this epoch's push.
+        if (drop.pushKind !== null) return { state: drop.state };
+        return reply.code(409).send(STALE);
+      }
+      const config = live();
+      const zone = config.dropZones.find((z) => z.id === drop.dropZoneId);
+      if (!zone) return reply.code(500).send({ error: `unknown drop zone ${drop.dropZoneId}` });
+      let stored: DropResult;
+      try {
+        stored = DropResultSchema.parse(JSON.parse(drop.resultJson ?? 'null'));
+      } catch {
+        return reply.code(500).send({ error: `pending push ${drop.id} has no stored result` });
+      }
+      const r = body.data.result;
+      // Nothing was pushed: the stored status, from the last commit that was (Ruling 7).
+      const fromPrior: DropResult = { ...stored, headSha: drop.headSha ?? undefined };
+      let outcome: DropResult;
+      if (r.status === 'pushed') {
+        outcome = { ...stored, headSha: r.headSha };
+      } else if (r.status === 'failed' && r.retryable) {
+        return { state: 'push_pending' };
+      } else if (r.status === 'nothing' && drop.pushKind === 'salvage') {
+        // No work to save: lost, and the item requeues as for any lost drop.
+        updateDrop(db, drop.id, { state: 'lost', finishedAt: at.toISOString() });
+        return { state: 'lost' };
+      } else if (drop.pushKind === 'final') {
+        outcome = { ...stored, status: 'failed', reason: r.reason };
+      } else {
+        outcome = fromPrior;
+      }
+      await applyResult(db, resultDeps(config, zone), drop.id, outcome, at);
+      return { state: getDrop(db, drop.id)?.state };
+    });
+
+    scope.post('/api/sticks/salvage', async (req, reply) => {
+      const body = PushCallBody.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: 'invalid body' });
+      const drop = ownDrop(req, reply, body.data.dropId, body.data.epoch);
+      if (!drop) return reply;
+      const at = now();
+      const refused = db.transaction((): string | null => {
+        const d = getDrop(db, drop.id) as Drop;
+        // Rediscovered as it was left: it continues, and an older attempt's reservation goes.
+        if (d.state === 'push_pending') {
+          revokeGrants(db, d.id, at);
+          return null;
+        }
+        // Resolve never checkpoints, so it has nothing to salvage.
+        if (d.role !== 'implement' && d.role !== 'heal') return 'role';
+        const { hard } = db
+          .prepare('SELECT hard_cancel AS hard FROM drops WHERE id = ?')
+          .get(d.id) as {
+          hard: number;
+        };
+        const lostAt = d.finishedAt === null ? Number.NaN : Date.parse(d.finishedAt);
+        const reclaimable =
+          d.state === 'lost' && d.runningAt !== null && at.getTime() - lostAt <= RECLAIM_WINDOW_MS;
+        const killed = d.state === 'cancelled' && hard === 1;
+        if (!reclaimable && !killed) return 'state';
+        if (d.workItemId !== null && activeDropFor(db, d.workItemId)) return 'active drop';
+        const synthetic: DropResult = {
+          status: 'interrupted',
+          role: d.role as Role,
+          gates: [],
+          reason: 'salvaged',
+        };
+        updateDrop(db, d.id, {
+          state: 'push_pending',
+          resultJson: JSON.stringify(synthetic),
+          pushKind: 'salvage',
+          pushExpectSha: null,
+          pushDeadline: new Date(at.getTime() + PUSH_RETENTION_MS).toISOString(),
+          usageApplied: 1,
+        });
+        // The agent container is gone: a later cancel of the pending push is an ordinary one.
+        db.prepare('UPDATE drops SET hard_cancel = 0 WHERE id = ?').run(d.id);
+        revokeGrants(db, d.id, at);
+        return null;
+      })();
+      if (refused !== null) return reply.code(409).send({ refused });
+      return { state: 'push_pending' };
     });
   });
 }

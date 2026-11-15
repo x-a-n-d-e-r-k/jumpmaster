@@ -413,7 +413,8 @@ function redactDeep(v: unknown, secrets: string[]): unknown {
 
 /**
  * A doctor drop's result: stored redacted for the doctor's `zone.doctor-drop` check, and nothing
- * else. No work item, no budget, no forge write. A rate-limit report still reaches the usage gate.
+ * else. No work item, no budget, no forge write. Its rate-limit report reaches the usage gate
+ * through `applyUsage`.
  */
 function applyDoctorResult(
   db: Db,
@@ -422,56 +423,41 @@ function applyDoctorResult(
   result: DropResult,
   now: Date,
 ): void {
-  const rand = deps.rand ?? Math.random;
-  try {
-    if (result.rateLimit) {
-      ingestRateLimit(
-        db,
-        result.rateLimit,
-        { dropId: drop.id, workItemId: null, startedAt: drop.startedAt, outcome: result.status },
-        deps.usageCfg,
-        now,
-        rand,
-      );
-    }
-    const findings = DoctorResultSchema.safeParse(result.doctor);
-    // The drop's state says whether the doctor found the zone ready, as its check does.
-    const f = findings.success ? findings.data : null;
-    const ok =
-      result.status === 'completed' &&
-      f !== null &&
-      f.claude.ok &&
-      f.clone.ok &&
-      f.services.every((s) => s.ok) &&
-      f.gates.every((g) => !g.timedOut && g.exitCode === 0);
-    updateDrop(db, drop.id, {
-      state: ok ? 'succeeded' : 'failed',
-      resultJson: JSON.stringify(redactDeep(result, deps.secrets)),
-    });
-    if (!findings.success && result.status === 'completed') {
-      appendEvents(db, drop.id, [
-        { ts: now.toISOString(), kind: 'log', data: { message: 'doctor result without findings' } },
-      ]);
-    }
-  } finally {
-    releaseProbe(db, drop.id, deps.usageCfg, now, rand);
+  const findings = DoctorResultSchema.safeParse(result.doctor);
+  // The drop's state says whether the doctor found the zone ready, as its check does.
+  const f = findings.success ? findings.data : null;
+  const ok =
+    result.status === 'completed' &&
+    f !== null &&
+    f.claude.ok &&
+    f.clone.ok &&
+    f.services.every((s) => s.ok) &&
+    f.gates.every((g) => !g.timedOut && g.exitCode === 0);
+  updateDrop(db, drop.id, {
+    state: ok ? 'succeeded' : 'failed',
+    resultJson: JSON.stringify(redactDeep(result, deps.secrets)),
+  });
+  if (!findings.success && result.status === 'completed') {
+    appendEvents(db, drop.id, [
+      { ts: now.toISOString(), kind: 'log', data: { message: 'doctor result without findings' } },
+    ]);
   }
 }
 
 /**
- * Applies a finished drop's result per role (see the Task 9 table). A drop already terminal is a
- * no-op, so stick retries are safe. Forge writes go through the outbox.
+ * The usage half of a result: the overage backstop, the probe's verdict, Fable's signals, the served
+ * model, the rate-limit report, and the probe's release. Whether the drop held the probe is read
+ * before the release and kept on the drop (`was_probe`), so the outcome, applied now or after a
+ * push, judges the drop as the probe it was.
  */
-export async function applyResult(
+export function applyUsage(
   db: Db,
   deps: ResultDeps,
-  dropId: string,
+  drop: Drop,
   result: DropResult,
   now: Date,
-): Promise<void> {
-  const drop = getDrop(db, dropId);
-  if (!drop) throw new Error(`unknown drop ${dropId}`);
-  if (TERMINAL.has(drop.state)) return;
+): void {
+  const rand = deps.rand ?? Math.random;
   // First and whatever the outcome: the backstop for live credits events that never arrived.
   if (result.rateLimit) noteOverage(db, deps.usageCfg, drop, result.rateLimit, result.status, now);
   noteProbeResult(db, drop, result, now);
@@ -484,44 +470,72 @@ export async function applyResult(
   );
   const served = result.servedModel ?? servedModel(result.modelUsage);
   if (served !== null) updateDrop(db, drop.id, { servedModel: served });
-  // By role first: a doctor drop has no work item either, and is not crew.
-  if (drop.role === 'doctor') return applyDoctorResult(db, deps, drop, result, now);
-  if (drop.workItemId === null) return applyCrewResult(db, deps, drop, result, now);
   const wasProbe = drop.id === getUsageState(db).probeDropId;
-  const item = getWorkItem(db, drop.workItemId);
-  if (!item) throw new Error(`unknown work item ${drop.workItemId}`);
-  const c: Ctx = { db, deps, drop, item, now };
-  const rand = deps.rand ?? Math.random;
-
-  if (result.rateLimit) {
-    ingestRateLimit(
-      db,
-      result.rateLimit,
-      {
-        dropId: drop.id,
-        workItemId: drop.workItemId,
-        startedAt: drop.startedAt,
-        outcome: result.status,
-      },
-      deps.usageCfg,
-      now,
-      rand,
-    );
-  }
+  updateDrop(db, drop.id, { wasProbe: wasProbe ? 1 : 0 });
   try {
-    if (result.status === 'rate_limited') return rateLimited(c, wasProbe, result);
-    switch (drop.role) {
-      case 'implement':
-        return await implementResult(c, result);
-      case 'review':
-        return await reviewResult(c, result);
-      case 'heal':
-      case 'resolve':
-        return await pushResult(c, result);
-      default:
-        throw new Error(`unknown drop role ${drop.role}`);
+    if (result.rateLimit) {
+      ingestRateLimit(
+        db,
+        result.rateLimit,
+        {
+          dropId: drop.id,
+          workItemId: drop.workItemId,
+          startedAt: drop.startedAt,
+          outcome: result.status,
+        },
+        deps.usageCfg,
+        now,
+        rand,
+      );
     }
   } finally {
     releaseProbe(db, drop.id, deps.usageCfg, now, rand);
   }
+}
+
+/** The outcome half of a result: routed by role. Whether the drop was the probe comes from the drop. */
+export async function applyOutcome(
+  db: Db,
+  deps: ResultDeps,
+  drop: Drop,
+  result: DropResult,
+  now: Date,
+): Promise<void> {
+  // By role first: a doctor drop has no work item either, and is not crew.
+  if (drop.role === 'doctor') return applyDoctorResult(db, deps, drop, result, now);
+  if (drop.workItemId === null) return applyCrewResult(db, deps, drop, result, now);
+  const item = getWorkItem(db, drop.workItemId);
+  if (!item) throw new Error(`unknown work item ${drop.workItemId}`);
+  const c: Ctx = { db, deps, drop, item, now };
+  if (result.status === 'rate_limited') return rateLimited(c, drop.wasProbe === 1, result);
+  switch (drop.role) {
+    case 'implement':
+      return await implementResult(c, result);
+    case 'review':
+      return await reviewResult(c, result);
+    case 'heal':
+    case 'resolve':
+      return await pushResult(c, result);
+    default:
+      throw new Error(`unknown drop role ${drop.role}`);
+  }
+}
+
+/**
+ * Applies a finished drop's result per role (see the Task 9 table): its usage, unless a
+ * push-requested result applied it already, then its outcome. A drop already terminal is a no-op,
+ * so stick retries are safe. Forge writes go through the outbox.
+ */
+export async function applyResult(
+  db: Db,
+  deps: ResultDeps,
+  dropId: string,
+  result: DropResult,
+  now: Date,
+): Promise<void> {
+  const drop = getDrop(db, dropId);
+  if (!drop) throw new Error(`unknown drop ${dropId}`);
+  if (TERMINAL.has(drop.state)) return;
+  if (drop.usageApplied !== 1) applyUsage(db, deps, drop, result, now);
+  await applyOutcome(db, deps, getDrop(db, dropId) as Drop, result, now);
 }

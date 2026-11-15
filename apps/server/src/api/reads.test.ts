@@ -37,7 +37,7 @@ test('a stick on another address still reaches its routes, which use their own t
     method: 'POST',
     url: '/api/sticks/lease',
     headers: { ...h.stickHeaders(), host: 'jumpmaster.lan:7420' },
-    payload: { freeSlots: 1 },
+    payload: { freeSlots: 1, capabilities: ['push-v1'] },
   });
   expect(res.statusCode).toBe(200);
 });

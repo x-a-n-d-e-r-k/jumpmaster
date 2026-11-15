@@ -24,6 +24,12 @@ export const ACTIVE_STATES_SQL = ACTIVE_DROP_STATES.map((s) => `'${s}'`).join(',
 /** How long an unrevoked grant reservation blocks another grant for the same drop. */
 export const GRANT_HOLD_MS = 15 * 60_000;
 
+/** How long a pending push is kept before it is given up on. */
+export const PUSH_RETENTION_MS = 24 * 3_600_000;
+
+/** How long after it went `lost` a drop that had reached `running` may still be salvaged. */
+export const RECLAIM_WINDOW_MS = 15 * 60_000;
+
 export type PushKind = 'final' | 'checkpoint' | 'salvage';
 
 export interface DropZoneRow {

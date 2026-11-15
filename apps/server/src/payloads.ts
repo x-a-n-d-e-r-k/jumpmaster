@@ -49,7 +49,7 @@ export const crewTemplate = (role: CrewRole): string => templates[role];
  * cannot forge prompt structure.
  */
 /** A zone's own gate secrets: never an inherited member (a zone named toString has none). */
-function ownZoneSecrets(
+export function ownZoneSecrets(
   secrets: { zoneSecrets?: Record<string, Record<string, string>> },
   zoneId: string,
 ): Record<string, string> | undefined {

@@ -5,10 +5,12 @@ import type { Db } from './db/open.js';
 import { openDb } from './db/open.js';
 import {
   activeDropFor,
+  type Drop,
   getAttempts,
   getDrop,
   getOutbox,
   getPullRequest,
+  getUsageState,
   insertDrop,
   insertVerdict,
   latestVerdict,
@@ -17,13 +19,14 @@ import {
   setAttempts,
   setUsageState,
   setWorkItemState,
+  updateDrop,
   upsertDropZone,
   upsertPullRequest,
   upsertWorkItem,
   verdictsForHead,
 } from './db/repo.js';
 import { promptVersions } from './payloads.js';
-import { applyResult, type ResultDeps, renderReviewBody } from './results.js';
+import { applyResult, applyUsage, type ResultDeps, renderReviewBody } from './results.js';
 import { fakeForgePair } from './test/fakes.js';
 import { plus, t0, tmpDbFile, workItem } from './test/helpers.js';
 
@@ -725,6 +728,50 @@ describe('applyResult: rate_limited', () => {
     await applyResult(db, deps, 'd1', { status: 'rate_limited', gates: [] }, t0);
     expect(getAttempts(db, 1, 'rate_limit').count).toBe(3);
     expect(activeDropFor(db, 1)?.role).toBe('implement');
+  });
+
+  test('a rate-limited probe is judged as the probe after the usage split', async () => {
+    const rateLimited: DropResult = { status: 'rate_limited', gates: [] };
+    // An ordinary result: usage and outcome in one call; the probe is released all the same.
+    const plain = setup();
+    seedPaused(plain.db);
+    setAttempts(plain.db, 1, 'rate_limit', 3, null);
+    setUsageState(plain.db, { probeDropId: 'd1' }, t0);
+    await applyResult(plain.db, plain.deps, 'd1', rateLimited, t0);
+    expect(getDrop(plain.db, 'd1')).toMatchObject({ state: 'cancelled', wasProbe: 1 });
+    expect(getUsageState(plain.db).probeDropId).toBeNull();
+    expect(getAttempts(plain.db, 1, 'rate_limit').count).toBe(3);
+    expect(activeDropFor(plain.db, 1)?.role).toBe('implement');
+
+    // A push-requested one: usage first (releasing the probe), the outcome later, read from the drop.
+    const { db, deps } = setup();
+    seedPaused(db);
+    setAttempts(db, 1, 'rate_limit', 3, null);
+    setUsageState(db, { probeDropId: 'd1' }, t0);
+    applyUsage(db, deps, getDrop(db, 'd1') as Drop, rateLimited, t0);
+    updateDrop(db, 'd1', { usageApplied: 1 });
+    expect(getUsageState(db).probeDropId).toBeNull();
+    expect(getDrop(db, 'd1')?.wasProbe).toBe(1);
+    await applyResult(db, deps, 'd1', rateLimited, plus(t0, 60_000));
+    expect(getDrop(db, 'd1')?.state).toBe('cancelled');
+    expect(getAttempts(db, 1, 'rate_limit').count).toBe(3);
+    expect(activeDropFor(db, 1)?.role).toBe('implement');
+  });
+
+  test('applyResult skips usage already applied', async () => {
+    const { db, deps } = setup();
+    const result: DropResult = {
+      status: 'interrupted',
+      gates: [],
+      rateLimit: { status: 'allowed', unifiedWindows: { seven_day: { utilization: 0.42 } } },
+    };
+    applyUsage(db, deps, getDrop(db, 'd1') as Drop, result, t0);
+    updateDrop(db, 'd1', { usageApplied: 1 });
+    expect(getUsageState(db).sevenDayUtil).toBe(0.42);
+    setUsageState(db, { sevenDayUtil: 0.1 }, t0);
+    await applyResult(db, deps, 'd1', result, t0);
+    expect(getUsageState(db).sevenDayUtil).toBe(0.1);
+    expect(getDrop(db, 'd1')?.state).toBe('succeeded');
   });
 });
 

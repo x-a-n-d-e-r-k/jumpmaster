@@ -1,4 +1,4 @@
-import type { ImagePolicy, StickCapability } from '@jumpmaster/protocol';
+import type { ImagePolicy, Role, StickCapability } from '@jumpmaster/protocol';
 import type { Config, DropZoneConfig, UsageConfig } from './config.js';
 import type { Db } from './db/open.js';
 import { getUsageState, isKilled, setKilled, setUsageState } from './db/repo.js';
@@ -61,16 +61,21 @@ export function missingFor(
   return missing;
 }
 
-/** Excludes queued drops of zones the stick can't run (a JSON array of zone ids). */
-const NOT_EXCLUDED = 'AND drop_zone_id NOT IN (SELECT value FROM json_each(@exclude))';
+/**
+ * Excludes queued drops of zones the stick can't run (a JSON array of zone ids), and of roles it
+ * must not be given (a JSON array of roles).
+ */
+const NOT_EXCLUDED = `AND drop_zone_id NOT IN (SELECT value FROM json_each(@exclude))
+  AND role NOT IN (SELECT value FROM json_each(@excludeRoles))`;
 
 /**
  * Leases the oldest queued drop the usage gate allows, bumping its epoch and stamping started_at.
  * `probe` leases exactly one drop (preferring one not on the pause's cause item) and records it.
  * `credits_resume` leases only the resumed work item's drops; with none queued, nothing. A stop
  * with no work item (a crew drop's) offers no Resume (credits.ts), so none binds to nothing. The gate is required: a caller that forgets it must not lease while stopped. All time
- * comes from `now`. Drops of the `exclude` zones (ones the stick can't run) are never picked, under
- * any gate: they stay queued, untouched, for a capable stick.
+ * comes from `now`. Drops of the `exclude` zones (ones the stick can't run), and of the
+ * `excludeRoles` (pushing roles, for a stick that can't take them), are never picked, under any
+ * gate: they stay queued, untouched, for a capable stick.
  */
 export function leaseNextDrop(
   db: Db,
@@ -78,8 +83,10 @@ export function leaseNextDrop(
   now: Date,
   gate: Gate,
   exclude: readonly string[] = [],
+  excludeRoles: readonly Role[] = [],
 ): { dropId: string; epoch: number } | null {
   const ex = JSON.stringify(exclude);
+  const exRoles = JSON.stringify(excludeRoles);
   return db.transaction(() => {
     if (isKilled(db)) return null;
     let next: { id: string } | undefined;
@@ -95,7 +102,9 @@ export function leaseNextDrop(
            ORDER BY CASE WHEN work_item_id = @cause THEN 1 ELSE 0 END, ${ROLE_CLASS}, created_at, rowid
            LIMIT 1`,
         )
-        .get({ cause: u.causeWorkItemId, exclude: ex }) as { id: string } | undefined;
+        .get({ cause: u.causeWorkItemId, exclude: ex, excludeRoles: exRoles }) as
+        | { id: string }
+        | undefined;
     };
     switch (gate) {
       case 'closed':
@@ -115,7 +124,7 @@ export function leaseNextDrop(
                      AND work_item_id = @bound
                    ORDER BY ${ROLE_CLASS}, created_at, rowid LIMIT 1`,
                 )
-                .get({ bound, exclude: ex }) as { id: string } | undefined);
+                .get({ bound, exclude: ex, excludeRoles: exRoles }) as { id: string } | undefined);
         break;
       }
       case 'open':
@@ -132,7 +141,7 @@ export function leaseNextDrop(
             `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE} ${NOT_EXCLUDED}${roleFilter}
              ORDER BY ${ROLE_CLASS}, created_at, rowid LIMIT 1`,
           )
-          .get({ exclude: ex }) as { id: string } | undefined;
+          .get({ exclude: ex, excludeRoles: exRoles }) as { id: string } | undefined;
         break;
       }
       default:
@@ -178,14 +187,18 @@ export function engageKill(db: Db, now: Date): { cancelled: number } {
   })();
 }
 
-/** Extends a live lease and moves leased to running; reports stale/cancelled drops. */
+/**
+ * Extends a live lease and moves leased to running, stamping `running_at` on the first such move;
+ * reports stale/cancelled drops. A pending push has no lease to extend: it answers `killed` while
+ * the kill switch is on, so its push container stops and keeps the volume, and `ok` otherwise.
+ */
 export function heartbeat(
   db: Db,
   dropId: string,
   stickId: string,
   epoch: number,
   now: Date,
-): 'ok' | 'stale' | 'cancel' | 'hard_cancel' {
+): 'ok' | 'stale' | 'cancel' | 'hard_cancel' | 'killed' {
   return db.transaction(() => {
     const d = db
       .prepare(
@@ -197,10 +210,12 @@ export function heartbeat(
     if (!d || d.stickId !== stickId || d.epoch !== epoch) return 'stale';
     // Hard stays hard after a reset: a trooper told to stop gracefully would checkpoint and push.
     if (d.state === 'cancelled') return d.hardCancel === 1 ? 'hard_cancel' : 'cancel';
+    if (d.state === 'push_pending') return isKilled(db) ? 'killed' : 'ok';
     if (d.state !== 'leased' && d.state !== 'running') return 'stale';
     db.prepare(
       `UPDATE drops SET state = 'running', lease_expires_at = @expires,
-         started_at = COALESCE(started_at, @now) WHERE id = @id`,
+         started_at = COALESCE(started_at, @now), running_at = COALESCE(running_at, @now)
+       WHERE id = @id`,
     ).run({ id: dropId, expires: iso(now, LEASE_TTL_MS), now: iso(now) });
     return 'ok';
   })();
