@@ -390,6 +390,9 @@ export async function commitIfDirty(
       `user.name=${AGENT_NAME}`,
       '-c',
       `user.email=${AGENT_EMAIL}`,
+      // No signing: an agent-configured gpg.program never runs.
+      '-c',
+      'commit.gpgSign=false',
       'commit',
       '-q',
       '--no-verify',

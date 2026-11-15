@@ -4,6 +4,17 @@ import { type PushGrant, PushGrantSchema } from '@jumpmaster/protocol';
 /** A grant is a small JSON object; a megabyte is far beyond any real one. */
 export const GRANT_MAX_BYTES = 1024 * 1024;
 
+/**
+ * stdin ended or broke before a full line: the sender went away (a stick that stopped this
+ * container, a dropped attach), not a bad line. The push role reports it as retryable.
+ */
+export class StdinClosedError extends Error {
+  constructor(message = 'stdin closed before a line') {
+    super(message);
+    this.name = 'StdinClosedError';
+  }
+}
+
 const toBuffer = (c: string | Buffer): Buffer => (typeof c === 'string' ? Buffer.from(c) : c);
 
 /**
@@ -26,9 +37,10 @@ export function readLine(stream: Readable, maxBytes: number, eofEnds = false): P
       done(() =>
         eofEnds && held.length > 0
           ? resolve(held.toString('utf8'))
-          : reject(new Error('stdin closed before a line')),
+          : reject(new StdinClosedError()),
       );
-    const onError = (err: Error) => done(() => reject(err));
+    // The stream's own error text is not echoed: say only that stdin broke.
+    const onError = () => done(() => reject(new StdinClosedError('stdin failed before a line')));
     const pump = () => {
       for (;;) {
         const chunk = stream.read() as string | Buffer | null;

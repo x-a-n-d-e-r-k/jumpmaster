@@ -1,6 +1,6 @@
 import { PassThrough, Readable } from 'node:stream';
 import { expect, test } from 'vitest';
-import { readGrant, readLine } from './stdin.js';
+import { readGrant, readLine, StdinClosedError } from './stdin.js';
 
 const grant = {
   token: 'tok-SECRET',
@@ -63,4 +63,17 @@ test('readLine returns two lines written in one chunk of a byte stream, leaving 
   expect(await readLine(s, 100)).toBe('one');
   expect(await readLine(s, 100)).toBe('two');
   expect(s.destroyed).toBe(false);
+});
+
+test('an EOF or a stream error is a StdinClosedError; a bad grant is not', async () => {
+  await expect(readGrant(Readable.from(['{"token":']))).rejects.toBeInstanceOf(StdinClosedError);
+  const broken = new PassThrough();
+  const p = readGrant(broken);
+  broken.destroy(new Error('EPIPE'));
+  await expect(p).rejects.toBeInstanceOf(StdinClosedError);
+  const bad = readGrant(Readable.from(['not json\n']));
+  await expect(bad).rejects.toThrow('grant is not valid JSON');
+  await expect(readGrant(Readable.from(['not json\n']))).rejects.not.toBeInstanceOf(
+    StdinClosedError,
+  );
 });

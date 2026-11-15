@@ -138,6 +138,12 @@ test("commitIfDirty hardened doesn't run a planted fsmonitor", async () => {
   git(dir, 'config', 'core.hooksPath', hooks);
   // The agent can rewrite its identity; the salvage commit is still the Jumpmaster Agent's.
   git(dir, 'config', 'user.name', 'Somebody Else');
+  // An agent-configured signing program never runs either.
+  const gpg = join(tmp, 'gpg.sh');
+  writeFileSync(gpg, `#!/bin/sh\necho gpg >> ${marker}\nexit 1\n`);
+  chmodSync(gpg, 0o755);
+  git(dir, 'config', 'commit.gpgSign', 'true');
+  git(dir, 'config', 'gpg.program', gpg);
   writeFileSync(join(dir, 'salvage.txt'), 's\n');
   expect(await commitIfDirty(dir, 'wip: salvage', null, { hardened: true })).toBe(true);
   expect(existsSync(marker)).toBe(false);

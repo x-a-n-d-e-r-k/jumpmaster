@@ -213,6 +213,37 @@ describe('runPush', () => {
     expect(existsSync(h.pushDir)).toBe(false);
   });
 
+  test('stdin ending after ready is a retryable failure', async () => {
+    const h = harness();
+    let ready = false;
+    h.deps.stdin = new Readable({
+      read() {
+        if (ready) this.push(null);
+      },
+    });
+    const emit = h.deps.emit;
+    h.deps.emit = (l) => {
+      emit(l);
+      if (l === READY_LINE) {
+        ready = true;
+        h.deps.stdin.read(0);
+      }
+    };
+    const r = await runPush(payload(), h.deps);
+    expect(r).toMatchObject({ status: 'failed', retryable: true });
+    expect(h.calls.push).toHaveLength(0);
+    expect(existsSync(h.pushDir)).toBe(false);
+  });
+
+  test('a process killed by the sweep is given time to die before it counts', async () => {
+    const h = harness();
+    let n = 0;
+    h.deps.alive = () => (n++ === 0 ? 1 : 0);
+    const r = await runPush(payload(), h.deps);
+    expect(r.status).toBe('pushed');
+    expect(h.log).toContain('ready');
+  });
+
   test('the result line never contains the token or its basic-auth form', async () => {
     const h = harness({
       push: async () => ({

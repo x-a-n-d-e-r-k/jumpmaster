@@ -11,7 +11,7 @@ import {
 import type { commitIfDirty, pushStaged, stageFromAgent } from '../git.js';
 import type { TrooperIdentities } from '../privilege.js';
 import { redact } from '../redact.js';
-import { readGrant } from '../stdin.js';
+import { readGrant, StdinClosedError } from '../stdin.js';
 
 export interface PushDeps {
   /** The rest of stdin after the payload line: the grant arrives here, after the ready line. */
@@ -30,6 +30,21 @@ export interface PushDeps {
 }
 
 const REASON_MAX = 2000;
+
+/** SIGKILL lands asynchronously: a process the sweep just killed may still be listed briefly. */
+export const SURVIVOR_CHECKS = 10;
+export const SURVIVOR_POLL_MS = 200;
+
+const sleep = (ms: number) => new Promise((ok) => setTimeout(ok, ms));
+
+/** True when agent processes are still alive after up to ~2 s of re-checks. */
+async function survivors(alive: () => number): Promise<boolean> {
+  for (let i = 0; i < SURVIVOR_CHECKS; i++) {
+    if (alive() === 0) return false;
+    if (i < SURVIVOR_CHECKS - 1) await sleep(SURVIVOR_POLL_MS);
+  }
+  return true;
+}
 
 const basicAuth = (token: string): string =>
   Buffer.from(`x-access-token:${token}`).toString('base64');
@@ -85,10 +100,19 @@ export async function runPush(payload: PushPayload, deps: PushDeps): Promise<Pus
     pushDir = staged.pushDir;
 
     deps.sweep();
-    if (deps.alive(agent.uid) > 0) return fail('agent process survived the sweep', true);
+    if (await survivors(() => deps.alive(agent.uid)))
+      return fail('agent process survived the sweep', true);
 
     deps.emit(READY_LINE);
-    const grant = await readGrant(deps.stdin);
+    let grant: PushGrant;
+    try {
+      grant = await readGrant(deps.stdin);
+    } catch (e) {
+      // The stick went away after ready (it stops the container on a refused grant and retries):
+      // retryable. A grant that arrived but is malformed or oversized stays final below.
+      if (e instanceof StdinClosedError) return fail(e.message, true);
+      throw e;
+    }
     secrets = grantSecrets(grant);
     if (grant.branch !== payload.branch) {
       return fail(`grant is for another branch than ${payload.branch}`, false);
@@ -96,6 +120,8 @@ export async function runPush(payload: PushPayload, deps: PushDeps): Promise<Pus
     // pushStaged removes the staged copy itself; the finally below covers it throwing.
     return done(await deps.git.pushStaged(pushDir, grant));
   } catch (e) {
+    // By design every other thrown error (staging, a malformed grant, an unexpected push throw)
+    // is final: the server can't tell a transient one from a hostile working copy.
     return fail(e instanceof Error ? e.message : String(e), false);
   } finally {
     if (pushDir) rmSync(pushDir, { recursive: true, force: true });
