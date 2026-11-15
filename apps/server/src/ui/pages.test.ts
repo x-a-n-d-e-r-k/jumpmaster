@@ -6,6 +6,7 @@ import type { CrewIssue } from '../crew/store.js';
 import type { Drop, WorkItem } from '../db/repo.js';
 import type { GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
+import { statusOf } from '../status.js';
 import {
   escapeHtml,
   page,
@@ -19,6 +20,7 @@ import {
   statusBanner,
   waitingOnYou,
 } from './pages.js';
+import { zoneTextNamer } from './zone-name.js';
 
 const z: DropZoneConfig = {
   id: 'main',
@@ -836,6 +838,50 @@ describe('zones are named by their repository (#99)', () => {
     // The ids stay in the URLs.
     expect(html).toContain('href="/zones/zid-solo/goals"');
     expectNoBareId(html);
+  });
+
+  test("the floor's status banner and page title name zones by repository", () => {
+    const problem = {
+      zoneId: 'zid-a',
+      kind: 'missing',
+      credential: 'claudeToken',
+      message: 'no Claude token is set',
+    } as const;
+    const statusZone = (id: string, mode: 'active' | 'paused') => ({
+      id,
+      mode,
+      items: [],
+      drops: [],
+      parked: 0,
+      credentialProblems: id === 'zid-solo' ? [] : [{ ...problem, zoneId: id }],
+    });
+    const status = statusOf(
+      {
+        setupActive: false,
+        killed: false,
+        sticks: { live: 1, slots: 1, busy: 0 },
+        doctor: { fails: [] },
+        lastPassAt: 't',
+        openBriefings: 0,
+        zones: [
+          statusZone('zid-a', 'active'),
+          statusZone('zid-b', 'active'),
+          statusZone('zid-solo', 'paused'),
+        ],
+        outboxRetrying: [],
+        restartPending: false,
+        zoneName: zoneTextNamer(zones),
+      },
+      new Date(),
+    );
+    const html = renderHome({ zones, items: [], drops: [], sticks: [], status });
+    expect(html).toContain('<title>Jumpmaster: Blocked: acme/shared (zid-a) needs claudeToken');
+    expect(html).toContain('<strong>Blocked: acme/shared (zid-a) needs claudeToken');
+    expect(html).toContain('acme/shared (zid-b): no Claude token');
+    expect(html).toContain('acme/widgets is paused');
+    expect(html).toContain('href="/zones/zid-solo"');
+    // A shared repository's id follows it in the plain-text status, as it does in <small> elsewhere.
+    expectNoBareId(html.replaceAll(/acme\/shared \(zid-[ab]\)/g, ''));
   });
 
   test('the briefings page names the zone of each briefing and ruling by repository', () => {

@@ -237,7 +237,7 @@ export function waitingOnYou(
       : `<ul class="held">${held
           .map(
             (z) =>
-              `<li><a href="${escapeHtml(zoneBriefingsHref(z.zoneId))}">${zones.some((c) => c.id === z.zoneId) ? name(z.zoneId) : escapeHtml(z.repo)}: ${escapeHtml(z.mode)}, ${plural(z.count, 'briefing')} held</a></li>`,
+              `<li><a href="${escapeHtml(zoneBriefingsHref(z.zoneId))}">${name(z.zoneId, z.repo)}: ${escapeHtml(z.mode)}, ${plural(z.count, 'briefing')} held</a></li>`,
           )
           .join('')}</ul>`;
   if (open.length === 0) {

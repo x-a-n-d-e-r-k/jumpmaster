@@ -403,6 +403,15 @@ describe('the status line (Task 12)', () => {
     expect(status.headline).toBe(
       'Queued: 1 issue; no stick can run zone main: no live stick has egress-v1',
     );
+    // The floor names the zone by its repository (#99); the API, read by `ctl status`, keeps the id.
+    const home = (await h.view('/')).body;
+    expect(home).toContain(
+      '<strong>Queued: 1 issue; no stick can run zone octo/demo: no live stick has egress-v1</strong>',
+    );
+    expect(home).toContain(
+      '<title>Jumpmaster: Queued: 1 issue; no stick can run zone octo/demo: no live stick has egress-v1</title>',
+    );
+    expect(home).not.toContain('zone main');
   });
 
   test('the status route needs the operator, as every control route does', async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { zoneName, zoneNamer, zoneNameText } from './zone-name.js';
+import { zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
 
 const main = { id: 'main', repo: 'octo/demo' };
 const ref = { id: 'ref', repo: 'octo/reference' };
@@ -30,5 +30,12 @@ describe('zone display name', () => {
     expect(name('ref')).toBe('octo/reference');
     expect(name('shadow')).toBe('octo/demo <small>(shadow)</small>');
     expect(name('gone<')).toBe('gone&lt;');
+  });
+
+  test('a zone no longer configured falls back to its repository when one is known', () => {
+    const name = zoneNamer([main]);
+    expect(name('gone', 'octo/<old>')).toBe('octo/&lt;old&gt;');
+    expect(name('gone')).toBe('gone');
+    expect(zoneTextNamer([main])('gone', 'octo/old')).toBe('octo/old');
   });
 });

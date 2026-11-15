@@ -36,21 +36,23 @@ export function zoneName(zone: ZoneRef, zones: readonly ZoneRef[]): string {
 
 /**
  * Names zones by id among `zones`, as escaped HTML. A zone no longer configured (a briefing or
- * observation outliving its zone) has only its id to go by.
+ * observation outliving its zone) goes by the repository the caller still knows for it, else by
+ * its id.
  */
-export function zoneNamer(zones: readonly ZoneRef[]): (id: string) => string {
+export function zoneNamer(zones: readonly ZoneRef[]): (id: string, repo?: string) => string {
+  const text = zoneTextNamer(zones);
   const byId = new Map(zones.map((z) => [z.id, z]));
-  return (id) => {
+  return (id, repo) => {
     const z = byId.get(id);
-    return z ? zoneName(z, zones) : esc(id);
+    return z ? zoneName(z, zones) : esc(text(id, repo));
   };
 }
 
 /** As zoneNamer, as plain text. */
-export function zoneTextNamer(zones: readonly ZoneRef[]): (id: string) => string {
+export function zoneTextNamer(zones: readonly ZoneRef[]): (id: string, repo?: string) => string {
   const byId = new Map(zones.map((z) => [z.id, z]));
-  return (id) => {
+  return (id, repo) => {
     const z = byId.get(id);
-    return z ? zoneNameText(z, zones) : id;
+    return z ? zoneNameText(z, zones) : (repo ?? id);
   };
 }

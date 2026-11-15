@@ -61,6 +61,7 @@ import {
 } from './ui/pages.js';
 import { claudeTokenDays, registerSettingsPages } from './ui/settings.js';
 import { registerSetupPages, wizardActive } from './ui/setup.js';
+import { zoneTextNamer } from './ui/zone-name.js';
 import { registerZonesPages } from './ui/zones.js';
 import { dispatchGate } from './usage.js';
 
@@ -212,6 +213,8 @@ export function createApp(
         ...(deps.config instanceof ConfigStore ? { store: deps.config } : {}),
         now: at,
         pages: pagesOf(app),
+        // The floor names zones by repository (#99); `ctl status` keeps the id.
+        zoneName: zoneTextNamer(config.dropZones),
       }),
       ...(deps.config instanceof ConfigStore
         ? { claudeTokenDays: claudeTokenDays(deps.config, at) }

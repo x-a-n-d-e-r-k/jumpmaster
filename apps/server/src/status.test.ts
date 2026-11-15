@@ -638,3 +638,69 @@ describe('round 3', () => {
     expect(cannotRunText([{ name: 'a', missing: [] }])).toBeUndefined();
   });
 });
+
+describe('zones named by a namer (#99)', () => {
+  const name = (id: string) => (id === 'main' ? 'octo/demo' : `octo/other (${id})`);
+  const items = [item({ state: 'ready' })];
+  const queued = [drop({ state: 'queued', startedAt: null })];
+
+  test('with no namer every line names the zone by id, as `ctl status` shows it', () => {
+    const s = statusOf(base({ zones: [zone({ mode: 'paused' })] }), NOW);
+    expect(s.headline).toBe('Paused by you: main (paused)');
+  });
+
+  test('every headline and list line that names a zone uses the namer', () => {
+    const cases: [StatusInput, RegExp][] = [
+      [base({ zones: [zone({ drops: [drop()] })] }), /in octo\/demo,/],
+      [base({ zones: [zone({ credentialProblems: [problem()] })] }), /^Blocked: octo\/demo needs/],
+      [base({ zones: [zone({ mode: 'paused' })] }), /^Paused by you: octo\/demo \(paused\)$/],
+      [base({ outboxRetrying: [outbox()] }), /^Retrying a GitHub call: merge in octo\/demo$/],
+      [
+        base({ zones: [zone({ items, drops: queued, cannotRun: 'no live stick has x' })] }),
+        /no stick can run zone octo\/demo:/,
+      ],
+    ];
+    for (const [input, headline] of cases)
+      expect(statusOf({ ...input, zoneName: name }, NOW).headline).toMatch(headline);
+
+    const also = statusOf(
+      base({
+        zoneName: name,
+        zones: [
+          zone({ credentialProblems: [problem(), problem({ zoneId: 'docs' })] }),
+          zone({ id: 'docs', mode: 'paused' }),
+        ],
+      }),
+      NOW,
+    ).also;
+    expect(also?.map((a) => a.text)).toEqual([
+      'octo/other (docs): no Claude token',
+      'octo/other (docs) is paused',
+    ]);
+    // The links keep the id.
+    expect(also?.[1]?.href).toBe('/zones/docs');
+
+    const draining = statusOf(
+      base({
+        zoneName: name,
+        zones: [zone({ mode: 'paused', drops: [drop({ state: 'queued' })] })],
+      }),
+      NOW,
+    );
+    expect(draining.detail).toBe('octo/demo is still draining 1 drop.');
+    const doctor = statusOf(
+      base({
+        zoneName: name,
+        zones: [
+          zone({
+            items,
+            drops: [drop({ role: 'doctor', state: 'queued', workItemId: null })],
+            doctorWait: 'waiting for a free stick slot',
+          }),
+        ],
+      }),
+      NOW,
+    );
+    expect(doctor.detail).toBe('The doctor drop in octo/demo: waiting for a free stick slot.');
+  });
+});
