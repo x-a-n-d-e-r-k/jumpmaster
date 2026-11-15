@@ -917,10 +917,29 @@ test('v23 adds rate_limit_requeue, undecided on every existing drop', () => {
     );
   });
   const db = openDb(f);
-  expect(MIGRATIONS.at(-1)?.version).toBe(23);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(db.prepare('SELECT id, state, rate_limit_requeue AS r FROM drops').all()).toEqual([
     { id: 'd1', state: 'push_pending', r: null },
   ]);
+  db.close();
+});
+
+test('v24 adds the stopping marker, unset on every existing zone', () => {
+  const f = dbAt(23, (raw) => {
+    raw.exec("INSERT INTO zone_controls (zone_id, mode, updated_at) VALUES ('z', 'paused', 't');");
+  });
+  const db = openDb(f);
+  expect(MIGRATIONS.at(-1)?.version).toBe(24);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(
+    db
+      .prepare(
+        'SELECT zone_id AS id, mode, stopping_since AS s, stopping_via AS v FROM zone_controls',
+      )
+      .all(),
+  ).toEqual([{ id: 'z', mode: 'paused', s: null, v: null }]);
+  expect(() => db.prepare("UPDATE zone_controls SET stopping_via = 'mcp'").run()).toThrow(
+    /CHECK constraint/,
+  );
   db.close();
 });

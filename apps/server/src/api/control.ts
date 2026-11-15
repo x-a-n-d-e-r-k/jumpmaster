@@ -30,6 +30,7 @@ import {
   ACTIVE_STATES_SQL,
   activeWorkCount,
   appendEvents,
+  clearZoneStopping,
   getDrop,
   getWorkItem,
   getZoneMode,
@@ -41,6 +42,8 @@ import {
   updateDrop,
   ZONE_MODES,
   zoneHistoryCounts,
+  zoneStopping,
+  zoneWaits,
 } from '../db/repo.js';
 import { pagesOf } from '../doctor/actions.js';
 import {
@@ -76,6 +79,7 @@ import {
   REPO,
   zoneIdOf,
 } from '../zones/detect.js';
+import { removalNote, stopZone } from '../zones/stop.js';
 
 export { detectFailure } from '../zones/detect.js';
 
@@ -362,6 +366,8 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         }
       }
       setZoneMode(db, zone.id, body.data.mode, now());
+      // Choosing a mode withdraws a stop asked for earlier: the zone stays.
+      clearZoneStopping(db, zone.id);
       audit(req, 'zone.mode', { mode: body.data.mode }, zone.id);
       return { zone: zone.id, mode: body.data.mode };
     });
@@ -808,11 +814,10 @@ const AdoptBody = z.strictObject({
   returnTo: z.string().max(2048).optional(),
   cancelTo: z.string().max(2048).optional(),
 });
+
 /** The removal's revision note, within the note limit whatever the id (an M4 file's may be long). */
-export const removalNote = (id: string): string => {
-  const note = `remove zone ${id}`;
-  return note.length > 500 ? `${note.slice(0, 497)}...` : note;
-};
+export { removalNote };
+
 const NO_GATES = 'add at least one check (gate): every change must pass one';
 const Resume = z.array(z.string().min(1)).max(100).optional();
 /** Where the confirmation page goes after a guarded change is applied: a path on this host. */
@@ -1089,6 +1094,12 @@ function registerConfigRoutes(
 
   // The zones page's reads, and `ctl zones list | show`: never a secret, only what the config and
   // the database say about each zone.
+  /** A zone being stopped: since when, and what it still waits for. */
+  const stoppingOf = (id: string) => {
+    const s = zoneStopping(db, id);
+    return s ? { stopping: { since: s.since, waits: zoneWaits(db, id) } } : {};
+  };
+
   scope.get('/api/control/zones', async (req) => {
     const config = req.jmConfig ?? store.current();
     const problems = store.problems();
@@ -1115,6 +1126,7 @@ function registerConfigRoutes(
             ? run.checks.filter((c) => c.zoneId === z.id && c.status === 'fail').length
             : null,
           problems: problems.filter((p) => p.zoneId === z.id).map((p) => p.message),
+          ...stoppingOf(z.id),
         };
       }),
     };
@@ -1132,31 +1144,30 @@ function registerConfigRoutes(
       modeLabel: MODE_LABELS[mode] ?? mode,
       revision: store.revision(),
       problems: store.problems().filter((p) => p.zoneId === req.params.id),
+      ...stoppingOf(req.params.id),
     };
   });
 
-  // Removal: the zone leaves the document through the apply path, whose rule is that it is drained
-  // in observe; only its mode row goes, and its history stays for a later Resume.
+  // Stop managing (removal): one action. The zone goes to observe and is marked stopping; drained,
+  // it leaves the document through the apply path at once (200 `removed`), else the server removes
+  // it once drained (202 `stopping`, with what it waits for). Only its mode row goes, and its
+  // history stays for a later Resume. A file-mode config is refused by the apply path.
   scope.delete<{ Params: { id: string }; Querystring: { returnTo?: string } }>(
     '/api/control/zones/:id',
     async (req, reply) => {
       const id = req.params.id;
       if (!zoneAt(id)) return reply.code(404).send({ error: 'unknown zone' });
-      const doc = store.document();
-      const zones = (doc.dropZones as Record<string, unknown>[]).filter((z) => z.id !== id);
-      const r = store.apply(
-        { ...doc, dropZones: zones },
-        {
-          via: viaOf(req),
-          principal: principalOf(req),
-          expectRevision: store.revision(),
-          note: removalNote(id),
-          returnTo: '/zones',
-          cancelTo: `/zones/${encodeURIComponent(id)}`,
-        },
-      );
-      const out = answer(req, reply, 'zone.remove', r, {}, id);
-      return r.ok ? { ...(out as object), removed: id } : out;
+      const r = stopZone(db, store, id, {
+        via: viaOf(req),
+        principal: principalOf(req),
+        now: now(),
+      });
+      if (r.kind === 'stopping') {
+        audit(req, 'zone.stop', { ...r.waits }, id);
+        return reply.code(202).send({ stopping: id, waits: r.waits });
+      }
+      const out = answer(req, reply, 'zone.remove', r.result, {}, id);
+      return r.kind === 'removed' ? { ...(out as object), removed: id } : out;
     },
   );
 

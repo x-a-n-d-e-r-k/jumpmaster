@@ -1121,6 +1121,70 @@ export function activeWorkCount(db: Db, zoneId: string): number {
   return row.n;
 }
 
+/** What a zone still waits for before it is drained, by kind (the sum is `activeWorkCount`). */
+export type ZoneWaits = { drops: number; pushes: number; outbox: number };
+
+export function zoneWaits(db: Db, zoneId: string): ZoneWaits {
+  return db
+    .prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM drops
+            WHERE drop_zone_id = @zone AND state IN (${ACTIVE_STATES_SQL}) AND state <> 'push_pending'
+              AND NOT (role = 'doctor' AND state = 'queued')) AS drops,
+         (SELECT COUNT(*) FROM drops
+            WHERE drop_zone_id = @zone AND state = 'push_pending') AS pushes,
+         (SELECT COUNT(*) FROM outbox o
+            WHERE o.zone_id = @zone AND o.state IN ('pending', 'unknown')) AS outbox`,
+    )
+    .get({ zone: zoneId }) as ZoneWaits;
+}
+
+export type ZoneStopping = { since: string; via: 'ui' | 'ctl' };
+
+/**
+ * The operator stopped managing the zone: it goes to observe (no new work, no GitHub write) and
+ * is marked stopping, so it is removed once drained, whenever that is. A second ask keeps the
+ * first one's time and via.
+ */
+export function markZoneStopping(db: Db, zoneId: string, via: 'ui' | 'ctl', now: Date): void {
+  db.prepare(
+    `INSERT INTO zone_controls (zone_id, mode, updated_at, stopping_since, stopping_via)
+       VALUES (@zone, 'observe', @now, @now, @via)
+       ON CONFLICT (zone_id) DO UPDATE SET
+         mode = 'observe',
+         updated_at = CASE WHEN mode = 'observe' THEN updated_at ELSE excluded.updated_at END,
+         stopping_since = COALESCE(stopping_since, excluded.stopping_since),
+         stopping_via = COALESCE(stopping_via, excluded.stopping_via)`,
+  ).run({ zone: zoneId, now: now.toISOString(), via });
+}
+
+/** Withdraws a stop (the operator chose a mode again); the mode stays as it is. */
+export function clearZoneStopping(db: Db, zoneId: string): void {
+  db.prepare(
+    'UPDATE zone_controls SET stopping_since = NULL, stopping_via = NULL WHERE zone_id = ?',
+  ).run(zoneId);
+}
+
+export function zoneStopping(db: Db, zoneId: string): ZoneStopping | undefined {
+  const row = db
+    .prepare(
+      'SELECT stopping_since AS since, stopping_via AS via FROM zone_controls WHERE zone_id = ? AND stopping_since IS NOT NULL',
+    )
+    .get(zoneId) as ZoneStopping | undefined;
+  return row;
+}
+
+/** Every zone marked stopping, oldest ask first. */
+export function stoppingZones(db: Db): string[] {
+  return (
+    db
+      .prepare(
+        'SELECT zone_id AS id FROM zone_controls WHERE stopping_since IS NOT NULL ORDER BY stopping_since, zone_id',
+      )
+      .all() as { id: string }[]
+  ).map((r) => r.id);
+}
+
 export function zoneIsDrained(db: Db, zoneId: string): boolean {
   return activeWorkCount(db, zoneId) === 0;
 }

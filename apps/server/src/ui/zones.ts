@@ -4,7 +4,7 @@ import { withCsrf } from '../auth/guard.js';
 import type { ConfigStore } from '../config/store.js';
 import { STARTER_WARNING } from '../config.js';
 import type { Db } from '../db/open.js';
-import { getZoneMode } from '../db/repo.js';
+import { getZoneMode, type ZoneWaits, zoneStopping, zoneWaits } from '../db/repo.js';
 import { egressSeen } from '../doctor/checks.js';
 import { latestDoctorRun } from '../doctor/run.js';
 import { BASE_EGRESS } from '../payloads.js';
@@ -44,6 +44,37 @@ document.getElementById('adopt').addEventListener('click', async () => {
 });
 </script>`;
 
+/** `n thing`, `n things`. */
+const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/** What a stopping zone still waits for, by count. */
+const waitsText = (w: ZoneWaits): string =>
+  `stopping: waiting for ${count(w.drops, 'running drop', 'running drops')}, ${count(w.pushes, 'pending push', 'pending pushes')}, ${count(w.outbox, 'outbox write', 'outbox writes')}`;
+
+/** The zone's stopping line, or undefined when it is not being stopped. */
+const stoppingLine = (db: Db, id: string): string | undefined =>
+  zoneStopping(db, id) ? waitsText(zoneWaits(db, id)) : undefined;
+
+/**
+ * Stop managing: one confirmed click. The confirmation names the repository and what happens;
+ * the click is the removal's DELETE, which sets observe and removes the zone once drained.
+ */
+const stopButton = (id: string, repo: string): string => {
+  const confirm = `Stop managing ${repo}? Jumpmaster takes no new work for it and sets it to observe, then removes it as soon as its running drops, pending pushes and outbox writes have finished. Open pull requests are left as they are. Its history is kept, for a later Resume.`;
+  return `<button class="stop" data-zone="${escapeHtml(id)}" data-confirm="${escapeHtml(confirm)}">Stop managing</button> `;
+};
+
+/** The Stop managing buttons' handler; `#stop-out` holds a refusal. */
+const STOP_SCRIPT = `for (const b of document.querySelectorAll('button.stop')) b.addEventListener('click', async () => {
+  if (!confirm(b.dataset.confirm)) return;
+  const r = await jmFetch('/api/control/zones/' + encodeURIComponent(b.dataset.zone), {}, 'DELETE');
+  const j = await r.json().catch(() => ({}));
+  // 200: removed now; 202: stopping, removed by the server once drained.
+  if (r.status === 200) { location.href = '/zones'; return; }
+  if (r.status === 202) { location.reload(); return; }
+  document.getElementById('stop-out').textContent = b.dataset.zone + ': ' + (j.error || (j.issues || []).map((i) => i.message).join('; ') || ('refused (' + r.status + ')'));
+});`;
+
 const FORBIDDEN_NOTE = 'set with <code>jumpmaster ctl</code> or in the config file';
 
 /** The list page. */
@@ -64,6 +95,7 @@ function listPage(store: ConfigStore, db: Db): string {
         ? run.checks.filter((c) => c.zoneId === z.id && c.status === 'fail').length
         : undefined;
       const mine = problems.filter((p) => p.zoneId === z.id);
+      const stopping = stoppingLine(db, z.id);
       const problem = mine.length
         ? `<span class="problem">${escapeHtml(mine[0]?.message)}</span> <a href="/settings/credentials">Fix in Settings, Credentials</a>`
         : '-';
@@ -72,15 +104,16 @@ function listPage(store: ConfigStore, db: Db): string {
         mode === m
           ? ''
           : `<button class="mode" data-zone="${escapeHtml(z.id)}" data-mode="${m}">${label}</button> `;
-      return `<tr><td><a href="${zoneHref(z.id)}">${escapeHtml(z.id)}</a></td><td>${escapeHtml(z.repo)}</td><td>${escapeHtml(MODE_LABELS[mode] ?? mode)}</td><td>${escapeHtml(z.preset ?? z.image)}</td><td>${escapeHtml(z.egress?.mode ?? 'off')}</td><td>${escapeHtml(z.identity)}</td><td>${last ? `<a href="/drops/${encodeURIComponent(last.id)}">${escapeHtml(last.role)}, ${escapeHtml(last.state)}</a>` : '-'}</td><td>${fails === undefined ? '-' : `<a href="/doctor">${fails}</a>`}</td><td>${problem}</td><td>${button('paused', 'Pause')}${button('active', 'Resume')}${button('observe', 'Observe')}<a href="${zoneHref(z.id)}/github">GitHub</a></td></tr>`;
+      return `<tr><td><a href="${zoneHref(z.id)}">${escapeHtml(z.id)}</a></td><td>${escapeHtml(z.repo)}</td><td>${escapeHtml(MODE_LABELS[mode] ?? mode)}${stopping ? `<br><strong>${escapeHtml(stopping)}</strong>` : ''}</td><td>${escapeHtml(z.preset ?? z.image)}</td><td>${escapeHtml(z.egress?.mode ?? 'off')}</td><td>${escapeHtml(z.identity)}</td><td>${last ? `<a href="/drops/${encodeURIComponent(last.id)}">${escapeHtml(last.role)}, ${escapeHtml(last.state)}</a>` : '-'}</td><td>${fails === undefined ? '-' : `<a href="/doctor">${fails}</a>`}</td><td>${problem}</td><td>${button('paused', 'Pause')}${button('active', 'Resume')}${button('observe', 'Observe')}${fileMode || stopping ? '' : stopButton(z.id, z.repo)}<a href="${zoneHref(z.id)}/github">GitHub</a></td></tr>`;
     })
     .join('');
   return page(
     `<p><a href="/">Home</a></p><h2>Zones</h2><p>A zone is one project: one repository Jumpmaster works on.</p>
 ${fileMode ? ADOPT_BANNER : '<p><a href="/zones/new">Add a project</a></p>'}
 <table><tr><th>Zone</th><th>Repository</th><th>Mode</th><th>Stack</th><th>Egress</th><th>Accounts</th><th>Last drop</th><th>Doctor fails</th><th>Needs</th><th></th></tr>${rows || '<tr><td colspan="10">No zones yet.</td></tr>'}</table>
-<p id="mode-out" role="status"></p>
+<p id="mode-out" role="status"></p><p id="stop-out" role="status"></p>
 <script>
+${STOP_SCRIPT}
 for (const b of document.querySelectorAll('button.mode')) b.addEventListener('click', async () => {
   const r = await jmFetch('/api/control/zones/' + encodeURIComponent(b.dataset.zone), { mode: b.dataset.mode });
   if (r.ok) { location.reload(); return; }
@@ -119,6 +152,7 @@ function zonePage(store: ConfigStore, db: Db, id: string, now: Date): string | u
   // The forms show what is in effect (defaults filled); the Advanced editor what is stored.
   const f = zoneToForm(resolved);
   const mode = getZoneMode(db, id, resolved.mode);
+  const stopping = stoppingLine(db, id);
   const gates = (f['gate.name'] as string[]).map((name, i) => ({
     name,
     run: (f['gate.run'] as string[])[i] ?? '',
@@ -221,14 +255,16 @@ ${field('overrideApprovers', 'Override approvers (logins)', textarea(f, 'overrid
   return page(
     `<p><a href="/">Home</a> · <a href="/zones">Zones</a> · <a href="${base}/github">GitHub</a></p>
 <h2>Zone ${escapeHtml(id)}</h2><p>${escapeHtml(MODE_LABELS[mode] ?? mode)}</p>
+${stopping ? `<p><strong>${escapeHtml(stopping)}</strong> <small>Resume or Pause from the Zones list withdraws it.</small></p>` : ''}
+${readOnly || stopping ? '' : `<p>${stopButton(id, String(raw.repo))}<small>No new work, then removed once drained; open pull requests and history stay.</small> <span id="stop-out" role="status"></span></p>`}
 ${readOnly ? ADOPT_BANNER : ''}
 <p id="form-out" role="status"></p>
 ${project}${stack}${egress}${merging}${advanced}
 ${
   readOnly
     ? ''
-    : `<h3>Remove</h3><p>A zone is removed once it is drained: set it to observe and let its drops and GitHub writes finish. Its history stays, for a later Resume.</p><p><button type="button" id="remove">Remove ${escapeHtml(id)}</button> <span id="remove-out" role="status"></span></p>
-<script>
+    : `<script>
+${STOP_SCRIPT}
 ${FORM_SCRIPT}
 const REVISION = ${store.revision()};
 const ZONE_INDEX = ${index};
@@ -294,14 +330,6 @@ if (adopt) adopt.addEventListener('click', async () => {
   const j = await r.json().catch(() => ({}));
   if (r.ok) { location.reload(); return; }
   if (r.status === 409 && j.needsConfirmation) { location.href = j.confirm; return; }
-  out.textContent = j.error || (j.issues || []).map((i) => i.message).join('; ') || ('Refused (' + r.status + ')');
-});
-document.getElementById('remove').addEventListener('click', async () => {
-  const out = document.getElementById('remove-out');
-  const r = await jmFetch('/api/control/zones/' + encodeURIComponent(ZONE_ID), {}, 'DELETE');
-  const j = await r.json().catch(() => ({}));
-  // A removal is not a guarded change (the drained rule is the guard): applied, or refused.
-  if (r.ok) { location.href = '/zones'; return; }
   out.textContent = j.error || (j.issues || []).map((i) => i.message).join('; ') || ('Refused (' + r.status + ')');
 });
 </script>`
