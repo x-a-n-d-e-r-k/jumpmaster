@@ -295,6 +295,35 @@ describe('stack presets', () => {
     );
   });
 
+  test('the trooper carries the push label and an agent-owned repo directory', () => {
+    const final = finalStage(instructions(read('images/trooper/Dockerfile')));
+    const labels = final
+      .filter((i) => i.op === 'LABEL')
+      .map((i) => i.args)
+      .join(' ');
+    expect(labels).toMatch(/(^|\s)org\.jumpmaster\.trooper\.push="1"(\s|$)/);
+    const runs = final
+      .filter((i) => i.op === 'RUN')
+      .map((i) => i.args)
+      .join('\n');
+    expect(runs).toMatch(/install -d -o agent -g agent -m 0700 \/home\/agent\/repo\b/);
+    // The presets build FROM the trooper and must not reset the label.
+    for (const file of Object.values(PRESET_FILES)) {
+      expect(read(file), file).not.toMatch(/org\.jumpmaster\.trooper\.push/);
+    }
+  });
+
+  test('the lazy-fetch e2e runs the exact hardened upload-pack offline as the agent', () => {
+    const e2e = read('images/trooper/e2e/lazy-fetch.sh');
+    const git = read('apps/trooper/src/git.ts');
+    const hardened = /HARDENED_UPLOAD_PACK =\s*'([^']+)'/.exec(git)?.[1];
+    expect(hardened).toBeTruthy();
+    expect(e2e).toContain(`HARDENED='${hardened}'`);
+    expect(e2e).toMatch(/--network none --user 10001:10001/);
+    expect(e2e).toContain('lazy fetching disabled');
+    expect(read('.github/workflows/images.yml')).toContain('images/trooper/e2e/lazy-fetch.sh');
+  });
+
   test('the python preset ships 3.11 and a uv-installed 3.12 every user can find', () => {
     const final = finalStage(instructions(read(PRESET_FILES.python)));
     const env = final

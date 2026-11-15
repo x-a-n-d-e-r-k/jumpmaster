@@ -18,7 +18,8 @@ FROM node:24-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9
 ARG SOURCE_URL
 LABEL org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.title="jumpmaster-trooper" \
-      org.jumpmaster.trooper.egress="1"
+      org.jumpmaster.trooper.egress="1" \
+      org.jumpmaster.trooper.push="1"
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates util-linux \
  && rm -rf /var/lib/apt/lists/*
@@ -45,6 +46,7 @@ RUN groupadd -g 10001 agent && useradd -u 10001 -g 10001 -d /home/agent -m -s /b
  && groupadd -g 10002 gate && useradd -u 10002 -g 10002 -d /home/gate -m -s /bin/sh gate \
  && chmod 0711 /home/agent && chmod 0700 /home/gate \
  && install -d -o agent -g agent -m 0700 /home/agent/.claude \
+ && install -d -o agent -g agent -m 0700 /home/agent/repo \
  && install -d -o agent -g agent -m 0700 /tmp/jm-10001 \
  && install -d -o gate -g gate -m 0700 /tmp/jm-10002 \
  && install -d -o root -g root -m 0755 /work \
