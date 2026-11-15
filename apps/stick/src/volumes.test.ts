@@ -16,9 +16,13 @@ test('volume names carry the drop, the epoch and an 8-hex nonce', () => {
 });
 
 /** A fake engine: volumes (some existing), and an init container exiting with `exitCode`. */
-function engine(o: { existing?: Record<string, string>[]; exitCode?: number } = {}) {
+function engine(
+  o: { existing?: Record<string, string>[]; exitCode?: number; startError?: string } = {},
+) {
   const calls: { kind: string; o?: unknown; id?: string }[] = [];
   const removed = new Set<string>();
+  /** A wait on a container that never ran rejects once it is removed, as the engine's does. */
+  const onRemove = new Map<string, () => void>();
   const docker = {
     async listVolumes(q: unknown) {
       calls.push({ kind: 'listVolumes', o: q });
@@ -39,11 +43,15 @@ function engine(o: { existing?: Record<string, string>[]; exitCode?: number } = 
       calls.push({ kind: 'createContainer', o: c });
       return {
         id: c.name,
-        async wait() {
-          return { StatusCode: o.exitCode ?? 0 };
+        wait() {
+          if (!o.startError) return Promise.resolve({ StatusCode: o.exitCode ?? 0 });
+          return new Promise((_, reject) =>
+            onRemove.set(c.name, () => reject(new Error('container removed'))),
+          );
         },
         async start() {
           calls.push({ kind: 'startContainer', id: c.name });
+          if (o.startError) throw new Error(o.startError);
         },
       };
     },
@@ -52,6 +60,7 @@ function engine(o: { existing?: Record<string, string>[]; exitCode?: number } = 
         async remove(r: unknown) {
           calls.push({ kind: 'removeContainer', id, o: r });
           removed.add(id);
+          onRemove.get(id)?.();
         },
         async inspect() {
           if (removed.has(id)) throw Object.assign(new Error('gone'), { statusCode: 404 });
@@ -154,5 +163,38 @@ test('a failed init container fails the drop and removes its volume', async () =
     prepareVolume(new DockerDriver(docker as never, { removePollMs: 1 }), drop),
   ).rejects.toThrow(/volume init failed for drop d1 epoch 3: exit 1/);
   const created = (calls.find((c) => c.kind === 'createVolume')?.o as { Name: string }).Name;
+  // The init container is gone before its volume is removed.
+  expect(calls.filter((c) => c.kind !== 'listVolumes').map((c) => c.kind)).toEqual([
+    'createVolume',
+    'createContainer',
+    'startContainer',
+    'removeContainer',
+    'removeVolume',
+  ]);
   expect(calls.at(-1)).toEqual({ kind: 'removeVolume', id: created });
+});
+
+test('an init container that fails to start is removed, then its volume, with no unhandled rejection', async () => {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (e: unknown) => unhandled.push(e);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const { docker, calls } = engine({ startError: 'exec: "/bin/sh": not found' });
+    await expect(
+      prepareVolume(new DockerDriver(docker as never, { removePollMs: 1 }), drop),
+    ).rejects.toThrow('/bin/sh');
+    const created = (calls.find((c) => c.kind === 'createVolume')?.o as { Name: string }).Name;
+    expect(calls.filter((c) => c.kind !== 'listVolumes')).toEqual([
+      { kind: 'createVolume', o: expect.anything() },
+      { kind: 'createContainer', o: expect.anything() },
+      { kind: 'startContainer', id: `${created}-init` },
+      { kind: 'removeContainer', id: `${created}-init`, o: { force: true } },
+      { kind: 'removeVolume', id: created },
+    ]);
+    // Let any orphaned rejection surface.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
 });

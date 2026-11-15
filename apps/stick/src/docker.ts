@@ -208,11 +208,20 @@ export class DockerDriver implements ContainerDriver {
       },
     });
     try {
-      const waited = container.wait({ condition: 'next-exit' });
+      // Handled from the start: if `start` throws, the removal below rejects this wait, and an
+      // unhandled rejection would end the stick.
+      const waited = (
+        container.wait({ condition: 'next-exit' }) as Promise<{
+          StatusCode: number;
+        }>
+      ).then(
+        (r) => r,
+        () => ({ StatusCode: -1 }),
+      );
       await container.start();
       let timer: NodeJS.Timeout | undefined;
       const r = await Promise.race([
-        waited as Promise<{ StatusCode: number }>,
+        waited,
         new Promise<'timeout'>((res) => {
           timer = setTimeout(() => res('timeout'), INIT_TIMEOUT_MS);
         }),
@@ -227,20 +236,36 @@ export class DockerDriver implements ContainerDriver {
 
   async removeAndWait(name: string, timeoutMs: number): Promise<void> {
     const c = this.docker.getContainer(name);
-    // Already gone, or a removal already in progress: either way, the inspect below decides.
-    await c.remove({ force: true }).catch(() => {});
-    const pollMs = this.opts.removePollMs ?? REMOVE_POLL_MS;
     const deadline = Date.now() + timeoutMs;
+    /** `call`, or 'timeout' at the deadline: a hung engine call can't outlast it. */
+    const bounded = async <T>(call: Promise<T>): Promise<T | 'timeout'> => {
+      call.catch(() => {}); // a late rejection after the deadline is not unhandled
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        return await Promise.race([
+          call,
+          new Promise<'timeout'>((r) => {
+            timer = setTimeout(() => r('timeout'), Math.max(0, deadline - Date.now()));
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    // Already gone, or a removal already in progress: either way, the inspect below decides.
+    await bounded(c.remove({ force: true })).catch(() => {});
+    const pollMs = this.opts.removePollMs ?? REMOVE_POLL_MS;
     for (;;) {
       try {
-        await c.inspect();
+        if ((await bounded(c.inspect())) === 'timeout') break;
       } catch (e) {
         if (statusOf(e) === 404) return;
         // Any other failure proves nothing: keep asking until the deadline.
       }
-      if (Date.now() >= deadline) throw new Error(`container not removed: ${name}`);
+      if (Date.now() >= deadline) break;
       await new Promise((r) => setTimeout(r, Math.min(pollMs, Math.max(0, deadline - Date.now()))));
     }
+    throw new Error(`container not removed: ${name}`);
   }
 
   async freeBytes(): Promise<number> {

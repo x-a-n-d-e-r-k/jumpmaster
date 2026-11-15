@@ -848,6 +848,21 @@ test('removeAndWait times out with a clear error', async () => {
   ).rejects.toThrow('container not removed');
 });
 
+test('removeAndWait enforces its deadline when the engine hangs', async () => {
+  const never = () => new Promise<never>(() => {});
+  const hangingInspect = { getContainer: () => ({ remove: async () => {}, inspect: never }) };
+  const t0 = Date.now();
+  await expect(
+    new DockerDriver(hangingInspect as never, { removePollMs: 1 }).removeAndWait('c1', 50),
+  ).rejects.toThrow('container not removed');
+  // The force-remove hanging too: still the deadline, not forever.
+  const hangingBoth = { getContainer: () => ({ remove: never, inspect: never }) };
+  await expect(
+    new DockerDriver(hangingBoth as never, { removePollMs: 1 }).removeAndWait('c1', 50),
+  ).rejects.toThrow('container not removed');
+  expect(Date.now() - t0).toBeLessThan(1000);
+});
+
 test('freeBytes is the free space of the engine root directory', async () => {
   const { statfs } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
