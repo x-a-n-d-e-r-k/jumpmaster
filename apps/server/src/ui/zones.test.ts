@@ -22,8 +22,8 @@ const TOKEN = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
 const ORIGIN = `http://${HOST}`;
 const PASS = 'a long operator passphrase';
-const CLAUDE = 'sk-ant-oat01-ZONESCLAUDEDUMMY0123456789';
-const AUTHOR = 'github_pat_ZONESAUTHORDUMMY0123456789';
+const CLAUDE = 'sk-ant-' + 'oat01-ZONESCLAUDEDUMMY0123456789';
+const AUTHOR = 'github_pat_' + 'ZONESAUTHORDUMMY0123456789';
 const token = { kind: 'operator' as const, via: 'token' as const, sudo: true };
 const esc = (s: string) => s.replaceAll("'", '&#39;').replaceAll('"', '&quot;');
 

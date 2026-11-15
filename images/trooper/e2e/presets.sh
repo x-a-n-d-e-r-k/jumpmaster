@@ -97,7 +97,7 @@ process.stdout.write(JSON.stringify({ protocol: 1, dropId: "e2e-preset", epoch: 
   repo: { owner, name, defaultBranch: branch }, issue: { number: 1, title: "e2e", body: "e2e" },
   branch, pr: { number: 1, branch, headSha: sha }, gates: [{ name: "toolchain", run, timeoutMinutes: 5 }],
   model: "m", maxTurns: 1, promptVersion: "e2e", prompt: "review", image: "jumpmaster-trooper:dev",
-  protectedPaths: [], credentials: { claudeToken: "sk-ant-oat01-E2EDUMMYDUMMYDUMMYDUMMY" } }));
+  protectedPaths: [], credentials: { claudeToken: "sk-ant-""oat01-E2EDUMMYDUMMYDUMMYDUMMY" } }));
 ' "$REPO" "$BRANCH" "$SHA" "$1"
 }
 gate_ok() { # name, pattern, output

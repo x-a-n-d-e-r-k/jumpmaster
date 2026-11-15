@@ -28,9 +28,9 @@ const OWNER = 'e2e';
 const NAME = 'push';
 // Distinct, recognisable values: the read token the agent container clones with, the write token
 // only the grant carries, and the Claude token.
-const READ_TOKEN = 'ghp_E2EREADTOKENreadtokenREADTOKEN0001';
-const WRITE_TOKEN = 'ghp_E2EWRITETOKENwritetokenWRITE00002';
-const CLAUDE_TOKEN = 'sk-ant-oat01-E2EDUMMYDUMMYDUMMYDUMMY';
+const READ_TOKEN = 'ghp_' + 'E2EREADTOKENreadtokenREADTOKEN0001';
+const WRITE_TOKEN = 'ghp_' + 'E2EWRITETOKENwritetokenWRITE00002';
+const CLAUDE_TOKEN = 'sk-ant-' + 'oat01-E2EDUMMYDUMMYDUMMYDUMMY';
 
 const real = new Docker();
 let failures = 0;

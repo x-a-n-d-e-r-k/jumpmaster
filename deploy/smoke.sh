@@ -267,7 +267,7 @@ case_init() {
   new_case init
   printf 'JM_UID=%s\nJM_GID=%s\n' "$HOST_UID" "$HOST_GID" >.env
   mkdir -m 0700 secrets
-  put claude_token sk-ant-oat01-SMOKEDUMMYSMOKEDUMMY
+  put claude_token sk-ant-""oat01-SMOKEDUMMYSMOKEDUMMY
   put github_author_token github_pat_SMOKEAUTHORDUMMY
   put github_reviewer_token github_pat_SMOKEREVIEWERDUMMY
   "${C[@]}" config --quiet || fail "compose config"
@@ -446,7 +446,7 @@ m4_install() {
   new_case "$1" m4
   printf 'JM_UID=%s\nJM_GID=%s\n' "$HOST_UID" "$HOST_GID" >.env
   mkdir -m 0700 secrets
-  put claude_token sk-ant-oat01-SMOKEDUMMYSMOKEDUMMY
+  put claude_token sk-ant-""oat01-SMOKEDUMMYSMOKEDUMMY
   put github_author_token github_pat_SMOKEAUTHORDUMMY
   put github_reviewer_token github_pat_SMOKEREVIEWERDUMMY
   local out

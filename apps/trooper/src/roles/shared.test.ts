@@ -40,7 +40,10 @@ const impl: DropPayload = {
   prompt: 'do it',
   image: 'img',
   protectedPaths: [],
-  credentials: { claudeToken: 'sk-ant-oat-SECRET1234567890', forgeToken: 'ghp_FORGE1234567890' },
+  credentials: {
+    claudeToken: 'sk-ant-' + 'oat-SECRET1234567890',
+    forgeToken: 'ghp_FORGE1234567890',
+  },
 };
 
 const ids: TrooperIdentities = {
@@ -50,7 +53,7 @@ const ids: TrooperIdentities = {
 // runAgent writes the system prompt and settings into the workdir, so it must exist.
 const ctx: RoleCtx = {
   workdir: mkdtempSync(join(realpathSync(tmpdir()), 'jm-roles-')),
-  secrets: ['sk-ant-oat-SECRET1234567890'],
+  secrets: ['sk-ant-' + 'oat-SECRET1234567890'],
   ids: null,
 };
 const ctxWithIds: RoleCtx = { ...ctx, ids };

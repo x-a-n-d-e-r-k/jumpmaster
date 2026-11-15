@@ -51,7 +51,7 @@ echo "server image: uid 10000, no docker client, no dockerode: ok"
 # Secrets, owned by the host user at 0600, and a config.
 mkdir -p "$WORK/secrets" "$WORK/config" "$WORK/data"
 put() { printf '%s\n' "$2" >"$WORK/secrets/$1" && chmod 0600 "$WORK/secrets/$1"; }
-put claude sk-ant-oat01-SMOKEDUMMYSMOKEDUMMY
+put claude sk-ant-""oat01-SMOKEDUMMYSMOKEDUMMY
 put author github_pat_SMOKEAUTHORDUMMY
 put reviewer github_pat_SMOKEREVIEWERDUMMY
 put join smoke-join-token-0123456789

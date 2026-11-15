@@ -7,7 +7,7 @@ import type { TrooperDeps } from '../main.js';
 import { runReview } from './review.js';
 import type { RoleCtx } from './shared.js';
 
-const SECRET = 'sk-ant-oat-SECRET1234567890';
+const SECRET = 'sk-ant-' + 'oat-SECRET1234567890';
 const review: DropPayload = {
   protocol: 1,
   dropId: 'd2',

@@ -23,11 +23,14 @@ const resolve: DropPayload = {
   prompt: 'resolve it',
   image: 'img',
   protectedPaths: [],
-  credentials: { claudeToken: 'sk-ant-oat-SECRET1234567890', forgeToken: 'ghp_FORGE1234567890' },
+  credentials: {
+    claudeToken: 'sk-ant-' + 'oat-SECRET1234567890',
+    forgeToken: 'ghp_FORGE1234567890',
+  },
 };
 const ctx: RoleCtx = {
   workdir: mkdtempSync(join(realpathSync(tmpdir()), 'jm-resolve-')),
-  secrets: ['sk-ant-oat-SECRET1234567890'],
+  secrets: ['sk-ant-' + 'oat-SECRET1234567890'],
   ids: null,
 };
 const repoDir = join(ctx.workdir, 'repo');

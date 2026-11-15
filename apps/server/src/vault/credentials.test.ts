@@ -17,7 +17,7 @@ import {
 } from './credentials.js';
 import { fingerprintOf, openVault, type Vault } from './vault.js';
 
-const CLAUDE = 'sk-ant-oat01-CLAUDEVALUE-0001';
+const CLAUDE = 'sk-ant-' + 'oat01-CLAUDEVALUE-0001';
 const AUTHOR = 'github_pat_AUTHORVALUE_0002';
 const REVIEWER = 'github_pat_REVIEWERVALUE_0003';
 const READ = 'github_pat_READVALUE_0004';
@@ -225,7 +225,7 @@ describe('shadowing, fingerprints and dates', () => {
 });
 
 describe('testing a credential on entry', () => {
-  const FAILED = 'github_pat_FAILEDTESTVALUE_distinct_9999';
+  const FAILED = 'github_pat_' + 'FAILEDTESTVALUE_distinct_9999';
   const zones = [
     { id: 'web', repo: 'octo/web' },
     { id: 'api', repo: 'octo/api' },

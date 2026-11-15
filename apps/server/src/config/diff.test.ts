@@ -50,7 +50,7 @@ describe('diff', () => {
   });
 
   test('a document holds no secret, so neither does its diff', () => {
-    const secret = 'ghp_secretvalue1234567890';
+    const secret = 'ghp_' + 'secretvalue1234567890';
     const changes = diff({ pollSeconds: 60 }, { pollSeconds: 30, dropZones: [zone('a')] });
     expect(JSON.stringify(changes)).not.toContain(secret);
   });

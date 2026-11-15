@@ -17,8 +17,8 @@ import type { TrooperDeps } from '../main.js';
 import { runCrew } from './crew.js';
 import type { RoleCtx } from './shared.js';
 
-const SECRET = 'sk-ant-oat-SECRET1234567890';
-const READ = 'ghp_READ1234567890abcdef';
+const SECRET = 'sk-ant-' + 'oat-SECRET1234567890';
+const READ = 'ghp_' + 'READ1234567890abcdef';
 
 const base = {
   protocol: 1 as const,

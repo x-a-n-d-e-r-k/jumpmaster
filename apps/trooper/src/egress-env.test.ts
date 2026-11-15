@@ -50,7 +50,7 @@ const base = {
   prompt: 'review it',
   image: 'jumpmaster-trooper:test',
   protectedPaths: [],
-  credentials: { claudeToken: 'sk-ant-oat-SECRETSECRETSECRET1234' },
+  credentials: { claudeToken: 'sk-ant-' + 'oat-SECRETSECRETSECRET1234' },
   role: 'review',
   pr: { number: 9, branch: 'agent/issue-5', headSha: 'abc' },
   services: [

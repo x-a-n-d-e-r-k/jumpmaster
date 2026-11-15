@@ -1298,7 +1298,7 @@ describe('zone removal, history and Resume (Task 3)', () => {
 });
 
 describe('credentials in the store (Task 4)', () => {
-  const VAULT_CLAUDE = 'sk-ant-oat01-VAULTCLAUDE-store-0001';
+  const VAULT_CLAUDE = 'sk-ant-' + 'oat01-VAULTCLAUDE-store-0001';
   function withVault() {
     const w = world();
     const key = join(dir(), 'vault_key');

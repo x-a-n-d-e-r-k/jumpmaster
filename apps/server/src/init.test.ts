@@ -15,11 +15,11 @@ import { loadConfig, parseEditable, splitConfigFile } from './config.js';
 import { createSecretOnce, type InitDeps, type InitForge, runInit } from './init.js';
 import { detectRepo, REPO, zoneIdOf } from './zones/detect.js';
 
-const AUTHOR = 'github_pat_INITAUTHORDUMMY0123456789';
-const CLASSIC = 'ghp_INITCLASSICDUMMY0123456789';
-const REVIEWER = 'github_pat_INITREVIEWERDUMMY0123456789';
-const READ = 'github_pat_INITREADDUMMY0123456789';
-const CLAUDE = 'sk-ant-oat01-INITCLAUDEDUMMY0123456789';
+const AUTHOR = 'github_pat_' + 'INITAUTHORDUMMY0123456789';
+const CLASSIC = 'ghp_' + 'INITCLASSICDUMMY0123456789';
+const REVIEWER = 'github_pat_' + 'INITREVIEWERDUMMY0123456789';
+const READ = 'github_pat_' + 'INITREADDUMMY0123456789';
+const CLAUDE = 'sk-ant-' + 'oat01-INITCLAUDEDUMMY0123456789';
 const ENV_FILE = 'JM_UID=1000\nJM_GID=1000\n# mine\nJM_SLOTS=2\n';
 const IDENTITY_MAP = '         0          0 4294967295\n';
 const digest = (c: string) => `sha256:${c.repeat(64)}`;

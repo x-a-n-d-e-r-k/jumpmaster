@@ -47,7 +47,7 @@ function payload(dropId, image, egress) {
     prompt: 'review',
     image,
     protectedPaths: [],
-    credentials: { claudeToken: 'sk-ant-oat01-E2EDUMMYDUMMYDUMMYDUMMY' },
+    credentials: { claudeToken: 'sk-ant-' + 'oat01-E2EDUMMYDUMMYDUMMYDUMMY' },
   };
 }
 

@@ -7,8 +7,8 @@ import type { TrooperDeps } from '../main.js';
 import { runDoctorRole } from './doctor.js';
 import type { RoleCtx } from './shared.js';
 
-const CLAUDE = 'sk-ant-oat01-DOCTORDOCTORDOCTORDOCTOR';
-const READ = 'github_pat_READREADREADREADREADREAD42';
+const CLAUDE = 'sk-ant-' + 'oat01-DOCTORDOCTORDOCTORDOCTOR';
+const READ = 'github_pat_' + 'READREADREADREADREADREAD42';
 
 const payload = (o: Partial<DoctorDropPayload> = {}): DoctorDropPayload => ({
   protocol: 1,

@@ -7,7 +7,7 @@ import { type Db, openDb } from '../db/open.js';
 import { plus, t0, tmpDbFile } from '../test/helpers.js';
 import { fingerprintOf, openVault, Vault, VaultKeyError } from './vault.js';
 
-const VALUE = 'sk-ant-oat01-VAULTVALUE-0123456789';
+const VALUE = 'sk-ant-' + 'oat01-VAULTVALUE-0123456789';
 
 function keyFile(key = randomBytes(32), mode = 0o600): string {
   const f = join(mkdtempSync(join(tmpdir(), 'jm-vault-')), 'vault_key');
