@@ -1,5 +1,4 @@
 import { readFileSync } from 'node:fs';
-import { statfs } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { EGRESS_PROXY_ALIAS, type ServiceSpec } from '@jumpmaster/protocol';
 import Docker from 'dockerode';
@@ -115,6 +114,12 @@ const INIT_PIDS = 64;
  * FOWNER), then gives it to the agent. Only CHOWN is needed for that.
  */
 const INIT_SCRIPT = `chown 0:0 ${REPO_MOUNT} && chmod 0700 ${REPO_MOUNT} && chown 10001:10001 ${REPO_MOUNT}`;
+const AGENT_USER = '10001:10001';
+/**
+ * Free blocks for an unprivileged user and their size, on the volume's filesystem; then, as the
+ * agent, a write and a removal on the mount point (only `writable` when both worked).
+ */
+const PROBE_SCRIPT = `stat -f -c '%a %S' ${REPO_MOUNT} && touch ${REPO_MOUNT}/.jm-selfcheck && rm ${REPO_MOUNT}/.jm-selfcheck && echo writable`;
 
 const statusOf = (e: unknown): number | undefined => (e as { statusCode?: number }).statusCode;
 
@@ -268,11 +273,54 @@ export class DockerDriver implements ContainerDriver {
     throw new Error(`container not removed: ${name}`);
   }
 
-  async freeBytes(): Promise<number> {
-    const info = (await this.docker.info()) as { DockerRootDir?: string };
-    if (!info.DockerRootDir) throw new Error('docker info reports no DockerRootDir');
-    const s = await statfs(info.DockerRootDir);
-    return s.bavail * s.bsize;
+  async probeVolume(o: Parameters<ContainerDriver['probeVolume']>[0]): Promise<{
+    freeBytes: number;
+    writable: boolean;
+  }> {
+    const container = await this.docker.createContainer({
+      Image: o.image,
+      name: o.name,
+      Labels: o.labels,
+      User: AGENT_USER,
+      // One raw stream: what the script prints, with no multiplexing headers to strip.
+      Tty: true,
+      Entrypoint: ['/bin/sh', '-c', PROBE_SCRIPT],
+      HostConfig: {
+        NetworkMode: 'none',
+        Privileged: false,
+        CapDrop: ['ALL'],
+        SecurityOpt: ['no-new-privileges'],
+        ReadonlyRootfs: true,
+        PidsLimit: INIT_PIDS,
+        Ulimits: [{ Name: 'core', Soft: 0, Hard: 0 }],
+        ...volumeMounts({ volume: o.volume, target: REPO_MOUNT }),
+      },
+    });
+    try {
+      const waited = (container.wait({ condition: 'next-exit' }) as Promise<unknown>).then(
+        () => 'exited' as const,
+        () => 'exited' as const,
+      );
+      await container.start();
+      let timer: NodeJS.Timeout | undefined;
+      const r = await Promise.race([
+        waited,
+        new Promise<'timeout'>((res) => {
+          timer = setTimeout(() => res('timeout'), INIT_TIMEOUT_MS);
+        }),
+      ]).finally(() => clearTimeout(timer));
+      if (r === 'timeout') throw new Error(`volume probe ${o.name} timed out`);
+      const out = String(await container.logs({ stdout: true, stderr: true, follow: false }));
+      const [first, ...rest] = out.split(/\r?\n/).map((l) => l.trim());
+      const m = /^(\d+) (\d+)$/.exec(first ?? '');
+      if (!m) throw new Error(`volume probe ${o.name} could not read the free space`);
+      return {
+        freeBytes: Number(m[1]) * Number(m[2]),
+        writable: rest.includes('writable'),
+      };
+    } finally {
+      await this.removeAndWait(o.name, REMOVE_TIMEOUT_MS);
+    }
   }
 
   async listByLabel(key: string, value: string): Promise<string[]> {

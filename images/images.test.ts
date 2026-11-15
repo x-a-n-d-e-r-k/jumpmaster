@@ -454,6 +454,8 @@ describe('image verification in the stick image', () => {
     expect(env).toMatch(/\bJM_IMAGE_POLICY=signed\b/);
     expect(env).toMatch(/\bJM_EGRESS_IMAGE=\$\{EGRESS_IMAGE\}/);
     expect(final.some((i) => i.op === 'ARG' && i.args === 'EGRESS_IMAGE')).toBe(true);
+    expect(env).toMatch(/\bJM_TROOPER_IMAGE=\$\{TROOPER_IMAGE\}/);
+    expect(final.some((i) => i.op === 'ARG' && i.args === 'TROOPER_IMAGE')).toBe(true);
     // The setuid sweep runs after cosign is in place.
     const sweep = final.findIndex((i) => i.op === 'RUN' && SETUID_SWEEP.test(i.args));
     const copy = final.findIndex(

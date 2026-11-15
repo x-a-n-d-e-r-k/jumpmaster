@@ -24,6 +24,8 @@ const PUSH_BACKOFF_BASE_MS = 15_000;
 export const PUSH_LOOP_MS = 15_000;
 /** Push containers one stick runs at once. They hold no lease slot. */
 export const MAX_CONCURRENT_PUSHES = 2;
+/** At this many pending pushes the stick leases with `noPush`: no pushing role until one clears. */
+export const MAX_PENDING_PUSHES = 8;
 /** Push containers that exit without a result line before the push is given up as failed. */
 export const NO_RESULT_RETRIES = 3;
 /** Every trooper image from the push-container release carries it; older ones can't push. */
@@ -52,7 +54,8 @@ export function backoffMs(attempts: number): number {
 }
 
 const pushNetwork = (dropId: string, epoch: number) => `jm-push-${dropId}-${epoch}`;
-const pushContainer = (dropId: string, epoch: number) => `jumpmaster-push-${dropId}-${epoch}`;
+export const pushContainer = (dropId: string, epoch: number) =>
+  `jumpmaster-push-${dropId}-${epoch}`;
 
 /**
  * The pending pushes this stick holds, by drop. Only a path that has confirmed the agent

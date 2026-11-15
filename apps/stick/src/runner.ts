@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   ARTIFACT_PREFIX,
   ArtifactChunkSchema,
@@ -18,23 +18,28 @@ import {
   TrooperEventSchema,
 } from '@jumpmaster/protocol';
 import type { Ack, DropClient } from './client.js';
-import type { ContainerDriver, DropNet } from './driver.js';
+import type { ContainerDriver, DropNet, VolumeInfo } from './driver.js';
 import { type EgressSession, egressImage, startEgress, trooperEgressRefusal } from './egress.js';
 import { pullImage } from './pull.js';
 import {
   type PendingPushes,
   PUSH_BACKOFF_MAX_MS,
+  pushContainer,
   TROOPER_PUSH_LABEL,
   TROOPER_PUSH_VERSION,
 } from './push.js';
 import { dropSubnetPool } from './subnets.js';
 import { digestOf, type ImageTrust, verifyImage } from './verify.js';
-import { prepareVolume, REMOVE_TIMEOUT_MS, REPO_MOUNT } from './volumes.js';
+import { prepareVolume, REMOVE_TIMEOUT_MS, REPO_MOUNT, VOLUME_LABEL } from './volumes.js';
 
 /** Services a drop network holds under egress: `.8` to `.14` of its /28. */
 const MAX_EGRESS_SERVICES = 6;
 
-export const TROOPER_IMAGE = process.env.JM_TROOPER_IMAGE ?? 'jumpmaster-trooper:dev';
+/**
+ * The stick's own trooper image: it runs the volume init, self-check and push containers, never a
+ * drop's agent. The release stick image bakes it by digest; an empty value is the dev default.
+ */
+export const TROOPER_IMAGE = process.env.JM_TROOPER_IMAGE || 'jumpmaster-trooper:dev';
 const STOP_GRACE_MS = 30_000;
 const MAX_BATCH = 50;
 /** Keeps an events POST far below the server's 1 MB body limit (each event is ≤ 64 KB). */
@@ -59,19 +64,176 @@ export function allowedImages(env: NodeJS.ProcessEnv): Set<string> {
 /**
  * Force-removes trooper containers this stick left behind (e.g. it crashed mid-drop), so a
  * re-leased drop never runs alongside a still-live agent. Other sticks' containers are untouched.
+ * Each removal is confirmed (`removeAndWait`); `unconfirmed` are those the engine never showed
+ * gone, so no pending push may be rediscovered yet (Ruling 14). Volumes are never removed here.
  */
-export async function reapOrphans(driver: ContainerDriver, stickId: string): Promise<string[]> {
+export async function reapOrphans(
+  driver: ContainerDriver,
+  stickId: string,
+): Promise<{ removed: string[]; unconfirmed: string[] }> {
   const removed: string[] = [];
+  const unconfirmed: string[] = [];
   for (const id of await driver.listByLabel(STICK_LABEL, stickId)) {
+    let ours = false;
     try {
       await driver.remove(id);
-      removed.push(id);
+      ours = true;
     } catch {
-      // already gone (AutoRemove) or racing another cleanup
+      // already gone (AutoRemove) or racing another cleanup: the confirmation below decides
+    }
+    try {
+      await driver.removeAndWait(id, REMOVE_TIMEOUT_MS);
+      if (ours) removed.push(id);
+    } catch {
+      unconfirmed.push(id);
     }
   }
   await driver.removeNetworksByLabel(STICK_LABEL, stickId).catch(() => 0);
-  return removed;
+  return { removed, unconfirmed };
+}
+
+/** Marks the self-check's own short-lived volume (never a drop's). */
+export const SELFCHECK_LABEL = 'jumpmaster.selfcheck';
+
+/**
+ * The latest volume self-check. `freeBytes` is null when it couldn't be measured, which counts as
+ * below the floor.
+ */
+export type VolumeHealth = { selfCheck: boolean; freeBytes: number | null };
+
+/**
+ * The volume self-check, at startup and in every sweep (Ruling 18): the trooper image carries
+ * the push label, a fresh volume takes the init container, and the agent can write to it. The
+ * free space is measured from inside a container on that volume, so it is the engine's volume
+ * filesystem wherever the stick itself runs. Never throws; the volume is removed after.
+ */
+export async function volumeSelfCheck(
+  driver: ContainerDriver,
+  image: string,
+  stickId: string,
+): Promise<VolumeHealth> {
+  const name = `jm-selfcheck-${stickId}-${randomBytes(4).toString('hex')}`;
+  const labels = { [STICK_LABEL]: stickId, [SELFCHECK_LABEL]: '1' };
+  try {
+    const pushLabel = await driver
+      .imageLabels(image)
+      .then((l) => l[TROOPER_PUSH_LABEL] === TROOPER_PUSH_VERSION)
+      .catch(() => false);
+    await driver.createVolume(name, labels);
+    try {
+      const init = await driver
+        .initVolume({ name: `${name}-init`, image, volume: name, labels })
+        .catch(() => -1);
+      const probe = await driver
+        .probeVolume({ name: `${name}-probe`, image, volume: name, labels })
+        .catch(() => undefined);
+      return {
+        selfCheck: pushLabel && init === 0 && probe?.writable === true,
+        freeBytes: probe?.freeBytes ?? null,
+      };
+    } finally {
+      // A leaked self-check volume is the sweep's to remove.
+      await driver.removeVolume(name).catch(() => {});
+    }
+  } catch {
+    return { selfCheck: false, freeBytes: null };
+  }
+}
+
+/**
+ * One drop volume no live drop or pending push holds: once both containers that could hold it
+ * (the agent's and the push container) are confirmed gone, the server decides. `salvage` ok: it
+ * joins `PendingPushes`; refused: it is removed; no answer: it stays for the next sweep.
+ */
+async function reconcileVolume(
+  driver: ContainerDriver,
+  client: Pick<DropClient, 'salvage'>,
+  pending: PendingPushes,
+  v: VolumeInfo,
+  log: (line: string) => void,
+): Promise<void> {
+  const dropId = v.labels['jumpmaster.drop'];
+  const epoch = Number(v.labels['jumpmaster.epoch']);
+  const say = (what: string, extra: Record<string, unknown> = {}) =>
+    log(JSON.stringify({ event: 'volume', dropId, epoch, volume: v.name, what, ...extra }));
+  if (!dropId || !Number.isInteger(epoch)) return;
+  try {
+    await driver.removeAndWait(agentName(dropId, epoch), REMOVE_TIMEOUT_MS);
+    await driver.removeAndWait(pushContainer(dropId, epoch), REMOVE_TIMEOUT_MS);
+  } catch (e) {
+    say('container not removed: volume kept', { error: message(e) });
+    return;
+  }
+  let answer: 'ok' | 'refused';
+  try {
+    answer = await client.salvage(dropId, epoch);
+  } catch (e) {
+    say('salvage unanswered: volume kept', { error: redactTokenShapes(message(e)) });
+    return;
+  }
+  if (answer === 'ok') {
+    const held = pending.get(dropId);
+    if (held && held.volume !== v.name) {
+      say('another volume holds this drop: volume kept');
+      return;
+    }
+    pending.add(dropId, { epoch, volume: v.name });
+    say('rediscovered: push pending');
+    return;
+  }
+  await driver.removeVolume(v.name).then(
+    () => say('salvage refused: volume removed'),
+    (e: unknown) => say('volume not removed', { error: message(e) }),
+  );
+}
+
+/** This stick's drop volumes (not the self-check's), as the engine lists them. */
+async function dropVolumes(driver: ContainerDriver, stickId: string): Promise<VolumeInfo[]> {
+  return (await driver.listVolumesByLabel(STICK_LABEL, stickId)).filter(
+    (v) => v.labels[VOLUME_LABEL] === '1',
+  );
+}
+
+/**
+ * At startup, after `reapOrphans` has confirmed every container gone and before the first lease:
+ * every drop volume of this stick is asked about (`salvage`), so a push the stick was holding (or
+ * a volume it kept for want of an answer) is not lost with the process.
+ */
+export async function rediscoverPending(
+  driver: ContainerDriver,
+  client: Pick<DropClient, 'salvage'>,
+  stickId: string,
+  pending: PendingPushes,
+  log: (line: string) => void = (line) => console.log(line),
+): Promise<void> {
+  for (const v of await dropVolumes(driver, stickId))
+    await reconcileVolume(driver, client, pending, v, log);
+}
+
+/**
+ * The 10-minute sweep's volumes. A volume a live drop (`dropId:epoch`) or a pending push holds
+ * stays. Any other drop volume is reconciled as at startup (refused: removed). A leaked
+ * self-check volume is removed.
+ */
+export async function sweepVolumes(
+  driver: ContainerDriver,
+  client: Pick<DropClient, 'salvage'>,
+  stickId: string,
+  pending: PendingPushes,
+  live: ReadonlySet<string>,
+  log: (line: string) => void = (line) => console.log(line),
+): Promise<void> {
+  for (const v of await driver.listVolumesByLabel(STICK_LABEL, stickId)) {
+    if (v.labels[SELFCHECK_LABEL] === '1') {
+      await driver.removeVolume(v.name).catch(() => {});
+      continue;
+    }
+    if (v.labels[VOLUME_LABEL] !== '1') continue;
+    const dropId = v.labels['jumpmaster.drop'] ?? '';
+    if (live.has(`${dropId}:${v.labels['jumpmaster.epoch']}`)) continue;
+    if (pending.get(dropId)?.volume === v.name) continue;
+    await reconcileVolume(driver, client, pending, v, log);
+  }
 }
 
 /**

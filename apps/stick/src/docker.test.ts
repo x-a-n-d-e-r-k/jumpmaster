@@ -863,24 +863,104 @@ test('removeAndWait enforces its deadline when the engine hangs', async () => {
   expect(Date.now() - t0).toBeLessThan(1000);
 });
 
-test('freeBytes is the free space of the engine root directory', async () => {
-  const { statfs } = await import('node:fs/promises');
-  const { tmpdir } = await import('node:os');
-  const dir = tmpdir();
+/** A fake engine for the volume probe: its container prints `out` and exits `exitCode`. */
+function probeEngine(out: string, exitCode = 0) {
+  const created: Record<string, unknown>[] = [];
+  const calls: string[] = [];
   const docker = {
-    async info() {
-      return { DockerRootDir: dir };
+    async createContainer(c: Record<string, unknown>) {
+      created.push(c);
+      calls.push('create');
+      return {
+        async wait() {
+          return { StatusCode: exitCode };
+        },
+        async start() {
+          calls.push('start');
+        },
+        async logs(o: Record<string, unknown>) {
+          calls.push(`logs ${JSON.stringify(o)}`);
+          return Buffer.from(out);
+        },
+      };
+    },
+    getContainer(name: string) {
+      return {
+        async remove() {
+          calls.push(`remove ${name}`);
+        },
+        async inspect() {
+          throw Object.assign(new Error('gone'), { statusCode: 404 });
+        },
+      };
     },
   };
-  const s = await statfs(dir);
-  const got = await new DockerDriver(docker as never).freeBytes();
-  expect(got).toBeGreaterThan(0);
-  // Same filesystem, read a moment apart: within 1 GiB.
-  expect(Math.abs(got - s.bavail * s.bsize)).toBeLessThan(2 ** 30);
-  const none = {
-    async info() {
-      return {};
-    },
+  return { docker, created, calls };
+}
+
+test('probeVolume measures free space on the volume from a locked-down, no-network container', async () => {
+  const e = probeEngine('1000 4096\r\nwritable\r\n');
+  const got = await new DockerDriver(e.docker as never, { removePollMs: 1 }).probeVolume({
+    name: 'jm-selfcheck-s1-0123abcd-probe',
+    image: 'trooper@x',
+    volume: 'jm-selfcheck-s1-0123abcd',
+    labels: { 'jumpmaster.stick': 's1' },
+  });
+  expect(got).toEqual({ freeBytes: 1000 * 4096, writable: true });
+  const c = e.created[0] as {
+    Image: string;
+    User: string;
+    Tty: boolean;
+    Entrypoint: string[];
+    HostConfig: Record<string, unknown>;
   };
-  await expect(new DockerDriver(none as never).freeBytes()).rejects.toThrow(/DockerRootDir/);
+  expect(c.Image).toBe('trooper@x');
+  // As the agent, which owns the mount point after init: no capability is needed.
+  expect(c.User).toBe('10001:10001');
+  expect(c.Entrypoint.join(' ')).toContain("stat -f -c '%a %S' /home/agent/repo");
+  expect(c.HostConfig).toEqual({
+    NetworkMode: 'none',
+    Privileged: false,
+    CapDrop: ['ALL'],
+    SecurityOpt: ['no-new-privileges'],
+    ReadonlyRootfs: true,
+    PidsLimit: 64,
+    Ulimits: [{ Name: 'core', Soft: 0, Hard: 0 }],
+    Mounts: [
+      {
+        Type: 'volume',
+        Source: 'jm-selfcheck-s1-0123abcd',
+        Target: '/home/agent/repo',
+        ReadOnly: false,
+        VolumeOptions: { NoCopy: true },
+      },
+    ],
+  });
+  // Removed (and confirmed gone) before it returns.
+  expect(e.calls.at(-1)).toBe('remove jm-selfcheck-s1-0123abcd-probe');
+  // Free space without a writable volume: measured, but not writable.
+  const ro = probeEngine('5 512\n', 1);
+  expect(
+    await new DockerDriver(ro.docker as never, { removePollMs: 1 }).probeVolume({
+      name: 'p',
+      image: 'i',
+      volume: 'v',
+      labels: {},
+    }),
+  ).toEqual({ freeBytes: 2560, writable: false });
+});
+
+test('probeVolume throws when the free space cannot be read, and still removes its container', async () => {
+  for (const out of ['', 'stat: cannot read file system information\n', 'x y\n']) {
+    const e = probeEngine(out, 1);
+    await expect(
+      new DockerDriver(e.docker as never, { removePollMs: 1 }).probeVolume({
+        name: 'p',
+        image: 'i',
+        volume: 'v',
+        labels: {},
+      }),
+    ).rejects.toThrow(/free space/);
+    expect(e.calls.at(-1)).toBe('remove p');
+  }
 });

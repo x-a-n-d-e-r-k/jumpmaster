@@ -544,6 +544,81 @@ describe('startup under the signed policy', () => {
     expect(t).toEqual({ policy: 'allowlist', allowed: new Set(['a:1', 'b:2']) });
     expect(f.calls).toEqual([]);
   });
+
+  test('the base image is verified at startup', async () => {
+    const f = fakeCosign(() => {
+      throw new Error('must not run');
+    });
+    const pulled: string[] = [];
+    const driver = {
+      async imageExists() {
+        return false;
+      },
+      async pullImage(ref: string) {
+        pulled.push(ref);
+      },
+    };
+    const digest = `ghcr.io/o/jumpmaster-trooper@sha256:${'a'.repeat(64)}`;
+    // Allowed: pulled by digest (a tag is never pulled) and the trust is returned.
+    const t = await prepareImageTrust(
+      { JM_STATE_DIR: fresh(), JM_ALLOWED_IMAGES: `${digest},b:2` },
+      { cosign: f.cosign, log: () => {}, base: { image: digest, driver } },
+    );
+    expect(t.policy).toBe('allowlist');
+    expect(pulled).toEqual([digest]);
+    // Not allowed under the policy: the stick refuses to start, and nothing is pulled.
+    await expect(
+      prepareImageTrust(
+        { JM_STATE_DIR: fresh(), JM_ALLOWED_IMAGES: 'b:2' },
+        { cosign: f.cosign, log: () => {}, base: { image: digest, driver } },
+      ),
+    ).rejects.toThrow(`base image ${digest}: image not allowed: ${digest}`);
+    expect(pulled).toEqual([digest]);
+    // A failed pull refuses startup too.
+    await expect(
+      prepareImageTrust(
+        { JM_STATE_DIR: fresh(), JM_ALLOWED_IMAGES: digest },
+        {
+          cosign: f.cosign,
+          log: () => {},
+          base: {
+            image: digest,
+            driver: {
+              ...driver,
+              async pullImage() {
+                throw new Error('manifest unknown');
+              },
+            },
+          },
+        },
+      ),
+    ).rejects.toThrow(/base image .*image pull failed: .*manifest unknown/);
+    expect(f.calls).toEqual([]);
+  });
+
+  test('under signed the base image goes through the same verification as a drop image', async () => {
+    const driver = {
+      async imageExists() {
+        return true;
+      },
+      async pullImage() {},
+    };
+    const digest = `ghcr.io/o/jumpmaster-trooper@sha256:${'a'.repeat(64)}`;
+    const cosign = cosignVersion(COSIGN_VERSION).cosign;
+    const t = await prepareImageTrust(
+      { ...base(fresh()), JM_ALLOWED_IMAGES: digest },
+      { cosign, release, log: () => {}, base: { image: digest, driver } },
+    );
+    expect(t.policy).toBe('signed');
+    await expect(
+      prepareImageTrust(base(fresh()), {
+        cosign,
+        release,
+        log: () => {},
+        base: { image: 'jumpmaster-trooper:dev', driver },
+      }),
+    ).rejects.toThrow(/base image jumpmaster-trooper:dev: image not verified: .*a tag reference/);
+  });
 });
 
 describe('execCosign', () => {

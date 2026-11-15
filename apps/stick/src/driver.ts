@@ -101,8 +101,19 @@ export interface ContainerDriver {
    * `container not removed` when it still exists (or can't be checked) after `timeoutMs`.
    */
   removeAndWait(name: string, timeoutMs: number): Promise<void>;
-  /** Free bytes on the filesystem of the engine's root directory (`DockerRootDir`). */
-  freeBytes(): Promise<number>;
+  /**
+   * The volume self-check's probe: a container from `image` with the init container's lockdown
+   * (no network, no capability at all, read-only root, the volume its only mount), run as the
+   * agent. It measures the free space of the volume's filesystem (where the engine keeps every
+   * volume) and whether the agent can write there. Removed (confirmed) before this returns.
+   * Throws when the free space can't be read.
+   */
+  probeVolume(o: {
+    name: string;
+    image: string;
+    volume: string;
+    labels: Record<string, string>;
+  }): Promise<{ freeBytes: number; writable: boolean }>;
   /**
    * Starts sidecars and returns the network name. Without `net`, on a new internal network; with
    * `net` (egress), on that drop network with the dead DNS, like the trooper.

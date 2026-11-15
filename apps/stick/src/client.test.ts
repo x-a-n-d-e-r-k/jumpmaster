@@ -81,9 +81,12 @@ describe('capabilities and lease logging', () => {
       }),
     );
     await client.lease(1);
+    // Each lease carries the capabilities of the latest health check, and noPush at the cap.
+    await client.lease(2, { capabilities: ['push-v1'], noPush: true });
     expect(bodies).toEqual([
       { joinToken: 'join', name: 'n', slots: 2, ...info },
       { freeSlots: 1, ...info },
+      { freeSlots: 2, ...info, capabilities: ['push-v1'], noPush: true },
     ]);
   });
 

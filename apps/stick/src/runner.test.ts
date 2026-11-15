@@ -18,8 +18,11 @@ import {
   allowedImages,
   LOST_SERVER_GRACE_MS,
   reapOrphans,
+  rediscoverPending,
   runDrop,
   sweepDropNetworks,
+  sweepVolumes,
+  volumeSelfCheck,
 } from './runner.js';
 import { type Cosign, type ImageTrust, releaseSigner, VerifyCache } from './verify.js';
 
@@ -230,8 +233,8 @@ function fakeDriver(
         order.push(`removeAndWait ${name}`);
         if (opts.removeError) throw new Error('container not removed');
       },
-      async freeBytes() {
-        return 100 * 2 ** 30;
+      async probeVolume() {
+        return { freeBytes: 100 * 2 ** 30, writable: true };
       },
     } satisfies ContainerDriver,
   };
@@ -846,7 +849,10 @@ describe('reapOrphans', () => {
         removed.push(id);
       },
     };
-    expect(await reapOrphans(driver, 's1')).toEqual(['mine-1', 'mine-2']);
+    expect(await reapOrphans(driver, 's1')).toEqual({
+      removed: ['mine-1', 'mine-2'],
+      unconfirmed: [],
+    });
     expect(queried).toEqual([['jumpmaster.stick', 's1']]);
     expect(removed).toEqual(['mine-1', 'mine-2']);
   });
@@ -863,8 +869,251 @@ describe('reapOrphans', () => {
         removed.push(id);
       },
     };
-    expect(await reapOrphans(driver, 's1')).toEqual(['b']);
+    expect(await reapOrphans(driver, 's1')).toEqual({ removed: ['b'], unconfirmed: [] });
     expect(removed).toEqual(['b']);
+  });
+
+  test('each removal is confirmed; one the engine cannot confirm is reported', async () => {
+    const confirmed: string[] = [];
+    const driver: ContainerDriver = {
+      ...fakeDriver([]).driver,
+      async listByLabel() {
+        return ['a', 'b'];
+      },
+      async removeAndWait(name) {
+        if (name === 'a') throw new Error('container not removed');
+        confirmed.push(name);
+      },
+    };
+    expect(await reapOrphans(driver, 's1')).toEqual({ removed: ['b'], unconfirmed: ['a'] });
+    expect(confirmed).toEqual(['b']);
+  });
+
+  test('reapOrphans never removes volumes', async () => {
+    const d = fakeDriver([]);
+    const driver: ContainerDriver = {
+      ...d.driver,
+      async listByLabel() {
+        return ['a'];
+      },
+    };
+    await reapOrphans(driver, 's1');
+    expect(d.order.filter((o) => o.startsWith('removeVolume'))).toEqual([]);
+  });
+});
+
+/** An engine holding volumes (by name, with labels), for the startup and sweep checks. */
+function volumeWorld(
+  vols: { name: string; labels: Record<string, string> }[],
+  o: {
+    probe?: { freeBytes: number; writable: boolean } | Error;
+    initExit?: number;
+    labels?: Record<string, string>;
+    unremovable?: string[];
+  } = {},
+) {
+  const d = fakeDriver([], o.labels ? { imageLabels: o.labels } : {});
+  const volumes = new Map(vols.map((v) => [v.name, v.labels]));
+  const log: string[] = [];
+  const driver: ContainerDriver = {
+    ...d.driver,
+    async listVolumesByLabel(key, value) {
+      return [...volumes]
+        .filter(([, l]) => l[key] === value)
+        .map(([name, labels]) => ({ name, labels }));
+    },
+    async createVolume(name, labels) {
+      log.push(`createVolume ${name.replace(/-[0-9a-f]{8}$/, '')}`);
+      volumes.set(name, labels);
+    },
+    async removeVolume(name) {
+      log.push(`removeVolume ${name.replace(/-[0-9a-f]{8}$/, '')}`);
+      volumes.delete(name);
+    },
+    async initVolume(i) {
+      log.push(`init ${i.image} ${i.name.replace(/-[0-9a-f]{8}-init$/, '-init')}`);
+      return o.initExit ?? 0;
+    },
+    async probeVolume(p) {
+      log.push(`probe ${p.image} ${p.name.replace(/-[0-9a-f]{8}-probe$/, '-probe')}`);
+      if (o.probe instanceof Error) throw o.probe;
+      return o.probe ?? { freeBytes: 100 * 2 ** 30, writable: true };
+    },
+    async removeAndWait(name) {
+      log.push(`removeAndWait ${name}`);
+      if (o.unremovable?.includes(name)) throw new Error('container not removed');
+    },
+  };
+  return { driver, volumes, log };
+}
+
+const dropVolume = (stick: string, drop: string, epoch: number) => ({
+  name: `jm-drop-${drop}-${epoch}-0123abcd`,
+  labels: {
+    'jumpmaster.stick': stick,
+    'jumpmaster.drop': drop,
+    'jumpmaster.epoch': String(epoch),
+    'jumpmaster.volume': '1',
+  },
+});
+
+function salvager(replies: Record<string, 'ok' | 'refused' | Error>) {
+  const asked: string[] = [];
+  return {
+    asked,
+    async salvage(dropId: string, epoch: number): Promise<'ok' | 'refused'> {
+      asked.push(`${dropId}:${epoch}`);
+      const r = replies[dropId] ?? 'refused';
+      if (r instanceof Error) throw r;
+      return r;
+    },
+  };
+}
+
+describe('volume self-check', () => {
+  test('a passing self-check measures free space on a fresh volume, then removes it', async () => {
+    const w = volumeWorld([], { probe: { freeBytes: 42 * 2 ** 30, writable: true } });
+    expect(await volumeSelfCheck(w.driver, 'trooper@x', 's1')).toEqual({
+      selfCheck: true,
+      freeBytes: 42 * 2 ** 30,
+    });
+    expect(w.log).toEqual([
+      'createVolume jm-selfcheck-s1',
+      'init trooper@x jm-selfcheck-s1-init',
+      'probe trooper@x jm-selfcheck-s1-probe',
+      'removeVolume jm-selfcheck-s1',
+    ]);
+    expect(w.volumes.size).toBe(0);
+  });
+
+  test('is withdrawn when a later sweep fails', async () => {
+    // A failed init, an unwritable volume or an image without the push label: no pass.
+    for (const o of [
+      { initExit: 1 },
+      { probe: { freeBytes: 100 * 2 ** 30, writable: false } },
+      { labels: {} },
+    ]) {
+      const w = volumeWorld([], o);
+      const h = await volumeSelfCheck(w.driver, 'trooper@x', 's1');
+      expect(h.selfCheck, JSON.stringify(o)).toBe(false);
+      expect(w.volumes.size).toBe(0);
+    }
+    // A measurement that fails is below the floor (null), and never throws.
+    const broken = volumeWorld([], { probe: new Error('no stat') });
+    expect(await volumeSelfCheck(broken.driver, 'trooper@x', 's1')).toEqual({
+      selfCheck: false,
+      freeBytes: null,
+    });
+    const dead: ContainerDriver = {
+      ...broken.driver,
+      async createVolume() {
+        throw new Error('engine down');
+      },
+    };
+    expect(await volumeSelfCheck(dead, 'trooper@x', 's1')).toEqual({
+      selfCheck: false,
+      freeBytes: null,
+    });
+  });
+});
+
+describe('rediscovery', () => {
+  test('rediscovers a pending push whose push container died with the stick', async () => {
+    // The stick died mid-push: its push container was reaped, its volume is still there.
+    const w = volumeWorld([dropVolume('s1', 'd7', 4), dropVolume('s2', 'other', 1)]);
+    const client = salvager({ d7: 'ok' });
+    const pending = new PendingPushes();
+    await rediscoverPending(w.driver, client, 's1', pending, () => {});
+    expect(client.asked).toEqual(['d7:4']);
+    expect(pending.get('d7')).toMatchObject({
+      dropId: 'd7',
+      epoch: 4,
+      volume: 'jm-drop-d7-4-0123abcd',
+      attempts: 0,
+    });
+    // No entry before both containers that could hold the volume are confirmed gone.
+    expect(w.log).toEqual([
+      'removeAndWait jumpmaster-drop-d7-4',
+      'removeAndWait jumpmaster-push-d7-4',
+    ]);
+    expect(w.volumes.has('jm-drop-d7-4-0123abcd')).toBe(true);
+  });
+
+  test('a refused rediscovery removes the volume', async () => {
+    const w = volumeWorld([dropVolume('s1', 'd7', 4)]);
+    const pending = new PendingPushes();
+    await rediscoverPending(w.driver, salvager({ d7: 'refused' }), 's1', pending, () => {});
+    expect(pending.size()).toBe(0);
+    expect(w.volumes.size).toBe(0);
+    expect(w.log.at(-1)).toBe('removeVolume jm-drop-d7-4');
+  });
+
+  test('an unanswered salvage or an unconfirmed container keeps the volume, with no entry', async () => {
+    const w = volumeWorld([dropVolume('s1', 'd7', 4), dropVolume('s1', 'd8', 2)], {
+      unremovable: ['jumpmaster-drop-d8-2'],
+    });
+    const client = salvager({ d7: new Error('server down'), d8: 'ok' });
+    const pending = new PendingPushes();
+    await rediscoverPending(w.driver, client, 's1', pending, () => {});
+    expect(pending.size()).toBe(0);
+    // d8's agent container was never confirmed gone: the server is not even asked.
+    expect(client.asked).toEqual(['d7:4']);
+    expect(w.volumes.size).toBe(2);
+  });
+});
+
+describe('the sweep', () => {
+  test('the sweep keeps live and pending volumes and networks', async () => {
+    const w = volumeWorld([
+      dropVolume('s1', 'live', 1),
+      dropVolume('s1', 'queued', 3),
+      dropVolume('s1', 'stray', 2),
+      dropVolume('s2', 'theirs', 1),
+      {
+        name: 'jm-selfcheck-s1-0123abcd',
+        labels: { 'jumpmaster.stick': 's1', 'jumpmaster.selfcheck': '1' },
+      },
+    ]);
+    const pending = new PendingPushes();
+    pending.add('queued', { epoch: 3, volume: 'jm-drop-queued-3-0123abcd' });
+    const client = salvager({});
+    await sweepVolumes(w.driver, client, 's1', pending, new Set(['live:1']), () => {});
+    expect([...w.volumes.keys()].sort()).toEqual([
+      'jm-drop-live-1-0123abcd',
+      'jm-drop-queued-3-0123abcd',
+      'jm-drop-theirs-1-0123abcd',
+    ]);
+    // Only the stray volume was asked about (and refused); a leaked self-check volume just goes.
+    expect(client.asked).toEqual(['stray:2']);
+    // Networks: a live drop's and a pending push's stay, the rest go.
+    const nets = fakeDriver([], {
+      networks: [
+        { name: 'jm-drop-live-1', labels: { 'jumpmaster.drop': 'live', 'jumpmaster.epoch': '1' } },
+        {
+          name: 'jm-push-queued-3',
+          labels: { 'jumpmaster.drop': 'queued', 'jumpmaster.epoch': '3' },
+        },
+        {
+          name: 'jm-push-stray-2',
+          labels: { 'jumpmaster.drop': 'stray', 'jumpmaster.epoch': '2' },
+        },
+      ],
+    });
+    const n = await sweepDropNetworks(
+      nets.driver,
+      's1',
+      new Set(['jm-drop-live-1', ...pending.networks()]),
+    );
+    expect(n).toBe(1);
+    expect(nets.removedNetworks).toEqual(['jm-push-stray-2']);
+  });
+
+  test('a stray volume the server salvages joins the pending pushes', async () => {
+    const w = volumeWorld([dropVolume('s1', 'kept', 5)]);
+    const pending = new PendingPushes();
+    await sweepVolumes(w.driver, salvager({ kept: 'ok' }), 's1', pending, new Set(), () => {});
+    expect(pending.get('kept')?.volume).toBe('jm-drop-kept-5-0123abcd');
+    expect(w.volumes.size).toBe(1);
   });
 });
 

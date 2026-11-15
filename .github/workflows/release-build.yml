@@ -282,7 +282,8 @@ jobs:
           provenance: mode=max
           sbom: true
           outputs: type=image,name=${{ needs.target.outputs.registry }}/jumpmaster-server,push-by-digest=true,name-canonical=true,push=true
-      # The stick trusts this repository's release workflow and runs this release's egress proxy.
+      # The stick trusts this repository's release workflow and runs this release's egress proxy
+      # and trooper (its own init, self-check and push containers).
       - id: stick
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -294,6 +295,7 @@ jobs:
             RELEASE_REPOSITORY=${{ github.repository }}
             RELEASE_VERSION=${{ needs.target.outputs.version }}
             EGRESS_IMAGE=${{ needs.target.outputs.registry }}/jumpmaster-egress@${{ needs.troopers-index.outputs.egress }}
+            TROOPER_IMAGE=${{ needs.target.outputs.registry }}/jumpmaster-trooper@${{ needs.troopers-index.outputs.trooper }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           provenance: mode=max

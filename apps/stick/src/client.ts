@@ -163,10 +163,14 @@ export class StickClient implements DropClient, PushClient {
 
   /**
    * Long-polls. `drop` is null when the server has nothing (204). `skipped` names zones with work
-   * waiting that this stick can't run, and what it lacks for each.
+   * waiting that this stick can't run, and what it lacks for each. `terms` override what the
+   * stick advertised at startup: the capabilities of its latest checks, and `noPush` at the cap.
    */
-  async lease(freeSlots: number): Promise<{ drop: DropPayload | null; skipped: LeaseSkip[] }> {
-    const res = await this.req('/api/sticks/lease', { freeSlots, ...this.info });
+  async lease(
+    freeSlots: number,
+    terms: { capabilities?: string[]; noPush?: boolean } = {},
+  ): Promise<{ drop: DropPayload | null; skipped: LeaseSkip[] }> {
+    const res = await this.req('/api/sticks/lease', { freeSlots, ...this.info, ...terms });
     this.features = featuresOf(res);
     const skipped = skippedOf(res);
     if (res.status === 204) return { drop: null, skipped };

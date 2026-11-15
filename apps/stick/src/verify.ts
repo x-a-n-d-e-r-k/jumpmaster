@@ -17,6 +17,7 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { type ImagePolicy, ImagePolicySchema } from '@jumpmaster/protocol';
+import { type PullDeps, pullImage } from './pull.js';
 import { allowedImages } from './runner.js';
 import { stateDir } from './state.js';
 
@@ -330,6 +331,35 @@ const isDigestRef = (ref: string) => digestOf(ref) !== null;
  * repository built into the image, and is logged.
  */
 export async function prepareImageTrust(
+  env: NodeJS.ProcessEnv,
+  deps: {
+    cosign: Cosign;
+    release?: ReleaseInfo;
+    log: (line: string) => void;
+    /**
+     * The stick's own trooper image (`TROOPER_IMAGE`) and the engine to pull it into. It runs the
+     * init, self-check and push containers, so it is verified under the policy, like a drop's
+     * image, and pulled before the stick starts (Ruling 17); either failing refuses startup.
+     */
+    base?: { image: string; driver: PullDeps['driver'] };
+  },
+): Promise<ImageTrust> {
+  const trust = await buildTrust(env, deps);
+  if (deps.base) {
+    const { image, driver } = deps.base;
+    const v = await verifyImage(image, trust);
+    if (!v.ok) throw new Error(`base image ${image}: ${v.reason}`);
+    try {
+      await pullImage(image, { driver, log: deps.log });
+    } catch (e) {
+      throw new Error(`base image ${image}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    deps.log(JSON.stringify({ event: 'base-image', image, via: v.via }));
+  }
+  return trust;
+}
+
+async function buildTrust(
   env: NodeJS.ProcessEnv,
   deps: { cosign: Cosign; release?: ReleaseInfo; log: (line: string) => void },
 ): Promise<ImageTrust> {

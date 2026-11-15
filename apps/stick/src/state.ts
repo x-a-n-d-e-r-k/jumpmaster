@@ -8,8 +8,10 @@ import {
   type StickCapability,
   type StickInfo,
 } from '@jumpmaster/protocol';
-import { allowedImages } from './runner.js';
+import { MAX_PENDING_PUSHES } from './push.js';
+import { allowedImages, type VolumeHealth } from './runner.js';
 import type { ReleaseInfo } from './verify.js';
+import { VOLUME_FREE_FLOOR_BYTES } from './volumes.js';
 
 /** Where the stick keeps its enrollment (and, in the image, its verify state). */
 export const stateDir = (env: NodeJS.ProcessEnv): string =>
@@ -48,18 +50,44 @@ export function saveEnrollment(dir: string, data: Enrollment & { serverUrl: stri
 const DIGEST_REF = /@sha256:[0-9a-f]{64}$/;
 
 /**
- * The capabilities a stick advertises from what its startup proved: `egress-v1` when the egress
- * check passed, and `image-verify-v1` only under the signed policy (a stick that doesn't verify
- * signatures must never lease a drop from a zone that requires signed images).
+ * The capabilities a stick advertises from what its checks proved: `egress-v1` when the egress
+ * check passed, `image-verify-v1` only under the signed policy (a stick that doesn't verify
+ * signatures must never lease a drop from a zone that requires signed images), and `push-v1`
+ * while the latest volume self-check passed above the free floor.
  */
 export function advertisedCapabilities(o: {
   egress: boolean;
   policy: ImagePolicy;
+  push?: boolean;
 }): StickCapability[] {
   return [
     ...(o.egress ? (['egress-v1'] as const) : []),
     ...(o.policy === 'signed' ? (['image-verify-v1'] as const) : []),
+    ...(o.push ? (['push-v1'] as const) : []),
   ];
+}
+
+/** Whether the latest measurement (null: it failed) is at or above the free floor. */
+export const aboveFloor = (h: VolumeHealth): boolean =>
+  h.freeBytes !== null && h.freeBytes >= VOLUME_FREE_FLOOR_BYTES;
+
+/**
+ * What the next lease says, from the latest health check: null below the free floor (the stick
+ * doesn't lease at all), else its capabilities, with `noPush` at `MAX_PENDING_PUSHES`.
+ */
+export function leaseTerms(o: {
+  egress: boolean;
+  policy: ImagePolicy;
+  health: VolumeHealth;
+  pending: number;
+}): { capabilities: StickCapability[]; noPush?: true } | null {
+  if (!aboveFloor(o.health)) return null;
+  const capabilities = advertisedCapabilities({
+    egress: o.egress,
+    policy: o.policy,
+    push: o.health.selfCheck,
+  });
+  return o.pending >= MAX_PENDING_PUSHES ? { capabilities, noPush: true } : { capabilities };
 }
 
 /**
