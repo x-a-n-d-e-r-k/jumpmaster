@@ -313,14 +313,17 @@ describe('stack presets', () => {
     }
   });
 
-  test('the lazy-fetch e2e runs the exact hardened upload-pack offline as the agent', () => {
+  test('the lazy-fetch e2e drives the real stageFromAgent offline as the agent', () => {
     const e2e = read('images/trooper/e2e/lazy-fetch.sh');
-    const git = read('apps/trooper/src/git.ts');
-    const hardened = /HARDENED_UPLOAD_PACK =\s*'([^']+)'/.exec(git)?.[1];
-    expect(hardened).toBeTruthy();
-    expect(e2e).toContain(`HARDENED='${hardened}'`);
-    expect(e2e).toMatch(/--network none --user 10001:10001/);
+    expect(read('apps/trooper/src/git.ts')).toContain(
+      'GIT_NO_LAZY_FETCH=1 git -c core.fsmonitor=false',
+    );
+    expect(e2e).toContain('import { stageFromAgent, setWorkRoot } from "/opt/trooper/git.js"');
+    expect(e2e).toMatch(/--network none/);
+    expect(e2e).toMatch(/setpriv --reuid=10001 --regid=10001/);
+    expect(e2e).toContain('as = { uid: 10001, gid: 10001');
     expect(e2e).toContain('lazy fetching disabled');
+    expect(e2e).toContain('already refuses lazy fetch inside upload-pack');
     expect(read('.github/workflows/images.yml')).toContain('images/trooper/e2e/lazy-fetch.sh');
   });
 
