@@ -833,6 +833,21 @@ describe('GitHubForge', () => {
         expect(await fresh().getBranchRules('main')).toEqual({ kind: 'none' });
       });
 
+      test('unreachable, not none, when the rules read but the permission read is refused', async () => {
+        for (const status of [403, 404]) {
+          nock(api)
+            .get(rulesUrl)
+            .query(true)
+            .reply(200, [prRule(1)]);
+          mockRuleset(1, { enforcement: 'active', current_user_can_bypass: 'never' });
+          nock(api).get('/user').reply(200, { login: 'jm-bot' });
+          nock(api)
+            .get('/repos/o/r/collaborators/jm-bot/permission')
+            .reply(status, { message: 'Resource not accessible by personal access token' });
+          expect(await fresh().getBranchRules('main')).toEqual({ kind: 'unreachable' });
+        }
+      });
+
       test('flags unpinned checks and an admin bot', async () => {
         nock(api)
           .get(rulesUrl)

@@ -135,6 +135,8 @@ export type ReadProbe = {
 export type BranchRulesRead =
   | { kind: 'ok'; rules: BranchRules }
   | { kind: 'none' }
+  /** The rules read, but GitHub refused the token's collaborator-permission read (403 or 404). */
+  | { kind: 'unreachable' }
   | { kind: 'unavailable' };
 
 export type IssueFacts = { body: string; state: 'open' | 'closed'; labels: string[] };
@@ -798,7 +800,17 @@ export class GitHubForge implements Forge {
           }
         }
       }
-      const viewerIsAdmin = await this.viewerIsAdmin();
+      // A fine-grained token not granted on a public repository reads its rules but is refused
+      // here: that is a token without access to the repository, not a branch without a ruleset.
+      let viewerIsAdmin: boolean;
+      try {
+        viewerIsAdmin = await this.viewerIsAdmin();
+      } catch (err) {
+        const status = statusOf(err);
+        if (!isRateLimited(err) && (status === 403 || status === 404))
+          return { kind: 'unreachable' };
+        throw err;
+      }
       return {
         kind: 'ok',
         rules: {

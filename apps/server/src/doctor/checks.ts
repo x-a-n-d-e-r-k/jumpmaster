@@ -1185,6 +1185,21 @@ async function branchRulesCheck(zone: DropZoneConfig, r: ZoneReads): Promise<Doc
       fix: 'Add a branch ruleset and set requireBranchProtection: true.',
     };
   const rules = await r.rules();
+  // The rules read, but the token was refused the repository's permission read: say so, not "no
+  // ruleset" (whose fix would have the operator create a ruleset they already have).
+  const unreachable = (['author', 'reviewer'] as const).filter(
+    (who) => rules[who]?.kind === 'unreachable',
+  );
+  if (unreachable.length > 0) {
+    const tokens = unreachable.map((who) => `the ${who} token`).join(' and ');
+    const vars = unreachable.map((who) => TOKEN_VAR[who]).join(' and ');
+    return {
+      ...base,
+      status: 'fail',
+      summary: `${tokens} can't reach the repository ${zone.repo}: it reads the rules on ${branch}, but GitHub refuses its read of the account's permission on the repository, so the rules can't be checked`,
+      fix: `Add ${zone.repo} to the repository access of ${tokens} (${vars}): for a fine-grained token, edit it on GitHub (Settings → Developer settings → Fine-grained tokens) and choose Only select repositories with ${zone.repo} included, or All repositories.`,
+    };
+  }
   const problems = branchProtectionProblems(rules, zone);
   // GitHub offers rulesets on a private repository only on a paid plan.
   const access = await r.access.author();
