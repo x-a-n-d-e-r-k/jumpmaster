@@ -1,4 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { chmodSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { readSecretFile } from '@jumpmaster/protocol';
 import type { Db } from '../db/open.js';
 
@@ -210,6 +212,7 @@ export function openVault(
   keyFile: string | undefined,
   db: Db,
   dataDir = 'the data directory',
+  label = 'JM_VAULT_KEY_FILE',
 ): Vault | 'disabled' {
   if (!keyFile) {
     const n = vaultCount(db);
@@ -218,11 +221,38 @@ export function openVault(
       `the vault at ${dataDir} holds ${n} credentials but JM_VAULT_KEY_FILE is unset: the key and the data travel together`,
     );
   }
-  const text = readSecretFile(keyFile, 'JM_VAULT_KEY_FILE');
+  const text = readSecretFile(keyFile, label);
   const key = /^[A-Za-z0-9_-]+=*$/.test(text) ? Buffer.from(text, 'base64url') : Buffer.alloc(0);
   if (key.length !== VAULT_KEY_BYTES)
     throw new Error(
-      `JM_VAULT_KEY_FILE: ${keyFile} must hold 32 random bytes, base64url (as bootstrap and init write it)`,
+      `${label}: ${keyFile} must hold 32 random bytes, base64url (as bootstrap and init write it)`,
     );
   return new Vault(db, key);
+}
+
+/** The key file Settings → Credentials writes under the secrets directory (bootstrap's name too). */
+export const VAULT_KEY_FILE_NAME = 'vault_key';
+
+/**
+ * Writes a new key (32 random bytes, base64url) to `vault_key` under `secretsDir`, mode 0600, and
+ * returns its path. An existing file is never overwritten: it may be the key to data elsewhere.
+ * The error names the path, never a key.
+ */
+export function createVaultKey(secretsDir: string): string {
+  const path = join(secretsDir, VAULT_KEY_FILE_NAME);
+  try {
+    writeFileSync(path, `${randomBytes(VAULT_KEY_BYTES).toString('base64url')}\n`, {
+      mode: 0o600,
+      flag: 'wx',
+    });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'EEXIST')
+      throw new Error(
+        `${path} already exists: point JM_VAULT_KEY_FILE at it and restart, or move it aside`,
+      );
+    throw new Error(`could not write ${path}: ${(e as NodeJS.ErrnoException).code ?? 'error'}`);
+  }
+  // The umask may have narrowed the mode, never widened it; make it exactly 0600.
+  chmodSync(path, 0o600);
+  return path;
 }

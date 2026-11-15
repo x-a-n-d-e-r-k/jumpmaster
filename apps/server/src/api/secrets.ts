@@ -21,7 +21,8 @@ import { credentialProblems } from '../vault/problems.js';
 import { fingerprintOf } from '../vault/vault.js';
 
 /**
- * The credential routes (§7.5): list, replace, test, remove and reload. No route ever returns,
+ * The credential routes (§7.5): list, replace, test, remove and reload; and the vault's switches
+ * (#101): turn it on or off, prefer it over variables and files, copy a credential into it. No route ever returns,
  * logs or audits a value: the list carries fingerprints and dates; a failed test returns the HTTP
  * status, the permission GitHub names and `refusalWords`' sentence built from those two (never
  * GitHub's message); audit details are built from named
@@ -47,6 +48,10 @@ const PutBody = z.strictObject({
     .optional(),
   note: z.string().max(500).optional(),
 });
+
+const PreferBody = z.strictObject({ prefer: z.boolean() });
+/** The queue the vault switches share (no credential is named this). */
+const VAULT_QUEUE = '#vault';
 
 const defaultForge: TestDeps['forge'] = (token, repo) => {
   const [owner = '', name = ''] = repo.split('/');
@@ -111,15 +116,36 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
       ...(r.testedAt ? { testedAt: r.testedAt } : {}),
       ...(r.testResult ? { testResult: r.testResult } : {}),
       ...(r.undecryptable ? { undecryptable: true } : {}),
+      ...(r.overriding
+        ? {
+            overriding: r.overriding.map((o) => ({
+              source: o.source,
+              ...(o.path && o.source === 'file' ? { path: o.path } : {}),
+              ...(o.path && o.source === 'env' ? { variable: o.path } : {}),
+            })),
+          }
+        : {}),
       ...(r.source === 'vault' ? { runningDropsWithPrevious: runningSince(db, r.setAt) } : {}),
     };
+  };
+  /** A session needs sudo for a vault write, as for a credential; the Bearer token never does. */
+  const sudoRefused = (req: FastifyRequest, reply: FastifyReply, what: string) => {
+    if (req.principal?.via !== 'session' || req.principal.sudo) return false;
+    void reply
+      .code(403)
+      .send({ error: `${what} asks for your passphrase again`, sudo: 'required' });
+    return true;
   };
 
   scope.get('/api/control/secrets', async () => {
     const vault = store.vault();
+    const from = store.vaultKeyFrom();
     return {
       vault: vault === 'disabled' ? 'disabled' : 'on',
       ...(vault === 'disabled' ? { hint: VAULT_DISABLED } : { keyId: vault.keyId }),
+      ...(from ? { vaultKeyFrom: from } : {}),
+      ...(vault === 'disabled' ? {} : { entries: vault.count() }),
+      preferVault: store.preferVault(),
       credentials: (
         Object.entries(store.resolved()) as [CredentialName, Resolved[CredentialName]][]
       ).map(([n, r]) => view(n, r)),
@@ -148,7 +174,8 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
       return reply.code(400).send({ error: 'a credential is one line with no whitespace' });
     return serialized(name, async () => {
       const current = store.resolved()[name];
-      if (current?.source === 'file' || current?.source === 'env')
+      // With the vault preferred, an entry stored here wins over the variable or file.
+      if ((current?.source === 'file' || current?.source === 'env') && !store.preferVault())
         return reply.code(409).send({
           error: `managed by ${current.path}: replace the file and run \`ctl secrets reload\``,
         });
@@ -244,15 +271,19 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
       });
     return serialized(name, async () => {
       const r = store.resolved()[name];
-      if (r?.source !== 'vault' && !r?.undecryptable)
+      const vault = store.vault();
+      // The vault's own entry, in use or behind a variable or file (a copy, #101).
+      const entry = vault === 'disabled' ? undefined : vault.meta(name);
+      if (!entry && r?.source !== 'vault' && !r?.undecryptable)
         return reply.code(409).send({
           error:
             r?.source === 'missing'
               ? 'the vault holds no such credential'
               : `managed by ${r?.path}: remove the file and run \`ctl secrets reload\``,
         });
-      // Refused when it would leave a zone without a credential it needs.
-      const without = { ...store.resolved(), [name]: { source: 'missing' } } as Resolved;
+      // Refused when it would leave a zone without a credential it needs; a variable or file that
+      // also holds it takes over, so its zones keep it.
+      const without = store.resolvedWithoutVaultEntry(name);
       const created = store
         .current()
         .dropZones.flatMap((z) => credentialProblems(z, without))
@@ -264,10 +295,71 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
         });
       const done = store.deleteCredential(name);
       if (!done.ok) return reply.code(400).send({ issues: done.issues });
-      audit(req, 'secret.remove', { name, fingerprint: r.fingerprint ?? null, result: 'removed' });
+      audit(req, 'secret.remove', {
+        name,
+        fingerprint: entry?.fingerprint ?? r?.fingerprint ?? null,
+        result: 'removed',
+      });
       return { removed: done.deleted, problems: store.problems() };
     });
   });
+
+  // The vault switches (#101). One at a time, behind the same queue as a credential's writes.
+  scope.post('/api/control/secrets/vault/on', async (req, reply) => {
+    if (sudoRefused(req, reply, 'turning the vault on')) return reply;
+    return serialized(VAULT_QUEUE, async () => {
+      const r = store.turnOnVault();
+      if (!r.ok) return reply.code(409).send({ error: r.message });
+      // The key id is a hash prefix of the key; the key itself is never answered or audited.
+      audit(req, 'vault.on', { keyId: r.keyId, result: 'on' });
+      return { vault: 'on', keyId: r.keyId, keyFile: r.keyFile, problems: store.problems() };
+    });
+  });
+
+  scope.post('/api/control/secrets/vault/off', async (req, reply) => {
+    if (sudoRefused(req, reply, 'turning the vault off')) return reply;
+    return serialized(VAULT_QUEUE, async () => {
+      const r = store.turnOffVault();
+      if (!r.ok) return reply.code(409).send({ error: r.message });
+      audit(req, 'vault.off', { result: 'off' });
+      return { vault: 'disabled', problems: store.problems() };
+    });
+  });
+
+  scope.post('/api/control/secrets/vault/prefer', async (req, reply) => {
+    if (sudoRefused(req, reply, 'changing which source wins')) return reply;
+    const body = PreferBody.safeParse(req.body ?? {});
+    if (!body.success)
+      return reply.code(400).send({ error: 'invalid body: {"prefer": true|false}' });
+    return serialized(VAULT_QUEUE, async () => {
+      const r = store.setPreferVault(body.data.prefer);
+      if (!r.ok) return reply.code(400).send({ issues: r.issues });
+      audit(req, 'vault.prefer', { prefer: body.data.prefer, result: 'saved' });
+      return { preferVault: store.preferVault(), problems: store.problems() };
+    });
+  });
+
+  scope.post<{ Params: { name: string } }>(
+    '/api/control/secrets/:name/copy-to-vault',
+    async (req, reply) => {
+      const name = nameOf(req, reply);
+      if (!name) return reply;
+      if (sudoRefused(req, reply, 'copying a credential into the vault')) return reply;
+      return serialized(name, async () => {
+        // The value is read and stored here, server-side; the answer carries its fingerprint.
+        const r = store.copyToVault(name);
+        if (!r.ok) return reply.code(409).send({ error: r.message });
+        audit(req, 'secret.copy', { name, fingerprint: r.fingerprint, result: 'stored' });
+        return {
+          name,
+          from: r.from,
+          fingerprint: r.fingerprint,
+          inUse: store.resolved()[name]?.source === 'vault',
+          problems: store.problems(),
+        };
+      });
+    },
+  );
 
   scope.post('/api/control/secrets/reload', async (req, reply) => {
     const r = store.refreshSecrets();

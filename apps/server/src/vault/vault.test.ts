@@ -1,11 +1,11 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { type Db, openDb } from '../db/open.js';
 import { plus, t0, tmpDbFile } from '../test/helpers.js';
-import { fingerprintOf, openVault, Vault, VaultKeyError } from './vault.js';
+import { createVaultKey, fingerprintOf, openVault, Vault, VaultKeyError } from './vault.js';
 
 const VALUE = 'sk-ant-' + 'oat01-VAULTVALUE-0123456789';
 
@@ -129,5 +129,31 @@ describe('the vault', () => {
   test('fingerprintOf is the first 8 hex characters of SHA-256, never a substring or the length', () => {
     expect(fingerprintOf('abc')).toBe('ba7816bf');
     expect(fingerprintOf(VALUE)).not.toContain(VALUE.slice(0, 4));
+  });
+});
+
+describe('createVaultKey', () => {
+  test('writes 32 random bytes, base64url, mode 0600 under the secrets directory, and opens', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'jm-secrets-'));
+    const path = createVaultKey(dir);
+    expect(path).toBe(join(dir, 'vault_key'));
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    const text = readFileSync(path, 'utf8').trim();
+    expect(text).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(Buffer.from(text, 'base64url')).toHaveLength(32);
+    const v = openVault(path, openDb(tmpDbFile()));
+    expect(v).toBeInstanceOf(Vault);
+    // Another key is another 32 random bytes.
+    const again = readFileSync(createVaultKey(mkdtempSync(join(tmpdir(), 'jm-secrets-'))), 'utf8');
+    expect(again.trim()).not.toBe(text);
+  });
+
+  test('refuses to overwrite an existing file, naming the path and no key', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'jm-secrets-'));
+    writeFileSync(join(dir, 'vault_key'), 'kept\n', { mode: 0o600 });
+    const msg = thrown(() => createVaultKey(dir));
+    expect(msg).toContain(join(dir, 'vault_key'));
+    expect(msg).toContain('already exists');
+    expect(readFileSync(join(dir, 'vault_key'), 'utf8')).toBe('kept\n');
   });
 });
