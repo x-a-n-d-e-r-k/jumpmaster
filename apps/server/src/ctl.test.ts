@@ -1040,3 +1040,21 @@ describe('the verbs Task 14 adds for parity', () => {
     ]);
   });
 });
+
+describe('ctl dismiss', () => {
+  test("dismisses the named briefings of one zone, as the zone's briefings page does", () => {
+    expect(ctlRequest(['dismiss', 'web', '3', '4'])).toEqual({
+      path: '/api/control/zones/web/briefings/dismiss',
+      method: 'POST',
+      body: { ids: [3, 4] },
+    });
+  });
+
+  test('needs a zone and at least one briefing id, each a positive integer', () => {
+    expect(ctlRequest(['dismiss'])).toBeNull();
+    expect(ctlRequest(['dismiss', 'web'])).toBeNull();
+    expect(ctlRequest(['dismiss', 'web', 'all'])).toBeNull();
+    expect(ctlRequest(['dismiss', 'web', '3', '0'])).toBeNull();
+    expect(ctlRequest(['dismiss', 'web', '1.5'])).toBeNull();
+  });
+});

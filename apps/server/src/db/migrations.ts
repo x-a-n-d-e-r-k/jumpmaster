@@ -725,6 +725,43 @@ ALTER TABLE zone_controls ADD COLUMN stopping_since TEXT;
 ALTER TABLE zone_controls ADD COLUMN stopping_via TEXT CHECK (stopping_via IN ('ui','ctl'));
 `;
 
+/**
+ * v25: Command can dismiss a briefing (`state` gains `dismissed`, issue #98): taken off the floor
+ * without a ruling, so its condition is not ruled on. SQLite's rebuild, foreign keys off
+ * (`rulings` references it).
+ */
+const V25_SQL = `
+CREATE TABLE new_briefings (
+  id                 INTEGER PRIMARY KEY,
+  zone_id            TEXT NOT NULL,
+  kind               TEXT NOT NULL CHECK (kind IN ('parked','promote','promote_held',
+                       'refute_exhausted','crew','credits_required')),
+  subject            TEXT NOT NULL,
+  decision           TEXT NOT NULL,
+  why                TEXT NOT NULL,
+  options_json       TEXT NOT NULL,
+  recommendation     TEXT NOT NULL DEFAULT '',
+  on_hold            TEXT NOT NULL DEFAULT '',
+  source             TEXT NOT NULL CHECK (source IN ('server','crew','mcp')),
+  source_ref         TEXT,
+  state              TEXT NOT NULL CHECK (state IN ('open','ruled','withdrawn','dismissed')),
+  diagnose_attempts  INTEGER NOT NULL DEFAULT 0,
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL,
+  diagnosis          TEXT,
+  diagnosis_basis    TEXT
+);
+INSERT INTO new_briefings (id, zone_id, kind, subject, decision, why, options_json, recommendation,
+  on_hold, source, source_ref, state, diagnose_attempts, created_at, updated_at, diagnosis,
+  diagnosis_basis)
+SELECT id, zone_id, kind, subject, decision, why, options_json, recommendation, on_hold, source,
+  source_ref, state, diagnose_attempts, created_at, updated_at, diagnosis, diagnosis_basis
+FROM briefings;
+DROP TABLE briefings;
+ALTER TABLE new_briefings RENAME TO briefings;
+CREATE UNIQUE INDEX briefings_open_subject ON briefings(zone_id, subject) WHERE state = 'open';
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -758,6 +795,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 22, sql: V22_SQL, foreignKeysOff: true },
   { version: 23, sql: V23_SQL },
   { version: 24, sql: V24_SQL },
+  { version: 25, sql: V25_SQL, foreignKeysOff: true },
 ];
 
 /**

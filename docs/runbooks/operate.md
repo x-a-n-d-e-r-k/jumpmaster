@@ -91,6 +91,15 @@ The mode is runtime state, separate from the config: a config change never flips
   let them drain first.
 - **Resume** (`ctl resume <zone>`): takes ready issues and runs drops again.
 
+A paused or observing zone's open briefings are held off the floor: they are not listed or counted
+in "Waiting on you" or the status line, and the zone gets one line instead, `<repo>: paused, N
+briefings held`, linking to the zone's briefings (`/briefings?zone=<zone>`, also linked from the
+zone's page). The briefings are unchanged; resuming the zone lists them on the floor again. The
+zone's briefings view can **Dismiss all** of them after a confirmation that states the count
+(`ctl dismiss <zone> <briefing>…` names them). A dismissal records no ruling: whatever the briefing
+was about is not ruled on, and nothing is written to GitHub. A dismissed parked briefing is not
+raised again until the item parks again.
+
 ### Stop managing a zone
 
 **Stop managing** on the zone's row in the Zones list, or near the top of its page
@@ -315,6 +324,7 @@ token is always allowed.
 | Doctor | `ctl labels <zone>` | `POST /api/control/zones/:id/labels` |
 | Briefings | `ctl briefings` | `GET /api/control/briefings` |
 | Briefings | `ctl rule <briefing> <option> [--options <digest>] [note]` | `POST /api/control/briefings/:id/rule` |
+| Briefings | `ctl dismiss <zone> <briefing>…` | `POST /api/control/zones/:id/briefings/dismiss` |
 | Drops | `ctl drops extend-retention <dropId> <hours>`<br>`ctl drops cancel <dropId>` | `POST /api/control/drops/:id/extend-retention`<br>`POST /api/control/drops/:id/cancel` |
 | Kill | `ctl kill` | `POST /api/control/kill` |
 | Kill | `ctl unkill` | `POST /api/control/kill` |

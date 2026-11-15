@@ -155,6 +155,11 @@ export const CONTROL_ROUTES: ControlRoute[] = [
   // Briefings
   { method: 'GET', path: '/api/control/briefings', ctl: 'ctl briefings' },
   { method: 'POST', path: '/api/control/briefings/:id/rule', ctl: 'ctl rule 3 yes' },
+  {
+    method: 'POST',
+    path: '/api/control/zones/:id/briefings/dismiss',
+    ctl: 'ctl dismiss web 3 4',
+  },
   // Drops
   {
     method: 'POST',
@@ -293,6 +298,7 @@ export const CTL_VERBS: { verb: string; page: Page; forms: string[] }[] = [
     page: 'Briefings',
     forms: ['ctl rule <briefing> <option> [--options <digest>] [note]'],
   },
+  { verb: 'dismiss', page: 'Briefings', forms: ['ctl dismiss <zone> <briefing>…'] },
   {
     verb: 'drops',
     page: 'Drops',

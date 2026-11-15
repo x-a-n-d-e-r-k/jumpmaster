@@ -60,6 +60,8 @@ export async function harness(
      * `parseEditable` accepts (its protectedPaths must cover crew.goalPath).
      */
     live?: boolean;
+    /** More zones beside the harness's own (configured only: the harness drives its own zone). */
+    extraZones?: Partial<DropZoneConfig>[];
   } = {},
 ): Promise<Harness> {
   const db = openDb(tmpDbFile());
@@ -95,7 +97,7 @@ export async function harness(
     listen: { host: '127.0.0.1', port: 0, allowedHosts: ['localhost:80'] },
     dataDir: opts.dataDir ?? '.',
     pollSeconds: 60,
-    dropZones: [zone],
+    dropZones: [zone, ...(opts.extraZones ?? []).map((z) => makeZone(z))],
     claude: { plan: 'pro', fableWeeklyDropCap: 5 },
     secrets: {
       claudeToken: 'claude-token',

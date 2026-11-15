@@ -3,6 +3,7 @@ import {
   applyEffect,
   applyPendingRulings,
   type BriefingOption,
+  dismissZoneBriefings,
   listBriefings,
   listRulings,
   raiseBriefing,
@@ -98,6 +99,65 @@ describe('parked briefings', () => {
     const b = open(w)[0];
     if (!b) throw new Error('no briefing');
     expect(ruleBriefing(w.db, b.id, optionOf(b, 'none'), '', plus(t0, MIN)).ok).toBe(true);
+    syncParkBriefings(w.db, w.zone, plus(t0, 2 * MIN));
+    expect(open(w)).toEqual([]);
+    setWorkItemState(w.db, id, 'pr_open', undefined, plus(t0, 3 * MIN));
+    setWorkItemState(w.db, id, 'parked', 'again', plus(t0, 4 * MIN));
+    syncParkBriefings(w.db, w.zone, plus(t0, 5 * MIN));
+    expect(open(w)).toHaveLength(1);
+  });
+});
+
+describe("dismissing a zone's briefings", () => {
+  const crewBriefing = (zoneId: string, subject: string) => ({
+    zoneId,
+    kind: 'crew' as const,
+    subject,
+    decision: `${subject}?`,
+    why: 'w',
+    options: [{ id: 'ok', label: 'OK', effect: 'none' as const }],
+    source: 'crew' as const,
+  });
+
+  test("dismisses exactly that zone's open briefings, rules nothing and writes no outbox entry", () => {
+    const { w, id } = parkedWorld();
+    syncParkBriefings(w.db, w.zone, t0);
+    raiseBriefing(w.db, crewBriefing('main', 'crew:a'), t0);
+    raiseBriefing(w.db, crewBriefing('other', 'crew:b'), t0);
+    const outboxBefore = listOutbox(w.db, ['pending', 'unknown', 'failed', 'done']).length;
+    const ids = open(w).map((b) => b.id);
+    expect(dismissZoneBriefings(w.db, 'main', ids, plus(t0, MIN))).toEqual(ids);
+    expect(open(w)).toEqual([]);
+    expect(listBriefings(w.db, { zoneId: 'main' }).map((b) => b.state)).toEqual([
+      'dismissed',
+      'dismissed',
+    ]);
+    expect(listBriefings(w.db, { zoneId: 'other', state: 'open' })).toHaveLength(1);
+    expect(listRulings(w.db, 'main')).toEqual([]);
+    expect(listOutbox(w.db, ['pending', 'unknown', 'failed', 'done'])).toHaveLength(outboxBefore);
+    // The condition is not ruled on: the item stays parked.
+    expect(getWorkItem(w.db, id)?.state).toBe('parked');
+  });
+
+  test('dismisses only the ids it was shown, and none of another zone', () => {
+    const w = zoneWorld({ crew: crewOn });
+    const a = raiseBriefing(w.db, crewBriefing('main', 'crew:a'), t0);
+    const b = raiseBriefing(w.db, crewBriefing('main', 'crew:b'), t0);
+    const c = raiseBriefing(w.db, crewBriefing('other', 'crew:c'), t0);
+    expect(dismissZoneBriefings(w.db, 'main', [a, c], plus(t0, MIN))).toEqual([a]);
+    expect(open(w).map((x) => x.id)).toEqual([b]);
+    expect(listBriefings(w.db, { zoneId: 'other', state: 'open' })).toHaveLength(1);
+  });
+
+  test('a dismissed parked briefing is not raised again until the item parks again', () => {
+    const { w, id } = parkedWorld();
+    syncParkBriefings(w.db, w.zone, t0);
+    dismissZoneBriefings(
+      w.db,
+      'main',
+      open(w).map((b) => b.id),
+      plus(t0, MIN),
+    );
     syncParkBriefings(w.db, w.zone, plus(t0, 2 * MIN));
     expect(open(w)).toEqual([]);
     setWorkItemState(w.db, id, 'pr_open', undefined, plus(t0, 3 * MIN));
