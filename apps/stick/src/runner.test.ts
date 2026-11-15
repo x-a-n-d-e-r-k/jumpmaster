@@ -16,6 +16,7 @@ import type { ContainerDriver, DropNet } from './driver.js';
 import { PendingPushes } from './push.js';
 import {
   allowedImages,
+  HELD_RESULT_MAX_5XX,
   HealthMonitor,
   LOST_SERVER_GRACE_MS,
   reapOrphans,
@@ -1966,16 +1967,88 @@ describe('push containers: the agent run on a volume', () => {
     expect(d.order).not.toContain(VOL);
   });
 
-  test('a stale or cancelled drop removes its volume without salvage', async () => {
-    for (const reply of ['stale', 'cancel'] as const) {
-      const d = fakeDriver([], { hang: true });
-      const client = fakeClient(reply);
-      const o = deps(d, client);
-      await runDrop(payload, o);
-      expect(client.salvaged).toBe(0);
-      expect(o.pending.size()).toBe(0);
-      expect(d.order.indexOf(VOL)).toBeGreaterThan(d.order.indexOf(`removeAndWait ${AGENT}`));
-    }
+  test('a cancelled drop removes its volume without salvage', async () => {
+    const d = fakeDriver([], { hang: true });
+    const client = fakeClient('cancel');
+    const o = deps(d, client);
+    await runDrop(payload, o);
+    expect(client.salvaged).toBe(0);
+    expect(o.pending.size()).toBe(0);
+    expect(d.order.indexOf(VOL)).toBeGreaterThan(d.order.indexOf(`removeAndWait ${AGENT}`));
+  });
+
+  test('a stale drop asks to salvage its checkpointed volume after the agent is gone', async () => {
+    const d = fakeDriver([], { hang: true });
+    const client = fakeClient('stale');
+    client.salvageReply = 'ok';
+    let salvagedAt = -1;
+    const salvage = client.salvage.bind(client);
+    client.salvage = async () => {
+      salvagedAt = d.order.length;
+      d.order.push('salvage');
+      return salvage();
+    };
+    const o = deps(d, client);
+    await runDrop(payload, o);
+    expect(d.stopped).toBe(true);
+    expect(client.result).toBeUndefined();
+    expect(client.salvaged).toBe(1);
+    expect(salvagedAt).toBeGreaterThan(d.order.indexOf(`removeAndWait ${AGENT}`));
+    expect(d.order.indexOf('add d1')).toBeGreaterThan(salvagedAt);
+    expect(d.order).not.toContain(VOL);
+
+    // Refused (the item is no longer reclaimable): the volume goes.
+    const d2 = fakeDriver([], { hang: true });
+    const refused = fakeClient('stale');
+    const o2 = deps(d2, refused);
+    await runDrop(payload, o2);
+    expect(refused.salvaged).toBe(1);
+    expect(o2.pending.size()).toBe(0);
+    expect(d2.order).toContain(VOL);
+  });
+
+  test('a held result gives up after HELD_RESULT_MAX_5XX server errors and keeps the volume', async () => {
+    const d = fakeDriver([PUSH_RESULT]);
+    const client = fakeClient();
+    let tries = 0;
+    client.postResult = async () => {
+      tries++;
+      throw Object.assign(new Error('result failed: 500'), { status: 500 });
+    };
+    let beats = 0;
+    client.heartbeat = async () => {
+      beats++;
+      return 'ok';
+    };
+    const o = deps(d, client);
+    await runDrop(payload, o);
+    expect(tries).toBe(HELD_RESULT_MAX_5XX);
+    expect(client.salvaged).toBe(0);
+    expect(o.pending.size()).toBe(0);
+    expect(d.order).not.toContain(VOL);
+    // The lease is left to lapse: no beat after giving up.
+    const after = beats;
+    await new Promise((r) => setTimeout(r, 30));
+    expect(beats).toBe(after);
+  });
+
+  test('network errors between server errors keep a held result going', async () => {
+    const d = fakeDriver([PUSH_RESULT]);
+    const client = fakeClient();
+    let tries = 0;
+    client.postResult = async (_d, _e, r) => {
+      tries++;
+      if (tries === 3 * HELD_RESULT_MAX_5XX) {
+        client.result = r;
+        return 'ok';
+      }
+      if (tries % 2 === 0) throw new Error('fetch failed');
+      throw Object.assign(new Error('result failed: 503'), { status: 503 });
+    };
+    const o = { ...deps(d, client), resultRetryMs: 0 };
+    await runDrop(payload, o);
+    expect(tries).toBe(3 * HELD_RESULT_MAX_5XX);
+    expect(o.pending.size()).toBe(1);
   });
 
   test('a pushing role from a server without push-v1 is never started and gets no result', async () => {

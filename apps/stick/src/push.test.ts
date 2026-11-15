@@ -297,7 +297,10 @@ describe('pushOnce', () => {
     // The grant request hangs until the heartbeat stops the container.
     killed.client.pushGrant = () => new Promise<GrantReply>(() => {});
     expect(await pushOnce(killed.entry, killed.deps)).toBe('killed');
-    expect(killed.d.order).toContain('stop');
+    // Killed at once, with no graceful stop first: nothing may reach GitHub.
+    const kill = killed.d.order.indexOf('kill');
+    expect(kill).toBeGreaterThan(-1);
+    expect(killed.d.order.slice(0, kill)).not.toContain('stop');
     expect(killed.d.removedVolumes).toEqual([]);
     expect(killed.pending.size()).toBe(1);
     expect(killed.d.writes).toEqual([[]]);

@@ -810,7 +810,10 @@ async function runContainer(
     await stopping;
     // The server no longer owns this epoch (stale) or already cancelled it: it would 409 a result.
     // A hard cancel (the kill switch) still asks to save the killed agent's work.
-    if (hard && volume) fate.decide = () => salvaged(client, dropId, epoch);
+    // A stale drop (a 409: the lease went past the server's grace) was stopped gracefully and may
+    // have checkpointed onto the volume: the server salvages it while the item is still reclaimable
+    // and refuses otherwise, and only then is the volume removed (Ruling 14 holds either way).
+    if ((hard || stale) && volume) fate.decide = () => salvaged(client, dropId, epoch);
     if (stale || cancelled) return;
     if (lost && !(result?.push && volume)) {
       // Fenced like the old kill: nothing posted, so a server that answers again sees the drop
@@ -823,8 +826,15 @@ async function runContainer(
       if (result.push && volume) {
         const ack = await holdResult(client, dropId, epoch, result, deps.resultRetryMs);
         // Accepted: the push loop takes the volume. Refused 409 (the drop went lost while the
-        // result was held): ask to salvage it before anything is removed (Ruling 14).
-        fate.decide = ack === 'ok' ? async () => 'push' : () => salvaged(client, dropId, epoch);
+        // result was held): ask to salvage it before anything is removed (Ruling 14). Given up on
+        // a lasting server error: heartbeats stop with this run, the lease lapses, and the volume
+        // stays for the sweep to salvage.
+        fate.decide =
+          ack === 'ok'
+            ? async () => 'push'
+            : ack === 'gave_up'
+              ? async () => 'keep'
+              : () => salvaged(client, dropId, epoch);
       } else {
         await client.postResult(dropId, epoch, result);
       }
@@ -860,8 +870,16 @@ async function salvaged(client: DropClient, dropId: string, epoch: number): Prom
 }
 
 /**
+ * Consecutive 5xx answers after which a held push result is given up: a server that answers but
+ * keeps failing (say, a drop zone it no longer knows) would otherwise hold the item for ever while
+ * heartbeats renew its lease. With the result backoff that is about 15 minutes.
+ */
+export const HELD_RESULT_MAX_5XX = 8;
+
+/**
  * Posts a push-requested result, re-sending it from memory while the server can't be reached (a
- * network error or a 5xx). Any other refusal (a 422 push request) is thrown.
+ * network error, retried for as long as it lasts) or answers with a 5xx (given up after
+ * HELD_RESULT_MAX_5XX in a row: `gave_up`). Any other refusal (a 422 push request) is thrown.
  */
 async function holdResult(
   client: DropClient,
@@ -869,13 +887,17 @@ async function holdResult(
   epoch: number,
   result: DropResult,
   firstMs = RESULT_RETRY_MS,
-): Promise<Ack> {
+): Promise<Ack | 'gave_up'> {
+  let serverErrors = 0;
   for (let attempt = 0; ; attempt++) {
     try {
       return await client.postResult(dropId, epoch, result);
     } catch (e) {
       const status = (e as { status?: unknown }).status;
       if (typeof status === 'number' && status < 500) throw e;
+      if (typeof status === 'number') {
+        if (++serverErrors >= HELD_RESULT_MAX_5XX) return 'gave_up';
+      } else serverErrors = 0;
       const ms = Math.min(PUSH_BACKOFF_MAX_MS, firstMs * 2 ** attempt);
       await new Promise((r) => setTimeout(r, ms));
     }

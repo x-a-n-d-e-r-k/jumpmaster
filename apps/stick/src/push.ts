@@ -307,7 +307,8 @@ async function drive(
     if (abort) return;
     try {
       const beat = await client.heartbeat(dropId, epoch);
-      if (beat === 'killed') stopFor('killed', false);
+      // The kill switch: killed at once (no grace), so nothing reaches GitHub; the volume stays.
+      if (beat === 'killed') stopFor('killed', true);
       else if (beat === 'cancel') stopFor('cancelled', false);
       else if (beat === 'hard_cancel') stopFor('cancelled', true);
       else if (beat === 'stale') stopFor('stale', false);
