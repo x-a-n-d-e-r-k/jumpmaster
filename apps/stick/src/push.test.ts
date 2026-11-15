@@ -6,7 +6,7 @@ import {
   READY_LINE,
 } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
-import type { Beat, GrantReply, PushClient } from './client.js';
+import type { Beat, GrantReply, PlanReply, PushClient } from './client.js';
 import type { ContainerDriver, ContainerHandle, DropNet } from './driver.js';
 import {
   backoffMs,
@@ -153,7 +153,7 @@ function fakeDriver(scripts: Script[], opts: { proxyStopError?: boolean } = {}) 
   return d;
 }
 
-function fakeClient(o: { plan?: PushPlan | 'stale'; grants?: GrantReply[]; beat?: Beat } = {}) {
+function fakeClient(o: { plan?: PlanReply; grants?: GrantReply[]; beat?: Beat } = {}) {
   const c = {
     posted: [] as PushResult[],
     planCalls: 0,
@@ -314,6 +314,18 @@ describe('pushOnce', () => {
     );
     expect(cancelled.pending.size()).toBe(0);
     expect(cancelled.client.posted).toEqual([]);
+  });
+
+  test('a refused plan starts nothing, keeps the volume and backs off', async () => {
+    const s = setup([{ before: [READY_LINE], hang: true }], {
+      plan: { refused: 'zone observe', retryable: true },
+    });
+    expect(await pushOnce(s.entry, s.deps)).toBe('retry');
+    expect(s.d.order).toEqual([]);
+    expect(s.d.removedVolumes).toEqual([]);
+    expect(s.client.grantCalls).toBe(0);
+    expect(s.pending.size()).toBe(1);
+    expect(s.logs.some((l) => l.includes('plan refused') && l.includes('zone observe'))).toBe(true);
   });
 
   test('a stale plan removes the volume and the entry', async () => {

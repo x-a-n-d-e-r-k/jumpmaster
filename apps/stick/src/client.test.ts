@@ -220,8 +220,13 @@ describe('push calls', () => {
     expect(await client().heartbeat('d1', 1)).toBe('killed');
   });
 
-  test('pushPlan parses the plan; 409 is stale', async () => {
-    serve(reply(200, { branch: 'agent/issue-1', salvage: false }), reply(409, { stale: true }));
+  test('pushPlan parses the plan; 409 is stale; 403 is a refusal', async () => {
+    serve(
+      reply(200, { branch: 'agent/issue-1', salvage: false }),
+      reply(409, { stale: true }),
+      reply(403, { refused: 'killed', retryable: true }),
+      reply(403, { error: 'nope' }),
+    );
     const c = client();
     expect(await c.pushPlan('d1', 2)).toEqual({ branch: 'agent/issue-1', salvage: false });
     expect(calls[0]).toEqual({
@@ -229,6 +234,8 @@ describe('push calls', () => {
       body: { dropId: 'd1', epoch: 2 },
     });
     expect(await c.pushPlan('d1', 2)).toBe('stale');
+    expect(await c.pushPlan('d1', 2)).toEqual({ refused: 'killed', retryable: true });
+    await expect(c.pushPlan('d1', 2)).rejects.toThrow('push-plan failed: 403');
   });
 
   test('pushGrant tells a grant, a refusal, reserved and stale apart by the body', async () => {

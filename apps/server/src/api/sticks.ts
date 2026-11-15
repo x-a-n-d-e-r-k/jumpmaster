@@ -234,6 +234,18 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
   });
 
   /**
+   * What holds every push back for now (retryable): the kill switch, or the zone observing. A
+   * paused zone still pushes: pause means its running work finishes, and a push is the end of it.
+   */
+  const pushHeld = (zoneId: string): Refusal | null => {
+    if (isKilled(db)) return { refused: 'killed', retryable: true };
+    if (getZoneMode(db, zoneId, 'active') === 'observe') {
+      return { refused: 'zone observe', retryable: true };
+    }
+    return null;
+  };
+
+  /**
    * Every check a push grant needs, made afresh (Ruling 20), then the drop's one reservation. Runs
    * in one transaction, so two requests can't both reserve.
    */
@@ -243,9 +255,8 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
     at: Date,
   ): Refusal | { branch: string; base: string } =>
     db.transaction((): Refusal | { branch: string; base: string } => {
-      if (isKilled(db)) return { refused: 'killed', retryable: true };
-      const mode = getZoneMode(db, zone.id, 'active');
-      if (mode !== 'active') return { refused: `zone ${mode}`, retryable: true };
+      const held = pushHeld(zone.id);
+      if (held) return held;
       if (!PUSHING_ROLES.includes(drop.role as Role)) return { refused: 'role', retryable: false };
       const row = db
         .prepare('SELECT repo, default_branch AS base FROM drop_zones WHERE id = ?')
@@ -469,6 +480,10 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       if (!zone) return reply.code(500).send({ error: `unknown drop zone ${drop.dropZoneId}` });
       const item = drop.workItemId === null ? undefined : getWorkItem(db, drop.workItemId);
       if (!item) return reply.code(500).send({ error: `drop ${drop.id} has no work item` });
+      // Refused now rather than at the grant: no push container starts, or stages the branch,
+      // only to be turned away. The grant checks again (Ruling 20).
+      const held = pushHeld(zone.id);
+      if (held) return reply.code(403).send(held);
       // A new attempt: a reservation left by one that died is no longer held against it.
       revokeGrants(db, drop.id, now());
       const egress = egressFor(zone);
@@ -561,7 +576,10 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       // Nothing was pushed: the stored status, from the last commit that was (Ruling 7).
       const fromPrior: DropResult = { ...stored, headSha: drop.headSha ?? undefined };
       let outcome: DropResult;
-      if (r.status === 'pushed') {
+      if (r.status === 'pushed' && drop.pushKind === 'final' && r.headSha !== drop.pushExpectSha) {
+        // The gates passed on the expected SHA only: any other head is not this drop's work.
+        outcome = { ...stored, status: 'failed', reason: 'pushed branch is not the gated commit' };
+      } else if (r.status === 'pushed') {
         outcome = { ...stored, headSha: r.headSha };
       } else if (r.status === 'failed' && r.retryable) {
         return { state: 'push_pending' };

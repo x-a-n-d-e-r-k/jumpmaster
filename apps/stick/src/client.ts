@@ -22,6 +22,9 @@ export type Ack = 'ok' | 'stale';
 export type Beat = 'ok' | 'cancel' | 'hard_cancel' | 'stale' | 'killed';
 
 /** The server's answer to a grant request; a refusal is told apart from stale by its body. */
+/** A push plan, `stale`, or why pushes are held back for now. */
+export type PlanReply = PushPlan | 'stale' | { refused: string; retryable: boolean };
+
 export type GrantReply =
   | { grant: PushGrant }
   | { refused: string; retryable: boolean }
@@ -42,7 +45,7 @@ export interface DropClient {
 /** The calls the push loop needs. */
 export interface PushClient {
   heartbeat(dropId: string, epoch: number): Promise<Beat>;
-  pushPlan(dropId: string, epoch: number): Promise<PushPlan | 'stale'>;
+  pushPlan(dropId: string, epoch: number): Promise<PlanReply>;
   pushGrant(dropId: string, epoch: number): Promise<GrantReply>;
   postPushResult(dropId: string, epoch: number, result: PushResult): Promise<Ack>;
 }
@@ -226,10 +229,22 @@ export class StickClient implements DropClient, PushClient {
     throw new HttpStatusError(`result failed: ${last}`, last);
   }
 
-  /** The plan for a push container; `stale` when the drop is no longer this stick's pending push. */
-  async pushPlan(dropId: string, epoch: number): Promise<PushPlan | 'stale'> {
+  /**
+   * The plan for a push container; `stale` when the drop is no longer this stick's pending push; a
+   * refusal (403 `{refused, retryable}`) while pushes are held back (the kill switch, observe).
+   */
+  async pushPlan(dropId: string, epoch: number): Promise<PlanReply> {
     const res = await this.req('/api/sticks/push-plan', { dropId, epoch });
     if (res.status === 409) return 'stale';
+    if (res.status === 403) {
+      const body = (await res
+        .clone()
+        .json()
+        .catch(() => null)) as { refused?: unknown; retryable?: unknown } | null;
+      if (typeof body?.refused === 'string') {
+        return { refused: body.refused, retryable: body.retryable === true };
+      }
+    }
     if (!res.ok) throw await failure('push-plan', res);
     const parsed = PushPlanSchema.safeParse(await res.json());
     if (!parsed.success) throw new Error('push-plan failed: invalid plan');

@@ -225,7 +225,7 @@ describe('kill switch and pending pushes', () => {
     expect(res.json().grant).toMatchObject({ branch: 'agent/issue-1' });
   });
 
-  test("a paused zone's pending push gets its grant when the zone is active again", async () => {
+  test("a paused zone's pending push still gets its grant: pause lets running work finish", async () => {
     const h = await harness();
     const { dropId, epoch } = await running(h);
     const status = await h.postResult(dropId, epoch, {
@@ -238,14 +238,11 @@ describe('kill switch and pending pushes', () => {
     expect(status).toBe(200);
     expect(getDrop(h.db, dropId)?.state).toBe('push_pending');
     expect((await control(h, '/api/control/zones/main', { mode: 'paused' })).statusCode).toBe(200);
-    let res = await stickPost(h, '/api/sticks/push-token', { dropId, epoch });
-    expect(res.statusCode).toBe(403);
-    expect(res.json()).toEqual({ refused: 'zone paused', retryable: true });
-    // A pause holds the pending push; it is not given up on.
     h.at(10);
     await h.reconcile();
     expect(getDrop(h.db, dropId)?.state).toBe('push_pending');
-    expect((await control(h, '/api/control/zones/main', { mode: 'active' })).statusCode).toBe(200);
+    let res = await stickPost(h, '/api/sticks/push-plan', { dropId, epoch });
+    expect(res.json()).toMatchObject({ branch: 'agent/issue-1', salvage: false });
     res = await stickPost(h, '/api/sticks/push-token', { dropId, epoch });
     expect(res.statusCode).toBe(200);
     expect(res.json().grant).toMatchObject({ branch: 'agent/issue-1' });

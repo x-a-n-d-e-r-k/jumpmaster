@@ -1,7 +1,6 @@
 import {
   type PushPayload,
   PushPayloadSchema,
-  type PushPlan,
   type PushResult,
   PushResultSchema,
   READY_LINE,
@@ -9,7 +8,7 @@ import {
   redact,
   redactTokenShapes,
 } from '@jumpmaster/protocol';
-import type { PushClient } from './client.js';
+import type { PlanReply, PushClient } from './client.js';
 import type { ContainerDriver, ContainerHandle, DropNet } from './driver.js';
 import { type EgressSession, egressImage, startEgress } from './egress.js';
 import { dropSubnetPool } from './subnets.js';
@@ -145,7 +144,7 @@ export async function pushOnce(entry: PushEntry, deps: PushDeps): Promise<PushOu
   /** The push is over on the server: the volume and the entry go. */
   let finished = false;
 
-  let plan: PushPlan | 'stale';
+  let plan: PlanReply;
   try {
     plan = await client.pushPlan(dropId, epoch);
   } catch (e) {
@@ -157,6 +156,15 @@ export async function pushOnce(entry: PushEntry, deps: PushDeps): Promise<PushOu
     await removeVolume(driver, volume, say);
     pending.remove(dropId, epoch);
     return 'done';
+  }
+  if ('refused' in plan) {
+    // Held back (the kill switch, an observing zone): nothing starts, the volume stays, and the
+    // entry backs off until the server lets pushes through again.
+    say('plan refused', {
+      refused: redactTokenShapes(plan.refused),
+      retryable: plan.retryable,
+    });
+    return 'retry';
   }
 
   const labels = {

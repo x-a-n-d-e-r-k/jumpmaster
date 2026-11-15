@@ -563,7 +563,7 @@ export type PushPlan = z.infer<typeof PushPlanSchema>;
 /** The credential and rules for one push, handed over only after the container reports ready. */
 export const PushGrantSchema = z
   .object({
-    token: z.string(),
+    token: z.string().min(1),
     owner: z.string(),
     name: z.string(),
     branch: z.string().min(1),

@@ -453,6 +453,8 @@ describe('push protocol', () => {
     expect(PushGrantSchema.safeParse(grant).success).toBe(true);
     expect(PushGrantSchema.safeParse({ ...grant, expectSha: SHA_A }).success).toBe(true);
     expect(PushGrantSchema.safeParse({ ...grant, extra: 1 }).success).toBe(false);
+    // A grant without a credential is no grant.
+    expect(PushGrantSchema.safeParse({ ...grant, token: '' }).success).toBe(false);
   });
 
   test('push result variants', () => {

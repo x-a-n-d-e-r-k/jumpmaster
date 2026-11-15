@@ -1055,6 +1055,25 @@ describe('push container routes', () => {
     expect((await grant(stickToken)).statusCode).toBe(200);
   });
 
+  test('push-plan refuses up front under the kill switch and in observe, not in pause', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    setKilled(db, true, t0);
+    let res = await plan(stickToken);
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ refused: 'killed', retryable: true });
+    setKilled(db, false, t0);
+    setZoneMode(db, 'main', 'observe', t0);
+    res = await plan(stickToken);
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ refused: 'zone observe', retryable: true });
+    setZoneMode(db, 'main', 'paused', t0);
+    res = await plan(stickToken);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ branch: 'agent/issue-7' });
+  });
+
   test('push-plan without egress names none, and salvage only for a salvage', async () => {
     const { db } = setup({ queued: false });
     const { stickId, stickToken } = await enroll();
@@ -1066,7 +1085,7 @@ describe('push container routes', () => {
     });
   });
 
-  test('push-token refuses killed, paused, observe, another stick, another epoch, a non-pushing role', async () => {
+  test('push-token refuses killed, observe, another stick, another epoch, a non-pushing role', async () => {
     const { db } = setup({ queued: false });
     const { stickId, stickToken } = await enroll();
     const other = await enroll('other');
@@ -1078,12 +1097,10 @@ describe('push container routes', () => {
     expect(res.json()).toEqual({ refused: 'killed', retryable: true });
     setKilled(db, false, t0);
 
-    for (const mode of ['paused', 'observe'] as const) {
-      setZoneMode(db, 'main', mode, t0);
-      res = await grant(stickToken);
-      expect(res.statusCode, mode).toBe(403);
-      expect(res.json(), mode).toEqual({ refused: `zone ${mode}`, retryable: true });
-    }
+    setZoneMode(db, 'main', 'observe', t0);
+    res = await grant(stickToken);
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ refused: 'zone observe', retryable: true });
     setZoneMode(db, 'main', 'active', t0);
 
     res = await grant(other.stickToken);
@@ -1102,6 +1119,16 @@ describe('push container routes', () => {
     expect(res.statusCode).toBe(403);
     expect(res.json()).toEqual({ refused: 'role', retryable: false });
     expect(liveGrants(db2)).toBe(0);
+  });
+
+  test('a paused zone still grants: pause lets running work finish, its push included', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    setZoneMode(db, 'main', 'paused', t0);
+    const res = await grant(stickToken);
+    expect(res.statusCode).toBe(200);
+    expect(PushGrantSchema.parse(res.json().grant).branch).toBe('agent/issue-7');
   });
 
   test('push-token refuses a zone whose repository is no longer the drop zone one', async () => {
@@ -1272,6 +1299,24 @@ describe('push container routes', () => {
       role: 'implement',
       state: 'queued',
       headSha: SHA_B,
+    });
+  });
+
+  test('a final push that reports another head is a failure, never the PR head', async () => {
+    const { db, forge } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    const res = await pushResult(stickToken, {
+      status: 'pushed',
+      headSha: SHA_B,
+      alreadyThere: false,
+    });
+    expect(res.json()).toEqual({ state: 'failed' });
+    expect(forge.created).toHaveLength(0);
+    expect(getPullRequest(db, 1)).toBeUndefined();
+    expect(workItem(db, 1)).toMatchObject({
+      state: 'parked',
+      reason: 'pushed branch is not the gated commit',
     });
   });
 
