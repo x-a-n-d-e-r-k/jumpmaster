@@ -10,6 +10,7 @@ import {
   getGatePark,
   getPullRequest,
   getWorkItem,
+  getZoneMode,
   listWorkItems,
   recordGateAllowance,
   setWorkItemState,
@@ -51,7 +52,8 @@ export type BriefingOption = {
   digest?: string;
   prNumber?: number;
 };
-export type BriefingState = 'open' | 'ruled' | 'withdrawn';
+/** `dismissed`: Command took it off the floor without ruling; its condition is not ruled on. */
+export type BriefingState = 'open' | 'ruled' | 'withdrawn' | 'dismissed';
 /**
  * Who raised a briefing: the server, a crew drop, or Command's own assistant over MCP. Only the
  * server defines effects; `crew` and `mcp` briefings carry effect `none` only.
@@ -223,6 +225,34 @@ export function listBriefings(
   return rows.map(toBriefing);
 }
 
+/** A zone whose open briefings the floor holds back: one line for the lot, not each briefing. */
+export type HeldZone = { zoneId: string; repo: string; mode: string; count: number };
+
+/** Modes in which a zone starts no work, so its briefings wait off the floor (issue #98). */
+const HELD_MODES: ReadonlySet<string> = new Set(['paused', 'observe']);
+
+/**
+ * The open briefings the floor lists, and the zones (paused or observing) whose briefings it holds
+ * back. Only the floor's view: the briefings are unchanged, and resuming the zone lists them again.
+ */
+export function floorBriefings(
+  db: Db,
+  zones: readonly Pick<DropZoneConfig, 'id' | 'repo' | 'mode'>[],
+): { listed: Briefing[]; held: HeldZone[] } {
+  const open = listBriefings(db, { state: 'open' });
+  const held = zones
+    .map((z) => ({ zoneId: z.id, repo: z.repo, mode: getZoneMode(db, z.id, z.mode), count: 0 }))
+    .filter((z) => HELD_MODES.has(z.mode));
+  const byZone = new Map(held.map((z) => [z.zoneId, z]));
+  const listed: Briefing[] = [];
+  for (const b of open) {
+    const h = byZone.get(b.zoneId);
+    if (h) h.count++;
+    else listed.push(b);
+  }
+  return { listed, held: held.filter((z) => z.count > 0) };
+}
+
 function getBriefing(db: Db, id: number): Briefing | undefined {
   const r = db.prepare(`SELECT ${BRIEFING_COLS} FROM briefings WHERE id = ?`).get(id) as
     | BriefingRow
@@ -278,6 +308,26 @@ export function ruleBriefing(
       .run(b.zoneId, id, optionId, note, at, option.label, option.effect);
     return { ok: true as const, rulingId: Number(r.lastInsertRowid) };
   })();
+}
+
+/**
+ * Dismisses the zone's open briefings among `ids` (the ones Command was shown), each as one
+ * dismissal: no ruling is recorded, so no effect applies and nothing is written to the forge.
+ * Returns the ids dismissed; another zone's briefing, or one no longer open, is left alone.
+ */
+export function dismissZoneBriefings(
+  db: Db,
+  zoneId: string,
+  ids: readonly number[],
+  now: Date,
+): number[] {
+  const dismiss = db.prepare(
+    `UPDATE briefings SET state = 'dismissed', updated_at = ?
+       WHERE id = ? AND zone_id = ? AND state = 'open'`,
+  );
+  return db.transaction(() =>
+    [...new Set(ids)].filter((id) => dismiss.run(now.toISOString(), id, zoneId).changes === 1),
+  )();
 }
 
 export function listRulings(db: Db, zoneId: string, limit = 50): Ruling[] {
@@ -527,6 +577,7 @@ export async function applyPendingRulings(
  * briefing is diagnosed afresh. An item whose briefing was ruled is not briefed again until it
  * parks again or its gate park is judged afresh (a new head, merge base or change list), unless
  * the ruling was refused as out of date: then Command is asked again about what it is parked on.
+ * A dismissed briefing counts as answered the same way.
  */
 export function syncParkBriefings(db: Db, zone: DropZoneConfig, now: Date): void {
   const parked = listWorkItems(db, zone.id, 'parked');
@@ -538,7 +589,8 @@ export function syncParkBriefings(db: Db, zone: DropZoneConfig, now: Date): void
   }
   const parkedAt = db.prepare('SELECT updated_at AS at FROM work_items WHERE id = ?');
   const ruledSince = db.prepare(
-    `SELECT 1 FROM briefings b WHERE b.zone_id = ? AND b.subject = ? AND b.state = 'ruled'
+    `SELECT 1 FROM briefings b WHERE b.zone_id = ? AND b.subject = ?
+       AND b.state IN ('ruled','dismissed')
        AND b.updated_at >= ?
        AND NOT EXISTS (SELECT 1 FROM rulings r WHERE r.briefing_id = b.id AND r.apply_error = ?)
      LIMIT 1`,

@@ -1,6 +1,7 @@
 import { PRESETS } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { withCsrf } from '../auth/guard.js';
+import { listBriefings } from '../briefings.js';
 import type { ConfigStore } from '../config/store.js';
 import { STARTER_WARNING } from '../config.js';
 import type { Db } from '../db/open.js';
@@ -10,7 +11,7 @@ import { latestDoctorRun } from '../doctor/run.js';
 import { BASE_EGRESS } from '../payloads.js';
 import { PRESET_EGRESS } from '../presets.js';
 import { FORM_SCRIPT, zoneToForm } from '../zones/form.js';
-import { escapeHtml, MODE_LABELS, page } from './pages.js';
+import { escapeHtml, MODE_LABELS, page, zoneBriefingsHref } from './pages.js';
 import { getWizard, projectBody } from './setup.js';
 import { zoneName, zoneNameText } from './zone-name.js';
 
@@ -255,8 +256,9 @@ ${field('overrideApprovers', 'Override approvers (logins)', textarea(f, 'overrid
     readOnly,
   );
   const base = zoneHref(id);
+  const briefings = listBriefings(db, { zoneId: id, state: 'open' }).length;
   return page(
-    `<p><a href="/">Home</a> · <a href="/zones">Zones</a> · <a href="${base}/github">GitHub</a></p>
+    `<p><a href="/">Home</a> · <a href="/zones">Zones</a> · <a href="${base}/github">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${briefings} open)</a></p>
 <h2>${zoneName(resolved, all)}</h2><p>${escapeHtml(MODE_LABELS[mode] ?? mode)}</p>
 ${stopping ? `<p><strong>${escapeHtml(stopping)}</strong> <small>Resume or Pause from the Zones list withdraws it.</small></p>` : ''}
 ${readOnly || stopping ? '' : `<p>${stopButton(id, zoneNameText(resolved, all))}<small>No new work, then removed once drained; open pull requests and history stay.</small> <span id="stop-out" role="status"></span></p>`}

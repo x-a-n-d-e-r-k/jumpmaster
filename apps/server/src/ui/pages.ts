@@ -1,5 +1,11 @@
 import type { ArtifactRow } from '../artifacts.js';
-import { type Briefing, optionsDigest, type Ruling, WAITS_FOR_CREW } from '../briefings.js';
+import {
+  type Briefing,
+  type HeldZone,
+  optionsDigest,
+  type Ruling,
+  WAITS_FOR_CREW,
+} from '../briefings.js';
 import { type DropZoneConfig, STARTER_WARNING } from '../config.js';
 import type { CrewIssue } from '../crew/store.js';
 import type {
@@ -68,8 +74,10 @@ export interface HomeState {
   details?: Map<number, ItemDetail>;
   /** Outbox ops needing attention (`unknown` or `failed`). */
   outbox?: OutboxRow[];
-  /** Open briefings, for "Waiting on you". */
+  /** Open briefings, for "Waiting on you": a paused or observing zone's are held back. */
   briefings?: Briefing[];
+  /** The zones whose briefings are held back, one collapsed line each. */
+  heldBriefings?: HeldZone[];
   /** One line per zone about its crew. */
   crew?: CrewLine[];
   /** Every enrolled stick, and the zones each can't run. */
@@ -207,14 +215,36 @@ function outboxSection(ops: OutboxRow[] | undefined, name: (id: string) => strin
   );
 }
 
-/** The home page's list of open briefings, each linking to where it is answered. */
-export function waitingOnYou(open: Briefing[], zones: readonly ZoneRef[] = []): string {
+const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+/** A zone's briefings view: where the floor's held line and the zone page link. */
+export const zoneBriefingsHref = (zoneId: string): string =>
+  `/briefings?zone=${encodeURIComponent(zoneId)}`;
+
+/**
+ * The home page's list of open briefings, each linking to where it is answered. A paused or
+ * observing zone's briefings are not listed or counted: the zone gets one line linking to them.
+ */
+export function waitingOnYou(
+  open: Briefing[],
+  held: HeldZone[] = [],
+  zones: readonly ZoneRef[] = [],
+): string {
   const name = zoneNamer(zones);
+  const heldLines =
+    held.length === 0
+      ? ''
+      : `<ul class="held">${held
+          .map(
+            (z) =>
+              `<li><a href="${escapeHtml(zoneBriefingsHref(z.zoneId))}">${zones.some((c) => c.id === z.zoneId) ? name(z.zoneId) : escapeHtml(z.repo)}: ${escapeHtml(z.mode)}, ${plural(z.count, 'briefing')} held</a></li>`,
+          )
+          .join('')}</ul>`;
   if (open.length === 0) {
     return card(
       'Briefings',
       '<h2>Waiting on you</h2>',
-      '<p class="empty">Nothing is waiting on you. <a href="/briefings">Briefings and rulings</a></p>',
+      `<p class="empty">Nothing is waiting on you. <a href="/briefings">Briefings and rulings</a></p>${heldLines}`,
     );
   }
   const rows = open
@@ -226,7 +256,7 @@ export function waitingOnYou(open: Briefing[], zones: readonly ZoneRef[] = []): 
   return card(
     'Briefings',
     '<h2>Waiting on you</h2>',
-    `<p>${open.length} decision${open.length === 1 ? '' : 's'} waiting. <a href="/briefings">Answer them on the briefings page</a>.</p><ul>${rows}</ul>`,
+    `<p>${plural(open.length, 'decision')} waiting. <a href="/briefings">Answer them on the briefings page</a>.</p><ul>${rows}</ul>${heldLines}`,
     'attention',
   );
 }
@@ -298,6 +328,16 @@ function briefingBlock(
   );
 }
 
+/**
+ * Dismisses the zone's briefings shown here, after a confirmation that states the count. It posts
+ * the ids shown, so a briefing raised since is not dismissed unseen.
+ */
+function dismissAllForm(zoneId: string, open: Briefing[]): string {
+  const what = `${plural(open.length, 'briefing')} of ${zoneId}`;
+  const ask = `Dismiss ${what}? Each is taken off the floor without a ruling: nothing it is about is ruled on, and nothing is written to GitHub.`;
+  return `<form id="dismiss-all" data-zone="${escapeHtml(zoneId)}" data-ids="${escapeHtml(JSON.stringify(open.map((b) => b.id)))}" data-ask="${escapeHtml(ask)}"><button class="danger">Dismiss all ${escapeHtml(what)}</button></form><script>{const f=document.getElementById('dismiss-all');f.addEventListener('submit',async(e)=>{e.preventDefault();if(!confirm(f.dataset.ask))return;const r=await jmFetch('/api/control/zones/'+encodeURIComponent(f.dataset.zone)+'/briefings/dismiss',{ids:JSON.parse(f.dataset.ids)});if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});}</script>`;
+}
+
 /** Briefings waiting on Command, with a rule form each, and the rulings recorded so far. */
 export function renderBriefings(s: {
   open: Briefing[];
@@ -305,12 +345,17 @@ export function renderBriefings(s: {
   zones: DropZoneConfig[];
   /** Hold-until per subject, for held refute promotions. */
   holds?: Map<string, string>;
+  /** One zone's view (`open` and `rulings` are that zone's): it offers the bulk dismiss. */
+  zone?: { id: string; mode: string };
 }): string {
   const name = zoneNamer(s.zones);
   const open =
     s.open.length === 0
       ? '<p>Nothing is waiting on you.</p>'
       : s.open.map((b) => briefingBlock(b, s.holds, name)).join('') + RULE_SCRIPT;
+  const head = s.zone
+    ? `<p><a href="/">Back</a> · <a href="/briefings">All briefings</a></p><h2>Briefings of ${name(s.zone.id)} <small>(${escapeHtml(s.zone.mode)})</small></h2>${s.open.length > 0 ? dismissAllForm(s.zone.id, s.open) : ''}`
+    : '<p><a href="/">Back</a></p><h2>Briefings (decisions waiting on you)</h2>';
   const crewOff = new Set(s.zones.filter((z) => !z.crew?.enabled).map((z) => z.id));
   // Recorded, and held until the zone's crew is enabled again (applyPendingRulings).
   const waiting = (r: Ruling) =>
@@ -326,7 +371,7 @@ export function renderBriefings(s: {
     )
     .join('');
   return page(
-    `<p><a href="/">Back</a></p><h2>Briefings (decisions waiting on you)</h2>${open}` +
+    `${head}${open}` +
       `<h2>Rulings (decisions recorded)</h2><table><tr><th>Ruling</th><th>Zone</th><th>Briefing</th><th>Choice</th><th>Note</th><th>Ruled</th><th>Applied</th><th>Error</th><th>Diagnosis</th></tr>${rulings}</table>`,
   );
 }
@@ -626,7 +671,7 @@ export function renderHome(state: HomeState): string {
       setupFrame +
       starterBanner +
       (state.briefings
-        ? `<div class="grid">${waitingOnYou(state.briefings, state.zones)}</div>`
+        ? `<div class="grid">${waitingOnYou(state.briefings, state.heldBriefings, state.zones)}</div>`
         : '') +
       `<h2 class="section-h">Running now <small class="muted">Troopers: one job slot each</small></h2>${slots}` +
       `<div class="grid wide">${card('Ready work', '<h2>Up next</h2>', queue)}${usageSection(state.usage) || card('Claude subscription', '<h2>Usage</h2>', '<p class="empty">No usage reported yet.</p>')}</div>` +
