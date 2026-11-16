@@ -15,6 +15,7 @@ import {
 import { creditsPass } from './credits.js';
 import { openDb } from './db/open.js';
 import { reconcileZone } from './flow/reconcile.js';
+import { createAppBrokers } from './forge/app-brokers.js';
 import { createAppTokenSource } from './forge/app-tokens.js';
 import { makeReadForgeFor, TIMED_REQUEST_MS } from './forge/read-forge.js';
 import { serverScrubSet } from './forge/scrub-set.js';
@@ -156,6 +157,9 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     now: Date.now,
     add: (s) => serverScrubSet.add(s),
   });
+  // The push containers' tokens in app mode (§4.2, issue #224): one broker per owner and role,
+  // every key, JWT and token in the scrub set before use.
+  const appBrokers = createAppBrokers({ apps: () => live.resolvedApps() });
   // The doctor's forge on the read token (or, with none, the reviewer app's contents: read token):
   // reads only, never handed a write.
   const readForgeFor = makeReadForgeFor(live, appTokens);
@@ -197,6 +201,8 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     kick: () => void guardedPass(),
     log,
     images: images.mirror,
+    appBrokers,
+    resolvedApps: () => live.resolvedApps(),
   });
 
   const expireLeases = leaseExpirer(db, () => live.current().usage);
