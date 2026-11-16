@@ -19,9 +19,11 @@ For the repository owner. A release is a version tag on `main`. Pushing it runs
      index lists exactly every manifest the two builds list, attestations included; after, it
      reads the index back by its digest (never through the tag). The
      **index digest** is the image's release digest: it is what is signed, locked and pulled.
-   - `apps` (per arch) builds the server with the release's `images.lock.json` (index digests)
-     baked in, and the stick with the release version, this repository as its trusted signer and
-     the egress proxy's index digest; `apps-index` joins them the same way.
+   - `stick` (per arch) builds the stick with the release version, this repository as its
+     trusted signer and the egress proxy's and trooper's index digests; `stick-index` joins it.
+   - `apps` (per arch) then builds the server with the release's `images.lock.json` (index
+     digests) baked in, the stick's included, so a release server mirrors the stick for the
+     one-line installer; `apps-index` joins it the same way.
 3. **sign**: signs every image by its index digest with cosign keyless, then verifies each with
    exactly the checks the stick makes (the identity flags, and every signed payload naming that
    digest). Renders `compose.yaml` from `deploy/compose.yaml.tmpl`, writes `images.lock.json` and
