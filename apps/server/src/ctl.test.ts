@@ -1237,3 +1237,135 @@ describe('ctl dismiss', () => {
     expect(ctlRequest(['dismiss', 'web', '1.5'])).toBeNull();
   });
 });
+
+describe('ctl briefings reads on its own (#226)', () => {
+  // The two briefings Command found barely actionable, as the route now serves them.
+  const refuteExhausted = {
+    id: 142,
+    zone: 'main',
+    kind: 'refute_exhausted',
+    subject: 'issue:21',
+    decision: 'Promote crew issue #224 as revised?',
+    options: [
+      {
+        id: 'promote',
+        label: 'Promote',
+        effectText: 'the issue gets the ready label; an implementer takes it as written',
+      },
+      {
+        id: 'reject',
+        label: 'Reject',
+        effectText: 'the issue is closed; the crew may file a replacement',
+      },
+    ],
+    optionsDigest: 'abc123',
+    about: {
+      text: '#224 Push tokens in app mode: a contents:write token per push',
+      url: 'https://github.com/octo/demo/issues/224',
+    },
+    why: [
+      "#224 Push tokens in app mode: a contents:write token per push was reviewed 2 times. Each review asked for changes, and the last revision hasn't been reviewed.",
+      '',
+      'Review 1 (2026-11-01 10:05 UTC), asked to revise:',
+      '  1. Criterion 2 is not testable.',
+      '  full text: /drops/r1',
+      '',
+      'Review 2 (2026-11-01 11:05 UTC), asked to revise:',
+      '  1. The token scope is wider than the push needs.',
+      '  full text: /drops/r2',
+      '',
+      "Promote if the last review's findings were only wording; reject if it found a design problem.",
+    ].join('\n'),
+    recommendation: '',
+    onHold: 'crew issue #224',
+  };
+  const crewLead = {
+    id: 150,
+    zone: 'main',
+    kind: 'crew',
+    subject: 'crew:Objective pointer still on Task 7 after Ruling 42',
+    decision: 'Objective pointer still on Task 7 after Ruling 42',
+    options: [
+      {
+        id: 'o1',
+        label: 'File app-push-token first',
+        effectText: 'recorded as guidance for the crew; nothing changes on GitHub',
+      },
+      {
+        id: 'o2',
+        label: 'Drop kill-suspend-installations',
+        effectText: 'recorded as guidance for the crew; nothing changes on GitHub',
+      },
+    ],
+    optionsDigest: 'def456',
+    about: { text: 'Objective pointer still on Task 7 after Ruling 42' },
+    why: 'Task 5 is done, but Briefing 125 \u001b[31mwas never ruled.',
+    recommendation: 'o1',
+    onHold: 'Task 7',
+  };
+
+  test('the text form gives About with its URL, why, recommendation, on hold, effects and the page', async () => {
+    const r = await run(
+      ['briefings'],
+      '',
+      fakeFetch(200, { briefings: [refuteExhausted, crewLead] }),
+    );
+    expect(r.code).toBe(0);
+    expect(r.out).toEqual([
+      'Briefing 142 (zone main, refute_exhausted)',
+      '  About: #224 Push tokens in app mode: a contents:write token per push <https://github.com/octo/demo/issues/224>',
+      '  Decision: Promote crew issue #224 as revised?',
+      '  Why:',
+      "    #224 Push tokens in app mode: a contents:write token per push was reviewed 2 times. Each review asked for changes, and the last revision hasn't been reviewed.",
+      '',
+      '    Review 1 (2026-11-01 10:05 UTC), asked to revise:',
+      '      1. Criterion 2 is not testable.',
+      '      full text: http://127.0.0.1:7420/drops/r1',
+      '',
+      '    Review 2 (2026-11-01 11:05 UTC), asked to revise:',
+      '      1. The token scope is wider than the push needs.',
+      '      full text: http://127.0.0.1:7420/drops/r2',
+      '',
+      "    Promote if the last review's findings were only wording; reject if it found a design problem.",
+      '  On hold: crew issue #224',
+      '  Options:',
+      '    promote: Promote: the issue gets the ready label; an implementer takes it as written',
+      '    reject: Reject: the issue is closed; the crew may file a replacement',
+      '  Rule: jumpmaster ctl rule 142 <option> --options abc123 [note]',
+      '  Page: http://127.0.0.1:7420/briefings/142',
+      '',
+      'Briefing 150 (zone main, crew)',
+      '  About: Objective pointer still on Task 7 after Ruling 42',
+      '  Decision: Objective pointer still on Task 7 after Ruling 42',
+      '  Why:',
+      '    Task 5 is done, but Briefing 125 [31mwas never ruled.',
+      '  Recommendation: o1',
+      '  On hold: Task 7',
+      '  Options:',
+      '    o1: File app-push-token first: recorded as guidance for the crew; nothing changes on GitHub',
+      '    o2: Drop kill-suspend-installations: recorded as guidance for the crew; nothing changes on GitHub',
+      '  Rule: jumpmaster ctl rule 150 <option> --options def456 [note]',
+      '  Page: http://127.0.0.1:7420/briefings/150',
+    ]);
+    const none = await run(['briefings'], '', fakeFetch(200, { briefings: [] }));
+    expect(none.out).toEqual(['nothing is waiting on you']);
+  });
+
+  test('--json keeps every old key and adds about, why, recommendation, onHold and effectText', async () => {
+    expect(ctlRequest(['briefings', '--json'])).toEqual({
+      path: '/api/control/briefings',
+      method: 'GET',
+    });
+    expect(ctlRequest(['briefings', 'extra'])).toBeNull();
+    const r = await run(['briefings', '--json'], '', fakeFetch(200, { briefings: [crewLead] }));
+    expect(r.code).toBe(0);
+    const [b] = (JSON.parse(r.out.join('\n')) as { briefings: Record<string, unknown>[] })
+      .briefings;
+    for (const key of ['id', 'zone', 'kind', 'subject', 'decision', 'options', 'optionsDigest'])
+      expect(b, key).toHaveProperty(key);
+    expect(b).toEqual(crewLead);
+    // A refusal is printed as it came, and fails.
+    const refused = await run(['briefings'], '', fakeFetch(401, { error: 'unauthorized' }));
+    expect(refused.code).toBe(1);
+  });
+});

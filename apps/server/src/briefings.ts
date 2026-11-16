@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { DropZoneConfig } from './config.js';
 import { applyCreditsEffect } from './credits.js';
 import { crewBodySha, liveCrewBody } from './crew/flush.js';
-import { getCrewIssue, setCrewIssue } from './crew/store.js';
+import { type CrewIssue, getCrewIssue, listCrewIssues, setCrewIssue } from './crew/store.js';
 import type { Db } from './db/open.js';
 import {
   activeDropFor,
@@ -29,15 +29,54 @@ export type BriefingKind =
   | 'refute_exhausted'
   | 'crew'
   | 'credits_required';
-export type Effect =
-  | 'none'
-  | 'retry_item'
-  | 'promote_issue'
-  | 'reject_issue'
-  | 'restage_issue'
-  | 'enable_fable'
-  | 'allow_gate_change'
-  | 'resume_after_credits';
+/** Every option effect the server defines. */
+export const EFFECTS = [
+  'none',
+  'retry_item',
+  'promote_issue',
+  'reject_issue',
+  'restage_issue',
+  'enable_fable',
+  'allow_gate_change',
+  'resume_after_credits',
+] as const;
+export type Effect = (typeof EFFECTS)[number];
+
+/**
+ * What each option effect does, in one line beside its label on the page and in `ctl briefings`.
+ * `byKind` says it more exactly for a kind whose `none` means something else (Leave parked, Noted).
+ */
+export const EFFECT_TEXT: Record<
+  Effect,
+  { text: string; byKind?: Partial<Record<BriefingKind, string>> }
+> = {
+  none: {
+    text: 'recorded as guidance for the crew; nothing changes on GitHub',
+    byKind: {
+      parked: 'the item stays parked; nothing runs and nothing changes on GitHub',
+      credits_required: 'recorded; nothing runs on credits and nothing changes on GitHub',
+    },
+  },
+  retry_item: {
+    text: 'the parked item goes back to work: an agent runs it again from where it parked',
+  },
+  promote_issue: { text: 'the issue gets the ready label; an implementer takes it as written' },
+  reject_issue: { text: 'the issue is closed; the crew may file a replacement' },
+  restage_issue: {
+    text: 'the issue text is taken as edited on GitHub, and a fresh refute reviews it before any promotion',
+  },
+  enable_fable: { text: 'drops may run on Fable again; nothing changes on GitHub' },
+  allow_gate_change: {
+    text: 'the gate changes listed are allowed for this head only; the item can then merge',
+  },
+  resume_after_credits: {
+    text: 'drops start again and run on credits until the limit given; nothing changes on GitHub',
+  },
+};
+
+/** The line beside an option's label: what choosing it does. */
+export const effectText = (kind: BriefingKind, effect: Effect): string =>
+  EFFECT_TEXT[effect].byKind?.[kind] ?? EFFECT_TEXT[effect].text;
 /**
  * `sha` is set by the server on an `allow_gate_change` option: the head it was offered for. A crew
  * briefing carries effect `none` only, so it can never offer one.
@@ -253,7 +292,7 @@ export function floorBriefings(
   return { listed, held: held.filter((z) => z.count > 0) };
 }
 
-function getBriefing(db: Db, id: number): Briefing | undefined {
+export function getBriefing(db: Db, id: number): Briefing | undefined {
   const r = db.prepare(`SELECT ${BRIEFING_COLS} FROM briefings WHERE id = ?`).get(id) as
     | BriefingRow
     | undefined;
@@ -701,5 +740,143 @@ function parkBriefing(db: Db, zoneId: string, item: WorkItem): NewBriefing {
     recommendation: '',
     onHold: `Issue #${item.issueNumber}`,
     source: 'server',
+  };
+}
+
+/** What a briefing is about, resolved for a reader: an issue's number and title, linked. */
+export type About = { text: string; url?: string };
+
+/** An issue (or pull request: GitHub redirects) of the zone's repository. */
+export const issueUrl = (repo: string, n: number): string =>
+  `https://github.com/${repo}/issues/${n}`;
+
+/**
+ * A briefing's subject resolved: `issue:<crewIssueId>` and `item:<workItemId>` to `#<n> <title>`
+ * linked to the zone's repository (a crew issue not filed yet by its key), `crew:<text>` to the
+ * text, and anything else as it is.
+ */
+export function briefingAbout(
+  db: Db,
+  zone: Pick<DropZoneConfig, 'repo'> | undefined,
+  b: Pick<Briefing, 'subject'>,
+): About {
+  const linked = (n: number, title: string): About => ({
+    text: `#${n} ${title}`,
+    ...(zone ? { url: issueUrl(zone.repo, n) } : {}),
+  });
+  const issueId = idOf(b.subject, 'issue:');
+  if (issueId !== null) {
+    const c = getCrewIssue(db, issueId);
+    if (c)
+      return c.number === null
+        ? { text: `crew issue ${c.key} (not filed yet)` }
+        : linked(c.number, c.title);
+  }
+  const itemId = idOf(b.subject, 'item:');
+  if (itemId !== null) {
+    const item = getWorkItem(db, itemId);
+    if (item) return linked(item.issueNumber, item.title);
+  }
+  if (b.subject.startsWith('crew:')) return { text: b.subject.slice('crew:'.length) };
+  return { text: b.subject };
+}
+
+/** The zone's filed crew issues by key: a key named in a briefing gets its `#<number>`. */
+export function crewKeyNumbers(db: Db, zoneId: string): Map<string, number> {
+  const keys = new Map<string, number>();
+  for (const c of listCrewIssues(db, zoneId)) if (c.number !== null) keys.set(c.key, c.number);
+  return keys;
+}
+
+/** The line a `refute_exhausted` briefing ends with: written here, never by a model. */
+export const REFUTE_RECOMMENDATION =
+  "Promote if the last review's findings were only wording; reject if it found a design problem.";
+/** The most of one finding a briefing quotes; the drop page has the full text. */
+export const MAX_FINDING = 400;
+
+type RefuteVerdict = { decision?: unknown; findings?: unknown };
+
+const minuteUtc = (iso: string): string => `${iso.slice(0, 16).replace('T', ' ')} UTC`;
+
+const quote = (finding: string): string => {
+  const flat = finding.replace(/\s+/g, ' ').trim();
+  return flat.length <= MAX_FINDING ? flat : `${flat.slice(0, MAX_FINDING - 1)}…`;
+};
+
+/** How a crew issue is named in a briefing's text. */
+const crewIssueName = (c: Pick<CrewIssue, 'number' | 'key' | 'title'>): string =>
+  c.number === null
+    ? `Crew issue ${c.key} (not filed yet), ${c.title},`
+    : `#${c.number} ${c.title}`;
+
+/**
+ * A `refute_exhausted` briefing's why, from the stored refute drops of the issue's current attempts:
+ * how often it was reviewed, then each review's date and findings (each cut to MAX_FINDING, with
+ * the drop page for the full text), then REFUTE_RECOMMENDATION.
+ */
+export function refuteExhaustedWhy(db: Db, issue: CrewIssue): string {
+  const rows = db
+    .prepare(
+      `SELECT id, created_at AS createdAt, finished_at AS finishedAt, result_json AS resultJson
+         FROM drops WHERE drop_zone_id = ? AND role = 'refute'
+           AND json_extract(input_json, '$.work.crewIssueId') = ?
+         ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+    )
+    .all(issue.zoneId, issue.id, Math.max(issue.refuteCount, 1)) as {
+    id: string;
+    createdAt: string;
+    finishedAt: string | null;
+    resultJson: string | null;
+  }[];
+  const reviews = rows.reverse().flatMap((r) => {
+    let crew: RefuteVerdict | undefined;
+    try {
+      crew = (JSON.parse(r.resultJson ?? 'null') as { crew?: RefuteVerdict } | null)?.crew;
+    } catch {
+      crew = undefined;
+    }
+    if (!crew || typeof crew.decision !== 'string') return [];
+    const findings = Array.isArray(crew.findings)
+      ? crew.findings.filter((f): f is string => typeof f === 'string')
+      : [];
+    return [{ id: r.id, at: r.finishedAt ?? r.createdAt, decision: crew.decision, findings }];
+  });
+  const name = crewIssueName(issue);
+  const k = reviews.length;
+  const times = k === 1 ? 'once' : `${k} times`;
+  const head =
+    k === 0
+      ? `${name} was never reviewed: its ${issue.refuteCount} refute attempts ended without a verdict.`
+      : reviews.every((r) => r.decision === 'revise')
+        ? `${name} was reviewed ${times}. Each review asked for changes, and the last revision hasn't been reviewed.`
+        : `${name} was reviewed ${times}, and its current text hasn't been reviewed: the refute attempts are used up.`;
+  const lines = [head];
+  reviews.forEach((r, i) => {
+    lines.push('', `Review ${i + 1} (${minuteUtc(r.at)}), asked to ${r.decision}:`);
+    if (r.findings.length === 0) lines.push('  (no findings)');
+    r.findings.forEach((f, j) => {
+      lines.push(`  ${j + 1}. ${quote(f)}`);
+    });
+    lines.push(`  full text: /drops/${r.id}`);
+  });
+  const tail = `\n\n${REFUTE_RECOMMENDATION}`;
+  let body = lines.join('\n');
+  if (body.length + tail.length > MAX_BRIEFING_WHY) {
+    const cut = '\n… (cut: the drop pages have every finding)';
+    body = body.slice(0, MAX_BRIEFING_WHY - tail.length - cut.length) + cut;
+  }
+  return body + tail;
+}
+
+/** What the page and `ctl briefings` show beside the briefings: each one's About, each zone's keys. */
+export function briefingContext(
+  db: Db,
+  zones: readonly Pick<DropZoneConfig, 'id' | 'repo'>[],
+  briefings: readonly Briefing[],
+): { about: Map<number, About>; crewKeys: Map<string, Map<string, number>> } {
+  const byId = new Map(zones.map((z) => [z.id, z]));
+  return {
+    about: new Map(briefings.map((b) => [b.id, briefingAbout(db, byId.get(b.zoneId), b)])),
+    crewKeys: new Map(zones.map((z) => [z.id, crewKeyNumbers(db, z.id)])),
   };
 }

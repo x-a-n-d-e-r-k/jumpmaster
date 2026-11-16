@@ -244,6 +244,8 @@ export const DropZoneObject = z.object({
    * an implementer (with the crew on and `triage.gate`). Must differ from the other labels.
    */
   triageLabel: z.string().min(1).default('jm-triage'),
+  /** Put on an issue triage has finished with (split, or not agent work), replacing the triage label. */
+  triagedLabel: z.string().min(1).default('jm-triaged'),
   /** `gate: false` admits every trusted human ready issue, formatted or not, as before #183. */
   triage: z.object({ gate: z.boolean().default(true) }).default({ gate: true }),
   mergeMethod: z.literal('squash').default('squash'),
@@ -354,6 +356,20 @@ const DropZoneSchema = DropZoneObject.superRefine((zone, ctx) => {
         code: 'custom',
         path: ['triageLabel'],
         message: `triageLabel must differ from ${field}`,
+      });
+    }
+  }
+  for (const [field, label] of [
+    ['readyLabel', zone.readyLabel],
+    ['retryLabel', zone.retryLabel],
+    ['triageLabel', zone.triageLabel],
+    ['crew.stagedLabel', zone.crew.stagedLabel],
+  ] as const) {
+    if (zone.triagedLabel === label) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['triagedLabel'],
+        message: `triagedLabel must differ from ${field}`,
       });
     }
   }

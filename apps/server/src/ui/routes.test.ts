@@ -102,6 +102,47 @@ describe('UI routes', () => {
     expect(html).toMatch(/new-stick<\/td>.*all zones/);
   });
 
+  test('/briefings resolves About and crew keys, and /briefings/<n> shows one briefing (#226)', async () => {
+    const h = await crewHarness();
+    const at = h.now();
+    const issue = insertCrewIssue(h.db, {
+      zoneId: 'main',
+      key: 'app-push-token',
+      source: 'drop',
+      objective: 'o',
+      title: 'Push tokens in app mode',
+      body: 'b',
+      priority: null,
+      createdAt: at.toISOString(),
+      number: 224,
+    });
+    const id = raiseBriefing(
+      h.db,
+      {
+        zoneId: 'main',
+        kind: 'promote',
+        subject: `issue:${issue}`,
+        decision: 'Promote it?',
+        why: 'Land app-push-token before Briefing 999.',
+        options: [{ id: 'promote', label: 'Promote', effect: 'promote_issue' }],
+        source: 'server',
+      },
+      at,
+    );
+    const list = await get(h, '/briefings');
+    expect(list.body).toContain('>#224 Push tokens in app mode</a>');
+    expect(list.body).toContain(
+      'app-push-token (<a href="https://github.com/octo/demo/issues/224" target="_blank" rel="noopener noreferrer">#224</a>)',
+    );
+    const one = await get(h, `/briefings/${id}`);
+    expect(one.statusCode).toBe(200);
+    expect(one.body).toContain(`id="briefing-${id}"`);
+    expect(one.body).toContain('>#224 Push tokens in app mode</a>');
+    expect(one.body).toContain('<a href="/briefings/999">Briefing 999</a>');
+    expect((await get(h, '/briefings/999')).statusCode).toBe(404);
+    expect((await get(h, '/briefings/abc')).statusCode).toBe(404);
+  });
+
   test('/briefings lists open briefings and recorded rulings', async () => {
     const h = await crewHarness();
     const at = h.now();

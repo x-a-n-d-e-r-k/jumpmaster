@@ -56,7 +56,16 @@ And at the top level of the server config:
   authors' issues under the zone's `triageLabel`, after diagnose and refute and before the lead
   cycle, only in an active zone with a free crew-issue slot. Its children are filed as staged
   crew issues under objective `triage:#N`, and go through refute and promotion like the lead's.
-  It never writes to the original issue.
+  On the original issue it leaves one comment and, for a split or not-agent-work, swaps
+  `triageLabel` for `triagedLabel` (see the install runbook's "How Jumpmaster triages issues").
+- A triage drop gets the issue's images. The server fetches at most 4 image URLs from the
+  issue body, only GitHub attachments (`https://github.com/user-attachments/assets/…`,
+  `user-images.githubusercontent.com`, `private-user-images.githubusercontent.com`), over HTTPS,
+  10 s each, following at most 3 redirects and only to the two `githubusercontent.com` hosts.
+  The read token (`JM_GITHUB_READ_TOKEN`) goes to `github.com` only and never across a redirect.
+  Each image is at most 3 MiB (8 MiB in all) and must be PNG, JPEG, GIF or WebP by its bytes;
+  anything else is skipped with a short reason and the drop still runs. The agent reads them as
+  `inputs/image-<n>.<ext>` in the trooper's work directory, as data like the issue text.
 - `maxDropsPerDay` counts crew drops (crew-lead, refute, diagnose, triage) over a trailing 24 hours,
   including failed and killed ones but not rate-limited or lost ones.
   Each ruling on a crew briefing starts a new crew-lead cycle, so a busy day can hit the cap; crew
@@ -300,7 +309,8 @@ this zone's items and that a revoked or expired token gets 401.
   under an `mcp:` subject: they can never update a crew or server briefing, and raising one on the
   subject of an open assistant briefing replaces its text.
 - **Ruling on an assistant briefing** checks that its options are the ones you read. The page
-  sends that for you; from a terminal, take the `optionsDigest` from `ctl briefings` and pass it:
+  sends that for you; from a terminal, `ctl briefings` prints it on each briefing's `Rule:` line
+  (`optionsDigest` with `--json`); pass it:
   `ctl rule <briefing> <option> --options <digest> [note]`. If the assistant rewrote the options
   since, the ruling is refused (409 "options changed"): read them again. Every ruling records the
   label and effect you chose.

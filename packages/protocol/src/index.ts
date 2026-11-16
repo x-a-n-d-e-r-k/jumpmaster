@@ -1,7 +1,23 @@
 import { basename, matchesGlob } from 'node:path';
 import { z } from 'zod';
+import {
+  MAX_TRIAGE_IMAGES,
+  MAX_TRIAGE_IMAGES_SKIPPED,
+  TriageImageSchema,
+  TriageImageSkippedSchema,
+} from './media.js';
 
 export const EVENT_PREFIX = 'JM_EVENT ';
+/** One part of an event too large for a single `JM_EVENT ` line. */
+export const EVENT_PART_PREFIX = 'JM_EVENT_PART ';
+/** A serialized event at or under this size goes out as one `JM_EVENT ` line. */
+export const MAX_EVENT_LINE_BYTES = 63 * 1024;
+/** The largest serialized event, sent in parts: a bigger one keeps its first 2 MiB. */
+export const MAX_EVENT_BYTES = 2 * 1024 * 1024;
+/** The bytes of a serialized event one part carries, before base64. */
+export const EVENT_PART_BYTES = 45 * 1024;
+/** The most parts one event can take. */
+export const MAX_EVENT_PARTS = Math.ceil(MAX_EVENT_BYTES / EVENT_PART_BYTES);
 export const RESULT_PREFIX = 'JM_RESULT ';
 export const ARTIFACT_PREFIX = 'JM_ARTIFACT ';
 export const MAX_ARTIFACTS = 10;
@@ -228,7 +244,14 @@ export const DropPayloadSchema = z.discriminatedUnion('role', [
   z.object({ ...dropPayloadBase, role: z.literal('resolve'), pr: PrRefSchema }),
   z.strictObject({ ...crewPayloadBase, role: z.literal('crew-lead') }),
   z.strictObject({ ...crewPayloadBase, role: z.literal('refute') }),
-  z.strictObject({ ...crewPayloadBase, role: z.literal('triage') }),
+  z.strictObject({
+    ...crewPayloadBase,
+    role: z.literal('triage'),
+    /** The issue's images, fetched and checked by the server (0..4), each checked again here. */
+    images: z.array(TriageImageSchema).max(MAX_TRIAGE_IMAGES).optional(),
+    /** One entry per image URL that was not fetched, with a short reason. */
+    imagesSkipped: z.array(TriageImageSkippedSchema).max(MAX_TRIAGE_IMAGES_SKIPPED).optional(),
+  }),
   z.strictObject({
     ...crewPayloadBase,
     role: z.literal('diagnose'),
@@ -518,6 +541,15 @@ export const TrooperEventSchema = z.object({
 });
 export type TrooperEvent = z.infer<typeof TrooperEventSchema>;
 
+/** Part `n` of `of` of event `id` (a per-drop counter): a base64 slice of the serialized event. */
+export const EventPartSchema = z.object({
+  id: z.number().int().nonnegative(),
+  n: z.number().int().positive(),
+  of: z.number().int().positive().max(MAX_EVENT_PARTS),
+  chunk: z.string().max(Math.ceil(EVENT_PART_BYTES / 3) * 4),
+});
+export type EventPart = z.infer<typeof EventPartSchema>;
+
 /** What a doctor drop found. Every error text is redacted by the trooper before it is sent. */
 export const DoctorResultSchema = z.object({
   claude: z.object({
@@ -576,6 +608,7 @@ export const DropResultSchema = z.object({
 });
 export type DropResult = z.infer<typeof DropResultSchema>;
 export * from './egress.js';
+export * from './media.js';
 export {
   containsSecret,
   dropSecrets,

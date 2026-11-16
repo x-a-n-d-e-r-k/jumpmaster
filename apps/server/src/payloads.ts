@@ -9,6 +9,8 @@ import {
   isCrewRole,
   normalizeHost,
   type Role,
+  type TriageImage,
+  type TriageImageSkipped,
 } from '@jumpmaster/protocol';
 import {
   type ClaudeConfig,
@@ -183,6 +185,10 @@ export type CrewInputJson = {
     | { role: 'triage'; requestId: number }
     | { role: 'crew-lead' };
   input: string;
+  /** A triage drop's issue images, fetched and checked at enqueue (`crew/images.ts`). */
+  images?: TriageImage[];
+  /** One short reason per image URL not fetched. */
+  imagesSkipped?: TriageImageSkipped[];
 };
 
 /**
@@ -226,6 +232,16 @@ function buildCrewPayload(
         : {}),
     },
   };
+  if (role === 'triage') {
+    return {
+      ...common,
+      role,
+      ...(stored.images && stored.images.length > 0 ? { images: stored.images } : {}),
+      ...(stored.imagesSkipped && stored.imagesSkipped.length > 0
+        ? { imagesSkipped: stored.imagesSkipped }
+        : {}),
+    };
+  }
   if (role !== 'diagnose') return { ...common, role };
   const work = stored.work;
   const itemId = work.role === 'diagnose' ? work.itemId : null;

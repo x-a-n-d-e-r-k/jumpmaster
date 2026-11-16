@@ -1,3 +1,4 @@
+import { DropPayloadSchema } from '@jumpmaster/protocol';
 import { beforeEach, describe, expect, test } from 'vitest';
 import {
   listBriefings,
@@ -22,7 +23,7 @@ import { reconcileZone } from '../flow/reconcile.js';
 import { zonePass } from '../flow/snapshot.js';
 import { refreshGoals } from '../goals.js';
 import { leaseNextDrop } from '../leases.js';
-import { promptVersions } from '../payloads.js';
+import { buildPayload, promptVersions } from '../payloads.js';
 import { crewOn, crewWorld, ISSUE_BODY } from '../test/crew.js';
 import { makeZone, usageCfg, type ZoneWorld } from '../test/fixtures.js';
 import { plus, t0 } from '../test/helpers.js';
@@ -345,6 +346,71 @@ describe('triage scheduling (#184)', () => {
     finish(t);
     setTriageRequest(w.db, req, { state: 'done', outcome: 'not-agent-work' }, t0);
     expect(nextCrewWork(w.db, w.zone, plus(t0, 3 * MIN))).toEqual({ role: 'crew-lead' });
+  });
+
+  test("a triage drop carries the issue's images, fetched at enqueue, into its payload (#186)", async () => {
+    const png = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from('png'),
+    ]);
+    const url = 'https://github.com/user-attachments/assets/179';
+    request(179, `Overage Included\n\n![gauge](${url})\n![x](https://evil.example/a.png)`);
+    const seen: { url: string; headers: Record<string, string> }[] = [];
+    const t =
+      (await enqueueCrew(
+        w.db,
+        w.forges,
+        w.zone,
+        await zonePass(w.forges, w.zone, 'main'),
+        promptVersions(),
+        usageCfg,
+        t0,
+        {
+          token: 'ghs_READ',
+          fetch: async (u, init) => {
+            seen.push({ url: u, headers: init.headers });
+            return new Response(new Uint8Array(png), { status: 200 });
+          },
+        },
+      )) ?? '';
+    expect(seen).toEqual([{ url, headers: { authorization: 'Bearer ghs_READ' } }]);
+    const p = buildPayload(
+      w.db,
+      w.zone,
+      getDrop(w.db, t) as never,
+      {
+        claudeToken: 'c',
+        githubAuthorToken: 'a',
+      } as never,
+    );
+    expect(DropPayloadSchema.safeParse(p).success).toBe(true);
+    expect(p).toMatchObject({
+      role: 'triage',
+      images: [{ mediaType: 'image/png', base64: png.toString('base64') }],
+      imagesSkipped: [{ reason: 'host not allowed' }],
+    });
+    expect(JSON.stringify(p)).not.toContain('ghs_READ');
+  });
+
+  test('a fetch that fails still enqueues the triage drop (D2)', async () => {
+    request(179, '![a](https://github.com/user-attachments/assets/1)');
+    const t = await enqueueCrew(
+      w.db,
+      w.forges,
+      w.zone,
+      await zonePass(w.forges, w.zone, 'main'),
+      promptVersions(),
+      usageCfg,
+      t0,
+      {
+        fetch: async () => {
+          throw new Error('network down');
+        },
+      },
+    );
+    expect(t).not.toBeNull();
+    const stored = JSON.parse(getDrop(w.db, t ?? '')?.inputJson ?? '{}') as CrewInputJson;
+    expect(stored).toMatchObject({ images: [], imagesSkipped: [{ reason: 'fetch failed' }] });
   });
 
   test('the oldest open request goes first', () => {

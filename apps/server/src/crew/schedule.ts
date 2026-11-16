@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Role } from '@jumpmaster/protocol';
-import { raiseBriefing, whyBasis } from '../briefings.js';
+import { raiseBriefing, refuteExhaustedWhy, whyBasis } from '../briefings.js';
 import type { DropZoneConfig, UsageConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import {
@@ -12,12 +12,14 @@ import {
 } from '../db/repo.js';
 import type { ZonePass } from '../flow/snapshot.js';
 import { getGoals } from '../goals.js';
-import type { ForgePair } from '../outbox.js';
+import { type ForgePair, unsanitizeForgeText } from '../outbox.js';
 import type { CrewInputJson } from '../payloads.js';
 import { dispatchGate, gateQueuesCrew } from '../usage.js';
 import { crewIssueSlots } from './actions.js';
 import { PROMOTE_OPTIONS, subjectOf } from './flush.js';
+import { fetchIssueImages, type ImageFetchOpts } from './images.js';
 import { crewLeadInput, diagnoseInput, refuteInput, triageInput } from './inputs.js';
+import { getCrewIssue, getTriageRequest } from './store.js';
 
 export type { CrewInputJson } from '../payloads.js';
 
@@ -71,12 +73,14 @@ export function nextCrewWork(db: Db, zone: DropZoneConfig, now: Date): CrewWork 
   // body unjudged: put it to Command rather than leave it staged forever.
   const exhausted = db
     .prepare(
-      `SELECT id, number, key FROM crew_issues WHERE zone_id = ? AND state = 'staged'
+      `SELECT id FROM crew_issues WHERE zone_id = ? AND state = 'staged'
          AND body_sha IS NOT NULL AND (refuted_sha IS NULL OR refuted_sha <> body_sha)
          AND refute_count >= ?`,
     )
-    .all(zone.id, zone.crew.maxRefute) as { id: number; number: number | null; key: string }[];
-  for (const c of exhausted) {
+    .all(zone.id, zone.crew.maxRefute) as { id: number }[];
+  for (const { id } of exhausted) {
+    const c = getCrewIssue(db, id);
+    if (!c) continue;
     const label = c.number !== null ? `crew issue #${c.number}` : `crew issue ${c.key}`;
     raiseBriefing(
       db,
@@ -85,7 +89,7 @@ export function nextCrewWork(db: Db, zone: DropZoneConfig, now: Date): CrewWork 
         kind: 'refute_exhausted',
         subject: subjectOf(c),
         decision: `Promote ${label} without a refute verdict?`,
-        why: `Its ${zone.crew.maxRefute} refute attempts ended without judging the current text.`,
+        why: refuteExhaustedWhy(db, c),
         options: PROMOTE_OPTIONS,
         onHold: label,
         source: 'server',
@@ -174,7 +178,8 @@ const observeDetail = (w: CrewWork): string =>
  * Queues the zone's next crew drop, if any, with its rendered input. Runs only with the crew
  * enabled, the zone active (observe records `would_enqueue:<role>` instead), the kill switch off,
  * the usage gate open, no crew drop active, and the zone under `maxDropsPerDay`. The lead cycle also
- * needs a parsed GOAL.md. Attempts are counted here, at enqueue.
+ * needs a parsed GOAL.md. Attempts are counted here, at enqueue. With `images`, a triage drop
+ * also carries the issue's images, fetched and checked here (`crew/images.ts`).
  */
 export async function enqueueCrew(
   db: Db,
@@ -184,6 +189,7 @@ export async function enqueueCrew(
   versions: Record<Role, string>,
   usageCfg: UsageConfig,
   now: Date,
+  images?: ImageFetchOpts,
 ): Promise<string | null> {
   if (!zone.crew?.enabled || isKilled(db)) return null;
   const mode = getZoneMode(db, zone.id, zone.mode);
@@ -217,6 +223,14 @@ export async function enqueueCrew(
     return null;
   }
   const stored: CrewInputJson = { work, input };
+  if (work.role === 'triage' && images) {
+    // The issue's images, fetched here: the server has the network and the read token, the
+    // trooper's egress does not. A failure skips that image; it never stops the drop.
+    const req = getTriageRequest(db, work.requestId);
+    const found = await fetchIssueImages(unsanitizeForgeText(req?.body ?? ''), images);
+    stored.images = found.images;
+    stored.imagesSkipped = found.imagesSkipped;
+  }
   try {
     db.transaction(() => {
       if (work.role === 'diagnose') {

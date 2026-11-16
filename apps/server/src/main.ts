@@ -248,6 +248,13 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
               config.usage,
               secrets,
               new Date(),
+              // A triage drop's issue images: the read token goes to github.com only.
+              {
+                fetch: globalThis.fetch,
+                ...(config.secrets.githubReadToken
+                  ? { token: config.secrets.githubReadToken }
+                  : {}),
+              },
             );
           },
           log,

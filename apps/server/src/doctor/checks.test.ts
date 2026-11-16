@@ -545,6 +545,13 @@ describe('forge checks', () => {
     expect(c).toMatchObject({ status: 'fail', summary: expect.stringContaining('jm-triage') });
     expect(c.fix).toContain('gh label create jm-triage --repo octo/demo');
     w.f.state.labels.push('jm-triage');
+    const triaged = one(await w.run(), 'forge.labels');
+    expect(triaged).toMatchObject({
+      status: 'fail',
+      summary: expect.stringContaining('jm-triaged'),
+    });
+    expect(triaged.fix).toContain('gh label create jm-triaged --repo octo/demo');
+    w.f.state.labels.push('jm-triaged');
     expect(one(await w.run(), 'forge.labels').status).toBe('pass');
     // With the gate off (or the crew off) nothing writes the label, so it is not needed.
     const off = world({ zone: { crew, protectedPaths: ['GOAL.md'], triage: { gate: false } } });

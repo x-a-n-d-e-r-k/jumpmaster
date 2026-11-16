@@ -3,7 +3,9 @@ import { agentBranch, type GateResult, type Role, type Verdict } from '@jumpmast
 import { applyPendingRulings, syncParkBriefings } from '../briefings.js';
 import type { DropZoneConfig, UsageConfig } from '../config.js';
 import { flushCrewOps } from '../crew/flush.js';
+import type { ImageFetchOpts } from '../crew/images.js';
 import { enqueueCrew } from '../crew/schedule.js';
+import { flushTriageTrail } from '../crew/trail.js';
 import type { Db } from '../db/open.js';
 import {
   deleteFailedOutbox,
@@ -362,6 +364,7 @@ export async function reconcileZone(
   usageCfg: UsageConfig,
   secrets: string[],
   now: Date,
+  crewImages?: ImageFetchOpts,
 ): Promise<ReconcileReport> {
   let actions = 0;
   let merges = 0;
@@ -383,6 +386,8 @@ export async function reconcileZone(
     const deps = { forges: () => forges, zone: () => zone };
     actions += await applyPendingRulings(db, deps, zone.id, now);
     actions += await flushCrewOps(db, forges, zone, secrets, now);
+    // In the same pass that confirms crew issue numbers: a split's comment names its children.
+    actions += await flushTriageTrail(db, forges, zone, secrets, now);
   }
   const pulls = await forges.author.listOpenAgentPulls('agent/issue-');
   actions += await adopt(db, forges, zone, pass, pulls, now);
@@ -460,11 +465,12 @@ export async function reconcileZone(
       const detail = `issue #${pick.issueNumber}`;
       recordObservation(db, zone.id, pick.id, 'would_enqueue:implement', detail, now);
     }
-    await enqueueCrew(db, forges, zone, pass, versions, usageCfg, now);
+    await enqueueCrew(db, forges, zone, pass, versions, usageCfg, now, crewImages);
     return { actions, merges };
   }
   if (enqueueNext(db, zone, versions.implement, usageCfg, now, branchUnknown) !== null) actions++;
   // Last, so crew work never takes a place ahead of finishing or implement work.
-  if ((await enqueueCrew(db, forges, zone, pass, versions, usageCfg, now)) !== null) actions++;
+  if ((await enqueueCrew(db, forges, zone, pass, versions, usageCfg, now, crewImages)) !== null)
+    actions++;
   return { actions, merges };
 }
