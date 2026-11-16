@@ -352,6 +352,21 @@ function isRepoName(repo: string): boolean {
   return REPO_NAME.test(repo) && repo !== '.' && repo !== '..' && !containsSecret(repo, []);
 }
 
+/**
+ * Where a forge gets its token. `token()` runs before every request, so a provider backed by the
+ * server-token cache hands out a re-minted token once the old one nears expiry (spec §4.3).
+ * `invalidate`, when present, runs once on a 401 so the next request gets a fresh token.
+ */
+export interface TokenProvider {
+  token(): Promise<string>;
+  invalidate?(): void;
+}
+
+/** A provider that always returns the same token and has nothing to invalidate. */
+export function staticTokenProvider(token: string): TokenProvider {
+  return { token: () => Promise.resolve(token) };
+}
+
 export class GitHubForge implements Forge {
   private readonly octokit: Octokit;
   private viewer: Promise<string> | undefined;
@@ -363,7 +378,7 @@ export class GitHubForge implements Forge {
   constructor(
     private readonly owner: string,
     private readonly repo: string,
-    token: string,
+    token: string | TokenProvider,
     opts: { requestTimeoutMs?: number } = {},
   ) {
     // A value in the wrong slot (a token as `owner`) would end up in every request path, and
@@ -374,7 +389,8 @@ export class GitHubForge implements Forge {
     const ms = opts.requestTimeoutMs;
     this.octokit = new Octokit({
       // No token: unauthenticated reads (the wizard's owner-type read before any token exists).
-      ...(token ? { auth: token } : {}),
+      // A provider passes no `auth`: its token is set per request by the hook below.
+      ...(typeof token === 'string' && token ? { auth: token } : {}),
       baseUrl: 'https://api.github.com',
       ...(ms === undefined
         ? {}
@@ -390,6 +406,31 @@ export class GitHubForge implements Forge {
               },
             },
           }),
+    });
+    if (typeof token !== 'string') this.authorizeEachRequest(token);
+  }
+
+  /**
+   * Reads the provider's token at request time for every request (REST, GraphQL and each page of
+   * a paginated list). A 401 invalidates the provider once and rethrows, with no retry.
+   */
+  private authorizeEachRequest(provider: TokenProvider): void {
+    const where = `${this.owner}/${this.repo}`;
+    this.octokit.hook.wrap('request', async (request, options) => {
+      let value: string;
+      try {
+        value = await provider.token();
+      } catch {
+        // The provider's error may quote a token or a PEM: drop it, and keep no `cause`.
+        throw new Error(`GitHubForge: could not get a token for ${where}`);
+      }
+      options.headers = { ...options.headers, authorization: `token ${value}` };
+      try {
+        return await request(options);
+      } catch (err) {
+        if ((err as ForgeError | undefined)?.status === 401) provider.invalidate?.();
+        throw err;
+      }
     });
   }
 
