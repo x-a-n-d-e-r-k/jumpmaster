@@ -56,7 +56,8 @@ And at the top level of the server config:
   authors' issues under the zone's `triageLabel`, after diagnose and refute and before the lead
   cycle, only in an active zone with a free crew-issue slot. Its children are filed as staged
   crew issues under objective `triage:#N`, and go through refute and promotion like the lead's.
-  It never writes to the original issue.
+  On the original issue it leaves one comment and, for a split or not-agent-work, swaps
+  `triageLabel` for `triagedLabel` (see the install runbook's "How Jumpmaster triages issues").
 - `maxDropsPerDay` counts crew drops (crew-lead, refute, diagnose, triage) over a trailing 24 hours,
   including failed and killed ones but not rate-limited or lost ones.
   Each ruling on a crew briefing starts a new crew-lead cycle, so a busy day can hit the cap; crew
