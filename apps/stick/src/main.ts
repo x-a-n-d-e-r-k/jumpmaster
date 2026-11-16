@@ -10,6 +10,7 @@ import {
   sweepVolumes,
   TROOPER_IMAGE,
 } from './runner.js';
+import { enrolledSlots, maxSlotsFor, SlotTarget } from './slots.js';
 import {
   advertisedCapabilities,
   healthLine,
@@ -28,6 +29,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const SWEEP_MS = 10 * 60_000;
 /** How long a stick below the free floor waits between re-measurements. */
 const FLOOR_WAIT_MS = 30_000;
+/** How often a full stick asks the server (with no free slot) whether its trooper count changed. */
+const SLOTS_POLL_MS = 10_000;
 
 function need(name: string): string {
   const v = process.env[name];
@@ -37,8 +40,10 @@ function need(name: string): string {
 
 async function main() {
   const serverUrl = need('JM_SERVER_URL');
-  const slots = Number(process.env.JM_SLOTS ?? '1');
-  if (!Number.isInteger(slots) || slots < 1) throw new Error('JM_SLOTS must be an integer >= 1');
+  // JM_SLOTS is the count asked for at enrollment; the server's count (capped here) wins after.
+  const slots = enrolledSlots(process.env);
+  const maxSlots = maxSlotsFor(process.env, slots);
+  const target = new SlotTarget(slots, maxSlots);
   const dir = stateDir(process.env);
   const saved = loadEnrollment(dir, serverUrl);
   const token = saved?.stickToken;
@@ -73,7 +78,8 @@ async function main() {
   console.log(
     `stick ${info.version}: image policy ${info.imagePolicy}, capabilities ${info.capabilities.join(', ') || 'none'}`,
   );
-  const client = new StickClient(serverUrl, token, { info });
+  const client = new StickClient(serverUrl, token, { info, maxSlots });
+  console.log(`troopers: ${target.target} at once to start, at most ${maxSlots}`);
   const leaseLog = leaseLogger((line) => console.error(line));
   if (!token || !stickId) {
     const name = process.env.JM_STICK_NAME ?? 'stick';
@@ -147,8 +153,27 @@ async function main() {
       });
   }, SWEEP_MS).unref();
   let running = 0;
+  let asked = 0;
+  /** Applies the server's trooper count, saying so when the target moves. */
+  const follow = (told: number | null) => {
+    const before = target.target;
+    target.follow(told);
+    asked = Date.now();
+    if (target.target !== before) console.log(`troopers: now ${target.target} at once`);
+  };
   for (;;) {
-    if (running >= slots) {
+    if (target.free(running) < 1) {
+      // Full: nothing running is stopped. Ask now and then, with no free slot, whether the count
+      // went up, so a raise applies before a drop finishes.
+      const terms = leaseTermsNow();
+      if (terms && Date.now() - asked >= SLOTS_POLL_MS) {
+        try {
+          follow((await client.lease(0, terms)).slots);
+        } catch (e) {
+          asked = Date.now();
+          leaseLog.error(e instanceof Error ? e.message : String(e));
+        }
+      }
       await sleep(500);
       continue;
     }
@@ -161,7 +186,8 @@ async function main() {
     const terms = leaseTermsNow();
     if (!terms) continue;
     try {
-      const { drop, skipped } = await client.lease(slots - running, terms);
+      const { drop, skipped, slots: told } = await client.lease(target.free(running), terms);
+      follow(told);
       leaseLog.skipped(skipped);
       if (!drop) continue;
       running++;

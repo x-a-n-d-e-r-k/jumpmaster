@@ -98,7 +98,7 @@ describe('capabilities and lease logging', () => {
       vi.fn(async () => new Response(null, { status: 204, headers: header })),
     );
     const client = new StickClient('http://127.0.0.1:1', 't', { info });
-    expect(await client.lease(1)).toEqual({ drop: null, skipped });
+    expect(await client.lease(1)).toEqual({ drop: null, skipped, slots: null });
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => new Response(JSON.stringify(valid), { status: 200, headers: header })),
@@ -114,7 +114,41 @@ describe('capabilities and lease logging', () => {
           new Response(null, { status: 204, headers: { 'x-jumpmaster-skipped': '%7Bnot' } }),
       ),
     );
-    expect(await client.lease(1)).toEqual({ drop: null, skipped: [] });
+    expect(await client.lease(1)).toEqual({ drop: null, skipped: [], slots: null });
+  });
+
+  test('lease reads the trooper count the server wants from x-jumpmaster-slots, on 200 and 204', async () => {
+    const reply = (status: number, slots?: string) =>
+      vi.fn(
+        async () =>
+          new Response(status === 200 ? JSON.stringify(valid) : null, {
+            status,
+            headers: slots === undefined ? {} : { 'x-jumpmaster-slots': slots },
+          }),
+      );
+    const client = new StickClient('http://127.0.0.1:1', 't', { info });
+    vi.stubGlobal('fetch', reply(204, '3'));
+    expect((await client.lease(1)).slots).toBe(3);
+    vi.stubGlobal('fetch', reply(200, '2'));
+    expect((await client.lease(1)).slots).toBe(2);
+    // An older server sends none; junk counts as none.
+    for (const junk of [undefined, '', 'abc', '0', '1.5', '-1']) {
+      vi.stubGlobal('fetch', reply(204, junk));
+      expect((await client.lease(1)).slots, String(junk)).toBeNull();
+    }
+  });
+
+  test('lease sends the stick ceiling as maxSlots', async () => {
+    const bodies: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: unknown, init: RequestInit) => {
+        bodies.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 204 });
+      }),
+    );
+    await new StickClient('http://127.0.0.1:1', 't', { info, maxSlots: 4 }).lease(0);
+    expect(bodies).toEqual([{ freeSlots: 0, ...info, maxSlots: 4 }]);
   });
 
   test('a non-2xx lease error carries the response body, truncated', async () => {
