@@ -1023,7 +1023,6 @@ test("v28 adds stick invites and the sticks' removal, Auto count and health, uns
     );
   });
   const db = openDb(f);
-  expect(MIGRATIONS.at(-1)?.version).toBe(28);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(
     db
@@ -1045,5 +1044,37 @@ test("v28 adds stick invites and the sticks' removal, Auto count and health, uns
        VALUES ('i2', 'vps-2', NULL, 'hash', 'a', 'b')`,
     ),
   ).toThrow(/UNIQUE/);
+  db.close();
+});
+
+test('v29 lets the outbox hold comment_issue, keeping every row and the kind check', () => {
+  const f = dbAt(28, (raw) =>
+    raw
+      .prepare(
+        `INSERT INTO outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state, created_at, updated_at)
+         VALUES ('o1', 'create_labels:z:1', 'create_labels', NULL, 'z', '{}', 'done', 't', 't')`,
+      )
+      .run(),
+  );
+  const db = openDb(f);
+  expect(MIGRATIONS.at(-1)?.version).toBe(29);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(count(db, 'outbox')).toBe(1);
+  const put = db.prepare(
+    `INSERT INTO outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state, created_at, updated_at)
+     VALUES (?, ?, ?, NULL, 'z', '{}', 'pending', 't', 't')`,
+  );
+  put.run('o2', 'comment:z:triage:1', 'comment_issue');
+  expect(
+    db.prepare('SELECT "table", "from", "to" FROM pragma_foreign_key_list(\'outbox\')').all(),
+  ).toEqual([{ table: 'work_items', from: 'work_item_id', to: 'id' }]);
+  const zoneCol = db
+    .prepare(
+      "SELECT dflt_value AS d, \"notnull\" AS nn FROM pragma_table_info('outbox') WHERE name = 'zone_id'",
+    )
+    .get();
+  expect(zoneCol).toEqual({ d: "''", nn: 1 });
+  expect(() => put.run('o3', 'x', 'delete_comment')).toThrow(/CHECK/);
+  expect(() => put.run('o4', 'comment:z:triage:1', 'comment_issue')).toThrow(/UNIQUE/);
   db.close();
 });

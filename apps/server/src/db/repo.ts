@@ -913,7 +913,8 @@ export interface OutboxRow {
     | 'create_issue'
     | 'update_issue'
     | 'set_labels'
-    | 'create_labels';
+    | 'create_labels'
+    | 'comment_issue';
   /** Null for a zone-level op (issue and label writes). */
   workItemId: number | null;
   zoneId: string;
