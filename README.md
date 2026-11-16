@@ -80,34 +80,55 @@ runbooks and the UI.
 
 ## Quickstart
 
-Five commands, copied as they are: make a directory, download the release, check its signature,
-check the files, and start it.
+Copy the block below as it is: it makes a directory, downloads the release, checks its signature
+and the files, and starts it. It works in bash and in zsh (its first line lets zsh read the
+comments as comments).
 
 ```bash
+setopt interactive_comments 2>/dev/null
+# latest skips pre-releases: to install a release candidate, set VERSION to its tag (for example VERSION=v0.4.0-rc.1).
+VERSION=latest
+if [ "$VERSION" = latest ]; then base=releases/latest/download/; else base=releases/download/$VERSION/; fi
 mkdir jumpmaster && cd jumpmaster
-for f in compose.yaml images.lock.json SHA256SUMS SHA256SUMS.sigstore.json; do curl -fsSLO "https://github.com/x-a-n-d-e-r-k/jumpmaster/releases/latest/download/$f"; done
+for f in compose.yaml images.lock.json SHA256SUMS SHA256SUMS.sigstore.json; do curl -fSLO "https://github.com/x-a-n-d-e-r-k/jumpmaster/$base$f"; done
 cosign verify-blob --bundle SHA256SUMS.sigstore.json \
   --certificate-identity-regexp '^https://github\.com/x-a-n-d-e-r-k/jumpmaster/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-github-workflow-trigger push \
   --certificate-github-workflow-repository x-a-n-d-e-r-k/jumpmaster \
   SHA256SUMS
-sha256sum -c SHA256SUMS
+sha256sum -c SHA256SUMS        # macOS: shasum -a 256 -c SHA256SUMS
 docker compose up
 ```
 
-To install a release candidate (a prerelease, which `latest` skips), replace `latest/download` with
-`download/<tag>`.
+A 404 here means there is no stable release yet: set VERSION to the newest tag on the releases
+page. Releases are listed at <https://github.com/x-a-n-d-e-r-k/jumpmaster/releases>.
 
-(On macOS, `shasum -a 256 -c SHA256SUMS` in place of `sha256sum -c SHA256SUMS`.) `docker compose
-up` stays in the foreground so you can read its output; `docker compose up -d` followed by
-`docker compose logs -f jumpmaster` does the same in the background.
+**No cosign?** Run it from its image instead: define `cosign_docker` (it mounts only the two
+release files, read-only), then run the `cosign verify-blob` command above with `cosign_docker`
+in place of `cosign`, and carry on from `sha256sum`. The
+[install runbook](docs/runbooks/install.md#step-1-download-and-verify-the-release) defines the
+same function.
 
-Then open `http://127.0.0.1:7420` and enter the setup code from the line that starts
-`JUMPMASTER SETUP CODE:`. You choose a passphrase, and the setup wizard takes you through the
-Claude token, the GitHub tokens and your repository (`your-org/your-repo`), the ruleset and
-CODEOWNERS files it generates for GitHub, and the doctor. Everything after `docker compose up`
-happens in the browser.
+```bash
+cosign_docker() {
+  docker run --rm -w /w \
+    -v "$PWD/SHA256SUMS:/w/SHA256SUMS:ro" \
+    -v "$PWD/SHA256SUMS.sigstore.json:/w/SHA256SUMS.sigstore.json:ro" \
+    ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d "$@"
+}
+```
+
+`docker compose up` stays in the foreground so you can read its output. To run it in the
+background instead, use `docker compose up -d`: the setup code is in
+`docker compose logs jumpmaster`.
+
+Then open `http://127.0.0.1:7420/setup` (the address the server prints) and enter the setup code
+from the line that starts `JUMPMASTER SETUP CODE:`. You choose a passphrase and land on the
+wizard's first step (Claude); the setup wizard takes you through the Claude token, the GitHub
+tokens and your repository (`your-org/your-repo`), the ruleset and CODEOWNERS files it generates
+for GitHub, and the doctor. If you leave early, the home page shows **Finish setup** to take you back. Everything
+after `docker compose up` happens in the browser.
 
 On a server, reach the page through an SSH tunnel from your own machine:
 `ssh -L 7420:127.0.0.1:7420 <host>`. If the first `up` stops with

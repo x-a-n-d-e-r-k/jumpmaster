@@ -1,7 +1,16 @@
 // The README and runbooks a stranger installs from: every link resolves, every anchor the code
 // and docs point at exists (GitHub's heading slugs), every doctor check id has a troubleshooting
 // entry, no image is named by tag, and the cosign commands match what the stick verifies.
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, normalize, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
@@ -311,9 +320,12 @@ function section(md: string, heading: RegExp): string {
   const start = lines.findIndex((l) => heading.test(l));
   if (start < 0) throw new Error(`no heading ${heading}`);
   const level = (lines[start]?.match(/^#+/)?.[0] ?? '#').length;
-  const end = lines.findIndex(
-    (l, i) => i > start && /^#+ /.test(l) && (l.match(/^#+/)?.[0] ?? '').length <= level,
-  );
+  // A `# comment` inside a fenced block is not a heading.
+  let fenced = false;
+  const end = lines.findIndex((l, i) => {
+    if (/^\s*(```|~~~)/.test(l)) fenced = !fenced;
+    return i > start && !fenced && /^#+ /.test(l) && (l.match(/^#+/)?.[0] ?? '').length <= level;
+  });
   return lines.slice(start, end < 0 ? undefined : end).join('\n');
 }
 
@@ -333,31 +345,35 @@ export function ctlTable(): string {
 }
 
 describe('M4.5 docs (Task 15)', () => {
-  test("the README's prelude is at most six commands and names no .env, secrets/ or token file", () => {
+  test("the README's prelude downloads, verifies and starts, and names no .env, secrets/ or token file", () => {
     const quick = section(read('README.md'), /^## Quickstart/);
     const block = fences(quick)[0];
     expect(block?.lang).toMatch(/^(sh|bash)$/);
     const cmds = commands(block?.body ?? '');
-    expect(cmds.length).toBeGreaterThanOrEqual(5);
-    expect(cmds.length).toBeLessThanOrEqual(6);
     expect(cmds.join('\n')).not.toMatch(/\.env|secrets\/|_token|put /);
-    expect(cmds[0]).toMatch(/^mkdir .* && cd /);
-    expect(cmds[1]).toMatch(
-      /compose\.yaml images\.lock\.json SHA256SUMS SHA256SUMS\.sigstore\.json/,
-    );
-    expect(cmds[2]).toMatch(/^cosign verify-blob /);
-    expect(cmds[3]).toMatch(/^sha256sum -c SHA256SUMS/);
-    expect(cmds[4]).toBe('docker compose up');
+    const at = (re: RegExp) => cmds.findIndex((c) => re.test(c));
+    const order = [
+      at(/^setopt interactive_comments 2>\/dev\/null$/),
+      at(/^VERSION=latest$/),
+      at(/^if .*base=/),
+      at(/^mkdir .* && cd /),
+      at(/compose\.yaml images\.lock\.json SHA256SUMS SHA256SUMS\.sigstore\.json/),
+      at(/^cosign verify-blob /),
+      at(/^sha256sum -c SHA256SUMS/),
+      at(/^docker compose up$/),
+    ];
+    expect(order).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    expect(cmds).toHaveLength(8);
     // Then the browser: the setup code's line, the tunnel for a server, and the alternative.
     for (const t of [
       'JUMPMASTER SETUP CODE:',
-      'http://127.0.0.1:7420',
+      'http://127.0.0.1:7420/setup',
       'ssh -L 7420:127.0.0.1:7420 <host>',
       'docker compose up -d',
-      'docker compose logs -f jumpmaster',
+      'the setup code is in `docker compose logs jumpmaster`',
       'jumpmaster ctl help',
     ])
-      expect(quick, t).toContain(t);
+      expect(quick.replace(/\s*\n\s*/g, ' '), t).toContain(t);
     // The scripted install lives in the runbook.
     expect(quick).not.toContain('--profile init');
   });
@@ -470,14 +486,20 @@ describe('M4.5 docs (Task 15)', () => {
   });
 
   test('the prelude says how to install a release candidate, and no doc names a particular tag or a diagnostics export', () => {
-    const rc =
-      'To install a release candidate (a prerelease, which `latest` skips), replace `latest/download` with `download/<tag>`.';
+    const rc = 'for example VERSION=v0.4.0-rc.1';
     for (const file of ['README.md', INSTALL]) {
-      const text = read(file).replace(/\s*\n\s*/g, ' ');
+      const text = read(file);
+      const flat = text.replace(/\s*\n\s*/g, ' ');
+      expect(flat, file).not.toContain('replace `latest/download`');
+      expect(flat, file).toContain(
+        'A 404 here means there is no stable release yet: set VERSION to the newest tag on the releases page.',
+      );
+      expect(text, file).not.toContain('curl -fsSLO');
       expect(text, file).toContain(rc);
     }
     for (const file of ['README.md', INSTALL, OPERATE, 'SECURITY.md']) {
-      expect(read(file), file).not.toMatch(/rc\.1/);
+      // The one tag a doc names is the example of a release candidate's VERSION.
+      expect(read(file).replaceAll(rc, ''), file).not.toMatch(/rc\.1/);
       expect(read(file), file).not.toMatch(/diagnostics export/i);
     }
   });
@@ -490,7 +512,7 @@ describe('M4.5 docs (Task 15)', () => {
     expect(up).not.toMatch(/mkdir jumpmaster/);
     // Step 2's own commands (an indented fence inside the list), for the directory you are in.
     for (const cmd of [
-      /^ {3}for f in compose\.yaml .*curl -fsSLO/m,
+      /^ {3}for f in compose\.yaml .*curl -fSLO/m,
       /^ {3}cosign verify-blob /m,
       /^ {3}sha256sum -c SHA256SUMS/m,
     ])
@@ -569,5 +591,127 @@ describe('push container docs (push-container Task 14)', () => {
       'Ruling',
     ])
       expect(spec, s).toContain(s);
+  });
+});
+
+describe('a first install from the docs (issue 160)', () => {
+  const flat = (md: string) => md.replace(/\s*\n\s*/g, ' ');
+  const FILES = ['compose.yaml', 'images.lock.json', 'SHA256SUMS', 'SHA256SUMS.sigstore.json'];
+  const BASE = `https://github.com/${REPOSITORY}/releases`;
+  const quickBlock = () => fences(section(read('README.md'), /^## Quickstart/))[0]?.body ?? '';
+  const step1Block = () =>
+    fences(section(read(INSTALL), /^### Step 1: Download and verify the release/))[0]?.body ?? '';
+  const upgradeBlock = () =>
+    (
+      section(read(INSTALL), /^## Upgrade/).match(/^ {3}```bash\n([\s\S]*?)^ {3}```$/m)?.[1] ?? ''
+    ).replace(/^ {3}/gm, '');
+  const has = (shell: string) => spawnSync(shell, ['-c', 'true']).status === 0;
+
+  /** The block's lines up to its download loop, run in an empty directory with a stub curl. */
+  function download(shell: string, body: string, version: string): string[] {
+    const lines = body.split('\n');
+    const loop = lines.findIndex((l) => l.startsWith('for f in compose.yaml'));
+    expect(loop).toBeGreaterThan(0);
+    const script = lines
+      .slice(0, loop + 1)
+      .map((l) => (l === 'VERSION=latest' ? `VERSION=${version}` : l))
+      .join('\n');
+    const dir = mkdtempSync(join(tmpdir(), 'jm-quickstart-'));
+    const bin = join(dir, 'bin');
+    spawnSync('mkdir', ['-p', bin, join(dir, 'work')]);
+    writeFileSync(
+      join(bin, 'curl'),
+      '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$CURL_LOG"\nfor a; do u=$a; done\n: > "${u##*/}"\n',
+    );
+    chmodSync(join(bin, 'curl'), 0o755);
+    const log = join(dir, 'curl.log');
+    // zsh reads the paste line by line, as an interactive shell does, with its interactive default.
+    const pre = shell === 'zsh' ? 'unsetopt interactive_comments\n' : '';
+    const r = spawnSync(shell, shell === 'zsh' ? ['-f'] : [], {
+      cwd: join(dir, 'work'),
+      input: `${pre}${script}\n`,
+      env: { PATH: `${bin}:${process.env.PATH}`, CURL_LOG: log, HOME: dir },
+      encoding: 'utf8',
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).toBe('');
+    for (const f of FILES)
+      expect(
+        existsSync(join(dir, 'work', 'jumpmaster', f)) || existsSync(join(dir, 'work', f)),
+        f,
+      ).toBe(true);
+    return readFileSync(log, 'utf8').trim().split('\n');
+  }
+
+  test('the README block carries the VERSION switch and shows curl errors', () => {
+    const block = quickBlock();
+    expect(block).toContain('VERSION=latest');
+    expect(block).toContain('releases/download/$VERSION/');
+    expect(block).toContain('releases/latest/download/');
+    expect(block).not.toContain('curl -fsSLO');
+    expect(block).toContain('curl -fSLO');
+    expect(block).toMatch(/^# .*latest.* skips pre-releases/m);
+    expect(block).toMatch(/^sha256sum -c SHA256SUMS +# macOS: shasum -a 256 -c SHA256SUMS$/m);
+  });
+
+  for (const shell of ['bash', 'zsh'])
+    test.skipIf(!has(shell))(
+      `pasted into ${shell}, each download block fetches the four files for latest and for a tag`,
+      () => {
+        for (const [name, body] of [
+          ['README', quickBlock()],
+          ['install.md step 1', step1Block()],
+          ['install.md upgrade', upgradeBlock()],
+        ] as const) {
+          const urls = (v: string) => download(shell, body, v).map((l) => l.split(' ').at(-1));
+          expect(urls('latest'), name).toEqual(FILES.map((f) => `${BASE}/latest/download/${f}`));
+          expect(urls('v0.4.0-rc.1'), name).toEqual(
+            FILES.map((f) => `${BASE}/download/v0.4.0-rc.1/${f}`),
+          );
+          for (const l of download(shell, body, 'latest')) expect(l, name).toMatch(/^-fSLO /);
+        }
+      },
+    );
+
+  test('the README and install.md blocks are the same download and checks', () => {
+    expect(step1Block()).toBe(quickBlock().replace(/\ndocker compose up\n$/, '\n'));
+  });
+
+  test('the README says how to verify without cosign, with the same cosign_docker install.md defines', () => {
+    const quick = section(read('README.md'), /^## Quickstart/);
+    const def = (md: string) => md.match(/^cosign_docker\(\) \{\n[\s\S]*?^\}$/m)?.[0];
+    expect(quick).toMatch(/^\*\*No cosign\?\*\*/m);
+    expect(def(quick)).toBeDefined();
+    expect(def(quick)).toBe(def(section(read(INSTALL), /^### Step 1:/)));
+    expect(flat(quick)).toContain('`cosign_docker` in place of `cosign`');
+  });
+
+  test('no doc counts the commands, and each names the address the server prints', () => {
+    const steps = [2, 3].map((n) => section(read(INSTALL), new RegExp(`^### Step ${n}:`)));
+    for (const [name, text] of [
+      ['README', section(read('README.md'), /^## Quickstart/)],
+      ['install.md step 2', steps[0] as string],
+      ['install.md step 3', steps[1] as string],
+    ] as const) {
+      expect(text, name).toContain('http://127.0.0.1:7420/setup');
+      expect(text.replaceAll('http://127.0.0.1:7420/setup', ''), name).not.toMatch(
+        /https?:\/\/127\.0\.0\.1:7420/,
+      );
+    }
+    for (const file of ['README.md', INSTALL])
+      expect(flat(read(file)), file).not.toMatch(/\b(five|four|six) (shell )?commands\b/i);
+  });
+
+  test('both say where the passphrase step lands, and where the setup code is after up -d', () => {
+    const quick = flat(section(read('README.md'), /^## Quickstart/));
+    const step4 = flat(section(read(INSTALL), /^### Step 4:/));
+    for (const text of [quick, step4]) {
+      expect(text).toContain("the wizard's first step (Claude)");
+      expect(text).toContain('**Finish setup**');
+    }
+    const logs = 'the setup code is in `docker compose logs jumpmaster`';
+    expect(quick).toContain(logs);
+    expect(flat(section(read(INSTALL), /^### Step 2:/))).toContain(logs);
+    expect(flat(section(read(INSTALL), /^### Start, claim and check it/))).toContain(logs);
   });
 });
