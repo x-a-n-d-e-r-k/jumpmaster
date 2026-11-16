@@ -1,7 +1,12 @@
 import dns from 'node:dns';
 import nock from 'nock';
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
-import { bufferedResponse, GitHubForge } from './github.js';
+import {
+  bufferedResponse,
+  GitHubForge,
+  staticTokenProvider,
+  type TokenProvider,
+} from './github.js';
 
 const api = 'https://api.github.com';
 
@@ -1324,5 +1329,161 @@ describe('constructor names', () => {
   test('constructs with a valid owner and repository', () => {
     expect(() => new GitHubForge('octo-org', 'my_repo.js-2', 'tok')).not.toThrow();
     expect(() => new GitHubForge('a'.repeat(39), 'b'.repeat(100), '')).not.toThrow();
+  });
+});
+
+describe('token providers', () => {
+  const alnum = (n: number) => 'aB3'.repeat(Math.ceil(n / 3)).slice(0, n);
+  const pat = `ghp_${alnum(36)}`;
+
+  beforeAll(() => {
+    nock.disableNetConnect();
+  });
+  afterEach(() => {
+    expect(nock.pendingMocks()).toEqual([]);
+    nock.cleanAll();
+  });
+
+  /** A provider that hands out the given tokens in turn, repeating the last one. */
+  function sequence(...tokens: string[]) {
+    let i = 0;
+    const invalidate = vi.fn();
+    const provider: TokenProvider = {
+      token: vi.fn(async () => tokens[Math.min(i++, tokens.length - 1)]!),
+      invalidate,
+    };
+    return { provider, invalidate };
+  }
+
+  test('a string token sends it as `authorization: token <value>`, as before', async () => {
+    nock(api)
+      .matchHeader('authorization', `token ${pat}`)
+      .get('/repos/o/r')
+      .reply(200, { default_branch: 'main' });
+    expect(await new GitHubForge('o', 'r', pat).getDefaultBranch()).toBe('main');
+  });
+
+  test('an empty string token sends no authorization header', async () => {
+    nock(api, { badheaders: ['authorization'] })
+      .get('/repos/o/r')
+      .reply(200, { default_branch: 'main' });
+    expect(await new GitHubForge('o', 'r', '').getDefaultBranch()).toBe('main');
+  });
+
+  test('staticTokenProvider returns the same token every time and has no invalidate', async () => {
+    const p = staticTokenProvider(pat);
+    expect(await p.token()).toBe(pat);
+    expect(await p.token()).toBe(pat);
+    expect(p.invalidate).toBeUndefined();
+    nock(api)
+      .matchHeader('authorization', `token ${pat}`)
+      .get('/repos/o/r')
+      .reply(200, { default_branch: 'main' });
+    expect(await new GitHubForge('o', 'r', p).getDefaultBranch()).toBe('main');
+  });
+
+  test('a provider is read on every request', async () => {
+    const { provider } = sequence('t1', 't2');
+    const forge = new GitHubForge('o', 'r', provider);
+    nock(api)
+      .matchHeader('authorization', 'token t1')
+      .get('/repos/o/r')
+      .reply(200, { default_branch: 'one' });
+    expect(await forge.getDefaultBranch()).toBe('one');
+    nock(api)
+      .matchHeader('authorization', 'token t2')
+      .get('/repos/o/r')
+      .reply(200, { default_branch: 'two' });
+    expect(await forge.getDefaultBranch()).toBe('two');
+  });
+
+  test('a provider token is sent on GraphQL and on each page of a paginated list', async () => {
+    const { provider } = sequence('t1', 't2', 't3');
+    const forge = new GitHubForge('o', 'r', provider);
+    nock(api)
+      .matchHeader('authorization', 'token t1')
+      .get('/repos/o/r/issues')
+      .query(true)
+      .reply(200, [issue(1)], {
+        link: `<${api}/repos/o/r/issues?page=2>; rel="next"`,
+      });
+    nock(api)
+      .matchHeader('authorization', 'token t2')
+      .get('/repos/o/r/issues')
+      .query({ page: '2' })
+      .reply(200, [issue(2)]);
+    nock(api)
+      .matchHeader('authorization', 'token t3')
+      .post('/graphql')
+      .reply(200, async (request: Request) => ({
+        data: {
+          repository: Object.fromEntries(
+            aliasesOf(await request.json()).map((a) => [a, blockerEntry(0, [])]),
+          ),
+        },
+      }));
+    const issues = await forge.listReadyIssues('agent-ready');
+    expect(issues.map((i) => i.number)).toEqual([1, 2]);
+    expect(provider.token).toHaveBeenCalledTimes(3);
+  });
+
+  test('a 401 invalidates the provider once and rethrows; the next request uses a new token', async () => {
+    const { provider, invalidate } = sequence('old', 'new');
+    const forge = new GitHubForge('o', 'r', provider);
+    nock(api)
+      .matchHeader('authorization', 'token old')
+      .get('/repos/o/r')
+      .reply(401, { message: 'Bad credentials' });
+    await expect(forge.getDefaultBranch()).rejects.toMatchObject({ status: 401 });
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    nock(api)
+      .matchHeader('authorization', 'token new')
+      .get('/repos/o/r')
+      .reply(200, { default_branch: 'main' });
+    expect(await forge.getDefaultBranch()).toBe('main');
+    expect(invalidate).toHaveBeenCalledTimes(1);
+  });
+
+  test('a non-401 failure does not invalidate the provider', async () => {
+    const { provider, invalidate } = sequence('t1');
+    nock(api).get('/repos/o/r').reply(404, { message: 'Not Found' });
+    await expect(new GitHubForge('o', 'r', provider).getDefaultBranch()).rejects.toMatchObject({
+      status: 404,
+    });
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  test('a rejecting provider fails the request with an error that holds no secret', async () => {
+    const pem = [
+      '-----BEGIN RSA PRIVATE KEY-----',
+      alnum(64),
+      '-----END RSA PRIVATE KEY-----',
+    ].join('\n');
+    const inner = new Error(`mint failed for ${pat} with key ${pem}`);
+    const forge = new GitHubForge('o', 'r', { token: () => Promise.reject(inner) });
+    let error: unknown;
+    try {
+      await forge.getDefaultBranch();
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(Error);
+    const err = error as Error;
+    expect(err.message).toContain('o/r');
+    const texts: string[] = [];
+    const seen = new Set<unknown>();
+    for (let e: unknown = err; e !== undefined && e !== null && !seen.has(e); ) {
+      seen.add(e);
+      expect(e).not.toBe(inner);
+      texts.push(String(e), String((e as Error).message), String((e as Error).stack));
+      e = (e as { cause?: unknown }).cause;
+    }
+    for (const text of texts) {
+      expect(text).not.toContain(pat);
+      expect(text).not.toContain('PRIVATE KEY');
+      expect(text).not.toContain(alnum(64));
+      expect(text).not.toContain('mint failed');
+    }
+    expect(Object.values(err)).not.toContain(inner);
   });
 });

@@ -105,3 +105,17 @@ export function createTokenCache({ mint, register, now }: TokenCacheDeps): Token
     },
   };
 }
+
+/**
+ * Wires one cache key to the forge's token-provider interface (`TokenProvider` in `github.ts`,
+ * matched by shape: this module imports nothing).
+ */
+export function cachedTokenProvider(
+  cache: TokenCache,
+  key: TokenKey,
+): { token(): Promise<string>; invalidate(): void } {
+  return {
+    token: () => cache.token(key),
+    invalidate: () => cache.invalidate(key),
+  };
+}

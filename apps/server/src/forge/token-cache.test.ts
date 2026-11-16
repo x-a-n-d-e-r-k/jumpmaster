@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
-import { createTokenCache, type TokenKey } from './token-cache.js';
+import { cachedTokenProvider, createTokenCache, type TokenKey } from './token-cache.js';
 
 // Fixture tokens are split after the prefix so no tracked line is token-shaped.
 const fakeToken = (n: number) => 'ghs_' + `FAKE_TOKEN_${String(n).padStart(4, '0')}`;
@@ -261,5 +261,32 @@ describe('createTokenCache', () => {
     expect(src).not.toMatch(/administration|workflows/);
     expect(src).not.toMatch(/\bconsole\b|\bfetch\b|\blogger\b|node:fs|undici|vault/i);
     expect(src).not.toMatch(/^import /m);
+  });
+});
+
+describe('cachedTokenProvider', () => {
+  test("returns the cache's token for its key", async () => {
+    const h = harness();
+    const provider = cachedTokenProvider(h.cache, AUTHOR);
+    const t = await provider.token();
+    expect(t).toBe(await h.cache.token(AUTHOR));
+    expect(h.mint).toHaveBeenCalledTimes(1);
+    expect(h.mint).toHaveBeenCalledWith(AUTHOR);
+  });
+
+  test('invalidate drops only its own key', async () => {
+    const h = harness();
+    const author = cachedTokenProvider(h.cache, AUTHOR);
+    const reviewer = cachedTokenProvider(h.cache, REVIEWER);
+    const a1 = await author.token();
+    const r1 = await reviewer.token();
+    expect(h.mint).toHaveBeenCalledTimes(2);
+
+    author.invalidate();
+    expect(await reviewer.token()).toBe(r1);
+    expect(h.mint).toHaveBeenCalledTimes(2);
+    const a2 = await author.token();
+    expect(a2).not.toBe(a1);
+    expect(h.mint).toHaveBeenCalledTimes(3);
   });
 });
