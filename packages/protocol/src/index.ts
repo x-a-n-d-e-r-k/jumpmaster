@@ -83,7 +83,7 @@ export const SKIPPED_HEADER = 'x-jumpmaster-skipped';
 export const SLOTS_HEADER = 'x-jumpmaster-slots';
 
 /** Roles that work for the zone rather than one work item. They hold no forge write credential. */
-export const CREW_ROLES = ['crew-lead', 'refute', 'diagnose'] as const;
+export const CREW_ROLES = ['crew-lead', 'refute', 'diagnose', 'triage'] as const;
 export type CrewRole = (typeof CREW_ROLES)[number];
 export const isCrewRole = (r: string): r is CrewRole =>
   (CREW_ROLES as readonly string[]).includes(r);
@@ -228,6 +228,7 @@ export const DropPayloadSchema = z.discriminatedUnion('role', [
   z.object({ ...dropPayloadBase, role: z.literal('resolve'), pr: PrRefSchema }),
   z.strictObject({ ...crewPayloadBase, role: z.literal('crew-lead') }),
   z.strictObject({ ...crewPayloadBase, role: z.literal('refute') }),
+  z.strictObject({ ...crewPayloadBase, role: z.literal('triage') }),
   z.strictObject({
     ...crewPayloadBase,
     role: z.literal('diagnose'),
@@ -414,16 +415,69 @@ export const DiagnoseOutputSchema = z.strictObject({
 });
 export type DiagnoseOutput = z.infer<typeof DiagnoseOutputSchema>;
 
+const TriageOutputObject = z.strictObject({
+  summary: z.string().max(4000),
+  outcome: z.enum(['split', 'questions', 'not-agent-work']),
+  children: z
+    .array(
+      z.strictObject({
+        key: z.string().regex(/^[a-z0-9-]{1,40}$/),
+        title: z.string().min(1).max(120),
+        body: z.string().min(1).max(12000),
+        priority: z.enum(PRIORITIES).optional(),
+      }),
+    )
+    .max(5)
+    .optional(),
+  briefing: z
+    .strictObject({
+      subject: z.string().max(80),
+      decision: z.string().max(500),
+      why: z.string().max(2000),
+      options: z.array(z.string().max(200)).min(2).max(4),
+      recommendation: z.string().max(1000),
+      onHold: z.string().max(500),
+    })
+    .optional(),
+  reason: z.string().max(500).optional(),
+});
+
+/**
+ * A triage drop's verdict on one issue. `split` carries 1..5 children and nothing else,
+ * `questions` a briefing and nothing else, `not-agent-work` a reason and nothing else.
+ */
+export const TriageOutputSchema = TriageOutputObject.superRefine((v, ctx) => {
+  const children = v.children?.length ?? 0;
+  const fail = (path: string, message: string) =>
+    ctx.addIssue({ code: 'custom', path: [path], message });
+  if (v.outcome === 'split') {
+    if (children < 1) fail('children', 'split needs 1 to 5 children');
+    if (v.briefing !== undefined) fail('briefing', 'split carries no briefing');
+    if (v.reason !== undefined) fail('reason', 'split carries no reason');
+  } else if (v.outcome === 'questions') {
+    if (v.briefing === undefined) fail('briefing', 'questions needs a briefing');
+    if (children > 0) fail('children', 'questions carries no children');
+    if (v.reason !== undefined) fail('reason', 'questions carries no reason');
+  } else {
+    if (v.reason === undefined) fail('reason', 'not-agent-work needs a reason');
+    if (children > 0) fail('children', 'not-agent-work carries no children');
+    if (v.briefing !== undefined) fail('briefing', 'not-agent-work carries no briefing');
+  }
+});
+export type TriageOutput = z.infer<typeof TriageOutputSchema>;
+
 const CREW_OUTPUT = {
   'crew-lead': CrewLeadOutputSchema,
   refute: RefuteOutputSchema,
   diagnose: DiagnoseOutputSchema,
+  triage: TriageOutputSchema,
 } as const;
 
 export type CrewOutput = {
   'crew-lead': CrewLeadOutput;
   refute: RefuteOutput;
   diagnose: DiagnoseOutput;
+  triage: TriageOutput;
 };
 
 /** The `--json-schema` for a crew role; every object forbids additional properties. */

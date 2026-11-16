@@ -31,7 +31,8 @@ keeps working.
   "stagedLabel": "agent-staged",
   "maxStaged": 3,
   "refutePromotes": false,
-  "maxRefute": 2
+  "maxRefute": 2,
+  "maxTriage": 2
 }
 ```
 
@@ -48,7 +49,15 @@ And at the top level of the server config:
   including ones waiting to be promoted.
 - `maxRefute` caps refute attempts per issue. An attempt counts when the drop is queued, so a
   failed, killed or rate-limited refute uses one up.
-- `maxDropsPerDay` counts crew drops (crew-lead, refute, diagnose) over a trailing 24 hours,
+- `maxTriage` caps triage attempts per issue text. An attempt counts when a triage drop fails,
+  is rate-limited, returns invalid output, or returns children Jumpmaster refuses (all or none of
+  a split is filed). At the cap the request is `failed` and one briefing,
+  `triage of #N failed`, carries the last error (never the issue's text). Triage runs on trusted
+  authors' issues under the zone's `triageLabel`, after diagnose and refute and before the lead
+  cycle, only in an active zone with a free crew-issue slot. Its children are filed as staged
+  crew issues under objective `triage:#N`, and go through refute and promotion like the lead's.
+  It never writes to the original issue.
+- `maxDropsPerDay` counts crew drops (crew-lead, refute, diagnose, triage) over a trailing 24 hours,
   including failed and killed ones but not rate-limited or lost ones.
   Each ruling on a crew briefing starts a new crew-lead cycle, so a busy day can hit the cap; crew
   work then stops until the window rolls.

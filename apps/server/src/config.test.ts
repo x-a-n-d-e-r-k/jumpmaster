@@ -453,6 +453,7 @@ describe('crew config', () => {
       maxStaged: 3,
       refutePromotes: false,
       maxRefute: 2,
+      maxTriage: 2,
     });
     expect(z?.botLogins).toEqual([]);
   });
@@ -1346,6 +1347,7 @@ describe('githubApp (spec §4.2: installation and repository ids, not secret)', 
         maxStaged: 3,
         refutePromotes: false,
         maxRefute: 2,
+        maxTriage: 2,
       },
       botLogins: [],
     });

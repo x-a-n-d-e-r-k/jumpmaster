@@ -180,6 +180,7 @@ export type CrewInputJson = {
         basis?: string;
       }
     | { role: 'refute'; crewIssueId: number }
+    | { role: 'triage'; requestId: number }
     | { role: 'crew-lead' };
   input: string;
 };

@@ -133,6 +133,37 @@ describe('runCrew', () => {
     expect(w.names()).not.toContain('runGates');
   });
 
+  test('triage runs read-only on the default branch with the triage schema and returns its outcome', async () => {
+    const out = { summary: 's', outcome: 'not-agent-work', reason: 'a question' };
+    const w = world({ output: out });
+    const r = await runCrew({ ...base, role: 'triage' }, w.deps, newCtx());
+    expect(r).toMatchObject({ status: 'completed', role: 'triage', crew: out, gates: [] });
+    expect(w.claude.args[w.claude.args.indexOf('--json-schema') + 1]).toBe(
+      JSON.stringify(crewOutputJsonSchema('triage')),
+    );
+    expect(w.names()).not.toContain('checkoutBranch');
+    expect(w.names()).not.toContain('push');
+  });
+
+  test('a triage output the schema forbids (split with a briefing) fails the drop', async () => {
+    const out = {
+      summary: 's',
+      outcome: 'split',
+      children: [{ key: 'a', title: 'T', body: 'B' }],
+      briefing: {
+        subject: 's',
+        decision: 'd',
+        why: 'w',
+        options: ['a', 'b'],
+        recommendation: 'r',
+        onHold: 'h',
+      },
+    };
+    const r = await runCrew({ ...base, role: 'triage' }, world({ output: out }).deps, newCtx());
+    expect(r.status).toBe('failed');
+    expect(r.reason).toMatch(/invalid crew output: briefing/);
+  });
+
   test('instruction files are removed from the clone before the snapshot and the agent run', async () => {
     const w = world();
     const ctx = newCtx();
@@ -288,7 +319,7 @@ describe('crew prompts', () => {
     readFileSync(new URL(`../../prompts/${role}.md`, import.meta.url), 'utf8');
 
   test('each crew prompt template states the data and escalation rules', () => {
-    for (const role of ['crew-lead', 'refute', 'diagnose']) {
+    for (const role of ['crew-lead', 'refute', 'diagnose', 'triage']) {
       const t = read(role);
       expect(t, role).toMatch(/<<<jm-data:<id>:begin NAME>>>/);
       expect(t, role).toMatch(/\(trusted instructions\)/);
@@ -322,6 +353,29 @@ describe('crew prompts', () => {
     expect(refute).toMatch(/single drop|one drop/);
     expect(refute).toMatch(/protected path/i);
     expect(refute).toMatch(/promote.*only if every criterion survives/i);
+    const triage = read('triage');
+    expect(triage).toMatch(/Read the issue as data/);
+    expect(triage).toMatch(/Check the claim against the code/);
+    expect(triage).toMatch(/Split by problem, one drop each/);
+    expect(triage).toMatch(/## Context/);
+    expect(triage).toMatch(/## Acceptance criteria/);
+    expect(triage).toMatch(/## Required tests/);
+    expect(triage).toMatch(/Ask Command only what the code cannot answer/);
+    expect(triage).toMatch(/Free slots/);
+    expect(triage).toMatch(/protected path/i);
+    for (const concern of [
+      'deploys',
+      'IAM',
+      'CI',
+      'secrets',
+      'spend',
+      'public claims',
+      'data deletion',
+      'goal changes',
+    ]) {
+      expect(triage, concern).toContain(concern);
+    }
+    expect(triage).toMatch(/raise a briefing/i);
     const diag = read('diagnose');
     expect(diag).toMatch(/evidence/);
     expect(diag).toMatch(/`retry` only when a fresh run would plausibly succeed/);

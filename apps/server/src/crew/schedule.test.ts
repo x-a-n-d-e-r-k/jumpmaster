@@ -28,7 +28,13 @@ import { makeZone, usageCfg, type ZoneWorld } from '../test/fixtures.js';
 import { plus, t0 } from '../test/helpers.js';
 import { applyCrewActions } from './actions.js';
 import { type CrewInputJson, enqueueCrew, nextCrewWork, requestCrewCycle } from './schedule.js';
-import { getCrewIssue, setCrewIssue } from './store.js';
+import {
+  getCrewIssue,
+  getTriageRequest,
+  recordTriageRequest,
+  setCrewIssue,
+  setTriageRequest,
+} from './store.js';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -295,5 +301,117 @@ describe('enqueueCrew', () => {
     const offPass = await zonePass(off.forges, off.zone, 'main');
     await reconcileZone(off.db, off.forges, off.zone, offPass, promptVersions(), usageCfg, [], t0);
     expect(off.db.prepare('SELECT COUNT(*) AS n FROM drops').get()).toEqual({ n: 0 });
+  });
+});
+
+describe('triage scheduling (#184)', () => {
+  const request = (n = 179, body = 'Two complaints in two sentences.') =>
+    recordTriageRequest(
+      w.db,
+      'main',
+      { number: n, title: `Issue ${n}`, body, author: 'human' },
+      t0,
+    ) ?? -1;
+  /** Fills every crew-issue slot with a staged issue that has been refuted already. */
+  const fillSlots = () => {
+    for (let n = 0; n < w.zone.crew.maxStaged; n++) {
+      const id = stagedIssue(`fill-${n}`);
+      setCrewIssue(w.db, id, { refutedSha: 'sha-1' }, t0);
+    }
+  };
+
+  test('triage follows diagnose and refute and precedes the lead cycle', async () => {
+    const req = request();
+    const issue = stagedIssue();
+    parkedItem();
+    const d = (await enqueue()) ?? '';
+    expect(work(d).role).toBe('diagnose');
+    finish(d);
+    const r = (await enqueue(plus(t0, MIN))) ?? '';
+    expect(work(r)).toEqual({ role: 'refute', crewIssueId: issue });
+    finish(r);
+    setCrewIssue(w.db, issue, { refutedSha: 'sha-1' }, t0);
+    expect(nextCrewWork(w.db, w.zone, plus(t0, 2 * MIN))).toEqual({
+      role: 'triage',
+      requestId: req,
+    });
+    const t = (await enqueue(plus(t0, 2 * MIN))) ?? '';
+    expect(work(t)).toEqual({ role: 'triage', requestId: req });
+    expect(getDrop(w.db, t)).toMatchObject({
+      role: 'triage',
+      workItemId: null,
+      promptVersion: promptVersions().triage,
+    });
+    finish(t);
+    setTriageRequest(w.db, req, { state: 'done', outcome: 'not-agent-work' }, t0);
+    expect(nextCrewWork(w.db, w.zone, plus(t0, 3 * MIN))).toEqual({ role: 'crew-lead' });
+  });
+
+  test('the oldest open request goes first', () => {
+    const a = request(179);
+    request(180);
+    expect(nextCrewWork(w.db, w.zone, t0)).toEqual({ role: 'triage', requestId: a });
+  });
+
+  test('no triage with 0 free slots, in a paused or observe zone, or with the crew off', async () => {
+    request();
+    const offZone = { ...w.zone, crew: { ...w.zone.crew, enabled: false } };
+    expect(nextCrewWork(w.db, offZone, t0)).not.toMatchObject({ role: 'triage' });
+    expect(await enqueue(t0, offZone)).toBeNull();
+
+    for (const mode of ['paused', 'observe'] as const) {
+      setZoneMode(w.db, 'main', mode, t0);
+      expect(nextCrewWork(w.db, w.zone, t0), mode).toEqual({ role: 'crew-lead' });
+    }
+    setZoneMode(w.db, 'main', 'active', t0);
+    expect(nextCrewWork(w.db, w.zone, t0)).toMatchObject({ role: 'triage' });
+
+    fillSlots();
+    expect(nextCrewWork(w.db, w.zone, t0)).toEqual({ role: 'crew-lead' });
+  });
+
+  test('a request at maxTriage is not scheduled', () => {
+    const req = request();
+    setTriageRequest(w.db, req, { attempts: w.zone.crew.maxTriage }, t0);
+    expect(nextCrewWork(w.db, w.zone, t0)).toEqual({ role: 'crew-lead' });
+    setTriageRequest(w.db, req, { attempts: w.zone.crew.maxTriage - 1 }, t0);
+    expect(nextCrewWork(w.db, w.zone, t0)).toEqual({ role: 'triage', requestId: req });
+  });
+
+  test('a waiting request comes back to open once its briefing is ruled', () => {
+    const req = request();
+    const b = raiseBriefing(
+      w.db,
+      {
+        zoneId: 'main',
+        kind: 'crew',
+        subject: 'crew:#179 fable',
+        decision: 'd',
+        why: 'w',
+        options: [
+          { id: 'o1', label: 'a', effect: 'none' },
+          { id: 'o2', label: 'b', effect: 'none' },
+        ],
+        source: 'crew',
+      },
+      t0,
+    );
+    setTriageRequest(w.db, req, { state: 'waiting', outcome: 'questions', briefingId: b }, t0);
+    expect(nextCrewWork(w.db, w.zone, t0)).toEqual({ role: 'crew-lead' });
+    ruleBriefing(w.db, b, 'o2', 'drop the gauge', plus(t0, MIN));
+    expect(nextCrewWork(w.db, w.zone, plus(t0, 2 * MIN))).toEqual({
+      role: 'triage',
+      requestId: req,
+    });
+    expect(getTriageRequest(w.db, req)?.state).toBe('open');
+  });
+
+  test('triage drops count toward maxDropsPerDay', async () => {
+    const capped = { ...w.zone, crew: { ...crewOn, maxDropsPerDay: 1 } };
+    request();
+    const t = (await enqueue(t0, capped)) ?? '';
+    expect(work(t).role).toBe('triage');
+    finish(t);
+    expect(await enqueue(plus(t0, MIN), capped)).toBeNull();
   });
 });

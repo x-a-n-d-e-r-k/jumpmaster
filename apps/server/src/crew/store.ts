@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Db } from '../db/open.js';
 
 /**
@@ -137,6 +138,102 @@ export function setCrewIssue(db: Db, id: number, patch: CrewIssuePatch, now: Dat
   db.prepare(`UPDATE crew_issues SET ${sets.join(', ')} WHERE id = @id`).run({
     ...patch,
     ...(patch.title !== undefined ? { titleNorm: normTitle(patch.title) } : {}),
+    updatedAt: now.toISOString(),
+    id,
+  });
+}
+
+export type TriageState = 'open' | 'waiting' | 'done' | 'failed';
+export type TriageOutcome = 'split' | 'questions' | 'not-agent-work';
+
+/** One triage-labeled issue text by a trusted author: what a triage drop works on (#184). */
+export type TriageRequest = {
+  id: number;
+  zoneId: string;
+  issueNumber: number;
+  title: string;
+  body: string;
+  bodySha: string;
+  author: string;
+  state: TriageState;
+  outcome: TriageOutcome | null;
+  reason: string | null;
+  attempts: number;
+  briefingId: number | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TriagePatch = Partial<
+  Pick<TriageRequest, 'state' | 'outcome' | 'reason' | 'attempts' | 'briefingId'>
+>;
+
+const TRIAGE_COLS = `id, zone_id AS zoneId, issue_number AS issueNumber, title, body,
+  body_sha AS bodySha, author, state, outcome, reason, attempts, briefing_id AS briefingId,
+  created_at AS createdAt, updated_at AS updatedAt`;
+
+const TRIAGE_COLUMN: Record<keyof TriagePatch, string> = {
+  state: 'state',
+  outcome: 'outcome',
+  reason: 'reason',
+  attempts: 'attempts',
+  briefingId: 'briefing_id',
+};
+
+export const triageBodySha = (body: string): string =>
+  createHash('sha256').update(body).digest('hex');
+
+/**
+ * Records a request for an issue's current text, once per body (`UNIQUE(zone, number, sha)`):
+ * the same body again records nothing. A new body supersedes the issue's request still open (or
+ * waiting on Command). Returns the new request's id, or null when nothing was recorded.
+ */
+export function recordTriageRequest(
+  db: Db,
+  zoneId: string,
+  issue: { number: number; title: string; body: string; author: string },
+  now: Date,
+): number | null {
+  const sha = triageBodySha(issue.body);
+  const at = now.toISOString();
+  return db.transaction(() => {
+    const seen = db
+      .prepare(
+        'SELECT 1 FROM triage_requests WHERE zone_id = ? AND issue_number = ? AND body_sha = ?',
+      )
+      .get(zoneId, issue.number, sha);
+    if (seen) return null;
+    db.prepare(
+      `UPDATE triage_requests SET state = 'done', reason = 'superseded', updated_at = ?
+         WHERE zone_id = ? AND issue_number = ? AND state IN ('open', 'waiting')`,
+    ).run(at, zoneId, issue.number);
+    const r = db
+      .prepare(
+        `INSERT INTO triage_requests (zone_id, issue_number, title, body, body_sha, author, state,
+           created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+      )
+      .run(zoneId, issue.number, issue.title, issue.body, sha, issue.author, at, at);
+    return Number(r.lastInsertRowid);
+  })();
+}
+
+export function getTriageRequest(db: Db, id: number): TriageRequest | undefined {
+  return db.prepare(`SELECT ${TRIAGE_COLS} FROM triage_requests WHERE id = ?`).get(id) as
+    | TriageRequest
+    | undefined;
+}
+
+export function listTriageRequests(db: Db, zoneId: string): TriageRequest[] {
+  return db
+    .prepare(`SELECT ${TRIAGE_COLS} FROM triage_requests WHERE zone_id = ? ORDER BY id`)
+    .all(zoneId) as TriageRequest[];
+}
+
+export function setTriageRequest(db: Db, id: number, patch: TriagePatch, now: Date): void {
+  const keys = (Object.keys(patch) as (keyof TriagePatch)[]).filter((k) => patch[k] !== undefined);
+  const sets = [...keys.map((k) => `${TRIAGE_COLUMN[k]} = @${k}`), 'updated_at = @updatedAt'];
+  db.prepare(`UPDATE triage_requests SET ${sets.join(', ')} WHERE id = @id`).run({
+    ...Object.fromEntries(keys.map((k) => [k, patch[k]])),
     updatedAt: now.toISOString(),
     id,
   });
