@@ -15,7 +15,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 REPO="${E2E_REPO:-x-a-n-d-e-r-k/jumpmaster}"
-BRANCH="${E2E_BRANCH:-main}"
+# A branch nothing pushes to (created once from main): a moving main races the drop's clone
+# ("head moved"). Point it at a newer commit by hand when the e2e needs newer repository content.
+BRANCH="${E2E_BRANCH:-e2e-fixture}"
 SOURCE_URL="${SOURCE_URL:-}"
 # Pinned by digest: the local registry (distribution 3.1.1) and an image Sigstore signs keyless
 # with its own identity (cosign v3.1.4), which this repository's identity must not accept.

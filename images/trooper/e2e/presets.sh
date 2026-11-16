@@ -6,7 +6,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 REPO="${E2E_REPO:-x-a-n-d-e-r-k/jumpmaster}"
-BRANCH="${E2E_BRANCH:-main}"
+# A branch nothing pushes to (created once from main): a moving main races the drop's clone
+# ("head moved"). Point it at a newer commit by hand when the e2e needs newer repository content.
+BRANCH="${E2E_BRANCH:-e2e-fixture}"
 SOURCE_URL="${SOURCE_URL:-}"
 FAKE="$PWD/images/trooper/e2e/fake-claude"
 echo "presets: Docker Engine $(docker version --format '{{.Server.Version}} {{.Server.Os}}/{{.Server.Arch}}')"

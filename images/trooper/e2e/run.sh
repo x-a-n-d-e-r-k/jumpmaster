@@ -5,7 +5,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 REPO="${E2E_REPO:-x-a-n-d-e-r-k/jumpmaster}"
-BRANCH="${E2E_BRANCH:-main}"
+# A branch nothing pushes to (created once from main): a moving main races the drop's clone
+# ("head moved"). Point it at a newer commit by hand when the e2e needs newer repository content.
+BRANCH="${E2E_BRANCH:-e2e-fixture}"
 # The sidecar image is pinned by digest (alpine 3.20, multi-arch index).
 SIDECAR_IMAGE="alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
 # The architecture these images were built for and ran on (release images are amd64 and arm64).
