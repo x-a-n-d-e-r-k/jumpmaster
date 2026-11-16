@@ -28,7 +28,7 @@ small team that does its bookkeeping by hand today.
 ## Objectives
 
 - [ ] The tool reads every CSV in a folder and reports rows it can't parse
-  Start with the bank export format in the samples folder.
+      Start with the bank export format in the samples folder.
 - [ ] Totals per category and per month, matching the hand-made report for March
 - [ ] A Markdown report written next to the input folder
 - [ ] Packaged as a single command with a --help that explains every option
