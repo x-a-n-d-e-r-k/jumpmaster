@@ -1057,7 +1057,7 @@ test('v29 lets the outbox hold comment_issue, keeping every row and the kind che
       .run(),
   );
   const db = openDb(f);
-  expect(MIGRATIONS.at(-1)?.version).toBe(29);
+  expect(MIGRATIONS.at(-1)?.version).toBeGreaterThanOrEqual(29);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(count(db, 'outbox')).toBe(1);
   const put = db.prepare(
@@ -1076,5 +1076,43 @@ test('v29 lets the outbox hold comment_issue, keeping every row and the kind che
   expect(zoneCol).toEqual({ d: "''", nn: 1 });
   expect(() => put.run('o3', 'x', 'delete_comment')).toThrow(/CHECK/);
   expect(() => put.run('o4', 'comment:z:triage:1', 'comment_issue')).toThrow(/UNIQUE/);
+  db.close();
+});
+
+test('v30 adds triage_requests and lets triage be a crew drop, keeping every drop and its columns', () => {
+  const f = dbAt(29, (raw) => {
+    raw.exec(`INSERT INTO drop_zones (id, repo, default_branch, config_json)
+      VALUES ('z', 'o/r', 'main', '{}')`);
+    raw.exec(`INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, created_at,
+        was_probe, rate_limit_requeue, push_kind)
+      VALUES ('d1', 'z', NULL, 'refute', 'succeeded', 't', 1, 0, 'final')`);
+  });
+  const db = openDb(f);
+  expect(MIGRATIONS.at(-1)?.version).toBe(30);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(
+    db
+      .prepare(
+        `SELECT role, was_probe AS p, rate_limit_requeue AS r, push_kind AS k FROM drops WHERE id = 'd1'`,
+      )
+      .get(),
+  ).toEqual({ role: 'refute', p: 1, r: 0, k: 'final' });
+  const drop = db.prepare(
+    `INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, created_at)
+     VALUES (?, 'z', NULL, ?, ?, 't')`,
+  );
+  drop.run('d2', 'triage', 'queued');
+  // One active crew drop per zone, triage included.
+  expect(() => drop.run('d3', 'crew-lead', 'queued')).toThrow(/UNIQUE/);
+  const put = db.prepare(
+    `INSERT INTO triage_requests (zone_id, issue_number, title, body, body_sha, author, state,
+       created_at, updated_at) VALUES ('z', 179, 't', 'b', ?, 'a', ?, 't', 't')`,
+  );
+  put.run('sha1', 'open');
+  expect(
+    db.prepare('SELECT attempts, outcome, briefing_id AS b FROM triage_requests').get(),
+  ).toEqual({ attempts: 0, outcome: null, b: null });
+  expect(() => put.run('sha1', 'open')).toThrow(/UNIQUE/);
+  expect(() => put.run('sha2', 'closed')).toThrow(/CHECK/);
   db.close();
 });

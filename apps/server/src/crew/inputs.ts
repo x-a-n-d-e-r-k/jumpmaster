@@ -8,7 +8,7 @@ import { type ForgePair, unsanitizeForgeText } from '../outbox.js';
 import { crewTemplate, fence, neutralise } from '../payloads.js';
 import { isCrewFiled } from '../sync.js';
 import { crewIssueSlots } from './actions.js';
-import { getCrewIssue, listCrewIssues } from './store.js';
+import { getCrewIssue, getTriageRequest, listCrewIssues } from './store.js';
 
 /** The most a crew prompt (template plus input) may weigh, in UTF-8 bytes. */
 export const MAX_CREW_PROMPT_BYTES = 100_000;
@@ -247,6 +247,99 @@ export function refuteInput(
       name: 'crew-issue',
       kind: 'data',
       text: `Objective: ${issue.objective}\nTitle: ${issue.title}\n\n${issue.body}`,
+    },
+  ]);
+}
+
+/**
+ * The triage input: GOAL.md, the current objective, the protected paths and Command's rulings on
+ * this request's briefing as instructions; the ruled briefing's text, the free slots and the
+ * issue's title and body as data. The issue is fenced like the lead's open issues, so its text can
+ * never close the fence or pass for instructions.
+ */
+export function triageInput(
+  db: Db,
+  zone: DropZoneConfig,
+  requestId: number,
+  dropId: string,
+): string {
+  const req = getTriageRequest(db, requestId);
+  if (!req || req.zoneId !== zone.id) throw new Error(`unknown triage request ${requestId}`);
+  const goals = getGoals(db, zone.id);
+  const current = goals ? currentObjective(goals.parse) : null;
+  const ruled =
+    req.briefingId === null
+      ? []
+      : (db
+          .prepare(
+            `SELECT r.choice, r.note, r.created_at AS createdAt, b.decision,
+               b.options_json AS optionsJson
+             FROM rulings r JOIN briefings b ON b.id = r.briefing_id
+             WHERE r.briefing_id = ? AND r.zone_id = ? ORDER BY r.id`,
+          )
+          .all(req.briefingId, zone.id) as {
+          choice: string;
+          note: string;
+          createdAt: string;
+          decision: string;
+          optionsJson: string;
+        }[]);
+  return assemble('triage', dropId, [
+    goalsSection(db, zone),
+    {
+      title: 'Current objective',
+      name: 'objective',
+      kind: 'trusted',
+      text: current
+        ? `Key: ${current.key}\nTitle: ${current.title}\n\n${current.body}`
+        : 'No objective is open.',
+    },
+    {
+      title: 'Protected paths',
+      name: 'protected-paths',
+      kind: 'trusted',
+      text: zone.protectedPaths.map((p) => `- ${p}`).join('\n') || '(none)',
+    },
+    {
+      title: "Command's rulings on this issue",
+      name: 'rulings',
+      kind: 'trusted',
+      text:
+        ruled.length === 0
+          ? 'No rulings yet.'
+          : ruled
+              .map(
+                (r) =>
+                  `Ruling on briefing ${req.briefingId}: option ${r.choice}${r.note ? `; note: ${r.note}` : ''} (${r.createdAt})`,
+              )
+              .join('\n'),
+    },
+    {
+      title: 'Ruled briefing',
+      name: 'ruled-briefing',
+      kind: 'data',
+      text:
+        ruled.length === 0
+          ? 'None.'
+          : ruled
+              .map((r) => {
+                const options = JSON.parse(r.optionsJson) as { id: string; label: string }[];
+                const label = options.find((o) => o.id === r.choice)?.label ?? r.choice;
+                return `Briefing ${req.briefingId}: ${r.decision}\nChosen: ${label}`;
+              })
+              .join('\n\n'),
+    },
+    {
+      title: 'Crew issue slots',
+      name: 'slots',
+      kind: 'data',
+      text: `Free slots: ${crewIssueSlots(db, zone)} (file at most this many children).`,
+    },
+    {
+      title: 'Issue',
+      name: 'issue',
+      kind: 'data',
+      text: `#${req.issueNumber}: ${req.title}\n\n${req.body.trim()}`,
     },
   ]);
 }

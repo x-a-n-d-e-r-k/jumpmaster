@@ -113,6 +113,7 @@ const CREW_DEFAULTS = {
   maxStaged: 3,
   refutePromotes: false,
   maxRefute: 2,
+  maxTriage: 2,
 };
 
 export type McpConfig = {
@@ -150,6 +151,8 @@ const CrewSchema = z
     /** Lets a crew refute promote an issue (still held one pass with a Reject option). */
     refutePromotes: z.boolean().default(CREW_DEFAULTS.refutePromotes),
     maxRefute: z.number().int().min(1).default(CREW_DEFAULTS.maxRefute),
+    /** Triage attempts on one issue text before it is put to Command as failed. */
+    maxTriage: z.number().int().min(1).default(CREW_DEFAULTS.maxTriage),
   })
   .default(CREW_DEFAULTS);
 
