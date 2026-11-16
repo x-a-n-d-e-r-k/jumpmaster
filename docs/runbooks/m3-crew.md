@@ -31,7 +31,7 @@ keeps working.
   "stagedLabel": "agent-staged",
   "maxStaged": 3,
   "refutePromotes": false,
-  "maxRefute": 2,
+  "maxRefute": 3,
   "maxTriage": 2
 }
 ```
