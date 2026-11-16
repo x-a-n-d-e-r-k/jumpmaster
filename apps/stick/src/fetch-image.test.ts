@@ -190,24 +190,31 @@ describe('fetching a missing image from the server (issue #141)', () => {
     expect(dir.startsWith(join(w.stateDir, 'image-fetch'))).toBe(true);
     expect(existsSync(dir)).toBe(false);
     expect(leftovers(w.stateDir)).toEqual([]);
-    // What was loaded: the platform image alone, named by the digest reference.
+    // What was loaded: this platform's image under a sparse index named by the digest reference.
     const loaded = untar(w.loadedTar() as Buffer);
     expect([...loaded.keys()].sort()).toEqual(
       [
         'index.json',
         'manifest.json',
         'oci-layout',
+        `blobs/sha256/${r.indexDigest.slice(7)}`,
         `blobs/sha256/${r.configDigest.slice(7)}`,
         `blobs/sha256/${r.layerDigest.slice(7)}`,
         `blobs/sha256/${r.manifestDigest.slice(7)}`,
       ].sort(),
     );
     const index = JSON.parse(String(loaded.get('index.json')));
-    expect(index.manifests).toHaveLength(1);
-    expect(index.manifests[0]).toMatchObject({
-      digest: r.manifestDigest,
-      annotations: { 'io.containerd.image.name': r.ref },
-    });
+    expect(index.manifests).toEqual([
+      {
+        mediaType: 'application/vnd.oci.image.index.v1+json',
+        digest: r.indexDigest,
+        size: (r.blobs.get(r.indexDigest) as Buffer).length,
+        annotations: {
+          'io.containerd.image.name': r.ref,
+          'org.opencontainers.image.ref.name': r.ref,
+        },
+      },
+    ]);
     expect(JSON.parse(String(loaded.get('manifest.json')))).toEqual([
       {
         Config: `blobs/sha256/${r.configDigest.slice(7)}`,
@@ -232,15 +239,64 @@ describe('fetching a missing image from the server (issue #141)', () => {
     expect(again.calls).toContain('load');
   });
 
-  test('the containerd store reports the manifest digest as the id: that is the image too', async () => {
+  test('the containerd store reports the index digest as the id: that is the image too', async () => {
     const r = release();
-    const w = world({ r, loadedIds: (x) => [x.manifestDigest] });
+    const w = world({ r, loadedIds: (x) => [x.indexDigest] });
     const c = fakeCosign(() => verified());
     expect(await fetchFromServer(r.ref, signedTrust(c.cosign), w.deps)).toEqual({
       ok: true,
       via: 'cosign',
     });
-    expect(w.calls.at(-1)).toBe(`tag ${r.manifestDigest} ${r.ref}`);
+    expect(w.calls.at(-1)).toBe(`tag ${r.indexDigest} ${r.ref}`);
+  });
+
+  test('the platform manifest digest is no id the stick accepts: removed and refused', async () => {
+    const r = release();
+    const w = world({ r, loadedIds: (x) => [x.manifestDigest] });
+    const c = fakeCosign(() => verified());
+    const v = await fetchFromServer(r.ref, signedTrust(c.cosign), w.deps);
+    expect(v.ok).toBe(false);
+    expect(w.calls).toContain(`remove ${r.manifestDigest}`);
+    expect(w.calls.some((x) => x.startsWith('tag '))).toBe(false);
+  });
+
+  test('on a containerd-store engine the loaded image resolves by <registry>/<name>@<index digest> (issue #168)', async () => {
+    // A fake engine that loads as Docker's containerd image store was observed to (v0.4.0-rc.2
+    // rehearsal): an index.json entry that is an index is named by its annotation with Id = the
+    // index digest; an entry that is a manifest exists only as <repo>@<manifest digest>.
+    const r = release();
+    const w = world({ r });
+    const images = new Map<string, string>();
+    w.deps.loader = {
+      async imageExists(ref) {
+        return images.has(ref);
+      },
+      async loadImage(t: Readable) {
+        const chunks: Buffer[] = [];
+        for await (const c of t) chunks.push(c as Buffer);
+        const files = untar(Buffer.concat(chunks));
+        const ids: string[] = [];
+        for (const m of JSON.parse(String(files.get('index.json'))).manifests) {
+          const name: string = m.annotations['io.containerd.image.name'];
+          if (m.mediaType === 'application/vnd.oci.image.index.v1+json') images.set(name, m.digest);
+          else images.set(`${name.slice(0, name.lastIndexOf('@'))}@${m.digest}`, m.digest);
+          ids.push(images.get(name) ?? '');
+        }
+        return ids.filter((id) => id !== '');
+      },
+      async removeImage(id) {
+        for (const [k, v] of images) if (v === id) images.delete(k);
+      },
+      async tagImage(id, ref) {
+        if (images.get(ref) !== id) throw new Error(`${ref} does not name ${id}`);
+      },
+    };
+    const c = fakeCosign(() => verified());
+    expect(await fetchFromServer(r.ref, signedTrust(c.cosign), w.deps)).toEqual({
+      ok: true,
+      via: 'cosign',
+    });
+    expect(images.get(r.ref)).toBe(r.indexDigest);
   });
 
   test('signature failure: the server is no trust anchor. Nothing loads, the directory goes, the event is logged', async () => {
@@ -354,7 +410,7 @@ describe('fetching a missing image from the server (issue #141)', () => {
     const v = await fetchFromServer(r.ref, signedTrust(c.cosign), w.deps);
     expect(v).toEqual({
       ok: false,
-      reason: `image not verified: ${r.ref}: the engine loaded ${evil}, not the image's config ${r.configDigest}`,
+      reason: `image not verified: ${r.ref}: the engine loaded ${evil}, not the image's index ${r.indexDigest} (containerd store) or config ${r.configDigest} (classic store)`,
     });
     expect(w.calls).toContain(`remove ${evil}`);
     expect(w.calls.some((x) => x.startsWith('tag '))).toBe(false);

@@ -3,14 +3,15 @@
 // layout tar; the stick trusts none of it:
 // - the tar is extracted in one pass under the state directory, refusing any link, absolute or
 //   `..` path, or name a layout doesn't have, and over 8 GB; every blob must hash to its name;
-// - the layout is bound to the digest asked for: that digest's blob is the multi-arch index, its
-//   entry for this stick's platform is the manifest loaded, and that manifest's config is the
-//   image id the engine must report;
+// - the layout is bound to the digest asked for: that digest's blob is the multi-arch index and
+//   its entry for this stick's platform is the manifest loaded, so the image id the engine must
+//   report is the index digest (Docker's containerd store) or that manifest's config (classic);
 // - under `signed`, the release workflow's Sigstore bundle on the digest asked for is checked
 //   with `cosign verify-blob-attestation` on the index's bytes, fully offline against the trusted
 //   root the stick image ships (issue #167; a pin or a digest verified before needs none);
-// - only then is the image loaded (a tar the stick builds from the files it checked, holding the
-//   platform image alone), its id checked, and it is named by its digest reference.
+// - only then is the image loaded (a tar the stick builds from the files it checked: a sparse
+//   index, this platform alone, named by the digest reference; issue #168), its id checked, and
+//   it is named by its digest reference.
 // The temporary directory is removed whatever happens. A stick in `server` mode never contacts
 // the registry; an image the server has not mirrored yet makes the drop wait.
 import { createHash } from 'node:crypto';
@@ -277,6 +278,8 @@ type Descriptor = { mediaType: string; digest: string; size: number };
 
 /** What the layout holds for this stick, bound to the digest asked for. */
 export type BoundLayout = {
+  /** The signed multi-arch index: the digest asked for, and its blob's size. */
+  index: { digest: string; size: number };
   /** The platform manifest the signed index names for this stick's platform. */
   manifest: Descriptor & { platform: Record<string, string> };
   /** Its config digest: the image id the engine must report. */
@@ -317,7 +320,8 @@ function json(b: Buffer, what: string): Record<string, unknown> {
  * blob was hashed on extraction, so what is read here is exactly what the digests name.
  */
 export function bindLayout(dir: string, digest: string, platform: string): BoundLayout {
-  const index = json(blob(dir, digest, 'the image index'), 'the image index');
+  const indexBytes = blob(dir, digest, 'the image index');
+  const index = json(indexBytes, 'the image index');
   const manifests = Array.isArray(index.manifests) ? index.manifests : [];
   const [os, architecture, variant] = platform.split('/');
   const entry = manifests.find((m: unknown) => {
@@ -337,6 +341,7 @@ export function bindLayout(dir: string, digest: string, platform: string): Bound
   );
   for (const l of layers) blobPath(dir, l, 'a layer');
   return {
+    index: { digest, size: indexBytes.length },
     manifest: {
       mediaType:
         typeof entry.mediaType === 'string'
@@ -371,36 +376,54 @@ function tarHeader(name: string, size: number): Buffer {
   return h;
 }
 
+/** The OCI media type of an image index. */
+export const IMAGE_INDEX_MEDIA_TYPE = 'application/vnd.oci.image.index.v1+json';
+
 /**
- * The tar `docker load` gets: built by the stick from the files it checked, holding the platform
- * image alone (no signature artifact), named `ref` for the containerd image store and listed in
- * `manifest.json` for the classic one.
+ * The `index.json` of the tar `docker load` gets: exactly one entry, the signed multi-arch index
+ * (a sparse one: only this platform's blobs travel), named `<registry>/<name>@<index digest>` for
+ * the containerd image store, which then resolves that reference to the index digest (issue
+ * #168). The installer writes the same bytes in shell (apps/server/src/install/stick-sh.ts).
+ */
+export function loadIndexJson(bound: BoundLayout, ref: string): Buffer {
+  const name = canonicalRef(ref);
+  return Buffer.from(
+    JSON.stringify({
+      schemaVersion: 2,
+      mediaType: IMAGE_INDEX_MEDIA_TYPE,
+      manifests: [
+        {
+          mediaType: IMAGE_INDEX_MEDIA_TYPE,
+          digest: bound.index.digest,
+          size: bound.index.size,
+          annotations: {
+            'io.containerd.image.name': name,
+            'org.opencontainers.image.ref.name': name,
+          },
+        },
+      ],
+    }),
+  );
+}
+
+/**
+ * The tar `docker load` gets: built by the stick from the files it checked, holding the sparse
+ * index, this platform's manifest, config and layers (no signature artifact, no other platform),
+ * named `ref` for the containerd image store and listed in `manifest.json` for the classic one.
  */
 export function loadTar(dir: string, bound: BoundLayout, ref: string): Readable {
-  const name = canonicalRef(ref);
   const path = (d: string) => `blobs/sha256/${d.slice(7)}`;
-  const index = {
-    schemaVersion: 2,
-    mediaType: 'application/vnd.oci.image.index.v1+json',
-    manifests: [
-      {
-        ...bound.manifest,
-        annotations: {
-          'org.opencontainers.image.ref.name': name,
-          'io.containerd.image.name': name,
-        },
-      },
-    ],
-  };
   const docker = [{ Config: path(bound.config), RepoTags: [], Layers: bound.layers.map(path) }];
   const files: { name: string; bytes?: Buffer; file?: string }[] = [
     { name: 'oci-layout', bytes: Buffer.from('{"imageLayoutVersion":"1.0.0"}') },
-    { name: 'index.json', bytes: Buffer.from(JSON.stringify(index)) },
+    { name: 'index.json', bytes: loadIndexJson(bound, ref) },
     { name: 'manifest.json', bytes: Buffer.from(JSON.stringify(docker)) },
-    ...[...new Set([bound.manifest.digest, bound.config, ...bound.layers])].map((d) => ({
-      name: path(d),
-      file: join(dir, path(d)),
-    })),
+    ...[...new Set([bound.index.digest, bound.manifest.digest, bound.config, ...bound.layers])].map(
+      (d) => ({
+        name: path(d),
+        file: join(dir, path(d)),
+      }),
+    ),
   ];
   async function* chunks(): AsyncGenerator<Buffer> {
     for (const f of files) {
@@ -598,16 +621,17 @@ export async function fetchFromServer(
       if (controller.signal.aborted) return timedOut(ref, timeoutMs);
       return { ok: false, reason: `image load failed: ${ref}: ${message(e)}` };
     }
-    // The classic image store reports the config digest as the id; the containerd store, the
-    // manifest's digest. Both are bound to the digest asked for; anything else is not.
-    const expected = new Set([bound.config, bound.manifest.digest]);
+    // The containerd image store reports the index digest as the id (the tar names the sparse
+    // index); the classic store, the platform config's digest. Both are bound to the digest asked
+    // for; anything else is removed and refused.
+    const expected = new Set([bound.index.digest, bound.config]);
     const wrong = ids.filter((id) => !expected.has(id));
     const id = ids.find((i) => expected.has(i));
     if (!id || wrong.length > 0) {
       for (const w of wrong) await deps.loader.removeImage(w).catch(() => {});
       return {
         ok: false,
-        reason: `image not verified: ${ref}: the engine loaded ${wrong[0] ?? 'no image'}, not the image's config ${bound.config}`,
+        reason: `image not verified: ${ref}: the engine loaded ${wrong[0] ?? 'no image'}, not the image's index ${bound.index.digest} (containerd store) or config ${bound.config} (classic store)`,
       };
     }
     try {
