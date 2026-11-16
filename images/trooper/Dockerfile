@@ -20,8 +20,10 @@ LABEL org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.title="jumpmaster-trooper" \
       org.jumpmaster.trooper.egress="1" \
       org.jumpmaster.trooper.push="1"
+# python3, make and g++: npm builds any package with a binding.gyp (better-sqlite3, bcrypt, …)
+# with node-gyp; npm_config_nodedir points it at this image's Node headers, so it never downloads them.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates util-linux jq procps \
+ && apt-get install -y --no-install-recommends git ca-certificates util-linux jq procps python3 make g++ \
  && rm -rf /var/lib/apt/lists/*
 # The Claude CLI comes from a lockfile, so every package (the platform binary too) is checked
 # against its integrity hash. This image doubles as the node preset: corepack provides pnpm and
@@ -53,6 +55,7 @@ RUN groupadd -g 10001 agent && useradd -u 10001 -g 10001 -d /home/agent -m -s /b
  && find / -xdev -type f -perm /6000 -exec chmod a-s {} +
 ENV PATH=${PATH}:/opt/corepack/bin \
     COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+    npm_config_nodedir=/usr/local \
     JM_CONTAINER=1 \
     JM_WORK_ROOT=/work \
     JM_AGENT_UID=10001 JM_AGENT_GID=10001 JM_AGENT_HOME=/home/agent \
