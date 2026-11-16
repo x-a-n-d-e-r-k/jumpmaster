@@ -1,5 +1,7 @@
 {
-  "version": null,
-  "registry": null,
-  "images": {}
+  "version": "v0.4.0-rc.1",
+  "registry": "ghcr.io/x-a-n-d-e-r-k",
+  "images": {
+    "jumpmaster-trooper": "sha256:8acad1c350b273ac36966fe99785f165a4fd963d040417549701ccad8002ebdf"
+  }
 }
