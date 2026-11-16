@@ -10,7 +10,13 @@ import { resolve as resolvePath, sep } from 'node:path';
  */
 import { DoctorResultSchema, type DropResult, hostAllowed } from '@jumpmaster/protocol';
 import type { ConfigStatus } from '../config/source.js';
-import { allowedHostsOf, type Config, type DropZoneConfig, STARTER_WARNING } from '../config.js';
+import {
+  allowedHostsOf,
+  type Config,
+  type DropZoneConfig,
+  STARTER_WARNING,
+  triageGateOn,
+} from '../config.js';
 import { creditsStopInForce } from '../credits.js';
 import { crewDropsToday } from '../crew/schedule.js';
 import type { Db } from '../db/open.js';
@@ -1423,16 +1429,19 @@ const LABEL_SPEC: Record<string, { color: string; description: string }> = {
   ready: { color: '0E8A16', description: 'Ready for a Jumpmaster agent' },
   retry: { color: 'FBCA04', description: 'Ask Jumpmaster to retry a parked issue' },
   staged: { color: 'C5DEF5', description: 'Filed by the crew, waiting for Command' },
+  triage: { color: 'D876E3', description: 'Not in the agent-ready format: waiting for triage' },
 };
 
 /** The labels a zone's config names, each with its colour and description. */
 export function wantedLabels(
-  zone: Pick<DropZoneConfig, 'readyLabel' | 'retryLabel' | 'crew'>,
+  zone: Pick<DropZoneConfig, 'readyLabel' | 'retryLabel' | 'crew' | 'triageLabel' | 'triage'>,
 ): { name: string; color: string; description: string }[] {
   const want: [string, keyof typeof LABEL_SPEC][] = [
     [zone.readyLabel, 'ready'],
     [zone.retryLabel, 'retry'],
     ...(zone.crew.enabled ? ([[zone.crew.stagedLabel, 'staged']] as [string, 'staged'][]) : []),
+    // Sync writes the triage label only while the gate is live (`triageGateOn`).
+    ...(triageGateOn(zone) ? ([[zone.triageLabel, 'triage']] as [string, 'triage'][]) : []),
   ];
   return want.map(([name, kind]) => ({
     name,
