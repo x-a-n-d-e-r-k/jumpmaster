@@ -2,6 +2,7 @@ import { leaseLogger, StickClient } from './client.js';
 import { DockerDriver } from './docker.js';
 import { egressCapability } from './egress.js';
 import { stickPlatform } from './fetch-image.js';
+import { runLeaseLoop } from './lease-loop.js';
 import { imageSource } from './pull.js';
 import { createPushLoop, PendingPushes, PUSH_LOOP_MS, pushOnce } from './push.js';
 import {
@@ -26,12 +27,7 @@ import {
 } from './state.js';
 import { execCosign, prepareImageTrust } from './verify.js';
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const SWEEP_MS = 10 * 60_000;
-/** How long a stick below the free floor waits between re-measurements. */
-const FLOOR_WAIT_MS = 30_000;
-/** How often a full stick asks the server (with no free slot) whether its trooper count changed. */
-const SLOTS_POLL_MS = 10_000;
 
 function need(name: string): string {
   const v = process.env[name];
@@ -160,7 +156,10 @@ async function main() {
     if (state !== lastState) console.log(state);
     lastState = state;
   };
-  await checkVolumes();
+  // The first check pulls the trooper image: minutes on a cold cache. It runs in the background
+  // while the lease loop reports the stick in, starting, and leases nothing (issue #157).
+  console.log(`starting: checking the trooper image ${TROOPER_IMAGE}`);
+  const firstCheck = checkVolumes();
   const active = new Set<string>();
   /** `dropId:epoch` of every drop in a lease slot: the sweep leaves their volumes alone. */
   const live = new Set<string>();
@@ -171,9 +170,8 @@ async function main() {
     (entry) => pushOnce(entry, { client, driver, stickId: id, image: TROOPER_IMAGE, pending }),
     { ready: () => health.latest().base.ok },
   );
-  setInterval(() => void pushLoop.tick(), PUSH_LOOP_MS);
   let sweeping = false;
-  setInterval(() => {
+  const sweep = () => {
     if (sweeping) return;
     sweeping = true;
     (async () => {
@@ -188,53 +186,31 @@ async function main() {
       .finally(() => {
         sweeping = false;
       });
-  }, SWEEP_MS).unref();
-  let running = 0;
-  let asked = 0;
-  /** Applies the server's trooper count, saying so when the target moves. */
-  const follow = (told: number | null) => {
-    const before = target.target;
-    target.follow(told);
-    asked = Date.now();
-    if (target.target !== before) console.log(`troopers: now ${target.target} at once`);
   };
-  for (;;) {
-    if (target.free(running) < 1) {
-      // Full: nothing running is stopped. Ask now and then, with no free slot, whether the count
-      // went up, so a raise applies before a drop finishes.
-      const terms = leaseTermsNow();
-      if (terms && Date.now() - asked >= SLOTS_POLL_MS) {
-        try {
-          follow((await client.lease(0, terms)).slots);
-        } catch (e) {
-          asked = Date.now();
-          leaseLog.error(e instanceof Error ? e.message : String(e));
-        }
-      }
-      await sleep(500);
-      continue;
-    }
-    if (!leaseTermsNow()) {
-      // Measured below the floor: look again now, so leasing resumes once space is freed.
-      await checkVolumes().catch(() => {});
-      if (!leaseTermsNow()) await sleep(FLOOR_WAIT_MS);
-      continue;
-    }
-    const terms = leaseTermsNow();
-    if (!terms) continue;
-    try {
-      const { drop, skipped, slots: told } = await client.lease(target.free(running), terms);
-      follow(told);
-      leaseLog.skipped(skipped);
-      if (!drop) continue;
-      running++;
+  // The push loop and the sweeps start once the first check has a result, as before.
+  firstCheck.then(
+    () => {
+      setInterval(() => void pushLoop.tick(), PUSH_LOOP_MS);
+      setInterval(sweep, SWEEP_MS).unref();
+    },
+    () => {},
+  );
+  await runLeaseLoop({
+    client,
+    target,
+    terms: leaseTermsNow,
+    firstCheck,
+    recheck: checkVolumes,
+    image: TROOPER_IMAGE,
+    leaseLog,
+    start: (drop) => {
       const key = `${drop.dropId}:${drop.epoch}`;
       live.add(key);
       console.log(`drop ${drop.dropId} (epoch ${drop.epoch}) leased`);
-      runDrop(drop, {
+      return runDrop(drop, {
         client,
         driver,
-        stickId,
+        stickId: id,
         active,
         trust,
         pending,
@@ -245,18 +221,15 @@ async function main() {
           ? { lostServerKillBeats: Number(process.env.JM_LOST_SERVER_KILL_BEATS) }
           : {}),
       })
+        .then(() => {})
         .catch((e) =>
           console.error(`drop ${drop.dropId} failed: ${e instanceof Error ? e.message : e}`),
         )
         .finally(() => {
           live.delete(key);
-          running--;
         });
-    } catch (e) {
-      leaseLog.error(e instanceof Error ? e.message : String(e));
-      await sleep(5000);
-    }
-  }
+    },
+  });
 }
 
 // The entry point: always runs (the helpers it uses live in state.ts so tests can import them).

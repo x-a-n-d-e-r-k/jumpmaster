@@ -1198,8 +1198,11 @@ The result page has two tabs:
 these stages in order, and the page refreshes every 3 seconds until the stick is live:
 
 1. **Fetching images**, with the download's progress.
-2. Its health: the Docker version, `egress-v1`, `image-verify-v1` and the free disk.
-3. **Live**.
+2. **Starting**, with `starting: checking the trooper image <name>`, while its first health check
+   pulls and checks the trooper image (minutes on a fresh machine). The stick already reports in
+   (it counts as seen) but takes no drop and runs no push until that check has a result.
+3. Its health: the Docker version, `egress-v1`, `image-verify-v1` and the free disk.
+4. **Live**.
 
 The stick gets the invite's name and trooper count. A code that is used, expired, cancelled or
 unknown is refused exactly as a wrong join token is (`401 {"error":"unauthorized"}`).

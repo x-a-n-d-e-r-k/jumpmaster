@@ -430,6 +430,25 @@ describe('server-hosted images (issue #141)', () => {
     await expect(c.reportImageFetch({ ref, done: 2, total: 2 })).resolves.toBeUndefined();
   });
 
+  test('a starting report (issue #157) rides every lease while set; null is sent once', async () => {
+    serve();
+    const c = new StickClient('http://server.test', 't');
+    await c.lease(0);
+    expect(calls[0]?.body).not.toHaveProperty('starting');
+    c.reportStarting({ image: ref });
+    // Setting it sends nothing by itself: the caller's lease carries it.
+    expect(calls).toHaveLength(1);
+    await c.lease(0, { capabilities: [] });
+    expect(calls[1]?.body).toMatchObject({ freeSlots: 0, starting: { image: ref } });
+    await c.lease(0);
+    expect(calls[2]?.body).toMatchObject({ starting: { image: ref } });
+    c.reportStarting(null);
+    await c.lease(1);
+    expect(calls[3]?.body).toMatchObject({ freeSlots: 1, starting: null });
+    await c.lease(1);
+    expect(calls[4]?.body).not.toHaveProperty('starting');
+  });
+
   test('imageLayout asks for name@digest and the platform with the stick token', async () => {
     serve(200, 'tar');
     const c = new StickClient('http://server.test/', 'tok');

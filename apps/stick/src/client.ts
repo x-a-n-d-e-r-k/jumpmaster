@@ -15,6 +15,7 @@ import {
   SKIPPED_HEADER,
   SLOTS_HEADER,
   type StickInfo,
+  type StickStarting,
   type TrooperEvent,
 } from '@jumpmaster/protocol';
 
@@ -158,6 +159,11 @@ export class StickClient implements DropClient, PushClient {
    * when a download ends; `undefined` sends nothing (as before server-hosted images).
    */
   private imageFetch: ImageFetch | null | undefined;
+  /**
+   * The first health check to report (issue #157): sent on every lease while set; `null` is sent
+   * once when the check has a result; `undefined` sends nothing.
+   */
+  private startingReport: StickStarting | null | undefined;
 
   /** What this stick advertises on enroll and on every lease (an M3 stick sent nothing). */
   private get info(): Partial<StickInfo> {
@@ -220,6 +226,7 @@ export class StickClient implements DropClient, PushClient {
     const { maxSlots: max, slots: start } = this.opts;
     this.lastTerms = terms;
     const fetching = this.imageFetch;
+    const starting = this.startingReport;
     const res = await this.req('/api/sticks/lease', {
       freeSlots,
       ...this.info,
@@ -227,9 +234,11 @@ export class StickClient implements DropClient, PushClient {
       ...(max === undefined ? {} : { maxSlots: max }),
       ...(start === undefined ? {} : { slots: start }),
       ...(fetching === undefined ? {} : { imageFetch: fetching }),
+      ...(starting === undefined ? {} : { starting }),
     });
-    // The end of a download is said once.
+    // The end of a download, and of the first check, is said once.
     if (fetching === null && this.imageFetch === null) this.imageFetch = undefined;
+    if (starting === null && this.startingReport === null) this.startingReport = undefined;
     this.features = featuresOf(res);
     const skipped = skippedOf(res);
     const slots = slotsOf(res);
@@ -251,6 +260,14 @@ export class StickClient implements DropClient, PushClient {
     this.imageFetch = p;
     if (!this.lastTerms) return;
     await this.lease(0, this.lastTerms).catch(() => {});
+  }
+
+  /**
+   * Sets the starting report (issue #157) the next leases carry: the image the first health check
+   * is checking, or `null` once it has a result. Sends nothing itself: the lease loop reports.
+   */
+  reportStarting(s: StickStarting | null): void {
+    this.startingReport = s;
   }
 
   /**

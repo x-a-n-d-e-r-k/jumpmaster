@@ -26,6 +26,7 @@ import {
   REVIEW_OUTPUT_SCHEMA,
   RoleSchema,
   STICK_CAPABILITIES,
+  StickStartingSchema,
   VerdictSchema,
 } from './index.js';
 
@@ -421,6 +422,13 @@ describe('push protocol', () => {
       { ref, done: 0 },
     ])
       expect(ImageFetchSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+  });
+
+  test('a starting report (issue #157) names the image the first health check is checking', () => {
+    const image = `ghcr.io/o/jumpmaster-trooper@sha256:${'a'.repeat(64)}`;
+    expect(StickStartingSchema.parse({ image })).toEqual({ image });
+    for (const bad of [{}, { image: '' }, { image: 'x'.repeat(513) }])
+      expect(StickStartingSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
   });
 
   test('push request: final needs expectSha; checkpoint forbids it', () => {

@@ -308,6 +308,7 @@ export function createApp(
     const html = renderSticks({
       sticks: listSticks(db).map((s): StickRow => {
         const fetching = fetches.get(s.id, deps.now());
+        const starting = fetches.starting(s.id, deps.now());
         return {
           ...stickLine(s, config),
           slots: effectiveSlots(s),
@@ -315,6 +316,7 @@ export function createApp(
           reported: s.maxSlots !== null,
           running: liveDropsOn(db, s.id),
           ...(fetching ? { fetching } : {}),
+          ...(starting ? { starting } : {}),
           dockerVersion: s.dockerVersion,
           freeBytes: s.freeBytes,
         };

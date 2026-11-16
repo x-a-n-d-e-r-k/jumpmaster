@@ -18,6 +18,7 @@ import {
   SLOTS_HEADER,
   type StickInfo,
   StickInfoSchema,
+  StickStartingSchema,
   TrooperEventSchema,
 } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -122,6 +123,8 @@ const LeaseBody = StickInfoSchema.extend({
   slots: z.number().int().min(1).optional(),
   /** The stick's image download from the mirror (issue #141); `null` once there is none. */
   imageFetch: ImageFetchSchema.nullable().optional(),
+  /** The image its first health check is checking (issue #157); `null` once it has a result. */
+  starting: StickStartingSchema.nullable().optional(),
   /** Its engine version and free drop-volume space, for the sticks page (issue #138). */
   health: z
     .object({
@@ -385,6 +388,8 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       const excludeRoles = noPush ? PUSHING_ROLES : [];
       if (body.data.imageFetch !== undefined)
         deps.fetches?.set(stick.id, body.data.imageFetch, now());
+      if (body.data.starting !== undefined)
+        deps.fetches?.setStarting(stick.id, body.data.starting, now());
       // Every lease call says what the stick can do now, and that it is alive.
       stampStick(db, stick.id, advertOf(body.data), now(), {
         maxSlots: body.data.maxSlots,

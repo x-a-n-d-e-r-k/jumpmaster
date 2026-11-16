@@ -1,6 +1,6 @@
 // The sticks page (issue #136): every enrolled stick, what it can run, and how many troopers it
 // runs at once, set here and applied on its next lease answer with no restart.
-import type { ImageFetch } from '@jumpmaster/protocol';
+import type { ImageFetch, StickStarting } from '@jumpmaster/protocol';
 import { STICK_LIVE_MS } from '../doctor/checks.js';
 import type { MirrorStatus } from '../images/mirror.js';
 import { MAX_INVITE_SLOTS } from '../install/invite.js';
@@ -24,6 +24,8 @@ export interface StickRow extends StickLine {
   running: number;
   /** The image it is downloading from this server now, as it last reported (issue #141). */
   fetching?: ImageFetch;
+  /** The image its first health check is checking, as it last reported (issue #157). */
+  starting?: StickStarting;
   /** The Docker engine version it last reported (issue #138). */
   dockerVersion?: string | null;
   /** The free space on its drop volumes it last measured (issue #138). */
@@ -39,10 +41,18 @@ export interface PendingInviteRow {
 
 const mb = (bytes: number): string => (bytes / 1_000_000).toFixed(0);
 
+/** An image by its name, without registry, tag or digest. */
+const imageName = (ref: string): string =>
+  ref.replace(/@.*$/, '').split('/').at(-1)?.replace(/:.*$/, '') || ref;
+
 /** `fetching <image> X/Y MB`: the image by its name, without registry or digest. */
 export function fetchingLine(f: ImageFetch): string {
-  const name = f.ref.replace(/@.*$/, '').split('/').at(-1) || f.ref;
-  return `fetching ${name} ${mb(f.done)}/${mb(f.total)} MB`;
+  return `fetching ${imageName(f.ref)} ${mb(f.done)}/${mb(f.total)} MB`;
+}
+
+/** `starting: checking the trooper image <image>` (issue #157), by the image's name. */
+export function startingLine(s: StickStarting): string {
+  return `starting: checking the trooper image ${imageName(s.image)}`;
 }
 
 /** Live, or how long since it was last seen. */
@@ -55,11 +65,14 @@ function seen(lastSeenAt: string | null, now: Date): string {
 }
 
 /**
- * Where a stick is on its way to live (issue #138): fetching its images, then live (its health
- * shown beneath from its first lease), or never seen / not seen for a while.
+ * Where a stick is on its way to live (issue #138): fetching its images, starting (its first
+ * health check, issue #157), then live (its health shown beneath from its first lease), or never
+ * seen / not seen for a while.
  */
 export function stickStage(st: StickRow, now: Date): { words: string; live: boolean } {
   if (st.fetching) return { words: 'Fetching images', live: false };
+  // Seen (it reports in while it starts), but not ready for work until its first check ends.
+  if (st.starting) return { words: 'Starting', live: false };
   const s = seen(st.lastSeenAt, now);
   return s === 'live' ? { words: 'Live', live: true } : { words: s, live: false };
 }
@@ -136,6 +149,9 @@ export function renderSticks(s: {
         `<span class="stage">${escapeHtml(stage.words)}</span>` +
         (st.fetching
           ? `<br><span class="muted">${escapeHtml(fetchingLine(st.fetching))}</span>`
+          : '') +
+        (st.starting
+          ? `<br><span class="muted starting">${escapeHtml(startingLine(st.starting))}</span>`
           : '') +
         (st.lastSeenAt !== null
           ? `<br><span class="muted health">${escapeHtml(healthLine(st))}</span>`

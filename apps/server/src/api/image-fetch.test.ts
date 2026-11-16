@@ -76,4 +76,17 @@ test('progress a stick reports on its lease shows on /sticks, and goes once it r
   expect(await page()).toContain('fetching jumpmaster-trooper 3/90 MB');
   await lease(null);
   expect(await page()).not.toContain('fetching jumpmaster-trooper');
+  // A stick still in its first health check (issue #157) says so the same way.
+  const starting = (value: unknown) =>
+    app?.inject({
+      method: 'POST',
+      url: '/api/sticks/lease',
+      headers: { ...proto, authorization: `Bearer ${stickToken}` },
+      payload: { freeSlots: 0, capabilities: [], starting: value },
+    });
+  expect((await starting({ image: ref }))?.statusCode).toBe(204);
+  expect(await page()).toContain('starting: checking the trooper image jumpmaster-trooper');
+  expect(await page()).toContain('<span class="stage">Starting</span>');
+  await starting(null);
+  expect(await page()).not.toContain('starting: checking');
 });
