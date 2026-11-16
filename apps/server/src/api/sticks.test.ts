@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
-import { FEATURES_HEADER, PushGrantSchema, PushPlanSchema } from '@jumpmaster/protocol';
+import {
+  FEATURES_HEADER,
+  PushGrantSchema,
+  PushPlanSchema,
+  SLOTS_HEADER,
+} from '@jumpmaster/protocol';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createApp } from '../app.js';
@@ -10,18 +15,22 @@ import type { Config } from '../config.js';
 import { type Db, openDb } from '../db/open.js';
 import {
   activeDropFor,
+  effectiveSlots,
   getAttempts,
   getDrop,
   getOutbox,
   getPullRequest,
+  getStick,
   getStickByTokenHash,
   getUsageState,
   insertDrop,
   listEvents,
   reclaimableDropFor,
   reserveGrant,
+  type Stick,
   setAttempts,
   setKilled,
+  setStickDesiredSlots,
   setUsageState,
   setWorkItemState,
   setZoneMode,
@@ -137,12 +146,13 @@ function setup(
   return { db, forge, wi, forgeZones };
 }
 
+/** Enrolls a stick that runs up to 4 troopers, so a test may lease it several drops. */
 async function enroll(name = 'stick-1') {
   const res = await app.inject({
     method: 'POST',
     url: '/api/sticks/enroll',
     headers: proto,
-    payload: { joinToken: 'join-me', name, slots: 1 },
+    payload: { joinToken: 'join-me', name, slots: 4 },
   });
   return res.json() as { stickId: string; stickToken: string };
 }
@@ -190,7 +200,7 @@ describe('stick API', () => {
     const { db } = setup();
     const { stickId, stickToken } = await enroll();
     const hash = createHash('sha256').update(stickToken).digest('hex');
-    expect(getStickByTokenHash(db, hash)).toMatchObject({ id: stickId, name: 'stick-1', slots: 1 });
+    expect(getStickByTokenHash(db, hash)).toMatchObject({ id: stickId, name: 'stick-1', slots: 4 });
     expect(getStickByTokenHash(db, stickToken)).toBeUndefined();
   });
 
@@ -470,6 +480,111 @@ describe('stick API', () => {
     const { stickToken } = await enroll();
     expect((await lease(stickToken)).statusCode).toBe(500);
     expect(getDrop(db, 'g1')).toMatchObject({ state: 'queued', stickId: null });
+  });
+});
+
+describe('the trooper count (x-jumpmaster-slots)', () => {
+  const enrollWith = async (slots: number) =>
+    (
+      await app.inject({
+        method: 'POST',
+        url: '/api/sticks/enroll',
+        headers: proto,
+        payload: { joinToken: 'join-me', name: 'kidney-shadow', slots },
+      })
+    ).json() as { stickId: string; stickToken: string };
+  const leaseWith = (token: string, payload: Record<string, unknown>) =>
+    app.inject({ method: 'POST', url: '/api/sticks/lease', headers: bearer(token), payload });
+  /** `n` drops live on the stick, outside the queued one. */
+  const busyOn = (db: Db, stickId: string, n: number) => {
+    for (let i = 0; i < n; i++)
+      insertDrop(db, {
+        id: `busy${i}`,
+        dropZoneId: 'main',
+        workItemId: upsertWorkItem(db, {
+          dropZoneId: 'main',
+          issueNumber: 100 + i,
+          title: 't',
+          body: 'b',
+          author: 'a',
+          priority: 0,
+          isFix: false,
+          issueCreatedAt: t0.toISOString(),
+        }).id,
+        role: 'implement',
+        state: i % 2 === 0 ? 'running' : 'leased',
+        stickId,
+        epoch: 1,
+        createdAt: t0.toISOString(),
+      });
+  };
+
+  test('the header is on a 200 and on a 204', async () => {
+    setup();
+    const { stickToken } = await enrollWith(2);
+    const got = await leaseWith(stickToken, { freeSlots: 1, capabilities: ['push-v1'] });
+    expect(got.statusCode).toBe(200);
+    expect(got.headers[SLOTS_HEADER]).toBe('2');
+    const none = await leaseWith(stickToken, { freeSlots: 1, capabilities: ['push-v1'] });
+    expect(none.statusCode).toBe(204);
+    expect(none.headers[SLOTS_HEADER]).toBe('2');
+    const full = await leaseWith(stickToken, { freeSlots: 0 });
+    expect(full.statusCode).toBe(204);
+    expect(full.headers[SLOTS_HEADER]).toBe('2');
+  });
+
+  test('a stick with effective 2 and 2 active drops gets 204, even asking with freeSlots 5', async () => {
+    const { db } = setup();
+    const { stickId, stickToken } = await enrollWith(2);
+    busyOn(db, stickId, 2);
+    const res = await leaseWith(stickToken, {
+      freeSlots: 5,
+      maxSlots: 8,
+      capabilities: ['push-v1'],
+    });
+    expect(res.statusCode).toBe(204);
+    expect(res.headers[SLOTS_HEADER]).toBe('2');
+    expect(getDrop(db, 'd1')?.state).toBe('queued');
+    // A pending push holds no lease slot: one of the two finishing its run frees one.
+    updateDrop(db, 'busy1', { state: 'push_pending' });
+    const after = await leaseWith(stickToken, { freeSlots: 5, capabilities: ['push-v1'] });
+    expect(after.statusCode).toBe(200);
+  });
+
+  test('max_slots is stored from the body; the desired count applies up to it', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enrollWith(1);
+    await leaseWith(stickToken, { freeSlots: 1, maxSlots: 4 });
+    expect(getStick(db, stickId)).toMatchObject({ slots: 1, maxSlots: 4, desiredSlots: null });
+    setStickDesiredSlots(db, stickId, 3);
+    const res = await leaseWith(stickToken, { freeSlots: 1, maxSlots: 4 });
+    expect(res.headers[SLOTS_HEADER]).toBe('3');
+    // A stick restarted with a lower ceiling caps the desired count.
+    const lower = await leaseWith(stickToken, { freeSlots: 1, maxSlots: 2 });
+    expect(lower.headers[SLOTS_HEADER]).toBe('2');
+    expect(getStick(db, stickId)?.maxSlots).toBe(2);
+    const invalid = await leaseWith(stickToken, { freeSlots: 1, maxSlots: 0 });
+    expect(invalid.statusCode).toBe(400);
+  });
+
+  test('an old-shaped body without maxSlots is capped at the enrolled slots', async () => {
+    const { db } = setup();
+    const { stickId, stickToken } = await enrollWith(1);
+    setStickDesiredSlots(db, stickId, 3);
+    busyOn(db, stickId, 1);
+    const res = await leaseWith(stickToken, { freeSlots: 2 });
+    expect(res.statusCode).toBe(204);
+    expect(res.headers[SLOTS_HEADER]).toBe('1');
+    expect(getStick(db, stickId)?.maxSlots).toBeNull();
+    expect(getDrop(db, 'd1')?.state).toBe('queued');
+  });
+
+  test('a stick with no desired count runs exactly as before: its enrolled slots', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enrollWith(3);
+    const res = await leaseWith(stickToken, { freeSlots: 1, maxSlots: 4 });
+    expect(res.headers[SLOTS_HEADER]).toBe('3');
+    expect(effectiveSlots(getStick(db, stickId) as Stick)).toBe(3);
   });
 });
 

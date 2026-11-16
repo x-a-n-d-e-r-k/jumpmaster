@@ -150,6 +150,7 @@ describe('the control manifest', () => {
       'Doctor',
       'Briefings',
       'Drops',
+      'Sticks',
       'Kill',
     ]);
     // `ctl help` prints it; `ctl <verb> --help` prints that verb's forms; usage is the same text.

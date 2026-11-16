@@ -961,7 +961,6 @@ test('v25 lets a briefing be dismissed, keeping every briefing and ruling', () =
   });
 
   const db = openDb(f);
-  expect(MIGRATIONS.at(-1)?.version).toBe(25);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(db.pragma('foreign_key_check')).toEqual([]);
   expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
@@ -986,4 +985,19 @@ test('v25 lets a briefing be dismissed, keeping every briefing and ruling', () =
          created_at, updated_at) VALUES ('main', 'crew', 'crew:x', 'd', 'w', '[]', 'crew', 'open', 'a', 'a')`,
     ),
   ).toThrow(/UNIQUE/);
+});
+
+test('v26 adds the trooper counts, unset on every existing stick: it runs its enrolled slots', () => {
+  const f = dbAt(25, (raw) => {
+    raw.exec(
+      `INSERT INTO sticks (id, name, token_hash, slots, created_at) VALUES ('s1', 'n', 'h', 2, 'a')`,
+    );
+  });
+  const db = openDb(f);
+  expect(MIGRATIONS.at(-1)?.version).toBe(26);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.prepare('SELECT slots, desired_slots AS d, max_slots AS m FROM sticks').all()).toEqual([
+    { slots: 2, d: null, m: null },
+  ]);
+  db.close();
 });

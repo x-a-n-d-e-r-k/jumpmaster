@@ -762,6 +762,16 @@ ALTER TABLE new_briefings RENAME TO briefings;
 CREATE UNIQUE INDEX briefings_open_subject ON briefings(zone_id, subject) WHERE state = 'open';
 `;
 
+/**
+ * v26: the operator sets each stick's trooper count from the UI (issue #136). `desired_slots` is
+ * that count (NULL: the enrolled `slots`); `max_slots` is the ceiling the stick last reported
+ * (NULL: a stick too old to report one, capped at its enrolled `slots`).
+ */
+const V26_SQL = `
+ALTER TABLE sticks ADD COLUMN desired_slots INTEGER;
+ALTER TABLE sticks ADD COLUMN max_slots INTEGER;
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -796,6 +806,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 23, sql: V23_SQL },
   { version: 24, sql: V24_SQL },
   { version: 25, sql: V25_SQL, foreignKeysOff: true },
+  { version: 26, sql: V26_SQL },
 ];
 
 /**

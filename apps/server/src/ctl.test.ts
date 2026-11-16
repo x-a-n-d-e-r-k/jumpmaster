@@ -43,6 +43,84 @@ async function run<C = ReturnType<typeof fakeFetch>['calls']>(
   return { code, out, err, calls: fetchImpl.calls };
 }
 
+describe('ctl sticks (issue #136)', () => {
+  test('sticks slots kidney-shadow 2 calls the route with {slots: 2}', async () => {
+    const r = await run(
+      ['sticks', 'slots', 'kidney-shadow', '2'],
+      '',
+      fakeFetch(200, { id: 's1', slots: 2, maxSlots: 4 }),
+    );
+    expect(r.code).toBe(0);
+    expect(r.calls).toHaveLength(1);
+    expect(r.calls[0]?.url).toBe('http://127.0.0.1:7420/api/control/sticks/kidney-shadow/slots');
+    expect(r.calls[0]?.init.method).toBe('POST');
+    expect(JSON.parse(String(r.calls[0]?.init.body))).toEqual({ slots: 2 });
+    expect(r.out).toEqual(['stick s1: 2 troopers at once (allows up to 4)']);
+  });
+
+  test('a count that is not a whole number is a usage error; a refusal prints and exits 1', async () => {
+    for (const bad of [
+      ['sticks', 'slots', 'k'],
+      ['sticks', 'slots', 'k', 'two'],
+      ['sticks', 'slots', 'k', '2', 'x'],
+    ]) {
+      const r = await run(bad);
+      expect(r.code, bad.join(' ')).toBe(2);
+      expect(r.calls).toHaveLength(0);
+    }
+    const refused = await run(
+      ['sticks', 'slots', 'k', '9'],
+      '',
+      fakeFetch(400, {
+        error:
+          'stick k allows up to 4 troopers at once: to allow more, set JM_MAX_SLOTS on that machine and restart the stick',
+      }),
+    );
+    expect(refused.code).toBe(1);
+    expect(refused.out.join('\n')).toContain('set JM_MAX_SLOTS on that machine');
+  });
+
+  test('ctl sticks lists name, effective, desired and max slots, and last seen', async () => {
+    const r = await run(
+      ['sticks'],
+      '',
+      fakeFetch(200, {
+        sticks: [
+          {
+            id: 's1',
+            name: 'kidney-shadow',
+            slots: 3,
+            enrolledSlots: 1,
+            desiredSlots: 3,
+            maxSlots: 4,
+            running: 1,
+            lastSeenAt: '2026-11-16T10:00:00.000Z',
+          },
+          {
+            id: 's2',
+            name: 'old',
+            slots: 1,
+            enrolledSlots: 1,
+            desiredSlots: null,
+            maxSlots: 1,
+            running: 0,
+            lastSeenAt: null,
+          },
+        ],
+      }),
+    );
+    expect(r.code).toBe(0);
+    expect(r.calls[0]?.url).toBe('http://127.0.0.1:7420/api/control/sticks');
+    expect(r.calls[0]?.init.method).toBe('GET');
+    expect(r.out).toEqual([
+      'kidney-shadow (s1): 3 troopers (desired 3, max 4), 1 running, last seen 2026-11-16T10:00:00.000Z',
+      'old (s2): 1 trooper (desired -, max 1), 0 running, last seen never',
+    ]);
+    const none = await run(['sticks'], '', fakeFetch(200, { sticks: [] }));
+    expect(none.out).toEqual(['no stick has enrolled']);
+  });
+});
+
 describe('ctl setup and passphrase verbs', () => {
   test('the setup and passphrase verbs map to their routes; a passphrase in argv is refused', () => {
     expect(ctlRequest(['setup-code'])).toEqual({

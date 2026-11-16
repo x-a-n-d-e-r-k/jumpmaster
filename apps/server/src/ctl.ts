@@ -340,8 +340,47 @@ function dropsRequest(args: string[]): Raw | null {
   return n >= 1 && n <= 168 ? { path: `${path}/extend-retention`, body: { hours: n } } : null;
 }
 
+/** `sticks [--json]` and `sticks slots <name-or-id> <n>`: each stick's trooper count. */
+function sticksRequest(args: string[]): Raw | null {
+  const [, what, stick, n, ...rest] = args;
+  if (what === undefined || (what === '--json' && args.length === 2))
+    return { path: '/api/control/sticks', method: 'GET' };
+  if (what !== 'slots' || !stick || n === undefined || rest.length > 0 || !/^[0-9]+$/.test(n))
+    return null;
+  return {
+    path: `/api/control/sticks/${encodeURIComponent(stick)}/slots`,
+    body: { slots: Number(n) },
+  };
+}
+
+type StickView = {
+  id: string;
+  name: string;
+  slots: number;
+  desiredSlots: number | null;
+  maxSlots: number;
+  running: number;
+  lastSeenAt: string | null;
+};
+
+/** `ctl sticks` and `ctl sticks slots` as lines a person reads. */
+function sticksLines(args: string[], body: Record<string, unknown>): string[] {
+  const troopers = (n: number) => `${n} trooper${n === 1 ? '' : 's'}`;
+  if (args[1] === 'slots') {
+    const b = body as { id: string; slots: number; maxSlots: number };
+    return [`stick ${b.id}: ${troopers(b.slots)} at once (allows up to ${b.maxSlots})`];
+  }
+  const sticks = (body.sticks ?? []) as StickView[];
+  if (sticks.length === 0) return ['no stick has enrolled'];
+  return sticks.map(
+    (s) =>
+      `${s.name} (${s.id}): ${troopers(s.slots)} (desired ${s.desiredSlots ?? '-'}, max ${s.maxSlots}), ${s.running} running, last seen ${s.lastSeenAt ?? 'never'}`,
+  );
+}
+
 function rawRequest(args: string[]): Raw | null {
   const [command, zone] = args;
+  if (command === 'sticks') return sticksRequest(args);
   if (command === 'config') return configRequest(args);
   if (command === 'secrets') return secretsRequest(args);
   if (command === 'settings') return settingsRequest(args);
@@ -1312,6 +1351,12 @@ async function runCtlOn(
     if (st.detail) say(st.detail);
     for (const a of st.also ?? []) say(`- ${a.text}${a.href ? ` (fix: ${a.href})` : ''}`);
     if (st.action) say(`next: ${st.action.label}: ${st.action.href}`);
+    return 0;
+  }
+  if (args[0] === 'sticks' && res.ok) {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    if (args.includes('--json')) out(JSON.stringify(parsed, null, 2));
+    else for (const line of sticksLines(args, parsed)) out(plain(line));
     return 0;
   }
   if (args[0] === 'mcp-tokens' && res.ok) {
