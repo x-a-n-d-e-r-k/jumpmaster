@@ -1,9 +1,16 @@
 // One mirrored image for one platform as an OCI image layout tar (issue #140), for a stick to
-// load: `oci-layout`, an `index.json` naming the platform's manifest (annotated with the original
-// reference) and the image's signature artifacts, and the blobs: the platform manifest, its config
-// and layers, the multi-arch index it was signed as, and each signature manifest with its blobs.
-// The stick checks the index hashes to the lock's digest, lists this manifest, and carries a valid
-// signature, before it loads anything.
+// load and verify. It follows cosign's local-layout conventions (sigstore/cosign
+// pkg/oci/layout), which find entries by their `kind` annotation:
+// - the platform manifest, named with the original reference: the image a stick loads;
+// - the signed multi-arch index under kind `dev.cosignproject.cosign/imageIndex`, so
+//   `cosign verify --local-image` checks the digest the signatures name (the index's), not the
+//   platform manifest's;
+// - a legacy `sha256-<hex>.sig` signature image under kind `dev.cosignproject.cosign/sigs`;
+// - OCI 1.1 signature referrers (sigstore bundles) listed with their artifactType and no kind,
+//   which cosign's layout reader has none for.
+// Signature entries carry no reference name, so nothing but the platform image is loaded as a
+// named image. A `manifest.json` names exactly the platform image for `docker load` on Docker's
+// classic image store, which reads that file rather than `index.json`.
 import { createReadStream } from 'node:fs';
 import { Readable } from 'node:stream';
 import type { Lookup } from './mirror.js';
@@ -21,6 +28,15 @@ export const LAYOUT_ANNOTATIONS = {
   /** On a signature artifact: the digest it signs. */
   signs: 'dev.jumpmaster.signature.of',
 } as const;
+
+/** cosign's local OCI layout annotations: `kind` says what an index.json entry is. */
+export const COSIGN_LAYOUT = {
+  kind: 'kind',
+  imageIndex: 'dev.cosignproject.cosign/imageIndex',
+  sigs: 'dev.cosignproject.cosign/sigs',
+} as const;
+
+const LEGACY_SIG = /^sha256-[0-9a-f]{64}\.sig$/;
 
 /** What a request for a layout gets: the tar, or why not. */
 export type LayoutAnswer =
@@ -87,12 +103,26 @@ export function layoutFor(lookup: Lookup, platform: string): LayoutAnswer {
           [LAYOUT_ANNOTATIONS.index]: r.digest,
         },
       },
-      ...r.signatures.map((s) => ({
-        ...s.manifest,
-        annotations: { ...s.manifest.annotations, [LAYOUT_ANNOTATIONS.signs]: r.digest },
-      })),
+      { ...r.index, annotations: { [COSIGN_LAYOUT.kind]: COSIGN_LAYOUT.imageIndex } },
+      ...r.signatures.map((s) => {
+        const { [LAYOUT_ANNOTATIONS.refName]: tag, ...rest } = s.manifest.annotations ?? {};
+        const legacy = !s.manifest.artifactType && tag !== undefined && LEGACY_SIG.test(tag);
+        return {
+          ...s.manifest,
+          annotations: {
+            ...rest,
+            ...(legacy ? { [COSIGN_LAYOUT.kind]: COSIGN_LAYOUT.sigs } : {}),
+            [LAYOUT_ANNOTATIONS.signs]: r.digest,
+          },
+        };
+      }),
     ],
   };
+  const [config, ...layers] = p.blobs;
+  const blobPath = (d: Descriptor) => `blobs/sha256/${d.digest.slice(7)}`;
+  const dockerManifest = config
+    ? [{ Config: blobPath(config), RepoTags: [], Layers: layers.map(blobPath) }]
+    : [];
   const blobs = new Map<string, Descriptor>();
   for (const d of [
     r.index,
@@ -114,14 +144,16 @@ export function layoutFor(lookup: Lookup, platform: string): LayoutAnswer {
 
   const layout = Buffer.from('{"imageLayoutVersion":"1.0.0"}');
   const indexBytes = Buffer.from(JSON.stringify(index));
+  const dockerBytes = Buffer.from(JSON.stringify(dockerManifest));
   const entries: Entry[] = [
     { name: 'oci-layout', size: layout.length, bytes: layout },
     { name: 'index.json', size: indexBytes.length, bytes: indexBytes },
+    { name: 'manifest.json', size: dockerBytes.length, bytes: dockerBytes },
     { name: 'blobs/', size: 0, dir: true },
     { name: 'blobs/sha256/', size: 0, dir: true },
     ...[...blobs.values()].map(
       (d): Entry => ({
-        name: `blobs/sha256/${d.digest.slice(7)}`,
+        name: blobPath(d),
         size: d.size,
         path: store.blobPath(d.digest),
       }),

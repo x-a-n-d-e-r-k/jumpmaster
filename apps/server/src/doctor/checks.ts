@@ -2194,7 +2194,6 @@ function vaultKeyCheck(d: DoctorDeps): DoctorCheck {
   };
 }
 
-/** Every check, global ones first, then each zone's (zones in parallel). */
 /**
  * The release images the server mirrors for sticks (issue #140): no lock is information (a
  * checkout has nothing to mirror), every image complete a pass, any failed a warn naming each
@@ -2234,6 +2233,7 @@ function imageMirrorCheck(status: MirrorStatus): DoctorCheck {
   };
 }
 
+/** Every check, global ones first, then each zone's (zones in parallel). */
 export async function runChecks(
   d: DoctorDeps,
   opts: { zoneId?: string } = {},

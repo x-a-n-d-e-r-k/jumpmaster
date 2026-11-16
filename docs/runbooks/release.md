@@ -297,12 +297,25 @@ with its stick token, exactly as it leases (anonymous: the same `401`). The answ
 layout tar with `Content-Length` and `ETag: "<platform manifest digest>"`:
 
 - `oci-layout`;
-- `index.json`, naming the platform manifest (annotated `org.opencontainers.image.ref.name` and
-  `io.containerd.image.name` with the original `<registry>/<name>@<index digest>`, and
-  `dev.jumpmaster.image.index` with the index digest) and each signature manifest (annotated
-  `dev.jumpmaster.signature.of`);
-- the blobs: the platform manifest, its config and layers, the multi-arch index (the digest the
-  signatures name), and each signature manifest with its blobs.
+- `index.json`, laid out as cosign's local OCI layout reads it (entries found by their `kind`
+  annotation):
+  - the platform manifest, annotated `org.opencontainers.image.ref.name` and
+    `io.containerd.image.name` with the original `<registry>/<name>@<index digest>` and
+    `dev.jumpmaster.image.index` with the index digest: the only named entry, the image a stick
+    loads;
+  - the signed multi-arch index, `kind: dev.cosignproject.cosign/imageIndex`, so
+    `cosign verify --local-image` checks the digest the signatures name (the index's, not the
+    platform manifest's);
+  - a legacy `sha256-<hex>.sig` signature image, `kind: dev.cosignproject.cosign/sigs`;
+  - each OCI 1.1 signature referrer (a sigstore bundle, what cosign v3 writes by default) with its
+    `artifactType` and no `kind`: cosign's layout reader defines none for bundles, so a stick
+    verifies a bundle-only image from these blobs itself (part 2);
+  - every signature entry annotated `dev.jumpmaster.signature.of` with the index digest, and none
+    with a reference name;
+- `manifest.json`, naming exactly the platform image (config and layers) for `docker load` on
+  Docker's classic image store, which reads that file rather than `index.json`;
+- the blobs: the platform manifest, its config and layers, the multi-arch index, and each
+  signature manifest with its blobs.
 
 Only images the current or the previous lock names are served, so sticks still on the previous
 release keep working through an upgrade; any other digest is `404 { error: 'not in the image

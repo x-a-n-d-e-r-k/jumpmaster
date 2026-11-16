@@ -29,7 +29,17 @@ export type FakeImage = {
   signature: { manifest: string; blobs: string[] };
 };
 
-export type SignatureMode = 'referrers-tag' | 'referrers-api' | 'legacy' | 'none';
+/**
+ * How the signature is published: an OCI 1.1 referrer under the `sha256-<hex>` fallback tag (no
+ * referrers API, GHCR's case), the same tag behind a referrers API that answers an empty list,
+ * a referrer the referrers API lists, the legacy `.sig` tag, or none.
+ */
+export type SignatureMode =
+  | 'referrers-tag'
+  | 'referrers-tag-empty-api'
+  | 'referrers-api'
+  | 'legacy'
+  | 'none';
 
 export type FakeRegistry = {
   /** `127.0.0.1:<port>` */
@@ -230,13 +240,15 @@ export async function startFakeRegistry(
         });
         const desc = { ...sig, artifactType: SIGSTORE_BUNDLE };
         if (mode === 'referrers-api') referrers.set(`${repo}@${index.digest}`, [desc]);
-        else
+        else {
+          if (mode === 'referrers-tag-empty-api') referrers.set(`${repo}@${index.digest}`, []);
           manifest(
             repo,
             OCI_INDEX,
             { schemaVersion: 2, mediaType: OCI_INDEX, manifests: [desc] },
             `sha256-${hex}`,
           );
+        }
         signature = { manifest: sig.digest, blobs: [empty.digest, bundle.digest] };
       }
       return { name, digest: index.digest, platforms: out, signature };

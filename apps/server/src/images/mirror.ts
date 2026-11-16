@@ -415,14 +415,17 @@ export class ImageMirror {
 
   /**
    * The cosign signature artifacts of `digest`, as the release workflow's cosign writes them:
-   * OCI 1.1 referrers (from the referrers API, else its `sha256-<hex>` fallback tag, which is
-   * what GHCR holds), and the legacy `sha256-<hex>.sig` tag. Each is stored with its blobs.
+   * OCI 1.1 referrers (from the referrers API, else, when it is missing or lists none, the
+   * `sha256-<hex>` fallback tag, which is what GHCR holds), and the legacy `sha256-<hex>.sig` tag. Each is stored with its blobs.
    */
   async #signatures(client: RegistryClient, digest: string): Promise<ImageRecord['signatures']> {
     const out: ImageRecord['signatures'] = [];
     const seen = new Set<string>();
-    const list = (await client.referrers(digest)) ?? (await client.signatureTag(digest, ''));
-    const referrers = list ? (parse(list.bytes, 'the referrers list').manifests ?? []) : [];
+    const listed = (list: { bytes: Buffer } | undefined) =>
+      list ? (parse(list.bytes, 'the referrers list').manifests ?? []) : [];
+    let referrers = listed(await client.referrers(digest));
+    // No referrers API, or one that lists nothing: cosign then wrote the fallback tag.
+    if (referrers.length === 0) referrers = listed(await client.signatureTag(digest, ''));
     for (const [i, r] of referrers.entries()) {
       const desc = descriptor(r, `referrer ${i}`);
       if (seen.has(desc.digest)) continue;

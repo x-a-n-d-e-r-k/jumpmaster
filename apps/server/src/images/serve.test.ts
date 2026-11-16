@@ -4,9 +4,20 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { ScrubSet } from '../forge/scrub-set.js';
-import { type FakeImage, type FakeRegistry, startFakeRegistry } from '../test/fake-registry.js';
+import {
+  type FakeImage,
+  type FakeRegistry,
+  type SignatureMode,
+  startFakeRegistry,
+} from '../test/fake-registry.js';
 import { ImageMirror } from './mirror.js';
-import { LAYOUT_ANNOTATIONS, type LayoutAnswer, layoutFor, tarHeader } from './serve.js';
+import {
+  COSIGN_LAYOUT,
+  LAYOUT_ANNOTATIONS,
+  type LayoutAnswer,
+  layoutFor,
+  tarHeader,
+} from './serve.js';
 
 let fake: FakeRegistry | undefined;
 afterEach(async () => {
@@ -70,9 +81,11 @@ type LayoutIndex = {
   }[];
 };
 
-async function mirrored(): Promise<{ m: ImageMirror; img: FakeImage; dir: string }> {
+async function mirrored(
+  signatures: SignatureMode = 'referrers-tag',
+): Promise<{ m: ImageMirror; img: FakeImage; dir: string }> {
   fake = await startFakeRegistry();
-  const img = fake.addImage('jumpmaster-trooper');
+  const img = fake.addImage('jumpmaster-trooper', { signatures });
   const dir = mkdtempSync(join(tmpdir(), 'jm-serve-'));
   const m = new ImageMirror({
     dataDir: dir,
@@ -106,9 +119,35 @@ describe('the OCI layout a stick downloads (issue #140)', () => {
       [LAYOUT_ANNOTATIONS.refName]: `${fake?.registry}/${img.name}@${img.digest}`,
       [LAYOUT_ANNOTATIONS.index]: img.digest,
     });
-    const sigs = index.manifests.filter((d) => !d.platform);
+    // cosign's layout conventions: the signed multi-arch index under kind imageIndex (the digest
+    // the signatures name), so `cosign verify --local-image` checks the index digest, not the
+    // platform manifest's. The bundle referrer carries no cosign kind: it is not a legacy sigs image.
+    const kinds = index.manifests.filter((d) => d.annotations?.[COSIGN_LAYOUT.kind]);
+    expect(kinds.map((d) => [d.annotations?.[COSIGN_LAYOUT.kind], d.digest])).toEqual([
+      [COSIGN_LAYOUT.imageIndex, img.digest],
+    ]);
+    expect(kinds[0]?.mediaType).toBe('application/vnd.oci.image.index.v1+json');
+    expect(kinds[0]?.annotations?.[LAYOUT_ANNOTATIONS.refName]).toBeUndefined();
+    const sigs = index.manifests.filter((d) => d.annotations?.[LAYOUT_ANNOTATIONS.signs]);
     expect(sigs.map((d) => d.digest)).toEqual([img.signature.manifest]);
     expect(sigs[0]?.annotations?.[LAYOUT_ANNOTATIONS.signs]).toBe(img.digest);
+    // Only the platform manifest is named: nothing else is loaded as a named image.
+    expect(
+      index.manifests
+        .filter((d) => d.annotations?.[LAYOUT_ANNOTATIONS.refName])
+        .map((d) => d.digest),
+    ).toEqual([img.platforms['linux/amd64']?.manifest]);
+    expect(index.manifests).toHaveLength(3);
+
+    // `docker load` on the classic store reads manifest.json: exactly the amd64 image.
+    const amd = img.platforms['linux/amd64'];
+    expect(JSON.parse(files.get('manifest.json')?.toString() ?? '')).toEqual([
+      {
+        Config: `blobs/sha256/${amd?.blobs[0]?.slice(7)}`,
+        RepoTags: [],
+        Layers: (amd?.blobs.slice(1) ?? []).map((d) => `blobs/sha256/${d.slice(7)}`),
+      },
+    ]);
 
     // Every blob is what its name says, every descriptor's size is right.
     const blobs = [...files.keys()].filter((f) => f.startsWith('blobs/sha256/'));
@@ -134,6 +173,27 @@ describe('the OCI layout a stick downloads (issue #140)', () => {
     expect(files.has(`blobs/sha256/${img.platforms['linux/arm64']?.manifest.slice(7)}`)).toBe(
       false,
     );
+  });
+
+  test("a legacy .sig signature is the layout's cosign sigs entry, unnamed", async () => {
+    const { m, img } = await mirrored('legacy');
+    const files = parseTar(await read(layoutFor(m.lookup(img.name, img.digest), 'linux/amd64')));
+    const index = JSON.parse(files.get('index.json')?.toString() ?? '') as LayoutIndex;
+    const byKind = Object.fromEntries(
+      index.manifests
+        .filter((d) => d.annotations?.[COSIGN_LAYOUT.kind])
+        .map((d) => [d.annotations?.[COSIGN_LAYOUT.kind], d]),
+    );
+    expect(Object.keys(byKind).sort()).toEqual(
+      [COSIGN_LAYOUT.imageIndex, COSIGN_LAYOUT.sigs].sort(),
+    );
+    expect(byKind[COSIGN_LAYOUT.imageIndex]?.digest).toBe(img.digest);
+    const sig = byKind[COSIGN_LAYOUT.sigs];
+    expect(sig?.digest).toBe(img.signature.manifest);
+    expect(sig?.annotations?.[LAYOUT_ANNOTATIONS.refName]).toBeUndefined();
+    expect(sig?.annotations?.[LAYOUT_ANNOTATIONS.signs]).toBe(img.digest);
+    for (const d of [sig?.digest ?? '', ...img.signature.blobs])
+      expect(files.has(`blobs/sha256/${d.slice(7)}`)).toBe(true);
   });
 
   test('an arm64 request gives the arm64 manifest', async () => {

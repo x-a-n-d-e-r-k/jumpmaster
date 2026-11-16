@@ -84,6 +84,18 @@ describe('the image mirror (issue #140)', () => {
     ]);
   });
 
+  test('a referrers API that answers an empty list still has its fallback tag checked', async () => {
+    fake = await startFakeRegistry();
+    const img = fake.addImage('jumpmaster-trooper', { signatures: 'referrers-tag-empty-api' });
+    const dir = tmp();
+    const m = mirrorOn(dir);
+    m.setLock({ registry: fake.registry, images: { [img.name]: img.digest } });
+    expect(await m.syncOnce()).toBe(0);
+    const rec = indexOf(dir).images[`${img.name}@${img.digest}`];
+    expect(rec?.state).toBe('complete');
+    expect(rec?.signatures.map((s) => s.manifest.digest)).toEqual([img.signature.manifest]);
+  });
+
   test('never asks for a tag: manifests by digest, and only the signature tags cosign derives from a lock digest', async () => {
     fake = await startFakeRegistry();
     const a = fake.addImage('jumpmaster-trooper');
