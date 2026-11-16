@@ -1,7 +1,7 @@
 # The per-drop egress proxy: Node's standard library only, no npm dependency at runtime. The stick
 # runs one per drop with a read-only root, no capabilities and no-new-privileges, bound to the
 # drop-network address it passes in JM_EGRESS_BIND.
-FROM node:24-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9 AS build
+FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS build
 WORKDIR /src
 COPY package.json package-lock.json tsconfig.base.json tsconfig.json ./
 COPY packages/protocol packages/protocol
@@ -15,7 +15,7 @@ RUN npm ci --ignore-scripts \
  && printf '{"type":"module"}\n' > /out/package.json \
  && cp -r packages/protocol/package.json packages/protocol/dist /out/node_modules/@jumpmaster/protocol/
 
-FROM node:24-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9
+FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 ARG SOURCE_URL
 LABEL org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.title="jumpmaster-egress"

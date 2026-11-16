@@ -9,7 +9,7 @@
 ARG BASE=ghcr.io/x-a-n-d-e-r-k/jumpmaster-trooper@sha256:d317048b6ab4ad86d03f0d08f6a8f72e9104a0aea63f11d6a1bcb75872f684c2
 
 # Go 1.27.3 (released 2026-10-20). A named stage, so Dependabot bumps the digest.
-FROM golang:1.27.3-bookworm@sha256:dc0963f32053e4bc451d24d87e3892d42d01021b61f093e98eb95c0352bb84b0 AS go
+FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS go
 
 FROM ${BASE}
 ARG SOURCE_URL
