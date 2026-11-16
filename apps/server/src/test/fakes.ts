@@ -64,7 +64,8 @@ export interface FakeForgeState {
   closeIssue(n: number): void;
   reopenIssue(n: number): void;
   setLabels(n: number, labels: string[]): void;
-  checks: Map<string, ChecksFacts>;
+  /** `failed` may be left out when a test doesn't care which checks failed: it reads as `[]`. */
+  checks: Map<string, Omit<ChecksFacts, 'failed'> & { failed?: ChecksFacts['failed'] }>;
   compares: Map<string, CompareFacts>;
   reviews: StateReview[];
   /** Appends a review (defaults: `pr: 1`, a human author, `APPROVED` on the PR head). */
@@ -406,8 +407,12 @@ function forgeFor(
     }),
     listPullFiles: async (n) =>
       structuredClone(state.pullFiles.get(n) ?? { files: [{ path: 'src/a.ts' }], complete: true }),
-    checksFor: async (sha) =>
-      structuredClone(state.checks.get(sha) ?? { state: 'none' as const, names: [] }),
+    checksFor: async (sha): Promise<ChecksFacts> => {
+      const seeded = state.checks.get(sha);
+      return seeded
+        ? structuredClone({ failed: [], ...seeded })
+        : { state: 'none', names: [], failed: [] };
+    },
     getBranchRules: async () => structuredClone(state.rules[identity]),
     getFileAt: async (ref, path) => state.files.get(`${ref}:${path}`) ?? null,
     listReviews: async (n) => state.reviews.filter((r) => r.pr === n).map(({ pr: _pr, ...r }) => r),

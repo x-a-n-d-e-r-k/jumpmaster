@@ -491,6 +491,7 @@ describe('GitHubForge', () => {
         expect(await forge.checksFor('sha1')).toEqual({
           state: 'pending',
           names: ['preflight', 'unblock', 'ci/x'],
+          failed: [],
         });
       });
 
@@ -517,6 +518,7 @@ describe('GitHubForge', () => {
         expect(await forge.checksFor('sha1')).toEqual({
           state: 'pending',
           names: ['preflight', 'guard', 'lint', 'build', 'preflight'],
+          failed: [],
           queued: ['build', 'preflight'], // de-duplicated, sorted; `waiting` is an approval hold
         });
       });
@@ -546,6 +548,7 @@ describe('GitHubForge', () => {
         expect(await forge.checksFor('sha1')).toEqual({
           state: 'success',
           names: ['build', 'ci/x'],
+          failed: [],
         });
         mock([run('build', 'completed', 'success'), run('slow', 'in_progress', null)], []);
         expect((await forge.checksFor('sha1')).state).toBe('pending');
@@ -553,6 +556,7 @@ describe('GitHubForge', () => {
         expect(await forge.checksFor('sha1')).toEqual({
           state: 'failure',
           names: ['build', 'ci/x'],
+          failed: [{ name: 'ci/x', conclusion: 'error' }],
           queued: ['build'],
         });
         mock([run('lint', 'completed', 'timed_out'), run('slow', 'queued', null)], []);
@@ -566,7 +570,35 @@ describe('GitHubForge', () => {
 
       test('none when both are empty', async () => {
         mock([], []);
-        expect(await forge.checksFor('sha1')).toEqual({ state: 'none', names: [] });
+        expect(await forge.checksFor('sha1')).toEqual({ state: 'none', names: [], failed: [] });
+      });
+
+      test('lists failed check runs and statuses, sorted by name and de-duplicated', async () => {
+        mock(
+          [
+            run('c', 'completed', 'failure'),
+            run('b', 'completed', 'success'),
+            run('a', 'completed', 'cancelled'),
+            run('c', 'completed', 'failure'),
+          ],
+          [{ context: 'd', state: 'error' }],
+        );
+        const facts = await forge.checksFor('sha1');
+        expect(facts.state).toBe('failure');
+        expect(facts.failed).toEqual([
+          { name: 'a', conclusion: 'cancelled' },
+          { name: 'c', conclusion: 'failure' },
+          { name: 'd', conclusion: 'error' },
+        ]);
+        mock([run('a', 'completed', 'success'), run('b', 'completed', 'success')], []);
+        expect((await forge.checksFor('sha1')).failed).toEqual([]);
+      });
+
+      test('failed is empty while the checks are not failing', async () => {
+        mock([run('a', 'completed', 'cancelled')], []);
+        expect((await forge.checksFor('sha1')).state).toBe('failure');
+        mock([run('a', 'completed', 'success'), run('b', 'in_progress', null)], []);
+        expect(await forge.checksFor('sha1')).toMatchObject({ state: 'pending', failed: [] });
       });
     });
 

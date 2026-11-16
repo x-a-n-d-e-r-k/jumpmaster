@@ -78,8 +78,19 @@ export type ForgeReview = {
 };
 
 export type ChecksState = 'success' | 'pending' | 'failure' | 'none';
-/** `queued`: check runs that have not started (no runner has picked them up). */
-export type ChecksFacts = { state: ChecksState; names: string[]; queued?: string[] };
+/** A failed check run (its conclusion) or commit status (its state, `failure` or `error`). */
+export type FailedCheck = { name: string; conclusion: string };
+/**
+ * `queued`: check runs that have not started (no runner has picked them up).
+ * `failed`: the failed checks, sorted by name, without duplicates; empty unless `state` is
+ * `failure`, and empty when the forge can't say which checks failed.
+ */
+export type ChecksFacts = {
+  state: ChecksState;
+  names: string[];
+  failed: FailedCheck[];
+  queued?: string[];
+};
 
 export type CompareFacts = {
   aheadBy: number;
@@ -228,6 +239,12 @@ const FAILED_CONCLUSIONS = new Set([
   'startup_failure',
   'stale',
 ]);
+/** Conclusions that say the runner, not the code, failed. `timed_out` is a code failure. */
+export const RUNNER_CONCLUSIONS: ReadonlySet<string> = new Set([
+  'cancelled',
+  'startup_failure',
+  'stale',
+]);
 
 /**
  * GitHub answers a primary or secondary rate limit with 403 (or 429). That is the forge being busy,
@@ -244,6 +261,20 @@ export function isRateLimited(err: unknown): boolean {
     headers['retry-after'] !== undefined ||
     /rate limit/i.test(String(e.message ?? ''))
   );
+}
+
+/** Sorted by name (then conclusion), with repeats of the same name and conclusion dropped. */
+function uniqueFailures(failures: FailedCheck[]): FailedCheck[] {
+  const seen = new Set<string>();
+  const out: FailedCheck[] = [];
+  for (const f of failures) {
+    const key = JSON.stringify([f.name, f.conclusion]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(f);
+  }
+  const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  return out.sort((a, b) => cmp(a.name, b.name) || cmp(a.conclusion, b.conclusion));
 }
 
 /** Rules under which an API merge by the server can never succeed. */
@@ -690,27 +721,32 @@ export class GitHubForge implements Forge {
       if (data.statuses.length < 100) break;
     }
     const names = [...runs.map((r) => r.name), ...statuses.map((s) => s.context)];
-    let failed = false;
+    const failures: FailedCheck[] = [];
     let pending = false;
     for (const r of runs) {
       if (r.status !== 'completed') pending = true;
-      else if (r.conclusion && FAILED_CONCLUSIONS.has(r.conclusion)) failed = true;
+      else if (r.conclusion && FAILED_CONCLUSIONS.has(r.conclusion)) {
+        failures.push({ name: r.name, conclusion: r.conclusion });
+      }
     }
     for (const s of statuses) {
-      if (s.state === 'failure' || s.state === 'error') failed = true;
-      else if (s.state === 'pending') pending = true;
+      if (s.state === 'failure' || s.state === 'error') {
+        failures.push({ name: s.context, conclusion: s.state });
+      } else if (s.state === 'pending') pending = true;
     }
-    const state: ChecksState = failed
-      ? 'failure'
-      : pending
-        ? 'pending'
-        : names.length === 0
-          ? 'none'
-          : 'success';
+    const state: ChecksState =
+      failures.length > 0
+        ? 'failure'
+        : pending
+          ? 'pending'
+          : names.length === 0
+            ? 'none'
+            : 'success';
     const queued = [
       ...new Set(runs.filter((r) => NOT_STARTED.has(r.status)).map((r) => r.name)),
     ].sort();
-    return queued.length > 0 ? { state, names, queued } : { state, names };
+    const failed = uniqueFailures(failures);
+    return queued.length > 0 ? { state, names, failed, queued } : { state, names, failed };
   }
 
   /**

@@ -491,7 +491,7 @@ export async function buildSnapshot(
   }
 
   let compare: Snapshot['compare'] = null;
-  let checks: ChecksFacts = { state: 'none', names: [] };
+  let checks: ChecksFacts = { state: 'none', names: [], failed: [] };
   let reviews: ForgeReview[] = [];
   let files: PullFiles = { files: [], complete: false };
   if (pr && headSha) {

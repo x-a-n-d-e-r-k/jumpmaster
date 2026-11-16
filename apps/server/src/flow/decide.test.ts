@@ -9,7 +9,13 @@ import {
   type VerdictRow,
   type WorkItem,
 } from '../db/repo.js';
-import type { ChecksFacts, CompareFacts, ForgeReview, PullFacts } from '../forge/github.js';
+import {
+  type ChecksFacts,
+  type CompareFacts,
+  type ForgeReview,
+  type PullFacts,
+  RUNNER_CONCLUSIONS,
+} from '../forge/github.js';
 import { promptVersions } from '../payloads.js';
 import { usageCfg, zoneWorld } from '../test/fixtures.js';
 import { t0 } from '../test/helpers.js';
@@ -113,10 +119,10 @@ const humanRc = (id: number, body: string): ForgeReview => ({
   submittedAt: minutesAgo(2),
 });
 
-const ok: ChecksFacts = { state: 'success', names: ['ci'] };
-const none: ChecksFacts = { state: 'none', names: [] };
-const pending: ChecksFacts = { state: 'pending', names: [] };
-const failing: ChecksFacts = { state: 'failure', names: ['test'] };
+const ok: ChecksFacts = { state: 'success', names: ['ci'], failed: [] };
+const none: ChecksFacts = { state: 'none', names: [], failed: [] };
+const pending: ChecksFacts = { state: 'pending', names: [], failed: [] };
+const failing: ChecksFacts = { state: 'failure', names: ['test'], failed: [] };
 
 const drop = { id: 'd1', role: 'review', state: 'running' } as Drop;
 
@@ -549,11 +555,70 @@ describe('rules in order', () => {
       feedback: { source: 'ci', text: 'CI failed on s; reproduce with the gates and fix.' },
     }));
 
+  describe('24: failed checks', () => {
+    const head = 'c441a9cdeadbeef';
+    const onHead = (over: Partial<Snapshot>) =>
+      mergeable({ pr: pr(head), branchSha: head, verdictsOnHead: [approve(head)], ...over });
+    const failedWith = (...failed: [string, string][]) =>
+      onHead({
+        checks: {
+          state: 'failure',
+          names: failed.map(([name]) => name),
+          failed: failed.map(([name, conclusion]) => ({ name, conclusion })),
+        },
+      });
+
+    test('a runner-only cancelled failure parks without a heal', () => {
+      const action = decide(failedWith(['images', 'cancelled']));
+      expect(action).toEqual({
+        kind: 'park',
+        reason:
+          'CI did not run to completion on c441a9c: images (cancelled); rerun the jobs, then Retry',
+      });
+      expect(action.kind).not.toBe('enqueue');
+    });
+
+    test.each(['startup_failure', 'stale'])('a runner-only %s failure parks', (conclusion) =>
+      expect(decide(failedWith(['a', 'cancelled'], ['b', conclusion]))).toEqual({
+        kind: 'park',
+        reason: `CI did not run to completion on c441a9c: a (cancelled), b (${conclusion}); rerun the jobs, then Retry`,
+      }),
+    );
+
+    test('a mixed failure heals and names every failed check', () =>
+      expect(decide(failedWith(['ci', 'failure'], ['images', 'cancelled']))).toEqual({
+        kind: 'enqueue',
+        role: 'heal',
+        fingerprint: fingerprint([head, 'ci']),
+        feedback: {
+          source: 'ci',
+          text: `CI failed on ${head}; reproduce with the gates and fix.\n- ci: failure\n- images: cancelled`,
+        },
+      }));
+
+    test('timed_out is a code failure and heals', () => {
+      expect(RUNNER_CONCLUSIONS.has('timed_out')).toBe(false);
+      expect(decide(failedWith(['ci', 'timed_out']))).toMatchObject({
+        kind: 'enqueue',
+        role: 'heal',
+        feedback: { text: expect.stringContaining('- ci: timed_out') },
+      });
+    });
+
+    test('an unknown failure (failed empty) heals with the plain text', () =>
+      expect(decide(onHead({ checks: failing }))).toEqual({
+        kind: 'enqueue',
+        role: 'heal',
+        fingerprint: fingerprint([head, 'ci']),
+        feedback: { source: 'ci', text: `CI failed on ${head}; reproduce with the gates and fix.` },
+      }));
+  });
+
   test('25: green CI with every required check merges the head', () =>
     expect(
       decide(
         mergeable({
-          checks: { state: 'success', names: ['lint', 'test'] },
+          checks: { state: 'success', names: ['lint', 'test'], failed: [] },
           requiredChecks: ['lint', 'test'],
         }),
       ),
@@ -596,7 +661,7 @@ describe('rules in order', () => {
       decide(
         snap({
           verdictsOnHead: [approve('s')],
-          checks: { state: 'success', names: ['lint'] },
+          checks: { state: 'success', names: ['lint'], failed: [] },
           requiredChecks: ['lint', 'test'],
           headFirstSeenAt: minutesAgo(46),
         }),
@@ -626,7 +691,12 @@ describe('rules in order', () => {
     expect(
       decide(
         mergeable({
-          checks: { state: 'pending', names: ['preflight', 'lint'], queued: ['preflight'] },
+          checks: {
+            state: 'pending',
+            names: ['preflight', 'lint'],
+            failed: [],
+            queued: ['preflight'],
+          },
           requiredChecks: ['preflight'],
           headFirstSeenAt: minutesAgo(46),
         }),
@@ -641,7 +711,7 @@ describe('rules in order', () => {
     expect(
       decide(
         mergeable({
-          checks: { state: 'pending', names: ['lint'], queued: ['lint'] },
+          checks: { state: 'pending', names: ['lint'], failed: [], queued: ['lint'] },
           requiredChecks: ['lint', 'test'],
           headFirstSeenAt: minutesAgo(46),
         }),
@@ -652,7 +722,7 @@ describe('rules in order', () => {
     expect(
       decide(
         mergeable({
-          checks: { state: 'pending', names: ['preflight'], queued: ['preflight'] },
+          checks: { state: 'pending', names: ['preflight'], failed: [], queued: ['preflight'] },
           requiredChecks: ['preflight'],
           headFirstSeenAt: minutesAgo(5),
         }),
@@ -664,7 +734,7 @@ describe('rules in order', () => {
       decide(
         snap({
           verdictsOnHead: [approve('s')],
-          checks: { state: 'success', names: ['lint'] },
+          checks: { state: 'success', names: ['lint'], failed: [] },
           requiredChecks: ['lint', 'test'],
         }),
       ),
