@@ -1,17 +1,18 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterEach, describe, expect, test } from 'vitest';
+import nock from 'nock';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest';
 import { listAudit } from '../auth/audit.js';
 import { registerGuard } from '../auth/guard.js';
 import { grantSudo, SUDO_MS, sha256Hex } from '../auth/sessions.js';
 import { listRulings, raiseBriefing } from '../briefings.js';
 import { loadBoot } from '../config/boot.js';
 import { ConfigStore, startVault } from '../config/store.js';
-import { type Config, secretList } from '../config.js';
+import { type Config, type DropZoneConfig, secretList } from '../config.js';
 import { nextCrewWork } from '../crew/schedule.js';
 import { insertCrewIssue, listCrewIssues } from '../crew/store.js';
 import { ctlRequest } from '../ctl.js';
@@ -35,6 +36,8 @@ import {
   upsertWorkItem,
   zoneIsDrained,
 } from '../db/repo.js';
+import { createAppBrokers } from '../forge/app-brokers.js';
+import { serverScrubSet } from '../forge/scrub-set.js';
 import type { MirrorStatus } from '../images/mirror.js';
 import { intakeKey } from '../intake.js';
 import { AUTHOR_TOKEN, CLAUDE_TOKEN, NOW, world } from '../test/doctorWorld.js';
@@ -43,6 +46,8 @@ import { makeZone } from '../test/fixtures.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import { addTranscriptDrop } from '../test/transcriptWorld.js';
 import { credentialCreatedAt } from '../vault/credentials.js';
+import type { AppEntryRead } from '../vault/github-app-entries.js';
+import type { ResolvedApps } from '../vault/resolution.js';
 import { fingerprintOf, openVault } from '../vault/vault.js';
 import { type ControlDeps, registerControlRoutes, removalNote } from './control.js';
 import { guidanceFor, recommendFor } from './github.js';
@@ -3338,5 +3343,254 @@ describe('transcript export (#195)', () => {
     expect(listAudit(db).map((a) => a.detail)).toEqual([
       { zone: 'main', since: iso(-2 * DAY), until: t0.toISOString(), drops: 300 },
     ]);
+  });
+});
+
+describe('the kill switch suspends app installations (issue #225)', () => {
+  const GH = 'https://api.github.com';
+  const KEY = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+  }).privateKey;
+  const entry: AppEntryRead = {
+    source: 'vault',
+    fingerprint: 'fp-1',
+    entry: { appId: '42', slug: 'jm', clientId: 'c', pem: KEY, importedAt: '2026-11-01' },
+  };
+  const none: AppEntryRead = { source: 'missing' };
+  const APPS: ResolvedApps = new Map([
+    ['octo', { author: entry, reviewer: entry }],
+    ['other', { author: entry, reviewer: none }],
+  ]);
+  const appZone = (id: string, repo: string, installations: Record<string, number>) =>
+    makeZone({
+      id,
+      repo,
+      identity: 'two-bot',
+      githubApp: { repositoryId: 1, installations },
+    } as Partial<DropZoneConfig>);
+  const APP_ZONES = [
+    appZone('a', 'octo/a', { author: 11, reviewer: 12 }),
+    // The same owner's installations again: one call each, not two.
+    appZone('b', 'octo/b', { author: 11, reviewer: 12 }),
+    appZone('c', 'other/c', { author: 13 }),
+  ];
+
+  type Seen = { method: string; id: number; authorization: string; killed: boolean };
+  let db: ReturnType<typeof openDb>;
+  let seen: Seen[];
+  let failing: Map<number, number | 'network' | 'hang'>;
+  const logs: string[] = [];
+
+  beforeAll(() => nock.disableNetConnect());
+  afterAll(() => nock.enableNetConnect());
+  beforeEach(() => {
+    nock.cleanAll();
+    seen = [];
+    failing = new Map();
+    logs.length = 0;
+    serverScrubSet.clear();
+    const handle = async (req: Request): Promise<[number, unknown]> => {
+      const id = Number(new URL(req.url).pathname.split('/')[3]);
+      seen.push({
+        method: req.method,
+        id,
+        authorization: req.headers.get('authorization') ?? '',
+        killed: isKilled(db),
+      });
+      const f = failing.get(id);
+      if (f === 'network') throw new Error('connect ECONNREFUSED');
+      if (f === 'hang') await new Promise(() => {});
+      if (typeof f === 'number') return [f, { message: 'GitHub says no' }];
+      return [204, ''];
+    };
+    const path = /^\/app\/installations\/\d+\/suspended$/;
+    nock(GH).persist().put(path).reply(handle).delete(path).reply(handle);
+  });
+  afterEach(() => nock.cleanAll());
+
+  function setupApps(o: {
+    zones?: Config['dropZones'];
+    apps?: ResolvedApps;
+    suspension?: boolean;
+    timeoutMs?: number;
+  }) {
+    db = openDb(tmpDbFile());
+    const config = {
+      listen: { host: '127.0.0.1', port: 7420 },
+      dropZones: o.zones ?? APP_ZONES,
+      secrets: { operatorToken: TOKEN, githubAuthorToken: 'pat-author-secret' },
+    } as unknown as Config;
+    const apps = o.apps ?? APPS;
+    const brokers = createAppBrokers({ apps: () => apps });
+    app = controlApp({
+      db,
+      config,
+      now: () => t0,
+      log: (l) => logs.push(l),
+      ...(o.suspension === false
+        ? {}
+        : {
+            appSuspension: {
+              apps: () => apps,
+              brokerFor: (owner, role) => brokers.brokerFor(owner, role),
+              ...(o.timeoutMs ? { timeoutMs: o.timeoutMs } : {}),
+            },
+          }),
+    });
+    return db;
+  }
+  const killAudits = () =>
+    listAudit(db)
+      .filter((r) => r.action === 'kill')
+      .map((r) => r.detail);
+
+  test('engaging suspends each distinct installation once, after the DB kill, with an app JWT', async () => {
+    setupApps({});
+    const res = await post('/api/control/kill', { engaged: true });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      engaged: true,
+      cancelled: 0,
+      installations: { ok: 3, failed: [] },
+    });
+    expect(seen.map((s) => [s.method, s.id]).sort()).toEqual([
+      ['PUT', 11],
+      ['PUT', 12],
+      ['PUT', 13],
+    ]);
+    for (const s of seen) {
+      expect(s.killed).toBe(true);
+      expect(s.authorization).toMatch(/^Bearer eyJ[\w-]+\.[\w-]+\.[\w-]+$/);
+    }
+    expect(killAudits()).toEqual([
+      { engaged: true, cancelled: 0, installationsOk: 3, installationsFailed: 0 },
+    ]);
+  });
+
+  test('releasing unsuspends the same set, and a second release calls again', async () => {
+    setupApps({});
+    await post('/api/control/kill', { engaged: true });
+    seen = [];
+    const first = await post('/api/control/kill', { engaged: false });
+    expect(first.json()).toEqual({
+      engaged: false,
+      cancelled: 0,
+      installations: { ok: 3, failed: [] },
+    });
+    expect(isKilled(db)).toBe(false);
+    expect(seen.map((s) => [s.method, s.id]).sort()).toEqual([
+      ['DELETE', 11],
+      ['DELETE', 12],
+      ['DELETE', 13],
+    ]);
+    expect(seen.every((s) => !s.killed)).toBe(true);
+    seen = [];
+    expect((await post('/api/control/kill', { engaged: false })).statusCode).toBe(200);
+    expect(seen.map((s) => s.id).sort()).toEqual([11, 12, 13]);
+    expect(killAudits()[0]).toEqual({
+      engaged: false,
+      installationsOk: 3,
+      installationsFailed: 0,
+    });
+  });
+
+  test('a 500 on one installation: the others are called, the kill stays, the audit is flat', async () => {
+    setupApps({});
+    failing.set(12, 500);
+    const res = await post('/api/control/kill', { engaged: true });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().installations).toEqual({
+      ok: 2,
+      failed: [{ owner: 'octo', role: 'reviewer', installationId: 12, status: 500 }],
+    });
+    expect(seen.map((s) => s.id).sort()).toEqual([11, 12, 13]);
+    expect(isKilled(db)).toBe(true);
+    const [detail] = killAudits();
+    expect(detail).toEqual({
+      engaged: true,
+      cancelled: 0,
+      installationsOk: 2,
+      installationsFailed: 1,
+      failedInstallations: 'octo/reviewer/12:500',
+    });
+    for (const v of Object.values(detail ?? {})) expect(typeof v).not.toBe('object');
+    expect(logs.filter((l) => l.includes('12'))).toHaveLength(1);
+    expect(logs.join('\n')).not.toContain('GitHub says no');
+  });
+
+  test('a network error and a hung call fail on their own, the release still commits', async () => {
+    setupApps({ timeoutMs: 50 });
+    await post('/api/control/kill', { engaged: true });
+    failing.set(11, 'network');
+    failing.set(13, 'hang');
+    const started = Date.now();
+    const res = await post('/api/control/kill', { engaged: false });
+    expect(Date.now() - started).toBeLessThan(3000);
+    expect(isKilled(db)).toBe(false);
+    expect(res.json().installations).toEqual({
+      ok: 1,
+      failed: [
+        { owner: 'octo', role: 'author', installationId: 11, status: 0 },
+        { owner: 'other', role: 'author', installationId: 13, status: 0 },
+      ],
+    });
+    expect(killAudits()[0]?.failedInstallations).toBe('octo/author/11:0,other/author/13:0');
+  });
+
+  test('a missing broker is reported as failed with status 0', async () => {
+    const apps: ResolvedApps = new Map([
+      ['octo', { author: { source: 'missing', undecryptable: true }, reviewer: none }],
+    ]);
+    setupApps({ zones: [appZone('a', 'octo/a', { author: 11 })], apps });
+    const res = await post('/api/control/kill', { engaged: true });
+    expect(res.json().installations).toEqual({
+      ok: 0,
+      failed: [{ owner: 'octo', role: 'author', installationId: 11, status: 0 }],
+    });
+    expect(seen).toEqual([]);
+    expect(isKilled(db)).toBe(true);
+  });
+
+  test('PAT-only, starter and unrecorded zones, or no appSuspension: no call, today’s response and audit', async () => {
+    const today = async (o: Parameters<typeof setupApps>[0]) => {
+      setupApps(o);
+      const on = await post('/api/control/kill', { engaged: true });
+      const off = await post('/api/control/kill', { engaged: false });
+      expect(on.json()).toEqual({ engaged: true, cancelled: 0 });
+      expect(off.json()).toEqual({ engaged: false, cancelled: 0 });
+      expect(killAudits()).toEqual([{ engaged: false }, { engaged: true, cancelled: 0 }]);
+    };
+    await today({ apps: new Map() });
+    await today({
+      zones: [
+        makeZone({ id: 's', repo: 'octo/s', identity: 'starter' } as Partial<DropZoneConfig>),
+        makeZone({ id: 'u', repo: 'octo/u', identity: 'two-bot' } as Partial<DropZoneConfig>),
+        appZone('p', 'pat/p', { author: 99 }),
+      ],
+    });
+    await today({ suspension: false });
+    expect(seen).toEqual([]);
+  });
+
+  test('no JWT, PEM or token in the response, audit row or log', async () => {
+    setupApps({});
+    failing.set(11, 500);
+    failing.set(13, 'network');
+    const bodies = [
+      (await post('/api/control/kill', { engaged: true })).body,
+      (await post('/api/control/kill', { engaged: false })).body,
+    ];
+    const jwts = seen.map((s) => s.authorization.replace(/^Bearer /, ''));
+    expect(jwts.length).toBeGreaterThan(0);
+    const everything = [...bodies, JSON.stringify(listAudit(db)), ...logs].join('\n');
+    for (const j of jwts) expect(everything).not.toContain(j);
+    expect(everything).not.toMatch(/eyJ[\w-]+\.[\w-]+/);
+    expect(everything).not.toContain('BEGIN');
+    expect(everything).not.toContain(KEY.split('\n')[1] ?? 'unreachable');
+    expect(everything).not.toMatch(/gh[pousr]_/);
+    expect(everything).not.toContain('pat-author-secret');
+    expect(everything).not.toContain('GitHub says no');
   });
 });

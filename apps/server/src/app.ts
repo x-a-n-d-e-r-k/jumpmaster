@@ -233,6 +233,8 @@ export function createApp(
     install?: Pick<InstallRouteDeps, 'signerRepository' | 'cosignDir' | 'cosignSha256'>;
     /** Where an invite's code is registered for the log scrub (default the server's set). */
     scrub?: { add(secret: string): void };
+    /** The kill switch's installation suspension (§4.2); absent, the kill route is DB-only. */
+    appSuspension?: ControlDeps['appSuspension'];
   },
 ): FastifyInstance {
   const app = Fastify({ logger: false });

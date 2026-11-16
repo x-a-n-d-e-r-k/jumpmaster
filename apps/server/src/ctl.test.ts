@@ -1507,3 +1507,44 @@ describe('ctl briefings reads on its own (#226)', () => {
     expect(refused.code).toBe(1);
   });
 });
+
+describe('ctl kill / unkill and suspended installations (issue #225)', () => {
+  test('prints today’s line alone without installations, or with none failed; exit 0', async () => {
+    for (const [cmd, body] of [
+      ['kill', { engaged: true, cancelled: 2 }],
+      ['unkill', { engaged: false, cancelled: 0 }],
+      ['kill', { engaged: true, cancelled: 0, installations: { ok: 3, failed: [] } }],
+      ['unkill', { engaged: false, cancelled: 0, installations: { ok: 3, failed: [] } }],
+    ] as const) {
+      const r = await run([cmd], '', fakeFetch(200, body));
+      expect(r.code).toBe(0);
+      expect(r.out).toEqual([`200 ${JSON.stringify(body)}`]);
+    }
+  });
+
+  test('prints one line per failed installation after today’s line; the exit code is unchanged', async () => {
+    const failed = [
+      { owner: 'octo', role: 'author', installationId: 11, status: 500 },
+      { owner: 'other', role: 'reviewer', installationId: 13, status: 0 },
+    ];
+    for (const [cmd, verb] of [
+      ['kill', 'suspend'],
+      ['unkill', 'unsuspend'],
+    ] as const) {
+      const body = { engaged: cmd === 'kill', cancelled: 0, installations: { ok: 1, failed } };
+      const r = await run([cmd], '', fakeFetch(200, body));
+      expect(r.code).toBe(0);
+      expect(r.out).toEqual([
+        `200 ${JSON.stringify(body)}`,
+        `could not ${verb} the author app installation 11 of octo (status 500)`,
+        `could not ${verb} the reviewer app installation 13 of other (status 0)`,
+      ]);
+    }
+  });
+
+  test('a refused kill prints today’s line and exits 1', async () => {
+    const r = await run(['kill'], '', fakeFetch(400, { error: 'invalid body' }));
+    expect(r.code).toBe(1);
+    expect(r.out).toEqual(['400 {"error":"invalid body"}']);
+  });
+});

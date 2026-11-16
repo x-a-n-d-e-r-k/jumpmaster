@@ -204,6 +204,11 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     images: images.mirror,
     appBrokers,
     resolvedApps: () => live.resolvedApps(),
+    // The kill switch suspends each zone's app installations, and release unsuspends them (§4.2).
+    appSuspension: {
+      apps: () => live.resolvedApps(),
+      brokerFor: (owner, role) => appBrokers.brokerFor(owner, role),
+    },
   });
 
   const expireLeases = leaseExpirer(db, () => live.current().usage);
