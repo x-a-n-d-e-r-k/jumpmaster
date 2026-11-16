@@ -197,11 +197,23 @@ wait_server() {
 }
 wait_stick() {
   for _ in $(seq 120); do
-    "${C[@]}" logs stick 2>&1 | grep -q 'enrolled as' && return 0
+    grep -q 'enrolled as' <<<"$("${C[@]}" logs stick 2>&1)" && return 0
     case "$(state_of stick)" in exited* | dead*) fail "the stick exited: $(state_of stick)" ;; esac
     sleep 1
   done
   fail "the stick did not enroll within 120 s"
+}
+# A release stick pulls the trooper before its first lease, so on a cold cache the server sees
+# it only once that pull is done: wait for the doctor's stick.seen to pass (up to 15 minutes).
+wait_seen() {
+  local out
+  for _ in $(seq 180); do
+    out="$("${C[@]}" exec -T jumpmaster jumpmaster ctl doctor 2>&1 || true)"
+    grep -qE '^PASS .*stick\.seen' <<<"$out" && { echo "stick: asked the server for work: ok"; return 0; }
+    case "$(state_of stick)" in exited* | dead*) fail "the stick exited: $(state_of stick)" ;; esac
+    sleep 5
+  done
+  fail "the server did not see the stick ask for work within 15 minutes: $(grep -E 'stick\.seen' <<<"$out")"
 }
 # `up`, which runs bootstrap first and waits for the server's healthcheck before the stick.
 up_ok() {
@@ -325,13 +337,18 @@ case_init() {
   wait_stick
   echo "stick: enrolled with the join token file over the compose network: ok"
   if [ "$MODE" = release ]; then
-    "${C[@]}" logs stick 2>&1 | grep -qE 'image policy signed, capabilities .*image-verify-v1' \
+    # Read the log once: with pipefail, `logs | grep -q` fails when grep's early exit kills the
+    # writer with SIGPIPE, even though the line is there.
+    local stick_log
+    stick_log="$("${C[@]}" logs stick 2>&1)"
+    grep -qE 'image policy signed, capabilities .*image-verify-v1' <<<"$stick_log" \
       || fail "the stick does not run the signed policy with image-verify-v1"
     # Egress control: the stick proved a drop network keeps a drop off the host, with the
     # release's proxy image (verified, or pinned for a local lock).
-    "${C[@]}" logs stick 2>&1 | grep -qE 'image policy signed, capabilities [^\n]*egress-v1' \
-      || fail "the stick does not advertise egress-v1: $("${C[@]}" logs stick 2>&1 | grep -i 'egress-v1' | tail -2)"
+    grep -qE 'image policy signed, capabilities [^\n]*egress-v1' <<<"$stick_log" \
+      || fail "the stick does not advertise egress-v1: $(grep -i 'egress-v1' <<<"$stick_log" | tail -2)"
     echo "stick: signed policy, image-verify-v1 and egress-v1: ok"
+    wait_seen
   fi
   out="$("${C[@]}" exec -T jumpmaster jumpmaster ctl briefings)" || fail "ctl briefings: $out"
   case "$out" in 200*) ;; *) fail "ctl briefings answered: $out" ;; esac
