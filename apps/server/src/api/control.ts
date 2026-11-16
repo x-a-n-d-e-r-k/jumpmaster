@@ -72,7 +72,14 @@ import {
   wantedLabels,
 } from '../doctor/checks.js';
 import { DoctorBusyError, latestDoctorRun, processEnv, runDoctor } from '../doctor/run.js';
+import {
+  appInstallationsOf,
+  type SuspensionResult,
+  suspendAll,
+  unsuspendAll,
+} from '../forge/app-suspension.js';
 import { type Forge, GitHubForge } from '../forge/github.js';
+import type { GitHubAppBroker } from '../forge/github-app.js';
 import type { ImageMirror } from '../images/mirror.js';
 import { fileIntakeIssue, GoalStubSchema, IntakeIssueSchema, renderGoalStub } from '../intake.js';
 import { engageKill, expireLeases, releaseKill } from '../leases.js';
@@ -103,6 +110,8 @@ import {
 import { safeNext } from '../ui/auth-pages.js';
 import { MODE_LABELS } from '../ui/pages.js';
 import { credentialCreatedAt, shadowedCredentials, type TestDeps } from '../vault/credentials.js';
+import type { AppRole } from '../vault/github-app-entries.js';
+import type { ResolvedApps } from '../vault/resolution.js';
 import {
   type DetectForge,
   type Detection,
@@ -164,6 +173,15 @@ export interface ControlDeps {
   log?: (msg: string) => void;
   /** How the Check reaches `<publicUrl>/healthz` (tests inject a fetch). */
   reach?: ReachDeps;
+  /**
+   * The kill switch's installation suspension (§4.2): engaging suspends each zone's recorded
+   * GitHub App installation, releasing unsuspends it. Absent, the kill route is DB-only.
+   */
+  appSuspension?: {
+    apps: () => ResolvedApps;
+    brokerFor(owner: string, role: AppRole): GitHubAppBroker | undefined;
+    timeoutMs?: number;
+  };
 }
 
 /** A setup mode whose codes go to stderr, alone on their line (main.ts passes its own). */
@@ -290,6 +308,31 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       now(),
       scrubList(req),
     );
+  /**
+   * Suspends (engaging) or unsuspends (releasing) every zone's recorded app installation, each
+   * within its deadline; undefined when there is none to call (PAT mode, or no `appSuspension`).
+   * A failure is logged once per installation by owner, role, id and status alone.
+   */
+  const suspendInstallations = async (
+    req: FastifyRequest,
+    engaged: boolean,
+  ): Promise<SuspensionResult | undefined> => {
+    const s = deps.appSuspension;
+    if (!s) return undefined;
+    const list = appInstallationsOf(cfg(req).dropZones, s.apps());
+    if (list.length === 0) return undefined;
+    const brokerFor = (owner: string, role: AppRole) => s.brokerFor(owner, role);
+    const o = s.timeoutMs === undefined ? {} : { timeoutMs: s.timeoutMs };
+    const r = engaged
+      ? await suspendAll(list, brokerFor, o)
+      : await unsuspendAll(list, brokerFor, o);
+    const verb = engaged ? 'suspending' : 'unsuspending';
+    for (const f of r.failed)
+      deps.log?.(
+        `kill switch: ${verb} the ${f.role} app installation ${f.installationId} of ${f.owner} failed (status ${f.status})`,
+      );
+    return r;
+  };
   /** Routes for `ctl` alone: a session is refused, whatever its sudo. */
   const tokenOnly = (req: FastifyRequest, reply: FastifyReply): boolean => {
     if (req.principal?.via === 'token') return true;
@@ -955,15 +998,30 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
     scope.post('/api/control/kill', async (req, reply) => {
       const body = KillBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: 'invalid body' });
-      if (!body.data.engaged) {
-        // The pause is credited to every pending push's retention (Ruling 12).
-        releaseKill(db, now());
-        audit(req, 'kill', { engaged: false });
-        return { engaged: false, cancelled: 0 };
+      const engaged = body.data.engaged;
+      // The DB first, committed before any GitHub call: new work is refused (or allowed) at once.
+      // The pause is credited to every pending push's retention on release (Ruling 12).
+      const done = engaged ? engageKill(db, now()) : (releaseKill(db, now()), { cancelled: 0 });
+      const today: AuditDetail = engaged ? { engaged, cancelled: done.cancelled } : { engaged };
+      const installations = await suspendInstallations(req, engaged);
+      if (!installations) {
+        audit(req, 'kill', today);
+        return { engaged, ...done };
       }
-      const done = engageKill(db, now());
-      audit(req, 'kill', { engaged: true, cancelled: done.cancelled });
-      return { engaged: true, ...done };
+      const { ok, failed } = installations;
+      audit(req, 'kill', {
+        ...today,
+        installationsOk: ok,
+        installationsFailed: failed.length,
+        ...(failed.length > 0
+          ? {
+              failedInstallations: failed
+                .map((f) => `${f.owner}/${f.role}/${f.installationId}:${f.status}`)
+                .join(','),
+            }
+          : {}),
+      });
+      return { engaged, ...done, installations };
     });
 
     if (deps.config instanceof ConfigStore) {

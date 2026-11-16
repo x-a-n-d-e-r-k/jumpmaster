@@ -1628,7 +1628,25 @@ async function runCtlOn(
     return 0;
   }
   out(`${res.status} ${text}`);
+  if ((args[0] === 'kill' || args[0] === 'unkill') && res.ok)
+    for (const line of killLines(args[0], text)) out(plain(line));
   return res.ok ? 0 : 1;
+}
+
+/** One line per app installation the kill switch could not suspend or unsuspend (issue #225). */
+function killLines(command: 'kill' | 'unkill', text: string): string[] {
+  let failed: unknown;
+  try {
+    failed = (JSON.parse(text) as { installations?: { failed?: unknown } }).installations?.failed;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(failed)) return [];
+  const verb = command === 'kill' ? 'suspend' : 'unsuspend';
+  return failed.map(
+    (f: { owner?: unknown; role?: unknown; installationId?: unknown; status?: unknown }) =>
+      `could not ${verb} the ${String(f.role)} app installation ${String(f.installationId)} of ${String(f.owner)} (status ${String(f.status)})`,
+  );
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
