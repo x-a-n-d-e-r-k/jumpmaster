@@ -1,7 +1,7 @@
 {
-  "version": "v0.4.0-rc.1",
+  "version": "v0.4.0",
   "registry": "ghcr.io/x-a-n-d-e-r-k",
   "images": {
-    "jumpmaster-trooper": "sha256:8acad1c350b273ac36966fe99785f165a4fd963d040417549701ccad8002ebdf"
+    "jumpmaster-trooper": "sha256:d317048b6ab4ad86d03f0d08f6a8f72e9104a0aea63f11d6a1bcb75872f684c2"
   }
 }
