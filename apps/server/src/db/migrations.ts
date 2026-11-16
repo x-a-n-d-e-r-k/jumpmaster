@@ -785,6 +785,31 @@ CREATE TABLE usage_windows (
 );
 `;
 
+/**
+ * v28: adding a stick with one pasted line (issue #138). `stick_invites` holds each one-time
+ * enrollment code by its SHA-256 only (`slots` NULL: Auto); `used_at` and `stick_id` are set in
+ * the enrollment's transaction. On `sticks`: `auto_slots` (enrolled from an Auto invite: its
+ * ceiling governs while no count is set), `removed_at` (removed: its token is revoked), and the
+ * health it last reported (`docker_version`, `free_bytes`).
+ */
+const V28_SQL = `
+CREATE TABLE stick_invites (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  slots       INTEGER,
+  code_hash   TEXT NOT NULL UNIQUE,
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL,
+  used_at     TEXT,
+  stick_id    TEXT REFERENCES sticks(id),
+  cancelled_at TEXT
+);
+ALTER TABLE sticks ADD COLUMN auto_slots INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sticks ADD COLUMN removed_at TEXT;
+ALTER TABLE sticks ADD COLUMN docker_version TEXT;
+ALTER TABLE sticks ADD COLUMN free_bytes INTEGER;
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -821,6 +846,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 25, sql: V25_SQL, foreignKeysOff: true },
   { version: 26, sql: V26_SQL },
   { version: 27, sql: V27_SQL },
+  { version: 28, sql: V28_SQL },
 ];
 
 /**

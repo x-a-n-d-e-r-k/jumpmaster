@@ -2,6 +2,12 @@
 # code. No Docker client of any kind: only the stick talks to the engine.
 # Run it with a read-only root, a tmpfs at /tmp (SQLite temp files), /data writable and secrets
 # passed as *_FILE paths. Compose overrides the user with the host uid that owns the secret files.
+# cosign v3.1.4 for each platform a stick runs on, served to the stick installer (issue #138) at
+# /install/cosign. The same image the stick image takes its cosign from, pinned by digest; the
+# installer checks each binary's SHA-256 (as images/stick/Dockerfile does) before it runs it.
+FROM --platform=linux/amd64 ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d AS cosign-amd64
+FROM --platform=linux/arm64 ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d AS cosign-arm64
+
 FROM node:24-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9 AS build
 # better-sqlite3 is compiled here from source against the image's own Node headers, so nothing
 # is downloaded outside npm's integrity-checked lockfile and no prebuilt binary runs.
@@ -42,6 +48,11 @@ ARG SOURCE_URL
 LABEL org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.title="jumpmaster-server"
 COPY --from=build /out /app
+COPY --from=cosign-amd64 /ko-app/cosign /app/install/cosign/linux-amd64/cosign
+COPY --from=cosign-arm64 /ko-app/cosign /app/install/cosign/linux-arm64/cosign
+RUN echo "be06b2d8da722330fa78fd7cd858a74b589b20ab314a7d901e8cefcf387c965d  /app/install/cosign/linux-amd64/cosign" | sha256sum -c - \
+ && echo "4ec67587bcf621c50f5309c7301b16033cd0b1b8ce3a3bf0ce945ff61cf0dacb  /app/install/cosign/linux-arm64/cosign" | sha256sum -c - \
+ && chmod 0444 /app/install/cosign/linux-amd64/cosign /app/install/cosign/linux-arm64/cosign
 RUN ln -s /app/apps/server/dist/cli.js /usr/local/bin/jumpmaster \
  && install -d -o 10000 -g 10000 -m 0700 /data \
  && install -d -o root -g root -m 0755 /config \
@@ -60,8 +71,10 @@ RUN if [ -n "$IMAGES_LOCK" ]; then \
 ARG RELEASE_VERSION
 # The config file, when there is one (file mode); without it the config lives in the database
 # (db mode) and the boot settings below apply. A file's own listen and dataDir take precedence.
+# The stick installer pins the release signer from the source repository (issue #138).
 ENV NODE_ENV=production \
     JM_RELEASE_VERSION=${RELEASE_VERSION} \
+    JM_SOURCE_URL=${SOURCE_URL} \
     JM_CONTAINER=1 \
     JM_CONFIG=/config/jumpmaster.config.json \
     JM_LISTEN_HOST=0.0.0.0 \

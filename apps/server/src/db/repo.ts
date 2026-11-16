@@ -150,14 +150,24 @@ export interface Stick {
   desiredSlots: number | null;
   /** The ceiling the stick last reported (v26); null: too old to report one. */
   maxSlots: number | null;
+  /** Enrolled from an Auto invite (v28): its ceiling governs while no count is set. */
+  autoSlots: boolean;
+  /** The Docker engine version it last reported (v28); null: none yet. */
+  dockerVersion: string | null;
+  /** The free space on its drop volumes it last measured (v28); null: unmeasured. */
+  freeBytes: number | null;
 }
 
 /** The most troopers a stick will run: what it reported, or its enrolled `slots` for an old one. */
 export const stickCeiling = (s: Pick<Stick, 'slots' | 'maxSlots'>): number => s.maxSlots ?? s.slots;
 
-/** How many troopers a stick runs at once: the operator's count (or the enrolled one), capped. */
-export const effectiveSlots = (s: Pick<Stick, 'slots' | 'maxSlots' | 'desiredSlots'>): number =>
-  Math.min(s.desiredSlots ?? s.slots, stickCeiling(s));
+/**
+ * How many troopers a stick runs at once: the operator's count, capped. With none set, its
+ * ceiling when it enrolled from an Auto invite (issue #138), else its enrolled count.
+ */
+export const effectiveSlots = (
+  s: Pick<Stick, 'slots' | 'maxSlots' | 'desiredSlots'> & { autoSlots?: boolean },
+): number => Math.min(s.desiredSlots ?? (s.autoSlots ? stickCeiling(s) : s.slots), stickCeiling(s));
 
 const wallClock = () => new Date().toISOString();
 const iso = (now?: Date) => (now ? now.toISOString() : wallClock());
@@ -484,18 +494,22 @@ const advertParams = (a: StickAdvert) => ({
 
 export function insertStick(
   db: Db,
-  s: Pick<Stick, 'id' | 'name' | 'tokenHash' | 'slots'> & Partial<StickAdvert>,
+  s: Pick<Stick, 'id' | 'name' | 'tokenHash' | 'slots'> &
+    Partial<StickAdvert> & { desiredSlots?: number | null; autoSlots?: boolean },
 ): void {
-  const { id, name, tokenHash, slots, ...advert } = s;
+  const { id, name, tokenHash, slots, desiredSlots, autoSlots, ...advert } = s;
   db.prepare(
     `INSERT INTO sticks (id, name, token_hash, slots, created_at, capabilities_json, image_policy,
-       version, pinned_json)
-     VALUES (@id, @name, @tokenHash, @slots, @createdAt, @caps, @policy, @version, @pinned)`,
+       version, pinned_json, desired_slots, auto_slots)
+     VALUES (@id, @name, @tokenHash, @slots, @createdAt, @caps, @policy, @version, @pinned,
+       @desiredSlots, @autoSlots)`,
   ).run({
     id,
     name,
     tokenHash,
     slots,
+    desiredSlots: desiredSlots ?? null,
+    autoSlots: autoSlots ? 1 : 0,
     createdAt: wallClock(),
     ...advertParams({ ...NO_ADVERT, ...advert }),
   });
@@ -511,18 +525,28 @@ export function stampStick(
   id: string,
   advert: StickAdvert,
   now: Date,
-  counts: { maxSlots?: number | undefined; slots?: number | undefined } = {},
+  counts: {
+    maxSlots?: number | undefined;
+    slots?: number | undefined;
+    /** The health it reported (issue #138); absent, the stored health stays. */
+    health?: { docker: string; freeBytes: number | null } | undefined;
+  } = {},
 ): void {
   db.prepare(
     `UPDATE sticks SET last_seen_at = @now, capabilities_json = @caps, image_policy = @policy,
        version = @version, pinned_json = @pinned, max_slots = COALESCE(@maxSlots, max_slots),
-       slots = COALESCE(@slots, slots)
+       slots = COALESCE(@slots, slots),
+       docker_version = CASE WHEN @hasHealth THEN @docker ELSE docker_version END,
+       free_bytes = CASE WHEN @hasHealth THEN @freeBytes ELSE free_bytes END
      WHERE id = @id`,
   ).run({
     id,
     now: now.toISOString(),
     maxSlots: counts.maxSlots ?? null,
     slots: counts.slots ?? null,
+    hasHealth: counts.health ? 1 : 0,
+    docker: counts.health?.docker ?? null,
+    freeBytes: counts.health?.freeBytes ?? null,
     ...advertParams(advert),
   });
 }
@@ -545,10 +569,12 @@ export function liveDropsOn(db: Db, stickId: string): number {
 
 const STICK_COLS = `id, name, token_hash AS tokenHash, slots, last_seen_at AS lastSeenAt,
   created_at AS createdAt, capabilities_json AS capabilitiesJson, image_policy AS imagePolicy,
-  version, pinned_json AS pinnedJson, desired_slots AS desiredSlots, max_slots AS maxSlots`;
-type StickRow = Omit<Stick, 'capabilities' | 'pinnedImages'> & {
+  version, pinned_json AS pinnedJson, desired_slots AS desiredSlots, max_slots AS maxSlots,
+  auto_slots AS autoSlots, docker_version AS dockerVersion, free_bytes AS freeBytes`;
+type StickRow = Omit<Stick, 'capabilities' | 'pinnedImages' | 'autoSlots'> & {
   capabilitiesJson: string;
   pinnedJson: string;
+  autoSlots: number;
 };
 const parseList = (json: string): string[] => {
   try {
@@ -564,19 +590,20 @@ const toStick = ({ capabilitiesJson, pinnedJson, ...r }: StickRow): Stick => ({
   imagePolicy: r.imagePolicy === 'signed' ? 'signed' : 'allowlist',
   capabilities: parseList(capabilitiesJson),
   pinnedImages: parseList(pinnedJson),
+  autoSlots: r.autoSlots === 1,
 });
 
 export function getStickByTokenHash(db: Db, tokenHash: string): Stick | undefined {
-  const row = db.prepare(`SELECT ${STICK_COLS} FROM sticks WHERE token_hash = ?`).get(tokenHash) as
-    | StickRow
-    | undefined;
+  const row = db
+    .prepare(`SELECT ${STICK_COLS} FROM sticks WHERE token_hash = ? AND removed_at IS NULL`)
+    .get(tokenHash) as StickRow | undefined;
   return row ? toStick(row) : undefined;
 }
 
 export function getStick(db: Db, id: string): Stick | undefined {
-  const row = db.prepare(`SELECT ${STICK_COLS} FROM sticks WHERE id = ?`).get(id) as
-    | StickRow
-    | undefined;
+  const row = db
+    .prepare(`SELECT ${STICK_COLS} FROM sticks WHERE id = ? AND removed_at IS NULL`)
+    .get(id) as StickRow | undefined;
   return row ? toStick(row) : undefined;
 }
 
@@ -587,18 +614,18 @@ export function findStick(db: Db, idOrName: string): Stick | 'ambiguous' | undef
   const byId = getStick(db, idOrName);
   if (byId) return byId;
   const rows = db
-    .prepare(`SELECT ${STICK_COLS} FROM sticks WHERE name = ? LIMIT 2`)
+    .prepare(`SELECT ${STICK_COLS} FROM sticks WHERE name = ? AND removed_at IS NULL LIMIT 2`)
     .all(idOrName) as StickRow[];
   if (rows.length > 1) return 'ambiguous';
   return rows[0] ? toStick(rows[0]) : undefined;
 }
 
-/** Every enrolled stick, most recently seen first. */
+/** Every enrolled stick not removed, most recently seen first. */
 export function listSticks(db: Db): Stick[] {
   return (
     db
       .prepare(
-        `SELECT ${STICK_COLS} FROM sticks ORDER BY last_seen_at IS NULL, last_seen_at DESC, name`,
+        `SELECT ${STICK_COLS} FROM sticks WHERE removed_at IS NULL ORDER BY last_seen_at IS NULL, last_seen_at DESC, name`,
       )
       .all() as StickRow[]
   ).map(toStick);
@@ -1423,4 +1450,133 @@ export function listObservations(db: Db, zoneId?: string): Observation[] {
          FROM observations WHERE @zoneId IS NULL OR zone_id = @zoneId ORDER BY last_at DESC, id DESC`,
     )
     .all({ zoneId: zoneId ?? null }) as Observation[];
+}
+
+/** A one-time enrollment code (issue #138), by its hash only. */
+export interface StickInvite {
+  id: string;
+  name: string;
+  /** The trooper count the stick enrolls with; null: Auto (its ceiling). */
+  slots: number | null;
+  createdAt: string;
+  expiresAt: string;
+  usedAt: string | null;
+  stickId: string | null;
+  cancelledAt: string | null;
+}
+
+const INVITE_COLS = `id, name, slots, created_at AS createdAt, expires_at AS expiresAt,
+  used_at AS usedAt, stick_id AS stickId, cancelled_at AS cancelledAt`;
+
+/** An invite still waiting: neither used, cancelled nor expired at `now`. */
+const PENDING_INVITE_SQL = 'used_at IS NULL AND cancelled_at IS NULL AND expires_at > @now';
+
+export function insertStickInvite(
+  db: Db,
+  i: Pick<StickInvite, 'id' | 'name' | 'slots' | 'createdAt' | 'expiresAt'> & { codeHash: string },
+): void {
+  db.prepare(
+    `INSERT INTO stick_invites (id, name, slots, code_hash, created_at, expires_at)
+     VALUES (@id, @name, @slots, @codeHash, @createdAt, @expiresAt)`,
+  ).run(i);
+}
+
+/** Whether a stick (not removed) or a pending invite already has this name. */
+export function stickNameTaken(db: Db, name: string, now: Date): boolean {
+  const row = db
+    .prepare(
+      `SELECT 1 FROM sticks WHERE name = @name AND removed_at IS NULL
+       UNION ALL SELECT 1 FROM stick_invites WHERE name = @name AND ${PENDING_INVITE_SQL} LIMIT 1`,
+    )
+    .get({ name, now: now.toISOString() });
+  return row !== undefined;
+}
+
+/** The invites waiting for their stick to check in, oldest first. */
+export function listPendingInvites(db: Db, now: Date): StickInvite[] {
+  return db
+    .prepare(
+      `SELECT ${INVITE_COLS} FROM stick_invites WHERE ${PENDING_INVITE_SQL}
+       ORDER BY created_at, rowid`,
+    )
+    .all({ now: now.toISOString() }) as StickInvite[];
+}
+
+/** The pending invite whose code hashes to `codeHash`, if any. Consumes nothing. */
+export function pendingInviteByHash(db: Db, codeHash: string, now: Date): StickInvite | undefined {
+  return db
+    .prepare(
+      `SELECT ${INVITE_COLS} FROM stick_invites WHERE code_hash = @codeHash AND ${PENDING_INVITE_SQL}`,
+    )
+    .get({ codeHash, now: now.toISOString() }) as StickInvite | undefined;
+}
+
+/** Cancels a pending invite; undefined when there is none by that id. */
+export function cancelStickInvite(db: Db, id: string, now: Date): StickInvite | undefined {
+  return db
+    .prepare(
+      `UPDATE stick_invites SET cancelled_at = @now WHERE id = @id AND ${PENDING_INVITE_SQL}
+       RETURNING ${INVITE_COLS}`,
+    )
+    .get({ id, now: now.toISOString() }) as StickInvite | undefined;
+}
+
+/**
+ * Enrolls a stick from the pending invite whose code hashes to `codeHash`: the stick takes the
+ * invite's name and count (Auto: no count, its ceiling governs), and the invite is marked used,
+ * in one transaction. Undefined when no pending invite matches (used, expired, cancelled or
+ * unknown); of two enrollments with one code, exactly one gets the invite.
+ */
+export function enrollFromInvite(
+  db: Db,
+  codeHash: string,
+  now: Date,
+  stick: Pick<Stick, 'id' | 'tokenHash' | 'slots'> & Partial<StickAdvert>,
+): StickInvite | { nameTaken: string } | undefined {
+  return db
+    .transaction((): StickInvite | { nameTaken: string } | undefined => {
+      const invite = pendingInviteByHash(db, codeHash, now);
+      if (!invite) return undefined;
+      // A live stick took the name since the invite was made (say, by the join token): refused,
+      // and the invite stays unused.
+      const taken = db
+        .prepare(`SELECT 1 FROM sticks WHERE name = ? AND removed_at IS NULL LIMIT 1`)
+        .get(invite.name);
+      if (taken) return { nameTaken: invite.name };
+      insertStick(db, {
+        ...stick,
+        name: invite.name,
+        desiredSlots: invite.slots,
+        autoSlots: invite.slots === null,
+      });
+      const used = db
+        .prepare(
+          `UPDATE stick_invites SET used_at = @now, stick_id = @stickId
+         WHERE id = @id AND ${PENDING_INVITE_SQL}`,
+        )
+        .run({ id: invite.id, stickId: stick.id, now: now.toISOString() });
+      if (used.changes !== 1) throw new Error(`invite ${invite.id} was used concurrently`);
+      return { ...invite, usedAt: now.toISOString(), stickId: stick.id };
+    })
+    .immediate();
+}
+
+/**
+ * Removes a stick (issue #138): its token is revoked (the row stays, for its drops' history), and
+ * its leased drops that never started have their lease ended now, so the lost-stick path
+ * (`expireLeases`) requeues them. Undefined when there is no such stick.
+ */
+export function removeStick(db: Db, id: string, now: Date): Stick | undefined {
+  return db.transaction((): Stick | undefined => {
+    const stick = getStick(db, id);
+    if (!stick) return undefined;
+    db.prepare(
+      `UPDATE sticks SET removed_at = @now, token_hash = 'removed:' || id WHERE id = @id`,
+    ).run({ id, now: now.toISOString() });
+    db.prepare(
+      `UPDATE drops SET lease_expires_at = @past
+       WHERE stick_id = @id AND state = 'leased' AND started_at IS NULL`,
+    ).run({ id, past: new Date(now.getTime() - 1).toISOString() });
+    return stick;
+  })();
 }

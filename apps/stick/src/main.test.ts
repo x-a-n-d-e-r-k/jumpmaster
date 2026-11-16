@@ -6,6 +6,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import {
   advertisedCapabilities,
+  enrollCredential,
+  enrollStick,
   joinToken,
   loadEnrollment,
   loadRelease,
@@ -48,6 +50,56 @@ describe('stick state', () => {
     expect(() => joinToken({ JM_JOIN_TOKEN: 'x', JM_JOIN_TOKEN_FILE: file })).toThrow(
       /JM_JOIN_TOKEN and JM_JOIN_TOKEN_FILE/,
     );
+  });
+});
+
+describe('enrolling with a one-time code (issue #138)', () => {
+  test('JM_ENROLL_CODE or JM_ENROLL_CODE_FILE is sent instead of the join token', () => {
+    const file = join(fresh(), 'enroll_code');
+    writeFileSync(file, 'jm_enroll_from-file\n', { mode: 0o600 });
+    expect(enrollCredential({ JM_ENROLL_CODE_FILE: file, JM_JOIN_TOKEN: 'j' })).toEqual({
+      enrollCode: 'jm_enroll_from-file',
+    });
+    expect(enrollCredential({ JM_ENROLL_CODE: 'jm_enroll_env' })).toEqual({
+      enrollCode: 'jm_enroll_env',
+    });
+    // Without a code, the join token as ever.
+    expect(enrollCredential({ JM_JOIN_TOKEN: 'join' })).toEqual({ joinToken: 'join' });
+    expect(() => enrollCredential({})).toThrow(
+      'JM_JOIN_TOKEN or JM_JOIN_TOKEN_FILE (or JM_ENROLL_CODE_FILE) is required',
+    );
+  });
+
+  test('a stick enrolling with a code file leaves no file behind', async () => {
+    const dir = fresh();
+    const file = join(dir, 'enroll_code');
+    writeFileSync(file, 'jm_enroll_once\n', { mode: 0o600 });
+    const sent: unknown[] = [];
+    const lines: string[] = [];
+    const client = {
+      enroll: async (cred: unknown, name: string, slots: number) => {
+        sent.push({ cred, name, slots });
+        return { stickId: 's9', stickToken: 't9', name: 'vps-1' };
+      },
+    };
+    const env = { JM_ENROLL_CODE_FILE: file, JM_STICK_NAME: 'stick' };
+    const stickId = await enrollStick(client, env, dir, 'http://jm:7420', 2, (l) => lines.push(l));
+    expect(stickId).toBe('s9');
+    expect(sent).toEqual([{ cred: { enrollCode: 'jm_enroll_once' }, name: 'stick', slots: 2 }]);
+    expect(existsSync(file)).toBe(false);
+    expect(loadEnrollment(dir, 'http://jm:7420')).toEqual({ stickId: 's9', stickToken: 't9' });
+    expect(lines).toEqual(['enrolled as vps-1 (s9)']);
+    // A refused enrollment keeps the file (the installer reports the error; a retry can use it).
+    writeFileSync(file, 'jm_enroll_twice\n', { mode: 0o600 });
+    const refusing = {
+      enroll: async () => {
+        throw new Error('enroll: 401');
+      },
+    };
+    await expect(
+      enrollStick(refusing, env, fresh(), 'http://jm:7420', 1, () => {}),
+    ).rejects.toThrow('enroll: 401');
+    expect(existsSync(file)).toBe(true);
   });
 });
 

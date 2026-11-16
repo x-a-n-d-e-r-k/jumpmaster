@@ -352,11 +352,21 @@ function publicUrlRequest(args: string[]): Raw | null {
   return null;
 }
 
-/** `sticks [--json]` and `sticks slots <name-or-id> <n>`: each stick's trooper count. */
+/**
+ * `sticks [--json]`, `sticks slots <name-or-id> <n>`: each stick's trooper count; `sticks remove
+ * <name-or-id>` and `sticks cancel <invite>` (issue #138).
+ */
 function sticksRequest(args: string[]): Raw | null {
   const [, what, stick, n, ...rest] = args;
   if (what === undefined || (what === '--json' && args.length === 2))
     return { path: '/api/control/sticks', method: 'GET' };
+  if ((what === 'remove' || what === 'cancel') && stick && n === undefined) {
+    const path =
+      what === 'remove'
+        ? `/api/control/sticks/${encodeURIComponent(stick)}/remove`
+        : `/api/control/sticks/invites/${encodeURIComponent(stick)}/cancel`;
+    return { path, body: {} };
+  }
   if (what !== 'slots' || !stick || n === undefined || rest.length > 0 || !/^[0-9]+$/.test(n))
     return null;
   return {
@@ -378,6 +388,14 @@ type StickView = {
 /** `ctl sticks` and `ctl sticks slots` as lines a person reads. */
 function sticksLines(args: string[], body: Record<string, unknown>): string[] {
   const troopers = (n: number) => `${n} trooper${n === 1 ? '' : 's'}`;
+  if (args[1] === 'remove') {
+    const b = body as { id: string; name: string };
+    return [`stick ${b.name} (${b.id}) removed: its token is revoked`];
+  }
+  if (args[1] === 'cancel') {
+    const b = body as { id: string; name: string };
+    return [`invite for ${b.name} (${b.id}) cancelled: its code no longer works`];
+  }
   if (args[1] === 'slots') {
     const b = body as { id: string; slots: number; maxSlots: number };
     return [`stick ${b.id}: ${troopers(b.slots)} at once (allows up to ${b.maxSlots})`];

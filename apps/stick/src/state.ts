@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -22,6 +22,51 @@ export function joinToken(env: NodeJS.ProcessEnv): string {
   const token = readSecret(env, 'JM_JOIN_TOKEN');
   if (!token) throw new Error('JM_JOIN_TOKEN or JM_JOIN_TOKEN_FILE is required');
   return token;
+}
+
+/** What a stick enrolls with: a one-time code from an invite (issue #138), or the join token. */
+export type EnrollCredential = { enrollCode: string } | { joinToken: string };
+
+/**
+ * `JM_ENROLL_CODE` or the file `JM_ENROLL_CODE_FILE` names (the installer's), sent instead of the
+ * join token; without one, the join token as ever.
+ */
+export function enrollCredential(env: NodeJS.ProcessEnv): EnrollCredential {
+  const code = readSecret(env, 'JM_ENROLL_CODE')?.trim();
+  if (code) return { enrollCode: code };
+  const token = readSecret(env, 'JM_JOIN_TOKEN');
+  if (!token)
+    throw new Error('JM_JOIN_TOKEN or JM_JOIN_TOKEN_FILE (or JM_ENROLL_CODE_FILE) is required');
+  return { joinToken: token };
+}
+
+/**
+ * Enrolls, saves the enrollment and logs the line the installer waits for. A one-time code's file
+ * (`JM_ENROLL_CODE_FILE`) is deleted once the stick has enrolled, so the spent code never stays in
+ * the state volume, even when the installer stopped waiting. Returns the stick id.
+ */
+export async function enrollStick(
+  client: {
+    enroll(
+      credential: EnrollCredential,
+      name: string,
+      slots: number,
+    ): Promise<{ stickId: string; stickToken: string; name?: string }>;
+  },
+  env: NodeJS.ProcessEnv,
+  dir: string,
+  serverUrl: string,
+  slots: number,
+  log: (line: string) => void,
+): Promise<string> {
+  const name = env.JM_STICK_NAME ?? 'stick';
+  // A one-time code (the installer's, issue #138) names the stick from its invite.
+  const out = await client.enroll(enrollCredential(env), name, slots);
+  saveEnrollment(dir, { serverUrl, stickId: out.stickId, stickToken: out.stickToken });
+  if (env.JM_ENROLL_CODE_FILE) rmSync(env.JM_ENROLL_CODE_FILE, { force: true });
+  // The installer waits for this line, and prints the name.
+  log(`enrolled as ${out.name ?? name} (${out.stickId})`);
+  return out.stickId;
 }
 
 type Enrollment = { stickId: string; stickToken: string };

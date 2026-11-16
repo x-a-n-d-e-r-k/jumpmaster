@@ -20,6 +20,16 @@ import {
 
 export type Ack = 'ok' | 'stale';
 
+/**
+ * What a lease says beyond the advert: the latest checks' capabilities, `noPush` at the cap, and
+ * the stick's health for the sticks page (issue #138).
+ */
+export type LeaseTerms = {
+  capabilities?: string[];
+  noPush?: boolean;
+  health?: { docker: string; freeBytes: number | null };
+};
+
 /** `killed` only for a pending push while the kill switch is on: stop, keep the volume. */
 export type Beat = 'ok' | 'cancel' | 'hard_cancel' | 'stale' | 'killed';
 
@@ -142,7 +152,7 @@ export class StickClient implements DropClient, PushClient {
   ) {}
 
   /** The terms of the latest lease, for a progress report between leases. */
-  private lastTerms: { capabilities?: string[]; noPush?: boolean } | undefined;
+  private lastTerms: LeaseTerms | undefined;
   /**
    * The image download to report (issue #141): sent on every lease while set; `null` is sent once
    * when a download ends; `undefined` sends nothing (as before server-hosted images).
@@ -180,18 +190,19 @@ export class StickClient implements DropClient, PushClient {
     });
   }
 
+  /**
+   * Enrolls with the join token, or with a one-time code (issue #138), whose invite names the
+   * stick: the server's answer then carries that `name`.
+   */
   async enroll(
-    joinToken: string,
+    credential: string | { joinToken: string } | { enrollCode: string },
     name: string,
     slots: number,
-  ): Promise<{ stickId: string; stickToken: string }> {
-    const res = await this.req(
-      '/api/sticks/enroll',
-      { joinToken, name, slots, ...this.info },
-      false,
-    );
+  ): Promise<{ stickId: string; stickToken: string; name?: string }> {
+    const cred = typeof credential === 'string' ? { joinToken: credential } : credential;
+    const res = await this.req('/api/sticks/enroll', { ...cred, name, slots, ...this.info }, false);
     if (!res.ok) throw await failure('enroll', res);
-    const out = (await res.json()) as { stickId: string; stickToken: string };
+    const out = (await res.json()) as { stickId: string; stickToken: string; name?: string };
     this.token = out.stickToken;
     return out;
   }
@@ -204,7 +215,7 @@ export class StickClient implements DropClient, PushClient {
    */
   async lease(
     freeSlots: number,
-    terms: { capabilities?: string[]; noPush?: boolean } = {},
+    terms: LeaseTerms = {},
   ): Promise<{ drop: DropPayload | null; skipped: LeaseSkip[]; slots: number | null }> {
     const { maxSlots: max, slots: start } = this.opts;
     this.lastTerms = terms;
