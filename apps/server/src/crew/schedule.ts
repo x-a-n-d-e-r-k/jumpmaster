@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Role } from '@jumpmaster/protocol';
-import { raiseBriefing, whyBasis } from '../briefings.js';
+import { raiseBriefing, refuteExhaustedWhy, whyBasis } from '../briefings.js';
 import type { DropZoneConfig, UsageConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import {
@@ -18,6 +18,7 @@ import { dispatchGate, gateQueuesCrew } from '../usage.js';
 import { crewIssueSlots } from './actions.js';
 import { PROMOTE_OPTIONS, subjectOf } from './flush.js';
 import { crewLeadInput, diagnoseInput, refuteInput, triageInput } from './inputs.js';
+import { getCrewIssue } from './store.js';
 
 export type { CrewInputJson } from '../payloads.js';
 
@@ -71,12 +72,14 @@ export function nextCrewWork(db: Db, zone: DropZoneConfig, now: Date): CrewWork 
   // body unjudged: put it to Command rather than leave it staged forever.
   const exhausted = db
     .prepare(
-      `SELECT id, number, key FROM crew_issues WHERE zone_id = ? AND state = 'staged'
+      `SELECT id FROM crew_issues WHERE zone_id = ? AND state = 'staged'
          AND body_sha IS NOT NULL AND (refuted_sha IS NULL OR refuted_sha <> body_sha)
          AND refute_count >= ?`,
     )
-    .all(zone.id, zone.crew.maxRefute) as { id: number; number: number | null; key: string }[];
-  for (const c of exhausted) {
+    .all(zone.id, zone.crew.maxRefute) as { id: number }[];
+  for (const { id } of exhausted) {
+    const c = getCrewIssue(db, id);
+    if (!c) continue;
     const label = c.number !== null ? `crew issue #${c.number}` : `crew issue ${c.key}`;
     raiseBriefing(
       db,
@@ -85,7 +88,7 @@ export function nextCrewWork(db: Db, zone: DropZoneConfig, now: Date): CrewWork 
         kind: 'refute_exhausted',
         subject: subjectOf(c),
         decision: `Promote ${label} without a refute verdict?`,
-        why: `Its ${zone.crew.maxRefute} refute attempts ended without judging the current text.`,
+        why: refuteExhaustedWhy(db, c),
         options: PROMOTE_OPTIONS,
         onHold: label,
         source: 'server',
