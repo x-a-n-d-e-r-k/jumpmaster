@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -1235,5 +1235,143 @@ describe('ctl dismiss', () => {
     expect(ctlRequest(['dismiss', 'web', 'all'])).toBeNull();
     expect(ctlRequest(['dismiss', 'web', '3', '0'])).toBeNull();
     expect(ctlRequest(['dismiss', 'web', '1.5'])).toBeNull();
+  });
+});
+
+describe('ctl transcripts (#195)', () => {
+  const JSONL = '{"dropId":"d1","header":true}\n{"dropId":"d1","seq":1,"data":{"a": "ü"}}\n';
+  /** A fetch answering the export in small chunks, as a stream would arrive. */
+  function ndjsonFetch(status = 200, text = JSONL) {
+    const calls: { url: string; init: RequestInit }[] = [];
+    const impl = (async (url: URL | string, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      const bytes = Buffer.from(text);
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          for (let i = 0; i < bytes.length; i += 7) c.enqueue(bytes.subarray(i, i + 7));
+          c.close();
+        },
+      });
+      return new Response(body, { status });
+    }) as typeof fetch;
+    return { calls, impl };
+  }
+
+  test('argument parsing: the routes, the window as a query, --out never sent', () => {
+    expect(ctlRequest(['drops', 'transcript', 'd1'])).toEqual({
+      method: 'GET',
+      path: '/api/control/drops/d1/transcript',
+    });
+    expect(ctlRequest(['drops', 'transcript', 'd1', '--out', 'x.jsonl'])).toEqual({
+      method: 'GET',
+      path: '/api/control/drops/d1/transcript',
+    });
+    expect(ctlRequest(['zones', 'transcripts', 'jm', '--since', '2026-11-16'])).toEqual({
+      method: 'GET',
+      path: '/api/control/zones/jm/transcripts?since=2026-11-16',
+    });
+    expect(
+      ctlRequest([
+        'zones',
+        'transcripts',
+        'jm',
+        '--out',
+        'jm.jsonl',
+        '--until',
+        '2026-12-01',
+        '--since',
+        '2026-11-16',
+      ]),
+    ).toEqual({
+      method: 'GET',
+      path: '/api/control/zones/jm/transcripts?since=2026-11-16&until=2026-12-01',
+    });
+    for (const bad of [
+      ['drops', 'transcript'],
+      ['drops', 'transcript', '--out', 'f'],
+      ['drops', 'transcript', 'd1', '--out'],
+      ['drops', 'transcript', 'd1', 'extra'],
+      ['drops', 'transcript', 'd1', '--since', '2026-11-16'],
+      ['zones', 'transcripts', 'jm'],
+      ['zones', 'transcripts', '--since', '2026-11-16'],
+      ['zones', 'transcripts', 'jm', '--since'],
+      ['zones', 'transcripts', 'jm', '--since', '16/11/2026'],
+      ['zones', 'transcripts', 'jm', '--since', '2026-11-16T00:00:00Z'],
+      ['zones', 'transcripts', 'jm', '--since', '2026-11-16', '--until', 'soon'],
+      ['zones', 'transcripts', 'jm', '--since', '2026-11-16', '--since', '2026-11-17'],
+      ['zones', 'transcripts', 'jm', '--since', '2026-11-16', '--json'],
+      ['zones', 'transcripts', 'jm', 'web', '--since', '2026-11-16'],
+    ])
+      expect(ctlRequest(bad), bad.join(' ')).toBeNull();
+  });
+
+  test('without --out the lines go to stdout, exactly', async () => {
+    const f = ndjsonFetch();
+    const r = await run(['drops', 'transcript', 'd1'], '', f);
+    expect(r.code).toBe(0);
+    expect(r.calls[0]?.url).toBe('http://127.0.0.1:7420/api/control/drops/d1/transcript');
+    expect(r.calls[0]?.init.method).toBe('GET');
+    expect(r.out).toEqual(JSONL.split('\n').slice(0, -1));
+    expect(r.err).toEqual([]);
+  });
+
+  test('--out writes the file 0600, byte for byte, and says where', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'jm-transcript-'));
+    const file = join(dir, 'jm.jsonl');
+    const r = await run(
+      ['zones', 'transcripts', 'jm', '--since', '2026-11-16', '--out', file],
+      '',
+      ndjsonFetch(),
+    );
+    expect(r.code).toBe(0);
+    expect(r.calls[0]?.url).toBe(
+      'http://127.0.0.1:7420/api/control/zones/jm/transcripts?since=2026-11-16',
+    );
+    expect(readFileSync(file, 'utf8')).toBe(JSONL);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(r.out).toEqual([]);
+    expect(r.err).toEqual([`wrote ${file}`]);
+  });
+
+  test('--out refuses to overwrite an existing file and asks the server nothing', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'jm-transcript-'));
+    const file = join(dir, 'old.jsonl');
+    writeFileSync(file, 'keep me');
+    const r = await run(['drops', 'transcript', 'd1', '--out', file], '', ndjsonFetch());
+    expect(r.code).toBe(1);
+    expect(r.calls).toEqual([]);
+    expect(readFileSync(file, 'utf8')).toBe('keep me');
+    expect(r.err.join('\n')).toMatch(/exists.*not overwritten/);
+  });
+
+  test('a refused export (400, 404) says why on stderr, exits 1 and leaves no file', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'jm-transcript-'));
+    const file = join(dir, 'jm.jsonl');
+    const r = await run(
+      [
+        'zones',
+        'transcripts',
+        'jm',
+        '--since',
+        '2026-01-01',
+        '--until',
+        '2026-12-31',
+        '--out',
+        file,
+      ],
+      '',
+      ndjsonFetch(400, '{"error":"the window is at most 92 days"}'),
+    );
+    expect(r.code).toBe(1);
+    expect(r.err).toEqual(['400 {"error":"the window is at most 92 days"}']);
+    expect(readdirSync(dir)).toEqual([]);
+    const s = await run(
+      ['drops', 'transcript', 'nope'],
+      '',
+      ndjsonFetch(404, '{"error":"unknown drop"}'),
+    );
+    expect(s.code).toBe(1);
+    expect(s.out).toEqual([]);
+    expect(s.err).toEqual(['404 {"error":"unknown drop"}']);
   });
 });

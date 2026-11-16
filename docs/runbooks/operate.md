@@ -277,6 +277,14 @@ restarts).
   to `ready`, charged as a resume; heal and resolve stay `pr_open`). The stick stops a push
   container already running for it and removes the volume. Only a `push_pending` drop can be
   cancelled this way.
+- **Transcripts.** `ctl drops transcript <dropId> [--out <file>]` exports a drop's events as
+  JSONL: a header line (`"header": true`: zone, role, state, stick, models), then one line per
+  stored event in `seq` order, its `data` as stored (already redacted). `ctl zones transcripts
+  <zone> --since <YYYY-MM-DD> [--until <YYYY-MM-DD>] [--out <file>]` exports every drop of the
+  zone created in `[since, until)`, oldest first; `until` defaults to now and the window is at
+  most 92 days. Transcripts hold code from private repositories: export is operator-only, each
+  export writes a `transcript-export` audit row, and `--out` creates the file mode 0600 and never
+  overwrites one.
 - **Kill switch.** `ctl kill` hard-cancels queued and running drops, but leaves pending pushes in
   place. While it is on, no push credential is issued and a running push container is stopped
   with its volume kept, so nothing reaches GitHub. An agent run the kill stopped leaves its
@@ -328,7 +336,7 @@ token is always allowed.
 | Setup | `ctl setup reopen` | `POST /api/control/setup/reopen` |
 | Setup | `ctl passphrase set (the passphrase on stdin)` | `PUT /api/control/passphrase` |
 | Setup | `ctl detect <owner/name>` | `POST /api/control/detect` |
-| Zones | `ctl zones add <owner/name> [--id <id>] [--preset <p>] [--identity starter] [--egress off\|monitor\|enforce] [--resume]`<br>`ctl zones list [--json]`<br>`ctl zones show <zone> [--json]`<br>`ctl zones set <zone> <path>=<json>… [--note <text>]`<br>`ctl zones remove <zone>`<br>`ctl zones egress observed <zone>`<br>`ctl zones egress adopt <zone> <host>…` | `GET /api/control/zones`<br>`POST /api/control/zones`<br>`GET /api/control/zones/:id`<br>`DELETE /api/control/zones/:id`<br>`GET /api/control/zones/:id/egress/observed`<br>`POST /api/control/zones/:id/egress/adopt`<br>`PATCH /api/control/config` |
+| Zones | `ctl zones add <owner/name> [--id <id>] [--preset <p>] [--identity starter] [--egress off\|monitor\|enforce] [--resume]`<br>`ctl zones list [--json]`<br>`ctl zones show <zone> [--json]`<br>`ctl zones set <zone> <path>=<json>… [--note <text>]`<br>`ctl zones remove <zone>`<br>`ctl zones egress observed <zone>`<br>`ctl zones egress adopt <zone> <host>…`<br>`ctl zones transcripts <zone> --since <YYYY-MM-DD> [--until <YYYY-MM-DD>] [--out <file>]` | `GET /api/control/zones`<br>`POST /api/control/zones`<br>`GET /api/control/zones/:id`<br>`DELETE /api/control/zones/:id`<br>`GET /api/control/zones/:id/egress/observed`<br>`POST /api/control/zones/:id/egress/adopt`<br>`PATCH /api/control/config`<br>`GET /api/control/zones/:id/transcripts` |
 | Zones | `ctl pause <zone>` | `POST /api/control/zones/:id` |
 | Zones | `ctl resume <zone>` | `POST /api/control/zones/:id` |
 | Zones | `ctl observe <zone>` | `POST /api/control/zones/:id` |
@@ -345,7 +353,7 @@ token is always allowed.
 | Briefings | `ctl briefings` | `GET /api/control/briefings` |
 | Briefings | `ctl rule <briefing> <option> [--options <digest>] [note]` | `POST /api/control/briefings/:id/rule` |
 | Briefings | `ctl dismiss <zone> <briefing>…` | `POST /api/control/zones/:id/briefings/dismiss` |
-| Drops | `ctl drops extend-retention <dropId> <hours>`<br>`ctl drops cancel <dropId>` | `POST /api/control/drops/:id/extend-retention`<br>`POST /api/control/drops/:id/cancel` |
+| Drops | `ctl drops extend-retention <dropId> <hours>`<br>`ctl drops cancel <dropId>`<br>`ctl drops transcript <dropId> [--out <file>]` | `POST /api/control/drops/:id/extend-retention`<br>`POST /api/control/drops/:id/cancel`<br>`GET /api/control/drops/:id/transcript` |
 | Sticks | `ctl sticks [--json]`<br>`ctl sticks slots <name-or-id> <n>`<br>`ctl sticks remove <name-or-id>`<br>`ctl sticks cancel <invite-name-or-id>` | `GET /api/control/sticks`<br>`POST /api/control/sticks/:id/slots`<br>`POST /api/control/sticks/:id/remove`<br>`POST /api/control/sticks/invites/:id/cancel` |
 | Kill | `ctl kill` | `POST /api/control/kill` |
 | Kill | `ctl unkill` | `POST /api/control/kill` |

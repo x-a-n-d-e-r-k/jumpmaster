@@ -1,5 +1,15 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  fchmodSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
 import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { PRESETS } from '@jumpmaster/protocol';
@@ -329,6 +339,44 @@ export function ctlRequest(args: string[]): CtlRequest | null {
     : { path: r.path, method, ...('body' in r ? { body: r.body } : {}) };
 }
 
+const DAY_ARG = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * `drops transcript <dropId> [--out <file>]` and `zones transcripts <zone> --since <YYYY-MM-DD>
+ * [--until <YYYY-MM-DD>] [--out <file>]` (issue #195): the export route, and the file `--out`
+ * names (ctl's own: never sent). Each flag at most once; null when the line is not one of these.
+ */
+export function transcriptArgs(args: string[]): { request: Raw; out?: string } | null {
+  const [command, verb, id, ...rest] = args;
+  const drop = command === 'drops' && verb === 'transcript';
+  if (!drop && !(command === 'zones' && verb === 'transcripts')) return null;
+  if (!id || id.startsWith('--') || rest.length % 2 !== 0) return null;
+  const allowed = drop ? ['--out'] : ['--out', '--since', '--until'];
+  const flags = new Map<string, string>();
+  for (let i = 0; i < rest.length; i += 2) {
+    const [flag, value] = [rest[i] as string, rest[i + 1] as string];
+    if (!allowed.includes(flag) || flags.has(flag) || value === '' || value.startsWith('--'))
+      return null;
+    flags.set(flag, value);
+  }
+  const out = flags.get('--out');
+  const withOut = (request: Raw) => (out === undefined ? { request } : { request, out });
+  if (drop)
+    return withOut({
+      path: `/api/control/drops/${encodeURIComponent(id)}/transcript`,
+      method: 'GET',
+    });
+  const since = flags.get('--since');
+  const until = flags.get('--until');
+  if (since === undefined || !DAY_ARG.test(since)) return null;
+  if (until !== undefined && !DAY_ARG.test(until)) return null;
+  const query = new URLSearchParams({ since, ...(until === undefined ? {} : { until }) });
+  return withOut({
+    path: `/api/control/zones/${encodeURIComponent(id)}/transcripts?${query}`,
+    method: 'GET',
+  });
+}
+
 /** `drops extend-retention <dropId> <hours>` and `drops cancel <dropId>`: a pending push's. */
 function dropsRequest(args: string[]): Raw | null {
   const [, what, dropId, hours, ...rest] = args;
@@ -422,6 +470,8 @@ function rawRequest(args: string[]): Raw | null {
     return args.length === 2 && zone && REPO_ARG.test(zone)
       ? { path: '/api/control/detect', body: { repo: zone } }
       : null;
+  const transcript = transcriptArgs(args);
+  if (transcript) return transcript.request;
   if (command === 'zones') return zonesRequest(args);
   if (command === 'drops') return dropsRequest(args);
   if (command === 'briefings') return { path: '/api/control/briefings', method: 'GET' };
@@ -1247,6 +1297,8 @@ export async function runCtl(
     err(`bad server url ${base}: JM_SERVER_URL is http://host:port or https://host:port`);
     return 1;
   }
+  const transcript = transcriptArgs(args);
+  if (transcript) return runTranscript(transcript, env, base, fetchImpl, out, err);
   // The whole answer is read here, so a connection cut mid-body is "cannot reach" too.
   const reach: typeof fetch = async (url, init) => {
     try {
@@ -1268,6 +1320,79 @@ export async function runCtl(
     err(e.message);
     return 1;
   }
+}
+
+/**
+ * `ctl drops transcript` and `ctl zones transcripts` (issue #195): the export streamed as it
+ * arrives, never held whole, to stdout or to `--out`. The file is created 0600 (transcripts hold
+ * private code) and never overwrites one already there; a failed export leaves no file.
+ */
+async function runTranscript(
+  t: { request: Raw; out?: string },
+  env: NodeJS.ProcessEnv,
+  base: string,
+  fetchImpl: typeof fetch,
+  out: (line: string) => void,
+  err: (line: string) => void,
+): Promise<number> {
+  const token = operatorToken(env, err);
+  if (token === null) return 2;
+  let fd: number | undefined;
+  if (t.out !== undefined) {
+    try {
+      fd = openSync(t.out, 'wx', 0o600);
+      fchmodSync(fd, 0o600); // Whatever the umask.
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      err(
+        code === 'EEXIST'
+          ? `${t.out} exists: not overwritten (choose another --out, or remove it first)`
+          : `cannot write ${t.out}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return 1;
+    }
+  }
+  const fail = (line: string) => {
+    if (fd !== undefined) {
+      closeSync(fd);
+      unlinkSync(t.out as string);
+    }
+    err(line);
+    return 1;
+  };
+  let res: Response;
+  try {
+    res = await fetchImpl(new URL(t.request.path, base), {
+      method: 'GET',
+      headers: { authorization: `Bearer ${token}` },
+    });
+  } catch (e) {
+    return fail(`cannot reach ${base}: ${causeOf(e)}`);
+  }
+  if (!res.ok) return fail(`${res.status} ${await res.text().catch(() => '')}`);
+  const decoder = new TextDecoder();
+  let partial = '';
+  try {
+    for await (const chunk of (res.body ?? []) as AsyncIterable<Uint8Array>) {
+      if (fd !== undefined) {
+        writeSync(fd, chunk);
+        continue;
+      }
+      const lines = (partial + decoder.decode(chunk, { stream: true })).split('\n');
+      partial = lines.pop() ?? '';
+      for (const line of lines) out(line);
+    }
+  } catch (e) {
+    return fail(`cannot reach ${base}: the export was cut off (${causeOf(e)})`);
+  }
+  if (fd !== undefined) {
+    closeSync(fd);
+    err(`wrote ${t.out}`);
+    return 0;
+  }
+  partial += decoder.decode();
+  if (partial !== '') out(partial);
+  return 0;
 }
 
 async function runCtlOn(

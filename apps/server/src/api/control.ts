@@ -1,4 +1,5 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { Readable } from 'node:stream';
 import { PRESETS, redact, validAllowEntry } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -84,6 +85,14 @@ import {
   type ReachDeps,
 } from '../reach.js';
 import { buildStatus } from '../status.js';
+import {
+  exportDropJsonl,
+  exportDropsJsonl,
+  exportWindow,
+  withNewlines,
+  zoneDropIds,
+  zoneRecorded,
+} from '../transcripts.js';
 import { safeNext } from '../ui/auth-pages.js';
 import { MODE_LABELS } from '../ui/pages.js';
 import { credentialCreatedAt, shadowedCredentials, type TestDeps } from '../vault/credentials.js';
@@ -797,6 +806,42 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         if (out.code !== 200) return reply.code(out.code).send({ error: out.error });
         audit(req, 'extend-retention', { dropId: out.dropId, hours }, out.dropId);
         return { dropId: out.dropId, pushDeadline: out.pushDeadline };
+      },
+    );
+
+    // Transcript export (issue #195): a drop's stored events, or a zone's drops' in a window, as
+    // JSONL. Transcripts hold private code: operator only, and each export is audited. Both routes
+    // stream the lines of `exportDropJsonl`, never the whole export as one string.
+    const ndjson = (reply: FastifyReply, lines: Iterable<string>) =>
+      reply
+        .header('content-type', 'application/x-ndjson; charset=utf-8')
+        .header('cache-control', 'no-store')
+        .send(Readable.from(withNewlines(lines)));
+    scope.get<{ Params: { id: string } }>(
+      '/api/control/drops/:id/transcript',
+      async (req, reply) => {
+        const drop = getDrop(db, req.params.id);
+        if (!drop) return reply.code(404).send({ error: 'unknown drop' });
+        audit(req, 'transcript-export', { dropId: drop.id }, drop.id);
+        return ndjson(reply, exportDropJsonl(db, drop.id));
+      },
+    );
+    scope.get<{ Params: { id: string }; Querystring: Record<string, unknown> }>(
+      '/api/control/zones/:id/transcripts',
+      async (req, reply) => {
+        const zone = req.params.id;
+        if (!cfg(req).dropZones.some((z) => z.id === zone) && !zoneRecorded(db, zone))
+          return reply.code(404).send({ error: 'unknown zone' });
+        const w = exportWindow(req.query ?? {}, now());
+        if ('error' in w) return reply.code(400).send({ error: w.error });
+        const ids = zoneDropIds(db, zone, w.since, w.until);
+        audit(
+          req,
+          'transcript-export',
+          { zone, since: w.since, until: w.until, drops: ids.length },
+          zone,
+        );
+        return ndjson(reply, exportDropsJsonl(db, ids));
       },
     );
 

@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
 import { listAudit } from '../auth/audit.js';
@@ -40,6 +41,7 @@ import { AUTHOR_TOKEN, CLAUDE_TOKEN, NOW, world } from '../test/doctorWorld.js';
 import { fakeForgePair } from '../test/fakes.js';
 import { makeZone } from '../test/fixtures.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
+import { addTranscriptDrop } from '../test/transcriptWorld.js';
 import { credentialCreatedAt } from '../vault/credentials.js';
 import { fingerprintOf, openVault } from '../vault/vault.js';
 import { type ControlDeps, registerControlRoutes, removalNote } from './control.js';
@@ -3092,5 +3094,195 @@ describe('stick trooper counts (issue #136)', () => {
         },
       ],
     });
+  });
+});
+
+describe('transcript export (#195)', () => {
+  const DAY = 86_400_000;
+  const iso = (ms: number) => new Date(t0.getTime() + ms).toISOString();
+  const get = (url: string, headers: Record<string, string> = auth) =>
+    app?.inject({ method: 'GET', url, headers }) as NonNullable<
+      ReturnType<NonNullable<typeof app>['inject']>
+    >;
+  const lines = (body: string) => body.split('\n').filter((l) => l !== '');
+
+  function transcriptWorld() {
+    const db = setup();
+    upsertDropZone(db, { id: 'other', repo: 'o/x', defaultBranch: 'main', configJson: '{}' });
+    insertStick(db, {
+      id: 's1',
+      name: 'kidney-shadow',
+      tokenHash: sha256Hex('stick-token'),
+      slots: 1,
+    });
+    return db;
+  }
+
+  test('a drop: x-ndjson, the header, then its events in seq order with data as stored', async () => {
+    const db = transcriptWorld();
+    const odd = '{ "text" :  "héllo ✓ 😀",  "n":1.50 }';
+    addTranscriptDrop(db, {
+      id: 'd1',
+      zone: 'main',
+      createdAt: iso(-DAY),
+      stickId: 's1',
+      events: [
+        { kind: 'phase', dataJson: '{"phase":"clone"}' },
+        { kind: 'agent', dataJson: odd },
+      ],
+    });
+    const r = await get('/api/control/drops/d1/transcript');
+    expect(r.statusCode).toBe(200);
+    expect(r.headers['content-type']).toMatch(/^application\/x-ndjson/);
+    const ls = lines(r.body);
+    expect(ls.map((l) => JSON.parse(l))).toEqual([
+      expect.objectContaining({ dropId: 'd1', zone: 'main', stick: 'kidney-shadow', header: true }),
+      expect.objectContaining({ seq: 1, kind: 'phase', data: { phase: 'clone' } }),
+      expect.objectContaining({ seq: 2, kind: 'agent' }),
+    ]);
+    expect(ls[2]?.endsWith(`"data":${odd}}`)).toBe(true);
+    expect(r.body.endsWith('\n')).toBe(true);
+    expect(listAudit(db).map((a) => [a.action, a.target, a.detail])).toEqual([
+      ['transcript-export', 'd1', { dropId: 'd1' }],
+    ]);
+    expect((await get('/api/control/drops/nope/transcript')).statusCode).toBe(404);
+    // A refused export writes no audit row.
+    expect(listAudit(db)).toHaveLength(1);
+  });
+
+  test('a zone: only its drops created in [since, until), oldest first, one audit row with the count', async () => {
+    const db = transcriptWorld();
+    const ev = [{ kind: 'log', dataJson: '{}' }];
+    addTranscriptDrop(db, { id: 'late', zone: 'main', createdAt: iso(5 * DAY), events: ev });
+    addTranscriptDrop(db, { id: 'at-since', zone: 'main', createdAt: iso(0), events: ev });
+    addTranscriptDrop(db, { id: 'at-until', zone: 'main', createdAt: iso(10 * DAY), events: ev });
+    addTranscriptDrop(db, { id: 'before', zone: 'main', createdAt: iso(-1), events: ev });
+    addTranscriptDrop(db, { id: 'other', zone: 'other', createdAt: iso(DAY), events: ev });
+    addTranscriptDrop(db, { id: 'early', zone: 'main', createdAt: iso(DAY), events: ev });
+    const since = iso(0);
+    const until = iso(10 * DAY);
+    const r = await get(`/api/control/zones/main/transcripts?since=${since}&until=${until}`);
+    expect(r.statusCode).toBe(200);
+    expect(r.headers['content-type']).toMatch(/^application\/x-ndjson/);
+    const ls = lines(r.body).map((l) => JSON.parse(l));
+    expect(ls.filter((l) => l.header).map((l) => l.dropId)).toEqual(['at-since', 'early', 'late']);
+    expect(ls.map((l) => l.dropId)).toEqual([
+      'at-since',
+      'at-since',
+      'early',
+      'early',
+      'late',
+      'late',
+    ]);
+    expect(listAudit(db).map((a) => [a.action, a.target, a.detail])).toEqual([
+      ['transcript-export', 'main', { zone: 'main', since, until, drops: 3 }],
+    ]);
+  });
+
+  test('D5: a drop’s lines are identical through either route', async () => {
+    const db = transcriptWorld();
+    addTranscriptDrop(db, {
+      id: 'd1',
+      zone: 'main',
+      createdAt: iso(-DAY),
+      stickId: 's1',
+      requestedModel: 'm',
+      events: [
+        { kind: 'agent', dataJson: '{"a": "ü"}' },
+        { kind: 'gate', dataJson: '{"ok":true}' },
+      ],
+    });
+    const one = (await get('/api/control/drops/d1/transcript')).body;
+    const zone = (await get(`/api/control/zones/main/transcripts?since=${iso(-2 * DAY)}`)).body;
+    expect(zone).toBe(one);
+  });
+
+  test('until defaults to now; a 92-day window is OK, a 93-day one, a bad or missing since is 400', async () => {
+    const db = transcriptWorld();
+    addTranscriptDrop(db, { id: 'past', zone: 'main', createdAt: iso(-DAY) });
+    addTranscriptDrop(db, { id: 'future', zone: 'main', createdAt: iso(DAY) });
+    const r = await get(`/api/control/zones/main/transcripts?since=${iso(-2 * DAY)}`);
+    expect(lines(r.body).map((l) => JSON.parse(l).dropId)).toEqual(['past']);
+    expect(listAudit(db).at(-1)?.detail).toEqual({
+      zone: 'main',
+      since: iso(-2 * DAY),
+      until: t0.toISOString(),
+      drops: 1,
+    });
+    expect(
+      (await get('/api/control/zones/main/transcripts?since=2025-01-01&until=2025-04-03'))
+        .statusCode,
+    ).toBe(200);
+    const audits = listAudit(db).length;
+    const long = await get('/api/control/zones/main/transcripts?since=2025-01-01&until=2025-04-04');
+    expect(long.statusCode).toBe(400);
+    expect(long.json().error).toMatch(/at most 92 days/);
+    expect(
+      (await get('/api/control/zones/main/transcripts?since=2026-01-01&until=2026-12-31'))
+        .statusCode,
+    ).toBe(400);
+    for (const q of ['', '?since=', '?since=yesterday', '?since=2025-02-30', '?until=2025-01-01'])
+      expect((await get(`/api/control/zones/main/transcripts${q}`)).statusCode, q).toBe(400);
+    expect((await get(`/api/control/zones/nope/transcripts?since=${iso(-DAY)}`)).statusCode).toBe(
+      404,
+    );
+    expect(listAudit(db)).toHaveLength(audits);
+  });
+
+  test('D1: a stick token or no auth is refused on both routes; a session may read', async () => {
+    const db = transcriptWorld();
+    addTranscriptDrop(db, { id: 'd1', zone: 'main', createdAt: iso(-DAY) });
+    const urls = [
+      '/api/control/drops/d1/transcript',
+      `/api/control/zones/main/transcripts?since=${iso(-2 * DAY)}`,
+    ];
+    for (const url of urls) {
+      for (const headers of [{ host: HOST }, { host: HOST, authorization: 'Bearer stick-token' }]) {
+        const r = await get(url, headers);
+        expect([401, 403], `${url} ${JSON.stringify(headers)}`).toContain(r.statusCode);
+        expect(r.body).not.toContain('"header":true');
+      }
+    }
+    expect(listAudit(db)).toEqual([]);
+    const session = operatorSession(db);
+    for (const url of urls) {
+      const r = await get(url, { host: HOST, cookie: session.cookie });
+      expect(r.statusCode, url).toBe(200);
+      expect(r.body).toContain('"header":true');
+    }
+    expect(listAudit(db).map((a) => [a.action, a.via])).toEqual([
+      ['transcript-export', 'session'],
+      ['transcript-export', 'session'],
+    ]);
+  });
+
+  test('the zone export streams: 300 drops of 50 events, the reply body a Readable', async () => {
+    const db = transcriptWorld();
+    for (let i = 0; i < 300; i++)
+      addTranscriptDrop(db, {
+        id: `d${String(i).padStart(3, '0')}`,
+        zone: 'main',
+        createdAt: iso(-DAY + i * 1000),
+        events: Array.from({ length: 50 }, (_, j) => ({
+          kind: 'agent',
+          dataJson: `{"drop":${i},"event":${j},"text":"${'x'.repeat(40)}"}`,
+        })),
+      });
+    const payloads: unknown[] = [];
+    app?.addHook('onSend', async (_req, _reply, payload) => {
+      payloads.push(payload);
+      return payload;
+    });
+    const r = await get(`/api/control/zones/main/transcripts?since=${iso(-2 * DAY)}`);
+    expect(r.statusCode).toBe(200);
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toBeInstanceOf(Readable);
+    const ls = lines(r.body);
+    expect(ls).toHaveLength(300 * 51);
+    expect(JSON.parse(ls[0] as string)).toMatchObject({ dropId: 'd000', header: true });
+    expect(JSON.parse(ls.at(-1) as string)).toMatchObject({ dropId: 'd299', seq: 50 });
+    expect(listAudit(db).map((a) => a.detail)).toEqual([
+      { zone: 'main', since: iso(-2 * DAY), until: t0.toISOString(), drops: 300 },
+    ]);
   });
 });
