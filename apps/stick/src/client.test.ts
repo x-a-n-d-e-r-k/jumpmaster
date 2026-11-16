@@ -90,6 +90,39 @@ describe('capabilities and lease logging', () => {
     ]);
   });
 
+  test('enroll sends a one-time code in place of the join token, and returns the name it got', async () => {
+    const bodies: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: unknown, init: { body: string }) => {
+        bodies.push(JSON.parse(init.body));
+        return new Response(JSON.stringify({ stickId: 's', stickToken: 't', name: 'vps-1' }), {
+          status: 200,
+        });
+      }),
+    );
+    const client = new StickClient('http://127.0.0.1:1', undefined, { info });
+    const out = await client.enroll({ enrollCode: 'jm_enroll_x' }, 'stick', 1);
+    expect(out).toEqual({ stickId: 's', stickToken: 't', name: 'vps-1' });
+    expect(bodies).toEqual([{ enrollCode: 'jm_enroll_x', name: 'stick', slots: 1, ...info }]);
+  });
+
+  test('a lease carries the health the stick reports (issue #138)', async () => {
+    const bodies: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: unknown, init: { body: string }) => {
+        bodies.push(JSON.parse(init.body));
+        return new Response(null, { status: 204 });
+      }),
+    );
+    const client = new StickClient('http://127.0.0.1:1', 't', { info });
+    await client.lease(1, { capabilities: [], health: { docker: '27.3.1', freeBytes: 5 } });
+    expect(bodies).toEqual([
+      { freeSlots: 1, ...info, capabilities: [], health: { docker: '27.3.1', freeBytes: 5 } },
+    ]);
+  });
+
   test('lease reports the zones the server skipped, on a payload and on a 204', async () => {
     const skipped = [{ zoneId: 'z', missing: ['egress-v1'] }];
     const header = { 'x-jumpmaster-skipped': encodeURIComponent(JSON.stringify(skipped)) };

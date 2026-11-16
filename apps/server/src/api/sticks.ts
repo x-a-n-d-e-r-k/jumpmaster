@@ -34,6 +34,7 @@ import {
   type Drop,
   type DropState,
   effectiveSlots,
+  enrollFromInvite,
   getDrop,
   getStick,
   getStickByTokenHash,
@@ -56,6 +57,7 @@ import {
 import type { StickFetches } from '../images/fetches.js';
 import type { ImageMirror } from '../images/mirror.js';
 import { layoutFor } from '../images/serve.js';
+import { codeHash, ENROLL_CODE } from '../install/invite.js';
 import { heartbeat, leaseNextDrop, missingFor, zoneRequirements, zonesWaiting } from '../leases.js';
 import type { ForgePair } from '../outbox.js';
 import { buildPayload, egressFor, ownZoneSecrets } from '../payloads.js';
@@ -97,11 +99,16 @@ const safeEqual = (a: string, b: string): boolean =>
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/**
+ * A stick enrolls with the join token, or with a one-time code from an invite (issue #138), whose
+ * name and trooper count it then takes instead of its own.
+ */
 const EnrollBody = StickInfoSchema.extend({
-  joinToken: z.string(),
+  joinToken: z.string().optional(),
+  enrollCode: z.string().max(256).optional(),
   name: z.string().min(1),
   slots: z.number().int().min(1),
-});
+}).refine((b) => (b.joinToken === undefined) !== (b.enrollCode === undefined));
 /**
  * `noPush`: the stick has no room for another pending push, so it takes no pushing role now.
  * `maxSlots`: the most troopers the stick will ever run (an older stick sends none).
@@ -115,6 +122,13 @@ const LeaseBody = StickInfoSchema.extend({
   slots: z.number().int().min(1).optional(),
   /** The stick's image download from the mirror (issue #141); `null` once there is none. */
   imageFetch: ImageFetchSchema.nullable().optional(),
+  /** Its engine version and free drop-volume space, for the sticks page (issue #138). */
+  health: z
+    .object({
+      docker: z.string().max(64),
+      freeBytes: z.number().int().min(0).nullable(),
+    })
+    .optional(),
 });
 
 const advertOf = (info: StickInfo) => ({
@@ -306,11 +320,26 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
     scope.post('/api/sticks/enroll', async (req, reply) => {
       const body = EnrollBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: 'invalid body' });
-      if (!safeEqual(body.data.joinToken, live().secrets.joinToken)) {
-        return reply.code(401).send({ error: 'unauthorized' });
-      }
       const stickId = randomUUID();
       const stickToken = randomBytes(32).toString('hex');
+      const { enrollCode, joinToken } = body.data;
+      if (enrollCode !== undefined) {
+        // Looked up by its hash (an equality on a SHA-256, so no timing leaks the code); a used,
+        // expired, cancelled or unknown code is refused exactly as a wrong join token is.
+        const invite = ENROLL_CODE.test(enrollCode)
+          ? enrollFromInvite(db, codeHash(enrollCode), now(), {
+              id: stickId,
+              tokenHash: sha256(stickToken),
+              slots: body.data.slots,
+              ...advertOf(body.data),
+            })
+          : undefined;
+        if (!invite) return reply.code(401).send({ error: 'unauthorized' });
+        return { stickId, stickToken, name: invite.name };
+      }
+      if (!safeEqual(joinToken ?? '', live().secrets.joinToken)) {
+        return reply.code(401).send({ error: 'unauthorized' });
+      }
       insertStick(db, {
         id: stickId,
         name: body.data.name,
@@ -355,6 +384,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       stampStick(db, stick.id, advertOf(body.data), now(), {
         maxSlots: body.data.maxSlots,
         slots: body.data.slots,
+        health: body.data.health,
       });
       if (full() || body.data.freeSlots < 1) return reply.code(204).send();
       let closed = false;

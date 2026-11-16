@@ -24,6 +24,22 @@ export function joinToken(env: NodeJS.ProcessEnv): string {
   return token;
 }
 
+/** What a stick enrolls with: a one-time code from an invite (issue #138), or the join token. */
+export type EnrollCredential = { enrollCode: string } | { joinToken: string };
+
+/**
+ * `JM_ENROLL_CODE` or the file `JM_ENROLL_CODE_FILE` names (the installer's), sent instead of the
+ * join token; without one, the join token as ever.
+ */
+export function enrollCredential(env: NodeJS.ProcessEnv): EnrollCredential {
+  const code = readSecret(env, 'JM_ENROLL_CODE')?.trim();
+  if (code) return { enrollCode: code };
+  const token = readSecret(env, 'JM_JOIN_TOKEN');
+  if (!token)
+    throw new Error('JM_JOIN_TOKEN or JM_JOIN_TOKEN_FILE (or JM_ENROLL_CODE_FILE) is required');
+  return { joinToken: token };
+}
+
 type Enrollment = { stickId: string; stickToken: string };
 
 /** The saved enrollment for this server URL, if any. */

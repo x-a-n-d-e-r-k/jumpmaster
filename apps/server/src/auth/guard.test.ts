@@ -112,6 +112,8 @@ describe('route classes', () => {
     expect(routeClass('/api/sticks/enroll')).toBe('stick');
     expect(routeClass('/api/drops/:id/result')).toBe('stick');
     expect(routeClass('/mcp')).toBe('mcp');
+    expect(routeClass('/install/stick.sh')).toBe('install');
+    expect(routeClass('/install/stick-image.tar')).toBe('install');
     expect(routeClass('/api/control/kill')).toBe('control');
     expect(routeClass('/api/other')).toBe('control');
     for (const p of ['/login', '/logout', '/setup', '/setup/code', '/setup/passphrase'])

@@ -15,8 +15,8 @@ import {
 import { enrolledSlots, maxSlotsFor, SlotTarget } from './slots.js';
 import {
   advertisedCapabilities,
+  enrollCredential,
   healthLine,
-  joinToken,
   leaseTerms,
   loadEnrollment,
   loadRelease,
@@ -64,11 +64,13 @@ async function main() {
   let enrolled = Boolean(token && stickId);
   const enroll = async () => {
     const name = process.env.JM_STICK_NAME ?? 'stick';
-    const out = await client.enroll(joinToken(process.env), name, slots);
+    // A one-time code (the installer's, issue #138) names the stick from its invite.
+    const out = await client.enroll(enrollCredential(process.env), name, slots);
     stickId = out.stickId;
     enrolled = true;
     saveEnrollment(dir, { serverUrl, stickId, stickToken: out.stickToken });
-    console.log(`enrolled as ${stickId}`);
+    // The installer waits for this line, and prints the name.
+    console.log(`enrolled as ${out.name ?? name} (${stickId})`);
   };
   // Where missing images come from (issue #141): JM_IMAGE_SOURCE, else the server once it
   // announces image-mirror-v1 on a lease. Checked here, so a bad value stops the start.
@@ -144,13 +146,17 @@ async function main() {
     trust,
     log: (line) => console.error(line),
   });
-  const leaseTermsNow = () =>
-    leaseTerms({
+  // Reported on every lease for the sticks page (issue #138), with the latest free space.
+  const docker = (await driver.engineVersion().catch(() => '')).slice(0, 64) || 'unknown';
+  const leaseTermsNow = () => {
+    const terms = leaseTerms({
       egress: egress.ok,
       policy: trust.policy,
       health: health.latest(),
       pending: pending.size(),
     });
+    return terms && { ...terms, health: { docker, freeBytes: health.latest().freeBytes } };
+  };
   let lastState = '';
   const checkVolumes = async (): Promise<void> => {
     const state = healthLine(await health.check());

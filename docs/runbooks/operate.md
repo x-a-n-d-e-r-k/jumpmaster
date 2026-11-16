@@ -304,6 +304,9 @@ stick's ceiling (`JM_MAX_SLOTS`, see the install runbook's
 [Troopers per stick](install.md#troopers-per-stick)); a refusal names the ceiling. From a script:
 `ctl sticks` lists each stick's effective, desired and max counts, and
 `ctl sticks slots <name-or-id> <n>` sets one. Each change is audited as `stick.slots`.
+`ctl sticks remove <name-or-id>` removes a stick (its token is revoked; its unstarted drops are
+requeued) and `ctl sticks cancel <invite>` cancels an invite that hasn't checked in; see
+[Add a stick](install.md#add-a-stick).
 
 A stick on another machine reaches the server at `server.publicUrl` (Settings, Other machines, or
 `ctl public-url set https://…`; `ctl public-url check` fetches its `/healthz`). Each change is
@@ -343,7 +346,7 @@ token is always allowed.
 | Briefings | `ctl rule <briefing> <option> [--options <digest>] [note]` | `POST /api/control/briefings/:id/rule` |
 | Briefings | `ctl dismiss <zone> <briefing>…` | `POST /api/control/zones/:id/briefings/dismiss` |
 | Drops | `ctl drops extend-retention <dropId> <hours>`<br>`ctl drops cancel <dropId>` | `POST /api/control/drops/:id/extend-retention`<br>`POST /api/control/drops/:id/cancel` |
-| Sticks | `ctl sticks [--json]`<br>`ctl sticks slots <name-or-id> <n>` | `GET /api/control/sticks`<br>`POST /api/control/sticks/:id/slots` |
+| Sticks | `ctl sticks [--json]`<br>`ctl sticks slots <name-or-id> <n>`<br>`ctl sticks remove <name-or-id>`<br>`ctl sticks cancel <invite-name-or-id>` | `GET /api/control/sticks`<br>`POST /api/control/sticks/:id/slots`<br>`POST /api/control/sticks/:id/remove`<br>`POST /api/control/sticks/invites/:id/cancel` |
 | Kill | `ctl kill` | `POST /api/control/kill` |
 | Kill | `ctl unkill` | `POST /api/control/kill` |
 <!-- ctl-table:end -->

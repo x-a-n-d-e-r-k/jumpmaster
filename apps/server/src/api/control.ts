@@ -30,6 +30,7 @@ import {
   ACTIVE_STATES_SQL,
   activeWorkCount,
   appendEvents,
+  cancelStickInvite,
   clearZoneStopping,
   effectiveSlots,
   findStick,
@@ -38,8 +39,10 @@ import {
   getZoneMode,
   insertDrop,
   isKilled,
+  listPendingInvites,
   listSticks,
   liveDropsOn,
+  removeStick,
   revokeGrants,
   setStickDesiredSlots,
   setWorkItemState,
@@ -64,7 +67,7 @@ import { DoctorBusyError, latestDoctorRun, processEnv, runDoctor } from '../doct
 import { type Forge, GitHubForge } from '../forge/github.js';
 import type { ImageMirror } from '../images/mirror.js';
 import { fileIntakeIssue, GoalStubSchema, IntakeIssueSchema, renderGoalStub } from '../intake.js';
-import { engageKill, releaseKill } from '../leases.js';
+import { engageKill, expireLeases, releaseKill } from '../leases.js';
 import {
   listMcpTokens,
   MAX_TOKEN_DAYS,
@@ -452,6 +455,50 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         slots: effectiveSlots({ ...stick, desiredSlots: slots }),
         maxSlots: ceiling,
       };
+    });
+
+    /** A session needs sudo to add, cancel or remove a stick (issue #138); the token always has it. */
+    const stickSudo = (req: FastifyRequest, reply: FastifyReply, what: string): boolean => {
+      if (req.principal?.via !== 'session' || req.principal.sudo) return true;
+      void reply.code(403).send({
+        error: `${what} needs sudo: re-enter the passphrase`,
+        sudo: 'required',
+      });
+      return false;
+    };
+
+    // Cancels an invite whose stick has not checked in: its code stops working at once.
+    scope.post<{ Params: { id: string } }>(
+      '/api/control/sticks/invites/:id/cancel',
+      async (req, reply) => {
+        if (!stickSudo(req, reply, 'cancelling an invite')) return reply;
+        const at = now();
+        const pending = listPendingInvites(db, at).filter(
+          (i) => i.id === req.params.id || i.name === req.params.id,
+        );
+        if (pending.length === 0) return reply.code(404).send({ error: 'no pending invite' });
+        const invite = cancelStickInvite(db, (pending[0] as { id: string }).id, at);
+        if (!invite) return reply.code(404).send({ error: 'no pending invite' });
+        audit(req, 'stick.invite_cancel', { name: invite.name }, invite.id);
+        return { id: invite.id, name: invite.name, cancelled: true };
+      },
+    );
+
+    // Removes a stick: its token is revoked (its next request is a 401), and its leased drops that
+    // never started are requeued through the lost-stick path.
+    scope.post<{ Params: { id: string } }>('/api/control/sticks/:id/remove', async (req, reply) => {
+      if (!stickSudo(req, reply, 'removing a stick')) return reply;
+      const stick = findStick(db, req.params.id);
+      if (stick === 'ambiguous')
+        return reply
+          .code(409)
+          .send({ error: `several sticks are named ${req.params.id}: name it by its id` });
+      if (!stick) return reply.code(404).send({ error: 'unknown stick' });
+      const at = now();
+      removeStick(db, stick.id, at);
+      expireLeases(db, at, cfg(req).usage);
+      audit(req, 'stick.remove', { name: stick.name }, stick.id);
+      return { id: stick.id, name: stick.name, removed: true };
     });
 
     // What Jumpmaster is doing and why it waits (§10.3): the home banner's line, for `ctl status`.

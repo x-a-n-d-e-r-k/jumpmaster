@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import {
   advertisedCapabilities,
+  enrollCredential,
   joinToken,
   loadEnrollment,
   loadRelease,
@@ -47,6 +48,24 @@ describe('stick state', () => {
     expect(() => joinToken({})).toThrow('JM_JOIN_TOKEN or JM_JOIN_TOKEN_FILE is required');
     expect(() => joinToken({ JM_JOIN_TOKEN: 'x', JM_JOIN_TOKEN_FILE: file })).toThrow(
       /JM_JOIN_TOKEN and JM_JOIN_TOKEN_FILE/,
+    );
+  });
+});
+
+describe('enrolling with a one-time code (issue #138)', () => {
+  test('JM_ENROLL_CODE or JM_ENROLL_CODE_FILE is sent instead of the join token', () => {
+    const file = join(fresh(), 'enroll_code');
+    writeFileSync(file, 'jm_enroll_from-file\n', { mode: 0o600 });
+    expect(enrollCredential({ JM_ENROLL_CODE_FILE: file, JM_JOIN_TOKEN: 'j' })).toEqual({
+      enrollCode: 'jm_enroll_from-file',
+    });
+    expect(enrollCredential({ JM_ENROLL_CODE: 'jm_enroll_env' })).toEqual({
+      enrollCode: 'jm_enroll_env',
+    });
+    // Without a code, the join token as ever.
+    expect(enrollCredential({ JM_JOIN_TOKEN: 'join' })).toEqual({ joinToken: 'join' });
+    expect(() => enrollCredential({})).toThrow(
+      'JM_JOIN_TOKEN or JM_JOIN_TOKEN_FILE (or JM_ENROLL_CODE_FILE) is required',
     );
   });
 });

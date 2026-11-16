@@ -42,13 +42,16 @@ const csrfOf = new WeakMap<Principal, string>();
 const SAFE_METHODS = new Set(['GET', 'HEAD']);
 
 /**
- * How a route is guarded: stick routes and `/mcp` authenticate themselves; `auth` routes (login,
+ * How a route is guarded: stick routes, the installer's and `/mcp` authenticate themselves; `auth` routes (login,
  * logout, setup) need no principal; `control` routes need one; everything else is a page.
  */
-export type RouteClass = 'stick' | 'mcp' | 'health' | 'auth' | 'control' | 'page';
+export type RouteClass = 'stick' | 'install' | 'mcp' | 'health' | 'auth' | 'control' | 'page';
 
 export function routeClass(path: string): RouteClass {
   if (path.startsWith('/api/sticks/') || path.startsWith('/api/drops/')) return 'stick';
+  // The stick installer (issue #138): the script is public and holds no secret; the image and
+  // cosign downloads authenticate with the one-time code. Reached at server.publicUrl, any Host.
+  if (path.startsWith('/install/')) return 'install';
   if (path === '/mcp') return 'mcp';
   // `{ ok, version }` and nothing else: other machines check the address they reach us at.
   if (path === '/healthz') return 'health';
@@ -137,7 +140,7 @@ export function registerGuard(app: FastifyInstance, deps: GuardDeps): void {
     const path = req.url.split('?')[0] ?? '';
     // The matched pattern where there is one, so the class follows the route that will run.
     const cls = routeClass(req.routeOptions.url ?? path);
-    if (cls === 'stick' || cls === 'health') return;
+    if (cls === 'stick' || cls === 'install' || cls === 'health') return;
     const config = live();
     req.jmConfig = config;
     if (!allowed.includes(req.headers.host ?? '')) {
