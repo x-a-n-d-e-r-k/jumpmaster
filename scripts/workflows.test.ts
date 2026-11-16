@@ -352,7 +352,7 @@ describe('release.yml', () => {
       { arch: 'amd64', runner: 'ubuntu-24.04' },
       { arch: 'arm64', runner: 'ubuntu-24.04-arm' },
     ];
-    for (const name of ['troopers', 'apps']) {
+    for (const name of ['troopers', 'stick', 'apps']) {
       const job = b.jobs[name] as Job & {
         strategy?: { matrix?: { include?: unknown } };
         'runs-on'?: string;
@@ -386,10 +386,10 @@ describe('release.yml', () => {
       ['jvm', 'troopers-index'],
       ['egress', 'troopers-index'],
       ['server', 'apps-index'],
-      ['stick', 'apps-index'],
+      ['stick', 'stick-index'],
     ])
       expect(outputs[name as string]?.value, name).toBe(`\${{ jobs.${job}.outputs.${name} }}`);
-    for (const job of ['troopers-index', 'apps-index']) {
+    for (const job of ['troopers-index', 'stick-index', 'apps-index']) {
       const j = b.jobs[job] as Job;
       const run = steps(j).find((s) => s.id === 'index');
       expect(run?.run, job).toBe('scripts/release-index.sh');
@@ -399,16 +399,35 @@ describe('release.yml', () => {
         expect(v, job).toMatch(/^\$\{\{ steps\.index\.outputs\.jumpmaster-[a-z-]+ \}\}$/);
     }
     // The server's lock and the stick's proxy are index digests, not one arch's.
-    const apps = JSON.stringify(b.jobs.apps);
-    expect(apps).toContain(
+    const stick = JSON.stringify(b.jobs.stick);
+    expect(stick).toContain(
       'EGRESS_IMAGE=${{ needs.target.outputs.registry }}/jumpmaster-egress@${{ needs.troopers-index.outputs.egress }}',
     );
+    const apps = JSON.stringify(b.jobs.apps);
     expect(apps).toContain('TROOPER":"${{ needs.troopers-index.outputs.trooper }}');
     expect(apps).not.toMatch(/needs\.troopers\.outputs/);
+    expect(stick).not.toMatch(/needs\.troopers\.outputs/);
+  });
+
+  test("the server's lock names the stick's index digest, so a release server can mirror it for the installer", () => {
+    const b = buildWorkflow();
+    const apps = b.jobs.apps as Job & { needs?: string[] };
+    // The stick is built and indexed before the server.
+    expect(apps.needs).toContain('stick-index');
+    const lock = steps(apps).find((s) => s.id === 'lock');
+    expect(lock?.env?.STICK).toBe('${{ needs.stick-index.outputs.stick }}');
+    expect(String(lock?.run)).toContain('"jumpmaster-stick": $k');
+    // The server job builds only the server; the stick job only the stick.
+    const builds = (job: string) =>
+      steps(b.jobs[job] as Job)
+        .filter((s) => s.uses?.startsWith('docker/build-push-action@'))
+        .map((s) => s.with?.file);
+    expect(builds('apps')).toEqual(['images/server/Dockerfile']);
+    expect(builds('stick')).toEqual(['images/stick/Dockerfile']);
   });
 
   test('the release stick image sets JM_TROOPER_IMAGE', () => {
-    const stick = steps(buildWorkflow().jobs.apps).find((s) => s.id === 'stick');
+    const stick = steps(buildWorkflow().jobs.stick).find((s) => s.id === 'stick');
     const args = String(stick?.with?.['build-args'] ?? '');
     // This release's trooper, by its index digest (Ruling 17), as the egress proxy is.
     expect(args).toContain(
