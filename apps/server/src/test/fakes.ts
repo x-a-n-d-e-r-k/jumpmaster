@@ -35,6 +35,14 @@ export interface FakeForge extends Forge {
 
 export type StateReview = ForgeReview & { pr: number };
 
+export type FakeComment = {
+  id: number;
+  issue: number;
+  author: string;
+  body: string;
+  createdAt: string;
+};
+
 export interface FakeForgeState {
   repo: string;
   defaultBranch: string;
@@ -68,6 +76,8 @@ export interface FakeForgeState {
   checks: Map<string, Omit<ChecksFacts, 'failed'> & { failed?: ChecksFacts['failed'] }>;
   compares: Map<string, CompareFacts>;
   reviews: StateReview[];
+  /** Issue comments, oldest first (ids from 1). */
+  comments: FakeComment[];
   /** Appends a review (defaults: `pr: 1`, a human author, `APPROVED` on the PR head). */
   review(r?: Partial<StateReview>): StateReview;
   files: Map<string, string>;
@@ -91,6 +101,7 @@ export const FORGE_WRITES: readonly (keyof Forge)[] = [
   'createIssue',
   'updateIssue',
   'setLabels',
+  'createIssueComment',
   'findOrCreatePullRequest',
   'createReview',
   'merge',
@@ -253,6 +264,7 @@ function createState(opts: {
     checks: new Map(),
     compares: new Map(),
     reviews: [],
+    comments: [],
     review(r = {}) {
       const pr = r.pr ?? 1;
       const id = r.id ?? nextReview;
@@ -430,6 +442,24 @@ function forgeFor(
         body: input.body,
       });
       return { id: rv.id };
+    },
+    createIssueComment: async (n, body) => {
+      if (!state.issues.has(n) && !state.pulls.has(n)) throw forgeError(404, `no issue ${n}`);
+      const id = Math.max(0, ...state.comments.map((c) => c.id)) + 1;
+      state.comments.push({
+        id,
+        issue: n,
+        author: me(),
+        body,
+        createdAt: new Date().toISOString(),
+      });
+      return { id };
+    },
+    findIssueCommentByMarker: async (n, marker) => {
+      const hit = state.comments.findLast(
+        (c) => c.issue === n && c.author === me() && c.body.trimEnd().endsWith(marker),
+      );
+      return hit ? { id: hit.id } : null;
     },
     findReviewByMarker: async (n, marker) => {
       const hit = state.reviews.find(

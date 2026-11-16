@@ -172,6 +172,13 @@ export interface Forge {
     patch: { title?: string; body?: string; state?: 'closed' },
   ): Promise<void>;
   setLabels(number: number, change: { add: string[]; remove: string[] }): Promise<void>;
+  /** A write: posts a comment on an issue (or PR). */
+  createIssueComment(number: number, body: string): Promise<{ id: number }>;
+  /**
+   * The newest comment on the issue written by this identity whose body ends with `marker`.
+   * Compares only the author and the body's ending: comment text is never read as input.
+   */
+  findIssueCommentByMarker(number: number, marker: string): Promise<{ id: number } | null>;
   isTrusted(login: string): Promise<boolean>;
   /** maintain or admin on the repository (write is not enough). */
   isMaintainer(login: string): Promise<boolean>;
@@ -639,6 +646,31 @@ export class GitHubForge implements Forge {
       labels: input.labels,
     });
     return { number: data.number };
+  }
+
+  async createIssueComment(number: number, body: string): Promise<{ id: number }> {
+    const { data } = await this.octokit.rest.issues.createComment({
+      owner: this.owner,
+      repo: this.repo,
+      issue_number: number,
+      body,
+    });
+    return { id: data.id };
+  }
+
+  async findIssueCommentByMarker(number: number, marker: string): Promise<{ id: number } | null> {
+    const me = await this.viewerLogin();
+    const comments = await this.octokit.paginate(this.octokit.rest.issues.listComments, {
+      owner: this.owner,
+      repo: this.repo,
+      issue_number: number,
+      per_page: 100,
+    });
+    // GitHub lists issue comments oldest first: the newest match is the last one.
+    const hit = comments.findLast(
+      (c) => c.user?.login === me && (c.body ?? '').trimEnd().endsWith(marker),
+    );
+    return hit ? { id: hit.id } : null;
   }
 
   async findIssueByMarker(marker: string, since: string): Promise<{ number: number } | null> {

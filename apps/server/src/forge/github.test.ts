@@ -986,6 +986,54 @@ describe('GitHubForge issue writes', () => {
     expect(await f.getIssue(10)).toBeNull();
   });
 
+  describe('issue comments', () => {
+    const MARK = '<!-- jm:comment:jm:triage:179 -->';
+    const comment = (id: number, login: string, body: string) => ({
+      id,
+      user: { login, type: 'User' },
+      body,
+      created_at: `2026-01-01T00:00:${String(id).padStart(2, '0')}Z`,
+    });
+
+    test('createIssueComment posts the body and returns the id', async () => {
+      const f = new GitHubForge('o', 'r', 'tok');
+      nock(api)
+        .post('/repos/o/r/issues/9/comments', { body: `hi\n\n${MARK}` })
+        .reply(201, comment(41, 'jm-bot', `hi\n\n${MARK}`));
+      expect(await f.createIssueComment(9, `hi\n\n${MARK}`)).toEqual({ id: 41 });
+    });
+
+    test("findIssueCommentByMarker ignores another author's marker copy and returns our newest", async () => {
+      const f = new GitHubForge('o', 'r', 'tok');
+      nock(api).get('/user').reply(200, { login: 'jm-bot' });
+      nock(api)
+        .get('/repos/o/r/issues/9/comments')
+        .query({ per_page: '100' })
+        .reply(200, [comment(1, 'mallory', `fake\n\n${MARK}`)]);
+      expect(await f.findIssueCommentByMarker(9, MARK)).toBeNull();
+
+      const page1 = [
+        comment(1, 'mallory', `fake\n\n${MARK}`),
+        comment(2, 'jm-bot', `first\n\n${MARK}`),
+        comment(3, 'jm-bot', `${MARK}\nnot at the end`),
+      ];
+      nock(api)
+        .get('/repos/o/r/issues/9/comments')
+        .query({ per_page: '100' })
+        .reply(200, page1, {
+          Link: `<${api}/repositories/1/issues/9/comments?page=2>; rel="next"`,
+        });
+      nock(api)
+        .get('/repositories/1/issues/9/comments')
+        .query({ page: '2' })
+        .reply(200, [
+          comment(4, 'jm-bot', `second\n\n${MARK}\n`),
+          comment(5, 'mallory', `later\n\n${MARK}`),
+        ]);
+      expect(await f.findIssueCommentByMarker(9, MARK)).toEqual({ id: 4 });
+    });
+  });
+
   test('setLabels adds and removes, ignoring a label already gone', async () => {
     const f = new GitHubForge('o', 'r', 'tok');
     nock(api)

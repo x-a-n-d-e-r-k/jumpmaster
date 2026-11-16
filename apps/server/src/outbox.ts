@@ -207,6 +207,33 @@ export type UpdateIssuePayload = {
   state?: 'closed';
 };
 export type SetLabelsPayload = { number: number; add: string[]; remove: string[] };
+/** A comment on an issue, found again by `marker` (from `commentMarker`), which ends the body. */
+export type CommentIssuePayload = { number: number; body: string; marker: string };
+
+/** The longest comment body accepted at enqueue (GitHub refuses past 65536, marker included). */
+export const COMMENT_BODY_MAX = 60_000;
+
+const COMMENT_KEY = /^[a-z0-9:-]{1,80}$/;
+const COMMENT_MARKER = /^<!-- jm:comment:[^\s<>]+:[a-z0-9:-]{1,80} -->$/;
+
+/**
+ * The marker ending a Jumpmaster comment: `<!-- jm:comment:<zoneId>:<key> -->`. `key` is
+ * `[a-z0-9:-]{1,80}`; anything else throws, as does a zone id that could break the comment.
+ */
+export function commentMarker(zoneId: string, key: string): string {
+  if (!COMMENT_KEY.test(key)) throw new Error('comment marker key must match [a-z0-9:-]{1,80}');
+  if (!/^[^\s<>]+$/.test(zoneId)) throw new Error('comment marker zone id is not usable');
+  return `<!-- jm:comment:${zoneId}:${key} -->`;
+}
+
+/** Refuses a comment op before anything is recorded or sent: no row, no forge call. */
+function checkCommentPayload(p: CommentIssuePayload): void {
+  if (!COMMENT_MARKER.test(p.marker)) throw new Error('comment_issue refused: bad marker');
+  if (p.body.length > COMMENT_BODY_MAX)
+    throw new Error(
+      `comment_issue refused: body is ${p.body.length} characters (at most ${COMMENT_BODY_MAX})`,
+    );
+}
 
 /** `itemId` is null for a zone-level op; `zoneId` decides the mode check and the outbox row. */
 export type Op = {
@@ -326,6 +353,10 @@ async function lookup(forges: ForgePair, kind: OpKind, opKey: string, payload: u
       const matches = p.add.every((l) => has.has(l)) && !p.remove.some((l) => has.has(l));
       return matches ? { number: p.number } : null;
     }
+    case 'comment_issue': {
+      const p = payload as CommentIssuePayload;
+      return forges.author.findIssueCommentByMarker(p.number, p.marker);
+    }
   }
 }
 
@@ -413,6 +444,10 @@ async function write(forges: ForgePair, kind: OpKind, opKey: string, payload: un
         if (r.created) created.push(l.name);
       }
       return { created };
+    }
+    case 'comment_issue': {
+      const p = payload as CommentIssuePayload;
+      return forges.author.createIssueComment(p.number, `${p.body}\n\n${p.marker}`);
     }
   }
 }
@@ -550,6 +585,7 @@ export async function runOp(
   if (!exempt && zoneMode(db, op.zoneId) === 'observe') {
     throw new Error(`observe mode: forge write ${op.kind} suppressed`);
   }
+  if (op.kind === 'comment_issue') checkCommentPayload(op.payload as CommentIssuePayload);
   const existing = getOutbox(db, op.opKey);
   if (existing) return fromExisting(db, forges, op, existing, now);
   const inserted = insertOutbox(db, {
