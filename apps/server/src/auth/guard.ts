@@ -45,11 +45,13 @@ const SAFE_METHODS = new Set(['GET', 'HEAD']);
  * How a route is guarded: stick routes and `/mcp` authenticate themselves; `auth` routes (login,
  * logout, setup) need no principal; `control` routes need one; everything else is a page.
  */
-export type RouteClass = 'stick' | 'mcp' | 'auth' | 'control' | 'page';
+export type RouteClass = 'stick' | 'mcp' | 'health' | 'auth' | 'control' | 'page';
 
 export function routeClass(path: string): RouteClass {
   if (path.startsWith('/api/sticks/') || path.startsWith('/api/drops/')) return 'stick';
   if (path === '/mcp') return 'mcp';
+  // `{ ok, version }` and nothing else: other machines check the address they reach us at.
+  if (path === '/healthz') return 'health';
   if (path.startsWith('/api/')) return 'control';
   // Only the claim itself needs no session; the wizard's steps under /setup/ are pages.
   if (
@@ -135,7 +137,7 @@ export function registerGuard(app: FastifyInstance, deps: GuardDeps): void {
     const path = req.url.split('?')[0] ?? '';
     // The matched pattern where there is one, so the class follows the route that will run.
     const cls = routeClass(req.routeOptions.url ?? path);
-    if (cls === 'stick') return;
+    if (cls === 'stick' || cls === 'health') return;
     const config = live();
     req.jmConfig = config;
     if (!allowed.includes(req.headers.host ?? '')) {

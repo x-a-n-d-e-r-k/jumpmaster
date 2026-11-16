@@ -121,6 +121,28 @@ describe('ctl sticks (issue #136)', () => {
   });
 });
 
+describe('ctl public-url (issue #139)', () => {
+  test('set, clear and check map to their routes; anything else is not a command', () => {
+    expect(ctlRequest(['public-url', 'set', 'https://a.b.ts.net'])).toEqual({
+      path: '/api/control/server/public-url',
+      method: 'PUT',
+      body: { publicUrl: 'https://a.b.ts.net' },
+    });
+    expect(ctlRequest(['public-url', 'clear'])).toEqual({
+      path: '/api/control/server/public-url',
+      method: 'PUT',
+      body: { publicUrl: null },
+    });
+    expect(ctlRequest(['public-url', 'check'])).toEqual({
+      path: '/api/control/server/public-url/check',
+      method: 'POST',
+      body: {},
+    });
+    expect(ctlRequest(['public-url', 'set'])).toBeNull();
+    expect(ctlRequest(['public-url', 'check', 'extra'])).toBeNull();
+  });
+});
+
 describe('ctl setup and passphrase verbs', () => {
   test('the setup and passphrase verbs map to their routes; a passphrase in argv is refused', () => {
     expect(ctlRequest(['setup-code'])).toEqual({

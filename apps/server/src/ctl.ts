@@ -340,6 +340,18 @@ function dropsRequest(args: string[]): Raw | null {
   return n >= 1 && n <= 168 ? { path: `${path}/extend-retention`, body: { hours: n } } : null;
 }
 
+/** `public-url set <url>`, `public-url clear` and `public-url check` (issue #139). */
+function publicUrlRequest(args: string[]): Raw | null {
+  const [, what, url, ...rest] = args;
+  const path = '/api/control/server/public-url';
+  if (rest.length > 0) return null;
+  if (what === 'set' && url) return { path, method: 'PUT', body: { publicUrl: url } };
+  if (url !== undefined) return null;
+  if (what === 'clear') return { path, method: 'PUT', body: { publicUrl: null } };
+  if (what === 'check') return { path: `${path}/check`, body: {} };
+  return null;
+}
+
 /** `sticks [--json]` and `sticks slots <name-or-id> <n>`: each stick's trooper count. */
 function sticksRequest(args: string[]): Raw | null {
   const [, what, stick, n, ...rest] = args;
@@ -381,6 +393,7 @@ function sticksLines(args: string[], body: Record<string, unknown>): string[] {
 function rawRequest(args: string[]): Raw | null {
   const [command, zone] = args;
   if (command === 'sticks') return sticksRequest(args);
+  if (command === 'public-url') return publicUrlRequest(args);
   if (command === 'config') return configRequest(args);
   if (command === 'secrets') return secretsRequest(args);
   if (command === 'settings') return settingsRequest(args);
