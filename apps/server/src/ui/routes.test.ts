@@ -329,7 +329,7 @@ describe('doctor fix links (Task 8)', () => {
     const order = [...html.matchAll(/<tr class="(\w+)">/g)].map((m) => m[1]);
     expect(order).toEqual(['fail', 'fail', 'fail', 'warn', 'pass']);
     expect(html).toContain(
-      '<a href="https://github.com/octo/demo/settings/rules?a=1&amp;b=2" rel="noopener noreferrer" target="_blank">Import &lt;the&gt; ruleset</a>',
+      '<a href="https://github.com/octo/demo/settings/rules?a=1&amp;b=2" target="_blank" rel="noopener noreferrer">Import &lt;the&gt; ruleset</a>',
     );
     // The artifact as a download, its name and text escaped and encoded.
     expect(html).toContain(
@@ -832,5 +832,78 @@ describe('/briefings grouped by project and paged (#132)', () => {
   test('an unknown zone is still 404, whatever the paging', async () => {
     const { h } = await projects();
     expect((await h.view('/briefings?zone=nope&per=20&page=2')).statusCode).toBe(404);
+  });
+});
+
+describe('external links open in a new tab, in-app links do not (#133)', () => {
+  test('a sweep over /, /work, /drops, /briefings and /zones/<id>/github', async () => {
+    const h = await harness({
+      issues: [],
+      live: true,
+      zone: { protectedPaths: [...DEFAULT_PROTECTED_PATHS] },
+      guidanceForge: () => ({
+        repoAccess: async () => ({
+          private: false,
+          defaultBranch: 'main',
+          permissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
+          scopes: null,
+          tokenExpiresAt: null,
+          ownerType: 'Organization',
+        }),
+        ownerType: async () => 'Organization',
+        viewerLogin: async () => 'jm-author',
+        listDir: async () => [],
+        getFileAt: async () => null,
+      }),
+    });
+    upsertDropZone(h.db, {
+      id: 'main',
+      repo: h.zone.repo,
+      defaultBranch: 'main',
+      configJson: '{}',
+    });
+    const w = upsertWorkItem(
+      h.db,
+      {
+        dropZoneId: 'main',
+        issueNumber: 41,
+        title: 'with a PR',
+        body: 'b',
+        author: 'human',
+        priority: 2,
+        isFix: false,
+        issueCreatedAt: '2026-01-01T00:00:00.000Z',
+      },
+      h.now(),
+    );
+    setWorkItemState(h.db, w.id, 'pr_open', undefined, h.now());
+    h.db.prepare('UPDATE work_items SET pr_number = 77 WHERE id = ?').run(w.id);
+    insertDrop(h.db, {
+      id: 'sweep-drop',
+      dropZoneId: 'main',
+      workItemId: w.id,
+      role: 'implement',
+      state: 'running',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    const anchors: string[] = [];
+    for (const url of ['/', '/work', '/drops', '/briefings', '/zones/main/github']) {
+      const res = await h.view(url);
+      expect(res.statusCode, url).toBe(200);
+      anchors.push(...(res.body.match(/<a\b[^>]*>/g) ?? []).map((a) => `${url}: ${a}`));
+    }
+    const hrefOf = (a: string) => /\shref="([^"]*)"/.exec(a)?.[1] ?? '';
+    const external = anchors.filter((a) => hrefOf(a).startsWith('http'));
+    // The PR link and GitHub's links are swept, so a missed one fails here.
+    expect(external.some((a) => hrefOf(a).endsWith('/pull/77'))).toBe(true);
+    expect(external.length).toBeGreaterThan(1);
+    for (const a of external) {
+      expect(a, a).toContain('target="_blank"');
+      expect(a, a).toContain('rel="noopener noreferrer"');
+    }
+    for (const a of anchors.filter((a) => /^[/?#]/.test(hrefOf(a))))
+      expect(a, a).not.toContain('target=');
+    for (const a of anchors.filter((a) => a.includes('target="_blank"')))
+      expect(a, a).toContain('rel="noopener noreferrer"');
   });
 });

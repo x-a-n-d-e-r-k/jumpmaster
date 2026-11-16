@@ -1251,3 +1251,50 @@ describe('briefings grouped by project and paged (#132)', () => {
     expect(one).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
   });
 });
+
+describe('external links open in a new tab (#133)', () => {
+  const NEW_TAB = 'target="_blank" rel="noopener noreferrer"';
+  test('a work-item row’s PR link (on /work and the zone pages) opens in a new tab', () => {
+    expect(workItemRows([item], [z])).toContain(
+      `<a href="https://github.com/octo/demo/pull/9" ${NEW_TAB}>#9</a>`,
+    );
+  });
+
+  test('the status banner’s "Open PR #7" action and an external Fix link open in a new tab', () => {
+    const html = statusBanner({
+      headline: 'h',
+      detail: '',
+      waitingOn: 'ci',
+      action: { label: 'Open PR #7', href: 'https://github.com/o/r/pull/7' },
+      also: [
+        { text: 'ext', href: 'https://github.com/o/r/settings' },
+        { text: 'int', href: '/settings/credentials' },
+      ],
+    });
+    expect(html).toContain(`<a href="https://github.com/o/r/pull/7" ${NEW_TAB}>Open PR #7</a>`);
+    expect(html).toContain(`<a href="https://github.com/o/r/settings" ${NEW_TAB}>Fix</a>`);
+    expect(html).toContain('<a href="/settings/credentials">Fix</a>');
+  });
+
+  test('the floor’s PR link (its "Open PR #N") opens in a new tab; its in-app links do not', () => {
+    const html = renderHome({
+      zones: [z],
+      items: [item],
+      drops: [{ ...drop, state: 'running' }],
+      sticks: [],
+      status: {
+        headline: 'Waiting on CI for PR #9',
+        detail: '',
+        waitingOn: 'ci',
+        action: { label: 'Open PR #9', href: 'https://github.com/octo/demo/pull/9' },
+      },
+    });
+    expect(html).toContain(
+      `<a href="https://github.com/octo/demo/pull/9" ${NEW_TAB}>Open PR #9</a>`,
+    );
+    expect(html).toMatch(/<a href="\/work"[^>]*>/);
+    expect(html).not.toMatch(/<a href="\/work"[^>]*target=/);
+    expect(html).toMatch(/<a [^>]*href="\/drops\/d1"[^>]*>/);
+    expect(html).not.toMatch(/<a [^>]*href="\/drops\/d1"[^>]*target=/);
+  });
+});
