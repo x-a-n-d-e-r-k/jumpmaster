@@ -93,11 +93,14 @@ const EnrollBody = StickInfoSchema.extend({
 /**
  * `noPush`: the stick has no room for another pending push, so it takes no pushing role now.
  * `maxSlots`: the most troopers the stick will ever run (an older stick sends none).
+ * `slots`: the stick's starting count (`JM_SLOTS`) as it runs now, which refreshes the enrolled
+ * one: a stick restarted with a new `JM_SLOTS` keeps it when no desired count is set.
  */
 const LeaseBody = StickInfoSchema.extend({
   freeSlots: z.number().int(),
   noPush: z.boolean().optional(),
   maxSlots: z.number().int().min(1).optional(),
+  slots: z.number().int().min(1).optional(),
 });
 
 const advertOf = (info: StickInfo) => ({
@@ -330,7 +333,10 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       const noPush = body.data.noPush === true || !body.data.capabilities.includes('push-v1');
       const excludeRoles = noPush ? PUSHING_ROLES : [];
       // Every lease call says what the stick can do now, and that it is alive.
-      stampStick(db, stick.id, advertOf(body.data), now(), body.data.maxSlots);
+      stampStick(db, stick.id, advertOf(body.data), now(), {
+        maxSlots: body.data.maxSlots,
+        slots: body.data.slots,
+      });
       if (full() || body.data.freeSlots < 1) return reply.code(204).send();
       let closed = false;
       // Not req.raw: IncomingMessage 'close' fires once the body is consumed, not on disconnect.
@@ -370,7 +376,10 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         }
         await sleep(pollMs);
         // A count lowered while this poll waited holds from the next poll.
-        if (full()) return reply.code(204).send();
+        if (full()) {
+          reportSkips(reply, stick, cannot);
+          return reply.code(204).send();
+        }
       }
     });
 

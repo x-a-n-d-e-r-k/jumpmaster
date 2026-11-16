@@ -78,7 +78,7 @@ async function main() {
   console.log(
     `stick ${info.version}: image policy ${info.imagePolicy}, capabilities ${info.capabilities.join(', ') || 'none'}`,
   );
-  const client = new StickClient(serverUrl, token, { info, maxSlots });
+  const client = new StickClient(serverUrl, token, { info, maxSlots, slots });
   console.log(`troopers: ${target.target} at once to start, at most ${maxSlots}`);
   const leaseLog = leaseLogger((line) => console.error(line));
   if (!token || !stickId) {

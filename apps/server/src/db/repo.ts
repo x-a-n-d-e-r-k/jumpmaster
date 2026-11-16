@@ -502,21 +502,29 @@ export function insertStick(
 }
 
 /**
- * Records what the stick advertised on this lease, and that it was seen now. `maxSlots`, when the
- * stick reports it, replaces the stored ceiling; an older stick's lease leaves it as it was.
+ * Records what the stick advertised on this lease, and that it was seen now. `maxSlots` and
+ * `slots` (its starting count), when the stick reports them, replace the stored ceiling and
+ * enrolled count; an older stick's lease leaves them as they were.
  */
 export function stampStick(
   db: Db,
   id: string,
   advert: StickAdvert,
   now: Date,
-  maxSlots?: number,
+  counts: { maxSlots?: number | undefined; slots?: number | undefined } = {},
 ): void {
   db.prepare(
     `UPDATE sticks SET last_seen_at = @now, capabilities_json = @caps, image_policy = @policy,
-       version = @version, pinned_json = @pinned, max_slots = COALESCE(@maxSlots, max_slots)
+       version = @version, pinned_json = @pinned, max_slots = COALESCE(@maxSlots, max_slots),
+       slots = COALESCE(@slots, slots)
      WHERE id = @id`,
-  ).run({ id, now: now.toISOString(), maxSlots: maxSlots ?? null, ...advertParams(advert) });
+  ).run({
+    id,
+    now: now.toISOString(),
+    maxSlots: counts.maxSlots ?? null,
+    slots: counts.slots ?? null,
+    ...advertParams(advert),
+  });
 }
 
 /** Sets the operator's trooper count for a stick (the caller checks it against the ceiling). */

@@ -135,6 +135,8 @@ export class StickClient implements DropClient, PushClient {
       info?: StickInfo;
       /** The stick's ceiling, sent with every lease. */
       maxSlots?: number;
+      /** The stick's starting count (`JM_SLOTS`), sent with every lease. */
+      slots?: number;
     } = {},
   ) {}
 
@@ -188,12 +190,13 @@ export class StickClient implements DropClient, PushClient {
     freeSlots: number,
     terms: { capabilities?: string[]; noPush?: boolean } = {},
   ): Promise<{ drop: DropPayload | null; skipped: LeaseSkip[]; slots: number | null }> {
-    const max = this.opts.maxSlots;
+    const { maxSlots: max, slots: start } = this.opts;
     const res = await this.req('/api/sticks/lease', {
       freeSlots,
       ...this.info,
       ...terms,
       ...(max === undefined ? {} : { maxSlots: max }),
+      ...(start === undefined ? {} : { slots: start }),
     });
     this.features = featuresOf(res);
     const skipped = skippedOf(res);

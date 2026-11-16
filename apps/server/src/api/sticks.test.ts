@@ -586,6 +586,18 @@ describe('the trooper count (x-jumpmaster-slots)', () => {
     expect(res.headers[SLOTS_HEADER]).toBe('3');
     expect(effectiveSlots(getStick(db, stickId) as Stick)).toBe(3);
   });
+  test('a stick enrolled with 1 and restarted with a starting count of 3 still runs 3', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enrollWith(1);
+    const res = await leaseWith(stickToken, { freeSlots: 1, maxSlots: 4, slots: 3 });
+    expect(res.headers[SLOTS_HEADER]).toBe('3');
+    expect(getStick(db, stickId)).toMatchObject({ slots: 3, maxSlots: 4, desiredSlots: null });
+    // An old-shaped body leaves the refreshed count as it was.
+    const old = await leaseWith(stickToken, { freeSlots: 1 });
+    expect(old.headers[SLOTS_HEADER]).toBe('3');
+    const invalid = await leaseWith(stickToken, { freeSlots: 1, slots: 0 });
+    expect(invalid.statusCode).toBe(400);
+  });
 });
 
 describe('stick capabilities, per zone', () => {
@@ -733,6 +745,47 @@ describe('stick capabilities, per zone', () => {
     expect(res.statusCode).toBe(200);
     expect((res.json() as { dropId: string }).dropId).toBe('x1');
     expect(skippedOf(res)).toBeUndefined();
+  });
+
+  test('a count reached mid-poll answers 204 with the skipped zones, like the timeout does', async () => {
+    let onRead: (() => void) | undefined;
+    const source = {
+      current: (): Config => {
+        onRead?.();
+        onRead = undefined;
+        return twoZones();
+      },
+    };
+    const { db } = setup({ queued: false, config: source, leaseWaitMs: 5000, leasePollMs: 1 });
+    lockedDrop(db);
+    const { stickId, stickToken } = await enroll();
+    // While the poll waits, the operator lowers the count to 1 and a drop starts on the stick.
+    onRead = () => {
+      setStickDesiredSlots(db, stickId, 1);
+      insertDrop(db, {
+        id: 'busy',
+        dropZoneId: 'main',
+        workItemId: upsertWorkItem(db, {
+          dropZoneId: 'main',
+          issueNumber: 900,
+          title: 't',
+          body: 'b',
+          author: 'a',
+          priority: 0,
+          isFix: false,
+          issueCreatedAt: t0.toISOString(),
+        }).id,
+        role: 'implement',
+        state: 'running',
+        stickId,
+        epoch: 1,
+        createdAt: t0.toISOString(),
+      });
+    };
+    const res = await lease(stickToken);
+    expect(res.statusCode).toBe(204);
+    expect(res.headers[SLOTS_HEADER]).toBe('1');
+    expect(skippedOf(res)).toEqual([{ zoneId: 'locked', missing: ['egress-v1'] }]);
   });
 
   test('a stick without egress-v1 skips an enforce zone drop and leases a drop from an off zone', async () => {

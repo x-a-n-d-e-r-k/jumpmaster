@@ -2990,7 +2990,7 @@ describe('stick trooper counts (issue #136)', () => {
   const SLOTS = '/api/control/sticks/s1/slots';
   const enrolled = (db: ReturnType<typeof openDb>, maxSlots?: number) => {
     insertStick(db, { id: 's1', name: 'kidney-shadow', tokenHash: 'h1', slots: 1 });
-    if (maxSlots !== undefined) stampStick(db, 's1', NO_ADVERT, t0, maxSlots);
+    if (maxSlots !== undefined) stampStick(db, 's1', NO_ADVERT, t0, { maxSlots });
   };
   const NO_ADVERT = {
     capabilities: [],

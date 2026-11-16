@@ -138,7 +138,7 @@ describe('capabilities and lease logging', () => {
     }
   });
 
-  test('lease sends the stick ceiling as maxSlots', async () => {
+  test('lease sends the stick ceiling as maxSlots, and its starting count as slots', async () => {
     const bodies: unknown[] = [];
     vi.stubGlobal(
       'fetch',
@@ -147,8 +147,8 @@ describe('capabilities and lease logging', () => {
         return new Response(null, { status: 204 });
       }),
     );
-    await new StickClient('http://127.0.0.1:1', 't', { info, maxSlots: 4 }).lease(0);
-    expect(bodies).toEqual([{ freeSlots: 0, ...info, maxSlots: 4 }]);
+    await new StickClient('http://127.0.0.1:1', 't', { info, maxSlots: 4, slots: 3 }).lease(0);
+    expect(bodies).toEqual([{ freeSlots: 0, ...info, maxSlots: 4, slots: 3 }]);
   });
 
   test('a non-2xx lease error carries the response body, truncated', async () => {

@@ -961,7 +961,9 @@ until fewer than the new count are running. The server enforces the count itself
 an older stick too.
 
 - `JM_SLOTS` is the **starting count**: what the stick asks for when it enrolls, and what it runs
-  at until the count is set on the page (or when the server is too old to send one).
+  at until the count is set on the page (or when the server is too old to send one). The stick
+  reports it on every lease, so a stick restarted with a new `JM_SLOTS` runs at it (up to its
+  ceiling) while no count is set on the page.
 - `JM_MAX_SLOTS` is the stick's **ceiling**, the most the page can set: an integer of 1 or more.
   Unset, it is 4, or `JM_SLOTS` when that is higher. Either way it is capped at the number of `/28`
   blocks in `JM_DROP_SUBNET_POOL` (a `/27` holds 2). An invalid value stops the stick at start

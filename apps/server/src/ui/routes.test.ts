@@ -923,7 +923,7 @@ describe('external links open in a new tab, in-app links do not (#133)', () => {
       's2',
       { capabilities: ['egress-v1'], imagePolicy: 'allowlist', version: '0.6.0', pinnedImages: [] },
       h.now(),
-      4,
+      { maxSlots: 4 },
     );
     setStickDesiredSlots(h.db, 's2', 3);
     const res = await h.view('/sticks');
