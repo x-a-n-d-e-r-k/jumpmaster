@@ -1,6 +1,7 @@
 import type { ArtifactRow } from '../artifacts.js';
 import {
   type Briefing,
+  HELD_MODES,
   type HeldZone,
   optionsDigest,
   type Ruling,
@@ -208,9 +209,63 @@ const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' 
 export const zoneBriefingsHref = (zoneId: string): string =>
   `/briefings?zone=${encodeURIComponent(zoneId)}`;
 
+/** The page sizes the briefings pages offer (#132); anything else is the first. */
+export const PAGE_SIZES = [10, 20, 50, 100] as const;
+export type PageParams = { per: number; page: number; rpage: number };
+
+const positiveInt = (v: unknown): number =>
+  typeof v === 'string' && /^[1-9][0-9]{0,8}$/.test(v) ? Number(v) : 1;
+
 /**
- * The home page's list of open briefings, each linking to where it is answered. A paused or
- * observing zone's briefings are not listed or counted: the zone gets one line linking to them.
+ * The briefings pages' paging: `per` among PAGE_SIZES, else 10; `page` and `rpage` positive
+ * integers, else 1. Never refused: a stale bookmark still opens a page. Clamping to the last page
+ * is the renderer's, which knows the counts.
+ */
+export function pageParams(q: { per?: unknown; page?: unknown; rpage?: unknown }): PageParams {
+  const per = PAGE_SIZES.find((n) => String(n) === q.per) ?? PAGE_SIZES[0];
+  return { per, page: positiveInt(q.page), rpage: positiveInt(q.rpage) };
+}
+
+/** A project's open briefings (newest first) and rulings, as the briefings pages group them. */
+type Project = { id: string; text: string; mode: string; open: Briefing[]; rulings: Ruling[] };
+
+const newestFirst = <T extends { id: number }>(xs: readonly T[]): T[] =>
+  [...xs].sort((x, y) => y.id - x.id);
+
+/** Most open briefings first, ties by repository name: the order of sections and floor lines. */
+const byWaiting = (a: Project, b: Project): number =>
+  b.open.length - a.open.length || (a.text < b.text ? -1 : a.text > b.text ? 1 : 0);
+
+/**
+ * One project per configured zone, and per zone still named by a briefing or ruling though no
+ * longer configured.
+ */
+function projectsOf(
+  zones: readonly (ZoneRef & { mode?: string })[],
+  open: readonly Briefing[],
+  rulings: readonly Ruling[],
+  modes: Readonly<Record<string, string>> = {},
+): Project[] {
+  const text = zoneTextNamer(zones);
+  const byId = new Map<string, Project>();
+  const at = (id: string, mode?: string): Project => {
+    let p = byId.get(id);
+    if (!p) {
+      p = { id, text: text(id), mode: modes[id] ?? mode ?? 'active', open: [], rulings: [] };
+      byId.set(id, p);
+    }
+    return p;
+  };
+  for (const z of zones) at(z.id, z.mode);
+  for (const b of newestFirst(open)) at(b.zoneId).open.push(b);
+  for (const r of newestFirst(rulings)) at(r.zoneId).rulings.push(r);
+  return [...byId.values()];
+}
+
+/**
+ * The home page's Waiting on you card: one line per project with open briefings, counted and
+ * linking to that project's briefings, in the order of the /briefings sections. No briefing's text
+ * shows here. A paused or observing zone's briefings are not counted: it gets one held line.
  */
 export function waitingOnYou(
   open: Briefing[],
@@ -234,10 +289,12 @@ export function waitingOnYou(
       `<p class="empty">Nothing is waiting on you. <a href="/briefings">Briefings and rulings</a></p>${heldLines}`,
     );
   }
-  const rows = open
+  const rows = projectsOf(zones, open, [])
+    .filter((p) => p.open.length > 0)
+    .sort(byWaiting)
     .map(
-      (b) =>
-        `<li>${name(b.zoneId)}: ${escapeHtml(b.decision)} <small>(${escapeHtml(b.kind)})</small></li>`,
+      (p) =>
+        `<li><a href="${escapeHtml(zoneBriefingsHref(p.id))}">${name(p.id)}: ${p.open.length} waiting</a></li>`,
     )
     .join('');
   return card(
@@ -297,6 +354,7 @@ function briefingBlock(
   b: Briefing,
   holds: Map<string, string> | undefined,
   name: (id: string) => string,
+  heading: 'h3' | 'h4' = 'h3',
 ): string {
   const hold = b.kind === 'promote_held' ? holds?.get(b.subject) : undefined;
   const options = b.options
@@ -308,7 +366,7 @@ function briefingBlock(
   const row = (k: string, v: string) =>
     v ? `<tr><th>${k}</th><td>${escapeHtml(v)}</td></tr>` : '';
   return (
-    `<h3>${escapeHtml(b.decision)}</h3>` +
+    `<${heading}>${escapeHtml(b.decision)}</${heading}>` +
     `<table><tr><th>Zone</th><td>${name(b.zoneId)}</td></tr>${row('Kind', b.kind)}${row('About', b.subject)}${b.why ? `<tr><th>Why</th><td><pre>${escapeHtml(b.why)}</pre></td></tr>` : ''}${b.diagnosis ? `<tr><th>Diagnosis</th><td><pre>${escapeHtml(b.diagnosis)}</pre></td></tr>` : ''}${row('Recommendation', b.recommendation)}${row('On hold', b.onHold)}${row('Raised by', b.source === 'mcp' ? 'assistant (MCP)' : b.source)}${row('Raised', b.createdAt)}</table>` +
     (hold ? `<p>Promotes at ${escapeHtml(hold)} unless you reject it.</p>` : '') +
     `<form class="rule" data-briefing="${escapeHtml(b.id)}" data-options="${optionsDigest(b)}">${options}<textarea name="note" maxlength="2000" placeholder="Note (optional)"></textarea><br><button>Rule</button></form>`
@@ -316,14 +374,60 @@ function briefingBlock(
 }
 
 /**
- * Dismisses the zone's briefings shown here, after a confirmation that states the count. It posts
- * the ids shown, so a briefing raised since is not dismissed unseen.
+ * Dismisses all the zone's open briefings, every page of them, after a confirmation that states
+ * the count. It posts the ids it was rendered with, so a briefing raised since is not dismissed
+ * unseen.
  */
 function dismissAllForm(zoneId: string, open: Briefing[], zones: readonly ZoneRef[]): string {
   const what = `${plural(open.length, 'briefing')} of`;
   const ask = `Dismiss ${what} ${zoneTextNamer(zones)(zoneId)}? Each is taken off the floor without a ruling: nothing it is about is ruled on, and nothing is written to GitHub.`;
   return `<form id="dismiss-all" data-zone="${escapeHtml(zoneId)}" data-ids="${escapeHtml(JSON.stringify(open.map((b) => b.id)))}" data-ask="${escapeHtml(ask)}"><button class="danger">Dismiss all ${escapeHtml(what)} ${zoneNamer(zones)(zoneId)}</button></form><script>{const f=document.getElementById('dismiss-all');f.addEventListener('submit',async(e)=>{e.preventDefault();if(!confirm(f.dataset.ask))return;const r=await jmFetch('/api/control/zones/'+encodeURIComponent(f.dataset.zone)+'/briefings/dismiss',{ids:JSON.parse(f.dataset.ids)});if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});}</script>`;
 }
+
+/** A /briefings URL, unescaped: the zone id is URL-encoded, a page of 1 or less is left out. */
+function briefingsHref(q: { zone?: string; per: number; page?: number; rpage?: number }): string {
+  const parts = [
+    ...(q.zone !== undefined ? [`zone=${encodeURIComponent(q.zone)}`] : []),
+    `per=${q.per}`,
+    ...(q.page !== undefined ? [`page=${q.page}`] : []),
+    ...(q.rpage !== undefined ? [`rpage=${q.rpage}`] : []),
+  ];
+  return `/briefings?${parts.join('&')}`;
+}
+
+/** The page-size links; each keeps the zone and starts again at page 1. */
+function sizeSelector(zone: string | undefined, per: number): string {
+  const links = PAGE_SIZES.map(
+    (n) =>
+      `<a href="${escapeHtml(briefingsHref({ ...(zone !== undefined ? { zone } : {}), per: n }))}"${n === per ? ' aria-current="page"' : ''}>${n}</a>`,
+  ).join(' · ');
+  return `<nav class="filters" aria-label="Page size"><p>Per page: ${links}</p></nav>`;
+}
+
+/** One page of `xs`, clamped to the last page, and its Previous / Page X of Y / Next line. */
+function paged<T>(
+  xs: readonly T[],
+  per: number,
+  asked: number,
+  label: string,
+  href: (page: number) => string,
+): { rows: T[]; nav: string } {
+  const pages = Math.max(1, Math.ceil(xs.length / per));
+  const at = Math.min(Math.max(1, asked), pages);
+  const link = (n: number, text: string) => `<a href="${escapeHtml(href(n))}">${text}</a>`;
+  const nav = [
+    ...(at > 1 ? [link(at - 1, 'Previous')] : []),
+    `Page ${at} of ${pages}`,
+    ...(at < pages ? [link(at + 1, 'Next')] : []),
+  ].join(' · ');
+  return {
+    rows: xs.slice((at - 1) * per, at * per),
+    nav: `<nav class="pager" aria-label="${label}"><p>${nav}</p></nav>`,
+  };
+}
+
+const RULINGS_HEAD =
+  '<tr><th>Ruling</th><th>Zone</th><th>Briefing</th><th>Choice</th><th>Note</th><th>Ruled</th><th>Applied</th><th>Error</th><th>Diagnosis</th></tr>';
 
 /** Briefings waiting on Command, with a rule form each, and the rulings recorded so far. */
 export function renderBriefings(s: {
@@ -332,17 +436,16 @@ export function renderBriefings(s: {
   zones: DropZoneConfig[];
   /** Hold-until per subject, for held refute promotions. */
   holds?: Map<string, string>;
-  /** One zone's view (`open` and `rulings` are that zone's): it offers the bulk dismiss. */
+  /** One zone's view (`open` and `rulings` are that zone's): paged, with the bulk dismiss. */
   zone?: { id: string; mode: string };
+  /** Each zone's mode as stored (getZoneMode), for the all-projects view; else its config's. */
+  modes?: Readonly<Record<string, string>>;
+  per?: number;
+  page?: number;
+  rpage?: number;
 }): string {
   const name = zoneNamer(s.zones);
-  const open =
-    s.open.length === 0
-      ? '<p>Nothing is waiting on you.</p>'
-      : s.open.map((b) => briefingBlock(b, s.holds, name)).join('') + RULE_SCRIPT;
-  const head = s.zone
-    ? `<p><a href="/">Back</a> · <a href="/briefings">All briefings</a></p><h2>Briefings of ${name(s.zone.id)} <small>(${escapeHtml(s.zone.mode)})</small></h2>${s.open.length > 0 ? dismissAllForm(s.zone.id, s.open, s.zones) : ''}`
-    : '<p><a href="/">Back</a></p><h2>Briefings (decisions waiting on you)</h2>';
+  const per = s.per ?? PAGE_SIZES[0];
   const crewOff = new Set(s.zones.filter((z) => !z.crew?.enabled).map((z) => z.id));
   // Recorded, and held until the zone's crew is enabled again (applyPendingRulings).
   const waiting = (r: Ruling) =>
@@ -351,15 +454,89 @@ export function renderBriefings(s: {
     r.effect !== null &&
     WAITS_FOR_CREW.has(r.effect) &&
     crewOff.has(r.zoneId);
-  const rulings = s.rulings
-    .map(
-      (r) =>
-        `<tr><td>${escapeHtml(r.id)}</td><td>${name(r.zoneId)}</td><td>${escapeHtml(r.briefingId)}</td><td>${escapeHtml(r.choice)}</td><td>${escapeHtml(r.note)}</td><td>${escapeHtml(r.createdAt)}</td><td>${escapeHtml(r.appliedAt ?? (waiting(r) ? 'waiting: crew disabled' : '-'))}</td><td>${escapeHtml(r.applyError ?? '')}</td><td>${escapeHtml(r.diagnosis ?? '')}</td></tr>`,
-    )
-    .join('');
+  const rulingRows = (rs: readonly Ruling[]) =>
+    rs
+      .map(
+        (r) =>
+          `<tr><td>${escapeHtml(r.id)}</td><td>${name(r.zoneId)}</td><td>${escapeHtml(r.briefingId)}</td><td>${escapeHtml(r.choice)}</td><td>${escapeHtml(r.note)}</td><td>${escapeHtml(r.createdAt)}</td><td>${escapeHtml(r.appliedAt ?? (waiting(r) ? 'waiting: crew disabled' : '-'))}</td><td>${escapeHtml(r.applyError ?? '')}</td><td>${escapeHtml(r.diagnosis ?? '')}</td></tr>`,
+      )
+      .join('');
+  const blocks = (bs: readonly Briefing[], heading: 'h3' | 'h4') =>
+    bs.map((b) => briefingBlock(b, s.holds, name, heading)).join('');
+
+  if (s.zone) {
+    const zone = s.zone.id;
+    const open = newestFirst(s.open);
+    const rulings = newestFirst(s.rulings);
+    const b = paged(open, per, s.page ?? 1, 'Briefing pages', (page) =>
+      briefingsHref({ zone, per, page }),
+    );
+    const r = paged(
+      rulings,
+      per,
+      s.rpage ?? 1,
+      'Ruling pages',
+      (rpage) => `${briefingsHref({ zone, per, rpage })}#rulings`,
+    );
+    const list =
+      open.length === 0 ? '<p>Nothing is waiting on you.</p>' : blocks(b.rows, 'h3') + RULE_SCRIPT;
+    return page(
+      `<p><a href="/">Back</a> · <a href="/briefings">All briefings</a></p><h2>Briefings of ${name(zone)} <small>(${escapeHtml(s.zone.mode)})</small></h2>` +
+        (open.length > 0 ? dismissAllForm(zone, s.open, s.zones) : '') +
+        sizeSelector(zone, per) +
+        list +
+        (open.length > 0 ? b.nav : '') +
+        `<h2 id="rulings">Rulings (decisions recorded)</h2>` +
+        (rulings.length === 0
+          ? '<p class="empty">No rulings yet.</p>'
+          : `<table>${RULINGS_HEAD}${rulingRows(r.rows)}</table>${r.nav}`),
+    );
+  }
+
+  const projects = projectsOf(s.zones, s.open, s.rulings, s.modes);
+  const held = (p: Project) => HELD_MODES.has(p.mode) && p.open.length > 0;
+  const busy = projects.filter((p) => !held(p) && p.open.length > 0).sort(byWaiting);
+  const quiet = projects.filter((p) => p.open.length === 0).sort(byWaiting);
+  const heldOnes = projects.filter(held).sort(byWaiting);
+  const total = busy.reduce((n, p) => n + p.open.length, 0);
+
+  const showAll = (p: Project) =>
+    p.open.length > per
+      ? `<p><a href="${escapeHtml(briefingsHref({ zone: p.id, per }))}">Show all ${p.open.length} in ${name(p.id)}</a></p>`
+      : '';
+  const rulingsOf = (p: Project) =>
+    `<details class="rulings"><summary>Rulings (${p.rulings.length})</summary>` +
+    (p.rulings.length === 0
+      ? '<p class="empty">No rulings yet.</p>'
+      : `<table>${RULINGS_HEAD}${rulingRows(p.rulings.slice(0, per))}</table>`) +
+    (p.rulings.length > per
+      ? `<p><a href="${escapeHtml(`${briefingsHref({ zone: p.id, per })}#rulings`)}">All ${p.rulings.length} rulings of ${name(p.id)}</a></p>`
+      : '') +
+    '</details>';
+  // Each section ends with a marker, so a section can be told from the next in tests.
+  const sections = [
+    ...busy.map(
+      (p) =>
+        `<section class="project" data-zone="${escapeHtml(p.id)}"><h3>${name(p.id)} ${badge(p.mode)} <small>${p.open.length} waiting</small></h3>${blocks(p.open.slice(0, per), 'h4')}${showAll(p)}${rulingsOf(p)}</section><!--/project-->`,
+    ),
+    ...quiet.map(
+      (p) =>
+        `<section class="project quiet" data-zone="${escapeHtml(p.id)}"><p>${name(p.id)} ${badge(p.mode)} Nothing waiting</p>${rulingsOf(p)}</section><!--/project-->`,
+    ),
+    ...heldOnes.map(
+      (p) =>
+        `<details class="project held" data-zone="${escapeHtml(p.id)}"><summary>${name(p.id)}: ${p.open.length} held while ${escapeHtml(p.mode)}</summary>${blocks(p.open.slice(0, per), 'h4')}${showAll(p)}${rulingsOf(p)}</details><!--/project-->`,
+    ),
+  ].join('');
+  const anyBlock = busy.length > 0 || heldOnes.length > 0;
   return page(
-    `${head}${open}` +
-      `<h2>Rulings (decisions recorded)</h2><table><tr><th>Ruling</th><th>Zone</th><th>Briefing</th><th>Choice</th><th>Note</th><th>Ruled</th><th>Applied</th><th>Error</th><th>Diagnosis</th></tr>${rulings}</table>`,
+    '<p><a href="/">Back</a></p><h2>Briefings (decisions waiting on you)</h2>' +
+      (total === 0
+        ? '<p>Nothing is waiting on you.</p>'
+        : `<p>${plural(total, 'decision')} waiting.</p>`) +
+      sizeSelector(undefined, per) +
+      sections +
+      (anyBlock ? RULE_SCRIPT : ''),
   );
 }
 

@@ -11,6 +11,7 @@ import {
   dropRows,
   escapeHtml,
   page,
+  pageParams,
   renderBriefings,
   renderDoctor,
   renderDrop,
@@ -348,7 +349,7 @@ const ruling = (o: Partial<Ruling> = {}): Ruling => ({
 });
 
 describe('briefings', () => {
-  test('home shows "Waiting on you" with each open briefing and a link to /briefings', () => {
+  test('home shows "Waiting on you" with a counted line per project and a link to /briefings', () => {
     const html = renderHome({
       zones: [z],
       items: [],
@@ -356,8 +357,9 @@ describe('briefings', () => {
       briefings: [briefing(), briefing({ id: 5, decision: 'Retry #7?' })],
     });
     expect(html).toContain('<h2>Waiting on you</h2>');
-    expect(html).toContain('Split the CLI objective?');
-    expect(html).toContain('Retry #7?');
+    expect(html).toContain('<a href="/briefings?zone=main">octo/demo: 2 waiting</a>');
+    expect(html).not.toContain('Split the CLI objective?');
+    expect(html).not.toContain('Retry #7?');
     expect(html).toContain('href="/briefings"');
     expect(waitingOnYou([])).toContain('Nothing is waiting on you.');
   });
@@ -365,7 +367,7 @@ describe('briefings', () => {
   test('each open briefing shows decision, why, options, recommendation and what is on hold', () => {
     const html = renderBriefings({ open: [briefing()], rulings: [], zones: [z] });
     expect(html).toContain('Briefings (decisions waiting on you)');
-    expect(html).toContain('Rulings (decisions recorded)');
+    expect(html).toContain('Rulings (0)');
     for (const text of [
       'Split the CLI objective?',
       'It is two drops of work.',
@@ -1024,5 +1026,228 @@ describe('renderWorkList and renderDropList (#119)', () => {
     const html = page('x');
     expect(html).toContain('<a href="/work">Work</a>');
     expect(html).toContain('<a href="/drops">Drops</a>');
+  });
+});
+
+describe('briefings grouped by project and paged (#132)', () => {
+  const za: DropZoneConfig = { ...z, id: 'za', repo: 'acme/alpha' };
+  const zb: DropZoneConfig = { ...z, id: 'zb', repo: 'acme/beta' };
+  const zc: DropZoneConfig = { ...z, id: 'zc', repo: 'acme/gamma' };
+  /** `n` open briefings of `zoneId`, ids from `from`, each decision naming its zone and number. */
+  const many = (zoneId: string, n: number, from = 1): Briefing[] =>
+    Array.from({ length: n }, (_, i) =>
+      briefing({ id: from + i, zoneId, decision: `Decide ${zoneId}#${from + i}?` }),
+    );
+  const blocks = (html: string): number => html.match(/data-briefing="/g)?.length ?? 0;
+  /** The HTML of one project's section, from its opening tag to its close. */
+  const section = (html: string, zoneId: string): string => {
+    const start = html.search(
+      new RegExp(`<(section|details) class="project[^"]*" data-zone="${zoneId}"`),
+    );
+    expect(start).toBeGreaterThanOrEqual(0);
+    const tag = html.slice(start + 1, html.indexOf(' ', start));
+    return html.slice(start, html.indexOf(`</${tag}><!--/project-->`, start));
+  };
+
+  test('pageParams: per is 10, 20, 50 or 100, else 10; page and rpage are positive integers, else 1', () => {
+    for (const per of ['10', '20', '50', '100']) expect(pageParams({ per }).per).toBe(Number(per));
+    for (const per of [undefined, '0', '7', 'abc', '1000', '', ['20', '50'], '20.0'])
+      expect(pageParams({ per }).per).toBe(10);
+    expect(pageParams({ page: '3', rpage: '2' })).toEqual({ per: 10, page: 3, rpage: 2 });
+    for (const page of [undefined, '-1', '0', 'x', '1.5', ['2']])
+      expect(pageParams({ page, rpage: page })).toEqual({ per: 10, page: 1, rpage: 1 });
+  });
+
+  test('grouping: the busier project comes first with 10 blocks and Show all; no briefing crosses sections', () => {
+    const open = [...many('za', 3, 1), ...many('zb', 12, 100)];
+    const html = renderBriefings({ open, rulings: [], zones: [za, zb] });
+    const a = section(html, 'za');
+    const b = section(html, 'zb');
+    expect(html.indexOf(b)).toBeLessThan(html.indexOf(a));
+    expect(blocks(b)).toBe(10);
+    expect(b).toContain('Show all 12 in acme/beta');
+    expect(b).toContain('href="/briefings?zone=zb&amp;per=10"');
+    expect(blocks(a)).toBe(3);
+    expect(a).not.toContain('Show all');
+    expect(a).toContain('3 waiting');
+    expect(b).toContain('12 waiting');
+    for (const x of many('za', 3, 1)) expect(b).not.toContain(x.decision);
+    for (const x of many('zb', 12, 100)) expect(a).not.toContain(x.decision);
+    // Newest first: the highest ids of zb show, the two oldest do not.
+    expect(b).toContain('Decide zb#111?');
+    expect(b).not.toContain('Decide zb#101?');
+    expect(html).not.toContain('Rulings (decisions recorded)');
+  });
+
+  test('order: by open count descending, ties by repository; then quiet projects; no zone ids shown', () => {
+    const open = [...many('zc', 2, 1), ...many('za', 2, 10), ...many('zb', 5, 20)];
+    const quiet: DropZoneConfig = { ...z, id: 'zq', repo: 'acme/aaa-quiet' };
+    const html = renderBriefings({ open, rulings: [], zones: [zc, quiet, za, zb] });
+    const at = (id: string) => html.indexOf(section(html, id));
+    expect(at('zb')).toBeLessThan(at('za'));
+    expect(at('za')).toBeLessThan(at('zc'));
+    expect(at('zc')).toBeLessThan(at('zq'));
+    expect(section(html, 'zq')).toContain('Nothing waiting');
+    expect(blocks(section(html, 'zq'))).toBe(0);
+    // The decisions name their zone (fixture text), so they are taken out with the URLs.
+    const text = html
+      .replace(/(href|data-[a-z-]+)="[^"]*"/g, '')
+      .replace(/Decide z[a-z]#\d+\?/g, '');
+    expect(text).not.toMatch(/\bz[abcq]\b/);
+    expect(html).not.toMatch(/zone z[abcq]/);
+  });
+
+  test('a held project is collapsed after the others and not counted as waiting', () => {
+    const open = [...many('za', 2, 1), ...many('zb', 30, 100)];
+    const html = renderBriefings({
+      open,
+      rulings: [],
+      zones: [za, zb, zc],
+      modes: { za: 'active', zb: 'paused', zc: 'active' },
+    });
+    const held = section(html, 'zb');
+    expect(held.startsWith('<details class="project held"')).toBe(true);
+    expect(held).toContain('<summary>acme/beta: 30 held while paused</summary>');
+    expect(blocks(held)).toBe(10);
+    expect(held).toContain('Show all 30 in acme/beta');
+    expect(html.indexOf(held)).toBeGreaterThan(html.indexOf(section(html, 'za')));
+    expect(html.indexOf(held)).toBeGreaterThan(html.indexOf(section(html, 'zc')));
+    expect(html).toContain('2 decisions waiting');
+    expect(html).not.toContain('32 decisions');
+  });
+
+  test('each section carries its newest rulings, collapsed, with a link when there are more', () => {
+    const rulings = Array.from({ length: 12 }, (_, i) =>
+      ruling({ id: i + 1, zoneId: 'za', note: `note-a-${i + 1}` }),
+    ).concat([ruling({ id: 99, zoneId: 'zb', note: 'note-b' })]);
+    const html = renderBriefings({ open: many('za', 1), rulings, zones: [za, zb] });
+    const a = section(html, 'za');
+    expect(a).toContain('<details class="rulings"><summary>Rulings (12)</summary>');
+    expect(a).toContain('note-a-12');
+    expect(a).not.toContain('note-a-2<');
+    expect(a).toContain('href="/briefings?zone=za&amp;per=10#rulings"');
+    expect(a).not.toContain('note-b');
+    const b = section(html, 'zb');
+    expect(b).toContain('Rulings (1)');
+    expect(b).toContain('note-b');
+    expect(b).not.toContain('#rulings"');
+  });
+
+  test.each([10, 20, 50, 100])('per=%i shows exactly that many blocks', (per) => {
+    const html = renderBriefings({ open: many('za', 120), rulings: [], zones: [za], per });
+    expect(blocks(html)).toBe(per);
+    const one = renderBriefings({
+      open: many('za', 120),
+      rulings: [],
+      zones: [za],
+      zone: { id: 'za', mode: 'active' },
+      per,
+    });
+    expect(blocks(one)).toBe(per);
+  });
+
+  test('the size selector marks the current size and keeps the zone, resetting the pages', () => {
+    const html = renderBriefings({
+      open: many('za', 30),
+      rulings: [],
+      zones: [za],
+      zone: { id: 'za', mode: 'active' },
+      per: 20,
+      page: 2,
+      rpage: 2,
+    });
+    expect(html).toContain('<a href="/briefings?zone=za&amp;per=10">10</a>');
+    expect(html).toContain('<a href="/briefings?zone=za&amp;per=20" aria-current="page">20</a>');
+    expect(html).toContain('<a href="/briefings?zone=za&amp;per=50">50</a>');
+    expect(html).toContain('<a href="/briefings?zone=za&amp;per=100">100</a>');
+    const all = renderBriefings({ open: [], rulings: [], zones: [za] });
+    expect(all).toContain('<a href="/briefings?per=10" aria-current="page">10</a>');
+  });
+
+  test('the zone view pages briefings, clamps the page, and keeps the dismiss for all of them', () => {
+    const open = many('za', 23);
+    const view = (page: number) =>
+      renderBriefings({ open, rulings: [], zones: [za], zone: { id: 'za', mode: 'active' }, page });
+    const first = view(1);
+    expect(blocks(first)).toBe(10);
+    expect(first).toContain('Page 1 of 3');
+    expect(first).toContain('href="/briefings?zone=za&amp;per=10&amp;page=2">Next</a>');
+    expect(first).not.toContain('>Previous</a>');
+    expect(first).toContain('Decide za#23?');
+    expect(first).toContain('Dismiss all 23 briefings of acme/alpha');
+    expect(first).toContain(`data-ids="${escapeHtml(JSON.stringify(open.map((b) => b.id)))}"`);
+    const last = view(3);
+    expect(blocks(last)).toBe(3);
+    expect(last).toContain('Page 3 of 3');
+    expect(last).toContain('href="/briefings?zone=za&amp;per=10&amp;page=2">Previous</a>');
+    expect(last).not.toContain('>Next</a>');
+    expect(last).toContain('Decide za#1?');
+    expect(view(99)).toBe(last);
+  });
+
+  test('rulings page independently of briefings', () => {
+    const rulings = Array.from({ length: 15 }, (_, i) =>
+      ruling({ id: i + 1, zoneId: 'za', note: `note-${i + 1}` }),
+    );
+    const view = (rpage: number) =>
+      renderBriefings({
+        open: many('za', 15),
+        rulings,
+        zones: [za],
+        zone: { id: 'za', mode: 'active' },
+        rpage,
+      });
+    const one = view(1);
+    const two = view(2);
+    const briefingsOf = (html: string) => html.slice(0, html.indexOf('id="rulings"'));
+    expect(briefingsOf(two)).toBe(briefingsOf(one));
+    expect(two).toContain('<h2 id="rulings">');
+    expect(two).toContain('<td>note-5</td>');
+    expect(two).not.toContain('<td>note-6</td>');
+    expect(one).toContain('<td>note-15</td>');
+    expect(one).toContain('Page 1 of 2');
+    expect(one).toContain('href="/briefings?zone=za&amp;per=10&amp;rpage=2#rulings">Next</a>');
+    expect(two).toContain('href="/briefings?zone=za&amp;per=10&amp;rpage=1#rulings">Previous</a>');
+  });
+
+  test('the floor card shows one counted line per project, in the same order, and no decision', () => {
+    const open = [...many('za', 2, 1), ...many('zb', 5, 10)];
+    const html = waitingOnYou(open, [], [za, zb]);
+    const lines = html.match(/<li>.*?<\/li>/g) ?? [];
+    expect(lines).toEqual([
+      '<li><a href="/briefings?zone=zb">acme/beta: 5 waiting</a></li>',
+      '<li><a href="/briefings?zone=za">acme/alpha: 2 waiting</a></li>',
+    ]);
+    expect(html).toContain('7 decisions waiting');
+    expect(html).toContain('href="/briefings"');
+    for (const b of open) expect(html).not.toContain(b.decision);
+  });
+
+  test('escaping: a decision with <script> is escaped, and a zone id needing it is encoded', () => {
+    const odd: DropZoneConfig = { ...z, id: 'a b', repo: 'acme/<odd>' };
+    const open = [
+      ...many('a b', 11, 1),
+      briefing({ id: 50, zoneId: 'a b', decision: '<script>alert(1)</script>' }),
+    ];
+    const all = renderBriefings({ open, rulings: [ruling({ zoneId: 'a b' })], zones: [odd] });
+    const one = renderBriefings({
+      open,
+      rulings: [],
+      zones: [odd],
+      zone: { id: 'a b', mode: 'active' },
+      page: 1,
+    });
+    const floor = waitingOnYou(open, [], [odd]);
+    for (const html of [all, one, floor]) {
+      expect(html).not.toContain('<script>alert');
+      expect(html).not.toContain('<odd>');
+      const hrefs = [...html.matchAll(/href="([^"]*)"/g)].map((m) => m[1]);
+      for (const href of hrefs.filter((x) => x?.includes('zone='))) {
+        expect(href).toContain('zone=a%20b');
+      }
+      expect(hrefs.some((x) => x?.includes('zone=a%20b'))).toBe(true);
+    }
+    expect(all).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(one).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
   });
 });

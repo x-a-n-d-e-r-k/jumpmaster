@@ -6,7 +6,7 @@ import { getArtifact, listArtifacts, readArtifact } from './artifacts.js';
 import { Backoff } from './auth/backoff.js';
 import { registerGuard, withCsrf } from './auth/guard.js';
 import type { SetupMode } from './auth/operator.js';
-import { floorBriefings, listBriefings, listRulings } from './briefings.js';
+import { ALL_RULINGS, floorBriefings, listBriefings, listRulings } from './briefings.js';
 import { configReader } from './config/source.js';
 import { ConfigStore } from './config/store.js';
 import type { Config } from './config.js';
@@ -53,6 +53,7 @@ import {
   DROP_STATES,
   type HomeState,
   type ItemDetail,
+  pageParams,
   renderBriefings,
   renderDoctor,
   renderDrop,
@@ -312,31 +313,39 @@ export function createApp(
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
 
-  // Every open briefing, or one zone's (`?zone=`: where the floor's held line and the zone page
-  // link, with that zone's bulk dismiss).
-  app.get<{ Querystring: { zone?: string } }>('/briefings', async (req, reply) => {
-    const { db } = deps;
-    const config = cfg(req);
-    const zoneId = typeof req.query.zone === 'string' ? req.query.zone : undefined;
-    const zone = zoneId === undefined ? undefined : config.dropZones.find((z) => z.id === zoneId);
-    if (zoneId !== undefined && !zone)
-      return reply.code(404).type('text/plain').send('no such zone');
-    const zones = zone ? [zone] : config.dropZones;
-    const holds = new Map<string, string>();
-    for (const z of zones) {
-      for (const c of listCrewIssues(db, z.id, ['promote_held'])) {
-        if (c.holdUntil) holds.set(`issue:${c.id}`, c.holdUntil);
+  // Every open briefing grouped by project, or one zone's paged (`?zone=`: where the floor's lines
+  // and the zone page link, with that zone's bulk dismiss). `per`, `page` and `rpage` never refuse.
+  app.get<{ Querystring: { zone?: string; per?: string; page?: string; rpage?: string } }>(
+    '/briefings',
+    async (req, reply) => {
+      const { db } = deps;
+      const config = cfg(req);
+      const zoneId = typeof req.query.zone === 'string' ? req.query.zone : undefined;
+      const zone = zoneId === undefined ? undefined : config.dropZones.find((z) => z.id === zoneId);
+      if (zoneId !== undefined && !zone)
+        return reply.code(404).type('text/plain').send('no such zone');
+      const zones = zone ? [zone] : config.dropZones;
+      const holds = new Map<string, string>();
+      for (const z of zones) {
+        for (const c of listCrewIssues(db, z.id, ['promote_held'])) {
+          if (c.holdUntil) holds.set(`issue:${c.id}`, c.holdUntil);
+        }
       }
-    }
-    const html = renderBriefings({
-      open: listBriefings(db, { state: 'open', ...(zone ? { zoneId: zone.id } : {}) }),
-      rulings: zones.flatMap((z) => listRulings(db, z.id)),
-      zones: config.dropZones,
-      holds,
-      ...(zone ? { zone: { id: zone.id, mode: getZoneMode(db, zone.id, zone.mode) } } : {}),
-    });
-    return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
-  });
+      const html = renderBriefings({
+        open: listBriefings(db, { state: 'open', ...(zone ? { zoneId: zone.id } : {}) }),
+        // Every ruling: each project counts its own, and pages or shows its newest `per`.
+        rulings: zones.flatMap((z) => listRulings(db, z.id, ALL_RULINGS)),
+        zones: config.dropZones,
+        holds,
+        modes: Object.fromEntries(
+          config.dropZones.map((z) => [z.id, getZoneMode(db, z.id, z.mode)]),
+        ),
+        ...pageParams(req.query),
+        ...(zone ? { zone: { id: zone.id, mode: getZoneMode(db, zone.id, zone.mode) } } : {}),
+      });
+      return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
+    },
+  );
 
   app.get<{ Querystring: { zone?: string; state?: string } }>('/work', async (req, reply) => {
     const { db } = deps;

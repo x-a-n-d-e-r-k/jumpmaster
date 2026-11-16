@@ -50,7 +50,9 @@ test('the floor lists only an active zone’s briefings; a paused zone gets one 
   const h = await twoZones();
   setZoneMode(h.db, 'shadow', 'paused', h.now());
   const home = (await h.view('/')).body;
-  expect(home).toContain('Decide crew:m1 in main?');
+  expect(home).toContain('<a href="/briefings?zone=main">octo/demo: 1 waiting</a>');
+  expect(home).not.toContain('octo/shadow: 2 waiting');
+  expect(home).not.toContain('Decide crew:m1 in main?');
   expect(home).not.toContain('Decide crew:s1 in shadow?');
   expect(home).not.toContain('Decide crew:s2 in shadow?');
   expect(home).toContain('1 decision waiting');
@@ -82,8 +84,9 @@ test('resuming the paused zone lists its briefings on the floor again', async ()
   setZoneMode(h.db, 'shadow', 'paused', h.now());
   setZoneMode(h.db, 'shadow', 'active', h.now());
   const home = (await h.view('/')).body;
-  expect(home).toContain('Decide crew:s1 in shadow?');
-  expect(home).toContain('Decide crew:s2 in shadow?');
+  expect(home).toContain('<a href="/briefings?zone=shadow">octo/shadow: 2 waiting</a>');
+  expect(home).toContain('<a href="/briefings?zone=main">octo/demo: 1 waiting</a>');
+  expect(home.indexOf('octo/shadow: 2 waiting')).toBeLessThan(home.indexOf('octo/demo: 1 waiting'));
   expect(home).toContain('3 decisions waiting');
   expect(home).toContain('Waiting on you: 3 briefings');
   expect(home).not.toContain('briefings held');
