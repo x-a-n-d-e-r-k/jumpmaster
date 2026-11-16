@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { raiseBriefing, ruleBriefing } from '../briefings.js';
+import { listBriefings, raiseBriefing, ruleBriefing } from '../briefings.js';
 import { DEFAULT_PROTECTED_PATHS } from '../config.js';
 import { insertCrewIssue } from '../crew/store.js';
 import {
@@ -10,6 +10,7 @@ import {
   insertOutbox,
   insertStick,
   setWorkItemState,
+  setZoneMode,
   stampStick,
   updateDrop,
   updateOutbox,
@@ -23,6 +24,7 @@ import { zoneGuidance } from '../github/guidance.js';
 import { opMarker } from '../outbox.js';
 import { crewOn, GOAL } from '../test/crew.js';
 import { harness } from '../test/flowHarness.js';
+import { operatorSession } from '../test/helpers.js';
 
 const get = async (h: Awaited<ReturnType<typeof harness>>, url: string) => h.view(url);
 
@@ -143,7 +145,8 @@ describe('UI routes', () => {
     expect(res.body).toContain('not now');
     const home = await get(h, '/');
     expect(home.body).toContain('Waiting on you');
-    expect(home.body).toContain('Open &lt;b&gt;question&lt;/b&gt;');
+    expect(home.body).toContain('<a href="/briefings?zone=main">octo/demo: 1 waiting</a>');
+    expect(home.body).not.toContain('Open &lt;b&gt;question&lt;/b&gt;');
     expect(home.body).toContain('<h2>Crew</h2>');
   });
 
@@ -665,5 +668,169 @@ describe('/work and /drops list pages (#119)', () => {
     expect(home).toContain('href="/drops?state=active"');
     expect(home).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/work">Work<\/a>.*<\/nav>/);
     expect(home).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/drops">Drops<\/a>.*<\/nav>/);
+  });
+});
+
+describe('/briefings grouped by project and paged (#132)', () => {
+  /** The harness zone `main` (octo/demo), plus `ref` and `a b` (which needs encoding). */
+  async function projects() {
+    const h = await harness({
+      extraZones: [
+        { id: 'ref', repo: 'octo/ref' },
+        { id: 'a b', repo: 'octo/spaced' },
+      ],
+    });
+    const raise = (zoneId: string, n: number) => {
+      const ids: number[] = [];
+      for (let i = 1; i <= n; i++)
+        ids.push(
+          raiseBriefing(
+            h.db,
+            {
+              zoneId,
+              kind: 'crew',
+              subject: `crew:${zoneId}-${i}`,
+              decision: `Decide ${zoneId} number ${i}?`,
+              why: 'w',
+              options: [{ id: 'ok', label: 'OK', effect: 'none' }],
+              source: 'crew',
+            },
+            h.now(),
+          ),
+        );
+      return ids;
+    };
+    return { h, raise };
+  }
+  const blocks = (html: string): number => html.match(/data-briefing="/g)?.length ?? 0;
+
+  test('the zone view pages 23 briefings: Next only on page 1, Previous only on the last, clamped', async () => {
+    const { h, raise } = await projects();
+    raise('main', 23);
+    const view = async (q: string) => (await h.view(`/briefings?zone=main${q}`)).body;
+    const one = await view('');
+    expect(blocks(one)).toBe(10);
+    expect(one).toContain('Page 1 of 3');
+    expect(one).toContain('>Next</a>');
+    expect(one).not.toContain('>Previous</a>');
+    expect(one).toContain('Decide main number 23?');
+    const three = await view('&page=3');
+    expect(blocks(three)).toBe(3);
+    expect(three).toContain('Page 3 of 3');
+    expect(three).toContain('>Previous</a>');
+    expect(three).not.toContain('>Next</a>');
+    expect(three).toContain('Decide main number 1?');
+    // The CSRF token differs per session: compare what the pages show.
+    const shown = (html: string) => [
+      ...[...html.matchAll(/data-briefing="(\d+)"/g)].map((m) => m[1]),
+      html.match(/Page \d+ of \d+/)?.[0],
+    ];
+    expect(shown(await view('&page=99'))).toEqual(shown(three));
+    expect(shown(await view('&page=-1'))).toEqual(shown(one));
+    const p2 = await view('&per=20&page=2');
+    expect(blocks(p2)).toBe(3);
+    expect(p2).toContain('Page 2 of 2');
+    expect(p2).toContain('>Previous</a>');
+    expect(p2).not.toContain('>Next</a>');
+  });
+
+  test.each([
+    ['10', 10],
+    ['20', 20],
+    ['50', 50],
+    ['100', 100],
+    ['7', 10],
+    ['abc', 10],
+    ['0', 10],
+    ['1000', 10],
+    [undefined, 10],
+  ])('per=%s shows %i of 120 briefings, on both views', async (per, shown) => {
+    const { h, raise } = await projects();
+    raise('main', 120);
+    const q = per === undefined ? '' : `per=${per}`;
+    for (const url of [`/briefings?${q}`, `/briefings?zone=main&${q}`]) {
+      const res = await h.view(url);
+      expect(res.statusCode).toBe(200);
+      expect(blocks(res.body)).toBe(shown);
+      expect(res.body).toContain(`per=${shown}" aria-current="page">${shown}</a>`);
+    }
+  });
+
+  test('rulings page independently: rpage=2 leaves the briefings shown as they were', async () => {
+    const { h, raise } = await projects();
+    const ids = raise('main', 25);
+    for (const id of ids.slice(0, 12)) ruleBriefing(h.db, id, 'ok', `note ${id}`, h.now());
+    const shown = (html: string) => [...html.matchAll(/data-briefing="(\d+)"/g)].map((m) => m[1]);
+    const one = (await h.view('/briefings?zone=main')).body;
+    const two = (await h.view('/briefings?zone=main&rpage=2')).body;
+    expect(shown(two)).toEqual(shown(one));
+    expect(shown(one)).toHaveLength(10);
+    expect(one).toContain(`<td>note ${ids[11]}</td>`);
+    expect(one).not.toContain(`<td>note ${ids[0]}</td>`);
+    expect(two).toContain(`<td>note ${ids[0]}</td>`);
+    expect(two).not.toContain(`<td>note ${ids[11]}</td>`);
+  });
+
+  test('the dismiss form on page 1 of 3 dismisses all 23 of the zone, and says so', async () => {
+    const { h, raise } = await projects();
+    raise('main', 23);
+    raise('ref', 2);
+    const html = (await h.view('/briefings?zone=main&per=10&page=1')).body;
+    expect(html).toContain('Dismiss all 23 briefings of octo/demo');
+    const ids = JSON.parse(
+      (html.match(/<form id="dismiss-all" [^>]*data-ids="([^"]*)"/)?.[1] ?? '[]').replaceAll(
+        '&quot;',
+        '"',
+      ),
+    ) as number[];
+    const session = operatorSession(h.db, h.now());
+    const res = await h.app.inject({
+      method: 'POST',
+      url: '/api/control/zones/main/briefings/dismiss',
+      headers: session.headers,
+      payload: { ids },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(listBriefings(h.db, { zoneId: 'main', state: 'open' })).toEqual([]);
+    expect(listBriefings(h.db, { zoneId: 'ref', state: 'open' })).toHaveLength(2);
+  });
+
+  test('all projects: sections by count, a paused zone collapsed last and not counted', async () => {
+    const { h, raise } = await projects();
+    raise('main', 3);
+    raise('ref', 12);
+    raise('a b', 30);
+    setZoneMode(h.db, 'a b', 'paused', h.now());
+    const res = await h.view('/briefings');
+    expect(res.statusCode).toBe(200);
+    const html = res.body;
+    const at = (id: string) => html.indexOf(`data-zone="${id}"`);
+    expect(at('ref')).toBeLessThan(at('main'));
+    expect(at('main')).toBeLessThan(at('a b'));
+    expect(html).toContain('<details class="project held" data-zone="a b">');
+    expect(html).toContain('<summary>octo/spaced: 30 held while paused</summary>');
+    expect(html).toContain('15 decisions waiting');
+    expect(html).toContain('Show all 12 in octo/ref');
+    expect(html).toContain('href="/briefings?zone=a%20b&amp;per=10"');
+    expect(html).not.toMatch(/zone (main|ref|a b)\b/);
+  });
+
+  test('the floor card holds one counted line per project and no decision text', async () => {
+    const { h, raise } = await projects();
+    raise('main', 2);
+    raise('a b', 3);
+    const home = (await h.view('/')).body;
+    const card = home.slice(home.indexOf('<h2>Waiting on you</h2>'));
+    const list = card.slice(card.indexOf('<ul>'), card.indexOf('</ul>'));
+    expect(list.match(/<li>/g)).toHaveLength(2);
+    expect(list).toContain('<a href="/briefings?zone=a%20b">octo/spaced: 3 waiting</a>');
+    expect(list).toContain('<a href="/briefings?zone=main">octo/demo: 2 waiting</a>');
+    expect(list.indexOf('octo/spaced')).toBeLessThan(list.indexOf('octo/demo'));
+    expect(home).not.toContain('Decide ');
+  });
+
+  test('an unknown zone is still 404, whatever the paging', async () => {
+    const { h } = await projects();
+    expect((await h.view('/briefings?zone=nope&per=20&page=2')).statusCode).toBe(404);
   });
 });

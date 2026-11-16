@@ -229,7 +229,7 @@ export function listBriefings(
 export type HeldZone = { zoneId: string; repo: string; mode: string; count: number };
 
 /** Modes in which a zone starts no work, so its briefings wait off the floor (issue #98). */
-const HELD_MODES: ReadonlySet<string> = new Set(['paused', 'observe']);
+export const HELD_MODES: ReadonlySet<string> = new Set(['paused', 'observe']);
 
 /**
  * The open briefings the floor lists, and the zones (paused or observing) whose briefings it holds
@@ -329,6 +329,9 @@ export function dismissZoneBriefings(
     [...new Set(ids)].filter((id) => dismiss.run(now.toISOString(), id, zoneId).changes === 1),
   )();
 }
+
+/** listRulings' limit for every ruling: SQLite reads a negative LIMIT as none. */
+export const ALL_RULINGS = -1;
 
 export function listRulings(db: Db, zoneId: string, limit = 50): Ruling[] {
   const rows = db
