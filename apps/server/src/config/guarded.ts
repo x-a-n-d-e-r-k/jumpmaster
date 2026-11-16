@@ -356,6 +356,14 @@ export const NOT_GUARDED: FreePath[] = [
     'how long to wait for CI; a missing CI is still a no-merge',
   ),
   free('dropZones[].retryLabel', 'the label that asks for a retry of parked work'),
+  free(
+    'dropZones[].triageLabel',
+    'the label an unformatted human issue is moved to; it starts nothing (it must differ from the other labels)',
+  ),
+  free(
+    'dropZones[].triage.gate',
+    'whether an unformatted human issue waits for triage; the author check still gates every issue (§7.1)',
+  ),
   free('dropZones[].mergeMethod', 'squash is the only value the schema accepts'),
   free('dropZones[].attribution', 'whether PRs carry a co-author trailer'),
   free(

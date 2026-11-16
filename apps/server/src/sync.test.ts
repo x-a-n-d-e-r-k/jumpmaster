@@ -6,8 +6,10 @@ import type { Db } from './db/open.js';
 import { openDb } from './db/open.js';
 import {
   insertOutbox,
+  listOutbox,
   listWorkItems,
   setWorkItemState,
+  setZoneMode,
   updateOutbox,
   type WorkItem,
 } from './db/repo.js';
@@ -40,6 +42,9 @@ const issue = (n: number, o: Partial<ForgeIssue> = {}): ForgeIssue => ({
   createdAt: t0.toISOString(),
   ...o,
 });
+
+/** A body in the agent-ready format, so the triage gate (crew on) admits it. */
+const FORMATTED = '## Acceptance criteria\n\n- [ ] it works\n\n## Required tests\n\n- a test\n';
 
 const item = (id: number, o: Partial<WorkItem> = {}): WorkItem => ({
   id,
@@ -207,7 +212,7 @@ describe('GOAL.md refresh', () => {
   });
 
   test('a thrown GOAL.md read never fails the sync', async () => {
-    const forge = fakeForge({ issues: [issue(1)], trusted: ['alice'] });
+    const forge = fakeForge({ issues: [issue(1, { body: FORMATTED })], trusted: ['alice'] });
     forge.getFileAt = async () => {
       throw new Error('fake 502');
     };
@@ -268,7 +273,7 @@ describe('crew provenance at intake', () => {
   });
 
   test("the operator's own unmarked issue is still trusted", async () => {
-    const w = world([crewIssue(12, { body: 'My own issue.' })]);
+    const w = world([crewIssue(12, { body: `My own issue.\n\n${FORMATTED}` })]);
     const r = await syncDropZone(w.db, w.forges, w.zone, t0);
     expect(numbers(w)).toEqual([12]);
     expect(r.skippedCrewUnpromoted).toEqual([]);
@@ -575,5 +580,200 @@ describe('intake issues at sync', () => {
     await syncDropZone(w2.db, w2.forges, w2.zone, t0);
     expect(getCrewIssue(w2.db, id)?.state).toBe('filing');
     expect(numbers(w2)).toEqual([]);
+  });
+});
+
+describe('triage gate at intake (#183)', () => {
+  /**
+   * #179's shape, reconstructed (the forge was not reachable when this was written): two
+   * complaints and a screenshot, no acceptance criteria and no tests.
+   */
+  const ISSUE_179 = {
+    title: 'Zone page: the drop list is confusing and the log viewer is broken',
+    body: [
+      'The drop list on the zone page shows finished drops above running ones, so I never know what is running right now.',
+      '',
+      'Also the log viewer cuts off long lines and you cannot scroll sideways to read them.',
+      '',
+      '![screenshot](https://github.com/user-attachments/assets/179-zone-page.png)',
+    ].join('\n'),
+  };
+  /** The same body with the two sections the agent-ready format asks for. */
+  const SHAPED_179 = `${ISSUE_179.body}
+
+## Acceptance criteria
+
+- [ ] Running drops are listed above finished ones on the zone page.
+- [ ] The log viewer scrolls sideways instead of cutting long lines.
+
+## Required tests
+
+- A zone page test with a running and a finished drop pins the order.
+`;
+
+  const crewOn = (o: Partial<DropZoneConfig> = {}) =>
+    zoneWorld({ crew: { ...makeZone().crew, enabled: true }, ...o });
+  /** A world whose only open ready issue is #179 by `author`. */
+  const world179 = (o: { body?: string; author?: string; zone?: Partial<DropZoneConfig> } = {}) => {
+    const w = crewOn(o.zone);
+    for (const n of [1, 2, 3, 4, 5]) w.f.state.closeIssue(n);
+    w.f.state.addIssue({
+      number: 179,
+      title: ISSUE_179.title,
+      body: o.body ?? ISSUE_179.body,
+      author: o.author ?? 'human',
+      labels: ['agent-ready'],
+      createdAt: t0.toISOString(),
+    });
+    return w;
+  };
+  const numbers = (w: ReturnType<typeof zoneWorld>) =>
+    listWorkItems(w.db, 'main').map((i) => i.issueNumber);
+  const ops = (w: ReturnType<typeof zoneWorld>) =>
+    listOutbox(w.db, ['pending', 'unknown', 'done', 'failed'], 'main');
+  const labelWrites = (w: ReturnType<typeof zoneWorld>) =>
+    w.f.author.calls.filter((c) => c.method === 'setLabels');
+
+  test('#179 by a trusted author is not admitted; one set_labels op sends it to triage', async () => {
+    const w = world179();
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([]);
+    expect(r).toMatchObject({ added: 0, sentToTriage: 1, skippedUntrusted: 0 });
+    const all = ops(w);
+    expect(all).toHaveLength(1);
+    expect(all[0]).toMatchObject({ kind: 'set_labels', state: 'done', workItemId: null });
+    expect(JSON.parse(all[0]?.payloadJson ?? '{}')).toEqual({
+      number: 179,
+      add: ['jm-triage'],
+      remove: ['agent-ready'],
+    });
+    expect(w.f.state.issues.get(179)?.labels).toEqual(['jm-triage']);
+  });
+
+  test('the same issue with the two sections added is admitted as today', async () => {
+    const w = world179({ body: SHAPED_179 });
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([179]);
+    expect(r).toMatchObject({ added: 1, sentToTriage: 0 });
+    expect(ops(w)).toEqual([]);
+  });
+
+  test('D1: an untrusted author is skipped with no forge write', async () => {
+    const w = world179({ author: 'stranger' });
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([]);
+    expect(r).toMatchObject({ skippedUntrusted: 1, sentToTriage: 0 });
+    expect(ops(w)).toEqual([]);
+    expect(labelWrites(w)).toEqual([]);
+  });
+
+  test('D2: a failed trust lookup fails closed, with no forge write', async () => {
+    const w = world179();
+    w.f.author.isTrusted = async () => {
+      throw new Error('fake 502');
+    };
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([]);
+    expect(r).toMatchObject({ skippedUntrusted: 1, sentToTriage: 0 });
+    expect(ops(w)).toEqual([]);
+    expect(labelWrites(w)).toEqual([]);
+  });
+
+  test('D3: two syncs in a row enqueue one op, even with the ready label put back', async () => {
+    const w = world179();
+    await syncDropZone(w.db, w.forges, w.zone, t0);
+    // Someone puts the ready label back on the unchanged issue.
+    w.f.state.setLabels(179, ['agent-ready', 'jm-triage']);
+    const r = await syncDropZone(w.db, w.forges, w.zone, plus(t0, 60_000));
+    expect(r.sentToTriage).toBe(1);
+    expect(numbers(w)).toEqual([]);
+    expect(ops(w)).toHaveLength(1);
+    expect(labelWrites(w)).toHaveLength(1);
+  });
+
+  test('D5: a crew-promoted issue is never gated, even with a failing body', async () => {
+    const w = world179({ author: 'author-bot' });
+    insertCrewIssue(w.db, {
+      zoneId: 'main',
+      key: 'k179',
+      source: 'crew-lead',
+      sourceRef: 'd',
+      objective: 'obj',
+      title: ISSUE_179.title,
+      body: ISSUE_179.body,
+      priority: null,
+      state: 'promoted',
+      number: 179,
+      createdAt: t0.toISOString(),
+    });
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([179]);
+    expect(r).toMatchObject({ added: 1, sentToTriage: 0 });
+    expect(ops(w)).toEqual([]);
+  });
+
+  test('triage.gate false admits a failing issue as today', async () => {
+    const w = world179({ zone: { triage: { gate: false } } });
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([179]);
+    expect(r).toMatchObject({ added: 1, sentToTriage: 0 });
+    expect(ops(w)).toEqual([]);
+  });
+
+  test('with the crew off and the gate on, a failing issue is admitted and no op is enqueued', async () => {
+    const w = world179({ zone: { crew: { ...makeZone().crew, enabled: false } } });
+    expect(w.zone.triage.gate).toBe(true);
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([179]);
+    expect(r).toMatchObject({ added: 1, sentToTriage: 0 });
+    expect(ops(w)).toEqual([]);
+  });
+
+  test('a ready item whose issue now fails goes to done / needs triage; an in-flight one is untouched', async () => {
+    const w = world179({ body: SHAPED_179 });
+    w.f.state.addIssue({
+      number: 180,
+      title: 'Another',
+      body: SHAPED_179,
+      author: 'human',
+      labels: ['agent-ready'],
+      createdAt: t0.toISOString(),
+    });
+    await syncDropZone(w.db, w.forges, w.zone, t0);
+    const [ready, flying] = listWorkItems(w.db, 'main');
+    setWorkItemState(w.db, flying!.id, 'in_flight');
+    // Both bodies are edited down to fail the format.
+    for (const n of [179, 180]) {
+      const e = w.f.state.issues.get(n);
+      if (e?.issue) e.issue.body = ISSUE_179.body;
+    }
+    const r = await syncDropZone(w.db, w.forges, w.zone, plus(t0, 60_000));
+    expect(r.sentToTriage).toBe(1);
+    const after = listWorkItems(w.db, 'main');
+    expect(after.find((i) => i.id === ready!.id)).toMatchObject({
+      state: 'done',
+      reason: 'needs triage',
+    });
+    expect(after.find((i) => i.id === flying!.id)).toMatchObject({
+      state: 'in_flight',
+      body: SHAPED_179,
+    });
+    expect(ops(w).map((o) => JSON.parse(o.payloadJson).number)).toEqual([179]);
+    // Shaped again and put back on ready, the retired item comes back.
+    const e = w.f.state.issues.get(179);
+    if (e?.issue) e.issue.body = SHAPED_179;
+    w.f.state.setLabels(179, ['agent-ready']);
+    const back = await syncDropZone(w.db, w.forges, w.zone, plus(t0, 120_000));
+    expect(back.added).toBe(1);
+    expect(listWorkItems(w.db, 'main').find((i) => i.id === ready!.id)?.state).toBe('ready');
+  });
+
+  test('in observe mode the gate holds the issue back and the refused write fails nothing', async () => {
+    const w = world179();
+    setZoneMode(w.db, 'main', 'observe', t0);
+    const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(numbers(w)).toEqual([]);
+    expect(r.sentToTriage).toBe(1);
+    expect(ops(w)).toEqual([]);
   });
 });
