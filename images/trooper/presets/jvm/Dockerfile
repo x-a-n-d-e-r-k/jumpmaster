@@ -16,7 +16,10 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 # Maven 3.9.16 (released 2026-05-17), checked against the SHA-512 Apache publishes for it.
-RUN curl -fsSLo /tmp/maven.tar.gz https://archive.apache.org/dist/maven/maven-3/3.9.16/binaries/apache-maven-3.9.16-bin.tar.gz \
+# Maven Central first (the same tarball, fast and well mirrored), the Apache archive as the
+# fallback; retries ride out a slow mirror. The sha512 pin checks the bytes either way.
+RUN { curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 -o /tmp/maven.tar.gz https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/3.9.16/apache-maven-3.9.16-bin.tar.gz \
+   || curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 -o /tmp/maven.tar.gz https://archive.apache.org/dist/maven/maven-3/3.9.16/binaries/apache-maven-3.9.16-bin.tar.gz; } \
  && echo "831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6  /tmp/maven.tar.gz" | sha512sum -c - \
  && mkdir -p /out/maven \
  && tar -xzf /tmp/maven.tar.gz -C /out/maven --strip-components=1
