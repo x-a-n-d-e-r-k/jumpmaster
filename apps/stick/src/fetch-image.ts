@@ -6,8 +6,9 @@
 // - the layout is bound to the digest asked for: that digest's blob is the multi-arch index, its
 //   entry for this stick's platform is the manifest loaded, and that manifest's config is the
 //   image id the engine must report;
-// - under `signed`, `cosign verify --local-image --offline` checks the release workflow's
-//   signature on the digest asked for (a pin or a digest verified before needs none);
+// - under `signed`, the release workflow's Sigstore bundle on the digest asked for is checked
+//   with `cosign verify-blob-attestation` on the index's bytes, fully offline against the trusted
+//   root the stick image ships (issue #167; a pin or a digest verified before needs none);
 // - only then is the image loaded (a tar the stick builds from the files it checked, holding the
 //   platform image alone), its id checked, and it is named by its digest reference.
 // The temporary directory is removed whatever happens. A stick in `server` mode never contacts

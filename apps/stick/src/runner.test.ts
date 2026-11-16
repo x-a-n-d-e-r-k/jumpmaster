@@ -2146,12 +2146,14 @@ describe('server-hosted images (issue #141)', () => {
     const registry: string[][] = [];
     const local: string[][] = [];
     const c: Cosign = async (args) => {
-      (args.includes('--local-image') ? local : registry).push(args);
+      const offline = args[0] === 'verify-blob-attestation' && args.includes('--offline');
+      (offline ? local : registry).push(args);
+      // Registry mode (`cosign verify`) still reads the signed digest from the output.
       return {
         code: 0,
-        stdout: JSON.stringify([
-          { critical: { image: { 'docker-manifest-digest': r.indexDigest } } },
-        ]),
+        stdout: offline
+          ? ''
+          : JSON.stringify([{ critical: { image: { 'docker-manifest-digest': r.indexDigest } } }]),
         stderr: '',
       };
     };
