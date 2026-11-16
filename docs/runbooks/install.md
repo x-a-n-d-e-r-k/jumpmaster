@@ -333,7 +333,7 @@ exec node apps/server/dist/main.js "$HOME/.config/jumpmaster/jumpmaster.config.j
 ```
 
 The stick's script is the same shape, with its own variables (`JM_SERVER_URL`, `JM_JOIN_TOKEN` or
-`JM_JOIN_TOKEN_FILE`, `JM_SLOTS`; `JM_STATE_DIR` for its enrollment, default `~/.jumpmaster`;
+`JM_JOIN_TOKEN_FILE`, `JM_SLOTS` and `JM_MAX_SLOTS` (see [Troopers per stick](#troopers-per-stick)); `JM_STATE_DIR` for its enrollment, default `~/.jumpmaster`;
 `JM_IMAGE_POLICY`, which is `allowlist` from source and `signed` only with cosign on the PATH) and
 `exec node apps/stick/dist/main.js`. It talks to `/var/run/docker.sock` and ignores docker
 contexts, so where the socket lives elsewhere, export `DOCKER_HOST` in the script. If the engine is
@@ -949,7 +949,29 @@ stick is connected`, `waiting for a stick that can run zone …`, or `waiting fo
 
 The stick is the only container with the Docker socket, which is root-equivalent on the host. It
 enrolls with the server using `secrets/join_token`, keeps its enrollment, Sigstore trust root and
-verify cache in the `jm-stick` volume, and runs `JM_SLOTS` drops at once (default 1).
+verify cache in the `jm-stick` volume, and runs `JM_SLOTS` drops at once to start (default 1).
+
+### Troopers per stick
+
+How many troopers (drops) a stick runs at once is set on the **Sticks** page (`/sticks`, linked
+from the navigation and the floor's Sticks summary), or with `jumpmaster ctl sticks slots
+<name-or-id> <n>`; `jumpmaster ctl sticks` lists each stick's counts. A change applies on the
+stick's next lease answer, with no restart. Lowering it stops nothing: the stick takes no new drop
+until fewer than the new count are running. The server enforces the count itself, so it holds for
+an older stick too.
+
+- `JM_SLOTS` is the **starting count**: what the stick asks for when it enrolls, and what it runs
+  at until the count is set on the page (or when the server is too old to send one). The stick
+  reports it on every lease, so a stick restarted with a new `JM_SLOTS` runs at it (up to its
+  ceiling) while no count is set on the page.
+- `JM_MAX_SLOTS` is the stick's **ceiling**, the most the page can set: an integer of 1 or more.
+  Unset, it is 4, or `JM_SLOTS` when that is higher. Either way it is capped at the number of `/28`
+  blocks in `JM_DROP_SUBNET_POOL` (a `/27` holds 2). An invalid value stops the stick at start
+  with a message, as an invalid `JM_SLOTS` does. To allow more, set `JM_MAX_SLOTS` on that machine
+  (in `.env` for the compose install) and restart the stick.
+
+A stick too old to report its ceiling is capped at the `JM_SLOTS` it enrolled with; the page says
+so under its row.
 
 What it needs, in short (the full account is the release runbook's
 [What a stick needs to verify images](release.md#what-a-stick-needs-to-verify-images)):

@@ -94,7 +94,10 @@ services:
       JM_SERVER_URL: http://jumpmaster:7420
       JM_JOIN_TOKEN_FILE: /secrets/join_token
       JM_STICK_NAME: stick
+      # The trooper count asked for at enrollment; the operator changes it on the sticks page.
       JM_SLOTS: ${JM_SLOTS:-1}
+      # The most the sticks page may set (empty: max(4, JM_SLOTS)).
+      JM_MAX_SLOTS: ${JM_MAX_SLOTS:-}
       # Images only by digest, each verified with cosign against this repository's release
       # workflow, or pinned by the operator in JM_ALLOWED_IMAGES (name@sha256:…, comma-separated).
       JM_IMAGE_POLICY: signed

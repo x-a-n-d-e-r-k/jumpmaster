@@ -31,14 +31,20 @@ import {
   activeWorkCount,
   appendEvents,
   clearZoneStopping,
+  effectiveSlots,
+  findStick,
   getDrop,
   getWorkItem,
   getZoneMode,
   insertDrop,
   isKilled,
+  listSticks,
+  liveDropsOn,
   revokeGrants,
+  setStickDesiredSlots,
   setWorkItemState,
   setZoneMode,
+  stickCeiling,
   updateDrop,
   ZONE_MODES,
   zoneHistoryCounts,
@@ -91,6 +97,9 @@ import {
   registerGuidanceRoutes,
 } from './github.js';
 import { registerSecretRoutes } from './secrets.js';
+
+/** A stick's trooper count: an integer of 1 or more (the ceiling is checked against the stick). */
+const SlotsBody = z.object({ slots: z.number().int().min(1) });
 
 export interface ControlDeps {
   db: Db;
@@ -390,6 +399,48 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         return { zone: zone.id, dismissed };
       },
     );
+
+    // Each stick's trooper counts (issue #136), for `ctl sticks`.
+    scope.get('/api/control/sticks', async () => ({
+      sticks: listSticks(db).map((s) => ({
+        id: s.id,
+        name: s.name,
+        slots: effectiveSlots(s),
+        enrolledSlots: s.slots,
+        desiredSlots: s.desiredSlots,
+        maxSlots: stickCeiling(s),
+        running: liveDropsOn(db, s.id),
+        lastSeenAt: s.lastSeenAt,
+      })),
+    }));
+
+    // How many troopers a stick runs at once, applied on its next lease answer, no restart. Up to
+    // the ceiling it reported (its enrolled count for a stick too old to report one).
+    scope.post<{ Params: { id: string } }>('/api/control/sticks/:id/slots', async (req, reply) => {
+      const stick = findStick(db, req.params.id);
+      if (stick === 'ambiguous')
+        return reply
+          .code(409)
+          .send({ error: `several sticks are named ${req.params.id}: name it by its id` });
+      if (!stick) return reply.code(404).send({ error: 'unknown stick' });
+      const body = SlotsBody.safeParse(req.body);
+      if (!body.success)
+        return reply.code(400).send({ error: 'slots must be an integer of 1 or more' });
+      const { slots } = body.data;
+      const ceiling = stickCeiling(stick);
+      if (slots > ceiling)
+        return reply.code(400).send({
+          error: `stick ${stick.name} allows up to ${ceiling} trooper${ceiling === 1 ? '' : 's'} at once: to allow more, set JM_MAX_SLOTS on that machine and restart the stick`,
+        });
+      const old = effectiveSlots(stick);
+      setStickDesiredSlots(db, stick.id, slots);
+      audit(req, 'stick.slots', { old, new: slots }, stick.id);
+      return {
+        id: stick.id,
+        slots: effectiveSlots({ ...stick, desiredSlots: slots }),
+        maxSlots: ceiling,
+      };
+    });
 
     // What Jumpmaster is doing and why it waits (§10.3): the home banner's line, for `ctl status`.
     scope.get('/api/control/status', async (req) =>

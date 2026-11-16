@@ -143,7 +143,13 @@ describe('the released compose file', () => {
     expect(env).toMatch(/jumpmaster init: begin/);
     expect(env).toMatch(/unused/);
     expect(env).toMatch(/may be deleted/);
-    for (const v of ['DOCKER_SOCKET', 'JM_SLOTS', 'JM_DROP_SUBNET_POOL', 'JM_ALLOWED_IMAGES'])
+    for (const v of [
+      'DOCKER_SOCKET',
+      'JM_SLOTS',
+      'JM_MAX_SLOTS',
+      'JM_DROP_SUBNET_POOL',
+      'JM_ALLOWED_IMAGES',
+    ])
       expect(env).toContain(v);
     // Nothing secret belongs in .env.
     expect(env).not.toMatch(/^JM_[A-Z_]*TOKEN/m);
@@ -207,6 +213,7 @@ describe('the released compose file', () => {
       JM_IMAGE_POLICY: 'signed',
       JM_STATE_DIR: '/state',
       JM_SLOTS: '${JM_SLOTS:-1}',
+      JM_MAX_SLOTS: '${JM_MAX_SLOTS:-}',
       JM_DROP_SUBNET_POOL: '${JM_DROP_SUBNET_POOL:-}',
       JM_EGRESS_IMAGE: `ghcr.io/x-a-n-d-e-r-k/jumpmaster-egress@${LOCK.images['jumpmaster-egress']}`,
     });

@@ -9,6 +9,7 @@ import {
   insertDrop,
   insertOutbox,
   insertStick,
+  setStickDesiredSlots,
   setWorkItemState,
   setZoneMode,
   stampStick,
@@ -905,5 +906,95 @@ describe('external links open in a new tab, in-app links do not (#133)', () => {
       expect(a, a).not.toContain('target=');
     for (const a of anchors.filter((a) => a.includes('target="_blank"')))
       expect(a, a).toContain('rel="noopener noreferrer"');
+  });
+
+  test('/sticks lists each stick, names its zones by repository, and has a trooper input up to maxSlots', async () => {
+    const h = await harness({ zone: { egress: { mode: 'enforce' } } });
+    insertStick(h.db, { id: 's1', name: 'm3-stick', tokenHash: 'h1', slots: 1 });
+    insertStick(h.db, {
+      id: 's2',
+      name: 'kidney-shadow',
+      tokenHash: 'h2',
+      slots: 1,
+      capabilities: ['egress-v1'],
+    });
+    stampStick(
+      h.db,
+      's2',
+      { capabilities: ['egress-v1'], imagePolicy: 'allowlist', version: '0.6.0', pinnedImages: [] },
+      h.now(),
+      { maxSlots: 4 },
+    );
+    setStickDesiredSlots(h.db, 's2', 3);
+    const res = await h.view('/sticks');
+    expect(res.statusCode).toBe(200);
+    const html = res.body;
+    const row = (name: string) =>
+      html.match(
+        new RegExp(`<tr[^>]*data-stick="[^"]*">(?:(?!</tr>).)*${name}(?:(?!</tr>).)*</tr>`),
+      )?.[0] ?? '';
+    const shadow = row('kidney-shadow');
+    const m3 = row('m3-stick');
+    expect(shadow).toContain('0.6.0');
+    expect(shadow).toContain('live');
+    expect(shadow).toMatch(/<input[^>]*type="number"[^>]*min="1"[^>]*max="4"[^>]*value="3"/);
+    expect(shadow).toContain('data-slots="/api/control/sticks/s2/slots"');
+    expect(shadow).toContain('Running now: 0 of 3');
+    expect(shadow).not.toContain('JM_MAX_SLOTS');
+    expect(m3).toContain('cannot run octo/demo: lacks egress-v1');
+    expect(m3).toMatch(/<input[^>]*type="number"[^>]*max="1"[^>]*value="1"/);
+    expect(m3).toContain(
+      'This stick allows up to 1. To allow more, set <code>JM_MAX_SLOTS</code> on that machine and restart it.',
+    );
+    expect(m3).toContain('never seen');
+    // The harness's own stick, enrolled with 4 and never leased.
+    expect(html).toMatch(/<input[^>]*type="number"[^>]*max="4"[^>]*value="4"/);
+    // Linked from the nav and from the floor's Sticks summary.
+    expect(html).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/sticks">Sticks<\/a>.*<\/nav>/);
+    const home = (await h.view('/')).body;
+    expect(home).toMatch(/<details id="sticks"[^>]*>.*<a href="\/sticks">.*<\/details>/);
+  });
+
+  test('anonymous: /sticks is refused as /work is', async () => {
+    const h = await harness();
+    const anon = async (url: string) => (await h.app.inject({ method: 'GET', url })).statusCode;
+    const work = await anon('/work');
+    expect(work).not.toBe(200);
+    expect(await anon('/sticks')).toBe(work);
+  });
+
+  test("posting through the page's route changes the count the next lease answers with", async () => {
+    const h = await harness();
+    const id = (h.db.prepare("SELECT id FROM sticks WHERE name = 'h'").get() as { id: string }).id;
+    const lease = (maxSlots: number) =>
+      h.app.inject({
+        method: 'POST',
+        url: '/api/sticks/lease',
+        headers: h.stickHeaders(),
+        payload: { freeSlots: 0, maxSlots },
+      });
+    expect((await lease(6)).headers['x-jumpmaster-slots']).toBe('4');
+    const html = (await h.view('/sticks')).body;
+    const url = html.match(/data-slots="([^"]*)"/)?.[1];
+    expect(url).toBe(`/api/control/sticks/${id}/slots`);
+    const session = operatorSession(h.db, h.now());
+    // The page's fetch carries the session's CSRF token; without it the write is refused.
+    const bare = await h.app.inject({
+      method: 'POST',
+      url: url as string,
+      headers: { cookie: session.cookie },
+      payload: { slots: 6 },
+    });
+    expect(bare.statusCode).toBe(403);
+    const res = await h.app.inject({
+      method: 'POST',
+      url: url as string,
+      headers: session.headers,
+      payload: { slots: 6 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ id, slots: 6, maxSlots: 6 });
+    expect((await lease(6)).headers['x-jumpmaster-slots']).toBe('6');
+    expect((await h.view('/sticks')).body).toContain('Running now: 0 of 6');
   });
 });

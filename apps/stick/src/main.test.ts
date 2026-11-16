@@ -70,6 +70,19 @@ describe('stick entry point', () => {
     expect(child.stderr).toContain('JM_SERVER_URL is required');
     expect(child.status).toBe(1);
   });
+
+  test('an invalid JM_MAX_SLOTS fails at start with a clear message', () => {
+    expect(existsSync(dist), 'build first: npx tsc -b').toBe(true);
+    const env = {
+      ...process.env,
+      JM_SERVER_URL: 'http://127.0.0.1:1',
+      JM_MAX_SLOTS: 'abc',
+      JM_STATE_DIR: fresh(),
+    };
+    const child = spawnSync(process.execPath, [dist], { encoding: 'utf8', env, timeout: 10_000 });
+    expect(child.stderr).toContain('JM_MAX_SLOTS must be an integer of 1 or more, not abc');
+    expect(child.status).toBe(1);
+  });
 });
 
 describe('the version the stick reports', () => {

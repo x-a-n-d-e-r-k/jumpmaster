@@ -18,6 +18,7 @@ import { openDb } from '../db/open.js';
 import {
   getDrop,
   getOutbox,
+  getStick,
   getWorkItem,
   getZoneMode,
   insertDrop,
@@ -27,6 +28,7 @@ import {
   setUsageState,
   setWorkItemState,
   setZoneMode,
+  stampStick,
   updateDrop,
   upsertDropZone,
   upsertWorkItem,
@@ -2981,5 +2983,103 @@ describe('vault routes: turn on, prefer, copy, turn off (#101)', () => {
     const rm = await del('/api/control/secrets/githubAuthorToken');
     expect(rm.statusCode).toBe(409);
     expect(rm.json().error).toContain('would park');
+  });
+});
+
+describe('stick trooper counts (issue #136)', () => {
+  const SLOTS = '/api/control/sticks/s1/slots';
+  const enrolled = (db: ReturnType<typeof openDb>, maxSlots?: number) => {
+    insertStick(db, { id: 's1', name: 'kidney-shadow', tokenHash: 'h1', slots: 1 });
+    if (maxSlots !== undefined) stampStick(db, 's1', NO_ADVERT, t0, { maxSlots });
+  };
+  const NO_ADVERT = {
+    capabilities: [],
+    imagePolicy: 'allowlist',
+    version: null,
+    pinnedImages: [],
+  } as const;
+
+  test('400 for 0, for maxSlots + 1 and for a non-integer; nothing set, nothing audited', async () => {
+    const db = setup();
+    enrolled(db, 4);
+    for (const slots of [0, 5, 2.5, '2', null]) {
+      const res = await post(SLOTS, { slots });
+      expect(res.statusCode, String(slots)).toBe(400);
+    }
+    const over = await post(SLOTS, { slots: 5 });
+    expect(over.json().error).toContain('kidney-shadow allows up to 4');
+    expect(over.json().error).toContain('set JM_MAX_SLOTS on that machine and restart the stick');
+    expect(getStick(db, 's1')?.desiredSlots).toBeNull();
+    expect(listAudit(db)).toEqual([]);
+  });
+
+  test('200 sets the count and writes one stick.slots audit row with the old and new values', async () => {
+    const db = setup();
+    enrolled(db, 4);
+    const res = await post(SLOTS, { slots: 3 });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ id: 's1', slots: 3, maxSlots: 4 });
+    expect(getStick(db, 's1')?.desiredSlots).toBe(3);
+    const rows = listAudit(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      action: 'stick.slots',
+      via: 'token',
+      target: 's1',
+      detail: { old: 1, new: 3 },
+    });
+    // By name, as ctl names it.
+    const byName = await post('/api/control/sticks/kidney-shadow/slots', { slots: 2 });
+    expect(byName.json()).toEqual({ id: 's1', slots: 2, maxSlots: 4 });
+    expect(listAudit(db)[0]?.detail).toEqual({ old: 3, new: 2 });
+    expect((await post('/api/control/sticks/ghost/slots', { slots: 1 })).statusCode).toBe(404);
+  });
+
+  test('a stick too old to report maxSlots is capped at its enrolled slots', async () => {
+    const db = setup();
+    enrolled(db);
+    const res = await post(SLOTS, { slots: 2 });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(
+      /allows up to 1 .*set JM_MAX_SLOTS on that machine and restart the stick/,
+    );
+    expect((await post(SLOTS, { slots: 1 })).statusCode).toBe(200);
+  });
+
+  test('a request with no operator auth is refused, the same as /api/control/status', async () => {
+    const db = setup();
+    enrolled(db, 4);
+    for (const headers of [{ host: HOST }, { host: HOST, authorization: 'Bearer nope' }]) {
+      const status = await app?.inject({ method: 'GET', url: '/api/control/status', headers });
+      const res = await post(SLOTS, { slots: 2 }, headers);
+      expect(res.statusCode).toBe(status?.statusCode);
+      expect(res.statusCode).toBe(401);
+      const list = await app?.inject({ method: 'GET', url: '/api/control/sticks', headers });
+      expect(list?.statusCode).toBe(401);
+    }
+    expect(getStick(db, 's1')?.desiredSlots).toBeNull();
+    expect(listAudit(db)).toEqual([]);
+  });
+
+  test('GET /api/control/sticks lists each stick with its effective, desired and max slots', async () => {
+    const db = setup();
+    enrolled(db, 4);
+    await post(SLOTS, { slots: 3 });
+    const res = await app?.inject({ method: 'GET', url: '/api/control/sticks', headers: auth });
+    expect(res?.statusCode).toBe(200);
+    expect(res?.json()).toEqual({
+      sticks: [
+        {
+          id: 's1',
+          name: 'kidney-shadow',
+          slots: 3,
+          enrolledSlots: 1,
+          desiredSlots: 3,
+          maxSlots: 4,
+          running: 0,
+          lastSeenAt: t0.toISOString(),
+        },
+      ],
+    });
   });
 });

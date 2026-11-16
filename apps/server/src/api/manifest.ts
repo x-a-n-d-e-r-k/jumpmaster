@@ -167,6 +167,13 @@ export const CONTROL_ROUTES: ControlRoute[] = [
     ctl: 'ctl drops extend-retention d1 6',
   },
   { method: 'POST', path: '/api/control/drops/:id/cancel', ctl: 'ctl drops cancel d1' },
+  // Sticks
+  { method: 'GET', path: '/api/control/sticks', ctl: 'ctl sticks' },
+  {
+    method: 'POST',
+    path: '/api/control/sticks/:id/slots',
+    ctl: 'ctl sticks slots kidney-shadow 2',
+  },
   // Kill
   { method: 'POST', path: '/api/control/kill', ctl: 'ctl kill', also: ['ctl unkill'] },
 ];
@@ -182,6 +189,7 @@ export type Page =
   | 'Doctor'
   | 'Briefings'
   | 'Drops'
+  | 'Sticks'
   | 'Kill';
 
 export const PAGES: Page[] = [
@@ -195,6 +203,7 @@ export const PAGES: Page[] = [
   'Doctor',
   'Briefings',
   'Drops',
+  'Sticks',
   'Kill',
 ];
 
@@ -303,6 +312,11 @@ export const CTL_VERBS: { verb: string; page: Page; forms: string[] }[] = [
     verb: 'drops',
     page: 'Drops',
     forms: ['ctl drops extend-retention <dropId> <hours>', 'ctl drops cancel <dropId>'],
+  },
+  {
+    verb: 'sticks',
+    page: 'Sticks',
+    forms: ['ctl sticks [--json]', 'ctl sticks slots <name-or-id> <n>'],
   },
   { verb: 'kill', page: 'Kill', forms: ['ctl kill'] },
   { verb: 'unkill', page: 'Kill', forms: ['ctl unkill'] },

@@ -41,6 +41,13 @@ export function dropSubnetPool(env: NodeJS.ProcessEnv): string {
   return pool;
 }
 
+/** How many /28 blocks `pool` holds: at most this many drops run under egress at once. */
+export function subnetBlocks(pool: string): number {
+  const p = parseCidr(pool);
+  if (!p) throw new Error(`bad subnet pool ${pool}`);
+  return Math.floor(p.size / BLOCK);
+}
+
 /** The first /28 of `pool` that overlaps none of `existing` (IPv4 subnets held by any network). */
 export function allocateSubnet(existing: string[], pool: string): string {
   const p = parseCidr(pool);

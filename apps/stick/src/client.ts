@@ -12,6 +12,7 @@ import {
   PushPlanSchema,
   type PushResult,
   SKIPPED_HEADER,
+  SLOTS_HEADER,
   type StickInfo,
   type TrooperEvent,
 } from '@jumpmaster/protocol';
@@ -86,6 +87,14 @@ function skippedOf(res: Response): LeaseSkip[] {
   }
 }
 
+/** The trooper count a lease answer carries; null when missing or not an integer of 1 or more. */
+function slotsOf(res: Response): number | null {
+  const raw = res.headers.get(SLOTS_HEADER)?.trim() ?? '';
+  if (!/^[0-9]+$/.test(raw)) return null;
+  const n = Number(raw);
+  return n >= 1 && Number.isSafeInteger(n) ? n : null;
+}
+
 /**
  * Lease logging that doesn't flood: each distinct skip reason and each distinct lease error is
  * logged at most once a minute, though the stick polls every few seconds.
@@ -121,7 +130,14 @@ export class StickClient implements DropClient, PushClient {
   constructor(
     private readonly baseUrl: string,
     private token?: string,
-    private readonly opts: { heartbeatTimeoutMs?: number; info?: StickInfo } = {},
+    private readonly opts: {
+      heartbeatTimeoutMs?: number;
+      info?: StickInfo;
+      /** The stick's ceiling, sent with every lease. */
+      maxSlots?: number;
+      /** The stick's starting count (`JM_SLOTS`), sent with every lease. */
+      slots?: number;
+    } = {},
   ) {}
 
   /** What this stick advertises on enroll and on every lease (an M3 stick sent nothing). */
@@ -168,21 +184,30 @@ export class StickClient implements DropClient, PushClient {
    * Long-polls. `drop` is null when the server has nothing (204). `skipped` names zones with work
    * waiting that this stick can't run, and what it lacks for each. `terms` override what the
    * stick advertised at startup: the capabilities of its latest checks, and `noPush` at the cap.
+   * `slots` is the trooper count the server wants (null from an older server).
    */
   async lease(
     freeSlots: number,
     terms: { capabilities?: string[]; noPush?: boolean } = {},
-  ): Promise<{ drop: DropPayload | null; skipped: LeaseSkip[] }> {
-    const res = await this.req('/api/sticks/lease', { freeSlots, ...this.info, ...terms });
+  ): Promise<{ drop: DropPayload | null; skipped: LeaseSkip[]; slots: number | null }> {
+    const { maxSlots: max, slots: start } = this.opts;
+    const res = await this.req('/api/sticks/lease', {
+      freeSlots,
+      ...this.info,
+      ...terms,
+      ...(max === undefined ? {} : { maxSlots: max }),
+      ...(start === undefined ? {} : { slots: start }),
+    });
     this.features = featuresOf(res);
     const skipped = skippedOf(res);
-    if (res.status === 204) return { drop: null, skipped };
+    const slots = slotsOf(res);
+    if (res.status === 204) return { drop: null, skipped, slots };
     // A refusal's body is the server's error JSON, never a payload: safe to show.
     if (!res.ok) throw await failure('lease', res);
     const parsed = DropPayloadSchema.safeParse(await res.json());
     // Never echo a 2xx body: it carries credentials.
     if (!parsed.success) throw new Error('lease failed: invalid lease payload');
-    return { drop: parsed.data, skipped };
+    return { drop: parsed.data, skipped, slots };
   }
 
   async heartbeat(dropId: string, epoch: number): Promise<Beat> {

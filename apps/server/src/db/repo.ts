@@ -146,7 +146,18 @@ export interface Stick {
   imagePolicy: ImagePolicy;
   version: string | null;
   pinnedImages: string[];
+  /** The trooper count the operator set (v26); null: the enrolled `slots`. */
+  desiredSlots: number | null;
+  /** The ceiling the stick last reported (v26); null: too old to report one. */
+  maxSlots: number | null;
 }
+
+/** The most troopers a stick will run: what it reported, or its enrolled `slots` for an old one. */
+export const stickCeiling = (s: Pick<Stick, 'slots' | 'maxSlots'>): number => s.maxSlots ?? s.slots;
+
+/** How many troopers a stick runs at once: the operator's count (or the enrolled one), capped. */
+export const effectiveSlots = (s: Pick<Stick, 'slots' | 'maxSlots' | 'desiredSlots'>): number =>
+  Math.min(s.desiredSlots ?? s.slots, stickCeiling(s));
 
 const wallClock = () => new Date().toISOString();
 const iso = (now?: Date) => (now ? now.toISOString() : wallClock());
@@ -490,17 +501,51 @@ export function insertStick(
   });
 }
 
-/** Records what the stick advertised on this lease, and that it was seen now. */
-export function stampStick(db: Db, id: string, advert: StickAdvert, now: Date): void {
+/**
+ * Records what the stick advertised on this lease, and that it was seen now. `maxSlots` and
+ * `slots` (its starting count), when the stick reports them, replace the stored ceiling and
+ * enrolled count; an older stick's lease leaves them as they were.
+ */
+export function stampStick(
+  db: Db,
+  id: string,
+  advert: StickAdvert,
+  now: Date,
+  counts: { maxSlots?: number | undefined; slots?: number | undefined } = {},
+): void {
   db.prepare(
     `UPDATE sticks SET last_seen_at = @now, capabilities_json = @caps, image_policy = @policy,
-       version = @version, pinned_json = @pinned WHERE id = @id`,
-  ).run({ id, now: now.toISOString(), ...advertParams(advert) });
+       version = @version, pinned_json = @pinned, max_slots = COALESCE(@maxSlots, max_slots),
+       slots = COALESCE(@slots, slots)
+     WHERE id = @id`,
+  ).run({
+    id,
+    now: now.toISOString(),
+    maxSlots: counts.maxSlots ?? null,
+    slots: counts.slots ?? null,
+    ...advertParams(advert),
+  });
+}
+
+/** Sets the operator's trooper count for a stick (the caller checks it against the ceiling). */
+export function setStickDesiredSlots(db: Db, id: string, slots: number): void {
+  db.prepare('UPDATE sticks SET desired_slots = ? WHERE id = ?').run(slots, id);
+}
+
+/** Drops holding one of the stick's lease slots now (leased or running; a pending push holds none). */
+export function liveDropsOn(db: Db, stickId: string): number {
+  return (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM drops WHERE stick_id = ? AND state IN ('leased','running')`,
+      )
+      .get(stickId) as { n: number }
+  ).n;
 }
 
 const STICK_COLS = `id, name, token_hash AS tokenHash, slots, last_seen_at AS lastSeenAt,
   created_at AS createdAt, capabilities_json AS capabilitiesJson, image_policy AS imagePolicy,
-  version, pinned_json AS pinnedJson`;
+  version, pinned_json AS pinnedJson, desired_slots AS desiredSlots, max_slots AS maxSlots`;
 type StickRow = Omit<Stick, 'capabilities' | 'pinnedImages'> & {
   capabilitiesJson: string;
   pinnedJson: string;
@@ -526,6 +571,26 @@ export function getStickByTokenHash(db: Db, tokenHash: string): Stick | undefine
     | StickRow
     | undefined;
   return row ? toStick(row) : undefined;
+}
+
+export function getStick(db: Db, id: string): Stick | undefined {
+  const row = db.prepare(`SELECT ${STICK_COLS} FROM sticks WHERE id = ?`).get(id) as
+    | StickRow
+    | undefined;
+  return row ? toStick(row) : undefined;
+}
+
+/**
+ * A stick by id, or else by name: `ambiguous` when several share the name (each needs its id).
+ */
+export function findStick(db: Db, idOrName: string): Stick | 'ambiguous' | undefined {
+  const byId = getStick(db, idOrName);
+  if (byId) return byId;
+  const rows = db
+    .prepare(`SELECT ${STICK_COLS} FROM sticks WHERE name = ? LIMIT 2`)
+    .all(idOrName) as StickRow[];
+  if (rows.length > 1) return 'ambiguous';
+  return rows[0] ? toStick(rows[0]) : undefined;
 }
 
 /** Every enrolled stick, most recently seen first. */

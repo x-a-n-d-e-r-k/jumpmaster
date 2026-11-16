@@ -75,6 +75,13 @@ export type LeaseSkip = z.infer<typeof LeaseSkipSchema>;
  */
 export const SKIPPED_HEADER = 'x-jumpmaster-skipped';
 
+/**
+ * The lease response header carrying how many troopers the server wants this stick to run at
+ * once (an integer of 1 or more), on a 200 and a 204 alike. A stick caps it at its own ceiling
+ * (`maxSlots` in the lease body); a stick that never sees it keeps its `JM_SLOTS`.
+ */
+export const SLOTS_HEADER = 'x-jumpmaster-slots';
+
 /** Roles that work for the zone rather than one work item. They hold no forge write credential. */
 export const CREW_ROLES = ['crew-lead', 'refute', 'diagnose'] as const;
 export type CrewRole = (typeof CREW_ROLES)[number];

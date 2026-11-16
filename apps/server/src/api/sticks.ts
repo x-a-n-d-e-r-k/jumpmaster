@@ -13,6 +13,7 @@ import {
   pushRequestValid,
   type Role,
   SKIPPED_HEADER,
+  SLOTS_HEADER,
   type StickInfo,
   StickInfoSchema,
   TrooperEventSchema,
@@ -30,7 +31,9 @@ import {
   appendEvents,
   type Drop,
   type DropState,
+  effectiveSlots,
   getDrop,
+  getStick,
   getStickByTokenHash,
   getWorkItem,
   getZoneMode,
@@ -39,6 +42,7 @@ import {
   isReclaimable,
   killHeldOrRecent,
   latestDropFor,
+  liveDropsOn,
   markMinted,
   PUSH_RETENTION_MS,
   reserveGrant,
@@ -86,10 +90,17 @@ const EnrollBody = StickInfoSchema.extend({
   name: z.string().min(1),
   slots: z.number().int().min(1),
 });
-/** `noPush`: the stick has no room for another pending push, so it takes no pushing role now. */
+/**
+ * `noPush`: the stick has no room for another pending push, so it takes no pushing role now.
+ * `maxSlots`: the most troopers the stick will ever run (an older stick sends none).
+ * `slots`: the stick's starting count (`JM_SLOTS`) as it runs now, which refreshes the enrolled
+ * one: a stick restarted with a new `JM_SLOTS` keeps it when no desired count is set.
+ */
 const LeaseBody = StickInfoSchema.extend({
   freeSlots: z.number().int(),
   noPush: z.boolean().optional(),
+  maxSlots: z.number().int().min(1).optional(),
+  slots: z.number().int().min(1).optional(),
 });
 
 const advertOf = (info: StickInfo) => ({
@@ -301,15 +312,32 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       if (!stick) return reply.code(401).send({ error: 'unauthorized' });
       // Announced on every answer: a stick refuses pushing roles from a server without it.
       reply.header(FEATURES_HEADER, 'push-v1');
+      /**
+       * The trooper count the stick runs at, read afresh (the operator may change it mid-poll) and
+       * announced on the answer. True when the stick's live drops already reach it: it is leased
+       * nothing, whatever `freeSlots` it asked with, so a lower count holds for an old stick too.
+       */
+      const full = (): boolean => {
+        const row = getStick(db, stick.id) ?? stick;
+        const effective = effectiveSlots(row);
+        reply.header(SLOTS_HEADER, String(effective));
+        return liveDropsOn(db, stick.id) >= effective;
+      };
       const body = LeaseBody.safeParse(req.body);
-      if (!body.success) return reply.code(400).send({ error: 'invalid body' });
+      if (!body.success) {
+        full();
+        return reply.code(400).send({ error: 'invalid body' });
+      }
       // A stick that can't run push containers, or has no room for another pending push, gets no
       // pushing role; review, crew and doctor drops still go to it.
       const noPush = body.data.noPush === true || !body.data.capabilities.includes('push-v1');
       const excludeRoles = noPush ? PUSHING_ROLES : [];
       // Every lease call says what the stick can do now, and that it is alive.
-      stampStick(db, stick.id, advertOf(body.data), now());
-      if (body.data.freeSlots < 1) return reply.code(204).send();
+      stampStick(db, stick.id, advertOf(body.data), now(), {
+        maxSlots: body.data.maxSlots,
+        slots: body.data.slots,
+      });
+      if (full() || body.data.freeSlots < 1) return reply.code(204).send();
       let closed = false;
       // Not req.raw: IncomingMessage 'close' fires once the body is consumed, not on disconnect.
       reply.raw.on('close', () => {
@@ -347,6 +375,11 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
           return reply.code(204).send();
         }
         await sleep(pollMs);
+        // A count lowered while this poll waited holds from the next poll.
+        if (full()) {
+          reportSkips(reply, stick, cannot);
+          return reply.code(204).send();
+        }
       }
     });
 
