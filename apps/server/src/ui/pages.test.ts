@@ -3,7 +3,7 @@ import type { Briefing, Ruling } from '../briefings.js';
 import type { ClaudePlan, DropZoneConfig } from '../config.js';
 import { STARTER_WARNING } from '../config.js';
 import type { CrewIssue } from '../crew/store.js';
-import type { Drop, UsageWindowRow, WorkItem } from '../db/repo.js';
+import type { Drop, StoredEvent, UsageWindowRow, WorkItem } from '../db/repo.js';
 import type { GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import { statusOf } from '../status.js';
@@ -1374,5 +1374,277 @@ describe('external links open in a new tab (#133)', () => {
     expect(html).not.toMatch(/<a href="\/work"[^>]*target=/);
     expect(html).toMatch(/<a [^>]*href="\/drops\/d1"[^>]*>/);
     expect(html).not.toMatch(/<a [^>]*href="\/drops\/d1"[^>]*target=/);
+  });
+});
+
+describe('transcript on the drop page', () => {
+  // About 20 events in the shapes a real drop stores: phases, stream-json lines as `agent` events
+  // ({ raw }), the stored end-of-run summary, rate limits, gates and egress.
+  const ev = (
+    seq: number,
+    kind: StoredEvent['kind'],
+    data: Record<string, unknown>,
+  ): StoredEvent => ({
+    seq,
+    ts: `2026-11-16T10:00:${String(seq).padStart(2, '0')}.000Z`,
+    kind,
+    data,
+  });
+  const assistant = (content: unknown[]) => ({
+    raw: { type: 'assistant', message: { role: 'assistant', content }, session_id: 's1' },
+  });
+  const toolResult = (id: string, content: unknown, isError = false) => ({
+    raw: {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: id, content, is_error: isError }],
+      },
+      session_id: 's1',
+    },
+  });
+  const fixture: StoredEvent[] = [
+    ev(1, 'phase', { phase: 'clone' }),
+    ev(2, 'phase', { phase: 'claude' }),
+    ev(3, 'agent', assistant([{ type: 'text', text: 'I will read the sync module first.' }])),
+    ev(
+      4,
+      'agent',
+      assistant([
+        {
+          type: 'tool_use',
+          id: 't1',
+          name: 'Read',
+          input: { file_path: 'apps/server/src/sync.ts' },
+        },
+      ]),
+    ),
+    ev(5, 'agent', toolResult('t1', 'export function sync() {}')),
+    ev(
+      6,
+      'agent',
+      assistant([
+        {
+          type: 'tool_use',
+          id: 't2',
+          name: 'Bash',
+          input: { command: 'npm test', description: 'run tests' },
+        },
+      ]),
+    ),
+    ev(7, 'agent', toolResult('t2', [{ type: 'text', text: 'Tests failed: 1' }], true)),
+    ev(
+      8,
+      'agent',
+      assistant([
+        {
+          type: 'tool_use',
+          id: 't3',
+          name: 'Grep',
+          input: { pattern: 'escapeHtml', path: 'apps' },
+        },
+      ]),
+    ),
+    ev(9, 'agent', toolResult('t3', 'apps/server/src/ui/pages.ts')),
+    ev(
+      10,
+      'agent',
+      assistant([
+        {
+          type: 'tool_use',
+          id: 't4',
+          name: 'TodoWrite',
+          input: { todos: [{ content: 'x'.repeat(300) }] },
+        },
+      ]),
+    ),
+    ev(11, 'rate_limit', { status: 'allowed', rateLimitType: 'five_hour' }),
+    ev(12, 'agent', { ...toolResult('t4', 'ok…[truncated 70000 chars]'), truncated: true }),
+    ev(13, 'agent', { raw: { type: 'mystery_event', note: 'kept' } }),
+    ev(14, 'agent', {
+      raw: {
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        duration_ms: 65400,
+        num_turns: 14,
+        total_cost_usd: 0.4213,
+      },
+    }),
+    ev(15, 'agent', { result: true, isError: false, terminalReason: 'completed' }),
+    ev(16, 'phase', { phase: 'gates' }),
+    ev(17, 'gate', {
+      name: 'lint',
+      exitCode: 0,
+      timedOut: false,
+      durationMs: 1200,
+      outputTail: 'all clean',
+    }),
+    ev(18, 'gate', {
+      name: 'test',
+      exitCode: 1,
+      timedOut: false,
+      durationMs: 30500,
+      outputTail: '1 failed',
+    }),
+    ev(19, 'egress', { host: 'registry.npmjs.org', decision: 'allow', count: 4 }),
+    ev(20, 'phase', { phase: 'checkpoint' }),
+  ];
+  const transcriptOf = (html: string) => {
+    const start = html.indexOf('<h3>Transcript</h3>');
+    expect(start).toBeGreaterThan(-1);
+    return html.slice(start, html.indexOf('<details class="raw-events">'));
+  };
+
+  test('every shape renders, labeled, in seq order', () => {
+    const t = transcriptOf(renderDrop(drop, fixture));
+    const marks = [
+      '<div class="t-phase">clone</div>',
+      '<div class="t-phase">claude</div>',
+      '<div class="t-text"><b>Claude</b><p>I will read the sync module first.</p></div>',
+      '<b>Read</b> apps/server/src/sync.ts',
+      '<summary>result</summary><pre>export function sync() {}</pre>',
+      '<b>Bash</b> npm test',
+      '<summary>error</summary><pre>Tests failed: 1</pre>',
+      '<b>Grep</b> escapeHtml',
+      `<b>TodoWrite</b> ${escapeHtml(JSON.stringify({ todos: [{ content: 'x'.repeat(300) }] }).slice(0, 200))}<`,
+      '<summary>rate_limit</summary>',
+      'cut when stored (over 63 KB)',
+      '<summary>agent: mystery_event</summary><pre>{&quot;type&quot;:&quot;mystery_event&quot;,&quot;note&quot;:&quot;kept&quot;}</pre>',
+      'Run ended: success, 65.4 s, 14 turns, $0.4213',
+      'Run ended: completed',
+      '<div class="t-phase">gates</div>',
+      'Gate <b>lint</b>: exit 0, 1.2 s<details><summary>output</summary><pre>all clean</pre></details>',
+      'Gate <b>test</b>: exit 1, 30.5 s<details><summary>output</summary><pre>1 failed</pre></details>',
+      '<summary>egress</summary>',
+      '<div class="t-phase">checkpoint</div>',
+    ];
+    let at = -1;
+    for (const m of marks) {
+      const i = t.indexOf(m, at + 1);
+      expect(i, m).toBeGreaterThan(at);
+      at = i;
+    }
+    // The full tool input sits collapsed beside its one-line summary.
+    expect(t).toContain(
+      '<details><summary>input</summary><pre>{&quot;command&quot;:&quot;npm test&quot;,&quot;description&quot;:&quot;run tests&quot;}</pre></details>',
+    );
+    // Only the stored-truncated event carries the marker.
+    expect(t.split('cut when stored').length - 1).toBe(1);
+  });
+
+  test('the transcript sits above the raw table', () => {
+    const html = renderDrop(drop, fixture);
+    expect(html.indexOf('<h3>Transcript</h3>')).toBeLessThan(
+      html.indexOf('<details class="raw-events">'),
+    );
+  });
+
+  const XSS = '<script>alert(1)</script>';
+  const ESC = '&lt;script&gt;alert(1)&lt;/script&gt;';
+
+  test('XSS in assistant text, tool name, tool input and tool result is escaped', () => {
+    const html = renderDrop(drop, [
+      ev(1, 'agent', assistant([{ type: 'text', text: XSS }])),
+      ev(
+        2,
+        'agent',
+        assistant([{ type: 'tool_use', id: 'a', name: XSS, input: { command: XSS } }]),
+      ),
+      ev(
+        3,
+        'agent',
+        assistant([{ type: 'tool_use', id: 'b', name: 'Write', input: { content: XSS } }]),
+      ),
+      ev(4, 'agent', toolResult('a', XSS)),
+      ev(5, 'agent', toolResult('b', [{ type: 'text', text: XSS }], true)),
+    ]);
+    expect(html).not.toContain(XSS);
+    const t = transcriptOf(html);
+    expect(t).toContain(`<div class="t-text"><b>Claude</b><p>${ESC}</p></div>`);
+    expect(t).toContain(
+      `<b>${ESC}</b> ${ESC}<details><summary>input</summary><pre>{&quot;command&quot;:&quot;${ESC}&quot;}</pre></details>`,
+    );
+    expect(t).toContain(`<b>Write</b> {&quot;content&quot;:&quot;${ESC}&quot;}`);
+    expect(t).toContain(`<summary>result</summary><pre>${ESC}</pre>`);
+    expect(t).toContain(`<summary>error</summary><pre>${ESC}</pre>`);
+  });
+
+  test('XSS in the result, gates, phases and unknown shapes is escaped', () => {
+    const html = renderDrop(drop, [
+      ev(1, 'phase', { phase: XSS }),
+      ev(2, 'agent', { raw: { type: 'result', subtype: XSS, duration_ms: 1000 } }),
+      ev(3, 'agent', { result: true, isError: true, terminalReason: XSS }),
+      ev(4, 'gate', { name: XSS, exitCode: XSS, durationMs: 1000, outputTail: XSS }),
+      ev(5, 'agent', { raw: { type: XSS, x: XSS } }),
+      ev(6, 'log', { msg: XSS }),
+    ]);
+    expect(html).not.toContain(XSS);
+    const t = transcriptOf(html);
+    expect(t).toContain(`<div class="t-phase">${ESC}</div>`);
+    expect(t).toContain(`Run ended: ${ESC}, 1.0 s`);
+    expect(t).toContain(`Run ended: error, ${ESC}`);
+    expect(t).toContain(
+      `Gate <b>${ESC}</b>: exit ${ESC}, 1.0 s<details><summary>output</summary><pre>${ESC}</pre></details>`,
+    );
+    expect(t).toContain(
+      `<summary>agent: ${ESC}</summary><pre>{&quot;type&quot;:&quot;${ESC}&quot;,&quot;x&quot;:&quot;${ESC}&quot;}</pre>`,
+    );
+    expect(t).toContain(`<summary>log</summary><pre>{&quot;msg&quot;:&quot;${ESC}&quot;}</pre>`);
+  });
+
+  test('a result over 4000 characters is shortened and states its full length', () => {
+    const long = `${'a'.repeat(3999)}b${'c'.repeat(6000)}`;
+    const t = transcriptOf(renderDrop(drop, [ev(1, 'agent', toolResult('a', long))]));
+    expect(t).toContain(`<pre>${'a'.repeat(3999)}b</pre>`);
+    expect(t).not.toContain('bc');
+    expect(t).toContain('First 4000 of 10000 characters.');
+    // A short result carries no such note.
+    expect(
+      transcriptOf(renderDrop(drop, [ev(1, 'agent', toolResult('a', 'short'))])),
+    ).not.toContain('characters.');
+  });
+
+  test('an event cut when stored shows the marker, even with nothing else left', () => {
+    const t = transcriptOf(
+      renderDrop(drop, [
+        ev(1, 'agent', { truncated: true, bytes: 900000 }),
+        ev(2, 'gate', {
+          name: 'lint',
+          exitCode: 0,
+          durationMs: 1,
+          outputTail: 'x',
+          truncated: true,
+        }),
+      ]),
+    );
+    expect(t.split('cut when stored (over 63 KB)').length - 1).toBe(2);
+    expect(t).toContain('{&quot;truncated&quot;:true,&quot;bytes&quot;:900000}');
+  });
+
+  test('no events and no agent events are told apart', () => {
+    const none = renderDrop(drop, []);
+    expect(none).toContain('No events recorded');
+    expect(none).not.toContain('No agent transcript');
+    const doctor = renderDrop(drop, [
+      ev(1, 'phase', { phase: 'gates' }),
+      ev(2, 'gate', { name: 'check', exitCode: 0, durationMs: 5, outputTail: '' }),
+    ]);
+    expect(doctor).toContain('No agent transcript in this drop');
+    expect(doctor).not.toContain('No events recorded');
+    expect(doctor).toContain('Gate <b>check</b>');
+    const full = renderDrop(drop, fixture);
+    expect(full).not.toContain('No agent transcript');
+    expect(full).not.toContain('No events recorded');
+  });
+
+  test('the raw table stays, collapsed, with the event count', () => {
+    const html = renderDrop(drop, fixture);
+    const raw = html.slice(html.indexOf('<details class="raw-events">'));
+    expect(raw).toMatch(
+      /^<details class="raw-events"><summary>Raw events \(20\)<\/summary><table>/,
+    );
+    expect(raw.match(/<tr><td>\d+<\/td>/g)).toHaveLength(fixture.length);
+    expect(renderDrop(drop, [])).toContain('<summary>Raw events (0)</summary>');
   });
 });
