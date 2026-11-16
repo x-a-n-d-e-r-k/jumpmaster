@@ -3,9 +3,9 @@
 This installs Jumpmaster from a published release with Docker Compose, on one Linux or macOS host,
 and takes it to a merged agent pull request. There are two ways in:
 
-- **[The browser path](#install-in-the-browser)** (start here): five shell commands, then
-  everything in the browser. The config lives in the database (db mode), and credentials you
-  enter are kept encrypted in the vault.
+- **[The browser path](#install-in-the-browser)** (start here): one block of shell commands
+  copied from the README, then everything in the browser. The config lives in the database (db
+  mode), and credentials you enter are kept encrypted in the vault.
 - **[The scripted install](#the-scripted-install)**: `jumpmaster init` writes a config file (file
   mode) and you keep each token as a file under `secrets/`. Use it when you want the config in
   version control; [Config as code](#config-as-code) covers both modes.
@@ -64,12 +64,16 @@ list.
 
 Make an empty directory, download the release's four files into it, check that `SHA256SUMS` was
 signed by this repository's release workflow from a version tag on `main`, and check the files
-against it. These are the README's first four commands; releases are listed at
-<https://github.com/x-a-n-d-e-r-k/jumpmaster/releases>.
+against it. This is the README's Quickstart block without its last line (`docker compose up`,
+step 2); releases are listed at <https://github.com/x-a-n-d-e-r-k/jumpmaster/releases>.
 
-```sh
+```bash
+setopt interactive_comments 2>/dev/null
+# latest skips pre-releases: to install a release candidate, set VERSION to its tag (for example VERSION=v0.4.0-rc.1).
+VERSION=latest
+if [ "$VERSION" = latest ]; then base=releases/latest/download/; else base=releases/download/$VERSION/; fi
 mkdir jumpmaster && cd jumpmaster
-for f in compose.yaml images.lock.json SHA256SUMS SHA256SUMS.sigstore.json; do curl -fsSLO "https://github.com/x-a-n-d-e-r-k/jumpmaster/releases/latest/download/$f"; done
+for f in compose.yaml images.lock.json SHA256SUMS SHA256SUMS.sigstore.json; do curl -fSLO "https://github.com/x-a-n-d-e-r-k/jumpmaster/$base$f"; done
 cosign verify-blob --bundle SHA256SUMS.sigstore.json \
   --certificate-identity-regexp '^https://github\.com/x-a-n-d-e-r-k/jumpmaster/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -79,8 +83,9 @@ cosign verify-blob --bundle SHA256SUMS.sigstore.json \
 sha256sum -c SHA256SUMS        # macOS: shasum -a 256 -c SHA256SUMS
 ```
 
-To install a release candidate (a prerelease, which `latest` skips), replace `latest/download` with
-`download/<tag>`.
+The first line lets zsh read the block's comments as comments (bash ignores it), so the block
+works pasted into either. A 404 here means there is no stable release yet: set VERSION to the
+newest tag on the releases page.
 
 Optionally, check the images the compose file names: the server, the stick and the egress proxy
 (the stick checks every trooper and proxy image itself before it runs one; see
@@ -122,9 +127,9 @@ download; the images are pinned whatever you skip. More in
 docker compose up
 ```
 
-It stays in the foreground so you can read its output (`docker compose up -d`, then
-`docker compose logs -f jumpmaster`, is the same in the background). The `bootstrap` service runs
-first, as your user: it makes `secrets/` and `data/` (`0700`) and `config/`, and generates
+It stays in the foreground so you can read its output. To run it in the background instead, use
+`docker compose up -d`: the setup code is in `docker compose logs jumpmaster`. The `bootstrap`
+service runs first, as your user: it makes `secrets/` and `data/` (`0700`) and `config/`, and generates
 `secrets/join_token`, `secrets/operator_token` and `secrets/vault_key` (`0600`); then the server
 starts, and the stick pairs with it using the join token. Nothing needs to be written by hand.
 
@@ -134,8 +139,9 @@ code (`docker compose logs jumpmaster` shows it again), and
 after you enter it you have ten minutes to choose the passphrase, and if you go back or that time
 runs out, print a fresh code and use the newest line.
 
-The UI is at <http://127.0.0.1:7420/>, on the host only. From another machine, tunnel it:
-`ssh -L 7420:127.0.0.1:7420 <host>`, then open the same address on your machine.
+The server prints the address to open with the code, <http://127.0.0.1:7420/setup>; it answers on
+the host only. From another machine, tunnel it: `ssh -L 7420:127.0.0.1:7420 <host>`, then open
+the same address on your machine.
 
 The services come back by themselves after a host restart only if the Docker engine starts at boot;
 [Start at boot](#start-at-boot) says how on each host.
@@ -154,7 +160,7 @@ problems (a directory made by `sudo`, or by the engine as root) print their own 
 
 ### Step 3: Claim the install
 
-Open <http://127.0.0.1:7420/>: a new install sends you to **Set up Jumpmaster**. Enter the setup
+Open <http://127.0.0.1:7420/setup>: a new install shows **Set up Jumpmaster**. Enter the setup
 code and press **Continue**, then choose the operator passphrase you will log in with (at least
 12 characters). That ends setup mode: from now on every page needs the login.
 
@@ -167,8 +173,9 @@ read -rs JM_PASS && printf '%s' "$JM_PASS" | docker compose exec -T jumpmaster j
 
 ### Step 4: The setup wizard
 
-After the login, the home page shows **Finish setup** and the wizard's five steps, each at its own
-address (`/setup/claude`, `/setup/forge`, `/setup/stick`, `/setup/project`, `/setup/doctor`).
+After the passphrase step you land on the wizard's first step (Claude). If you leave the wizard
+early, the home page shows **Finish setup** to take you back. The wizard has five steps, each at its
+own address (`/setup/claude`, `/setup/forge`, `/setup/stick`, `/setup/project`, `/setup/doctor`).
 **Do this later** skips a step; **Dismiss setup** hides the wizard (home keeps **Add a project**).
 Saving a credential asks for your passphrase again (sudo, good for five minutes).
 
@@ -515,8 +522,8 @@ docker compose exec jumpmaster jumpmaster ctl doctor
 ```
 
 `ctl passphrase set` claims the install without a browser (or open the UI and use the setup code,
-as in [step 3](#step-3-claim-the-install)); `ctl labels <zone>` creates the missing labels
-([Labels](#labels)). Fix what the doctor reports until it shows `0 fail`, then run the doctor drop
+as in [step 3](#step-3-claim-the-install): the setup code is in `docker compose logs jumpmaster`);
+`ctl labels <zone>` creates the missing labels ([Labels](#labels)). Fix what the doctor reports until it shows `0 fail`, then run the doctor drop
 (`ctl doctor <zone> --drop`) and enforce egress: add the hosts the doctor's `zone.egress` lists to
 the zone's `egress.allow` in the file, set its `mode` to `enforce`, run
 `docker compose exec jumpmaster jumpmaster ctl config reload`, and run another doctor drop.
@@ -577,12 +584,16 @@ From M4, or any earlier release with Compose, replacing `compose.yaml` is the wh
 1. **Drain.** `docker compose exec jumpmaster jumpmaster ctl pause <zone>` for each zone, then wait
    until the home page shows nothing running.
 2. **Replace `compose.yaml`.** From inside the install directory, download the new release's four
-   files over the old ones and verify them (with `cosign_docker` from
+   files over the old ones and verify them (set VERSION as in step 1; with `cosign_docker` from
    [step 1](#step-1-download-and-verify-the-release), only the two release files are mounted,
    never `secrets/`):
 
-   ```sh
-   for f in compose.yaml images.lock.json SHA256SUMS SHA256SUMS.sigstore.json; do curl -fsSLO "https://github.com/x-a-n-d-e-r-k/jumpmaster/releases/latest/download/$f"; done
+   ```bash
+   setopt interactive_comments 2>/dev/null
+   # latest skips pre-releases: to install a release candidate, set VERSION to its tag (for example VERSION=v0.4.0-rc.1).
+   VERSION=latest
+   if [ "$VERSION" = latest ]; then base=releases/latest/download/; else base=releases/download/$VERSION/; fi
+   for f in compose.yaml images.lock.json SHA256SUMS SHA256SUMS.sigstore.json; do curl -fSLO "https://github.com/x-a-n-d-e-r-k/jumpmaster/$base$f"; done
    cosign verify-blob --bundle SHA256SUMS.sigstore.json \
      --certificate-identity-regexp '^https://github\.com/x-a-n-d-e-r-k/jumpmaster/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' \
      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
