@@ -14,6 +14,7 @@ import { loadBoot } from '../config/boot.js';
 import { ConfigStore } from '../config/store.js';
 import { openDb } from '../db/open.js';
 import {
+  findStick,
   getDrop,
   insertDrop,
   insertStick,
@@ -26,6 +27,12 @@ import type { ImageMirror } from '../images/mirror.js';
 import type { ImageRecord, ImageStore } from '../images/store.js';
 import { expireLeases } from '../leases.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
+
+// Wrapped so a test can replay a racing Remove: findStick answering with a stick already removed.
+vi.mock('../db/repo.js', async (actual) => {
+  const repo = await actual<typeof import('../db/repo.js')>();
+  return { ...repo, findStick: vi.fn(repo.findStick) };
+});
 
 const HOST = '127.0.0.1:7420';
 const JOIN = 'join-secret-value-4';
@@ -342,6 +349,32 @@ describe('enrolling with a code', () => {
     expect(w.db.prepare('SELECT COUNT(*) AS n FROM sticks').get()).toEqual({ n: 1 });
   });
 
+  test('an invite whose name a live stick took since refuses clearly and stays unused', async () => {
+    const w = await world();
+    const code = await w.invite('a');
+    // Another stick enrolls as `a` with the join token after the invite was made.
+    const joined = await w.inject({
+      method: 'POST',
+      url: '/api/sticks/enroll',
+      headers: w.proto,
+      payload: { joinToken: JOIN, name: 'a', slots: 1, capabilities: [] },
+    });
+    expect(joined.statusCode, joined.body).toBe(200);
+    const r = await w.enroll({ enrollCode: code });
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).toContain('a stick named a is already enrolled');
+    expect(r.body).not.toContain(code);
+    expect(
+      w.db
+        .prepare("SELECT COUNT(*) AS n FROM sticks WHERE name = 'a' AND removed_at IS NULL")
+        .get(),
+    ).toEqual({ n: 1 });
+    expect(w.db.prepare('SELECT used_at, stick_id FROM stick_invites').get()).toEqual({
+      used_at: null,
+      stick_id: null,
+    });
+  });
+
   test('the join token enrolls as ever, with the stick name it sends', async () => {
     const w = await world();
     const r = await w.enroll({ joinToken: JOIN });
@@ -473,6 +506,25 @@ describe('removing a stick and cancelling an invite', () => {
     expect(await w.page()).not.toContain(`data-stick="${stickId}"`);
     // Gone: a second removal finds nothing.
     expect((await remove()).statusCode).toBe(404);
+  });
+
+  test('a racing second Remove that removes nothing gets 404 and writes no audit row', async () => {
+    const w = await world();
+    await w.enroll({ joinToken: JOIN });
+    const remove = () =>
+      w.inject({
+        method: 'POST',
+        url: '/api/control/sticks/stick/remove',
+        headers: { host: HOST, authorization: `Bearer ${TOKEN}` },
+        payload: {},
+      });
+    const stale = findStick(w.db, 'stick');
+    expect((await remove()).statusCode).toBe(200);
+    // The second request passed findStick before the first committed: removeStick finds nothing.
+    vi.mocked(findStick).mockImplementationOnce(() => stale);
+    const second = await remove();
+    expect(second.statusCode).toBe(404);
+    expect(listAudit(w.db).filter((a) => a.action === 'stick.remove')).toHaveLength(1);
   });
 
   test('ctl reaches Remove with the operator token (always sudo)', async () => {

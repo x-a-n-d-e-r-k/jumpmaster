@@ -15,12 +15,11 @@ import {
 import { enrolledSlots, maxSlotsFor, SlotTarget } from './slots.js';
 import {
   advertisedCapabilities,
-  enrollCredential,
+  enrollStick,
   healthLine,
   leaseTerms,
   loadEnrollment,
   loadRelease,
-  saveEnrollment,
   stateDir,
   stickInfo,
   stickVersion,
@@ -63,14 +62,11 @@ async function main() {
   const client = new StickClient(serverUrl, token, { maxSlots, slots });
   let enrolled = Boolean(token && stickId);
   const enroll = async () => {
-    const name = process.env.JM_STICK_NAME ?? 'stick';
-    // A one-time code (the installer's, issue #138) names the stick from its invite.
-    const out = await client.enroll(enrollCredential(process.env), name, slots);
-    stickId = out.stickId;
+    // Deletes a one-time code's file once enrolled (issue #138).
+    stickId = await enrollStick(client, process.env, dir, serverUrl, slots, (line) =>
+      console.log(line),
+    );
     enrolled = true;
-    saveEnrollment(dir, { serverUrl, stickId, stickToken: out.stickToken });
-    // The installer waits for this line, and prints the name.
-    console.log(`enrolled as ${out.name ?? name} (${stickId})`);
   };
   // Where missing images come from (issue #141): JM_IMAGE_SOURCE, else the server once it
   // announces image-mirror-v1 on a lease. Checked here, so a bad value stops the start.

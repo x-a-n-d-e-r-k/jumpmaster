@@ -495,7 +495,8 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
           .send({ error: `several sticks are named ${req.params.id}: name it by its id` });
       if (!stick) return reply.code(404).send({ error: 'unknown stick' });
       const at = now();
-      removeStick(db, stick.id, at);
+      // A racing remove may have committed since findStick: then this one removed nothing.
+      if (!removeStick(db, stick.id, at)) return reply.code(404).send({ error: 'unknown stick' });
       expireLeases(db, at, cfg(req).usage);
       audit(req, 'stick.remove', { name: stick.name }, stick.id);
       return { id: stick.id, name: stick.name, removed: true };

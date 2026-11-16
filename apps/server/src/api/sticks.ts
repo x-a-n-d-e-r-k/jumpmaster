@@ -335,6 +335,11 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
             })
           : undefined;
         if (!invite) return reply.code(401).send({ error: 'unauthorized' });
+        if ('nameTaken' in invite) {
+          return reply.code(409).send({
+            error: `a stick named ${invite.nameTaken} is already enrolled: remove it, or add this stick under another name`,
+          });
+        }
         return { stickId, stickToken, name: invite.name };
       }
       if (!safeEqual(joinToken ?? '', live().secrets.joinToken)) {

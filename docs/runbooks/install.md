@@ -1186,6 +1186,11 @@ The result page has two tabs:
    - `JM_IMAGE_POLICY=signed`.
 6. It waits up to 60 seconds for the stick to enroll. Then it prints
    `Enrolled as <name>. Back to your browser.`, or the enrollment error, and deletes the code file.
+   The stick also deletes the code file itself once it enrolls, so the spent code is gone even if
+   the 60-second wait ran out. If a stick already has the invite's name (for example, one that
+   enrolled with the join token after you added the invite), enrolling with the code is refused
+   and the invite stays unused: remove that stick, or cancel the invite and add the stick under
+   another name.
 
 **In the browser**, the sticks page lists the invite as `<name>: waiting for it to check in
 (expires <time>)` until the stick enrolls. You can **Cancel** the invite there (sudo; audited as

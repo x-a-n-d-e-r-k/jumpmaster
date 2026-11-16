@@ -1532,11 +1532,17 @@ export function enrollFromInvite(
   codeHash: string,
   now: Date,
   stick: Pick<Stick, 'id' | 'tokenHash' | 'slots'> & Partial<StickAdvert>,
-): StickInvite | undefined {
+): StickInvite | { nameTaken: string } | undefined {
   return db
-    .transaction((): StickInvite | undefined => {
+    .transaction((): StickInvite | { nameTaken: string } | undefined => {
       const invite = pendingInviteByHash(db, codeHash, now);
       if (!invite) return undefined;
+      // A live stick took the name since the invite was made (say, by the join token): refused,
+      // and the invite stays unused.
+      const taken = db
+        .prepare(`SELECT 1 FROM sticks WHERE name = ? AND removed_at IS NULL LIMIT 1`)
+        .get(invite.name);
+      if (taken) return { nameTaken: invite.name };
       insertStick(db, {
         ...stick,
         name: invite.name,
