@@ -69,6 +69,7 @@ import {
 } from './reach.js';
 import { buildStatus } from './status.js';
 import { lastSyncResult } from './sync.js';
+import { transcriptPruned } from './transcripts.js';
 import { registerAuthPages } from './ui/auth-pages.js';
 import { registerConfirmPages } from './ui/confirm.js';
 import { registerGithubPages } from './ui/github.js';
@@ -607,7 +608,12 @@ export function createApp(
       .send(
         withCsrf(
           req,
-          renderDrop(drop, listEvents(deps.db, drop.id), listArtifacts(deps.db, drop.id)),
+          renderDrop(
+            drop,
+            listEvents(deps.db, drop.id),
+            listArtifacts(deps.db, drop.id),
+            transcriptPruned(deps.db, drop.id),
+          ),
         ),
       );
   });

@@ -1653,6 +1653,24 @@ describe('transcript on the drop page', () => {
     expect(full).not.toContain('No events recorded');
   });
 
+  test('a pruned transcript says when and where it went, unlike one that never had events', () => {
+    const archived = renderDrop(drop, [], [], {
+      prunedAt: '2026-11-16T12:00:00.000Z',
+      archive: 'transcripts/main/2026-08/d1.jsonl.gz',
+    });
+    expect(archived).toContain(
+      'Transcript pruned on 2026-11-16; archived at transcripts/main/2026-08/d1.jsonl.gz',
+    );
+    expect(archived).not.toContain('No events recorded');
+    const lost = renderDrop(drop, [], [], { prunedAt: '2026-11-16T12:00:00.000Z', archive: null });
+    expect(lost).toContain('Transcript pruned on 2026-11-16; not archived');
+    const never = renderDrop(drop, []);
+    expect(never).toContain('No events recorded');
+    expect(never).not.toContain('pruned');
+    // The path is escaped like any other field.
+    expect(renderDrop(drop, [], [], { prunedAt: 'x', archive: '<b>' })).toContain('&lt;b&gt;');
+  });
+
   test('the raw table stays, collapsed, with the event count', () => {
     const html = renderDrop(drop, fixture);
     const raw = html.slice(html.indexOf('<details class="raw-events">'));

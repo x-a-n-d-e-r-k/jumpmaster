@@ -84,11 +84,11 @@ describe('runDoctor', () => {
     expect(latest?.id).toBeGreaterThan(all.id);
     expect(latest?.finishedAt).toBeTruthy();
     expect(summarize(all.checks)).toEqual({
-      pass: all.checks.length - 3,
+      pass: all.checks.length - 4,
       warn: 0,
       fail: 0,
       skip: 2,
-      info: 1,
+      info: 2,
     });
   });
 

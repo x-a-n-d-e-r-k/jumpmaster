@@ -190,6 +190,12 @@ export const GUARDED_PATHS: GuardedPath[] = [
     true,
     (ctx) => `Gates in ${zoneOf(ctx)} will run package build scripts pnpm would otherwise block`,
   ),
+  // Issue #197: without the archive, retention deletes a transcript for good.
+  becomes(
+    'dropZones[].transcripts.archive',
+    false,
+    (ctx) => `Transcripts pruned in ${zoneOf(ctx)} will be deleted without an archive copy`,
+  ),
   // Follow-up 26: CI=false lets a gate install resolve afresh, which weakens the lockfile review.
   becomes(
     'dropZones[].gateCi',
@@ -363,6 +369,10 @@ export const NOT_GUARDED: FreePath[] = [
   free(
     'dropZones[].triagedLabel',
     'the label put on an issue triage has finished with; it starts nothing (it must differ from the other labels)',
+  ),
+  free(
+    'dropZones[].transcripts.retainDays',
+    'how long a finished drop keeps its events; with the archive on they are kept as a file',
   ),
   free(
     'dropZones[].triage.gate',

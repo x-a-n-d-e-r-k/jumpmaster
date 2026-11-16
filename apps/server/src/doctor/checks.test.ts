@@ -1,4 +1,11 @@
-import { chmodSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -16,6 +23,8 @@ import {
 import { AUTHOR_TOKEN, ago, NOW, one, PG, world } from '../test/doctorWorld.js';
 import { okProbes } from '../test/fakes.js';
 import { makeZone } from '../test/fixtures.js';
+import { addTranscriptDrop } from '../test/transcriptWorld.js';
+import { prunePass } from '../transcripts.js';
 import { CHECK_IDS, type DoctorDeps, installDocUrl } from './checks.js';
 import { processEnv } from './run.js';
 
@@ -26,6 +35,7 @@ describe('a healthy install', () => {
     expect(notPass.map((c) => [c.id, c.status])).toEqual([
       ['claude.token-age', 'skip'],
       ['server.public-url', 'info'],
+      ['transcripts.retention', 'info'],
       ['zone.doctor-drop', 'skip'],
     ]);
     for (const c of checks) {
@@ -842,6 +852,7 @@ describe('starter identity', () => {
     expect(checks.filter((c) => c.status !== 'pass').map((c) => [c.id, c.status])).toEqual([
       ['claude.token-age', 'skip'],
       ['server.public-url', 'info'],
+      ['transcripts.retention', 'info'],
       ['forge.reviewer', 'skip'],
       ['forge.reviewer-reads', 'skip'],
       ['zone.identity', 'warn'],
@@ -1668,5 +1679,66 @@ describe('server.image-mirror (issue #140)', () => {
     const c = one(await w.run(), 'server.image-mirror');
     expect(c.status).toBe('info');
     expect(c.summary).toContain('2 of 2 release images are still being mirrored');
+  });
+});
+
+describe('transcripts.retention (issue #197)', () => {
+  test("info: each zone's setting, the archive size and the drops due", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'jm-doc-'));
+    const w = world({ config: { dataDir } });
+    mkdirSync(join(dataDir, 'transcripts/main/2026-08'), { recursive: true });
+    writeFileSync(join(dataDir, 'transcripts/main/2026-08/a.jsonl.gz'), 'x'.repeat(2048));
+    addTranscriptDrop(w.db, {
+      id: 'old',
+      zone: 'main',
+      createdAt: 't',
+      finishedAt: ago(100 * 86_400_000).toISOString(),
+    });
+    addTranscriptDrop(w.db, {
+      id: 'held',
+      zone: 'main',
+      state: 'push_pending',
+      createdAt: 't',
+      finishedAt: ago(100 * 86_400_000).toISOString(),
+    });
+    expect(one(await w.run(), 'transcripts.retention')).toMatchObject({
+      status: 'info',
+      zoneId: null,
+      summary:
+        'transcript retention: main keeps 90 days, archived (1 drop due); archive directory 2.0 KiB',
+    });
+    w.zone.transcripts = { retainDays: 0, archive: false };
+    expect(one(await w.run(), 'transcripts.retention').summary).toBe(
+      'transcript retention: main keeps forever; archive directory 2.0 KiB',
+    );
+  });
+
+  test('warn after an archive write failed in the last 24 hours; info again after', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'jm-doc-'));
+    const w = world({ config: { dataDir } });
+    addTranscriptDrop(w.db, {
+      id: 'old',
+      zone: 'main',
+      createdAt: 't',
+      finishedAt: ago(100 * 86_400_000).toISOString(),
+      events: [{ kind: 'log', dataJson: '{}' }],
+    });
+    await prunePass(w.db, {
+      dataDir,
+      zones: [w.zone],
+      now: ago(3_600_000),
+      log: () => {},
+      write: async () => {
+        throw new Error('EACCES: permission denied');
+      },
+    });
+    const c = one(await w.run(), 'transcripts.retention');
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('an archive write failed at 2026-11-09T11:00:00.000Z');
+    expect(c.summary).toContain('drop old in zone main: EACCES: permission denied');
+    expect(c.summary).toContain('main keeps 90 days, archived (1 drop due)');
+    expect(c.fix).toContain('transcripts');
+    w.deps.now = () => new Date(NOW.getTime() + 24 * 3_600_000);
+    expect(one(await w.run(), 'transcripts.retention').status).toBe('info');
   });
 });

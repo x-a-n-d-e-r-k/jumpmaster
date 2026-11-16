@@ -109,6 +109,7 @@ const TABLE: Record<string, Rule> = {
   'usage.gate': settings('/settings/install', 'Open Settings, Install'),
   'config.file': settings('/settings/history', 'Open Settings, History'),
   'config.uid': docs,
+  'transcripts.retention': docs,
   'config.secret-files': docs,
   // The Install tab carries the restart-pending badge and the restart command.
   'config.restart': settings('/settings/install', 'Open Settings, Install'),

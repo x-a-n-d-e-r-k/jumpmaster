@@ -1,6 +1,6 @@
 import type { Db } from '../db/open.js';
 
-/** A finished doctor drop (no work item needed) with its events' `data_json` stored verbatim. */
+/** A doctor drop (finished, `succeeded`, unless `state` says otherwise) (no work item needed) with its events' `data_json` stored verbatim. */
 export function addTranscriptDrop(
   db: Db,
   d: {
@@ -12,15 +12,17 @@ export function addTranscriptDrop(
     finishedAt?: string | null;
     requestedModel?: string | null;
     servedModel?: string | null;
+    state?: string;
   },
 ): void {
   db.prepare(
     `INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, stick_id, created_at,
        finished_at, requested_model, served_model)
-     VALUES (?, ?, NULL, 'doctor', 'succeeded', ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, NULL, 'doctor', ?, ?, ?, ?, ?, ?)`,
   ).run(
     d.id,
     d.zone,
+    d.state ?? 'succeeded',
     d.stickId ?? null,
     d.createdAt,
     d.finishedAt ?? null,

@@ -239,6 +239,34 @@ describe('UI routes', () => {
     );
   });
 
+  test('the drop page tells a pruned transcript from one that never had events', async () => {
+    const h = await crewHarness();
+    await h.sync();
+    for (const id of ['pruned', 'empty'])
+      insertDrop(h.db, {
+        id,
+        dropZoneId: 'main',
+        workItemId: null,
+        role: 'doctor',
+        state: 'succeeded',
+        createdAt: h.now().toISOString(),
+      });
+    h.db
+      .prepare(
+        `UPDATE drops SET transcript_pruned_at = '2026-11-16T12:00:00.000Z',
+           transcript_archive = 'transcripts/main/2026-08/pruned.jsonl.gz' WHERE id = 'pruned'`,
+      )
+      .run();
+    const pruned = (await get(h, '/drops/pruned')).body;
+    expect(pruned).toContain(
+      'Transcript pruned on 2026-11-16; archived at transcripts/main/2026-08/pruned.jsonl.gz',
+    );
+    expect(pruned).not.toContain('No events recorded');
+    const empty = (await get(h, '/drops/empty')).body;
+    expect(empty).toContain('No events recorded');
+    expect(empty).not.toContain('Transcript pruned');
+  });
+
   test('the intake page renders for a known zone and is 404 for an unknown one', async () => {
     const h = await crewHarness();
     const res = await get(h, '/zones/main/intake');
