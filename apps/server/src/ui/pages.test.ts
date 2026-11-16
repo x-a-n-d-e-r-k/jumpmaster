@@ -1008,6 +1008,11 @@ describe('zones are named by their repository (#99)', () => {
       zones,
     );
     expect(doctor).toContain('Doctor drop: acme/widgets');
+    // The doctor drop buttons are a list under their explanation, one item per project.
+    expect(doctor).toMatch(
+      /it spends one turn of usage\.<\/p><ul class="doctor-drops"><li><button [^>]*>Doctor drop: [^<]*<\/button><\/li><li><button /,
+    );
+    expect(doctor).not.toMatch(/usage\.\s*<button/);
     expect(doctor).toContain('<td>acme/shared <small>(zid-b)</small></td>');
     expectNoBareId(doctor);
     const obs = renderObservations(

@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { auditedReadds } from '../auth/audit.js';
 import type { Principal } from '../auth/guard.js';
 import {
@@ -579,21 +580,21 @@ export class ConfigStore implements ConfigSource {
 
   /**
    * Turns the vault on with no restart: a new key file (32 random bytes, base64url, 0600) under the
-   * secrets directory, never over an existing file; its path recorded so a restart opens it
-   * without `JM_VAULT_KEY_FILE`. No answer carries the key.
+   * secrets directory, or `<dataDir>/vault` (0700) when none is set, never over an existing file;
+   * its path recorded so a restart opens it without `JM_VAULT_KEY_FILE`. No answer carries the key.
    */
   turnOnVault(): { ok: true; keyId: string; keyFile: string } | { ok: false; message: string } {
     if (this.vaultValue !== 'disabled') return { ok: false, message: 'the vault is already on' };
-    const dir = this.o.boot.secretsDir;
-    if (!dir)
-      return {
-        ok: false,
-        message:
-          'there is no secrets directory to write the key to: set JM_SECRETS_DIR (or JM_VAULT_KEY_FILE) and restart',
-      };
     let keyFile: string;
     let vault: Vault | 'disabled';
     try {
+      let dir = this.o.boot.secretsDir;
+      if (!dir) {
+        // No JM_SECRETS_DIR: the key lives beside the database, in a directory only the server reads.
+        dir = join(this.o.boot.dataDir, 'vault');
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        chmodSync(dir, 0o700);
+      }
       keyFile = createVaultKey(dir);
       vault = openVault(keyFile, this.o.db, this.o.boot.dataDir, SETTINGS_KEY_LABEL);
     } catch (e) {

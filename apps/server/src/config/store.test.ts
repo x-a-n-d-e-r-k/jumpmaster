@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { payloadSecrets } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
 import type { Principal } from '../auth/guard.js';
@@ -1537,11 +1537,33 @@ describe('turning the vault on and preferring it from Settings (#101)', () => {
     expect(store.turnOnVault()).toMatchObject({ ok: false, message: 'the vault is already on' });
   });
 
-  test('turn on without a secrets directory says to set JM_SECRETS_DIR', () => {
+  test('turn on without a secrets directory writes the key under <dataDir>/vault (0700) and survives a restart', () => {
     const w = world();
-    const store = w.open({ vault: 'disabled' });
-    expect(store.turnOnVault()).toMatchObject({ ok: false });
-    expect(JSON.stringify(store.turnOnVault())).toContain('JM_SECRETS_DIR');
+    const e = { ...env, JM_DATA_DIR: dir() };
+    const store = w.open({ env: e, boot: loadBoot(e, w.file), vault: startVault(e, w.db, 'data') });
+    const r = store.turnOnVault();
+    expect(r).toMatchObject({ ok: true });
+    if (!r.ok) return;
+    expect(basename(dirname(r.keyFile))).toBe('vault');
+    expect(statSync(dirname(r.keyFile)).mode & 0o777).toBe(0o700);
+    expect(statSync(r.keyFile).mode & 0o777).toBe(0o600);
+    expect(store.putCredential('githubReadToken', READ_VAULT, {}).ok).toBe(true);
+    const again = w.open({ env: e, boot: loadBoot(e, w.file), vault: startVault(e, w.db, 'data') });
+    expect(again.vault()).not.toBe('disabled');
+    expect(again.resolved().githubReadToken).toMatchObject({ value: READ_VAULT, source: 'vault' });
+  });
+
+  test('turn on without a secrets directory never overwrites an existing key under <dataDir>/vault', () => {
+    const w = world();
+    const e = { ...env, JM_DATA_DIR: dir() };
+    const store = w.open({ env: e, boot: loadBoot(e, w.file), vault: startVault(e, w.db, 'data') });
+    const first = store.turnOnVault();
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const kept = readFileSync(first.keyFile, 'utf8');
+    const fresh = w.open({ env: e, boot: loadBoot(e, w.file), vault: 'disabled' });
+    expect(fresh.turnOnVault()).toMatchObject({ ok: false });
+    expect(readFileSync(first.keyFile, 'utf8')).toBe(kept);
   });
 
   test('JM_VAULT_KEY_FILE still takes precedence over the key turned on in Settings', () => {

@@ -120,13 +120,17 @@ function actionsCell(
   // With the vault preferred, a value entered here wins over the variable or file.
   if ((c.source === 'file' || c.source === 'env') && vaultOn && vault.prefer)
     return `${replaceForm(n, claudeDated)}${test}${copy}${hidden}`;
+  // A variable or file credential is never a dead button: Replace moves credentials to the vault
+  // (turning it on if it is off, and preferring it), then the page shows the Replace form.
+  const useVault = (why: string) =>
+    `<button type="button" class="use-vault" data-name="${n}">Replace</button>${test}${copy}${hidden} <small>${why}. Replace stores a new value in the vault, which then wins over variables and files.</small>`;
   if (c.source === 'file')
-    return disabled(
-      `managed by ${escapeHtml(c.path ?? '?')}: replace that file and run <code>jumpmaster ctl secrets reload</code> to change it`,
+    return useVault(
+      `managed by ${escapeHtml(c.path ?? '?')}: replace that file and run <code>jumpmaster ctl secrets reload</code> to change it there`,
     );
   if (c.source === 'env')
-    return disabled(
-      `set by the environment variable ${escapeHtml(c.path ?? '?')}: change it where the server's environment is set, and restart the server`,
+    return useVault(
+      `set by the environment variable ${escapeHtml(c.path ?? '?')}: change it where the server's environment is set, and restart the server, to change it there`,
     );
   if (!vaultOn) return disabled(escapeHtml(VAULT_DISABLED));
   // A vault entry that no longer decrypts can be removed too (then entered again).
@@ -153,7 +157,7 @@ function vaultSection(store: ConfigStore): string {
   const vault = store.vault();
   if (vault === 'disabled')
     return `<p class="warn">${escapeHtml(VAULT_DISABLED)}</p>
-<p><button type="button" id="vault-on">Turn on the vault</button> <small>Writes a new random key to <code>vault_key</code> under the secrets directory (mode 0600, never over an existing file) and opens the vault now, with no restart; it stays on across restarts. Keep that file with your backups: the database holds only ciphertext.</small></p>`;
+<p><button type="button" id="vault-on">Turn on the vault</button> <small>Writes a new random key to <code>vault_key</code> under the secrets directory, or under the data directory's <code>vault/</code> when none is set (mode 0600, never over an existing file) and opens the vault now, with no restart; it stays on across restarts. Keep that file with your backups: the database holds only ciphertext. Without <code>JM_SECRETS_DIR</code> the key sits beside the database, so one copy of the data directory holds both; set <code>JM_SECRETS_DIR</code> to keep them apart.</small></p>`;
   const prefer = store.preferVault();
   const order = prefer
     ? 'A credential in the vault wins over its variable or file.'
@@ -335,6 +339,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const want = prefer.checked;
     const s = state(); const outcome = await jmVaultPost('/api/control/secrets/vault/prefer', { prefer: want }, s, status, 'Prefer the vault'); after(s, outcome);
     if (outcome === 'done') location.reload(); else prefer.checked = !want;
+  });
+  for (const b of document.querySelectorAll('button.use-vault')) b.addEventListener('click', async () => {
+    if (!confirm('Replace ' + b.dataset.name + ' in the vault? This turns the vault on if it is off and makes it win over environment variables and files, for every credential it holds. Credentials not in the vault keep coming from their variable or file.')) return;
+    const s = state();
+    let outcome = 'done';
+    // The vault is on when its Prefer switch is on the page, or once this click turned it on.
+    if (b.dataset.vault !== 'on' && !document.getElementById('prefer-vault')) {
+      outcome = await jmVaultPost('/api/control/secrets/vault/on', {}, s, status, 'Turning the vault on');
+      if (outcome === 'done') b.dataset.vault = 'on';
+    }
+    if (outcome === 'done') outcome = await jmVaultPost('/api/control/secrets/vault/prefer', { prefer: true }, s, status, 'Prefer the vault');
+    after(s, outcome);
+    if (outcome === 'done') location.reload();
   });
   for (const b of document.querySelectorAll('button.copy')) b.addEventListener('click', async () => {
     const s = state(); const outcome = await jmVaultPost('/api/control/secrets/' + encodeURIComponent(b.dataset.name) + '/copy-to-vault', {}, s, status, 'Copying ' + b.dataset.name); after(s, outcome);
