@@ -21,3 +21,17 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+      # CLAIM = PROOF (issue #167): the stick's offline layout verification, with the real cosign
+      # v3.1.4 the images ship, on the real v0.4.0-rc.2 signature fixtures. It must run, not skip.
+      - name: The real cosign verifies the rc.2 fixtures offline
+        env:
+          COSIGN_IMAGE: ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d
+          COSIGN_SHA256: be06b2d8da722330fa78fd7cd858a74b589b20ab314a7d901e8cefcf387c965d
+        run: |
+          id="$(docker create --platform linux/amd64 "$COSIGN_IMAGE")"
+          docker cp "$id:/ko-app/cosign" "$RUNNER_TEMP/cosign"
+          docker rm "$id" >/dev/null
+          echo "$COSIGN_SHA256  $RUNNER_TEMP/cosign" | sha256sum -c -
+          chmod 0755 "$RUNNER_TEMP/cosign"
+          COSIGN_BIN="$RUNNER_TEMP/cosign" npx vitest run apps/stick/src/verify-real-cosign.test.ts --reporter=verbose | tee "$RUNNER_TEMP/real-cosign.log"
+          if grep -qiE 'skipped|↓' "$RUNNER_TEMP/real-cosign.log"; then echo "::error::the real-cosign test skipped"; exit 1; fi
