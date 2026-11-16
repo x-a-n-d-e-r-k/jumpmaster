@@ -20,7 +20,7 @@ RUN set -eu; \
       arm64) a=aarch64; sum=4bb69cf95ed13f23713bb7bc09f241896ea0c75b7c557e615a20604b82f9c403 ;; \
       *) echo "unsupported TARGETARCH $TARGETARCH" >&2; exit 1 ;; \
     esac; \
-    curl -fsSLo /tmp/uv.tar.gz "https://github.com/astral-sh/uv/releases/download/0.13.5/uv-${a}-unknown-linux-gnu.tar.gz"; \
+    curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 -o /tmp/uv.tar.gz "https://github.com/astral-sh/uv/releases/download/0.13.5/uv-${a}-unknown-linux-gnu.tar.gz"; \
     echo "${sum}  /tmp/uv.tar.gz" | sha256sum -c -; \
     mkdir -p /out; \
     tar -xzf /tmp/uv.tar.gz -C /tmp; \
