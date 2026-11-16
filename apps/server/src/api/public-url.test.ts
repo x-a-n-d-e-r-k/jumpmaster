@@ -24,7 +24,10 @@ afterEach(async () => {
 });
 
 function world(
-  o: { fetch?: (url: string, init: RequestInit) => Promise<Response>; tailscale?: TailscaleDeps } = {},
+  o: {
+    fetch?: (url: string, init: RequestInit) => Promise<Response>;
+    tailscale?: TailscaleDeps;
+  } = {},
 ) {
   const db = openDb(tmpDbFile());
   const dir = mkdtempSync(join(tmpdir(), 'jm-reach-'));

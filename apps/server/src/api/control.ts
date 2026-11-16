@@ -24,13 +24,6 @@ import { mergeConfigPatch, mergePatch } from '../config/diff.js';
 import { configReader, type LiveConfig, statusOf } from '../config/source.js';
 import { type ApplyResult, ConfigStore } from '../config/store.js';
 import { type Config, mcpConfigOf, secretList } from '../config.js';
-import {
-  checkReach,
-  PUBLIC_URL_NEEDED,
-  PUBLIC_URL_PAGE,
-  publicUrlProblem,
-  type ReachDeps,
-} from '../reach.js';
 import { requestCrewCycle } from '../crew/schedule.js';
 import type { Db } from '../db/open.js';
 import {
@@ -79,6 +72,13 @@ import {
   revokeMcpToken,
 } from '../mcp/tokens.js';
 import { type ForgePair, runOp } from '../outbox.js';
+import {
+  checkReach,
+  PUBLIC_URL_NEEDED,
+  PUBLIC_URL_PAGE,
+  publicUrlProblem,
+  type ReachDeps,
+} from '../reach.js';
 import { buildStatus } from '../status.js';
 import { safeNext } from '../ui/auth-pages.js';
 import { MODE_LABELS } from '../ui/pages.js';
@@ -576,6 +576,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
               ...(deps.readForgeFor ? { readForge: deps.readForgeFor } : {}),
               ...(configStatus ? { configStatus } : {}),
               ...(credentials ? { credentials } : {}),
+              ...(deps.reach ? { reach: (u: string) => checkReach(u, deps.reach) } : {}),
               // The pages this app registers decide where the fix links go.
               pages: pagesOf(app),
               // The zone's generated GitHub files, for the fix links that bring one along.

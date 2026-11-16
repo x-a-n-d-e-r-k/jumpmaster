@@ -1188,7 +1188,7 @@ export function renderDoctor(
     })
     .join('');
   return page(
-    `<h2>Doctor</h2><p>Run ${run.id}, finished ${escapeHtml(run.finishedAt ?? '-')}: ${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip.</p>${controls}<table><tr><th>Status</th><th>Zone</th><th>Check</th><th>Finding</th></tr>${rows}</table>${DOCTOR_SCRIPT}`,
+    `<h2>Doctor</h2><p>Run ${run.id}, finished ${escapeHtml(run.finishedAt ?? '-')}: ${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip${n('info') > 0 ? `, ${n('info')} info` : ''}.</p>${controls}<table><tr><th>Status</th><th>Zone</th><th>Check</th><th>Finding</th></tr>${rows}</table>${DOCTOR_SCRIPT}`,
   );
 }
 

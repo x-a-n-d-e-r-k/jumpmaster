@@ -160,7 +160,7 @@ export function latestDoctorRun(db: Db): DoctorRun | null {
 }
 
 export function summarize(checks: DoctorCheck[]): Record<DoctorStatus, number> {
-  const out: Record<DoctorStatus, number> = { pass: 0, warn: 0, fail: 0, skip: 0 };
+  const out: Record<DoctorStatus, number> = { pass: 0, warn: 0, fail: 0, skip: 0, info: 0 };
   for (const c of checks) out[c.status]++;
   return out;
 }

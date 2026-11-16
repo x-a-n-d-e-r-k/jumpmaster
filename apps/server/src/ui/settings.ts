@@ -12,6 +12,7 @@ import {
   planLabel,
 } from '../config.js';
 import type { Db } from '../db/open.js';
+import { listMcpTokens, MAX_TOKEN_DAYS, type McpTokenInfo } from '../mcp/tokens.js';
 import {
   defaultTailscaleDeps,
   PUBLIC_URL_NEEDED,
@@ -20,7 +21,6 @@ import {
   type TailscaleGuidance,
   tailscaleGuidance,
 } from '../reach.js';
-import { listMcpTokens, MAX_TOKEN_DAYS, type McpTokenInfo } from '../mcp/tokens.js';
 import {
   CREDENTIAL_ROLES,
   type CredentialName,

@@ -495,6 +495,7 @@ const STATUS_WORD: Record<DoctorCheck['status'], string> = {
   warn: 'WARN',
   fail: 'FAIL',
   skip: 'SKIP',
+  info: 'INFO',
 };
 
 /** The doctor's run as lines a person reads: each check, then its fix and doc for any not passing. */
@@ -542,7 +543,7 @@ export function formatDoctor(
   const n = (s: DoctorCheck['status']) => run.checks.filter((c) => c.status === s).length;
   lines.push(
     '',
-    `${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip${n('fail') > 0 ? ': fix each FAIL, then run the doctor again' : ''}`,
+    `${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip${n('info') > 0 ? `, ${n('info')} info` : ''}${n('fail') > 0 ? ': fix each FAIL, then run the doctor again' : ''}`,
   );
   return lines.map(plain);
 }
@@ -1370,6 +1371,20 @@ async function runCtlOn(
     const parsed = JSON.parse(text) as Record<string, unknown>;
     if (args.includes('--json')) out(JSON.stringify(parsed, null, 2));
     else for (const line of sticksLines(args, parsed)) out(plain(line));
+    return 0;
+  }
+  if (args[0] === 'public-url' && res.ok) {
+    const b = JSON.parse(text) as {
+      ok?: boolean;
+      message?: string;
+      revision?: number;
+      publicUrl?: string | null;
+    };
+    if (args[1] === 'check') {
+      out(plain(b.message ?? ''));
+      return b.ok ? 0 : 1;
+    }
+    out(plain(`server.publicUrl is ${b.publicUrl ?? 'unset'} (revision ${b.revision})`));
     return 0;
   }
   if (args[0] === 'mcp-tokens' && res.ok) {

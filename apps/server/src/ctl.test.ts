@@ -141,6 +141,33 @@ describe('ctl public-url (issue #139)', () => {
     expect(ctlRequest(['public-url', 'set'])).toBeNull();
     expect(ctlRequest(['public-url', 'check', 'extra'])).toBeNull();
   });
+
+  test('check prints the Check answer and exits 1 when unreachable; set prints the address', async () => {
+    const ok = await run(
+      ['public-url', 'check'],
+      '',
+      fakeFetch(200, { ok: true, message: 'Reachable' }),
+    );
+    expect([ok.code, ok.out]).toEqual([0, ['Reachable']]);
+    const bad = await run(
+      ['public-url', 'check'],
+      '',
+      fakeFetch(200, { ok: false, message: 'HTTP 404 Not Found from https://a.b/healthz' }),
+    );
+    expect([bad.code, bad.out]).toEqual([1, ['HTTP 404 Not Found from https://a.b/healthz']]);
+    const set = await run(
+      ['public-url', 'set', 'https://a.b'],
+      '',
+      fakeFetch(200, { revision: 4, publicUrl: 'https://a.b' }),
+    );
+    expect([set.code, set.out]).toEqual([0, ['server.publicUrl is https://a.b (revision 4)']]);
+    const cleared = await run(
+      ['public-url', 'clear'],
+      '',
+      fakeFetch(200, { revision: 5, publicUrl: null }),
+    );
+    expect(cleared.out).toEqual(['server.publicUrl is unset (revision 5)']);
+  });
 });
 
 describe('ctl setup and passphrase verbs', () => {
