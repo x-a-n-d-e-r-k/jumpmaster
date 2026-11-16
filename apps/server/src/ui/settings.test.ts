@@ -230,16 +230,26 @@ describe('the credentials tab', () => {
     const w = await world({ env: { JM_GITHUB_READ_TOKEN: READ } });
     const html = (await w.get('/settings/credentials')).body;
     // File and environment credentials: read-only, with where they come from and how to change it.
+    // A variable or file credential is never a dead button: Replace moves credentials to the vault.
     const reviewer = rowOf(html, 'githubReviewerToken');
-    expect(reviewer).toMatch(/<button[^>]*disabled[^>]*>Replace<\/button>/);
+    expect(reviewer).not.toMatch(/<button[^>]*disabled[^>]*>Replace<\/button>/);
+    expect(reviewer).toContain(
+      '<button type="button" class="use-vault" data-name="githubReviewerToken">Replace</button>',
+    );
     expect(reviewer).toContain(
       `managed by ${join(w.secrets, 'github_reviewer_token')}: replace that file and run <code>jumpmaster ctl secrets reload</code>`,
     );
     expect(reviewer).not.toContain('type="password"');
     expect(reviewer).not.toContain('class="remove"');
     const read = rowOf(html, 'githubReadToken');
-    expect(read).toMatch(/<button[^>]*disabled[^>]*>Replace<\/button>/);
+    expect(read).not.toMatch(/<button[^>]*disabled[^>]*>Replace<\/button>/);
+    expect(read).toContain(
+      '<button type="button" class="use-vault" data-name="githubReadToken">Replace</button>',
+    );
     expect(read).toContain('set by the environment variable JM_GITHUB_READ_TOKEN');
+    // Its click turns the vault on (if off) and prefers it, then reloads to show the Replace form.
+    expect(html).toContain("querySelectorAll('button.use-vault')");
+    expect(html).toMatch(/use-vault[\s\S]*\/api\/control\/secrets\/vault\/prefer/);
     expect(html).not.toContain(READ);
     // A credential the vault can hold: a password field, never prefilled, and the Claude date.
     const claude = rowOf(html, 'claudeToken');
