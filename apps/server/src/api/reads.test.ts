@@ -17,12 +17,12 @@ test('an allowed Host can read the home page', async () => {
   expect((await h.view('/')).statusCode).toBe(200);
 });
 
-test("the home page shows Command's gate change allowance for the item's current head", async () => {
+test("the work list shows Command's gate change allowance for the item's current head", async () => {
   const h = await harness();
   await toPrOpen(h, 'abcdef1234567890');
   const item = listWorkItems(h.db, h.zone.id)[0];
   if (!item) throw new Error('no item');
-  const home = async () => (await h.view('/')).body;
+  const home = async () => (await h.view('/work?state=pr_open')).body;
   expect(await home()).not.toContain('allowed by Command');
   const prNumber = getPullRequest(h.db, item.id)?.number ?? 0;
   const allowance = { itemId: item.id, prNumber, headSha: 'abcdef1234567890', rulingId: 1 };

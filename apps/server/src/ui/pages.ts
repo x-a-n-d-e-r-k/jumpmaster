@@ -25,6 +25,7 @@ import type { GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import type { Status } from '../status.js';
 import type { Gate } from '../usage.js';
+import { floorCounts, sticksSummary, totalsStrip, zoneCards } from './floor.js';
 import { STYLE } from './theme.js';
 import { type ZoneRef, zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
 
@@ -35,10 +36,6 @@ export const escapeHtml = (v: unknown): string =>
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
-
-export interface RateLimitSeen extends StoredEvent {
-  dropId: string;
-}
 
 /** Each zone mode with its plain-English meaning (§4), as the pages and `ctl zones` say it. */
 export const MODE_LABELS: Record<string, string> = {
@@ -60,9 +57,10 @@ export interface HomeState {
   /** Each zone's current mode; absent means active. */
   modes?: Record<string, string>;
   killed?: boolean;
+  /** Every work item of the configured zones. */
   items: WorkItem[];
+  /** The active drops (queued, leased, running, pending push): the slots and the Running counts. */
   drops: Drop[];
-  lastRateLimit?: RateLimitSeen;
   now?: Date;
   usage?: {
     gate: Gate;
@@ -72,10 +70,13 @@ export interface HomeState {
     /** The account's `overageStatus` as last reported (raw, pending rehearsal). */
     overageStatus?: string | null;
   };
-  /** Per work item: PR head, latest verdict and attempt counts. */
-  details?: Map<number, ItemDetail>;
-  /** Outbox ops needing attention (`unknown` or `failed`). */
+  /** Outbox ops needing attention (`unknown` or `failed`): counted on the zone cards. */
   outbox?: OutboxRow[];
+  /**
+   * Merges done in the last 24 hours, by zone. Absent when they could not be read: the floor
+   * then says "unavailable", never 0.
+   */
+  merges24h?: Array<{ zoneId: string; at: string }>;
   /** Open briefings, for "Waiting on you": a paused or observing zone's are held back. */
   briefings?: Briefing[];
   /** The zones whose briefings are held back, one collapsed line each. */
@@ -201,22 +202,6 @@ function usageSection(u: HomeState['usage']): string {
   );
 }
 
-function outboxSection(ops: OutboxRow[] | undefined, name: (id: string) => string): string {
-  if (!ops || ops.length === 0) return '';
-  const rows = ops
-    .map(
-      (o) =>
-        `<tr><td>${escapeHtml(o.id)}</td><td>${escapeHtml(o.kind)}</td><td>${o.workItemId === null ? name(o.zoneId) : escapeHtml(o.workItemId)}</td><td>${escapeHtml(o.state)}</td><td>${escapeHtml(o.error ?? '')}</td><td>${escapeHtml(o.updatedAt)}</td></tr>`,
-    )
-    .join('');
-  return card(
-    'Forge writes that need a look',
-    '<h2>Outbox</h2>',
-    `<table><tr><th>Op</th><th>Kind</th><th>Item</th><th>State</th><th>Error</th><th>Updated</th></tr>${rows}</table>`,
-    'attention',
-  );
-}
-
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 /** A zone's briefings view: where the floor's held line and the zone page link. */
@@ -278,31 +263,31 @@ function crewSection(lines: CrewLine[] | undefined, name: (id: string) => string
   );
 }
 
-function sticksSection(lines: StickLine[] | undefined, name: (id: string) => string): string {
+/** The sticks, collapsed: a summary line, the table inside (`#sticks`, where the status links). */
+function sticksSection(
+  lines: StickLine[] | undefined,
+  name: (id: string) => string,
+  now: Date,
+): string {
   if (!lines) return '';
-  const plain = 'Runner hosts';
-  if (lines.length === 0)
-    return card(
-      plain,
-      '<h2 id="sticks">Sticks</h2>',
-      '<p class="empty">No stick has enrolled.</p>',
-    );
-  const rows = lines
-    .map((s) => {
-      const runs =
-        s.cannotRun.length === 0
-          ? 'all zones'
-          : s.cannotRun
-              .map((c) => `cannot run ${name(c.zoneId)}: lacks ${escapeHtml(c.missing.join(', '))}`)
-              .join('<br>');
-      return `<tr><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.version ?? '-')}</td><td>${escapeHtml(s.lastSeenAt ?? 'never')}</td><td>${escapeHtml(s.capabilities.join(', ') || '-')}</td><td>${escapeHtml(s.imagePolicy)}</td><td>${runs}</td></tr>`;
-    })
-    .join('');
-  return card(
-    plain,
-    '<h2 id="sticks">Sticks</h2>',
-    `<table><tr><th>Stick</th><th>Version</th><th>Last seen</th><th>Capabilities</th><th>Image policy</th><th>Zones</th></tr>${rows}</table>`,
-  );
+  const body =
+    lines.length === 0
+      ? '<p class="empty">No stick has enrolled.</p>'
+      : `<table><tr><th>Stick</th><th>Version</th><th>Last seen</th><th>Capabilities</th><th>Image policy</th><th>Zones</th></tr>${lines
+          .map((s) => {
+            const runs =
+              s.cannotRun.length === 0
+                ? 'all zones'
+                : s.cannotRun
+                    .map(
+                      (c) =>
+                        `cannot run ${name(c.zoneId)}: lacks ${escapeHtml(c.missing.join(', '))}`,
+                    )
+                    .join('<br>');
+            return `<tr><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.version ?? '-')}</td><td>${escapeHtml(s.lastSeenAt ?? 'never')}</td><td>${escapeHtml(s.capabilities.join(', ') || '-')}</td><td>${escapeHtml(s.imagePolicy)}</td><td>${runs}</td></tr>`;
+          })
+          .join('')}</table>`;
+  return `<details id="sticks" class="card sticks"><summary>${escapeHtml(sticksSummary(lines, now))}</summary>${body}</details>`;
 }
 
 /** One shared handler for every rule form: it posts with the session's CSRF header. */
@@ -546,11 +531,11 @@ function gateCount(drop: Drop): { total: number; passed: number; failed: number 
   }
 }
 
-/** The work-item ledger's header row, on the floor and on /work. */
+/** The work-item ledger's header row, on /work. */
 export const WORK_HEAD =
   '<tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>';
 
-/** The drop ledger's header row, on the floor and on /drops. */
+/** The drop ledger's header row, on /drops. */
 export const DROP_HEAD =
   '<tr><th>Drop</th><th>Issue</th><th>Role</th><th>State</th><th>Elapsed</th><th>Gates</th></tr>';
 
@@ -558,7 +543,7 @@ export const DROP_HEAD =
 const waitingOn = (i: WorkItem): string =>
   i.state === 'ready' && i.blockedBy.length > 0 ? `waiting on ${i.blockedBy.join(', ')}` : '';
 
-/** The work-item ledger's rows (the floor's and /work's), zones named by repository. */
+/** The work-item ledger's rows (/work's), zones named by repository. */
 export function workItemRows(
   items: readonly WorkItem[],
   zones: readonly Pick<DropZoneConfig, 'id' | 'repo'>[],
@@ -587,7 +572,7 @@ function dropTarget(d: Drop, itemById: Map<number, WorkItem>): string {
   return wi ? `#${escapeHtml(wi.issueNumber)}` : '-';
 }
 
-/** The drop ledger's rows (the floor's and /drops'); `items` resolve each drop's issue. */
+/** The drop ledger's rows (/drops'); `items` resolve each drop's issue. */
 export function dropRows(drops: readonly Drop[], items: readonly WorkItem[], now: Date): string {
   const itemById = new Map(items.map((i) => [i.id, i]));
   return drops
@@ -761,17 +746,6 @@ export function renderHome(state: HomeState): string {
     .join('');
   const itemById = new Map(state.items.map((i) => [i.id, i]));
 
-  const zones = state.zones
-    .map(
-      (z) =>
-        `<tr><td>${name(z.id)}</td><td>${escapeHtml(z.readyLabel)}</td><td>${escapeHtml(z.model)}</td><td>${badge(state.modes?.[z.id] ?? 'active')}</td><td><a href="/zones/${encodeURIComponent(z.id)}/github">GitHub</a></td></tr>`,
-    )
-    .join('');
-
-  const items = workItemRows(state.items, state.zones, state.details);
-  const targetOf = (d: Drop): string => dropTarget(d, itemById);
-  const drops = dropRows(state.drops, state.items, now);
-
   // The slots (§10.1): what each trooper is doing right now, one card per live drop.
   // Everything active but still queued, which nothing has started; a pending push still holds its slot.
   const live = state.drops.filter(
@@ -779,7 +753,7 @@ export function renderHome(state: HomeState): string {
   );
   const slotCard = (d: Drop): string => {
     const wi = d.workItemId === null ? undefined : itemById.get(d.workItemId);
-    const what = `${name(wi ? wi.dropZoneId : d.dropZoneId)} ${targetOf(d)}`;
+    const what = `${name(wi ? wi.dropZoneId : d.dropZoneId)} ${dropTarget(d, itemById)}`;
     const title = wi ? `<span class="muted">${escapeHtml(wi.title)}</span>` : '';
     const g = gateCount(d);
     const gates = g
@@ -792,88 +766,34 @@ export function renderHome(state: HomeState): string {
       ? '<p class="empty">No drop is running.</p>'
       : `<div class="grid">${live.map(slotCard).join('')}</div>`;
 
-  // Up next: ready work in the order the floor holds it, with what each waits on.
-  const ready = state.items.filter((i) => i.state === 'ready');
-  const QUEUE_SHOWN = 6;
-  const queue =
-    ready.length === 0
-      ? '<p class="empty">Nothing is ready to start.</p>'
-      : `<table><tr><th>Issue</th><th>Title</th><th>Waiting on</th></tr>${ready
-          .slice(0, QUEUE_SHOWN)
-          .map(
-            (i) =>
-              `<tr><td class="num">${name(i.dropZoneId)} #${escapeHtml(i.issueNumber)}</td><td>${escapeHtml(i.title)}</td><td>${escapeHtml(waitingOn(i) || '-')}</td></tr>`,
-          )
-          .join(
-            '',
-          )}</table>${ready.length > QUEUE_SHOWN ? `<p class="muted">${ready.length - QUEUE_SHOWN} more under Work items.</p>` : ''}`;
-
-  const rl = state.lastRateLimit
-    ? `<p>Drop ${escapeHtml(state.lastRateLimit.dropId)} at ${escapeHtml(state.lastRateLimit.ts)}: <code>${escapeHtml(JSON.stringify(state.lastRateLimit.data))}</code></p>`
-    : '<p class="empty">None seen.</p>';
-
   const setupFrame = state.setup?.active
     ? `<div class="warn setup-frame"><p><strong>Finish setting up Jumpmaster.</strong> <a href="/setup/next">Continue where you left off</a>: connect Claude and GitHub, check the runner, add a project and run the doctor.</p><form method="post" action="/setup/dismiss"><button>Dismiss</button></form></div>`
     : '';
   const addProject = state.setup?.addProject
     ? '<p class="quick"><a href="/zones/new">Add a project</a></p>'
     : '';
-  const ledger = (
-    plain: string,
-    heading: string,
-    head: string,
-    rows: string,
-    none: string,
-    after = '',
-  ) =>
-    card(
-      plain,
-      heading,
-      (rows ? `<table>${head}${rows}</table>` : `<p class="empty">${none}</p>`) + after,
-    );
+  // The dashboard (#120): every number from floorCounts.
+  const counts = floorCounts(state, now);
+  const dashboard =
+    state.zones.length === 0
+      ? `<div class="grid">${card('Projects', '<h2>No project yet</h2>', addProject)}</div>`
+      : totalsStrip(counts) + zoneCards(counts, state.zones) + addProject;
   return page(
     (state.killed ? KILLED_NOTICE : '') +
       `<div class="floor-head">${statusBanner(state.status) || '<div class="status" data-waiting-on="nothing"><p><strong>Factory floor</strong></p></div>'}${killSection(state.killed ?? false)}</div>` +
       tokenAgeBanner(state.claudeTokenDays) +
       setupFrame +
       starterBanner +
+      dashboard +
       (state.briefings
         ? `<div class="grid">${waitingOnYou(state.briefings, state.heldBriefings, state.zones)}</div>`
         : '') +
       `<h2 class="section-h">Running now <small class="muted">Troopers: one job slot each</small></h2>${slots}` +
-      `<div class="grid wide">${card('Ready work', '<h2>Up next</h2>', queue)}${usageSection(state.usage) || card('Claude subscription', '<h2>Usage</h2>', '<p class="empty">No usage reported yet.</p>')}</div>` +
-      `<div class="grid">${ledger(
-        'Issues Jumpmaster is working',
-        '<h2>Work items</h2>',
-        WORK_HEAD,
-        items,
-        'No work items yet.',
-        '<p><a href="/work">All work items</a></p>',
-      )}</div>` +
-      `<div class="grid">${ledger(
-        'Jobs, newest first',
-        '<h2>Drops</h2>',
-        DROP_HEAD,
-        drops,
-        'No drops yet.',
-        '<p><a href="/drops">All drops</a></p>',
-      )}</div>` +
-      `<div class="grid">${ledger(
-        'Projects',
-        '<h2>Drop zones</h2>',
-        '<tr><th>Project</th><th>Label</th><th>Model</th><th>Mode</th><th>GitHub setup</th></tr>',
-        zones,
-        'No project yet.',
-        addProject,
-      )}</div>` +
+      `<div class="grid">${usageSection(state.usage) || card('Claude subscription', '<h2>Usage</h2>', '<p class="empty">No usage reported yet.</p>')}</div>` +
       (state.crew && state.crew.length > 0
         ? `<div class="grid">${crewSection(state.crew, name)}</div>`
         : '') +
-      `<div class="grid">${sticksSection(state.sticks, name)}</div>` +
-      (state.outbox && state.outbox.length > 0
-        ? `<div class="grid">${outboxSection(state.outbox, name)}</div>`
-        : '') +
-      `<div class="grid">${card('Claude API', '<h2>Last rate limit</h2>', rl)}</div>`,
+      sticksSection(state.sticks, name, now),
     state.status ? { title: state.status.headline } : {},
   );
 }

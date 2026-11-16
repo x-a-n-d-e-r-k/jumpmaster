@@ -572,12 +572,6 @@ export function listDrops(
     .all(...args, f.limit) as Drop[];
 }
 
-export function listRecentDrops(db: Db, limit = 50): Drop[] {
-  return db
-    .prepare(`SELECT ${DROP_COLS} FROM drops ORDER BY created_at DESC, id LIMIT ?`)
-    .all(limit) as Drop[];
-}
-
 export function latestRateLimitEvent(db: Db): (StoredEvent & { dropId: string }) | undefined {
   const r = db
     .prepare(
@@ -878,6 +872,18 @@ export function updateOutbox(
     opKey,
     updatedAt: now.toISOString(),
   });
+}
+
+/** Merges done since `since` (by `updated_at`), each with its work item's zone, oldest first. */
+export function listMergesSince(db: Db, since: Date): Array<{ zoneId: string; at: string }> {
+  return db
+    .prepare(
+      `SELECT COALESCE(w.drop_zone_id, o.zone_id) AS zoneId, o.updated_at AS at FROM outbox o
+       LEFT JOIN work_items w ON w.id = o.work_item_id
+       WHERE o.kind = 'merge' AND o.state = 'done' AND o.updated_at >= ?
+       ORDER BY o.updated_at, o.rowid`,
+    )
+    .all(since.toISOString()) as Array<{ zoneId: string; at: string }>;
 }
 
 export function listOutbox(db: Db, states: OutboxState[], zoneId?: string): OutboxRow[] {

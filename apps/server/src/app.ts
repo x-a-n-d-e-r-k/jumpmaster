@@ -27,9 +27,9 @@ import {
   latestVerdict,
   listDrops,
   listEvents,
+  listMergesSince,
   listObservations,
   listOutbox,
-  listRecentDrops,
   listSticks,
   listWorkItems,
   type WorkItem,
@@ -119,6 +119,21 @@ function listFilter<S extends string>(
     ...(typeof zone === 'string' ? { zone } : {}),
     ...(state !== undefined ? { state: state as S } : {}),
   };
+}
+
+/** The most active drops the floor reads: far above any slot count. */
+const FLOOR_DROP_LIMIT = 1000;
+
+/**
+ * Merges done in the 24 hours before `at`, each with its item's zone, for the floor's Merged
+ * (24h) counts. A failed read leaves `merges24h` out: the floor says "unavailable", not 0.
+ */
+function floorMerges(db: Db, at: Date): { merges24h?: Array<{ zoneId: string; at: string }> } {
+  try {
+    return { merges24h: listMergesSince(db, new Date(at.getTime() - 24 * 3_600_000)) };
+  } catch {
+    return {};
+  }
 }
 
 /** Fastify instance with stick and UI routes registered; the caller listens. Logger stays off: payloads carry tokens. */
@@ -230,7 +245,6 @@ export function createApp(
     const config = cfg(req);
     const at = now();
     const items = config.dropZones.flatMap((z) => listWorkItems(db, z.id));
-    const details = itemDetails(db, items);
     const floor = floorBriefings(db, config.dropZones);
     const html = renderHome({
       setup: {
@@ -256,11 +270,10 @@ export function createApp(
       killed: isKilled(db),
       modes: Object.fromEntries(config.dropZones.map((z) => [z.id, getZoneMode(db, z.id, z.mode)])),
       items,
-      drops: listRecentDrops(db),
-      lastRateLimit: latestRateLimitEvent(db),
+      drops: listDrops(db, { states: ACTIVE_DROP_STATES, limit: FLOOR_DROP_LIMIT }),
       now: at,
       usage: usageView(db, config, at),
-      details,
+      ...floorMerges(db, at),
       outbox: listOutbox(db, ['unknown', 'failed']),
       briefings: floor.listed,
       heldBriefings: floor.held,
