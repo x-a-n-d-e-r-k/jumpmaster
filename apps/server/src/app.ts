@@ -16,6 +16,7 @@ import type { Db } from './db/open.js';
 import {
   ACTIVE_DROP_STATES,
   type AttemptKey,
+  effectiveSlots,
   getAttempts,
   getDrop,
   getGateAllowance,
@@ -32,6 +33,9 @@ import {
   listOutbox,
   listSticks,
   listWorkItems,
+  liveDropsOn,
+  type Stick,
+  stickCeiling,
   type WorkItem,
 } from './db/repo.js';
 import { pagesOf } from './doctor/actions.js';
@@ -70,6 +74,7 @@ import {
 } from './ui/pages.js';
 import { claudeTokenDays, registerSettingsPages } from './ui/settings.js';
 import { registerSetupPages, wizardActive } from './ui/setup.js';
+import { renderSticks, type StickRow } from './ui/sticks.js';
 import { zoneTextNamer } from './ui/zone-name.js';
 import { registerZonesPages } from './ui/zones.js';
 import { dispatchGate } from './usage.js';
@@ -159,6 +164,21 @@ export function routesOf(app: FastifyInstance): { method: string; url: string }[
   return [...(ROUTES.get(app) ?? [])];
 }
 
+/** A stick as the floor lists it, with the zones it can't run and what it lacks for each. */
+function stickLine(s: Stick, config: Config): StickLine {
+  return {
+    id: s.id,
+    name: s.name,
+    version: s.version,
+    lastSeenAt: s.lastSeenAt,
+    capabilities: s.capabilities,
+    imagePolicy: s.imagePolicy,
+    cannotRun: config.dropZones
+      .map((z) => ({ zoneId: z.id, missing: missingFor(s, zoneRequirements(z, config)) }))
+      .filter((c) => c.missing.length > 0),
+  };
+}
+
 export function createApp(
   deps: StickRouteDeps & {
     kick?: () => void;
@@ -241,6 +261,26 @@ export function createApp(
     registerZonesPages(app, { db: deps.db, store: deps.config, now: deps.now });
   }
 
+  // Every stick and its trooper count (issue #136): the count is set through the control route.
+  app.get('/sticks', async (req, reply) => {
+    const { db } = deps;
+    const config = cfg(req);
+    const html = renderSticks({
+      sticks: listSticks(db).map(
+        (s): StickRow => ({
+          ...stickLine(s, config),
+          slots: effectiveSlots(s),
+          maxSlots: stickCeiling(s),
+          reported: s.maxSlots !== null,
+          running: liveDropsOn(db, s.id),
+        }),
+      ),
+      zones: config.dropZones,
+      now: deps.now(),
+    });
+    return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
+  });
+
   app.get('/', async (req, reply) => {
     const { db, now } = deps;
     const config = cfg(req);
@@ -278,19 +318,7 @@ export function createApp(
       outbox: listOutbox(db, ['unknown', 'failed']),
       briefings: floor.listed,
       heldBriefings: floor.held,
-      sticks: listSticks(db).map(
-        (s): StickLine => ({
-          id: s.id,
-          name: s.name,
-          version: s.version,
-          lastSeenAt: s.lastSeenAt,
-          capabilities: s.capabilities,
-          imagePolicy: s.imagePolicy,
-          cannotRun: config.dropZones
-            .map((z) => ({ zoneId: z.id, missing: missingFor(s, zoneRequirements(z, config)) }))
-            .filter((c) => c.missing.length > 0),
-        }),
-      ),
+      sticks: listSticks(db).map((s) => stickLine(s, config)),
       crew: config.dropZones.map((z): CrewLine => {
         const last = db
           .prepare(

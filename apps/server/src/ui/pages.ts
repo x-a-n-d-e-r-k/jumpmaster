@@ -345,7 +345,8 @@ function sticksSection(
             return `<tr><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.version ?? '-')}</td><td>${escapeHtml(s.lastSeenAt ?? 'never')}</td><td>${escapeHtml(s.capabilities.join(', ') || '-')}</td><td>${escapeHtml(s.imagePolicy)}</td><td>${runs}</td></tr>`;
           })
           .join('')}</table>`;
-  return `<details id="sticks" class="card sticks"><summary>${escapeHtml(sticksSummary(lines, now))}</summary>${body}</details>`;
+  const manage = '<p><a href="/sticks">Set each stick\'s troopers on the sticks page</a></p>';
+  return `<details id="sticks" class="card sticks"><summary>${escapeHtml(sticksSummary(lines, now))}</summary>${body}${manage}</details>`;
 }
 
 /** One shared handler for every rule form: it posts with the session's CSRF header. */
@@ -646,7 +647,7 @@ export const STORE_NAV_SLOT = '<!--jm-store-nav-->';
 export const STORE_NAV = `<a href="/zones">Zones</a><a href="/settings">Settings</a>`;
 
 /** The pages every install has, in the order the operator reaches for them. */
-const NAV = `<a href="/">Floor</a><a href="/work">Work</a><a href="/drops">Drops</a><a href="/briefings">Briefings</a>${STORE_NAV_SLOT}<a href="/doctor">Doctor</a><a href="/observations">Observations</a>`;
+const NAV = `<a href="/">Floor</a><a href="/work">Work</a><a href="/drops">Drops</a><a href="/briefings">Briefings</a><a href="/sticks">Sticks</a>${STORE_NAV_SLOT}<a href="/doctor">Doctor</a><a href="/observations">Observations</a>`;
 
 /** Marks the link for the current page; the longest matching prefix wins. */
 const NAV_SCRIPT = `<script>(()=>{const p=location.pathname;let best=null,len=-1;for(const a of document.querySelectorAll('.topnav a')){const h=a.getAttribute('href');const hit=h==='/'?p==='/':p===h||p.startsWith(h+'/');if(hit&&h.length>len){best=a;len=h.length;}}if(best)best.setAttribute('aria-current','page');})();</script>`;
