@@ -253,3 +253,65 @@ refuses tags. Either push that image to a registry and pin its digest in `JM_ALL
 pin it the same way, or keep that zone's stick on `JM_IMAGE_POLICY=allowlist` and leave the zone's
 `requireSignedImages` unset. A service image (a database, say) is not signed by this workflow:
 pin it by digest.
+
+## Sticks that fetch from the server
+
+A new stick can get the release images from the Jumpmaster server instead of from GHCR, so the
+machine needs no registry access and no credential, and the GHCR packages can stay private. This
+is the server half (issue #140); the stick half that fetches from it is issue #141.
+
+**The server is a cache, not a trust anchor.** It mirrors each image together with the cosign
+signature artifacts of its index digest, and the stick verifies those signatures offline against
+the pinned release identity (above) before it loads anything. A compromised server can't make a
+stick run an unsigned image; that claim holds only because the stick verifies.
+
+What the server mirrors:
+
+- **Which images:** the ones the release lock names, read from the server image's
+  `/app/images.lock.json` or the file `JM_IMAGES_LOCK` names. That is the stick image, the
+  trooper and each preset, and the egress proxy; not the server's own image, and no service
+  image (those stay on Docker Hub, pinned by digest).
+- **What of each:** the multi-arch index, then for `linux/amd64` and `linux/arm64` (those the index
+  lists) the platform manifest, its config and its layers; and the signatures the release
+  workflow's cosign wrote for the index digest: OCI 1.1 referrers (the referrers API, or GHCR's
+  `sha256-<hex>` fallback tag) and the legacy `sha256-<hex>.sig` tag. An image with no signature
+  is not mirrored: a stick could not verify it.
+- **Where:** `<dataDir>/images/blobs/sha256/<hex>`, with `<dataDir>/images/index.json` recording
+  each image's state. Every blob's SHA-256 is checked as it arrives; a mismatch deletes the partial
+  file and fails the image.
+- **When:** in the background at start, and when the lock file changes (an upgrade). A failed
+  image is retried with backoff (30 s, 2 min, 10 min, 30 min, then hourly) and its last error is
+  kept. The mirror fetches only the digests the lock names: it never resolves a tag (the
+  signature tags are derived from a lock digest) and never asks the registry what is newer. New
+  images arrive only with a new lock, when the server is upgraded to a new release.
+
+The registry: anonymous access first, which serves public packages. If the registry refuses it
+(private packages), set the optional `registryReadToken` credential (Settings, Credentials, the
+file `registry_read_token` in the secrets directory, or `JM_REGISTRY_READ_TOKEN`): a GitHub token
+with `read:packages`. The server exchanges it at the registry's own token service (never at another
+host) for a pull token. Both are scrubbed from every log line, and neither is written to the image
+store or shown on a page.
+
+What a stick gets: `GET /api/sticks/images/<name>@sha256:<index digest>/oci.tar?platform=linux/amd64`,
+with its stick token, exactly as it leases (anonymous: the same `401`). The answer is an OCI image
+layout tar with `Content-Length` and `ETag: "<platform manifest digest>"`:
+
+- `oci-layout`;
+- `index.json`, naming the platform manifest (annotated `org.opencontainers.image.ref.name` and
+  `io.containerd.image.name` with the original `<registry>/<name>@<index digest>`, and
+  `dev.jumpmaster.image.index` with the index digest) and each signature manifest (annotated
+  `dev.jumpmaster.signature.of`);
+- the blobs: the platform manifest, its config and layers, the multi-arch index (the digest the
+  signatures name), and each signature manifest with its blobs.
+
+Only images the current or the previous lock names are served, so sticks still on the previous
+release keep working through an upgrade; any other digest is `404 { error: 'not in the image
+lock' }`. An image not yet complete is `404 { error: 'not mirrored', state }` with `state` one of
+`pending`, `fetching` or `failed: <reason>`; a platform the image does not have is `404`.
+
+The sticks page has an **Images** card listing each image with its platforms, size and state, and
+the doctor's `server.image-mirror` says the same: `info` with no lock (a checkout has nothing to
+mirror), `pass` when every image is complete, `warn` naming each failure.
+
+Follow-up, not done yet: blobs are never garbage-collected. Images of neither the current nor the
+previous lock leave the index, but their blobs stay under `<dataDir>/images/blobs`.

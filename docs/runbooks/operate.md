@@ -133,13 +133,14 @@ you recognise; the drops listed beside each one say where it came from.
 ### Credentials and rotation
 
 Each credential (`claudeToken`, `githubAuthorToken`, `githubReviewerToken`, `githubReadToken`,
-and any gate secret a zone declares) shows its source, its fingerprint (the first 8 hex
+`registryReadToken`, and any gate secret a zone declares) shows its source, its fingerprint (the first 8 hex
 characters of its SHA-256), the GitHub login it belongs to, when it was set, when it was made, and
 its last test. Never the value.
 
 Sources, in the order they win: a variable in the server's environment (`JM_CLAUDE_TOKEN` and the
 like, or its `_FILE` form naming a file), then a file under `secrets/` with the credential's name
-(`claude_token`, `github_author_token`, `github_reviewer_token`, `github_read_token`), then the
+(`claude_token`, `github_author_token`, `github_reviewer_token`, `github_read_token`,
+`registry_read_token`), then the
 vault (what you enter here). A file's or the
 environment's credential is read-only here, with where it comes from: replace the file and run
 `ctl secrets reload`, or change the environment and restart. The doctor's `credential.shadowed`

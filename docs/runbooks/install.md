@@ -701,6 +701,7 @@ Collaborators; accept the invitation as that account), and neither bot may be an
 | `secrets/github_author_token` | the author bot (opens and merges pull requests) | Contents: Read and write · Pull requests: Read and write · Issues: Read and write · Metadata: Read-only · **no Workflows** |
 | `secrets/github_reviewer_token` | the reviewer bot, a different account (two-bot only) | Pull requests: Read and write · Contents: Read-only · Metadata: Read-only |
 | `secrets/github_read_token` | any account that can read the repository (private repositories only) | Contents: Read-only · Metadata: Read-only |
+| `secrets/registry_read_token` | any account that can read the release packages (private GHCR packages only: the server's image mirror, see [Sticks that fetch from the server](release.md#sticks-that-fetch-from-the-server)) | a classic token with `read:packages` |
 
 Also give the author token **Commit statuses: Read-only** and **Actions: Read-only**: the server
 reads CI results through them (a fine-grained token can't read check runs, so Jumpmaster reads
@@ -1159,6 +1160,17 @@ The address other machines reach this server at. `info` while it is unset: nothi
 a stick runs on another machine. `pass` when `<address>/healthz` answers; `warn` with the same words
 as the Check button (a DNS failure, a TLS error, a timeout or a status code) when it does not. See
 [Reaching the server from other machines](#reaching-the-server-from-other-machines).
+
+### `server.image-mirror`
+
+**Action:** See the images on Sticks
+
+The release images the server mirrors for sticks (the stick, the troopers and the egress proxy,
+for linux/amd64 and linux/arm64, with their cosign signatures). `info` with no image lock (the
+server runs from a checkout: nothing to mirror) and while the mirror is still fetching; `pass` when
+every image of the lock is complete; `warn` naming each image that failed and why. A registry that
+refuses anonymous access needs the `registryReadToken` credential. See
+[Sticks that fetch from the server](release.md#sticks-that-fetch-from-the-server).
 
 ### `config.uid`
 
