@@ -5,7 +5,6 @@ import {
   type CrewDropPayload,
   type DropPayload,
   type DropResult,
-  EVENT_PREFIX,
   type GateResult,
   type ItemDropPayload,
   isCrewRole,
@@ -16,7 +15,7 @@ import {
   type TrooperEvent,
 } from '@jumpmaster/protocol';
 import { buildClaudeArgs, type ParsedLine, parseStreamLine } from '../claude.js';
-import { capEventData } from '../events.js';
+import { eventLines } from '../events.js';
 import { scrubEnv } from '../gates.js';
 import type { TrooperDeps } from '../main.js';
 import { sweepUid, type TrooperIdentities } from '../privilege.js';
@@ -47,18 +46,20 @@ export interface AgentOutcome {
   aborted?: boolean;
 }
 
+/** The id of the last event sent in parts: one trooper process runs one drop. */
+let partIds = 0;
+
 export function emitEvent(
   deps: TrooperDeps,
   ctx: RoleCtx,
   kind: TrooperEvent['kind'],
   data: Record<string, unknown>,
 ): void {
-  const ev: TrooperEvent = {
+  const lines = eventLines(kind, data, ctx.secrets, {
     ts: new Date().toISOString(),
-    kind,
-    data: capEventData(data, ctx.secrets),
-  };
-  deps.emit(redact(EVENT_PREFIX + JSON.stringify(ev), ctx.secrets));
+    id: () => ++partIds,
+  });
+  for (const line of lines) deps.emit(line);
 }
 
 /** The agent's working copy: under its own home in container mode, else in the workdir. */
