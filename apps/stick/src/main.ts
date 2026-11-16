@@ -1,6 +1,8 @@
 import { leaseLogger, StickClient } from './client.js';
 import { DockerDriver } from './docker.js';
 import { egressCapability } from './egress.js';
+import { stickPlatform } from './fetch-image.js';
+import { imageSource } from './pull.js';
 import { createPushLoop, PendingPushes, PUSH_LOOP_MS, pushOnce } from './push.js';
 import {
   HealthMonitor,
@@ -58,6 +60,44 @@ async function main() {
     ...(release ? { release } : {}),
     log: (line) => console.log(line),
   });
+  const client = new StickClient(serverUrl, token, { maxSlots, slots });
+  let enrolled = Boolean(token && stickId);
+  const enroll = async () => {
+    const name = process.env.JM_STICK_NAME ?? 'stick';
+    const out = await client.enroll(joinToken(process.env), name, slots);
+    stickId = out.stickId;
+    enrolled = true;
+    saveEnrollment(dir, { serverUrl, stickId, stickToken: out.stickToken });
+    console.log(`enrolled as ${stickId}`);
+  };
+  // Where missing images come from (issue #141): JM_IMAGE_SOURCE, else the server once it
+  // announces image-mirror-v1 on a lease. Checked here, so a bad value stops the start.
+  imageSource(process.env, undefined);
+  trust.server = {
+    source: () => imageSource(process.env, client.features),
+    deps: {
+      client,
+      loader: driver,
+      stateDir: dir,
+      platform: stickPlatform(),
+      log: (line) => console.log(line),
+    },
+  };
+  if (imageSource(process.env, undefined) === 'server') {
+    console.log(`images: from the server, for ${stickPlatform()}`);
+    // The proxy image below comes from the server, which needs the stick token: enroll first,
+    // advertising what is known so far (every lease advertises the rest).
+    if (!enrolled) {
+      client.advertise(
+        stickInfo(
+          process.env,
+          stickVersion(release),
+          advertisedCapabilities({ egress: false, policy: trust.policy }),
+        ),
+      );
+      await enroll();
+    }
+  }
   // Advertised only when this engine really can enforce it; the server then never leases this
   // stick a drop from a zone that restricts egress.
   const egress = await egressCapability(driver, process.env, {
@@ -78,18 +118,13 @@ async function main() {
   console.log(
     `stick ${info.version}: image policy ${info.imagePolicy}, capabilities ${info.capabilities.join(', ') || 'none'}`,
   );
-  const client = new StickClient(serverUrl, token, { info, maxSlots, slots });
+  client.advertise(info);
   console.log(`troopers: ${target.target} at once to start, at most ${maxSlots}`);
   const leaseLog = leaseLogger((line) => console.error(line));
-  if (!token || !stickId) {
-    const name = process.env.JM_STICK_NAME ?? 'stick';
-    const enrolled = await client.enroll(joinToken(process.env), name, slots);
-    stickId = enrolled.stickId;
-    saveEnrollment(dir, { serverUrl, stickId, stickToken: enrolled.stickToken });
-    console.log(`enrolled as ${stickId}`);
-  }
+  if (!enrolled) await enroll();
 
-  const id = stickId;
+  if (!stickId) throw new Error('not enrolled');
+  const id: string = stickId;
   const pending = new PendingPushes();
   // Before leasing: kill troopers a previous run of this stick left behind, then rediscover its
   // pending pushes, each volume once its own drop's containers are confirmed gone (Ruling 14).

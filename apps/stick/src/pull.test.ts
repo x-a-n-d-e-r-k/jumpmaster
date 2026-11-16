@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { PULL_PROGRESS_MS, PULL_TIMEOUT_MS, pullImage } from './pull.js';
+import { imageSource, PULL_PROGRESS_MS, PULL_TIMEOUT_MS, pullImage } from './pull.js';
 
 const REF = `ghcr.io/o/jumpmaster-trooper@sha256:${'a'.repeat(64)}`;
 
@@ -96,5 +96,29 @@ describe('pullImage', () => {
       lines.filter((l) => l.event === 'image-pull' && l.status === 'Downloading'),
     ).toHaveLength(3);
     expect(lines.at(-1)).toEqual({ event: 'image-pull', ref: REF, status: 'done' });
+  });
+});
+
+describe('where missing images come from (issue #141)', () => {
+  const mirror = new Set(['push-v1', 'image-mirror-v1']);
+  const plain = new Set(['push-v1']);
+
+  test('unset: the server when it announces image-mirror-v1, else the registry', () => {
+    expect(imageSource({}, mirror)).toBe('server');
+    expect(imageSource({ JM_IMAGE_SOURCE: '' }, mirror)).toBe('server');
+    expect(imageSource({}, plain)).toBe('registry');
+    expect(imageSource({}, undefined)).toBe('registry');
+  });
+
+  test('explicit: what it says, whatever the server announces', () => {
+    expect(imageSource({ JM_IMAGE_SOURCE: 'registry' }, mirror)).toBe('registry');
+    expect(imageSource({ JM_IMAGE_SOURCE: 'server' }, plain)).toBe('server');
+    expect(imageSource({ JM_IMAGE_SOURCE: ' server ' }, plain)).toBe('server');
+  });
+
+  test('anything else is refused', () => {
+    expect(() => imageSource({ JM_IMAGE_SOURCE: 'both' }, mirror)).toThrow(
+      'JM_IMAGE_SOURCE must be server or registry, not both',
+    );
   });
 });

@@ -3,6 +3,7 @@
 // egress never runs without its only exit being the proxy.
 import type { DropPayload, TrooperEvent } from '@jumpmaster/protocol';
 import type { ContainerDriver, DropNet, IsolationFacts, ProxyHandle } from './driver.js';
+import { fetchFromServer, fromServer } from './fetch-image.js';
 import { pullImage } from './pull.js';
 import { dropSubnetPool } from './subnets.js';
 import { digestOf, type ImageTrust, verifyImage } from './verify.js';
@@ -253,12 +254,21 @@ export async function egressCapability(
         ok: false,
         reason: `the egress proxy image ${image} is not a digest reference; under the signed image policy set JM_EGRESS_IMAGE to the release's proxy by digest`,
       };
-    const v = await verifyImage(image, o.trust);
-    if (!v.ok) return { ok: false, reason: `the egress proxy image is not verified: ${v.reason}` };
-    try {
-      await pullImage(image, { driver, ...(o.log ? { log: o.log } : {}) });
-    } catch (e) {
-      return { ok: false, reason: message(e) };
+    const server = fromServer(o.trust);
+    if (server) {
+      // From the server, verified offline before it loads (issue #141).
+      const v = await fetchFromServer(image, o.trust, server);
+      if (!v.ok)
+        return { ok: false, reason: `the egress proxy image is not verified: ${v.reason}` };
+    } else {
+      const v = await verifyImage(image, o.trust);
+      if (!v.ok)
+        return { ok: false, reason: `the egress proxy image is not verified: ${v.reason}` };
+      try {
+        await pullImage(image, { driver, ...(o.log ? { log: o.log } : {}) });
+      } catch (e) {
+        return { ok: false, reason: message(e) };
+      }
     }
   }
   if (!(await driver.imageExists(image).catch(() => false)))

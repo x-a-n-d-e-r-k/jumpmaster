@@ -328,3 +328,84 @@ describe('push calls', () => {
     expect((err as { status?: number }).status).toBe(422);
   });
 });
+
+describe('server-hosted images (issue #141)', () => {
+  const ref = `ghcr.io/o/jumpmaster-trooper@sha256:${'a'.repeat(64)}`;
+  type Call = { url: string; method: string; headers: Record<string, string>; body: unknown };
+  const calls: Call[] = [];
+  const serve = (status = 204, body: BodyInit | null = null) => {
+    calls.length = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: URL, init: RequestInit) => {
+        calls.push({
+          url: String(url),
+          method: init.method ?? 'GET',
+          headers: init.headers as Record<string, string>,
+          body: typeof init.body === 'string' ? JSON.parse(init.body) : undefined,
+        });
+        return new Response(body, { status });
+      }),
+    );
+  };
+
+  test('a lease carries no imageFetch until a download is reported', async () => {
+    serve();
+    const c = new StickClient('http://server.test', 't');
+    await c.lease(1, { capabilities: ['push-v1'] });
+    expect(calls[0]?.body).not.toHaveProperty('imageFetch');
+  });
+
+  test('a report is sent at once on a lease with no free slot and the latest terms; null once done', async () => {
+    serve();
+    const c = new StickClient('http://server.test', 't', { maxSlots: 4, slots: 2 });
+    await c.lease(1, { capabilities: ['push-v1', 'egress-v1'], noPush: false });
+    await c.reportImageFetch({ ref, done: 5, total: 10 });
+    expect(calls[1]).toMatchObject({
+      url: 'http://server.test/api/sticks/lease',
+      body: {
+        freeSlots: 0,
+        capabilities: ['push-v1', 'egress-v1'],
+        noPush: false,
+        maxSlots: 4,
+        slots: 2,
+        imageFetch: { ref, done: 5, total: 10 },
+      },
+    });
+    // The next regular lease carries it too, until the download ends.
+    await c.lease(1, { capabilities: ['push-v1'] });
+    expect(calls[2]?.body).toMatchObject({ freeSlots: 1, imageFetch: { ref, done: 5, total: 10 } });
+    await c.reportImageFetch(null);
+    expect(calls[3]?.body).toMatchObject({ freeSlots: 0, imageFetch: null });
+    await c.lease(1);
+    expect(calls[4]?.body).not.toHaveProperty('imageFetch');
+  });
+
+  test('a report before the first lease waits for it; a failed report is not an error', async () => {
+    serve();
+    const c = new StickClient('http://server.test', 't');
+    await c.reportImageFetch({ ref, done: 1, total: 2 });
+    expect(calls).toHaveLength(0);
+    await c.lease(1);
+    expect(calls[0]?.body).toMatchObject({ imageFetch: { ref, done: 1, total: 2 } });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('down');
+      }),
+    );
+    await expect(c.reportImageFetch({ ref, done: 2, total: 2 })).resolves.toBeUndefined();
+  });
+
+  test('imageLayout asks for name@digest and the platform with the stick token', async () => {
+    serve(200, 'tar');
+    const c = new StickClient('http://server.test/', 'tok');
+    const res = await c.imageLayout(ref, 'linux/arm64', new AbortController().signal);
+    expect(await res.text()).toBe('tar');
+    expect(calls[0]).toMatchObject({
+      method: 'GET',
+      url: `http://server.test/api/sticks/images/jumpmaster-trooper%40sha256%3A${'a'.repeat(64)}/oci.tar?platform=linux%2Farm64`,
+      headers: { authorization: 'Bearer tok', 'x-jumpmaster-protocol': '1' },
+    });
+  });
+});

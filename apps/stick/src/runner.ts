@@ -20,6 +20,7 @@ import {
 import type { Ack, DropClient } from './client.js';
 import type { ContainerDriver, DropNet, VolumeInfo } from './driver.js';
 import { type EgressSession, egressImage, startEgress, trooperEgressRefusal } from './egress.js';
+import { fetchFromServer, fromServer } from './fetch-image.js';
 import { pullImage } from './pull.js';
 import {
   type PendingPushes,
@@ -518,7 +519,26 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
   // Then verify (cosign asks the registry: under signed nothing is downloaded until every image
   // has verified), then pull digest references, all before any container exists.
   const unique = [...new Map(images.map((i) => [i.ref, i])).values()];
-  if (trust.policy === 'signed') {
+  const server = fromServer(trust);
+  if (server) {
+    // Server-hosted images (issue #141): each missing image comes from the server and is
+    // verified offline before it loads. The registry is never asked, not even to verify.
+    for (const i of unique) {
+      const v = await fetchFromServer(i.ref, trust, server);
+      if (!v.ok) {
+        if ('wait' in v) {
+          // Not mirrored yet: no result and no heartbeat, so the lease lapses and the drop is
+          // leased again later, by when the server may have it.
+          log(JSON.stringify({ event: 'drop-waiting', dropId, epoch, reason: v.reason }));
+          return;
+        }
+        await fail(v.reason);
+        return;
+      }
+      if (trust.policy === 'signed')
+        log(JSON.stringify({ event: 'image-verified', dropId, ref: i.ref, via: v.via }));
+    }
+  } else if (trust.policy === 'signed') {
     for (const i of unique) {
       const v = await decide(i);
       if (!v.ok) {
@@ -528,7 +548,7 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
       log(JSON.stringify({ event: 'image-verified', dropId, ref: i.ref, via: v.via }));
     }
   }
-  for (const i of unique) {
+  for (const i of server ? [] : unique) {
     try {
       await pullImage(i.ref, { driver, log });
     } catch (e) {

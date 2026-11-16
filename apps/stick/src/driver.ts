@@ -1,3 +1,4 @@
+import type { Readable } from 'node:stream';
 import type { ContainerLimits, ServiceSpec } from '@jumpmaster/protocol';
 
 export type ContainerHandle = {
@@ -177,4 +178,22 @@ export interface ContainerDriver {
    * images need node. Containers it starts are removed before it returns.
    */
   probeIsolation(net: DropNet, images: { host: string; drop: string }): Promise<IsolationFacts>;
+}
+
+/** Loading an image the stick fetched from its server (issue #141), as `docker load` does. */
+export interface ImageLoader {
+  /** Whether the image is present on this engine. */
+  imageExists(image: string): Promise<boolean>;
+  /**
+   * Loads an image tar; resolves to the ids of the images it loaded (a name the engine reports is
+   * resolved to its id). Rejects on any error the engine reports and when `signal` aborts.
+   */
+  loadImage(tar: Readable, signal: AbortSignal): Promise<string[]>;
+  /** Removes an image by id; gone already is fine. */
+  removeImage(id: string): Promise<void>;
+  /**
+   * Makes `ref` (a digest reference) name the image `id`, so `imageExists(ref)` finds it and
+   * containers are created from it. Throws when the engine can't.
+   */
+  tagImage(id: string, ref: string): Promise<void>;
 }
