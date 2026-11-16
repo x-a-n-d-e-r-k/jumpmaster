@@ -7,9 +7,9 @@
 // - a legacy `sha256-<hex>.sig` signature image under kind `dev.cosignproject.cosign/sigs`;
 // - OCI 1.1 signature referrers (sigstore bundles) listed with their artifactType and no kind,
 //   which the stick and the installer verify on the index bytes, offline (issue #167).
-// Signature entries carry no reference name, so nothing but the platform image is loaded as a
-// named image. A `manifest.json` names exactly the platform image for `docker load` on Docker's
-// classic image store, which reads that file rather than `index.json`.
+// This layout is never loaded as it is: it serves verification (issue #167). Sticks and the
+// installer load only a tar they build from the verified files (issue #168): a sparse index,
+// named `<registry>/<name>@<index digest>`, with one platform's blobs and no signature.
 import { createReadStream } from 'node:fs';
 import { Readable } from 'node:stream';
 import type { Lookup } from './mirror.js';

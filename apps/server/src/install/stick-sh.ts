@@ -5,7 +5,10 @@
 // Sigstore's trusted root are baked in. The machine reaches only this server: cosign, the trusted
 // root and the stick image come from here, and the image is verified fully offline (issue #167)
 // against the release workflow's Sigstore bundle before `docker load`, with the same steps as the
-// stick's `verifyIndexBundles` (apps/stick/src/verify.ts).
+// stick's `verifyIndexBundles` (apps/stick/src/verify.ts). What it loads is a tar it builds from
+// the verified files, as the stick's `loadTar` does (apps/stick/src/fetch-image.ts, issue #168):
+// a sparse index named `<registry>/jumpmaster-stick@<digest>` holding this platform alone, and no
+// signature; it then tags that reference, once the engine answers it with the expected id.
 
 /** What the script is rendered with; nothing here is a secret. */
 export type StickScriptParams = {
@@ -42,6 +45,20 @@ export const STICK_IMAGE_NAME = 'jumpmaster-stick';
 export const ENROLL_CODE_PATH = '/state/enroll_code';
 
 const REPOSITORY = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
+/** The OCI media type of an image index. */
+const IMAGE_INDEX_MEDIA_TYPE = 'application/vnd.oci.image.index.v1+json';
+
+/**
+ * `<registry>/<name>@<digest>` of a reference, any tag dropped: the name the loaded image gets
+ * (as the stick's `canonicalRef`).
+ */
+export function digestName(ref: string, digest: string): string {
+  const at = ref.lastIndexOf('@');
+  const name = at < 0 ? ref : ref.slice(0, at);
+  const slash = name.lastIndexOf('/');
+  const colon = name.lastIndexOf(':');
+  return `${colon > slash ? name.slice(0, colon) : name}@${digest}`;
+}
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
@@ -112,6 +129,8 @@ set -eu
 JM_SERVER_URL=${shq(p.serverUrl)}
 STICK_REF=${shq(p.image?.ref ?? '')}
 STICK_DIGEST=${shq(p.image?.digest ?? '')}
+STICK_NAME=${shq(p.image ? digestName(p.image.ref, p.image.digest) : '')}
+INDEX_MEDIA_TYPE=${shq(IMAGE_INDEX_MEDIA_TYPE)}
 SIGNER_REPOSITORY=${shq(repo)}
 IDENTITY_REGEXP=${shq(ready ? identityRegexp(repo) : '')}
 OIDC_ISSUER=${shq(GITHUB_ISSUER)}
@@ -134,24 +153,26 @@ COSIGN_WAIT=\${JM_INSTALL_COSIGN_TIMEOUT:-${COSIGN_WAIT_SECONDS}}
 say() { printf '%s\\n' "$*"; }
 die() { printf 'jumpmaster: %s\\n' "$*" >&2; exit 1; }
 
-# The descriptors of an OCI JSON document (an image layout's index.json, a manifest), one per
-# line: the key of the list holding it, its digest and artifactType, and its signature-of and
-# kind annotations, "-" for none. sed and a brace count, no jq: every file it picks is hash-checked
+# The descriptors of an OCI JSON document (an image layout's index.json, an image index, a
+# manifest), one per line: the key of the list holding it, its digest and artifactType, its
+# signature-of and kind annotations, and its platform's os and architecture, "-" for none. sed and a brace count, no jq: every file it picks is hash-checked
 # after, and only cosign decides what is signed.
 descriptors() {
   tr -d ' \\t\\r\\n' <"$1" | sed 's/[{}]/\\
 &\\
 /g; s/,"/\\
 "/g' | {
-    depth=0 key=- parent=- d=- at=- of=- kind=-
+    depth=0 key=- parent=- sub=- d=- at=- of=- kind=- os=- pa=-
     while IFS= read -r t; do
       case $t in
         '{')
           depth=$((depth + 1))
-          if [ "$depth" = 2 ]; then parent=$key d=- at=- of=- kind=-; fi
+          if [ "$depth" = 2 ]; then parent=$key sub=- d=- at=- of=- kind=- os=- pa=-; fi
           ;;
         '}')
-          if [ "$depth" = 2 ]; then printf '%s %s %s %s %s\\n' "$parent" "$d" "$at" "$of" "$kind"; fi
+          if [ "$depth" = 2 ]; then
+            printf '%s %s %s %s %s %s %s\\n' "$parent" "$d" "$at" "$of" "$kind" "$os" "$pa"
+          fi
           depth=$((depth - 1))
           ;;
         '"'*)
@@ -161,6 +182,7 @@ descriptors() {
           case $value in
             '' | '[')
               if [ "$depth" = 1 ]; then key=$name; fi
+              if [ "$depth" = 2 ]; then sub=$name; fi
               ;;
             '"'*)
               v=\${value#\\"}
@@ -172,6 +194,12 @@ descriptors() {
                 3:"$SIGNATURE_OF") of=$v ;;
                 3:kind) kind=$v ;;
               esac
+              if [ "$depth:$sub" = 3:platform ]; then
+                case $name in
+                  os) os=$v ;;
+                  architecture) pa=$v ;;
+                esac
+              fi
               ;;
           esac
           ;;
@@ -289,7 +317,7 @@ LAYOUT="$TMP/layout"
 descriptors "$LAYOUT/index.json" >"$TMP/entries" || die "the stick image download's index.json does not parse"
 index=
 : >"$TMP/bundles"
-while read -r parent d at of kind; do
+while read -r parent d at of kind _; do
   [ "$parent" = manifests ] || continue
   if [ "$d" = "$STICK_DIGEST" ] && [ "$kind" = "$IMAGE_INDEX_KIND" ]; then index=$d; fi
   if [ "$of" = "$STICK_DIGEST" ] && [ "$at" = "$BUNDLE_ARTIFACT_TYPE" ]; then
@@ -339,10 +367,60 @@ while read -r b; do
 done <"$TMP/bundle-files"
 [ "$verified" = 1 ] || die "the stick image is not signed by $SIGNER_REPOSITORY's release workflow: $why"
 
-loaded=$(docker load -i "$TMP/stick.tar") || die "docker load failed"
-image=$(printf '%s\\n' "$loaded" | sed -n 's/^Loaded image ID: //p; s/^Loaded image: //p' | head -n 1)
-[ -n "$image" ] || die "docker load named no image"
-docker tag "$image" "$LOCAL_IMAGE" || die "could not tag the stick image"
+say "Signed by $SIGNER_REPOSITORY's release workflow"
+
+# What docker load gets (issue #168), built from the verified files as the stick builds it: the
+# signed index alone in index.json, named by its digest reference (Docker's containerd image
+# store then resolves that reference to it), with only this platform's manifest, config and
+# layers, each hash-checked; manifest.json lists the same image for the classic store. No
+# signature and no other platform is loaded.
+descriptors "$index_blob" >"$TMP/platforms" || die "the stick image index does not parse"
+manifest=
+while read -r parent d at of kind os pa; do
+  if [ "$parent" = manifests ] && [ "$os/$pa" = "$PLATFORM" ]; then
+    manifest=$d
+    break
+  fi
+done <"$TMP/platforms"
+[ -n "$manifest" ] || die "the stick image index has no $PLATFORM image"
+manifest_blob=$(blob "$manifest") || die "the stick image download has no $PLATFORM image (its manifest $manifest is missing or does not hash to its digest)"
+descriptors "$manifest_blob" >"$TMP/parts" || die "the stick image's $PLATFORM manifest does not parse"
+config=$(sed -n 's/^config \\([^ ]*\\) .*/\\1/p' "$TMP/parts" | head -n 1)
+[ -n "$config" ] || die "the stick image's $PLATFORM manifest has no config"
+LOAD="$TMP/load"
+mkdir -p "$LOAD/blobs/sha256"
+put() {
+  b=$(blob "$1") || die "the stick image's $2 $1 in the download does not hash to its digest"
+  dest="$LOAD/blobs/sha256/\${1#sha256:}"
+  [ -e "$dest" ] || ln "$b" "$dest" 2>/dev/null || cp "$b" "$dest" || die "could not stage $1"
+}
+put "$STICK_DIGEST" index
+put "$manifest" manifest
+put "$config" config
+layers=
+for layer in $(sed -n 's/^layers \\([^ ]*\\) .*/\\1/p' "$TMP/parts"); do
+  put "$layer" layer
+  layers="$layers\${layers:+,}$(printf '"blobs/sha256/%s"' "\${layer#sha256:}")"
+done
+size=$(($(wc -c <"$index_blob")))
+printf '%s' '{"imageLayoutVersion":"1.0.0"}' >"$LOAD/oci-layout"
+printf '{"schemaVersion":2,"mediaType":"%s","manifests":[{"mediaType":"%s","digest":"%s","size":%s,"annotations":{"io.containerd.image.name":"%s","org.opencontainers.image.ref.name":"%s"}}]}' \
+  "$INDEX_MEDIA_TYPE" "$INDEX_MEDIA_TYPE" "$STICK_DIGEST" "$size" "$STICK_NAME" "$STICK_NAME" >"$LOAD/index.json"
+printf '[{"Config":"blobs/sha256/%s","RepoTags":[],"Layers":[%s]}]' "\${config#sha256:}" "$layers" >"$LOAD/manifest.json"
+tar -cf "$TMP/load.tar" -C "$LOAD" oci-layout index.json manifest.json blobs || die "could not build the image tar to load"
+
+docker load -i "$TMP/load.tar" >"$TMP/loaded" || die "docker load failed"
+# The containerd store answers the reference with the index digest; the classic store, if it
+# answers it at all, with this platform's config digest. Anything else is removed, never kept.
+id=$(docker image inspect -f '{{.Id}}' "$STICK_NAME" 2>/dev/null) || id=
+if [ "$id" != "$STICK_DIGEST" ] && [ "$id" != "$config" ]; then
+  docker image rm -f "$STICK_NAME" >/dev/null 2>&1 || true
+  sed -n 's/^Loaded image ID: //p; s/^Loaded image: //p' "$TMP/loaded" | while read -r x; do
+    docker image rm -f "$x" >/dev/null 2>&1 || true
+  done
+  die "the engine did not load the stick image as $STICK_NAME (it answers \${id:-no image}): loading an image by digest needs Docker's containerd image store"
+fi
+docker tag "$STICK_NAME" "$LOCAL_IMAGE" || die "could not tag the stick image"
 
 docker volume create "$VOLUME" >/dev/null || die "could not create the volume $VOLUME"
 mount=$(docker volume inspect -f '{{ .Mountpoint }}' "$VOLUME")
