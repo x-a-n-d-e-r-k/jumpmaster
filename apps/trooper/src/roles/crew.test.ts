@@ -401,6 +401,19 @@ describe('crew prompts', () => {
   const read = (role: string) =>
     readFileSync(new URL(`../../prompts/${role}.md`, import.meta.url), 'utf8');
 
+  test('the crew lead and the diagnostician write briefings for a reader without context (#226)', () => {
+    for (const role of ['crew-lead', 'diagnose']) {
+      const t = read(role);
+      expect(t, role).toMatch(/reader without context/i);
+      expect(t, role).toMatch(/every issue by `#number` and title/);
+      expect(t, role).toMatch(
+        /explain any plan term \("Task 5", an objective key\) in one clause/i,
+      );
+      expect(t, role).toMatch(/rulings by number with what they decided/i);
+    }
+    expect(read('crew-lead')).toMatch(/each option label say what changes/i);
+  });
+
   test('each crew prompt template states the data and escalation rules', () => {
     for (const role of ['crew-lead', 'refute', 'diagnose', 'triage']) {
       const t = read(role);

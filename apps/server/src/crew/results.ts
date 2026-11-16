@@ -4,7 +4,7 @@ import {
   isCrewRole,
   parseCrewOutput,
 } from '@jumpmaster/protocol';
-import { raiseBriefing, whyBasis } from '../briefings.js';
+import { raiseBriefing, refuteExhaustedWhy, whyBasis } from '../briefings.js';
 import type { Db } from '../db/open.js';
 import { appendEvents, type Drop, type DropState, updateDrop } from '../db/repo.js';
 import type { CrewInputJson } from '../payloads.js';
@@ -107,7 +107,7 @@ function applyRefute(
             kind: 'refute_exhausted',
             subject,
             decision: `Promote ${label} as revised?`,
-            why: `The refute revised it and its ${zone.crew.maxRefute} refute attempts are used up.`,
+            why: refuteExhaustedWhy(db, getCrewIssue(db, issue.id) ?? issue),
             options: PROMOTE_OPTIONS,
             onHold: label,
             source: 'server',
@@ -319,6 +319,8 @@ export async function applyCrewResult(
       return;
     }
     if (role === 'refute' && work?.role === 'refute') {
+      // Kept on the drop: a refute_exhausted briefing quotes every review's findings from it.
+      updateDrop(db, drop.id, { resultJson: JSON.stringify(result) });
       const issue = getCrewIssue(db, work.crewIssueId);
       if (issue) applyRefute(db, deps, issue, parsed.value as CrewOutput['refute'], now);
     } else if (role === 'triage' && work?.role === 'triage') {

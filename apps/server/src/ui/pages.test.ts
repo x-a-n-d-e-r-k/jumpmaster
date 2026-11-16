@@ -1,17 +1,32 @@
 import { describe, expect, test } from 'vitest';
-import type { Briefing, Ruling } from '../briefings.js';
+import {
+  type Briefing,
+  briefingAbout,
+  crewKeyNumbers,
+  EFFECT_TEXT,
+  EFFECTS,
+  effectText,
+  MAX_FINDING,
+  REFUTE_RECOMMENDATION,
+  type Ruling,
+  refuteExhaustedWhy,
+} from '../briefings.js';
 import type { ClaudePlan, DropZoneConfig } from '../config.js';
 import { STARTER_WARNING } from '../config.js';
-import type { CrewIssue } from '../crew/store.js';
+import { type CrewIssue, getCrewIssue, insertCrewIssue, setCrewIssue } from '../crew/store.js';
 import type { Drop, StoredEvent, UsageWindowRow, WorkItem } from '../db/repo.js';
+import { insertDrop, updateDrop } from '../db/repo.js';
 import type { GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import { statusOf } from '../status.js';
+import { zoneWorld } from '../test/fixtures.js';
 import {
   dropRows,
   escapeHtml,
+  linkify,
   page,
   pageParams,
+  renderBriefing,
   renderBriefings,
   renderDoctor,
   renderDrop,
@@ -1646,5 +1661,251 @@ describe('transcript on the drop page', () => {
     );
     expect(raw.match(/<tr><td>\d+<\/td>/g)).toHaveLength(fixture.length);
     expect(renderDrop(drop, [])).toContain('<summary>Raw events (0)</summary>');
+  });
+});
+
+describe('every briefing stands on its own (#226)', () => {
+  const at = new Date('2026-11-01T10:00:00Z');
+  const refs = {
+    repo: 'octo/demo',
+    crewKeys: new Map([['app-push-token', 231]]),
+  };
+
+  test('About resolves each subject form to its text and link', () => {
+    const w = zoneWorld();
+    const filed = insertCrewIssue(w.db, {
+      zoneId: 'main',
+      key: 'app-push-token',
+      source: 'drop',
+      objective: 'o',
+      title: 'Push tokens in app mode',
+      body: 'b',
+      priority: null,
+      createdAt: at.toISOString(),
+      number: 224,
+    });
+    const unfiled = insertCrewIssue(w.db, {
+      zoneId: 'main',
+      key: 'kill-suspend-installations',
+      source: 'drop',
+      objective: 'o',
+      title: 'Kill suspends installations',
+      body: 'b',
+      priority: null,
+      createdAt: at.toISOString(),
+    });
+    const item = w.item(3, 'parked');
+    const about = (subject: string) => briefingAbout(w.db, w.zone, { subject });
+    expect(about(`issue:${filed}`)).toEqual({
+      text: '#224 Push tokens in app mode',
+      url: 'https://github.com/octo/demo/issues/224',
+    });
+    expect(about(`issue:${unfiled}`)).toEqual({
+      text: 'crew issue kill-suspend-installations (not filed yet)',
+    });
+    expect(about(`item:${item}`)).toEqual({
+      text: '#3 Issue 3',
+      url: 'https://github.com/octo/demo/issues/3',
+    });
+    expect(about('crew:split the push work')).toEqual({ text: 'split the push work' });
+    expect(about('credits:fable')).toEqual({ text: 'credits:fable' });
+    expect(about('issue:999')).toEqual({ text: 'issue:999' });
+    expect(crewKeyNumbers(w.db, 'main')).toEqual(new Map([['app-push-token', 224]]));
+  });
+
+  test('linkify links #n, Ruling n, Briefing n, known crew keys and a drop page, nothing else', () => {
+    expect(linkify('see #12.', refs)).toBe(
+      'see <a href="https://github.com/octo/demo/issues/12" target="_blank" rel="noopener noreferrer">#12</a>.',
+    );
+    expect(linkify('after Ruling 42', refs)).toBe(
+      'after <a href="/briefings#ruling-42">Ruling 42</a>',
+    );
+    expect(
+      linkify('after Ruling 42 and Briefing 125', {
+        ...refs,
+        rulingHref: (n) => `#ruling-${n}`,
+        briefingHref: (n) => `#briefing-${n}`,
+      }),
+    ).toBe('after <a href="#ruling-42">Ruling 42</a> and <a href="#briefing-125">Briefing 125</a>');
+    expect(linkify('Briefing 125', refs)).toBe('<a href="/briefings/125">Briefing 125</a>');
+    expect(linkify('land app-push-token first', refs)).toBe(
+      'land app-push-token (<a href="https://github.com/octo/demo/issues/231" target="_blank" rel="noopener noreferrer">#231</a>) first',
+    );
+    expect(linkify('  full text: /drops/d-1', refs)).toBe('  <a href="/drops/d-1">full text</a>');
+    // Not a reference: an issue number inside a word, an entity, an unknown key.
+    expect(linkify('PR#12 &#39; kill-suspend-installations app-push-tokens', refs)).toBe(
+      'PR#12 &amp;#39; kill-suspend-installations app-push-tokens',
+    );
+    // Without the zone's repository no issue link is built.
+    expect(linkify('#12 app-push-token', {})).toBe('#12 app-push-token');
+  });
+
+  test('a script beside #12 is escaped, and the #12 link is the only markup (D4)', () => {
+    const evil = '<script>alert(1)</script><a href="javascript:x">#13</a> "Ruling 1" #12';
+    const html = linkify(evil, refs);
+    expect(html).not.toContain('<script');
+    expect(html).toContain(
+      '&lt;script&gt;alert(1)&lt;/script&gt;&lt;a href=&quot;javascript:x&quot;&gt;',
+    );
+    // Strip the links the patterns built: no other tag is left.
+    const rest = html.replace(
+      /<a href="[^"]*"( target="_blank" rel="noopener noreferrer")?>[^<]*<\/a>/g,
+      '',
+    );
+    expect(rest).not.toMatch(/[<>"]/);
+    expect(html.match(/<a /g)).toHaveLength(3);
+    expect(html).toContain('<a href="https://github.com/octo/demo/issues/12"');
+    // In a rendered briefing the same holds for every field.
+    const page = renderBriefings({
+      open: [briefing({ decision: evil, why: evil, recommendation: evil, onHold: evil })],
+      rulings: [],
+      zones: [z],
+    });
+    expect(page).not.toContain('<script>alert');
+    expect(page).not.toContain('javascript:x"');
+  });
+
+  test('every option effect has its line, and the page shows it beside the label', () => {
+    for (const e of EFFECTS) expect(EFFECT_TEXT[e].text, e).toMatch(/\w/);
+    expect(Object.keys(EFFECT_TEXT).sort()).toEqual([...EFFECTS].sort());
+    expect(effectText('promote', 'promote_issue')).toBe(
+      'the issue gets the ready label; an implementer takes it as written',
+    );
+    expect(effectText('promote', 'reject_issue')).toBe(
+      'the issue is closed; the crew may file a replacement',
+    );
+    expect(effectText('crew', 'none')).toBe(
+      'recorded as guidance for the crew; nothing changes on GitHub',
+    );
+    expect(effectText('parked', 'retry_item')).toMatch(/runs it again/);
+    expect(effectText('parked', 'none')).toMatch(/stays parked/);
+    const html = renderBriefings({
+      open: [
+        briefing({
+          kind: 'promote',
+          options: [{ id: 'promote', label: 'Promote', effect: 'promote_issue' }],
+        }),
+      ],
+      rulings: [],
+      zones: [z],
+    });
+    expect(html).toContain(
+      'Promote</label> <small><code>promote</code></small> <small class="effect">the issue gets the ready label; an implementer takes it as written</small>',
+    );
+  });
+
+  test('a refute_exhausted briefing quotes both refutes and ends with the line the code writes', () => {
+    const w = zoneWorld();
+    const id = insertCrewIssue(w.db, {
+      zoneId: 'main',
+      key: 'app-push-token',
+      source: 'drop',
+      objective: 'o',
+      title: 'Push tokens in app mode',
+      body: 'b',
+      priority: null,
+      createdAt: at.toISOString(),
+      number: 224,
+    });
+    setCrewIssue(w.db, id, { refuteCount: 2 }, at);
+    const refute = (dropId: string, minute: number, findings: string[]) => {
+      insertDrop(
+        w.db,
+        {
+          id: dropId,
+          dropZoneId: 'main',
+          workItemId: null,
+          role: 'refute',
+          state: 'succeeded',
+          inputJson: JSON.stringify({ work: { role: 'refute', crewIssueId: id }, input: '' }),
+        },
+        new Date(at.getTime() + minute * 60_000),
+      );
+      updateDrop(w.db, dropId, {
+        finishedAt: new Date(at.getTime() + (minute + 5) * 60_000).toISOString(),
+        resultJson: JSON.stringify({
+          status: 'completed',
+          crew: { decision: 'revise', findings, revisedBody: 'x' },
+        }),
+      });
+    };
+    refute('r1', 0, ['Criterion 2 is not testable.', `Long ${'x'.repeat(600)}`]);
+    refute('r2', 60, ['The token scope needs contents:write <b>only</b>.']);
+    const issue = getCrewIssue(w.db, id);
+    if (!issue) throw new Error('no issue');
+    const why = refuteExhaustedWhy(w.db, issue);
+    expect(why).toContain(
+      "#224 Push tokens in app mode was reviewed 2 times. Each review asked for changes, and the last revision hasn't been reviewed.",
+    );
+    expect(why).toContain(
+      'Review 1 (2026-11-01 10:05 UTC), asked to revise:\n  1. Criterion 2 is not testable.',
+    );
+    expect(why).toContain('Review 2 (2026-11-01 11:05 UTC)');
+    expect(why).toContain('full text: /drops/r1');
+    const long = why.split('\n').find((l) => l.includes('Long '));
+    expect(long?.trim().length).toBeLessThanOrEqual(3 + MAX_FINDING);
+    expect(why.endsWith(`\n\n${REFUTE_RECOMMENDATION}`)).toBe(true);
+    expect(REFUTE_RECOMMENDATION).toBe(
+      "Promote if the last review's findings were only wording; reject if it found a design problem.",
+    );
+
+    const b = briefing({
+      id: 142,
+      kind: 'refute_exhausted',
+      subject: `issue:${id}`,
+      decision: 'Promote crew issue #224 as revised?',
+      why,
+      source: 'server',
+      options: [
+        { id: 'promote', label: 'Promote', effect: 'promote_issue' },
+        { id: 'reject', label: 'Reject', effect: 'reject_issue' },
+      ],
+    });
+    const html = renderBriefings({
+      open: [b],
+      rulings: [],
+      zones: [z],
+      about: new Map([[b.id, briefingAbout(w.db, w.zone, b)]]),
+    });
+    expect(html).toContain(
+      '<a href="https://github.com/octo/demo/issues/224" target="_blank" rel="noopener noreferrer">#224 Push tokens in app mode</a>',
+    );
+    expect(html).toContain('Criterion 2 is not testable.');
+    expect(html).toContain('contents:write &lt;b&gt;only&lt;/b&gt;');
+    expect(html).toContain('<a href="/drops/r2">full text</a>');
+    expect(html).toContain('Promote if the last review&#39;s findings were only wording');
+    expect(html).toContain('id="briefing-142"');
+  });
+
+  test('/briefings/<n> shows one briefing with its rulings, and the lists carry anchors', () => {
+    const ruled = briefing({ id: 7, state: 'ruled', decision: 'Split it, after Ruling 3?' });
+    const one = renderBriefing({
+      briefing: ruled,
+      rulings: [ruling({ id: 3, briefingId: 7 }), ruling({ id: 9, briefingId: 2 })],
+      zones: [z],
+    });
+    expect(one).toContain('id="briefing-7"');
+    expect(one).toContain('<tr id="ruling-3">');
+    expect(one).not.toContain('id="ruling-9"');
+    expect(one).toContain('<a href="#ruling-3">Ruling 3</a>');
+    expect(one).toContain('ruled');
+    // A ruled briefing has no rule form.
+    expect(one).not.toContain('class="rule"');
+    const open = renderBriefing({ briefing: briefing({ id: 8 }), rulings: [], zones: [z] });
+    expect(open).toContain('class="rule"');
+    const list = renderBriefings({
+      open: [briefing({ id: 8, why: 'see Briefing 8, Briefing 2 and Ruling 1 and Ruling 5' })],
+      rulings: [ruling({ id: 1, briefingId: 2 }), ruling({ id: 5, briefingId: 3 })],
+      zones: [z],
+      per: 10,
+    });
+    expect(list).toContain('id="briefing-8"');
+    expect(list).toContain('<tr id="ruling-1">');
+    expect(list).toContain('<a href="#briefing-8">Briefing 8</a>');
+    expect(list).toContain('<a href="/briefings/2">Briefing 2</a>');
+    expect(list).toContain('<a href="#ruling-1">Ruling 1</a>');
+    expect(list).toContain('<a href="#ruling-5">Ruling 5</a>');
+    // Each briefing links to its own page.
+    expect(list).toContain('<a href="/briefings/8">');
   });
 });
