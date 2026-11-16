@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import nock from 'nock';
+import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { type Db, openDb } from './db/open.js';
 import {
   getOutbox,
@@ -9,6 +10,7 @@ import {
   upsertDropZone,
   upsertWorkItem,
 } from './db/repo.js';
+import type { TokenProvider } from './forge/github.js';
 import {
   type ForgePair,
   ForgePairs,
@@ -25,6 +27,7 @@ import {
 } from './outbox.js';
 import { FORGE_WRITES, fakeForgePair } from './test/fakes.js';
 import { plus, t0, tmpDbFile } from './test/helpers.js';
+import type { AppRole, CredentialRef } from './vault/github-app-entries.js';
 
 const MIN = 60_000;
 const t1 = plus(t0, MIN);
@@ -649,5 +652,217 @@ describe('the label op (Task 8)', () => {
       /observe mode/,
     );
     expect(f.author.calls.filter((c) => FORGE_WRITES.includes(c.method as never))).toEqual([]);
+  });
+});
+
+describe('pairFor by credential kind (spec §4.4)', () => {
+  const api = 'https://api.github.com';
+  const alnum = (n: number) => 'aB3'.repeat(Math.ceil(n / 3)).slice(0, n);
+  const authorPat = `ghp_${alnum(36)}`;
+  const reviewerPat = `ghp_${alnum(35)}x`;
+  const appToken = `ghs_${alnum(36)}`;
+  const tokens = { githubAuthorToken: authorPat, githubReviewerToken: reviewerPat };
+  const pat = (name: 'githubAuthorToken' | 'githubReviewerToken'): CredentialRef => ({
+    kind: 'github-pat',
+    name,
+  });
+  const app = (owner: string): CredentialRef => ({ kind: 'github-app', owner });
+  const patRefs = { author: pat('githubAuthorToken'), reviewer: pat('githubReviewerToken') };
+  const twoBot = { repo: 'o/r', authorMayBeAdmin: false, identity: 'two-bot' as const };
+  const fakeApps = (value = appToken) =>
+    vi.fn((_owner: string, _role: AppRole): TokenProvider => ({ token: async () => value }));
+
+  /** Answers one default-branch read only when it carries `token`. */
+  const expectToken = (token: string) =>
+    nock(api)
+      .matchHeader('authorization', `token ${token}`)
+      .get('/repos/o/r')
+      .reply(200, { default_branch: 'main' });
+
+  beforeAll(() => {
+    nock.disableNetConnect();
+  });
+  afterEach(() => {
+    expect(nock.pendingMocks()).toEqual([]);
+    nock.cleanAll();
+  });
+
+  for (const [label, refs] of [
+    ['no refs', undefined],
+    ['token refs', patRefs],
+  ] as const) {
+    describe(label, () => {
+      test('the author and reviewer forges get the same tokens as before', async () => {
+        const pair = pairFor(twoBot, tokens, refs ? { refs } : {});
+        expectToken(authorPat);
+        expect(await pair.author.getDefaultBranch()).toBe('main');
+        expectToken(reviewerPat);
+        expect(await pair.reviewer!.getDefaultBranch()).toBe('main');
+        expect(pair.merger).toBeUndefined();
+      });
+
+      test('authorMayBeAdmin still merges through the reviewer', () => {
+        const pair = pairFor({ ...twoBot, authorMayBeAdmin: true }, tokens, refs ? { refs } : {});
+        expect(pair.merger).toBe(pair.reviewer);
+      });
+
+      test('a two-bot zone with no reviewer token still throws', () => {
+        expect(() =>
+          pairFor(twoBot, { githubAuthorToken: authorPat }, refs ? { refs } : {}),
+        ).toThrow('JM_GITHUB_REVIEWER_TOKEN is required for a two-bot zone');
+      });
+    });
+  }
+
+  test('an app author never gets a merger, and its requests carry the provider token', async () => {
+    const appTokens = fakeApps();
+    const pair = pairFor({ ...twoBot, authorMayBeAdmin: true }, tokens, {
+      refs: { author: app('o'), reviewer: pat('githubReviewerToken') },
+      appTokens,
+    });
+    expect(pair.merger).toBeUndefined();
+    expect(appTokens).toHaveBeenCalledExactlyOnceWith('o', 'author');
+    expectToken(appToken);
+    expect(await pair.author.getDefaultBranch()).toBe('main');
+    expectToken(reviewerPat);
+    expect(await pair.reviewer!.getDefaultBranch()).toBe('main');
+  });
+
+  test('an app reviewer needs no reviewer token and uses the provider', async () => {
+    const appTokens = fakeApps();
+    const pair = pairFor(
+      twoBot,
+      { githubAuthorToken: authorPat },
+      { refs: { author: pat('githubAuthorToken'), reviewer: app('o') }, appTokens },
+    );
+    expect(appTokens).toHaveBeenCalledExactlyOnceWith('o', 'reviewer');
+    expectToken(appToken);
+    expect(await pair.reviewer!.getDefaultBranch()).toBe('main');
+    expectToken(authorPat);
+    expect(await pair.author.getDefaultBranch()).toBe('main');
+  });
+
+  test('a starter zone uses the author token whatever the refs say', async () => {
+    const appTokens = fakeApps();
+    const pair = pairFor(
+      { ...twoBot, identity: 'starter' },
+      { githubAuthorToken: authorPat },
+      { refs: { author: app('o'), reviewer: app('o') }, appTokens },
+    );
+    expect(pair.reviewer).toBeNull();
+    expect(appTokens).not.toHaveBeenCalled();
+    expectToken(authorPat);
+    expect(await pair.author.getDefaultBranch()).toBe('main');
+  });
+
+  test('an app ref without a provider factory names the repository and role, and no secret', () => {
+    for (const role of ['author', 'reviewer'] as const) {
+      const refs = { ...patRefs, [role]: app('o') };
+      let message = '';
+      try {
+        pairFor(twoBot, tokens, { refs });
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message).toContain('o/r');
+      expect(message).toContain(role);
+      expect(message).not.toContain(authorPat);
+      expect(message).not.toContain(reviewerPat);
+    }
+  });
+
+  test('a provider that fails with a PEM and a token reaches the caller with neither', async () => {
+    const pem = '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----';
+    const appTokens = vi.fn(
+      (): TokenProvider => ({
+        token: () => Promise.reject(new Error(`mint failed: ${pem} ${appToken}`)),
+      }),
+    );
+    const pair = pairFor(twoBot, tokens, {
+      refs: { author: app('o'), reviewer: app('o') },
+      appTokens,
+    });
+    for (const forge of [pair.author, pair.reviewer!]) {
+      const err = (await forge.getDefaultBranch().catch((e: unknown) => e)) as Error;
+      expect(err).toBeInstanceOf(Error);
+      const seen = `${err.message}\n${err.stack ?? ''}\n${String(err.cause ?? '')}`;
+      expect(seen).not.toContain('PRIVATE KEY');
+      expect(seen).not.toContain('MIIEowIBAAKCAQEA');
+      expect(seen).not.toContain(appToken);
+    }
+  });
+
+  test('a provider factory that throws is reported without its message', () => {
+    const appTokens = vi.fn((): TokenProvider => {
+      throw new Error(`no key: ${appToken}`);
+    });
+    expect(() =>
+      pairFor(twoBot, tokens, { refs: { ...patRefs, author: app('o') }, appTokens }),
+    ).toThrow(/author of o\/r/);
+    expect(() =>
+      pairFor(twoBot, tokens, { refs: { ...patRefs, author: app('o') }, appTokens }),
+    ).not.toThrow(appToken);
+  });
+
+  describe('the pair cache', () => {
+    const zone = { ...twoBot, id: 'main' };
+
+    test('the same refs return the same pair', () => {
+      const pairs = new ForgePairs();
+      const appTokens = fakeApps();
+      const refs = { author: app('o'), reviewer: pat('githubReviewerToken') };
+      const first = pairs.for(zone, tokens, { refs, appTokens });
+      expect(pairs.for({ ...zone }, { ...tokens }, { refs: { ...refs }, appTokens })).toBe(first);
+      expect(appTokens).toHaveBeenCalledOnce();
+    });
+
+    test('token refs keep the pair built with no refs (today’s key)', () => {
+      const pairs = new ForgePairs();
+      const first = pairs.for(zone, tokens);
+      expect(pairs.for(zone, tokens, { refs: patRefs })).toBe(first);
+    });
+
+    test('author token to app, and back, gives a new pair', () => {
+      const pairs = new ForgePairs();
+      const appTokens = fakeApps();
+      const byToken = pairs.for(zone, tokens, { refs: patRefs, appTokens });
+      const byApp = pairs.for(zone, tokens, {
+        refs: { ...patRefs, author: app('o') },
+        appTokens,
+      });
+      expect(byApp).not.toBe(byToken);
+      expect(pairs.for(zone, tokens, { refs: patRefs, appTokens })).not.toBe(byApp);
+    });
+
+    test('reviewer token to app gives a new pair', () => {
+      const pairs = new ForgePairs();
+      const appTokens = fakeApps();
+      const byToken = pairs.for(zone, tokens, { refs: patRefs, appTokens });
+      const byApp = pairs.for(zone, tokens, {
+        refs: { ...patRefs, reviewer: app('o') },
+        appTokens,
+      });
+      expect(byApp).not.toBe(byToken);
+    });
+
+    test('app owner A to app owner B gives a new pair', () => {
+      const pairs = new ForgePairs();
+      const appTokens = fakeApps();
+      const a = pairs.for(zone, tokens, { refs: { ...patRefs, author: app('a') }, appTokens });
+      const b = pairs.for(zone, tokens, { refs: { ...patRefs, author: app('b') }, appTokens });
+      expect(b).not.toBe(a);
+      expect(appTokens).toHaveBeenLastCalledWith('b', 'author');
+    });
+
+    test('a config revision that changes nothing keeps the pair', () => {
+      const pairs = new ForgePairs();
+      const appTokens = fakeApps();
+      const refs = { author: app('o'), reviewer: app('o') };
+      const first = pairs.for(zone, tokens, { refs, appTokens });
+      const revised = structuredClone({ zone, tokens, refs });
+      expect(pairs.for(revised.zone, revised.tokens, { refs: revised.refs, appTokens })).toBe(
+        first,
+      );
+    });
   });
 });
