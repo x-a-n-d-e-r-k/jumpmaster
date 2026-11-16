@@ -452,7 +452,7 @@ describe('crew config', () => {
       stagedLabel: 'agent-staged',
       maxStaged: 3,
       refutePromotes: false,
-      maxRefute: 2,
+      maxRefute: 3,
       maxTriage: 2,
     });
     expect(z?.botLogins).toEqual([]);
@@ -1382,7 +1382,7 @@ describe('githubApp (spec §4.2: installation and repository ids, not secret)', 
         stagedLabel: 'agent-staged',
         maxStaged: 3,
         refutePromotes: false,
-        maxRefute: 2,
+        maxRefute: 3,
         maxTriage: 2,
       },
       botLogins: [],
