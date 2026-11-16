@@ -7,10 +7,12 @@ import { insertCrewIssue } from '../crew/store.js';
 import {
   type DropState,
   insertDrop,
+  insertOutbox,
   insertStick,
   setWorkItemState,
   stampStick,
   updateDrop,
+  updateOutbox,
   upsertDropZone,
   upsertWorkItem,
   type WorkItemState,
@@ -591,6 +593,62 @@ describe('/work and /drops list pages (#119)', () => {
     expect(res.body).toBe(text);
   });
 
+  test('the floor (#120): totals and a card per zone, every count linked, no ledgers', async () => {
+    const { h, item } = await lists();
+    item('main', 'parked');
+    item('main', 'parked');
+    item('ref', 'ready');
+    const merged = item('main', 'pr_open');
+    drop(h, 'live-ref', 'running', 'ref');
+    const at = (hours: number) => new Date(h.now().getTime() - hours * 3_600_000);
+    const merge = (key: string, state: 'done' | 'failed', hoursAgo: number) => {
+      insertOutbox(h.db, {
+        id: key,
+        opKey: key,
+        kind: 'merge',
+        workItemId: merged.id,
+        zoneId: 'main',
+        payloadJson: '{}',
+        state: 'pending',
+        createdAt: at(hoursAgo).toISOString(),
+      });
+      updateOutbox(h.db, key, { state }, at(hoursAgo));
+    };
+    merge('m-23h', 'done', 23);
+    merge('m-25h', 'done', 25);
+    merge('m-failed', 'failed', 1);
+    const home = (await h.view('/')).body;
+    const tile = (key: string, scope: string) => {
+      const from = home.indexOf(scope);
+      const m = home
+        .slice(from)
+        .match(new RegExp(`<a class="tile" data-tile="${key}" href="([^"]*)"><b[^>]*>([^<]*)</b>`));
+      return m ? { href: m[1], n: m[2] } : undefined;
+    };
+    expect(tile('running', 'class="totals"')).toEqual({ href: '/drops?state=active', n: '1' });
+    expect(tile('queued', 'class="totals"')).toEqual({ href: '/work?state=ready', n: '1' });
+    expect(tile('parked', 'class="totals"')).toEqual({ href: '/work?state=parked', n: '2' });
+    expect(tile('merged', 'class="totals"')).toEqual({ href: '/work?state=done', n: '1' });
+    expect(tile('merged', 'data-zone="main"')).toEqual({
+      href: '/work?zone=main&amp;state=done',
+      n: '1',
+    });
+    expect(tile('running', 'data-zone="ref"')).toEqual({
+      href: '/drops?zone=ref&amp;state=active',
+      n: '1',
+    });
+    // The failed merge counts as blocked on main's card; main comes first, then ref.
+    expect(home).toContain('<a href="/work?zone=main&amp;state=parked">2 parked</a>');
+    expect(home).toContain('1 forge write unknown or failed');
+    expect(home.indexOf('data-zone="main"')).toBeLessThan(home.indexOf('data-zone="ref"'));
+    expect(home).toContain('data-state="blocked" data-zone="main"');
+    expect(home).toContain('data-state="working" data-zone="ref"');
+    expect(home).toContain('<a href="/zones/ref">octo/ref</a>');
+    for (const gone of ['<h2>Work items</h2>', '<h2>Drops</h2>', '<h2>Drop zones</h2>'])
+      expect(home).not.toContain(gone);
+    expect(home).toMatch(/<details id="sticks"[^>]*><summary>Sticks: \d+ live/);
+  });
+
   test('anonymous: /work and /drops are refused as /briefings is', async () => {
     const { h } = await lists();
     const anon = async (url: string) => (await h.app.inject({ method: 'GET', url })).statusCode;
@@ -600,11 +658,11 @@ describe('/work and /drops list pages (#119)', () => {
     expect(await anon('/drops')).toBe(briefings);
   });
 
-  test('the floor links its two ledgers to the list pages, and the nav has Work and Drops', async () => {
+  test('the floor links its counts to the list pages, and the nav has Work and Drops', async () => {
     const { h } = await lists();
     const home = (await h.view('/')).body;
-    expect(home).toContain('<a href="/work">All work items</a>');
-    expect(home).toContain('<a href="/drops">All drops</a>');
+    expect(home).toContain('href="/work?state=ready"');
+    expect(home).toContain('href="/drops?state=active"');
     expect(home).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/work">Work<\/a>.*<\/nav>/);
     expect(home).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/drops">Drops<\/a>.*<\/nav>/);
   });

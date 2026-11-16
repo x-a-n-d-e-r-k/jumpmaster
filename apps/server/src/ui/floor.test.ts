@@ -1,7 +1,23 @@
-import { expect, test } from 'vitest';
-import { listBriefings, raiseBriefing } from '../briefings.js';
-import { listOutbox, setZoneMode } from '../db/repo.js';
+import { describe, expect, test } from 'vitest';
+import { type Briefing, listBriefings, raiseBriefing } from '../briefings.js';
+import type { DropZoneConfig } from '../config.js';
+import {
+  type Drop,
+  type DropState,
+  insertOutbox,
+  listMergesSince,
+  listOutbox,
+  type OutboxRow,
+  setZoneMode,
+  updateOutbox,
+  upsertDropZone,
+  upsertWorkItem,
+  type WorkItem,
+  type WorkItemState,
+} from '../db/repo.js';
 import { harness } from '../test/flowHarness.js';
+import { type FloorCounts, floorCounts, listHref } from './floor.js';
+import { type HomeState, renderHome } from './pages.js';
 
 const OPERATOR = { authorization: `Bearer ${'o'.repeat(32)}`, host: 'localhost:80' };
 
@@ -104,4 +120,328 @@ test('bulk dismiss refuses an unknown zone', async () => {
     payload: { ids: [1] },
   });
   expect(res.statusCode).toBe(404);
+});
+
+// --- floorCounts and the dashboard's renderers (#120) ---
+
+const NOW = new Date('2026-06-01T12:00:00.000Z');
+const ago = (h: number) => new Date(NOW.getTime() - h * 3_600_000).toISOString();
+
+const zone = (id: string, repo = `octo/${id.replaceAll(' ', '-')}`): DropZoneConfig => ({
+  id,
+  repo,
+  readyLabel: 'agent-ready',
+  gates: [],
+  image: 'img',
+  model: 'm',
+  maxTurns: 200,
+});
+
+let nextId = 1;
+const wi = (zoneId: string, state: WorkItemState): WorkItem => {
+  const id = nextId++;
+  return {
+    id,
+    dropZoneId: zoneId,
+    issueNumber: id,
+    title: `t${id}`,
+    body: 'b',
+    author: 'a',
+    priority: 2,
+    isFix: false,
+    issueCreatedAt: '2026-01-01T00:00:00.000Z',
+    state,
+    reason: null,
+    prNumber: null,
+    retryLabelSeen: false,
+    waitingSince: null,
+    blockedBy: [],
+  };
+};
+const dr = (zoneId: string, state: DropState): Drop => ({
+  id: `d${nextId++}`,
+  dropZoneId: zoneId,
+  workItemId: null,
+  role: 'implement',
+  state,
+  stickId: null,
+  epoch: 1,
+  leaseExpiresAt: null,
+  promptVersion: null,
+  image: null,
+  resultJson: null,
+  createdAt: ago(1),
+  startedAt: ago(1),
+  finishedAt: null,
+});
+const br = (zoneId: string): Briefing =>
+  ({
+    id: nextId++,
+    zoneId,
+    kind: 'crew',
+    subject: `s${nextId}`,
+    decision: 'Decide?',
+    why: 'w',
+    options: [],
+    recommendation: '',
+    onHold: '',
+    source: 'crew',
+    createdAt: ago(1),
+  }) as unknown as Briefing;
+
+const home = (s: Partial<HomeState> & { zones: DropZoneConfig[] }): HomeState => ({
+  items: [],
+  drops: [],
+  merges24h: [],
+  now: NOW,
+  ...s,
+});
+const zoneOf = (f: FloorCounts, id: string) => {
+  const z = f.zones.find((x) => x.zoneId === id);
+  if (!z) throw new Error(`no zone ${id}`);
+  return z;
+};
+
+describe('floorCounts', () => {
+  test('counts per zone without crossing zones, and totals across the install', () => {
+    const A = zone('A');
+    const B = zone('B');
+    const f = floorCounts(
+      home({
+        zones: [A, B],
+        items: [wi('A', 'parked'), wi('A', 'parked')],
+        drops: [dr('B', 'running'), dr('B', 'queued')],
+      }),
+      NOW,
+    );
+    expect(zoneOf(f, 'A').counts).toMatchObject({ parked: 2, running: 0 });
+    expect(zoneOf(f, 'B').counts).toMatchObject({ parked: 0, running: 1 });
+    expect(f.totals).toMatchObject({ parked: 2, running: 1 });
+  });
+
+  test.each<[string, Partial<HomeState>, string]>([
+    [
+      'a briefing and a parked item',
+      { briefings: [br('A')], items: [wi('A', 'parked')] },
+      'needs-you',
+    ],
+    ['parked only', { items: [wi('A', 'parked')] }, 'blocked'],
+    ['running only', { drops: [dr('A', 'running')] }, 'working'],
+    ['nothing', {}, 'idle'],
+  ])('card state: %s is %s', (_name, s, expected) => {
+    const f = floorCounts(home({ zones: [zone('A')], ...s }), NOW);
+    expect(zoneOf(f, 'A').state).toBe(expected);
+  });
+
+  test("a paused zone's briefings are held, not needs-you, on the card and in the totals", () => {
+    const f = floorCounts(
+      home({
+        zones: [zone('A'), zone('B')],
+        modes: { A: 'paused' },
+        briefings: [br('A'), br('A'), br('A'), br('B')],
+      }),
+      NOW,
+    );
+    const a = zoneOf(f, 'A');
+    expect(a.counts.needsYou).toBe(0);
+    expect(a.counts.held).toBe(3);
+    expect(a.state).not.toBe('needs-you');
+    expect(f.totals.needsYou).toBe(1);
+    // As the app passes them: held back by floorBriefings.
+    const g = floorCounts(
+      home({
+        zones: [zone('A')],
+        modes: { A: 'paused' },
+        heldBriefings: [{ zoneId: 'A', repo: 'octo/A', mode: 'paused', count: 3 }],
+      }),
+      NOW,
+    );
+    expect(zoneOf(g, 'A').counts).toMatchObject({ needsYou: 0, held: 3 });
+    expect(g.totals.needsYou).toBe(0);
+    const html = renderHome(
+      home({ zones: [zone('A')], modes: { A: 'paused' }, briefings: [br('A'), br('A'), br('A')] }),
+    );
+    expect(html).toContain('3 held while paused');
+  });
+
+  test('Merged (24h) counts a merge done 23 hours ago, not one 25 hours ago', () => {
+    const f = floorCounts(
+      home({
+        zones: [zone('A')],
+        merges24h: [
+          { zoneId: 'A', at: ago(23) },
+          { zoneId: 'A', at: ago(25) },
+        ],
+      }),
+      NOW,
+    );
+    expect(zoneOf(f, 'A').counts.merged24h).toBe(1);
+    expect(f.totals.merged24h).toBe(1);
+  });
+
+  test('outbox ops unknown or failed count on the zone of their item; no live stick that can run it blocks', () => {
+    const A = zone('A');
+    const item = wi('A', 'pr_open');
+    const op = { workItemId: item.id, zoneId: '', state: 'failed' } as OutboxRow;
+    const stick = (cannot: string[]) => ({
+      id: 's',
+      name: 's',
+      version: null,
+      lastSeenAt: ago(0),
+      capabilities: [],
+      imagePolicy: 'p',
+      cannotRun: cannot.map((zoneId) => ({ zoneId, missing: ['x'] })),
+    });
+    const f = floorCounts(
+      home({ zones: [A, zone('B')], items: [item], outbox: [op], sticks: [stick(['B'])] }),
+      NOW,
+    );
+    expect(zoneOf(f, 'A').counts).toMatchObject({ outbox: 1, noStick: false });
+    expect(zoneOf(f, 'A').state).toBe('blocked');
+    expect(zoneOf(f, 'B').counts).toMatchObject({ outbox: 0, noStick: true });
+  });
+});
+
+test('the merge query reads merges done in the window, with the zone of their item', async () => {
+  const h = await harness({ extraZones: [{ id: 'shadow', repo: 'octo/shadow' }] });
+  upsertDropZone(h.db, {
+    id: 'shadow',
+    repo: 'octo/shadow',
+    defaultBranch: 'main',
+    configJson: '{}',
+  });
+  const w = upsertWorkItem(
+    h.db,
+    {
+      dropZoneId: 'shadow',
+      issueNumber: 5,
+      title: 't',
+      body: 'b',
+      author: 'a',
+      priority: 2,
+      isFix: false,
+      issueCreatedAt: '2026-01-01T00:00:00.000Z',
+    },
+    h.now(),
+  );
+  const at = (hours: number) => new Date(h.now().getTime() - hours * 3_600_000);
+  const op = (
+    key: string,
+    kind: 'merge' | 'create_pr',
+    state: 'done' | 'failed',
+    hours: number,
+  ) => {
+    insertOutbox(h.db, {
+      id: key,
+      opKey: key,
+      kind,
+      workItemId: w.id,
+      zoneId: '',
+      payloadJson: '{}',
+      state: 'pending',
+      createdAt: at(hours).toISOString(),
+    });
+    updateOutbox(h.db, key, { state }, at(hours));
+  };
+  op('done-23h', 'merge', 'done', 23);
+  op('done-25h', 'merge', 'done', 25);
+  op('failed-1h', 'merge', 'failed', 1);
+  op('pr-1h', 'create_pr', 'done', 1);
+  expect(listMergesSince(h.db, at(24))).toEqual([{ zoneId: 'shadow', at: at(23).toISOString() }]);
+});
+
+describe('the dashboard', () => {
+  const cardOrder = (html: string) =>
+    [...html.matchAll(/class="card zone-card" data-state="([^"]+)" data-zone="([^"]+)"/g)].map(
+      (m) => `${m[2]}:${m[1]}`,
+    );
+
+  test('cards render needs-you, then blocked, working and idle, whatever the configured order', () => {
+    const html = renderHome(
+      home({
+        zones: [zone('idle'), zone('work'), zone('block'), zone('need')],
+        items: [wi('block', 'parked')],
+        drops: [dr('work', 'running')],
+        briefings: [br('need')],
+      }),
+    );
+    expect(cardOrder(html)).toEqual([
+      'need:needs-you',
+      'block:blocked',
+      'work:working',
+      'idle:idle',
+    ]);
+    expect(html).toContain('Idle: nothing queued or running.');
+  });
+
+  test('a working card shows zero Working counts as 0', () => {
+    const html = renderHome(home({ zones: [zone('A')], drops: [dr('A', 'running')] }));
+    const card = html.slice(html.indexOf('data-zone="A"'));
+    expect(card).toContain('href="/work?zone=A&amp;state=ready"><b>0</b><span>Queued</span>');
+  });
+
+  test('a merge count that failed to load shows "–", never 0', () => {
+    const html = renderHome(home({ zones: [zone('A')], merges24h: undefined }));
+    const tiles = [...html.matchAll(/<a class="tile" data-tile="merged"[^>]*>.*?<\/a>/g)].map(
+      (m) => m[0],
+    );
+    expect(tiles.length).toBeGreaterThan(0);
+    for (const t of tiles) {
+      expect(t).toContain('<b title="unavailable">–</b>');
+      expect(t).not.toContain('>0<');
+    }
+    expect(
+      floorCounts(home({ zones: [zone('A')], merges24h: undefined }), NOW).totals.merged24h,
+    ).toBeNull();
+  });
+
+  test('zone links carry the zone id URL-encoded', () => {
+    const B = zone('a b');
+    const html = renderHome(home({ zones: [zone('A'), B], items: [wi('a b', 'parked')] }));
+    expect(listHref('/work', 'a b', 'parked')).toBe('/work?zone=a%20b&state=parked');
+    expect(html).toContain('<a href="/work?zone=a%20b&amp;state=parked">1 parked</a>');
+    expect(html).toContain('href="/zones/a%20b"');
+    expect(html).toContain('href="/drops?zone=a%20b&amp;state=active"');
+    const needs = renderHome(home({ zones: [B], briefings: [br('a b')] }));
+    expect(needs).toContain('<a href="/briefings?zone=a%20b">1 briefing needs you</a>');
+  });
+
+  test('the totals strip links each count to its list', () => {
+    const html = renderHome(home({ zones: [zone('A')] }));
+    const strip = html.slice(
+      html.indexOf('<nav class="totals"'),
+      html.indexOf('</nav>', html.indexOf('<nav class="totals"')),
+    );
+    for (const href of [
+      '/drops?state=active',
+      '/work?state=ready',
+      '/work?state=pr_open',
+      '/work?state=done',
+      '/work?state=parked',
+      '/briefings',
+    ])
+      expect(strip).toContain(`href="${href}"`);
+  });
+
+  test('the removed sections are gone, and sticks are collapsed', () => {
+    const html = renderHome(home({ zones: [zone('A')], items: [wi('A', 'ready')], sticks: [] }));
+    for (const h of [
+      '<h2>Work items</h2>',
+      '<h2>Drops</h2>',
+      '<h2>Drop zones</h2>',
+      '<h2>Outbox</h2>',
+      '<h2>Up next</h2>',
+      '<h2>Last rate limit</h2>',
+    ])
+      expect(html).not.toContain(h);
+    expect(html).toContain('<details id="sticks"');
+    expect(html).toContain('<summary>Sticks: 0 live</summary>');
+  });
+
+  test('no zones: no totals strip, and "No project yet"', () => {
+    const html = renderHome(home({ zones: [], setup: { active: false, addProject: true } }));
+    expect(html).not.toContain('class="totals"');
+    expect(html).toContain('No project yet');
+    expect(html).toContain('<a href="/zones/new">Add a project</a>');
+  });
 });

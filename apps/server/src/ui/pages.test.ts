@@ -99,7 +99,10 @@ describe('renderHome', () => {
         },
       ],
     });
-    expect(html).toContain('<h2 id="sticks">Sticks</h2>');
+    // Collapsed: the summary counts the live ones (none here) and those that can't run a zone.
+    expect(html).toContain(
+      '<details id="sticks" class="card sticks"><summary>Sticks: 0 live, 1 can&#39;t run a zone</summary>',
+    );
     expect(html).toContain('old&lt;stick&gt;');
     expect(html).not.toContain('old<stick>');
     expect(html).toContain('cannot run locked: lacks egress-v1, image-policy:signed');
@@ -116,39 +119,26 @@ describe('renderHome', () => {
     const html = renderHome({
       zones: [z],
       items: [{ ...item, title: '<script>alert(1)</script>' }],
-      drops: [],
+      drops: [{ ...drop, state: 'running', finishedAt: null }],
     });
     expect(html).not.toContain('<script>alert(1)</script>');
     expect(html).toContain('&lt;script&gt;');
   });
 
   test('a blocked ready item shows what it waits on', () => {
-    const html = renderHome({
-      zones: [z],
-      items: [{ ...item, state: 'ready', prNumber: null, blockedBy: ['#4', 'o/x#<2>'] }],
-      drops: [],
-    });
+    const html = workItemRows(
+      [{ ...item, state: 'ready', prNumber: null, blockedBy: ['#4', 'o/x#<2>'] }],
+      [z],
+    );
     expect(html).toContain('waiting on #4, o/x#&lt;2&gt;');
   });
 
-  test('escapes reasons, gate names and shows PR link, elapsed, rate limit', () => {
-    const html = renderHome({
-      zones: [z],
-      items: [{ ...item, reason: '"><img src=x>' }],
-      drops: [drop],
-      lastRateLimit: {
-        dropId: 'd1',
-        seq: 1,
-        ts: 't',
-        kind: 'rate_limit',
-        data: { x: '<i>' },
-      },
-    });
-    expect(html).toContain('Jumpmaster');
+  test('the ledger rows escape reasons and gate names, and show the PR link and elapsed', () => {
+    const items = [{ ...item, reason: '"><img src=x>' }];
+    const html = workItemRows(items, [z]) + dropRows([drop], items, new Date());
     expect(html).not.toContain('<img src=x>');
     expect(html).not.toContain('lint<b>');
     expect(html).toContain('lint&lt;b&gt;');
-    expect(html).not.toContain('<i>');
     expect(html).toContain('https://github.com/octo/demo/pull/9');
     expect(html).toContain('1m 5s');
   });
@@ -232,21 +222,21 @@ describe('renderHome loop state', () => {
   });
 
   test('shows verdict and attempts', () => {
-    const html = renderHome({
-      zones: [z],
-      items: [item],
-      drops: [{ ...drop, role: 'review' }],
-      details: new Map([
-        [
-          1,
-          {
-            headSha: 'abcdef1234567890',
-            verdict: { decision: 'approve', forced: true, summary: 'fine' },
-            attempts: { heal: 2, review: 1 },
-          },
-        ],
-      ]),
-    });
+    const html =
+      workItemRows(
+        [item],
+        [z],
+        new Map([
+          [
+            1,
+            {
+              headSha: 'abcdef1234567890',
+              verdict: { decision: 'approve', forced: true, summary: 'fine' },
+              attempts: { heal: 2, review: 1 },
+            },
+          ],
+        ]),
+      ) + dropRows([{ ...drop, role: 'review' }], [item], new Date());
     expect(html).toContain('abcdef1');
     expect(html).not.toContain('abcdef12345');
     expect(html).toContain('approve (forced)');
@@ -256,30 +246,27 @@ describe('renderHome loop state', () => {
   });
 
   test("shows Command's gate change allowance for the item's head", () => {
-    const html = renderHome({
-      zones: [z],
-      items: [item],
-      drops: [],
-      details: new Map([
+    const html = workItemRows(
+      [item],
+      [z],
+      new Map([
         [1, { headSha: 'abcdef1234567890', gateAllowedSha: 'abcdef1234567890', attempts: {} }],
       ]),
-    });
+    );
     expect(html).toContain('gate change allowed by Command for abcdef1');
-    const plain = renderHome({
-      zones: [z],
-      items: [item],
-      drops: [],
-      details: new Map([[1, { headSha: 'abcdef1234567890', attempts: {} }]]),
-    });
+    const plain = workItemRows(
+      [item],
+      [z],
+      new Map([[1, { headSha: 'abcdef1234567890', attempts: {} }]]),
+    );
     expect(plain).not.toContain('allowed by Command');
   });
 
   test('escapes verdict summary', () => {
-    const html = renderHome({
-      zones: [z],
-      items: [item],
-      drops: [],
-      details: new Map([
+    const html = workItemRows(
+      [item],
+      [z],
+      new Map([
         [
           1,
           {
@@ -289,17 +276,18 @@ describe('renderHome loop state', () => {
           },
         ],
       ]),
-    });
+    );
     expect(html).not.toContain('<svg onload=x>');
     expect(html).toContain('&lt;svg onload=x&gt;');
   });
 
-  test('lists unknown and failed outbox ops', () => {
+  test('counts unknown and failed outbox ops on the zone card, as blocked', () => {
     const op = (id: string, state: 'unknown' | 'failed', error: string | null) => ({
       id,
       opKey: `k-${id}`,
       kind: 'merge' as const,
       workItemId: 1,
+      zoneId: 'main',
       payloadJson: '{}',
       state,
       resultJson: null,
@@ -313,11 +301,10 @@ describe('renderHome loop state', () => {
       drops: [],
       outbox: [op('o1', 'unknown', null), op('o2', 'failed', '<b>409</b>')],
     });
-    expect(html).toContain('<h2>Outbox</h2>');
-    expect(html).toContain('o1');
-    expect(html).toContain('unknown');
-    expect(html).toContain('o2');
-    expect(html).toContain('&lt;b&gt;409&lt;/b&gt;');
+    expect(html).not.toContain('<h2>Outbox</h2>');
+    expect(html).toContain('data-state="blocked" data-zone="main"');
+    expect(html).toContain('2 forge writes unknown or failed');
+    expect(html).not.toContain('<b>409</b>');
   });
 });
 
@@ -768,7 +755,9 @@ describe('the status banner (Task 12, round 2)', () => {
 
 test('the home page sticks section has an anchor the status links to', () => {
   const html = renderHome({ zones: [], items: [], drops: [], sticks: [] });
-  expect(html).toContain('<h2 id="sticks">Sticks</h2>');
+  expect(html).toContain(
+    '<details id="sticks" class="card sticks"><summary>Sticks: 0 live</summary>',
+  );
 });
 
 describe('zones are named by their repository (#99)', () => {
@@ -969,19 +958,19 @@ describe('renderWorkList and renderDropList (#119)', () => {
   const ref: DropZoneConfig = { ...z, id: 'ref', repo: 'octo/ref' };
   const zones = [z, ref];
 
-  test('the floor and /work render work rows through workItemRows', () => {
+  test('/work renders work rows through workItemRows; the floor only counts them', () => {
     const items = [item, { ...item, id: 2, dropZoneId: 'ref', title: 'other <b>' }];
     const rows = workItemRows(items, zones);
     expect(rows).toContain('other &lt;b&gt;');
-    expect(renderHome({ zones, items, drops: [] })).toContain(rows);
+    expect(renderHome({ zones, items, drops: [] })).not.toContain(rows);
     expect(renderWorkList({ zones, state: 'active', items })).toContain(rows);
   });
 
-  test('the floor and /drops render drop rows through dropRows', () => {
+  test('/drops renders drop rows through dropRows; the floor only counts them', () => {
     const now = new Date('2026-01-01T00:02:00.000Z');
     const rows = dropRows([drop], [item], now);
     expect(rows).toContain('>d1</a>');
-    expect(renderHome({ zones, items: [item], drops: [drop], now })).toContain(rows);
+    expect(renderHome({ zones, items: [item], drops: [drop], now })).not.toContain(rows);
     expect(
       renderDropList({ zones, state: 'all', drops: [drop], items: [item], limited: false, now }),
     ).toContain(rows);
