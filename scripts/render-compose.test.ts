@@ -63,6 +63,104 @@ describe('renderCompose', () => {
     expect(() => renderCompose(m4, fullLock())).not.toThrow();
   });
 
+  describe('published ports: every syntax is checked, not only a bare block list (issue #215)', () => {
+    const tmpl = readFileSync(join(ROOT, 'deploy/compose.yaml.tmpl'), 'utf8');
+    const SHIPPED = /( +)ports:\n\1  - "127\.0\.0\.1:7420:7420"\n/;
+    /** The real template with its ports block replaced (indent is the `ports:` key's). */
+    const edit = (block: (indent: string) => string): string => {
+      const m = SHIPPED.exec(tmpl);
+      if (!m) throw new Error('the shipped ports block moved: update this test');
+      return tmpl.replace(SHIPPED, block(m[1] as string));
+    };
+    /** What the rendered file actually publishes off loopback, read by a YAML parser. */
+    const offLoopback = (rendered: string): string[] => {
+      const doc = load(rendered) as { services: Record<string, Record<string, unknown>> };
+      const bad: string[] = [];
+      for (const [name, svc] of Object.entries(doc.services)) {
+        if (svc.network_mode === 'host') bad.push(`${name}: host network`);
+        for (const p of (svc.ports as unknown[] | undefined) ?? []) {
+          if (
+            typeof p === 'string'
+              ? !p.startsWith('127.0.0.1:')
+              : (p as { host_ip?: string }).host_ip !== '127.0.0.1'
+          )
+            bad.push(`${name}: ${JSON.stringify(p)}`);
+        }
+      }
+      return bad;
+    };
+    const variants: [string, string][] = [
+      [
+        'a comment between ports: and its item',
+        edit((i) => `${i}ports:\n${i}  # note\n${i}  - "7420:7420"\n`),
+      ],
+      [
+        'a blank line between ports: and its item',
+        edit((i) => `${i}ports:\n\n${i}  - "7420:7420"\n`),
+      ],
+      ['a comment after ports:', edit((i) => `${i}ports: # x\n${i}  - "7420:7420"\n`)],
+      ['flow style', edit((i) => `${i}ports: ["0.0.0.0:7420:7420"]\n`)],
+      [
+        'long form with no host_ip',
+        edit((i) => `${i}ports:\n${i}  - target: 7420\n${i}    published: 7420\n`),
+      ],
+      [
+        'long form on another address',
+        edit(
+          (i) =>
+            `${i}ports:\n${i}  - target: 7420\n${i}    host_ip: 0.0.0.0\n${i}    published: 7420\n`,
+        ),
+      ],
+      ['the host network', edit((i) => `${i}network_mode: host\n`)],
+    ];
+    const good: [string, string][] = [
+      ['the shipped template', tmpl],
+      ['flow style on loopback', edit((i) => `${i}ports: ["127.0.0.1:7420:7420"]\n`)],
+      [
+        'long form on loopback',
+        edit(
+          (i) =>
+            `${i}ports:\n${i}  - target: 7420\n${i}    host_ip: 127.0.0.1\n${i}    published: 7420\n`,
+        ),
+      ],
+    ];
+
+    for (const [what, text] of variants)
+      test(`refuses ${what}`, () => {
+        expect(() => renderCompose(text, fullLock())).toThrow(
+          /not bound to 127\.0\.0\.1|uses the host network/,
+        );
+      });
+    for (const [what, text] of good)
+      test(`accepts ${what}`, () => {
+        expect(() => renderCompose(text, fullLock())).not.toThrow();
+      });
+
+    test('the renderer and a YAML parser agree on every variant (D5)', () => {
+      for (const [what, text] of [...variants, ...good]) {
+        const rendered = text.replace(
+          /\{\{image ([a-z-]+)\}\}/g,
+          'ghcr.io/o/$1@sha256:' + '0'.repeat(64),
+        );
+        let refused = false;
+        try {
+          renderCompose(text, fullLock());
+        } catch {
+          refused = true;
+        }
+        expect(refused, what).toBe(offLoopback(rendered).length > 0);
+      }
+    });
+
+    test('the shipped template publishes exactly one port, on loopback', () => {
+      const doc = load(renderCompose(tmpl, fullLock())) as {
+        services: Record<string, { ports?: unknown[] }>;
+      };
+      const ports = Object.values(doc.services).flatMap((s) => s.ports ?? []);
+      expect(ports).toEqual(['127.0.0.1:7420:7420']);
+    });
+  });
+
   test('the shipped template renders to a compose file with every service image by digest', () => {
     const tmpl = readFileSync(join(ROOT, TEMPLATE), 'utf8');
     for (const name of ['jumpmaster-server', 'jumpmaster-stick'])
