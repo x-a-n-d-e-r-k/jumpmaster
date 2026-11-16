@@ -2,7 +2,7 @@
 // conditions are evaluated with a small GitHub-expression evaluator, so the tests prove which jobs
 // run for a tag push and for a workflow_dispatch dry run, not only that some text is present.
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -644,4 +644,22 @@ describe('release docs', () => {
     // No private hostnames or paths in a public runbook.
     expect(doc).not.toMatch(/\/Users\/|\/home\/[a-z]+\/|\.local\b|\.internal\b/);
   });
+});
+
+test('every actions/checkout step in every workflow keeps no credentials (issue #215)', () => {
+  const dir = join(ROOT, '.github/workflows');
+  const files = readdirSync(dir).filter((f) => f.endsWith('.yml'));
+  let checkouts = 0;
+  for (const f of files) {
+    const doc = load(readFileSync(join(dir, f), 'utf8')) as {
+      jobs?: Record<string, { steps?: { uses?: string; with?: Record<string, unknown> }[] }>;
+    };
+    for (const [job, j] of Object.entries(doc.jobs ?? {}))
+      for (const step of j.steps ?? []) {
+        if (!step.uses?.startsWith('actions/checkout@')) continue;
+        checkouts++;
+        expect(step.with?.['persist-credentials'], `${f} ${job}`).toBe(false);
+      }
+  }
+  expect(checkouts).toBeGreaterThanOrEqual(10);
 });
