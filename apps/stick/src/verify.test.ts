@@ -17,6 +17,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
+import type { ServerImages } from './fetch-image.js';
+import { PLATFORM, release as releaseImage, tar } from './test/layout.js';
 import {
   COSIGN_VERSION,
   type Cosign,
@@ -602,6 +604,82 @@ describe('startup under the signed policy', () => {
       /base image .*image pull failed: .*manifest unknown/,
     );
     expect(f.calls).toEqual([]);
+  });
+
+  test('in server mode the base image comes from the server (issue #141), never the registry', async () => {
+    const r = releaseImage();
+    const pulled: string[] = [];
+    const driver = {
+      async imageExists() {
+        return false;
+      },
+      async pullImage(ref: string) {
+        pulled.push(ref);
+      },
+    };
+    const server = (status: 200 | 404): ServerImages => ({
+      source: () => 'server',
+      deps: {
+        client: {
+          async imageLayout() {
+            return status === 200
+              ? new Response(tar(r.entries))
+              : Response.json({ error: 'not mirrored', state: 'fetching' }, { status: 404 });
+          },
+          async reportImageFetch() {},
+        },
+        loader: {
+          async imageExists() {
+            return false;
+          },
+          async loadImage(t) {
+            for await (const _ of t);
+            return [r.configDigest];
+          },
+          async removeImage() {},
+          async tagImage() {},
+        },
+        stateDir: fresh(),
+        platform: PLATFORM,
+        log: () => {},
+      },
+    });
+    const f = fakeCosign((args) =>
+      args.includes('--local-image')
+        ? ok(JSON.stringify([{ critical: { image: { 'docker-manifest-digest': r.indexDigest } } }]))
+        : { code: 99, stdout: '', stderr: 'Error: the registry was asked' },
+    );
+    expect(
+      await verifyBaseImage(r.ref, {
+        trust: signedTrust({ cosign: f.cosign, server: server(200) }),
+        driver,
+        log: () => {},
+      }),
+    ).toEqual({ ok: true });
+    const log: string[] = [];
+    expect(
+      await verifyBaseImage(r.ref, {
+        trust: signedTrust({ cosign: f.cosign, server: server(404) }),
+        driver,
+        log: (l) => log.push(l),
+      }),
+    ).toEqual({
+      ok: false,
+      reason: `base image ${r.ref}: image ${r.ref} not yet mirrored on the server (fetching)`,
+    });
+    expect(log.join('\n')).toMatch(/push-v1 withheld/);
+    expect(pulled).toEqual([]);
+    expect(f.calls.every((a) => a.includes('--local-image'))).toBe(true);
+    // Under allowlist, the allow-list still decides first.
+    const allow = await verifyBaseImage(r.ref, {
+      trust: { policy: 'allowlist', allowed: new Set(), server: server(200) },
+      driver,
+      log: () => {},
+    });
+    expect(allow).toEqual({
+      ok: false,
+      reason: `base image ${r.ref}: image not allowed: ${r.ref}`,
+    });
   });
 
   test('under signed the base image goes through the same verification as a drop image', async () => {

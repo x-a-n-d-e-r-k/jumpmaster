@@ -44,6 +44,7 @@ import { latestDoctorRun } from './doctor/run.js';
 import { fableStatus } from './fable.js';
 import type { Forge } from './forge/github.js';
 import { getGoals } from './goals.js';
+import { StickFetches } from './images/fetches.js';
 import { missingFor, zoneRequirements } from './leases.js';
 import { registerMcpRoute } from './mcp/server.js';
 import type { ForgePair } from './outbox.js';
@@ -232,7 +233,8 @@ export function createApp(
   const setup = deps.setup ?? stderrSetupMode(live().listen);
   const backoff = deps.backoff ?? new Backoff();
   registerAuthPages(app, { ...deps, setup, backoff });
-  registerStickRoutes(app, deps);
+  const fetches = deps.fetches ?? new StickFetches();
+  registerStickRoutes(app, { ...deps, fetches });
   registerControlRoutes(app, { ...deps, setup, backoff });
   registerMcpRoute(app, deps);
   // Other machines check the address they reach this server at (issue #139): no auth, any Host,
@@ -281,15 +283,17 @@ export function createApp(
     const { db } = deps;
     const config = cfg(req);
     const html = renderSticks({
-      sticks: listSticks(db).map(
-        (s): StickRow => ({
+      sticks: listSticks(db).map((s): StickRow => {
+        const fetching = fetches.get(s.id, deps.now());
+        return {
           ...stickLine(s, config),
           slots: effectiveSlots(s),
           maxSlots: stickCeiling(s),
           reported: s.maxSlots !== null,
           running: liveDropsOn(db, s.id),
-        }),
-      ),
+          ...(fetching ? { fetching } : {}),
+        };
+      }),
       zones: config.dropZones,
       now: deps.now(),
       ...(publicOrigin(config) ? { publicUrl: publicOrigin(config) as string } : {}),

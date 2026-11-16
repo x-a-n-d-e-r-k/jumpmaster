@@ -1,5 +1,5 @@
 import { Readable } from 'node:stream';
-import { expect, test } from 'vitest';
+import { describe, expect, test } from 'vitest';
 import { DockerDriver, ownContainerId, pullRef } from './docker.js';
 
 test('listByLabel queries all containers (incl. stopped) by exact label', async () => {
@@ -992,4 +992,80 @@ test('probeVolume throws when the free space cannot be read, and still removes i
     ).rejects.toThrow(/free space/);
     expect(e.calls.at(-1)).toBe('remove p');
   }
+});
+
+describe('loading an image fetched from the server (issue #141)', () => {
+  const ID = `sha256:${'c'.repeat(64)}`;
+  function loadDocker(body: string, images: Record<string, string> = {}) {
+    const removed: string[] = [];
+    let sent: Readable | undefined;
+    const docker = {
+      async loadImage(tar: Readable, o: { abortSignal?: AbortSignal }) {
+        sent = tar;
+        expect(o.abortSignal).toBeInstanceOf(AbortSignal);
+        return Readable.from([body]);
+      },
+      getImage(name: string) {
+        return {
+          async inspect() {
+            const id = images[name];
+            if (!id) throw Object.assign(new Error('no such image'), { statusCode: 404 });
+            return { Id: id };
+          },
+          async remove(o: { force?: boolean }) {
+            expect(o.force).toBe(true);
+            if (!images[name] && name !== ID)
+              throw Object.assign(new Error('no such image'), { statusCode: 404 });
+            removed.push(name);
+          },
+        };
+      },
+    };
+    return { driver: new DockerDriver(docker as never), removed, sent: () => sent };
+  }
+  const signal = () => new AbortController().signal;
+
+  test('loadImage returns the id the classic store reports, and resolves a name the containerd store reports', async () => {
+    const classic = loadDocker(`{"stream":"Loaded image ID: ${ID}\\n"}\n`);
+    const tar = Readable.from([Buffer.from('tar')]);
+    expect(await classic.driver.loadImage(tar, signal())).toEqual([ID]);
+    expect(classic.sent()).toBe(tar);
+    const c8d = loadDocker(`{"stream":"Loaded image: ghcr.io/o/x@${D}\\n"}\n`, {
+      [`ghcr.io/o/x@${D}`]: ID,
+    });
+    expect(await c8d.driver.loadImage(Readable.from([]), signal())).toEqual([ID]);
+  });
+
+  test('loadImage fails on an error line and when aborted', async () => {
+    const bad = loadDocker(
+      '{"errorDetail":{"message":"invalid tar header"},"error":"invalid tar header"}\n',
+    );
+    await expect(bad.driver.loadImage(Readable.from([]), signal())).rejects.toThrow(
+      'invalid tar header',
+    );
+    const aborted = new AbortController();
+    aborted.abort();
+    await expect(bad.driver.loadImage(Readable.from([]), aborted.signal)).rejects.toThrow(
+      'aborted',
+    );
+  });
+
+  test('removeImage forces the removal; an image already gone is fine', async () => {
+    const d = loadDocker('', {});
+    await d.driver.removeImage(ID);
+    await d.driver.removeImage(`sha256:${'9'.repeat(64)}`);
+    expect(d.removed).toEqual([ID]);
+  });
+
+  test('tagImage succeeds when the digest reference names that image, and says why not otherwise', async () => {
+    const ref = `ghcr.io/o/x:v1@${D}`;
+    await loadDocker('', { [`ghcr.io/o/x@${D}`]: ID }).driver.tagImage(ID, ref);
+    await expect(loadDocker('', {}).driver.tagImage(ID, ref)).rejects.toThrow(
+      /did not name the loaded image .* containerd image store/,
+    );
+    const other = `sha256:${'e'.repeat(64)}`;
+    await expect(
+      loadDocker('', { [`ghcr.io/o/x@${D}`]: other }).driver.tagImage(ID, ref),
+    ).rejects.toThrow(`(it names ${other})`);
+  });
 });

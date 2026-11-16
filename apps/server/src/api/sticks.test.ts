@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   FEATURES_HEADER,
+  IMAGE_MIRROR_FEATURE,
   PushGrantSchema,
   PushPlanSchema,
   SLOTS_HEADER,
@@ -43,6 +44,7 @@ import {
   upsertWorkItem,
 } from '../db/repo.js';
 import { ScrubSet } from '../forge/scrub-set.js';
+import { StickFetches } from '../images/fetches.js';
 import { ImageMirror } from '../images/mirror.js';
 import { buildPayload, promptVersions } from '../payloads.js';
 import { type FakeImage, type FakeRegistry, startFakeRegistry } from '../test/fake-registry.js';
@@ -110,6 +112,7 @@ function setup(
     config?: LiveConfig;
     logs?: string[];
     images?: ImageMirror;
+    fetches?: StickFetches;
   } = {},
 ) {
   const db = openDb(tmpDbFile());
@@ -150,6 +153,7 @@ function setup(
     leaseWaitMs: opts.leaseWaitMs ?? 60,
     leasePollMs: opts.leasePollMs ?? 10,
     ...(opts.images ? { images: opts.images } : {}),
+    ...(opts.fetches ? { fetches: opts.fetches } : {}),
   });
   return { db, forge, wi, forgeZones };
 }
@@ -1952,5 +1956,64 @@ describe('the images route (issue #140)', () => {
     );
     expect(res.statusCode).toBe(404);
     expect(res.json()).toEqual({ error: 'not in the image lock' });
+  });
+
+  test('a server with an image lock announces image-mirror-v1; without one it does not (issue #141)', async () => {
+    const { stickToken } = await withImages();
+    const res = await lease(stickToken);
+    expect(String(res.headers[FEATURES_HEADER]).split(',')).toEqual([
+      'push-v1',
+      IMAGE_MIRROR_FEATURE,
+    ]);
+    await app.close();
+    setup({ queued: false });
+    const plain = await enroll();
+    expect((await lease(plain.stickToken)).headers[FEATURES_HEADER]).toBe('push-v1');
+    // A mirror with no lock (a server run from a checkout) has nothing to serve: not announced.
+    await app.close();
+    const none = new ImageMirror({
+      dataDir: mkdtempSync(join(tmpdir(), 'jm-route-')),
+      scrub: new ScrubSet(),
+      log: () => {},
+    });
+    none.setLock(undefined);
+    setup({ queued: false, images: none });
+    const nolock = await enroll();
+    expect((await lease(nolock.stickToken)).headers[FEATURES_HEADER]).toBe('push-v1');
+  });
+});
+
+describe('image download progress on the lease (issue #141)', () => {
+  const ref = `ghcr.io/o/jumpmaster-trooper@sha256:${'a'.repeat(64)}`;
+  const leaseWith = (token: string, extra: Record<string, unknown>) =>
+    app.inject({
+      method: 'POST',
+      url: '/api/sticks/lease',
+      headers: bearer(token),
+      payload: { freeSlots: 0, capabilities: ['push-v1'], ...extra },
+    });
+
+  test('a lease carrying imageFetch records it for the stick; null clears it', async () => {
+    const fetches = new StickFetches();
+    setup({ queued: false, fetches });
+    const { stickId, stickToken } = await enroll();
+    expect(fetches.get(stickId, t0)).toBeUndefined();
+    const res = await leaseWith(stickToken, { imageFetch: { ref, done: 5, total: 10 } });
+    expect(res.statusCode).toBe(204);
+    expect(fetches.get(stickId, t0)).toEqual({ ref, done: 5, total: 10 });
+    // A lease without the field (an older stick, or nothing new) leaves it.
+    await leaseWith(stickToken, {});
+    expect(fetches.get(stickId, t0)).toEqual({ ref, done: 5, total: 10 });
+    await leaseWith(stickToken, { imageFetch: null });
+    expect(fetches.get(stickId, t0)).toBeUndefined();
+  });
+
+  test('malformed progress is a 400, like any malformed lease', async () => {
+    const fetches = new StickFetches();
+    setup({ queued: false, fetches });
+    const { stickId, stickToken } = await enroll();
+    const res = await leaseWith(stickToken, { imageFetch: { ref, done: -1, total: 10 } });
+    expect(res.statusCode).toBe(400);
+    expect(fetches.get(stickId, t0)).toBeUndefined();
   });
 });

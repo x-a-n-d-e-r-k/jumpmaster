@@ -1,3 +1,6 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { ContainerDriver, IsolationFacts } from './driver.js';
 import {
@@ -9,7 +12,9 @@ import {
   MIN_ENGINE_VERSION,
   startEgress,
 } from './egress.js';
+import type { ServerImages } from './fetch-image.js';
 import { stickInfo } from './state.js';
+import { PLATFORM, release, tar } from './test/layout.js';
 import { type Cosign, releaseSigner } from './verify.js';
 
 const GOOD: IsolationFacts = {
@@ -310,6 +315,77 @@ describe('the egress capability', () => {
           expect(d.calls.some((c) => c.startsWith('pull'))).toBe(false);
       }
     });
+  });
+
+  test('in server mode the proxy image comes from the server (issue #141): never pulled; a 404 means no egress-v1', async () => {
+    const r = release();
+    const fetched: string[] = [];
+    const server = (status: 200 | 404): ServerImages => {
+      let loaded = false;
+      return {
+        source: () => 'server',
+        deps: {
+          client: {
+            async imageLayout(ref) {
+              fetched.push(ref);
+              return status === 200
+                ? new Response(tar(r.entries))
+                : Response.json({ error: 'not mirrored', state: 'pending' }, { status: 404 });
+            },
+            async reportImageFetch() {},
+          },
+          loader: {
+            async imageExists() {
+              return loaded;
+            },
+            async loadImage(t) {
+              for await (const _ of t);
+              loaded = true;
+              return [r.configDigest];
+            },
+            async removeImage() {},
+            async tagImage() {},
+          },
+          stateDir: mkdtempSync(join(tmpdir(), 'jm-state-')),
+          platform: PLATFORM,
+          log: () => {},
+        },
+      };
+    };
+    const signed = (s: ServerImages) => ({
+      policy: 'signed' as const,
+      allowed: new Set<string>(),
+      signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster'),
+      cosign: (async (args: string[]) => ({
+        code: args.includes('--local-image') ? 0 : 99,
+        stdout: JSON.stringify([
+          { critical: { image: { 'docker-manifest-digest': r.indexDigest } } },
+        ]),
+        stderr: '',
+      })) as Cosign,
+      server: s,
+    });
+    const ok = probeDriver({ present: true });
+    expect(
+      await egressCapability(
+        ok.driver,
+        { HOSTNAME: 'h1', JM_EGRESS_IMAGE: r.ref },
+        { readyMs: 50, trust: signed(server(200)), log: () => {} },
+      ),
+    ).toEqual({ ok: true });
+    expect(fetched).toEqual([r.ref]);
+    expect(ok.calls.some((c) => c.startsWith('pull'))).toBe(false);
+    const waiting = probeDriver({ present: false });
+    const no = await egressCapability(
+      waiting.driver,
+      { HOSTNAME: 'h1', JM_EGRESS_IMAGE: r.ref },
+      { readyMs: 50, trust: signed(server(404)), log: () => {} },
+    );
+    expect(no).toEqual({
+      ok: false,
+      reason: `the egress proxy image is not verified: image ${r.ref} not yet mirrored on the server (pending)`,
+    });
+    expect(waiting.calls.some((c) => c.startsWith('pull') || c.startsWith('create'))).toBe(false);
   });
 
   test('JM_EGRESS_IMAGE names the proxy image', () => {

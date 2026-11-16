@@ -6,6 +6,8 @@ import {
   DropResultSchema,
   dropSecrets,
   FEATURES_HEADER,
+  IMAGE_MIRROR_FEATURE,
+  ImageFetchSchema,
   type LeaseSkip,
   type PushGrant,
   type PushPlan,
@@ -51,6 +53,7 @@ import {
   stampStick,
   updateDrop,
 } from '../db/repo.js';
+import type { StickFetches } from '../images/fetches.js';
 import type { ImageMirror } from '../images/mirror.js';
 import { layoutFor } from '../images/serve.js';
 import { heartbeat, leaseNextDrop, missingFor, zoneRequirements, zonesWaiting } from '../leases.js';
@@ -77,6 +80,8 @@ export interface StickRouteDeps {
   log?: (line: string) => void;
   /** The image mirror (issue #140); absent, no image is served. */
   images?: Pick<ImageMirror, 'lookup' | 'status'>;
+  /** Where the sticks' image downloads are recorded, for /sticks (issue #141). */
+  fetches?: StickFetches;
 }
 
 /** `<name>@sha256:<hex>`, the only form an image is asked for by. */
@@ -108,6 +113,8 @@ const LeaseBody = StickInfoSchema.extend({
   noPush: z.boolean().optional(),
   maxSlots: z.number().int().min(1).optional(),
   slots: z.number().int().min(1).optional(),
+  /** The stick's image download from the mirror (issue #141); `null` once there is none. */
+  imageFetch: ImageFetchSchema.nullable().optional(),
 });
 
 const advertOf = (info: StickInfo) => ({
@@ -318,7 +325,10 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       const stick = authStick(req);
       if (!stick) return reply.code(401).send({ error: 'unauthorized' });
       // Announced on every answer: a stick refuses pushing roles from a server without it.
-      reply.header(FEATURES_HEADER, 'push-v1');
+      // image-mirror-v1 once there is a lock to mirror: a stick with no JM_IMAGE_SOURCE then
+      // fetches its images from here (issue #141).
+      const features = ['push-v1', ...(deps.images?.status().lock ? [IMAGE_MIRROR_FEATURE] : [])];
+      reply.header(FEATURES_HEADER, features.join(','));
       /**
        * The trooper count the stick runs at, read afresh (the operator may change it mid-poll) and
        * announced on the answer. True when the stick's live drops already reach it: it is leased
@@ -339,6 +349,8 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       // pushing role; review, crew and doctor drops still go to it.
       const noPush = body.data.noPush === true || !body.data.capabilities.includes('push-v1');
       const excludeRoles = noPush ? PUSHING_ROLES : [];
+      if (body.data.imageFetch !== undefined)
+        deps.fetches?.set(stick.id, body.data.imageFetch, now());
       // Every lease call says what the stick can do now, and that it is alive.
       stampStick(db, stick.id, advertOf(body.data), now(), {
         maxSlots: body.data.maxSlots,

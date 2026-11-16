@@ -581,6 +581,20 @@ export const READY_LINE = 'JM_READY';
 /** The response header through which the server announces the features it supports. */
 export const FEATURES_HEADER = 'x-jumpmaster-features';
 
+/** The feature a server announces once it has an image lock to mirror for sticks (issue #141). */
+export const IMAGE_MIRROR_FEATURE = 'image-mirror-v1';
+
+/**
+ * A stick's image download from the server (issue #141), carried on its lease calls: bytes done
+ * and bytes total. `null` says no download is in progress.
+ */
+export const ImageFetchSchema = z.object({
+  ref: z.string().min(1).max(512),
+  done: z.number().int().min(0),
+  total: z.number().int().min(0),
+});
+export type ImageFetch = z.infer<typeof ImageFetchSchema>;
+
 /** The push container's payload. Strict, and carries no token: the grant arrives after ready. */
 export const PushPayloadSchema = z
   .object({

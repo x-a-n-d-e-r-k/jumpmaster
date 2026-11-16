@@ -4,6 +4,7 @@ import {
   DropPayloadSchema,
   type DropResult,
   FEATURES_HEADER,
+  type ImageFetch,
   type LeaseSkip,
   LeaseSkipSchema,
   type PushGrant,
@@ -140,9 +141,24 @@ export class StickClient implements DropClient, PushClient {
     } = {},
   ) {}
 
+  /** The terms of the latest lease, for a progress report between leases. */
+  private lastTerms: { capabilities?: string[]; noPush?: boolean } | undefined;
+  /**
+   * The image download to report (issue #141): sent on every lease while set; `null` is sent once
+   * when a download ends; `undefined` sends nothing (as before server-hosted images).
+   */
+  private imageFetch: ImageFetch | null | undefined;
+
   /** What this stick advertises on enroll and on every lease (an M3 stick sent nothing). */
   private get info(): Partial<StickInfo> {
-    return this.opts.info ?? {};
+    return this.advertised ?? this.opts.info ?? {};
+  }
+
+  private advertised: StickInfo | undefined;
+
+  /** Replaces what the stick advertises, for a client made before its checks finished. */
+  advertise(info: StickInfo): void {
+    this.advertised = info;
   }
 
   private async req(
@@ -191,13 +207,18 @@ export class StickClient implements DropClient, PushClient {
     terms: { capabilities?: string[]; noPush?: boolean } = {},
   ): Promise<{ drop: DropPayload | null; skipped: LeaseSkip[]; slots: number | null }> {
     const { maxSlots: max, slots: start } = this.opts;
+    this.lastTerms = terms;
+    const fetching = this.imageFetch;
     const res = await this.req('/api/sticks/lease', {
       freeSlots,
       ...this.info,
       ...terms,
       ...(max === undefined ? {} : { maxSlots: max }),
       ...(start === undefined ? {} : { slots: start }),
+      ...(fetching === undefined ? {} : { imageFetch: fetching }),
     });
+    // The end of a download is said once.
+    if (fetching === null && this.imageFetch === null) this.imageFetch = undefined;
     this.features = featuresOf(res);
     const skipped = skippedOf(res);
     const slots = slotsOf(res);
@@ -208,6 +229,33 @@ export class StickClient implements DropClient, PushClient {
     // Never echo a 2xx body: it carries credentials.
     if (!parsed.success) throw new Error('lease failed: invalid lease payload');
     return { drop: parsed.data, skipped, slots };
+  }
+
+  /**
+   * Reports an image download's progress (or, with `null`, its end) on a lease with no free slot,
+   * under the latest lease's terms, so nothing is leased by it (issue #141). Before the first
+   * lease it only waits for that lease. Never throws: a lost report is replaced by the next.
+   */
+  async reportImageFetch(p: ImageFetch | null): Promise<void> {
+    this.imageFetch = p;
+    if (!this.lastTerms) return;
+    await this.lease(0, this.lastTerms).catch(() => {});
+  }
+
+  /**
+   * The server's OCI layout tar of `ref` (a digest reference) for `platform` (issue #141). The
+   * server knows an image by its last path segment and digest. The caller reads the status.
+   */
+  async imageLayout(ref: string, platform: string, signal: AbortSignal): Promise<Response> {
+    const at = ref.lastIndexOf('@');
+    // A tag beside the digest is dropped (the last segment holds no registry port).
+    const name = (ref.slice(0, at).split('/').at(-1) ?? '').replace(/:.*$/, '');
+    const path = `/api/sticks/images/${encodeURIComponent(`${name}${ref.slice(at)}`)}/oci.tar`;
+    const url = new URL(path, this.baseUrl);
+    url.searchParams.set('platform', platform);
+    const headers: Record<string, string> = { 'x-jumpmaster-protocol': '1' };
+    if (this.token) headers.authorization = `Bearer ${this.token}`;
+    return fetch(url, { method: 'GET', headers, signal });
   }
 
   async heartbeat(dropId: string, epoch: number): Promise<Beat> {

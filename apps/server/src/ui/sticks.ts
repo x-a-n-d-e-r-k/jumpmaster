@@ -1,5 +1,6 @@
 // The sticks page (issue #136): every enrolled stick, what it can run, and how many troopers it
 // runs at once, set here and applied on its next lease answer with no restart.
+import type { ImageFetch } from '@jumpmaster/protocol';
 import { STICK_LIVE_MS } from '../doctor/checks.js';
 import type { MirrorStatus } from '../images/mirror.js';
 import { PUBLIC_URL_NEEDED, PUBLIC_URL_PAGE } from '../reach.js';
@@ -19,6 +20,16 @@ export interface StickRow extends StickLine {
   reported: boolean;
   /** Drops holding one of its lease slots now. */
   running: number;
+  /** The image it is downloading from this server now, as it last reported (issue #141). */
+  fetching?: ImageFetch;
+}
+
+const mb = (bytes: number): string => (bytes / 1_000_000).toFixed(0);
+
+/** `fetching <image> X/Y MB`: the image by its name, without registry or digest. */
+export function fetchingLine(f: ImageFetch): string {
+  const name = f.ref.replace(/@.*$/, '').split('/').at(-1) || f.ref;
+  return `fetching ${name} ${mb(f.done)}/${mb(f.total)} MB`;
 }
 
 /** Live, or how long since it was last seen. */
@@ -69,7 +80,7 @@ export function renderSticks(s: {
       const troopers =
         `<form data-slots="${escapeHtml(url)}"><input type="number" name="slots" min="1" max="${st.maxSlots}" value="${st.slots}" aria-label="${escapeHtml(label)}" required> <button>Save</button> <output aria-live="polite"></output></form>` +
         `<p>Running now: ${st.running} of ${st.slots}</p>${note}`;
-      return `<tr data-stick="${escapeHtml(st.id)}"><td>${escapeHtml(st.name)}</td><td>${escapeHtml(seen(st.lastSeenAt, s.now))}</td><td>${escapeHtml(st.version ?? '-')}</td><td>${escapeHtml(st.capabilities.join(', ') || '-')}</td><td>${runs}</td><td>${troopers}</td></tr>`;
+      return `<tr data-stick="${escapeHtml(st.id)}"><td>${escapeHtml(st.name)}</td><td>${escapeHtml(seen(st.lastSeenAt, s.now))}${st.fetching ? `<br><span class="muted">${escapeHtml(fetchingLine(st.fetching))}</span>` : ''}</td><td>${escapeHtml(st.version ?? '-')}</td><td>${escapeHtml(st.capabilities.join(', ') || '-')}</td><td>${runs}</td><td>${troopers}</td></tr>`;
     })
     .join('');
   return page(

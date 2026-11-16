@@ -6,6 +6,7 @@ import type {
   ContainerDriver,
   ContainerHandle,
   DropNet,
+  ImageLoader,
   IsolationFacts,
   ProxyHandle,
   RepoMount,
@@ -155,7 +156,7 @@ async function* lines(stream: Readable): AsyncIterable<string> {
   if (buf) yield buf;
 }
 
-export class DockerDriver implements ContainerDriver {
+export class DockerDriver implements ContainerDriver, ImageLoader {
   constructor(
     private readonly docker = new Docker(),
     private readonly opts: {
@@ -700,6 +701,62 @@ export class DockerDriver implements ContainerDriver {
     } catch {
       return false;
     }
+  }
+
+  async loadImage(tar: Readable, signal: AbortSignal): Promise<string[]> {
+    if (signal.aborted) throw new Error('aborted');
+    const stream = (await this.docker.loadImage(tar, { abortSignal: signal })) as Readable;
+    const abort = () => stream.destroy(new Error('aborted'));
+    signal.addEventListener('abort', abort, { once: true });
+    const loaded: string[] = [];
+    try {
+      // One JSON object per line: `Loaded image ID: <id>` (Docker's classic store) or
+      // `Loaded image: <name>` (the containerd store, from the layout's name annotation).
+      for await (const line of lines(stream)) {
+        if (line.trim() === '') continue;
+        let event: { stream?: unknown; error?: unknown; errorDetail?: { message?: unknown } };
+        try {
+          event = JSON.parse(line) as typeof event;
+        } catch {
+          continue;
+        }
+        if (event.error !== undefined || event.errorDetail !== undefined)
+          throw new Error(String(event.error ?? event.errorDetail?.message ?? 'error'));
+        const text = typeof event.stream === 'string' ? event.stream.trim() : '';
+        const id = /^Loaded image ID: (\S+)$/.exec(text)?.[1];
+        const name = /^Loaded image: (\S+)$/.exec(text)?.[1];
+        if (id) loaded.push(id);
+        else if (name) {
+          const info = (await this.docker.getImage(name).inspect()) as { Id?: string };
+          if (typeof info.Id === 'string') loaded.push(info.Id);
+        }
+      }
+    } finally {
+      signal.removeEventListener('abort', abort);
+    }
+    if (signal.aborted) throw new Error('aborted');
+    return [...new Set(loaded)];
+  }
+
+  async removeImage(id: string): Promise<void> {
+    try {
+      await this.docker.getImage(id).remove({ force: true });
+    } catch (e) {
+      if (statusOf(e) !== 404) throw e;
+    }
+  }
+
+  async tagImage(id: string, ref: string): Promise<void> {
+    // The engine API refuses a tag with a digest; the name comes from the loaded layout's
+    // `io.containerd.image.name` annotation, which Docker's containerd image store applies.
+    const named = (await this.docker
+      .getImage(pullRef(ref))
+      .inspect()
+      .catch(() => undefined)) as { Id?: string } | undefined;
+    if (named?.Id === id) return;
+    throw new Error(
+      `the engine did not name the loaded image ${id} as ${ref}${named?.Id ? ` (it names ${named.Id})` : ''}: loading images by digest needs Docker's containerd image store`,
+    );
   }
 
   async imageLabels(image: string): Promise<Record<string, string>> {

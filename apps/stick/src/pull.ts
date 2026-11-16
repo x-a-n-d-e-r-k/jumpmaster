@@ -1,8 +1,26 @@
 // Pulling images a drop needs. Only digest references are pulled: the registry is content-
 // addressed, so what is pulled is exactly what is verified and then created. A tag is never
 // pulled (the allow-list policy keeps M3's behaviour: a missing tag fails at create).
+import { IMAGE_MIRROR_FEATURE } from '@jumpmaster/protocol';
 import type { ContainerDriver } from './driver.js';
 import { digestOf } from './verify.js';
+
+/**
+ * Where a missing image comes from (issue #141): the Jumpmaster server's mirror, verified
+ * offline, or the registry. `JM_IMAGE_SOURCE` decides; unset, the server when it announces
+ * `image-mirror-v1`, else the registry (as before server-hosted images).
+ */
+export type ImageSource = 'server' | 'registry';
+
+export function imageSource(
+  env: NodeJS.ProcessEnv,
+  features: ReadonlySet<string> | undefined,
+): ImageSource {
+  const v = (env.JM_IMAGE_SOURCE ?? '').trim();
+  if (v === 'server' || v === 'registry') return v;
+  if (v !== '') throw new Error(`JM_IMAGE_SOURCE must be server or registry, not ${v}`);
+  return features?.has(IMAGE_MIRROR_FEATURE) ? 'server' : 'registry';
+}
 
 export const PULL_TIMEOUT_MS = 10 * 60_000;
 export const PULL_PROGRESS_MS = 10_000;

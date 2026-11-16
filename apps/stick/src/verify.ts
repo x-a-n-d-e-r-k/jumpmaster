@@ -17,6 +17,7 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { type ImagePolicy, ImagePolicySchema } from '@jumpmaster/protocol';
+import { fetchFromServer, fromServer, type ServerImages } from './fetch-image.js';
 import { type PullDeps, pullImage } from './pull.js';
 import { allowedImages } from './runner.js';
 import { stateDir } from './state.js';
@@ -223,6 +224,8 @@ export type ImageTrust = {
   cosign?: Cosign;
   cache?: VerifyCache;
   timeoutMs?: number;
+  /** Fetching missing images from the Jumpmaster server (issue #141); absent, the registry. */
+  server?: ServerImages;
 };
 
 export type Verdict =
@@ -239,8 +242,28 @@ function cosignWhy(stderr: string): string {
   return line.replace(/^Error:\s*/, '').slice(0, 300);
 }
 
+/** A verdict cosign must still give, on `digest`, with how to say no. */
+type NeedsSignature = { digest: string; refuse: (why: string) => Verdict };
+
 /** Whether `ref` may run under `trust`, and how that was decided. Never throws. */
 export async function verifyImage(ref: string, trust: ImageTrust): Promise<Verdict> {
+  const pre = decideWithoutCosign(ref, trust);
+  if ('ok' in pre) return pre;
+  if (!trust.cosign) return pre.refuse('cosign is not available');
+  const signer = trust.signer as Signer;
+  return runCosign(
+    [...identityArgs(signer), '--output', 'json', '--', ref],
+    pre.digest,
+    trust,
+    pre.refuse,
+  );
+}
+
+/**
+ * Everything decided without cosign: the allow-list, a tag under signed, a pin, a cached
+ * success, no signer; otherwise the digest cosign must verify.
+ */
+function decideWithoutCosign(ref: string, trust: ImageTrust): Verdict | NeedsSignature {
   const refuseTag = (why: string): Verdict => ({
     ok: false,
     reason: `image not verified: ${ref}: ${why}`,
@@ -266,30 +289,38 @@ export async function verifyImage(ref: string, trust: ImageTrust): Promise<Verdi
     ok: false,
     reason: `image not verified: ${ref}: ${why}${hint}`,
   });
-  const { signer, cosign } = trust;
-  if (!signer) return refuse('this stick has no trusted signer');
+  if (!trust.signer) return refuse('this stick has no trusted signer');
   if (trust.cache?.has(digest)) return { ok: true, via: 'cache' };
+  return { digest, refuse };
+}
+
+/** The pinned identity flags: who may have signed (issue #141 keeps them for offline checks). */
+const identityArgs = (signer: Signer): string[] => [
+  '--certificate-identity-regexp',
+  signer.identityRegexp,
+  '--certificate-oidc-issuer',
+  signer.issuer,
+  '--certificate-github-workflow-trigger',
+  signer.trigger,
+  '--certificate-github-workflow-repository',
+  signer.repository,
+];
+
+/**
+ * Runs `cosign verify <args>` and reads its verdict: a success only when cosign exits 0 and every
+ * payload it printed names `digest`. A success is cached.
+ */
+async function runCosign(
+  args: string[],
+  digest: string,
+  trust: ImageTrust,
+  refuse: (why: string) => Verdict,
+): Promise<Verdict> {
+  const cosign = trust.cosign;
   if (!cosign) return refuse('cosign is not available');
   let r: CosignResult;
   try {
-    r = await cosign(
-      [
-        'verify',
-        '--certificate-identity-regexp',
-        signer.identityRegexp,
-        '--certificate-oidc-issuer',
-        signer.issuer,
-        '--certificate-github-workflow-trigger',
-        signer.trigger,
-        '--certificate-github-workflow-repository',
-        signer.repository,
-        '--output',
-        'json',
-        '--',
-        ref,
-      ],
-      { timeoutMs: trust.timeoutMs ?? VERIFY_TIMEOUT_MS },
-    );
+    r = await cosign(['verify', ...args], { timeoutMs: trust.timeoutMs ?? VERIFY_TIMEOUT_MS });
   } catch (e) {
     return refuse(e instanceof Error ? e.message : String(e));
   }
@@ -317,6 +348,42 @@ export async function verifyImage(ref: string, trust: ImageTrust): Promise<Verdi
   if (other !== undefined) return refuse(`cosign verified ${other}, not ${digest}`);
   trust.cache?.add(digest);
   return { ok: true, via: 'cosign' };
+}
+
+/**
+ * Verifies `ref` from an OCI image layout the server sent (issue #141): `cosign verify
+ * --local-image --offline` with the pinned identity, keeping the bundled transparency-log proof
+ * (`--insecure-ignore-tlog=false`). Nothing is asked of the registry or of Sigstore; the server
+ * is no trust anchor, since what it sent must carry the release workflow's signature on `ref`'s
+ * digest. Never throws.
+ */
+export async function verifyLayout(dir: string, ref: string, trust: ImageTrust): Promise<Verdict> {
+  const pre = decideWithoutCosign(ref, trust);
+  if ('ok' in pre) return pre;
+  return runCosign(
+    [
+      '--local-image',
+      '--offline',
+      '--insecure-ignore-tlog=false',
+      ...identityArgs(trust.signer as Signer),
+      '--output',
+      'json',
+      '--',
+      dir,
+    ],
+    pre.digest,
+    trust,
+    pre.refuse,
+  );
+}
+
+/**
+ * Under signed, a decision that needs no signature check: a refusal, a pin or a digest verified
+ * before; `null` when only a signature can decide. Under allowlist, the allow-list's answer.
+ */
+export function verifiedWithoutSignature(ref: string, trust: ImageTrust): Verdict | null {
+  const pre = decideWithoutCosign(ref, trust);
+  return 'ok' in pre ? pre : null;
 }
 
 /** What the stick image's build recorded (/app/release.json). */
@@ -354,6 +421,16 @@ export async function verifyBaseImage(
     );
     return { ok: false as const, reason };
   };
+  const server = fromServer(deps.trust);
+  if (server) {
+    // From the server, verified offline before it loads (issue #141); the allow-list as ever.
+    if (deps.trust.policy === 'allowlist') {
+      const v = await verifyImage(image, deps.trust);
+      if (!v.ok) return refuse(v.reason);
+    }
+    const v = await fetchFromServer(image, deps.trust, server);
+    return v.ok ? { ok: true } : refuse(v.reason);
+  }
   const v = await verifyImage(image, deps.trust);
   if (!v.ok) return refuse(v.reason);
   try {

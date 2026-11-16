@@ -58,3 +58,42 @@ describe('the Images card on /sticks (issue #140)', () => {
     expect(renderSticks({ sticks: [], zones: [], now: t0 })).not.toContain('<h3>Images</h3>');
   });
 });
+
+describe('image downloads on /sticks (issue #141)', () => {
+  const row = {
+    id: 's1',
+    name: 'vps-1',
+    version: '1.0.0',
+    lastSeenAt: t0.toISOString(),
+    capabilities: ['push-v1'],
+    imagePolicy: 'signed',
+    cannotRun: [],
+    slots: 2,
+    maxSlots: 4,
+    reported: true,
+    running: 0,
+  };
+
+  test('a stick fetching an image shows the image and MB done of total', () => {
+    const html = renderSticks({
+      sticks: [
+        {
+          ...row,
+          fetching: {
+            ref: `ghcr.io/o/jumpmaster-trooper@${digest}`,
+            done: 12_400_000,
+            total: 40_000_000,
+          },
+        },
+      ],
+      zones: [],
+      now: t0,
+    });
+    expect(html).toContain('fetching jumpmaster-trooper 12/40 MB');
+  });
+
+  test('a stick fetching nothing shows no download', () => {
+    const html = renderSticks({ sticks: [row], zones: [], now: t0 });
+    expect(html).not.toContain('fetching ');
+  });
+});

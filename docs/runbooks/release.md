@@ -239,6 +239,9 @@ The stick's own outbound traffic (not restricted by Jumpmaster; allow it if the 
 - `rekor.sigstore.dev` and `fulcio.sigstore.dev`: the transparency log and the CA;
 - the Jumpmaster server.
 
+A stick with `JM_IMAGE_SOURCE=server` (below) needs only the last: it fetches images from its
+server and verifies them offline.
+
 The egress capability check (`egress-v1`) runs short-lived probe containers on the host network,
 from the stick's own image, as `nobody`, with no capabilities, to prove a drop can't reach the
 host. Under `signed`, the proxy image it starts is first verified and then pulled by digest, so the
@@ -258,7 +261,7 @@ pin it by digest.
 
 A new stick can get the release images from the Jumpmaster server instead of from GHCR, so the
 machine needs no registry access and no credential, and the GHCR packages can stay private. This
-is the server half (issue #140); the stick half that fetches from it is issue #141.
+is the server half (issue #140); the stick half that fetches from it (issue #141) is below.
 
 **The server is a cache, not a trust anchor.** It mirrors each image together with the cosign
 signature artifacts of its index digest, and the stick verifies those signatures offline against
@@ -325,6 +328,50 @@ lock' }`. An image not yet complete is `404 { error: 'not mirrored', state }` wi
 The sticks page has an **Images** card listing each image with its platforms, size and state, and
 the doctor's `server.image-mirror` says the same: `info` with no lock (a checkout has nothing to
 mirror), `pass` when every image is complete, `warn` naming each failure.
+
+### The stick's half (issue #141)
+
+`JM_IMAGE_SOURCE=server|registry` says where a stick gets an image it doesn't have. Unset, it is
+`server` once the server announces `image-mirror-v1` on a lease answer (`x-jumpmaster-features`;
+a server announces it once it has an image lock), else `registry`, as before. The installer sets
+`JM_IMAGE_SOURCE=server`. Unset, the checks a stick runs at startup, before its first lease, use
+the registry; with `server` set it enrolls first, so even the egress proxy comes from the server.
+The stick's own image comes from the installer, never from the stick.
+
+In `server` mode, wherever a stick pulled a digest before (a drop's trooper, proxy and service
+images, its own trooper image, the egress check's proxy), for one it doesn't have:
+
+1. It downloads the layout for its own platform (`linux/amd64` or `linux/arm64`) with its stick
+   token into a temporary directory under its state directory (`/state/image-fetch`), extracting
+   as it reads. It refuses, before writing anything outside that directory: a link entry (symlink
+   or hard link), an absolute or `..` path, any name an image layout doesn't have, a duplicate,
+   and more than 8 GB. Every blob must hash to its name. Progress (bytes done of total) goes to
+   the server at most every 2 seconds on a lease call with no free slot; `/sticks` shows
+   `fetching <image> X/Y MB` beside the stick.
+2. It binds the layout to the digest it asked for: that digest's blob is the multi-arch index, and
+   the index's entry for its platform is the manifest it loads.
+3. Under `signed`: `cosign verify --local-image --offline --insecure-ignore-tlog=false` with the
+   pinned identity above, on the layout. Nothing asks the registry or Sigstore. A failure deletes
+   the directory, refuses the drop with `image not verified: …` and logs
+   `{"event":"image-verify-failed","ref":…,"via":"server"}`. A digest the operator pinned, or one in
+   `/state/verified.json`, needs no signature; a success is recorded there. Under `allowlist` the
+   image must be in `JM_ALLOWED_IMAGES`, as ever.
+4. It runs `docker load` on a tar it builds from the files it checked (the platform image alone,
+   no signature artifact). The engine must report the manifest's config digest as the loaded id
+   (the containerd image store reports the manifest digest, which is bound the same way); any
+   other id is removed and the drop refused. The image is then found by its digest reference.
+   Naming an image by digest needs Docker's containerd image store (the default on new Docker
+   installs): the engine API refuses to tag by digest, so the name comes from the layout's
+   `io.containerd.image.name` annotation; on the classic store the drop is refused with that
+   reason.
+5. The temporary directory is deleted, whatever happened.
+
+A `404 not mirrored` is no failure: the drop waits, logged as
+`{"event":"drop-waiting","reason":"image <ref> not yet mirrored on the server (<state>)"}`. The stick
+posts no result and sends no heartbeat, so the lease lapses and the drop is leased again later.
+A stick in `server` mode never falls back to the registry, and never loads anything unverified.
+A signature cosign's local-layout reader cannot find (an image signed only with a sigstore
+bundle) fails verification: refused, never loaded.
 
 Follow-up, not done yet: blobs are never garbage-collected. Images of neither the current nor the
 previous lock leave the index, but their blobs stay under `<dataDir>/images/blobs`.

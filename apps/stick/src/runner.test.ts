@@ -13,6 +13,8 @@ import {
 import { describe, expect, test } from 'vitest';
 import type { DropClient } from './client.js';
 import type { ContainerDriver, DropNet } from './driver.js';
+import type { ServerImageDeps, ServerImages } from './fetch-image.js';
+import type { ImageSource } from './pull.js';
 import { PendingPushes } from './push.js';
 import {
   allowedImages,
@@ -28,6 +30,7 @@ import {
   sweepVolumes,
   volumeSelfCheck,
 } from './runner.js';
+import { release, tar } from './test/layout.js';
 import { type Cosign, type ImageTrust, releaseSigner, VerifyCache } from './verify.js';
 
 const NET: DropNet = {
@@ -2095,5 +2098,148 @@ describe('push containers: the agent run on a volume', () => {
       reason: 'trooper image too old for push containers',
     });
     expect(d.order).toEqual([]);
+  });
+});
+
+describe('server-hosted images (issue #141)', () => {
+  const done = 'JM_RESULT {"status":"completed","gates":[]}';
+  const r = release();
+  const p: DropPayload = { ...payload, image: r.ref };
+  /** The server: serves the release's layout, or answers 404 `not mirrored`. */
+  function serverImages(o: { source?: ImageSource; mirrored?: boolean } = {}) {
+    const calls: string[] = [];
+    let loaded = false;
+    const deps: ServerImageDeps = {
+      client: {
+        async imageLayout(ref) {
+          calls.push(`fetch ${ref}`);
+          if (o.mirrored === false)
+            return Response.json({ error: 'not mirrored', state: 'fetching' }, { status: 404 });
+          return new Response(tar(r.entries), { status: 200 });
+        },
+        async reportImageFetch() {},
+      },
+      loader: {
+        async imageExists() {
+          return loaded;
+        },
+        async loadImage(t) {
+          for await (const _ of t);
+          calls.push('load');
+          loaded = true;
+          return [r.configDigest];
+        },
+        async removeImage() {},
+        async tagImage(id, ref) {
+          calls.push(`tag ${id} ${ref}`);
+        },
+      },
+      stateDir: mkdtempSync(join(tmpdir(), 'jm-state-')),
+      platform: 'linux/amd64',
+      log: () => {},
+    };
+    const server: ServerImages = { source: () => o.source ?? 'server', deps };
+    return { server, calls };
+  }
+  /** cosign: offline layout checks pass for the release; any registry call is recorded. */
+  function cosign() {
+    const registry: string[][] = [];
+    const local: string[][] = [];
+    const c: Cosign = async (args) => {
+      (args.includes('--local-image') ? local : registry).push(args);
+      return {
+        code: 0,
+        stdout: JSON.stringify([
+          { critical: { image: { 'docker-manifest-digest': r.indexDigest } } },
+        ]),
+        stderr: '',
+      };
+    };
+    return { cosign: c, registry, local };
+  }
+  const trust = (c: Cosign, server: ServerImages): ImageTrust => ({
+    policy: 'signed',
+    allowed: new Set(),
+    signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster'),
+    cosign: c,
+    cache: new VerifyCache(
+      join(mkdtempSync(join(tmpdir(), 'jm-trust-')), 'verified.json'),
+      releaseSigner('x-a-n-d-e-r-k/jumpmaster'),
+    ),
+    server,
+  });
+
+  test('a missing image comes from the server, verified offline and loaded, then the drop runs; the registry is never asked', async () => {
+    const d = fakeDriver([done], { present: () => false });
+    const s = serverImages();
+    const c = cosign();
+    const client = fakeClient();
+    const log: string[] = [];
+    await runDrop(p, {
+      client,
+      driver: d.driver,
+      stickId: 's1',
+      trust: trust(c.cosign, s.server),
+      log: (l) => log.push(l),
+    });
+    expect(client.result).toMatchObject({ status: 'completed' });
+    expect(s.calls).toEqual([`fetch ${r.ref}`, 'load', `tag ${r.configDigest} ${r.ref}`]);
+    expect(c.local).toHaveLength(1);
+    // No registry: neither the driver's pull (spied) nor cosign's online verify.
+    expect(d.images).toEqual([]);
+    expect(c.registry).toEqual([]);
+    expect(d.started?.image).toBe(r.ref);
+    expect(log.map((l) => JSON.parse(l))).toContainEqual({
+      event: 'image-verified',
+      dropId: 'd1',
+      ref: r.ref,
+      via: 'cosign',
+    });
+  });
+
+  test('404 not mirrored: the drop waits with the server state, posts nothing and never pulls', async () => {
+    const d = fakeDriver([done], { present: () => false });
+    const s = serverImages({ mirrored: false });
+    const c = cosign();
+    const client = fakeClient();
+    const log: string[] = [];
+    await runDrop(p, {
+      client,
+      driver: d.driver,
+      stickId: 's1',
+      trust: trust(c.cosign, s.server),
+      log: (l) => log.push(l),
+    });
+    expect(client.result).toBeUndefined();
+    expect(d.started).toBeUndefined();
+    expect(d.images).toEqual([]);
+    expect(c.registry).toEqual([]);
+    expect(c.local).toEqual([]);
+    expect(log.map((l) => JSON.parse(l))).toContainEqual({
+      event: 'drop-waiting',
+      dropId: 'd1',
+      epoch: 3,
+      reason: `image ${r.ref} not yet mirrored on the server (fetching)`,
+    });
+  });
+
+  test('registry mode behaves as before: verify against the registry, then pull', async () => {
+    const d = fakeDriver([done], { present: () => false });
+    const s = serverImages({ source: 'registry' });
+    const c = cosign();
+    const verify = c.cosign;
+    const client = fakeClient();
+    await runDrop(p, {
+      client,
+      driver: d.driver,
+      stickId: 's1',
+      // The registry's cosign names the asked-for digest, as the fixture release signs it.
+      trust: trust(verify, s.server),
+    });
+    expect(client.result).toMatchObject({ status: 'completed' });
+    expect(s.calls).toEqual([]);
+    expect(c.local).toEqual([]);
+    expect(c.registry).toHaveLength(1);
+    expect(d.images).toEqual([`pull ${r.ref}`]);
   });
 });
