@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import {
+  DEFAULT_PROTECTED_PATHS,
   gateSecretsOf,
   loadConfig,
   MCP_DEFAULTS,
@@ -1196,5 +1197,138 @@ describe('server.publicUrl (issue #139)', () => {
     expect(() => loadConfig(minimal, { ...fullEnv, JM_PUBLIC_URL: 'http://k' })).toThrow(
       /JM_PUBLIC_URL: server.publicUrl must use https:\/\//,
     );
+  });
+});
+
+describe('githubApp (spec §4.2: installation and repository ids, not secret)', () => {
+  const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json'), strict: true };
+  const app = { repositoryId: 123, installations: { author: 11, reviewer: 22 } };
+  const parseZone = (extra: Record<string, unknown>) =>
+    parseEditable({ dropZones: [{ ...baseZone, ...extra }] }, noLock);
+  const issuesOf = (r: ReturnType<typeof parseEditable>) => (r.ok ? [] : r.issues);
+
+  test('a two-bot zone carries a repository id and per-role installation ids', () => {
+    for (const githubApp of [
+      app,
+      { repositoryId: 5, installations: {} },
+      { repositoryId: Number.MAX_SAFE_INTEGER, installations: { author: 1 } },
+    ]) {
+      const r = parseZone({ githubApp });
+      expect(issuesOf(r)).toEqual([]);
+      if (r.ok) expect(r.config.dropZones[0]?.githubApp).toEqual(githubApp);
+    }
+    const explicit = parseZone({ identity: 'two-bot', githubApp: app });
+    expect(explicit.ok).toBe(true);
+  });
+
+  test('each invalid value is refused with an issue on its path', () => {
+    const bad = [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1];
+    for (const v of bad) {
+      for (const [githubApp, path] of [
+        [{ ...app, repositoryId: v }, 'dropZones.0.githubApp.repositoryId'],
+        [{ ...app, installations: { author: v } }, 'dropZones.0.githubApp.installations.author'],
+        [
+          { ...app, installations: { reviewer: v } },
+          'dropZones.0.githubApp.installations.reviewer',
+        ],
+      ] as const) {
+        const issues = issuesOf(parseZone({ githubApp }));
+        expect(
+          issues.map((i) => i.path),
+          `${path}=${v}`,
+        ).toContain(path);
+      }
+    }
+    const paths = (githubApp: unknown) => issuesOf(parseZone({ githubApp })).map((i) => i.path);
+    expect(paths({ ...app, installationId: 9 })).toEqual(['dropZones.0.githubApp.installationId']);
+    expect(paths({ ...app, installations: { author: 1, merger: 2 } })).toEqual([
+      'dropZones.0.githubApp.installations.merger',
+    ]);
+    expect(paths({ repositoryId: 1 })).toEqual(['dropZones.0.githubApp.installations']);
+    expect(paths({ repositoryId: '1', installations: {} })).toEqual([
+      'dropZones.0.githubApp.repositoryId',
+    ]);
+  });
+
+  test('a starter zone with githubApp is refused on path githubApp', () => {
+    const r = parseZone({ identity: 'starter', githubApp: app });
+    expect(issuesOf(r)).toEqual([
+      {
+        path: 'dropZones.0.githubApp',
+        message:
+          'a starter zone uses personal access tokens; githubApp applies to two-bot zones only',
+      },
+    ]);
+  });
+
+  test('a config without the field parses exactly as before, defaults included', () => {
+    const r = parseEditable(
+      {
+        dropZones: [
+          {
+            id: 'main',
+            repo: 'octo/demo',
+            gates: [{ name: 'test', run: 'npm test' }],
+            image: 'jm-trooper:dev',
+          },
+        ],
+      },
+      noLock,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const zone = r.config.dropZones[0];
+    expect(zone).not.toHaveProperty('githubApp');
+    expect(zone).toEqual({
+      id: 'main',
+      repo: 'octo/demo',
+      readyLabel: 'agent-ready',
+      gates: [{ name: 'test', run: 'npm test', timeoutMinutes: 20 }],
+      services: [],
+      verification: [],
+      limits: { pids: 512 },
+      adoptPulls: [],
+      maxConcurrentImplement: 1,
+      gateSecrets: [],
+      mode: 'active',
+      image: 'jm-trooper:dev',
+      model: 'claude-opus-5-5',
+      maxTurns: 200,
+      models: {},
+      budgets: {
+        maxHeal: 3,
+        maxResolve: 2,
+        maxResolveTotal: 6,
+        maxResume: 2,
+        maxReviewRepeat: 2,
+        maxNoChange: 1,
+      },
+      ciRequired: true,
+      ciDeadlineMinutes: 45,
+      retryLabel: 'agent-retry',
+      mergeMethod: 'squash',
+      requireBranchProtection: true,
+      authorMayBeAdmin: false,
+      identity: 'two-bot',
+      protectedPaths: DEFAULT_PROTECTED_PATHS,
+      overrideApprovers: [],
+      trustPnpmBuildBlocking: false,
+      gateCi: true,
+      reviewReadToken: false,
+      attribution: true,
+      crew: {
+        enabled: false,
+        goalPath: 'GOAL.md',
+        cycleMinutes: 60,
+        maxDropsPerDay: 24,
+        stagedLabel: 'agent-staged',
+        maxStaged: 3,
+        refutePromotes: false,
+        maxRefute: 2,
+      },
+      botLogins: [],
+    });
+    // The loaded file of an existing install, too.
+    expect(loadConfig(minimal, fullEnv).dropZones[0]).not.toHaveProperty('githubApp');
   });
 });

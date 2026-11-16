@@ -456,3 +456,85 @@ describe('added, removed and renamed zones', () => {
       ).toEqual([newProject('new', 'octo/new')]);
   });
 });
+
+describe('githubApp ids (spec §4.2): not secret, but guarded', () => {
+  const app = (repositoryId: number, installations: Record<string, number>) => ({
+    githubApp: { repositoryId, installations },
+  });
+
+  test('GUARDED_PATHS names exactly the three leaves, each a scalar rule', () => {
+    const rules = GUARDED_PATHS.filter((g) => g.path.startsWith('dropZones[].githubApp'));
+    expect(rules.map((g) => [g.path, g.kind])).toEqual([
+      ['dropZones[].githubApp.repositoryId', 'scalar'],
+      ['dropZones[].githubApp.installations.author', 'scalar'],
+      ['dropZones[].githubApp.installations.reviewer', 'scalar'],
+    ]);
+  });
+
+  test('adding githubApp to an existing zone is guarded, naming the zone and each value', () => {
+    expect(edit({}, app(123, { author: 11, reviewer: 22 })).guarded).toEqual([
+      {
+        path: 'dropZones[web].githubApp.installations.author',
+        consequence: 'Author tokens for zone web will be minted from installation id 11',
+      },
+      {
+        path: 'dropZones[web].githubApp.installations.reviewer',
+        consequence: 'Reviewer tokens for zone web will be minted from installation id 22',
+      },
+      {
+        path: 'dropZones[web].githubApp.repositoryId',
+        consequence: 'Tokens for zone web will be minted for repository id 123',
+      },
+    ]);
+  });
+
+  test('changing the repository id or an installation id is guarded', () => {
+    expect(edit(app(123, { author: 11 }), app(456, { author: 11 })).guarded).toEqual([
+      {
+        path: 'dropZones[web].githubApp.repositoryId',
+        consequence: 'Tokens for zone web will be minted for repository id 456',
+      },
+    ]);
+    expect(edit(app(123, { author: 11 }), app(123, { author: 12 })).guarded).toEqual([
+      {
+        path: 'dropZones[web].githubApp.installations.author',
+        consequence: 'Author tokens for zone web will be minted from installation id 12',
+      },
+    ]);
+    // An installation id removed on its own.
+    expect(edit(app(123, { author: 11, reviewer: 22 }), app(123, { author: 11 })).guarded).toEqual([
+      {
+        path: 'dropZones[web].githubApp.installations.reviewer',
+        consequence:
+          'Reviewer tokens for zone web will no longer be minted from installation id 22: it is removed',
+      },
+    ]);
+    // The same ids again: nothing to confirm.
+    expect(edit(app(1, { author: 2 }), app(1, { author: 2 })).guarded).toEqual([]);
+  });
+
+  test('removing the field is guarded, each leaf saying it is removed', () => {
+    expect(edit(app(123, { author: 11 }), { githubApp: undefined }).guarded).toEqual([
+      {
+        path: 'dropZones[web].githubApp.installations.author',
+        consequence:
+          'Author tokens for zone web will no longer be minted from installation id 11: it is removed',
+      },
+      {
+        path: 'dropZones[web].githubApp.repositoryId',
+        consequence:
+          'Tokens for zone web will no longer be minted for repository id 123: it is removed',
+      },
+    ]);
+  });
+
+  test('an added zone carrying githubApp is guarded beside its repository', () => {
+    const monitored = { egress: { mode: 'monitor', allow: [] } };
+    const c = classify(doc([]), doc([zone('new', { ...monitored, ...app(7, { reviewer: 8 }) })]));
+    expect(c.guarded.map((g) => g.path)).toEqual([
+      'dropZones[new].repo',
+      'dropZones[new].githubApp.installations.reviewer',
+      'dropZones[new].githubApp.repositoryId',
+    ]);
+  });
+});

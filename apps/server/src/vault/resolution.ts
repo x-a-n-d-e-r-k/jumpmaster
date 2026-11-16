@@ -39,7 +39,8 @@ function ownerOf(repo: string): string | undefined {
   }
 }
 
-const isTwoBot = (z: ZoneForCredentials): boolean => (z.identity ?? 'two-bot') === 'two-bot';
+const isTwoBot = (z: Pick<ZoneForCredentials, 'identity'>): boolean =>
+  (z.identity ?? 'two-bot') === 'two-bot';
 
 /**
  * The app entries of every two-bot zone's owner, both roles each. Starter zones and zones whose
@@ -96,4 +97,28 @@ export function credentialFor(
   // which identity authors or merges.
   if (r.undecryptable) return { ref: { kind: 'github-app', owner }, problem: 'undecryptable' };
   return pat;
+}
+
+/** The zone fields `appInstallationFor` reads: the recorded ids, config not secret (§4.2). */
+export type ZoneForAppInstallation = Pick<ZoneForCredentials, 'identity'> & {
+  githubApp?: {
+    repositoryId: number;
+    installations: { author?: number; reviewer?: number };
+  };
+};
+
+/**
+ * The recorded installation and repository a role's app tokens are for, or undefined when the
+ * zone is starter, has no `githubApp`, or records no installation for the role. Pure: it reads the
+ * zone alone. Nothing mints from it until installation discovery (§4.1) checks the ids, since the
+ * server never trusts an installation id it is handed.
+ */
+export function appInstallationFor(
+  zone: ZoneForAppInstallation,
+  role: AppRole,
+): { installationId: number; repositoryId: number } | undefined {
+  if (!isTwoBot(zone) || !zone.githubApp) return undefined;
+  const installationId = zone.githubApp.installations[role];
+  if (installationId === undefined) return undefined;
+  return { installationId, repositoryId: zone.githubApp.repositoryId };
 }

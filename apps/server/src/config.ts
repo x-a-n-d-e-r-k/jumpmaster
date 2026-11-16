@@ -143,6 +143,9 @@ const CrewSchema = z
   })
   .default(CREW_DEFAULTS);
 
+/** A GitHub numeric id: a positive safe integer. */
+const GitHubId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+
 /** A zone's fields with their defaults, without the cross-field rules (the add baseline parses with it). */
 export const DropZoneObject = z.object({
   id: z.string().min(1),
@@ -235,6 +238,18 @@ export const DropZoneObject = z.object({
    * merges on the reviewer drop's verdict and green CI. See STARTER_WARNING.
    */
   identity: z.enum(IDENTITIES).default('two-bot'),
+  /**
+   * The zone's GitHub App installations (spec §4.2): config, not a secret. One repository id, and
+   * one installation id per role, since the author and reviewer apps are separate apps. Guarded:
+   * the ids decide which installation and repository minted tokens reach. Nothing mints from them
+   * until installation discovery (§4.1) checks them; the server never trusts an id it is handed.
+   */
+  githubApp: z
+    .object({
+      repositoryId: GitHubId,
+      installations: z.object({ author: GitHubId.optional(), reviewer: GitHubId.optional() }),
+    })
+    .optional(),
   protectedPaths: z.array(z.string()).default(DEFAULT_PROTECTED_PATHS),
   /**
    * Logins (with write access) whose approval of the exact head lets a gate script or gate tool
@@ -283,6 +298,14 @@ const DropZoneSchema = DropZoneObject.superRefine((zone, ctx) => {
       path: ['ciRequired'],
       message:
         'a starter zone requires ciRequired: true: with no reviewer identity, required CI is what GitHub enforces',
+    });
+  }
+  if (zone.identity === 'starter' && zone.githubApp) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['githubApp'],
+      message:
+        'a starter zone uses personal access tokens; githubApp applies to two-bot zones only',
     });
   }
   if ((zone.egress?.mode ?? 'off') !== 'off' && zone.services.length > MAX_EGRESS_SERVICES) {
