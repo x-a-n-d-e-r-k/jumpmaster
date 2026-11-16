@@ -1,5 +1,11 @@
 import { basename, matchesGlob } from 'node:path';
 import { z } from 'zod';
+import {
+  MAX_TRIAGE_IMAGES,
+  MAX_TRIAGE_IMAGES_SKIPPED,
+  TriageImageSchema,
+  TriageImageSkippedSchema,
+} from './media.js';
 
 export const EVENT_PREFIX = 'JM_EVENT ';
 /** One part of an event too large for a single `JM_EVENT ` line. */
@@ -238,7 +244,14 @@ export const DropPayloadSchema = z.discriminatedUnion('role', [
   z.object({ ...dropPayloadBase, role: z.literal('resolve'), pr: PrRefSchema }),
   z.strictObject({ ...crewPayloadBase, role: z.literal('crew-lead') }),
   z.strictObject({ ...crewPayloadBase, role: z.literal('refute') }),
-  z.strictObject({ ...crewPayloadBase, role: z.literal('triage') }),
+  z.strictObject({
+    ...crewPayloadBase,
+    role: z.literal('triage'),
+    /** The issue's images, fetched and checked by the server (0..4), each checked again here. */
+    images: z.array(TriageImageSchema).max(MAX_TRIAGE_IMAGES).optional(),
+    /** One entry per image URL that was not fetched, with a short reason. */
+    imagesSkipped: z.array(TriageImageSkippedSchema).max(MAX_TRIAGE_IMAGES_SKIPPED).optional(),
+  }),
   z.strictObject({
     ...crewPayloadBase,
     role: z.literal('diagnose'),
@@ -595,6 +608,7 @@ export const DropResultSchema = z.object({
 });
 export type DropResult = z.infer<typeof DropResultSchema>;
 export * from './egress.js';
+export * from './media.js';
 export {
   containsSecret,
   dropSecrets,

@@ -12,12 +12,14 @@ import {
 } from '../db/repo.js';
 import type { ZonePass } from '../flow/snapshot.js';
 import { getGoals } from '../goals.js';
-import type { ForgePair } from '../outbox.js';
+import { type ForgePair, unsanitizeForgeText } from '../outbox.js';
 import type { CrewInputJson } from '../payloads.js';
 import { dispatchGate, gateQueuesCrew } from '../usage.js';
 import { crewIssueSlots } from './actions.js';
 import { PROMOTE_OPTIONS, subjectOf } from './flush.js';
+import { fetchIssueImages, type ImageFetchOpts } from './images.js';
 import { crewLeadInput, diagnoseInput, refuteInput, triageInput } from './inputs.js';
+import { getTriageRequest } from './store.js';
 
 export type { CrewInputJson } from '../payloads.js';
 
@@ -174,7 +176,8 @@ const observeDetail = (w: CrewWork): string =>
  * Queues the zone's next crew drop, if any, with its rendered input. Runs only with the crew
  * enabled, the zone active (observe records `would_enqueue:<role>` instead), the kill switch off,
  * the usage gate open, no crew drop active, and the zone under `maxDropsPerDay`. The lead cycle also
- * needs a parsed GOAL.md. Attempts are counted here, at enqueue.
+ * needs a parsed GOAL.md. Attempts are counted here, at enqueue. With `images`, a triage drop
+ * also carries the issue's images, fetched and checked here (`crew/images.ts`).
  */
 export async function enqueueCrew(
   db: Db,
@@ -184,6 +187,7 @@ export async function enqueueCrew(
   versions: Record<Role, string>,
   usageCfg: UsageConfig,
   now: Date,
+  images?: ImageFetchOpts,
 ): Promise<string | null> {
   if (!zone.crew?.enabled || isKilled(db)) return null;
   const mode = getZoneMode(db, zone.id, zone.mode);
@@ -217,6 +221,14 @@ export async function enqueueCrew(
     return null;
   }
   const stored: CrewInputJson = { work, input };
+  if (work.role === 'triage' && images) {
+    // The issue's images, fetched here: the server has the network and the read token, the
+    // trooper's egress does not. A failure skips that image; it never stops the drop.
+    const req = getTriageRequest(db, work.requestId);
+    const found = await fetchIssueImages(unsanitizeForgeText(req?.body ?? ''), images);
+    stored.images = found.images;
+    stored.imagesSkipped = found.imagesSkipped;
+  }
   try {
     db.transaction(() => {
       if (work.role === 'diagnose') {

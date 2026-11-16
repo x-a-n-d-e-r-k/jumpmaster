@@ -13,7 +13,7 @@ import { ARTIFACT_PREFIX, type DropPayload, type GateResult } from '@jumpmaster/
 import { beforeEach, describe, expect, test } from 'vitest';
 import type { TrooperDeps } from './main.js';
 import type { RoleCtx } from './roles/shared.js';
-import { artifactLines, runVerification, sniffMediaType } from './verification.js';
+import { artifactLines, runVerification } from './verification.js';
 
 const PNG = Buffer.concat([
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
@@ -162,13 +162,4 @@ describe('artifactLines', () => {
     const whole = Buffer.concat(parts.map((p) => Buffer.from(p.data, 'base64')));
     expect(whole.equals(bytes)).toBe(true);
   });
-});
-
-test('sniffMediaType goes by content', () => {
-  expect(sniffMediaType(PNG)).toBe('image/png');
-  expect(sniffMediaType(Buffer.from([0xff, 0xd8, 0xff, 0xe0]))).toBe('image/jpeg');
-  expect(sniffMediaType(Buffer.from('RIFF0000WEBPVP8 '))).toBe('image/webp');
-  expect(sniffMediaType(Buffer.from('{"a":1}'))).toBe('application/json');
-  expect(sniffMediaType(Buffer.from('<svg onload=x>'))).toBeNull();
-  expect(sniffMediaType(Buffer.from('{broken'))).toBeNull();
 });

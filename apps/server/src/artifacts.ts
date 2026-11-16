@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { MAX_ARTIFACT_BYTES, MAX_ARTIFACTS } from '@jumpmaster/protocol';
+import { MAX_ARTIFACT_BYTES, MAX_ARTIFACTS, MEDIA_EXTENSIONS } from '@jumpmaster/protocol';
 import type { Db } from './db/open.js';
 
 export type ArtifactRow = {
@@ -15,12 +15,7 @@ export type ArtifactRow = {
   createdAt: string;
 };
 
-const EXTENSIONS: Record<string, string> = {
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/webp': 'webp',
-  'application/json': 'json',
-};
+const EXTENSIONS = MEDIA_EXTENSIONS;
 
 const COLUMNS = `id, drop_id AS dropId, rule, name, sha256, media_type AS mediaType, bytes,
   created_at AS createdAt`;

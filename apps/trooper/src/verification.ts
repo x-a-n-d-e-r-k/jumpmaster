@@ -6,7 +6,9 @@ import {
   type ItemDropPayload,
   MAX_ARTIFACT_BYTES,
   MAX_ARTIFACTS,
+  MEDIA_EXTENSIONS,
   pathMatches,
+  sniffMediaType,
 } from '@jumpmaster/protocol';
 import { scrubEnv } from './gates.js';
 import type { TrooperDeps } from './main.js';
@@ -23,29 +25,6 @@ export type ArtifactFile = {
 };
 
 const CHUNK_BYTES = 45 * 1024; // Base64 grows this to about 60 KiB, under the 64 KiB line limit.
-const EXTENSIONS: Record<string, string> = {
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/webp': 'webp',
-  'application/json': 'json',
-};
-
-/** The media type by content; an extension proves nothing. Null when it isn't an allowed type. */
-export function sniffMediaType(b: Buffer): string | null {
-  if (b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
-    return 'image/png';
-  }
-  if (b.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) return 'image/jpeg';
-  if (b.toString('latin1', 0, 4) === 'RIFF' && b.toString('latin1', 8, 12) === 'WEBP') {
-    return 'image/webp';
-  }
-  try {
-    const parsed: unknown = JSON.parse(b.toString('utf8'));
-    return typeof parsed === 'object' && parsed !== null ? 'application/json' : null;
-  } catch {
-    return null;
-  }
-}
 
 /** One artifact as stdout lines, each small enough to cross the container's log stream. */
 export function artifactLines(a: {
@@ -122,7 +101,7 @@ export async function runVerification(
       if (!bytes || !mediaType) continue;
       const sha256 = createHash('sha256').update(bytes).digest('hex');
       mkdirSync(outDir, { recursive: true, mode: 0o755 });
-      const path = join(outDir, `${sha256}.${EXTENSIONS[mediaType]}`);
+      const path = join(outDir, `${sha256}.${MEDIA_EXTENSIONS[mediaType]}`);
       writeFileSync(path, bytes, { mode: 0o644 });
       for (const line of artifactLines({ rule: rule.name, name, mediaType, sha256, bytes })) {
         deps.emit(line);

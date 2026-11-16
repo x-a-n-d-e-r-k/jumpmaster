@@ -58,6 +58,14 @@ And at the top level of the server config:
   crew issues under objective `triage:#N`, and go through refute and promotion like the lead's.
   On the original issue it leaves one comment and, for a split or not-agent-work, swaps
   `triageLabel` for `triagedLabel` (see the install runbook's "How Jumpmaster triages issues").
+- A triage drop gets the issue's images. The server fetches at most 4 image URLs from the
+  issue body, only GitHub attachments (`https://github.com/user-attachments/assets/…`,
+  `user-images.githubusercontent.com`, `private-user-images.githubusercontent.com`), over HTTPS,
+  10 s each, following at most 3 redirects and only to the two `githubusercontent.com` hosts.
+  The read token (`JM_GITHUB_READ_TOKEN`) goes to `github.com` only and never across a redirect.
+  Each image is at most 3 MiB (8 MiB in all) and must be PNG, JPEG, GIF or WebP by its bytes;
+  anything else is skipped with a short reason and the drop still runs. The agent reads them as
+  `inputs/image-<n>.<ext>` in the trooper's work directory, as data like the issue text.
 - `maxDropsPerDay` counts crew drops (crew-lead, refute, diagnose, triage) over a trailing 24 hours,
   including failed and killed ones but not rate-limited or lost ones.
   Each ruling on a crew briefing starts a new crew-lead cycle, so a busy day can hit the cap; crew
