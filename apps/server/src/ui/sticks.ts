@@ -183,7 +183,7 @@ function addForm(publicUrl: string | undefined): string {
   const body = publicUrl
     ? `<form id="add-stick">${fields}${SUDO_FIELD}<p><button class="primary">Add a stick</button> <output id="add-out" aria-live="polite"></output></p></form>`
     : `<p class="warn"><a href="${PUBLIC_URL_PAGE}">${PUBLIC_URL_NEEDED}</a> to add a stick: the new machine downloads it from that address.</p>${SUDO_FIELD}`;
-  return `<h3>Add a stick</h3><p>One line pasted on a Linux machine (x86_64 or aarch64) that reaches this server, such as a VPS on your tailnet, installs a stick and enrolls it.</p>${body}`;
+  return `<h3>Add a stick</h3><p>One line pasted on a Linux machine (x86_64 or aarch64) or a Mac with Docker Desktop that reaches this server, such as a VPS on your tailnet, installs a stick and enrolls it.</p>${body}`;
 }
 
 /** The result page (issue #138): the code's only showing, in the line and the cloud-init. */

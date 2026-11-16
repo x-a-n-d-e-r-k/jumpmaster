@@ -111,7 +111,7 @@ const STUBS: Record<string, string> = {
 case $1 in -s) echo "\${UNAME_S:-Linux}" ;; -m) echo "\${UNAME_M:-x86_64}" ;; esac
 `,
   id: `#!/bin/sh
-echo 0
+echo "\${ID_U:-0}"
 `,
   curl: `#!/bin/sh
 echo "curl $*" >>"$LOG"
@@ -135,12 +135,28 @@ echo "docker $*" >>"$LOG"
 case "$1 $2" in
   "container inspect") [ -n "\${EXISTS:-}" ] && exit 0; exit 1 ;;
   "volume create") exit 0 ;;
-  "volume inspect") echo "$VOLDIR"; exit 0 ;;
+  "volume inspect") if [ -n "\${VOLDIR_HIDDEN:-}" ]; then echo /var/lib/docker/volumes/jm-stick/_data; else echo "$VOLDIR"; fi; exit 0 ;;
   "volume rm") exit 0 ;;
   "image inspect") [ -n "\${IMAGE_ID:-}" ] || { echo "Error: No such image: $5" >&2; exit 1; }; echo "$IMAGE_ID"; exit 0 ;;
   "image rm") exit 0 ;;
 esac
+if [ "$1" = run ]; then
+  case " $* " in
+    *" /cosign "*)
+      while [ "$1" != /cosign ]; do shift; done
+      shift
+      exec "$WORK/imported/cosign" "$@" ;;
+    *" --entrypoint sh "*"/state "*)
+      cat >"$VOLDIR/enroll_code"
+      chmod 600 "$VOLDIR/enroll_code"
+      exit 0 ;;
+    *" --entrypoint rm "*)
+      rm -f "$VOLDIR/enroll_code"
+      exit 0 ;;
+  esac
+fi
 case $1 in
+  import) mkdir -p "$WORK/imported"; tar -xf - -C "$WORK/imported"; echo sha256:imported ;;
   load) cp "$3" "$WORK/loaded.tar"; echo "Loaded image: \${LOADED:-}" ;;
   tag) ;;
   run) echo "mode $(stat -c %a "$VOLDIR/enroll_code" 2>/dev/null || stat -f %Lp "$VOLDIR/enroll_code") $(cat "$VOLDIR/enroll_code")" >>"$LOG" ;;
@@ -257,11 +273,11 @@ describe('the installer script', () => {
     expect(r.status).toBe(0);
   });
 
-  test('refuses anything but Linux on x86_64 or aarch64, with a message', () => {
+  test('refuses anything but Linux or macOS on x86_64 or aarch64, with a message', () => {
     const w = world();
-    const mac = w.run([CODE], { UNAME_S: 'Darwin' });
-    expect(mac.status).toBe(1);
-    expect(mac.stderr).toContain('Linux only, not Darwin');
+    const bsd = w.run([CODE], { UNAME_S: 'FreeBSD' });
+    expect(bsd.status).toBe(1);
+    expect(bsd.stderr).toContain('Linux or macOS (Docker Desktop) only, not FreeBSD');
     const riscv = w.run([CODE], { UNAME_M: 'riscv64' });
     expect(riscv.status).toBe(1);
     expect(riscv.stderr).toContain('x86_64 or aarch64, not riscv64');
@@ -333,6 +349,76 @@ describe('the installer script', () => {
     ]);
     expect(lines).toContain(`docker image inspect -f {{.Id}} ${STICK_REF}`);
     expect(r.log).not.toContain('docker image rm');
+  });
+
+  describe('on macOS with Docker Desktop', () => {
+    const MAC = { UNAME_S: 'Darwin', UNAME_M: 'arm64', ID_U: '501', VOLDIR_HIDDEN: '1' };
+
+    test('installs as the user, not root: cosign runs in a container with no network, the code goes in through stdin, the stick runs linux/arm64', () => {
+      const w = world();
+      const r = w.run([CODE], MAC);
+      expect(r.stderr).toBe('');
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('Enrolled as vps-1. Back to your browser.');
+      const lines = r.log.split('\n');
+      expect(r.log).toContain('platform=linux/arm64');
+      // The pinned Linux cosign is imported as a one-file image and run with no network, the
+      // work directory mounted at the same path; the image goes once verification is done.
+      const imp = lines.findIndex((l) => l.startsWith('docker import - '));
+      const runCosign = lines.findIndex(
+        (l) => l.startsWith('docker run ') && l.includes(' /cosign '),
+      );
+      const verify = lines.findIndex((l) =>
+        l.startsWith('cosign verify-blob-attestation --bundle '),
+      );
+      const loaded = lines.findIndex((l) => l.startsWith('docker load'));
+      expect(imp).toBeGreaterThanOrEqual(0);
+      expect(runCosign).toBeGreaterThan(imp);
+      expect(lines[runCosign]).toContain('--network none');
+      expect(lines[runCosign]).toMatch(new RegExp(`-v (${w.work}/tmp\\.\\w+):\\1 `));
+      expect(verify).toBeGreaterThan(runCosign);
+      expect(loaded).toBeGreaterThan(verify);
+      expect(lines.some((l) => l.startsWith('docker image rm jm-install-cosign'))).toBe(true);
+      // The volume's Mountpoint is inside Docker Desktop's VM: the code is written by a
+      // container, read from stdin, never on a command line, 0600, and removed once enrolled.
+      expect(r.log).toContain(`mode 600 ${CODE}`);
+      for (const l of lines.filter((l) => l.startsWith('docker '))) expect(l).not.toContain(CODE);
+      expect(existsSync(join(w.voldir, 'enroll_code'))).toBe(false);
+      const stick = lines.find((l) => l.startsWith('docker run -d ')) ?? '';
+      expect(stick).toContain('-v /var/run/docker.sock:/var/run/docker.sock');
+      expect(stick).toContain('-e JM_IMAGE_POLICY=signed');
+    });
+
+    test('without Docker it points at Docker Desktop and never runs get.docker.com, even with --yes', () => {
+      const w = world({ docker: false });
+      const r = w.run(['--yes', CODE], MAC);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('Docker Desktop');
+      expect(r.log).not.toContain('get.docker.com');
+    });
+
+    test('a failed enrollment removes the code from the volume through a container', () => {
+      const w = world();
+      const r = w.run([CODE], { ...MAC, ENROLL_FAIL: '1' });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('could not enroll');
+      expect(existsSync(join(w.voldir, 'enroll_code'))).toBe(false);
+    });
+  });
+
+  test('on Linux a volume with no directory on this host (rootless Docker) gets the code through a container too', () => {
+    const w = world();
+    const r = w.run([CODE], { VOLDIR_HIDDEN: '1' });
+    expect(r.status).toBe(0);
+    expect(r.log).toContain(`mode 600 ${CODE}`);
+    expect(existsSync(join(w.voldir, 'enroll_code'))).toBe(false);
+  });
+
+  test('Linux still requires root', () => {
+    const w = world();
+    const r = w.run([CODE], { ID_U: '1000' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('run it as root');
   });
 
   describe('what it loads: a sparse index named by its digest, this platform alone (issue #168)', () => {
