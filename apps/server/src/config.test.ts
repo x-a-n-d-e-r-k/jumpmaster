@@ -504,6 +504,25 @@ describe('crew config', () => {
     ).toThrow(/stagedLabel/);
   });
 
+  test('triageLabel defaults to jm-triage and triage.gate to true', () => {
+    const z = loadConfig(withZone({}), fullEnv).dropZones[0];
+    expect(z?.triageLabel).toBe('jm-triage');
+    expect(z?.triage).toEqual({ gate: true });
+  });
+
+  test('triageLabel equal to readyLabel, retryLabel or crew.stagedLabel is a config error', () => {
+    expect(() => loadConfig(withZone({ triageLabel: 'agent-ready' }), fullEnv)).toThrow(
+      /triageLabel must differ from readyLabel/,
+    );
+    expect(() => loadConfig(withZone({ triageLabel: 'agent-retry' }), fullEnv)).toThrow(
+      /triageLabel must differ from retryLabel/,
+    );
+    expect(() => loadConfig(withZone({ triageLabel: 'agent-staged' }), fullEnv)).toThrow(
+      /triageLabel must differ from crew\.stagedLabel/,
+    );
+    expect(() => loadConfig(withZone({ triageLabel: 'needs-shape' }), fullEnv)).not.toThrow();
+  });
+
   test('the ultra plan parses, a bogus plan is refused, and a stored max config loads unchanged (#144)', () => {
     const withPlan = (plan: string) =>
       fixture({ dataDir: './data', dropZones: [baseZone], claude: { plan } });
@@ -1306,6 +1325,8 @@ describe('githubApp (spec §4.2: installation and repository ids, not secret)', 
       ciRequired: true,
       ciDeadlineMinutes: 45,
       retryLabel: 'agent-retry',
+      triageLabel: 'jm-triage',
+      triage: { gate: true },
       mergeMethod: 'squash',
       requireBranchProtection: true,
       authorMayBeAdmin: false,
