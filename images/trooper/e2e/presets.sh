@@ -65,6 +65,12 @@ expect 'node as agent' "$NODE_OK" "$(tr '\n' ' ' <<<"$out")"
 TOOLS='echo "jq=$(printf "{\"a\":1}" | jq -c .a)" && ps -o pid= -p $$ >/dev/null && echo ps-ok'
 out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper:dev -c "$TOOLS" 2>&1 || true)"
 expect 'jq and ps as agent' 'jq=1.*ps-ok' "$(tr '\n' ' ' <<<"$out")"
+# A native addon builds the way npm builds any package with a binding.gyp (node-gyp rebuild),
+# with no network: the toolchain is in the image and node-gyp uses the image's own headers.
+# shellcheck disable=SC2016 # expanded by the container's sh
+GYP='d="$(mktemp -d)" && cd "$d" && printf "{\"targets\":[{\"target_name\":\"hello\",\"sources\":[\"hello.c\"]}]}" > binding.gyp && printf "#include <node_api.h>\nstatic napi_value Init(napi_env env, napi_value exports) { return exports; }\nNAPI_MODULE(NODE_GYP_MODULE_NAME, Init)\n" > hello.c && node /usr/local/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js rebuild >/dev/null 2>&1 && node -e "require(\"./build/Release/hello.node\"); console.log(\"gyp-ok\")"'
+out="$(docker run --rm "${HARDEN[@]}" --network none --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper:dev -c "$GYP" 2>&1 || true)"
+expect 'native addon offline as agent' 'gyp-ok' "$(tr '\n' ' ' <<<"$out")"
 out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-globalpnpm:dev -c "$GLOBAL" 2>&1 || true)"
 expect 'global pnpm as agent' "$GLOBAL_OK" "$(tr '\n' ' ' <<<"$out")"
 
