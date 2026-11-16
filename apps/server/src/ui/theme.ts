@@ -216,6 +216,14 @@ td>code:first-child{white-space:nowrap}
 .zone-card p.muted{margin:.75rem 0 0}.zone-card a.muted{color:var(--text-sub-600);font-weight:400}
 details.sticks{margin:0 0 1.5rem}
 details.sticks>summary{cursor:pointer;font-weight:500}
-details.sticks[open]>summary{margin-bottom:.75rem}`;
+details.sticks[open]>summary{margin-bottom:.75rem}
+.transcript{margin:0 0 1.5rem}
+.transcript details>summary{cursor:pointer;color:var(--text-sub-600)}
+.transcript pre{background:var(--bg-weak-50);border-radius:8px;padding:.5rem .625rem}
+.t-text p{white-space:pre-wrap;overflow-wrap:anywhere}
+.t-tool,.t-gate,.t-end{margin:.5rem 0;overflow-wrap:anywhere}
+.t-phase{border-top:1px solid var(--stroke-soft-200);margin:1rem 0 .5rem;padding-top:.25rem;font-size:.75rem;color:var(--text-sub-600);text-transform:uppercase}
+.t-cut{font-size:.75rem;color:var(--state-warning-base,#b45309)}
+details.raw-events>summary{cursor:pointer;font-weight:500;margin:0 0 .75rem}`;
 
 export const STYLE = TOKENS + BASE + SHELL + FLOOR;

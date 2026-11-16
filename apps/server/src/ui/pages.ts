@@ -1116,6 +1116,120 @@ function egressSection(events: StoredEvent[]): string {
   return `<h3>Egress</h3><table><tr><th>Host</th><th>Decision</th><th>Connections</th></tr>${rows}</table>`;
 }
 
+/** A tool result shows this many characters; the rest is stated, not shown. */
+const RESULT_CHARS = 4000;
+/** A tool call's one-line summary falls back to this much of its input JSON. */
+const INPUT_SUMMARY_CHARS = 200;
+/** The trooper's per-event cap (`MAX_EVENT_DATA_BYTES` in apps/trooper/src/events.ts). */
+const CUT_MARKER = '<p class="t-cut">cut when stored (over 63 KB)</p>';
+
+type Json = Record<string, unknown>;
+const isObj = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v);
+const seconds = (ms: unknown): string | null =>
+  typeof ms === 'number' && Number.isFinite(ms) ? `${(ms / 1000).toFixed(1)} s` : null;
+
+/** One collapsed raw-JSON line: how a shape the transcript does not know is still shown. */
+const rawLine = (label: string, v: unknown): string =>
+  `<details class="t-raw"><summary>${escapeHtml(label)}</summary><pre>${escapeHtml(JSON.stringify(v) ?? String(v))}</pre></details>`;
+
+function toolUse(b: Json): string {
+  const fields = isObj(b.input) ? b.input : {};
+  const named = [fields.file_path, fields.command, fields.pattern].find(
+    (v): v is string => typeof v === 'string',
+  );
+  const json = JSON.stringify(b.input ?? null);
+  const summary = named ?? json.slice(0, INPUT_SUMMARY_CHARS);
+  return `<div class="t-tool"><b>${escapeHtml(b.name ?? 'tool')}</b> ${escapeHtml(summary)}<details><summary>input</summary><pre>${escapeHtml(json)}</pre></details></div>`;
+}
+
+function resultText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (content === undefined) return '';
+  if (!Array.isArray(content)) return JSON.stringify(content);
+  return content
+    .map((c) =>
+      isObj(c) && c.type === 'text' && typeof c.text === 'string' ? c.text : JSON.stringify(c),
+    )
+    .join('\n');
+}
+
+function toolResult(b: Json): string {
+  const text = resultText(b.content);
+  const cut = text.length > RESULT_CHARS;
+  const note = cut
+    ? `<p><small>First ${RESULT_CHARS} of ${text.length} characters.</small></p>`
+    : '';
+  return `<details class="t-result"><summary>${b.is_error === true ? 'error' : 'result'}</summary><pre>${escapeHtml(cut ? text.slice(0, RESULT_CHARS) : text)}</pre>${note}</details>`;
+}
+
+const runEnd = (parts: unknown[]): string => {
+  const shown = parts.filter((p) => p !== null && p !== undefined && p !== '').map(String);
+  return `<p class="t-end">Run ended: ${escapeHtml(shown.join(', ') || 'no details')}</p>`;
+};
+
+/** A stream-json line (an `agent` event's `raw`) as transcript blocks. */
+function agentRaw(raw: unknown): string {
+  if (!isObj(raw)) return rawLine('agent', raw);
+  const type = raw.type;
+  if (type === 'result') {
+    return runEnd([
+      raw.subtype,
+      seconds(raw.duration_ms),
+      typeof raw.num_turns === 'number' ? `${raw.num_turns} turns` : null,
+      typeof raw.total_cost_usd === 'number' ? `$${raw.total_cost_usd}` : null,
+    ]);
+  }
+  const content = isObj(raw.message) ? raw.message.content : undefined;
+  if ((type !== 'assistant' && type !== 'user') || !Array.isArray(content)) {
+    return rawLine(`agent: ${String(type)}`, raw);
+  }
+  return content
+    .map((b) => {
+      if (isObj(b) && type === 'assistant' && b.type === 'text') {
+        return `<div class="t-text"><b>Claude</b><p>${escapeHtml(b.text)}</p></div>`;
+      }
+      if (isObj(b) && type === 'assistant' && b.type === 'tool_use') return toolUse(b);
+      if (isObj(b) && type === 'user' && b.type === 'tool_result') return toolResult(b);
+      return rawLine(`${type}: ${String(isObj(b) ? b.type : typeof b)}`, b);
+    })
+    .join('');
+}
+
+function transcriptEvent(e: StoredEvent): string {
+  const d = e.data;
+  let body: string;
+  if (e.kind === 'phase' && typeof d.phase === 'string') {
+    body = `<div class="t-phase">${escapeHtml(d.phase)}</div>`;
+  } else if (e.kind === 'gate') {
+    const parts = [
+      `exit ${String(d.exitCode ?? '-')}`,
+      seconds(d.durationMs),
+      d.timedOut === true ? 'timed out' : null,
+    ].filter((p) => p !== null);
+    body = `<div class="t-gate">Gate <b>${escapeHtml(d.name ?? '-')}</b>: ${escapeHtml(parts.join(', '))}<details><summary>output</summary><pre>${escapeHtml(d.outputTail ?? '')}</pre></details></div>`;
+  } else if (e.kind === 'agent' && 'raw' in d) {
+    body = agentRaw(d.raw);
+  } else if (e.kind === 'agent' && d.result === true) {
+    // The trooper stores the stream's result line as this summary, not as `raw`.
+    body = runEnd([d.isError === true ? 'error' : null, d.terminalReason]);
+  } else {
+    body = rawLine(e.kind, d);
+  }
+  return body + (d.truncated === true ? CUT_MARKER : '');
+}
+
+/** The drop's stored events as a readable transcript, in seq order. Every field is escaped. */
+export function transcriptSection(events: readonly StoredEvent[]): string {
+  const sorted = [...events].sort((a, b) => a.seq - b.seq);
+  const note =
+    sorted.length === 0
+      ? '<p>No events recorded.</p>'
+      : sorted.some((e) => e.kind === 'agent')
+        ? ''
+        : '<p>No agent transcript in this drop.</p>';
+  return `<section class="transcript"><h3>Transcript</h3>${note}${sorted.map(transcriptEvent).join('')}</section>`;
+}
+
 export function renderDrop(
   drop: Drop,
   events: StoredEvent[],
@@ -1131,7 +1245,8 @@ export function renderDrop(
     `<p><a href="/">Back</a></p><h2>Drop ${escapeHtml(drop.id)}</h2><p>State: ${escapeHtml(drop.state)}</p>` +
       modelLines(drop) +
       egressSection(events) +
-      `<table><tr><th>Seq</th><th>Time</th><th>Kind</th><th>Data</th></tr>${rows}</table>` +
+      transcriptSection(events) +
+      `<details class="raw-events"><summary>Raw events (${events.length})</summary><table><tr><th>Seq</th><th>Time</th><th>Kind</th><th>Data</th></tr>${rows}</table></details>` +
       artifactsSection(artifacts),
   );
 }
