@@ -810,3 +810,13 @@ describe('images.yml', () => {
     }
   });
 });
+
+// `ctl briefings` prints readable text since #226 (no `200 {json}` line): on a fresh server it
+// says nothing is waiting, and a wrong token still answers `401 …`. The smoke scripts expect that.
+test('the smoke scripts expect the text form of ctl briefings', () => {
+  for (const f of ['images/smoke.sh', 'deploy/smoke.sh']) {
+    const text = read(f);
+    expect(text, f).not.toMatch(/ctl briefings answered/);
+    expect(text, f).toContain("'nothing is waiting on you'");
+  }
+});
