@@ -323,7 +323,9 @@ describe('crew prompts', () => {
       const t = read(role);
       expect(t, role).toMatch(/reader without context/i);
       expect(t, role).toMatch(/every issue by `#number` and title/);
-      expect(t, role).toMatch(/explain any plan term \("Task 5", an objective key\) in one clause/i);
+      expect(t, role).toMatch(
+        /explain any plan term \("Task 5", an objective key\) in one clause/i,
+      );
       expect(t, role).toMatch(/rulings by number with what they decided/i);
     }
     expect(read('crew-lead')).toMatch(/each option label say what changes/i);

@@ -19,7 +19,14 @@ import {
   verifyPassphrase,
 } from '../auth/operator.js';
 import { grantSudo } from '../auth/sessions.js';
-import { dismissZoneBriefings, listBriefings, optionsDigest, ruleBriefing } from '../briefings.js';
+import {
+  briefingContext,
+  dismissZoneBriefings,
+  effectText,
+  listBriefings,
+  optionsDigest,
+  ruleBriefing,
+} from '../briefings.js';
 import { mergeConfigPatch, mergePatch } from '../config/diff.js';
 import { configReader, type LiveConfig, statusOf } from '../config/source.js';
 import { type ApplyResult, ConfigStore } from '../config/store.js';
@@ -514,17 +521,30 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
     );
 
     // Open briefings with their option ids, for `ctl rule` without the UI.
-    scope.get('/api/control/briefings', async () => ({
-      briefings: listBriefings(db, { state: 'open' }).map((b) => ({
-        id: b.id,
-        zone: b.zoneId,
-        kind: b.kind,
-        subject: b.subject,
-        decision: b.decision,
-        options: b.options.map((o) => ({ id: o.id, label: o.label })),
-        optionsDigest: optionsDigest(b),
-      })),
-    }));
+    // With what each is about, the evidence and what each option does (#226): it reads on its own.
+    scope.get('/api/control/briefings', async (req) => {
+      const open = listBriefings(db, { state: 'open' });
+      const { about } = briefingContext(db, cfg(req).dropZones, open);
+      return {
+        briefings: open.map((b) => ({
+          id: b.id,
+          zone: b.zoneId,
+          kind: b.kind,
+          subject: b.subject,
+          decision: b.decision,
+          options: b.options.map((o) => ({
+            id: o.id,
+            label: o.label,
+            effectText: effectText(b.kind, o.effect),
+          })),
+          optionsDigest: optionsDigest(b),
+          about: about.get(b.id) ?? { text: b.subject },
+          why: b.why,
+          recommendation: b.recommendation,
+          onHold: b.onHold,
+        })),
+      };
+    });
 
     scope.post<{ Params: { id: string } }>(
       '/api/control/briefings/:id/rule',
