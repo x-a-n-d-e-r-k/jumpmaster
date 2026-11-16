@@ -36,7 +36,7 @@ on:
       server:
         value: ${{ jobs.apps-index.outputs.server }}
       stick:
-        value: ${{ jobs.apps-index.outputs.stick }}
+        value: ${{ jobs.stick-index.outputs.stick }}
 
 jobs:
   target:
@@ -221,10 +221,107 @@ jobs:
           GROUP: troopers
         run: scripts/release-index.sh
 
-  # The same, for the server (with the release's lock of index digests) and the stick (with the
-  # release's egress proxy index digest).
-  apps:
+  # The same, for the stick (with the release's egress proxy and trooper index digests). It is
+  # built and indexed before the server, whose lock names the stick's index digest: the server
+  # mirrors it for the one-line installer (issue #138), so the lock must know it.
+  stick:
     needs: [target, troopers-index]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    services:
+      registry:
+        image: registry:3.1.1@sha256:325b4b29b041e82803abeb703e201655e4e23ab83264ec1a7c9ddb0a5b14a6e0
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Log in to GHCR
+        if: inputs.release
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host
+      # The stick trusts this repository's release workflow and runs this release's egress proxy
+      # and trooper (its own init, self-check and push containers).
+      - id: stick
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/stick/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+            RELEASE_REPOSITORY=${{ github.repository }}
+            RELEASE_VERSION=${{ needs.target.outputs.version }}
+            EGRESS_IMAGE=${{ needs.target.outputs.registry }}/jumpmaster-egress@${{ needs.troopers-index.outputs.egress }}
+            TROOPER_IMAGE=${{ needs.target.outputs.registry }}/jumpmaster-trooper@${{ needs.troopers-index.outputs.trooper }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ needs.target.outputs.registry }}/jumpmaster-stick,push-by-digest=true,name-canonical=true,push=true
+      - name: Record this arch's digests
+        env:
+          ARCH: ${{ matrix.arch }}
+          STICK: ${{ steps.stick.outputs.digest }}
+        run: |
+          mkdir -p digests
+          jq -n --arg k "$STICK" '{"jumpmaster-stick": $k}' > "digests/stick-$ARCH.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digests-stick-${{ matrix.arch }}
+          path: digests/
+          if-no-files-found: error
+          retention-days: 1
+
+  stick-index:
+    needs: [target, stick]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      stick: ${{ steps.index.outputs.jumpmaster-stick }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: digests-stick-*
+          path: digests
+          merge-multiple: true
+      - name: Log in to GHCR
+        if: inputs.release
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - id: index
+        name: Join each image's amd64 and arm64 digests into one index
+        env:
+          RELEASE: ${{ inputs.release }}
+          REGISTRY: ${{ needs.target.outputs.registry }}
+          VERSION: ${{ needs.target.outputs.version }}
+          GROUP: stick
+        run: scripts/release-index.sh
+
+  # The same, for the server, with the release's lock of index digests: the zone images it may
+  # resolve a preset to, the egress proxy and the stick it mirrors for the installer.
+  apps:
+    needs: [target, troopers-index, stick-index]
     strategy:
       fail-fast: true
       matrix:
@@ -260,9 +357,10 @@ jobs:
           GO: ${{ needs.troopers-index.outputs.go }}
           JVM: ${{ needs.troopers-index.outputs.jvm }}
           EGRESS: ${{ needs.troopers-index.outputs.egress }}
+          STICK: ${{ needs.stick-index.outputs.stick }}
         run: |
-          lock="$(jq -cn --arg r "$REGISTRY" --arg t "$TROOPER" --arg p "$PYTHON" --arg g "$GO" --arg j "$JVM" --arg e "$EGRESS" \
-            '{registry: $r, images: {"jumpmaster-trooper": $t, "jumpmaster-trooper-python": $p, "jumpmaster-trooper-go": $g, "jumpmaster-trooper-jvm": $j, "jumpmaster-egress": $e}}')"
+          lock="$(jq -cn --arg r "$REGISTRY" --arg t "$TROOPER" --arg p "$PYTHON" --arg g "$GO" --arg j "$JVM" --arg e "$EGRESS" --arg k "$STICK" \
+            '{registry: $r, images: {"jumpmaster-trooper": $t, "jumpmaster-trooper-python": $p, "jumpmaster-trooper-go": $g, "jumpmaster-trooper-jvm": $j, "jumpmaster-egress": $e, "jumpmaster-stick": $k}}')"
           echo "lock=$lock" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
@@ -282,34 +380,13 @@ jobs:
           provenance: mode=max
           sbom: true
           outputs: type=image,name=${{ needs.target.outputs.registry }}/jumpmaster-server,push-by-digest=true,name-canonical=true,push=true
-      # The stick trusts this repository's release workflow and runs this release's egress proxy
-      # and trooper (its own init, self-check and push containers).
-      - id: stick
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: images/stick/Dockerfile
-          platforms: linux/${{ matrix.arch }}
-          build-args: |
-            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
-            RELEASE_REPOSITORY=${{ github.repository }}
-            RELEASE_VERSION=${{ needs.target.outputs.version }}
-            EGRESS_IMAGE=${{ needs.target.outputs.registry }}/jumpmaster-egress@${{ needs.troopers-index.outputs.egress }}
-            TROOPER_IMAGE=${{ needs.target.outputs.registry }}/jumpmaster-trooper@${{ needs.troopers-index.outputs.trooper }}
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-          provenance: mode=max
-          sbom: true
-          outputs: type=image,name=${{ needs.target.outputs.registry }}/jumpmaster-stick,push-by-digest=true,name-canonical=true,push=true
       - name: Record this arch's digests
         env:
           ARCH: ${{ matrix.arch }}
           SERVER: ${{ steps.server.outputs.digest }}
-          STICK: ${{ steps.stick.outputs.digest }}
         run: |
           mkdir -p digests
-          jq -n --arg s "$SERVER" --arg k "$STICK" '{"jumpmaster-server": $s, "jumpmaster-stick": $k}' \
-            > "digests/apps-$ARCH.json"
+          jq -n --arg s "$SERVER" '{"jumpmaster-server": $s}' > "digests/apps-$ARCH.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: digests-apps-${{ matrix.arch }}
@@ -323,7 +400,6 @@ jobs:
     timeout-minutes: 15
     outputs:
       server: ${{ steps.index.outputs.jumpmaster-server }}
-      stick: ${{ steps.index.outputs.jumpmaster-stick }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

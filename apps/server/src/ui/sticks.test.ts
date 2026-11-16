@@ -97,3 +97,36 @@ describe('image downloads on /sticks (issue #141)', () => {
     expect(html).not.toContain('fetching ');
   });
 });
+
+describe('a stick starting up on /sticks (issue #157)', () => {
+  const row = {
+    id: 's1',
+    name: 'vps-1',
+    version: '0.4.0',
+    lastSeenAt: t0.toISOString(),
+    capabilities: [],
+    imagePolicy: 'signed',
+    cannotRun: [],
+    slots: 1,
+    maxSlots: 4,
+    reported: true,
+    running: 0,
+  };
+
+  test('while the report is present the row shows the starting line, and polls', () => {
+    const html = renderSticks({
+      sticks: [{ ...row, starting: { image: `ghcr.io/o/jumpmaster-trooper@${digest}` } }],
+      zones: [],
+      now: t0,
+    });
+    expect(html).toContain('starting: checking the trooper image jumpmaster-trooper');
+    expect(html).toContain('<span class="stage">Starting</span>');
+    expect(html).toContain('data-poll data-stick="s1"');
+  });
+
+  test('once the report is cleared the line is gone and the stick is live', () => {
+    const html = renderSticks({ sticks: [row], zones: [], now: t0 });
+    expect(html).not.toContain('starting: checking');
+    expect(html).toContain('<span class="stage">Live</span>');
+  });
+});

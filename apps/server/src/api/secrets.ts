@@ -210,7 +210,11 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
       const running = runningSince(db, stored.meta.createdAt);
       return {
         fingerprint,
-        tested: true,
+        // Only a check against the provider (GitHub) is a test; a Claude token's form is not.
+        tested: t.live === true,
+        result: t.result,
+        ...(t.login ? { login: t.login } : {}),
+        setAt: stored.meta.createdAt,
         problems: store.problems(),
         runningDropsWithPrevious: running,
         // A pass in flight keeps the forge pair it started with until it ends.

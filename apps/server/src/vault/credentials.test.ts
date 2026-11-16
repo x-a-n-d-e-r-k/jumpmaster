@@ -319,7 +319,7 @@ describe('testing a credential on entry', () => {
   test('a forge token is tested for its login and against every zone', async () => {
     const f = forgeFake({});
     const r = await testCredential('githubAuthorToken', AUTHOR, { zones, forge: f.forge });
-    expect(r).toEqual({ ok: true, result: 'ok', login: 'author-bot' });
+    expect(r).toEqual({ ok: true, result: 'ok', login: 'author-bot', live: true });
     expect(f.calls).toEqual(['login octo/web', 'access octo/web', 'access octo/api']);
     // The read token: its login only.
     const g = forgeFake({});

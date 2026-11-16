@@ -1,13 +1,20 @@
 // The stick installer (issue #138), run with `sh` against stubbed uname, id, docker, curl and
-// cosign on a PATH of its own, and the cloud-init snippet.
+// cosign on a PATH of its own, and the cloud-init snippet. The image download is a layout built
+// like the server's around the real rc.2 signature (apps/stick/src/fixtures/rc2-stick); cosign is
+// a fake that checks its exact arguments, or the real cosign v3.1.4 when COSIGN_BIN is set (issue
+// #167). The rc.2 fixtures lack the platform blobs, so tests that load use a synthetic signed
+// image laid out the same way (issue #168); the signature parity tests use the rc.2 index.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -15,6 +22,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { load } from 'js-yaml';
 import { describe, expect, test } from 'vitest';
+import { bindLayout, loadIndexJson, loadTar } from '../../../stick/src/fetch-image.js';
+import {
+  fakeCosignScript,
+  PINNED_ROOT,
+  platformImage,
+  RC2_INDEX,
+  RC2_REPOSITORY,
+  type Rc2Case,
+  rc2Layout,
+} from '../../../stick/src/test/rc2.js';
+import {
+  execCosign,
+  releaseSigner,
+  identityRegexp as stickIdentityRegexp,
+  verifyLayout,
+} from '../../../stick/src/verify.js';
 import {
   COSIGN_SHA256,
   cloudInit,
@@ -25,7 +48,16 @@ import {
 } from './stick-sh.js';
 
 const SERVER = 'https://jm.tail1234.ts.net';
-const DIGEST = `sha256:${'d'.repeat(64)}`;
+/** The stick image the tests load: synthetic, signed (as far as the fake cosign knows). */
+const IMAGE = platformImage();
+const DIGEST = IMAGE.digest;
+const REPO = RC2_REPOSITORY;
+const STICK_NAME = 'ghcr.io/x-a-n-d-e-r-k/jumpmaster-stick';
+const STICK_REF = `${STICK_NAME}@${DIGEST}`;
+/** The real cosign v3.1.4, when the environment has one (CLAIM = PROOF). */
+const COSIGN_BIN = process.env.COSIGN_BIN ?? '';
+const fileSha = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex');
+const ROOT_SHA = fileSha(PINNED_ROOT);
 const CODE = `jm_enroll_${'C'.repeat(43)}`;
 
 /** Real tools the script uses; docker, curl, uname, id and cosign are stubs. */
@@ -47,6 +79,11 @@ const TOOLS = [
   'sleep',
   'stat',
   'cp',
+  'tr',
+  'ls',
+  'timeout',
+  'ln',
+  'wc',
 ];
 
 const which = (cmd: string): string => {
@@ -56,11 +93,18 @@ const which = (cmd: string): string => {
   return path;
 };
 
-const COSIGN_STUB = `#!/bin/sh
-echo "cosign $*" >>"$LOG"
-if [ -n "\${COSIGN_FAIL:-}" ]; then echo 'Error: no matching signatures' >&2; exit 1; fi
-printf '[{"critical":{"image":{"docker-manifest-digest":"%s"}}}]\\n' "$SIGNED_DIGEST"
-`;
+const COSIGN_STUB = fakeCosignScript({
+  rootSha256: ROOT_SHA,
+  identityRegexp: stickIdentityRegexp(REPO),
+  repository: REPO,
+  signedIndex: IMAGE.index,
+});
+const RC2_COSIGN_STUB = fakeCosignScript({
+  rootSha256: ROOT_SHA,
+  identityRegexp: stickIdentityRegexp(REPO),
+  repository: REPO,
+  signedIndex: RC2_INDEX,
+});
 
 const STUBS: Record<string, string> = {
   uname: `#!/bin/sh
@@ -80,7 +124,8 @@ for a in "$@"; do
 done
 case $url in
   *get.docker.com*) printf '#!/bin/sh\\nexit 0\\n' >"$out" ;;
-  */install/cosign*) cp "$WORK/cosign-stub" "$out" ;;
+  */install/cosign*) [ -e "$WORK/no-cosign" ] && exit 22; cp "$WORK/cosign-stub" "$out" ;;
+  */install/trusted-root.json*) cp "$WORK/trusted_root.json" "$out" ;;
   */install/stick-image.tar*) cp "$WORK/stick.tar" "$out" ;;
   *) exit 22 ;;
 esac
@@ -92,9 +137,11 @@ case "$1 $2" in
   "volume create") exit 0 ;;
   "volume inspect") echo "$VOLDIR"; exit 0 ;;
   "volume rm") exit 0 ;;
+  "image inspect") [ -n "\${IMAGE_ID:-}" ] || { echo "Error: No such image: $5" >&2; exit 1; }; echo "$IMAGE_ID"; exit 0 ;;
+  "image rm") exit 0 ;;
 esac
 case $1 in
-  load) echo 'Loaded image ID: sha256:0123456789abcdef' ;;
+  load) cp "$3" "$WORK/loaded.tar"; echo "Loaded image: \${LOADED:-}" ;;
   tag) ;;
   run) echo "mode $(stat -c %a "$VOLDIR/enroll_code") $(cat "$VOLDIR/enroll_code")" >>"$LOG" ;;
   logs)
@@ -106,7 +153,22 @@ exit 0
 `,
 };
 
-function world(o: { docker?: boolean; script?: string } = {}) {
+type WorldOptions = {
+  docker?: boolean;
+  script?: string;
+  /** The layout the image download holds. */
+  layout?: Rc2Case;
+  /** The signer the script is rendered with. */
+  repo?: string;
+  /** The real cosign at COSIGN_BIN instead of the fake. */
+  realCosign?: boolean;
+  /** The download holds the real rc.2 index (signature only: no platform blobs to load). */
+  rc2?: boolean;
+  /** What the server sends as the trusted root; default the pinned one. */
+  root?: string;
+};
+
+function world(o: WorldOptions = {}) {
   const work = mkdtempSync(join(tmpdir(), 'jm-installer-'));
   const bin = join(work, 'bin');
   mkdirSync(bin);
@@ -115,13 +177,17 @@ function world(o: { docker?: boolean; script?: string } = {}) {
     if (name === 'docker' && o.docker === false) continue;
     writeFileSync(join(bin, name), body, { mode: 0o755 });
   }
-  writeFileSync(join(work, 'cosign-stub'), COSIGN_STUB, { mode: 0o755 });
-  // The image download: a tar of an OCI layout (its content is cosign's business here).
-  const layout = join(work, 'layout');
-  mkdirSync(layout);
-  writeFileSync(join(layout, 'oci-layout'), '{"imageLayoutVersion":"1.0.0"}');
-  writeFileSync(join(layout, 'index.json'), '{}');
-  spawnSync('tar', ['-cf', join(work, 'stick.tar'), '-C', layout, '.']);
+  const cosign = join(work, 'cosign-stub');
+  if (o.realCosign) copyFileSync(COSIGN_BIN, cosign);
+  else writeFileSync(cosign, o.rc2 ? RC2_COSIGN_STUB : COSIGN_STUB);
+  chmodSync(cosign, 0o755);
+  writeFileSync(join(work, 'trusted_root.json'), o.root ?? readFileSync(PINNED_ROOT));
+  // The image download: a tar of the server's OCI layout of the rc.2 stick image.
+  const layout = rc2Layout(
+    { ...o.layout, ...(o.rc2 ? {} : { image: IMAGE }) },
+    join(work, 'layout'),
+  );
+  spawnSync('tar', ['-cf', join(work, 'stick.tar'), '-C', layout.dir, '.']);
   const voldir = join(work, 'volume');
   mkdirSync(voldir);
   const log = join(work, 'log');
@@ -130,12 +196,10 @@ function world(o: { docker?: boolean; script?: string } = {}) {
     o.script ??
     stickScript({
       serverUrl: SERVER,
-      image: { ref: `ghcr.io/o/jumpmaster-stick@${DIGEST}`, digest: DIGEST },
-      signerRepository: 'o/jumpmaster',
-      cosignSha256: {
-        amd64: createHash('sha256').update(COSIGN_STUB).digest('hex'),
-        arm64: 'f'.repeat(64),
-      },
+      image: { ref: STICK_REF.replace(DIGEST, layout.digest), digest: layout.digest },
+      signerRepository: o.repo ?? REPO,
+      cosignSha256: { amd64: fileSha(cosign), arm64: fileSha(cosign) },
+      trustedRootSha256: ROOT_SHA,
     });
   const file = join(work, 'stick.sh');
   writeFileSync(file, script);
@@ -148,28 +212,48 @@ function world(o: { docker?: boolean; script?: string } = {}) {
         LOG: log,
         WORK: work,
         VOLDIR: voldir,
-        SIGNED_DIGEST: DIGEST,
         TMPDIR: work,
         JM_INSTALL_TTY: join(work, 'no-tty'),
         JM_INSTALL_WAIT: '3',
+        // The engine: Docker's containerd store, which names the loaded index by its digest.
+        IMAGE_ID: layout.digest,
+        LOADED: `${STICK_NAME}@${layout.digest}`,
         ...env,
       },
     });
-    return { ...r, log: readFileSync(log, 'utf8') };
+    const text = readFileSync(log, 'utf8');
+    return { ...r, log: text, loaded: text.split('\n').some((l) => l.startsWith('docker load')) };
   };
-  return { run, voldir, work };
+  /** The files of the tar the script gave `docker load`. */
+  const loadedTar = (): Map<string, Buffer> => {
+    const dir = mkdtempSync(join(work, 'loaded-'));
+    const r = spawnSync('tar', ['-xf', join(work, 'loaded.tar'), '-C', dir], { encoding: 'utf8' });
+    if (r.status !== 0) throw new Error(`untar: ${r.stderr}`);
+    const out = new Map<string, Buffer>();
+    const walk = (rel: string) => {
+      for (const e of readdirSync(join(dir, rel), { withFileTypes: true })) {
+        const name = rel ? `${rel}/${e.name}` : e.name;
+        if (e.isDirectory()) walk(name);
+        else out.set(name, readFileSync(join(dir, name)));
+      }
+    };
+    walk('');
+    return out;
+  };
+  return { run, voldir, work, bin, layout, loadedTar };
 }
+
+const SCRIPT_PARAMS = {
+  serverUrl: SERVER,
+  image: { ref: STICK_REF, digest: DIGEST },
+  signerRepository: REPO,
+  cosignSha256: { amd64: 'a'.repeat(64), arm64: 'b'.repeat(64) },
+  trustedRootSha256: ROOT_SHA,
+};
 
 describe('the installer script', () => {
   test('parses with sh -n', () => {
-    const r = spawnSync('sh', ['-n'], {
-      input: stickScript({
-        serverUrl: SERVER,
-        image: { ref: `ghcr.io/o/jumpmaster-stick@${DIGEST}`, digest: DIGEST },
-        signerRepository: 'o/jumpmaster',
-        cosignSha256: { amd64: 'a'.repeat(64), arm64: 'b'.repeat(64) },
-      }),
-    });
+    const r = spawnSync('sh', ['-n'], { input: stickScript(SCRIPT_PARAMS) });
     expect(r.status).toBe(0);
   });
 
@@ -217,34 +301,207 @@ describe('the installer script', () => {
     expect(run).toContain('-e JM_IMAGE_POLICY=signed');
     expect(run).not.toContain(CODE);
     expect(r.log).toContain(`mode 600 ${CODE}`);
-    // cosign before load, with the pinned identity, offline.
-    const verify = lines.findIndex((l) => l.startsWith('cosign verify --local-image --offline'));
+    // The trusted root is downloaded with the code; then cosign checks the bundle on the index
+    // bytes, offline, against the downloaded root (the fake refuses any other arguments, a HOME
+    // that is not empty, or another root), before load.
+    expect(lines.some((l) => /^curl .*-H @\S+ .*\/install\/trusted-root\.json$/.test(l))).toBe(
+      true,
+    );
+    const verify = lines.findIndex((l) => l.startsWith('cosign verify-blob-attestation --bundle '));
     const loaded = lines.findIndex((l) => l.startsWith('docker load'));
     expect(verify).toBeGreaterThanOrEqual(0);
     expect(loaded).toBeGreaterThan(verify);
-    expect(lines[verify]).toContain('--certificate-github-workflow-repository o/jumpmaster');
+    expect(lines[verify]).toMatch(
+      new RegExp(
+        `--trusted-root ${w.work}/tmp\\.\\w+/trusted_root\\.json --offline --certificate-identity-regexp \\S+ --certificate-oidc-issuer https://token\\.actions\\.githubusercontent\\.com --certificate-github-workflow-trigger push --certificate-github-workflow-repository ${REPO} ${w.work}/tmp\\.\\w+/layout/blobs/sha256/${DIGEST.slice(7)}$`,
+      ),
+    );
+    expect(lines[verify]).not.toMatch(/insecure/);
+    expect(r.log).not.toContain('--local-image');
     // The code never rides on a command line.
     for (const l of lines.filter((l) => l.startsWith('curl '))) {
       expect(l).not.toContain(CODE);
       expect(l).toMatch(/-H @/);
     }
     expect(existsSync(join(w.voldir, 'enroll_code'))).toBe(false);
+    // It loads the tar it built, then tags the digest reference, never a `Loaded image` line.
+    expect(lines.filter((l) => l.startsWith('docker load'))).toEqual([
+      expect.stringMatching(new RegExp(`^docker load -i ${w.work}/tmp\\.\\w+/load\\.tar$`)),
+    ]);
+    expect(lines.filter((l) => l.startsWith('docker tag'))).toEqual([
+      `docker tag ${STICK_REF} jumpmaster-stick:installed`,
+    ]);
+    expect(lines).toContain(`docker image inspect -f {{.Id}} ${STICK_REF}`);
+    expect(r.log).not.toContain('docker image rm');
+  });
+
+  describe('what it loads: a sparse index named by its digest, this platform alone (issue #168)', () => {
+    for (const [uname, arch] of [
+      ['x86_64', 'amd64'],
+      ['aarch64', 'arm64'],
+    ] as const)
+      test(`on ${uname}`, () => {
+        const w = world();
+        const r = w.run([CODE], { UNAME_M: uname });
+        expect(r.status, r.stderr).toBe(0);
+        const files = w.loadedTar();
+        const part = IMAGE[arch];
+        const blob = (d: string) => `blobs/sha256/${d.slice(7)}`;
+        expect([...files.keys()].sort()).toEqual(
+          [
+            'oci-layout',
+            'index.json',
+            'manifest.json',
+            blob(DIGEST),
+            blob(part.manifestDigest),
+            blob(part.configDigest),
+            blob(part.layerDigest),
+          ].sort(),
+        );
+        const index = JSON.parse(String(files.get('index.json')));
+        expect(index.manifests).toEqual([
+          {
+            mediaType: 'application/vnd.oci.image.index.v1+json',
+            digest: DIGEST,
+            size: IMAGE.index.length,
+            annotations: {
+              'io.containerd.image.name': STICK_REF,
+              'org.opencontainers.image.ref.name': STICK_REF,
+            },
+          },
+        ]);
+        expect(JSON.parse(String(files.get('manifest.json')))).toEqual([
+          {
+            Config: blob(part.configDigest),
+            RepoTags: [],
+            Layers: [blob(part.layerDigest)],
+          },
+        ]);
+        expect(files.get(blob(part.layerDigest))).toEqual(part.blobs[2]);
+      });
+
+    test('D5 parity: the same layout gives the stick and the installer byte-identical index.json and manifest.json', async () => {
+      const w = world();
+      expect(w.run([CODE]).status).toBe(0);
+      const files = w.loadedTar();
+      const bound = bindLayout(w.layout.dir, DIGEST, 'linux/amd64');
+      expect(String(files.get('index.json'))).toBe(String(loadIndexJson(bound, STICK_REF)));
+      const chunks: Buffer[] = [];
+      for await (const c of loadTar(w.layout.dir, bound, STICK_REF)) chunks.push(c as Buffer);
+      const stick = Buffer.concat(chunks);
+      const at = stick.indexOf('[{"Config"');
+      expect(at).toBeGreaterThan(0);
+      expect(String(files.get('manifest.json'))).toBe(
+        stick.subarray(at, stick.indexOf(0, at)).toString('utf8'),
+      );
+    });
+
+    test('a platform blob missing from the download refuses before docker load', () => {
+      const w = world();
+      rmSync(join(w.layout.dir, 'blobs', 'sha256', IMAGE.amd64.layerDigest.slice(7)));
+      spawnSync('tar', ['-cf', join(w.work, 'stick.tar'), '-C', w.layout.dir, '.']);
+      const r = w.run([CODE]);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain(`layer ${IMAGE.amd64.layerDigest} in the download does not hash`);
+      expect(r.loaded).toBe(false);
+    });
+
+    test('the classic store answers the config digest: accepted', () => {
+      const w = world();
+      const r = w.run([CODE], { IMAGE_ID: IMAGE.amd64.configDigest });
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.log).toContain(`docker tag ${STICK_REF} jumpmaster-stick:installed`);
+    });
+
+    for (const [name, id] of [
+      ['another id', `sha256:${'e'.repeat(64)}`],
+      ['the platform manifest digest', IMAGE.amd64.manifestDigest],
+      ['no image at all', ''],
+    ] as const)
+      test(`the engine answers ${name} for the reference: what it loaded is removed, and it refuses`, () => {
+        const w = world();
+        const r = w.run([CODE], { IMAGE_ID: id });
+        expect(r.status).toBe(1);
+        expect(r.stderr).toContain(`did not load the stick image as ${STICK_REF}`);
+        expect(r.log).toContain(`docker image rm -f ${STICK_REF}`);
+        expect(r.log).not.toContain('docker tag');
+        expect(r.log).not.toContain('docker run');
+      });
   });
 
   test('a cosign failure stops before docker load', () => {
     const w = world();
     const r = w.run([CODE], { COSIGN_FAIL: '1' });
     expect(r.status).toBe(1);
-    expect(r.stderr).toContain('not signed by o/jumpmaster');
+    expect(r.stderr).toContain(
+      `not signed by ${REPO}'s release workflow: cosign exit 1: no matching signatures`,
+    );
     expect(r.log).not.toContain('docker load');
     expect(r.log).not.toContain('docker run');
   });
 
-  test('cosign verifying another digest stops before docker load', () => {
-    const w = world();
-    const r = w.run([CODE], { SIGNED_DIGEST: `sha256:${'e'.repeat(64)}` });
+  test('a trusted root that is not the pinned one is refused before cosign runs', () => {
+    const w = world({
+      root: '{"mediaType":"application/vnd.dev.sigstore.trustedroot+json;version=0.1","tlogs":[]}',
+    });
+    const r = w.run([CODE]);
     expect(r.status).toBe(1);
-    expect(r.log).not.toContain('docker load');
+    expect(r.stderr).toContain('the trusted root the server sent is not the pinned one');
+    expect(r.log).not.toMatch(/^cosign /m);
+    expect(r.loaded).toBe(false);
+  });
+
+  describe('every verification failure refuses and never loads (issue #167)', () => {
+    const cases: [string, WorldOptions, Record<string, string>, string][] = [
+      [
+        'an index blob whose hash is not D',
+        { layout: { tamperIndex: true } },
+        {},
+        `the image index blob in the download does not hash to ${DIGEST}`,
+      ],
+      [
+        'no bundle entry',
+        { layout: { noBundle: true } },
+        {},
+        `has no Sigstore bundle signing ${DIGEST}`,
+      ],
+      [
+        'a bundle whose layer hash mismatches',
+        { layout: { tamperBundle: true } },
+        {},
+        'does not hash to its digest',
+      ],
+      ['cosign exit != 0', {}, { COSIGN_FAIL: '1' }, 'cosign exit 1: no matching signatures'],
+      [
+        'a timeout',
+        {},
+        { COSIGN_SLEEP: '5', JM_INSTALL_COSIGN_TIMEOUT: '1' },
+        'cosign timed out after 1s',
+      ],
+      [
+        'another identity',
+        { repo: 'someone-else/jumpmaster' },
+        {},
+        'no matching CertificateIdentity found',
+      ],
+    ];
+    for (const [name, o, env, why] of cases)
+      test(name, () => {
+        const r = world(o).run([CODE], env);
+        expect(r.status).toBe(1);
+        expect(r.stderr).toContain(why);
+        expect(r.loaded).toBe(false);
+        expect(r.log).not.toContain('docker run');
+      });
+
+    test('cosign missing: the server has none to send', () => {
+      const w = world();
+      writeFileSync(join(w.work, 'no-cosign'), '');
+      const r = w.run([CODE]);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('could not download cosign');
+      expect(r.loaded).toBe(false);
+    });
   });
 
   test('a cosign that is not the pinned binary is refused', () => {
@@ -277,12 +534,7 @@ describe('the installer script', () => {
 
   test('a server with no stick image says so before anything is downloaded', () => {
     const w = world({
-      script: stickScript({
-        serverUrl: SERVER,
-        image: null,
-        signerRepository: 'o/jumpmaster',
-        cosignSha256: { amd64: 'a'.repeat(64), arm64: 'b'.repeat(64) },
-      }),
+      script: stickScript({ ...SCRIPT_PARAMS, image: null }),
     });
     const r = w.run([CODE]);
     expect(r.status).toBe(1);
@@ -295,6 +547,49 @@ describe('the installer script', () => {
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('no enrollment code');
   });
+});
+
+test('a server with no trusted root says so before anything is downloaded', () => {
+  const w = world({ script: stickScript({ ...SCRIPT_PARAMS, trustedRootSha256: null }) });
+  const r = w.run([CODE]);
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain('no Sigstore trusted root');
+  expect(r.log).toBe('');
+});
+
+describe('sibling parity: the stick and the installer give the same verdict on the same layout (issue #167)', () => {
+  // One cosign binary for both: the fake (it checks the exact arguments, the empty HOME and the
+  // pinned root, and answers as cosign does on these fixtures), or the real one at COSIGN_BIN.
+  const cases: [string, Rc2Case, string, boolean][] = [
+    ['good', {}, REPO, true],
+    ['tampered index', { tamperIndex: true }, REPO, false],
+    ['index relabelled under its own digest', { relabelIndex: true }, REPO, false],
+    ['no bundle', { noBundle: true }, REPO, false],
+    ['tampered bundle', { tamperBundle: true }, REPO, false],
+    ['wrong identity', {}, 'someone-else/jumpmaster', false],
+  ];
+  const real = COSIGN_BIN !== '';
+  for (const [name, layout, repo, want] of cases)
+    test(`${name}: ${want ? 'verified' : 'refused'} by both${real ? ' (real cosign)' : ''}`, async () => {
+      const w = world({ layout, repo, realCosign: real, rc2: true });
+      const installer = w.run([CODE]);
+      const stick = await verifyLayout(
+        w.layout.dir,
+        `ghcr.io/x-a-n-d-e-r-k/jumpmaster-stick@${w.layout.digest}`,
+        {
+          policy: 'signed',
+          allowed: new Set(),
+          signer: releaseSigner(repo),
+          cosign: execCosign(join(w.work, 'cosign-stub'), { PATH: w.bin }),
+          trustedRoot: PINNED_ROOT,
+        },
+      );
+      expect(stick.ok, JSON.stringify(stick)).toBe(want);
+      expect(installer.stdout.includes(`Signed by ${repo}'s release workflow`)).toBe(want);
+      // The rc.2 fixtures hold no platform blobs, so even a verified one is never loaded.
+      expect(installer.loaded, installer.stderr).toBe(false);
+      if (want) expect(installer.stderr).toContain('has no linux/amd64 image');
+    });
 });
 
 describe('the cloud-init snippet', () => {

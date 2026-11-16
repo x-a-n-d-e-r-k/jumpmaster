@@ -416,6 +416,7 @@ describe('the setup wizard', () => {
 });
 
 type Answer = { status: number; body: Record<string, unknown> };
+type El = { textContent: string; hidden?: boolean; disabled?: boolean };
 /** Runs the page's credential-saving script against stub fields: the browser path, without one. */
 function runSave(
   fields: Record<string, string>,
@@ -426,20 +427,41 @@ function runSave(
   const out = { textContent: '' };
   const wrap = { hidden: true };
   const focused: string[] = [];
-  const inputs = Object.entries(fields).map(([name, value]) => ({
-    name,
-    value,
-    type: 'password',
-    disabled: name === 'sudo' && sudoHidden,
-    closest: () => wrap,
-    focus: () => focused.push(name),
-  }));
+  const scrolled: string[] = [];
+  /** Each field's own answer, beneath it; each credential's status line; the Continue button. */
+  const fieldOut: Record<string, El> = {};
+  const status: Record<string, El> = {};
+  const continueButton: El = { textContent: 'Continue', disabled: true };
+  const inputs = Object.entries(fields).map(([name, value]) => {
+    fieldOut[name] = { textContent: '' };
+    status[name] = { textContent: 'Not set yet.' };
+    return {
+      name,
+      value,
+      type: 'password',
+      disabled: name === 'sudo' && sudoHidden,
+      closest: () => wrap,
+      focus: () => focused.push(name),
+      scrollIntoView: () => scrolled.push(name),
+    };
+  });
+  const attr = (sel: string, a: string) => new RegExp(`\\[${a}="?([A-Za-z]+)"?\\]`).exec(sel)?.[1];
   const form = {
-    querySelector: (sel: string) =>
-      sel === 'input[name=sudo]' ? (inputs.find((i) => i.name === 'sudo') ?? null) : null,
+    querySelector: (sel: string) => {
+      if (sel === 'input[name=sudo]') return inputs.find((i) => i.name === 'sudo') ?? null;
+      const n = attr(sel, 'data-out-for');
+      return n ? (fieldOut[n] ?? null) : null;
+    },
     querySelectorAll: () => inputs.filter((i) => i.name !== 'sudo'),
   };
   const ctx = vm.createContext({
+    document: {
+      querySelector: (sel: string) => {
+        if (sel.includes('value=continue')) return continueButton;
+        const n = attr(sel, 'data-credential');
+        return n ? (status[n] ?? null) : null;
+      },
+    },
     jmFetch: async (path: string) => {
       fetched.push(path);
       const a = answer(path);
@@ -452,6 +474,10 @@ function runSave(
     out,
     wrap,
     focused,
+    scrolled,
+    fieldOut,
+    status,
+    continueButton,
     value: (name: string) => inputs.find((i) => i.name === name)?.value,
     result: (ctx.jmSaveCredentials as (f: unknown, o: unknown) => Promise<unknown>)(form, out),
   };
@@ -535,7 +561,14 @@ describe('the wizard, round 2', () => {
     expect(await empty.result).toBe('empty');
     expect(empty.out.textContent).toBe('Enter a token first.');
     expect(empty.fetched).toEqual([]);
-    const filled = runSave({ githubAuthorToken: AUTHOR, githubReviewerToken: '', sudo: PASS });
+    // The route tested the GitHub token: its answer says so.
+    const filled = runSave(
+      { githubAuthorToken: AUTHOR, githubReviewerToken: '', sudo: PASS },
+      () => ({
+        status: 200,
+        body: { tested: true },
+      }),
+    );
     expect(await filled.result).toBe('saved');
     expect(filled.fetched).toEqual(['/api/control/sudo', '/api/control/secrets/githubAuthorToken']);
     expect(filled.out.textContent).toBe('Saved and tested.');
@@ -545,10 +578,11 @@ describe('the wizard, round 2', () => {
       const body = (await w.get(`/setup/${step}`)).body;
       expect(body, step).not.toContain('.click()');
     }
-    // The starter choice is part of Continue, not of Save.
+    // The starter choice is part of Continue, not of Save: shown above the fields, sent with Continue.
     const forge = (await w.get('/setup/forge')).body;
-    const advance = forge.slice(forge.indexOf('id="advance"'));
-    expect(advance.slice(0, advance.indexOf('</form>'))).toContain('name="starter"');
+    expect(forge).toMatch(/<input type="checkbox" name="starter" value="1" form="advance"/);
+    const save = forge.slice(forge.indexOf('<form id="forge"'));
+    expect(save.slice(0, save.indexOf('</form>'))).not.toContain('name="starter"');
   });
 
   test('every pattern attribute in the pages compiles under the v flag, as browsers compile it', async () => {
@@ -604,6 +638,35 @@ describe('the wizard, round 2', () => {
     expect(claude).not.toMatch(/expectRevision: \d/);
   });
 
+  test('every plan has a prose label, here and in Settings, and the stored values are unchanged', async () => {
+    const w = await world();
+    for (const url of ['/setup/claude', '/settings/credentials']) {
+      const html = (await w.get(url)).body;
+      const select = /<select name="plan">(.*?)<\/select>/s.exec(html)?.[1] ?? '';
+      const options = [...select.matchAll(/<option value="([^"]+)"[^>]*>([^<]*)<\/option>/g)];
+      expect(
+        options.map((o) => o[1]),
+        url,
+      ).toEqual(['pro', 'max', 'ultra', 'team_standard', 'team_premium', 'enterprise']);
+      for (const [, value, label] of options) expect(label, `${url} ${value}`).not.toBe(value);
+      expect(
+        options.map((o) => o[2]),
+        url,
+      ).toEqual([
+        'Pro',
+        'Max ($100/mo)',
+        'Ultra ($200/mo)',
+        'Team (standard seat)',
+        'Team (premium seat)',
+        'Enterprise',
+      ]);
+    }
+    // The Claude token field shows what a token looks like.
+    expect((await w.get('/setup/claude')).body).toMatch(
+      /<input type="password" name="claudeToken" placeholder="sk-ant-oat01-…"/,
+    );
+  });
+
   test('the Claude step offers Ultra ($200/mo), and a saved ultra plan is selected on reload (#144)', async () => {
     const w = await world();
     expect((await w.get('/setup/claude')).body).toContain(
@@ -618,6 +681,12 @@ describe('the wizard, round 2', () => {
     expect((await w.get('/setup/claude')).body).toContain(
       '<option value="ultra" selected>Ultra ($200/mo)</option>',
     );
+  });
+
+  test('the project step offers the GitHub step as a button-styled link when the author token is missing', async () => {
+    const w = await world();
+    const project = (await w.get('/setup/project')).body;
+    expect(project).toContain("a.href = '/setup/forge'; a.className = 'button primary'");
   });
 
   test('a wizard add says it is part of setup, and Cancel goes back to the project step', async () => {
@@ -666,7 +735,7 @@ describe('GitHub guidance in the wizard (Task 7)', () => {
       'check the Resource owner field: for an organization it may not pre-fill',
     );
     // The recommendation chooses the starter box until the operator chooses otherwise.
-    expect(forge).toMatch(/name="starter" value="1" checked/);
+    expect(forge).toMatch(/name="starter" value="1" form="advance" checked/);
     // The checklist, once the author token resolves a login.
     expect(forge).not.toContain('id="checklist"');
     expect((await w.call('POST', '/api/control/sudo', { passphrase: PASS })).statusCode).toBe(200);
@@ -713,5 +782,112 @@ describe('GitHub guidance in the wizard (Task 7)', () => {
     expect(paid).toContain('id="tokens"');
     // The read token joins the links for a private repository.
     expect(paid).toContain('The read token');
+  });
+});
+
+describe('the wizard says what it checked (#161)', () => {
+  const FAKE_CLAUDE = 'sk-ant-oat01-fake000';
+  const CLAUDE_SAVED = 'Saved. The format is right; Claude is first contacted by the first drop.';
+
+  test('a Claude token save contacts no one and says so; a GitHub token save tests it', async () => {
+    const w = await world();
+    await w.call('POST', '/api/control/sudo', { passphrase: PASS });
+    const claude = await w.call('PUT', '/api/control/secrets/claudeToken', { value: FAKE_CLAUDE });
+    expect(claude.statusCode, claude.body).toBe(200);
+    expect(claude.json()).toMatchObject({ tested: false });
+    expect(claude.json().fingerprint).toEqual(expect.any(String));
+    expect(claude.json().setAt).toEqual(expect.any(String));
+    // Nothing contacted GitHub (or anyone) for it.
+    expect(w.tested).toEqual([]);
+    const github = await w.call('PUT', '/api/control/secrets/githubAuthorToken', { value: AUTHOR });
+    expect(github.statusCode, github.body).toBe(200);
+    expect(github.json()).toMatchObject({ tested: true, login: 'octo-owner' });
+    expect(w.tested).toEqual(['ok']);
+  });
+
+  test("the save script's wording is keyed on the route's tested", async () => {
+    expect(SAVE_CREDENTIALS).toContain(CLAUDE_SAVED);
+    expect(SAVE_CREDENTIALS).toContain('Saved and tested.');
+    expect(SAVE_CREDENTIALS).toMatch(/j\.tested \?/);
+    const claude = runSave({ claudeToken: FAKE_CLAUDE, sudo: PASS }, () => ({
+      status: 200,
+      body: { tested: false, fingerprint: 'abcd1234', setAt: '2026-11-16T10:00:00.000Z' },
+    }));
+    expect(await claude.result).toBe('saved');
+    expect(claude.out.textContent).toBe(CLAUDE_SAVED);
+    expect(claude.fieldOut.claudeToken?.textContent).toBe(CLAUDE_SAVED);
+    expect(claude.out.textContent).not.toContain('tested');
+    const github = runSave({ githubAuthorToken: AUTHOR, sudo: PASS }, () => ({
+      status: 200,
+      body: { tested: true, fingerprint: 'ef567890', setAt: '2026-11-16T10:00:00.000Z' },
+    }));
+    expect(await github.result).toBe('saved');
+    expect(github.out.textContent).toBe('Saved and tested.');
+    expect(github.fieldOut.githubAuthorToken?.textContent).toBe('Saved and tested.');
+  });
+
+  test('after a save the status line shows the new state and Continue is enabled, with no reload', async () => {
+    const s = runSave({ claudeToken: FAKE_CLAUDE, sudo: PASS }, () => ({
+      status: 200,
+      body: { tested: false, fingerprint: 'abcd1234', setAt: '2026-11-16T10:00:00.000Z' },
+    }));
+    expect(s.status.claudeToken?.textContent).toBe('Not set yet.');
+    await s.result;
+    expect(s.status.claudeToken?.textContent).toBe(
+      'Set: fingerprint abcd1234, saved 2026-11-16; kept in the encrypted vault.',
+    );
+    expect(s.continueButton.disabled).toBe(false);
+    const g = runSave({ githubAuthorToken: AUTHOR, sudo: PASS }, () => ({
+      status: 200,
+      body: { tested: true, fingerprint: 'ef56', login: 'octo-owner', setAt: '2026-11-16T10:00Z' },
+    }));
+    await g.result;
+    expect(g.status.githubAuthorToken?.textContent).toBe(
+      'Set: fingerprint ef56, account octo-owner, saved 2026-11-16; kept in the encrypted vault.',
+    );
+  });
+
+  test('an error shows beneath its own field, which is scrolled into view and focused', async () => {
+    const s = runSave(
+      { githubAuthorToken: AUTHOR, githubReviewerToken: 'reviewer-value-1', sudo: PASS },
+      (path) =>
+        path.endsWith('githubReviewerToken')
+          ? {
+              status: 422,
+              body: { tested: false, status: 401, error: 'GitHub rejected this token (401).' },
+            }
+          : { status: 200, body: { tested: true, fingerprint: 'f1' } },
+    );
+    expect(await s.result).toBe(false);
+    const said = 'The reviewer token was not saved: GitHub rejected this token (401).';
+    expect(s.fieldOut.githubReviewerToken?.textContent).toBe(said);
+    expect(s.fieldOut.githubAuthorToken?.textContent).toBe('Saved and tested.');
+    expect(s.scrolled).toEqual(['githubReviewerToken']);
+    expect(s.focused).toEqual(['githubReviewerToken']);
+    // Each field on the page has its own answer slot.
+    const w = await world();
+    const forge = (await w.get('/setup/forge')).body;
+    for (const name of ['githubAuthorToken', 'githubReviewerToken', 'githubReadToken'])
+      expect(forge).toMatch(
+        new RegExp(
+          `name="${name}"[^>]*></label>\\s*<small class="field-out" data-out-for="${name}" role="status"></small>`,
+        ),
+      );
+  });
+
+  test('the forge step speaks plain words and puts the mode above the token fields', async () => {
+    const w = await world({ github: { ownerType: 'User' } });
+    const forge = (await w.get('/setup/forge?repo=octo%2Fdemo')).body;
+    expect(forge).toContain('the author account owns the repository, so it can merge');
+    expect(forge).toContain('owns the repository');
+    const visible = forge.replace(/name="[^"]*"/g, '');
+    expect(visible).not.toMatch(/\bauthorMayBeAdmin\b/);
+    const text = forge
+      .replace(/<script>[\s\S]*?<\/script>/g, '')
+      .replace(/<style>[\s\S]*?<\/style>/g, '')
+      .replace(/<[^>]*>/g, ' ');
+    expect(text.match(/\b[a-z]+[A-Z][A-Za-z]*\b/g) ?? []).toEqual([]);
+    expect(forge.indexOf('name="starter"')).toBeGreaterThan(-1);
+    expect(forge.indexOf('name="starter"')).toBeLessThan(forge.indexOf('name="githubAuthorToken"'));
   });
 });

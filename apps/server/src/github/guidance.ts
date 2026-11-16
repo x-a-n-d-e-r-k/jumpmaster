@@ -204,7 +204,7 @@ export function recommendIdentity(d: {
   return {
     identity: 'starter',
     authorMayBeAdmin: true,
-    reason: `This repository belongs to a personal account. A fine-grained token cannot serve a collaborator bot on another person's repository, so use your own account as the author in starter mode, with authorMayBeAdmin (you own the repository, so your account is its admin; the token itself gets no Administration permission). What starter mode costs: ${STARTER_WARNING}`,
+    reason: `This repository belongs to a personal account. A fine-grained token cannot serve a collaborator bot on another person's repository, so use your own account as the author in starter mode: the author account owns the repository, so it can merge (your account is its admin; the token itself gets no Administration permission). What starter mode costs: ${STARTER_WARNING}`,
     ...plan,
   };
 }

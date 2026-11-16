@@ -23,6 +23,7 @@ import {
   roleOf,
   TOKEN_BANNER_DAYS,
 } from './settings.js';
+import { CLAUDE_SAVED } from './setup.js';
 
 const TOKEN = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
@@ -441,7 +442,15 @@ describe('the credentials tab, round 2', () => {
 
   test('no running-drops line when no drop carries the old value; Test and Replace both offer a refresh', async () => {
     const none = await runReplace({ name: 'claudeToken', value: CLAUDE, sudo: true, running: 0 });
-    expect(none.status).toBe('Saved and tested.');
+    // Nothing contacted Claude: the answer says what was checked, never "tested" (#161).
+    expect(none.status).toBe(CLAUDE_SAVED);
+    const github = await runReplace({
+      name: 'githubAuthorToken',
+      value: 'github_pat_' + 'SETTINGSDUMMY0123456789',
+      sudo: true,
+      running: 0,
+    });
+    expect(github.status).toBe('Saved and tested.');
     expect(none.appended).toContain('Refresh the list');
     const some = await runReplace({ name: 'claudeToken', value: CLAUDE, sudo: true, running: 2 });
     expect(some.status).toContain('2 running drops still carry the previous token');
@@ -464,8 +473,8 @@ describe('the ultra plan (#144)', () => {
     for (const url of ['/settings/credentials', '/settings/install']) {
       const html = (await w.get(url)).body;
       expect(html, url).toMatch(/<option value="ultra"[^>]*>Ultra \(\$200\/mo\)<\/option>/);
-      // The other plans keep their labels.
-      expect(html, url).toMatch(/<option value="max"[^>]*>max<\/option>/);
+      // The other plans have prose labels too (#161).
+      expect(html, url).toMatch(/<option value="max"[^>]*>Max \(\$100\/mo\)<\/option>/);
     }
     const r = await w.call('PATCH', '/api/control/config', {
       patch: { claude: { plan: 'ultra' } },
@@ -1227,7 +1236,8 @@ function scriptContext(
       const json =
         method === 'PUT'
           ? {
-              tested: true,
+              // As the route answers: only a GitHub token is tested against its provider.
+              tested: !path.endsWith('/claudeToken'),
               runningDropsWithPrevious: running,
               hint: `${running} running drops still carry the previous token, and the pass running now keeps it until it ends: revoke it on GitHub after they finish`,
             }

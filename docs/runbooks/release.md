@@ -19,9 +19,11 @@ For the repository owner. A release is a version tag on `main`. Pushing it runs
      index lists exactly every manifest the two builds list, attestations included; after, it
      reads the index back by its digest (never through the tag). The
      **index digest** is the image's release digest: it is what is signed, locked and pulled.
-   - `apps` (per arch) builds the server with the release's `images.lock.json` (index digests)
-     baked in, and the stick with the release version, this repository as its trusted signer and
-     the egress proxy's index digest; `apps-index` joins them the same way.
+   - `stick` (per arch) builds the stick with the release version, this repository as its
+     trusted signer and the egress proxy's and trooper's index digests; `stick-index` joins it.
+   - `apps` (per arch) then builds the server with the release's `images.lock.json` (index
+     digests) baked in, the stick's included, so a release server mirrors the stick for the
+     one-line installer; `apps-index` joins it the same way.
 3. **sign**: signs every image by its index digest with cosign keyless, then verifies each with
    exactly the checks the stick makes (the identity flags, and every signed payload naming that
    digest). Renders `compose.yaml` from `deploy/compose.yaml.tmpl`, writes `images.lock.json` and
@@ -239,8 +241,9 @@ The stick's own outbound traffic (not restricted by Jumpmaster; allow it if the 
 - `rekor.sigstore.dev` and `fulcio.sigstore.dev`: the transparency log and the CA;
 - the Jumpmaster server.
 
-A stick with `JM_IMAGE_SOURCE=server` (below) needs only the last: it fetches images from its
-server and verifies them offline.
+A stick with `JM_IMAGE_SOURCE=server` (below) needs only the last, and no Sigstore access at all:
+it fetches images from its server and verifies them fully offline against the trusted root its
+image ships (`/app/sigstore/trusted_root.json`, issue #167). So does the stick installer.
 
 The egress capability check (`egress-v1`) runs short-lived probe containers on the host network,
 from the stick's own image, as `nobody`, with no capabilities, to prove a drop can't reach the
@@ -306,13 +309,12 @@ layout tar with `Content-Length` and `ETag: "<platform manifest digest>"`:
     `io.containerd.image.name` with the original `<registry>/<name>@<index digest>` and
     `dev.jumpmaster.image.index` with the index digest: the only named entry, the image a stick
     loads;
-  - the signed multi-arch index, `kind: dev.cosignproject.cosign/imageIndex`, so
-    `cosign verify --local-image` checks the digest the signatures name (the index's, not the
-    platform manifest's);
+  - the signed multi-arch index, `kind: dev.cosignproject.cosign/imageIndex`: the bytes the
+    signatures name (the index's digest, not the platform manifest's);
   - a legacy `sha256-<hex>.sig` signature image, `kind: dev.cosignproject.cosign/sigs`;
   - each OCI 1.1 signature referrer (a sigstore bundle, what cosign v3 writes by default) with its
-    `artifactType` and no `kind`: cosign's layout reader defines none for bundles, so a stick
-    verifies a bundle-only image from these blobs itself (part 2);
+    `artifactType` and no `kind`: the stick and the installer verify the image from these blobs
+    (step 3 below);
   - every signature entry annotated `dev.jumpmaster.signature.of` with the index digest, and none
     with a reference name;
 - `manifest.json`, naming exactly the platform image (config and layers) for `docker load` on
@@ -350,8 +352,20 @@ images, its own trooper image, the egress check's proxy), for one it doesn't hav
    `fetching <image> X/Y MB` beside the stick.
 2. It binds the layout to the digest it asked for: that digest's blob is the multi-arch index, and
    the index's entry for its platform is the manifest it loads.
-3. Under `signed`: `cosign verify --local-image --offline --insecure-ignore-tlog=false` with the
-   pinned identity above, on the layout. Nothing asks the registry or Sigstore. A failure deletes
+3. Under `signed`, fully offline (issue #167):
+   - the layout's `index.json` must name the image index for the digest asked for, and that blob
+     must hash to it;
+   - every entry annotated `dev.jumpmaster.signature.of` with that digest and the artifactType
+     `application/vnd.dev.sigstore.bundle.v0.3+json` is a manifest whose single layer is the
+     Sigstore bundle, each hash-checked;
+   - `cosign verify-blob-attestation --bundle <bundle> --type https://sigstore.dev/cosign/sign/v1
+     --trusted-root /app/sigstore/trusted_root.json --offline` with the pinned identity above
+     checks each bundle on the index blob, with `HOME` and `TUF_ROOT` an empty temporary
+     directory, so no cache and no TUF fetch can stand in for the pinned root. One bundle that
+     verifies is enough.
+
+   Nothing asks the registry or Sigstore. No bundle, a hash that doesn't match, a cosign error or
+   a timeout refuses, naming cosign's last error line. A failure deletes
    the directory, refuses the drop with `image not verified: …` and logs
    `{"event":"image-verify-failed","ref":…,"via":"server"}`. A digest the operator pinned, or one in
    `/state/verified.json`, needs no signature; a success is recorded there. Under `allowlist` the
@@ -370,8 +384,19 @@ A `404 not mirrored` is no failure: the drop waits, logged as
 `{"event":"drop-waiting","reason":"image <ref> not yet mirrored on the server (<state>)"}`. The stick
 posts no result and sends no heartbeat, so the lease lapses and the drop is leased again later.
 A stick in `server` mode never falls back to the registry, and never loads anything unverified.
-A signature cosign's local-layout reader cannot find (an image signed only with a sigstore
-bundle) fails verification: refused, never loaded.
+
+The trusted root is Sigstore's public-good root, committed as `images/sigstore/trusted_root.json`
+and copied into the stick and server images. It is not refreshed on its own: when Sigstore rotates
+its keys, a release updates the file. `COSIGN_BIN=<a cosign v3.1.4> npm test` runs the real
+cosign on the rc.2 fixtures under `apps/stick/src/fixtures/rc2-stick`
+(`apps/stick/src/verify-real-cosign.test.ts`, and the stick/installer parity table in
+`apps/server/src/install/stick-sh.test.ts`); without `COSIGN_BIN` those tests are skipped. By
+hand:
+
+```
+cosign verify-blob-attestation --bundle bundle.json --type https://sigstore.dev/cosign/sign/v1 \
+  --trusted-root images/sigstore/trusted_root.json --offline <identity flags> index.json
+```
 
 Follow-up, not done yet: blobs are never garbage-collected. Images of neither the current nor the
 previous lock leave the index, but their blobs stay under `<dataDir>/images/blobs`.

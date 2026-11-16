@@ -2,15 +2,14 @@
 // load and verify. It follows cosign's local-layout conventions (sigstore/cosign
 // pkg/oci/layout), which find entries by their `kind` annotation:
 // - the platform manifest, named with the original reference: the image a stick loads;
-// - the signed multi-arch index under kind `dev.cosignproject.cosign/imageIndex`, so
-//   `cosign verify --local-image` checks the digest the signatures name (the index's), not the
-//   platform manifest's;
+// - the signed multi-arch index under kind `dev.cosignproject.cosign/imageIndex`: the bytes the
+//   signatures name (the index's digest), not the platform manifest's;
 // - a legacy `sha256-<hex>.sig` signature image under kind `dev.cosignproject.cosign/sigs`;
 // - OCI 1.1 signature referrers (sigstore bundles) listed with their artifactType and no kind,
-//   which cosign's layout reader has none for.
-// Signature entries carry no reference name, so nothing but the platform image is loaded as a
-// named image. A `manifest.json` names exactly the platform image for `docker load` on Docker's
-// classic image store, which reads that file rather than `index.json`.
+//   which the stick and the installer verify on the index bytes, offline (issue #167).
+// This layout is never loaded as it is: it serves verification (issue #167). Sticks and the
+// installer load only a tar they build from the verified files (issue #168): a sparse index,
+// named `<registry>/<name>@<index digest>`, with one platform's blobs and no signature.
 import { createReadStream } from 'node:fs';
 import { Readable } from 'node:stream';
 import type { Lookup } from './mirror.js';

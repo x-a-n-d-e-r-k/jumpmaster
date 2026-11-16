@@ -63,6 +63,10 @@ RUN set -eu; \
     cosign version --json > /tmp/cosign-version.json; \
     node -e "const v = JSON.parse(require('fs').readFileSync('/tmp/cosign-version.json', 'utf8')); if (v.gitVersion !== 'v3.1.4') throw new Error('cosign ' + v.gitVersion)"; \
     rm /tmp/cosign-version.json
+# Sigstore's public-good trusted root, pinned (issue #167): an image the server sends is verified
+# against it alone, offline, so a stick fetching from its server needs no Sigstore access.
+COPY images/sigstore/trusted_root.json /app/sigstore/trusted_root.json
+RUN chmod 0444 /app/sigstore/trusted_root.json
 RUN install -d -o root -g root -m 0700 /state \
  && find / -xdev -type f -perm /6000 -exec chmod a-s {} +
 # The release's egress proxy, by digest (the release workflow passes it); empty in other builds.

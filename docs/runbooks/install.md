@@ -994,7 +994,9 @@ What it needs, in short (the full account is the release runbook's
 - **Its own outbound traffic**, which Jumpmaster doesn't restrict; allow it if your host filters:
   `ghcr.io` and `pkg-containers.githubusercontent.com` (image pulls), `tuf-repo-cdn.sigstore.dev`
   (the Sigstore trust root), `rekor.sigstore.dev` and `fulcio.sigstore.dev` (the transparency log
-  and the CA), and the server.
+  and the CA), and the server. A stick with `JM_IMAGE_SOURCE=server` (what the installer sets)
+  needs only the server: it verifies the images the server sends fully offline, against the
+  Sigstore trusted root its image ships.
 - **Docker Engine 27.0 or later.** At startup the stick proves that a drop network keeps a drop off
   the host, and only then advertises `egress-v1`; otherwise its log says
   `egress-v1 not advertised:` and why, and egress zones' drops stay queued.
@@ -1184,11 +1186,16 @@ The result page has two tabs:
 2. If Docker is missing, it asks `Install Docker with get.docker.com? [y/N]`. With no terminal, as
    in cloud-init, add `--yes` before the code; without `--yes` it stops and says how to install
    Docker.
-3. It downloads cosign and the stick image for the machine's platform from the server, sending the
-   code as `Authorization: Bearer` (from a file, never on a command line). The downloads don't use
-   up the code. cosign's SHA-256 is pinned in the script.
-4. It verifies the image offline with cosign, against this repository's release workflow, before
-   `docker load`. An image that doesn't verify is never loaded.
+3. It downloads cosign, Sigstore's trusted root and the stick image for the machine's platform
+   from the server, sending the code as `Authorization: Bearer` (from a file, never on a command
+   line). The downloads don't use up the code. The SHA-256s of cosign and of the trusted root are
+   pinned in the script; a download that doesn't match is refused.
+4. It verifies the image fully offline, before `docker load`: cosign checks the release's
+   Sigstore bundle on the image's index (its `verify-blob-attestation` command) against this
+   repository's release workflow and the pinned trusted root. The machine needs no Sigstore
+   access. These are the stick's own steps; see the release runbook's
+   [Sticks that fetch from the server](release.md#sticks-that-fetch-from-the-server). An image
+   that doesn't verify is never loaded.
 5. It starts the stick as the `jm-stick` container. The container has `--restart unless-stopped`,
    the Docker socket and the `jm-stick` state volume, and these settings:
    - `JM_SERVER_URL`;
@@ -1209,8 +1216,11 @@ The result page has two tabs:
 these stages in order, and the page refreshes every 3 seconds until the stick is live:
 
 1. **Fetching images**, with the download's progress.
-2. Its health: the Docker version, `egress-v1`, `image-verify-v1` and the free disk.
-3. **Live**.
+2. **Starting**, with `starting: checking the trooper image <name>`, while its first health check
+   pulls and checks the trooper image (minutes on a fresh machine). The stick already reports in
+   (it counts as seen) but takes no drop and runs no push until that check has a result.
+3. Its health: the Docker version, `egress-v1`, `image-verify-v1` and the free disk.
+4. **Live**.
 
 The stick gets the invite's name and trooper count. A code that is used, expired, cancelled or
 unknown is refused exactly as a wrong join token is (`401 {"error":"unauthorized"}`).

@@ -58,7 +58,7 @@ export function recommendationSection(rec: Recommendation): string {
       ? 'Starter: your own account as the author, no reviewer account'
       : 'Two bot accounts: an author and a reviewer';
   return `<section id="recommendation"><h3>Which accounts</h3>
-<p><strong>Recommended: ${escapeHtml(label)}</strong>${rec.authorMayBeAdmin ? ' (the author owns the repository: <code>authorMayBeAdmin</code>)' : ''}.</p>
+<p><strong>Recommended: ${escapeHtml(label)}</strong>${rec.authorMayBeAdmin ? ' (the author account owns the repository, so it can merge)' : ''}.</p>
 <p>${escapeHtml(rec.reason)}</p>
 ${rec.stop ? `<p class="warn" data-stop><strong>Stop here:</strong> ${escapeHtml(rec.stop)}.</p>` : ''}
 ${rec.ask ? `<p class="warn" data-ask><strong>First:</strong> ${escapeHtml(rec.ask)}</p>` : ''}
@@ -153,7 +153,7 @@ function zonePage(
     `<h2>GitHub for ${zoneName(zone, zones)}</h2>
 <p>What Jumpmaster needs on GitHub, as links and files: nothing here changes GitHub; the clicks and the commit are yours. The doctor checks each part.</p>
 ${recommendationSection(g.recommendation)}
-<p>This zone runs as ${escapeHtml(zone.identity)}${zone.authorMayBeAdmin ? ' with authorMayBeAdmin' : ''}${zone.identity === g.recommendation.identity ? '' : ': not the recommendation above. Changing it changes which tokens and rules it needs'}.</p>
+<p>This zone runs as ${escapeHtml(zone.identity)}${zone.authorMayBeAdmin ? ' (the author account owns the repository, so it can merge)' : ''}${zone.identity === g.recommendation.identity ? '' : ': not the recommendation above. Changing it changes which tokens and rules it needs'}.</p>
 ${tokensSection(g.pat, rolesOf(zone))}
 ${checklistSection(g.checklist)}
 ${rulesetSection(g.ruleset, g.rulesUrl, zone.identity)}

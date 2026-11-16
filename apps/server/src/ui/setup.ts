@@ -116,14 +116,22 @@ function credentialLine(name: CredentialName, c: ResolvedCredential | undefined)
   return `<p data-credential="${name}">Set: fingerprint <code>${escapeHtml(c.fingerprint ?? '?')}</code>${c.login ? `, account ${escapeHtml(c.login)}` : ''}${c.setAt ? `, saved ${escapeHtml(c.setAt.slice(0, 10))}` : ''}; ${where}.</p>`;
 }
 
-/** A credential field, or nothing when the credential is a file's or the environment's. */
+/** What a token looks like, shown in its empty field. */
+const PLACEHOLDERS: Partial<Record<CredentialName, string>> = { claudeToken: 'sk-ant-oat01-…' };
+
+/**
+ * A credential field with its own answer beneath it (the save script writes there), or nothing
+ * when the credential is a file's or the environment's.
+ */
 function credentialField(
   name: CredentialName,
   label: string,
   c: ResolvedCredential | undefined,
 ): string {
   if (c && (c.source === 'file' || c.source === 'env')) return '';
-  return `<p><label>${escapeHtml(label)} <input type="password" name="${name}" autocomplete="off" spellcheck="false"></label></p>`;
+  const placeholder = PLACEHOLDERS[name];
+  return `<p><label>${escapeHtml(label)} <input type="password" name="${name}"${placeholder ? ` placeholder="${escapeHtml(placeholder)}"` : ''} autocomplete="off" spellcheck="false"></label>
+<small class="field-out" data-out-for="${name}" role="status"></small></p>`;
 }
 
 /**
@@ -134,11 +142,19 @@ function credentialField(
 const sudoField = (sudo: boolean): string =>
   `<p class="sudo"${sudo ? ' hidden' : ''}><label>Your passphrase (saving a credential asks for it again) <input type="password" name="sudo" autocomplete="current-password"${sudo ? ' disabled' : ''}></label></p>`;
 
+/** What a saved Claude token's answer says: its form was checked, and nothing contacted Claude. */
+export const CLAUDE_SAVED =
+  'Saved. The format is right; Claude is first contacted by the first drop.';
+
 /**
  * The script that saves the filled credential fields: sudo first when asked for, then one `PUT`
- * per field to the secret routes, which test each before storing it. A failure shows the field's
- * label and the route's sentence, and keeps the refused value and the ones after it; a field is
- * cleared once saved. The value never leaves the field except in the request body. It answers
+ * per field to the secret routes, which check each before storing it. Each field's answer shows
+ * beneath it as well as beside Save, and says only what happened: "Saved and tested." when the
+ * route's `tested` says the provider answered (GitHub), else that only the form was checked. A
+ * failure shows the field's label and the route's sentence, scrolls to the field and focuses it,
+ * and keeps the refused value and the ones after it. A saved field is cleared, its status line
+ * shows the new state and the step's Continue is enabled, with no reload. The value never leaves
+ * the field except in the request body. It answers
  * `'empty'` (nothing was filled: "Enter a token first."), `'saved'`, `'sudo'` (sudo lapsed: the
  * passphrase field is shown) or `false`. Save never moves the wizard on: only Continue and Do this
  * later do.
@@ -151,9 +167,23 @@ function jmAskPassphrase(sudo) {
   const p = sudo.closest('p'); if (p) p.hidden = false;
   sudo.disabled = false; sudo.focus();
 }
+// Beneath the field: its own answer slot.
+function jmFieldOut(form, field) {
+  return form.querySelector('[data-out-for="' + field.name + '"]');
+}
+// The credential's status line, from the save's answer (written as text, never as markup).
+function jmShowSaved(name, j) {
+  const line = document.querySelector('[data-credential="' + name + '"]');
+  if (line) line.textContent = 'Set: fingerprint ' + (j.fingerprint || '?') + (j.login ? ', account ' + j.login : '') + (j.setAt ? ', saved ' + String(j.setAt).slice(0, 10) : '') + '; kept in the encrypted vault.';
+  const next = document.querySelector('#advance button[value=continue]');
+  if (next) next.disabled = false;
+}
 async function jmSaveCredentials(form, out) {
   out.textContent = '';
-  const filled = [...form.querySelectorAll('input[type=password]:not([name=sudo])')].filter((f) => f.value);
+  let said = '';
+  const fields = [...form.querySelectorAll('input[type=password]:not([name=sudo])')];
+  for (const f of fields) { const own = jmFieldOut(form, f); if (own) own.textContent = ''; }
+  const filled = fields.filter((f) => f.value);
   if (filled.length === 0) { out.textContent = 'Enter a token first.'; return 'empty'; }
   const sudo = form.querySelector('input[name=sudo]');
   // A hidden field is disabled: a password manager's unseen fill is never sent.
@@ -181,11 +211,22 @@ async function jmSaveCredentials(form, out) {
       out.textContent = j.error
         ? label + ' was not saved: ' + j.error
         : label + ' was not saved (' + r.status + ')' + (j.permission ? ': it needs ' + j.permission : '') + '.';
+      // Where the operator looks: beneath the field, scrolled to and focused.
+      const own = jmFieldOut(form, field);
+      if (own) own.textContent = out.textContent;
+      if (field.scrollIntoView) field.scrollIntoView({ block: 'center' });
+      if (field.focus) field.focus();
       return false;
     }
     field.value = '';
+    let j = {};
+    try { j = await r.json(); } catch (e) {}
+    said = j.tested ? 'Saved and tested.' : field.name === 'claudeToken' ? ${JSON.stringify(CLAUDE_SAVED)} : 'Saved. Only its form was checked.';
+    const own = jmFieldOut(form, field);
+    if (own) own.textContent = said;
+    jmShowSaved(field.name, j);
   }
-  out.textContent = 'Saved and tested.';
+  out.textContent = said;
   return 'saved';
 }
 </script>`;
@@ -320,11 +361,14 @@ function forgePage(store: ConfigStore, sudo: boolean, wizard: Wizard, guide?: Fo
       r.githubReadToken,
     ),
   ].join('');
+  // The account choice comes before the fields it decides, but goes with Continue (its `form`
+  // attribute names the advance form; the project step offers it), never with Save.
   return frame(
     'forge',
     `<h3>Connect GitHub</h3>
 ${guideSection(guide)}
 <h4>The tokens</h4>
+<p><label><input type="checkbox" name="starter" value="1" form="advance"${starter ? ' checked' : ''}> Starter mode: one GitHub account, no reviewer</label> <small>Decides whether the reviewer token is needed; it is kept when you press Continue.</small></p>
 <p>Jumpmaster works on GitHub as an <strong>author</strong> account (opens and merges the agents' pull requests) and, in two-bot mode, a separate <strong>reviewer</strong> account (approves them). Use fine-grained tokens limited to your repositories. Each token is tested with GitHub before it is saved, and never shown back.</p>
 <h4>Author</h4>${credentialLine('githubAuthorToken', r.githubAuthorToken)}
 <h4>Reviewer</h4>${credentialLine('githubReviewerToken', r.githubReviewerToken)}
@@ -339,13 +383,6 @@ document.getElementById('forge').addEventListener('submit', async (e) => {
   await jmSaveCredentials(e.target, document.getElementById('forge-out'));
 });
 </script>`,
-    {
-      // The account choice goes with Continue (the project step offers it), never with Save.
-      advance: advanceForm(
-        'forge',
-        `<p><label><input type="checkbox" name="starter" value="1"${starter ? ' checked' : ''}> Starter mode: one GitHub account, no reviewer</label></p>`,
-      ),
-    },
   );
 }
 
@@ -443,7 +480,7 @@ document.getElementById('detect').addEventListener('submit', async (e) => {
   const j = await r.json().catch(() => ({}));
   if (!r.ok) {
     out.textContent = (j.error || ('Not read (' + r.status + ')')) + ' ';
-    if (r.status === 409) { const a = document.createElement('a'); a.href = '/setup/forge'; a.textContent = 'Go to the GitHub step'; out.append(a); }
+    if (r.status === 409) { const a = document.createElement('a'); a.href = '/setup/forge'; a.className = 'button primary'; a.textContent = 'Go to the GitHub step'; out.append(a); }
     return;
   }
   out.textContent = '';

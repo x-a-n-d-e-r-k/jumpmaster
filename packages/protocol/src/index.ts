@@ -595,6 +595,17 @@ export const ImageFetchSchema = z.object({
 });
 export type ImageFetch = z.infer<typeof ImageFetchSchema>;
 
+/**
+ * A stick still running its first health check (issue #157), which pulls `image` and can take
+ * minutes on a cold cache: carried on its no-free-slot lease calls until the check has a result.
+ * `null` says the check has finished. A sibling of `ImageFetch`, not a reuse of it: there are no
+ * bytes to count.
+ */
+export const StickStartingSchema = z.object({
+  image: z.string().min(1).max(512),
+});
+export type StickStarting = z.infer<typeof StickStartingSchema>;
+
 /** The push container's payload. Strict, and carries no token: the grant arrives after ready. */
 export const PushPayloadSchema = z
   .object({

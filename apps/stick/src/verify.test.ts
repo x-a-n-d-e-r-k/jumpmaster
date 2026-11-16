@@ -645,8 +645,8 @@ describe('startup under the signed policy', () => {
       },
     });
     const f = fakeCosign((args) =>
-      args.includes('--local-image')
-        ? ok(JSON.stringify([{ critical: { image: { 'docker-manifest-digest': r.indexDigest } } }]))
+      args[0] === 'verify-blob-attestation' && args.includes('--offline')
+        ? ok('')
         : { code: 99, stdout: '', stderr: 'Error: the registry was asked' },
     );
     expect(
@@ -669,7 +669,7 @@ describe('startup under the signed policy', () => {
     });
     expect(log.join('\n')).toMatch(/push-v1 withheld/);
     expect(pulled).toEqual([]);
-    expect(f.calls.every((a) => a.includes('--local-image'))).toBe(true);
+    expect(f.calls.every((a) => a[0] === 'verify-blob-attestation')).toBe(true);
     // Under allowlist, the allow-list still decides first.
     const allow = await verifyBaseImage(r.ref, {
       trust: { policy: 'allowlist', allowed: new Set(), server: server(200) },
