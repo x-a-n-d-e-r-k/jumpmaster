@@ -1,5 +1,13 @@
-import { randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { payloadSecrets } from '@jumpmaster/protocol';
@@ -14,7 +22,10 @@ import {
   upsertDropZone,
   upsertWorkItem,
 } from '../db/repo.js';
+import { ScrubSet } from '../forge/scrub-set.js';
+import { scrub } from '../scrub.js';
 import { plus, t0, tmpDbFile } from '../test/helpers.js';
+import { appEntryName, serializeAppEntry } from '../vault/github-app-entries.js';
 import { openVault } from '../vault/vault.js';
 import { type BootConfig, loadBoot, RESTART_PATHS } from './boot.js';
 import { mergePatch } from './diff.js';
@@ -1335,6 +1346,132 @@ describe('credentials in the store (Task 4)', () => {
     });
     expect(store.current().secrets.claudeToken).toBe(VAULT_CLAUDE);
     expect(vault !== 'disabled' ? vault.snapshot('claudeToken') : undefined).toEqual(before);
+  });
+});
+
+describe('GitHub App entries in the store (§4.4)', () => {
+  const PEM = generateKeyPairSync('rsa', { modulusLength: 2048 })
+    .privateKey.export({ type: 'pkcs8', format: 'pem' })
+    .toString();
+  const PEM_LINES = PEM.split('\n').filter((l) => l !== '' && !l.startsWith('-----'));
+  const appEntry = serializeAppEntry({
+    appId: '42',
+    slug: 'acme-author',
+    clientId: 'Iv23liStore0001',
+    pem: PEM,
+    importedAt: '2026-11-15T10:00:00.000Z',
+  });
+  function withVault(doc?: Record<string, unknown>) {
+    const w = world(doc);
+    const secrets = dir();
+    const key = join(dir(), 'vault_key');
+    writeFileSync(key, randomBytes(32).toString('base64url'), { mode: 0o600 });
+    const vault = openVault(key, w.db);
+    if (vault === 'disabled') throw new Error('expected a vault');
+    const e = { ...env, JM_SECRETS_DIR: secrets };
+    const open = () =>
+      w.open({ env: e, boot: loadBoot(e, w.file), vault, scrubSet: new ScrubSet() });
+    return { w, vault, secrets, open };
+  }
+
+  test("a vault app entry for a two-bot zone's owner is in resolvedApps(), on load and on each revision", () => {
+    const { vault, open } = withVault({ dropZones: [zone('main', { repo: 'Acme/main' })] });
+    vault.put(appEntryName('acme', 'author'), appEntry, { now: t0 });
+    const store = open();
+    expect(store.resolvedApps().get('acme')?.author).toMatchObject({ source: 'vault' });
+    expect(store.resolvedApps().get('acme')?.reviewer).toEqual({ source: 'missing' });
+    for (const l of PEM_LINES) expect(JSON.stringify(store.current())).not.toContain(l);
+  });
+
+  test('resolvedApps() follows each revision', () => {
+    const { vault, open } = withVault();
+    vault.put(appEntryName('globex', 'reviewer'), appEntry, { now: t0 });
+    const store = open();
+    expect(store.resolvedApps().size).toBe(0);
+    expect(
+      store.apply(
+        { dropZones: [zone('g', { repo: 'globex/g' })] },
+        { via: 'ctl', principal: token },
+      ).ok,
+    ).toBe(true);
+    expect(store.resolvedApps().get('globex')?.reviewer).toMatchObject({ source: 'vault' });
+  });
+
+  test('a config with no app entries loads as before, its zone on an owner GitHub would refuse too', () => {
+    const { open } = withVault({ dropZones: [zone('main', { repo: 'my_org/x' })] });
+    const store = open();
+    expect(store.current().dropZones.map((z) => z.repo)).toEqual(['my_org/x']);
+    expect(store.resolvedApps().size).toBe(0);
+  });
+
+  test('the secretsFor seam has no app entries', () => {
+    const w = world({ dropZones: [zone()] });
+    const store = w.open({
+      secretsFor: () => ({
+        claudeToken: 'claude-x-0001',
+        githubAuthorToken: 'author-x-0001',
+        githubReviewerToken: 'reviewer-x-0001',
+        joinToken: 'join-x-0001',
+        operatorToken: 'o'.repeat(32),
+      }),
+    });
+    expect(store.resolvedApps().size).toBe(0);
+  });
+
+  test("a malformed entry file for a two-bot zone's owner is an issue naming the path, with no PEM line", () => {
+    const { open, secrets } = withVault();
+    const store = open();
+    mkdirSync(join(secrets, 'github-app', 'acme'), { recursive: true });
+    const path = join(secrets, 'github-app', 'acme', 'author.json');
+    writeFileSync(path, appEntry.replace('"42"', '"forty-two"'), { mode: 0o600 });
+    const r = store.apply(
+      { dropZones: [zone('main', { repo: 'acme/main' })] },
+      { via: 'ctl', principal: token },
+    );
+    expect(r.ok).toBe(false);
+    const msg = JSON.stringify(r);
+    expect(msg).toContain(path);
+    expect(msg).not.toContain('PRIVATE KEY');
+    for (const l of PEM_LINES) expect(msg).not.toContain(l);
+    // A starter zone on the same owner does not read it.
+    expect(
+      store.apply(
+        { dropZones: [zone('main', { repo: 'acme/main', identity: 'starter', ciRequired: true })] },
+        { via: 'ctl', principal: token },
+      ).ok,
+    ).toBe(true);
+  });
+
+  test('a malformed entry file at start refuses the stored config, as an unreadable secret does', () => {
+    const { open, secrets } = withVault();
+    const store = open();
+    expect(
+      store.apply(
+        { dropZones: [zone('main', { repo: 'acme/main' })] },
+        { via: 'ctl', principal: token },
+      ).ok,
+    ).toBe(true);
+    mkdirSync(join(secrets, 'github-app', 'acme'), { recursive: true });
+    const path = join(secrets, 'github-app', 'acme', 'author.json');
+    writeFileSync(path, appEntry.replace('"42"', '"forty-two"'), { mode: 0o600 });
+    let msg = '';
+    try {
+      open();
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    expect(msg).toContain('the stored config');
+    expect(msg).toContain(path);
+    for (const l of PEM_LINES) expect(msg).not.toContain(l);
+  });
+
+  test('the loaded PEM is registered with the scrub set', () => {
+    const { w, vault } = withVault({ dropZones: [zone('main', { repo: 'acme/main' })] });
+    vault.put(appEntryName('acme', 'author'), appEntry, { now: t0 });
+    const set = new ScrubSet();
+    const e = { ...env };
+    w.open({ env: e, vault, scrubSet: set });
+    expect(scrub(`k ${PEM}`, undefined, [], set)).toBe('k [redacted]');
   });
 });
 
