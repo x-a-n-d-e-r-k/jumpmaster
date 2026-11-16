@@ -1103,14 +1103,14 @@ export function renderDoctor(
   zones: DropZoneConfig[],
 ): string {
   const name = zoneNamer(zones);
-  const controls = `<p><button data-doctor="/api/control/doctor">Run the doctor</button></p><p>A doctor drop proves the Claude token, the clone, services and gates on a stick; it spends one turn of usage.${zones
+  // One doctor drop button per project, as a list under its explanation.
+  const drops = zones
     .map(
       (z) =>
-        ` <button data-doctor="/api/control/doctor/drop" data-body="${escapeHtml(JSON.stringify({ zone: z.id }))}">Doctor drop: ${name(z.id)}</button>`,
+        `<li><button data-doctor="/api/control/doctor/drop" data-body="${escapeHtml(JSON.stringify({ zone: z.id }))}">Doctor drop: ${name(z.id)}</button></li>`,
     )
-    .join(
-      '',
-    )}</p>${zones.length > 0 ? `<p>GitHub setup (token links, the ruleset file, CODEOWNERS): ${zones.map((z) => `<a href="/zones/${encodeURIComponent(z.id)}/github">${name(z.id)}</a>`).join(', ')}</p>` : ''}`;
+    .join('');
+  const controls = `<p><button data-doctor="/api/control/doctor">Run the doctor</button></p><p>A doctor drop proves the Claude token, the clone, services and gates on a stick; it spends one turn of usage.</p>${drops ? `<ul class="doctor-drops">${drops}</ul>` : ''}${zones.length > 0 ? `<p>GitHub setup (token links, the ruleset file, CODEOWNERS): ${zones.map((z) => `<a href="/zones/${encodeURIComponent(z.id)}/github">${name(z.id)}</a>`).join(', ')}</p>` : ''}`;
   if (!run)
     return page(
       `<h2>Doctor</h2><p>No doctor run has finished yet. Run one here or with <code>jumpmaster ctl doctor</code>.</p>${controls}${DOCTOR_SCRIPT}`,

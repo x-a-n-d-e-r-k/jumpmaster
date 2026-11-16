@@ -188,6 +188,7 @@ dl.kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:.375rem 1
 dl.kv dt{color:var(--text-sub-600)}dl.kv dd{margin:0;overflow-wrap:anywhere}
 .section-h{margin:2rem 0 .75rem;display:flex;align-items:baseline;gap:.5rem;flex-wrap:wrap}
 .quick{display:flex;gap:.5rem;flex-wrap:wrap;margin:0 0 1rem}
+.doctor-drops{list-style:none;padding:0;margin:0 0 1rem;display:flex;flex-direction:column;align-items:flex-start;gap:.5rem}
 .quick a{display:inline-flex;align-items:center;min-height:2rem;padding:0 .75rem;border-radius:8px;background:var(--bg-white-0);box-shadow:var(--shadow-xs),inset 0 0 0 1px var(--stroke-soft-200);color:var(--text-sub-600)}
 .quick a:hover{background:var(--bg-weak-50);color:var(--text-strong-950);text-decoration:none}
 td:last-child>a+a{margin-left:.75rem}
