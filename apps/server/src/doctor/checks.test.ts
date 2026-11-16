@@ -1583,3 +1583,65 @@ describe('server.public-url (issue #139)', () => {
     expect(c.summary).toContain(message);
   });
 });
+
+describe('server.image-mirror (issue #140)', () => {
+  const row = (
+    name: string,
+    state: 'complete' | 'fetching' | 'failed' | 'pending',
+    error?: string,
+  ) => ({
+    name,
+    digest: `sha256:${'a'.repeat(64)}`,
+    ref: `ghcr.io/o/${name}@sha256:${'a'.repeat(64)}`,
+    state,
+    ...(error ? { error } : {}),
+    platforms: ['linux/amd64', 'linux/arm64'],
+    size: 1000,
+    current: true,
+  });
+
+  test('absent without a mirror (a test app); with one and no lock: info, nothing to mirror', async () => {
+    const w = world();
+    expect((await w.run()).some((c) => c.id === 'server.image-mirror')).toBe(false);
+    w.deps.imageMirror = () => ({ lock: false, images: [] });
+    const c = one(await w.run(), 'server.image-mirror');
+    expect(c.status).toBe('info');
+    expect(c.summary).toContain('runs from a checkout; nothing to mirror');
+  });
+
+  test('every image complete: pass', async () => {
+    const w = world();
+    w.deps.imageMirror = () => ({
+      lock: true,
+      images: [row('jumpmaster-trooper', 'complete'), row('jumpmaster-egress', 'complete')],
+    });
+    const c = one(await w.run(), 'server.image-mirror');
+    expect(c.status).toBe('pass');
+    expect(c.summary).toBe('2 release images mirrored for sticks (linux/amd64, linux/arm64)');
+  });
+
+  test('an image failed: warn naming it and the reason', async () => {
+    const w = world();
+    w.deps.imageMirror = () => ({
+      lock: true,
+      images: [
+        row('jumpmaster-trooper', 'complete'),
+        row('jumpmaster-egress', 'failed', 'the registry refused anonymous access'),
+      ],
+    });
+    const c = one(await w.run(), 'server.image-mirror');
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('jumpmaster-egress: the registry refused anonymous access');
+  });
+
+  test('still fetching: info, saying so', async () => {
+    const w = world();
+    w.deps.imageMirror = () => ({
+      lock: true,
+      images: [row('jumpmaster-trooper', 'fetching'), row('jumpmaster-egress', 'pending')],
+    });
+    const c = one(await w.run(), 'server.image-mirror');
+    expect(c.status).toBe('info');
+    expect(c.summary).toContain('2 of 2 release images are still being mirrored');
+  });
+});

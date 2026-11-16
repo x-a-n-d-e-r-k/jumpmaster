@@ -1,4 +1,7 @@
 import { createHash } from 'node:crypto';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   FEATURES_HEADER,
   PushGrantSchema,
@@ -39,7 +42,10 @@ import {
   upsertPullRequest,
   upsertWorkItem,
 } from '../db/repo.js';
+import { ScrubSet } from '../forge/scrub-set.js';
+import { ImageMirror } from '../images/mirror.js';
 import { buildPayload, promptVersions } from '../payloads.js';
+import { type FakeImage, type FakeRegistry, startFakeRegistry } from '../test/fake-registry.js';
 import { fakeForge } from '../test/fakes.js';
 import { plus, t0, tmpDbFile, workItem } from '../test/helpers.js';
 import { registerStickRoutes } from './sticks.js';
@@ -103,6 +109,7 @@ function setup(
     now?: () => Date;
     config?: LiveConfig;
     logs?: string[];
+    images?: ImageMirror;
   } = {},
 ) {
   const db = openDb(tmpDbFile());
@@ -142,6 +149,7 @@ function setup(
     now: opts.now ?? (() => t0),
     leaseWaitMs: opts.leaseWaitMs ?? 60,
     leasePollMs: opts.leasePollMs ?? 10,
+    ...(opts.images ? { images: opts.images } : {}),
   });
   return { db, forge, wi, forgeZones };
 }
@@ -1831,5 +1839,118 @@ describe('push container routes', () => {
       }
     }
     expect(liveGrants(db)).toBe(0);
+  });
+});
+
+describe('the images route (issue #140)', () => {
+  let fake: FakeRegistry;
+  let img: FakeImage;
+  let pending: FakeImage;
+  afterEach(() => fake.close());
+
+  /** A mirror with one complete image and one listed but not yet fetched. */
+  async function withImages() {
+    fake = await startFakeRegistry();
+    img = fake.addImage('jumpmaster-trooper');
+    pending = fake.addImage('jumpmaster-egress');
+    const images = new ImageMirror({
+      dataDir: mkdtempSync(join(tmpdir(), 'jm-route-')),
+      scheme: () => 'http',
+      scrub: new ScrubSet(),
+      log: () => {},
+    });
+    images.setLock({ registry: fake.registry, images: { [img.name]: img.digest } });
+    await images.syncOnce();
+    images.setLock({
+      registry: fake.registry,
+      images: { [img.name]: img.digest, [pending.name]: pending.digest },
+    });
+    setup({ images });
+    return enroll();
+  }
+
+  const get = (url: string, headers: Record<string, string> = proto) =>
+    app.inject({ method: 'GET', url, headers });
+  const urlOf = (name: string, digest: string, platform = 'linux/amd64') =>
+    `/api/sticks/images/${name}@${digest}/oci.tar?platform=${encodeURIComponent(platform)}`;
+
+  test('an authenticated stick downloads the OCI layout tar, with its length and ETag', async () => {
+    const { stickToken } = await withImages();
+    const res = await get(urlOf(img.name, img.digest), bearer(stickToken));
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toBe('application/x-tar');
+    expect(Number(res.headers['content-length'])).toBe(res.rawPayload.length);
+    expect(res.headers.etag).toBe(`"${img.platforms['linux/amd64']?.manifest}"`);
+    expect(res.rawPayload.subarray(0, 10).toString()).toBe('oci-layout');
+    const arm = await get(urlOf(img.name, img.digest, 'linux/arm64'), bearer(stickToken));
+    expect(arm.headers.etag).toBe(`"${img.platforms['linux/arm64']?.manifest}"`);
+    // A percent-encoded reference is the same reference.
+    const encoded = await get(
+      `/api/sticks/images/${encodeURIComponent(`${img.name}@${img.digest}`)}/oci.tar?platform=linux/amd64`,
+      bearer(stickToken),
+    );
+    expect(encoded.statusCode).toBe(200);
+    // The same ETag again: nothing to send.
+    const again = await get(urlOf(img.name, img.digest), {
+      ...bearer(stickToken),
+      'if-none-match': String(res.headers.etag),
+    });
+    expect(again.statusCode).toBe(304);
+  });
+
+  test('anonymous and wrong-token requests get what an anonymous lease gets', async () => {
+    await withImages();
+    const anonLease = await app.inject({
+      method: 'POST',
+      url: '/api/sticks/lease',
+      headers: proto,
+      payload: { freeSlots: 1 },
+    });
+    const anon = await get(urlOf(img.name, img.digest));
+    expect(anon.statusCode).toBe(anonLease.statusCode);
+    expect(anon.json()).toEqual(anonLease.json());
+    expect((await get(urlOf(img.name, img.digest), bearer('bogus'))).statusCode).toBe(
+      (await lease('bogus')).statusCode,
+    );
+    // And without the protocol header, as every stick route.
+    expect((await get(urlOf(img.name, img.digest), {})).statusCode).toBe(426);
+  });
+
+  test('a digest the lock does not list is 404, as is a malformed reference', async () => {
+    const { stickToken } = await withImages();
+    const other = await get(urlOf(img.name, `sha256:${'0'.repeat(64)}`), bearer(stickToken));
+    expect(other.statusCode).toBe(404);
+    expect(other.json()).toEqual({ error: 'not in the image lock' });
+    for (const ref of ['jumpmaster-trooper:latest', '..%2F..%2Fetc@sha256:00', 'x'])
+      expect(
+        (await get(`/api/sticks/images/${ref}/oci.tar?platform=linux/amd64`, bearer(stickToken)))
+          .statusCode,
+        ref,
+      ).toBe(404);
+  });
+
+  test('an image not mirrored yet is 404 with its state; an unknown platform is 404', async () => {
+    const { stickToken } = await withImages();
+    const res = await get(urlOf(pending.name, pending.digest), bearer(stickToken));
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: 'not mirrored', state: 'pending' });
+    const plat = await get(urlOf(img.name, img.digest, 'linux/s390x'), bearer(stickToken));
+    expect(plat.statusCode).toBe(404);
+    expect(plat.json()).toEqual({ error: 'unknown platform' });
+    expect(
+      (await get(urlOf(img.name, img.digest).replace(/\?.*$/, ''), bearer(stickToken))).statusCode,
+    ).toBe(400);
+  });
+
+  test('a server without a mirror answers 404 for every image', async () => {
+    fake = await startFakeRegistry();
+    setup();
+    const { stickToken } = await enroll();
+    const res = await get(
+      urlOf('jumpmaster-trooper', `sha256:${'1'.repeat(64)}`),
+      bearer(stickToken),
+    );
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: 'not in the image lock' });
   });
 });

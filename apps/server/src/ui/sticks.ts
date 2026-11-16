@@ -1,6 +1,7 @@
 // The sticks page (issue #136): every enrolled stick, what it can run, and how many troopers it
 // runs at once, set here and applied on its next lease answer with no restart.
 import { STICK_LIVE_MS } from '../doctor/checks.js';
+import type { MirrorStatus } from '../images/mirror.js';
 import { PUBLIC_URL_NEEDED, PUBLIC_URL_PAGE } from '../reach.js';
 import { escapeHtml, page, type StickLine } from './pages.js';
 import { type ZoneRef, zoneNamer } from './zone-name.js';
@@ -38,12 +39,15 @@ export function renderSticks(s: {
   now: Date;
   /** `server.publicUrl` as an origin; absent, nothing that needs it is offered (issue #139). */
   publicUrl?: string;
+  /** The release images the server mirrors for sticks (issue #140); absent, no card. */
+  images?: MirrorStatus;
 }): string {
   const name = zoneNamer(s.zones);
   const reach = reachLine(s.publicUrl);
+  const images = s.images ? imagesCard(s.images) : '';
   if (s.sticks.length === 0)
     return page(
-      `<h2>Sticks</h2><p class="empty">No stick has enrolled. See <code>docs/runbooks/install.md</code> to add one.</p>${reach}`,
+      `<h2>Sticks</h2><p class="empty">No stick has enrolled. See <code>docs/runbooks/install.md</code> to add one.</p>${reach}${images}`,
       { title: 'Sticks' },
     );
   const rows = s.sticks
@@ -70,9 +74,27 @@ export function renderSticks(s: {
     .join('');
   return page(
     `<h2>Sticks</h2><p>How many troopers each stick runs at once. A change applies on the stick's next lease, with no restart; lowering it stops nothing that runs. <code>jumpmaster ctl sticks</code> does the same.</p>${reach}` +
-      `<table><tr><th>Stick</th><th>Status</th><th>Version</th><th>Capabilities</th><th>Zones</th><th>Troopers</th></tr>${rows}</table>${SLOTS_SCRIPT}`,
+      `<table><tr><th>Stick</th><th>Status</th><th>Version</th><th>Capabilities</th><th>Zones</th><th>Troopers</th></tr>${rows}</table>${SLOTS_SCRIPT}${images}`,
     { title: 'Sticks' },
   );
+}
+
+const mib = (bytes: number): string => `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+
+/** The images card: each image the mirror holds for sticks, its platforms, size and state. */
+function imagesCard(m: MirrorStatus): string {
+  const intro =
+    '<p>The release images this server keeps for sticks, with their signatures: a stick fetches them from here and verifies each signature itself.</p>';
+  if (!m.lock && m.images.length === 0)
+    return `<h3>Images</h3><p class="empty">No image lock: this server runs from a checkout, so there is nothing to mirror.</p>`;
+  const rows = m.images
+    .map((i) => {
+      const state = i.state === 'failed' ? `failed: ${i.error ?? 'unknown'}` : i.state;
+      const when = i.current ? '' : ' (previous release)';
+      return `<tr data-image="${escapeHtml(i.name)}"><td>${escapeHtml(i.name)}</td><td>${escapeHtml(i.platforms.join(', ') || '-')}</td><td>${i.size > 0 ? mib(i.size) : '-'}</td><td>${escapeHtml(state + when)}</td><td><code>${escapeHtml(i.digest)}</code></td></tr>`;
+    })
+    .join('');
+  return `<h3>Images</h3>${intro}<table><tr><th>Image</th><th>Platforms</th><th>Size</th><th>State</th><th>Digest</th></tr>${rows}</table>`;
 }
 
 /**

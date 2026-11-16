@@ -45,12 +45,29 @@ function vault(): Vault {
 }
 
 describe('resolveCredentials', () => {
-  test('SECRET_FILES names the four credential files', () => {
+  test('SECRET_FILES names the five credential files', () => {
     expect(SECRET_FILES).toEqual({
       claudeToken: 'claude_token',
       githubAuthorToken: 'github_author_token',
       githubReviewerToken: 'github_reviewer_token',
       githubReadToken: 'github_read_token',
+      registryReadToken: 'registry_read_token',
+    });
+  });
+
+  test('the registry read token (issue #140) resolves like the others: variable, file, vault', () => {
+    const value = 'ghp_' + 'registryReadToken0123456789';
+    expect(
+      resolveCredentials({ JM_REGISTRY_READ_TOKEN: value }, undefined, 'disabled')
+        .registryReadToken,
+    ).toMatchObject({ value, source: 'env', path: 'JM_REGISTRY_READ_TOKEN' });
+    const dir = secretsDir({ registry_read_token: value });
+    expect(resolveCredentials({}, dir, 'disabled').registryReadToken).toMatchObject({
+      value,
+      source: 'file',
+    });
+    expect(resolveCredentials({}, undefined, 'disabled').registryReadToken).toEqual({
+      source: 'missing',
     });
   });
 
@@ -310,6 +327,22 @@ describe('testing a credential on entry', () => {
       ok: true,
     });
     expect(g.calls).toEqual(['login octo/web']);
+  });
+
+  test('the registry read token is not a forge token: no GitHub call, the image mirror is its proof', async () => {
+    const f = forgeFake({});
+    expect(
+      await testCredential('registryReadToken', 'ghp_' + 'registryRead0123456789', {
+        zones,
+        forge: f.forge,
+      }),
+    ).toEqual({ ok: true, result: 'stored: the image mirror is the live proof (Sticks, Images)' });
+    expect(f.calls).toEqual([]);
+    expect(await testCredential('registryReadToken', 'short', { zones, forge: f.forge })).toEqual({
+      ok: false,
+      status: null,
+      problem: 'a registry token is at least 8 characters',
+    });
   });
 
   test('a failed test returns only the status and the permission, and nothing of the value or the upstream body', async () => {

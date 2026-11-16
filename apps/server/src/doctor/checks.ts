@@ -33,6 +33,7 @@ import {
 } from '../forge/github.js';
 import type { ZoneGuidance } from '../github/guidance.js';
 import { getGoals } from '../goals.js';
+import type { MirrorStatus } from '../images/mirror.js';
 import { doctorMayLease, missingFor, zoneRequirements } from '../leases.js';
 import type { ForgePair } from '../outbox.js';
 import { egressFor } from '../payloads.js';
@@ -101,6 +102,7 @@ export const CHECK_IDS = [
   'forge.private-clone',
   'forge.reviewer',
   'forge.reviewer-reads',
+  'server.image-mirror',
   'server.public-url',
   'stick.capabilities',
   'stick.image-policy',
@@ -145,6 +147,8 @@ export type DoctorDeps = {
   readForge?(zoneId: string): Forge | undefined;
   /** The config store's status (mode, file problems, restart-pending settings), when there is one. */
   configStatus?: ConfigStatus;
+  /** The image mirror's state, for `server.image-mirror`; absent, the check does not run. */
+  imageMirror?(): MirrorStatus;
   /** The Check behind `server.public-url` (default: fetch `<publicUrl>/healthz`, 5 s). */
   reach?(publicUrl: string): Promise<ReachResult>;
   /** Which pages exist, for the fix links (default: this build's, `PAGES_M45A`). */
@@ -2191,6 +2195,45 @@ function vaultKeyCheck(d: DoctorDeps): DoctorCheck {
 }
 
 /** Every check, global ones first, then each zone's (zones in parallel). */
+/**
+ * The release images the server mirrors for sticks (issue #140): no lock is information (a
+ * checkout has nothing to mirror), every image complete a pass, any failed a warn naming each
+ * image and its reason, and a mirror still at work information.
+ */
+function imageMirrorCheck(status: MirrorStatus): DoctorCheck {
+  const base = { id: 'server.image-mirror', zoneId: null };
+  if (!status.lock)
+    return {
+      ...base,
+      status: 'info',
+      summary: 'no image lock: the server runs from a checkout; nothing to mirror',
+    };
+  const current = status.images.filter((i) => i.current);
+  const failed = current.filter((i) => i.state === 'failed');
+  if (failed.length > 0)
+    return {
+      ...base,
+      status: 'warn',
+      summary: `${failed.length} of ${current.length} release images could not be mirrored: ${failed
+        .map((i) => `${i.name}: ${i.error ?? 'unknown'}`)
+        .join('; ')}`,
+      fix: 'The mirror retries with backoff. A refusal from the registry needs the registryReadToken credential (Settings, Credentials, or JM_REGISTRY_READ_TOKEN) with read access to the packages.',
+    };
+  const busy = current.filter((i) => i.state !== 'complete');
+  if (busy.length > 0)
+    return {
+      ...base,
+      status: 'info',
+      summary: `${busy.length} of ${current.length} release images are still being mirrored`,
+    };
+  const platforms = [...new Set(current.flatMap((i) => i.platforms))].sort();
+  return {
+    ...base,
+    status: 'pass',
+    summary: `${current.length} release images mirrored for sticks (${platforms.join(', ')})`,
+  };
+}
+
 export async function runChecks(
   d: DoctorDeps,
   opts: { zoneId?: string } = {},
@@ -2205,6 +2248,13 @@ export async function runChecks(
     g('claude.plan', null, () => planCheck(d)),
     g('control.kill', null, () => killCheck(d)),
     g('server.public-url', null, () => publicUrlCheck(d)),
+    ...(d.imageMirror
+      ? [
+          g('server.image-mirror', null, () =>
+            imageMirrorCheck((d.imageMirror as () => MirrorStatus)()),
+          ),
+        ]
+      : []),
     g('usage.gate', null, () => usageCheck(d)),
     g('stick.seen', null, () => stickSeenCheck(d, sticks)),
     g('stick.image-policy', null, () => imagePolicyCheck(d, sticks)),

@@ -104,6 +104,7 @@ type Rule = (check: DoctorCheck, ctx: ActionCtx) => Action | undefined;
 const TABLE: Record<string, Rule> = {
   'config.listen': settings('/settings/install', 'Open Settings, Install'),
   'server.public-url': settings('/settings/other-machines', 'Open Settings, Other machines'),
+  'server.image-mirror': () => app('See the images on Sticks', '/sticks'),
   'claude.plan': settings('/settings/install', 'Open Settings, Install'),
   'usage.gate': settings('/settings/install', 'Open Settings, Install'),
   'config.file': settings('/settings/history', 'Open Settings, History'),

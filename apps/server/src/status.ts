@@ -132,6 +132,7 @@ const CREDENTIAL_WORDS: Record<string, string> = {
   githubAuthorToken: 'author token',
   githubReviewerToken: 'reviewer token',
   githubReadToken: 'read token',
+  registryReadToken: 'registry read token',
 };
 const credentialWords = (name: string) =>
   CREDENTIAL_WORDS[name] ?? `gate secret ${name.split(':').at(-1)}`;

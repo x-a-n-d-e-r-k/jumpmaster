@@ -293,6 +293,7 @@ export function createApp(
       zones: config.dropZones,
       now: deps.now(),
       ...(publicOrigin(config) ? { publicUrl: publicOrigin(config) as string } : {}),
+      ...(deps.images ? { images: deps.images.status() } : {}),
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });

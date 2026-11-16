@@ -62,6 +62,7 @@ import {
 } from '../doctor/checks.js';
 import { DoctorBusyError, latestDoctorRun, processEnv, runDoctor } from '../doctor/run.js';
 import { type Forge, GitHubForge } from '../forge/github.js';
+import type { ImageMirror } from '../images/mirror.js';
 import { fileIntakeIssue, GoalStubSchema, IntakeIssueSchema, renderGoalStub } from '../intake.js';
 import { engageKill, releaseKill } from '../leases.js';
 import {
@@ -128,6 +129,8 @@ export interface ControlDeps {
   readForgeFor?(zoneId: string): Forge | undefined;
   /** This process as the doctor sees it (default: read from the process). */
   doctorEnv?: DoctorEnv;
+  /** The image mirror, for the doctor's `server.image-mirror` (issue #140). */
+  images?: Pick<ImageMirror, 'status'>;
   /** The in-memory setup code, shared with the setup pages (default: one printing to stderr). */
   setup?: SetupMode;
   /** Per-source backoff for passphrase guesses, shared with the login page. */
@@ -577,6 +580,9 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
               ...(configStatus ? { configStatus } : {}),
               ...(credentials ? { credentials } : {}),
               ...(deps.reach ? { reach: (u: string) => checkReach(u, deps.reach) } : {}),
+              ...(deps.images
+                ? { imageMirror: () => deps.images?.status() ?? { lock: false, images: [] } }
+                : {}),
               // The pages this app registers decide where the fix links go.
               pages: pagesOf(app),
               // The zone's generated GitHub files, for the fix links that bring one along.
