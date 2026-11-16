@@ -178,7 +178,7 @@ export async function harness(
     wipeDbKeepIssues() {
       db.exec(`DELETE FROM outbox; DELETE FROM attempts; DELETE FROM verdicts;
         DELETE FROM pull_requests; DELETE FROM drop_events; DELETE FROM drops;
-        DELETE FROM work_items;
+        DELETE FROM work_items; DELETE FROM usage_windows;
         UPDATE usage_state SET status = NULL, paused_until = NULL, five_hour_util = NULL,
           five_hour_resets_at = NULL, seven_day_util = NULL, seven_day_resets_at = NULL,
           observed_at = NULL, paused_at = NULL, pause_confirmed = 0, probe_drop_id = NULL,

@@ -113,6 +113,44 @@ describe('protocol', () => {
         unifiedWindows: { seven_day: { utilization: 0.5 } },
       }).unifiedWindows?.seven_day?.utilization,
     ).toBe(0.5));
+  test('rate limit event data keeps every valid window key (#144)', () => {
+    const at = '2026-11-20T00:00:00.000Z';
+    expect(
+      RateLimitEventDataSchema.parse({
+        status: 'allowed',
+        unifiedWindows: {
+          seven_day: { utilization: 0.5, resetsAt: at },
+          seven_day_fable: { utilization: 0.42 },
+        },
+      }).unifiedWindows,
+    ).toEqual({
+      seven_day: { utilization: 0.5, resetsAt: at },
+      seven_day_fable: { utilization: 0.42 },
+    });
+  });
+  test('a bad window key or value is dropped without failing the parse (#144)', () => {
+    const parsed = RateLimitEventDataSchema.parse({
+      status: 'allowed',
+      unifiedWindows: {
+        seven_day: { utilization: 0.5 },
+        'Bad-Key!': { utilization: 0.1 },
+        seven_day_opus: { utilization: 2 },
+        five_hour: { utilization: 0.3, resetsAt: 'soon' },
+        [`k${'x'.repeat(40)}`]: { utilization: 0.1 },
+      },
+    });
+    expect(parsed.unifiedWindows).toEqual({
+      seven_day: { utilization: 0.5 },
+      five_hour: { utilization: 0.3 },
+    });
+    expect(
+      DropResultSchema.parse({
+        status: 'completed',
+        gates: [],
+        rateLimit: { status: 'allowed', unifiedWindows: { 'Bad-Key!': { utilization: 2 } } },
+      }).status,
+    ).toBe('completed');
+  });
   test('rate_limited result carries its rate limit', () =>
     expect(
       DropResultSchema.parse({
