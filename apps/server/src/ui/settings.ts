@@ -3,7 +3,14 @@ import { type GuidanceForge, githubGuidanceForge } from '../api/github.js';
 import { withCsrf } from '../auth/guard.js';
 import type { BootOrigin } from '../config/boot.js';
 import { type ConfigStore, type RevisionView, VAULT_DISABLED } from '../config/store.js';
-import { type Config, MAX_POLL_SECONDS, MIN_POLL_SECONDS, mcpConfigOf } from '../config.js';
+import {
+  CLAUDE_PLANS,
+  type Config,
+  MAX_POLL_SECONDS,
+  MIN_POLL_SECONDS,
+  mcpConfigOf,
+  planLabel,
+} from '../config.js';
 import type { Db } from '../db/open.js';
 import { listMcpTokens, MAX_TOKEN_DAYS, type McpTokenInfo } from '../mcp/tokens.js';
 import {
@@ -183,12 +190,10 @@ function rowFor(
 function planSection(store: ConfigStore, config: Config): string {
   if (store.mode() === 'file')
     return `<p>Plan <strong>${escapeHtml(config.claude.plan)}</strong> (set in the config file)</p>`;
-  const plans = ['pro', 'max', 'team_standard', 'team_premium', 'enterprise']
-    .map(
-      (p) =>
-        `<option value="${p}"${config.claude.plan === p ? ' selected' : ''}>${escapeHtml(p)}</option>`,
-    )
-    .join('');
+  const plans = CLAUDE_PLANS.map(
+    (p) =>
+      `<option value="${p}"${config.claude.plan === p ? ' selected' : ''}>${escapeHtml(planLabel(p))}</option>`,
+  ).join('');
   return `<form id="plan"><label>Plan <select name="plan">${plans}</select></label> <button>Save the plan</button></form>`;
 }
 
@@ -433,13 +438,14 @@ type Setting = {
   /** `<input>` attributes for a number (min, max, step). */
   attrs?: string;
   options?: readonly string[];
+  /** How a select's option reads (default: its value). */
+  optionLabel?: (option: string) => string;
   /** Read-only even in db mode, with `note` saying where it is changed. */
   locked?: boolean;
   note?: string;
 };
 
 const RESTART_NOTE = 'takes effect at the next restart';
-const PLANS = ['pro', 'max', 'team_standard', 'team_premium', 'enterprise'] as const;
 
 function installSettings(config: Config): Setting[] {
   const mcp = mcpConfigOf(config);
@@ -472,7 +478,8 @@ function installSettings(config: Config): Setting[] {
       label: 'the Claude plan, as you declare it',
       kind: 'select',
       value: config.claude.plan,
-      options: PLANS,
+      options: CLAUDE_PLANS,
+      optionLabel: planLabel,
     },
     {
       path: 'claude.fableModel',
@@ -551,7 +558,7 @@ function settingControl(s: Setting): string {
     return `<select ${data}${lock}>${(s.options ?? [])
       .map(
         (o) =>
-          `<option value="${escapeHtml(o)}"${o === s.value ? ' selected' : ''}>${escapeHtml(o)}</option>`,
+          `<option value="${escapeHtml(o)}"${o === s.value ? ' selected' : ''}>${escapeHtml(s.optionLabel?.(o) ?? o)}</option>`,
       )
       .join('')}</select>`;
   const value = s.value === null || s.value === undefined ? '' : String(s.value);

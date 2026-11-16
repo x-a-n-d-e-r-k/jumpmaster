@@ -11,7 +11,7 @@ goes through the outbox.
 > **Billing warning.** Declaring a plan that includes Fable when yours doesn't can bill
 > pay-as-you-go credits without asking. Declare `claude.plan` exactly as your subscription is, and
 > leave `claude.fableModel` unset if you are unsure. With `plan: "pro"` (the default) no drop ever
-> asks for Fable. Only `max` and `team_premium` count as including Fable.
+> asks for Fable. Only `max`, `ultra` and `team_premium` count as including Fable.
 
 **Rollback for every stage:** set `crew.enabled: false` on the zone and restart. No crew drop runs,
 and nothing is filed, promoted or revised. **Promote** and **Re-stage** rulings are recorded and
@@ -154,7 +154,7 @@ To check the model rules, park something on purpose: add the `jm:hold` label to 
 item's **PR** (the label on the issue does nothing). Then open the diagnose drop at `/drops/<id>`:
 - Its requested and served models are shown.
 - With `plan: "pro"`, the requested model is never Fable.
-- With `max` or `team_premium` and `fableModel` set, diagnose may request Fable, as may any role
+- With `max`, `ultra` or `team_premium` and `fableModel` set, diagnose may request Fable, as may any role
   whose model names Fable, until `fableWeeklyDropCap` drops across all zones have asked for it in
   the trailing seven days (drops that started and asked for Fable count, even if they failed or were cancelled). A Fable-only rate limit pauses Fable
   until it resets.

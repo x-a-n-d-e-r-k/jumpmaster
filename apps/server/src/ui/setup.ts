@@ -10,7 +10,7 @@ import {
 import { withCsrf } from '../auth/guard.js';
 import { getSetting, setSetting } from '../config/revisions.js';
 import type { ConfigStore } from '../config/store.js';
-import { type Config, STARTER_WARNING } from '../config.js';
+import { CLAUDE_PLANS, type Config, planLabel, STARTER_WARNING } from '../config.js';
 import type { Db } from '../db/open.js';
 import { listSticks } from '../db/repo.js';
 import { DOC } from '../doctor/checks.js';
@@ -208,12 +208,10 @@ function claudePage(store: ConfigStore, sudo: boolean): string {
   const c = store.resolved().claudeToken;
   const config = store.current();
   const fileMode = store.mode() === 'file';
-  const plans = ['pro', 'max', 'team_standard', 'team_premium', 'enterprise']
-    .map(
-      (p) =>
-        `<option value="${p}"${config.claude.plan === p ? ' selected' : ''}>${escapeHtml(p)}</option>`,
-    )
-    .join('');
+  const plans = CLAUDE_PLANS.map(
+    (p) =>
+      `<option value="${p}"${config.claude.plan === p ? ' selected' : ''}>${escapeHtml(planLabel(p))}</option>`,
+  ).join('');
   const field = credentialField('claudeToken', 'Claude token', c);
   return frame(
     'claude',

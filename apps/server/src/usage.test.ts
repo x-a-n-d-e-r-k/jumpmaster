@@ -10,6 +10,7 @@ import {
   getUsageState,
   insertDrop,
   insertStick,
+  listUsageWindows,
   type NewDrop,
   setUsageState,
   setWorkItemState,
@@ -525,4 +526,189 @@ test('ingestRateLimit accepts a source with no work item', () => {
   ingestRateLimit(db, rej(future), crew, cfg, t0, zero);
   expect(getUsageState(db)).toMatchObject({ status: 'rejected', causeWorkItemId: null });
   expect(dispatchGate(db, cfg, plus(t0, MIN))).toBe('closed');
+});
+
+describe('every reported usage window (#144)', () => {
+  const allowed = (windows: RateLimitEventData['unifiedWindows']): RateLimitEventData => ({
+    status: 'allowed',
+    unifiedWindows: windows,
+  });
+
+  test('two reports keep the latest value of every window, with observed_at set', () => {
+    ingestRateLimit(
+      db,
+      allowed({
+        seven_day: { utilization: 0.3, resetsAt: '2026-10-25T00:00:00.000Z' },
+        seven_day_fable: { utilization: 0.1 },
+      }),
+      src('d1', null),
+      cfg,
+      t0,
+    );
+    const later = plus(t0, MIN);
+    ingestRateLimit(
+      db,
+      allowed({ seven_day_fable: { utilization: 0.42, resetsAt: '2026-10-26T00:00:00.000Z' } }),
+      src('d2', null),
+      cfg,
+      later,
+    );
+    expect(listUsageWindows(db)).toEqual([
+      {
+        key: 'seven_day',
+        utilization: 0.3,
+        resetsAt: '2026-10-25T00:00:00.000Z',
+        observedAt: t0.toISOString(),
+      },
+      {
+        key: 'seven_day_fable',
+        utilization: 0.42,
+        resetsAt: '2026-10-26T00:00:00.000Z',
+        observedAt: later.toISOString(),
+      },
+    ]);
+    // The existing columns still follow five_hour and seven_day only.
+    expect(getUsageState(db)).toMatchObject({ sevenDayUtil: 0.3, fiveHourUtil: null });
+  });
+
+  test('a Fable-only limit still records its window', () => {
+    ingestRateLimit(
+      db,
+      {
+        status: 'rejected',
+        rateLimitType: 'seven_day_fable',
+        unifiedWindows: { seven_day_fable: { utilization: 1 } },
+      },
+      src('d1', 'rate_limited'),
+      cfg,
+      t0,
+    );
+    expect(listUsageWindows(db).map((w) => [w.key, w.utilization])).toEqual([
+      ['seven_day_fable', 1],
+    ]);
+  });
+
+  test('the raw fallback keeps every valid window and drops bad ones', () => {
+    expect(
+      rateLimitFromEvent({
+        raw: {
+          rate_limit_info: {
+            status: 'allowed',
+            unifiedWindows: {
+              seven_day: { utilization: 0.5, resetsAt: 1792555200 },
+              seven_day_fable: { utilization: 0.42 },
+              'Bad-Key!': { utilization: 0.1 },
+              seven_day_opus: { utilization: 2 },
+            },
+          },
+        },
+      })?.unifiedWindows,
+    ).toEqual({
+      seven_day: { utilization: 0.5, resetsAt: new Date(1792555200 * 1000).toISOString() },
+      seven_day_fable: { utilization: 0.42 },
+    });
+  });
+
+  // The gate reads no plan: under ultra (no five_hour reported) it decides exactly as today on
+  // seven_day, and a new window (here Fable's) never pauses or throttles anything.
+  type Row = { name: string; events: RateLimitEventData[]; outcome: DropResult['status'] | null };
+  const fable = (u: number) => ({ seven_day_fable: { utilization: u } });
+  const table: (Row & { gate: string })[] = [
+    {
+      name: 'seven_day low, Fable full',
+      events: [allowed({ seven_day: { utilization: 0.2 }, ...fable(1) })],
+      outcome: null,
+      gate: 'open',
+    },
+    {
+      name: 'only a new window, full',
+      events: [allowed(fable(1))],
+      outcome: null,
+      gate: 'open',
+    },
+    {
+      name: 'seven_day over the throttle',
+      events: [allowed({ seven_day: { utilization: 0.95 }, ...fable(0.1) })],
+      outcome: null,
+      gate: 'finishing_only',
+    },
+    {
+      name: 'rejected on seven_day',
+      events: [
+        {
+          status: 'rejected',
+          rateLimitType: 'seven_day',
+          resetsAt: '2026-10-27T12:00:00Z',
+          unifiedWindows: { seven_day: { utilization: 1 }, ...fable(0.5) },
+        },
+      ],
+      outcome: 'rate_limited',
+      gate: 'closed',
+    },
+    {
+      name: 'rejected on Fable only',
+      events: [
+        {
+          status: 'rejected',
+          rateLimitType: 'seven_day_fable',
+          resetsAt: '2026-10-27T12:00:00Z',
+          unifiedWindows: { seven_day: { utilization: 0.4 }, ...fable(1) },
+        },
+      ],
+      outcome: 'rate_limited',
+      gate: 'open',
+    },
+    {
+      name: 'rejected on seven_day, then a later drop resumes',
+      events: [
+        {
+          status: 'rejected',
+          rateLimitType: 'seven_day',
+          resetsAt: '2026-10-27T12:00:00Z',
+          unifiedWindows: { seven_day: { utilization: 1 }, ...fable(1) },
+        },
+        allowed({ seven_day: { utilization: 0.5 }, ...fable(1) }),
+      ],
+      outcome: 'rate_limited',
+      gate: 'open',
+    },
+  ];
+  /** Today's input for the same report: the windows the gate always knew, nothing else. */
+  const today = (e: RateLimitEventData): RateLimitEventData => {
+    const { unifiedWindows, ...rest } = e;
+    const sd = unifiedWindows?.seven_day;
+    return { ...rest, ...(sd ? { unifiedWindows: { seven_day: sd } } : {}) };
+  };
+  const run = (events: RateLimitEventData[], outcome: DropResult['status'] | null) => {
+    db = openDb(tmpDbFile());
+    upsertDropZone(db, { id: 'main', repo: 'octo/demo', defaultBranch: 'main', configJson: '{}' });
+    events.forEach((e, i) => {
+      const when = plus(t0, i * MIN);
+      // A later event comes from a drop started after the pause: it clears it.
+      ingestRateLimit(
+        db,
+        e,
+        src(`d${i}`, i === 0 ? outcome : null, when.toISOString(), i + 1),
+        cfg,
+        when,
+        zero,
+      );
+    });
+    const end = plus(t0, events.length * MIN);
+    return { gate: dispatchGate(db, cfg, end), state: getUsageState(db) };
+  };
+
+  test.each(table)('ultra, $name: $gate, as today, never a 5-hour pause', (row) => {
+    const now = run(row.events, row.outcome);
+    const before = run(row.events.map(today), row.outcome);
+    expect(now.gate).toBe(row.gate);
+    expect(now.gate).toBe(before.gate);
+    expect(now.state).toEqual(before.state);
+    expect(now.state.fiveHourUtil).toBeNull();
+    expect(now.state.fiveHourResetsAt).toBeNull();
+    if (now.state.pausedUntil !== null) {
+      // A seven_day pause, capped at an hour until confirmed: never the 5-hour window.
+      expect(Date.parse(now.state.pausedUntil) - t0.getTime()).toBeLessThanOrEqual(H + 90_000);
+    }
+  });
 });
