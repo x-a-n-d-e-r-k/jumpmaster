@@ -28,7 +28,7 @@ import { plus, t0, tmpDbFile } from '../test/helpers.js';
 import { appEntryName, serializeAppEntry } from '../vault/github-app-entries.js';
 import { openVault } from '../vault/vault.js';
 import { type BootConfig, loadBoot, RESTART_PATHS } from './boot.js';
-import { mergePatch } from './diff.js';
+import { mergeConfigPatch, mergePatch } from './diff.js';
 import { canonicalJson, getSetting, hashOf } from './revisions.js';
 import { ConfigStore, type StoreOptions, startVault } from './store.js';
 
@@ -1677,5 +1677,98 @@ describe('server.publicUrl in the store (issue #139)', () => {
     );
     expect(r).toMatchObject({ ok: true, changed: ['server'], restartNeeded: [] });
     expect(store.current().server?.publicUrl).toBe('https://a.b.ts.net');
+  });
+});
+
+describe('githubApp ids (spec §4.2): config, not secret, and guarded', () => {
+  const ids = { repositoryId: 123, installations: { author: 11, reviewer: 22 } };
+  const needs = (r: ReturnType<ConfigStore['apply']>) => {
+    if (r.ok || !('needsConfirmation' in r))
+      throw new Error(`expected needsConfirmation: ${JSON.stringify(r)}`);
+    return r.needsConfirmation.guarded.map((g) => g.consequence);
+  };
+  /** The current document with `patch` merged in, as the PATCH route builds it. */
+  const patched = (store: ConfigStore, patch: unknown) =>
+    mergeConfigPatch(store.document(), patch) as Record<string, unknown>;
+
+  test('adding, changing and removing githubApp each need confirmation from a session and apply from the token', () => {
+    const w = world();
+    const store = w.open();
+    expect(store.apply({ dropZones: [zone()] }, { via: 'ctl', principal: token }).ok).toBe(true);
+
+    const steps: [unknown, string[], unknown][] = [
+      [
+        { dropZones: [{ id: 'main', githubApp: ids }] },
+        [
+          'Author tokens for zone main will be minted from installation id 11',
+          'Reviewer tokens for zone main will be minted from installation id 22',
+          'Tokens for zone main will be minted for repository id 123',
+        ],
+        ids,
+      ],
+      [
+        { dropZones: [{ id: 'main', githubApp: { repositoryId: 456 } }] },
+        ['Tokens for zone main will be minted for repository id 456'],
+        { ...ids, repositoryId: 456 },
+      ],
+      [
+        { dropZones: [{ id: 'main', githubApp: { installations: { author: 12 } } }] },
+        ['Author tokens for zone main will be minted from installation id 12'],
+        { repositoryId: 456, installations: { author: 12, reviewer: 22 } },
+      ],
+      [
+        { dropZones: [{ id: 'main', githubApp: null }] },
+        [
+          'Author tokens for zone main will no longer be minted from installation id 12: it is removed',
+          'Reviewer tokens for zone main will no longer be minted from installation id 22: it is removed',
+          'Tokens for zone main will no longer be minted for repository id 456: it is removed',
+        ],
+        undefined,
+      ],
+    ];
+    for (const [patch, consequences, after] of steps) {
+      const before = store.revision();
+      const doc = patched(store, patch);
+      expect(needs(store.apply(doc, { via: 'ui', principal: session }))).toEqual(consequences);
+      expect(store.revision()).toBe(before);
+      const t = store.apply(doc, { via: 'ctl', principal: token, expectRevision: before });
+      expect(t).toMatchObject({ ok: true, revision: before + 1 });
+      expect(store.current().dropZones[0]?.githubApp).toEqual(after);
+    }
+    expect(store.document().dropZones).toEqual([zone()]);
+  });
+
+  test('the field survives a revision round-trip and an export-then-import', () => {
+    const w = world();
+    const store = w.open();
+    store.apply({ dropZones: [zone()] }, { via: 'ctl', principal: token });
+    store.apply(
+      { dropZones: [zone('main', { githubApp: ids })] },
+      { via: 'ctl', principal: token },
+    );
+    expect(store.revisions(1)[0]?.changes.map((c) => [c.path, c.to])).toEqual([
+      ['dropZones[main].githubApp', ids],
+    ]);
+    // Not a secret: the export carries it as written.
+    const exported = JSON.parse(store.exportJson()) as { dropZones: Record<string, unknown>[] };
+    expect(exported.dropZones[0]?.githubApp).toEqual(ids);
+
+    // Removed, then a rollback brings the revision's ids back.
+    store.apply({ dropZones: [zone()] }, { via: 'ctl', principal: token });
+    expect(store.current().dropZones[0]?.githubApp).toBeUndefined();
+    expect(store.rollback(3, { principal: token })).toMatchObject({ ok: true, revision: 5 });
+    expect(store.current().dropZones[0]?.githubApp).toEqual(ids);
+
+    // A fresh install imports the export to the same ids; importing it again changes nothing.
+    const other = world().open();
+    expect(other.importDoc(exported, { via: 'import', principal: token })).toMatchObject({
+      ok: true,
+    });
+    expect(other.current().dropZones[0]?.githubApp).toEqual(ids);
+    expect(other.exportJson()).toBe(store.exportJson());
+    expect(other.importDoc(exported, { via: 'import', principal: token })).toMatchObject({
+      ok: true,
+      changed: [],
+    });
   });
 });

@@ -137,6 +137,22 @@ function servicesAdded(from: unknown, to: unknown): string[] {
     .map((s) => String((s as Service).image));
 }
 
+/**
+ * A GitHub App id of a zone (spec §4.2): any difference changes which installation or repository
+ * minted tokens reach, so adding, changing and removing it are each guarded.
+ */
+function appId(path: string, minted: string, preposition: string): GuardedPath {
+  return {
+    path,
+    kind: 'scalar',
+    weakens: (from, to) => from !== to,
+    consequence: (from, to, ctx) =>
+      to === undefined
+        ? `${minted} for zone ${zoneOf(ctx)} will no longer be minted ${preposition} ${String(from)}: it is removed`
+        : `${minted} for zone ${zoneOf(ctx)} will be minted ${preposition} ${String(to)}`,
+  };
+}
+
 export const GUARDED_PATHS: GuardedPath[] = [
   {
     path: 'dropZones[].egress.mode',
@@ -254,6 +270,9 @@ export const GUARDED_PATHS: GuardedPath[] = [
     'additions',
     (n, ctx) => `Jumpmaster will take over PR #${n} in ${zoneOf(ctx)} and may merge it`,
   ),
+  appId('dropZones[].githubApp.repositoryId', 'Tokens', 'for repository id'),
+  appId('dropZones[].githubApp.installations.author', 'Author tokens', 'from installation id'),
+  appId('dropZones[].githubApp.installations.reviewer', 'Reviewer tokens', 'from installation id'),
 ];
 
 /** Never a session's to change, confirmed or not: they decide what runs with the secrets. */

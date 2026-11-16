@@ -14,7 +14,12 @@ import {
   readAppEntry,
   serializeAppEntry,
 } from './github-app-entries.js';
-import { credentialFor, type ResolvedApps, resolveAppEntries } from './resolution.js';
+import {
+  appInstallationFor,
+  credentialFor,
+  type ResolvedApps,
+  resolveAppEntries,
+} from './resolution.js';
 import { openVault, type Vault } from './vault.js';
 
 const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -221,5 +226,40 @@ describe('resolveAppEntries', () => {
       credentialFor(z, 'reviewer', apps),
     ]);
     for (const l of PEM_LINES) expect(out).not.toContain(l);
+  });
+});
+
+describe('appInstallationFor (spec §4.2)', () => {
+  const githubApp = { repositoryId: 123, installations: { author: 11, reviewer: 22 } };
+  const zone = (extra: Record<string, unknown> = {}) => ({ repo: 'octo/web', ...extra });
+
+  test('a two-bot zone with both roles recorded gives each role its installation and the shared repository', () => {
+    const z = zone({ identity: 'two-bot', githubApp });
+    expect(appInstallationFor(z, 'author')).toEqual({ installationId: 11, repositoryId: 123 });
+    expect(appInstallationFor(z, 'reviewer')).toEqual({ installationId: 22, repositoryId: 123 });
+  });
+
+  test('identity absent is two-bot', () => {
+    expect(appInstallationFor(zone({ githubApp }), 'reviewer')).toEqual({
+      installationId: 22,
+      repositoryId: 123,
+    });
+  });
+
+  test('only the author recorded: the reviewer gives undefined', () => {
+    const z = zone({ githubApp: { repositoryId: 123, installations: { author: 11 } } });
+    expect(appInstallationFor(z, 'author')).toEqual({ installationId: 11, repositoryId: 123 });
+    expect(appInstallationFor(z, 'reviewer')).toBeUndefined();
+  });
+
+  test('no githubApp gives undefined', () => {
+    expect(appInstallationFor(zone(), 'author')).toBeUndefined();
+    expect(appInstallationFor(zone({ identity: 'two-bot' }), 'reviewer')).toBeUndefined();
+  });
+
+  test('a starter zone gives undefined even with ids recorded', () => {
+    const z = zone({ identity: 'starter', githubApp });
+    expect(appInstallationFor(z, 'author')).toBeUndefined();
+    expect(appInstallationFor(z, 'reviewer')).toBeUndefined();
   });
 });

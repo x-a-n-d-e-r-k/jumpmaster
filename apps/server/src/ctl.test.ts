@@ -361,6 +361,58 @@ describe('ctl config', () => {
     await s.app.close();
   });
 
+  test('ctl zones set takes nested githubApp paths end to end, and refuses a bad id or a missing installations', async () => {
+    const s = server();
+    s.store.apply(
+      { dropZones: [zoneDoc()] },
+      { via: 'ctl', principal: { kind: 'operator', via: 'token', sudo: true } },
+    );
+    // Only the repository id, on a zone without githubApp: installations is required.
+    const alone = await run(['zones', 'set', 'main', 'githubApp.repositoryId=123'], '', s.fetch);
+    expect(alone.code).toBe(1);
+    expect(alone.out.join('\n')).toMatch(/^400 .*githubApp\.installations/);
+    // Not a positive id.
+    const zero = await run(
+      ['zones', 'set', 'main', 'githubApp.repositoryId=0', 'githubApp.installations.author=11'],
+      '',
+      s.fetch,
+    );
+    expect(zero.code).toBe(1);
+    expect(zero.out.join('\n')).toMatch(/^400 .*githubApp\.repositoryId/);
+    expect(s.store.revision()).toBe(2);
+
+    const set = await run(
+      ['zones', 'set', 'main', 'githubApp.repositoryId=123', 'githubApp.installations.author=11'],
+      '',
+      s.fetch,
+    );
+    expect(set.code).toBe(0);
+    expect(s.fetch.calls.at(-1)?.body).toEqual({
+      patch: {
+        dropZones: [
+          { id: 'main', githubApp: { repositoryId: 123, installations: { author: 11 } } },
+        ],
+      },
+      expectRevision: 2,
+    });
+    expect(s.store.current().dropZones[0]?.githubApp).toEqual({
+      repositoryId: 123,
+      installations: { author: 11 },
+    });
+    // A later nested set merges into what is there; null removes the field.
+    expect(
+      (await run(['zones', 'set', 'main', 'githubApp.installations.reviewer=22'], '', s.fetch))
+        .code,
+    ).toBe(0);
+    expect(s.store.current().dropZones[0]?.githubApp).toEqual({
+      repositoryId: 123,
+      installations: { author: 11, reviewer: 22 },
+    });
+    expect((await run(['zones', 'set', 'main', 'githubApp=null'], '', s.fetch)).code).toBe(0);
+    expect(s.store.current().dropZones[0]).not.toHaveProperty('githubApp');
+    await s.app.close();
+  });
+
   test('ctl config rollback and import refuse to overwrite a revision applied after they read', async () => {
     const s = server();
     await run(['config', 'set', 'pollSeconds=30'], '', s.fetch);
