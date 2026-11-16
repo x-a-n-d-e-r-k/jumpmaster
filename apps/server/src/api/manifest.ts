@@ -334,7 +334,7 @@ export const CTL_VERBS: { verb: string; page: Page; forms: string[] }[] = [
     ],
   },
   { verb: 'labels', page: 'Doctor', forms: ['ctl labels <zone>'] },
-  { verb: 'briefings', page: 'Briefings', forms: ['ctl briefings'] },
+  { verb: 'briefings', page: 'Briefings', forms: ['ctl briefings [--json]'] },
   {
     verb: 'rule',
     page: 'Briefings',

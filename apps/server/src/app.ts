@@ -7,7 +7,14 @@ import { recordAudit } from './auth/audit.js';
 import { Backoff } from './auth/backoff.js';
 import { registerGuard, requireCsrf, withCsrf } from './auth/guard.js';
 import type { SetupMode } from './auth/operator.js';
-import { ALL_RULINGS, floorBriefings, listBriefings, listRulings } from './briefings.js';
+import {
+  ALL_RULINGS,
+  briefingContext,
+  floorBriefings,
+  getBriefing,
+  listBriefings,
+  listRulings,
+} from './briefings.js';
 import { configReader } from './config/source.js';
 import { ConfigStore } from './config/store.js';
 import type { Config } from './config.js';
@@ -72,6 +79,7 @@ import {
   type HomeState,
   type ItemDetail,
   pageParams,
+  renderBriefing,
   renderBriefings,
   renderDoctor,
   renderDrop,
@@ -460,8 +468,10 @@ export function createApp(
           if (c.holdUntil) holds.set(`issue:${c.id}`, c.holdUntil);
         }
       }
+      const open = listBriefings(db, { state: 'open', ...(zone ? { zoneId: zone.id } : {}) });
       const html = renderBriefings({
-        open: listBriefings(db, { state: 'open', ...(zone ? { zoneId: zone.id } : {}) }),
+        open,
+        ...briefingContext(db, config.dropZones, open),
         // Every ruling: each project counts its own, and pages or shows its newest `per`.
         rulings: zones.flatMap((z) => listRulings(db, z.id, ALL_RULINGS)),
         zones: config.dropZones,
@@ -475,6 +485,31 @@ export function createApp(
       return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
     },
   );
+
+  // One briefing, open or not, with its rulings: where `Briefing n` and `ctl briefings` link.
+  app.get<{ Params: { id: string } }>('/briefings/:id', async (req, reply) => {
+    const { db } = deps;
+    const id = /^[1-9][0-9]{0,9}$/.test(req.params.id) ? Number(req.params.id) : 0;
+    const b = id > 0 ? getBriefing(db, id) : undefined;
+    if (!b) return reply.code(404).type('text/plain').send('no such briefing');
+    const config = cfg(req);
+    const holds = new Map<string, string>();
+    for (const c of listCrewIssues(db, b.zoneId, ['promote_held'])) {
+      if (c.holdUntil) holds.set(`issue:${c.id}`, c.holdUntil);
+    }
+    const ctx = briefingContext(db, config.dropZones, [b]);
+    const about = ctx.about.get(b.id);
+    const keys = ctx.crewKeys.get(b.zoneId);
+    const html = renderBriefing({
+      briefing: b,
+      rulings: listRulings(db, b.zoneId, ALL_RULINGS),
+      zones: config.dropZones,
+      holds,
+      ...(about ? { about } : {}),
+      ...(keys ? { crewKeys: keys } : {}),
+    });
+    return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
+  });
 
   app.get<{ Querystring: { zone?: string; state?: string } }>('/work', async (req, reply) => {
     const { db } = deps;

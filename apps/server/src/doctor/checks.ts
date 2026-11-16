@@ -1430,18 +1430,27 @@ const LABEL_SPEC: Record<string, { color: string; description: string }> = {
   retry: { color: 'FBCA04', description: 'Ask Jumpmaster to retry a parked issue' },
   staged: { color: 'C5DEF5', description: 'Filed by the crew, waiting for Command' },
   triage: { color: 'D876E3', description: 'Not in the agent-ready format: waiting for triage' },
+  triaged: { color: 'BFD4F2', description: 'Triaged by Jumpmaster: see its comment' },
 };
 
 /** The labels a zone's config names, each with its colour and description. */
 export function wantedLabels(
-  zone: Pick<DropZoneConfig, 'readyLabel' | 'retryLabel' | 'crew' | 'triageLabel' | 'triage'>,
+  zone: Pick<
+    DropZoneConfig,
+    'readyLabel' | 'retryLabel' | 'crew' | 'triageLabel' | 'triagedLabel' | 'triage'
+  >,
 ): { name: string; color: string; description: string }[] {
   const want: [string, keyof typeof LABEL_SPEC][] = [
     [zone.readyLabel, 'ready'],
     [zone.retryLabel, 'retry'],
     ...(zone.crew.enabled ? ([[zone.crew.stagedLabel, 'staged']] as [string, 'staged'][]) : []),
     // Sync writes the triage label only while the gate is live (`triageGateOn`).
-    ...(triageGateOn(zone) ? ([[zone.triageLabel, 'triage']] as [string, 'triage'][]) : []),
+    ...(triageGateOn(zone)
+      ? ([
+          [zone.triageLabel, 'triage'],
+          [zone.triagedLabel, 'triaged'],
+        ] as [string, 'triage' | 'triaged'][])
+      : []),
   ];
   return want.map(([name, kind]) => ({
     name,
@@ -1795,7 +1804,7 @@ function crewCapCheck(zone: DropZoneConfig, d: DoctorDeps): DoctorCheck {
   const oldest = d.db
     .prepare(
       `SELECT created_at AS at FROM drops WHERE drop_zone_id = ? AND work_item_id IS NULL
-         AND role IN ('crew-lead','refute','diagnose') AND created_at > ? AND state <> 'lost'
+         AND role IN ('crew-lead','refute','diagnose','triage') AND created_at > ? AND state <> 'lost'
          AND COALESCE(json_extract(result_json, '$.status'), '') <> 'rate_limited'
        ORDER BY created_at LIMIT 1`,
     )

@@ -847,7 +847,8 @@ protected path, so an agent change to a workflow parks instead of merging. Under
 ## Labels
 
 The zone uses `agent-ready` (`readyLabel`) and `agent-retry` (`retryLabel`); with the crew on,
-also `agent-staged`. When one is missing, `forge.labels` fails and its action, **Create the
+also `agent-staged`, and with the triage gate on, `jm-triage` and `jm-triaged` (see
+[How Jumpmaster triages issues](#how-jumpmaster-triages-issues)). When one is missing, `forge.labels` fails and its action, **Create the
 missing labels** on `/doctor` (or `jumpmaster ctl labels <zone>`), creates the configured ones as
 the author bot; it creates nothing else and works in observe mode too, but not while the kill
 switch is engaged. You can also make them yourself under the repository's Issues → Labels, or with
@@ -1268,6 +1269,50 @@ stops dispatch and raises a briefing for you to rule on (`/briefings`). Doctor c
 
 The crew (off by default) plans issues from `GOAL.md` on its own; see the
 [M3 crew runbook](m3-crew.md). Doctor checks: `zone.goals`, `zone.crew-cap`.
+
+## How Jumpmaster triages issues
+
+Triage needs the crew on (`crew.enabled`, see [Crew](#crew)); with it off, every trusted human
+issue labeled `agent-ready` is admitted as it is.
+
+**The gate.** With the crew on and `triage.gate` true (the default), a trusted author's
+`agent-ready` issue that is not in the agent-ready format (an `## Acceptance criteria` checklist
+and a `## Tests` or `## Required tests` list) does not start an agent. Jumpmaster swaps its ready
+label for the triage label, and a triage crew drop reads it. Set `triage.gate: false` to admit
+unformatted issues as before.
+
+**The two labels.** `jm-triage` (`triageLabel`) marks an issue waiting for triage. `jm-triaged`
+(`triagedLabel`) marks one triage has finished with. Both must differ from each other, from
+`readyLabel`, `retryLabel` and `crew.stagedLabel`; the config is refused otherwise. While the gate
+is on, `forge.labels` reports either one missing, and its action creates them.
+
+**The three outcomes.** A triage drop ends one of three ways:
+
+- **split:** the issue becomes one or more agent-ready child issues, filed staged (`agent-staged`)
+  under objective `triage:#N`. They go through refute and promotion like any crew issue: none
+  starts until it is reviewed and promoted.
+- **questions:** the crew needs a decision first. It raises a briefing on `/briefings`; once you
+  rule on it, triage runs again with your ruling.
+- **not-agent-work:** the issue isn't a task for an agent (a question, a duplicate, work for a
+  person). Nothing is filed.
+
+If triage fails `crew.maxTriage` times, you get one briefing, `triage of #N failed`, and the issue
+keeps its triage label.
+
+**What the comment says.** Jumpmaster leaves one comment on the original issue, as the author bot:
+
+- split, once every child is filed: `Jumpmaster split this into #A, #B. They start once they are
+  reviewed and promoted.` The label swaps from `jm-triage` to `jm-triaged`.
+- questions: `Jumpmaster needs a decision before this can be worked: <briefing subject>. It
+  continues once that is answered.` The issue keeps `jm-triage` while it waits.
+- not-agent-work: `Jumpmaster won't work this as an agent task: <reason>`. The label swaps from
+  `jm-triage` to `jm-triaged`.
+
+A failed triage, or one replaced because you edited the issue's text, leaves no comment. The comment
+is built from the outcome, the child numbers, the briefing subject and the reason only: it never
+quotes the issue. Each ends with a hidden marker, so a retry or a restart never posts it twice. In
+an observe-mode zone nothing is written. Jumpmaster doesn't read replies to its comment: answer a
+question on `/briefings`, or edit the issue to have it triaged again.
 
 ## Troubleshooting by check id
 

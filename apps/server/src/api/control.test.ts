@@ -13,7 +13,7 @@ import { loadBoot } from '../config/boot.js';
 import { ConfigStore, startVault } from '../config/store.js';
 import { type Config, secretList } from '../config.js';
 import { nextCrewWork } from '../crew/schedule.js';
-import { listCrewIssues } from '../crew/store.js';
+import { insertCrewIssue, listCrewIssues } from '../crew/store.js';
 import { ctlRequest } from '../ctl.js';
 import { openDb } from '../db/open.js';
 import {
@@ -300,6 +300,60 @@ describe('rule route', () => {
     );
     return { db, id };
   }
+
+  test('GET briefings keeps its fields and adds about, why, recommendation, onHold and effect lines (#226)', async () => {
+    const db = setup();
+    const issue = insertCrewIssue(db, {
+      zoneId: 'main',
+      key: 'k',
+      source: 'drop',
+      objective: 'o',
+      title: 'Push tokens',
+      body: 'b',
+      priority: null,
+      createdAt: t0.toISOString(),
+      number: 224,
+    });
+    const id = raiseBriefing(
+      db,
+      {
+        zoneId: 'main',
+        kind: 'promote',
+        subject: `issue:${issue}`,
+        decision: 'Promote it?',
+        why: 'w',
+        recommendation: 'r',
+        onHold: 'h',
+        options: [{ id: 'promote', label: 'Promote', effect: 'promote_issue' }],
+        source: 'server',
+      },
+      t0,
+    );
+    const res = await app?.inject({ method: 'GET', url: '/api/control/briefings', headers: auth });
+    const [b] = (res?.json() as { briefings: Record<string, unknown>[] }).briefings;
+    expect(b).toEqual({
+      id,
+      zone: 'main',
+      kind: 'promote',
+      subject: `issue:${issue}`,
+      decision: 'Promote it?',
+      options: [
+        {
+          id: 'promote',
+          label: 'Promote',
+          effectText: 'the issue gets the ready label; an implementer takes it as written',
+        },
+      ],
+      optionsDigest: expect.any(String),
+      about: {
+        text: '#224 Push tokens',
+        url: `https://github.com/${makeZone({}).repo}/issues/224`,
+      },
+      why: 'w',
+      recommendation: 'r',
+      onHold: 'h',
+    });
+  });
 
   test('the rule route refuses a missing token and a foreign Origin', async () => {
     const { db, id } = withBriefing();

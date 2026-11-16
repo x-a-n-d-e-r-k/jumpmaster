@@ -350,7 +350,7 @@ token is always allowed.
 | Config | `ctl config show [--json]`<br>`ctl config revisions`<br>`ctl config set <path>=<json>… [--note <text>]`<br>`ctl config rollback <id> [note]`<br>`ctl config import <file> [--dry-run] [--note <text>]`<br>`ctl config export`<br>`ctl config reload`<br>`ctl config adopt`<br>`ctl config mode file` | `PATCH /api/control/config`<br>`GET /api/control/config`<br>`GET /api/control/config/revisions`<br>`POST /api/control/config/rollback`<br>`POST /api/control/config/reload`<br>`POST /api/control/config/adopt`<br>`POST /api/control/config/mode`<br>`GET /api/control/config/export`<br>`POST /api/control/config/import` |
 | Doctor | `ctl doctor [zone] [--json] [--artifacts <dir>]`<br>`ctl doctor --last [--json]`<br>`ctl doctor <zone> --drop`<br>`ctl doctor <zone> --cancel` | `POST /api/control/doctor`<br>`GET /api/control/doctor`<br>`POST /api/control/doctor/drop` |
 | Doctor | `ctl labels <zone>` | `POST /api/control/zones/:id/labels` |
-| Briefings | `ctl briefings` | `GET /api/control/briefings` |
+| Briefings | `ctl briefings [--json]` | `GET /api/control/briefings` |
 | Briefings | `ctl rule <briefing> <option> [--options <digest>] [note]` | `POST /api/control/briefings/:id/rule` |
 | Briefings | `ctl dismiss <zone> <briefing>…` | `POST /api/control/zones/:id/briefings/dismiss` |
 | Drops | `ctl drops extend-retention <dropId> <hours>`<br>`ctl drops cancel <dropId>`<br>`ctl drops transcript <dropId> [--out <file>]` | `POST /api/control/drops/:id/extend-retention`<br>`POST /api/control/drops/:id/cancel`<br>`GET /api/control/drops/:id/transcript` |

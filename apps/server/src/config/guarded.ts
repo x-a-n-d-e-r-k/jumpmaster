@@ -361,6 +361,10 @@ export const NOT_GUARDED: FreePath[] = [
     'the label an unformatted human issue is moved to; it starts nothing (it must differ from the other labels)',
   ),
   free(
+    'dropZones[].triagedLabel',
+    'the label put on an issue triage has finished with; it starts nothing (it must differ from the other labels)',
+  ),
+  free(
     'dropZones[].triage.gate',
     'whether an unformatted human issue waits for triage; the author check still gates every issue (§7.1)',
   ),
@@ -378,6 +382,7 @@ export const NOT_GUARDED: FreePath[] = [
   ),
   free('dropZones[].crew.maxStaged', PACE),
   free('dropZones[].crew.maxRefute', PACE),
+  free('dropZones[].crew.maxTriage', PACE),
 ];
 
 /**

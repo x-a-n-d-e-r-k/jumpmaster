@@ -351,7 +351,7 @@ case_init() {
     wait_seen
   fi
   out="$("${C[@]}" exec -T jumpmaster jumpmaster ctl briefings)" || fail "ctl briefings: $out"
-  case "$out" in 200*) ;; *) fail "ctl briefings answered: $out" ;; esac
+  case "$out" in 'nothing is waiting on you' | 'Briefing '*) ;; *) fail "ctl briefings printed: $out" ;; esac
   set +e
   out="$("${C[@]}" exec -T jumpmaster jumpmaster ctl doctor 2>&1)"
   set -e

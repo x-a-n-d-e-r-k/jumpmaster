@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { type DropZoneConfig, triageGateOn } from './config.js';
 import { validateIssueSpec } from './crew/actions.js';
-import { getCrewIssueByNumber } from './crew/store.js';
+import { getCrewIssueByNumber, recordTriageRequest } from './crew/store.js';
 import type { Db } from './db/open.js';
 import {
   clearRequestChangesOnHead,
@@ -238,6 +238,7 @@ export async function syncDropZone(
   });
   run();
   for (const issue of toTriage) await sendToTriage(db, forges, zone, issue, now);
+  if (zone.crew?.enabled) await recordTriage(db, forges, zone, now);
   // The ladder is read whenever a goal file is configured, crew on or off: one file read per
   // pass, no usage, and the goals page, the intake and MCP's get_goals rely on it.
   if (zone.crew?.goalPath) {
@@ -298,6 +299,39 @@ async function sendToTriage(
     }
   } catch (err) {
     console.warn(`zone ${zone.id}: sending #${issue.number} to triage: ${errorText(err)}`);
+  }
+}
+
+/**
+ * Records a triage request for each open triage-labeled issue by a trusted author, once per body
+ * text. An untrusted author's issue, or one whose trust lookup failed, is never recorded. A failed
+ * listing is logged and tried again next pass.
+ */
+async function recordTriage(
+  db: Db,
+  forges: ForgePair,
+  zone: DropZoneConfig,
+  now: Date,
+): Promise<void> {
+  let issues: ForgeIssue[];
+  try {
+    issues = (await forges.author.listOpenIssues(zone.triageLabel)).filter(
+      (i) => !isCrewFiled(i, zone),
+    );
+  } catch (err) {
+    console.warn(`zone ${zone.id}: listing triage issues failed: ${errorText(err)}`);
+    return;
+  }
+  const trust = new Map<string, boolean>();
+  for (const author of new Set(issues.map((i) => i.author))) {
+    try {
+      trust.set(author, await forges.author.isTrusted(author));
+    } catch {
+      trust.set(author, false); // a failed lookup counts as untrusted
+    }
+  }
+  for (const issue of issues) {
+    if (trust.get(issue.author) === true) recordTriageRequest(db, zone.id, issue, now);
   }
 }
 

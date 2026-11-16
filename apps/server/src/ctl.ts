@@ -456,6 +456,63 @@ function sticksLines(args: string[], body: Record<string, unknown>): string[] {
   );
 }
 
+/** One open briefing as `GET /api/control/briefings` serves it. */
+type BriefingView = {
+  id: number;
+  zone: string;
+  kind: string;
+  decision: string;
+  options: { id: string; label: string; effectText?: string }[];
+  optionsDigest: string;
+  about?: { text: string; url?: string };
+  why?: string;
+  recommendation?: string;
+  onHold?: string;
+};
+
+/**
+ * `ctl briefings` as text a person reads without the page (#226): per briefing its id, zone and
+ * kind, About with its URL, the decision, why, recommendation and on hold, each option with what
+ * it does, how to rule, and its page. Control characters are dropped from every line.
+ */
+export function briefingsLines(body: { briefings?: BriefingView[] }, base: string): string[] {
+  const briefings = body.briefings ?? [];
+  if (briefings.length === 0) return ['nothing is waiting on you'];
+  const url = (path: string) => new URL(path, base).href;
+  const out: string[] = [];
+  for (const [i, b] of briefings.entries()) {
+    if (i > 0) out.push('');
+    const about = b.about ?? { text: '' };
+    out.push(
+      `Briefing ${b.id} (zone ${b.zone}, ${b.kind})`,
+      `  About: ${about.text}${about.url ? ` <${about.url}>` : ''}`,
+      `  Decision: ${b.decision}`,
+    );
+    if (b.why) {
+      out.push('  Why:');
+      for (const line of b.why.split('\n')) {
+        // A refute's drop page, made absolute so the terminal can open it.
+        const full = line.replace(
+          /full text: (\/drops\/[A-Za-z0-9_-]+)$/,
+          (_, p) => `full text: ${url(p)}`,
+        );
+        out.push(full === '' ? '' : `    ${full}`);
+      }
+    }
+    if (b.recommendation) out.push(`  Recommendation: ${b.recommendation}`);
+    if (b.onHold) out.push(`  On hold: ${b.onHold}`);
+    out.push('  Options:');
+    for (const o of b.options) {
+      out.push(`    ${o.id}: ${o.label}${o.effectText ? `: ${o.effectText}` : ''}`);
+    }
+    out.push(
+      `  Rule: jumpmaster ctl rule ${b.id} <option> --options ${b.optionsDigest} [note]`,
+      `  Page: ${url(`/briefings/${b.id}`)}`,
+    );
+  }
+  return out.map(plain);
+}
+
 function rawRequest(args: string[]): Raw | null {
   const [command, zone] = args;
   if (command === 'sticks') return sticksRequest(args);
@@ -474,7 +531,10 @@ function rawRequest(args: string[]): Raw | null {
   if (transcript) return transcript.request;
   if (command === 'zones') return zonesRequest(args);
   if (command === 'drops') return dropsRequest(args);
-  if (command === 'briefings') return { path: '/api/control/briefings', method: 'GET' };
+  if (command === 'briefings')
+    return args.length === 1 || (args.length === 2 && args[1] === '--json')
+      ? { path: '/api/control/briefings', method: 'GET' }
+      : null;
   // What Jumpmaster is doing and why it waits: the home banner's line.
   if (command === 'status')
     return args.length === 1 || (args.length === 2 && args[1] === '--json')
@@ -1508,6 +1568,12 @@ async function runCtlOn(
     if (st.detail) say(st.detail);
     for (const a of st.also ?? []) say(`- ${a.text}${a.href ? ` (fix: ${a.href})` : ''}`);
     if (st.action) say(`next: ${st.action.label}: ${st.action.href}`);
+    return 0;
+  }
+  if (args[0] === 'briefings' && res.ok) {
+    const parsed = JSON.parse(text) as { briefings?: BriefingView[] };
+    if (args.includes('--json')) out(JSON.stringify(parsed, null, 2));
+    else for (const line of briefingsLines(parsed, base)) out(line);
     return 0;
   }
   if (args[0] === 'sticks' && res.ok) {

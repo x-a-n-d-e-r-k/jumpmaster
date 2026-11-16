@@ -6,6 +6,7 @@ import {
   type DropPayload,
   type DropResult,
   DropResultSchema,
+  EVENT_PART_PREFIX,
   EVENT_PREFIX,
   isPushingRole,
   MAX_ARTIFACT_BYTES,
@@ -20,6 +21,7 @@ import {
 import type { Ack, DropClient } from './client.js';
 import type { ContainerDriver, DropNet, VolumeInfo } from './driver.js';
 import { type EgressSession, egressImage, startEgress, trooperEgressRefusal } from './egress.js';
+import { EventAssembler } from './event-assembler.js';
 import { fetchFromServer, fromServer } from './fetch-image.js';
 import { pullImage } from './pull.js';
 import {
@@ -43,8 +45,12 @@ const MAX_EGRESS_SERVICES = 6;
 export const TROOPER_IMAGE = process.env.JM_TROOPER_IMAGE || 'jumpmaster-trooper:dev';
 const STOP_GRACE_MS = 30_000;
 const MAX_BATCH = 50;
-/** Keeps an events POST far below the server's 1 MB body limit (each event is ≤ 64 KB). */
+/**
+ * Keeps an events POST far below the server's 8 MiB limit for it: a batch is ≤ 512 KiB of events
+ * plus one, an event is ≤ 2 MiB, and an event over {@link SOLO_EVENT_BYTES} is posted alone.
+ */
 const MAX_BATCH_BYTES = 512 * 1024;
+const SOLO_EVENT_BYTES = 1024 * 1024;
 const FLUSH_MS = 1000;
 export const STICK_LABEL = 'jumpmaster.stick';
 const DEFAULT_IMAGE = 'jumpmaster-trooper:dev';
@@ -735,10 +741,17 @@ async function runContainer(
   let pendingBytes = 0;
   let flushing = Promise.resolve();
   const queue = (ev: TrooperEvent, bytes: number) => {
-    if (pending.length > 0 && pendingBytes + bytes > MAX_BATCH_BYTES) void flush();
+    const solo = bytes > SOLO_EVENT_BYTES;
+    if (pending.length > 0 && (solo || pendingBytes + bytes > MAX_BATCH_BYTES)) void flush();
     pending.push(ev);
     pendingBytes += bytes;
-    if (pending.length >= MAX_BATCH) void flush();
+    if (solo || pending.length >= MAX_BATCH) void flush();
+  };
+  /** An event from the trooper, whole or assembled from parts. */
+  const relay = (ev: TrooperEvent) => {
+    // Egress events come from the stick's own reading of the proxy, never the trooper.
+    if (ev.kind === 'egress') return;
+    queue(ev, Buffer.byteLength(JSON.stringify(ev)));
   };
   const flush = () => {
     if (pending.length === 0) return flushing;
@@ -795,6 +808,7 @@ async function runContainer(
   const flusher = setInterval(() => void flush(), FLUSH_MS);
 
   const artifacts = new ArtifactAssembler();
+  const parts = new EventAssembler();
   const uploads: Promise<unknown>[] = [];
   let result: DropResult | undefined;
   let postedReal = false;
@@ -804,14 +818,11 @@ async function runContainer(
         const done = artifacts.add(line.slice(ARTIFACT_PREFIX.length));
         if (done) uploads.push(client.postArtifact(dropId, epoch, done).catch(() => 'stale'));
       } else if (line.startsWith(EVENT_PREFIX)) {
-        try {
-          const ev = TrooperEventSchema.parse(JSON.parse(line.slice(EVENT_PREFIX.length)));
-          // Egress events come from the stick's own reading of the proxy, never the trooper.
-          if (ev.kind === 'egress') continue;
-          queue(ev, Buffer.byteLength(line));
-        } catch {
-          // malformed event line: drop it
-        }
+        const ev = TrooperEventSchema.safeParse(safeJson(line.slice(EVENT_PREFIX.length)));
+        // A malformed event line is dropped.
+        if (ev.success) relay(ev.data);
+      } else if (line.startsWith(EVENT_PART_PREFIX)) {
+        for (const ev of parts.add(line.slice(EVENT_PART_PREFIX.length))) relay(ev);
       } else if (line.startsWith(RESULT_PREFIX)) {
         try {
           result = DropResultSchema.parse(JSON.parse(line.slice(RESULT_PREFIX.length)));
@@ -820,6 +831,8 @@ async function runContainer(
         }
       }
     }
+    // The trooper's output has ended: an event still missing parts never will be complete.
+    for (const ev of parts.finish()) relay(ev);
     const { exitCode } = await handle.wait();
     // The proxy logs each tunnel as it closes: stop it, then report the drop's egress.
     if (session)

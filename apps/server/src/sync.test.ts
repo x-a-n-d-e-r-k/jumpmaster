@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, test } from 'vitest';
 import type { DropZoneConfig } from './config.js';
 import { flushCrewOps } from './crew/flush.js';
-import { type CrewIssueState, getCrewIssue, insertCrewIssue, setCrewIssue } from './crew/store.js';
+import {
+  type CrewIssueState,
+  getCrewIssue,
+  insertCrewIssue,
+  listTriageRequests,
+  setCrewIssue,
+} from './crew/store.js';
 import type { Db } from './db/open.js';
 import { openDb } from './db/open.js';
 import {
@@ -775,5 +781,78 @@ describe('triage gate at intake (#183)', () => {
     expect(numbers(w)).toEqual([]);
     expect(r.sentToTriage).toBe(1);
     expect(ops(w)).toEqual([]);
+  });
+});
+
+describe('triage requests at sync (#184)', () => {
+  const BODY = 'The overage gauge shows when overage is off. Also Fable usage is missing.';
+  /** A crew-on world whose only triage-labeled issue is #179 by `author`. */
+  const world = (o: { author?: string; crew?: boolean } = {}) => {
+    const w = zoneWorld({ crew: { ...makeZone().crew, enabled: o.crew ?? true } });
+    for (const n of [1, 2, 3, 4, 5]) w.f.state.closeIssue(n);
+    w.f.state.addIssue({
+      number: 179,
+      title: 'Usage page',
+      body: BODY,
+      author: o.author ?? 'human',
+      labels: ['jm-triage'],
+      createdAt: t0.toISOString(),
+    });
+    return w;
+  };
+  const rows = (w: ReturnType<typeof zoneWorld>) =>
+    listTriageRequests(w.db, 'main').map((r) => ({
+      n: r.issueNumber,
+      state: r.state,
+      reason: r.reason,
+      body: r.body,
+    }));
+
+  test('a trusted author’s triage-labeled issue is recorded as an open request', async () => {
+    const w = world();
+    await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(rows(w)).toEqual([{ n: 179, state: 'open', reason: null, body: BODY }]);
+    const [r] = listTriageRequests(w.db, 'main');
+    expect(r).toMatchObject({ author: 'human', title: 'Usage page', attempts: 0, outcome: null });
+  });
+
+  test('D1: an untrusted author’s issue is never recorded', async () => {
+    const w = world({ author: 'stranger' });
+    await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(rows(w)).toEqual([]);
+  });
+
+  test('D2: a failed trust lookup counts as untrusted', async () => {
+    const w = world();
+    w.f.author.isTrusted = async () => {
+      throw new Error('fake 502');
+    };
+    await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(rows(w)).toEqual([]);
+  });
+
+  test('D3: the same body synced twice records one request', async () => {
+    const w = world();
+    await syncDropZone(w.db, w.forges, w.zone, t0);
+    await syncDropZone(w.db, w.forges, w.zone, plus(t0, 60_000));
+    expect(rows(w)).toHaveLength(1);
+  });
+
+  test('an edited body supersedes the open request with a new open one', async () => {
+    const w = world();
+    await syncDropZone(w.db, w.forges, w.zone, t0);
+    const e = w.f.state.issues.get(179);
+    if (e?.issue) e.issue.body = `${BODY}\n\nEdited.`;
+    await syncDropZone(w.db, w.forges, w.zone, plus(t0, 60_000));
+    expect(rows(w)).toEqual([
+      { n: 179, state: 'done', reason: 'superseded', body: BODY },
+      { n: 179, state: 'open', reason: null, body: `${BODY}\n\nEdited.` },
+    ]);
+  });
+
+  test('with the crew off nothing is recorded', async () => {
+    const w = world({ crew: false });
+    await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(rows(w)).toEqual([]);
   });
 });

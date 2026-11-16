@@ -1,8 +1,11 @@
 import type { ArtifactRow } from '../artifacts.js';
 import {
+  type About,
   type Briefing,
+  effectText,
   HELD_MODES,
   type HeldZone,
+  issueUrl,
   optionsDigest,
   type Ruling,
   WAITS_FOR_CREW,
@@ -407,26 +410,100 @@ function sticksSection(
 /** One shared handler for every rule form: it posts with the session's CSRF header. */
 const RULE_SCRIPT = `<script>for(const f of document.querySelectorAll('form.rule'))f.addEventListener('submit',async(e)=>{e.preventDefault();const o=f.querySelector('input[name=option]:checked');if(!o){alert('Choose an option');return;}const r=await jmFetch('/api/control/briefings/'+f.dataset.briefing+'/rule',{optionId:o.value,optionsDigest:f.dataset.options,note:f.querySelector('textarea').value});if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});</script>`;
 
-function briefingBlock(
-  b: Briefing,
-  holds: Map<string, string> | undefined,
-  name: (id: string) => string,
-  heading: 'h3' | 'h4' = 'h3',
-): string {
-  const hold = b.kind === 'promote_held' ? holds?.get(b.subject) : undefined;
+/** What a briefing's references resolve against: the zone's repository and crew issues. */
+export type LinkRefs = {
+  /** The zone's repository (`owner/name`): `#n` and crew keys link only with it. */
+  repo?: string;
+  /** The zone's filed crew issues, key to number. */
+  crewKeys?: ReadonlyMap<string, number>;
+  /** Where `Briefing n` links; else its own page. */
+  briefingHref?: (n: number) => string;
+  /** Where `Ruling n` links; else its row on /briefings. */
+  rulingHref?: (n: number) => string;
+};
+
+/**
+ * The references a briefing's text may carry: `#n`, `Ruling n`, `Briefing n`, a refute's
+ * `full text: /drops/<id>`, and a word shaped like a crew key (linked only if it is one).
+ */
+const REFERENCE =
+  /(?<![\w&#])#(\d{1,9})(?!\w)|\b(Ruling|Briefing) (\d{1,9})\b|full text: \/drops\/([A-Za-z0-9_-]{1,80})(?![\w-])|(?<![\w-])([a-z0-9][a-z0-9-]{0,39})(?![\w-])/g;
+
+const anchor = (href: string, text: string): string =>
+  `<a href="${escapeHtml(href)}"${linkTarget(href)}>${escapeHtml(text)}</a>`;
+
+/**
+ * Briefing text as HTML (D4): every character escaped, and links built only from the fixed
+ * reference patterns, to the zone's own repository or this app's pages. No other markup passes.
+ */
+export function linkify(text: string, refs: LinkRefs): string {
+  const issue = (n: number) =>
+    refs.repo === undefined ? escapeHtml(`#${n}`) : anchor(issueUrl(refs.repo, n), `#${n}`);
+  let out = '';
+  let last = 0;
+  for (const m of text.matchAll(REFERENCE)) {
+    out += escapeHtml(text.slice(last, m.index));
+    last = m.index + m[0].length;
+    const [all, hash, word, wordN, dropId, key] = m;
+    if (hash !== undefined) out += issue(Number(hash));
+    else if (word !== undefined) {
+      const n = Number(wordN);
+      const href =
+        word === 'Ruling'
+          ? (refs.rulingHref?.(n) ?? `/briefings#ruling-${n}`)
+          : (refs.briefingHref?.(n) ?? `/briefings/${n}`);
+      out += anchor(href, all);
+    } else if (dropId !== undefined) out += anchor(`/drops/${dropId}`, 'full text');
+    else {
+      const n = key !== undefined && /[a-z]/.test(key) ? refs.crewKeys?.get(key) : undefined;
+      out +=
+        n === undefined || refs.repo === undefined
+          ? escapeHtml(all)
+          : `${escapeHtml(all)} (${issue(n)})`;
+    }
+  }
+  return out + escapeHtml(text.slice(last));
+}
+
+/** The About cell: the resolved subject, linked when it has a URL. */
+const aboutHtml = (a: About): string =>
+  a.url && /^https:\/\//.test(a.url) ? anchor(a.url, a.text) : escapeHtml(a.text);
+
+/** What a briefing block needs beyond the briefing: its zone's references and its About. */
+type BlockContext = {
+  holds?: Map<string, string> | undefined;
+  name: (id: string) => string;
+  refs: (zoneId: string) => LinkRefs;
+  about?: ReadonlyMap<number, About> | undefined;
+};
+
+function briefingBlock(b: Briefing, ctx: BlockContext, heading: 'h3' | 'h4' = 'h3'): string {
+  const hold = b.kind === 'promote_held' ? ctx.holds?.get(b.subject) : undefined;
+  const refs = ctx.refs(b.zoneId);
+  const text = (v: string) => linkify(v, refs);
   const options = b.options
     .map(
       (o) =>
-        `<label><input type="radio" name="option" value="${escapeHtml(o.id)}" required> ${escapeHtml(o.label)}</label> <small><code>${escapeHtml(o.id)}</code></small><br>`,
+        `<label><input type="radio" name="option" value="${escapeHtml(o.id)}" required> ${escapeHtml(o.label)}</label> <small><code>${escapeHtml(o.id)}</code></small> <small class="effect">${escapeHtml(effectText(b.kind, o.effect))}</small><br>`,
     )
     .join('');
   const row = (k: string, v: string) =>
     v ? `<tr><th>${k}</th><td>${escapeHtml(v)}</td></tr>` : '';
+  const rich = (k: string, v: string) => (v ? `<tr><th>${k}</th><td>${text(v)}</td></tr>` : '');
+  const pre = (k: string, v: string | null) =>
+    v ? `<tr><th>${k}</th><td><pre>${text(v)}</pre></td></tr>` : '';
+  const about = ctx.about?.get(b.id) ?? { text: b.subject };
+  const form =
+    b.state === 'open'
+      ? `<form class="rule" data-briefing="${escapeHtml(b.id)}" data-options="${optionsDigest(b)}">${options}<textarea name="note" maxlength="2000" placeholder="Note (optional)"></textarea><br><button>Rule</button></form>`
+      : `<p>${escapeHtml(b.state)}</p><ul>${b.options.map((o) => `<li>${escapeHtml(o.label)} <small><code>${escapeHtml(o.id)}</code></small> <small class="effect">${escapeHtml(effectText(b.kind, o.effect))}</small></li>`).join('')}</ul>`;
   return (
-    `<${heading}>${escapeHtml(b.decision)}</${heading}>` +
-    `<table><tr><th>Zone</th><td>${name(b.zoneId)}</td></tr>${row('Kind', b.kind)}${row('About', b.subject)}${b.why ? `<tr><th>Why</th><td><pre>${escapeHtml(b.why)}</pre></td></tr>` : ''}${b.diagnosis ? `<tr><th>Diagnosis</th><td><pre>${escapeHtml(b.diagnosis)}</pre></td></tr>` : ''}${row('Recommendation', b.recommendation)}${row('On hold', b.onHold)}${row('Raised by', b.source === 'mcp' ? 'assistant (MCP)' : b.source)}${row('Raised', b.createdAt)}</table>` +
+    `<div class="briefing" id="briefing-${escapeHtml(b.id)}">` +
+    `<${heading}>${text(b.decision)}</${heading}>` +
+    `<table><tr><th>Briefing</th><td><a href="/briefings/${escapeHtml(b.id)}">${escapeHtml(b.id)}</a></td></tr><tr><th>Zone</th><td>${ctx.name(b.zoneId)}</td></tr>${row('Kind', b.kind)}<tr><th>About</th><td>${aboutHtml(about)}</td></tr>${pre('Why', b.why)}${pre('Diagnosis', b.diagnosis)}${rich('Recommendation', b.recommendation)}${rich('On hold', b.onHold)}${row('Raised by', b.source === 'mcp' ? 'assistant (MCP)' : b.source)}${row('Raised', b.createdAt)}</table>` +
     (hold ? `<p>Promotes at ${escapeHtml(hold)} unless you reject it.</p>` : '') +
-    `<form class="rule" data-briefing="${escapeHtml(b.id)}" data-options="${optionsDigest(b)}">${options}<textarea name="note" maxlength="2000" placeholder="Note (optional)"></textarea><br><button>Rule</button></form>`
+    form +
+    '</div>'
   );
 }
 
@@ -500,6 +577,10 @@ export function renderBriefings(s: {
   per?: number;
   page?: number;
   rpage?: number;
+  /** Each briefing's subject resolved (briefingAbout), by briefing id; else the raw subject. */
+  about?: ReadonlyMap<number, About>;
+  /** Each zone's filed crew issues by key (crewKeyNumbers), by zone id. */
+  crewKeys?: ReadonlyMap<string, ReadonlyMap<string, number>>;
 }): string {
   const name = zoneNamer(s.zones);
   const per = s.per ?? PAGE_SIZES[0];
@@ -515,11 +596,19 @@ export function renderBriefings(s: {
     rs
       .map(
         (r) =>
-          `<tr><td>${escapeHtml(r.id)}</td><td>${name(r.zoneId)}</td><td>${escapeHtml(r.briefingId)}</td><td>${escapeHtml(r.choice)}</td><td>${escapeHtml(r.note)}</td><td>${escapeHtml(r.createdAt)}</td><td>${escapeHtml(r.appliedAt ?? (waiting(r) ? 'waiting: crew disabled' : '-'))}</td><td>${escapeHtml(r.applyError ?? '')}</td><td>${escapeHtml(r.diagnosis ?? '')}</td></tr>`,
+          `<tr id="ruling-${escapeHtml(r.id)}"><td>${escapeHtml(r.id)}</td><td>${name(r.zoneId)}</td><td>${escapeHtml(r.briefingId)}</td><td>${escapeHtml(r.choice)}</td><td>${escapeHtml(r.note)}</td><td>${escapeHtml(r.createdAt)}</td><td>${escapeHtml(r.appliedAt ?? (waiting(r) ? 'waiting: crew disabled' : '-'))}</td><td>${escapeHtml(r.applyError ?? '')}</td><td>${escapeHtml(r.diagnosis ?? '')}</td></tr>`,
       )
       .join('');
+  // What this page shows, so a reference to it is an anchor here and to anything else a link away.
+  const shown = { briefings: new Set<number>(), rulings: new Set<number>() };
+  const ctx: BlockContext = {
+    holds: s.holds,
+    name,
+    about: s.about,
+    refs: briefingRefs(s.zones, s.rulings, s.crewKeys, shown),
+  };
   const blocks = (bs: readonly Briefing[], heading: 'h3' | 'h4') =>
-    bs.map((b) => briefingBlock(b, s.holds, name, heading)).join('');
+    bs.map((b) => briefingBlock(b, ctx, heading)).join('');
 
   if (s.zone) {
     const zone = s.zone.id;
@@ -535,6 +624,8 @@ export function renderBriefings(s: {
       'Ruling pages',
       (rpage) => `${briefingsHref({ zone, per, rpage })}#rulings`,
     );
+    for (const x of b.rows) shown.briefings.add(x.id);
+    for (const x of r.rows) shown.rulings.add(x.id);
     const list =
       open.length === 0 ? '<p>Nothing is waiting on you.</p>' : blocks(b.rows, 'h3') + RULE_SCRIPT;
     return page(
@@ -556,6 +647,10 @@ export function renderBriefings(s: {
   const quiet = projects.filter((p) => p.open.length === 0).sort(byWaiting);
   const heldOnes = projects.filter(held).sort(byWaiting);
   const total = busy.reduce((n, p) => n + p.open.length, 0);
+  for (const p of projects) {
+    for (const x of p.open.slice(0, per)) shown.briefings.add(x.id);
+    for (const x of p.rulings.slice(0, per)) shown.rulings.add(x.id);
+  }
 
   const showAll = (p: Project) =>
     p.open.length > per
@@ -594,6 +689,82 @@ export function renderBriefings(s: {
       sizeSelector(undefined, per) +
       sections +
       (anyBlock ? RULE_SCRIPT : ''),
+  );
+}
+
+/**
+ * Each zone's references: its repository and crew keys; `Briefing n` and `Ruling n` to their anchor
+ * when this page shows them, else to the briefing's own page.
+ */
+function briefingRefs(
+  zones: readonly Pick<DropZoneConfig, 'id' | 'repo'>[],
+  rulings: readonly Ruling[],
+  crewKeys: ReadonlyMap<string, ReadonlyMap<string, number>> | undefined,
+  shown: { briefings: ReadonlySet<number>; rulings: ReadonlySet<number> },
+): (zoneId: string) => LinkRefs {
+  const repos = new Map(zones.map((z) => [z.id, z.repo]));
+  const briefingOf = new Map(rulings.map((r) => [r.id, r.briefingId]));
+  const briefingHref = (n: number) =>
+    shown.briefings.has(n) ? `#briefing-${n}` : `/briefings/${n}`;
+  const rulingHref = (n: number) => {
+    if (shown.rulings.has(n)) return `#ruling-${n}`;
+    const b = briefingOf.get(n);
+    return b === undefined ? `/briefings#ruling-${n}` : `/briefings/${b}#ruling-${n}`;
+  };
+  return (zoneId) => {
+    const repo = repos.get(zoneId);
+    const keys = crewKeys?.get(zoneId);
+    return {
+      ...(repo !== undefined ? { repo } : {}),
+      ...(keys !== undefined ? { crewKeys: keys } : {}),
+      briefingHref,
+      rulingHref,
+    };
+  };
+}
+
+/**
+ * One briefing on its own page (`/briefings/<n>`), open or not, with its rulings: where a
+ * reference to it from another page, or `ctl briefings`, leads.
+ */
+export function renderBriefing(s: {
+  briefing: Briefing;
+  /** The zone's rulings: this briefing's are listed, the rest resolve `Ruling n` references. */
+  rulings: Ruling[];
+  zones: DropZoneConfig[];
+  holds?: Map<string, string>;
+  about?: About;
+  crewKeys?: ReadonlyMap<string, number>;
+}): string {
+  const b = s.briefing;
+  const name = zoneNamer(s.zones);
+  const own = newestFirst(s.rulings.filter((r) => r.briefingId === b.id));
+  const shown = { briefings: new Set([b.id]), rulings: new Set(own.map((r) => r.id)) };
+  const ctx: BlockContext = {
+    holds: s.holds,
+    name,
+    about: s.about ? new Map([[b.id, s.about]]) : undefined,
+    refs: briefingRefs(
+      s.zones,
+      s.rulings,
+      s.crewKeys ? new Map([[b.zoneId, s.crewKeys]]) : undefined,
+      shown,
+    ),
+  };
+  const rows = own
+    .map(
+      (r) =>
+        `<tr id="ruling-${escapeHtml(r.id)}"><td>${escapeHtml(r.id)}</td><td>${escapeHtml(r.label ?? r.choice)} <small><code>${escapeHtml(r.choice)}</code></small></td><td>${escapeHtml(r.note)}</td><td>${escapeHtml(r.createdAt)}</td><td>${escapeHtml(r.appliedAt ?? '-')}</td><td>${escapeHtml(r.applyError ?? '')}</td></tr>`,
+    )
+    .join('');
+  return page(
+    `<p><a href="/briefings">All briefings</a> · <a href="${escapeHtml(zoneBriefingsHref(b.zoneId))}">Briefings of ${name(b.zoneId)}</a></p><h2>Briefing ${escapeHtml(b.id)}</h2>` +
+      briefingBlock(b, ctx, 'h3') +
+      (b.state === 'open' ? RULE_SCRIPT : '') +
+      `<h3 id="rulings">Rulings</h3>` +
+      (own.length === 0
+        ? '<p class="empty">No ruling on this briefing.</p>'
+        : `<table><tr><th>Ruling</th><th>Choice</th><th>Note</th><th>Ruled</th><th>Applied</th><th>Error</th></tr>${rows}</table>`),
   );
 }
 
