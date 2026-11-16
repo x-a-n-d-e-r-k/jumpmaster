@@ -143,7 +143,7 @@ esac
 case $1 in
   load) cp "$3" "$WORK/loaded.tar"; echo "Loaded image: \${LOADED:-}" ;;
   tag) ;;
-  run) echo "mode $(stat -c %a "$VOLDIR/enroll_code") $(cat "$VOLDIR/enroll_code")" >>"$LOG" ;;
+  run) echo "mode $(stat -c %a "$VOLDIR/enroll_code" 2>/dev/null || stat -f %Lp "$VOLDIR/enroll_code") $(cat "$VOLDIR/enroll_code")" >>"$LOG" ;;
   logs)
     if [ -n "\${ENROLL_FAIL:-}" ]; then echo 'enroll failed: 401 {"error":"unauthorized"}'
     else echo 'images: from the server, for linux/amd64'; echo 'enrolled as vps-1 (abc-123)'; fi ;;
