@@ -59,7 +59,8 @@ interface Flight {
   promise: Promise<string>;
 }
 
-const keyId = (key: TokenKey): string => JSON.stringify([key.owner, key.role, key.repositoryId, key.use]);
+const keyId = (key: TokenKey): string =>
+  JSON.stringify([key.owner, key.role, key.repositoryId, key.use]);
 
 export function createTokenCache({ mint, register, now }: TokenCacheDeps): TokenCache {
   const cached = new Map<string, MintedToken>();
