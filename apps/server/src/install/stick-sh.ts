@@ -253,7 +253,7 @@ fi
 [ -n "$CODE" ] || die "no enrollment code: copy the whole line from Add a stick on the sticks page"
 [ -z "$NOT_READY" ] || die "$NOT_READY"
 
-TMP=$(mktemp -d)
+TMP=$(mktemp -d "\${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 trap 'exit 1' INT TERM
 
