@@ -27,6 +27,7 @@ import {
   rulesetSection,
   tokensSection,
 } from './github.js';
+import { linkTarget } from './links.js';
 import { escapeHtml, page } from './pages.js';
 import { type ZoneRef, zoneName, zoneNamer } from './zone-name.js';
 
@@ -218,7 +219,7 @@ function claudePage(store: ConfigStore, sudo: boolean): string {
     'claude',
     `<h3>Connect Claude</h3>
 <p>Jumpmaster runs Claude Code with <strong>your own</strong> subscription token. Make it on your own computer with <code>claude setup-token</code> (it lasts a year) and paste it here. Jumpmaster never asks Anthropic for it on your behalf, and it is never shown back: you will see its fingerprint.</p>
-<p>Your use stays under Anthropic's terms: <a href="${ANTHROPIC_TERMS}" rel="noreferrer">Consumer Terms</a> and <a href="${CLAUDE_CODE_LEGAL}" rel="noreferrer">Claude Code legal and compliance</a>.</p>
+<p>Your use stays under Anthropic's terms: <a href="${ANTHROPIC_TERMS}"${linkTarget(ANTHROPIC_TERMS)}>Consumer Terms</a> and <a href="${CLAUDE_CODE_LEGAL}"${linkTarget(CLAUDE_CODE_LEGAL)}>Claude Code legal and compliance</a>.</p>
 ${credentialLine('claudeToken', c)}
 <form id="claude">${field}${field ? '<p><label>Made on (optional) <input type="date" name="declaredCreatedAt"></label></p>' : ''}
 <p><label>Plan ${fileMode ? `<strong>${escapeHtml(config.claude.plan)}</strong> (set in the config file)` : `<select name="plan">${plans}</select>`}</label></p>
@@ -518,7 +519,7 @@ function doctorPage(db: Db, zones: readonly ZoneRef[]): string {
   const rows = checks
     .map(
       (c) =>
-        `<li class="${c.status}"><strong>${c.status.toUpperCase()}</strong> ${c.zoneId ? name(c.zoneId) : ''} <code>${escapeHtml(c.id)}</code>: ${escapeHtml(c.summary)}${c.status !== 'pass' && c.fix ? `<br><small>Fix: ${escapeHtml(c.fix)}</small>` : ''}${c.status !== 'pass' && c.doc ? ` <a href="${escapeHtml(c.doc)}" rel="noreferrer">how</a>` : ''}</li>`,
+        `<li class="${c.status}"><strong>${c.status.toUpperCase()}</strong> ${c.zoneId ? name(c.zoneId) : ''} <code>${escapeHtml(c.id)}</code>: ${escapeHtml(c.summary)}${c.status !== 'pass' && c.fix ? `<br><small>Fix: ${escapeHtml(c.fix)}</small>` : ''}${c.status !== 'pass' && c.doc ? ` <a href="${escapeHtml(c.doc)}"${linkTarget(c.doc)}>how</a>` : ''}</li>`,
     )
     .join('');
   const fails = checks.filter((c) => c.status === 'fail').length;
@@ -527,7 +528,7 @@ function doctorPage(db: Db, zones: readonly ZoneRef[]): string {
     `<h3>Check everything</h3><p>The doctor reads your setup (it never changes anything) and says what is missing, with the fix for each.</p>
 <p><button id="run">Run the doctor</button> <span id="run-out" role="status"></span></p>
 ${run ? `<p>Run ${run.id} (${escapeHtml(run.finishedAt ?? 'unfinished')}): ${fails ? `${fails} to fix` : 'nothing to fix'}.</p><ul>${rows}</ul>` : ''}
-<p>To have Jumpmaster come back after the host restarts: make Docker start at boot, and run it in the background with <code>docker compose up -d</code> (stopping a foreground <code>up</code> with Ctrl+C keeps it down at the next boot). <a href="${DOC}#start-at-boot" rel="noreferrer">How, on each host</a>.</p>
+<p>To have Jumpmaster come back after the host restarts: make Docker start at boot, and run it in the background with <code>docker compose up -d</code> (stopping a foreground <code>up</code> with Ctrl+C keeps it down at the next boot). <a href="${DOC}#start-at-boot"${linkTarget(DOC)}>How, on each host</a>.</p>
 <form method="post" action="/setup/dismiss"><button>Go to the factory floor</button></form>
 <script>
 document.getElementById('run').addEventListener('click', async () => {

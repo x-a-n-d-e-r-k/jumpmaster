@@ -15,6 +15,7 @@ import {
   type ZoneGuidance,
 } from '../github/guidance.js';
 import { MATRIX_AND_REUSABLE_NOTE } from '../github/workflows.js';
+import { linkTarget } from './links.js';
 import { escapeHtml, page } from './pages.js';
 import { type ZoneRef, zoneName } from './zone-name.js';
 
@@ -61,7 +62,7 @@ export function recommendationSection(rec: Recommendation): string {
 <p>${escapeHtml(rec.reason)}</p>
 ${rec.stop ? `<p class="warn" data-stop><strong>Stop here:</strong> ${escapeHtml(rec.stop)}.</p>` : ''}
 ${rec.ask ? `<p class="warn" data-ask><strong>First:</strong> ${escapeHtml(rec.ask)}</p>` : ''}
-${(rec.links ?? []).map((l) => `<p><a href="${gh(l.url)}" rel="noreferrer">${escapeHtml(l.label)}</a></p>`).join('')}
+${(rec.links ?? []).map((l) => `<p><a href="${gh(l.url)}"${linkTarget(gh(l.url))}>${escapeHtml(l.label)}</a></p>`).join('')}
 </section>`;
 }
 
@@ -70,7 +71,7 @@ export function tokensSection(pat: ZoneGuidance['pat'], roles: PatRole[]): strin
   const items = roles
     .map(
       (r) =>
-        `<li><a href="${gh(pat[r])}" rel="noreferrer" target="_blank">${escapeHtml(ROLE_TITLES[r])}</a><br><small>${escapeHtml(permissionList(r))}; no Workflows, no Administration.</small></li>`,
+        `<li><a href="${gh(pat[r])}"${linkTarget(gh(pat[r]))}>${escapeHtml(ROLE_TITLES[r])}</a><br><small>${escapeHtml(permissionList(r))}; no Workflows, no Administration.</small></li>`,
     )
     .join('');
   return `<section id="tokens"><h3>Create the tokens</h3>
@@ -89,7 +90,7 @@ export function tokensSection(pat: ZoneGuidance['pat'], roles: PatRole[]): strin
 /** The collaborator page and what to do there. */
 export function checklistSection(checklist: ZoneGuidance['checklist']): string {
   return `<section id="checklist"><h3>Give the accounts access</h3>
-<p>On the repository's <a href="${gh(checklist.url)}" rel="noreferrer">collaborators page</a>:</p>
+<p>On the repository's <a href="${gh(checklist.url)}"${linkTarget(gh(checklist.url))}>collaborators page</a>:</p>
 <ul>${checklist.items.map((i) => `<li>${escapeHtml(i)}</li>`).join('')}</ul></section>`;
 }
 
@@ -104,7 +105,7 @@ export function rulesetSection(
 ${ruleset.note ? `<p class="warn">${escapeHtml(ruleset.note)}</p>` : ''}
 <p>Jumpmaster merges only under a ruleset that requires a pull request and your CI, with no bypass. This file is one, with the checks your workflows report${identity === 'starter' ? '' : ", and a code owner's review on the protected paths"}:</p>
 ${identity === 'starter' ? `<p>${escapeHtml(STARTER_CODEOWNERS_NOTE)}</p>` : ''}
-<ol><li>Open the repository's <a href="${gh(rulesUrl)}" rel="noreferrer">Rulesets</a>, then New ruleset → Import a ruleset, and choose <code>${escapeHtml(ruleset.filename)}</code>.</li>
+<ol><li>Open the repository's <a href="${gh(rulesUrl)}"${linkTarget(gh(rulesUrl))}>Rulesets</a>, then New ruleset → Import a ruleset, and choose <code>${escapeHtml(ruleset.filename)}</code>.</li>
 <li>Review it and click Create.</li></ol>
 <p><small>${escapeHtml(MATRIX_AND_REUSABLE_NOTE)}</small></p>
 <p><a href="${escapeHtml(data)}" download="${escapeHtml(ruleset.filename)}">Download ${escapeHtml(ruleset.filename)}</a> <button type="button" data-copy="ruleset-text">Copy</button></p>
@@ -122,7 +123,7 @@ export function codeownersSection(
 <p>Changes to the protected paths need a person's review. Name yourself (and anyone else who may approve them) as code owners: each needs the Write role.</p>
 ${identity === 'starter' ? '' : '<p class="warn">The file starts with the reviewer bot on <code>*</code>, so its approval still merges ordinary pull requests. If your file already has a <code>*</code> line, add the reviewer bot to it, or nothing will merge.</p>'}
 ${form ? `<form method="get" action="${escapeHtml(form.action)}"><label>Your GitHub login <input name="reviewer" value="${escapeHtml(form.reviewer)}" placeholder="${escapeHtml(CODEOWNERS_PLACEHOLDER.slice(1))}" pattern="[A-Za-z0-9@,._ \\/\\-]+"></label> <button>Show</button></form>` : ''}
-<p><a href="${gh(codeowners.newFileUrl)}" rel="noreferrer" target="_blank">Create <code>${escapeHtml(codeowners.filename)}</code> on GitHub</a>, paste the text, and commit it. <button type="button" data-copy="codeowners-text">Copy</button></p>
+<p><a href="${gh(codeowners.newFileUrl)}"${linkTarget(gh(codeowners.newFileUrl))}>Create <code>${escapeHtml(codeowners.filename)}</code> on GitHub</a>, paste the text, and commit it. <button type="button" data-copy="codeowners-text">Copy</button></p>
 <pre id="codeowners-text">${escapeHtml(codeowners.text)}</pre></section>`;
 }
 

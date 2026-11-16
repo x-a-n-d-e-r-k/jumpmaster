@@ -62,6 +62,8 @@ export async function harness(
     live?: boolean;
     /** More zones beside the harness's own (configured only: the harness drives its own zone). */
     extraZones?: Partial<DropZoneConfig>[];
+    /** The GitHub reads the zone's GitHub page makes (with `live`). */
+    guidanceForge?: Parameters<typeof createApp>[0]['guidanceForge'];
   } = {},
 ): Promise<Harness> {
   const db = openDb(tmpDbFile());
@@ -125,6 +127,7 @@ export async function harness(
     leaseWaitMs: 0,
     leasePollMs: 0,
     ...(opts.kick ? { kick: opts.kick } : {}),
+    ...(opts.guidanceForge ? { guidanceForge: opts.guidanceForge } : {}),
   });
   const enroll = await app.inject({
     method: 'POST',

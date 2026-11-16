@@ -27,6 +27,7 @@ import { forgetSubmitKey, submitKey } from '../intake.js';
 import type { Status } from '../status.js';
 import type { Gate } from '../usage.js';
 import { floorCounts, sticksSummary, totalsStrip, zoneCards } from './floor.js';
+import { linkTarget } from './links.js';
 import { STYLE } from './theme.js';
 import { type ZoneRef, zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
 
@@ -730,9 +731,9 @@ export function workItemRows(
   const repoOf = new Map(zones.map((z) => [z.id, z.repo]));
   const prLink = (i: WorkItem): string => {
     const repo = repoOf.get(i.dropZoneId);
-    return i.prNumber !== null && repo
-      ? `<a href="${escapeHtml(`https://github.com/${repo}/pull/${i.prNumber}`)}">#${escapeHtml(i.prNumber)}</a>`
-      : '-';
+    if (i.prNumber === null || !repo) return '-';
+    const href = `https://github.com/${repo}/pull/${i.prNumber}`;
+    return `<a href="${escapeHtml(href)}"${linkTarget(href)}>#${escapeHtml(i.prNumber)}</a>`;
   };
   return items
     .map(
@@ -992,13 +993,13 @@ export function statusBanner(s: Status | undefined): string {
       ? `<ul class="also">${s.also
           .map(
             (a) =>
-              `<li>${codeHtml(a.text)}${a.href && safeHref(a.href) ? ` <a href="${escapeHtml(a.href)}">Fix</a>` : ''}</li>`,
+              `<li>${codeHtml(a.text)}${a.href && safeHref(a.href) ? ` <a href="${escapeHtml(a.href)}"${linkTarget(a.href)}>Fix</a>` : ''}</li>`,
           )
           .join('')}</ul>`
       : '';
   const action =
     s.action && safeHref(s.action.href)
-      ? `<p><a href="${escapeHtml(s.action.href)}">${escapeHtml(s.action.label)}</a></p>`
+      ? `<p><a href="${escapeHtml(s.action.href)}"${linkTarget(s.action.href)}>${escapeHtml(s.action.label)}</a></p>`
       : '';
   return `<div class="status" data-waiting-on="${escapeHtml(s.waitingOn)}"><p><strong>${codeHtml(s.headline)}</strong>${since}</p>${detail}${also}${action}</div>`;
 }
@@ -1160,9 +1161,7 @@ function renderAction(a: DoctorAction): string {
   if (a.method === 'POST' && safeHref(a.href) && a.href.startsWith('/'))
     control = `<button data-doctor="${escapeHtml(a.href)}" data-body="${escapeHtml(JSON.stringify(a.body ?? {}))}">${escapeHtml(a.label)}</button>`;
   else if (!a.method && safeHref(a.href))
-    control = a.href.startsWith('/')
-      ? `<a href="${escapeHtml(a.href)}">${escapeHtml(a.label)}</a>`
-      : `<a href="${escapeHtml(a.href)}" rel="noopener noreferrer" target="_blank">${escapeHtml(a.label)}</a>`;
+    control = `<a href="${escapeHtml(a.href)}"${linkTarget(a.href)}>${escapeHtml(a.label)}</a>`;
   const file = a.artifact
     ? ` <a download="${escapeHtml(a.artifact.filename)}" href="data:text/plain;charset=utf-8,${encodeURIComponent(a.artifact.text)}">Download ${escapeHtml(a.artifact.filename)}</a>`
     : '';
