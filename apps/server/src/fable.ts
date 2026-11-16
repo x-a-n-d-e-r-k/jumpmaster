@@ -16,7 +16,7 @@ export { servedModel } from '@jumpmaster/protocol';
 /** Roles that run on Fable when it is available. */
 export const FABLE_ROLES: readonly CrewRole[] = ['diagnose'];
 /** Plans that include Fable. `enterprise` is treated as not including it until verified. */
-export const FABLE_PLANS: readonly ClaudePlan[] = ['max', 'team_premium'];
+export const FABLE_PLANS: readonly ClaudePlan[] = ['max', 'ultra', 'team_premium'];
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;

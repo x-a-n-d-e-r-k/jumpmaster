@@ -22,6 +22,22 @@ import {
   resolveCredentials,
 } from './vault/credentials.js';
 
+/**
+ * The Claude plans, as declared. `ultra` is the $200/mo plan (#144); it has no 5-hour window.
+ * A stored `max` still loads.
+ */
+export const CLAUDE_PLANS = [
+  'pro',
+  'max',
+  'ultra',
+  'team_standard',
+  'team_premium',
+  'enterprise',
+] as const;
+
+/** A plan as the UI names it: the plan key, except Ultra which says its price. */
+export const planLabel = (plan: string): string => (plan === 'ultra' ? 'Ultra ($200/mo)' : plan);
+
 /** An image by digest (`name@sha256:<64 hex>`), the only form a signed zone runs. */
 const DIGEST_REF = /^[^\s@-][^\s@]*@sha256:[0-9a-f]{64}$/;
 
@@ -340,7 +356,7 @@ export const EditableSchema = z.object({
    */
   claude: z
     .object({
-      plan: z.enum(['pro', 'max', 'team_standard', 'team_premium', 'enterprise']).default('pro'),
+      plan: z.enum(CLAUDE_PLANS).default('pro'),
       fableModel: z.string().min(1).optional(),
       fableWeeklyDropCap: z.number().int().nonnegative().default(5),
       /**
@@ -414,7 +430,7 @@ export type BootSettings = Pick<Config, 'listen' | 'dataDir'>;
 export type ConfigIssue = { path: string; message: string };
 
 export type UsageConfig = Config['usage'];
-export type ClaudePlan = 'pro' | 'max' | 'team_standard' | 'team_premium' | 'enterprise';
+export type ClaudePlan = (typeof CLAUDE_PLANS)[number];
 export type ClaudeConfig = {
   plan: ClaudePlan;
   fableModel?: string;

@@ -740,8 +740,11 @@ limits where it can send it (see [Egress](#egress)).
 
 ### Claude plan
 
-`claude.plan` in the config declares your plan (`pro`, `max`, `team_standard`, `team_premium` or
-`enterprise`; default `pro`); `init --plan max` sets it. It isn't detected. Jumpmaster runs Fable
+`claude.plan` in the config declares your plan (`pro`, `max`, `ultra`, `team_standard`,
+`team_premium` or `enterprise`; default `pro`); `init --plan max` sets it. It isn't detected.
+`ultra` is the $200/mo plan: it has no 5-hour window, so the floor shows no 5-hour meter for it.
+The Usage card shows a Fable meter on every plan, and a meter for any other model window Claude
+reports. Jumpmaster runs Fable
 only on a plan that includes it and only with `claude.fableModel` set; `claude.plan` flags a
 `fableModel` your plan doesn't include.
 

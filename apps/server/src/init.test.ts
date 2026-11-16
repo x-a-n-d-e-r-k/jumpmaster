@@ -499,6 +499,36 @@ describe('jumpmaster init', () => {
     expect(noPreset.err).toContain('--preset');
   });
 
+  test('--plan ultra is written to the config, and named in the usage (#144)', async () => {
+    const dir = installDir({ reviewer: false });
+    const r = await run(
+      dir,
+      [
+        '--repo',
+        'octo/demo',
+        '--offline',
+        '--preset',
+        'node',
+        '--identity',
+        'starter',
+        '--plan',
+        'ultra',
+      ],
+      {
+        forge: () => {
+          throw new Error('offline');
+        },
+      },
+    );
+    expect(r.code, r.all).toBe(0);
+    expect(configOf(dir).claude).toMatchObject({ plan: 'ultra' });
+    const help = await run(installDir(), ['--help']);
+    expect(help.out).toMatch(/--plan pro\|max\|ultra\|/);
+    const bad = await run(installDir(), ['--repo', 'o/r', '--plan', 'bogus']);
+    expect(bad.code).toBe(2);
+    expect(bad.err).toContain('ultra');
+  });
+
   test('--help prints usage and exits 0', async () => {
     for (const flag of ['--help', '-h']) {
       const r = await run(installDir(), [flag]);

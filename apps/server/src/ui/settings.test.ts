@@ -11,7 +11,7 @@ import { SetupMode, setOperatorPassphrase } from '../auth/operator.js';
 import { loadBoot } from '../config/boot.js';
 import { ConfigStore, startVault } from '../config/store.js';
 import { openDb } from '../db/open.js';
-import { insertDrop, setZoneMode, upsertDropZone } from '../db/repo.js';
+import { insertDrop, recordUsageWindows, setZoneMode, upsertDropZone } from '../db/repo.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import { gateSecretName } from '../vault/credentials.js';
 import { fingerprintOf, openVault } from '../vault/vault.js';
@@ -447,6 +447,36 @@ const settingRow = (html: string, path: string): string => {
   if (at < 0) throw new Error(`no row for ${path}`);
   return html.slice(at, html.indexOf('</tr>', at));
 };
+
+describe('the ultra plan (#144)', () => {
+  test('both plan lists offer Ultra ($200/mo); choosing it is saved and shown selected on reload', async () => {
+    const w = await world({ dbMode: true, doc: { dropZones: [ZONE] } });
+    for (const url of ['/settings/credentials', '/settings/install']) {
+      const html = (await w.get(url)).body;
+      expect(html, url).toMatch(/<option value="ultra"[^>]*>Ultra \(\$200\/mo\)<\/option>/);
+      // The other plans keep their labels.
+      expect(html, url).toMatch(/<option value="max"[^>]*>max<\/option>/);
+    }
+    const r = await w.call('PATCH', '/api/control/config', {
+      patch: { claude: { plan: 'ultra' } },
+      expectRevision: w.store.revision(),
+    });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(w.store.current().claude.plan).toBe('ultra');
+    for (const url of ['/settings/credentials', '/settings/install'])
+      expect((await w.get(url)).body, url).toMatch(/<option value="ultra" selected>/);
+    // The floor follows the saved plan: no 5-hour meter, Fable's and Opus's windows as stored.
+    recordUsageWindows(
+      w.db,
+      { seven_day_fable: { utilization: 0.42 }, seven_day_opus: { utilization: 0.3 } },
+      t0,
+    );
+    const floor = (await w.get('/')).body;
+    expect(floor).not.toContain('<span>5-hour</span>');
+    expect(floor).toMatch(/<span>Fable \(7-day\)<\/span><b>42%<\/b>/);
+    expect(floor).toMatch(/<span>Opus \(7-day\)<\/span><b>30%<\/b>/);
+  });
+});
 
 describe('settings, part two (Task 13)', () => {
   test('the install tab marks mcp.enabled as restart-needed, shows the boot settings read-only with their source, and applies the rest live', async () => {

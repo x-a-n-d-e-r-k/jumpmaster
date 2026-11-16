@@ -604,6 +604,22 @@ describe('the wizard, round 2', () => {
     expect(claude).not.toMatch(/expectRevision: \d/);
   });
 
+  test('the Claude step offers Ultra ($200/mo), and a saved ultra plan is selected on reload (#144)', async () => {
+    const w = await world();
+    expect((await w.get('/setup/claude')).body).toContain(
+      '<option value="ultra">Ultra ($200/mo)</option>',
+    );
+    const r = await w.call('PATCH', '/api/control/config', {
+      patch: { claude: { plan: 'ultra' } },
+      expectRevision: w.store.revision(),
+    });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(w.store.current().claude.plan).toBe('ultra');
+    expect((await w.get('/setup/claude')).body).toContain(
+      '<option value="ultra" selected>Ultra ($200/mo)</option>',
+    );
+  });
+
   test('a wizard add says it is part of setup, and Cancel goes back to the project step', async () => {
     const w = await world();
     const add = await w.call('POST', '/api/control/zones', {

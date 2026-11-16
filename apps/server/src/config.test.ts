@@ -496,6 +496,20 @@ describe('crew config', () => {
     ).toThrow(/stagedLabel/);
   });
 
+  test('the ultra plan parses, a bogus plan is refused, and a stored max config loads unchanged (#144)', () => {
+    const withPlan = (plan: string) =>
+      fixture({ dataDir: './data', dropZones: [baseZone], claude: { plan } });
+    expect(loadConfig(withPlan('ultra'), fullEnv).claude).toEqual({
+      plan: 'ultra',
+      fableWeeklyDropCap: 5,
+    });
+    expect(() => loadConfig(withPlan('bogus'), fullEnv)).toThrow(/claude.plan/);
+    expect(loadConfig(withPlan('max'), fullEnv).claude).toEqual({
+      plan: 'max',
+      fableWeeklyDropCap: 5,
+    });
+  });
+
   test('claude defaults to the pro plan with no Fable and a weekly cap of 5', () => {
     expect(loadConfig(minimal, fullEnv).claude).toEqual({ plan: 'pro', fableWeeklyDropCap: 5 });
     const c = loadConfig(

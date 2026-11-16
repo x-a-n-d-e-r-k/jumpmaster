@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'vitest';
 import type { Briefing, Ruling } from '../briefings.js';
-import type { DropZoneConfig } from '../config.js';
+import type { ClaudePlan, DropZoneConfig } from '../config.js';
 import { STARTER_WARNING } from '../config.js';
 import type { CrewIssue } from '../crew/store.js';
-import type { Drop, WorkItem } from '../db/repo.js';
+import type { Drop, UsageWindowRow, WorkItem } from '../db/repo.js';
 import type { GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import { statusOf } from '../status.js';
@@ -205,13 +205,86 @@ const usageState = {
   updatedAt: null,
 };
 
+describe('the Usage card by plan (#144)', () => {
+  const home = (
+    plan: ClaudePlan,
+    windows: UsageWindowRow[] = [],
+    state: typeof usageState = usageState,
+  ): string =>
+    renderHome({ zones: [z], items: [], drops: [], usage: { gate: 'open', state, plan, windows } });
+  /** Each meter on the card: its label, figure and note. */
+  const meters = (html: string) =>
+    [
+      ...html.matchAll(
+        /<div class="meter"><div class="meter-row"><span>([^<]*)<\/span><b>([^<]*)<\/b><\/div>(?:<small class="note">([^<]*)<\/small>)?/g,
+      ),
+    ].map(([, label, value, note]) => ({ label, value, ...(note ? { note } : {}) }));
+  const labels = (html: string) => meters(html).map((m) => m.label);
+  const win = (key: string, utilization: number, observedAt = '2026-01-01T00:00:00.000Z') => ({
+    key,
+    utilization,
+    resetsAt: null,
+    observedAt,
+  });
+
+  test('ultra shows no 5-hour meter', () => {
+    const html = home('ultra');
+    expect(labels(html)).toEqual(['7-day', 'Fable (7-day)']);
+    expect(html).not.toContain('<span>5-hour</span>');
+  });
+
+  test('max, pro and team_premium show the 5-hour meter, "-" when nothing is known', () => {
+    for (const plan of ['max', 'pro', 'team_premium'] as const) {
+      expect(labels(home(plan)), plan).toEqual(['5-hour', '7-day', 'Fable (7-day)']);
+      expect(meters(home(plan))[0], plan).toEqual({ label: '5-hour', value: '97%' });
+      const unknown = home(plan, [], { ...usageState, fiveHourUtil: null });
+      expect(meters(unknown)[0], plan).toEqual({ label: '5-hour', value: '-' });
+    }
+  });
+
+  test('with no Fable window, the Fable meter shows "-" and says so, never 0', () => {
+    for (const plan of ['pro', 'ultra'] as const) {
+      const fable = meters(home(plan)).find((m) => m.label === 'Fable (7-day)');
+      expect(fable, plan).toEqual({
+        label: 'Fable (7-day)',
+        value: '-',
+        note: 'not reported by Claude yet',
+      });
+    }
+  });
+
+  test('the Fable meter reads the reported window, the most recently observed if several', () => {
+    const fable = (ws: UsageWindowRow[]) =>
+      meters(home('pro', ws)).filter((m) => m.label.startsWith('Fable'));
+    expect(fable([win('seven_day_fable', 0.42)])).toEqual([
+      { label: 'Fable (7-day)', value: '42%' },
+    ]);
+    expect(
+      fable([
+        win('seven_day_fable', 0.42, '2026-01-02T00:00:00.000Z'),
+        win('seven_day_fable_beta', 0.7, '2026-01-01T00:00:00.000Z'),
+      ]),
+    ).toEqual([{ label: 'Fable (7-day)', value: '42%' }]);
+  });
+
+  test('another model window gets its own meter, labelled from its key', () => {
+    const html = home('max', [
+      win('seven_day', 0.41),
+      win('five_hour', 0.97),
+      win('seven_day_opus', 0.33),
+    ]);
+    expect(labels(html)).toEqual(['5-hour', '7-day', 'Fable (7-day)', 'Opus (7-day)']);
+    expect(meters(html).at(-1)).toEqual({ label: 'Opus (7-day)', value: '33%' });
+  });
+});
+
 describe('renderHome loop state', () => {
   test('shows usage gate', () => {
     const html = renderHome({
       zones: [z],
       items: [],
       drops: [],
-      usage: { gate: 'closed', state: usageState },
+      usage: { gate: 'closed', state: usageState, plan: 'pro', windows: [] },
     });
     expect(html).toContain('<h2>Usage</h2>');
     expect(html).toContain('closed');
