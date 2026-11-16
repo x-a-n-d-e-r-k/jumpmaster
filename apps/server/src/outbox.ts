@@ -17,7 +17,9 @@ import {
   GitHubForge,
   isRateLimited,
   type PullFacts,
+  type TokenProvider,
 } from './forge/github.js';
+import type { AppRole, CredentialRef } from './vault/github-app-entries.js';
 
 /**
  * One zone's forge identities: `author` creates PRs and merges, `reviewer` only posts reviews.
@@ -30,21 +32,72 @@ export type ForgePair = {
   merger?: Forge;
 };
 
-/** The forges for a zone. An admin author must not be the identity that merges. */
+/** Each role's resolved credential (spec §4.4): its owner's app, or an install-wide PAT. */
+export type PairRefs = { author: CredentialRef; reviewer: CredentialRef };
+
+/**
+ * How a pair is built beyond its zone and tokens. `refs` absent, or naming tokens only, builds the
+ * same pair as before. An app ref builds that role's forge on `appTokens(owner, role)`.
+ */
+export type PairOptions = {
+  requestTimeoutMs?: number;
+  refs?: PairRefs;
+  appTokens?: (owner: string, role: AppRole) => TokenProvider;
+};
+
+/**
+ * The forges for a zone. An admin author must not be the identity that merges, but an app author
+ * never gets a merger: apps are offered only in two-bot mode, so `authorMayBeAdmin` there is a
+ * stale flag, and the reviewer it would route merges to may be unable to merge (spec §4.4).
+ */
 export function pairFor(
   zone: { repo: string; authorMayBeAdmin: boolean; identity?: 'two-bot' | 'starter' },
   secrets: { githubAuthorToken: string; githubReviewerToken?: string },
-  opts: { requestTimeoutMs?: number } = {},
+  opts: PairOptions = {},
 ): ForgePair {
   const [owner = '', name = ''] = zone.repo.split('/');
-  const author = new GitHubForge(owner, name, secrets.githubAuthorToken, opts);
+  const forgeOpts =
+    opts.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: opts.requestTimeoutMs };
   // Starter has no second identity, so the author merges (an admin author included: see
-  // authorMayBeAdmin, and the per-pass Administration probe that guards it).
-  if (zone.identity === 'starter') return { author, reviewer: null };
-  if (!secrets.githubReviewerToken)
+  // authorMayBeAdmin, and the per-pass Administration probe that guards it). It always uses the
+  // author token, whatever the refs say.
+  if (zone.identity === 'starter')
+    return {
+      author: new GitHubForge(owner, name, secrets.githubAuthorToken, forgeOpts),
+      reviewer: null,
+    };
+  const appRef = (role: AppRole) => {
+    const ref = opts.refs?.[role];
+    return ref?.kind === 'github-app' ? ref : undefined;
+  };
+  const appForge = (role: AppRole, ref: { owner: string }): Forge => {
+    const where = redactTokenShapes(zone.repo);
+    if (!opts.appTokens)
+      throw new Error(
+        `the ${role} of ${where} uses a GitHub App, but no app token provider was given`,
+      );
+    let provider: TokenProvider;
+    try {
+      provider = opts.appTokens(ref.owner, role);
+    } catch {
+      // The factory's error may quote a key or a token: drop it, and keep no `cause`.
+      throw new Error(`could not get a GitHub App token provider for the ${role} of ${where}`);
+    }
+    return new GitHubForge(owner, name, provider, forgeOpts);
+  };
+  const authorApp = appRef('author');
+  const reviewerApp = appRef('reviewer');
+  const author = authorApp
+    ? appForge('author', authorApp)
+    : new GitHubForge(owner, name, secrets.githubAuthorToken, forgeOpts);
+  let reviewer: Forge;
+  if (reviewerApp) reviewer = appForge('reviewer', reviewerApp);
+  else if (!secrets.githubReviewerToken)
     throw new Error('JM_GITHUB_REVIEWER_TOKEN is required for a two-bot zone');
-  const reviewer = new GitHubForge(owner, name, secrets.githubReviewerToken, opts);
-  return zone.authorMayBeAdmin ? { author, reviewer, merger: reviewer } : { author, reviewer };
+  else reviewer = new GitHubForge(owner, name, secrets.githubReviewerToken, forgeOpts);
+  return zone.authorMayBeAdmin && !authorApp
+    ? { author, reviewer, merger: reviewer }
+    : { author, reviewer };
 }
 
 type PairTokens = {
@@ -73,21 +126,35 @@ export function forgeTokenFingerprint(secrets: PairTokens): string {
 type PairZone = Parameters<typeof pairFor>[0] & { id: string };
 
 /**
+ * What the refs add to a pair's cache key: each app role's owner. Token refs (or none) add
+ * nothing, so their key is today's; a starter zone ignores refs, so they add nothing there either.
+ */
+function refsKey(zone: PairZone, refs: PairRefs | undefined): (string | null)[][] {
+  if (!refs || zone.identity === 'starter') return [];
+  const owners = [refs.author, refs.reviewer].map((r) =>
+    r.kind === 'github-app' ? r.owner : null,
+  );
+  return owners.every((o) => o === null) ? [] : [owners];
+}
+
+/**
  * The forge pairs, built on first use and rebuilt only when what they were built from changes:
- * the zone's repository, identity and admin setting, and the credential fingerprint. A config
- * revision that leaves those alone keeps the pair (and its connections); a rotated token gets a
+ * the zone's repository, identity and admin setting, the credential fingerprint, and each
+ * role's credential kind (and app owner). A config revision that leaves those alone keeps the
+ * pair (and its connections); a rotated token, or a role switched between token and app, gets a
  * new one at the next pass. Only the latest pair per zone (timed or not) is kept.
  */
 export class ForgePairs {
   private readonly cache = new Map<string, { key: string; pair: ForgePair }>();
 
-  for(zone: PairZone, secrets: PairTokens, opts: { requestTimeoutMs?: number } = {}): ForgePair {
+  for(zone: PairZone, secrets: PairTokens, opts: PairOptions = {}): ForgePair {
     const slot = `${zone.id}\n${opts.requestTimeoutMs ?? ''}`;
     const key = JSON.stringify([
       zone.repo,
       zone.identity ?? 'two-bot',
       zone.authorMayBeAdmin,
       forgeTokenFingerprint(secrets),
+      ...refsKey(zone, opts.refs),
     ]);
     const hit = this.cache.get(slot);
     if (hit && hit.key === key) return hit.pair;
