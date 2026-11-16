@@ -37,6 +37,7 @@ export function makeZone(o: Partial<DropZoneConfig> = {}): DropZoneConfig {
     triageLabel: 'jm-triage',
     triagedLabel: 'jm-triaged',
     triage: { gate: true },
+    transcripts: { retainDays: 90, archive: true },
     mergeMethod: 'squash',
     requireBranchProtection: true,
     mode: 'active',

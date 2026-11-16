@@ -248,6 +248,17 @@ export const DropZoneObject = z.object({
   triagedLabel: z.string().min(1).default('jm-triaged'),
   /** `gate: false` admits every trusted human ready issue, formatted or not, as before #183. */
   triage: z.object({ gate: z.boolean().default(true) }).default({ gate: true }),
+  /**
+   * Transcript retention (issue #197): a finished drop's events are pruned `retainDays` after it
+   * finished (0 keeps them forever), archived first as gzipped JSONL under the data directory
+   * unless `archive` is false. The drop row, its result and its artifacts are always kept.
+   */
+  transcripts: z
+    .object({
+      retainDays: z.number().int().min(0).default(90),
+      archive: z.boolean().default(true),
+    })
+    .default({ retainDays: 90, archive: true }),
   mergeMethod: z.literal('squash').default('squash'),
   requireBranchProtection: z.boolean().default(true),
   /**

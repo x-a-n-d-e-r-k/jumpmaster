@@ -25,6 +25,7 @@ import { scrub } from './scrub.js';
 import { readSecretFile } from './secrets.js';
 import { recordPass } from './status.js';
 import { syncDropZone } from './sync.js';
+import { transcriptPruner } from './transcripts.js';
 import { credentialProblems } from './vault/problems.js';
 import { sweepStopping } from './zones/stop.js';
 
@@ -278,6 +279,13 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     }
   };
 
+  // Transcript retention (issue #197): at most once an hour, beside the lease sweep.
+  const pruneTranscripts = transcriptPruner({
+    db,
+    dataDir: boot.dataDir,
+    zones: () => live.current().dropZones,
+    log,
+  });
   const poll = pollTimer(live, () => void guardedPass());
   const leaseTimer = setInterval(() => {
     try {
@@ -286,6 +294,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
       log(`lease expiry failed: ${errorMessage(e)}`);
     }
     sweepStops();
+    void pruneTranscripts(new Date());
   }, 10_000);
 
   await app.listen({ host: boot.listen.host, port: boot.listen.port });

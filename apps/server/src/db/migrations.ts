@@ -922,6 +922,15 @@ export type Migration = {
   after?: (db: Db) => void;
 };
 
+/**
+ * Migration v31 (issue #197): transcript retention. A drop whose events were pruned records when,
+ * and where its archive went (relative to the data directory; null when the zone archives nothing).
+ */
+const V31_SQL = `
+ALTER TABLE drops ADD COLUMN transcript_pruned_at TEXT;
+ALTER TABLE drops ADD COLUMN transcript_archive TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -953,6 +962,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 28, sql: V28_SQL },
   { version: 29, sql: V29_SQL, foreignKeysOff: true },
   { version: 30, sql: V30_SQL, foreignKeysOff: true },
+  { version: 31, sql: V31_SQL },
 ];
 
 /**

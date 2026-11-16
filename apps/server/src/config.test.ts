@@ -511,6 +511,22 @@ describe('crew config', () => {
     expect(z?.triage).toEqual({ gate: true });
   });
 
+  test('transcripts default to 90 days retained, archived', () => {
+    const z = loadConfig(withZone({}), fullEnv).dropZones[0];
+    expect(z?.transcripts).toEqual({ retainDays: 90, archive: true });
+  });
+
+  test('transcripts.retainDays is a whole number of days, 0 (keep forever) or more', () => {
+    const z = loadConfig(withZone({ transcripts: { retainDays: 0 } }), fullEnv).dropZones[0];
+    expect(z?.transcripts).toEqual({ retainDays: 0, archive: true });
+    expect(() => loadConfig(withZone({ transcripts: { retainDays: -1 } }), fullEnv)).toThrow(
+      /retainDays/,
+    );
+    expect(() => loadConfig(withZone({ transcripts: { retainDays: 1.5 } }), fullEnv)).toThrow(
+      /retainDays/,
+    );
+  });
+
   test('triageLabel equal to readyLabel, retryLabel or crew.stagedLabel is a config error', () => {
     expect(() => loadConfig(withZone({ triageLabel: 'agent-ready' }), fullEnv)).toThrow(
       /triageLabel must differ from readyLabel/,
@@ -1347,6 +1363,7 @@ describe('githubApp (spec §4.2: installation and repository ids, not secret)', 
       triageLabel: 'jm-triage',
       triagedLabel: 'jm-triaged',
       triage: { gate: true },
+      transcripts: { retainDays: 90, archive: true },
       mergeMethod: 'squash',
       requireBranchProtection: true,
       authorMayBeAdmin: false,

@@ -626,7 +626,7 @@ const insDrop = (db: Db, id: string, role: string, item: number | null, state = 
 test('v17 rebuilds drops keeping every row and column, with foreign keys intact', () => {
   const f = v16Db();
   const before = new Database(f);
-  // v22 and v23 add columns; the rows as v17 left them are what must survive.
+  // v22, v23 and v31 add columns; the rows as v17 left them are what must survive.
   const NEW_V22 = [
     'push_kind',
     'push_expect_sha',
@@ -635,6 +635,8 @@ test('v17 rebuilds drops keeping every row and column, with foreign keys intact'
     'usage_applied',
     'was_probe',
     'rate_limit_requeue',
+    'transcript_pruned_at',
+    'transcript_archive',
   ];
   const all = (db: Db | Database.Database) =>
     (db.prepare('SELECT * FROM drops ORDER BY id').all() as Record<string, unknown>[]).map((r) =>
@@ -1088,7 +1090,7 @@ test('v30 adds triage_requests and lets triage be a crew drop, keeping every dro
       VALUES ('d1', 'z', NULL, 'refute', 'succeeded', 't', 1, 0, 'final')`);
   });
   const db = openDb(f);
-  expect(MIGRATIONS.at(-1)?.version).toBe(30);
+  expect(MIGRATIONS.at(-1)?.version).toBeGreaterThanOrEqual(30);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(
     db
@@ -1114,5 +1116,26 @@ test('v30 adds triage_requests and lets triage be a crew drop, keeping every dro
   ).toEqual({ attempts: 0, outcome: null, b: null });
   expect(() => put.run('sha1', 'open')).toThrow(/UNIQUE/);
   expect(() => put.run('sha2', 'closed')).toThrow(/CHECK/);
+  db.close();
+});
+
+test('v31 adds the transcript prune mark and archive path, unset on every existing drop', () => {
+  const f = dbAt(30, (raw) => {
+    raw.exec(
+      `INSERT INTO drop_zones (id, repo, default_branch, config_json) VALUES ('z', 'o/r', 'main', '{}');
+       INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, created_at, finished_at,
+         result_json) VALUES ('d1', 'z', NULL, 'doctor', 'succeeded', 't', 't', '{"ok":true}');`,
+    );
+  });
+  const db = openDb(f);
+  expect(MIGRATIONS.at(-1)?.version).toBe(31);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(
+    db
+      .prepare(
+        `SELECT id, result_json AS r, transcript_pruned_at AS p, transcript_archive AS a FROM drops`,
+      )
+      .all(),
+  ).toEqual([{ id: 'd1', r: '{"ok":true}', p: null, a: null }]);
   db.close();
 });
