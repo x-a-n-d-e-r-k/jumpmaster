@@ -131,6 +131,22 @@ test('camelCase window resetsAt (as the CLI sends it) is normalized too', () =>
     unifiedWindows: { five_hour: { utilization: 0.02, resetsAt: '2026-01-01T00:00:00.000Z' } },
   }));
 
+test('rate_limit parsing keeps every valid window and drops bad keys or values (#144)', () => {
+  const parsed = parseStreamLine(
+    rlLine({
+      seven_day: { utilization: 0.5, resets_at: 1767225600 },
+      seven_day_fable: { utilization: 0.42, resets_at: 1767225600 },
+      'Bad-Key!': { utilization: 0.1 },
+      seven_day_opus: { utilization: 2 },
+    }),
+  );
+  expect(parsed).toMatchObject({ type: 'rate_limit', status: 'allowed' });
+  expect(parsed.type === 'rate_limit' && parsed.unifiedWindows).toEqual({
+    seven_day: { utilization: 0.5, resetsAt: '2026-01-01T00:00:00.000Z' },
+    seven_day_fable: { utilization: 0.42, resetsAt: '2026-01-01T00:00:00.000Z' },
+  });
+});
+
 test('system/init yields the session id', () =>
   expect(
     parseStreamLine(JSON.stringify({ type: 'system', subtype: 'init', session_id: 's-1' })),

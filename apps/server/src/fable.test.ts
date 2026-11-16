@@ -74,7 +74,7 @@ function pastDrop(id: string, model: string, at: Date): void {
 describe('which model a drop gets', () => {
   test('pro, team_standard and enterprise never run Fable; diagnose gets the zone model', () => {
     expect(FABLE_ROLES).toEqual(['diagnose']);
-    expect(FABLE_PLANS).toEqual(['max', 'team_premium']);
+    expect(FABLE_PLANS).toEqual(['max', 'ultra', 'team_premium']);
     for (const plan of ['pro', 'team_standard', 'enterprise'] as const) {
       const c = cfg({ plan, fableModel: FABLE });
       expect(resolveModel(w.db, c, w.zone, 'diagnose', t0)).toBe(w.zone.model);
@@ -94,7 +94,7 @@ describe('which model a drop gets', () => {
   test('max with fableModel runs diagnose on Fable and records requested_model', async () => {
     expect(fableStatus(w.db, maxPlan, t0)).toEqual({ available: true, reason: 'available' });
     expect(resolveModel(w.db, maxPlan, w.zone, 'diagnose', t0)).toBe(FABLE);
-    for (const plan of ['max', 'team_premium'] as const) {
+    for (const plan of ['max', 'ultra', 'team_premium'] as const) {
       expect(resolveModel(w.db, cfg({ plan, fableModel: FABLE }), w.zone, 'diagnose', t0)).toBe(
         FABLE,
       );

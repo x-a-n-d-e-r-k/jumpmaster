@@ -1,3 +1,5 @@
+import { type UsageWindows, usageWindowsOf } from '@jumpmaster/protocol';
+
 export interface ClaudeArgsOptions {
   prompt: string;
   model: string;
@@ -44,7 +46,7 @@ export type ParsedLine =
       status: 'allowed' | 'allowed_warning' | 'rejected';
       resetsAt?: string;
       rateLimitType?: string;
-      unifiedWindows?: Partial<Record<'five_hour' | 'seven_day', UsageWindow>>;
+      unifiedWindows?: UsageWindows;
       isUsingOverage?: boolean;
       overageStatus?: string;
       /** When the extra-usage spending cap resets (monthly), not a usage window. */
@@ -64,22 +66,6 @@ export type ParsedLine =
     }
   | { type: 'agent'; raw: unknown }
   | { type: 'ignored' };
-
-export type UsageWindow = { utilization: number; resetsAt?: string };
-
-function windowsOf(
-  v: unknown,
-): Partial<Record<'five_hour' | 'seven_day', UsageWindow>> | undefined {
-  if (typeof v !== 'object' || v === null) return undefined;
-  const out: Partial<Record<'five_hour' | 'seven_day', UsageWindow>> = {};
-  for (const key of ['five_hour', 'seven_day'] as const) {
-    const w = (v as Record<string, Record<string, unknown> | undefined>)[key];
-    if (!w || typeof w.utilization !== 'number') continue;
-    const resetsAt = normalizeResetsAt(w.resetsAt ?? w.resets_at);
-    out[key] = { utilization: w.utilization, ...(resetsAt ? { resetsAt } : {}) };
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
-}
 
 function normalizeResetsAt(v: unknown): string | undefined {
   let d: Date;
@@ -104,7 +90,7 @@ export function parseStreamLine(line: string): ParsedLine {
     const status = info.status;
     if (status === 'allowed' || status === 'allowed_warning' || status === 'rejected') {
       const resetsAt = normalizeResetsAt(info.resetsAt);
-      const unifiedWindows = windowsOf(info.unifiedWindows);
+      const unifiedWindows = usageWindowsOf(info.unifiedWindows, normalizeResetsAt);
       const overageResetsAt = normalizeResetsAt(info.overageResetsAt);
       return {
         type: 'rate_limit',

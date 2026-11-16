@@ -32,7 +32,7 @@ import {
 import { join } from 'node:path';
 import { PRESETS, type Preset } from '@jumpmaster/protocol';
 import { runBootstrap } from './bootstrap.js';
-import { IDENTITIES, type Identity, STARTER_WARNING } from './config.js';
+import { CLAUDE_PLANS, IDENTITIES, type Identity, STARTER_WARNING } from './config.js';
 import { DOC, identityMap } from './doctor/checks.js';
 import type { Forge } from './forge/github.js';
 import { type Detection, detectAs } from './presets.js';
@@ -58,11 +58,11 @@ export type InitDeps = {
 const USAGE = [
   'usage: jumpmaster init --repo owner/name [--preset node|python|go|jvm]',
   '         [--identity two-bot|starter] [--author-may-be-admin]',
-  '         [--plan pro|max|team_standard|team_premium|enterprise] [--force] [--allow-root]',
+  '         [--plan pro|max|ultra|team_standard|team_premium|enterprise] [--force] [--allow-root]',
   '         [--offline --preset p [--private]]   (write the config without reading GitHub)',
   '       jumpmaster init --secrets-only [--allow-root]   (the same as jumpmaster bootstrap)',
 ].join('\n');
-const PLANS = ['pro', 'max', 'team_standard', 'team_premium', 'enterprise'] as const;
+const PLANS = CLAUDE_PLANS;
 
 /** Shared with the wizard's detection: the same pattern, the same zone id rule. */
 export { REPO, zoneIdOf };

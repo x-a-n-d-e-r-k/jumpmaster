@@ -994,10 +994,25 @@ test('v26 adds the trooper counts, unset on every existing stick: it runs its en
     );
   });
   const db = openDb(f);
-  expect(MIGRATIONS.at(-1)?.version).toBe(26);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(db.prepare('SELECT slots, desired_slots AS d, max_slots AS m FROM sticks').all()).toEqual([
     { slots: 2, d: null, m: null },
   ]);
+  db.close();
+});
+
+test('v27 adds usage_windows, empty, keyed by window', () => {
+  const db = openDb(dbAt(26, () => {}));
+  expect(MIGRATIONS.at(-1)?.version).toBe(27);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.prepare('SELECT * FROM usage_windows').all()).toEqual([]);
+  db.exec(
+    "INSERT INTO usage_windows (key, utilization, resets_at, observed_at) VALUES ('seven_day_fable', 0.4, NULL, 'a')",
+  );
+  expect(() =>
+    db.exec(
+      "INSERT INTO usage_windows (key, utilization, resets_at, observed_at) VALUES ('seven_day_fable', 0.5, NULL, 'b')",
+    ),
+  ).toThrow(/UNIQUE|PRIMARY/);
   db.close();
 });

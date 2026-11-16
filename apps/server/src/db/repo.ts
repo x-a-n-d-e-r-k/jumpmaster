@@ -1072,6 +1072,40 @@ export function setUsageState(db: Db, patch: Partial<UsageStateRow>, now: Date):
   db.prepare(`UPDATE usage_state SET ${sets} WHERE id = 1`).run(params);
 }
 
+/** One usage window's latest reported value (#144). */
+export interface UsageWindowRow {
+  key: string;
+  utilization: number | null;
+  resetsAt: string | null;
+  observedAt: string | null;
+}
+
+/** Stores the latest value of each reported window, stamped `now`. */
+export function recordUsageWindows(
+  db: Db,
+  windows: Record<string, { utilization: number; resetsAt?: string | undefined }>,
+  now: Date,
+): void {
+  const up = db.prepare(
+    `INSERT INTO usage_windows (key, utilization, resets_at, observed_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT (key) DO UPDATE SET utilization = excluded.utilization,
+       resets_at = excluded.resets_at, observed_at = excluded.observed_at`,
+  );
+  for (const [key, w] of Object.entries(windows)) {
+    up.run(key, w.utilization, w.resetsAt ?? null, now.toISOString());
+  }
+}
+
+/** Every stored usage window, by key. */
+export function listUsageWindows(db: Db): UsageWindowRow[] {
+  return db
+    .prepare(
+      `SELECT key, utilization, resets_at AS resetsAt, observed_at AS observedAt
+       FROM usage_windows ORDER BY key`,
+    )
+    .all() as UsageWindowRow[];
+}
+
 /** The zone's default branch as last synced from the forge, or null before the first sync. */
 export function getDropZoneDefaultBranch(db: Db, zoneId: string): string | null {
   const r = db.prepare('SELECT default_branch AS b FROM drop_zones WHERE id = ?').get(zoneId) as

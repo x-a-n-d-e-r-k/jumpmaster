@@ -7,7 +7,7 @@ import {
   type Ruling,
   WAITS_FOR_CREW,
 } from '../briefings.js';
-import { type DropZoneConfig, STARTER_WARNING } from '../config.js';
+import { type ClaudePlan, type DropZoneConfig, STARTER_WARNING } from '../config.js';
 import type { CrewIssue } from '../crew/store.js';
 import type {
   AttemptKey,
@@ -17,6 +17,7 @@ import type {
   OutboxRow,
   StoredEvent,
   UsageStateRow,
+  UsageWindowRow,
   WorkItem,
   WorkItemState,
 } from '../db/repo.js';
@@ -67,6 +68,10 @@ export interface HomeState {
   usage?: {
     gate: Gate;
     state: UsageStateRow;
+    /** The declared plan: `ultra` has no 5-hour window, so no 5-hour meter (#144). */
+    plan: ClaudePlan;
+    /** Every usage window as last reported (Fable's and other models' among them). */
+    windows: UsageWindowRow[];
     /** Drops that reported usage credits since Command's Resume. */
     creditDropsSinceResume?: number;
     /** The account's `overageStatus` as last reported (raw, pending rehearsal). */
@@ -176,10 +181,61 @@ function creditsLine(u: NonNullable<HomeState['usage']>): string | null {
 }
 
 /** A utilisation meter: the figure, and a bar that warms at 80% and goes red at 95%. */
-function meter(label: string, v: number | null): string {
+function meter(label: string, v: number | null, note?: string): string {
   const w = v === null ? 0 : Math.min(100, Math.max(0, Math.round(v * 100)));
   const tone = v === null ? '' : v >= 0.95 ? ' class="full"' : v >= 0.8 ? ' class="hot"' : '';
-  return `<div class="meter"><div class="meter-row"><span>${label}</span><b>${pct(v)}</b></div><div class="bar" role="presentation"><i${tone} style="width:${w}%"></i></div></div>`;
+  const small = note ? `<small class="note">${escapeHtml(note)}</small>` : '';
+  return `<div class="meter"><div class="meter-row"><span>${escapeHtml(label)}</span><b>${pct(v)}</b></div>${small}<div class="bar" role="presentation"><i${tone} style="width:${w}%"></i></div></div>`;
+}
+
+/** The windows usage_state already carries, read by the gate. */
+const GATE_WINDOWS = new Set(['five_hour', 'seven_day']);
+const isFableWindow = (key: string): boolean => key.includes('fable');
+const PERIODS: [string, string][] = [
+  ['five_hour', '5-hour'],
+  ['seven_day', '7-day'],
+];
+
+/** A model window's meter label from its key: `seven_day_opus` reads `Opus (7-day)`. */
+export function windowLabel(key: string): string {
+  const [prefix, period] = PERIODS.find(([p]) => key.startsWith(`${p}_`)) ?? ['', ''];
+  const rest = (prefix ? key.slice(prefix.length + 1) : key)
+    .split('_')
+    .filter(Boolean)
+    .map((w) => w[0]?.toUpperCase() + w.slice(1))
+    .join(' ');
+  return period ? `${rest} (${period})` : rest;
+}
+
+/** The Fable window: the one whose key names Fable, the most recently observed if several. */
+function fableWindow(windows: readonly UsageWindowRow[]): UsageWindowRow | undefined {
+  return windows
+    .filter((w) => isFableWindow(w.key))
+    .reduce<UsageWindowRow | undefined>(
+      (best, w) =>
+        best === undefined || (w.observedAt ?? '') > (best.observedAt ?? '') ? w : best,
+      undefined,
+    );
+}
+
+/**
+ * The card's meters: 5-hour (not on Ultra, which has no such window), 7-day, Fable on every plan
+ * ("-" with a note until Claude reports it, never 0), then each other reported model window.
+ */
+function usageMeters(u: NonNullable<HomeState['usage']>): string {
+  const s = u.state;
+  const fable = fableWindow(u.windows);
+  const others = u.windows
+    .filter((w) => !GATE_WINDOWS.has(w.key) && !isFableWindow(w.key))
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  return (
+    (u.plan === 'ultra' ? '' : meter('5-hour', s.fiveHourUtil)) +
+    meter('7-day', s.sevenDayUtil) +
+    (fable && fable.utilization !== null
+      ? meter('Fable (7-day)', fable.utilization)
+      : meter('Fable (7-day)', null, 'not reported by Claude yet')) +
+    others.map((w) => meter(windowLabel(w.key), w.utilization)).join('')
+  );
 }
 
 function usageSection(u: HomeState['usage']): string {
@@ -190,8 +246,7 @@ function usageSection(u: HomeState['usage']): string {
   return card(
     'Claude subscription',
     '<h2>Usage</h2>',
-    meter('5-hour', s.fiveHourUtil) +
-      meter('7-day', s.sevenDayUtil) +
+    usageMeters(u) +
       '<dl class="kv">' +
       row('Gate', u.gate) +
       (credits ? row('Credits', credits) : '') +

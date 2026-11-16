@@ -32,6 +32,7 @@ import {
   listObservations,
   listOutbox,
   listSticks,
+  listUsageWindows,
   listWorkItems,
   liveDropsOn,
   type Stick,
@@ -150,6 +151,8 @@ function usageView(db: Db, config: Config, at: Date): NonNullable<HomeState['usa
   return {
     gate: dispatchGate(db, config.usage, at),
     state,
+    plan: config.claude.plan,
+    windows: listUsageWindows(db),
     creditDropsSinceResume:
       state.overageResumedAt === null ? 0 : creditDropsSince(db, state.overageResumedAt),
     overageStatus:

@@ -772,6 +772,19 @@ ALTER TABLE sticks ADD COLUMN desired_slots INTEGER;
 ALTER TABLE sticks ADD COLUMN max_slots INTEGER;
 `;
 
+/**
+ * v27: the latest value of every usage window the account reports (#144), keyed as reported
+ * (`seven_day_fable`...). usage_state keeps five_hour and seven_day, which the gate reads.
+ */
+const V27_SQL = `
+CREATE TABLE usage_windows (
+  key          TEXT PRIMARY KEY,
+  utilization  REAL,
+  resets_at    TEXT,
+  observed_at  TEXT
+);
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -807,6 +820,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 24, sql: V24_SQL },
   { version: 25, sql: V25_SQL, foreignKeysOff: true },
   { version: 26, sql: V26_SQL },
+  { version: 27, sql: V27_SQL },
 ];
 
 /**

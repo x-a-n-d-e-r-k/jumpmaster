@@ -2,6 +2,7 @@ import {
   type DropResult,
   type RateLimitEventData,
   RateLimitEventDataSchema,
+  usageWindowsOf,
 } from '@jumpmaster/protocol';
 import type { UsageConfig } from './config.js';
 import {
@@ -11,7 +12,7 @@ import {
   stopsOnOverage,
 } from './credits.js';
 import type { Db } from './db/open.js';
-import { getUsageState, setUsageState, type UsageStateRow } from './db/repo.js';
+import { getUsageState, recordUsageWindows, setUsageState, type UsageStateRow } from './db/repo.js';
 import { isFableRateLimit, pauseFableFor } from './fable.js';
 
 /**
@@ -117,21 +118,13 @@ export function rateLimitFromEvent(data: unknown): RateLimitEventData | null {
   const raw = (data as { raw?: { rate_limit_info?: Record<string, unknown> } } | null)?.raw
     ?.rate_limit_info;
   if (!raw || typeof raw !== 'object') return null;
-  const windows = raw.unifiedWindows as Record<string, Record<string, unknown>> | undefined;
-  const unifiedWindows: Record<string, { utilization: number; resetsAt?: string }> = {};
-  for (const key of ['five_hour', 'seven_day'] as const) {
-    const w = windows?.[key];
-    if (w && typeof w.utilization === 'number') {
-      const resetsAt = normalizeResetsAt(w.resetsAt);
-      unifiedWindows[key] = { utilization: w.utilization, ...(resetsAt ? { resetsAt } : {}) };
-    }
-  }
+  const unifiedWindows = usageWindowsOf(raw.unifiedWindows, normalizeResetsAt);
   const resetsAt = normalizeResetsAt(raw.resetsAt);
   const candidate = {
     status: raw.status,
     ...(resetsAt ? { resetsAt } : {}),
     ...(typeof raw.rateLimitType === 'string' ? { rateLimitType: raw.rateLimitType } : {}),
-    ...(Object.keys(unifiedWindows).length > 0 ? { unifiedWindows } : {}),
+    ...(unifiedWindows ? { unifiedWindows } : {}),
     ...(typeof raw.isUsingOverage === 'boolean' ? { isUsingOverage: raw.isUsingOverage } : {}),
     ...(typeof raw.overageStatus === 'string' ? { overageStatus: raw.overageStatus } : {}),
   };
@@ -148,6 +141,9 @@ export function ingestRateLimit(
   now: Date,
   rand: () => number = Math.random,
 ): void {
+  // Every reported window is kept for the floor (#144); only five_hour and seven_day feed the gate.
+  const windows = usageWindowsOf(data.unifiedWindows);
+  if (windows) recordUsageWindows(db, windows, now);
   // A Fable-only limit pauses Fable, never dispatch (best-effort, pending rehearsal).
   if (isFableRateLimit(data)) return pauseFableFor(db, data, now);
   db.transaction(() => {
