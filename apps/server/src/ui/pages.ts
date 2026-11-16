@@ -1390,21 +1390,32 @@ function transcriptEvent(e: StoredEvent): string {
 }
 
 /** The drop's stored events as a readable transcript, in seq order. Every field is escaped. */
-export function transcriptSection(events: readonly StoredEvent[]): string {
+export function transcriptSection(
+  events: readonly StoredEvent[],
+  pruned?: TranscriptPruned | null,
+): string {
   const sorted = [...events].sort((a, b) => a.seq - b.seq);
   const note =
     sorted.length === 0
-      ? '<p>No events recorded.</p>'
+      ? pruned
+        ? `<p>Transcript pruned on ${escapeHtml(pruned.prunedAt.slice(0, 10))}; ${
+            pruned.archive === null ? 'not archived' : `archived at ${escapeHtml(pruned.archive)}`
+          }.</p>`
+        : '<p>No events recorded.</p>'
       : sorted.some((e) => e.kind === 'agent')
         ? ''
         : '<p>No agent transcript in this drop.</p>';
   return `<section class="transcript"><h3>Transcript</h3>${note}${sorted.map(transcriptEvent).join('')}</section>`;
 }
 
+/** A drop whose events retention pruned (issue #197): when, and its archive under the data dir. */
+export type TranscriptPruned = { prunedAt: string; archive: string | null };
+
 export function renderDrop(
   drop: Drop,
   events: StoredEvent[],
   artifacts: ArtifactRow[] = [],
+  pruned: TranscriptPruned | null = null,
 ): string {
   const rows = events
     .map(
@@ -1416,7 +1427,7 @@ export function renderDrop(
     `<p><a href="/">Back</a></p><h2>Drop ${escapeHtml(drop.id)}</h2><p>State: ${escapeHtml(drop.state)}</p>` +
       modelLines(drop) +
       egressSection(events) +
-      transcriptSection(events) +
+      transcriptSection(events, pruned) +
       `<details class="raw-events"><summary>Raw events (${events.length})</summary><table><tr><th>Seq</th><th>Time</th><th>Kind</th><th>Data</th></tr>${rows}</table></details>` +
       artifactsSection(artifacts),
   );

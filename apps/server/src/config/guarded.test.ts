@@ -172,6 +172,12 @@ describe('guarded scalar paths', () => {
       'Gates in web will run with CI=false, so an install may resolve afresh and run what it resolved',
     ],
     [
+      'transcripts.archive',
+      {},
+      { transcripts: { archive: false } },
+      'Transcripts pruned in web will be deleted without an archive copy',
+    ],
+    [
       'crew.goalPath',
       {},
       { crew: { goalPath: 'docs/GOAL.md' }, protectedPaths: ['GOAL.md', 'docs/GOAL.md'] },

@@ -121,6 +121,8 @@ export type SettingKey =
   | 'config.restart_pending'
   | 'setup.step'
   | 'status.last_pass'
+  | 'transcripts.last_prune'
+  | 'transcripts.archive_failure'
   | 'vault.key_file'
   | 'vault.prefer';
 

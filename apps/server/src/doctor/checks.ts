@@ -45,6 +45,13 @@ import type { ForgePair } from '../outbox.js';
 import { egressFor } from '../payloads.js';
 import { DETECT_FILES, detectPreset } from '../presets.js';
 import { checkReach, PUBLIC_URL_NEEDED, publicOrigin, type ReachResult } from '../reach.js';
+import {
+  ARCHIVE_DIR,
+  archiveDirBytes,
+  countDueDrops,
+  FAILURE_WINDOW_MS,
+  lastArchiveFailure,
+} from '../transcripts.js';
 import { dispatchGate } from '../usage.js';
 import type { Shadowed } from '../vault/credentials.js';
 import type { CredentialProblem } from '../vault/problems.js';
@@ -114,6 +121,7 @@ export const CHECK_IDS = [
   'stick.image-policy',
   'stick.seen',
   'stick.volumes',
+  'transcripts.retention',
   'usage.gate',
   'vault.key',
   'zone.crew-cap',
@@ -2251,6 +2259,41 @@ function imageMirrorCheck(status: MirrorStatus): DoctorCheck {
   };
 }
 
+const kib = (bytes: number): string =>
+  bytes < 1024
+    ? `${bytes} B`
+    : bytes < 1024 ** 2
+      ? `${(bytes / 1024).toFixed(1)} KiB`
+      : bytes < 1024 ** 3
+        ? `${(bytes / 1024 ** 2).toFixed(1)} MiB`
+        : `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
+
+/**
+ * Transcript retention (issue #197): each zone's setting with its drops due, and the archive
+ * directory's size, as information; a warn while an archive write failed in the last 24 hours
+ * (the drop kept its events, and the next hourly pass tries again).
+ */
+function transcriptsCheck(d: DoctorDeps): DoctorCheck {
+  const now = d.now();
+  const zones = d.config.dropZones.map((z) => {
+    const t = z.transcripts ?? { retainDays: 90, archive: true };
+    if (t.retainDays === 0) return `${z.id} keeps forever`;
+    const due = countDueDrops(d.db, z, now);
+    return `${z.id} keeps ${t.retainDays} days, ${t.archive ? 'archived' : 'not archived'} (${due} drop${due === 1 ? '' : 's'} due)`;
+  });
+  const setting = `transcript retention: ${zones.length > 0 ? zones.join('; ') : 'no zones'}; archive directory ${kib(archiveDirBytes(d.config.dataDir))}`;
+  const base = { id: 'transcripts.retention', zoneId: null };
+  const f = lastArchiveFailure(d.db);
+  if (f && now.getTime() - Date.parse(f.at) < FAILURE_WINDOW_MS)
+    return {
+      ...base,
+      status: 'warn',
+      summary: `an archive write failed at ${f.at} (drop ${f.dropId} in zone ${f.zone}: ${f.error}); its events were kept. ${setting}`,
+      fix: `Make ${d.config.dataDir}/${ARCHIVE_DIR} writable by the server's user (and the disk not full); the next hourly pass archives the drop and prunes it.`,
+    };
+  return { ...base, status: 'info', summary: setting };
+}
+
 /** Every check, global ones first, then each zone's (zones in parallel). */
 export async function runChecks(
   d: DoctorDeps,
@@ -2274,6 +2317,7 @@ export async function runChecks(
         ]
       : []),
     g('usage.gate', null, () => usageCheck(d)),
+    g('transcripts.retention', null, () => transcriptsCheck(d)),
     g('stick.seen', null, () => stickSeenCheck(d, sticks)),
     g('stick.image-policy', null, () => imagePolicyCheck(d, sticks)),
     g('stick.volumes', null, () => stickVolumesCheck(d, sticks)),

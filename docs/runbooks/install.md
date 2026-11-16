@@ -1347,6 +1347,18 @@ every image of the lock is complete; `warn` naming each image that failed and wh
 refuses anonymous access needs the `registryReadToken` credential. See
 [Sticks that fetch from the server](release.md#sticks-that-fetch-from-the-server).
 
+### `transcripts.retention`
+
+Each zone's transcript retention (`transcripts.retainDays`, default 90; 0 keeps forever, and
+`transcripts.archive`, default true), the drops due for pruning and the size of the archive
+directory `<dataDir>/transcripts/`, as `info`. Once an hour the server deletes the events of
+finished drops (`succeeded`, `failed`, `lost`, `cancelled`; never a live one or a held push) older
+than `retainDays`, at most 200 a pass, archiving each first as
+`transcripts/<zone>/<YYYY-MM>/<dropId>.jsonl.gz` (files 0600, directories 0700): `gunzip` it to
+get exactly what `jumpmaster ctl drops transcript <dropId>` printed. The drop row, its result and
+its artifacts stay. `warn` when an archive write failed in the last 24 hours: that drop kept every
+event, and the next pass tries again once the directory is writable.
+
 ### `config.uid`
 
 **Action:** this entry (the doctor links here).
