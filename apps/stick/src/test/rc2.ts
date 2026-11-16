@@ -38,7 +38,92 @@ export type Rc2Case = {
   noBundle?: boolean;
   /** The bundle layer's bytes differ from its manifest's digest. */
   tamperBundle?: boolean;
+  /**
+   * The signed index is this image's (with its platforms' blobs) instead of the rc.2 index, whose
+   * platform blobs these fixtures lack: for tests that load. Only a fake cosign told
+   * `signedIndex: image.index` accepts it.
+   */
+  image?: PlatformImage;
 };
+
+/** One platform of a synthetic image: its manifest, config and layer, and their digests. */
+export type PlatformPart = {
+  manifestDigest: string;
+  configDigest: string;
+  layerDigest: string;
+  blobs: Buffer[];
+};
+
+/** A synthetic two-platform image (linux/amd64 and linux/arm64): its index and every blob. */
+export type PlatformImage = {
+  index: Buffer;
+  digest: string;
+  amd64: PlatformPart;
+  arm64: PlatformPart;
+};
+
+function platformPart(arch: string): PlatformPart {
+  const layer = Buffer.from(`layer of ${arch} `.repeat(200));
+  const config = Buffer.from(
+    JSON.stringify({
+      architecture: arch,
+      os: 'linux',
+      rootfs: { type: 'layers', diff_ids: [sha256(layer)] },
+    }),
+  );
+  const manifest = Buffer.from(
+    JSON.stringify(
+      {
+        schemaVersion: 2,
+        mediaType: 'application/vnd.oci.image.manifest.v1+json',
+        config: {
+          mediaType: 'application/vnd.oci.image.config.v1+json',
+          digest: sha256(config),
+          size: config.length,
+        },
+        layers: [
+          {
+            mediaType: 'application/vnd.oci.image.layer.v1.tar',
+            digest: sha256(layer),
+            size: layer.length,
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+  );
+  return {
+    manifestDigest: sha256(manifest),
+    configDigest: sha256(config),
+    layerDigest: sha256(layer),
+    blobs: [manifest, config, layer],
+  };
+}
+
+/** A synthetic image laid out like the rc.2 one, with every platform's blobs present. */
+export function platformImage(): PlatformImage {
+  const amd64 = platformPart('amd64');
+  const arm64 = platformPart('arm64');
+  const entry = (p: PlatformPart, architecture: string) => ({
+    mediaType: 'application/vnd.oci.image.manifest.v1+json',
+    digest: p.manifestDigest,
+    size: (p.blobs[0] as Buffer).length,
+    platform: { architecture, os: 'linux' },
+  });
+  const index = Buffer.from(
+    JSON.stringify(
+      {
+        schemaVersion: 2,
+        mediaType: 'application/vnd.oci.image.index.v1+json',
+        manifests: [entry(amd64, 'amd64'), entry(arm64, 'arm64')],
+      },
+      null,
+      2,
+    ),
+  );
+  return { index, digest: sha256(index), amd64, arm64 };
+}
 
 export type Rc2Layout = { dir: string; digest: string; indexBlob: string; bundleBlob: string };
 
@@ -51,9 +136,11 @@ export function rc2Layout(o: Rc2Case = {}, dir = mkdtempSync(join(tmpdir(), 'jm-
     writeFileSync(path, b);
     return path;
   };
-  const appended = Buffer.concat([RC2_INDEX, Buffer.from('\n')]);
-  const digest = o.relabelIndex ? sha256(appended) : RC2_DIGEST;
-  const indexBlob = put(digest, o.tamperIndex || o.relabelIndex ? appended : RC2_INDEX);
+  const signed = o.image?.index ?? RC2_INDEX;
+  const appended = Buffer.concat([signed, Buffer.from('\n')]);
+  const digest = o.relabelIndex ? sha256(appended) : sha256(signed);
+  const indexBlob = put(digest, o.tamperIndex || o.relabelIndex ? appended : signed);
+  if (o.image) for (const b of [...o.image.amd64.blobs, ...o.image.arm64.blobs]) put(sha256(b), b);
   put(sha256(RC2_BUNDLE_MANIFEST), RC2_BUNDLE_MANIFEST);
   const bundleBlob = put(
     sha256(RC2_BUNDLE),
@@ -67,7 +154,7 @@ export function rc2Layout(o: Rc2Case = {}, dir = mkdtempSync(join(tmpdir(), 'jm-
       {
         mediaType: 'application/vnd.oci.image.index.v1+json',
         digest,
-        size: (o.relabelIndex ? appended : RC2_INDEX).length,
+        size: (o.relabelIndex ? appended : signed).length,
         annotations: { kind: 'dev.cosignproject.cosign/imageIndex' },
       },
       ...(o.noBundle
@@ -99,6 +186,8 @@ export type FakeCosignExpect = {
   /** The identity the rc.2 certificate satisfies. */
   identityRegexp: string;
   repository: string;
+  /** The index bytes the bundle signs, as far as the fake knows; default the rc.2 index. */
+  signedIndex?: Buffer;
 };
 
 /**
@@ -130,7 +219,7 @@ bad() { echo "Error: $*" >&2; exit 2; }
 if [ "\${10}" != ${q(e.identityRegexp)} ] || [ "\${16}" != ${q(e.repository)} ]; then
   echo 'Error: failed to verify certificate identity: no matching CertificateIdentity found' >&2; exit 1
 fi
-if [ "$(sha256sum "\${17}" | cut -d ' ' -f 1)" != ${q(hex(RC2_INDEX))} ]; then
+if [ "$(sha256sum "\${17}" | cut -d ' ' -f 1)" != ${q(hex(e.signedIndex ?? RC2_INDEX))} ]; then
   echo 'Error: failed to verify signature: provided artifact digests do not match digests in statement' >&2; exit 1
 fi
 echo 'Verified OK' >&2
