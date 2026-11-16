@@ -293,6 +293,17 @@ restarts).
   refusal would. A refusal for the kill switch, an observing zone, or another attempt's
   reservation is retried with backoff, the volume kept; a paused zone is not refused.
 
+## Sticks
+
+The **Sticks** page (`/sticks`) lists every stick: whether it is live, its version and
+capabilities, the zones it can't run, and how many troopers it runs at once. Change the count and
+Save: the stick picks it up on its next lease answer, with no restart. Lowering it stops nothing;
+the stick takes no new drop until fewer than the new count are running. The count goes up to the
+stick's ceiling (`JM_MAX_SLOTS`, see the install runbook's
+[Troopers per stick](install.md#troopers-per-stick)); a refusal names the ceiling. From a script:
+`ctl sticks` lists each stick's effective, desired and max counts, and
+`ctl sticks slots <name-or-id> <n>` sets one. Each change is audited as `stick.slots`.
+
 ## ctl
 
 `docker compose exec jumpmaster jumpmaster ctl help` lists every verb by page, and
@@ -326,6 +337,7 @@ token is always allowed.
 | Briefings | `ctl rule <briefing> <option> [--options <digest>] [note]` | `POST /api/control/briefings/:id/rule` |
 | Briefings | `ctl dismiss <zone> <briefing>…` | `POST /api/control/zones/:id/briefings/dismiss` |
 | Drops | `ctl drops extend-retention <dropId> <hours>`<br>`ctl drops cancel <dropId>` | `POST /api/control/drops/:id/extend-retention`<br>`POST /api/control/drops/:id/cancel` |
+| Sticks | `ctl sticks [--json]`<br>`ctl sticks slots <name-or-id> <n>` | `GET /api/control/sticks`<br>`POST /api/control/sticks/:id/slots` |
 | Kill | `ctl kill` | `POST /api/control/kill` |
 | Kill | `ctl unkill` | `POST /api/control/kill` |
 <!-- ctl-table:end -->
