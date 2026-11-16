@@ -11,6 +11,8 @@ import {
   type TrooperEvent,
 } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
+// The real trooper's output, fed through the stick: the two ends of the event protocol.
+import { eventLines } from '../../trooper/src/events.js';
 import type { DropClient } from './client.js';
 import type { ContainerDriver, DropNet } from './driver.js';
 import type { ServerImageDeps, ServerImages } from './fetch-image.js';
@@ -487,6 +489,123 @@ describe('artifacts', () => {
     await runDrop(payload, { client, driver: d.driver, heartbeatMs: 1000, stickId: 's1' });
     expect(uploads).toBe(0);
     expect(client.result).toMatchObject({ status: 'completed' });
+  });
+});
+
+describe('events sent in parts', () => {
+  const RESULT = 'JM_RESULT {"status":"completed","headSha":"a","gates":[]}';
+  const TS = '2026-11-16T10:00:00.000Z';
+  let ids = 0;
+  const lines = (kind: TrooperEvent['kind'], data: Record<string, unknown>) =>
+    eventLines(kind, data, [TOKEN], { ts: TS, id: () => ++ids });
+  const run = async (out: string[]) => {
+    const client = fakeClient();
+    await runDrop(payload, {
+      client,
+      driver: fakeDriver([...out, RESULT]).driver,
+      heartbeatMs: 1000,
+      stickId: 's1',
+    });
+    return client;
+  };
+
+  test('a 300 KB event is stored byte-identical to what the trooper serialized', async () => {
+    const data = { text: `${'é'.repeat(50_000)}${'w'.repeat(200_000)}`, tool: 'Read' };
+    const out = lines('agent', data);
+    expect(out).toHaveLength(7);
+    const client = await run(out);
+    const stored = client.events.flat();
+    expect(stored).toHaveLength(1);
+    expect(JSON.stringify(stored[0])).toBe(JSON.stringify({ ts: TS, kind: 'agent', data }));
+    expect(stored[0]?.data).not.toHaveProperty('truncated');
+    // Over 256 KB but under 1 MiB: batched as usual.
+    expect(client.result).toMatchObject({ status: 'completed' });
+  });
+
+  test('a 3 MB event keeps its first 2 MiB, flagged with its size', async () => {
+    const data = { text: 'v'.repeat(3_000_000) };
+    const client = await run(lines('agent', data));
+    const [ev] = client.events.flat();
+    expect(ev?.data).toMatchObject({ truncated: true, bytes: 3_000_011 });
+    expect(Buffer.byteLength(JSON.stringify(ev))).toBeLessThanOrEqual(2 * 1024 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(ev))).toBeGreaterThan(2 * 1024 * 1024 - 1024);
+  });
+
+  test('a secret is redacted in the stored event', async () => {
+    const data = { text: `${'a'.repeat(46_000)}${TOKEN}${'b'.repeat(100_000)}` };
+    const client = await run(lines('agent', data));
+    const stored = JSON.stringify(client.events.flat());
+    expect(stored).not.toContain(TOKEN);
+    expect(stored).toContain('[REDACTED]');
+  });
+
+  test('order is kept between assembled and single-line events', async () => {
+    const big = lines('agent', { text: 'c'.repeat(150_000) });
+    const out = [
+      ...lines('phase', { phase: 'clone' }),
+      big[0] as string,
+      ...lines('phase', { phase: 'claude' }),
+      ...big.slice(1, -1),
+      ...lines('agent', { text: 'small' }),
+      big.at(-1) as string,
+      ...lines('phase', { phase: 'gates' }),
+    ];
+    const client = await run(out);
+    expect(client.events.flat().map((e) => e.data.phase ?? e.data.text)).toEqual([
+      'clone',
+      'claude',
+      'small',
+      'c'.repeat(150_000),
+      'gates',
+    ]);
+  });
+
+  test('parts out of order are assembled', async () => {
+    const out = lines('agent', { text: 'o'.repeat(200_000) });
+    const client = await run(out.toReversed());
+    expect(client.events.flat()).toEqual([
+      { ts: TS, kind: 'agent', data: { text: 'o'.repeat(200_000) } },
+    ]);
+  });
+
+  test('D5: an assembled egress event from the trooper is dropped, like a single line', async () => {
+    const out = [
+      ...lines('egress', { host: 'forged.test', decision: 'allow', pad: 'p'.repeat(100_000) }),
+      ...lines('egress', { host: 'forged-small.test', decision: 'allow' }),
+      ...lines('phase', { phase: 'clone' }),
+    ];
+    expect(out.length).toBeGreaterThan(3);
+    const client = await run(out);
+    expect(client.events.flat().map((e) => e.kind)).toEqual(['phase']);
+  });
+
+  test('the trooper killed after part 3 of 7: no event, one log naming the parts', async () => {
+    const out = lines('agent', { text: 'k'.repeat(300_000) });
+    expect(out).toHaveLength(7);
+    const id = JSON.parse((out[0] as string).slice('JM_EVENT_PART '.length)).id;
+    const client = await run(out.slice(0, 3));
+    const stored = client.events.flat();
+    expect(stored).toEqual([
+      {
+        ts: expect.any(String),
+        kind: 'log',
+        data: { message: `event ${id} incomplete: 3 of 7 parts` },
+      },
+    ]);
+  });
+
+  test('an event over 1 MiB is posted in a batch of its own', async () => {
+    const out = [
+      ...lines('phase', { phase: 'clone' }),
+      ...lines('agent', { text: 'm'.repeat(1_200_000) }),
+      ...lines('phase', { phase: 'gates' }),
+    ];
+    const client = await run(out);
+    expect(client.events.map((b) => b.map((e) => e.kind))).toEqual([
+      ['phase'],
+      ['agent'],
+      ['phase'],
+    ]);
   });
 });
 

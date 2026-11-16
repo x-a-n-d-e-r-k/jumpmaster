@@ -141,6 +141,8 @@ const advertOf = (info: StickInfo) => ({
   pinnedImages: info.pinnedImages,
 });
 const HeartbeatBody = z.object({ epoch: z.number() });
+/** The largest events batch: the stick posts any event over 1 MiB alone. */
+const EVENTS_BODY_LIMIT = 8 * 1024 * 1024;
 const EventsBody = z.object({ epoch: z.number(), events: z.array(TrooperEventSchema) });
 const ResultBody = z.object({ epoch: z.number(), result: DropResultSchema });
 const PushCallBody = z.object({ dropId: z.string().min(1), epoch: z.number() });
@@ -498,40 +500,45 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       },
     );
 
-    scope.post<{ Params: { id: string } }>('/api/drops/:id/events', async (req, reply) => {
-      const body = EventsBody.safeParse(req.body);
-      if (!body.success) return reply.code(400).send({ error: 'invalid body' });
-      const drop = liveDrop(req, reply, req.params.id, body.data.epoch);
-      if (!drop) return reply;
-      appendEvents(db, drop.id, body.data.events);
-      const config = live();
-      let stopped = false;
-      for (const ev of body.data.events) {
-        if (ev.kind !== 'rate_limit') continue;
-        const data = rateLimitFromEvent(ev.data);
-        if (!data) continue;
-        // First, whatever else the report means (a Fable limit returns early below).
-        const at = now();
-        const ts = Date.parse(ev.ts);
-        const reportedAt = Number.isFinite(ts) ? new Date(Math.min(ts, at.getTime())) : at;
-        if (noteOverage(db, config.usage, drop, data, null, at, reportedAt)) stopped = true;
-        ingestRateLimit(
-          db,
-          data,
-          {
-            dropId: drop.id,
-            workItemId: drop.workItemId,
-            startedAt: drop.startedAt,
-            outcome: null,
-          },
-          config.usage,
-          now(),
-          deps.rand ?? Math.random,
-        );
-      }
-      if (stopped) deps.kick?.();
-      return reply.code(204).send();
-    });
+    // A batch may hold an event of up to 2 MiB, which the stick sends to us whole.
+    scope.post<{ Params: { id: string } }>(
+      '/api/drops/:id/events',
+      { bodyLimit: EVENTS_BODY_LIMIT },
+      async (req, reply) => {
+        const body = EventsBody.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: 'invalid body' });
+        const drop = liveDrop(req, reply, req.params.id, body.data.epoch);
+        if (!drop) return reply;
+        appendEvents(db, drop.id, body.data.events);
+        const config = live();
+        let stopped = false;
+        for (const ev of body.data.events) {
+          if (ev.kind !== 'rate_limit') continue;
+          const data = rateLimitFromEvent(ev.data);
+          if (!data) continue;
+          // First, whatever else the report means (a Fable limit returns early below).
+          const at = now();
+          const ts = Date.parse(ev.ts);
+          const reportedAt = Number.isFinite(ts) ? new Date(Math.min(ts, at.getTime())) : at;
+          if (noteOverage(db, config.usage, drop, data, null, at, reportedAt)) stopped = true;
+          ingestRateLimit(
+            db,
+            data,
+            {
+              dropId: drop.id,
+              workItemId: drop.workItemId,
+              startedAt: drop.startedAt,
+              outcome: null,
+            },
+            config.usage,
+            now(),
+            deps.rand ?? Math.random,
+          );
+        }
+        if (stopped) deps.kick?.();
+        return reply.code(204).send();
+      },
+    );
 
     scope.post<{ Params: { id: string } }>('/api/drops/:id/result', async (req, reply) => {
       let body = ResultBody.safeParse(req.body);
