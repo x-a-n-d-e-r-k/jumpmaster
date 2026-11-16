@@ -36,8 +36,18 @@ export const CLAUDE_PLANS = [
   'enterprise',
 ] as const;
 
-/** A plan as the UI names it: the plan key, except Ultra which says its price. */
-export const planLabel = (plan: string): string => (plan === 'ultra' ? 'Ultra ($200/mo)' : plan);
+const PLAN_LABELS: Record<(typeof CLAUDE_PLANS)[number], string> = {
+  pro: 'Pro',
+  max: 'Max ($100/mo)',
+  ultra: 'Ultra ($200/mo)',
+  team_standard: 'Team (standard seat)',
+  team_premium: 'Team (premium seat)',
+  enterprise: 'Enterprise',
+};
+
+/** A plan as the UI names it, in prose; the stored value stays the plan key. */
+export const planLabel = (plan: string): string =>
+  (PLAN_LABELS as Record<string, string>)[plan] ?? plan;
 
 /** An image by digest (`name@sha256:<64 hex>`), the only form a signed zone runs. */
 const DIGEST_REF = /^[^\s@-][^\s@]*@sha256:[0-9a-f]{64}$/;

@@ -31,6 +31,16 @@ import { sweepStopping } from './zones/stop.js';
 /** How long one request on the timed forges (doctor reads, intake writes) may take. */
 const TIMED_REQUEST_MS = 30_000;
 
+/**
+ * The startup line. On 0.0.0.0 the server is inside a container (compose's default), where that
+ * address is not the one to open: compose publishes the port on the address compose.yaml names.
+ */
+export function listeningLine(host: string, port: number, mode: string): string {
+  return host === '0.0.0.0'
+    ? `listening on ${host}:${port} inside the container (config: ${mode} mode); compose publishes it on the address in compose.yaml`
+    : `listening on ${host}:${port} (config: ${mode} mode)`;
+}
+
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 type Timers = {
@@ -274,7 +284,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
   await app.listen({ host: boot.listen.host, port: boot.listen.port });
   const address = app.server.address();
   if (address && typeof address === 'object') bound = { ...bound, port: address.port };
-  log(`listening on ${boot.listen.host}:${bound.port} (config: ${live.mode()} mode)`);
+  log(listeningLine(boot.listen.host, bound.port, live.mode()));
   // No operator yet: one setup code per start (§7.5), printed once the URL it names answers.
   if (setupActive(db)) setup.rotateSetupCode();
   void guardedPass();

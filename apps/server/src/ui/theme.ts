@@ -86,12 +86,12 @@ input:disabled,select:disabled,textarea:disabled{background:var(--bg-weak-50);co
 input[type=radio],input[type=checkbox]{accent-color:var(--primary-base);width:1rem;height:1rem;margin:0 .375rem 0 0;vertical-align:-.15rem}
 fieldset{border:1px solid var(--stroke-soft-200);border-radius:16px;background:var(--bg-white-0);box-shadow:var(--shadow-xs);padding:1rem 1.25rem 1.25rem;margin:0 0 1rem;min-width:0}
 legend{font-weight:500;padding:0 .375rem;margin-left:-.375rem;color:var(--text-strong-950)}
-button{font:500 .875rem/1.25rem var(--font-sans);letter-spacing:-.006em;display:inline-flex;align-items:center;justify-content:center;gap:.5rem;min-height:2.25rem;padding:0 .75rem;border:0;border-radius:8px;cursor:pointer;white-space:nowrap;background:var(--bg-white-0);color:var(--text-sub-600);box-shadow:var(--shadow-xs),inset 0 0 0 1px var(--stroke-soft-200);transition:background-color .2s ease-out,color .2s ease-out,box-shadow .2s ease-out}
-button:hover{background:var(--bg-weak-50);color:var(--text-strong-950);box-shadow:none}
+button,a.button{font:500 .875rem/1.25rem var(--font-sans);letter-spacing:-.006em;display:inline-flex;align-items:center;justify-content:center;gap:.5rem;min-height:2.25rem;padding:0 .75rem;border:0;border-radius:8px;cursor:pointer;white-space:nowrap;background:var(--bg-white-0);color:var(--text-sub-600);box-shadow:var(--shadow-xs),inset 0 0 0 1px var(--stroke-soft-200);transition:background-color .2s ease-out,color .2s ease-out,box-shadow .2s ease-out}
+button:hover,a.button:hover{background:var(--bg-weak-50);color:var(--text-strong-950);box-shadow:none}
 button:focus-visible{outline:none;color:var(--text-strong-950);box-shadow:var(--focus-important),inset 0 0 0 1px var(--stroke-strong-950)}
 button:disabled{cursor:default;background:var(--bg-weak-50);color:var(--text-disabled-300);box-shadow:none}
-button.primary,form.primary button,form.rule button{background:var(--primary-base);color:var(--static-white);box-shadow:none}
-button.primary:hover,form.primary button:hover,form.rule button:hover{background:var(--primary-darker);color:var(--static-white)}
+button.primary,a.button.primary,form.primary button,form.rule button{background:var(--primary-base);color:var(--static-white);box-shadow:none}
+button.primary:hover,a.button.primary:hover,form.primary button:hover,form.rule button:hover{background:var(--primary-darker);color:var(--static-white)}
 button.primary:focus-visible,form.primary button:focus-visible,form.rule button:focus-visible{box-shadow:var(--focus-primary)}
 button.danger,button.revoke,button.remove{background:var(--bg-white-0);color:var(--error-base);box-shadow:inset 0 0 0 1px var(--error-base)}
 button.danger:hover,button.revoke:hover,button.remove:hover{background:var(--red-alpha-10);color:var(--error-base)}
