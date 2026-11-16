@@ -1,8 +1,9 @@
-import { generateKeyPairSync, randomBytes } from 'node:crypto';
+import { createVerify, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import nock from 'nock';
+import { afterEach, beforeAll, describe, expect, test } from 'vitest';
 import { openDb } from '../db/open.js';
 import { ScrubSet } from '../forge/scrub-set.js';
 import { t0, tmpDbFile } from '../test/helpers.js';
@@ -14,9 +15,10 @@ import {
   resolveCredentials,
   SECRET_FILES,
   shadowedCredentials,
+  testAppEntry,
   testCredential,
 } from './credentials.js';
-import { appEntryName, serializeAppEntry } from './github-app-entries.js';
+import { appEntryName, type GitHubAppEntry, serializeAppEntry } from './github-app-entries.js';
 import { type ResolvedApps, resolveAppEntries } from './resolution.js';
 import { fingerprintOf, openVault, type Vault } from './vault.js';
 
@@ -457,5 +459,190 @@ describe('preferring the vault', () => {
     db.prepare("UPDATE vault SET nonce = zeroblob(12) WHERE name = 'claudeToken'").run();
     const r = resolveCredentials({ JM_CLAUDE_TOKEN: CLAUDE }, undefined, v, { preferVault: true });
     expect(r.claudeToken).toMatchObject({ value: CLAUDE, source: 'env' });
+  });
+});
+
+describe('testAppEntry', () => {
+  const api = 'https://ghe.test.invalid/api/v3';
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const pem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+  const pemLines = pem
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l !== '' && !l.startsWith('-----'));
+  const entry: GitHubAppEntry = {
+    appId: '424242',
+    slug: 'jm-author-app',
+    clientId: 'Iv23liCLIENTIDVALUE01',
+    pem,
+    importedAt: '2026-11-13T00:00:00.000Z',
+  };
+  const now = () => 1_800_000_000_000;
+  const recorder = () => {
+    const calls: [string, string][] = [];
+    return {
+      calls,
+      scrub: {
+        add: (v: string) => calls.push(['add', v]),
+        addPem: (v: string) => calls.push(['addPem', v]),
+      },
+    };
+  };
+  const leaks = (r: unknown, extra: string[] = []): string[] => {
+    const text = JSON.stringify(r);
+    return [pem, ...pemLines, entry.clientId, ...extra].filter((v) => text.includes(v));
+  };
+
+  beforeAll(() => {
+    nock.disableNetConnect();
+  });
+  afterEach(() => {
+    expect(nock.pendingMocks()).toEqual([]);
+    nock.cleanAll();
+  });
+
+  test('a 200 with a matching id and slug is ok, signed with the entry key as a bearer JWT', async () => {
+    let auth = '';
+    nock(api, {
+      reqheaders: {
+        authorization: (v: string) => {
+          auth = v;
+          return true;
+        },
+        accept: 'application/vnd.github+json',
+        'x-github-api-version': '2022-11-28',
+      },
+    })
+      .get('/app')
+      .reply(200, { id: 424242, slug: 'jm-author-app', client_id: entry.clientId });
+    const { scrub, calls } = recorder();
+    const r = await testAppEntry(entry, { apiBase: `${api}//`, now, scrub });
+    expect(r).toEqual({ ok: true, result: 'ok', login: 'jm-author-app[bot]' });
+    expect(auth).toMatch(/^Bearer [\w-]+\.[\w-]+\.[\w-]+$/);
+    const jwt = auth.slice('Bearer '.length);
+    const [head, body, sig] = jwt.split('.') as [string, string, string];
+    const verified = createVerify('RSA-SHA256')
+      .update(`${head}.${body}`)
+      .verify(publicKey, Buffer.from(sig, 'base64url'));
+    expect(verified).toBe(true);
+    expect(JSON.parse(Buffer.from(body, 'base64url').toString())).toMatchObject({
+      iss: '424242',
+      iat: 1_800_000_000 - 60,
+    });
+    expect(calls).toContainEqual(['add', jwt]);
+  });
+
+  test('a 200 with a different slug is refused without echoing either slug', async () => {
+    nock(api).get('/app').reply(200, { id: 424242, slug: 'some-other-app' });
+    const r = await testAppEntry(entry, { apiBase: api, now, scrub: recorder().scrub });
+    expect(r).toEqual({
+      ok: false,
+      status: 200,
+      problem: "GitHub names this app differently from the entry's slug: re-import the app",
+    });
+    expect(leaks(r, ['jm-author-app', 'some-other-app'])).toEqual([]);
+  });
+
+  test('a 200 with a different id is refused without echoing either id', async () => {
+    nock(api).get('/app').reply(200, { id: 777777, slug: 'jm-author-app' });
+    const r = await testAppEntry(entry, { apiBase: api, now, scrub: recorder().scrub });
+    expect(r).toEqual({
+      ok: false,
+      status: 200,
+      problem:
+        "GitHub says this key belongs to a different app than the entry's app id: re-import the app",
+    });
+    expect(leaks(r, ['424242', '777777'])).toEqual([]);
+  });
+
+  test('a 401 means a wrong or revoked key, and nothing secret is echoed', async () => {
+    const token = 'ghs_' + 'FAKETOKENVALUE0123456789abcdef';
+    let jwt = '';
+    const captureJwt = (v: string) => {
+      jwt = v.slice('Bearer '.length);
+      return true;
+    };
+    nock(api, { reqheaders: { authorization: captureJwt } })
+      .get('/app')
+      .reply(() => {
+        return [401, { message: `Bad credentials ${token} ${pem} ${entry.clientId}` }];
+      });
+    const r = await testAppEntry(entry, { apiBase: api, now, scrub: recorder().scrub });
+    expect(r).toEqual({
+      ok: false,
+      status: 401,
+      problem:
+        "GitHub rejected this app's key (401): it is the wrong key or it was revoked. Generate a new private key on the app's page and import it again.",
+    });
+    expect(jwt).not.toBe('');
+    expect(leaks(r, [jwt, token, 'Bad credentials'])).toEqual([]);
+  });
+
+  test('a 500 returns its status only', async () => {
+    nock(api).get('/app').reply(500, { message: 'boom' });
+    const r = await testAppEntry(entry, { apiBase: api, now, scrub: recorder().scrub });
+    expect(r).toEqual({ ok: false, status: 500 });
+  });
+
+  test('a network error returns status null with the fixed words', async () => {
+    nock(api).get('/app').replyWithError(`socket hang up ${pem}`);
+    const r = await testAppEntry(entry, { apiBase: api, now, scrub: recorder().scrub });
+    expect(r).toEqual({ ok: false, status: null, problem: 'GitHub could not be reached' });
+  });
+
+  test('a malformed PEM is refused with the fixed words and makes no request', async () => {
+    const bad = `-----BEGIN PRIVATE KEY-----\n${'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo'.repeat(2)}\n-----END PRIVATE KEY-----\n`;
+    const scope = nock(api).get('/app').reply(200, { id: 424242, slug: 'jm-author-app' });
+    const { scrub, calls } = recorder();
+    const r = await testAppEntry({ ...entry, pem: bad }, { apiBase: api, now, scrub });
+    expect(r).toEqual({
+      ok: false,
+      status: null,
+      problem: 'the private key could not be used to sign',
+    });
+    expect(scope.isDone()).toBe(false);
+    expect(calls).toEqual([['addPem', bad]]);
+    const text = JSON.stringify(r);
+    for (const part of bad.split('\n').filter((l) => l !== '')) expect(text).not.toContain(part);
+    expect(text).not.toContain(entry.clientId);
+    nock.cleanAll();
+  });
+
+  test('addPem and add(jwt) are called before the request is answered', async () => {
+    const { scrub, calls } = recorder();
+    let seen: [string, string][] = [];
+    let jwt = '';
+    const captureJwt = (v: string) => {
+      jwt = v.slice('Bearer '.length);
+      return true;
+    };
+    nock(api, { reqheaders: { authorization: captureJwt } })
+      .get('/app')
+      .reply(() => {
+        seen = [...calls];
+        return [200, { id: 424242, slug: 'jm-author-app' }];
+      });
+    await testAppEntry(entry, { apiBase: api, now, scrub });
+    expect(seen).toEqual([
+      ['addPem', pem],
+      ['add', jwt],
+    ]);
+  });
+
+  test('scrub defaults to the server scrub set', async () => {
+    const { serverScrubSet } = await import('../forge/scrub-set.js');
+    serverScrubSet.clear();
+    let jwt = '';
+    const captureJwt = (v: string) => {
+      jwt = v.slice('Bearer '.length);
+      return true;
+    };
+    nock(api, { reqheaders: { authorization: captureJwt } })
+      .get('/app')
+      .reply(200, { id: 424242, slug: 'jm-author-app' });
+    await testAppEntry(entry, { apiBase: api, now });
+    expect(serverScrubSet.values()).toContain(pem);
+    expect(serverScrubSet.values()).toContain(jwt);
+    serverScrubSet.clear();
   });
 });
