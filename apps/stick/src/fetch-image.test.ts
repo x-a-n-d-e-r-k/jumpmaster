@@ -3,7 +3,7 @@
 // cosign and the engine are fakes that record their calls.
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { Readable } from 'node:stream';
 import type { ImageFetch } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
@@ -18,6 +18,7 @@ import { type Entry, PLATFORM, release, slowBody, tar } from './test/layout.js';
 import {
   type Cosign,
   type CosignResult,
+  execCosign,
   type ImageTrust,
   identityRegexp,
   releaseSigner,
@@ -116,18 +117,17 @@ function fakeCosign(answer: (args: string[]) => CosignResult) {
   const sawLayout: boolean[] = [];
   const cosign: Cosign = async (args) => {
     calls.push(args);
-    const dir = args.at(-1) as string;
+    const dir = layoutOf(args);
     sawLayout.push(existsSync(join(dir, 'index.json')) && existsSync(join(dir, 'blobs', 'sha256')));
     return answer(args);
   };
   return { cosign, calls, sawLayout };
 }
 
-const signedBy = (digest: string): CosignResult => ({
-  code: 0,
-  stdout: JSON.stringify([{ critical: { image: { 'docker-manifest-digest': digest } } }]),
-  stderr: '',
-});
+/** The layout directory of a call: its last argument is the index blob, `<dir>/blobs/sha256/<hex>`. */
+const layoutOf = (args: string[]): string => dirname(dirname(dirname(args.at(-1) as string)));
+
+const verified = (): CosignResult => ({ code: 0, stdout: '', stderr: 'Verified OK\n' });
 
 function signedTrust(cosign: Cosign, dir = fresh(), allowed: string[] = []): ImageTrust {
   return {
@@ -153,7 +153,7 @@ describe('fetching a missing image from the server (issue #141)', () => {
   test('happy path: download, cosign verify offline with the pinned identity, load, tag by digest', async () => {
     const r = release();
     const w = world({ r });
-    const c = fakeCosign(() => signedBy(r.indexDigest));
+    const c = fakeCosign(() => verified());
     const cacheDir = fresh();
     const trust = signedTrust(c.cosign, cacheDir);
     expect(await fetchFromServer(r.ref, trust, w.deps)).toEqual({ ok: true, via: 'cosign' });
@@ -165,12 +165,16 @@ describe('fetching a missing image from the server (issue #141)', () => {
     ]);
     expect(c.calls).toHaveLength(1);
     const args = c.calls[0] as string[];
-    const dir = args.at(-1) as string;
+    const dir = layoutOf(args);
     expect(args).toEqual([
-      'verify',
-      '--local-image',
+      'verify-blob-attestation',
+      '--bundle',
+      join(dir, 'blobs', 'sha256', r.bundleDigest.slice(7)),
+      '--type',
+      'https://sigstore.dev/cosign/sign/v1',
+      '--trusted-root',
+      '/app/sigstore/trusted_root.json',
       '--offline',
-      '--insecure-ignore-tlog=false',
       '--certificate-identity-regexp',
       identityRegexp(REPO),
       '--certificate-oidc-issuer',
@@ -179,10 +183,7 @@ describe('fetching a missing image from the server (issue #141)', () => {
       'push',
       '--certificate-github-workflow-repository',
       REPO,
-      '--output',
-      'json',
-      '--',
-      dir,
+      join(dir, 'blobs', 'sha256', r.indexDigest.slice(7)),
     ]);
     // cosign saw the extracted layout, under the state directory; it is gone now.
     expect(c.sawLayout).toEqual([true]);
@@ -234,7 +235,7 @@ describe('fetching a missing image from the server (issue #141)', () => {
   test('the containerd store reports the manifest digest as the id: that is the image too', async () => {
     const r = release();
     const w = world({ r, loadedIds: (x) => [x.manifestDigest] });
-    const c = fakeCosign(() => signedBy(r.indexDigest));
+    const c = fakeCosign(() => verified());
     expect(await fetchFromServer(r.ref, signedTrust(c.cosign), w.deps)).toEqual({
       ok: true,
       via: 'cosign',
@@ -257,7 +258,7 @@ describe('fetching a missing image from the server (issue #141)', () => {
     });
     expect(w.calls).not.toContain('load');
     expect(w.calls.some((x) => x.startsWith('tag '))).toBe(false);
-    expect(existsSync(c.calls[0]?.at(-1) as string)).toBe(false);
+    expect(existsSync(layoutOf(c.calls[0] as string[]))).toBe(false);
     expect(leftovers(w.stateDir)).toEqual([]);
     expect(w.logs.map((l) => JSON.parse(l))).toContainEqual(
       expect.objectContaining({ event: 'image-verify-failed', ref: r.ref, via: 'server' }),
@@ -267,17 +268,89 @@ describe('fetching a missing image from the server (issue #141)', () => {
   test('a signature on another digest is refused too', async () => {
     const r = release();
     const w = world({ r });
-    const c = fakeCosign(() => signedBy(`sha256:${'5'.repeat(64)}`));
+    const c = fakeCosign(() => ({
+      code: 1,
+      stdout: '',
+      stderr:
+        'Error: failed to verify signature: provided artifact digests do not match digests in statement\n',
+    }));
     const v = await fetchFromServer(r.ref, signedTrust(c.cosign), w.deps);
     expect(v.ok).toBe(false);
     expect(w.calls).not.toContain('load');
+  });
+
+  describe('every verification failure refuses and never loads (issue #167)', () => {
+    const r = release();
+    const withoutBundle = r.entries.map((e) =>
+      e.name === 'index.json'
+        ? {
+            ...e,
+            body: Buffer.from(
+              JSON.stringify({
+                ...JSON.parse(String(e.body)),
+                manifests: JSON.parse(String(e.body)).manifests.filter(
+                  (m: { artifactType?: string }) => !m.artifactType,
+                ),
+              }),
+            ),
+          }
+        : e,
+    );
+    const slow = join(fresh('jm-slow-cosign-'), 'cosign');
+    writeFileSync(slow, '#!/bin/sh\nsleep 5\n', { mode: 0o755 });
+    const cases: [string, { cosign?: Cosign; body?: Buffer; timeoutMs?: number }, string][] = [
+      [
+        'no bundle entry',
+        { cosign: fakeCosign(verified).cosign, body: tar(withoutBundle) },
+        'no Sigstore bundle',
+      ],
+      [
+        'cosign exit != 0',
+        { cosign: fakeCosign(() => ({ code: 1, stdout: '', stderr: 'Error: nope' })).cosign },
+        'cosign exit 1: nope',
+      ],
+      [
+        'cosign missing',
+        { cosign: execCosign(join(tmpdir(), 'no-such-cosign')) },
+        'cosign not found',
+      ],
+      ['cosign missing from the trust', {}, 'cosign is not available'],
+      [
+        'a timeout',
+        { cosign: execCosign(slow, { PATH: process.env.PATH }), timeoutMs: 200 },
+        'timed out after 0.2s',
+      ],
+      [
+        'a thrown cosign call',
+        {
+          cosign: async () => {
+            throw new Error('spawn EACCES');
+          },
+        },
+        'spawn EACCES',
+      ],
+    ];
+    for (const [name, o, why] of cases)
+      test(name, async () => {
+        const w = world({ r, ...(o.body ? { body: o.body } : {}) });
+        const trust: ImageTrust = {
+          ...signedTrust(o.cosign as Cosign),
+          ...(o.cosign ? {} : { cosign: undefined }),
+          ...(o.timeoutMs ? { timeoutMs: o.timeoutMs } : {}),
+        };
+        const v = await fetchFromServer(r.ref, trust, w.deps);
+        expect(v).toEqual({ ok: false, reason: expect.stringContaining(why) });
+        expect(w.calls).not.toContain('load');
+        expect(w.calls.some((x) => x.startsWith('tag '))).toBe(false);
+        expect(leftovers(w.stateDir)).toEqual([]);
+      });
   });
 
   test('ID mismatch: the loaded image is not the manifest config; it is removed and refused', async () => {
     const r = release();
     const evil = `sha256:${'e'.repeat(64)}`;
     const w = world({ r, loadedIds: () => [evil] });
-    const c = fakeCosign(() => signedBy(r.indexDigest));
+    const c = fakeCosign(() => verified());
     const v = await fetchFromServer(r.ref, signedTrust(c.cosign), w.deps);
     expect(v).toEqual({
       ok: false,
@@ -299,7 +372,7 @@ describe('fetching a missing image from the server (issue #141)', () => {
         : e,
     );
     const w = world({ r, body: tar(entries) });
-    const c = fakeCosign(() => signedBy(r.indexDigest));
+    const c = fakeCosign(() => verified());
     const v = await fetchFromServer(r.ref, signedTrust(c.cosign), w.deps);
     expect(v).toEqual({
       ok: false,
@@ -315,7 +388,7 @@ describe('fetching a missing image from the server (issue #141)', () => {
       r,
       body: tar(r.entries.filter((e) => e.name !== `blobs/sha256/${r.indexDigest.slice(7)}`)),
     });
-    const c = fakeCosign(() => signedBy(r.indexDigest));
+    const c = fakeCosign(() => verified());
     expect(await fetchFromServer(r.ref, signedTrust(c.cosign), noIndex.deps)).toEqual({
       ok: false,
       reason: `image fetch refused: ${r.ref}: the image index ${r.indexDigest} is not in the layout`,
@@ -335,7 +408,7 @@ describe('fetching a missing image from the server (issue #141)', () => {
 
   describe('a tar that would write outside its directory is refused before writing anything there', () => {
     const r = release();
-    const trust = () => signedTrust(fakeCosign(() => signedBy(r.indexDigest)).cosign);
+    const trust = () => signedTrust(fakeCosign(() => verified()).cosign);
 
     test('an entry named ../evil', async () => {
       const w = world({
@@ -430,7 +503,7 @@ describe('fetching a missing image from the server (issue #141)', () => {
           { status: 200, headers: { 'content-length': String(FETCH_CAP_BYTES + 1) } },
         ),
     });
-    const c = fakeCosign(() => signedBy(r.indexDigest));
+    const c = fakeCosign(() => verified());
     expect(await fetchFromServer(r.ref, signedTrust(c.cosign), big.deps)).toEqual({
       ok: false,
       reason: `image fetch refused: ${r.ref}: the layout is ${FETCH_CAP_BYTES + 1} bytes, over the ${FETCH_CAP_BYTES}-byte cap`,
@@ -458,7 +531,7 @@ describe('fetching a missing image from the server (issue #141)', () => {
       r,
       answer: () => Response.json({ error: 'not mirrored', state: 'fetching' }, { status: 404 }),
     });
-    const c = fakeCosign(() => signedBy(r.indexDigest));
+    const c = fakeCosign(() => verified());
     expect(await fetchFromServer(r.ref, signedTrust(c.cosign), w.deps)).toEqual({
       ok: false,
       wait: true,
@@ -510,7 +583,7 @@ describe('fetching a missing image from the server (issue #141)', () => {
       at.push(t);
       return report(p);
     };
-    const c = fakeCosign(() => signedBy(r.indexDigest));
+    const c = fakeCosign(() => verified());
     expect((await fetchFromServer(r.ref, signedTrust(c.cosign), w.deps)).ok).toBe(true);
     const progress = w.reports.slice(0, -1) as ImageFetch[];
     expect(w.reports.at(-1)).toBeNull();
@@ -557,7 +630,7 @@ describe('fetching a missing image from the server (issue #141)', () => {
     expect(c.calls).toEqual([]);
     // Present but never verified: verified from the server's layout, not loaded again.
     const unverified = world({ r, present: true });
-    const ok = fakeCosign(() => signedBy(r.indexDigest));
+    const ok = fakeCosign(() => verified());
     expect(await fetchFromServer(r.ref, signedTrust(ok.cosign), unverified.deps)).toEqual({
       ok: true,
       via: 'cosign',

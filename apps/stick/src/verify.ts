@@ -5,16 +5,23 @@
 // trigger. Every failure refuses: a tag, a non-zero exit, a timeout, output that doesn't parse,
 // or a signed digest that isn't the one asked for. Successes are cached by digest for 7 days in a
 // root-only file, so a short Sigstore outage doesn't stop images the stick already verified.
+// An image the server sent (issue #141) is verified fully offline (issue #167): the release's
+// Sigstore bundle, checked by `cosign verify-blob-attestation` on the signed index's own bytes
+// against the trusted root the stick image ships, in an empty HOME.
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { type ImagePolicy, ImagePolicySchema } from '@jumpmaster/protocol';
 import { fetchFromServer, fromServer, type ServerImages } from './fetch-image.js';
@@ -29,6 +36,16 @@ export const VERIFY_TIMEOUT_MS = 60_000;
 export const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** A verified-at this far in the future is a clock or a forgery, not a success. */
 const CLOCK_SKEW_MS = 5 * 60 * 1000;
+/** Sigstore's public-good trusted root, as the stick image ships it (images/sigstore). */
+export const TRUSTED_ROOT_PATH = '/app/sigstore/trusted_root.json';
+/** The predicate type of the statement the release's `cosign sign` bundles. */
+export const SIGN_PREDICATE_TYPE = 'https://sigstore.dev/cosign/sign/v1';
+/** The artifactType of an OCI 1.1 Sigstore bundle referrer. */
+export const BUNDLE_ARTIFACT_TYPE = 'application/vnd.dev.sigstore.bundle.v0.3+json';
+/** The server's layout annotation on a signature artifact: the digest it signs. */
+export const SIGNATURE_OF = 'dev.jumpmaster.signature.of';
+/** cosign's layout `kind` of the signed multi-arch index. */
+export const IMAGE_INDEX_KIND = 'dev.cosignproject.cosign/imageIndex';
 
 /** Who may sign the images this stick runs. Built from the repository, never from free text. */
 export type Signer = {
@@ -85,7 +102,11 @@ export function canonicalRef(ref: string): string {
 }
 
 export type CosignResult = { code: number | null; stdout: string; stderr: string; error?: string };
-export type Cosign = (args: string[], o: { timeoutMs: number }) => Promise<CosignResult>;
+/** `env` replaces those variables for this call only (an empty HOME and TUF_ROOT, say). */
+export type Cosign = (
+  args: string[],
+  o: { timeoutMs: number; env?: Record<string, string> },
+) => Promise<CosignResult>;
 
 /**
  * The only variables cosign gets: where to find binaries, its home and temp dir, the TUF cache,
@@ -120,7 +141,12 @@ export function execCosign(bin = 'cosign', env: NodeJS.ProcessEnv = process.env)
       execFile(
         bin,
         args,
-        { timeout: o.timeoutMs, maxBuffer: 8 * 1024 * 1024, env: childEnv, encoding: 'utf8' },
+        {
+          timeout: o.timeoutMs,
+          maxBuffer: 8 * 1024 * 1024,
+          env: { ...childEnv, ...o.env },
+          encoding: 'utf8',
+        },
         (err, stdout, stderr) => {
           if (!err) return resolve({ code: 0, stdout, stderr });
           const e = err as NodeJS.ErrnoException & { killed?: boolean; code?: unknown };
@@ -226,6 +252,8 @@ export type ImageTrust = {
   timeoutMs?: number;
   /** Fetching missing images from the Jumpmaster server (issue #141); absent, the registry. */
   server?: ServerImages;
+  /** The trusted root a server layout is verified against; default TRUSTED_ROOT_PATH. */
+  trustedRoot?: string;
 };
 
 export type Verdict =
@@ -350,31 +378,139 @@ async function runCosign(
   return { ok: true, via: 'cosign' };
 }
 
+/** Index and manifest blobs are small; a larger one is refused unread. */
+const META_CAP_BYTES = 4 * 1024 * 1024;
+const SHA256 = /^sha256:[0-9a-f]{64}$/;
+
+class Refused extends Error {}
+
+/** A small JSON object from `path`, or a refusal naming `what`. */
+function readObject(path: string, what: string): Record<string, unknown> {
+  if (!existsSync(path)) throw new Refused(`the layout has no ${what}`);
+  if (statSync(path).size > META_CAP_BYTES) throw new Refused(`${what} is too large`);
+  try {
+    const v = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+    if (v && typeof v === 'object' && !Array.isArray(v)) return v as Record<string, unknown>;
+  } catch {
+    // below
+  }
+  throw new Refused(`${what} is not JSON`);
+}
+
+/** The path of blob `digest` in `dir`, after checking its content hashes to it. */
+function checkedBlob(dir: string, digest: unknown, what: string): string {
+  if (typeof digest !== 'string' || !SHA256.test(digest))
+    throw new Refused(`${what} has no sha256 digest`);
+  const path = join(dir, 'blobs', 'sha256', digest.slice(7));
+  if (!existsSync(path) || !statSync(path).isFile())
+    throw new Refused(`${what} ${digest} is not in the layout`);
+  const got = `sha256:${createHash('sha256').update(readFileSync(path)).digest('hex')}`;
+  if (got !== digest) throw new Refused(`${what} does not hash to ${digest}`);
+  return path;
+}
+
+type Descriptor = { digest?: unknown; artifactType?: unknown; annotations?: unknown };
+const annotation = (d: Descriptor, key: string): unknown =>
+  d.annotations && typeof d.annotations === 'object'
+    ? (d.annotations as Record<string, unknown>)[key]
+    : undefined;
+
 /**
- * Verifies `ref` from an OCI image layout the server sent (issue #141): `cosign verify
- * --local-image --offline` with the pinned identity, keeping the bundled transparency-log proof
- * (`--insecure-ignore-tlog=false`). Nothing is asked of the registry or of Sigstore; the server
- * is no trust anchor, since what it sent must carry the release workflow's signature on `ref`'s
- * digest. Never throws.
+ * Verifies that the layout in `dir` carries the release workflow's signature on image index
+ * `digest`, fully offline (issue #167). The steps:
+ * 1. `index.json` names the image index `digest` (kind `dev.cosignproject.cosign/imageIndex`),
+ *    whose blob hashes to `digest`;
+ * 2. every entry annotated `dev.jumpmaster.signature.of: digest` with the Sigstore bundle
+ *    artifactType is a manifest of one layer, the bundle, each hash-checked;
+ * 3. `cosign verify-blob-attestation` checks each bundle on the index blob with the pinned
+ *    identity and `trustedRoot`, `--offline`, its HOME and TUF_ROOT an empty temporary directory
+ *    (so no cache and no TUF fetch can stand in for the pinned root).
+ * Verified when one bundle verifies; otherwise refused with why, naming cosign's last error.
+ * Never throws. The installer (apps/server/src/install/stick-sh.ts) runs the same steps in sh.
+ */
+export async function verifyIndexBundles(
+  dir: string,
+  digest: string,
+  o: { signer: Signer; cosign?: Cosign; trustedRoot: string; timeoutMs: number },
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const bundles: string[] = [];
+  let indexBlob: string;
+  try {
+    const index = readObject(join(dir, 'index.json'), 'index.json');
+    const entries = (Array.isArray(index.manifests) ? index.manifests : []).filter(
+      (m: unknown): m is Descriptor => m !== null && typeof m === 'object',
+    );
+    if (!entries.some((m) => m.digest === digest && annotation(m, 'kind') === IMAGE_INDEX_KIND))
+      throw new Refused(`the layout has no image index ${digest}`);
+    indexBlob = checkedBlob(dir, digest, 'the image index blob');
+    const signatures = entries.filter(
+      (m) => annotation(m, SIGNATURE_OF) === digest && m.artifactType === BUNDLE_ARTIFACT_TYPE,
+    );
+    if (signatures.length === 0)
+      throw new Refused(`the layout has no Sigstore bundle signing ${digest}`);
+    for (const s of signatures) {
+      const what = `the signature manifest ${String(s.digest)}`;
+      const m = readObject(checkedBlob(dir, s.digest, what), what);
+      const layers = Array.isArray(m.layers) ? m.layers : [];
+      if (layers.length !== 1) throw new Refused(`${what} does not hold exactly one layer`);
+      const layer = (layers[0] as Descriptor | null)?.digest;
+      bundles.push(checkedBlob(dir, layer, `the Sigstore bundle ${String(layer)}`));
+    }
+  } catch (e) {
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  }
+  const cosign = o.cosign;
+  if (!cosign) return { ok: false, reason: 'cosign is not available' };
+  let why = '';
+  for (const bundle of bundles) {
+    const home = mkdtempSync(join(tmpdir(), 'jm-cosign-'));
+    try {
+      const r = await cosign(
+        [
+          'verify-blob-attestation',
+          '--bundle',
+          bundle,
+          '--type',
+          SIGN_PREDICATE_TYPE,
+          '--trusted-root',
+          o.trustedRoot,
+          '--offline',
+          ...identityArgs(o.signer),
+          indexBlob,
+        ],
+        { timeoutMs: o.timeoutMs, env: { HOME: home, TUF_ROOT: home } },
+      );
+      if (!r.error && r.code === 0) return { ok: true };
+      const line = cosignWhy(r.stderr);
+      why = r.error ?? `cosign exit ${r.code}${line ? `: ${line}` : ''}`;
+    } catch (e) {
+      why = e instanceof Error ? e.message : String(e);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+  return { ok: false, reason: why };
+}
+
+/**
+ * Verifies `ref` from an OCI image layout the server sent (issue #141), fully offline with the
+ * pinned trusted root (issue #167, `verifyIndexBundles`). Nothing is asked of the registry or of
+ * Sigstore; the server is no trust anchor, since what it sent must carry the release workflow's
+ * signature on `ref`'s digest. A success is cached. Never throws.
  */
 export async function verifyLayout(dir: string, ref: string, trust: ImageTrust): Promise<Verdict> {
   const pre = decideWithoutCosign(ref, trust);
   if ('ok' in pre) return pre;
-  return runCosign(
-    [
-      '--local-image',
-      '--offline',
-      '--insecure-ignore-tlog=false',
-      ...identityArgs(trust.signer as Signer),
-      '--output',
-      'json',
-      '--',
-      dir,
-    ],
-    pre.digest,
-    trust,
-    pre.refuse,
-  );
+  if (!trust.cosign) return pre.refuse('cosign is not available');
+  const r = await verifyIndexBundles(dir, pre.digest, {
+    signer: trust.signer as Signer,
+    cosign: trust.cosign,
+    trustedRoot: trust.trustedRoot ?? TRUSTED_ROOT_PATH,
+    timeoutMs: trust.timeoutMs ?? VERIFY_TIMEOUT_MS,
+  });
+  if (!r.ok) return pre.refuse(r.reason);
+  trust.cache?.add(pre.digest);
+  return { ok: true, via: 'cosign' };
 }
 
 /**

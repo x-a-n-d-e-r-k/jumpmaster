@@ -91,6 +91,28 @@ export function release(o: { tamperIndexEntry?: boolean } = {}) {
   );
   const indexDigest = add(index);
   const ref = `ghcr.io/o/jumpmaster-trooper@${indexDigest}`;
+  // The release's Sigstore bundle on the index, an OCI 1.1 referrer (its content is cosign's
+  // business; cosign is a fake in these tests).
+  const bundle = Buffer.from(
+    JSON.stringify({ mediaType: 'application/vnd.dev.sigstore.bundle.v0.3+json' }),
+  );
+  const bundleDigest = add(bundle);
+  const bundleManifest = Buffer.from(
+    JSON.stringify({
+      schemaVersion: 2,
+      mediaType: 'application/vnd.oci.image.manifest.v1+json',
+      artifactType: 'application/vnd.dev.sigstore.bundle.v0.3+json',
+      layers: [
+        {
+          mediaType: 'application/vnd.dev.sigstore.bundle.v0.3+json',
+          digest: bundleDigest,
+          size: bundle.length,
+        },
+      ],
+      subject: { digest: indexDigest },
+    }),
+  );
+  const bundleManifestDigest = add(bundleManifest);
   const layoutIndex = Buffer.from(
     JSON.stringify({
       schemaVersion: 2,
@@ -106,6 +128,13 @@ export function release(o: { tamperIndexEntry?: boolean } = {}) {
           size: index.length,
           annotations: { kind: 'dev.cosignproject.cosign/imageIndex' },
         },
+        {
+          mediaType: 'application/vnd.oci.image.manifest.v1+json',
+          digest: bundleManifestDigest,
+          size: bundleManifest.length,
+          artifactType: 'application/vnd.dev.sigstore.bundle.v0.3+json',
+          annotations: { 'dev.jumpmaster.signature.of': indexDigest },
+        },
       ],
     }),
   );
@@ -117,7 +146,16 @@ export function release(o: { tamperIndexEntry?: boolean } = {}) {
     { name: 'blobs/sha256/', type: '5' },
     ...[...blobs].map(([d, body]) => ({ name: `blobs/sha256/${d.slice(7)}`, body })),
   ];
-  return { entries, ref, indexDigest, manifestDigest, configDigest, layerDigest, blobs };
+  return {
+    entries,
+    ref,
+    indexDigest,
+    manifestDigest,
+    configDigest,
+    layerDigest,
+    bundleDigest,
+    blobs,
+  };
 }
 
 export const PLATFORM = 'linux/amd64';

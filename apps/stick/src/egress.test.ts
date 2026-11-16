@@ -357,10 +357,8 @@ describe('the egress capability', () => {
       allowed: new Set<string>(),
       signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster'),
       cosign: (async (args: string[]) => ({
-        code: args.includes('--local-image') ? 0 : 99,
-        stdout: JSON.stringify([
-          { critical: { image: { 'docker-manifest-digest': r.indexDigest } } },
-        ]),
+        code: args[0] === 'verify-blob-attestation' && args.includes('--offline') ? 0 : 99,
+        stdout: '',
         stderr: '',
       })) as Cosign,
       server: s,

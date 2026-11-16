@@ -1,7 +1,7 @@
 // Adding a stick with one pasted line, and removing one (issue #138), through the whole app.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
@@ -42,6 +42,7 @@ const CODE = /jm_enroll_[A-Za-z0-9_-]{43}/;
 const DAY = 24 * 60 * 60 * 1000;
 
 const sha = (b: Buffer | string) => createHash('sha256').update(b).digest('hex');
+const TRUSTED_ROOT = '{"mediaType":"application/vnd.dev.sigstore.trustedroot+json;version=0.1"}';
 
 /** A mirror holding one complete stick image for linux/amd64, its blobs in a temp directory. */
 function fakeImages(): Pick<ImageMirror, 'lookup' | 'status'> & { digest: string } {
@@ -125,6 +126,8 @@ async function world(o: { publicUrl?: boolean } = {}) {
   const cosignDir = join(dir, 'cosign');
   mkdirSync(join(cosignDir, 'linux-amd64'), { recursive: true });
   writeFileSync(join(cosignDir, 'linux-amd64', 'cosign'), 'fake-cosign');
+  const trustedRootFile = join(dir, 'trusted_root.json');
+  writeFileSync(trustedRootFile, TRUSTED_ROOT);
   const scrub = new ScrubSet();
   const images = fakeImages();
   let clock = t0;
@@ -145,6 +148,7 @@ async function world(o: { publicUrl?: boolean } = {}) {
       signerRepository: 'o/jumpmaster',
       cosignDir,
       cosignSha256: { amd64: sha('fake-cosign'), arm64: 'f'.repeat(64) },
+      trustedRootFile,
     },
   });
   app = a;
@@ -172,6 +176,7 @@ async function world(o: { publicUrl?: boolean } = {}) {
     session,
     sudo,
     proto,
+    trustedRootFile,
     setClock: (d: Date) => {
       clock = d;
     },
@@ -436,6 +441,59 @@ describe('the installer downloads', () => {
     );
     expect(secrets.length).toBeGreaterThan(0);
     for (const s of [...secrets, code]) expect(r.body).not.toContain(s);
+  });
+});
+
+describe('the trusted root download (issue #167)', () => {
+  const root = (
+    w: { inject: (o: object) => Promise<{ statusCode: number; body: string }> },
+    code?: string,
+  ) =>
+    w.inject({
+      method: 'GET',
+      url: '/install/trusted-root.json',
+      headers: { host: 'any.example', ...(code ? { authorization: `Bearer ${code}` } : {}) },
+    });
+
+  test('a valid code downloads it without being consumed', async () => {
+    const w = await world();
+    const code = await w.invite('vps-1');
+    const r = await root(w, code);
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toBe(TRUSTED_ROOT);
+    expect((await w.enroll({ enrollCode: code })).statusCode).toBe(200);
+  });
+
+  test('no code, a used one or an expired one gets 401', async () => {
+    const w = await world();
+    expect((await root(w)).statusCode).toBe(401);
+    const used = await w.invite('vps-1');
+    await w.enroll({ enrollCode: used });
+    expect((await root(w, used)).statusCode).toBe(401);
+    const old = await w.invite('vps-2');
+    w.setClock(new Date(t0.getTime() + DAY + 1000));
+    expect((await root(w, old)).statusCode).toBe(401);
+  });
+
+  test("the script pins the sha256 of the server's own copy, the one it serves", async () => {
+    const w = await world();
+    const script = await w.inject({
+      method: 'GET',
+      url: '/install/stick.sh',
+      headers: { host: 'jm.tail1234.ts.net' },
+    });
+    expect(script.body).toContain(`TRUSTED_ROOT_SHA256='${sha(TRUSTED_ROOT)}'`);
+    // A server without its copy cannot pin one: the script says so instead of installing.
+    rmSync(w.trustedRootFile);
+    const none = await w.inject({
+      method: 'GET',
+      url: '/install/stick.sh',
+      headers: { host: 'jm.tail1234.ts.net' },
+    });
+    expect(none.body).toContain("TRUSTED_ROOT_SHA256=''");
+    expect(none.body).toContain('no Sigstore trusted root');
+    const code = await w.invite('vps-1');
+    expect((await root(w, code)).statusCode).toBe(404);
   });
 });
 

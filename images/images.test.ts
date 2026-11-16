@@ -445,6 +445,40 @@ describe('stack presets', () => {
   });
 });
 
+describe("Sigstore's pinned trusted root (issue #167)", () => {
+  const FILE = 'images/sigstore/trusted_root.json';
+  const COPY = `${FILE} /app/sigstore/trusted_root.json`;
+
+  test('the committed file is a Sigstore trusted root', () => {
+    const root = JSON.parse(read(FILE)) as { mediaType?: string; tlogs?: unknown[] };
+    expect(root.mediaType).toMatch(/^application\/vnd\.dev\.sigstore\.trustedroot/);
+    expect(root.tlogs?.length).toBeGreaterThan(0);
+  });
+
+  test('the stick and server images copy exactly that file to /app/sigstore/trusted_root.json, read-only', () => {
+    for (const image of ['images/stick/Dockerfile', 'images/server/Dockerfile']) {
+      const final = finalStage(instructions(read(image)));
+      expect(
+        final.some((i) => i.op === 'COPY' && i.args === COPY),
+        image,
+      ).toBe(true);
+      expect(
+        final.some(
+          (i) => i.op === 'RUN' && i.args.includes('chmod 0444 /app/sigstore/trusted_root.json'),
+        ),
+        image,
+      ).toBe(true);
+    }
+    // The stick verifies against that path, and the server serves the installer from it.
+    expect(read('apps/stick/src/verify.ts')).toContain(
+      "TRUSTED_ROOT_PATH = '/app/sigstore/trusted_root.json'",
+    );
+    expect(read('apps/server/src/install/routes.ts')).toContain(
+      "TRUSTED_ROOT_FILE = '/app/sigstore/trusted_root.json'",
+    );
+  });
+});
+
 describe('image verification in the stick image', () => {
   test('the stick image ships cosign at the pinned version, checked with sha256sum -c, and sets the signed policy', () => {
     const text = read('images/stick/Dockerfile');

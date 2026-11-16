@@ -120,7 +120,7 @@ describe('the OCI layout a stick downloads (issue #140)', () => {
       [LAYOUT_ANNOTATIONS.index]: img.digest,
     });
     // cosign's layout conventions: the signed multi-arch index under kind imageIndex (the digest
-    // the signatures name), so `cosign verify --local-image` checks the index digest, not the
+    // the signatures name), so the stick verifies the index digest, not the
     // platform manifest's. The bundle referrer carries no cosign kind: it is not a legacy sigs image.
     const kinds = index.manifests.filter((d) => d.annotations?.[COSIGN_LAYOUT.kind]);
     expect(kinds.map((d) => [d.annotations?.[COSIGN_LAYOUT.kind], d.digest])).toEqual([

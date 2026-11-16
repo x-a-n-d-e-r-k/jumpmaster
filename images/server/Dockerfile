@@ -53,6 +53,10 @@ COPY --from=cosign-arm64 /ko-app/cosign /app/install/cosign/linux-arm64/cosign
 RUN echo "be06b2d8da722330fa78fd7cd858a74b589b20ab314a7d901e8cefcf387c965d  /app/install/cosign/linux-amd64/cosign" | sha256sum -c - \
  && echo "4ec67587bcf621c50f5309c7301b16033cd0b1b8ce3a3bf0ce945ff61cf0dacb  /app/install/cosign/linux-arm64/cosign" | sha256sum -c - \
  && chmod 0444 /app/install/cosign/linux-amd64/cosign /app/install/cosign/linux-arm64/cosign
+# Sigstore's public-good trusted root, served to the stick installer at /install/trusted-root.json
+# (issue #167); the installer checks it against the sha256 the server renders from this copy.
+COPY images/sigstore/trusted_root.json /app/sigstore/trusted_root.json
+RUN chmod 0444 /app/sigstore/trusted_root.json
 RUN ln -s /app/apps/server/dist/cli.js /usr/local/bin/jumpmaster \
  && install -d -o 10000 -g 10000 -m 0700 /data \
  && install -d -o root -g root -m 0755 /config \

@@ -1,9 +1,11 @@
 // The stick installer (issue #138): `curl -fsSL <publicUrl>/install/stick.sh | sudo sh -s -- <code>`
 // on a fresh Linux machine, and the cloud-init snippet that runs the same line when a VPS is made.
 // The script holds no secret: the one-time code arrives as its argument, and only this server's
-// address, the stick image's digest, the release signer and cosign's pinned SHA-256s are baked in.
-// The machine reaches only this server: cosign and the stick image come from here, and the image
-// is verified offline against the release workflow's signature before `docker load`.
+// address, the stick image's digest, the release signer and the pinned SHA-256s of cosign and of
+// Sigstore's trusted root are baked in. The machine reaches only this server: cosign, the trusted
+// root and the stick image come from here, and the image is verified fully offline (issue #167)
+// against the release workflow's Sigstore bundle before `docker load`, with the same steps as the
+// stick's `verifyIndexBundles` (apps/stick/src/verify.ts).
 
 /** What the script is rendered with; nothing here is a secret. */
 export type StickScriptParams = {
@@ -15,6 +17,8 @@ export type StickScriptParams = {
   signerRepository: string | null;
   /** The pinned cosign binary's SHA-256 per platform. */
   cosignSha256: { amd64: string; arm64: string };
+  /** The SHA-256 of the server's copy of Sigstore's trusted root; null when it has none. */
+  trustedRootSha256: string | null;
 };
 
 /** The cosign the stick image ships (images/stick/Dockerfile), served to the installer. */
@@ -26,6 +30,13 @@ export const COSIGN_SHA256 = {
 } as const;
 
 export const GITHUB_ISSUER = 'https://token.actions.githubusercontent.com';
+/** What the installer checks, as the stick does (apps/stick/src/verify.ts). */
+export const SIGN_PREDICATE_TYPE = 'https://sigstore.dev/cosign/sign/v1';
+export const BUNDLE_ARTIFACT_TYPE = 'application/vnd.dev.sigstore.bundle.v0.3+json';
+export const SIGNATURE_OF = 'dev.jumpmaster.signature.of';
+export const IMAGE_INDEX_KIND = 'dev.cosignproject.cosign/imageIndex';
+/** How long one cosign check may take on the machine, in seconds. */
+export const COSIGN_WAIT_SECONDS = 120;
 export const STICK_IMAGE_NAME = 'jumpmaster-stick';
 /** Where the installer writes the code in the stick's state volume (mounted at /state). */
 export const ENROLL_CODE_PATH = '/state/enroll_code';
@@ -81,12 +92,14 @@ export function cloudInit(serverUrl: string, code: string): string {
 
 /** The installer, for this server and its mirrored stick image. POSIX sh, run as root. */
 export function stickScript(p: StickScriptParams): string {
-  const ready =
-    p.image !== null && p.signerRepository !== null && REPOSITORY.test(p.signerRepository);
+  const signed = p.signerRepository !== null && REPOSITORY.test(p.signerRepository);
+  const ready = p.image !== null && signed && p.trustedRootSha256 !== null;
   const why =
     p.image === null
       ? 'this server mirrors no release stick image (it runs from a checkout, or the release has no image lock): see docs/runbooks/install.md to add a stick another way'
-      : 'this server does not know which repository signs its release images: set JM_TRUSTED_SIGNER_REPOSITORY=<owner/name> on the server';
+      : !signed
+        ? 'this server does not know which repository signs its release images: set JM_TRUSTED_SIGNER_REPOSITORY=<owner/name> on the server'
+        : 'this server has no Sigstore trusted root to send (the server image ships it at /app/sigstore/trusted_root.json): use a release server image';
   const repo = ready ? (p.signerRepository as string) : '';
   return `#!/bin/sh
 # Jumpmaster stick installer, served by ${p.serverUrl} (issue #138). It holds no secret: the
@@ -104,6 +117,11 @@ IDENTITY_REGEXP=${shq(ready ? identityRegexp(repo) : '')}
 OIDC_ISSUER=${shq(GITHUB_ISSUER)}
 COSIGN_SHA256_AMD64=${shq(p.cosignSha256.amd64)}
 COSIGN_SHA256_ARM64=${shq(p.cosignSha256.arm64)}
+TRUSTED_ROOT_SHA256=${shq(p.trustedRootSha256 ?? '')}
+SIGN_PREDICATE_TYPE=${shq(SIGN_PREDICATE_TYPE)}
+BUNDLE_ARTIFACT_TYPE=${shq(BUNDLE_ARTIFACT_TYPE)}
+SIGNATURE_OF=${shq(SIGNATURE_OF)}
+IMAGE_INDEX_KIND=${shq(IMAGE_INDEX_KIND)}
 NOT_READY=${shq(ready ? '' : why)}
 CONTAINER=jm-stick
 VOLUME=jm-stick
@@ -111,9 +129,67 @@ LOCAL_IMAGE=${STICK_IMAGE_NAME}:installed
 CODE_PATH=${ENROLL_CODE_PATH}
 WAIT_SECONDS=\${JM_INSTALL_WAIT:-60}
 TTY=\${JM_INSTALL_TTY:-/dev/tty}
+COSIGN_WAIT=\${JM_INSTALL_COSIGN_TIMEOUT:-${COSIGN_WAIT_SECONDS}}
 
 say() { printf '%s\\n' "$*"; }
 die() { printf 'jumpmaster: %s\\n' "$*" >&2; exit 1; }
+
+# The descriptors of an OCI JSON document (an image layout's index.json, a manifest), one per
+# line: the key of the list holding it, its digest and artifactType, and its signature-of and
+# kind annotations, "-" for none. sed and a brace count, no jq: every file it picks is hash-checked
+# after, and only cosign decides what is signed.
+descriptors() {
+  tr -d ' \\t\\r\\n' <"$1" | sed 's/[{}]/\\
+&\\
+/g; s/,"/\\
+"/g' | {
+    depth=0 key=- parent=- d=- at=- of=- kind=-
+    while IFS= read -r t; do
+      case $t in
+        '{')
+          depth=$((depth + 1))
+          if [ "$depth" = 2 ]; then parent=$key d=- at=- of=- kind=-; fi
+          ;;
+        '}')
+          if [ "$depth" = 2 ]; then printf '%s %s %s %s %s\\n' "$parent" "$d" "$at" "$of" "$kind"; fi
+          depth=$((depth - 1))
+          ;;
+        '"'*)
+          name=\${t#\\"}
+          name=\${name%%\\"*}
+          value=\${t#*\\":}
+          case $value in
+            '' | '[')
+              if [ "$depth" = 1 ]; then key=$name; fi
+              ;;
+            '"'*)
+              v=\${value#\\"}
+              v=\${v%%\\"*}
+              v=\${v:--}
+              case $depth:$name in
+                2:digest) d=$v ;;
+                2:artifactType) at=$v ;;
+                3:"$SIGNATURE_OF") of=$v ;;
+                3:kind) kind=$v ;;
+              esac
+              ;;
+          esac
+          ;;
+      esac
+    done
+  }
+}
+
+# The path of blob $1 in the layout, if it is there and its content hashes to its name.
+blob() {
+  case $1 in sha256:*) ;; *) return 1 ;; esac
+  h=\${1#sha256:}
+  case $h in '' | *[!0-9a-f]*) return 1 ;; esac
+  [ \${#h} = 64 ] || return 1
+  [ -f "$LAYOUT/blobs/sha256/$h" ] || return 1
+  [ "$(sha256sum "$LAYOUT/blobs/sha256/$h" | cut -d ' ' -f 1)" = "$h" ] || return 1
+  printf '%s' "$LAYOUT/blobs/sha256/$h"
+}
 
 YES=0
 UNINSTALL=0
@@ -192,6 +268,12 @@ got=$(sha256sum "$TMP/cosign" | cut -d ' ' -f 1)
 [ "$got" = "$COSIGN_SHA256" ] || die "the cosign the server sent is not the pinned ${COSIGN_VERSION} (sha256 $got)"
 chmod 0700 "$TMP/cosign"
 
+say "Downloading Sigstore's trusted root from $JM_SERVER_URL"
+fetch "/install/trusted-root.json" "$TMP/trusted_root.json" ||
+  die "could not download the trusted root from $JM_SERVER_URL: is the code unused and less than 24 hours old?"
+got=$(sha256sum "$TMP/trusted_root.json" | cut -d ' ' -f 1)
+[ "$got" = "$TRUSTED_ROOT_SHA256" ] || die "the trusted root the server sent is not the pinned one (sha256 $got)"
+
 say "Downloading the stick image for $PLATFORM"
 fetch "/install/stick-image.tar?platform=$PLATFORM" "$TMP/stick.tar" ||
   die "could not download the stick image from $JM_SERVER_URL: is the code unused and less than 24 hours old?"
@@ -199,20 +281,63 @@ mkdir "$TMP/layout"
 tar -xf "$TMP/stick.tar" -C "$TMP/layout" || die "the stick image download is not a tar"
 
 say "Verifying its signature offline"
-if ! verified=$(HOME="$TMP" TUF_ROOT="$TMP/sigstore" "$TMP/cosign" verify --local-image --offline \\
-  --insecure-ignore-tlog=false \\
-  --certificate-identity-regexp "$IDENTITY_REGEXP" \\
-  --certificate-oidc-issuer "$OIDC_ISSUER" \\
-  --certificate-github-workflow-trigger push \\
-  --certificate-github-workflow-repository "$SIGNER_REPOSITORY" \\
-  --output json -- "$TMP/layout" 2>"$TMP/cosign.err"); then
-  die "the stick image is not signed by $SIGNER_REPOSITORY's release workflow: $(tail -n 1 "$TMP/cosign.err")"
-fi
-digests=$(printf '%s' "$verified" | grep -o '"docker-manifest-digest": *"[^"]*"' | sed 's/.*"\\(sha256:[0-9a-f]*\\)"$/\\1/' || true)
-[ -n "$digests" ] || die "cosign named no signed digest"
-for d in $digests; do
-  [ "$d" = "$STICK_DIGEST" ] || die "cosign verified $d, not $STICK_DIGEST"
-done
+# The signed multi-arch index, its bytes hashing to the digest this server pins; every Sigstore
+# bundle the layout says signs it, each the one layer of its manifest, hash-checked; then cosign
+# on the index bytes with only the pinned trusted root, in an empty HOME (no TUF, no network).
+LAYOUT="$TMP/layout"
+[ -f "$LAYOUT/index.json" ] || die "the stick image download has no index.json"
+descriptors "$LAYOUT/index.json" >"$TMP/entries" || die "the stick image download's index.json does not parse"
+index=
+: >"$TMP/bundles"
+while read -r parent d at of kind; do
+  [ "$parent" = manifests ] || continue
+  if [ "$d" = "$STICK_DIGEST" ] && [ "$kind" = "$IMAGE_INDEX_KIND" ]; then index=$d; fi
+  if [ "$of" = "$STICK_DIGEST" ] && [ "$at" = "$BUNDLE_ARTIFACT_TYPE" ]; then
+    printf '%s\\n' "$d" >>"$TMP/bundles"
+  fi
+done <"$TMP/entries"
+[ -n "$index" ] || die "the stick image download has no image index $STICK_DIGEST"
+index_blob=$(blob "$STICK_DIGEST") || die "the image index blob in the download does not hash to $STICK_DIGEST"
+[ -s "$TMP/bundles" ] || die "the stick image download has no Sigstore bundle signing $STICK_DIGEST"
+: >"$TMP/bundle-files"
+while read -r d; do
+  m=$(blob "$d") || die "the signature manifest $d in the download does not hash to its digest"
+  descriptors "$m" >"$TMP/layers" || die "the signature manifest $d does not parse"
+  n=$(grep -c '^layers ' "$TMP/layers" || true)
+  [ "$n" = 1 ] || die "the signature manifest $d does not hold exactly one layer"
+  layer=$(sed -n 's/^layers \\([^ ]*\\) .*/\\1/p' "$TMP/layers")
+  b=$(blob "$layer") || die "the Sigstore bundle $layer in the download does not hash to its digest"
+  printf '%s\\n' "$b" >>"$TMP/bundle-files"
+done <"$TMP/bundles"
+TIMEOUT=
+if command -v timeout >/dev/null 2>&1; then TIMEOUT="timeout $COSIGN_WAIT"; fi
+verified=0
+why=
+while read -r b; do
+  home=$(mktemp -d "$TMP/cosign-home.XXXXXX")
+  rc=0
+  HOME="$home" TUF_ROOT="$home" $TIMEOUT "$TMP/cosign" verify-blob-attestation \\
+    --bundle "$b" --type "$SIGN_PREDICATE_TYPE" \\
+    --trusted-root "$TMP/trusted_root.json" --offline \\
+    --certificate-identity-regexp "$IDENTITY_REGEXP" \\
+    --certificate-oidc-issuer "$OIDC_ISSUER" \\
+    --certificate-github-workflow-trigger push \\
+    --certificate-github-workflow-repository "$SIGNER_REPOSITORY" \\
+    "$index_blob" </dev/null >/dev/null 2>"$TMP/cosign.err" || rc=$?
+  rm -rf "$home"
+  if [ "$rc" = 0 ]; then
+    verified=1
+    break
+  fi
+  if [ "$rc" = 124 ] && [ -n "$TIMEOUT" ]; then
+    why="cosign timed out after \${COSIGN_WAIT}s"
+  else
+    line=$(grep '^Error:' "$TMP/cosign.err" | tail -n 1 | sed 's/^Error: *//')
+    [ -n "$line" ] || line=$(tail -n 1 "$TMP/cosign.err")
+    why="cosign exit $rc: $line"
+  fi
+done <"$TMP/bundle-files"
+[ "$verified" = 1 ] || die "the stick image is not signed by $SIGNER_REPOSITORY's release workflow: $why"
 
 loaded=$(docker load -i "$TMP/stick.tar") || die "docker load failed"
 image=$(printf '%s\\n' "$loaded" | sed -n 's/^Loaded image ID: //p; s/^Loaded image: //p' | head -n 1)
