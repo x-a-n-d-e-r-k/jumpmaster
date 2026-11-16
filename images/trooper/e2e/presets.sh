@@ -60,6 +60,11 @@ out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --e
 expect 'jvm as agent' 'openjdk version "21\..*Apache Maven 3\.' "$(tr '\n' ' ' <<<"$out")"
 out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper:dev -c "$NODE" 2>&1 || true)"
 expect 'node as agent' "$NODE_OK" "$(tr '\n' ' ' <<<"$out")"
+# The everyday tools a repository's own scripts and tests reach for: jq and ps.
+# shellcheck disable=SC2016 # expanded by the container's sh
+TOOLS='echo "jq=$(printf "{\"a\":1}" | jq -c .a)" && ps -o pid= -p $$ >/dev/null && echo ps-ok'
+out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper:dev -c "$TOOLS" 2>&1 || true)"
+expect 'jq and ps as agent' 'jq=1.*ps-ok' "$(tr '\n' ' ' <<<"$out")"
 out="$(docker run --rm "${HARDEN[@]}" --user 10001:10001 -e HOME=/home/agent --entrypoint sh jumpmaster-trooper-globalpnpm:dev -c "$GLOBAL" 2>&1 || true)"
 expect 'global pnpm as agent' "$GLOBAL_OK" "$(tr '\n' ' ' <<<"$out")"
 

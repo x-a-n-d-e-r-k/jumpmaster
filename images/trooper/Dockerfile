@@ -21,7 +21,7 @@ LABEL org.opencontainers.image.source="${SOURCE_URL}" \
       org.jumpmaster.trooper.egress="1" \
       org.jumpmaster.trooper.push="1"
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates util-linux \
+ && apt-get install -y --no-install-recommends git ca-certificates util-linux jq procps \
  && rm -rf /var/lib/apt/lists/*
 # The Claude CLI comes from a lockfile, so every package (the platform binary too) is checked
 # against its integrity hash. This image doubles as the node preset: corepack provides pnpm and
