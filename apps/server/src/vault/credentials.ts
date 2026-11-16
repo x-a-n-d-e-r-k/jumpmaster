@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { readSecret, readSecretFile } from '@jumpmaster/protocol';
-import { APP_ROLES, appEntryName } from './github-app-entries.js';
+import { appJwt } from '../forge/github-app.js';
+import { type ScrubSet, serverScrubSet } from '../forge/scrub-set.js';
+import { APP_ROLES, appEntryName, type GitHubAppEntry } from './github-app-entries.js';
 import type { ResolvedApps } from './resolution.js';
 import { fingerprintOf, type Vault, VaultKeyError, type VaultMeta } from './vault.js';
 
@@ -387,4 +389,68 @@ export async function testCredential(
   } catch (e) {
     return refusalOf(e);
   }
+}
+
+const APP_KEY_REJECTED =
+  "GitHub rejected this app's key (401): it is the wrong key or it was revoked. Generate a new private key on the app's page and import it again.";
+const APP_ID_MISMATCH =
+  "GitHub says this key belongs to a different app than the entry's app id: re-import the app";
+const APP_SLUG_MISMATCH =
+  "GitHub names this app differently from the entry's slug: re-import the app";
+
+/**
+ * Tests a GitHub App entry (§4.4): signs the app JWT with the entry's key and calls `GET /app`.
+ * A 401 means a wrong or revoked key; a 200 must name the entry's app id and slug. The PEM and the
+ * JWT are registered with `scrub` before the request is sent. Like `testCredential`, a result
+ * holds a status and fixed words only: never GitHub's body, an id, a slug, the key or the JWT.
+ */
+export async function testAppEntry(
+  entry: GitHubAppEntry,
+  deps: {
+    apiBase?: string;
+    now?: () => number;
+    scrub?: Pick<ScrubSet, 'add' | 'addPem'>;
+  } = {},
+): Promise<TestResult> {
+  const scrub = deps.scrub ?? serverScrubSet;
+  const apiBase = (deps.apiBase ?? 'https://api.github.com').replace(/\/+$/, '');
+  const now = deps.now ?? Date.now;
+  scrub.addPem(entry.pem);
+  let jwt: string;
+  try {
+    jwt = appJwt(entry.appId, entry.pem, Math.floor(now() / 1000));
+  } catch {
+    // The exception text can quote key material.
+    return { ok: false, status: null, problem: 'the private key could not be used to sign' };
+  }
+  scrub.add(jwt);
+  let res: Response;
+  try {
+    res = await fetch(`${apiBase}/app`, {
+      headers: {
+        Authorization: `Bearer ${jwt}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    });
+  } catch {
+    return { ok: false, status: null, problem: 'GitHub could not be reached' };
+  }
+  if (res.status === 401) {
+    await res.body?.cancel().catch(() => undefined);
+    return { ok: false, status: 401, problem: APP_KEY_REJECTED };
+  }
+  if (res.status !== 200) {
+    await res.body?.cancel().catch(() => undefined);
+    return { ok: false, status: res.status };
+  }
+  let body: { id?: unknown; slug?: unknown } | null;
+  try {
+    body = (await res.json()) as { id?: unknown; slug?: unknown } | null;
+  } catch {
+    return { ok: false, status: 200 };
+  }
+  if (String(body?.id) !== entry.appId) return { ok: false, status: 200, problem: APP_ID_MISMATCH };
+  if (body?.slug !== entry.slug) return { ok: false, status: 200, problem: APP_SLUG_MISMATCH };
+  return { ok: true, result: 'ok', login: `${entry.slug}[bot]` };
 }
