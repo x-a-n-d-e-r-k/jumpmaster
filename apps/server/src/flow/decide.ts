@@ -1,6 +1,12 @@
 import type { DropZoneConfig } from '../config.js';
 import type { Drop, VerdictRow, WorkItem } from '../db/repo.js';
-import type { ChecksFacts, CompareFacts, ForgeReview, PullFacts } from '../forge/github.js';
+import {
+  type ChecksFacts,
+  type CompareFacts,
+  type ForgeReview,
+  type PullFacts,
+  RUNNER_CONCLUSIONS,
+} from '../forge/github.js';
 import type { OpResult } from '../outbox.js';
 import { fingerprint } from './budgets.js';
 
@@ -304,11 +310,24 @@ export function decide(s: Snapshot): Action {
   }
   // 24
   if (s.checks.state === 'failure') {
+    const failed = s.checks.failed;
+    // A runner that dropped or never started the jobs: a heal drop has nothing to reproduce.
+    if (failed.length > 0 && failed.every((f) => RUNNER_CONCLUSIONS.has(f.conclusion))) {
+      const list = failed.map((f) => `${f.name} (${f.conclusion})`).join(', ');
+      return {
+        kind: 'park',
+        reason: `CI did not run to completion on ${head.slice(0, 7)}: ${list}; rerun the jobs, then Retry`,
+      };
+    }
+    const lines = failed.map((f) => `\n- ${f.name}: ${f.conclusion}`).join('');
     return {
       kind: 'enqueue',
       role: 'heal',
       fingerprint: fingerprint([head, 'ci']),
-      feedback: { source: 'ci', text: `CI failed on ${head}; reproduce with the gates and fix.` },
+      feedback: {
+        source: 'ci',
+        text: `CI failed on ${head}; reproduce with the gates and fix.${lines}`,
+      },
     };
   }
   // 25
