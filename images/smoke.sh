@@ -99,7 +99,7 @@ wait_log "$SERVER" "listening on 0.0.0.0:7420" 60 || fail "server did not start"
 echo "server: read-only root, file secrets, host uid, database under /data: ok"
 
 out="$(docker exec "$SERVER" jumpmaster ctl briefings)" || fail "ctl briefings: $out"
-case "$out" in 200*) ;; *) fail "ctl briefings answered: $out" ;; esac
+[ "$out" = 'nothing is waiting on you' ] || fail "ctl briefings printed: $out"
 out="$(docker exec -e JM_OPERATOR_TOKEN_FILE=/run/secrets/claude "$SERVER" jumpmaster ctl briefings || true)"
 case "$out" in 401*) ;; *) fail "ctl with the wrong token answered: $out" ;; esac
 echo "jumpmaster ctl through docker exec, operator token from a file: ok"

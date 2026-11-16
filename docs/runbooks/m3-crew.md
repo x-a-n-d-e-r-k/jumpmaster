@@ -301,7 +301,8 @@ this zone's items and that a revoked or expired token gets 401.
   under an `mcp:` subject: they can never update a crew or server briefing, and raising one on the
   subject of an open assistant briefing replaces its text.
 - **Ruling on an assistant briefing** checks that its options are the ones you read. The page
-  sends that for you; from a terminal, take the `optionsDigest` from `ctl briefings` and pass it:
+  sends that for you; from a terminal, `ctl briefings` prints it on each briefing's `Rule:` line
+  (`optionsDigest` with `--json`); pass it:
   `ctl rule <briefing> <option> --options <digest> [note]`. If the assistant rewrote the options
   since, the ruling is refused (409 "options changed"): read them again. Every ruling records the
   label and effect you chose.
