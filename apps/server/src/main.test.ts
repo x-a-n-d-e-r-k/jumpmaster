@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, test, vi } from 'vitest';
 import { openDb } from './db/open.js';
-import { pollTimer, start } from './main.js';
+import { listeningLine, pollTimer, start } from './main.js';
 
 const env: Record<string, string> = {
   JM_CLAUDE_TOKEN: 'claude-token-value',
@@ -246,4 +246,13 @@ test('a missing key file with a non-empty vault refuses startup with the travel-
   ).rejects.toThrow(
     `the vault at ${dataDir} holds 1 credentials but JM_VAULT_KEY_FILE is unset: the key and the data travel together`,
   );
+});
+
+test('the listening line puts 0.0.0.0 in its container context; any other host prints as before', () => {
+  expect(listeningLine('0.0.0.0', 7420, 'db')).toBe(
+    'listening on 0.0.0.0:7420 inside the container (config: db mode); compose publishes it on the address in compose.yaml',
+  );
+  const local = listeningLine('127.0.0.1', 7420, 'file');
+  expect(local).toBe('listening on 127.0.0.1:7420 (config: file mode)');
+  expect(local).not.toContain('inside the container');
 });

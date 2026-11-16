@@ -31,7 +31,7 @@ import {
   type ResolvedCredential,
 } from '../vault/credentials.js';
 import { escapeHtml, page, tokenAgeBanner } from './pages.js';
-import { forgeGuideFor, guideSection } from './setup.js';
+import { CLAUDE_SAVED, forgeGuideFor, guideSection } from './setup.js';
 import { type ZoneRef, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
 
 /**
@@ -273,7 +273,9 @@ async function jmReplaceCredential(c, state, status) {
   }
   const j = await r.json();
   // The route's running-drops line, only when a drop still carries the previous value.
-  status.textContent = 'Saved and tested.' + (j.runningDropsWithPrevious > 0 && j.hint ? ' ' + j.hint : '');
+  // Only a check against the provider is a test: a Claude token's form is all that was checked.
+  const said = j.tested ? 'Saved and tested.' : c.name === 'claudeToken' ? ${JSON.stringify(CLAUDE_SAVED)} : 'Saved. Only its form was checked.';
+  status.textContent = said + (j.runningDropsWithPrevious > 0 && j.hint ? ' ' + j.hint : '');
   jmRefreshLink(status);
   return 'saved';
 }

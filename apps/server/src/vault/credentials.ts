@@ -301,7 +301,8 @@ export function credentialCreatedAt(
 
 /** What a test on entry says: never the value, never GitHub's error text. */
 export type TestResult =
-  | { ok: true; result: string; login?: string }
+  /** `live`: the provider itself answered (GitHub); without it only the value's form was checked. */
+  | { ok: true; result: string; login?: string; live?: true }
   | { ok: false; status: number | null; permission?: string; problem?: string };
 
 export type TestDeps = {
@@ -396,7 +397,7 @@ export async function testCredential(
     const login = await deps.forge(value, repo).viewerLogin();
     if (name === 'githubAuthorToken' || name === 'githubReviewerToken')
       for (const z of deps.zones) await deps.forge(value, z.repo).repoAccess();
-    return { ok: true, result: 'ok', login };
+    return { ok: true, result: 'ok', login, live: true };
   } catch (e) {
     return refusalOf(e);
   }
