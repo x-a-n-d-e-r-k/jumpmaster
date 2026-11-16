@@ -15,6 +15,7 @@ import {
 } from '../db/repo.js';
 import { AUTHOR_TOKEN, ago, NOW, one, PG, world } from '../test/doctorWorld.js';
 import { okProbes } from '../test/fakes.js';
+import { makeZone } from '../test/fixtures.js';
 import { CHECK_IDS, type DoctorDeps, installDocUrl } from './checks.js';
 import { processEnv } from './run.js';
 
@@ -533,6 +534,21 @@ describe('forge checks', () => {
     expect(c.fix).toContain('gh label create agent-ready --repo octo/demo');
     expect(c.fix).toContain('gh label create agent-retry --repo octo/demo');
     expect(c.fix).toContain('gh label create agent-staged --repo octo/demo');
+  });
+
+  test('forge.labels reports a missing triage label on a zone whose triage gate is on', async () => {
+    const crew = { ...makeZone().crew, enabled: true };
+    const w = world({ zone: { crew, protectedPaths: ['GOAL.md'] } });
+    w.f.state.labels = ['agent-ready', 'agent-retry', 'agent-staged'];
+    const c = one(await w.run(), 'forge.labels');
+    expect(c).toMatchObject({ status: 'fail', summary: expect.stringContaining('jm-triage') });
+    expect(c.fix).toContain('gh label create jm-triage --repo octo/demo');
+    w.f.state.labels.push('jm-triage');
+    expect(one(await w.run(), 'forge.labels').status).toBe('pass');
+    // With the gate off (or the crew off) nothing writes the label, so it is not needed.
+    const off = world({ zone: { crew, protectedPaths: ['GOAL.md'], triage: { gate: false } } });
+    off.f.state.labels = ['agent-ready', 'agent-retry', 'agent-staged'];
+    expect(one(await off.run(), 'forge.labels').status).toBe('pass');
   });
 });
 

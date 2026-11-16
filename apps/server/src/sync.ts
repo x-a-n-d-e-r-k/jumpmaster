@@ -1,4 +1,6 @@
-import type { DropZoneConfig } from './config.js';
+import { createHash } from 'node:crypto';
+import { type DropZoneConfig, triageGateOn } from './config.js';
+import { validateIssueSpec } from './crew/actions.js';
 import { getCrewIssueByNumber } from './crew/store.js';
 import type { Db } from './db/open.js';
 import {
@@ -31,8 +33,7 @@ import {
 import type { ChecksFacts, ForgeIssue, PullFacts } from './forge/github.js';
 import { refreshGoals } from './goals.js';
 import { confirmIntakeIssues } from './intake.js';
-import type { ForgePair } from './outbox.js';
-import { isJmIssueBody } from './outbox.js';
+import { type ForgePair, isJmIssueBody, runOp, type SetLabelsPayload } from './outbox.js';
 
 const PRIORITY_LABELS = ['highest', 'high', 'low', 'lowest'] as const;
 const PRIORITY_VALUE: Record<(typeof PRIORITY_LABELS)[number], number> = {
@@ -73,6 +74,22 @@ const isStagedAndReady = (issue: ForgeIssue, zone: DropZoneConfig): boolean =>
 /** Why a ready work item for a crew issue that is not (or no longer) promoted was retired. */
 const CREW_NOT_PROMOTED = 'crew issue not promoted';
 
+/** Why a ready work item whose human issue fails the agent-ready format was retired. */
+const NEEDS_TRIAGE = 'needs triage';
+
+/** Done reasons an item comes back from once its issue is admitted again. */
+const REVIVABLE = new Set(['no longer ready', CREW_NOT_PROMOTED, NEEDS_TRIAGE]);
+
+/**
+ * One relabel per issue text: a re-run (or the ready label put back on the same text) finds the
+ * op already recorded; an edit that still fails the format is sent to triage again.
+ */
+const triageOpKey = (zoneId: string, issue: ForgeIssue): string =>
+  `labels:triage:${zoneId}:${issue.number}:${createHash('sha256')
+    .update(`${issue.title}\n${issue.body}`)
+    .digest('hex')
+    .slice(0, 12)}`;
+
 const isFixTitle = (title: string): boolean => /^fix:/i.test(title);
 
 /** Orders by priority, then fix: items first, then oldest issue. Does not mutate the input. */
@@ -92,6 +109,8 @@ export type SyncResult = {
   skippedCrewUnpromoted: number[];
   /** Set when classifying an issue failed: this pass added nothing and marked nothing done. */
   intakeSkipped?: string;
+  /** Trusted human ready issues held back for failing the agent-ready format (#183). */
+  sentToTriage: number;
   retried: number;
   reopened: number;
   /** The zone's rules read for this pass; hand it to `reconcileZone`. */
@@ -154,6 +173,11 @@ export async function syncDropZone(
 
   let added = 0;
   let skippedUntrusted = 0;
+  const gateOn = triageGateOn(zone);
+  /** Gated issues to relabel once the transaction commits (forge writes are async). */
+  const toTriage: ForgeIssue[] = [];
+  /** Gated issues: their ready items are retired below. */
+  const gated = new Set<number>();
   const run = db.transaction(() => {
     upsertDropZone(db, {
       id: zone.id,
@@ -171,6 +195,19 @@ export async function syncDropZone(
         skippedUntrusted++;
         continue;
       }
+      const prev = existing.get(issue.number);
+      // The triage gate: a trusted human issue only (crew-promoted ones were validated when
+      // filed). An item already in flight is left alone, with no relabel under it.
+      if (
+        gateOn &&
+        !crewPromoted.has(issue.number) &&
+        validateIssueSpec(issue.title, issue.body).length > 0
+      ) {
+        if (prev && prev.state !== 'ready' && prev.state !== 'done') continue;
+        gated.add(issue.number);
+        toTriage.push(issue);
+        continue;
+      }
       upsertWorkItem(db, {
         dropZoneId: zone.id,
         issueNumber: issue.number,
@@ -182,12 +219,8 @@ export async function syncDropZone(
         issueCreatedAt: issue.createdAt,
         blockedBy: issue.blockedBy ?? [],
       });
-      const prev = existing.get(issue.number);
       if (!prev) added++;
-      else if (
-        prev.state === 'done' &&
-        (prev.reason === 'no longer ready' || prev.reason === CREW_NOT_PROMOTED)
-      ) {
+      else if (prev.state === 'done' && REVIVABLE.has(prev.reason ?? '')) {
         setWorkItemState(db, prev.id, 'ready');
         added++;
       }
@@ -200,10 +233,11 @@ export async function syncDropZone(
       // start. An item already in flight is out of reach here.
       else if (skippedCrewUnpromoted.includes(w.issueNumber)) {
         setWorkItemState(db, w.id, 'done', CREW_NOT_PROMOTED);
-      }
+      } else if (gated.has(w.issueNumber)) setWorkItemState(db, w.id, 'done', NEEDS_TRIAGE);
     }
   });
   run();
+  for (const issue of toTriage) await sendToTriage(db, forges, zone, issue, now);
   // The ladder is read whenever a goal file is configured, crew on or off: one file read per
   // pass, no usage, and the goals page, the intake and MCP's get_goals rely on it.
   if (zone.crew?.goalPath) {
@@ -220,12 +254,51 @@ export async function syncDropZone(
     added,
     skippedUntrusted,
     skippedCrewUnpromoted,
+    sentToTriage: toTriage.length,
     ...(intakeSkipped ? { intakeSkipped } : {}),
     ...parked,
     pass,
   };
   lastSyncs.set(zone.id, result);
   return result;
+}
+
+/**
+ * Swaps the ready label for the triage label, once per issue text (the outbox op key). A write
+ * refused before it is recorded (observe mode, the kill switch) is logged and tried again next
+ * pass; a failed op is logged and stays failed. Either way the issue stays held back.
+ */
+async function sendToTriage(
+  db: Db,
+  forges: ForgePair,
+  zone: DropZoneConfig,
+  issue: ForgeIssue,
+  now: Date,
+): Promise<void> {
+  const payload: SetLabelsPayload = {
+    number: issue.number,
+    add: [zone.triageLabel],
+    remove: [zone.readyLabel],
+  };
+  try {
+    const r = await runOp(
+      db,
+      forges,
+      {
+        kind: 'set_labels',
+        opKey: triageOpKey(zone.id, issue),
+        zoneId: zone.id,
+        itemId: null,
+        payload,
+      },
+      now,
+    );
+    if (r.state === 'failed') {
+      console.warn(`zone ${zone.id}: sending #${issue.number} to triage failed: ${r.error ?? ''}`);
+    }
+  } catch (err) {
+    console.warn(`zone ${zone.id}: sending #${issue.number} to triage: ${errorText(err)}`);
+  }
 }
 
 async function readPull(forges: ForgePair, number: number | null): Promise<PullFacts | null> {

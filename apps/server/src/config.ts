@@ -236,6 +236,13 @@ export const DropZoneObject = z.object({
   ciRequired: z.boolean().default(true),
   ciDeadlineMinutes: z.number().positive().default(45),
   retryLabel: z.string().min(1).default('agent-retry'),
+  /**
+   * Where a trusted human's ready issue that fails the agent-ready format is sent instead of to
+   * an implementer (with the crew on and `triage.gate`). Must differ from the other labels.
+   */
+  triageLabel: z.string().min(1).default('jm-triage'),
+  /** `gate: false` admits every trusted human ready issue, formatted or not, as before #183. */
+  triage: z.object({ gate: z.boolean().default(true) }).default({ gate: true }),
   mergeMethod: z.literal('squash').default('squash'),
   requireBranchProtection: z.boolean().default(true),
   /**
@@ -333,6 +340,19 @@ const DropZoneSchema = DropZoneObject.superRefine((zone, ctx) => {
       path: ['crew', 'goalPath'],
       message: `crew.goalPath ${zone.crew.goalPath} must match a protectedPaths glob`,
     });
+  }
+  for (const [field, label] of [
+    ['readyLabel', zone.readyLabel],
+    ['retryLabel', zone.retryLabel],
+    ['crew.stagedLabel', zone.crew.stagedLabel],
+  ] as const) {
+    if (zone.triageLabel === label) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['triageLabel'],
+        message: `triageLabel must differ from ${field}`,
+      });
+    }
   }
   if (!zone.crew.enabled) return;
   if (zone.crew.stagedLabel === zone.readyLabel) {
@@ -443,6 +463,13 @@ export const EditableSchema = z.object({
 /** A loaded zone: `image` is always resolved (from the preset when it wasn't given). */
 export type DropZoneConfig = Omit<z.infer<typeof DropZoneSchema>, 'image'> & { image: string };
 export type Budgets = DropZoneConfig['budgets'];
+
+/**
+ * Whether sync holds back a trusted human ready issue that fails the agent-ready format and sends
+ * it to triage: only with the crew on (nothing else would triage it) and `triage.gate` set.
+ */
+export const triageGateOn = (zone: Pick<DropZoneConfig, 'crew' | 'triage'>): boolean =>
+  zone.crew?.enabled === true && zone.triage?.gate !== false;
 
 export interface Config {
   listen: { host: string; port: number; allowedHosts?: string[]; tlsTerminated?: boolean };
