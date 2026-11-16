@@ -15,7 +15,9 @@ import {
 import { creditsPass } from './credits.js';
 import { openDb } from './db/open.js';
 import { reconcileZone } from './flow/reconcile.js';
-import { GitHubForge } from './forge/github.js';
+import { createAppTokenSource } from './forge/app-tokens.js';
+import { makeReadForgeFor, TIMED_REQUEST_MS } from './forge/read-forge.js';
+import { serverScrubSet } from './forge/scrub-set.js';
 import { imageLockPath, startImageMirror } from './images/run.js';
 import { leaseExpirer } from './leases.js';
 import { type ForgePair, ForgePairs, markPendingUnknown } from './outbox.js';
@@ -27,9 +29,6 @@ import { recordPass } from './status.js';
 import { syncDropZone } from './sync.js';
 import { credentialProblems } from './vault/problems.js';
 import { sweepStopping } from './zones/stop.js';
-
-/** How long one request on the timed forges (doctor reads, intake writes) may take. */
-const TIMED_REQUEST_MS = 30_000;
 
 /**
  * The startup line. On 0.0.0.0 the server is inside a container (compose's default), where that
@@ -149,15 +148,17 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
   };
   const forgesFor = (zoneId: string): ForgePair => pairOf(zoneId);
 
-  // The doctor's forge on the read token: reads only, never handed a write.
-  const readForgeFor = (zoneId: string) => {
-    const config = live.current();
-    const readToken = config.secrets.githubReadToken;
-    const zone = config.dropZones.find((z) => z.id === zoneId);
-    if (!zone || !readToken) return undefined;
-    const [owner = '', name = ''] = zone.repo.split('/');
-    return new GitHubForge(owner, name, readToken, { requestTimeoutMs: TIMED_REQUEST_MS });
-  };
+  // The server's GitHub App tokens (§4.2): one process-wide cache, nothing called until a token is
+  // asked for, every JWT and token in the scrub set before use.
+  const appTokens = createAppTokenSource({
+    resolvedApps: () => live.resolvedApps(),
+    zones: () => live.current().dropZones,
+    now: Date.now,
+    add: (s) => serverScrubSet.add(s),
+  });
+  // The doctor's forge on the read token (or, with none, the reviewer app's contents: read token):
+  // reads only, never handed a write.
+  const readForgeFor = makeReadForgeFor(live, appTokens);
   // Timed forges: the zone's tokens again, but every request is abandoned after a deadline, so one
   // stalled connection can't hang a request handler (the polling pass keeps its forges as they
   // were). Two users, with different contracts:
