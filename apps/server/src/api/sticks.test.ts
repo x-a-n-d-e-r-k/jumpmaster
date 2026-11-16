@@ -327,6 +327,34 @@ describe('stick API', () => {
     expect(listEvents(db, 'd1')).toHaveLength(3);
   });
 
+  test('an events batch of 8 MiB is accepted; 8 MiB + 1 byte is refused with 413', async () => {
+    const { db } = setup();
+    const { stickToken } = await enroll();
+    await lease(stickToken);
+    const LIMIT = 8 * 1024 * 1024;
+    const body = (bytes: number) => {
+      const of = (text: string) =>
+        JSON.stringify({
+          epoch: 1,
+          events: [{ ts: t0.toISOString(), kind: 'agent', data: { text } }],
+        });
+      return of('x'.repeat(bytes - Buffer.byteLength(of(''))));
+    };
+    const post = (payload: string) =>
+      app.inject({
+        method: 'POST',
+        url: '/api/drops/d1/events',
+        headers: { ...bearer(stickToken), 'content-type': 'application/json' },
+        payload,
+      });
+    expect(Buffer.byteLength(body(LIMIT))).toBe(LIMIT);
+    expect((await post(body(LIMIT))).statusCode).toBe(204);
+    expect((await post(body(LIMIT + 1))).statusCode).toBe(413);
+    const stored = listEvents(db, 'd1');
+    expect(stored).toHaveLength(1);
+    expect(JSON.stringify(stored[0]?.data).length).toBeGreaterThan(LIMIT - 200);
+  });
+
   test('rate_limit events update utilization but a live rejected never pauses', async () => {
     const { db } = setup();
     const { stickToken } = await enroll();

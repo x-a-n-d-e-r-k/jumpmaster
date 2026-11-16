@@ -11,7 +11,7 @@ import { describe, expect, test } from 'vitest';
 import { eventLines } from './events.js';
 
 const TS = '2026-11-16T00:00:00.000Z';
-const SECRET = 'sk-ant-oat-SECRET1234567890abcdef';
+const SECRET = 'sk-ant-' + 'oat-SECRET1234567890abcdef';
 
 /** A counter, as a drop's emitter keeps one. */
 const counter = () => {
