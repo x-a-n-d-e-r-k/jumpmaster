@@ -298,6 +298,10 @@ export const NOT_GUARDED: FreePath[] = [
   ),
   free('claude.fableWeeklyDropCap', PACE),
   free('claude.tokenCreatedAt', 'a date the doctor reads for the expiry warning'),
+  free(
+    'server.publicUrl',
+    'the address shown to other machines; https only, and it grants no access by itself',
+  ),
   free('mcp.maxBodyBytes', MCP_LIMIT),
   free('mcp.writesPerHour', MCP_LIMIT),
   free('mcp.callsPerHour', MCP_LIMIT),
