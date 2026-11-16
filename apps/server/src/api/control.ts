@@ -72,6 +72,13 @@ import {
   revokeMcpToken,
 } from '../mcp/tokens.js';
 import { type ForgePair, runOp } from '../outbox.js';
+import {
+  checkReach,
+  PUBLIC_URL_NEEDED,
+  PUBLIC_URL_PAGE,
+  publicUrlProblem,
+  type ReachDeps,
+} from '../reach.js';
 import { buildStatus } from '../status.js';
 import { safeNext } from '../ui/auth-pages.js';
 import { MODE_LABELS } from '../ui/pages.js';
@@ -133,6 +140,8 @@ export interface ControlDeps {
   guidanceForge?(repo: string, token: string): GuidanceForge;
   /** The operator's log (scrubbed); the secret routes never write a value to it. */
   log?: (msg: string) => void;
+  /** How the Check reaches `<publicUrl>/healthz` (tests inject a fetch). */
+  reach?: ReachDeps;
 }
 
 /** A setup mode whose codes go to stderr, alone on their line (main.ts passes its own). */
@@ -567,6 +576,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
               ...(deps.readForgeFor ? { readForge: deps.readForgeFor } : {}),
               ...(configStatus ? { configStatus } : {}),
               ...(credentials ? { credentials } : {}),
+              ...(deps.reach ? { reach: (u: string) => checkReach(u, deps.reach) } : {}),
               // The pages this app registers decide where the fix links go.
               pages: pagesOf(app),
               // The zone's generated GitHub files, for the fix links that bring one along.
@@ -844,7 +854,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         audit,
         tokenOnly,
         deps.detectForge ?? githubDetectForge,
-        { db, now },
+        { db, now, ...(deps.reach ? { reach: deps.reach } : {}) },
       );
       // GitHub guidance (Task 7): reads only, never a forge write.
       registerGuidanceRoutes(scope, {
@@ -914,6 +924,9 @@ const RollbackBody = z.strictObject({
   cancelTo: ReturnTo,
 });
 const NoteBody = z.strictObject({ note: z.string().optional() });
+const PublicUrlBody = z.strictObject({ publicUrl: z.string().max(2048).nullable() });
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
 const ModeBody = z.strictObject({ mode: z.literal('file') });
 const ImportBody = z.strictObject({
   config: z.unknown(),
@@ -964,7 +977,7 @@ function registerConfigRoutes(
   audit: (req: FastifyRequest, action: string, detail: AuditDetail, target?: string) => void,
   tokenOnly: (req: FastifyRequest, reply: FastifyReply) => boolean,
   detectForge: (repo: string, token: string) => DetectForge,
-  ctx: { db: Db; now(): Date },
+  ctx: { db: Db; now(): Date; reach?: ReachDeps },
 ): void {
   const { db, now } = ctx;
   // The guard sets a principal on every control route or answers 401; never assume one.
@@ -1328,6 +1341,42 @@ function registerConfigRoutes(
       return answer(req, reply, 'zone.egress-adopt', r, { hosts: fresh.join(', ') }, req.params.id);
     },
   );
+
+  // The address other machines reach this server at (issue #139): set or cleared alone, applied
+  // live through the store, audited as `server.public_url` with the address (it is no secret).
+  scope.put('/api/control/server/public-url', async (req, reply) => {
+    const body = PublicUrlBody.safeParse(req.body ?? {});
+    if (!body.success) return invalid(reply, '{"publicUrl": "https://…" | null}');
+    const { publicUrl } = body.data;
+    if (publicUrl !== null) {
+      const problem = publicUrlProblem(publicUrl);
+      if (problem)
+        return reply.code(400).send({ issues: [{ path: 'server.publicUrl', message: problem }] });
+    }
+    const doc = structuredClone(store.document());
+    const server = isRecord(doc.server) ? { ...doc.server } : {};
+    if (publicUrl === null) delete server.publicUrl;
+    else server.publicUrl = publicUrl;
+    if (Object.keys(server).length > 0) doc.server = server;
+    else delete doc.server;
+    const r = store.apply(doc, {
+      via: viaOf(req),
+      principal: principalOf(req),
+      expectRevision: store.revision(),
+    });
+    const out = answer(req, reply, 'server.public_url', r, { publicUrl });
+    return r.ok ? { ...(out as Record<string, unknown>), publicUrl } : out;
+  });
+
+  // Check: this server fetches `<publicUrl>/healthz` (5 s) and says Reachable or the failure.
+  scope.post('/api/control/server/public-url/check', async (req, reply) => {
+    const publicUrl = (req.jmConfig ?? store.current()).server?.publicUrl;
+    if (!publicUrl)
+      return reply
+        .code(409)
+        .send({ error: `${PUBLIC_URL_NEEDED}: Settings, Other machines (${PUBLIC_URL_PAGE})` });
+    return checkReach(publicUrl, ctx.reach ?? {});
+  });
 
   scope.get('/api/control/config', async () => {
     const b = store.boot();

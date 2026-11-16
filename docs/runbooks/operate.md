@@ -304,6 +304,10 @@ stick's ceiling (`JM_MAX_SLOTS`, see the install runbook's
 `ctl sticks` lists each stick's effective, desired and max counts, and
 `ctl sticks slots <name-or-id> <n>` sets one. Each change is audited as `stick.slots`.
 
+A stick on another machine reaches the server at `server.publicUrl` (Settings, Other machines, or
+`ctl public-url set https://…`; `ctl public-url check` fetches its `/healthz`). Each change is
+audited as `server.public_url`. See install.md, "Reaching the server from other machines".
+
 ## ctl
 
 `docker compose exec jumpmaster jumpmaster ctl help` lists every verb by page, and
@@ -328,6 +332,7 @@ token is always allowed.
 | Zones | `ctl intake <zone> stub <file.json> (prints the GOAL.md stub)`<br>`ctl intake <zone> issue <file.json> (files the issue ready)` | `POST /api/control/zones/:id/intake/goal-stub`<br>`POST /api/control/zones/:id/intake/issue` |
 | GitHub | `ctl github <zone> recommend \| pat <author\|reviewer\|read> \| ruleset \| codeowners [--reviewer <login>]… \| checklist`<br>`ctl github recommend <owner/name> [--paid-plan] [--identity starter\|two-bot]` | `GET /api/control/zones/:id/github`<br>`POST /api/control/github/recommend` |
 | Settings | `ctl settings set <path>=<json>… [--note <text>]` | `PATCH /api/control/config` |
+| Settings | `ctl public-url set <https://address>`<br>`ctl public-url clear`<br>`ctl public-url check` | `PUT /api/control/server/public-url`<br>`POST /api/control/server/public-url/check` |
 | Settings | `ctl mcp-tokens mint <zone> <read\|write> --days N [--label <text>]`<br>`ctl mcp-tokens list`<br>`ctl mcp-tokens revoke <id>` | `POST /api/control/mcp-tokens`<br>`GET /api/control/mcp-tokens`<br>`DELETE /api/control/mcp-tokens/:id` |
 | Credentials | `ctl secrets list`<br>`ctl secrets set <name> [--from-file <path>] [--created YYYY-MM-DD] (the value on stdin or in the file, never in argv)`<br>`ctl secrets test <name>`<br>`ctl secrets remove <name>`<br>`ctl secrets reload`<br>`ctl secrets vault on\|off`<br>`ctl secrets vault prefer on\|off`<br>`ctl secrets copy-to-vault <name>` | `GET /api/control/secrets`<br>`PUT /api/control/secrets/:name`<br>`POST /api/control/secrets/:name/test`<br>`DELETE /api/control/secrets/:name`<br>`POST /api/control/secrets/reload`<br>`POST /api/control/secrets/vault/on`<br>`POST /api/control/secrets/vault/off`<br>`POST /api/control/secrets/vault/prefer`<br>`POST /api/control/secrets/:name/copy-to-vault` |
 | Config | `ctl config show [--json]`<br>`ctl config revisions`<br>`ctl config set <path>=<json>… [--note <text>]`<br>`ctl config rollback <id> [note]`<br>`ctl config import <file> [--dry-run] [--note <text>]`<br>`ctl config export`<br>`ctl config reload`<br>`ctl config adopt`<br>`ctl config mode file` | `PATCH /api/control/config`<br>`GET /api/control/config`<br>`GET /api/control/config/revisions`<br>`POST /api/control/config/rollback`<br>`POST /api/control/config/reload`<br>`POST /api/control/config/adopt`<br>`POST /api/control/config/mode`<br>`GET /api/control/config/export`<br>`POST /api/control/config/import` |

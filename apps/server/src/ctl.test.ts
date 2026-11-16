@@ -121,6 +121,55 @@ describe('ctl sticks (issue #136)', () => {
   });
 });
 
+describe('ctl public-url (issue #139)', () => {
+  test('set, clear and check map to their routes; anything else is not a command', () => {
+    expect(ctlRequest(['public-url', 'set', 'https://a.b.ts.net'])).toEqual({
+      path: '/api/control/server/public-url',
+      method: 'PUT',
+      body: { publicUrl: 'https://a.b.ts.net' },
+    });
+    expect(ctlRequest(['public-url', 'clear'])).toEqual({
+      path: '/api/control/server/public-url',
+      method: 'PUT',
+      body: { publicUrl: null },
+    });
+    expect(ctlRequest(['public-url', 'check'])).toEqual({
+      path: '/api/control/server/public-url/check',
+      method: 'POST',
+      body: {},
+    });
+    expect(ctlRequest(['public-url', 'set'])).toBeNull();
+    expect(ctlRequest(['public-url', 'check', 'extra'])).toBeNull();
+  });
+
+  test('check prints the Check answer and exits 1 when unreachable; set prints the address', async () => {
+    const ok = await run(
+      ['public-url', 'check'],
+      '',
+      fakeFetch(200, { ok: true, message: 'Reachable' }),
+    );
+    expect([ok.code, ok.out]).toEqual([0, ['Reachable']]);
+    const bad = await run(
+      ['public-url', 'check'],
+      '',
+      fakeFetch(200, { ok: false, message: 'HTTP 404 Not Found from https://a.b/healthz' }),
+    );
+    expect([bad.code, bad.out]).toEqual([1, ['HTTP 404 Not Found from https://a.b/healthz']]);
+    const set = await run(
+      ['public-url', 'set', 'https://a.b'],
+      '',
+      fakeFetch(200, { revision: 4, publicUrl: 'https://a.b' }),
+    );
+    expect([set.code, set.out]).toEqual([0, ['server.publicUrl is https://a.b (revision 4)']]);
+    const cleared = await run(
+      ['public-url', 'clear'],
+      '',
+      fakeFetch(200, { revision: 5, publicUrl: null }),
+    );
+    expect(cleared.out).toEqual(['server.publicUrl is unset (revision 5)']);
+  });
+});
+
 describe('ctl setup and passphrase verbs', () => {
   test('the setup and passphrase verbs map to their routes; a passphrase in argv is refused', () => {
     expect(ctlRequest(['setup-code'])).toEqual({

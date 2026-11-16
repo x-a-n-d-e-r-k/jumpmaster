@@ -9,6 +9,7 @@ import {
   type ConfigIssue,
   type DropZoneConfig,
   type EditableConfig,
+  fileModeServer,
   formatIssues,
   gateSecretsOf,
   loadMachineSecrets,
@@ -963,7 +964,23 @@ export class ConfigStore implements ConfigSource {
     }
     this.resolvedValue = v.resolved;
     this.appsValue = v.apps;
-    this.cfg = { listen, dataDir, ...v.editable, secrets: v.secrets };
+    const server = this.serverOf(v.editable);
+    const { server: _stored, ...editable } = v.editable;
+    this.cfg = { listen, dataDir, ...editable, ...(server ? { server } : {}), secrets: v.secrets };
+  }
+
+  /**
+   * The `server` section that runs: in file mode `JM_PUBLIC_URL` wins over the file's (issue #139);
+   * an invalid value is said once and left out. Db mode runs the stored document's.
+   */
+  private serverOf(editable: EditableConfig): Config['server'] {
+    if (this.modeValue !== 'file') return editable.server;
+    try {
+      return fileModeServer(editable.server, this.o.env);
+    } catch (e) {
+      this.warnOnce(`${(e as Error).message}; the address for other machines is left unset`);
+      return editable.server;
+    }
   }
 
   /** Restart-only paths whose new value differs from the one this process runs with. */

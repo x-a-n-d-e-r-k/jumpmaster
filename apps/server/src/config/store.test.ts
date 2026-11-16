@@ -1649,3 +1649,33 @@ describe('turning the vault on and preferring it from Settings (#101)', () => {
     expect(JSON.stringify(store.turnOffVault())).toContain('JM_VAULT_KEY_FILE');
   });
 });
+
+describe('server.publicUrl in the store (issue #139)', () => {
+  test('file mode reads JM_PUBLIC_URL; db mode ignores it; an invalid one is a warning, not set', () => {
+    const file = world({ dropZones: [zone()] });
+    const fs = file.open({ env: { ...env, JM_PUBLIC_URL: 'https://k.example.ts.net' } });
+    expect(fs.mode()).toBe('file');
+    expect(fs.current().server).toEqual({ publicUrl: 'https://k.example.ts.net' });
+
+    const bad = world({ dropZones: [zone()] });
+    const bs = bad.open({ env: { ...env, JM_PUBLIC_URL: 'http://k' } });
+    expect(bs.current().server).toBeUndefined();
+    expect(bad.logs.join('\n')).toMatch(/JM_PUBLIC_URL: server.publicUrl must use https:\/\//);
+
+    const db = world();
+    const ds = db.open({ env: { ...env, JM_PUBLIC_URL: 'https://k.example.ts.net' } });
+    expect(ds.mode()).toBe('db');
+    expect(ds.current().server).toBeUndefined();
+  });
+
+  test('db mode: an apply sets it live, with no restart needed', () => {
+    const w = world();
+    const store = w.open();
+    const r = store.apply(
+      { server: { publicUrl: 'https://a.b.ts.net' } },
+      { via: 'ctl', principal: token, expectRevision: store.revision() },
+    );
+    expect(r).toMatchObject({ ok: true, changed: ['server'], restartNeeded: [] });
+    expect(store.current().server?.publicUrl).toBe('https://a.b.ts.net');
+  });
+});

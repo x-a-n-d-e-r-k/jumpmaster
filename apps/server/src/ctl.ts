@@ -340,6 +340,18 @@ function dropsRequest(args: string[]): Raw | null {
   return n >= 1 && n <= 168 ? { path: `${path}/extend-retention`, body: { hours: n } } : null;
 }
 
+/** `public-url set <url>`, `public-url clear` and `public-url check` (issue #139). */
+function publicUrlRequest(args: string[]): Raw | null {
+  const [, what, url, ...rest] = args;
+  const path = '/api/control/server/public-url';
+  if (rest.length > 0) return null;
+  if (what === 'set' && url) return { path, method: 'PUT', body: { publicUrl: url } };
+  if (url !== undefined) return null;
+  if (what === 'clear') return { path, method: 'PUT', body: { publicUrl: null } };
+  if (what === 'check') return { path: `${path}/check`, body: {} };
+  return null;
+}
+
 /** `sticks [--json]` and `sticks slots <name-or-id> <n>`: each stick's trooper count. */
 function sticksRequest(args: string[]): Raw | null {
   const [, what, stick, n, ...rest] = args;
@@ -381,6 +393,7 @@ function sticksLines(args: string[], body: Record<string, unknown>): string[] {
 function rawRequest(args: string[]): Raw | null {
   const [command, zone] = args;
   if (command === 'sticks') return sticksRequest(args);
+  if (command === 'public-url') return publicUrlRequest(args);
   if (command === 'config') return configRequest(args);
   if (command === 'secrets') return secretsRequest(args);
   if (command === 'settings') return settingsRequest(args);
@@ -482,6 +495,7 @@ const STATUS_WORD: Record<DoctorCheck['status'], string> = {
   warn: 'WARN',
   fail: 'FAIL',
   skip: 'SKIP',
+  info: 'INFO',
 };
 
 /** The doctor's run as lines a person reads: each check, then its fix and doc for any not passing. */
@@ -529,7 +543,7 @@ export function formatDoctor(
   const n = (s: DoctorCheck['status']) => run.checks.filter((c) => c.status === s).length;
   lines.push(
     '',
-    `${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip${n('fail') > 0 ? ': fix each FAIL, then run the doctor again' : ''}`,
+    `${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip${n('info') > 0 ? `, ${n('info')} info` : ''}${n('fail') > 0 ? ': fix each FAIL, then run the doctor again' : ''}`,
   );
   return lines.map(plain);
 }
@@ -1357,6 +1371,20 @@ async function runCtlOn(
     const parsed = JSON.parse(text) as Record<string, unknown>;
     if (args.includes('--json')) out(JSON.stringify(parsed, null, 2));
     else for (const line of sticksLines(args, parsed)) out(plain(line));
+    return 0;
+  }
+  if (args[0] === 'public-url' && res.ok) {
+    const b = JSON.parse(text) as {
+      ok?: boolean;
+      message?: string;
+      revision?: number;
+      publicUrl?: string | null;
+    };
+    if (args[1] === 'check') {
+      out(plain(b.message ?? ''));
+      return b.ok ? 0 : 1;
+    }
+    out(plain(`server.publicUrl is ${b.publicUrl ?? 'unset'} (revision ${b.revision})`));
     return 0;
   }
   if (args[0] === 'mcp-tokens' && res.ok) {

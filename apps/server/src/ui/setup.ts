@@ -512,7 +512,7 @@ async function createZone(zone, resume, out) {
 function doctorPage(db: Db, zones: readonly ZoneRef[]): string {
   const name = zoneNamer(zones);
   const run = latestDoctorRun(db);
-  const order = { fail: 0, warn: 1, skip: 2, pass: 3 } as const;
+  const order = { fail: 0, warn: 1, info: 2, skip: 3, pass: 4 } as const;
   const checks = run ? [...run.checks].sort((a, b) => order[a.status] - order[b.status]) : [];
   const rows = checks
     .map(

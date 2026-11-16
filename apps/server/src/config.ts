@@ -13,6 +13,7 @@ import {
 import { z } from 'zod';
 import { ZONE_MODES } from './db/repo.js';
 import { IMAGE_LOCK_PATH, loadImageLock, resolveImage } from './presets.js';
+import { publicUrlProblem } from './reach.js';
 import { readSecret } from './secrets.js';
 import {
   gateSecretName,
@@ -389,6 +390,21 @@ export const EditableSchema = z.object({
       maxOpenBriefings: z.number().int().nonnegative().default(MCP_DEFAULTS.maxOpenBriefings),
     })
     .default(MCP_DEFAULTS),
+  /**
+   * The address other machines (a new stick) reach this server at: an https origin, no path, query
+   * or fragment (issue #139). Unset by default; file mode reads `JM_PUBLIC_URL`. Applied live.
+   */
+  server: z
+    .object({
+      publicUrl: z
+        .string()
+        .superRefine((s, ctx) => {
+          const problem = publicUrlProblem(s);
+          if (problem) ctx.addIssue({ code: 'custom', message: problem });
+        })
+        .optional(),
+    })
+    .optional(),
 });
 
 /** A loaded zone: `image` is always resolved (from the preset when it wasn't given). */
@@ -411,6 +427,8 @@ export interface Config {
   mcp?: Partial<McpConfig>;
   /** Absent means false. */
   requireSignedImages?: boolean;
+  /** Absent (or without `publicUrl`): no address for other machines yet. */
+  server?: ServerConfig;
   secrets: {
     claudeToken: string;
     githubAuthorToken: string;
@@ -430,6 +448,22 @@ export type BootSettings = Pick<Config, 'listen' | 'dataDir'>;
 export type ConfigIssue = { path: string; message: string };
 
 export type UsageConfig = Config['usage'];
+export type ServerConfig = { publicUrl?: string };
+
+/**
+ * File mode's `server` section: `JM_PUBLIC_URL` when set (it wins over the file's), else the
+ * file's. An invalid value throws with the rule it breaks.
+ */
+export function fileModeServer(
+  server: ServerConfig | undefined,
+  rawEnv: NodeJS.ProcessEnv,
+): ServerConfig | undefined {
+  const fromEnv = rawEnv.JM_PUBLIC_URL;
+  if (!fromEnv) return server;
+  const problem = publicUrlProblem(fromEnv);
+  if (problem) throw new Error(`JM_PUBLIC_URL: ${problem}`);
+  return { ...server, publicUrl: fromEnv };
+}
 export type ClaudePlan = (typeof CLAUDE_PLANS)[number];
 export type ClaudeConfig = {
   plan: ClaudePlan;
@@ -748,9 +782,11 @@ export function loadConfig(
   const resolved = resolveCredentials(rawEnv, rawEnv.JM_SECRETS_DIR || undefined, 'disabled', {
     gateSecrets: gateSecretsOf(zones),
   });
+  const server = fileModeServer(parsed.config.server, rawEnv);
   return {
     ...boot,
     ...parsed.config,
+    ...(server ? { server } : {}),
     secrets: assembleSecrets(resolved, loadMachineSecrets(rawEnv, resolved), zones),
   };
 }

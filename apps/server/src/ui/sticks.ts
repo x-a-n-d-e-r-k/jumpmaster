@@ -1,6 +1,7 @@
 // The sticks page (issue #136): every enrolled stick, what it can run, and how many troopers it
 // runs at once, set here and applied on its next lease answer with no restart.
 import { STICK_LIVE_MS } from '../doctor/checks.js';
+import { PUBLIC_URL_NEEDED, PUBLIC_URL_PAGE } from '../reach.js';
 import { escapeHtml, page, type StickLine } from './pages.js';
 import { type ZoneRef, zoneNamer } from './zone-name.js';
 
@@ -35,11 +36,14 @@ export function renderSticks(s: {
   sticks: StickRow[];
   zones: readonly ZoneRef[];
   now: Date;
+  /** `server.publicUrl` as an origin; absent, nothing that needs it is offered (issue #139). */
+  publicUrl?: string;
 }): string {
   const name = zoneNamer(s.zones);
+  const reach = reachLine(s.publicUrl);
   if (s.sticks.length === 0)
     return page(
-      '<h2>Sticks</h2><p class="empty">No stick has enrolled. See <code>docs/runbooks/install.md</code> to add one.</p>',
+      `<h2>Sticks</h2><p class="empty">No stick has enrolled. See <code>docs/runbooks/install.md</code> to add one.</p>${reach}`,
       { title: 'Sticks' },
     );
   const rows = s.sticks
@@ -65,8 +69,18 @@ export function renderSticks(s: {
     })
     .join('');
   return page(
-    `<h2>Sticks</h2><p>How many troopers each stick runs at once. A change applies on the stick's next lease, with no restart; lowering it stops nothing that runs. <code>jumpmaster ctl sticks</code> does the same.</p>` +
+    `<h2>Sticks</h2><p>How many troopers each stick runs at once. A change applies on the stick's next lease, with no restart; lowering it stops nothing that runs. <code>jumpmaster ctl sticks</code> does the same.</p>${reach}` +
       `<table><tr><th>Stick</th><th>Status</th><th>Version</th><th>Capabilities</th><th>Zones</th><th>Troopers</th></tr>${rows}</table>${SLOTS_SCRIPT}`,
     { title: 'Sticks' },
   );
+}
+
+/**
+ * Where a new machine reaches this server: the address once set, else the words and the link to
+ * set it, and nothing that needs it.
+ */
+export function reachLine(publicUrl: string | undefined): string {
+  return publicUrl
+    ? `<p class="reach">Other machines reach this server at <code>${escapeHtml(publicUrl)}</code> (<a href="${PUBLIC_URL_PAGE}">Other machines</a>).</p>`
+    : `<p class="reach warn"><a href="${PUBLIC_URL_PAGE}">${PUBLIC_URL_NEEDED}</a> before adding a stick on another machine.</p>`;
 }

@@ -87,6 +87,17 @@ export const CONTROL_ROUTES: ControlRoute[] = [
   { method: 'POST', path: '/api/control/github/recommend', ctl: 'ctl github recommend octo/demo' },
   // Settings
   {
+    method: 'PUT',
+    path: '/api/control/server/public-url',
+    ctl: 'ctl public-url set https://jumpmaster.example.ts.net',
+    also: ['ctl public-url clear'],
+  },
+  {
+    method: 'POST',
+    path: '/api/control/server/public-url/check',
+    ctl: 'ctl public-url check',
+  },
+  {
     method: 'PATCH',
     path: '/api/control/config',
     ctl: 'ctl config set pollSeconds=30',
@@ -251,6 +262,11 @@ export const CTL_VERBS: { verb: string; page: Page; forms: string[] }[] = [
     verb: 'settings',
     page: 'Settings',
     forms: ['ctl settings set <path>=<json>… [--note <text>]'],
+  },
+  {
+    verb: 'public-url',
+    page: 'Settings',
+    forms: ['ctl public-url set <https://address>', 'ctl public-url clear', 'ctl public-url check'],
   },
   {
     verb: 'mcp-tokens',

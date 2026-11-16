@@ -14,6 +14,14 @@ import {
 import type { Db } from '../db/open.js';
 import { listMcpTokens, MAX_TOKEN_DAYS, type McpTokenInfo } from '../mcp/tokens.js';
 import {
+  defaultTailscaleDeps,
+  PUBLIC_URL_NEEDED,
+  publicOrigin,
+  type TailscaleDeps,
+  type TailscaleGuidance,
+  tailscaleGuidance,
+} from '../reach.js';
+import {
   CREDENTIAL_ROLES,
   type CredentialName,
   credentialCreatedAt,
@@ -57,6 +65,7 @@ export function claudeTokenDays(store: ConfigStore, now: Date): number | undefin
 const TABS: [string, string][] = [
   ['credentials', 'Credentials'],
   ['install', 'Install'],
+  ['other-machines', 'Other machines'],
   ['mcp-tokens', 'MCP tokens'],
   ['history', 'History'],
 ];
@@ -723,6 +732,85 @@ ${INSTALL_SCRIPT}`,
 }
 
 // ---------------------------------------------------------------------------------------------
+// Other machines (issue #139): the address a new machine reaches this server at, its Check, and
+// how to make it work on a tailnet. The server shows the tailscale command; it never runs it.
+
+/**
+ * The Other machines tab's script: Save sends the address alone (`PUT`, empty clears it) and
+ * redraws; Check asks the server to fetch `<publicUrl>/healthz` and says what it answered.
+ */
+export const OTHER_MACHINES_SCRIPT = `<script>
+async function jmSavePublicUrl(value, status, go) {
+  const r = await jmFetch('/api/control/server/public-url', { publicUrl: value === '' ? null : value }, 'PUT');
+  let j = {};
+  try { j = await r.json(); } catch (e) {}
+  if (r.ok) { status.textContent = 'Saved as revision ' + j.revision + '.'; go('/settings/other-machines'); return 'saved'; }
+  if (j.issues) { status.textContent = j.issues.map((i) => i.message).join('; '); return 'refused'; }
+  status.textContent = j.error || ('Refused (' + r.status + ')');
+  return 'refused';
+}
+async function jmCheckPublicUrl(status) {
+  status.textContent = 'Checking…';
+  const r = await jmFetch('/api/control/server/public-url/check', {});
+  let j = {};
+  try { j = await r.json(); } catch (e) {}
+  status.textContent = j.message || j.error || ('Refused (' + r.status + ')');
+  status.dataset.ok = j.ok ? '1' : '0';
+  return j.ok === true;
+}
+document.addEventListener('DOMContentLoaded', () => {
+  const form = document.getElementById('public-url-form');
+  if (!form) return;
+  const out = document.getElementById('public-url-out');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (form.dataset.readonly === '1') return;
+    await jmSavePublicUrl(document.getElementById('public-url').value.trim(), out, (to) => { location.href = to; });
+  });
+  const check = document.getElementById('public-url-check');
+  if (check) check.addEventListener('click', () => jmCheckPublicUrl(out));
+});
+</script>`;
+
+export function renderOtherMachines(o: {
+  store: ConfigStore;
+  config: Config;
+  guidance: TailscaleGuidance;
+}): string {
+  const { store, config, guidance } = o;
+  const fileMode = store.mode() === 'file';
+  const current = publicOrigin(config);
+  const value = config.server?.publicUrl ?? '';
+  const how = fileMode
+    ? '<p class="warn">File mode: the address is read from <code>JM_PUBLIC_URL</code> in the server&#39;s environment. Set it there and restart, or adopt the config into the database to set it here.</p>'
+    : '<p>An absolute <code>https://</code> address with no path, query or fragment. Saving applies it at once, with no restart.</p>';
+  const state = current
+    ? `<p>Other machines reach this server at <code>${escapeHtml(current)}</code>.</p>`
+    : `<p class="warn">${escapeHtml(PUBLIC_URL_NEEDED)}: until then, nothing that needs it (such as adding a stick on another machine) is offered.</p>`;
+  const tailnet = guidance.present
+    ? `<h3>On your tailnet</h3><p>This server&#39;s host has the <code>tailscale</code> CLI. To expose the server on the tailnet over HTTPS, run this on the host (the server does not run it for you):</p><pre><code>${escapeHtml(guidance.command)}</code></pre>${
+        guidance.publicUrl
+          ? `<p>The address is then <code>${escapeHtml(guidance.publicUrl)}</code>: save it above, then Check.</p>`
+          : '<p>The address is then <code>https://</code> and this machine&#39;s name on the tailnet (<code>tailscale status</code> shows it): save it above, then Check.</p>'
+      }`
+    : `<h3>Making the address work</h3><p>${escapeHtml(guidance.note)}</p>`;
+  return page(
+    `<h2>Settings</h2>${tabs('other-machines')}
+<h3 id="other-machines">Other machines</h3>
+<p>The address other machines, such as a new stick on a VPS, reach this server at.</p>
+${state}${how}
+<form id="public-url-form" data-readonly="${fileMode ? '1' : '0'}">
+<p><label for="public-url"><code>server.publicUrl</code></label> <input type="url" id="public-url" name="publicUrl" placeholder="https://jumpmaster.example.ts.net" value="${escapeHtml(value)}"${fileMode ? ' disabled' : ''}>
+${fileMode ? '' : '<button>Save</button> '}<button type="button" id="public-url-check"${current ? '' : ' disabled'}>Check</button>
+<output id="public-url-out" role="status" aria-live="polite"></output></p>
+</form>
+<p><small>Check: this server fetches <code>&lt;address&gt;/healthz</code> (5 seconds at most) and says Reachable, or what failed.</small></p>
+${tailnet}
+${OTHER_MACHINES_SCRIPT}`,
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
 // MCP tokens (§7.5): Command's tokens, made here with a zone, a scope and an expiry.
 
 /** The token table's frame, shared by the server's render and the script's redraw (no quotes). */
@@ -999,6 +1087,8 @@ export function registerSettingsPages(
     /** Active drops started before a time: the drops that carry a replaced credential's old value. */
     runningSince(since: string): number;
     guidanceForge?: (repo: string, token: string) => GuidanceForge;
+    /** The tailscale CLI lookup (tests); default `PATH` and `tailscale status --json`. */
+    tailscale?: TailscaleDeps;
   },
 ): void {
   const { store, now } = deps;
@@ -1018,6 +1108,14 @@ export function registerSettingsPages(
         ...(saved !== undefined ? { saved } : {}),
       }),
     );
+  });
+  app.get('/settings/other-machines', async (req, reply) => {
+    const config = req.jmConfig ?? store.current();
+    const guidance = await tailscaleGuidance(
+      config.listen.port,
+      deps.tailscale ?? defaultTailscaleDeps,
+    );
+    return html(req, reply, renderOtherMachines({ store, config, guidance }));
   });
   app.get('/settings/mcp-tokens', async (req, reply) =>
     html(

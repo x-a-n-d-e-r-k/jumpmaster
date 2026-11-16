@@ -47,6 +47,7 @@ import { getGoals } from './goals.js';
 import { missingFor, zoneRequirements } from './leases.js';
 import { registerMcpRoute } from './mcp/server.js';
 import type { ForgePair } from './outbox.js';
+import { publicOrigin, type ReachDeps, type TailscaleDeps } from './reach.js';
 import { buildStatus } from './status.js';
 import { lastSyncResult } from './sync.js';
 import { registerAuthPages } from './ui/auth-pages.js';
@@ -203,6 +204,10 @@ export function createApp(
     guidanceForge?: ControlDeps['guidanceForge'];
     /** The forge a credential test reads through (tests); default GitHub. */
     credentialForge?: ControlDeps['credentialForge'];
+    /** What `/healthz` says; default the release version (`JM_RELEASE_VERSION`), else `dev`. */
+    version?: string;
+    /** The Check's fetch and the tailscale CLI lookup (tests inject both). */
+    reach?: ReachDeps & { tailscale?: TailscaleDeps };
   },
 ): FastifyInstance {
   const app = Fastify({ logger: false });
@@ -230,6 +235,12 @@ export function createApp(
   registerStickRoutes(app, deps);
   registerControlRoutes(app, { ...deps, setup, backoff });
   registerMcpRoute(app, deps);
+  // Other machines check the address they reach this server at (issue #139): no auth, any Host,
+  // and `{ ok, version }` only: no config, counts or names.
+  const version = deps.version ?? (process.env.JM_RELEASE_VERSION || 'dev');
+  app.get('/healthz', async (_req, reply) =>
+    reply.header('cache-control', 'no-store').send({ ok: true, version }),
+  );
   // The confirmation page for a session's guarded config change (§7.5): with the store only.
   if (deps.config instanceof ConfigStore) {
     // Every page's navigation gains the store-only pages (Zones, Settings).
@@ -253,6 +264,7 @@ export function createApp(
       now: deps.now,
       runningSince: (since) => runningSince(deps.db, since),
       ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
+      ...(deps.reach?.tailscale ? { tailscale: deps.reach.tailscale } : {}),
     });
     // The GitHub half of setup for a zone: links and generated files, never a forge write.
     registerGithubPages(app, {
@@ -280,6 +292,7 @@ export function createApp(
       ),
       zones: config.dropZones,
       now: deps.now(),
+      ...(publicOrigin(config) ? { publicUrl: publicOrigin(config) as string } : {}),
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });

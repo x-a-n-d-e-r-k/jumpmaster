@@ -1091,6 +1091,35 @@ so don't publish it on another interface; reach it through an SSH tunnel. A brow
 because the passphrase would cross the network in clear. Declared, the login cookies are `Secure`.
 Doctor check: `config.listen`.
 
+## Reaching the server from other machines
+
+A stick on another machine (a VPS on your tailnet, say) needs an address it reaches this server
+at: `server.publicUrl`. Set it under Settings, **Other machines** (`/settings/other-machines`), or
+with `jumpmaster ctl public-url set https://<address>`; in file mode set `JM_PUBLIC_URL` in the
+server's environment instead. It must be an absolute `https://` address with no path, query or
+fragment. Saving needs the operator login (or the token), is audited as `server.public_url` and
+applies at once, with no restart. Until it is set, nothing that needs it is offered: the pages say
+"Set the address other machines reach this server at" and link to the section.
+
+**Check** (or `jumpmaster ctl public-url check`) makes the server fetch `<address>/healthz` from
+itself, waiting 5 seconds at most, and says `Reachable` or exactly what failed: the DNS lookup, TLS,
+a timeout or the HTTP status. `GET /healthz` needs no login and answers `{ "ok": true, "version" }`
+only: no config, counts or names.
+
+On a tailnet, run this on the server's host (the server shows it but never runs it), with the port
+the server listens on:
+
+```sh
+tailscale serve --bg --https=443 http://127.0.0.1:7420
+```
+
+The address is then `https://` and the host's tailnet name (`tailscale status --json`,
+`Self.DNSName`, without its trailing dot). When the `tailscale` CLI is on the server's `PATH`, the
+section shows this command with the real port and fills in that name; otherwise (as inside the
+server's container) it says only to put the server behind HTTPS on an address the new machine can
+reach. Any other VPN or reverse proxy works as well, as long as `<address>/healthz` answers.
+Doctor check: `server.public-url`.
+
 ## UID
 
 The server, `bootstrap` and `init` run as `JM_UID:JM_GID` from `.env` (1000:1000 without it),
@@ -1121,6 +1150,15 @@ page (`/doctor`) offers beside a fail or a warn, and `ctl doctor` prints as `act
 Where the UI listens and which host names it accepts. Inside the container `0.0.0.0` passes:
 compose publishes `127.0.0.1` only. It fails when `allowedHosts` names a host other than loopback
 and no TLS terminator is declared (`JM_TLS_TERMINATED=1`). See [Listen](#listen).
+
+### `server.public-url`
+
+**Action:** Open Settings, Other machines
+
+The address other machines reach this server at. `info` while it is unset: nothing needs it until
+a stick runs on another machine. `pass` when `<address>/healthz` answers; `warn` with the same words
+as the Check button (a DNS failure, a TLS error, a timeout or a status code) when it does not. See
+[Reaching the server from other machines](#reaching-the-server-from-other-machines).
 
 ### `config.uid`
 

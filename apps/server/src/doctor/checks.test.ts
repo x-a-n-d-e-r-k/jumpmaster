@@ -24,6 +24,7 @@ describe('a healthy install', () => {
     const notPass = checks.filter((c) => c.status !== 'pass');
     expect(notPass.map((c) => [c.id, c.status])).toEqual([
       ['claude.token-age', 'skip'],
+      ['server.public-url', 'info'],
       ['zone.doctor-drop', 'skip'],
     ]);
     for (const c of checks) {
@@ -815,6 +816,7 @@ describe('starter identity', () => {
     const checks = await starter().run();
     expect(checks.filter((c) => c.status !== 'pass').map((c) => [c.id, c.status])).toEqual([
       ['claude.token-age', 'skip'],
+      ['server.public-url', 'info'],
       ['forge.reviewer', 'skip'],
       ['forge.reviewer-reads', 'skip'],
       ['zone.identity', 'warn'],
@@ -1543,4 +1545,41 @@ test('CHECK_IDS names exactly the check ids this file reports', () => {
   for (const m of src.matchAll(/\bg\('([a-z]+\.[a-z-]+)'/g)) ids.add(m[1] as string);
   for (const who of ['author', 'reviewer']) ids.add(`forge.${who}`).add(`forge.${who}-reads`);
   expect([...ids].sort()).toEqual([...CHECK_IDS].sort());
+});
+
+describe('server.public-url (issue #139)', () => {
+  test('unset: info, not a failure, saying where to set it; nothing is fetched', async () => {
+    const w = world();
+    let fetched = 0;
+    w.deps.reach = async () => {
+      fetched++;
+      return { ok: true, message: 'Reachable' };
+    };
+    const c = one(await w.run(), 'server.public-url');
+    expect(c.status).toBe('info');
+    expect(c.summary).toContain('Set the address other machines reach this server at');
+    expect(fetched).toBe(0);
+  });
+
+  test('set and reachable: pass', async () => {
+    const w = world({ config: { server: { publicUrl: 'https://a.b.ts.net' } } });
+    const asked: string[] = [];
+    w.deps.reach = async (url) => {
+      asked.push(url);
+      return { ok: true, message: 'Reachable' };
+    };
+    const c = one(await w.run(), 'server.public-url');
+    expect(asked).toEqual(['https://a.b.ts.net']);
+    expect(c.status).toBe('pass');
+    expect(c.summary).toBe('https://a.b.ts.net is reachable (/healthz answered)');
+  });
+
+  test('set and unreachable: warn with the Check button text', async () => {
+    const w = world({ config: { server: { publicUrl: 'https://a.b.ts.net' } } });
+    const message = 'timeout: https://a.b.ts.net/healthz did not answer within 5 seconds';
+    w.deps.reach = async () => ({ ok: false, message });
+    const c = one(await w.run(), 'server.public-url');
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain(message);
+  });
 });

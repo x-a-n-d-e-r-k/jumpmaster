@@ -37,12 +37,14 @@ import { doctorMayLease, missingFor, zoneRequirements } from '../leases.js';
 import type { ForgePair } from '../outbox.js';
 import { egressFor } from '../payloads.js';
 import { DETECT_FILES, detectPreset } from '../presets.js';
+import { checkReach, PUBLIC_URL_NEEDED, publicOrigin, type ReachResult } from '../reach.js';
 import { dispatchGate } from '../usage.js';
 import type { Shadowed } from '../vault/credentials.js';
 import type { CredentialProblem } from '../vault/problems.js';
 import { KEY_CHANGED } from '../vault/vault.js';
 
-export type DoctorStatus = 'pass' | 'warn' | 'fail' | 'skip';
+/** `info` says something worth knowing that is no fault (an optional setting left unset). */
+export type DoctorStatus = 'pass' | 'warn' | 'fail' | 'skip' | 'info';
 
 /** `doc` is an anchor in `docs/runbooks/install.md`. */
 export type DoctorCheck = {
@@ -99,6 +101,7 @@ export const CHECK_IDS = [
   'forge.private-clone',
   'forge.reviewer',
   'forge.reviewer-reads',
+  'server.public-url',
   'stick.capabilities',
   'stick.image-policy',
   'stick.seen',
@@ -142,6 +145,8 @@ export type DoctorDeps = {
   readForge?(zoneId: string): Forge | undefined;
   /** The config store's status (mode, file problems, restart-pending settings), when there is one. */
   configStatus?: ConfigStatus;
+  /** The Check behind `server.public-url` (default: fetch `<publicUrl>/healthz`, 5 s). */
+  reach?(publicUrl: string): Promise<ReachResult>;
   /** Which pages exist, for the fix links (default: this build's, `PAGES_M45A`). */
   pages?: { zones: boolean; settings: boolean; credentials: boolean };
   /**
@@ -775,6 +780,34 @@ function usageCheck(d: DoctorDeps): DoctorCheck {
     default:
       return { ...base, status: 'warn', summary: `unknown usage gate ${String(gate)}` };
   }
+}
+
+/**
+ * The address other machines reach this server at (issue #139): unset is information, set and
+ * answering `/healthz` a pass, set and not answering a warn with the Check button's words.
+ */
+async function publicUrlCheck(d: DoctorDeps): Promise<DoctorCheck> {
+  const base = {
+    id: 'server.public-url',
+    zoneId: null,
+    doc: doc('reaching-the-server-from-other-machines'),
+  };
+  const url = publicOrigin(d.config);
+  if (!url)
+    return {
+      ...base,
+      status: 'info',
+      summary: `no address for other machines is set: ${PUBLIC_URL_NEEDED} before adding a stick on another machine`,
+      fix: 'Settings, Other machines (or jumpmaster ctl public-url set https://…); in file mode set JM_PUBLIC_URL.',
+    };
+  const r = await (d.reach ?? ((u: string) => checkReach(u)))(url);
+  if (r.ok) return { ...base, status: 'pass', summary: `${url} is reachable (/healthz answered)` };
+  return {
+    ...base,
+    status: 'warn',
+    summary: `${url} is not reachable from this server: ${r.message}`,
+    fix: 'Make the address answer over HTTPS (Settings, Other machines shows how), then Check again.',
+  };
 }
 
 function killCheck(d: DoctorDeps): DoctorCheck {
@@ -2171,6 +2204,7 @@ export async function runChecks(
     g('claude.token-age', null, () => tokenAgeCheck(d)),
     g('claude.plan', null, () => planCheck(d)),
     g('control.kill', null, () => killCheck(d)),
+    g('server.public-url', null, () => publicUrlCheck(d)),
     g('usage.gate', null, () => usageCheck(d)),
     g('stick.seen', null, () => stickSeenCheck(d, sticks)),
     g('stick.image-policy', null, () => imagePolicyCheck(d, sticks)),

@@ -1153,3 +1153,41 @@ describe('zone id charset', () => {
       ]);
   });
 });
+
+describe('server.publicUrl (issue #139)', () => {
+  const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json'), strict: true };
+
+  test('unset by default', () => {
+    const r = parseEditable({}, noLock);
+    expect(r.ok && r.config.server).toBeUndefined();
+  });
+
+  test('accepts an https origin', () => {
+    const r = parseEditable({ server: { publicUrl: 'https://a.b.ts.net' } }, noLock);
+    expect(r.ok && r.config.server).toEqual({ publicUrl: 'https://a.b.ts.net' });
+  });
+
+  test.each([
+    ['http://a.b', /https:\/\//],
+    ['https://a.b/x', /no path/],
+    ['https://a.b?q=1', /no query/],
+    ['ftp://a', /https:\/\//],
+  ])('refuses %s with the rule it breaks', (url, rule) => {
+    const r = parseEditable({ server: { publicUrl: url } }, noLock);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.issues).toHaveLength(1);
+    expect(r.issues[0]?.path).toBe('server.publicUrl');
+    expect(r.issues[0]?.message).toMatch(rule);
+  });
+
+  test('file mode reads JM_PUBLIC_URL; an invalid one stops the load with its rule', () => {
+    expect(loadConfig(minimal, fullEnv).server).toBeUndefined();
+    expect(loadConfig(minimal, { ...fullEnv, JM_PUBLIC_URL: 'https://k.ts.net' }).server).toEqual({
+      publicUrl: 'https://k.ts.net',
+    });
+    expect(() => loadConfig(minimal, { ...fullEnv, JM_PUBLIC_URL: 'http://k' })).toThrow(
+      /JM_PUBLIC_URL: server.publicUrl must use https:\/\//,
+    );
+  });
+});
