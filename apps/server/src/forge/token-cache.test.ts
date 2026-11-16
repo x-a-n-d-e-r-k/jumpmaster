@@ -7,8 +7,13 @@ const fakeToken = (n: number) => 'ghs_' + `FAKE_TOKEN_${String(n).padStart(4, '0
 const MIN = 60_000;
 const T0 = 1_790_000_000_000;
 
-const AUTHOR: TokenKey = { owner: 'acme', role: 'author', repositoryId: 1 };
-const REVIEWER: TokenKey = { owner: 'acme', role: 'reviewer', repositoryId: 1 };
+const AUTHOR: TokenKey = { owner: 'acme', role: 'author', repositoryId: 1, use: 'server-author' };
+const REVIEWER: TokenKey = {
+  owner: 'acme',
+  role: 'reviewer',
+  repositoryId: 1,
+  use: 'server-reviewer',
+};
 
 const consoleSpies: ReturnType<typeof vi.spyOn>[] = [];
 const captured: string[] = [];
@@ -163,17 +168,18 @@ describe('createTokenCache', () => {
     const keys: TokenKey[] = [
       AUTHOR,
       REVIEWER,
-      { owner: 'other', role: 'author', repositoryId: 1 },
-      { owner: 'acme', role: 'author', repositoryId: 2 },
+      { owner: 'other', role: 'author', repositoryId: 1, use: 'server-author' },
+      { owner: 'acme', role: 'author', repositoryId: 2, use: 'server-author' },
+      { ...REVIEWER, use: 'drop-read-reviewer' },
     ];
     const first = await Promise.all(keys.map((k) => h.cache.token(k)));
-    expect(new Set(first).size).toBe(4);
-    expect(h.mint).toHaveBeenCalledTimes(4);
+    expect(new Set(first).size).toBe(5);
+    expect(h.mint).toHaveBeenCalledTimes(5);
     for (const [i, k] of keys.entries()) expect(h.mint).toHaveBeenNthCalledWith(i + 1, k);
 
     const again = await Promise.all(keys.map((k) => h.cache.token({ ...k })));
     expect(again).toEqual(first);
-    expect(h.mint).toHaveBeenCalledTimes(4);
+    expect(h.mint).toHaveBeenCalledTimes(5);
   });
 
   test('the error does not copy the mint error message, which may hold a token', async () => {

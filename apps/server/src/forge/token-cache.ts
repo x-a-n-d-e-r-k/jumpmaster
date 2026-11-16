@@ -8,12 +8,17 @@
  *
  * Unsuspending an installation brings its old tokens back, so a mint in progress when its key is
  * invalidated or the cache cleared (the kill switch) is never cached once it completes.
+ *
+ * The key includes the token's use (§4.2's table), so tokens narrowed to different permission sets
+ * never share a slot: a `contents: read` token is never handed out for a `pull_requests: write` use.
  */
 
 export interface TokenKey {
   owner: string;
   role: 'author' | 'reviewer';
   repositoryId: number;
+  /** The use the token is narrowed for: a key of `USE_PERMISSIONS` in `github-app.ts`. */
+  use: string;
 }
 
 export interface MintedToken {
@@ -54,7 +59,7 @@ interface Flight {
   promise: Promise<string>;
 }
 
-const keyId = (key: TokenKey): string => JSON.stringify([key.owner, key.role, key.repositoryId]);
+const keyId = (key: TokenKey): string => JSON.stringify([key.owner, key.role, key.repositoryId, key.use]);
 
 export function createTokenCache({ mint, register, now }: TokenCacheDeps): TokenCache {
   const cached = new Map<string, MintedToken>();
