@@ -1,9 +1,10 @@
-import { randomBytes } from 'node:crypto';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { openDb } from '../db/open.js';
+import { ScrubSet } from '../forge/scrub-set.js';
 import { t0, tmpDbFile } from '../test/helpers.js';
 import {
   credentialCreatedAt,
@@ -15,6 +16,8 @@ import {
   shadowedCredentials,
   testCredential,
 } from './credentials.js';
+import { appEntryName, serializeAppEntry } from './github-app-entries.js';
+import { type ResolvedApps, resolveAppEntries } from './resolution.js';
 import { fingerprintOf, openVault, type Vault } from './vault.js';
 
 const CLAUDE = 'sk-ant-' + 'oat01-CLAUDEVALUE-0001';
@@ -200,6 +203,53 @@ describe('shadowing, fingerprints and dates', () => {
     expect(credentialFingerprint(a)).toBe(
       credentialFingerprint(resolveCredentials({}, dir, 'disabled')),
     );
+  });
+
+  test('credentialFingerprint with no app entries is byte-identical to the PAT-only value', () => {
+    const r = resolveCredentials(
+      { JM_GITHUB_AUTHOR_TOKEN: AUTHOR, JM_GITHUB_REVIEWER_TOKEN: REVIEWER },
+      undefined,
+      'disabled',
+    );
+    // Pinned from the code before app entries were hashed.
+    const PINNED = 'd30acf30e7d73d1f';
+    expect(credentialFingerprint(r)).toBe(PINNED);
+    expect(credentialFingerprint(r, new Map())).toBe(PINNED);
+    const onlyMissing: ResolvedApps = new Map([
+      [
+        'acme',
+        { author: { source: 'missing' }, reviewer: { source: 'missing', undecryptable: true } },
+      ],
+    ]);
+    expect(credentialFingerprint(r, onlyMissing)).toBe(PINNED);
+  });
+
+  test('credentialFingerprint changes when an app entry changes, and holds no PEM', () => {
+    const r = resolveCredentials({ JM_GITHUB_AUTHOR_TOKEN: AUTHOR }, undefined, 'disabled');
+    const pemOf = () =>
+      generateKeyPairSync('rsa', { modulusLength: 2048 })
+        .privateKey.export({ type: 'pkcs8', format: 'pem' })
+        .toString();
+    const v = vault();
+    const appsWith = (pem: string): ResolvedApps => {
+      v.put(
+        appEntryName('acme', 'author'),
+        serializeAppEntry({
+          appId: '1',
+          slug: 's',
+          clientId: 'c',
+          pem,
+          importedAt: '2026-11-15T10:00:00.000Z',
+        }),
+        { now: t0 },
+      );
+      return resolveAppEntries([{ repo: 'acme/x' }], { vault: v, scrubSet: new ScrubSet() });
+    };
+    const a = credentialFingerprint(r, appsWith(pemOf()));
+    const b = credentialFingerprint(r, appsWith(pemOf()));
+    expect(a).toMatch(/^[0-9a-f]{16}$/);
+    expect(a).not.toBe(credentialFingerprint(r));
+    expect(a).not.toBe(b);
   });
 
   test("credentialCreatedAt: a vault credential's date (declared, else set) in either mode; claude.tokenCreatedAt for one the vault does not hold", () => {

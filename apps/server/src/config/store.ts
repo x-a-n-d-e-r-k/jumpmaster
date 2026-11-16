@@ -25,6 +25,7 @@ import {
   zoneHasHistory,
   zoneHistoryRepo,
 } from '../db/repo.js';
+import type { ScrubSet } from '../forge/scrub-set.js';
 import {
   type CredentialName,
   type Resolved,
@@ -32,6 +33,7 @@ import {
   resolveCredentials,
 } from '../vault/credentials.js';
 import { type CredentialProblem, credentialProblems } from '../vault/problems.js';
+import { type ResolvedApps, resolveAppEntries } from '../vault/resolution.js';
 import {
   createVaultKey,
   fingerprintOf,
@@ -154,6 +156,8 @@ export type StoreOptions = {
    * the secrets directory and the vault.
    */
   secretsFor?: (zones: readonly DropZoneConfig[]) => Config['secrets'];
+  /** Where each loaded app PEM is registered for the log scrub; `serverScrubSet` by default. */
+  scrubSet?: ScrubSet;
 };
 
 /** How many replaced secret values the log and audit scrub keep redacting. */
@@ -184,6 +188,7 @@ const restartValues = (c: EditableConfig): Record<(typeof RESTART_PATHS)[number]
 type Valid = {
   editable: EditableConfig;
   resolved: Resolved;
+  apps: ResolvedApps;
   secrets: Config['secrets'];
   warnings?: string[];
 };
@@ -212,6 +217,7 @@ export class ConfigStore implements ConfigSource {
   /** Guarded changes from sessions waiting for the confirmation page (in memory only). */
   readonly confirmations: Confirmations;
   private resolvedValue!: Resolved;
+  private appsValue: ResolvedApps = new Map();
   /** The vault as it is now: Settings can turn it on (and off, empty) while the server runs. */
   private vaultValue: Vault | 'disabled';
   private readonly retiredValues = new Set<string>();
@@ -534,6 +540,11 @@ export class ConfigStore implements ConfigSource {
   /** Every credential as it resolved: source, path, fingerprint, dates and the value. */
   resolved(): Resolved {
     return this.resolvedValue;
+  }
+
+  /** The GitHub App entries of the two-bot zones' owners, as they resolved (§4.4). */
+  resolvedApps(): ResolvedApps {
+    return this.appsValue;
   }
 
   /** The vault, or `'disabled'` when there is no key file. */
@@ -892,21 +903,30 @@ export class ConfigStore implements ConfigSource {
     try {
       const zones = parsed.config.dropZones;
       let resolved: Resolved;
+      let apps: ResolvedApps = new Map();
       let secrets: Config['secrets'];
       if (this.o.secretsFor) {
         secrets = this.o.secretsFor(zones);
         resolved = resolvedFromSecrets(secrets, zones);
       } else {
+        const preferVault = this.preferVault();
         resolved = resolveCredentials(this.o.env, this.o.boot.secretsDir, this.vault(), {
           gateSecrets: gateSecretsOf(zones),
-          preferVault: this.preferVault(),
+          preferVault,
           warn: (m) => this.warnOnce(m),
+        });
+        apps = resolveAppEntries(zones, {
+          vault: this.vault(),
+          ...(this.o.boot.secretsDir ? { secretsDir: this.o.boot.secretsDir } : {}),
+          preferVault,
+          ...(this.o.scrubSet ? { scrubSet: this.o.scrubSet } : {}),
         });
         secrets = assembleSecrets(resolved, loadMachineSecrets(this.o.env, resolved), zones);
       }
       return {
         editable: parsed.config,
         resolved,
+        apps,
         secrets,
         ...(parsed.warnings ? { warnings: parsed.warnings } : {}),
       };
@@ -941,6 +961,7 @@ export class ConfigStore implements ConfigSource {
       }
     }
     this.resolvedValue = v.resolved;
+    this.appsValue = v.apps;
     this.cfg = { listen, dataDir, ...v.editable, secrets: v.secrets };
   }
 
