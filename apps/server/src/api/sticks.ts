@@ -55,6 +55,8 @@ import {
   stampStick,
   updateDrop,
 } from '../db/repo.js';
+import type { AppBrokers } from '../forge/app-brokers.js';
+import { GitHubAppError } from '../forge/github-app.js';
 import type { StickFetches } from '../images/fetches.js';
 import type { ImageMirror } from '../images/mirror.js';
 import { layoutFor } from '../images/serve.js';
@@ -64,6 +66,7 @@ import type { ForgePair } from '../outbox.js';
 import { buildPayload, egressFor, ownZoneSecrets } from '../payloads.js';
 import { applyResult, applyUsage, type ResultDeps } from '../results.js';
 import { dispatchGate, ingestRateLimit, rateLimitFromEvent } from '../usage.js';
+import { appInstallationFor, credentialFor, type ResolvedApps } from '../vault/resolution.js';
 
 const ArtifactBody = ArtifactUploadSchema.extend({ epoch: z.number() });
 
@@ -85,6 +88,13 @@ export interface StickRouteDeps {
   images?: Pick<ImageMirror, 'lookup' | 'status'>;
   /** Where the sticks' image downloads are recorded, for /sticks (issue #141). */
   fetches?: StickFetches;
+  /**
+   * The GitHub App brokers (spec §4.2, issue #224): with them, a zone whose author credential is
+   * an app pushes with a contents: write token minted per push. Absent, every push uses the PAT.
+   */
+  appBrokers?: AppBrokers;
+  /** The app entries as they resolved now (`ConfigStore.resolvedApps`); absent, none. */
+  resolvedApps?: () => ResolvedApps;
 }
 
 /** `<name>@sha256:<hex>`, the only form an image is asked for by. */
@@ -191,6 +201,31 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
   // The app runs with Fastify's logger off; the server's own log is stderr.
   const log = deps.log ?? ((line: string) => console.error(`[jumpmaster] ${line}`));
   const lastLogged = new Map<string, number>();
+
+  /**
+   * The push token each drop was last granted in app mode, so it can be revoked when the drop's
+   * reservation is released. In memory only: never in the DB, the vault, an audit row or a log. A
+   * token never revoked (restart, cancel, expiry) dies within its hour.
+   */
+  const heldTokens = new Map<string, { epoch: number; owner: string; token: string }>();
+
+  /** Revokes the drop's held push token, of any epoch, without waiting and without failing. */
+  const revokeHeld = (dropId: string): void => {
+    const held = heldTokens.get(dropId);
+    if (!held) return;
+    heldTokens.delete(dropId);
+    const broker = deps.appBrokers?.brokerFor(held.owner, 'author');
+    if (!broker) {
+      log(
+        `push token of drop ${dropId} not revoked: no author app broker (it expires in the hour)`,
+      );
+      return;
+    }
+    broker.revoke(held.token).catch((e: unknown) => {
+      const why = e instanceof GitHubAppError ? `HTTP ${e.status}` : 'an error';
+      log(`revoking the push token of drop ${dropId} failed (${why}); it expires in the hour`);
+    });
+  };
 
   /** Zones this stick can't run, with what it lacks for each (config order). */
   const incapable = (info: StickInfo, config: Config): LeaseSkip[] =>
@@ -609,6 +644,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       if (held) return reply.code(403).send(held);
       // A new attempt: a reservation left by one that died is no longer held against it.
       revokeGrants(db, drop.id, now());
+      revokeHeld(drop.id);
       const egress = egressFor(zone);
       const plan: PushPlan = {
         branch: agentBranch(item.issueNumber),
@@ -633,10 +669,53 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         return reply.code(checked.refused === 'reserved' ? 409 : 403).send(checked);
       }
       const { secrets } = config;
+      // App mode (§4.2): a contents: write token minted for this push, never the PAT instead.
+      let token = secrets.githubAuthorToken;
+      let credential: 'app' | 'pat' = 'pat';
+      if (deps.appBrokers) {
+        const resolution = credentialFor(zone, 'author', deps.resolvedApps?.() ?? new Map());
+        if (resolution.ref.kind === 'github-app') {
+          credential = 'app';
+          const appOwner = resolution.ref.owner;
+          const ids = appInstallationFor(zone, 'author');
+          const broker =
+            resolution.problem === 'undecryptable'
+              ? undefined
+              : deps.appBrokers.brokerFor(appOwner, 'author');
+          if (!broker || !ids) {
+            revokeGrants(db, drop.id, at);
+            return reply.code(403).send({ refused: 'app unavailable', retryable: true });
+          }
+          try {
+            const minted = await broker.mint({ ...ids, use: 'push' });
+            token = minted.token;
+          } catch (e) {
+            revokeGrants(db, drop.id, at);
+            const why = e instanceof GitHubAppError ? `HTTP ${e.status}` : 'an error';
+            log(`minting the push token of drop ${drop.id} failed (${why})`);
+            return reply.code(503).send({ refused: 'mint failed', retryable: true });
+          }
+          // Released while the mint was in flight (a new attempt, a result): this grant is void.
+          const stillReserved = db
+            .prepare(
+              'SELECT 1 FROM push_tokens WHERE drop_id = ? AND epoch = ? AND revoked_at IS NULL',
+            )
+            .get(drop.id, drop.epoch);
+          if (!stillReserved) {
+            broker.revoke(token).catch(() => {
+              log(`revoking a void push token of drop ${drop.id} failed; it expires in the hour`);
+            });
+            return reply.code(503).send({ refused: 'mint failed', retryable: true });
+          }
+          // A token left from an earlier grant goes before this one is held.
+          revokeHeld(drop.id);
+          heldTokens.set(drop.id, { epoch: drop.epoch, owner: appOwner, token });
+        }
+      }
       const [owner = '', name = ''] = zone.repo.split('/');
       const gateSecrets = ownZoneSecrets(secrets, zone.id);
       const grant: PushGrant = {
-        token: secrets.githubAuthorToken,
+        token,
         owner,
         name,
         branch: checked.branch,
@@ -651,7 +730,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
             dropSecrets({
               // The forge token the drop's agent container held (Ruling 1), and the author token.
               forgeToken: secrets.githubReadToken ?? secrets.githubAuthorToken,
-              authorToken: secrets.githubAuthorToken,
+              authorToken: token,
               claudeToken: secrets.claudeToken,
               ...(gateSecrets ? { gateSecrets } : {}),
             }),
@@ -666,7 +745,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
           via: 'system',
           action: 'push-token',
           target: drop.id,
-          detail: { drop: drop.id, epoch: drop.epoch, kind: drop.pushKind },
+          detail: { drop: drop.id, epoch: drop.epoch, kind: drop.pushKind, credential },
         },
         at,
         secretList(secrets),
@@ -681,6 +760,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       if (!drop) return reply;
       const at = now();
       revokeGrants(db, drop.id, at);
+      revokeHeld(drop.id);
       if (drop.state !== 'push_pending') {
         // A retry after a lost response: the drop left push_pending through this epoch's push.
         if (drop.pushKind !== null) return { state: drop.state };
@@ -773,6 +853,8 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         revokeGrants(db, d.id, at);
         return null;
       })();
+      // After the transaction commits, never inside it: the reservation is gone, so is its token.
+      if (refused === null) revokeHeld(drop.id);
       if (refused !== null) return reply.code(409).send({ refused });
       return { state: 'push_pending' };
     });
