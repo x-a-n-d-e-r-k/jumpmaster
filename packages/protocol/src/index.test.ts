@@ -8,7 +8,9 @@ import {
   DropResultSchema,
   EVENT_PREFIX,
   FEATURES_HEADER,
+  IMAGE_MIRROR_FEATURE,
   IMPLEMENT_OUTPUT_SCHEMA,
+  ImageFetchSchema,
   isCrewRole,
   PushGrantSchema,
   PushPayloadSchema,
@@ -401,6 +403,24 @@ describe('push protocol', () => {
     expect(STICK_CAPABILITIES).toContain('push-v1');
     expect(READY_LINE).toBe('JM_READY');
     expect(FEATURES_HEADER).toBe('x-jumpmaster-features');
+  });
+
+  test('image fetch progress (issue #141): the feature name and bytes done of total', () => {
+    expect(IMAGE_MIRROR_FEATURE).toBe('image-mirror-v1');
+    const ref = `ghcr.io/o/jumpmaster-trooper@sha256:${'a'.repeat(64)}`;
+    expect(ImageFetchSchema.parse({ ref, done: 5, total: 10 })).toEqual({
+      ref,
+      done: 5,
+      total: 10,
+    });
+    for (const bad of [
+      { ref, done: -1, total: 10 },
+      { ref, done: 1.5, total: 10 },
+      { ref: '', done: 0, total: 0 },
+      { ref: 'x'.repeat(513), done: 0, total: 0 },
+      { ref, done: 0 },
+    ])
+      expect(ImageFetchSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
   });
 
   test('push request: final needs expectSha; checkpoint forbids it', () => {
