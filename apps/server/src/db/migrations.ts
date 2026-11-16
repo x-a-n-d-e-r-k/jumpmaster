@@ -810,6 +810,33 @@ ALTER TABLE sticks ADD COLUMN docker_version TEXT;
 ALTER TABLE sticks ADD COLUMN free_bytes INTEGER;
 `;
 
+/**
+ * v29: issue comments (#182): the outbox may hold `comment_issue`. The same twelve-step rebuild
+ * of `outbox` as v21, rows and columns kept, with foreign keys off.
+ */
+const V29_SQL = `
+CREATE TABLE new_outbox (
+  id           TEXT PRIMARY KEY,
+  op_key       TEXT NOT NULL UNIQUE,
+  kind         TEXT NOT NULL CHECK (kind IN ('create_pr','post_review','merge',
+                 'create_issue','update_issue','set_labels','create_labels','comment_issue')),
+  work_item_id INTEGER REFERENCES work_items(id),
+  zone_id      TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL,
+  state        TEXT NOT NULL CHECK (state IN ('pending','done','unknown','failed')),
+  result_json  TEXT,
+  error        TEXT,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+INSERT INTO new_outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state, result_json,
+  error, created_at, updated_at)
+SELECT id, op_key, kind, work_item_id, zone_id, payload_json, state, result_json, error,
+  created_at, updated_at FROM outbox;
+DROP TABLE outbox;
+ALTER TABLE new_outbox RENAME TO outbox;
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -847,6 +874,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 26, sql: V26_SQL },
   { version: 27, sql: V27_SQL },
   { version: 28, sql: V28_SQL },
+  { version: 29, sql: V29_SQL, foreignKeysOff: true },
 ];
 
 /**

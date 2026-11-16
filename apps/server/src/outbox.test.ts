@@ -12,6 +12,8 @@ import {
 } from './db/repo.js';
 import type { TokenProvider } from './forge/github.js';
 import {
+  COMMENT_BODY_MAX,
+  commentMarker,
   type ForgePair,
   ForgePairs,
   forgeTokenFingerprint,
@@ -461,6 +463,105 @@ describe('runOp', () => {
     expect(f.state.reviews).toHaveLength(1);
     expect(f.state.reviews[0]).toMatchObject({ author: 'reviewer-bot', state: 'APPROVED', pr: 1 });
     expect(f.state.reviews[0]?.body.split('\n').pop()).toBe(opMarker(reviewOp().opKey));
+  });
+});
+
+describe('comment_issue', () => {
+  const MARK = '<!-- jm:comment:main:triage:1 -->';
+  const commentOp = (opKey = 'comment:main:triage:1', body = 'Triaged.') => ({
+    kind: 'comment_issue' as const,
+    opKey,
+    zoneId: 'main',
+    itemId: null,
+    payload: { number: 1, body, marker: MARK },
+  });
+  beforeEach(() => f.state.addIssue({ number: 1 }));
+
+  test('commentMarker builds the marker and rejects a key outside [a-z0-9:-]{1,80}', () => {
+    expect(commentMarker('jm', 'triage:179')).toBe('<!-- jm:comment:jm:triage:179 -->');
+    expect(() => commentMarker('jm', 'Bad Key')).toThrow(/key/);
+    expect(() => commentMarker('jm', '')).toThrow(/key/);
+    expect(() => commentMarker('jm', 'a'.repeat(81))).toThrow(/key/);
+    expect(() => commentMarker('jm', 'x -->')).toThrow(/key/);
+    expect(commentMarker('jm', 'a'.repeat(80))).toBe(`<!-- jm:comment:jm:${'a'.repeat(80)} -->`);
+  });
+
+  test('posts the body with the marker as the author', async () => {
+    expect(await runOp(db, forges, commentOp(), t0)).toMatchObject({
+      state: 'done',
+      result: { id: 1 },
+    });
+    expect(f.state.comments).toHaveLength(1);
+    expect(f.state.comments[0]).toMatchObject({
+      issue: 1,
+      author: 'author-bot',
+      body: `Triaged.\n\n${MARK}`,
+    });
+  });
+
+  test('the same op applied twice makes one createIssueComment call', async () => {
+    await runOp(db, forges, commentOp(), t0);
+    expect((await runOp(db, forges, commentOp(), t1)).state).toBe('done');
+    expect(calls('createIssueComment')).toHaveLength(1);
+    expect(f.state.comments).toHaveLength(1);
+  });
+
+  test('two ops with the same marker post one comment', async () => {
+    await runOp(db, forges, commentOp('comment:main:a'), t0);
+    expect(await runOp(db, forges, commentOp('comment:main:b'), t1)).toMatchObject({
+      state: 'done',
+      result: { id: 1 },
+    });
+    expect(calls('createIssueComment')).toHaveLength(1);
+    expect(f.state.comments).toHaveLength(1);
+  });
+
+  test('a crash after the POST (unknown) is resolved by the marker, never by posting again', async () => {
+    f.author.failNext('createIssueComment', '5xx-after-success');
+    expect((await runOp(db, forges, commentOp(), t0)).state).toBe('unknown');
+    expect(f.state.comments).toHaveLength(1);
+    expect((await runOp(db, forges, commentOp(), t1)).state).toBe('done');
+    expect(calls('createIssueComment')).toHaveLength(1);
+    expect(f.state.comments).toHaveLength(1);
+  });
+
+  test('resolveUnknown settles an unknown comment by its marker, with one comment', async () => {
+    f.author.failNext('createIssueComment', '5xx-after-success');
+    await runOp(db, forges, commentOp(), t0);
+    expect(await resolveUnknown(db, forges, 'main', t1, 30)).toBe(1);
+    expect(getOutbox(db, 'comment:main:triage:1')?.state).toBe('done');
+    expect(calls('createIssueComment')).toHaveLength(1);
+    expect(f.state.comments).toHaveLength(1);
+  });
+
+  test("another account's comment ending with the marker is not ours: ours is still posted", async () => {
+    f.state.comments.push({
+      id: 50,
+      issue: 1,
+      author: 'mallory',
+      body: `copied\n\n${MARK}`,
+      createdAt: t0.toISOString(),
+    });
+    expect(await runOp(db, forges, commentOp(), t0)).toMatchObject({ state: 'done' });
+    expect(calls('createIssueComment')).toHaveLength(1);
+    expect(f.state.comments.filter((c) => c.author === 'author-bot')).toHaveLength(1);
+  });
+
+  test('a body over 60000 characters is refused at enqueue, with no forge call and no row', async () => {
+    expect(COMMENT_BODY_MAX).toBe(60_000);
+    const long = commentOp('comment:main:long', 'x'.repeat(60_001));
+    await expect(runOp(db, forges, long, t0)).rejects.toThrow(/60000/);
+    expect(getOutbox(db, 'comment:main:long')).toBeUndefined();
+    expect([...f.author.calls, ...f.reviewer.calls]).toHaveLength(0);
+    const max = commentOp('comment:main:max', 'x'.repeat(60_000));
+    expect((await runOp(db, forges, max, t0)).state).toBe('done');
+    expect(f.state.comments).toHaveLength(1);
+  });
+
+  test('a marker not built by commentMarker is refused at enqueue', async () => {
+    const op = { ...commentOp(), payload: { number: 1, body: 'b', marker: 'nope' } };
+    await expect(runOp(db, forges, op, t0)).rejects.toThrow(/marker/);
+    expect(f.author.calls).toHaveLength(0);
   });
 });
 
