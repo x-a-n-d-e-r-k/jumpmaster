@@ -1121,6 +1121,110 @@ server's container) it says only to put the server behind HTTPS on an address th
 reach. Any other VPN or reverse proxy works as well, as long as `<address>/healthz` answers.
 Doctor check: `server.public-url`.
 
+## Add a stick
+
+A stick on another Linux machine (x86_64 or aarch64) installs with one pasted line. A typical case
+is a VPS from Vultr or Hostinger on your tailnet. The machine reaches only this server: it needs no
+registry or GitHub access, because cosign and the stick image come from the server's
+[image mirror](release.md#sticks-that-fetch-from-the-server).
+
+Before you start:
+
+- Set the address other machines reach this server at
+  ([Reaching the server from other machines](#reaching-the-server-from-other-machines)). Until it is
+  set, **Add a stick** is refused with a link to Settings.
+- The server runs a release image, so it has an image lock, and the mirror shows the stick image
+  as complete under **Images** on `/sticks`.
+
+**On the sticks page** (`/sticks`), under **Add a stick**:
+
+1. Give the stick a **name** of 1 to 64 letters, digits, dots, dashes or underscores. No other
+   stick or pending invite may have the same name.
+2. Set **Troopers** to a number from 1 to 64, or leave it empty for **Auto**. Auto runs as many
+   troopers as the machine allows (its `JM_MAX_SLOTS` ceiling, 4 by default). You can change the
+   count later on the same page.
+3. Press **Add a stick** and re-enter your passphrase (sudo).
+
+The result page appears once. It holds a **one-time code**, which:
+
+- works once;
+- expires after 24 hours;
+- is never shown again.
+
+The server keeps only the code's SHA-256. Neither the audit row (`stick.invite`) nor any log
+holds the code.
+
+The result page has two tabs:
+
+- **Paste on the machine.** Run this as a user who can sudo:
+
+  ```sh
+  curl -fsSL https://<address>/install/stick.sh | sudo sh -s -- jm_enroll_…
+  ```
+
+- **Paste when creating the VPS.** A `#cloud-config` for the provider's "user data" (cloud-init)
+  field. It installs Tailscale, joins your tailnet, installs Docker if the image has none, and runs
+  the same installer line. First replace `TS_AUTHKEY` with an auth key from your Tailscale admin
+  console (Settings, Keys). A one-off, pre-approved key is enough.
+
+**What the installer does** (the script is `GET /install/stick.sh`; it holds no secret):
+
+1. It refuses anything but Linux on x86_64 or aarch64.
+2. If Docker is missing, it asks `Install Docker with get.docker.com? [y/N]`. With no terminal, as
+   in cloud-init, add `--yes` before the code; without `--yes` it stops and says how to install
+   Docker.
+3. It downloads cosign and the stick image for the machine's platform from the server, sending the
+   code as `Authorization: Bearer` (from a file, never on a command line). The downloads don't use
+   up the code. cosign's SHA-256 is pinned in the script.
+4. It verifies the image offline with cosign, against this repository's release workflow, before
+   `docker load`. An image that doesn't verify is never loaded.
+5. It starts the stick as the `jm-stick` container. The container has `--restart unless-stopped`,
+   the Docker socket and the `jm-stick` state volume, and these settings:
+   - `JM_SERVER_URL`;
+   - `JM_ENROLL_CODE_FILE`: the code, written into the volume with mode 0600;
+   - `JM_IMAGE_SOURCE=server`;
+   - `JM_IMAGE_POLICY=signed`.
+6. It waits up to 60 seconds for the stick to enroll. Then it prints
+   `Enrolled as <name>. Back to your browser.`, or the enrollment error, and deletes the code file.
+   The stick also deletes the code file itself once it enrolls, so the spent code is gone even if
+   the 60-second wait ran out. If a stick already has the invite's name (for example, one that
+   enrolled with the join token after you added the invite), enrolling with the code is refused
+   and the invite stays unused: remove that stick, or cancel the invite and add the stick under
+   another name.
+
+**In the browser**, the sticks page lists the invite as `<name>: waiting for it to check in
+(expires <time>)` until the stick enrolls. You can **Cancel** the invite there (sudo; audited as
+`stick.invite_cancel`), and the code stops working at once. Once the stick enrolls, its row shows
+these stages in order, and the page refreshes every 3 seconds until the stick is live:
+
+1. **Fetching images**, with the download's progress.
+2. Its health: the Docker version, `egress-v1`, `image-verify-v1` and the free disk.
+3. **Live**.
+
+The stick gets the invite's name and trooper count. A code that is used, expired, cancelled or
+unknown is refused exactly as a wrong join token is (`401 {"error":"unauthorized"}`).
+
+**Remove a stick** with **Remove** on its row (sudo, and a confirmation), or with
+`jumpmaster ctl sticks remove <name-or-id>`. Removal:
+
+- revokes the stick's token, so its next request gets 401;
+- returns the drops it leased but never started to the queue, as for a lost stick;
+- is audited as `stick.remove`, by name.
+
+To remove its container and state volume from the machine, run:
+
+```sh
+curl -fsSL https://<address>/install/stick.sh | sudo sh -s -- --uninstall
+```
+
+`jumpmaster ctl sticks cancel <invite-name-or-id>` cancels an invite from the command line.
+
+The bundled Compose stick and any stick started with `JM_JOIN_TOKEN` enroll as before.
+
+**The signer.** The installer checks the stick image against the repository the server image was
+built from (its `JM_SOURCE_URL`). For a fork, set `JM_TRUSTED_SIGNER_REPOSITORY=<owner/name>` in the
+server's environment.
+
 ## UID
 
 The server, `bootstrap` and `init` run as `JM_UID:JM_GID` from `.env` (1000:1000 without it),

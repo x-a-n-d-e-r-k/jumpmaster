@@ -3,8 +3,9 @@ import { type ControlDeps, registerControlRoutes, stderrSetupMode } from './api/
 import { runningSince } from './api/secrets.js';
 import { registerStickRoutes, type StickRouteDeps } from './api/sticks.js';
 import { getArtifact, listArtifacts, readArtifact } from './artifacts.js';
+import { recordAudit } from './auth/audit.js';
 import { Backoff } from './auth/backoff.js';
-import { registerGuard, withCsrf } from './auth/guard.js';
+import { registerGuard, requireCsrf, withCsrf } from './auth/guard.js';
 import type { SetupMode } from './auth/operator.js';
 import { ALL_RULINGS, floorBriefings, listBriefings, listRulings } from './briefings.js';
 import { configReader } from './config/source.js';
@@ -31,6 +32,7 @@ import {
   listMergesSince,
   listObservations,
   listOutbox,
+  listPendingInvites,
   listSticks,
   listUsageWindows,
   listWorkItems,
@@ -45,10 +47,19 @@ import { fableStatus } from './fable.js';
 import type { Forge } from './forge/github.js';
 import { getGoals } from './goals.js';
 import { StickFetches } from './images/fetches.js';
+import { createInvite, inviteProblem } from './install/invite.js';
+import { type InstallRouteDeps, registerInstallRoutes } from './install/routes.js';
+import { cloudInit, installLine } from './install/stick-sh.js';
 import { missingFor, zoneRequirements } from './leases.js';
 import { registerMcpRoute } from './mcp/server.js';
 import type { ForgePair } from './outbox.js';
-import { publicOrigin, type ReachDeps, type TailscaleDeps } from './reach.js';
+import {
+  PUBLIC_URL_NEEDED,
+  PUBLIC_URL_PAGE,
+  publicOrigin,
+  type ReachDeps,
+  type TailscaleDeps,
+} from './reach.js';
 import { buildStatus } from './status.js';
 import { lastSyncResult } from './sync.js';
 import { registerAuthPages } from './ui/auth-pages.js';
@@ -77,7 +88,7 @@ import {
 } from './ui/pages.js';
 import { claudeTokenDays, registerSettingsPages } from './ui/settings.js';
 import { registerSetupPages, wizardActive } from './ui/setup.js';
-import { renderSticks, type StickRow } from './ui/sticks.js';
+import { renderInviteResult, renderSticks, type StickRow } from './ui/sticks.js';
 import { zoneTextNamer } from './ui/zone-name.js';
 import { registerZonesPages } from './ui/zones.js';
 import { dispatchGate } from './usage.js';
@@ -209,6 +220,10 @@ export function createApp(
     version?: string;
     /** The Check's fetch and the tailscale CLI lookup (tests inject both). */
     reach?: ReachDeps & { tailscale?: TailscaleDeps };
+    /** The stick installer's signer and cosign (issue #138); defaults from the environment. */
+    install?: Pick<InstallRouteDeps, 'signerRepository' | 'cosignDir' | 'cosignSha256'>;
+    /** Where an invite's code is registered for the log scrub (default the server's set). */
+    scrub?: { add(secret: string): void };
   },
 ): FastifyInstance {
   const app = Fastify({ logger: false });
@@ -237,6 +252,14 @@ export function createApp(
   registerStickRoutes(app, { ...deps, fetches });
   registerControlRoutes(app, { ...deps, setup, backoff });
   registerMcpRoute(app, deps);
+  // The stick installer (issue #138): the script, cosign and the stick image, at publicUrl.
+  registerInstallRoutes(app, {
+    db: deps.db,
+    config: deps.config,
+    now: deps.now,
+    ...(deps.images ? { images: deps.images } : {}),
+    ...deps.install,
+  });
   // Other machines check the address they reach this server at (issue #139): no auth, any Host,
   // and `{ ok, version }` only: no config, counts or names.
   const version = deps.version ?? (process.env.JM_RELEASE_VERSION || 'dev');
@@ -292,14 +315,69 @@ export function createApp(
           reported: s.maxSlots !== null,
           running: liveDropsOn(db, s.id),
           ...(fetching ? { fetching } : {}),
+          dockerVersion: s.dockerVersion,
+          freeBytes: s.freeBytes,
         };
       }),
+      pending: listPendingInvites(db, deps.now()),
       zones: config.dropZones,
       now: deps.now(),
       ...(publicOrigin(config) ? { publicUrl: publicOrigin(config) as string } : {}),
       ...(deps.images ? { images: deps.images.status() } : {}),
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
+  });
+
+  // Add a stick (issue #138): a session with sudo makes a one-time code, shown once on the page
+  // this answers with (never cached). A refusal is JSON for the form to show.
+  app.post('/sticks/add', async (req, reply) => {
+    const p = req.principal;
+    if (!p || !requireCsrf(req, p))
+      return reply.code(403).send({ error: 'missing or wrong x-jm-csrf header' });
+    if (!p.sudo)
+      return reply.code(403).send({
+        error: 'adding a stick shows a one-time code, so it needs sudo: re-enter the passphrase',
+        sudo: 'required',
+      });
+    const config = cfg(req);
+    const serverUrl = publicOrigin(config);
+    if (!serverUrl)
+      return reply.code(409).send({
+        error: `${PUBLIC_URL_NEEDED} first: Settings, Other machines (${PUBLIC_URL_PAGE})`,
+        settings: PUBLIC_URL_PAGE,
+      });
+    const body = (req.body ?? {}) as { name?: unknown; slots?: unknown };
+    const request = {
+      name: typeof body.name === 'string' ? body.name : '',
+      slots: body.slots === 'auto' ? ('auto' as const) : Number(body.slots),
+    };
+    const at = deps.now();
+    const problem = inviteProblem(deps.db, request, at);
+    if (problem) return reply.code(400).send({ error: problem });
+    const { invite, code } = createInvite(deps.db, request, at, deps.scrub);
+    // The name, never the code (which is scrubbed here too, should it ever reach a field).
+    recordAudit(
+      deps.db,
+      {
+        via: p.via,
+        action: 'stick.invite',
+        target: invite.id,
+        detail: { name: invite.name, slots: invite.slots ?? 'auto', expiresAt: invite.expiresAt },
+      },
+      at,
+      [code],
+    );
+    const html = renderInviteResult({
+      name: invite.name,
+      slots: invite.slots,
+      expiresAt: invite.expiresAt,
+      line: installLine(serverUrl, code),
+      cloudInit: cloudInit(serverUrl, code),
+    });
+    return reply
+      .header('cache-control', 'no-store')
+      .type('text/html; charset=utf-8')
+      .send(withCsrf(req, html));
   });
 
   app.get('/', async (req, reply) => {

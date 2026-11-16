@@ -1003,7 +1003,6 @@ test('v26 adds the trooper counts, unset on every existing stick: it runs its en
 
 test('v27 adds usage_windows, empty, keyed by window', () => {
   const db = openDb(dbAt(26, () => {}));
-  expect(MIGRATIONS.at(-1)?.version).toBe(27);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(db.prepare('SELECT * FROM usage_windows').all()).toEqual([]);
   db.exec(
@@ -1014,5 +1013,37 @@ test('v27 adds usage_windows, empty, keyed by window', () => {
       "INSERT INTO usage_windows (key, utilization, resets_at, observed_at) VALUES ('seven_day_fable', 0.5, NULL, 'b')",
     ),
   ).toThrow(/UNIQUE|PRIMARY/);
+  db.close();
+});
+
+test("v28 adds stick invites and the sticks' removal, Auto count and health, unset on every existing stick", () => {
+  const f = dbAt(27, (raw) => {
+    raw.exec(
+      `INSERT INTO sticks (id, name, token_hash, slots, created_at) VALUES ('s1', 'n', 'h', 2, 'a')`,
+    );
+  });
+  const db = openDb(f);
+  expect(MIGRATIONS.at(-1)?.version).toBe(28);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(
+    db
+      .prepare(
+        'SELECT auto_slots AS a, removed_at AS r, docker_version AS d, free_bytes AS b FROM sticks',
+      )
+      .all(),
+  ).toEqual([{ a: 0, r: null, d: null, b: null }]);
+  db.exec(
+    `INSERT INTO stick_invites (id, name, slots, code_hash, created_at, expires_at)
+     VALUES ('i1', 'vps-1', NULL, 'hash', 'a', 'b')`,
+  );
+  expect(
+    db.prepare('SELECT name, slots, used_at AS u, stick_id AS s FROM stick_invites').all(),
+  ).toEqual([{ name: 'vps-1', slots: null, u: null, s: null }]);
+  expect(() =>
+    db.exec(
+      `INSERT INTO stick_invites (id, name, slots, code_hash, created_at, expires_at)
+       VALUES ('i2', 'vps-2', NULL, 'hash', 'a', 'b')`,
+    ),
+  ).toThrow(/UNIQUE/);
   db.close();
 });

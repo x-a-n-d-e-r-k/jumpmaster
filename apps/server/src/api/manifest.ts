@@ -185,6 +185,16 @@ export const CONTROL_ROUTES: ControlRoute[] = [
     path: '/api/control/sticks/:id/slots',
     ctl: 'ctl sticks slots kidney-shadow 2',
   },
+  {
+    method: 'POST',
+    path: '/api/control/sticks/:id/remove',
+    ctl: 'ctl sticks remove kidney-shadow',
+  },
+  {
+    method: 'POST',
+    path: '/api/control/sticks/invites/:id/cancel',
+    ctl: 'ctl sticks cancel vps-1',
+  },
   // Kill
   { method: 'POST', path: '/api/control/kill', ctl: 'ctl kill', also: ['ctl unkill'] },
 ];
@@ -332,7 +342,12 @@ export const CTL_VERBS: { verb: string; page: Page; forms: string[] }[] = [
   {
     verb: 'sticks',
     page: 'Sticks',
-    forms: ['ctl sticks [--json]', 'ctl sticks slots <name-or-id> <n>'],
+    forms: [
+      'ctl sticks [--json]',
+      'ctl sticks slots <name-or-id> <n>',
+      'ctl sticks remove <name-or-id>',
+      'ctl sticks cancel <invite-name-or-id>',
+    ],
   },
   { verb: 'kill', page: 'Kill', forms: ['ctl kill'] },
   { verb: 'unkill', page: 'Kill', forms: ['ctl unkill'] },
