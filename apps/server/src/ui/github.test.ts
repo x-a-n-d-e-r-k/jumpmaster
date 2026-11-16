@@ -220,9 +220,10 @@ describe('the GitHub page of a zone', () => {
     expect(r.body).toContain('href="/setup/forge"');
   });
 
-  test('home and the doctor page link each zone’s GitHub page', async () => {
+  test('home links each zone’s page, which links its GitHub page, as the doctor page does', async () => {
     const w = await world();
-    expect((await w.get('/')).body).toContain('href="/zones/demo/github"');
+    expect((await w.get('/')).body).toContain('href="/zones/demo"');
+    expect((await w.get('/zones/demo')).body).toContain('href="/zones/demo/github"');
     expect((await w.get('/doctor')).body).toContain('href="/zones/demo/github"');
   });
 });

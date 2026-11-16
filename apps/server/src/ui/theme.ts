@@ -194,6 +194,27 @@ td:last-child>a+a{margin-left:.75rem}
 td.num{font-variant-numeric:tabular-nums;white-space:nowrap}
 td>code:first-child{white-space:nowrap}
 .card td:first-child{white-space:nowrap}
-.card table+*{margin-top:1.75rem}.card .quick{margin-bottom:0}`;
+.card table+*{margin-top:1.75rem}.card .quick{margin-bottom:0}
+.totals{display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(min(100%,7.5rem),1fr));margin:0 0 1rem}
+.tile{display:flex;flex-direction:column;gap:.125rem;min-width:0;padding:.625rem .75rem;border-radius:12px;background:var(--bg-white-0);box-shadow:var(--shadow-xs),inset 0 0 0 1px var(--stroke-soft-200);color:var(--text-sub-600);font-weight:400}
+.tile:hover{background:var(--bg-weak-50);text-decoration:none}
+.tile b{font:500 1.25rem/1.75rem var(--font-sans);font-variant-numeric:tabular-nums;color:var(--text-strong-950)}
+.tile span{font-size:.75rem;line-height:1rem;overflow-wrap:anywhere}
+.zone-card .tiles{display:grid;gap:.5rem;grid-template-columns:repeat(4,minmax(0,1fr))}
+.zone-card .tiles .tile{box-shadow:none;background:var(--bg-weak-50);padding:.5rem}
+@media (max-width:420px){.zone-card .tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.zone-card>h2 a{color:var(--text-strong-950);overflow-wrap:anywhere}
+.card-state{margin-left:auto;font:500 .6875rem/1rem var(--font-sans);letter-spacing:.06em;text-transform:uppercase;color:var(--text-soft-400)}
+.zone-card[data-state=needs-you]{box-shadow:var(--shadow-xs),inset 0 0 0 1px var(--warning-light),inset 4px 0 0 var(--warning-base)}
+.zone-card[data-state=needs-you] .card-state{color:var(--warning-base)}
+.zone-card[data-state=blocked]{box-shadow:var(--shadow-xs),inset 0 0 0 1px var(--error-light),inset 4px 0 0 var(--error-base)}
+.zone-card[data-state=blocked] .card-state{color:var(--error-base)}
+.zone-card[data-state=working] .card-state{color:var(--information-base)}
+.zone-card ul.blocked{margin:.75rem 0 0;padding-left:1.25rem}
+.zone-card .needs{margin:.75rem 0 0;font-weight:500}
+.zone-card p.muted{margin:.75rem 0 0}.zone-card a.muted{color:var(--text-sub-600);font-weight:400}
+details.sticks{margin:0 0 1.5rem}
+details.sticks>summary{cursor:pointer;font-weight:500}
+details.sticks[open]>summary{margin-bottom:.75rem}`;
 
 export const STYLE = TOKENS + BASE + SHELL + FLOOR;
