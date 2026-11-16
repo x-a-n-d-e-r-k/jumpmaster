@@ -113,6 +113,9 @@ case $1 in -s) echo "\${UNAME_S:-Linux}" ;; -m) echo "\${UNAME_M:-x86_64}" ;; es
   id: `#!/bin/sh
 echo "\${ID_U:-0}"
 `,
+  chown: `#!/bin/sh
+echo "chown $*" >>"$LOG"
+`,
   curl: `#!/bin/sh
 echo "curl $*" >>"$LOG"
 out=
@@ -389,6 +392,28 @@ describe('the installer script', () => {
       expect(stick).toContain('-e JM_IMAGE_POLICY=signed');
     });
 
+    test('under sudo it hands the work directory to the user Docker Desktop reads files as, before cosign runs', () => {
+      const w = world();
+      const r = w.run([CODE], { ...MAC, ID_U: '0', SUDO_UID: '501', SUDO_GID: '20' });
+      expect(r.stderr).toBe('');
+      expect(r.status).toBe(0);
+      const lines = r.log.split('\n');
+      const chown = lines.findIndex((l) =>
+        new RegExp(`^chown -R 501:20 ${w.work}/tmp\\.\\w+$`).test(l),
+      );
+      const runCosign = lines.findIndex(
+        (l) => l.startsWith('docker run ') && l.includes(' /cosign '),
+      );
+      expect(chown).toBeGreaterThanOrEqual(0);
+      expect(runCosign).toBeGreaterThan(chown);
+    });
+
+    test('without sudo it changes no owner', () => {
+      const r = world().run([CODE], MAC);
+      expect(r.status).toBe(0);
+      expect(r.log).not.toMatch(/^chown /m);
+    });
+
     test('without Docker it points at Docker Desktop and never runs get.docker.com, even with --yes', () => {
       const w = world({ docker: false });
       const r = w.run(['--yes', CODE], MAC);
@@ -412,6 +437,12 @@ describe('the installer script', () => {
     expect(r.status).toBe(0);
     expect(r.log).toContain(`mode 600 ${CODE}`);
     expect(existsSync(join(w.voldir, 'enroll_code'))).toBe(false);
+  });
+
+  test('on Linux under sudo it changes no owner', () => {
+    const r = world().run([CODE], { SUDO_UID: '1000', SUDO_GID: '1000' });
+    expect(r.status).toBe(0);
+    expect(r.log).not.toMatch(/^chown /m);
   });
 
   test('Linux still requires root', () => {

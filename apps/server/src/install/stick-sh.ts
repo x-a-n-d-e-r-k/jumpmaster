@@ -360,6 +360,11 @@ while read -r b; do
   home=$(mktemp -d "$TMP/cosign-home.XXXXXX")
   rc=0
   if [ "$os" = Darwin ]; then
+    # Docker Desktop reads shared files as the user running it, not as root: under sudo, the
+    # work directory (0700) goes to that user, or the container can't open it.
+    if [ "$(id -u)" = 0 ] && [ -n "\${SUDO_UID:-}" ]; then
+      chown -R "$SUDO_UID:\${SUDO_GID:-$SUDO_UID}" "$TMP" || die "could not hand $TMP to the user Docker Desktop runs as"
+    fi
     set -- docker run --rm --network none -v "$TMP:$TMP" -e "HOME=$home" -e "TUF_ROOT=$home" "$COSIGN_IMAGE" /cosign
   else
     set -- "$TMP/cosign"
