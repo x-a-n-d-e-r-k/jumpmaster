@@ -15,8 +15,9 @@ import { getGoals } from '../goals.js';
 import type { ForgePair } from '../outbox.js';
 import type { CrewInputJson } from '../payloads.js';
 import { dispatchGate, gateQueuesCrew } from '../usage.js';
+import { crewIssueSlots } from './actions.js';
 import { PROMOTE_OPTIONS, subjectOf } from './flush.js';
-import { crewLeadInput, diagnoseInput, refuteInput } from './inputs.js';
+import { crewLeadInput, diagnoseInput, refuteInput, triageInput } from './inputs.js';
 
 export type { CrewInputJson } from '../payloads.js';
 
@@ -40,8 +41,8 @@ export function requestCrewCycle(zoneId: string, now: Date): void {
 
 /**
  * The zone's next crew work, in order: diagnose an open parked briefing not yet diagnosed, refute a
- * staged crew issue whose current body is unrefuted (within `maxRefute`), then the lead cycle when
- * it is due.
+ * staged crew issue whose current body is unrefuted (within `maxRefute`), triage the oldest open
+ * triage request (within `maxTriage`, with a slot free), then the lead cycle when it is due.
  */
 export function nextCrewWork(db: Db, zone: DropZoneConfig, now: Date): CrewWork | null {
   const parked = db
@@ -93,6 +94,9 @@ export function nextCrewWork(db: Db, zone: DropZoneConfig, now: Date): CrewWork 
     );
   }
 
+  const triage = nextTriage(db, zone, now);
+  if (triage !== null) return { role: 'triage', requestId: triage };
+
   const last = db
     .prepare(
       `SELECT created_at AS at FROM drops WHERE drop_zone_id = ? AND role = 'crew-lead'
@@ -113,6 +117,28 @@ export function nextCrewWork(db: Db, zone: DropZoneConfig, now: Date): CrewWork 
   const requested = cycleRequests.get(zone.id);
   if (ruled || (requested !== undefined && requested > last.at)) return { role: 'crew-lead' };
   return null;
+}
+
+/**
+ * The oldest open triage request with attempts left, if the zone is active, its crew on and a
+ * crew-issue slot free. A request waiting on Command comes back to open once its briefing is ruled.
+ */
+function nextTriage(db: Db, zone: DropZoneConfig, now: Date): number | null {
+  if (!zone.crew?.enabled) return null;
+  db.prepare(
+    `UPDATE triage_requests SET state = 'open', updated_at = ?
+       WHERE zone_id = ? AND state = 'waiting'
+         AND briefing_id IN (SELECT briefing_id FROM rulings WHERE zone_id = ?)`,
+  ).run(now.toISOString(), zone.id, zone.id);
+  if (getZoneMode(db, zone.id, zone.mode) !== 'active') return null;
+  if (crewIssueSlots(db, zone) < 1) return null;
+  const row = db
+    .prepare(
+      `SELECT id FROM triage_requests WHERE zone_id = ? AND state = 'open' AND attempts < ?
+       ORDER BY id LIMIT 1`,
+    )
+    .get(zone.id, zone.crew.maxTriage) as { id: number } | undefined;
+  return row?.id ?? null;
 }
 
 /** Crew drops created in the trailing 24 hours, not counting lost or rate-limited ones (nor doctor drops). */
@@ -140,7 +166,9 @@ const observeDetail = (w: CrewWork): string =>
     ? `briefing ${w.briefingId}`
     : w.role === 'refute'
       ? `crew issue ${w.crewIssueId}`
-      : 'lead cycle';
+      : w.role === 'triage'
+        ? `triage request ${w.requestId}`
+        : 'lead cycle';
 
 /**
  * Queues the zone's next crew drop, if any, with its rendered input. Runs only with the crew
@@ -180,7 +208,9 @@ export async function enqueueCrew(
         ? await crewLeadInput(db, forges, zone, pass, now, id)
         : work.role === 'refute'
           ? refuteInput(db, zone, work.crewIssueId, id)
-          : diagnoseInput(db, zone, work.itemId, id);
+          : work.role === 'triage'
+            ? triageInput(db, zone, work.requestId, id)
+            : diagnoseInput(db, zone, work.itemId, id);
   } catch (err) {
     // A forge read failed while gathering input: try again next pass.
     console.warn(`zone ${zone.id}: crew ${work.role} input failed: ${String(err)}`);

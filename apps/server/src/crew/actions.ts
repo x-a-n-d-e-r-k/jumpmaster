@@ -16,6 +16,16 @@ export type CrewActionInput = Partial<Pick<CrewLeadOutput, 'fileIssues' | 'brief
 
 export type ApplyReport = { filed: number[]; briefings: number[]; refused: string[] };
 
+/**
+ * How a triage drop files through the same path as the lead: `objective` is the one objective
+ * (`triage:#N`) its issues may carry besides the ladder's, and `allOrNothing` files no issue at all
+ * when any is refused.
+ */
+export type ApplyOptions = { objective?: string; allOrNothing?: boolean };
+
+/** Thrown inside the transaction to roll back an all-or-nothing batch with a refusal. */
+class Refused extends Error {}
+
 /** Crew issues that hold a slot: not yet promoted, and not rejected or failed. */
 const OPEN_STATES: CrewIssueState[] = ['filing', 'staged', 'promote_held', 'promoting', 'revising'];
 
@@ -81,11 +91,12 @@ export function applyCrewActions(
   input: CrewActionInput,
   source: CrewSource,
   now: Date,
+  opts: ApplyOptions = {},
 ): ApplyReport {
   const issues = input.fileIssues ?? [];
   const briefs = input.briefings ?? [];
   const report: ApplyReport = { filed: [], briefings: [], refused: [] };
-  return db.transaction(() => {
+  const run = db.transaction((): ApplyReport => {
     const mode = getZoneMode(db, zone.id, zone.mode);
     const blocked = isKilled(db)
       ? 'kill switch is engaged'
@@ -102,6 +113,7 @@ export function applyCrewActions(
 
     const goals = getGoals(db, zone.id)?.parse;
     const ladder = new Set(goals?.ok ? goals.objectives.map((o) => o.key) : []);
+    if (opts.objective !== undefined) ladder.add(opts.objective);
     const keyUsed = db.prepare('SELECT 1 FROM crew_issues WHERE zone_id = ? AND key = ?');
     const titleUsed = db.prepare(
       `SELECT 1 FROM crew_issues WHERE zone_id = ? AND objective = ? AND title_norm = ?
@@ -155,6 +167,7 @@ export function applyCrewActions(
         }),
       );
     }
+    if (opts.allOrNothing && report.refused.length > 0) throw new Refused();
 
     // An MCP briefing is the assistant's, under its own `mcp:` prefix: it can never update a
     // crew-drop briefing (`crew:`) or a server one, and Command can tell it from the crew's.
@@ -182,5 +195,12 @@ export function applyCrewActions(
       );
     }
     return report;
-  })();
+  });
+  try {
+    return run();
+  } catch (e) {
+    if (!(e instanceof Refused)) throw e;
+    // Rolled back: nothing filed, nothing briefed.
+    return { filed: [], briefings: [], refused: report.refused };
+  }
 }

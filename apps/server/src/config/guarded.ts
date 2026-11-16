@@ -378,6 +378,7 @@ export const NOT_GUARDED: FreePath[] = [
   ),
   free('dropZones[].crew.maxStaged', PACE),
   free('dropZones[].crew.maxRefute', PACE),
+  free('dropZones[].crew.maxTriage', PACE),
 ];
 
 /**

@@ -837,6 +837,83 @@ DROP TABLE outbox;
 ALTER TABLE new_outbox RENAME TO outbox;
 `;
 
+/**
+ * v30: the triage role (#184). `triage_requests` holds one request per issue text
+ * (`body_sha`), and `drops` is rebuilt so `triage` is a crew role: the work-item CHECK and the
+ * one-active-crew-drop index both name it. Rows and columns kept, foreign keys off.
+ */
+const V30_SQL = `
+CREATE TABLE triage_requests (
+  id            INTEGER PRIMARY KEY,
+  zone_id       TEXT NOT NULL,
+  issue_number  INTEGER NOT NULL,
+  title         TEXT NOT NULL,
+  body          TEXT NOT NULL,
+  body_sha      TEXT NOT NULL,
+  author        TEXT NOT NULL,
+  state         TEXT NOT NULL CHECK (state IN ('open','waiting','done','failed')),
+  outcome       TEXT CHECK (outcome IN ('split','questions','not-agent-work')),
+  reason        TEXT,
+  attempts      INTEGER NOT NULL DEFAULT 0,
+  briefing_id   INTEGER,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  UNIQUE (zone_id, issue_number, body_sha)
+);
+
+CREATE TABLE new_drops (
+  id               TEXT PRIMARY KEY,
+  drop_zone_id     TEXT NOT NULL REFERENCES drop_zones(id),
+  work_item_id     INTEGER REFERENCES work_items(id),
+  role             TEXT NOT NULL,
+  state            TEXT NOT NULL
+                   CHECK (state IN ('queued','leased','running','push_pending','succeeded','failed','lost','cancelled')),
+  stick_id         TEXT REFERENCES sticks(id),
+  epoch            INTEGER NOT NULL DEFAULT 0,
+  lease_expires_at TEXT,
+  prompt_version   TEXT,
+  image            TEXT,
+  result_json      TEXT,
+  created_at       TEXT NOT NULL,
+  started_at       TEXT,
+  finished_at      TEXT,
+  fingerprint      TEXT,
+  pr_number        INTEGER,
+  head_sha         TEXT,
+  input_json       TEXT,
+  charged_key      TEXT,
+  hard_cancel      INTEGER NOT NULL DEFAULT 0,
+  requested_model  TEXT,
+  served_model     TEXT,
+  push_kind        TEXT CHECK (push_kind IN ('final','checkpoint','salvage')),
+  push_expect_sha  TEXT,
+  push_deadline    TEXT,
+  running_at       TEXT,
+  usage_applied    INTEGER NOT NULL DEFAULT 0,
+  was_probe        INTEGER NOT NULL DEFAULT 0,
+  rate_limit_requeue INTEGER,
+  CHECK ((work_item_id IS NULL) = (role IN ('crew-lead','refute','diagnose','triage','doctor')))
+);
+INSERT INTO new_drops (id, drop_zone_id, work_item_id, role, state, stick_id, epoch, lease_expires_at,
+  prompt_version, image, result_json, created_at, started_at, finished_at, fingerprint, pr_number,
+  head_sha, input_json, charged_key, hard_cancel, requested_model, served_model, push_kind,
+  push_expect_sha, push_deadline, running_at, usage_applied, was_probe, rate_limit_requeue)
+SELECT id, drop_zone_id, work_item_id, role, state, stick_id, epoch, lease_expires_at,
+  prompt_version, image, result_json, created_at, started_at, finished_at, fingerprint, pr_number,
+  head_sha, input_json, charged_key, hard_cancel, requested_model, served_model, push_kind,
+  push_expect_sha, push_deadline, running_at, usage_applied, was_probe, rate_limit_requeue FROM drops;
+DROP TABLE drops;
+ALTER TABLE new_drops RENAME TO drops;
+CREATE UNIQUE INDEX one_active_drop
+  ON drops(work_item_id) WHERE state IN ('queued','leased','running','push_pending');
+CREATE UNIQUE INDEX one_active_crew_drop
+  ON drops(drop_zone_id) WHERE role IN ('crew-lead','refute','diagnose','triage')
+    AND state IN ('queued','leased','running','push_pending');
+CREATE UNIQUE INDEX one_active_doctor_drop
+  ON drops(drop_zone_id) WHERE role = 'doctor'
+    AND state IN ('queued','leased','running','push_pending');
+`;
+
 export type Migration = {
   version: number;
   sql: string;
@@ -875,6 +952,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 27, sql: V27_SQL },
   { version: 28, sql: V28_SQL },
   { version: 29, sql: V29_SQL, foreignKeysOff: true },
+  { version: 30, sql: V30_SQL, foreignKeysOff: true },
 ];
 
 /**

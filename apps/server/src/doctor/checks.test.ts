@@ -524,6 +524,7 @@ describe('forge checks', () => {
           maxStaged: 3,
           refutePromotes: false,
           maxRefute: 2,
+          maxTriage: 2,
         },
         protectedPaths: ['GOAL.md'],
       },
@@ -781,6 +782,7 @@ describe('zone checks', () => {
       maxStaged: 3,
       refutePromotes: false,
       maxRefute: 2,
+      maxTriage: 2,
     };
     expect((await world().run()).some((c) => c.id === 'zone.crew-cap')).toBe(false);
     const w = world({ zone: { crew, protectedPaths: ['GOAL.md'] } });

@@ -27,6 +27,7 @@ import {
   RoleSchema,
   STICK_CAPABILITIES,
   StickStartingSchema,
+  TriageOutputSchema,
   VerdictSchema,
 } from './index.js';
 
@@ -193,7 +194,7 @@ describe('crew roles', () => {
   const checkout = { number: 3, branch: 'agent/issue-7', headSha: 'abc' };
 
   test('isCrewRole and RoleSchema know the crew roles', () => {
-    expect(CREW_ROLES).toEqual(['crew-lead', 'refute', 'diagnose']);
+    expect(CREW_ROLES).toEqual(['crew-lead', 'refute', 'diagnose', 'triage']);
     expect(isCrewRole('refute')).toBe(true);
     expect(isCrewRole('review')).toBe(false);
     expect(RoleSchema.parse('diagnose')).toBe('diagnose');
@@ -264,6 +265,71 @@ describe('crew roles', () => {
     expect(
       parseCrewOutput('diagnose', { diagnosis: 'd', recommendation: 'merge', detail: '' }).ok,
     ).toBe(false);
+  });
+
+  describe('TriageOutputSchema', () => {
+    const child = {
+      key: 'hide-gauge',
+      title: 'Hide the overage gauge',
+      body: 'B',
+      priority: 'high',
+    };
+    const briefing = {
+      subject: 'fable usage',
+      decision: 'Drop the gauge, estimate it, or wait?',
+      why: 'w',
+      options: ['drop', 'estimate'],
+      recommendation: 'drop',
+      onHold: '#179',
+    };
+    const split = { summary: 's', outcome: 'split', children: [child, { ...child, key: 'b' }] };
+    const questions = { summary: 's', outcome: 'questions', briefing };
+    const notAgent = { summary: 's', outcome: 'not-agent-work', reason: 'a question' };
+    const ok = (v: unknown) => TriageOutputSchema.safeParse(v).success;
+
+    test('accepts the three valid shapes', () => {
+      expect(ok(split)).toBe(true);
+      expect(ok({ ...split, children: [child], briefing: undefined })).toBe(true);
+      expect(ok(questions)).toBe(true);
+      expect(ok({ ...questions, children: [] })).toBe(true);
+      expect(ok(notAgent)).toBe(true);
+      expect(parseCrewOutput('triage', notAgent)).toEqual({ ok: true, value: notAgent });
+    });
+
+    test('rejects every forbidden combination', () => {
+      for (const bad of [
+        { summary: 's', outcome: 'split' },
+        { ...split, children: [] },
+        { ...split, briefing },
+        { ...split, reason: 'r' },
+        { summary: 's', outcome: 'questions' },
+        { ...questions, children: [child] },
+        { ...questions, reason: 'r' },
+        { summary: 's', outcome: 'not-agent-work' },
+        { ...notAgent, children: [child] },
+        { ...notAgent, briefing },
+        { ...notAgent, outcome: 'maybe' },
+        { ...notAgent, extra: 1 },
+      ]) {
+        expect(ok(bad), JSON.stringify(bad)).toBe(false);
+      }
+    });
+
+    test('rejects a sixth child, a 121-character title and a bad key', () => {
+      const six = {
+        ...split,
+        children: Array.from({ length: 6 }, (_, n) => ({ ...child, key: `k${n}` })),
+      };
+      const r = parseCrewOutput('triage', six);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toMatch(/children/);
+      expect(ok({ ...split, children: [{ ...child, title: 'x'.repeat(121) }] })).toBe(false);
+      expect(ok({ ...split, children: [{ ...child, title: 'x'.repeat(120) }] })).toBe(true);
+      expect(ok({ ...split, children: [{ ...child, key: 'Bad Key' }] })).toBe(false);
+      expect(ok({ ...split, children: [{ ...child, body: 'x'.repeat(12001) }] })).toBe(false);
+      expect(ok({ ...questions, briefing: { ...briefing, options: ['one'] } })).toBe(false);
+      expect(ok({ ...notAgent, reason: 'x'.repeat(501) })).toBe(false);
+    });
   });
 
   test('extra properties are refused by the parser', () => {
