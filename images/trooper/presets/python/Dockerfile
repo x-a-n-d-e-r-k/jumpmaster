@@ -8,7 +8,7 @@
 # (images/images.test.ts checks the two agree; see docs/runbooks/release.md).
 ARG BASE=ghcr.io/x-a-n-d-e-r-k/jumpmaster-trooper@sha256:d317048b6ab4ad86d03f0d08f6a8f72e9104a0aea63f11d6a1bcb75872f684c2
 
-FROM node:24-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9 AS fetch
+FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS fetch
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*

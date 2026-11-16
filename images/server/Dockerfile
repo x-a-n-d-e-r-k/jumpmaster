@@ -8,7 +8,7 @@
 FROM --platform=linux/amd64 ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d AS cosign-amd64
 FROM --platform=linux/arm64 ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d AS cosign-arm64
 
-FROM node:24-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9 AS build
+FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS build
 # better-sqlite3 is compiled here from source against the image's own Node headers, so nothing
 # is downloaded outside npm's integrity-checked lockfile and no prebuilt binary runs.
 RUN apt-get update \
@@ -43,7 +43,7 @@ RUN cp /src/package.json /src/package-lock.json ./ \
  && node -e "new (require('better-sqlite3'))(':memory:').close()" \
  && chmod 0755 apps/server/dist/cli.js
 
-FROM node:24-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9
+FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 ARG SOURCE_URL
 LABEL org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.title="jumpmaster-server"
