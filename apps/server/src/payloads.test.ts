@@ -485,7 +485,7 @@ describe('renderFeedback', () => {
 describe('prompts', () => {
   test('promptVersions differ per role and are 12 hex', () => {
     const v = promptVersions();
-    expect(new Set(Object.values(v)).size).toBe(7);
+    expect(new Set(Object.values(v)).size).toBe(8);
     for (const x of Object.values(v)) expect(x).toMatch(/^[0-9a-f]{12}$/);
   });
   test('review.md names weakened tests as a blocker', () => {
