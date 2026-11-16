@@ -2017,3 +2017,40 @@ describe('image download progress on the lease (issue #141)', () => {
     expect(fetches.get(stickId, t0)).toBeUndefined();
   });
 });
+
+describe('a stick starting up reports it on the lease (issue #157)', () => {
+  const image = `ghcr.io/o/jumpmaster-trooper@sha256:${'a'.repeat(64)}`;
+  const leaseWith = (token: string, extra: Record<string, unknown>) =>
+    app.inject({
+      method: 'POST',
+      url: '/api/sticks/lease',
+      headers: bearer(token),
+      payload: { freeSlots: 0, capabilities: [], ...extra },
+    });
+
+  test('a lease carrying starting records it and marks the stick seen; null clears it', async () => {
+    const fetches = new StickFetches();
+    const { db } = setup({ queued: false, fetches });
+    const { stickId, stickToken } = await enroll();
+    expect(fetches.starting(stickId, t0)).toBeUndefined();
+    const res = await leaseWith(stickToken, { starting: { image } });
+    expect(res.statusCode).toBe(204);
+    expect(fetches.starting(stickId, t0)).toEqual({ image });
+    expect(getStick(db, stickId)?.lastSeenAt).not.toBeNull();
+    // A lease without the field leaves it; a download report is separate.
+    await leaseWith(stickToken, {});
+    expect(fetches.starting(stickId, t0)).toEqual({ image });
+    expect(fetches.get(stickId, t0)).toBeUndefined();
+    await leaseWith(stickToken, { starting: null });
+    expect(fetches.starting(stickId, t0)).toBeUndefined();
+  });
+
+  test('a malformed starting report is a 400', async () => {
+    const fetches = new StickFetches();
+    setup({ queued: false, fetches });
+    const { stickId, stickToken } = await enroll();
+    const res = await leaseWith(stickToken, { starting: { image: '' } });
+    expect(res.statusCode).toBe(400);
+    expect(fetches.starting(stickId, t0)).toBeUndefined();
+  });
+});
