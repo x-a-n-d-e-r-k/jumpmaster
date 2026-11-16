@@ -51,6 +51,8 @@ import {
   stampStick,
   updateDrop,
 } from '../db/repo.js';
+import type { ImageMirror } from '../images/mirror.js';
+import { layoutFor } from '../images/serve.js';
 import { heartbeat, leaseNextDrop, missingFor, zoneRequirements, zonesWaiting } from '../leases.js';
 import type { ForgePair } from '../outbox.js';
 import { buildPayload, egressFor, ownZoneSecrets } from '../payloads.js';
@@ -73,7 +75,12 @@ export interface StickRouteDeps {
   kick?: () => void;
   /** Where a refused lease is logged; defaults to the server's stderr log. */
   log?: (line: string) => void;
+  /** The image mirror (issue #140); absent, no image is served. */
+  images?: Pick<ImageMirror, 'lookup' | 'status'>;
 }
+
+/** `<name>@sha256:<hex>`, the only form an image is asked for by. */
+const IMAGE_REF = /^([a-z0-9]+(?:[._-][a-z0-9]+)*)@(sha256:[0-9a-f]{64})$/;
 
 /** A refusal is logged at most this often per stick, zone and reason. */
 const SKIP_LOG_MS = 60_000;
@@ -382,6 +389,30 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         }
       }
     });
+
+    // A release image from the server's mirror (issue #140), as an OCI layout tar for one
+    // platform, behind the same stick auth as the lease. Only the digests the current or the
+    // previous lock names are served; the stick verifies the signatures it carries.
+    scope.get<{ Params: { ref: string }; Querystring: { platform?: unknown } }>(
+      '/api/sticks/images/:ref/oci.tar',
+      async (req, reply) => {
+        const stick = authStick(req);
+        if (!stick) return reply.code(401).send({ error: 'unauthorized' });
+        const platform = req.query.platform;
+        if (typeof platform !== 'string' || platform === '')
+          return reply.code(400).send({ error: 'platform is required, as os/architecture' });
+        const m = IMAGE_REF.exec(req.params.ref);
+        if (!m || !deps.images) return reply.code(404).send({ error: 'not in the image lock' });
+        const answer = layoutFor(deps.images.lookup(m[1] as string, m[2] as string), platform);
+        if (!answer.ok) return reply.code(answer.status).send(answer.body);
+        reply.header('etag', answer.etag).header('cache-control', 'no-cache');
+        if (req.headers['if-none-match'] === answer.etag) return reply.code(304).send();
+        return reply
+          .header('content-type', 'application/x-tar')
+          .header('content-length', answer.size)
+          .send(answer.stream());
+      },
+    );
 
     scope.post<{ Params: { id: string } }>('/api/drops/:id/heartbeat', async (req, reply) => {
       const stick = authStick(req);

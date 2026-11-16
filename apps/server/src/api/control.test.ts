@@ -34,6 +34,7 @@ import {
   upsertWorkItem,
   zoneIsDrained,
 } from '../db/repo.js';
+import type { MirrorStatus } from '../images/mirror.js';
 import { intakeKey } from '../intake.js';
 import { AUTHOR_TOKEN, CLAUDE_TOKEN, NOW, world } from '../test/doctorWorld.js';
 import { fakeForgePair } from '../test/fakes.js';
@@ -346,7 +347,7 @@ describe('rule route', () => {
 });
 
 describe('doctor routes', () => {
-  function doctorApp() {
+  function doctorApp(o: { images?: { status(): MirrorStatus } } = {}) {
     const w = world();
     app = controlApp({
       db: w.db,
@@ -354,9 +355,19 @@ describe('doctor routes', () => {
       now: () => NOW,
       forgesFor: w.deps.forges,
       doctorEnv: w.deps.env,
+      ...(o.images ? { images: o.images } : {}),
     });
     return w;
   }
+
+  test('the doctor reports the image mirror the server runs (issue #140)', async () => {
+    doctorApp({ images: { status: () => ({ lock: false, images: [] }) } });
+    const ran = await post('/api/control/doctor', {});
+    const c = (ran?.json().run.checks as { id: string; status: string }[]).find(
+      (x) => x.id === 'server.image-mirror',
+    );
+    expect(c).toMatchObject({ status: 'info' });
+  });
 
   test('forge.labels offers the create action, which runs through the outbox as the author and is idempotent', async () => {
     const w = doctorApp();

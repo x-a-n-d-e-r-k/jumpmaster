@@ -419,6 +419,13 @@ describe('loadConfig', () => {
     ).toBe('rd');
   });
 
+  test('the registry read token (issue #140) is optional, passed through and scrubbed', () => {
+    expect(loadConfig(minimal, fullEnv).secrets.registryReadToken).toBeUndefined();
+    const c = loadConfig(minimal, { ...fullEnv, JM_REGISTRY_READ_TOKEN: 'reg-token-1' });
+    expect(c.secrets.registryReadToken).toBe('reg-token-1');
+    expect(secretList(c.secrets)).toContain('reg-token-1');
+  });
+
   test('modelFor falls back to zone model', () => {
     const zone = loadConfig(withZone({ models: { review: 'r' } }), fullEnv).dropZones[0];
     if (!zone) throw new Error('no zone');

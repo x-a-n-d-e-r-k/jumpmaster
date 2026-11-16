@@ -16,6 +16,7 @@ import { creditsPass } from './credits.js';
 import { openDb } from './db/open.js';
 import { reconcileZone } from './flow/reconcile.js';
 import { GitHubForge } from './forge/github.js';
+import { imageLockPath, startImageMirror } from './images/run.js';
 import { leaseExpirer } from './leases.js';
 import { type ForgePair, ForgePairs, markPendingUnknown } from './outbox.js';
 import { promptVersions } from './payloads.js';
@@ -158,6 +159,15 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
   const doctorForgesFor = timedForgesFor;
   const intakeForgesFor = timedForgesFor;
 
+  // The release images, mirrored for sticks in the background (issue #140): from the lock only,
+  // with the registry read token when the registry refuses anonymous access.
+  const images = startImageMirror({
+    dataDir: boot.dataDir,
+    lockPath: imageLockPath(env),
+    token: () => live.current().secrets.registryReadToken,
+    log,
+  });
+
   // The setup code goes to stderr alone on its line, unscrubbed and unprefixed (it is no
   // configured secret), naming the port actually bound.
   let bound = { host: boot.listen.host, port: boot.listen.port };
@@ -175,6 +185,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     now: () => new Date(),
     kick: () => void guardedPass(),
     log,
+    images: images.mirror,
   });
 
   const expireLeases = leaseExpirer(db, () => live.current().usage);
@@ -273,6 +284,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     store: live,
     async stop() {
       poll.stop();
+      images.stop();
       clearInterval(leaseTimer);
       await app.close();
       db.close();

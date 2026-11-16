@@ -435,6 +435,8 @@ export interface Config {
     /** Absent only when every zone is `starter`. */
     githubReviewerToken?: string;
     githubReadToken?: string;
+    /** The image mirror's registry read token (issue #140), when anonymous access is refused. */
+    registryReadToken?: string;
     joinToken: string;
     operatorToken: string;
     /** Per-zone values for gate steps only. Any PR's gate code can read them. */
@@ -872,6 +874,7 @@ export function assembleSecrets(
   }
   const reviewer = resolved.githubReviewerToken.value;
   const read = resolved.githubReadToken.value;
+  const registry = resolved.registryReadToken.value;
   return {
     claudeToken: resolved.claudeToken.value ?? '',
     githubAuthorToken: resolved.githubAuthorToken.value ?? '',
@@ -879,6 +882,7 @@ export function assembleSecrets(
     joinToken: machine.joinToken,
     operatorToken: machine.operatorToken,
     ...(read ? { githubReadToken: read } : {}),
+    ...(registry ? { registryReadToken: registry } : {}),
     ...(Object.keys(zoneValues).length > 0 ? { zoneSecrets: zoneValues } : {}),
   };
 }

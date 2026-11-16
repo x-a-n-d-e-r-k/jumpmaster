@@ -21,6 +21,7 @@ export const INSTALL_CREDENTIALS = [
   'githubAuthorToken',
   'githubReviewerToken',
   'githubReadToken',
+  'registryReadToken',
 ] as const;
 export type InstallCredential = (typeof INSTALL_CREDENTIALS)[number];
 /** The last form is a zone's gate secret (today's `JM_ZONE_SECRET_<ZONE>_<NAME>`). */
@@ -32,6 +33,7 @@ export const SECRET_FILES: Record<InstallCredential, string> = {
   githubAuthorToken: 'github_author_token',
   githubReviewerToken: 'github_reviewer_token',
   githubReadToken: 'github_read_token',
+  registryReadToken: 'registry_read_token',
 };
 
 /** The variable each install-wide credential is read from (`NAME` or `NAME_FILE`). */
@@ -40,6 +42,7 @@ export const CREDENTIAL_VARS: Record<InstallCredential, string> = {
   githubAuthorToken: 'JM_GITHUB_AUTHOR_TOKEN',
   githubReviewerToken: 'JM_GITHUB_REVIEWER_TOKEN',
   githubReadToken: 'JM_GITHUB_READ_TOKEN',
+  registryReadToken: 'JM_REGISTRY_READ_TOKEN',
 };
 
 /** What a person reads beside each name. */
@@ -48,6 +51,8 @@ export const CREDENTIAL_ROLES: Record<InstallCredential, string> = {
   githubAuthorToken: 'GitHub author token: opens and merges the agent PRs',
   githubReviewerToken: 'GitHub reviewer token: posts reviews (two-bot zones)',
   githubReadToken: 'GitHub read token: lets review drops read a private repository',
+  registryReadToken:
+    'Registry read token: lets the server mirror the release images from a private registry',
 };
 
 /** Shorter gate secrets can't be redacted without mangling ordinary output. */
@@ -358,7 +363,8 @@ function refusalOf(e: unknown): { ok: false; status: number | null; permission?:
 
 /**
  * Tests a value before it is stored: a forge author or reviewer token for its login and its
- * access to every zone's repository; the read token for its login; the Claude token by shape only
+ * access to every zone's repository; the read token for its login; the registry read token by its
+ * length (the image mirror is its live proof); the Claude token by shape only
  * (the doctor drop is the live proof); a gate secret by its length. A failure returns the HTTP
  * status and the permission GitHub names, and nothing else: no message, no body, no value.
  */
@@ -379,6 +385,11 @@ export async function testCredential(
     return value.length >= MIN_GATE_SECRET
       ? { ok: true, result: 'length ok' }
       : { ok: false, status: null, problem: 'a gate secret is at least 8 characters' };
+  if (name === 'registryReadToken')
+    // Not a forge token: the registry is the judge, and the image mirror asks it (Sticks, Images).
+    return value.length >= MIN_GATE_SECRET
+      ? { ok: true, result: 'stored: the image mirror is the live proof (Sticks, Images)' }
+      : { ok: false, status: null, problem: 'a registry token is at least 8 characters' };
   const first = deps.zones[0];
   const repo = first?.repo ?? 'octocat/Hello-World';
   try {

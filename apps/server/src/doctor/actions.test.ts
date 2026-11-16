@@ -49,6 +49,14 @@ describe('the action table', () => {
     expect([...new Set(listed)].sort()).toEqual([...CHECK_IDS].sort());
   });
 
+  test('server.image-mirror (issue #140) links to the images on the sticks page', () => {
+    expect(actionFor(fail('server.image-mirror'), { pages: PAGES_M45A })).toEqual({
+      kind: 'app',
+      label: 'See the images on Sticks',
+      href: '/sticks',
+    });
+  });
+
   test('the docs fallback is the check own runbook anchor, or the anchor named by the check', () => {
     expect(actionFor(fail('config.uid'), { pages: PAGES_M45A })).toEqual({
       kind: 'docs',
