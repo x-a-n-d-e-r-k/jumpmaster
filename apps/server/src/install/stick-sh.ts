@@ -1,5 +1,5 @@
 // The stick installer (issue #138): `curl -fsSL <publicUrl>/install/stick.sh | sudo sh -s -- <code>`
-// on a fresh Linux machine, and the cloud-init snippet that runs the same line when a VPS is made.
+// on a fresh Linux machine or a Mac with Docker Desktop, and the cloud-init snippet that runs the same line when a VPS is made.
 // The script holds no secret: the one-time code arrives as its argument, and only this server's
 // address, the stick image's digest, the release signer and the pinned SHA-256s of cosign and of
 // Sigstore's trusted root are baked in. The machine reaches only this server: cosign, the trusted
@@ -148,6 +148,9 @@ LOCAL_IMAGE=${STICK_IMAGE_NAME}:installed
 CODE_PATH=${ENROLL_CODE_PATH}
 WAIT_SECONDS=\${JM_INSTALL_WAIT:-60}
 TTY=\${JM_INSTALL_TTY:-/dev/tty}
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d ' ' -f 1
+}
 COSIGN_WAIT=\${JM_INSTALL_COSIGN_TIMEOUT:-${COSIGN_WAIT_SECONDS}}
 
 say() { printf '%s\\n' "$*"; }
@@ -215,7 +218,7 @@ blob() {
   case $h in '' | *[!0-9a-f]*) return 1 ;; esac
   [ \${#h} = 64 ] || return 1
   [ -f "$LAYOUT/blobs/sha256/$h" ] || return 1
-  [ "$(sha256sum "$LAYOUT/blobs/sha256/$h" | cut -d ' ' -f 1)" = "$h" ] || return 1
+  [ "$(sha256 "$LAYOUT/blobs/sha256/$h")" = "$h" ] || return 1
   printf '%s' "$LAYOUT/blobs/sha256/$h"
 }
 
@@ -233,13 +236,16 @@ done
 
 os=$(uname -s)
 arch=$(uname -m)
-[ "$os" = Linux ] || die "a stick installs on Linux only, not $os (on macOS, see docs/runbooks/install.md for a source install)"
+case $os in
+  Linux | Darwin) ;;
+  *) die "a stick installs on Linux or macOS (Docker Desktop) only, not $os" ;;
+esac
 case $arch in
   x86_64 | amd64) PLATFORM=linux/amd64; COSIGN_SHA256=$COSIGN_SHA256_AMD64 ;;
   aarch64 | arm64) PLATFORM=linux/arm64; COSIGN_SHA256=$COSIGN_SHA256_ARM64 ;;
   *) die "a stick runs on x86_64 or aarch64, not $arch" ;;
 esac
-[ "$(id -u)" = 0 ] || die "run it as root: curl -fsSL $JM_SERVER_URL/install/stick.sh | sudo sh -s -- <code>"
+[ "$os" = Darwin ] || [ "$(id -u)" = 0 ] || die "run it as root: curl -fsSL $JM_SERVER_URL/install/stick.sh | sudo sh -s -- <code>"
 
 if [ "$UNINSTALL" = 1 ]; then
   command -v docker >/dev/null 2>&1 || die "Docker is not installed: there is no stick to remove"
@@ -257,6 +263,9 @@ TMP=$(mktemp -d "\${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 trap 'exit 1' INT TERM
 
+if [ "$os" = Darwin ] && ! command -v docker >/dev/null 2>&1; then
+  die "Docker is not installed: install Docker Desktop (https://docs.docker.com/desktop/setup/install/mac-install/), start it, and paste the line again"
+fi
 if ! command -v docker >/dev/null 2>&1; then
   answer=n
   if [ "$YES" = 1 ]; then
@@ -292,14 +301,20 @@ fetch() {
 say "Downloading cosign $PLATFORM from $JM_SERVER_URL"
 fetch "/install/cosign?platform=$PLATFORM" "$TMP/cosign" ||
   die "could not download cosign from $JM_SERVER_URL: is the code unused and less than 24 hours old?"
-got=$(sha256sum "$TMP/cosign" | cut -d ' ' -f 1)
+got=$(sha256 "$TMP/cosign")
 [ "$got" = "$COSIGN_SHA256" ] || die "the cosign the server sent is not the pinned ${COSIGN_VERSION} (sha256 $got)"
 chmod 0700 "$TMP/cosign"
+# On macOS the pinned Linux cosign can't run on the host: it runs in Docker Desktop's VM, as a
+# one-file image with no network, the work directory mounted at the same path.
+COSIGN_IMAGE=jm-install-cosign:$$
+if [ "$os" = Darwin ]; then
+  tar -cf - -C "$TMP" cosign | docker import - "$COSIGN_IMAGE" >/dev/null || die "could not load cosign into Docker"
+fi
 
 say "Downloading Sigstore's trusted root from $JM_SERVER_URL"
 fetch "/install/trusted-root.json" "$TMP/trusted_root.json" ||
   die "could not download the trusted root from $JM_SERVER_URL: is the code unused and less than 24 hours old?"
-got=$(sha256sum "$TMP/trusted_root.json" | cut -d ' ' -f 1)
+got=$(sha256 "$TMP/trusted_root.json")
 [ "$got" = "$TRUSTED_ROOT_SHA256" ] || die "the trusted root the server sent is not the pinned one (sha256 $got)"
 
 say "Downloading the stick image for $PLATFORM"
@@ -344,7 +359,12 @@ why=
 while read -r b; do
   home=$(mktemp -d "$TMP/cosign-home.XXXXXX")
   rc=0
-  HOME="$home" TUF_ROOT="$home" $TIMEOUT "$TMP/cosign" verify-blob-attestation \\
+  if [ "$os" = Darwin ]; then
+    set -- docker run --rm --network none -v "$TMP:$TMP" -e "HOME=$home" -e "TUF_ROOT=$home" "$COSIGN_IMAGE" /cosign
+  else
+    set -- "$TMP/cosign"
+  fi
+  HOME="$home" TUF_ROOT="$home" $TIMEOUT "$@" verify-blob-attestation \\
     --bundle "$b" --type "$SIGN_PREDICATE_TYPE" \\
     --trusted-root "$TMP/trusted_root.json" --offline \\
     --certificate-identity-regexp "$IDENTITY_REGEXP" \\
@@ -365,6 +385,7 @@ while read -r b; do
     why="cosign exit $rc: $line"
   fi
 done <"$TMP/bundle-files"
+if [ "$os" = Darwin ]; then docker image rm "$COSIGN_IMAGE" >/dev/null 2>&1 || true; fi
 [ "$verified" = 1 ] || die "the stick image is not signed by $SIGNER_REPOSITORY's release workflow: $why"
 
 say "Signed by $SIGNER_REPOSITORY's release workflow"
@@ -423,17 +444,31 @@ fi
 docker tag "$STICK_NAME" "$LOCAL_IMAGE" || die "could not tag the stick image"
 
 docker volume create "$VOLUME" >/dev/null || die "could not create the volume $VOLUME"
-mount=$(docker volume inspect -f '{{ .Mountpoint }}' "$VOLUME")
-[ -d "$mount" ] || die "the volume $VOLUME has no directory on this host ($mount)"
-code_file="$mount/$(basename "$CODE_PATH")"
-printf '%s\\n' "$CODE" >"$code_file"
-chmod 0600 "$code_file"
+mount=$(docker volume inspect -f '{{ .Mountpoint }}' "$VOLUME" 2>/dev/null || true)
+code_file=
+if [ -n "$mount" ] && [ -d "$mount" ]; then
+  code_file="$mount/$(basename "$CODE_PATH")"
+  printf '%s\\n' "$CODE" >"$code_file"
+  chmod 0600 "$code_file"
+else
+  # The volume lives in a VM (Docker Desktop) or under another user (rootless Docker): a container
+  # writes the code, read from stdin, never on a command line.
+  printf '%s\\n' "$CODE" | docker run --rm -i --network none --entrypoint sh -v "$VOLUME:/state" "$LOCAL_IMAGE" \\
+    -c "umask 077 && cat >$CODE_PATH" || die "could not write the enrollment code into the volume $VOLUME"
+fi
+forget_code() {
+  if [ -n "$code_file" ]; then
+    rm -f "$code_file"
+  else
+    docker run --rm --network none --entrypoint rm -v "$VOLUME:/state" "$LOCAL_IMAGE" -f "$CODE_PATH" >/dev/null 2>&1 || true
+  fi
+}
 
 docker run -d --name "$CONTAINER" --restart unless-stopped --read-only --tmpfs /tmp \\
   -v /var/run/docker.sock:/var/run/docker.sock -v "$VOLUME:/state" \\
   -e "JM_SERVER_URL=$JM_SERVER_URL" -e "JM_ENROLL_CODE_FILE=$CODE_PATH" \\
   -e JM_IMAGE_SOURCE=server -e JM_IMAGE_POLICY=signed \\
-  "$LOCAL_IMAGE" >/dev/null || { rm -f "$code_file"; die "docker run failed"; }
+  "$LOCAL_IMAGE" >/dev/null || { forget_code; die "docker run failed"; }
 
 say "Waiting for the stick to enroll"
 i=0
@@ -441,14 +476,14 @@ while [ "$i" -lt "$WAIT_SECONDS" ]; do
   logs=$(docker logs "$CONTAINER" 2>&1 || true)
   name=$(printf '%s\\n' "$logs" | sed -n 's/^enrolled as \\(.*\\) (.*)$/\\1/p' | head -n 1)
   if [ -n "$name" ]; then
-    rm -f "$code_file"
+    forget_code
     say "Enrolled as $name. Back to your browser."
     exit 0
   fi
   failed=$(printf '%s\\n' "$logs" | grep 'enroll failed' | head -n 1 || true)
   if [ -n "$failed" ]; then
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-    rm -f "$code_file"
+    forget_code
     die "the stick could not enroll ($failed): make a new code on the sticks page"
   fi
   sleep 1

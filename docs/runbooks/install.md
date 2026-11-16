@@ -1136,8 +1136,13 @@ Doctor check: `server.public-url`.
 
 ## Add a stick
 
-A stick on another Linux machine (x86_64 or aarch64) installs with one pasted line. A typical case
-is a VPS from Vultr or Hostinger on your tailnet. The machine reaches only this server: it needs no
+A stick on another Linux machine (x86_64 or aarch64), or a Mac with Docker Desktop running,
+installs with one pasted line. A typical case is a VPS from Vultr or Hostinger on your tailnet. On a
+Mac the stick and its troopers run in Docker Desktop's Linux VM: the installer never offers
+get.docker.com there, checks the signature with the server's cosign inside a container with no
+network, and writes the enrollment code into the stick's volume through a container, because the
+volume lives in the VM. Docker Desktop's containerd image store must be on (the default for new
+installs: Settings, General, Use containerd for pulling and storing images). The machine reaches only this server: it needs no
 registry or GitHub access, because cosign and the stick image come from the server's
 [image mirror](release.md#sticks-that-fetch-from-the-server).
 
