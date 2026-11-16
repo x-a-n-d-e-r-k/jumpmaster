@@ -109,6 +109,24 @@ describe('the control manifest', () => {
     );
   });
 
+  test('the manifest lists both transcript export forms (#195)', () => {
+    const help = ctlHelp();
+    expect(help).toContain('  ctl drops transcript <dropId> [--out <file>]');
+    expect(help).toContain(
+      '  ctl zones transcripts <zone> --since <YYYY-MM-DD> [--until <YYYY-MM-DD>] [--out <file>]',
+    );
+    expect(
+      CONTROL_ROUTES.filter((r) => r.path.includes('transcript')).map((r) => [
+        r.method,
+        r.path,
+        r.ctl,
+      ]),
+    ).toEqual([
+      ['GET', '/api/control/drops/:id/transcript', 'ctl drops transcript d1'],
+      ['GET', '/api/control/zones/:id/transcripts', 'ctl zones transcripts web --since 2026-11-16'],
+    ]);
+  });
+
   test('a manifest entry without a ctl verb carries a reason', () => {
     for (const r of CONTROL_ROUTES)
       if (r.ctl === null) expect([r.path, (r.reason ?? '').length > 10]).toEqual([r.path, true]);

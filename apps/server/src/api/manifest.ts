@@ -178,6 +178,12 @@ export const CONTROL_ROUTES: ControlRoute[] = [
     ctl: 'ctl drops extend-retention d1 6',
   },
   { method: 'POST', path: '/api/control/drops/:id/cancel', ctl: 'ctl drops cancel d1' },
+  { method: 'GET', path: '/api/control/drops/:id/transcript', ctl: 'ctl drops transcript d1' },
+  {
+    method: 'GET',
+    path: '/api/control/zones/:id/transcripts',
+    ctl: 'ctl zones transcripts web --since 2026-11-16',
+  },
   // Sticks
   { method: 'GET', path: '/api/control/sticks', ctl: 'ctl sticks' },
   {
@@ -246,6 +252,7 @@ export const CTL_VERBS: { verb: string; page: Page; forms: string[] }[] = [
       'ctl zones remove <zone>',
       'ctl zones egress observed <zone>',
       'ctl zones egress adopt <zone> <host>…',
+      'ctl zones transcripts <zone> --since <YYYY-MM-DD> [--until <YYYY-MM-DD>] [--out <file>]',
     ],
   },
   { verb: 'pause', page: 'Zones', forms: ['ctl pause <zone>'] },
@@ -337,7 +344,11 @@ export const CTL_VERBS: { verb: string; page: Page; forms: string[] }[] = [
   {
     verb: 'drops',
     page: 'Drops',
-    forms: ['ctl drops extend-retention <dropId> <hours>', 'ctl drops cancel <dropId>'],
+    forms: [
+      'ctl drops extend-retention <dropId> <hours>',
+      'ctl drops cancel <dropId>',
+      'ctl drops transcript <dropId> [--out <file>]',
+    ],
   },
   {
     verb: 'sticks',
