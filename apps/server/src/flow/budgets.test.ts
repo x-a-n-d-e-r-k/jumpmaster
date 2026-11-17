@@ -10,6 +10,7 @@ import {
 } from '../db/repo.js';
 import { t0, tmpDbFile } from '../test/helpers.js';
 import {
+  baseSyncExhausted,
   chargeBudget,
   chargeNoChange,
   chargeRateLimitRequeue,
@@ -203,6 +204,34 @@ describe('base syncs (a resolve that ends in a carried verdict)', () => {
     expect(getAttempts(db, id, 'resolve_total').count).toBe(0);
     setAttempts(db, id, 'base_sync', 11, null);
     expect(chargeBudget(db, id, 'resolve', 'f1', b).ok).toBe(true);
+  });
+
+  test('a forge update spends base_sync and never resolve_total, resolve or anything else', () => {
+    expect(chargeBudget(db, id, 'forge_update', 'f1', b)).toEqual({
+      ok: true,
+      charged: ['base_sync'],
+    });
+    expect(chargeBudget(db, id, 'forge_update', 'f2', b).ok).toBe(true);
+    expect(getAttempts(db, id, 'base_sync').count).toBe(2);
+    for (const key of ['resolve_total', 'resolve', 'heal', 'review', 'resume'] as const)
+      expect(getAttempts(db, id, key).count).toBe(0);
+  });
+
+  test('a forge update stops at maxBaseSync, and a resolve with it', () => {
+    const small = { ...b, maxBaseSync: 2 };
+    expect(baseSyncExhausted(db, id, small)).toBe(false);
+    chargeBudget(db, id, 'forge_update', 'f1', small);
+    chargeBudget(db, id, 'forge_update', 'f2', small);
+    expect(baseSyncExhausted(db, id, small)).toBe(true);
+    expect(chargeBudget(db, id, 'forge_update', 'f3', small)).toEqual({
+      ok: false,
+      reason: 'budget exhausted: base-sync',
+    });
+    expect(chargeBudget(db, id, 'resolve', 'f3', small)).toEqual({
+      ok: false,
+      reason: 'budget exhausted: base-sync',
+    });
+    expect(getAttempts(db, id, 'base_sync').count).toBe(2);
   });
 
   test('resetAttempts clears base_sync', () => {

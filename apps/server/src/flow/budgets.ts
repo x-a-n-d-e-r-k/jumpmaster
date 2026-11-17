@@ -22,6 +22,10 @@ function bump(db: Db, itemId: number, key: AttemptKey): void {
   setAttempts(db, itemId, key, a.count + 1, a.lastFingerprint);
 }
 
+/** No base sync is left: neither a forge update nor a resolve may run. */
+export const baseSyncExhausted = (db: Db, itemId: number, budgets: Budgets): boolean =>
+  getAttempts(db, itemId, 'base_sync').count >= budgets.maxBaseSync;
+
 /**
  * Charges one budget key. Over the limit nothing is written. Callers run this in the same
  * transaction as the drop insert and store `charged.join(',')` as the drop's `chargedKey`.
@@ -29,7 +33,7 @@ function bump(db: Db, itemId: number, key: AttemptKey): void {
 export function chargeBudget(
   db: Db,
   itemId: number,
-  key: 'heal' | 'resolve' | 'resume' | 'review',
+  key: 'heal' | 'resolve' | 'resume' | 'review' | 'forge_update',
   fp: string,
   budgets: Budgets,
 ): ChargeResult {
@@ -48,11 +52,15 @@ export function chargeBudget(
       setAttempts(db, itemId, key, count, fp);
       return { ok: true, charged: [key] };
     }
+    case 'forge_update': {
+      // The forge merged the base in (no drop): a base sync, never a resolve.
+      if (baseSyncExhausted(db, itemId, budgets)) return exhausted('base-sync');
+      bump(db, itemId, 'base_sync');
+      return { ok: true, charged: ['base_sync'] };
+    }
     case 'resolve': {
       // Every clean base sync is given back to resolve_total (`creditBaseSync`): this bounds them.
-      if (getAttempts(db, itemId, 'base_sync').count >= budgets.maxBaseSync) {
-        return exhausted('base-sync');
-      }
+      if (baseSyncExhausted(db, itemId, budgets)) return exhausted('base-sync');
       const total = getAttempts(db, itemId, 'resolve_total');
       if (total.count >= budgets.maxResolveTotal) return exhausted('resolve-total');
       const r = getAttempts(db, itemId, 'resolve');

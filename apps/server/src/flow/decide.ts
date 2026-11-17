@@ -84,6 +84,11 @@ export interface Snapshot {
    * it, when there is no holder, or when the zone turns the reservation off.
    */
   mergeReservedBy: MergeReservation | null;
+  /**
+   * An `update_conflict` mark for (pr.headSha, compare.baseSha): the forge could not merge this base
+   * into this head (a conflict, repeated failures, or no push token), so a resolve drop runs.
+   */
+  updateConflict: boolean;
 }
 
 const RESERVATION_PREFIX = 'waiting to merge after #';
@@ -125,6 +130,8 @@ export type Action =
   /** Copy verdict `fromVerdictId` to `headSha` (see `carriable`). */
   | { kind: 'carry_verdict'; fromVerdictId: string; headSha: string }
   | { kind: 'merge'; sha: string }
+  /** Ask the forge to merge base `baseSha` into head `headSha` (no drop, no model). */
+  | { kind: 'update_branch'; headSha: string; baseSha: string }
   | { kind: 'done'; reason: string }
   | { kind: 'park'; reason: string }
   | { kind: 'none' };
@@ -346,8 +353,12 @@ export function decide(s: Snapshot): Action {
       feedback: { source: 'review', text: verdictFeedback(latestRc) },
     };
   }
-  // 18: forge `mergeable` is never read (§5.1).
+  // 18: forge `mergeable` is never read (§5.1). The forge merges the base in first; a resolve
+  // drop runs only once it could not for this head and base.
   if (compare.behindBy > 0) {
+    if (!s.updateConflict) {
+      return { kind: 'update_branch', headSha: head, baseSha: compare.baseSha };
+    }
     return { kind: 'enqueue', role: 'resolve', fingerprint: fingerprint([head, compare.baseSha]) };
   }
   // 19: a head that only merged the base in cleanly keeps its approval; any other is reviewed.

@@ -8,8 +8,12 @@ import { enqueueCrew } from '../crew/schedule.js';
 import { flushTriageTrail } from '../crew/trail.js';
 import type { Db } from '../db/open.js';
 import {
+  addBranchUpdateFailure,
   deleteFailedOutbox,
+  deleteOutbox,
   ensureZoneMode,
+  forgeUpdatedFrom,
+  getOutbox,
   getPullRequest,
   getWorkItem,
   getZoneMode,
@@ -21,6 +25,7 @@ import {
   listObservations,
   listWorkItems,
   recordObservation,
+  setBranchUpdateOutcome,
   setParkMark,
   setWorkItemReason,
   setWorkItemState,
@@ -37,6 +42,8 @@ import {
   type PostReviewPayload,
   resolveUnknown,
   runOp,
+  type UpdateBranchPayload,
+  type UpdateBranchResult,
 } from '../outbox.js';
 import { renderReviewBody } from '../results.js';
 import {
@@ -46,7 +53,7 @@ import {
   openPrCap,
   readyCandidates,
 } from '../scheduler.js';
-import { chargeBudget, creditBaseSync } from './budgets.js';
+import { baseSyncExhausted, chargeBudget, creditBaseSync } from './budgets.js';
 import {
   type Action,
   decide,
@@ -292,8 +299,72 @@ function carryVerdict(
       gatesJson: from.gatesJson,
       createdAt: now.toISOString(),
     });
-    if (inserted) creditBaseSync(db, s.item.id);
+    // A head the forge brought up to date already spent its base_sync, and no resolve_total.
+    if (inserted && !forgeUpdatedFrom(db, s.item.id, from.headSha)) creditBaseSync(db, s.item.id);
   })();
+}
+
+/** Failed update requests for one head and base before the resolve drop runs instead. */
+export const UPDATE_BRANCH_TRIES = 3;
+
+/**
+ * Asks the forge to merge the base into the PR head, through the outbox (one request per item,
+ * head and base). `updated` spends `base_sync` once and waits for the new head; `head_moved`
+ * records nothing; a conflict, no push token, or the third failed request records the
+ * `update_conflict` mark. Returns whether the mark was recorded, so the caller enqueues the
+ * resolve drop now.
+ */
+async function updateBranch(
+  db: Db,
+  forges: ForgePair,
+  zone: DropZoneConfig,
+  s: Snapshot,
+  a: Extract<Action, { kind: 'update_branch' }>,
+  now: Date,
+): Promise<boolean> {
+  const item = s.item;
+  if (!s.pr) return false;
+  const conflict = () => setBranchUpdateOutcome(db, item.id, a.headSha, a.baseSha, 'conflict', now);
+  // No push grant to write with: the agent path, never a wider token.
+  if (!forges.pusher) return conflict();
+  const opKey = opKeys.updateBranch(item.id, a.headSha, a.baseSha);
+  if (!getOutbox(db, opKey) && baseSyncExhausted(db, item.id, zone.budgets)) {
+    parkReason(db, item.id, 'budget exhausted: base-sync', now);
+    return false;
+  }
+  const payload: UpdateBranchPayload = { pr: s.pr.number, headSha: a.headSha, baseSha: a.baseSha };
+  const r = await runOp(
+    db,
+    forges,
+    { kind: 'update_branch', opKey, zoneId: item.dropZoneId, itemId: item.id, payload },
+    now,
+  );
+  if (r.state === 'done') {
+    const result = r.result as UpdateBranchResult | undefined;
+    switch (result?.kind) {
+      case 'updated':
+        db.transaction(() => {
+          if (setBranchUpdateOutcome(db, item.id, a.headSha, a.baseSha, 'updated', now))
+            chargeBudget(db, item.id, 'forge_update', opKey, zone.budgets);
+        })();
+        return false;
+      case 'conflict':
+      case 'no_token':
+        return conflict();
+      default:
+        return false; // head_moved: the next pass reads the new head
+    }
+  }
+  if (r.state === 'failed') {
+    // Sent again on a later pass (the outbox reads the head back first); the third failure for
+    // this head and base gives up on the forge, so the item never sticks here.
+    return db.transaction(() => {
+      deleteOutbox(db, opKey);
+      const failures = addBranchUpdateFailure(db, item.id, a.headSha, a.baseSha, now);
+      return failures >= UPDATE_BRANCH_TRIES && conflict();
+    })();
+  }
+  return false; // pending or unknown: read back on a later pass
 }
 
 async function postReview(
@@ -389,6 +460,8 @@ function observeDecision(db: Db, zoneId: string, s: Snapshot, a: Action, now: Da
       return note('would_carry_verdict', `${head} from verdict ${a.fromVerdictId}`);
     case 'merge':
       return note('would_merge', `sha ${a.sha}`);
+    case 'update_branch':
+      return note('would_update_branch', `${head} onto base ${a.baseSha}`);
     case 'park':
       return note('would_park', a.reason);
     case 'done':
@@ -483,6 +556,14 @@ export async function reconcileZone(
         carryVerdict(db, s, a, now);
         actions++;
         break;
+      case 'update_branch': {
+        actions++;
+        if (!(await updateBranch(db, forges, zone, s, a, now))) break;
+        // The forge could not: the resolve drop runs now, as decide asks with the mark.
+        const next = decide({ ...s, updateConflict: true });
+        if (next.kind === 'enqueue') enqueue(db, zone, s, next, versions, now);
+        break;
+      }
       case 'post_review':
         // Starter mode never posts (decide doesn't ask); with no reviewer there is no one to post.
         if (forges.reviewer === null) break;

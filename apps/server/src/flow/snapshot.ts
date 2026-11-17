@@ -4,6 +4,7 @@ import { agentBranch } from '@jumpmaster/protocol';
 import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import {
+  getBranchUpdate,
   getDropZoneDefaultBranch,
   getGateAllowance,
   getOutbox,
@@ -669,6 +670,11 @@ export async function buildSnapshot(
   const holder = mergeHolder(db, zone, now);
   const mergeReservedBy = holder !== null && holder.itemId !== item.id ? holder : null;
 
+  const updateConflict =
+    headSha !== null && compare !== null
+      ? getBranchUpdate(db, item.id, headSha, compare.baseSha)?.outcome === 'conflict'
+      : false;
+
   return {
     item,
     zone,
@@ -701,5 +707,6 @@ export async function buildSnapshot(
     missingSince,
     carry,
     mergeReservedBy,
+    updateConflict,
   };
 }

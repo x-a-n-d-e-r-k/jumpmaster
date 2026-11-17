@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import {
+  addBranchUpdateFailure,
   getWorkItem,
   getWorkItemPrFiles,
   insertVerdict,
   recordGateAllowance,
+  setBranchUpdateOutcome,
   setWorkItemState,
   type VerdictRow,
 } from '../db/repo.js';
@@ -674,6 +676,41 @@ describe('carry facts', () => {
     expect(s.carry).toBeNull();
     expect(s.forgeUnavailable).toBeNull();
     expect(decide(s)).toMatchObject({ kind: 'enqueue', role: 'review' });
+  });
+});
+
+describe('the update_conflict mark (issue #292)', () => {
+  const behind = (baseSha: string) =>
+    w.f.state.compares.set('main...sha1', { aheadBy: 1, behindBy: 2, baseSha, mergeBaseSha: 'b0' });
+
+  test('a conflict mark for this head and base is read, and decide resolves', async () => {
+    behind('b1');
+    setBranchUpdateOutcome(w.db, itemId, 'sha1', 'b1', 'conflict', now);
+    const s = await snapshotOf();
+    expect(s.updateConflict).toBe(true);
+    expect(decide(s)).toMatchObject({ kind: 'enqueue', role: 'resolve' });
+  });
+
+  test('a mark for another base sha does not count: the forge is asked again', async () => {
+    behind('b2');
+    setBranchUpdateOutcome(w.db, itemId, 'sha1', 'b1', 'conflict', now);
+    const s = await snapshotOf();
+    expect(s.updateConflict).toBe(false);
+    expect(decide(s)).toEqual({ kind: 'update_branch', headSha: 'sha1', baseSha: 'b2' });
+  });
+
+  test('a mark for another head does not count', async () => {
+    behind('b1');
+    setBranchUpdateOutcome(w.db, itemId, 'sha0', 'b1', 'conflict', now);
+    expect((await snapshotOf()).updateConflict).toBe(false);
+  });
+
+  test('failures short of a conflict and an updated outcome are no mark', async () => {
+    behind('b1');
+    addBranchUpdateFailure(w.db, itemId, 'sha1', 'b1', now);
+    expect((await snapshotOf()).updateConflict).toBe(false);
+    setBranchUpdateOutcome(w.db, itemId, 'sha1', 'b1', 'updated', now);
+    expect((await snapshotOf()).updateConflict).toBe(false);
   });
 });
 

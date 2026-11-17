@@ -877,6 +877,44 @@ describe('GitHubForge', () => {
       });
     });
 
+    describe('updateBranch', () => {
+      const url = '/repos/o/r/pulls/5/update-branch';
+
+      test('sends expected_head_sha and maps 202 to updated', async () => {
+        nock(api)
+          .put(url, (b) => b.expected_head_sha === 'aaa' && Object.keys(b).length === 1)
+          .reply(202, { message: 'Updating pull request branch.', url: 'https://x' });
+        expect(await forge.updateBranch(5, 'aaa')).toEqual({ kind: 'updated' });
+      });
+
+      test('a 422 naming a merge conflict is conflict', async () => {
+        nock(api).put(url).reply(422, { message: 'merge conflict between base and head' });
+        expect(await forge.updateBranch(5, 'aaa')).toEqual({ kind: 'conflict' });
+      });
+
+      test('a 422 naming the expected head is head_moved', async () => {
+        nock(api)
+          .put(url)
+          .reply(422, { message: "expected head sha didn't match current head ref." });
+        expect(await forge.updateBranch(5, 'aaa')).toEqual({ kind: 'head_moved' });
+      });
+
+      test.each([
+        [422, 'Validation Failed'],
+        [403, 'Resource not accessible by integration'],
+        [404, 'Not Found'],
+        [500, 'Server Error'],
+      ])('any other answer (%i %s) throws with its status', async (status, message) => {
+        nock(api).put(url).reply(status, { message });
+        await expect(forge.updateBranch(5, 'aaa')).rejects.toMatchObject({ status });
+      });
+
+      test('a 2xx other than 202 throws', async () => {
+        nock(api).put(url).reply(200, { message: 'ok' });
+        await expect(forge.updateBranch(5, 'aaa')).rejects.toThrow(/update-branch answered 200/);
+      });
+    });
+
     describe('getBranchRules', () => {
       const rulesUrl = '/repos/o/r/rules/branches/main';
       const prRule = (id: number, count = 1, stale = true) => ({

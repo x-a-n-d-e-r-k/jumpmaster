@@ -1221,10 +1221,48 @@ test('v35 adds work_items.pr_files, null (unknown) on every existing item', () =
     );
   });
   const db = openDb(f);
-  expect(MIGRATIONS.at(-1)?.version).toBe(35);
+  expect(MIGRATIONS.at(-1)?.version).toBeGreaterThanOrEqual(35);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(db.prepare('SELECT issue_number AS n, pr_files AS f FROM work_items').all()).toEqual([
     { n: 7, f: null },
   ]);
+  db.close();
+});
+
+test('v36 keeps every outbox row, takes update_branch ops and adds branch_updates', () => {
+  const f = dbAt(35, (raw) => {
+    raw.exec(
+      `INSERT INTO drop_zones (id, repo, default_branch, config_json) VALUES ('z', 'o/r', 'main', '{}');
+       INSERT INTO work_items (drop_zone_id, issue_number, title, body, author, priority, is_fix,
+         issue_created_at, state, updated_at) VALUES ('z', 7, 't', 'b', 'a', 0, 0, 't', 'pr_open', 't');
+       INSERT INTO outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state, created_at,
+         updated_at) VALUES ('o1', 'merge:1:aaa', 'merge', 1, 'z', '{}', 'done', 't', 't');`,
+    );
+  });
+  const db = openDb(f);
+  expect(MIGRATIONS.at(-1)?.version).toBe(36);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.prepare('SELECT op_key AS k, kind, state FROM outbox').all()).toEqual([
+    { k: 'merge:1:aaa', kind: 'merge', state: 'done' },
+  ]);
+  db.exec(
+    `INSERT INTO outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state, created_at,
+       updated_at) VALUES ('o2', 'update_branch:1:aaa:b1', 'update_branch', 1, 'z', '{}', 'pending', 't', 't')`,
+  );
+  const mark = db.prepare(
+    `INSERT INTO branch_updates (work_item_id, head_sha, base_sha, failures, outcome, updated_at)
+     VALUES (?, 'aaa', 'b1', 0, ?, 't')`,
+  );
+  mark.run(1, 'conflict');
+  expect(() => mark.run(1, 'conflict')).toThrow(/UNIQUE|PRIMARY/);
+  expect(() => mark.run(99, null)).toThrow(/FOREIGN KEY/);
+  expect(() =>
+    db
+      .prepare(
+        `INSERT INTO branch_updates (work_item_id, head_sha, base_sha, outcome, updated_at)
+         VALUES (1, 'x', 'y', 'maybe', 't')`,
+      )
+      .run(),
+  ).toThrow(/CHECK/);
   db.close();
 });
