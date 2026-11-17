@@ -59,6 +59,9 @@ export type MirrorIndex = {
 
 export class DigestMismatch extends Error {}
 
+/** A blob the registry served more of than it declared, or than the caller's cap allows. */
+export class BlobTooLarge extends DigestMismatch {}
+
 export const imageKey = (name: string, digest: string): string => `${name}@${digest}`;
 
 const emptyIndex = (): MirrorIndex => ({ version: 1, current: [], previous: [], images: {} });
@@ -108,14 +111,19 @@ export class ImageStore {
 
   /**
    * Streams a blob into the store, hashing as it arrives. It lands only when the bytes hash to
-   * `digest` (and are no more than `size`, when known); otherwise the partial file is deleted and
-   * `DigestMismatch` thrown.
+   * `digest` (and are no more than `size`, when known, nor than `max`); otherwise the partial file
+   * is deleted and `DigestMismatch` thrown (`BlobTooLarge` when it was too many bytes).
    */
   async putStream(
     digest: string,
     body: AsyncIterable<Uint8Array>,
     size: number | undefined,
+    max?: number,
   ): Promise<void> {
+    if (max !== undefined && size !== undefined && size > max) {
+      for await (const _ of body) break;
+      throw new BlobTooLarge(`${digest}: ${size} bytes is over the ${max} byte cap`);
+    }
     const target = this.blobPath(digest);
     if (existsSync(target)) {
       for await (const _ of body) break;
@@ -129,7 +137,9 @@ export class ImageStore {
       for await (const chunk of body) {
         total += chunk.byteLength;
         if (size !== undefined && total > size)
-          throw new DigestMismatch(`${digest}: the registry served more than its ${size} bytes`);
+          throw new BlobTooLarge(`${digest}: the registry served more than its ${size} bytes`);
+        if (max !== undefined && total > max)
+          throw new BlobTooLarge(`${digest}: the registry served more than the ${max} byte cap`);
         hash.update(chunk);
         if (!out.write(chunk)) await new Promise<void>((r) => out.once('drain', r));
       }
@@ -142,7 +152,8 @@ export class ImageStore {
         throw new DigestMismatch(`${digest}: the registry served ${total} of ${size} bytes`);
       renameSync(tmp, target);
     } catch (e) {
-      out.destroy();
+      // Wait for the stream to close: it opens its file lazily, and could create it after the rm.
+      if (!out.closed) await new Promise<void>((r) => out.destroy().once('close', () => r()));
       rmSync(tmp, { force: true });
       throw e;
     }
