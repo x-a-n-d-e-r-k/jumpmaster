@@ -229,6 +229,8 @@ export const DropZoneObject = z.object({
       maxResume: z.number().int().nonnegative().default(2),
       maxReviewRepeat: z.number().int().nonnegative().default(2),
       maxNoChange: z.number().int().nonnegative().default(1),
+      /** Resolves that end in a carried approval (the base merged in cleanly, nothing else). */
+      maxBaseSync: z.number().int().min(1).default(12),
     })
     .default({
       maxHeal: 3,
@@ -237,6 +239,7 @@ export const DropZoneObject = z.object({
       maxResume: 2,
       maxReviewRepeat: 2,
       maxNoChange: 1,
+      maxBaseSync: 12,
     }),
   ciRequired: z.boolean().default(true),
   ciDeadlineMinutes: z.number().positive().default(45),

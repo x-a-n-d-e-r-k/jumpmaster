@@ -43,6 +43,7 @@ const z: DropZoneConfig = {
     maxResume: 2,
     maxReviewRepeat: 2,
     maxNoChange: 1,
+    maxBaseSync: 12,
   },
   ciRequired: true,
   ciDeadlineMinutes: 45,
@@ -157,6 +158,7 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
     protectionProblems: [],
     headFirstSeenAt: now.toISOString(),
     missingSince: null,
+    carry: null,
     ...over,
   };
 }
@@ -493,6 +495,91 @@ describe('rules in order', () => {
       role: 'review',
       fingerprint: fingerprint(['s']),
     }));
+
+  describe('19: carrying an approval across a clean merge of the base', () => {
+    const same = { digest: 'd1', complete: true };
+    const carry = (over: Partial<NonNullable<Snapshot['carry']>> = {}): Snapshot['carry'] => ({
+      fromVerdictId: 'v-aaa',
+      fromHead: 'aaa',
+      fromDecision: 'approve',
+      fromForced: false,
+      requestChangesAfter: false,
+      digestFrom: same,
+      digestHead: same,
+      ...over,
+    });
+    const review = { kind: 'enqueue', role: 'review', fingerprint: fingerprint(['s']) };
+
+    test('carries when every condition holds', () =>
+      expect(decide(snap({ carry: carry() }))).toEqual({
+        kind: 'carry_verdict',
+        fromVerdictId: 'v-aaa',
+        headSha: 's',
+      }));
+
+    test.each<[string, Partial<Snapshot>]>([
+      ['the digests differ', { carry: carry({ digestHead: { digest: 'd2', complete: true } }) }],
+      [
+        'the source digest is incomplete',
+        { carry: carry({ digestFrom: { ...same, complete: false } }) },
+      ],
+      [
+        'the head digest is incomplete',
+        { carry: carry({ digestHead: { ...same, complete: false } }) },
+      ],
+      [
+        'both digests are incomplete (and empty)',
+        {
+          carry: carry({
+            digestFrom: { digest: '', complete: false },
+            digestHead: { digest: '', complete: false },
+          }),
+        },
+      ],
+      ['there are no carry facts', { carry: null }],
+      ['the source verdict was forced', { carry: carry({ fromForced: true }) }],
+      ['a request-changes came after the approve', { carry: carry({ requestChangesAfter: true }) }],
+      ['the source is a request-changes', { carry: carry({ fromDecision: 'request_changes' }) }],
+      ['the source is on this same head', { carry: carry({ fromHead: 's' }) }],
+    ])('reviews when %s', (_, over) => expect(decide(snap(over))).toEqual(review));
+
+    test('never replaces a verdict already on the head', () => {
+      const v = approve('s');
+      expect(decide(snap({ carry: carry(), verdictsOnHead: [v], reviewOp: null }))).toEqual({
+        kind: 'post_review',
+        verdictId: v.id,
+      });
+    });
+
+    test('rules 12 to 18 still run first', () => {
+      const c = { carry: carry() };
+      expect(decide(snap({ ...c, protectedHits: ['.github/x'] }))).toMatchObject({ kind: 'park' });
+      expect(decide(snap({ ...c, filesComplete: false }))).toMatchObject({ kind: 'park' });
+      expect(decide(snap({ ...c, gateScriptChanges: ['test'] }))).toMatchObject({
+        kind: 'park',
+        reason: expect.stringMatching(/^gate script changed: /),
+      });
+      expect(decide(snap({ ...c, gateToolChanges: ['vitest 1 → 2'] }))).toMatchObject({
+        kind: 'park',
+        reason: expect.stringMatching(/^gate tool changed: /),
+      });
+      expect(decide(snap({ ...c, held: true }))).toEqual({ kind: 'park', reason: HOLD_REASON });
+      expect(decide(snap({ ...c, trustedChangeRequests: [humanRc(1, 'no')] }))).toMatchObject({
+        kind: 'enqueue',
+        role: 'heal',
+        feedback: { source: 'human' },
+      });
+      expect(decide(snap({ ...c, verdictsOnHead: [rc('s')] }))).toMatchObject({
+        kind: 'enqueue',
+        role: 'heal',
+        feedback: { source: 'review' },
+      });
+      expect(decide(snap({ ...c, compare: cmp({ behindBy: 1 }) }))).toMatchObject({
+        kind: 'enqueue',
+        role: 'resolve',
+      });
+    });
+  });
 
   test('a hold parks before any heal, resolve or review is enqueued', () => {
     const park = { kind: 'park', reason: HOLD_REASON };
