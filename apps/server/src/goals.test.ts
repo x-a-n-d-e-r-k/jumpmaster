@@ -74,6 +74,19 @@ describe('parseGoals', () => {
     expect(currentObjective({ ok: false, error: 'x' })).toBeNull();
   });
 
+  test('currentObjective skips objectives done by ruling; the empty set changes nothing', () => {
+    const p = parseGoals(DOC);
+    const [, second, third] = ok(p).objectives;
+    expect(currentObjective(p, new Set())?.key).toBe(second?.key);
+    expect(currentObjective(p, new Set([second?.key ?? '']))?.key).toBe(third?.key);
+    expect(currentObjective(p, new Set(ok(p).objectives.map((o) => o.key)))).toBeNull();
+    const ladder = parseGoals('## Objectives\n### Alpha\n### Beta\n');
+    expect(currentObjective(ladder)?.key).toBe('alpha');
+    expect(currentObjective(ladder, new Set())?.key).toBe('alpha');
+    expect(currentObjective(ladder, new Set(['alpha']))?.key).toBe('beta');
+    expect(currentObjective(ladder, new Set(['alpha', 'beta']))).toBeNull();
+  });
+
   test('Lighthouse text and other ## sections are kept', () => {
     const p = ok(parseGoals(DOC));
     expect(p.lighthouse).toBe('Every widget ships with docs.');

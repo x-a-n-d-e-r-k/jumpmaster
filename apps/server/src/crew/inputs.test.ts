@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from 'vitest';
-import { raiseBriefing, ruleBriefing } from '../briefings.js';
+import { applyPendingRulings, raiseBriefing, ruleBriefing } from '../briefings.js';
 import { insertDrop, insertVerdict, setWorkItemState, updateDrop } from '../db/repo.js';
 import { zonePass } from '../flow/snapshot.js';
 import { refreshGoals } from '../goals.js';
@@ -29,6 +29,28 @@ const leadInput = async () =>
   crewLeadInput(w.db, w.forges, w.zone, await zonePass(w.forges, w.zone, 'main'), t0, DROP);
 
 describe('crew-lead input', () => {
+  test('an objective done by ruling is skipped and shown as done by that ruling', async () => {
+    const r = applyCrewActions(
+      w.db,
+      w.zone,
+      { objectiveDone: { key: 'document-every-endpoint', why: 'All merged.' } },
+      { kind: 'drop', dropId: 'd0' },
+      t0,
+    );
+    const ruled = ruleBriefing(w.db, r.briefings[0] ?? -1, 'done', '', t0);
+    if (!ruled.ok) throw new Error('not ruled');
+    await applyPendingRulings(w.db, { forges: () => w.forges, zone: () => w.zone }, 'main', t0);
+    const input = await leadInput();
+    const objective = input.slice(input.indexOf('Current objective'));
+    expect(objective).toContain(`begin objective>>>\nKey: ship-the-cli\nTitle: Ship the CLI`);
+    const goals = input.slice(0, input.indexOf('Current objective'));
+    expect(goals).toContain(`Document every endpoint (done by ruling ${ruled.rulingId})`);
+    expect(goals).not.toContain('Ship the CLI (done');
+    // The goal file is never written.
+    expect(w.f.state.files.get('main:GOAL.md')).toBe(GOAL);
+    expect(w.f.author.calls.map((c) => c.method)).not.toContain('putFile');
+  });
+
   test('crew-lead input holds GOAL.md, the current objective, rulings, crew issues and trusted open issues', async () => {
     const b = raiseBriefing(
       w.db,

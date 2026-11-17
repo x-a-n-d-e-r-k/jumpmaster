@@ -1128,7 +1128,7 @@ test('v31 adds the transcript prune mark and archive path, unset on every existi
     );
   });
   const db = openDb(f);
-  expect(MIGRATIONS.at(-1)?.version).toBe(31);
+  expect(MIGRATIONS.at(-1)?.version).toBeGreaterThanOrEqual(31);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(
     db
@@ -1137,5 +1137,34 @@ test('v31 adds the transcript prune mark and archive path, unset on every existi
       )
       .all(),
   ).toEqual([{ id: 'd1', r: '{"ok":true}', p: null, a: null }]);
+  db.close();
+});
+
+test('v32 adds objectives_done and the objective_done kind, keeping every briefing and ruling', () => {
+  const f = dbAt(31, (raw) => {
+    raw.exec(
+      `INSERT INTO briefings (id, zone_id, kind, subject, decision, why, options_json, source, state,
+         created_at, updated_at) VALUES (7, 'z', 'crew', 'crew:x', 'd', 'w', '[]', 'crew', 'ruled',
+         't', 't');
+       INSERT INTO rulings (id, zone_id, briefing_id, choice, created_at) VALUES (7, 'z', 7, 'o1', 't');`,
+    );
+  });
+  const db = openDb(f);
+  expect(db.prepare('SELECT id, kind FROM briefings').all()).toEqual([{ id: 7, kind: 'crew' }]);
+  expect(db.prepare('SELECT id, briefing_id AS b FROM rulings').all()).toEqual([{ id: 7, b: 7 }]);
+  expect(MIGRATIONS.at(-1)?.version).toBe(32);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  db.exec(
+    `INSERT INTO briefings (id, zone_id, kind, subject, decision, why, options_json, source, state,
+       created_at, updated_at) VALUES (1, 'z', 'objective_done', 'objective:a', 'd', 'w', '[]',
+       'server', 'ruled', 't', 't');
+     INSERT INTO rulings (id, zone_id, briefing_id, choice, created_at) VALUES (1, 'z', 1, 'done', 't');`,
+  );
+  const put = db.prepare(
+    `INSERT INTO objectives_done (zone_id, key, done_at, ruling_id) VALUES ('z', ?, 't', ?)`,
+  );
+  put.run('a', 1);
+  expect(() => put.run('a', 1)).toThrow(/UNIQUE|PRIMARY/);
+  expect(() => put.run('b', 99)).toThrow(/FOREIGN KEY/);
   db.close();
 });

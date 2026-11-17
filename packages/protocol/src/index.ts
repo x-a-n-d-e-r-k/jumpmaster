@@ -420,6 +420,16 @@ export const CrewLeadOutputSchema = z.strictObject({
       }),
     )
     .max(3),
+  /**
+   * The current objective, reported finished: the server raises a briefing whose "Mark it done"
+   * ruling records it done. The key is a goal key (at most 60 characters, as the server slugs).
+   */
+  objectiveDone: z
+    .strictObject({
+      key: z.string().regex(/^[a-z0-9-]{1,60}$/),
+      why: z.string().max(2000),
+    })
+    .optional(),
 });
 export type CrewLeadOutput = z.infer<typeof CrewLeadOutputSchema>;
 

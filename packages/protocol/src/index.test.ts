@@ -256,6 +256,19 @@ describe('crew roles', () => {
     expect(parseCrewOutput('crew-lead', badKey).ok).toBe(false);
   });
 
+  test('crew-lead output may report the current objective done, and nothing else in it', () => {
+    const done = { ...lead, objectiveDone: { key: 'ship-the-cli', why: 'all merged' } };
+    expect(parseCrewOutput('crew-lead', done)).toEqual({ ok: true, value: done });
+    const extra = { ...lead, objectiveDone: { key: 'ship-the-cli', why: 'w', title: 'x' } };
+    expect(parseCrewOutput('crew-lead', extra).ok).toBe(false);
+    const badKey = { ...lead, objectiveDone: { key: 'Ship The CLI', why: 'w' } };
+    expect(parseCrewOutput('crew-lead', badKey).ok).toBe(false);
+    const long = { ...lead, objectiveDone: { key: 'k'.repeat(61), why: 'w' } };
+    expect(parseCrewOutput('crew-lead', long).ok).toBe(false);
+    const longWhy = { ...lead, objectiveDone: { key: 'k', why: 'w'.repeat(2001) } };
+    expect(parseCrewOutput('crew-lead', longWhy).ok).toBe(false);
+  });
+
   test('refute and diagnose outputs validate', () => {
     expect(parseCrewOutput('refute', { decision: 'promote', findings: [] }).ok).toBe(true);
     expect(parseCrewOutput('refute', { decision: 'merge', findings: [] }).ok).toBe(false);

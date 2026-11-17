@@ -1,6 +1,6 @@
 import type { CrewLeadOutput } from '@jumpmaster/protocol';
 import { beforeEach, describe, expect, test } from 'vitest';
-import { listBriefings } from '../briefings.js';
+import { applyPendingRulings, listBriefings, ruleBriefing } from '../briefings.js';
 import { setKilled, setZoneMode } from '../db/repo.js';
 import { refreshGoals } from '../goals.js';
 import { makeZone, type ZoneWorld, zoneWorld } from '../test/fixtures.js';
@@ -201,6 +201,76 @@ describe('applyCrewActions', () => {
     });
     // A crew subject never lands on a server subject such as item:<id>.
     expect(b?.subject).toBe('crew:item:1');
+  });
+
+  describe('objectiveDone', () => {
+    const DONE = {
+      key: 'document-every-endpoint',
+      why: 'Every endpoint page has merged (#3, #4).',
+    };
+    const OPTIONS = [
+      { id: 'done', label: 'Mark it done', effect: 'advance_objective' },
+      { id: 'keep', label: 'Keep it open', effect: 'none' },
+    ];
+
+    test('for the current objective it raises one server briefing; a second report updates it', () => {
+      const r = apply({ objectiveDone: DONE });
+      expect(r).toEqual({ filed: [], briefings: [expect.any(Number)], refused: [] });
+      const again = apply({ objectiveDone: { ...DONE, why: 'Still all merged.' } }, plus(t0, 1));
+      expect(again.briefings).toEqual(r.briefings);
+      const all = listBriefings(w.db, { zoneId: 'main' });
+      expect(all).toHaveLength(1);
+      expect(all[0]).toMatchObject({
+        id: r.briefings[0],
+        kind: 'objective_done',
+        source: 'server',
+        subject: 'objective:document-every-endpoint',
+        decision: 'Mark objective "Document every endpoint" done?',
+        why: 'Still all merged.',
+        options: OPTIONS,
+        onHold: 'All crew filing for the next objective',
+        state: 'open',
+      });
+    });
+
+    test('any key but the current objective is refused with the reason, and nothing is raised', () => {
+      for (const key of ['ship-the-cli', 'not-on-the-ladder']) {
+        expect(apply({ objectiveDone: { key, why: 'w' } })).toEqual({
+          filed: [],
+          briefings: [],
+          refused: [`objectiveDone ${key}: not the current objective`],
+        });
+      }
+      expect(listBriefings(w.db, { zoneId: 'main' })).toEqual([]);
+    });
+
+    test('an objective already done by ruling is no longer current, so it is refused', async () => {
+      const [id] = apply({ objectiveDone: DONE }).briefings;
+      expect(ruleBriefing(w.db, id ?? -1, 'done', '', t0).ok).toBe(true);
+      await applyPendingRulings(w.db, { forges: () => w.forges, zone: () => w.zone }, 'main', t0);
+      expect(apply({ objectiveDone: DONE }).refused).toEqual([
+        'objectiveDone document-every-endpoint: not the current objective',
+      ]);
+      expect(apply({ objectiveDone: { key: 'ship-the-cli', why: 'w' } }).briefings).toHaveLength(1);
+    });
+
+    test('an MCP source can never report an objective done (D1)', () => {
+      const r = apply({ objectiveDone: DONE }, t0, { kind: 'mcp', tokenId: 7 });
+      expect(r).toEqual({
+        filed: [],
+        briefings: [],
+        refused: ['objectiveDone document-every-endpoint: an MCP source cannot report it'],
+      });
+      expect(listBriefings(w.db, { zoneId: 'main' })).toEqual([]);
+    });
+
+    test('in observe it is refused with the mode', () => {
+      setZoneMode(w.db, 'main', 'observe', t0);
+      expect(apply({ objectiveDone: DONE }).refused).toEqual([
+        'objectiveDone document-every-endpoint: zone is observe',
+      ]);
+      expect(listBriefings(w.db, { zoneId: 'main' })).toEqual([]);
+    });
   });
 
   test('in observe, paused or killed nothing is recorded and every action is refused with the mode', () => {

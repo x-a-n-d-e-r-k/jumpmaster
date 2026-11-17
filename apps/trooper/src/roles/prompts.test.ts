@@ -15,3 +15,13 @@ describe('the drop-ready format in the prompts (#198)', () => {
     },
   );
 });
+
+describe('finishing an objective (#245)', () => {
+  test('the crew lead reports objectiveDone once every part has merged, not a free-text briefing', () => {
+    const text = prompt('crew-lead.md');
+    expect(text).toMatch(
+      /every part of the current objective has merged, report it with `objectiveDone`/,
+    );
+    expect(text).toMatch(/instead of raising a free-text briefing/);
+  });
+});

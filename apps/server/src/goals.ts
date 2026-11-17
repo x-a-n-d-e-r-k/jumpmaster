@@ -27,6 +27,8 @@ const H3 = /^###\s+(.+?)\s*#*\s*$/;
 const CHECKBOX = /^[-*+]\s+\[([ xX])\]\s+(.+?)\s*$/;
 const DONE_SUFFIX = /\s*\(done\)$/i;
 const KEY_MAX = 60;
+/** What a goal key may be: the shape `slug` and `withKeys` produce. */
+export const GOAL_KEY = new RegExp(`^[a-z0-9-]{1,${KEY_MAX}}$`);
 
 /** A line with whether it sits inside a fenced code block (the fence lines count as inside). */
 type Line = { text: string; fenced: boolean };
@@ -144,10 +146,43 @@ export function parseGoals(md: string): GoalParse {
   };
 }
 
-/** The first objective not done, or null (all done, or no usable parse). */
-export function currentObjective(p: GoalParse): Objective | null {
+/**
+ * The first objective neither marked done in the goal file nor in `doneKeys` (done by Command's
+ * ruling), or null (all done, or no usable parse).
+ */
+export function currentObjective(
+  p: GoalParse,
+  doneKeys: ReadonlySet<string> = new Set(),
+): Objective | null {
   if (!p.ok) return null;
-  return p.objectives.find((o) => !o.done) ?? null;
+  return p.objectives.find((o) => !o.done && !doneKeys.has(o.key)) ?? null;
+}
+
+/** The zone's objectives recorded done by a ruling: key to the ruling's id. */
+export function objectivesDone(db: Db, zoneId: string): Map<string, number> {
+  const rows = db
+    .prepare(
+      'SELECT key, ruling_id AS rulingId FROM objectives_done WHERE zone_id = ? ORDER BY key',
+    )
+    .all(zoneId) as { key: string; rulingId: number }[];
+  return new Map(rows.map((r) => [r.key, r.rulingId]));
+}
+
+/**
+ * Records `key` done by `rulingId`. A key already recorded is left as it was. Only the database is
+ * written: the goal file stays the owner's.
+ */
+export function recordObjectiveDone(
+  db: Db,
+  zoneId: string,
+  key: string,
+  rulingId: number,
+  now: Date,
+): void {
+  db.prepare(
+    `INSERT INTO objectives_done (zone_id, key, done_at, ruling_id) VALUES (?, ?, ?, ?)
+       ON CONFLICT (zone_id, key) DO NOTHING`,
+  ).run(zoneId, key, now.toISOString(), rulingId);
 }
 
 type GoalDbRow = {

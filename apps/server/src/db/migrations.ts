@@ -931,6 +931,51 @@ ALTER TABLE drops ADD COLUMN transcript_pruned_at TEXT;
 ALTER TABLE drops ADD COLUMN transcript_archive TEXT;
 `;
 
+/**
+ * v32: objectives Command ruled done, beside the goal file's own ` (done)` marks (#245), and the
+ * `objective_done` briefing kind that asks for the ruling. SQLite's rebuild of `briefings`, foreign
+ * keys off (`rulings` references it).
+ */
+const V32_SQL = `
+CREATE TABLE new_briefings (
+  id                 INTEGER PRIMARY KEY,
+  zone_id            TEXT NOT NULL,
+  kind               TEXT NOT NULL CHECK (kind IN ('parked','promote','promote_held',
+                       'refute_exhausted','crew','credits_required','objective_done')),
+  subject            TEXT NOT NULL,
+  decision           TEXT NOT NULL,
+  why                TEXT NOT NULL,
+  options_json       TEXT NOT NULL,
+  recommendation     TEXT NOT NULL DEFAULT '',
+  on_hold            TEXT NOT NULL DEFAULT '',
+  source             TEXT NOT NULL CHECK (source IN ('server','crew','mcp')),
+  source_ref         TEXT,
+  state              TEXT NOT NULL CHECK (state IN ('open','ruled','withdrawn','dismissed')),
+  diagnose_attempts  INTEGER NOT NULL DEFAULT 0,
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL,
+  diagnosis          TEXT,
+  diagnosis_basis    TEXT
+);
+INSERT INTO new_briefings (id, zone_id, kind, subject, decision, why, options_json, recommendation,
+  on_hold, source, source_ref, state, diagnose_attempts, created_at, updated_at, diagnosis,
+  diagnosis_basis)
+SELECT id, zone_id, kind, subject, decision, why, options_json, recommendation, on_hold, source,
+  source_ref, state, diagnose_attempts, created_at, updated_at, diagnosis, diagnosis_basis
+FROM briefings;
+DROP TABLE briefings;
+ALTER TABLE new_briefings RENAME TO briefings;
+CREATE UNIQUE INDEX briefings_open_subject ON briefings(zone_id, subject) WHERE state = 'open';
+
+CREATE TABLE objectives_done (
+  zone_id    TEXT NOT NULL,
+  key        TEXT NOT NULL,
+  done_at    TEXT NOT NULL,
+  ruling_id  INTEGER NOT NULL REFERENCES rulings(id),
+  PRIMARY KEY (zone_id, key)
+);
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -963,6 +1008,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 29, sql: V29_SQL, foreignKeysOff: true },
   { version: 30, sql: V30_SQL, foreignKeysOff: true },
   { version: 31, sql: V31_SQL },
+  { version: 32, sql: V32_SQL, foreignKeysOff: true },
 ];
 
 /**

@@ -1,9 +1,9 @@
 import type { CrewLeadOutput } from '@jumpmaster/protocol';
-import { raiseBriefing } from '../briefings.js';
+import { OBJECTIVE_PREFIX, raiseBriefing } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import { getZoneMode, isKilled } from '../db/repo.js';
-import { getGoals } from '../goals.js';
+import { currentObjective, getGoals, objectivesDone } from '../goals.js';
 import { type CrewIssueState, insertCrewIssue, normTitle } from './store.js';
 
 /** Lower case, punctuation and repeated whitespace collapsed: how two titles are compared. */
@@ -12,7 +12,9 @@ export const normaliseTitle = normTitle;
 /** Where a crew action came from: a crew drop's result, or (later) a zone-scoped MCP token. */
 export type CrewSource = { kind: 'drop'; dropId: string } | { kind: 'mcp'; tokenId: number };
 
-export type CrewActionInput = Partial<Pick<CrewLeadOutput, 'fileIssues' | 'briefings'>>;
+export type CrewActionInput = Partial<
+  Pick<CrewLeadOutput, 'fileIssues' | 'briefings' | 'objectiveDone'>
+>;
 
 export type ApplyReport = { filed: number[]; briefings: number[]; refused: string[] };
 
@@ -81,6 +83,44 @@ export function crewIssueSlots(db: Db, zone: DropZoneConfig): number {
 const sourceRefOf = (s: CrewSource): string => (s.kind === 'drop' ? s.dropId : String(s.tokenId));
 
 /**
+ * The crew's report that the current objective is finished, raised as a server briefing whose
+ * "Mark it done" ruling records it done (`advance_objective`). Only a crew drop may report it, and
+ * only for the zone's current objective; a second report while it is open updates the briefing.
+ */
+function objectiveDoneBriefing(
+  db: Db,
+  zone: DropZoneConfig,
+  done: NonNullable<CrewActionInput['objectiveDone']>,
+  source: CrewSource,
+  now: Date,
+): number | { refused: string } {
+  if (source.kind !== 'drop') return { refused: 'an MCP source cannot report it' };
+  const goals = getGoals(db, zone.id)?.parse;
+  const current = goals
+    ? currentObjective(goals, new Set(objectivesDone(db, zone.id).keys()))
+    : null;
+  if (!current || current.key !== done.key) return { refused: 'not the current objective' };
+  return raiseBriefing(
+    db,
+    {
+      zoneId: zone.id,
+      kind: 'objective_done',
+      subject: `${OBJECTIVE_PREFIX}${current.key}`,
+      decision: `Mark objective "${current.title}" done?`,
+      why: done.why,
+      options: [
+        { id: 'done', label: 'Mark it done', effect: 'advance_objective' },
+        { id: 'keep', label: 'Keep it open', effect: 'none' },
+      ],
+      onHold: 'All crew filing for the next objective',
+      source: 'server',
+      sourceRef: sourceRefOf(source),
+    },
+    now,
+  );
+}
+
+/**
  * Records the crew's proposed actions as intents, in one transaction that touches only the
  * database: forge writes happen later in `flushCrewOps`. Nothing is recorded unless the zone is
  * active with the kill switch off.
@@ -95,6 +135,7 @@ export function applyCrewActions(
 ): ApplyReport {
   const issues = input.fileIssues ?? [];
   const briefs = input.briefings ?? [];
+  const done = input.objectiveDone;
   const report: ApplyReport = { filed: [], briefings: [], refused: [] };
   const run = db.transaction((): ApplyReport => {
     const mode = getZoneMode(db, zone.id, zone.mode);
@@ -108,6 +149,7 @@ export function applyCrewActions(
       briefs.forEach((_, n) => {
         report.refused.push(`briefing ${n + 1}: ${blocked}`);
       });
+      if (done) report.refused.push(`objectiveDone ${done.key}: ${blocked}`);
       return report;
     }
 
@@ -193,6 +235,11 @@ export function applyCrewActions(
           now,
         ),
       );
+    }
+    if (done) {
+      const id = objectiveDoneBriefing(db, zone, done, source, now);
+      if (typeof id === 'number') report.briefings.push(id);
+      else report.refused.push(`objectiveDone ${done.key}: ${id.refused}`);
     }
     return report;
   });

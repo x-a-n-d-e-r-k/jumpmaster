@@ -10,6 +10,7 @@ import {
   ruleBriefing,
   syncParkBriefings,
 } from './briefings.js';
+import { applyCrewActions } from './crew/actions.js';
 import { flushCrewOps } from './crew/flush.js';
 import { getCrewIssue, insertCrewIssue, setCrewIssue } from './crew/store.js';
 import {
@@ -21,7 +22,9 @@ import {
   setWorkItemState,
 } from './db/repo.js';
 import { zonePass } from './flow/snapshot.js';
+import { objectivesDone } from './goals.js';
 import { syncParked } from './sync.js';
+import { crewWorld } from './test/crew.js';
 import { makeZone, type ZoneWorld, zoneWorld } from './test/fixtures.js';
 import { plus, t0 } from './test/helpers.js';
 
@@ -405,5 +408,108 @@ describe('promotion mismatch', () => {
     const [b] = open(w);
     expect(b).toMatchObject({ kind: 'promote', subject: `issue:${id}` });
     expect(b?.why).toMatch(/body changed/);
+  });
+});
+
+describe('advance_objective', () => {
+  const SUBJECT = 'objective:document-every-endpoint';
+  async function objectiveBriefing(): Promise<{ w: ZoneWorld; id: number }> {
+    const w = await crewWorld();
+    const r = applyCrewActions(
+      w.db,
+      w.zone,
+      { objectiveDone: { key: 'document-every-endpoint', why: 'All merged.' } },
+      { kind: 'drop', dropId: 'd1' },
+      t0,
+    );
+    return { w, id: r.briefings[0] ?? -1 };
+  }
+  const rows = (w: ZoneWorld) =>
+    w.db.prepare('SELECT zone_id AS zoneId, key, ruling_id AS rulingId FROM objectives_done').all();
+
+  test('ruling done records the objective done by that ruling', async () => {
+    const { w, id } = await objectiveBriefing();
+    const ruled = ruleBriefing(w.db, id, 'done', '', t0);
+    if (!ruled.ok) throw new Error('not ruled');
+    expect(await applyPendingRulings(w.db, deps(w), 'main', plus(t0, MIN))).toBe(1);
+    expect(rows(w)).toEqual([
+      { zoneId: 'main', key: 'document-every-endpoint', rulingId: ruled.rulingId },
+    ]);
+    expect(objectivesDone(w.db, 'main')).toEqual(
+      new Map([['document-every-endpoint', ruled.rulingId]]),
+    );
+    expect(listRulings(w.db, 'main')[0]).toMatchObject({
+      applyError: null,
+      effect: 'advance_objective',
+    });
+  });
+
+  test('ruling again or applying the effect again still leaves one row (D3)', async () => {
+    const { w, id } = await objectiveBriefing();
+    const ruled = ruleBriefing(w.db, id, 'done', '', t0);
+    if (!ruled.ok) throw new Error('not ruled');
+    expect(ruleBriefing(w.db, id, 'done', '', t0)).toEqual({ ok: false, status: 409 });
+    await applyPendingRulings(w.db, deps(w), 'main', plus(t0, MIN));
+    await applyPendingRulings(w.db, deps(w), 'main', plus(t0, 2 * MIN));
+    await applyEffect(w.db, deps(w), 'main', SUBJECT, 'advance_objective', plus(t0, 3 * MIN), {
+      rulingId: ruled.rulingId,
+      source: 'server',
+    });
+    expect(rows(w)).toEqual([
+      { zoneId: 'main', key: 'document-every-endpoint', rulingId: ruled.rulingId },
+    ]);
+  });
+
+  test('ruling keep records nothing', async () => {
+    const { w, id } = await objectiveBriefing();
+    expect(ruleBriefing(w.db, id, 'keep', '', t0).ok).toBe(true);
+    expect(await applyPendingRulings(w.db, deps(w), 'main', plus(t0, MIN))).toBe(1);
+    expect(rows(w)).toEqual([]);
+  });
+
+  test('a subject not starting objective: throws and records nothing (D2)', async () => {
+    const { w, id } = await objectiveBriefing();
+    const ruled = ruleBriefing(w.db, id, 'done', '', t0);
+    if (!ruled.ok) throw new Error('not ruled');
+    for (const subject of ['issue:1', 'crew:objective:x', 'objective:', 'objective:Bad Key']) {
+      await expect(
+        applyEffect(w.db, deps(w), 'main', subject, 'advance_objective', t0, {
+          rulingId: ruled.rulingId,
+          source: 'server',
+        }),
+      ).rejects.toThrow(/advance_objective needs an objective subject/);
+    }
+    // Only a ruling on a server briefing applies it.
+    for (const ruling of [{}, { rulingId: ruled.rulingId, source: 'crew' as const }]) {
+      await expect(
+        applyEffect(w.db, deps(w), 'main', SUBJECT, 'advance_objective', t0, ruling),
+      ).rejects.toThrow(/only through a ruling/);
+    }
+    expect(rows(w)).toEqual([]);
+  });
+
+  test('a crew or MCP briefing can never offer advance_objective', async () => {
+    const w = await crewWorld();
+    for (const source of ['crew', 'mcp'] as const) {
+      expect(() =>
+        raiseBriefing(
+          w.db,
+          {
+            zoneId: 'main',
+            kind: 'objective_done',
+            subject: SUBJECT,
+            decision: 'Mark it done?',
+            why: 'w',
+            options: [
+              { id: 'done', label: 'Mark it done', effect: 'advance_objective' },
+              { id: 'keep', label: 'Keep it open', effect: 'none' },
+            ],
+            source,
+          },
+          t0,
+        ),
+      ).toThrow(/effect none/);
+    }
+    expect(listBriefings(w.db, { zoneId: 'main' })).toEqual([]);
   });
 });

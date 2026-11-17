@@ -19,6 +19,7 @@ import {
 import { enableFable } from './fable.js';
 import { GATE_PARK_PREFIXES, gateParkAllowable } from './flow/decide.js';
 import { gateDigest } from './flow/snapshot.js';
+import { GOAL_KEY, recordObjectiveDone } from './goals.js';
 import type { ForgePair } from './outbox.js';
 import { retryParkedItem } from './sync.js';
 
@@ -28,7 +29,8 @@ export type BriefingKind =
   | 'promote_held'
   | 'refute_exhausted'
   | 'crew'
-  | 'credits_required';
+  | 'credits_required'
+  | 'objective_done';
 /** Every option effect the server defines. */
 export const EFFECTS = [
   'none',
@@ -39,6 +41,7 @@ export const EFFECTS = [
   'enable_fable',
   'allow_gate_change',
   'resume_after_credits',
+  'advance_objective',
 ] as const;
 export type Effect = (typeof EFFECTS)[number];
 
@@ -71,6 +74,9 @@ export const EFFECT_TEXT: Record<
   },
   resume_after_credits: {
     text: 'drops start again and run on credits until the limit given; nothing changes on GitHub',
+  },
+  advance_objective: {
+    text: 'the objective is recorded as done; the crew moves to the next one in the goal file',
   },
 };
 
@@ -407,9 +413,14 @@ const idOf = (subject: string, prefix: string): number | null => {
   return Number.isInteger(n) ? n : null;
 };
 
+/** What an `objective_done` briefing is about: `objective:<goal key>`. */
+export const OBJECTIVE_PREFIX = 'objective:';
+
 /**
  * Applies one effect to the briefing's subject. Idempotent: an effect whose subject has moved on
  * does nothing. Returns false when it could not run yet (try again next pass); throws on error.
+ * `ruling` is the ruling applying it and its briefing's source: `advance_objective` applies only
+ * through a ruling on a server briefing.
  */
 export async function applyEffect(
   db: Db,
@@ -418,6 +429,7 @@ export async function applyEffect(
   subject: string,
   effect: Effect,
   now: Date,
+  ruling: { rulingId?: number; source?: BriefingSource } = {},
 ): Promise<boolean> {
   switch (effect) {
     case 'none':
@@ -479,6 +491,20 @@ export async function applyEffect(
     case 'resume_after_credits':
       applyCreditsEffect(db, subject, effect, now);
       return true;
+    case 'advance_objective': {
+      // The key is the briefing's own subject: a late ruling marks only what it was raised for.
+      const key = subject.startsWith(OBJECTIVE_PREFIX)
+        ? subject.slice(OBJECTIVE_PREFIX.length)
+        : '';
+      if (!GOAL_KEY.test(key)) {
+        throw new Error(`advance_objective needs an objective subject, got ${subject}`);
+      }
+      if (ruling.rulingId === undefined || ruling.source !== 'server') {
+        throw new Error('advance_objective applies only through a ruling');
+      }
+      recordObjectiveDone(db, zoneId, key, ruling.rulingId, now);
+      return true;
+    }
   }
 }
 
@@ -599,7 +625,10 @@ export async function applyPendingRulings(
       const done =
         option.effect === 'allow_gate_change'
           ? await applyGateAllowance(db, deps, zoneId, r, option, now)
-          : await applyEffect(db, deps, zoneId, r.subject, option.effect, now);
+          : await applyEffect(db, deps, zoneId, r.subject, option.effect, now, {
+              rulingId: r.id,
+              source: r.source,
+            });
       if (!done) continue;
       db.prepare('UPDATE rulings SET applied_at = ? WHERE id = ?').run(now.toISOString(), r.id);
       applied++;

@@ -3,7 +3,7 @@ import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import { getPullRequest, getWorkItem } from '../db/repo.js';
 import type { ZonePass } from '../flow/snapshot.js';
-import { currentObjective, getGoals } from '../goals.js';
+import { currentObjective, getGoals, objectivesDone } from '../goals.js';
 import { type ForgePair, unsanitizeForgeText } from '../outbox.js';
 import { crewTemplate, fence, neutralise } from '../payloads.js';
 import { isCrewFiled } from '../sync.js';
@@ -88,14 +88,38 @@ function assemble(role: CrewRole, dropId: string, raw: Section[]): string {
   return `${out}\n\n${note}`;
 }
 
+/**
+ * The goal file as read, with each objective done only by Command's ruling listed after it as
+ * `<title> (done by ruling <id>)`: the file itself is never written.
+ */
 function goalsSection(db: Db, zone: DropZoneConfig): Section {
   const row = getGoals(db, zone.id);
-  const text = !row
-    ? `${zone.crew.goalPath} has not been read yet.`
-    : row.parse.ok
-      ? (row.raw ?? '')
-      : `${zone.crew.goalPath} could not be used: ${row.parse.error}`;
+  if (!row) {
+    const text = `${zone.crew.goalPath} has not been read yet.`;
+    return { title: zone.crew.goalPath, name: 'goals', kind: 'trusted', text };
+  }
+  if (!row.parse.ok) {
+    const text = `${zone.crew.goalPath} could not be used: ${row.parse.error}`;
+    return { title: zone.crew.goalPath, name: 'goals', kind: 'trusted', text };
+  }
+  const ruled = objectivesDone(db, zone.id);
+  const byRuling = row.parse.objectives.flatMap((o) => {
+    const id = ruled.get(o.key);
+    return o.done || id === undefined ? [] : [`- ${o.title} (done by ruling ${id})`];
+  });
+  const text = [
+    row.raw ?? '',
+    ...(byRuling.length === 0
+      ? []
+      : ['', 'Objectives Command ruled done (not yet marked in the file):', ...byRuling]),
+  ].join('\n');
   return { title: zone.crew.goalPath, name: 'goals', kind: 'trusted', text };
+}
+
+/** The zone's current objective, skipping those Command ruled done. */
+function zoneObjective(db: Db, zoneId: string) {
+  const goals = getGoals(db, zoneId);
+  return goals ? currentObjective(goals.parse, new Set(objectivesDone(db, zoneId).keys())) : null;
 }
 
 type RulingLine = {
@@ -134,8 +158,7 @@ export async function crewLeadInput(
   _now: Date,
   dropId: string,
 ): Promise<string> {
-  const goals = getGoals(db, zone.id);
-  const current = goals ? currentObjective(goals.parse) : null;
+  const current = zoneObjective(db, zone.id);
   const ruled = rulings(db, zone.id);
 
   const crewIssues = listCrewIssues(db, zone.id);
@@ -265,8 +288,7 @@ export function triageInput(
 ): string {
   const req = getTriageRequest(db, requestId);
   if (!req || req.zoneId !== zone.id) throw new Error(`unknown triage request ${requestId}`);
-  const goals = getGoals(db, zone.id);
-  const current = goals ? currentObjective(goals.parse) : null;
+  const current = zoneObjective(db, zone.id);
   const ruled =
     req.briefingId === null
       ? []
