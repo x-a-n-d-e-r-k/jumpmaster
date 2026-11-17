@@ -4,8 +4,11 @@ For the repository owner. A release is a version tag on `main`. Pushing it runs
 `.github/workflows/release.yml`, which:
 
 1. **guard**: refuses the tag unless it is `vX.Y.Z` or `vX.Y.Z-rc.N` and the commit it names
-   (`git rev-parse "$GITHUB_SHA^{commit}"`) is on `main` (`git merge-base --is-ancestor`). Nothing
-   else runs if it fails.
+   (`git rev-parse "$GITHUB_SHA^{commit}"`) is on `main` (`git merge-base --is-ancestor`), and
+   that commit's Images run on `main` (`.github/workflows/images.yml`, the image e2e tests this
+   workflow doesn't run) passed (`scripts/release-images-green.sh`). Nothing else runs if it fails.
+   Tag a commit whose Images run is green; if you tagged too early, wait for that run, then re-run
+   the Release workflow for the tag (the ruleset blocks moving it).
 2. **build** (`.github/workflows/release-build.yml`), natively, with no emulation: every per-arch
    job runs twice, on `ubuntu-24.04` (linux/amd64) and `ubuntu-24.04-arm` (linux/arm64).
    - `troopers` builds the trooper (the node preset), the python, go and jvm presets and the
