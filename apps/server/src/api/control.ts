@@ -81,6 +81,7 @@ import {
 import { type Forge, GitHubForge } from '../forge/github.js';
 import type { GitHubAppBroker } from '../forge/github-app.js';
 import type { HeldDropTokens } from '../forge/held-tokens.js';
+import type { InstallationVerifier } from '../forge/installation-verifier.js';
 import type { ImageMirror } from '../images/mirror.js';
 import { fileIntakeIssue, GoalStubSchema, IntakeIssueSchema, renderGoalStub } from '../intake.js';
 import { engageKill, expireLeases, releaseKill } from '../leases.js';
@@ -187,6 +188,11 @@ export interface ControlDeps {
   heldReadTokens?: Pick<HeldDropTokens, 'sweep'>;
   /** The app entries as they resolved now, for the doctor's app-reviewer zones (issue #237). */
   resolvedApps?: () => ResolvedApps;
+  /**
+   * The installation check every mint goes through (issue #267); the doctor's `forge.author` and
+   * `forge.reviewer` fail a zone whose recorded ids it refuses.
+   */
+  installationVerifier?: InstallationVerifier;
 }
 
 /** A setup mode whose codes go to stderr, alone on their line (main.ts passes its own). */
@@ -703,6 +709,13 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
               forges: deps.doctorForgesFor ?? forgesFor,
               ...(deps.readForgeFor ? { readForge: deps.readForgeFor } : {}),
               ...(deps.resolvedApps ? { resolvedApps: deps.resolvedApps } : {}),
+              ...(deps.installationVerifier
+                ? {
+                    verifiedInstallation: (
+                      ...a: Parameters<InstallationVerifier['verifiedInstallation']>
+                    ) => deps.installationVerifier!.verifiedInstallation(...a),
+                  }
+                : {}),
               ...(configStatus ? { configStatus } : {}),
               ...(credentials ? { credentials } : {}),
               ...(deps.reach ? { reach: (u: string) => checkReach(u, deps.reach) } : {}),
