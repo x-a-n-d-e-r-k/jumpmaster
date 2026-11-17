@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { type Db, openDb } from '../db/open.js';
+import { ScrubSet } from '../forge/scrub-set.js';
+import { scrub } from '../scrub.js';
 import { plus, t0, tmpDbFile } from '../test/helpers.js';
 import { createVaultKey, fingerprintOf, openVault, Vault, VaultKeyError } from './vault.js';
 
@@ -161,4 +163,16 @@ describe('createVaultKey', () => {
     expect(msg).toContain('already exists');
     expect(readFileSync(join(dir, 'vault_key'), 'utf8')).toBe('kept\n');
   });
+});
+
+test('opening the vault pins its key, in each text form, in the scrub set', () => {
+  const db = openDb(tmpDbFile());
+  const key = randomBytes(32);
+  const set = new ScrubSet(2, () => {});
+  expect(openVault(keyFile(key), db, '/data', 'JM_VAULT_KEY_FILE', set)).not.toBe('disabled');
+  for (let i = 0; i < 10; i++) set.add(`minted-value-${i}-xx`);
+  const values = set.values();
+  for (const form of [key.toString('base64url'), key.toString('base64'), key.toString('hex')])
+    expect(values).toContain(form);
+  expect(scrub(`key ${key.toString('hex')}`, undefined, [], set)).toBe('key [redacted]');
 });

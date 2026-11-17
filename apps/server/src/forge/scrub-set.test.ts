@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from 'node:crypto';
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 import { scrub } from '../scrub.js';
-import { SCRUB_SET_LIMIT, ScrubSet, serverScrubSet } from './scrub-set.js';
+import { EVICTION_WARNING, SCRUB_SET_LIMIT, ScrubSet, serverScrubSet } from './scrub-set.js';
 
 const basic = (t: string) => Buffer.from(`x-access-token:${t}`).toString('base64');
 const stateless = `ghs_12345_${'eyJhbGciOiJSUzI1NiJ9'}.${'a-b_c'.repeat(20)}.${'Zz-_9'.repeat(30)}`;
@@ -65,7 +65,7 @@ test('the set is bounded: the oldest value goes first, and a re-add moves a valu
   set.add('value-ddd');
   expect(set.values()).toEqual(['value-ccc', 'value-aaa', 'value-ddd']);
   expect(SCRUB_SET_LIMIT).toBe(4096);
-  const big = new ScrubSet();
+  const big = new ScrubSet(SCRUB_SET_LIMIT, () => {});
   for (let i = 0; i <= SCRUB_SET_LIMIT; i++) big.add(`secret-value-${i}`);
   expect(big.values()).toHaveLength(SCRUB_SET_LIMIT);
   expect(big.values()[0]).toBe('secret-value-1');
@@ -78,4 +78,71 @@ test('one server-wide instance is exported', () => {
 test('withBasicAuth is importable from @jumpmaster/protocol', async () => {
   const { withBasicAuth } = await import('@jumpmaster/protocol');
   expect(withBasicAuth(stateless)).toEqual([stateless, basic(stateless)]);
+});
+
+test('pinned PEM lines survive 5,000 later adds; the oldest tokens go; one warning at the first eviction', () => {
+  const { privateKey } = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+  });
+  const warnings: string[] = [];
+  const set = new ScrubSet(SCRUB_SET_LIMIT, (l) => warnings.push(l));
+  set.addPem(privateKey);
+  const lines = privateKey.split('\n').filter((l) => l.length >= 40 && !l.startsWith('-----'));
+  expect(lines.length).toBeGreaterThanOrEqual(20);
+  const pinned = set.values().length;
+  const token = (i: number) => `minted-value-${String(i).padStart(6, '0')}`;
+  for (let i = 0; i < 5000; i++) set.add(token(i));
+
+  const values = new Set(set.values());
+  for (const l of lines) {
+    expect(values.has(l)).toBe(true);
+    expect(scrub(`x ${l} y`, undefined, [], set)).toBe('x [redacted] y');
+  }
+  expect(values.has(privateKey)).toBe(true);
+  // Bounded: the evictable part holds `limit` values; pinned ones do not count.
+  expect(set.values().length).toBe(pinned + SCRUB_SET_LIMIT);
+  expect(values.has(token(0))).toBe(false);
+  expect(values.has(token(4999))).toBe(true);
+  expect(scrub(`x ${token(0)} y`, undefined, [], set)).toBe(`x ${token(0)} y`);
+  // 904 evictions: only the first is said.
+  expect(warnings).toEqual([EVICTION_WARNING]);
+  expect(EVICTION_WARNING).toBe(
+    'scrub set full: oldest minted values are no longer scrubbed by value',
+  );
+});
+
+test('the eviction warning repeats every 1,000th eviction after the first', () => {
+  const warnings: string[] = [];
+  const set = new ScrubSet(10, (l) => warnings.push(l));
+  for (let i = 0; i < 10 + 2001; i++) set.add(`value-${String(i).padStart(8, '0')}`);
+  // Evictions 1, 1001 and 2001.
+  expect(warnings).toEqual([EVICTION_WARNING, EVICTION_WARNING, EVICTION_WARNING]);
+});
+
+test('a pinned value is not evicted by a later add of the same value, nor counted', () => {
+  const set = new ScrubSet(2, () => {});
+  set.pin('vault-key-material');
+  set.add('vault-key-material');
+  set.add('token-one-xx');
+  set.add('token-two-xx');
+  set.add('token-three-x');
+  expect(set.values()).toEqual(['vault-key-material', 'token-two-xx', 'token-three-x']);
+  set.pin('short');
+  expect(set.values()).not.toContain('short');
+});
+
+test('the server-wide set logs its eviction warning through the scrubbed server log', () => {
+  const lines: string[] = [];
+  const spy = vi.spyOn(console, 'error').mockImplementation((m: unknown) => {
+    lines.push(String(m));
+  });
+  try {
+    for (let i = 0; i <= SCRUB_SET_LIMIT; i++) serverScrubSet.add(`server-value-${i}-padding`);
+  } finally {
+    spy.mockRestore();
+    serverScrubSet.clear();
+  }
+  expect(lines).toEqual([`[jumpmaster] ${EVICTION_WARNING}`]);
 });

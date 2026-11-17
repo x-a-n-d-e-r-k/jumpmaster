@@ -25,6 +25,7 @@ import {
   upsertWorkItem,
   verdictsForHead,
 } from './db/repo.js';
+import { serverScrubSet } from './forge/scrub-set.js';
 import { promptVersions } from './payloads.js';
 import { applyResult, applyUsage, type ResultDeps, renderReviewBody } from './results.js';
 import { fakeForgePair } from './test/fakes.js';
@@ -879,6 +880,28 @@ describe('applyResult: doctor', () => {
     expect(db.prepare('SELECT * FROM attempts').all()).toEqual(before);
     expect(getDrop(db, 'doc')?.chargedKey).toBeNull();
     expect(workItem(db, 1).state).toBe('in_flight');
+  });
+
+  test('D5: a value only the scrub set holds is redacted from the stored result', async () => {
+    const { db, deps } = doctorSetup();
+    const minted = 'minted-only-in-scrub-set-0001';
+    serverScrubSet.add(minted);
+    try {
+      const doctor = findings(`token ${minted}`);
+      await applyResult(
+        db,
+        deps,
+        'doc',
+        { status: 'completed', role: 'doctor', gates: doctor.gates, doctor },
+        t0,
+      );
+    } finally {
+      serverScrubSet.clear();
+    }
+    const stored = getDrop(db, 'doc')?.resultJson ?? '';
+    expect(deps.secrets).not.toContain(minted);
+    expect(stored).not.toContain(minted);
+    expect(JSON.parse(stored).doctor.gates[0].outputTail).toBe('token [REDACTED]');
   });
 
   test('M-5: a doctor drop whose probe, a service or a gate failed is stored as failed', async () => {

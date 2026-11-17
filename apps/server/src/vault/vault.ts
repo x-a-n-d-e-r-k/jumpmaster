@@ -3,6 +3,7 @@ import { chmodSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readSecretFile } from '@jumpmaster/protocol';
 import type { Db } from '../db/open.js';
+import { type ScrubSet, serverScrubSet } from '../forge/scrub-set.js';
 
 /**
  * The vault (§7.5): values encrypted at rest with AES-256-GCM under a 32-byte key read from
@@ -208,13 +209,15 @@ export class Vault {
  * The vault for this install. The key is 32 random bytes, base64url, in the file `keyFile`
  * (`JM_VAULT_KEY_FILE`), read with every check a secret file gets. Without a key file: an empty
  * vault is `'disabled'` (credentials come from files and the environment only), a non-empty one
- * refuses the start, since the key and the data travel together.
+ * refuses the start, since the key and the data travel together. The key, as the file holds it and
+ * in its other text forms, is pinned in the scrub set (`set`) before it is used.
  */
 export function openVault(
   keyFile: string | undefined,
   db: Db,
   dataDir = 'the data directory',
   label = 'JM_VAULT_KEY_FILE',
+  set: Pick<ScrubSet, 'pin'> = serverScrubSet,
 ): Vault | 'disabled' {
   if (!keyFile) {
     const n = vaultCount(db);
@@ -229,6 +232,8 @@ export function openVault(
     throw new Error(
       `${label}: ${keyFile} must hold 32 random bytes, base64url (as bootstrap and init write it)`,
     );
+  for (const form of [text, key.toString('base64url'), key.toString('base64'), key.toString('hex')])
+    set.pin(form);
   return new Vault(db, key, keyFile);
 }
 
