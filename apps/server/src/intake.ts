@@ -130,7 +130,7 @@ export function renderGoalStub(t: IntakeTemplate, a: GoalStubInput): string {
   ].join('\n');
 }
 
-/** An agent-ready issue body (§8.3): context, a checklist of criteria, tests, and what is out. */
+/** A drop-ready issue body (§8.3): context, a checklist of criteria, tests, and what is out. */
 export function renderIssueSpec(i: Omit<IssueSpec, 'title'> & { title?: string }): string {
   const [context, criteria, tests, out] = ISSUE_SPEC_HEADINGS;
   const outOfScope = i.outOfScope ?? [];

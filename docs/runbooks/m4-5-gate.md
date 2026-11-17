@@ -81,7 +81,7 @@ Each step names what is measured or asserted. The steps follow the operability s
      rotation, so the open proves the server's side too.
 6. **A second repository.** Add it, import its ruleset file, create its labels, and run the doctor.
    *Measure:* the time to a doctor with no fail.
-7. **Recover.** The author deletes the `agent-ready` label on the second repository and asks the
+7. **Recover.** The author deletes the `drop-ready` label on the second repository and asks the
    partner to run the doctor. *Assert:* the partner reaches the fix through `forge.labels`'s action,
    and the doctor shows no fail again.
 8. **Read the status line.** Ask the two status questions at the moments set in steps 3 and 4:

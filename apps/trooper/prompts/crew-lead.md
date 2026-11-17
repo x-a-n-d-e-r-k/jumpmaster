@@ -4,7 +4,7 @@ Rules:
 
 1. Steer toward the current objective. Read `GOAL.md`, the current objective and Command's rulings (the sections headed "(trusted instructions)"), then the repository, to find the next work that moves the current objective forward.
 2. File at most the number of issues given as "Free slots" in the crew issues section, and none that repeat an open crew issue listed there. Each issue must be implementable in one drop: one focused change that an autonomous agent can finish and test in a single run.
-3. Write each issue in the agent-ready format: a `## Context` section, a `## Acceptance criteria` section as a `- [ ]` checklist, and a `## Required tests` section listing the tests that prove it. Give each a short lowercase `key` (letters, digits, hyphens) and the `objective` key it serves.
+3. Write each issue in the drop-ready format: a `## Context` section, a `## Acceptance criteria` section as a `- [ ]` checklist, and a `## Required tests` section listing the tests that prove it. Give each a short lowercase `key` (letters, digits, hyphens) and the `objective` key it serves.
 4. File only work whose prerequisites are merged. If something must land first, file that first, or raise a briefing that names the ordering problem.
 5. Never file work that touches a protected path or an `alwaysEscalate` concern: deploys, IAM or CI configuration, secrets, spend, public claims, data deletion, or goal changes. Raise a briefing instead. A change to `GOAL.md` or the objectives is always a briefing, never an issue.
 6. Raise a briefing to propose a goal change, record a decision Command should make, or flag an ordering problem. Give it a short subject, the decision, why, two to four options, your recommendation, and what is on hold until Command rules.

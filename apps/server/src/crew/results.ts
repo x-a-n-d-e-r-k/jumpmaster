@@ -117,7 +117,7 @@ function applyRefute(
       }
       return;
     }
-    // A revision that is missing or not in the agent-ready format counts as a rejection.
+    // A revision that is missing or not in the drop-ready format counts as a rejection.
   }
   setCrewIssue(db, issue.id, { ...base, state: 'rejecting' }, now);
 }

@@ -542,7 +542,7 @@ describe('forge checks', () => {
     w.f.state.labels = ['bug'];
     const c = one(await w.run(), 'forge.labels');
     expect(c.status).toBe('fail');
-    expect(c.fix).toContain('gh label create agent-ready --repo octo/demo');
+    expect(c.fix).toContain('gh label create drop-ready --repo octo/demo');
     expect(c.fix).toContain('gh label create agent-retry --repo octo/demo');
     expect(c.fix).toContain('gh label create agent-staged --repo octo/demo');
   });
@@ -550,7 +550,7 @@ describe('forge checks', () => {
   test('forge.labels reports a missing triage label on a zone whose triage gate is on', async () => {
     const crew = { ...makeZone().crew, enabled: true };
     const w = world({ zone: { crew, protectedPaths: ['GOAL.md'] } });
-    w.f.state.labels = ['agent-ready', 'agent-retry', 'agent-staged'];
+    w.f.state.labels = ['drop-ready', 'agent-retry', 'agent-staged'];
     const c = one(await w.run(), 'forge.labels');
     expect(c).toMatchObject({ status: 'fail', summary: expect.stringContaining('jm-triage') });
     expect(c.fix).toContain('gh label create jm-triage --repo octo/demo');
@@ -565,7 +565,7 @@ describe('forge checks', () => {
     expect(one(await w.run(), 'forge.labels').status).toBe('pass');
     // With the gate off (or the crew off) nothing writes the label, so it is not needed.
     const off = world({ zone: { crew, protectedPaths: ['GOAL.md'], triage: { gate: false } } });
-    off.f.state.labels = ['agent-ready', 'agent-retry', 'agent-staged'];
+    off.f.state.labels = ['drop-ready', 'agent-retry', 'agent-staged'];
     expect(one(await off.run(), 'forge.labels').status).toBe('pass');
   });
 });
@@ -1740,5 +1740,24 @@ describe('transcripts.retention (issue #197)', () => {
     expect(c.fix).toContain('transcripts');
     w.deps.now = () => new Date(NOW.getTime() + 24 * 3_600_000);
     expect(one(await w.run(), 'transcripts.retention').status).toBe('info');
+  });
+});
+
+describe('zone.ready-label (#198)', () => {
+  test('a zone on agent-ready gets an INFO with the two steps to drop-ready, in order', async () => {
+    const checks = await world({ zone: { readyLabel: 'agent-ready' } }).run();
+    const c = one(checks, 'zone.ready-label');
+    expect(c).toMatchObject({ status: 'info', zoneId: 'main' });
+    expect(c.summary).toContain('drop-ready');
+    const fix = c.fix ?? '';
+    const rename = fix.indexOf('Issues → Labels → `agent-ready` → Edit');
+    const set = fix.indexOf('jumpmaster ctl zones set main readyLabel=drop-ready');
+    expect(rename).toBeGreaterThanOrEqual(0);
+    expect(set).toBeGreaterThan(rename);
+  });
+
+  test.each(['drop-ready', 'go'])('a zone on %s gets none', async (readyLabel) => {
+    const checks = await world({ zone: { readyLabel } }).run();
+    expect(checks.filter((c) => c.id === 'zone.ready-label')).toEqual([]);
   });
 });

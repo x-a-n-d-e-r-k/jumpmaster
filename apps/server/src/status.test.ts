@@ -279,7 +279,7 @@ const STEPS: Step[] = [
   [
     'idle',
     () => {},
-    'Idle: no ready issues. Label one agent-ready or file one from Intake',
+    'Idle: no ready issues. Label one drop-ready or file one from Intake',
     'you',
     '/zones/main/intake',
   ],
@@ -412,6 +412,11 @@ describe('statusOf', () => {
     expect(doctorQueued.detail).toContain(
       'The doctor drop in main: waiting for a free stick slot.',
     );
+  });
+
+  test("the idle headline names the zone's own ready label (#198)", () => {
+    const s = statusOf(base({ zones: [zone({ items: [], readyLabel: 'go' })] }), NOW);
+    expect(s.headline).toBe('Idle: no ready issues. Label one go or file one from Intake');
   });
 
   test('the status names zones, issues and PRs and never a token', () => {

@@ -39,6 +39,8 @@ export function world(
     image: IMAGE,
     preset: 'node',
     egress: { mode: 'enforce', allow: [] },
+    // A zone added since #198, on the default.
+    readyLabel: 'drop-ready',
     ...o.zone,
   });
   const f = fakeForgePair({ issues: [], trusted: [] });
@@ -59,7 +61,7 @@ export function world(
       },
     };
   }
-  f.state.labels = ['agent-ready', 'agent-retry', 'bug'];
+  f.state.labels = ['drop-ready', 'agent-retry', 'bug'];
   f.state.dirs.set('main:.github/workflows', ['ci.yml']);
   f.state.dirs.set('main:', ['package.json', 'package-lock.json', 'src']);
   f.state.files.set('main:package.json', JSON.stringify({ scripts: { test: 'vitest' } }));

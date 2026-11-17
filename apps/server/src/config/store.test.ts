@@ -1772,3 +1772,127 @@ describe('githubApp ids (spec §4.2): config, not secret, and guarded', () => {
     });
   });
 });
+
+describe('the readyLabel pin at upgrade (#198)', () => {
+  const NOTE = 'readyLabel pinned to agent-ready (the default became drop-ready)';
+  const notes = (db: Db) =>
+    (
+      db.prepare('SELECT note FROM config_revisions ORDER BY id').all() as { note: string | null }[]
+    ).map((r) => r.note);
+  /** A database as an install before #198 left it: a current revision and no pin marker. */
+  function upgraded(w: World): void {
+    w.db.prepare("DELETE FROM settings WHERE key = 'config.ready_label_pins'").run();
+  }
+
+  test('db mode: an existing zone with no readyLabel is pinned with a revision; an explicit one is untouched', () => {
+    const w = world();
+    const store = w.open();
+    const added = store.apply(
+      { dropZones: [zone('main'), zone('web', { readyLabel: 'go' })] },
+      { via: 'ctl', principal: token },
+    );
+    expect(added.ok).toBe(true);
+    // Before the upgrade the zone ran on the old default and its document named no label.
+    upgraded(w);
+    const before = revCount(w.db);
+    const after = w.open();
+    expect(revCount(w.db)).toBe(before + 1);
+    expect(notes(w.db).at(-1)).toBe(NOTE);
+    const labels = after.current().dropZones.map((z) => [z.id, z.readyLabel]);
+    expect(labels).toEqual([
+      ['main', 'agent-ready'],
+      ['web', 'go'],
+    ]);
+    expect((after.document().dropZones as Record<string, unknown>[])[0]?.readyLabel).toBe(
+      'agent-ready',
+    );
+    // Twice changes nothing.
+    const again = w.open();
+    expect(revCount(w.db)).toBe(before + 1);
+    expect(again.current().dropZones[0]?.readyLabel).toBe('agent-ready');
+  });
+
+  test('db mode: the pin runs once, so a zone added after the upgrade gets drop-ready', () => {
+    const w = world();
+    const store = w.open();
+    expect(store.apply({ dropZones: [zone('main')] }, { via: 'ctl', principal: token }).ok).toBe(
+      true,
+    );
+    expect(store.current().dropZones[0]?.readyLabel).toBe('drop-ready');
+    const n = revCount(w.db);
+    expect(w.open().current().dropZones[0]?.readyLabel).toBe('drop-ready');
+    expect(revCount(w.db)).toBe(n);
+  });
+
+  test('db mode: a rollback to a revision from before the pin keeps the zone on the old label', () => {
+    const w = world();
+    const store = w.open();
+    const first = store.apply({ dropZones: [zone('main')] }, { via: 'ctl', principal: token });
+    if (!first.ok) throw new Error('apply');
+    upgraded(w);
+    const after = w.open();
+    const r = after.rollback(first.revision, { principal: token });
+    expect(r.ok).toBe(true);
+    expect(after.current().dropZones[0]?.readyLabel).toBe('agent-ready');
+  });
+
+  test('file mode: an existing zone with no readyLabel is pinned with a revision; a new zone is not', () => {
+    const w = world({ dropZones: [zone('main'), zone('web', { readyLabel: 'go' })] });
+    w.open();
+    upgraded(w);
+    const before = revCount(w.db);
+    const after = w.open();
+    expect(after.mode()).toBe('file');
+    expect(revCount(w.db)).toBe(before + 1);
+    expect(notes(w.db).at(-1)).toBe(NOTE);
+    expect(after.current().dropZones.map((z) => [z.id, z.readyLabel])).toEqual([
+      ['main', 'agent-ready'],
+      ['web', 'go'],
+    ]);
+    // Twice changes nothing.
+    w.open();
+    expect(revCount(w.db)).toBe(before + 1);
+    // The file still names no label for main: each read pins it again. A zone added later does not.
+    writeConfig(w.file, {
+      dropZones: [zone('main'), zone('web', { readyLabel: 'go' }), zone('new')],
+    });
+    const r = after.reload();
+    expect(r.ok).toBe(true);
+    expect(after.current().dropZones.map((z) => [z.id, z.readyLabel])).toEqual([
+      ['main', 'agent-ready'],
+      ['web', 'go'],
+      ['new', 'drop-ready'],
+    ]);
+  });
+
+  test('file mode: a fresh install pins nothing', () => {
+    const w = world({ dropZones: [zone('main')] });
+    const store = w.open();
+    expect(store.current().dropZones[0]?.readyLabel).toBe('drop-ready');
+    expect(notes(w.db)).toEqual([null]);
+    expect(w.open().current().dropZones[0]?.readyLabel).toBe('drop-ready');
+  });
+
+  test('file mode: a zone with history from before the config store is pinned', () => {
+    const w = world({ dropZones: [zone('main')] });
+    upsertDropZone(w.db, {
+      id: 'main',
+      repo: 'octo/main',
+      defaultBranch: 'main',
+      configJson: '{}',
+    });
+    upsertWorkItem(w.db, {
+      dropZoneId: 'main',
+      issueNumber: 1,
+      title: 't',
+      body: 'b',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    const store = w.open();
+    expect(store.current().dropZones[0]?.readyLabel).toBe('agent-ready');
+    expect(notes(w.db)).toEqual([NOTE]);
+  });
+});

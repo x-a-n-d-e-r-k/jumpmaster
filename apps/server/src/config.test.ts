@@ -91,7 +91,7 @@ describe('loadConfig', () => {
     expect(c.listen).toMatchObject({ host: '127.0.0.1', port: 7420 });
     expect(c.pollSeconds).toBe(60);
     expect(c.dropZones[0]).toMatchObject({
-      readyLabel: 'agent-ready',
+      readyLabel: 'drop-ready',
       model: 'claude-opus-5-5',
       maxTurns: 200,
     });
@@ -501,7 +501,7 @@ describe('crew config', () => {
 
   test('crew.enabled with stagedLabel equal to readyLabel is a config error', () => {
     expect(() =>
-      loadConfig(withZone({ crew: { enabled: true, stagedLabel: 'agent-ready' } }), fullEnv),
+      loadConfig(withZone({ crew: { enabled: true, stagedLabel: 'drop-ready' } }), fullEnv),
     ).toThrow(/stagedLabel/);
   });
 
@@ -528,7 +528,7 @@ describe('crew config', () => {
   });
 
   test('triageLabel equal to readyLabel, retryLabel or crew.stagedLabel is a config error', () => {
-    expect(() => loadConfig(withZone({ triageLabel: 'agent-ready' }), fullEnv)).toThrow(
+    expect(() => loadConfig(withZone({ triageLabel: 'drop-ready' }), fullEnv)).toThrow(
       /triageLabel must differ from readyLabel/,
     );
     expect(() => loadConfig(withZone({ triageLabel: 'agent-retry' }), fullEnv)).toThrow(
@@ -546,7 +546,7 @@ describe('crew config', () => {
 
   test('triagedLabel equal to readyLabel, retryLabel, triageLabel or crew.stagedLabel is a config error', () => {
     for (const [label, field] of [
-      ['agent-ready', 'readyLabel'],
+      ['drop-ready', 'readyLabel'],
       ['agent-retry', 'retryLabel'],
       ['jm-triage', 'triageLabel'],
       ['agent-staged', 'crew\\.stagedLabel'],
@@ -1336,7 +1336,7 @@ describe('githubApp (spec §4.2: installation and repository ids, not secret)', 
     expect(zone).toEqual({
       id: 'main',
       repo: 'octo/demo',
-      readyLabel: 'agent-ready',
+      readyLabel: 'drop-ready',
       gates: [{ name: 'test', run: 'npm test', timeoutMinutes: 20 }],
       services: [],
       verification: [],

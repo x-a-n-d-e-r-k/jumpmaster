@@ -49,13 +49,13 @@ runbooks and the UI.
 
 **Planning**
 
-| Term              | Meaning                                                                                                                                            |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`GOAL.md`**     | A file in your repository that holds the long-term goal, the objectives that lead to it, your decisions and the non-goals. The crew plans from it. |
-| **Lighthouse**    | The long-term end state at the top of `GOAL.md`.                                                                                                   |
-| **Objective**     | One milestone on the way to the lighthouse.                                                                                                        |
-| **Staged**        | An issue the crew has written but not yet approved for agents.                                                                                     |
-| **`agent-ready`** | The label that queues an issue for an implement drop. You can add it yourself.                                                                     |
+| Term             | Meaning                                                                                                                                            |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`GOAL.md`**    | A file in your repository that holds the long-term goal, the objectives that lead to it, your decisions and the non-goals. The crew plans from it. |
+| **Lighthouse**   | The long-term end state at the top of `GOAL.md`.                                                                                                   |
+| **Objective**    | One milestone on the way to the lighthouse.                                                                                                        |
+| **Staged**       | An issue the crew has written but not yet approved for agents.                                                                                     |
+| **`drop-ready`** | The label that queues an issue for an implement drop. You can add it yourself.                                                                     |
 
 **Safety**
 

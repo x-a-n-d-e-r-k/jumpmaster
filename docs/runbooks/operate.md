@@ -237,7 +237,7 @@ The top of home answers "what is Jumpmaster doing, and why is it waiting?" in on
 example `Working: implement #12 in <zone>, 4m 12s, gate 2 of 3`, `Waiting on CI for PR #13 (…)`,
 `Paused by you: <zone> (paused)`, `Blocked: <zone> needs githubReviewerToken: …`,
 `No runner: the stick hasn't checked in`, or
-`Idle: no ready issues. Label one agent-ready or file one from Intake`. Below it: the detail, the
+`Idle: no ready issues. Label one drop-ready or file one from Intake`. Below it: the detail, the
 other things that block work, each with its fix, and the control that moves it on. `ctl status`
 prints the same (`--json` for the object).
 
