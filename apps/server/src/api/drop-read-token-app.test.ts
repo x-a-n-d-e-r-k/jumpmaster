@@ -37,6 +37,8 @@ const api = 'https://api.github.com';
 const HOUR = 3_600_000;
 const SHA = 'b'.repeat(40);
 const INSTALLATION = 88;
+const AUTHOR_INSTALLATION = 77;
+const AUTHOR_APP_ID = '42';
 const REPOSITORY = 6660;
 const OPERATOR = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
@@ -85,7 +87,7 @@ const appZone = {
   identity: 'two-bot',
   githubApp: {
     repositoryId: REPOSITORY,
-    installations: { author: 11, reviewer: INSTALLATION },
+    installations: { author: AUTHOR_INSTALLATION, reviewer: INSTALLATION },
   },
 } as DropZoneConfig;
 
@@ -114,6 +116,30 @@ const reviewerEntry: AppEntryRead = {
 const withReviewerApp: ResolvedApps = new Map([
   ['octo', { author: { source: 'missing' }, reviewer: reviewerEntry }],
 ]);
+const authorEntry: AppEntryRead = {
+  source: 'vault',
+  fingerprint: 'fp-a',
+  entry: {
+    appId: AUTHOR_APP_ID,
+    slug: 'jm-author',
+    clientId: 'c',
+    pem: KEY,
+    importedAt: '2026-11-01',
+  },
+};
+const withAuthorApp: ResolvedApps = new Map([
+  ['octo', { author: authorEntry, reviewer: { source: 'missing' } }],
+]);
+const withBothApps: ResolvedApps = new Map([
+  ['octo', { author: authorEntry, reviewer: reviewerEntry }],
+]);
+
+/** The app id a JWT bearer was signed for (its `iss`), or undefined for an installation token. */
+const issuerOf = (authorization: string): string | undefined => {
+  const [, body] = authorization.replace(/^Bearer /, '').split('.');
+  if (!body) return undefined;
+  return (JSON.parse(Buffer.from(body, 'base64url').toString()) as { iss?: string }).iss;
+};
 
 interface Call {
   method: string;
@@ -141,7 +167,12 @@ function fakeGitHub() {
     .get('/repos/octo/demo/installation')
     .reply(async (req: Request) => {
       await record(req);
-      return [200, { id: INSTALLATION, permissions: { contents: 'read' } }];
+      // Each app finds the repository under its own installation.
+      const id =
+        issuerOf(req.headers.get('authorization') ?? '') === AUTHOR_APP_ID
+          ? AUTHOR_INSTALLATION
+          : INSTALLATION;
+      return [200, { id, permissions: { contents: 'read' } }];
     })
     .post(/^\/app\/installations\/\d+\/access_tokens$/)
     .reply(async (req: Request) => {
@@ -193,7 +224,7 @@ beforeEach(() => {
 });
 afterEach(() => app.close());
 
-type Role = 'review' | 'refute' | 'doctor';
+type Role = 'review' | 'refute' | 'doctor' | 'implement' | 'heal' | 'resolve';
 
 function setup(o: { zone?: DropZoneConfig; apps?: ResolvedApps; read?: boolean } = {}) {
   const db = openDb(tmpDbFile());
@@ -237,17 +268,22 @@ function setup(o: { zone?: DropZoneConfig; apps?: ResolvedApps; read?: boolean }
   return { db, held, config };
 }
 
+const onPr = (role: Role) => role === 'review' || role === 'heal' || role === 'resolve';
+
 function queue(db: Db, id: string, role: Role) {
   insertDrop(db, {
     id,
     dropZoneId: 'main',
-    workItemId: role === 'review' ? 1 : null,
+    workItemId: role === 'refute' || role === 'doctor' ? null : 1,
     role,
     state: 'queued',
     createdAt: t0.toISOString(),
-    ...(role === 'review' ? { prNumber: 3, headSha: SHA } : {}),
+    ...(onPr(role) ? { prNumber: 3, headSha: SHA } : {}),
     ...(role === 'refute'
       ? { inputJson: JSON.stringify({ work: { role: 'refute', crewIssueId: 1 }, input: 'x' }) }
+      : {}),
+    ...(role === 'heal'
+      ? { inputJson: JSON.stringify({ feedback: { source: 'review', text: 'Fix it' } }) }
       : {}),
   });
 }
@@ -336,19 +372,199 @@ describe('the lease of an app-reviewer zone', () => {
     expect(held.holds(token)).toBe(true);
   });
 
-  test('an implement drop mints nothing', async () => {
-    const { db } = setup();
+  test('an implement drop mints nothing when the zone is not an app-author zone', async () => {
+    const { db } = setup({ read: true });
+    const { payload } = await leased(db, 'implement', 'i1');
+    expect(gh.calls).toEqual([]);
+    expect(cloneToken(payload)).toBe(READ_PAT);
+  });
+
+  test('with both apps set, an implement drop mints from the author app only', async () => {
+    const { db } = setup({ apps: withBothApps, read: true });
+    const { payload } = await leased(db, 'implement', 'i1');
+    expect(gh.mints()).toHaveLength(1);
+    expect(gh.mints()[0]?.path).toBe(`/app/installations/${AUTHOR_INSTALLATION}/access_tokens`);
+    expect(gh.calls.every((c) => issuerOf(c.authorization) === AUTHOR_APP_ID)).toBe(true);
+    expect(cloneToken(payload)).toBe(gh.minted[0]);
+  });
+});
+
+describe('the lease of an app-author zone', () => {
+  const resultOf = (role: Role) => ({
+    epoch: 1,
+    result: { status: 'failed', role, gates: [], reason: 'x' },
+  });
+
+  for (const role of ['implement', 'heal', 'resolve'] as const) {
+    test(`a ${role} drop fetches with a freshly minted author contents: read token, not a PAT`, async () => {
+      const { db, config } = setup({ apps: withAuthorApp, read: true });
+      expect(config.secrets.githubReadToken).toBe(READ_PAT);
+      expect(config.secrets.githubAuthorToken).toBeTruthy();
+      const { res, payload } = await leased(db, role);
+      expect(gh.mints()).toHaveLength(1);
+      const [m] = gh.mints();
+      expect(m?.path).toBe(`/app/installations/${AUTHOR_INSTALLATION}/access_tokens`);
+      expect(m?.body).toEqual({ repository_ids: [REPOSITORY], permissions: { contents: 'read' } });
+      expect(payload.credentials.forgeToken).toBe(gh.minted[0]);
+      expect(res.body).not.toContain(READ_PAT);
+      expect(res.body).not.toContain(config.secrets.githubAuthorToken);
+    });
+  }
+
+  test('two implement drops get two mints and two different tokens, none from the cache', async () => {
+    const { db } = setup({ apps: withAuthorApp });
     const { stickToken } = await enroll();
-    insertDrop(db, {
-      id: 'i1',
+    upsertWorkItem(db, {
       dropZoneId: 'main',
-      workItemId: 1,
+      issueNumber: 8,
+      title: 'Add gadget',
+      body: 'Please add a gadget.',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    queue(db, 'd1', 'implement');
+    insertDrop(db, {
+      id: 'd2',
+      dropZoneId: 'main',
+      workItemId: 2,
       role: 'implement',
       state: 'queued',
       createdAt: t0.toISOString(),
     });
-    expect((await lease(stickToken)).statusCode).toBe(200);
-    expect(gh.calls).toEqual([]);
+    const a = (await lease(stickToken)).json() as DropPayload;
+    const b = (await lease(stickToken)).json() as DropPayload;
+    expect(gh.mints()).toHaveLength(2);
+    expect(cloneToken(a)).toBe(gh.minted[0]);
+    expect(cloneToken(b)).toBe(gh.minted[1]);
+    expect(cloneToken(a)).not.toBe(cloneToken(b));
+  });
+
+  test('the minted token is in the scrub set and held for the drop', async () => {
+    const { db, held } = setup({ apps: withAuthorApp });
+    const { payload } = await leased(db, 'implement');
+    const token = cloneToken(payload)!;
+    expect(serverScrubSet.values()).toContain(token);
+    expect(scrub(`fetched with ${token}`)).not.toContain(token);
+    expect(held.holds(token)).toBe(true);
+  });
+
+  test('a mint failure requeues the drop, answers 503 mint failed, logs no token, and never falls back to a PAT', async () => {
+    const { db, config } = setup({ apps: withAuthorApp, read: true });
+    const { stickToken } = await enroll();
+    queue(db, 'd1', 'implement');
+    gh.state.mint = 500;
+    const res = await lease(stickToken);
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toEqual({ refused: 'mint failed', retryable: true });
+    expect(res.body).not.toContain(READ_PAT);
+    expect(res.body).not.toContain(config.secrets.githubAuthorToken);
+    expect(getDrop(db, 'd1')).toMatchObject({
+      state: 'queued',
+      stickId: null,
+      leaseExpiresAt: null,
+    });
+    expect(logs.some((l) => l.includes('d1') && l.includes('HTTP 500'))).toBe(true);
+    for (const line of [...logs, ...consoleLines]) {
+      expect(line).not.toMatch(/eyJ|BEGIN|ghs_/);
+      expect(line).not.toContain(READ_PAT);
+    }
+  });
+
+  describe('revocation', () => {
+    const revoked = async (token: string) => {
+      await vi.waitFor(() => expect(gh.revokes()).toHaveLength(1));
+      expect(gh.revokes()[0]?.authorization).toBe(`Bearer ${token}`);
+    };
+
+    test('an accepted result revokes it', async () => {
+      const { db, held } = setup({ apps: withAuthorApp });
+      const { stickToken, payload } = await leased(db, 'implement');
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/drops/d1/result',
+        headers: bearer(stickToken),
+        payload: resultOf('implement'),
+      });
+      expect(res.statusCode).toBe(204);
+      await revoked(cloneToken(payload)!);
+      expect(held.size()).toBe(0);
+    });
+
+    test('lease expiry through expireLeases and the sweep revokes it', async () => {
+      const { db, held } = setup({ apps: withAuthorApp });
+      const { payload } = await leased(db, 'implement');
+      held.sweep(db);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(gh.revokes()).toHaveLength(0);
+      expect(expireLeases(db, plus(t0, 24 * HOUR))).toBe(1);
+      held.sweep(db);
+      await revoked(cloneToken(payload)!);
+    });
+
+    test('a cancel revokes it at the next sweep', async () => {
+      const { db, held } = setup({ apps: withAuthorApp });
+      const { payload } = await leased(db, 'implement');
+      updateDrop(db, 'd1', { state: 'cancelled', finishedAt: t0.toISOString() });
+      held.sweep(db);
+      await revoked(cloneToken(payload)!);
+    });
+
+    test('engaging the kill switch revokes it', async () => {
+      const { db } = setup({ apps: withAuthorApp });
+      const { payload } = await leased(db, 'implement');
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/control/kill',
+        headers: { authorization: `Bearer ${OPERATOR}`, host: HOST },
+        payload: { engaged: true },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(getDrop(db, 'd1')?.state).toBe('cancelled');
+      await revoked(cloneToken(payload)!);
+    });
+  });
+
+  test('after a full lease, events and result cycle no table, audit row, event or log holds the token', async () => {
+    const { db } = setup({ apps: withAuthorApp });
+    const { stickToken, payload } = await leased(db, 'implement');
+    const token = cloneToken(payload)!;
+    const events = await app.inject({
+      method: 'POST',
+      url: '/api/drops/d1/events',
+      headers: bearer(stickToken),
+      payload: {
+        epoch: 1,
+        events: [{ ts: t0.toISOString(), kind: 'log', data: { line: 'fetching' } }],
+      },
+    });
+    expect(events.statusCode).toBe(204);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/drops/d1/result',
+      headers: bearer(stickToken),
+      payload: resultOf('implement'),
+    });
+    expect(res.statusCode).toBe(204);
+    expect(res.body).not.toContain(token);
+    await vi.waitFor(() => expect(gh.revokes()).toHaveLength(1));
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as {
+      name: string;
+    }[];
+    for (const { name } of tables) expect(dump(db, name), name).not.toContain(token);
+    expect(JSON.stringify(listAudit(db))).not.toContain(token);
+    for (const line of [...logs, ...consoleLines]) expect(line).not.toContain(token);
+  });
+
+  test('nothing asks for administration or workflows', async () => {
+    const { db } = setup({ apps: withAuthorApp });
+    await leased(db, 'implement');
+    for (const m of gh.mints()) {
+      const perms = (m.body as { permissions: Record<string, string> }).permissions;
+      expect(perms).not.toHaveProperty('administration');
+      expect(perms).not.toHaveProperty('workflows');
+    }
   });
 });
 
@@ -361,6 +577,27 @@ describe('PAT zones are as before', () => {
       new Map([['octo', { author: reviewerEntry, reviewer: { source: 'missing' } }]]),
     ],
   ];
+  const authorPatCases: [string, DropZoneConfig, ResolvedApps][] = [
+    ['a PAT zone', baseZone, new Map()],
+    ['a two-bot zone whose author is a PAT', appZone, withReviewerApp],
+  ];
+  for (const [name, zone, apps] of authorPatCases) {
+    for (const role of ['implement', 'heal', 'resolve'] as const) {
+      for (const read of [true, false]) {
+        test(`${name}: the ${role} payload ${read ? 'with' : 'without'} a read PAT is as before`, async () => {
+          const { db, config } = setup({ zone, apps, read });
+          const { payload } = await leased(db, role);
+          const drop = getDrop(db, 'd1') as Drop;
+          const expected = buildPayload(db, zone, drop, config.secrets, { now: t0 });
+          expect(payload).toEqual(JSON.parse(JSON.stringify(expected)));
+          expect(payload.credentials.forgeToken).toBe(
+            config.secrets.githubReadToken ?? config.secrets.githubAuthorToken,
+          );
+          expect(gh.calls).toEqual([]);
+        });
+      }
+    }
+  }
   for (const [name, zone, apps] of cases) {
     for (const role of ['review', 'refute', 'doctor'] as const) {
       test(`${name}: the ${role} payload deep-equals buildPayload without app deps`, async () => {
