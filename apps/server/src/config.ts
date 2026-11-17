@@ -277,7 +277,8 @@ export const DropZoneObject = z.object({
    * The zone's GitHub App installations (spec §4.2): config, not a secret. One repository id, and
    * one installation id per role, since the author and reviewer apps are separate apps. Guarded:
    * the ids decide which installation and repository minted tokens reach. Nothing mints from them
-   * until installation discovery (§4.1) checks them; the server never trusts an id it is handed.
+   * until `verifiedInstallation` (forge/installation-verifier.ts, issue #267) has checked both
+   * against `repo` on GitHub; the server never trusts an id it is handed.
    */
   githubApp: z
     .object({

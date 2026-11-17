@@ -116,6 +116,57 @@ describe('credential problems park dispatch (Task 4)', () => {
   });
 });
 
+describe('an app zone whose recorded ids GitHub refuses is parked (issue #267)', () => {
+  test('the refusal is the park reason; nothing of the zone runs; it dispatches once the ids verify', async () => {
+    add(1, 0);
+    const logs: string[] = [];
+    let ran = 0;
+    const run = async () => {
+      ran++;
+    };
+    let refusal: string | undefined =
+      'main: the recorded author repository id does not match octo/demo';
+    const verify = async () => refusal;
+    expect(await zonePass(zone, [], run, (l) => logs.push(l), verify)).toEqual({
+      held: `app: ${refusal}`,
+    });
+    expect(zoneHold('main')).toBe(`app: ${refusal}`);
+    expect(ran).toBe(0);
+    expect(logs).toEqual([`zone main parked: app: ${refusal}`]);
+    refusal = undefined;
+    expect(await zonePass(zone, [], run, (l) => logs.push(l), verify)).toEqual({ held: null });
+    expect(zoneHold('main')).toBeUndefined();
+    expect(ran).toBe(1);
+  });
+
+  test('a credential problem parks first, without asking GitHub', async () => {
+    let asked = 0;
+    const problem: CredentialProblem = {
+      zoneId: 'main',
+      kind: 'missing',
+      credential: 'claudeToken',
+      message: 'no Claude token is set',
+    };
+    await zonePass(
+      zone,
+      [problem],
+      async () => {},
+      () => {},
+      async () => {
+        asked++;
+        return 'refused';
+      },
+    );
+    expect(asked).toBe(0);
+    await zonePass(
+      zone,
+      [],
+      async () => {},
+      () => {},
+    );
+  });
+});
+
 describe('push_pending', () => {
   test('scheduler counts pending pushes toward maxConcurrentImplement', () => {
     add(1, 2);

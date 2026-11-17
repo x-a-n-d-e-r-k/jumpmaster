@@ -20,6 +20,7 @@ import {
   setZoneMode,
   stampStick,
 } from '../db/repo.js';
+import { InstallationCheckError } from '../forge/installation-verifier.js';
 import { AUTHOR_TOKEN, ago, NOW, one, PG, world } from '../test/doctorWorld.js';
 import { okProbes } from '../test/fakes.js';
 import { makeZone } from '../test/fixtures.js';
@@ -1819,5 +1820,79 @@ describe('forge.private-clone for an app-reviewer zone (issue #237)', () => {
       status: 'fail',
       fix: expect.stringContaining('JM_GITHUB_READ_TOKEN'),
     });
+  });
+});
+
+describe("forge.author and forge.reviewer verify an app zone's ids (issue #267)", () => {
+  const entry = {
+    source: 'vault',
+    fingerprint: 'fp',
+    entry: { appId: '9', slug: 'jm', clientId: 'c', pem: 'unused', importedAt: 'x' },
+  } as const;
+  const apps = new Map([['octo', { author: entry, reviewer: entry }]]) as unknown as ResolvedApps;
+  const appWorld = (verify: (role: string) => Promise<void>) => {
+    const w = world({
+      zone: { githubApp: { repositoryId: 5, installations: { author: 7, reviewer: 8 } } },
+    });
+    w.deps.resolvedApps = () => apps;
+    const asked: string[] = [];
+    w.deps.verifiedInstallation = async (zone, role) => {
+      asked.push(`${zone.id}/${role}`);
+      await verify(role);
+      return {
+        owner: 'octo',
+        installationId: role === 'author' ? 7 : 8,
+        repositoryId: 5,
+        fingerprint: 'fp',
+        broker: {} as never,
+      };
+    };
+    return { w, asked };
+  };
+
+  test('a match passes both checks', async () => {
+    const { w, asked } = appWorld(async () => {});
+    const checks = await w.run();
+    expect(one(checks, 'forge.author').status).toBe('pass');
+    expect(one(checks, 'forge.reviewer').status).toBe('pass');
+    expect(asked.sort()).toEqual(['main/author', 'main/reviewer']);
+  });
+
+  test("a mismatch fails the role's check, naming the zone and role", async () => {
+    const { w } = appWorld(async (role) => {
+      if (role === 'reviewer')
+        throw new InstallationCheckError(
+          'main: the recorded reviewer repository id does not match octo/demo',
+          true,
+        );
+    });
+    const checks = await w.run();
+    expect(one(checks, 'forge.author').status).toBe('pass');
+    const c = one(checks, 'forge.reviewer');
+    expect(c.status).toBe('fail');
+    expect(c.summary).toBe('main: the recorded reviewer repository id does not match octo/demo');
+    expect(c.fix).toContain('githubApp');
+  });
+
+  test('a check that could not run warns, and is never a pass', async () => {
+    const { w } = appWorld(async (role) => {
+      if (role === 'author')
+        throw new InstallationCheckError('main: could not verify the author app', false);
+    });
+    const c = one(await w.run(), 'forge.author');
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('could not verify');
+  });
+
+  test('a PAT zone is not verified', async () => {
+    const w = world();
+    let asked = 0;
+    w.deps.verifiedInstallation = async () => {
+      asked++;
+      throw new Error('never');
+    };
+    const checks = await w.run();
+    expect(one(checks, 'forge.author').status).toBe('pass');
+    expect(asked).toBe(0);
   });
 });
