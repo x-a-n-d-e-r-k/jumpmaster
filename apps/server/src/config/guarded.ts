@@ -235,6 +235,17 @@ export const GUARDED_PATHS: GuardedPath[] = [
     true,
     () => "Command's MCP server will accept tokens at /mcp after the next restart",
   ),
+  {
+    // Issue #254: a new machine runs the installer from this address as root and sends its
+    // one-time enrollment code there, so setting, changing and clearing it all ask.
+    path: 'server.publicUrl',
+    kind: 'scalar',
+    weakens: (from, to) => from !== to,
+    consequence: (_f, to) =>
+      `New machines will download and run the installer from this address as root: ${
+        to === undefined ? 'it is cleared, so none can be added until it is set again' : String(to)
+      }`,
+  },
   setRule(
     'dropZones[].egress.allow',
     'additions',
@@ -323,10 +334,6 @@ export const NOT_GUARDED: FreePath[] = [
   ),
   free('claude.fableWeeklyDropCap', PACE),
   free('claude.tokenCreatedAt', 'a date the doctor reads for the expiry warning'),
-  free(
-    'server.publicUrl',
-    'the address shown to other machines; https only, and it grants no access by itself',
-  ),
   free('mcp.maxBodyBytes', MCP_LIMIT),
   free('mcp.writesPerHour', MCP_LIMIT),
   free('mcp.callsPerHour', MCP_LIMIT),

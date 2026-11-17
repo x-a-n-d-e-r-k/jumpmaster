@@ -1537,6 +1537,8 @@ function registerConfigRoutes(
 
   // The address other machines reach this server at (issue #139): set or cleared alone, applied
   // live through the store, audited as `server.public_url` with the address (it is no secret).
+  // Guarded (issue #254): a new machine runs the installer from it as root, so a session's change
+  // waits for the confirmation page, which returns to the tab and writes the same audit row.
   scope.put('/api/control/server/public-url', async (req, reply) => {
     const body = PublicUrlBody.safeParse(req.body ?? {});
     if (!body.success) return invalid(reply, '{"publicUrl": "https://…" | null}');
@@ -1556,6 +1558,9 @@ function registerConfigRoutes(
       via: viaOf(req),
       principal: principalOf(req),
       expectRevision: store.revision(),
+      returnTo: PUBLIC_URL_PAGE,
+      cancelTo: PUBLIC_URL_PAGE,
+      audit: { action: 'server.public_url', detail: { publicUrl } },
     });
     const out = answer(req, reply, 'server.public_url', r, { publicUrl });
     return r.ok ? { ...(out as Record<string, unknown>), publicUrl } : out;
