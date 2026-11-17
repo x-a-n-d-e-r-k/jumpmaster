@@ -10,7 +10,7 @@ import {
   upsertDropZone,
   upsertWorkItem,
 } from './db/repo.js';
-import type { TokenProvider } from './forge/github.js';
+import { GitHubForge, type TokenProvider } from './forge/github.js';
 import {
   COMMENT_BODY_MAX,
   commentMarker,
@@ -775,6 +775,8 @@ describe('pairFor by credential kind (spec §4.4)', () => {
   const twoBot = { repo: 'o/r', authorMayBeAdmin: false, identity: 'two-bot' as const };
   const fakeApps = (value = appToken) =>
     vi.fn((_owner: string, _role: AppRole): TokenProvider => ({ token: async () => value }));
+  const slugs: Record<AppRole, string> = { author: 'acme-author', reviewer: 'acme-reviewer' };
+  const appIdentity = (_owner: string, role: AppRole) => ({ slug: slugs[role], appId: '12345' });
 
   /** Answers one default-branch read only when it carries `token`. */
   const expectToken = (token: string) =>
@@ -823,6 +825,7 @@ describe('pairFor by credential kind (spec §4.4)', () => {
     const pair = pairFor({ ...twoBot, authorMayBeAdmin: true }, tokens, {
       refs: { author: app('o'), reviewer: pat('githubReviewerToken') },
       appTokens,
+      appIdentity,
     });
     expect(pair.merger).toBeUndefined();
     expect(appTokens).toHaveBeenCalledExactlyOnceWith('o', 'author');
@@ -837,7 +840,7 @@ describe('pairFor by credential kind (spec §4.4)', () => {
     const pair = pairFor(
       twoBot,
       { githubAuthorToken: authorPat },
-      { refs: { author: pat('githubAuthorToken'), reviewer: app('o') }, appTokens },
+      { refs: { author: pat('githubAuthorToken'), reviewer: app('o') }, appTokens, appIdentity },
     );
     expect(appTokens).toHaveBeenCalledExactlyOnceWith('o', 'reviewer');
     expectToken(appToken);
@@ -851,7 +854,7 @@ describe('pairFor by credential kind (spec §4.4)', () => {
     const pair = pairFor(
       { ...twoBot, identity: 'starter' },
       { githubAuthorToken: authorPat },
-      { refs: { author: app('o'), reviewer: app('o') }, appTokens },
+      { refs: { author: app('o'), reviewer: app('o') }, appTokens, appIdentity },
     );
     expect(pair.reviewer).toBeNull();
     expect(appTokens).not.toHaveBeenCalled();
@@ -885,6 +888,7 @@ describe('pairFor by credential kind (spec §4.4)', () => {
     const pair = pairFor(twoBot, tokens, {
       refs: { author: app('o'), reviewer: app('o') },
       appTokens,
+      appIdentity,
     });
     for (const forge of [pair.author, pair.reviewer!]) {
       const err = (await forge.getDefaultBranch().catch((e: unknown) => e)) as Error;
@@ -901,11 +905,113 @@ describe('pairFor by credential kind (spec §4.4)', () => {
       throw new Error(`no key: ${appToken}`);
     });
     expect(() =>
-      pairFor(twoBot, tokens, { refs: { ...patRefs, author: app('o') }, appTokens }),
+      pairFor(twoBot, tokens, { refs: { ...patRefs, author: app('o') }, appTokens, appIdentity }),
     ).toThrow(/author of o\/r/);
     expect(() =>
-      pairFor(twoBot, tokens, { refs: { ...patRefs, author: app('o') }, appTokens }),
+      pairFor(twoBot, tokens, { refs: { ...patRefs, author: app('o') }, appTokens, appIdentity }),
     ).not.toThrow(appToken);
+  });
+
+  describe('app identity (spec §4.3)', () => {
+    const identityOf = (forge: unknown) =>
+      forge instanceof GitHubForge ? forge.appIdentity() : 'not a GitHubForge';
+
+    test('an app author gets its identity, and a PAT reviewer none', () => {
+      const identities = vi.fn(appIdentity);
+      const pair = pairFor(twoBot, tokens, {
+        refs: { author: app('o'), reviewer: pat('githubReviewerToken') },
+        appTokens: fakeApps(),
+        appIdentity: identities,
+      });
+      expect(identities).toHaveBeenCalledExactlyOnceWith('o', 'author');
+      expect(identityOf(pair.author)).toEqual({ slug: 'acme-author', appId: '12345' });
+      expect(identityOf(pair.reviewer)).toBeNull();
+    });
+
+    test('an app reviewer gets its own identity, and a PAT author none', async () => {
+      const pair = pairFor(twoBot, tokens, {
+        refs: { author: pat('githubAuthorToken'), reviewer: app('o') },
+        appTokens: fakeApps(),
+        appIdentity,
+      });
+      expect(identityOf(pair.author)).toBeNull();
+      expect(identityOf(pair.reviewer)).toEqual({ slug: 'acme-reviewer', appId: '12345' });
+      expect(await pair.reviewer!.viewerLogin()).toBe('acme-reviewer[bot]');
+    });
+
+    test('token refs, no refs and a starter zone build forges with no identity', () => {
+      const identities = vi.fn(appIdentity);
+      const opts = { appTokens: fakeApps(), appIdentity: identities };
+      for (const pair of [
+        pairFor(twoBot, tokens, opts),
+        pairFor(twoBot, tokens, { ...opts, refs: patRefs }),
+        pairFor({ ...twoBot, identity: 'starter' }, tokens, {
+          ...opts,
+          refs: { author: app('o'), reviewer: app('o') },
+        }),
+      ]) {
+        expect(identityOf(pair.author)).toBeNull();
+        if (pair.reviewer) expect(identityOf(pair.reviewer)).toBeNull();
+      }
+      expect(identities).not.toHaveBeenCalled();
+    });
+
+    const failureOf = (fn: () => unknown): Error => {
+      try {
+        fn();
+      } catch (err) {
+        return err as Error;
+      }
+      throw new Error('expected a throw');
+    };
+
+    test('an app ref with no appIdentity is refused with a fixed message', () => {
+      for (const role of ['author', 'reviewer'] as const) {
+        const err = failureOf(() =>
+          pairFor(twoBot, tokens, {
+            refs: { ...patRefs, [role]: app('o') },
+            appTokens: fakeApps(),
+          }),
+        );
+        expect(err.message).toContain(role);
+        expect(err.message).toContain('o/r');
+        expect(err.cause).toBeUndefined();
+      }
+    });
+
+    test('an appIdentity that throws is reported without its error, key or token', () => {
+      const pem =
+        '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----';
+      const ghp = `ghp_${alnum(36)}`;
+      for (const role of ['author', 'reviewer'] as const) {
+        const err = failureOf(() =>
+          pairFor(twoBot, tokens, {
+            refs: { ...patRefs, [role]: app('o') },
+            appTokens: fakeApps(),
+            appIdentity: () => {
+              throw new Error(`bad entry ${ghp} ${pem}`);
+            },
+          }),
+        );
+        expect(err.message).toContain(role);
+        expect(err.message).toContain('o/r');
+        const seen = `${err.message}\n${err.stack ?? ''}`;
+        for (const secret of [ghp, 'PRIVATE KEY', 'MIIEowIBAAKCAQEA', 'bad entry'])
+          expect(seen).not.toContain(secret);
+        expect(err.cause).toBeUndefined();
+      }
+    });
+
+    test('the repository in the message is redacted', () => {
+      const ghp = `ghp_${alnum(36)}`;
+      const err = failureOf(() =>
+        pairFor({ ...twoBot, repo: `o/${ghp}` }, tokens, {
+          refs: { ...patRefs, author: app('o') },
+          appTokens: fakeApps(),
+        }),
+      );
+      expect(err.message).not.toContain(ghp);
+    });
   });
 
   describe('the pair cache', () => {
@@ -916,9 +1022,13 @@ describe('pairFor by credential kind (spec §4.4)', () => {
       const pairs = new ForgePairs();
       const appTokens = fakeApps();
       const refs = { author: app('o'), reviewer: pat('githubReviewerToken') };
-      const first = pairs.for(zone, tokens, { refs, appTokens, credentials });
+      const first = pairs.for(zone, tokens, { refs, appTokens, appIdentity, credentials });
       expect(
-        pairs.for({ ...zone }, { ...tokens }, { refs: { ...refs }, appTokens, credentials }),
+        pairs.for(
+          { ...zone },
+          { ...tokens },
+          { refs: { ...refs }, appTokens, appIdentity, credentials },
+        ),
       ).toBe(first);
       expect(appTokens).toHaveBeenCalledOnce();
     });
@@ -932,23 +1042,37 @@ describe('pairFor by credential kind (spec §4.4)', () => {
     test('author token to app, and back, gives a new pair', () => {
       const pairs = new ForgePairs();
       const appTokens = fakeApps();
-      const byToken = pairs.for(zone, tokens, { refs: patRefs, appTokens, credentials });
+      const byToken = pairs.for(zone, tokens, {
+        refs: patRefs,
+        appTokens,
+        appIdentity,
+        credentials,
+      });
       const byApp = pairs.for(zone, tokens, {
         refs: { ...patRefs, author: app('o') },
         appTokens,
+        appIdentity,
         credentials,
       });
       expect(byApp).not.toBe(byToken);
-      expect(pairs.for(zone, tokens, { refs: patRefs, appTokens, credentials })).not.toBe(byApp);
+      expect(
+        pairs.for(zone, tokens, { refs: patRefs, appTokens, appIdentity, credentials }),
+      ).not.toBe(byApp);
     });
 
     test('reviewer token to app gives a new pair', () => {
       const pairs = new ForgePairs();
       const appTokens = fakeApps();
-      const byToken = pairs.for(zone, tokens, { refs: patRefs, appTokens, credentials });
+      const byToken = pairs.for(zone, tokens, {
+        refs: patRefs,
+        appTokens,
+        appIdentity,
+        credentials,
+      });
       const byApp = pairs.for(zone, tokens, {
         refs: { ...patRefs, reviewer: app('o') },
         appTokens,
+        appIdentity,
         credentials,
       });
       expect(byApp).not.toBe(byToken);
@@ -960,11 +1084,13 @@ describe('pairFor by credential kind (spec §4.4)', () => {
       const a = pairs.for(zone, tokens, {
         refs: { ...patRefs, author: app('a') },
         appTokens,
+        appIdentity,
         credentials,
       });
       const b = pairs.for(zone, tokens, {
         refs: { ...patRefs, author: app('b') },
         appTokens,
+        appIdentity,
         credentials,
       });
       expect(b).not.toBe(a);
@@ -1004,6 +1130,7 @@ describe('pairFor by credential kind (spec §4.4)', () => {
       const opts = (fp: string) => ({
         refs: appRefs,
         appTokens,
+        appIdentity,
         credentials: { resolved, apps: appsWith(fp) },
       });
       const first = pairs.for(appZone, tokens, opts('F1'));
@@ -1015,7 +1142,12 @@ describe('pairFor by credential kind (spec §4.4)', () => {
     test('a changed installation or repository id gives a new pair', () => {
       const pairs = new ForgePairs();
       const appTokens = fakeApps();
-      const opts = { refs: appRefs, appTokens, credentials: { resolved, apps: appsWith('F1') } };
+      const opts = {
+        refs: appRefs,
+        appTokens,
+        appIdentity,
+        credentials: { resolved, apps: appsWith('F1') },
+      };
       const first = pairs.for(appZone, tokens, opts);
       const installation = {
         ...appZone,
@@ -1041,10 +1173,15 @@ describe('pairFor by credential kind (spec §4.4)', () => {
       const pairs = new ForgePairs();
       const appTokens = fakeApps();
       const refs = { author: app('o'), reviewer: app('o') };
-      const first = pairs.for(zone, tokens, { refs, appTokens, credentials });
+      const first = pairs.for(zone, tokens, { refs, appTokens, appIdentity, credentials });
       const revised = structuredClone({ zone, tokens, refs });
       expect(
-        pairs.for(revised.zone, revised.tokens, { refs: revised.refs, appTokens, credentials }),
+        pairs.for(revised.zone, revised.tokens, {
+          refs: revised.refs,
+          appTokens,
+          appIdentity,
+          credentials,
+        }),
       ).toBe(first);
     });
   });
