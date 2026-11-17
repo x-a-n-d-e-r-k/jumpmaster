@@ -9,7 +9,7 @@ import type { Db } from '../db/open.js';
 import { appendEvents, type Drop, type DropState, updateDrop } from '../db/repo.js';
 import type { CrewInputJson } from '../payloads.js';
 import type { ResultDeps } from '../results.js';
-import { applyCrewActions, validateIssueSpec } from './actions.js';
+import { applyCrewActions, protectedPathsNamed, validateIssueSpec } from './actions.js';
 import { PROMOTE_OPTIONS, subjectOf } from './flush.js';
 import {
   type CrewIssue,
@@ -97,7 +97,11 @@ function applyRefute(
     const title = out.revisedTitle ?? issue.title;
     const body = out.revisedBody ?? issue.body;
     const revised = out.revisedTitle !== undefined || out.revisedBody !== undefined;
-    if (revised && validateIssueSpec(title, body).length === 0) {
+    if (
+      revised &&
+      validateIssueSpec(title, body).length === 0 &&
+      protectedPathsNamed(body, zone.protectedPaths).length === 0
+    ) {
       setCrewIssue(db, issue.id, { ...base, state: 'revising', title, body }, now);
       if (issue.refuteCount >= zone.crew.maxRefute) {
         raiseBriefing(
@@ -117,7 +121,8 @@ function applyRefute(
       }
       return;
     }
-    // A revision that is missing or not in the drop-ready format counts as a rejection.
+    // A revision that is missing, not in the drop-ready format or naming a protected path counts
+    // as a rejection.
   }
   setCrewIssue(db, issue.id, { ...base, state: 'rejecting' }, now);
 }

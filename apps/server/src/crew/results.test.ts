@@ -221,6 +221,20 @@ describe('refute results', () => {
     });
   });
 
+  test('refute revise whose revised body names a protected path is not taken (#247)', async () => {
+    const issue = staged();
+    const id = await crewDrop();
+    const revisedBody = ISSUE_BODY.replace('The API has no docs.', 'Also edit `CODEOWNERS`.');
+    await applyResult(
+      w.db,
+      deps(),
+      id,
+      completed({ decision: 'revise', findings: ['f'], revisedBody }),
+      t0,
+    );
+    expect(getCrewIssue(w.db, issue)).toMatchObject({ state: 'rejecting', body: ISSUE_BODY });
+  });
+
   test('refute revise with a valid body moves to revising with the new text', async () => {
     const issue = staged();
     const id = await crewDrop();
