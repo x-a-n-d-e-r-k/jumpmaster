@@ -110,8 +110,9 @@ export type ZoneForAppInstallation = Pick<ZoneForCredentials, 'identity'> & {
 /**
  * The recorded installation and repository a role's app tokens are for, or undefined when the
  * zone is starter, has no `githubApp`, or records no installation for the role. Pure: it reads the
- * zone alone. Nothing mints from it until installation discovery (§4.1) checks the ids, since the
- * server never trusts an installation id it is handed.
+ * zone alone. Nothing mints from it until `verifiedInstallation` (forge/installation-verifier.ts,
+ * issue #267) has checked both ids against `zone.repo` on GitHub, since the server never trusts an
+ * id it is handed; the tests there prove it.
  */
 export function appInstallationFor(
   zone: ZoneForAppInstallation,

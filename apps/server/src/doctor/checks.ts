@@ -39,6 +39,10 @@ import {
   isRateLimited,
   type ReadProbe,
 } from '../forge/github.js';
+import {
+  InstallationCheckError,
+  type InstallationVerifier,
+} from '../forge/installation-verifier.js';
 import type { ZoneGuidance } from '../github/guidance.js';
 import { getGoals } from '../goals.js';
 import type { MirrorStatus } from '../images/mirror.js';
@@ -57,7 +61,7 @@ import {
 import { dispatchGate } from '../usage.js';
 import type { Shadowed } from '../vault/credentials.js';
 import type { CredentialProblem } from '../vault/problems.js';
-import { isAppReviewerZone, type ResolvedApps } from '../vault/resolution.js';
+import { credentialFor, isAppReviewerZone, type ResolvedApps } from '../vault/resolution.js';
 import { KEY_CHANGED } from '../vault/vault.js';
 
 /** `info` says something worth knowing that is no fault (an optional setting left unset). */
@@ -168,6 +172,11 @@ export type DoctorDeps = {
   readForge?(zoneId: string): Forge | undefined;
   /** The GitHub App entries as they resolved; absent, every zone is judged as a PAT zone. */
   resolvedApps?(): ResolvedApps;
+  /**
+   * The installation check every mint goes through (issue #267): an app zone's recorded ids
+   * against its repository. Absent, `forge.author` and `forge.reviewer` don't check them.
+   */
+  verifiedInstallation?: InstallationVerifier['verifiedInstallation'];
   /** The config store's status (mode, file problems, restart-pending settings), when there is one. */
   configStatus?: ConfigStatus;
   /** The image mirror's state, for `server.image-mirror`; absent, the check does not run. */
@@ -945,6 +954,8 @@ async function identityCheck(
   const base = { id: `forge.${who}`, zoneId: zone.id, doc: doc('tokens') };
   if (who === 'reviewer' && zone.identity === 'starter')
     return { ...base, status: 'skip', summary: NO_REVIEWER, doc: doc('starter-mode') };
+  const unverified = await appIdsProblem(d, zone, who, base);
+  if (unverified) return unverified;
   const login = await r.logins[who]();
   if (!login.ok)
     return readFailed(base, who, 'read its own account (GET /user)', 'any valid token', login);
@@ -1008,6 +1019,47 @@ async function identityCheck(
       fix: `Create a replacement token before then, write it to the file ${v}_FILE names, and restart the server.`,
     };
   return { ...base, status: 'pass', summary };
+}
+
+/**
+ * For a zone whose `who` credential is its owner's GitHub App: the recorded installation and
+ * repository ids checked against the zone's repository (issue #267), as every mint checks them.
+ * A refusal fails; a check that could not run warns. Undefined when the ids verify, or the zone
+ * does not use the app for the role.
+ */
+async function appIdsProblem(
+  d: DoctorDeps,
+  zone: DropZoneConfig,
+  who: 'author' | 'reviewer',
+  base: { id: string; zoneId: string; doc: string },
+): Promise<DoctorCheck | undefined> {
+  const apps = d.resolvedApps?.();
+  if (!apps || !d.verifiedInstallation) return undefined;
+  const r = credentialFor(zone, who, apps);
+  // An undecryptable entry is `credential.*`'s to report.
+  if (r.ref.kind !== 'github-app' || r.problem) return undefined;
+  try {
+    await d.verifiedInstallation(zone, who);
+    return undefined;
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (e instanceof InstallationCheckError && e.refused)
+      return {
+        ...base,
+        status: 'fail',
+        summary: message,
+        fix: `Nothing mints for ${zone.repo} as the ${who} app until this is fixed. Install the ${who} GitHub App on ${zone.repo}, and set the zone's githubApp installation id for the ${who} and its repository id to the ones GitHub gives ${zone.repo}.`,
+      };
+    return {
+      ...base,
+      status: 'warn',
+      summary:
+        e instanceof InstallationCheckError
+          ? message
+          : `${zone.id}: could not verify the ${who} app installation on ${zone.repo}`,
+      fix: 'Run the doctor again; nothing mints for the zone until the check passes.',
+    };
+  }
 }
 
 async function adminCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck> {

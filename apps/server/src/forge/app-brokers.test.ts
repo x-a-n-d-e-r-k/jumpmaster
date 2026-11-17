@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import type { AppEntryRead, AppRole } from '../vault/github-app-entries.js';
 import type { ResolvedApps } from '../vault/resolution.js';
 import { createAppBrokers } from './app-brokers.js';
+import type { InstallationVerifier } from './installation-verifier.js';
 import { serverScrubSet } from './scrub-set.js';
 
 const pem = () =>
@@ -84,5 +85,29 @@ describe('createAppBrokers', () => {
       'author',
     );
     expect(seen).toContain(KEY_A);
+  });
+
+  test('verifiedInstallation goes through the given verifier (issue #267)', async () => {
+    const apps = appsOf({ octo: { author: entry(KEY_A, 'fa') } });
+    const seen: string[] = [];
+    const verifier: InstallationVerifier = {
+      async verifiedInstallation(zone, role) {
+        seen.push(`${zone.id}/${role}`);
+        throw new Error('refused');
+      },
+    };
+    const b = createAppBrokers({ apps: () => apps, onSecret: () => {}, verifier });
+    await expect(
+      b.verifiedInstallation({ id: 'z', repo: 'octo/demo', identity: 'two-bot' }, 'author'),
+    ).rejects.toThrow('refused');
+    expect(seen).toEqual(['z/author']);
+  });
+
+  test('without a verifier it verifies with its own brokers, and refuses a zone with no ids', async () => {
+    const apps = appsOf({ octo: { author: entry(KEY_A, 'fa') } });
+    const b = createAppBrokers({ apps: () => apps, onSecret: () => {} });
+    await expect(
+      b.verifiedInstallation({ id: 'z', repo: 'octo/demo', identity: 'two-bot' }, 'author'),
+    ).rejects.toThrow('z: the zone records no author app installation for octo/demo');
   });
 });

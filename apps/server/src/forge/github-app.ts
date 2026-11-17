@@ -77,6 +77,11 @@ export interface GitHubAppBroker {
     repositoryId: number;
     use: Use;
   }): Promise<{ token: string; expiresAt: Date }>;
+  /**
+   * The id GitHub gives `owner/repo`, read under the installation (issue #267): with a token
+   * narrowed to that repository by name and to `metadata: read` alone, revoked once read.
+   */
+  repositoryIdOf(installationId: number, owner: string, repo: string): Promise<number>;
   revoke(token: string): Promise<void>;
   suspend(installationId: number): Promise<void>;
   unsuspend(installationId: number): Promise<void>;
@@ -187,6 +192,35 @@ export function createGitHubAppBroker(opts: GitHubAppBrokerOptions): GitHubAppBr
         throw fail(`minting a ${use} token`, r, [bearer]);
       onSecret(j.token);
       return { token: j.token, expiresAt: new Date(String(j.expires_at)) };
+    },
+
+    async repositoryIdOf(installationId, owner, repo) {
+      const bearer = jwt();
+      const what = `reading the repository id of ${owner}/${repo}`;
+      // Narrowed by name, so the token reaches the named repository or none; it can read metadata only.
+      const minted = await call(
+        'POST',
+        `/app/installations/${installationId}/access_tokens`,
+        bearer,
+        {
+          repositories: [repo],
+          permissions: { metadata: 'read' },
+        },
+      );
+      const m = minted.json as { token?: unknown } | undefined;
+      if (minted.status !== 201 || typeof m?.token !== 'string') throw fail(what, minted, [bearer]);
+      const token = m.token;
+      onSecret(token);
+      try {
+        const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+        const r = await call('GET', path, token);
+        const id = (r.json as { id?: unknown } | undefined)?.id;
+        if (r.status !== 200 || typeof id !== 'number') throw fail(what, r, [bearer, token]);
+        return id;
+      } finally {
+        // Best effort: an unrevoked metadata token dies within its hour.
+        await call('DELETE', '/installation/token', token).catch(() => undefined);
+      }
     },
 
     async revoke(token) {
