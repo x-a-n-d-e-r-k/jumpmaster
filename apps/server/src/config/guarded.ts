@@ -369,6 +369,10 @@ export const NOT_GUARDED: FreePath[] = [
     'dropZones[].ciDeadlineMinutes',
     'how long to wait for CI; a missing CI is still a no-merge',
   ),
+  free(
+    'dropZones[].mergeReservationMinutes',
+    'how long the oldest approved PR holds the next merge; every merge still needs approval and CI',
+  ),
   free('dropZones[].retryLabel', 'the label that asks for a retry of parked work'),
   free(
     'dropZones[].triageLabel',

@@ -243,6 +243,11 @@ export const DropZoneObject = z.object({
     }),
   ciRequired: z.boolean().default(true),
   ciDeadlineMinutes: z.number().positive().default(45),
+  /**
+   * The oldest approved PR reserves the zone's next merge for this long after its approval, so
+   * younger items that are ready wait for it instead of moving main under it. 0 turns it off.
+   */
+  mergeReservationMinutes: z.number().int().min(0).max(240).default(30),
   retryLabel: z.string().min(1).default('agent-retry'),
   /**
    * Where a trusted human's ready issue that fails the drop-ready format is sent instead of to

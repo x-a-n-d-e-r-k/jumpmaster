@@ -9,6 +9,7 @@ import {
   getOutbox,
   getPullRequest,
   holdingDropFor,
+  listWorkItems,
   type OutboxRow,
   recordGatePark,
   setWaitingSince,
@@ -26,7 +27,7 @@ import {
 } from '../forge/github.js';
 import { log } from '../log.js';
 import { type ForgePair, type OpResult, opKeys } from '../outbox.js';
-import type { CarryFacts, Snapshot } from './decide.js';
+import type { CarryFacts, MergeReservation, Snapshot } from './decide.js';
 import {
   administrationOf,
   branchProtectionProblems,
@@ -488,6 +489,32 @@ async function carryFacts(
 }
 
 /**
+ * The zone's merge reservation holder, from the database alone: among pr_open items whose newest
+ * verdict on their recorded PR head is an approve made no more than `zone.mergeReservationMinutes`
+ * ago (carried verdicts included), the one approved first, ties to the lower item id. null when
+ * there is none, or the zone sets 0.
+ */
+export function mergeHolder(db: Db, zone: DropZoneConfig, now: Date): MergeReservation | null {
+  const minutes = zone.mergeReservationMinutes ?? 0;
+  if (minutes <= 0) return null;
+  const limit = minutes * 60_000;
+  let holder: MergeReservation | null = null;
+  for (const item of listWorkItems(db, zone.id, 'pr_open')) {
+    const pr = getPullRequest(db, item.id);
+    if (!pr || pr.state !== 'open') continue;
+    const latest = verdictsForHead(db, item.id, pr.headSha).at(-1);
+    if (latest?.decision !== 'approve') continue;
+    const age = now.getTime() - Date.parse(latest.createdAt);
+    if (!(age <= limit)) continue;
+    // Items come in id order, so a strict comparison leaves a tie with the lower id.
+    if (holder === null || Date.parse(latest.createdAt) < Date.parse(holder.since)) {
+      holder = { itemId: item.id, issueNumber: item.issueNumber, since: latest.createdAt };
+    }
+  }
+  return holder;
+}
+
+/**
  * Assembles everything `decide` reads for one pr_open item. Forge facts are read fresh; failed
  * reads fail closed (see `Snapshot` field docs). Upserts `pull_requests` and maintains
  * `work_items.waiting_since`.
@@ -630,6 +657,9 @@ export async function buildSnapshot(
     headSha && !activeDrop && !missing && compare?.behindBy === 0 && verdictsOnHead.length === 0
       ? await carryFacts(db, forges, item.id, base, headSha)
       : null;
+  // After the upsert above, so this item's own holding reads the head just seen.
+  const holder = mergeHolder(db, zone, now);
+  const mergeReservedBy = holder !== null && holder.itemId !== item.id ? holder : null;
 
   return {
     item,
@@ -662,5 +692,6 @@ export async function buildSnapshot(
     headFirstSeenAt,
     missingSince,
     carry,
+    mergeReservedBy,
   };
 }
