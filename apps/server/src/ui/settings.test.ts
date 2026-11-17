@@ -14,7 +14,7 @@ import { openDb } from '../db/open.js';
 import { insertDrop, recordUsageWindows, setZoneMode, upsertDropZone } from '../db/repo.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import { gateSecretName } from '../vault/credentials.js';
-import { fingerprintOf, openVault } from '../vault/vault.js';
+import { fingerprintOf, openVault, VAULT_KEY_IN_DATA_DIR } from '../vault/vault.js';
 import {
   CREDENTIALS_SCRIPT,
   HISTORY_SCRIPT,
@@ -1294,6 +1294,30 @@ test("a gate secret's role names its zone by repository (#99)", () => {
 });
 
 describe('turning the vault on and preferring it (#101)', () => {
+  test('#258: with the vault off, the key-in-the-data-directory warning shows only when no secrets directory is set', async () => {
+    const data = mkdtempSync(join(tmpdir(), 'jm-data-258-'));
+    const without = await world({
+      vaultOff: true,
+      env: { JM_SECRETS_DIR: '' },
+      file: { dataDir: data },
+    });
+    let html = (await without.get('/settings/credentials')).body;
+    expect(html).toContain(VAULT_KEY_IN_DATA_DIR);
+    expect(html).toContain('<button type="button" id="vault-on">Turn on the vault</button>');
+    // Turning it on still works.
+    expect((await without.call('POST', '/api/control/sudo', { passphrase: PASS })).statusCode).toBe(
+      200,
+    );
+    expect((await without.call('POST', '/api/control/secrets/vault/on', {})).statusCode).toBe(200);
+    html = (await without.get('/settings/credentials')).body;
+    expect(html).not.toContain('id="vault-on"');
+    expect(readFileSync(join(data, 'vault', 'vault_key'), 'utf8')).not.toBe('');
+    const withDir = await world({ vaultOff: true });
+    html = (await withDir.get('/settings/credentials')).body;
+    expect(html).toContain('id="vault-on"');
+    expect(html).not.toContain(VAULT_KEY_IN_DATA_DIR);
+  });
+
   test('with the vault off the tab offers Turn on the vault; turned on, it offers Prefer the vault and Copy into the vault', async () => {
     const w = await world({ vaultOff: true, env: { JM_GITHUB_READ_TOKEN: READ } });
     let html = (await w.get('/settings/credentials')).body;

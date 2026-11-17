@@ -4,6 +4,7 @@ import { redact } from '@jumpmaster/protocol';
 import type { Db } from '../db/open.js';
 import type { ZoneGuidance } from '../github/guidance.js';
 import { redactionList } from '../scrub.js';
+import { APP_ENTRY_DIR } from '../vault/github-app-entries.js';
 import { actionFor, PAGES_M45A } from './actions.js';
 import {
   type DoctorCheck,
@@ -188,32 +189,39 @@ export function processEnv(env: NodeJS.ProcessEnv = process.env): DoctorEnv {
       return { variable, path: path as string, mode, ...(link ? { link } : {}) };
     });
   // Every file under the secrets directory (credentials by name, the machine secrets, the vault
-  // key), once, beside the *_FILE variables that point elsewhere.
+  // key), once, beside the *_FILE variables that point elsewhere; and every GitHub App entry
+  // file, `github-app/<owner>/<role>.json`, which holds a private key (issue #258).
   const dir = env.JM_SECRETS_DIR;
-  if (dir) {
-    let names: string[] = [];
+  const list = (d: string): string[] => {
     try {
-      names = readdirSync(dir).sort();
+      return readdirSync(d).sort();
     } catch {
-      names = [];
+      return [];
     }
-    for (const name of names) {
-      const path = join(dir, name);
-      if (secretFiles.some((f) => f.path === path)) continue;
-      try {
-        const st = statSync(path);
-        const link = lstatSync(path).isSymbolicLink();
-        if (st.isFile())
-          secretFiles.push({
-            variable: `secrets/${name}`,
-            path,
-            mode: st.mode & 0o777,
-            ...(link ? { link } : {}),
-          });
-      } catch {
-        // gone between the listing and the stat
-      }
+  };
+  const add = (rel: string): void => {
+    const path = join(dir as string, rel);
+    if (secretFiles.some((f) => f.path === path)) return;
+    try {
+      const st = statSync(path);
+      const link = lstatSync(path).isSymbolicLink();
+      if (st.isFile())
+        secretFiles.push({
+          variable: `secrets/${rel}`,
+          path,
+          mode: st.mode & 0o777,
+          ...(link ? { link } : {}),
+        });
+    } catch {
+      // gone between the listing and the stat
     }
+  };
+  if (dir) {
+    for (const name of list(dir)) add(name);
+    const apps = join(dir, APP_ENTRY_DIR);
+    for (const owner of list(apps))
+      for (const name of list(join(apps, owner)))
+        if (name.endsWith('.json')) add(join(APP_ENTRY_DIR, owner, name));
   }
   return {
     uid: typeof process.getuid === 'function' ? process.getuid() : null,

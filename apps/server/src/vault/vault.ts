@@ -77,6 +77,8 @@ export class Vault {
   constructor(
     private readonly db: Db,
     private readonly key: Buffer,
+    /** The file the key was read from, when there is one (the doctor judges where it lies). */
+    readonly keyFile?: string,
   ) {
     if (key.length !== VAULT_KEY_BYTES) throw new Error('a vault key is 32 bytes');
     this.keyId = createHash('sha256').update(key).digest('hex').slice(0, 8);
@@ -232,11 +234,15 @@ export function openVault(
     );
   for (const form of [text, key.toString('base64url'), key.toString('base64'), key.toString('hex')])
     set.pin(form);
-  return new Vault(db, key);
+  return new Vault(db, key, keyFile);
 }
 
 /** The key file Settings → Credentials writes under the secrets directory (bootstrap's name too). */
 export const VAULT_KEY_FILE_NAME = 'vault_key';
+
+/** Why a vault key under the data directory is a risk: the doctor's warn and the Settings note. */
+export const VAULT_KEY_IN_DATA_DIR =
+  'The vault key is stored in the data directory, beside the data it protects. A copy of that directory can read every stored credential. Set JM_SECRETS_DIR to a directory outside it and turn the vault on again.';
 
 /**
  * Writes a new key (32 random bytes, base64url) to `vault_key` under `secretsDir`, mode 0600, and

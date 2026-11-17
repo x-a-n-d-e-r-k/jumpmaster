@@ -31,6 +31,7 @@ import {
   parseGateSecretName,
   type ResolvedCredential,
 } from '../vault/credentials.js';
+import { VAULT_KEY_IN_DATA_DIR } from '../vault/vault.js';
 import { escapeHtml, page, tokenAgeBanner } from './pages.js';
 import { CLAUDE_SAVED, forgeGuideFor, guideSection } from './setup.js';
 import { type ZoneRef, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
@@ -166,8 +167,13 @@ function replaceForm(n: string, claudeDated: boolean): string {
 function vaultSection(store: ConfigStore): string {
   const vault = store.vault();
   if (vault === 'disabled')
-    return `<p class="warn">${escapeHtml(VAULT_DISABLED)}</p>
-<p><button type="button" id="vault-on">Turn on the vault</button> <small>Writes a new random key to <code>vault_key</code> under the secrets directory, or under the data directory's <code>vault/</code> when none is set (mode 0600, never over an existing file) and opens the vault now, with no restart; it stays on across restarts. Keep that file with your backups: the database holds only ciphertext. Without <code>JM_SECRETS_DIR</code> the key sits beside the database, so one copy of the data directory holds both; set <code>JM_SECRETS_DIR</code> to keep them apart.</small></p>`;
+    return `<p class="warn">${escapeHtml(VAULT_DISABLED)}</p>${
+      // No secrets directory: Turn on writes the key beside the data (issue #258). It still works.
+      store.vaultKeyGoesToDataDir()
+        ? `\n<p class="warn">${escapeHtml(VAULT_KEY_IN_DATA_DIR)}</p>`
+        : ''
+    }
+<p><button type="button" id="vault-on">Turn on the vault</button> <small>Writes a new random key to <code>vault_key</code> under the secrets directory, or under the data directory's <code>vault/</code> when none is set (mode 0600, never over an existing file) and opens the vault now, with no restart; it stays on across restarts. Keep that file with your backups: the database holds only ciphertext.</small></p>`;
   const prefer = store.preferVault();
   const order = prefer
     ? 'A credential in the vault wins over its variable or file.'

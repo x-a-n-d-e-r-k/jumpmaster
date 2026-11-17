@@ -1559,6 +1559,8 @@ describe('turning the vault on and preferring it from Settings (#101)', () => {
     expect(JSON.stringify(r)).not.toContain(text);
     expect(store.vault()).not.toBe('disabled');
     expect(store.vaultKeyFrom()).toBe('settings');
+    expect(store.vaultKeyFile()).toBe(keyPath);
+    expect(store.vaultKeyGoesToDataDir()).toBe(false);
     // No restart: the vault takes an entry now.
     expect(store.putCredential('githubReadToken', READ_VAULT, {}).ok).toBe(true);
     expect(store.resolved().githubReadToken).toMatchObject({ source: 'vault' });
@@ -1586,9 +1588,13 @@ describe('turning the vault on and preferring it from Settings (#101)', () => {
     const w = world();
     const e = { ...env, JM_DATA_DIR: dir() };
     const store = w.open({ env: e, boot: loadBoot(e, w.file), vault: startVault(e, w.db, 'data') });
+    expect(store.vaultKeyFile()).toBeUndefined();
+    expect(store.vaultKeyGoesToDataDir()).toBe(true);
     const r = store.turnOnVault();
     expect(r).toMatchObject({ ok: true });
     if (!r.ok) return;
+    // The effective key path the doctor judges (#258): the one Settings recorded.
+    expect(store.vaultKeyFile()).toBe(r.keyFile);
     expect(basename(dirname(r.keyFile))).toBe('vault');
     expect(statSync(dirname(r.keyFile)).mode & 0o777).toBe(0o700);
     expect(statSync(r.keyFile).mode & 0o777).toBe(0o600);
@@ -1620,6 +1626,7 @@ describe('turning the vault on and preferring it from Settings (#101)', () => {
     const v = startVault(withEnv, w.db, 'data');
     const s = w.open({ env: withEnv, boot: loadBoot(withEnv, w.file), vault: v });
     expect(s.vaultKeyFrom()).toBe('env');
+    expect(s.vaultKeyFile()).toBe(other);
     expect(v !== 'disabled' && openVault(other, w.db) !== 'disabled').toBe(true);
     expect((v as Exclude<typeof v, 'disabled'>).keyId).toBe(
       (openVault(other, w.db) as Exclude<typeof v, 'disabled'>).keyId,

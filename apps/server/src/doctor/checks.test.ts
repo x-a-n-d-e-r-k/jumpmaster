@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from 'node:crypto';
 import {
   chmodSync,
   mkdirSync,
@@ -26,6 +27,11 @@ import { okProbes } from '../test/fakes.js';
 import { makeZone } from '../test/fixtures.js';
 import { addTranscriptDrop } from '../test/transcriptWorld.js';
 import { prunePass } from '../transcripts.js';
+import {
+  type GitHubAppEntry,
+  readAppEntry,
+  serializeAppEntry,
+} from '../vault/github-app-entries.js';
 import type { ResolvedApps } from '../vault/resolution.js';
 import { CHECK_IDS, type DoctorDeps, installDocUrl } from './checks.js';
 import { processEnv } from './run.js';
@@ -1470,7 +1476,7 @@ describe('credential checks (Task 4)', () => {
     });
     w.deps.credentials = creds({ vaultKey: { status: 'disabled' } });
     expect(one(await w.run(), 'vault.key')).toMatchObject({ status: 'skip' });
-    w.deps.credentials = creds({ vaultKey: { status: 'ok' } });
+    w.deps.credentials = creds({ vaultKey: { status: 'ok' }, vaultKeyFile: '/secrets/vault_key' });
     expect(one(await w.run(), 'vault.key').status).toBe('pass');
   });
 
@@ -1503,20 +1509,119 @@ test('config.secret-files checks every file under the secrets directory, the fou
   ]);
 });
 
-test('vault.key warns when the key file lies under the data directory', async () => {
+const APP_ENTRY: GitHubAppEntry = {
+  appId: '123456',
+  slug: 'acme-jumpmaster-author',
+  clientId: 'Iv1.0123456789abcdef',
+  pem: generateKeyPairSync('rsa', { modulusLength: 2048 })
+    .privateKey.export({ type: 'pkcs8', format: 'pem' })
+    .toString(),
+  importedAt: '2026-11-17T00:00:00.000Z',
+};
+
+test('#258 D5 parity: one mode rule for a top-level secret file and a GitHub App entry file', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'jm-secrets-app-'));
+  mkdirSync(join(dir, 'github-app', 'acme'), { recursive: true });
+  const top = join(dir, 'claude_token');
+  const app = join(dir, 'github-app', 'acme', 'author.json');
+  writeFileSync(top, 'x');
+  writeFileSync(app, serializeAppEntry(APP_ENTRY));
+  // Not an entry file: a stray non-JSON name and a deeper level are not listed.
+  writeFileSync(join(dir, 'github-app', 'acme', 'notes.txt'), 'x');
+  for (const p of [top, app, join(dir, 'github-app', 'acme', 'notes.txt')]) chmodSync(p, 0o644);
   const w = world();
-  w.deps.credentials = { problems: [], shadowed: [], vaultKey: { status: 'ok' } };
-  w.deps.env.vaultKeyFile = '/tmp/x/keys/vault_key';
-  expect(one(await w.run(), 'vault.key')).toMatchObject({
-    status: 'warn',
-    summary:
-      'the vault key /tmp/x/keys/vault_key is under the data directory /tmp/x: a copy of the data carries the key beside the ciphertext',
-  });
-  w.deps.env.vaultKeyFile = '/secrets/vault_key';
-  expect(one(await w.run(), 'vault.key').status).toBe('pass');
-  expect(processEnv({ JM_VAULT_KEY_FILE: '/secrets/vault_key' }).vaultKeyFile).toBe(
-    '/secrets/vault_key',
+  w.deps.env = processEnv({ JM_SECRETS_DIR: dir });
+  expect(w.deps.env.secretFiles).toEqual([
+    { variable: 'secrets/claude_token', path: top, mode: 0o644 },
+    { variable: 'secrets/github-app/acme/author.json', path: app, mode: 0o644 },
+  ]);
+  const c = one(await w.run(), 'config.secret-files');
+  expect(c.status).toBe('fail');
+  expect(c.summary).toBe(
+    `secret file(s) other users on the host can read: ${top} (secrets/claude_token, mode 644), ${app} (secrets/github-app/acme/author.json, mode 644)`,
   );
+  expect(c.fix).toContain('chmod 600 secrets/github-app/*/*.json');
+  // The server refuses the same app entry file the doctor reports.
+  expect(() => readAppEntry({ vault: 'disabled', secretsDir: dir }, 'acme', 'author')).toThrow(
+    `${app} is readable by others; chmod 600 it`,
+  );
+  // At 0600 both pass, and the entry is read.
+  for (const p of [top, app]) chmodSync(p, 0o600);
+  w.deps.env = processEnv({ JM_SECRETS_DIR: dir });
+  expect(one(await w.run(), 'config.secret-files')).toMatchObject({
+    status: 'pass',
+    summary: 'every secret file is readable by its owner only (2)',
+  });
+  expect(readAppEntry({ vault: 'disabled', secretsDir: dir }, 'acme', 'author')).toMatchObject({
+    source: 'file',
+    path: app,
+  });
+});
+
+const KEY_IN_DATA_DIR =
+  'The vault key is stored in the data directory, beside the data it protects. A copy of that directory can read every stored credential. Set JM_SECRETS_DIR to a directory outside it and turn the vault on again.';
+
+describe('vault.key judges the effective key path (#258)', () => {
+  const on = (keyFile?: string): NonNullable<DoctorDeps['credentials']> => ({
+    problems: [],
+    shadowed: [],
+    vaultKey: { status: 'ok' },
+    ...(keyFile ? { vaultKeyFile: keyFile } : {}),
+  });
+
+  test('a key from JM_VAULT_KEY_FILE under the data directory warns; outside it passes', async () => {
+    const w = world();
+    w.deps.credentials = on();
+    w.deps.env.vaultKeyFile = '/tmp/x/keys/vault_key';
+    expect(one(await w.run(), 'vault.key')).toMatchObject({
+      status: 'warn',
+      summary: KEY_IN_DATA_DIR,
+    });
+    w.deps.env.vaultKeyFile = '/secrets/vault_key';
+    expect(one(await w.run(), 'vault.key')).toMatchObject({
+      status: 'pass',
+      summary: 'every vault entry decrypts with the key /secrets/vault_key',
+    });
+    expect(processEnv({ JM_VAULT_KEY_FILE: '/secrets/vault_key' }).vaultKeyFile).toBe(
+      '/secrets/vault_key',
+    );
+  });
+
+  test('a Settings-created key at <dataDir>/vault/vault_key warns (it passed before)', async () => {
+    const w = world();
+    delete w.deps.env.vaultKeyFile;
+    w.deps.credentials = on('/tmp/x/vault/vault_key');
+    const c = one(await w.run(), 'vault.key');
+    expect(c).toMatchObject({ status: 'warn', summary: KEY_IN_DATA_DIR });
+    expect(c.fix).toContain('/tmp/x/vault/vault_key');
+    // The examined path is the store's effective one: JM_VAULT_KEY_FILE when set, which wins.
+    w.deps.credentials = on('/run/secrets/vault_key');
+    w.deps.env.vaultKeyFile = '/run/secrets/vault_key';
+    expect(one(await w.run(), 'vault.key')).toMatchObject({
+      status: 'pass',
+      summary: 'every vault entry decrypts with the key /run/secrets/vault_key',
+    });
+  });
+
+  test('a pass names the key path it examined; with no path known, the check does not pass', async () => {
+    const w = world();
+    delete w.deps.env.vaultKeyFile;
+    w.deps.credentials = on();
+    const c = one(await w.run(), 'vault.key');
+    expect(c.status).not.toBe('pass');
+    expect(c.summary).toMatch(/key file/);
+  });
+
+  test('neither set and the vault off: the existing off result, not a pass', async () => {
+    const w = world();
+    delete w.deps.env.vaultKeyFile;
+    w.deps.credentials = { problems: [], shadowed: [], vaultKey: { status: 'disabled' } };
+    expect(one(await w.run(), 'vault.key')).toMatchObject({
+      status: 'skip',
+      summary:
+        'no vault key (the vault is off: turn it on under Settings, Credentials, or set JM_VAULT_KEY_FILE): credentials come from files and the environment only',
+    });
+  });
 });
 
 test('config.secret-files fails a group- or world-readable target reached through a link, saying to chmod the file it points to', async () => {
