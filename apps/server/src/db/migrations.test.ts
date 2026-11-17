@@ -1152,7 +1152,7 @@ test('v32 adds objectives_done and the objective_done kind, keeping every briefi
   const db = openDb(f);
   expect(db.prepare('SELECT id, kind FROM briefings').all()).toEqual([{ id: 7, kind: 'crew' }]);
   expect(db.prepare('SELECT id, briefing_id AS b FROM rulings').all()).toEqual([{ id: 7, b: 7 }]);
-  expect(MIGRATIONS.at(-1)?.version).toBe(32);
+  expect(MIGRATIONS.at(-1)?.version).toBeGreaterThanOrEqual(32);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   db.exec(
     `INSERT INTO briefings (id, zone_id, kind, subject, decision, why, options_json, source, state,
@@ -1166,5 +1166,21 @@ test('v32 adds objectives_done and the objective_done kind, keeping every briefi
   put.run('a', 1);
   expect(() => put.run('a', 1)).toThrow(/UNIQUE|PRIMARY/);
   expect(() => put.run('b', 99)).toThrow(/FOREIGN KEY/);
+  db.close();
+});
+
+test('v33 adds triage_requests.gate_reasons, null on every existing request', () => {
+  const f = dbAt(32, (raw) => {
+    raw.exec(
+      `INSERT INTO triage_requests (zone_id, issue_number, title, body, body_sha, author, state,
+         reason, created_at, updated_at) VALUES ('z', 179, 't', 'b', 's', 'a', 'done', 'r', 't', 't')`,
+    );
+  });
+  const db = openDb(f);
+  expect(MIGRATIONS.at(-1)?.version).toBe(33);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(
+    db.prepare('SELECT issue_number AS n, reason, gate_reasons AS g FROM triage_requests').all(),
+  ).toEqual([{ n: 179, reason: 'r', g: null }]);
   db.close();
 });

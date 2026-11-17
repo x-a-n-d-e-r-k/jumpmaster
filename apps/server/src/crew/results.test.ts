@@ -13,6 +13,7 @@ import {
   getUsageState,
   listEvents,
   listOutbox,
+  listWorkItems,
   setUsageState,
   setWorkItemState,
   updateDrop,
@@ -21,6 +22,7 @@ import { zonePass } from '../flow/snapshot.js';
 import { unsanitizeForgeText } from '../outbox.js';
 import { promptVersions } from '../payloads.js';
 import { applyResult, type ResultDeps } from '../results.js';
+import { syncDropZone } from '../sync.js';
 import { crewOn, crewWorld, ISSUE_BODY } from '../test/crew.js';
 import { usageCfg, type ZoneWorld } from '../test/fixtures.js';
 import { plus, t0 } from '../test/helpers.js';
@@ -31,6 +33,7 @@ import {
   getCrewIssue,
   getTriageRequest,
   listCrewIssues,
+  listTriageRequests,
   recordTriageRequest,
   setCrewIssue,
 } from './store.js';
@@ -219,6 +222,20 @@ describe('refute results', () => {
       body: ISSUE_BODY,
       findingsJson: JSON.stringify(['too big']),
     });
+  });
+
+  test('refute revise whose revised body names a protected path is not taken (#247)', async () => {
+    const issue = staged();
+    const id = await crewDrop();
+    const revisedBody = ISSUE_BODY.replace('The API has no docs.', 'Also edit `CODEOWNERS`.');
+    await applyResult(
+      w.db,
+      deps(),
+      id,
+      completed({ decision: 'revise', findings: ['f'], revisedBody }),
+      t0,
+    );
+    expect(getCrewIssue(w.db, issue)).toMatchObject({ state: 'rejecting', body: ISSUE_BODY });
   });
 
   test('refute revise with a valid body moves to revising with the new text', async () => {
@@ -658,5 +675,88 @@ describe('triage results (#184)', () => {
     const [b] = listBriefings(w.db, { zoneId: 'main' });
     expect(b?.why).toContain('split refused');
     expect(JSON.stringify(b)).not.toMatch(/OVERAGE-SENTENCE|FABLE-SENTENCE|overage-sentence/);
+  });
+});
+
+describe('D5: a body naming a protected path is stopped at every entry point (#247)', () => {
+  const NAMES_CI = ISSUE_BODY.replace(
+    'The API has no docs.',
+    'Add a docs job to `.github/workflows/ci.yml`.',
+  );
+  const child = { key: 'ci-docs', title: 'Docs job', body: NAMES_CI };
+
+  test('sync gate: a trusted human ready issue goes to triage, not to a work item', async () => {
+    w.f.state.addIssue({
+      number: 300,
+      title: 'Docs job',
+      body: NAMES_CI,
+      author: 'human',
+      labels: [w.zone.readyLabel],
+    });
+    await syncDropZone(w.db, w.forges, w.zone, t0);
+    expect(listWorkItems(w.db, 'main').map((i) => i.issueNumber)).not.toContain(300);
+    const reqs = listTriageRequests(w.db, 'main').filter((r) => r.issueNumber === 300);
+    expect(reqs.map((r) => r.gateReasons)).toEqual([
+      ['protected path .github/** named in the issue'],
+    ]);
+  });
+
+  test('applyCrewActions from a lead and from an MCP source', () => {
+    for (const source of [
+      { kind: 'drop', dropId: 'd1' },
+      { kind: 'mcp', tokenId: 7 },
+    ] as const) {
+      const r = applyCrewActions(
+        w.db,
+        w.zone,
+        { fileIssues: [{ ...child, objective: 'document-every-endpoint' }] },
+        source,
+        t0,
+      );
+      expect(r.filed).toEqual([]);
+      expect(r.refused).toEqual(['ci-docs: names protected path .github/**']);
+    }
+    expect(listCrewIssues(w.db, 'main')).toEqual([]);
+  });
+
+  test('a triage split: nothing filed, one failed attempt', async () => {
+    w.f.state.addIssue({
+      number: 179,
+      title: 'T',
+      body: 'b',
+      author: 'human',
+      labels: ['jm-triage'],
+    });
+    const req =
+      recordTriageRequest(
+        w.db,
+        'main',
+        { number: 179, title: 'T', body: 'b', author: 'human' },
+        t0,
+      ) ?? -1;
+    const id = await crewDrop();
+    expect(getDrop(w.db, id)?.role).toBe('triage');
+    await applyResult(
+      w.db,
+      deps(),
+      id,
+      completed({ summary: 's', outcome: 'split', children: [child] }),
+      t0,
+    );
+    expect(listCrewIssues(w.db, 'main')).toEqual([]);
+    expect(getTriageRequest(w.db, req)).toMatchObject({ state: 'open', attempts: 1 });
+  });
+
+  test('a refute revise', async () => {
+    const issue = staged();
+    const id = await crewDrop();
+    await applyResult(
+      w.db,
+      deps(),
+      id,
+      completed({ decision: 'revise', findings: [], revisedBody: NAMES_CI }),
+      t0,
+    );
+    expect(getCrewIssue(w.db, issue)).toMatchObject({ state: 'rejecting', body: ISSUE_BODY });
   });
 });

@@ -1,4 +1,4 @@
-import type { CrewLeadOutput } from '@jumpmaster/protocol';
+import { type CrewLeadOutput, protectedPathMatches } from '@jumpmaster/protocol';
 import { OBJECTIVE_PREFIX, raiseBriefing } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
@@ -69,6 +69,72 @@ export function validateIssueSpec(title: string, body: string): string[] {
   if (/[\r\n]/.test(title)) reasons.push('the title has a line break');
   if (title.includes('jm:op:') || body.includes('jm:op:')) reasons.push('contains "jm:op:"');
   return reasons;
+}
+
+const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+const HEADING_LEVEL = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
+/** An inline code span with no whitespace inside: how an issue names a path. */
+const CODE_SPAN = /`([^`\s]+)`/g;
+/** A line that says its paths stay as they are. */
+const KEEPS = /protected|unchanged|not changed/i;
+
+/**
+ * The protected globs an issue body asks to change, sorted and de-duplicated: a path in an inline
+ * code span (outside fenced blocks and any `## Out of scope` section, on a line that does not say
+ * `protected`, `unchanged` or `not changed`) that matches a glob through `protectedPathMatches`,
+ * the push check's matcher. A miss only falls back to the push check refusing the branch.
+ */
+export function protectedPathsNamed(body: string, protectedPaths: readonly string[]): string[] {
+  const found = new Set<string>();
+  let fence: string | null = null;
+  let outOfScope: number | null = null;
+  for (const line of body.split(/\r?\n/)) {
+    const f = FENCE.exec(line);
+    if (fence !== null) {
+      if (
+        f?.[1] &&
+        f[1][0] === fence[0] &&
+        f[1].length >= fence.length &&
+        !line.slice(f[0].length).trim()
+      )
+        fence = null;
+      continue;
+    }
+    if (f?.[1]) {
+      fence = f[1];
+      continue;
+    }
+    const h = HEADING_LEVEL.exec(line);
+    if (h) {
+      const level = h[1]?.length ?? 1;
+      if (outOfScope !== null && level <= outOfScope) outOfScope = null;
+      if ((h[2] ?? '').toLowerCase() === 'out of scope') outOfScope = level;
+    }
+    if (outOfScope !== null || KEEPS.test(line)) continue;
+    for (const m of line.matchAll(CODE_SPAN)) {
+      const path = (m[1] ?? '').replace(/^(?:\.\/)+/, '');
+      if (!path) continue;
+      for (const glob of protectedPaths) if (protectedPathMatches(path, glob)) found.add(glob);
+    }
+  }
+  return [...found].sort();
+}
+
+/**
+ * Why an issue is held back from an implementer: its drop-ready format reasons, then each
+ * protected glob it names. Empty means it may go to a work item.
+ */
+export function issueGateReasons(
+  title: string,
+  body: string,
+  protectedPaths: readonly string[],
+): string[] {
+  return [
+    ...validateIssueSpec(title, body),
+    ...protectedPathsNamed(body, protectedPaths).map(
+      (g) => `protected path ${g} named in the issue`,
+    ),
+  ];
 }
 
 /** Free crew-issue slots: `maxStaged` less the open crew issues, floored at 0. */
@@ -187,6 +253,11 @@ export function applyCrewActions(
       const reasons = validateIssueSpec(i.title, i.body);
       if (reasons.length > 0) {
         refuse(reasons.join('; '));
+        continue;
+      }
+      const named = protectedPathsNamed(i.body, zone.protectedPaths);
+      if (named.length > 0) {
+        refuse(named.map((g) => `names protected path ${g}`).join('; '));
         continue;
       }
       if (slots <= 0) {

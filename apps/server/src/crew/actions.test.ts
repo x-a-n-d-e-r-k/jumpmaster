@@ -1,4 +1,5 @@
 import type { CrewLeadOutput } from '@jumpmaster/protocol';
+import { protectedPathMatches } from '@jumpmaster/protocol';
 import { beforeEach, describe, expect, test } from 'vitest';
 import {
   applyPendingRulings,
@@ -16,6 +17,7 @@ import {
   type CrewSource,
   crewIssueSlots,
   normaliseTitle,
+  protectedPathsNamed,
   validateIssueSpec,
 } from './actions.js';
 import { flushCrewOps } from './flush.js';
@@ -95,6 +97,64 @@ describe('validateIssueSpec', () => {
   });
 });
 
+describe('protectedPathsNamed (#247)', () => {
+  const PROTECTED = ['GOAL.md', 'examples/**', '.github/**'];
+  const named = (body: string) => protectedPathsNamed(body, PROTECTED);
+
+  test('a wording list naming a protected file in backticks', () => {
+    expect(named('- `README.md`, `examples/jumpmaster.config.json` and the skills')).toEqual([
+      'examples/**',
+    ]);
+  });
+
+  test('a line saying the paths are protected and not changed', () => {
+    expect(
+      named(
+        '- `GOAL.md` and `examples/jumpmaster.config.json` are protected paths and are not changed here',
+      ),
+    ).toEqual([]);
+  });
+
+  test('a line saying the paths are unchanged', () => {
+    expect(named('- [ ] `docs/superpowers/`, `GOAL.md` and `examples/` are unchanged.')).toEqual(
+      [],
+    );
+  });
+
+  test('a path inside a fenced block', () => {
+    expect(
+      named('Run this:\n\n```\n`.github/workflows/ci.yml`\n.github/workflows/ci.yml\n```\n'),
+    ).toEqual([]);
+    expect(named('~~~yaml\n`.github/workflows/ci.yml`\n~~~\n')).toEqual([]);
+  });
+
+  test('a leading ./ is stripped before matching', () => {
+    expect(named('Change `./.github/workflows/ci.yml`')).toEqual(['.github/**']);
+  });
+
+  test('a path under ## Out of scope', () => {
+    expect(named('## Out of scope\n\nChange `GOAL.md`\n')).toEqual([]);
+    // The next section is in scope again.
+    expect(named('## Out of scope\n\n- nothing\n\n## Placement\n\nChange `GOAL.md`\n')).toEqual([
+      'GOAL.md',
+    ]);
+  });
+
+  test('sorted and de-duplicated; whitespace inside a span or no backticks is not a path', () => {
+    expect(named('Edit `GOAL.md`, `.github/a.yml`, `.github/b.yml` and `GOAL.md` again')).toEqual([
+      '.github/**',
+      'GOAL.md',
+    ]);
+    expect(named('Edit GOAL.md and `GOAL .md`')).toEqual([]);
+  });
+
+  test('D4: padded forms agree with protectedPathMatches on the normalized token', () => {
+    expect(named('Change `./GOAL.md`')).toEqual(['GOAL.md']);
+    const dir = protectedPathMatches('examples/', 'examples/**');
+    expect(named('Add a file under `examples/`')).toEqual(dir ? ['examples/**'] : []);
+  });
+});
+
 describe('applyCrewActions', () => {
   test('a valid issue becomes a filing intent tagged with its objective and source', () => {
     const r = apply({ fileIssues: [issue({ priority: 'high' })] });
@@ -123,6 +183,15 @@ describe('applyCrewActions', () => {
       'add-docs: no "## Acceptance criteria" checklist; no "## Tests" or "## Required tests" list',
     ]);
     expect(r.refused.join()).not.toContain('just do it');
+    expect(listCrewIssues(w.db, 'main')).toEqual([]);
+  });
+
+  test('a lead issue naming a protected path is refused with the glob, and no crew issue row', () => {
+    const zone = { ...w.zone, protectedPaths: ['examples/**', '.github/**'] };
+    const body = BODY.replace('The API has no docs.', 'Update `examples/x.json` too.');
+    const r = applyCrewActions(w.db, zone, { fileIssues: [issue({ body })] }, DROP, t0);
+    expect(r.filed).toEqual([]);
+    expect(r.refused).toEqual(['add-docs: names protected path examples/**']);
     expect(listCrewIssues(w.db, 'main')).toEqual([]);
   });
 

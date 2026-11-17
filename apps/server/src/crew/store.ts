@@ -158,6 +158,8 @@ export type TriageRequest = {
   state: TriageState;
   outcome: TriageOutcome | null;
   reason: string | null;
+  /** Why sync's triage gate held the issue back (#247), or null when it recorded none. */
+  gateReasons: string[] | null;
   attempts: number;
   briefingId: number | null;
   createdAt: string;
@@ -169,8 +171,15 @@ export type TriagePatch = Partial<
 >;
 
 const TRIAGE_COLS = `id, zone_id AS zoneId, issue_number AS issueNumber, title, body,
-  body_sha AS bodySha, author, state, outcome, reason, attempts, briefing_id AS briefingId,
-  created_at AS createdAt, updated_at AS updatedAt`;
+  body_sha AS bodySha, author, state, outcome, reason, gate_reasons AS gateReasons, attempts,
+  briefing_id AS briefingId, created_at AS createdAt, updated_at AS updatedAt`;
+
+type TriageRow = Omit<TriageRequest, 'gateReasons'> & { gateReasons: string | null };
+
+const triageOf = (r: TriageRow): TriageRequest => ({
+  ...r,
+  gateReasons: r.gateReasons === null ? null : (JSON.parse(r.gateReasons) as string[]),
+});
 
 const TRIAGE_COLUMN: Record<keyof TriagePatch, string> = {
   state: 'state',
@@ -193,6 +202,7 @@ export function recordTriageRequest(
   zoneId: string,
   issue: { number: number; title: string; body: string; author: string },
   now: Date,
+  gateReasons: readonly string[] = [],
 ): number | null {
   const sha = triageBodySha(issue.body);
   const at = now.toISOString();
@@ -210,23 +220,36 @@ export function recordTriageRequest(
     const r = db
       .prepare(
         `INSERT INTO triage_requests (zone_id, issue_number, title, body, body_sha, author, state,
-           created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+           gate_reasons, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
       )
-      .run(zoneId, issue.number, issue.title, issue.body, sha, issue.author, at, at);
+      .run(
+        zoneId,
+        issue.number,
+        issue.title,
+        issue.body,
+        sha,
+        issue.author,
+        gateReasons.length > 0 ? JSON.stringify(gateReasons) : null,
+        at,
+        at,
+      );
     return Number(r.lastInsertRowid);
   })();
 }
 
 export function getTriageRequest(db: Db, id: number): TriageRequest | undefined {
-  return db.prepare(`SELECT ${TRIAGE_COLS} FROM triage_requests WHERE id = ?`).get(id) as
-    | TriageRequest
+  const row = db.prepare(`SELECT ${TRIAGE_COLS} FROM triage_requests WHERE id = ?`).get(id) as
+    | TriageRow
     | undefined;
+  return row && triageOf(row);
 }
 
 export function listTriageRequests(db: Db, zoneId: string): TriageRequest[] {
-  return db
-    .prepare(`SELECT ${TRIAGE_COLS} FROM triage_requests WHERE zone_id = ? ORDER BY id`)
-    .all(zoneId) as TriageRequest[];
+  return (
+    db
+      .prepare(`SELECT ${TRIAGE_COLS} FROM triage_requests WHERE zone_id = ? ORDER BY id`)
+      .all(zoneId) as TriageRow[]
+  ).map(triageOf);
 }
 
 export function setTriageRequest(db: Db, id: number, patch: TriagePatch, now: Date): void {
