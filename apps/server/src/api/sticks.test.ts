@@ -1495,6 +1495,25 @@ describe('push container routes', () => {
     void db;
   });
 
+  test('a stored lease that is not a SHA, or an unsafe base, gets no grant (issue #262)', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId, { kind: 'checkpoint', headSha: '--output=/x' });
+    const res = await grant(stickToken);
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ refused: 'lease', retryable: false });
+    expect(liveGrants(db)).toBe(0);
+
+    const { db: db2 } = setup({ queued: false });
+    const s2 = await enroll();
+    pending(db2, s2.stickId, { kind: 'checkpoint', headSha: PRIOR });
+    db2.prepare('UPDATE drop_zones SET default_branch = ?').run('--upload-pack=x');
+    const res2 = await grant(s2.stickToken);
+    expect(res2.statusCode).toBe(403);
+    expect(res2.json()).toMatchObject({ refused: 'base', retryable: false });
+    expect(liveGrants(db2)).toBe(0);
+  });
+
   test('the audit row never contains the token', async () => {
     const { db } = setup({ queued: false });
     const { stickId, stickToken } = await enroll();
