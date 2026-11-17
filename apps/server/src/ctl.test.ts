@@ -673,6 +673,34 @@ describe('ctl secrets (Task 4)', () => {
     expect((await run(['secrets', 'nope'])).code).toBe(2);
   });
 
+  test('secrets test github-app/<owner>/<role> reaches the app entry route; a PAT name and list keep theirs', async () => {
+    const app = await run(['secrets', 'test', 'github-app/acme/author']);
+    expect(app.calls[0]).toMatchObject({
+      url: 'http://127.0.0.1:7420/api/control/secrets/github-app/acme/author/test',
+      init: { method: 'POST' },
+    });
+    expect(ctlRequest(['secrets', 'test', 'github-app/acme/author'])).toEqual({
+      path: '/api/control/secrets/github-app/acme/author/test',
+      method: 'POST',
+      body: {},
+    });
+    // Each segment is encoded on its own.
+    expect(ctlRequest(['secrets', 'test', 'github-app/a b/author'])?.path).toBe(
+      '/api/control/secrets/github-app/a%20b/author/test',
+    );
+    expect((await run(['secrets', 'test', 'githubAuthorToken'])).calls[0]).toMatchObject({
+      url: 'http://127.0.0.1:7420/api/control/secrets/githubAuthorToken/test',
+      init: { method: 'POST' },
+    });
+    expect(ctlRequest(['secrets', 'test', 'githubAuthorToken'])?.path).toBe(
+      '/api/control/secrets/githubAuthorToken/test',
+    );
+    expect((await run(['secrets', 'list'])).calls[0]).toMatchObject({
+      url: 'http://127.0.0.1:7420/api/control/secrets',
+      init: { method: 'GET' },
+    });
+  });
+
   test('vault on, off, prefer and copy-to-vault reach their routes and send no value', async () => {
     const on = await run(['secrets', 'vault', 'on']);
     expect(on.calls[0]).toMatchObject({
