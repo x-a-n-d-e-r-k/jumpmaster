@@ -378,8 +378,8 @@ async function runCosign(
   return { ok: true, via: 'cosign' };
 }
 
-/** Index and manifest blobs are small; a larger one is refused unread. */
-const META_CAP_BYTES = 4 * 1024 * 1024;
+/** Index, manifest and bundle blobs are small; a larger one is refused unread. */
+export const META_CAP_BYTES = 4 * 1024 * 1024;
 const SHA256 = /^sha256:[0-9a-f]{64}$/;
 
 class Refused extends Error {}
@@ -397,13 +397,18 @@ function readObject(path: string, what: string): Record<string, unknown> {
   throw new Refused(`${what} is not JSON`);
 }
 
-/** The path of blob `digest` in `dir`, after checking its content hashes to it. */
+/**
+ * The path of blob `digest` in `dir`, after checking its content hashes to it. Every blob checked
+ * here is small (an index, a signature manifest, a bundle): one over `META_CAP_BYTES` is refused
+ * before it is read (issue #257).
+ */
 function checkedBlob(dir: string, digest: unknown, what: string): string {
   if (typeof digest !== 'string' || !SHA256.test(digest))
     throw new Refused(`${what} has no sha256 digest`);
   const path = join(dir, 'blobs', 'sha256', digest.slice(7));
-  if (!existsSync(path) || !statSync(path).isFile())
-    throw new Refused(`${what} ${digest} is not in the layout`);
+  const st = existsSync(path) ? statSync(path) : undefined;
+  if (!st?.isFile()) throw new Refused(`${what} ${digest} is not in the layout`);
+  if (st.size > META_CAP_BYTES) throw new Refused(`${what} is too large`);
   const got = `sha256:${createHash('sha256').update(readFileSync(path)).digest('hex')}`;
   if (got !== digest) throw new Refused(`${what} does not hash to ${digest}`);
   return path;
