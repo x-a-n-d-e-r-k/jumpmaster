@@ -15,7 +15,7 @@ results in `docs/spikes/2026-11-14-github-app.md`, and the push container alread
 (spec Task 4) are the ground truth. File issues small enough for one drop each, in dependency
 order, each naming the spec sections it implements.
 
-### Vault and credential resolution (spec Task 7)
+### Vault and credential resolution (spec Task 7) (done)
 
 §4.4: `github-app/<owner>/<role>` vault entries, credential references, app-first resolution,
 `testCredential` and fingerprints for apps, PEM scrubbing, `pairFor` by credential kind, the read
