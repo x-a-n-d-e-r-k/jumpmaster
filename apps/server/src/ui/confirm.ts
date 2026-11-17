@@ -149,7 +149,11 @@ export function registerConfirmPages(app: FastifyInstance, deps: ConfirmPageDeps
     if (r.ok) {
       recordAudit(
         db,
-        { via: 'session', action: ACTION_OF[pending.meta.via], detail: appliedDetail(r) },
+        {
+          via: 'session',
+          action: pending.meta.audit?.action ?? ACTION_OF[pending.meta.via],
+          detail: { ...appliedDetail(r), ...pending.meta.audit?.detail },
+        },
         now(),
         // The request's snapshot, the secrets now and the retired ones (T3 review M6).
         [

