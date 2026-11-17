@@ -62,7 +62,7 @@ import { dispatchGate } from '../usage.js';
 import type { Shadowed } from '../vault/credentials.js';
 import type { CredentialProblem } from '../vault/problems.js';
 import { credentialFor, isAppReviewerZone, type ResolvedApps } from '../vault/resolution.js';
-import { KEY_CHANGED } from '../vault/vault.js';
+import { KEY_CHANGED, VAULT_KEY_IN_DATA_DIR } from '../vault/vault.js';
 
 /** `info` says something worth knowing that is no fault (an optional setting left unset). */
 export type DoctorStatus = 'pass' | 'warn' | 'fail' | 'skip' | 'info';
@@ -153,7 +153,7 @@ export type DoctorEnv = {
   /** Each secret read from a file (`JM_*_FILE`), with its mode (null when it can't be read). */
   /** `mode` is the target's (a link is followed); `link` when the path itself is a symlink. */
   secretFiles?: { variable: string; path: string; mode: number | null; link?: boolean }[];
-  /** `JM_VAULT_KEY_FILE`, to warn when it lies under the data directory. */
+  /** `JM_VAULT_KEY_FILE`, used when the store does not name the effective key path. */
   vaultKeyFile?: string;
 };
 
@@ -195,6 +195,11 @@ export type DoctorDeps = {
     problems: CredentialProblem[];
     shadowed: Shadowed[];
     vaultKey: { status: 'ok' | 'empty' | 'disabled' } | { status: 'mismatch'; names: string[] };
+    /**
+     * The key file the vault opened (`ConfigStore.vaultKeyFile`): the one it read, `JM_VAULT_KEY_FILE` or the
+     * `vault.key_file` setting. `vault.key` judges where it lies (issue #258).
+     */
+    vaultKeyFile?: string;
     /** The Claude token's creation date (`credentialCreatedAt`), for `claude.token-age`. */
     claudeTokenCreatedAt?: string;
     /** Whether each install-wide credential is set, for `credential.install`. */
@@ -538,7 +543,7 @@ function secretFilesCheck(d: DoctorDeps): DoctorCheck {
     ...base,
     status: 'fail',
     summary: `secret file(s) other users on the host can read: ${open.map((f) => `${f.path} (${f.variable}, mode ${(f.mode as number).toString(8).padStart(3, '0')}${f.link ? '; a link: chmod 600 the file it points to' : ''})`).join(', ')}`,
-    fix: 'In the install directory: chmod 700 secrets && chmod 600 secrets/*, then docker compose restart jumpmaster.',
+    fix: `In the install directory: chmod 700 secrets && chmod 600 secrets/*${open.some((f) => f.variable.startsWith('secrets/github-app/')) ? ' && chmod 700 secrets/github-app secrets/github-app/* && chmod 600 secrets/github-app/*/*.json' : ''}, then docker compose restart jumpmaster.`,
   };
 }
 
@@ -2336,7 +2341,15 @@ function vaultKeyCheck(d: DoctorDeps): DoctorCheck {
       summary:
         'no vault key (the vault is off: turn it on under Settings, Credentials, or set JM_VAULT_KEY_FILE): credentials come from files and the environment only',
     };
-  const keyFile = d.env.vaultKeyFile;
+  const keyFile = d.credentials?.vaultKeyFile ?? d.env.vaultKeyFile;
+  // CLAIM = PROOF: no examined key path, no pass.
+  if (!keyFile)
+    return {
+      ...base,
+      status: 'info',
+      summary:
+        'the vault is on, but its key file is not known here, so where it is stored was not examined',
+    };
   // Real paths on both sides: a symlinked data directory or key path can't hide the overlap.
   const real = (p: string): string => {
     try {
@@ -2346,20 +2359,20 @@ function vaultKeyCheck(d: DoctorDeps): DoctorCheck {
     }
   };
   const data = real(d.config.dataDir);
-  if (keyFile && real(keyFile).startsWith(data + sep))
+  if (real(keyFile).startsWith(data + sep))
     return {
       ...base,
       status: 'warn',
-      summary: `the vault key ${keyFile} is under the data directory ${d.config.dataDir}: a copy of the data carries the key beside the ciphertext`,
-      fix: 'Move the key file to secrets/vault_key (outside the data directory), point JM_VAULT_KEY_FILE at it, and restart.',
+      summary: VAULT_KEY_IN_DATA_DIR,
+      fix: `The key file is ${keyFile}, under the data directory ${d.config.dataDir}. Keep it out of any copy or backup of the data directory until it is replaced.`,
     };
   return {
     ...base,
     status: 'pass',
     summary:
       k.status === 'empty'
-        ? 'the vault key is set; the vault is empty'
-        : 'every vault entry decrypts with the key',
+        ? `the vault key ${keyFile} is set; the vault is empty`
+        : `every vault entry decrypts with the key ${keyFile}`,
   };
 }
 

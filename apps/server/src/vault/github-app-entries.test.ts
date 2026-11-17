@@ -314,6 +314,25 @@ describe('readAppEntry', () => {
     expectClean(msg);
   });
 
+  test('#258: an entry file with any group or other bit is refused with the chmod message; 0600 and 0400 are read', () => {
+    const { vault, secretsDir } = setup();
+    const path = writeEntryFile(secretsDir, 'acme', 'author', serializeAppEntry(fileEntry));
+    for (const mode of [0o640, 0o604, 0o644, 0o666]) {
+      chmodSync(path, mode);
+      const msg = thrown(() => readAppEntry({ vault, secretsDir }, 'acme', 'author'));
+      expect(msg).toBe(`${path} is readable by others; chmod 600 it`);
+      expectClean(msg);
+    }
+    for (const mode of [0o600, 0o400]) {
+      chmodSync(path, mode);
+      expect(readAppEntry({ vault, secretsDir }, 'acme', 'author')).toMatchObject({
+        source: 'file',
+        path,
+        entry: { slug: 'from-file' },
+      });
+    }
+  });
+
   test('a vault entry holding invalid JSON throws naming the entry, never its contents', () => {
     const { vault, secretsDir } = setup();
     const name = appEntryName('acme', 'author');

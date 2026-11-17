@@ -85,6 +85,21 @@ describe('resolveAppEntries', () => {
     expect(apps.get('globex')?.reviewer).toEqual({ source: 'missing' });
   });
 
+  test('a resolved PEM is pinned: thousands of later minted values never evict its lines', () => {
+    const { vault, secretsDir } = setup();
+    vault.put(appEntryName('acme', 'author'), serializeAppEntry(entry()), { now: t0 });
+    const set = new ScrubSet(64, () => {});
+    resolveAppEntries([twoBot('acme/a')], { vault, secretsDir, scrubSet: set });
+    for (let i = 0; i < 5000; i++) set.add(`minted-value-${i}-xx`);
+    const lines = entry()
+      .pem.split('\n')
+      .filter((l) => l.length >= 40 && !l.startsWith('-----'));
+    expect(lines.length).toBeGreaterThan(0);
+    const values = set.values();
+    for (const l of lines) expect(values).toContain(l);
+    expect(values).toContain(entry().pem);
+  });
+
   test('a starter-only owner is not read, and its zone gets the PAT', () => {
     const { vault, secretsDir } = setup();
     vault.put(appEntryName('acme', 'author'), serializeAppEntry(entry()), { now: t0 });

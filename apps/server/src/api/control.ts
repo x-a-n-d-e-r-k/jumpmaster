@@ -226,10 +226,12 @@ function credentialsOf(store: ConfigStore): NonNullable<DoctorDeps['credentials'
   const resolved = store.resolved();
   const vault = store.vault();
   const created = credentialCreatedAt('claudeToken', resolved, store.current().claude);
+  const keyFile = store.vaultKeyFile();
   return {
     problems: store.problems(),
     shadowed: shadowedCredentials(resolved, vault),
     vaultKey: vault === 'disabled' ? { status: 'disabled' } : vault.keyStatus(),
+    ...(keyFile ? { vaultKeyFile: keyFile } : {}),
     ...(created ? { claudeTokenCreatedAt: created } : {}),
     install: {
       claudeToken: resolved.claudeToken.source !== 'missing',

@@ -211,7 +211,11 @@ export function setDropZoneDefaultBranch(db: Db, id: string, defaultBranch: stri
   db.prepare('UPDATE drop_zones SET default_branch = ? WHERE id = ?').run(defaultBranch, id);
 }
 
-/** Inserts a new ready work item, or refreshes issue fields of an existing one (state is preserved). */
+/**
+ * Inserts a new ready work item, or refreshes issue fields of an existing one. A refresh keeps the
+ * state and `updated_at`: that is when the state last changed, which `syncParkBriefings` reads as
+ * when the item parked (a refresh every pass would pass for a fresh park and re-brief it).
+ */
 export function upsertWorkItem(db: Db, w: NewWorkItem, now?: Date): WorkItem {
   const row = db
     .prepare(
@@ -221,8 +225,7 @@ export function upsertWorkItem(db: Db, w: NewWorkItem, now?: Date): WorkItem {
          @blockedBy, @updatedAt)
        ON CONFLICT(drop_zone_id, issue_number) DO UPDATE SET title = excluded.title, body = excluded.body,
          author = excluded.author, priority = excluded.priority, is_fix = excluded.is_fix,
-         issue_created_at = excluded.issue_created_at, blocked_by = excluded.blocked_by,
-         updated_at = excluded.updated_at
+         issue_created_at = excluded.issue_created_at, blocked_by = excluded.blocked_by
        RETURNING ${WORK_ITEM_COLS}`,
     )
     .get({

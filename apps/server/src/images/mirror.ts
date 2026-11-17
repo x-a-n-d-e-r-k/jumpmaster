@@ -10,6 +10,7 @@
 
 import { join } from 'node:path';
 import { type ScrubSet, serverScrubSet } from '../forge/scrub-set.js';
+import { log } from '../log.js';
 import type { ImageLockFile } from '../presets.js';
 import {
   DOCKER_LIST,
@@ -191,7 +192,7 @@ export class ImageMirror {
   constructor(deps: MirrorDeps) {
     this.#deps = deps;
     this.#scrub = deps.scrub ?? serverScrubSet;
-    this.#log = deps.log ?? ((line) => console.error(`[jumpmaster] ${line}`));
+    this.#log = deps.log ?? log;
     this.store = new ImageStore(join(deps.dataDir, 'images'));
     this.#index = this.store.readIndex();
     // A pass that died mid-fetch left `fetching`: it starts again.

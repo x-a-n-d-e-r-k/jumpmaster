@@ -9,7 +9,7 @@ import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { type BriefingSource, listBriefings, listRulings } from '../briefings.js';
-import { type Config, type DropZoneConfig, mcpConfigOf, secretList } from '../config.js';
+import { type Config, type DropZoneConfig, mcpConfigOf } from '../config.js';
 import { applyCrewActions, type CrewActionInput } from '../crew/actions.js';
 import { getCrewIssueByNumber, listCrewIssues } from '../crew/store.js';
 import type { Db } from '../db/open.js';
@@ -24,6 +24,7 @@ import {
 } from '../db/repo.js';
 import { getGoals } from '../goals.js';
 import { fence, neutralise } from '../payloads.js';
+import { redactionList } from '../scrub.js';
 import { dispatchGate } from '../usage.js';
 import { auditMcp, type McpPrincipal, type McpScope } from './tokens.js';
 
@@ -314,7 +315,7 @@ function writeBlocked(
       'usage stopped',
     );
   }
-  if (containsSecret(JSON.stringify(args), secretList(config.secrets))) {
+  if (containsSecret(JSON.stringify(args), redactionList(config.secrets))) {
     return refused('the arguments contain a token or secret', 'contains secret');
   }
   return null;
@@ -527,7 +528,7 @@ export async function callTool(
       const out = tool.run(
         { ...ctx, now: () => at },
         parsed.data as never,
-        fencer(secretList(ctx.config.secrets)),
+        fencer(redactionList(ctx.config.secrets)),
       );
       if (tool.scope === 'read' && out.outcome === 'ok') audit('ok');
       else audit(out.outcome, out.detail);

@@ -23,10 +23,10 @@ import { makeReadForgeFor, TIMED_REQUEST_MS } from './forge/read-forge.js';
 import { serverScrubSet } from './forge/scrub-set.js';
 import { imageLockPath, startImageMirror } from './images/run.js';
 import { leaseExpirer } from './leases.js';
+import { log as serverLog, setLogSource, writeLog } from './log.js';
 import { type ForgePair, ForgePairs, markPendingUnknown } from './outbox.js';
 import { promptVersions } from './payloads.js';
 import { zonePass } from './scheduler.js';
-import { scrub } from './scrub.js';
 import { readSecretFile } from './secrets.js';
 import { recordPass } from './status.js';
 import { syncDropZone } from './sync.js';
@@ -109,8 +109,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
   markPendingUnknown(db, new Date());
 
   let store: ConfigStore | undefined;
-  const log = (msg: string) =>
-    console.error(`[jumpmaster] ${scrub(msg, store?.current(), store?.retired())}`);
+  const log = (msg: string) => writeLog(msg, store?.current(), store?.retired());
   try {
     // The key and the data travel together: a non-empty vault without its key stops the start.
     // JM_VAULT_KEY_FILE wins; else the key file Settings wrote when it turned the vault on.
@@ -129,6 +128,9 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     throw e;
   }
   const live = store;
+  // Writers with no store of their own (sync, the crew schedule, the image mirror) log through
+  // the module-level `log`: it scrubs against this store's config and retired values.
+  const unsetLogSource = setLogSource(live);
   // Risky settings are said out loud at every start (starter mode's merge-any-green-PR residual),
   // and again when a revision makes a zone starter.
   let warned = new Set(startupWarnings(live.current()));
@@ -341,6 +343,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     app,
     store: live,
     async stop() {
+      unsetLogSource();
       poll.stop();
       images.stop();
       clearInterval(leaseTimer);
@@ -358,7 +361,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       process.on('SIGTERM', shutdown);
     },
     (e) => {
-      console.error(`[jumpmaster] fatal: ${errorMessage(e)}`);
+      serverLog(`fatal: ${errorMessage(e)}`);
       process.exit(1);
     },
   );

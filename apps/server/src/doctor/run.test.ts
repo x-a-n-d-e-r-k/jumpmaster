@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { secretList } from '../config.js';
+import { serverScrubSet } from '../forge/scrub-set.js';
 import { zoneGuidance } from '../github/guidance.js';
 import {
   AUTHOR_TOKEN,
@@ -44,6 +45,26 @@ describe('runDoctor', () => {
       for (const t of texts) expect(t).not.toContain(secret);
     // The redaction left the rest of the message readable.
     expect(JSON.stringify(run)).toContain('upstream said [REDACTED]');
+  });
+
+  test('D5: a value only the scrub set holds is redacted from a stored and returned run', async () => {
+    const w = world();
+    const minted = 'minted-only-in-scrub-set-0002';
+    serverScrubSet.add(minted);
+    let texts: string[];
+    try {
+      w.f.author.failNext('listLabels', { status: 500, message: `upstream said ${minted}` });
+      const run = await runDoctor(w.deps);
+      const stored = w.db.prepare('SELECT results_json AS r FROM doctor_runs').all() as {
+        r: string;
+      }[];
+      texts = [JSON.stringify(run), ...stored.map((s) => s.r)];
+    } finally {
+      serverScrubSet.clear();
+    }
+    expect(secretList(w.config.secrets)).not.toContain(minted);
+    for (const t of texts) expect(t).not.toContain(minted);
+    expect(texts[0]).toContain('upstream said [REDACTED]');
   });
 
   test('one doctor run at a time', async () => {

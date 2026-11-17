@@ -9,6 +9,7 @@
 // `compose run`: a new container's loopback is not the server.
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { log } from './log.js';
 
 export type CliDeps = {
   serve: (configPath: string | undefined) => Promise<number>;
@@ -58,7 +59,7 @@ async function serve(configPath: string | undefined): Promise<number> {
     process.on('SIGTERM', shutdown);
     return 0;
   } catch (e) {
-    console.error(`[jumpmaster] fatal: ${errorMessage(e)}`);
+    log(`fatal: ${errorMessage(e)}`);
     return 1;
   }
 }

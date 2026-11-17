@@ -1,5 +1,6 @@
 import type { DropResult, GateResult, Verdict } from '@jumpmaster/protocol';
 import { beforeEach, describe, expect, test } from 'vitest';
+import { listBriefings, ruleBriefing } from '../briefings.js';
 import {
   activeDropFor,
   getAttempts,
@@ -479,5 +480,71 @@ describe('hot apply', () => {
         gates: [gateOk],
       }),
     ).toBe(204);
+  });
+});
+
+describe('a Retry ruling on a parked briefing (#288)', () => {
+  const openParked = () =>
+    listBriefings(h.db, { zoneId: 'main', state: 'open' }).filter(
+      (b) => b.kind === 'parked' && b.subject === 'item:1',
+    );
+
+  /**
+   * Item 1 parked on its resolve-total budget with its PR open and behind the base, briefed on a
+   * pass, then ruled by Command.
+   */
+  async function parkedAndRuled(choice: 'retry' | 'leave'): Promise<void> {
+    await toPrOpen(h, 'sha1');
+    h.forge.state.compares.set('main...sha1', {
+      aheadBy: 1,
+      behindBy: 3,
+      baseSha: 'base1',
+      mergeBaseSha: 'base0',
+    });
+    setAttempts(h.db, 1, 'resolve_total', h.zone.budgets.maxResolveTotal, null);
+    setWorkItemState(h.db, 1, 'parked', 'budget exhausted: resolve-total', h.at(1));
+    h.at(1);
+    await h.reconcile();
+    const [b] = openParked();
+    if (!b) throw new Error('no parked briefing raised');
+    expect(ruleBriefing(h.db, b.id, choice, '', h.at(1))).toMatchObject({ ok: true });
+    h.at(1);
+  }
+
+  test('the pass that applies Retry enqueues the resolve and leaves no parked briefing', async () => {
+    await parkedAndRuled('retry');
+    await h.reconcile();
+    expect(activeDropFor(h.db, 1)).toMatchObject({ role: 'resolve', state: 'queued' });
+    expect(workItem(h.db, 1).state).not.toBe('parked');
+    expect(openParked()).toEqual([]);
+  });
+
+  test('an item denied a PR read on its fresh snapshot parks again with one new briefing', async () => {
+    await parkedAndRuled('retry');
+    h.forge.author.failNext('listPullFiles', { status: 403 });
+    await h.reconcile();
+    const reason = /^forge read denied: listPullFiles/;
+    expect(workItem(h.db, 1)).toMatchObject({
+      state: 'parked',
+      reason: expect.stringMatching(reason),
+    });
+    h.forge.author.failNext('listPullFiles', { status: 403 });
+    h.at(1);
+    await h.reconcile();
+    const open = openParked();
+    expect(open).toHaveLength(1);
+    expect(open[0]?.why).toMatch(reason);
+  });
+
+  test('a Leave parked ruling is not followed by a new briefing', async () => {
+    await parkedAndRuled('leave');
+    await h.reconcile();
+    h.at(1);
+    await h.reconcile();
+    expect(workItem(h.db, 1)).toMatchObject({
+      state: 'parked',
+      reason: 'budget exhausted: resolve-total',
+    });
+    expect(openParked()).toEqual([]);
   });
 });

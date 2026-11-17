@@ -40,6 +40,7 @@ import {
 } from './flow/budgets.js';
 import { protectedPathHits } from './flow/guards.js';
 import { isHeld } from './forge/github.js';
+import { serverScrubSet } from './forge/scrub-set.js';
 import {
   type CreatePrPayload,
   type ForgePair,
@@ -463,7 +464,7 @@ function applyDoctorResult(
     f.gates.every((g) => !g.timedOut && g.exitCode === 0);
   updateDrop(db, drop.id, {
     state: ok ? 'succeeded' : 'failed',
-    resultJson: JSON.stringify(redactDeep(result, deps.secrets)),
+    resultJson: JSON.stringify(redactDeep(result, [...deps.secrets, ...serverScrubSet.values()])),
   });
   if (!findings.success && result.status === 'completed') {
     appendEvents(db, drop.id, [
