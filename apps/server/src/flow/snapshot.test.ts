@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
-import { getWorkItem, insertVerdict, recordGateAllowance, type VerdictRow } from '../db/repo.js';
+import {
+  getWorkItem,
+  insertVerdict,
+  recordGateAllowance,
+  setWorkItemState,
+  type VerdictRow,
+} from '../db/repo.js';
 import { zoneWorld } from '../test/fixtures.js';
 import { decide } from './decide.js';
 import { ADMINISTRATION_PROBLEM } from './guards.js';
@@ -667,5 +673,97 @@ describe('carry facts', () => {
     expect(s.carry).toBeNull();
     expect(s.forgeUnavailable).toBeNull();
     expect(decide(s)).toMatchObject({ kind: 'enqueue', role: 'review' });
+  });
+});
+
+describe('merge reservation', () => {
+  const at = (minutesAgo: number): string =>
+    new Date(now.getTime() - minutesAgo * 60_000).toISOString();
+  let n = 0;
+  const verdict = (
+    id: number,
+    headSha: string,
+    minutesAgo: number,
+    decision: VerdictRow['decision'] = 'approve',
+  ): void => {
+    insertVerdict(w.db, {
+      id: `r${++n}`,
+      workItemId: id,
+      headSha,
+      decision,
+      forced: false,
+      summary: 's',
+      findingsJson: '[]',
+      gatesJson: '[]',
+      createdAt: at(minutesAgo),
+    });
+  };
+  let two: number;
+  let three: number;
+  beforeEach(() => {
+    two = w.prItem(2, 'sha2');
+    three = w.prItem(3, 'sha3');
+  });
+
+  test('the holder is the item with the oldest approve on its current head', async () => {
+    verdict(itemId, 'sha1', 5);
+    verdict(two, 'sha2', 20);
+    verdict(three, 'sha3', 10);
+    expect((await snapshotOf(itemId)).mergeReservedBy).toEqual({
+      itemId: two,
+      issueNumber: 2,
+      since: at(20),
+    });
+    expect((await snapshotOf(three)).mergeReservedBy?.itemId).toBe(two);
+  });
+
+  test('a tie goes to the lower item id', async () => {
+    verdict(three, 'sha3', 10);
+    verdict(two, 'sha2', 10);
+    expect((await snapshotOf(itemId)).mergeReservedBy?.itemId).toBe(two);
+  });
+
+  test("the holder's own snapshot has none", async () => {
+    verdict(itemId, 'sha1', 5);
+    verdict(two, 'sha2', 20);
+    expect((await snapshotOf(two)).mergeReservedBy).toBeNull();
+  });
+
+  test('an approve on an older head does not count', async () => {
+    verdict(itemId, 'sha1', 5);
+    verdict(two, 'old2', 20);
+    verdict(three, 'sha3', 10);
+    expect((await snapshotOf(itemId)).mergeReservedBy?.itemId).toBe(three);
+    verdict(three, 'old3', 15);
+    expect((await snapshotOf(itemId)).mergeReservedBy?.itemId).toBe(three);
+  });
+
+  test('a request-changes newer than the approve on the same head does not count', async () => {
+    verdict(itemId, 'sha1', 5);
+    verdict(two, 'sha2', 20);
+    verdict(two, 'sha2', 18, 'request_changes');
+    expect((await snapshotOf(itemId)).mergeReservedBy).toBeNull();
+  });
+
+  test('an approve older than mergeReservationMinutes does not count', async () => {
+    verdict(itemId, 'sha1', 5);
+    verdict(two, 'sha2', 31);
+    expect((await snapshotOf(itemId)).mergeReservedBy).toBeNull();
+    verdict(three, 'sha3', 30);
+    expect((await snapshotOf(itemId)).mergeReservedBy?.itemId).toBe(three);
+  });
+
+  test('an item that is not pr_open holds nothing', async () => {
+    verdict(itemId, 'sha1', 5);
+    verdict(two, 'sha2', 20);
+    setWorkItemState(w.db, two, 'parked', 'x');
+    expect((await snapshotOf(itemId)).mergeReservedBy).toBeNull();
+  });
+
+  test('mergeReservationMinutes 0 turns it off', async () => {
+    w.zone = { ...w.zone, mergeReservationMinutes: 0 };
+    verdict(itemId, 'sha1', 5);
+    verdict(two, 'sha2', 20);
+    expect((await snapshotOf(itemId)).mergeReservedBy).toBeNull();
   });
 });

@@ -22,6 +22,7 @@ import {
   listWorkItems,
   recordObservation,
   setParkMark,
+  setWorkItemReason,
   setWorkItemState,
   upsertPullRequest,
   verdictsForItem,
@@ -41,7 +42,14 @@ import { renderReviewBody } from '../results.js';
 import { enqueueImplement, enqueueNext, isBlocked } from '../scheduler.js';
 import { rankItems } from '../sync.js';
 import { chargeBudget, creditBaseSync } from './budgets.js';
-import { type Action, decide, GATE_PARK_PREFIXES, type Snapshot } from './decide.js';
+import {
+  type Action,
+  decide,
+  GATE_PARK_PREFIXES,
+  isReservationReason,
+  reservationReason,
+  type Snapshot,
+} from './decide.js';
 import { buildSnapshot, recordGateParkOf, type ZonePass } from './snapshot.js';
 
 export type ReconcileReport = { actions: number; merges: number };
@@ -451,6 +459,15 @@ export async function reconcileZone(
     if (mode === 'observe') {
       observeDecision(db, zone.id, s, a, now);
       continue;
+    }
+    // A reserved-out item says whose merge it waits for (the /work list and the status line read
+    // it); the reason goes as soon as the wait does.
+    const reserved =
+      a.kind === 'wait' && a.on === 'merge-reservation' && s.mergeReservedBy
+        ? reservationReason(s.mergeReservedBy.issueNumber)
+        : null;
+    if (reserved !== item.reason && (reserved !== null || isReservationReason(item.reason))) {
+      setWorkItemReason(db, item.id, reserved);
     }
     switch (a.kind) {
       case 'enqueue':

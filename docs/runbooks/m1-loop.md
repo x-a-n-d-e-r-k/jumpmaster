@@ -126,6 +126,7 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   "mergeMethod": "squash",
   "ciRequired": true,
   "ciDeadlineMinutes": 45,
+  "mergeReservationMinutes": 30,
   "retryLabel": "agent-retry",
   "requireBranchProtection": true,
   "reviewReadToken": false,
@@ -156,6 +157,17 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   required checks. With `ciRequired: true`, only checks the ruleset names count: an
   unrelated green check (a CLA bot, a labeler) never stands in for CI, and an item with no
   named required check waits, then parks `no CI result`.
+- `mergeReservationMinutes` (an integer from 0 to 240, default 30) gives the zone's oldest
+  approved PR a merge reservation. A PR is a candidate while the newest verdict on its current
+  head is an approve (a carried one counts) made no more than that many minutes ago; the holder
+  is the candidate approved first, ties to the lower item id. While it waits on CI, a younger
+  item that is otherwise ready to merge waits instead, so main stops moving under the older PR
+  and pushing it behind again. Only that final merge waits: a reserved-out item still resolves,
+  heals, is reviewed and waits on its own CI as before, and the wait spends no budget and counts
+  toward no deadline. Its reason on the Work page and in the status line (`ctl status`) reads
+  `waiting to merge after #<issue>`. The reservation lapses when the holder merges, leaves
+  `pr_open`, gets a new head with no approve on it, or its approval is older than the limit; the
+  next pass picks the next holder. `0` turns it off.
 - `protectedPaths` defaults to CI and agent configuration (`.github/**`, `.claude/**`,
   `CODEOWNERS`, `CLAUDE.md`, `AGENTS.md`, `.mcp.json`, `GOAL.md`, `jumpmaster*.json`), git
   settings (`.gitattributes`, `.gitmodules`), package-manager settings, hooks and patches

@@ -175,6 +175,111 @@ describe('lifecycle', () => {
   });
 });
 
+describe('the merge reservation of the oldest approved PR', () => {
+  /**
+   * CI required. A (issue 1, sha1) is approved, then five minutes later B (issue 2, sha2); each
+   * review is posted. A's CI stays pending and B's is green.
+   */
+  async function twoApproved(zone: Partial<Parameters<typeof harness>[0]>['zone'] = {}) {
+    h = await harness({ issues: [issue(1), issue(2)], zone: { ciRequired: true, ...zone } });
+    for (const id of ['author', 'reviewer'] as const) {
+      const r = h.forge.state.rules[id];
+      if (r.kind === 'ok') r.rules.requiredChecks = ['ci'];
+    }
+    h.forge.state.checks.set('sha1', { state: 'pending', names: [] });
+    h.forge.state.checks.set('sha2', { state: 'pending', names: [] });
+    await toApproved(h, 'sha1');
+    h.at(5);
+    await toApproved(h, 'sha2');
+    h.forge.state.checks.set('sha2', { state: 'success', names: ['ci'] });
+  }
+  const merged = () => h.forge.state.merges.map((m) => m.sha);
+  const attemptsOf = (id: number) =>
+    h.db.prepare('SELECT key, count FROM attempts WHERE work_item_id = ? AND count > 0').all(id);
+
+  test('B waits for A, A merges when its CI is green, then B resolves without merging first', async () => {
+    await twoApproved();
+    const spent = attemptsOf(2);
+    await h.reconcile();
+    await h.reconcile();
+    await h.reconcile();
+    // Today's code merged B here, and A went behind.
+    expect(merged()).toEqual([]);
+    expect(workItem(h.db, 2)).toMatchObject({
+      state: 'pr_open',
+      reason: 'waiting to merge after #1',
+    });
+    // The floor's status line and the /work ledger both say whose merge B waits for.
+    for (const url of ['/', '/work']) {
+      expect((await h.view(url)).body).toContain('waiting to merge after #1');
+    }
+    expect(attemptsOf(2)).toEqual(spent);
+    expect(h.queuedRoles()).toEqual([]);
+
+    h.forge.state.checks.set('sha1', { state: 'success', names: ['ci'] });
+    await h.reconcile();
+    expect(merged()).toEqual(['sha1']);
+
+    h.forge.state.compares.set('main...sha2', {
+      aheadBy: 1,
+      behindBy: 1,
+      baseSha: 'base1',
+      mergeBaseSha: 'base0',
+    });
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['resolve']);
+    expect(merged()).toEqual(['sha1']);
+    expect(workItem(h.db, 2)).toMatchObject({ state: 'pr_open', reason: null });
+  });
+
+  test("A's CI fails: A heals, its new head has no approve, and B merges on the next pass", async () => {
+    await twoApproved();
+    await h.reconcile();
+    await h.reconcile();
+    expect(merged()).toEqual([]);
+    h.forge.state.checks.set('sha1', {
+      state: 'failure',
+      names: ['ci'],
+      failed: [{ name: 'ci', conclusion: 'failure' }],
+    });
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['heal']);
+    expect(merged()).toEqual([]);
+    await h.finishDrop('heal', { status: 'completed', headSha: 'sha1h', gates: [gateOk] });
+    await h.reconcile();
+    expect(merged()).toEqual(['sha2']);
+    expect(workItem(h.db, 2)).toMatchObject({ state: 'done', reason: 'merged' });
+  });
+
+  test('the reservation lapses when A has waited past mergeReservationMinutes', async () => {
+    await twoApproved();
+    await h.reconcile();
+    await h.reconcile();
+    expect(merged()).toEqual([]);
+    h.at(26); // A was approved 31 minutes ago
+    await h.reconcile();
+    expect(merged()).toEqual(['sha2']);
+  });
+
+  test('the reservation lapses when A leaves pr_open', async () => {
+    await twoApproved();
+    await h.reconcile();
+    await h.reconcile();
+    expect(merged()).toEqual([]);
+    h.forge.state.close(1);
+    await h.reconcile();
+    expect(workItem(h.db, 1)).toMatchObject({ state: 'parked', reason: 'pr closed' });
+    expect(merged()).toEqual(['sha2']);
+  });
+
+  test('mergeReservationMinutes 0: B merges first, as before', async () => {
+    await twoApproved({ mergeReservationMinutes: 0 });
+    await h.reconcile();
+    await h.reconcile();
+    expect(merged()).toEqual(['sha2']);
+  });
+});
+
 describe('an approval carried across a clean merge of the base', () => {
   const prFile = (patch: string): CompareFile => ({
     filename: 'src/a.ts',

@@ -432,6 +432,68 @@ describe('statusOf', () => {
   });
 });
 
+describe('a merge reservation (#287)', () => {
+  test('a reserved-out PR says which issue it waits to merge after', () => {
+    const s = statusOf(
+      base({
+        zones: [
+          zone({
+            items: [
+              item({
+                id: 2,
+                issueNumber: 263,
+                state: 'pr_open',
+                prNumber: 12,
+                reason: 'waiting to merge after #257',
+              }),
+            ],
+            prs: [
+              { workItemId: 2, number: 12, headFirstSeenAt: plus(NOW, -20 * MIN).toISOString() },
+            ],
+          }),
+        ],
+      }),
+      NOW,
+    );
+    expect(s.headline).toBe('PR #12 is waiting to merge after #257');
+    expect(s.waitingOn).toBe('ci');
+    expect(s.action?.href).toBe('https://github.com/octo/demo/pull/12');
+  });
+
+  test('behind a holder waiting on CI, the reserved-out PR is listed with whose merge it waits for', () => {
+    const s = statusOf(
+      base({
+        zones: [
+          zone({
+            items: [
+              item({ id: 1, issueNumber: 257, state: 'pr_open', prNumber: 11 }),
+              item({
+                id: 2,
+                issueNumber: 263,
+                state: 'pr_open',
+                prNumber: 12,
+                reason: 'waiting to merge after #257',
+              }),
+            ],
+            prs: [
+              { workItemId: 1, number: 11, headFirstSeenAt: plus(NOW, -20 * MIN).toISOString() },
+              { workItemId: 2, number: 12, headFirstSeenAt: plus(NOW, -10 * MIN).toISOString() },
+            ],
+          }),
+        ],
+      }),
+      NOW,
+    );
+    expect(s.headline).toBe('Waiting on CI for PR #11 (20 of 45 min)');
+    expect(s.also).toEqual([
+      {
+        text: 'PR #12 is waiting to merge after #257',
+        href: 'https://github.com/octo/demo/pull/12',
+      },
+    ]);
+  });
+});
+
 describe('usage holds (round 2, I1 and I2)', () => {
   const ready = () => [item({ id: 5, issueNumber: 11, state: 'ready' })];
 
