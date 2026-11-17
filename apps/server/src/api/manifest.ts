@@ -255,7 +255,7 @@ export const CTL_VERBS: { verb: string; page: Page; forms: string[] }[] = [
       'ctl zones show <zone> [--json]',
       'ctl zones set <zone> <path>=<json>… [--note <text>]',
       'ctl zones remove <zone>',
-      'ctl zones egress observed <zone>',
+      'ctl zones egress observed <zone> [--json]',
       'ctl zones egress adopt <zone> <host>…',
       'ctl zones transcripts <zone> --since <YYYY-MM-DD> [--until <YYYY-MM-DD>] [--out <file>]',
     ],
