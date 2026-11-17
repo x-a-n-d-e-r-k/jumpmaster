@@ -260,7 +260,10 @@ describe('making an invite (Add a stick)', () => {
     expect(r.headers['cache-control']).toBe('no-store');
     const code = CODE.exec(r.body)?.[0] as string;
     expect(code).toBeDefined();
-    expect(r.body).toContain(`curl -fsSL ${PUBLIC}/install/stick.sh | sudo sh -s -- ${code}`);
+    // The URL is one single-quoted shell word (issue #254), HTML-escaped on the page.
+    expect(r.body).toContain(
+      `curl -fsSL &#39;${PUBLIC}/install/stick.sh&#39; | sudo sh -s -- ${code}`,
+    );
     expect(r.body).toContain('#cloud-config');
     expect(r.body).toContain('TS_AUTHKEY');
     expect(r.body).toContain('works once');

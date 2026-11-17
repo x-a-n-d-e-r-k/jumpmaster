@@ -20,6 +20,7 @@ import {
   HISTORY_SCRIPT,
   INSTALL_SCRIPT,
   MCP_TOKENS_SCRIPT,
+  OTHER_MACHINES_SCRIPT,
   roleOf,
   TOKEN_BANNER_DAYS,
 } from './settings.js';
@@ -1089,6 +1090,42 @@ describe('settings, part two: browser findings (Task 13, fix round 1)', () => {
     const form = mcp.slice(start, mcp.indexOf('</form>', start));
     for (const name of ['zoneId', 'scope', 'days', 'label'])
       expect(form).toMatch(new RegExp(`<label>[A-Z][a-z]+ <(input|select)[^>]* name="${name}"`));
+  });
+});
+
+describe('the Other machines tab (issue #254)', () => {
+  test('a held change goes to the confirmation page; a refusal says why', async () => {
+    let went = '';
+    const held = pageScript(OTHER_MACHINES_SCRIPT, () => ({
+      ok: false,
+      status: 409,
+      json: { needsConfirmation: true, confirm: '/config/confirm/abc' },
+    }));
+    const save = held.ctx.jmSavePublicUrl as (...a: unknown[]) => Promise<string>;
+    const out = stubStatus();
+    expect(
+      await save('https://a.b.ts.net', out, (to: string) => {
+        went = to;
+      }),
+    ).toBe('confirm');
+    expect(went).toBe('/config/confirm/abc');
+    expect(held.calls).toEqual([
+      {
+        method: 'PUT',
+        path: '/api/control/server/public-url',
+        body: { publicUrl: 'https://a.b.ts.net' },
+      },
+    ]);
+    const bad = pageScript(OTHER_MACHINES_SCRIPT, () => ({
+      ok: false,
+      status: 400,
+      json: { issues: [{ path: 'server.publicUrl', message: 'must be a plain https origin' }] },
+    }));
+    const out2 = stubStatus();
+    expect(
+      await (bad.ctx.jmSavePublicUrl as (...a: unknown[]) => Promise<string>)('x', out2, () => {}),
+    ).toBe('refused');
+    expect(out2.textContent).toBe('must be a plain https origin');
   });
 });
 
