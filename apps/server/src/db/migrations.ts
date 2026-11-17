@@ -976,6 +976,15 @@ CREATE TABLE objectives_done (
 );
 `;
 
+/**
+ * v33: why sync's triage gate held an issue back (#247): its drop-ready format reasons and the
+ * protected paths it names, as a JSON array of strings. Null for a request recorded before, or
+ * with nothing to say. `reason` stays the outcome's.
+ */
+const V33_SQL = `
+ALTER TABLE triage_requests ADD COLUMN gate_reasons TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1009,6 +1018,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 30, sql: V30_SQL, foreignKeysOff: true },
   { version: 31, sql: V31_SQL },
   { version: 32, sql: V32_SQL, foreignKeysOff: true },
+  { version: 33, sql: V33_SQL },
 ];
 
 /**

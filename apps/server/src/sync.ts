@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { type DropZoneConfig, triageGateOn } from './config.js';
-import { validateIssueSpec } from './crew/actions.js';
+import { issueGateReasons } from './crew/actions.js';
 import { getCrewIssueByNumber, recordTriageRequest } from './crew/store.js';
 import type { Db } from './db/open.js';
 import {
@@ -74,7 +74,10 @@ const isStagedAndReady = (issue: ForgeIssue, zone: DropZoneConfig): boolean =>
 /** Why a ready work item for a crew issue that is not (or no longer) promoted was retired. */
 const CREW_NOT_PROMOTED = 'crew issue not promoted';
 
-/** Why a ready work item whose human issue fails the drop-ready format was retired. */
+/**
+ * Why a ready work item whose human issue fails the drop-ready format, or names a protected path,
+ * was retired.
+ */
 const NEEDS_TRIAGE = 'needs triage';
 
 /** Done reasons an item comes back from once its issue is admitted again. */
@@ -197,11 +200,12 @@ export async function syncDropZone(
       }
       const prev = existing.get(issue.number);
       // The triage gate: a trusted human issue only (crew-promoted ones were validated when
-      // filed). An item already in flight is left alone, with no relabel under it.
+      // filed) that fails the drop-ready format or names a protected path the push check would
+      // refuse. An item already in flight is left alone, with no relabel under it.
       if (
         gateOn &&
         !crewPromoted.has(issue.number) &&
-        validateIssueSpec(issue.title, issue.body).length > 0
+        issueGateReasons(issue.title, issue.body, zone.protectedPaths).length > 0
       ) {
         if (prev && prev.state !== 'ready' && prev.state !== 'done') continue;
         gated.add(issue.number);
@@ -330,8 +334,12 @@ async function recordTriage(
       trust.set(author, false); // a failed lookup counts as untrusted
     }
   }
+  const gateOn = triageGateOn(zone);
   for (const issue of issues) {
-    if (trust.get(issue.author) === true) recordTriageRequest(db, zone.id, issue, now);
+    if (trust.get(issue.author) !== true) continue;
+    // Why the gate holds it back, for the triage input; the same text gives the same reasons.
+    const reasons = gateOn ? issueGateReasons(issue.title, issue.body, zone.protectedPaths) : [];
+    recordTriageRequest(db, zone.id, issue, now, reasons);
   }
 }
 

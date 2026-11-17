@@ -5,6 +5,7 @@ import { loadBoot } from './config/boot.js';
 import { ConfigStore } from './config/store.js';
 import type { DropZoneConfig } from './config.js';
 import { flushCrewOps } from './crew/flush.js';
+import { triageInput } from './crew/inputs.js';
 import {
   type CrewIssueState,
   getCrewIssue,
@@ -776,6 +777,73 @@ describe('triage gate at intake (#183)', () => {
     const back = await syncDropZone(w.db, w.forges, w.zone, plus(t0, 120_000));
     expect(back.added).toBe(1);
     expect(listWorkItems(w.db, 'main').find((i) => i.id === ready!.id)?.state).toBe('ready');
+  });
+
+  describe('a spec-valid issue naming a protected path (#247)', () => {
+    const NAMES_GOAL = SHAPED_179.replace(
+      '## Required tests',
+      'Also update `GOAL.md` with the new objective.\n\n## Required tests',
+    );
+    const PROTECTED = { protectedPaths: ['GOAL.md', 'examples/**', '.github/**'] };
+
+    test('with the gate on it goes to triage with the reason, and no work item', async () => {
+      const w = world179({ body: NAMES_GOAL, zone: PROTECTED });
+      const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+      expect(numbers(w)).toEqual([]);
+      expect(r).toMatchObject({ added: 0, sentToTriage: 1 });
+      expect(w.f.state.issues.get(179)?.labels).toEqual(['jm-triage']);
+      const [req] = listTriageRequests(w.db, 'main');
+      expect(req).toMatchObject({
+        issueNumber: 179,
+        state: 'open',
+        reason: null,
+        gateReasons: ['protected path GOAL.md named in the issue'],
+      });
+      const input = triageInput(w.db, w.zone, req?.id ?? -1, 'drop-x');
+      expect(input).toContain('Why this issue is in triage');
+      expect(input).toContain('- protected path GOAL.md named in the issue');
+    });
+
+    test('the spec reasons come first when both apply', async () => {
+      const w = world179({ body: `${ISSUE_179.body}\n\nEdit \`GOAL.md\`.`, zone: PROTECTED });
+      await syncDropZone(w.db, w.forges, w.zone, t0);
+      expect(listTriageRequests(w.db, 'main')[0]?.gateReasons).toEqual([
+        'no "## Acceptance criteria" checklist',
+        'no "## Tests" or "## Required tests" list',
+        'protected path GOAL.md named in the issue',
+      ]);
+    });
+
+    test('naming no protected path, it becomes a work item as today', async () => {
+      const w = world179({ body: SHAPED_179, zone: PROTECTED });
+      const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+      expect(numbers(w)).toEqual([179]);
+      expect(r).toMatchObject({ added: 1, sentToTriage: 0 });
+    });
+
+    test('with the gate off it becomes a work item', async () => {
+      const w = world179({ body: NAMES_GOAL, zone: { ...PROTECTED, triage: { gate: false } } });
+      const r = await syncDropZone(w.db, w.forges, w.zone, t0);
+      expect(numbers(w)).toEqual([179]);
+      expect(r).toMatchObject({ added: 1, sentToTriage: 0 });
+      expect(ops(w)).toEqual([]);
+    });
+
+    test('an item already past ready is left alone', async () => {
+      const w = world179({ body: SHAPED_179, zone: PROTECTED });
+      await syncDropZone(w.db, w.forges, w.zone, t0);
+      const [it] = listWorkItems(w.db, 'main');
+      setWorkItemState(w.db, it!.id, 'in_flight');
+      const e = w.f.state.issues.get(179);
+      if (e?.issue) e.issue.body = NAMES_GOAL;
+      const r = await syncDropZone(w.db, w.forges, w.zone, plus(t0, 60_000));
+      expect(r.sentToTriage).toBe(0);
+      expect(listWorkItems(w.db, 'main')[0]).toMatchObject({
+        state: 'in_flight',
+        body: SHAPED_179,
+      });
+      expect(ops(w)).toEqual([]);
+    });
   });
 
   test('in observe mode the gate holds the issue back and the refused write fails nothing', async () => {

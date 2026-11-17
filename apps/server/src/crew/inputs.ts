@@ -343,6 +343,17 @@ export function triageInput(
       kind: 'trusted',
       text: zone.protectedPaths.map((p) => `- ${p}`).join('\n') || '(none)',
     },
+    ...(req.gateReasons && req.gateReasons.length > 0
+      ? [
+          {
+            // Server-written: the format's fixed reasons and the zone's own globs, never issue text.
+            title: 'Why this issue is in triage',
+            name: 'gate-reasons',
+            kind: 'trusted' as const,
+            text: req.gateReasons.map((r) => `- ${r}`).join('\n'),
+          },
+        ]
+      : []),
     {
       title: "Command's rulings on this issue",
       name: 'rulings',
