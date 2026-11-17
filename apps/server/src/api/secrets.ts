@@ -15,8 +15,15 @@ import {
   type Resolved,
   refusalWords,
   type TestDeps,
+  testAppEntry,
   testCredential,
 } from '../vault/credentials.js';
+import {
+  APP_ROLES,
+  type AppEntryRead,
+  type AppRole,
+  parseAppEntryName,
+} from '../vault/github-app-entries.js';
 import { credentialProblems } from '../vault/problems.js';
 import { fingerprintOf } from '../vault/vault.js';
 
@@ -36,6 +43,8 @@ export type SecretRouteDeps = {
   audit(req: FastifyRequest, action: string, detail: AuditDetail, target?: string): void;
   /** A forge on a token for a repository, for tests on entry (default: GitHub, with a deadline). */
   credentialForge?: TestDeps['forge'];
+  /** The test of a GitHub App entry (default: `testAppEntry`, a JWT sent to `GET /app`). */
+  testApp?: typeof testAppEntry;
 };
 
 const TEST_TIMEOUT_MS = 30_000;
@@ -74,6 +83,7 @@ export function runningSince(db: Db, since: string | undefined): number {
 export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDeps): void {
   const { db, store, audit } = deps;
   const forge = deps.credentialForge ?? defaultForge;
+  const testApp = deps.testApp ?? testAppEntry;
   /** One write per name at a time: a PUT's test, store and swap finish before the next begins. */
   const queues = new Map<string, Promise<unknown>>();
   const serialized = <T>(name: string, fn: () => Promise<T>): Promise<T> => {
@@ -128,6 +138,47 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
       ...(r.source === 'vault' ? { runningDropsWithPrevious: runningSince(db, r.setAt) } : {}),
     };
   };
+  /**
+   * An app entry as the list shows it (§4.4): where it comes from and what identifies it, never
+   * its PEM or client id.
+   */
+  const appView = (owner: string, role: AppRole, r: AppEntryRead) => {
+    const name = `github-app/${owner}/${role}`;
+    const vault = store.vault();
+    const meta = r.source === 'vault' && vault !== 'disabled' ? vault.meta(name) : undefined;
+    return {
+      owner,
+      role,
+      name,
+      source: r.source,
+      ...(r.source === 'missing'
+        ? r.undecryptable
+          ? { undecryptable: true }
+          : {}
+        : {
+            appId: r.entry.appId,
+            slug: r.entry.slug,
+            importedAt: r.entry.importedAt,
+            fingerprint: r.fingerprint,
+            ...(r.source === 'file' && r.path ? { path: r.path } : {}),
+            ...(r.overriding
+              ? {
+                  overriding: r.overriding.map((o) => ({
+                    source: o.source,
+                    ...(o.path && o.source === 'file' ? { path: o.path } : {}),
+                  })),
+                }
+              : {}),
+          }),
+      ...(meta?.testedAt ? { testedAt: meta.testedAt } : {}),
+      ...(meta?.testResult ? { testResult: meta.testResult } : {}),
+    };
+  };
+  const apps = () =>
+    [...store.resolvedApps().entries()]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .flatMap(([owner, reads]) => APP_ROLES.map((role) => appView(owner, role, reads[role])));
+
   /** A session needs sudo for a vault write, as for a credential; the Bearer token never does. */
   const sudoRefused = (req: FastifyRequest, reply: FastifyReply, what: string) => {
     if (req.principal?.via !== 'session' || req.principal.sudo) return false;
@@ -149,6 +200,7 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
       credentials: (
         Object.entries(store.resolved()) as [CredentialName, Resolved[CredentialName]][]
       ).map(([n, r]) => view(n, r)),
+      apps: apps(),
       problems: store.problems(),
     };
   });
@@ -260,6 +312,55 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
               ...(t.permission ? { permission: t.permission } : {}),
               ...(t.problem ? { problem: t.problem } : {}),
               error: t.problem ?? refusalWords(t.status, t.permission, r),
+            };
+      });
+    },
+  );
+
+  // A GitHub App entry's test (§4.4): a JWT signed with its key, sent to `GET /app`.
+  scope.post<{ Params: { owner: string; role: string } }>(
+    '/api/control/secrets/github-app/:owner/:role/test',
+    async (req, reply) => {
+      if (sudoRefused(req, reply, 'testing a credential')) return reply;
+      // Fixed words: an owner or role in the wrong slot could be a secret.
+      const parsed = parseAppEntryName(`github-app/${req.params.owner}/${req.params.role}`);
+      if (!parsed)
+        return reply.code(400).send({
+          error:
+            'an app entry is github-app/<owner>/<role>: a lowercase GitHub owner name, and author or reviewer',
+        });
+      const { owner, role } = parsed;
+      const name = `github-app/${owner}/${role}`;
+      if (!store.resolvedApps().has(owner))
+        return reply.code(404).send({ error: 'unknown app entry' });
+      return serialized(name, async () => {
+        const r = store.resolvedApps().get(owner)?.[role];
+        if (!r) return reply.code(404).send({ error: 'unknown app entry' });
+        if (r.source === 'missing')
+          return reply.code(409).send({
+            error: r.undecryptable
+              ? 'the app entry does not decrypt with this vault key'
+              : 'the app entry is not set',
+          });
+        const t = await testApp(r.entry);
+        const words = t.ok ? t.result : `failed (${t.status ?? 'no answer'})`;
+        const vault = store.vault();
+        if (r.source === 'vault' && vault !== 'disabled') {
+          vault.recordTest(name, { at: deps.now(), result: words });
+          store.refreshSecrets();
+        }
+        audit(req, 'secret.test', {
+          name,
+          fingerprint: r.fingerprint,
+          result: t.ok ? 'ok' : words,
+        });
+        return t.ok
+          ? { tested: true, result: t.result, ...(t.login ? { login: t.login } : {}) }
+          : {
+              tested: false,
+              status: t.status,
+              ...(t.problem ? { problem: t.problem } : {}),
+              error: t.problem ?? refusalWords(t.status),
             };
       });
     },

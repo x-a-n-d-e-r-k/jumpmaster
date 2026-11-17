@@ -280,6 +280,19 @@ function mcpTokensRequest(args: string[]): Raw | null {
 }
 
 /**
+ * The test route of a credential: `github-app/<owner>/<role>` names an app entry, each segment
+ * encoded on its own; any other name is one segment.
+ */
+function secretTestPath(name: string): string {
+  const app = /^github-app\/([^/]+)\/([^/]+)$/.exec(name);
+  if (app) {
+    const [, owner = '', role = ''] = app;
+    return `/api/control/secrets/github-app/${encodeURIComponent(owner)}/${encodeURIComponent(role)}/test`;
+  }
+  return `/api/control/secrets/${encodeURIComponent(name)}/test`;
+}
+
+/**
  * `ctl secrets list | set <name> | test <name> | remove <name> | reload | vault on|off |
  * vault prefer on|off | copy-to-vault <name>`. `set` takes its value
  * from stdin or a file, never argv: `runSecrets` sends it.
@@ -292,7 +305,7 @@ function secretsRequest(args: string[]): Raw | null {
   if (verb === 'vault') return vaultRequest(name, rest);
   if (!name || name.startsWith('--')) return null;
   const at = `${path}/${encodeURIComponent(name)}`;
-  if (verb === 'test' && rest.length === 0) return { path: `${at}/test`, body: {} };
+  if (verb === 'test' && rest.length === 0) return { path: secretTestPath(name), body: {} };
   if (verb === 'remove' && rest.length === 0) return { path: at, method: 'DELETE' };
   if (verb === 'copy-to-vault' && rest.length === 0)
     return { path: `${at}/copy-to-vault`, body: {} };
@@ -1166,7 +1179,8 @@ async function runSecrets(
   if (!name) return usage();
   if (verb === 'copy-to-vault' && rest.length === 0)
     return show(await call('POST', `${at(name)}/copy-to-vault`, {}));
-  if (verb === 'test' && rest.length === 0) return show(await call('POST', `${at(name)}/test`, {}));
+  if (verb === 'test' && rest.length === 0)
+    return show(await call('POST', secretTestPath(name), {}));
   if (verb === 'remove' && rest.length === 0) return show(await call('DELETE', at(name)));
   if (verb !== 'set') return usage();
   let file: string | undefined;
