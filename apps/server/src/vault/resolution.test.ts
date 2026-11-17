@@ -17,6 +17,7 @@ import {
 import {
   appInstallationFor,
   credentialFor,
+  isAppAuthorZone,
   isAppReviewerZone,
   type ResolvedApps,
   resolveAppEntries,
@@ -300,5 +301,54 @@ describe('isAppReviewerZone (issue #237)', () => {
     expect(
       isAppReviewerZone({ repo: 'octo/web', identity: 'starter', githubApp }, apps(present)),
     ).toBe(false);
+  });
+});
+
+describe('isAppAuthorZone (issue #249)', () => {
+  const githubApp = { repositoryId: 123, installations: { author: 11, reviewer: 22 } };
+  const entry: GitHubAppEntry = {
+    appId: '8',
+    slug: 'auth',
+    clientId: 'c',
+    pem: 'unused',
+    importedAt: '2026-11-01',
+  };
+  const present = { source: 'vault', fingerprint: 'fp', entry } as const;
+  const missing = { source: 'missing' } as const;
+  const apps = (author: unknown): ResolvedApps =>
+    new Map([['octo', { author, reviewer: present }]]) as unknown as ResolvedApps;
+
+  test('a two-bot zone with a decryptable author app and a recorded author installation is one', () => {
+    expect(isAppAuthorZone({ repo: 'octo/web', githubApp }, apps(present))).toBe(true);
+  });
+
+  test('a starter zone is not', () => {
+    expect(
+      isAppAuthorZone({ repo: 'octo/web', identity: 'starter', githubApp }, apps(present)),
+    ).toBe(false);
+  });
+
+  test('an author PAT (no author entry) is not', () => {
+    expect(isAppAuthorZone({ repo: 'octo/web', githubApp }, apps(missing))).toBe(false);
+    expect(isAppAuthorZone({ repo: 'octo/web', githubApp }, new Map())).toBe(false);
+  });
+
+  test('an undecryptable author entry is not', () => {
+    expect(
+      isAppAuthorZone(
+        { repo: 'octo/web', githubApp },
+        apps({ source: 'missing', undecryptable: true }),
+      ),
+    ).toBe(false);
+  });
+
+  test('a missing author installation is not', () => {
+    expect(
+      isAppAuthorZone(
+        { repo: 'octo/web', githubApp: { repositoryId: 123, installations: { reviewer: 22 } } },
+        apps(present),
+      ),
+    ).toBe(false);
+    expect(isAppAuthorZone({ repo: 'octo/web' }, apps(present))).toBe(false);
   });
 });

@@ -72,6 +72,7 @@ import { dispatchGate, ingestRateLimit, rateLimitFromEvent } from '../usage.js';
 import {
   appInstallationFor,
   credentialFor,
+  isAppAuthorZone,
   isAppReviewerZone,
   type ResolvedApps,
 } from '../vault/resolution.js';
@@ -186,6 +187,9 @@ const LIVE: readonly DropState[] = ['leased', 'running'];
 /** The roles that clone with the reviewer's read token (§4.2): never an author's. */
 const readsAsReviewer = (role: string): boolean =>
   role === 'review' || role === 'doctor' || isCrewRole(role);
+/** The roles whose agent container fetches with the author's read token (§4.2, issue #249). */
+const readsAsAuthor = (role: string): boolean =>
+  (PUSHING_ROLES as readonly string[]).includes(role);
 const PENDING: readonly DropState[] = ['push_pending'];
 const STALE = { error: 'stale', stale: true } as const;
 
@@ -230,18 +234,24 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
    * token never revoked (restart, cancel, expiry) dies within its hour.
    */
   const heldTokens = new Map<string, { epoch: number; owner: string; token: string }>();
-  /** The per-drop reviewer read tokens (issue #237), likewise in memory only. */
+  /** The per-drop reviewer and author read tokens (issues #237, #249), likewise in memory only. */
   const heldReadTokens = deps.heldReadTokens ?? createHeldDropTokens({ log });
 
   /**
-   * The reviewer app's read token minted for this drop alone, held until the drop ends; undefined
-   * when the drop clones as before (not an app-reviewer zone, or a role that doesn't read as the
-   * reviewer). Rejects when the mint fails: there is no PAT fallback.
+   * The read token minted for this drop alone, held until the drop ends: the reviewer app's for a
+   * review, crew or doctor drop of an app-reviewer zone (issue #237), the author app's for an
+   * implement, heal or resolve drop of an app-author zone (issue #249). Undefined when the drop
+   * fetches as before. Rejects when the mint fails: there is no PAT fallback.
    */
   const dropReadToken = async (zone: DropZoneConfig, drop: Drop): Promise<string | undefined> => {
-    if (!deps.appTokens || !readsAsReviewer(drop.role)) return undefined;
-    if (!isAppReviewerZone(zone, deps.resolvedApps?.() ?? new Map())) return undefined;
-    const fresh = await deps.appTokens.fresh(zone.id, 'reviewer', 'drop-read-reviewer');
+    if (!deps.appTokens) return undefined;
+    const apps = deps.resolvedApps?.() ?? new Map();
+    let fresh: Awaited<ReturnType<AppTokenSource['fresh']>>;
+    if (readsAsReviewer(drop.role) && isAppReviewerZone(zone, apps))
+      fresh = await deps.appTokens.fresh(zone.id, 'reviewer', 'drop-read-reviewer');
+    else if (readsAsAuthor(drop.role) && isAppAuthorZone(zone, apps))
+      fresh = await deps.appTokens.fresh(zone.id, 'author', 'drop-read-author');
+    else return undefined;
     heldReadTokens.hold(drop.id, drop.epoch, fresh);
     return fresh.token;
   };
