@@ -7,7 +7,13 @@
 // is refused, the read token (`registryReadToken`) is exchanged for a bearer at the same token
 // service with Basic auth, as GHCR expects. The read token is sent only to a token service on the
 // registry's own host and scheme, and both it and every bearer are registered with the scrub set.
+//
+// Outbound addresses the registry names (issue #256): a token service off the registry's own origin
+// must be https and not a loopback, link-local, private or unique-local IP literal nor localhost,
+// and its answer is never a redirect. Manifest and blob requests follow redirects (blobs live on
+// storage hosts) only to https, and the bearer is not carried off the registry's origin.
 import { createHash } from 'node:crypto';
+import { isIPv4, isIPv6 } from 'node:net';
 import type { ScrubSet } from '../forge/scrub-set.js';
 
 export const OCI_INDEX = 'application/vnd.oci.image.index.v1+json';
@@ -41,6 +47,74 @@ export type RegistryDeps = {
   /** `https` unless told otherwise (the tests' fake registry speaks plain HTTP on loopback). */
   scheme?: (host: string) => 'http' | 'https';
 };
+
+/** How many redirects a manifest or blob request follows. */
+const MAX_REDIRECTS = 5;
+
+const TOKEN_SERVICE_REFUSED = 'the registry named a token service that is not allowed';
+
+function v4Refused(a: number, b: number): boolean {
+  return (
+    a === 0 || // 0.0.0.0/8: "this host"
+    a === 127 ||
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254)
+  );
+}
+
+/** An IPv6 literal as eight 16-bit groups, or undefined. */
+function v6Groups(ip: string): number[] | undefined {
+  let s = ip;
+  const tail: number[] = [];
+  const dotted = /^(.*:)(\d+\.\d+\.\d+\.\d+)$/.exec(s);
+  if (dotted) {
+    const o = (dotted[2] as string).split('.').map(Number);
+    tail.push(
+      ((o[0] as number) << 8) | (o[1] as number),
+      ((o[2] as number) << 8) | (o[3] as number),
+    );
+    s = (dotted[1] as string).endsWith('::')
+      ? (dotted[1] as string)
+      : (dotted[1] as string).slice(0, -1);
+  }
+  const halves = s.split('::');
+  if (halves.length > 2) return undefined;
+  const parse = (h: string) => (h === '' ? [] : h.split(':').map((g) => Number.parseInt(g, 16)));
+  const head = parse(halves[0] as string);
+  const rest = halves.length === 2 ? parse(halves[1] as string) : [];
+  const fill = 8 - head.length - rest.length - tail.length;
+  if (fill < 0 || (halves.length === 1 && fill !== 0)) return undefined;
+  const groups = [...head, ...new Array<number>(fill).fill(0), ...rest, ...tail];
+  return groups.some((g) => Number.isNaN(g)) ? undefined : groups;
+}
+
+/**
+ * Whether a URL hostname (as `new URL` serializes it: IPv4 normalized, IPv6 bracketed) is
+ * localhost or an IP literal in a loopback, link-local, private or unique-local range, including
+ * an IPv4-mapped IPv6 one. Names are not resolved.
+ */
+export function isRefusedHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/\.$/, '');
+  if (h === 'localhost' || h.endsWith('.localhost')) return true;
+  if (isIPv4(h)) {
+    const [a, b] = h.split('.').map(Number) as [number, number];
+    return v4Refused(a, b);
+  }
+  const bare = h.startsWith('[') && h.endsWith(']') ? h.slice(1, -1) : h;
+  if (!isIPv6(bare)) return false;
+  const g = v6Groups(bare);
+  if (!g) return true; // An IPv6 literal we can't read is not trusted.
+  const zeros = (n: number) => g.slice(0, n).every((x) => x === 0);
+  if (zeros(7) && ((g[7] as number) === 0 || (g[7] as number) === 1)) return true; // :: and ::1
+  if (zeros(5) && (g[5] === 0xffff || g[5] === 0)) {
+    // IPv4-mapped (::ffff:a.b.c.d) and the deprecated IPv4-compatible (::a.b.c.d).
+    return v4Refused((g[6] as number) >> 8, (g[6] as number) & 0xff);
+  }
+  const first = g[0] as number;
+  return (first & 0xffc0) === 0xfe80 || (first & 0xfe00) === 0xfc00;
+}
 
 type Challenge = { realm: string; service?: string; scope?: string };
 
@@ -180,17 +254,43 @@ export class RegistryClient {
     return res;
   }
 
+  /**
+   * One GET, following redirects itself: only to https (or the registry's own origin), at most
+   * MAX_REDIRECTS, and with the bearer only on the registry's own origin.
+   */
   async #send(path: string, accept: string): Promise<Response> {
-    try {
-      return await this.#fetch(`${this.#base}${path}`, {
-        headers: {
-          Accept: accept,
-          ...(this.#bearer ? { Authorization: `Bearer ${this.#bearer}` } : {}),
-        },
-      });
-    } catch {
-      // The exception may quote the request; say only where.
-      throw new RegistryError(`${this.host} could not be reached`);
+    const origin = new URL(this.#base).origin;
+    let url = new URL(`${this.#base}${path}`);
+    for (let hop = 0; ; hop++) {
+      const own = url.origin === origin;
+      let res: Response;
+      try {
+        res = await this.#fetch(url, {
+          redirect: 'manual',
+          headers: {
+            Accept: accept,
+            ...(own && this.#bearer ? { Authorization: `Bearer ${this.#bearer}` } : {}),
+          },
+        });
+      } catch {
+        // The exception may quote the request; say only where.
+        throw new RegistryError(`${url.host} could not be reached`);
+      }
+      if (res.status < 300 || res.status >= 400 || res.status === 304) return res;
+      const location = res.headers.get('location');
+      await drain(res);
+      if (!location)
+        throw new RegistryError(`${path}: the registry answered ${res.status}`, res.status);
+      if (hop >= MAX_REDIRECTS) throw new RegistryError(`${path}: too many redirects`);
+      let next: URL;
+      try {
+        next = new URL(location, url);
+      } catch {
+        throw new RegistryError(`${path}: the registry redirected to something that is not a URL`);
+      }
+      if (next.protocol !== 'https:' && next.origin !== origin)
+        throw new RegistryError(`${path}: the registry redirected to ${next.host} without https`);
+      url = next;
     }
   }
 
@@ -203,7 +303,11 @@ export class RegistryClient {
       throw new RegistryError('the registry named a token service that is not a URL');
     }
     const base = new URL(this.#base);
-    if (token !== undefined && (realm.host !== base.host || realm.protocol !== base.protocol))
+    const own = realm.host === base.host && realm.protocol === base.protocol;
+    // Off the registry's own origin (which is https outside the tests), only a public https host.
+    if (!own && (realm.protocol !== 'https:' || isRefusedHost(realm.hostname)))
+      throw new RegistryError(TOKEN_SERVICE_REFUSED);
+    if (token !== undefined && !own)
       // The read token goes to the registry's own token service, never to a host it names.
       throw new RegistryError(
         `the registry's token service is on ${realm.host}, not ${base.host}: the read token is not sent there`,
@@ -214,6 +318,8 @@ export class RegistryClient {
     let res: Response;
     try {
       res = await this.#fetch(realm, {
+        // A token service answers; it does not send the request on somewhere else.
+        redirect: 'error',
         headers:
           token === undefined
             ? {}
