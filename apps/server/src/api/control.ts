@@ -78,6 +78,7 @@ import {
   suspendAll,
   unsuspendAll,
 } from '../forge/app-suspension.js';
+import type { AppTokenSource } from '../forge/app-tokens.js';
 import { type Forge, GitHubForge } from '../forge/github.js';
 import type { GitHubAppBroker } from '../forge/github-app.js';
 import type { HeldDropTokens } from '../forge/held-tokens.js';
@@ -184,6 +185,11 @@ export interface ControlDeps {
     brokerFor(owner: string, role: AppRole): GitHubAppBroker | undefined;
     timeoutMs?: number;
   };
+  /**
+   * The server's GitHub App token cache (issue #266): engaging the kill switch empties it, and a
+   * mint in flight then is neither cached nor handed to a later caller.
+   */
+  appTokens?: Pick<AppTokenSource, 'clear'>;
   /** The per-drop read tokens (issue #237): the kill switch revokes the cancelled drops' at once. */
   heldReadTokens?: Pick<HeldDropTokens, 'sweep'>;
   /** The app entries as they resolved now, for the doctor's app-reviewer zones (issue #237). */
@@ -220,10 +226,12 @@ function credentialsOf(store: ConfigStore): NonNullable<DoctorDeps['credentials'
   const resolved = store.resolved();
   const vault = store.vault();
   const created = credentialCreatedAt('claudeToken', resolved, store.current().claude);
+  const keyFile = store.vaultKeyFile();
   return {
     problems: store.problems(),
     shadowed: shadowedCredentials(resolved, vault),
     vaultKey: vault === 'disabled' ? { status: 'disabled' } : vault.keyStatus(),
+    ...(keyFile ? { vaultKeyFile: keyFile } : {}),
     ...(created ? { claudeTokenCreatedAt: created } : {}),
     install: {
       claudeToken: resolved.claudeToken.source !== 'missing',
@@ -1022,6 +1030,8 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       // The pause is credited to every pending push's retention on release (Ruling 12).
       const done = engaged ? engageKill(db, now()) : (releaseKill(db, now()), { cancelled: 0 });
       // The cancelled drops' clone tokens go now, not at the next lease tick.
+      // No cached app token outlives the switch: after release, every token is minted afresh.
+      if (engaged) deps.appTokens?.clear();
       if (engaged) deps.heldReadTokens?.sweep(db);
       const today: AuditDetail = engaged ? { engaged, cancelled: done.cancelled } : { engaged };
       const installations = await suspendInstallations(req, engaged);

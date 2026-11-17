@@ -10,6 +10,7 @@
 
 import { join } from 'node:path';
 import { type ScrubSet, serverScrubSet } from '../forge/scrub-set.js';
+import { log } from '../log.js';
 import type { ImageLockFile } from '../presets.js';
 import {
   DOCKER_LIST,
@@ -19,6 +20,7 @@ import {
   type RegistryDeps,
 } from './registry.js';
 import {
+  BlobTooLarge,
   type Descriptor,
   type ImageRecord,
   type ImageState,
@@ -35,6 +37,31 @@ const NOT_FOR_STICKS = new Set(['jumpmaster-server']);
 
 /** A repository name component: nothing that walks a path or a URL. */
 const IMAGE_NAME = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
+
+/**
+ * The artifact types of a signature a stick can use (issue #257): Sigstore bundles and cosign
+ * signatures. A referrer of any other type (an SBOM, an attestation) is not stored.
+ */
+export const SIGNATURE_ARTIFACT_TYPES: readonly string[] = [
+  'application/vnd.dev.sigstore.bundle.v0.3+json',
+  'application/vnd.dev.sigstore.bundle+json;version=0.3',
+  'application/vnd.dev.sigstore.bundle+json;version=0.2',
+  'application/vnd.dev.sigstore.bundle+json;version=0.1',
+  'application/vnd.dev.cosign.artifact.sig.v1+json',
+  'application/vnd.dev.cosign.simplesigning.v1+json',
+];
+
+/** Referrers stored per image, in listed order (the legacy `.sig` manifest comes on top). */
+export const MAX_SIGNATURE_ARTIFACTS = 16;
+/** A signature manifest larger than this is not stored (real ones are about 1 KiB). */
+export const MAX_SIGNATURE_MANIFEST_BYTES = 1024 * 1024;
+/** A signature blob larger than this, declared or delivered, is not stored. */
+export const MAX_SIGNATURE_BLOB_BYTES = 4 * 1024 * 1024;
+/** Every blob of one signature artifact together (a bundle is one layer and a tiny config). */
+const MAX_SIGNATURE_ARTIFACT_BYTES = 2 * MAX_SIGNATURE_BLOB_BYTES;
+
+/** Why one signature artifact is skipped: the others still count. */
+class SignatureRefused extends Error {}
 
 /** How long to wait before each retry of a failed pass (the last repeats). */
 export const BACKOFF_MS = [30_000, 120_000, 600_000, 1_800_000, 3_600_000] as const;
@@ -165,7 +192,7 @@ export class ImageMirror {
   constructor(deps: MirrorDeps) {
     this.#deps = deps;
     this.#scrub = deps.scrub ?? serverScrubSet;
-    this.#log = deps.log ?? ((line) => console.error(`[jumpmaster] ${line}`));
+    this.#log = deps.log ?? log;
     this.store = new ImageStore(join(deps.dataDir, 'images'));
     this.#index = this.store.readIndex();
     // A pass that died mid-fetch left `fetching`: it starts again.
@@ -387,10 +414,10 @@ export class ImageMirror {
     if (Object.keys(platforms).length === 0)
       throw new Error(`the index lists neither ${MIRRORED_PLATFORMS.join(' nor ')}`);
 
-    const signatures = await this.#signatures(client, rec.digest);
+    const { signatures, refused } = await this.#signatures(client, rec.digest);
     if (signatures.length === 0)
       throw new Error(
-        `no cosign signature was found for ${rec.digest}: a stick verifies the signature, so the image is not mirrored without one`,
+        `no cosign signature was found for ${rec.digest}${refused > 0 ? ` (${refused} signature artifacts refused)` : ''}: a stick verifies the signature, so the image is not mirrored without one`,
       );
     for (const s of signatures) {
       keep(s.manifest);
@@ -400,27 +427,79 @@ export class ImageMirror {
     return { index: indexDesc, platforms, signatures, size };
   }
 
-  /** A manifest's config and layers, each fetched into the store unless it is there already. */
-  async #blobs(client: RegistryClient, m: ManifestJson, what: string): Promise<Descriptor[]> {
+  /**
+   * A manifest's config and layers, each fetched into the store unless it is there already.
+   * `signature`: a signature artifact's, each blob capped at `MAX_SIGNATURE_BLOB_BYTES` declared
+   * or delivered (`SignatureRefused`, before anything is fetched when declared).
+   */
+  async #blobs(
+    client: RegistryClient,
+    m: ManifestJson,
+    what: string,
+    signature = false,
+  ): Promise<Descriptor[]> {
     if (!m.config || !Array.isArray(m.layers))
       throw new Error(`the ${what} manifest has no config or layers`);
     const out = [descriptor(m.config, `the ${what} config`)];
     for (const [i, l] of m.layers.entries()) out.push(descriptor(l, `the ${what} layer ${i}`));
+    if (signature) {
+      const big = out.find((b) => b.size > MAX_SIGNATURE_BLOB_BYTES);
+      if (big)
+        throw new SignatureRefused(
+          `blob ${big.digest} is too large (${big.size} bytes declared, over the ${MAX_SIGNATURE_BLOB_BYTES} byte cap)`,
+        );
+      const total = out.reduce((a, b) => a + b.size, 0);
+      if (total > MAX_SIGNATURE_ARTIFACT_BYTES)
+        throw new SignatureRefused(
+          `its blobs are too large (${total} bytes declared, over the ${MAX_SIGNATURE_ARTIFACT_BYTES} byte cap)`,
+        );
+    }
     for (const b of out) {
       if (this.store.has(b.digest)) continue;
-      await this.store.putStream(b.digest, await client.blob(b.digest), b.size);
+      const body = await client.blob(b.digest);
+      if (!signature) {
+        await this.store.putStream(b.digest, body, b.size);
+        continue;
+      }
+      try {
+        await this.store.putStream(b.digest, body, b.size, MAX_SIGNATURE_BLOB_BYTES);
+      } catch (e) {
+        if (e instanceof BlobTooLarge) throw new SignatureRefused(`blob ${e.message}`);
+        throw e;
+      }
     }
     return out;
+  }
+
+  /** Refuses a signature manifest over `MAX_SIGNATURE_MANIFEST_BYTES`. */
+  #manifestSize(size: number): void {
+    if (size > MAX_SIGNATURE_MANIFEST_BYTES)
+      throw new SignatureRefused(
+        `the signature manifest is too large (${size} bytes, over the ${MAX_SIGNATURE_MANIFEST_BYTES} byte cap)`,
+      );
   }
 
   /**
    * The cosign signature artifacts of `digest`, as the release workflow's cosign writes them:
    * OCI 1.1 referrers (from the referrers API, else, when it is missing or lists none, the
-   * `sha256-<hex>` fallback tag, which is what GHCR holds), and the legacy `sha256-<hex>.sig` tag. Each is stored with its blobs.
+   * `sha256-<hex>` fallback tag, which is what GHCR holds), and the legacy `sha256-<hex>.sig` tag.
+   * Each is stored with its blobs. Bounded (issue #257): only Sigstore bundle and cosign signature
+   * types, the first `MAX_SIGNATURE_ARTIFACTS` referrers listed, and no manifest or blob over its
+   * cap; a refused artifact is skipped with a log line and counted in `refused`.
    */
-  async #signatures(client: RegistryClient, digest: string): Promise<ImageRecord['signatures']> {
+  async #signatures(
+    client: RegistryClient,
+    digest: string,
+  ): Promise<{ signatures: ImageRecord['signatures']; refused: number }> {
     const out: ImageRecord['signatures'] = [];
     const seen = new Set<string>();
+    let refused = 0;
+    let past = 0;
+    let otherTypes = 0;
+    const refuse = (artifact: string, why: string) => {
+      refused++;
+      this.#log(`image mirror: signature ${artifact} of ${digest} skipped: ${this.#clean(why)}`);
+    };
     const listed = (list: { bytes: Buffer } | undefined) =>
       list ? (parse(list.bytes, 'the referrers list').manifests ?? []) : [];
     let referrers = listed(await client.referrers(digest));
@@ -429,39 +508,74 @@ export class ImageMirror {
     for (const [i, r] of referrers.entries()) {
       const desc = descriptor(r, `referrer ${i}`);
       if (seen.has(desc.digest)) continue;
-      const m = await client.manifest(desc.digest);
-      const body = parse(m.bytes, `referrer ${desc.digest}`);
-      // A referrer of another digest is not this image's signature.
-      if (body.subject?.digest !== digest) continue;
-      this.store.putBytes(m.digest, m.bytes);
-      const blobs = await this.#blobs(client, body, `referrer ${desc.digest}`);
+      if (
+        desc.artifactType !== undefined &&
+        !SIGNATURE_ARTIFACT_TYPES.includes(desc.artifactType)
+      ) {
+        otherTypes++;
+        continue;
+      }
+      if (seen.size >= MAX_SIGNATURE_ARTIFACTS) {
+        past++;
+        continue;
+      }
       seen.add(desc.digest);
-      out.push({
-        manifest: {
-          ...desc,
-          mediaType: m.mediaType || desc.mediaType,
-          size: m.bytes.length,
-          ...(typeof body.artifactType === 'string' ? { artifactType: body.artifactType } : {}),
-        },
-        blobs,
-      });
+      try {
+        this.#manifestSize(desc.size);
+        const m = await client.manifest(desc.digest);
+        this.#manifestSize(m.bytes.length);
+        const body = parse(m.bytes, `referrer ${desc.digest}`);
+        // A referrer of another digest is not this image's signature.
+        if (body.subject?.digest !== digest) continue;
+        const type = body.artifactType ?? body.config?.mediaType;
+        if (typeof type !== 'string' || !SIGNATURE_ARTIFACT_TYPES.includes(type))
+          throw new SignatureRefused(`its artifact type ${String(type)} is not a signature`);
+        const blobs = await this.#blobs(client, body, `referrer ${desc.digest}`, true);
+        this.store.putBytes(m.digest, m.bytes);
+        out.push({
+          manifest: {
+            ...desc,
+            mediaType: m.mediaType || desc.mediaType,
+            size: m.bytes.length,
+            ...(typeof body.artifactType === 'string' ? { artifactType: body.artifactType } : {}),
+          },
+          blobs,
+        });
+      } catch (e) {
+        if (!(e instanceof SignatureRefused)) throw e;
+        refuse(desc.digest, e.message);
+      }
     }
+    if (otherTypes > 0)
+      this.#log(
+        `image mirror: ${digest}: ${otherTypes} referrers of other artifact types skipped (not signatures)`,
+      );
+    if (past > 0)
+      this.#log(
+        `image mirror: ${digest}: ${past} signature referrers past the first ${MAX_SIGNATURE_ARTIFACTS} skipped`,
+      );
     const legacy = await client.signatureTag(digest, '.sig');
     if (legacy && !seen.has(legacy.digest)) {
-      const body = parse(legacy.bytes, 'the .sig manifest');
-      this.store.putBytes(legacy.digest, legacy.bytes);
-      const blobs = await this.#blobs(client, body, 'the .sig manifest');
-      out.push({
-        manifest: {
-          mediaType: legacy.mediaType,
-          digest: legacy.digest,
-          size: legacy.bytes.length,
-          annotations: { 'org.opencontainers.image.ref.name': `sha256-${digest.slice(7)}.sig` },
-        },
-        blobs,
-      });
+      try {
+        this.#manifestSize(legacy.bytes.length);
+        const body = parse(legacy.bytes, 'the .sig manifest');
+        const blobs = await this.#blobs(client, body, 'the .sig manifest', true);
+        this.store.putBytes(legacy.digest, legacy.bytes);
+        out.push({
+          manifest: {
+            mediaType: legacy.mediaType,
+            digest: legacy.digest,
+            size: legacy.bytes.length,
+            annotations: { 'org.opencontainers.image.ref.name': `sha256-${digest.slice(7)}.sig` },
+          },
+          blobs,
+        });
+      } catch (e) {
+        if (!(e instanceof SignatureRefused)) throw e;
+        refuse(legacy.digest, e.message);
+      }
     }
-    return out;
+    return { signatures: out, refused };
   }
 
   /** Words with every known secret taken out (the read token, bearers it was exchanged for). */

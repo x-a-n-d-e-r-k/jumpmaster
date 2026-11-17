@@ -2,7 +2,7 @@ import { redact } from '@jumpmaster/protocol';
 import { floorBriefings } from './briefings.js';
 import { getSetting, setSetting } from './config/revisions.js';
 import type { ConfigStore } from './config/store.js';
-import { type Config, DEFAULT_READY_LABEL, secretList } from './config.js';
+import { type Config, DEFAULT_READY_LABEL } from './config.js';
 import type { Db } from './db/open.js';
 import {
   type Drop,
@@ -23,6 +23,7 @@ import { type DoctorCheck, doctorDropWait, liveSticks } from './doctor/checks.js
 import { latestDoctorRun } from './doctor/run.js';
 import { missingFor, zoneRequirements } from './leases.js';
 import { isBlocked } from './scheduler.js';
+import { redactionList } from './scrub.js';
 import { wizardActive } from './ui/setup.js';
 import { dispatchGate, type Gate } from './usage.js';
 import { type CredentialProblem, credentialProblems } from './vault/problems.js';
@@ -630,7 +631,7 @@ function redactStatus(s: Status, secrets: string[]): Status {
 
 /**
  * The status the home page and `GET /api/control/status` show: built once, here, and redacted
- * of the install's secrets so no future reason text can carry one.
+ * of the install's secrets and the scrub set's values so no future reason text can carry one.
  */
 export function buildStatus(
   o: Parameters<typeof statusInputOf>[0] & { zoneName?: (id: string) => string },
@@ -638,6 +639,6 @@ export function buildStatus(
   const input = statusInputOf(o);
   return redactStatus(
     statusOf(o.zoneName ? { ...input, zoneName: o.zoneName } : input, o.now),
-    secretList(o.config.secrets),
+    redactionList(o.config.secrets),
   );
 }

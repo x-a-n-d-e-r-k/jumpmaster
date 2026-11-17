@@ -7,12 +7,21 @@ const fakeToken = (n: number) => 'ghs_' + `FAKE_TOKEN_${String(n).padStart(4, '0
 const MIN = 60_000;
 const T0 = 1_790_000_000_000;
 
-const AUTHOR: TokenKey = { owner: 'acme', role: 'author', repositoryId: 1, use: 'server-author' };
+const AUTHOR: TokenKey = {
+  owner: 'acme',
+  role: 'author',
+  repositoryId: 1,
+  use: 'server-author',
+  appFingerprint: 'F1',
+  installationId: 7,
+};
 const REVIEWER: TokenKey = {
   owner: 'acme',
   role: 'reviewer',
   repositoryId: 1,
   use: 'server-reviewer',
+  appFingerprint: 'R1',
+  installationId: 7,
 };
 
 const consoleSpies: ReturnType<typeof vi.spyOn>[] = [];
@@ -168,8 +177,8 @@ describe('createTokenCache', () => {
     const keys: TokenKey[] = [
       AUTHOR,
       REVIEWER,
-      { owner: 'other', role: 'author', repositoryId: 1, use: 'server-author' },
-      { owner: 'acme', role: 'author', repositoryId: 2, use: 'server-author' },
+      { ...AUTHOR, owner: 'other' },
+      { ...AUTHOR, repositoryId: 2 },
       { ...REVIEWER, use: 'drop-read-reviewer' },
     ];
     const first = await Promise.all(keys.map((k) => h.cache.token(k)));
@@ -196,6 +205,47 @@ describe('createTokenCache', () => {
     expect(err.cause).toBe(cause);
 
     expect(await h.cache.token(REVIEWER)).toBe(fakeToken(1));
+  });
+
+  test('a replaced app entry (new fingerprint) mints afresh and never returns the old token', async () => {
+    const h = harness();
+    const t1 = await h.cache.token(AUTHOR);
+    const t2 = await h.cache.token({ ...AUTHOR, appFingerprint: 'F2' });
+    expect(h.mint).toHaveBeenCalledTimes(2);
+    expect(t2).not.toBe(t1);
+    expect(h.mint.mock.calls[1]?.[0]).toMatchObject({ appFingerprint: 'F2' });
+    expect(await h.cache.token({ ...AUTHOR, appFingerprint: 'F2' })).toBe(t2);
+  });
+
+  test('a changed installation id mints afresh and never returns the old token', async () => {
+    const h = harness();
+    const t1 = await h.cache.token(AUTHOR);
+    const t2 = await h.cache.token({ ...AUTHOR, installationId: 8 });
+    expect(h.mint).toHaveBeenCalledTimes(2);
+    expect(t2).not.toBe(t1);
+    expect(h.mint.mock.calls[1]?.[0]).toMatchObject({ installationId: 8 });
+  });
+
+  test('a changed repository id mints afresh', async () => {
+    const h = harness();
+    const t1 = await h.cache.token(AUTHOR);
+    expect(await h.cache.token({ ...AUTHOR, repositoryId: 2 })).not.toBe(t1);
+    expect(h.mint).toHaveBeenCalledTimes(2);
+  });
+
+  test('D1: keys equal but for the app entry never share a token, either way round', async () => {
+    const h = harness();
+    const zoneA: TokenKey = { ...AUTHOR, appFingerprint: 'FA' };
+    const zoneB: TokenKey = { ...AUTHOR, appFingerprint: 'FB' };
+    const a = await h.cache.token(zoneA);
+    const b = await h.cache.token(zoneB);
+    expect(a).not.toBe(b);
+    expect(await h.cache.token(zoneA)).toBe(a);
+    expect(await h.cache.token(zoneB)).toBe(b);
+    // Invalidating one leaves the other alone.
+    h.cache.invalidate(zoneA);
+    expect(await h.cache.token(zoneB)).toBe(b);
+    expect(await h.cache.token(zoneA)).not.toBe(a);
   });
 
   test('invalidate re-mints that key only; clear re-mints every key', async () => {

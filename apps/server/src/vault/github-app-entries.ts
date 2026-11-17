@@ -25,6 +25,9 @@ export type GitHubAppEntry = {
   importedAt: string;
 };
 
+/** The directory under the secrets directory that holds the app entry files. */
+export const APP_ENTRY_DIR = 'github-app';
+
 export const APP_ROLES = ['author', 'reviewer'] as const;
 export type AppRole = (typeof APP_ROLES)[number];
 
@@ -186,7 +189,7 @@ const present = (path: string): boolean => {
 
 /**
  * An entry file's text, with the checks a secret file gets (opened non-blocking, a regular file,
- * not group- or world-writable, at most 64 KiB), but whitespace kept: a PEM spans lines. Errors
+ * no group or other permission bit, at most 64 KiB), but whitespace kept: a PEM spans lines. Errors
  * name the path, never the contents.
  */
 function readEntryFile(path: string): string {
@@ -203,8 +206,8 @@ function readEntryFile(path: string): string {
   try {
     const stat = fstatSync(fd);
     if (!stat.isFile()) throw new Error(`${path} is not a regular file`);
-    if ((stat.mode & 0o022) !== 0)
-      throw new Error(`${path} is group- or world-writable; chmod go-w it`);
+    // It holds a private key: any group or other bit, read or write, refuses it (issue #258).
+    if ((stat.mode & 0o077) !== 0) throw new Error(`${path} is readable by others; chmod 600 it`);
     if (stat.size > MAX_SECRET_FILE_BYTES) throw new Error(`${path} is larger than 64 KiB`);
     const buffer = Buffer.alloc(MAX_SECRET_FILE_BYTES + 1);
     let length = 0;
@@ -250,7 +253,7 @@ export function readAppEntry(
 ): AppEntryRead {
   const name = appEntryName(owner, role);
   const lower = normalOwner(owner);
-  const path = o.secretsDir ? join(o.secretsDir, 'github-app', lower, `${role}.json`) : undefined;
+  const path = o.secretsDir ? join(o.secretsDir, APP_ENTRY_DIR, lower, `${role}.json`) : undefined;
   const filePath = path && present(path) ? path : undefined;
 
   let vaultText: string | undefined;

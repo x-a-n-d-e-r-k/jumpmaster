@@ -266,7 +266,8 @@ export function shadowedCredentials(resolved: Resolved, vault: Vault | 'disabled
 }
 
 /**
- * A hash over the forge credentials' fingerprints (the forge pair cache's key): it changes with
+ * A hash over the forge credentials' fingerprints (the forge pair cache's key for a zone with an
+ * app role, `pairKey` in outbox.ts; a PAT-only zone keeps its key from before): it changes with
  * any of them, and with any present app entry (by entry name, sorted), and holds none. With no
  * present app entry it is the PAT-only value.
  */
@@ -274,14 +275,23 @@ export function credentialFingerprint(resolved: Resolved, apps?: ResolvedApps): 
   const parts = (['githubAuthorToken', 'githubReviewerToken', 'githubReadToken'] as const).map(
     (n) => `${n}=${resolved[n]?.fingerprint ?? ''}`,
   );
-  const appParts: string[] = [];
+  parts.push(...appEntryFingerprints(apps));
+  return createHash('sha256').update(parts.join('\n')).digest('hex').slice(0, 16);
+}
+
+/**
+ * Each present app entry as `<entry name>=<fingerprint>`, sorted: what `credentialFingerprint`
+ * adds for the apps, and what the config store compares to tell a changed app entry (issue #266).
+ * Holds no secret.
+ */
+export function appEntryFingerprints(apps?: ResolvedApps): string[] {
+  const out: string[] = [];
   for (const [owner, reads] of apps ?? [])
     for (const role of APP_ROLES) {
       const r = reads[role];
-      if (r.source !== 'missing') appParts.push(`${appEntryName(owner, role)}=${r.fingerprint}`);
+      if (r.source !== 'missing') out.push(`${appEntryName(owner, role)}=${r.fingerprint}`);
     }
-  parts.push(...appParts.sort());
-  return createHash('sha256').update(parts.join('\n')).digest('hex').slice(0, 16);
+  return out.sort();
 }
 
 /**

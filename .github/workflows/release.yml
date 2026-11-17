@@ -35,14 +35,17 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      # Reads the Images runs for the tagged commit (scripts/release-images-green.sh).
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: The tag names a version and its commit is on main
+      - name: The tag names a version, its commit is on main, and Images passed there
         env:
           TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
             echo "::error::$TAG is not vX.Y.Z or vX.Y.Z-rc.N"
@@ -58,6 +61,8 @@ jobs:
             echo "::error::$TAG points at $commit, which is not on main: nothing is built or signed"
             exit 1
           fi
+          # The image e2e tests run in images.yml, not here: its run on main must have passed.
+          bash scripts/release-images-green.sh "$commit"
 
   # A version tag push, after guard: pushes to GHCR.
   build:

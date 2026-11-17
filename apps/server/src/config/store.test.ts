@@ -1397,6 +1397,51 @@ describe('GitHub App entries in the store (§4.4)', () => {
     expect(store.resolvedApps().get('globex')?.reviewer).toMatchObject({ source: 'vault' });
   });
 
+  test('onAppsChanged fires when a load changes the app entry fingerprints, and only then (issue #266)', () => {
+    const { w, vault, open } = withVault({ dropZones: [zone('main', { repo: 'Acme/main' })] });
+    vault.put(appEntryName('acme', 'author'), appEntry, { now: t0 });
+    const store = open();
+    const revise = (doc: Record<string, unknown>) => {
+      writeConfig(w.file, doc);
+      expect(store.reload()).toMatchObject({ ok: true });
+    };
+    let fired = 0;
+    const off = store.onAppsChanged(() => {
+      fired += 1;
+    });
+    // A revision that leaves the app entries alone does not fire.
+    revise({ dropZones: [zone('main', { repo: 'Acme/main', maxConcurrentImplement: 2 })] });
+    expect(store.refreshSecrets().ok).toBe(true);
+    expect(fired).toBe(0);
+    // The entry replaced (a new key): the next load fires.
+    const otherPem = generateKeyPairSync('rsa', { modulusLength: 2048 })
+      .privateKey.export({ type: 'pkcs8', format: 'pem' })
+      .toString();
+    const before = store.resolvedApps().get('acme')?.author;
+    vault.put(
+      appEntryName('acme', 'author'),
+      serializeAppEntry({
+        appId: '42',
+        slug: 'acme-author',
+        clientId: 'Iv23liStore0001',
+        pem: otherPem,
+        importedAt: '2026-11-16T10:00:00.000Z',
+      }),
+      { now: t0 },
+    );
+    expect(store.refreshSecrets().ok).toBe(true);
+    expect(store.resolvedApps().get('acme')?.author).not.toEqual(before);
+    expect(fired).toBe(1);
+    // A revision whose zones bring in another owner's entry fires too.
+    vault.put(appEntryName('globex', 'reviewer'), appEntry, { now: t0 });
+    revise({ dropZones: [zone('main', { repo: 'Acme/main' }), zone('g', { repo: 'globex/g' })] });
+    expect(fired).toBe(2);
+    off();
+    vault.put(appEntryName('acme', 'author'), appEntry, { now: t0 });
+    expect(store.refreshSecrets().ok).toBe(true);
+    expect(fired).toBe(2);
+  });
+
   test('a config with no app entries loads as before, its zone on an owner GitHub would refuse too', () => {
     const { open } = withVault({ dropZones: [zone('main', { repo: 'my_org/x' })] });
     const store = open();
@@ -1514,6 +1559,8 @@ describe('turning the vault on and preferring it from Settings (#101)', () => {
     expect(JSON.stringify(r)).not.toContain(text);
     expect(store.vault()).not.toBe('disabled');
     expect(store.vaultKeyFrom()).toBe('settings');
+    expect(store.vaultKeyFile()).toBe(keyPath);
+    expect(store.vaultKeyGoesToDataDir()).toBe(false);
     // No restart: the vault takes an entry now.
     expect(store.putCredential('githubReadToken', READ_VAULT, {}).ok).toBe(true);
     expect(store.resolved().githubReadToken).toMatchObject({ source: 'vault' });
@@ -1541,9 +1588,13 @@ describe('turning the vault on and preferring it from Settings (#101)', () => {
     const w = world();
     const e = { ...env, JM_DATA_DIR: dir() };
     const store = w.open({ env: e, boot: loadBoot(e, w.file), vault: startVault(e, w.db, 'data') });
+    expect(store.vaultKeyFile()).toBeUndefined();
+    expect(store.vaultKeyGoesToDataDir()).toBe(true);
     const r = store.turnOnVault();
     expect(r).toMatchObject({ ok: true });
     if (!r.ok) return;
+    // The effective key path the doctor judges (#258): the one Settings recorded.
+    expect(store.vaultKeyFile()).toBe(r.keyFile);
     expect(basename(dirname(r.keyFile))).toBe('vault');
     expect(statSync(dirname(r.keyFile)).mode & 0o777).toBe(0o700);
     expect(statSync(r.keyFile).mode & 0o777).toBe(0o600);
@@ -1575,6 +1626,7 @@ describe('turning the vault on and preferring it from Settings (#101)', () => {
     const v = startVault(withEnv, w.db, 'data');
     const s = w.open({ env: withEnv, boot: loadBoot(withEnv, w.file), vault: v });
     expect(s.vaultKeyFrom()).toBe('env');
+    expect(s.vaultKeyFile()).toBe(other);
     expect(v !== 'disabled' && openVault(other, w.db) !== 'disabled').toBe(true);
     expect((v as Exclude<typeof v, 'disabled'>).keyId).toBe(
       (openVault(other, w.db) as Exclude<typeof v, 'disabled'>).keyId,

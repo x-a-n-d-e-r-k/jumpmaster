@@ -48,6 +48,24 @@ export type FakeRegistry = {
   registry: string;
   owner: string;
   addImage(name: string, o?: { platforms?: string[]; signatures?: SignatureMode }): FakeImage;
+  /**
+   * Publishes one more signature artifact signing `img` where `via` says: listed by the referrers
+   * API, in the `sha256-<hex>` fallback tag's list, or as the legacy `.sig` tag (replacing it).
+   * `layer` is the artifact's one layer (a small bundle by default); `declaredSize` is the size
+   * its descriptor claims; `artifactType` null leaves it out (the config's media type then says).
+   */
+  addSignature(
+    img: FakeImage,
+    o?: {
+      via?: 'referrers-api' | 'referrers-tag' | 'legacy';
+      artifactType?: string | null;
+      configMediaType?: string;
+      layer?: Buffer;
+      declaredSize?: number;
+      /** Bytes of padding in an annotation, to grow the manifest. */
+      padManifest?: number;
+    },
+  ): { manifest: string; blobs: string[] };
   /** Serve other bytes for this blob from now on. */
   corrupt(digest: string): void;
   /** Serve the right bytes again. */
@@ -75,6 +93,7 @@ export async function startFakeRegistry(
   const requests: FakeRegistry['requests'] = [];
   const exchanged: string[] = [];
   const valid = new Set<string>();
+  const tagLists = new Map<string, Descriptor[]>();
 
   const blob = (mediaType: string, bytes: Buffer): Descriptor => {
     const digest = sha256(bytes);
@@ -171,6 +190,46 @@ export async function startFakeRegistry(
     owner,
     requests,
     exchanged,
+    addSignature(img, o = {}) {
+      const repo = `${owner}/${img.name}`;
+      const hex = img.digest.slice('sha256:'.length);
+      const via = o.via ?? 'referrers-tag';
+      const artifactType = o.artifactType === undefined ? SIGSTORE_BUNDLE : o.artifactType;
+      const config = blob(o.configMediaType ?? OCI_EMPTY, Buffer.from('{}'));
+      const bytes =
+        o.layer ?? json({ mediaType: SIGSTORE_BUNDLE, sig: randomBytes(8).toString('hex') });
+      const layer = { ...blob(artifactType ?? SIGSTORE_BUNDLE, bytes) };
+      if (o.declaredSize !== undefined) layer.size = o.declaredSize;
+      const subject = { mediaType: OCI_INDEX, digest: img.digest, size: 0 };
+      const body = {
+        schemaVersion: 2,
+        mediaType: OCI_MANIFEST,
+        ...(artifactType !== null && via !== 'legacy' ? { artifactType } : {}),
+        config,
+        layers: [layer],
+        ...(via !== 'legacy' ? { subject } : {}),
+        annotations: { pad: 'x'.repeat(o.padManifest ?? 0) },
+      };
+      if (via === 'legacy') {
+        const sig = manifest(repo, OCI_MANIFEST, body, `sha256-${hex}.sig`);
+        return { manifest: sig.digest, blobs: [config.digest, layer.digest] };
+      }
+      const sig = manifest(repo, OCI_MANIFEST, body);
+      const desc = { ...sig, ...(artifactType !== null ? { artifactType } : {}) };
+      const key = `${repo}@${img.digest}`;
+      if (via === 'referrers-api') referrers.set(key, [...(referrers.get(key) ?? []), desc]);
+      else {
+        const list = [...(tagLists.get(key) ?? []), desc];
+        tagLists.set(key, list);
+        manifest(
+          repo,
+          OCI_INDEX,
+          { schemaVersion: 2, mediaType: OCI_INDEX, manifests: list },
+          `sha256-${hex}`,
+        );
+      }
+      return { manifest: sig.digest, blobs: [config.digest, layer.digest] };
+    },
     corrupt: (digest) => corrupted.add(digest),
     heal: (digest) => corrupted.delete(digest),
     addImage(name, opts = {}) {
@@ -242,6 +301,7 @@ export async function startFakeRegistry(
         if (mode === 'referrers-api') referrers.set(`${repo}@${index.digest}`, [desc]);
         else {
           if (mode === 'referrers-tag-empty-api') referrers.set(`${repo}@${index.digest}`, []);
+          tagLists.set(`${repo}@${index.digest}`, [desc]);
           manifest(
             repo,
             OCI_INDEX,

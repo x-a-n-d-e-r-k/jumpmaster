@@ -51,7 +51,7 @@ describe('the CODEOWNERS read behind a required code owner review', () => {
       if (r.kind === 'ok') r.rules.requireCodeOwnerReview = true;
     }
     const warned: string[] = [];
-    const spy = vi.spyOn(console, 'warn').mockImplementation((m: unknown) => {
+    const spy = vi.spyOn(console, 'error').mockImplementation((m: unknown) => {
       warned.push(String(m));
     });
     try {
@@ -60,7 +60,7 @@ describe('the CODEOWNERS read behind a required code owner review', () => {
         expect((await zonePass(w.forges, w.zone, 'main')).protectionProblems).toEqual([]);
       }
       expect(warned.filter((m) => m.includes('CODEOWNERS'))).toEqual([
-        `zone ${w.zone.id}: the CODEOWNERS read failed, so this pass did not check that the reviewer bot can satisfy the required code owner review`,
+        `[jumpmaster] zone ${w.zone.id}: the CODEOWNERS read failed, so this pass did not check that the reviewer bot can satisfy the required code owner review`,
       ]);
       // A good read resets it: the next failure is said again.
       await zonePass(w.forges, w.zone, 'main');

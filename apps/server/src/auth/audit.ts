@@ -1,5 +1,6 @@
 import { redact } from '@jumpmaster/protocol';
 import type { Db } from '../db/open.js';
+import { serverScrubSet } from '../forge/scrub-set.js';
 
 export type AuditVia = 'token' | 'session' | 'system';
 
@@ -26,11 +27,13 @@ export type AuditRow = {
 
 /**
  * Records one mutating control call (§7.5: which credential was used). `detail` is built by the
- * handler from named fields; it is still scrubbed of every configured secret and of token shapes.
+ * handler from named fields; it is still scrubbed of every configured secret, every scrub-set value
+ * and token shapes.
  * The table keeps the last 5000 rows (a trigger prunes older ones).
  */
 export function recordAudit(db: Db, e: AuditEntry, now: Date, secrets: string[] = []): void {
-  const scrub = (v: string): string => redact(v, secrets);
+  const all = [...secrets, ...serverScrubSet.values()];
+  const scrub = (v: string): string => redact(v, all);
   const detail = Object.fromEntries(
     Object.entries(e.detail)
       .filter(([, v]) => v !== undefined)

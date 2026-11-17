@@ -3,6 +3,7 @@
 // changes. The lock is a local file the operator replaces by upgrading the server; the registry is
 // never asked what is newer.
 import { unwatchFile, watchFile } from 'node:fs';
+import { log as serverLog } from '../log.js';
 import { IMAGE_LOCK_PATH, type ImageLockFile, loadImageLock } from '../presets.js';
 import { ImageMirror, type MirrorDeps } from './mirror.js';
 
@@ -22,7 +23,7 @@ export type ImageMirrorRun = {
 export function startImageMirror(
   deps: MirrorDeps & { lockPath: string; watch?: false },
 ): ImageMirrorRun {
-  const log = deps.log ?? ((line: string) => console.error(`[jumpmaster] ${line}`));
+  const log = deps.log ?? serverLog;
   const mirror = new ImageMirror({ ...deps, log });
   let last: string | undefined;
   const reload = () => {

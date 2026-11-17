@@ -33,6 +33,7 @@ import {
 import type { ChecksFacts, ForgeIssue, PullFacts } from './forge/github.js';
 import { refreshGoals } from './goals.js';
 import { confirmIntakeIssues } from './intake.js';
+import { log } from './log.js';
 import { type ForgePair, isJmIssueBody, runOp, type SetLabelsPayload } from './outbox.js';
 
 const PRIORITY_LABELS = ['highest', 'high', 'low', 'lowest'] as const;
@@ -250,7 +251,7 @@ export async function syncDropZone(
       await refreshGoals(db, forge, zone, defaultBranch, now);
     } catch (err) {
       // The last good ladder stays; the sync goes on.
-      console.warn(`zone ${zone.id}: reading ${zone.crew.goalPath} failed: ${errorText(err)}`);
+      log(`zone ${zone.id}: reading ${zone.crew.goalPath} failed: ${errorText(err)}`);
     }
   }
   const pass = await zonePass(forges, zone, defaultBranch);
@@ -299,10 +300,10 @@ async function sendToTriage(
       now,
     );
     if (r.state === 'failed') {
-      console.warn(`zone ${zone.id}: sending #${issue.number} to triage failed: ${r.error ?? ''}`);
+      log(`zone ${zone.id}: sending #${issue.number} to triage failed: ${r.error ?? ''}`);
     }
   } catch (err) {
-    console.warn(`zone ${zone.id}: sending #${issue.number} to triage: ${errorText(err)}`);
+    log(`zone ${zone.id}: sending #${issue.number} to triage: ${errorText(err)}`);
   }
 }
 
@@ -323,7 +324,7 @@ async function recordTriage(
       (i) => !isCrewFiled(i, zone),
     );
   } catch (err) {
-    console.warn(`zone ${zone.id}: listing triage issues failed: ${errorText(err)}`);
+    log(`zone ${zone.id}: listing triage issues failed: ${errorText(err)}`);
     return;
   }
   const trust = new Map<string, boolean>();

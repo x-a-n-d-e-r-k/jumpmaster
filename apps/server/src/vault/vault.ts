@@ -3,6 +3,7 @@ import { chmodSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readSecretFile } from '@jumpmaster/protocol';
 import type { Db } from '../db/open.js';
+import { type ScrubSet, serverScrubSet } from '../forge/scrub-set.js';
 
 /**
  * The vault (§7.5): values encrypted at rest with AES-256-GCM under a 32-byte key read from
@@ -76,6 +77,8 @@ export class Vault {
   constructor(
     private readonly db: Db,
     private readonly key: Buffer,
+    /** The file the key was read from, when there is one (the doctor judges where it lies). */
+    readonly keyFile?: string,
   ) {
     if (key.length !== VAULT_KEY_BYTES) throw new Error('a vault key is 32 bytes');
     this.keyId = createHash('sha256').update(key).digest('hex').slice(0, 8);
@@ -206,13 +209,15 @@ export class Vault {
  * The vault for this install. The key is 32 random bytes, base64url, in the file `keyFile`
  * (`JM_VAULT_KEY_FILE`), read with every check a secret file gets. Without a key file: an empty
  * vault is `'disabled'` (credentials come from files and the environment only), a non-empty one
- * refuses the start, since the key and the data travel together.
+ * refuses the start, since the key and the data travel together. The key, as the file holds it and
+ * in its other text forms, is pinned in the scrub set (`set`) before it is used.
  */
 export function openVault(
   keyFile: string | undefined,
   db: Db,
   dataDir = 'the data directory',
   label = 'JM_VAULT_KEY_FILE',
+  set: Pick<ScrubSet, 'pin'> = serverScrubSet,
 ): Vault | 'disabled' {
   if (!keyFile) {
     const n = vaultCount(db);
@@ -227,11 +232,17 @@ export function openVault(
     throw new Error(
       `${label}: ${keyFile} must hold 32 random bytes, base64url (as bootstrap and init write it)`,
     );
-  return new Vault(db, key);
+  for (const form of [text, key.toString('base64url'), key.toString('base64'), key.toString('hex')])
+    set.pin(form);
+  return new Vault(db, key, keyFile);
 }
 
 /** The key file Settings → Credentials writes under the secrets directory (bootstrap's name too). */
 export const VAULT_KEY_FILE_NAME = 'vault_key';
+
+/** Why a vault key under the data directory is a risk: the doctor's warn and the Settings note. */
+export const VAULT_KEY_IN_DATA_DIR =
+  'The vault key is stored in the data directory, beside the data it protects. A copy of that directory can read every stored credential. Set JM_SECRETS_DIR to a directory outside it and turn the vault on again.';
 
 /**
  * Writes a new key (32 random bytes, base64url) to `vault_key` under `secretsDir`, mode 0600, and

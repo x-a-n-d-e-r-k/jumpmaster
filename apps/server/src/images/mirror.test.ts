@@ -5,8 +5,20 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { ScrubSet } from '../forge/scrub-set.js';
 import type { ImageLockFile } from '../presets.js';
-import { type FakeRegistry, startFakeRegistry } from '../test/fake-registry.js';
-import { ImageMirror, type MirrorDeps } from './mirror.js';
+import {
+  COSIGN_SIMPLESIGNING,
+  type FakeImage,
+  type FakeRegistry,
+  SIGSTORE_BUNDLE,
+  startFakeRegistry,
+} from '../test/fake-registry.js';
+import {
+  ImageMirror,
+  MAX_SIGNATURE_ARTIFACTS,
+  MAX_SIGNATURE_BLOB_BYTES,
+  type MirrorDeps,
+  SIGNATURE_ARTIFACT_TYPES,
+} from './mirror.js';
 import type { MirrorIndex } from './store.js';
 
 let fake: FakeRegistry | undefined;
@@ -302,6 +314,129 @@ describe('the image mirror (issue #140)', () => {
     expect(await again.syncOnce()).toBe(0);
     expect(fake.requests.length).toBe(before);
     expect(again.status().images[0]).toMatchObject({ state: 'complete' });
+  });
+});
+
+describe('the signature artifacts stored are bounded (issue #257)', () => {
+  const MiB = 1024 * 1024;
+  const blobPath = (dir: string, d: string) => join(dir, 'images', 'blobs', 'sha256', hex(d));
+  const partials = (dir: string) =>
+    readdirSync(join(dir, 'images', 'tmp')).filter((f) => f.endsWith('.partial'));
+
+  async function run(img: FakeImage, logs: string[] = []) {
+    const dir = tmp();
+    const m = mirrorOn(dir, { logs });
+    m.setLock({ registry: fake?.registry ?? '', images: { [img.name]: img.digest } });
+    const failed = await m.syncOnce();
+    const rec = indexOf(dir).images[`${img.name}@${img.digest}`];
+    return { dir, m, failed, rec, stored: rec?.signatures.map((s) => s.manifest.digest) ?? [] };
+  }
+
+  test('the caps and accepted types are exported', () => {
+    expect(MAX_SIGNATURE_ARTIFACTS).toBe(16);
+    expect(MAX_SIGNATURE_BLOB_BYTES).toBe(4 * MiB);
+    expect(SIGNATURE_ARTIFACT_TYPES).toContain(SIGSTORE_BUNDLE);
+    expect(SIGNATURE_ARTIFACT_TYPES).toContain(COSIGN_SIMPLESIGNING);
+  });
+
+  for (const via of ['referrers-api', 'referrers-tag'] as const)
+    test(`a list of 500 referrers (${via}): 16 stored, the rest skipped and logged`, async () => {
+      fake = await startFakeRegistry();
+      const img = fake.addImage('jumpmaster-trooper', { signatures: 'none' });
+      const sigs = Array.from({ length: 500 }, () => fake?.addSignature(img, { via }));
+      const legacy = fake.addSignature(img, { via: 'legacy' });
+      const logs: string[] = [];
+      const r = await run(img, logs);
+      expect(r.rec?.state).toBe('complete');
+      expect(r.stored).toEqual([...sigs.slice(0, 16).map((s) => s?.manifest), legacy.manifest]);
+      expect(existsSync(blobPath(r.dir, sigs[16]?.manifest as string))).toBe(false);
+      expect(logs.some((l) => /484 .*skipped/.test(l))).toBe(true);
+      // Nothing past the cap is even fetched.
+      const asked = new Set(fake.requests.map((q) => q.path.split('/').pop()));
+      expect(asked.has(sigs[16]?.manifest)).toBe(false);
+    });
+
+  test('a referrer of an unrelated artifact type is not stored', async () => {
+    fake = await startFakeRegistry();
+    const img = fake.addImage('jumpmaster-trooper');
+    const sbom = fake.addSignature(img, { artifactType: 'application/spdx+json' });
+    // No artifactType: the config's media type decides.
+    const untyped = fake.addSignature(img, {
+      artifactType: null,
+      configMediaType: 'application/vnd.example.thing',
+    });
+    const typedByConfig = fake.addSignature(img, {
+      artifactType: null,
+      configMediaType: SIGSTORE_BUNDLE,
+    });
+    const r = await run(img);
+    expect(r.rec?.state).toBe('complete');
+    expect(r.stored).toEqual([img.signature.manifest, typedByConfig.manifest]);
+    for (const d of [sbom.manifest, untyped.manifest, sbom.blobs[1], untyped.blobs[1]])
+      expect(existsSync(blobPath(r.dir, d as string))).toBe(false);
+  });
+
+  for (const via of ['referrers-api', 'referrers-tag', 'legacy'] as const) {
+    test(`${via}: a layer declaring 1 KiB but streaming 5 MiB is not stored, its partial removed`, async () => {
+      fake = await startFakeRegistry();
+      const img = fake.addImage('jumpmaster-trooper', { signatures: 'none' });
+      const big = fake.addSignature(img, {
+        via,
+        layer: Buffer.alloc(5 * MiB, 1),
+        declaredSize: 1024,
+      });
+      const good = via === 'legacy' ? undefined : fake.addSignature(img, { via });
+      const logs: string[] = [];
+      const r = await run(img, logs);
+      expect(existsSync(blobPath(r.dir, big.blobs[1] as string))).toBe(false);
+      expect(existsSync(blobPath(r.dir, big.manifest))).toBe(false);
+      expect(partials(r.dir)).toEqual([]);
+      expect(r.stored).not.toContain(big.manifest);
+      expect(logs.some((l) => l.includes(big.manifest) && /skipped/.test(l))).toBe(true);
+      if (good) expect(r.stored).toEqual([good.manifest]);
+    });
+
+    test(`${via}: a layer declaring more than 4 MiB is refused unfetched; exactly 4 MiB is stored`, async () => {
+      fake = await startFakeRegistry();
+      const img = fake.addImage('jumpmaster-trooper', { signatures: 'none' });
+      const over = fake.addSignature(img, { via, layer: Buffer.alloc(4 * MiB + 1, 2) });
+      const r1 = await run(img);
+      expect(r1.stored).toEqual([]);
+      expect(existsSync(blobPath(r1.dir, over.blobs[1] as string))).toBe(false);
+      expect(fake.requests.some((q) => q.path.endsWith(over.blobs[1] as string))).toBe(false);
+
+      const img2 = fake.addImage('jumpmaster-egress', { signatures: 'none' });
+      const exact = fake.addSignature(img2, { via, layer: Buffer.alloc(4 * MiB, 3) });
+      const r2 = await run(img2);
+      expect(r2.rec?.state).toBe('complete');
+      expect(r2.stored).toEqual([exact.manifest]);
+      expect(existsSync(blobPath(r2.dir, exact.blobs[1] as string))).toBe(true);
+    });
+
+    test(`${via}: a signature manifest over 1 MiB is not stored`, async () => {
+      fake = await startFakeRegistry();
+      const img = fake.addImage('jumpmaster-trooper', { signatures: 'none' });
+      const fat = fake.addSignature(img, { via, padManifest: MiB });
+      const logs: string[] = [];
+      const r = await run(img, logs);
+      expect(r.stored).toEqual([]);
+      expect(existsSync(blobPath(r.dir, fat.manifest))).toBe(false);
+      expect(logs.some((l) => l.includes(fat.manifest) && /too large/.test(l))).toBe(true);
+    });
+  }
+
+  test('only oversized referrers: the image is refused, its status no signature (never "mirrored")', async () => {
+    fake = await startFakeRegistry();
+    const img = fake.addImage('jumpmaster-trooper', { signatures: 'none' });
+    fake.addSignature(img, { layer: Buffer.alloc(5 * MiB, 1), declaredSize: 1024 });
+    fake.addSignature(img, { layer: Buffer.alloc(4 * MiB + 1, 1) });
+    fake.addSignature(img, { via: 'legacy', layer: Buffer.alloc(4 * MiB + 1, 1) });
+    const r = await run(img);
+    expect(r.failed).toBe(1);
+    expect(r.rec?.state).toBe('failed');
+    expect(r.rec?.signatures).toEqual([]);
+    expect(r.m.status().images[0]).toMatchObject({ state: 'failed' });
+    expect(r.m.status().images[0]?.error).toMatch(/no cosign signature/);
   });
 });
 
