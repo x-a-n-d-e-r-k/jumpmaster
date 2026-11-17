@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -12,19 +12,22 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, expect, test } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest';
 import {
   aheadOfBase,
   authHeader,
   cloneRepo,
   commitIfDirty,
   conflictMarkers,
+  GIT_OUTPUT_MAX_BYTES,
   headSha,
   mergeInProgress,
   prepareBranch,
   remoteBranchExists,
   removeInstructionFiles,
   runGit,
+  setGitOutputMaxBytes,
+  setSpawn,
   sweepProcesses,
   treeState,
 } from './git.js';
@@ -58,6 +61,10 @@ beforeAll(() => {
   git(seed, 'push', '-q', origin, 'main');
 });
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
+afterEach(() => {
+  setSpawn(null);
+  setGitOutputMaxBytes(null);
+});
 
 test('token is not persisted in .git/config', async () => {
   const dir = await clone('cfg');
@@ -273,4 +280,63 @@ test('removeInstructionFiles removes instruction files at any depth, never .git,
   expect(existsSync(join(root, 'pkg', 'README.md'))).toBe(true);
   expect(existsSync(join(outside, 'CLAUDE.md'))).toBe(true);
   expect(existsSync(join(root, '.claude'))).toBe(false);
+});
+
+describe('the git output cap', () => {
+  const CAP = 4096;
+  /** Every runGit child becomes `sh -c <script>`, with exec's own spawn options. */
+  const shell = (script: string) =>
+    setSpawn((_cmd, _args, opts) => spawn('sh', ['-c', script], opts));
+  const gone = (pid: number) => {
+    try {
+      const st = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });
+      return st.trim() === '' || st.trim().startsWith('Z');
+    } catch {
+      return true; // ps exits 1 when the pid does not exist
+    }
+  };
+
+  test('defaults to 16 MiB', () => {
+    expect(GIT_OUTPUT_MAX_BYTES).toBe(16 * 1024 * 1024);
+  });
+
+  test('output past the cap from a child that keeps running rejects at once and kills it', async () => {
+    setGitOutputMaxBytes(CAP);
+    const pidFile = join(tmp, 'cap.pid');
+    // exec: the sleep keeps the shell's pid, so the pid file names the process that must die.
+    shell(`echo $$ > ${pidFile}; head -c ${CAP + 1} /dev/zero | tr '\\0' a; exec sleep 30`);
+    const t0 = Date.now();
+    await expect(runGit(tmp, ['status'])).rejects.toThrow('output too large');
+    expect(Date.now() - t0).toBeLessThan(10_000);
+    const pid = Number(readFileSync(pidFile, 'utf8').trim());
+    const t1 = Date.now();
+    while (!gone(pid) && Date.now() - t1 < 5_000) await new Promise((ok) => setTimeout(ok, 100));
+    const dead = gone(pid);
+    if (!dead) process.kill(pid, 'SIGKILL');
+    expect(dead).toBe(true);
+  }, 30_000);
+
+  test('cap + 1 bytes and exit 0 rejects, never resolves cut off', async () => {
+    setGitOutputMaxBytes(CAP);
+    shell(`head -c ${CAP + 1} /dev/zero | tr '\\0' a`);
+    await expect(runGit(tmp, ['status'])).rejects.toThrow('output too large');
+  });
+
+  test('exactly cap bytes resolves with all of them', async () => {
+    setGitOutputMaxBytes(CAP);
+    shell(`head -c ${CAP} /dev/zero | tr '\\0' a`);
+    expect(await runGit(tmp, ['status'])).toBe('a'.repeat(CAP));
+  });
+
+  test('the cap counts bytes, not UTF-16 characters', async () => {
+    setGitOutputMaxBytes(CAP);
+    // 3 bytes and 1 UTF-16 unit each: 4098 bytes, 1366 characters.
+    const text = '\u20ac'.repeat(Math.ceil((CAP + 1) / 3));
+    const file = join(tmp, 'euro.txt');
+    writeFileSync(file, text);
+    expect(Buffer.byteLength(text)).toBeGreaterThan(CAP);
+    expect(text.length).toBeLessThan(CAP);
+    shell(`cat ${file}`);
+    await expect(runGit(tmp, ['status'])).rejects.toThrow('output too large');
+  });
 });

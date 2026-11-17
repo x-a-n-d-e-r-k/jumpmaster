@@ -54,10 +54,26 @@ export function setSpawn(fn: SpawnFn | null): void {
   spawnImpl = fn ?? spawn;
 }
 
+/** The most stdout `exec` accepts from one child; past it the call fails, never truncates. */
+export const GIT_OUTPUT_MAX_BYTES = 16 * 1024 * 1024;
+let outputMaxBytes = GIT_OUTPUT_MAX_BYTES;
+
+/** Test seam: lowers the stdout cap `exec` enforces (null restores the default). */
+export function setGitOutputMaxBytes(n: number | null): void {
+  outputMaxBytes = n ?? GIT_OUTPUT_MAX_BYTES;
+}
+
 /** Root-owned scratch for repo-less root calls (ls-remote). Defaults to the real tmpdir. */
 let workRoot = realpathSync(tmpdir());
 export function setWorkRoot(dir: string): void {
   workRoot = dir;
+}
+
+/** `exec`'s rejection once a child's stdout passes the cap. */
+class OutputTooLarge extends Error {
+  constructor() {
+    super('output too large');
+  }
 }
 
 type ExecOpts = {
@@ -80,19 +96,20 @@ function exec(argv: string[], o: ExecOpts): Promise<string> {
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    let stdout = '';
+    const chunks: Buffer[] = [];
+    let stdoutBytes = 0;
     let stderr = '';
-    let aborted: string | null = null;
-    const abort = (msg: string) => {
+    let aborted: Error | null = null;
+    const abort = (msg: string, err: Error = new Error(msg)) => {
       if (aborted) return;
-      aborted = msg;
+      aborted = err;
       killGroup(child);
       // Settle now: a grandchild (a remote hook, a transport helper) can hold the pipes open, and
       // 'close' would wait for it.
       done();
       child.stdout?.destroy();
       child.stderr?.destroy();
-      reject(new Error(msg));
+      reject(err);
     };
     const timer =
       o.timeoutMs !== undefined ? setTimeout(() => abort('timeout'), o.timeoutMs) : null;
@@ -103,7 +120,12 @@ function exec(argv: string[], o: ExecOpts): Promise<string> {
         }, 1000)
       : null;
     child.stdout?.on('data', (c: Buffer) => {
-      if (stdout.length < 16 * 1024 * 1024) stdout += c.toString('utf8');
+      if (aborted) return;
+      // Bytes, not characters. Past the cap the call fails: a cut-off listing would read as a
+      // complete one to every caller.
+      stdoutBytes += c.length;
+      if (stdoutBytes > outputMaxBytes) return abort('output too large', new OutputTooLarge());
+      chunks.push(c);
     });
     child.stderr?.on('data', (c: Buffer) => {
       stderr = (stderr + c.toString('utf8')).slice(-8192);
@@ -120,7 +142,8 @@ function exec(argv: string[], o: ExecOpts): Promise<string> {
     });
     child.on('close', (code) => {
       done();
-      if (aborted) return reject(new Error(aborted));
+      if (aborted) return reject(aborted);
+      const stdout = Buffer.concat(chunks).toString('utf8');
       if (code === 0) return resolve(stdout.trim());
       // Never echo the command line: it may carry the upload-pack wrapper or paths.
       const detail = stderr.trim();
@@ -611,6 +634,22 @@ export async function prePushCheck(
   protectedPaths: string[],
   since: string,
   secrets: string[] = [],
+): Promise<string | null> {
+  try {
+    return await checkStaged(bareDir, branch, protectedPaths, since, secrets);
+  } catch (e) {
+    // A listing cut at the cap could hide the very entry the check exists for: refuse.
+    if (e instanceof OutputTooLarge) return 'diff too large to check';
+    throw e;
+  }
+}
+
+async function checkStaged(
+  bareDir: string,
+  branch: string,
+  protectedPaths: string[],
+  since: string,
+  secrets: string[],
 ): Promise<string | null> {
   const ref = `refs/heads/${branch}`;
   // -z: paths are raw bytes, never C-quoted, so a non-ASCII name cannot dodge the glob.
