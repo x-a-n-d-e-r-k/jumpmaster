@@ -57,6 +57,7 @@ import {
 import { dispatchGate } from '../usage.js';
 import type { Shadowed } from '../vault/credentials.js';
 import type { CredentialProblem } from '../vault/problems.js';
+import { isAppReviewerZone, type ResolvedApps } from '../vault/resolution.js';
 import { KEY_CHANGED } from '../vault/vault.js';
 
 /** `info` says something worth knowing that is no fault (an optional setting left unset). */
@@ -160,8 +161,13 @@ export type DoctorDeps = {
   forges(zoneId: string): ForgePair;
   /** How long one check may take before it is reported as not answering (default 60 s). */
   checkTimeoutMs?: number;
-  /** A forge on the read token (`JM_GITHUB_READ_TOKEN`), when one is configured. */
+  /**
+   * The read forge (`makeReadForgeFor`): the reviewer app's token for an app-reviewer zone, else
+   * the read token (`JM_GITHUB_READ_TOKEN`) when one is configured.
+   */
   readForge?(zoneId: string): Forge | undefined;
+  /** The GitHub App entries as they resolved; absent, every zone is judged as a PAT zone. */
+  resolvedApps?(): ResolvedApps;
   /** The config store's status (mode, file problems, restart-pending settings), when there is one. */
   configStatus?: ConfigStatus;
   /** The image mirror's state, for `server.image-mirror`; absent, the check does not run. */
@@ -1501,6 +1507,68 @@ export async function labelsCheckOn(zone: DropZoneConfig, author: Forge): Promis
 const labelsCheck = (zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck> =>
   labelsCheckOn(zone, r.pair.author);
 
+/**
+ * The reviewer app's name (its slug) when the zone is an app-reviewer zone (issue #237): its review,
+ * crew and doctor drops clone with that app's token minted per drop. Undefined for a PAT zone.
+ */
+function reviewerAppOf(d: DoctorDeps, zone: DropZoneConfig): string | undefined {
+  const apps = d.resolvedApps?.();
+  if (!apps || !isAppReviewerZone(zone, apps)) return undefined;
+  const owner = zone.repo.split('/')[0]?.toLowerCase() ?? '';
+  const read = apps.get(owner)?.reviewer;
+  return read && read.source !== 'missing' ? read.entry.slug : 'the reviewer app';
+}
+
+/** `forge.private-clone` for an app-reviewer zone: the read goes through the reviewer app's token. */
+async function privateCloneByApp(
+  d: DoctorDeps,
+  zone: DropZoneConfig,
+  r: ZoneReads,
+  base: { id: string; zoneId: string; doc: string },
+  app: string,
+  isPrivate: boolean,
+): Promise<DoctorCheck> {
+  const named = `the reviewer GitHub App (${app})`;
+  if (!isPrivate)
+    return {
+      ...base,
+      status: 'pass',
+      summary: `${zone.repo} is public: review, crew and doctor drops clone it with ${named}'s token`,
+    };
+  const branch = await r.branch();
+  const read = d.readForge?.(zone.id);
+  if (!read)
+    return {
+      ...base,
+      status: 'skip',
+      summary: `drops clone with ${named}'s token, but the doctor has no forge for it; the check did not run`,
+    };
+  const root = await attempt(() => read.listDir(branch, ''));
+  if (!root.ok && root.rateLimited)
+    return {
+      ...base,
+      status: 'warn',
+      summary: `could not read ${zone.repo}'s files: GitHub's rate limit refused ${named}'s read (HTTP ${root.status}); the check did not run`,
+      fix: 'Run the doctor again in a few minutes.',
+    };
+  if (!root.ok || root.value === null) {
+    const why = root.ok
+      ? `sees no files at the root of ${branch}`
+      : `can't read its files (${root.status === null ? root.message : `HTTP ${root.status}`})`;
+    return {
+      ...base,
+      status: 'fail',
+      summary: `${zone.repo} is private, and ${named} ${why}: review, crew and doctor drops can't clone it`,
+      fix: `Install ${named} on ${zone.repo} (Repository access: include ${zone.repo}, with Contents: Read-only), then run the doctor again.`,
+    };
+  }
+  return {
+    ...base,
+    status: 'pass',
+    summary: `${zone.repo} is private; ${named} can read its files (review, crew and doctor drops clone with its token)`,
+  };
+}
+
 async function privateCloneCheck(
   d: DoctorDeps,
   zone: DropZoneConfig,
@@ -1510,6 +1578,8 @@ async function privateCloneCheck(
   const access = await r.access.author();
   if (!access.ok)
     return readFailed(base, 'author', `read the repository ${zone.repo}`, 'Metadata: read', access);
+  const app = reviewerAppOf(d, zone);
+  if (app !== undefined) return privateCloneByApp(d, zone, r, base, app, access.value.private);
   const hasToken = d.config.secrets.githubReadToken !== undefined;
   const branch = await r.branch();
   if (!access.value.private) {

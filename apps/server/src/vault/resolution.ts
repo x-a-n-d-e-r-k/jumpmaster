@@ -122,3 +122,20 @@ export function appInstallationFor(
   if (installationId === undefined) return undefined;
   return { installationId, repositoryId: zone.githubApp.repositoryId };
 }
+
+/**
+ * An app-reviewer zone (§4.2, §4.4, issue #237): a two-bot zone whose reviewer credential is its
+ * owner's GitHub App, decryptable, with a recorded reviewer installation. Its review, crew and
+ * doctor drops clone with a reviewer `contents: read` token minted per drop, not the read PAT.
+ */
+export function isAppReviewerZone(
+  zone: ZoneForCredentials & ZoneForAppInstallation,
+  apps: ResolvedApps,
+): boolean {
+  const r = credentialFor(zone, 'reviewer', apps);
+  return (
+    r.ref.kind === 'github-app' &&
+    r.problem === undefined &&
+    appInstallationFor(zone, 'reviewer') !== undefined
+  );
+}

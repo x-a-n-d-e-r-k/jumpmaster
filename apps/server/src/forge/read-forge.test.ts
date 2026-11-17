@@ -121,14 +121,26 @@ describe('makeReadForgeFor', () => {
     expect(read.isDone()).toBe(true);
   });
 
-  test('with the reviewer app and the read token both set, the read token wins and no app endpoint is called', async () => {
+  test('app-first: with the reviewer app and the read token both set, the forge sends the minted token', async () => {
     const l = live({ apps: reviewerApp(), readToken: true });
     const scope = appEndpoints();
+    const read = contents(MINTED);
+    const forge = makeReadForgeFor(l, source(l))('main');
+    expect(await forge!.listDir('main', '')).toEqual(['package.json']);
+    expect(read.isDone()).toBe(true);
+    expect(scope.isDone()).toBe(true);
+  });
+
+  test('a PAT zone with the read token set reads with it, even when its owner has a reviewer app entry but no recorded installation', async () => {
+    const l = live({
+      apps: reviewerApp(),
+      readToken: true,
+      zone: appZone({ githubApp: { repositoryId: 4242, installations: { author: 11 } } }),
+    });
     const read = contents(READ_TOKEN);
     const forge = makeReadForgeFor(l, source(l))('main');
     expect(await forge!.listDir('main', '')).toEqual(['package.json']);
     expect(read.isDone()).toBe(true);
-    expect(scope.isDone()).toBe(false);
     expect(appCalls()).toEqual([]);
   });
 
@@ -175,25 +187,36 @@ describe('makeReadForgeFor', () => {
 });
 
 describe('the doctor with makeReadForgeFor', () => {
-  test('forge.private-clone with the reviewer app but no read token still fails with the same summary (Ruling 39)', async () => {
-    const baseline = world({ zone: { reviewReadToken: true } });
-    baseline.f.state.access.author.private = true;
-    const expected = one(await baseline.run(), 'forge.private-clone');
-
+  test('forge.private-clone with the reviewer app and no read token passes through the app token', async () => {
     const w = world({
-      zone: {
-        reviewReadToken: true,
-        githubApp: { repositoryId: 4242, installations: { reviewer: 77 } },
-      },
+      zone: { githubApp: { repositoryId: 4242, installations: { reviewer: 77 } } },
     });
     w.f.state.access.author.private = true;
     const l = live({ zone: w.zone, apps: reviewerApp() });
     w.deps.readForge = makeReadForgeFor(l, source(l));
+    w.deps.resolvedApps = l.resolvedApps;
+    const scope = appEndpoints();
+    const read = contents(MINTED);
     const got = one(await w.run(), 'forge.private-clone');
-    expect(got).toEqual(expected);
+    expect(got.status).toBe('pass');
+    expect(got.summary).toContain('rev');
+    expect(scope.isDone()).toBe(true);
+    expect(read.isDone()).toBe(true);
+  });
+
+  test('forge.private-clone fails naming the reviewer app when the app is not installed on the repository', async () => {
+    const w = world({
+      zone: { githubApp: { repositoryId: 4242, installations: { reviewer: 77 } } },
+    });
+    w.f.state.access.author.private = true;
+    const l = live({ zone: w.zone, apps: reviewerApp() });
+    w.deps.readForge = makeReadForgeFor(l, source(l));
+    w.deps.resolvedApps = l.resolvedApps;
+    nock(api).get('/repos/octo/demo/installation').reply(404, { message: 'Not Found' });
+    const got = one(await w.run(), 'forge.private-clone');
     expect(got.status).toBe('fail');
-    expect(got.summary).toContain('no read token is configured');
-    expect(appCalls()).toEqual([]);
+    expect(got.summary).toContain('reviewer GitHub App (rev)');
+    expect(got.fix).toContain('Install the reviewer GitHub App (rev)');
   });
 
   test('a PAT install passes forge.private-clone through the read token and calls no app endpoint', async () => {

@@ -707,7 +707,9 @@ export class ConfigStore implements ConfigSource {
 
   /** The credential problems of every zone (dispatch refusals; doctor `credential.*`). */
   problems(): CredentialProblem[] {
-    return this.cfg.dropZones.flatMap((z) => credentialProblems(z, this.resolvedValue));
+    return this.cfg.dropZones.flatMap((z) =>
+      credentialProblems(z, this.resolvedValue, this.appsValue),
+    );
   }
 
   /** Secret values replaced while this process ran: logs and audit rows keep redacting them. */

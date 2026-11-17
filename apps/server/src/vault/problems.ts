@@ -7,6 +7,7 @@ import {
   type Resolved,
   type ResolvedCredential,
 } from './credentials.js';
+import { isAppReviewerZone, type ResolvedApps } from './resolution.js';
 
 /**
  * The rules that span a zone's config and the credentials (§7.5), judged locally and at once.
@@ -28,7 +29,15 @@ const fine = (r: ResolvedCredential | undefined): boolean =>
 const present = (r: ResolvedCredential | undefined): boolean =>
   r !== undefined && r.value !== undefined && r.value !== '';
 
-export function credentialProblems(zone: DropZoneConfig, resolved: Resolved): CredentialProblem[] {
+/**
+ * `apps`: the GitHub App entries as they resolved. An app-reviewer zone's review, crew and doctor
+ * drops clone with a reviewer token minted per drop (issue #237), so it needs no read token.
+ */
+export function credentialProblems(
+  zone: DropZoneConfig,
+  resolved: Resolved,
+  apps: ResolvedApps = new Map(),
+): CredentialProblem[] {
   const out: CredentialProblem[] = [];
   const add = (kind: CredentialProblem['kind'], credential: CredentialName, message: string) =>
     out.push({ zoneId: zone.id, kind, credential, message });
@@ -80,7 +89,7 @@ export function credentialProblems(zone: DropZoneConfig, resolved: Resolved): Cr
     }
   }
 
-  if (zone.reviewReadToken && !present(resolved.githubReadToken))
+  if (zone.reviewReadToken && !present(resolved.githubReadToken) && !isAppReviewerZone(zone, apps))
     add(
       'missing',
       'githubReadToken',
