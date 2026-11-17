@@ -51,6 +51,7 @@ import {
 import { pagesOf } from './doctor/actions.js';
 import { latestDoctorRun } from './doctor/run.js';
 import { fableStatus } from './fable.js';
+import type { AppTokenSource } from './forge/app-tokens.js';
 import type { Forge } from './forge/github.js';
 import { getGoals } from './goals.js';
 import { StickFetches } from './images/fetches.js';
@@ -235,6 +236,8 @@ export function createApp(
     install?: Pick<InstallRouteDeps, 'signerRepository' | 'cosignDir' | 'cosignSha256'>;
     /** Where an invite's code is registered for the log scrub (default the server's set). */
     scrub?: { add(secret: string): void };
+    /** The app token source: drops mint from it, and the kill switch clears its cache. */
+    appTokens?: Pick<AppTokenSource, 'fresh' | 'clear'>;
     /** The kill switch's installation suspension (§4.2); absent, the kill route is DB-only. */
     appSuspension?: ControlDeps['appSuspension'];
     /** The installation check every mint goes through (issue #267), for the doctor. */

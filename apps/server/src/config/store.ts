@@ -29,6 +29,7 @@ import {
 } from '../db/repo.js';
 import type { ScrubSet } from '../forge/scrub-set.js';
 import {
+  appEntryFingerprints,
   type CredentialName,
   type Resolved,
   type ResolvedCredential,
@@ -227,6 +228,9 @@ export class ConfigStore implements ConfigSource {
   readonly confirmations: Confirmations;
   private resolvedValue!: Resolved;
   private appsValue: ResolvedApps = new Map();
+  /** The loaded app entries' fingerprints, for `onAppsChanged`. */
+  private appsSignature = '';
+  private readonly appsListeners = new Set<() => void>();
   /** The vault as it is now: Settings can turn it on (and off, empty) while the server runs. */
   private vaultValue: Vault | 'disabled';
   private readonly retiredValues = new Set<string>();
@@ -385,6 +389,16 @@ export class ConfigStore implements ConfigSource {
       ...(this.warnings ? { warnings: this.warnings } : {}),
       restartPending: this.pending(this.cfg),
     };
+  }
+
+  /**
+   * Calls `fn` whenever a load (a revision, a reload or a secrets refresh) changes the app
+   * entries' fingerprints: a replaced or swapped app, or one added or gone. The app token cache
+   * clears on it (issue #266), so no token minted with the old entry is served again.
+   */
+  onAppsChanged(fn: () => void): () => void {
+    this.appsListeners.add(fn);
+    return () => this.appsListeners.delete(fn);
   }
 
   subscribe(fn: (c: Config, rev: number, changes: Change[]) => void): () => void {
@@ -1009,9 +1023,20 @@ export class ConfigStore implements ConfigSource {
     }
     this.resolvedValue = v.resolved;
     this.appsValue = v.apps;
+    const signature = appEntryFingerprints(v.apps).join('\n');
+    const appsChanged = this.cfg !== undefined && signature !== this.appsSignature;
+    this.appsSignature = signature;
     const server = this.serverOf(v.editable);
     const { server: _stored, ...editable } = v.editable;
     this.cfg = { listen, dataDir, ...editable, ...(server ? { server } : {}), secrets: v.secrets };
+    if (appsChanged)
+      for (const fn of this.appsListeners) {
+        try {
+          fn();
+        } catch (e) {
+          this.o.log?.(`app entry listener failed: ${(e as Error).message}`);
+        }
+      }
   }
 
   /**
