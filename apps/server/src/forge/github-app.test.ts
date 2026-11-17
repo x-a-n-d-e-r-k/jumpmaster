@@ -1,4 +1,5 @@
 import { createVerify, generateKeyPairSync } from 'node:crypto';
+import { redactTokenShapes } from '@jumpmaster/protocol';
 import nock from 'nock';
 import { afterEach, beforeAll, describe, expect, test } from 'vitest';
 import {
@@ -151,6 +152,25 @@ describe('createGitHubAppBroker', () => {
       expect((err as GitHubAppError).status).toBe(status);
     });
 
+    test('a failure carrying a stateless token after a letter does not leak it', async () => {
+      const stateless = [
+        'ghs',
+        '1234567',
+        'eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOjF9.c2lnLW5hdHVyZV9oZXJl',
+      ].join('_');
+      nock(api)
+        .post('/app/installations/99/access_tokens')
+        .reply(500, {
+          message: `bad token x${stateless} and ${JSON.stringify('l\n' + stateless)}`,
+        });
+      const err = await caught(broker().mint({ installationId: 99, repositoryId: 1, use: 'push' }));
+      expectClean(err);
+      const msg = (err as GitHubAppError).message;
+      expect(msg).not.toContain(stateless);
+      expect(msg).not.toContain('ghs_');
+      expect(msg).not.toContain('1234567');
+    });
+
     test('an unknown use throws before any request', async () => {
       const err = await caught(
         broker().mint({ installationId: 99, repositoryId: 1, use: 'nope' as Use }),
@@ -245,5 +265,31 @@ describe('createGitHubAppBroker', () => {
       apiBase: 'https://ghe.example/api/v3',
       now: () => NOW_MS,
     }).suspend(1);
+  });
+});
+
+// D5 sibling parity (#253): the broker scrubs GitHub token shapes exactly as the protocol does.
+describe('error scrubbing parity with redactTokenShapes', () => {
+  afterEach(() => nock.cleanAll());
+  const jwtish = 'eyJhbGciOiJSUzI1NiJ9.' + 'aB3-_x'.repeat(8) + '.' + 'Zz9_-q'.repeat(8);
+  const tokens = [
+    ['ghs', '1234567', jwtish].join('_'),
+    ['ghp', 'A1b2'.repeat(9)].join('_'),
+    ['gho', 'C3d4'.repeat(9)].join('_'),
+    ['ghs', 'E5f6'.repeat(9)].join('_'),
+    ['github', 'pat', '11AB_'.repeat(16)].join('_'),
+  ];
+  const wraps = [
+    (t: string) => `plain ${t}`,
+    (t: string) => JSON.stringify(`line\n${t}`),
+    (t: string) => `\x1b[32m${t}`,
+    (t: string) => `x-access-token%3A${t}`,
+    () => 'highs_and_lows_of_a_long_identifier_name_here',
+  ];
+  test.each(tokens.flatMap((t) => wraps.map((w) => w(t))))('%j', async (message) => {
+    nock(api).post('/app/installations/99/access_tokens').reply(500, { message });
+    const err = await caught(broker().mint({ installationId: 99, repositoryId: 1, use: 'push' }));
+    const expected = redactTokenShapes(message, '[redacted]');
+    expect((err as GitHubAppError).githubMessage).toBe(expected);
   });
 });
