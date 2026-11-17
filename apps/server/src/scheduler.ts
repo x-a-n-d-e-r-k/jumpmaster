@@ -6,7 +6,9 @@ import {
   getZoneMode,
   insertDrop,
   isKilled,
+  listOpenPrTouches,
   listWorkItems,
+  setWorkItemReason,
   setWorkItemState,
   type WorkItem,
 } from './db/repo.js';
@@ -68,7 +70,112 @@ export function enqueueImplement(
 /** A ready item with an open native blocker waits; work already started is not affected. */
 export const isBlocked = (item: WorkItem): boolean => item.blockedBy.length > 0;
 
-/** Enqueue the top-ranked unblocked ready item (at most one active implement drop per zone). */
+/** Fenced code: a line opening or closing a ``` or ~~~ block. */
+const FENCE = /^\s{0,3}(`{3,}|~{3,})/;
+const PLACEMENT_HEADING = /^\s{0,3}(?:>\s*)?##\s+Placement\s*#*\s*$/i;
+const NEXT_HEADING = /^\s{0,3}(?:>\s*)?#{1,2}\s/;
+/** An inline code span: a run of backticks, its content, and the same run closing it. */
+const CODE_SPAN = /(`+)(?!`)(.+?)(?<!`)\1(?!`)/g;
+const FILE_EXTENSION = /\.[A-Za-z][A-Za-z0-9]*$/;
+
+/**
+ * The repository paths an issue's `## Placement` section names (#291): its inline code spans
+ * (outside fenced blocks, up to the next `##` heading) with no whitespace inside, that contain a
+ * `/` or end in a file extension. A leading `./` goes; a trailing `/` marks a directory. Sorted
+ * and de-duplicated; `[]` with no Placement section.
+ */
+export function placementPaths(body: string): string[] {
+  const lines = body.split(/\r?\n/);
+  const start = lines.findIndex((l) => PLACEMENT_HEADING.test(l));
+  if (start < 0) return [];
+  const paths = new Set<string>();
+  let fence: string | null = null;
+  for (const line of lines.slice(start + 1)) {
+    const f = FENCE.exec(line)?.[1];
+    if (fence !== null) {
+      if (f && f[0] === fence[0] && f.length >= fence.length) fence = null;
+      continue;
+    }
+    if (f) {
+      fence = f;
+      continue;
+    }
+    if (NEXT_HEADING.test(line)) break;
+    for (const m of line.matchAll(CODE_SPAN)) {
+      const span = (m[2] ?? '').trim();
+      if (span === '' || /\s/.test(span) || span.includes('://')) continue;
+      if (!span.includes('/') && !FILE_EXTENSION.test(span)) continue;
+      const path = span.replace(/^(?:\.\/)+/, '');
+      if (path !== '' && path !== '/') paths.add(path);
+    }
+  }
+  return [...paths].sort();
+}
+
+/** Whether two paths overlap: equal, or one a directory (trailing `/`) holding the other. */
+const pathsOverlap = (a: string, b: string): boolean =>
+  a === b || (a.endsWith('/') && b.startsWith(a)) || (b.endsWith('/') && a.startsWith(b));
+
+/** The reason a ready item carries while an open PR changes a file its Placement names. */
+export const OVERLAP_PREFIX = 'waiting: overlaps #';
+export const overlapReason = (pr: number, path: string): string =>
+  `${OVERLAP_PREFIX}${pr} on ${path}`;
+export const isOverlapReason = (reason: string | null): boolean =>
+  reason?.startsWith(OVERLAP_PREFIX) === true;
+
+type OpenTouches = ReturnType<typeof listOpenPrTouches>;
+
+/**
+ * The first overlap of a ready item with the zone's open PRs, in sorted order (by path, then PR
+ * number), as its waiting reason; null when none. An open PR with an unknown file list and an
+ * item whose Placement names no path overlap nothing. A directory match names the PR's file.
+ */
+export function overlapOf(item: Pick<WorkItem, 'id' | 'body'>, open: OpenTouches): string | null {
+  const mine = placementPaths(item.body);
+  if (mine.length === 0) return null;
+  const hits: { path: string; pr: number }[] = [];
+  for (const o of open) {
+    if (o.itemId === item.id || o.files === null || o.prNumber === null) continue;
+    for (const p of mine)
+      for (const f of o.files)
+        if (pathsOverlap(p, f)) hits.push({ path: p.length >= f.length ? p : f, pr: o.prNumber });
+  }
+  hits.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.pr - b.pr));
+  const first = hits[0];
+  return first ? overlapReason(first.pr, first.path) : null;
+}
+
+/** The cap's words when the zone has `maxOpenPrs` or more items in `pr_open`, else null. */
+export function openPrCap(
+  zone: Pick<DropZoneConfig, 'maxOpenPrs'>,
+  openCount: number,
+): string | null {
+  const cap = zone.maxOpenPrs;
+  return cap !== undefined && openCount >= cap
+    ? `waiting: ${openCount} open PRs (cap ${cap})`
+    : null;
+}
+
+/**
+ * The ready items a new implement drop may start, ranked, each with the overlap that holds it
+ * back (#291) or null. `skip` items and blocked items are left out.
+ */
+export function readyCandidates(
+  db: Db,
+  zoneId: string,
+  skip: ReadonlySet<number> = new Set(),
+): { item: WorkItem; overlap: string | null }[] {
+  const open = listOpenPrTouches(db, zoneId);
+  return rankItems(
+    listWorkItems(db, zoneId, 'ready').filter((i) => !skip.has(i.id) && !isBlocked(i)),
+  ).map((item) => ({ item, overlap: overlapOf(item, open) }));
+}
+
+/**
+ * Enqueue the top-ranked unblocked ready item no open PR overlaps (#291), within the zone's
+ * implement concurrency and its `maxOpenPrs` cap. Each ready item's overlap is kept as its reason
+ * (`waiting: overlaps #<pr> on <path>`), cleared once the PR no longer overlaps it.
+ */
 export function enqueueNext(
   db: Db,
   zone: DropZoneConfig,
@@ -78,9 +185,13 @@ export function enqueueNext(
   /** Items not to start fresh this pass (their agent branch could not be read). */
   skip: ReadonlySet<number> = new Set(),
 ): string | null {
-  const top = rankItems(
-    listWorkItems(db, zone.id, 'ready').filter((i) => !skip.has(i.id) && !isBlocked(i)),
-  )[0];
+  const candidates = readyCandidates(db, zone.id, skip);
+  for (const { item, overlap } of candidates) {
+    if (overlap !== item.reason && (overlap !== null || isOverlapReason(item.reason)))
+      setWorkItemReason(db, item.id, overlap);
+  }
+  if (openPrCap(zone, listWorkItems(db, zone.id, 'pr_open').length) !== null) return null;
+  const top = candidates.find((c) => c.overlap === null)?.item;
   if (!top) return null;
   return enqueueImplement(
     db,

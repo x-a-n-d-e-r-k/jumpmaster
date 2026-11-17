@@ -280,6 +280,38 @@ export function setWorkItemReason(db: Db, id: number, reason: string | null): vo
   db.prepare('UPDATE work_items SET reason = ? WHERE id = ?').run(reason, id);
 }
 
+/**
+ * Stores the files an open PR changes (#291): a sorted, de-duplicated path list, or null when
+ * unknown (a list GitHub cut short).
+ */
+export function setWorkItemPrFiles(db: Db, id: number, paths: readonly string[] | null): void {
+  const json = paths === null ? null : JSON.stringify([...new Set(paths)].sort());
+  db.prepare('UPDATE work_items SET pr_files = ? WHERE id = ?').run(json, id);
+}
+
+/** The stored file list of an item's open PR: null when unknown or never read. */
+export function getWorkItemPrFiles(db: Db, id: number): string[] | null {
+  const row = db.prepare('SELECT pr_files AS f FROM work_items WHERE id = ?').get(id) as
+    | { f: string | null }
+    | undefined;
+  return row?.f ? (JSON.parse(row.f) as string[]) : null;
+}
+
+/** A zone's pr_open items with their PR number and stored file list (null: unknown), by item id. */
+export function listOpenPrTouches(
+  db: Db,
+  zoneId: string,
+): { itemId: number; prNumber: number | null; files: string[] | null }[] {
+  const rows = db
+    .prepare(
+      `SELECT w.id AS itemId, COALESCE(p.number, w.pr_number) AS prNumber, w.pr_files AS files
+         FROM work_items w LEFT JOIN pull_requests p ON p.work_item_id = w.id
+        WHERE w.drop_zone_id = ? AND w.state = 'pr_open' ORDER BY w.id`,
+    )
+    .all(zoneId) as { itemId: number; prNumber: number | null; files: string | null }[];
+  return rows.map((r) => ({ ...r, files: r.files ? (JSON.parse(r.files) as string[]) : null }));
+}
+
 export function setWaitingSince(db: Db, id: number, at: string | null): void {
   db.prepare('UPDATE work_items SET waiting_since = ? WHERE id = ?').run(at, id);
 }

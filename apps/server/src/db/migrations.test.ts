@@ -1211,3 +1211,20 @@ test('v33 adds triage_requests.gate_reasons, null on every existing request', ()
   ).toEqual([{ n: 179, reason: 'r', g: null }]);
   db.close();
 });
+
+test('v35 adds work_items.pr_files, null (unknown) on every existing item', () => {
+  const f = dbAt(34, (raw) => {
+    raw.exec(
+      `INSERT INTO drop_zones (id, repo, default_branch, config_json) VALUES ('z', 'o/r', 'main', '{}');
+       INSERT INTO work_items (drop_zone_id, issue_number, title, body, author, priority, is_fix,
+         issue_created_at, state, updated_at) VALUES ('z', 7, 't', 'b', 'a', 0, 0, 't', 'pr_open', 't')`,
+    );
+  });
+  const db = openDb(f);
+  expect(MIGRATIONS.at(-1)?.version).toBe(35);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.prepare('SELECT issue_number AS n, pr_files AS f FROM work_items').all()).toEqual([
+    { n: 7, f: null },
+  ]);
+  db.close();
+});

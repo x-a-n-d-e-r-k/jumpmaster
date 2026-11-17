@@ -353,6 +353,7 @@ export const NOT_GUARDED: FreePath[] = [
   free('dropZones[].limits.memoryMb', 'a container resource limit, not an access'),
   free('dropZones[].limits.shmMb', 'a container resource limit, not an access'),
   free('dropZones[].maxConcurrentImplement', PACE),
+  free('dropZones[].maxOpenPrs', PACE),
   free('dropZones[].outboxDeadlineMinutes', 'how long a forge write may stay unknown'),
   free('dropZones[].mode', 'the starting mode, used only until an operator stores one'),
   free('dropZones[].model', 'the model a drop runs; the same guards hold'),

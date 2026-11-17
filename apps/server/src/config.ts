@@ -183,6 +183,11 @@ export const DropZoneObject = z.object({
    */
   adoptPulls: z.array(z.number().int().positive()).default([]),
   maxConcurrentImplement: z.number().int().positive().default(1),
+  /**
+   * The most items the zone has in `pr_open` before it starts no new implement drop (#291).
+   * Absent: no cap. Resolve, heal, review, resume and crew drops are never held by it.
+   */
+  maxOpenPrs: z.number().int().min(1).max(50).optional(),
   /** How long an unresolved forge write may stay unknown; defaults to ciDeadlineMinutes. */
   outboxDeadlineMinutes: z.number().positive().optional(),
   /** Names of secrets for gate steps; values come from JM_ZONE_SECRET_<ZONE>_<NAME>[_FILE]. */
