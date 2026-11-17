@@ -25,3 +25,11 @@ describe('finishing an objective (#245)', () => {
     expect(text).toMatch(/instead of raising a free-text briefing/);
   });
 });
+
+describe('one open briefing per objective (#246)', () => {
+  test('the crew lead reuses an open briefing for the current objective instead of raising another', () => {
+    const text = prompt('crew-lead.md');
+    expect(text).toMatch(/While a briefing is open for the current objective/);
+    expect(text).toMatch(/don't raise another; reuse its subject to update it/);
+  });
+});

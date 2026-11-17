@@ -102,6 +102,79 @@ describe('crew-lead input', () => {
     expect(input).toContain(`<<<jm-data:${DROP}:begin open-issues>>>`);
   });
 
+  test('lists each open crew briefing by id, subject, decision and options (#246)', async () => {
+    const lead = applyCrewActions(
+      w.db,
+      w.zone,
+      {
+        briefings: [
+          {
+            subject: 'Order the author token',
+            decision: 'Which token work first?',
+            why: 'w',
+            options: ['Token first', 'Broker first'],
+            recommendation: '',
+            onHold: '',
+          },
+        ],
+      },
+      { kind: 'drop', dropId: 'd0' },
+      t0,
+    );
+    applyCrewActions(
+      w.db,
+      w.zone,
+      {
+        briefings: [
+          {
+            subject: 'assistant',
+            decision: 'MCP-DECISION',
+            why: 'w',
+            options: ['a', 'b'],
+            recommendation: '',
+            onHold: '',
+          },
+        ],
+      },
+      { kind: 'mcp', tokenId: 7 },
+      t0,
+    );
+    const input = await leadInput();
+    const section = input.slice(input.indexOf('## Open briefings'));
+    expect(section).toMatch(/^## Open briefings \(trusted instructions\)/);
+    expect(section).toContain(
+      `Briefing ${lead.briefings[0]} (crew:document-every-endpoint:Order the author token): Which token work first?\nOptions: Token first; Broker first`,
+    );
+    expect(input).not.toContain('No open briefings.');
+    expect(input).not.toContain('MCP-DECISION');
+  });
+
+  test('says No open briefings. when the query finds none (#246)', async () => {
+    const [id] = applyCrewActions(
+      w.db,
+      w.zone,
+      {
+        briefings: [
+          {
+            subject: 's',
+            decision: 'RULED-ONE',
+            why: 'w',
+            options: ['a', 'b'],
+            recommendation: '',
+            onHold: '',
+          },
+        ],
+      },
+      { kind: 'drop', dropId: 'd0' },
+      t0,
+    ).briefings;
+    ruleBriefing(w.db, id ?? -1, 'o1', '', t0);
+    const input = await leadInput();
+    expect(input).toContain(
+      `## Open briefings (trusted instructions)\n\n<<<jm-data:${DROP}:begin open-briefings>>>\nNo open briefings.`,
+    );
+  });
+
   test('an issue by an untrusted author, or one whose trust lookup failed, is absent; only a count is shown', async () => {
     w.f.state.addIssue({ number: 10, title: 'Stranger wants things', author: 'stranger' });
     const input = await leadInput();

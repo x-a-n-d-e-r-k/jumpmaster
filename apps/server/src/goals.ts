@@ -169,6 +169,15 @@ export function objectivesDone(db: Db, zoneId: string): Map<string, number> {
 }
 
 /**
+ * The zone's current objective: the first not marked done in the goal file nor by Command's ruling,
+ * or null.
+ */
+export function zoneObjective(db: Db, zoneId: string): Objective | null {
+  const goals = getGoals(db, zoneId);
+  return goals ? currentObjective(goals.parse, new Set(objectivesDone(db, zoneId).keys())) : null;
+}
+
+/**
  * Records `key` done by `rulingId`. A key already recorded is left as it was. Only the database is
  * written: the goal file stays the owner's.
  */

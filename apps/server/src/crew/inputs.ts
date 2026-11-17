@@ -3,7 +3,7 @@ import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import { getPullRequest, getWorkItem } from '../db/repo.js';
 import type { ZonePass } from '../flow/snapshot.js';
-import { currentObjective, getGoals, objectivesDone } from '../goals.js';
+import { getGoals, objectivesDone, zoneObjective } from '../goals.js';
 import { type ForgePair, unsanitizeForgeText } from '../outbox.js';
 import { crewTemplate, fence, neutralise } from '../payloads.js';
 import { isCrewFiled } from '../sync.js';
@@ -116,12 +116,6 @@ function goalsSection(db: Db, zone: DropZoneConfig): Section {
   return { title: zone.crew.goalPath, name: 'goals', kind: 'trusted', text };
 }
 
-/** The zone's current objective, skipping those Command ruled done. */
-function zoneObjective(db: Db, zoneId: string) {
-  const goals = getGoals(db, zoneId);
-  return goals ? currentObjective(goals.parse, new Set(objectivesDone(db, zoneId).keys())) : null;
-}
-
 type RulingLine = {
   id: number;
   briefingId: number;
@@ -144,6 +138,18 @@ function rulings(db: Db, zoneId: string, limit = 20): RulingLine[] {
     .all(zoneId, limit) as RulingLine[];
 }
 
+type OpenBriefingLine = { id: number; subject: string; decision: string; optionsJson: string };
+
+/** The zone's open briefings raised by the crew, oldest first. */
+function openCrewBriefings(db: Db, zoneId: string): OpenBriefingLine[] {
+  return db
+    .prepare(
+      `SELECT id, subject, decision, options_json AS optionsJson FROM briefings
+       WHERE zone_id = ? AND state = 'open' AND source = 'crew' ORDER BY id`,
+    )
+    .all(zoneId) as OpenBriefingLine[];
+}
+
 /**
  * The lead's input: GOAL.md, the current objective and Command's rulings as instructions; the crew
  * issues, free slots and trusted open issues as data. Issues by untrusted authors (or whose trust
@@ -160,6 +166,7 @@ export async function crewLeadInput(
 ): Promise<string> {
   const current = zoneObjective(db, zone.id);
   const ruled = rulings(db, zone.id);
+  const openBriefings = openCrewBriefings(db, zone.id);
 
   const crewIssues = listCrewIssues(db, zone.id);
   const byObjective = new Map<string, string[]>();
@@ -227,6 +234,20 @@ export async function crewLeadInput(
                   `Ruling ${r.id} on briefing ${r.briefingId}: option ${r.choice}${r.note ? `; note: ${r.note}` : ''} (${r.createdAt})`,
               )
               .join('\n'),
+    },
+    {
+      title: 'Open briefings',
+      name: 'open-briefings',
+      kind: 'trusted',
+      text:
+        openBriefings.length === 0
+          ? 'No open briefings.'
+          : openBriefings
+              .map((b) => {
+                const options = JSON.parse(b.optionsJson) as { label: string }[];
+                return `Briefing ${b.id} (${b.subject}): ${b.decision}\nOptions: ${options.map((o) => o.label).join('; ')}`;
+              })
+              .join('\n\n'),
     },
     {
       title: 'Ruled briefings',
