@@ -619,6 +619,23 @@ export class ConfigStore implements ConfigSource {
     return this.o.env.JM_VAULT_KEY_FILE ? 'env' : 'settings';
   }
 
+  /**
+   * The vault's effective key file (issue #258: the doctor judges where it lies): the file the open
+   * vault read its key from, else `JM_VAULT_KEY_FILE`, which wins, else the one Settings wrote
+   * (`vault.key_file`); undefined with none.
+   */
+  vaultKeyFile(): string | undefined {
+    if (this.vaultValue !== 'disabled' && this.vaultValue.keyFile) return this.vaultValue.keyFile;
+    if (this.o.env.JM_VAULT_KEY_FILE) return this.o.env.JM_VAULT_KEY_FILE;
+    const stored = getSetting(this.o.db, 'vault.key_file');
+    return typeof stored === 'string' ? stored : undefined;
+  }
+
+  /** Whether the vault key Turn on would write lands in the data directory (no secrets directory). */
+  vaultKeyGoesToDataDir(): boolean {
+    return !this.o.boot.secretsDir;
+  }
+
   /** Whether a vault entry wins over a variable or a file for the same credential. */
   preferVault(): boolean {
     return getSetting(this.o.db, 'vault.prefer') === true;
