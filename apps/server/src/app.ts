@@ -182,6 +182,7 @@ function usageView(db: Db, config: Config, at: Date): NonNullable<HomeState['usa
   };
 }
 
+const FRAME_ANCESTORS = "frame-ancestors 'none'";
 const ROUTES = new WeakMap<FastifyInstance, { method: string; url: string }[]>();
 
 /** The routes an app from `createApp` registered (HEAD included, as Fastify adds it). */
@@ -255,6 +256,20 @@ export function createApp(
     for (const method of [r.method].flat()) routes.push({ method, url: r.url });
   });
   ROUTES.set(app, routes);
+  // No page may be framed (issue #260): a same-site page on another port would carry the Strict
+  // session cookie into the frame. Every HTML response, error pages included, and any response with
+  // a policy of its own (the artifacts route keeps its sandbox) forbids it; nothing else changes.
+  app.addHook('onSend', async (_req, reply, payload) => {
+    const csp = reply.getHeader('content-security-policy');
+    const html = String(reply.getHeader('content-type') ?? '').startsWith('text/html');
+    if (!html && csp === undefined) return payload;
+    reply.header(
+      'content-security-policy',
+      csp === undefined ? FRAME_ANCESTORS : `${String(csp)}; ${FRAME_ANCESTORS}`,
+    );
+    reply.header('x-frame-options', 'DENY');
+    return payload;
+  });
   /** The request's snapshot (taken by the guard). */
   const cfg = (req: { jmConfig: Config | null }): Config => req.jmConfig ?? live();
   // The login and setup pages post plain HTML forms.
