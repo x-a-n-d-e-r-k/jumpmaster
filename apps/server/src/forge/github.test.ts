@@ -1626,3 +1626,215 @@ describe('token providers', () => {
     expect(Object.values(err)).not.toContain(inner);
   });
 });
+
+describe('GitHubForge with an app identity (spec §4.3)', () => {
+  const identity = { kind: 'app' as const, slug: 'acme-author', appId: '12345' };
+  const bot = 'acme-author[bot]';
+  const appForge = () => new GitHubForge('o', 'r', 'ghs_tok', { identity });
+  const userCalls: string[] = [];
+  const recordUser = () => {
+    userCalls.length = 0;
+    nock.emitter.on('no match', (req: { path?: string }) => userCalls.push(String(req.path)));
+  };
+
+  beforeAll(() => {
+    nock.disableNetConnect();
+  });
+  afterEach(() => {
+    expect(nock.pendingMocks()).toEqual([]);
+    nock.emitter.removeAllListeners('no match');
+    nock.cleanAll();
+  });
+
+  test('viewerLogin resolves to <slug>[bot] and sends no request', async () => {
+    recordUser();
+    // An installation token gets 403 from GET /user: a call would fail this test.
+    const user = nock(api).get('/user').reply(403, { message: 'nope' });
+    expect(await appForge().viewerLogin()).toBe(bot);
+    expect(user.isDone()).toBe(false);
+    expect(userCalls).toEqual([]);
+    nock.cleanAll();
+  });
+
+  test('appIdentity() returns the identity for an app forge and null without one', () => {
+    expect(appForge().appIdentity()).toEqual({ slug: 'acme-author', appId: '12345' });
+    expect(new GitHubForge('o', 'r', 'tok').appIdentity()).toBeNull();
+  });
+
+  test('the identity it returns cannot change the forge', async () => {
+    const f = appForge();
+    const seen = f.appIdentity() as { slug: string };
+    try {
+      seen.slug = 'other';
+    } catch {
+      // frozen
+    }
+    expect(f.appIdentity()).toEqual({ slug: 'acme-author', appId: '12345' });
+    expect(await f.viewerLogin()).toBe(bot);
+  });
+
+  test('getBranchRules reports viewerIsAdmin false with no collaborator-permission read', async () => {
+    recordUser();
+    nock(api)
+      .get('/repos/o/r/rules/branches/main')
+      .query(true)
+      .reply(200, [
+        {
+          type: 'pull_request',
+          ruleset_id: 1,
+          parameters: { required_approving_review_count: 1, dismiss_stale_reviews_on_push: true },
+        },
+      ]);
+    nock(api)
+      .get('/repos/o/r/rulesets/1')
+      .query({ includes_parents: 'true' })
+      .reply(200, { enforcement: 'active', current_user_can_bypass: 'never' });
+    const res = await appForge().getBranchRules('main');
+    expect(res).toMatchObject({ kind: 'ok', rules: { viewerIsAdmin: false } });
+    expect(userCalls).toEqual([]);
+  });
+
+  test('findIssueByMarker queries creator=<slug>[bot] and never reads /user', async () => {
+    recordUser();
+    const marker = '<!-- jm:op:k1 -->';
+    nock(api)
+      .get('/repos/o/r/issues')
+      .query((q) => q.creator === bot)
+      .reply(200, [
+        { number: 1, body: `x\n${marker}`, user: { login: 'someone' } },
+        { number: 2, body: `x\n${marker}`, user: { login: bot } },
+      ]);
+    expect(await appForge().findIssueByMarker(marker, '2026-01-01T00:00:00Z')).toEqual({
+      number: 2,
+    });
+    expect(userCalls).toEqual([]);
+  });
+
+  test('the creator filter is sent percent-encoded', async () => {
+    let path = '';
+    nock(api)
+      .get((uri) => {
+        path = uri;
+        return uri.startsWith('/repos/o/r/issues?');
+      })
+      .reply(200, []);
+    await appForge().findIssueByMarker('<!-- m -->', '2026-01-01T00:00:00Z');
+    expect(path).toContain('creator=acme-author%5Bbot%5D');
+  });
+
+  test('findReviewByMarker matches only a review by <slug>[bot]', async () => {
+    recordUser();
+    const marker = '<!-- jm:op:k1 -->';
+    const rv = (id: number, login: string) => ({
+      id,
+      user: { login },
+      state: 'APPROVED',
+      commit_id: 'c1',
+      body: `text\n${marker}`,
+      submitted_at: '2026-01-01T00:00:00Z',
+    });
+    nock(api)
+      .get('/repos/o/r/pulls/5/reviews')
+      .query(true)
+      .reply(200, [rv(1, 'acme-author'), rv(2, bot)]);
+    nock(api)
+      .get('/repos/o/r/pulls/5/reviews')
+      .query(true)
+      .reply(200, [rv(1, 'other[bot]')]);
+    const f = appForge();
+    expect(await f.findReviewByMarker(5, marker)).toEqual({ id: 2 });
+    expect(await f.findReviewByMarker(5, marker)).toBeNull();
+    expect(userCalls).toEqual([]);
+  });
+
+  test('findIssueCommentByMarker matches only a comment by <slug>[bot]', async () => {
+    recordUser();
+    const marker = '<!-- jm:op:k1 -->';
+    const c = (id: number, login: string) => ({ id, user: { login }, body: `t\n${marker}` });
+    nock(api)
+      .get('/repos/o/r/issues/7/comments')
+      .query(true)
+      .reply(200, [c(1, bot), c(2, 'someone')]);
+    nock(api)
+      .get('/repos/o/r/issues/7/comments')
+      .query(true)
+      .reply(200, [c(3, 'someone')]);
+    const f = appForge();
+    expect(await f.findIssueCommentByMarker(7, marker)).toEqual({ id: 1 });
+    expect(await f.findIssueCommentByMarker(7, marker)).toBeNull();
+    expect(userCalls).toEqual([]);
+  });
+
+  test('checksFor reads check-runs and never takes the Actions-jobs fallback', async () => {
+    recordUser();
+    nock(api)
+      .get('/repos/o/r/commits/sha1/check-runs')
+      .query(true)
+      .reply(200, {
+        total_count: 1,
+        check_runs: [{ name: 'build', status: 'completed', conclusion: 'success' }],
+      });
+    nock(api)
+      .get('/repos/o/r/commits/sha1/status')
+      .query(true)
+      .reply(200, { state: 'success', statuses: [] });
+    const runs = nock(api).get('/repos/o/r/actions/runs').query(true).reply(200, {});
+    expect(await appForge().checksFor('sha1')).toMatchObject({
+      state: 'success',
+      names: ['build'],
+    });
+    expect(runs.isDone()).toBe(false);
+    expect(userCalls).toEqual([]);
+    nock.cleanAll();
+  });
+
+  test('a PAT forge still reads /user and the collaborator permission', async () => {
+    const user = nock(api).get('/user').reply(200, { login: 'jm-bot' });
+    nock(api)
+      .get('/repos/o/r/rules/branches/main')
+      .query(true)
+      .reply(200, [
+        {
+          type: 'pull_request',
+          ruleset_id: 1,
+          parameters: { required_approving_review_count: 1, dismiss_stale_reviews_on_push: true },
+        },
+      ]);
+    nock(api)
+      .get('/repos/o/r/rulesets/1')
+      .query({ includes_parents: 'true' })
+      .reply(200, { enforcement: 'active', current_user_can_bypass: 'never' });
+    const perm = nock(api)
+      .get('/repos/o/r/collaborators/jm-bot/permission')
+      .reply(200, { permission: 'admin', role_name: 'admin' });
+    nock(api)
+      .get('/repos/o/r/issues')
+      .query((q) => q.creator === 'jm-bot')
+      .reply(200, []);
+    const f = new GitHubForge('o', 'r', 'tok');
+    expect(await f.getBranchRules('main')).toMatchObject({
+      kind: 'ok',
+      rules: { viewerIsAdmin: true },
+    });
+    expect(await f.findIssueByMarker('<!-- m -->', '2026-01-01T00:00:00Z')).toBeNull();
+    expect(user.isDone()).toBe(true);
+    expect(perm.isDone()).toBe(true);
+  });
+
+  test.each([['Acme_App'], ['../x'], [''], [`ghp_${'abcdefghijklmnopqrstuvwxyzabcdefghij'}`]])(
+    'a bad slug %j is refused without being echoed',
+    (slug) => {
+      let message = '';
+      expect(() => {
+        try {
+          new GitHubForge('o', 'r', 'tok', { identity: { kind: 'app', slug, appId: '1' } });
+        } catch (e) {
+          message = (e as Error).message;
+          throw e;
+        }
+      }).toThrow();
+      expect(message).not.toBe('');
+      if (slug) expect(message).not.toContain(slug);
+    },
+  );
+});

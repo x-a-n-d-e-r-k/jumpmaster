@@ -414,25 +414,40 @@ export function staticTokenProvider(token: string): TokenProvider {
   return { token: () => Promise.resolve(token) };
 }
 
+/**
+ * A forge that acts as a GitHub App installation (spec §4.3). An installation token gets 403 from
+ * `GET /user`, so its login comes from the slug, and an installation is never a repository admin.
+ */
+export type AppForgeIdentity = { kind: 'app'; slug: string; appId: string };
+
+/** GitHub's app-slug rule: lowercase letters, digits and hyphens, and not empty. */
+const APP_SLUG = /^[a-z0-9-]+$/;
+
 export class GitHubForge implements Forge {
   private readonly octokit: Octokit;
   private viewer: Promise<string> | undefined;
+  private readonly app: Readonly<{ slug: string; appId: string }> | null;
 
   /**
    * `requestTimeoutMs` aborts any request that has not answered in time (the doctor's forges set
    * it, so one stalled connection can't hang a run); absent, requests wait as before.
+   * `identity` marks an app installation's forge; absent, the forge is a token's (PAT mode).
    */
   constructor(
     private readonly owner: string,
     private readonly repo: string,
     token: string | TokenProvider,
-    opts: { requestTimeoutMs?: number } = {},
+    opts: { requestTimeoutMs?: number; identity?: AppForgeIdentity } = {},
   ) {
     // A value in the wrong slot (a token as `owner`) would end up in every request path, and
     // Octokit logs request paths. Refuse it here, and never echo it in the error.
     if (!isOwnerName(owner)) throw new Error('GitHubForge: owner is not a valid GitHub owner name');
     if (!isRepoName(repo))
       throw new Error('GitHubForge: repository is not a valid GitHub repository name');
+    const id = opts.identity;
+    if (id && !(typeof id.slug === 'string' && APP_SLUG.test(id.slug)))
+      throw new Error('GitHubForge: the app slug is not a valid GitHub App slug');
+    this.app = id ? Object.freeze({ slug: id.slug, appId: id.appId }) : null;
     const ms = opts.requestTimeoutMs;
     this.octokit = new Octokit({
       // No token: unauthenticated reads (the wizard's owner-type read before any token exists).
@@ -598,7 +613,14 @@ export class GitHubForge implements Forge {
     return `${this.owner}/${this.repo}`;
   }
 
+  /** The app this forge acts as, or null for a token's forge. */
+  appIdentity(): { slug: string; appId: string } | null {
+    return this.app ? { ...this.app } : null;
+  }
+
+  /** An app's login is `<slug>[bot]`, with no request: `GET /user` refuses an installation. */
   viewerLogin(): Promise<string> {
+    if (this.app) return Promise.resolve(`${this.app.slug}[bot]`);
     if (!this.viewer) {
       const p = this.octokit.rest.users.getAuthenticated().then(({ data }) => data.login);
       p.catch(() => {
@@ -1016,6 +1038,8 @@ export class GitHubForge implements Forge {
   }
 
   private async viewerIsAdmin(): Promise<boolean> {
+    // An installation is never a repository admin, and has no collaborator permission to read.
+    if (this.app) return false;
     const { data } = await this.octokit.rest.repos.getCollaboratorPermissionLevel({
       owner: this.owner,
       repo: this.repo,
