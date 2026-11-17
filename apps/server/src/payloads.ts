@@ -306,9 +306,12 @@ const DEFAULT_CLAUDE: ClaudeConfig = { plan: 'pro', fableWeeklyDropCap: 5 };
  * The payload for a leased drop. The model comes from `resolveModel` (Fable only where the declared
  * plan includes it) and is recorded on the drop as `requested_model`.
  *
- * `readToken`: the reviewer app's `contents: read` token minted for this drop (issue #237). A
- * review, crew or doctor drop clones with it in place of the read PAT, whatever `reviewReadToken`
- * says; absent, those drops get the read PAT only when the zone sets `reviewReadToken`.
+ * `readToken`: the app's `contents: read` token minted for this drop alone, by the role's app:
+ * - the reviewer app's (issue #237) for a review, crew or doctor drop, which clones with it in
+ *   place of the read PAT, whatever `reviewReadToken` says; absent, those drops get the read PAT
+ *   only when the zone sets `reviewReadToken`;
+ * - the author app's (issue #249) for an implement, heal or resolve drop, which fetches with it in
+ *   place of any PAT; absent, those drops get `githubReadToken ?? githubAuthorToken` (Ruling 1).
  */
 export function buildPayload(
   db: Db,
@@ -368,10 +371,11 @@ export function buildPayload(
   };
   // Ruling 1: the agent container only fetches (the push container pushes with a grant), so it
   // gets the read token when one is configured. In PAT mode without one it still holds the author
-  // token for its fetch; it never pushes with it.
+  // token for its fetch; it never pushes with it. In an app-author zone the lease passes the author
+  // app's per-drop read token (issue #249), and no PAT is used.
   const fetchCredentials = {
     claudeToken: secrets.claudeToken,
-    forgeToken: secrets.githubReadToken ?? secrets.githubAuthorToken,
+    forgeToken: o.readToken ?? secrets.githubReadToken ?? secrets.githubAuthorToken,
   };
   const pr = () => {
     if (drop.prNumber === null || drop.headSha === null) {
