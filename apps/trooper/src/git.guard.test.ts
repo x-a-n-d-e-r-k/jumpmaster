@@ -22,10 +22,12 @@ import {
   commitIfDirty,
   mergeBase,
   mirrorFetch,
+  prePushCheck,
   prepareBranch,
   remoteBranchSha,
   removeInstructionFiles,
   runGit,
+  setGitOutputMaxBytes,
   setSpawn,
 } from './git.js';
 
@@ -54,7 +56,10 @@ beforeAll(() => {
   tmp = mkdtempSync(join(realpathSync(tmpdir()), 'gitguard-'));
 });
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
-afterEach(() => setSpawn(null));
+afterEach(() => {
+  setSpawn(null);
+  setGitOutputMaxBytes(null);
+});
 
 /** Own origin (main: a.txt, .github/x.yml by a human), a working copy with B pushed at s0. */
 async function world(name: string) {
@@ -275,5 +280,103 @@ describe('working copy and helpers', () => {
       expect(c.cwd?.startsWith(dir) ?? false).toBe(false);
       expect(c.argv.join(' ')).not.toContain(` ${dir}`);
     }
+  });
+});
+
+describe('prePushCheck: output past the git output cap', () => {
+  const CAP = 4096;
+  const AGENT = {
+    GIT_AUTHOR_NAME: 'Jumpmaster Agent',
+    GIT_AUTHOR_EMAIL: 'jumpmaster-agent@users.noreply.github.com',
+    GIT_COMMITTER_NAME: 'Jumpmaster Agent',
+    GIT_COMMITTER_EMAIL: 'jumpmaster-agent@users.noreply.github.com',
+  };
+  const commit = (cwd: string, env: Record<string, string>, ...args: string[]) =>
+    execFileSync('git', ['commit', '-q', ...args], {
+      cwd,
+      env: { ...process.env, ...AGENT, ...env },
+    });
+
+  /**
+   * A root-style bare repo: refs/jm/base at a human base commit and refs/heads/B with whatever
+   * `build` commits on top (as the agent unless it says otherwise).
+   */
+  function scratch(name: string, build: (work: string) => void): string {
+    const base = join(tmp, name);
+    const work = join(base, 'work');
+    const bare = join(base, 'push.git');
+    mkdirSync(work, { recursive: true });
+    git(work, 'init', '-q', '-b', 'main');
+    writeFileSync(join(work, 'a.txt'), 'a\n');
+    git(work, 'add', '.');
+    commit(work, { GIT_AUTHOR_NAME: 'Human', GIT_COMMITTER_NAME: 'Human' }, '-m', 'init');
+    git(work, 'switch', '-q', '-c', B);
+    build(work);
+    git(base, 'clone', '-q', '--bare', work, bare);
+    git(bare, 'update-ref', 'refs/jm/base', 'refs/heads/main');
+    return bare;
+  }
+  const check = (bare: string) => prePushCheck(bare, B, ['.github/**'], 'refs/jm/base');
+
+  test('a name-status listing past the cap hides no protected path', async () => {
+    const bare = scratch('cap-names', (w) => {
+      // Long names that sort before .github, so the protected entry is listed last.
+      for (let i = 0; i < 40; i++) {
+        writeFileSync(join(w, `.a-${String(i).padStart(3, '0')}-${'p'.repeat(150)}`), '');
+      }
+      mkdirSync(join(w, '.github/workflows'), { recursive: true });
+      writeFileSync(join(w, '.github/workflows/ci.yml'), '');
+      git(w, 'add', '.');
+      commit(w, {}, '-m', 'feat: pad');
+    });
+    const listing = git(
+      bare,
+      'diff',
+      '--name-status',
+      '-z',
+      '-M',
+      `refs/jm/base...refs/heads/${B}`,
+    ).split('\0');
+    expect(listing.filter(Boolean).at(-1)).toBe('.github/workflows/ci.yml');
+    expect(await check(bare)).toBe('protected path .github/workflows/ci.yml');
+    setGitOutputMaxBytes(CAP);
+    expect(await check(bare)).toBe('diff too large to check');
+  });
+
+  test('only the added-lines patch past the cap', async () => {
+    const bare = scratch('cap-patch', (w) => {
+      writeFileSync(join(w, 'big.txt'), 'x'.repeat(CAP * 2));
+      git(w, 'add', '.');
+      commit(w, {}, '-m', 'feat: big');
+    });
+    expect(await check(bare)).toBeNull();
+    setGitOutputMaxBytes(CAP);
+    expect(await check(bare)).toBe('diff too large to check');
+  });
+
+  test('only the commit-message log past the cap', async () => {
+    const bare = scratch('cap-messages', (w) => {
+      commit(w, {}, '--allow-empty', '-m', `feat: long\n\n${'m'.repeat(CAP * 2)}`);
+    });
+    expect(await check(bare)).toBeNull();
+    setGitOutputMaxBytes(CAP);
+    expect(await check(bare)).toBe('diff too large to check');
+  });
+
+  test('only the commit-identity log past the cap', async () => {
+    const name = 'N'.repeat(CAP * 2);
+    const bare = scratch('cap-identities', (w) => {
+      commit(w, { GIT_AUTHOR_NAME: name }, '--allow-empty', '-m', 'feat: who');
+    });
+    expect(await check(bare)).toBe('foreign commit identity');
+    setGitOutputMaxBytes(CAP);
+    expect(await check(bare)).toBe('diff too large to check');
+  });
+
+  test('any other git failure still throws', async () => {
+    const bare = scratch('cap-missing', () => undefined);
+    await expect(prePushCheck(bare, 'no/such', ['.github/**'], 'refs/jm/base')).rejects.toThrow(
+      /git diff failed/,
+    );
   });
 });
