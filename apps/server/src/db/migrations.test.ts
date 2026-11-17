@@ -1081,6 +1081,33 @@ test('v29 lets the outbox hold comment_issue, keeping every row and the kind che
   db.close();
 });
 
+test('v34 lets the outbox hold add_blocked_by, keeping every row and the kind check', () => {
+  const f = dbAt(33, (raw) =>
+    raw
+      .prepare(
+        `INSERT INTO outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state, created_at, updated_at)
+         VALUES ('o1', 'comment:z:triage:1:2', 'comment_issue', NULL, 'z', '{}', 'done', 't', 't')`,
+      )
+      .run(),
+  );
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.prepare('SELECT op_key AS k, kind, state FROM outbox').all()).toEqual([
+    { k: 'comment:z:triage:1:2', kind: 'comment_issue', state: 'done' },
+  ]);
+  const put = db.prepare(
+    `INSERT INTO outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state, created_at, updated_at)
+     VALUES (?, ?, ?, NULL, 'z', '{}', 'pending', 't', 't')`,
+  );
+  put.run('o2', 'blocked-by:z:triage:2:300:200', 'add_blocked_by');
+  expect(
+    db.prepare('SELECT "table", "from", "to" FROM pragma_foreign_key_list(\'outbox\')').all(),
+  ).toEqual([{ table: 'work_items', from: 'work_item_id', to: 'id' }]);
+  expect(() => put.run('o3', 'x', 'remove_blocked_by')).toThrow(/CHECK/);
+  expect(() => put.run('o4', 'blocked-by:z:triage:2:300:200', 'add_blocked_by')).toThrow(/UNIQUE/);
+  db.close();
+});
+
 test('v30 adds triage_requests and lets triage be a crew drop, keeping every drop and its columns', () => {
   const f = dbAt(29, (raw) => {
     raw.exec(`INSERT INTO drop_zones (id, repo, default_branch, config_json)
@@ -1185,8 +1212,8 @@ test('v33 adds triage_requests.gate_reasons, null on every existing request', ()
   db.close();
 });
 
-test('v34 adds work_items.pr_files, null (unknown) on every existing item', () => {
-  const f = dbAt(33, (raw) => {
+test('v35 adds work_items.pr_files, null (unknown) on every existing item', () => {
+  const f = dbAt(34, (raw) => {
     raw.exec(
       `INSERT INTO drop_zones (id, repo, default_branch, config_json) VALUES ('z', 'o/r', 'main', '{}');
        INSERT INTO work_items (drop_zone_id, issue_number, title, body, author, priority, is_fix,
@@ -1194,7 +1221,7 @@ test('v34 adds work_items.pr_files, null (unknown) on every existing item', () =
     );
   });
   const db = openDb(f);
-  expect(MIGRATIONS.at(-1)?.version).toBe(34);
+  expect(MIGRATIONS.at(-1)?.version).toBe(35);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(db.prepare('SELECT issue_number AS n, pr_files AS f FROM work_items').all()).toEqual([
     { n: 7, f: null },

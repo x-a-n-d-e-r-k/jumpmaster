@@ -224,6 +224,75 @@ describe('GitHubForge', () => {
         });
       await expect(forge.listReadyIssues('agent-ready')).rejects.toThrow();
     });
+
+    test('listBlockedBy reads every link of one issue, open and closed, and counts unreadable ones', async () => {
+      nock(api)
+        .post('/graphql')
+        .reply(200, {
+          data: {
+            repository: {
+              i9: blockerEntry(3, [
+                { number: 7, state: 'OPEN' },
+                { number: 8, state: 'CLOSED' },
+                { number: 3, state: 'OPEN', repo: 'other/repo' },
+              ]),
+            },
+          },
+        });
+      expect(await forge.listBlockedBy(9)).toEqual({
+        blockers: [
+          { number: 7, repo: 'o/r', open: true },
+          { number: 8, repo: 'o/r', open: false },
+          { number: 3, repo: 'other/repo', open: true },
+        ],
+        unreadable: 1,
+      });
+    });
+
+    test('addBlockedBy sends the mutation with both node ids', async () => {
+      const bodies: { query: string; variables: Record<string, unknown> }[] = [];
+      nock(api)
+        .post('/graphql')
+        .times(2)
+        .reply(200, async (request: Request) => {
+          const body = (await request.json()) as {
+            query: string;
+            variables: Record<string, unknown>;
+          };
+          bodies.push(body);
+          return body.query.includes('mutation')
+            ? { data: { addBlockedBy: { issue: { id: 'I_12' } } } }
+            : { data: { repository: { issue: { id: 'I_12' }, blocker: { id: 'I_4' } } } };
+        });
+      await forge.addBlockedBy(12, 4);
+      expect(bodies[0]?.query).toMatch(/issue: issue\(number: 12\)/);
+      expect(bodies[0]?.query).toMatch(/blocker: issue\(number: 4\)/);
+      expect(bodies[1]?.query).toMatch(
+        /addBlockedBy\(input: \{ issueId: \$issueId, blockingIssueId: \$blockingIssueId \}\)/,
+      );
+      expect(bodies[1]?.variables).toEqual({ issueId: 'I_12', blockingIssueId: 'I_4' });
+    });
+
+    test('addBlockedBy: a link that already exists is success; any other error throws', async () => {
+      const ids = { data: { repository: { issue: { id: 'I_12' }, blocker: { id: 'I_4' } } } };
+      nock(api).post('/graphql').reply(200, ids);
+      nock(api)
+        .post('/graphql')
+        .reply(200, {
+          data: { addBlockedBy: null },
+          errors: [{ type: 'UNPROCESSABLE', message: 'Blocked by issue already exists' }],
+        });
+      await expect(forge.addBlockedBy(12, 4)).resolves.toBeUndefined();
+
+      nock(api).post('/graphql').reply(200, ids);
+      nock(api)
+        .post('/graphql')
+        .reply(200, {
+          data: { addBlockedBy: null },
+          errors: [{ type: 'FORBIDDEN', message: 'Resource not accessible by integration' }],
+        });
+      await expect(forge.addBlockedBy(12, 4)).rejects.toThrow(/not accessible/);
+    });
   });
 
   test('trusts write/maintain/admin only; 404 is untrusted, other errors throw', async () => {
@@ -1065,6 +1134,10 @@ describe('GitHubForge issue writes', () => {
     });
     nock(api).patch('/repos/o/r/issues/9', { state: 'closed' }).reply(200, issue(9));
     await f.updateIssue(9, { state: 'closed' });
+    nock(api)
+      .patch('/repos/o/r/issues/9', { state: 'closed', state_reason: 'completed' })
+      .reply(200, issue(9));
+    await f.updateIssue(9, { state: 'closed', stateReason: 'completed' });
     nock(api)
       .get('/repos/o/r/issues/9')
       .reply(200, issue(9, { state: 'closed', body: null }));

@@ -979,7 +979,8 @@ export interface OutboxRow {
     | 'update_issue'
     | 'set_labels'
     | 'create_labels'
-    | 'comment_issue';
+    | 'comment_issue'
+    | 'add_blocked_by';
   /** Null for a zone-level op (issue and label writes). */
   workItemId: number | null;
   zoneId: string;

@@ -986,11 +986,40 @@ ALTER TABLE triage_requests ADD COLUMN gate_reasons TEXT;
 `;
 
 /**
- * v34: the files an open PR changes (#291), as a JSON array of paths (renames add their previous
+ * v34: a split's parts inherit the parent's blockers (#297): the outbox may hold
+ * `add_blocked_by`. The same twelve-step rebuild of `outbox` as v29, rows and columns kept, with
+ * foreign keys off.
+ */
+const V34_SQL = `
+CREATE TABLE new_outbox (
+  id           TEXT PRIMARY KEY,
+  op_key       TEXT NOT NULL UNIQUE,
+  kind         TEXT NOT NULL CHECK (kind IN ('create_pr','post_review','merge',
+                 'create_issue','update_issue','set_labels','create_labels','comment_issue',
+                 'add_blocked_by')),
+  work_item_id INTEGER REFERENCES work_items(id),
+  zone_id      TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL,
+  state        TEXT NOT NULL CHECK (state IN ('pending','done','unknown','failed')),
+  result_json  TEXT,
+  error        TEXT,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+INSERT INTO new_outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state, result_json,
+  error, created_at, updated_at)
+SELECT id, op_key, kind, work_item_id, zone_id, payload_json, state, result_json, error,
+  created_at, updated_at FROM outbox;
+DROP TABLE outbox;
+ALTER TABLE new_outbox RENAME TO outbox;
+`;
+
+/**
+ * v35: the files an open PR changes (#291), as a JSON array of paths (renames add their previous
  * path), stored by each pass that reads the complete list. Null is unknown: never read, or a list
  * GitHub cut short. The scheduler holds back a ready item whose Placement names one of them.
  */
-const V34_SQL = `
+const V35_SQL = `
 ALTER TABLE work_items ADD COLUMN pr_files TEXT;
 `;
 
@@ -1028,7 +1057,8 @@ export const MIGRATIONS: Migration[] = [
   { version: 31, sql: V31_SQL },
   { version: 32, sql: V32_SQL, foreignKeysOff: true },
   { version: 33, sql: V33_SQL },
-  { version: 34, sql: V34_SQL },
+  { version: 34, sql: V34_SQL, foreignKeysOff: true },
+  { version: 35, sql: V35_SQL },
 ];
 
 /**
