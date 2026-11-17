@@ -723,6 +723,47 @@ describe('the cloud-init snippet', () => {
   });
 });
 
+/**
+ * The words `sh` splits `line` into when it runs it, with `curl` and `sudo` stubbed: curl prints
+ * each argument it got on its own line to stderr, and nothing runs as root or reaches the network.
+ */
+function curlArgs(line: string): string[] {
+  const r = spawnSync(
+    'sh',
+    [
+      '-c',
+      `curl() { for a; do printf '[%s]\\n' "$a" >&2; done; }; sudo() { cat >/dev/null; }; ${line}`,
+    ],
+    { encoding: 'utf8' },
+  );
+  expect(r.status, r.stderr).toBe(0);
+  return r.stderr.split('\n').filter((l) => l !== '');
+}
+
+describe('the pasted line carries the URL as one single-quoted shell word (issue #254)', () => {
+  test('installLine quotes the address', () => {
+    expect(installLine('https://h.example', 'jm_enroll_x')).toBe(
+      "curl -fsSL 'https://h.example/install/stick.sh' | sudo sh -s -- jm_enroll_x",
+    );
+  });
+
+  // Constructed directly, past validation: the quoting holds on its own.
+  const HOSTILE = "https://h.example';touch /tmp/jm-pwned-254;'$(id)`id`;x";
+
+  test('installLine: a value with a quote is still one word to sh', () => {
+    const line = installLine(HOSTILE, 'jm_enroll_x');
+    expect(spawnSync('sh', ['-n', '-c', line]).status).toBe(0);
+    expect(curlArgs(line)).toEqual(['[-fsSL]', `[${HOSTILE}/install/stick.sh]`]);
+  });
+
+  test('cloudInit: the runcmd entry is the same line, still one word to sh', () => {
+    const doc = load(cloudInit(HOSTILE, 'jm_enroll_x')) as { runcmd: string[] };
+    const line = doc.runcmd.find((c) => c.includes('/install/stick.sh')) as string;
+    expect(line).toBe(installLine(HOSTILE, 'jm_enroll_x'));
+    expect(curlArgs(line)).toEqual(['[-fsSL]', `[${HOSTILE}/install/stick.sh]`]);
+  });
+});
+
 describe('the signer', () => {
   test("the identity is the stick verifier's, and the repository comes from the source URL", () => {
     expect(identityRegexp('o/jumpmaster')).toBe(

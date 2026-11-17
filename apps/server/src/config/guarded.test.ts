@@ -238,6 +238,29 @@ describe('guarded scalar paths', () => {
     expect(classify(doc([], { mcp: { enabled: true } }), doc([])).guarded).toEqual([]);
   });
 
+  // Issue #254: the address decides which script a new machine runs as root and where its
+  // one-time code goes.
+  test('server.publicUrl is guarded when it is set, changed or cleared', () => {
+    const A = 'https://a.example.ts.net';
+    const B = 'https://b.example.ts.net';
+    const say = 'New machines will download and run the installer from this address as root';
+    const at = (u?: string) => (u === undefined ? {} : { server: { publicUrl: u } });
+    expect(classify(doc([]), doc([], at(A))).guarded).toEqual([
+      { path: 'server.publicUrl', consequence: `${say}: ${A}` },
+    ]);
+    expect(classify(doc([], at(A)), doc([], at(B))).guarded).toEqual([
+      { path: 'server.publicUrl', consequence: `${say}: ${B}` },
+    ]);
+    expect(classify(doc([], at(A)), doc([])).guarded).toEqual([
+      {
+        path: 'server.publicUrl',
+        consequence: `${say}: it is cleared, so none can be added until it is set again`,
+      },
+    ]);
+    expect(classify(doc([], at(A)), doc([], at(A))).guarded).toEqual([]);
+    expect(NOT_GUARDED.map((n) => n.path)).not.toContain('server.publicUrl');
+  });
+
   test('not-guarded settings change freely, and readyLabel carries its note', () => {
     const c = edit({}, { model: 'other', maxTurns: 5, budgets: { maxHeal: 9 }, readyLabel: 'go' });
     expect(c.guarded).toEqual([]);

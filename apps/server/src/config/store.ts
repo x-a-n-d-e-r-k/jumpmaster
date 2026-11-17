@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { auditedReadds } from '../auth/audit.js';
+import { type AuditDetail, auditedReadds } from '../auth/audit.js';
 import type { Principal } from '../auth/guard.js';
 import {
   assembleSecrets,
@@ -95,6 +95,12 @@ export type ApplyMeta = {
   returnTo?: string;
   /** Where its Cancel goes (a path on this host); home when absent. */
   cancelTo?: string;
+  /**
+   * The audit row a route writes for its own change (`server.public_url`), kept on a pending
+   * change so the confirmation page records the confirmed apply under the same action and fields.
+   * The store itself never reads it.
+   */
+  audit?: { action: string; detail: AuditDetail };
 };
 
 /** Mode switches and rollbacks: the via is the operation's own. */
