@@ -25,6 +25,7 @@ import { okProbes } from '../test/fakes.js';
 import { makeZone } from '../test/fixtures.js';
 import { addTranscriptDrop } from '../test/transcriptWorld.js';
 import { prunePass } from '../transcripts.js';
+import type { ResolvedApps } from '../vault/resolution.js';
 import { CHECK_IDS, type DoctorDeps, installDocUrl } from './checks.js';
 import { processEnv } from './run.js';
 
@@ -1740,5 +1741,64 @@ describe('transcripts.retention (issue #197)', () => {
     expect(c.fix).toContain('transcripts');
     w.deps.now = () => new Date(NOW.getTime() + 24 * 3_600_000);
     expect(one(await w.run(), 'transcripts.retention').status).toBe('info');
+  });
+});
+
+describe('forge.private-clone for an app-reviewer zone (issue #237)', () => {
+  const reviewer = {
+    source: 'vault',
+    fingerprint: 'fp',
+    entry: { appId: '9', slug: 'jm-reviewer', clientId: 'c', pem: 'unused', importedAt: 'x' },
+  } as const;
+  const apps = new Map([['octo', { author: reviewer, reviewer }]]) as unknown as ResolvedApps;
+  const appWorld = (o: { readToken?: boolean } = {}) => {
+    const w = world({
+      ...o,
+      zone: { githubApp: { repositoryId: 5, installations: { reviewer: 7 } } },
+    });
+    w.deps.resolvedApps = () => apps;
+    // The read forge on the reviewer app's token (makeReadForgeFor is app-first for this zone).
+    w.deps.readForge = () => w.read.author;
+    return w;
+  };
+
+  test('a private repository passes when the app reads the default branch, without reviewReadToken or a read token', async () => {
+    const w = appWorld();
+    w.f.state.access.author.private = true;
+    const c = one(await w.run(), 'forge.private-clone');
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('jm-reviewer');
+  });
+
+  test('a read that gets 404 fails naming the reviewer app, with the install fix and no read-token advice', async () => {
+    const w = appWorld({ readToken: true });
+    w.f.state.access.author.private = true;
+    w.read.author.failNext('listDir', { status: 404 });
+    const c = one(await w.run(), 'forge.private-clone');
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('jm-reviewer');
+    expect(c.summary).toContain('HTTP 404');
+    expect(c.fix).toContain('Install the reviewer GitHub App (jm-reviewer) on octo/demo');
+    expect(`${c.summary} ${c.fix}`).not.toMatch(/JM_GITHUB_READ_TOKEN|reviewReadToken/);
+  });
+
+  test('a public repository says drops clone with the reviewer app', async () => {
+    const w = appWorld();
+    const c = one(await w.run(), 'forge.private-clone');
+    expect(c).toMatchObject({
+      status: 'pass',
+      summary:
+        "octo/demo is public: review, crew and doctor drops clone it with the reviewer GitHub App (jm-reviewer)'s token",
+    });
+  });
+
+  test('a zone without a recorded reviewer installation keeps the PAT messages', async () => {
+    const w = world({ zone: { githubApp: { repositoryId: 5, installations: { author: 1 } } } });
+    w.deps.resolvedApps = () => apps;
+    w.f.state.access.author.private = true;
+    expect(one(await w.run(), 'forge.private-clone')).toMatchObject({
+      status: 'fail',
+      fix: expect.stringContaining('JM_GITHUB_READ_TOKEN'),
+    });
   });
 });

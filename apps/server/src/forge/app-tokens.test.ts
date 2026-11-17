@@ -66,6 +66,11 @@ function fakeGitHub() {
       const token = tokenOf(minted.length + 1);
       minted.push(token);
       return [201, { token, expires_at: new Date(clock + HOUR).toISOString() }];
+    })
+    .delete('/installation/token')
+    .reply(async (req: Request) => {
+      await record(req);
+      return [204, ''];
     });
   return {
     calls,
@@ -74,6 +79,7 @@ function fakeGitHub() {
     state,
     mints: () => calls.filter((c) => c.path.endsWith('/access_tokens')),
     lookups: () => calls.filter((c) => c.path.endsWith('/installation')),
+    revokes: () => calls.filter((c) => c.method === 'DELETE'),
   };
 }
 
@@ -343,5 +349,40 @@ describe('createAppTokenSource', () => {
     for (const s of [...gh.minted, ...gh.jwts, KEY_A]) expect(values).toContain(s);
     const text = [...errors.map(serialized), ...captured].join('\n');
     for (const s of secrets) expect(text.includes(s)).toBe(false);
+  });
+});
+
+describe('fresh tokens (issue #237)', () => {
+  test('each call mints a new token, after the same installation check, never from or into the cache', async () => {
+    const w = world();
+    const a = await w.source.fresh('main', 'reviewer', 'drop-read-reviewer');
+    const b = await w.source.fresh('main', 'reviewer', 'drop-read-reviewer');
+    expect(a.token).not.toBe(b.token);
+    expect([a.token, b.token]).toEqual(gh.minted);
+    expect(a.owner).toBe('octo');
+    expect(gh.lookups()).toHaveLength(1);
+    for (const m of gh.mints()) {
+      expect(m.path).toBe('/app/installations/77/access_tokens');
+      expect(m.body).toEqual({ repository_ids: [4242], permissions: { contents: 'read' } });
+    }
+    for (const t of gh.minted) expect(w.scrub.values()).toContain(t);
+    // The cached provider mints its own: a fresh token is never handed out again.
+    const cached = await w.source.provider('main', 'reviewer', 'drop-read-reviewer').token();
+    expect([a.token, b.token]).not.toContain(cached);
+  });
+
+  test('revoke deletes that token with the token itself', async () => {
+    const w = world();
+    const a = await w.source.fresh('main', 'reviewer', 'drop-read-reviewer');
+    await a.revoke();
+    expect(gh.revokes()).toHaveLength(1);
+    expect(gh.revokes()[0]!.authorization).toBe(`Bearer ${a.token}`);
+  });
+
+  test('a mismatched installation rejects and mints nothing', async () => {
+    const w = world();
+    gh.state.installed = { status: 200, id: 999 };
+    await rejection(w.source.fresh('main', 'reviewer', 'drop-read-reviewer'));
+    expect(gh.mints()).toEqual([]);
   });
 });

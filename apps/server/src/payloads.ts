@@ -202,6 +202,7 @@ function buildCrewPayload(
   role: CrewRole,
   secrets: Config['secrets'],
   model: string,
+  readToken: string | undefined,
 ): DropPayload {
   const stored = JSON.parse(drop.inputJson ?? 'null') as CrewInputJson | null;
   if (!stored || typeof stored.input !== 'string') {
@@ -227,9 +228,7 @@ function buildCrewPayload(
     prompt: `${templates[role]}\n\n${stored.input}`,
     credentials: {
       claudeToken: secrets.claudeToken,
-      ...(zone.reviewReadToken && secrets.githubReadToken
-        ? { forgeToken: secrets.githubReadToken }
-        : {}),
+      ...(readToken ? { forgeToken: readToken } : {}),
     },
   };
   if (role === 'triage') {
@@ -273,6 +272,7 @@ function buildDoctorPayload(
   drop: Drop,
   secrets: Config['secrets'],
   model: string,
+  readToken: string | undefined,
 ): DropPayload {
   const row = db
     .prepare('SELECT default_branch AS defaultBranch FROM drop_zones WHERE id = ?')
@@ -295,9 +295,7 @@ function buildDoctorPayload(
     ...egressField(zone),
     credentials: {
       claudeToken: secrets.claudeToken,
-      ...(zone.reviewReadToken && secrets.githubReadToken
-        ? { readToken: secrets.githubReadToken }
-        : {}),
+      ...(readToken ? { readToken } : {}),
     },
   };
 }
@@ -307,13 +305,17 @@ const DEFAULT_CLAUDE: ClaudeConfig = { plan: 'pro', fableWeeklyDropCap: 5 };
 /**
  * The payload for a leased drop. The model comes from `resolveModel` (Fable only where the declared
  * plan includes it) and is recorded on the drop as `requested_model`.
+ *
+ * `readToken`: the reviewer app's `contents: read` token minted for this drop (issue #237). A
+ * review, crew or doctor drop clones with it in place of the read PAT, whatever `reviewReadToken`
+ * says; absent, those drops get the read PAT only when the zone sets `reviewReadToken`.
  */
 export function buildPayload(
   db: Db,
   zone: DropZoneConfig,
   drop: Drop,
   secrets: Config['secrets'],
-  o: { claude?: ClaudeConfig; now?: Date } = {},
+  o: { claude?: ClaudeConfig; now?: Date; readToken?: string } = {},
 ): DropPayload {
   const model = resolveModel(
     db,
@@ -324,8 +326,13 @@ export function buildPayload(
   );
   // Records requested_model on the drop as a side effect (the Fable weekly cap counts it).
   updateDrop(db, drop.id, { requestedModel: model });
-  if (isCrewRole(drop.role)) return buildCrewPayload(db, zone, drop, drop.role, secrets, model);
-  if (drop.role === 'doctor') return buildDoctorPayload(db, zone, drop, secrets, model);
+  // The clone token of review, crew and doctor drops (never an author's).
+  const readToken =
+    o.readToken ??
+    (zone.reviewReadToken && secrets.githubReadToken ? secrets.githubReadToken : undefined);
+  if (isCrewRole(drop.role))
+    return buildCrewPayload(db, zone, drop, drop.role, secrets, model, readToken);
+  if (drop.role === 'doctor') return buildDoctorPayload(db, zone, drop, secrets, model, readToken);
   const item = listWorkItems(db, zone.id).find((w) => w.id === drop.workItemId);
   if (!item) throw new Error(`unknown work item ${drop.workItemId}`);
   const row = db
@@ -390,9 +397,7 @@ export function buildPayload(
         prompt: `${common.prompt}\n\n${authorReports(db, drop)}`,
         credentials: {
           claudeToken: secrets.claudeToken,
-          ...(zone.reviewReadToken && secrets.githubReadToken
-            ? { forgeToken: secrets.githubReadToken }
-            : {}),
+          ...(readToken ? { forgeToken: readToken } : {}),
         },
       };
     case 'heal': {

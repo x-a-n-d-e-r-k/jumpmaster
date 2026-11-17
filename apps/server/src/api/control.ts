@@ -80,6 +80,7 @@ import {
 } from '../forge/app-suspension.js';
 import { type Forge, GitHubForge } from '../forge/github.js';
 import type { GitHubAppBroker } from '../forge/github-app.js';
+import type { HeldDropTokens } from '../forge/held-tokens.js';
 import type { ImageMirror } from '../images/mirror.js';
 import { fileIntakeIssue, GoalStubSchema, IntakeIssueSchema, renderGoalStub } from '../intake.js';
 import { engageKill, expireLeases, releaseKill } from '../leases.js';
@@ -182,6 +183,10 @@ export interface ControlDeps {
     brokerFor(owner: string, role: AppRole): GitHubAppBroker | undefined;
     timeoutMs?: number;
   };
+  /** The per-drop read tokens (issue #237): the kill switch revokes the cancelled drops' at once. */
+  heldReadTokens?: Pick<HeldDropTokens, 'sweep'>;
+  /** The app entries as they resolved now, for the doctor's app-reviewer zones (issue #237). */
+  resolvedApps?: () => ResolvedApps;
 }
 
 /** A setup mode whose codes go to stderr, alone on their line (main.ts passes its own). */
@@ -697,6 +702,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
               env,
               forges: deps.doctorForgesFor ?? forgesFor,
               ...(deps.readForgeFor ? { readForge: deps.readForgeFor } : {}),
+              ...(deps.resolvedApps ? { resolvedApps: deps.resolvedApps } : {}),
               ...(configStatus ? { configStatus } : {}),
               ...(credentials ? { credentials } : {}),
               ...(deps.reach ? { reach: (u: string) => checkReach(u, deps.reach) } : {}),
@@ -1002,6 +1008,8 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       // The DB first, committed before any GitHub call: new work is refused (or allowed) at once.
       // The pause is credited to every pending push's retention on release (Ruling 12).
       const done = engaged ? engageKill(db, now()) : (releaseKill(db, now()), { cancelled: 0 });
+      // The cancelled drops' clone tokens go now, not at the next lease tick.
+      if (engaged) deps.heldReadTokens?.sweep(db);
       const today: AuditDetail = engaged ? { engaged, cancelled: done.cancelled } : { engaged };
       const installations = await suspendInstallations(req, engaged);
       if (!installations) {

@@ -8,6 +8,7 @@ import {
   FEATURES_HEADER,
   IMAGE_MIRROR_FEATURE,
   ImageFetchSchema,
+  isCrewRole,
   type LeaseSkip,
   type PushGrant,
   type PushPlan,
@@ -56,7 +57,9 @@ import {
   updateDrop,
 } from '../db/repo.js';
 import type { AppBrokers } from '../forge/app-brokers.js';
+import type { AppTokenSource } from '../forge/app-tokens.js';
 import { GitHubAppError } from '../forge/github-app.js';
+import { createHeldDropTokens, failureOf, type HeldDropTokens } from '../forge/held-tokens.js';
 import type { StickFetches } from '../images/fetches.js';
 import type { ImageMirror } from '../images/mirror.js';
 import { layoutFor } from '../images/serve.js';
@@ -66,7 +69,12 @@ import type { ForgePair } from '../outbox.js';
 import { buildPayload, egressFor, ownZoneSecrets } from '../payloads.js';
 import { applyResult, applyUsage, type ResultDeps } from '../results.js';
 import { dispatchGate, ingestRateLimit, rateLimitFromEvent } from '../usage.js';
-import { appInstallationFor, credentialFor, type ResolvedApps } from '../vault/resolution.js';
+import {
+  appInstallationFor,
+  credentialFor,
+  isAppReviewerZone,
+  type ResolvedApps,
+} from '../vault/resolution.js';
 
 const ArtifactBody = ArtifactUploadSchema.extend({ epoch: z.number() });
 
@@ -95,6 +103,17 @@ export interface StickRouteDeps {
   appBrokers?: AppBrokers;
   /** The app entries as they resolved now (`ConfigStore.resolvedApps`); absent, none. */
   resolvedApps?: () => ResolvedApps;
+  /**
+   * The server's GitHub App token source (spec §4.2, issue #237): with it, a review, crew or doctor
+   * drop of an app-reviewer zone clones with a reviewer `contents: read` token minted for the drop
+   * alone. Absent, those drops get the read PAT as before.
+   */
+  appTokens?: Pick<AppTokenSource, 'fresh'>;
+  /**
+   * Where those per-drop tokens are held until the drop ends (main.ts sweeps it on each
+   * lease-expirer tick); absent, the routes keep their own.
+   */
+  heldReadTokens?: HeldDropTokens;
 }
 
 /** `<name>@sha256:<hex>`, the only form an image is asked for by. */
@@ -164,6 +183,9 @@ const PUSHING_ROLES: readonly Role[] = ['implement', 'heal', 'resolve'];
 const PUSH_EGRESS = ['github.com'];
 
 const LIVE: readonly DropState[] = ['leased', 'running'];
+/** The roles that clone with the reviewer's read token (§4.2): never an author's. */
+const readsAsReviewer = (role: string): boolean =>
+  role === 'review' || role === 'doctor' || isCrewRole(role);
 const PENDING: readonly DropState[] = ['push_pending'];
 const STALE = { error: 'stale', stale: true } as const;
 
@@ -208,6 +230,21 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
    * token never revoked (restart, cancel, expiry) dies within its hour.
    */
   const heldTokens = new Map<string, { epoch: number; owner: string; token: string }>();
+  /** The per-drop reviewer read tokens (issue #237), likewise in memory only. */
+  const heldReadTokens = deps.heldReadTokens ?? createHeldDropTokens({ log });
+
+  /**
+   * The reviewer app's read token minted for this drop alone, held until the drop ends; undefined
+   * when the drop clones as before (not an app-reviewer zone, or a role that doesn't read as the
+   * reviewer). Rejects when the mint fails: there is no PAT fallback.
+   */
+  const dropReadToken = async (zone: DropZoneConfig, drop: Drop): Promise<string | undefined> => {
+    if (!deps.appTokens || !readsAsReviewer(drop.role)) return undefined;
+    if (!isAppReviewerZone(zone, deps.resolvedApps?.() ?? new Map())) return undefined;
+    const fresh = await deps.appTokens.fresh(zone.id, 'reviewer', 'drop-read-reviewer');
+    heldReadTokens.hold(drop.id, drop.epoch, fresh);
+    return fresh.token;
+  };
 
   /** Revokes the drop's held push token, of any epoch, without waiting and without failing. */
   const revokeHeld = (dropId: string): void => {
@@ -464,7 +501,23 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
             updateDrop(db, drop.id, { state: 'queued', stickId: null, leaseExpiresAt: null });
             return reply.code(500).send({ error: `unknown drop zone ${drop.dropZoneId}` });
           }
-          return buildPayload(db, zone, drop, config.secrets, { claude: config.claude, now: at });
+          let readToken: string | undefined;
+          try {
+            readToken = await dropReadToken(zone, drop);
+          } catch (e) {
+            // Back to the queue as an unknown zone's drop goes, unless it moved on meanwhile.
+            db.prepare(
+              `UPDATE drops SET state = 'queued', stick_id = NULL, lease_expires_at = NULL
+               WHERE id = ? AND epoch = ? AND state = 'leased'`,
+            ).run(drop.id, drop.epoch);
+            log(`minting the read token of drop ${drop.id} failed (${failureOf(e)})`);
+            return reply.code(503).send({ refused: 'mint failed', retryable: true });
+          }
+          return buildPayload(db, zone, drop, config.secrets, {
+            claude: config.claude,
+            now: at,
+            ...(readToken ? { readToken } : {}),
+          });
         }
         if (closed || Date.now() + pollMs > deadline) {
           reportSkips(reply, stick, cannot);
@@ -619,6 +672,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
           applyUsage(db, rdeps, drop, result, at);
           updateDrop(db, drop.id, { usageApplied: 1 });
         })();
+        heldReadTokens.release(drop.id);
         return { state: 'push_pending' };
       }
       updateDrop(db, drop.id, {
@@ -626,6 +680,8 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         finishedAt: at.toISOString(),
       });
       await applyResult(db, rdeps, drop.id, result, at);
+      // The drop's work is over: its clone token goes now.
+      heldReadTokens.release(drop.id);
       return reply.code(204).send();
     });
 

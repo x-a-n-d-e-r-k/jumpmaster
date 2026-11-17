@@ -3,6 +3,7 @@ import type { DropZoneConfig } from '../config.js';
 import { makeZone } from '../test/fixtures.js';
 import type { Resolved, ResolvedCredential } from './credentials.js';
 import { credentialProblems } from './problems.js';
+import type { ResolvedApps } from './resolution.js';
 import { fingerprintOf } from './vault.js';
 
 const has = (value: string, extra: Partial<ResolvedCredential> = {}): ResolvedCredential => ({
@@ -111,5 +112,38 @@ describe('credentialProblems', () => {
     const r = full({ githubAuthorToken: has('ghp_classic_value_1234') });
     for (const p of credentialProblems(zone({ identity: 'starter' }), r))
       expect(p.message).not.toContain('ghp_classic_value_1234');
+  });
+});
+
+describe('the read token in app mode (issue #237)', () => {
+  const entry = {
+    source: 'vault',
+    fingerprint: 'fp',
+    entry: { appId: '9', slug: 'rev', clientId: 'c', pem: 'unused', importedAt: '2026-11-01' },
+  } as const;
+  const owner = (z: DropZoneConfig) => z.repo.split('/')[0]!.toLowerCase();
+  const appsFor = (z: DropZoneConfig): ResolvedApps =>
+    new Map([[owner(z), { author: entry, reviewer: entry }]]);
+  const recorded = (installations: { author?: number; reviewer?: number }) => ({
+    githubApp: { repositoryId: 5, installations },
+  });
+
+  test('an app-reviewer zone with reviewReadToken and no read token is not parked', () => {
+    const z = zone({ reviewReadToken: true, ...recorded({ author: 1, reviewer: 2 }) });
+    expect(credentialProblems(z, full(), appsFor(z))).toEqual([]);
+  });
+
+  test('a PAT zone in that state still is', () => {
+    const z = zone({ reviewReadToken: true });
+    expect(credentialProblems(z, full(), new Map()).map((p) => [p.kind, p.credential])).toEqual([
+      ['missing', 'githubReadToken'],
+    ]);
+  });
+
+  test('an app zone with no recorded reviewer installation still is', () => {
+    const z = zone({ reviewReadToken: true, ...recorded({ author: 1 }) });
+    expect(credentialProblems(z, full(), appsFor(z)).map((p) => [p.kind, p.credential])).toEqual([
+      ['missing', 'githubReadToken'],
+    ]);
   });
 });

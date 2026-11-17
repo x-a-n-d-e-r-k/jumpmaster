@@ -17,6 +17,7 @@ import {
 import {
   appInstallationFor,
   credentialFor,
+  isAppReviewerZone,
   type ResolvedApps,
   resolveAppEntries,
 } from './resolution.js';
@@ -261,5 +262,43 @@ describe('appInstallationFor (spec §4.2)', () => {
     const z = zone({ identity: 'starter', githubApp });
     expect(appInstallationFor(z, 'author')).toBeUndefined();
     expect(appInstallationFor(z, 'reviewer')).toBeUndefined();
+  });
+});
+
+describe('isAppReviewerZone (issue #237)', () => {
+  const githubApp = { repositoryId: 123, installations: { author: 11, reviewer: 22 } };
+  const entry: GitHubAppEntry = {
+    appId: '9',
+    slug: 'rev',
+    clientId: 'c',
+    pem: 'unused',
+    importedAt: '2026-11-01',
+  };
+  const present = { source: 'vault', fingerprint: 'fp', entry } as const;
+  const missing = { source: 'missing' } as const;
+  const apps = (reviewer: unknown): ResolvedApps =>
+    new Map([['octo', { author: present, reviewer }]]) as unknown as ResolvedApps;
+
+  test('a two-bot zone with a reviewer app and a recorded reviewer installation is one', () => {
+    expect(isAppReviewerZone({ repo: 'octo/web', githubApp }, apps(present))).toBe(true);
+  });
+
+  test('no reviewer entry, an undecryptable one, no recorded installation or a starter zone is not', () => {
+    expect(isAppReviewerZone({ repo: 'octo/web', githubApp }, apps(missing))).toBe(false);
+    expect(
+      isAppReviewerZone(
+        { repo: 'octo/web', githubApp },
+        apps({ source: 'missing', undecryptable: true }),
+      ),
+    ).toBe(false);
+    expect(
+      isAppReviewerZone(
+        { repo: 'octo/web', githubApp: { repositoryId: 123, installations: { author: 11 } } },
+        apps(present),
+      ),
+    ).toBe(false);
+    expect(
+      isAppReviewerZone({ repo: 'octo/web', identity: 'starter', githubApp }, apps(present)),
+    ).toBe(false);
   });
 });

@@ -587,7 +587,9 @@ export function statusInputOf(o: {
         items,
         drops,
         parked: items.filter((i) => i.state === 'parked').length,
-        credentialProblems: resolved ? credentialProblems(zone, resolved) : [],
+        credentialProblems: resolved
+          ? credentialProblems(zone, resolved, store?.resolvedApps())
+          : [],
         repo: zone.repo,
         ciDeadlineMinutes: zone.ciDeadlineMinutes,
         gateCount: zone.gates.length,
