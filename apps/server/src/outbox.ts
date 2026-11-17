@@ -26,6 +26,7 @@ import { credentialFingerprint, type Resolved } from './vault/credentials.js';
 import type { AppRole, CredentialRef } from './vault/github-app-entries.js';
 import {
   appInstallationFor,
+  credentialFor,
   type ResolvedApps,
   type ZoneForAppInstallation,
 } from './vault/resolution.js';
@@ -81,6 +82,12 @@ export type PairOptions = {
    * 'author', 'push')`), minted per branch update. Absent, an app author zone has no `pusher`.
    */
   pushToken?: () => Promise<PushToken>;
+  /**
+   * The zone's author credential resolves to an app (`credentialFor(zone, 'author', apps)`), even
+   * when `refs` are absent and its forges still run on the PAT. Its push grant is then the app's
+   * narrowed `push` token: the pusher mints from `pushToken`, or there is none. Never the PAT.
+   */
+  authorUsesApp?: boolean;
   /**
    * The credentials as they resolved (`ConfigStore.resolved()` and `resolvedApps()`), for the pair
    * cache's key. `ForgePairs.for` requires them when a role uses an app, so a replaced app entry
@@ -151,7 +158,7 @@ export function pairFor(
     ? appForge('author', authorApp)
     : new GitHubForge(owner, name, secrets.githubAuthorToken, forgeOpts);
   let pusher: ForgePair['pusher'];
-  if (!authorApp) pusher = patPusher(author);
+  if (!authorApp && !opts.authorUsesApp) pusher = patPusher(author);
   else if (opts.pushToken) {
     const mint = opts.pushToken;
     const identity = author instanceof GitHubForge ? author.appIdentity() : null;
@@ -222,11 +229,14 @@ type KeyPart = string | number | null;
  */
 function refsKey(zone: PairZone, opts: PairOptions): KeyPart[][] {
   const refs = opts.refs;
-  if (!refs || zone.identity === 'starter') return [];
+  if (zone.identity === 'starter') return [];
+  // An app author's push grant differs from the PAT pair's, so it keys a pair of its own.
+  const push: KeyPart[][] = opts.authorUsesApp ? [['push:app']] : [];
+  if (!refs) return push;
   const owners = [refs.author, refs.reviewer].map((r) =>
     r.kind === 'github-app' ? r.owner : null,
   );
-  if (owners.every((o) => o === null)) return [];
+  if (owners.every((o) => o === null)) return push;
   if (!opts.credentials)
     throw new Error(
       `the pair of ${redactTokenShapes(zone.repo)} uses a GitHub App, but no resolved credentials were given for its key`,
@@ -237,7 +247,21 @@ function refsKey(zone: PairZone, opts: PairOptions): KeyPart[][] {
     const at = appInstallationFor(zone, role);
     return at ? `${at.installationId}@${at.repositoryId}` : null;
   });
-  return [owners, [credentialFingerprint(resolved, apps)], ids];
+  return [owners, [credentialFingerprint(resolved, apps)], ids, ...push];
+}
+
+/**
+ * The push-grant options the live server builds every pair with (issue #292, D1 and D5): a zone
+ * whose author resolves to an app pushes, and updates its branch, only with that app's `push`
+ * token minted from `source`; any other zone with the author PAT, as its push containers do.
+ */
+export function pushOptionsFor(
+  zone: Parameters<typeof credentialFor>[0] & { id: string },
+  apps: ResolvedApps,
+  source: Pick<AppTokenSource, 'fresh'>,
+): PairOptions {
+  if (credentialFor(zone, 'author', apps).ref.kind !== 'github-app') return {};
+  return { authorUsesApp: true, pushToken: appPushToken(source, zone.id) };
 }
 
 /**
@@ -455,11 +479,18 @@ async function lookup(forges: ForgePair, kind: OpKind, opKey: string, payload: u
     }
     case 'update_branch': {
       // A head that moved off `headSha` is the update's effect (GitHub answers 202 before the
-      // merge lands): sending again would only be refused as head_moved.
+      // merge lands) only when it holds both the old head and the base, as the forge's merge
+      // does. Any other move (an agent push) is `head_moved`: no update made, nothing charged.
+      // Either way sending again would only be refused as head_moved.
       const p = payload as UpdateBranchPayload;
       const pr = await forges.author.getPull(p.pr);
-      const moved = pr !== null && pr.headSha !== null && pr.headSha !== p.headSha;
-      return moved ? ({ kind: 'updated' } satisfies UpdateBranchResult) : null;
+      if (pr === null || pr.headSha === null || pr.headSha === p.headSha) return null;
+      const [fromHead, fromBase] = await Promise.all([
+        forges.author.compare(p.headSha, pr.headSha),
+        forges.author.compare(p.baseSha, pr.headSha),
+      ]);
+      const merged = fromHead.behindBy === 0 && fromBase.behindBy === 0;
+      return { kind: merged ? 'updated' : 'head_moved' } satisfies UpdateBranchResult;
     }
     case 'create_issue': {
       const p = payload as CreateIssuePayload;

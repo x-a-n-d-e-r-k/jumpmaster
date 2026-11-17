@@ -24,6 +24,7 @@ import {
   opMarker,
   pairFor,
   pairKey,
+  pushOptionsFor,
   resolveUnknown,
   runOp,
   sanitizeCrewText,
@@ -1016,6 +1017,74 @@ describe('pairFor by credential kind (spec §4.4)', () => {
       const pair = pairFor(twoBot, tokens, { refs: patRefs });
       const r = await runOp(db, withPusher(pair), updateOp(), t0);
       expect(r).toEqual({ state: 'done', result: { kind: 'updated' } });
+    });
+
+    test('a head moved by an agent push (not holding the base) is read back as head_moved', async () => {
+      f.state.setHead(7, 'ccc');
+      f.state.compares.set('base1...ccc', {
+        aheadBy: 1,
+        behindBy: 2,
+        baseSha: 'base1',
+        mergeBaseSha: 'base0',
+      });
+      const pair = pairFor(twoBot, tokens, { refs: patRefs });
+      const r = await runOp(db, withPusher(pair), updateOp(), t0);
+      expect(r).toEqual({ state: 'done', result: { kind: 'head_moved' } });
+      expect(calls('updateBranch')).toEqual([]);
+    });
+
+    describe('the live wiring: ForgePairs with pushOptionsFor, and no refs (main.ts)', () => {
+      const entry = { source: 'file', fingerprint: 'F1', entry: {} } as unknown as AppEntryRead;
+      const missing = { source: 'missing' } as unknown as AppEntryRead;
+      const zone = { ...twoBot, id: 'main' };
+      const appAuthor: ResolvedApps = new Map([['o', { author: entry, reviewer: missing }]]);
+      const minted = (revoke: () => Promise<void> = async () => {}) => ({
+        token: pushToken,
+        expiresAt: plus(t0, 60 * MIN),
+        owner: 'o',
+        revoke,
+      });
+      const source = (mint: () => Promise<ReturnType<typeof minted>>) => ({ fresh: vi.fn(mint) });
+
+      test('an app-author zone updates with the minted push token, never the author PAT', async () => {
+        const revoke = vi.fn(async () => {});
+        const src = source(async () => minted(revoke));
+        const pair = new ForgePairs().for(zone, tokens, pushOptionsFor(zone, appAuthor, src));
+        expectUpdate(pushToken);
+        const r = await runOp(db, withPusher(pair), updateOp(), t0);
+        expect(r).toEqual({ state: 'done', result: { kind: 'updated' } });
+        expect(src.fresh).toHaveBeenCalledExactlyOnceWith('main', 'author', 'push');
+        expect(revoke).toHaveBeenCalledOnce();
+      });
+
+      test('an app-author zone whose mint fails sends nothing: refused, not widened', async () => {
+        const src = source(async () => {
+          throw new Error('mint failed');
+        });
+        const pair = new ForgePairs().for(zone, tokens, pushOptionsFor(zone, appAuthor, src));
+        const r = await runOp(db, withPusher(pair), updateOp(), t0);
+        expect(r).toEqual({ state: 'done', result: { kind: 'no_token' } });
+        expect(src.fresh).toHaveBeenCalledOnce();
+      });
+
+      test('a PAT-author zone keeps the author PAT, and its pair key', async () => {
+        const src = source(async () => minted());
+        const opts = pushOptionsFor(zone, new Map(), src);
+        expect(opts).toEqual({});
+        const pair = new ForgePairs().for(zone, tokens, opts);
+        expectUpdate(authorPat);
+        const r = await runOp(db, withPusher(pair), updateOp(), t0);
+        expect(r).toEqual({ state: 'done', result: { kind: 'updated' } });
+        expect(src.fresh).not.toHaveBeenCalled();
+      });
+
+      test('a zone switched to an app author gets a new pair, without the PAT pusher', () => {
+        const pairs = new ForgePairs();
+        const src = source(async () => minted());
+        const before = pairs.for(zone, tokens, pushOptionsFor(zone, new Map(), src));
+        const after = pairs.for(zone, tokens, pushOptionsFor(zone, appAuthor, src));
+        expect(after).not.toBe(before);
+      });
     });
 
     test('any error fails the op, so the caller may send it again', async () => {

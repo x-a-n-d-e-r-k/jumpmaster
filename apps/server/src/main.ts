@@ -24,7 +24,7 @@ import { serverScrubSet } from './forge/scrub-set.js';
 import { imageLockPath, startImageMirror } from './images/run.js';
 import { leaseExpirer } from './leases.js';
 import { log as serverLog, setLogSource, writeLog } from './log.js';
-import { type ForgePair, ForgePairs, markPendingUnknown } from './outbox.js';
+import { type ForgePair, ForgePairs, markPendingUnknown, pushOptionsFor } from './outbox.js';
 import { promptVersions } from './payloads.js';
 import { zonePass } from './scheduler.js';
 import { readSecretFile } from './secrets.js';
@@ -150,7 +150,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     const config = live.current();
     const zone = config.dropZones.find((z) => z.id === zoneId);
     if (!zone) throw new Error(`unknown drop zone ${zoneId}`);
-    return pairs.for(zone, config.secrets, opts);
+    return pairs.for(zone, config.secrets, { ...opts, ...pushOptionsOf(zone) });
   };
   const forgesFor = (zoneId: string): ForgePair => pairOf(zoneId);
 
@@ -162,6 +162,11 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     now: Date.now,
     add: (s) => serverScrubSet.add(s),
   });
+  // A zone's push grant (issue #292, D1 and D5): an app author's narrowed `push` token, minted per
+  // write, or the author PAT in PAT mode. Never a wider token for the server's branch update.
+  function pushOptionsOf(zone: Parameters<typeof pushOptionsFor>[0]) {
+    return pushOptionsFor(zone, live.resolvedApps(), appTokens);
+  }
   // A revision that replaces, swaps, adds or drops an app entry empties the token cache (issue #266).
   live.onAppsChanged(() => appTokens.clear());
   // The push containers' tokens in app mode (§4.2, issue #224): one broker per owner and role,
@@ -263,7 +268,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
           zone,
           credentialProblems(zone, resolved, live.resolvedApps()),
           async () => {
-            const forgePair = pairs.for(zone, config.secrets);
+            const forgePair = pairs.for(zone, config.secrets, pushOptionsOf(zone));
             const synced = await syncDropZone(db, forgePair, zone, new Date());
             await reconcileZone(
               db,
