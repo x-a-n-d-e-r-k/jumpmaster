@@ -1,6 +1,12 @@
 import type { CrewLeadOutput } from '@jumpmaster/protocol';
 import { beforeEach, describe, expect, test } from 'vitest';
-import { applyPendingRulings, listBriefings, ruleBriefing } from '../briefings.js';
+import {
+  applyPendingRulings,
+  listBriefings,
+  raiseBriefing,
+  ruleBriefing,
+  withdrawBriefing,
+} from '../briefings.js';
 import { setKilled, setZoneMode } from '../db/repo.js';
 import { refreshGoals } from '../goals.js';
 import { makeZone, type ZoneWorld, zoneWorld } from '../test/fixtures.js';
@@ -200,7 +206,122 @@ describe('applyCrewActions', () => {
       ],
     });
     // A crew subject never lands on a server subject such as item:<id>.
-    expect(b?.subject).toBe('crew:item:1');
+    expect(b?.subject).toBe('crew:document-every-endpoint:item:1');
+  });
+
+  describe('one open crew briefing per objective (#246)', () => {
+    type Brief = CrewLeadOutput['briefings'][number];
+    const brief = (subject: string, decision = 'Which first?'): Brief => ({
+      subject,
+      decision,
+      why: 'w',
+      options: ['A', 'B'],
+      recommendation: '',
+      onHold: '',
+    });
+    const open = () => listBriefings(w.db, { zoneId: 'main', state: 'open' });
+    const A = 'document-every-endpoint';
+    const moveToB = async () => {
+      const [id] = apply({ objectiveDone: { key: A, why: 'merged' } }).briefings;
+      expect(ruleBriefing(w.db, id ?? -1, 'done', '', t0).ok).toBe(true);
+      await applyPendingRulings(w.db, { forges: () => w.forges, zone: () => w.zone }, 'main', t0);
+    };
+
+    test('a lead briefing is stored under the current objective, or none', async () => {
+      apply({ briefings: [brief('Order the author token')] });
+      expect(open().map((b) => b.subject)).toEqual([`crew:${A}:Order the author token`]);
+      w.f.state.files.set('main:GOAL.md', GOAL.replace(/^(### .+)$/gm, '$1 (done)'));
+      await refreshGoals(w.db, w.f.author, w.zone, 'main', plus(t0, 1000));
+      apply({ briefings: [brief('Anything left?')] });
+      expect(open().map((b) => b.subject)).toContain('crew:none:Anything left?');
+    });
+
+    test('a differently worded second briefing for the same objective is refused', () => {
+      const [first] = apply({ briefings: [brief('Order the author token')] }).briefings;
+      const r = apply({ briefings: [brief('Where next?', 'Where?')] }, plus(t0, 3600_000));
+      expect(r.briefings).toEqual([]);
+      expect(r.refused).toEqual([`briefing 1: briefing ${first} is open for objective ${A}`]);
+      expect(open()).toHaveLength(1);
+      expect(open()[0]).toMatchObject({ id: first, decision: 'Which first?' });
+    });
+
+    test('the same subject twice updates the open briefing', () => {
+      const [first] = apply({ briefings: [brief('Order it')] }).briefings;
+      const r = apply({ briefings: [brief('Order it', 'New facts: which first?')] });
+      expect(r).toMatchObject({ briefings: [first], refused: [] });
+      expect(open()).toHaveLength(1);
+      expect(open()[0]?.decision).toBe('New facts: which first?');
+    });
+
+    test('once the open briefing is ruled or withdrawn, a new one is raised', () => {
+      const [first] = apply({ briefings: [brief('Order it')] }).briefings;
+      expect(ruleBriefing(w.db, first ?? -1, 'o1', '', t0).ok).toBe(true);
+      const [second] = apply({ briefings: [brief('Where next?')] }).briefings;
+      expect(second).toBeDefined();
+      expect(second).not.toBe(first);
+      withdrawBriefing(w.db, 'main', `crew:${A}:Where next?`, t0);
+      expect(apply({ briefings: [brief('And now?')] }).briefings).toHaveLength(1);
+      expect(listBriefings(w.db, { zoneId: 'main' })).toHaveLength(3);
+    });
+
+    test('an open briefing for objective A does not block one for objective B', async () => {
+      apply({ briefings: [brief('Order it')] });
+      await moveToB();
+      const r = apply({ briefings: [brief('Where next?')] });
+      expect(r.refused).toEqual([]);
+      expect(open().map((b) => b.subject)).toEqual([
+        `crew:${A}:Order it`,
+        'crew:ship-the-cli:Where next?',
+      ]);
+    });
+
+    test('MCP and server briefings neither block nor are touched by a crew one (D5)', () => {
+      const mcp = apply({ briefings: [brief('Order it', 'mcp')] }, t0, { kind: 'mcp', tokenId: 7 });
+      const server = raiseBriefing(
+        w.db,
+        {
+          zoneId: 'main',
+          kind: 'parked',
+          subject: 'item:1',
+          decision: 'server',
+          why: 'w',
+          options: [{ id: 'x', label: 'X', effect: 'none' }],
+          source: 'server',
+        },
+        t0,
+      );
+      const crew = apply({ briefings: [brief('Order it', 'crew')] });
+      expect(crew.refused).toEqual([]);
+      const again = apply({ briefings: [brief('Other', 'mcp2')] }, t0, { kind: 'mcp', tokenId: 7 });
+      expect(again.refused).toEqual([]);
+      const byId = new Map(open().map((b) => [b.id, b]));
+      expect(byId.get(mcp.briefings[0] ?? -1)).toMatchObject({
+        subject: 'mcp:Order it',
+        decision: 'mcp',
+      });
+      expect(byId.get(server)).toMatchObject({ subject: 'item:1', decision: 'server' });
+      expect(byId.get(crew.briefings[0] ?? -1)).toMatchObject({
+        subject: `crew:${A}:Order it`,
+        decision: 'crew',
+      });
+      expect(open()).toHaveLength(4);
+    });
+
+    test("a subject naming another objective's key stays under the current one (D4)", async () => {
+      apply({ briefings: [brief('Order it')] });
+      await moveToB();
+      // Objective B is current: this cannot update or be blocked by A's open briefing.
+      const r = apply({ briefings: [brief(`${A}:Order it`, 'sneaky')] });
+      expect(r.refused).toEqual([]);
+      const subjects = open().map((b) => [b.subject, b.decision]);
+      expect(subjects).toEqual([
+        [`crew:${A}:Order it`, 'Which first?'],
+        [`crew:ship-the-cli:${A}:Order it`, 'sneaky'],
+      ]);
+      // And with B's briefing open, another B one is refused, A's still untouched.
+      const blocked = apply({ briefings: [brief('x:y')] });
+      expect(blocked.refused[0]).toMatch(/is open for objective ship-the-cli$/);
+    });
   });
 
   describe('objectiveDone', () => {

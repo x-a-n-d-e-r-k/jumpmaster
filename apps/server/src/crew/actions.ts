@@ -3,7 +3,7 @@ import { OBJECTIVE_PREFIX, raiseBriefing } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import { getZoneMode, isKilled } from '../db/repo.js';
-import { currentObjective, getGoals, objectivesDone } from '../goals.js';
+import { getGoals, zoneObjective } from '../goals.js';
 import { type CrewIssueState, insertCrewIssue, normTitle } from './store.js';
 
 /** Lower case, punctuation and repeated whitespace collapsed: how two titles are compared. */
@@ -20,10 +20,12 @@ export type ApplyReport = { filed: number[]; briefings: number[]; refused: strin
 
 /**
  * How a triage drop files through the same path as the lead: `objective` is the one objective
- * (`triage:#N`) its issues may carry besides the ladder's, and `allOrNothing` files no issue at all
- * when any is refused.
+ * (`triage:#N`) its issues may carry besides the ladder's, `allOrNothing` files no issue at all
+ * when any is refused, and `ownBriefing` raises a drop's briefing under `crew:<subject>` as given
+ * (the triage request's own, already scoped by issue number) instead of under the current
+ * objective with one open per objective.
  */
-export type ApplyOptions = { objective?: string; allOrNothing?: boolean };
+export type ApplyOptions = { objective?: string; allOrNothing?: boolean; ownBriefing?: boolean };
 
 /** Thrown inside the transaction to roll back an all-or-nothing batch with a refusal. */
 class Refused extends Error {}
@@ -95,10 +97,7 @@ function objectiveDoneBriefing(
   now: Date,
 ): number | { refused: string } {
   if (source.kind !== 'drop') return { refused: 'an MCP source cannot report it' };
-  const goals = getGoals(db, zone.id)?.parse;
-  const current = goals
-    ? currentObjective(goals, new Set(objectivesDone(db, zone.id).keys()))
-    : null;
+  const current = zoneObjective(db, zone.id);
   if (!current || current.key !== done.key) return { refused: 'not the current objective' };
   return raiseBriefing(
     db,
@@ -214,8 +213,28 @@ export function applyCrewActions(
     // An MCP briefing is the assistant's, under its own `mcp:` prefix: it can never update a
     // crew-drop briefing (`crew:`) or a server one, and Command can tell it from the crew's.
     const mcp = source.kind === 'mcp';
-    for (const b of briefs) {
-      const subject = `${mcp ? 'mcp' : 'crew'}:${b.subject}`;
+    // A lead's briefing is scoped to the current objective, with one open per objective: a run
+    // that sees the same stuck state may update it (same subject) but not ask again in new words.
+    const perObjective = !mcp && !opts.ownBriefing;
+    const objectiveKey = perObjective ? (zoneObjective(db, zone.id)?.key ?? 'none') : '';
+    const scope = `crew:${objectiveKey}:`;
+    const openForObjective = db.prepare(
+      `SELECT id, subject FROM briefings WHERE zone_id = ? AND state = 'open'
+         AND substr(subject, 1, ?) = ? ORDER BY id LIMIT 1`,
+    );
+    briefs.forEach((b, n) => {
+      const subject = mcp ? `mcp:${b.subject}` : `${perObjective ? scope : 'crew:'}${b.subject}`;
+      if (perObjective) {
+        const open = openForObjective.get(zone.id, scope.length, scope) as
+          | { id: number; subject: string }
+          | undefined;
+        if (open && open.subject !== subject) {
+          report.refused.push(
+            `briefing ${n + 1}: briefing ${open.id} is open for objective ${objectiveKey}`,
+          );
+          return;
+        }
+      }
       report.briefings.push(
         raiseBriefing(
           db,
@@ -235,7 +254,7 @@ export function applyCrewActions(
           now,
         ),
       );
-    }
+    });
     if (done) {
       const id = objectiveDoneBriefing(db, zone, done, source, now);
       if (typeof id === 'number') report.briefings.push(id);

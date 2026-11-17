@@ -253,6 +253,7 @@ function applyTriage(
       { briefings: [{ ...out.briefing, subject: `#${n} ${out.briefing.subject}` }] },
       source,
       now,
+      { ownBriefing: true },
     );
     const briefingId = report.briefings[0];
     if (briefingId === undefined) {
