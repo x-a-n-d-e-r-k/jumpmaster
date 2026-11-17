@@ -10,7 +10,7 @@ import {
   type DropResult,
   type TrooperEvent,
 } from '@jumpmaster/protocol';
-import { describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 // The real trooper's output, fed through the stick: the two ends of the event protocol.
 import { eventLines } from '../../trooper/src/events.js';
 import type { DropClient } from './client.js';
@@ -2344,6 +2344,38 @@ describe('server-hosted images (issue #141)', () => {
     });
   });
 
+  test('404 not mirrored: no heartbeat after drop-waiting, so the lease lapses', async () => {
+    vi.useFakeTimers();
+    try {
+      const d = fakeDriver([done], { present: () => false });
+      const s = serverImages({ mirrored: false });
+      const c = cosign();
+      const client = fakeClient();
+      const order: string[] = [];
+      client.heartbeat = async () => {
+        order.push('beat');
+        return 'ok';
+      };
+      const run = runDrop(p, {
+        client,
+        driver: d.driver,
+        stickId: 's1',
+        heartbeatMs: 1000,
+        trust: trust(c.cosign, s.server),
+        log: (l) => {
+          if (JSON.parse(l).event === 'drop-waiting') order.push('waiting');
+        },
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      await run;
+      expect(order).toContain('waiting');
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(order.slice(order.indexOf('waiting') + 1)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test('registry mode behaves as before: verify against the registry, then pull', async () => {
     const d = fakeDriver([done], { present: () => false });
     const s = serverImages({ source: 'registry' });
@@ -2362,5 +2394,155 @@ describe('server-hosted images (issue #141)', () => {
     expect(c.local).toEqual([]);
     expect(c.registry).toHaveLength(1);
     expect(d.images).toEqual([`pull ${r.ref}`]);
+  });
+});
+
+describe('the heartbeat while images are prepared (issue #239)', () => {
+  const HB = 1000;
+  const REF = `ghcr.io/o/jumpmaster-trooper@sha256:${'7'.repeat(64)}`;
+  const p: DropPayload = { ...payload, image: REF };
+  const done = 'JM_RESULT {"status":"completed","gates":[]}';
+  /** A driver whose pull of the trooper image takes `ms`. */
+  const slowPull = (ms: number, lines = [done]) => {
+    const d = fakeDriver(lines, { present: () => false });
+    d.driver.pullImage = async (ref) => {
+      d.order.push(`pull ${ref}`);
+      await new Promise((r) => setTimeout(r, ms));
+    };
+    return d;
+  };
+  /** A client that counts its beats and records them in `order` too. */
+  const counting = (order: string[], reply: 'ok' | 'cancel' | 'stale' = 'ok') => {
+    const client = fakeClient(reply);
+    let results = 0;
+    const c = Object.assign(client, {
+      beats: 0,
+      results: () => results,
+      async heartbeat() {
+        c.beats++;
+        order.push('beat');
+        return c.heartbeatReply;
+      },
+      async postResult(_d: string, _e: number, r: DropResult) {
+        results++;
+        order.push('result');
+        client.result = r;
+        return 'ok' as const;
+      },
+    });
+    return c;
+  };
+  const deps = (d: ReturnType<typeof fakeDriver>, client: DropClient, extra = {}) => ({
+    client,
+    driver: d.driver,
+    heartbeatMs: HB,
+    stickId: 's1',
+    allowedImages: new Set([REF]),
+    log: () => {},
+    ...extra,
+  });
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test('a slow pull longer than several intervals: heartbeats go out before the container exists', async () => {
+    const d = slowPull(5.5 * HB);
+    const client = counting(d.order);
+    const run = runDrop(p, deps(d, client));
+    await vi.advanceTimersByTimeAsync(6 * HB);
+    await run;
+    const first = d.order.indexOf('trooper');
+    expect(first).toBeGreaterThan(-1);
+    expect(d.order.slice(0, first).filter((s) => s === 'beat').length).toBeGreaterThanOrEqual(2);
+    expect(client.result).toMatchObject({ status: 'completed' });
+  });
+
+  test('a cancel answer during a slow pull: no container is created and nothing is posted', async () => {
+    const d = slowPull(5.5 * HB);
+    const client = counting(d.order, 'cancel');
+    const run = runDrop(p, deps(d, client));
+    await vi.advanceTimersByTimeAsync(6 * HB);
+    await run;
+    expect(d.started).toBeUndefined();
+    expect(client.results()).toBe(0);
+    const beats = client.beats;
+    await vi.advanceTimersByTimeAsync(5 * HB);
+    expect(client.beats).toBe(beats);
+  });
+
+  test('a stale answer during a slow pull: no container and no result', async () => {
+    const d = slowPull(5.5 * HB);
+    const client = counting(d.order, 'stale');
+    const run = runDrop(p, deps(d, client));
+    await vi.advanceTimersByTimeAsync(6 * HB);
+    await run;
+    expect(d.started).toBeUndefined();
+    expect(client.results()).toBe(0);
+  });
+
+  test('the lost-server limit during a slow pull: no container is created', async () => {
+    const d = slowPull(5.5 * HB);
+    const client = counting(d.order);
+    client.heartbeat = async () => {
+      client.beats++;
+      throw new Error('network down');
+    };
+    const run = runDrop(p, deps(d, client, { lostServerKillBeats: 3 }));
+    await vi.advanceTimersByTimeAsync(6 * HB);
+    await run;
+    expect(d.started).toBeUndefined();
+    expect(client.results()).toBe(0);
+    expect(client.beats).toBe(3);
+  });
+
+  test('a failed verification stops the heartbeat before the failure is posted, once', async () => {
+    const d = fakeDriver([done], { present: () => false });
+    const client = counting(d.order);
+    const cosign: Cosign = async () => {
+      await new Promise((r) => setTimeout(r, 3.5 * HB));
+      return { code: 10, stdout: '', stderr: 'Error: no signatures found' };
+    };
+    const trust: ImageTrust = {
+      policy: 'signed',
+      allowed: new Set(),
+      signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster'),
+      cosign,
+      cache: new VerifyCache(
+        join(mkdtempSync(join(tmpdir(), 'jm-trust-')), 'verified.json'),
+        releaseSigner('x-a-n-d-e-r-k/jumpmaster'),
+      ),
+    };
+    const run = runDrop(p, deps(d, client, { trust }));
+    await vi.advanceTimersByTimeAsync(4 * HB);
+    await run;
+    expect(client.beats).toBeGreaterThanOrEqual(2);
+    expect(client.results()).toBe(1);
+    expect(client.result).toMatchObject({ status: 'failed' });
+    expect(d.started).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(5 * HB);
+    expect(d.order.lastIndexOf('beat')).toBeLessThan(d.order.indexOf('result'));
+  });
+
+  test('a normal drop beats on one interval, not two', async () => {
+    const d = fakeDriver([], { hang: true });
+    const start = d.driver.start;
+    d.driver.start = async (o) => {
+      const h = await start(o);
+      setTimeout(() => void h.stop(0), 10.5 * HB);
+      return h;
+    };
+    const client = counting(d.order);
+    const run = runDrop(payload, deps(d, client, { allowedImages: new Set([payload.image]) }));
+    await vi.advanceTimersByTimeAsync(11 * HB);
+    await run;
+    expect(d.started).toBeDefined();
+    expect(client.beats).toBeGreaterThanOrEqual(9);
+    expect(client.beats).toBeLessThanOrEqual(11);
+    const beats = client.beats;
+    await vi.advanceTimersByTimeAsync(5 * HB);
+    expect(client.beats).toBe(beats);
   });
 });
