@@ -11,6 +11,9 @@
  *
  * The key includes the token's use (§4.2's table), so tokens narrowed to different permission sets
  * never share a slot: a `contents: read` token is never handed out for a `pull_requests: write` use.
+ * It also includes the app entry's fingerprint and the installation id (issue #266), so a replaced
+ * or swapped app entry, or a changed installation, never shares a slot with the old one: the
+ * separation holds in the key itself, not only through `invalidate`.
  */
 
 export interface TokenKey {
@@ -19,6 +22,10 @@ export interface TokenKey {
   repositoryId: number;
   /** The use the token is narrowed for: a key of `USE_PERMISSIONS` in `github-app.ts`. */
   use: string;
+  /** The app entry's fingerprint (`AppEntryRead.fingerprint`, as `credentialFingerprint` uses). */
+  appFingerprint: string;
+  /** The installation the token is minted from. */
+  installationId: number;
 }
 
 export interface MintedToken {
@@ -60,7 +67,14 @@ interface Flight {
 }
 
 const keyId = (key: TokenKey): string =>
-  JSON.stringify([key.owner, key.role, key.repositoryId, key.use]);
+  JSON.stringify([
+    key.owner,
+    key.role,
+    key.repositoryId,
+    key.use,
+    key.appFingerprint,
+    key.installationId,
+  ]);
 
 export function createTokenCache({ mint, register, now }: TokenCacheDeps): TokenCache {
   const cached = new Map<string, MintedToken>();
