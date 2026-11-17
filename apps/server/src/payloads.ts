@@ -47,10 +47,6 @@ export const promptVersions = (): Record<Role, string> => VERSIONS;
 /** A crew role's prompt template; the rendered input follows it. */
 export const crewTemplate = (role: CrewRole): string => templates[role];
 
-/**
- * Quotes heading lines and breaks up code fences and data-fence markers so text from a forge
- * cannot forge prompt structure.
- */
 /** A zone's own gate secrets: never an inherited member (a zone named toString has none). */
 export function ownZoneSecrets(
   secrets: { zoneSecrets?: Record<string, Record<string, string>> },
@@ -60,8 +56,19 @@ export function ownZoneSecrets(
   return all && Object.hasOwn(all, zoneId) ? all[zoneId] : undefined;
 }
 
+/** Zero-width and invisible format characters that could hide a heading's `#` from the test. */
+const INVISIBLE = /[\u200b-\u200d\u2060\ufeff\u00ad]/g;
+
+/**
+ * Quotes heading lines and breaks up code fences and data-fence markers so text from a forge
+ * cannot forge prompt structure. Line endings are normalised to `\n` and invisible characters
+ * removed first, so neither a bare `\r` nor a zero-width character can hide a heading. Idempotent:
+ * the zero-width spaces it inserts are removed and put back on a second pass.
+ */
 export function neutralise(text: string): string {
   return text
+    .replace(/\r\n?/g, '\n')
+    .replace(INVISIBLE, '')
     .split('\n')
     .map((line) => (/^\s*#/.test(line) ? `> ${line}` : line))
     .join('\n')
