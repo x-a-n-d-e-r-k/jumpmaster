@@ -18,6 +18,11 @@ export const PUBLIC_URL_NEEDED = 'Set the address other machines reach this serv
 export const TAILSCALE_GENERAL_NOTE =
   'Put this server behind HTTPS on an address the new machine can reach (a reverse proxy with a certificate, or a VPN such as a tailnet), then set that address here.';
 
+export const PLAIN_ORIGIN =
+  'server.publicUrl must be a plain https origin such as https://jumpmaster.example.ts.net';
+const HOSTNAME = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/;
+const IPV6_LITERAL = /^\[[0-9a-f:.]+\]$/;
+
 /** Why `raw` can't be `server.publicUrl`, or null when it can: an https origin and nothing more. */
 export function publicUrlProblem(raw: string): string | null {
   let u: URL;
@@ -35,6 +40,12 @@ export function publicUrlProblem(raw: string): string | null {
   if (u.search !== '' || raw.includes('?'))
     return `server.publicUrl must have no query (found ${u.search || '?'})`;
   if (u.hash !== '' || raw.includes('#')) return 'server.publicUrl must have no fragment';
+  // Issue #254: WHATWG hosts keep `; & $ ( ) { } , " '` and backtick, and the origin is pasted
+  // into a root shell line on a new machine. A DNS name or a bracketed IPv6 literal, a numeric
+  // port, and nothing new URL would rewrite beyond the case of the host and one trailing slash.
+  const plainHost = HOSTNAME.test(u.hostname) || IPV6_LITERAL.test(u.hostname);
+  const plainOrigin = u.origin.toLowerCase() === raw.replace(/\/$/, '').toLowerCase();
+  if (!plainHost || !/^[0-9]*$/.test(u.port) || !plainOrigin) return PLAIN_ORIGIN;
   return null;
 }
 

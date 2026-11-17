@@ -1123,9 +1123,14 @@ Doctor check: `config.listen`.
 A stick on another machine (a VPS on your tailnet, say) needs an address it reaches this server
 at: `server.publicUrl`. Set it under Settings, **Other machines** (`/settings/other-machines`), or
 with `jumpmaster ctl public-url set https://<address>`; in file mode set `JM_PUBLIC_URL` in the
-server's environment instead. It must be an absolute `https://` address with no path, query or
-fragment. Saving needs the operator login (or the token), is audited as `server.public_url` and
-applies at once, with no restart. Until it is set, nothing that needs it is offered: the pages say
+server's environment instead. It must be a plain `https://` origin: a host name (letters, digits,
+dots and hyphens) or a bracketed IPv6 address, an optional numeric port, and no path, query or
+fragment. New machines download and run the installer from it as root, so it is a
+[guarded change](operate.md#guarded-changes-and-the-confirmation-page): from the browser, setting,
+changing or clearing it goes through the confirmation page and your passphrase; `ctl` (the operator
+token) applies it directly. Either way it is audited as `server.public_url` and applies at once,
+with no restart. The install line quotes the address as one shell word:
+`curl -fsSL '<address>/install/stick.sh' | sudo sh -s -- <code>`. Until it is set, nothing that needs it is offered: the pages say
 "Set the address other machines reach this server at" and link to the section.
 
 **Check** (or `jumpmaster ctl public-url check`) makes the server fetch `<address>/healthz` from
@@ -1190,7 +1195,7 @@ The result page has two tabs:
 - **Paste on the machine.** Run this as a user who can sudo:
 
   ```sh
-  curl -fsSL https://<address>/install/stick.sh | sudo sh -s -- jm_enroll_…
+  curl -fsSL 'https://<address>/install/stick.sh' | sudo sh -s -- jm_enroll_…
   ```
 
 - **Paste when creating the VPS.** A `#cloud-config` for the provider's "user data" (cloud-init)

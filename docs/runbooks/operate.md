@@ -64,7 +64,7 @@ images before you set `gateCi: false`: an older stick drops the field, so its ga
 
 A change that lets more code run, lets a drop reach more, hands a drop a credential, or weakens a
 merge guard is guarded: a new project, an egress host added or egress loosened (`enforce` to
-`monitor` or `off`), a protected path removed, CI no longer required, `usage.stopOnOverage` turned off, `mcp.enabled` turned on, and others. From
+`monitor` or `off`), a protected path removed, CI no longer required, `usage.stopOnOverage` turned off, `mcp.enabled` turned on, `server.publicUrl` set, changed or cleared (new machines run the installer from it as root), and others. From
 the browser such a change is not applied at once: the page goes to **Confirm a guarded change**,
 which says in words what the change allows. Enter your **Operator passphrase** and press
 **Confirm**; **Cancel** goes back. The confirmation is good for five minutes and once, for that
