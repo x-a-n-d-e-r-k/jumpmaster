@@ -148,6 +148,33 @@ describe('work items', () => {
     });
     expect(listWorkItems(db, 'main')).toHaveLength(1);
   });
+
+  test('a refresh keeps updated_at, the time the state last changed (#288)', () => {
+    const parkedAt = new Date('2026-01-01T01:00:00Z');
+    setWorkItemState(db, workItemId, 'parked', 'budget exhausted: resolve-total', parkedAt);
+    const updatedAt = () =>
+      (
+        db.prepare('SELECT updated_at AS at FROM work_items WHERE id = ?').get(workItemId) as {
+          at: string;
+        }
+      ).at;
+    upsertWorkItem(
+      db,
+      {
+        dropZoneId: 'main',
+        issueNumber: 7,
+        title: 'edited',
+        body: 'b2',
+        author: 'a',
+        priority: 1,
+        isFix: false,
+        issueCreatedAt: '2026-01-01T00:00:00Z',
+      },
+      new Date('2026-01-01T02:00:00Z'),
+    );
+    expect(getWorkItem(db, workItemId)).toMatchObject({ title: 'edited', state: 'parked' });
+    expect(updatedAt()).toBe(parkedAt.toISOString());
+  });
 });
 
 describe('drops', () => {
