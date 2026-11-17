@@ -12,6 +12,7 @@ import {
   updateOutbox,
 } from './db/repo.js';
 import {
+  type AppForgeIdentity,
   type Forge,
   type ForgeError,
   GitHubForge,
@@ -43,12 +44,14 @@ export type PairRefs = { author: CredentialRef; reviewer: CredentialRef };
 
 /**
  * How a pair is built beyond its zone and tokens. `refs` absent, or naming tokens only, builds the
- * same pair as before. An app ref builds that role's forge on `appTokens(owner, role)`.
+ * same pair as before. An app ref builds that role's forge on `appTokens(owner, role)`, acting as
+ * the app `appIdentity(owner, role)` names (spec §4.3).
  */
 export type PairOptions = {
   requestTimeoutMs?: number;
   refs?: PairRefs;
   appTokens?: (owner: string, role: AppRole) => TokenProvider;
+  appIdentity?: (owner: string, role: AppRole) => { slug: string; appId: string };
   /**
    * The credentials as they resolved (`ConfigStore.resolved()` and `resolvedApps()`), for the pair
    * cache's key. `ForgePairs.for` requires them when a role uses an app, so a replaced app entry
@@ -95,7 +98,19 @@ export function pairFor(
       // The factory's error may quote a key or a token: drop it, and keep no `cause`.
       throw new Error(`could not get a GitHub App token provider for the ${role} of ${where}`);
     }
-    return new GitHubForge(owner, name, provider, forgeOpts);
+    // Without its identity an app forge would ask GET /user for its login, which an installation
+    // is refused: a missing or failing identity stops the pair here instead.
+    const noIdentity = `could not get the GitHub App identity for the ${role} of ${where}`;
+    if (!opts.appIdentity) throw new Error(noIdentity);
+    let identity: AppForgeIdentity;
+    try {
+      const { slug, appId } = opts.appIdentity(ref.owner, role);
+      identity = { kind: 'app', slug, appId };
+    } catch {
+      // The lookup's error may quote a key or a token: drop it, and keep no `cause`.
+      throw new Error(noIdentity);
+    }
+    return new GitHubForge(owner, name, provider, { ...forgeOpts, identity });
   };
   const authorApp = appRef('author');
   const reviewerApp = appRef('reviewer');
