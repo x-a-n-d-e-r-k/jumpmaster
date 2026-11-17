@@ -311,7 +311,7 @@ const grantLine = JSON.stringify({
   name: 'n',
   branch: 'jm/x',
   base: 'main',
-  lease: 'l',
+  lease: '',
   protectedPaths: [],
   secrets: [],
 });

@@ -15,7 +15,7 @@ async function ciZone(): Promise<Harness> {
 describe('forge reads a zone does not need, and reads it is denied', () => {
   test('with no CI required and no required checks, checks are never read', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     expect(h.forge.author.calls.some((c) => c.method === 'checksFor')).toBe(false);
     expect(h.queuedRoles()).toContain('review');
@@ -23,7 +23,7 @@ describe('forge reads a zone does not need, and reads it is denied', () => {
 
   test('a 403 on a needed read parks at once, naming the permission to grant', async () => {
     const h = await ciZone();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     h.forge.author.failNext('checksFor', { status: 403, message: 'Resource not accessible' });
     await h.reconcile();
     expect(getWorkItem(h.db, 1)).toMatchObject({
@@ -35,7 +35,7 @@ describe('forge reads a zone does not need, and reads it is denied', () => {
 
   test('a denied read recovers once the token can read', async () => {
     const h = await ciZone();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     h.forge.author.failNext('checksFor', { status: 403 });
     await h.reconcile();
     expect(getWorkItem(h.db, 1)?.state).toBe('parked');
@@ -45,7 +45,7 @@ describe('forge reads a zone does not need, and reads it is denied', () => {
 
   test('a transient failure still waits instead of parking', async () => {
     const h = await ciZone();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     h.forge.author.failNext('checksFor', '5xx');
     await h.reconcile();
     expect(getWorkItem(h.db, 1)?.state).toBe('pr_open');

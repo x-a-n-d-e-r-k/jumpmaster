@@ -580,7 +580,25 @@ export type DoctorResult = z.infer<typeof DoctorResultSchema>;
 /** Longest author report a result may carry; the trooper truncates to this. */
 export const REPORT_MAX_CHARS = 8000;
 
-const sha40 = z.string().regex(/^[0-9a-f]{40}$/, 'a full 40-hex commit SHA');
+/** A full lowercase 40-hex commit SHA: never a ref name or an option. */
+export const sha40 = z.string().regex(/^[0-9a-f]{40}$/, 'a full 40-hex commit SHA');
+
+/**
+ * Whether `name` is a branch name that is safe on root git's command line: what `git
+ * check-ref-format --branch` accepts, and never one that starts with `-` (an option).
+ */
+export function isSafeBranchName(name: string): boolean {
+  if (name.length === 0 || name.length > 255 || name === '@') return false;
+  // Controls, space, DEL, and git's reserved ref characters.
+  if (/[\x00-\x20\x7f~^:?*[\\]/.test(name)) return false;
+  if (/^[-/]|[/.]$|\.\.|\/\/|@\{/.test(name)) return false;
+  return name.split('/').every((c) => !c.startsWith('.') && !c.endsWith('.lock'));
+}
+
+/** A branch name that passes `isSafeBranchName`. */
+export const BranchNameSchema = z
+  .string()
+  .refine(isSafeBranchName, 'a branch name git accepts that does not start with "-"');
 
 /**
  * What the agent container asks the push container to do with its work. `final` pushes the tip it
@@ -608,7 +626,8 @@ export const DropResultSchema = z.object({
   /** The model that actually served the drop, when the trooper could tell. */
   servedModel: z.string().optional(),
   reason: z.string().optional(),
-  headSha: z.string().optional(),
+  /** The commit the run ended on. Never anything else: it can become a later push's lease. */
+  headSha: sha40.optional(),
   /** The author's report (implement/heal): each acceptance criterion, how it is met, and evidence. */
   summary: z.string().max(REPORT_MAX_CHARS).optional(),
   gates: z.array(GateResultSchema),
@@ -738,9 +757,10 @@ export const PushGrantSchema = z
     token: z.string().min(1),
     owner: z.string(),
     name: z.string(),
-    branch: z.string().min(1),
-    base: z.string(),
-    lease: z.string(),
+    branch: BranchNameSchema,
+    base: BranchNameSchema,
+    /** The SHA the remote branch must still be at, or empty for a new branch. */
+    lease: z.union([sha40, z.literal('')]),
     expectSha: sha40.optional(),
     protectedPaths: z.array(z.string()),
     secrets: z.array(z.string()),

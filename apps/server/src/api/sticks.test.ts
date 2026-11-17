@@ -413,17 +413,56 @@ describe('stick API', () => {
       method: 'POST',
       url: '/api/drops/d1/result',
       headers: bearer(stickToken),
-      payload: { epoch: 2, result: { status: 'completed', headSha: 'abc', gates: [gateOk] } },
+      payload: {
+        epoch: 2,
+        result: {
+          status: 'completed',
+          headSha: 'abc0000000000000000000000000000000000000',
+          gates: [gateOk],
+        },
+      },
     });
     expect(res.statusCode).toBe(409);
     expect(getDrop(db, 'd1')?.state).toBe('leased');
+  });
+
+  test('a result whose headSha is not a full lowercase SHA is 400 and nothing is stored (issue #262)', async () => {
+    const { db } = setup();
+    const { stickToken } = await enroll();
+    await lease(stickToken);
+    const post = (headSha: string) =>
+      app.inject({
+        method: 'POST',
+        url: '/api/drops/d1/result',
+        headers: bearer(stickToken),
+        payload: { epoch: 1, result: { status: 'interrupted', headSha, gates: [] } },
+      });
+    const drops = () => db.prepare('SELECT id, head_sha AS headSha FROM drops').all();
+    const before = drops();
+    for (const bad of ['--x', '--output=/x', 'c'.repeat(39), 'C'.repeat(40)]) {
+      const res = await post(bad);
+      expect(res.statusCode, bad).toBe(400);
+      expect(getDrop(db, 'd1')?.state, bad).toBe('leased');
+      expect(getDrop(db, 'd1')?.resultJson, bad).toBeNull();
+      // No replacement drop carries it.
+      expect(drops(), bad).toEqual(before);
+    }
+    // The boundary: 40 lowercase hex is a SHA, and the replacement resumes from it.
+    const ok = await post('c'.repeat(40));
+    expect(ok.statusCode).toBe(204);
+    expect(getDrop(db, 'd1')?.state).not.toBe('leased');
+    expect(drops()).toContainEqual(expect.objectContaining({ headSha: 'c'.repeat(40) }));
   });
 
   test('accepted result stores result_json, finishes the drop and opens a PR', async () => {
     const { db, forge } = setup();
     const { stickToken } = await enroll();
     await lease(stickToken);
-    const result = { status: 'completed', headSha: 'abc', gates: [gateOk] };
+    const result = {
+      status: 'completed',
+      headSha: 'abc0000000000000000000000000000000000000',
+      gates: [gateOk],
+    };
     const res = await app.inject({
       method: 'POST',
       url: '/api/drops/d1/result',
@@ -457,12 +496,19 @@ describe('stick API', () => {
       method: 'POST',
       url: '/api/drops/d1/result',
       headers: bearer(stickToken),
-      payload: { epoch: 1, result: { status: 'completed', headSha: 'abc', gates: [] } },
+      payload: {
+        epoch: 1,
+        result: {
+          status: 'completed',
+          headSha: 'abc0000000000000000000000000000000000000',
+          gates: [],
+        },
+      },
     });
     expect(res.statusCode).toBe(204);
     expect(forgeZones).toEqual(['main']);
     expect(getDrop(db, 'd1')?.finishedAt).toBe(clock.toISOString());
-    expect(getOutbox(db, 'pr:1:abc')).toMatchObject({
+    expect(getOutbox(db, 'pr:1:abc0000000000000000000000000000000000000')).toMatchObject({
       state: 'done',
       createdAt: clock.toISOString(),
     });

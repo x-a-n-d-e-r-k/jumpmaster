@@ -32,7 +32,7 @@ async function world() {
     dataDir,
     zone: { protectedPaths: ['.github/**', 'CODEOWNERS', 'GOAL.md'] },
   });
-  await toPrOpen(h, 'sha1');
+  await toPrOpen(h, '7368613100000000000000000000000000000000');
   await h.reconcile();
   const { dropId } = await h.lease();
   const artifact = storeArtifact(h.db, dataDir, dropId, {

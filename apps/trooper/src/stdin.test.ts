@@ -8,7 +8,7 @@ const grant = {
   name: 'n',
   branch: 'jm/x',
   base: 'main',
-  lease: 'l',
+  lease: '',
   protectedPaths: [],
   secrets: [],
 };

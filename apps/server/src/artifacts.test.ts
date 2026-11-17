@@ -22,7 +22,7 @@ const upload = (epoch: number, over: Record<string, unknown> = {}) => ({
 async function reviewing(zone = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'jm-art-'));
   const h = await harness({ zone: { verification: [rule], ...zone }, dataDir });
-  await toPrOpen(h, 'sha1');
+  await toPrOpen(h, '7368613100000000000000000000000000000000');
   await h.reconcile();
   const { dropId, epoch } = await h.lease();
   const post = (body: unknown, headers = h.stickHeaders()) =>

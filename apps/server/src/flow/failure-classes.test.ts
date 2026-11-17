@@ -78,7 +78,7 @@ async function toHealQueued(h: Harness, sha: string): Promise<void> {
 describe('§16 outbox and merge', () => {
   test('5xx after a successful merge: exactly one merge; outcome read back', async () => {
     const h = await harness();
-    await toApproved(h, 'sha1');
+    await toApproved(h, '7368613100000000000000000000000000000000');
     h.forge.author.failNext('merge', '5xx-after-success');
     await h.reconcile();
     await h.reconcile();
@@ -89,16 +89,25 @@ describe('§16 outbox and merge', () => {
 
   test('server restart with a pending merge: pending row read back after restart; no second merge', async () => {
     const h = await harness();
-    await toApproved(h, 'sha1');
+    await toApproved(h, '7368613100000000000000000000000000000000');
     // The process died after the forge merged but before the row left `pending`.
-    await h.forge.author.merge(1, { sha: 'sha1', title: 'Issue 1', message: 'Closes #1' });
+    await h.forge.author.merge(1, {
+      sha: '7368613100000000000000000000000000000000',
+      title: 'Issue 1',
+      message: 'Closes #1',
+    });
     insertOutbox(h.db, {
       id: 'op-m',
-      opKey: opKeys.merge(1, 'sha1'),
+      opKey: opKeys.merge(1, '7368613100000000000000000000000000000000'),
       kind: 'merge',
       workItemId: 1,
       zoneId: 'main',
-      payloadJson: JSON.stringify({ pr: 1, sha: 'sha1', title: 'Issue 1', message: 'Closes #1' }),
+      payloadJson: JSON.stringify({
+        pr: 1,
+        sha: '7368613100000000000000000000000000000000',
+        title: 'Issue 1',
+        message: 'Closes #1',
+      }),
       state: 'pending',
       createdAt: h.now().toISOString(),
     });
@@ -110,7 +119,7 @@ describe('§16 outbox and merge', () => {
 
   test('merge rejected (405): parks merge rejected; never re-merges', async () => {
     const h = await harness();
-    await toApproved(h, 'sha1');
+    await toApproved(h, '7368613100000000000000000000000000000000');
     h.forge.author.failNext('merge', { status: 405, message: 'not mergeable' });
     await h.reconcile();
     await h.reconcile();
@@ -122,7 +131,7 @@ describe('§16 outbox and merge', () => {
 
   test('outbox never resolves: unknown merge row fails at the deadline, then parks', async () => {
     const h = await harness();
-    await toApproved(h, 'sha1');
+    await toApproved(h, '7368613100000000000000000000000000000000');
     h.forge.author.failNext('merge', 'throw');
     await h.reconcile();
     expect(listOutbox(h.db, ['unknown'])).toHaveLength(1);
@@ -138,14 +147,14 @@ describe('§16 outbox and merge', () => {
 
   test('restore from an older backup: adopts unknown PRs; nothing merged twice', async () => {
     const h = await harness();
-    await toApproved(h, 'sha1');
+    await toApproved(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     await h.reconcile();
     expect(h.forge.state.merges).toHaveLength(1);
     h.forge.state.addPull({
       number: 5,
       headRef: 'agent/issue-1',
-      headSha: 'sha9',
+      headSha: '7368613900000000000000000000000000000000',
       author: 'author-bot',
     });
     h.forge.state.pulls.get(5)!.state = 'closed';
@@ -167,16 +176,28 @@ describe('§16 drops and results', () => {
     const second = await h.lease();
     expect(second.payload.role).toBe('implement');
     expect(second.dropId).not.toBe(first.dropId);
-    h.forge.state.branches.set('agent/issue-1', 'sha1');
-    expect(await h.postResult(first.dropId, first.epoch, implemented('sha1'))).toBe(409);
-    expect(await h.postResult(second.dropId, second.epoch, implemented('sha1'))).toBe(204);
+    h.forge.state.branches.set('agent/issue-1', '7368613100000000000000000000000000000000');
+    expect(
+      await h.postResult(
+        first.dropId,
+        first.epoch,
+        implemented('7368613100000000000000000000000000000000'),
+      ),
+    ).toBe(409);
+    expect(
+      await h.postResult(
+        second.dropId,
+        second.epoch,
+        implemented('7368613100000000000000000000000000000000'),
+      ),
+    ).toBe(204);
     expect(h.forge.state.pulls.size).toBe(1);
     expect(count(h, 'findOrCreatePullRequest', 'author')).toBe(1);
   });
 
   test('duplicate result post: one verdict, one review', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     const { dropId, epoch } = await h.lease();
     expect(await h.postResult(dropId, epoch, reviewed(approve))).toBe(204);
@@ -198,19 +219,19 @@ describe('§16 drops and results', () => {
   test("Jumpmaster's own comments and reviews never reset or change a fingerprint", async () => {
     const h = await harness();
     h.forge.state.trusted.push('author-bot', 'reviewer-bot');
-    await toHealQueued(h, 'sha1');
+    await toHealQueued(h, '7368613100000000000000000000000000000000');
     const before = getAttempts(h.db, 1, 'heal');
     h.forge.state.review({
       author: 'author-bot',
       state: 'CHANGES_REQUESTED',
       body: 'bot',
-      commitId: 'sha1',
+      commitId: '7368613100000000000000000000000000000000',
     });
     h.forge.state.review({
       author: 'reviewer-bot',
       state: 'COMMENTED',
       body: 'note',
-      commitId: 'sha1',
+      commitId: '7368613100000000000000000000000000000000',
     });
     await h.finishDrop('heal', { status: 'no_changes', gates: [] });
     await h.reconcile();
@@ -222,11 +243,27 @@ describe('§16 drops and results', () => {
   test('implement interrupted: resumes with resume:true; three interruptions park', async () => {
     const h = await harness();
     await h.reconcile();
-    await h.finishDrop('implement', { status: 'interrupted', headSha: 'ck1', gates: [] });
+    await h.finishDrop('implement', {
+      status: 'interrupted',
+      headSha: '636b310000000000000000000000000000000000',
+      gates: [],
+    });
     const { payload, dropId, epoch } = await h.lease();
-    expect(payload).toMatchObject({ role: 'implement', resume: true, resumeSha: 'ck1' });
-    await h.postResult(dropId, epoch, { status: 'interrupted', headSha: 'ck2', gates: [] });
-    await h.finishDrop('implement', { status: 'interrupted', headSha: 'ck3', gates: [] });
+    expect(payload).toMatchObject({
+      role: 'implement',
+      resume: true,
+      resumeSha: '636b310000000000000000000000000000000000',
+    });
+    await h.postResult(dropId, epoch, {
+      status: 'interrupted',
+      headSha: '636b320000000000000000000000000000000000',
+      gates: [],
+    });
+    await h.finishDrop('implement', {
+      status: 'interrupted',
+      headSha: '636b330000000000000000000000000000000000',
+      gates: [],
+    });
     expect(item(h)).toMatchObject({ state: 'parked', reason: 'budget exhausted: resume' });
   });
 
@@ -234,14 +271,14 @@ describe('§16 drops and results', () => {
     const h = await harness();
     await Promise.all([h.reconcile(), h.reconcile(), h.reconcile()]);
     expect(h.queuedRoles()).toEqual(['implement']);
-    await toPrOpen(await harness(), 'x'); // sanity: harness still usable
+    await toPrOpen(await harness(), 'f'.repeat(40)); // sanity: harness still usable
   });
 
   test('dead in_flight: create_pr 5xx with no PR: item resumes after the row fails', async () => {
     const h = await harness();
     await h.reconcile();
     h.forge.author.failNext('findOrCreatePullRequest', '5xx');
-    await h.finishDrop('implement', implemented('sha1'));
+    await h.finishDrop('implement', implemented('7368613100000000000000000000000000000000'));
     expect(item(h).state).toBe('in_flight');
     await h.reconcile();
     expect(h.queuedRoles()).toEqual([]);
@@ -249,15 +286,19 @@ describe('§16 drops and results', () => {
     await h.reconcile();
     await h.reconcile();
     const { payload } = await h.lease();
-    expect(payload).toMatchObject({ role: 'implement', resume: true, resumeSha: 'sha1' });
+    expect(payload).toMatchObject({
+      role: 'implement',
+      resume: true,
+      resumeSha: '7368613100000000000000000000000000000000',
+    });
   });
 });
 
 describe('§16 closed issues', () => {
   test('landed: closed issue with the work on base is done', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
-    h.forge.state.compares.set('main...sha1', {
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
+    h.forge.state.compares.set('main...7368613100000000000000000000000000000000', {
       aheadBy: 0,
       behindBy: 0,
       baseSha: 'b',
@@ -271,7 +312,7 @@ describe('§16 closed issues', () => {
 
   test('not landed: parks issue closed', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     h.forge.state.closeIssue(1);
     await h.reconcile();
     expect(item(h)).toMatchObject({ state: 'parked', reason: 'issue closed' });
@@ -279,8 +320,8 @@ describe('§16 closed issues', () => {
 
   test('conflicted: parks issue closed without a resolve', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
-    h.forge.state.compares.set('main...sha1', {
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
+    h.forge.state.compares.set('main...7368613100000000000000000000000000000000', {
       aheadBy: 1,
       behindBy: 3,
       baseSha: 'b2',
@@ -294,7 +335,7 @@ describe('§16 closed issues', () => {
 
   test('branch gone: parks issue closed', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     h.forge.state.branches.delete('agent/issue-1');
     h.forge.state.closeIssue(1);
     await h.reconcile();
@@ -303,7 +344,7 @@ describe('§16 closed issues', () => {
 
   test('never blocks dispatch of another ready item', async () => {
     const h = await harness({ issues: [issue(1), issue(2)] });
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     h.forge.state.closeIssue(1);
     await h.reconcile();
     expect(item(h, 1).state).toBe('parked');
@@ -315,14 +356,14 @@ describe('§16 closed issues', () => {
 describe('§16 reviews and heals', () => {
   test("stale CHANGES_REQUESTED on an old SHA: one review, then park 'human block stands'; no merge call", async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     h.forge.state.review({
       author: 'alice',
       state: 'CHANGES_REQUESTED',
       body: 'no',
-      commitId: 'sha1',
+      commitId: '7368613100000000000000000000000000000000',
     });
-    h.forge.state.setHead(1, 'sha2');
+    h.forge.state.setHead(1, '7368613200000000000000000000000000000000');
     await h.reconcile();
     expect(h.queuedRoles()).toEqual(['review']);
     await h.finishDrop('review', reviewed(approve));
@@ -337,7 +378,7 @@ describe('§16 reviews and heals', () => {
 
   test('heal that pushes nothing: never reaches approval; parks on the second identical try', async () => {
     const h = await harness();
-    await toHealQueued(h, 'sha1');
+    await toHealQueued(h, '7368613100000000000000000000000000000000');
     for (let i = 0; i < h.zone.budgets.maxHeal + 2 && item(h).state === 'pr_open'; i++) {
       if (h.queuedRoles().includes('heal'))
         await h.finishDrop('heal', { status: 'no_changes', gates: [] });
@@ -358,7 +399,7 @@ describe('§16 reviews and heals', () => {
   test('waiver: marking a criterion (manual) and adding the retry label reviews the same head afresh', async () => {
     const issues = [{ ...issue(1), body: '- [ ] works in a browser' }];
     const h = await harness({ issues });
-    await toHealQueued(h, 'sha1');
+    await toHealQueued(h, '7368613100000000000000000000000000000000');
     await h.finishDrop('heal', { status: 'no_changes', gates: [] });
     await h.reconcile();
     await h.finishDrop('heal', { status: 'no_changes', gates: [] });
@@ -373,13 +414,16 @@ describe('§16 reviews and heals', () => {
     await h.reconcile();
     expect(h.queuedRoles()).toEqual(['review']);
     const { payload } = await h.lease();
-    expect(payload).toMatchObject({ role: 'review', pr: { headSha: 'sha1' } });
+    expect(payload).toMatchObject({
+      role: 'review',
+      pr: { headSha: '7368613100000000000000000000000000000000' },
+    });
     expect(payload.prompt).toContain('works in a browser (manual)');
   });
 
   test('a heal that answers review findings with evidence gets re-reviews, bounded by the review budget', async () => {
     const h = await harness();
-    await toHealQueued(h, 'sha1');
+    await toHealQueued(h, '7368613100000000000000000000000000000000');
     for (let i = 0; i < 10 && item(h).state === 'pr_open'; i++) {
       const role = h.queuedRoles()[0];
       if (role === 'heal') {
@@ -404,7 +448,7 @@ describe('§16 reviews and heals', () => {
 
   test('a failed PR read during a retry skips the item without consuming the label', async () => {
     const h = await harness();
-    await toHealQueued(h, 'sha1');
+    await toHealQueued(h, '7368613100000000000000000000000000000000');
     await h.finishDrop('heal', { status: 'no_changes', gates: [] });
     await h.reconcile();
     await h.finishDrop('heal', { status: 'no_changes', gates: [] });
@@ -425,11 +469,11 @@ describe('§16 reviews and heals', () => {
 
   test('the retry label never leaves a stale approve standing alone on a request-changes head', async () => {
     const h = await harness();
-    await toHealQueued(h, 'sha1');
+    await toHealQueued(h, '7368613100000000000000000000000000000000');
     insertVerdict(h.db, {
       id: 'v-late',
       workItemId: 1,
-      headSha: 'sha1',
+      headSha: '7368613100000000000000000000000000000000',
       decision: 'approve',
       forced: false,
       summary: 'ok now',
@@ -451,11 +495,11 @@ describe('§16 reviews and heals', () => {
 
   test('reviewer blocked SHA X, then the same SHA is approved: never merges', async () => {
     const h = await harness();
-    await toHealQueued(h, 'sha1');
+    await toHealQueued(h, '7368613100000000000000000000000000000000');
     insertVerdict(h.db, {
       id: 'v-late',
       workItemId: 1,
-      headSha: 'sha1',
+      headSha: '7368613100000000000000000000000000000000',
       decision: 'approve',
       forced: false,
       summary: 'ok now',
@@ -472,10 +516,10 @@ describe('§16 reviews and heals', () => {
 
   test('head moved under review: re-decided, not parked', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     const { dropId, epoch } = await h.lease();
-    h.forge.state.setHead(1, 'sha2');
+    h.forge.state.setHead(1, '7368613200000000000000000000000000000000');
     await h.postResult(dropId, epoch, reviewed(approve));
     await h.reconcile();
     expect(item(h).state).toBe('pr_open');
@@ -485,8 +529,8 @@ describe('§16 reviews and heals', () => {
 
   test('head moved under heal: re-decided, not parked', async () => {
     const h = await harness();
-    await toHealQueued(h, 'sha1');
-    h.forge.state.setHead(1, 'sha2');
+    await toHealQueued(h, '7368613100000000000000000000000000000000');
+    h.forge.state.setHead(1, '7368613200000000000000000000000000000000');
     await h.finishDrop('heal', {
       status: 'failed',
       reason: 'head moved: expected sha1 got sha2',
@@ -499,32 +543,34 @@ describe('§16 reviews and heals', () => {
 
   test('untrusted or bot CHANGES_REQUESTED is ignored', async () => {
     const h = await harness();
-    await toApproved(h, 'sha1');
+    await toApproved(h, '7368613100000000000000000000000000000000');
     h.forge.state.review({
       author: 'mallory',
       state: 'CHANGES_REQUESTED',
       body: 'x',
-      commitId: 'sha1',
+      commitId: '7368613100000000000000000000000000000000',
     });
     h.forge.state.review({
       author: 'author-bot',
       state: 'CHANGES_REQUESTED',
       body: 'y',
-      commitId: 'sha1',
+      commitId: '7368613100000000000000000000000000000000',
     });
     await h.reconcile();
     await h.reconcile();
-    expect(h.forge.state.merges.map((m) => m.sha)).toEqual(['sha1']);
+    expect(h.forge.state.merges.map((m) => m.sha)).toEqual([
+      '7368613100000000000000000000000000000000',
+    ]);
   });
 
   test('a failed trust lookup waits instead of dropping the block; never merges', async () => {
     const h = await harness();
-    await toApproved(h, 'sha1');
+    await toApproved(h, '7368613100000000000000000000000000000000');
     h.forge.state.review({
       author: 'alice',
       state: 'CHANGES_REQUESTED',
       body: 'x',
-      commitId: 'sha1',
+      commitId: '7368613100000000000000000000000000000000',
     });
     const real = h.forge.author.isTrusted;
     let down = true;
@@ -550,7 +596,7 @@ describe('§16 hostile PR content', () => {
 
   async function withFiles(paths: string[]): Promise<Harness> {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     h.forge.state.pullFiles.set(1, { files: paths.map((path) => ({ path })), complete: true });
     return h;
   }
@@ -568,7 +614,7 @@ describe('§16 hostile PR content', () => {
   test("rewriting the test script parks 'gate script changed'", async () => {
     const h = await withFiles(['package.json']);
     h.forge.state.files.set('base0:package.json', pkg('vitest run'));
-    h.forge.state.files.set('sha1:package.json', pkg('true'));
+    h.forge.state.files.set('7368613100000000000000000000000000000000:package.json', pkg('true'));
     await h.reconcile();
     expect(item(h)).toMatchObject({
       state: 'parked',
@@ -580,10 +626,17 @@ describe('§16 hostile PR content', () => {
     const h = await withFiles(['package.json']);
     h.forge.state.maintainers = ['alice'];
     h.forge.state.files.set('base0:package.json', pkg('vitest run'));
-    h.forge.state.files.set('sha1:package.json', pkg('vitest run --bail'));
+    h.forge.state.files.set(
+      '7368613100000000000000000000000000000000:package.json',
+      pkg('vitest run --bail'),
+    );
     await h.reconcile();
     expect(item(h).state).toBe('parked');
-    h.forge.state.review({ author: 'alice', state: 'APPROVED', commitId: 'sha1' });
+    h.forge.state.review({
+      author: 'alice',
+      state: 'APPROVED',
+      commitId: '7368613100000000000000000000000000000000',
+    });
     await h.sync();
     expect(item(h).state).toBe('pr_open');
     await h.reconcile();
@@ -593,10 +646,17 @@ describe('§16 hostile PR content', () => {
   test('a maintainer approval of an older head does not lift a gate park', async () => {
     const h = await withFiles(['package.json']);
     h.forge.state.maintainers = ['alice'];
-    h.forge.state.review({ author: 'alice', state: 'APPROVED', commitId: 'sha1' });
-    h.forge.state.setHead(1, 'sha2');
+    h.forge.state.review({
+      author: 'alice',
+      state: 'APPROVED',
+      commitId: '7368613100000000000000000000000000000000',
+    });
+    h.forge.state.setHead(1, '7368613200000000000000000000000000000000');
     h.forge.state.files.set('base0:package.json', pkg('vitest run'));
-    h.forge.state.files.set('sha2:package.json', pkg('vitest run --bail'));
+    h.forge.state.files.set(
+      '7368613200000000000000000000000000000000:package.json',
+      pkg('vitest run --bail'),
+    );
     await h.reconcile();
     await h.sync();
     expect(item(h)).toMatchObject({
@@ -610,7 +670,10 @@ describe('§16 hostile PR content', () => {
     const h = await withFiles(['package.json']);
     h.forge.state.maintainers = ['alice'];
     h.forge.state.files.set('base0:package.json', pkg('vitest run'));
-    h.forge.state.files.set('sha1:package.json', pkg('vitest run --bail'));
+    h.forge.state.files.set(
+      '7368613100000000000000000000000000000000:package.json',
+      pkg('vitest run --bail'),
+    );
     await h.reconcile();
     expect(item(h).state).toBe('parked');
     const snapshotReads = () => count(h, 'compare') + count(h, 'listPullFiles');
@@ -621,7 +684,11 @@ describe('§16 hostile PR content', () => {
     expect(snapshotReads()).toBe(before.snap);
     expect(item(h).state).toBe('parked');
     // A new review is re-decided at once.
-    h.forge.state.review({ author: 'alice', state: 'APPROVED', commitId: 'sha1' });
+    h.forge.state.review({
+      author: 'alice',
+      state: 'APPROVED',
+      commitId: '7368613100000000000000000000000000000000',
+    });
     await h.sync();
     expect(snapshotReads()).toBeGreaterThan(before.snap);
     expect(item(h).state).toBe('pr_open');
@@ -630,7 +697,10 @@ describe('§16 hostile PR content', () => {
   test('an unchanged gate park is re-decided at most hourly', async () => {
     const h = await withFiles(['package.json']);
     h.forge.state.files.set('base0:package.json', pkg('vitest run'));
-    h.forge.state.files.set('sha1:package.json', pkg('vitest run --bail'));
+    h.forge.state.files.set(
+      '7368613100000000000000000000000000000000:package.json',
+      pkg('vitest run --bail'),
+    );
     await h.reconcile();
     const snapshotReads = () => count(h, 'compare') + count(h, 'listPullFiles');
     const before = snapshotReads();
@@ -646,7 +716,11 @@ describe('§16 hostile PR content', () => {
   test('a maintainer approval does not lift a protected-path park', async () => {
     const h = await withFiles(['pnpm-workspace.yaml']);
     h.forge.state.maintainers = ['alice'];
-    h.forge.state.review({ author: 'alice', state: 'APPROVED', commitId: 'sha1' });
+    h.forge.state.review({
+      author: 'alice',
+      state: 'APPROVED',
+      commitId: '7368613100000000000000000000000000000000',
+    });
     await h.reconcile();
     await h.sync();
     expect(item(h)).toMatchObject({
@@ -658,9 +732,12 @@ describe('§16 hostile PR content', () => {
   test("an npm: alias for the runner parks 'gate tool changed'", async () => {
     const h = await withFiles(['package.json', 'package-lock.json']);
     h.forge.state.files.set('base0:package.json', pkg('vitest run'));
-    h.forge.state.files.set('sha1:package.json', pkg('vitest run', { vitest: 'npm:evil@1.0.0' }));
+    h.forge.state.files.set(
+      '7368613100000000000000000000000000000000:package.json',
+      pkg('vitest run', { vitest: 'npm:evil@1.0.0' }),
+    );
     h.forge.state.files.set('base0:package-lock.json', lock);
-    h.forge.state.files.set('sha1:package-lock.json', lock);
+    h.forge.state.files.set('7368613100000000000000000000000000000000:package-lock.json', lock);
     await h.reconcile();
     expect(item(h).state).toBe('parked');
     expect(item(h).reason).toMatch(/^gate tool changed: .*vitest/);
@@ -669,9 +746,12 @@ describe('§16 hostile PR content', () => {
   test('base changing a gate script does not park a behind PR', async () => {
     const h = await withFiles(['src/a.ts']);
     h.forge.state.files.set('base0:package.json', pkg('vitest run'));
-    h.forge.state.files.set('sha1:package.json', pkg('vitest run'));
+    h.forge.state.files.set(
+      '7368613100000000000000000000000000000000:package.json',
+      pkg('vitest run'),
+    );
     h.forge.state.files.set('b2:package.json', pkg('vitest run --coverage'));
-    h.forge.state.compares.set('main...sha1', {
+    h.forge.state.compares.set('main...7368613100000000000000000000000000000000', {
       aheadBy: 1,
       behindBy: 1,
       baseSha: 'b2',
@@ -686,24 +766,30 @@ describe('§16 hostile PR content', () => {
 describe('§16 PR lifecycle edges', () => {
   test('closed PR, then retry: retry resumes the branch and opens a new PR (create_pr keyed by head)', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     h.forge.state.close(1);
     await h.reconcile();
     expect(item(h)).toMatchObject({ state: 'parked', reason: 'pr closed' });
     h.forge.state.setLabels(1, ['agent-ready', 'agent-retry']);
     await h.reconcile();
     const { payload, dropId, epoch } = await h.lease();
-    expect(payload).toMatchObject({ role: 'implement', resume: true, resumeSha: 'sha1' });
-    h.forge.state.branches.set('agent/issue-1', 'sha2');
-    await h.postResult(dropId, epoch, implemented('sha2'));
+    expect(payload).toMatchObject({
+      role: 'implement',
+      resume: true,
+      resumeSha: '7368613100000000000000000000000000000000',
+    });
+    h.forge.state.branches.set('agent/issue-1', '7368613200000000000000000000000000000000');
+    await h.postResult(dropId, epoch, implemented('7368613200000000000000000000000000000000'));
     expect(item(h).state).toBe('pr_open');
     expect([...h.forge.state.pulls.values()].filter((p) => p.state === 'open')).toHaveLength(1);
-    expect(listOutbox(h.db, ['done']).map((o) => o.opKey)).toContain(opKeys.pr(1, 'sha2'));
+    expect(listOutbox(h.db, ['done']).map((o) => o.opKey)).toContain(
+      opKeys.pr(1, '7368613200000000000000000000000000000000'),
+    );
   });
 
   test("a retried PR at the same SHA is reviewed afresh, never merged on the closed PR's approval", async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     const review = await h.lease();
     h.forge.state.close(1); // a human closes PR 1 while its approval is being posted
@@ -712,7 +798,7 @@ describe('§16 PR lifecycle edges', () => {
     expect(item(h)).toMatchObject({ state: 'parked', reason: 'pr closed' });
     h.forge.state.setLabels(1, ['agent-ready', 'agent-retry']);
     await h.reconcile();
-    await h.finishDrop('implement', implemented('sha1'));
+    await h.finishDrop('implement', implemented('7368613100000000000000000000000000000000'));
     expect(item(h)).toMatchObject({ state: 'pr_open', prNumber: 2 });
     await h.reconcile();
     expect(h.forge.state.merges).toEqual([]);
@@ -721,7 +807,7 @@ describe('§16 PR lifecycle edges', () => {
 
   test('orphan (rule 10, agent branch deleted) parks', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     h.forge.state.branches.delete('agent/issue-1');
     await h.reconcile();
     expect(item(h)).toMatchObject({ state: 'parked', reason: 'agent branch deleted' });
@@ -729,7 +815,7 @@ describe('§16 PR lifecycle edges', () => {
 
   test('orphan (rule 4, pr closed) parks', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     h.forge.state.close(1);
     await h.reconcile();
     expect(item(h)).toMatchObject({ state: 'parked', reason: 'pr closed' });
@@ -737,7 +823,7 @@ describe('§16 PR lifecycle edges', () => {
 
   test('a null-SHA preparing PR waits', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     h.forge.state.pulls.get(1)!.headSha = null;
     await h.reconcile();
     expect(item(h).state).toBe('pr_open');
@@ -746,12 +832,14 @@ describe('§16 PR lifecycle edges', () => {
 
   test('stale conflict flag while the branch contains base: no resolve loop', async () => {
     const h = await harness();
-    await toApproved(h, 'sha1');
+    await toApproved(h, '7368613100000000000000000000000000000000');
     (h.forge.state.pulls.get(1) as unknown as Record<string, unknown>).mergeable = false;
     await h.reconcile();
     await h.reconcile();
     expect(h.queuedRoles()).not.toContain('resolve');
-    expect(h.forge.state.merges.map((m) => m.sha)).toEqual(['sha1']);
+    expect(h.forge.state.merges.map((m) => m.sha)).toEqual([
+      '7368613100000000000000000000000000000000',
+    ]);
   });
 
   test('every merge moves base: three approved PRs: clean resolves are free; none parks', async () => {
@@ -775,13 +863,13 @@ describe('§16 PR lifecycle edges', () => {
       while (h.queuedRoles().length > 0) {
         const { payload, dropId, epoch } = await h.lease();
         if (payload.role === 'implement') {
-          const sha = `s${payload.issue.number}`;
+          const sha = String(payload.issue.number).padStart(40, '0');
           h.forge.state.branches.set(payload.branch, sha);
           await h.postResult(dropId, epoch, implemented(sha));
         } else if (payload.role === 'review') {
           await h.postResult(dropId, epoch, reviewed(approve));
         } else if (payload.role === 'resolve') {
-          const sha = `${payload.pr.headSha}-r${pass}`;
+          const sha = `${payload.pr.headSha.slice(0, 37)}e${pass.toString(16).padStart(2, '0')}`;
           h.forge.state.setHead(payload.pr.number, sha);
           await h.postResult(dropId, epoch, {
             status: 'completed',
@@ -803,8 +891,8 @@ describe('§16 PR lifecycle edges', () => {
 
   test('busy base: free resolves stop at maxResolveTotal', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
-    let head = 'sha1';
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
+    let head = '7368613100000000000000000000000000000000';
     for (let i = 0; i < h.zone.budgets.maxResolveTotal + 2 && item(h).state === 'pr_open'; i++) {
       h.forge.state.compares.set(`main...${head}`, {
         aheadBy: 1,
@@ -814,7 +902,7 @@ describe('§16 PR lifecycle edges', () => {
       });
       await h.reconcile();
       if (!h.queuedRoles().includes('resolve')) break;
-      const next = `r${i}`;
+      const next = `${'e'.repeat(38)}${i.toString(16).padStart(2, '0')}`;
       await h.finishDrop('resolve', {
         status: 'completed',
         headSha: next,
@@ -832,7 +920,7 @@ describe('§16 server-side parks', () => {
     const h = await harness();
     const r = h.forge.state.rules.author;
     if (r.kind === 'ok') r.rules.viewerCanBypass = true;
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     expect(item(h).state).toBe('parked');
     expect(item(h).reason).toMatch(/^unsafe branch protection/);
@@ -847,7 +935,7 @@ describe('§16 server-side parks', () => {
       if (r.kind === 'ok') r.rules.requireCodeOwnerReview = true;
     }
     h.forge.state.files.set('main:.github/CODEOWNERS', '* @human\n.github/** @human\n');
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     expect(item(h).state).toBe('parked');
     expect(item(h).reason).toContain(
@@ -868,7 +956,7 @@ describe('§16 server-side parks', () => {
     const h = await harness();
     const r = h.forge.state.rules.author;
     if (r.kind === 'ok') r.rules.viewerCanBypass = true;
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     if (r.kind === 'ok') r.rules.viewerCanBypass = false;
     await h.reconcile();
@@ -877,7 +965,7 @@ describe('§16 server-side parks', () => {
 
   test('a merge rejected park is retried after an hour, so a cleared human blocker merges', async () => {
     const h = await harness();
-    await toApproved(h, 'sha1');
+    await toApproved(h, '7368613100000000000000000000000000000000');
     h.forge.author.failNext('merge', { status: 405, message: 'unresolved conversations' });
     await h.reconcile();
     await h.reconcile();
@@ -895,7 +983,7 @@ describe('§16 server-side parks', () => {
 
   test('merge rejected park is cleared by the retry label', async () => {
     const h = await harness();
-    await toApproved(h, 'sha1');
+    await toApproved(h, '7368613100000000000000000000000000000000');
     h.forge.author.failNext('merge', { status: 405 });
     await h.reconcile();
     await h.reconcile();
@@ -908,7 +996,7 @@ describe('§16 server-side parks', () => {
 
   test('human block park is cleared by the cause going away', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     const rc = h.forge.state.review({
       author: 'alice',
       state: 'CHANGES_REQUESTED',
@@ -919,14 +1007,19 @@ describe('§16 server-side parks', () => {
     await h.reconcile();
     await h.reconcile();
     expect(item(h).reason).toBe('human block stands');
-    h.forge.state.review({ author: 'alice', state: 'APPROVED', commitId: 'sha1', id: rc.id + 10 });
+    h.forge.state.review({
+      author: 'alice',
+      state: 'APPROVED',
+      commitId: '7368613100000000000000000000000000000000',
+      id: rc.id + 10,
+    });
     await h.reconcile();
     expect(item(h).state).not.toBe('parked');
   });
 
   test('a hold added during a review blocks the approval until it is removed', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     const pull = [...h.forge.state.pulls.values()][0];
     if (!pull) throw new Error('no pull');
@@ -946,7 +1039,7 @@ describe('§16 server-side parks', () => {
 
   test('a held PR stays parked through sync and starts no agent work', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     const pull = [...h.forge.state.pulls.values()][0];
     if (!pull) throw new Error('no pull');
     pull.labels = ['jm:hold'];
@@ -960,7 +1053,7 @@ describe('§16 server-side parks', () => {
 
   test('budgets counted before the run; retry label resets once', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     expect(getAttempts(h.db, 1, 'review').count).toBe(1); // charged at enqueue, before the drop ran
     await h.finishDrop('review', reviewed(changes));
@@ -987,8 +1080,11 @@ describe('§16 CI and forge data', () => {
   test('CI lag: green checks without a required check wait; the deadline park names the missing check', async () => {
     const h = await harness({ zone: { ciRequired: true } });
     requireCi(h);
-    await toApproved(h, 'sha1');
-    h.forge.state.checks.set('sha1', { state: 'success', names: ['lint'] });
+    await toApproved(h, '7368613100000000000000000000000000000000');
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+      state: 'success',
+      names: ['lint'],
+    });
     await h.reconcile();
     await h.reconcile();
     expect(item(h).state).toBe('pr_open');
@@ -1001,8 +1097,11 @@ describe('§16 CI and forge data', () => {
   test("lost webhook: deadline parks with 'no CI result'", async () => {
     const h = await harness({ zone: { ciRequired: true } });
     requireCi(h);
-    await toApproved(h, 'sha1');
-    h.forge.state.checks.set('sha1', { state: 'pending', names: [] });
+    await toApproved(h, '7368613100000000000000000000000000000000');
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+      state: 'pending',
+      names: [],
+    });
     h.at(h.zone.ciDeadlineMinutes + 5);
     await h.reconcile();
     await h.reconcile();
@@ -1012,8 +1111,12 @@ describe('§16 CI and forge data', () => {
   test('a no-CI-result park clears when the checks finally report green', async () => {
     const h = await harness({ zone: { ciRequired: true } });
     requireCi(h);
-    await toApproved(h, 'sha1');
-    h.forge.state.checks.set('sha1', { state: 'pending', names: ['ci'], queued: ['ci'] });
+    await toApproved(h, '7368613100000000000000000000000000000000');
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+      state: 'pending',
+      names: ['ci'],
+      queued: ['ci'],
+    });
     h.at(h.zone.ciDeadlineMinutes + 5);
     await h.reconcile();
     await h.reconcile();
@@ -1021,7 +1124,10 @@ describe('§16 CI and forge data', () => {
       state: 'parked',
       reason: 'no CI result: ci queued and never started (is a runner available for its labels?)',
     });
-    h.forge.state.checks.set('sha1', { state: 'success', names: ['ci'] });
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+      state: 'success',
+      names: ['ci'],
+    });
     h.at(6); // past the probe interval (h.at advances the clock)
     await h.reconcile();
     await h.reconcile();
@@ -1031,14 +1137,20 @@ describe('§16 CI and forge data', () => {
   test('a no-CI-result park probes at most every few minutes', async () => {
     const h = await harness({ zone: { ciRequired: true } });
     requireCi(h);
-    await toApproved(h, 'sha1');
-    h.forge.state.checks.set('sha1', { state: 'pending', names: ['ci'] });
+    await toApproved(h, '7368613100000000000000000000000000000000');
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+      state: 'pending',
+      names: ['ci'],
+    });
     h.at(h.zone.ciDeadlineMinutes + 5);
     await h.reconcile();
     await h.reconcile();
     await h.reconcile(); // parked, and probed once while still pending
     expect(item(h).state).toBe('parked');
-    h.forge.state.checks.set('sha1', { state: 'success', names: ['ci'] });
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+      state: 'success',
+      names: ['ci'],
+    });
     h.at(2);
     await h.reconcile();
     expect(item(h).state).toBe('parked'); // probed under five minutes ago
@@ -1051,13 +1163,19 @@ describe('§16 CI and forge data', () => {
   test('a no-CI-result park ignores a failed forge read', async () => {
     const h = await harness({ zone: { ciRequired: true } });
     requireCi(h);
-    await toApproved(h, 'sha1');
-    h.forge.state.checks.set('sha1', { state: 'pending', names: ['ci'] });
+    await toApproved(h, '7368613100000000000000000000000000000000');
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+      state: 'pending',
+      names: ['ci'],
+    });
     h.at(h.zone.ciDeadlineMinutes + 5);
     await h.reconcile();
     await h.reconcile();
     const parked = item(h);
-    h.forge.state.checks.set('sha1', { state: 'success', names: ['ci'] });
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+      state: 'success',
+      names: ['ci'],
+    });
     h.forge.author.failNext('compare', { status: 502 });
     h.at(6);
     await h.reconcile();
@@ -1067,12 +1185,18 @@ describe('§16 CI and forge data', () => {
   test('CI that fails after a no-CI-result park sends the item to heal', async () => {
     const h = await harness({ zone: { ciRequired: true } });
     requireCi(h);
-    await toApproved(h, 'sha1');
-    h.forge.state.checks.set('sha1', { state: 'pending', names: ['ci'] });
+    await toApproved(h, '7368613100000000000000000000000000000000');
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+      state: 'pending',
+      names: ['ci'],
+    });
     h.at(h.zone.ciDeadlineMinutes + 5);
     await h.reconcile();
     await h.reconcile();
-    h.forge.state.checks.set('sha1', { state: 'failure', names: ['ci'] });
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+      state: 'failure',
+      names: ['ci'],
+    });
     h.at(6);
     await h.reconcile();
     await h.reconcile();
@@ -1083,13 +1207,20 @@ describe('§16 CI and forge data', () => {
   test('a no-CI-result park stays parked while CI is still out, whatever its reason now says', async () => {
     const h = await harness({ zone: { ciRequired: true } });
     requireCi(h);
-    await toApproved(h, 'sha1');
-    h.forge.state.checks.set('sha1', { state: 'pending', names: ['ci'], queued: ['ci'] });
+    await toApproved(h, '7368613100000000000000000000000000000000');
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+      state: 'pending',
+      names: ['ci'],
+      queued: ['ci'],
+    });
     h.at(h.zone.ciDeadlineMinutes + 5);
     await h.reconcile();
     await h.reconcile();
     const parked = item(h);
-    h.forge.state.checks.set('sha1', { state: 'pending', names: ['ci'] }); // started, still running
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+      state: 'pending',
+      names: ['ci'],
+    }); // started, still running
     h.at(6);
     await h.reconcile();
     await h.reconcile();
@@ -1100,7 +1231,7 @@ describe('§16 CI and forge data', () => {
   test("missing pipeline: deadline parks with 'no pipeline'", async () => {
     // With protection required, ciRequired and no required check is already unsafe protection.
     const h = await harness({ zone: { ciRequired: true, requireBranchProtection: false } });
-    await toApproved(h, 'sha1');
+    await toApproved(h, '7368613100000000000000000000000000000000');
     h.at(h.zone.ciDeadlineMinutes + 5);
     await h.reconcile();
     await h.reconcile();
@@ -1109,7 +1240,7 @@ describe('§16 CI and forge data', () => {
 
   test('missing forge data: null pr waits, then parks at the deadline', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     h.forge.state.pulls.delete(1);
     await h.reconcile();
     expect(item(h).state).toBe('pr_open');
@@ -1120,7 +1251,7 @@ describe('§16 CI and forge data', () => {
 
   test('missing forge data: null compare waits, then parks at the deadline', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     h.forge.author.failNext('compare', '5xx');
     await h.reconcile();
     expect(item(h).state).toBe('pr_open');
@@ -1136,7 +1267,7 @@ describe('§16 usage limits', () => {
 
   test('usage limit mid-drop: requeued only while paused, charge refunded, gate closed until reset', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     expect(getAttempts(h.db, 1, 'review').count).toBe(1);
     const reset = new Date(h.now().getTime() + 30 * 60_000).toISOString();
@@ -1164,7 +1295,7 @@ describe('§16 usage limits', () => {
 
   test('a late allowed from an older drop does not reopen', async () => {
     const h = await harness({ issues: [issue(1), issue(2)] });
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile(); // review for 1, implement for 2
     const older = await h.lease();
     h.at(1);
@@ -1176,7 +1307,9 @@ describe('§16 usage limits', () => {
       rateLimit: rejected(reset),
     });
     await h.postResult(older.dropId, older.epoch, {
-      ...(older.payload.role === 'review' ? reviewed(approve) : implemented('sha2')),
+      ...(older.payload.role === 'review'
+        ? reviewed(approve)
+        : implemented('7368613200000000000000000000000000000000')),
       rateLimit: { status: 'allowed' },
     });
     expect(dispatchGate(h.db, usageCfg, h.now())).toBe('closed');
@@ -1184,7 +1317,7 @@ describe('§16 usage limits', () => {
 
   test('probe drop dies: gate reopens after one jitter; the probe is never the cause item', async () => {
     const h = await harness({ issues: [issue(1), issue(2)] });
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     const cause = await h.lease(); // review on item 1
     const reset = new Date(h.now().getTime() + 10 * 60_000).toISOString();
@@ -1206,7 +1339,7 @@ describe('§16 usage limits', () => {
 
   test('a rate-limited probe is requeued free', async () => {
     const h = await harness({ issues: [issue(1), issue(2)] });
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     const cause = await h.lease();
     const reset = new Date(h.now().getTime() + 10 * 60_000).toISOString();
@@ -1241,7 +1374,7 @@ describe('§16 human-action matrix', () => {
   }
   async function s2() {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     const drop = await h.lease();
     return { h, drop };
@@ -1249,15 +1382,18 @@ describe('§16 human-action matrix', () => {
   async function s3() {
     const h = await harness({ zone: { ciRequired: true } });
     requireCi(h);
-    h.forge.state.checks.set('sha1', { state: 'pending', names: [] });
-    await toApproved(h, 'sha1');
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+      state: 'pending',
+      names: [],
+    });
+    await toApproved(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     expect(item(h).state).toBe('pr_open');
     return h;
   }
   async function s4() {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     await h.finishDrop('review', reviewed(changes));
     setAttempts(h.db, 1, 'heal', h.zone.budgets.maxHeal, 'spent');
@@ -1317,7 +1453,7 @@ describe('§16 human-action matrix', () => {
 
   test('reopens the PR, S4 from pr closed: back to pr_open, re-decided', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     h.forge.state.close(1);
     await h.reconcile();
     expect(item(h).reason).toBe('pr closed');
@@ -1331,8 +1467,12 @@ describe('§16 human-action matrix', () => {
     test('S1: the PR is created, then parked issue closed; another ready item dispatches', async () => {
       const { h, drop } = await s1([issue(1), issue(2)]);
       h.forge.state.closeIssue(1);
-      h.forge.state.branches.set('agent/issue-1', 'sha1');
-      await h.postResult(drop.dropId, drop.epoch, implemented('sha1'));
+      h.forge.state.branches.set('agent/issue-1', '7368613100000000000000000000000000000000');
+      await h.postResult(
+        drop.dropId,
+        drop.epoch,
+        implemented('7368613100000000000000000000000000000000'),
+      );
       expect(h.forge.state.pulls.size).toBe(1);
       await h.reconcile();
       expect(item(h, 1)).toMatchObject({ state: 'parked', reason: 'issue closed' });
@@ -1349,7 +1489,10 @@ describe('§16 human-action matrix', () => {
     test('S3: parked issue closed; zero merge calls', async () => {
       const h = await s3();
       h.forge.state.closeIssue(1);
-      h.forge.state.checks.set('sha1', { state: 'success', names: ['ci'] });
+      h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+        state: 'success',
+        names: ['ci'],
+      });
       await h.reconcile();
       expect(item(h)).toMatchObject({ state: 'parked', reason: 'issue closed' });
       expect(count(h, 'merge')).toBe(0);
@@ -1364,7 +1507,7 @@ describe('§16 human-action matrix', () => {
 
   test('reopens the issue, S4 from issue closed: back to pr_open', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     h.forge.state.closeIssue(1);
     await h.reconcile();
     expect(item(h).reason).toBe('issue closed');
@@ -1389,24 +1532,24 @@ describe('§16 human-action matrix', () => {
     });
     test('S2: the verdict binds to the old SHA; new head reviewed; zero merge calls on the old SHA', async () => {
       const { h, drop } = await s2();
-      h.forge.state.setHead(1, 'sha2');
+      h.forge.state.setHead(1, '7368613200000000000000000000000000000000');
       await finishReview(h, drop);
       await h.reconcile();
       expect(h.queuedRoles()).toEqual(['review']);
       expect(h.forge.author.calls.filter((c) => c.method === 'merge')).toHaveLength(0);
       const v = h.db.prepare('SELECT head_sha AS headSha FROM verdicts').get();
-      expect(v).toEqual({ headSha: 'sha1' });
+      expect(v).toEqual({ headSha: '7368613100000000000000000000000000000000' });
     });
     test('S3: approval invalidated; review queued for the new head', async () => {
       const h = await s3();
-      h.forge.state.setHead(1, 'sha2');
+      h.forge.state.setHead(1, '7368613200000000000000000000000000000000');
       await h.reconcile();
       expect(h.queuedRoles()).toEqual(['review']);
       expect(count(h, 'merge')).toBe(0);
     });
     test('S4: stays parked', async () => {
       const h = await s4();
-      h.forge.state.setHead(1, 'sha2');
+      h.forge.state.setHead(1, '7368613200000000000000000000000000000000');
       await h.reconcile();
       expect(item(h).state).toBe('parked');
     });
@@ -1415,8 +1558,12 @@ describe('§16 human-action matrix', () => {
   describe('deletes the branch', () => {
     test('S1: implement pushes a new branch normally', async () => {
       const { h, drop } = await s1();
-      h.forge.state.branches.set('agent/issue-1', 'sha1');
-      await h.postResult(drop.dropId, drop.epoch, implemented('sha1'));
+      h.forge.state.branches.set('agent/issue-1', '7368613100000000000000000000000000000000');
+      await h.postResult(
+        drop.dropId,
+        drop.epoch,
+        implemented('7368613100000000000000000000000000000000'),
+      );
       expect(item(h).state).toBe('pr_open');
     });
     test('S2: parked pr closed (forge closes the PR)', async () => {
@@ -1444,14 +1591,18 @@ describe('§16 human-action matrix', () => {
   describe('pushes to base', () => {
     test('S1: no effect until the PR exists', async () => {
       const { h, drop } = await s1();
-      h.forge.state.branches.set('agent/issue-1', 'sha1');
-      await h.postResult(drop.dropId, drop.epoch, implemented('sha1'));
+      h.forge.state.branches.set('agent/issue-1', '7368613100000000000000000000000000000000');
+      await h.postResult(
+        drop.dropId,
+        drop.epoch,
+        implemented('7368613100000000000000000000000000000000'),
+      );
       expect(item(h).state).toBe('pr_open');
       expect(h.queuedRoles()).toEqual([]);
     });
     test('S2: after the drop: resolve queued, no budget charge if clean', async () => {
       const { h, drop } = await s2();
-      h.forge.state.compares.set('main...sha1', {
+      h.forge.state.compares.set('main...7368613100000000000000000000000000000000', {
         aheadBy: 1,
         behindBy: 1,
         baseSha: 'b2',
@@ -1462,7 +1613,7 @@ describe('§16 human-action matrix', () => {
       expect(h.queuedRoles()).toEqual(['resolve']);
       await h.finishDrop('resolve', {
         status: 'completed',
-        headSha: 'sha2',
+        headSha: '7368613200000000000000000000000000000000',
         mergeOutcome: 'clean',
         gates: [gateOk],
       });
@@ -1470,7 +1621,7 @@ describe('§16 human-action matrix', () => {
     });
     test('S3: resolve, then re-review on the new head', async () => {
       const h = await s3();
-      h.forge.state.compares.set('main...sha1', {
+      h.forge.state.compares.set('main...7368613100000000000000000000000000000000', {
         aheadBy: 1,
         behindBy: 1,
         baseSha: 'b2',
@@ -1480,7 +1631,7 @@ describe('§16 human-action matrix', () => {
       expect(h.queuedRoles()).toEqual(['resolve']);
       await h.finishDrop('resolve', {
         status: 'completed',
-        headSha: 'sha2',
+        headSha: '7368613200000000000000000000000000000000',
         mergeOutcome: 'clean',
         gates: [gateOk],
       });
@@ -1489,7 +1640,7 @@ describe('§16 human-action matrix', () => {
     });
     test('S4: stays parked', async () => {
       const h = await s4();
-      h.forge.state.compares.set('main...sha1', {
+      h.forge.state.compares.set('main...7368613100000000000000000000000000000000', {
         aheadBy: 1,
         behindBy: 1,
         baseSha: 'b2',
@@ -1507,7 +1658,7 @@ describe('§16 human-action matrix', () => {
         author: 'alice',
         state: 'CHANGES_REQUESTED',
         body: 'rename foo',
-        commitId: 'sha1',
+        commitId: '7368613100000000000000000000000000000000',
       });
       await finishReview(h, drop);
       await h.reconcile();
@@ -1524,9 +1675,12 @@ describe('§16 human-action matrix', () => {
         author: 'alice',
         state: 'CHANGES_REQUESTED',
         body: 'no',
-        commitId: 'sha1',
+        commitId: '7368613100000000000000000000000000000000',
       });
-      h.forge.state.checks.set('sha1', { state: 'success', names: ['ci'] });
+      h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+        state: 'success',
+        names: ['ci'],
+      });
       await h.reconcile();
       expect(h.queuedRoles()).toEqual(['heal']);
       expect(count(h, 'merge')).toBe(0);
@@ -1537,7 +1691,7 @@ describe('§16 human-action matrix', () => {
         author: 'alice',
         state: 'CHANGES_REQUESTED',
         body: 'no',
-        commitId: 'sha1',
+        commitId: '7368613100000000000000000000000000000000',
       });
       await h.reconcile();
       expect(item(h).state).toBe('parked');
@@ -1577,7 +1731,7 @@ describe('§16 human-action matrix', () => {
 describe('§16 final-review regressions', () => {
   test('a partial forge outage past the deadline recovers once the forge answers again', async () => {
     const h = await harness();
-    await toApproved(h, 'sha1');
+    await toApproved(h, '7368613100000000000000000000000000000000');
     h.forge.author.failNext('getPull', '5xx');
     h.forge.author.failNext('getPull', '5xx');
     await h.reconcile();
@@ -1591,14 +1745,14 @@ describe('§16 final-review regressions', () => {
 
   test("an unchanged package.json with a 5xx on one read is reviewed, not parked 'unreadable'", async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     const pkg = JSON.stringify({ scripts: { test: 'vitest run' } });
     h.forge.state.pullFiles.set(1, {
       files: [{ path: 'package.json' }, { path: 'src/a.ts' }],
       complete: true,
     });
     h.forge.state.files.set('base0:package.json', pkg);
-    h.forge.state.files.set('sha1:package.json', pkg);
+    h.forge.state.files.set('7368613100000000000000000000000000000000:package.json', pkg);
     h.forge.author.failNext('getFileAt', '5xx');
     await h.reconcile();
     expect(item(h).state).toBe('pr_open');
@@ -1608,8 +1762,11 @@ describe('§16 final-review regressions', () => {
 
   test('ciRequired without required checks never merges on a green third-party check', async () => {
     const h = await harness({ zone: { requireBranchProtection: false, ciRequired: true } });
-    h.forge.state.checks.set('sha1', { state: 'success', names: ['license/cla'] });
-    await toApproved(h, 'sha1');
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+      state: 'success',
+      names: ['license/cla'],
+    });
+    await toApproved(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     expect(h.forge.state.merges).toHaveLength(0);
     h.at(h.zone.ciDeadlineMinutes + 5);
@@ -1656,12 +1813,20 @@ describe('starter identity (one forge identity)', () => {
 
   test('the whole loop merges under the author token and posts no review', async () => {
     const h = await starter();
-    await toApproved(h, 'sha1');
-    h.forge.state.checks.set('sha1', { state: 'success', names: ['ci'] });
+    await toApproved(h, '7368613100000000000000000000000000000000');
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+      state: 'success',
+      names: ['ci'],
+    });
     await h.reconcile();
     expect(item(h)).toMatchObject({ state: 'done', reason: 'merged' });
     expect(h.forge.state.merges).toEqual([
-      { number: 1, sha: 'sha1', title: 'Issue 1', message: 'Closes #1' },
+      {
+        number: 1,
+        sha: '7368613100000000000000000000000000000000',
+        title: 'Issue 1',
+        message: 'Closes #1',
+      },
     ]);
     expect(count(h, 'createReview')).toBe(0);
     expect(h.forge.reviewer.calls).toEqual([]);
@@ -1672,22 +1837,30 @@ describe('starter identity (one forge identity)', () => {
 
   test('starter never merges on a verdict for an older SHA', async () => {
     const h = await starter();
-    await toApproved(h, 'sha1');
+    await toApproved(h, '7368613100000000000000000000000000000000');
     // Someone pushes after the verdict: CI is green on the new head, but no verdict covers it.
-    h.forge.state.setHead(1, 'sha2');
-    h.forge.state.checks.set('sha1', { state: 'success', names: ['ci'] });
-    h.forge.state.checks.set('sha2', { state: 'success', names: ['ci'] });
+    h.forge.state.setHead(1, '7368613200000000000000000000000000000000');
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+      state: 'success',
+      names: ['ci'],
+    });
+    h.forge.state.checks.set('7368613200000000000000000000000000000000', {
+      state: 'success',
+      names: ['ci'],
+    });
     await h.reconcile();
     await h.reconcile();
     expect(count(h, 'merge')).toBe(0);
     expect(h.queuedRoles()).toEqual(['review']);
     const { payload } = await h.lease();
-    expect(payload.role === 'review' && payload.pr.headSha).toBe('sha2');
+    expect(payload.role === 'review' && payload.pr.headSha).toBe(
+      '7368613200000000000000000000000000000000',
+    );
   });
 
   test('starter review payloads carry no write token', async () => {
     const h = await starter();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     const { payload } = await h.lease();
     expect(payload.role).toBe('review');
