@@ -378,7 +378,6 @@ export async function reconcileZone(
     now,
     zone.outboxDeadlineMinutes ?? zone.ciDeadlineMinutes,
   );
-  syncParkBriefings(db, zone, now);
   if (mode === 'active') {
     // Rulings apply only while the zone acts; one made while paused waits for resume. They apply
     // before the flush, so a Reject recorded meanwhile beats a refute hold that has run out (also
@@ -389,6 +388,9 @@ export async function reconcileZone(
     // In the same pass that confirms crew issue numbers: a split's comment names its children.
     actions += await flushTriageTrail(db, forges, zone, secrets, now);
   }
+  // After the rulings: a parked item is briefed on its state as they left it (a Retry has already
+  // taken it out of parked), never on the state they were made about.
+  syncParkBriefings(db, zone, now);
   const pulls = await forges.author.listOpenAgentPulls('agent/issue-');
   actions += await adopt(db, forges, zone, pass, pulls, now);
   if (mode === 'paused') return { actions, merges };
