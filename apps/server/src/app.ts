@@ -183,6 +183,7 @@ function usageView(db: Db, config: Config, at: Date): NonNullable<HomeState['usa
   };
 }
 
+const FRAME_ANCESTORS = "frame-ancestors 'none'";
 const ROUTES = new WeakMap<FastifyInstance, { method: string; url: string }[]>();
 
 /** The routes an app from `createApp` registered (HEAD included, as Fastify adds it). */
@@ -242,15 +243,36 @@ export function createApp(
     installationVerifier?: ControlDeps['installationVerifier'];
   },
 ): FastifyInstance {
-  const app = Fastify({ logger: false });
+  // Every page reads the config once per request: the store swaps it on each applied revision.
+  const live = configReader(deps.config);
+  // Behind a TLS terminator on this host (issue #261), `req.ip` is the client the terminator names
+  // in X-Forwarded-For, believed only from a loopback peer: the per-source backoff then counts each
+  // client apart. Nothing else reads forwarded headers: the guard judges the real Host and Origin.
+  // A boot setting, so read once.
+  const app = Fastify({
+    logger: false,
+    ...(live().listen.tlsTerminated === true ? { trustProxy: 'loopback' } : {}),
+  });
   // Every route as registered, for the control manifest's test (api/manifest.ts).
   const routes: { method: string; url: string }[] = [];
   app.addHook('onRoute', (r) => {
     for (const method of [r.method].flat()) routes.push({ method, url: r.url });
   });
   ROUTES.set(app, routes);
-  // Every page reads the config once per request: the store swaps it on each applied revision.
-  const live = configReader(deps.config);
+  // No page may be framed (issue #260): a same-site page on another port would carry the Strict
+  // session cookie into the frame. Every HTML response, error pages included, and any response with
+  // a policy of its own (the artifacts route keeps its sandbox) forbids it; nothing else changes.
+  app.addHook('onSend', async (_req, reply, payload) => {
+    const csp = reply.getHeader('content-security-policy');
+    const html = String(reply.getHeader('content-type') ?? '').startsWith('text/html');
+    if (!html && csp === undefined) return payload;
+    reply.header(
+      'content-security-policy',
+      csp === undefined ? FRAME_ANCESTORS : `${String(csp)}; ${FRAME_ANCESTORS}`,
+    );
+    reply.header('x-frame-options', 'DENY');
+    return payload;
+  });
   /** The request's snapshot (taken by the guard). */
   const cfg = (req: { jmConfig: Config | null }): Config => req.jmConfig ?? live();
   // The login and setup pages post plain HTML forms.

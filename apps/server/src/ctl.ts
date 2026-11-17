@@ -18,6 +18,7 @@ import { BOOT_KEYS, EditableSchema, ZONE_ID, ZONE_KEYS } from './config.js';
 import type { DoctorCheck } from './doctor/checks.js';
 import { EXPIRATION_NOTE, REPOSITORY_ACCESS_NOTE, RESOURCE_OWNER_NOTE } from './github/guidance.js';
 import { readSecret, readSecretFile } from './secrets.js';
+import { jsonLine, plain } from './terminal.js';
 
 const MODES: Record<string, string> = { pause: 'paused', resume: 'active', observe: 'observe' };
 
@@ -213,7 +214,7 @@ function githubLines(args: string[], g: GuidanceView): string[] {
 
 /**
  * `ctl zones …`: `add` (Task 6), `list [--json]`, `show <zone> [--json]`, `remove <zone>`,
- * `egress observed <zone>`, `egress adopt <zone> <host>…`. `set` reads first, so `runZonesSet`
+ * `egress observed <zone> [--json]`, `egress adopt <zone> <host>…`. `set` reads first, so `runZonesSet`
  * builds it.
  */
 function zonesRequest(args: string[]): Raw | null {
@@ -243,7 +244,7 @@ function zonesRequest(args: string[]): Raw | null {
     const [what, zoneId, ...hosts] = rest;
     const z = id(zoneId);
     if (!z) return null;
-    if (what === 'observed' && hosts.length === 0)
+    if (what === 'observed' && hosts.every((a) => a === '--json'))
       return { path: `/api/control/zones/${z}/egress/observed`, method: 'GET' };
     if (what === 'adopt' && hosts.length > 0)
       return { path: `/api/control/zones/${z}/egress/adopt`, body: { hosts } };
@@ -523,7 +524,7 @@ export function briefingsLines(body: { briefings?: BriefingView[] }, base: strin
       `  Page: ${url(`/briefings/${b.id}`)}`,
     );
   }
-  return out.map(plain);
+  return out;
 }
 
 function rawRequest(args: string[]): Raw | null {
@@ -686,15 +687,12 @@ export function formatDoctor(
     '',
     `${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip${n('info') > 0 ? `, ${n('info')} info` : ''}${n('fail') > 0 ? ': fix each FAIL, then run the doctor again' : ''}`,
   );
-  return lines.map(plain);
+  return lines;
 }
 
-/**
- * A line for the terminal. Forge text (summaries, CI job names in a park reason) reaches it: no
- * control character, so an escape sequence or a newline in a workflow file can't paint or forge
- * a line.
- */
-const plain = (line: string): string => line.replace(/[\u0000-\u001f\u007f]/g, '');
+/** JSON shown to a person, a line per write, each line kept whole by `plain` (see `jsonLine`). */
+const jsonLines = (value: unknown): string[] =>
+  JSON.stringify(value, null, 2).split('\n').map(jsonLine);
 
 const formsOf = (verb: string): string[] => CTL_VERBS.find((v) => v.verb === verb)?.forms ?? [];
 const CONFIG_USAGE = formsOf('config').join(' | ');
@@ -855,7 +853,7 @@ function zonesLines(args: string[], body: Record<string, unknown>): string[] {
         `${z.id}  ${z.repo}  ${z.modeLabel}; egress ${z.egress}; ${z.identity}${z.problems.length ? `; needs: ${z.problems.join('; ')}` : ''}`,
     );
   }
-  if (verb === 'show') return [`${body.modeLabel}`, JSON.stringify(body.zone, null, 2)];
+  if (verb === 'show') return [`${body.modeLabel}`, ...jsonLines(body.zone)];
   if (verb === 'remove')
     return [`removed zone ${body.removed} (revision ${body.revision}); its history is kept`];
   if (verb === 'egress' && args[2] === 'observed') {
@@ -1105,8 +1103,9 @@ async function runConfig(
       : await call('POST', request.path, body);
   if (!res.ok) return fail(res);
   if (verb === 'export') {
-    // Exactly the JSON: `out` ends the line the JSON's own trailing newline would.
-    out((await res.text()).replace(/\n$/, ''));
+    // Exactly the JSON, a line per write: `out` ends each line, the last as the JSON's own
+    // trailing newline would. A control a string holds raw is written as its JSON escape.
+    for (const line of (await res.text()).replace(/\n$/, '').split('\n')) out(jsonLine(line));
     return 0;
   }
   if (verb === 'show') {
@@ -1124,8 +1123,8 @@ async function runConfig(
     const pending =
       body.restartPending.length > 0 ? `, restart pending: ${body.restartPending.join(', ')}` : '';
     out(`config: ${body.mode} mode, revision ${body.revision}${pending}`);
-    for (const w of body.warnings ?? []) out(plain(`warning: ${w}`));
-    out(JSON.stringify(body.config, null, 2));
+    for (const w of body.warnings ?? []) out(`warning: ${w}`);
+    for (const line of jsonLines(body.config)) out(line);
     return 0;
   }
   if (verb === 'revisions') {
@@ -1334,6 +1333,13 @@ export async function runCtl(
   err: (line: string) => void = console.error,
   readStdin: () => Promise<string> = readStdinLine,
 ): Promise<number> {
+  // Every line passes `plain` here (issue #264), so no formatter can forget it: forge and agent
+  // text reaches these lines. `--json` prints the answer as it came; JSON escapes its controls.
+  const json = args.includes('--json');
+  const toOut = out;
+  const toErr = err;
+  out = json ? toOut : (line) => toOut(plain(line));
+  err = (line) => toErr(plain(line));
   // Help needs no server and no token.
   const lines = (to: (line: string) => void, text: string) => {
     for (const l of text.split('\n')) to(l);
@@ -1454,7 +1460,7 @@ async function runTranscript(
       }
       const lines = (partial + decoder.decode(chunk, { stream: true })).split('\n');
       partial = lines.pop() ?? '';
-      for (const line of lines) out(line);
+      for (const line of lines) out(jsonLine(line));
     }
   } catch (e) {
     return fail(`cannot reach ${base}: the export was cut off (${causeOf(e)})`);
@@ -1465,7 +1471,7 @@ async function runTranscript(
     return 0;
   }
   partial += decoder.decode();
-  if (partial !== '') out(partial);
+  if (partial !== '') out(jsonLine(partial));
   return 0;
 }
 
@@ -1577,7 +1583,7 @@ async function runCtlOn(
       action?: { label: string; href: string };
     };
     // Code is in backticks for the page; the terminal gets the words.
-    const say = (line: string) => out(plain(line.replace(/`([^`]*)`/g, '$1')));
+    const say = (line: string) => out(line.replace(/`([^`]*)`/g, '$1'));
     say(st.headline);
     if (st.detail) say(st.detail);
     for (const a of st.also ?? []) say(`- ${a.text}${a.href ? ` (fix: ${a.href})` : ''}`);
@@ -1593,7 +1599,7 @@ async function runCtlOn(
   if (args[0] === 'sticks' && res.ok) {
     const parsed = JSON.parse(text) as Record<string, unknown>;
     if (args.includes('--json')) out(JSON.stringify(parsed, null, 2));
-    else for (const line of sticksLines(args, parsed)) out(plain(line));
+    else for (const line of sticksLines(args, parsed)) out(line);
     return 0;
   }
   if (args[0] === 'public-url' && res.ok) {
@@ -1604,18 +1610,21 @@ async function runCtlOn(
       publicUrl?: string | null;
     };
     if (args[1] === 'check') {
-      out(plain(b.message ?? ''));
+      out(b.message ?? '');
       return b.ok ? 0 : 1;
     }
-    out(plain(`server.publicUrl is ${b.publicUrl ?? 'unset'} (revision ${b.revision})`));
+    out(`server.publicUrl is ${b.publicUrl ?? 'unset'} (revision ${b.revision})`);
     return 0;
   }
   if (args[0] === 'mcp-tokens' && res.ok) {
-    for (const line of mcpTokenLines(args[1], JSON.parse(text))) out(plain(line));
+    for (const line of mcpTokenLines(args[1], JSON.parse(text))) out(line);
     return 0;
   }
   if (args[0] === 'intake' && args[2] === 'stub' && res.ok) {
-    out((JSON.parse(text) as { markdown: string }).markdown.replace(/\n$/, ''));
+    for (const line of (JSON.parse(text) as { markdown: string }).markdown
+      .replace(/\n$/, '')
+      .split('\n'))
+      out(line);
     return 0;
   }
   if (args[0] === 'github' && !request.path.endsWith('/github/recommend') && res.ok) {
@@ -1643,7 +1652,7 @@ async function runCtlOn(
   }
   out(`${res.status} ${text}`);
   if ((args[0] === 'kill' || args[0] === 'unkill') && res.ok)
-    for (const line of killLines(args[0], text)) out(plain(line));
+    for (const line of killLines(args[0], text)) out(line);
   return res.ok ? 0 : 1;
 }
 

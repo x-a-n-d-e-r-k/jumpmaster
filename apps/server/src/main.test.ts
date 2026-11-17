@@ -30,7 +30,7 @@ function install(): { file: string; dataDir: string } {
 }
 
 /** Starts the server with stderr captured; returns the captured text and the server. */
-async function startCaptured(file: string) {
+async function startCaptured(file: string, extra: Record<string, string> = {}) {
   const written: string[] = [];
   vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
     written.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
@@ -39,7 +39,7 @@ async function startCaptured(file: string) {
   vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
     written.push(`${a.map(String).join(' ')}\n`);
   });
-  const srv = await start(file, env);
+  const srv = await start(file, { ...env, ...extra });
   vi.restoreAllMocks();
   return { srv, stderr: written.join('') };
 }
@@ -91,6 +91,34 @@ test('the setup code appears once per start in stderr on its own prefixed line a
   const second = await startCaptured(file);
   expect(second.stderr).not.toContain('SETUP CODE');
   await second.srv.stop();
+});
+
+test('with JM_TLS_TERMINATED=1 the served app counts wrong setup codes per forwarded client from a loopback peer (issue #261)', async () => {
+  const wrongCodes = async (extra: Record<string, string>) => {
+    const { file } = install();
+    const { srv } = await startCaptured(file, extra);
+    const post = (forwarded: string, remoteAddress = '127.0.0.1') =>
+      srv.app.inject({
+        method: 'POST',
+        url: '/setup/code',
+        remoteAddress,
+        headers: { host: '127.0.0.1:0', 'x-forwarded-for': forwarded },
+        payload: { code: 'AAAA-AAAA-AAAA' },
+      });
+    const codes = [
+      (await post('100.64.0.7')).statusCode,
+      (await post('100.64.0.7')).statusCode,
+      (await post('100.64.0.8')).statusCode,
+      // From a non-loopback peer the header is ignored: that peer's first try.
+      (await post('100.64.0.9', '192.168.1.50')).statusCode,
+      (await post('100.64.0.10', '192.168.1.50')).statusCode,
+    ];
+    await srv.stop();
+    return codes;
+  };
+  expect(await wrongCodes({ JM_TLS_TERMINATED: '1' })).toEqual([401, 429, 401, 401, 429]);
+  // Off, as before: every loopback client shares one bucket.
+  expect(await wrongCodes({})).toEqual([401, 429, 429, 401, 429]);
 });
 
 test('a restart prints a new code', async () => {
