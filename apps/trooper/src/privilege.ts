@@ -32,38 +32,75 @@ export function trooperIdentities(
   return { agent, gate };
 }
 
-/** Pids under `procRoot` whose real or effective uid is `uid`. */
-function pidsOfUid(uid: number, procRoot: string): number[] {
+/** Reads a `/proc/<pid>/status` file. A test seam. */
+export type StatusReader = (path: string) => string;
+const readStatus: StatusReader = (path) => readFileSync(path, 'utf8');
+
+/** A pid that exited between the listing and the read: its status is gone, so is it. */
+const gone = (e: unknown): boolean => {
+  const code = (e as NodeJS.ErrnoException).code;
+  return code === 'ENOENT' || code === 'ESRCH';
+};
+
+/**
+ * Pids under `procRoot` whose real or effective uid is `uid` (`owned`), and pids whose status could
+ * not be read for another reason (`unknown`): those may be the uid's, so they never count as gone.
+ */
+function scanUid(
+  uid: number,
+  procRoot: string,
+  read: StatusReader,
+): { owned: number[]; unknown: number[] } {
+  const owned: number[] = [];
+  const unknown: number[] = [];
   let entries: string[];
   try {
     entries = readdirSync(procRoot);
   } catch {
-    return [];
+    return { owned, unknown };
   }
-  const pids: number[] = [];
   for (const entry of entries) {
     if (!/^\d+$/.test(entry)) continue;
     let status: string;
     try {
-      status = readFileSync(join(procRoot, entry, 'status'), 'utf8');
-    } catch {
-      continue; // exited
+      status = read(join(procRoot, entry, 'status'));
+    } catch (e) {
+      if (!gone(e)) unknown.push(Number(entry));
+      continue;
     }
     const m = /^Uid:\s+(\d+)\s+(\d+)/m.exec(status);
     if (!m || (Number(m[1]) !== uid && Number(m[2]) !== uid)) continue;
-    pids.push(Number(entry));
+    owned.push(Number(entry));
   }
-  return pids;
+  return { owned, unknown };
 }
 
-/** SIGKILLs every process whose real or effective uid is `uid`; returns how many were signalled. */
+/**
+ * Pids under `procRoot` whose real or effective uid is `uid`. A pid whose status can't be read for
+ * a reason other than having exited (`ENOENT`, `ESRCH`) is included: it may be the uid's.
+ */
+export function pidsOfUid(
+  uid: number,
+  procRoot = '/proc',
+  read: StatusReader = readStatus,
+): number[] {
+  const { owned, unknown } = scanUid(uid, procRoot, read);
+  return [...owned, ...unknown];
+}
+
+/**
+ * SIGKILLs every process whose real or effective uid is `uid`; returns how many were signalled. A
+ * pid whose owner can't be read is not signalled (it may be root's): `agentProcessesAlive` counts
+ * it, so the push stops instead.
+ */
 export function sweepUid(
   uid: number,
   kill: (pid: number, signal: NodeJS.Signals) => void = (pid, sig) => process.kill(pid, sig),
   procRoot = '/proc',
+  read: StatusReader = readStatus,
 ): number {
   let killed = 0;
-  for (const pid of pidsOfUid(uid, procRoot)) {
+  for (const pid of scanUid(uid, procRoot, read).owned) {
     try {
       kill(pid, 'SIGKILL');
       killed++;
@@ -74,9 +111,16 @@ export function sweepUid(
   return killed;
 }
 
-/** How many processes still run with `uid` as their real or effective uid. */
-export function agentProcessesAlive(uid: number, procRoot = '/proc'): number {
-  return pidsOfUid(uid, procRoot).length;
+/**
+ * How many processes still run with `uid` as their real or effective uid, counting every pid
+ * whose status can't be read (other than because it exited) as one of them.
+ */
+export function agentProcessesAlive(
+  uid: number,
+  procRoot = '/proc',
+  read: StatusReader = readStatus,
+): number {
+  return pidsOfUid(uid, procRoot, read).length;
 }
 
 /**

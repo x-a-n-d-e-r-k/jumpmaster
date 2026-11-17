@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -7,6 +7,7 @@ import {
   agentSpawnOptions,
   asAgentArgv,
   asAgentInDirArgv,
+  pidsOfUid,
   readAgentFile,
   sweepUid,
   trooperIdentities,
@@ -95,6 +96,33 @@ describe('agentProcessesAlive', () => {
     expect(agentProcessesAlive(10001, proc)).toBe(3);
     expect(agentProcessesAlive(10003, proc)).toBe(0);
     expect(agentProcessesAlive(10001, join(proc, 'missing'))).toBe(0);
+  });
+});
+
+describe('pidsOfUid: an unreadable status (issue #262)', () => {
+  const err = (code: string) => Object.assign(new Error(code), { code });
+  /** Reads the fake /proc, except that pid 41's status throws `EACCES` and 42's `ENOENT`. */
+  const reader = (path: string): string => {
+    if (path.endsWith('/41/status')) throw err('EACCES');
+    if (path.endsWith('/42/status')) throw err('ENOENT');
+    if (path.endsWith('/43/status')) throw err('ESRCH');
+    return readFileSync(path, 'utf8');
+  };
+
+  test('a permission error counts as the uid; a pid that is gone does not', () => {
+    const proc = fakeProc({
+      40: { ruid: 10001, euid: 10001 },
+      41: { ruid: 0, euid: 0 },
+      42: { ruid: 10001, euid: 10001 },
+      43: { ruid: 10001, euid: 10001 },
+      44: { ruid: 10002, euid: 10002 },
+    });
+    expect(pidsOfUid(10001, proc, reader).sort()).toEqual([40, 41]);
+    expect(agentProcessesAlive(10001, proc, reader)).toBe(2);
+    // Not this uid's for certain: counted alive, but never signalled.
+    const killed: number[] = [];
+    expect(sweepUid(10001, (pid) => void killed.push(pid), proc, reader)).toBe(1);
+    expect(killed).toEqual([40]);
   });
 });
 

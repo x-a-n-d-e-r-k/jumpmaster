@@ -22,6 +22,8 @@ export interface PushDeps {
   sweep(): void;
   /** How many agent-uid processes are still alive. */
   alive(uid: number): number;
+  /** Waits between survivor readings (default: a real timer). */
+  sleep?: (ms: number) => Promise<void>;
   git: {
     stageFromAgent: typeof stageFromAgent;
     pushStaged: typeof pushStaged;
@@ -31,19 +33,31 @@ export interface PushDeps {
 
 const REASON_MAX = 2000;
 
-/** SIGKILL lands asynchronously: a process the sweep just killed may still be listed briefly. */
+/**
+ * How many times the sweep and the reading after it run before the ready line, and the pause
+ * between them: an agent process that forks in a chain can be missing from one reading.
+ */
 export const SURVIVOR_CHECKS = 10;
 export const SURVIVOR_POLL_MS = 200;
 
-const sleep = (ms: number) => new Promise((ok) => setTimeout(ok, ms));
+const sleepMs = (ms: number) => new Promise<void>((ok) => setTimeout(ok, ms));
 
-/** True when agent processes are still alive after up to ~2 s of re-checks. */
-async function survivors(alive: () => number): Promise<boolean> {
+/**
+ * True unless every one of `SURVIVOR_CHECKS` readings, each taken right after a fresh sweep, found
+ * no agent process. Any non-zero reading is a survivor: a process the sweep could not account for
+ * at that moment is one the push must not run beside.
+ */
+export async function survivors(
+  sweep: () => void,
+  alive: () => number,
+  sleep: (ms: number) => Promise<void> = sleepMs,
+): Promise<boolean> {
   for (let i = 0; i < SURVIVOR_CHECKS; i++) {
-    if (alive() === 0) return false;
+    sweep();
+    if (alive() !== 0) return true;
     if (i < SURVIVOR_CHECKS - 1) await sleep(SURVIVOR_POLL_MS);
   }
-  return true;
+  return false;
 }
 
 const basicAuth = (token: string): string =>
@@ -65,7 +79,8 @@ function finish(r: PushResult, secrets: string[], emit: (l: string) => void): Pu
  *
  * 1. salvage only: commit what the agent left, as the agent, hardened (best effort);
  * 2. stage the branch into a root-owned bare repo (no token anywhere yet); `nothing` ends here;
- * 3. sweep the agent uid, and refuse (retryable) if any agent process survived;
+ * 3. sweep the agent uid before each of several readings, and refuse (retryable) if any reading
+ *    found an agent process;
  * 4. print the ready line; only then read the grant (which carries the token) from stdin;
  * 5. refuse a grant for another branch; push.
  *
@@ -99,8 +114,7 @@ export async function runPush(payload: PushPayload, deps: PushDeps): Promise<Pus
     if ('nothing' in staged) return done({ status: 'nothing', reason: staged.nothing });
     pushDir = staged.pushDir;
 
-    deps.sweep();
-    if (await survivors(() => deps.alive(agent.uid)))
+    if (await survivors(deps.sweep, () => deps.alive(agent.uid), deps.sleep))
       return fail('agent process survived the sweep', true);
 
     deps.emit(READY_LINE);
