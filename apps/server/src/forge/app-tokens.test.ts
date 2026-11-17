@@ -313,6 +313,28 @@ describe('createAppTokenSource', () => {
     expect(await server.token()).not.toBe(serverBefore);
   });
 
+  test('a changed recorded repository id checks and mints again, and never returns the old token', async () => {
+    const w = world();
+    const p = w.source.provider('main', 'reviewer', 'drop-read-reviewer');
+    const before = await p.token();
+    w.zones[0] = { ...ZONE, githubApp: { repositoryId: 4343, installations: { reviewer: 77 } } };
+    const after = await p.token();
+    expect(after).not.toBe(before);
+    expect(gh.mints()).toHaveLength(2);
+    expect(gh.mints().at(-1)!.body).toMatchObject({ repository_ids: [4343] });
+  });
+
+  test('clear (the kill switch) empties the cache: the next token is minted afresh', async () => {
+    const w = world();
+    const p = w.source.provider('main', 'reviewer', 'drop-read-reviewer');
+    const before = await p.token();
+    w.source.clear();
+    const after = await p.token();
+    expect(after).not.toBe(before);
+    expect(gh.mints()).toHaveLength(2);
+    expect(await p.token()).toBe(after);
+  });
+
   test('a changed id that no longer matches GitHub rejects, and the token from before is not returned', async () => {
     const w = world();
     const p = w.source.provider('main', 'reviewer', 'drop-read-reviewer');

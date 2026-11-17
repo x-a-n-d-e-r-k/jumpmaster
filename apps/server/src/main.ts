@@ -159,6 +159,8 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     now: Date.now,
     add: (s) => serverScrubSet.add(s),
   });
+  // A revision that replaces, swaps, adds or drops an app entry empties the token cache (issue #266).
+  live.onAppsChanged(() => appTokens.clear());
   // The push containers' tokens in app mode (§4.2, issue #224): one broker per owner and role,
   // every key, JWT and token in the scrub set before use.
   const appBrokers = createAppBrokers({ apps: () => live.resolvedApps() });

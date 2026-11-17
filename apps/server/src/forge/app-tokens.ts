@@ -9,7 +9,9 @@
  * - The server never trusts an installation id it is handed (§4.2): before the first mint for a
  *   zone and role, `installationFor` must find the repository installed under the recorded id.
  *   A passed check is remembered until the recorded ids or the entry's fingerprint change.
- * - A changed fingerprint or recorded installation id drops that owner and role's cached tokens.
+ * - A changed fingerprint or recorded installation id drops that owner and role's cached tokens,
+ *   and the cache key carries both (issue #266), so the old token is never served under the new ones.
+ * - `clear` (the kill switch, or a revision whose app entries changed) drops every cached token.
  * - No PAT fallback, ever: a starter zone, an undecryptable entry or a missing installation
  *   rejects (an identity swap is what `credentialFor` refuses too).
  *
@@ -56,6 +58,11 @@ export interface AppTokenSource {
    * tokens are, but never taken from or put in the cache. The caller holds and revokes it.
    */
   fresh(zoneId: string, role: AppRole, use: Use): Promise<FreshToken>;
+  /**
+   * Drops every cached token and detaches every mint in progress (the kill switch, or a revision
+   * whose app entries changed): a later `token()` mints afresh.
+   */
+  clear(): void;
 }
 
 /** A token the source would not mint. Its message names the repository and role, never a secret. */
@@ -91,7 +98,8 @@ interface Check {
 }
 
 const slotId = (owner: string, role: AppRole) => JSON.stringify([owner, role]);
-const tokenKeyId = (k: TokenKey) => JSON.stringify([k.owner, k.role, k.repositoryId, k.use]);
+const tokenKeyId = (k: TokenKey) =>
+  JSON.stringify([k.owner, k.role, k.repositoryId, k.use, k.appFingerprint, k.installationId]);
 
 export function createAppTokenSource(deps: AppTokenSourceDeps): AppTokenSource {
   const now = deps.now ?? Date.now;
@@ -110,8 +118,12 @@ export function createAppTokenSource(deps: AppTokenSourceDeps): AppTokenSource {
       const role = key.role;
       const slot = brokers.get(slotId(key.owner, role));
       const installationId = installationOf.get(slotId(key.owner, role))?.get(key.repositoryId);
-      if (!slot || installationId === undefined)
+      // Mint only from the entry and installation the key names, so a token never sits under a
+      // key for another app entry or installation (D1).
+      if (!slot || installationId === undefined || installationId !== key.installationId)
         throw new AppTokenError(`no checked ${role} installation to mint from`);
+      if (slot.fingerprint !== key.appFingerprint)
+        throw new AppTokenError(`the ${role} GitHub App entry changed; try again`);
       return slot.broker.mint({
         installationId,
         repositoryId: key.repositoryId,
@@ -212,7 +224,14 @@ export function createAppTokenSource(deps: AppTokenSourceDeps): AppTokenSource {
       });
     }
     await check!.passed;
-    return { owner, role, repositoryId: recorded.repositoryId, use };
+    return {
+      owner,
+      role,
+      repositoryId: recorded.repositoryId,
+      use,
+      appFingerprint: slot.fingerprint,
+      installationId: recorded.installationId,
+    };
   }
 
   /** Records a key handed to the cache, so a rotation or changed id drops its token. */
@@ -254,6 +273,10 @@ export function createAppTokenSource(deps: AppTokenSourceDeps): AppTokenSource {
       });
       const { broker } = slot;
       return { ...minted, owner: key.owner, revoke: () => broker.revoke(minted.token) };
+    },
+
+    clear() {
+      cache.clear();
     },
   };
 }
