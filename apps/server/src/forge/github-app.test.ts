@@ -205,6 +205,49 @@ describe('createGitHubAppBroker', () => {
     });
   });
 
+  describe('repositoryIdOf (issue #267)', () => {
+    test('reads the id with a metadata-only token narrowed to the repository by name, then revokes it', async () => {
+      let body: unknown;
+      nock(api, { reqheaders: { authorization: `Bearer ${JWT}` } })
+        .post('/app/installations/7/access_tokens', (b) => {
+          body = b;
+          return true;
+        })
+        .reply(201, { token: TOKEN, expires_at: EXPIRES });
+      nock(api, { reqheaders: { authorization: `Bearer ${TOKEN}` } })
+        .get('/repos/acme/widgets')
+        .reply(200, { id: 42, full_name: 'acme/widgets' })
+        .delete('/installation/token')
+        .reply(204);
+      const secrets: string[] = [];
+      expect(await broker(secrets).repositoryIdOf(7, 'acme', 'widgets')).toBe(42);
+      expect(body).toEqual({ repositories: ['widgets'], permissions: { metadata: 'read' } });
+      expect(secrets).toContain(TOKEN);
+    });
+
+    test('a failed read throws a clean typed error and still revokes the token', async () => {
+      nock(api)
+        .post('/app/installations/7/access_tokens')
+        .reply(201, { token: TOKEN, expires_at: EXPIRES })
+        .get('/repos/acme/widgets')
+        .reply(500, { message: `boom ${TOKEN}` })
+        .delete('/installation/token')
+        .reply(204);
+      const err = await caught(broker().repositoryIdOf(7, 'acme', 'widgets'));
+      expectClean(err);
+      expect((err as GitHubAppError).status).toBe(500);
+    });
+
+    test('a refused probe mint throws a clean typed error', async () => {
+      nock(api)
+        .post('/app/installations/7/access_tokens')
+        .reply(422, { message: `nope ${JWT}` });
+      const err = await caught(broker().repositoryIdOf(7, 'acme', 'widgets'));
+      expectClean(err);
+      expect((err as GitHubAppError).status).toBe(422);
+    });
+  });
+
   describe('revoke', () => {
     test.each([204, 401, 404])('%i counts as done', async (status) => {
       nock(api, { reqheaders: { authorization: `Bearer ${TOKEN}` } })

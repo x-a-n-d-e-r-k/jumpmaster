@@ -153,6 +153,8 @@ function fakeGitHub() {
   const calls: Call[] = [];
   const minted: string[] = [];
   const state = { mint: 201, revoke: 204 };
+  /** The metadata-only tokens the installation check minted (issue #267). */
+  const probes: string[] = [];
   const record = async (req: Request) => {
     const text = await req.text();
     calls.push({
@@ -174,9 +176,21 @@ function fakeGitHub() {
           : INSTALLATION;
       return [200, { id, permissions: { contents: 'read' } }];
     })
+    .get('/repos/octo/demo')
+    .reply(async (req: Request) => {
+      await record(req);
+      return [200, { id: REPOSITORY }];
+    })
     .post(/^\/app\/installations\/\d+\/access_tokens$/)
     .reply(async (req: Request) => {
       await record(req);
+      if ('repositories' in (calls.at(-1)!.body as object)) {
+        const probe = ['ghs', `PROBE${String(probes.length + 1).padStart(4, '0')}`.repeat(4)].join(
+          '_',
+        );
+        probes.push(probe);
+        return [201, { token: probe, expires_at: plus(t0, HOUR).toISOString() }];
+      }
       if (state.mint !== 201) return [state.mint, { message: 'boom' }];
       const token = tokenOf(minted.length + 1);
       minted.push(token);
@@ -191,8 +205,15 @@ function fakeGitHub() {
     calls,
     minted,
     state,
-    mints: () => calls.filter((c) => c.path.endsWith('/access_tokens')),
-    revokes: () => calls.filter((c) => c.method === 'DELETE'),
+    /** The drop mints (narrowed by repository id; the check's probe is narrowed by name). */
+    mints: () =>
+      calls.filter(
+        (c) => c.path.endsWith('/access_tokens') && !('repositories' in (c.body as object)),
+      ),
+    revokes: () =>
+      calls.filter(
+        (c) => c.method === 'DELETE' && !probes.includes(c.authorization.slice('Bearer '.length)),
+      ),
   };
 }
 
@@ -384,7 +405,10 @@ describe('the lease of an app-reviewer zone', () => {
     const { payload } = await leased(db, 'implement', 'i1');
     expect(gh.mints()).toHaveLength(1);
     expect(gh.mints()[0]?.path).toBe(`/app/installations/${AUTHOR_INSTALLATION}/access_tokens`);
-    expect(gh.calls.every((c) => issuerOf(c.authorization) === AUTHOR_APP_ID)).toBe(true);
+    // Every app call is the author app's (the check's repository read carries its probe token).
+    const signed = gh.calls.filter((c) => issuerOf(c.authorization) !== undefined);
+    expect(signed.length).toBeGreaterThanOrEqual(3);
+    expect(signed.every((c) => issuerOf(c.authorization) === AUTHOR_APP_ID)).toBe(true);
     expect(cloneToken(payload)).toBe(gh.minted[0]);
   });
 });

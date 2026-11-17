@@ -86,7 +86,10 @@ function source(l: ReturnType<typeof live>) {
   });
 }
 
-/** Records the GitHub App endpoints, answering a matching installation and one mint. */
+/**
+ * Records the GitHub App endpoints, answering a matching installation, the repository id check
+ * (issue #267: a metadata probe, the repository read and its revoke) and one mint.
+ */
 function appEndpoints() {
   return nock(api)
     .get('/repos/octo/demo/installation')
@@ -94,6 +97,14 @@ function appEndpoints() {
       seen.push('GET /repos/octo/demo/installation');
       return { id: 77, permissions: {} };
     })
+    .post('/app/installations/77/access_tokens', (b: { repositories?: string[] }) =>
+      Boolean(b.repositories),
+    )
+    .reply(201, { token: 'probe-token', expires_at: '2099-01-01T00:00:00Z' })
+    .get('/repos/octo/demo')
+    .reply(200, { id: 4242 })
+    .delete('/installation/token')
+    .reply(204)
     .post('/app/installations/77/access_tokens')
     .reply(201, () => {
       seen.push('POST /app/installations/77/access_tokens');

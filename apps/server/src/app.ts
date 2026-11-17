@@ -235,6 +235,8 @@ export function createApp(
     scrub?: { add(secret: string): void };
     /** The kill switch's installation suspension (§4.2); absent, the kill route is DB-only. */
     appSuspension?: ControlDeps['appSuspension'];
+    /** The installation check every mint goes through (issue #267), for the doctor. */
+    installationVerifier?: ControlDeps['installationVerifier'];
   },
 ): FastifyInstance {
   // Every page reads the config once per request: the store swaps it on each applied revision.
