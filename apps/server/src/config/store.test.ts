@@ -1397,6 +1397,51 @@ describe('GitHub App entries in the store (§4.4)', () => {
     expect(store.resolvedApps().get('globex')?.reviewer).toMatchObject({ source: 'vault' });
   });
 
+  test('onAppsChanged fires when a load changes the app entry fingerprints, and only then (issue #266)', () => {
+    const { w, vault, open } = withVault({ dropZones: [zone('main', { repo: 'Acme/main' })] });
+    vault.put(appEntryName('acme', 'author'), appEntry, { now: t0 });
+    const store = open();
+    const revise = (doc: Record<string, unknown>) => {
+      writeConfig(w.file, doc);
+      expect(store.reload()).toMatchObject({ ok: true });
+    };
+    let fired = 0;
+    const off = store.onAppsChanged(() => {
+      fired += 1;
+    });
+    // A revision that leaves the app entries alone does not fire.
+    revise({ dropZones: [zone('main', { repo: 'Acme/main', maxConcurrentImplement: 2 })] });
+    expect(store.refreshSecrets().ok).toBe(true);
+    expect(fired).toBe(0);
+    // The entry replaced (a new key): the next load fires.
+    const otherPem = generateKeyPairSync('rsa', { modulusLength: 2048 })
+      .privateKey.export({ type: 'pkcs8', format: 'pem' })
+      .toString();
+    const before = store.resolvedApps().get('acme')?.author;
+    vault.put(
+      appEntryName('acme', 'author'),
+      serializeAppEntry({
+        appId: '42',
+        slug: 'acme-author',
+        clientId: 'Iv23liStore0001',
+        pem: otherPem,
+        importedAt: '2026-11-16T10:00:00.000Z',
+      }),
+      { now: t0 },
+    );
+    expect(store.refreshSecrets().ok).toBe(true);
+    expect(store.resolvedApps().get('acme')?.author).not.toEqual(before);
+    expect(fired).toBe(1);
+    // A revision whose zones bring in another owner's entry fires too.
+    vault.put(appEntryName('globex', 'reviewer'), appEntry, { now: t0 });
+    revise({ dropZones: [zone('main', { repo: 'Acme/main' }), zone('g', { repo: 'globex/g' })] });
+    expect(fired).toBe(2);
+    off();
+    vault.put(appEntryName('acme', 'author'), appEntry, { now: t0 });
+    expect(store.refreshSecrets().ok).toBe(true);
+    expect(fired).toBe(2);
+  });
+
   test('a config with no app entries loads as before, its zone on an owner GitHub would refuse too', () => {
     const { open } = withVault({ dropZones: [zone('main', { repo: 'my_org/x' })] });
     const store = open();

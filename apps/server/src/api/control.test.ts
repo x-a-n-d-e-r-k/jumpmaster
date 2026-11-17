@@ -38,6 +38,7 @@ import {
 } from '../db/repo.js';
 import { createAppBrokers } from '../forge/app-brokers.js';
 import { serverScrubSet } from '../forge/scrub-set.js';
+import { createTokenCache } from '../forge/token-cache.js';
 import type { MirrorStatus } from '../images/mirror.js';
 import { intakeKey } from '../intake.js';
 import { AUTHOR_TOKEN, CLAUDE_TOKEN, NOW, world } from '../test/doctorWorld.js';
@@ -206,6 +207,37 @@ describe('control routes', () => {
     expect(isKilled(db)).toBe(true);
     expect((await post('/api/control/kill', { engaged: false })).statusCode).toBe(200);
     expect(isKilled(db)).toBe(false);
+  });
+});
+
+describe('kill switch and the token cache (issue #266)', () => {
+  test('engaging empties the app token cache: a token asked for afterwards is minted afresh', async () => {
+    const db = openDb(tmpDbFile());
+    let n = 0;
+    const cache = createTokenCache({
+      mint: async () => ({ token: `minted-${++n}`, expiresAt: new Date(t0.getTime() + 3_600_000) }),
+      register: () => {},
+      now: () => t0.getTime(),
+    });
+    const key = {
+      owner: 'o',
+      role: 'author' as const,
+      repositoryId: 1,
+      use: 'server-author',
+      appFingerprint: 'F1',
+      installationId: 7,
+    };
+    const config = {
+      listen: { host: '127.0.0.1', port: 7420 },
+      dropZones: [makeZone({ id: 'main' })],
+      secrets: { operatorToken: TOKEN },
+    } as unknown as Config;
+    app = controlApp({ db, config, now: () => t0, appTokens: cache });
+    expect(await cache.token(key)).toBe('minted-1');
+    expect(await cache.token(key)).toBe('minted-1');
+    expect((await post('/api/control/kill', { engaged: true })).statusCode).toBe(200);
+    expect((await post('/api/control/kill', { engaged: false })).statusCode).toBe(200);
+    expect(await cache.token(key)).toBe('minted-2');
   });
 });
 

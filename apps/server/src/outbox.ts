@@ -19,7 +19,13 @@ import {
   type PullFacts,
   type TokenProvider,
 } from './forge/github.js';
+import { credentialFingerprint, type Resolved } from './vault/credentials.js';
 import type { AppRole, CredentialRef } from './vault/github-app-entries.js';
+import {
+  appInstallationFor,
+  type ResolvedApps,
+  type ZoneForAppInstallation,
+} from './vault/resolution.js';
 
 /**
  * One zone's forge identities: `author` creates PRs and merges, `reviewer` only posts reviews.
@@ -43,6 +49,12 @@ export type PairOptions = {
   requestTimeoutMs?: number;
   refs?: PairRefs;
   appTokens?: (owner: string, role: AppRole) => TokenProvider;
+  /**
+   * The credentials as they resolved (`ConfigStore.resolved()` and `resolvedApps()`), for the pair
+   * cache's key. `ForgePairs.for` requires them when a role uses an app, so a replaced app entry
+   * gets a new pair (issue #266); token refs never read them.
+   */
+  credentials?: { resolved: Resolved; apps: ResolvedApps };
 };
 
 /**
@@ -123,24 +135,59 @@ export function forgeTokenFingerprint(secrets: PairTokens): string {
     .slice(0, 16);
 }
 
-type PairZone = Parameters<typeof pairFor>[0] & { id: string };
+type PairZone = Parameters<typeof pairFor>[0] & { id: string } & Pick<
+    ZoneForAppInstallation,
+    'githubApp'
+  >;
+
+type KeyPart = string | number | null;
 
 /**
- * What the refs add to a pair's cache key: each app role's owner. Token refs (or none) add
- * nothing, so their key is today's; a starter zone ignores refs, so they add nothing there either.
+ * What the refs add to a pair's cache key. Token refs (or none) add nothing, so their key is the
+ * one before apps (PR 146); a starter zone ignores refs, so they add nothing there either. With an
+ * app role it adds each role's owner; the credential fingerprint over every PAT and app entry
+ * (`credentialFingerprint`), so a replaced or swapped app entry gets a new pair; and each app
+ * role's recorded installation id and the zone's repository id (issue #266).
  */
-function refsKey(zone: PairZone, refs: PairRefs | undefined): (string | null)[][] {
+function refsKey(zone: PairZone, opts: PairOptions): KeyPart[][] {
+  const refs = opts.refs;
   if (!refs || zone.identity === 'starter') return [];
   const owners = [refs.author, refs.reviewer].map((r) =>
     r.kind === 'github-app' ? r.owner : null,
   );
-  return owners.every((o) => o === null) ? [] : [owners];
+  if (owners.every((o) => o === null)) return [];
+  if (!opts.credentials)
+    throw new Error(
+      `the pair of ${redactTokenShapes(zone.repo)} uses a GitHub App, but no resolved credentials were given for its key`,
+    );
+  const { resolved, apps } = opts.credentials;
+  const ids = (['author', 'reviewer'] as const).map((role) => {
+    if (refs[role].kind !== 'github-app') return null;
+    const at = appInstallationFor(zone, role);
+    return at ? `${at.installationId}@${at.repositoryId}` : null;
+  });
+  return [owners, [credentialFingerprint(resolved, apps)], ids];
+}
+
+/**
+ * The pair cache's key for a zone, its tokens and options (without the timeout, which picks the
+ * slot). Exported so the PAT-mode key can be pinned (PR 146's guarantee).
+ */
+export function pairKey(zone: PairZone, secrets: PairTokens, opts: PairOptions = {}): string {
+  return JSON.stringify([
+    zone.repo,
+    zone.identity ?? 'two-bot',
+    zone.authorMayBeAdmin,
+    forgeTokenFingerprint(secrets),
+    ...refsKey(zone, opts),
+  ]);
 }
 
 /**
  * The forge pairs, built on first use and rebuilt only when what they were built from changes:
- * the zone's repository, identity and admin setting, the credential fingerprint, and each
- * role's credential kind (and app owner). A config revision that leaves those alone keeps the
+ * the zone's repository, identity and admin setting, the forge tokens' fingerprint, and each
+ * role's credential kind (and, for an app, its owner, the app entries' fingerprint and the
+ * recorded installation and repository ids: issue #266). A config revision that leaves those alone keeps the
  * pair (and its connections); a rotated token, or a role switched between token and app, gets a
  * new one at the next pass. Only the latest pair per zone (timed or not) is kept.
  */
@@ -149,13 +196,7 @@ export class ForgePairs {
 
   for(zone: PairZone, secrets: PairTokens, opts: PairOptions = {}): ForgePair {
     const slot = `${zone.id}\n${opts.requestTimeoutMs ?? ''}`;
-    const key = JSON.stringify([
-      zone.repo,
-      zone.identity ?? 'two-bot',
-      zone.authorMayBeAdmin,
-      forgeTokenFingerprint(secrets),
-      ...refsKey(zone, opts.refs),
-    ]);
+    const key = pairKey(zone, secrets, opts);
     const hit = this.cache.get(slot);
     if (hit && hit.key === key) return hit.pair;
     const pair = pairFor(zone, secrets, opts);
