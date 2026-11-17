@@ -261,7 +261,11 @@ export type UpdateIssuePayload = {
   title?: string;
   body?: string;
   state?: 'closed';
+  /** With `state: 'closed'`: why it closed (GitHub's `state_reason`). */
+  stateReason?: 'completed';
 };
+/** A "blocked by" link: `issue` blocked by `blocker`, both in `repo` (the zone's repository). */
+export type AddBlockedByPayload = { issue: number; blocker: number; repo: string };
 export type SetLabelsPayload = { number: number; add: string[]; remove: string[] };
 /** A comment on an issue, found again by `marker` (from `commentMarker`), which ends the body. */
 export type CommentIssuePayload = { number: number; body: string; marker: string };
@@ -413,6 +417,14 @@ async function lookup(forges: ForgePair, kind: OpKind, opKey: string, payload: u
       const p = payload as CommentIssuePayload;
       return forges.author.findIssueCommentByMarker(p.number, p.marker);
     }
+    case 'add_blocked_by': {
+      const p = payload as AddBlockedByPayload;
+      const { blockers } = await forges.author.listBlockedBy(p.issue);
+      const linked = blockers.some(
+        (b) => b.number === p.blocker && b.repo.toLowerCase() === p.repo.toLowerCase(),
+      );
+      return linked ? { issue: p.issue, blocker: p.blocker } : null;
+    }
   }
 }
 
@@ -481,6 +493,7 @@ async function write(forges: ForgePair, kind: OpKind, opKey: string, payload: un
         ...(p.title !== undefined ? { title: p.title } : {}),
         ...(p.body !== undefined ? { body: withMarker(p.body, opKey) } : {}),
         ...(p.state ? { state: p.state } : {}),
+        ...(p.stateReason ? { stateReason: p.stateReason } : {}),
       });
       return { number: p.number };
     }
@@ -504,6 +517,11 @@ async function write(forges: ForgePair, kind: OpKind, opKey: string, payload: un
     case 'comment_issue': {
       const p = payload as CommentIssuePayload;
       return forges.author.createIssueComment(p.number, `${p.body}\n\n${p.marker}`);
+    }
+    case 'add_blocked_by': {
+      const p = payload as AddBlockedByPayload;
+      await forges.author.addBlockedBy(p.issue, p.blocker);
+      return { issue: p.issue, blocker: p.blocker };
     }
   }
 }

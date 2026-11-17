@@ -49,6 +49,14 @@ function blockersOf(entry: BlockerEntry, repo: string): string[] {
 
 export type ForgeError = Error & { status?: number };
 
+/** One "blocked by" link of an issue: the blocking issue, its repository and whether it's open. */
+export type IssueBlocker = { number: number; repo: string; open: boolean };
+/** An issue's "blocked by" links; `unreadable` counts open ones the token can't see. */
+export type BlockedByList = { blockers: IssueBlocker[]; unreadable: number };
+
+/** GitHub's answer when the link `addBlockedBy` asks for is already there. */
+const LINK_EXISTS = /already (exists|been taken|blocked|added)|duplicate/i;
+
 export type PullFacts = {
   number: number;
   title: string;
@@ -176,8 +184,15 @@ export interface Forge {
   findIssueByMarker(marker: string, since: string): Promise<{ number: number } | null>;
   updateIssue(
     number: number,
-    patch: { title?: string; body?: string; state?: 'closed' },
+    patch: { title?: string; body?: string; state?: 'closed'; stateReason?: 'completed' },
   ): Promise<void>;
+  /** Every "blocked by" link on the issue (the first 100), open and closed. */
+  listBlockedBy(number: number): Promise<BlockedByList>;
+  /**
+   * A write: marks `issue` blocked by `blocker`, both in this repository (GraphQL `addBlockedBy`).
+   * A link that already exists is success.
+   */
+  addBlockedBy(issue: number, blocker: number): Promise<void>;
   setLabels(number: number, change: { add: string[]; remove: string[] }): Promise<void>;
   /** A write: posts a comment on an issue (or PR). */
   createIssueComment(number: number, body: string): Promise<{ id: number }>;
@@ -554,6 +569,40 @@ export class GitHubForge implements Forge {
     }
   }
 
+  async listBlockedBy(number: number): Promise<BlockedByList> {
+    const entry = (await this.readBlockers([number])).repository?.[`i${number}`] ?? null;
+    if (!entry) throw new Error(`blockers of #${number} are unreadable`);
+    const blockers = (entry.blockedBy.nodes ?? []).flatMap((n) =>
+      n === null
+        ? []
+        : [{ number: n.number, repo: n.repository.nameWithOwner, open: n.state === 'OPEN' }],
+    );
+    const open = blockers.filter((b) => b.open).length;
+    return { blockers, unreadable: Math.max(0, entry.issueDependenciesSummary.blockedBy - open) };
+  }
+
+  async addBlockedBy(issue: number, blocker: number): Promise<void> {
+    type Ids = { repository?: { issue?: { id: string } | null; blocker?: { id: string } | null } };
+    const ids = await this.octokit.graphql<Ids>(
+      `query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { issue: issue(number: ${issue}) { id } blocker: issue(number: ${blocker}) { id } } }`,
+      { owner: this.owner, repo: this.repo },
+    );
+    const issueId = ids.repository?.issue?.id;
+    const blockingIssueId = ids.repository?.blocker?.id;
+    if (!issueId || !blockingIssueId) throw new Error(`no node id for #${issue} or #${blocker}`);
+    try {
+      await this.octokit.graphql(
+        `mutation($issueId: ID!, $blockingIssueId: ID!) { addBlockedBy(input: { issueId: $issueId, blockingIssueId: $blockingIssueId }) { issue { id } } }`,
+        { issueId, blockingIssueId },
+      );
+    } catch (err) {
+      const e = err as { errors?: { message?: string }[]; message?: string };
+      const messages = e.errors?.map((x) => x.message ?? '') ?? [e.message ?? ''];
+      if (messages.length > 0 && messages.every((m) => LINK_EXISTS.test(m))) return;
+      throw err;
+    }
+  }
+
   async isTrusted(login: string): Promise<boolean> {
     return this.hasRole(login, TRUSTED_ROLES, TRUSTED_PERMISSIONS);
   }
@@ -753,13 +802,15 @@ export class GitHubForge implements Forge {
 
   async updateIssue(
     number: number,
-    patch: { title?: string; body?: string; state?: 'closed' },
+    patch: { title?: string; body?: string; state?: 'closed'; stateReason?: 'completed' },
   ): Promise<void> {
+    const { stateReason, ...rest } = patch;
     await this.octokit.rest.issues.update({
       owner: this.owner,
       repo: this.repo,
       issue_number: number,
-      ...patch,
+      ...rest,
+      ...(stateReason ? { state_reason: stateReason } : {}),
     });
   }
 
