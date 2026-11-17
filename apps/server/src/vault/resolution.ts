@@ -132,10 +132,30 @@ export function isAppReviewerZone(
   zone: ZoneForCredentials & ZoneForAppInstallation,
   apps: ResolvedApps,
 ): boolean {
-  const r = credentialFor(zone, 'reviewer', apps);
+  return isAppZoneFor(zone, 'reviewer', apps);
+}
+
+/**
+ * An app-author zone (§4.2, issue #249): a two-bot zone whose author credential is its owner's
+ * GitHub App, decryptable, with a recorded author installation. Its implement, heal and resolve
+ * drops fetch with an author `contents: read` token minted per drop, not a PAT.
+ */
+export function isAppAuthorZone(
+  zone: ZoneForCredentials & ZoneForAppInstallation,
+  apps: ResolvedApps,
+): boolean {
+  return isAppZoneFor(zone, 'author', apps);
+}
+
+function isAppZoneFor(
+  zone: ZoneForCredentials & ZoneForAppInstallation,
+  role: AppRole,
+  apps: ResolvedApps,
+): boolean {
+  const r = credentialFor(zone, role, apps);
   return (
     r.ref.kind === 'github-app' &&
     r.problem === undefined &&
-    appInstallationFor(zone, 'reviewer') !== undefined
+    appInstallationFor(zone, role) !== undefined
   );
 }

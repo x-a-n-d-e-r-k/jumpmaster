@@ -1,6 +1,7 @@
 /**
  * The tokens minted for one drop each (spec docs/superpowers/specs/2026-11-13-github-app-auth.md,
- * §4.2, issue #237): the reviewer's `contents: read` clone token of a review, crew or doctor drop.
+ * §4.2): the reviewer's `contents: read` clone token of a review, crew or doctor drop (issue #237),
+ * and the author's `contents: read` fetch token of an implement, heal or resolve drop (issue #249).
  *
  * Held in memory only, keyed by drop id and epoch, with the owner whose app minted it: never in
  * the DB, the vault, an audit row, an event or a log. Each is revoked when its drop ends:

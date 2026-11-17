@@ -173,6 +173,27 @@ describe('buildPayload', () => {
     }
   });
 
+  test('a passed read token (the per-drop author app token) is the forgeToken of implement, heal and resolve', () => {
+    // Issue #249: in an app-author zone the lease mints the fetch token; no PAT reaches the drop.
+    const minted = 'minted-author-read';
+    for (const d of [impl, heal, resolve]) {
+      const p = buildPayload(db, zone, d, secrets, { readToken: minted });
+      expect(p.credentials, d.role).toEqual({ claudeToken: 'claude-secret', forgeToken: minted });
+      expect(JSON.stringify(p), d.role).not.toContain(secrets.githubReadToken);
+      expect(JSON.stringify(p), d.role).not.toContain(secrets.githubAuthorToken);
+    }
+  });
+
+  test('without a passed read token, implement, heal and resolve payloads are as before', () => {
+    for (const d of [impl, heal, resolve]) {
+      expect(buildPayload(db, zone, d, secrets, {}), d.role).toEqual(build(d));
+      expect(build(d).credentials, d.role).toEqual({
+        claudeToken: 'claude-secret',
+        forgeToken: 'read-secret',
+      });
+    }
+  });
+
   test('implement with a headSha resumes', () => {
     expect(build({ ...impl, headSha: 'ck1' })).toMatchObject({ resume: true, resumeSha: 'ck1' });
     expect(build(impl)).toMatchObject({ resume: false });
