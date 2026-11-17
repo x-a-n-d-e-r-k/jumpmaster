@@ -36,7 +36,13 @@ function fakeGitHub() {
   const calls: Call[] = [];
   const minted: string[] = [];
   const jwts: string[] = [];
-  const state = { installed: { status: 200, id: 77 } as { status: number; id?: number } };
+  const state = {
+    installed: { status: 200, id: 77 } as { status: number; id?: number },
+    /** The id GitHub gives each repository (issue #267). */
+    repositoryId: 4242,
+  };
+  /** The metadata-only tokens the verification minted (narrowed by name, not by id). */
+  const probes: string[] = [];
   const record = async (req: Request): Promise<Call> => {
     const text = await req.text();
     const authorization = req.headers.get('authorization') ?? '';
@@ -62,24 +68,48 @@ function fakeGitHub() {
     })
     .post(/^\/app\/installations\/\d+\/access_tokens$/)
     .reply(async (req: Request) => {
-      await record(req);
+      const call = await record(req);
+      if ('repositories' in (call.body as object)) {
+        const probe = ['ghs', `PROBE${String(probes.length + 1).padStart(4, '0')}`.repeat(4)].join(
+          '_',
+        );
+        probes.push(probe);
+        return [201, { token: probe, expires_at: new Date(clock + HOUR).toISOString() }];
+      }
       const token = tokenOf(minted.length + 1);
       minted.push(token);
       return [201, { token, expires_at: new Date(clock + HOUR).toISOString() }];
+    })
+    .get(/^\/repos\/[^/]+\/[^/]+$/)
+    .reply(async (req: Request) => {
+      await record(req);
+      return [200, { id: state.repositoryId }];
     })
     .delete('/installation/token')
     .reply(async (req: Request) => {
       await record(req);
       return [204, ''];
     });
+  const isProbe = (c: Call) =>
+    probes.includes(c.authorization.slice('Bearer '.length)) ||
+    (c.body !== undefined && 'repositories' in (c.body as object));
   return {
     calls,
     minted,
     jwts,
+    probes,
     state,
-    mints: () => calls.filter((c) => c.path.endsWith('/access_tokens')),
+    /** The zone mints: narrowed by repository id. */
+    mints: () => calls.filter((c) => c.path.endsWith('/access_tokens') && !isProbe(c)),
+    /** Every POST to access_tokens, the verification's probe included. */
+    anyMint: () => calls.filter((c) => c.path.endsWith('/access_tokens')),
     lookups: () => calls.filter((c) => c.path.endsWith('/installation')),
-    revokes: () => calls.filter((c) => c.method === 'DELETE'),
+    revokes: () => calls.filter((c) => c.method === 'DELETE' && !isProbe(c)),
+    /** The calls of the use, without the verification's (issue #267). */
+    useCalls: () =>
+      calls.filter(
+        (c) => !isProbe(c) && !(c.method === 'GET' && !c.path.endsWith('/installation')),
+      ),
   };
 }
 
@@ -191,6 +221,10 @@ describe('createAppTokenSource', () => {
     expect(t1).toBe(gh.minted[0]);
     expect(gh.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
       'GET /repos/Octo/demo/installation',
+      // The repository id check (issue #267): a metadata-only token narrowed to Octo/demo by name.
+      'POST /app/installations/77/access_tokens',
+      'GET /repos/Octo/demo',
+      'DELETE /installation/token',
       'POST /app/installations/77/access_tokens',
     ]);
     expect(gh.mints()[0]!.body).toEqual({
@@ -201,7 +235,7 @@ describe('createAppTokenSource', () => {
     expect(await p.token()).toBe(t1);
     // A second provider for the same zone, role and use shares the cache.
     expect(await w.source.provider('main', 'reviewer', 'drop-read-reviewer').token()).toBe(t1);
-    expect(gh.calls).toHaveLength(2);
+    expect(gh.calls).toHaveLength(5);
   });
 
   test('a mismatched installation id rejects, naming the repository and role, and mints nothing', async () => {
@@ -317,6 +351,8 @@ describe('createAppTokenSource', () => {
     const w = world();
     const p = w.source.provider('main', 'reviewer', 'drop-read-reviewer');
     const before = await p.token();
+    // GitHub agrees with the new id, so the check (issue #267) passes.
+    gh.state.repositoryId = 4343;
     w.zones[0] = { ...ZONE, githubApp: { repositoryId: 4343, installations: { reviewer: 77 } } };
     const after = await p.token();
     expect(after).not.toBe(before);
@@ -371,6 +407,50 @@ describe('createAppTokenSource', () => {
     for (const s of [...gh.minted, ...gh.jwts, KEY_A]) expect(values).toContain(s);
     const text = [...errors.map(serialized), ...captured].join('\n');
     for (const s of secrets) expect(text.includes(s)).toBe(false);
+  });
+});
+
+describe('repository id verification (issue #267)', () => {
+  test('a recorded repository id GitHub does not give Octo/demo rejects, naming the zone and role, and mints nothing', async () => {
+    const w = world();
+    gh.state.repositoryId = 9999;
+    const e = await rejection(w.source.provider('main', 'reviewer', 'server-reviewer').token());
+    expect(e.message).toBe('main: the recorded reviewer repository id does not match Octo/demo');
+    await rejection(w.source.fresh('main', 'reviewer', 'drop-read-reviewer'));
+    expect(gh.mints()).toEqual([]);
+    expect(gh.minted).toEqual([]);
+  });
+
+  test('the verification probe is narrowed to the zone repository by name, metadata: read only', async () => {
+    const w = world();
+    gh.state.installed = { status: 200, id: 11 };
+    await w.source.provider('main', 'author', 'server-author').token();
+    const probe = gh.anyMint().find((c) => !gh.mints().includes(c));
+    expect(probe?.body).toEqual({ repositories: ['demo'], permissions: { metadata: 'read' } });
+    // The probe was revoked once read, and is in the scrub set.
+    expect(gh.calls.filter((c) => c.method === 'DELETE')).toHaveLength(1);
+    expect(w.scrub.values()).toContain(gh.probes[0]);
+  });
+
+  test('a cached token is not served once its zone no longer verifies', async () => {
+    const w = world();
+    const p = w.source.provider('main', 'reviewer', 'drop-read-reviewer');
+    await p.token();
+    w.zones[0] = { ...ZONE, githubApp: { repositoryId: 5555, installations: { reviewer: 77 } } };
+    await rejection(p.token());
+    expect(gh.mints()).toHaveLength(1);
+  });
+
+  test('a lookup that fails is never a pass: no mint, and the next call verifies again', async () => {
+    const w = world();
+    gh.state.installed = { status: 502 };
+    const e = await rejection(w.source.fresh('main', 'author', 'drop-read-author'));
+    expect(e.message).toContain('could not verify');
+    expect(gh.anyMint()).toEqual([]);
+    gh.state.installed = { status: 200, id: 11 };
+    await w.source.fresh('main', 'author', 'drop-read-author');
+    expect(gh.lookups()).toHaveLength(2);
+    expect(gh.mints()).toHaveLength(1);
   });
 });
 

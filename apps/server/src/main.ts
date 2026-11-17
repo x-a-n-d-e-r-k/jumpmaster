@@ -18,6 +18,7 @@ import { reconcileZone } from './flow/reconcile.js';
 import { createAppBrokers } from './forge/app-brokers.js';
 import { createAppTokenSource } from './forge/app-tokens.js';
 import { createHeldDropTokens } from './forge/held-tokens.js';
+import { appRefusal } from './forge/installation-verifier.js';
 import { makeReadForgeFor, TIMED_REQUEST_MS } from './forge/read-forge.js';
 import { serverScrubSet } from './forge/scrub-set.js';
 import { imageLockPath, startImageMirror } from './images/run.js';
@@ -163,7 +164,8 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
   live.onAppsChanged(() => appTokens.clear());
   // The push containers' tokens in app mode (§4.2, issue #224): one broker per owner and role,
   // every key, JWT and token in the scrub set before use.
-  const appBrokers = createAppBrokers({ apps: () => live.resolvedApps() });
+  // They verify a zone's recorded ids with the token source's check (issue #267): one cache.
+  const appBrokers = createAppBrokers({ apps: () => live.resolvedApps(), verifier: appTokens });
   // The review, crew and doctor drops' clone tokens in app mode (§4.2, issue #237): minted per
   // drop, held in memory, revoked when the drop ends (the lease tick sweeps the ended ones).
   const heldReadTokens = createHeldDropTokens({ log });
@@ -210,6 +212,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     images: images.mirror,
     appBrokers,
     appTokens,
+    installationVerifier: appTokens,
     heldReadTokens,
     resolvedApps: () => live.resolvedApps(),
     // The kill switch suspends each zone's app installations, and release unsuspends them (§4.2).
@@ -252,7 +255,8 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     const resolved = live.resolved();
     for (const zone of config.dropZones) {
       try {
-        // A zone with a credential problem is parked with it as the reason (vault/problems.ts).
+        // A zone with a credential problem is parked with it as the reason (vault/problems.ts),
+        // and so is one whose recorded app ids GitHub refuses (issue #267).
         await zonePass(
           zone,
           credentialProblems(zone, resolved, live.resolvedApps()),
@@ -278,6 +282,8 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
             );
           },
           log,
+          // A zone whose recorded app ids GitHub refuses is parked too (issue #267).
+          () => appRefusal(appTokens, zone, live.resolvedApps()),
         );
       } catch (e) {
         log(`pass failed for zone ${zone.id}: ${errorMessage(e)}`);
