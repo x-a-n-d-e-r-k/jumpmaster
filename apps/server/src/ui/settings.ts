@@ -739,7 +739,7 @@ ${INSTALL_SCRIPT}`,
 
 /**
  * The Other machines tab's script: Save sends the address alone (`PUT`, empty clears it) and
- * redraws; Check asks the server to fetch `<publicUrl>/healthz` and says what it answered.
+ * redraws, or goes to the confirmation page the change waits on (issue #254); Check asks the server to fetch `<publicUrl>/healthz` and says what it answered.
  */
 export const OTHER_MACHINES_SCRIPT = `<script>
 async function jmSavePublicUrl(value, status, go) {
@@ -747,6 +747,7 @@ async function jmSavePublicUrl(value, status, go) {
   let j = {};
   try { j = await r.json(); } catch (e) {}
   if (r.ok) { status.textContent = 'Saved as revision ' + j.revision + '.'; go('/settings/other-machines'); return 'saved'; }
+  if (r.status === 409 && j.needsConfirmation) { go(j.confirm); return 'confirm'; }
   if (j.issues) { status.textContent = j.issues.map((i) => i.message).join('; '); return 'refused'; }
   status.textContent = j.error || ('Refused (' + r.status + ')');
   return 'refused';
@@ -785,7 +786,7 @@ export function renderOtherMachines(o: {
   const value = config.server?.publicUrl ?? '';
   const how = fileMode
     ? '<p class="warn">File mode: the address is read from <code>JM_PUBLIC_URL</code> in the server&#39;s environment. Set it there and restart, or adopt the config into the database to set it here.</p>'
-    : '<p>An absolute <code>https://</code> address with no path, query or fragment. Saving applies it at once, with no restart.</p>';
+    : '<p>A plain <code>https://</code> origin: a host name or a bracketed IPv6 address and an optional port, with no path, query or fragment. New machines download and run the installer from it as root, so saving asks for your passphrase on a confirmation page first; it then applies at once, with no restart.</p>';
   const state = current
     ? `<p>Other machines reach this server at <code>${escapeHtml(current)}</code>.</p>`
     : `<p class="warn">${escapeHtml(PUBLIC_URL_NEEDED)}: until then, nothing that needs it (such as adding a stick on another machine) is offered.</p>`;

@@ -1,4 +1,4 @@
-// The stick installer (issue #138): `curl -fsSL <publicUrl>/install/stick.sh | sudo sh -s -- <code>`
+// The stick installer (issue #138): `curl -fsSL '<publicUrl>/install/stick.sh' | sudo sh -s -- <code>`
 // on a fresh Linux machine or a Mac with Docker Desktop, and the cloud-init snippet that runs the same line when a VPS is made.
 // The script holds no secret: the one-time code arrives as its argument, and only this server's
 // address, the stick image's digest, the release signer and the pinned SHA-256s of cosign and of
@@ -80,9 +80,9 @@ export function repositoryOf(sourceUrl: string | undefined): string | null {
 /** `s` as one single-quoted shell word. */
 export const shq = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
 
-/** The line the owner pastes on the machine. */
+/** The line the owner pastes on the machine: the script's URL is one single-quoted word. */
 export const installLine = (serverUrl: string, code: string): string =>
-  `curl -fsSL ${serverUrl}/install/stick.sh | sudo sh -s -- ${code}`;
+  `curl -fsSL ${shq(`${serverUrl}/install/stick.sh`)} | sudo sh -s -- ${code}`;
 
 /** The placeholder the owner replaces with an auth key from the Tailscale admin console. */
 export const TS_AUTHKEY_PLACEHOLDER = 'TS_AUTHKEY';
