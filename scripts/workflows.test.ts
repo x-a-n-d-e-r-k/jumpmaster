@@ -2,7 +2,14 @@
 // conditions are evaluated with a small GitHub-expression evaluator, so the tests prove which jobs
 // run for a tag push and for a workflow_dispatch dry run, not only that some text is present.
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -662,4 +669,56 @@ test('every actions/checkout step in every workflow keeps no credentials (issue 
       }
   }
   expect(checkouts).toBeGreaterThanOrEqual(10);
+});
+
+describe('the release needs a green Images run on main for its commit', () => {
+  const SCRIPT = join(ROOT, 'scripts/release-images-green.sh');
+  const COMMIT = 'a'.repeat(40);
+  /** Runs the script with a fake `gh` that records its arguments and answers as told. */
+  const run = (answer: { out?: string; exit?: number }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'jm-gh-'));
+    const log = join(dir, 'args');
+    const gh = join(dir, 'gh');
+    writeFileSync(
+      gh,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > '${log}'\nprintf '%s' '${answer.out ?? ''}'\nexit ${answer.exit ?? 0}\n`,
+    );
+    chmodSync(gh, 0o755);
+    const r = spawnSync('bash', [SCRIPT, COMMIT], {
+      encoding: 'utf8',
+      env: { PATH: `${dir}:${process.env.PATH}`, GITHUB_REPOSITORY: 'owner/repo' },
+    });
+    const args = existsSync(log) ? readFileSync(log, 'utf8') : '';
+    return { status: r.status, out: `${r.stdout}${r.stderr}`, args };
+  };
+
+  test('asks for successful push runs of images.yml on main for exactly that commit', () => {
+    const r = run({ out: '1' });
+    expect(r.status).toBe(0);
+    const url = r.args.split('\n').find((a) => a.startsWith('repos/'));
+    expect(url).toBe(
+      `repos/owner/repo/actions/workflows/images.yml/runs?head_sha=${COMMIT}&event=push&branch=main&status=success&per_page=1`,
+    );
+  });
+
+  test('refuses when no run passed, when the read fails, and when the answer is not a count', () => {
+    for (const answer of [{ out: '0' }, { out: '', exit: 1 }, { out: 'null' }, { out: '' }]) {
+      const r = run(answer);
+      expect(r.status, JSON.stringify(answer)).toBe(1);
+      expect(r.out, JSON.stringify(answer)).toContain('nothing is built or signed');
+    }
+  });
+
+  test('guard runs it on the peeled commit with a read-only Actions token, after the main check', () => {
+    const guard = release().jobs.guard as Job;
+    expect(guard.permissions).toEqual({ contents: 'read', actions: 'read' });
+    const runs = steps(guard).map((s) => s.run ?? '');
+    const onMain = runs.findIndex((r) => /merge-base --is-ancestor/.test(r));
+    const green = steps(guard).findIndex((s) =>
+      (s.run ?? '').includes('scripts/release-images-green.sh "$commit"'),
+    );
+    expect(onMain).toBeGreaterThanOrEqual(0);
+    expect(green).toBe(onMain);
+    expect(steps(guard)[green]?.env?.GH_TOKEN).toBe('${{ github.token }}');
+  });
 });
