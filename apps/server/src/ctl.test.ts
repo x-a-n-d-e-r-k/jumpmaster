@@ -2,12 +2,15 @@ import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import { CONTROL_ROUTES } from './api/manifest.js';
 import { createApp } from './app.js';
 import { loadBoot } from './config/boot.js';
 import { ConfigStore } from './config/store.js';
 import { ctlRequest, runCtl } from './ctl.js';
 import { openDb } from './db/open.js';
-import { t0, tmpDbFile } from './test/helpers.js';
+import { appendEvents, listEvents } from './db/repo.js';
+import { plain } from './terminal.js';
+import { seedQueuedDrop, t0, tmpDbFile } from './test/helpers.js';
 
 const TOKEN = 'o'.repeat(32);
 const env = { JM_OPERATOR_TOKEN: TOKEN };
@@ -302,8 +305,8 @@ describe('ctl config', () => {
     const r = await run(['config', 'export'], '', s.fetch);
     expect(r.code).toBe(0);
     expect(r.err).toEqual([]);
-    // One write, byte for byte the export (it ends in its own newline; out adds none).
-    expect(r.out).toEqual([s.store.exportJson().replace(/\n$/, '')]);
+    // A write per line, byte for byte the export (it ends in its own newline; out adds that).
+    expect(r.out.join('\n')).toEqual(s.store.exportJson().replace(/\n$/, ''));
     for (const v of Object.values(storeEnv)) expect(r.out.join('')).not.toContain(v);
     await s.app.close();
   });
@@ -1574,5 +1577,223 @@ describe('ctl kill / unkill and suspended installations (issue #225)', () => {
     const r = await run(['kill'], '', fakeFetch(400, { error: 'invalid body' }));
     expect(r.code).toBe(1);
     expect(r.out).toEqual(['400 {"error":"invalid body"}']);
+  });
+});
+
+describe('ctl prints no terminal control (issue #264)', () => {
+  const ESC = '\u001b';
+  const CSI = '\u009b';
+  const LS = '\u2028';
+  const POISON = `${ESC}[31m${CSI}2K${LS}\u2029\r\n\u007f\u0085`;
+  const BAD = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+
+  test('plain() strips C0, DEL, C1 and the line and paragraph separators', () => {
+    for (let c = 0; c <= 0x1f; c++) expect(plain(`a${String.fromCharCode(c)}b`)).toBe('ab');
+    for (let c = 0x7f; c <= 0x9f; c++) expect(plain(`a${String.fromCharCode(c)}b`)).toBe('ab');
+    expect(plain('a\u2028b\u2029c')).toBe('abc');
+    expect(plain('evil.example\u001b[31mFAKE')).toBe('evil.example[31mFAKE');
+    expect(plain('test\u001b[2K\rOK')).toBe('test[2KOK');
+    expect(plain('ü é – “x”  ')).toBe('ü é – “x”  ');
+  });
+
+  /** Every string in `v` with the poison appended, keys kept. */
+  const poison = (v: unknown): unknown =>
+    typeof v === 'string'
+      ? `${v}${POISON}`
+      : Array.isArray(v)
+        ? v.map(poison)
+        : v !== null && typeof v === 'object'
+          ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, poison(x)]))
+          : v;
+
+  /** One answer with the fields the formatters read, so each has strings to print. */
+  const ANSWER = poison({
+    ok: true,
+    id: 's1',
+    slots: 2,
+    maxSlots: 4,
+    revision: 3,
+    since: '2026-11-03',
+    headline: 'Blocked',
+    detail: 'a detail',
+    also: [{ text: 'also', href: '/x' }],
+    action: { label: 'fix', href: '/fix' },
+    message: 'a message',
+    publicUrl: 'https://jm.example',
+    markdown: '# Goal\nline two\n',
+    mode: 'db',
+    modeLabel: 'Active',
+    zone: 'web',
+    preset: 'node',
+    egress: 'monitor',
+    gates: [{ name: 'test', run: 'npm test' }],
+    removed: 'web',
+    changed: ['dropZones[web]'],
+    restartNeeded: ['server.port'],
+    restartPending: ['server.port'],
+    warnings: ['a warning'],
+    config: { server: { name: 'x' } },
+    zones: [
+      {
+        id: 'web',
+        repo: 'octo/web',
+        modeLabel: 'Active',
+        egress: 'monitor',
+        identity: 'starter',
+        problems: ['a problem'],
+      },
+    ],
+    hosts: [{ host: 'evil.example', decision: 'refused', count: 1, drops: ['d1'] }],
+    sticks: [
+      {
+        id: 's1',
+        name: 'kidney-shadow',
+        slots: 1,
+        desiredSlots: 1,
+        maxSlots: 2,
+        lastSeenAt: '2026-11-03T00:00:00.000Z',
+      },
+    ],
+    tokens: [
+      {
+        id: 't1',
+        zoneId: 'web',
+        scope: 'read',
+        label: 'a label',
+        expiresAt: '2026-12-01T00:00:00.000Z',
+        createdAt: '2026-11-01T00:00:00.000Z',
+      },
+    ],
+    token: 'mcp-token',
+    revisions: [
+      {
+        id: 1,
+        createdAt: '2026-11-01T00:00:00.000Z',
+        via: 'ctl',
+        note: 'a note',
+        changes: [{ path: 'server.name', from: 'a', to: 'b' }],
+      },
+    ],
+    secrets: [{ name: 'a', source: 'file', present: true }],
+    run: {
+      id: 1,
+      finishedAt: '2026-11-03T00:00:00.000Z',
+      checks: [
+        {
+          id: 'zone.egress',
+          zoneId: 'web',
+          status: 'fail',
+          message: 'a failure',
+          fix: 'do this\nthen that',
+        },
+      ],
+    },
+    briefings: [
+      {
+        id: 1,
+        zone: 'web',
+        kind: 'refute',
+        about: { text: 'about', url: 'https://x' },
+        decision: 'decide',
+        why: 'because\nfull text: /drops/d1',
+        recommendation: 'r',
+        onHold: 'h',
+        options: [{ id: 'a', label: 'A', effectText: 'e' }],
+        optionsDigest: 'abc',
+      },
+    ],
+    ruleset: { text: '{"a":1}\n' },
+    codeowners: { text: '* @octo\n' },
+    pat: { implement: 'https://github.com/settings/pat' },
+    checklist: { url: 'https://x', items: ['one'] },
+    installations: {
+      failed: [{ owner: 'octo', role: 'author', installationId: 1, status: 500 }],
+    },
+  });
+
+  const ndjson = `${JSON.stringify(ANSWER)}\n${JSON.stringify(ANSWER)}\n`;
+
+  test('D5: every manifest verb prints lines without a terminal control', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'jm-264-'));
+    for (const f of ['goal.json', 'issue.json', 'x.json', 'v'])
+      writeFileSync(join(dir, f), JSON.stringify(ANSWER));
+    const examples = CONTROL_ROUTES.flatMap((r) => [r.ctl, ...(r.also ?? [])]).filter(
+      (e): e is string => e !== null,
+    );
+    expect(examples.length).toBeGreaterThan(30);
+    for (const example of examples) {
+      // The example's words, a file argument pointed at a file that is there.
+      const argv = example
+        .split(' ')
+        .slice(1)
+        .map((w) => (/\.json$/.test(w) ? join(dir, w) : w));
+      const impl = (async (url: URL | string) =>
+        new Response(String(url).includes('transcript') ? ndjson : JSON.stringify(ANSWER), {
+          status: 200,
+        })) as typeof fetch;
+      const r = await run(argv, `secret${POISON}\n`, { calls: [], impl }).catch((e) => {
+        throw new Error(`${example}: ${e}`);
+      });
+      for (const line of [...r.out, ...r.err])
+        expect([example, line, BAD.test(line)]).toEqual([example, line, false]);
+      expect([example, r.out.length + r.err.length > 0]).toEqual([example, true]);
+    }
+  });
+
+  test('a refused answer prints no terminal control either', async () => {
+    const r = await run(['pause', 'web'], '', fakeFetch(409, ANSWER));
+    expect(r.code).toBe(1);
+    for (const line of [...r.out, ...r.err]) expect(BAD.test(line)).toBe(false);
+  });
+
+  test('zones egress observed and zones add print hosts and gates without the escapes', async () => {
+    const observed = await run(
+      ['zones', 'egress', 'observed', 'z'],
+      '',
+      fakeFetch(200, {
+        since: '2026-11-03',
+        hosts: [{ host: 'evil.example\u001b[31mFAKE', decision: 'refused', count: 1, drops: [] }],
+      }),
+    );
+    expect(observed.out).toEqual(['evil.example[31mFAKE  refused 1x  drops: ']);
+    const added = await run(
+      ['zones', 'add', 'octo/demo'],
+      '',
+      fakeFetch(200, {
+        zone: 'demo',
+        revision: 2,
+        gates: [{ name: 'test\u001b[2K\rOK', run: 'x' }],
+      }),
+    );
+    expect(added.out[1]).toBe('  gate test[2KOK: x');
+  });
+
+  test('--json prints the answer as it came, escapes and all', async () => {
+    const body = {
+      since: '2026-11-03',
+      hosts: [{ host: 'evil.example\u001b[31mFAKE', decision: 'refused', count: 1, drops: [] }],
+    };
+    const r = await run(['zones', 'egress', 'observed', 'z', '--json'], '', fakeFetch(200, body));
+    expect(r.out).toEqual([`200 ${JSON.stringify(body)}`]);
+    expect(r.out[0]).toContain('evil.example\\u001b[31mFAKE');
+  });
+
+  test('a recorded egress observation keeps no control character in its host', () => {
+    const db = seedQueuedDrop();
+    appendEvents(db, 'd1', [
+      {
+        ts: t0.toISOString(),
+        kind: 'egress',
+        data: { host: 'evil.example\u001b[31m\u009b\u2028x', decision: 'refused', count: 1 },
+      },
+      { ts: t0.toISOString(), kind: 'log', data: { message: 'kept\u001b' } },
+    ]);
+    const [egress, log] = listEvents(db, 'd1');
+    expect(egress?.data).toEqual({
+      host: 'evil.example?[31m??x',
+      decision: 'refused',
+      count: 1,
+    });
+    expect(log?.data).toEqual({ message: 'kept\u001b' });
   });
 });
