@@ -26,6 +26,7 @@ import {
   mirrorFetch,
   prepareBranch,
   pushStaged,
+  setGitOutputMaxBytes,
   setSpawn,
   setWorkRoot,
   stageFromAgent,
@@ -64,7 +65,10 @@ beforeAll(() => {
   setWorkRoot(work);
 });
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
-afterEach(() => setSpawn(null));
+afterEach(() => {
+  setSpawn(null);
+  setGitOutputMaxBytes(null);
+});
 
 const leftovers = () => readdirSync(work).filter((e) => e.startsWith('push-'));
 
@@ -341,6 +345,21 @@ describe('pushStaged', () => {
       reason: 'protected path .github/x.yml',
       retryable: false,
     });
+    expect(w.remoteTip()).toBe(w.s0);
+    expect(leftovers()).toEqual([]);
+  });
+
+  test('a check past the git output cap refuses the push', async () => {
+    const w = await world('outputcap');
+    for (let i = 0; i < 40; i++) {
+      writeFileSync(join(w.dir, `.a-${String(i).padStart(3, '0')}-${'p'.repeat(150)}`), '');
+    }
+    mkdirSync(join(w.dir, '.github/workflows'), { recursive: true });
+    writeFileSync(join(w.dir, '.github/workflows/ci.yml'), '');
+    await commitIfDirty(w.dir, 'feat: pad');
+    setGitOutputMaxBytes(4096);
+    const r = await stageAndPush(w);
+    expect(r).toEqual({ status: 'failed', reason: 'diff too large to check', retryable: false });
     expect(w.remoteTip()).toBe(w.s0);
     expect(leftovers()).toEqual([]);
   });
