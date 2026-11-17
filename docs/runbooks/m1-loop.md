@@ -120,7 +120,7 @@ Start from the M0 config. The zone gains these fields (defaults shown):
 {
   "id": "main",
   "repo": "your-org/your-test-repo",
-  "readyLabel": "agent-ready",
+  "readyLabel": "drop-ready",
   "gates": [{ "name": "test", "run": "npm test", "timeoutMinutes": 20 }],
   "image": "jumpmaster-trooper:dev",
   "mergeMethod": "squash",
@@ -316,7 +316,7 @@ run below covers the push path.
 
 ## 5. Scenarios
 
-Create each issue in the test repository with the `agent-ready` label, then watch the
+Create each issue in the test repository with the `drop-ready` label, then watch the
 home page (`http://127.0.0.1:7420`). The new **Usage** section shows the dispatch gate;
 the work-item table shows the PR, its head SHA, the latest verdict and attempts per
 budget; the **Outbox** section lists any forge write that is `unknown` or `failed`.

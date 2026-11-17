@@ -9,10 +9,12 @@ import { resolve as resolvePath, sep } from 'node:path';
  * `fail` when the cause is a setting, such as a refused permission). It is never a `pass`.
  */
 import { DoctorResultSchema, type DropResult, hostAllowed } from '@jumpmaster/protocol';
+import { LEGACY_READY_LABEL } from '../config/ready-label.js';
 import type { ConfigStatus } from '../config/source.js';
 import {
   allowedHostsOf,
   type Config,
+  DEFAULT_READY_LABEL,
   type DropZoneConfig,
   STARTER_WARNING,
   triageGateOn,
@@ -132,6 +134,7 @@ export const CHECK_IDS = [
   'zone.identity',
   'zone.mode',
   'zone.preset',
+  'zone.ready-label',
   'zone.services',
 ] as const;
 
@@ -1443,7 +1446,7 @@ const LABEL_SPEC: Record<string, { color: string; description: string }> = {
   ready: { color: '0E8A16', description: 'Ready for a Jumpmaster agent' },
   retry: { color: 'FBCA04', description: 'Ask Jumpmaster to retry a parked issue' },
   staged: { color: 'C5DEF5', description: 'Filed by the crew, waiting for Command' },
-  triage: { color: 'D876E3', description: 'Not in the agent-ready format: waiting for triage' },
+  triage: { color: 'D876E3', description: 'Not in the drop-ready format: waiting for triage' },
   triaged: { color: 'BFD4F2', description: 'Triaged by Jumpmaster: see its comment' },
 };
 
@@ -1911,6 +1914,21 @@ function modeCheck(zone: DropZoneConfig, d: DoctorDeps): DoctorCheck {
   };
 }
 
+/**
+ * A zone still on the ready label from before #198 (pinned at the upgrade): information, with the
+ * way to `drop-ready` in the order that misses no ready issue (rename on GitHub, then the config).
+ */
+function readyLabelCheck(zone: DropZoneConfig): DoctorCheck {
+  return {
+    id: 'zone.ready-label',
+    zoneId: zone.id,
+    doc: doc('labels'),
+    status: 'info',
+    summary: `the zone's ready label is ${zone.readyLabel}; the default is now ${DEFAULT_READY_LABEL}`,
+    fix: `To switch: 1. rename the label on GitHub (Issues → Labels → \`${zone.readyLabel}\` → Edit, name it ${DEFAULT_READY_LABEL}), which keeps it on every issue; 2. then run jumpmaster ctl zones set ${zone.id} readyLabel=${DEFAULT_READY_LABEL}. In this order no ready issue is missed in between. Nothing breaks if you keep ${zone.readyLabel}.`,
+  };
+}
+
 /** The zone's identity mode: two bots pass; starter mode warns with what it costs. */
 function identityModeCheck(zone: DropZoneConfig): DoctorCheck {
   const base = { id: 'zone.identity', zoneId: zone.id, doc: doc('starter-mode') };
@@ -2170,6 +2188,9 @@ export async function zoneChecks(
     g('zone.services', z, () => servicesCheck(d, zone, sticks)),
     g('zone.egress', z, () => egressCheck(d, zone)),
     g('zone.identity', z, () => identityModeCheck(zone)),
+    ...(zone.readyLabel === LEGACY_READY_LABEL
+      ? [g('zone.ready-label', z, () => readyLabelCheck(zone))]
+      : []),
     ...(zone.crew.enabled
       ? [
           g('zone.goals', z, () => goalsCheck(zone, d)),

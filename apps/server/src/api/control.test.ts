@@ -446,7 +446,7 @@ describe('doctor routes', () => {
     const r = await post('/api/control/zones/main/labels', {});
     expect(r?.statusCode).toBe(200);
     expect(r?.json()).toMatchObject({
-      created: ['agent-ready', 'agent-retry'],
+      created: ['drop-ready', 'agent-retry'],
       check: { id: 'forge.labels', status: 'pass' },
     });
     expect(w.f.author.calls.filter((c) => c.method === 'createLabel')).toHaveLength(2);
@@ -480,7 +480,7 @@ describe('doctor routes', () => {
     const rows = listAudit(w.db).filter((a) => a.action === 'labels.create');
     expect(rows.map((a) => [a.target, a.detail.result])).toEqual([
       ['main', 'refused: killed'],
-      ['main', 'created: agent-ready, agent-retry'],
+      ['main', 'created: drop-ready, agent-retry'],
     ]);
   });
 
@@ -2529,7 +2529,7 @@ describe('zones page routes', () => {
     });
     expect(r.statusCode, r.body).toBe(200);
     expect(store.current().dropZones.map((z) => [z.id, z.readyLabel])).toEqual([
-      ['a', 'agent-ready'],
+      ['a', 'drop-ready'],
       ['b', 'go'],
     ]);
   });

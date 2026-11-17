@@ -74,7 +74,7 @@ const isStagedAndReady = (issue: ForgeIssue, zone: DropZoneConfig): boolean =>
 /** Why a ready work item for a crew issue that is not (or no longer) promoted was retired. */
 const CREW_NOT_PROMOTED = 'crew issue not promoted';
 
-/** Why a ready work item whose human issue fails the agent-ready format was retired. */
+/** Why a ready work item whose human issue fails the drop-ready format was retired. */
 const NEEDS_TRIAGE = 'needs triage';
 
 /** Done reasons an item comes back from once its issue is admitted again. */
@@ -109,7 +109,7 @@ export type SyncResult = {
   skippedCrewUnpromoted: number[];
   /** Set when classifying an issue failed: this pass added nothing and marked nothing done. */
   intakeSkipped?: string;
-  /** Trusted human ready issues held back for failing the agent-ready format (#183). */
+  /** Trusted human ready issues held back for failing the drop-ready format (#183). */
   sentToTriage: number;
   retried: number;
   reopened: number;

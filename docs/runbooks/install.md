@@ -218,7 +218,7 @@ writes nothing to GitHub: it gives you links and generated files, and you click.
 - **Give the accounts access**: the collaborators page and a checklist naming each bot login
   (Write role; accept the invitation as that account).
 
-The labels (`agent-ready`, `agent-retry`) are created from the doctor: `forge.labels` fails while
+The labels (`drop-ready`, `agent-retry`) are created from the doctor: `forge.labels` fails while
 one is missing, and its **Create the missing labels** button creates them as the author bot.
 
 ### Step 6: Run the doctor to zero fails
@@ -259,10 +259,10 @@ Open the zone's intake page, `/zones/<zone>/intake` (the **Intake** link in home
    Jumpmaster doesn't commit it: `GOAL.md` is a protected path no agent may write. Commit it
    yourself by pull request when you're ready; the first issue doesn't wait for it.
 2. **The first issue.** Give it a title, the context, acceptance criteria and the tests that prove
-   it, and **File the issue**. It is filed on GitHub as a ready issue (`agent-ready`) at once, and
+   it, and **File the issue**. It is filed on GitHub as a ready issue (`drop-ready`) at once, and
    the next pass picks it up. Submitting twice never files twice.
 
-A small, testable change makes the best first issue. Any issue you label `agent-ready` yourself
+A small, testable change makes the best first issue. Any issue you label `drop-ready` yourself
 works the same way.
 
 ### Step 8: Watch the pull request merge
@@ -846,13 +846,25 @@ protected path, so an agent change to a workflow parks instead of merging. Under
 
 ## Labels
 
-The zone uses `agent-ready` (`readyLabel`) and `agent-retry` (`retryLabel`); with the crew on,
+The zone uses `drop-ready` (`readyLabel`) and `agent-retry` (`retryLabel`); with the crew on,
 also `agent-staged`, and with the triage gate on, `jm-triage` and `jm-triaged` (see
 [How Jumpmaster triages issues](#how-jumpmaster-triages-issues)). When one is missing, `forge.labels` fails and its action, **Create the
 missing labels** on `/doctor` (or `jumpmaster ctl labels <zone>`), creates the configured ones as
 the author bot; it creates nothing else and works in observe mode too, but not while the kill
 switch is engaged. You can also make them yourself under the repository's Issues → Labels, or with
-`gh label create agent-ready --repo your-org/your-repo`. Doctor check: `forge.labels`.
+`gh label create drop-ready --repo your-org/your-repo`. Doctor check: `forge.labels`.
+
+The default ready label was `agent-ready` before it became `drop-ready`. On the upgrade, every zone
+that set no `readyLabel` had `readyLabel: "agent-ready"` written into its config (a config revision
+noted *readyLabel pinned to agent-ready (the default became drop-ready)*), so its ready issues keep
+starting; zones added after the upgrade get `drop-ready`. To switch a pinned zone, do it in this
+order, so no ready issue is missed in between:
+
+1. rename the label on GitHub (Issues → Labels → `agent-ready` → Edit, name it `drop-ready`),
+   which keeps it on every issue;
+2. then `jumpmaster ctl zones set <zone> readyLabel=drop-ready`.
+
+Doctor check: `zone.ready-label`.
 
 ## Starter mode
 
@@ -1273,10 +1285,10 @@ The crew (off by default) plans issues from `GOAL.md` on its own; see the
 ## How Jumpmaster triages issues
 
 Triage needs the crew on (`crew.enabled`, see [Crew](#crew)); with it off, every trusted human
-issue labeled `agent-ready` is admitted as it is.
+issue labeled `drop-ready` is admitted as it is.
 
 **The gate.** With the crew on and `triage.gate` true (the default), a trusted author's
-`agent-ready` issue that is not in the agent-ready format (an `## Acceptance criteria` checklist
+`drop-ready` issue that is not in the drop-ready format (an `## Acceptance criteria` checklist
 and a `## Tests` or `## Required tests` list) does not start an agent. Jumpmaster swaps its ready
 label for the triage label, and a triage crew drop reads it. Set `triage.gate: false` to admit
 unformatted issues as before.
@@ -1288,7 +1300,7 @@ is on, `forge.labels` reports either one missing, and its action creates them.
 
 **The three outcomes.** A triage drop ends one of three ways:
 
-- **split:** the issue becomes one or more agent-ready child issues, filed staged (`agent-staged`)
+- **split:** the issue becomes one or more drop-ready child issues, filed staged (`agent-staged`)
   under objective `triage:#N`. They go through refute and promotion like any crew issue: none
   starts until it is reviewed and promoted.
 - **questions:** the crew needs a decision first. It raises a briefing on `/briefings`; once you
@@ -1600,6 +1612,14 @@ A private repository needs the read token and `reviewReadToken: true` ([Read tok
 
 The zone is paused or observing: **Resume** on `/zones`, or
 `docker compose exec jumpmaster jumpmaster ctl resume <zone>`.
+
+### `zone.ready-label`
+
+**Action:** Open the labels on GitHub.
+
+Information only: the zone's ready label is still `agent-ready`, pinned at the upgrade that made
+`drop-ready` the default. Nothing breaks if you keep it. To switch, rename the label on GitHub
+first, then run `jumpmaster ctl zones set <zone> readyLabel=drop-ready` ([Labels](#labels)).
 
 ### `zone.preset`
 

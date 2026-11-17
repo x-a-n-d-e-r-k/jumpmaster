@@ -48,6 +48,7 @@ import { RESTART_PATHS } from './boot.js';
 import { Confirmations, type ConsumeFailure } from './confirm.js';
 import { type Change, diff } from './diff.js';
 import { type Classification, classify } from './guarded.js';
+import { pinReadyLabels, READY_LABEL_PIN_NOTE, unpinnedZoneIds } from './ready-label.js';
 import {
   canonicalJson,
   deleteSetting,
@@ -224,6 +225,8 @@ export class ConfigStore implements ConfigSource {
   private vaultValue: Vault | 'disabled';
   private readonly retiredValues = new Set<string>();
   private readonly warned = new Set<string>();
+  /** The zones pinned to the old ready label at the upgrade (#198): each file read pins them. */
+  private pins: string[] = [];
 
   private constructor(private readonly o: StoreOptions) {
     this.confirmations = new Confirmations(o.now);
@@ -247,16 +250,28 @@ export class ConfigStore implements ConfigSource {
         throw new Error(
           `config mode is file, but ${o.filePath ?? 'the config file'} does not exist: restore it, or start with the file it was exported to`,
         );
-      const doc = s.readFileDoc();
+      const raw = s.readFileDoc();
+      const cur = s.storedCurrent();
+      const pinsStored = storedPins(db);
+      // The upgrade's pin (#198): the zones this install already ran, as the database knows them.
+      const known = new Set(cur ? zoneIdsOf(cur.doc) : []);
+      s.pins =
+        pinsStored ?? unpinnedZoneIds(raw).filter((id) => known.has(id) || zoneHasHistory(db, id));
+      const { doc, pinned } = pinReadyLabels(raw, s.pins);
       const v = s.validate(doc);
       if ('issues' in v) throw new Error(`Invalid config ${o.filePath}: ${formatIssues(v.issues)}`);
-      const cur = s.storedCurrent();
       const hash = hashOf(canonicalJson(doc));
       db.transaction(() => {
         if (!cur || cur.sourceHash !== hash) {
-          const id = insertRevision(db, { parentId: cur?.id ?? null, doc, via: 'file' }, now);
+          const note = !pinsStored && pinned.length > 0 ? { note: READY_LABEL_PIN_NOTE } : {};
+          const id = insertRevision(
+            db,
+            { parentId: cur?.id ?? null, doc, via: 'file', ...note },
+            now,
+          );
           setSetting(db, 'config.current', id, now);
         }
+        if (!pinsStored) setSetting(db, 'config.ready_label_pins', s.pins, now);
         setSetting(db, 'config.mode', 'file', now);
       })();
       s.modeValue = 'file';
@@ -278,6 +293,27 @@ export class ConfigStore implements ConfigSource {
       }
       if (!cur) throw new Error('the config store could not record its first revision');
       if (stored === undefined) setSetting(db, 'config.mode', 'db', now);
+      // The upgrade's pin (#198), once: every zone stored without a readyLabel ran on the old default.
+      const pins = storedPins(db);
+      if (pins) s.pins = pins;
+      else {
+        const from = cur;
+        const { doc, pinned } = pinReadyLabels(from.doc, unpinnedZoneIds(from.doc));
+        db.transaction(() => {
+          if (pinned.length > 0) {
+            const id = insertRevision(
+              db,
+              { parentId: from.id, doc, via: 'setup', note: READY_LABEL_PIN_NOTE },
+              now,
+            );
+            setSetting(db, 'config.current', id, now);
+          }
+          setSetting(db, 'config.ready_label_pins', pinned, now);
+        })();
+        s.pins = pinned;
+        cur = s.storedCurrent();
+        if (!cur) throw new Error('the config store lost its current revision');
+      }
       const v = s.validate(cur.doc);
       if ('issues' in v)
         throw new Error(
@@ -725,7 +761,8 @@ export class ConfigStore implements ConfigSource {
   rollback(id: number, meta: OpMeta): ApplyResult {
     const old = getRevision(this.o.db, id);
     if (!old) return refused(`no revision ${id}`, 'id');
-    return this.apply(old.doc, {
+    // A revision from before the upgrade's pin keeps a pinned zone on its label (#198).
+    return this.apply(pinReadyLabels(old.doc, this.pins).doc, {
       ...meta,
       via: 'rollback',
       note: meta.note ?? `rollback to ${id}`,
@@ -748,14 +785,14 @@ export class ConfigStore implements ConfigSource {
       this.fileProblem = [{ path: '', message: (e as Error).message }];
       return { ok: false, issues: this.fileProblem };
     }
-    const v = this.validate(split.editable);
+    const doc = pinReadyLabels(split.editable, this.pins).doc;
+    const v = this.validate(doc);
     if ('issues' in v) {
       this.fileProblem = v.issues;
       return { ok: false, issues: v.issues };
     }
     this.fileProblem = undefined;
     this.bootPending = this.bootChanges(split.boot);
-    const doc = split.editable;
     if (hashOf(canonicalJson(doc)) === hashOf(canonicalJson(this.doc))) {
       this.storePending(this.cfg);
       return unchanged(this.rev, [...this.bootPending]);
@@ -1067,6 +1104,17 @@ export class ConfigStore implements ConfigSource {
     return { ok: true, revision: id, changed: changes.map((c) => c.path), restartNeeded };
   }
 }
+
+/** The zone ids pinned at the upgrade (#198), or undefined when the pin has not run. */
+function storedPins(db: Db): string[] | undefined {
+  const v = getSetting(db, 'config.ready_label_pins');
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : undefined;
+}
+
+const zoneIdsOf = (doc: Record<string, unknown>): string[] =>
+  (Array.isArray(doc.dropZones) ? (doc.dropZones as { id?: unknown }[]) : []).flatMap((z) =>
+    typeof z?.id === 'string' ? [z.id] : [],
+  );
 
 export const VAULT_DISABLED =
   'the vault is off: turn it on under Settings, Credentials (or set JM_VAULT_KEY_FILE, a 32-byte key file under ./secrets), or write the credential to its file under secrets/';

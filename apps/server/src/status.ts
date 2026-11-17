@@ -2,7 +2,7 @@ import { redact } from '@jumpmaster/protocol';
 import { floorBriefings } from './briefings.js';
 import { getSetting, setSetting } from './config/revisions.js';
 import type { ConfigStore } from './config/store.js';
-import { type Config, secretList } from './config.js';
+import { type Config, DEFAULT_READY_LABEL, secretList } from './config.js';
 import type { Db } from './db/open.js';
 import {
   type Drop,
@@ -79,6 +79,8 @@ export type StatusZone = {
   parked: number;
   credentialProblems: CredentialProblem[];
   repo?: string;
+  /** The label that queues an issue in the zone (`readyLabel`). */
+  readyLabel?: string;
   ciDeadlineMinutes?: number;
   /** How many gates the zone's drops run. */
   gateCount?: number;
@@ -460,7 +462,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
 
   const zoneOne = activeZones[0] ?? zones[0];
   return said({
-    headline: 'Idle: no ready issues. Label one agent-ready or file one from Intake',
+    headline: `Idle: no ready issues. Label one ${zoneOne?.readyLabel ?? DEFAULT_READY_LABEL} or file one from Intake`,
     detail: '',
     waitingOn: 'you',
     action: zoneOne
@@ -591,6 +593,7 @@ export function statusInputOf(o: {
           ? credentialProblems(zone, resolved, store?.resolvedApps())
           : [],
         repo: zone.repo,
+        readyLabel: zone.readyLabel,
         ciDeadlineMinutes: zone.ciDeadlineMinutes,
         gateCount: zone.gates.length,
         gateEvents,

@@ -44,7 +44,7 @@ The image tag `jumpmaster-trooper:dev` is the stick's default trooper image.
    ```
 
    `node --test` passes when there are no test files, which is fine as a baseline.
-3. Create the `agent-ready` label in the repository (Issues > Labels > New label).
+3. Create the `drop-ready` label in the repository (Issues > Labels > New label).
 
 ## 3. Create the GitHub token
 
@@ -79,7 +79,7 @@ Edit it so the drop zone points at your repo and uses the image you built:
     {
       "id": "main",
       "repo": "your-org/your-test-repo",
-      "readyLabel": "agent-ready",
+      "readyLabel": "drop-ready",
       "gates": [{ "name": "test", "run": "npm test", "timeoutMinutes": 20 }],
       "image": "jumpmaster-trooper:dev"
     }
@@ -148,7 +148,7 @@ In the test repo, open an issue:
 
 - Title: `Add a sum(a, b) function`
 - Body: `Add a sum(a, b) function in sum.js that returns a + b, with a test in sum.test.js using node:test.`
-- Label: `agent-ready`
+- Label: `drop-ready`
 
 Only issues from trusted authors are picked up; open the issue as the repo owner.
 
@@ -241,7 +241,7 @@ M0 is a tracer, not a hardened deployment. Know the residual risks before you ru
 | Server exits: `Missing required environment variables` | Export all three of `JM_CLAUDE_TOKEN`, `JM_GITHUB_AUTHOR_TOKEN`, `JM_JOIN_TOKEN` in the shell that starts the server. |
 | Server exits: `Invalid config` | The message lists the failing JSON paths. |
 | Stick: `JM_SERVER_URL is required` or enrol fails | Set `JM_SERVER_URL`; ensure `JM_JOIN_TOKEN` matches the server's. If the server's data was reset, delete `~/.jumpmaster/stick.json` and re-enrol. |
-| Issue never appears | It needs the `agent-ready` label (the zone's `readyLabel`) and a trusted author. Wait one poll interval. |
+| Issue never appears | It needs the `drop-ready` label (the zone's `readyLabel`) and a trusted author. Wait one poll interval. |
 | Nothing is leased | Check the stick is running and enrolled, and Docker is up. Stick prints `lease error:` on failures. |
 | Work item `parked`, reason about no changes (drop result `no_changes`) | The agent finished without changing anything, usually because the task was unclear or already done. Open the drop for the agent's summary, clarify the issue, and re-label. |
 | Work item `parked` with another reason / drop `failed` | The reason is shown on the home page and in the drop events. Common causes: a gate failed, the agent was blocked, or the trooper could not reach GitHub. |

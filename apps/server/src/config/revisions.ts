@@ -119,6 +119,8 @@ export type SettingKey =
   | 'config.mode'
   | 'config.current'
   | 'config.restart_pending'
+  /** The zone ids the upgrade pinned to the old ready label (#198); set once the pin has run. */
+  | 'config.ready_label_pins'
   | 'setup.step'
   | 'status.last_pass'
   | 'transcripts.last_prune'

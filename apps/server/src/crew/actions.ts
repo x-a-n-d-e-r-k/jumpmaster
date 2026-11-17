@@ -50,7 +50,7 @@ function sectionLines(body: string): Map<string, string[]> {
 }
 
 /**
- * The agent-ready format (§8.3). An empty list means valid; otherwise each entry is a short reason
+ * The drop-ready format (§8.3). An empty list means valid; otherwise each entry is a short reason
  * that never echoes the issue's text.
  */
 export function validateIssueSpec(title: string, body: string): string[] {

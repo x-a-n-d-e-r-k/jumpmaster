@@ -157,7 +157,7 @@ describe('the zones page', () => {
     const r = await w.get('/zones/main');
     expect(r.statusCode).toBe(200);
     for (const id of ['project', 'stack', 'egress', 'merging', 'advanced']) section(r.body, id);
-    expect(section(r.body, 'project')).toContain('name="readyLabel" value="agent-ready"');
+    expect(section(r.body, 'project')).toContain('name="readyLabel" value="drop-ready"');
     expect(section(r.body, 'stack')).toContain('<option value="node" selected>');
     expect(section(r.body, 'stack')).toContain('name="gate.run" value="npm test"');
     expect(section(r.body, 'egress')).toContain('known.example.com');
@@ -178,7 +178,7 @@ describe('the zones page', () => {
       expectRevision: w.store.revision(),
     });
     expect(res.statusCode, res.body).toBe(200);
-    expect(w.store.current().dropZones.map((z) => z.readyLabel)).toEqual(['go', 'agent-ready']);
+    expect(w.store.current().dropZones.map((z) => z.readyLabel)).toEqual(['go', 'drop-ready']);
   });
 
   test("the zone page links to the zone's briefings with their count", async () => {

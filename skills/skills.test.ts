@@ -112,7 +112,7 @@ describe('skills', () => {
         /\b(JM_[A-Z_]*TOKEN[A-Z_]*|GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)\b/,
       ],
       ['a token value', /\b(github_pat_|ghp_|gho_|sk-ant-)/],
-      ['the ready label', /agent-ready|readyLabel/i],
+      ['the ready label', /agent-ready|drop-ready(?! format)|readyLabel/i],
       ['ready labelling', /\b(add|apply|set|put|mark)\w*\s+(\w+\s+){0,3}ready\b/i],
     ];
     for (const f of markdownFiles())

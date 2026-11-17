@@ -88,6 +88,8 @@ export const DEFAULT_PROTECTED_PATHS = [
 ];
 
 export const DEFAULT_PIDS_LIMIT = 512;
+/** The label that hands an issue to Jumpmaster when a zone sets none (#198). */
+export const DEFAULT_READY_LABEL = 'drop-ready';
 export const MIN_POLL_SECONDS = 5;
 export const MAX_POLL_SECONDS = 86_400;
 export const EGRESS_MODES = ['off', 'monitor', 'enforce'] as const;
@@ -163,7 +165,7 @@ const GitHubId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 export const DropZoneObject = z.object({
   id: z.string().min(1),
   repo: z.string().regex(/^[^/\s]+\/[^/\s]+$/, 'repo must be "owner/name"'),
-  readyLabel: z.string().default('agent-ready'),
+  readyLabel: z.string().default(DEFAULT_READY_LABEL),
   gates: z.array(GateSpecSchema),
   services: z
     .array(ServiceSpecSchema)
@@ -240,7 +242,7 @@ export const DropZoneObject = z.object({
   ciDeadlineMinutes: z.number().positive().default(45),
   retryLabel: z.string().min(1).default('agent-retry'),
   /**
-   * Where a trusted human's ready issue that fails the agent-ready format is sent instead of to
+   * Where a trusted human's ready issue that fails the drop-ready format is sent instead of to
    * an implementer (with the crew on and `triage.gate`). Must differ from the other labels.
    */
   triageLabel: z.string().min(1).default('jm-triage'),
@@ -495,7 +497,7 @@ export type DropZoneConfig = Omit<z.infer<typeof DropZoneSchema>, 'image'> & { i
 export type Budgets = DropZoneConfig['budgets'];
 
 /**
- * Whether sync holds back a trusted human ready issue that fails the agent-ready format and sends
+ * Whether sync holds back a trusted human ready issue that fails the drop-ready format and sends
  * it to triage: only with the crew on (nothing else would triage it) and `triage.gate` set.
  */
 export const triageGateOn = (zone: Pick<DropZoneConfig, 'crew' | 'triage'>): boolean =>

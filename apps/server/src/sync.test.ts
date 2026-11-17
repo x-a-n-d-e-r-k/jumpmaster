@@ -1,4 +1,8 @@
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, test } from 'vitest';
+import { loadBoot } from './config/boot.js';
+import { ConfigStore } from './config/store.js';
 import type { DropZoneConfig } from './config.js';
 import { flushCrewOps } from './crew/flush.js';
 import {
@@ -23,7 +27,7 @@ import type { ForgeIssue } from './forge/github.js';
 import { getGoals } from './goals.js';
 import { resolveUnknown } from './outbox.js';
 import { rankItems, syncDropZone } from './sync.js';
-import { fakeForge } from './test/fakes.js';
+import { fakeForge, fakeForgePair } from './test/fakes.js';
 import { makeZone, zoneWorld } from './test/fixtures.js';
 import { plus, t0, tmpDbFile } from './test/helpers.js';
 
@@ -854,5 +858,49 @@ describe('triage requests at sync (#184)', () => {
     const w = world({ crew: false });
     await syncDropZone(w.db, w.forges, w.zone, t0);
     expect(rows(w)).toEqual([]);
+  });
+});
+
+describe('the ready label after the drop-ready upgrade (#198)', () => {
+  const env: NodeJS.ProcessEnv = {
+    JM_CLAUDE_TOKEN: 'claude-secret-value-1',
+    JM_GITHUB_AUTHOR_TOKEN: 'author-secret-value-2',
+    JM_GITHUB_REVIEWER_TOKEN: 'reviewer-secret-value-3',
+    JM_JOIN_TOKEN: 'join-secret-value-4',
+    JM_OPERATOR_TOKEN: 'o'.repeat(32),
+  };
+  const open = () =>
+    ConfigStore.open({
+      db,
+      boot: loadBoot(env, undefined),
+      env,
+      now: () => t0,
+      imageLockPath: join(tmpdir(), 'jm-no-such-lock.json'),
+    });
+
+  test('a zone that ran on the old default is pinned and still admits its agent-ready issues', async () => {
+    const before = open();
+    const token = { kind: 'operator', via: 'token', sudo: true } as const;
+    const added = before.apply(
+      {
+        dropZones: [
+          { id: 'main', repo: 'octo/demo', gates: [{ name: 't', run: 'true' }], image: 'img' },
+        ],
+      },
+      { via: 'ctl', principal: token },
+    );
+    expect(added.ok).toBe(true);
+    // As an install before the upgrade left it: the pin has not run.
+    db.prepare("DELETE FROM settings WHERE key = 'config.ready_label_pins'").run();
+    const after = open().current().dropZones[0];
+    if (!after) throw new Error('no zone');
+    const forge = fakeForgePair({ issues: [issue(1)], trusted: ['alice'] });
+    expect(issue(1).labels).toEqual(['agent-ready']);
+    const r = await syncDropZone(db, { author: forge.author, reviewer: forge.reviewer }, after, t0);
+    expect(r).toMatchObject({ added: 1 });
+    expect(listWorkItems(db, 'main').map((w) => w.issueNumber)).toEqual([1]);
+    // Unpinned, the new default would have missed it.
+    const unpinned = { ...after, readyLabel: 'drop-ready' };
+    expect(await forge.author.listReadyIssues(unpinned.readyLabel)).toEqual([]);
   });
 });

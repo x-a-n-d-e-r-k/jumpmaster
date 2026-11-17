@@ -167,6 +167,14 @@ const TABLE: Record<string, Rule> = {
           method: 'POST',
         }
       : docs(check),
+  'zone.ready-label': (check, ctx) =>
+    ctx.zone
+      ? {
+          kind: 'forge',
+          label: 'Open the labels on GitHub',
+          href: `${GITHUB}/${ctx.zone.repo}/labels`,
+        }
+      : docs(check),
   'zone.mode': (_c, ctx) =>
     ctx.pages.zones ? app('Open the zones', '/zones') : app('Open home (zone modes)', '/'),
   // The zone page's sections (Task 11): Stack, Egress, Merging, and Advanced for the rest.

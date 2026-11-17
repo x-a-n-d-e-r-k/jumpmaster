@@ -303,7 +303,7 @@ this zone's items and that a revoked or expired token gets 401.
   redacted.
 - **Write** (`write` tokens only): `file_staged_issues` (up to 5 issues per call) and
   `raise_briefing` (up to 3 per call, options with no effect). They use the crew's own schema and
-  checks: objective on the ladder, agent-ready format, no duplicate, a free `maxStaged` slot, zone
+  checks: objective on the ladder, drop-ready format, no duplicate, a free `maxStaged` slot, zone
   active, kill switch off. Filed issues wait under the staged label for your **Promote** ruling,
   as crew issues do. Assistant briefings show as "Raised by assistant (MCP)" on `/briefings`,
   under an `mcp:` subject: they can never update a crew or server briefing, and raising one on the

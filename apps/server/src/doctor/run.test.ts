@@ -68,7 +68,7 @@ describe('runDoctor', () => {
     ok.deps.now = () => new Date(at);
     await expect(runDoctor(ok.deps)).resolves.toMatchObject({ finishedAt: expect.any(String) });
     // Let the stalled run finish, so no timer or promise outlives the test; the lock is free.
-    answer(['agent-ready', 'agent-retry']);
+    answer(['drop-ready', 'agent-retry']);
     await first;
     await expect(runDoctor(ok.deps)).resolves.toMatchObject({ finishedAt: expect.any(String) });
   });
