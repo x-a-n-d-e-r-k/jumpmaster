@@ -787,18 +787,42 @@ describe('images.yml', () => {
 
   test('builds each shipped image by name and never pushes or logs in', () => {
     const text = read('.github/workflows/images.yml');
-    const builds = Object.values(workflow().jobs)
-      .flatMap((j) => j.steps.map((s) => s.run ?? ''))
-      .flatMap((run) => run.split('\n'))
-      .filter((line) => /^\s*docker build /.test(line));
-    for (const file of SHIPPED) {
-      const name = file.split('/')[1] as string;
-      const build = builds.find((line) => line.includes(` -f ${file} `));
-      expect(build, file).toMatch(new RegExp(` -t jumpmaster-${name}:dev -f ${file} \\.$`));
-      expect(build, file).toMatch(/--build-arg SOURCE_URL="\$SOURCE_URL"/);
+    const buildsIn = (j: Workflow['jobs'][string]) =>
+      j.steps
+        .map((s) => s.run ?? '')
+        .flatMap((run) => run.split('\n'))
+        .filter((line) => /^\s*docker build /.test(line));
+    // Each job that builds the :dev images (`images`, and `compose` beside it) builds every
+    // shipped image exactly once, the same way.
+    const building = Object.entries(workflow().jobs).filter(([, j]) => buildsIn(j).length > 0);
+    expect(building.map(([name]) => name).sort()).toEqual(['compose', 'images']);
+    for (const [name, j] of building) {
+      const builds = buildsIn(j);
+      for (const file of SHIPPED) {
+        const image = file.split('/')[1] as string;
+        const build = builds.find((line) => line.includes(` -f ${file} `));
+        expect(build, `${name}: ${file}`).toMatch(
+          new RegExp(` -t jumpmaster-${image}:dev -f ${file} \\.$`),
+        );
+        expect(build, `${name}: ${file}`).toMatch(/--build-arg SOURCE_URL="\$SOURCE_URL"/);
+      }
+      expect(builds, name).toHaveLength(SHIPPED.length);
     }
-    expect(builds).toHaveLength(SHIPPED.length);
     expect(text).not.toMatch(/--push|docker push|docker login|login-action|packages: write/);
+  });
+
+  test('the compose install smoke runs once, in its own job, after that job builds the images', () => {
+    const jobs = workflow().jobs;
+    const withSmoke = Object.entries(jobs).filter(([, j]) =>
+      j.steps.some((s) => /deploy\/smoke\.sh/.test(s.run ?? '')),
+    );
+    expect(withSmoke.map(([name]) => name)).toEqual(['compose']);
+    const runs = (jobs.compose as Workflow['jobs'][string]).steps.map((s) => s.run ?? '');
+    const build = runs.findIndex((r) => /-t jumpmaster-server:dev/.test(r));
+    const smoke = runs.findIndex((r) => /deploy\/smoke\.sh/.test(r));
+    expect(build).toBeGreaterThanOrEqual(0);
+    expect(build).toBeLessThan(smoke);
+    expect(runs.find((r) => /docker version/.test(r))).toMatch(/GITHUB_STEP_SUMMARY/);
   });
 
   test('checkout keeps no credentials and every job has a timeout', () => {
