@@ -6,9 +6,9 @@
  *
  * - One broker per owner and role, built from the `resolvedApps()` entry and rebuilt when the
  *   entry's fingerprint changes (key rotation).
- * - The server never trusts an installation id it is handed (§4.2): before the first mint for a
- *   zone and role, `installationFor` must find the repository installed under the recorded id.
- *   A passed check is remembered until the recorded ids or the entry's fingerprint change.
+ * - The server never trusts an installation id it is handed (§4.2): every mint for a zone and role
+ *   first passes `verifiedInstallation` (issue #267), which checks both recorded ids against
+ *   `zone.repo` on GitHub and remembers a pass until the ids or the entry's fingerprint change.
  * - A changed fingerprint or recorded installation id drops that owner and role's cached tokens.
  * - No PAT fallback, ever: a starter zone, an undecryptable entry or a missing installation
  *   rejects (an identity swap is what `credentialFor` refuses too).
@@ -18,9 +18,14 @@
  */
 import type { DropZoneConfig } from '../config.js';
 import type { AppRole } from '../vault/github-app-entries.js';
-import { appInstallationFor, credentialFor, type ResolvedApps } from '../vault/resolution.js';
+import { appInstallationFor, type ResolvedApps } from '../vault/resolution.js';
 import type { TokenProvider } from './github.js';
 import { createGitHubAppBroker, type GitHubAppBroker, type Use } from './github-app.js';
+import {
+  createInstallationVerifier,
+  type InstallationVerifier,
+  type VerifiedInstallation,
+} from './installation-verifier.js';
 import { createTokenCache, type TokenKey } from './token-cache.js';
 
 /** The zone fields the source reads. */
@@ -48,7 +53,7 @@ export interface FreshToken {
   revoke(): Promise<void>;
 }
 
-export interface AppTokenSource {
+export interface AppTokenSource extends InstallationVerifier {
   /** A provider of the zone's `use` tokens from its `role` app; nothing is called until `token()`. */
   provider(zoneId: string, role: AppRole, use: Use): TokenProvider;
   /**
@@ -80,14 +85,12 @@ interface BrokerSlot {
   broker: GitHubAppBroker;
 }
 
+/** The ids a zone and role last minted under, so a change drops the tokens minted before it. */
 interface Check {
-  /** The owner and role's slot id the check was made with. */
+  /** The owner and role's slot id. */
   slot: string;
   installationId: number;
   repositoryId: number;
-  fingerprint: string;
-  /** Settles once the check passed; a failed check is forgotten, so the next call retries it. */
-  passed: Promise<void>;
 }
 
 const slotId = (owner: string, role: AppRole) => JSON.stringify([owner, role]);
@@ -151,68 +154,60 @@ export function createAppTokenSource(deps: AppTokenSourceDeps): AppTokenSource {
     return fresh;
   }
 
+  // The one check every mint for a zone goes through (issue #267), over this source's brokers.
+  const verifier = createInstallationVerifier({
+    resolvedApps: deps.resolvedApps,
+    brokerFor(owner, role) {
+      try {
+        return brokerFor(owner, role);
+      } catch {
+        return undefined;
+      }
+    },
+  });
+
   /** The zone's verified key for the use, or a secret-free rejection. */
   async function keyFor(zoneId: string, role: AppRole, use: Use): Promise<TokenKey> {
     const zone = deps.zones().find((z) => z.id === zoneId);
     if (!zone) throw new AppTokenError(`unknown drop zone ${zoneId}`);
-    const where = `${zone.repo} (${role})`;
     if (ROLE_OF_USE[use] !== role)
       throw new AppTokenError(`a ${use} token is not minted by the ${role} app (${zone.repo})`);
-    if ((zone.identity ?? 'two-bot') !== 'two-bot')
-      throw new AppTokenError(`${where}: a starter zone uses personal access tokens, not an app`);
-    const resolution = credentialFor(zone, role, deps.resolvedApps());
-    if (resolution.ref.kind !== 'github-app')
-      throw new AppTokenError(`${where}: the owner has no ${role} GitHub App`);
-    if (resolution.problem === 'undecryptable')
-      throw new AppTokenError(`${where}: the ${role} GitHub App entry can't be decrypted`);
-    const owner = resolution.ref.owner;
-    const recorded = appInstallationFor(zone, role);
-    if (!recorded)
-      throw new AppTokenError(`${where}: the zone records no ${role} app installation`);
-
-    const slot = brokerFor(owner, role);
-    const id = slotId(owner, role);
     const checkId = JSON.stringify([zone.id, role]);
-    let check = checks.get(checkId);
-    const same =
-      check !== undefined &&
-      check.slot === id &&
-      check.installationId === recorded.installationId &&
-      check.repositoryId === recorded.repositoryId &&
-      check.fingerprint === slot.fingerprint;
-    if (!same) {
-      // A changed recorded id: tokens minted under the old one are not handed out again.
-      // (A rotated key's were dropped by `brokerFor` already.)
-      if (check) forget(check.slot);
-      const [repoOwner = '', repoName = ''] = zone.repo.split('/');
-      const passed = (async () => {
-        let found: Awaited<ReturnType<GitHubAppBroker['installationFor']>>;
-        try {
-          found = await slot.broker.installationFor(repoOwner, repoName);
-        } catch (err) {
-          throw new AppTokenError(`${where}: could not check the ${role} app installation`, {
-            cause: err,
-          });
-        }
-        if (!found.installed)
-          throw new AppTokenError(`${where}: the ${role} GitHub App is not installed`);
-        if (found.installationId !== recorded.installationId)
-          throw new AppTokenError(
-            `${where}: the ${role} app's installation does not match the one the zone records`,
-          );
-        const ids = installationOf.get(id) ?? new Map<number, number>();
-        ids.set(recorded.repositoryId, recorded.installationId);
-        installationOf.set(id, ids);
-      })();
-      check = { slot: id, ...recorded, fingerprint: slot.fingerprint, passed };
-      checks.set(checkId, check);
-      const mine = check;
-      passed.catch(() => {
-        if (checks.get(checkId) === mine) checks.delete(checkId);
-      });
+    const recorded = appInstallationFor(zone, role);
+    const was = checks.get(checkId);
+    let verified: VerifiedInstallation;
+    try {
+      verified = await verifier.verifiedInstallation(zone, role);
+    } catch (err) {
+      // Neither a refusal nor an error is a pass: what was cached for the old ids goes.
+      if (
+        was &&
+        (!recorded ||
+          was.installationId !== recorded.installationId ||
+          was.repositoryId !== recorded.repositoryId)
+      )
+        forget(was.slot);
+      throw new AppTokenError(err instanceof Error ? err.message : String(err), { cause: err });
     }
-    await check!.passed;
-    return { owner, role, repositoryId: recorded.repositoryId, use };
+    const id = slotId(verified.owner, role);
+    // A changed recorded id: tokens minted under the old one are not handed out again.
+    // (A rotated key's were dropped by `brokerFor` already.)
+    if (
+      was &&
+      (was.slot !== id ||
+        was.installationId !== verified.installationId ||
+        was.repositoryId !== verified.repositoryId)
+    )
+      forget(was.slot);
+    checks.set(checkId, {
+      slot: id,
+      installationId: verified.installationId,
+      repositoryId: verified.repositoryId,
+    });
+    const ids = installationOf.get(id) ?? new Map<number, number>();
+    ids.set(verified.repositoryId, verified.installationId);
+    installationOf.set(id, ids);
+    return { owner: verified.owner, role, repositoryId: verified.repositoryId, use };
   }
 
   /** Records a key handed to the cache, so a rotation or changed id drops its token. */
@@ -224,6 +219,8 @@ export function createAppTokenSource(deps: AppTokenSourceDeps): AppTokenSource {
   }
 
   return {
+    verifiedInstallation: (zone, role) => verifier.verifiedInstallation(zone, role),
+
     provider(zoneId, role, use) {
       let last: TokenKey | undefined;
       return {

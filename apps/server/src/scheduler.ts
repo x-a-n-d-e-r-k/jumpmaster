@@ -101,17 +101,24 @@ export const zoneHold = (zoneId: string): string | undefined => holds.get(zoneId
 /**
  * One zone's turn in a pass. A zone with a credential problem is parked: nothing of it runs (no
  * sync, no dispatch, no forge write), with `credentials: <message>` as its reason, said once when
- * it starts and once when it ends. Its drops already running keep their payloads.
+ * it starts and once when it ends. Its drops already running keep their payloads. A zone whose
+ * recorded GitHub App ids GitHub refuses is parked the same way, with `app: <message>`.
  */
 export async function zonePass(
   zone: Pick<DropZoneConfig, 'id'>,
   problems: readonly CredentialProblem[],
   run: () => Promise<void>,
   log: (line: string) => void = () => {},
+  /**
+   * Why GitHub refuses the zone's recorded app ids (issue #267), or undefined when they verify or
+   * the check could not run (it runs again next pass). Asked only when the credentials are in order.
+   */
+  appRefusal?: () => Promise<string | undefined>,
 ): Promise<{ held: string | null }> {
   const first = problems[0];
-  if (first) {
-    const reason = `credentials: ${first.message}`;
+  const refused = first ? undefined : await appRefusal?.();
+  const reason = first ? `credentials: ${first.message}` : refused ? `app: ${refused}` : undefined;
+  if (reason) {
     if (holds.get(zone.id) !== reason) log(`zone ${zone.id} parked: ${reason}`);
     holds.set(zone.id, reason);
     return { held: reason };

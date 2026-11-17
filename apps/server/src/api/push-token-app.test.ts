@@ -118,7 +118,12 @@ interface Call {
 function fakeGitHub() {
   const calls: Call[] = [];
   const minted: string[] = [];
+  /** The metadata-only tokens the installation check minted (issue #267). */
+  const probes: string[] = [];
   const state = {
+    /** What GitHub says of octo/demo: its installation (or 404, or a network error) and its id. */
+    installation: INSTALLATION as number | 404 | 'network',
+    repositoryId: REPOSITORY,
     mint: 'ok' as 'ok' | '500' | 'network',
     revoke: 204,
     /** When set, each mint waits for it before answering. */
@@ -135,9 +140,28 @@ function fakeGitHub() {
   };
   const scope = nock(api).persist();
   scope
+    .get('/repos/octo/demo/installation')
+    .reply(async (req: Request) => {
+      await record(req);
+      if (state.installation === 'network') throw new Error('connect ETIMEDOUT');
+      if (state.installation === 404) return [404, { message: 'Not Found' }];
+      return [200, { id: state.installation, permissions: {} }];
+    })
+    .get('/repos/octo/demo')
+    .reply(async (req: Request) => {
+      await record(req);
+      return [200, { id: state.repositoryId }];
+    })
     .post(/^\/app\/installations\/\d+\/access_tokens$/)
     .reply(async (req: Request) => {
       await record(req);
+      if ('repositories' in (calls.at(-1)!.body as object)) {
+        const probe = ['ghs', `PROBE${String(probes.length + 1).padStart(4, '0')}`.repeat(4)].join(
+          '_',
+        );
+        probes.push(probe);
+        return [201, { token: probe, expires_at: plus(t0, HOUR).toISOString() }];
+      }
       if (state.gate) await state.gate;
       if (state.mint === 'network') throw new Error('connect ECONNREFUSED');
       if (state.mint === '500') return [500, { message: 'boom' }];
@@ -154,8 +178,18 @@ function fakeGitHub() {
     calls,
     minted,
     state,
-    mints: () => calls.filter((c) => c.path.endsWith('/access_tokens')),
-    revokes: () => calls.filter((c) => c.method === 'DELETE'),
+    probes,
+    /** The push mints (narrowed by repository id; the check's probe is narrowed by name). */
+    mints: () =>
+      calls.filter(
+        (c) => c.path.endsWith('/access_tokens') && !('repositories' in (c.body as object)),
+      ),
+    anyMint: () => calls.filter((c) => c.path.endsWith('/access_tokens')),
+    lookups: () => calls.filter((c) => c.path.endsWith('/installation')),
+    revokes: () =>
+      calls.filter(
+        (c) => c.method === 'DELETE' && !probes.includes(c.authorization.slice('Bearer '.length)),
+      ),
   };
 }
 
@@ -211,7 +245,10 @@ function setup(o: {
   app = Fastify();
   const brokers =
     o.brokers === 'none'
-      ? { brokerFor: () => undefined }
+      ? {
+          brokerFor: () => undefined,
+          verifiedInstallation: () => Promise.reject(new Error('no broker')),
+        }
       : (o.brokers ?? createAppBrokers({ apps: () => apps }));
   registerStickRoutes(app, {
     db,
@@ -416,6 +453,72 @@ describe('push-token in app mode', () => {
       expect(PushGrantSchema.parse(again.json().grant).token).toBe(gh.minted[0]);
     });
   }
+});
+
+describe('push-token: the installation check (issue #267)', () => {
+  test('a recorded repository id GitHub does not give octo/demo is refused, and no push token is minted', async () => {
+    const { db } = setup({});
+    gh.state.repositoryId = 9999;
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    const res = await grant(stickToken);
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ refused: 'app unverified', retryable: true });
+    expect(res.body).not.toContain(AUTHOR_PAT);
+    expect(gh.mints()).toEqual([]);
+    expect(liveGrants(db)).toBe(0);
+    expect(
+      logs.some((l) =>
+        l.includes('main: the recorded author repository id does not match octo/demo'),
+      ),
+    ).toBe(true);
+  });
+
+  test('a recorded installation id GitHub does not give octo/demo is refused before any token is minted', async () => {
+    const { db } = setup({});
+    gh.state.installation = 78;
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    const res = await grant(stickToken);
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ refused: 'app unverified', retryable: true });
+    expect(gh.anyMint()).toEqual([]);
+  });
+
+  test('an app not installed on octo/demo is refused before any token is minted', async () => {
+    const { db } = setup({});
+    gh.state.installation = 404;
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    expect((await grant(stickToken)).statusCode).toBe(403);
+    expect(gh.anyMint()).toEqual([]);
+  });
+
+  test('a check that cannot run is a retryable 503 with no mint; the retry checks again and mints', async () => {
+    const { db } = setup({});
+    gh.state.installation = 'network';
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    const res = await grant(stickToken);
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toEqual({ refused: 'app unverified', retryable: true });
+    expect(gh.anyMint()).toEqual([]);
+    expect(liveGrants(db)).toBe(0);
+    gh.state.installation = INSTALLATION;
+    const again = await grant(stickToken);
+    expect(again.statusCode).toBe(200);
+    expect(gh.lookups()).toHaveLength(2);
+    expect(gh.mints()).toHaveLength(1);
+  });
+
+  test('a second grant for the verified zone does not check again', async () => {
+    const { db } = setup({});
+    const { stickToken } = await granted(db);
+    expect((await plan(stickToken)).statusCode).toBe(200);
+    expect((await grant(stickToken)).statusCode).toBe(200);
+    expect(gh.lookups()).toHaveLength(1);
+    expect(gh.mints()).toHaveLength(2);
+  });
 });
 
 describe('revoking the push token', () => {
