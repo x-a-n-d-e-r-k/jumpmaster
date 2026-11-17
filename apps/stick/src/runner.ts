@@ -452,7 +452,85 @@ type RunDeps = {
 type Disposition = 'push' | 'remove' | 'keep';
 type VolumeFate = { decide: () => Promise<Disposition> };
 
+/**
+ * A drop's one heartbeat (issue #239): it starts when the drop is accepted, so the lease holds
+ * while its images are prepared, and runs on to the end of its container. Before a container
+ * exists an answer only sets the flags (`halted` then stops the preparation); once one runs, it
+ * reacts through `onStop` and `onKill`.
+ */
+type DropBeat = {
+  stale: boolean;
+  cancelled: boolean;
+  /** Hard-cancelled (the kill switch). */
+  hard: boolean;
+  /** Stopped by the lost-server rule: the epoch is fenced, as a kill used to fence it. */
+  lost: boolean;
+  /** Set by a running container: stop it (with a grace) or kill it. */
+  onStop?: (graceMs?: number) => void;
+  onKill?: () => void;
+  /** Whether the drop must not go on: stale, cancelled or lost. */
+  halted: () => boolean;
+  /** Clears the interval; no beat goes out after it. Idempotent. */
+  stop: () => void;
+};
+
+function startBeat(client: DropClient, dropId: string, epoch: number, deps: RunDeps): DropBeat {
+  const lostLimit = deps.lostServerKillBeats ?? DEFAULT_LOST_SERVER_KILL_BEATS;
+  let failedBeats = 0;
+  let stopped = false;
+  const beat: DropBeat = {
+    stale: false,
+    cancelled: false,
+    hard: false,
+    lost: false,
+    halted: () => beat.stale || beat.cancelled || beat.lost,
+    stop: () => {
+      stopped = true;
+      clearInterval(timer);
+    },
+  };
+  const timer = setInterval(async () => {
+    // After a hard kill or the lost-server stop no beat goes out: a server back inside the grace
+    // must not see a live lease, and must find the drop lost (or salvage it from the push result).
+    if (stopped || beat.hard || beat.lost) return;
+    try {
+      const r = await client.heartbeat(dropId, epoch);
+      failedBeats = 0;
+      // `killed` is for a pending push only; a running drop under the kill switch is hard-cancelled.
+      if (r === 'ok' || r === 'killed') return;
+      if (r === 'hard_cancel') {
+        beat.cancelled = true;
+        beat.hard = true;
+        beat.onKill?.();
+        return;
+      }
+      if (r === 'stale') beat.stale = true;
+      else beat.cancelled = true;
+      beat.onStop?.();
+    } catch {
+      // Keep going through a blip. Past the limit the lease is ending anyway: stop with a grace
+      // (Ruling 14). Only a push-requested result is posted after that (held, then salvaged).
+      failedBeats++;
+      if (failedBeats >= lostLimit && !beat.lost) {
+        beat.lost = true;
+        beat.onStop?.(LOST_SERVER_GRACE_MS);
+      }
+    }
+  }, deps.heartbeatMs ?? 15_000);
+  return beat;
+}
+
 export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void> {
+  // The lease lapses unless renewed: beat from acceptance on, through the image preparation.
+  const beat = startBeat(deps.client, payload.dropId, payload.epoch, deps);
+  try {
+    await prepareAndRun(payload, deps, beat);
+  } finally {
+    beat.stop();
+  }
+}
+
+async function prepareAndRun(payload: DropPayload, deps: RunDeps, beat: DropBeat): Promise<void> {
   const { client, driver } = deps;
   const { dropId, epoch } = payload;
   const image = payload.image || deps.image || TROOPER_IMAGE;
@@ -465,6 +543,7 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
   // Ruling 11: a server without push-v1 expects the trooper to push. Run nothing, post nothing and
   // never heartbeat, so it sees the drop lost and requeues it rather than parking the item.
   if (pushes && !client.features?.has('push-v1')) {
+    beat.stop();
     log(OLD_SERVER);
     return;
   }
@@ -488,8 +567,25 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
   );
   const services = ('services' in payload ? payload.services : undefined) ?? [];
   const egress = payload.egress;
-  const fail = (reason: string) =>
-    client.postResult(dropId, epoch, { status: 'failed', role: payload.role, reason, gates: [] });
+  // The beat stops before a failure is posted. A drop the server already gave up (stale, cancelled
+  // or lost) gets no result: it would be refused.
+  const fail = async (reason: string) => {
+    beat.stop();
+    if (beat.halted()) return;
+    await client.postResult(dropId, epoch, {
+      status: 'failed',
+      role: payload.role,
+      reason,
+      gates: [],
+    });
+  };
+  /** A heartbeat answer (or the lost-server limit) ended the drop: prepare nothing more. */
+  const halted = () => {
+    if (!beat.halted()) return false;
+    beat.stop();
+    log(JSON.stringify({ event: 'drop-halted', dropId, epoch, ...haltReason(beat) }));
+    return true;
+  };
   const base = pushes ? deps.baseImage?.() : undefined;
   if (base && !base.ok) {
     log(JSON.stringify({ event: 'drop-refused', dropId, epoch, reason: base.reason }));
@@ -510,6 +606,7 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
       : verifyImage(i.ref, trust);
   // First what needs no network: a tag under signed, or an image off the allow-list.
   for (const i of images) {
+    if (halted()) return;
     // Under signed only the tag check is offline; verifyImage refuses a tag without cosign.
     if (trust.policy === 'signed' && digestOf(i.ref)) continue;
     const v = await decide(i);
@@ -530,11 +627,13 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
     // Server-hosted images (issue #141): each missing image comes from the server and is
     // verified offline before it loads. The registry is never asked, not even to verify.
     for (const i of unique) {
+      if (halted()) return;
       const v = await fetchFromServer(i.ref, trust, server);
       if (!v.ok) {
         if ('wait' in v) {
           // Not mirrored yet: no result and no heartbeat, so the lease lapses and the drop is
           // leased again later, by when the server may have it.
+          beat.stop();
           log(JSON.stringify({ event: 'drop-waiting', dropId, epoch, reason: v.reason }));
           return;
         }
@@ -546,6 +645,7 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
     }
   } else if (trust.policy === 'signed') {
     for (const i of unique) {
+      if (halted()) return;
       const v = await decide(i);
       if (!v.ok) {
         await fail(v.reason);
@@ -555,6 +655,7 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
     }
   }
   for (const i of server ? [] : unique) {
+    if (halted()) return;
     try {
       await pullImage(i.ref, { driver, log });
     } catch (e) {
@@ -562,6 +663,7 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
       return;
     }
   }
+  if (halted()) return;
   // Inspected once, for whichever of egress and push support this drop needs.
   let labelsOf: Promise<Record<string, string>> | undefined;
   const trooperLabels = () => {
@@ -596,6 +698,7 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
       await fail(OLD_IMAGE);
       return;
     }
+    if (halted()) return;
     try {
       volume = await prepareVolume(driver, {
         dropId,
@@ -620,6 +723,7 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
   let session: EgressSession | undefined;
   if (network) deps.active?.add(network);
   try {
+    if (halted()) return;
     if (egress && network) {
       // Fail closed: no network, no proxy or no ready line means no trooper.
       try {
@@ -641,6 +745,7 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
       console.log(JSON.stringify({ event: 'egress', dropId, mode: egress.mode, proxy: 'ready' }));
     }
     if (services.length > 0) {
+      if (halted()) return;
       try {
         await driver.startServices(dropId, epoch, services, labels, net);
       } catch (e) {
@@ -648,7 +753,8 @@ export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void
         return;
       }
     }
-    await runContainer(payload, deps, image, labels, network, net, session, volume, fate);
+    if (halted()) return;
+    await runContainer(payload, deps, beat, image, labels, network, net, session, volume, fate);
   } finally {
     if (session) await session.stop();
     if (network) await driver.removeServices(network, labels).catch(() => {});
@@ -704,6 +810,7 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 async function runContainer(
   payload: DropPayload,
   deps: RunDeps,
+  beat: DropBeat,
   image: string,
   labels: Record<string, string>,
   network: string | undefined,
@@ -725,11 +832,6 @@ async function runContainer(
     ...(volume ? { mount: { volume, target: REPO_MOUNT } } : {}),
   });
 
-  let stale = false;
-  let cancelled = false;
-  let hard = false;
-  /** Stopped by the lost-server rule: the epoch is fenced, as a kill used to fence it. */
-  let lost = false;
   let stopping: Promise<void> | undefined;
   let killing: Promise<void> | undefined;
   const stop = (graceMs = STOP_GRACE_MS) => {
@@ -761,7 +863,7 @@ async function runContainer(
     flushing = flushing.then(async () => {
       try {
         if ((await client.postEvents(dropId, epoch, batch)) === 'stale') {
-          stale = true;
+          beat.stale = true;
           void stop();
         }
       } catch {
@@ -772,39 +874,16 @@ async function runContainer(
   };
 
   const hardKill = () => {
-    cancelled = true;
-    hard = true;
     killing ??= handle.kill().catch(() => {});
     return killing;
   };
-  const lostLimit = deps.lostServerKillBeats ?? DEFAULT_LOST_SERVER_KILL_BEATS;
-  let failedBeats = 0;
-  const hb = setInterval(async () => {
-    // After the lost-server stop no beat goes out: a server back inside the grace must not see a
-    // live lease, and must find the drop lost (or salvage it from the push result).
-    if (killing || lost) return;
-    try {
-      const r = await client.heartbeat(dropId, epoch);
-      failedBeats = 0;
-      // `killed` is for a pending push only; a running drop under the kill switch is hard-cancelled.
-      if (r === 'ok' || r === 'killed') return;
-      if (r === 'hard_cancel') {
-        void hardKill();
-        return;
-      }
-      if (r === 'stale') stale = true;
-      else cancelled = true;
-      void stop();
-    } catch {
-      // Keep going through a blip. Past the limit the lease is ending anyway: stop with a grace
-      // (Ruling 14). Only a push-requested result is posted after that (held, then salvaged).
-      failedBeats++;
-      if (failedBeats >= lostLimit && !lost) {
-        lost = true;
-        void stop(LOST_SERVER_GRACE_MS);
-      }
-    }
-  }, deps.heartbeatMs ?? 15_000);
+  // The drop's one heartbeat, running since it was accepted, now acts on the container.
+  beat.onStop = (graceMs) => void stop(graceMs);
+  beat.onKill = () => void hardKill();
+  // An answer that came between the last preparation check and the start.
+  if (beat.hard) void hardKill();
+  else if (beat.lost) void stop(LOST_SERVER_GRACE_MS);
+  else if (beat.halted()) void stop();
   const flusher = setInterval(() => void flush(), FLUSH_MS);
 
   const artifacts = new ArtifactAssembler();
@@ -846,9 +925,9 @@ async function runContainer(
     // A stale drop (a 409: the lease went past the server's grace) was stopped gracefully and may
     // have checkpointed onto the volume: the server salvages it while the item is still reclaimable
     // and refuses otherwise, and only then is the volume removed (Ruling 14 holds either way).
-    if ((hard || stale) && volume) fate.decide = () => salvaged(client, dropId, epoch);
-    if (stale || cancelled) return;
-    if (lost && !(result?.push && volume)) {
+    if ((beat.hard || beat.stale) && volume) fate.decide = () => salvaged(client, dropId, epoch);
+    if (beat.stale || beat.cancelled) return;
+    if (beat.lost && !(result?.push && volume)) {
       // Fenced like the old kill: nothing posted, so a server that answers again sees the drop
       // lost. Its answer about the volume is unknown, so it stays for rediscovery to salvage.
       fate.decide = async () => 'keep';
@@ -884,17 +963,24 @@ async function runContainer(
     // A real result that could not be delivered must not be replaced by a synthetic failure
     // (the server would lose result_json); surface the error to the caller instead.
     if (postedReal) throw e;
-    if (lost && volume) fate.decide = async () => 'keep';
-    if (!stale && !cancelled && !lost) {
+    if (beat.lost && volume) fate.decide = async () => 'keep';
+    if (!beat.stale && !beat.cancelled && !beat.lost) {
       const reason = `stick runner error: ${e instanceof Error ? e.message : String(e)}`;
       await client
         .postResult(dropId, epoch, { status: 'failed', role: payload.role, reason, gates: [] })
         .catch(() => {});
     }
   } finally {
-    clearInterval(hb);
+    beat.stop();
     clearInterval(flusher);
   }
+}
+
+/** Why the preparation stopped, for the `drop-halted` line. */
+function haltReason(beat: DropBeat): { reason: string } {
+  if (beat.lost) return { reason: 'server unreachable' };
+  if (beat.stale) return { reason: 'stale' };
+  return { reason: beat.hard ? 'hard_cancel' : 'cancel' };
 }
 
 /** `push` when the server accepts a salvage of this drop's volume, else `remove`. */
