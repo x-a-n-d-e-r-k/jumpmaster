@@ -758,7 +758,9 @@ export type AttemptKey =
   | 'no_change'
   /** A heal that changed nothing; `lastFingerprint` is the findings it could not act on. */
   | 'heal_no_change'
-  | 'rate_limit';
+  | 'rate_limit'
+  /** Resolves that ended in a carried verdict (a clean merge of the base), bounded by maxBaseSync. */
+  | 'base_sync';
 
 export interface PullRequestRow {
   workItemId: number;
@@ -870,6 +872,16 @@ export function clearRequestChangesOnHead(db: Db, itemId: number, headSha: strin
   if (!rc) return false;
   db.prepare('DELETE FROM verdicts WHERE work_item_id = ? AND head_sha = ?').run(itemId, headSha);
   return true;
+}
+
+/** Every verdict on the item, oldest first (the order `latestVerdict` picks the last of). */
+export function verdictsForItem(db: Db, itemId: number): VerdictRow[] {
+  const rows = db
+    .prepare(
+      `SELECT ${VERDICT_COLS} FROM verdicts WHERE work_item_id = ? ORDER BY created_at, rowid`,
+    )
+    .all(itemId) as VerdictDbRow[];
+  return rows.map(toVerdict);
 }
 
 export function verdictsForHead(db: Db, itemId: number, headSha: string): VerdictRow[] {

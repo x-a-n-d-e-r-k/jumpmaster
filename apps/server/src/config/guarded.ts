@@ -364,6 +364,7 @@ export const NOT_GUARDED: FreePath[] = [
   free('dropZones[].budgets.maxResume', BUDGET),
   free('dropZones[].budgets.maxReviewRepeat', BUDGET),
   free('dropZones[].budgets.maxNoChange', BUDGET),
+  free('dropZones[].budgets.maxBaseSync', BUDGET),
   free(
     'dropZones[].ciDeadlineMinutes',
     'how long to wait for CI; a missing CI is still a no-merge',

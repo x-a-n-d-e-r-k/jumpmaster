@@ -1,7 +1,9 @@
 import type {
   BranchRulesRead,
+  ChangeDigest,
   ChecksFacts,
   CompareFacts,
+  CompareFile,
   Forge,
   ForgeError,
   ForgeIssue,
@@ -11,6 +13,7 @@ import type {
   ReadProbe,
   RepoAccess,
 } from '../forge/github.js';
+import { digestCompareFiles } from '../forge/github.js';
 
 /** A fake's issue: `authorType` defaults to `User`. */
 export type FakeIssue = Omit<ForgeIssue, 'authorType'> & { authorType?: string };
@@ -75,6 +78,13 @@ export interface FakeForgeState {
   /** `failed` may be left out when a test doesn't care which checks failed: it reads as `[]`. */
   checks: Map<string, Omit<ChecksFacts, 'failed'> & { failed?: ChecksFacts['failed'] }>;
   compares: Map<string, CompareFacts>;
+  /**
+   * `changeDigest` answers, keyed `base...head`. Absent: digested from `compareFiles` with the
+   * real digest, else complete and distinct per head (a head changes something of its own).
+   */
+  digests: Map<string, ChangeDigest>;
+  /** The compare response's file list for `base...head`, digested as GitHub's would be. */
+  compareFiles: Map<string, CompareFile[]>;
   reviews: StateReview[];
   /** Issue comments, oldest first (ids from 1). */
   comments: FakeComment[];
@@ -263,6 +273,8 @@ function createState(opts: {
     },
     checks: new Map(),
     compares: new Map(),
+    digests: new Map(),
+    compareFiles: new Map(),
     reviews: [],
     comments: [],
     review(r = {}) {
@@ -417,6 +429,15 @@ function forgeFor(
         mergeBaseSha: 'base0',
       }),
     }),
+    changeDigest: async (base, head) => {
+      const key = `${base}...${head}`;
+      const seeded = state.digests.get(key);
+      if (seeded) return { ...seeded };
+      const files = state.compareFiles.get(key);
+      return files
+        ? digestCompareFiles(structuredClone(files))
+        : { digest: `change of ${head}`, complete: true };
+    },
     listPullFiles: async (n) =>
       structuredClone(state.pullFiles.get(n) ?? { files: [{ path: 'src/a.ts' }], complete: true }),
     checksFor: async (sha): Promise<ChecksFacts> => {

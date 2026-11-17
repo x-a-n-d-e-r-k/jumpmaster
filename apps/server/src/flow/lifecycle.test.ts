@@ -5,9 +5,11 @@ import {
   activeDropFor,
   getAttempts,
   getPullRequest,
+  latestVerdict,
   setAttempts,
   setWorkItemState,
 } from '../db/repo.js';
+import type { CompareFile } from '../forge/github.js';
 import { opKeys, opMarker } from '../outbox.js';
 import { type Harness, harness, toApproved, toPrOpen } from '../test/flowHarness.js';
 import { workItem } from '../test/helpers.js';
@@ -170,6 +172,171 @@ describe('lifecycle', () => {
     await h.finishDrop('resolve', { status: 'completed', headSha: 'sha3r', gates: [gateOk] });
     expect(getAttempts(h.db, 2, 'resolve').count).toBe(0);
     expect(getAttempts(h.db, 3, 'resolve').count).toBe(0);
+  });
+});
+
+describe('an approval carried across a clean merge of the base', () => {
+  const prFile = (patch: string): CompareFile => ({
+    filename: 'src/a.ts',
+    status: 'modified',
+    patch,
+  });
+  const hunk = '@@ -10,2 +10,3 @@\n context\n+handle the empty case\n context';
+  const verdictRows = () =>
+    h.db.prepare('SELECT id, head_sha AS headSha FROM verdicts ORDER BY rowid').all() as {
+      id: string;
+      headSha: string;
+    }[];
+  const dropRoles = () =>
+    (
+      h.db.prepare('SELECT role FROM drops ORDER BY created_at, rowid').all() as { role: string }[]
+    ).map((r) => r.role);
+  const digestCalls = () => h.forge.author.calls.filter((c) => c.method === 'changeDigest');
+
+  /**
+   * CI required: `aaa` approved, its review posted, waiting on CI. Main then moves on and a resolve
+   * merges it into the branch, making `bbb`; `bbbFiles` is what `bbb` changes from its merge base.
+   */
+  async function resolvedTo(bbbFiles: CompareFile[]): Promise<void> {
+    h = await harness({ issues: [issue(1)], zone: { ciRequired: true } });
+    for (const id of ['author', 'reviewer'] as const) {
+      const r = h.forge.state.rules[id];
+      if (r.kind === 'ok') r.rules.requiredChecks = ['ci'];
+    }
+    h.forge.state.checks.set('aaa', { state: 'pending', names: [] });
+    h.forge.state.compareFiles.set('main...aaa', [prFile(hunk)]);
+    await toApproved(h, 'aaa');
+    await h.reconcile();
+    expect(h.forge.state.reviews.map((r) => r.commitId)).toEqual(['aaa']);
+    // A sibling merges: the approved head is behind.
+    h.forge.state.compares.set('main...aaa', {
+      aheadBy: 1,
+      behindBy: 1,
+      baseSha: 'base1',
+      mergeBaseSha: 'base0',
+    });
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['resolve']);
+    expect(getAttempts(h.db, 1, 'resolve_total').count).toBe(1);
+    h.forge.state.compareFiles.set('main...bbb', bbbFiles);
+    h.forge.state.checks.set('bbb', { state: 'pending', names: [] });
+    await h.finishDrop('resolve', { status: 'completed', headSha: 'bbb', gates: [gateOk] });
+  }
+
+  test('the same change on the new head carries the approval, posts it and merges after CI', async () => {
+    await resolvedTo([prFile(hunk)]);
+    await h.reconcile();
+    // Today's code enqueued a second review here.
+    expect(h.queuedRoles()).toEqual([]);
+    const carried = latestVerdict(h.db, 1);
+    expect(carried).toMatchObject({
+      headSha: 'bbb',
+      decision: 'approve',
+      forced: false,
+      summary: 'Carried from aaa: the change is identical after merging the base branch.\n\nok',
+    });
+    expect(carried?.id).toMatch(/^carry:.+:bbb$/);
+    expect(getAttempts(h.db, 1, 'resolve_total').count).toBe(0);
+    expect(getAttempts(h.db, 1, 'base_sync').count).toBe(1);
+
+    // Posted on the new head like any approval, then held for CI on it.
+    await h.reconcile();
+    expect(h.forge.state.reviews.map((r) => [r.commitId, r.state])).toEqual([
+      ['aaa', 'APPROVED'],
+      ['bbb', 'APPROVED'],
+    ]);
+    await h.reconcile();
+    expect(h.forge.state.merges).toEqual([]);
+    h.forge.state.checks.set('bbb', { state: 'success', names: ['ci'] });
+    await h.reconcile();
+    expect(h.forge.state.merges.map((m) => m.sha)).toEqual(['bbb']);
+    expect(workItem(h.db, 1)).toMatchObject({ state: 'done', reason: 'merged' });
+    expect(dropRoles().filter((r) => r === 'review')).toHaveLength(1);
+  });
+
+  test('D4: one more line in a PR file on the new head is reviewed, not carried', async () => {
+    await resolvedTo([prFile(`${hunk}\n+and one more line`)]);
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['review']);
+    expect(verdictRows().map((v) => v.headSha)).toEqual(['aaa']);
+    expect(getAttempts(h.db, 1, 'resolve_total').count).toBe(1);
+    expect(getAttempts(h.db, 1, 'base_sync').count).toBe(0);
+  });
+
+  test('a file without a patch on the new head is reviewed', async () => {
+    await resolvedTo([prFile(hunk), { filename: 'logo.png', status: 'added' }]);
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['review']);
+  });
+
+  test('D2: a digest read that throws is reviewed and parks nothing', async () => {
+    await resolvedTo([prFile(hunk)]);
+    h.forge.author.failNext('changeDigest', 'throw');
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['review']);
+    expect(workItem(h.db, 1).state).toBe('pr_open');
+    expect(verdictRows().map((v) => v.headSha)).toEqual(['aaa']);
+  });
+
+  test('D3: two passes applying the same carry insert one verdict row and credit once', async () => {
+    await resolvedTo([prFile(hunk)]);
+    const before = digestCalls().length;
+    await Promise.all([h.reconcile(), h.reconcile()]);
+    // Both passes read the carry facts on a head with no verdict, so both applied the carry.
+    expect(digestCalls().length - before).toBe(4);
+    expect(verdictRows().filter((v) => v.headSha === 'bbb')).toHaveLength(1);
+    expect(getAttempts(h.db, 1, 'base_sync').count).toBe(1);
+    expect(getAttempts(h.db, 1, 'resolve_total').count).toBe(0);
+  });
+
+  test('a forced approval is never carried', async () => {
+    await resolvedTo([prFile(hunk)]);
+    h.db.prepare('UPDATE verdicts SET forced = 1').run();
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['review']);
+  });
+
+  test('clean base syncs stop at maxBaseSync and park on base-sync', async () => {
+    h = await harness({
+      issues: [issue(1)],
+      zone: { budgets: { ...h.zone.budgets, maxBaseSync: 2 } },
+    });
+    for (const id of ['author', 'reviewer'] as const) {
+      const r = h.forge.state.rules[id];
+      if (r.kind === 'ok') r.rules.requiredChecks = ['ci'];
+    }
+    const heads = ['h0', 'h1', 'h2'];
+    for (const sha of heads) {
+      h.forge.state.checks.set(sha, { state: 'pending', names: [] });
+      h.forge.state.compareFiles.set(`main...${sha}`, [prFile(hunk)]);
+    }
+    await toApproved(h, 'h0');
+    for (let i = 0; i < heads.length; i++) {
+      const sha = heads[i] as string;
+      await h.reconcile();
+      h.forge.state.compares.set(`main...${sha}`, {
+        aheadBy: 1,
+        behindBy: 1,
+        baseSha: `base${i + 1}`,
+        mergeBaseSha: `base${i}`,
+      });
+      await h.reconcile();
+      if (i === 2) break;
+      expect(h.queuedRoles()).toEqual(['resolve']);
+      await h.finishDrop('resolve', {
+        status: 'completed',
+        headSha: heads[i + 1] as string,
+        gates: [gateOk],
+      });
+      await h.reconcile(); // carries
+      expect(getAttempts(h.db, 1, 'base_sync').count).toBe(i + 1);
+    }
+    expect(getAttempts(h.db, 1, 'resolve_total').count).toBe(0);
+    expect(dropRoles().filter((r) => r === 'review')).toHaveLength(1);
+    expect(workItem(h.db, 1)).toMatchObject({
+      state: 'parked',
+      reason: 'budget exhausted: base-sync',
+    });
   });
 });
 

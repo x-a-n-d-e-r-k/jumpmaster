@@ -399,8 +399,16 @@ describe('loadConfig', () => {
         maxResume: 2,
         maxReviewRepeat: 2,
         maxNoChange: 1,
+        maxBaseSync: 12,
       },
     }));
+
+  test('maxBaseSync defaults beside the given budgets and is at least 1', () => {
+    expect(
+      loadConfig(withZone({ budgets: { maxHeal: 1 } }), fullEnv).dropZones[0]?.budgets.maxBaseSync,
+    ).toBe(12);
+    expect(() => loadConfig(withZone({ budgets: { maxBaseSync: 0 } }), fullEnv)).toThrow();
+  });
 
   test('mergeMethod other than squash is refused', () =>
     expect(() => loadConfig(withZone({ mergeMethod: 'rebase' }), fullEnv)).toThrow());
@@ -1356,6 +1364,7 @@ describe('githubApp (spec §4.2: installation and repository ids, not secret)', 
         maxResume: 2,
         maxReviewRepeat: 2,
         maxNoChange: 1,
+        maxBaseSync: 12,
       },
       ciRequired: true,
       ciDeadlineMinutes: 45,

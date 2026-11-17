@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { containsSecret } from '@jumpmaster/protocol';
 import { Octokit } from '@octokit/rest';
 
@@ -99,6 +100,12 @@ export type CompareFacts = {
   mergeBaseSha: string;
 };
 
+/**
+ * What a branch changes against its merge base with the base branch (`changeDigest`). `digest` is
+ * '' when `complete` is false: a cut-short file list or a file without a patch proves nothing.
+ */
+export type ChangeDigest = { digest: string; complete: boolean };
+
 export type PullFiles = { files: { path: string; previousPath?: string }[]; complete: boolean };
 
 /** GitHub's app id for GitHub Actions, as a ruleset's required check names its source. */
@@ -197,6 +204,12 @@ export interface Forge {
   branchSha(branch: string): Promise<string | null>;
   compare(base: string, head: string): Promise<CompareFacts>;
   listPullFiles(number: number): Promise<PullFiles>;
+  /**
+   * sha256 over the three-dot comparison `base...head` (merge base to `head`): each changed file,
+   * sorted by path, as `path NUL status NUL previousPath-or-empty NUL patch`, records joined with
+   * NUL. Two heads with equal complete digests change the same files the same way.
+   */
+  changeDigest(base: string, head: string): Promise<ChangeDigest>;
   checksFor(sha: string): Promise<ChecksFacts>;
   getBranchRules(branch: string): Promise<BranchRulesRead>;
   getFileAt(ref: string, path: string): Promise<string | null>;
@@ -238,6 +251,33 @@ const MAINTAINER_ROLES = new Set(['maintain', 'admin']);
 const MAINTAINER_PERMISSIONS = new Set(['admin']);
 
 const PULLS_FILES_CAP = 3000;
+/** GitHub's compare endpoint lists at most this many files: a full list may be cut short. */
+const COMPARE_FILES_CAP = 300;
+
+/** One file of GitHub's compare response, as `changeDigest` reads it. */
+export type CompareFile = {
+  filename: string;
+  status: string;
+  previous_filename?: string;
+  patch?: string;
+};
+
+/** The digest of a comparison's file list (see `Forge.changeDigest`). */
+export function digestCompareFiles(files: readonly CompareFile[] | undefined): ChangeDigest {
+  const incomplete: ChangeDigest = { digest: '', complete: false };
+  if (files === undefined || files.length >= COMPARE_FILES_CAP) return incomplete;
+  const records: { path: string; text: string }[] = [];
+  for (const f of files) {
+    if (typeof f.patch !== 'string') return incomplete; // binary, or too large to show
+    const fields = [f.filename, f.status, f.previous_filename ?? '', f.patch];
+    // A NUL inside a field could move a record boundary: two different lists, one digest.
+    if (fields.some((x) => x.includes('\0'))) return incomplete;
+    records.push({ path: f.filename, text: fields.join('\0') });
+  }
+  records.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const text = records.map((r) => r.text).join('\0');
+  return { digest: createHash('sha256').update(text).digest('hex'), complete: true };
+}
 const FAILED_CONCLUSIONS = new Set([
   'failure',
   'timed_out',
@@ -761,6 +801,17 @@ export class GitHubForge implements Forge {
       baseSha: data.base_commit.sha,
       mergeBaseSha: data.merge_base_commit.sha,
     };
+  }
+
+  async changeDigest(base: string, head: string): Promise<ChangeDigest> {
+    // Paging asks for one commit; the file list comes whole with page 1 (up to GitHub's cap).
+    const { data } = await this.octokit.rest.repos.compareCommitsWithBasehead({
+      owner: this.owner,
+      repo: this.repo,
+      basehead: `${base}...${head}`,
+      per_page: 1,
+    });
+    return digestCompareFiles(data.files);
   }
 
   async listPullFiles(number: number): Promise<PullFiles> {

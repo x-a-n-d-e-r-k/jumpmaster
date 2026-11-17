@@ -14,6 +14,7 @@ import {
   setWaitingSince,
   upsertPullRequest,
   verdictsForHead,
+  verdictsForItem,
   type WorkItem,
 } from '../db/repo.js';
 import {
@@ -25,7 +26,7 @@ import {
 } from '../forge/github.js';
 import { log } from '../log.js';
 import { type ForgePair, type OpResult, opKeys } from '../outbox.js';
-import type { Snapshot } from './decide.js';
+import type { CarryFacts, Snapshot } from './decide.js';
 import {
   administrationOf,
   branchProtectionProblems,
@@ -446,6 +447,47 @@ async function findLockfile(
 }
 
 /**
+ * The facts for carrying the item's newest verdict to `headSha`, read only when it could be
+ * carried: no verdict on this head, the newest verdict a non-forced approve on another head, and
+ * no request-changes after it or on its head. null otherwise, and when either digest read throws
+ * (the head is then reviewed; a failed read never carries and never parks).
+ */
+async function carryFacts(
+  db: Db,
+  forges: ForgePair,
+  itemId: number,
+  base: string,
+  headSha: string,
+): Promise<CarryFacts | null> {
+  const all = verdictsForItem(db, itemId);
+  const source = all.at(-1);
+  if (!source || source.decision !== 'approve' || source.forced) return null;
+  if (source.headSha === headSha || all.some((v) => v.headSha === headSha)) return null;
+  const at = all.indexOf(source);
+  const requestChangesAfter = all.some(
+    (v, i) => v.decision === 'request_changes' && (i > at || v.headSha === source.headSha),
+  );
+  if (requestChangesAfter) return null;
+  try {
+    const [digestFrom, digestHead] = await Promise.all([
+      forges.author.changeDigest(base, source.headSha),
+      forges.author.changeDigest(base, headSha),
+    ]);
+    return {
+      fromVerdictId: source.id,
+      fromHead: source.headSha,
+      fromDecision: source.decision,
+      fromForced: source.forced,
+      requestChangesAfter,
+      digestFrom,
+      digestHead,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Assembles everything `decide` reads for one pr_open item. Forge facts are read fresh; failed
  * reads fail closed (see `Snapshot` field docs). Upserts `pull_requests` and maintains
  * `work_items.waiting_since`.
@@ -581,13 +623,19 @@ export async function buildSnapshot(
       ? toOpResult(getOutbox(db, opKeys.review(item.id, headSha, latest.id)))
       : null;
   const mergeOp = headSha ? toOpResult(getOutbox(db, opKeys.merge(item.id, headSha))) : null;
+  // A lost drop its stick may still salvage holds the item like an active one (Ruling 10).
+  const activeDrop = holdingDropFor(db, item.id, now) ?? null;
+  // Read only where rule 19 could use it: nothing else holds the item and the head is not behind.
+  const carry =
+    headSha && !activeDrop && !missing && compare?.behindBy === 0 && verdictsOnHead.length === 0
+      ? await carryFacts(db, forges, item.id, base, headSha)
+      : null;
 
   return {
     item,
     zone,
     now,
-    // A lost drop its stick may still salvage holds the item like an active one (Ruling 10).
-    activeDrop: holdingDropFor(db, item.id, now) ?? null,
+    activeDrop,
     pr,
     issueState,
     branchSha,
@@ -613,5 +661,6 @@ export async function buildSnapshot(
     protectionProblems: pass.protectionProblems,
     headFirstSeenAt,
     missingSince,
+    carry,
   };
 }

@@ -49,6 +49,10 @@ export function chargeBudget(
       return { ok: true, charged: [key] };
     }
     case 'resolve': {
+      // Every clean base sync is given back to resolve_total (`creditBaseSync`): this bounds them.
+      if (getAttempts(db, itemId, 'base_sync').count >= budgets.maxBaseSync) {
+        return exhausted('base-sync');
+      }
       const total = getAttempts(db, itemId, 'resolve_total');
       if (total.count >= budgets.maxResolveTotal) return exhausted('resolve-total');
       const r = getAttempts(db, itemId, 'resolve');
@@ -63,6 +67,17 @@ export function chargeBudget(
       return { ok: true, charged: ['resolve', 'resolve_total'] };
     }
   }
+}
+
+/**
+ * A resolve that ended in a carried verdict (the change is identical after merging the base): it
+ * spends `base_sync` instead of `resolve_total`, which is kept for real conflicts. Call once per
+ * carried verdict, in the transaction that inserts it.
+ */
+export function creditBaseSync(db: Db, itemId: number): void {
+  const total = getAttempts(db, itemId, 'resolve_total');
+  setAttempts(db, itemId, 'resolve_total', Math.max(0, total.count - 1), total.lastFingerprint);
+  bump(db, itemId, 'base_sync');
 }
 
 function chargeCounter(db: Db, itemId: number, key: AttemptKey, limit: number): boolean {
