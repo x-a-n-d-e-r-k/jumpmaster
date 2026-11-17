@@ -575,7 +575,6 @@ describe('pushStaged', () => {
   });
 });
 
-/** Carried over from the deleted in-container push suites: the same refusals, now on the push path. */
 describe('root git and payload-derived revisions (issue #262)', () => {
   /** The git subcommand of an argv, past `-c k=v` pairs and other global options. */
   const sub = (argv: string[]): string => {
@@ -621,6 +620,21 @@ describe('root git and payload-derived revisions (issue #262)', () => {
     for (const s of ['fetch', 'diff', 'log', 'rev-parse', 'push']) expect(seen).toContain(s);
   });
 
+  test('the mirror fetches (clone and refresh) end options before the url and refspecs', async () => {
+    const rec = recordSpawn();
+    const w = await world('endofoptions-mirror');
+    await mirrorFetch(w.mirror, 't', w.target, [B, 'main']);
+    const derived = ['refs/heads/', w.origin];
+    const fetches = rec.calls.filter(
+      (c) => c.argv[0] === 'git' && c.env.GIT_DIR && c.argv.includes('fetch'),
+    );
+    // cloneRepo's all-heads fetch and the refresh of the payload's branches.
+    expect(fetches.length).toBeGreaterThanOrEqual(2);
+    expect(fetches.some((c) => c.argv.includes(`+refs/heads/${B}:refs/heads/${B}`))).toBe(true);
+    expect(fetches.some((c) => c.argv.includes('+refs/heads/*:refs/heads/*'))).toBe(true);
+    expect(expectEndOfOptions(fetches, derived)).toEqual(new Set(['fetch']));
+  });
+
   test('the remote check after a failed push ends options too', async () => {
     const w = await world('endofoptions-stale');
     const h = w.human();
@@ -639,6 +653,7 @@ describe('root git and payload-derived revisions (issue #262)', () => {
   });
 });
 
+/** Carried over from the deleted in-container push suites: the same refusals, now on the push path. */
 describe('pushStaged: guard cases carried over from the in-container push', () => {
   test('a protected path git would C-quote (non-ASCII) is still refused', async () => {
     const w = await world('quoted');

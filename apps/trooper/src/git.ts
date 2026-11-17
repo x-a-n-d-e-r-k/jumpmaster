@@ -340,6 +340,7 @@ export async function mirrorFetch(
       '--no-tags',
       '--no-write-fetch-head',
       '--prune',
+      '--end-of-options',
       url,
       ...refs.map((r) => `+refs/heads/${r}:refs/heads/${r}`),
     ],
