@@ -17,6 +17,7 @@ import { openDb } from './db/open.js';
 import { reconcileZone } from './flow/reconcile.js';
 import { createAppBrokers } from './forge/app-brokers.js';
 import { createAppTokenSource } from './forge/app-tokens.js';
+import { createHeldDropTokens } from './forge/held-tokens.js';
 import { makeReadForgeFor, TIMED_REQUEST_MS } from './forge/read-forge.js';
 import { serverScrubSet } from './forge/scrub-set.js';
 import { imageLockPath, startImageMirror } from './images/run.js';
@@ -161,6 +162,9 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
   // The push containers' tokens in app mode (§4.2, issue #224): one broker per owner and role,
   // every key, JWT and token in the scrub set before use.
   const appBrokers = createAppBrokers({ apps: () => live.resolvedApps() });
+  // The review, crew and doctor drops' clone tokens in app mode (§4.2, issue #237): minted per
+  // drop, held in memory, revoked when the drop ends (the lease tick sweeps the ended ones).
+  const heldReadTokens = createHeldDropTokens({ log });
   // The doctor's forge on the read token (or, with none, the reviewer app's contents: read token):
   // reads only, never handed a write.
   const readForgeFor = makeReadForgeFor(live, appTokens);
@@ -203,6 +207,8 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     log,
     images: images.mirror,
     appBrokers,
+    appTokens,
+    heldReadTokens,
     resolvedApps: () => live.resolvedApps(),
     // The kill switch suspends each zone's app installations, and release unsuspends them (§4.2).
     appSuspension: {
@@ -247,7 +253,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
         // A zone with a credential problem is parked with it as the reason (vault/problems.ts).
         await zonePass(
           zone,
-          credentialProblems(zone, resolved),
+          credentialProblems(zone, resolved, live.resolvedApps()),
           async () => {
             const forgePair = pairs.for(zone, config.secrets);
             const synced = await syncDropZone(db, forgePair, zone, new Date());
@@ -304,6 +310,12 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
       expireLeases(new Date());
     } catch (e) {
       log(`lease expiry failed: ${errorMessage(e)}`);
+    }
+    // After expiry: an expired, lost or cancelled drop's clone token is revoked.
+    try {
+      heldReadTokens.sweep(db);
+    } catch (e) {
+      log(`read token sweep failed: ${errorMessage(e)}`);
     }
     sweepStops();
     void pruneTranscripts(new Date());

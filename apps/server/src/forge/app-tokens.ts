@@ -38,9 +38,24 @@ export interface AppTokenSourceDeps {
   add: (secret: string) => void;
 }
 
+/** A token minted for one holder alone (issue #237): never cached, never shared. */
+export interface FreshToken {
+  token: string;
+  expiresAt: Date;
+  /** The owner whose app minted it. */
+  owner: string;
+  /** Revokes this token with the broker that minted it. */
+  revoke(): Promise<void>;
+}
+
 export interface AppTokenSource {
   /** A provider of the zone's `use` tokens from its `role` app; nothing is called until `token()`. */
   provider(zoneId: string, role: AppRole, use: Use): TokenProvider;
+  /**
+   * A token minted now for one holder (a drop): checked against the installation as the cached
+   * tokens are, but never taken from or put in the cache. The caller holds and revokes it.
+   */
+  fresh(zoneId: string, role: AppRole, use: Use): Promise<FreshToken>;
 }
 
 /** A token the source would not mint. Its message names the repository and role, never a secret. */
@@ -197,12 +212,15 @@ export function createAppTokenSource(deps: AppTokenSourceDeps): AppTokenSource {
       });
     }
     await check!.passed;
+    return { owner, role, repositoryId: recorded.repositoryId, use };
+  }
 
-    const key: TokenKey = { owner, role, repositoryId: recorded.repositoryId, use };
+  /** Records a key handed to the cache, so a rotation or changed id drops its token. */
+  function issue(key: TokenKey): void {
+    const id = slotId(key.owner, key.role as AppRole);
     const keys = issued.get(id) ?? new Map<string, TokenKey>();
     keys.set(tokenKeyId(key), key);
     issued.set(id, keys);
-    return key;
   }
 
   return {
@@ -211,6 +229,7 @@ export function createAppTokenSource(deps: AppTokenSourceDeps): AppTokenSource {
       return {
         async token() {
           const key = await keyFor(zoneId, role, use);
+          issue(key);
           last = key;
           return cache.token(key);
         },
@@ -218,6 +237,23 @@ export function createAppTokenSource(deps: AppTokenSourceDeps): AppTokenSource {
           if (last) cache.invalidate(last);
         },
       };
+    },
+
+    async fresh(zoneId, role, use) {
+      const key = await keyFor(zoneId, role, use);
+      const id = slotId(key.owner, role);
+      const slot = brokers.get(id);
+      const installationId = installationOf.get(id)?.get(key.repositoryId);
+      if (!slot || installationId === undefined)
+        throw new AppTokenError(`no checked ${role} installation to mint from`);
+      // The broker gives the token to `add` before it returns it.
+      const minted = await slot.broker.mint({
+        installationId,
+        repositoryId: key.repositoryId,
+        use,
+      });
+      const { broker } = slot;
+      return { ...minted, owner: key.owner, revoke: () => broker.revoke(minted.token) };
     },
   };
 }

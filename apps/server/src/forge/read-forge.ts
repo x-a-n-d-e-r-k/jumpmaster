@@ -2,13 +2,13 @@
  * The doctor's read forge (spec docs/superpowers/specs/2026-11-13-github-app-auth.md, §4.4 and §13
  * Task 7): reads only, never handed a write.
  *
- * The read token wins while it is set. Drops still clone with `githubReadToken` until the per-drop
- * read-token hookup (Task 5, Ruling 39), so testing the app's token in its place would let a broken
- * read token pass the doctor. The reviewer app's `drop-read-reviewer` token is used only when no
- * read token is configured; app-first switches on with the drop clone token in Task 5.
+ * App-first (§4.4, issue #237): an app-reviewer zone (`isAppReviewerZone`) reads with the reviewer
+ * app's `drop-read-reviewer` token even when `githubReadToken` is set, because its review, crew and
+ * doctor drops clone with that app's token minted per drop: the doctor tests what the drops use.
+ * Every other zone reads with `githubReadToken`, and has no read forge without it.
  */
 import type { Config } from '../config.js';
-import { appInstallationFor, credentialFor, type ResolvedApps } from '../vault/resolution.js';
+import { isAppReviewerZone, type ResolvedApps } from '../vault/resolution.js';
 import type { AppTokenSource } from './app-tokens.js';
 import { type Forge, GitHubForge } from './github.js';
 
@@ -28,17 +28,14 @@ export function makeReadForgeFor(
     if (!zone) return undefined;
     const [owner = '', name = ''] = zone.repo.split('/');
     const opts = { requestTimeoutMs: TIMED_REQUEST_MS };
+    if (appTokens && isAppReviewerZone(zone, live.resolvedApps()))
+      return new GitHubForge(
+        owner,
+        name,
+        appTokens.provider(zone.id, 'reviewer', 'drop-read-reviewer'),
+        opts,
+      );
     const readToken = config.secrets.githubReadToken;
-    if (readToken) return new GitHubForge(owner, name, readToken, opts);
-    if (!appTokens) return undefined;
-    const reviewer = credentialFor(zone, 'reviewer', live.resolvedApps());
-    if (reviewer.ref.kind !== 'github-app' || reviewer.problem) return undefined;
-    if (!appInstallationFor(zone, 'reviewer')) return undefined;
-    return new GitHubForge(
-      owner,
-      name,
-      appTokens.provider(zone.id, 'reviewer', 'drop-read-reviewer'),
-      opts,
-    );
+    return readToken ? new GitHubForge(owner, name, readToken, opts) : undefined;
   };
 }

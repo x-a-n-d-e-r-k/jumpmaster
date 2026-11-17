@@ -391,7 +391,7 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
       const without = store.resolvedWithoutVaultEntry(name);
       const created = store
         .current()
-        .dropZones.flatMap((z) => credentialProblems(z, without))
+        .dropZones.flatMap((z) => credentialProblems(z, without, store.resolvedApps()))
         .filter((p) => p.credential === name && p.kind === 'missing');
       if (created.length > 0)
         return reply.code(409).send({
