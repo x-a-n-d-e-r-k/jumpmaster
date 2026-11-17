@@ -1,4 +1,4 @@
-import { expect, test } from 'vitest';
+import { describe, expect, test } from 'vitest';
 import {
   containsSecret,
   dropSecrets,
@@ -103,4 +103,46 @@ test('withBasicAuth is exported from the package and pairs a token with its git 
     Buffer.from('x-access-token:ghs_abc').toString('base64'),
   ]);
   expect(withBasicAuth(undefined)).toEqual([]);
+});
+
+// D4 evasion (#253): every GitHub token kind, in every position a sink sees it, leaves no part behind.
+// Built by concatenation so no token-shaped literal sits in the tracked file.
+const statelessToken = 'ghs' + '_1234567_' + jwtPart(12);
+const tokenKinds: [string, string][] = [
+  ['stateless ghs_', statelessToken],
+  ['classic ghp_', 'ghp' + '_' + 'A1b2'.repeat(9)],
+  ['classic gho_', 'gho' + '_' + 'C3d4'.repeat(9)],
+  ['classic 40-character ghs_', 'ghs' + '_' + 'E5f6'.repeat(9)],
+  ['fine-grained github_pat_', 'github' + '_pat_' + '11AB_'.repeat(16)],
+];
+const positions: [string, (t: string) => string][] = [
+  ['plain', (t) => ' ' + t],
+  ['JSON-escaped newline', (t) => JSON.stringify('line\n' + t)],
+  ['ANSI prefix', (t) => '\x1b[32m' + t],
+  ['URL-encoded prefix', (t) => 'x-access-token%3A' + t],
+];
+const survivors = (out: string, token: string) =>
+  [
+    token,
+    token.slice(4, 20),
+    token.slice(-16),
+    ...token.split(/[._]/).filter((p) => p.length >= 8),
+  ].filter((part) => out.includes(part));
+
+describe('redactTokenShapes catches each token kind in each position', () => {
+  test.each(
+    tokenKinds.flatMap(([kind, token]) =>
+      positions.map(([where, wrap]) => ({ kind, where, token, wrap })),
+    ),
+  )('$kind, $where', ({ token, wrap }) => {
+    const out = redactTokenShapes(wrap(token));
+    expect(out).toContain('[REDACTED]');
+    expect(survivors(out, token)).toEqual([]);
+  });
+});
+
+test('an identifier that merely contains ghs_ is not redacted', () => {
+  const id = 'highs_and_lows_of_a_long_identifier_name_here';
+  expect(redactTokenShapes(id)).toBe(id);
+  expect(redactTokenShapes(`const ${id} = 1;`)).toBe(`const ${id} = 1;`);
 });

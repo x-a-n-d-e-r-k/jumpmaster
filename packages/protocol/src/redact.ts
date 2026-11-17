@@ -1,5 +1,9 @@
 const TOKEN_SHAPES = [
   /github_pat_[A-Za-z0-9_]{20,}/g,
+  // A stateless installation token by its full shape (`ghs_<app id>_<JWT>`), with no lookbehind:
+  // a token right after a letter, digit or `_` (the `n` of a JSON-escaped `\n`, an ANSI colour
+  // code, `x-access-token%3A`) is still caught, and an identifier never has this shape.
+  /ghs_\d+_eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
   // Installation tokens: stateless since 2026 (`ghs_<app id>_<JWT>`, ~520 characters with `.`, `-`
   // and `_`), the pattern GitHub suggests. Before the generic shape, which stops at the first `_`.
   // Not inside a longer identifier (`highs_and_lows_…`), which would refuse an ordinary push.
