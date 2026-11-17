@@ -69,6 +69,7 @@ import type { ImageMirror } from '../images/mirror.js';
 import { layoutFor } from '../images/serve.js';
 import { codeHash, ENROLL_CODE } from '../install/invite.js';
 import { heartbeat, leaseNextDrop, missingFor, zoneRequirements, zonesWaiting } from '../leases.js';
+import { log as serverLog } from '../log.js';
 import type { ForgePair } from '../outbox.js';
 import { buildPayload, egressFor, ownZoneSecrets } from '../payloads.js';
 import { applyResult, applyUsage, type ResultDeps } from '../results.js';
@@ -229,7 +230,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
   const waitMs = deps.leaseWaitMs ?? 25_000;
   const pollMs = deps.leasePollMs ?? 1000;
   // The app runs with Fastify's logger off; the server's own log is stderr.
-  const log = deps.log ?? ((line: string) => console.error(`[jumpmaster] ${line}`));
+  const log = deps.log ?? serverLog;
   const lastLogged = new Map<string, number>();
 
   /**

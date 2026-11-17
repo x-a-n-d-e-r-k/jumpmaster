@@ -23,6 +23,7 @@ import {
   type PullFacts,
   type PullFiles,
 } from '../forge/github.js';
+import { log } from '../log.js';
 import { type ForgePair, type OpResult, opKeys } from '../outbox.js';
 import type { Snapshot } from './decide.js';
 import {
@@ -114,7 +115,7 @@ function noteCodeownersRead(zoneId: string, ok: boolean): void {
   }
   if (codeownersUnread.has(zoneId)) return;
   codeownersUnread.add(zoneId);
-  console.warn(
+  log(
     `zone ${zoneId}: the CODEOWNERS read failed, so this pass did not check that the reviewer bot can satisfy the required code owner review`,
   );
 }

@@ -1,9 +1,9 @@
 import { lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { redact } from '@jumpmaster/protocol';
-import { secretList } from '../config.js';
 import type { Db } from '../db/open.js';
 import type { ZoneGuidance } from '../github/guidance.js';
+import { redactionList } from '../scrub.js';
 import { actionFor, PAGES_M45A } from './actions.js';
 import {
   type DoctorCheck,
@@ -106,7 +106,7 @@ export async function runDoctor(d: DoctorDeps, opts: { zoneId?: string } = {}): 
       .prepare('INSERT INTO doctor_runs (started_at) VALUES (?)')
       .run(startedAt);
     const id = Number(lastInsertRowid);
-    const secrets = secretList(d.config.secrets);
+    const secrets = redactionList(d.config.secrets);
     const checks = (await withActions(d, await runChecks(d, opts))).map((c) =>
       redactCheck(c, secrets),
     );

@@ -12,6 +12,7 @@ import {
 } from '../db/repo.js';
 import type { ZonePass } from '../flow/snapshot.js';
 import { getGoals } from '../goals.js';
+import { log } from '../log.js';
 import { type ForgePair, unsanitizeForgeText } from '../outbox.js';
 import type { CrewInputJson } from '../payloads.js';
 import { dispatchGate, gateQueuesCrew } from '../usage.js';
@@ -219,7 +220,7 @@ export async function enqueueCrew(
             : diagnoseInput(db, zone, work.itemId, id);
   } catch (err) {
     // A forge read failed while gathering input: try again next pass.
-    console.warn(`zone ${zone.id}: crew ${work.role} input failed: ${String(err)}`);
+    log(`zone ${zone.id}: crew ${work.role} input failed: ${String(err)}`);
     return null;
   }
   const stored: CrewInputJson = { work, input };

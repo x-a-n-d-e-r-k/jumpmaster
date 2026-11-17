@@ -25,6 +25,7 @@ import {
   upsertDropZone,
   upsertWorkItem,
 } from '../db/repo.js';
+import { serverScrubSet } from '../forge/scrub-set.js';
 import { opMarker } from '../outbox.js';
 import { crewOn, crewWorld, ISSUE_BODY } from '../test/crew.js';
 import { makeZone, usageCfg } from '../test/fixtures.js';
@@ -863,6 +864,29 @@ describe('read tools', () => {
       detail: '',
       argsSha: sha256(JSON.stringify({ number: 42 })),
     });
+  });
+
+  test('D5: a value only the scrub set holds is redacted from read output and refused in a write', async () => {
+    const s = await setup();
+    seed(s);
+    const minted = 'minted-only-in-scrub-set-0004';
+    serverScrubSet.add(minted);
+    try {
+      const [mine] = s.db.prepare('SELECT id FROM work_items WHERE issue_number = 41').all() as {
+        id: number;
+      }[];
+      setWorkItemState(s.db, mine?.id as number, 'parked', `gate failed: token ${minted}`);
+      const item = textOf(await call(s.read, 'get_work_item', { number: 41 }));
+      expect(item).not.toContain(minted);
+      expect(item).toContain('[REDACTED]');
+      const r = await call(s.write, 'file_staged_issues', {
+        issues: [issue({ body: `${ISSUE_BODY}\n${minted}` })],
+      });
+      expect(r.isError).toBe(true);
+      expect(textOf(r)).toMatch(/token or secret/);
+    } finally {
+      serverScrubSet.clear();
+    }
   });
 
   test('list_rulings labels Command notes trusted and diagnoses untrusted', async () => {

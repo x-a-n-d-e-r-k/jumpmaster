@@ -21,6 +21,7 @@ import {
 } from '../db/repo.js';
 import { actionFor, PAGES_M45A, pagesOf } from '../doctor/actions.js';
 import { CHECK_IDS, DOC } from '../doctor/checks.js';
+import { serverScrubSet } from '../forge/scrub-set.js';
 import { zoneGuidance } from '../github/guidance.js';
 import { opMarker } from '../outbox.js';
 import { crewOn, GOAL } from '../test/crew.js';
@@ -449,6 +450,24 @@ describe('the status line (Task 12)', () => {
     setWorkItemState(h.db, first?.id as number, 'parked', 'merge refused for author-token');
     const redacted = (await h.view('/api/control/status')).json() as { headline: string };
     expect(redacted.headline).toBe('1 parked: merge refused for [REDACTED]');
+    // D5: a value only the scrub set holds (a minted token) is redacted the same way.
+    serverScrubSet.add('minted-only-in-scrub-set-0003');
+    try {
+      setWorkItemState(
+        h.db,
+        first?.id as number,
+        'parked',
+        'push with minted-only-in-scrub-set-0003',
+      );
+      const minted = await h.view('/api/control/status');
+      expect(minted.body).not.toContain('minted-only-in-scrub-set-0003');
+      expect((minted.json() as { headline: string }).headline).toBe(
+        '1 parked: push with [REDACTED]',
+      );
+    } finally {
+      serverScrubSet.clear();
+    }
+    setWorkItemState(h.db, first?.id as number, 'parked', 'merge refused for author-token');
     // No secret of the install reaches the line, the page or the route.
     for (const secret of ['claude-token', 'author-token', 'reviewer-token', 'o'.repeat(32), 'join'])
       for (const text of [
