@@ -1,13 +1,20 @@
 import { beforeEach, describe, expect, test } from 'vitest';
 import type { Budgets } from '../config.js';
 import { type Db, openDb } from '../db/open.js';
-import { getAttempts, upsertDropZone, upsertWorkItem } from '../db/repo.js';
+import {
+  getAttempts,
+  resetAttempts,
+  setAttempts,
+  upsertDropZone,
+  upsertWorkItem,
+} from '../db/repo.js';
 import { t0, tmpDbFile } from '../test/helpers.js';
 import {
   chargeBudget,
   chargeNoChange,
   chargeRateLimitRequeue,
   chargeResolveConflict,
+  creditBaseSync,
   fingerprint,
   RATE_LIMIT_REQUEUE_MAX,
   refundCharge,
@@ -20,6 +27,7 @@ const b: Budgets = {
   maxResume: 2,
   maxReviewRepeat: 2,
   maxNoChange: 1,
+  maxBaseSync: 12,
 };
 
 let db: Db;
@@ -154,5 +162,52 @@ describe('other charges', () => {
     refundCharge(db, id, 'heal,heal,resolve');
     expect(getAttempts(db, id, 'heal').count).toBe(0);
     expect(getAttempts(db, id, 'resolve').count).toBe(0);
+  });
+});
+
+describe('base syncs (a resolve that ends in a carried verdict)', () => {
+  test('a carry gives back the resolve_total charge and counts a base_sync', () => {
+    expect(chargeBudget(db, id, 'resolve', 'f1', b).ok).toBe(true);
+    expect(getAttempts(db, id, 'resolve_total').count).toBe(1);
+    creditBaseSync(db, id);
+    expect(getAttempts(db, id, 'resolve_total').count).toBe(0);
+    expect(getAttempts(db, id, 'base_sync').count).toBe(1);
+  });
+
+  test('resolve_total never goes below zero', () => {
+    creditBaseSync(db, id);
+    creditBaseSync(db, id);
+    expect(getAttempts(db, id, 'resolve_total').count).toBe(0);
+    expect(getAttempts(db, id, 'base_sync').count).toBe(2);
+  });
+
+  test('clean base syncs never exhaust resolve-total, and stop at maxBaseSync', () => {
+    const small = { ...b, maxResolveTotal: 2, maxBaseSync: 3 };
+    for (let i = 0; i < 3; i++) {
+      expect(chargeBudget(db, id, 'resolve', `f${i}`, small).ok).toBe(true);
+      creditBaseSync(db, id);
+    }
+    expect(chargeBudget(db, id, 'resolve', 'f9', small)).toEqual({
+      ok: false,
+      reason: 'budget exhausted: base-sync',
+    });
+    expect(getAttempts(db, id, 'resolve_total').count).toBe(0);
+  });
+
+  test('base-sync is refused at the limit even with resolve_total to spare', () => {
+    setAttempts(db, id, 'base_sync', 12, null);
+    expect(chargeBudget(db, id, 'resolve', 'f1', b)).toEqual({
+      ok: false,
+      reason: 'budget exhausted: base-sync',
+    });
+    expect(getAttempts(db, id, 'resolve_total').count).toBe(0);
+    setAttempts(db, id, 'base_sync', 11, null);
+    expect(chargeBudget(db, id, 'resolve', 'f1', b).ok).toBe(true);
+  });
+
+  test('resetAttempts clears base_sync', () => {
+    creditBaseSync(db, id);
+    resetAttempts(db, id);
+    expect(getAttempts(db, id, 'base_sync').count).toBe(0);
   });
 });

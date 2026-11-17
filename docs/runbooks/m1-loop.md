@@ -135,12 +135,23 @@ Start from the M0 config. The zone gains these fields (defaults shown):
     "maxResolveTotal": 6,
     "maxResume": 2,
     "maxReviewRepeat": 2,
-    "maxNoChange": 1
+    "maxNoChange": 1,
+    "maxBaseSync": 12
   }
 }
 ```
 
 - `mergeMethod` accepts only `squash` in M1.
+- Budgets: `maxHeal`, `maxResolve` (repeat resolves of one head and base, and resolves that hit
+  conflicts), `maxResolveTotal` (every resolve, parks `budget exhausted: resolve-total`),
+  `maxResume`, `maxReviewRepeat` and `maxNoChange`. `maxBaseSync` (default 12, at least 1)
+  bounds clean base syncs: when main moves past an approved PR and the resolve merges it in with
+  the PR's own change byte-for-byte the same (an equal, complete digest of `base...head` for both
+  heads), the approval is carried to the new head without a fresh review, and that resolve is
+  given back to `resolve_total` and counted in `base_sync` instead. Past the limit the item parks
+  `budget exhausted: base-sync`. A changed patch, a file list GitHub cut short, a file without a
+  patch (binary or too large), a forced approval or a later request-changes all mean a fresh
+  review. Retry clears every budget.
 - Set `ciRequired: false` for a repository with no CI. The ruleset then needs no
   required checks. With `ciRequired: true`, only checks the ruleset names count: an
   unrelated green check (a CLA bot, a labeler) never stands in for CI, and an item with no

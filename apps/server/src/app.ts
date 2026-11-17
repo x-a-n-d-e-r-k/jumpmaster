@@ -111,6 +111,7 @@ const ATTEMPT_KEYS: AttemptKey[] = [
   'no_change',
   'heal_no_change',
   'rate_limit',
+  'base_sync',
 ];
 
 /** Per work item: its PR head, whether Command allowed its gate change, verdict and attempts. */

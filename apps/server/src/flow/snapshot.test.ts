@@ -588,3 +588,84 @@ describe('buildSnapshot', () => {
     expect(s.headFirstSeenAt).toBe(now.toISOString());
   });
 });
+
+describe('carry facts', () => {
+  const at = (s: number) => new Date(now.getTime() - (100 - s) * 1000).toISOString();
+  const row = (id: string, headSha: string, over: Partial<VerdictRow> = {}): VerdictRow => ({
+    ...approveRow(headSha),
+    id,
+    ...over,
+  });
+  const digestReads = () => w.f.author.calls.filter((c) => c.method === 'changeDigest');
+  const moveHead = (sha: string) => w.f.state.setHead(1, sha);
+
+  test('reads both digests against the base when the newest verdict is an approve on an earlier head', async () => {
+    insertVerdict(w.db, row('v1', 'sha1', { createdAt: at(1) }));
+    moveHead('sha2');
+    w.f.state.digests.set('main...sha1', { digest: 'd', complete: true });
+    w.f.state.digests.set('main...sha2', { digest: 'd', complete: true });
+    const s = await snapshotOf();
+    expect(s.carry).toEqual({
+      fromVerdictId: 'v1',
+      fromHead: 'sha1',
+      fromDecision: 'approve',
+      fromForced: false,
+      requestChangesAfter: false,
+      digestFrom: { digest: 'd', complete: true },
+      digestHead: { digest: 'd', complete: true },
+    });
+    expect(decide(s)).toEqual({ kind: 'carry_verdict', fromVerdictId: 'v1', headSha: 'sha2' });
+  });
+
+  test.each<[string, VerdictRow[]]>([
+    ['there is no verdict', []],
+    ['the newest verdict is forced', [row('v1', 'sha1', { forced: true })]],
+    [
+      'the newest verdict asks for changes',
+      [
+        row('v1', 'sha1', { createdAt: at(1) }),
+        row('v2', 'sha1', { decision: 'request_changes', createdAt: at(2) }),
+      ],
+    ],
+    [
+      'the approved head also had a request-changes',
+      [
+        row('v1', 'sha1', { decision: 'request_changes', createdAt: at(1) }),
+        row('v2', 'sha1', { createdAt: at(2) }),
+      ],
+    ],
+    [
+      'the head already has a verdict',
+      [row('v1', 'sha1', { createdAt: at(1) }), row('v2', 'sha2', { createdAt: at(2) })],
+    ],
+  ])('is null, with no digest read, when %s', async (_, rows) => {
+    for (const r of rows) insertVerdict(w.db, r);
+    moveHead('sha2');
+    const s = await snapshotOf();
+    expect(s.carry).toBeNull();
+    expect(digestReads()).toEqual([]);
+  });
+
+  test('is null when the head is behind (a resolve comes first)', async () => {
+    insertVerdict(w.db, row('v1', 'sha1'));
+    moveHead('sha2');
+    w.f.state.compares.set('main...sha2', {
+      aheadBy: 1,
+      behindBy: 1,
+      baseSha: 'b1',
+      mergeBaseSha: 'b0',
+    });
+    expect((await snapshotOf()).carry).toBeNull();
+    expect(digestReads()).toEqual([]);
+  });
+
+  test('a digest read that throws leaves it null and marks no read unavailable', async () => {
+    insertVerdict(w.db, row('v1', 'sha1'));
+    moveHead('sha2');
+    w.f.author.failNext('changeDigest', '5xx');
+    const s = await snapshotOf();
+    expect(s.carry).toBeNull();
+    expect(s.forgeUnavailable).toBeNull();
+    expect(decide(s)).toMatchObject({ kind: 'enqueue', role: 'review' });
+  });
+});

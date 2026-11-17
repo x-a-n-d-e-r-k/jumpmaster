@@ -51,6 +51,7 @@ const zone: DropZoneConfig = {
     maxResume: 2,
     maxReviewRepeat: 2,
     maxNoChange: 1,
+    maxBaseSync: 12,
   },
   ciRequired: true,
   ciDeadlineMinutes: 45,

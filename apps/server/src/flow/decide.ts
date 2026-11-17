@@ -1,6 +1,7 @@
 import type { DropZoneConfig } from '../config.js';
 import type { Drop, VerdictRow, WorkItem } from '../db/repo.js';
 import {
+  type ChangeDigest,
   type ChecksFacts,
   type CompareFacts,
   type ForgeReview,
@@ -71,7 +72,28 @@ export interface Snapshot {
   headFirstSeenAt: string;
   /** work_items.waiting_since. */
   missingSince: string | null;
+  /**
+   * Facts for carrying the item's newest verdict to this head (`CarryFacts`). null unless this
+   * head has no verdict and the newest is a non-forced approve on an earlier head with no
+   * request-changes after it, or when a read failed: the head is then reviewed.
+   */
+  carry: CarryFacts | null;
 }
+
+/**
+ * The item's newest verdict (`latestVerdict`), on head `fromHead`, and what each head changes
+ * against its merge base with the base branch (`Forge.changeDigest`).
+ */
+export type CarryFacts = {
+  fromVerdictId: string;
+  fromHead: string;
+  fromDecision: VerdictRow['decision'];
+  fromForced: boolean;
+  /** A request-changes verdict was recorded for the item after the source verdict, or on its head. */
+  requestChangesAfter: boolean;
+  digestFrom: ChangeDigest;
+  digestHead: ChangeDigest;
+};
 
 export type Feedback = { source: 'human' | 'review' | 'ci'; text: string };
 
@@ -84,6 +106,8 @@ export type Action =
       feedback?: Feedback;
     }
   | { kind: 'post_review'; verdictId: string }
+  /** Copy verdict `fromVerdictId` to `headSha` (see `carriable`). */
+  | { kind: 'carry_verdict'; fromVerdictId: string; headSha: string }
   | { kind: 'merge'; sha: string }
   | { kind: 'done'; reason: string }
   | { kind: 'park'; reason: string }
@@ -196,6 +220,25 @@ function ciSatisfied(s: Snapshot): boolean {
   return s.checks.state === 'none' && !s.zone.ciRequired && s.requiredChecks.length === 0;
 }
 
+/**
+ * Whether the newest verdict may stand for `head`, which no reviewer saw: a non-forced approve on
+ * an earlier head, nothing asking for changes since, and both heads changing exactly the same
+ * against their merge base, read in full. Anything less is reviewed.
+ */
+function carriable(c: CarryFacts | null, head: string): c is CarryFacts {
+  return (
+    c !== null &&
+    c.fromHead !== head &&
+    c.fromDecision === 'approve' &&
+    !c.fromForced &&
+    !c.requestChangesAfter &&
+    c.digestFrom.complete &&
+    c.digestHead.complete &&
+    c.digestFrom.digest !== '' &&
+    c.digestFrom.digest === c.digestHead.digest
+  );
+}
+
 /** The PR lifecycle state machine: first matching rule wins. Pure; reads no clock but `s.now`. */
 export function decide(s: Snapshot): Action {
   // 1: an active drop, or a lost one its stick may still salvage (`holdingDropFor`, Ruling 10).
@@ -291,10 +334,14 @@ export function decide(s: Snapshot): Action {
   if (compare.behindBy > 0) {
     return { kind: 'enqueue', role: 'resolve', fingerprint: fingerprint([head, compare.baseSha]) };
   }
-  // 19
+  // 19: a head that only merged the base in cleanly keeps its approval; any other is reviewed.
   const latest = s.verdictsOnHead.at(-1);
-  if (latest === undefined)
+  if (latest === undefined) {
+    if (carriable(s.carry, head)) {
+      return { kind: 'carry_verdict', fromVerdictId: s.carry.fromVerdictId, headSha: head };
+    }
     return { kind: 'enqueue', role: 'review', fingerprint: fingerprint([head]) };
+  }
   // 20
   if (s.humanBlockStanding) return { kind: 'park', reason: 'human block stands' };
   // 21–23. Starter mode has no reviewer identity: the verdict on this head stays in Jumpmaster

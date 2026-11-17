@@ -16,6 +16,7 @@ import {
   hasOpenCreatePr,
   holdingDropFor,
   insertDrop,
+  insertVerdict,
   isKilled,
   listObservations,
   listWorkItems,
@@ -23,6 +24,7 @@ import {
   setParkMark,
   setWorkItemState,
   upsertPullRequest,
+  verdictsForItem,
   type WorkItem,
 } from '../db/repo.js';
 import type { PullFacts } from '../forge/github.js';
@@ -38,7 +40,7 @@ import {
 import { renderReviewBody } from '../results.js';
 import { enqueueImplement, enqueueNext, isBlocked } from '../scheduler.js';
 import { rankItems } from '../sync.js';
-import { chargeBudget } from './budgets.js';
+import { chargeBudget, creditBaseSync } from './budgets.js';
 import { type Action, decide, GATE_PARK_PREFIXES, type Snapshot } from './decide.js';
 import { buildSnapshot, recordGateParkOf, type ZonePass } from './snapshot.js';
 
@@ -249,6 +251,38 @@ function enqueue(
   }
 }
 
+/** The id a carried verdict gets: the same carry applied twice inserts one row. */
+const carriedVerdictId = (fromVerdictId: string, headSha: string): string =>
+  `carry:${fromVerdictId}:${headSha}`;
+
+/**
+ * Copies the source verdict to the new head (decide proved the change identical after merging the
+ * base). The resolve that made the head spends `base_sync` instead of `resolve_total`, once.
+ */
+function carryVerdict(
+  db: Db,
+  s: Snapshot,
+  a: Extract<Action, { kind: 'carry_verdict' }>,
+  now: Date,
+): void {
+  const from = verdictsForItem(db, s.item.id).find((v) => v.id === a.fromVerdictId);
+  if (!from) return; // gone (a new PR forgets verdicts): the next pass reviews the head
+  db.transaction(() => {
+    const inserted = insertVerdict(db, {
+      id: carriedVerdictId(from.id, a.headSha),
+      workItemId: s.item.id,
+      headSha: a.headSha,
+      decision: from.decision,
+      forced: false,
+      summary: `Carried from ${from.headSha.slice(0, 7)}: the change is identical after merging the base branch.\n\n${from.summary}`,
+      findingsJson: from.findingsJson,
+      gatesJson: from.gatesJson,
+      createdAt: now.toISOString(),
+    });
+    if (inserted) creditBaseSync(db, s.item.id);
+  })();
+}
+
 async function postReview(
   db: Db,
   forges: ForgePair,
@@ -338,6 +372,8 @@ function observeDecision(db: Db, zoneId: string, s: Snapshot, a: Action, now: Da
       return note(`would_enqueue:${a.role}`, head);
     case 'post_review':
       return note('would_post_review', head);
+    case 'carry_verdict':
+      return note('would_carry_verdict', `${head} from verdict ${a.fromVerdictId}`);
     case 'merge':
       return note('would_merge', `sha ${a.sha}`);
     case 'park':
@@ -417,6 +453,10 @@ export async function reconcileZone(
     switch (a.kind) {
       case 'enqueue':
         enqueue(db, zone, s, a, versions, now);
+        actions++;
+        break;
+      case 'carry_verdict':
+        carryVerdict(db, s, a, now);
         actions++;
         break;
       case 'post_review':

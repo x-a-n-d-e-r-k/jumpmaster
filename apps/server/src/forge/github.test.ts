@@ -431,6 +431,97 @@ describe('GitHubForge', () => {
       });
     });
 
+    describe('changeDigest', () => {
+      type CompareFile = {
+        filename: string;
+        status: string;
+        previous_filename?: string;
+        patch?: string;
+      };
+      const file = (name: string, patch = `@@ -1 +1 @@\n-old ${name}\n+new ${name}`) => ({
+        filename: name,
+        status: 'modified',
+        patch,
+      });
+      const answer = (files: CompareFile[] | undefined, basehead = 'main...h1') =>
+        nock(api)
+          .get(`/repos/o/r/compare/${basehead}`)
+          .query(true)
+          .reply(200, {
+            ahead_by: 1,
+            behind_by: 0,
+            base_commit: { sha: 'b1' },
+            merge_base_commit: { sha: 'mb' },
+            ...(files ? { files } : {}),
+          });
+      const digestOf = async (files: CompareFile[] | undefined) => {
+        answer(files);
+        return forge.changeDigest('main', 'h1');
+      };
+
+      test('reads the three-dot comparison from the merge base to head', async () => {
+        answer([file('a.ts')], 'main...agent%2Fissue-3');
+        const d = await forge.changeDigest('main', 'agent/issue-3');
+        expect(d.complete).toBe(true);
+        expect(d.digest).toMatch(/^[0-9a-f]{64}$/);
+      });
+
+      test('is stable under file order', async () => {
+        const one = await digestOf([file('a.ts'), file('b.ts'), file('c.ts')]);
+        const two = await digestOf([file('c.ts'), file('a.ts'), file('b.ts')]);
+        expect(one.complete).toBe(true);
+        expect(two).toEqual(one);
+      });
+
+      test('changes when one line of one patch changes', async () => {
+        const one = await digestOf([file('a.ts'), file('b.ts')]);
+        const two = await digestOf([
+          file('a.ts'),
+          file('b.ts', '@@ -1 +1 @@\n-old b.ts\n+newer b.ts'),
+        ]);
+        expect(two.complete).toBe(true);
+        expect(two.digest).not.toBe(one.digest);
+      });
+
+      test('changes when a file is renamed (previousPath)', async () => {
+        const one = await digestOf([
+          { ...file('a.ts'), status: 'renamed', previous_filename: 'x.ts' },
+        ]);
+        const two = await digestOf([
+          { ...file('a.ts'), status: 'renamed', previous_filename: 'y.ts' },
+        ]);
+        const plain = await digestOf([file('a.ts')]);
+        expect(new Set([one.digest, two.digest, plain.digest]).size).toBe(3);
+      });
+
+      test('changes with the status', async () => {
+        const one = await digestOf([file('a.ts')]);
+        const two = await digestOf([{ ...file('a.ts'), status: 'added' }]);
+        expect(two.digest).not.toBe(one.digest);
+      });
+
+      test('is incomplete when a field holds NUL, so no record boundary can move', async () => {
+        expect(await digestOf([file('a', 'x\0b'), file('c', 'y')])).toEqual({
+          digest: '',
+          complete: false,
+        });
+      });
+
+      test('is incomplete for a 300-file response', async () => {
+        const many = Array.from({ length: 300 }, (_, i) => file(`f${i}.ts`));
+        expect(await digestOf(many)).toEqual({ digest: '', complete: false });
+      });
+
+      test('is incomplete when a file has no patch', async () => {
+        const binary = { filename: 'logo.png', status: 'modified' };
+        expect(await digestOf([file('a.ts'), binary])).toEqual({ digest: '', complete: false });
+      });
+
+      test('is incomplete when the response has no file list', async () => {
+        expect(await digestOf(undefined)).toEqual({ digest: '', complete: false });
+      });
+    });
+
     test('listPullFiles paginates and keeps previousPath', async () => {
       const f = (i: number) => ({ filename: `f${i}`, status: 'modified' });
       const page1 = Array.from({ length: 100 }, (_, i) => f(i));
