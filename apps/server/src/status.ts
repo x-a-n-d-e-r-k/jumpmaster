@@ -21,6 +21,7 @@ import {
 import type { Pages } from './doctor/actions.js';
 import { type DoctorCheck, doctorDropWait, liveSticks } from './doctor/checks.js';
 import { latestDoctorRun } from './doctor/run.js';
+import { isReservationReason } from './flow/decide.js';
 import { missingFor, zoneRequirements } from './leases.js';
 import { isBlocked } from './scheduler.js';
 import { redactionList } from './scrub.js';
@@ -287,7 +288,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
   }
 
   // CI: an open PR none of the zone's drops is working on, oldest head first.
-  const ci = zones
+  const open = zones
     .flatMap((z) =>
       (z.prs ?? [])
         .filter((p) => {
@@ -296,24 +297,50 @@ export function statusOf(input: StatusInput, now: Date): Status {
         })
         .map((p) => ({ z, p })),
     )
-    .sort((a, b) => Date.parse(a.p.headFirstSeenAt) - Date.parse(b.p.headFirstSeenAt))[0];
+    .sort((a, b) => Date.parse(a.p.headFirstSeenAt) - Date.parse(b.p.headFirstSeenAt));
+  // The flow's own words for a PR held back by an older approved PR's merge reservation.
+  const reservedReason = (z: StatusZone, workItemId: number): string | null => {
+    const reason = z.items.find((i) => i.id === workItemId)?.reason ?? null;
+    return isReservationReason(reason) ? reason : null;
+  };
+  const prHref = (z: StatusZone, n: number) => `https://github.com/${z.repo}/pull/${n}`;
+  const ci = open[0];
   if (ci) {
     const { z, p } = ci;
     const m = Math.floor((now.getTime() - Date.parse(p.headFirstSeenAt)) / 60_000);
-    return said({
-      headline: `Waiting on CI for PR #${p.number} (${m} of ${z.ciDeadlineMinutes ?? '?'} min)`,
-      detail: 'After the deadline the item parks with the reason CI gave, or that it gave none.',
+    const reason = reservedReason(z, p.workItemId);
+    const reserved = reason !== null;
+    // Every other PR waiting on a reservation is listed, so each says whose merge it waits for.
+    const reservedOut = open.slice(1).flatMap(({ z: oz, p: op }) => {
+      const r = reservedReason(oz, op.workItemId);
+      return r === null
+        ? []
+        : [
+            {
+              text: `PR #${op.number} is ${r}`,
+              ...(oz.repo ? { href: prHref(oz, op.number) } : {}),
+            },
+          ];
+    });
+    const st = said({
+      headline: reserved
+        ? `PR #${p.number} is ${reason}`
+        : `Waiting on CI for PR #${p.number} (${m} of ${z.ciDeadlineMinutes ?? '?'} min)`,
+      detail: reserved
+        ? 'An older approved PR is waiting on CI and holds the next merge; this one merges after it, or once that reservation lapses.'
+        : 'After the deadline the item parks with the reason CI gave, or that it gave none.',
       waitingOn: 'ci',
       since: p.headFirstSeenAt,
       ...(z.repo
         ? {
             action: {
               label: `Open PR #${p.number}`,
-              href: `https://github.com/${z.repo}/pull/${p.number}`,
+              href: prHref(z, p.number),
             },
           }
         : {}),
     });
+    return reservedOut.length > 0 ? { ...st, also: [...reservedOut, ...(st.also ?? [])] } : st;
   }
 
   // Held by the usage gate: work waits that the gate, not a slot, keeps from starting. The words

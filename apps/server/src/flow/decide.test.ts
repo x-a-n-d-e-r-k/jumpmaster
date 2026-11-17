@@ -159,6 +159,7 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
     headFirstSeenAt: now.toISOString(),
     missingSince: null,
     carry: null,
+    mergeReservedBy: null,
     ...over,
   };
 }
@@ -836,6 +837,51 @@ test('a denied directory listing names the permission to grant', () =>
     kind: 'park',
     reason: 'forge read denied: listDir (grant the author token Contents: read)',
   }));
+
+describe('25: a merge reservation held by an older approved item', () => {
+  const reserved = { mergeReservedBy: { itemId: 2, issueNumber: 257, since: minutesAgo(10) } };
+
+  test('a merge becomes a wait on the reservation', () => {
+    expect(decide(mergeable())).toEqual({ kind: 'merge', sha: 's' });
+    expect(decide(mergeable(reserved))).toEqual({ kind: 'wait', on: 'merge-reservation' });
+  });
+
+  test('the wait counts toward no deadline: CI past its deadline still waits, never parks', () => {
+    expect(decide(mergeable({ ...reserved, headFirstSeenAt: minutesAgo(600) }))).toEqual({
+      kind: 'wait',
+      on: 'merge-reservation',
+    });
+  });
+
+  test('a resolve is unchanged', () => {
+    const s = mergeable({ compare: cmp({ behindBy: 2, baseSha: 'b2' }) });
+    expect(decide({ ...s, ...reserved })).toEqual(decide(s));
+    expect(decide(s)).toMatchObject({ kind: 'enqueue', role: 'resolve' });
+  });
+
+  test('a heal is unchanged', () => {
+    const s = mergeable({ checks: failing, requiredChecks: [] });
+    expect(decide({ ...s, ...reserved })).toEqual(decide(s));
+    expect(decide(s)).toMatchObject({ kind: 'enqueue', role: 'heal' });
+  });
+
+  test('a review is unchanged', () => {
+    const s = mergeable({ verdictsOnHead: [] });
+    expect(decide({ ...s, ...reserved })).toEqual(decide(s));
+    expect(decide(s)).toMatchObject({ kind: 'enqueue', role: 'review' });
+  });
+
+  test('a wait on CI is unchanged', () => {
+    const s = mergeable({ checks: pending });
+    expect(decide({ ...s, ...reserved })).toEqual({ kind: 'wait', on: 'ci' });
+  });
+
+  test('the CI deadline still parks missing CI', () => {
+    const s = mergeable({ checks: pending, headFirstSeenAt: minutesAgo(46) });
+    expect(decide({ ...s, ...reserved })).toEqual(decide(s));
+    expect(decide(s)).toMatchObject({ kind: 'park' });
+  });
+});
 
 describe('overlaps', () => {
   test('head change invalidates approval', () =>

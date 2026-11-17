@@ -34,6 +34,7 @@ export function makeZone(o: Partial<DropZoneConfig> = {}): DropZoneConfig {
     },
     ciRequired: true,
     ciDeadlineMinutes: 45,
+    mergeReservationMinutes: 30,
     retryLabel: 'agent-retry',
     triageLabel: 'jm-triage',
     triagedLabel: 'jm-triaged',

@@ -275,6 +275,11 @@ export function setWorkItemState(
   );
 }
 
+/** Sets the reason alone, leaving the state and `updated_at` as they are. */
+export function setWorkItemReason(db: Db, id: number, reason: string | null): void {
+  db.prepare('UPDATE work_items SET reason = ? WHERE id = ?').run(reason, id);
+}
+
 export function setWaitingSince(db: Db, id: number, at: string | null): void {
   db.prepare('UPDATE work_items SET waiting_since = ? WHERE id = ?').run(at, id);
 }
