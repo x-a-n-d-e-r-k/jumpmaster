@@ -60,6 +60,10 @@ import type { AppBrokers } from '../forge/app-brokers.js';
 import type { AppTokenSource } from '../forge/app-tokens.js';
 import { GitHubAppError } from '../forge/github-app.js';
 import { createHeldDropTokens, failureOf, type HeldDropTokens } from '../forge/held-tokens.js';
+import {
+  InstallationCheckError,
+  type VerifiedInstallation,
+} from '../forge/installation-verifier.js';
 import type { StickFetches } from '../images/fetches.js';
 import type { ImageMirror } from '../images/mirror.js';
 import { layoutFor } from '../images/serve.js';
@@ -744,16 +748,37 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
           credential = 'app';
           const appOwner = resolution.ref.owner;
           const ids = appInstallationFor(zone, 'author');
-          const broker =
-            resolution.problem === 'undecryptable'
-              ? undefined
-              : deps.appBrokers.brokerFor(appOwner, 'author');
-          if (!broker || !ids) {
+          if (
+            resolution.problem === 'undecryptable' ||
+            !ids ||
+            !deps.appBrokers.brokerFor(appOwner, 'author')
+          ) {
             revokeGrants(db, drop.id, at);
             return reply.code(403).send({ refused: 'app unavailable', retryable: true });
           }
+          // Both recorded ids checked against zone.repo before anything mints (issue #267).
+          let verified: VerifiedInstallation;
           try {
-            const minted = await broker.mint({ ...ids, use: 'push' });
+            verified = await deps.appBrokers.verifiedInstallation(zone, 'author');
+          } catch (e) {
+            revokeGrants(db, drop.id, at);
+            const refused = e instanceof InstallationCheckError && e.refused;
+            log(
+              `push token of drop ${drop.id} not minted: ${
+                e instanceof InstallationCheckError ? e.message : 'the installation check failed'
+              }`,
+            );
+            return reply
+              .code(refused ? 403 : 503)
+              .send({ refused: 'app unverified', retryable: true });
+          }
+          const { broker } = verified;
+          try {
+            const minted = await broker.mint({
+              installationId: verified.installationId,
+              repositoryId: verified.repositoryId,
+              use: 'push',
+            });
             token = minted.token;
           } catch (e) {
             revokeGrants(db, drop.id, at);
