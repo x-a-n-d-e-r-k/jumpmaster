@@ -17,6 +17,7 @@ import {
   defaultTailscaleDeps,
   PUBLIC_URL_NEEDED,
   publicOrigin,
+  SHARED_BACKOFF_HINT,
   type TailscaleDeps,
   type TailscaleGuidance,
   tailscaleGuidance,
@@ -790,6 +791,10 @@ export function renderOtherMachines(o: {
   const state = current
     ? `<p>Other machines reach this server at <code>${escapeHtml(current)}</code>.</p>`
     : `<p class="warn">${escapeHtml(PUBLIC_URL_NEEDED)}: until then, nothing that needs it (such as adding a stick on another machine) is offered.</p>`;
+  const shared =
+    current && config.listen.tlsTerminated !== true
+      ? `<p class="warn">${escapeHtml(SHARED_BACKOFF_HINT)}</p>`
+      : '';
   const tailnet = guidance.present
     ? `<h3>On your tailnet</h3><p>This server&#39;s host has the <code>tailscale</code> CLI. To expose the server on the tailnet over HTTPS, run this on the host (the server does not run it for you):</p><pre><code>${escapeHtml(guidance.command)}</code></pre>${
         guidance.publicUrl
@@ -801,7 +806,7 @@ export function renderOtherMachines(o: {
     `<h2>Settings</h2>${tabs('other-machines')}
 <h3 id="other-machines">Other machines</h3>
 <p>The address other machines, such as a new stick on a VPS, reach this server at.</p>
-${state}${how}
+${state}${shared}${how}
 <form id="public-url-form" data-readonly="${fileMode ? '1' : '0'}">
 <p><label for="public-url"><code>server.publicUrl</code></label> <input type="url" id="public-url" name="publicUrl" placeholder="https://jumpmaster.example.ts.net" value="${escapeHtml(value)}"${fileMode ? ' disabled' : ''}>
 ${fileMode ? '' : '<button>Save</button> '}<button type="button" id="public-url-check"${current ? '' : ' disabled'}>Check</button>
