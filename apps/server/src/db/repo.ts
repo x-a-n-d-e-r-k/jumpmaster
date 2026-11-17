@@ -1,4 +1,5 @@
 import type { ImagePolicy, TrooperEvent } from '@jumpmaster/protocol';
+import { defang } from '../terminal.js';
 import type { Db } from './open.js';
 
 export type WorkItemState = 'ready' | 'in_flight' | 'pr_open' | 'parked' | 'done';
@@ -457,6 +458,18 @@ export function updateDrop(db: Db, id: string, patch: DropPatch): void {
   db.prepare(`UPDATE drops SET ${sets} WHERE id = @id`).run({ ...patch, id });
 }
 
+/**
+ * An egress event as stored: its host and decision with each terminal control replaced by `?`
+ * (issue #264). The proxy records a refused request's Host verbatim, and an agent chooses it.
+ */
+function storedData(e: TrooperEvent): unknown {
+  if (e.kind !== 'egress' || e.data === null || typeof e.data !== 'object') return e.data;
+  const data = { ...(e.data as Record<string, unknown>) };
+  for (const k of ['host', 'decision'])
+    if (typeof data[k] === 'string') data[k] = defang(data[k] as string);
+  return data;
+}
+
 /** Appends events after the drop's current highest seq (seq starts at 1), atomically. */
 export function appendEvents(db: Db, dropId: string, events: TrooperEvent[]): void {
   const max = db.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM drop_events WHERE drop_id = ?');
@@ -465,7 +478,7 @@ export function appendEvents(db: Db, dropId: string, events: TrooperEvent[]): vo
   );
   db.transaction(() => {
     let seq = (max.get(dropId) as { m: number }).m;
-    for (const e of events) ins.run(dropId, ++seq, e.ts, e.kind, JSON.stringify(e.data));
+    for (const e of events) ins.run(dropId, ++seq, e.ts, e.kind, JSON.stringify(storedData(e)));
   })();
 }
 
