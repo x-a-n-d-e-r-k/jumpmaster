@@ -30,6 +30,11 @@ const thrown = (fn: () => unknown): string => {
 };
 
 describe('the vault', () => {
+  test('#258: an open vault names the key file it read, for the doctor to judge', () => {
+    const path = keyFile();
+    expect(open(openDb(tmpDbFile()), path).keyFile).toBe(path);
+  });
+
   test('a value round-trips through AES-256-GCM with the name as AAD and a fresh nonce per write', () => {
     const dbFile = tmpDbFile();
     const db = openDb(dbFile);
