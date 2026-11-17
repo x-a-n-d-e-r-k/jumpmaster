@@ -239,15 +239,22 @@ export function createApp(
     installationVerifier?: ControlDeps['installationVerifier'];
   },
 ): FastifyInstance {
-  const app = Fastify({ logger: false });
+  // Every page reads the config once per request: the store swaps it on each applied revision.
+  const live = configReader(deps.config);
+  // Behind a TLS terminator on this host (issue #261), `req.ip` is the client the terminator names
+  // in X-Forwarded-For, believed only from a loopback peer: the per-source backoff then counts each
+  // client apart. Nothing else reads forwarded headers: the guard judges the real Host and Origin.
+  // A boot setting, so read once.
+  const app = Fastify({
+    logger: false,
+    ...(live().listen.tlsTerminated === true ? { trustProxy: 'loopback' } : {}),
+  });
   // Every route as registered, for the control manifest's test (api/manifest.ts).
   const routes: { method: string; url: string }[] = [];
   app.addHook('onRoute', (r) => {
     for (const method of [r.method].flat()) routes.push({ method, url: r.url });
   });
   ROUTES.set(app, routes);
-  // Every page reads the config once per request: the store swaps it on each applied revision.
-  const live = configReader(deps.config);
   /** The request's snapshot (taken by the guard). */
   const cfg = (req: { jmConfig: Config | null }): Config => req.jmConfig ?? live();
   // The login and setup pages post plain HTML forms.

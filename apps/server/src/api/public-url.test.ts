@@ -11,7 +11,7 @@ import { loadBoot } from '../config/boot.js';
 import { ConfigStore } from '../config/store.js';
 import { fileModeServer, parseEditable } from '../config.js';
 import { openDb } from '../db/open.js';
-import { PLAIN_ORIGIN, type TailscaleDeps } from '../reach.js';
+import { PLAIN_ORIGIN, SHARED_BACKOFF_HINT, type TailscaleDeps } from '../reach.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
 
 const TOKEN = 'o'.repeat(32);
@@ -29,6 +29,7 @@ function world(
   o: {
     fetch?: (url: string, init: RequestInit) => Promise<Response>;
     tailscale?: TailscaleDeps;
+    tls?: boolean;
   } = {},
 ) {
   const db = openDb(tmpDbFile());
@@ -37,6 +38,7 @@ function world(
     JM_JOIN_TOKEN: 'join-secret-value-4',
     JM_OPERATOR_TOKEN: TOKEN,
     JM_DEV_IMAGES: '1',
+    ...(o.tls ? { JM_TLS_TERMINATED: '1' } : {}),
   };
   const filePath = join(dir, 'jumpmaster.config.json');
   const store = ConfigStore.open({
@@ -354,6 +356,27 @@ describe('the Other machines section', () => {
     expect(html).toContain('tailscale serve --bg --https=443 http://127.0.0.1:7420');
     expect(html).toContain('https://kidney.example.ts.net');
     expect(html).not.toContain('kidney.example.ts.net.');
+  });
+
+  test('with an address set and no declared TLS terminator, it says sign-ins are counted together (issue #261)', async () => {
+    expect(SHARED_BACKOFF_HINT).toBe(
+      'Sign-in attempts from every machine are counted together. Set listen.tlsTerminated if a TLS terminator on this host fronts the server.',
+    );
+    const set = async (w: ReturnType<typeof world>) =>
+      w.inject({
+        method: 'PUT',
+        url: URL_PATH,
+        headers: w.bearer,
+        payload: { publicUrl: 'https://a.b.ts.net' },
+      });
+    const plain = world();
+    expect(await page(plain)).not.toContain(SHARED_BACKOFF_HINT);
+    expect((await set(plain)).statusCode).toBe(200);
+    expect(await page(plain)).toContain(SHARED_BACKOFF_HINT);
+    await app?.close();
+    const tls = world({ tls: true });
+    expect((await set(tls)).statusCode).toBe(200);
+    expect(await page(tls)).not.toContain(SHARED_BACKOFF_HINT);
   });
 
   test('the sticks page says where to set the address while it is unset, and shows it once set', async () => {
