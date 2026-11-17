@@ -7,6 +7,7 @@ import { creditsPass } from '../credits.js';
 import type { Db } from '../db/open.js';
 import { openDb } from '../db/open.js';
 import { type ReconcileReport, reconcileZone } from '../flow/reconcile.js';
+import type { ForgePair } from '../outbox.js';
 import { promptVersions } from '../payloads.js';
 import { syncDropZone } from '../sync.js';
 import { type FakeForge, type FakeForgeState, type FakeIssue, fakeForgePair } from './fakes.js';
@@ -62,6 +63,11 @@ export async function harness(
     live?: boolean;
     /** More zones beside the harness's own (configured only: the harness drives its own zone). */
     extraZones?: Partial<DropZoneConfig>[];
+    /**
+     * The zone's push grant (`ForgePair.pusher`): `true` is the fake author forge, as in PAT mode.
+     * Absent, the pair has none, and a behind PR always gets a resolve drop.
+     */
+    pusher?: true | ForgePair['pusher'];
     /** The GitHub reads the zone's GitHub page makes (with `live`). */
     guidanceForge?: Parameters<typeof createApp>[0]['guidanceForge'];
   } = {},
@@ -94,7 +100,13 @@ export async function harness(
         requiresPullRequest: true,
       },
     };
-  const forges = { author: f.author, reviewer: starter ? null : f.reviewer };
+  const pusher: ForgePair['pusher'] =
+    opts.pusher === true ? async () => ({ forge: f.author, release: async () => {} }) : opts.pusher;
+  const forges: ForgePair = {
+    author: f.author,
+    reviewer: starter ? null : f.reviewer,
+    ...(pusher ? { pusher } : {}),
+  };
   const config: Config = {
     listen: { host: '127.0.0.1', port: 0, allowedHosts: ['localhost:80'] },
     dataDir: opts.dataDir ?? '.',
@@ -176,7 +188,7 @@ export async function harness(
       ).map((r) => r.role);
     },
     wipeDbKeepIssues() {
-      db.exec(`DELETE FROM outbox; DELETE FROM attempts; DELETE FROM verdicts;
+      db.exec(`DELETE FROM outbox; DELETE FROM attempts; DELETE FROM branch_updates; DELETE FROM verdicts;
         DELETE FROM pull_requests; DELETE FROM drop_events; DELETE FROM drops;
         DELETE FROM work_items; DELETE FROM usage_windows;
         UPDATE usage_state SET status = NULL, paused_until = NULL, five_hour_util = NULL,

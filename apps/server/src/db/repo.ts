@@ -964,6 +964,82 @@ export function resetAttempts(db: Db, itemId: number): void {
   db.prepare('DELETE FROM attempts WHERE work_item_id = ?').run(itemId);
 }
 
+// ---- branch updates (#292) ---------------------------------------------------------------------
+
+/** What came of asking the forge to merge `baseSha` into head `headSha` of an item's PR. */
+export type BranchUpdateRow = { failures: number; outcome: 'updated' | 'conflict' | null };
+
+export function getBranchUpdate(
+  db: Db,
+  itemId: number,
+  headSha: string,
+  baseSha: string,
+): BranchUpdateRow | undefined {
+  return db
+    .prepare(
+      `SELECT failures, outcome FROM branch_updates
+       WHERE work_item_id = ? AND head_sha = ? AND base_sha = ?`,
+    )
+    .get(itemId, headSha, baseSha) as BranchUpdateRow | undefined;
+}
+
+/**
+ * Sets the outcome for `(head, base)` once: returns false when one is already recorded (so a
+ * caller charging on `updated` charges once).
+ */
+export function setBranchUpdateOutcome(
+  db: Db,
+  itemId: number,
+  headSha: string,
+  baseSha: string,
+  outcome: 'updated' | 'conflict',
+  now: Date,
+): boolean {
+  const r = db
+    .prepare(
+      `INSERT INTO branch_updates (work_item_id, head_sha, base_sha, failures, outcome, updated_at)
+       VALUES (?, ?, ?, 0, ?, ?)
+       ON CONFLICT(work_item_id, head_sha, base_sha) DO UPDATE SET
+         outcome = excluded.outcome, updated_at = excluded.updated_at
+       WHERE branch_updates.outcome IS NULL`,
+    )
+    .run(itemId, headSha, baseSha, outcome, now.toISOString());
+  return r.changes === 1;
+}
+
+/** Counts one failed update request for `(head, base)`; returns the failures so far. */
+export function addBranchUpdateFailure(
+  db: Db,
+  itemId: number,
+  headSha: string,
+  baseSha: string,
+  now: Date,
+): number {
+  db.prepare(
+    `INSERT INTO branch_updates (work_item_id, head_sha, base_sha, failures, updated_at)
+     VALUES (?, ?, ?, 1, ?)
+     ON CONFLICT(work_item_id, head_sha, base_sha) DO UPDATE SET
+       failures = failures + 1, updated_at = excluded.updated_at`,
+  ).run(itemId, headSha, baseSha, now.toISOString());
+  return getBranchUpdate(db, itemId, headSha, baseSha)?.failures ?? 0;
+}
+
+/** Whether the forge brought head `headSha` up to date (with any base): it made the next head. */
+export function forgeUpdatedFrom(db: Db, itemId: number, headSha: string): boolean {
+  return (
+    db
+      .prepare(
+        `SELECT 1 FROM branch_updates WHERE work_item_id = ? AND head_sha = ? AND outcome = 'updated'`,
+      )
+      .get(itemId, headSha) !== undefined
+  );
+}
+
+/** Deletes an op's row (a failed branch update, so a later pass sends it again). */
+export function deleteOutbox(db: Db, opKey: string): void {
+  db.prepare('DELETE FROM outbox WHERE op_key = ?').run(opKey);
+}
+
 // ---- M1: outbox --------------------------------------------------------------------------------
 
 export type OutboxState = 'pending' | 'done' | 'unknown' | 'failed';
@@ -980,7 +1056,8 @@ export interface OutboxRow {
     | 'set_labels'
     | 'create_labels'
     | 'comment_issue'
-    | 'add_blocked_by';
+    | 'add_blocked_by'
+    | 'update_branch';
   /** Null for a zone-level op (issue and label writes). */
   workItemId: number | null;
   zoneId: string;

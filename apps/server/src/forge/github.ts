@@ -166,6 +166,12 @@ export type BranchRulesRead =
   | { kind: 'unreachable' }
   | { kind: 'unavailable' };
 
+/**
+ * What GitHub answered a branch update: `updated` (202, the merge runs), `conflict` (422: the base
+ * does not merge cleanly) or `head_moved` (422: the head is no longer the expected SHA).
+ */
+export type BranchUpdate = { kind: 'updated' } | { kind: 'conflict' } | { kind: 'head_moved' };
+
 export type IssueFacts = { body: string; state: 'open' | 'closed'; labels: string[] };
 
 export interface Forge {
@@ -238,6 +244,12 @@ export interface Forge {
     number: number,
     input: { sha: string; method: 'squash'; title: string; message: string },
   ): Promise<{ merged: boolean; sha?: string }>;
+  /**
+   * A write to the PR's head branch: GitHub merges the base into it (`PUT …/update-branch`), only
+   * while the head is still `expectedHeadSha`. The new head is not returned: a later read sees it.
+   * Any answer other than 202 or the two 422s below throws.
+   */
+  updateBranch(prNumber: number, expectedHeadSha: string): Promise<BranchUpdate>;
   /** Doctor reads (never a write): the token account's access to the repository. */
   repoAccess(): Promise<RepoAccess>;
   /** Every label name on the repository. */
@@ -1175,6 +1187,34 @@ export class GitHubForge implements Forge {
       commit_message: input.message,
     });
     return data.sha ? { merged: data.merged, sha: data.sha } : { merged: data.merged };
+  }
+
+  async updateBranch(prNumber: number, expectedHeadSha: string): Promise<BranchUpdate> {
+    let status: number;
+    try {
+      ({ status } = await this.octokit.request(
+        'PUT /repos/{owner}/{repo}/pulls/{pull_number}/update-branch',
+        {
+          owner: this.owner,
+          repo: this.repo,
+          pull_number: prNumber,
+          expected_head_sha: expectedHeadSha,
+        },
+      ));
+    } catch (err) {
+      if (statusOf(err) === 422) {
+        const message = String(
+          (err as { response?: { data?: { message?: unknown } } }).response?.data?.message ?? '',
+        );
+        if (/merge conflict/i.test(message)) return { kind: 'conflict' };
+        if (/expected head sha/i.test(message)) return { kind: 'head_moved' };
+      }
+      throw err;
+    }
+    if (status !== 202) {
+      throw Object.assign(new Error(`update-branch answered ${status}, not 202`), { status });
+    }
+    return { kind: 'updated' };
   }
 
   async repoAccess(): Promise<RepoAccess> {

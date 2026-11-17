@@ -1023,6 +1023,45 @@ const V35_SQL = `
 ALTER TABLE work_items ADD COLUMN pr_files TEXT;
 `;
 
+/**
+ * v36 (#292): the outbox takes `update_branch` (GitHub merging the base into a PR's head), and
+ * `branch_updates` records, per item, head and base SHA, what came of updating that head: the
+ * failed requests so far, and `updated` (charged to base_sync once) or `conflict` (the resolve
+ * drop runs instead: a real conflict, or the fallback after failures or with no push token).
+ */
+const V36_SQL = `
+CREATE TABLE new_outbox (
+  id           TEXT PRIMARY KEY,
+  op_key       TEXT NOT NULL UNIQUE,
+  kind         TEXT NOT NULL CHECK (kind IN ('create_pr','post_review','merge',
+                 'create_issue','update_issue','set_labels','create_labels','comment_issue',
+                 'add_blocked_by','update_branch')),
+  work_item_id INTEGER REFERENCES work_items(id),
+  zone_id      TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL,
+  state        TEXT NOT NULL CHECK (state IN ('pending','done','unknown','failed')),
+  result_json  TEXT,
+  error        TEXT,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+INSERT INTO new_outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state, result_json,
+  error, created_at, updated_at)
+SELECT id, op_key, kind, work_item_id, zone_id, payload_json, state, result_json, error,
+  created_at, updated_at FROM outbox;
+DROP TABLE outbox;
+ALTER TABLE new_outbox RENAME TO outbox;
+CREATE TABLE branch_updates (
+  work_item_id INTEGER NOT NULL REFERENCES work_items(id),
+  head_sha     TEXT NOT NULL,
+  base_sha     TEXT NOT NULL,
+  failures     INTEGER NOT NULL DEFAULT 0,
+  outcome      TEXT CHECK (outcome IN ('updated','conflict')),
+  updated_at   TEXT NOT NULL,
+  PRIMARY KEY (work_item_id, head_sha, base_sha)
+);
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1059,6 +1098,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 33, sql: V33_SQL },
   { version: 34, sql: V34_SQL, foreignKeysOff: true },
   { version: 35, sql: V35_SQL },
+  { version: 36, sql: V36_SQL, foreignKeysOff: true },
 ];
 
 /**

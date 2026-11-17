@@ -128,6 +128,12 @@ export interface FakeForgeState {
   pullFiles: Map<number, PullFiles>;
   rules: Record<Identity, BranchRulesRead>;
   merges: { number: number; sha: string; title: string; message: string }[];
+  /** Every branch update GitHub accepted or refused (not a thrown one), in order. */
+  branchUpdates: { number: number; expectedHeadSha: string; identity: Identity }[];
+  /** PRs whose base does not merge cleanly: `updateBranch` answers `conflict`. */
+  updateConflicts: Set<number>;
+  /** The head a branch update makes from each old head; absent, `<old>+base`. */
+  updatedHeads: Map<string, string>;
   /** Each identity's access to the repository (default: push, not admin, public repo). */
   access: Record<Identity, RepoAccess>;
   /** Label names on the repository (default: none). */
@@ -149,6 +155,7 @@ export const FORGE_WRITES: readonly (keyof Forge)[] = [
   'findOrCreatePullRequest',
   'createReview',
   'merge',
+  'updateBranch',
   'createLabel',
   'addBlockedBy',
 ];
@@ -334,6 +341,9 @@ function createState(opts: {
     pullFiles: new Map(),
     rules: { author: okRules(), reviewer: okRules() },
     merges: [],
+    branchUpdates: [],
+    updateConflicts: new Set(),
+    updatedHeads: new Map(),
     access: { author: okAccess(), reviewer: okAccess() },
     labels: [],
     dirs: new Map(),
@@ -548,6 +558,15 @@ function forgeFor(
       p.state = 'closed';
       state.merges.push({ number: n, sha: input.sha, title: input.title, message: input.message });
       return { merged: true, sha: `merge-${n}` };
+    },
+    updateBranch: async (n, expectedHeadSha) => {
+      const p = mustPull(state, n);
+      if (p.state !== 'open' || p.merged) throw forgeError(422, 'Pull request is closed');
+      state.branchUpdates.push({ number: n, expectedHeadSha, identity });
+      if (p.headSha !== expectedHeadSha) return { kind: 'head_moved' };
+      if (state.updateConflicts.has(n)) return { kind: 'conflict' };
+      state.setHead(n, state.updatedHeads.get(expectedHeadSha) ?? `${expectedHeadSha}+base`);
+      return { kind: 'updated' };
     },
     repoAccess: async () => structuredClone(state.access[identity]),
     listLabels: async () => [...state.labels],

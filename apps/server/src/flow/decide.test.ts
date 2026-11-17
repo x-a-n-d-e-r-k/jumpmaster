@@ -160,6 +160,7 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
     missingSince: null,
     carry: null,
     mergeReservedBy: null,
+    updateConflict: false,
     ...over,
   };
 }
@@ -483,8 +484,17 @@ describe('rules in order', () => {
     });
   });
 
-  test('18: behind base resolves', () =>
+  test('18: behind base with no conflict mark asks the forge to update the branch', () =>
     expect(decide(snap({ compare: cmp({ behindBy: 3, baseSha: 'base9' }) }))).toEqual({
+      kind: 'update_branch',
+      headSha: 's',
+      baseSha: 'base9',
+    }));
+
+  test('18: behind base with a conflict mark for this head and base resolves', () =>
+    expect(
+      decide(snap({ compare: cmp({ behindBy: 3, baseSha: 'base9' }), updateConflict: true })),
+    ).toEqual({
       kind: 'enqueue',
       role: 'resolve',
       fingerprint: fingerprint(['s', 'base9']),
@@ -576,9 +586,11 @@ describe('rules in order', () => {
         feedback: { source: 'review' },
       });
       expect(decide(snap({ ...c, compare: cmp({ behindBy: 1 }) }))).toMatchObject({
-        kind: 'enqueue',
-        role: 'resolve',
+        kind: 'update_branch',
       });
+      expect(
+        decide(snap({ ...c, compare: cmp({ behindBy: 1 }), updateConflict: true })),
+      ).toMatchObject({ kind: 'enqueue', role: 'resolve' });
     });
   });
 
@@ -588,6 +600,9 @@ describe('rules in order', () => {
     expect(decide(snap({ held: true, verdictsOnHead: [approve('s')] }))).toEqual(park);
     expect(decide(snap({ held: true, verdictsOnHead: [rc('s')] }))).toEqual(park);
     expect(decide(snap({ held: true, compare: cmp({ behindBy: 3 }) }))).toEqual(park);
+    expect(
+      decide(snap({ held: true, compare: cmp({ behindBy: 3 }), updateConflict: true })),
+    ).toEqual(park);
   });
 
   test('20: standing human block on an older commit parks after one review', () => {
@@ -854,9 +869,15 @@ describe('25: a merge reservation held by an older approved item', () => {
   });
 
   test('a resolve is unchanged', () => {
-    const s = mergeable({ compare: cmp({ behindBy: 2, baseSha: 'b2' }) });
+    const s = mergeable({ compare: cmp({ behindBy: 2, baseSha: 'b2' }), updateConflict: true });
     expect(decide({ ...s, ...reserved })).toEqual(decide(s));
     expect(decide(s)).toMatchObject({ kind: 'enqueue', role: 'resolve' });
+  });
+
+  test('a branch update is unchanged', () => {
+    const s = mergeable({ compare: cmp({ behindBy: 2, baseSha: 'b2' }) });
+    expect(decide({ ...s, ...reserved })).toEqual(decide(s));
+    expect(decide(s)).toMatchObject({ kind: 'update_branch' });
   });
 
   test('a heal is unchanged', () => {
@@ -968,17 +989,20 @@ describe('overlaps', () => {
       fingerprint: fingerprint(['s', 'human', 5]),
     }));
 
-  test('behind base and CI failure resolves first', () =>
+  test('behind base and CI failure updates the branch first', () =>
     expect(decide(mergeable({ checks: failing, compare: cmp({ behindBy: 2 }) }))).toMatchObject({
-      kind: 'enqueue',
-      role: 'resolve',
+      kind: 'update_branch',
     }));
 
-  test('behind base resolves before the first review', () =>
+  test('behind base updates the branch before the first review', () =>
     expect(decide(snap({ verdictsOnHead: [], compare: cmp({ behindBy: 2 }) }))).toMatchObject({
-      kind: 'enqueue',
-      role: 'resolve',
+      kind: 'update_branch',
     }));
+
+  test('behind base with a conflict mark resolves before the first review', () =>
+    expect(
+      decide(snap({ verdictsOnHead: [], compare: cmp({ behindBy: 2 }), updateConflict: true })),
+    ).toMatchObject({ kind: 'enqueue', role: 'resolve' }));
 
   test('stale mergeable flag is never consulted: behindBy 0 gives no resolve', () => {
     const p = { ...pr('s'), mergeable: false } as PullFacts;
