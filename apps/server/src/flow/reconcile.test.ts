@@ -596,3 +596,42 @@ describe('reconcileZone — adoption and resume', () => {
     expect(item(id)).toMatchObject({ state: 'parked', reason: 'budget exhausted: resume' });
   });
 });
+
+describe('maxOpenPrs (issue #291)', () => {
+  test('at the cap no implement drop starts, while resolve and heal drops still run', async () => {
+    w = zoneWorld({ maxOpenPrs: 2 });
+    const behind = w.prItem(1, 'sha1');
+    w.f.state.compares.set('main...sha1', {
+      aheadBy: 1,
+      behindBy: 1,
+      baseSha: 'base1',
+      mergeBaseSha: 'base0',
+    });
+    const blocked = w.prItem(2, 'sha2');
+    insertVerdict(w.db, {
+      id: 'rc-2',
+      workItemId: blocked,
+      headSha: 'sha2',
+      decision: 'request_changes',
+      forced: false,
+      summary: 'fix it',
+      findingsJson: '[]',
+      gatesJson: '[]',
+      createdAt: t.toISOString(),
+    });
+    const ready = w.item(3);
+    await pass();
+    expect(activeDropFor(w.db, behind)).toMatchObject({ role: 'resolve' });
+    expect(activeDropFor(w.db, blocked)).toMatchObject({ role: 'heal' });
+    expect(activeDropFor(w.db, ready)).toBeUndefined();
+    expect(item(ready).state).toBe('ready');
+  });
+
+  test('below the cap the ready item starts', async () => {
+    w = zoneWorld({ maxOpenPrs: 2 });
+    w.prItem(1, 'sha1');
+    const ready = w.item(3);
+    await pass();
+    expect(activeDropFor(w.db, ready)).toMatchObject({ role: 'implement' });
+  });
+});

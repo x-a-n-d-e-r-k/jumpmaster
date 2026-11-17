@@ -13,6 +13,7 @@ import {
   type OutboxRow,
   recordGatePark,
   setWaitingSince,
+  setWorkItemPrFiles,
   upsertPullRequest,
   verdictsForHead,
   verdictsForItem,
@@ -224,6 +225,10 @@ async function maintainerApprovedHead(
   }
   return false;
 }
+
+/** Every path a PR's file list touches: each file's path, and a rename's previous path. */
+const prTouches = (files: PullFiles['files']): string[] =>
+  files.flatMap((f) => (f.previousPath ? [f.path, f.previousPath] : [f.path]));
 
 const isPackageJson = (p: string): boolean => p === 'package.json' || p.endsWith('/package.json');
 
@@ -586,7 +591,10 @@ export async function buildSnapshot(
     }
     try {
       files = await forges.author.listPullFiles(pr.number);
+      // What the PR changes, for the scheduler's overlap hold (#291): a list cut short is unknown.
+      setWorkItemPrFiles(db, item.id, files.complete ? prTouches(files.files) : null);
     } catch (err) {
+      // A failed read leaves the stored list as it was.
       unavailable('listPullFiles', err);
     }
   }

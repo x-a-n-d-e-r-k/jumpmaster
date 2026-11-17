@@ -7,6 +7,7 @@ import {
   recordObservation,
   setWorkItemState,
   setZoneMode,
+  upsertPullRequest,
 } from '../db/repo.js';
 import { opKeys, opMarker, runOp } from '../outbox.js';
 import { type Harness, harness, toPrOpen } from '../test/flowHarness.js';
@@ -90,6 +91,46 @@ describe('observe mode', () => {
     expect(obs).toContainEqual(['would_wait:blocked', 1, 'blocked by #4']);
     expect(obs).toContainEqual(['would_enqueue:implement', 2, 'issue #2']);
     expect(obs.some(([a, id]) => a === 'would_enqueue:implement' && id === 1)).toBe(false);
+  });
+
+  test('records would_wait:overlap for a ready item whose Placement an open PR changes', async () => {
+    const h = await harness({
+      zone: { mode: 'observe' },
+      issues: [
+        {
+          ...readyIssue(1),
+          labels: ['agent-ready', 'high'],
+          body: '## Placement\n\n`src/a.ts`\n',
+        },
+        readyIssue(2),
+        readyIssue(9),
+      ],
+    });
+    await h.reconcile();
+    // #9 has an open PR that changes src/a.ts: the pass reads its file list and stores it.
+    setWorkItemState(h.db, 3, 'pr_open');
+    h.forge.state.addPull({
+      number: 57,
+      headRef: 'agent/issue-9',
+      headSha: 's9',
+      author: 'author-bot',
+    });
+    h.forge.state.pullFiles.set(57, { files: [{ path: 'src/a.ts' }], complete: true });
+    upsertPullRequest(
+      h.db,
+      { workItemId: 3, number: 57, headRef: 'agent/issue-9', headSha: 's9', state: 'open' },
+      h.now(),
+    );
+    const at = h.at(1).toISOString();
+    await h.reconcile();
+    const obs = listObservations(h.db, h.zone.id)
+      .filter((o) => o.lastAt === at)
+      .map((o) => [o.action, o.itemId, o.detail]);
+    expect(obs).toContainEqual(['would_wait:overlap', 1, 'waiting: overlaps #57 on src/a.ts']);
+    expect(obs).toContainEqual(['would_enqueue:implement', 2, 'issue #2']);
+    expect(obs.some(([a, id]) => a === 'would_enqueue:implement' && id === 1)).toBe(false);
+    // Observe changes nothing: the reason stays unset.
+    expect(getWorkItem(h.db, 1)?.reason).toBeNull();
   });
 
   test('observe does not record a resume for a blocked ready item with an old branch', async () => {

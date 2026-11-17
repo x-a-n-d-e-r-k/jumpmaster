@@ -39,8 +39,13 @@ import {
   runOp,
 } from '../outbox.js';
 import { renderReviewBody } from '../results.js';
-import { enqueueImplement, enqueueNext, isBlocked } from '../scheduler.js';
-import { rankItems } from '../sync.js';
+import {
+  enqueueImplement,
+  enqueueNext,
+  isBlocked,
+  openPrCap,
+  readyCandidates,
+} from '../scheduler.js';
 import { chargeBudget, creditBaseSync } from './budgets.js';
 import {
   type Action,
@@ -518,9 +523,16 @@ export async function reconcileZone(
     const resumes = listObservations(db, zone.id).filter(
       (o) => o.action === 'would_enqueue:resume' && o.lastAt === now.toISOString(),
     ).length;
-    const slots = Math.max(0, (zone.maxConcurrentImplement ?? 1) - resumes);
-    const skip = (i: WorkItem) => !branchUnknown.has(i.id) && !isBlocked(i);
-    for (const pick of rankItems(ready.filter(skip)).slice(0, slots)) {
+    // The same holds as enqueueNext (#291): an open PR changing a file the Placement names, and
+    // the zone's open PR cap.
+    const candidates = readyCandidates(db, zone.id, branchUnknown);
+    for (const { item: i, overlap } of candidates)
+      if (overlap !== null)
+        recordObservation(db, zone.id, i.id, 'would_wait:overlap', overlap, now);
+    const capped = openPrCap(zone, listWorkItems(db, zone.id, 'pr_open').length) !== null;
+    const slots = capped ? 0 : Math.max(0, (zone.maxConcurrentImplement ?? 1) - resumes);
+    const picks = candidates.filter((c) => c.overlap === null).map((c) => c.item);
+    for (const pick of picks.slice(0, slots)) {
       const detail = `issue #${pick.issueNumber}`;
       recordObservation(db, zone.id, pick.id, 'would_enqueue:implement', detail, now);
     }

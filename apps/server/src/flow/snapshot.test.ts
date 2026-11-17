@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import {
   getWorkItem,
+  getWorkItemPrFiles,
   insertVerdict,
   recordGateAllowance,
   setWorkItemState,
@@ -765,5 +766,32 @@ describe('merge reservation', () => {
     verdict(itemId, 'sha1', 5);
     verdict(two, 'sha2', 20);
     expect((await snapshotOf(itemId)).mergeReservedBy).toBeNull();
+  });
+});
+
+describe('the open PR file list is stored on the item (issue #291)', () => {
+  test('a complete list is stored, renames with their previous path, sorted', async () => {
+    w.f.state.pullFiles.set(1, {
+      files: [{ path: 'src/b.ts' }, { path: 'src/new.ts', previousPath: 'src/old.ts' }],
+      complete: true,
+    });
+    await snapshotOf();
+    expect(getWorkItemPrFiles(w.db, itemId)).toEqual(['src/b.ts', 'src/new.ts', 'src/old.ts']);
+  });
+
+  test('a list GitHub cut short stores null (unknown)', async () => {
+    w.f.state.pullFiles.set(1, { files: [{ path: 'src/a.ts' }], complete: true });
+    await snapshotOf();
+    w.f.state.pullFiles.set(1, { files: [{ path: 'src/a.ts' }], complete: false });
+    await snapshotOf();
+    expect(getWorkItemPrFiles(w.db, itemId)).toBeNull();
+  });
+
+  test('a failed read leaves the stored list as it was', async () => {
+    w.f.state.pullFiles.set(1, { files: [{ path: 'src/a.ts' }], complete: true });
+    await snapshotOf();
+    w.f.author.failNext('listPullFiles', '5xx');
+    await snapshotOf();
+    expect(getWorkItemPrFiles(w.db, itemId)).toEqual(['src/a.ts']);
   });
 });

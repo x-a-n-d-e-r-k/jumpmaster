@@ -985,6 +985,15 @@ const V33_SQL = `
 ALTER TABLE triage_requests ADD COLUMN gate_reasons TEXT;
 `;
 
+/**
+ * v34: the files an open PR changes (#291), as a JSON array of paths (renames add their previous
+ * path), stored by each pass that reads the complete list. Null is unknown: never read, or a list
+ * GitHub cut short. The scheduler holds back a ready item whose Placement names one of them.
+ */
+const V34_SQL = `
+ALTER TABLE work_items ADD COLUMN pr_files TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1019,6 +1028,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 31, sql: V31_SQL },
   { version: 32, sql: V32_SQL, foreignKeysOff: true },
   { version: 33, sql: V33_SQL },
+  { version: 34, sql: V34_SQL },
 ];
 
 /**
