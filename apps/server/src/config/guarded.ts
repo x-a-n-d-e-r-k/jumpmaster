@@ -215,6 +215,13 @@ export const GUARDED_PATHS: GuardedPath[] = [
     true,
     (ctx) => `A Fable arbiter in ${zoneOf(ctx)} will settle crew disagreements without asking you`,
   ),
+  // A crew retry replaces the owner's Retry on a failed implementation; turning it off is free.
+  becomes(
+    'dropZones[].crew.autoRetry',
+    true,
+    (ctx) =>
+      `The crew in ${zoneOf(ctx)} will retry a failed implementation once on its own diagnosis, without asking you`,
+  ),
   {
     path: 'dropZones[].crew.goalPath',
     kind: 'scalar',

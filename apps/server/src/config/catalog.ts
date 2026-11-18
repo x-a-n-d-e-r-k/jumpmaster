@@ -657,6 +657,12 @@ const WORDS: Words[] = [
     'When reviewers and the crew keep disagreeing, a Fable agent rules on the evidence and acts on its ruling. Turned off, every such case is put to you, as before.',
     'bool',
   ),
+  z_(
+    'crew.autoRetry',
+    'Let the crew retry failed work once',
+    "When an implementation fails and the crew's diagnosis says another try with a specific fix would work, the crew retries it once without asking you. Turned off, every such case is put to you, as before.",
+    'bool',
+  ),
 ];
 
 /** Every setting, in plain words, with its group. */
