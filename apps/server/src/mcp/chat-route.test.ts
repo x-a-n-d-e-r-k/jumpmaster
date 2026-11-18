@@ -148,6 +148,15 @@ const READ_TOOLS = [
   'list_rulings',
   'get_queue',
 ];
+/** The chat's own read tools (Task 9), which take their own arguments. */
+const CHAT_READ_TOOLS = [
+  'list_sticks',
+  'get_settings',
+  'get_doctor_run',
+  'list_open_issues',
+  'list_open_pulls',
+  'get_drop_transcript',
+];
 
 describe('/mcp/chat', () => {
   test('D1: a zone read or write token is refused on /mcp/chat', async () => {
@@ -180,7 +189,7 @@ describe('/mcp/chat', () => {
     const r = await post(s.chat, LIST);
     expect(r.statusCode).toBe(200);
     const tools = (r.json() as { result: { tools: { name: string }[] } }).result.tools;
-    expect(tools.map((t) => t.name).sort()).toEqual([...READ_TOOLS].sort());
+    expect(tools.map((t) => t.name).sort()).toEqual([...READ_TOOLS, ...CHAT_READ_TOOLS].sort());
     // /mcp itself stays unregistered.
     expect(
       (await post(s.read, LIST, { url: '/mcp', headers: { host: '127.0.0.1:7420' } })).statusCode,
@@ -226,7 +235,7 @@ describe('/mcp/chat', () => {
     }
   });
 
-  test('tools/list for a chat token lists the six read tools, each requiring zoneId, and no write tool', async () => {
+  test('tools/list for a chat token lists the six zone read tools, each requiring zoneId, the chat read tools, and no write tool', async () => {
     const s = await setup();
     const r = await rpc(s.chat, 'tools/list');
     const tools = (
@@ -237,8 +246,8 @@ describe('/mcp/chat', () => {
         }[];
       }
     ).tools;
-    expect(tools.map((t) => t.name).sort()).toEqual([...READ_TOOLS].sort());
-    for (const t of tools) {
+    expect(tools.map((t) => t.name).sort()).toEqual([...READ_TOOLS, ...CHAT_READ_TOOLS].sort());
+    for (const t of tools.filter((t) => READ_TOOLS.includes(t.name))) {
       expect(t.inputSchema.properties?.zoneId).toEqual(expect.objectContaining({ type: 'string' }));
       expect(t.inputSchema.required).toContain('zoneId');
     }
