@@ -1,5 +1,6 @@
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -1605,6 +1606,64 @@ describe('GitHub App entries in the store (§4.4)', () => {
     expect(msg).toContain('the stored config');
     expect(msg).toContain(path);
     for (const l of PEM_LINES) expect(msg).not.toContain(l);
+  });
+
+  describe('appSlugs (#374): only the slug of each role, for the UI', () => {
+    test('a vault entry gives { slug } only: no PEM, no client id', () => {
+      const { vault, open } = withVault();
+      vault.put(appEntryName('acme', 'author'), appEntry, { now: t0 });
+      const store = open();
+      const slugs = store.appSlugs('Acme');
+      expect(slugs).toEqual({ author: { slug: 'acme-author' } });
+      const json = JSON.stringify(slugs);
+      expect(json).not.toContain('PRIVATE KEY');
+      for (const l of PEM_LINES) expect(json).not.toContain(l);
+      expect(json).not.toContain('Iv23liStore0001');
+      expect(json).not.toContain('"42"');
+    });
+
+    test('a secrets-directory file counts too', () => {
+      const { open, secrets } = withVault();
+      mkdirSync(join(secrets, 'github-app', 'acme'), { recursive: true });
+      writeFileSync(join(secrets, 'github-app', 'acme', 'reviewer.json'), appEntry, {
+        mode: 0o600,
+      });
+      expect(open().appSlugs('acme')).toEqual({ reviewer: { slug: 'acme-author' } });
+    });
+
+    test('a missing entry gives nothing for that role', () => {
+      const { open } = withVault();
+      expect(open().appSlugs('acme')).toEqual({});
+    });
+
+    test('a file with mode 0644, or with invalid JSON, gives nothing for that role and does not throw', () => {
+      const { w, open, secrets } = withVault();
+      const store = open();
+      mkdirSync(join(secrets, 'github-app', 'acme'), { recursive: true });
+      const author = join(secrets, 'github-app', 'acme', 'author.json');
+      writeFileSync(author, appEntry, { mode: 0o600 });
+      chmodSync(author, 0o644);
+      const reviewer = join(secrets, 'github-app', 'acme', 'reviewer.json');
+      writeFileSync(reviewer, '{ not json', { mode: 0o600 });
+      const before = w.logs.length;
+      expect(store.appSlugs('acme')).toEqual({});
+      for (const l of w.logs.slice(before)) {
+        expect(l).not.toContain('PRIVATE KEY');
+        expect(l).not.toContain('not json');
+      }
+    });
+
+    test('an undecryptable vault entry, or an owner GitHub would refuse, gives nothing', () => {
+      const { w, vault, open } = withVault();
+      vault.put(appEntryName('acme', 'author'), appEntry, { now: t0 });
+      const otherKey = join(dir(), 'vault_key');
+      writeFileSync(otherKey, randomBytes(32).toString('base64url'), { mode: 0o600 });
+      const other = openVault(otherKey, w.db);
+      if (other === 'disabled') throw new Error('expected a vault');
+      const store = w.open({ env: { ...env }, vault: other, scrubSet: new ScrubSet() });
+      expect(store.appSlugs('acme')).toEqual({});
+      expect(open().appSlugs('not an owner!')).toEqual({});
+    });
   });
 
   test('the loaded PEM is registered with the scrub set', () => {
