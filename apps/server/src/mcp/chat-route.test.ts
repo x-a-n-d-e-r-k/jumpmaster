@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createApp } from '../app.js';
+import { listCards } from '../chat/cards.js';
 import type { Config, McpConfig } from '../config.js';
 import { upsertDropZone } from '../db/repo.js';
 import { crewOn, crewWorld } from '../test/crew.js';
@@ -157,6 +158,16 @@ const CHAT_READ_TOOLS = [
   'list_open_pulls',
   'get_drop_transcript',
 ];
+/** The zone write tools and the chat's action tools (Task 13): each records a card. */
+const ACTION_TOOLS = [
+  'file_staged_issues',
+  'raise_briefing',
+  'rule_briefing',
+  'set_zone_mode',
+  'run_crew_cycle',
+  'mark_objective_done',
+];
+const ALL_TOOLS = [...READ_TOOLS, ...CHAT_READ_TOOLS, ...ACTION_TOOLS].sort();
 
 describe('/mcp/chat', () => {
   test('D1: a zone read or write token is refused on /mcp/chat', async () => {
@@ -189,7 +200,7 @@ describe('/mcp/chat', () => {
     const r = await post(s.chat, LIST);
     expect(r.statusCode).toBe(200);
     const tools = (r.json() as { result: { tools: { name: string }[] } }).result.tools;
-    expect(tools.map((t) => t.name).sort()).toEqual([...READ_TOOLS, ...CHAT_READ_TOOLS].sort());
+    expect(tools.map((t) => t.name).sort()).toEqual(ALL_TOOLS);
     // /mcp itself stays unregistered.
     expect(
       (await post(s.read, LIST, { url: '/mcp', headers: { host: '127.0.0.1:7420' } })).statusCode,
@@ -235,7 +246,7 @@ describe('/mcp/chat', () => {
     }
   });
 
-  test('tools/list for a chat token lists the six zone read tools, each requiring zoneId, the chat read tools, and no write tool', async () => {
+  test('tools/list for a chat token lists the six zone read tools, each requiring zoneId, the chat read tools, and the action tools', async () => {
     const s = await setup();
     const r = await rpc(s.chat, 'tools/list');
     const tools = (
@@ -246,7 +257,7 @@ describe('/mcp/chat', () => {
         }[];
       }
     ).tools;
-    expect(tools.map((t) => t.name).sort()).toEqual([...READ_TOOLS, ...CHAT_READ_TOOLS].sort());
+    expect(tools.map((t) => t.name).sort()).toEqual(ALL_TOOLS);
     for (const t of tools.filter((t) => READ_TOOLS.includes(t.name))) {
       expect(t.inputSchema.properties?.zoneId).toEqual(expect.objectContaining({ type: 'string' }));
       expect(t.inputSchema.required).toContain('zoneId');
@@ -254,12 +265,16 @@ describe('/mcp/chat', () => {
     expect(tools.find((t) => t.name === 'get_work_item')?.inputSchema.required).toEqual(
       expect.arrayContaining(['number', 'zoneId']),
     );
-    // A write tool is refused when called anyway, and audited.
-    const w = await call(s.chat, 'raise_briefing', { zoneId: 'main', briefings: [] });
-    expect(w.isError).toBe(true);
+    // An action through the route acts as the chat, is audited, and records a card on the
+    // token's own thread and message.
+    const w = await call(s.chat, 'set_zone_mode', { zoneId: 'main', mode: 'paused' });
+    expect(w.isError).toBeFalsy();
     expect(audit(s).at(-1)).toEqual(
-      expect.objectContaining({ tokenId: s.chatId, tool: 'raise_briefing', outcome: 'refused' }),
+      expect.objectContaining({ tokenId: s.chatId, tool: 'set_zone_mode', outcome: 'ok' }),
     );
+    expect(listCards(s.db, 11)).toEqual([
+      expect.objectContaining({ messageId: 22, kind: 'pause', state: 'done' }),
+    ]);
   });
 
   test('D5: get_goals for zoneId main through a chat token answers what a main read token answers', async () => {

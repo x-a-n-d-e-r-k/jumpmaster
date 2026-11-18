@@ -3,8 +3,9 @@ import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { type BriefingSource, listBriefings, listRulings } from '../briefings.js';
+import type { ChatCard } from '../chat/cards.js';
 import { type Config, type DropZoneConfig, mcpConfigOf } from '../config.js';
-import { applyCrewActions, type CrewActionInput } from '../crew/actions.js';
+import { type ApplyReport, applyCrewActions, type CrewActionInput } from '../crew/actions.js';
 import { getCrewIssueByNumber, listCrewIssues } from '../crew/store.js';
 import type { Db } from '../db/open.js';
 import {
@@ -19,6 +20,7 @@ import {
 import { getGoals } from '../goals.js';
 import { redactionList } from '../scrub.js';
 import { dispatchGate } from '../usage.js';
+import { type Acted, CHAT_ACTION_TOOLS, carded } from './chat-actions.js';
 import { CHAT_TOOLS } from './chat-tools.js';
 import {
   type ChatToolContext,
@@ -275,7 +277,7 @@ function writeBlocked(
   return null;
 }
 
-function applied(ctx: ToolContext, input: CrewActionInput): Outcome {
+function applied(ctx: ToolContext, input: CrewActionInput): { out: Outcome; report: ApplyReport } {
   const r = applyCrewActions(
     ctx.db,
     ctx.zone,
@@ -290,10 +292,42 @@ function applied(ctx: ToolContext, input: CrewActionInput): Outcome {
     2,
   );
   return {
-    result: { content: [{ type: 'text', text }], ...(any ? {} : { isError: true }) },
-    outcome: any ? 'ok' : 'refused',
-    // Counts only: refusal reasons can echo the caller's keys and objectives.
-    detail: `filed ${r.filed.length}, briefings ${r.briefings.length}, refused ${r.refused.length}`,
+    out: {
+      result: { content: [{ type: 'text', text }], ...(any ? {} : { isError: true }) },
+      outcome: any ? 'ok' : 'refused',
+      // Counts only: refusal reasons can echo the caller's keys and objectives.
+      detail: `filed ${r.filed.length}, briefings ${r.briefings.length}, refused ${r.refused.length}`,
+    },
+    report: r,
+  };
+}
+
+const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
+const refusedTail = (r: ApplyReport): string =>
+  r.refused.length > 0 ? ` ${plural(r.refused.length, 'other was', 'others were')} refused.` : '';
+
+/** A filing's card: counts and the server's crew issue ids, never the titles the caller wrote. */
+function filedCard(ctx: ToolContext, input: CrewActionInput): Acted {
+  const { out, report: r } = applied(ctx, input);
+  return {
+    out,
+    summary:
+      `Filed ${plural(r.filed.length, 'staged issue', 'staged issues')} in zone ${ctx.zone.id} ` +
+      `(crew issue ${r.filed.join(', ')}). Nothing starts until Command promotes ` +
+      `${r.filed.length === 1 ? 'it' : 'them'}.${refusedTail(r)}`,
+    target: `zone:${ctx.zone.id}`,
+    link: `/zones/${encodeURIComponent(ctx.zone.id)}`,
+  };
+}
+
+/** A briefing's card: how many the server raised, linked to the first. */
+function briefedCard(ctx: ToolContext, input: CrewActionInput): Acted {
+  const { out, report: r } = applied(ctx, input);
+  const first = r.briefings[0];
+  return {
+    out,
+    summary: `Raised ${plural(r.briefings.length, 'briefing', 'briefings')} for Command in zone ${ctx.zone.id}.${refusedTail(r)}`,
+    ...(first === undefined ? {} : { target: `briefing:${first}`, link: `/briefings/${first}` }),
   };
 }
 
@@ -310,9 +344,10 @@ const fileStagedIssuesTool: ZoneToolDef = {
   input: FileIssuesArgs,
   run(ctx, args: z.infer<typeof FileIssuesArgs>) {
     // Staged issues start nothing until Command promotes them, so filing needs no crew.
-    return (
-      writeBlocked(ctx, args, { needsCrew: false }) ?? applied(ctx, { fileIssues: args.issues })
-    );
+    return carded(ctx, 'file_issues', args, () => {
+      const blocked = writeBlocked(ctx, args, { needsCrew: false });
+      return blocked ? { out: blocked } : filedCard(ctx, { fileIssues: args.issues });
+    });
   },
 };
 
@@ -325,27 +360,32 @@ const raiseBriefingTool: ZoneToolDef = {
     'Command as raised by the assistant.',
   input: BriefingsArgs,
   run(ctx, args: z.infer<typeof BriefingsArgs>) {
-    const blocked = writeBlocked(ctx, args);
-    if (blocked) return blocked;
-    const { db, config, zone } = ctx;
-    const cap = mcpConfigOf(config).maxOpenBriefings;
-    const open = new Set(
-      listBriefings(db, { zoneId: zone.id, state: 'open' })
-        .filter((b) => b.source === 'mcp')
-        .map((b) => b.subject),
-    );
-    const fresh = new Set(
-      args.briefings.map((b) => `mcp:${b.subject}`).filter((s) => !open.has(s)),
-    );
-    if (open.size + fresh.size > cap) {
-      return refused(
-        `the zone holds ${open.size} open assistant briefings and the cap is ${cap}; Command rules on them first`,
-        'briefing cap',
-      );
-    }
-    return applied(ctx, { briefings: args.briefings });
+    return carded(ctx, 'briefing', args, () => raiseBriefings(ctx, args));
   },
 };
+
+/** Raises the assistant's briefings, within the zone's cap of open ones. */
+function raiseBriefings(ctx: ToolContext, args: z.infer<typeof BriefingsArgs>): Acted {
+  const blocked = writeBlocked(ctx, args);
+  if (blocked) return { out: blocked };
+  const { db, config, zone } = ctx;
+  const cap = mcpConfigOf(config).maxOpenBriefings;
+  const open = new Set(
+    listBriefings(db, { zoneId: zone.id, state: 'open' })
+      .filter((b) => b.source === 'mcp')
+      .map((b) => b.subject),
+  );
+  const fresh = new Set(args.briefings.map((b) => `mcp:${b.subject}`).filter((s) => !open.has(s)));
+  if (open.size + fresh.size > cap) {
+    return {
+      out: refused(
+        `the zone holds ${open.size} open assistant briefings and the cap is ${cap}; Command rules on them first`,
+        'briefing cap',
+      ),
+    };
+  }
+  return briefedCard(ctx, { briefings: args.briefings });
+}
 
 const TOOLS: ToolDef[] = [
   getGoalsTool,
@@ -357,6 +397,7 @@ const TOOLS: ToolDef[] = [
   fileStagedIssuesTool,
   raiseBriefingTool,
   ...CHAT_TOOLS,
+  ...CHAT_ACTION_TOOLS,
 ];
 const isZoneTool = (t: ToolDef): t is ZoneToolDef => t.scope === 'read' || t.scope === 'write';
 const isWriteTool = (t: ToolDef): boolean => t.scope === 'write' || t.scope === 'chat-write';
@@ -534,6 +575,17 @@ export async function callTool(
     return out.result;
   };
   const fx = fencer(redactionList(ctx.config.secrets));
+  /** The call's cards, pushed to the thread's stream only once what recorded them committed. */
+  const cards: ChatCard[] = [];
+  const flush = (): void => {
+    for (const c of cards.splice(0)) {
+      try {
+        ctx.onCard?.(c);
+      } catch (e) {
+        ctx.log?.(`mcp card push failed: ${errorMessage(e)}`);
+      }
+    }
+  };
   try {
     const checked = db.transaction((): CallToolResult | Ready => {
       if (callBudgetSpent(db, ctx.config, principal.tokenId, at)) {
@@ -567,11 +619,16 @@ export async function callTool(
           .join('; ');
         return refuse(refused(`invalid arguments: ${issues}`, 'invalid arguments'));
       }
-      const { zone: _own, actions: _actions, ...base } = ctx;
+      const { zone: _own, actions: _actions, onCard: _onCard, ...base } = ctx;
       const ready: Ready = {
         ready: true,
         tool,
-        ctx: { ...base, ...(target.zone ? { zone: target.zone } : {}), now: () => at },
+        ctx: {
+          ...base,
+          ...(target.zone ? { zone: target.zone } : {}),
+          now: () => at,
+          onCard: (c) => cards.push(c),
+        },
         args: parsed.data,
       };
       if (tool.external) {
@@ -583,10 +640,16 @@ export async function callTool(
       if (out instanceof Promise) throw new Error(`tool ${tool.name} is async but not external`);
       return finish(tool, out);
     })();
-    if (!isReady(checked)) return checked;
+    if (!isReady(checked)) {
+      flush();
+      return checked;
+    }
     const out = await run(checked, fx);
-    return db.transaction(() => finish(checked.tool, out))();
+    const answered = db.transaction(() => finish(checked.tool, out))();
+    flush();
+    return answered;
   } catch (e) {
+    cards.length = 0;
     // The transaction rolled back: whatever the tool recorded is gone with it.
     ctx.log?.(`mcp ${tool?.name ?? 'unknown tool'} failed: ${errorMessage(e)}`);
     try {

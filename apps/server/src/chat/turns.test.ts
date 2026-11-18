@@ -10,6 +10,7 @@ import { plus, t0, tmpDbFile } from '../test/helpers.js';
 import { dispatchGate } from '../usage.js';
 import type { AppEntryRead } from '../vault/github-app-entries.js';
 import type { ResolvedApps } from '../vault/resolution.js';
+import { recordCard } from './cards.js';
 import type { ChatServiceClient } from './service.js';
 import {
   appendMessage,
@@ -187,6 +188,29 @@ describe('ChatTurns', () => {
       'reply to two',
       'reply to three',
     ]);
+  });
+
+  test("publishCard sends a card to its own thread's subscribers at the thread's latest seq", () => {
+    const w = world(async function* () {});
+    const th = createThread(w.db, { title: 't' }, t0);
+    const other = createThread(w.db, { title: 'o' }, t0);
+    w.owner(th.id, 'one');
+    w.owner(th.id, 'two');
+    const seen: HubEvent[] = [];
+    const elsewhere: HubEvent[] = [];
+    const stop = w.turns.subscribe(th.id, 2, (e) => seen.push(e));
+    w.turns.subscribe(other.id, 0, (e) => elsewhere.push(e));
+    const card = recordCard(
+      w.db,
+      { threadId: th.id, messageId: 1, kind: 'pause', state: 'done', summary: 'Paused' },
+      t0,
+    );
+    w.turns.publishCard(card);
+    expect(seen).toEqual([{ seq: 2, event: { type: 'card', card } }]);
+    expect(elsewhere).toEqual([]);
+    stop();
+    w.turns.publishCard(card);
+    expect(seen).toHaveLength(1);
   });
 
   test('turns beyond chat.maxConcurrentTurns wait', async () => {

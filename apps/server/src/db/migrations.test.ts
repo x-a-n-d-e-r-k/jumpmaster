@@ -1449,15 +1449,18 @@ test('v40 keeps every control_audit row and the 5000-row trigger (the rebuild sh
       `INSERT INTO control_audit (at, via, action, target, guarded, detail_json)
        VALUES (?, ?, ?, ?, ?, ?)`,
     );
-    for (let i = 0; i < 5002; i++)
-      put.run(
-        `t${i}`,
-        ['token', 'session', 'system'][i % 3],
-        `a${i}`,
-        i % 2 ? 'z' : null,
-        i % 2,
-        `{"n":${i}}`,
-      );
+    // One transaction: 5002 commits on their own outlast the test's timeout on a slow disk.
+    raw.transaction(() => {
+      for (let i = 0; i < 5002; i++)
+        put.run(
+          `t${i}`,
+          ['token', 'session', 'system'][i % 3],
+          `a${i}`,
+          i % 2 ? 'z' : null,
+          i % 2,
+          `{"n":${i}}`,
+        );
+    })();
   });
   const before = new Database(f);
   const rows = before.prepare('SELECT * FROM control_audit ORDER BY id').all();
