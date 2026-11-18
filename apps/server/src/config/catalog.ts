@@ -645,6 +645,12 @@ const WORDS: Words[] = [
     'How many triage attempts one issue text gets before it is put to Command as failed.',
     'number',
   ),
+  z_(
+    'crew.arbiter',
+    'Let a Fable arbiter settle disagreements',
+    'When reviewers and the crew keep disagreeing, a Fable agent rules on the evidence and acts on its ruling. Turned off, every such case is put to you, as before.',
+    'bool',
+  ),
 ];
 
 /** Every setting, in plain words, with its group. */

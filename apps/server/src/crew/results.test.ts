@@ -1,13 +1,16 @@
+import { readFileSync } from 'node:fs';
 import type { DropResult } from '@jumpmaster/protocol';
 import { beforeEach, describe, expect, test } from 'vitest';
 import {
   applyPendingRulings,
   listBriefings,
+  MAX_BRIEFING_WHY,
+  REFUTE_RECOMMENDATION,
   ruleBriefing,
   syncParkBriefings,
   whyBasis,
 } from '../briefings.js';
-import type { DropZoneConfig } from '../config.js';
+import type { ClaudeConfig, Config, DropZoneConfig } from '../config.js';
 import {
   getDrop,
   getUsageState,
@@ -20,7 +23,7 @@ import {
 } from '../db/repo.js';
 import { zonePass } from '../flow/snapshot.js';
 import { unsanitizeForgeText } from '../outbox.js';
-import { promptVersions } from '../payloads.js';
+import { buildPayload, promptVersions } from '../payloads.js';
 import { applyResult, type ResultDeps } from '../results.js';
 import { syncDropZone } from '../sync.js';
 import { crewOn, crewWorld, ISSUE_BODY, parsedCrew } from '../test/crew.js';
@@ -28,6 +31,7 @@ import { usageCfg, type ZoneWorld } from '../test/fixtures.js';
 import { plus, t0 } from '../test/helpers.js';
 import { applyCrewActions } from './actions.js';
 import { crewBodySha, flushCrewOps } from './flush.js';
+import { applyCrewResult } from './results.js';
 import { enqueueCrew, nextCrewWork } from './schedule.js';
 import {
   getCrewIssue,
@@ -349,7 +353,7 @@ describe('refute results', () => {
     });
   });
 
-  test('a revise at the refute budget raises a refute_exhausted briefing', async () => {
+  test('a revise at the refute budget is kept as a revision; no briefing is raised here', async () => {
     const zone = { ...w.zone, crew: { ...crewOn, maxRefute: 1 } };
     const issue = staged();
     const id = await crewDrop(t0, zone);
@@ -360,9 +364,11 @@ describe('refute results', () => {
       completed({ decision: 'revise', findings: [], revisedBody: `${ISSUE_BODY}\nMore.` }),
       t0,
     );
-    const [b] = listBriefings(w.db, { zoneId: 'main', state: 'open' });
-    expect(b).toMatchObject({ kind: 'refute_exhausted', subject: `issue:${issue}` });
-    expect(b?.options.map((o) => o.effect)).toEqual(['promote_issue', 'reject_issue']);
+    expect(getCrewIssue(w.db, issue)).toMatchObject({
+      state: 'revising',
+      body: `${ISSUE_BODY}\nMore.`,
+    });
+    expect(listBriefings(w.db, { zoneId: 'main', state: 'open' })).toEqual([]);
   });
 });
 
@@ -841,5 +847,393 @@ describe('D5: a body naming a protected path is stopped at every entry point (#2
       t0,
     );
     expect(getCrewIssue(w.db, issue)).toMatchObject({ state: 'rejecting', body: ISSUE_BODY });
+  });
+});
+
+describe('arbiter rulings on crew issues out of refutes (#382)', () => {
+  const FABLE = 'claude-fable-1';
+  const fable: ClaudeConfig = { plan: 'max', fableModel: FABLE, fableWeeklyDropCap: 5 };
+  const secrets = {
+    claudeToken: 'claude-secret',
+    githubAuthorToken: 'author-secret',
+    githubReviewerToken: 'reviewer-secret',
+    joinToken: 'join',
+    operatorToken: 'o'.repeat(32),
+  } as Config['secrets'];
+  const zoneWith = (o: Partial<DropZoneConfig['crew']> = {}): DropZoneConfig => ({
+    ...w.zone,
+    crew: { ...crewOn, maxRefute: 3, refutePromotes: true, ...o },
+  });
+  const arbDeps = (zone: DropZoneConfig): ResultDeps => ({ ...deps(zone), claude: fable });
+  const ruling = (o: Record<string, unknown> = {}) => ({
+    ruling: 'A',
+    because: 'Every finding was wording; the cited lines exist as described.',
+    wouldReverse: 'A cited endpoint that does not exist.',
+    reversible: true,
+    productQuestion: false,
+    instruction: 'Promote the issue.',
+    ...o,
+  });
+
+  /** Runs one refute drop on the issue to a result, as the trooper would return it. */
+  async function refute(zone: DropZoneConfig, at: Date, result: DropResult): Promise<void> {
+    const id = await crewDrop(at, zone);
+    expect(getDrop(w.db, id)?.role).toBe('refute');
+    await applyResult(w.db, deps(zone), id, result, at);
+  }
+
+  /**
+   * Issue #50 out of refutes: three refutes each asked to revise, the flush staged each revision,
+   * and the last one is unrefuted (the results-site path).
+   */
+  async function exhaustedByRevise(zone: DropZoneConfig): Promise<number> {
+    const issue = staged();
+    setCrewIssue(w.db, issue, { number: 50 }, t0);
+    w.f.state.addIssue({ number: 50, body: ISSUE_BODY, labels: ['agent-staged'] });
+    for (let i = 0; i < 3; i++) {
+      const at = plus(t0, i * 10 * MIN);
+      await refute(
+        zone,
+        at,
+        completed({
+          decision: 'revise',
+          findings: [`finding ${i}`],
+          revisedBody: `${ISSUE_BODY}\nRevision ${i}.`,
+        }),
+      );
+      expect(getCrewIssue(w.db, issue)?.state).toBe('revising');
+      await flushCrewOps(w.db, w.forges, zone, [], plus(at, MIN));
+      expect(getCrewIssue(w.db, issue)?.state).toBe('staged');
+    }
+    expect(getCrewIssue(w.db, issue)?.refuteCount).toBe(3);
+    return issue;
+  }
+
+  /** The same issue at the cap with one verdict and dead refute drops (the schedule-site path). */
+  async function exhaustedByDeadDrops(zone: DropZoneConfig): Promise<number> {
+    const issue = staged();
+    setCrewIssue(w.db, issue, { number: 50 }, t0);
+    w.f.state.addIssue({ number: 50, body: ISSUE_BODY, labels: ['agent-staged'] });
+    await refute(
+      zone,
+      t0,
+      completed({ decision: 'revise', findings: ['finding 0'], revisedBody: `${ISSUE_BODY}\nR.` }),
+    );
+    await flushCrewOps(w.db, w.forges, zone, [], plus(t0, MIN));
+    await refute(zone, plus(t0, 10 * MIN), { status: 'failed', gates: [], reason: 'boom' });
+    await refute(zone, plus(t0, 20 * MIN), { status: 'rate_limited', gates: [] });
+    expect(getCrewIssue(w.db, issue)).toMatchObject({ state: 'staged', refuteCount: 3 });
+    return issue;
+  }
+
+  /** Enqueues the arbitrate drop with Fable available and leases it on `model`. */
+  async function arbitrateDrop(
+    zone: DropZoneConfig,
+    at = plus(t0, 60 * MIN),
+    claude: ClaudeConfig = fable,
+  ): Promise<string> {
+    const pass = await zonePass(w.forges, zone, 'main');
+    const id = await enqueueCrew(
+      w.db,
+      w.forges,
+      zone,
+      pass,
+      promptVersions(),
+      usageCfg,
+      at,
+      undefined,
+      { claude },
+    );
+    if (!id) throw new Error('no arbitrate drop');
+    expect(getDrop(w.db, id)?.role).toBe('arbitrate');
+    // The lease records requested_model as the payload is built.
+    buildPayload(w.db, zone, getDrop(w.db, id) as never, secrets, { claude, now: at });
+    updateDrop(w.db, id, { state: 'running', startedAt: at.toISOString() });
+    return id;
+  }
+
+  const arbitration = () =>
+    w.db
+      .prepare(
+        `SELECT state, ruling, acted, because, instruction, reason FROM arbitrations ORDER BY id`,
+      )
+      .all() as {
+      state: string;
+      ruling: string | null;
+      acted: number;
+      because: string | null;
+      instruction: string | null;
+      reason: string | null;
+    }[];
+  const open = () => listBriefings(w.db, { zoneId: 'main', state: 'open' });
+  const exhaustedOpen = () => open().filter((b) => b.kind === 'refute_exhausted');
+
+  test('ruling A, reversible, on Fable: promote_held with the hold briefing, and no refute_exhausted', async () => {
+    const zone = zoneWith();
+    const issue = await exhaustedByRevise(zone);
+    const sha = getCrewIssue(w.db, issue)?.bodySha;
+    const id = await arbitrateDrop(zone);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(FABLE);
+    await applyResult(w.db, arbDeps(zone), id, completed(ruling()), plus(t0, 61 * MIN));
+    expect(getCrewIssue(w.db, issue)).toMatchObject({ state: 'promote_held', refutedSha: sha });
+    const [b] = open();
+    expect(b?.kind).toBe('promote_held');
+    expect(b?.options.map((o) => o.effect)).toEqual(['reject_issue', 'promote_issue']);
+    expect(b?.decision).toContain('A Fable arbiter found nothing to fix in crew issue #50');
+    expect(b?.why).toContain(`/drops/${id}`);
+    expect(exhaustedOpen()).toEqual([]);
+    expect(arbitration()).toEqual([
+      {
+        state: 'ruled',
+        ruling: 'A',
+        acted: 1,
+        because: ruling().because,
+        instruction: 'Promote the issue.',
+        reason: null,
+      },
+    ]);
+    expect(getDrop(w.db, id)?.state).toBe('succeeded');
+    // Still held one pass, then promoted only if the Reject option was not taken.
+    await flushCrewOps(w.db, w.forges, zone, [], plus(t0, 62 * MIN));
+    expect(getCrewIssue(w.db, issue)?.state).toBe('promote_held');
+  });
+
+  test('ruling A with crew.refutePromotes off: a promote briefing, never a promotion', async () => {
+    const zone = zoneWith({ refutePromotes: false });
+    const issue = await exhaustedByRevise(zone);
+    const sha = getCrewIssue(w.db, issue)?.bodySha;
+    const id = await arbitrateDrop(zone);
+    await applyResult(w.db, arbDeps(zone), id, completed(ruling()), plus(t0, 61 * MIN));
+    expect(getCrewIssue(w.db, issue)).toMatchObject({ state: 'staged', refutedSha: sha });
+    expect(open().map((b) => b.kind)).toEqual(['promote']);
+    expect(open()[0]?.options.map((o) => o.effect)).toEqual(['promote_issue', 'reject_issue']);
+    // Judged now: the schedule neither arbitrates it again nor puts it to Command as exhausted.
+    const pass = await zonePass(w.forges, zone, 'main');
+    await enqueueCrew(
+      w.db,
+      w.forges,
+      zone,
+      pass,
+      promptVersions(),
+      usageCfg,
+      plus(t0, 70 * MIN),
+      undefined,
+      { claude: fable },
+    );
+    expect(exhaustedOpen()).toEqual([]);
+    expect(arbitration()).toHaveLength(1);
+  });
+
+  test('ruling B: the issue goes rejecting, and the flush closes it', async () => {
+    const zone = zoneWith();
+    const issue = await exhaustedByRevise(zone);
+    const id = await arbitrateDrop(zone);
+    await applyResult(
+      w.db,
+      arbDeps(zone),
+      id,
+      completed(ruling({ ruling: 'B' })),
+      plus(t0, 61 * MIN),
+    );
+    expect(getCrewIssue(w.db, issue)?.state).toBe('rejecting');
+    expect(exhaustedOpen()).toEqual([]);
+    expect(arbitration()[0]).toMatchObject({ state: 'ruled', ruling: 'B', acted: 1 });
+    await flushCrewOps(w.db, w.forges, zone, [], plus(t0, 62 * MIN));
+    expect(getCrewIssue(w.db, issue)?.state).toBe('rejected');
+    expect((await w.f.author.getIssue(50))?.state).toBe('closed');
+  });
+
+  test.each([
+    [
+      { ruling: 'insufficient_evidence' },
+      'insufficient evidence',
+      'ruled that the evidence is insufficient',
+    ],
+    [{ productQuestion: true }, 'a product question', 'ruled A'],
+    [{ reversible: false }, 'not reversible', 'ruled A'],
+    [{ ruling: 'B', productQuestion: true }, 'a product question', 'ruled B'],
+  ])(
+    'a ruling %o does not act: staged, and the briefing as today ends with %s',
+    async (o, reason, said) => {
+      const zone = zoneWith();
+      const issue = await exhaustedByRevise(zone);
+      const id = await arbitrateDrop(zone);
+      await applyResult(w.db, arbDeps(zone), id, completed(ruling(o)), plus(t0, 61 * MIN));
+      expect(getCrewIssue(w.db, issue)?.state).toBe('staged');
+      expect(arbitration()[0]).toMatchObject({ state: 'ruled', acted: 0, reason });
+      const [b] = exhaustedOpen();
+      expect(b?.subject).toBe(`issue:${issue}`);
+      expect(b?.why).toContain(`A Fable arbiter ${said}`);
+      expect(b?.why).toContain(ruling().because);
+      if (o.ruling !== 'insufficient_evidence')
+        expect(b?.why).toContain(`It was not acted on: ${reason}.`);
+      expect(b?.why).toContain(`/drops/${id}`);
+      expect(b?.why.endsWith(REFUTE_RECOMMENDATION)).toBe(true);
+      expect(b?.why.length).toBeLessThanOrEqual(MAX_BRIEFING_WHY);
+      expect(open()).toHaveLength(1);
+    },
+  );
+
+  test('ruling A on a drop that asked for the zone model does not act: "did not run on Fable"', async () => {
+    const zone = zoneWith();
+    const issue = await exhaustedByRevise(zone);
+    const id = await arbitrateDrop(zone);
+    updateDrop(w.db, id, { requestedModel: zone.model });
+    await applyResult(w.db, arbDeps(zone), id, completed(ruling()), plus(t0, 61 * MIN));
+    expect(getCrewIssue(w.db, issue)?.state).toBe('staged');
+    expect(arbitration()[0]).toMatchObject({
+      ruling: 'A',
+      acted: 0,
+      reason: 'did not run on Fable',
+    });
+    expect(exhaustedOpen()[0]?.why).toContain('did not run on Fable');
+    expect(exhaustedOpen()[0]?.why).toContain('The arbiter ruled A');
+  });
+
+  test('ruling A from a Fable request served by another model does not act', async () => {
+    const zone = zoneWith();
+    const issue = await exhaustedByRevise(zone);
+    const id = await arbitrateDrop(zone);
+    await applyResult(
+      w.db,
+      arbDeps(zone),
+      id,
+      { ...completed(ruling()), modelUsage: { 'claude-opus-5-5': { outputTokens: 40 } } },
+      plus(t0, 61 * MIN),
+    );
+    expect(getDrop(w.db, id)?.servedModel).toBe('claude-opus-5-5');
+    expect(getCrewIssue(w.db, issue)?.state).toBe('staged');
+    expect(arbitration()[0]?.reason).toBe('did not run on Fable');
+    expect(exhaustedOpen()).toHaveLength(1);
+  });
+
+  test('ruling A with no claude config on the result side does not act (D2)', async () => {
+    const zone = zoneWith();
+    const issue = await exhaustedByRevise(zone);
+    const id = await arbitrateDrop(zone);
+    await applyResult(w.db, deps(zone), id, completed(ruling()), plus(t0, 61 * MIN));
+    expect(getCrewIssue(w.db, issue)?.state).toBe('staged');
+    expect(arbitration()[0]?.reason).toBe('did not run on Fable');
+  });
+
+  test.each([
+    ['rate-limited', { status: 'rate_limited', gates: [] } as DropResult, 'rate-limited'],
+    ['failed', { status: 'failed', gates: [], reason: 'boom' } as DropResult, 'boom'],
+    [
+      'missing ruling',
+      completed({ ...ruling(), ruling: undefined }) as DropResult,
+      'invalid crew output',
+    ],
+    ['no output', { status: 'completed', gates: [] } as DropResult, 'invalid crew output'],
+  ])(
+    'D2: a %s arbitrate drop leaves the issue staged and raises the briefing',
+    async (_n, result, reason) => {
+      const zone = zoneWith();
+      const issue = await exhaustedByRevise(zone);
+      const id = await arbitrateDrop(zone);
+      await applyResult(w.db, arbDeps(zone), id, result, plus(t0, 61 * MIN));
+      expect(getCrewIssue(w.db, issue)?.state).toBe('staged');
+      expect(arbitration()[0]).toMatchObject({ state: 'failed', acted: 0, ruling: null });
+      expect(arbitration()[0]?.reason).toContain(reason);
+      const [b] = exhaustedOpen();
+      expect(b?.why).toContain('The arbiter could not rule:');
+      expect(b?.why).toContain(reason);
+      expect(open().filter((x) => x.kind !== 'refute_exhausted')).toEqual([]);
+    },
+  );
+
+  test('the same completed result applied twice acts once', async () => {
+    const zone = zoneWith({ refutePromotes: false });
+    const issue = await exhaustedByRevise(zone);
+    const id = await arbitrateDrop(zone);
+    const drop = getDrop(w.db, id);
+    if (!drop) throw new Error('no drop');
+    const result = completed(ruling({ ruling: 'B' }));
+    await applyCrewResult(w.db, arbDeps(zone), drop, result, plus(t0, 61 * MIN));
+    expect(getCrewIssue(w.db, issue)?.state).toBe('rejecting');
+    // Command reopens it; a re-delivered ruling must not reject it again.
+    setCrewIssue(w.db, issue, { state: 'staged' }, plus(t0, 62 * MIN));
+    const before = arbitration();
+    await applyCrewResult(w.db, arbDeps(zone), drop, result, plus(t0, 63 * MIN));
+    expect(getCrewIssue(w.db, issue)?.state).toBe('staged');
+    expect(arbitration()).toEqual(before);
+  });
+
+  test('a ruling on a body that changed since enqueue is discarded, with no state change', async () => {
+    const zone = zoneWith();
+    const issue = await exhaustedByRevise(zone);
+    const id = await arbitrateDrop(zone);
+    setCrewIssue(w.db, issue, { bodySha: 'sha-new' }, plus(t0, 60 * MIN));
+    const before = getCrewIssue(w.db, issue);
+    await applyResult(w.db, arbDeps(zone), id, completed(ruling()), plus(t0, 61 * MIN));
+    expect(getCrewIssue(w.db, issue)).toEqual(before);
+    expect(arbitration()[0]).toMatchObject({ state: 'discarded', ruling: null, acted: 0 });
+    expect(open()).toEqual([]);
+    expect(getDrop(w.db, id)?.state).toBe('succeeded');
+  });
+
+  describe('D5: both former raise sites take the same arbitration path', () => {
+    for (const [name, exhaust] of [
+      ['a revise at the cap (the former results site)', exhaustedByRevise],
+      ['dead refute drops at the cap (the schedule site)', exhaustedByDeadDrops],
+    ] as const) {
+      test(`${name}: one arbitration, then ruling A acts and insufficient evidence briefs`, async () => {
+        const zone = zoneWith();
+        const issue = await exhaust(zone);
+        expect(exhaustedOpen()).toEqual([]);
+        const id = await arbitrateDrop(zone);
+        expect(arbitration()).toHaveLength(1);
+        // No second arbitration of this text while it is in flight, nor a briefing.
+        const pass = await zonePass(w.forges, zone, 'main');
+        await enqueueCrew(
+          w.db,
+          w.forges,
+          zone,
+          pass,
+          promptVersions(),
+          usageCfg,
+          plus(t0, 60 * MIN + 1),
+          undefined,
+          { claude: fable },
+        );
+        expect(arbitration()).toHaveLength(1);
+        expect(exhaustedOpen()).toEqual([]);
+        await applyResult(
+          w.db,
+          arbDeps(zone),
+          id,
+          completed(ruling({ ruling: 'insufficient_evidence' })),
+          plus(t0, 61 * MIN),
+        );
+        expect(getCrewIssue(w.db, issue)?.state).toBe('staged');
+        expect(exhaustedOpen()).toHaveLength(1);
+        expect(exhaustedOpen()[0]?.why).toContain('ruled that the evidence is insufficient');
+      });
+
+      test(`${name}: ruling A promotes as a passing refute would`, async () => {
+        const zone = zoneWith();
+        const issue = await exhaust(zone);
+        const id = await arbitrateDrop(zone);
+        await applyResult(w.db, arbDeps(zone), id, completed(ruling()), plus(t0, 61 * MIN));
+        expect(getCrewIssue(w.db, issue)?.state).toBe('promote_held');
+        expect(open().map((b) => b.kind)).toEqual(['promote_held']);
+      });
+    }
+
+    test('applyRefute raises no refute_exhausted briefing of its own', () => {
+      const src = readFileSync(new URL('./results.ts', import.meta.url), 'utf8');
+      const start = src.indexOf('function applyRefute(');
+      const end = src.indexOf('\n}\n', start);
+      const body = src.slice(start, end);
+      expect(start).toBeGreaterThan(-1);
+      expect(body).not.toContain('refute_exhausted');
+      expect(body).not.toContain('raiseRefuteExhausted');
+      expect(body).not.toContain('refuteExhaustedWhy');
+      // The schedule is the one place a refute_exhausted briefing is raised.
+      const raised = ['./results.ts', './schedule.ts', './flush.ts', './actions.ts'].filter((f) =>
+        readFileSync(new URL(f, import.meta.url), 'utf8').includes("kind: 'refute_exhausted'"),
+      );
+      expect(raised).toEqual(['./schedule.ts']);
+    });
   });
 });

@@ -1,4 +1,5 @@
 import type { CrewRole } from '@jumpmaster/protocol';
+import { refuteVerdicts } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import { getPullRequest, getWorkItem } from '../db/repo.js';
@@ -291,6 +292,58 @@ export function refuteInput(
       name: 'crew-issue',
       kind: 'data',
       text: `Objective: ${issue.objective}\nTitle: ${issue.title}\n\n${issue.body}`,
+    },
+  ]);
+}
+
+/** The two positions an arbiter weighs on a crew issue whose refutes ran out: written here. */
+export const ISSUE_POSITIONS = [
+  'A: the issue as it reads now is complete, unambiguous and safe to implement; promote it.',
+  "B: the reviewers' findings stand; it should not be implemented as written; reject it.",
+].join('\n');
+
+/**
+ * The arbitrate input for a crew issue that ran out of refutes: the goals, the protected paths and
+ * the two positions as instructions, the crew issue as data, and every stored refute verdict on it,
+ * oldest first, as untrusted data.
+ */
+export function arbitrateIssueInput(
+  db: Db,
+  zone: DropZoneConfig,
+  work: { crewIssueId: number },
+  dropId: string,
+): string {
+  const issue = getCrewIssue(db, work.crewIssueId);
+  if (!issue) throw new Error(`unknown crew issue ${work.crewIssueId}`);
+  const reviews = refuteVerdicts(db, issue);
+  return assemble('arbitrate', dropId, [
+    goalsSection(db, zone),
+    {
+      title: 'Protected paths',
+      name: 'protected-paths',
+      kind: 'trusted',
+      text: zone.protectedPaths.map((p) => `- ${p}`).join('\n') || '(none)',
+    },
+    { title: 'Positions', name: 'positions', kind: 'trusted', text: ISSUE_POSITIONS },
+    {
+      title: 'Crew issue',
+      name: 'crew-issue',
+      kind: 'data',
+      text: `Objective: ${issue.objective}\nTitle: ${issue.title}\n\n${issue.body}`,
+    },
+    {
+      title: 'Refute reviews, oldest first',
+      name: 'refute-reviews',
+      kind: 'untrusted',
+      text:
+        reviews
+          .map((r, i) =>
+            [
+              `Review ${i + 1} (${r.at}), asked to ${r.decision}:`,
+              ...(r.findings.length === 0 ? ['(no findings)'] : r.findings.map((f) => `- ${f}`)),
+            ].join('\n'),
+          )
+          .join('\n\n') || 'No reviews.',
     },
   ]);
 }

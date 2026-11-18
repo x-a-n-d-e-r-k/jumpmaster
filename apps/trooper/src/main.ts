@@ -66,6 +66,7 @@ const ROLES: Partial<Record<DropPayload['role'], RoleRunner>> = {
   refute: runCrew,
   diagnose: runCrew,
   triage: runCrew,
+  arbitrate: runCrew,
   doctor: runDoctorRole,
 };
 

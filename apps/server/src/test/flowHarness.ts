@@ -177,7 +177,9 @@ export async function harness(
       const z = zoneNow();
       creditsPass(db, clock);
       const { pass } = await syncDropZone(db, forges, z, clock);
-      return reconcileZone(db, forges, z, pass, promptVersions(), c.usage, [], clock);
+      return reconcileZone(db, forges, z, pass, promptVersions(), c.usage, [], clock, undefined, {
+        claude: c.claude,
+      });
     },
     stickHeaders: () => auth,
     queuedRoles() {
