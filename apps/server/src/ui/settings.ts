@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { type GuidanceForge, githubGuidanceForge } from '../api/github.js';
+import { type AppEntryView, appEntryViews } from '../api/secrets.js';
 import { withCsrf } from '../auth/guard.js';
 import type { BootOrigin } from '../config/boot.js';
 import { flagRows } from '../config/catalog.js';
@@ -224,6 +225,48 @@ function planSection(store: ConfigStore, config: Config): string {
   return `<form id="plan"><label>Plan <select name="plan">${plans}</select></label> <button>Save the plan</button></form>`;
 }
 
+/** The link to a GitHub App's page, by its slug (URL-encoded, then escaped). */
+const appUrl = (slug: string) => escapeHtml(`https://github.com/apps/${encodeURIComponent(slug)}`);
+
+/** One app entry's row (#375): what identifies it, never its PEM or client id. */
+function appEntryRow(a: AppEntryView): string {
+  const owner = escapeHtml(a.owner);
+  const role = escapeHtml(a.role);
+  const overriding = a.overriding?.length
+    ? `, overriding ${a.overriding.map(otherWords).join(' and ')}`
+    : '';
+  const source =
+    a.source === 'vault'
+      ? `vault (encrypted)${overriding}`
+      : a.source === 'file'
+        ? `file <code>${escapeHtml(a.path ?? '?')}</code>${overriding}`
+        : a.undecryptable
+          ? 'undecryptable'
+          : 'not created';
+  const slug = a.slug === undefined ? '-' : `<a href="${appUrl(a.slug)}">${escapeHtml(a.slug)}</a>`;
+  const test = a.testResult ? `${escapeHtml(a.testResult)} <small>${day(a.testedAt)}</small>` : '-';
+  const actions =
+    a.source === 'missing'
+      ? a.undecryptable
+        ? 'The stored entry does not decrypt with the vault key: create the app again, or restore the key it was stored with.'
+        : 'Not created yet: one app pair per GitHub owner.'
+      : `<a href="${a.slug === undefined ? '#' : `${appUrl(a.slug)}/installations/new`}">Install</a> <button type="button" class="app-test" data-owner="${owner}" data-role="${role}">Test</button>`;
+  return `<tr data-app="${owner}/${role}"><td data-col="owner">${owner}</td><td data-col="role">${role}</td><td data-col="source">${source}</td><td data-col="slug">${slug}</td><td data-col="app-id">${a.appId === undefined ? '-' : escapeHtml(a.appId)}</td><td data-col="imported">${day(a.importedAt)}</td><td data-col="test">${test}</td><td data-col="actions">${actions}</td></tr>`;
+}
+
+/**
+ * Each owner's GitHub App pair the two-bot zones need (#375, spec §4.1/§4.4), from the same views
+ * as `GET /api/control/secrets`. Distinct from the create section (`github-apps`, #374).
+ */
+function appEntriesSection(store: ConfigStore): string {
+  const views = appEntryViews(store);
+  const body =
+    views.length === 0
+      ? '<p>GitHub Apps are for two-bot mode: starter zones use tokens.</p>'
+      : `<table><tr><th>Owner</th><th>Role</th><th>Source</th><th>App</th><th>App id</th><th>Imported</th><th>Last test</th><th></th></tr>${views.map(appEntryRow).join('')}</table>`;
+  return `<section id="app-entries"><h3>GitHub App entries</h3>${body}</section>`;
+}
+
 /**
  * The tab's script. `jmReplaceCredential`, `jmTestCredential` and `jmRemoveCredential` take the
  * sudo state the page knows (`{ sudo, passphrase }`) and a status element: without sudo and with
@@ -306,6 +349,17 @@ async function jmTestCredential(name, state, status) {
   jmRefreshLink(status);
   return j.tested ? 'ok' : 'failed';
 }
+// A GitHub App entry's test (#375): its own route, by owner and role.
+async function jmTestApp(owner, role, state, status) {
+  const name = 'github-app/' + owner + '/' + role;
+  if (!(await jmSudo(state, status))) return 'sudo';
+  const r = await jmFetch('/api/control/secrets/github-app/' + encodeURIComponent(owner) + '/' + encodeURIComponent(role) + '/test', {});
+  if (!r.ok) { if (await jmLapsed(r, state, status)) return 'sudo'; if (r.status === 403) state.sudo = false; status.textContent = name + ': ' + r.status + ' ' + (await jmWhy(r)); return 'refused'; }
+  const j = await jmBody(r);
+  status.textContent = j.tested ? name + ': ' + j.result + (j.login ? ' (' + j.login + ')' : '') : name + ': ' + (await jmWhy({ json: async () => j }));
+  jmRefreshLink(status);
+  return j.tested ? 'tested' : 'failed';
+}
 async function jmRemoveCredential(name, state, status) {
   if (!(await jmSudo(state, status))) return 'sudo';
   const r = await jmFetch('/api/control/secrets/' + encodeURIComponent(name), {}, 'DELETE');
@@ -346,6 +400,9 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   for (const b of document.querySelectorAll('button.test')) b.addEventListener('click', async () => {
     const s = state(); after(s, await jmTestCredential(b.dataset.name, s, status));
+  });
+  for (const b of document.querySelectorAll('button.app-test')) b.addEventListener('click', async () => {
+    const s = state(); after(s, await jmTestApp(b.dataset.owner, b.dataset.role, s, status));
   });
   for (const b of document.querySelectorAll('button.remove')) b.addEventListener('click', async () => {
     if (!confirm('Remove ' + b.dataset.name + ' from the vault? Jumpmaster refuses to remove it while a zone still needs it.')) return;
@@ -447,6 +504,7 @@ export function renderCredentials(o: {
 <div id="credentials" data-sudo="${o.sudo ? '1' : '0'}">
 ${vaultLine}${running}
 <table><tr><th>Credential</th><th>Source</th><th>Fingerprint</th><th>Login</th><th>Set</th><th>Created</th><th>Last test</th><th></th></tr>${rows}</table>
+${appEntriesSection(store)}
 ${SUDO_PROMPT('changing a credential')}
 <p id="credentials-status" role="status"></p>
 <h3>Zone problems</h3>${problemList}
