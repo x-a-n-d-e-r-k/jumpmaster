@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
 import type { FastifyInstance } from 'fastify';
-import { afterEach, describe, expect, test } from 'vitest';
+import nock from 'nock';
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest';
 import { createApp } from '../app.js';
 import { Backoff } from '../auth/backoff.js';
 import { SetupMode, setOperatorPassphrase } from '../auth/operator.js';
@@ -1765,3 +1766,296 @@ describe('the advanced settings page for the install, /settings/flags (issue #32
     expect(install).not.toEqual(zoneForm);
   });
 });
+
+describe("each owner's GitHub App pair on the Credentials tab (#375, spec §4.1/§4.4)", () => {
+  const API = 'https://api.github.com';
+  const pemOf = () =>
+    generateKeyPairSync('rsa', { modulusLength: 2048 })
+      .privateKey.export({ type: 'pkcs8', format: 'pem' })
+      .toString();
+  const linesOf = (pem: string) =>
+    pem
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l !== '' && !l.startsWith('-----'));
+  const AUTHOR_ENTRY = {
+    appId: '901',
+    slug: 'jm-a',
+    clientId: 'Iv23liAppTabAuthor001',
+    pem: pemOf(),
+    importedAt: '2026-11-15T10:00:00.000Z',
+  };
+  const REVIEWER_ENTRY = {
+    appId: '902',
+    slug: 'jm-r',
+    clientId: 'Iv23liAppTabReviewer2',
+    pem: pemOf(),
+    importedAt: '2026-11-16T10:00:00.000Z',
+  };
+  const zoneOn = (id: string, repo: string, extra: object = {}) => ({
+    ...ZONE,
+    id,
+    repo,
+    ...extra,
+  });
+  const TWO_OWNERS = { dropZones: [zoneOn('web', 'acme/web'), zoneOn('api', 'alice/api')] };
+
+  beforeAll(() => nock.disableNetConnect());
+  afterAll(() => nock.enableNetConnect());
+  afterEach(() => nock.cleanAll());
+
+  /** Two two-bot owners; the vault holds acme's pair and nothing for alice. */
+  async function twoOwners(o: { slug?: string } = {}) {
+    const w = await world({ dbMode: true, doc: TWO_OWNERS });
+    const vault = w.store.vault();
+    if (vault === 'disabled') throw new Error('expected a vault');
+    vault.put(
+      appEntryName('acme', 'author'),
+      serializeAppEntry({ ...AUTHOR_ENTRY, ...(o.slug ? { slug: o.slug } : {}) }),
+      { now: t0 },
+    );
+    vault.put(appEntryName('acme', 'reviewer'), serializeAppEntry(REVIEWER_ENTRY), { now: t0 });
+    w.store.refreshSecrets();
+    return w;
+  }
+  /** The row of one app entry, from `<tr data-app="owner/role">` to its `</tr>`. */
+  const appRowOf = (html: string, owner: string, role: string): string => {
+    const at = html.indexOf(`<tr data-app="${owner}/${role}"`);
+    if (at < 0) throw new Error(`no app row for ${owner}/${role}`);
+    return html.slice(at, html.indexOf('</tr>', at));
+  };
+  const sectionOf = (html: string): string => {
+    const at = html.indexOf('<section id="app-entries"');
+    if (at < 0) throw new Error('no app-entries section');
+    return html.slice(at, html.indexOf('</section>', at));
+  };
+
+  test('two owners: acme has its slugs, install links and Test buttons; alice is not created and has no Test', async () => {
+    const w = await twoOwners();
+    const r = await w.get('/settings/credentials');
+    expect(r.statusCode).toBe(200);
+    const section = sectionOf(r.body);
+    expect(section).toContain('GitHub App entries');
+    expect(section).not.toContain('GitHub Apps (recommended for two bots)');
+    const a = appRowOf(r.body, 'acme', 'author');
+    expect(a).toContain('acme');
+    expect(a).toContain('author');
+    expect(a).toContain('vault');
+    expect(a).toContain('<a href="https://github.com/apps/jm-a">jm-a</a>');
+    expect(a).toContain('901');
+    expect(a).toContain('2026-11-15');
+    expect(a).toContain('href="https://github.com/apps/jm-a/installations/new"');
+    expect(a).toContain(
+      '<button type="button" class="app-test" data-owner="acme" data-role="author">Test</button>',
+    );
+    const rv = appRowOf(r.body, 'acme', 'reviewer');
+    expect(rv).toContain('jm-r');
+    expect(rv).toContain('902');
+    expect(rv).toContain('href="https://github.com/apps/jm-r/installations/new"');
+    expect(rv).toContain('class="app-test" data-owner="acme" data-role="reviewer"');
+    for (const role of ['author', 'reviewer']) {
+      const row = appRowOf(r.body, 'alice', role);
+      expect(row).toContain('Not created yet: one app pair per GitHub owner');
+      expect(row).toContain('not created');
+      expect(row).not.toContain('<button');
+      expect(row).not.toContain('installations/new');
+    }
+    // Every app button has its own class: CREDENTIALS_SCRIPT binds button.test to the PAT route.
+    expect(section).not.toMatch(/class="test"/);
+  });
+
+  test('a file entry shows its path; the last test shows once recorded', async () => {
+    const w = await twoOwners();
+    mkdirSync(join(w.secrets, 'github-app', 'alice'), { recursive: true, mode: 0o700 });
+    const file = join(w.secrets, 'github-app', 'alice', 'author.json');
+    writeFileSync(file, serializeAppEntry({ ...AUTHOR_ENTRY, slug: 'jm-alice' }), { mode: 0o600 });
+    w.store.refreshSecrets();
+    const vault = w.store.vault();
+    if (vault === 'disabled') throw new Error('expected a vault');
+    vault.recordTest(appEntryName('acme', 'author'), { at: t0, result: 'ok as jm-a[bot]' });
+    w.store.refreshSecrets();
+    const html = (await w.get('/settings/credentials')).body;
+    const alice = appRowOf(html, 'alice', 'author');
+    expect(alice).toContain(`file <code>${file}</code>`);
+    expect(alice).toContain('https://github.com/apps/jm-alice/installations/new');
+    expect(alice).toContain('class="app-test"');
+    expect(appRowOf(html, 'acme', 'author')).toContain('ok as jm-a[bot]');
+    expect(appRowOf(html, 'acme', 'author')).toContain(t0.toISOString().slice(0, 10));
+  });
+
+  test('Test posts to the app route and shows its result or its error, never the PEM, the client id, nor a request to github.com but the faked one', async () => {
+    const w = await twoOwners();
+    const jwts: string[] = [];
+    const scope = nock(API, {
+      reqheaders: {
+        authorization: (v: string) => {
+          jwts.push(v);
+          return true;
+        },
+      },
+    })
+      .get('/app')
+      .reply(200, { slug: 'jm-a', id: 901 })
+      .get('/app')
+      .reply(401, { message: 'A JSON web token could not be decoded' });
+    const calls: string[] = [];
+    const answers: { tested: boolean; result?: string; login?: string; error?: string }[] = [];
+    const ctx = vm.createContext({
+      document: { addEventListener: () => {}, querySelectorAll: () => [] },
+      encodeURIComponent,
+      jmFetch: async (path: string, body: unknown, method?: string) => {
+        calls.push(`${method ?? 'POST'} ${path}`);
+        const r = await w.call((method ?? 'POST') as 'POST', path, body);
+        if (path.endsWith('/test')) answers.push(r.json());
+        return { ok: r.statusCode < 300, status: r.statusCode, json: async () => r.json() };
+      },
+    });
+    vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
+    const fn = ctx.jmTestApp as (...a: unknown[]) => Promise<string>;
+    const run = async (role: string) => {
+      const status = stubStatus();
+      const result = await fn('acme', role, { sudo: false, passphrase: PASS }, status);
+      return { result, text: status.textContent, appended: status.appended };
+    };
+    const ok = await run('author');
+    const refused = await run('reviewer');
+    expect(calls).toEqual([
+      'POST /api/control/sudo',
+      'POST /api/control/secrets/github-app/acme/author/test',
+      'POST /api/control/sudo',
+      'POST /api/control/secrets/github-app/acme/reviewer/test',
+    ]);
+    const [good, bad] = answers;
+    expect(good?.tested).toBe(true);
+    expect(bad?.tested).toBe(false);
+    expect(ok.result).toBe('tested');
+    expect(ok.text).toBe(
+      `github-app/acme/author: ${good?.result}${good?.login ? ` (${good.login})` : ''}`,
+    );
+    expect(refused.result).toBe('failed');
+    expect(bad?.error).toContain('401');
+    expect(refused.text).toBe(`github-app/acme/reviewer: ${bad?.error}`);
+    expect(scope.isDone()).toBe(true);
+    expect(jwts).toHaveLength(2);
+    for (const t of [ok.text, refused.text, ok.appended, refused.appended]) {
+      for (const e of [AUTHOR_ENTRY, REVIEWER_ENTRY]) {
+        expect(t).not.toContain(e.clientId);
+        for (const l of linesOf(e.pem)) expect(t).not.toContain(l);
+      }
+      for (const j of jwts) expect(t).not.toContain(j.replace(/^Bearer /, ''));
+    }
+  });
+
+  test('a refusal the route answers (sudo lapsed, 404) shows its error', async () => {
+    const lapsed = pageScript(CREDENTIALS_SCRIPT, (c) =>
+      c.path === '/api/control/sudo'
+        ? { ok: true, status: 200, json: { sudo: true } }
+        : { ok: false, status: 404, json: { error: 'unknown app entry' } },
+    );
+    const status = stubStatus();
+    const fn = lapsed.ctx.jmTestApp as (...a: unknown[]) => Promise<string>;
+    expect(await fn('a&b', 'author', { sudo: true, passphrase: '' }, status)).toBe('refused');
+    expect(lapsed.calls.map((c) => c.path)).toEqual([
+      '/api/control/secrets/github-app/a%26b/author/test',
+    ]);
+    expect(status.textContent).toBe('github-app/a&b/author: 404 unknown app entry');
+    const none = stubStatus();
+    expect(await fn('acme', 'author', { sudo: false, passphrase: '' }, none)).toBe('sudo');
+  });
+
+  test('an entry the vault cannot decrypt says so, with no Test button', async () => {
+    const w = await world({ dbMode: true, doc: TWO_OWNERS });
+    const otherKey = join(mkdtempSync(join(tmpdir(), 'jm-other-')), 'other_key');
+    writeFileSync(otherKey, randomBytes(32).toString('base64url'), { mode: 0o600 });
+    openVault(otherKey, w.db).put(appEntryName('acme', 'author'), serializeAppEntry(AUTHOR_ENTRY), {
+      now: t0,
+    });
+    w.store.refreshSecrets();
+    const html = (await w.get('/settings/credentials')).body;
+    const row = appRowOf(html, 'acme', 'author');
+    expect(row).toContain('does not decrypt');
+    expect(row).not.toContain('<button');
+    expect(row).not.toContain('Not created yet');
+    expect(html).not.toContain(AUTHOR_ENTRY.clientId);
+  });
+
+  test('only starter zones: the two-bot-mode line and no app rows', async () => {
+    const w = await world({
+      dbMode: true,
+      doc: { dropZones: [zoneOn('solo', 'solo/x', { identity: 'starter', ciRequired: true })] },
+    });
+    const html = (await w.get('/settings/credentials')).body;
+    const section = sectionOf(html);
+    expect(section).toContain('GitHub Apps are for two-bot mode: starter zones use tokens.');
+    expect(section).not.toContain('<tr data-app=');
+    expect(section).not.toContain('app-test');
+  });
+
+  test('the page holds neither PEM body lines nor client ids of the stored entries', async () => {
+    const w = await twoOwners();
+    const raw = (await w.get('/settings/credentials')).body;
+    // CLAIM = PROOF: the fixture entries carry both, and the vault hands them back.
+    const vault = w.store.vault();
+    if (vault === 'disabled') throw new Error('expected a vault');
+    const stored = w.store.resolvedApps().get('acme');
+    expect(stored?.author.source).toBe('vault');
+    if (stored?.author.source !== 'vault') throw new Error('expected a vault entry');
+    expect(stored.author.entry.clientId).toBe(AUTHOR_ENTRY.clientId);
+    expect(stored.author.entry.pem).toBe(AUTHOR_ENTRY.pem);
+    for (const e of [AUTHOR_ENTRY, REVIEWER_ENTRY]) {
+      expect(raw).not.toContain(e.clientId);
+      for (const l of linesOf(e.pem)) expect(raw).not.toContain(l);
+    }
+    expect(raw).not.toContain('PRIVATE KEY');
+  });
+
+  test('a slug with <script> is HTML-escaped in the page and URL-encoded in both links', async () => {
+    const slug = 'x"><script>alert(1)</script>';
+    const w = await twoOwners({ slug });
+    const html = (await w.get('/settings/credentials')).body;
+    const row = appRowOf(html, 'acme', 'author');
+    expect(html).not.toContain('<script>alert(1)</script>');
+    const enc = encodeURIComponent(slug);
+    expect(row).toContain(`href="https://github.com/apps/${enc}"`);
+    expect(row).toContain(`href="https://github.com/apps/${enc}/installations/new"`);
+    expect(row).toContain('x&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;');
+  });
+
+  test('with ?repo=acme%2Fdemo the page has one id="github-apps" and the create forms still render', async () => {
+    const w = await world({ dbMode: true, doc: { dropZones: [zoneOn('web', 'acme/demo')] } });
+    const r = await w.get('/settings/credentials?repo=acme%2Fdemo');
+    expect(r.statusCode).toBe(200);
+    expect(r.body.match(/id="github-apps"/g) ?? []).toHaveLength(1);
+    expect(r.body.match(/id="app-entries"/g) ?? []).toHaveLength(1);
+    expect(r.body).toContain('GitHub Apps (recommended for two bots)');
+    expect(
+      r.body.match(/<form method="post" action="\/setup\/github-app\/start"[^>]*>/g) ?? [],
+    ).toHaveLength(2);
+    expect(appRowOf(r.body, 'acme', 'author')).toContain('Not created yet');
+  });
+
+  test('a PAT-only install: each PAT row is as before, and no app button has the test class', async () => {
+    const w = await world({ env: { JM_GITHUB_READ_TOKEN: READ } });
+    const html = (await w.get('/settings/credentials')).body;
+    const at = (s: string) => s.replaceAll(w.secrets, '<secrets>');
+    expect(PAT_ROWS).not.toEqual({});
+    for (const [name, row] of Object.entries(PAT_ROWS)) expect(at(rowOf(html, name))).toBe(row);
+    expect(sectionOf(html)).not.toMatch(/class="test"/);
+    const testButtons = Object.values(PAT_ROWS)
+      .join('')
+      .match(/class="test"/g)?.length;
+    expect(html.match(/class="test"/g)?.length).toBe(testButtons);
+  });
+});
+
+/** Each PAT row of the default world (READ in the environment) as it rendered before #375. */
+const PAT_ROWS: Record<string, string> = {
+  claudeToken:
+    '<tr data-credential="claudeToken"><td><code>claudeToken</code><br><small>Claude token (claude setup-token): runs the agent in every drop</small></td><td data-col="source">not set</td><td data-col="fingerprint">-</td><td data-col="login">-</td><td data-col="set">-</td><td data-col="created">-</td><td data-col="test">-</td><td data-col="actions"><form class="replace" data-name="claudeToken"><input type="password" name="value" autocomplete="off" spellcheck="false" aria-label="New value for claudeToken"> <label>Made on <input type="date" name="declaredCreatedAt"></label> <button>Replace</button> <span class="replace-out" role="status"></span></form></td>',
+  githubAuthorToken:
+    '<tr data-credential="githubAuthorToken"><td><code>githubAuthorToken</code><br><small>GitHub author token: opens and merges the agent PRs</small></td><td data-col="source">not set</td><td data-col="fingerprint">-</td><td data-col="login">-</td><td data-col="set">-</td><td data-col="created">-</td><td data-col="test">-</td><td data-col="actions"><form class="replace" data-name="githubAuthorToken"><input type="password" name="value" autocomplete="off" spellcheck="false" aria-label="New value for githubAuthorToken"> <button>Replace</button> <span class="replace-out" role="status"></span></form></td>',
+  githubReviewerToken:
+    '<tr data-credential="githubReviewerToken"><td><code>githubReviewerToken</code><br><small>GitHub reviewer token: posts reviews (two-bot zones)</small></td><td data-col="source">file <code><secrets>/github_reviewer_token</code></td><td data-col="fingerprint"><code>de6463b3</code></td><td data-col="login">-</td><td data-col="set">-</td><td data-col="created">-</td><td data-col="test">-</td><td data-col="actions"><button type="button" class="use-vault" data-name="githubReviewerToken">Replace</button> <button type="button" class="test" data-name="githubReviewerToken">Test</button> <button type="button" class="copy" data-name="githubReviewerToken">Copy into the vault</button> <small>managed by <secrets>/github_reviewer_token: replace that file and run <code>jumpmaster ctl secrets reload</code> to change it there. Replace stores a new value in the vault, which then wins over variables and files.</small></td>',
+  githubReadToken:
+    '<tr data-credential="githubReadToken"><td><code>githubReadToken</code><br><small>GitHub read token: lets review drops read a private repository</small></td><td data-col="source">environment variable <code>JM_GITHUB_READ_TOKEN</code></td><td data-col="fingerprint"><code>7ba50946</code></td><td data-col="login">-</td><td data-col="set">-</td><td data-col="created">-</td><td data-col="test">-</td><td data-col="actions"><button type="button" class="use-vault" data-name="githubReadToken">Replace</button> <button type="button" class="test" data-name="githubReadToken">Test</button> <button type="button" class="copy" data-name="githubReadToken">Copy into the vault</button> <small>set by the environment variable JM_GITHUB_READ_TOKEN: change it where the server\'s environment is set, and restart the server, to change it there. Replace stores a new value in the vault, which then wins over variables and files.</small></td>',
+};

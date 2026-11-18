@@ -11,6 +11,7 @@ import {
   type CredentialName,
   isCredentialName,
   isInstallCredential,
+  type OtherSource,
   parseGateSecretName,
   type Resolved,
   refusalWords,
@@ -80,6 +81,77 @@ export function runningSince(db: Db, since: string | undefined): number {
   ).n;
 }
 
+/** An app entry as the list and the Credentials tab show it (§4.4). */
+export type AppEntryView = {
+  owner: string;
+  role: AppRole;
+  name: string;
+  source: AppEntryRead['source'];
+  undecryptable?: true;
+  appId?: string;
+  slug?: string;
+  importedAt?: string;
+  fingerprint?: string;
+  path?: string;
+  overriding?: { source: OtherSource['source']; path?: string }[];
+  testedAt?: string;
+  testResult?: string;
+};
+
+/**
+ * An app entry as the list shows it (§4.4): where it comes from and what identifies it, never
+ * its PEM or client id.
+ */
+function appEntryView(
+  store: Pick<ConfigStore, 'vault'>,
+  owner: string,
+  role: AppRole,
+  r: AppEntryRead,
+): AppEntryView {
+  const name = `github-app/${owner}/${role}`;
+  const vault = store.vault();
+  const meta = r.source === 'vault' && vault !== 'disabled' ? vault.meta(name) : undefined;
+  return {
+    owner,
+    role,
+    name,
+    source: r.source,
+    ...(r.source === 'missing'
+      ? r.undecryptable
+        ? { undecryptable: true as const }
+        : {}
+      : {
+          appId: r.entry.appId,
+          slug: r.entry.slug,
+          importedAt: r.entry.importedAt,
+          fingerprint: r.fingerprint,
+          ...(r.source === 'file' && r.path ? { path: r.path } : {}),
+          ...(r.overriding
+            ? {
+                overriding: r.overriding.map((o) => ({
+                  source: o.source,
+                  ...(o.path && o.source === 'file' ? { path: o.path } : {}),
+                })),
+              }
+            : {}),
+        }),
+    ...(meta?.testedAt ? { testedAt: meta.testedAt } : {}),
+    ...(meta?.testResult ? { testResult: meta.testResult } : {}),
+  };
+}
+
+/**
+ * Each owner of the configured two-bot zones, sorted, with both roles' entries: what
+ * `GET /api/control/secrets` lists as `apps` and the Credentials tab shows (#375).
+ */
+export function appEntryViews(store: Pick<ConfigStore, 'vault' | 'resolvedApps'>): AppEntryView[] {
+  return [...store.resolvedApps().entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .flatMap(([owner, reads]) =>
+      APP_ROLES.map((role) => appEntryView(store, owner, role, reads[role])),
+    );
+}
+
 export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDeps): void {
   const { db, store, audit } = deps;
   const forge = deps.credentialForge ?? defaultForge;
@@ -138,47 +210,6 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
       ...(r.source === 'vault' ? { runningDropsWithPrevious: runningSince(db, r.setAt) } : {}),
     };
   };
-  /**
-   * An app entry as the list shows it (§4.4): where it comes from and what identifies it, never
-   * its PEM or client id.
-   */
-  const appView = (owner: string, role: AppRole, r: AppEntryRead) => {
-    const name = `github-app/${owner}/${role}`;
-    const vault = store.vault();
-    const meta = r.source === 'vault' && vault !== 'disabled' ? vault.meta(name) : undefined;
-    return {
-      owner,
-      role,
-      name,
-      source: r.source,
-      ...(r.source === 'missing'
-        ? r.undecryptable
-          ? { undecryptable: true }
-          : {}
-        : {
-            appId: r.entry.appId,
-            slug: r.entry.slug,
-            importedAt: r.entry.importedAt,
-            fingerprint: r.fingerprint,
-            ...(r.source === 'file' && r.path ? { path: r.path } : {}),
-            ...(r.overriding
-              ? {
-                  overriding: r.overriding.map((o) => ({
-                    source: o.source,
-                    ...(o.path && o.source === 'file' ? { path: o.path } : {}),
-                  })),
-                }
-              : {}),
-          }),
-      ...(meta?.testedAt ? { testedAt: meta.testedAt } : {}),
-      ...(meta?.testResult ? { testResult: meta.testResult } : {}),
-    };
-  };
-  const apps = () =>
-    [...store.resolvedApps().entries()]
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      .flatMap(([owner, reads]) => APP_ROLES.map((role) => appView(owner, role, reads[role])));
-
   /** A session needs sudo for a vault write, as for a credential; the Bearer token never does. */
   const sudoRefused = (req: FastifyRequest, reply: FastifyReply, what: string) => {
     if (req.principal?.via !== 'session' || req.principal.sudo) return false;
@@ -200,7 +231,7 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
       credentials: (
         Object.entries(store.resolved()) as [CredentialName, Resolved[CredentialName]][]
       ).map(([n, r]) => view(n, r)),
-      apps: apps(),
+      apps: appEntryViews(store),
       problems: store.problems(),
     };
   });
