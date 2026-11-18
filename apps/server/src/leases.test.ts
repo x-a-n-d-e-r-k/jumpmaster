@@ -5,8 +5,10 @@ import {
   getDrop,
   getUsageState,
   insertDrop,
+  insertStick,
   listEvents,
   reclaimableDropFor,
+  removeStick,
   reserveGrant,
   setKilled,
   setUsageState,
@@ -67,6 +69,34 @@ describe('leaseNextDrop', () => {
       createdAt: plus(t0, 1000).toISOString(),
     });
     expect(leaseNextDrop(db, 's1', t0, 'open')?.dropId).toBe('early');
+  });
+});
+
+describe('leaseNextDrop and a removed stick (issue #255)', () => {
+  test('a removed stick is leased nothing, even called directly; a live one is', () => {
+    removeStick(db, 's1', t0);
+    expect(leaseNextDrop(db, 's1', t0, 'open')).toBeNull();
+    expect(getDrop(db, 'd1')).toMatchObject({ state: 'queued', stickId: null });
+    insertStick(db, { id: 's2', name: 'stick-2', tokenHash: 'h2', slots: 1 });
+    expect(leaseNextDrop(db, 's2', t0, 'open')).toEqual({ dropId: 'd1', epoch: 1 });
+  });
+
+  test('a lease and a removal in either order: never leased to a removed stick with a live lease', () => {
+    // Lease first, then removal: the lease is ended at once, and the next expireLeases takes it
+    // down the lost-stick path.
+    leaseNextDrop(db, 's1', t0, 'open');
+    removeStick(db, 's1', t0);
+    const leased = getDrop(db, 'd1')!;
+    expect(leased.state).toBe('leased');
+    expect(new Date(leased.leaseExpiresAt!).getTime()).toBeLessThan(t0.getTime());
+    expect(expireLeases(db, t0)).toBe(1);
+    expect(getDrop(db, 'd1')?.state).toBe('lost');
+
+    // Removal first, then lease: the drop stays queued.
+    const other = seedQueuedDrop();
+    removeStick(other, 's1', t0);
+    expect(leaseNextDrop(other, 's1', t0, 'open')).toBeNull();
+    expect(getDrop(other, 'd1')?.state).toBe('queued');
   });
 });
 

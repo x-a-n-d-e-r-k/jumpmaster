@@ -1707,8 +1707,10 @@ export function enrollFromInvite(
 
 /**
  * Removes a stick (issue #138): its token is revoked (the row stays, for its drops' history), and
- * its leased drops that never started have their lease ended now, so the lost-stick path
- * (`expireLeases`) requeues them. Undefined when there is no such stick.
+ * every drop it holds in state `leased` has its lease ended now (issue #255; `leaseNextDrop` stamps
+ * started_at at lease time, so that is no test), so the lost-stick path (`expireLeases`) takes it
+ * at its next run. A `running` drop is left to that path's own clock. Undefined when there is no
+ * such stick.
  */
 export function removeStick(db: Db, id: string, now: Date): Stick | undefined {
   return db.transaction((): Stick | undefined => {
@@ -1719,7 +1721,7 @@ export function removeStick(db: Db, id: string, now: Date): Stick | undefined {
     ).run({ id, now: now.toISOString() });
     db.prepare(
       `UPDATE drops SET lease_expires_at = @past
-       WHERE stick_id = @id AND state = 'leased' AND started_at IS NULL`,
+       WHERE stick_id = @id AND state = 'leased'`,
     ).run({ id, past: new Date(now.getTime() - 1).toISOString() });
     return stick;
   })();
