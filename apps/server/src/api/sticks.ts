@@ -9,6 +9,7 @@ import {
   IMAGE_MIRROR_FEATURE,
   ImageFetchSchema,
   isCrewRole,
+  isRepoFullName,
   isSafeBranchName,
   type LeaseSkip,
   type PushGrant,
@@ -22,6 +23,7 @@ import {
   StickInfoSchema,
   StickStartingSchema,
   sha40,
+  splitRepoFullName,
   TrooperEventSchema,
 } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -395,6 +397,8 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         .prepare('SELECT repo, default_branch AS base FROM drop_zones WHERE id = ?')
         .get(drop.dropZoneId) as { repo: string; base: string } | undefined;
       if (!row || row.repo !== zone.repo) return { refused: 'repo mismatch', retryable: false };
+      // The grant's owner and name become a git remote: the one name rule (issue #265).
+      if (!isRepoFullName(zone.repo)) return { refused: 'repo name', retryable: false };
       if (!pushKindValid(drop)) return { refused: 'kind', retryable: false };
       const item = drop.workItemId === null ? undefined : getWorkItem(db, drop.workItemId);
       if (!item) return { refused: 'branch', retryable: false };
@@ -811,7 +815,8 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
           heldTokens.set(drop.id, { epoch: drop.epoch, owner: appOwner, token });
         }
       }
-      const [owner = '', name = ''] = zone.repo.split('/');
+      // checkGrant refused a zone.repo that isn't owner/name, so this split always succeeds.
+      const { owner, name } = splitRepoFullName(zone.repo) ?? { owner: '', name: '' };
       const gateSecrets = ownZoneSecrets(secrets, zone.id);
       const grant: PushGrant = {
         token,

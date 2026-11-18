@@ -1,8 +1,7 @@
 import { createPrivateKey } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
-import { MAX_SECRET_FILE_BYTES } from '@jumpmaster/protocol';
-import { isOwnerName } from '../forge/github.js';
+import { isOwnerName, MAX_SECRET_FILE_BYTES } from '@jumpmaster/protocol';
 import type { InstallCredential, OtherSource } from './credentials.js';
 import { fingerprintOf, type Vault, VaultKeyError } from './vault.js';
 

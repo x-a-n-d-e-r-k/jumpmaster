@@ -141,6 +141,59 @@ describe('modes at start', () => {
     expect(() => w.open()).toThrow(/Invalid config .*dropZones\.0\.repo/);
   });
 
+  test('the file, an import and a PATCH refuse a repo that is not a GitHub owner/name, without echoing it (issue #265)', () => {
+    const tokenOwner = ['ghp', 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJ'].join('_');
+    const bad = [
+      'acme/widgets?x',
+      'acme/wid%2Fgets',
+      'acme/"x"',
+      '-acme/widgets',
+      'acme/..',
+      'o/n#',
+      `${tokenOwner}/widgets`,
+    ];
+    const refusedAtRepo = (issues: { path: string; message: string }[]) => {
+      expect(issues.map((i) => i.path)).toContain('dropZones.0.repo');
+    };
+    for (const repo of bad) {
+      // File mode: refused at start.
+      const f = world({ dropZones: [zone('main', { repo })] });
+      let thrown = '';
+      try {
+        f.open();
+      } catch (e) {
+        thrown = (e as Error).message;
+      }
+      expect(thrown, repo).toMatch(/Invalid config .*dropZones\.0\.repo/);
+      expect(thrown).not.toContain(repo);
+      // Import and PATCH, on a db-mode store.
+      const w = world();
+      const store = w.open();
+      const imported = store.importDoc(
+        { dropZones: [zone('main', { repo })] },
+        {
+          via: 'import',
+          principal: token,
+        },
+      );
+      if (imported.ok) throw new Error(`import accepted ${repo}`);
+      refusedAtRepo(imported.issues);
+      expect(JSON.stringify(imported.issues)).not.toContain(repo);
+      expect(store.apply({ dropZones: [zone()] }, { via: 'ctl', principal: token }).ok).toBe(true);
+      const patched = store.apply(
+        mergeConfigPatch(store.document(), { dropZones: [{ id: 'main', repo }] }),
+        { via: 'ctl', principal: token },
+      );
+      if (patched.ok) throw new Error(`PATCH accepted ${repo}`);
+      refusedAtRepo(patched.issues);
+      expect(JSON.stringify(patched.issues)).not.toContain(repo);
+    }
+    for (const repo of ['acme/widgets', 'acme/wid.gets-2']) {
+      const w = world({ dropZones: [zone('main', { repo })] });
+      expect(w.open().current().dropZones[0]?.repo).toBe(repo);
+    }
+  });
+
   test('db mode whose current revision is missing or dangling stops the server rather than starting empty', () => {
     for (const damage of [
       "DELETE FROM settings WHERE key = 'config.current'",
@@ -1442,11 +1495,9 @@ describe('GitHub App entries in the store (§4.4)', () => {
     expect(fired).toBe(2);
   });
 
-  test('a config with no app entries loads as before, its zone on an owner GitHub would refuse too', () => {
+  test('a zone on an owner GitHub would refuse no longer loads: it is refused at its repo (issue #265)', () => {
     const { open } = withVault({ dropZones: [zone('main', { repo: 'my_org/x' })] });
-    const store = open();
-    expect(store.current().dropZones.map((z) => z.repo)).toEqual(['my_org/x']);
-    expect(store.resolvedApps().size).toBe(0);
+    expect(() => open()).toThrow(/Invalid config .*dropZones\.0\.repo/);
   });
 
   test('the secretsFor seam has no app entries', () => {

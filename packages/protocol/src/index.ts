@@ -6,6 +6,7 @@ import {
   TriageImageSchema,
   TriageImageSkippedSchema,
 } from './media.js';
+import { isOwnerName, isRepoName } from './names.js';
 
 export const EVENT_PREFIX = 'JM_EVENT ';
 /** One part of an event too large for a single `JM_EVENT ` line. */
@@ -182,11 +183,20 @@ export const EgressPayloadSchema = z.object({
 });
 export type EgressPayload = z.infer<typeof EgressPayloadSchema>;
 
+/** A GitHub owner login; the error names the field, never the value. */
+export const OwnerNameSchema = z
+  .string()
+  .refine(isOwnerName, { message: 'owner is not a valid GitHub owner name' });
+/** A GitHub repository name; the error names the field, never the value. */
+export const RepoNameSchema = z
+  .string()
+  .refine(isRepoName, { message: 'name is not a valid GitHub repository name' });
+
 const dropPayloadBase = {
   protocol: z.literal(1),
   dropId: z.string(),
   epoch: z.number(),
-  repo: z.object({ owner: z.string(), name: z.string(), defaultBranch: z.string() }),
+  repo: z.object({ owner: OwnerNameSchema, name: RepoNameSchema, defaultBranch: z.string() }),
   issue: z.object({ number: z.number(), title: z.string(), body: z.string() }),
   branch: z.string(),
   gates: z.array(GateSpecSchema),
@@ -638,6 +648,7 @@ export const DropResultSchema = z.object({
 export type DropResult = z.infer<typeof DropResultSchema>;
 export * from './egress.js';
 export * from './media.js';
+export * from './names.js';
 export {
   containsSecret,
   dropSecrets,
@@ -755,8 +766,8 @@ export type PushPlan = z.infer<typeof PushPlanSchema>;
 export const PushGrantSchema = z
   .object({
     token: z.string().min(1),
-    owner: z.string(),
-    name: z.string(),
+    owner: OwnerNameSchema,
+    name: RepoNameSchema,
     branch: BranchNameSchema,
     base: BranchNameSchema,
     /** The SHA the remote branch must still be at, or empty for a new branch. */
