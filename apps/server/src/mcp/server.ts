@@ -16,6 +16,7 @@ import {
   mcpConfigOf,
 } from '../config.js';
 import type { Db } from '../db/open.js';
+import type { ForgePair } from '../outbox.js';
 import {
   auditMcp,
   auditRefusedAuth,
@@ -33,6 +34,14 @@ export interface McpDeps {
   now(): Date;
   /** The operator's scrubbed log: the caller sees a generic error, the operator the cause. */
   log?: (msg: string) => void;
+  /** The zone's forges (the author pair), for the chat's forge read tools; absent, they refuse. */
+  forgesFor?: (zoneId: string) => ForgePair;
+}
+
+/** The store's editable document, when the config is a store (the settings catalog reads it). */
+function documentOf(c: LiveConfig): (() => Record<string, unknown>) | undefined {
+  const d = (c as { document?: unknown }).document;
+  return typeof d === 'function' ? () => (d as () => Record<string, unknown>).call(c) : undefined;
 }
 
 /**
@@ -80,6 +89,7 @@ async function serve(
 ): Promise<unknown> {
   const { db, now } = deps;
   const { principal, zone, config } = caller;
+  const document = documentOf(deps.config);
   // The MCP revision of 2025-06-18 removed batching; one request would otherwise carry hundreds of
   // tool calls past the write budget's check.
   if (Array.isArray(req.body)) {
@@ -120,6 +130,8 @@ async function serve(
         now,
         ...(zone ? { zone } : {}),
         ...(deps.log ? { log: deps.log } : {}),
+        ...(deps.forgesFor ? { forgesFor: deps.forgesFor } : {}),
+        ...(document ? { document } : {}),
       },
       request.params.name,
       request.params.arguments ?? {},
