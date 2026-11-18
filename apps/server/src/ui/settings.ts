@@ -516,7 +516,7 @@ function installSettings(config: Config): Setting[] {
     },
     {
       path: 'claude.fableWeeklyDropCap',
-      label: 'Fable drops allowed in a trailing seven days',
+      label: 'Fable drops allowed in a trailing seven days (0 = no limit)',
       kind: 'number',
       value: config.claude.fableWeeklyDropCap,
       attrs: 'min="0" step="1"',
