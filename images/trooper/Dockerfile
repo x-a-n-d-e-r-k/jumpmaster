@@ -8,6 +8,7 @@ COPY apps/trooper apps/trooper
 # the server's native module (better-sqlite3) from being built or downloaded here.
 RUN npm ci --ignore-scripts
 RUN npx tsc -b packages/protocol && npx tsc -b apps/trooper \
+ && cp apps/trooper/src/chat/prompt.md apps/trooper/dist/chat/prompt.md \
  && mkdir -p /out/node_modules/@jumpmaster/protocol \
  && cp -r apps/trooper/dist/. /out/ \
  && printf '{"type":"module"}\n' > /out/package.json \

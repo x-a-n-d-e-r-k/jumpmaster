@@ -235,14 +235,26 @@ const trustedMirrors = new Set<string>();
 /** Root-written global config for agent-identity git: only `safe.directory` for those mirrors. */
 let agentGlobalConfig: string | null = null;
 
-function trustMirror(mirrorDir: string): void {
+/** The root-written global git config agent-identity git reads, once a mirror is trusted. */
+export function agentGitConfigFile(): string | null {
+  return agentGlobalConfig;
+}
+
+/**
+ * Trusts `mirrorDir` for agent-identity git (see `trustedMirrors`). `alsoTrust` adds a working
+ * tree root created for the agent (the chat's `work`, group-writable by the agent's gid but owned
+ * by root, since root here cannot chown). Returns the global config file the agent's git reads.
+ */
+export function trustMirror(mirrorDir: string, alsoTrust: string[] = []): string {
   assertRootOwnedDir(mirrorDir);
   trustedMirrors.add(mirrorDir);
+  for (const d of alsoTrust) trustedMirrors.add(d);
   const file = join(dirname(mirrorDir), 'agent.gitconfig');
   const lines = [...trustedMirrors].map((m) => `\tdirectory = ${m}`).join('\n');
   // In the root-owned workdir (0755): the agent can read it but not change it.
   writeFileSync(file, `[safe]\n${lines}\n`, { mode: 0o644 });
   agentGlobalConfig = file;
+  return file;
 }
 
 /**
@@ -315,7 +327,8 @@ function ensureRootDir(path: string): void {
 /** The fixed config of every root-owned bare repo: nothing an earlier process wrote survives. */
 const BARE_CONFIG = '[core]\n\trepositoryformatversion = 0\n\tbare = true\n';
 
-async function initBare(gitDir: string): Promise<void> {
+/** Creates (or resets) a root-owned bare repo: fixed config, no hooks. */
+export async function initBare(gitDir: string): Promise<void> {
   ensureRootDir(gitDir);
   await runGit(undefined, ['init', '--bare', '-q', '--template='], '', { gitDir });
   // Fixed config: nothing an earlier process wrote survives.
@@ -323,12 +336,16 @@ async function initBare(gitDir: string): Promise<void> {
   rmSync(join(gitDir, 'hooks'), { recursive: true, force: true });
 }
 
-/** Root, in the mirror only: refresh `refs/heads/<ref>` (`*` for all heads) from the remote. */
+/**
+ * Root, in the mirror only: refresh `refs/heads/<ref>` (`*` for all heads) from the remote, and
+ * each of `extraRefs` (`pull/7/head`) as `refs/<ref>`. `depth` makes the fetch shallow.
+ */
 export async function mirrorFetch(
   mirrorDir: string,
   token: string,
   target: RemoteTarget,
   refs: string[],
+  o: { extraRefs?: string[]; depth?: number; timeoutMs?: number } = {},
 ): Promise<void> {
   const url = remoteUrl(target);
   await runGit(
@@ -341,12 +358,14 @@ export async function mirrorFetch(
       '--no-tags',
       '--no-write-fetch-head',
       '--prune',
+      ...(o.depth !== undefined ? [`--depth=${o.depth}`] : []),
       '--end-of-options',
       url,
       ...refs.map((r) => `+refs/heads/${r}:refs/heads/${r}`),
+      ...(o.extraRefs ?? []).map((r) => `+refs/${r}:refs/${r}`),
     ],
     token,
-    { gitDir: mirrorDir },
+    { gitDir: mirrorDir, ...(o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}) },
   );
 }
 
