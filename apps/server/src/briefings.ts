@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { DropResultSchema } from '@jumpmaster/protocol';
 import type { DropZoneConfig } from './config.js';
 import { applyCreditsEffect } from './credits.js';
 import { crewBodySha, liveCrewBody } from './crew/flush.js';
@@ -12,12 +13,14 @@ import {
 } from './crew/store.js';
 import type { Db } from './db/open.js';
 import {
+  ACTIVE_STATES_SQL,
   activeDropFor,
   type GatePark,
   getGatePark,
   getPullRequest,
   getWorkItem,
   getZoneMode,
+  isKilled,
   listWorkItems,
   recordGateAllowance,
   setWorkItemState,
@@ -26,6 +29,7 @@ import {
 import { enableFable } from './fable.js';
 import { GATE_PARK_PREFIXES, gateParkAllowable } from './flow/decide.js';
 import { gateDigest } from './flow/snapshot.js';
+import { gateFailureWhy } from './gate-output.js';
 import {
   closeProposedGoalChange,
   GOAL_CHANGE_PREFIX,
@@ -792,6 +796,86 @@ export function gateParkWhy(reason: string, park: GatePark): { why: string; comp
   return { why: full.slice(0, MAX_BRIEFING_WHY - CUT_NOTE.length) + CUT_NOTE, complete: false };
 }
 
+/** A park reason the trooper gives when a gate went red (implement, heal and resolve). */
+const GATE_FAILED = /^gate (.+) failed$/;
+
+/**
+ * A `gate <name> failed` park in plain words: `gateFailureWhy` of the red gate of that name in the
+ * newest drop of the item whose stored result failed for that very reason, then the reason.
+ * Undefined for any other park, or when no stored result matches (or parses): the why is then the
+ * reason, as before. A pure function of stored rows, so every pass gives the same why.
+ */
+function gateFailureParkWhy(db: Db, item: WorkItem): string | undefined {
+  const reason = item.reason ?? '';
+  const gateName = GATE_FAILED.exec(reason)?.[1];
+  if (gateName === undefined) return undefined;
+  // json_valid first: json_extract throws on a result_json that does not parse.
+  const row = db
+    .prepare(
+      `SELECT result_json AS resultJson FROM drops
+       WHERE work_item_id = ?
+         AND CASE WHEN json_valid(result_json)
+           THEN json_extract(result_json, '$.status') = 'failed'
+             AND json_extract(result_json, '$.reason') = ?
+           ELSE 0 END
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(item.id, reason) as { resultJson: string } | undefined;
+  if (!row) return undefined;
+  const result = DropResultSchema.safeParse(JSON.parse(row.resultJson));
+  if (!result.success) return undefined;
+  const gate = result.data.gates.find(
+    (g) => g.name === gateName && (g.timedOut || g.exitCode !== 0),
+  );
+  if (!gate) return undefined;
+  return `${gateFailureWhy(gate)}\n\nPark reason: ${reason}`;
+}
+
+/** How long a parked briefing waits for its first diagnose drop before the rule form returns. */
+export const DIAGNOSE_WAIT_MINUTES = 60;
+
+/**
+ * Whether the crew is still to diagnose a parked briefing, so the page shows that in place of the
+ * rule form: open and undiagnosed, with the zone's crew able to run (enabled, kill switch off,
+ * zone active), and either a diagnose drop for it active, or none run yet and the briefing raised
+ * (or refreshed) less than `DIAGNOSE_WAIT_MINUTES` ago. The bound keeps a crew that never gets to
+ * it (a closed usage gate) from hiding the question for good.
+ */
+export function diagnosePending(db: Db, zone: DropZoneConfig, b: Briefing, now: Date): boolean {
+  if (b.kind !== 'parked' || b.state !== 'open' || b.diagnosis !== null) return false;
+  if (!zone.crew?.enabled || isKilled(db)) return false;
+  if (getZoneMode(db, zone.id, zone.mode) !== 'active') return false;
+  const active = db
+    .prepare(
+      `SELECT 1 FROM drops WHERE drop_zone_id = ? AND role = 'diagnose'
+         AND state IN (${ACTIVE_STATES_SQL})
+         AND CASE WHEN json_valid(input_json)
+           THEN json_extract(input_json, '$.work.briefingId') = ? ELSE 0 END LIMIT 1`,
+    )
+    .get(zone.id, b.id);
+  if (active) return true;
+  return (
+    b.diagnoseAttempts === 0 &&
+    now.getTime() - Date.parse(b.updatedAt) < DIAGNOSE_WAIT_MINUTES * 60_000
+  );
+}
+
+/** The ids of `briefings` the crew is still to diagnose (`diagnosePending`), each by its zone. */
+export function pendingDiagnoses(
+  db: Db,
+  zones: readonly DropZoneConfig[],
+  briefings: readonly Briefing[],
+  now: Date,
+): Set<number> {
+  const byId = new Map(zones.map((z) => [z.id, z]));
+  const pending = new Set<number>();
+  for (const b of briefings) {
+    const zone = byId.get(b.zoneId);
+    if (zone && diagnosePending(db, zone, b, now)) pending.add(b.id);
+  }
+  return pending;
+}
+
 /** The parked briefing the server raises for `item` now. */
 function parkBriefing(db: Db, zoneId: string, item: WorkItem): NewBriefing {
   const reason = item.reason ?? 'no reason recorded';
@@ -800,7 +884,7 @@ function parkBriefing(db: Db, zoneId: string, item: WorkItem): NewBriefing {
     { id: 'leave', label: 'Leave parked', effect: 'none' },
   ];
   let decision = `Issue #${item.issueNumber} is parked. Retry it?`;
-  let why = reason;
+  let why = gateFailureParkWhy(db, item) ?? reason;
   const park = GATE_PARK_PREFIXES.some((p) => reason.startsWith(p))
     ? getGatePark(db, item.id)
     : undefined;
