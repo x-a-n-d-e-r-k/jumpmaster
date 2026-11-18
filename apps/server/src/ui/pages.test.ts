@@ -27,6 +27,7 @@ import {
   FAVICON_HREF,
   linkify,
   MARK,
+  modelFamily,
   page,
   pageParams,
   renderBriefing,
@@ -238,12 +239,12 @@ describe('the Usage card by plan (#144)', () => {
       ),
     ].map(([, label, value, note]) => ({ label, value, ...(note ? { note } : {}) }));
   const labels = (html: string) => meters(html).map((m) => m.label);
-  const win = (key: string, utilization: number, observedAt = '2026-01-01T00:00:00.000Z') => ({
-    key,
-    utilization,
-    resetsAt: null,
-    observedAt,
-  });
+  const win = (
+    key: string,
+    utilization: number,
+    observedAt = '2026-01-01T00:00:00.000Z',
+    model: string | null = null,
+  ): UsageWindowRow => ({ key, utilization, resetsAt: null, observedAt, model });
 
   test('ultra shows no 5-hour meter', () => {
     const html = home('ultra');
@@ -293,6 +294,53 @@ describe('the Usage card by plan (#144)', () => {
     ]);
     expect(labels(html)).toEqual(['5-hour', '7-day', 'Fable (7-day)', 'Opus (7-day)']);
     expect(meters(html).at(-1)).toEqual({ label: 'Opus (7-day)', value: '33%' });
+  });
+
+  test('the per-model weekly window reported by a Fable drop is the Fable meter (#377)', () => {
+    const html = home(
+      'max',
+      [
+        win('seven_day', 0.04),
+        win('seven_day_overage_included', 0.01, undefined, 'claude-fable-5-2'),
+      ],
+      { ...usageState, sevenDayUtil: 0.04 },
+    );
+    expect(meters(html).filter((m) => m.label !== '5-hour')).toEqual([
+      { label: '7-day', value: '4%' },
+      { label: 'Fable (7-day)', value: '1%' },
+    ]);
+    expect(html).not.toContain('Overage Included');
+  });
+
+  test('the per-model weekly window is labelled by its model family (#377)', () => {
+    const html = home('max', [
+      win('seven_day_overage_included', 0.3, undefined, 'claude-opus-5-5'),
+    ]);
+    const ms = meters(html);
+    expect(ms.find((m) => m.label === 'Fable (7-day)')).toEqual({
+      label: 'Fable (7-day)',
+      value: '-',
+      note: 'not reported by Claude yet',
+    });
+    expect(ms.at(-1)).toEqual({ label: 'Opus (7-day)', value: '30%' });
+    expect(html).not.toContain('Overage Included');
+  });
+
+  test('with no model, the per-model weekly window says so (#377)', () => {
+    const html = home('max', [win('seven_day_overage_included', 0.2)]);
+    expect(meters(html).at(-1)).toEqual({
+      label: 'Model weekly limit (7-day)',
+      value: '20%',
+      note: 'Claude didn&#39;t say which model',
+    });
+    expect(html).not.toContain('Overage Included');
+  });
+
+  test('modelFamily reads the family of a claude-<family>- id (#377)', () => {
+    expect(modelFamily('claude-fable-5-2')).toBe('Fable');
+    expect(modelFamily('claude-opus-5-5')).toBe('Opus');
+    expect(modelFamily('gpt-4')).toBeNull();
+    expect(modelFamily(null)).toBeNull();
   });
 });
 

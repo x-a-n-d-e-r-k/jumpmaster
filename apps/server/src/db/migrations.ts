@@ -1140,11 +1140,20 @@ CREATE TABLE chat_messages (
 `;
 
 /**
- * v40 (#382): the arbiter. `arbitrations` records one ruling per subject and basis (the text it
- * judged), and `drops` is rebuilt with foreign keys off so `arbitrate` is a crew role: the
- * work-item CHECK and the one-active crew drop index both name it. Every v39 column is carried.
+ * v40: the model of the drop that reported each usage window (#377). A per-model window such as
+ * `seven_day_overage_included` does not name its model; the drop's model does. NULL on rows
+ * stored before.
  */
 const V40_SQL = `
+ALTER TABLE usage_windows ADD COLUMN model TEXT;
+`;
+
+/**
+ * v41 (#382): the arbiter. `arbitrations` records one ruling per subject and basis (the text it
+ * judged), and `drops` is rebuilt with foreign keys off so `arbitrate` is a crew role: the
+ * work-item CHECK and the one-active crew drop index both name it. Every v40 column is carried.
+ */
+const V41_SQL = `
 CREATE TABLE arbitrations (
   id           INTEGER PRIMARY KEY,
   zone_id      TEXT NOT NULL,
@@ -1259,7 +1268,8 @@ export const MIGRATIONS: Migration[] = [
   { version: 37, sql: V37_SQL },
   { version: 38, sql: V38_SQL, foreignKeysOff: true },
   { version: 39, sql: V39_SQL },
-  { version: 40, sql: V40_SQL, foreignKeysOff: true },
+  { version: 40, sql: V40_SQL },
+  { version: 41, sql: V41_SQL, foreignKeysOff: true },
 ];
 
 /**

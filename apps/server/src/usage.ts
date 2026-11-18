@@ -12,7 +12,13 @@ import {
   stopsOnOverage,
 } from './credits.js';
 import type { Db } from './db/open.js';
-import { getUsageState, recordUsageWindows, setUsageState, type UsageStateRow } from './db/repo.js';
+import {
+  getDrop,
+  getUsageState,
+  recordUsageWindows,
+  setUsageState,
+  type UsageStateRow,
+} from './db/repo.js';
 import { isFableRateLimit, pauseFableFor } from './fable.js';
 
 /**
@@ -143,7 +149,11 @@ export function ingestRateLimit(
 ): void {
   // Every reported window is kept for the floor (#144); only five_hour and seven_day feed the gate.
   const windows = usageWindowsOf(data.unifiedWindows);
-  if (windows) recordUsageWindows(db, windows, now);
+  if (windows) {
+    // A per-model window does not name its model; the reporting drop's model does (#377).
+    const d = getDrop(db, src.dropId);
+    recordUsageWindows(db, windows, now, d ? (d.servedModel ?? d.requestedModel) : null);
+  }
   // A Fable-only limit pauses Fable, never dispatch (best-effort, pending rehearsal).
   if (isFableRateLimit(data)) return pauseFableFor(db, data, now);
   db.transaction(() => {

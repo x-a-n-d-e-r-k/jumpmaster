@@ -1018,6 +1018,20 @@ test('v27 adds usage_windows, empty, keyed by window', () => {
   db.close();
 });
 
+test('v40 adds the reporting model to usage_windows, null on every existing row (#377)', () => {
+  const f = dbAt(39, (raw) => {
+    raw.exec(
+      "INSERT INTO usage_windows (key, utilization, resets_at, observed_at) VALUES ('seven_day_overage_included', 0.01, NULL, 'a')",
+    );
+  });
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.prepare('SELECT key, utilization, model FROM usage_windows').all()).toEqual([
+    { key: 'seven_day_overage_included', utilization: 0.01, model: null },
+  ]);
+  db.close();
+});
+
 test("v28 adds stick invites and the sticks' removal, Auto count and health, unset on every existing stick", () => {
   const f = dbAt(27, (raw) => {
     raw.exec(
@@ -1373,8 +1387,8 @@ test('v38 keeps existing tokens and their audit rows', () => {
   ).toThrow(/FOREIGN KEY/);
 });
 
-test('v40 adds arbitrations and lets arbitrate be a crew drop, keeping every drop and its columns', () => {
-  const f = dbAt(39, (raw) => {
+test('v41 adds arbitrations and lets arbitrate be a crew drop, keeping every drop and its columns', () => {
+  const f = dbAt(40, (raw) => {
     raw.exec(`INSERT INTO drop_zones (id, repo, default_branch, config_json)
       VALUES ('z', 'o/r', 'main', '{}')`);
     raw.exec(`INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, created_at,
@@ -1385,7 +1399,7 @@ test('v40 adds arbitrations and lets arbitrate be a crew drop, keeping every dro
       VALUES ('d1', 1, 't', 'log', '{}')`);
   });
   const db = openDb(f);
-  expect(MIGRATIONS.at(-1)?.version).toBeGreaterThanOrEqual(40);
+  expect(MIGRATIONS.at(-1)?.version).toBeGreaterThanOrEqual(41);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(
     db
