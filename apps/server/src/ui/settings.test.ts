@@ -619,6 +619,7 @@ describe('settings, part two (Task 13)', () => {
     expect(settingRow(html, 'mcp.enabled')).toContain('takes effect at the next restart');
     expect(settingRow(html, 'mcp.maxBodyBytes')).toContain('takes effect at the next restart');
     expect(settingRow(html, 'pollSeconds')).not.toContain('restart');
+    expect(settingRow(html, 'claude.fableWeeklyDropCap')).toContain('0 = no limit');
     for (const path of [
       'pollSeconds',
       'usage.throttleUtilization',
