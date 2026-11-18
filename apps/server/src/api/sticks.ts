@@ -71,7 +71,7 @@ import {
 import type { StickFetches } from '../images/fetches.js';
 import type { ImageMirror } from '../images/mirror.js';
 import { layoutFor } from '../images/serve.js';
-import { codeHash, ENROLL_CODE } from '../install/invite.js';
+import { codeHash, ENROLL_CODE, INSTALL_TOKEN } from '../install/invite.js';
 import { heartbeat, leaseNextDrop, missingFor, zoneRequirements, zonesWaiting } from '../leases.js';
 import { log as serverLog } from '../log.js';
 import type { ForgePair } from '../outbox.js';
@@ -427,10 +427,16 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       const stickToken = randomBytes(32).toString('hex');
       const { enrollCode, joinToken } = body.data;
       if (enrollCode !== undefined) {
-        // Looked up by its hash (an equality on a SHA-256, so no timing leaks the code); a used,
-        // expired, cancelled or unknown code is refused exactly as a wrong join token is.
-        const invite = ENROLL_CODE.test(enrollCode)
-          ? enrollFromInvite(db, codeHash(enrollCode), now(), {
+        // The installer's install token (issue #269), or a pending code: looked up by its hash
+        // (an equality on a SHA-256, so no timing leaks it); a used, expired, cancelled, spent or
+        // unknown one is refused exactly as a wrong join token is.
+        const cred = INSTALL_TOKEN.test(enrollCode)
+          ? { tokenHash: codeHash(enrollCode) }
+          : ENROLL_CODE.test(enrollCode)
+            ? { codeHash: codeHash(enrollCode) }
+            : undefined;
+        const invite = cred
+          ? enrollFromInvite(db, cred, now(), {
               id: stickId,
               tokenHash: sha256(stickToken),
               slots: body.data.slots,

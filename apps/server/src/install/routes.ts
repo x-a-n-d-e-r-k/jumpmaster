@@ -5,19 +5,28 @@
 // - `GET /install/trusted-root.json`: Sigstore's trusted root the server image ships, which the
 //   script pins by the sha256 rendered from this same file (issue #167);
 // - `GET /install/stick-image.tar?platform=`: the release's stick image as an OCI layout tar.
-// The downloads take the code as `Authorization: Bearer` and check it (unused, unexpired)
-// without consuming it: only the stick's enrollment does that.
+// - `POST /install/exchange` (issue #269): the script's first network call swaps the pasted code
+//   for a 30-minute install token, in one statement; the code works nowhere after;
+// - `POST /install/cancel` (issue #269): the script's failure paths cancel the exchanged invite.
+// The downloads take the install token (or a still-pending code) as `Authorization: Bearer` and
+// check it without consuming it: only the stick's enrollment does that.
 import { createHash } from 'node:crypto';
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { configReader, type LiveConfig } from '../config/source.js';
 import type { Db } from '../db/open.js';
-import { pendingInviteByHash } from '../db/repo.js';
+import {
+  cancelInviteByToken,
+  exchangedInviteByToken,
+  inviteCodeSpent,
+  pendingInviteByHash,
+} from '../db/repo.js';
+import { type ScrubSet, serverScrubSet } from '../forge/scrub-set.js';
 import type { ImageMirror } from '../images/mirror.js';
 import { layoutFor } from '../images/serve.js';
 import { PUBLIC_URL_NEEDED, publicOrigin } from '../reach.js';
-import { codeHash, ENROLL_CODE } from './invite.js';
+import { codeHash, ENROLL_CODE, exchangeCode, INSTALL_TOKEN, SPENT_CODE_ERROR } from './invite.js';
 import {
   COSIGN_SHA256,
   repositoryOf,
@@ -55,6 +64,8 @@ export interface InstallRouteDeps {
   cosignSha256?: StickScriptParams['cosignSha256'];
   /** Sigstore's trusted root; default `JM_TRUSTED_ROOT_FILE` or `/app/sigstore/trusted_root.json`. */
   trustedRootFile?: string;
+  /** Where an install token is registered for the log scrub (default the server's set). */
+  scrub?: Pick<ScrubSet, 'add'>;
 }
 
 /**
@@ -82,15 +93,44 @@ export function registerInstallRoutes(app: FastifyInstance, deps: InstallRouteDe
   const trustedRoot =
     deps.trustedRootFile ?? (process.env.JM_TRUSTED_ROOT_FILE || TRUSTED_ROOT_FILE);
 
-  /** The code is valid (pending), or the request is answered 401 as a wrong join token is. */
+  const bearer = (req: FastifyRequest): string =>
+    /^Bearer (\S+)$/.exec(req.headers.authorization ?? '')?.[1] ?? '';
+  const refuse = (reply: FastifyReply, error = 'unauthorized') =>
+    reply.code(401).header('cache-control', 'no-store').send({ error });
+
+  /**
+   * A live install token, or a pending code (a manual install that never swapped it), or the
+   * request is answered 401 as a wrong join token is; a spent code is told so (issue #269).
+   */
   const authorized = (req: FastifyRequest, reply: FastifyReply): boolean => {
-    const m = /^Bearer (\S+)$/.exec(req.headers.authorization ?? '');
-    const code = m?.[1];
-    if (code && ENROLL_CODE.test(code) && pendingInviteByHash(deps.db, codeHash(code), deps.now()))
+    const cred = bearer(req);
+    const at = deps.now();
+    if (INSTALL_TOKEN.test(cred) && exchangedInviteByToken(deps.db, codeHash(cred), at))
       return true;
-    void reply.code(401).header('cache-control', 'no-store').send({ error: 'unauthorized' });
+    if (ENROLL_CODE.test(cred)) {
+      if (pendingInviteByHash(deps.db, codeHash(cred), at)) return true;
+      if (inviteCodeSpent(deps.db, codeHash(cred))) {
+        void refuse(reply, SPENT_CODE_ERROR);
+        return false;
+      }
+    }
+    void refuse(reply);
     return false;
   };
+
+  app.post('/install/exchange', async (req, reply) => {
+    const r = exchangeCode(deps.db, bearer(req), deps.now(), deps.scrub ?? serverScrubSet);
+    if ('refused' in r)
+      return refuse(reply, r.refused === 'spent' ? SPENT_CODE_ERROR : 'unauthorized');
+    return reply.header('cache-control', 'no-store').send({ token: r.token });
+  });
+
+  app.post('/install/cancel', async (req, reply) => {
+    const token = bearer(req);
+    if (!INSTALL_TOKEN.test(token) || !cancelInviteByToken(deps.db, codeHash(token), deps.now()))
+      return refuse(reply);
+    return reply.header('cache-control', 'no-store').send({ cancelled: true });
+  });
 
   const platformOf = (req: FastifyRequest<{ Querystring: { platform?: unknown } }>) => {
     const p = req.query.platform;

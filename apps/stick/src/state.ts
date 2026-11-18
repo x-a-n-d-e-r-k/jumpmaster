@@ -28,8 +28,9 @@ export function joinToken(env: NodeJS.ProcessEnv): string {
 export type EnrollCredential = { enrollCode: string } | { joinToken: string };
 
 /**
- * `JM_ENROLL_CODE` or the file `JM_ENROLL_CODE_FILE` names (the installer's), sent instead of the
- * join token; without one, the join token as ever.
+ * `JM_ENROLL_CODE` or the file `JM_ENROLL_CODE_FILE` names (the installer's: the install token it
+ * swapped the code for, issue #269), sent as `enrollCode` instead of the join token; without one,
+ * the join token as ever.
  */
 export function enrollCredential(env: NodeJS.ProcessEnv): EnrollCredential {
   const code = readSecret(env, 'JM_ENROLL_CODE')?.trim();

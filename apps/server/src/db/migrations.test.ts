@@ -1240,7 +1240,6 @@ test('v36 keeps every outbox row, takes update_branch ops and adds branch_update
     );
   });
   const db = openDb(f);
-  expect(MIGRATIONS.at(-1)?.version).toBe(36);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(db.prepare('SELECT op_key AS k, kind, state FROM outbox').all()).toEqual([
     { k: 'merge:1:aaa', kind: 'merge', state: 'done' },
@@ -1264,5 +1263,33 @@ test('v36 keeps every outbox row, takes update_branch ops and adds branch_update
       )
       .run(),
   ).toThrow(/CHECK/);
+  db.close();
+});
+
+test('v37 keeps every invite as a line invite and adds the exchange columns, the token hash unique', () => {
+  const f = dbAt(36, (raw) => {
+    raw.exec(
+      `INSERT INTO stick_invites (id, name, slots, code_hash, created_at, expires_at)
+       VALUES ('i1', 'vps-1', NULL, 'c1', 't', 'u')`,
+    );
+  });
+  const db = openDb(f);
+  expect(MIGRATIONS.at(-1)?.version).toBe(37);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(
+    db
+      .prepare(
+        'SELECT id, kind, exchanged_at AS x, token_hash AS h, token_expires_at AS e FROM stick_invites',
+      )
+      .all(),
+  ).toEqual([{ id: 'i1', kind: 'line', x: null, h: null, e: null }]);
+  const add = db.prepare(
+    `INSERT INTO stick_invites (id, name, code_hash, created_at, expires_at, kind, token_hash)
+     VALUES (?, 'n', ?, 't', 'u', ?, ?)`,
+  );
+  add.run('i2', 'c2', 'cloud_init', 'th');
+  add.run('i3', 'c3', 'line', null);
+  expect(() => add.run('i4', 'c4', 'line', 'th')).toThrow(/UNIQUE/);
+  expect(() => add.run('i5', 'c5', 'pigeon', null)).toThrow(/CHECK/);
   db.close();
 });

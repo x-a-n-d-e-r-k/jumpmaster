@@ -1,6 +1,9 @@
 // The stick installer (issue #138): `curl -fsSL '<publicUrl>/install/stick.sh' | sudo sh -s -- <code>`
 // on a fresh Linux machine or a Mac with Docker Desktop, and the cloud-init snippet that runs the same line when a VPS is made.
-// The script holds no secret: the one-time code arrives as its argument, and only this server's
+// The script holds no secret: the one-time code arrives as its argument, and its first network
+// call swaps it for a 30-minute install token (issue #269), so the code is spent within a second;
+// every later call, the stick's volume and its enrollment use the token, and every failure after
+// the swap cancels the invite. Only this server's
 // address, the stick image's digest, the release signer and the pinned SHA-256s of cosign and of
 // Sigstore's trusted root are baked in. The machine reaches only this server: cosign, the trusted
 // root and the stick image come from here, and the image is verified fully offline (issue #167)
@@ -43,6 +46,8 @@ export const COSIGN_WAIT_SECONDS = 120;
 export const STICK_IMAGE_NAME = 'jumpmaster-stick';
 /** Where the installer writes the code in the stick's state volume (mounted at /state). */
 export const ENROLL_CODE_PATH = '/state/enroll_code';
+/** How long the installer's best-effort cancel may take, in seconds (issue #269). */
+export const CANCEL_WAIT_SECONDS = 5;
 
 const REPOSITORY = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 /** The OCI media type of an image index. */
@@ -124,6 +129,10 @@ export function stickScript(p: StickScriptParams): string {
 #   curl -fsSL ${p.serverUrl}/install/stick.sh | sudo sh -s -- <code>       install and enroll
 #   curl -fsSL ${p.serverUrl}/install/stick.sh | sudo sh -s -- --uninstall  remove it
 # Add --yes to install Docker with get.docker.com without asking.
+# The code appears on the pasted line (and so in ps, shell history and sudo's log) only until
+# the exchange, which is the first network call: it swaps the code for an install token, and the
+# code works nowhere after. The token goes only through a header file and stdin, never argv, and
+# every failure after the exchange cancels the invite (issue #269).
 set -eu
 
 JM_SERVER_URL=${shq(p.serverUrl)}
@@ -154,7 +163,18 @@ sha256() {
 COSIGN_WAIT=\${JM_INSTALL_COSIGN_TIMEOUT:-${COSIGN_WAIT_SECONDS}}
 
 say() { printf '%s\\n' "$*"; }
-die() { printf 'jumpmaster: %s\\n' "$*" >&2; exit 1; }
+INSTALL_TOKEN=
+# After the exchange, every failure cancels the invite first (best effort, ${CANCEL_WAIT_SECONDS} s), so its
+# token stops working; it never reports success.
+die() {
+  printf 'jumpmaster: %s\\n' "$*" >&2
+  if [ -n "$INSTALL_TOKEN" ]; then
+    INSTALL_TOKEN=
+    curl -fsS -m ${CANCEL_WAIT_SECONDS} -X POST -H "@$TMP/auth" -o /dev/null "$JM_SERVER_URL/install/cancel" 2>/dev/null ||
+      printf 'jumpmaster: %s\\n' "the invite may still be pending: press Cancel on the sticks page" >&2
+  fi
+  exit 1
+}
 
 # The descriptors of an OCI JSON document (an image layout's index.json, an image index, a
 # manifest), one per line: the key of the list holding it, its digest and artifactType, its
@@ -261,11 +281,34 @@ fi
 
 TMP=$(mktemp -d "\${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -rf "$TMP"' EXIT
-trap 'exit 1' INT TERM
+trap 'die "interrupted"' INT TERM
 
+# What fails without the network fails before the exchange, so the code is not spent.
 if [ "$os" = Darwin ] && ! command -v docker >/dev/null 2>&1; then
   die "Docker is not installed: install Docker Desktop (https://docs.docker.com/desktop/setup/install/mac-install/), start it, and paste the line again"
 fi
+if command -v docker >/dev/null 2>&1 && docker container inspect "$CONTAINER" >/dev/null 2>&1; then
+  die "a stick is already installed here (container $CONTAINER): run this with --uninstall first"
+fi
+
+# The exchange: the code, from a header file, for an install token. From here on only the token
+# is used, also from a header file, never on a command line another user could read.
+umask 077
+printf 'Authorization: Bearer %s\\n' "$CODE" >"$TMP/auth"
+CODE=
+status=$(curl -sS -X POST -H "@$TMP/auth" -o "$TMP/exchange" -w '%{http_code}' "$JM_SERVER_URL/install/exchange") || status=
+: >"$TMP/auth"
+token=
+if [ "$status" = 200 ]; then
+  token=$(sed -n 's/.*"token":"\\(jm_install_[A-Za-z0-9_-]*\\)".*/\\1/p' "$TMP/exchange" 2>/dev/null | head -n 1)
+fi
+if [ -z "$token" ]; then
+  why=$(sed -n 's/.*"error":"\\([^"]*\\)".*/\\1/p' "$TMP/exchange" 2>/dev/null | head -n 1)
+  die "the server did not accept the code (\${why:-could not reach $JM_SERVER_URL}): make a new one on the sticks page if it was used, cancelled or is out of date"
+fi
+printf 'Authorization: Bearer %s\\n' "$token" >"$TMP/auth"
+INSTALL_TOKEN=$token
+token=
 if ! command -v docker >/dev/null 2>&1; then
   answer=n
   if [ "$YES" = 1 ]; then
@@ -287,20 +330,13 @@ if ! command -v docker >/dev/null 2>&1; then
   sh "$TMP/get-docker.sh" || die "installing Docker failed"
 fi
 
-if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
-  die "a stick is already installed here (container $CONTAINER): run this with --uninstall first"
-fi
-
-# The code goes in a header file, never on a command line another user could read.
-umask 077
-printf 'Authorization: Bearer %s\\n' "$CODE" >"$TMP/auth"
 fetch() {
   curl -fsSL -H "@$TMP/auth" -o "$2" "$JM_SERVER_URL$1"
 }
 
 say "Downloading cosign $PLATFORM from $JM_SERVER_URL"
 fetch "/install/cosign?platform=$PLATFORM" "$TMP/cosign" ||
-  die "could not download cosign from $JM_SERVER_URL: is the code unused and less than 24 hours old?"
+  die "could not download cosign from $JM_SERVER_URL: the install token works for 30 minutes"
 got=$(sha256 "$TMP/cosign")
 [ "$got" = "$COSIGN_SHA256" ] || die "the cosign the server sent is not the pinned ${COSIGN_VERSION} (sha256 $got)"
 chmod 0700 "$TMP/cosign"
@@ -313,13 +349,13 @@ fi
 
 say "Downloading Sigstore's trusted root from $JM_SERVER_URL"
 fetch "/install/trusted-root.json" "$TMP/trusted_root.json" ||
-  die "could not download the trusted root from $JM_SERVER_URL: is the code unused and less than 24 hours old?"
+  die "could not download the trusted root from $JM_SERVER_URL: the install token works for 30 minutes"
 got=$(sha256 "$TMP/trusted_root.json")
 [ "$got" = "$TRUSTED_ROOT_SHA256" ] || die "the trusted root the server sent is not the pinned one (sha256 $got)"
 
 say "Downloading the stick image for $PLATFORM"
 fetch "/install/stick-image.tar?platform=$PLATFORM" "$TMP/stick.tar" ||
-  die "could not download the stick image from $JM_SERVER_URL: is the code unused and less than 24 hours old?"
+  die "could not download the stick image from $JM_SERVER_URL: the install token works for 30 minutes"
 mkdir "$TMP/layout"
 tar -xf "$TMP/stick.tar" -C "$TMP/layout" || die "the stick image download is not a tar"
 
@@ -453,12 +489,12 @@ mount=$(docker volume inspect -f '{{ .Mountpoint }}' "$VOLUME" 2>/dev/null || tr
 code_file=
 if [ -n "$mount" ] && [ -d "$mount" ]; then
   code_file="$mount/$(basename "$CODE_PATH")"
-  printf '%s\\n' "$CODE" >"$code_file"
+  printf '%s\\n' "$INSTALL_TOKEN" >"$code_file"
   chmod 0600 "$code_file"
 else
   # The volume lives in a VM (Docker Desktop) or under another user (rootless Docker): a container
-  # writes the code, read from stdin, never on a command line.
-  printf '%s\\n' "$CODE" | docker run --rm -i --network none --entrypoint sh -v "$VOLUME:/state" "$LOCAL_IMAGE" \\
+  # writes the token, read from stdin, never on a command line.
+  printf '%s\\n' "$INSTALL_TOKEN" | docker run --rm -i --network none --entrypoint sh -v "$VOLUME:/state" "$LOCAL_IMAGE" \\
     -c "umask 077 && cat >$CODE_PATH" || die "could not write the enrollment code into the volume $VOLUME"
 fi
 forget_code() {
@@ -494,6 +530,6 @@ while [ "$i" -lt "$WAIT_SECONDS" ]; do
   sleep 1
   i=$((i + 1))
 done
-die "the stick did not enroll within $WAIT_SECONDS seconds: see docker logs $CONTAINER"
+die "the stick did not enroll within $WAIT_SECONDS seconds: see docker logs $CONTAINER, run this with --uninstall, and make a new code on the sticks page"
 `;
 }

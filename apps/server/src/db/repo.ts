@@ -1596,51 +1596,68 @@ export function listObservations(db: Db, zoneId?: string): Observation[] {
     .all({ zoneId: zoneId ?? null }) as Observation[];
 }
 
+/** How an invite will be installed (issue #269): the pasted line, or cloud-init user data. */
+export type InviteKind = 'line' | 'cloud_init';
+
 /** A one-time enrollment code (issue #138), by its hash only. */
 export interface StickInvite {
   id: string;
   name: string;
   /** The trooper count the stick enrolls with; null: Auto (its ceiling). */
   slots: number | null;
+  kind: InviteKind;
   createdAt: string;
   expiresAt: string;
+  /** When the code was swapped for an install token (issue #269); the code is spent from then. */
+  exchangedAt: string | null;
+  /** Until when that install token works. */
+  tokenExpiresAt: string | null;
   usedAt: string | null;
   stickId: string | null;
   cancelledAt: string | null;
 }
 
-const INVITE_COLS = `id, name, slots, created_at AS createdAt, expires_at AS expiresAt,
+const INVITE_COLS = `id, name, slots, kind, created_at AS createdAt, expires_at AS expiresAt,
+  exchanged_at AS exchangedAt, token_expires_at AS tokenExpiresAt,
   used_at AS usedAt, stick_id AS stickId, cancelled_at AS cancelledAt`;
 
-/** An invite still waiting: neither used, cancelled nor expired at `now`. */
-const PENDING_INVITE_SQL = 'used_at IS NULL AND cancelled_at IS NULL AND expires_at > @now';
+/** Neither used nor cancelled. */
+const LIVE_SQL = 'used_at IS NULL AND cancelled_at IS NULL';
+/** A code that still works: an invite not used, cancelled, exchanged or expired at `now`. */
+const PENDING_INVITE_SQL = `${LIVE_SQL} AND exchanged_at IS NULL AND expires_at > @now`;
+/** An install token that still works (issue #269): exchanged, its token unexpired at `now`. */
+const EXCHANGED_INVITE_SQL = `${LIVE_SQL} AND exchanged_at IS NOT NULL AND token_expires_at > @now`;
+/** An invite still waiting for its stick: pending, or exchanged with a live token. */
+const OPEN_INVITE_SQL = `((${PENDING_INVITE_SQL}) OR (${EXCHANGED_INVITE_SQL}))`;
 
 export function insertStickInvite(
   db: Db,
-  i: Pick<StickInvite, 'id' | 'name' | 'slots' | 'createdAt' | 'expiresAt'> & { codeHash: string },
+  i: Pick<StickInvite, 'id' | 'name' | 'slots' | 'kind' | 'createdAt' | 'expiresAt'> & {
+    codeHash: string;
+  },
 ): void {
   db.prepare(
-    `INSERT INTO stick_invites (id, name, slots, code_hash, created_at, expires_at)
-     VALUES (@id, @name, @slots, @codeHash, @createdAt, @expiresAt)`,
+    `INSERT INTO stick_invites (id, name, slots, kind, code_hash, created_at, expires_at)
+     VALUES (@id, @name, @slots, @kind, @codeHash, @createdAt, @expiresAt)`,
   ).run(i);
 }
 
-/** Whether a stick (not removed) or a pending invite already has this name. */
+/** Whether a stick (not removed) or an open invite already has this name. */
 export function stickNameTaken(db: Db, name: string, now: Date): boolean {
   const row = db
     .prepare(
       `SELECT 1 FROM sticks WHERE name = @name AND removed_at IS NULL
-       UNION ALL SELECT 1 FROM stick_invites WHERE name = @name AND ${PENDING_INVITE_SQL} LIMIT 1`,
+       UNION ALL SELECT 1 FROM stick_invites WHERE name = @name AND ${OPEN_INVITE_SQL} LIMIT 1`,
     )
     .get({ name, now: now.toISOString() });
   return row !== undefined;
 }
 
-/** The invites waiting for their stick to check in, oldest first. */
+/** The invites waiting for their stick to check in (pending or exchanged), oldest first. */
 export function listPendingInvites(db: Db, now: Date): StickInvite[] {
   return db
     .prepare(
-      `SELECT ${INVITE_COLS} FROM stick_invites WHERE ${PENDING_INVITE_SQL}
+      `SELECT ${INVITE_COLS} FROM stick_invites WHERE ${OPEN_INVITE_SQL}
        ORDER BY created_at, rowid`,
     )
     .all({ now: now.toISOString() }) as StickInvite[];
@@ -1655,31 +1672,132 @@ export function pendingInviteByHash(db: Db, codeHash: string, now: Date): StickI
     .get({ codeHash, now: now.toISOString() }) as StickInvite | undefined;
 }
 
-/** Cancels a pending invite; undefined when there is none by that id. */
+/** The exchanged invite whose live install token hashes to `tokenHash`, if any (issue #269). */
+export function exchangedInviteByToken(
+  db: Db,
+  tokenHash: string,
+  now: Date,
+): StickInvite | undefined {
+  return db
+    .prepare(
+      `SELECT ${INVITE_COLS} FROM stick_invites WHERE token_hash = @tokenHash AND ${EXCHANGED_INVITE_SQL}`,
+    )
+    .get({ tokenHash, now: now.toISOString() }) as StickInvite | undefined;
+}
+
+/** Whether the code hashing to `codeHash` was spent: swapped for a token, or enrolled with. */
+export function inviteCodeSpent(db: Db, codeHash: string): boolean {
+  return (
+    db
+      .prepare(
+        `SELECT 1 FROM stick_invites WHERE code_hash = ?
+         AND (exchanged_at IS NOT NULL OR used_at IS NOT NULL)`,
+      )
+      .get(codeHash) !== undefined
+  );
+}
+
+/**
+ * Swaps a pending invite's code for an install token (issue #269), in one statement: the invite
+ * is marked exchanged with the token's hash and expiry, so the code works nowhere after. Of two
+ * exchanges of one code, exactly one matches. Undefined when no pending invite has that code.
+ */
+export function exchangeInvite(
+  db: Db,
+  codeHash: string,
+  token: { hash: string; expiresAt: string },
+  now: Date,
+): StickInvite | undefined {
+  return db
+    .prepare(
+      `UPDATE stick_invites
+          SET exchanged_at = @now, token_hash = @tokenHash, token_expires_at = @tokenExpiresAt
+        WHERE code_hash = @codeHash AND ${PENDING_INVITE_SQL}
+        RETURNING ${INVITE_COLS}`,
+    )
+    .get({
+      codeHash,
+      tokenHash: token.hash,
+      tokenExpiresAt: token.expiresAt,
+      now: now.toISOString(),
+    }) as StickInvite | undefined;
+}
+
+/** Where an invite is at `now`; an exchanged one whose token expired counts as cancelled. */
+export type InviteState = 'pending' | 'exchanged' | 'used' | 'cancelled' | 'expired';
+
+export function inviteState(db: Db, id: string, now: Date): InviteState | undefined {
+  const i = db.prepare(`SELECT ${INVITE_COLS} FROM stick_invites WHERE id = ?`).get(id) as
+    | StickInvite
+    | undefined;
+  if (!i) return undefined;
+  if (i.usedAt !== null) return 'used';
+  if (i.cancelledAt !== null) return 'cancelled';
+  const at = now.toISOString();
+  if (i.exchangedAt !== null) return (i.tokenExpiresAt ?? '') > at ? 'exchanged' : 'cancelled';
+  return i.expiresAt > at ? 'pending' : 'expired';
+}
+
+/** Cancels an open invite (pending or exchanged); undefined when there is none by that id. */
 export function cancelStickInvite(db: Db, id: string, now: Date): StickInvite | undefined {
   return db
     .prepare(
-      `UPDATE stick_invites SET cancelled_at = @now WHERE id = @id AND ${PENDING_INVITE_SQL}
+      `UPDATE stick_invites SET cancelled_at = @now WHERE id = @id AND ${OPEN_INVITE_SQL}
        RETURNING ${INVITE_COLS}`,
     )
     .get({ id, now: now.toISOString() }) as StickInvite | undefined;
 }
 
 /**
- * Enrolls a stick from the pending invite whose code hashes to `codeHash`: the stick takes the
- * invite's name and count (Auto: no count, its ceiling governs), and the invite is marked used,
- * in one transaction. Undefined when no pending invite matches (used, expired, cancelled or
- * unknown); of two enrollments with one code, exactly one gets the invite.
+ * The installer's cancel (issue #269): the exchanged invite whose install token hashes to
+ * `tokenHash` is cancelled. True when it is cancelled now or was already (idempotent, while the
+ * token has not expired); false for an unknown, expired or used token.
+ */
+export function cancelInviteByToken(db: Db, tokenHash: string, now: Date): boolean {
+  return db
+    .transaction((): boolean => {
+      const at = now.toISOString();
+      const done = db
+        .prepare(
+          `UPDATE stick_invites SET cancelled_at = @now
+            WHERE token_hash = @tokenHash AND ${EXCHANGED_INVITE_SQL}`,
+        )
+        .run({ tokenHash, now: at });
+      if (done.changes === 1) return true;
+      return (
+        db
+          .prepare(
+            `SELECT 1 FROM stick_invites WHERE token_hash = @tokenHash AND used_at IS NULL
+               AND cancelled_at IS NOT NULL AND token_expires_at > @now`,
+          )
+          .get({ tokenHash, now: at }) !== undefined
+      );
+    })
+    .immediate();
+}
+
+/** What enrolls a stick from an invite: its pending code, or the install token it was swapped for. */
+export type InviteCredential = { codeHash: string } | { tokenHash: string };
+
+/**
+ * Enrolls a stick from the open invite the credential matches: a pending invite's code, or an
+ * exchanged invite's live install token (issue #269). The stick takes the invite's name and count
+ * (Auto: no count, its ceiling governs), and the invite is marked used, in one transaction.
+ * Undefined when nothing matches (used, expired, cancelled, exchanged code or unknown); of two
+ * enrollments with one credential, exactly one gets the invite.
  */
 export function enrollFromInvite(
   db: Db,
-  codeHash: string,
+  cred: InviteCredential,
   now: Date,
   stick: Pick<Stick, 'id' | 'tokenHash' | 'slots'> & Partial<StickAdvert>,
 ): StickInvite | { nameTaken: string } | undefined {
   return db
     .transaction((): StickInvite | { nameTaken: string } | undefined => {
-      const invite = pendingInviteByHash(db, codeHash, now);
+      const invite =
+        'codeHash' in cred
+          ? pendingInviteByHash(db, cred.codeHash, now)
+          : exchangedInviteByToken(db, cred.tokenHash, now);
       if (!invite) return undefined;
       // A live stick took the name since the invite was made (say, by the join token): refused,
       // and the invite stays unused.
@@ -1696,7 +1814,7 @@ export function enrollFromInvite(
       const used = db
         .prepare(
           `UPDATE stick_invites SET used_at = @now, stick_id = @stickId
-         WHERE id = @id AND ${PENDING_INVITE_SQL}`,
+         WHERE id = @id AND ${OPEN_INVITE_SQL}`,
         )
         .run({ id: invite.id, stickId: stick.id, now: now.toISOString() });
       if (used.changes !== 1) throw new Error(`invite ${invite.id} was used concurrently`);
