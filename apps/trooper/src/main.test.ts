@@ -290,6 +290,32 @@ test('readPayload reads one line and leaves the stream open', async () => {
   expect(s.destroyed).toBe(false);
 });
 
+test('readPayload refuses a drop payload whose repository owner or name is not one, without echoing it (issue #265)', async () => {
+  const tokenOwner = ['ghp', 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJ'].join('_');
+  for (const [owner, name] of [
+    ['acme', 'widgets?x'],
+    ['acme', 'wid%2Fgets'],
+    ['acme', '"x"'],
+    ['-acme', 'widgets'],
+    ['acme', '..'],
+    [tokenOwner, 'widgets'],
+  ]) {
+    const s = new PassThrough();
+    s.write(`${JSON.stringify({ ...payload, repo: { ...payload.repo, owner, name } })}\n`);
+    const err = await readPayload(undefined, s).then(
+      () => undefined,
+      (e: unknown) => e as Error,
+    );
+    expect(err, `${owner}/${name}`).toBeInstanceOf(Error);
+    expect(err?.message).not.toContain(owner === 'acme' ? name : owner);
+  }
+  const ok = new PassThrough();
+  ok.write(
+    `${JSON.stringify({ ...payload, repo: { ...payload.repo, owner: 'acme', name: 'wid.gets-2' } })}\n`,
+  );
+  expect((await readPayload(undefined, ok)).repo.name).toBe('wid.gets-2');
+});
+
 test('readPayload strips a Docker prefix', async () => {
   const s = Readable.from([
     `\u0001\u0000\u0000\u0000\u0000\u0000\u0001\u0000${JSON.stringify(payload)}\n`,

@@ -91,3 +91,26 @@ test('readGrant refuses a lease that is not a full SHA, and an option-shaped bas
   ])
     await expect(read(over), JSON.stringify(over)).rejects.toThrow('grant rejected');
 });
+
+test('readGrant refuses a grant whose owner or name is not a GitHub one, without echoing it (issue #265)', async () => {
+  const tokenOwner = ['ghp', 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJ'].join('_');
+  const read = (over: Record<string, unknown>) =>
+    readGrant(Readable.from([`${JSON.stringify({ ...grant, ...over })}\n`]));
+  expect((await read({ owner: 'acme', name: 'wid.gets-2' })).name).toBe('wid.gets-2');
+  for (const over of [
+    { name: 'widgets?x' },
+    { name: 'wid%2Fgets' },
+    { name: '"x"' },
+    { owner: '-acme' },
+    { name: '..' },
+    { owner: tokenOwner },
+  ]) {
+    const err = await read(over).then(
+      () => undefined,
+      (e: unknown) => e as Error,
+    );
+    expect(err?.message, JSON.stringify(over)).toBe(
+      'grant rejected: does not match the grant schema',
+    );
+  }
+});

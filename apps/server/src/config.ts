@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import {
   ContainerLimitsSchema,
   GateSpecSchema,
+  isRepoFullName,
   PresetSchema,
   protectedPathMatches,
   type Role,
@@ -166,7 +167,10 @@ const GitHubId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 /** A zone's fields with their defaults, without the cross-field rules (the add baseline parses with it). */
 export const DropZoneObject = z.object({
   id: z.string().min(1),
-  repo: z.string().regex(/^[^/\s]+\/[^/\s]+$/, 'repo must be "owner/name"'),
+  // The one owner/name rule (issue #265); the message names the field, never the value.
+  repo: z.string().refine(isRepoFullName, {
+    message: 'repo must be "owner/name" with a valid GitHub owner and repository name',
+  }),
   readyLabel: z.string().default(DEFAULT_READY_LABEL),
   gates: z.array(GateSpecSchema),
   services: z
