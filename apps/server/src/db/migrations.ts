@@ -1256,6 +1256,67 @@ BEGIN
 END;
 `;
 
+/**
+ * v43 (#357, the crew chat's cards): one row per action a chat turn took or was refused, written
+ * from the server's own record of the action (never the model's text). A card is the thread's and
+ * message's of the chat token that acted. `undo_json` is what Undo needs; null where there is none
+ * (a ruling has no Undo).
+ */
+const V43_SQL = `
+CREATE TABLE chat_cards (
+  id          INTEGER PRIMARY KEY,
+  thread_id   INTEGER NOT NULL,
+  message_id  INTEGER NOT NULL,
+  kind        TEXT NOT NULL,
+  zone_id     TEXT,
+  target      TEXT,
+  link        TEXT,
+  state       TEXT NOT NULL CHECK (state IN ('done','pending','refused','undone')),
+  summary     TEXT NOT NULL,
+  undo_json   TEXT,
+  created_at  TEXT NOT NULL,
+  undone_at   TEXT
+);
+CREATE INDEX chat_cards_by_thread ON chat_cards (thread_id, id);
+`;
+
+/**
+ * v44 (#383): an item's arbitration that acted is applied once (Command's Retry on the parked
+ * item): `applied_at` records when, so two passes never retry it twice. (Ships as v44: v43 was
+ * taken by the chat cards.)
+ */
+const V44_SQL = `
+ALTER TABLE arbitrations ADD COLUMN applied_at TEXT;
+`;
+
+/**
+ * v45 (#362, goal changes): one row per proposed GOAL.md change, from the chat or the crew. The
+ * server opens it as a PR on `jm/goal-change-<id>` (`base_sha`, `branch`, `pr_number`, `head_sha`),
+ * and merges it only at the SHA the owner confirmed in the browser (`confirmed_sha`).
+ */
+const V45_SQL = `
+CREATE TABLE goal_changes (
+  id            INTEGER PRIMARY KEY,
+  zone_id       TEXT NOT NULL,
+  source        TEXT NOT NULL CHECK (source IN ('chat','crew')),
+  source_ref    TEXT,
+  text          TEXT NOT NULL,
+  text_sha256   TEXT NOT NULL,
+  base_sha      TEXT,
+  branch        TEXT,
+  pr_number     INTEGER,
+  head_sha      TEXT,
+  state         TEXT NOT NULL
+                CHECK (state IN ('proposed','open','confirmed','merged','refused','closed')),
+  confirmed_sha TEXT,
+  confirmed_at  TEXT,
+  error         TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+CREATE INDEX goal_changes_by_zone_state ON goal_changes (zone_id, state, id);
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1299,6 +1360,9 @@ export const MIGRATIONS: Migration[] = [
   { version: 40, sql: V40_SQL },
   { version: 41, sql: V41_SQL, foreignKeysOff: true },
   { version: 42, sql: V42_SQL },
+  { version: 43, sql: V43_SQL },
+  { version: 44, sql: V44_SQL },
+  { version: 45, sql: V45_SQL },
 ];
 
 /**

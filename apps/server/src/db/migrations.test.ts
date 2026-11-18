@@ -715,7 +715,10 @@ test('v18 adds operator, sessions and control_audit, and control_audit keeps the
     "INSERT INTO control_audit (at, via, action, detail_json) VALUES ('t', ?, 'kill', '{}')",
   );
   expect(() => audit.run('browser')).toThrow(/CHECK/);
-  for (let i = 0; i < 5003; i++) audit.run(['token', 'session', 'system'][i % 3]);
+  // One transaction: 5003 autocommits cost an fsync each and time the test out on slow disks.
+  db.transaction(() => {
+    for (let i = 0; i < 5003; i++) audit.run(['token', 'session', 'system'][i % 3]);
+  })();
   expect(count(db, 'control_audit')).toBe(5000);
   const ids = db.prepare('SELECT MIN(id) AS lo, MAX(id) AS hi FROM control_audit').get() as {
     lo: number;
@@ -1444,7 +1447,9 @@ test('v41 adds arbitrations and lets arbitrate be a crew drop, keeping every dro
 });
 
 test('v40 keeps every control_audit row and the 5000-row trigger (the rebuild ships as v42: v40 and v41 were taken)', () => {
+  let seedMs = Infinity;
   const f = dbAt(41, (raw) => {
+    const start = performance.now();
     const put = raw.prepare(
       `INSERT INTO control_audit (at, via, action, target, guarded, detail_json)
        VALUES (?, ?, ?, ?, ?, ?)`,
@@ -1461,7 +1466,10 @@ test('v40 keeps every control_audit row and the 5000-row trigger (the rebuild sh
           `{"n":${i}}`,
         );
     })();
+    seedMs = performance.now() - start;
   });
+  // The seed must stay fast, or the test drifts back towards vitest's timeout on slow disks.
+  expect(seedMs).toBeLessThan(5000);
   const before = new Database(f);
   const rows = before.prepare('SELECT * FROM control_audit ORDER BY id').all();
   before.close();
@@ -1487,5 +1495,18 @@ test('v40 keeps every control_audit row and the 5000-row trigger (the rebuild sh
   });
   for (let i = 0; i < 10; i++) audit.run('session');
   expect(count(db, 'control_audit')).toBe(5000);
+  db.close();
+});
+
+test('v44 adds applied_at to arbitrations, keeping every row unapplied', () => {
+  const f = dbAt(43, (raw) => {
+    raw.exec(`INSERT INTO arbitrations (zone_id, subject, basis, drop_id, state, created_at,
+        updated_at) VALUES ('z', 'issue:1', 'sha1', 'd1', 'ruled', 't', 't')`);
+  });
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.prepare('SELECT subject, state, applied_at AS at FROM arbitrations').all()).toEqual([
+    { subject: 'issue:1', state: 'ruled', at: null },
+  ]);
   db.close();
 });

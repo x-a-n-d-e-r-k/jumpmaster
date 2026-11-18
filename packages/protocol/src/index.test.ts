@@ -378,10 +378,12 @@ describe('crew roles', () => {
       expect(DropPayloadSchema.safeParse({ ...arb, branch: 'b' }).success).toBe(false);
       expect(DropPayloadSchema.safeParse({ ...arb, gates: [] }).success).toBe(false);
       expect(DropPayloadSchema.safeParse({ ...arb, gateSecrets: { A: 'b' } }).success).toBe(false);
+      // An item's arbitration reads the disputed PR's head, as diagnose does (#383).
       expect(
         DropPayloadSchema.safeParse({ ...arb, checkout: { number: 1, branch: 'b', headSha: 'a' } })
           .success,
-      ).toBe(false);
+      ).toBe(true);
+      expect(DropPayloadSchema.safeParse({ ...arb, checkout: { number: 1 } }).success).toBe(false);
     });
   });
 

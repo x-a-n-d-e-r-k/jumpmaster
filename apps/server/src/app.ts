@@ -15,6 +15,7 @@ import {
   listBriefings,
   listRulings,
 } from './briefings.js';
+import { type ChatCard, listCards } from './chat/cards.js';
 import { type ChatTurnHub, registerChatRoutes, threadIdOf } from './chat/routes.js';
 import { getThread, listMessages, listThreads } from './chat/store.js';
 import { configReader } from './config/source.js';
@@ -312,7 +313,13 @@ export function createApp(
   registerControlRoutes(app, { ...deps, setup, backoff });
   registerMcpRoute(app, deps);
   // The chat service's endpoint (chat tokens only): always on, so the chat needs no setup step.
-  registerChatMcpRoute(app, deps);
+  registerChatMcpRoute(app, {
+    ...deps,
+    // A chat action's card goes to its thread's stream as soon as its call commits.
+    ...(deps.chatTurns?.publishCard
+      ? { onCard: (card: ChatCard) => deps.chatTurns?.publishCard?.(card) }
+      : {}),
+  });
   // The crew chat's threads (browser sessions only): an owner message waits as `queued` for a turn.
   registerChatRoutes(app, {
     db: deps.db,
@@ -687,7 +694,12 @@ export function createApp(
     if (!thread) return reply.code(404).type('text/plain').send('not found');
     return reply
       .type('text/html; charset=utf-8')
-      .send(withCsrf(req, renderThread(thread, listMessages(deps.db, thread.id))));
+      .send(
+        withCsrf(
+          req,
+          renderThread(thread, listMessages(deps.db, thread.id), listCards(deps.db, thread.id)),
+        ),
+      );
   });
 
   app.get('/doctor', async (req, reply) =>

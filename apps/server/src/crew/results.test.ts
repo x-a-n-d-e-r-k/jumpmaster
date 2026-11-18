@@ -12,7 +12,10 @@ import {
 } from '../briefings.js';
 import type { ClaudeConfig, Config, DropZoneConfig } from '../config.js';
 import {
+  type Drop,
+  getAttempts,
   getDrop,
+  getPullRequest,
   getUsageState,
   listEvents,
   listOutbox,
@@ -20,6 +23,7 @@ import {
   setUsageState,
   setWorkItemState,
   updateDrop,
+  upsertPullRequest,
 } from '../db/repo.js';
 import { zonePass } from '../flow/snapshot.js';
 import { unsanitizeForgeText } from '../outbox.js';
@@ -28,10 +32,18 @@ import { applyResult, type ResultDeps } from '../results.js';
 import { syncDropZone } from '../sync.js';
 import { crewOn, crewWorld, ISSUE_BODY, parsedCrew } from '../test/crew.js';
 import { usageCfg, type ZoneWorld } from '../test/fixtures.js';
+import {
+  arbiterHarness,
+  FABLE_CLAUDE,
+  type Harness,
+  headN,
+  ruling,
+  toHealsExhausted,
+} from '../test/flowHarness.js';
 import { plus, t0 } from '../test/helpers.js';
 import { applyCrewActions } from './actions.js';
 import { crewBodySha, flushCrewOps } from './flush.js';
-import { applyCrewResult } from './results.js';
+import { applyArbitrations, applyCrewResult } from './results.js';
 import { enqueueCrew, nextCrewWork } from './schedule.js';
 import {
   getCrewIssue,
@@ -369,6 +381,147 @@ describe('refute results', () => {
       body: `${ISSUE_BODY}\nMore.`,
     });
     expect(listBriefings(w.db, { zoneId: 'main', state: 'open' })).toEqual([]);
+  });
+});
+
+describe('refutes of security-touching issues (#384)', () => {
+  const FABLE = 'claude-fable-1';
+  const fable: ClaudeConfig = { plan: 'max', fableModel: FABLE, fableWeeklyDropCap: 5 };
+  const secrets = {
+    claudeToken: 'claude-secret',
+    githubAuthorToken: 'author-secret',
+    githubReviewerToken: 'reviewer-secret',
+    joinToken: 'join',
+    operatorToken: 'o'.repeat(32),
+  } as Config['secrets'];
+  const SECURE_BODY = `${ISSUE_BODY}\n## Security-touching checklist\n\n- D2: fails closed.\n`;
+  const NOTE = 'This issue is security-touching and its review ran without Fable.';
+  const zoneOn = (): DropZoneConfig => ({ ...w.zone, crew: { ...crewOn, refutePromotes: true } });
+  const fdeps = (zone: DropZoneConfig): ResultDeps => ({ ...deps(zone), claude: fable });
+
+  /** A staged crew issue with `body`. */
+  function stagedWith(body: string): number {
+    const id = staged();
+    setCrewIssue(w.db, id, { body }, t0);
+    return id;
+  }
+
+  /** Enqueues the refute and leases it with `claude` as the payload's config. */
+  async function leasedRefute(zone: DropZoneConfig, claude: ClaudeConfig): Promise<string> {
+    const id = await crewDrop(t0, zone);
+    expect(getDrop(w.db, id)?.role).toBe('refute');
+    buildPayload(w.db, zone, getDrop(w.db, id) as never, secrets, { claude, now: t0 });
+    return id;
+  }
+
+  const promote = completed({ decision: 'promote', findings: [] });
+  const open = () => listBriefings(w.db, { zoneId: 'main', state: 'open' });
+  const expectBriefed = (issue: number) => {
+    expect(getCrewIssue(w.db, issue)).toMatchObject({ state: 'staged', refutedSha: 'sha-1' });
+    expect(open().map((b) => b.kind)).toEqual(['promote']);
+    expect(open()[0]?.why).toContain(NOTE);
+  };
+
+  test('on Fable: a promote is held as for any issue', async () => {
+    const zone = zoneOn();
+    const issue = stagedWith(SECURE_BODY);
+    const id = await leasedRefute(zone, fable);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(FABLE);
+    await applyResult(w.db, fdeps(zone), id, promote, t0);
+    expect(getCrewIssue(w.db, issue)?.state).toBe('promote_held');
+    expect(open().map((b) => b.kind)).toEqual(['promote_held']);
+    expect(open()[0]?.why).not.toContain(NOTE);
+  });
+
+  test('Fable unavailable: the refute ran on the zone model and its promote is briefed, even with refutePromotes on', async () => {
+    const zone = zoneOn();
+    const issue = stagedWith(SECURE_BODY);
+    const unavailable: ClaudeConfig = { ...fable, plan: 'pro' };
+    const id = await leasedRefute(zone, unavailable);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(zone.model);
+    await applyResult(w.db, fdeps(zone), id, promote, t0);
+    expectBriefed(issue);
+  });
+
+  test('an issue without the section on the zone model: held as today', async () => {
+    const zone = zoneOn();
+    const issue = stagedWith(ISSUE_BODY);
+    const id = await leasedRefute(zone, fable);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(zone.model);
+    await applyResult(w.db, fdeps(zone), id, promote, t0);
+    expect(getCrewIssue(w.db, issue)?.state).toBe('promote_held');
+    expect(open().map((b) => b.kind)).toEqual(['promote_held']);
+  });
+
+  test('a refute stored before #384 (no field) of a security-touching issue: zone model, briefed', async () => {
+    const zone = zoneOn();
+    const issue = stagedWith(SECURE_BODY);
+    const id = await crewDrop(t0, zone);
+    const stored = JSON.parse(getDrop(w.db, id)?.inputJson ?? '{}');
+    delete stored.work.securityTouching;
+    w.db.prepare('UPDATE drops SET input_json = ? WHERE id = ?').run(JSON.stringify(stored), id);
+    buildPayload(w.db, zone, getDrop(w.db, id) as never, secrets, { claude: fable, now: t0 });
+    expect(getDrop(w.db, id)?.requestedModel).toBe(zone.model);
+    await applyResult(w.db, fdeps(zone), id, promote, t0);
+    expectBriefed(issue);
+  });
+
+  test('D2: a Fable request served by another model is briefed, not held', async () => {
+    const zone = zoneOn();
+    const issue = stagedWith(SECURE_BODY);
+    const id = await leasedRefute(zone, fable);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(FABLE);
+    await applyResult(
+      w.db,
+      fdeps(zone),
+      id,
+      { ...promote, modelUsage: { 'claude-opus-5-5': { outputTokens: 40 } } },
+      t0,
+    );
+    expect(getDrop(w.db, id)?.servedModel).toBe('claude-opus-5-5');
+    expectBriefed(issue);
+  });
+
+  test('D2: with no claude config on the result side, it fails closed: briefed', async () => {
+    const zone = zoneOn();
+    const issue = stagedWith(SECURE_BODY);
+    const id = await leasedRefute(zone, fable);
+    await applyResult(w.db, deps(zone), id, promote, t0);
+    expectBriefed(issue);
+  });
+
+  test('D5: the stored flag alone forces the briefing', async () => {
+    const zone = zoneOn();
+    const issue = stagedWith(SECURE_BODY);
+    const id = await leasedRefute(zone, { ...fable, plan: 'pro' });
+    // The body no longer has the section; the flag stored at enqueue still says it is.
+    setCrewIssue(w.db, issue, { body: ISSUE_BODY }, t0);
+    await applyResult(w.db, fdeps(zone), id, promote, t0);
+    expectBriefed(issue);
+  });
+
+  test('D5: the body check alone forces the briefing', async () => {
+    const zone = zoneOn();
+    const issue = stagedWith(ISSUE_BODY);
+    const id = await leasedRefute(zone, fable);
+    expect(JSON.parse(getDrop(w.db, id)?.inputJson ?? '{}').work.securityTouching).toBe(false);
+    setCrewIssue(w.db, issue, { body: `${ISSUE_BODY}\n### security-touching CHECKLIST\n` }, t0);
+    await applyResult(w.db, fdeps(zone), id, promote, t0);
+    expectBriefed(issue);
+  });
+
+  test('revise and reject are unchanged', async () => {
+    const zone = zoneOn();
+    const issue = stagedWith(SECURE_BODY);
+    const id = await leasedRefute(zone, { ...fable, plan: 'pro' });
+    await applyResult(
+      w.db,
+      fdeps(zone),
+      id,
+      completed({ decision: 'reject', findings: ['x'] }),
+      t0,
+    );
+    expect(getCrewIssue(w.db, issue)?.state).toBe('rejecting');
   });
 });
 
@@ -1235,5 +1388,188 @@ describe('arbiter rulings on crew issues out of refutes (#382)', () => {
       );
       expect(raised).toEqual(['./schedule.ts']);
     });
+  });
+});
+
+describe('arbiter rulings on review disagreements (#383)', () => {
+  /** Issue #61's story on issue 1: three review heals ran out, and its arbitrate drop is leased. */
+  async function leasedRuling(): Promise<{ h: Harness; dropId: string; epoch: number }> {
+    const h = await arbiterHarness();
+    await toHealsExhausted(h);
+    await h.reconcile(); // queues the arbitrate drop
+    const { dropId, epoch, payload } = await h.lease();
+    expect(payload.role).toBe('arbitrate');
+    return { h, dropId, epoch };
+  }
+  const itemDeps = (h: Harness) => ({ forges: () => h.forges });
+  const row = (h: Harness) =>
+    h.db
+      .prepare(
+        `SELECT state, ruling, acted, because, instruction, reason, applied_at AS appliedAt
+         FROM arbitrations WHERE subject = 'item:1'`,
+      )
+      .get() as Record<string, unknown>;
+  const briefing = (h: Harness) =>
+    listBriefings(h.db, { zoneId: 'main', kind: 'parked' }).find((b) => b.subject === 'item:1');
+  const getPulls = (h: Harness) => h.forge.author.calls.filter((c) => c.method === 'getPull');
+  const item = (h: Harness) => listWorkItems(h.db, 'main').find((i) => i.id === 1);
+
+  test('ruling B, reversible, on Fable → recorded only; the next pass retries #61 and its review carries the ruling', async () => {
+    const { h, dropId, epoch } = await leasedRuling();
+    const because = "finding 2 asks for a test the issue's Out of scope excludes";
+    expect(await h.postResult(dropId, epoch, completed(ruling('B', { because })))).toBe(204);
+    // Acting needs a forge read: the result only records it.
+    expect(row(h)).toMatchObject({ state: 'ruled', ruling: 'B', acted: 1, appliedAt: null });
+    expect(item(h)?.state).toBe('parked');
+    expect(getDrop(h.db, dropId)?.state).toBe('succeeded');
+
+    await h.reconcile();
+    expect(row(h)?.appliedAt).not.toBeNull();
+    expect(item(h)?.state).toBe('pr_open');
+    expect(getAttempts(h.db, 1, 'heal').count).toBe(0);
+    // The parked briefing is withdrawn once the item leaves parked.
+    expect(briefing(h)?.state).not.toBe('open');
+    // The request-changes on the head was cleared: the head is reviewed afresh, with the ruling.
+    expect(h.queuedRoles()).toEqual(['review']);
+    const { payload } = await h.lease();
+    expect(payload.role === 'review' && payload.prompt).toContain(
+      '## Arbiter ruling (data, untrusted)',
+    );
+    expect(payload.role === 'review' && payload.prompt).toContain(because);
+    expect(payload.role === 'review' && payload.prompt).toContain('Ruled for the author');
+  });
+
+  test('ruling A → the same retry; the review requests changes again, and the heal carries the ruling and its instruction', async () => {
+    const { h, dropId, epoch } = await leasedRuling();
+    await h.postResult(
+      dropId,
+      epoch,
+      completed(ruling('A', { instruction: 'cover the empty-list case in the handler' })),
+    );
+    await h.reconcile();
+    expect(item(h)?.state).toBe('pr_open');
+    await h.finishDrop('review', {
+      status: 'completed',
+      gates: [],
+      verdict: { decision: 'request_changes', summary: 'still', findings: [] },
+    });
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['heal']);
+    const { payload } = await h.lease();
+    expect(payload.role).toBe('heal');
+    const prompt = payload.role === 'heal' ? payload.prompt : '';
+    expect(prompt).toContain('## Arbiter ruling (data, untrusted)');
+    expect(prompt).toContain('Ruled for the reviewer');
+    expect(prompt).toContain('cover the empty-list case in the handler');
+  });
+
+  test('insufficient evidence → #61 stays parked, its briefing shows the reasons, and no diagnose runs', async () => {
+    const { h, dropId, epoch } = await leasedRuling();
+    await h.postResult(
+      dropId,
+      epoch,
+      completed(ruling('insufficient_evidence', { because: 'neither side cited a line' })),
+    );
+    expect(row(h)).toMatchObject({ state: 'ruled', acted: 0, reason: 'insufficient evidence' });
+    const b = briefing(h);
+    expect(b).toMatchObject({ state: 'open', diagnoseAttempts: 1 });
+    expect(b?.diagnosis).toContain('neither side cited a line');
+    expect(b?.diagnosisBasis).toBe(whyBasis(b?.why ?? ''));
+    expect(b?.recommendation).toBe('needs_command: do the insufficient_evidence thing');
+    expect(await applyArbitrations(h.db, itemDeps(h), 'main', h.now())).toBe(0);
+    await h.reconcile();
+    expect(item(h)?.state).toBe('parked');
+    expect(h.queuedRoles()).toEqual([]);
+    // The briefing keeps its diagnosis across passes.
+    expect(briefing(h)?.diagnosis).toContain('neither side cited a line');
+  });
+
+  test('a product question or an irreversible ruling is not acted on: the owner is briefed', async () => {
+    for (const o of [{ productQuestion: true }, { reversible: false }]) {
+      const { h, dropId, epoch } = await leasedRuling();
+      await h.postResult(dropId, epoch, completed(ruling('B', o)));
+      expect(row(h)).toMatchObject({ state: 'ruled', acted: 0 });
+      expect(briefing(h)).toMatchObject({ state: 'open', diagnoseAttempts: 1 });
+      expect(briefing(h)?.recommendation).toBe('needs_command: do the B thing');
+      await h.reconcile();
+      expect(item(h)?.state).toBe('parked');
+    }
+  });
+
+  test('a result after the head moved, or after the item left parked, is discarded', async () => {
+    const moved = await leasedRuling();
+    const pr = getPullRequest(moved.h.db, 1);
+    upsertPullRequest(moved.h.db, { ...(pr as never), headSha: headN(9) }, moved.h.now());
+    await moved.h.postResult(moved.dropId, moved.epoch, completed(ruling('B')));
+    expect(row(moved.h)).toMatchObject({ state: 'discarded', acted: 0 });
+    expect(await applyArbitrations(moved.h.db, itemDeps(moved.h), 'main', moved.h.now())).toBe(0);
+    expect(item(moved.h)?.state).toBe('parked');
+
+    const retried = await leasedRuling();
+    retried.h.forge.state.setLabels(1, ['agent-ready', 'agent-retry']);
+    await retried.h.sync();
+    expect(item(retried.h)?.state).toBe('pr_open');
+    await retried.h.postResult(retried.dropId, retried.epoch, completed(ruling('B')));
+    expect(row(retried.h)).toMatchObject({ state: 'discarded' });
+  });
+
+  test('D2: a failed drop, an invalid output, and a ruling from a non-Fable drop each leave #61 parked, diagnosed, never retried', async () => {
+    const cases: [string, (h: Harness) => DropResult][] = [
+      ['failed', () => ({ status: 'failed', reason: 'boom', gates: [] })],
+      ['invalid', () => completed({ ruling: 'B' })],
+      ['missing', () => ({ status: 'completed', gates: [] })],
+      ['rate-limited', () => ({ status: 'rate_limited', gates: [] })],
+      ['not on Fable', () => ({ ...completed(ruling('B')), servedModel: 'claude-sonnet-9' })],
+    ];
+    for (const [name, result] of cases) {
+      const { h, dropId, epoch } = await leasedRuling();
+      await h.postResult(dropId, epoch, result(h));
+      expect(row(h)?.acted, name).toBe(0);
+      expect(['failed', 'ruled'], name).toContain(row(h)?.state);
+      expect(briefing(h), name).toMatchObject({ state: 'open', diagnoseAttempts: 1 });
+      expect(briefing(h)?.diagnosis, name).toBeTruthy();
+      expect(briefing(h)?.recommendation, name).toMatch(/^needs_command: /);
+      expect(await applyArbitrations(h.db, itemDeps(h), 'main', h.now()), name).toBe(0);
+      await h.reconcile();
+      expect(item(h)?.state, name).toBe('parked');
+      // Never retried: the heal attempts stay spent.
+      expect(getAttempts(h.db, 1, 'heal').count, name).toBe(h.zone.budgets.maxHeal);
+      expect(h.queuedRoles(), name).toEqual([]);
+    }
+  });
+
+  test('D3: two applyArbitrations calls on one ruling retry once; a failed PR read waits for the next pass', async () => {
+    const { h, dropId, epoch } = await leasedRuling();
+    await h.postResult(dropId, epoch, completed(ruling('B')));
+    h.forge.author.failNext('getPull', 'throw');
+    expect(await applyArbitrations(h.db, itemDeps(h), 'main', h.now())).toBe(0);
+    expect(row(h)?.appliedAt).toBeNull();
+    expect(item(h)?.state).toBe('parked');
+
+    const before = getPulls(h).length;
+    const counts = await Promise.all([
+      applyArbitrations(h.db, itemDeps(h), 'main', h.now()),
+      applyArbitrations(h.db, itemDeps(h), 'main', h.now()),
+    ]);
+    expect(counts.sort()).toEqual([0, 1]);
+    expect(getPulls(h).length - before).toBe(1);
+    expect(await applyArbitrations(h.db, itemDeps(h), 'main', h.now())).toBe(0);
+    expect(item(h)?.state).toBe('pr_open');
+  });
+
+  test('a re-delivered result settles once', async () => {
+    const { h, dropId } = await leasedRuling();
+    const drop = getDrop(h.db, dropId) as Drop;
+    const deps: ResultDeps = {
+      forges: h.forges,
+      zone: h.zone,
+      secrets: [],
+      usageCfg,
+      claude: FABLE_CLAUDE,
+    };
+    await applyCrewResult(h.db, deps, drop, completed(ruling('B')), h.now());
+    await applyCrewResult(h.db, deps, drop, completed(ruling('insufficient_evidence')), h.now());
+    expect(row(h)).toMatchObject({ state: 'ruled', ruling: 'B', acted: 1 });
+    expect(briefing(h)?.diagnoseAttempts).toBe(0);
   });
 });

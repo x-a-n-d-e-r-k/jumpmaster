@@ -10,6 +10,8 @@ import {
 import type { ClaudeConfig, Config, DropZoneConfig } from '../config.js';
 import {
   getDrop,
+  getPullRequest,
+  getWorkItem,
   insertDrop,
   insertStick,
   listObservations,
@@ -18,6 +20,7 @@ import {
   setWorkItemState,
   setZoneMode,
   updateDrop,
+  upsertPullRequest,
 } from '../db/repo.js';
 import { reconcileZone } from '../flow/reconcile.js';
 import { zonePass } from '../flow/snapshot.js';
@@ -26,9 +29,26 @@ import { leaseNextDrop } from '../leases.js';
 import { buildPayload, promptVersions } from '../payloads.js';
 import { crewOn, crewWorld, ISSUE_BODY } from '../test/crew.js';
 import { makeZone, usageCfg, type ZoneWorld } from '../test/fixtures.js';
+import {
+  arbiterHarness,
+  FABLE_CLAUDE,
+  type Harness,
+  type HealRound,
+  headN,
+  reviewRounds,
+  ruling,
+  toHealsExhausted,
+  toPrOpen,
+} from '../test/flowHarness.js';
 import { plus, t0 } from '../test/helpers.js';
 import { applyCrewActions } from './actions.js';
-import { type CrewInputJson, enqueueCrew, nextCrewWork, requestCrewCycle } from './schedule.js';
+import {
+  type CrewInputJson,
+  enqueueCrew,
+  nextCrewWork,
+  requestCrewCycle,
+  reviewDisagreement,
+} from './schedule.js';
 import {
   getCrewIssue,
   getTriageRequest,
@@ -162,7 +182,7 @@ describe('enqueueCrew', () => {
     expect(work(d).role).toBe('diagnose');
     finish(d);
     const r = (await enqueue(plus(t0, MIN))) ?? '';
-    expect(work(r)).toEqual({ role: 'refute', crewIssueId: issue });
+    expect(work(r)).toEqual({ role: 'refute', crewIssueId: issue, securityTouching: false });
     finish(r);
     setCrewIssue(w.db, issue, { refutedSha: 'sha-1' }, t0);
     expect(nextCrewWork(w.db, w.zone, plus(t0, 2 * MIN))).toEqual({ role: 'crew-lead' });
@@ -203,7 +223,7 @@ describe('enqueueCrew', () => {
     expect(await enqueue(plus(t0, MIN))).toBeNull(); // one crew drop at a time
     finish(d);
     const r = (await enqueue(plus(t0, 2 * MIN))) ?? '';
-    expect(work(r)).toEqual({ role: 'refute', crewIssueId: issue });
+    expect(work(r)).toEqual({ role: 'refute', crewIssueId: issue, securityTouching: false });
     expect(getCrewIssue(w.db, issue)?.refuteCount).toBe(1);
     finish(r);
     setCrewIssue(w.db, issue, { refutedSha: 'sha-1' }, t0);
@@ -365,7 +385,7 @@ describe('triage scheduling (#184)', () => {
     expect(work(d).role).toBe('diagnose');
     finish(d);
     const r = (await enqueue(plus(t0, MIN))) ?? '';
-    expect(work(r)).toEqual({ role: 'refute', crewIssueId: issue });
+    expect(work(r)).toEqual({ role: 'refute', crewIssueId: issue, securityTouching: false });
     finish(r);
     setCrewIssue(w.db, issue, { refutedSha: 'sha-1' }, t0);
     expect(nextCrewWork(w.db, w.zone, plus(t0, 2 * MIN))).toEqual({
@@ -752,5 +772,239 @@ describe('arbitration of crew issues out of refutes (#382)', () => {
       role: 'arbitrate',
       basis: 'sha-2',
     });
+  });
+});
+
+describe('arbitration of review disagreements (#383)', () => {
+  const fable = FABLE_CLAUDE;
+
+  /** Issue #1, parked on its heals by the real flow: `rounds` say where each heal's feedback came from. */
+  async function parked(
+    rounds: HealRound[] = ['review', 'review', 'review'],
+    o: Parameters<typeof arbiterHarness>[0] = {},
+  ): Promise<Harness> {
+    const h = await arbiterHarness({
+      ...o,
+      zone: { ...(rounds.includes('ci') ? { ciRequired: true } : {}), ...o.zone },
+    });
+    await toHealsExhausted(h, rounds);
+    expect(getWorkItem(h.db, 1)).toMatchObject({
+      state: 'parked',
+      reason: 'budget exhausted: heal',
+    });
+    return h;
+  }
+
+  const enqueueOn = async (h: Harness, claude: ClaudeConfig | null = fable, zone = h.zone) =>
+    enqueueCrew(
+      h.db,
+      h.forges,
+      zone,
+      await zonePass(h.forges, zone, 'main'),
+      promptVersions(),
+      usageCfg,
+      h.now(),
+      undefined,
+      claude ? { claude } : {},
+    );
+  const parkedBriefing = (h: Harness) =>
+    listBriefings(h.db, { zoneId: 'main', state: 'open', kind: 'parked' })[0];
+  const rows = (h: Harness) =>
+    h.db.prepare('SELECT subject, basis, drop_id AS dropId, state FROM arbitrations').all();
+  const crewDrops = (h: Harness, role: string) =>
+    (h.db.prepare('SELECT id FROM drops WHERE role = ?').all(role) as { id: string }[]).map(
+      (r) => r.id,
+    );
+
+  test('#61: three review heals ran out, Fable available → one arbitrate drop on the PR head, before diagnose', async () => {
+    const h = await parked();
+    const b = parkedBriefing(h);
+    const head = headN(4);
+    expect(reviewDisagreement(h.db, getWorkItem(h.db, 1) as never)).toBe(true);
+    expect(nextCrewWork(h.db, h.zone, h.now(), true)).toEqual({
+      role: 'arbitrate',
+      subject: 'item',
+      itemId: 1,
+      briefingId: b?.id,
+      headSha: head,
+      basis: 'review',
+    });
+    const id = (await enqueueOn(h)) ?? '';
+    expect(getDrop(h.db, id)).toMatchObject({ role: 'arbitrate', workItemId: null });
+    expect(rows(h)).toEqual([{ subject: 'item:1', basis: 'review', dropId: id, state: 'pending' }]);
+    expect(crewDrops(h, 'diagnose')).toEqual([]);
+    expect(parkedBriefing(h)?.diagnoseAttempts).toBe(0);
+    // While it is in flight the item is neither arbitrated again nor diagnosed.
+    expect(nextCrewWork(h.db, h.zone, h.now(), true)).toEqual({ role: 'crew-lead' });
+
+    const p = buildPayload(h.db, h.zone, getDrop(h.db, id) as never, secretsFor(), {
+      claude: fable,
+      now: h.now(),
+    });
+    expect(DropPayloadSchema.parse(p)).toMatchObject({
+      role: 'arbitrate',
+      model: fable.fableModel,
+      checkout: { number: 1, branch: 'agent/issue-1', headSha: head },
+    });
+    const prompt = p.role === 'arbitrate' ? p.prompt : '';
+    expect(prompt).toContain('## Positions (trusted instructions)');
+    expect(prompt).toContain('A: the reviewer is right: the change does not yet meet the issue.');
+    expect(prompt).toContain(
+      'B: the author is right: the change meets the issue, and the remaining findings are not defects.',
+    );
+    expect(prompt).toContain('## Issue (data)');
+    expect(prompt).toContain(`#1 at head ${head}`);
+    expect(prompt).toContain('## Review verdicts on this item, newest first (data, untrusted)');
+    expect(prompt).toContain('the last finding');
+    expect(prompt).toContain('## Author reports (data, untrusted)');
+    expect(prompt).toContain('healed round 3');
+    expect(prompt).toContain('## Last heal feedback (data, untrusted)');
+    expect(prompt).toContain('finding 3');
+    expect(p.credentials).not.toHaveProperty('forgeToken', 'author-token');
+  });
+
+  test('the last heal came from a trusted person, or from CI → no arbitrate drop: diagnose as today', async () => {
+    for (const last of ['human', 'ci'] as const) {
+      const h = await parked(['review', 'review', last]);
+      expect(reviewDisagreement(h.db, getWorkItem(h.db, 1) as never), last).toBe(false);
+      expect(nextCrewWork(h.db, h.zone, h.now(), true), last).toMatchObject({
+        role: 'diagnose',
+        itemId: 1,
+      });
+      const id = (await enqueueOn(h)) ?? '';
+      expect(getDrop(h.db, id)?.role).toBe('diagnose');
+      expect(rows(h)).toEqual([]);
+    }
+  });
+
+  test('Fable unavailable, no claude config, or crew.arbiter off → diagnose as today', async () => {
+    const noFable: ClaudeConfig = { ...fable, plan: 'pro' };
+    for (const [claude, arbiter] of [
+      [noFable, true],
+      [null, true],
+      [fable, false],
+    ] as const) {
+      const h = await parked();
+      const zone = { ...h.zone, crew: { ...h.zone.crew, arbiter } };
+      const id = (await enqueueOn(h, claude, zone)) ?? '';
+      expect(getDrop(h.db, id)?.role).toBe('diagnose');
+      expect(rows(h)).toEqual([]);
+    }
+  });
+
+  test('reviewDisagreement is false for budget exhausted: review and budget exhausted: resolve', async () => {
+    // Review drops that died on one head: a failed review, not a disagreement.
+    const r = await arbiterHarness();
+    await toPrOpen(r, headN(1));
+    for (let i = 0; i < 6 && getWorkItem(r.db, 1)?.state === 'pr_open'; i++) {
+      await r.reconcile();
+      if (r.queuedRoles().includes('review')) {
+        await r.finishDrop('review', { status: 'failed', reason: 'boom', gates: [] });
+      }
+    }
+    syncParkBriefings(r.db, r.zone, r.now());
+    expect(getWorkItem(r.db, 1)).toMatchObject({ reason: 'budget exhausted: review' });
+    expect(reviewDisagreement(r.db, getWorkItem(r.db, 1) as never)).toBe(false);
+    expect(nextCrewWork(r.db, r.zone, r.now(), true)).toMatchObject({ role: 'diagnose' });
+
+    // Conflicting resolves after two review heals: the newest heal is still the reviewer's.
+    const s = await arbiterHarness();
+    await toPrOpen(s, headN(1));
+    s.forge.state.updateConflicts.add(1);
+    let head = 1;
+    for (let i = 0; i < 12 && getWorkItem(s.db, 1)?.state === 'pr_open'; i++) {
+      s.forge.state.compares.set(`main...${headN(head)}`, {
+        aheadBy: 1,
+        behindBy: 1,
+        baseSha: `b${i}`,
+        mergeBaseSha: 'b',
+      });
+      await s.reconcile();
+      const role = s.queuedRoles()[0];
+      if (role === 'review') {
+        await s.finishDrop('review', {
+          status: 'completed',
+          gates: [],
+          verdict:
+            head < 3
+              ? { decision: 'request_changes', summary: 'no', findings: [] }
+              : { decision: 'approve', summary: 'ok', findings: [] },
+        });
+      } else if (role === 'heal' || role === 'resolve') {
+        head++;
+        await s.finishDrop(role, {
+          status: 'completed',
+          headSha: headN(head),
+          gates: [],
+          ...(role === 'resolve' ? { mergeOutcome: 'conflicts' as const } : {}),
+        });
+      }
+    }
+    syncParkBriefings(s.db, s.zone, s.now());
+    expect(getWorkItem(s.db, 1)).toMatchObject({ reason: 'budget exhausted: resolve' });
+    expect(reviewDisagreement(s.db, getWorkItem(s.db, 1) as never)).toBe(false);
+    expect(nextCrewWork(s.db, s.zone, s.now(), true)).toMatchObject({ role: 'diagnose' });
+  });
+
+  test('reviewDisagreement is false for a closed PR and for an item whose arbitration is spent', async () => {
+    const h = await parked();
+    const pr = getPullRequest(h.db, 1);
+    upsertPullRequest(h.db, { ...(pr as never), state: 'closed' }, h.now());
+    expect(reviewDisagreement(h.db, getWorkItem(h.db, 1) as never)).toBe(false);
+    expect(nextCrewWork(h.db, h.zone, h.now(), true)).toMatchObject({ role: 'diagnose' });
+
+    const s = await parked();
+    expect(await enqueueOn(s)).not.toBeNull();
+    expect(reviewDisagreement(s.db, getWorkItem(s.db, 1) as never)).toBe(false);
+  });
+
+  test('D3: two enqueues in one pass, or two passes before the drop finishes → one arbitration, one drop', async () => {
+    const h = await parked();
+    const ids = await Promise.all([enqueueOn(h), enqueueOn(h)]);
+    expect(ids.filter((x) => x !== null)).toHaveLength(1);
+    expect(await enqueueOn(h)).toBeNull();
+    expect(rows(h)).toHaveLength(1);
+    expect(crewDrops(h, 'arbitrate')).toHaveLength(1);
+    // Even with the crew drop index out of the way, the item is not arbitrated twice.
+    for (const id of crewDrops(h, 'arbitrate')) updateDrop(h.db, id, { state: 'running' });
+    expect(nextCrewWork(h.db, h.zone, h.now(), true)).toEqual({ role: 'crew-lead' });
+  });
+
+  test('an arbitrate drop lost without a result fails closed: the item stays parked, briefed, undiagnosed', async () => {
+    const h = await parked();
+    const id = (await enqueueOn(h)) ?? '';
+    updateDrop(h.db, id, { state: 'lost' });
+    expect(nextCrewWork(h.db, h.zone, h.now(), true)).toEqual({ role: 'crew-lead' });
+    expect(rows(h)).toMatchObject([{ state: 'failed' }]);
+    expect(parkedBriefing(h)).toMatchObject({
+      diagnoseAttempts: 1,
+      diagnosis: 'The arbiter could not rule: the arbitrate drop ended without a ruling.',
+      recommendation: 'needs_command: the arbitrate drop ended without a ruling',
+    });
+    expect(getWorkItem(h.db, 1)?.state).toBe('parked');
+  });
+
+  test('#61 parks again after its arbitration was applied → diagnose and the owner, no second arbitration', async () => {
+    const h = await parked();
+    await h.reconcile(); // queues the arbitrate drop
+    const { dropId, epoch, payload } = await h.lease();
+    expect(payload.role).toBe('arbitrate');
+    await h.postResult(dropId, epoch, { status: 'completed', gates: [], crew: ruling('B') });
+    await h.reconcile(); // applies the ruling: the item is retried and its head reviewed afresh
+    expect(getWorkItem(h.db, 1)?.state).toBe('pr_open');
+    await reviewRounds(h, () => 'request_changes');
+    syncParkBriefings(h.db, h.zone, h.now());
+    expect(getWorkItem(h.db, 1)).toMatchObject({
+      state: 'parked',
+      reason: 'budget exhausted: heal',
+    });
+    expect(reviewDisagreement(h.db, getWorkItem(h.db, 1) as never)).toBe(false);
+    expect(nextCrewWork(h.db, h.zone, h.now(), true)).toMatchObject({
+      role: 'diagnose',
+      itemId: 1,
+    });
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['diagnose']);
+    expect(crewDrops(h, 'arbitrate')).toHaveLength(1);
   });
 });

@@ -10,6 +10,7 @@ import {
   type Ruling,
   WAITS_FOR_CREW,
 } from '../briefings.js';
+import type { Focus } from '../chat/focus.js';
 import { type ClaudePlan, type DropZoneConfig, STARTER_WARNING } from '../config.js';
 import type { CrewIssue } from '../crew/store.js';
 import type {
@@ -26,6 +27,7 @@ import type {
 } from '../db/repo.js';
 import { ACTIVE_DROP_STATES } from '../db/repo.js';
 import type { DoctorAction } from '../doctor/checks.js';
+import { fableWindow, isFableWindow, modelFamily, PER_MODEL_WINDOWS } from '../fable.js';
 import { currentObjective, type GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import type { Status } from '../status.js';
@@ -194,23 +196,8 @@ function meter(label: string, v: number | null, note?: string): string {
 /** The windows usage_state already carries, read by the gate. */
 const GATE_WINDOWS = new Set(['five_hour', 'seven_day']);
 
-/**
- * Windows that belong to one model the key does not name (#377): `seven_day_overage_included` is
- * Claude's "per-model bucket", labelled by the model of the drop that reported it.
- */
-export const PER_MODEL_WINDOWS = new Set(['seven_day_overage_included']);
+export { modelFamily, PER_MODEL_WINDOWS };
 
-/** A model id's family: `claude-fable-5-2` reads `Fable`; null for any other shape. */
-export function modelFamily(model: string | null): string | null {
-  const m = model === null ? null : /^claude-([a-z]+)-/.exec(model);
-  const f = m?.[1];
-  return f ? f[0]?.toUpperCase() + f.slice(1) : null;
-}
-
-/** The Fable window: its key names Fable, or it is a per-model window a Fable drop reported. */
-const isFableWindow = (row: UsageWindowRow): boolean =>
-  row.key.includes('fable') ||
-  (PER_MODEL_WINDOWS.has(row.key) && modelFamily(row.model) === 'Fable');
 const PERIODS: [string, string][] = [
   ['five_hour', '5-hour'],
   ['seven_day', '7-day'],
@@ -233,17 +220,6 @@ export function windowLabel(key: string): string {
     .map((w) => w[0]?.toUpperCase() + w.slice(1))
     .join(' ');
   return period ? `${rest} (${period})` : rest;
-}
-
-/** The Fable window: the one whose key names Fable, the most recently observed if several. */
-function fableWindow(windows: readonly UsageWindowRow[]): UsageWindowRow | undefined {
-  return windows
-    .filter(isFableWindow)
-    .reduce<UsageWindowRow | undefined>(
-      (best, w) =>
-        best === undefined || (w.observedAt ?? '') > (best.observedAt ?? '') ? w : best,
-      undefined,
-    );
 }
 
 /**
@@ -762,6 +738,21 @@ function briefingRefs(
 }
 
 /**
+ * The script behind every Ask about this button: it opens a thread focused on the button's object
+ * (`POST /api/chat/threads {focus}`) and goes to it. It binds each form once, so a page may carry it
+ * more than once.
+ */
+const ASK_SCRIPT = `<script>for(const f of document.querySelectorAll('form.ask')){if(f.dataset.bound)continue;f.dataset.bound='1';f.addEventListener('submit',async(e)=>{e.preventDefault();const r=await jmFetch('/api/chat/threads',{focus:{kind:f.dataset.focusKind,zoneId:f.dataset.focusZone,ref:f.dataset.focusRef}});if(r.ok){const b=await r.json();location.href='/chat/'+encodeURIComponent(b.thread.id);}else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});}</script>`;
+
+/**
+ * Ask about this (#103): a form that opens a chat thread focused on a zone, its goals or a briefing,
+ * then goes to `/chat/<id>`. The focus rides in escaped `data-focus-*` attributes.
+ */
+export function askButton(focus: Focus): string {
+  return `<form class="ask" data-focus-kind="${escapeHtml(focus.kind)}" data-focus-zone="${escapeHtml(focus.zoneId)}" data-focus-ref="${escapeHtml(focus.ref)}"><button>Ask about this</button></form>${ASK_SCRIPT}`;
+}
+
+/**
  * One briefing on its own page (`/briefings/<n>`), open or not, with its rulings: where a
  * reference to it from another page, or `ctl briefings`, leads.
  */
@@ -797,6 +788,7 @@ export function renderBriefing(s: {
     .join('');
   return page(
     `<p><a href="/briefings">All briefings</a> · <a href="${escapeHtml(zoneBriefingsHref(b.zoneId))}">Briefings of ${name(b.zoneId)}</a></p><h2>Briefing ${escapeHtml(b.id)}</h2>` +
+      askButton({ kind: 'briefing', zoneId: b.zoneId, ref: String(b.id) }) +
       briefingBlock(b, ctx, 'h3') +
       (b.state === 'open' ? RULE_SCRIPT : '') +
       `<h3 id="rulings">Rulings</h3>` +
@@ -884,7 +876,9 @@ export function renderGoals(s: {
       ? '<p>None.</p>'
       : `<ul>${s.skippedCrewUnpromoted.map((n) => `<li>${skippedLine(n)}</li>`).join('')}</ul>`;
   return page(
-    `<p><a href="/">Back</a> · <a href="${escapeHtml(zoneHref(s.zone.id))}">Zone</a></p><h2>Objectives (goal ladder): ${zoneName(s.zone, s.zones)}</h2>${ladder}${edit}` +
+    `<p><a href="/">Back</a> · <a href="${escapeHtml(zoneHref(s.zone.id))}">Zone</a></p><h2>Objectives (goal ladder): ${zoneName(s.zone, s.zones)}</h2>` +
+      askButton({ kind: 'goals', zoneId: s.zone.id, ref: s.zone.id }) +
+      `${ladder}${edit}` +
       `<h2>Crew issues</h2><table><tr><th>Objective</th><th>Key</th><th>Title</th><th>State</th><th>Issue</th><th>Work item</th><th>Findings</th></tr>${issues}</table>` +
       `<h2>Crew issues not started (no recorded promotion)</h2>${skipped}`,
   );

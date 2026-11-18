@@ -22,6 +22,7 @@ import { statusOf } from '../status.js';
 import { makeZone, zoneWorld } from '../test/fixtures.js';
 import { harness } from '../test/flowHarness.js';
 import {
+  askButton,
   dropRows,
   escapeHtml,
   FAVICON_HREF,
@@ -2062,5 +2063,53 @@ describe('the tab icon (#334)', () => {
     const res = await h.app.inject({ method: 'GET', url: '/login' });
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain(LINK);
+  });
+});
+
+describe('Ask about this (#103)', () => {
+  const askForm = (html: string): string => {
+    const at = html.indexOf('<form class="ask"');
+    expect(at).toBeGreaterThanOrEqual(0);
+    return html.slice(at, html.indexOf('</form>', at) + 7);
+  };
+
+  test('the zone page, the goals page and a briefing page each carry Ask about this with their focus', () => {
+    const goalsHtml = renderGoals({
+      zone: z,
+      zones: [z],
+      goals: undefined,
+      crewIssues: [],
+      items: [],
+      skippedCrewUnpromoted: [],
+      doneByRuling: new Map(),
+    });
+    const g = askForm(goalsHtml);
+    expect(g).toContain('Ask about this');
+    expect(g).toContain('data-focus-kind="goals"');
+    expect(g).toContain('data-focus-zone="main"');
+    expect(g).toContain('data-focus-ref="main"');
+    const briefingHtml = renderBriefing({
+      briefing: briefing({ id: 12 }),
+      rulings: [],
+      zones: [z],
+    });
+    const b = askForm(briefingHtml);
+    expect(b).toContain('Ask about this');
+    expect(b).toContain('data-focus-kind="briefing"');
+    expect(b).toContain('data-focus-zone="main"');
+    expect(b).toContain('data-focus-ref="12"');
+    // The page script posts the focus and goes to the new thread.
+    for (const html of [goalsHtml, briefingHtml]) {
+      expect(html).toContain("jmFetch('/api/chat/threads'");
+      expect(html).toContain("'/chat/'+encodeURIComponent(");
+    }
+  });
+
+  test("the button's focus values are escaped", () => {
+    const html = askButton({ kind: 'zone', zoneId: '"><img src=x>', ref: "a'&<b>" });
+    expect(html).not.toContain('<img');
+    expect(html).not.toContain('<b>');
+    expect(html).toContain('data-focus-zone="&quot;&gt;&lt;img src=x&gt;"');
+    expect(html).toContain('data-focus-ref="a&#39;&amp;&lt;b&gt;"');
   });
 });

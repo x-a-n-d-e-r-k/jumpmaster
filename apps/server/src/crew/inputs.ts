@@ -3,10 +3,11 @@ import { refuteVerdicts } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import { getPullRequest, getWorkItem } from '../db/repo.js';
+import type { Feedback } from '../flow/decide.js';
 import type { ZonePass } from '../flow/snapshot.js';
 import { getGoals, objectivesDone, zoneObjective } from '../goals.js';
 import { type ForgePair, unsanitizeForgeText } from '../outbox.js';
-import { crewTemplate, fence, neutralise } from '../payloads.js';
+import { crewTemplate, fence, gatherAuthorReports, neutralise } from '../payloads.js';
 import { isCrewFiled } from '../sync.js';
 import { crewIssueSlots } from './actions.js';
 import { getCrewIssue, getTriageRequest, listCrewIssues } from './store.js';
@@ -473,12 +474,6 @@ export function diagnoseInput(
        WHERE work_item_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 20`,
     )
     .all(itemId) as DropLine[];
-  const verdicts = db
-    .prepare(
-      `SELECT head_sha AS headSha, decision, summary, findings_json AS findingsJson FROM verdicts
-       WHERE work_item_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 5`,
-    )
-    .all(itemId) as VerdictLine[];
   const reasonOf = (d: DropLine): string => {
     try {
       const r = JSON.parse(d.resultJson ?? '{}') as { status?: unknown; reason?: unknown };
@@ -520,16 +515,105 @@ export function diagnoseInput(
       title: 'Review verdicts, newest first',
       name: 'verdicts',
       kind: 'untrusted',
+      text: verdictsText(db, itemId),
+    },
+  ]);
+}
+
+/** The item's latest review verdicts, newest first, with their findings: as diagnose reads them. */
+function verdictsText(db: Db, itemId: number): string {
+  const verdicts = db
+    .prepare(
+      `SELECT head_sha AS headSha, decision, summary, findings_json AS findingsJson FROM verdicts
+       WHERE work_item_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 5`,
+    )
+    .all(itemId) as VerdictLine[];
+  return (
+    verdicts
+      .map((v) => {
+        const findings = JSON.parse(v.findingsJson) as { severity: string; detail: string }[];
+        return [
+          `Head ${v.headSha}: ${v.decision}. ${v.summary}`,
+          ...findings.map((f) => `- ${f.severity}: ${f.detail}`),
+        ].join('\n');
+      })
+      .join('\n\n') || 'No verdicts.'
+  );
+}
+
+/** The two positions an arbiter weighs on a review disagreement: written here. */
+export const ITEM_POSITIONS = [
+  'A: the reviewer is right: the change does not yet meet the issue.',
+  'B: the author is right: the change meets the issue, and the remaining findings are not defects.',
+].join('\n');
+
+/** The feedback of the item's newest heal drop, as it was stored at enqueue, if any. */
+export function lastHealFeedback(db: Db, itemId: number): Feedback | null {
+  const row = db
+    .prepare(
+      `SELECT input_json AS inputJson FROM drops WHERE work_item_id = ? AND role = 'heal'
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(itemId) as { inputJson: string | null } | undefined;
+  try {
+    const f = (JSON.parse(row?.inputJson ?? 'null') as { feedback?: Feedback } | null)?.feedback;
+    return f && typeof f.source === 'string' && typeof f.text === 'string' ? f : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The arbitrate input for a review disagreement on a parked item: the goals and the two positions
+ * as instructions, the issue and the PR as data, and the verdicts, the author's reports and the
+ * last heal's feedback, all agent-written, as untrusted data.
+ */
+export function arbitrateItemInput(
+  db: Db,
+  zone: DropZoneConfig,
+  work: { itemId: number; headSha: string },
+  dropId: string,
+): string {
+  const item = getWorkItem(db, work.itemId);
+  if (!item || item.dropZoneId !== zone.id) throw new Error(`unknown work item ${work.itemId}`);
+  const pr = getPullRequest(db, work.itemId);
+  const { reports } = gatherAuthorReports(db, work.itemId);
+  const feedback = lastHealFeedback(db, work.itemId);
+  return assemble('arbitrate', dropId, [
+    goalsSection(db, zone),
+    { title: 'Positions', name: 'positions', kind: 'trusted', text: ITEM_POSITIONS },
+    {
+      title: 'Issue',
+      name: 'issue',
+      kind: 'data',
+      text: `#${item.issueNumber}: ${item.title}\n\n${item.body}`,
+    },
+    {
+      title: 'Pull request',
+      name: 'pull-request',
+      kind: 'data',
+      text: pr ? `#${pr.number} at head ${work.headSha}` : 'No pull request.',
+    },
+    {
+      title: 'Review verdicts on this item, newest first',
+      name: 'verdicts',
+      kind: 'untrusted',
+      text: verdictsText(db, work.itemId),
+    },
+    {
+      title: 'Author reports',
+      name: 'author-reports',
+      kind: 'untrusted',
       text:
-        verdicts
-          .map((v) => {
-            const findings = JSON.parse(v.findingsJson) as { severity: string; detail: string }[];
-            return [
-              `Head ${v.headSha}: ${v.decision}. ${v.summary}`,
-              ...findings.map((f) => `- ${f.severity}: ${f.detail}`),
-            ].join('\n');
-          })
-          .join('\n\n') || 'No verdicts.',
+        reports
+          .map((r) => `Report for ${r.head.slice(0, 7)} (${r.role}):\n${r.summary}`)
+          .join('\n\n') || 'No author report was recorded.',
+    },
+    {
+      title: 'Last heal feedback',
+      name: 'heal-feedback',
+      kind: 'untrusted',
+      text: feedback ? `From ${feedback.source}:\n${feedback.text}` : 'No heal feedback.',
     },
   ]);
 }

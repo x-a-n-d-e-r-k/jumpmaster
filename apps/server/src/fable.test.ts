@@ -8,14 +8,26 @@ import {
 } from './briefings.js';
 import type { ClaudeConfig, Config } from './config.js';
 import { creditsPass } from './credits.js';
+import { applyCrewActions } from './crew/actions.js';
 import { enqueueCrew } from './crew/schedule.js';
-import { getDrop, getUsageState, insertDrop, setWorkItemState, updateDrop } from './db/repo.js';
+import { setCrewIssue } from './crew/store.js';
+import {
+  getDrop,
+  getUsageState,
+  insertDrop,
+  listUsageWindows,
+  recordUsageWindows,
+  setWorkItemState,
+  updateDrop,
+} from './db/repo.js';
 import {
   FABLE_PLANS,
   FABLE_ROLES,
   fableStatus,
+  fableWindow,
   getFableState,
   isFableRequest,
+  isFableWindow,
   noteFableSignals,
   ranOnFable,
   resolveModel,
@@ -24,9 +36,10 @@ import {
 import { zonePass } from './flow/snapshot.js';
 import { buildPayload, promptVersions } from './payloads.js';
 import { applyResult } from './results.js';
-import { crewWorld } from './test/crew.js';
+import { crewWorld, ISSUE_BODY } from './test/crew.js';
 import { usageCfg, type ZoneWorld } from './test/fixtures.js';
 import { plus, t0 } from './test/helpers.js';
+import { renderHome } from './ui/pages.js';
 import { ingestRateLimit } from './usage.js';
 
 const FABLE = 'claude-fable-1';
@@ -179,6 +192,102 @@ describe('which model a drop gets', () => {
   });
 });
 
+describe('refutes of security-touching crew issues (#384)', () => {
+  const SECTION = '\n## Security-touching checklist\n\n- D2: fails closed.\n';
+
+  /** A staged crew issue with `body`, ready for a refute. */
+  function staged(body: string): number {
+    const r = applyCrewActions(
+      w.db,
+      w.zone,
+      {
+        fileIssues: [{ key: 'k', objective: 'document-every-endpoint', title: 'Add docs', body }],
+      },
+      { kind: 'drop', dropId: 'd0' },
+      t0,
+    );
+    const id = r.filed[0] ?? -1;
+    setCrewIssue(w.db, id, { state: 'staged', number: 40, bodySha: 'sha-1' }, t0);
+    return id;
+  }
+
+  /** Enqueues the refute through the real schedule and leases it: the payload's model. */
+  async function refuteModel(c: Pick<Config, 'claude'>): Promise<{ id: string; model: string }> {
+    const pass = await zonePass(w.forges, w.zone, 'main');
+    const id = await enqueueCrew(w.db, w.forges, w.zone, pass, promptVersions(), usageCfg, t0);
+    if (!id) throw new Error('no refute drop');
+    const drop = getDrop(w.db, id);
+    expect(drop?.role).toBe('refute');
+    const p = buildPayload(w.db, w.zone, drop as never, secrets, { claude: c.claude, now: t0 });
+    return { id, model: p.model };
+  }
+
+  const report = (utilization: number) =>
+    recordUsageWindows(
+      w.db,
+      { seven_day_overage_included: { utilization, resetsAt: plus(t0, DAY).toISOString() } },
+      plus(t0, -1000),
+      'claude-fable-5-2',
+    );
+
+  test('the section and Fable available: the refute runs on Fable, recorded as requested_model', async () => {
+    staged(`${ISSUE_BODY}${SECTION}`);
+    const { id, model } = await refuteModel(maxPlan);
+    expect(model).toBe(FABLE);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(FABLE);
+    expect(JSON.parse(getDrop(w.db, id)?.inputJson ?? '{}').work).toMatchObject({
+      role: 'refute',
+      securityTouching: true,
+    });
+  });
+
+  test('the section with Fable over its weekly limit: the zone model', async () => {
+    staged(`${ISSUE_BODY}${SECTION}`);
+    report(0.85);
+    expect(fableStatus(w.db, maxPlan, t0).available).toBe(false);
+    const { id, model } = await refuteModel(maxPlan);
+    expect(model).toBe(w.zone.model);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(w.zone.model);
+  });
+
+  test('another heading level and case counts the same', async () => {
+    staged(`${ISSUE_BODY}\n### security-touching CHECKLIST\n\n- x\n`);
+    expect((await refuteModel(maxPlan)).model).toBe(FABLE);
+  });
+
+  test('an issue without the section: the zone model, and securityTouching false', async () => {
+    staged(ISSUE_BODY);
+    const { id, model } = await refuteModel(maxPlan);
+    expect(model).toBe(w.zone.model);
+    expect(JSON.parse(getDrop(w.db, id)?.inputJson ?? '{}').work.securityTouching).toBe(false);
+    // As today: refute and crew-lead never get Fable by role.
+    for (const role of ['refute', 'crew-lead'] as const) {
+      expect(resolveModel(w.db, maxPlan, w.zone, role, t0)).toBe(w.zone.model);
+    }
+  });
+
+  test('a refute stored before #384 (no securityTouching) of a security-touching issue: the zone model', async () => {
+    staged(`${ISSUE_BODY}${SECTION}`);
+    const pass = await zonePass(w.forges, w.zone, 'main');
+    const id = await enqueueCrew(w.db, w.forges, w.zone, pass, promptVersions(), usageCfg, t0);
+    const stored = JSON.parse(getDrop(w.db, id ?? '')?.inputJson ?? '{}');
+    delete stored.work.securityTouching;
+    w.db.prepare('UPDATE drops SET input_json = ? WHERE id = ?').run(JSON.stringify(stored), id);
+    const p = buildPayload(w.db, w.zone, getDrop(w.db, id ?? '') as never, secrets, {
+      claude: maxPlan.claude,
+      now: t0,
+    });
+    expect(p.model).toBe(w.zone.model);
+  });
+
+  test('{ fable: true } makes any role a Fable role, but never the doctor', () => {
+    expect(resolveModel(w.db, maxPlan, w.zone, 'refute', t0, { fable: true })).toBe(FABLE);
+    expect(resolveModel(w.db, maxPlan, w.zone, 'refute', t0, { fable: false })).toBe(w.zone.model);
+    expect(resolveModel(w.db, maxPlan, w.zone, 'doctor', t0, { fable: true })).toBe(w.zone.model);
+    expect(resolveModel(w.db, cfg(), w.zone, 'refute', t0, { fable: true })).toBe(w.zone.model);
+  });
+});
+
 describe('what the drop reports', () => {
   test('servedModel picks the model with the most output tokens', () => {
     expect(
@@ -322,5 +431,143 @@ describe('Fable signals (best-effort, pending rehearsal)', () => {
     expect(creditsPass(w.db, t0)).toBe(1);
     expect(getFableState(w.db).disabledReason).toBeNull();
     expect(fableStatus(w.db, maxPlan, t0).available).toBe(true);
+  });
+});
+
+describe("Fable's budget: its reported weekly window (#381)", () => {
+  const FABLE_ID = 'claude-fable-5-2';
+  const tomorrow = plus(t0, DAY).toISOString();
+  const capped = cfg({ plan: 'max', fableModel: FABLE, fableWeeklyDropCap: 10 });
+  let made = 0;
+  const fableDrops = (n: number) => {
+    for (let i = 0; i < n; i++) pastDrop(`f${made++}`, FABLE, plus(t0, -(i + 1) * 60_000));
+  };
+  const report = (
+    key: string,
+    utilization: number,
+    model: string | null = FABLE_ID,
+    resetsAt: string | undefined = tomorrow,
+  ) => recordUsageWindows(w.db, { [key]: { utilization, resetsAt } }, plus(t0, -1000), model);
+  const fableMeter = (): string | undefined => {
+    const html = renderHome({
+      zones: [],
+      items: [],
+      drops: [],
+      usage: {
+        gate: 'open',
+        state: getUsageState(w.db),
+        plan: 'max',
+        windows: listUsageWindows(w.db),
+      },
+    });
+    return /<span>Fable \(7-day\)<\/span><b>([^<]*)<\/b>/.exec(html)?.[1];
+  };
+
+  test('live install: cap 10, 12 Fable drops, window at 1% → diagnose runs on Fable', async () => {
+    fableDrops(12);
+    report('seven_day_overage_included', 0.01);
+    expect(fableStatus(w.db, capped, t0)).toEqual({ available: true, reason: 'available' });
+    const id = await diagnoseDrop();
+    const p = buildPayload(w.db, w.zone, getDrop(w.db, id) as never, secrets, {
+      claude: capped.claude,
+      now: t0,
+    });
+    expect(p.model).toBe(FABLE);
+  });
+
+  test('a window at 85% with the limit at 80% → unavailable; diagnose runs on the zone model', () => {
+    report('seven_day_overage_included', 0.85);
+    expect(fableStatus(w.db, capped, t0)).toEqual({
+      available: false,
+      reason: 'Fable weekly usage at 85% (limit 80%)',
+    });
+    expect(resolveModel(w.db, capped, w.zone, 'diagnose', t0)).toBe(w.zone.model);
+  });
+
+  test('the limit is inclusive and follows claude.fableMaxUtilization', () => {
+    report('seven_day_overage_included', 0.8);
+    expect(fableStatus(w.db, capped, t0).reason).toBe('Fable weekly usage at 80% (limit 80%)');
+    const looser = cfg({ ...capped.claude, fableMaxUtilization: 0.9 });
+    expect(fableStatus(w.db, looser, t0).available).toBe(true);
+    const tighter = cfg({ ...capped.claude, fableMaxUtilization: 0.5 });
+    report('seven_day_overage_included', 0.6);
+    expect(fableStatus(w.db, tighter, t0).reason).toBe('Fable weekly usage at 60% (limit 50%)');
+  });
+
+  test('no window stored: the drop cap applies as before', () => {
+    fableDrops(10);
+    expect(fableStatus(w.db, capped, t0)).toEqual({
+      available: false,
+      reason: 'weekly cap reached (10 Fable drops in 7 days)',
+    });
+  });
+
+  test('a window past its reset is unreported: the drop cap applies', () => {
+    fableDrops(2);
+    report('seven_day_overage_included', 0.5, FABLE_ID, plus(t0, -60 * 60_000).toISOString());
+    expect(fableStatus(w.db, capped, t0)).toEqual({ available: true, reason: 'available' });
+    fableDrops(8);
+    report('seven_day_overage_included', 0.01, FABLE_ID, plus(t0, -60 * 60_000).toISOString());
+    expect(fableStatus(w.db, capped, t0).reason).toBe(
+      'weekly cap reached (10 Fable drops in 7 days)',
+    );
+  });
+
+  test("a per-model window reported by Opus is not Fable's: the drop cap applies", () => {
+    report('seven_day_overage_included', 0.95, 'claude-opus-5-5');
+    expect(fableStatus(w.db, capped, t0).available).toBe(true);
+    fableDrops(10);
+    expect(fableStatus(w.db, capped, t0).reason).toBe(
+      'weekly cap reached (10 Fable drops in 7 days)',
+    );
+    expect(fableMeter()).toBe('-');
+  });
+
+  test('a read error fails closed', () => {
+    w.db.exec('DROP TABLE usage_windows');
+    expect(fableStatus(w.db, capped, t0)).toEqual({
+      available: false,
+      reason: 'Fable usage could not be read',
+    });
+    expect(resolveModel(w.db, capped, w.zone, 'diagnose', t0)).toBe(w.zone.model);
+  });
+
+  test('an invalid utilization fails closed', () => {
+    const invalid = { available: false, reason: 'Fable usage report is invalid' };
+    report('seven_day_overage_included', -0.1);
+    expect(fableStatus(w.db, capped, t0)).toEqual(invalid);
+    // NaN as stored in the column (SQLite keeps it as non-numeric text).
+    w.db.prepare("UPDATE usage_windows SET utilization = 'NaN'").run();
+    expect(fableStatus(w.db, capped, t0)).toEqual(invalid);
+    expect(resolveModel(w.db, capped, w.zone, 'diagnose', t0)).toBe(w.zone.model);
+  });
+
+  test('a NaN recorded through recordUsageWindows reads as unreported: the drop cap, never unlimited', () => {
+    report('seven_day_overage_included', Number.NaN);
+    fableDrops(10);
+    expect(fableStatus(w.db, capped, t0).reason).toBe(
+      'weekly cap reached (10 Fable drops in 7 days)',
+    );
+  });
+
+  test('both shapes of the Fable window are honoured by the budget and the Floor meter alike', () => {
+    expect(fableMeter()).toBe('-');
+    report('seven_day_fable', 0.9, null);
+    expect(fableStatus(w.db, capped, t0).reason).toBe('Fable weekly usage at 90% (limit 80%)');
+    expect(fableMeter()).toBe('90%');
+    w.db.exec('DELETE FROM usage_windows');
+    report('seven_day_overage_included', 0.42);
+    expect(fableStatus(w.db, capped, t0).available).toBe(true);
+    expect(fableMeter()).toBe('42%');
+    expect(fableWindow(listUsageWindows(w.db))?.key).toBe('seven_day_overage_included');
+    expect(
+      isFableWindow({
+        key: 'seven_day_fable',
+        utilization: 0,
+        resetsAt: null,
+        observedAt: null,
+        model: null,
+      }),
+    ).toBe(true);
   });
 });
