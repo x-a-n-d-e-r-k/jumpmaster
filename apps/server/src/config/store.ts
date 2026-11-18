@@ -35,6 +35,12 @@ import {
   type ResolvedCredential,
   resolveCredentials,
 } from '../vault/credentials.js';
+import {
+  type AppRole,
+  appEntryName,
+  type GitHubAppEntry,
+  serializeAppEntry,
+} from '../vault/github-app-entries.js';
 import { type CredentialProblem, credentialProblems } from '../vault/problems.js';
 import { type ResolvedApps, resolveAppEntries } from '../vault/resolution.js';
 import {
@@ -776,6 +782,28 @@ export class ConfigStore implements ConfigSource {
       return { ok: false, issues: 'issues' in r ? r.issues : [] };
     }
     return { ok: true, meta: vault.meta(name) ?? meta };
+  }
+
+  /**
+   * Stores a GitHub App entry (`github-app/<owner>/<role>`) in the vault and swaps it in, as
+   * `putCredential` does: when the new set does not load, the previous entry is put back.
+   */
+  putAppEntry(
+    owner: string,
+    role: AppRole,
+    entry: GitHubAppEntry,
+  ): { ok: true } | { ok: false; issues: ConfigIssue[] } {
+    const vault = this.vault();
+    if (vault === 'disabled') return { ok: false, issues: [{ path: '', message: VAULT_DISABLED }] };
+    const name = appEntryName(owner, role);
+    const before = vault.snapshot(name);
+    vault.put(name, serializeAppEntry(entry), { now: this.o.now() });
+    const r = this.refreshSecrets();
+    if (!r.ok) {
+      vault.restore(name, before);
+      return { ok: false, issues: 'issues' in r ? r.issues : [] };
+    }
+    return { ok: true };
   }
 
   /** Removes a vault entry and swaps the credentials; refused when the vault is off. */

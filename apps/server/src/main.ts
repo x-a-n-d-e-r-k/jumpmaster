@@ -28,6 +28,8 @@ import { type ForgePair, ForgePairs, markPendingUnknown, pairOptionsFor } from '
 import { promptVersions } from './payloads.js';
 import { zonePass } from './scheduler.js';
 import { readSecretFile } from './secrets.js';
+import { AppManifestStore } from './setup/app-manifest-state.js';
+import { sweepPendingApps } from './setup/github-app-routes.js';
 import { recordPass } from './status.js';
 import { syncDropZone } from './sync.js';
 import { transcriptPruner } from './transcripts.js';
@@ -43,6 +45,9 @@ export function listeningLine(host: string, port: number, mode: string): string 
     ? `listening on ${host}:${port} inside the container (config: ${mode} mode); compose publishes it on the address in compose.yaml`
     : `listening on ${host}:${port} (config: ${mode} mode)`;
 }
+
+/** How often discarded pending GitHub Apps are swept and reported. */
+export const APP_MANIFEST_SWEEP_MS = 60_000;
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -210,6 +215,10 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
   let bound = { host: boot.listen.host, port: boot.listen.port };
   const setup = new SetupMode((code) => process.stderr.write(`${setupCodeLine(code, bound)}\n`));
 
+  // The GitHub App manifest flow's states and pendings: an app GitHub made but no one finished
+  // within ten minutes is discarded, and the log says to delete it on GitHub.
+  const appManifestStore = new AppManifestStore();
+
   // A ruling starts a pass at once; `guardedPass` is defined below and only called after listen.
   const app = createApp({
     setup,
@@ -226,6 +235,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     appBrokers,
     appTokens,
     installationVerifier: appTokens,
+    appManifestStore,
     heldReadTokens,
     resolvedApps: () => live.resolvedApps(),
     // The kill switch suspends each zone's app installations, and release unsuspends them (§4.2).
@@ -342,6 +352,14 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     void pruneTranscripts(new Date());
   }, 10_000);
 
+  const appManifestSweep = setInterval(() => {
+    try {
+      sweepPendingApps(appManifestStore, log);
+    } catch (e) {
+      log(`pending app sweep failed: ${errorMessage(e)}`);
+    }
+  }, APP_MANIFEST_SWEEP_MS);
+
   await app.listen({ host: boot.listen.host, port: boot.listen.port });
   const address = app.server.address();
   if (address && typeof address === 'object') bound = { ...bound, port: address.port };
@@ -358,6 +376,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
       poll.stop();
       images.stop();
       clearInterval(leaseTimer);
+      clearInterval(appManifestSweep);
       await app.close();
       db.close();
     },

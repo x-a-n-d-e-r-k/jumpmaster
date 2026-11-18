@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, test, vi } from 'vitest';
 import { openDb } from './db/open.js';
-import { listeningLine, pollTimer, start } from './main.js';
+import { APP_MANIFEST_SWEEP_MS, listeningLine, pollTimer, start } from './main.js';
 
 const env: Record<string, string> = {
   JM_CLAUDE_TOKEN: 'claude-token-value',
@@ -152,6 +152,40 @@ test('jumpmaster serve without a path starts in db mode from JM_DATA_DIR', async
   expect(written.join('')).toContain('SETUP CODE');
   expect(existsSync(join(dataDir, 'jumpmaster.sqlite'))).toBe(true);
   await srv.stop();
+});
+
+test('start arms the pending GitHub App sweep once a minute, and stop clears it', async () => {
+  const { file, dataDir } = install();
+  // A poll other than a minute, so the sweep is the one 60-second interval.
+  writeFileSync(
+    file,
+    JSON.stringify({
+      dataDir,
+      listen: { host: '0.0.0.0', port: 0 },
+      dropZones: [],
+      pollSeconds: 30,
+    }),
+  );
+  const armed: { fn: () => void; ms: number | undefined; handle: unknown }[] = [];
+  const realSet = globalThis.setInterval;
+  vi.spyOn(globalThis, 'setInterval').mockImplementation(((fn: () => void, ms?: number) => {
+    const handle = realSet(fn, ms);
+    armed.push({ fn, ms, handle });
+    return handle;
+  }) as typeof setInterval);
+  const cleared = vi.spyOn(globalThis, 'clearInterval');
+  vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  const srv = await start(file, env);
+  expect(APP_MANIFEST_SWEEP_MS).toBe(60_000);
+  const sweeps = armed.filter((a) => a.ms === APP_MANIFEST_SWEEP_MS);
+  expect(sweeps).toHaveLength(1);
+  const sweep = sweeps[0] as (typeof armed)[number];
+  // Nothing pending: a sweep runs without a word or a throw.
+  expect(() => sweep.fn()).not.toThrow();
+  expect(cleared.mock.calls.some(([h]) => h === sweep.handle)).toBe(false);
+  await srv.stop();
+  expect(cleared.mock.calls.some(([h]) => h === sweep.handle)).toBe(true);
 });
 
 test('a changed pollSeconds re-arms the poll timer', () => {
