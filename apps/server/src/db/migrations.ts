@@ -1290,12 +1290,40 @@ ALTER TABLE arbitrations ADD COLUMN applied_at TEXT;
 `;
 
 /**
- * v45 (#385): the audit of merged changes. `crew_audit_cursor` holds each zone's last audited
- * commit on the default branch; `crew_audits` records one audit per (zone, commit). `drops` is
- * rebuilt with foreign keys off so `audit` is a crew role: the work-item CHECK and the one-active
- * crew drop index both name it. Every v44 column is carried.
+ * v45 (#362, goal changes): one row per proposed GOAL.md change, from the chat or the crew. The
+ * server opens it as a PR on `jm/goal-change-<id>` (`base_sha`, `branch`, `pr_number`, `head_sha`),
+ * and merges it only at the SHA the owner confirmed in the browser (`confirmed_sha`).
  */
 const V45_SQL = `
+CREATE TABLE goal_changes (
+  id            INTEGER PRIMARY KEY,
+  zone_id       TEXT NOT NULL,
+  source        TEXT NOT NULL CHECK (source IN ('chat','crew')),
+  source_ref    TEXT,
+  text          TEXT NOT NULL,
+  text_sha256   TEXT NOT NULL,
+  base_sha      TEXT,
+  branch        TEXT,
+  pr_number     INTEGER,
+  head_sha      TEXT,
+  state         TEXT NOT NULL
+                CHECK (state IN ('proposed','open','confirmed','merged','refused','closed')),
+  confirmed_sha TEXT,
+  confirmed_at  TEXT,
+  error         TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+CREATE INDEX goal_changes_by_zone_state ON goal_changes (zone_id, state, id);
+`;
+
+/**
+ * v46 (#385): the audit of merged changes. `crew_audit_cursor` holds each zone's last audited
+ * commit on the default branch; `crew_audits` records one audit per (zone, commit). `drops` is
+ * rebuilt with foreign keys off so `audit` is a crew role: the work-item CHECK and the one-active
+ * crew drop index both name it. Every v45 column is carried.
+ */
+const V46_SQL = `
 CREATE TABLE crew_audit_cursor (
   zone_id      TEXT PRIMARY KEY,
   audited_sha  TEXT NOT NULL,
@@ -1418,7 +1446,8 @@ export const MIGRATIONS: Migration[] = [
   { version: 42, sql: V42_SQL },
   { version: 43, sql: V43_SQL },
   { version: 44, sql: V44_SQL },
-  { version: 45, sql: V45_SQL, foreignKeysOff: true },
+  { version: 45, sql: V45_SQL },
+  { version: 46, sql: V46_SQL, foreignKeysOff: true },
 ];
 
 /**

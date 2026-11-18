@@ -1511,8 +1511,8 @@ test('v44 adds applied_at to arbitrations, keeping every row unapplied', () => {
   db.close();
 });
 
-test('v45 adds the audit tables and lets audit be a crew drop, keeping every drop and its columns', () => {
-  const f = dbAt(44, (raw) => {
+test('v46 adds the audit tables and lets audit be a crew drop, keeping every drop and its columns', () => {
+  const f = dbAt(45, (raw) => {
     raw.exec(`INSERT INTO drop_zones (id, repo, default_branch, config_json)
       VALUES ('z', 'o/r', 'main', '{}')`);
     raw.exec(`INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, created_at,
@@ -1525,7 +1525,7 @@ test('v45 adds the audit tables and lets audit be a crew drop, keeping every dro
   });
   const db = openDb(f);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
-  expect(MIGRATIONS.find((m) => m.version === 45)?.foreignKeysOff).toBe(true);
+  expect(MIGRATIONS.find((m) => m.version === 46)?.foreignKeysOff).toBe(true);
   // The drops survive the rebuild with every column.
   expect(
     db

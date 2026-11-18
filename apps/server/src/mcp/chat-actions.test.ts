@@ -16,8 +16,9 @@ import type { Config } from '../config.js';
 import { flushCrewOps } from '../crew/flush.js';
 import { listCrewIssues } from '../crew/store.js';
 import { getZoneMode, setKilled, setUsageState, upsertDropZone } from '../db/repo.js';
+import { listGoalChanges, openGoalChange } from '../goal-change.js';
 import { objectivesDone } from '../goals.js';
-import { crewOn, crewWorld, ISSUE_BODY } from '../test/crew.js';
+import { crewOn, crewWorld, GOAL, ISSUE_BODY } from '../test/crew.js';
 import { makeZone, usageCfg } from '../test/fixtures.js';
 import { operatorSession, t0 } from '../test/helpers.js';
 import { type ChatPrincipal, checkMcpToken, mintChatToken } from './tokens.js';
@@ -207,6 +208,68 @@ describe('chat action tools', () => {
     ]);
   });
 
+  test('propose_goal_change records a proposed change and openGoalChange commits only goalPath on jm/goal-change-<id> and opens one PR', async () => {
+    const w = await world();
+    const text = GOAL.replace('### Ship the CLI', '### Ship the CLI\n\n### Write the user guide');
+    const r = await w.call('propose_goal_change', { zoneId: 'main', text });
+    expect(r.isError).toBeFalsy();
+    const [row] = listGoalChanges(w.db, 'main');
+    expect(row).toMatchObject({
+      zoneId: 'main',
+      source: 'chat',
+      sourceRef: `chat:${w.one.id}:22`,
+      text,
+      state: 'proposed',
+      prNumber: null,
+    });
+    const id = row?.id ?? 0;
+    // Nothing reaches the forge until the pass opens it.
+    expect(w.f.author.calls.filter((c) => c.method !== 'getFileAt')).toEqual([]);
+    expect(listCards(w.db, w.one.id)).toEqual([
+      expect.objectContaining({
+        kind: 'goal_change',
+        state: 'done',
+        target: `goal_change:${id}`,
+        summary: expect.stringContaining('+ ### Write the user guide'),
+      }),
+    ]);
+    w.f.state.branches.set('main', 'base0');
+    w.f.state.files.set('base0:GOAL.md', GOAL);
+    expect(await openGoalChange(w.db, w.forges, w.zone, id, t0)).toBe('open');
+    const branch = `jm/goal-change-${id}`;
+    expect(w.f.state.commits).toEqual([
+      expect.objectContaining({ branch, path: 'GOAL.md', parent: 'base0' }),
+    ]);
+    expect(w.f.state.files.get(`${branch}:GOAL.md`)).toBe(text);
+    const pulls = [...w.f.state.pulls.values()].filter((p) => p.headRef === branch);
+    expect(pulls).toHaveLength(1);
+    expect(listGoalChanges(w.db, 'main')[0]).toMatchObject({
+      state: 'open',
+      branch,
+      prNumber: pulls[0]?.number,
+    });
+  });
+
+  test('D1 propose_goal_change refuses a text that is not goals or holds a token, with a refused card', async () => {
+    const w = await world();
+    const bad = await w.call('propose_goal_change', { zoneId: 'main', text: 'just words' });
+    expect(bad.isError).toBe(true);
+    const token = `ghp_${'b'.repeat(36)}`;
+    const secret = await w.call('propose_goal_change', {
+      zoneId: 'main',
+      text: GOAL.replace('LIGHTHOUSE-TEXT', token),
+    });
+    expect(secret.isError).toBe(true);
+    expect(secret.text).not.toContain(token);
+    expect(listGoalChanges(w.db, 'main')).toEqual([]);
+    expect(listCards(w.db, w.one.id).map((c) => [c.kind, c.state])).toEqual([
+      ['goal_change', 'refused'],
+      ['goal_change', 'refused'],
+    ]);
+    expect(JSON.stringify(listCards(w.db, w.one.id))).not.toContain(token);
+    expect(w.f.author.calls.filter((c) => c.method !== 'getFileAt')).toEqual([]);
+  });
+
   test("D1 mark_objective_done refuses a key that isn't in the zone's goals or is already done", async () => {
     const w = await world();
     const unknown = await w.call('mark_objective_done', { zoneId: 'main', key: 'take-over' });
@@ -358,6 +421,7 @@ describe('chat action tools', () => {
         'set_zone_mode',
         'run_crew_cycle',
         'mark_objective_done',
+        'propose_goal_change',
       ].sort(),
     );
     const byName = new Map(listTools('chat', { actions: true }).map((t) => [t.name, t]));
@@ -366,6 +430,7 @@ describe('chat action tools', () => {
       'raise_briefing',
       'set_zone_mode',
       'run_crew_cycle',
+      'propose_goal_change',
     ]) {
       expect(byName.get(name)?.inputSchema.required).toContain('zoneId');
     }
