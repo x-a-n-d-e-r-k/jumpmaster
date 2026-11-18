@@ -264,7 +264,6 @@ function usageSection(u: HomeState['usage']): string {
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-/** A zone's briefings view: where the floor's held line and the zone page link. */
 /** A zone's page. */
 export const zoneHref = (id: string): string => `/zones/${encodeURIComponent(id)}`;
 
@@ -274,6 +273,7 @@ const githubBlobHref = (repo: string, path: string): string => {
   return `https://github.com/${enc(repo)}/blob/HEAD/${enc(path)}`;
 };
 
+/** A zone's briefings view: where the floor's held line and the zone page link. */
 export const zoneBriefingsHref = (zoneId: string): string =>
   `/briefings?zone=${encodeURIComponent(zoneId)}`;
 
