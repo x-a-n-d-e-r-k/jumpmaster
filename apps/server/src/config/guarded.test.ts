@@ -1,5 +1,4 @@
 import { describe, expect, test } from 'vitest';
-import type { z } from 'zod';
 import { DEFAULT_PROTECTED_PATHS, EditableSchema, STARTER_WARNING } from '../config.js';
 import { PRESET_EGRESS } from '../presets.js';
 import {
@@ -11,6 +10,7 @@ import {
   REFUSED_PATHS,
   SESSION_FORBIDDEN,
 } from './guarded.js';
+import { schemaLeaves } from './schema-leaves.js';
 
 const zone = (id = 'web', extra: Record<string, unknown> = {}) => ({
   id,
@@ -34,27 +34,6 @@ const newProject = (zone: string, repo: string) => ({
 });
 
 describe('the schema walk', () => {
-  /** Every leaf of the editable schema, as the rule tables name paths. */
-  function leaves(): string[] {
-    const out: string[] = [];
-    const walk = (s: z.ZodType, path: string): void => {
-      const def = (s as unknown as { _zod: { def: Record<string, unknown> } })._zod.def;
-      const t = def.type;
-      if (t === 'default' || t === 'optional' || t === 'nullable' || t === 'prefault')
-        return walk(def.innerType as z.ZodType, path);
-      if (t === 'object') {
-        for (const [k, v] of Object.entries(def.shape as Record<string, z.ZodType>))
-          walk(v, path ? `${path}.${k}` : k);
-        return;
-      }
-      if (t === 'array' && path === 'dropZones')
-        return walk(def.element as z.ZodType, 'dropZones[]');
-      out.push(path);
-    };
-    walk(EditableSchema, '');
-    return out.sort();
-  }
-
   test('every setting in the config schema is judged by exactly one table, and no table names a setting the schema lacks', () => {
     const tables = [
       ...GUARDED_PATHS.map((g) => g.path),
@@ -64,7 +43,7 @@ describe('the schema walk', () => {
     ];
     // A path in two tables would be judged twice; a new schema field in none would go unjudged.
     expect(new Set(tables).size).toBe(tables.length);
-    expect([...tables].sort()).toEqual(leaves());
+    expect([...tables].sort()).toEqual([...schemaLeaves().keys()]);
     for (const n of NOT_GUARDED) expect(n.reason.length, n.path).toBeGreaterThan(10);
   });
 
