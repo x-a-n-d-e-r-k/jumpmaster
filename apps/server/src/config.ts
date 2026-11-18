@@ -502,16 +502,17 @@ export const EditableSchema = z.object({
     .default({ throttleUtilization: 0.9, probeJitterSeconds: [30, 90], stopOnOverage: true }),
   /**
    * The Claude plan as declared (not detected). Fable runs only on a plan that includes it, with
-   * `fableModel` set, under a trailing seven-day drop cap.
+   * `fableModel` set, paced by its reported weekly usage (and, if positive, a trailing seven-day
+   * drop cap; 0, the default, is no cap).
    */
   claude: z
     .object({
       plan: z.enum(CLAUDE_PLANS).default('pro'),
       fableModel: z.string().min(1).optional(),
-      fableWeeklyDropCap: z.number().int().nonnegative().default(5),
+      fableWeeklyDropCap: z.number().int().nonnegative().default(0),
       /**
        * Fable runs while Claude reports its weekly window under this share. Until Claude reports
-       * it, `fableWeeklyDropCap` applies instead.
+       * it, a positive `fableWeeklyDropCap` applies instead.
        */
       fableMaxUtilization: z.number().min(0).max(1).default(0.8),
       /**
@@ -525,7 +526,7 @@ export const EditableSchema = z.object({
         })
         .optional(),
     })
-    .default({ plan: 'pro', fableWeeklyDropCap: 5, fableMaxUtilization: 0.8 }),
+    .default({ plan: 'pro', fableWeeklyDropCap: 0, fableMaxUtilization: 0.8 }),
   /**
    * Run trooper images only from a stick that verifies signatures (`image-verify-v1`) under the
    * `signed` policy. Off by default; the generated install turns it on.

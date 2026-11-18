@@ -63,7 +63,7 @@ export type ResultDeps = {
   claude?: ClaudeConfig;
 };
 
-const DEFAULT_CLAUDE: ClaudeConfig = { plan: 'pro', fableWeeklyDropCap: 5 };
+const DEFAULT_CLAUDE: ClaudeConfig = { plan: 'pro', fableWeeklyDropCap: 0 };
 
 const TERMINAL: ReadonlySet<DropState> = new Set(['succeeded', 'failed', 'lost', 'cancelled']);
 
