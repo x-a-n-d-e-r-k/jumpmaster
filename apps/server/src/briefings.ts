@@ -860,6 +860,22 @@ export function diagnosePending(db: Db, zone: DropZoneConfig, b: Briefing, now: 
   );
 }
 
+/** The ids of `briefings` the crew is still to diagnose (`diagnosePending`), each by its zone. */
+export function pendingDiagnoses(
+  db: Db,
+  zones: readonly DropZoneConfig[],
+  briefings: readonly Briefing[],
+  now: Date,
+): Set<number> {
+  const byId = new Map(zones.map((z) => [z.id, z]));
+  const pending = new Set<number>();
+  for (const b of briefings) {
+    const zone = byId.get(b.zoneId);
+    if (zone && diagnosePending(db, zone, b, now)) pending.add(b.id);
+  }
+  return pending;
+}
+
 /** The parked briefing the server raises for `item` now. */
 function parkBriefing(db: Db, zoneId: string, item: WorkItem): NewBriefing {
   const reason = item.reason ?? 'no reason recorded';
