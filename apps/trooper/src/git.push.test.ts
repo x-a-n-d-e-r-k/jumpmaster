@@ -575,6 +575,84 @@ describe('pushStaged', () => {
   });
 });
 
+describe('root git and payload-derived revisions (issue #262)', () => {
+  /** The git subcommand of an argv, past `-c k=v` pairs and other global options. */
+  const sub = (argv: string[]): string => {
+    for (let i = 1; i < argv.length; i++) {
+      if (argv[i] === '-c') i++;
+      else if (!argv[i]?.startsWith('-')) return argv[i] as string;
+    }
+    return '';
+  };
+
+  /**
+   * Every root git call (a root-owned GIT_DIR, never the agent's identity) whose argv carries a
+   * payload- or grant-derived value as an argument has `--end-of-options` ahead of it. Values
+   * inside an option (`--force-with-lease=<ref>:<lease>`) are git's to parse, not an argument.
+   */
+  function expectEndOfOptions(calls: Call[], derived: string[]): Set<string> {
+    const seen = new Set<string>();
+    for (const c of calls) {
+      if (c.argv[0] !== 'git' || !c.env.GIT_DIR) continue;
+      const first = c.argv.findIndex(
+        (a, i) => i > 0 && !a.startsWith('-') && derived.some((d) => a.includes(d)),
+      );
+      if (first === -1) continue;
+      seen.add(sub(c.argv));
+      const eoo = c.argv.indexOf('--end-of-options');
+      expect(eoo, c.argv.join(' ')).toBeGreaterThan(0);
+      expect(eoo, c.argv.join(' ')).toBeLessThan(first);
+      // Nothing that looks like an option follows it from a payload.
+      expect(c.argv.indexOf(sub(c.argv)), c.argv.join(' ')).toBeLessThan(eoo);
+    }
+    return seen;
+  }
+
+  test('every root call that takes a revision from the grant or payload ends options first', async () => {
+    const w = await world('endofoptions');
+    writeFileSync(join(w.dir, 'e.txt'), 'e\n');
+    await commitIfDirty(w.dir, 'feat: e');
+    const head = await headSha(w.dir);
+    const rec = recordSpawn();
+    expect(await stageAndPush(w, { expectSha: head })).toMatchObject({ status: 'pushed' });
+    const seen = expectEndOfOptions(rec.calls, [B, w.s0, 'refs/heads/main']);
+    // The test covers the calls it exists for: a new one without the marker fails above.
+    for (const s of ['fetch', 'diff', 'log', 'rev-parse', 'push']) expect(seen).toContain(s);
+  });
+
+  test('the mirror fetches (clone and refresh) end options before the url and refspecs', async () => {
+    const rec = recordSpawn();
+    const w = await world('endofoptions-mirror');
+    await mirrorFetch(w.mirror, 't', w.target, [B, 'main']);
+    const derived = ['refs/heads/', w.origin];
+    const fetches = rec.calls.filter(
+      (c) => c.argv[0] === 'git' && c.env.GIT_DIR && c.argv.includes('fetch'),
+    );
+    // cloneRepo's all-heads fetch and the refresh of the payload's branches.
+    expect(fetches.length).toBeGreaterThanOrEqual(2);
+    expect(fetches.some((c) => c.argv.includes(`+refs/heads/${B}:refs/heads/${B}`))).toBe(true);
+    expect(fetches.some((c) => c.argv.includes('+refs/heads/*:refs/heads/*'))).toBe(true);
+    expect(expectEndOfOptions(fetches, derived)).toEqual(new Set(['fetch']));
+  });
+
+  test('the remote check after a failed push ends options too', async () => {
+    const w = await world('endofoptions-stale');
+    const h = w.human();
+    git(h, 'switch', '-q', B);
+    writeFileSync(join(h, 'h.txt'), 'h\n');
+    git(h, 'add', '.');
+    git(h, 'commit', '-q', '-m', 'human');
+    git(h, 'push', '-q', 'origin', `HEAD:refs/heads/${B}`);
+    writeFileSync(join(w.dir, 'f.txt'), 'f\n');
+    await commitIfDirty(w.dir, 'feat: f');
+    const rec = recordSpawn();
+    expect(await stageAndPush(w, { expectSha: await headSha(w.dir) })).toMatchObject({
+      status: 'failed',
+    });
+    expect(expectEndOfOptions(rec.calls, [B, w.s0])).toContain('ls-remote');
+  });
+});
+
 /** Carried over from the deleted in-container push suites: the same refusals, now on the push path. */
 describe('pushStaged: guard cases carried over from the in-container push', () => {
   test('a protected path git would C-quote (non-ASCII) is still refused', async () => {

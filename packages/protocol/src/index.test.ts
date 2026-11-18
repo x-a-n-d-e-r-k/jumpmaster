@@ -591,7 +591,7 @@ describe('push protocol', () => {
       name: 'n',
       branch: 'agent/x',
       base: 'main',
-      lease: 'l',
+      lease: '',
       protectedPaths: ['.github/**'],
       secrets: ['s'],
     };
@@ -600,6 +600,63 @@ describe('push protocol', () => {
     expect(PushGrantSchema.safeParse({ ...grant, extra: 1 }).success).toBe(false);
     // A grant without a credential is no grant.
     expect(PushGrantSchema.safeParse({ ...grant, token: '' }).success).toBe(false);
+  });
+
+  test('grant lease is a full SHA or empty; base and branch are safe ref names (issue #262)', () => {
+    const grant = {
+      token: 't',
+      owner: 'o',
+      name: 'n',
+      branch: 'agent/issue-1',
+      base: 'main',
+      lease: '',
+      protectedPaths: [],
+      secrets: [],
+    };
+    const ok = (over: Record<string, unknown>) => PushGrantSchema.safeParse({ ...grant, ...over });
+    expect(ok({}).success).toBe(true);
+    expect(ok({ lease: SHA_A }).success).toBe(true);
+    for (const lease of ['-x', 'refs/heads/main', 'main', SHA_A.toUpperCase(), SHA_A.slice(1)])
+      expect(ok({ lease }).success, lease).toBe(false);
+    for (const base of ['main', 'develop', 'release/1.x', 'v2_stable'])
+      expect(ok({ base }).success, base).toBe(true);
+    for (const bad of [
+      '',
+      '-x',
+      '--output=/x',
+      'a..b',
+      'a b',
+      'a~1',
+      'a^',
+      'a:b',
+      'x.lock',
+      'a/',
+      '/a',
+      'a//b',
+      'a@{1}',
+      '.a',
+      'a/.b',
+      'a*',
+      'a?',
+      'a[',
+      'a\\b',
+      '@',
+      'a\u0001',
+    ]) {
+      expect(ok({ base: bad }).success, `base ${JSON.stringify(bad)}`).toBe(false);
+      expect(ok({ branch: bad }).success, `branch ${JSON.stringify(bad)}`).toBe(false);
+    }
+  });
+
+  test('a result SHA is a full lowercase 40-hex SHA (issue #262)', () => {
+    expect(
+      DropResultSchema.safeParse({ status: 'interrupted', gates: [], headSha: SHA_A }).success,
+    ).toBe(true);
+    for (const headSha of ['--x', '--output=/x', SHA_A.slice(1), SHA_A.toUpperCase(), 'main', ''])
+      expect(
+        DropResultSchema.safeParse({ status: 'interrupted', gates: [], headSha }).success,
+        headSha,
+      ).toBe(false);
   });
 
   test('push result variants', () => {

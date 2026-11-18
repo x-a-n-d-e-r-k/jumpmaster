@@ -303,7 +303,9 @@ across GitHub, so the name carries a short install id; the operator may edit it.
   process but the trooper. *[Corrected, as built: trooper containers run with `Init: true`, so
   Docker's init is PID 1 and the trooper is its child, not PID 1. The sweep is `sweepUid`, which
   SIGKILLs every process whose real or effective uid is the agent's, and the push role then
-  re-checks `agentProcessesAlive` for up to two seconds and refuses (retryable) if any survives.
+  sweeps and reads `agentProcessesAlive` ten times over about two seconds and refuses (retryable)
+  if any reading is non-zero (issue #262). A pid whose status can't be read, other than because
+  it exited, counts as alive.
   The private PID namespace is still what makes that list complete; an agent process left in the
   agent's container is gone with that container, which the stick removes first.]* The push
   container tightens it:

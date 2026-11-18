@@ -371,7 +371,8 @@ describe('runDrop with services', () => {
     services: [{ name: 'db', image: 'postgres:16', port: 5432, readyTimeoutSeconds: 60 }],
   };
   const allowed = new Set(['trooper', 'postgres:16']);
-  const done = 'JM_RESULT {"status":"completed","headSha":"a","gates":[]}';
+  const done =
+    'JM_RESULT {"status":"completed","headSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","gates":[]}';
 
   test('a service image off the allow-list fails the drop before any container starts', async () => {
     const d = fakeDriver([done]);
@@ -493,7 +494,8 @@ describe('artifacts', () => {
 });
 
 describe('events sent in parts', () => {
-  const RESULT = 'JM_RESULT {"status":"completed","headSha":"a","gates":[]}';
+  const RESULT =
+    'JM_RESULT {"status":"completed","headSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","gates":[]}';
   const TS = '2026-11-16T10:00:00.000Z';
   let ids = 0;
   const lines = (kind: TrooperEvent['kind'], data: Record<string, unknown>) =>
@@ -613,12 +615,15 @@ describe('runDrop', () => {
   test('relays events and posts the result', async () => {
     const d = fakeDriver([
       'JM_EVENT {"ts":"t","kind":"phase","data":{"phase":"clone"}}',
-      'JM_RESULT {"status":"completed","headSha":"a","gates":[]}',
+      'JM_RESULT {"status":"completed","headSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","gates":[]}',
     ]);
     const client = fakeClient();
     await runDrop(payload, { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' });
     expect(client.events.flat()).toHaveLength(1);
-    expect(client.result).toMatchObject({ status: 'completed', headSha: 'a' });
+    expect(client.result).toMatchObject({
+      status: 'completed',
+      headSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    });
   });
 
   // The trooper finds the payload on a polluted stdin by this prefix (see trooper readPayload).
@@ -918,7 +923,9 @@ describe('runDrop', () => {
   });
 
   test('a real result whose post fails is not overwritten by a synthetic failure', async () => {
-    const d = fakeDriver(['JM_RESULT {"status":"completed","headSha":"a","gates":[]}']);
+    const d = fakeDriver([
+      'JM_RESULT {"status":"completed","headSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","gates":[]}',
+    ]);
     const posted: DropResult[] = [];
     const client = {
       ...fakeClient(),
@@ -931,7 +938,10 @@ describe('runDrop', () => {
       runDrop(payload, { client, driver: d.driver, heartbeatMs: 10, stickId: 's1' }),
     ).rejects.toThrow('result failed: 502');
     expect(posted).toHaveLength(1);
-    expect(posted[0]).toMatchObject({ status: 'completed', headSha: 'a' });
+    expect(posted[0]).toMatchObject({
+      status: 'completed',
+      headSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    });
   });
 
   test('logs() throwing stops the container and posts a failed result', async () => {
@@ -1339,7 +1349,8 @@ describe('the sweep', () => {
 });
 
 describe('egress', () => {
-  const done = 'JM_RESULT {"status":"completed","headSha":"a","gates":[]}';
+  const done =
+    'JM_RESULT {"status":"completed","headSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","gates":[]}';
   const enforce: DropPayload = {
     ...payload,
     image: 'trooper',

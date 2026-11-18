@@ -19,15 +19,20 @@ test('an allowed Host can read the home page', async () => {
 
 test("the work list shows Command's gate change allowance for the item's current head", async () => {
   const h = await harness();
-  await toPrOpen(h, 'abcdef1234567890');
+  await toPrOpen(h, '6162636465663132333435363738393000000000');
   const item = listWorkItems(h.db, h.zone.id)[0];
   if (!item) throw new Error('no item');
   const home = async () => (await h.view('/work?state=pr_open')).body;
   expect(await home()).not.toContain('allowed by Command');
   const prNumber = getPullRequest(h.db, item.id)?.number ?? 0;
-  const allowance = { itemId: item.id, prNumber, headSha: 'abcdef1234567890', rulingId: 1 };
+  const allowance = {
+    itemId: item.id,
+    prNumber,
+    headSha: '6162636465663132333435363738393000000000',
+    rulingId: 1,
+  };
   recordGateAllowance(h.db, { ...allowance, mergeBaseSha: 'mb', digest: 'd' }, h.now());
-  expect(await home()).toContain('gate change allowed by Command for abcdef1');
+  expect(await home()).toContain('gate change allowed by Command for 6162636');
 });
 
 test('a stick on another address still reaches its routes, which use their own token', async () => {

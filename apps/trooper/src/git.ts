@@ -340,6 +340,7 @@ export async function mirrorFetch(
       '--no-tags',
       '--no-write-fetch-head',
       '--prune',
+      '--end-of-options',
       url,
       ...refs.map((r) => `+refs/heads/${r}:refs/heads/${r}`),
     ],
@@ -478,7 +479,15 @@ export async function remoteBranchSha(
     const url = remoteUrl(target);
     const out = await runGit(
       undefined,
-      [...PRISTINE, ...protocolFor(url), 'ls-remote', '--heads', url, `refs/heads/${branch}`],
+      [
+        ...PRISTINE,
+        ...protocolFor(url),
+        'ls-remote',
+        '--heads',
+        '--end-of-options',
+        url,
+        `refs/heads/${branch}`,
+      ],
       token,
       { gitDir: scratch, ...(timeoutMs !== undefined ? { timeoutMs } : {}) },
     );
@@ -655,7 +664,15 @@ async function checkStaged(
   // -z: paths are raw bytes, never C-quoted, so a non-ASCII name cannot dodge the glob.
   const diff = await runGit(
     undefined,
-    ['--no-replace-objects', 'diff', '--name-status', '-z', '-M', `refs/jm/base...${ref}`],
+    [
+      '--no-replace-objects',
+      'diff',
+      '--name-status',
+      '-z',
+      '-M',
+      '--end-of-options',
+      `refs/jm/base...${ref}`,
+    ],
     '',
     { gitDir: bareDir },
   );
@@ -680,6 +697,7 @@ async function checkStaged(
       '--no-ext-diff',
       '--no-color',
       '-U0',
+      '--end-of-options',
       `refs/jm/base...${ref}`,
     ],
     '',
@@ -691,7 +709,14 @@ async function checkStaged(
     .join('\n');
   const messages = await runGit(
     undefined,
-    ['--no-replace-objects', 'log', '--format=%B', `${since}..${ref}`, '^refs/jm/base'],
+    [
+      '--no-replace-objects',
+      'log',
+      '--format=%B',
+      '--end-of-options',
+      `${since}..${ref}`,
+      '^refs/jm/base',
+    ],
     '',
     { gitDir: bareDir },
   );
@@ -702,6 +727,7 @@ async function checkStaged(
       '--no-replace-objects',
       'log',
       '--format=%an%x00%ae%x00%cn%x00%ce',
+      '--end-of-options',
       `${since}..${ref}`,
       '^refs/jm/base',
     ],
@@ -767,6 +793,7 @@ export async function stageFromAgent(
           '--no-tags',
           '--no-write-fetch-head',
           `--upload-pack=${uploadPack}`,
+          '--end-of-options',
           `file://${dir}`,
           `+${ref}:${ref}`,
         ],
@@ -788,9 +815,14 @@ export async function stageFromAgent(
     // Nothing the agent fetch could have touched survives.
     writeFileSync(join(pushDir, 'config'), BARE_CONFIG);
     rmSync(join(pushDir, 'hooks'), { recursive: true, force: true });
-    const head = await runGit(undefined, ['rev-parse', '--verify', `${ref}^{commit}`], '', {
-      gitDir: pushDir,
-    });
+    const head = await runGit(
+      undefined,
+      ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`],
+      '',
+      {
+        gitDir: pushDir,
+      },
+    );
     keep = true;
     return { pushDir, head };
   } finally {
@@ -857,6 +889,7 @@ export async function pushStaged(
           '-q',
           '--no-tags',
           '--no-write-fetch-head',
+          '--end-of-options',
           url,
           `+refs/heads/${grant.base}:refs/jm/base`,
         ],
@@ -874,9 +907,14 @@ export async function pushStaged(
       grant.secrets,
     );
     if (refusal) throw new PushFailure(refusal, false);
-    const head = await runGit(undefined, ['rev-parse', '--verify', `${ref}^{commit}`], '', {
-      gitDir: pushDir,
-    });
+    const head = await runGit(
+      undefined,
+      ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`],
+      '',
+      {
+        gitDir: pushDir,
+      },
+    );
     if (grant.expectSha !== undefined && head !== grant.expectSha) {
       throw new PushFailure(
         `pushed branch is not the gated commit: ${head} != ${grant.expectSha}`,
@@ -898,6 +936,7 @@ export async function pushStaged(
           'push',
           '--porcelain',
           `--force-with-lease=${ref}:${lease}`,
+          '--end-of-options',
           url,
           `${ref}:${ref}`,
         ],

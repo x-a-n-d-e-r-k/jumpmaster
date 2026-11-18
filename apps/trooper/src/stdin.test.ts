@@ -8,7 +8,7 @@ const grant = {
   name: 'n',
   branch: 'jm/x',
   base: 'main',
-  lease: 'l',
+  lease: '',
   protectedPaths: [],
   secrets: [],
 };
@@ -76,4 +76,18 @@ test('an EOF or a stream error is a StdinClosedError; a bad grant is not', async
   await expect(readGrant(Readable.from(['not json\n']))).rejects.not.toBeInstanceOf(
     StdinClosedError,
   );
+});
+
+test('readGrant refuses a lease that is not a full SHA, and an option-shaped base or branch (issue #262)', async () => {
+  const read = (over: Record<string, unknown>) =>
+    readGrant(Readable.from([`${JSON.stringify({ ...grant, ...over })}\n`]));
+  expect((await read({ lease: 'a'.repeat(40) })).lease).toBe('a'.repeat(40));
+  for (const over of [
+    { lease: 'main' },
+    { lease: '-x' },
+    { lease: 'refs/heads/main' },
+    { base: '--upload-pack=x' },
+    { branch: '-x' },
+  ])
+    await expect(read(over), JSON.stringify(over)).rejects.toThrow('grant rejected');
 });

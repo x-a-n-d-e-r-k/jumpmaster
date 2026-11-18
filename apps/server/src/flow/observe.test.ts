@@ -36,7 +36,7 @@ const readyIssue = (n: number) => ({
 describe('native blockers in active mode', () => {
   test('a blocked ready item with an old branch is not resumed', async () => {
     const h = await harness({ issues: [{ ...readyIssue(1), blockedBy: ['#4'] }] });
-    h.forge.state.branches.set('agent/issue-1', 'wip1');
+    h.forge.state.branches.set('agent/issue-1', '7769703100000000000000000000000000000000');
     await h.reconcile();
     expect(activeDropFor(h.db, 1)).toBeUndefined();
     expect(getWorkItem(h.db, 1)?.state).toBe('ready');
@@ -49,16 +49,19 @@ describe('native blockers in active mode', () => {
     setWorkItemState(h.db, 1, 'in_flight'); // work began before the link was added
     setZoneMode(h.db, h.zone.id, 'active', h.now());
     one.blockedBy = ['#4'];
-    h.forge.state.branches.set('agent/issue-1', 'wip1');
+    h.forge.state.branches.set('agent/issue-1', '7769703100000000000000000000000000000000');
     await h.reconcile();
-    expect(activeDropFor(h.db, 1)).toMatchObject({ role: 'implement', headSha: 'wip1' });
+    expect(activeDropFor(h.db, 1)).toMatchObject({
+      role: 'implement',
+      headSha: '7769703100000000000000000000000000000000',
+    });
   });
 });
 
 /** A PR opened and reviewed for real, then observed from that state. */
 async function reviewedThenObserving(): Promise<Harness> {
   const h = await harness();
-  await toPrOpen(h, 'sha1');
+  await toPrOpen(h, '7368613100000000000000000000000000000000');
   await h.reconcile();
   const { dropId, epoch } = await h.lease();
   setZoneMode(h.db, h.zone.id, 'paused', h.now());
@@ -194,7 +197,7 @@ describe('observe mode', () => {
     h.forge.state.addPull({
       number: 9,
       headRef: 'agent/issue-1',
-      headSha: 's9',
+      headSha: '7339000000000000000000000000000000000000',
       author: h.forge.state.logins.author,
       body: 'by hand',
     });
@@ -209,9 +212,9 @@ describe('observe mode', () => {
     h.forge.state.addPull({
       number: 9,
       headRef: 'agent/issue-1',
-      headSha: 's9',
+      headSha: '7339000000000000000000000000000000000000',
       author: h.forge.state.logins.author,
-      body: opMarker(opKeys.pr(1, 's9')),
+      body: opMarker(opKeys.pr(1, '7339000000000000000000000000000000000000')),
     });
     await h.reconcile();
     expect(getWorkItem(h.db, 1)?.state).toBe('pr_open');
@@ -311,7 +314,7 @@ describe('pause', () => {
 
   test('a review finishing during pause posts after resume, not during', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     const { dropId, epoch } = await h.lease();
     setZoneMode(h.db, h.zone.id, 'paused', h.now());

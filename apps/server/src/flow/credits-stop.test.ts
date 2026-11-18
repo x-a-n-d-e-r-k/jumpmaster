@@ -79,9 +79,13 @@ describe('a drop on usage credits stops dispatch', () => {
     expect(await leaseStatus(h)).toBe(204);
     // The running drop finishes; its review is queued but does not lease either.
     h.at(1);
-    h.forge.state.branches.set(d1.payload.branch, 'a1');
+    h.forge.state.branches.set(d1.payload.branch, '6131000000000000000000000000000000000000');
     expect(
-      await h.postResult(d1.dropId, d1.epoch, { status: 'completed', headSha: 'a1', gates: GREEN }),
+      await h.postResult(d1.dropId, d1.epoch, {
+        status: 'completed',
+        headSha: '6131000000000000000000000000000000000000',
+        gates: GREEN,
+      }),
     ).toBe(204);
     await h.reconcile();
     expect(h.queuedRoles()).toContain('review');
@@ -207,7 +211,7 @@ describe('a drop on usage credits stops dispatch', () => {
     h.at(50);
     const result: DropResult = {
       status: 'completed',
-      headSha: 'x1',
+      headSha: '7831000000000000000000000000000000000000',
       gates: GREEN,
       rateLimit: {
         status: 'allowed',
@@ -220,7 +224,7 @@ describe('a drop on usage credits stops dispatch', () => {
         isUsingOverage: true,
       },
     };
-    h.forge.state.branches.set(x.payload.branch, 'x1');
+    h.forge.state.branches.set(x.payload.branch, '7831000000000000000000000000000000000000');
     expect(await h.postResult(x.dropId, x.epoch, result)).toBe(204);
     await h.reconcile();
     expect(getUsageState(h.db).overageStoppedAt).toBeNull();
@@ -283,8 +287,12 @@ describe('a drop on usage credits stops dispatch', () => {
     expect(h.queuedRoles()).toEqual(['implement']);
     expect(await leaseStatus(h)).toBe(204);
     h.at(1);
-    h.forge.state.branches.set(x.payload.branch, 'x1');
-    await h.postResult(x.dropId, x.epoch, { status: 'completed', headSha: 'x1', gates: GREEN });
+    h.forge.state.branches.set(x.payload.branch, '7831000000000000000000000000000000000000');
+    await h.postResult(x.dropId, x.epoch, {
+      status: 'completed',
+      headSha: '7831000000000000000000000000000000000000',
+      gates: GREEN,
+    });
     await h.reconcile();
     expect(h.queuedRoles()).toEqual(['implement', 'review']);
     const next = await h.lease();
@@ -308,10 +316,10 @@ describe('a drop on usage credits stops dispatch', () => {
     await h.reconcile();
     const probe = await h.lease();
     expect(await leaseStatus(h)).toBe(204);
-    h.forge.state.branches.set(probe.payload.branch, 'p1');
+    h.forge.state.branches.set(probe.payload.branch, '7031000000000000000000000000000000000000');
     const done: DropResult = {
       status: 'completed',
-      headSha: 'p1',
+      headSha: '7031000000000000000000000000000000000000',
       gates: GREEN,
       rateLimit: { status: 'allowed', isUsingOverage: false },
     };

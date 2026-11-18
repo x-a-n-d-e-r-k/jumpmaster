@@ -39,7 +39,7 @@ describe('kill switch', () => {
 
   test('while engaged: no lease, no enqueue, no outbox write, no merge', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     const before = h.forge.author.calls
       .concat(h.forge.reviewer.calls)
@@ -85,7 +85,7 @@ describe('kill switch', () => {
 
   test('a result from a cancelled drop is refused and writes nothing', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     const { dropId, epoch } = await h.lease();
     engageKill(h.db, h.now());
@@ -95,7 +95,7 @@ describe('kill switch', () => {
 
   test('engaging refunds the charge of each cancelled drop', async () => {
     const h = await harness();
-    await toPrOpen(h, 'sha1');
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
     await h.reconcile();
     expect(getAttempts(h.db, 1, 'review').count).toBe(1);
     engageKill(h.db, h.now());
@@ -115,10 +115,13 @@ describe('kill switch', () => {
     expect(activeDropFor(h.db, 1)?.headSha ?? null).toBeNull();
 
     engageKill(h.db, h.now());
-    h.forge.state.branches.set('agent/issue-1', 'ck1');
+    h.forge.state.branches.set('agent/issue-1', '636b310000000000000000000000000000000000');
     setKilled(h.db, false, h.now());
     await h.reconcile();
-    expect(activeDropFor(h.db, 1)).toMatchObject({ role: 'implement', headSha: 'ck1' });
+    expect(activeDropFor(h.db, 1)).toMatchObject({
+      role: 'implement',
+      headSha: '636b310000000000000000000000000000000000',
+    });
   });
 
   test('the heartbeat reply tells the stick to hard-kill while engaged', async () => {

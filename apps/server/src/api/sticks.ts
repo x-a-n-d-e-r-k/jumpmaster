@@ -9,6 +9,7 @@ import {
   IMAGE_MIRROR_FEATURE,
   ImageFetchSchema,
   isCrewRole,
+  isSafeBranchName,
   type LeaseSkip,
   type PushGrant,
   type PushPlan,
@@ -20,6 +21,7 @@ import {
   type StickInfo,
   StickInfoSchema,
   StickStartingSchema,
+  sha40,
   TrooperEventSchema,
 } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -396,6 +398,11 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       if (!pushKindValid(drop)) return { refused: 'kind', retryable: false };
       const item = drop.workItemId === null ? undefined : getWorkItem(db, drop.workItemId);
       if (!item) return { refused: 'branch', retryable: false };
+      // Both reach root git in the push container: never an option, a ref name or a range.
+      if (!isSafeBranchName(row.base)) return { refused: 'base', retryable: false };
+      if (drop.headSha !== null && !sha40.safeParse(drop.headSha).success) {
+        return { refused: 'lease', retryable: false };
+      }
       if (reserveGrant(db, drop.id, drop.epoch, at) === 'reserved') {
         return { refused: 'reserved', retryable: true };
       }
