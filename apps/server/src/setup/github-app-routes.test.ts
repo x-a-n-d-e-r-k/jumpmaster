@@ -624,7 +624,9 @@ describe('guard', () => {
     expect(routeClass('/setup/github-app/callback')).toBe('auth');
     expect(routeClass('/setup/github-app/start')).toBe('page');
     expect(routeClass('/setup/github-app/finish')).toBe('page');
-    expect(routeClass('/setup/github-app/installed')).toBe('page');
+    // The setup_url page (issue #344) needs no session; discovery behind it is a page.
+    expect(routeClass('/setup/github-app/installed')).toBe('auth');
+    expect(routeClass('/setup/github-app/discover')).toBe('page');
   });
 
   test('with setup inactive, start and finish without a session are 401 and write nothing', async () => {
