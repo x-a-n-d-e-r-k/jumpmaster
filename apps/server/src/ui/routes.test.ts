@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import { routeClass } from '../auth/guard.js';
 import { listBriefings, raiseBriefing, ruleBriefing } from '../briefings.js';
 import { DEFAULT_PROTECTED_PATHS } from '../config.js';
 import { insertCrewIssue } from '../crew/store.js';
@@ -1175,5 +1176,13 @@ describe('external links open in a new tab, in-app links do not (#133)', () => {
     expect(res.json()).toEqual({ id, slots: 6, maxSlots: 6 });
     expect((await lease(6)).headers['x-jumpmaster-slots']).toBe('6');
     expect((await h.view('/sticks')).body).toContain('Running now: 0 of 6');
+  });
+});
+
+describe('route classes (crew chat, #349)', () => {
+  test("routeClass('/mcp/chat') is 'chat-mcp', and /mcp is still 'mcp'", () => {
+    expect(routeClass('/mcp/chat')).toBe('chat-mcp');
+    expect(routeClass('/mcp')).toBe('mcp');
+    expect(routeClass('/mcp/chat/x')).toBe('page');
   });
 });

@@ -16,6 +16,7 @@ import {
   checkMcpToken,
   listMcpTokens,
   MAX_REFUSED_AUTH_ROWS,
+  mintChatToken,
   mintMcpToken,
   pruneMcpAudit,
   revokeMcpToken,
@@ -208,6 +209,81 @@ describe('tokens', () => {
     expect(sanitizeForgeText(`paste: ${token}`, [])).not.toContain(token.slice(4, 30));
     expect(sanitizeCrewText(`paste: ${token}`, [])).not.toContain(token.slice(4, 30));
     expect(sanitizeForgeText('paste: jmm_short', [])).toBe('paste: jmm_short');
+  });
+
+  test('a chat token checks to a ChatPrincipal and is hidden from listMcpTokens', () => {
+    const d = db();
+    const zone = mintMcpToken(d, { zoneId: 'main', scope: 'read', days: 1 }, t0);
+    const chat = mintChatToken(
+      d,
+      { threadId: 7, messageId: 42, sessionHash: 'a'.repeat(64), minutes: 30 },
+      t0,
+    );
+    expect(chat.token).toMatch(/^jmm_[A-Za-z0-9_-]{43}$/);
+    expect(chat.expiresAt).toBe(plus(t0, 30 * 60 * 1000).toISOString());
+    expect(checkMcpToken(d, chat.token, t0)).toEqual({
+      ok: true,
+      principal: {
+        tokenId: chat.id,
+        scope: 'chat',
+        threadId: 7,
+        messageId: 42,
+        sessionHash: 'a'.repeat(64),
+      },
+    });
+    expect(checkMcpToken(d, chat.token, plus(t0, 30 * 60 * 1000))).toEqual({
+      ok: false,
+      reason: 'expired',
+      tokenId: chat.id,
+    });
+    expect(listMcpTokens(d).map((t) => t.id)).toEqual([zone.id]);
+    const row = d
+      .prepare(
+        `SELECT zone_id AS zoneId, scope, chat_thread_id AS t, chat_message_id AS m,
+           session_hash AS h, token_hash AS hash FROM mcp_tokens WHERE id = ?`,
+      )
+      .get(chat.id);
+    expect(row).toEqual({
+      zoneId: '*',
+      scope: 'chat',
+      t: 7,
+      m: 42,
+      h: 'a'.repeat(64),
+      hash: sha256(chat.token),
+    });
+    expect(auditRows(d).at(-1)).toEqual(
+      expect.objectContaining({ tokenId: chat.id, tool: 'mint', outcome: 'ok', detail: 'chat' }),
+    );
+    expect(JSON.stringify(auditRows(d))).not.toContain(chat.token);
+  });
+
+  test('mintChatToken refuses minutes outside 1 to 60', () => {
+    const d = db();
+    const o = { threadId: 1, messageId: 1, sessionHash: 'h' };
+    for (const minutes of [0, 61, 1.5, -1, Number.NaN]) {
+      expect(() => mintChatToken(d, { ...o, minutes }, t0)).toThrow(/minutes/);
+    }
+    expect(mintChatToken(d, { ...o, minutes: 1 }, t0).id).toBeGreaterThan(0);
+    expect(mintChatToken(d, { ...o, minutes: 60 }, t0).id).toBeGreaterThan(0);
+    expect(d.prepare("SELECT COUNT(*) AS n FROM mcp_tokens WHERE scope = 'chat'").get()).toEqual({
+      n: 2,
+    });
+  });
+
+  test('revoking a chat token refuses it from the next call', () => {
+    const d = db();
+    const chat = mintChatToken(d, { threadId: 3, messageId: 4, sessionHash: 'h', minutes: 10 }, t0);
+    expect(checkMcpToken(d, chat.token, t0).ok).toBe(true);
+    expect(revokeMcpToken(d, chat.id, plus(t0, 1000))).toBe(true);
+    expect(checkMcpToken(d, chat.token, plus(t0, 1000))).toEqual({
+      ok: false,
+      reason: 'revoked',
+      tokenId: chat.id,
+    });
+    expect(auditRows(d).at(-1)).toEqual(
+      expect.objectContaining({ tokenId: chat.id, tool: 'revoke', outcome: 'ok' }),
+    );
+    expect(revokeMcpToken(d, chat.id, plus(t0, 2000))).toBe(false);
   });
 });
 
