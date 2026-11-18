@@ -1177,6 +1177,9 @@ describe('GitHubForge issue writes', () => {
       .patch('/repos/o/r/issues/9', { state: 'closed', state_reason: 'completed' })
       .reply(200, issue(9));
     await f.updateIssue(9, { state: 'closed', stateReason: 'completed' });
+    // Undo of a chat close reopens: the state alone, no body and no reason.
+    nock(api).patch('/repos/o/r/issues/9', { state: 'open' }).reply(200, issue(9));
+    await f.updateIssue(9, { state: 'open' });
     nock(api)
       .get('/repos/o/r/issues/9')
       .reply(200, issue(9, { state: 'closed', body: null }));

@@ -2,15 +2,21 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createApp } from '../app.js';
 import { Backoff } from '../auth/backoff.js';
+import { registerGuard } from '../auth/guard.js';
 import { SetupMode } from '../auth/operator.js';
 import { loadBoot } from '../config/boot.js';
 import { ConfigStore } from '../config/store.js';
+import type { Config } from '../config.js';
 import { openDb } from '../db/open.js';
+import { setZoneMode } from '../db/repo.js';
+import { usageCfg, zoneWorld } from '../test/fixtures.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
+import { listCards, recordCard } from './cards.js';
+import { registerChatRoutes } from './routes.js';
 import { appendMessage, createThread, listMessages } from './store.js';
 
 const TOKEN = 'o'.repeat(32);
@@ -200,5 +206,97 @@ describe('/api/chat', () => {
       expect(posted.statusCode, id).toBe(404);
     }
     expect(w.enqueued).toEqual([]);
+  });
+});
+
+/** A zone on a fake forge, its issue 1 queued by a chat card with Undo. */
+function undoWorld() {
+  const z = zoneWorld();
+  const config = {
+    listen: { host: '127.0.0.1', port: 7420 },
+    dataDir: '.',
+    pollSeconds: 60,
+    dropZones: [z.zone],
+    claude: { plan: 'max', fableModel: 'fable-x', fableWeeklyDropCap: 5 },
+    usage: usageCfg,
+    secrets: { operatorToken: TOKEN, joinToken: 'join-secret-value-4' },
+  } as Config;
+  const a = Fastify();
+  registerGuard(a, { db: z.db, config, now: () => t0 });
+  registerChatRoutes(a, { db: z.db, config, now: () => t0, forgesFor: () => z.forges });
+  app = a;
+  const th = createThread(z.db, { title: 't' }, t0);
+  const card = recordCard(
+    z.db,
+    {
+      threadId: th.id,
+      messageId: 1,
+      kind: 'queue',
+      zoneId: 'main',
+      target: 'issue:1',
+      state: 'done',
+      summary: 'Put agent-ready on issue #1.',
+      undo: { op: 'labels', number: 1, label: 'agent-ready' },
+    },
+    t0,
+  );
+  const s = operatorSession(z.db, t0);
+  const undo = (headers: Record<string, string>, id: number | string = card.id) =>
+    a.inject({ method: 'POST', url: `/api/chat/cards/${id}/undo`, headers, payload: {} });
+  const setLabelWrites = () => z.f.author.calls.filter((c) => c.method === 'setLabels').length;
+  return {
+    ...z,
+    th,
+    card,
+    undo,
+    setLabelWrites,
+    session: { host: HOST, ...s.headers },
+    bearer: { host: HOST, authorization: `Bearer ${TOKEN}` },
+  };
+}
+
+describe('POST /api/chat/cards/:id/undo', () => {
+  test('D1 undo needs the browser session (403 for the Bearer token)', async () => {
+    const w = undoWorld();
+    const viaToken = await w.undo(w.bearer);
+    expect(viaToken.statusCode).toBe(403);
+    expect((await w.undo({ host: HOST })).statusCode).toBe(401);
+    expect(w.setLabelWrites()).toBe(0);
+    expect(listCards(w.db, w.th.id)[0]?.state).toBe('done');
+    const ok = await w.undo(w.session);
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toMatchObject({ card: { id: w.card.id, state: 'undone', undoable: false } });
+    expect(ok.json().card.undo).toBeUndefined();
+    expect(w.f.state.issues.get(1)?.labels).toEqual([]);
+  });
+
+  test('a card already undone is 409', async () => {
+    const w = undoWorld();
+    expect((await w.undo(w.session)).statusCode).toBe(200);
+    const again = await w.undo(w.session);
+    expect(again.statusCode).toBe(409);
+    expect(w.setLabelWrites()).toBe(1);
+    expect((await w.undo(w.session, w.card.id + 1)).statusCode).toBe(404);
+    expect((await w.undo(w.session, 'nope')).statusCode).toBe(404);
+  });
+
+  test('D3 two Undo presses on one card make one forge write', async () => {
+    const w = undoWorld();
+    const [a, b] = await Promise.all([w.undo(w.session), w.undo(w.session)]);
+    expect([a?.statusCode, b?.statusCode].sort()).toEqual([200, 409]);
+    expect(w.setLabelWrites()).toBe(1);
+    const rows = w.db.prepare('SELECT op_key AS opKey FROM outbox').all() as { opKey: string }[];
+    expect(rows).toEqual([{ opKey: `labels:main:undo:${w.card.id}` }]);
+  });
+
+  test('D2 undo in observe mode refuses with no outbox row', async () => {
+    const w = undoWorld();
+    setZoneMode(w.db, 'main', 'observe', t0);
+    const res = await w.undo(w.session);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/observe/);
+    expect(w.db.prepare('SELECT COUNT(*) AS n FROM outbox').get()).toEqual({ n: 0 });
+    expect(w.setLabelWrites()).toBe(0);
+    expect(listCards(w.db, w.th.id)[0]?.state).toBe('done');
   });
 });

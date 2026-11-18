@@ -238,7 +238,12 @@ export interface Forge {
   findIssueByMarker(marker: string, since: string): Promise<{ number: number } | null>;
   updateIssue(
     number: number,
-    patch: { title?: string; body?: string; state?: 'closed'; stateReason?: 'completed' },
+    patch: {
+      title?: string;
+      body?: string;
+      state?: 'closed' | 'open';
+      stateReason?: 'completed';
+    },
   ): Promise<void>;
   /** Every "blocked by" link on the issue (the first 100), open and closed. */
   listBlockedBy(number: number): Promise<BlockedByList>;
@@ -888,7 +893,12 @@ export class GitHubForge implements Forge {
 
   async updateIssue(
     number: number,
-    patch: { title?: string; body?: string; state?: 'closed'; stateReason?: 'completed' },
+    patch: {
+      title?: string;
+      body?: string;
+      state?: 'closed' | 'open';
+      stateReason?: 'completed';
+    },
   ): Promise<void> {
     const { stateReason, ...rest } = patch;
     await this.octokit.rest.issues.update({
