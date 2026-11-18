@@ -17,9 +17,59 @@ const TOKEN_SHAPES = [
   /jmm_[A-Za-z0-9_-]{20,}/g,
 ];
 
-/** Replaces anything shaped like a known token with `mark`. */
+/** A private key block's header; `<label>` is captured so the footer can be matched to it. */
+const KEY_HEADER = /-----BEGIN ([A-Z0-9 ]*)PRIVATE KEY-----/g;
+/** A newline as it appears raw (LF, CRLF) or JSON-escaped (the characters `\n`, `\r\n`). */
+const KEY_NEWLINE = /\r?\n|(?:\\r)?\\n/;
+/** A PEM header field (`Proc-Type: 4,ENCRYPTED`, `DEK-Info: …`), after any quotes or spaces. */
+const KEY_FIELD = /^[\s'"`+,]*[A-Za-z][A-Za-z0-9-]*:/;
+/** The body size from which a key block is taken as a real key; short dummy bodies are fakes. */
+export const REAL_KEY_BODY_CHARS = 200;
+
+export type PrivateKeyBlock = { start: number; end: number; real: boolean };
+
+/**
+ * Every private key block in `text`: from `-----BEGIN <label>PRIVATE KEY-----` to the matching
+ * footer, or to the end of the text when there is none. Newlines may be LF, CRLF or JSON-escaped.
+ * `real` when the body, header fields aside, has at least 200 base64 characters.
+ */
+export function findPrivateKeys(text: string): PrivateKeyBlock[] {
+  const found: PrivateKeyBlock[] = [];
+  const header = new RegExp(KEY_HEADER.source, 'g');
+  for (let m = header.exec(text); m !== null; m = header.exec(text)) {
+    const start = m.index;
+    const bodyStart = start + m[0].length;
+    const footer = `-----END ${m[1] ?? ''}PRIVATE KEY-----`;
+    const at = text.indexOf(footer, bodyStart);
+    const bodyEnd = at === -1 ? text.length : at;
+    const end = at === -1 ? text.length : at + footer.length;
+    let chars = 0;
+    for (const line of text.slice(bodyStart, bodyEnd).split(KEY_NEWLINE)) {
+      if (KEY_FIELD.test(line)) continue;
+      chars += line.replace(/[^A-Za-z0-9+/=]/g, '').length;
+    }
+    found.push({ start, end, real: chars >= REAL_KEY_BODY_CHARS });
+    header.lastIndex = end;
+  }
+  return found;
+}
+
+/** Replaces every private key block, real or fake, with `[REDACTED PRIVATE KEY]`. */
+function redactPrivateKeys(text: string): string {
+  const blocks = findPrivateKeys(text);
+  if (blocks.length === 0) return text;
+  let out = '';
+  let from = 0;
+  for (const b of blocks) {
+    out += `${text.slice(from, b.start)}[REDACTED PRIVATE KEY]`;
+    from = b.end;
+  }
+  return out + text.slice(from);
+}
+
+/** Replaces every private key block, then anything shaped like a known token with `mark`. */
 export function redactTokenShapes(text: string, mark = '[REDACTED]'): string {
-  let out = text;
+  let out = redactPrivateKeys(text);
   for (const re of TOKEN_SHAPES) out = out.replace(re, mark);
   return out;
 }

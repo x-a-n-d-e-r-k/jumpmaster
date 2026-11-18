@@ -207,6 +207,8 @@ const dropPayloadBase = {
   image: z.string(),
   /** The trooper's pre-push guard: a change touching these paths is refused. */
   protectedPaths: z.array(z.string()),
+  /** Globs where the pre-push check lets a real private key through. Absent: none. */
+  privateKeyPaths: z.array(z.string()).optional(),
   credentials: z.object({ claudeToken: z.string(), forgeToken: z.string().optional() }),
   /** Environment for gate steps only, never the agent. Redacted like every credential. */
   gateSecrets: z.record(z.string(), z.string()).optional(),
@@ -235,6 +237,7 @@ const crewPayloadBase = {
   prompt: dropPayloadBase.prompt,
   image: dropPayloadBase.image,
   protectedPaths: dropPayloadBase.protectedPaths,
+  privateKeyPaths: dropPayloadBase.privateKeyPaths,
   credentials: dropPayloadBase.credentials,
   limits: dropPayloadBase.limits,
   attribution: dropPayloadBase.attribution,
@@ -652,7 +655,10 @@ export * from './names.js';
 export {
   containsSecret,
   dropSecrets,
+  findPrivateKeys,
+  type PrivateKeyBlock,
   payloadSecrets,
+  REAL_KEY_BODY_CHARS,
   redact,
   redactTokenShapes,
   withBasicAuth,
@@ -774,6 +780,8 @@ export const PushGrantSchema = z
     lease: z.union([sha40, z.literal('')]),
     expectSha: sha40.optional(),
     protectedPaths: z.array(z.string()),
+    /** Globs where a real private key may be pushed (fixtures). Absent: none. */
+    privateKeyPaths: z.array(z.string()).optional(),
     secrets: z.array(z.string()),
   })
   .strict();

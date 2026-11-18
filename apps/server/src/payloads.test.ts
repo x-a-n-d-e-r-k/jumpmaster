@@ -51,6 +51,7 @@ const zone = {
   models: { review: 'claude-sonnet-5-5' },
   maxTurns: 200,
   protectedPaths: ['.github/**', 'CLAUDE.md'],
+  privateKeyPaths: [],
   reviewReadToken: false,
 } as unknown as DropZoneConfig;
 
@@ -219,6 +220,16 @@ describe('buildPayload', () => {
 
   test('payload carries zone protectedPaths', () => {
     expect(build(impl).protectedPaths).toEqual(['.github/**', 'CLAUDE.md']);
+  });
+
+  test('payload carries zone privateKeyPaths when set, and validates', () => {
+    expect(build(impl).privateKeyPaths).toBeUndefined();
+    const keyed = { ...zone, privateKeyPaths: ['test/fixtures/**'] };
+    for (const d of [impl, review, heal, resolve]) {
+      const p = build(d, keyed);
+      expect(p.privateKeyPaths, d.role).toEqual(['test/fixtures/**']);
+      expect(DropPayloadSchema.parse(p).privateKeyPaths, d.role).toEqual(['test/fixtures/**']);
+    }
   });
 
   test('payload carries zone image and role model', () => {

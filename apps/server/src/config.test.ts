@@ -433,6 +433,12 @@ describe('loadConfig', () => {
     expect(paths).toHaveLength(29);
   });
 
+  test('privateKeyPaths defaults to none and keeps the globs it is given', () => {
+    expect(loadConfig(minimal, fullEnv).dropZones[0]?.privateKeyPaths).toEqual([]);
+    const set = loadConfig(withZone({ privateKeyPaths: ['test/fixtures/**'] }), fullEnv);
+    expect(set.dropZones[0]?.privateKeyPaths).toEqual(['test/fixtures/**']);
+  });
+
   test('read token is optional and passed through', () => {
     expect(loadConfig(minimal, fullEnv).secrets.githubReadToken).toBeUndefined();
     expect(
@@ -1413,6 +1419,7 @@ describe('githubApp (spec §4.2: installation and repository ids, not secret)', 
       authorMayBeAdmin: false,
       identity: 'two-bot',
       protectedPaths: DEFAULT_PROTECTED_PATHS,
+      privateKeyPaths: [],
       overrideApprovers: [],
       trustPnpmBuildBlocking: false,
       gateCi: true,

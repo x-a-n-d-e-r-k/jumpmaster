@@ -327,6 +327,13 @@ describe('set paths are judged as set differences', () => {
         consequence: 'bob will be able to override branch-rule problems for web',
       },
     ]);
+    expect(edit({}, { privateKeyPaths: ['test/fixtures/**'] }).guarded).toEqual([
+      {
+        path: 'dropZones[web].privateKeyPaths',
+        consequence: 'Agents will be able to push private keys to test/fixtures/** in web',
+      },
+    ]);
+    expect(paths(edit({ privateKeyPaths: ['test/fixtures/**'] }, {}))).toEqual([]);
     expect(edit({}, { gateSecrets: ['NPM_TOKEN'] }).guarded).toEqual([
       {
         path: 'dropZones[web].gateSecrets',
