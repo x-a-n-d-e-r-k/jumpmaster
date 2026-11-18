@@ -7,6 +7,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { originAllowed } from '../api/control.js';
+import type { ChatCard } from '../chat/cards.js';
 import { configReader, type LiveConfig } from '../config/source.js';
 import {
   allowedHostsOf,
@@ -36,6 +37,10 @@ export interface McpDeps {
   log?: (msg: string) => void;
   /** The zone's forges (the author pair), for the chat's forge read tools; absent, they refuse. */
   forgesFor?: (zoneId: string) => ForgePair;
+  /** A chat action's card, once its call committed: the turn runner pushes it to the thread. */
+  onCard?: (card: ChatCard) => void;
+  /** Starts a pass without waiting for it, so a chat's ruling or cycle applies promptly. */
+  kick?: () => void;
 }
 
 /** The store's editable document, when the config is a store (the settings catalog reads it). */
@@ -119,7 +124,8 @@ async function serve(
     { capabilities: { tools: {} } },
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: listTools(principal.scope),
+    // A chat token may act (the chat's action tools, each carded); a zone token's scope decides.
+    tools: listTools(principal.scope, { actions: true }),
   }));
   server.setRequestHandler(CallToolRequestSchema, async (request) =>
     callTool(
@@ -132,6 +138,9 @@ async function serve(
         ...(deps.log ? { log: deps.log } : {}),
         ...(deps.forgesFor ? { forgesFor: deps.forgesFor } : {}),
         ...(document ? { document } : {}),
+        ...(isChatPrincipal(principal) ? { actions: true } : {}),
+        ...(deps.onCard ? { onCard: deps.onCard } : {}),
+        ...(deps.kick ? { kick: deps.kick } : {}),
       },
       request.params.name,
       request.params.arguments ?? {},

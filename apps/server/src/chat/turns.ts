@@ -23,6 +23,7 @@ import {
   rateLimitFromEvent,
 } from '../usage.js';
 import type { ResolvedApps } from '../vault/resolution.js';
+import type { ChatCard } from './cards.js';
 import { type ChatReadCredential, chatReadCredential } from './credentials.js';
 import { focusContext } from './focus.js';
 import type { ChatServiceClient } from './service.js';
@@ -50,7 +51,7 @@ import {
 /** A thread's live stream: stored messages as they change, and the service's events as they come. */
 export type HubEvent = {
   seq: number;
-  event: ChatEvent | { type: 'message'; message: ChatMessage };
+  event: ChatEvent | { type: 'message'; message: ChatMessage } | { type: 'card'; card: ChatCard };
 };
 
 export interface ChatTurnDeps {
@@ -238,6 +239,17 @@ export class ChatTurns {
       s?.delete(fn);
       if (s?.size === 0) this.hubs.delete(threadId);
     };
+  }
+
+  /**
+   * Sends a chat action's card, as recorded, to its thread's subscribers. Its seq is the thread's
+   * latest, so a browser's `Last-Event-ID` never goes back; a reopened page renders stored cards.
+   */
+  publishCard(card: ChatCard): void {
+    const { seq } = this.d.db
+      .prepare('SELECT COALESCE(MAX(seq), 0) AS seq FROM chat_messages WHERE thread_id = ?')
+      .get(card.threadId) as { seq: number };
+    this.emit(card.threadId, { seq, event: { type: 'card', card } });
   }
 
   /** Resolves once no turn is running or waiting. */

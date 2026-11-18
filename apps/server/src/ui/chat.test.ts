@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { createApp } from '../app.js';
 import { Backoff } from '../auth/backoff.js';
 import { SetupMode } from '../auth/operator.js';
+import { recordCard } from '../chat/cards.js';
 import {
   appendMessage,
   createThread,
@@ -231,6 +232,88 @@ describe('/chat', () => {
     expect(frames(res.body)[1]?.data).toEqual({ seq: 1, text: 'Hello <there>' });
     expect(res.body).not.toContain('sessionHash');
     expect(w.listeners).toEqual([]);
+  });
+
+  test('/chat/:id renders the stored cards after their message, from the server record, escaped', async () => {
+    const w = world();
+    const th = createThread(w.db, { title: 'Act' }, t0);
+    appendMessage(w.db, th.id, { role: 'owner', text: 'pause main', state: 'done' }, t0);
+    recordCard(
+      w.db,
+      {
+        threadId: th.id,
+        messageId: 1,
+        kind: 'pause',
+        zoneId: 'main',
+        link: '/zones/main',
+        state: 'done',
+        summary: 'Paused zone <main>',
+      },
+      plus(t0, 1000),
+    );
+    appendMessage(
+      w.db,
+      th.id,
+      { role: 'assistant', text: 'done-reply', state: 'done' },
+      plus(t0, 2000),
+    );
+    const res = await w.app.inject({ method: 'GET', url: `/chat/${th.id}`, headers: w.session });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('Paused zone &lt;main&gt;');
+    expect(res.body).toContain('href="/zones/main"');
+    const owner = res.body.indexOf('pause main');
+    const card = res.body.indexOf('Paused zone &lt;main&gt;');
+    expect(owner).toBeLessThan(card);
+    expect(card).toBeLessThan(res.body.indexOf('done-reply'));
+    // A card on another thread is not this thread's.
+    expect(renderThread(th, [], [])).not.toContain('class="msg card');
+  });
+
+  test('a card streams as a card event without what Undo needs', async () => {
+    const w = world();
+    const th = createThread(w.db, { title: 't' }, t0);
+    const owner = appendMessage(w.db, th.id, { role: 'owner', text: 'hi', state: 'running' }, t0);
+    const pending = w.app.inject({
+      method: 'GET',
+      url: `/api/chat/threads/${th.id}/events`,
+      headers: w.session,
+    });
+    for (let i = 0; i < 50 && w.listeners.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const card = recordCard(
+      w.db,
+      {
+        threadId: th.id,
+        messageId: owner.id,
+        kind: 'queue',
+        state: 'done',
+        summary: 'Queued #4',
+        link: 'javascript:alert(1)',
+        undo: { label: 'secret-ish-undo-state' },
+      },
+      t0,
+    );
+    for (const fn of [...w.listeners]) fn({ seq: 1, event: { type: 'card', card } });
+    setMessage(w.db, owner.id, { state: 'done' }, t0);
+    const [done] = listMessages(w.db, th.id, 0);
+    for (const fn of [...w.listeners]) {
+      if (done) fn({ seq: done.seq, event: { type: 'message', message: done } });
+    }
+    const res = await pending;
+    const got = frames(res.body);
+    expect(got.map((f) => f.event)).toEqual(['message', 'card', 'message', 'done']);
+    expect(got[1]?.data).toEqual({
+      seq: 1,
+      card: expect.objectContaining({
+        id: card.id,
+        kind: 'queue',
+        summary: 'Queued #4',
+        link: null,
+        undoable: true,
+      }),
+    });
+    expect(res.body).not.toContain('secret-ish-undo-state');
   });
 
   test('the events route is session-only', async () => {
