@@ -1,6 +1,7 @@
 // Test helpers for server-hosted images (issue #141): OCI layout tars built in the test, the
 // way the server's mirror serves them, and a slow response body.
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 export const sha = (b: Buffer) => `sha256:${createHash('sha256').update(b).digest('hex')}`;
 
@@ -91,11 +92,10 @@ export function release(o: { tamperIndexEntry?: boolean } = {}) {
   );
   const indexDigest = add(index);
   const ref = `ghcr.io/o/jumpmaster-trooper@${indexDigest}`;
-  // The release's Sigstore bundle on the index, an OCI 1.1 referrer (its content is cosign's
-  // business; cosign is a fake in these tests).
-  const bundle = Buffer.from(
-    JSON.stringify({ mediaType: 'application/vnd.dev.sigstore.bundle.v0.3+json' }),
-  );
+  // The release's Sigstore bundle on the index, an OCI 1.1 referrer. cosign is a fake in these
+  // tests, so its signature need not match; it is the real v0.4.0-rc.2 bundle, whose certificate
+  // carries the release tag the stick's version floor reads (issue #270).
+  const bundle = readFileSync(new URL('../fixtures/rc2-stick/bundle.json', import.meta.url));
   const bundleDigest = add(bundle);
   const bundleManifest = Buffer.from(
     JSON.stringify({

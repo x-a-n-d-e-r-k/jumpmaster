@@ -248,7 +248,13 @@ describe('the egress capability', () => {
           ? {
               code: 0,
               stdout: JSON.stringify([
-                { critical: { image: { 'docker-manifest-digest': `sha256:${'e'.repeat(64)}` } } },
+                {
+                  critical: { image: { 'docker-manifest-digest': `sha256:${'e'.repeat(64)}` } },
+                  optional: {
+                    Subject:
+                      'https://github.com/x-a-n-d-e-r-k/jumpmaster/.github/workflows/release.yml@refs/tags/v0.4.0-rc.2',
+                  },
+                },
               ]),
               stderr: '',
             }
@@ -256,7 +262,7 @@ describe('the egress capability', () => {
     const trust = (code = 0) => ({
       policy: 'signed' as const,
       allowed: new Set<string>(),
-      signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster'),
+      signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster', '0.4.0-rc.2'),
       cosign: cosign(code),
     });
 
@@ -355,7 +361,7 @@ describe('the egress capability', () => {
     const signed = (s: ServerImages) => ({
       policy: 'signed' as const,
       allowed: new Set<string>(),
-      signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster'),
+      signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster', '0.4.0-rc.2'),
       cosign: (async (args: string[]) => ({
         code: args[0] === 'verify-blob-attestation' && args.includes('--offline') ? 0 : 99,
         stdout: '',

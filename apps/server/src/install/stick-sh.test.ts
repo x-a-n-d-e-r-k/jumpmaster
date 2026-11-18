@@ -696,7 +696,9 @@ describe('sibling parity: the stick and the installer give the same verdict on t
         {
           policy: 'signed',
           allowed: new Set(),
-          signer: releaseSigner(repo),
+          // A stick at the fixture's own release (v0.4.0-rc.2), so the version floor (#270),
+          // which the installer doesn't apply to the stick image it pins, passes.
+          signer: releaseSigner(repo, '0.4.0-rc.2'),
           cosign: execCosign(join(w.work, 'cosign-stub'), { PATH: w.bin }),
           trustedRoot: PINNED_ROOT,
         },

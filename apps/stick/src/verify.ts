@@ -2,14 +2,15 @@
 // JM_ALLOWED_IMAGES names it exactly. Under `signed` (the stick image's policy) it runs only by
 // digest, and only if the operator pinned that exact reference or cosign verifies a keyless
 // signature from this repository's release workflow on a version tag, pushed by a `push`
-// trigger. Every failure refuses: a tag, a non-zero exit, a timeout, output that doesn't parse,
+// trigger, and that tag is at or above the stick's own release version (issue #270: the version
+// floor, read from the signing certificate after cosign verified it). Every failure refuses: a tag, a non-zero exit, a timeout, output that doesn't parse,
 // or a signed digest that isn't the one asked for. Successes are cached by digest for 7 days in a
 // root-only file, so a short Sigstore outage doesn't stop images the stick already verified.
 // An image the server sent (issue #141) is verified fully offline (issue #167): the release's
 // Sigstore bundle, checked by `cosign verify-blob-attestation` on the signed index's own bytes
 // against the trusted root the stick image ships, in an empty HOME.
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, X509Certificate } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
@@ -53,6 +54,12 @@ export type Signer = {
   issuer: string;
   trigger: 'push';
   repository: string;
+  /**
+   * This stick's own release version (/app/release.json): a signature counts only if it comes
+   * from a release tag at or above it (issue #270). Null when the stick has none, which refuses
+   * every signature.
+   */
+  floor: string | null;
 };
 
 const REPOSITORY = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
@@ -60,13 +67,14 @@ const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
  * The certificate identity of `release.yml` in `repository`, run for a version tag: anchored at
- * both ends, so no other workflow, branch, tag shape or repository matches.
+ * both ends, so no other workflow, branch, tag shape or repository matches. It accepts every
+ * version; the floor (`checkFloor`) then refuses a tag older than the stick.
  */
 export function identityRegexp(repository: string): string {
   return `^https://github\\.com/${escape(repository)}/\\.github/workflows/release\\.yml@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+(-rc\\.[0-9]+)?$`;
 }
 
-export function releaseSigner(repository: string): Signer {
+export function releaseSigner(repository: string, floor: string | null): Signer {
   if (!REPOSITORY.test(repository))
     throw new Error(`the trusted signer must be a GitHub owner/name, not ${repository}`);
   return {
@@ -74,12 +82,121 @@ export function releaseSigner(repository: string): Signer {
     issuer: GITHUB_ISSUER,
     trigger: 'push',
     repository,
+    floor,
   };
 }
 
-/** What a cache entry was verified against: entries under another signer don't count. */
+/**
+ * What a cache entry was verified against: entries under another signer, or under another version
+ * floor (a stick upgraded since), don't count.
+ */
 export const signerKey = (s: Signer): string =>
-  JSON.stringify([s.identityRegexp, s.issuer, s.trigger, s.repository]);
+  JSON.stringify([s.identityRegexp, s.issuer, s.trigger, s.repository, s.floor]);
+
+/** A release version: `X.Y.Z` or `X.Y.Z-rc.N`; `rc` null for a final release. */
+export type ReleaseVersion = { major: number; minor: number; patch: number; rc: number | null };
+
+const RELEASE_VERSION =
+  /^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(?:-rc\.(0|[1-9][0-9]{0,8}))?$/;
+
+/** `X.Y.Z` or `X.Y.Z-rc.N` (no `v`), or null for anything else. */
+export function parseReleaseVersion(v: string): ReleaseVersion | null {
+  const m = RELEASE_VERSION.exec(v);
+  if (!m) return null;
+  return {
+    major: Number(m[1]),
+    minor: Number(m[2]),
+    patch: Number(m[3]),
+    rc: m[4] === undefined ? null : Number(m[4]),
+  };
+}
+
+/** Semver order on release versions: `X.Y.Z-rc.N` < `X.Y.Z`, and `rc.N` < `rc.M` when N < M. */
+export function compareReleaseVersions(a: ReleaseVersion, b: ReleaseVersion): number {
+  for (const k of ['major', 'minor', 'patch'] as const) if (a[k] !== b[k]) return a[k] - b[k];
+  if (a.rc === b.rc) return 0;
+  if (a.rc === null) return 1;
+  if (b.rc === null) return -1;
+  return a.rc - b.rc;
+}
+
+export const NO_RELEASE_VERSION = 'this stick has no release version';
+export const NO_RELEASE_TAG = 'image signature carries no release tag';
+
+/**
+ * Whether a signature from release tag `tag` (`vX.Y.Z` or `vX.Y.Z-rc.N`; null when the signature
+ * names none) may run on a stick whose own version is `own`: only at or above it (issue #270).
+ * A missing or unparseable version or tag refuses; nothing falls back to "any release".
+ */
+export function checkFloor(
+  tag: string | null,
+  own: string | null,
+): { ok: true } | { ok: false; reason: string } {
+  const mine = own === null ? null : parseReleaseVersion(own);
+  if (!mine) return { ok: false, reason: NO_RELEASE_VERSION };
+  const theirs = tag?.startsWith('v') ? parseReleaseVersion(tag.slice(1)) : null;
+  if (!theirs || tag === null) return { ok: false, reason: NO_RELEASE_TAG };
+  if (compareReleaseVersions(theirs, mine) < 0)
+    return { ok: false, reason: `image signed for ${tag}, older than this stick (${own})` };
+  return { ok: true };
+}
+
+/**
+ * The release tag in a signing identity: `<tag>` of
+ * `https://github.com/<repository>/.github/workflows/release.yml@refs/tags/<tag>`, or null for
+ * any other identity (another workflow or repository, a branch ref, no ref).
+ */
+export function releaseTagOf(identity: string, repository: string): string | null {
+  const prefix = `https://github.com/${repository}/.github/workflows/release.yml@refs/tags/`;
+  if (!identity.startsWith(prefix)) return null;
+  const tag = identity.slice(prefix.length);
+  return /^[A-Za-z0-9._-]+$/.test(tag) ? tag : null;
+}
+
+/**
+ * The URI SANs of a DER or PEM certificate, as node:crypto reads them. Null when it doesn't
+ * parse. An entry Node had to quote (one holding a separator) is dropped, never split.
+ */
+export function certificateUris(cert: Buffer | string): string[] | null {
+  let x: X509Certificate;
+  try {
+    x = new X509Certificate(cert);
+  } catch {
+    return null;
+  }
+  const san = x.subjectAltName;
+  if (!san) return [];
+  return san
+    .split(', ')
+    .filter((e) => e.startsWith('URI:'))
+    .map((e) => e.slice(4));
+}
+
+/**
+ * The release tag the signing certificate of a Sigstore bundle carries (its one URI SAN, on
+ * `repository`'s release workflow), or null when the bundle has no certificate, the certificate
+ * has no such SAN, or more than one.
+ */
+export function bundleReleaseTag(bundle: Buffer | string, repository: string): string | null {
+  let v: unknown;
+  try {
+    v = JSON.parse(bundle.toString());
+  } catch {
+    return null;
+  }
+  const material = (v as { verificationMaterial?: unknown } | null)?.verificationMaterial as
+    | {
+        certificate?: { rawBytes?: unknown };
+        x509CertificateChain?: { certificates?: { rawBytes?: unknown }[] };
+      }
+    | undefined;
+  const raw =
+    material?.certificate?.rawBytes ?? material?.x509CertificateChain?.certificates?.[0]?.rawBytes;
+  if (typeof raw !== 'string' || raw === '') return null;
+  const uris = certificateUris(Buffer.from(raw, 'base64'));
+  if (!uris || uris.length !== 1) return null;
+  return releaseTagOf(uris[0] as string, repository);
+}
 
 const DIGEST_REF = /^[^\s@-][^\s@]*@(sha256:[0-9a-f]{64})$/;
 
@@ -318,6 +435,9 @@ function decideWithoutCosign(ref: string, trust: ImageTrust): Verdict | NeedsSig
     reason: `image not verified: ${ref}: ${why}${hint}`,
   });
   if (!trust.signer) return refuse('this stick has no trusted signer');
+  // No version, no floor: every signature is refused, never accepted as "any release" (#270).
+  const floor = trust.signer.floor;
+  if (floor === null || !parseReleaseVersion(floor)) return refuse(NO_RELEASE_VERSION);
   if (trust.cache?.has(digest)) return { ok: true, via: 'cache' };
   return { digest, refuse };
 }
@@ -374,6 +494,17 @@ async function runCosign(
     return refuse('cosign output names no signed digest');
   const other = signed.find((d) => d !== digest);
   if (other !== undefined) return refuse(`cosign verified ${other}, not ${digest}`);
+  // The release tag each signature's certificate names (cosign reports its SAN as
+  // `optional.Subject`): one at or above this stick's version is needed (issue #270).
+  const signer = trust.signer as Signer;
+  let floor: { ok: true } | { ok: false; reason: string } = { ok: false, reason: NO_RELEASE_TAG };
+  for (const p of payloads as { optional?: { Subject?: unknown } | null }[]) {
+    const subject = p?.optional?.Subject;
+    const tag = typeof subject === 'string' ? releaseTagOf(subject, signer.repository) : null;
+    floor = checkFloor(tag, signer.floor);
+    if (floor.ok) break;
+  }
+  if (!floor.ok) return refuse(floor.reason);
   trust.cache?.add(digest);
   return { ok: true, via: 'cosign' };
 }
@@ -485,7 +616,16 @@ export async function verifyIndexBundles(
         ],
         { timeoutMs: o.timeoutMs, env: { HOME: home, TUF_ROOT: home } },
       );
-      if (!r.error && r.code === 0) return { ok: true };
+      if (!r.error && r.code === 0) {
+        // Verified; now its age: the certificate's release tag against this stick's (#270).
+        const floor = checkFloor(
+          bundleReleaseTag(readFileSync(bundle), o.signer.repository),
+          o.signer.floor,
+        );
+        if (floor.ok) return { ok: true };
+        why = floor.reason;
+        continue;
+      }
       const line = cosignWhy(r.stderr);
       why = r.error ?? `cosign exit ${r.code}${line ? `: ${line}` : ''}`;
     } catch (e) {
@@ -613,12 +753,24 @@ async function buildTrust(
   }
 
   const built = deps.release?.repository ?? undefined;
+  // The version floor (issue #270): a signature counts only from this release or a later one.
+  const version = deps.release?.version ?? null;
+  const floor = version !== null && parseReleaseVersion(version) ? version : null;
+  if (floor === null)
+    deps.log(
+      JSON.stringify({
+        event: 'no-release-version',
+        version,
+        effect: 'every signed image is refused',
+        reason: NO_RELEASE_VERSION,
+      }),
+    );
   const override = (env.JM_TRUSTED_SIGNER_REPOSITORY ?? '').trim();
   let signer: Signer;
   if (override) {
     if (!REPOSITORY.test(override))
       throw new Error(`JM_TRUSTED_SIGNER_REPOSITORY must be a GitHub owner/name, not ${override}`);
-    signer = releaseSigner(override);
+    signer = releaseSigner(override, floor);
     deps.log(
       JSON.stringify({
         event: 'trusted-signer-override',
@@ -627,7 +779,7 @@ async function buildTrust(
       }),
     );
   } else if (built) {
-    signer = releaseSigner(built);
+    signer = releaseSigner(built, floor);
   } else {
     throw new Error(
       'no trusted signer: this stick image was built without RELEASE_REPOSITORY, so it cannot verify signed images. Use a release stick image, set JM_TRUSTED_SIGNER_REPOSITORY=<owner/name> for a fork, or JM_IMAGE_POLICY=allowlist',

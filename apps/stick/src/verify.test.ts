@@ -19,10 +19,13 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import type { ServerImages } from './fetch-image.js';
 import { PLATFORM, release as releaseImage, tar } from './test/layout.js';
+import { RC2_BUNDLE, RC2_DIGEST, rc2Layout } from './test/rc2.js';
 import {
+  bundleReleaseTag,
   COSIGN_VERSION,
   type Cosign,
   type CosignResult,
+  checkFloor,
   digestOf,
   execCosign,
   GITHUB_ISSUER,
@@ -34,6 +37,7 @@ import {
   VerifyCache,
   verifyBaseImage,
   verifyImage,
+  verifyLayout,
 } from './verify.js';
 
 const fixture = (name: string) =>
@@ -55,9 +59,31 @@ function fakeCosign(answer: (args: string[]) => CosignResult | Promise<CosignRes
   };
   return { cosign, calls };
 }
-const ok = (stdout = fixture('cosign-verify-ok.stdout')): CosignResult => ({
+const releaseIdentity = (ref: string) =>
+  `https://github.com/${REPO}/.github/workflows/release.yml@${ref}`;
+/**
+ * cosign's output for a keyless signature: the recorded payloads, each with the certificate's
+ * SAN as `optional.Subject` the way cosign reports it (the recorded fixtures are key-signed and
+ * carry none); `ref` null leaves the payloads as recorded.
+ */
+function keyless(stdout: string, ref: string | null = 'refs/tags/v0.4.0-rc.2'): string {
+  let payloads: unknown;
+  try {
+    payloads = JSON.parse(stdout);
+  } catch {
+    return stdout;
+  }
+  if (ref === null || !Array.isArray(payloads)) return stdout;
+  return JSON.stringify(
+    (payloads as { optional?: object }[]).map((p) => ({
+      ...p,
+      optional: { ...p.optional, Subject: releaseIdentity(ref) },
+    })),
+  );
+}
+const ok = (stdout = fixture('cosign-verify-ok.stdout'), ref?: string | null): CosignResult => ({
   code: 0,
-  stdout,
+  stdout: keyless(stdout, ref),
   stderr: 'Verification for …',
 });
 
@@ -67,8 +93,8 @@ function signedTrust(o: Partial<ImageTrust> & { cosign: Cosign; dir?: string; no
   return {
     policy: 'signed' as const,
     allowed: new Set<string>(),
-    signer: releaseSigner(REPO),
-    cache: new VerifyCache(join(dir, 'verified.json'), releaseSigner(REPO), { now }),
+    signer: releaseSigner(REPO, '0.4.0-rc.2'),
+    cache: new VerifyCache(join(dir, 'verified.json'), releaseSigner(REPO, '0.4.0-rc.2'), { now }),
     ...o,
   } satisfies ImageTrust;
 }
@@ -98,8 +124,8 @@ describe('the signing identity', () => {
       '^https://github\\.com/x-a-n-d-e-r-k/jumpmaster/\\.github/workflows/release\\.yml@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+(-rc\\.[0-9]+)?$',
     );
     expect(identityRegexp('o/jump.master')).toContain('/o/jump\\.master/');
-    expect(() => releaseSigner('not a repo')).toThrow(/owner\/name/);
-    expect(() => releaseSigner('o/n/x')).toThrow(/owner\/name/);
+    expect(() => releaseSigner('not a repo', '0.4.0')).toThrow(/owner\/name/);
+    expect(() => releaseSigner('o/n/x', '0.4.0')).toThrow(/owner\/name/);
   });
 
   test('SECURITY.md documents exactly the identity the stick verifies', () => {
@@ -348,7 +374,7 @@ describe('the verify cache', () => {
       chmodSync(file, 0o600);
       setup();
       const g = fakeCosign(() => ({ code: 1, stdout: '', stderr: 'Error: rekor unreachable' }));
-      const cache = new VerifyCache(file, releaseSigner(REPO), {
+      const cache = new VerifyCache(file, releaseSigner(REPO, '0.4.0-rc.2'), {
         now: now('2026-11-08T12:00:00Z'),
         ...(uid !== undefined ? { uid } : {}),
       });
@@ -393,14 +419,14 @@ describe('the verify cache', () => {
     expect((await verifyImage(SIGNED, trust())).ok).toBe(false);
     expect(f.calls).toHaveLength(3);
     // An entry dated in the future (a clock set back, or a forged file) is not trusted.
-    const cache = new VerifyCache(join(dir, 'future.json'), releaseSigner(REPO), {
+    const cache = new VerifyCache(join(dir, 'future.json'), releaseSigner(REPO, '0.4.0-rc.2'), {
       now: () => new Date('2026-11-08T12:00:00Z'),
     });
     writeFileSync(
       join(dir, 'future.json'),
       JSON.stringify({
         version: 1,
-        signer: signerKey(releaseSigner(REPO)),
+        signer: signerKey(releaseSigner(REPO, '0.4.0-rc.2')),
         entries: { [SIGNED_DIGEST]: '2027-01-01T00:00:00.000Z' },
       }),
       { mode: 0o600 },
@@ -458,7 +484,7 @@ describe('startup under the signed policy', () => {
       log: () => {},
     });
     expect(t.policy).toBe('signed');
-    expect(t.signer).toEqual(releaseSigner(REPO));
+    expect(t.signer).toEqual(releaseSigner(REPO, '0.4.0'));
     // The Sigstore TUF root is the stick's own: root-only.
     expect(statSync(join(dir, 'sigstore')).mode & 0o777).toBe(0o700);
   });
@@ -768,5 +794,215 @@ describe('execCosign', () => {
       timeoutMs: 200,
     });
     expect(slow).toMatchObject({ code: null, error: 'timed out after 0.2s' });
+  });
+});
+
+describe('the version floor (issue #270)', () => {
+  const RC2_REF = `ghcr.io/x-a-n-d-e-r-k/jumpmaster-stick@${RC2_DIGEST}`;
+  const older = (tag: string, own: string) => ({
+    ok: false,
+    reason: `image signed for ${tag}, older than this stick (${own})`,
+  });
+  /** A Sigstore bundle whose signing certificate is `pem` (a test certificate, see fixtures/certs). */
+  const bundleWith = (pem: string) =>
+    Buffer.from(
+      JSON.stringify({
+        mediaType: 'application/vnd.dev.sigstore.bundle.v0.3+json',
+        verificationMaterial: {
+          certificate: {
+            rawBytes: pem.replace(/-----(BEGIN|END) CERTIFICATE-----/g, '').replace(/\s+/g, ''),
+          },
+        },
+      }),
+    );
+  const NO_SAN = fixture('certs/no-san.pem');
+  const BRANCH_SAN = fixture('certs/branch-san.pem');
+  const layoutTrust = (floor: string | null, cosign: Cosign): ImageTrust => ({
+    policy: 'signed',
+    allowed: new Set(),
+    signer: releaseSigner(REPO, floor),
+    cosign,
+  });
+
+  test.each([
+    ['equal', 'v0.4.1', '0.4.1', true],
+    ['newer patch', 'v0.4.2', '0.4.1', true],
+    ['newer minor', 'v0.5.0', '0.4.1', true],
+    ['newer major', 'v1.0.0', '0.4.1', true],
+    ['older patch', 'v0.4.0', '0.4.1', false],
+    ['older minor', 'v0.3.9', '0.4.1', false],
+    ['a release candidate of my own final version', 'v0.4.1-rc.3', '0.4.1', false],
+    ['my own rc', 'v0.4.1-rc.2', '0.4.1-rc.2', true],
+    ['a later rc of my version', 'v0.4.1-rc.3', '0.4.1-rc.2', true],
+    ['rc ordering is numeric', 'v0.4.1-rc.10', '0.4.1-rc.2', true],
+    ['the final release of my rc', 'v0.4.1', '0.4.1-rc.2', true],
+    ['an earlier rc of my version', 'v0.4.1-rc.1', '0.4.1-rc.2', false],
+    ['the previous final release', 'v0.4.0', '0.4.1-rc.2', false],
+    ['a numeric, not lexical, compare', 'v0.10.0', '0.9.0', true],
+  ])('%s: %s on a %s stick', (_, tag, own, accepted) => {
+    expect(checkFloor(tag, own)).toEqual(accepted ? { ok: true } : older(tag, own));
+  });
+
+  test('the issue examples, word for word', () => {
+    expect(checkFloor('v0.4.2', '0.4.1')).toEqual({ ok: true });
+    expect(checkFloor('v0.4.0', '0.4.1')).toEqual({
+      ok: false,
+      reason: 'image signed for v0.4.0, older than this stick (0.4.1)',
+    });
+    expect(checkFloor('v0.4.1-rc.1', '0.4.1-rc.2').ok).toBe(false);
+  });
+
+  test('a missing or unparseable tag refuses; so does a stick with no or an unparseable version', () => {
+    for (const tag of [null, '', '0.4.1', 'v0.4', 'v0.4.1-beta.1', 'v0.4.1.1', 'v01.4.1', 'main'])
+      expect(checkFloor(tag, '0.0.1'), String(tag)).toEqual({
+        ok: false,
+        reason: 'image signature carries no release tag',
+      });
+    for (const own of [null, '', 'v0.4.1', 'unknown', '0.4.1-dev'])
+      expect(checkFloor('v9.9.9', own), String(own)).toEqual({
+        ok: false,
+        reason: 'this stick has no release version',
+      });
+  });
+
+  test('the real rc.2 certificate, parsed, carries v0.4.0-rc.2; a no-SAN or branch-ref certificate carries none', () => {
+    expect(bundleReleaseTag(RC2_BUNDLE, REPO)).toBe('v0.4.0-rc.2');
+    // The tag binds to this repository's release workflow only.
+    expect(bundleReleaseTag(RC2_BUNDLE, 'someone-else/jumpmaster')).toBeNull();
+    expect(bundleReleaseTag(bundleWith(NO_SAN), REPO)).toBeNull();
+    expect(bundleReleaseTag(bundleWith(BRANCH_SAN), REPO)).toBeNull();
+    expect(bundleReleaseTag(Buffer.from('{}'), REPO)).toBeNull();
+    expect(bundleReleaseTag(Buffer.from('not json'), REPO)).toBeNull();
+    const junk = { verificationMaterial: { certificate: { rawBytes: 'AAAA' } } };
+    expect(bundleReleaseTag(Buffer.from(JSON.stringify(junk)), REPO)).toBeNull();
+  });
+
+  test('the real rc.2 bundle: a 0.4.0-rc.1 stick accepts it, a 0.4.0 stick refuses it, after cosign verified it', async () => {
+    const f = fakeCosign(() => ok(''));
+    const verify = (floor: string) =>
+      verifyLayout(rc2Layout().dir, RC2_REF, layoutTrust(floor, f.cosign));
+    expect(await verify('0.4.0-rc.1')).toEqual({ ok: true, via: 'cosign' });
+    expect(await verify('0.4.0-rc.2')).toEqual({ ok: true, via: 'cosign' });
+    expect(await verify('0.4.0')).toEqual({
+      ok: false,
+      reason: `image not verified: ${RC2_REF}: image signed for v0.4.0-rc.2, older than this stick (0.4.0)`,
+    });
+    // cosign ran each time: the floor is checked after the signature, never instead of it.
+    expect(f.calls).toHaveLength(3);
+  });
+
+  test('a certificate with no SAN, or a SAN on a branch ref, is refused even when cosign verifies it (D1/D2)', async () => {
+    for (const pem of [NO_SAN, BRANCH_SAN]) {
+      const f = fakeCosign(() => ok(''));
+      const l = rc2Layout({ bundle: bundleWith(pem) });
+      expect(await verifyLayout(l.dir, RC2_REF, layoutTrust('0.0.1', f.cosign))).toEqual({
+        ok: false,
+        reason: `image not verified: ${RC2_REF}: image signature carries no release tag`,
+      });
+      expect(f.calls).toHaveLength(1);
+    }
+  });
+
+  test('from the registry, the tag comes from the certificate subject cosign reports; old, missing or a branch refuses', async () => {
+    const at = (ref: string | null) => fakeCosign(() => ok(undefined, ref)).cosign;
+    const t = (cosign: Cosign) => signedTrust({ cosign, signer: releaseSigner(REPO, '0.4.1') });
+    expect(await verifyImage(SIGNED, t(at('refs/tags/v0.4.2')))).toEqual({
+      ok: true,
+      via: 'cosign',
+    });
+    expect(await verifyImage(SIGNED, t(at('refs/tags/v0.4.0')))).toEqual({
+      ok: false,
+      reason: `image not verified: ${SIGNED}: image signed for v0.4.0, older than this stick (0.4.1)`,
+    });
+    for (const ref of [null, 'refs/heads/main', 'refs/tags/latest'])
+      expect(await verifyImage(SIGNED, t(at(ref))), String(ref)).toEqual({
+        ok: false,
+        reason: `image not verified: ${SIGNED}: image signature carries no release tag`,
+      });
+    // A subject from another repository's release workflow names no tag of ours.
+    const elsewhere = fakeCosign(() => ({
+      code: 0,
+      stdout: JSON.stringify([
+        {
+          critical: { image: { 'docker-manifest-digest': SIGNED_DIGEST } },
+          optional: {
+            Subject:
+              'https://github.com/other/jumpmaster/.github/workflows/release.yml@refs/tags/v9.0.0',
+          },
+        },
+      ]),
+      stderr: '',
+    }));
+    expect((await verifyImage(SIGNED, t(elsewhere.cosign))).ok).toBe(false);
+  });
+
+  test('a stick with no release version refuses every signed image, without asking cosign', async () => {
+    for (const floor of [null, 'garbage']) {
+      const f = fakeCosign(() => ok(''));
+      const signer = releaseSigner(REPO, floor);
+      expect(await verifyImage(SIGNED, signedTrust({ cosign: f.cosign, signer }))).toEqual({
+        ok: false,
+        reason: `image not verified: ${SIGNED}: this stick has no release version`,
+      });
+      expect(await verifyLayout(rc2Layout().dir, RC2_REF, layoutTrust(floor, f.cosign))).toEqual({
+        ok: false,
+        reason: `image not verified: ${RC2_REF}: this stick has no release version`,
+      });
+      expect(f.calls).toEqual([]);
+    }
+  });
+
+  test('startup: no version under signed means no floor (logged), so every image is refused; under allowlist nothing changes', async () => {
+    const dir = fresh();
+    const cosign = fakeCosign(() => ({
+      code: 0,
+      stdout: JSON.stringify({ gitVersion: COSIGN_VERSION }),
+      stderr: '',
+    })).cosign;
+    const env = { JM_IMAGE_POLICY: 'signed', JM_STATE_DIR: dir, TUF_ROOT: join(dir, 'sigstore') };
+    for (const version of [null, 'v0.4.1', 'nonsense']) {
+      const log: string[] = [];
+      const t = await prepareImageTrust(env, {
+        cosign,
+        release: { version, repository: REPO },
+        log: (l) => log.push(l),
+      });
+      expect(t.signer?.floor, String(version)).toBeNull();
+      expect(log.map((l) => JSON.parse(l).event)).toContain('no-release-version');
+      expect(await verifyImage(SIGNED, { ...t, cosign: fakeCosign(() => ok()).cosign })).toEqual({
+        ok: false,
+        reason: `image not verified: ${SIGNED}: this stick has no release version`,
+      });
+    }
+    const t = await prepareImageTrust(env, {
+      cosign,
+      release: { version: '0.4.1', repository: REPO },
+      log: () => {},
+    });
+    expect(t.signer?.floor).toBe('0.4.1');
+    // Allowlist: no version, and the allow-list decides exactly as before.
+    const a = await prepareImageTrust(
+      { JM_ALLOWED_IMAGES: 'jumpmaster-trooper:dev' },
+      { cosign, release: { version: null, repository: null }, log: () => {} },
+    );
+    expect(a).toEqual({ policy: 'allowlist', allowed: new Set(['jumpmaster-trooper:dev']) });
+    expect(await verifyImage('jumpmaster-trooper:dev', a)).toEqual({ ok: true, via: 'allowlist' });
+    expect(await verifyImage('jumpmaster-trooper:other', a)).toEqual({
+      ok: false,
+      reason: 'image not allowed: jumpmaster-trooper:other',
+    });
+  });
+
+  test('a success cached under a lower floor does not count once the stick is upgraded', () => {
+    const file = join(fresh(), 'verified.json');
+    const now = () => new Date('2026-11-08T12:00:00Z');
+    const at040 = new VerifyCache(file, releaseSigner(REPO, '0.4.0'), { now });
+    at040.add(SIGNED_DIGEST);
+    expect(new VerifyCache(file, releaseSigner(REPO, '0.4.0'), { now }).has(SIGNED_DIGEST)).toBe(
+      true,
+    );
+    expect(new VerifyCache(file, releaseSigner(REPO, '0.4.1'), { now }).has(SIGNED_DIGEST)).toBe(
+      false,
+    );
   });
 });
