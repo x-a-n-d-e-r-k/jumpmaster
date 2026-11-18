@@ -945,7 +945,7 @@ export const STORE_NAV_SLOT = '<!--jm-store-nav-->';
 export const STORE_NAV = `<a href="/zones">Zones</a><a href="/settings">Settings</a>`;
 
 /** The pages every install has, in the order the operator reaches for them. */
-const NAV = `<a href="/">Floor</a><a href="/work">Work</a><a href="/drops">Drops</a><a href="/briefings">Briefings</a><a href="/sticks">Sticks</a>${STORE_NAV_SLOT}<a href="/doctor">Doctor</a><a href="/observations">Observations</a>`;
+const NAV = `<a href="/">Floor</a><a href="/work">Work</a><a href="/drops">Drops</a><a href="/briefings">Briefings</a><a href="/chat">Chat</a><a href="/sticks">Sticks</a>${STORE_NAV_SLOT}<a href="/doctor">Doctor</a><a href="/observations">Observations</a>`;
 
 /** Marks the link for the current page; the longest matching prefix wins. */
 const NAV_SCRIPT = `<script>(()=>{const p=location.pathname;let best=null,len=-1;for(const a of document.querySelectorAll('.topnav a')){const h=a.getAttribute('href');const hit=h==='/'?p==='/':p===h||p.startsWith(h+'/');if(hit&&h.length>len){best=a;len=h.length;}}if(best)best.setAttribute('aria-current','page');})();</script>`;
