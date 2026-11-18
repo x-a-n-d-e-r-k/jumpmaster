@@ -64,11 +64,29 @@ export interface AppTokenSource extends InstallationVerifier {
    */
   fresh(zoneId: string, role: AppRole, use: Use): Promise<FreshToken>;
   /**
+   * The installation grant of the zone's `role` app on its repository (spec §4.3): the permissions
+   * `GET /repos/{o}/{r}/installation` reports under the verified owner's app JWT, and the expiry of
+   * the cached server-use token for that zone and role (null when none is cached). Nothing is
+   * called until the returned function is. It never mints a server-use token and never fills the
+   * cache. Every rejection names the repository and role only, and has no `cause`.
+   */
+  grant(zoneId: string, role: AppRole): () => Promise<AppGrant>;
+  /**
    * Drops every cached token and detaches every mint in progress (the kill switch, or a revision
    * whose app entries changed): a later `token()` mints afresh.
    */
   clear(): void;
 }
+
+/** What an installation grants a role's app on a zone's repository (`AppTokenSource.grant`). */
+export interface AppGrant {
+  permissions: Record<string, string>;
+  /** The cached server-use token's expiry as an ISO string, or null when none is cached. */
+  tokenExpiresAt: string | null;
+}
+
+/** The use the server's own forge for each role acts with. */
+const SERVER_USE: Record<AppRole, Use> = { author: 'server-author', reviewer: 'server-reviewer' };
 
 /** A token the source would not mint. Its message names the repository and role, never a secret. */
 export class AppTokenError extends Error {
@@ -270,6 +288,36 @@ export function createAppTokenSource(deps: AppTokenSourceDeps): AppTokenSource {
       });
       const { broker } = slot;
       return { ...minted, owner: key.owner, revoke: () => broker.revoke(minted.token) };
+    },
+
+    grant(zoneId, role) {
+      return async () => {
+        const zone = deps.zones().find((z) => z.id === zoneId);
+        if (!zone) throw new AppTokenError(`unknown drop zone ${zoneId}`);
+        // Every failure past here may quote GitHub's answer: none is passed on, and no `cause`.
+        const refused = () =>
+          new AppTokenError(
+            `could not read the ${role} GitHub App's installation grant on ${zone.repo}`,
+          );
+        let read: AppGrant;
+        try {
+          const key = await keyFor(zoneId, role, SERVER_USE[role]);
+          const slot = brokers.get(slotId(key.owner, role));
+          if (!slot || slot.fingerprint !== key.appFingerprint) throw refused();
+          const [owner = '', repo = ''] = zone.repo.split('/');
+          const installation = await slot.broker.installationFor(owner, repo);
+          if (!installation.installed || installation.installationId !== key.installationId)
+            throw refused();
+          const expiresAt = cache.expiresAt(key);
+          read = {
+            permissions: { ...installation.permissions },
+            tokenExpiresAt: expiresAt ? expiresAt.toISOString() : null,
+          };
+        } catch {
+          throw refused();
+        }
+        return read;
+      };
     },
 
     clear() {

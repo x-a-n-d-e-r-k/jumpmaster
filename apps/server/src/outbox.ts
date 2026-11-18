@@ -78,6 +78,11 @@ export type PairOptions = {
   appTokens?: (owner: string, role: AppRole) => TokenProvider;
   appIdentity?: (owner: string, role: AppRole) => { slug: string; appId: string };
   /**
+   * The installation grant an app forge's `repoAccess()` reads (spec §4.3; `AppTokenSource.grant`
+   * for the zone and role). Absent, an app forge's `repoAccess()` rejects rather than guess.
+   */
+  appGrant?: (owner: string, role: AppRole) => NonNullable<AppForgeIdentity['grant']>;
+  /**
    * In app mode, the author app's push token for this zone (`AppTokenSource.fresh(zone.id,
    * 'author', 'push')`), minted per branch update. Absent, an app author zone has no `pusher`.
    */
@@ -149,6 +154,16 @@ export function pairFor(
     } catch {
       // The lookup's error may quote a key or a token: drop it, and keep no `cause`.
       throw new Error(noIdentity);
+    }
+    if (opts.appGrant) {
+      try {
+        identity.grant = opts.appGrant(ref.owner, role);
+      } catch {
+        // The factory's error may quote a key or a token: drop it, and keep no `cause`.
+        throw new Error(
+          `could not get the GitHub App installation grant for the ${role} of ${where}`,
+        );
+      }
     }
     return new GitHubForge(owner, name, provider, { ...forgeOpts, identity });
   };
