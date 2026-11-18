@@ -179,3 +179,14 @@ export function nextQueued(db: Db, threadId: number): ChatMessage | undefined {
     .get(threadId) as MessageRow | undefined;
   return row ? messageOf(row) : undefined;
 }
+
+/** Whether a turn of the thread is waiting or running. */
+export function threadBusy(db: Db, threadId: number): boolean {
+  return (
+    db
+      .prepare(
+        `SELECT 1 FROM chat_messages WHERE thread_id = ? AND state IN ('queued', 'running') LIMIT 1`,
+      )
+      .get(threadId) !== undefined
+  );
+}
