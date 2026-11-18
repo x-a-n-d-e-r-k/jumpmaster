@@ -27,7 +27,7 @@ import { zonePass } from '../flow/snapshot.js';
 import { refreshGoals } from '../goals.js';
 import { leaseNextDrop } from '../leases.js';
 import { buildPayload, promptVersions } from '../payloads.js';
-import { crewOn, crewWorld, ISSUE_BODY } from '../test/crew.js';
+import { crewOn, crewWorld, ISSUE_BODY, parsedCrew } from '../test/crew.js';
 import { makeZone, usageCfg, type ZoneWorld } from '../test/fixtures.js';
 import {
   arbiterHarness,
@@ -85,6 +85,10 @@ const work = (id: string) =>
 /** Finishes a crew drop so the next one may start. */
 const finish = (id: string) => updateDrop(w.db, id, { state: 'succeeded' });
 
+/** The zone's crew drops, of any state. */
+const listCrewDrops = () =>
+  w.db.prepare(`SELECT id FROM drops WHERE drop_zone_id = 'main' AND work_item_id IS NULL`).all();
+
 function stagedIssue(key = 'add-docs'): number {
   const r = applyCrewActions(
     w.db,
@@ -140,6 +144,48 @@ describe('enqueueCrew', () => {
     expect(await enqueue(at, capped)).toBeNull();
     // The cap is a trailing 24 hours.
     expect(await enqueue(plus(t0, 25 * HOUR), capped)).not.toBeNull();
+  });
+
+  /** Records `n` finished crew drops 20 hours before `at`, older than any cycle interval. */
+  function pastCrewDrops(n: number, at: Date): void {
+    for (let i = 0; i < n; i++)
+      insertDrop(
+        w.db,
+        {
+          id: `past${i}`,
+          dropZoneId: 'main',
+          workItemId: null,
+          role: 'crew-lead',
+          state: 'succeeded',
+        },
+        plus(at, -20 * HOUR + i * 1000),
+      );
+  }
+
+  test('maxDropsPerDay left unset is 0, no daily limit: 100 crew drops in the day still schedule work (#398)', async () => {
+    const unset = { ...w.zone, crew: parsedCrew() };
+    expect(unset.crew.maxDropsPerDay).toBe(0);
+    const at = plus(t0, 2 * HOUR);
+    pastCrewDrops(100, at);
+    expect(await enqueue(at, unset)).not.toBeNull();
+  });
+
+  test('a positive maxDropsPerDay caps at the boundary: 60 of 60 holds, 59 schedules (#398)', async () => {
+    const at = plus(t0, 2 * HOUR);
+    const capped = { ...w.zone, crew: parsedCrew({ maxDropsPerDay: 60 }) };
+    pastCrewDrops(59, at);
+    expect(await enqueue(at, capped)).not.toBeNull();
+    const other = await crewWorld();
+    w = other;
+    pastCrewDrops(60, at);
+    expect(await enqueue(at, { ...w.zone, crew: parsedCrew({ maxDropsPerDay: 60 }) })).toBeNull();
+  });
+
+  test('with no daily limit the usage gate still holds every crew drop (#398)', async () => {
+    const unset = { ...w.zone, crew: parsedCrew() };
+    setUsageState(w.db, { pausedUntil: plus(t0, HOUR).toISOString() }, t0);
+    expect(await enqueue(t0, unset)).toBeNull();
+    expect(listCrewDrops()).toHaveLength(0);
   });
 
   test('rate-limited and lost crew drops do not count toward maxDropsPerDay', async () => {
