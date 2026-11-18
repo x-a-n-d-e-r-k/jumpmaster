@@ -861,8 +861,25 @@ const JM_FETCH = `<script>function jmFetch(path,body,method){return fetch(path,{
 
 const LOGOUT = `<form method="post" action="/logout" class="logout"><button>Log out</button></form>`;
 
-/** The mark: a canopy over a trooper's lines, after the airborne vocabulary (§4). */
-const MARK = `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M2 9a8 8 0 0 1 16 0" fill="currentColor"/><path d="M2.5 9.5 10 17l7.5-7.5M7 9.5l3 7.5 3-7.5" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><circle cx="10" cy="17" r="1.6" fill="currentColor"/></svg>`;
+/**
+ * The mark's drawing, once: a canopy over a trooper's lines, after the airborne vocabulary (§4).
+ * `paint` is the color the shapes take; the top bar and the tab icon differ only in that.
+ */
+const markShapes = (paint: string): string =>
+  `<path d="M2 9a8 8 0 0 1 16 0" fill="${paint}"/><path d="M2.5 9.5 10 17l7.5-7.5M7 9.5l3 7.5 3-7.5" stroke="${paint}" stroke-width="1.4" stroke-linejoin="round"/><circle cx="10" cy="17" r="1.6" fill="${paint}"/>`;
+
+/** The mark in the top bar, painted with the brand color through `.brand svg`'s `color`. */
+export const MARK = `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">${markShapes('currentColor')}</svg>`;
+
+/** The top bar's brand color (`--primary-base`, `--blue-500` in `STYLE`): a favicon has no text color to inherit. */
+const BRAND_COLOR = '#335cff';
+
+/** The mark as the browser tab's icon: an SVG `data:` URI, so it needs no route and no CSP change. */
+export const FAVICON_HREF = `data:image/svg+xml,${encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20" fill="none">${markShapes(BRAND_COLOR)}</svg>`,
+)}`;
+
+const FAVICON_LINK = `<link rel="icon" type="image/svg+xml" href="${FAVICON_HREF}">`;
 
 /**
  * Where the store-only links (Zones, Settings) go. `page()` cannot know the install's mode, so
@@ -888,7 +905,7 @@ export const page = (body: string, opts: { chrome?: boolean; title?: string } = 
   const title = opts.title ? `Jumpmaster: ${escapeHtml(opts.title)}` : 'Jumpmaster';
   const nav = chrome ? `<nav class="topnav" aria-label="Main">${NAV}</nav>${LOGOUT}` : '';
   return (
-    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${chrome ? `<meta name="jm-csrf" content="">` : ''}<title>${title}</title><style>${STYLE}</style>${chrome ? JM_FETCH : ''}</head>` +
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${chrome ? `<meta name="jm-csrf" content="">` : ''}<title>${title}</title>${FAVICON_LINK}<style>${STYLE}</style>${chrome ? JM_FETCH : ''}</head>` +
     `<body><a class="skip" href="#main">Skip to content</a><header class="topbar"><div class="topbar-in"><h1 class="brand">${MARK}Jumpmaster</h1>${nav}</div></header>` +
     `<main id="main">${body}</main>${chrome ? NAV_SCRIPT : ''}</body></html>`
   );
