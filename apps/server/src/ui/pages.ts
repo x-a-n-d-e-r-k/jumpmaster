@@ -262,7 +262,7 @@ function usageSection(u: HomeState['usage']): string {
       row('Overage status', u.overageStatus) +
       row('Status', s.status) +
       row('Paused until', s.pausedUntil) +
-      row('Observed', s.observedAt) +
+      `<dt>Observed</dt><dd>${s.observedAt ? volatile(escapeHtml(s.observedAt)) : '-'}</dd>` +
       row('Cause drop', s.causeDropId) +
       '</dl>',
   );
@@ -415,7 +415,7 @@ function sticksSection(
                         `cannot run ${name(c.zoneId)}: lacks ${escapeHtml(c.missing.join(', '))}`,
                     )
                     .join('<br>');
-            return `<tr><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.version ?? '-')}</td><td>${escapeHtml(s.lastSeenAt ?? 'never')}</td><td>${escapeHtml(s.capabilities.join(', ') || '-')}</td><td>${escapeHtml(s.imagePolicy)}</td><td>${runs}</td></tr>`;
+            return `<tr><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.version ?? '-')}</td><td>${s.lastSeenAt ? volatile(escapeHtml(s.lastSeenAt)) : 'never'}</td><td>${escapeHtml(s.capabilities.join(', ') || '-')}</td><td>${escapeHtml(s.imagePolicy)}</td><td>${runs}</td></tr>`;
           })
           .join('')}</table>`;
   const manage = '<p><a href="/sticks">Set each stick\'s troopers on the sticks page</a></p>';
@@ -653,6 +653,7 @@ export function renderBriefings(s: {
         (rulings.length === 0
           ? '<p class="empty">No rulings yet.</p>'
           : `<table>${RULINGS_HEAD}${rulingRows(r.rows)}</table>${r.nav}`),
+      { live: true },
     );
   }
 
@@ -704,6 +705,7 @@ export function renderBriefings(s: {
       sizeSelector(undefined, per) +
       sections +
       (anyBlock ? RULE_SCRIPT : ''),
+    { live: true },
   );
 }
 
@@ -986,19 +988,37 @@ const NAV = `<a href="/">Floor</a><a href="/work">Work</a><a href="/drops">Drops
 /** Marks the link for the current page; the longest matching prefix wins. */
 const NAV_SCRIPT = `<script>(()=>{const p=location.pathname;let best=null,len=-1;for(const a of document.querySelectorAll('.topnav a')){const h=a.getAttribute('href');const hit=h==='/'?p==='/':p===h||p.startsWith(h+'/');if(hit&&h.length>len){best=a;len=h.length;}}if(best)best.setAttribute('aria-current','page');})();</script>`;
 
+/** Marks a page that refreshes itself (`page({ live: true })`): a comment inside LIVE_SCRIPT. */
+export const LIVE_MARKER = 'jm-live';
+
+/**
+ * Refreshes a live page (#404): every 10 seconds, while the tab is visible, it fetches the page
+ * again and reloads when `<main>`, less every `[data-live-ignore]`, differs from the last fetch's
+ * (the first fetch is the baseline). It holds the reload while the owner types in `<main>` or has
+ * an unsaved change in one of its forms, checks at once when the tab comes back, ignores a failed
+ * fetch or a non-200, and stops on a 401 or a redirect to the login page.
+ */
+export const LIVE_SCRIPT = `<script>/*${LIVE_MARKER}*/(()=>{let base=null,pending=false,stopped=false,busyFetch=false,timer=null;const stop=()=>{stopped=true;if(timer!==null)clearInterval(timer);};const dirty=(f)=>{const t=f.tagName;if(t==='SELECT'){for(const o of f.options||[])if(o.selected!==o.defaultSelected)return true;return false;}if(t==='INPUT'&&(f.type==='checkbox'||f.type==='radio'))return f.checked!==f.defaultChecked;if(t==='INPUT'||t==='TEXTAREA')return f.value!==f.defaultValue;return false;};const busy=()=>{const m=document.querySelector('main');if(!m)return false;const a=document.activeElement;if(a&&/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName||'')&&m.contains(a))return true;for(const f of m.querySelectorAll('form'))for(const e of f.elements)if(dirty(e))return true;return false;};const tick=async()=>{if(stopped||busyFetch||document.visibilityState!=='visible')return;busyFetch=true;try{const r=await fetch(location.pathname+location.search,{credentials:'same-origin',cache:'no-store'});if(r.status===401||(r.redirected&&new URL(r.url,location.origin).pathname==='/login')){stop();return;}if(r.status!==200)return;const m=new DOMParser().parseFromString(await r.text(),'text/html').querySelector('main');if(!m)return;for(const e of m.querySelectorAll('[data-live-ignore]'))e.remove();const html=m.innerHTML;if(base!==null&&html!==base)pending=true;base=html;if(pending&&!busy()){stop();location.reload();}}catch{}finally{busyFetch=false;}};timer=setInterval(tick,10000);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')tick();});})();</script>`;
+
+/** A value that changes on every render while the page's state does not: no reload for it. */
+const volatile = (html: string): string => `<span data-live-ignore>${html}</span>`;
+
 /**
  * The page shell. With `chrome` (the default, for pages behind the login) it carries an empty
  * `jm-csrf` meta for the guard to fill, `jmFetch`, the navigation and the logout button; the login
  * and setup pages go without.
  */
-export const page = (body: string, opts: { chrome?: boolean; title?: string } = {}): string => {
+export const page = (
+  body: string,
+  opts: { chrome?: boolean; title?: string; live?: boolean } = {},
+): string => {
   const chrome = opts.chrome ?? true;
   const title = opts.title ? `Jumpmaster: ${escapeHtml(opts.title)}` : 'Jumpmaster';
   const nav = chrome ? `<nav class="topnav" aria-label="Main">${NAV}</nav>${LOGOUT}` : '';
   return (
     `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${chrome ? `<meta name="jm-csrf" content="">` : ''}<title>${title}</title>${FAVICON_LINK}<style>${STYLE}</style>${chrome ? JM_FETCH : ''}</head>` +
     `<body><a class="skip" href="#main">Skip to content</a><header class="topbar"><div class="topbar-in"><h1 class="brand">${MARK}Jumpmaster</h1>${nav}</div></header>` +
-    `<main id="main">${body}</main>${chrome ? NAV_SCRIPT : ''}</body></html>`
+    `<main id="main">${body}</main>${chrome ? NAV_SCRIPT : ''}${opts.live ? LIVE_SCRIPT : ''}</body></html>`
   );
 };
 
@@ -1272,7 +1292,7 @@ export function renderHome(state: HomeState): string {
     const gates = g
       ? ` · gates ${g.passed}/${g.total} passed${g.failed ? `, ${g.failed} failed` : ''}`
       : '';
-    return `<article class="card slot"><div>${badge(d.state)} <small>${escapeHtml(d.role)}</small></div><a class="what" href="/drops/${encodeURIComponent(d.id)}">${what}</a>${title}<span class="meta">${escapeHtml(elapsed(d, now))}${gates} · ${escapeHtml(d.id)}</span></article>`;
+    return `<article class="card slot"><div>${badge(d.state)} <small>${escapeHtml(d.role)}</small></div><a class="what" href="/drops/${encodeURIComponent(d.id)}">${what}</a>${title}<span class="meta">${volatile(escapeHtml(elapsed(d, now)))}${gates} · ${escapeHtml(d.id)}</span></article>`;
   };
   const slots =
     live.length === 0
@@ -1307,7 +1327,7 @@ export function renderHome(state: HomeState): string {
         ? `<div class="grid">${crewSection(state.crew, name)}</div>`
         : '') +
       sticksSection(state.sticks, name, now),
-    state.status ? { title: state.status.headline } : {},
+    { live: true, ...(state.status ? { title: state.status.headline } : {}) },
   );
 }
 

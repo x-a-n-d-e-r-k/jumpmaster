@@ -17,6 +17,7 @@ import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import { gateSecretName } from '../vault/credentials.js';
 import { fingerprintOf, openVault, VAULT_KEY_IN_DATA_DIR } from '../vault/vault.js';
 import { FLAGS_SCRIPT, renderFlagsForm } from './flags.js';
+import { LIVE_MARKER } from './pages.js';
 import { RESTART_NOTE } from './setting-controls.js';
 import {
   CREDENTIALS_SCRIPT,
@@ -510,6 +511,8 @@ describe('settings, part two (Task 13)', () => {
     const r = await w.get('/settings/install');
     expect(r.statusCode).toBe(200);
     const html = r.body;
+    // Not a live page (#404): only the Floor and the briefings refresh themselves.
+    expect(html).not.toContain(LIVE_MARKER);
     // Each tab a path, the current one in bold; /settings goes to the first.
     expect(html).toContain('<strong>Install</strong>');
     for (const tab of ['credentials', 'mcp-tokens', 'history'])
