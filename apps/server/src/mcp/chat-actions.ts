@@ -336,6 +336,10 @@ const shown = (v: unknown): string => {
 /** The hint a browser-forbidden change gets: the chat can no more change it than the browser. */
 export const SETTING_FORBIDDEN_HINT = 'set it with `jumpmaster ctl` or in the config file';
 
+/** The card's words for a file-mode install, the store's own without the file's path. */
+const SETTING_FILE_MODE =
+  'the config is managed by the file: edit it and run `jumpmaster ctl config reload`, or adopt it into the UI';
+
 const changeSettingTool: ChatToolDef = {
   name: 'change_setting',
   scope: 'chat-write',
@@ -425,9 +429,15 @@ const changeSettingTool: ChatToolDef = {
           summary: `Changing ${labels} ${where} was refused: the config changed meanwhile.`,
         };
       }
+      // Fixed words on the card: a store message can quote the value the model chose.
+      if (store.mode() === 'file')
+        return {
+          out: refused(r.error, 'file mode'),
+          summary: `Changing ${labels} ${where} was refused: ${SETTING_FILE_MODE}.`,
+        };
       return {
         out: refused(r.error, 'invalid setting'),
-        summary: `Changing ${labels} ${where} was refused: ${r.error}`,
+        summary: `Changing ${labels} ${where} was refused: the config store refused the value; read the setting's description on the settings page.`,
       };
     });
   },

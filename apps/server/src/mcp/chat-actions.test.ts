@@ -642,6 +642,46 @@ describe('change_setting', () => {
     expect(card?.summary).not.toContain('repo2');
   });
 
+  test("a value the store refuses is refused with fixed words on the card, never the store's message quoting it", async () => {
+    const w = await settingWorld();
+    const before = w.store.revision();
+    const r = await w.call('change_setting', {
+      zoneId: 'main',
+      set: { 'dropZones[].crew.goalPath': 'MODEL-CHOSEN-TEXT.md' },
+    });
+    expect(r.isError).toBe(true);
+    expect(w.store.revision()).toBe(before);
+    const [card] = listCards(w.db, w.thread.id);
+    expect(card).toMatchObject({ kind: 'setting', state: 'refused' });
+    expect(card?.summary).toContain('the config store refused the value');
+    expect(card?.summary).not.toContain('MODEL-CHOSEN-TEXT');
+  });
+
+  test('Undo of an object-valued setting removes the keys the change added', async () => {
+    const w = await settingWorld();
+    const seeded = w.store.apply(
+      mergeConfigPatch(w.store.document(), {
+        dropZones: [{ id: 'main', models: { review: 'claude-sonnet-5-5' } }],
+      }),
+      { via: 'ctl', principal: tokenP },
+    );
+    expect(seeded.ok, JSON.stringify(seeded)).toBe(true);
+    const r = await w.call('change_setting', {
+      zoneId: 'main',
+      set: { 'dropZones[].models': { implement: 'claude-opus-5-5' } },
+    });
+    expect(r.isError, r.text).toBeFalsy();
+    expect(zoneOf(w.store)?.models).toEqual({
+      review: 'claude-sonnet-5-5',
+      implement: 'claude-opus-5-5',
+    });
+    const [card] = listCards(w.db, w.thread.id);
+    const u = undoSettingCard(w.actx(), w.store, card as ChatCard);
+    expect(u.ok).toBe(true);
+    expect(zoneOf(w.store)?.models).toEqual({ review: 'claude-sonnet-5-5' });
+    expect(listCards(w.db, w.thread.id)[0]).toMatchObject({ state: 'undone' });
+  });
+
   test("Review Focus 4 Undo refuses with changed since when the path's value moved after the change", async () => {
     const w = await settingWorld();
     await w.call('change_setting', { zoneId: 'main', set: { 'dropZones[].maxOpenPrs': 4 } });

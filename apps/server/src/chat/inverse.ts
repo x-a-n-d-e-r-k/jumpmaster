@@ -116,6 +116,32 @@ export function settingPatch(
 }
 
 /**
+ * The merge-patch value that turns `after` back into `before` at one path. A merge patch merges
+ * objects key by key and removes only keys set to `null`, so for an object value the Undo must
+ * name each key the change added (as `null`) as well as each key it changed or removed; sending
+ * `before` alone would leave the added keys in place.
+ */
+function undoValue(before: unknown, after: unknown): unknown {
+  if (before === undefined) return null;
+  if (!isRecord(before) || !isRecord(after)) return before;
+  const out: Record<string, unknown> = {};
+  const set = (k: string, v: unknown) =>
+    Object.defineProperty(out, k, {
+      value: v,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  for (const k of Object.keys(after)) if (!Object.hasOwn(before, k)) set(k, null);
+  for (const k of Object.keys(before)) {
+    const was = before[k];
+    const now = Object.hasOwn(after, k) ? after[k] : undefined;
+    if (canonicalJson(was) !== canonicalJson(now)) set(k, undoValue(was, now));
+  }
+  return out;
+}
+
+/**
  * The inverse of a change, for its Undo: the patch that puts each of `paths` back to its value in
  * `before` (removed where it was unset), and what each must still hold, as in `after`, for the Undo
  * to apply. Other paths are not touched, so a later change to them stays.
@@ -125,7 +151,7 @@ export function inversePatch(
   after: Record<string, unknown>,
   paths: string[],
 ): { patch: unknown; expect: Record<string, unknown> } {
-  const patch = patchOf(paths.map((p) => [p, valueAt(before, p) ?? null]));
+  const patch = patchOf(paths.map((p) => [p, undoValue(valueAt(before, p), valueAt(after, p))]));
   const expect: Record<string, unknown> = {};
   for (const p of paths) expect[p] = valueAt(after, p) ?? null;
   return { patch, expect };

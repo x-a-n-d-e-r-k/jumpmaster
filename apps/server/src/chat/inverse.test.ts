@@ -42,6 +42,45 @@ describe('settingPatch', () => {
 });
 
 describe('inversePatch', () => {
+  test('an Undo of an object-valued setting removes the keys the change added', () => {
+    const before = mergeConfigPatch(doc(), {
+      dropZones: [{ id: 'main', models: { review: 'a' } }],
+    }) as Record<string, unknown>;
+    const after = mergeConfigPatch(
+      before,
+      settingPatch(before, 'main', { 'dropZones[].models': { implement: 'b' } }),
+    ) as Record<string, unknown>;
+    expect(valueAt(after, 'dropZones[main].models')).toEqual({ review: 'a', implement: 'b' });
+    const inv = inversePatch(before, after, ['dropZones[main].models']);
+    const undone = mergeConfigPatch(after, inv.patch) as Record<string, unknown>;
+    expect(valueAt(undone, 'dropZones[main].models')).toEqual({ review: 'a' });
+    expect(undone).toEqual(before);
+  });
+
+  test('an Undo of an object-valued setting that was unset removes it', () => {
+    const before = doc();
+    const after = mergeConfigPatch(
+      before,
+      settingPatch(before, 'main', { 'dropZones[].models': { implement: 'b' } }),
+    ) as Record<string, unknown>;
+    const inv = inversePatch(before, after, ['dropZones[main].models']);
+    expect(mergeConfigPatch(after, inv.patch)).toEqual(before);
+  });
+
+  test('an Undo of an object-valued setting restores a key the change replaced or removed', () => {
+    const before = mergeConfigPatch(doc(), {
+      dropZones: [{ id: 'main', models: { review: 'a', implement: 'c' } }],
+    }) as Record<string, unknown>;
+    const after = mergeConfigPatch(
+      before,
+      settingPatch(before, 'main', {
+        'dropZones[].models': { review: null, implement: 'b', triage: 'd' },
+      }),
+    ) as Record<string, unknown>;
+    const inv = inversePatch(before, after, ['dropZones[main].models']);
+    expect(mergeConfigPatch(after, inv.patch)).toEqual(before);
+  });
+
   test('inversePatch restores just the changed paths and leaves a later change to another path alone', () => {
     const before = doc();
     const after = mergeConfigPatch(
