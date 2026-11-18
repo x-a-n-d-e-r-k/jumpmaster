@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, test, vi } from 'vitest';
@@ -186,6 +187,44 @@ test('start arms the pending GitHub App sweep once a minute, and stop clears it'
   expect(cleared.mock.calls.some(([h]) => h === sweep.handle)).toBe(false);
   await srv.stop();
   expect(cleared.mock.calls.some(([h]) => h === sweep.handle)).toBe(true);
+});
+
+test('a start whose listen fails leaves no pending GitHub App sweep armed', async () => {
+  const busy = createServer();
+  await new Promise<void>((resolve) => busy.listen(0, '127.0.0.1', resolve));
+  const address = busy.address();
+  const port = address && typeof address === 'object' ? address.port : 0;
+  const dir = mkdtempSync(join(tmpdir(), 'jm-main-'));
+  const dataDir = join(dir, 'data');
+  const file = join(dir, 'jumpmaster.config.json');
+  writeFileSync(
+    file,
+    JSON.stringify({
+      dataDir,
+      listen: { host: '127.0.0.1', port },
+      dropZones: [],
+      pollSeconds: 30,
+    }),
+  );
+  const armed: { ms: number | undefined; handle: NodeJS.Timeout }[] = [];
+  const realSet = globalThis.setInterval;
+  vi.spyOn(globalThis, 'setInterval').mockImplementation(((fn: () => void, ms?: number) => {
+    const handle = realSet(fn, ms);
+    armed.push({ ms, handle });
+    return handle;
+  }) as typeof setInterval);
+  const cleared = vi.spyOn(globalThis, 'clearInterval');
+  vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    await expect(start(file, env)).rejects.toThrow();
+    const sweeps = armed.filter((a) => a.ms === APP_MANIFEST_SWEEP_MS);
+    const live = sweeps.filter((a) => !cleared.mock.calls.some(([h]) => h === a.handle));
+    expect(live).toHaveLength(0);
+  } finally {
+    for (const a of armed) clearInterval(a.handle);
+    await new Promise<void>((resolve) => busy.close(() => resolve()));
+  }
 });
 
 test('a changed pollSeconds re-arms the poll timer', () => {

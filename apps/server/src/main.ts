@@ -352,6 +352,8 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     void pruneTranscripts(new Date());
   }, 10_000);
 
+  await app.listen({ host: boot.listen.host, port: boot.listen.port });
+  // Armed once listening: a failed listen rejects start() and nothing clears it.
   const appManifestSweep = setInterval(() => {
     try {
       sweepPendingApps(appManifestStore, log);
@@ -359,8 +361,6 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
       log(`pending app sweep failed: ${errorMessage(e)}`);
     }
   }, APP_MANIFEST_SWEEP_MS);
-
-  await app.listen({ host: boot.listen.host, port: boot.listen.port });
   const address = app.server.address();
   if (address && typeof address === 'object') bound = { ...bound, port: address.port };
   log(listeningLine(boot.listen.host, bound.port, live.mode()));
