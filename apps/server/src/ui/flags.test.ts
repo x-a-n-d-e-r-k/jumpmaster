@@ -225,7 +225,7 @@ describe('the advanced settings page, /zones/:id/flags', () => {
     expect(max).toMatch(/<input type="number" min="0" step="1"[^>]*value="60"/);
     expect(max).toContain('<span class="set">set</span>');
     expect(max).toMatch(
-      /<button type="button" class="reset" data-reset="crew.maxDropsPerDay" title="Default: 24">Reset to default<\/button>/,
+      /<button type="button" class="reset" data-reset="crew.maxDropsPerDay" title="Default: 0">Reset to default<\/button>/,
     );
     expect(rowHtml(html, 'mergeReservationMinutes')).toContain('max="240"');
     expect(rowHtml(html, 'crew.cycleMinutes')).toContain('step="any"');
