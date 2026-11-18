@@ -225,6 +225,33 @@ describe('enqueueCrew', () => {
     expect(open).toHaveLength(1);
     expect(open[0]).toMatchObject({ kind: 'refute_exhausted', subject: `issue:${issue}` });
     expect(open[0]?.options.map((o) => o.effect)).toEqual(['promote_issue', 'reject_issue']);
+    expect(open[0]?.decision).toBe(
+      "Reviewers asked for changes to crew issue #40 2 times, and its latest text hasn't been " +
+        'reviewed. Promote it as it reads now, or reject it?',
+    );
+  });
+
+  test("the out-of-refutes briefing counts the issue's own refutes, in plain words", () => {
+    for (const refuteCount of [3, 2]) {
+      const issue = stagedIssue(`k${refuteCount}`);
+      setCrewIssue(w.db, issue, { refuteCount, number: null }, t0);
+      nextCrewWork(w.db, w.zone, t0);
+      const open = listBriefings(w.db, { zoneId: 'main', state: 'open' }).filter(
+        (b) => b.subject === `issue:${issue}`,
+      );
+      expect(open).toHaveLength(1);
+      const [b] = open;
+      expect(b?.decision).toContain(`${refuteCount} times`);
+      expect(b?.decision).toBe(
+        `Reviewers asked for changes to crew issue k${refuteCount} ${refuteCount} times, and ` +
+          "its latest text hasn't been reviewed. Promote it as it reads now, or reject it?",
+      );
+      for (const text of [b?.decision ?? '', b?.why ?? '']) {
+        expect(text).not.toContain('survived the refute');
+        expect(text).not.toContain('refute verdict');
+      }
+      setCrewIssue(w.db, issue, { state: 'rejected' }, t0);
+    }
   });
 
   test('a ruling newer than the last cycle makes the lead cycle due at once', async () => {

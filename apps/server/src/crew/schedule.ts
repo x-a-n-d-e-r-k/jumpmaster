@@ -89,7 +89,7 @@ export function nextCrewWork(db: Db, zone: DropZoneConfig, now: Date): CrewWork 
         zoneId: zone.id,
         kind: 'refute_exhausted',
         subject: subjectOf(c),
-        decision: `Promote ${label} without a refute verdict?`,
+        decision: `Reviewers asked for changes to ${label} ${c.refuteCount} times, and its latest text hasn't been reviewed. Promote it as it reads now, or reject it?`,
         why: refuteExhaustedWhy(db, c),
         options: PROMOTE_OPTIONS,
         onHold: label,
