@@ -20,6 +20,7 @@ import {
   verifyPassphrase,
 } from '../auth/operator.js';
 import { grantSudo } from '../auth/sessions.js';
+import { listBacklog, queueIssue } from '../backlog.js';
 import {
   briefingContext,
   dismissZoneBriefings,
@@ -139,6 +140,9 @@ import { registerSecretRoutes } from './secrets.js';
 
 /** A stick's trooper count: an integer of 1 or more (the ceiling is checked against the stick). */
 const SlotsBody = z.object({ slots: z.number().int().min(1) });
+
+/** The issue "Work on it" queues: a positive issue number. */
+const QueueBody = z.object({ issue: z.number().int().positive() });
 
 export interface ControlDeps {
   db: Db;
@@ -652,6 +656,37 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         return { zone: zone.id, crewCycle: 'due' };
       },
     );
+
+    // The backlog: open issues Jumpmaster has not touched, read as the zone's author identity.
+    scope.get<{ Params: { id: string } }>('/api/control/zones/:id/backlog', async (req, reply) => {
+      const zone = cfg(req).dropZones.find((z) => z.id === req.params.id);
+      if (!zone) return reply.code(404).send({ error: 'unknown zone' });
+      if (!deps.forgesFor)
+        return reply.code(503).send({ error: 'this server has no forge to read the backlog from' });
+      try {
+        return { zone: zone.id, issues: await listBacklog(deps.forgesFor(zone.id).author, zone) };
+      } catch (e) {
+        const error = `reading the backlog failed: ${(e as Error).message}`;
+        return reply.code(502).send({ error: redact(error, scrubList(req)) });
+      }
+    });
+
+    // "Work on it": the zone's ready label on one backlog issue, through the outbox.
+    scope.post<{ Params: { id: string } }>('/api/control/zones/:id/queue', async (req, reply) => {
+      const zone = cfg(req).dropZones.find((z) => z.id === req.params.id);
+      if (!zone) return reply.code(404).send({ error: 'unknown zone' });
+      if (!deps.forgesFor)
+        return reply.code(503).send({ error: 'this server has no forge to label through' });
+      const body = QueueBody.safeParse(req.body ?? {});
+      if (!body.success)
+        return reply.code(400).send({ error: 'invalid body: issue must be a number' });
+      const { issue } = body.data;
+      const r = await queueIssue(db, deps.forgesFor(zone.id), zone, issue, now());
+      if (!r.ok) return reply.code(r.status).send({ error: redact(r.error, scrubList(req)) });
+      audit(req, 'zone.queue', { issue, opKey: r.opKey }, zone.id);
+      deps.kick?.();
+      return { zone: zone.id, issue, label: zone.readyLabel };
+    });
 
     // MCP tokens: minted only here, the plain token returned once; registered only with mcp on.
     // The value is shown, so a session mints only with sudo (the passphrase re-entered within five

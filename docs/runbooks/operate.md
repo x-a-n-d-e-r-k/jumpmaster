@@ -113,6 +113,18 @@ are left as they are; only the zone's mode goes, and its history stays for a lat
 API answers `200 {"removed": …}` when the zone went at once and `202 {"stopping": …, "waits": …}`
 otherwise. A file-mode config shows no control: edit the file.
 
+### The backlog and "Work on it"
+
+`ctl backlog <zone>` lists the zone's open issues that carry none of its Jumpmaster labels (ready,
+retry, the crew's staged label, triage and triaged) and were not filed by Jumpmaster. An issue
+whose author has no write access is listed as not startable, with the reason: intake skips such
+issues, so it cannot be queued. `ctl queue <zone> <issue>` puts the zone's ready label on one of
+them, as the author identity through the outbox, and starts a pass; intake picks it up from there.
+It reads the issue again first and refuses (409, nothing written) a closed issue, a pull request,
+an issue already carrying a Jumpmaster label, an untrusted author's issue, a zone in observe mode
+and an engaged kill switch. A failed forge read is a 502 with nothing written. Each queue is
+audited as `zone.queue` with the issue number.
+
 ### Egress adoption
 
 In `monitor`, every host a zone's drops reach is recorded. The Egress section's **Observed in the
@@ -341,6 +353,8 @@ token is always allowed.
 | Zones | `ctl resume <zone>` | `POST /api/control/zones/:id` |
 | Zones | `ctl observe <zone>` | `POST /api/control/zones/:id` |
 | Zones | `ctl crew-cycle <zone>` | `POST /api/control/zones/:id/crew-cycle` |
+| Zones | `ctl backlog <zone> (open issues with no Jumpmaster label)` | `GET /api/control/zones/:id/backlog` |
+| Zones | `ctl queue <zone> <issue> (puts the ready label on)` | `POST /api/control/zones/:id/queue` |
 | Zones | `ctl intake <zone> stub <file.json> (prints the GOAL.md stub)`<br>`ctl intake <zone> issue <file.json> (files the issue ready)` | `POST /api/control/zones/:id/intake/goal-stub`<br>`POST /api/control/zones/:id/intake/issue` |
 | GitHub | `ctl github <zone> recommend \| pat <author\|reviewer\|read> \| ruleset \| codeowners [--reviewer <login>]… \| checklist`<br>`ctl github recommend <owner/name> [--paid-plan] [--identity starter\|two-bot]` | `GET /api/control/zones/:id/github`<br>`POST /api/control/github/recommend` |
 | Settings | `ctl settings set <path>=<json>… [--note <text>]` | `PATCH /api/control/config` |
