@@ -22,6 +22,45 @@ export interface ConfirmPageDeps {
 
 /** Longer than any passphrase may be, so an oversized one fails like a wrong one. */
 const MAX_FIELD = 4096;
+const PassphraseBody = z.object({ passphrase: z.string().max(MAX_FIELD) });
+
+/**
+ * The operator passphrase a page's form carries (`passphrase` in the body), checked as the sudo
+ * for one change: `backoff` while this source waits (nothing is charged or checked), else the
+ * attempt is charged before the check (as the login is) and a right passphrase resets it. `busy`
+ * when the passphrase check is saturated; `wrong` also when the passphrase changed meanwhile
+ * (which ended every session, this one included).
+ */
+export async function checkPassphrase(
+  req: FastifyRequest,
+  deps: { db: Db; now(): Date; backoff: Backoff },
+): Promise<'ok' | 'wrong' | 'busy' | 'backoff'> {
+  const { db, now, backoff } = deps;
+  if (!backoff.check(req.ip, now()).allowed) return 'backoff';
+  const body = PassphraseBody.safeParse(req.body ?? {});
+  const stored = operatorHash(db);
+  backoff.fail(req.ip, now());
+  let right = false;
+  try {
+    right =
+      body.success && stored !== null && (await verifyPassphrase(body.data.passphrase, stored));
+  } catch (e) {
+    if (e instanceof ScryptBusyError) return 'busy';
+    throw e;
+  }
+  if (!right || operatorHash(db) !== stored) return 'wrong';
+  backoff.reset(req.ip);
+  return 'ok';
+}
+
+/** What a page says when the passphrase check is saturated (`busy`). */
+export const BUSY = new ScryptBusyError().message;
+
+/** How long this source still waits, in whole seconds (at least one), for `retry-after`. */
+export const retryAfterSeconds = (backoff: Backoff, req: FastifyRequest, now: Date): string => {
+  const c = backoff.check(req.ip, now);
+  return String(Math.max(1, Math.ceil(c.allowed ? 0 : c.retryAfterMs / 1000)));
+};
 const ConfirmBody = z.object({
   token: z.string().max(256),
   passphrase: z.string().max(MAX_FIELD),
@@ -46,10 +85,10 @@ const REASON: Record<ConsumeFailure, (revision: number) => string> = {
   expired: () => 'This confirmation expired: open the page again, or start the change again.',
 };
 
-const html = (reply: FastifyReply, status: number, body: string) =>
+export const html = (reply: FastifyReply, status: number, body: string) =>
   reply.code(status).type('text/html; charset=utf-8').send(body);
 
-const notice = (title: string, body: string): string =>
+export const notice = (title: string, body: string): string =>
   page(`<h2>${escapeHtml(title)}</h2><p>${body}</p>`);
 
 const GONE = notice(
@@ -117,29 +156,18 @@ export function registerConfirmPages(app: FastifyInstance, deps: ConfirmPageDeps
     if (!pending && typeof token === 'string' && store.confirmations.wasUsed(token))
       return html(reply, 409, withCsrf(req, notice('Not applied', escapeHtml(REASON.used(0)))));
     if (!pending) return html(reply, 404, withCsrf(req, GONE));
-    const c = backoff.check(req.ip, now());
-    if (!c.allowed)
+    const checked = await checkPassphrase(req, deps);
+    if (checked === 'backoff')
       return html(
-        reply.header('retry-after', String(Math.ceil(c.retryAfterMs / 1000))),
+        reply.header('retry-after', retryAfterSeconds(backoff, req, now())),
         429,
         render(req, pending, 'Too many wrong passphrases from here: wait a moment and try again.'),
       );
+    if (checked === 'busy')
+      return html(reply.header('retry-after', '1'), 503, render(req, pending, BUSY));
     const body = ConfirmBody.safeParse(req.body ?? {});
-    const stored = operatorHash(db);
-    // Charged before the check, as the login is; a right passphrase resets it.
-    backoff.fail(req.ip, now());
-    let right = false;
-    try {
-      right =
-        body.success && stored !== null && (await verifyPassphrase(body.data.passphrase, stored));
-    } catch (e) {
-      if (!(e instanceof ScryptBusyError)) throw e;
-      return html(reply.header('retry-after', '1'), 503, render(req, pending, e.message));
-    }
-    // A passphrase changed during the wait ended every session, this one included.
-    if (!right || !body.success || operatorHash(db) !== stored)
+    if (checked === 'wrong' || !body.success)
       return html(reply, 401, render(req, pending, 'That passphrase is not right.'));
-    backoff.reset(req.ip);
     const r = store.apply(pending.patch, {
       ...pending.meta,
       principal,
