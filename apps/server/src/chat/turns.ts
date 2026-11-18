@@ -71,6 +71,10 @@ export interface ChatTurnDeps {
  * Where a chat turn's rate-limit observation came from (R11). The id's `chat:` prefix never
  * matches a drop id, so the usage state never treats a chat turn as a drop, a probe or a cause
  * work item, and usage-credit use in a chat never starts a credits stop by itself.
+ *
+ * Because no drop has this id, `ingestRateLimit` finds no drop to read a model from, so a
+ * per-model window a chat turn reports is recorded with a null model. That is intended: the
+ * chat runs no drop, and the window's utilization still counts for the install.
  */
 export function chatRateLimitSource(
   threadId: number,
@@ -398,12 +402,13 @@ export class ChatTurns {
       }
       if (outcome.kind === 'done') {
         if (outcome.texts.length > 0) {
-          const reply = this.append(threadId, {
+          // Stored with the result's usage in one write, so no subscriber sees it without one.
+          this.append(threadId, {
             role: 'assistant',
             text: outcome.texts.join('\n\n'),
             state: 'done',
+            ...(outcome.usage ? { usage: outcome.usage } : {}),
           });
-          if (outcome.usage) this.store(threadId, reply, { usage: outcome.usage });
         }
         this.store(threadId, msg, { state: 'done' });
       } else {

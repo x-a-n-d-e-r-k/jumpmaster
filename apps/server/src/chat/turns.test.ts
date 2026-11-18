@@ -574,6 +574,28 @@ describe('chat usage', () => {
     );
   });
 
+  test('a per-model window a chat turn reports is recorded with no model', async () => {
+    const w = world(async function* () {
+      yield {
+        type: 'rate_limit',
+        data: {
+          status: 'allowed',
+          unifiedWindows: { seven_day_overage_included: { utilization: 0.3 } },
+        },
+      };
+      yield { type: 'text', text: 'hi' };
+      yield { type: 'result', isError: false };
+    });
+    const th = createThread(w.db, { title: 't' }, t0);
+    w.owner(th.id, 'q');
+    w.turns.enqueue(th.id);
+    await w.turns.idle();
+    // No drop has a chat source's id, so there is no drop model to name the window by.
+    expect(listUsageWindows(w.db)).toContainEqual(
+      expect.objectContaining({ key: 'seven_day_overage_included', utilization: 0.3, model: null }),
+    );
+  });
+
   test('a chat source id never matches a real drop id', () => {
     const db = openDb(tmpDbFile());
     const src = chatRateLimitSource(7, 3, t0.toISOString());
@@ -595,10 +617,17 @@ describe('chat usage', () => {
     });
     const th = createThread(w.db, { title: 't' }, t0);
     w.owner(th.id, 'q');
+    const events: HubEvent[] = [];
+    w.turns.subscribe(th.id, 0, (e) => events.push(e));
     w.turns.enqueue(th.id);
     await w.turns.idle();
     const reply = listMessages(w.db, th.id).find((m) => m.role === 'assistant');
     expect(reply?.text).toBe('answer');
     expect(reply?.usage).toEqual(usage);
+    // The reply is stored with its usage in one write: a subscriber never sees it without one.
+    const announced = events
+      .map((e) => e.event)
+      .filter((e) => e.type === 'message' && e.message.id === reply?.id);
+    expect(announced).toEqual([{ type: 'message', message: reply }]);
   });
 });

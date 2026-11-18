@@ -91,15 +91,22 @@ const touch = (db: Db, threadId: number, now: Date) =>
 export function appendMessage(
   db: Db,
   threadId: number,
-  m: { role: ChatRole; text: string; state: ChatMessageState; sessionHash?: string },
+  m: {
+    role: ChatRole;
+    text: string;
+    state: ChatMessageState;
+    sessionHash?: string;
+    usage?: Record<string, unknown>;
+  },
   now: Date,
 ): ChatMessage {
   return db.transaction(() => {
     const row = db
       .prepare(
-        `INSERT INTO chat_messages (thread_id, seq, role, text, state, session_hash, created_at)
+        `INSERT INTO chat_messages
+           (thread_id, seq, role, text, state, session_hash, usage_json, created_at)
          VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM chat_messages WHERE thread_id = ?),
-           ?, ?, ?, ?, ?)
+           ?, ?, ?, ?, ?, ?)
          RETURNING ${MESSAGE_COLS}`,
       )
       .get(
@@ -109,6 +116,7 @@ export function appendMessage(
         m.text,
         m.state,
         m.sessionHash ?? null,
+        m.usage === undefined ? null : JSON.stringify(m.usage),
         now.toISOString(),
       ) as MessageRow;
     touch(db, threadId, now);
