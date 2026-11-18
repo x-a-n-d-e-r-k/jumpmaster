@@ -1442,3 +1442,50 @@ test('v41 adds arbitrations and lets arbitrate be a crew drop, keeping every dro
   ).toThrow(/CHECK/);
   db.close();
 });
+
+test('v40 keeps every control_audit row and the 5000-row trigger (the rebuild ships as v42: v40 and v41 were taken)', () => {
+  const f = dbAt(41, (raw) => {
+    const put = raw.prepare(
+      `INSERT INTO control_audit (at, via, action, target, guarded, detail_json)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    // One transaction: 5002 autocommits cost an fsync each and time the test out on slow disks.
+    raw.transaction(() => {
+      for (let i = 0; i < 5002; i++)
+        put.run(
+          `t${i}`,
+          ['token', 'session', 'system'][i % 3],
+          `a${i}`,
+          i % 2 ? 'z' : null,
+          i % 2,
+          `{"n":${i}}`,
+        );
+    })();
+  });
+  const before = new Database(f);
+  const rows = before.prepare('SELECT * FROM control_audit ORDER BY id').all();
+  before.close();
+  expect(rows).toHaveLength(5000);
+  const db = openDb(f);
+  expect(MIGRATIONS.some((m) => m.version === 42)).toBe(true);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.prepare('SELECT * FROM control_audit ORDER BY id').all()).toEqual(rows);
+  const audit = db.prepare(
+    "INSERT INTO control_audit (at, via, action, detail_json) VALUES ('t', ?, 'x', '{}')",
+  );
+  expect(() => audit.run('browser')).toThrow(/CHECK/);
+  audit.run('chat');
+  // The trigger still keeps the last 5000, and ids keep counting from where they were.
+  expect(count(db, 'control_audit')).toBe(5000);
+  const ids = db.prepare('SELECT MIN(id) AS lo, MAX(id) AS hi FROM control_audit').get() as {
+    lo: number;
+    hi: number;
+  };
+  expect(ids).toEqual({ lo: 4, hi: 5003 });
+  expect(db.prepare('SELECT via FROM control_audit WHERE id = 5003').get()).toEqual({
+    via: 'chat',
+  });
+  for (let i = 0; i < 10; i++) audit.run('session');
+  expect(count(db, 'control_audit')).toBe(5000);
+  db.close();
+});

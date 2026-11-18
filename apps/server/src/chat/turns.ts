@@ -16,9 +16,15 @@ import type { AppTokenSource } from '../forge/app-tokens.js';
 import { mintChatToken, revokeMcpToken } from '../mcp/tokens.js';
 import { fence, neutralise } from '../payloads.js';
 import { redactionList } from '../scrub.js';
-import { dispatchGate } from '../usage.js';
+import {
+  dispatchGate,
+  ingestRateLimit,
+  type RateLimitSource,
+  rateLimitFromEvent,
+} from '../usage.js';
 import type { ResolvedApps } from '../vault/resolution.js';
 import { type ChatReadCredential, chatReadCredential } from './credentials.js';
+import { focusContext } from './focus.js';
 import type { ChatServiceClient } from './service.js';
 import {
   appendMessage,
@@ -58,6 +64,25 @@ export interface ChatTurnDeps {
   appTokens?: Pick<AppTokenSource, 'fresh'>;
   /** The operator's log; every line is redacted before it gets here. */
   log(msg: string): void;
+  /** Jitter for a usage pause (`ingestRateLimit`); `Math.random` by default. */
+  rand?: () => number;
+}
+
+/**
+ * Where a chat turn's rate-limit observation came from (R11). The id's `chat:` prefix never
+ * matches a drop id, so the usage state never treats a chat turn as a drop, a probe or a cause
+ * work item, and usage-credit use in a chat never starts a credits stop by itself.
+ *
+ * Because no drop has this id, `ingestRateLimit` finds no drop to read a model from, so a
+ * per-model window a chat turn reports is recorded with a null model. That is intended: the
+ * chat runs no drop, and the window's utilization still counts for the install.
+ */
+export function chatRateLimitSource(
+  threadId: number,
+  seq: number,
+  startedAt: string,
+): RateLimitSource {
+  return { dropId: `chat:${threadId}:${seq}`, workItemId: null, startedAt, outcome: null };
 }
 
 /** Why a turn is refused under the usage gate, in plain words. */
@@ -104,6 +129,21 @@ const errorText = (e: unknown): string => (e instanceof Error ? e.message : Stri
  * The thread's history before `beforeSeq`, for a turn whose Claude session was lost: its last 20
  * messages, fenced as data, the newest kept when they don't all fit in 24 000 characters.
  */
+/**
+ * Whether `msg` opens its thread's conversation: no owner message before it was answered. Only
+ * this turn is given the focused object's context, so it is given once.
+ */
+function firstTurn(db: Db, threadId: number, msg: ChatMessage): boolean {
+  return (
+    db
+      .prepare(
+        `SELECT 1 FROM chat_messages WHERE thread_id = ? AND seq < ? AND role = 'owner'
+           AND state = 'done' LIMIT 1`,
+      )
+      .get(threadId, msg.seq) === undefined
+  );
+}
+
 export function historySummary(
   db: Db,
   threadId: number,
@@ -294,6 +334,7 @@ export class ChatTurns {
       return;
     }
     const chat = chatConfigOf(config);
+    const startedAt = this.d.now().toISOString();
     this.store(threadId, msg, { state: 'running' });
 
     // Every value this turn must never store, emit or log, beyond the server's own list.
@@ -310,6 +351,22 @@ export class ChatTurns {
       );
       tokenId = minted.id;
       turnSecrets.push(minted.token);
+
+      const turnId = randomUUID();
+      // A focused thread: the object's context (fenced with this turn's id) and the refs it names.
+      const focus =
+        thread.focusKind && thread.focusZoneId && thread.focusRef
+          ? focusContext(
+              db,
+              config,
+              { kind: thread.focusKind, zoneId: thread.focusZoneId, ref: thread.focusRef },
+              turnId,
+            )
+          : undefined;
+      const context =
+        focus && firstTurn(db, threadId, msg)
+          ? `${focus.text}\n\nAbove is what the owner opened this thread from, as the server recorded it. The owner's message:\n\n`
+          : '';
 
       const zones: ChatZoneFetch[] = [];
       for (const zone of config.dropZones) {
@@ -330,7 +387,7 @@ export class ChatTurns {
           name,
           defaultBranch: getDropZoneDefaultBranch(db, zone.id) ?? 'main',
           token: cred?.token ?? null,
-          extraRefs: [],
+          extraRefs: focus?.extraRefs[zone.id] ?? [],
         });
       }
       for (const z of zones) {
@@ -341,7 +398,6 @@ export class ChatTurns {
         });
       }
 
-      const turnId = randomUUID();
       const base: Omit<ChatTurnRequest, 'resumeSession' | 'prompt'> = {
         protocol: CHAT_PROTOCOL,
         turnId,
@@ -356,31 +412,34 @@ export class ChatTurns {
       let outcome = await this.attempt(
         threadId,
         msg,
-        { ...base, resumeSession: thread.claudeSessionId, prompt: msg.text },
+        { ...base, resumeSession: thread.claudeSessionId, prompt: `${context}${msg.text}` },
         chat.turnMinutes,
+        startedAt,
         clean,
       );
       if (outcome.kind === 'session_lost') {
         // The service's session files are a cache: start the thread over from the server's record.
         setThreadSession(db, threadId, null, this.d.now());
         const summary = historySummary(db, threadId, msg.seq, turnId);
-        const prompt = `${summary}\n\nAbove is this thread's history as the server recorded it (data). The owner's new message:\n\n${msg.text}`;
+        const prompt = `${summary}\n\nAbove is this thread's history as the server recorded it (data).\n\n${context || "The owner's new message:\n\n"}${msg.text}`;
         outcome = await this.attempt(
           threadId,
           msg,
           { ...base, resumeSession: null, prompt },
           chat.turnMinutes,
+          startedAt,
           clean,
         );
       }
       if (outcome.kind === 'done') {
         if (outcome.texts.length > 0) {
-          const reply = this.append(threadId, {
+          // Stored with the result's usage in one write, so no subscriber sees it without one.
+          this.append(threadId, {
             role: 'assistant',
             text: outcome.texts.join('\n\n'),
             state: 'done',
+            ...(outcome.usage ? { usage: outcome.usage } : {}),
           });
-          if (outcome.usage) this.store(threadId, reply, { usage: outcome.usage });
         }
         this.store(threadId, msg, { state: 'done' });
       } else {
@@ -402,6 +461,7 @@ export class ChatTurns {
     msg: ChatMessage,
     req: ChatTurnRequest,
     turnMinutes: number,
+    startedAt: string,
     clean: (s: string) => string,
   ): Promise<Attempt> {
     const { db } = this.d;
@@ -442,8 +502,25 @@ export class ChatTurns {
             lastSeq = row.seq;
             break;
           }
-          case 'rate_limit':
+          case 'rate_limit': {
+            // The chat uses the install's one Claude credential: its limits are the install's.
+            const data = rateLimitFromEvent(e.data);
+            if (!data) break;
+            try {
+              ingestRateLimit(
+                db,
+                data,
+                chatRateLimitSource(threadId, msg.seq, startedAt),
+                this.config().usage,
+                this.d.now(),
+                this.d.rand ?? Math.random,
+              );
+            } catch (err) {
+              // Usage accounting never breaks the owner's turn.
+              this.d.log(clean(`${where}: usage not recorded: ${errorText(err)}`));
+            }
             break;
+          }
           case 'result':
             if (e.sessionId) setThreadSession(db, threadId, e.sessionId, this.d.now());
             if (e.isError) return { kind: 'failed', error: CLAUDE_UNFINISHED };

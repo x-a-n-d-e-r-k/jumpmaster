@@ -137,6 +137,15 @@ import {
   guidanceFor,
   registerGuidanceRoutes,
 } from './github.js';
+import {
+  type ActionCtx,
+  type ActionResult,
+  applyOutcome,
+  configPatchAction,
+  crewCycleAction,
+  ruleAction,
+  zoneModeAction,
+} from './operator-actions.js';
 import { registerSecretRoutes } from './secrets.js';
 
 /** A stick's trooper count: an integer of 1 or more (the ceiling is checked against the stick). */
@@ -334,6 +343,18 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       now(),
       scrubList(req),
     );
+  /** The shared actions' context for this request: its principal, snapshot and scrub list. */
+  const actx = (req: FastifyRequest): ActionCtx => {
+    if (!req.principal) throw new Error('a control route was reached without a principal');
+    return {
+      db,
+      now,
+      config: cfg(req),
+      principal: req.principal,
+      secrets: scrubList(req),
+      ...(deps.kick ? { kick: deps.kick } : {}),
+    };
+  };
   /**
    * Suspends (engaging) or unsuspends (releasing) every zone's recorded app installation, each
    * within its deadline; undefined when there is none to call (PAT mode, or no `appSuspension`).
@@ -468,19 +489,9 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       if (!zone) return reply.code(404).send({ error: 'unknown zone' });
       const body = ZoneBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: 'invalid mode' });
-      if (body.data.mode === 'observe') {
-        const active = activeWorkCount(db, zone.id);
-        if (active > 0) {
-          return reply
-            .code(409)
-            .send({ error: `${active} active drops or forge writes: pause and drain first` });
-        }
-      }
-      setZoneMode(db, zone.id, body.data.mode, now());
-      // Choosing a mode withdraws a stop asked for earlier: the zone stays.
-      clearZoneStopping(db, zone.id);
-      audit(req, 'zone.mode', { mode: body.data.mode }, zone.id);
-      return { zone: zone.id, mode: body.data.mode };
+      const r = zoneModeAction(actx(req), zone.id, body.data.mode);
+      if (!r.ok) return sendFailure(reply, r);
+      return { zone: zone.id, mode: r.value.mode };
     });
 
     // Dismisses the zone's open briefings Command was shown (issue #98), each recorded as one
@@ -634,29 +645,20 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         const body = RuleBody.safeParse(req.body);
         if (!body.success) return reply.code(400).send({ error: 'invalid body' });
         const { optionId, note, optionsDigest: seen } = body.data;
-        const r = ruleBriefing(db, id, optionId, note ?? '', now(), {
+        const r = ruleAction(actx(req), id, optionId, note ?? '', {
           ...(seen ? { optionsDigest: seen } : {}),
         });
-        if (!r.ok) {
-          const error = { 404: 'unknown briefing', 409: 'already ruled', 400: 'unknown option' };
-          return reply.code(r.status).send({ error: r.reason ?? error[r.status] });
-        }
-        audit(req, 'briefing.rule', { optionId, rulingId: r.rulingId }, `briefing:${id}`);
-        deps.kick?.();
-        return { briefing: id, rulingId: r.rulingId };
+        if (!r.ok) return sendFailure(reply, r);
+        return { briefing: id, rulingId: r.value.rulingId };
       },
     );
 
     scope.post<{ Params: { id: string } }>(
       '/api/control/zones/:id/crew-cycle',
       async (req, reply) => {
-        const zone = cfg(req).dropZones.find((z) => z.id === req.params.id);
-        if (!zone) return reply.code(404).send({ error: 'unknown zone' });
-        if (!zone.crew?.enabled) return reply.code(409).send({ error: 'crew is not enabled' });
-        requestCrewCycle(zone.id, now());
-        audit(req, 'zone.crew-cycle', {}, zone.id);
-        deps.kick?.();
-        return { zone: zone.id, crewCycle: 'due' };
+        const r = crewCycleAction(actx(req), req.params.id);
+        if (!r.ok) return sendFailure(reply, r);
+        return { zone: req.params.id, crewCycle: r.value.crewCycle };
       },
     );
 
@@ -1099,6 +1101,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         scope,
         deps.config,
         audit,
+        actx,
         tokenOnly,
         deps.detectForge ?? githubDetectForge,
         { db, now, ...(deps.reach ? { reach: deps.reach } : {}) },
@@ -1184,7 +1187,6 @@ const ImportBody = z.strictObject({
   returnTo: ReturnTo,
   cancelTo: ReturnTo,
 });
-const SESSION_FORBIDDEN_HINT = 'set with jumpmaster ctl or in the config file';
 const MAX_REVISIONS = 500;
 
 /** A `returnTo` kept only as a path on this host. */
@@ -1194,19 +1196,9 @@ const returnToOf = (returnTo: string | undefined): { returnTo?: string } =>
 const cancelToOf = (cancelTo: string | undefined): { cancelTo?: string } =>
   cancelTo === undefined ? {} : { cancelTo: safeNext(cancelTo) };
 
-/** An applied revision's audit fields: the revision and the paths, and whether it was guarded. */
-export const appliedDetail = (r: Extract<ApplyResult, { ok: true }>): AuditDetail => ({
-  revision: r.revision,
-  changed: pathsOf(r.changed),
-  ...(r.guarded ? { guarded: 1, guardedPaths: pathsOf(r.guarded) } : {}),
-  ...(r.readds ? { readds: r.readds.join(', ') } : {}),
-});
-
-/** The paths an apply changed, for the audit row: names only, never a value. */
-const pathsOf = (changed: string[]): string => {
-  const text = changed.join(', ');
-  return text.length > 400 ? `${text.slice(0, 400)}…` : text;
-};
+/** A shared action's refusal as the routes answer it: its body when it has one, else `{ error }`. */
+const sendFailure = (reply: FastifyReply, r: Extract<ActionResult<unknown>, { ok: false }>) =>
+  reply.code(r.status).send(r.body ?? { error: r.error });
 
 /**
  * The config store's routes (§10.3 live config). Both principals read and write; a session's
@@ -1222,6 +1214,7 @@ function registerConfigRoutes(
   scope: FastifyInstance,
   store: ConfigStore,
   audit: (req: FastifyRequest, action: string, detail: AuditDetail, target?: string) => void,
+  actx: (req: FastifyRequest) => ActionCtx,
   tokenOnly: (req: FastifyRequest, reply: FastifyReply) => boolean,
   detectForge: (repo: string, token: string) => DetectForge,
   ctx: { db: Db; now(): Date; reach?: ReachDeps },
@@ -1233,7 +1226,7 @@ function registerConfigRoutes(
     return req.principal;
   };
   const viaOf = (req: FastifyRequest): 'ui' | 'ctl' =>
-    req.principal?.via === 'session' ? 'ui' : 'ctl';
+    principalOf(req).via === 'token' ? 'ctl' : 'ui';
   /** An apply's answer: 200 with the revision, 400 with issues by path, 409 on a stale revision. */
   const answer = (
     req: FastifyRequest,
@@ -1243,39 +1236,8 @@ function registerConfigRoutes(
     extra: AuditDetail = {},
     target?: string,
   ) => {
-    if (!r.ok) {
-      if ('conflict' in r) return reply.code(409).send({ conflict: r.conflict });
-      if ('needsConfirmation' in r) {
-        const { pendingId, guarded, expectRevision } = r.needsConfirmation;
-        // An attempt never confirmed still shows in the audit: the paths and the base, never the
-        // pending id (the confirm page's key) and never a value.
-        audit(req, 'config.propose', {
-          kind: action.replace(/^config\./, ''),
-          base: expectRevision,
-          guardedPaths: pathsOf([...new Set(guarded.map((g) => g.path))]),
-        });
-        return reply.code(409).send({
-          needsConfirmation: true,
-          pendingId,
-          confirm: `/config/confirm/${pendingId}`,
-          guarded,
-        });
-      }
-      if ('sessionForbidden' in r)
-        return reply
-          .code(403)
-          .send({ sessionForbidden: r.sessionForbidden, hint: SESSION_FORBIDDEN_HINT });
-      if ('confirmation' in r) return reply.code(409).send({ confirmation: r.confirmation });
-      return reply.code(400).send({ issues: r.issues });
-    }
-    audit(req, action, { ...appliedDetail(r), ...extra }, target);
-    return {
-      revision: r.revision,
-      changed: r.changed,
-      restartNeeded: r.restartNeeded,
-      ...(r.readds ? { readds: r.readds } : {}),
-      ...(r.guarded ? { guarded: r.guarded } : {}),
-    };
+    const out = applyOutcome(actx(req), action, r, extra, target);
+    return out.ok ? out.value : sendFailure(reply, out);
   };
   const invalid = (reply: FastifyReply, shape: string) =>
     reply.code(400).send({ issues: [{ path: '', message: `invalid body: ${shape}` }] });
@@ -1652,17 +1614,14 @@ function registerConfigRoutes(
     if (!body.success)
       return invalid(reply, '{"patch": {…}, "expectRevision": <revision>, "note"?: "…"}');
     const { patch, expectRevision, note, resume, returnTo, cancelTo } = body.data;
-    // Zones are matched by id: a section's `{ dropZones: [{ id, … }] }` edits that zone alone.
-    const r = store.apply(mergeConfigPatch(store.document(), patch), {
-      via: viaOf(req),
-      principal: principalOf(req),
+    const r = configPatchAction(actx(req), store, patch, {
       expectRevision,
       ...(note !== undefined ? { note } : {}),
       ...(resume ? { resume } : {}),
-      ...returnToOf(returnTo),
-      ...cancelToOf(cancelTo),
+      ...(returnTo !== undefined ? { returnTo } : {}),
+      ...(cancelTo !== undefined ? { cancelTo } : {}),
     });
-    return answer(req, reply, 'config.apply', r);
+    return r.ok ? r.value : sendFailure(reply, r);
   });
 
   scope.get<{ Querystring: { limit?: string } }>('/api/control/config/revisions', async (req) => {
