@@ -4,6 +4,7 @@ import { applyPendingRulings, syncParkBriefings } from '../briefings.js';
 import type { ClaudeConfig, DropZoneConfig, UsageConfig } from '../config.js';
 import { flushCrewOps } from '../crew/flush.js';
 import type { ImageFetchOpts } from '../crew/images.js';
+import { applyArbitrations } from '../crew/results.js';
 import { enqueueCrew } from '../crew/schedule.js';
 import { flushTriageTrail } from '../crew/trail.js';
 import type { Db } from '../db/open.js';
@@ -509,6 +510,8 @@ export async function reconcileZone(
     actions += await applyPendingRulings(db, deps, zone.id, now);
     // A goal change proposed in the chat (or by a ruling just applied) opens as its PR.
     actions += await openGoalChanges(db, forges, zone, now);
+    // An arbiter's acting ruling on a review disagreement: the item is retried, as Command's Retry.
+    actions += await applyArbitrations(db, deps, zone.id, now);
     actions += await flushCrewOps(db, forges, zone, secrets, now);
     // In the same pass that confirms crew issue numbers: a split's comment names its children.
     actions += await flushTriageTrail(db, forges, zone, secrets, now);
