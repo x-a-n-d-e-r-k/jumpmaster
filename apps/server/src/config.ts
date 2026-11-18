@@ -116,7 +116,7 @@ const CREW_DEFAULTS = {
   maxDropsPerDay: 24,
   stagedLabel: 'agent-staged',
   maxStaged: 3,
-  refutePromotes: false,
+  refutePromotes: true,
   maxRefute: 3,
   maxTriage: 2,
 };
@@ -153,7 +153,10 @@ const CrewSchema = z
     /** Crew-filed issues wait under this label until Command promotes them. */
     stagedLabel: z.string().min(1).default(CREW_DEFAULTS.stagedLabel),
     maxStaged: z.number().int().nonnegative().default(CREW_DEFAULTS.maxStaged),
-    /** Lets a crew refute promote an issue (still held one pass with a Reject option). */
+    /**
+     * Lets a crew refute promote an issue (still held one pass with a Reject option). On unless a
+     * zone sets it false, which puts each passing refute to Command as a Promote briefing.
+     */
     refutePromotes: z.boolean().default(CREW_DEFAULTS.refutePromotes),
     maxRefute: z.number().int().min(1).default(CREW_DEFAULTS.maxRefute),
     /** Triage attempts on one issue text before it is put to Command as failed. */

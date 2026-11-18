@@ -1,3 +1,4 @@
+import { type DropZoneConfig, DropZoneObject } from '../config.js';
 import { refreshGoals } from '../goals.js';
 import { makeZone, type ZoneWorld, zoneWorld } from './fixtures.js';
 import { t0 } from './helpers.js';
@@ -32,6 +33,20 @@ The API has no docs.
 `;
 
 export const crewOn = { ...makeZone().crew, enabled: true };
+
+/**
+ * A zone's crew settings as the real zone schema parses them from `crew` in a config file, so a
+ * key the file leaves out takes the schema's default rather than a fixture's value.
+ */
+export function parsedCrew(crew: Record<string, unknown> = {}): DropZoneConfig['crew'] {
+  return DropZoneObject.parse({
+    id: 'main',
+    repo: 'octo/demo',
+    gates: [{ name: 'test', run: 'npm test' }],
+    image: 'img',
+    crew: { enabled: true, ...crew },
+  }).crew;
+}
 
 /** A zone world with the crew enabled and GOAL.md read into the ladder. */
 export async function crewWorld(
