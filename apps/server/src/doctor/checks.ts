@@ -32,7 +32,7 @@ import {
   type Stick,
 } from '../db/repo.js';
 import { FABLE_PLANS } from '../fable.js';
-import { branchProtectionProblems, codeownersFindings } from '../flow/guards.js';
+import { branchProtectionProblems, codeownersFindings, MERGE_RULESET } from '../flow/guards.js';
 import {
   type BranchRulesRead,
   type Forge,
@@ -1335,6 +1335,23 @@ async function branchRulesCheck(zone: DropZoneConfig, r: ZoneReads): Promise<Doc
       if (!problems.includes('no pull request rule')) problems.push('no pull request rule');
   if (problems.length === 0) {
     const ok = rules.author.kind === 'ok' ? rules.author.rules : null;
+    // An unreadable bypass is never read as "cannot bypass": it is a warn naming how to check.
+    const unknown = [
+      ...new Set(
+        [rules.author, rules.reviewer].flatMap((read) =>
+          read?.kind === 'ok'
+            ? (read.rules.bypass ?? []).filter((b) => b.can === 'unknown').map((b) => b.name)
+            : [],
+        ),
+      ),
+    ];
+    if (unknown.length > 0)
+      return {
+        ...base,
+        status: 'warn',
+        summary: `${branch} is otherwise safe, but GitHub did not say whether the bots can bypass ${unknown.length === 1 ? 'the ruleset' : 'the rulesets'} ${unknown.join(', ')} (no current_user_can_bypass and no bypass list in its answer)`,
+        fix: `${unknown.map((n) => `Open Settings → Rules → Rulesets → ${n} → Bypass list`).join('; ')}, and check that the app is listed only on ${MERGE_RULESET}, and only for the author app.`,
+      };
     if (zone.identity === 'starter')
       return {
         ...base,

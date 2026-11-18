@@ -126,7 +126,15 @@ export type BranchRules = {
   unpinnedChecks: string[];
   /** Required checks pinned to an app other than GitHub Actions (absent when none). */
   nonActionsChecks?: string[];
+  /** True when any active ruleset's `bypass` entry is `yes`. */
   viewerCanBypass: boolean;
+  /**
+   * One entry per active ruleset: whether this token's identity can bypass it. `restrictUpdatesOnly`
+   * is true when every rule of that ruleset on the branch is `update`. Fakes may omit it.
+   */
+  bypass?: RulesetBypass[];
+  /** True when the forge reads as a GitHub App installation (absent for a token's forge). */
+  asApp?: boolean;
   viewerIsAdmin: boolean;
   /** Active rule types the server cannot satisfy with its own merge (merge queue, deployments). */
   unsupportedRules?: string[];
@@ -159,6 +167,38 @@ export type ReadProbe = {
   accepted: string | null;
   rateLimited?: boolean;
 };
+/** One active ruleset's bypass reading (spec §4.3). */
+export type RulesetBypass = {
+  rulesetId: number;
+  name: string;
+  restrictUpdatesOnly: boolean;
+  can: 'yes' | 'no' | 'unknown';
+};
+
+/**
+ * Whether the viewer can bypass one ruleset. The field, when GitHub sends it, decides. Without it,
+ * a token's forge reads `yes` (as always); an app reads its own `Integration` entry in
+ * `bypass_actors` (role, team, organization-admin and deploy-key entries are ones an installation
+ * can't hold), and `unknown` when that list is absent too.
+ */
+function rulesetBypass(
+  data: { current_user_can_bypass?: string | null; bypass_actors?: unknown },
+  appId: string | null,
+): RulesetBypass['can'] {
+  const field = data.current_user_can_bypass;
+  if (field != null) return field === 'never' ? 'no' : 'yes';
+  if (appId === null) return 'yes';
+  if (!Array.isArray(data.bypass_actors)) return 'unknown';
+  return data.bypass_actors.some(
+    (a: { actor_type?: unknown; actor_id?: unknown } | null) =>
+      a?.actor_type === 'Integration' &&
+      typeof a.actor_id === 'number' &&
+      String(a.actor_id) === appId,
+  )
+    ? 'yes'
+    : 'no';
+}
+
 export type BranchRulesRead =
   | { kind: 'ok'; rules: BranchRules }
   | { kind: 'none' }
@@ -1005,7 +1045,7 @@ export class GitHubForge implements Forge {
       );
       const ids = [...new Set(rules.map((r) => r.ruleset_id).filter((id) => id != null))];
       const active = new Set<number>();
-      let viewerCanBypass = false;
+      const bypass: RulesetBypass[] = [];
       for (const id of ids) {
         const { data } = await this.octokit.request(
           'GET /repos/{owner}/{repo}/rulesets/{ruleset_id}',
@@ -1018,8 +1058,15 @@ export class GitHubForge implements Forge {
         );
         if (data.enforcement !== 'active') continue;
         active.add(id as number);
-        if (data.current_user_can_bypass !== 'never') viewerCanBypass = true;
+        const own = rules.filter((r) => r.ruleset_id === id);
+        bypass.push({
+          rulesetId: id as number,
+          name: String(data.name ?? ''),
+          restrictUpdatesOnly: own.length > 0 && own.every((r) => r.type === 'update'),
+          can: rulesetBypass(data, this.app?.appId ?? null),
+        });
       }
+      const viewerCanBypass = bypass.some((b) => b.can === 'yes');
       if (active.size === 0) return { kind: 'none' };
 
       let requiredApprovals = 0;
@@ -1084,6 +1131,8 @@ export class GitHubForge implements Forge {
           requiredChecks,
           unpinnedChecks,
           viewerCanBypass,
+          bypass,
+          ...(this.app ? { asApp: true } : {}),
           viewerIsAdmin,
           ...(unsupportedRules.length > 0 ? { unsupportedRules } : {}),
           ...(nonActionsChecks.length > 0 ? { nonActionsChecks } : {}),

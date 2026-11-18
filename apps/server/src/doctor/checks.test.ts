@@ -444,6 +444,58 @@ describe('forge checks', () => {
     expect(c.fix).toContain('Require a pull request before merging');
   });
 
+  test('an unknown bypass with no other problem warns, naming the ruleset and how to check', async () => {
+    const w = world();
+    for (const id of ['author', 'reviewer'] as const) {
+      const r = w.f.state.rules[id];
+      if (r.kind !== 'ok') throw new Error('world rules');
+      w.f.state.rules[id] = {
+        kind: 'ok',
+        rules: {
+          ...r.rules,
+          asApp: true,
+          bypass: [
+            { rulesetId: 1, name: 'jumpmaster', restrictUpdatesOnly: false, can: 'no' },
+            ...(id === 'reviewer'
+              ? [
+                  {
+                    rulesetId: 2,
+                    name: 'jumpmaster-merge',
+                    restrictUpdatesOnly: true,
+                    can: 'unknown' as const,
+                  },
+                ]
+              : []),
+          ],
+        },
+      };
+    }
+    const c = one(await w.run(), 'forge.branch-rules');
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('jumpmaster-merge');
+    expect(c.summary).not.toContain('jumpmaster,');
+    expect(c.fix).toContain('Settings → Rules → Rulesets → jumpmaster-merge → Bypass list');
+    expect(c.fix).toContain('only on jumpmaster-merge');
+    expect(c.fix).toContain('author app');
+  });
+
+  test('every bypass read as no is a pass, as before', async () => {
+    const w = world();
+    for (const id of ['author', 'reviewer'] as const) {
+      const r = w.f.state.rules[id];
+      if (r.kind !== 'ok') throw new Error('world rules');
+      w.f.state.rules[id] = {
+        kind: 'ok',
+        rules: {
+          ...r.rules,
+          asApp: true,
+          bypass: [{ rulesetId: 1, name: 'jumpmaster', restrictUpdatesOnly: false, can: 'no' }],
+        },
+      };
+    }
+    expect(one(await w.run(), 'forge.branch-rules').status).toBe('pass');
+  });
+
   test('branch rules that cannot be read are never a pass', async () => {
     const w = world();
     w.f.state.rules.author = { kind: 'unavailable' };

@@ -960,6 +960,7 @@ describe('GitHubForge', () => {
             requiredChecks: ['build'],
             unpinnedChecks: [],
             viewerCanBypass: false,
+            bypass: [{ rulesetId: 1, name: '', restrictUpdatesOnly: false, can: 'no' }],
             viewerIsAdmin: false,
             requiresPullRequest: true,
             requireCodeOwnerReview: false,
@@ -1948,4 +1949,136 @@ describe('GitHubForge with an app identity (spec §4.3)', () => {
       if (slug) expect(message).not.toContain(slug);
     },
   );
+});
+
+describe('getBranchRules reads bypass per ruleset (spec §4.3, §5.2)', () => {
+  const identity = { kind: 'app' as const, slug: 'acme-author', appId: '12345' };
+  const rulesUrl = '/repos/o/r/rules/branches/main';
+  const prRule = (id: number) => ({
+    type: 'pull_request',
+    ruleset_id: id,
+    parameters: { required_approving_review_count: 1, dismiss_stale_reviews_on_push: true },
+  });
+  const updateRule = (id: number) => ({ type: 'update', ruleset_id: id, parameters: {} });
+  const mockRuleset = (id: number, body: Record<string, unknown>) =>
+    nock(api)
+      .get(`/repos/o/r/rulesets/${id}`)
+      .query({ includes_parents: 'true' })
+      .reply(200, { id, enforcement: 'active', ...body });
+  const mockViewer = () => {
+    nock(api).get('/user').reply(200, { login: 'jm-bot' });
+    nock(api)
+      .get('/repos/o/r/collaborators/jm-bot/permission')
+      .reply(200, { permission: 'write', role_name: 'write' });
+  };
+  const make = (mode: 'pat' | 'app') =>
+    mode === 'app'
+      ? new GitHubForge('o', 'r', 'ghs_tok', { identity })
+      : new GitHubForge('o', 'r', 'tok');
+
+  beforeAll(() => {
+    nock.disableNetConnect();
+  });
+  afterEach(() => {
+    expect(nock.pendingMocks()).toEqual([]);
+    nock.cleanAll();
+  });
+
+  const fields = ['never', 'always', 'absent'] as const;
+  const actorSets = {
+    absent: undefined,
+    'this app': [{ actor_id: 12345, actor_type: 'Integration', bypass_mode: 'always' }],
+    'another app': [{ actor_id: 999, actor_type: 'Integration', bypass_mode: 'always' }],
+    'a RepositoryRole only': [
+      { actor_id: 12345, actor_type: 'RepositoryRole', bypass_mode: 'always' },
+    ],
+  } as const;
+  const expected = (
+    mode: 'pat' | 'app',
+    field: (typeof fields)[number],
+    actors: keyof typeof actorSets,
+  ): 'yes' | 'no' | 'unknown' => {
+    if (field === 'never') return 'no';
+    if (field === 'always') return 'yes';
+    if (mode === 'pat') return 'yes';
+    if (actors === 'absent') return 'unknown';
+    return actors === 'this app' ? 'yes' : 'no';
+  };
+  const cases = (['pat', 'app'] as const).flatMap((mode) =>
+    fields.flatMap((field) =>
+      (Object.keys(actorSets) as (keyof typeof actorSets)[]).map(
+        (actors) => [mode, field, actors, expected(mode, field, actors)] as const,
+      ),
+    ),
+  );
+
+  test.each(cases)(
+    '%s forge, field %s, bypass_actors %s → %s',
+    async (mode, field, actors, can) => {
+      nock(api)
+        .get(rulesUrl)
+        .query(true)
+        .reply(200, [prRule(7)]);
+      const a = actorSets[actors];
+      mockRuleset(7, {
+        name: 'jumpmaster',
+        ...(field === 'absent' ? {} : { current_user_can_bypass: field }),
+        ...(a ? { bypass_actors: a } : {}),
+      });
+      if (mode === 'pat') mockViewer();
+      const res = await make(mode).getBranchRules('main');
+      expect(res.kind).toBe('ok');
+      if (res.kind !== 'ok') return;
+      expect(res.rules.bypass).toEqual([
+        { rulesetId: 7, name: 'jumpmaster', restrictUpdatesOnly: false, can },
+      ]);
+      expect(res.rules.viewerCanBypass).toBe(can === 'yes');
+      expect(res.rules.asApp).toBe(mode === 'app' ? true : undefined);
+    },
+  );
+
+  test('two rulesets with different answers give two entries', async () => {
+    nock(api)
+      .get(rulesUrl)
+      .query(true)
+      .reply(200, [prRule(1), updateRule(2)]);
+    mockRuleset(1, { name: 'jumpmaster', current_user_can_bypass: 'never' });
+    mockRuleset(2, { name: 'jumpmaster-merge', current_user_can_bypass: 'always' });
+    const res = await make('app').getBranchRules('main');
+    expect(res).toMatchObject({
+      kind: 'ok',
+      rules: {
+        viewerCanBypass: true,
+        asApp: true,
+        bypass: [
+          { rulesetId: 1, name: 'jumpmaster', restrictUpdatesOnly: false, can: 'no' },
+          { rulesetId: 2, name: 'jumpmaster-merge', restrictUpdatesOnly: true, can: 'yes' },
+        ],
+      },
+    });
+  });
+
+  test('restrictUpdatesOnly is false when the ruleset also has a pull_request rule', async () => {
+    nock(api)
+      .get(rulesUrl)
+      .query(true)
+      .reply(200, [updateRule(2), prRule(2)]);
+    mockRuleset(2, { name: 'jumpmaster-merge', current_user_can_bypass: 'always' });
+    const res = await make('app').getBranchRules('main');
+    expect(res.kind === 'ok' && res.rules.bypass).toEqual([
+      { rulesetId: 2, name: 'jumpmaster-merge', restrictUpdatesOnly: false, can: 'yes' },
+    ]);
+  });
+
+  test('PAT regression: a ruleset without the field still reads viewerCanBypass true', async () => {
+    nock(api)
+      .get(rulesUrl)
+      .query(true)
+      .reply(200, [prRule(1)]);
+    mockRuleset(1, { name: 'jumpmaster' });
+    mockViewer();
+    const res = await make('pat').getBranchRules('main');
+    expect(res).toMatchObject({ kind: 'ok', rules: { viewerCanBypass: true } });
+    expect(res.kind === 'ok' && 'asApp' in res.rules).toBe(false);
+  });
 });
