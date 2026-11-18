@@ -471,7 +471,43 @@ export function staticTokenProvider(token: string): TokenProvider {
  * A forge that acts as a GitHub App installation (spec §4.3). An installation token gets 403 from
  * `GET /user`, so its login comes from the slug, and an installation is never a repository admin.
  */
-export type AppForgeIdentity = { kind: 'app'; slug: string; appId: string };
+export type AppForgeIdentity = {
+  kind: 'app';
+  slug: string;
+  appId: string;
+  /**
+   * The installation's grant on the repository (`AppTokenSource.grant`): `GET /repos` reports every
+   * permission false for an installation token, so `repoAccess()` reads the permissions from here,
+   * and the cached server-use token's expiry (ISO string, or null when none is cached).
+   */
+  grant?: () => Promise<AppForgeGrant>;
+};
+
+/** What `AppForgeIdentity.grant` resolves to. */
+export type AppForgeGrant = {
+  permissions: Record<string, string>;
+  tokenExpiresAt: string | null;
+};
+
+/** The fixed rejection of an app forge's `repoAccess()` when it was given no grant to read. */
+export const NO_APP_GRANT = "repoAccess needs the GitHub App's installation grant";
+
+/**
+ * An installation's permissions as `RepoAccess` flags. The spec gives no mapping (§4.3), so this
+ * one is ours: `pull` on any `contents` access, `push` on `contents: write`, `triage` on `issues`
+ * or `pull_requests: write`, `admin` on `administration: write`, and `maintain` never (an app has
+ * no repository role).
+ */
+function appPermissions(grant: Record<string, string>): RepoAccess['permissions'] {
+  const level = (name: string) => (Object.hasOwn(grant, name) ? grant[name] : undefined);
+  return {
+    admin: level('administration') === 'write',
+    maintain: false,
+    push: level('contents') === 'write',
+    triage: level('issues') === 'write' || level('pull_requests') === 'write',
+    pull: level('contents') === 'read' || level('contents') === 'write',
+  };
+}
 
 /** GitHub's app-slug rule: lowercase letters, digits and hyphens, and not empty. */
 const APP_SLUG = /^[a-z0-9-]+$/;
@@ -480,6 +516,7 @@ export class GitHubForge implements Forge {
   private readonly octokit: Octokit;
   private viewer: Promise<string> | undefined;
   private readonly app: Readonly<{ slug: string; appId: string }> | null;
+  private readonly grant: (() => Promise<AppForgeGrant>) | null;
 
   /**
    * `requestTimeoutMs` aborts any request that has not answered in time (the doctor's forges set
@@ -501,6 +538,7 @@ export class GitHubForge implements Forge {
     if (id && !(typeof id.slug === 'string' && APP_SLUG.test(id.slug)))
       throw new Error('GitHubForge: the app slug is not a valid GitHub App slug');
     this.app = id ? Object.freeze({ slug: id.slug, appId: id.appId }) : null;
+    this.grant = id?.grant ?? null;
     const ms = opts.requestTimeoutMs;
     this.octokit = new Octokit({
       // No token: unauthenticated reads (the wizard's owner-type read before any token exists).
@@ -1253,6 +1291,7 @@ export class GitHubForge implements Forge {
   }
 
   async repoAccess(): Promise<RepoAccess> {
+    if (this.app) return this.appRepoAccess(this.app.slug);
     const { data, headers } = await this.octokit.rest.repos.get({
       owner: this.owner,
       repo: this.repo,
@@ -1278,6 +1317,39 @@ export class GitHubForge implements Forge {
               .map((s) => s.trim())
               .filter(Boolean)
           : null,
+      tokenExpiresAt: Number.isFinite(expiresAt) ? new Date(expiresAt).toISOString() : null,
+      ownerType:
+        (data.owner as { type?: string } | undefined)?.type === 'Organization'
+          ? 'Organization'
+          : 'User',
+    };
+  }
+
+  /**
+   * An app forge's access (spec §4.3): `GET /repos` (under the installation token, so that token is
+   * cached before its expiry is read) for the repository's own fields, then the installation's
+   * grant for the permissions and expiry. An installation token has no scopes. Without a grant, or
+   * when it fails, this rejects: it never reports permissions it did not read. A grant's error may
+   * quote a token or GitHub's answer, so it is not passed on, and no `cause` is kept.
+   */
+  private async appRepoAccess(slug: string): Promise<RepoAccess> {
+    const read = this.grant;
+    if (!read) throw new Error(NO_APP_GRANT);
+    const { data } = await this.octokit.rest.repos.get({ owner: this.owner, repo: this.repo });
+    let grant: AppForgeGrant;
+    try {
+      grant = await read();
+    } catch {
+      throw new Error(
+        `could not read the installation grant of the GitHub App ${slug} on ${this.owner}/${this.repo}`,
+      );
+    }
+    const expiresAt = grant.tokenExpiresAt === null ? NaN : Date.parse(grant.tokenExpiresAt);
+    return {
+      private: data.private === true,
+      defaultBranch: data.default_branch,
+      permissions: appPermissions(grant.permissions),
+      scopes: null,
       tokenExpiresAt: Number.isFinite(expiresAt) ? new Date(expiresAt).toISOString() : null,
       ownerType:
         (data.owner as { type?: string } | undefined)?.type === 'Organization'

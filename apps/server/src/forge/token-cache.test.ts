@@ -309,6 +309,27 @@ describe('createTokenCache', () => {
     expect(await h.cache.token(AUTHOR)).toBe(fresh);
   });
 
+  test('expiresAt is null before a mint, the minted expiry after, and null after invalidate and clear', async () => {
+    const h = harness();
+    expect(h.cache.expiresAt(AUTHOR)).toBeNull();
+    await h.cache.token(AUTHOR);
+    expect(h.cache.expiresAt(AUTHOR)?.toISOString()).toBe(new Date(T0 + 60 * MIN).toISOString());
+    expect(h.cache.expiresAt(REVIEWER)).toBeNull();
+    h.cache.invalidate(AUTHOR);
+    expect(h.cache.expiresAt(AUTHOR)).toBeNull();
+    await h.cache.token(AUTHOR);
+    expect(h.cache.expiresAt(AUTHOR)).not.toBeNull();
+    h.cache.clear();
+    expect(h.cache.expiresAt(AUTHOR)).toBeNull();
+  });
+
+  test('expiresAt never mints', () => {
+    const h = harness();
+    expect(h.cache.expiresAt(AUTHOR)).toBeNull();
+    expect(h.cache.expiresAt(REVIEWER)).toBeNull();
+    expect(h.mint).not.toHaveBeenCalled();
+  });
+
   test('the module source names no forbidden permission, I/O or logging', async () => {
     const { readFileSync } = await import('node:fs');
     const src = readFileSync(new URL('./token-cache.ts', import.meta.url), 'utf8')

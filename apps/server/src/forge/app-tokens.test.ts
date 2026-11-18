@@ -488,3 +488,143 @@ describe('fresh tokens (issue #237)', () => {
     expect(gh.mints()).toEqual([]);
   });
 });
+
+describe('installation grant (issue #305, spec §4.3)', () => {
+  /** Every POST to access_tokens whose body carries a server use's permissions. */
+  const serverMints = () =>
+    gh
+      .anyMint()
+      .filter((c) =>
+        [USE_PERMISSIONS['server-author'], USE_PERMISSIONS['server-reviewer']].some(
+          (p) =>
+            JSON.stringify((c.body as { permissions?: unknown }).permissions) === JSON.stringify(p),
+        ),
+      );
+  /** Both roles' apps on one installation, as the fake GitHub answers. */
+  const BOTH: AppTokenZone = {
+    ...ZONE,
+    githubApp: { repositoryId: 4242, installations: { author: 77, reviewer: 77 } },
+  };
+
+  test("reads the installation of the zone's repository with the role's app and returns its permissions", async () => {
+    const w = world();
+    const grant = w.source.grant('main', 'reviewer');
+    expect(gh.calls).toEqual([]);
+    const g = await grant();
+    expect(g).toEqual({
+      permissions: { contents: 'read', pull_requests: 'write' },
+      tokenExpiresAt: null,
+    });
+    const lookups = gh.lookups();
+    expect(lookups.length).toBeGreaterThanOrEqual(1);
+    for (const c of lookups) {
+      expect(c.path).toBe('/repos/Octo/demo/installation');
+      expect(c.authorization.startsWith('Bearer eyJ')).toBe(true);
+    }
+    // The reviewer app's JWT: its `iss` is the reviewer entry's app id.
+    const iss = (jwt: string) =>
+      JSON.parse(Buffer.from(jwt.split('.')[1]!, 'base64url').toString()).iss as unknown;
+    const last = lookups.at(-1)!.authorization.slice('Bearer '.length);
+    expect(String(iss(last))).toBe('200');
+  });
+
+  test("tokenExpiresAt is null before the role's server-use provider mints, then the minted expiry", async () => {
+    const w = world({ zone: BOTH });
+    const grant = w.source.grant('main', 'author');
+    expect((await grant()).tokenExpiresAt).toBeNull();
+    // Another use's token is not the server-use token.
+    await w.source.provider('main', 'author', 'drop-read-author').token();
+    expect((await grant()).tokenExpiresAt).toBeNull();
+    await w.source.provider('main', 'author', 'server-author').token();
+    expect((await grant()).tokenExpiresAt).toBe(new Date(T0 + HOUR).toISOString());
+    // The other role's grant reads its own server-use token.
+    expect((await w.source.grant('main', 'reviewer')()).tokenExpiresAt).toBeNull();
+  });
+
+  test('never mints a server-use token and never fills the cache', async () => {
+    const w = world({ zone: BOTH });
+    await w.source.grant('main', 'author')();
+    await w.source.grant('main', 'reviewer')();
+    expect(serverMints()).toEqual([]);
+    // Only the verifier's metadata-only probe may have minted.
+    for (const c of gh.anyMint())
+      expect((c.body as { permissions?: unknown }).permissions).toEqual({ metadata: 'read' });
+    expect(gh.mints()).toEqual([]);
+    // Nothing cached: the providers mint on their first token().
+    const before = gh.mints().length;
+    await w.source.provider('main', 'author', 'server-author').token();
+    await w.source.provider('main', 'reviewer', 'server-reviewer').token();
+    expect(gh.mints().length).toBe(before + 2);
+  });
+
+  test('an installation that is not installed rejects, naming the repository and role, with no secret and no cause', async () => {
+    const w = world();
+    const grant = w.source.grant('main', 'reviewer');
+    await grant(); // verified and remembered
+    gh.state.installed = { status: 404 };
+    const e = await rejection(grant());
+    expect(e.name).toBe('AppTokenError');
+    expect(e.message).toContain('Octo/demo');
+    expect(e.message).toContain('reviewer');
+    expect(e.cause).toBeUndefined();
+    const text = serialized(e);
+    for (const s of [...gh.jwts, ...gh.probes, KEY_A]) expect(text.includes(s)).toBe(false);
+    expect(text).not.toMatch(/ghs_|eyJ/);
+  });
+
+  test('an installation id that differs from the verified one rejects the same way', async () => {
+    const w = world();
+    const grant = w.source.grant('main', 'reviewer');
+    await grant();
+    gh.state.installed = { status: 200, id: 999 };
+    const e = await rejection(grant());
+    expect(e.name).toBe('AppTokenError');
+    expect(e.message).toContain('Octo/demo');
+    expect(e.message).toContain('reviewer');
+    expect(e.cause).toBeUndefined();
+    expect(serialized(e)).not.toMatch(/ghs_|eyJ|PRIVATE KEY/);
+  });
+
+  test('a failing verification or lookup rejects with its own message and no cause', async () => {
+    const w = world();
+    // The verification itself refuses (mismatched recorded id).
+    gh.state.installed = { status: 200, id: 999 };
+    const refused = await rejection(w.source.grant('main', 'author')());
+    expect(refused.message).toContain('Octo/demo');
+    expect(refused.message).toContain('author');
+    expect(refused.cause).toBeUndefined();
+
+    // The grant's own lookup fails with a body that quotes token shapes.
+    gh.state.installed = { status: 200, id: 77 };
+    const grant = w.source.grant('main', 'reviewer');
+    await grant();
+    nock.cleanAll();
+    const leak = `${tokenOf(9)} eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiIyMDAifQ.c2lnbmF0dXJlc2lnbmF0dXJl`;
+    nock(api)
+      .get(/installation$/)
+      .reply(500, { message: leak });
+    const failed = await rejection(grant());
+    expect(failed.message).toContain('Octo/demo');
+    expect(failed.message).toContain('reviewer');
+    expect(failed.cause).toBeUndefined();
+    expect(serialized(failed)).not.toMatch(/ghs_|eyJ/);
+  });
+
+  test('a missing app entry rejects with no cause', async () => {
+    const w = world();
+    w.apps.delete('octo');
+    const e = await rejection(w.source.grant('main', 'author')());
+    expect(e.message).toContain('Octo/demo');
+    expect(e.message).toContain('author');
+    expect(e.cause).toBeUndefined();
+    expect(gh.calls).toEqual([]);
+  });
+
+  test('an unknown zone rejects, naming the zone, with no cause and no GitHub call', async () => {
+    const w = world();
+    const e = await rejection(w.source.grant('nope', 'author')());
+    expect(e.message).toContain('nope');
+    expect(e.cause).toBeUndefined();
+    expect(gh.calls).toEqual([]);
+  });
+});

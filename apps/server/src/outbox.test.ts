@@ -1255,6 +1255,57 @@ describe('pairFor by credential kind (spec §4.4)', () => {
       }
     });
 
+    test('an app ref with appGrant builds a forge whose repoAccess reads that grant', async () => {
+      const grants = vi.fn((_owner: string, _role: AppRole) => async () => ({
+        permissions: { contents: 'write', pull_requests: 'write' },
+        tokenExpiresAt: '2026-12-01T10:00:00.000Z',
+      }));
+      const pair = pairFor(twoBot, tokens, {
+        refs: { author: app('o'), reviewer: app('o') },
+        appTokens: fakeApps(),
+        appIdentity,
+        appGrant: grants,
+      });
+      expect(grants).toHaveBeenCalledWith('o', 'author');
+      expect(grants).toHaveBeenCalledWith('o', 'reviewer');
+      nock(api)
+        .get('/repos/o/r')
+        .reply(200, {
+          private: true,
+          default_branch: 'main',
+          permissions: { admin: false, maintain: false, push: false, triage: false, pull: false },
+        });
+      expect(await pair.author.repoAccess()).toEqual({
+        private: true,
+        defaultBranch: 'main',
+        permissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
+        scopes: null,
+        tokenExpiresAt: '2026-12-01T10:00:00.000Z',
+        ownerType: 'User',
+      });
+    });
+
+    test('an appGrant factory that throws is reported without its error, and keeps no cause', () => {
+      const ghp = `ghp_${alnum(36)}`;
+      for (const role of ['author', 'reviewer'] as const) {
+        const err = failureOf(() =>
+          pairFor(twoBot, tokens, {
+            refs: { ...patRefs, [role]: app('o') },
+            appTokens: fakeApps(),
+            appIdentity,
+            appGrant: () => {
+              throw new Error(`bad grant ${ghp}`);
+            },
+          }),
+        );
+        expect(err.message).toContain(role);
+        expect(err.message).toContain('o/r');
+        const seen = `${err.message}\n${err.stack ?? ''}`;
+        for (const secret of [ghp, 'bad grant']) expect(seen).not.toContain(secret);
+        expect(err.cause).toBeUndefined();
+      }
+    });
+
     test('the repository in the message is redacted', () => {
       const ghp = `ghp_${alnum(36)}`;
       const err = failureOf(() =>
