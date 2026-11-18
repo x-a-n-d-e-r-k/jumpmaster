@@ -617,8 +617,8 @@ const WORDS: Words[] = [
   ),
   z_(
     'crew.maxDropsPerDay',
-    'Most crew drops a day',
-    "The most crew drops this zone runs in a day. Raising it spends more of the plan on the crew. Diagnoses of parked work don't count: there is one per park.",
+    'Crew drops per day (0 = no limit)',
+    "The most crew drops (planning, refutes, triage) in a trailing 24 hours. Diagnoses of parked work don't count: there is one per park. 0 means no limit: Claude usage paces the crew instead, and Jumpmaster pauses when the subscription runs out and tries again after it resets.",
     'number',
   ),
   z_(

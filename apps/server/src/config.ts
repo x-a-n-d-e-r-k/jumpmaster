@@ -113,7 +113,7 @@ const CREW_DEFAULTS = {
   enabled: false,
   goalPath: 'GOAL.md',
   cycleMinutes: 60,
-  maxDropsPerDay: 24,
+  maxDropsPerDay: 0,
   stagedLabel: 'agent-staged',
   maxStaged: 3,
   refutePromotes: true,

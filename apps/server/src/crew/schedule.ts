@@ -365,8 +365,9 @@ const observeDetail = (w: CrewWork): string =>
 /**
  * Queues the zone's next crew drop, if any, with its rendered input. Runs only with the crew
  * enabled, the zone active (observe records `would_enqueue:<role>` instead), the kill switch off,
- * the usage gate open, and no crew drop active. At `maxDropsPerDay` only a parked briefing's
- * diagnosis (or arbitration) is queued (`nextDiagnose`); diagnoses don't count. The lead cycle also
+ * the usage gate open, and no crew drop active. At a positive `maxDropsPerDay` (0 is no limit)
+ * only a parked briefing's diagnosis (or arbitration) is queued (`nextDiagnose`); diagnoses don't
+ * count. The lead cycle also
  * needs a parsed GOAL.md. Attempts are counted here, at enqueue. With `images`, a triage drop
  * also carries the issue's images, fetched and checked here (`crew/images.ts`).
  */
@@ -386,11 +387,13 @@ export async function enqueueCrew(
   if (mode === 'paused') return null;
   if (!gateQueuesCrew(dispatchGate(db, usageCfg, now))) return null;
   if (hasActiveCrewDrop(db, zone.id)) return null;
+  // 0 means no daily limit: the usage gate above alone paces the crew.
+  const cap = zone.crew.maxDropsPerDay;
   // No claude config means no Fable, so nothing is arbitrated: it is put to Command as before.
   const fableOk = opts.claude ? fableStatus(db, { claude: opts.claude }, now).available : false;
   // At the cap only parked briefings are worked on: nextCrewWork's other branches (and their side
   // effects: refute exhaustion put to Command, arbitrations settled, triage reopened) wait.
-  const capped = crewDropsToday(db, zone.id, now) >= zone.crew.maxDropsPerDay;
+  const capped = cap > 0 && crewDropsToday(db, zone.id, now) >= cap;
   const work = capped ? nextDiagnose(db, zone, now, fableOk) : nextCrewWork(db, zone, now, fableOk);
   if (!work) return null;
   if (work.role === 'crew-lead' && getGoals(db, zone.id)?.parse.ok !== true) return null;

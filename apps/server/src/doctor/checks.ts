@@ -2036,6 +2036,12 @@ function crewCapCheck(zone: DropZoneConfig, d: DoctorDeps): DoctorCheck {
   const now = d.now();
   const used = crewDropsToday(d.db, zone.id, now);
   const cap = zone.crew.maxDropsPerDay;
+  if (cap === 0)
+    return {
+      ...base,
+      status: 'pass',
+      summary: `crew drops in the last 24 hours: ${used} (no daily limit; Claude usage paces the crew)`,
+    };
   if (used < cap)
     return {
       ...base,
