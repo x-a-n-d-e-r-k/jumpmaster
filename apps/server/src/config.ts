@@ -113,7 +113,7 @@ const CREW_DEFAULTS = {
   enabled: false,
   goalPath: 'GOAL.md',
   cycleMinutes: 60,
-  maxDropsPerDay: 24,
+  maxDropsPerDay: 0,
   stagedLabel: 'agent-staged',
   maxStaged: 3,
   refutePromotes: true,
@@ -121,6 +121,7 @@ const CREW_DEFAULTS = {
   maxTriage: 2,
   arbiter: true,
   auditPerCycle: 1,
+  autoRetry: true,
 };
 
 export type McpConfig = {
@@ -188,6 +189,8 @@ const CrewSchema = z
      * refuted one becomes a staged crew issue; 0 turns the audit off.
      */
     auditPerCycle: z.number().int().min(0).default(CREW_DEFAULTS.auditPerCycle),
+    /** Lets the crew retry a failed implementation once on its own diagnosis; false briefs. */
+    autoRetry: z.boolean().default(CREW_DEFAULTS.autoRetry),
   })
   .default(CREW_DEFAULTS);
 
@@ -505,16 +508,17 @@ export const EditableSchema = z.object({
     .default({ throttleUtilization: 0.9, probeJitterSeconds: [30, 90], stopOnOverage: true }),
   /**
    * The Claude plan as declared (not detected). Fable runs only on a plan that includes it, with
-   * `fableModel` set, under a trailing seven-day drop cap.
+   * `fableModel` set, paced by its reported weekly usage (and, if positive, a trailing seven-day
+   * drop cap; 0, the default, is no cap).
    */
   claude: z
     .object({
       plan: z.enum(CLAUDE_PLANS).default('pro'),
       fableModel: z.string().min(1).optional(),
-      fableWeeklyDropCap: z.number().int().nonnegative().default(5),
+      fableWeeklyDropCap: z.number().int().nonnegative().default(0),
       /**
        * Fable runs while Claude reports its weekly window under this share. Until Claude reports
-       * it, `fableWeeklyDropCap` applies instead.
+       * it, a positive `fableWeeklyDropCap` applies instead.
        */
       fableMaxUtilization: z.number().min(0).max(1).default(0.8),
       /**
@@ -528,7 +532,7 @@ export const EditableSchema = z.object({
         })
         .optional(),
     })
-    .default({ plan: 'pro', fableWeeklyDropCap: 5, fableMaxUtilization: 0.8 }),
+    .default({ plan: 'pro', fableWeeklyDropCap: 0, fableMaxUtilization: 0.8 }),
   /**
    * Run trooper images only from a stick that verifies signatures (`image-verify-v1`) under the
    * `signed` policy. Off by default; the generated install turns it on.

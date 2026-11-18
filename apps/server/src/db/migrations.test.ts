@@ -1511,8 +1511,47 @@ test('v44 adds applied_at to arbitrations, keeping every row unapplied', () => {
   db.close();
 });
 
-test('v46 adds the audit tables and lets audit be a crew drop, keeping every drop and its columns', () => {
+test('v43 keeps every briefing and ruling (the rebuild ships as v46: v43 to v45 were taken), and takes the goal_change kind', () => {
   const f = dbAt(45, (raw) => {
+    raw.exec(
+      `INSERT INTO briefings (id, zone_id, kind, subject, decision, why, options_json,
+         recommendation, on_hold, source, source_ref, state, diagnose_attempts, created_at,
+         updated_at, diagnosis, diagnosis_basis)
+       VALUES (7, 'z', 'objective_done', 'objective:a', 'd', 'w', '[]', 'r', 'h', 'server', 'drop-1',
+         'ruled', 2, 't1', 't2', 'diag', 'basis'),
+              (8, 'z', 'crew', 'crew:x', 'd', 'w', '[]', '', '', 'crew', NULL, 'open', 0, 't', 't',
+         NULL, NULL),
+              (9, 'z', 'promote', 'issue:3', 'd', 'w', '[]', '', '', 'mcp', '4', 'dismissed', 0,
+         't', 't', NULL, NULL);
+       INSERT INTO rulings (id, zone_id, briefing_id, choice, note, created_at, applied_at,
+         apply_error, apply_attempts)
+       VALUES (7, 'z', 7, 'done', 'n', 't', 't3', NULL, 0);
+       INSERT INTO objectives_done (zone_id, key, done_at, ruling_id) VALUES ('z', 'a', 't', 7);`,
+    );
+  });
+  const before = new Database(f);
+  const briefings = before.prepare('SELECT * FROM briefings ORDER BY id').all();
+  const rulings = before.prepare('SELECT * FROM rulings ORDER BY id').all();
+  before.close();
+  const db = openDb(f);
+  expect(MIGRATIONS.some((m) => m.version === 46 && m.foreignKeysOff)).toBe(true);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.prepare('SELECT * FROM briefings ORDER BY id').all()).toEqual(briefings);
+  expect(db.prepare('SELECT * FROM rulings ORDER BY id').all()).toEqual(rulings);
+  expect(count(db, 'objectives_done')).toBe(1);
+  const put = db.prepare(
+    `INSERT INTO briefings (zone_id, kind, subject, decision, why, options_json, source, state,
+       created_at, updated_at) VALUES ('z', ?, ?, 'd', 'w', '[]', 'server', 'open', 't', 't')`,
+  );
+  put.run('goal_change', 'goal-change:1');
+  expect(() => put.run('nonsense', 'x:1')).toThrow(/CHECK/);
+  // The one-open-per-subject index survives the rebuild.
+  expect(() => put.run('goal_change', 'goal-change:1')).toThrow(/UNIQUE/);
+  db.close();
+});
+
+test('v48 adds the audit tables and lets audit be a crew drop, keeping every drop and its columns', () => {
+  const f = dbAt(47, (raw) => {
     raw.exec(`INSERT INTO drop_zones (id, repo, default_branch, config_json)
       VALUES ('z', 'o/r', 'main', '{}')`);
     raw.exec(`INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, created_at,
@@ -1525,7 +1564,7 @@ test('v46 adds the audit tables and lets audit be a crew drop, keeping every dro
   });
   const db = openDb(f);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
-  expect(MIGRATIONS.find((m) => m.version === 46)?.foreignKeysOff).toBe(true);
+  expect(MIGRATIONS.find((m) => m.version === 48)?.foreignKeysOff).toBe(true);
   // The drops survive the rebuild with every column.
   expect(
     db

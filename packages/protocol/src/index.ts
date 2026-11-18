@@ -405,6 +405,17 @@ export const CrewLeadOutputSchema = z.strictObject({
       why: z.string().max(2000),
     })
     .optional(),
+  /**
+   * A proposed new text for the zone's goal file, and why: the server records it and raises a
+   * briefing whose "Open the PR" ruling opens it as a pull request. Merging it still needs the
+   * owner's confirmation in the browser.
+   */
+  goalChange: z
+    .strictObject({
+      text: z.string().min(1).max(64_000),
+      why: z.string().max(2000),
+    })
+    .optional(),
 });
 export type CrewLeadOutput = z.infer<typeof CrewLeadOutputSchema>;
 
@@ -420,6 +431,8 @@ export const DiagnoseOutputSchema = z.strictObject({
   diagnosis: z.string().max(4000),
   recommendation: z.enum(['retry', 'leave_parked', 'needs_command']),
   detail: z.string().max(2000),
+  /** With `retry`: the one concrete change the next attempt must make. The server may act on it. */
+  instruction: z.string().min(1).max(2000).optional(),
 });
 export type DiagnoseOutput = z.infer<typeof DiagnoseOutputSchema>;
 

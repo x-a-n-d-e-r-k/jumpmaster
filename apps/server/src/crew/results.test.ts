@@ -22,32 +22,44 @@ import {
   listWorkItems,
   setUsageState,
   setWorkItemState,
+  setZoneMode,
   updateDrop,
   upsertPullRequest,
 } from '../db/repo.js';
 import { zonePass } from '../flow/snapshot.js';
+import { expireLeases } from '../leases.js';
 import { unsanitizeForgeText } from '../outbox.js';
 import { buildPayload, promptVersions } from '../payloads.js';
 import { applyResult, type ResultDeps } from '../results.js';
 import { syncDropZone } from '../sync.js';
 import { crewOn, crewWorld, ISSUE_BODY, parsedCrew } from '../test/crew.js';
-import { usageCfg, type ZoneWorld } from '../test/fixtures.js';
+import { makeZone, usageCfg, type ZoneWorld } from '../test/fixtures.js';
 import {
   arbiterHarness,
   FABLE_CLAUDE,
   type Harness,
+  harness,
   headN,
   ruling,
   toHealsExhausted,
+  toPrOpen,
 } from '../test/flowHarness.js';
 import { plus, t0 } from '../test/helpers.js';
 import { applyCrewActions } from './actions.js';
 import { crewBodySha, flushCrewOps } from './flush.js';
-import { applyArbitrations, applyCrewResult, foundByAudit } from './results.js';
+import {
+  applyArbitrations,
+  applyCrewResult,
+  applyCrewRetries,
+  crewMayRetry,
+  foundByAudit,
+} from './results.js';
 import { enqueueCrew, nextCrewWork } from './schedule.js';
 import {
   getCrewIssue,
+  getCrewRetry,
   getTriageRequest,
+  insertCrewRetry,
   listAudits,
   listCrewIssues,
   listTriageRequests,
@@ -1787,5 +1799,367 @@ src/retry.ts:12 loops without a cap; the merged change dropped the check.
     await applyCrewResult(w.db, deps(), drop, out, at(64));
     expect(listCrewIssues(w.db, 'main')).toHaveLength(1);
     expect(auditRow()?.state).toBe('filed');
+  });
+});
+
+describe('the crew retries a failed implementation once on its own diagnosis (#396)', () => {
+  const TAIL =
+    ' FAIL  scripts/no-token-literals.test.ts > no tracked file holds a token-shaped literal\n' +
+    'AssertionError: expected [ …(1) ] to deeply equal []';
+  const redGate = { name: 'test', exitCode: 1, durationMs: 1, timedOut: false, outputTail: TAIL };
+  const INSTRUCTION =
+    'Build fake tokens from parts at runtime, as scripts/no-token-literals.test.ts says; no whole token literal in any test file.';
+  const DIAGNOSIS = 'The implement drop wrote whole fake tokens into test files.';
+  const diag = (o: Record<string, unknown> = {}) => ({
+    diagnosis: DIAGNOSIS,
+    recommendation: 'retry',
+    detail: 'Retry it with the fix.',
+    instruction: INSTRUCTION,
+    ...o,
+  });
+  const implementFailed: DropResult = {
+    status: 'failed',
+    reason: 'gate test failed',
+    gates: [redGate],
+  };
+
+  /** Issue 1 with the crew on: its implement fails the test gate, it parks and is briefed. */
+  async function parked(zone: Partial<DropZoneConfig> = {}): Promise<Harness> {
+    const h = await harness({
+      zone: { crew: crewOn, triage: { gate: false }, ...zone },
+    });
+    await h.reconcile();
+    expect(await h.finishDrop('implement', implementFailed)).toBe(204);
+    await h.reconcile(); // raises the parked briefing and queues its diagnose drop
+    return h;
+  }
+  const item = (h: Harness) => listWorkItems(h.db, 'main').find((i) => i.id === 1);
+  const briefings = (h: Harness) =>
+    listBriefings(h.db, { zoneId: 'main', kind: 'parked' }).filter((b) => b.subject === 'item:1');
+  const openBriefing = (h: Harness) => briefings(h).find((b) => b.state === 'open');
+  const rows = (h: Harness) =>
+    (h.db.prepare('SELECT COUNT(*) AS n FROM crew_retries').get() as { n: number }).n;
+  const implementDrops = (h: Harness) =>
+    (
+      h.db
+        .prepare(`SELECT COUNT(*) AS n FROM drops WHERE role = 'implement' AND work_item_id = 1`)
+        .get() as { n: number }
+    ).n;
+  const retryDeps = (h: Harness, zone: DropZoneConfig = h.zone) => ({
+    forges: () => h.forges,
+    zone: () => zone,
+  });
+  async function diagnose(h: Harness, result: DropResult): Promise<string> {
+    const { dropId, epoch, payload } = await h.lease();
+    expect(payload.role).toBe('diagnose');
+    expect(await h.postResult(dropId, epoch, result)).toBe(204);
+    return dropId;
+  }
+
+  test('#348: retry with an instruction withdraws the briefing; the next pass retries; the implement prompt carries it', async () => {
+    const h = await parked();
+    const raised = openBriefing(h);
+    expect(raised).toBeDefined();
+    expect(item(h)?.state).toBe('parked');
+    const dropId = await diagnose(h, completed(diag()));
+    // Recorded in the result's transaction: the row, the diagnosis kept, the briefing withdrawn.
+    expect(getCrewRetry(h.db, 1)).toMatchObject({
+      zoneId: 'main',
+      briefingId: raised?.id,
+      dropId,
+      diagnosis: DIAGNOSIS,
+      instruction: INSTRUCTION,
+      appliedAt: null,
+      outcome: null,
+    });
+    const withdrawn = briefings(h).find((b) => b.id === raised?.id);
+    expect(withdrawn).toMatchObject({ state: 'withdrawn', diagnosis: DIAGNOSIS });
+    expect(withdrawn?.recommendation).toBe('retry: Retry it with the fix.');
+    expect(item(h)?.state).toBe('parked');
+    // Nothing raises it again before the apply.
+    syncParkBriefings(h.db, h.zone, h.now());
+    expect(openBriefing(h)).toBeUndefined();
+
+    await h.reconcile();
+    expect(getCrewRetry(h.db, 1)).toMatchObject({ outcome: 'retried' });
+    expect(getCrewRetry(h.db, 1)?.appliedAt).not.toBeNull();
+    expect(item(h)?.state).not.toBe('parked');
+    expect(openBriefing(h)).toBeUndefined();
+    expect(h.queuedRoles()).toEqual(['implement']);
+    // No ruling was made by the owner.
+    expect(h.db.prepare('SELECT COUNT(*) AS n FROM rulings').get()).toEqual({ n: 0 });
+    const { payload } = await h.lease();
+    const prompt = payload.role === 'implement' ? (payload.prompt ?? '') : '';
+    const section = prompt.slice(prompt.indexOf('## Previous attempt (data, untrusted)'));
+    expect(section).toContain('no-token-literals.test.ts > no tracked file');
+    expect(section).toContain(
+      `The crew diagnosed this failure and retried the item once. Its diagnosis: ${DIAGNOSIS}. What the next attempt must do differently: ${INSTRUCTION}`,
+    );
+  });
+
+  test('the retried implement passes: a PR opens, as for any implement drop', async () => {
+    const h = await parked();
+    await diagnose(h, completed(diag()));
+    await toPrOpen(h, headN(1));
+    expect(item(h)?.state).toBe('pr_open');
+    expect(rows(h)).toBe(1);
+  });
+
+  test('CLAIM = PROOF: it fails again → parked, briefed as already retried, diagnosed, never retried twice', async () => {
+    const h = await parked();
+    await diagnose(h, completed(diag()));
+    await h.reconcile();
+    const retriedAt = getCrewRetry(h.db, 1)?.appliedAt ?? '';
+    expect(await h.finishDrop('implement', implementFailed)).toBe(204);
+    await h.reconcile();
+    expect(item(h)?.state).toBe('parked');
+    const again = openBriefing(h);
+    expect(again?.decision).toBe('Issue #1 parked again after the crew retried it once. Retry it?');
+    expect(again?.why).toMatch(
+      new RegExp(
+        `^The crew already retried this once on ${retriedAt.slice(0, 10)}\\. Its diagnosis: `,
+      ),
+    );
+    expect(again?.why).toContain(`It told the next attempt: ${INSTRUCTION}`);
+    expect(again?.options.map((o) => o.effect)).toEqual(['retry_item', 'none']);
+    expect(crewMayRetry(h.db, h.zone, 1)).toBe(false);
+
+    await diagnose(h, completed(diag({ diagnosis: 'Same again.' })));
+    expect(rows(h)).toBe(1);
+    expect(openBriefing(h)).toMatchObject({ id: again?.id, diagnosis: 'Same again.' });
+    const before = implementDrops(h);
+    await h.reconcile();
+    await h.reconcile();
+    expect(item(h)?.state).toBe('parked');
+    expect(implementDrops(h)).toBe(before);
+    expect(openBriefing(h)?.why).toContain('The crew already retried this once');
+  });
+
+  test('CLAIM = PROOF: a direct second insert for the item is refused by the schema', async () => {
+    const h = await parked();
+    const b = openBriefing(h);
+    const row = {
+      zoneId: 'main',
+      itemId: 1,
+      briefingId: b?.id ?? -1,
+      dropId: 'd1',
+      diagnosis: 'd',
+      instruction: 'i',
+      createdAt: h.now(),
+    };
+    insertCrewRetry(h.db, row);
+    expect(() => insertCrewRetry(h.db, { ...row, dropId: 'd2' })).toThrow(/UNIQUE/);
+    expect(rows(h)).toBe(1);
+  });
+
+  test('needs_command, leave_parked, retry with no instruction, setting off: the diagnosis is shown, nothing retries', async () => {
+    const cases: [string, Record<string, unknown>, Partial<DropZoneConfig>][] = [
+      ['needs_command', diag({ recommendation: 'needs_command' }), {}],
+      ['leave_parked', diag({ recommendation: 'leave_parked' }), {}],
+      ['no instruction', diag({ instruction: undefined }), {}],
+      ['setting off', diag(), { crew: { ...crewOn, autoRetry: false } }],
+    ];
+    for (const [name, out, zone] of cases) {
+      const h = await parked(zone);
+      await diagnose(h, completed(out));
+      expect(rows(h), name).toBe(0);
+      expect(openBriefing(h)?.diagnosis, name).toBe(DIAGNOSIS);
+      await h.reconcile();
+      await h.reconcile();
+      expect(item(h)?.state, name).toBe('parked');
+      expect(openBriefing(h), name).toBeDefined();
+      expect(h.queuedRoles(), name).toEqual([]);
+    }
+  });
+
+  test('D2: a diagnose that fails, is lost, rate-limited or invalid → no row, the briefing open, still parked after two passes', async () => {
+    const cases: [string, DropResult | 'lost'][] = [
+      ['failed', { status: 'failed', reason: 'boom', gates: [] }],
+      ['rate-limited', { status: 'rate_limited', gates: [] }],
+      ['invalid', completed({ ...diag(), extra: true })],
+      ['empty instruction', completed(diag({ instruction: '' }))],
+      ['missing', { status: 'completed', gates: [] }],
+      ['lost', 'lost'],
+    ];
+    for (const [name, result] of cases) {
+      const h = await parked();
+      if (result === 'lost') {
+        const { payload } = await h.lease();
+        expect(payload.role).toBe('diagnose');
+        h.at(24 * 60);
+        expect(expireLeases(h.db, h.now())).toBe(1);
+      } else {
+        await diagnose(h, result);
+      }
+      expect(rows(h), name).toBe(0);
+      expect(openBriefing(h), name).toBeDefined();
+      await h.reconcile();
+      await h.reconcile();
+      expect(rows(h), name).toBe(0);
+      expect(item(h)?.state, name).toBe('parked');
+      expect(openBriefing(h), name).toBeDefined();
+    }
+  });
+
+  test('D2: the setting turned off between record and apply → skipped, and the briefing is raised again that pass', async () => {
+    const h = await parked();
+    await diagnose(h, completed(diag()));
+    expect(openBriefing(h)).toBeUndefined();
+    const off = { ...h.zone, crew: { ...h.zone.crew, autoRetry: false } };
+    // As reconcileZone runs it: the crew retries, then the parked briefings.
+    expect(await applyCrewRetries(h.db, retryDeps(h, off), 'main', h.now())).toBe(0);
+    syncParkBriefings(h.db, off, h.now());
+    expect(getCrewRetry(h.db, 1)).toMatchObject({ outcome: 'skipped' });
+    expect(item(h)?.state).toBe('parked');
+    expect(openBriefing(h)).toMatchObject({ decision: 'Issue #1 is parked. Retry it?' });
+    expect(await applyCrewRetries(h.db, retryDeps(h), 'main', h.now())).toBe(0);
+    expect(item(h)?.state).toBe('parked');
+  });
+
+  test('an item no longer parked at apply → skipped', async () => {
+    const h = await parked();
+    await diagnose(h, completed(diag()));
+    setWorkItemState(h.db, 1, 'ready', undefined, h.now());
+    expect(await applyCrewRetries(h.db, retryDeps(h), 'main', h.now())).toBe(0);
+    expect(getCrewRetry(h.db, 1)).toMatchObject({ outcome: 'skipped' });
+  });
+
+  test('D3: two retry results for the same item, applied in turn → one row, one implement drop', async () => {
+    const h = await parked();
+    const first = await h.lease();
+    expect(first.payload.role).toBe('diagnose');
+    // Its lease runs out; the item parks on a new reason, so the why changes and is diagnosed afresh.
+    h.at(24 * 60);
+    expect(expireLeases(h.db, h.now())).toBe(1);
+    h.db.prepare(`UPDATE work_items SET reason = 'gate test failed (again)' WHERE id = 1`).run();
+    await h.reconcile();
+    expect(openBriefing(h)?.diagnoseAttempts).toBe(1);
+    const second = await h.lease();
+    expect(second.payload.role).toBe('diagnose');
+    const d = (id: string) => getDrop(h.db, id) as Drop;
+    const rdeps: ResultDeps = { forges: h.forges, zone: h.zone, secrets: [], usageCfg };
+    await applyCrewResult(h.db, rdeps, d(second.dropId), completed(diag()), h.now());
+    await applyCrewResult(h.db, rdeps, d(first.dropId), completed(diag()), h.now());
+    expect(rows(h)).toBe(1);
+    expect(getCrewRetry(h.db, 1)?.dropId).toBe(second.dropId);
+    const before = implementDrops(h);
+    await h.reconcile();
+    await h.reconcile();
+    expect(implementDrops(h) - before).toBe(1);
+  });
+
+  test('D3: two applyCrewRetries together on one row retry once', async () => {
+    const h = await parked();
+    await diagnose(h, completed(diag()));
+    const counts = await Promise.all([
+      applyCrewRetries(h.db, retryDeps(h), 'main', h.now()),
+      applyCrewRetries(h.db, retryDeps(h), 'main', h.now()),
+    ]);
+    expect(counts.sort()).toEqual([0, 1]);
+    expect(item(h)?.state).toBe('ready');
+    const before = implementDrops(h);
+    await h.reconcile();
+    expect(implementDrops(h) - before).toBe(1);
+    expect(h.queuedRoles()).toEqual(['implement']);
+  });
+
+  test('paused and observe zones do not apply; the kill switch stops it', async () => {
+    for (const mode of ['paused', 'observe'] as const) {
+      const h = await parked();
+      await diagnose(h, completed(diag()));
+      setZoneMode(h.db, 'main', mode, h.now());
+      await h.reconcile();
+      expect(getCrewRetry(h.db, 1)?.appliedAt, mode).toBeNull();
+      expect(item(h)?.state, mode).toBe('parked');
+    }
+  });
+
+  describe('crewMayRetry', () => {
+    test('true for a failed implement park with no PR and no row', async () => {
+      const h = await parked();
+      expect(crewMayRetry(h.db, h.zone, 1)).toBe(true);
+      expect(crewMayRetry(h.db, { ...h.zone, crew: { ...h.zone.crew, autoRetry: false } }, 1)).toBe(
+        false,
+      );
+    });
+
+    test('false with a row', async () => {
+      const h = await parked();
+      insertCrewRetry(h.db, {
+        zoneId: 'main',
+        itemId: 1,
+        briefingId: openBriefing(h)?.id ?? -1,
+        dropId: 'x',
+        diagnosis: 'd',
+        instruction: 'i',
+        createdAt: h.now(),
+      });
+      expect(crewMayRetry(h.db, h.zone, 1)).toBe(false);
+    });
+
+    test('false for a heals-exhausted park (newest drop a review, with a PR)', async () => {
+      const h = await arbiterHarness();
+      await toHealsExhausted(h);
+      expect(item(h)?.state).toBe('parked');
+      expect(crewMayRetry(h.db, h.zone, 1)).toBe(false);
+    });
+
+    test('false for an item with a PR, a heal as newest drop, or not parked', async () => {
+      const h = await parked();
+      upsertPullRequest(
+        h.db,
+        {
+          workItemId: 1,
+          number: 7,
+          headRef: 'agent/issue-1',
+          headSha: headN(1),
+          state: 'open',
+        } as never,
+        h.now(),
+      );
+      expect(crewMayRetry(h.db, h.zone, 1)).toBe(false);
+
+      const heal = await parked();
+      heal.db
+        .prepare(
+          `UPDATE drops SET role = 'heal' WHERE id = (SELECT id FROM drops WHERE work_item_id = 1
+             ORDER BY created_at DESC, rowid DESC LIMIT 1)`,
+        )
+        .run();
+      expect(crewMayRetry(heal.db, heal.zone, 1)).toBe(false);
+
+      const prNumber = await parked();
+      prNumber.db.prepare('UPDATE work_items SET pr_number = 9 WHERE id = 1').run();
+      expect(crewMayRetry(prNumber.db, prNumber.zone, 1)).toBe(false);
+
+      const ready = await parked();
+      setWorkItemState(ready.db, 1, 'ready', undefined, ready.now());
+      expect(crewMayRetry(ready.db, ready.zone, 1)).toBe(false);
+    });
+
+    test('false for a budget, rate-limit, completed-without-head or no-changes park (newest implement not failed)', async () => {
+      const results: [string, DropResult][] = [
+        ['blocked', { status: 'blocked', reason: 'blocked', gates: [] }],
+        ['no_changes', { status: 'no_changes', gates: [] }],
+        ['interrupted, budget', { status: 'interrupted', gates: [] }],
+      ];
+      const checked: string[] = [];
+      for (const [name, result] of results) {
+        const h = await harness({
+          zone: {
+            crew: crewOn,
+            triage: { gate: false },
+            budgets: { ...makeZone().budgets, maxResume: 0 },
+          },
+        });
+        await h.reconcile();
+        await h.finishDrop('implement', result);
+        await h.reconcile();
+        if (item(h)?.state !== 'parked') continue;
+        checked.push(name);
+        expect(crewMayRetry(h.db, h.zone, 1), name).toBe(false);
+      }
+      expect(checked).toContain('blocked');
+    });
   });
 });

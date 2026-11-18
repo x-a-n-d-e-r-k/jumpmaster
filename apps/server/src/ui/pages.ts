@@ -28,6 +28,7 @@ import type {
 import { ACTIVE_DROP_STATES } from '../db/repo.js';
 import type { DoctorAction } from '../doctor/checks.js';
 import { fableWindow, isFableWindow, modelFamily, PER_MODEL_WINDOWS } from '../fable.js';
+import type { GoalChange } from '../goal-change.js';
 import { currentObjective, type GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import type { Status } from '../status.js';
@@ -261,7 +262,7 @@ function usageSection(u: HomeState['usage']): string {
       row('Overage status', u.overageStatus) +
       row('Status', s.status) +
       row('Paused until', s.pausedUntil) +
-      row('Observed', s.observedAt) +
+      `<dt>Observed</dt><dd>${s.observedAt ? volatile(escapeHtml(s.observedAt)) : '-'}</dd>` +
       row('Cause drop', s.causeDropId) +
       '</dl>',
   );
@@ -414,7 +415,7 @@ function sticksSection(
                         `cannot run ${name(c.zoneId)}: lacks ${escapeHtml(c.missing.join(', '))}`,
                     )
                     .join('<br>');
-            return `<tr><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.version ?? '-')}</td><td>${escapeHtml(s.lastSeenAt ?? 'never')}</td><td>${escapeHtml(s.capabilities.join(', ') || '-')}</td><td>${escapeHtml(s.imagePolicy)}</td><td>${runs}</td></tr>`;
+            return `<tr><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.version ?? '-')}</td><td>${s.lastSeenAt ? volatile(escapeHtml(s.lastSeenAt)) : 'never'}</td><td>${escapeHtml(s.capabilities.join(', ') || '-')}</td><td>${escapeHtml(s.imagePolicy)}</td><td>${runs}</td></tr>`;
           })
           .join('')}</table>`;
   const manage = '<p><a href="/sticks">Set each stick\'s troopers on the sticks page</a></p>';
@@ -489,7 +490,12 @@ type BlockContext = {
   name: (id: string) => string;
   refs: (zoneId: string) => LinkRefs;
   about?: ReadonlyMap<number, About> | undefined;
+  /** Briefings the crew is still to diagnose (`diagnosePending`): no rule form yet. */
+  pending?: ReadonlySet<number> | undefined;
 };
+
+/** In place of the rule form while the crew is still to diagnose a parked briefing. */
+const PENDING_NOTICE = `<p class="pending">${escapeHtml("The crew is looking at this. You'll be asked if it needs you.")}</p>`;
 
 function briefingBlock(b: Briefing, ctx: BlockContext, heading: 'h3' | 'h4' = 'h3'): string {
   const hold = b.kind === 'promote_held' ? ctx.holds?.get(b.subject) : undefined;
@@ -507,10 +513,13 @@ function briefingBlock(b: Briefing, ctx: BlockContext, heading: 'h3' | 'h4' = 'h
   const pre = (k: string, v: string | null) =>
     v ? `<tr><th>${k}</th><td><pre>${text(v)}</pre></td></tr>` : '';
   const about = ctx.about?.get(b.id) ?? { text: b.subject };
+  const readOnly = `<ul>${b.options.map((o) => `<li>${escapeHtml(o.label)} <small><code>${escapeHtml(o.id)}</code></small> <small class="effect">${escapeHtml(effectText(b.kind, o.effect))}</small></li>`).join('')}</ul>`;
   const form =
-    b.state === 'open'
-      ? `<form class="rule" data-briefing="${escapeHtml(b.id)}" data-options="${optionsDigest(b)}">${options}<textarea name="note" maxlength="2000" placeholder="Note (optional)"></textarea><br><button>Rule</button></form>`
-      : `<p>${escapeHtml(b.state)}</p><ul>${b.options.map((o) => `<li>${escapeHtml(o.label)} <small><code>${escapeHtml(o.id)}</code></small> <small class="effect">${escapeHtml(effectText(b.kind, o.effect))}</small></li>`).join('')}</ul>`;
+    b.state !== 'open'
+      ? `<p>${escapeHtml(b.state)}</p>${readOnly}`
+      : ctx.pending?.has(b.id)
+        ? PENDING_NOTICE + readOnly
+        : `<form class="rule" data-briefing="${escapeHtml(b.id)}" data-options="${optionsDigest(b)}">${options}<textarea name="note" maxlength="2000" placeholder="Note (optional)"></textarea><br><button>Rule</button></form>`;
   return (
     `<div class="briefing" id="briefing-${escapeHtml(b.id)}">` +
     `<${heading}>${text(b.decision)}</${heading}>` +
@@ -595,6 +604,8 @@ export function renderBriefings(s: {
   about?: ReadonlyMap<number, About>;
   /** Each zone's filed crew issues by key (crewKeyNumbers), by zone id. */
   crewKeys?: ReadonlyMap<string, ReadonlyMap<string, number>>;
+  /** Open briefings the crew is still to diagnose (`diagnosePending`), by id. */
+  pending?: ReadonlySet<number>;
 }): string {
   const name = zoneNamer(s.zones);
   const per = s.per ?? PAGE_SIZES[0];
@@ -620,6 +631,7 @@ export function renderBriefings(s: {
     name,
     about: s.about,
     refs: briefingRefs(s.zones, s.rulings, s.crewKeys, shown),
+    pending: s.pending,
   };
   const blocks = (bs: readonly Briefing[], heading: 'h3' | 'h4') =>
     bs.map((b) => briefingBlock(b, ctx, heading)).join('');
@@ -652,6 +664,7 @@ export function renderBriefings(s: {
         (rulings.length === 0
           ? '<p class="empty">No rulings yet.</p>'
           : `<table>${RULINGS_HEAD}${rulingRows(r.rows)}</table>${r.nav}`),
+      { live: true },
     );
   }
 
@@ -703,6 +716,7 @@ export function renderBriefings(s: {
       sizeSelector(undefined, per) +
       sections +
       (anyBlock ? RULE_SCRIPT : ''),
+    { live: true },
   );
 }
 
@@ -764,6 +778,8 @@ export function renderBriefing(s: {
   holds?: Map<string, string>;
   about?: About;
   crewKeys?: ReadonlyMap<string, number>;
+  /** The crew is still to diagnose it (`diagnosePending`). */
+  pending?: boolean;
 }): string {
   const b = s.briefing;
   const name = zoneNamer(s.zones);
@@ -779,6 +795,7 @@ export function renderBriefing(s: {
       s.crewKeys ? new Map([[b.zoneId, s.crewKeys]]) : undefined,
       shown,
     ),
+    pending: s.pending ? new Set([b.id]) : undefined,
   };
   const rows = own
     .map(
@@ -798,6 +815,45 @@ export function renderBriefing(s: {
   );
 }
 
+/** How many ended goal changes (merged, refused, closed) the goals page still lists. */
+const ENDED_GOAL_CHANGES = 3;
+
+/**
+ * The zone's goal changes still in flight, each with what happens next (an open one: its Approve
+ * and merge link), and the last few that ended, with why.
+ */
+function goalChangesBlock(changes: readonly GoalChange[]): string {
+  const live = changes.filter((c) => ['proposed', 'open', 'confirmed'].includes(c.state));
+  const ended = changes
+    .filter((c) => !live.includes(c))
+    .slice(-ENDED_GOAL_CHANGES)
+    .reverse();
+  if (live.length === 0 && ended.length === 0) return '';
+  const pr = (c: GoalChange) =>
+    c.prNumber === null ? '' : ` (pull request #${escapeHtml(c.prNumber)})`;
+  const next = (c: GoalChange): string => {
+    switch (c.state) {
+      case 'proposed':
+        return 'Its pull request opens at the next pass.';
+      case 'open':
+        return `<a href="/goal-changes/${escapeHtml(c.id)}/confirm">Approve and merge</a>`;
+      case 'confirmed':
+        return `Confirmed at <code>${escapeHtml((c.confirmedSha ?? '').slice(0, 7))}</code>: Jumpmaster merges it once its required checks pass.`;
+      case 'merged':
+        return 'Merged.';
+      default:
+        return `Not merged (${escapeHtml(c.state)}).`;
+    }
+  };
+  const rows = [...live, ...ended]
+    .map(
+      (c) =>
+        `<li>Goal change ${escapeHtml(c.id)}${pr(c)}, from the ${escapeHtml(c.source)}: ${next(c)}${c.error ? ` <small>${escapeHtml(c.error)}</small>` : ''}</li>`,
+    )
+    .join('');
+  return `<h3>Goal changes</h3><ul>${rows}</ul>`;
+}
+
 /** A zone's goal ladder, its crew issues, and marker-bearing issues intake did not start. */
 export function renderGoals(s: {
   zone: DropZoneConfig;
@@ -809,13 +865,15 @@ export function renderGoals(s: {
   skippedCrewUnpromoted: number[];
   /** Objectives Command marked done by a ruling: key to the ruling's id. */
   doneByRuling: ReadonlyMap<string, number>;
+  /** The zone's goal changes (#363), oldest first. */
+  goalChanges?: readonly GoalChange[];
 }): string {
   const path = s.zone.crew?.goalPath ?? 'GOAL.md';
   const missing = s.goals?.parse.ok === false && s.goals.parse.error === `${path} not found`;
   // Until the goal can change in the app (#336), the owner edits it on GitHub: a protected path.
   const edit = missing
     ? `<p>${escapeHtml(path)} isn't in the repository yet. <a href="${escapeHtml(zoneHref(s.zone.id))}/intake">Write one with the intake page</a>.</p>`
-    : `<p>The goals live in ${escapeHtml(path)} in ${escapeHtml(s.zone.repo)}. Jumpmaster never commits it, because it is a protected path. <a href="${escapeHtml(githubBlobHref(s.zone.repo, path))}">Open ${escapeHtml(path)} on GitHub</a> and use the pencil to edit it. The crew reads the change at its next cycle.</p>`;
+    : `<p>The goals live in ${escapeHtml(path)} in ${escapeHtml(s.zone.repo)}. It is a protected path: agent pull requests never change it, and Jumpmaster merges a change to it only when you approve it here. Propose a change in the chat, or <a href="${escapeHtml(githubBlobHref(s.zone.repo, path))}">open ${escapeHtml(path)} on GitHub</a> and use the pencil to edit it. The crew reads the change at its next cycle.</p>`;
   let ladder: string;
   if (!s.goals) {
     ladder = `<p>${escapeHtml(path)} has not been read yet.</p>`;
@@ -878,7 +936,7 @@ export function renderGoals(s: {
   return page(
     `<p><a href="/">Back</a> · <a href="${escapeHtml(zoneHref(s.zone.id))}">Zone</a></p><h2>Objectives (goal ladder): ${zoneName(s.zone, s.zones)}</h2>` +
       askButton({ kind: 'goals', zoneId: s.zone.id, ref: s.zone.id }) +
-      `${ladder}${edit}` +
+      `${ladder}${edit}${goalChangesBlock(s.goalChanges ?? [])}` +
       `<h2>Crew issues</h2><table><tr><th>Objective</th><th>Key</th><th>Title</th><th>State</th><th>Issue</th><th>Work item</th><th>Findings</th></tr>${issues}</table>` +
       `<h2>Crew issues not started (no recorded promotion)</h2>${skipped}`,
   );
@@ -944,19 +1002,37 @@ const NAV = `<a href="/">Floor</a><a href="/work">Work</a><a href="/drops">Drops
 /** Marks the link for the current page; the longest matching prefix wins. */
 const NAV_SCRIPT = `<script>(()=>{const p=location.pathname;let best=null,len=-1;for(const a of document.querySelectorAll('.topnav a')){const h=a.getAttribute('href');const hit=h==='/'?p==='/':p===h||p.startsWith(h+'/');if(hit&&h.length>len){best=a;len=h.length;}}if(best)best.setAttribute('aria-current','page');})();</script>`;
 
+/** Marks a page that refreshes itself (`page({ live: true })`): a comment inside LIVE_SCRIPT. */
+export const LIVE_MARKER = 'jm-live';
+
+/**
+ * Refreshes a live page (#404): every 10 seconds, while the tab is visible, it fetches the page
+ * again and reloads when `<main>`, less every `[data-live-ignore]`, differs from the last fetch's
+ * (the first fetch is the baseline). It holds the reload while the owner types in `<main>` or has
+ * an unsaved change in one of its forms, checks at once when the tab comes back, ignores a failed
+ * fetch or a non-200, and stops on a 401 or a redirect to the login page.
+ */
+export const LIVE_SCRIPT = `<script>/*${LIVE_MARKER}*/(()=>{let base=null,pending=false,stopped=false,busyFetch=false,timer=null;const stop=()=>{stopped=true;if(timer!==null)clearInterval(timer);};const dirty=(f)=>{const t=f.tagName;if(t==='SELECT'){for(const o of f.options||[])if(o.selected!==o.defaultSelected)return true;return false;}if(t==='INPUT'&&(f.type==='checkbox'||f.type==='radio'))return f.checked!==f.defaultChecked;if(t==='INPUT'||t==='TEXTAREA')return f.value!==f.defaultValue;return false;};const busy=()=>{const m=document.querySelector('main');if(!m)return false;const a=document.activeElement;if(a&&/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName||'')&&m.contains(a))return true;for(const f of m.querySelectorAll('form'))for(const e of f.elements)if(dirty(e))return true;return false;};const tick=async()=>{if(stopped||busyFetch||document.visibilityState!=='visible')return;busyFetch=true;try{const r=await fetch(location.pathname+location.search,{credentials:'same-origin',cache:'no-store'});if(r.status===401||(r.redirected&&new URL(r.url,location.origin).pathname==='/login')){stop();return;}if(r.status!==200)return;const m=new DOMParser().parseFromString(await r.text(),'text/html').querySelector('main');if(!m)return;for(const e of m.querySelectorAll('[data-live-ignore]'))e.remove();const html=m.innerHTML;if(base!==null&&html!==base)pending=true;base=html;if(pending&&!busy()){stop();location.reload();}}catch{}finally{busyFetch=false;}};timer=setInterval(tick,10000);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')tick();});})();</script>`;
+
+/** A value that changes on every render while the page's state does not: no reload for it. */
+const volatile = (html: string): string => `<span data-live-ignore>${html}</span>`;
+
 /**
  * The page shell. With `chrome` (the default, for pages behind the login) it carries an empty
  * `jm-csrf` meta for the guard to fill, `jmFetch`, the navigation and the logout button; the login
  * and setup pages go without.
  */
-export const page = (body: string, opts: { chrome?: boolean; title?: string } = {}): string => {
+export const page = (
+  body: string,
+  opts: { chrome?: boolean; title?: string; live?: boolean } = {},
+): string => {
   const chrome = opts.chrome ?? true;
   const title = opts.title ? `Jumpmaster: ${escapeHtml(opts.title)}` : 'Jumpmaster';
   const nav = chrome ? `<nav class="topnav" aria-label="Main">${NAV}</nav>${LOGOUT}` : '';
   return (
     `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${chrome ? `<meta name="jm-csrf" content="">` : ''}<title>${title}</title>${FAVICON_LINK}<style>${STYLE}</style>${chrome ? JM_FETCH : ''}</head>` +
     `<body><a class="skip" href="#main">Skip to content</a><header class="topbar"><div class="topbar-in"><h1 class="brand">${MARK}Jumpmaster</h1>${nav}</div></header>` +
-    `<main id="main">${body}</main>${chrome ? NAV_SCRIPT : ''}</body></html>`
+    `<main id="main">${body}</main>${chrome ? NAV_SCRIPT : ''}${opts.live ? LIVE_SCRIPT : ''}</body></html>`
   );
 };
 
@@ -1230,7 +1306,7 @@ export function renderHome(state: HomeState): string {
     const gates = g
       ? ` · gates ${g.passed}/${g.total} passed${g.failed ? `, ${g.failed} failed` : ''}`
       : '';
-    return `<article class="card slot"><div>${badge(d.state)} <small>${escapeHtml(d.role)}</small></div><a class="what" href="/drops/${encodeURIComponent(d.id)}">${what}</a>${title}<span class="meta">${escapeHtml(elapsed(d, now))}${gates} · ${escapeHtml(d.id)}</span></article>`;
+    return `<article class="card slot"><div>${badge(d.state)} <small>${escapeHtml(d.role)}</small></div><a class="what" href="/drops/${encodeURIComponent(d.id)}">${what}</a>${title}<span class="meta">${volatile(escapeHtml(elapsed(d, now)))}${gates} · ${escapeHtml(d.id)}</span></article>`;
   };
   const slots =
     live.length === 0
@@ -1265,7 +1341,7 @@ export function renderHome(state: HomeState): string {
         ? `<div class="grid">${crewSection(state.crew, name)}</div>`
         : '') +
       sticksSection(state.sticks, name, now),
-    state.status ? { title: state.status.headline } : {},
+    { live: true, ...(state.status ? { title: state.status.headline } : {}) },
   );
 }
 
@@ -1294,7 +1370,15 @@ export function statusBanner(s: Status | undefined): string {
     s.action && safeHref(s.action.href)
       ? `<p><a href="${escapeHtml(s.action.href)}"${linkTarget(s.action.href)}>${escapeHtml(s.action.label)}</a></p>`
       : '';
-  return `<div class="status" data-waiting-on="${escapeHtml(s.waitingOn)}"><p><strong>${codeHtml(s.headline)}</strong>${since}</p>${detail}${also}${action}</div>`;
+  return `<div class="status" data-waiting-on="${escapeHtml(s.waitingOn)}"><p><strong>${headlineHtml(s)}</strong>${since}</p>${detail}${also}${action}</div>`;
+}
+
+/** The headline, its clock-driven part (`volatile`) in a span the live script ignores. */
+function headlineHtml(s: Status): string {
+  const at = s.volatile ? s.headline.lastIndexOf(s.volatile) : -1;
+  if (!s.volatile || at < 0) return codeHtml(s.headline);
+  const end = at + s.volatile.length;
+  return `${codeHtml(s.headline.slice(0, at))}${volatile(codeHtml(s.volatile))}${codeHtml(s.headline.slice(end))}`;
 }
 
 function artifactsSection(artifacts: ArtifactRow[]): string {

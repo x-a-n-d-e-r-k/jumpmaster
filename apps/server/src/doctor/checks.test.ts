@@ -891,6 +891,39 @@ describe('zone checks', () => {
     expect(one(checks, 'zone.goals')).toMatchObject({ status: 'warn' });
   });
 
+  test('zone.crew-cap passes with maxDropsPerDay 0: no daily limit, usage paces the crew (#398)', async () => {
+    const crew = {
+      enabled: true,
+      goalPath: 'GOAL.md',
+      cycleMinutes: 60,
+      maxDropsPerDay: 0,
+      stagedLabel: 'agent-staged',
+      maxStaged: 3,
+      refutePromotes: false,
+      maxRefute: 2,
+      maxTriage: 2,
+      arbiter: true,
+    };
+    const w = world({ zone: { crew, protectedPaths: ['GOAL.md'] } });
+    w.f.state.labels.push('agent-staged');
+    for (let n = 0; n < 100; n++)
+      insertDrop(
+        w.db,
+        {
+          id: `c${n}`,
+          dropZoneId: 'main',
+          workItemId: null,
+          role: 'crew-lead',
+          state: 'succeeded',
+        },
+        ago(3_600_000),
+      );
+    expect(one(await w.run(), 'zone.crew-cap')).toMatchObject({
+      status: 'pass',
+      summary: 'crew drops in the last 24 hours: 100 (no daily limit; Claude usage paces the crew)',
+    });
+  });
+
   test('zone.crew-cap counts every crew role as crewDropsToday does: an arbitrate drop dates the cap (D5)', async () => {
     const crew = {
       enabled: true,
@@ -915,6 +948,45 @@ describe('zone checks', () => {
       status: 'warn',
       summary: expect.stringContaining('daily cap 2/2 until 2026-11-10T07:00:00.000Z'),
     });
+  });
+
+  test('zone.crew-cap leaves diagnose drops out, as crewDropsToday does (#397)', async () => {
+    const crew = {
+      enabled: true,
+      goalPath: 'GOAL.md',
+      cycleMinutes: 60,
+      maxDropsPerDay: 2,
+      stagedLabel: 'agent-staged',
+      maxStaged: 3,
+      refutePromotes: false,
+      maxRefute: 2,
+      maxTriage: 2,
+      arbiter: true,
+    };
+    const w = world({ zone: { crew, protectedPaths: ['GOAL.md'] } });
+    w.f.state.labels.push('agent-staged');
+    for (const [id, role, at] of [
+      ['c1', 'diagnose', ago(6 * 3_600_000)],
+      ['c2', 'diagnose', ago(5 * 3_600_000)],
+      ['c3', 'crew-lead', ago(3_600_000)],
+    ] as const)
+      insertDrop(w.db, { id, dropZoneId: 'main', workItemId: null, role, state: 'succeeded' }, at);
+    expect(one(await w.run(), 'zone.crew-cap')).toMatchObject({
+      status: 'pass',
+      summary: 'crew drops in the last 24 hours: 1/2',
+    });
+    insertDrop(
+      w.db,
+      { id: 'c4', dropZoneId: 'main', workItemId: null, role: 'refute', state: 'succeeded' },
+      ago(2 * 3_600_000),
+    );
+    // The oldest counted drop (c4, not the diagnoses) dates the cap; diagnoses still run.
+    const cap = one(await w.run(), 'zone.crew-cap');
+    expect(cap).toMatchObject({
+      status: 'warn',
+      summary: expect.stringContaining('daily cap 2/2 until 2026-11-10T10:00:00.000Z'),
+    });
+    expect(cap.summary).toContain('only parked briefings are still diagnosed');
   });
 
   test('zone.identity passes for two bot identities', async () => {

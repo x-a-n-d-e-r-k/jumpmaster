@@ -43,7 +43,7 @@ import {
   settingControl,
   settingId,
 } from './setting-controls.js';
-import { CLAUDE_SAVED, forgeGuideFor, guideSection } from './setup.js';
+import { appOptionsFor, CLAUDE_SAVED, forgeGuideFor, guideSection } from './setup.js';
 import { type ZoneRef, zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
 
 /**
@@ -386,6 +386,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const s = state(); const outcome = await jmVaultPost('/api/control/secrets/' + encodeURIComponent(b.dataset.name) + '/copy-to-vault', {}, s, status, 'Copying ' + b.dataset.name); after(s, outcome);
     if (outcome === 'done') location.reload();
   });
+  // A GitHub App button without sudo (#374): the passphrase first, then the plain form POST.
+  for (const form of document.querySelectorAll('form.app-create[data-sudo-first]')) form.addEventListener('submit', async (e) => {
+    if (e.defaultPrevented || root.dataset.sudo === '1') return;
+    e.preventDefault();
+    const s = state();
+    const out = form.querySelector('.app-out') || status;
+    const ok = await jmSudo(s, out, 'Creating a GitHub App asks for your passphrase again: enter it above, then press the button again.');
+    after(s, ok ? 'done' : 'sudo');
+    if (ok) form.submit();
+  });
   const plan = document.getElementById('plan');
   if (plan) plan.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -444,7 +454,7 @@ ${SUDO_PROMPT('changing a credential')}
 <p>Make the token on your own computer with <code>claude setup-token</code> (it lasts a year) and replace it above; its “Made on” date starts the expiry reminder.</p>
 ${planSection(store, config)}
 <h3>GitHub</h3>
-${guideSection(o.guide, '/settings/credentials')}
+${guideSection(o.guide, '/settings/credentials', appOptionsFor(store, o.guide, o.sudo))}
 </div>
 ${CREDENTIALS_SCRIPT}`,
   );
@@ -506,7 +516,7 @@ function installSettings(config: Config): Setting[] {
     },
     {
       path: 'claude.fableWeeklyDropCap',
-      label: 'Fable drops allowed in a trailing seven days',
+      label: 'Fable drops allowed in a trailing seven days (0 = no limit)',
       kind: 'number',
       value: config.claude.fableWeeklyDropCap,
       attrs: 'min="0" step="1"',

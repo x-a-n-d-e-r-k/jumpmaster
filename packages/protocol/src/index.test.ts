@@ -269,6 +269,20 @@ describe('crew roles', () => {
     expect(parseCrewOutput('crew-lead', longWhy).ok).toBe(false);
   });
 
+  test('crew-lead output may propose a goal change: a text and why, and nothing else in it', () => {
+    const change = { ...lead, goalChange: { text: '# Goals', why: 'a guide is next' } };
+    expect(parseCrewOutput('crew-lead', change)).toEqual({ ok: true, value: change });
+    const extra = { ...lead, goalChange: { text: '# Goals', why: 'w', path: 'GOAL.md' } };
+    expect(parseCrewOutput('crew-lead', extra).ok).toBe(false);
+    expect(parseCrewOutput('crew-lead', { ...lead, goalChange: { text: '', why: 'w' } }).ok).toBe(
+      false,
+    );
+    const long = { ...lead, goalChange: { text: 'x'.repeat(64_001), why: 'w' } };
+    expect(parseCrewOutput('crew-lead', long).ok).toBe(false);
+    const longWhy = { ...lead, goalChange: { text: '# Goals', why: 'w'.repeat(2001) } };
+    expect(parseCrewOutput('crew-lead', longWhy).ok).toBe(false);
+  });
+
   test('refute and diagnose outputs validate', () => {
     expect(parseCrewOutput('refute', { decision: 'promote', findings: [] }).ok).toBe(true);
     expect(parseCrewOutput('refute', { decision: 'merge', findings: [] }).ok).toBe(false);
@@ -277,6 +291,32 @@ describe('crew roles', () => {
     ).toBe(true);
     expect(
       parseCrewOutput('diagnose', { diagnosis: 'd', recommendation: 'merge', detail: '' }).ok,
+    ).toBe(false);
+  });
+
+  test('a diagnose instruction is accepted with every recommendation, refused empty or over 2000 characters (#396)', () => {
+    const base = { diagnosis: 'd', detail: '' };
+    for (const recommendation of ['retry', 'leave_parked', 'needs_command'] as const) {
+      expect(
+        parseCrewOutput('diagnose', { ...base, recommendation, instruction: 'Fix the test.' }).ok,
+      ).toBe(true);
+    }
+    expect(
+      parseCrewOutput('diagnose', {
+        ...base,
+        recommendation: 'retry',
+        instruction: 'x'.repeat(2000),
+      }).ok,
+    ).toBe(true);
+    expect(
+      parseCrewOutput('diagnose', { ...base, recommendation: 'retry', instruction: '' }).ok,
+    ).toBe(false);
+    expect(
+      parseCrewOutput('diagnose', {
+        ...base,
+        recommendation: 'retry',
+        instruction: 'x'.repeat(2001),
+      }).ok,
     ).toBe(false);
   });
 

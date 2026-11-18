@@ -99,8 +99,10 @@ const percent = (v: number): string => `${Math.round(v * 100)}%`;
 /**
  * Whether Fable may run now, and why not. It needs a declared plan that includes it, `fableModel`
  * set, no disable and no pause in force. Then, while Claude has reported Fable's weekly window and
- * it hasn't reset, its utilization must be under `fableMaxUtilization`; until then, fewer than
- * `fableWeeklyDropCap` Fable drops this week. A read error or an invalid figure fails closed.
+ * it hasn't reset, its utilization must be under `fableMaxUtilization`; until then, when
+ * `fableWeeklyDropCap` is positive, fewer than that many Fable drops this week (0, the default, sets
+ * no count limit: the usage gate's pause and probe cover running out). A read error or an invalid
+ * figure fails closed.
  */
 export function fableStatus(
   db: Db,
@@ -126,7 +128,7 @@ export function fableStatus(
   const unreported =
     util === null || (window?.resetsAt != null && !(Date.parse(window.resetsAt) > now.getTime()));
   if (unreported) {
-    if (fableDropsThisWeek(db, cfg, now) >= fableWeeklyDropCap) {
+    if (fableWeeklyDropCap > 0 && fableDropsThisWeek(db, cfg, now) >= fableWeeklyDropCap) {
       return no(`weekly cap reached (${fableWeeklyDropCap} Fable drops in 7 days)`);
     }
     return { available: true, reason: 'available' };

@@ -178,6 +178,7 @@ const FLOOR = `
 .slot .meta{color:var(--text-sub-600);font-size:.75rem;line-height:1rem}
 .muted{color:var(--text-sub-600)}
 .empty{color:var(--text-sub-600);margin:0}
+.briefing .pending{color:var(--text-sub-600);font-style:italic}
 .meter{margin:.5rem 0 .75rem}
 .meter-row{display:flex;justify-content:space-between;gap:.5rem}
 .meter-row b{font-weight:500;font-variant-numeric:tabular-nums}

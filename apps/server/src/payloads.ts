@@ -18,13 +18,15 @@ import {
   DEFAULT_PIDS_LIMIT,
   type DropZoneConfig,
 } from './config.js';
-import { appliedItemArbitration } from './crew/store.js';
+import { appliedItemArbitration, getCrewRetry } from './crew/store.js';
 import type { Db } from './db/open.js';
 import { type Drop, getPullRequest, listWorkItems, updateDrop } from './db/repo.js';
 import { resolveModel } from './fable.js';
 import type { Feedback } from './flow/decide.js';
+import { type CrewRetryNote, lastFailure, renderLastFailure } from './gate-output.js';
 import { unsanitizeForgeText } from './outbox.js';
 import { PRESET_EGRESS } from './presets.js';
+import { redactionList } from './scrub.js';
 
 const ROLES: Role[] = ['implement', 'review', 'heal', 'resolve', ...CREW_ROLES];
 
@@ -75,6 +77,35 @@ export function neutralise(text: string): string {
     .join('\n')
     .replaceAll('```', '`\u200b`\u200b`')
     .replaceAll('<<<', '<\u200b<\u200b<');
+}
+
+/**
+ * The crew's retry of the item (#396), for an implement drop of that retry: the row says
+ * `retried`, the drop was created at or after it was applied, and no implement drop of the item
+ * since then failed. So it rides every attempt of the crew's retry (an interrupted one's
+ * continuation too) and stops once that retry fails.
+ */
+function crewRetryNote(
+  db: Db,
+  itemId: number,
+  drop: Pick<Drop, 'id' | 'createdAt'>,
+): CrewRetryNote | undefined {
+  const r = getCrewRetry(db, itemId);
+  if (r?.outcome !== 'retried' || r.appliedAt === null || drop.createdAt < r.appliedAt) {
+    return undefined;
+  }
+  const failedSince = db
+    .prepare(
+      // One created at applied_at's very instant counts only if inserted after the diagnose drop
+      // that asked for the retry: the failure it diagnosed was inserted before it.
+      `SELECT 1 FROM drops WHERE work_item_id = ? AND role = 'implement' AND state = 'failed'
+         AND id <> ? AND created_at <= @until
+         AND (created_at > @from
+           OR (created_at = @from AND rowid > COALESCE((SELECT rowid FROM drops WHERE id = ?), 0)))
+       LIMIT 1`,
+    )
+    .get(itemId, drop.id, r.dropId, { from: r.appliedAt, until: drop.createdAt });
+  return failedSince ? undefined : { diagnosis: r.diagnosis, instruction: r.instruction };
 }
 
 /**
@@ -408,7 +439,7 @@ function buildDoctorPayload(
   };
 }
 
-const DEFAULT_CLAUDE: ClaudeConfig = { plan: 'pro', fableWeeklyDropCap: 5 };
+const DEFAULT_CLAUDE: ClaudeConfig = { plan: 'pro', fableWeeklyDropCap: 0 };
 
 /**
  * The payload for a leased drop. The model comes from `resolveModel` (Fable only where the declared
@@ -495,14 +526,24 @@ export function buildPayload(
   };
 
   switch (role) {
-    case 'implement':
+    case 'implement': {
+      // A retry learns how the last attempt failed (#395), and what the crew told it when the
+      // crew retried it (#396): untrusted, redacted, fenced.
+      const failure = lastFailure(db, item.id, drop);
+      const crewRetry = crewRetryNote(db, item.id, drop);
       return {
         ...common,
         role,
+        ...(failure || crewRetry
+          ? {
+              prompt: `${common.prompt}\n\n${renderLastFailure(failure, drop.id, redactionList(secrets), crewRetry)}`,
+            }
+          : {}),
         credentials: fetchCredentials,
         resume: drop.headSha !== null,
         resumeSha: drop.headSha ?? undefined,
       };
+    }
     case 'review':
       return {
         ...common,

@@ -184,23 +184,17 @@ export function reviewDisagreement(db: Db, item: WorkItem): boolean {
 }
 
 /**
- * The zone's next crew work, in order: an open parked briefing not yet diagnosed is arbitrated
- * when its item is a review disagreement (`reviewDisagreement`, with `crew.arbiter` on and Fable
+ * The zone's next work on its parked briefings: an open one not yet diagnosed is arbitrated when
+ * its item is a review disagreement (`reviewDisagreement`, with `crew.arbiter` on and Fable
  * available), skipped while that arbitration is in flight or waits to be applied, and else
- * diagnosed; then refute a
- * staged crew issue whose current body is unrefuted (within `maxRefute`), arbitrate one whose
- * refutes ran out (with `crew.arbiter` on, Fable available, at least one stored verdict, and no
- * arbitration of this text yet), triage the oldest open triage request (within `maxTriage`, with a
- * slot free), then the lead cycle when it is due, then an audit of a merged commit (`auditDue`). An
- * exhausted issue that may not be arbitrated, or whose arbitration of this text is settled, is put
- * to Command instead.
+ * diagnosed. It answers a park the server raised, so it runs at the daily crew cap too.
  */
-export function nextCrewWork(
+export function nextDiagnose(
   db: Db,
   zone: DropZoneConfig,
   now: Date,
   fableOk = false,
-): CrewNext | null {
+): CrewWork | null {
   const parked = db
     .prepare(
       `SELECT id, subject, why FROM briefings WHERE zone_id = ? AND kind = 'parked'
@@ -237,6 +231,26 @@ export function nextCrewWork(
     }
     return { role: 'diagnose', briefingId: b.id, itemId, basis: whyBasis(b.why) };
   }
+  return null;
+}
+
+/**
+ * The zone's next crew work, in order: a parked briefing's arbitration or diagnosis
+ * (`nextDiagnose`); then refute a staged crew issue whose current body is unrefuted (within `maxRefute`), arbitrate one whose
+ * refutes ran out (with `crew.arbiter` on, Fable available, at least one stored verdict, and no
+ * arbitration of this text yet), triage the oldest open triage request (within `maxTriage`, with a
+ * slot free), then the lead cycle when it is due, then an audit of a merged commit (`auditDue`). An
+ * exhausted issue that may not be arbitrated, or whose arbitration of this text is settled, is put
+ * to Command instead.
+ */
+export function nextCrewWork(
+  db: Db,
+  zone: DropZoneConfig,
+  now: Date,
+  fableOk = false,
+): CrewNext | null {
+  const parkedWork = nextDiagnose(db, zone, now, fableOk);
+  if (parkedWork) return parkedWork;
 
   const refute = db
     .prepare(
@@ -417,12 +431,16 @@ function nextTriage(db: Db, zone: DropZoneConfig, now: Date): number | null {
   return row?.id ?? null;
 }
 
-/** Crew drops created in the trailing 24 hours, not counting lost or rate-limited ones (nor doctor drops). */
+/**
+ * Crew drops created in the trailing 24 hours, not counting lost or rate-limited ones, doctor
+ * drops, nor diagnose drops: a diagnosis answers a park the server raised, one per park
+ * (`diagnose_attempts`), so it is not the crew's self-directed spend the cap bounds.
+ */
 export function crewDropsToday(db: Db, zoneId: string, now: Date): number {
   const { n } = db
     .prepare(
       `SELECT COUNT(*) AS n FROM drops WHERE drop_zone_id = ? AND work_item_id IS NULL
-         AND role <> 'doctor' AND created_at > ? AND state <> 'lost'
+         AND role NOT IN ('doctor', 'diagnose') AND created_at > ? AND state <> 'lost'
          AND COALESCE(json_extract(result_json, '$.status'), '') <> 'rate_limited'`,
     )
     .get(zoneId, new Date(now.getTime() - DAY_MS).toISOString()) as { n: number };
@@ -451,7 +469,9 @@ const observeDetail = (w: CrewNext, auditSha?: string): string =>
 /**
  * Queues the zone's next crew drop, if any, with its rendered input. Runs only with the crew
  * enabled, the zone active (observe records `would_enqueue:<role>` instead), the kill switch off,
- * the usage gate open, no crew drop active, and the zone under `maxDropsPerDay`. The lead cycle also
+ * the usage gate open, and no crew drop active. At a positive `maxDropsPerDay` (0 is no limit)
+ * only a parked briefing's diagnosis (or arbitration) is queued (`nextDiagnose`); diagnoses don't
+ * count. The lead cycle also
  * needs a parsed GOAL.md. Attempts are counted here, at enqueue. With `images`, a triage drop
  * also carries the issue's images, fetched and checked here (`crew/images.ts`).
  */
@@ -471,11 +491,15 @@ export async function enqueueCrew(
   if (mode === 'paused') return null;
   if (!gateQueuesCrew(dispatchGate(db, usageCfg, now))) return null;
   if (hasActiveCrewDrop(db, zone.id)) return null;
-  if (crewDropsToday(db, zone.id, now) >= zone.crew.maxDropsPerDay) return null;
+  // 0 means no daily limit: the usage gate above alone paces the crew.
+  const cap = zone.crew.maxDropsPerDay;
   // No claude config means no Fable, so nothing is arbitrated: it is put to Command as before.
   const fableOk = opts.claude ? fableStatus(db, { claude: opts.claude }, now).available : false;
   settleLostAudits(db, zone.id, now);
-  const next = nextCrewWork(db, zone, now, fableOk);
+  // At the cap only parked briefings are worked on: nextCrewWork's other branches (and their side
+  // effects: refute exhaustion put to Command, arbitrations settled, triage reopened) wait.
+  const capped = cap > 0 && crewDropsToday(db, zone.id, now) >= cap;
+  const next = capped ? nextDiagnose(db, zone, now, fableOk) : nextCrewWork(db, zone, now, fableOk);
   if (!next) return null;
   if (next.role === 'crew-lead' && getGoals(db, zone.id)?.parse.ok !== true) return null;
   if (mode === 'observe') {

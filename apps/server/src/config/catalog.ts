@@ -164,8 +164,8 @@ const WORDS: Words[] = [
   ),
   w(
     'claude.fableWeeklyDropCap',
-    'Most Fable drops in seven days',
-    "The most drops that may run on Fable in any trailing seven days, applied only until Claude reports Fable's weekly limit. Raising it spends more of the plan on Fable.",
+    'Fable drops per week (0 = no limit)',
+    "The most drops that may run on Fable in any trailing seven days, applied only until Claude reports Fable's weekly limit. 0 means no count limit: Fable is paced by its reported weekly usage and the usage gate.",
     'number',
   ),
   w(
@@ -617,8 +617,8 @@ const WORDS: Words[] = [
   ),
   z_(
     'crew.maxDropsPerDay',
-    'Most crew drops a day',
-    'The most crew drops this zone runs in a day. Raising it spends more of the plan on the crew.',
+    'Crew drops per day (0 = no limit)',
+    "The most crew drops (planning, refutes, triage) in a trailing 24 hours. Diagnoses of parked work don't count: there is one per park. 0 means no limit: Claude usage paces the crew instead, and Jumpmaster pauses when the subscription runs out and tries again after it resets.",
     'number',
   ),
   z_(
@@ -662,6 +662,12 @@ const WORDS: Words[] = [
     'Merged changes audited per crew cycle',
     'How many commits merged to the default branch the crew re-examines each cycle, oldest first. A refuted one becomes a staged issue; 0 turns the audit off.',
     'number',
+  ),
+  z_(
+    'crew.autoRetry',
+    'Let the crew retry failed work once',
+    "When an implementation fails and the crew's diagnosis says another try with a specific fix would work, the crew retries it once without asking you. Turned off, every such case is put to you, as before.",
+    'bool',
   ),
 ];
 

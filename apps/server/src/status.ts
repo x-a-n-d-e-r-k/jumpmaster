@@ -42,6 +42,11 @@ import { type CredentialProblem, credentialProblems } from './vault/problems.js'
 
 export type Status = {
   headline: string;
+  /**
+   * The part of the headline that changes with the clock alone (an elapsed time, minutes on CI),
+   * so the Floor's live script can ignore it. Its last occurrence in the headline is the one.
+   */
+  volatile?: string;
   /** What the headline's state means, and nothing else. */
   detail: string;
   waitingOn:
@@ -300,8 +305,10 @@ export function statusOf(input: StatusInput, now: Date): Status {
     const n = z.gateCount ?? 0;
     const k = z.gateEvents?.[d.id] ?? 0;
     const more = working.length - 1;
+    const took = elapsed(d.startedAt, now);
     return said({
-      headline: `Working: ${d.role}${issue !== undefined ? ` #${issue}` : ''} in ${name(z.id)}, ${elapsed(d.startedAt, now)}${n > 0 ? `, gate ${k} of ${n}` : ''}`,
+      headline: `Working: ${d.role}${issue !== undefined ? ` #${issue}` : ''} in ${name(z.id)}, ${took}${n > 0 ? `, gate ${k} of ${n}` : ''}`,
+      volatile: took,
       detail: more > 0 ? `${plural(more, 'more drop')} running.` : '',
       waitingOn: 'nothing',
       ...(d.startedAt ? { since: d.startedAt } : {}),
@@ -344,10 +351,12 @@ export function statusOf(input: StatusInput, now: Date): Status {
             },
           ];
     });
+    const minutes = `(${m} of ${z.ciDeadlineMinutes ?? '?'} min)`;
     const st = said({
       headline: reserved
         ? `PR #${p.number} is ${reason}`
-        : `Waiting on CI for PR #${p.number} (${m} of ${z.ciDeadlineMinutes ?? '?'} min)`,
+        : `Waiting on CI for PR #${p.number} ${minutes}`,
+      ...(reserved ? {} : { volatile: minutes }),
       detail: reserved
         ? 'An older approved PR is waiting on CI and holds the next merge; this one merges after it, or once that reservation lapses.'
         : 'After the deadline the item parks with the reason CI gave, or that it gave none.',
@@ -689,6 +698,7 @@ function redactStatus(s: Status, secrets: string[]): Status {
   return {
     ...s,
     headline: r(s.headline),
+    ...(s.volatile !== undefined ? { volatile: r(s.volatile) } : {}),
     detail: r(s.detail),
     ...(s.since ? { since: r(s.since) } : {}),
     ...(s.action ? { action: { label: r(s.action.label), href: r(s.action.href) } } : {}),

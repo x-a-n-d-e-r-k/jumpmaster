@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { DropResultSchema, redact } from '@jumpmaster/protocol';
 import type { DropZoneConfig } from './config.js';
 import { applyCreditsEffect } from './credits.js';
 import { crewBodySha, liveCrewBody } from './crew/flush.js';
@@ -6,18 +7,21 @@ import {
   type CrewIssue,
   getArbitration,
   getCrewIssue,
+  getCrewRetry,
   issueArbitrationSubject,
   listCrewIssues,
   setCrewIssue,
 } from './crew/store.js';
 import type { Db } from './db/open.js';
 import {
+  ACTIVE_STATES_SQL,
   activeDropFor,
   type GatePark,
   getGatePark,
   getPullRequest,
   getWorkItem,
   getZoneMode,
+  isKilled,
   listWorkItems,
   recordGateAllowance,
   setWorkItemState,
@@ -26,6 +30,14 @@ import {
 import { enableFable } from './fable.js';
 import { GATE_PARK_PREFIXES, gateParkAllowable } from './flow/decide.js';
 import { gateDigest } from './flow/snapshot.js';
+import { serverScrubSet } from './forge/scrub-set.js';
+import { gateFailureWhy } from './gate-output.js';
+import {
+  closeProposedGoalChange,
+  GOAL_CHANGE_PREFIX,
+  getGoalChange,
+  openGoalChange,
+} from './goal-change.js';
 import { GOAL_KEY, recordObjectiveDone } from './goals.js';
 import type { ForgePair } from './outbox.js';
 import { retryParkedItem } from './sync.js';
@@ -37,7 +49,8 @@ export type BriefingKind =
   | 'refute_exhausted'
   | 'crew'
   | 'credits_required'
-  | 'objective_done';
+  | 'objective_done'
+  | 'goal_change';
 /** Every option effect the server defines. */
 export const EFFECTS = [
   'none',
@@ -49,6 +62,7 @@ export const EFFECTS = [
   'allow_gate_change',
   'resume_after_credits',
   'advance_objective',
+  'open_goal_change',
 ] as const;
 export type Effect = (typeof EFFECTS)[number];
 
@@ -84,6 +98,9 @@ export const EFFECT_TEXT: Record<
   },
   advance_objective: {
     text: 'the objective is recorded as done; the crew moves to the next one in the goal file',
+  },
+  open_goal_change: {
+    text: 'a pull request changing the goal file is opened; it merges only after you confirm it in the browser',
   },
 };
 
@@ -449,8 +466,8 @@ export const OBJECTIVE_PREFIX = 'objective:';
 /**
  * Applies one effect to the briefing's subject. Idempotent: an effect whose subject has moved on
  * does nothing. Returns false when it could not run yet (try again next pass); throws on error.
- * `ruling` is the ruling applying it and its briefing's source: `advance_objective` applies only
- * through a ruling on a server briefing.
+ * `ruling` is the ruling applying it and its briefing's source: `advance_objective` and
+ * `open_goal_change` apply only through a ruling on a server briefing.
  */
 export async function applyEffect(
   db: Db,
@@ -533,6 +550,27 @@ export async function applyEffect(
         throw new Error('advance_objective applies only through a ruling');
       }
       recordObjectiveDone(db, zoneId, key, ruling.rulingId, now);
+      return true;
+    }
+    case 'open_goal_change': {
+      // The change is the briefing's own subject: a ruling opens only what it was raised for.
+      const id = idOf(subject, GOAL_CHANGE_PREFIX);
+      if (id === null) {
+        throw new Error(`open_goal_change needs a goal-change subject, got ${subject}`);
+      }
+      if (ruling.rulingId === undefined || ruling.source !== 'server') {
+        throw new Error('open_goal_change applies only through a ruling');
+      }
+      const change = getGoalChange(db, id);
+      if (!change || change.zoneId !== zoneId || change.source !== 'crew') {
+        throw new Error('no such goal change from the crew');
+      }
+      // Opens the PR and nothing more: merging waits for the owner's confirmation in the browser.
+      const opened = await openGoalChange(db, deps.forges(zoneId), deps.zone(zoneId), id, now);
+      if (opened === 'retry') return false;
+      if (opened === 'refused') {
+        throw new Error(getGoalChange(db, id)?.error ?? 'goal change refused');
+      }
       return true;
     }
   }
@@ -660,6 +698,11 @@ export async function applyPendingRulings(
               source: r.source,
             });
       if (!done) continue;
+      if (r.kind === 'goal_change' && r.source === 'server' && option.effect === 'none') {
+        // Leave the goals as they are: the crew's proposal is closed, so nothing ever opens it.
+        const id = idOf(r.subject, GOAL_CHANGE_PREFIX);
+        if (id !== null) closeProposedGoalChange(db, zoneId, id, now);
+      }
       db.prepare('UPDATE rulings SET applied_at = ? WHERE id = ?').run(now.toISOString(), r.id);
       applied++;
     } catch (err) {
@@ -678,7 +721,8 @@ export async function applyPendingRulings(
  * briefing is diagnosed afresh. An item whose briefing was ruled is not briefed again until it
  * parks again or its gate park is judged afresh (a new head, merge base or change list), unless
  * the ruling was refused as out of date: then Command is asked again about what it is parked on.
- * A dismissed briefing counts as answered the same way.
+ * A dismissed briefing counts as answered the same way. An item with a crew retry recorded and not
+ * yet applied is not briefed: the crew is retrying it (#396).
  */
 export function syncParkBriefings(db: Db, zone: DropZoneConfig, now: Date): void {
   const parked = listWorkItems(db, zone.id, 'parked');
@@ -704,6 +748,9 @@ export function syncParkBriefings(db: Db, zone: DropZoneConfig, now: Date): void
     listBriefings(db, { zoneId: zone.id, state: 'open' }).map((b) => [b.subject, b]),
   );
   for (const item of parked) {
+    // The crew retries it on its own diagnosis (#396) once a pass applies it: not Command's yet.
+    const crewRetry = getCrewRetry(db, item.id);
+    if (crewRetry && crewRetry.appliedAt === null) continue;
     const subject = `item:${item.id}`;
     const want = parkBriefing(db, zone.id, item);
     const current = open.get(subject);
@@ -755,6 +802,105 @@ export function gateParkWhy(reason: string, park: GatePark): { why: string; comp
   return { why: full.slice(0, MAX_BRIEFING_WHY - CUT_NOTE.length) + CUT_NOTE, complete: false };
 }
 
+/** A park reason the trooper gives when a gate went red (implement, heal and resolve). */
+const GATE_FAILED = /^gate (.+) failed$/;
+
+/**
+ * A `gate <name> failed` park in plain words: `gateFailureWhy` of the red gate of that name in the
+ * newest drop of the item whose stored result failed for that very reason, then the reason.
+ * Undefined for any other park, or when no stored result matches (or parses): the why is then the
+ * reason, as before. A pure function of stored rows, so every pass gives the same why.
+ */
+function gateFailureParkWhy(db: Db, item: WorkItem): string | undefined {
+  const reason = item.reason ?? '';
+  const gateName = GATE_FAILED.exec(reason)?.[1];
+  if (gateName === undefined) return undefined;
+  // json_valid first: json_extract throws on a result_json that does not parse.
+  const row = db
+    .prepare(
+      `SELECT result_json AS resultJson FROM drops
+       WHERE work_item_id = ?
+         AND CASE WHEN json_valid(result_json)
+           THEN json_extract(result_json, '$.status') = 'failed'
+             AND json_extract(result_json, '$.reason') = ?
+           ELSE 0 END
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(item.id, reason) as { resultJson: string } | undefined;
+  if (!row) return undefined;
+  const result = DropResultSchema.safeParse(JSON.parse(row.resultJson));
+  if (!result.success) return undefined;
+  const gate = result.data.gates.find(
+    (g) => g.name === gateName && (g.timedOut || g.exitCode !== 0),
+  );
+  if (!gate) return undefined;
+  return `${gateFailureWhy(gate)}\n\nPark reason: ${reason}`;
+}
+
+/** How long a parked briefing waits for its first diagnose drop before the rule form returns. */
+export const DIAGNOSE_WAIT_MINUTES = 60;
+
+/**
+ * Whether the crew is still to diagnose a parked briefing, so the page shows that in place of the
+ * rule form: open and undiagnosed, with the zone's crew able to run (enabled, kill switch off,
+ * zone active), and either a diagnose drop for it active, or none run yet and the briefing raised
+ * (or refreshed) less than `DIAGNOSE_WAIT_MINUTES` ago. The bound keeps a crew that never gets to
+ * it (a closed usage gate) from hiding the question for good.
+ */
+export function diagnosePending(db: Db, zone: DropZoneConfig, b: Briefing, now: Date): boolean {
+  if (b.kind !== 'parked' || b.state !== 'open' || b.diagnosis !== null) return false;
+  if (!zone.crew?.enabled || isKilled(db)) return false;
+  if (getZoneMode(db, zone.id, zone.mode) !== 'active') return false;
+  const active = db
+    .prepare(
+      `SELECT 1 FROM drops WHERE drop_zone_id = ? AND role = 'diagnose'
+         AND state IN (${ACTIVE_STATES_SQL})
+         AND CASE WHEN json_valid(input_json)
+           THEN json_extract(input_json, '$.work.briefingId') = ? ELSE 0 END LIMIT 1`,
+    )
+    .get(zone.id, b.id);
+  if (active) return true;
+  return (
+    b.diagnoseAttempts === 0 &&
+    now.getTime() - Date.parse(b.updatedAt) < DIAGNOSE_WAIT_MINUTES * 60_000
+  );
+}
+
+/** The ids of `briefings` the crew is still to diagnose (`diagnosePending`), each by its zone. */
+export function pendingDiagnoses(
+  db: Db,
+  zones: readonly DropZoneConfig[],
+  briefings: readonly Briefing[],
+  now: Date,
+): Set<number> {
+  const byId = new Map(zones.map((z) => [z.id, z]));
+  const pending = new Set<number>();
+  for (const b of briefings) {
+    const zone = byId.get(b.zoneId);
+    if (zone && diagnosePending(db, zone, b, now)) pending.add(b.id);
+  }
+  return pending;
+}
+
+/** The most of the crew's diagnosis a parked-again briefing quotes. */
+export const MAX_CREW_RETRY_DIAGNOSIS = 500;
+
+/**
+ * The parked-again why's opening (#396): when the crew retried the item, its diagnosis (cut) and
+ * what it told the next attempt. Agent-written, so redacted (the server's scrub set and token
+ * shapes); the page escapes it.
+ */
+function crewRetriedWhy(db: Db, itemId: number): string | undefined {
+  const r = getCrewRetry(db, itemId);
+  if (r?.outcome !== 'retried' || r.appliedAt === null) return undefined;
+  const secrets = [...serverScrubSet.values()];
+  // Redacted before it is cut, so a cut cannot leave part of a secret that no longer matches.
+  const full = redact(r.diagnosis, secrets);
+  const diagnosis =
+    full.length > MAX_CREW_RETRY_DIAGNOSIS ? `${full.slice(0, MAX_CREW_RETRY_DIAGNOSIS)}…` : full;
+  return `The crew already retried this once on ${r.appliedAt.slice(0, 10)}. Its diagnosis: ${diagnosis}. It told the next attempt: ${redact(r.instruction, secrets)}`;
+}
+
 /** The parked briefing the server raises for `item` now. */
 function parkBriefing(db: Db, zoneId: string, item: WorkItem): NewBriefing {
   const reason = item.reason ?? 'no reason recorded';
@@ -763,7 +909,7 @@ function parkBriefing(db: Db, zoneId: string, item: WorkItem): NewBriefing {
     { id: 'leave', label: 'Leave parked', effect: 'none' },
   ];
   let decision = `Issue #${item.issueNumber} is parked. Retry it?`;
-  let why = reason;
+  let why = gateFailureParkWhy(db, item) ?? reason;
   const park = GATE_PARK_PREFIXES.some((p) => reason.startsWith(p))
     ? getGatePark(db, item.id)
     : undefined;
@@ -788,6 +934,12 @@ function parkBriefing(db: Db, zoneId: string, item: WorkItem): NewBriefing {
         prNumber: park.prNumber,
       });
     }
+  }
+  // A gate park keeps its own words: its decision is to read the diff, and its why is cut to fit.
+  const crewRetried = park ? undefined : crewRetriedWhy(db, item.id);
+  if (crewRetried !== undefined) {
+    decision = `Issue #${item.issueNumber} parked again after the crew retried it once. Retry it?`;
+    why = `${crewRetried}\n\n${why}`;
   }
   return {
     zoneId,
