@@ -111,6 +111,8 @@ export function world(
     },
     forges: () => ({ author: f.author, reviewer: starter ? null : f.reviewer }),
     readForge: () => (o.readToken ? read.author : undefined),
+    // The chat service answers and reaches both (#336).
+    chatHealth: async () => ({ ok: true, claude: true, forge: true }),
   };
   const run = () => runChecks(deps);
   return { db, f, read, zone, config, deps, run };

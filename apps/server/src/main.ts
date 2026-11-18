@@ -224,12 +224,13 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
   // The crew chat's turns (#336): only with the chat service's address (compose sets it). Without
   // it, owner messages wait as `queued` and the chat page says why.
   const chatServiceUrl = env.JM_CHAT_SERVICE_URL;
-  const chatTurns = chatServiceUrl
+  const chatService = chatServiceUrl ? httpChatService(chatServiceUrl) : undefined;
+  const chatTurns = chatService
     ? new ChatTurns({
         db,
         config: live,
         now: () => new Date(),
-        service: httpChatService(chatServiceUrl),
+        service: chatService,
         mcpUrl: chatMcpUrl(boot.listen.port),
         resolvedApps: () => live.resolvedApps(),
         appTokens,
@@ -256,6 +257,8 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     appManifestStore,
     heldReadTokens,
     ...(chatTurns ? { chatTurns } : {}),
+    // The doctor's `chat.service` asks the same service (#336).
+    ...(chatService ? { chatHealth: () => chatService.health() } : {}),
     resolvedApps: () => live.resolvedApps(),
     // The kill switch suspends each zone's app installations, and release unsuspends them (§4.2).
     appSuspension: {

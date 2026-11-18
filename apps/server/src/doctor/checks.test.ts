@@ -33,12 +33,20 @@ import {
   serializeAppEntry,
 } from '../vault/github-app-entries.js';
 import type { ResolvedApps } from '../vault/resolution.js';
-import { CHECK_IDS, type DoctorDeps, installDocUrl } from './checks.js';
+import {
+  ADD_CHAT_SERVICE,
+  CHECK_IDS,
+  chatServiceCheck,
+  type DoctorCheck,
+  type DoctorDeps,
+  installDocUrl,
+} from './checks.js';
 import { processEnv } from './run.js';
 
 describe('a healthy install', () => {
   test('passes every check but those that cannot run yet, which say so', async () => {
-    const checks = await world().run();
+    // Setup asks for the read token, which the chat reads the zone's code with (R3).
+    const checks = await world({ readToken: true }).run();
     const notPass = checks.filter((c) => c.status !== 'pass');
     expect(notPass.map((c) => [c.id, c.status])).toEqual([
       ['claude.token-age', 'skip'],
@@ -936,7 +944,7 @@ describe('starter identity', () => {
   });
 
   test('a healthy starter install warns only on its identity', async () => {
-    const checks = await starter().run();
+    const checks = await world({ zone: { identity: 'starter' }, readToken: true }).run();
     expect(checks.filter((c) => c.status !== 'pass').map((c) => [c.id, c.status])).toEqual([
       ['claude.token-age', 'skip'],
       ['server.public-url', 'info'],
@@ -2079,5 +2087,79 @@ describe("forge.author and forge.reviewer verify an app zone's ids (issue #267)"
     const checks = await w.run();
     expect(one(checks, 'forge.author').status).toBe('pass');
     expect(asked).toBe(0);
+  });
+});
+
+describe('chat.service (#336)', () => {
+  const healthy = async () => ({ ok: true, claude: true, forge: true });
+  const global = (checks: DoctorCheck[]) =>
+    checks.find((c) => c.id === 'chat.service' && c.zoneId === null) as DoctorCheck;
+
+  test('no chat service configured warns with the add-the-service command', async () => {
+    const c = await chatServiceCheck(undefined);
+    expect(c).toMatchObject({ id: 'chat.service', zoneId: null, status: 'warn' });
+    expect(c.summary).toContain('no chat service');
+    expect(c.fix).toContain(ADD_CHAT_SERVICE);
+    expect(ADD_CHAT_SERVICE).toContain('docker compose up -d');
+    const w = world();
+    delete w.deps.chatHealth;
+    expect(global(await w.run()).status).toBe('warn');
+  });
+
+  test('an unreachable service fails', async () => {
+    const c = await chatServiceCheck(async () => null);
+    expect(c).toMatchObject({ id: 'chat.service', status: 'fail' });
+    expect(c.summary).toContain('not answering');
+    const thrown = await chatServiceCheck(async () => {
+      throw new Error('ECONNREFUSED');
+    });
+    expect(thrown.status).toBe('fail');
+  });
+
+  test("a service that can't reach Claude or the forge fails naming which", async () => {
+    const claude = await chatServiceCheck(async () => ({ ok: false, claude: false, forge: true }));
+    expect(claude.status).toBe('fail');
+    expect(claude.summary).toContain('Claude');
+    expect(claude.summary).not.toContain('GitHub');
+    const forge = await chatServiceCheck(async () => ({ ok: false, claude: true, forge: false }));
+    expect(forge.status).toBe('fail');
+    expect(forge.summary).toContain('GitHub');
+    expect(forge.summary).not.toContain('Claude');
+    const both = await chatServiceCheck(async () => ({ ok: false, claude: false, forge: false }));
+    expect(both.summary).toContain('Claude');
+    expect(both.summary).toContain('GitHub');
+  });
+
+  test('a healthy service passes', async () => {
+    const c = await chatServiceCheck(healthy);
+    expect(c).toMatchObject({ id: 'chat.service', zoneId: null, status: 'pass' });
+    const w = world({ readToken: true });
+    w.deps.chatHealth = healthy;
+    const checks = (await w.run()).filter((x) => x.id === 'chat.service');
+    expect(checks.map((x) => [x.zoneId, x.status])).toEqual([[null, 'pass']]);
+  });
+
+  test("a PAT zone with no githubReadToken warns that the chat can't read that zone's code, naming the zone (R3)", async () => {
+    const w = world();
+    w.deps.chatHealth = healthy;
+    const c = one(
+      (await w.run()).filter((x) => x.zoneId === 'main'),
+      'chat.service',
+    );
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('main');
+    expect(c.summary).toContain("can't read");
+    expect(c.fix).toContain('JM_GITHUB_READ_TOKEN');
+    // An app-reviewer zone reads with the reviewer app's token: no warning.
+    const reviewer = {
+      source: 'vault',
+      fingerprint: 'fp',
+      entry: { appId: '9', slug: 'jm-reviewer', clientId: 'c', pem: 'unused', importedAt: 'x' },
+    } as const;
+    const app = world({ zone: { githubApp: { repositoryId: 5, installations: { reviewer: 7 } } } });
+    app.deps.resolvedApps = () =>
+      new Map([['octo', { author: reviewer, reviewer }]]) as unknown as ResolvedApps;
+    app.deps.chatHealth = healthy;
+    expect((await app.run()).filter((x) => x.id === 'chat.service' && x.zoneId)).toEqual([]);
   });
 });

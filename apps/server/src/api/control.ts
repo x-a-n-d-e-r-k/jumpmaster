@@ -65,6 +65,7 @@ import {
 } from '../db/repo.js';
 import { pagesOf } from '../doctor/actions.js';
 import {
+  type ChatHealth,
   type DoctorDeps,
   type DoctorEnv,
   doctorDropWait,
@@ -173,6 +174,8 @@ export interface ControlDeps {
   readForgeFor?(zoneId: string): Forge | undefined;
   /** This process as the doctor sees it (default: read from the process). */
   doctorEnv?: DoctorEnv;
+  /** The chat service's health, for the doctor's `chat.service`; absent, there is no chat service. */
+  chatHealth?: ChatHealth;
   /** The image mirror, for the doctor's `server.image-mirror` (issue #140). */
   images?: Pick<ImageMirror, 'status'>;
   /** The in-memory setup code, shared with the setup pages (default: one printing to stderr). */
@@ -753,6 +756,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
               env,
               forges: deps.doctorForgesFor ?? forgesFor,
               ...(deps.readForgeFor ? { readForge: deps.readForgeFor } : {}),
+              ...(deps.chatHealth ? { chatHealth: deps.chatHealth } : {}),
               ...(deps.resolvedApps ? { resolvedApps: deps.resolvedApps } : {}),
               ...(deps.installationVerifier
                 ? {
