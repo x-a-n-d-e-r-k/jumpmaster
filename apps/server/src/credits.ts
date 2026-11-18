@@ -386,6 +386,7 @@ export function applyCreditsEffect(db: Db, subject: string, effect: Effect, now:
     case 'restage_issue':
     case 'allow_gate_change':
     case 'advance_objective':
+    case 'open_goal_change':
       throw new Error(`${effect} does not apply to ${subject}`);
     default: {
       const never: never = effect;

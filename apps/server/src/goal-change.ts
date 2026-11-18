@@ -18,6 +18,9 @@ import { type ForgePair, opMarker } from './outbox.js';
 /** The branch a goal change is committed on. Never an agent branch (`agent/issue-`). */
 export const GOAL_CHANGE_BRANCH = (id: number): string => `jm/goal-change-${id}`;
 
+/** What a `goal_change` briefing is about: `goal-change:<id>`. */
+export const GOAL_CHANGE_PREFIX = 'goal-change:';
+
 /** The longest goal text a change may propose, in characters. */
 export const GOAL_TEXT_MAX = 64_000;
 
@@ -229,7 +232,16 @@ export async function openGoalChange(
   }
 }
 
-/** Opens every proposed goal change of the zone (a reconcile pass, while the zone is active). */
+/** Closes a goal change still proposed (the owner declined to open it). Idempotent. */
+export function closeProposedGoalChange(db: Db, zoneId: string, id: number, now: Date): void {
+  const c = getGoalChange(db, id);
+  if (c?.zoneId === zoneId && c.state === 'proposed') update(db, id, { state: 'closed' }, now);
+}
+
+/**
+ * Opens every goal change of the zone proposed in the chat (a reconcile pass, while the zone is
+ * active). A crew proposal opens only through its briefing's ruling (`open_goal_change`).
+ */
 export async function openGoalChanges(
   db: Db,
   forges: ForgePair,
@@ -238,6 +250,7 @@ export async function openGoalChanges(
 ): Promise<number> {
   let opened = 0;
   for (const c of listGoalChanges(db, zone.id, 'proposed')) {
+    if (c.source !== 'chat') continue;
     if ((await openGoalChange(db, forges, zone, c.id, now)) === 'open') opened++;
   }
   return opened;

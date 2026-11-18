@@ -26,6 +26,12 @@ import {
 import { enableFable } from './fable.js';
 import { GATE_PARK_PREFIXES, gateParkAllowable } from './flow/decide.js';
 import { gateDigest } from './flow/snapshot.js';
+import {
+  closeProposedGoalChange,
+  GOAL_CHANGE_PREFIX,
+  getGoalChange,
+  openGoalChange,
+} from './goal-change.js';
 import { GOAL_KEY, recordObjectiveDone } from './goals.js';
 import type { ForgePair } from './outbox.js';
 import { retryParkedItem } from './sync.js';
@@ -37,7 +43,8 @@ export type BriefingKind =
   | 'refute_exhausted'
   | 'crew'
   | 'credits_required'
-  | 'objective_done';
+  | 'objective_done'
+  | 'goal_change';
 /** Every option effect the server defines. */
 export const EFFECTS = [
   'none',
@@ -49,6 +56,7 @@ export const EFFECTS = [
   'allow_gate_change',
   'resume_after_credits',
   'advance_objective',
+  'open_goal_change',
 ] as const;
 export type Effect = (typeof EFFECTS)[number];
 
@@ -84,6 +92,9 @@ export const EFFECT_TEXT: Record<
   },
   advance_objective: {
     text: 'the objective is recorded as done; the crew moves to the next one in the goal file',
+  },
+  open_goal_change: {
+    text: 'a pull request changing the goal file is opened; it merges only after you confirm it in the browser',
   },
 };
 
@@ -449,8 +460,8 @@ export const OBJECTIVE_PREFIX = 'objective:';
 /**
  * Applies one effect to the briefing's subject. Idempotent: an effect whose subject has moved on
  * does nothing. Returns false when it could not run yet (try again next pass); throws on error.
- * `ruling` is the ruling applying it and its briefing's source: `advance_objective` applies only
- * through a ruling on a server briefing.
+ * `ruling` is the ruling applying it and its briefing's source: `advance_objective` and
+ * `open_goal_change` apply only through a ruling on a server briefing.
  */
 export async function applyEffect(
   db: Db,
@@ -533,6 +544,27 @@ export async function applyEffect(
         throw new Error('advance_objective applies only through a ruling');
       }
       recordObjectiveDone(db, zoneId, key, ruling.rulingId, now);
+      return true;
+    }
+    case 'open_goal_change': {
+      // The change is the briefing's own subject: a ruling opens only what it was raised for.
+      const id = idOf(subject, GOAL_CHANGE_PREFIX);
+      if (id === null) {
+        throw new Error(`open_goal_change needs a goal-change subject, got ${subject}`);
+      }
+      if (ruling.rulingId === undefined || ruling.source !== 'server') {
+        throw new Error('open_goal_change applies only through a ruling');
+      }
+      const change = getGoalChange(db, id);
+      if (!change || change.zoneId !== zoneId || change.source !== 'crew') {
+        throw new Error('no such goal change from the crew');
+      }
+      // Opens the PR and nothing more: merging waits for the owner's confirmation in the browser.
+      const opened = await openGoalChange(db, deps.forges(zoneId), deps.zone(zoneId), id, now);
+      if (opened === 'retry') return false;
+      if (opened === 'refused') {
+        throw new Error(getGoalChange(db, id)?.error ?? 'goal change refused');
+      }
       return true;
     }
   }
@@ -660,6 +692,11 @@ export async function applyPendingRulings(
               source: r.source,
             });
       if (!done) continue;
+      if (r.kind === 'goal_change' && r.source === 'server' && option.effect === 'none') {
+        // Leave the goals as they are: the crew's proposal is closed, so nothing ever opens it.
+        const id = idOf(r.subject, GOAL_CHANGE_PREFIX);
+        if (id !== null) closeProposedGoalChange(db, zoneId, id, now);
+      }
       db.prepare('UPDATE rulings SET applied_at = ? WHERE id = ?').run(now.toISOString(), r.id);
       applied++;
     } catch (err) {
