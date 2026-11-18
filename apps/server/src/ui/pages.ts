@@ -1356,7 +1356,15 @@ export function statusBanner(s: Status | undefined): string {
     s.action && safeHref(s.action.href)
       ? `<p><a href="${escapeHtml(s.action.href)}"${linkTarget(s.action.href)}>${escapeHtml(s.action.label)}</a></p>`
       : '';
-  return `<div class="status" data-waiting-on="${escapeHtml(s.waitingOn)}"><p><strong>${codeHtml(s.headline)}</strong>${since}</p>${detail}${also}${action}</div>`;
+  return `<div class="status" data-waiting-on="${escapeHtml(s.waitingOn)}"><p><strong>${headlineHtml(s)}</strong>${since}</p>${detail}${also}${action}</div>`;
+}
+
+/** The headline, its clock-driven part (`volatile`) in a span the live script ignores. */
+function headlineHtml(s: Status): string {
+  const at = s.volatile ? s.headline.lastIndexOf(s.volatile) : -1;
+  if (!s.volatile || at < 0) return codeHtml(s.headline);
+  const end = at + s.volatile.length;
+  return `${codeHtml(s.headline.slice(0, at))}${volatile(codeHtml(s.volatile))}${codeHtml(s.headline.slice(end))}`;
 }
 
 function artifactsSection(artifacts: ArtifactRow[]): string {

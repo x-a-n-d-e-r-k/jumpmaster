@@ -1,8 +1,15 @@
 import vm from 'node:vm';
 import { describe, expect, test } from 'vitest';
-import { insertDrop, updateDrop } from '../db/repo.js';
+import { insertDrop, insertStick, stampStick, updateDrop } from '../db/repo.js';
 import { harness } from '../test/flowHarness.js';
-import { LIVE_MARKER, LIVE_SCRIPT, page, renderHome, zoneBriefingsHref } from './pages.js';
+import {
+  LIVE_MARKER,
+  LIVE_SCRIPT,
+  page,
+  renderHome,
+  statusBanner,
+  zoneBriefingsHref,
+} from './pages.js';
 
 /** A `<main>` as a string, with `[data-live-ignore]` spans its only elements. */
 function fakeMain(html: string) {
@@ -298,6 +305,52 @@ describe('live pages', () => {
     const slot = body.slice(body.indexOf('href="/drops/tick-drop"'));
     expect(slot).toMatch(
       /^[^<]*<\/a><span class="meta"><span data-live-ignore>(\d+m )?\d+s<\/span>/,
+    );
+  });
+
+  test("GET /'s <main>, less its data-live-ignore spans, is the same at two clock times while a drop runs", async () => {
+    const h = await harness();
+    await h.sync();
+    insertDrop(h.db, {
+      id: 'tick-drop',
+      dropZoneId: 'main',
+      workItemId: null,
+      role: 'crew-lead',
+      state: 'running',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    updateDrop(h.db, 'tick-drop', { startedAt: '2026-01-01T00:00:00.000Z' });
+    insertStick(h.db, { id: 'live', name: 'stick-live', tokenHash: 'hl', slots: 1 });
+    // The stick checks in at each render, so the status line is the running drop's.
+    const main = async () => {
+      stampStick(
+        h.db,
+        'live',
+        { capabilities: ['egress-v1'], imagePolicy: 'allowlist', version: '1', pinnedImages: [] },
+        h.now(),
+      );
+      const body = (await h.view('/')).body;
+      const inner = /<main[^>]*>([\s\S]*)<\/main>/.exec(body)?.[1] ?? '';
+      return inner.replace(/<span data-live-ignore>[^<]*<\/span>/g, '');
+    };
+    const first = await main();
+    expect(first).toContain('Working: crew-lead in');
+    h.at(0.25);
+    const second = await main();
+    h.at(3);
+    expect(await main()).toBe(first);
+    expect(second).toBe(first);
+  });
+
+  test("the status banner wraps the headline's clock-driven part in data-live-ignore", () => {
+    const html = statusBanner({
+      headline: 'Waiting on CI for PR #12 (20 of 45 min)',
+      volatile: '(20 of 45 min)',
+      detail: '',
+      waitingOn: 'ci',
+    });
+    expect(html).toContain(
+      '<strong>Waiting on CI for PR #12 <span data-live-ignore>(20 of 45 min)</span></strong>',
     );
   });
 
