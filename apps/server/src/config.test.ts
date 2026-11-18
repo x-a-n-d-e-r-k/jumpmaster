@@ -499,11 +499,22 @@ describe('crew config', () => {
       maxDropsPerDay: 24,
       stagedLabel: 'agent-staged',
       maxStaged: 3,
-      refutePromotes: false,
+      refutePromotes: true,
       maxRefute: 3,
       maxTriage: 2,
     });
     expect(z?.botLogins).toEqual([]);
+  });
+
+  test('a crew zone with no refutePromotes key parses to true: a passing refute promotes (#318)', () => {
+    const z = loadConfig(withZone({ crew: { enabled: true } }), fullEnv).dropZones[0];
+    expect(z?.crew.refutePromotes).toBe(true);
+  });
+
+  test('an explicit refutePromotes false parses to false', () => {
+    const z = loadConfig(withZone({ crew: { enabled: true, refutePromotes: false } }), fullEnv)
+      .dropZones[0];
+    expect(z?.crew.refutePromotes).toBe(false);
   });
 
   test('a dotfile goalPath under a protected glob is accepted, as the review check protects it', () => {
@@ -1432,7 +1443,7 @@ describe('githubApp (spec §4.2: installation and repository ids, not secret)', 
         maxDropsPerDay: 24,
         stagedLabel: 'agent-staged',
         maxStaged: 3,
-        refutePromotes: false,
+        refutePromotes: true,
         maxRefute: 3,
         maxTriage: 2,
       },

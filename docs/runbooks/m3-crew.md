@@ -30,7 +30,7 @@ keeps working.
   "maxDropsPerDay": 24,
   "stagedLabel": "agent-staged",
   "maxStaged": 3,
-  "refutePromotes": false,
+  "refutePromotes": true,
   "maxRefute": 3,
   "maxTriage": 2
 }
@@ -86,8 +86,9 @@ And at the top level of the server config:
    - `## Objectives` (required): each objective is a `### ` heading, marked done by ending the
      heading with `(done)`. With no `###` headings, each `- [ ]` / `- [x]` line is an objective.
    - Any other `##` section (Constraints, Non-goals) is passed to the crew as written.
-5. Set `claude.plan` (and `fableModel` only if your plan includes Fable). Leave `refutePromotes`
-   false.
+5. Set `claude.plan` (and `fableModel` only if your plan includes Fable). `refutePromotes` is
+   true unless you set it: a passing refute promotes its issue after a short hold (§4). To rule on
+   each one yourself, as §3 does, set `refutePromotes: false`.
 6. If the zone requires CI (`ciRequired: true`), confirm a runner can pick the required check up.
    A workflow with `runs-on: self-hosted` and no runner stays queued, and the item parks with "no
    CI result: <check> queued and never started". Run a self-hosted runner in a container with no
@@ -124,7 +125,9 @@ is running, the daily cap allows, `GOAL.md` parses, and pending refute or diagno
   slot. Many "not on the ladder" refusals mean the objective keys don't match.
 
 A refute drop then judges each staged issue in turn, and decides one of three things:
-- **Promote:** a briefing offers **Promote** and **Reject**.
+- **Promote:** the issue is held for about a minute with a briefing that offers **Reject** and
+  **Promote now**, then promoted (§4). With `refutePromotes: false`, a briefing offers **Promote**
+  and **Reject** instead (§3).
 - **Revise:** the issue is edited and judged again, up to `maxRefute`.
 - **Reject:** the issue is closed, with no briefing.
 
@@ -133,7 +136,9 @@ When the attempts run out without a verdict, the issue comes to you with **Promo
 
 ### 3. Promote by ruling
 
-Open `/briefings` and rule **Promote** on each refuted issue you agree with, or from a terminal:
+A passing refute promotes on its own (§4); this is the path with `refutePromotes: false`, and for
+an issue whose refute attempts ran out. Open `/briefings` and rule **Promote** on each refuted
+issue you agree with, or from a terminal:
 
 ```bash
 node apps/server/dist/ctl.js rule <briefing> promote "why"
@@ -152,11 +157,17 @@ implement, review and merge loop.
   and the staged label is gone. Labels and the body can stop a crew issue, never start one. A crew issue that was rejected or failed stays unstartable; the goals page lists it with
   its state. Close it, or file a fresh issue for the work.
 
-### 4. Optional: let refutes promote
+### 4. Optional: approve each crew issue yourself
 
-Set `refutePromotes: true`. A refute that finds nothing to stop an issue promotes it after a hold of
-about a minute, with **Reject** and **Promote now**. Reject still works after promotion until the
-work starts. Not part of the M3 gate.
+By default (`refutePromotes: true`, or no key at all), a refute that finds nothing to stop an issue
+promotes it after a hold of about a minute. The hold raises a briefing with **Reject** and
+**Promote now**; with no ruling, the issue is promoted when the hold ends. Reject still works after
+promotion until the work starts.
+
+To approve each one yourself, set `refutePromotes: false`. Each passing refute then raises a
+**Promote** briefing instead, and the issue stays staged until you rule (§3). Turning
+`refutePromotes` back to true from an explicit false is a guarded change that asks you to confirm;
+setting it to false asks nothing.
 
 ### 5. Diagnose and Fable
 
