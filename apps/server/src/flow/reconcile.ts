@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { agentBranch, type GateResult, type Role, type Verdict } from '@jumpmaster/protocol';
 import { applyPendingRulings, syncParkBriefings } from '../briefings.js';
-import type { DropZoneConfig, UsageConfig } from '../config.js';
+import type { ClaudeConfig, DropZoneConfig, UsageConfig } from '../config.js';
 import { flushCrewOps } from '../crew/flush.js';
 import type { ImageFetchOpts } from '../crew/images.js';
 import { enqueueCrew } from '../crew/schedule.js';
@@ -486,6 +486,7 @@ export async function reconcileZone(
   secrets: string[],
   now: Date,
   crewImages?: ImageFetchOpts,
+  opts: { claude?: ClaudeConfig } = {},
 ): Promise<ReconcileReport> {
   let actions = 0;
   let merges = 0;
@@ -616,12 +617,14 @@ export async function reconcileZone(
       const detail = `issue #${pick.issueNumber}`;
       recordObservation(db, zone.id, pick.id, 'would_enqueue:implement', detail, now);
     }
-    await enqueueCrew(db, forges, zone, pass, versions, usageCfg, now, crewImages);
+    await enqueueCrew(db, forges, zone, pass, versions, usageCfg, now, crewImages, opts);
     return { actions, merges };
   }
   if (enqueueNext(db, zone, versions.implement, usageCfg, now, branchUnknown) !== null) actions++;
   // Last, so crew work never takes a place ahead of finishing or implement work.
-  if ((await enqueueCrew(db, forges, zone, pass, versions, usageCfg, now, crewImages)) !== null)
+  if (
+    (await enqueueCrew(db, forges, zone, pass, versions, usageCfg, now, crewImages, opts)) !== null
+  )
     actions++;
   return { actions, merges };
 }

@@ -14,7 +14,7 @@ import type { Drop } from './db/repo.js';
 export { servedModel } from '@jumpmaster/protocol';
 
 /** Roles that run on Fable when it is available. */
-export const FABLE_ROLES: readonly CrewRole[] = ['diagnose'];
+export const FABLE_ROLES: readonly CrewRole[] = ['diagnose', 'arbitrate'];
 /** Plans that include Fable. `enterprise` is treated as not including it until verified. */
 export const FABLE_PLANS: readonly ClaudePlan[] = ['max', 'ultra', 'team_premium'];
 
@@ -108,9 +108,19 @@ export function resolveModel(
   return isFable && !status.available ? zone.model : configured;
 }
 
-const isFableRequest = (cfg: Pick<Config, 'claude'>, drop: Drop): boolean =>
-  drop.requestedModel !== null &&
-  (drop.requestedModel === cfg.claude.fableModel || FABLE.test(drop.requestedModel));
+const namesFable = (cfg: Pick<Config, 'claude'>, model: string): boolean =>
+  model === cfg.claude.fableModel || FABLE.test(model);
+
+/** The drop asked for Fable, as recorded in `requested_model`. */
+export const isFableRequest = (cfg: Pick<Config, 'claude'>, drop: Drop): boolean =>
+  drop.requestedModel !== null && namesFable(cfg, drop.requestedModel);
+
+/**
+ * The drop asked for Fable and, when the served model is recorded, was served by Fable too: what
+ * the server recorded, never what the agent says it ran on.
+ */
+export const ranOnFable = (cfg: Pick<Config, 'claude'>, drop: Drop): boolean =>
+  isFableRequest(cfg, drop) && (drop.servedModel === null || namesFable(cfg, drop.servedModel));
 
 /** A rate limit on Fable alone: it pauses Fable, never dispatch. */
 export const isFableRateLimit = (data: RateLimitEventData | undefined): boolean =>

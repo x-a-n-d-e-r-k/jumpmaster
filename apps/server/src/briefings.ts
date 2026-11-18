@@ -2,7 +2,14 @@ import { createHash } from 'node:crypto';
 import type { DropZoneConfig } from './config.js';
 import { applyCreditsEffect } from './credits.js';
 import { crewBodySha, liveCrewBody } from './crew/flush.js';
-import { type CrewIssue, getCrewIssue, listCrewIssues, setCrewIssue } from './crew/store.js';
+import {
+  type CrewIssue,
+  getArbitration,
+  getCrewIssue,
+  issueArbitrationSubject,
+  listCrewIssues,
+  setCrewIssue,
+} from './crew/store.js';
 import type { Db } from './db/open.js';
 import {
   activeDropFor,
@@ -838,12 +845,15 @@ const crewIssueName = (c: Pick<CrewIssue, 'number' | 'key' | 'title'>): string =
     ? `Crew issue ${c.key} (not filed yet), ${c.title},`
     : `#${c.number} ${c.title}`;
 
+/** One stored refute verdict on a crew issue: its drop, when it finished, its decision and findings. */
+export type RefuteVerdictLine = { id: string; at: string; decision: string; findings: string[] };
+
 /**
- * A `refute_exhausted` briefing's why, from the stored refute drops of the issue's current attempts:
- * how often it was reviewed, then each review's date and findings (each cut to MAX_FINDING, with
- * the drop page for the full text), then REFUTE_RECOMMENDATION.
+ * The stored verdicts of the issue's current refute attempts, oldest first: the latest
+ * `refuteCount` refute drops that returned a decision. A drop that died without one is not a
+ * verdict.
  */
-export function refuteExhaustedWhy(db: Db, issue: CrewIssue): string {
+export function refuteVerdicts(db: Db, issue: CrewIssue): RefuteVerdictLine[] {
   const rows = db
     .prepare(
       `SELECT id, created_at AS createdAt, finished_at AS finishedAt, result_json AS resultJson
@@ -857,7 +867,7 @@ export function refuteExhaustedWhy(db: Db, issue: CrewIssue): string {
     finishedAt: string | null;
     resultJson: string | null;
   }[];
-  const reviews = rows.reverse().flatMap((r) => {
+  return rows.reverse().flatMap((r) => {
     let crew: RefuteVerdict | undefined;
     try {
       crew = (JSON.parse(r.resultJson ?? 'null') as { crew?: RefuteVerdict } | null)?.crew;
@@ -870,6 +880,50 @@ export function refuteExhaustedWhy(db: Db, issue: CrewIssue): string {
       : [];
     return [{ id: r.id, at: r.finishedAt ?? r.createdAt, decision: crew.decision, findings }];
   });
+}
+
+/** The most of an arbiter's reasons a briefing quotes; the drop page has the full text. */
+export const MAX_ARBITER_QUOTE = 1500;
+
+const RULED: Record<string, string> = {
+  A: 'A (promote it as it reads)',
+  B: 'B (the findings stand; reject it)',
+  insufficient_evidence: 'that the evidence is insufficient',
+};
+
+/**
+ * What the arbiter said about the issue's current text, when its ruling is settled: the ruling and
+ * its reasons, or why it could not rule. Empty when there is no settled arbitration for this text.
+ */
+function arbiterPart(db: Db, issue: CrewIssue): string {
+  if (issue.bodySha === null) return '';
+  const a = getArbitration(db, issueArbitrationSubject(issue.id), issue.bodySha);
+  if (!a || a.state === 'pending') return '';
+  const link = `full text: /drops/${a.dropId}`;
+  if (a.state !== 'ruled' || a.ruling === null) {
+    return `The arbiter could not rule: ${a.reason ?? 'no reason recorded'}. ${link}`;
+  }
+  const who = a.reason === 'did not run on Fable' ? 'The arbiter' : 'A Fable arbiter';
+  const acted =
+    a.acted || a.ruling === 'insufficient_evidence'
+      ? ''
+      : ` It was not acted on: ${a.reason ?? 'no reason recorded'}.`;
+  return `${who} ruled ${RULED[a.ruling] ?? a.ruling}: ${quoteUpTo(a.because ?? '', MAX_ARBITER_QUOTE)}${acted} ${link}`;
+}
+
+const quoteUpTo = (text: string, max: number): string => {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
+};
+
+/**
+ * A `refute_exhausted` briefing's why, from the stored refute drops of the issue's current attempts:
+ * how often it was reviewed, then each review's date and findings (each cut to MAX_FINDING, with
+ * the drop page for the full text), then what the arbiter ruled on this text, if it ruled, then
+ * REFUTE_RECOMMENDATION.
+ */
+export function refuteExhaustedWhy(db: Db, issue: CrewIssue): string {
+  const reviews = refuteVerdicts(db, issue);
   const name = crewIssueName(issue);
   const k = reviews.length;
   const times = k === 1 ? 'once' : `${k} times`;
@@ -888,7 +942,8 @@ export function refuteExhaustedWhy(db: Db, issue: CrewIssue): string {
     });
     lines.push(`  full text: /drops/${r.id}`);
   });
-  const tail = `\n\n${REFUTE_RECOMMENDATION}`;
+  const arbiter = arbiterPart(db, issue);
+  const tail = `${arbiter ? `\n\n${arbiter}` : ''}\n\n${REFUTE_RECOMMENDATION}`;
   let body = lines.join('\n');
   if (body.length + tail.length > MAX_BRIEFING_WHY) {
     const cut = '\n… (cut: the drop pages have every finding)';

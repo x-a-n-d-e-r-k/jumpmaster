@@ -4,19 +4,24 @@ import {
   isCrewRole,
   parseCrewOutput,
 } from '@jumpmaster/protocol';
-import { raiseBriefing, refuteExhaustedWhy, whyBasis } from '../briefings.js';
+import { raiseBriefing, whyBasis } from '../briefings.js';
 import type { Db } from '../db/open.js';
-import { appendEvents, type Drop, type DropState, updateDrop } from '../db/repo.js';
+import { appendEvents, type Drop, type DropState, getDrop, updateDrop } from '../db/repo.js';
+import { ranOnFable } from '../fable.js';
 import type { CrewInputJson } from '../payloads.js';
 import type { ResultDeps } from '../results.js';
 import { applyCrewActions, protectedPathsNamed, validateIssueSpec } from './actions.js';
 import { PROMOTE_OPTIONS, subjectOf } from './flush.js';
+import { raiseRefuteExhausted } from './schedule.js';
 import {
   type CrewIssue,
+  type CrewIssuePatch,
+  getArbitrationByDrop,
   getCrewIssue,
   getTriageRequest,
   setCrewIssue,
   setTriageRequest,
+  settleArbitration,
 } from './store.js';
 
 const log = (db: Db, drop: Drop, now: Date, message: string) =>
@@ -35,7 +40,93 @@ function storedWork(drop: Drop): CrewInputJson['work'] | null {
   }
 }
 
-/** A refute's verdict on a staged crew issue. Nothing happens if the issue has moved on. */
+const labelOf = (issue: CrewIssue): string =>
+  issue.number !== null ? `crew issue #${issue.number}` : `crew issue ${issue.key}`;
+
+/**
+ * Who passed a staged issue, a refute or an arbiter's ruling A, in the briefings' words: `found`
+ * opens the decision, `reviewed` (Promote briefing) and `held` (hold notice) say what they did.
+ */
+export type ReviewWhy = { found: string; reviewed: string; held: string };
+
+const REFUTE_WHY: ReviewWhy = {
+  found: 'A reviewer found nothing to fix in',
+  reviewed:
+    'a second agent reviewed it against the code and the spec, looking for criteria that are ' +
+    'wrong, vague or untestable, and found none.',
+  held:
+    'a second agent reviewed it against the code and the spec and found nothing wrong, vague or ' +
+    'untestable.',
+};
+
+/**
+ * A staged issue that passed review (a refute's `promote`, or an arbiter's ruling A). With
+ * `crew.refutePromotes` on it becomes `promote_held`, ready next pass unless Command rejects it;
+ * off, it stays staged and Command gets a Promote briefing. Never further than a refute could.
+ */
+export function promoteAfterReview(
+  db: Db,
+  deps: Pick<ResultDeps, 'zone'>,
+  issue: CrewIssue,
+  base: CrewIssuePatch,
+  why: ReviewWhy,
+  now: Date,
+): void {
+  const { zone } = deps;
+  const subject = subjectOf(issue);
+  const label = labelOf(issue);
+  if (zone.crew.refutePromotes) {
+    // hold_until is set by the first active flush that sees it (one pass for Command).
+    setCrewIssue(db, issue.id, { ...base, state: 'promote_held' }, now);
+    raiseBriefing(
+      db,
+      {
+        zoneId: zone.id,
+        kind: 'promote_held',
+        subject,
+        decision: `${why.found} ${label}. It becomes ready on the next pass unless you reject it.`,
+        why:
+          `The crew filed ${label} as staged, and ${why.held} This zone lets a passing review ` +
+          'promote (crew.refutePromotes is on), so you only need to act to stop it.',
+        options: [
+          { id: 'reject', label: 'Reject', effect: 'reject_issue' },
+          { id: 'promote', label: 'Promote now', effect: 'promote_issue' },
+        ],
+        onHold: label,
+        source: 'server',
+      },
+      now,
+    );
+    return;
+  }
+  setCrewIssue(db, issue.id, base, now);
+  raiseBriefing(
+    db,
+    {
+      zoneId: zone.id,
+      kind: 'promote',
+      subject,
+      decision: `${why.found} ${label}. Promote it so an agent can start?`,
+      why:
+        `The crew filed ${label} as staged, so no agent works on it yet. ${capitalise(why.reviewed)} ` +
+        'Promote gives it the ready label; Reject closes it. To let a passing ' +
+        'review promote on its own, with a notice you can still reject, set crew.refutePromotes ' +
+        `for this zone: jumpmaster ctl zones set ${zone.id} crew.refutePromotes=true`,
+      options: PROMOTE_OPTIONS,
+      onHold: label,
+      source: 'server',
+    },
+    now,
+  );
+}
+
+const capitalise = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
+
+/**
+ * A refute's verdict on a staged crew issue. Nothing happens if the issue has moved on. A revise
+ * at the refute budget is kept like any other: once staged again, the schedule's exhausted step
+ * (the one place a refute_exhausted briefing is raised) judges the revised text.
+ */
 function applyRefute(
   db: Db,
   deps: ResultDeps,
@@ -49,55 +140,9 @@ function applyRefute(
     refutedSha: issue.bodySha,
     findingsJson: JSON.stringify(out.findings),
   };
-  const subject = subjectOf(issue);
-  const label = issue.number !== null ? `crew issue #${issue.number}` : `crew issue ${issue.key}`;
 
   if (out.decision === 'promote') {
-    if (zone.crew.refutePromotes) {
-      // hold_until is set by the first active flush that sees it (one pass for Command).
-      setCrewIssue(db, issue.id, { ...base, state: 'promote_held' }, now);
-      raiseBriefing(
-        db,
-        {
-          zoneId: zone.id,
-          kind: 'promote_held',
-          subject,
-          decision: `A reviewer found nothing to fix in ${label}. It becomes ready on the next pass unless you reject it.`,
-          why:
-            `The crew filed ${label} as staged, and a second agent reviewed it against the code and the spec ` +
-            'and found nothing wrong, vague or untestable. This zone lets a passing review promote ' +
-            '(crew.refutePromotes is on), so you only need to act to stop it.',
-          options: [
-            { id: 'reject', label: 'Reject', effect: 'reject_issue' },
-            { id: 'promote', label: 'Promote now', effect: 'promote_issue' },
-          ],
-          onHold: label,
-          source: 'server',
-        },
-        now,
-      );
-      return;
-    }
-    setCrewIssue(db, issue.id, base, now);
-    raiseBriefing(
-      db,
-      {
-        zoneId: zone.id,
-        kind: 'promote',
-        subject,
-        decision: `A reviewer found nothing to fix in ${label}. Promote it so an agent can start?`,
-        why:
-          `The crew filed ${label} as staged, so no agent works on it yet. A second agent reviewed it ` +
-          'against the code and the spec, looking for criteria that are wrong, vague or untestable, ' +
-          'and found none. Promote gives it the ready label; Reject closes it. To let a passing ' +
-          'review promote on its own, with a notice you can still reject, set crew.refutePromotes ' +
-          `for this zone: jumpmaster ctl zones set ${zone.id} crew.refutePromotes=true`,
-        options: PROMOTE_OPTIONS,
-        onHold: label,
-        source: 'server',
-      },
-      now,
-    );
+    promoteAfterReview(db, deps, issue, base, REFUTE_WHY, now);
     return;
   }
 
@@ -111,28 +156,111 @@ function applyRefute(
       protectedPathsNamed(body, zone.protectedPaths).length === 0
     ) {
       setCrewIssue(db, issue.id, { ...base, state: 'revising', title, body }, now);
-      if (issue.refuteCount >= zone.crew.maxRefute) {
-        raiseBriefing(
-          db,
-          {
-            zoneId: zone.id,
-            kind: 'refute_exhausted',
-            subject,
-            decision: `Promote ${label} as revised?`,
-            why: refuteExhaustedWhy(db, getCrewIssue(db, issue.id) ?? issue),
-            options: PROMOTE_OPTIONS,
-            onHold: label,
-            source: 'server',
-          },
-          now,
-        );
-      }
       return;
     }
     // A revision that is missing, not in the drop-ready format or naming a protected path counts
     // as a rejection.
   }
   setCrewIssue(db, issue.id, { ...base, state: 'rejecting' }, now);
+}
+
+/** An acting ruling A, in the briefings' words: the drop page has the full ruling. */
+const arbiterWhy = (dropId: string): ReviewWhy => {
+  const did =
+    "a Fable arbiter weighed every reviewer's findings against the code after the refutes ran " +
+    `out, and ruled it complete, unambiguous and safe to implement (full ruling: /drops/${dropId}).`;
+  return { found: 'A Fable arbiter found nothing to fix in', reviewed: did, held: did };
+};
+
+type ArbitrateWork = Extract<CrewInputJson['work'], { role: 'arbitrate' }>;
+
+/** The crew issue an arbitration judged, if it is still staged with the text judged. */
+function judgedIssue(db: Db, work: ArbitrateWork): CrewIssue | undefined {
+  const issue = getCrewIssue(db, work.crewIssueId);
+  return issue && issue.state === 'staged' && issue.bodySha === work.basis ? issue : undefined;
+}
+
+/**
+ * An arbitrate drop that came to nothing (rate-limited, failed, invalid output): its arbitration
+ * is `failed` with the reason and, if the issue still reads as judged, Command is asked as before.
+ * Fails closed: nothing is promoted.
+ */
+function arbitrationFailed(
+  db: Db,
+  deps: ResultDeps,
+  drop: Drop,
+  work: ArbitrateWork,
+  reason: string,
+  now: Date,
+): void {
+  const row = getArbitrationByDrop(db, drop.id);
+  if (!row || !settleArbitration(db, row.id, { state: 'failed', reason }, now)) return;
+  const issue = judgedIssue(db, work);
+  if (issue) raiseRefuteExhausted(db, deps.zone, issue, now);
+}
+
+/**
+ * An arbiter's ruling on a crew issue that ran out of refutes. Settled once, from `pending` only. A
+ * ruling on a text that changed (or an issue no longer staged) is discarded. It acts only on a
+ * ruling A or B that is reversible, is not a product question, and ran on Fable as the server
+ * recorded it: A promotes as a passing refute would, B rejects. Anything else is put to Command,
+ * with the reason in the briefing's why. Returns a note for the drop's log, if any.
+ */
+export function applyIssueArbitration(
+  db: Db,
+  deps: ResultDeps,
+  drop: Drop,
+  work: ArbitrateWork,
+  out: CrewOutput['arbitrate'],
+  now: Date,
+): string | undefined {
+  const row = getArbitrationByDrop(db, drop.id);
+  if (!row || row.state !== 'pending') return 'ruling not applied: its arbitration is settled';
+  const issue = judgedIssue(db, work);
+  if (!issue) {
+    const reason = 'the issue changed or moved on since it was asked';
+    settleArbitration(db, row.id, { state: 'discarded', reason }, now);
+    return `ruling discarded: ${reason}`;
+  }
+  // What the server recorded about the run, never what the agent says it ran on.
+  const recorded = getDrop(db, drop.id) ?? drop;
+  const reason =
+    out.ruling === 'insufficient_evidence'
+      ? 'insufficient evidence'
+      : !out.reversible
+        ? 'not reversible'
+        : out.productQuestion
+          ? 'a product question'
+          : // No claude config: nothing says what Fable is here, so it fails closed.
+            !deps.claude || !ranOnFable({ claude: deps.claude }, recorded)
+            ? 'did not run on Fable'
+            : undefined;
+  const acts = reason === undefined;
+  const settled = settleArbitration(
+    db,
+    row.id,
+    {
+      state: 'ruled',
+      ruling: out.ruling,
+      acted: acts,
+      because: out.because,
+      instruction: out.instruction,
+      ...(reason !== undefined ? { reason } : {}),
+    },
+    now,
+  );
+  if (!settled) return undefined;
+  if (!acts) {
+    raiseRefuteExhausted(db, deps.zone, issue, now);
+    return `ruling ${out.ruling} not acted on: ${reason}`;
+  }
+  const base = { refutedSha: issue.bodySha };
+  if (out.ruling === 'A') {
+    promoteAfterReview(db, deps, issue, base, arbiterWhy(drop.id), now);
+  } else {
+    setCrewIssue(db, issue.id, { ...base, state: 'rejecting' }, now);
+  }
+  return undefined;
 }
 
 /**
@@ -305,6 +433,8 @@ export async function applyCrewResult(
     const failed = (error: string) => {
       if (role === 'triage' && work?.role === 'triage') {
         triageFailed(db, deps, work.requestId, error, now);
+      } else if (role === 'arbitrate' && work?.role === 'arbitrate') {
+        arbitrationFailed(db, deps, drop, work, error, now);
       }
     };
     if (result.status === 'rate_limited') {
@@ -340,6 +470,12 @@ export async function applyCrewResult(
     } else if (role === 'triage' && work?.role === 'triage') {
       const out = parsed.value as CrewOutput['triage'];
       const note = applyTriage(db, deps, drop, work.requestId, out, now);
+      return finish(db, drop, 'succeeded', now, note);
+    } else if (role === 'arbitrate' && work?.role === 'arbitrate') {
+      // Kept on the drop: its page is where the full ruling is read.
+      updateDrop(db, drop.id, { resultJson: JSON.stringify(result) });
+      const out = parsed.value as CrewOutput['arbitrate'];
+      const note = applyIssueArbitration(db, deps, drop, work, out, now);
       return finish(db, drop, 'succeeded', now, note);
     } else if (role === 'diagnose' && work?.role === 'diagnose') {
       const discarded = applyDiagnose(db, work, parsed.value as CrewOutput['diagnose'], now);

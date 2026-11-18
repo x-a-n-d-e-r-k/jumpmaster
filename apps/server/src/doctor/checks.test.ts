@@ -595,6 +595,7 @@ describe('forge checks', () => {
           refutePromotes: false,
           maxRefute: 2,
           maxTriage: 2,
+          arbiter: true,
         },
         protectedPaths: ['GOAL.md'],
       },
@@ -860,6 +861,7 @@ describe('zone checks', () => {
       refutePromotes: false,
       maxRefute: 2,
       maxTriage: 2,
+      arbiter: true,
     };
     expect((await world().run()).some((c) => c.id === 'zone.crew-cap')).toBe(false);
     const w = world({ zone: { crew, protectedPaths: ['GOAL.md'] } });
@@ -879,6 +881,32 @@ describe('zone checks', () => {
       summary: expect.stringContaining('daily cap 2/2 until 2026-11-10T07:00:00.000Z'),
     });
     expect(one(checks, 'zone.goals')).toMatchObject({ status: 'warn' });
+  });
+
+  test('zone.crew-cap counts every crew role as crewDropsToday does: an arbitrate drop dates the cap (D5)', async () => {
+    const crew = {
+      enabled: true,
+      goalPath: 'GOAL.md',
+      cycleMinutes: 60,
+      maxDropsPerDay: 2,
+      stagedLabel: 'agent-staged',
+      maxStaged: 3,
+      refutePromotes: false,
+      maxRefute: 2,
+      maxTriage: 2,
+      arbiter: true,
+    };
+    const w = world({ zone: { crew, protectedPaths: ['GOAL.md'] } });
+    w.f.state.labels.push('agent-staged');
+    for (const [id, role, at] of [
+      ['c1', 'arbitrate', ago(5 * 3_600_000)],
+      ['c2', 'crew-lead', ago(3_600_000)],
+    ] as const)
+      insertDrop(w.db, { id, dropZoneId: 'main', workItemId: null, role, state: 'succeeded' }, at);
+    expect(one(await w.run(), 'zone.crew-cap')).toMatchObject({
+      status: 'warn',
+      summary: expect.stringContaining('daily cap 2/2 until 2026-11-10T07:00:00.000Z'),
+    });
   });
 
   test('zone.identity passes for two bot identities', async () => {

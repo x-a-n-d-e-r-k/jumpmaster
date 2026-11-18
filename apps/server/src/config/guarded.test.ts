@@ -168,6 +168,12 @@ describe('guarded scalar paths', () => {
       { crew: { refutePromotes: true } },
       'A crew refute in web will be able to promote a staged issue to ready',
     ],
+    [
+      'crew.arbiter',
+      { crew: { arbiter: false } },
+      { crew: { arbiter: true } },
+      'A Fable arbiter in web will settle crew disagreements without asking you',
+    ],
   ];
 
   test.each(cases)(
@@ -192,6 +198,19 @@ describe('guarded scalar paths', () => {
     expect(paths(edit(off, on))).toEqual([at]);
     expect(paths(edit(on, off))).toEqual([]);
     // A config with no key already promotes: writing true over it, or the opt-out, asks nothing.
+    expect(paths(edit({}, on))).toEqual([]);
+    expect(paths(edit({}, off))).toEqual([]);
+    // Opting back in from an explicit false is guarded, whether written or by dropping the key.
+    expect(paths(edit(off, {}))).toEqual([at]);
+  });
+
+  test('crew.arbiter: false to true is guarded, true to false is not, and the default is true', () => {
+    const at = 'dropZones[web].crew.arbiter';
+    const off = { crew: { arbiter: false } };
+    const on = { crew: { arbiter: true } };
+    expect(paths(edit(off, on))).toEqual([at]);
+    expect(paths(edit(on, off))).toEqual([]);
+    // A config with no key already arbitrates: writing true over it, or the opt-out, asks nothing.
     expect(paths(edit({}, on))).toEqual([]);
     expect(paths(edit({}, off))).toEqual([]);
     // Opting back in from an explicit false is guarded, whether written or by dropping the key.
