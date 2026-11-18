@@ -1510,6 +1510,20 @@ it ([Claude token](#claude-token)).
 
 The declared plan, and whether a `fableModel` fits it ([Claude plan](#claude-plan)).
 
+### `chat.service`
+
+**Action:** Open Settings, Credentials (`/settings/credentials`) for a zone's line; the
+install-wide line points here.
+
+The crew chat's service answers and reaches both the Claude API and GitHub. With no chat service
+(`JM_CHAT_SERVICE_URL` unset, a compose file from before the chat), it warns with the command that
+adds it, run in the install directory:
+`curl -fSLO https://github.com/x-a-n-d-e-r-k/jumpmaster/releases/latest/download/compose.yaml && docker compose up -d`.
+A service that does not answer, or cannot reach Claude or GitHub, fails and names which;
+`docker compose logs chat` and `docker compose logs chat-egress` say why. A zone the chat can't read
+(a PAT zone with no read token) warns by name: the chat still answers about it, without its code
+([Read token](#read-token)).
+
 ### `control.kill`
 
 **Action:** Open the kill switch on home (`/`).

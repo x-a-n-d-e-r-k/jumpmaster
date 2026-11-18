@@ -102,6 +102,7 @@ export type DoctorAction = {
 export const CHECK_IDS = [
   'claude.plan',
   'claude.token-age',
+  'chat.service',
   'config.file',
   'config.listen',
   'config.restart',
@@ -206,7 +207,15 @@ export type DoctorDeps = {
     /** Whether each install-wide credential is set, for `credential.install`. */
     install?: { claudeToken: boolean; githubAuthorToken: boolean };
   };
+  /**
+   * The chat service's health (`ChatServiceClient.health`): null when it doesn't answer. Absent,
+   * the install has no chat service (`JM_CHAT_SERVICE_URL` unset: an older compose file).
+   */
+  chatHealth?: ChatHealth;
 };
+
+/** The chat service's `GET /healthz`: its own state and whether it reaches Claude and the forge. */
+export type ChatHealth = () => Promise<{ ok: boolean; claude: boolean; forge: boolean } | null>;
 
 /**
  * The install runbook as a full URL (on the install host there is no checkout), at the tag of the
@@ -828,6 +837,83 @@ function usageCheck(d: DoctorDeps): DoctorCheck {
  * The address other machines reach this server at (issue #139): unset is information, set and
  * answering `/healthz` a pass, set and not answering a warn with the Check button's words.
  */
+/**
+ * The one command that adds the chat service to an install whose compose file predates it: the
+ * release's compose file, fetched into the install directory, then brought up.
+ */
+export const ADD_CHAT_SERVICE = `curl -fSLO ${PROJECT_URL}/releases/latest/download/compose.yaml && docker compose up -d`;
+
+/**
+ * `chat.service` (#336): the chat service answers, and reaches both the Claude API and the forge.
+ * Without one, the chat page holds every message as `queued`.
+ */
+export async function chatServiceCheck(health: ChatHealth | undefined): Promise<DoctorCheck> {
+  const base = { id: 'chat.service', zoneId: null };
+  if (!health)
+    return {
+      ...base,
+      status: 'warn',
+      summary:
+        'no chat service is configured (JM_CHAT_SERVICE_URL is unset): the crew chat holds every message until one is added',
+      fix: `In the install directory, run: ${ADD_CHAT_SERVICE}`,
+    };
+  let h: Awaited<ReturnType<ChatHealth>>;
+  try {
+    h = await health();
+  } catch {
+    h = null;
+  }
+  if (!h)
+    return {
+      ...base,
+      status: 'fail',
+      summary: 'the chat service is not answering: the crew chat cannot run a turn',
+      fix: 'Run docker compose ps in the install directory; if chat is not running, docker compose up -d chat, and docker compose logs chat says why it stopped.',
+    };
+  const missing = [
+    ...(h.claude ? [] : ['Claude (api.anthropic.com)']),
+    ...(h.forge ? [] : ['GitHub']),
+  ];
+  if (missing.length > 0)
+    return {
+      ...base,
+      status: 'fail',
+      summary: `the chat service answers but can't reach ${missing.join(' or ')}: the crew chat cannot run a turn`,
+      fix: 'Check that chat-egress is running (docker compose ps) and that this host reaches api.anthropic.com and github.com; docker compose logs chat-egress shows refused connections.',
+    };
+  if (!h.ok)
+    return {
+      ...base,
+      status: 'fail',
+      summary: 'the chat service answers but reports it is not ready',
+      fix: 'docker compose logs chat says why; docker compose restart chat starts it again.',
+    };
+  return {
+    ...base,
+    status: 'pass',
+    summary: 'the chat service answers and reaches Claude and GitHub',
+  };
+}
+
+/**
+ * `chat.service` per zone (R3): the chat reads a zone's code with the read token, or the reviewer
+ * app's token in an app-reviewer zone, never the author's. A zone with neither still chats, without
+ * its code. Only said when there is a chat service; a zone that can be read gets no line.
+ */
+function chatReadCheck(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck | null {
+  if (!d.chatHealth) return null;
+  const apps = d.resolvedApps?.();
+  if ((apps && isAppReviewerZone(zone, apps)) || d.config.secrets.githubReadToken) return null;
+  return {
+    id: 'chat.service',
+    zoneId: zone.id,
+    status: 'warn',
+    summary: `${zone.id}: no read token is configured, so the chat can't read ${zone.repo}'s code (it answers from Jumpmaster's own records only)`,
+    fix: `Create a fine-grained token for ${zone.repo} with Contents: Read-only (and Metadata), and store it as JM_GITHUB_READ_TOKEN (or JM_GITHUB_READ_TOKEN_FILE).`,
+    doc: doc('read-token'),
+  };
+}
+
 async function publicUrlCheck(d: DoctorDeps): Promise<DoctorCheck> {
   const base = {
     id: 'server.public-url',
@@ -2482,6 +2568,7 @@ export async function runChecks(
     g('claude.token-age', null, () => tokenAgeCheck(d)),
     g('claude.plan', null, () => planCheck(d)),
     g('control.kill', null, () => killCheck(d)),
+    g('chat.service', null, () => chatServiceCheck(d.chatHealth)),
     g('server.public-url', null, () => publicUrlCheck(d)),
     ...(d.imageMirror
       ? [
@@ -2514,5 +2601,6 @@ export async function runChecks(
   const zones = d.config.dropZones.filter((z) => opts.zoneId === undefined || z.id === opts.zoneId);
   const perZone = await Promise.all(zones.map((z) => zoneChecks(d, z, sticks)));
   const creds = d.credentials ? zones.flatMap((z) => credentialChecks(d, z)) : [];
-  return [...global, ...perZone.flat(), ...creds];
+  const chatReads = zones.flatMap((z) => chatReadCheck(d, z) ?? []);
+  return [...global, ...perZone.flat(), ...chatReads, ...creds];
 }
