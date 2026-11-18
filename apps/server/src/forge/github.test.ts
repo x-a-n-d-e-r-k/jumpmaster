@@ -1387,6 +1387,164 @@ describe('GitHubForge doctor reads', () => {
     });
   });
 
+  describe('repoAccess on an app forge (issue #305, spec §4.3)', () => {
+    const EXPIRES = '2026-12-01T10:00:00.000Z';
+    // Built at runtime so no token-shaped literal sits in the tracked file.
+    const ghs = ['ghs', 'LEAKEDTOKEN0001'.repeat(3)].join('_');
+    const jwt = ['eyJhbGciOiJSUzI1NiJ9', 'eyJpc3MiOiIxMDAifQ', 'c2lnbmF0dXJlc2ln'].join('.');
+    type Grant = () => Promise<{
+      permissions: Record<string, string>;
+      tokenExpiresAt: string | null;
+    }>;
+    const appForge = (grant?: Grant) =>
+      new GitHubForge('o', 'r', 'tok', {
+        identity: { kind: 'app', slug: 'jm-author', appId: '100', ...(grant ? { grant } : {}) },
+      });
+    /** `GET /repos` as an installation token sees it: every flag false, no scope or expiry header. */
+    const allFalseRepo = () =>
+      nock(api)
+        .get('/repos/o/r')
+        .reply(200, {
+          private: true,
+          default_branch: 'trunk',
+          owner: { login: 'o', type: 'Organization' },
+          permissions: { admin: false, maintain: false, push: false, triage: false, pull: false },
+        });
+    const grantOf =
+      (permissions: Record<string, string>, tokenExpiresAt: string | null = EXPIRES): Grant =>
+      async () => ({ permissions, tokenExpiresAt });
+
+    test("reports the installation's permissions, scopes null and the grant's expiry", async () => {
+      const order: string[] = [];
+      nock(api)
+        .get('/repos/o/r')
+        .reply(() => {
+          order.push('GET /repos');
+          return [
+            200,
+            {
+              private: true,
+              default_branch: 'trunk',
+              owner: { login: 'o', type: 'Organization' },
+              permissions: {
+                admin: false,
+                maintain: false,
+                push: false,
+                triage: false,
+                pull: false,
+              },
+            },
+          ];
+        });
+      const inner = grantOf({ contents: 'write', pull_requests: 'write', metadata: 'read' });
+      const grant: Grant = () => {
+        order.push('grant');
+        return inner();
+      };
+      expect(await appForge(grant).repoAccess()).toEqual({
+        private: true,
+        defaultBranch: 'trunk',
+        permissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
+        scopes: null,
+        tokenExpiresAt: EXPIRES,
+        ownerType: 'Organization',
+      });
+      // The forge's own token is fetched (and cached) before the grant reads its expiry.
+      expect(order).toEqual(['GET /repos', 'grant']);
+    });
+
+    test('contents: read gives pull alone; a null expiry stays null', async () => {
+      allFalseRepo();
+      const a = await appForge(grantOf({ contents: 'read' }, null)).repoAccess();
+      expect(a.permissions).toEqual({
+        admin: false,
+        maintain: false,
+        push: false,
+        triage: false,
+        pull: true,
+      });
+      expect(a.scopes).toBeNull();
+      expect(a.tokenExpiresAt).toBeNull();
+    });
+
+    test('issues: write gives triage; administration: write gives admin; maintain is never true', async () => {
+      allFalseRepo();
+      const a = await appForge(
+        grantOf({ issues: 'write', administration: 'write', contents: 'none' }),
+      ).repoAccess();
+      expect(a.permissions).toEqual({
+        admin: true,
+        maintain: false,
+        push: false,
+        triage: true,
+        pull: false,
+      });
+    });
+
+    test('an app forge without a grant rejects with the fixed message', async () => {
+      allFalseRepo();
+      const e = await appForge()
+        .repoAccess()
+        .then(
+          () => undefined,
+          (err: unknown) => err as Error,
+        );
+      expect(e).toBeInstanceOf(Error);
+      expect(e!.message).toBe("repoAccess needs the GitHub App's installation grant");
+      expect(e!.cause).toBeUndefined();
+      nock.cleanAll();
+    });
+
+    test("a failing grant rejects with the forge's own message: no token, JWT or cause", async () => {
+      allFalseRepo();
+      const grant: Grant = async () => {
+        throw new Error(`installation lookup failed for ${ghs} with Bearer ${jwt}`, {
+          cause: new Error(ghs),
+        });
+      };
+      const e = await appForge(grant)
+        .repoAccess()
+        .then(
+          () => undefined,
+          (err: unknown) => err as Error,
+        );
+      expect(e).toBeInstanceOf(Error);
+      expect(e!.message).toContain('o/r');
+      expect(e!.message).toContain('jm-author');
+      expect(e!.cause).toBeUndefined();
+      const text = [String(e), e!.message, e!.stack ?? '', JSON.stringify(e)].join('\n');
+      expect(text).not.toContain(ghs);
+      expect(text).not.toContain(jwt);
+      expect(text).not.toMatch(/ghs_|eyJ/);
+    });
+
+    test("a PAT forge's repoAccess is unchanged by the app path", async () => {
+      nock(api)
+        .get('/repos/o/r')
+        .reply(
+          200,
+          {
+            private: false,
+            default_branch: 'main',
+            owner: { login: 'o', type: 'User' },
+            permissions: { admin: true, maintain: true, push: true, triage: true, pull: true },
+          },
+          {
+            'x-oauth-scopes': 'repo',
+            'github-authentication-token-expiration': '2026-12-01 10:00:00 UTC',
+          },
+        );
+      expect(await new GitHubForge('o', 'r', 'tok').repoAccess()).toEqual({
+        private: false,
+        defaultBranch: 'main',
+        permissions: { admin: true, maintain: true, push: true, triage: true, pull: true },
+        scopes: ['repo'],
+        tokenExpiresAt: EXPIRES,
+        ownerType: 'User',
+      });
+    });
+  });
+
   test('ownerType reads the owner account, with no token at all for a forge without one', async () => {
     nock(api, { badheaders: ['authorization'] })
       .get('/users/octo-org')
