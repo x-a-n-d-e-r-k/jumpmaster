@@ -423,6 +423,8 @@ export const DiagnoseOutputSchema = z.strictObject({
   diagnosis: z.string().max(4000),
   recommendation: z.enum(['retry', 'leave_parked', 'needs_command']),
   detail: z.string().max(2000),
+  /** With `retry`: the one concrete change the next attempt must make. The server may act on it. */
+  instruction: z.string().min(1).max(2000).optional(),
 });
 export type DiagnoseOutput = z.infer<typeof DiagnoseOutputSchema>;
 

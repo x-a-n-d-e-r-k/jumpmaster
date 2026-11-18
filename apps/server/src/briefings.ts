@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { DropResultSchema } from '@jumpmaster/protocol';
+import { DropResultSchema, redact } from '@jumpmaster/protocol';
 import type { DropZoneConfig } from './config.js';
 import { applyCreditsEffect } from './credits.js';
 import { crewBodySha, liveCrewBody } from './crew/flush.js';
@@ -7,6 +7,7 @@ import {
   type CrewIssue,
   getArbitration,
   getCrewIssue,
+  getCrewRetry,
   issueArbitrationSubject,
   listCrewIssues,
   setCrewIssue,
@@ -29,6 +30,7 @@ import {
 import { enableFable } from './fable.js';
 import { GATE_PARK_PREFIXES, gateParkAllowable } from './flow/decide.js';
 import { gateDigest } from './flow/snapshot.js';
+import { serverScrubSet } from './forge/scrub-set.js';
 import { gateFailureWhy } from './gate-output.js';
 import {
   closeProposedGoalChange,
@@ -719,7 +721,8 @@ export async function applyPendingRulings(
  * briefing is diagnosed afresh. An item whose briefing was ruled is not briefed again until it
  * parks again or its gate park is judged afresh (a new head, merge base or change list), unless
  * the ruling was refused as out of date: then Command is asked again about what it is parked on.
- * A dismissed briefing counts as answered the same way.
+ * A dismissed briefing counts as answered the same way. An item with a crew retry recorded and not
+ * yet applied is not briefed: the crew is retrying it (#396).
  */
 export function syncParkBriefings(db: Db, zone: DropZoneConfig, now: Date): void {
   const parked = listWorkItems(db, zone.id, 'parked');
@@ -745,6 +748,9 @@ export function syncParkBriefings(db: Db, zone: DropZoneConfig, now: Date): void
     listBriefings(db, { zoneId: zone.id, state: 'open' }).map((b) => [b.subject, b]),
   );
   for (const item of parked) {
+    // The crew retries it on its own diagnosis (#396) once a pass applies it: not Command's yet.
+    const crewRetry = getCrewRetry(db, item.id);
+    if (crewRetry && crewRetry.appliedAt === null) continue;
     const subject = `item:${item.id}`;
     const want = parkBriefing(db, zone.id, item);
     const current = open.get(subject);
@@ -876,6 +882,25 @@ export function pendingDiagnoses(
   return pending;
 }
 
+/** The most of the crew's diagnosis a parked-again briefing quotes. */
+export const MAX_CREW_RETRY_DIAGNOSIS = 500;
+
+/**
+ * The parked-again why's opening (#396): when the crew retried the item, its diagnosis (cut) and
+ * what it told the next attempt. Agent-written, so redacted (the server's scrub set and token
+ * shapes); the page escapes it.
+ */
+function crewRetriedWhy(db: Db, itemId: number): string | undefined {
+  const r = getCrewRetry(db, itemId);
+  if (r?.outcome !== 'retried' || r.appliedAt === null) return undefined;
+  const secrets = [...serverScrubSet.values()];
+  // Redacted before it is cut, so a cut cannot leave part of a secret that no longer matches.
+  const full = redact(r.diagnosis, secrets);
+  const diagnosis =
+    full.length > MAX_CREW_RETRY_DIAGNOSIS ? `${full.slice(0, MAX_CREW_RETRY_DIAGNOSIS)}…` : full;
+  return `The crew already retried this once on ${r.appliedAt.slice(0, 10)}. Its diagnosis: ${diagnosis}. It told the next attempt: ${redact(r.instruction, secrets)}`;
+}
+
 /** The parked briefing the server raises for `item` now. */
 function parkBriefing(db: Db, zoneId: string, item: WorkItem): NewBriefing {
   const reason = item.reason ?? 'no reason recorded';
@@ -909,6 +934,12 @@ function parkBriefing(db: Db, zoneId: string, item: WorkItem): NewBriefing {
         prNumber: park.prNumber,
       });
     }
+  }
+  // A gate park keeps its own words: its decision is to read the diff, and its why is cut to fit.
+  const crewRetried = park ? undefined : crewRetriedWhy(db, item.id);
+  if (crewRetried !== undefined) {
+    decision = `Issue #${item.issueNumber} parked again after the crew retried it once. Retry it?`;
+    why = `${crewRetried}\n\n${why}`;
   }
   return {
     zoneId,

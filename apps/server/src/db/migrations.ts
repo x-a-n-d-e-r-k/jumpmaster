@@ -1355,6 +1355,26 @@ ALTER TABLE new_briefings RENAME TO briefings;
 CREATE UNIQUE INDEX briefings_open_subject ON briefings(zone_id, subject) WHERE state = 'open';
 `;
 
+/**
+ * #396: a crew retry of a parked item, on its own diagnosis. `UNIQUE (item_id)` is the cap: one
+ * crew retry per work item, ever. Recorded in the diagnose result's transaction, applied (claimed
+ * by `applied_at`) by the next active pass.
+ */
+const V47_SQL = `
+CREATE TABLE crew_retries (
+  id           INTEGER PRIMARY KEY,
+  zone_id      TEXT NOT NULL,
+  item_id      INTEGER NOT NULL UNIQUE REFERENCES work_items(id),
+  briefing_id  INTEGER NOT NULL REFERENCES briefings(id),
+  drop_id      TEXT NOT NULL,
+  diagnosis    TEXT NOT NULL,
+  instruction  TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  applied_at   TEXT,
+  outcome      TEXT CHECK (outcome IN ('retried', 'skipped'))
+);
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1402,6 +1422,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 44, sql: V44_SQL },
   { version: 45, sql: V45_SQL },
   { version: 46, sql: V46_SQL, foreignKeysOff: true },
+  { version: 47, sql: V47_SQL },
 ];
 
 /**

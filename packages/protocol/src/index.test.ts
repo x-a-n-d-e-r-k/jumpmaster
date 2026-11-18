@@ -294,6 +294,32 @@ describe('crew roles', () => {
     ).toBe(false);
   });
 
+  test('a diagnose instruction is accepted with every recommendation, refused empty or over 2000 characters (#396)', () => {
+    const base = { diagnosis: 'd', detail: '' };
+    for (const recommendation of ['retry', 'leave_parked', 'needs_command'] as const) {
+      expect(
+        parseCrewOutput('diagnose', { ...base, recommendation, instruction: 'Fix the test.' }).ok,
+      ).toBe(true);
+    }
+    expect(
+      parseCrewOutput('diagnose', {
+        ...base,
+        recommendation: 'retry',
+        instruction: 'x'.repeat(2000),
+      }).ok,
+    ).toBe(true);
+    expect(
+      parseCrewOutput('diagnose', { ...base, recommendation: 'retry', instruction: '' }).ok,
+    ).toBe(false);
+    expect(
+      parseCrewOutput('diagnose', {
+        ...base,
+        recommendation: 'retry',
+        instruction: 'x'.repeat(2001),
+      }).ok,
+    ).toBe(false);
+  });
+
   describe('TriageOutputSchema', () => {
     const child = {
       key: 'hide-gauge',

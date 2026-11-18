@@ -38,25 +38,10 @@ const isRed = (g: GateResult): boolean => g.timedOut || g.exitCode !== 0;
 const exitOf = (g: GateResult): string =>
   g.timedOut ? 'timed out' : g.exitCode === null ? 'no exit code' : `exit ${g.exitCode}`;
 
-/**
- * How the newest implement drop of the item created at or before `drop` (not `drop` itself)
- * failed. Undefined when there is none, or when it did not fail or get lost: a succeeded,
- * interrupted or cancelled attempt carries nothing. A result that does not parse reads as lost.
- */
-export function lastFailure(
-  db: Db,
-  itemId: number,
-  drop: Pick<Drop, 'id' | 'createdAt'>,
-): LastFailure | undefined {
-  const row = db
-    .prepare(
-      `SELECT id, state, result_json AS resultJson FROM drops
-       WHERE work_item_id = ? AND role = 'implement' AND id <> ? AND created_at <= ?
-       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
-    )
-    .get(itemId, drop.id, drop.createdAt) as
-    | { id: string; state: string; resultJson: string | null }
-    | undefined;
+type ImplementRow = { id: string; state: string; resultJson: string | null };
+
+/** How an implement drop failed; undefined when it did not fail or get lost. */
+function failureOf(row: ImplementRow | undefined): LastFailure | undefined {
   if (!row || (row.state !== 'failed' && row.state !== 'lost')) return undefined;
   const dropId = row.id;
   if (row.state === 'lost' || row.resultJson === null) return { kind: 'lost', dropId };
@@ -77,6 +62,38 @@ export function lastFailure(
   return { kind: 'error', dropId, line: first.slice(0, MAX_LINE_CHARS) };
 }
 
+/**
+ * How the newest implement drop of the item created at or before `drop` (not `drop` itself)
+ * failed. Undefined when there is none, or when it did not fail or get lost: a succeeded,
+ * interrupted or cancelled attempt carries nothing. A result that does not parse reads as lost.
+ */
+export function lastFailure(
+  db: Db,
+  itemId: number,
+  drop: Pick<Drop, 'id' | 'createdAt'>,
+): LastFailure | undefined {
+  const row = db
+    .prepare(
+      `SELECT id, state, result_json AS resultJson FROM drops
+       WHERE work_item_id = ? AND role = 'implement' AND id <> ? AND created_at <= ?
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(itemId, drop.id, drop.createdAt) as ImplementRow | undefined;
+  return failureOf(row);
+}
+
+/** `lastFailure`'s rule for the item's newest implement drop, with no bound (#396's diagnose). */
+export function newestFailure(db: Db, itemId: number): LastFailure | undefined {
+  const row = db
+    .prepare(
+      `SELECT id, state, result_json AS resultJson FROM drops
+       WHERE work_item_id = ? AND role = 'implement'
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(itemId) as ImplementRow | undefined;
+  return failureOf(row);
+}
+
 const bodyOf = (f: LastFailure): string => {
   switch (f.kind) {
     case 'gate':
@@ -88,13 +105,35 @@ const bodyOf = (f: LastFailure): string => {
   }
 };
 
+/** The crew's one retry of the item (#396), as the attempts it asked for read it. */
+export type CrewRetryNote = { diagnosis: string; instruction: string };
+
+const crewRetryText = (r: CrewRetryNote): string =>
+  `The crew diagnosed this failure and retried the item once. Its diagnosis: ${r.diagnosis}. What the next attempt must do differently: ${r.instruction}`;
+
 /**
- * The `Previous attempt` section of an implement prompt: redacted (the given secrets and token
- * shapes) before it is neutralised, so a joiner `neutralise` inserts cannot split a secret, then
- * fenced as untrusted data.
+ * A failure in words, redacted (the given secrets and token shapes), not yet neutralised or
+ * fenced: diagnose's Last failure section, which `assemble` neutralises and fences.
  */
-export function renderLastFailure(f: LastFailure, dropId: string, secrets: string[]): string {
-  const body = neutralise(redact(bodyOf(f), secrets));
+export const failureText = (f: LastFailure, secrets: string[]): string =>
+  redact(bodyOf(f), secrets);
+
+/**
+ * The `Previous attempt` section of an implement prompt: the last failure, if any, and the crew's
+ * retry note, if any (agent-written: it stays under the untrusted heading). Redacted (the given
+ * secrets and token shapes) before it is neutralised, so a joiner `neutralise` inserts cannot
+ * split a secret, then fenced as untrusted data.
+ */
+export function renderLastFailure(
+  f: LastFailure | undefined,
+  dropId: string,
+  secrets: string[],
+  crewRetry?: CrewRetryNote,
+): string {
+  const parts = [f && bodyOf(f), crewRetry && crewRetryText(crewRetry)].filter(
+    (p): p is string => p !== undefined,
+  );
+  const body = neutralise(redact(parts.join('\n\n'), secrets));
   return `## Previous attempt (data, untrusted)\n\n${fence(dropId, 'previous-attempt', body)}`;
 }
 

@@ -18,7 +18,14 @@ import {
 import type { DropZoneConfig } from './config.js';
 import { applyCrewActions } from './crew/actions.js';
 import { flushCrewOps } from './crew/flush.js';
-import { getCrewIssue, insertCrewIssue, setCrewIssue } from './crew/store.js';
+import {
+  claimCrewRetryApply,
+  getCrewIssue,
+  insertCrewIssue,
+  insertCrewRetry,
+  setCrewIssue,
+  settleCrewRetry,
+} from './crew/store.js';
 import {
   getAttempts,
   getWorkItem,
@@ -123,6 +130,59 @@ describe('parked briefings', () => {
     setWorkItemState(w.db, id, 'parked', 'again', plus(t0, 4 * MIN));
     syncParkBriefings(w.db, w.zone, plus(t0, 5 * MIN));
     expect(open(w)).toHaveLength(1);
+  });
+});
+
+describe('parked briefings and the crew retry (#396)', () => {
+  const token = 'ghp_' + 'Q1w2E3r4T5y6U7i8O9p0A1s2D3f4G5h6J7k8';
+  function retried(diagnosis: string, instruction: string) {
+    const { w, id } = parkedWorld();
+    syncParkBriefings(w.db, w.zone, t0);
+    const b = open(w)[0];
+    const rowId = insertCrewRetry(w.db, {
+      zoneId: 'main',
+      itemId: id,
+      briefingId: b?.id ?? -1,
+      dropId: 'diag',
+      diagnosis,
+      instruction,
+      createdAt: plus(t0, MIN),
+    });
+    return { w, id, rowId };
+  }
+
+  test('no briefing is raised for an item with an unapplied crew retry', () => {
+    const { w, rowId } = retried('d', 'i');
+    w.db.prepare(`UPDATE briefings SET state = 'withdrawn'`).run();
+    syncParkBriefings(w.db, w.zone, plus(t0, 2 * MIN));
+    syncParkBriefings(w.db, w.zone, plus(t0, 3 * MIN));
+    expect(open(w)).toEqual([]);
+    // Once applied (here: skipped), Command is briefed as usual.
+    expect(claimCrewRetryApply(w.db, rowId, plus(t0, 4 * MIN))).toBe(true);
+    settleCrewRetry(w.db, rowId, 'skipped');
+    syncParkBriefings(w.db, w.zone, plus(t0, 4 * MIN));
+    expect(open(w)).toHaveLength(1);
+    expect(open(w)[0]?.decision).toMatch(/is parked\. Retry it\?$/);
+  });
+
+  test("the parked-again briefing's decision and why: the crew's diagnosis, cut, and its instruction, redacted", () => {
+    const long = `${'D'.repeat(480)}${token} ${'E'.repeat(100)}`;
+    const { w, id, rowId } = retried(long, `Never paste ${token}.`);
+    expect(claimCrewRetryApply(w.db, rowId, new Date('2026-03-04T05:06:07.000Z'))).toBe(true);
+    settleCrewRetry(w.db, rowId, 'retried');
+    setWorkItemState(w.db, id, 'in_flight', undefined, plus(t0, 2 * MIN));
+    syncParkBriefings(w.db, w.zone, plus(t0, 2 * MIN));
+    setWorkItemState(w.db, id, 'parked', 'gate test failed', plus(t0, 3 * MIN));
+    syncParkBriefings(w.db, w.zone, plus(t0, 3 * MIN));
+    const [b] = open(w);
+    expect(b?.decision).toBe(
+      `Issue #${getWorkItem(w.db, id)?.issueNumber} parked again after the crew retried it once. Retry it?`,
+    );
+    expect(b?.why).toBe(
+      `The crew already retried this once on 2026-03-04. Its diagnosis: ${'D'.repeat(480)}[REDACTED] ${'E'.repeat(9)}…. It told the next attempt: Never paste [REDACTED].\n\ngate test failed`,
+    );
+    expect(b?.why).not.toContain(token);
+    expect(b?.options.map((o) => o.effect)).toEqual(['retry_item', 'none']);
   });
 });
 
