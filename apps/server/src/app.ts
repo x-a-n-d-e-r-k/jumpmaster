@@ -70,6 +70,7 @@ import {
   type TailscaleDeps,
 } from './reach.js';
 import { AppManifestStore } from './setup/app-manifest-state.js';
+import { registerGitHubAppInstalledRoutes } from './setup/github-app-installed.js';
 import { registerGitHubAppRoutes } from './setup/github-app-routes.js';
 import { buildStatus } from './status.js';
 import { lastSyncResult } from './sync.js';
@@ -345,6 +346,13 @@ export function createApp(
       ...(deps.appManifestFetch ? { fetch: deps.appManifestFetch } : {}),
       ...(deps.appManifestApiBase ? { apiBase: deps.appManifestApiBase } : {}),
       ...(deps.scrub ? { scrub: deps.scrub } : {}),
+    });
+    // After an install (§4.1, §4.2): GitHub's setup_url page, and discovery of each zone's ids.
+    registerGitHubAppInstalledRoutes(app, {
+      store: deps.config,
+      log: deps.log ?? (() => {}),
+      ...(deps.appBrokers ? { appBrokers: deps.appBrokers } : {}),
+      ...(deps.resolvedApps ? { resolvedApps: deps.resolvedApps } : {}),
     });
     // Settings: Credentials (Task 9), Install, MCP tokens and History (Task 13).
     registerSettingsPages(app, {

@@ -77,7 +77,10 @@ export function routeClass(path: string): RouteClass {
     path === '/setup/passphrase' ||
     // GitHub's redirect after creating an app comes without the Strict session cookie: the
     // callback only consumes the state and redeems the code; Finish (a page) saves the app.
-    path === '/setup/github-app/callback'
+    path === '/setup/github-app/callback' ||
+    // GitHub's setup_url redirect after an install, likewise without the cookie: it only renders
+    // a same-origin form to the discovery page, and never reads the query.
+    path === '/setup/github-app/installed'
   )
     return 'auth';
   return 'page';
