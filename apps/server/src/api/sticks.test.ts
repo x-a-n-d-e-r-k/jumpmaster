@@ -30,6 +30,7 @@ import {
   insertDrop,
   listEvents,
   reclaimableDropFor,
+  removeStick,
   reserveGrant,
   type Stick,
   setAttempts,
@@ -541,6 +542,27 @@ describe('stick API', () => {
     expect(res.status).toBe(200);
     expect(((await res.json()) as { dropId: string }).dropId).toBe('late');
     expect(Date.now() - started).toBeGreaterThanOrEqual(150);
+  });
+
+  test('a stick removed while its lease poll is open gets 401 on the next round, and no drop (issue #255)', async () => {
+    const { db, wi } = setup({ queued: false, leaseWaitMs: 5000, leasePollMs: 20 });
+    const { stickId, stickToken } = await enroll();
+    const pending = lease(stickToken);
+    await new Promise((r) => setTimeout(r, 50));
+    removeStick(db, stickId, t0);
+    insertDrop(db, {
+      id: 'late',
+      dropZoneId: 'main',
+      workItemId: wi.id,
+      role: 'implement',
+      state: 'queued',
+      createdAt: t0.toISOString(),
+    });
+    const res = await pending;
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: 'unauthorized' });
+    expect(res.body).not.toContain('claude-secret');
+    expect(getDrop(db, 'late')).toMatchObject({ state: 'queued', stickId: null, epoch: 0 });
   });
 
   test('lease for a drop whose zone is not configured releases it back to queued', async () => {

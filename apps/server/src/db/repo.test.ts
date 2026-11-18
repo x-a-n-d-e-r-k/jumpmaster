@@ -32,6 +32,7 @@ import {
   markMinted,
   markZoneStopping,
   type NewDrop,
+  removeStick,
   reserveGrant,
   resetAttempts,
   revokeGrants,
@@ -213,6 +214,51 @@ describe('sticks', () => {
     insertStick(db, { id: 's1', name: 'box', tokenHash: 'h', slots: 2 });
     expect(getStickByTokenHash(db, 'h')).toMatchObject({ id: 's1', name: 'box', slots: 2 });
     expect(getStickByTokenHash(db, 'zz')).toBeUndefined();
+  });
+});
+
+describe('removeStick (issue #255)', () => {
+  test("ends the lease of every leased drop of the stick at once, and leaves another stick's alone", () => {
+    const now = new Date('2026-03-01T00:00:00.000Z');
+    const later = new Date(now.getTime() + 60_000).toISOString();
+    insertStick(db, { id: 'sa', name: 'a', tokenHash: 'ha', slots: 2 });
+    insertStick(db, { id: 'sb', name: 'b', tokenHash: 'hb', slots: 2 });
+    const other = upsertWorkItem(db, {
+      dropZoneId: 'main',
+      issueNumber: 8,
+      title: 't',
+      body: 'b',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: '2026-01-01T00:00:00Z',
+    }).id;
+    insertDrop(db, drop('da'));
+    insertDrop(db, drop('db', { workItemId: other }));
+    // Leased as leaseNextDrop leaves it: started_at is stamped at lease time.
+    for (const [id, stick] of [
+      ['da', 'sa'],
+      ['db', 'sb'],
+    ] as const)
+      updateDrop(db, id, {
+        state: 'leased',
+        stickId: stick,
+        leaseExpiresAt: later,
+        startedAt: now.toISOString(),
+      });
+    expect(removeStick(db, 'sa', now)?.id).toBe('sa');
+    expect(new Date(getDrop(db, 'da')!.leaseExpiresAt!).getTime()).toBeLessThan(now.getTime());
+    expect(getDrop(db, 'db')!.leaseExpiresAt).toBe(later);
+  });
+
+  test('leaves a running drop to the lost-stick path', () => {
+    const now = new Date('2026-03-01T00:00:00.000Z');
+    const later = new Date(now.getTime() + 60_000).toISOString();
+    insertStick(db, { id: 'sa', name: 'a', tokenHash: 'ha', slots: 2 });
+    insertDrop(db, drop('dr'));
+    updateDrop(db, 'dr', { state: 'running', stickId: 'sa', leaseExpiresAt: later });
+    removeStick(db, 'sa', now);
+    expect(getDrop(db, 'dr')).toMatchObject({ state: 'running', leaseExpiresAt: later });
   });
 });
 

@@ -130,3 +130,32 @@ describe('a stick starting up on /sticks (issue #157)', () => {
     expect(html).toContain('<span class="stage">Live</span>');
   });
 });
+
+describe('the Remove confirmation (issue #255)', () => {
+  test('says the stick keeps its credentials and a join-token stick can enroll again', () => {
+    const html = renderSticks({
+      sticks: [
+        {
+          id: 's1',
+          name: 'vps-1',
+          version: '0.4.0',
+          lastSeenAt: t0.toISOString(),
+          capabilities: [],
+          imagePolicy: 'signed',
+          cannotRun: [],
+          slots: 1,
+          maxSlots: 4,
+          reported: true,
+          running: 0,
+        },
+      ],
+      zones: [],
+      now: t0,
+    });
+    const ask = /data-ask="([^"]*)"/.exec(html)?.[1] ?? '';
+    const text = ask.replaceAll('&#39;', "'").replaceAll('&#x27;', "'").replaceAll('&apos;', "'");
+    expect(text).toContain(
+      "This stick keeps any credentials it was already sent. Rotate the Claude and GitHub tokens if you don't trust it. A stick that enrolled with the join token can enroll again until that token is changed.",
+    );
+  });
+});
