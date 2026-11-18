@@ -495,6 +495,7 @@ describe('the ultra plan (#144)', () => {
       w.db,
       { seven_day_fable: { utilization: 0.42 }, seven_day_opus: { utilization: 0.3 } },
       t0,
+      null,
     );
     const floor = (await w.get('/')).body;
     expect(floor).not.toContain('<span>5-hour</span>');

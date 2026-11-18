@@ -1139,6 +1139,15 @@ CREATE TABLE chat_messages (
 );
 `;
 
+/**
+ * v40: the model of the drop that reported each usage window (#377). A per-model window such as
+ * `seven_day_overage_included` does not name its model; the drop's model does. NULL on rows
+ * stored before.
+ */
+const V40_SQL = `
+ALTER TABLE usage_windows ADD COLUMN model TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1179,6 +1188,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 37, sql: V37_SQL },
   { version: 38, sql: V38_SQL, foreignKeysOff: true },
   { version: 39, sql: V39_SQL },
+  { version: 40, sql: V40_SQL },
 ];
 
 /**
