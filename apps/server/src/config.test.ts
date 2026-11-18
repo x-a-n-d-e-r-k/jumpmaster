@@ -461,6 +461,28 @@ describe('loadConfig', () => {
   });
 });
 
+describe('authorLoginAliases (issue #284)', () => {
+  test('defaults to an empty list', () => {
+    expect(loadConfig(minimal, fullEnv).dropZones[0]?.authorLoginAliases).toEqual([]);
+    const z = loadConfig(withZone({ authorLoginAliases: ['old-bot', 'app-slug[bot]'] }), fullEnv);
+    expect(z.dropZones[0]?.authorLoginAliases).toEqual(['old-bot', 'app-slug[bot]']);
+  });
+
+  test.each(['a b', `ghp_${'a'.repeat(36)}`])(
+    'a bad entry is refused without being echoed',
+    (bad) => {
+      let message = '';
+      try {
+        loadConfig(withZone({ authorLoginAliases: [bad] }), fullEnv);
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message).toMatch(/authorLoginAliases/);
+      expect(message).not.toContain(bad);
+    },
+  );
+});
+
 describe('crew config', () => {
   test('crew defaults keep a zone off, with botLogins empty', () => {
     const z = loadConfig(minimal, fullEnv).dropZones[0];
@@ -1408,6 +1430,7 @@ describe('githubApp (spec §4.2: installation and repository ids, not secret)', 
         maxTriage: 2,
       },
       botLogins: [],
+      authorLoginAliases: [],
     });
     // The loaded file of an existing install, too.
     expect(loadConfig(minimal, fullEnv).dropZones[0]).not.toHaveProperty('githubApp');

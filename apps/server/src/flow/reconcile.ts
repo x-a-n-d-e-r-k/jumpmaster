@@ -62,7 +62,7 @@ import {
   reservationReason,
   type Snapshot,
 } from './decide.js';
-import { buildSnapshot, recordGateParkOf, type ZonePass } from './snapshot.js';
+import { buildSnapshot, loginIn, recordGateParkOf, type ZonePass } from './snapshot.js';
 
 export type ReconcileReport = { actions: number; merges: number };
 
@@ -88,7 +88,7 @@ const parkReason = (db: Db, itemId: number, reason: string, now: Date): void =>
 
 const handOpened = (n: number): string => `hand-opened PR on agent branch: #${n}`;
 
-/** Step 2: adopt open agent PRs (author, same repo, server marker) for items that lost track. */
+/** Step 2: adopt open agent PRs (an author login, same repo, marker or listing) for lost items. */
 async function adopt(
   db: Db,
   forges: ForgePair,
@@ -97,7 +97,6 @@ async function adopt(
   pulls: PullFacts[],
   now: Date,
 ): Promise<number> {
-  const authorLogin = pass.botLogins[0];
   const items = listWorkItems(db, zone.id);
   const refuse = (detail: string) =>
     recordObservation(db, zone.id, null, 'adopt_refused', detail, now);
@@ -108,7 +107,7 @@ async function adopt(
     seen.add(pr.number);
     const n = agentIssue(pr.headRef);
     if (n === null || pr.headSha === null) continue;
-    if (pr.author !== authorLogin) {
+    if (!loginIn(pr.author, pass.authorLogins)) {
       if (listed(pr.number))
         refuse(`#${pr.number} is authored by ${pr.author}, not the author account`);
       continue;
@@ -155,7 +154,7 @@ async function resume(
   now: Date,
   unknown: Set<number>,
   pulls: PullFacts[],
-  authorLogin: string | undefined,
+  authorLogins: readonly string[],
 ): Promise<number> {
   let acted = 0;
   const observing = getZoneMode(db, zone.id, zone.mode) === 'observe';
@@ -184,7 +183,7 @@ async function resume(
     // `adopt` already took any PR with the server's marker, so an open one here isn't ours.
     const foreign = pulls.find((p) => p.headRef === agentBranch(item.issueNumber));
     const vouched =
-      foreign && foreign.author === authorLogin && zone.adoptPulls.includes(foreign.number);
+      foreign && loginIn(foreign.author, authorLogins) && zone.adoptPulls.includes(foreign.number);
     if (foreign && !isServerPrBody(foreign.body, item.id) && !vouched) {
       if (observing) {
         recordObservation(db, zone.id, item.id, 'would_park', handOpened(foreign.number), now);
@@ -526,7 +525,7 @@ export async function reconcileZone(
     now,
     branchUnknown,
     pulls,
-    pass.botLogins[0],
+    pass.authorLogins,
   );
 
   for (const listed of listWorkItems(db, zone.id, 'pr_open')) {

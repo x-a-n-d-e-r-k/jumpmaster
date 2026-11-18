@@ -49,7 +49,12 @@ import {
 
 /** Read once per zone per pass and shared by the parked-item sync and the reconciler. */
 export type ZonePass = {
-  /** `[authorLogin, reviewerLogin]`, in that order; `[authorLogin]` alone in starter mode. */
+  /**
+   * The logins whose agent-branch PRs are the author's (spec §4.3): the author's own login first,
+   * then the zone's `authorLoginAliases`, duplicates removed case-insensitively.
+   */
+  authorLogins: string[];
+  /** `[...authorLogins, reviewerLogin]`, the author's first; `authorLogins` alone in starter mode. */
   botLogins: string[];
   requiredChecks: string[];
   protectionProblems: string[] | null;
@@ -93,8 +98,10 @@ export async function zonePass(
     );
   const codeownersText = ownersRequired ? await readCodeowners(forges, baseBranch) : undefined;
   if (ownersRequired) noteCodeownersRead(zone.id, codeownersText !== undefined);
+  const authorLogins = uniqueLogins([authorLogin, ...(zone.authorLoginAliases ?? [])]);
   return {
-    botLogins: reviewerLogin === null ? [authorLogin] : [authorLogin, reviewerLogin],
+    authorLogins,
+    botLogins: reviewerLogin === null ? authorLogins : [...authorLogins, reviewerLogin],
     requiredChecks: authorRules.kind === 'ok' ? authorRules.rules.requiredChecks : [],
     protectionProblems: branchProtectionProblems(
       { author: authorRules, reviewer: reviewerRules },
@@ -107,6 +114,23 @@ export async function zonePass(
       },
     ),
   };
+}
+
+/** `logins` in order, keeping the first of any that differ only in case. */
+function uniqueLogins(logins: string[]): string[] {
+  const seen = new Set<string>();
+  return logins.filter((l) => {
+    const key = l.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** Whether `login` is one of `logins`, compared case-insensitively as GitHub compares logins. */
+export function loginIn(login: string, logins: readonly string[]): boolean {
+  const key = login.toLowerCase();
+  return logins.some((l) => l.toLowerCase() === key);
 }
 
 /** Zones whose last CODEOWNERS read failed and was said: said once until a read succeeds. */
@@ -167,7 +191,7 @@ async function trustedReviews(
   bots: string[],
   markUnavailable: (method: string) => void,
 ): Promise<ForgeReview[]> {
-  const candidates = reviews.filter((r) => !bots.includes(r.author) && !r.body.includes('jm:op:'));
+  const candidates = reviews.filter((r) => !loginIn(r.author, bots) && !r.body.includes('jm:op:'));
   const trust = new Map<string, boolean>();
   for (const author of new Set(candidates.map((r) => r.author))) {
     try {
