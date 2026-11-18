@@ -219,6 +219,77 @@ describe('refute results', () => {
     expect(b).toMatchObject({ kind: 'promote', subject: `issue:${issue}` });
   });
 
+  test('a passing refute with refutePromotes off says what the review found and names the setting', async () => {
+    expect(w.zone.id).not.toBe('jm');
+    staged();
+    const id = await crewDrop();
+    await applyResult(w.db, deps(), id, completed({ decision: 'promote', findings: [] }), t0);
+    const [b] = listBriefings(w.db, { zoneId: 'main', state: 'open' });
+    expect(b?.kind).toBe('promote');
+    expect(b?.decision).toBe(
+      'A reviewer found nothing to fix in crew issue #40. Promote it so an agent can start?',
+    );
+    expect(b?.why).toBe(
+      'The crew filed crew issue #40 as staged, so no agent works on it yet. A second agent ' +
+        'reviewed it against the code and the spec, looking for criteria that are wrong, vague ' +
+        'or untestable, and found none. Promote gives it the ready label; Reject closes it. To ' +
+        'let a passing review promote on its own, with a notice you can still reject, set ' +
+        'crew.refutePromotes for this zone: ' +
+        `jumpmaster ctl zones set ${w.zone.id} crew.refutePromotes=true`,
+    );
+    expect(b?.options.map((o) => o.effect)).toEqual(['promote_issue', 'reject_issue']);
+  });
+
+  test('a passing refute with refutePromotes on says it becomes ready unless rejected', async () => {
+    const zone = { ...w.zone, crew: { ...crewOn, refutePromotes: true } };
+    staged();
+    const id = await crewDrop(t0, zone);
+    await applyResult(w.db, deps(zone), id, completed({ decision: 'promote', findings: [] }), t0);
+    const [b] = listBriefings(w.db, { zoneId: 'main', state: 'open' });
+    expect(b?.kind).toBe('promote_held');
+    expect(b?.decision).toBe(
+      'A reviewer found nothing to fix in crew issue #40. It becomes ready on the next pass ' +
+        'unless you reject it.',
+    );
+    expect(b?.why).toBe(
+      'The crew filed crew issue #40 as staged, and a second agent reviewed it against the code ' +
+        'and the spec and found nothing wrong, vague or untestable. This zone lets a passing ' +
+        'review promote (crew.refutePromotes is on), so you only need to act to stop it.',
+    );
+    expect(b?.why).not.toContain('jumpmaster ctl zones set');
+  });
+
+  test('a passing refute on an issue with no number names it by its key', async () => {
+    const issue = staged();
+    setCrewIssue(w.db, issue, { number: null }, t0);
+    const id = await crewDrop();
+    await applyResult(w.db, deps(), id, completed({ decision: 'promote', findings: [] }), t0);
+    const [b] = listBriefings(w.db, { zoneId: 'main', state: 'open' });
+    expect(b?.decision).toBe(
+      'A reviewer found nothing to fix in crew issue add-docs. Promote it so an agent can start?',
+    );
+    expect(b?.why).toContain('The crew filed crew issue add-docs as staged');
+    expect(b?.why).not.toContain('#');
+  });
+
+  test("no refute briefing uses the crew's internal words", async () => {
+    for (const refutePromotes of [false, true]) {
+      w = await crewWorld();
+      const zone = { ...w.zone, crew: { ...crewOn, refutePromotes } };
+      staged();
+      const id = await crewDrop(t0, zone);
+      await applyResult(w.db, deps(zone), id, completed({ decision: 'promote', findings: [] }), t0);
+      const all = listBriefings(w.db, { zoneId: 'main' });
+      expect(all).toHaveLength(1);
+      for (const b of all) {
+        for (const text of [b.decision, b.why]) {
+          expect(text).not.toContain('survived the refute');
+          expect(text).not.toContain('refute verdict');
+        }
+      }
+    }
+  });
+
   test('refute revise with an invalid body counts as a rejection', async () => {
     const issue = staged();
     const id = await crewDrop();
