@@ -121,6 +121,8 @@ export type SettingKey =
   | 'config.restart_pending'
   /** The zone ids the upgrade pinned to the old ready label (#198); set once the pin has run. */
   | 'config.ready_label_pins'
+  /** The short id GitHub App names carry (`Jumpmaster author (<id>)`); not a secret. */
+  | 'github_app.install_id'
   | 'setup.step'
   | 'status.last_pass'
   | 'transcripts.last_prune'

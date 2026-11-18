@@ -50,6 +50,7 @@ import { doctorMayLease, missingFor, zoneRequirements } from '../leases.js';
 import type { ForgePair } from '../outbox.js';
 import { egressFor } from '../payloads.js';
 import { DETECT_FILES, detectPreset } from '../presets.js';
+import { PROJECT_URL } from '../project.js';
 import { checkReach, PUBLIC_URL_NEEDED, publicOrigin, type ReachResult } from '../reach.js';
 import {
   ARCHIVE_DIR,
@@ -214,7 +215,7 @@ export type DoctorDeps = {
  */
 export function installDocUrl(version: string | undefined): string {
   const tag = version && /^\d+\.\d+\.\d+(-rc\.\d+)?$/.test(version) ? `v${version}` : 'main';
-  return `https://github.com/x-a-n-d-e-r-k/jumpmaster/blob/${tag}/docs/runbooks/install.md`;
+  return `${PROJECT_URL}/blob/${tag}/docs/runbooks/install.md`;
 }
 export const DOC = installDocUrl(process.env.JM_RELEASE_VERSION);
 const doc = (anchor: string): string => `${DOC}#${anchor}`;

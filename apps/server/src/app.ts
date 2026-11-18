@@ -70,6 +70,8 @@ import {
   type ReachDeps,
   type TailscaleDeps,
 } from './reach.js';
+import { AppManifestStore } from './setup/app-manifest-state.js';
+import { registerGitHubAppRoutes } from './setup/github-app-routes.js';
 import { buildStatus } from './status.js';
 import { lastSyncResult } from './sync.js';
 import { transcriptPruned } from './transcripts.js';
@@ -249,6 +251,11 @@ export function createApp(
     appSuspension?: ControlDeps['appSuspension'];
     /** The installation check every mint goes through (issue #267), for the doctor. */
     installationVerifier?: ControlDeps['installationVerifier'];
+    /** The GitHub App manifest flow's states and pendings (main.ts sweeps it); default a new one. */
+    appManifestStore?: AppManifestStore;
+    /** The manifest conversion's fetch and API base (tests inject a fake GitHub). */
+    appManifestFetch?: typeof globalThis.fetch;
+    appManifestApiBase?: string;
   },
 ): FastifyInstance {
   // Every page reads the config once per request: the store swaps it on each applied revision.
@@ -337,6 +344,17 @@ export function createApp(
       store: deps.config,
       now: deps.now,
       ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
+    });
+    // Creating a GitHub App from a manifest (§4.1): start, the github.com callback, and Finish.
+    registerGitHubAppRoutes(app, {
+      db: deps.db,
+      store: deps.config,
+      now: deps.now,
+      log: deps.log ?? (() => {}),
+      manifestStore: deps.appManifestStore ?? new AppManifestStore(),
+      ...(deps.appManifestFetch ? { fetch: deps.appManifestFetch } : {}),
+      ...(deps.appManifestApiBase ? { apiBase: deps.appManifestApiBase } : {}),
+      ...(deps.scrub ? { scrub: deps.scrub } : {}),
     });
     // Settings: Credentials (Task 9), Install, MCP tokens and History (Task 13).
     registerSettingsPages(app, {
