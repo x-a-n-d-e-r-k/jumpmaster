@@ -166,6 +166,7 @@ const ACTION_TOOLS = [
   'set_zone_mode',
   'run_crew_cycle',
   'mark_objective_done',
+  'propose_goal_change',
 ];
 const ALL_TOOLS = [...READ_TOOLS, ...CHAT_READ_TOOLS, ...ACTION_TOOLS].sort();
 

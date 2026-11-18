@@ -35,6 +35,7 @@ import {
   type WorkItem,
 } from '../db/repo.js';
 import type { PullFacts } from '../forge/github.js';
+import { openGoalChanges } from '../goal-change.js';
 import {
   type ForgePair,
   isServerPrBody,
@@ -507,6 +508,8 @@ export async function reconcileZone(
     // on the first pass after the crew is enabled again).
     const deps = { forges: () => forges, zone: () => zone };
     actions += await applyPendingRulings(db, deps, zone.id, now);
+    // A goal change proposed in the chat (or by a ruling just applied) opens as its PR.
+    actions += await openGoalChanges(db, forges, zone, now);
     // An arbiter's acting ruling on a review disagreement: the item is retried, as Command's Retry.
     actions += await applyArbitrations(db, deps, zone.id, now);
     actions += await flushCrewOps(db, forges, zone, secrets, now);
