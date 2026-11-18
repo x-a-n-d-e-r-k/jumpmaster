@@ -183,6 +183,18 @@ describe('renderCompose', () => {
       for (const p of s.ports ?? []) expect(p).toMatch(/^127\.0\.0\.1:/);
   });
 
+  test('the rendered template pins the chat and chat-egress images by digest', () => {
+    const tmpl = readFileSync(join(ROOT, TEMPLATE), 'utf8');
+    const lock = fullLock();
+    const doc = load(renderCompose(tmpl, lock)) as { services: Record<string, { image?: string }> };
+    expect(doc.services.chat?.image).toBe(
+      `ghcr.io/some-owner/jumpmaster-trooper@${lock.images['jumpmaster-trooper']}`,
+    );
+    expect(doc.services['chat-egress']?.image).toBe(
+      `ghcr.io/some-owner/jumpmaster-egress@${lock.images['jumpmaster-egress']}`,
+    );
+  });
+
   test('the CLI renders a template with a lock file and fails closed on a bad lock', () => {
     const dir = mkdtempSync(join(tmpdir(), 'jm-render-'));
     const lockFile = join(dir, 'images.lock.json');

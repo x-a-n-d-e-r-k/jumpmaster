@@ -15,6 +15,7 @@ import {
   listBriefings,
   listRulings,
 } from './briefings.js';
+import { registerChatRoutes } from './chat/routes.js';
 import { configReader } from './config/source.js';
 import { ConfigStore } from './config/store.js';
 import type { Config } from './config.js';
@@ -60,7 +61,7 @@ import { createInvite, inviteProblem, inviteTtl } from './install/invite.js';
 import { type InstallRouteDeps, registerInstallRoutes } from './install/routes.js';
 import { cloudInit, installLine } from './install/stick-sh.js';
 import { missingFor, zoneRequirements } from './leases.js';
-import { registerMcpRoute } from './mcp/server.js';
+import { registerChatMcpRoute, registerMcpRoute } from './mcp/server.js';
 import type { ForgePair } from './outbox.js';
 import {
   PUBLIC_URL_NEEDED,
@@ -69,6 +70,8 @@ import {
   type ReachDeps,
   type TailscaleDeps,
 } from './reach.js';
+import { AppManifestStore } from './setup/app-manifest-state.js';
+import { registerGitHubAppRoutes } from './setup/github-app-routes.js';
 import { buildStatus } from './status.js';
 import { lastSyncResult } from './sync.js';
 import { transcriptPruned } from './transcripts.js';
@@ -211,6 +214,8 @@ function stickLine(s: Stick, config: Config): StickLine {
 export function createApp(
   deps: StickRouteDeps & {
     kick?: () => void;
+    /** Starts a chat thread's next queued turn; absent, owner messages wait as `queued`. */
+    chatTurns?: { enqueue(threadId: number): void };
     /** A forge on the read token, for the doctor (absent without `JM_GITHUB_READ_TOKEN`). */
     readForgeFor?: (zoneId: string) => Forge | undefined;
     /** The doctor's forges (requests time out); defaults to `forgesFor`. */
@@ -246,6 +251,11 @@ export function createApp(
     appSuspension?: ControlDeps['appSuspension'];
     /** The installation check every mint goes through (issue #267), for the doctor. */
     installationVerifier?: ControlDeps['installationVerifier'];
+    /** The GitHub App manifest flow's states and pendings (main.ts sweeps it); default a new one. */
+    appManifestStore?: AppManifestStore;
+    /** The manifest conversion's fetch and API base (tests inject a fake GitHub). */
+    appManifestFetch?: typeof globalThis.fetch;
+    appManifestApiBase?: string;
   },
 ): FastifyInstance {
   // Every page reads the config once per request: the store swaps it on each applied revision.
@@ -295,6 +305,15 @@ export function createApp(
   registerStickRoutes(app, { ...deps, fetches });
   registerControlRoutes(app, { ...deps, setup, backoff });
   registerMcpRoute(app, deps);
+  // The chat service's endpoint (chat tokens only): always on, so the chat needs no setup step.
+  registerChatMcpRoute(app, deps);
+  // The crew chat's threads (browser sessions only): an owner message waits as `queued` for a turn.
+  registerChatRoutes(app, {
+    db: deps.db,
+    config: deps.config,
+    now: deps.now,
+    ...(deps.chatTurns ? { turns: deps.chatTurns } : {}),
+  });
   // The stick installer (issue #138): the script, cosign and the stick image, at publicUrl.
   registerInstallRoutes(app, {
     db: deps.db,
@@ -325,6 +344,17 @@ export function createApp(
       store: deps.config,
       now: deps.now,
       ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
+    });
+    // Creating a GitHub App from a manifest (§4.1): start, the github.com callback, and Finish.
+    registerGitHubAppRoutes(app, {
+      db: deps.db,
+      store: deps.config,
+      now: deps.now,
+      log: deps.log ?? (() => {}),
+      manifestStore: deps.appManifestStore ?? new AppManifestStore(),
+      ...(deps.appManifestFetch ? { fetch: deps.appManifestFetch } : {}),
+      ...(deps.appManifestApiBase ? { apiBase: deps.appManifestApiBase } : {}),
+      ...(deps.scrub ? { scrub: deps.scrub } : {}),
     });
     // Settings: Credentials (Task 9), Install, MCP tokens and History (Task 13).
     registerSettingsPages(app, {

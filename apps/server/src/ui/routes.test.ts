@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import { routeClass } from '../auth/guard.js';
 import { listBriefings, raiseBriefing, ruleBriefing } from '../briefings.js';
 import { DEFAULT_PROTECTED_PATHS } from '../config.js';
 import { insertCrewIssue } from '../crew/store.js';
@@ -285,6 +286,27 @@ Ship it.
     );
     expect(body).not.toContain('Current objective');
     expect(statusOf(body, 'Release notes')).toBe(`done (ruling #${rid})`);
+  });
+
+  test('/zones/:id/goals links back to the zone page and to the goal file on GitHub (#365)', async () => {
+    const h = await crewHarness();
+    await h.sync();
+    const body = (await get(h, '/zones/main/goals')).body;
+    expect(body).toContain('href="/zones/main"');
+    expect(body).toContain('The goals live in GOAL.md in octo/demo.');
+    expect(body).toContain('<a href="https://github.com/octo/demo/blob/HEAD/GOAL.md">');
+    expect(body).not.toContain('/zones/main/intake');
+  });
+
+  test('/zones/:id/goals offers the intake page, not GitHub, when the goal file is missing (#365)', async () => {
+    const h = await crewHarness();
+    h.forge.state.files.delete('main:GOAL.md');
+    await h.sync();
+    const body = (await get(h, '/zones/main/goals')).body;
+    expect(body).toContain(
+      `GOAL.md isn't in the repository yet. <a href="/zones/main/intake">Write one with the intake page</a>.`,
+    );
+    expect(body).not.toContain('github.com');
   });
 
   test('an unknown zone on /zones/:id/goals is 404', async () => {
@@ -1154,5 +1176,13 @@ describe('external links open in a new tab, in-app links do not (#133)', () => {
     expect(res.json()).toEqual({ id, slots: 6, maxSlots: 6 });
     expect((await lease(6)).headers['x-jumpmaster-slots']).toBe('6');
     expect((await h.view('/sticks')).body).toContain('Running now: 0 of 6');
+  });
+});
+
+describe('route classes (crew chat, #349)', () => {
+  test("routeClass('/mcp/chat') is 'chat-mcp', and /mcp is still 'mcp'", () => {
+    expect(routeClass('/mcp/chat')).toBe('chat-mcp');
+    expect(routeClass('/mcp')).toBe('mcp');
+    expect(routeClass('/mcp/chat/x')).toBe('page');
   });
 });

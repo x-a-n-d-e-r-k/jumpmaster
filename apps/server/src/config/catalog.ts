@@ -211,6 +211,24 @@ const WORDS: Words[] = [
     'number',
   ),
   w(
+    'chat.model',
+    'Chat model',
+    'The Claude model the crew chat answers with. Each new message uses the model set when it starts.',
+    'text',
+  ),
+  w(
+    'chat.maxConcurrentTurns',
+    'Chat answers at once',
+    'How many chat threads may be answered at the same time. More messages wait their turn.',
+    'number',
+  ),
+  w(
+    'chat.turnMinutes',
+    'Longest chat answer (minutes)',
+    'How long one chat answer may run before it is stopped and the message marked failed.',
+    'number',
+  ),
+  w(
     'server.publicUrl',
     'Address other machines use',
     'The https address a new stick reaches this server at, to download the installer and enroll. Unset, no machine can be added.',

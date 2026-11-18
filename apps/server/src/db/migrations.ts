@@ -1078,6 +1078,67 @@ ALTER TABLE stick_invites ADD COLUMN token_expires_at TEXT;
 CREATE UNIQUE INDEX stick_invites_token_hash ON stick_invites (token_hash);
 `;
 
+/**
+ * v38 (#349): per-turn chat MCP tokens. `mcp_tokens.scope` takes `chat`, and a chat token names the
+ * thread and message whose turn it serves and the hash of the browser session that posted that
+ * message (`zone_id` is `*`: the zone is a tool argument). The same twelve-step rebuild, rows and
+ * ids kept, with foreign keys off (`mcp_audit` references it).
+ */
+const V38_SQL = `
+CREATE TABLE new_mcp_tokens (
+  id               INTEGER PRIMARY KEY,
+  token_hash       TEXT NOT NULL UNIQUE,
+  zone_id          TEXT NOT NULL,
+  scope            TEXT NOT NULL CHECK (scope IN ('read','write','chat')),
+  label            TEXT NOT NULL DEFAULT '',
+  created_at       TEXT NOT NULL,
+  expires_at       TEXT NOT NULL,
+  revoked_at       TEXT,
+  last_used_at     TEXT,
+  chat_thread_id   INTEGER,
+  chat_message_id  INTEGER,
+  session_hash     TEXT
+);
+INSERT INTO new_mcp_tokens (id, token_hash, zone_id, scope, label, created_at, expires_at,
+  revoked_at, last_used_at)
+SELECT id, token_hash, zone_id, scope, label, created_at, expires_at, revoked_at, last_used_at
+FROM mcp_tokens;
+DROP TABLE mcp_tokens;
+ALTER TABLE new_mcp_tokens RENAME TO mcp_tokens;
+`;
+
+/**
+ * v39 (#350): the crew chat's threads and messages. A message's `seq` is its place in its thread,
+ * allocated inside the insert; `session_hash` is the hash of the browser session that posted an
+ * owner message (never the session id), so a guarded change it asks for binds to that session.
+ */
+const V39_SQL = `
+CREATE TABLE chat_threads (
+  id                 INTEGER PRIMARY KEY,
+  title              TEXT NOT NULL,
+  focus_kind         TEXT CHECK (focus_kind IN ('zone','goals','briefing')),
+  focus_zone_id      TEXT,
+  focus_ref          TEXT,
+  claude_session_id  TEXT,
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL
+);
+CREATE INDEX chat_threads_updated ON chat_threads (updated_at);
+CREATE TABLE chat_messages (
+  id            INTEGER PRIMARY KEY,
+  thread_id     INTEGER NOT NULL REFERENCES chat_threads(id),
+  seq           INTEGER NOT NULL,
+  role          TEXT NOT NULL CHECK (role IN ('owner','assistant','tool','system')),
+  text          TEXT NOT NULL,
+  state         TEXT NOT NULL CHECK (state IN ('queued','running','done','failed')),
+  session_hash  TEXT,
+  usage_json    TEXT,
+  error         TEXT,
+  created_at    TEXT NOT NULL,
+  UNIQUE (thread_id, seq)
+);
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1116,6 +1177,8 @@ export const MIGRATIONS: Migration[] = [
   { version: 35, sql: V35_SQL },
   { version: 36, sql: V36_SQL, foreignKeysOff: true },
   { version: 37, sql: V37_SQL },
+  { version: 38, sql: V38_SQL, foreignKeysOff: true },
+  { version: 39, sql: V39_SQL },
 ];
 
 /**
