@@ -462,6 +462,8 @@ function forgeFor(
         if (patch.body !== undefined) e.issue.body = patch.body;
       }
       if (patch.state) e.state = patch.state;
+      // A reopen drops the reason the issue closed for, as GitHub does.
+      if (patch.state === 'open') delete e.stateReason;
       if (patch.stateReason) e.stateReason = patch.stateReason;
       e.updatedAt = new Date().toISOString();
     },
