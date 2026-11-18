@@ -51,6 +51,7 @@ import {
   type WorkItem,
 } from './db/repo.js';
 import { pagesOf } from './doctor/actions.js';
+import type { ChatHealth } from './doctor/checks.js';
 import { latestDoctorRun } from './doctor/run.js';
 import { fableStatus } from './fable.js';
 import type { AppTokenSource } from './forge/app-tokens.js';
@@ -217,6 +218,8 @@ export function createApp(
     kick?: () => void;
     /** Starts a chat thread's next queued turn; absent, owner messages wait as `queued`. */
     chatTurns?: { enqueue(threadId: number): void };
+    /** The chat service's health, for the doctor (`ChatServiceClient.health`); absent without one. */
+    chatHealth?: ChatHealth;
     /** A forge on the read token, for the doctor (absent without `JM_GITHUB_READ_TOKEN`). */
     readForgeFor?: (zoneId: string) => Forge | undefined;
     /** The doctor's forges (requests time out); defaults to `forgesFor`. */

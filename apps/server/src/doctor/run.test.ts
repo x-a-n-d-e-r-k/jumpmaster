@@ -95,7 +95,7 @@ describe('runDoctor', () => {
   });
 
   test('a run is stored, the latest is read back, and a zone filter limits the zone checks', async () => {
-    const w = world();
+    const w = world({ readToken: true });
     expect(latestDoctorRun(w.db)).toBeNull();
     const all = await runDoctor(w.deps);
     const only = await runDoctor(w.deps, { zoneId: 'nope' });

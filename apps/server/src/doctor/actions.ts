@@ -126,6 +126,8 @@ const TABLE: Record<string, Rule> = {
   'vault.key': credentials,
   'forge.author-reads': reads('author'),
   'forge.reviewer-reads': reads('reviewer'),
+  // The install-wide line is fixed in the install directory; a zone's line by its read token.
+  'chat.service': (check, ctx) => (check.zoneId ? credentials(check, ctx) : docs(check)),
   'control.kill': () => app('Open the kill switch on home', '/'),
   'stick.seen': () => app('See the sticks on home', '/'),
   'stick.image-policy': () => app('See the sticks on home', '/'),
