@@ -190,6 +190,13 @@ export type CrewInputJson = {
       }
     | { role: 'refute'; crewIssueId: number }
     | { role: 'triage'; requestId: number }
+    | {
+        role: 'arbitrate';
+        subject: 'issue';
+        crewIssueId: number;
+        /** The crew issue's `body_sha` when asked: the text the ruling is about. */
+        basis: string;
+      }
     | { role: 'crew-lead' };
   input: string;
   /** A triage drop's issue images, fetched and checked at enqueue (`crew/images.ts`). */

@@ -32,7 +32,8 @@ keeps working.
   "maxStaged": 3,
   "refutePromotes": true,
   "maxRefute": 3,
-  "maxTriage": 2
+  "maxTriage": 2,
+  "arbiter": true
 }
 ```
 
@@ -58,6 +59,13 @@ And at the top level of the server config:
   crew issues under objective `triage:#N`, and go through refute and promotion like the lead's.
   On the original issue it leaves one comment and, for a split or not-agent-work, swaps
   `triageLabel` for `triagedLabel` (see the install runbook's "How Jumpmaster triages issues").
+- `arbiter` (on by default) lets a Fable arbiter settle a staged crew issue whose refutes ran out
+  with at least one verdict, once per issue text, instead of briefing you. It runs only when Fable
+  is available (`claude.plan` includes it and `fableModel` is set). Ruling A promotes as a passing
+  refute would (still held one pass, and only a briefing with `refutePromotes: false`); ruling B
+  rejects. Insufficient evidence, a product question, an irreversible ruling, a drop that did not
+  run on Fable, or a failed drop puts the issue to you as before, with the arbiter's reasons in the
+  briefing. Turning it on is a guarded change; `arbiter: false` briefs every case as before.
 - A triage drop gets the issue's images. The server fetches at most 4 image URLs from the
   issue body, only GitHub attachments (`https://github.com/user-attachments/assets/…`,
   `user-images.githubusercontent.com`, `private-user-images.githubusercontent.com`), over HTTPS,

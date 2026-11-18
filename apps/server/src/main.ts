@@ -302,6 +302,8 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
                   ? { token: config.secrets.githubReadToken }
                   : {}),
               },
+              // Fable's availability decides whether a crew disagreement is arbitrated.
+              { claude: config.claude },
             );
           },
           log,

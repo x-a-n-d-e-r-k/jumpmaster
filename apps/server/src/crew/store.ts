@@ -261,3 +261,100 @@ export function setTriageRequest(db: Db, id: number, patch: TriagePatch, now: Da
     id,
   });
 }
+
+export type ArbitrationState = 'pending' | 'ruled' | 'failed' | 'discarded';
+export type ArbitrationRuling = 'A' | 'B' | 'insufficient_evidence';
+
+/**
+ * One arbiter ruling on a contested decision: `subject` names what was contested
+ * (`issue:<crewIssueId>`), `basis` the exact text judged (the crew issue's `body_sha`). One per
+ * subject and basis (`UNIQUE`), inserted in the arbitrate drop's own transaction.
+ */
+export type Arbitration = {
+  id: number;
+  zoneId: string;
+  subject: string;
+  basis: string;
+  dropId: string;
+  state: ArbitrationState;
+  ruling: ArbitrationRuling | null;
+  acted: boolean;
+  because: string | null;
+  instruction: string | null;
+  /** Why it failed, was discarded or did not act. */
+  reason: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ArbitrationSettle = {
+  state: Exclude<ArbitrationState, 'pending'>;
+  ruling?: ArbitrationRuling;
+  acted?: boolean;
+  because?: string;
+  instruction?: string;
+  reason?: string;
+};
+
+const ARB_COLS = `id, zone_id AS zoneId, subject, basis, drop_id AS dropId, state, ruling, acted, because,
+  instruction, reason, created_at AS createdAt, updated_at AS updatedAt`;
+
+type ArbitrationRow = Omit<Arbitration, 'acted'> & { acted: number };
+const arbitrationOf = (r: ArbitrationRow): Arbitration => ({ ...r, acted: r.acted === 1 });
+
+/** The subject of a crew issue's arbitration (and of its briefings). */
+export const issueArbitrationSubject = (crewIssueId: number): string => `issue:${crewIssueId}`;
+
+/** Records a pending arbitration; throws a UNIQUE violation if (subject, basis) has one already. */
+export function insertArbitration(
+  db: Db,
+  row: { zoneId: string; subject: string; basis: string; dropId: string },
+  now: Date,
+): number {
+  const at = now.toISOString();
+  const r = db
+    .prepare(
+      `INSERT INTO arbitrations (zone_id, subject, basis, drop_id, state, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
+    )
+    .run(row.zoneId, row.subject, row.basis, row.dropId, at, at);
+  return Number(r.lastInsertRowid);
+}
+
+export function getArbitration(db: Db, subject: string, basis: string): Arbitration | undefined {
+  const row = db
+    .prepare(`SELECT ${ARB_COLS} FROM arbitrations WHERE subject = ? AND basis = ?`)
+    .get(subject, basis) as ArbitrationRow | undefined;
+  return row && arbitrationOf(row);
+}
+
+export function getArbitrationByDrop(db: Db, dropId: string): Arbitration | undefined {
+  const row = db.prepare(`SELECT ${ARB_COLS} FROM arbitrations WHERE drop_id = ?`).get(dropId) as
+    | ArbitrationRow
+    | undefined;
+  return row && arbitrationOf(row);
+}
+
+/**
+ * Settles a pending arbitration. Only from `pending`: returns false, changing nothing, when it was
+ * settled already, so a re-delivered result acts once.
+ */
+export function settleArbitration(db: Db, id: number, s: ArbitrationSettle, now: Date): boolean {
+  const r = db
+    .prepare(
+      `UPDATE arbitrations SET state = @state, ruling = @ruling, acted = @acted, because = @because,
+         instruction = @instruction, reason = @reason, updated_at = @at
+       WHERE id = @id AND state = 'pending'`,
+    )
+    .run({
+      id,
+      state: s.state,
+      ruling: s.ruling ?? null,
+      acted: s.acted ? 1 : 0,
+      because: s.because ?? null,
+      instruction: s.instruction ?? null,
+      reason: s.reason ?? null,
+      at: now.toISOString(),
+    });
+  return r.changes > 0;
+}
