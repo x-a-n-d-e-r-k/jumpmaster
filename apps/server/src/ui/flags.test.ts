@@ -157,6 +157,9 @@ const field = (key: string, kind: string, value: unknown, original: unknown, exp
 
 const stubStatus = () => ({ textContent: '', innerHTML: '' });
 
+/** The zone page's save target, as the form carries it. */
+const JM = { savedTo: '/zones/jm/flags', zone: { id: 'jm', index: 0 } };
+
 describe('the advanced settings page, /zones/:id/flags', () => {
   test('lists exactly the zone flagRows, each once, grouped in FlagGroup order and in catalog order', async () => {
     const w = await world();
@@ -331,7 +334,7 @@ describe('the advanced settings page script', () => {
     const { fn, calls } = pageScript(() => ({ ok: true, status: 200, json: { revision: 9 } }));
     let went = '';
     const r = await fn<Promise<string>>('jmSaveFlags')(
-      'jm',
+      JM,
       { crew: { refutePromotes: true } },
       4,
       stubStatus(),
@@ -359,9 +362,7 @@ describe('the advanced settings page script', () => {
     const { fn, calls } = pageScript();
     const out = stubStatus();
     const patch = fn<unknown>('jmFlagsPatch')([field('maxTurns', 'number', '200', 200)]);
-    expect(await fn<Promise<string>>('jmSaveFlags')('jm', patch, 4, out, () => {})).toBe(
-      'unchanged',
-    );
+    expect(await fn<Promise<string>>('jmSaveFlags')(JM, patch, 4, out, () => {})).toBe('unchanged');
     expect(out.textContent).toBe('Nothing changed.');
     expect(calls).toEqual([]);
   });
@@ -381,7 +382,7 @@ describe('the advanced settings page script', () => {
       let went = '';
       const out = stubStatus();
       const r = await fn<Promise<string>>('jmSaveFlags')(
-        'jm',
+        JM,
         { maxTurns: 1 },
         1,
         out,
@@ -424,7 +425,7 @@ describe('the advanced settings page script', () => {
       { document },
     );
     const out = stubStatus();
-    const r = await fn<Promise<string>>('jmSaveFlags')('jm', { maxTurns: 1 }, 1, out, () => {}, 0);
+    const r = await fn<Promise<string>>('jmSaveFlags')(JM, { maxTurns: 1 }, 1, out, () => {});
     expect(r).toBe('refused');
     expect(spans['crew.maxDropsPerDay']?.textContent).toBe('too big');
     expect(spans['egress.allow']?.textContent).toBe('not a host');
