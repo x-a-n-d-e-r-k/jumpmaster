@@ -58,6 +58,7 @@ import { latestDoctorRun } from './doctor/run.js';
 import { fableStatus } from './fable.js';
 import type { AppTokenSource } from './forge/app-tokens.js';
 import type { Forge } from './forge/github.js';
+import { listGoalChanges } from './goal-change.js';
 import { getGoals, objectivesDone } from './goals.js';
 import { StickFetches } from './images/fetches.js';
 import { createInvite, inviteProblem, inviteTtl } from './install/invite.js';
@@ -83,6 +84,7 @@ import { registerAuthPages } from './ui/auth-pages.js';
 import { renderChatList, renderThread } from './ui/chat.js';
 import { registerConfirmPages } from './ui/confirm.js';
 import { registerGithubPages } from './ui/github.js';
+import { registerGoalConfirmPages } from './ui/goal-confirm.js';
 import {
   type CrewLine,
   DROP_LIST_LIMIT,
@@ -344,6 +346,13 @@ export function createApp(
   app.get('/healthz', async (_req, reply) =>
     reply.header('cache-control', 'no-store').send({ ok: true, version }),
   );
+  // The owner's confirmation of a goal change (#363): the diff, the passphrase, then the pass merges.
+  registerGoalConfirmPages(app, {
+    db: deps.db,
+    now: deps.now,
+    backoff,
+    forgesFor: deps.forgesFor,
+  });
   // The confirmation page for a session's guarded config change (§7.5): with the store only.
   if (deps.config instanceof ConfigStore) {
     // Every page's navigation gains the store-only pages (Zones, Settings).
@@ -676,6 +685,7 @@ export function createApp(
       items: listWorkItems(db, zone.id),
       skippedCrewUnpromoted: lastSyncResult(zone.id)?.skippedCrewUnpromoted ?? [],
       doneByRuling: objectivesDone(db, zone.id),
+      goalChanges: listGoalChanges(db, zone.id),
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });

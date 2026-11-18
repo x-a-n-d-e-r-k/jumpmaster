@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'vitest';
-import type { DropZoneConfig } from '../config.js';
+import { DEFAULT_PROTECTED_PATHS, type DropZoneConfig } from '../config.js';
 import {
   activeDropFor,
   type Drop,
+  getWorkItem,
   insertDrop,
   reclaimableDropFor,
   updateDrop,
@@ -21,8 +22,9 @@ import { usageCfg, zoneWorld } from '../test/fixtures.js';
 import { t0 } from '../test/helpers.js';
 import { fingerprint } from './budgets.js';
 import { decide, gateParkAllowable, HOLD_REASON, OVERRIDE_HINT, type Snapshot } from './decide.js';
+import { protectedPathHits } from './guards.js';
 import { reconcileZone } from './reconcile.js';
-import { zonePass } from './snapshot.js';
+import { buildSnapshot, zonePass } from './snapshot.js';
 
 const now = t0;
 const minutesAgo = (m: number): string => new Date(now.getTime() - m * 60_000).toISOString();
@@ -1075,5 +1077,37 @@ describe('reclaim window', () => {
     expect(reclaimableDropFor(w.db, id, later)).toBeUndefined();
     await pass(later);
     expect(activeDropFor(w.db, id)).toMatchObject({ role: 'review', headSha: 'sha1' });
+  });
+});
+
+describe('the goal file (#363)', () => {
+  test('CLAIM=PROOF this is the only path that writes goalPath', async () => {
+    // The pure rule: a PR touching GOAL.md parks, whatever else would let it merge.
+    const hits = protectedPathHits([{ path: 'GOAL.md' }], DEFAULT_PROTECTED_PATHS);
+    expect(decide(mergeable({ protectedHits: hits }))).toEqual({
+      kind: 'park',
+      reason: 'protected path: GOAL.md',
+    });
+    // Through a real pass (with the goal-change step in it): a work item whose PR touches GOAL.md,
+    // approved and green, still parks and is never merged.
+    // The zone as a config file gives it: the default protected paths, which hold the goal file.
+    const w = zoneWorld({ protectedPaths: [...DEFAULT_PROTECTED_PATHS] });
+    expect(w.zone.crew.goalPath).toBe('GOAL.md');
+    const id = w.prItem(1, 'sha1');
+    w.f.state.pullFiles.set(1, { files: [{ path: 'GOAL.md' }], complete: true });
+    const item = getWorkItem(w.db, id);
+    if (!item) throw new Error('no item');
+    const pass = await zonePass(w.forges, w.zone, 'main');
+    const s = await buildSnapshot(w.db, w.forges, w.zone, item, pass, t0);
+    expect(decide({ ...s, verdictsOnHead: [approve('sha1')] })).toEqual({
+      kind: 'park',
+      reason: 'protected path: GOAL.md',
+    });
+    await reconcileZone(w.db, w.forges, w.zone, pass, promptVersions(), usageCfg, [], t0);
+    expect(getWorkItem(w.db, id)).toMatchObject({
+      state: 'parked',
+      reason: 'protected path: GOAL.md',
+    });
+    expect(w.f.state.merges).toEqual([]);
   });
 });
