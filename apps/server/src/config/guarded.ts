@@ -425,6 +425,9 @@ export const NOT_GUARDED: FreePath[] = [
   ),
   free('dropZones[].crew.maxStaged', PACE),
   free('dropZones[].crew.maxRefute', PACE),
+  // Only files staged issues, which still pass a refute and Command's controls before any work;
+  // crew.maxDropsPerDay still caps the drops.
+  free('dropZones[].crew.auditPerCycle', PACE),
   free('dropZones[].crew.maxTriage', PACE),
 ];
 

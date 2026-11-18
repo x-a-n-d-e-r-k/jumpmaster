@@ -33,6 +33,7 @@ import { fetchIssueImages, type ImageFetchOpts } from './images.js';
 import {
   arbitrateIssueInput,
   arbitrateItemInput,
+  auditInput,
   crewLeadInput,
   diagnoseInput,
   lastHealFeedback,
@@ -43,18 +44,28 @@ import {
   type Arbitration,
   type CrewIssue,
   getArbitration,
+  getAuditCursor,
   getCrewIssue,
   getItemArbitration,
   getTriageRequest,
   insertArbitration,
+  insertAudit,
+  insertAuditCursor,
   issueArbitrationSubject,
   itemArbitrationSubject,
+  moveAuditCursor,
   settleArbitration,
 } from './store.js';
 
 export type { CrewInputJson } from '../payloads.js';
 
 export type CrewWork = CrewInputJson['work'];
+
+/**
+ * What `nextCrewWork` names: crew work, or an audit whose commit `enqueueCrew` resolves with forge
+ * reads.
+ */
+export type CrewNext = Exclude<CrewWork, { role: 'audit' }> | { role: 'audit' };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -180,15 +191,16 @@ export function reviewDisagreement(db: Db, item: WorkItem): boolean {
  * staged crew issue whose current body is unrefuted (within `maxRefute`), arbitrate one whose
  * refutes ran out (with `crew.arbiter` on, Fable available, at least one stored verdict, and no
  * arbitration of this text yet), triage the oldest open triage request (within `maxTriage`, with a
- * slot free), then the lead cycle when it is due. An exhausted issue that may not be arbitrated, or
- * whose arbitration of this text is settled, is put to Command instead.
+ * slot free), then the lead cycle when it is due, then an audit of a merged commit (`auditDue`). An
+ * exhausted issue that may not be arbitrated, or whose arbitration of this text is settled, is put
+ * to Command instead.
  */
 export function nextCrewWork(
   db: Db,
   zone: DropZoneConfig,
   now: Date,
   fableOk = false,
-): CrewWork | null {
+): CrewNext | null {
   const parked = db
     .prepare(
       `SELECT id, subject, why FROM briefings WHERE zone_id = ? AND kind = 'parked'
@@ -273,10 +285,10 @@ export function nextCrewWork(
 
   const last = db
     .prepare(
-      `SELECT created_at AS at FROM drops WHERE drop_zone_id = ? AND role = 'crew-lead'
+      `SELECT created_at AS at, rowid AS rid FROM drops WHERE drop_zone_id = ? AND role = 'crew-lead'
        ORDER BY created_at DESC, rowid DESC LIMIT 1`,
     )
-    .get(zone.id) as { at: string } | undefined;
+    .get(zone.id) as { at: string; rid: number } | undefined;
   if (!last) return { role: 'crew-lead' };
   if (now.getTime() - Date.parse(last.at) >= zone.crew.cycleMinutes * 60_000) {
     return { role: 'crew-lead' };
@@ -290,7 +302,97 @@ export function nextCrewWork(
     .get(zone.id, last.at);
   const requested = cycleRequests.get(zone.id);
   if (ruled || (requested !== undefined && requested > last.at)) return { role: 'crew-lead' };
-  return null;
+  return auditDue(db, zone, last) ? { role: 'audit' } : null;
+}
+
+/**
+ * Whether the zone audits a merged commit now, in the lead cycle that began with `lead`: with
+ * `crew.auditPerCycle` above 0, fewer audit drops than that created since the lead drop, a
+ * crew-issue slot free (a refutation files one), and the cursor missing, not checked since the
+ * lead drop, or with commits pending.
+ */
+function auditDue(db: Db, zone: DropZoneConfig, lead: { at: string; rid: number }): boolean {
+  const per = zone.crew.auditPerCycle ?? 0;
+  if (per <= 0) return false;
+  const { n } = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM drops WHERE drop_zone_id = ? AND role = 'audit'
+         AND (created_at > ? OR (created_at = ? AND rowid > ?))`,
+    )
+    .get(zone.id, lead.at, lead.at, lead.rid) as { n: number };
+  if (n >= per) return false;
+  if (crewIssueSlots(db, zone) < 1) return false;
+  const cursor = getAuditCursor(db, zone.id);
+  return !cursor || cursor.checkedAt < lead.at || cursor.pending > 0;
+}
+
+/**
+ * Audits whose drop ended without a verdict applied (lost or cancelled) are `failed`, so every row
+ * says what became of its commit. The cursor has moved: the commit is not audited again.
+ */
+export function settleLostAudits(db: Db, zoneId: string, now: Date): void {
+  db.prepare(
+    `UPDATE crew_audits SET state = 'failed', reason = 'the audit drop ended without a verdict',
+       updated_at = ?
+     WHERE zone_id = ? AND state = 'running' AND drop_id IN (
+       SELECT id FROM drops WHERE drop_zone_id = ? AND state NOT IN (${ACTIVE_STATES_SQL}))`,
+  ).run(now.toISOString(), zoneId, zoneId);
+}
+
+/** A pass that lost the race to move the audit cursor: rolls its drop back. */
+class AuditCursorMoved extends Error {}
+
+/**
+ * Resolves the commit an audit is for, with forge reads: the oldest first-parent commit on the
+ * default branch after the zone's cursor. With no cursor, one is stored at the head and nothing is
+ * audited (audits start from now); with history the cursor can't be walked from, the cursor moves
+ * to the head and an `audit_skipped` observation says why; with nothing new, the cursor is marked
+ * checked. Returns the work and the cursor SHA read, or null when there is nothing to audit.
+ */
+async function resolveAudit(
+  db: Db,
+  forges: ForgePair,
+  zone: DropZoneConfig,
+  now: Date,
+  /** Observe mode: read only, moving nothing and recording nothing. */
+  readOnly = false,
+): Promise<{ work: Extract<CrewWork, { role: 'audit' }>; from: string; pending: number } | null> {
+  const row = db.prepare('SELECT default_branch AS b FROM drop_zones WHERE id = ?').get(zone.id) as
+    | { b: string }
+    | undefined;
+  const branch = row?.b ?? 'main';
+  const head = await forges.author.branchSha(branch);
+  if (head === null) return null;
+  const cursor = getAuditCursor(db, zone.id);
+  if (!cursor) {
+    if (!readOnly) insertAuditCursor(db, zone.id, head, now);
+    return null;
+  }
+  const from = cursor.auditedSha;
+  const found = await forges.author.firstParentCommits(from, head, zone.crew.auditPerCycle + 1);
+  if (!found.complete) {
+    if (!readOnly && moveAuditCursor(db, zone.id, from, head, 0, now)) {
+      recordObservation(
+        db,
+        zone.id,
+        null,
+        'audit_skipped',
+        `commit ${from.slice(0, 7)} is not a first-parent ancestor of ${branch} at ${head.slice(0, 7)} within one compare; audits resume from ${head.slice(0, 7)}`,
+        now,
+      );
+    }
+    return null;
+  }
+  const [oldest] = found.commits;
+  if (!oldest) {
+    if (!readOnly) moveAuditCursor(db, zone.id, from, from, 0, now);
+    return null;
+  }
+  return {
+    work: { role: 'audit', sha: oldest.sha, message: oldest.message },
+    from,
+    pending: found.commits.length - 1,
+  };
 }
 
 /**
@@ -335,14 +437,16 @@ const hasActiveCrewDrop = (db: Db, zoneId: string): boolean =>
     )
     .get(zoneId) !== undefined;
 
-const observeDetail = (w: CrewWork): string =>
+const observeDetail = (w: CrewNext, auditSha?: string): string =>
   w.role === 'diagnose' || (w.role === 'arbitrate' && w.subject === 'item')
     ? `briefing ${w.briefingId}`
     : w.role === 'refute' || w.role === 'arbitrate'
       ? `crew issue ${w.crewIssueId}`
       : w.role === 'triage'
         ? `triage request ${w.requestId}`
-        : 'lead cycle';
+        : w.role === 'audit'
+          ? `commit ${(auditSha ?? '').slice(0, 7)}`
+          : 'lead cycle';
 
 /**
  * Queues the zone's next crew drop, if any, with its rendered input. Runs only with the crew
@@ -370,36 +474,67 @@ export async function enqueueCrew(
   if (crewDropsToday(db, zone.id, now) >= zone.crew.maxDropsPerDay) return null;
   // No claude config means no Fable, so nothing is arbitrated: it is put to Command as before.
   const fableOk = opts.claude ? fableStatus(db, { claude: opts.claude }, now).available : false;
-  const work = nextCrewWork(db, zone, now, fableOk);
-  if (!work) return null;
-  if (work.role === 'crew-lead' && getGoals(db, zone.id)?.parse.ok !== true) return null;
+  settleLostAudits(db, zone.id, now);
+  const next = nextCrewWork(db, zone, now, fableOk);
+  if (!next) return null;
+  if (next.role === 'crew-lead' && getGoals(db, zone.id)?.parse.ok !== true) return null;
   if (mode === 'observe') {
     const itemId =
-      work.role === 'diagnose' || (work.role === 'arbitrate' && work.subject === 'item')
-        ? work.itemId
+      next.role === 'diagnose' || (next.role === 'arbitrate' && next.subject === 'item')
+        ? next.itemId
         : null;
-    recordObservation(db, zone.id, itemId, `would_enqueue:${work.role}`, observeDetail(work), now);
+    let auditSha: string | undefined;
+    if (next.role === 'audit') {
+      // Observe reads which commit it would audit, and moves nothing.
+      try {
+        auditSha = (await resolveAudit(db, forges, zone, now, true))?.work.sha;
+      } catch (err) {
+        log(`zone ${zone.id}: crew audit read failed: ${String(err)}`);
+        return null;
+      }
+      if (auditSha === undefined) return null;
+    }
+    recordObservation(
+      db,
+      zone.id,
+      itemId,
+      `would_enqueue:${next.role}`,
+      observeDetail(next, auditSha),
+      now,
+    );
     return null;
   }
 
   const id = randomUUID();
   let input: string;
+  let work: CrewWork;
+  let audit: { from: string; pending: number } | undefined;
   try {
+    if (next.role === 'audit') {
+      const resolved = await resolveAudit(db, forges, zone, now);
+      if (!resolved) return null;
+      work = resolved.work;
+      audit = { from: resolved.from, pending: resolved.pending };
+    } else {
+      work = next;
+    }
     input =
-      work.role === 'crew-lead'
-        ? await crewLeadInput(db, forges, zone, pass, now, id)
-        : work.role === 'refute'
-          ? refuteInput(db, zone, work.crewIssueId, id)
-          : work.role === 'arbitrate'
-            ? work.subject === 'item'
-              ? arbitrateItemInput(db, zone, work, id)
-              : arbitrateIssueInput(db, zone, work, id)
-            : work.role === 'triage'
-              ? triageInput(db, zone, work.requestId, id)
-              : diagnoseInput(db, zone, work.itemId, id);
+      work.role === 'audit'
+        ? auditInput(db, zone, work, id)
+        : work.role === 'crew-lead'
+          ? await crewLeadInput(db, forges, zone, pass, now, id)
+          : work.role === 'refute'
+            ? refuteInput(db, zone, work.crewIssueId, id)
+            : work.role === 'arbitrate'
+              ? work.subject === 'item'
+                ? arbitrateItemInput(db, zone, work, id)
+                : arbitrateIssueInput(db, zone, work, id)
+              : work.role === 'triage'
+                ? triageInput(db, zone, work.requestId, id)
+                : diagnoseInput(db, zone, work.itemId, id);
   } catch (err) {
     // A forge read failed while gathering input: try again next pass.
-    log(`zone ${zone.id}: crew ${work.role} input failed: ${String(err)}`);
+    log(`zone ${zone.id}: crew ${next.role} input failed: ${String(err)}`);
     return null;
   }
   const stored: CrewInputJson = { work, input };
@@ -437,6 +572,13 @@ export async function enqueueCrew(
           },
           now,
         );
+      } else if (work.role === 'audit' && audit) {
+        // One audit per commit ever (UNIQUE rolls a second back), and the cursor moves only from
+        // the SHA this pass read: a pass that lost the race rolls back.
+        insertAudit(db, { zoneId: zone.id, sha: work.sha, dropId: id }, now);
+        if (!moveAuditCursor(db, zone.id, audit.from, work.sha, audit.pending, now)) {
+          throw new AuditCursorMoved();
+        }
       }
       insertDrop(db, {
         id,
@@ -451,8 +593,9 @@ export async function enqueueCrew(
       });
     })();
   } catch (e) {
-    // Another crew drop became active, or this text was arbitrated already: rolled back.
-    if (isUniqueViolation(e)) return null;
+    // Another crew drop became active, this text was arbitrated already, this commit was audited
+    // already, or another pass moved the audit cursor: rolled back.
+    if (isUniqueViolation(e) || e instanceof AuditCursorMoved) return null;
     throw e;
   }
   return id;

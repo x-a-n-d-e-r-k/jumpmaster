@@ -272,6 +272,17 @@ export interface Forge {
   getIssueLabels(number: number): Promise<string[]>;
   branchSha(branch: string): Promise<string | null>;
   compare(base: string, head: string): Promise<CompareFacts>;
+  /**
+   * The first-parent commits from `base` (exclusive) to `head` (inclusive), both SHAs, oldest
+   * first and at most `max` of them. `complete` is false when the walk from `head` along
+   * `parents[0]` does not reach `base` within one compare response (history rewritten, `base`
+   * gone, or more than 250 commits between them).
+   */
+  firstParentCommits(
+    base: string,
+    head: string,
+    max: number,
+  ): Promise<{ commits: { sha: string; message: string }[]; complete: boolean }>;
   listPullFiles(number: number): Promise<PullFiles>;
   /**
    * sha256 over the three-dot comparison `base...head` (merge base to `head`): each changed file,
@@ -401,6 +412,32 @@ function uniqueFailures(failures: FailedCheck[]): FailedCheck[] {
 
 /** Rules under which an API merge by the server can never succeed. */
 const UNSUPPORTED_RULES = new Set(['merge_queue', 'required_deployments']);
+
+/** The most commits one compare response lists (GitHub's page size cap). */
+const COMPARE_COMMITS_CAP = 250;
+
+/**
+ * Walks `parents[0]` from `head` back to `base` over one compare response's commits, skipping
+ * every merge's other parents. Returns the walked commits oldest first, at most `max` of them;
+ * `complete` is false when the walk leaves the response before reaching `base`.
+ */
+export function walkFirstParents(
+  listed: readonly { sha: string; commit: { message: string }; parents: { sha: string }[] }[],
+  base: string,
+  head: string,
+  max: number,
+): { commits: { sha: string; message: string }[]; complete: boolean } {
+  const bySha = new Map(listed.map((c) => [c.sha, c]));
+  const walked: { sha: string; message: string }[] = [];
+  let cur: string | undefined = head;
+  while (cur !== base) {
+    const c: (typeof listed)[number] | undefined = cur === undefined ? undefined : bySha.get(cur);
+    if (!c || walked.length > bySha.size) return { commits: [], complete: false };
+    walked.push({ sha: c.sha, message: c.commit.message });
+    cur = c.parents[0]?.sha;
+  }
+  return { commits: walked.reverse().slice(0, Math.max(0, max)), complete: true };
+}
 
 function statusOf(err: unknown): number | undefined {
   return (err as ForgeError | null)?.status;
@@ -960,6 +997,30 @@ export class GitHubForge implements Forge {
       baseSha: data.base_commit.sha,
       mergeBaseSha: data.merge_base_commit.sha,
     };
+  }
+
+  async firstParentCommits(
+    base: string,
+    head: string,
+    max: number,
+  ): Promise<{ commits: { sha: string; message: string }[]; complete: boolean }> {
+    if (base === head) return { commits: [], complete: true };
+    let data: {
+      commits: { sha: string; commit: { message: string }; parents: { sha: string }[] }[];
+    };
+    try {
+      ({ data } = await this.octokit.rest.repos.compareCommitsWithBasehead({
+        owner: this.owner,
+        repo: this.repo,
+        basehead: `${base}...${head}`,
+        per_page: COMPARE_COMMITS_CAP,
+      }));
+    } catch (err) {
+      // The base commit no longer exists (history rewritten and collected): nothing to walk.
+      if (statusOf(err) === 404) return { commits: [], complete: false };
+      throw err;
+    }
+    return walkFirstParents(data.commits, base, head, max);
   }
 
   async changeDigest(base: string, head: string): Promise<ChangeDigest> {

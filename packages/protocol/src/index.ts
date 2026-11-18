@@ -101,7 +101,14 @@ export const SKIPPED_HEADER = 'x-jumpmaster-skipped';
 export const SLOTS_HEADER = 'x-jumpmaster-slots';
 
 /** Roles that work for the zone rather than one work item. They hold no forge write credential. */
-export const CREW_ROLES = ['crew-lead', 'refute', 'diagnose', 'triage', 'arbitrate'] as const;
+export const CREW_ROLES = [
+  'crew-lead',
+  'refute',
+  'diagnose',
+  'triage',
+  'arbitrate',
+  'audit',
+] as const;
 export type CrewRole = (typeof CREW_ROLES)[number];
 export const isCrewRole = (r: string): r is CrewRole =>
   (CREW_ROLES as readonly string[]).includes(r);
@@ -258,6 +265,7 @@ export const DropPayloadSchema = z.discriminatedUnion('role', [
   z.object({ ...dropPayloadBase, role: z.literal('resolve'), pr: PrRefSchema }),
   z.strictObject({ ...crewPayloadBase, role: z.literal('crew-lead') }),
   z.strictObject({ ...crewPayloadBase, role: z.literal('refute') }),
+  z.strictObject({ ...crewPayloadBase, role: z.literal('audit') }),
   z.strictObject({
     ...crewPayloadBase,
     role: z.literal('arbitrate'),
@@ -481,12 +489,36 @@ export const TriageOutputSchema = TriageOutputObject.superRefine((v, ctx) => {
 });
 export type TriageOutput = z.infer<typeof TriageOutputSchema>;
 
+/**
+ * An audit of one merged commit. `refuted` carries exactly one fix-forward issue with the
+ * evidence; `holds` carries none.
+ */
+export const AuditOutputSchema = z
+  .strictObject({
+    verdict: z.enum(['holds', 'refuted']),
+    findings: z.array(z.string().max(1000)).max(20),
+    issue: z
+      .strictObject({
+        title: z.string().min(1).max(120),
+        body: z.string().min(1).max(12000),
+      })
+      .optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.verdict === 'refuted' && v.issue === undefined)
+      ctx.addIssue({ code: 'custom', path: ['issue'], message: 'refuted needs an issue' });
+    if (v.verdict === 'holds' && v.issue !== undefined)
+      ctx.addIssue({ code: 'custom', path: ['issue'], message: 'holds carries no issue' });
+  });
+export type AuditOutput = z.infer<typeof AuditOutputSchema>;
+
 const CREW_OUTPUT = {
   'crew-lead': CrewLeadOutputSchema,
   refute: RefuteOutputSchema,
   diagnose: DiagnoseOutputSchema,
   triage: TriageOutputSchema,
   arbitrate: ArbitrateOutputSchema,
+  audit: AuditOutputSchema,
 } as const;
 
 export type CrewOutput = {
@@ -495,6 +527,7 @@ export type CrewOutput = {
   diagnose: DiagnoseOutput;
   triage: TriageOutput;
   arbitrate: ArbitrateOutput;
+  audit: AuditOutput;
 };
 
 /** The `--json-schema` for a crew role; every object forbids additional properties. */

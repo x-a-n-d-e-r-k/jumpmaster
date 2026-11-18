@@ -112,6 +112,13 @@ export interface FakeForgeState {
   /** `failed` may be left out when a test doesn't care which checks failed: it reads as `[]`. */
   checks: Map<string, Omit<ChecksFacts, 'failed'> & { failed?: ChecksFacts['failed'] }>;
   compares: Map<string, CompareFacts>;
+  /** Commits by SHA: their message and parents (first parent first), walked by `firstParentCommits`. */
+  commits: Map<string, { message: string; parents: string[] }>;
+  /**
+   * Adds a commit on `branch` (its parent the branch tip, plus `mergeOf` as a second parent) and
+   * moves the branch to it. Returns its SHA.
+   */
+  commit(branch: string, message: string, opts?: { sha?: string; mergeOf?: string }): string;
   /**
    * `changeDigest` answers, keyed `base...head`. Absent: digested from `compareFiles` with the
    * real digest, else complete and distinct per head (a head changes something of its own).
@@ -316,6 +323,15 @@ function createState(opts: {
     blockedByLinks: [],
     checks: new Map(),
     compares: new Map(),
+    commits: new Map(),
+    commit(branch, message, o = {}) {
+      const sha = o.sha ?? `c${state.commits.size + 1}`.padEnd(40, '0');
+      const tip = state.branches.get(branch);
+      const parents = [...(tip ? [tip] : []), ...(o.mergeOf ? [o.mergeOf] : [])];
+      state.commits.set(sha, { message, parents });
+      state.branches.set(branch, sha);
+      return sha;
+    },
     digests: new Map(),
     compareFiles: new Map(),
     reviews: [],
@@ -506,6 +522,19 @@ function forgeFor(
         mergeBaseSha: 'base0',
       }),
     }),
+    firstParentCommits: async (base, head, max) => {
+      const walked: { sha: string; message: string }[] = [];
+      let cur: string | undefined = head;
+      while (cur !== base) {
+        const c: { message: string; parents: string[] } | undefined =
+          cur === undefined ? undefined : state.commits.get(cur);
+        if (!c || cur === undefined || walked.length > state.commits.size)
+          return { commits: [], complete: false };
+        walked.push({ sha: cur, message: c.message });
+        cur = c.parents[0];
+      }
+      return { commits: walked.reverse().slice(0, Math.max(0, max)), complete: true };
+    },
     changeDigest: async (base, head) => {
       const key = `${base}...${head}`;
       const seeded = state.digests.get(key);

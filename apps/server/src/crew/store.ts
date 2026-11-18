@@ -410,3 +410,119 @@ export function settleArbitration(db: Db, id: number, s: ArbitrationSettle, now:
     });
   return r.changes > 0;
 }
+
+/** A zone's audit cursor: the last merged commit audited (or the head when audits started). */
+export type AuditCursor = {
+  zoneId: string;
+  auditedSha: string;
+  /** Commits known to wait after `auditedSha` when it was set; 0 when none were. */
+  pending: number;
+  checkedAt: string;
+  updatedAt: string;
+};
+
+export function getAuditCursor(db: Db, zoneId: string): AuditCursor | undefined {
+  return db
+    .prepare(
+      `SELECT zone_id AS zoneId, audited_sha AS auditedSha, pending, checked_at AS checkedAt,
+         updated_at AS updatedAt FROM crew_audit_cursor WHERE zone_id = ?`,
+    )
+    .get(zoneId) as AuditCursor | undefined;
+}
+
+/** Stores a zone's first cursor; a cursor stored meanwhile by another pass is kept. */
+export function insertAuditCursor(db: Db, zoneId: string, sha: string, now: Date): void {
+  const at = now.toISOString();
+  db.prepare(
+    `INSERT INTO crew_audit_cursor (zone_id, audited_sha, pending, checked_at, updated_at)
+     VALUES (?, ?, 0, ?, ?) ON CONFLICT (zone_id) DO NOTHING`,
+  ).run(zoneId, sha, at, at);
+}
+
+/**
+ * Moves the cursor from `from` (the SHA this pass read) to `to`. Returns false, changing nothing,
+ * when another pass moved it first.
+ */
+export function moveAuditCursor(
+  db: Db,
+  zoneId: string,
+  from: string,
+  to: string,
+  pending: number,
+  now: Date,
+): boolean {
+  const at = now.toISOString();
+  const r = db
+    .prepare(
+      `UPDATE crew_audit_cursor SET audited_sha = ?, pending = ?, checked_at = ?, updated_at = ?
+       WHERE zone_id = ? AND audited_sha = ?`,
+    )
+    .run(to, pending, at, at, zoneId, from);
+  return r.changes > 0;
+}
+
+export type AuditState = 'running' | 'holds' | 'filed' | 'refused' | 'failed';
+
+/** One audit of one merged commit, by its drop. One per zone and commit (`UNIQUE`). */
+export type CrewAudit = {
+  id: number;
+  zoneId: string;
+  sha: string;
+  dropId: string;
+  state: AuditState;
+  crewIssueId: number | null;
+  /** Why it was refused or failed. */
+  reason: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+const AUDIT_COLS = `id, zone_id AS zoneId, sha, drop_id AS dropId, state, crew_issue_id AS crewIssueId,
+  reason, created_at AS createdAt, updated_at AS updatedAt`;
+
+/** Records a running audit; throws a UNIQUE violation if the zone audited this commit already. */
+export function insertAudit(
+  db: Db,
+  row: { zoneId: string; sha: string; dropId: string },
+  now: Date,
+): number {
+  const at = now.toISOString();
+  const r = db
+    .prepare(
+      `INSERT INTO crew_audits (zone_id, sha, drop_id, state, created_at, updated_at)
+       VALUES (?, ?, ?, 'running', ?, ?)`,
+    )
+    .run(row.zoneId, row.sha, row.dropId, at, at);
+  return Number(r.lastInsertRowid);
+}
+
+export function getAuditByDrop(db: Db, dropId: string): CrewAudit | undefined {
+  return db.prepare(`SELECT ${AUDIT_COLS} FROM crew_audits WHERE drop_id = ?`).get(dropId) as
+    | CrewAudit
+    | undefined;
+}
+
+export function listAudits(db: Db, zoneId: string): CrewAudit[] {
+  return db
+    .prepare(`SELECT ${AUDIT_COLS} FROM crew_audits WHERE zone_id = ? ORDER BY id`)
+    .all(zoneId) as CrewAudit[];
+}
+
+/**
+ * Settles a running audit. Only from `running`: returns false, changing nothing, when it was
+ * settled already, so a re-delivered result acts once.
+ */
+export function settleAudit(
+  db: Db,
+  id: number,
+  s: { state: Exclude<AuditState, 'running'>; crewIssueId?: number; reason?: string },
+  now: Date,
+): boolean {
+  const r = db
+    .prepare(
+      `UPDATE crew_audits SET state = ?, crew_issue_id = ?, reason = ?, updated_at = ?
+       WHERE id = ? AND state = 'running'`,
+    )
+    .run(s.state, s.crewIssueId ?? null, s.reason ?? null, now.toISOString(), id);
+  return r.changes > 0;
+}

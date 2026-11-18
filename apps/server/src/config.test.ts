@@ -503,8 +503,17 @@ describe('crew config', () => {
       maxRefute: 3,
       maxTriage: 2,
       arbiter: true,
+      auditPerCycle: 1,
     });
     expect(z?.botLogins).toEqual([]);
+  });
+
+  test('crew.auditPerCycle defaults to 1, takes 0 to turn the audit off, and refuses negatives (#385)', () => {
+    const at = (v: unknown) => withZone({ crew: { enabled: true, auditPerCycle: v } });
+    expect(loadConfig(at(0), fullEnv).dropZones[0]?.crew.auditPerCycle).toBe(0);
+    expect(loadConfig(at(3), fullEnv).dropZones[0]?.crew.auditPerCycle).toBe(3);
+    expect(() => loadConfig(at(-1), fullEnv)).toThrow();
+    expect(() => loadConfig(at(1.5), fullEnv)).toThrow();
   });
 
   test('a crew zone with no refutePromotes key parses to true: a passing refute promotes (#318)', () => {
@@ -1459,6 +1468,7 @@ describe('githubApp (spec §4.2: installation and repository ids, not secret)', 
         maxRefute: 3,
         maxTriage: 2,
         arbiter: true,
+        auditPerCycle: 1,
       },
       botLogins: [],
       authorLoginAliases: [],

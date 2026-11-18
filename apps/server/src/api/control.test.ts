@@ -301,7 +301,8 @@ describe('crew-cycle route', () => {
       state: 'succeeded',
       createdAt: new Date(t0.getTime() - 60_000).toISOString(),
     });
-    const zone = makeZone({ id: 'main', crew });
+    // The audit of merged changes off: this is the lead cycle's own scheduling.
+    const zone = makeZone({ id: 'main', crew: { ...crew, auditPerCycle: 0 } });
     expect(nextCrewWork(db, zone, t0)).toBeNull();
     expect((await post('/api/control/zones/main/crew-cycle', {})).statusCode).toBe(200);
     expect(nextCrewWork(db, zone, new Date(t0.getTime() + 1000))).toEqual({ role: 'crew-lead' });

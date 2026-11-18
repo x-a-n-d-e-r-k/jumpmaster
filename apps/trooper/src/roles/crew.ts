@@ -103,7 +103,7 @@ function triageImages(
 }
 
 /**
- * A crew role (crew-lead, refute, diagnose, triage, arbitrate): a read-only clone, no gates, no
+ * A crew role (crew-lead, refute, diagnose, triage, arbitrate, audit): a read-only clone, no gates, no
  * verification, no services, never a commit or a push. The structured output goes back to the
  * server, which decides what, if anything, it leads to.
  */

@@ -43,11 +43,12 @@ import {
 import { plus, t0 } from '../test/helpers.js';
 import { applyCrewActions } from './actions.js';
 import { crewBodySha, flushCrewOps } from './flush.js';
-import { applyArbitrations, applyCrewResult } from './results.js';
+import { applyArbitrations, applyCrewResult, foundByAudit } from './results.js';
 import { enqueueCrew, nextCrewWork } from './schedule.js';
 import {
   getCrewIssue,
   getTriageRequest,
+  listAudits,
   listCrewIssues,
   listTriageRequests,
   recordTriageRequest,
@@ -1430,5 +1431,220 @@ describe('arbiter rulings on review disagreements (#383)', () => {
     await applyCrewResult(h.db, deps, drop, completed(ruling('insufficient_evidence')), h.now());
     expect(row(h)).toMatchObject({ state: 'ruled', ruling: 'B', acted: 1 });
     expect(briefing(h)?.diagnoseAttempts).toBe(0);
+  });
+});
+
+describe('audit results (#385)', () => {
+  // A day on, clear of any lead cycle the tests above ran at t0.
+  const at = (m: number) => plus(t0, 24 * 60 * MIN + m * MIN);
+  const AUDIT_ISSUE = {
+    title: 'Cap the retry count the merged change left unbounded',
+    body: `## Context
+
+src/retry.ts:12 loops without a cap; the merged change dropped the check.
+
+## Acceptance criteria
+
+- [ ] retries stop after 3
+
+## Required tests
+
+- a test that a fourth retry is not attempted
+`,
+  };
+
+  /** A running audit drop for the commit merged after the cursor, and that commit's SHA. */
+  async function auditDrop(zone: DropZoneConfig = w.zone): Promise<{ id: string; sha: string }> {
+    w.f.state.commit('main', 'chore: base');
+    const lead1 = await crewDrop(at(0), zone);
+    updateDrop(w.db, lead1, { state: 'succeeded' });
+    const pass = await zonePass(w.forges, zone, 'main');
+    // The first audit pass stores the cursor at the head.
+    expect(
+      await enqueueCrew(w.db, w.forges, zone, pass, promptVersions(), usageCfg, at(1)),
+    ).toBeNull();
+    const sha = w.f.state.commit('main', 'feat: retries (#12)');
+    const lead2 = await crewDrop(at(61), zone);
+    updateDrop(w.db, lead2, { state: 'succeeded' });
+    const id = await crewDrop(at(62), zone);
+    expect(getDrop(w.db, id)?.role).toBe('audit');
+    return { id, sha };
+  }
+
+  const auditRow = () => listAudits(w.db, 'main')[0];
+
+  test('holds: the audit is settled holds and nothing is filed', async () => {
+    const { id, sha } = await auditDrop();
+    await applyResult(w.db, deps(), id, completed({ verdict: 'holds', findings: [] }), at(63));
+    expect(getDrop(w.db, id)?.state).toBe('succeeded');
+    expect(auditRow()).toMatchObject({ sha, dropId: id, state: 'holds', crewIssueId: null });
+    expect(listCrewIssues(w.db, 'main')).toEqual([]);
+  });
+
+  test('a refutation files one staged crew issue under audit:<sha7>, its body ending with the audit line', async () => {
+    const { id, sha } = await auditDrop();
+    const sha7 = sha.slice(0, 7);
+    await applyResult(
+      w.db,
+      deps(),
+      id,
+      completed({
+        verdict: 'refuted',
+        findings: ['src/retry.ts:12 has no cap'],
+        issue: { ...AUDIT_ISSUE, body: `${AUDIT_ISSUE.body}\n\n` },
+      }),
+      at(63),
+    );
+    expect(getDrop(w.db, id)?.state).toBe('succeeded');
+    const filed = listCrewIssues(w.db, 'main');
+    expect(filed).toHaveLength(1);
+    const c = filed[0];
+    expect(c).toMatchObject({
+      key: `audit-${sha7}`,
+      objective: `audit:${sha7}`,
+      title: AUDIT_ISSUE.title,
+      source: 'drop',
+      sourceRef: id,
+      state: 'filing',
+    });
+    expect(c?.body.split('\n').at(-1)).toBe(`Found by the audit of ${sha}.`);
+    expect(c?.body).toBe(`${AUDIT_ISSUE.body.trim()}\n\n${foundByAudit(sha)}`);
+    expect(auditRow()).toMatchObject({ state: 'filed', crewIssueId: c?.id, reason: null });
+
+    // The only forge op it leads to is the staged issue's create_issue, through flushCrewOps.
+    await flushCrewOps(w.db, w.forges, w.zone, [], at(64));
+    const ops = listOutbox(w.db, ['pending', 'unknown', 'done', 'failed'], 'main');
+    expect(ops.map((o) => o.kind)).toEqual(['create_issue']);
+    expect(getCrewIssue(w.db, c?.id ?? -1)?.state).toBe('staged');
+    const n = getCrewIssue(w.db, c?.id ?? -1)?.number ?? -1;
+    expect(w.f.state.issues.get(n)?.labels).toContain('agent-staged');
+    // No revert, reopen, comment or merge: no forge write but the create.
+    const writes = w.f.author.calls.filter((x) =>
+      [
+        'updateIssue',
+        'setLabels',
+        'createIssueComment',
+        'findOrCreatePullRequest',
+        'merge',
+        'createReview',
+        'updateBranch',
+      ].includes(x.method),
+    );
+    expect(writes).toEqual([]);
+    // Next it is refuted like any crew issue.
+    expect(nextCrewWork(w.db, w.zone, at(65))).toEqual({ role: 'refute', crewIssueId: c?.id });
+  });
+
+  test('a refutation naming a protected path in a code span is refused and files nothing', async () => {
+    const zone = { ...w.zone, protectedPaths: ['.github/**'] };
+    const { id } = await auditDrop(zone);
+    const body = AUDIT_ISSUE.body.replace(
+      'src/retry.ts:12',
+      'SECRET-TEXT in `.github/workflows/ci.yml`',
+    );
+    await applyResult(
+      w.db,
+      deps(zone),
+      id,
+      completed({ verdict: 'refuted', findings: [], issue: { ...AUDIT_ISSUE, body } }),
+      at(63),
+    );
+    expect(getDrop(w.db, id)?.state).toBe('succeeded');
+    expect(listCrewIssues(w.db, 'main')).toEqual([]);
+    const row = auditRow();
+    expect(row?.state).toBe('refused');
+    expect(row?.reason).toMatch(/protected path/);
+    // The reasons never echo the issue's text.
+    expect(row?.reason).not.toContain('SECRET-TEXT');
+    expect(row?.reason).not.toContain('audit-');
+  });
+
+  test('a refutation without ## Required tests is refused and files nothing', async () => {
+    const { id } = await auditDrop();
+    const body = AUDIT_ISSUE.body.slice(0, AUDIT_ISSUE.body.indexOf('## Required tests'));
+    await applyResult(
+      w.db,
+      deps(),
+      id,
+      completed({ verdict: 'refuted', findings: [], issue: { ...AUDIT_ISSUE, body } }),
+      at(63),
+    );
+    expect(listCrewIssues(w.db, 'main')).toEqual([]);
+    expect(auditRow()?.state).toBe('refused');
+    expect(auditRow()?.crewIssueId).toBeNull();
+  });
+
+  test('a body over the limit once the audit line is added is refused', async () => {
+    const { id } = await auditDrop();
+    const body = `${AUDIT_ISSUE.body}\n${'x'.repeat(12_000 - AUDIT_ISSUE.body.length - 1)}`;
+    expect(body.length).toBeLessThanOrEqual(12_000);
+    await applyResult(
+      w.db,
+      deps(),
+      id,
+      completed({ verdict: 'refuted', findings: [], issue: { ...AUDIT_ISSUE, body } }),
+      at(63),
+    );
+    expect(listCrewIssues(w.db, 'main')).toEqual([]);
+    expect(auditRow()).toMatchObject({ state: 'refused' });
+    expect(auditRow()?.reason).toMatch(/12000/);
+  });
+
+  test('a failed drop ends failed with its reason', async () => {
+    const { id } = await auditDrop();
+    await applyResult(
+      w.db,
+      deps(),
+      id,
+      { status: 'failed', reason: 'crew modified the tree', gates: [] },
+      at(63),
+    );
+    expect(getDrop(w.db, id)?.state).toBe('failed');
+    expect(auditRow()?.state).toBe('failed');
+    expect(auditRow()?.reason).toContain('crew modified the tree');
+    expect(listCrewIssues(w.db, 'main')).toEqual([]);
+  });
+
+  test('an invalid output ends failed', async () => {
+    const { id } = await auditDrop();
+    await applyResult(w.db, deps(), id, completed({ verdict: 'refuted', findings: [] }), at(63));
+    expect(getDrop(w.db, id)?.state).toBe('failed');
+    expect(auditRow()?.state).toBe('failed');
+    expect(auditRow()?.reason).toMatch(/^invalid crew output: issue/);
+  });
+
+  test('a rate-limited drop ends failed, and the commit is not audited again', async () => {
+    const { id } = await auditDrop();
+    await applyResult(w.db, deps(), id, { status: 'rate_limited', gates: [] }, at(63));
+    expect(auditRow()).toMatchObject({ state: 'failed', reason: 'the drop was rate-limited' });
+    // The cursor has moved past it: the next cycle finds nothing new.
+    const lead = await crewDrop(at(124));
+    updateDrop(w.db, lead, { state: 'succeeded' });
+    const pass = await zonePass(w.forges, w.zone, 'main');
+    expect(
+      await enqueueCrew(w.db, w.forges, w.zone, pass, promptVersions(), usageCfg, at(125)),
+    ).toBeNull();
+    expect(listAudits(w.db, 'main')).toHaveLength(1);
+  });
+
+  test('a lost drop ends failed on the next pass', async () => {
+    const { id } = await auditDrop();
+    updateDrop(w.db, id, { state: 'lost' });
+    const pass = await zonePass(w.forges, w.zone, 'main');
+    await enqueueCrew(w.db, w.forges, w.zone, pass, promptVersions(), usageCfg, at(63));
+    expect(auditRow()).toMatchObject({
+      state: 'failed',
+      reason: 'the audit drop ended without a verdict',
+    });
+  });
+
+  test('a re-delivered verdict acts once', async () => {
+    const { id } = await auditDrop();
+    const drop = getDrop(w.db, id) as Drop;
+    const out = completed({ verdict: 'refuted', findings: [], issue: AUDIT_ISSUE });
+    await applyCrewResult(w.db, deps(), drop, out, at(63));
+    await applyCrewResult(w.db, deps(), drop, out, at(64));
+    expect(listCrewIssues(w.db, 'main')).toHaveLength(1);
+    expect(auditRow()?.state).toBe('filed');
   });
 });

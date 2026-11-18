@@ -14,7 +14,7 @@ import { type Drop, listUsageWindows, type UsageWindowRow } from './db/repo.js';
 export { servedModel } from '@jumpmaster/protocol';
 
 /** Roles that run on Fable when it is available. */
-export const FABLE_ROLES: readonly CrewRole[] = ['diagnose', 'arbitrate'];
+export const FABLE_ROLES: readonly CrewRole[] = ['diagnose', 'arbitrate', 'audit'];
 /** Plans that include Fable. `enterprise` is treated as not including it until verified. */
 export const FABLE_PLANS: readonly ClaudePlan[] = ['max', 'ultra', 'team_premium'];
 

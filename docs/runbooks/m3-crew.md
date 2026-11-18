@@ -33,7 +33,8 @@ keeps working.
   "refutePromotes": true,
   "maxRefute": 3,
   "maxTriage": 2,
-  "arbiter": true
+  "arbiter": true,
+  "auditPerCycle": 1
 }
 ```
 
@@ -74,6 +75,18 @@ And at the top level of the server config:
   reviewer still decides, and the item still merges only with an approving verdict on its head and
   CI. Anything else leaves the item parked, with the ruling as its briefing's diagnosis. If it
   parks again, it is diagnosed and briefed to you as before.
+- `auditPerCycle` (1 by default, 0 turns it off) audits commits merged to the default branch:
+  after each lead cycle, when no other crew work is due and a crew-issue slot is free, an `audit`
+  drop tries to refute "this merged change is correct and meets the definition of done" for the
+  oldest first-parent commit after the zone's cursor, one drop per commit, at most this many per
+  cycle. It runs on Fable when Fable is available. The first pass only stores the cursor at the
+  head, so audits start from then. A refutation with evidence files one staged crew issue (key
+  `audit-<sha7>`, objective `audit:<sha7>`, its body ending `Found by the audit of <sha>.`), which
+  is refuted and promoted like any crew issue; one Jumpmaster refuses (protected path, not
+  drop-ready) files nothing. It never reverts, reopens or comments. If history was rewritten (the
+  cursor isn't a first-parent ancestor of the head within one compare), the cursor moves to the
+  head and an `audit_skipped` observation says so. Each audit is a `crew_audits` row
+  (`holds`, `filed`, `refused` or `failed`); a failed audit's commit is not audited again.
 - A triage drop gets the issue's images. The server fetches at most 4 image URLs from the
   issue body, only GitHub attachments (`https://github.com/user-attachments/assets/…`,
   `user-images.githubusercontent.com`, `private-user-images.githubusercontent.com`), over HTTPS,
@@ -82,7 +95,7 @@ And at the top level of the server config:
   Each image is at most 3 MiB (8 MiB in all) and must be PNG, JPEG, GIF or WebP by its bytes;
   anything else is skipped with a short reason and the drop still runs. The agent reads them as
   `inputs/image-<n>.<ext>` in the trooper's work directory, as data like the issue text.
-- `maxDropsPerDay` counts crew drops (crew-lead, refute, diagnose, triage) over a trailing 24 hours,
+- `maxDropsPerDay` counts crew drops (crew-lead, refute, diagnose, triage, arbitrate, audit) over a trailing 24 hours,
   including failed and killed ones but not rate-limited or lost ones.
   Each ruling on a crew briefing starts a new crew-lead cycle, so a busy day can hit the cap; crew
   work then stops until the window rolls.

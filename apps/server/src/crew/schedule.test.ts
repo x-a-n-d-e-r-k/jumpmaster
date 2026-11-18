@@ -79,6 +79,9 @@ async function enqueue(at = t0, zone: DropZoneConfig = w.zone): Promise<string |
   return enqueueCrew(w.db, w.forges, zone, pass, promptVersions(), usageCfg, at);
 }
 
+/** The zone with the audit of merged changes off: the lead cycle's own scheduling. */
+const noAudit = (): DropZoneConfig => ({ ...w.zone, crew: { ...w.zone.crew, auditPerCycle: 0 } });
+
 const work = (id: string) =>
   (JSON.parse(getDrop(w.db, id)?.inputJson ?? '{}') as CrewInputJson).work;
 
@@ -231,7 +234,7 @@ describe('enqueueCrew', () => {
     expect(work(l)).toEqual({ role: 'crew-lead' });
     finish(l);
     // The next cycle waits cycleMinutes.
-    expect(nextCrewWork(w.db, w.zone, plus(t0, 30 * MIN))).toBeNull();
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 30 * MIN))).toBeNull();
     expect(nextCrewWork(w.db, w.zone, plus(t0, 64 * MIN))).toEqual({ role: 'crew-lead' });
   });
 
@@ -286,7 +289,7 @@ describe('enqueueCrew', () => {
   test('a ruling newer than the last cycle makes the lead cycle due at once', async () => {
     const l = (await enqueue()) ?? '';
     finish(l);
-    expect(nextCrewWork(w.db, w.zone, plus(t0, 5 * MIN))).toBeNull();
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 5 * MIN))).toBeNull();
     const b = raiseBriefing(
       w.db,
       {
@@ -312,12 +315,12 @@ describe('enqueueCrew', () => {
     parkedItem();
     const [b] = listBriefings(w.db, { zoneId: 'main', state: 'open' });
     ruleBriefing(w.db, b?.id ?? -1, 'leave', '', plus(t0, 2 * MIN));
-    expect(nextCrewWork(w.db, w.zone, plus(t0, 3 * MIN))).toBeNull();
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 3 * MIN))).toBeNull();
   });
 
   test('crew-cycle makes the lead cycle due now', async () => {
     finish((await enqueue()) ?? '');
-    expect(nextCrewWork(w.db, w.zone, plus(t0, 5 * MIN))).toBeNull();
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 5 * MIN))).toBeNull();
     requestCrewCycle('main', plus(t0, 5 * MIN));
     expect(nextCrewWork(w.db, w.zone, plus(t0, 6 * MIN))).toEqual({ role: 'crew-lead' });
   });
@@ -773,6 +776,49 @@ describe('arbitration of crew issues out of refutes (#382)', () => {
       basis: 'sha-2',
     });
   });
+
+  test('an audit never preempts diagnose, refute, arbitrate, triage or a due lead cycle (#385)', async () => {
+    const zone = zone3({ maxStaged: 5 });
+    // A lead cycle ran (a day on, after any crew-cycle request kept in memory) and an audit is
+    // due: the cursor waits with commits pending.
+    const lead = plus(t0, 24 * HOUR);
+    insertDrop(
+      w.db,
+      { id: 'lead-0', dropZoneId: 'main', workItemId: null, role: 'crew-lead', state: 'succeeded' },
+      lead,
+    );
+    w.db
+      .prepare(
+        `INSERT INTO crew_audit_cursor (zone_id, audited_sha, pending, checked_at, updated_at)
+         VALUES ('main', 'abc', 2, ?, ?)`,
+      )
+      .run(lead.toISOString(), lead.toISOString());
+    const at = plus(lead, MIN);
+    const work = () => nextCrewWork(w.db, zone, at, true);
+    expect(work()).toEqual({ role: 'audit' });
+    const req =
+      recordTriageRequest(
+        w.db,
+        'main',
+        { number: 179, title: 'Issue 179', body: 'Two things.', author: 'human' },
+        t0,
+      ) ?? -1;
+    const arb = exhausted('arb');
+    const fresh = stagedIssue('fresh');
+    parkedItem();
+    expect(work()?.role).toBe('diagnose');
+    const [parked] = listBriefings(w.db, { zoneId: 'main', state: 'open', kind: 'parked' });
+    w.db.prepare('UPDATE briefings SET diagnose_attempts = 1 WHERE id = ?').run(parked?.id);
+    expect(work()?.role).toBe('refute');
+    setCrewIssue(w.db, fresh, { refutedSha: 'sha-1' }, t0);
+    expect(work()?.role).toBe('arbitrate');
+    setCrewIssue(w.db, arb, { state: 'rejected' }, t0);
+    expect(work()?.role).toBe('triage');
+    setTriageRequest(w.db, req, { state: 'done', outcome: 'not-agent-work' }, t0);
+    expect(work()).toEqual({ role: 'audit' });
+    // A due lead cycle comes first; the audit follows it.
+    expect(nextCrewWork(w.db, zone, plus(lead, 61 * MIN), true)).toEqual({ role: 'crew-lead' });
+  });
 });
 
 describe('arbitration of review disagreements (#383)', () => {
@@ -1006,5 +1052,261 @@ describe('arbitration of review disagreements (#383)', () => {
     await h.reconcile();
     expect(h.queuedRoles()).toEqual(['diagnose']);
     expect(crewDrops(h, 'arbitrate')).toHaveLength(1);
+  });
+});
+
+describe('audit of merged changes (#385)', () => {
+  // A day on: an earlier test's crew-cycle request (kept in memory) is older than these cycles.
+  const at = (m: number) => plus(t0, 24 * HOUR + m * MIN);
+  const audits = () =>
+    w.db.prepare('SELECT sha, drop_id AS dropId, state FROM crew_audits ORDER BY id').all() as {
+      sha: string;
+      dropId: string;
+      state: string;
+    }[];
+  const cursor = () =>
+    w.db
+      .prepare(
+        `SELECT audited_sha AS sha, pending, checked_at AS checkedAt FROM crew_audit_cursor
+         WHERE zone_id = 'main'`,
+      )
+      .get() as { sha: string; pending: number; checkedAt: string } | undefined;
+  const auditDrops = () =>
+    (
+      w.db.prepare(`SELECT id FROM drops WHERE role = 'audit' ORDER BY rowid`).all() as {
+        id: string;
+      }[]
+    ).map((r) => r.id);
+  const zoneWith = (o: Partial<DropZoneConfig['crew']>): DropZoneConfig => ({
+    ...w.zone,
+    crew: { ...w.zone.crew, ...o },
+  });
+
+  /** Runs a lead cycle at `m` minutes and finishes it. */
+  async function leadCycle(m: number, zone = w.zone): Promise<void> {
+    const id = (await enqueue(at(m), zone)) ?? '';
+    expect(work(id)).toEqual({ role: 'crew-lead' });
+    finish(id);
+  }
+
+  /** main at `base`, a lead cycle, and the cursor stored at `base` by the first audit pass. */
+  async function cursorAtBase(zone = w.zone): Promise<string> {
+    const base = w.f.state.commit('main', 'chore: base');
+    await leadCycle(0, zone);
+    expect(await enqueue(at(1), zone)).toBeNull();
+    expect(cursor()?.sha).toBe(base);
+    return base;
+  }
+
+  test('a new zone: the first eligible pass stores the cursor at the head, and no drop runs', async () => {
+    const head = w.f.state.commit('main', 'feat: one (#3)');
+    await leadCycle(0);
+    expect(nextCrewWork(w.db, w.zone, at(1))).toEqual({ role: 'audit' });
+    expect(await enqueue(at(1))).toBeNull();
+    expect(cursor()).toEqual({ sha: head, pending: 0, checkedAt: at(1).toISOString() });
+    expect(auditDrops()).toEqual([]);
+    expect(audits()).toEqual([]);
+    // Audits start from now: nothing more this cycle.
+    expect(nextCrewWork(w.db, w.zone, at(2))).toBeNull();
+  });
+
+  test('three merged commits, auditPerCycle 1: one audit drop for the oldest, the rest wait for the next cycle', async () => {
+    await cursorAtBase();
+    const c1 = w.f.state.commit('main', 'feat: one (#3)');
+    const c2 = w.f.state.commit('main', 'feat: two (#4)');
+    w.f.state.commit('main', 'feat: three (#5)');
+    // Not checked since the last lead cycle? It was: the next audit waits for the next cycle.
+    expect(nextCrewWork(w.db, w.zone, at(2))).toBeNull();
+    await leadCycle(61);
+    const d = (await enqueue(at(62))) ?? '';
+    expect(work(d)).toEqual({ role: 'audit', sha: c1, message: 'feat: one (#3)' });
+    expect(getDrop(w.db, d)).toMatchObject({ role: 'audit', workItemId: null, state: 'queued' });
+    expect(audits()).toEqual([{ sha: c1, dropId: d, state: 'running' }]);
+    // max is auditPerCycle + 1 = 2, so the pass sees one more commit pending after c1.
+    expect(cursor()).toEqual({ sha: c1, pending: 1, checkedAt: at(62).toISOString() });
+    finish(d);
+    // auditPerCycle is spent: the next audit waits for the next lead cycle.
+    expect(nextCrewWork(w.db, w.zone, at(63))).toBeNull();
+    await leadCycle(122);
+    const d2 = (await enqueue(at(123))) ?? '';
+    expect(work(d2)).toMatchObject({ role: 'audit', sha: c2 });
+  });
+
+  test('auditPerCycle 2: the second-oldest is audited in the same cycle, after the first drop ends', async () => {
+    const zone = zoneWith({ auditPerCycle: 2 });
+    await cursorAtBase(zone);
+    await leadCycle(61, zone);
+    const c1 = w.f.state.commit('main', 'feat: one');
+    const c2 = w.f.state.commit('main', 'feat: two');
+    const c3 = w.f.state.commit('main', 'feat: three');
+    const d1 = (await enqueue(at(62), zone)) ?? '';
+    expect(work(d1)).toMatchObject({ role: 'audit', sha: c1 });
+    expect(cursor()?.pending).toBe(2);
+    // Only one crew drop runs at a time.
+    expect(await enqueue(at(63), zone)).toBeNull();
+    finish(d1);
+    const d2 = (await enqueue(at(64), zone)) ?? '';
+    expect(work(d2)).toMatchObject({ role: 'audit', sha: c2 });
+    finish(d2);
+    // Two this cycle: c3 waits for the next.
+    expect(nextCrewWork(w.db, zone, at(65))).toBeNull();
+    expect(cursor()).toMatchObject({ sha: c2, pending: 1 });
+    await leadCycle(122, zone);
+    const d3 = (await enqueue(at(123), zone)) ?? '';
+    expect(work(d3)).toMatchObject({ role: 'audit', sha: c3 });
+    finish(d3);
+    // Nothing seen after c3: no audit is due until the next lead cycle.
+    expect(cursor()).toMatchObject({ sha: c3, pending: 0 });
+    expect(nextCrewWork(w.db, zone, at(124))).toBeNull();
+    // Nothing new by then: the cursor is marked checked with nothing pending, and no drop runs.
+    await leadCycle(183, zone);
+    expect(await enqueue(at(184), zone)).toBeNull();
+    expect(cursor()).toEqual({ sha: c3, pending: 0, checkedAt: at(184).toISOString() });
+    expect(nextCrewWork(w.db, zone, at(185))).toBeNull();
+    expect(auditDrops()).toEqual([d1, d2, d3]);
+  });
+
+  test('a merge commit is audited as one commit: its second parent is skipped', async () => {
+    const base = await cursorAtBase();
+    w.f.state.branches.set('feature', base);
+    const f1 = w.f.state.commit('feature', 'wip');
+    const m = w.f.state.commit('main', 'Merge pull request #7', { mergeOf: f1 });
+    await leadCycle(61);
+    const d = (await enqueue(at(62))) ?? '';
+    expect(work(d)).toMatchObject({ role: 'audit', sha: m });
+    expect(cursor()).toMatchObject({ sha: m, pending: 0 });
+  });
+
+  test('history rewritten: the cursor moves to the head and audit_skipped is recorded', async () => {
+    await cursorAtBase();
+    // A force-push: main now starts afresh, without the cursor's commit.
+    w.f.state.branches.delete('main');
+    w.f.state.commit('main', 'rewritten root');
+    const head = w.f.state.commit('main', 'feat: after');
+    await leadCycle(61);
+    expect(await enqueue(at(62))).toBeNull();
+    expect(cursor()).toEqual({ sha: head, pending: 0, checkedAt: at(62).toISOString() });
+    expect(auditDrops()).toEqual([]);
+    const skipped = listObservations(w.db, 'main').filter((o) => o.action === 'audit_skipped');
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]?.itemId ?? null).toBeNull();
+    expect(skipped[0]?.detail).toContain(head.slice(0, 7));
+  });
+
+  test('auditPerCycle 0: no audit work ever', async () => {
+    const zone = zoneWith({ auditPerCycle: 0 });
+    w.f.state.commit('main', 'chore: base');
+    await leadCycle(0, zone);
+    expect(nextCrewWork(w.db, zone, at(1))).toBeNull();
+    expect(await enqueue(at(1), zone)).toBeNull();
+    expect(cursor()).toBeUndefined();
+    w.f.state.commit('main', 'feat: one');
+    await leadCycle(61, zone);
+    expect(await enqueue(at(62), zone)).toBeNull();
+    expect(auditDrops()).toEqual([]);
+  });
+
+  test('no audit runs with no crew-issue slot free', async () => {
+    await cursorAtBase();
+    w.f.state.commit('main', 'feat: one');
+    await leadCycle(61);
+    const full = zoneWith({ maxStaged: 0 });
+    expect(nextCrewWork(w.db, full, at(62))).toBeNull();
+    expect(await enqueue(at(62), full)).toBeNull();
+    expect(auditDrops()).toEqual([]);
+    expect(nextCrewWork(w.db, w.zone, at(62))).toEqual({ role: 'audit' });
+  });
+
+  test('observe records would_enqueue:audit with the commit and moves nothing', async () => {
+    const base = await cursorAtBase();
+    const c1 = w.f.state.commit('main', 'feat: one');
+    await leadCycle(61);
+    const before = cursor();
+    setZoneMode(w.db, 'main', 'observe', at(62));
+    expect(await enqueue(at(62))).toBeNull();
+    expect(auditDrops()).toEqual([]);
+    expect(audits()).toEqual([]);
+    expect(cursor()).toEqual(before);
+    expect(cursor()?.sha).toBe(base);
+    const obs = listObservations(w.db, 'main').filter((o) => o.action === 'would_enqueue:audit');
+    expect(obs.map((o) => o.detail)).toEqual([`commit ${c1.slice(0, 7)}`]);
+  });
+
+  test('a forge error skips the pass and moves nothing', async () => {
+    const base = await cursorAtBase();
+    w.f.state.commit('main', 'feat: one');
+    await leadCycle(61);
+    const author = w.forges.author;
+    const real = author.firstParentCommits.bind(author);
+    author.firstParentCommits = async () => {
+      throw new Error('502');
+    };
+    expect(await enqueue(at(62))).toBeNull();
+    expect(cursor()?.sha).toBe(base);
+    expect(auditDrops()).toEqual([]);
+    author.firstParentCommits = real;
+    expect(await enqueue(at(63))).not.toBeNull();
+  });
+
+  test('D3: two enqueueCrew calls in one pass for the same cursor make one drop and one audit row', async () => {
+    await cursorAtBase();
+    const c1 = w.f.state.commit('main', 'feat: one');
+    await leadCycle(61);
+    const [a, b] = await Promise.all([enqueue(at(62)), enqueue(at(62))]);
+    const ids = [a, b].filter((x) => x !== null);
+    expect(ids).toHaveLength(1);
+    expect(auditDrops()).toEqual(ids);
+    expect(audits()).toEqual([{ sha: c1, dropId: ids[0], state: 'running' }]);
+    expect(cursor()?.sha).toBe(c1);
+  });
+
+  test('D3: a cursor moved between the read and the insert rolls the insert back', async () => {
+    const base = await cursorAtBase();
+    w.f.state.commit('main', 'feat: one');
+    await leadCycle(61);
+    const author = w.forges.author;
+    const real = author.firstParentCommits.bind(author);
+    author.firstParentCommits = async (...args) => {
+      const r = await real(...args);
+      // Another pass moves the cursor while this one waits on the forge.
+      w.db
+        .prepare(`UPDATE crew_audit_cursor SET audited_sha = 'moved' WHERE zone_id = 'main'`)
+        .run();
+      return r;
+    };
+    expect(await enqueue(at(62))).toBeNull();
+    expect(auditDrops()).toEqual([]);
+    expect(audits()).toEqual([]);
+    expect(cursor()?.sha).toBe('moved');
+    expect(base).not.toBe('moved');
+  });
+
+  test('the audit input: the commit as instructions, its message and merged issue as data', async () => {
+    await cursorAtBase();
+    const item = w.item(9, 'done');
+    w.db.prepare('UPDATE work_items SET pr_number = 12 WHERE id = ?').run(item);
+    const c1 = w.f.state.commit('main', 'feat: the thing (#12)\n\nCOMMIT-BODY');
+    await leadCycle(61);
+    const d = (await enqueue(at(62))) ?? '';
+    const input = (JSON.parse(getDrop(w.db, d)?.inputJson ?? '{}') as CrewInputJson).input;
+    expect(input).toMatch(/## Commit \(trusted instructions\)/);
+    expect(input).toContain(`SHA: ${c1}`);
+    expect(input).toContain('Default branch: main');
+    expect(input).toMatch(/## Commit message \(data\)/);
+    expect(input).toContain('COMMIT-BODY');
+    expect(input).toMatch(/## Merged issue \(data\)/);
+    expect(input).toContain('Issue #9');
+    expect(input).toMatch(/## Protected paths \(trusted instructions\)/);
+    expect(input).toContain('LIGHTHOUSE-TEXT');
+    // Its payload is a strict crew payload on the default branch.
+    const p = buildPayload(w.db, w.zone, getDrop(w.db, d) as never, secretsFor());
+    expect(DropPayloadSchema.parse(p).role).toBe('audit');
+    finish(d);
+    // A message naming no PR of the zone's.
+    w.f.state.commit('main', 'chore: by hand');
+    await leadCycle(122);
+    const d2 = (await enqueue(at(123))) ?? '';
+    const input2 = (JSON.parse(getDrop(w.db, d2)?.inputJson ?? '{}') as CrewInputJson).input;
+    expect(input2).toContain('No Jumpmaster issue found for this commit.');
   });
 });

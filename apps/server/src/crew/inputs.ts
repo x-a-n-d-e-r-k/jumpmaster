@@ -617,3 +617,60 @@ export function arbitrateItemInput(
     },
   ]);
 }
+
+type AuditWork = { role: 'audit'; sha: string; message: string };
+
+/** The pull request a merge or squash message names last, as `(#N)` at the end of its subject. */
+export function mergedPrNumber(message: string): number | null {
+  const subject = message.trim().split('\n')[0]?.trim() ?? '';
+  const m = /\(#(\d+)\)$/.exec(subject) ?? /\(#(\d+)\)$/.exec(message.trim());
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * The audit input for one merged commit: the goals, the protected paths and the commit (its full
+ * SHA and the default branch, written here) as instructions; the commit message and the merged
+ * issue (the zone's work item whose PR the message names, if any) as data.
+ */
+export function auditInput(db: Db, zone: DropZoneConfig, work: AuditWork, dropId: string): string {
+  const branch =
+    (
+      db.prepare('SELECT default_branch AS b FROM drop_zones WHERE id = ?').get(zone.id) as
+        | { b: string }
+        | undefined
+    )?.b ?? 'main';
+  const pr = mergedPrNumber(work.message);
+  const item =
+    pr === null
+      ? undefined
+      : (db
+          .prepare(
+            `SELECT issue_number AS issueNumber, title, body FROM work_items
+             WHERE drop_zone_id = ? AND pr_number = ? ORDER BY id DESC LIMIT 1`,
+          )
+          .get(zone.id, pr) as { issueNumber: number; title: string; body: string } | undefined);
+  return assemble('audit', dropId, [
+    goalsSection(db, zone),
+    {
+      title: 'Protected paths',
+      name: 'protected-paths',
+      kind: 'trusted',
+      text: zone.protectedPaths.map((p) => `- ${p}`).join('\n') || '(none)',
+    },
+    {
+      title: 'Commit',
+      name: 'commit',
+      kind: 'trusted',
+      text: `SHA: ${work.sha}\nDefault branch: ${branch}\n\nRun \`git show ${work.sha}\` to read it.`,
+    },
+    { title: 'Commit message', name: 'commit-message', kind: 'data', text: work.message },
+    {
+      title: 'Merged issue',
+      name: 'merged-issue',
+      kind: 'data',
+      text: item
+        ? `Issue #${item.issueNumber}\nTitle: ${item.title}\n\n${item.body}`
+        : 'No Jumpmaster issue found for this commit.',
+    },
+  ]);
+}
