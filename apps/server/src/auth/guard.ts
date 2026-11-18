@@ -42,10 +42,19 @@ const csrfOf = new WeakMap<Principal, string>();
 const SAFE_METHODS = new Set(['GET', 'HEAD']);
 
 /**
- * How a route is guarded: stick routes, the installer's and `/mcp` authenticate themselves; `auth` routes (login,
- * logout, setup) need no principal; `control` routes need one; everything else is a page.
+ * How a route is guarded: stick routes, the installer's, `/mcp` and `/mcp/chat` authenticate
+ * themselves; `auth` routes (login, logout, setup) need no principal; `control` routes need one;
+ * everything else is a page.
  */
-export type RouteClass = 'stick' | 'install' | 'mcp' | 'health' | 'auth' | 'control' | 'page';
+export type RouteClass =
+  | 'stick'
+  | 'install'
+  | 'mcp'
+  | 'chat-mcp'
+  | 'health'
+  | 'auth'
+  | 'control'
+  | 'page';
 
 export function routeClass(path: string): RouteClass {
   if (path.startsWith('/api/sticks/') || path.startsWith('/api/drops/')) return 'stick';
@@ -53,6 +62,9 @@ export function routeClass(path: string): RouteClass {
   // cosign downloads authenticate with the one-time code. Reached at server.publicUrl, any Host.
   if (path.startsWith('/install/')) return 'install';
   if (path === '/mcp') return 'mcp';
+  // The chat service's MCP endpoint: reached as `jumpmaster:<port>` on the compose network, so no
+  // Host check, and never by a browser, so any Origin is refused.
+  if (path === '/mcp/chat') return 'chat-mcp';
   // `{ ok, version }` and nothing else: other machines check the address they reach us at.
   if (path === '/healthz') return 'health';
   if (path.startsWith('/api/')) return 'control';
@@ -129,7 +141,7 @@ function refuse(reply: FastifyReply, cls: RouteClass, status: number, error: str
 
 /**
  * The one place that decides who may reach what. In order: the Host check (DNS rebinding) on
- * everything but stick routes; the Origin check on every non-GET but `/mcp` (which keeps its own);
+ * everything but stick routes and `/mcp/chat` (which refuses any Origin instead); the Origin check on every non-GET but `/mcp` (which keeps its own);
  * then the route class: control routes need the token or a session (with CSRF on a non-GET), pages
  * need a session (or go to `/setup` while setup is open, else `/login`), auth routes need neither.
  * A request refused here never reaches a handler, so it charges no backoff.
@@ -144,6 +156,13 @@ export function registerGuard(app: FastifyInstance, deps: GuardDeps): void {
     // The matched pattern where there is one, so the class follows the route that will run.
     const cls = routeClass(req.routeOptions.url ?? path);
     if (cls === 'stick' || cls === 'install' || cls === 'health') return;
+    if (cls === 'chat-mcp') {
+      // Only the chat service calls it, and it sends no Origin: a browser always does on a POST.
+      if (req.headers.origin !== undefined) {
+        return reply.code(403).type('text/plain').send('forbidden origin');
+      }
+      return;
+    }
     const config = live();
     req.jmConfig = config;
     if (!allowed.includes(req.headers.host ?? '')) {

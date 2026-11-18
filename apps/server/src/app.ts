@@ -60,7 +60,7 @@ import { createInvite, inviteProblem, inviteTtl } from './install/invite.js';
 import { type InstallRouteDeps, registerInstallRoutes } from './install/routes.js';
 import { cloudInit, installLine } from './install/stick-sh.js';
 import { missingFor, zoneRequirements } from './leases.js';
-import { registerMcpRoute } from './mcp/server.js';
+import { registerChatMcpRoute, registerMcpRoute } from './mcp/server.js';
 import type { ForgePair } from './outbox.js';
 import {
   PUBLIC_URL_NEEDED,
@@ -302,6 +302,8 @@ export function createApp(
   registerStickRoutes(app, { ...deps, fetches });
   registerControlRoutes(app, { ...deps, setup, backoff });
   registerMcpRoute(app, deps);
+  // The chat service's endpoint (chat tokens only): always on, so the chat needs no setup step.
+  registerChatMcpRoute(app, deps);
   // The stick installer (issue #138): the script, cosign and the stick image, at publicUrl.
   registerInstallRoutes(app, {
     db: deps.db,

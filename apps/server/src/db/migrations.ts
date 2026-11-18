@@ -1078,6 +1078,35 @@ ALTER TABLE stick_invites ADD COLUMN token_expires_at TEXT;
 CREATE UNIQUE INDEX stick_invites_token_hash ON stick_invites (token_hash);
 `;
 
+/**
+ * v38 (#349): per-turn chat MCP tokens. `mcp_tokens.scope` takes `chat`, and a chat token names the
+ * thread and message whose turn it serves and the hash of the browser session that posted that
+ * message (`zone_id` is `*`: the zone is a tool argument). The same twelve-step rebuild, rows and
+ * ids kept, with foreign keys off (`mcp_audit` references it).
+ */
+const V38_SQL = `
+CREATE TABLE new_mcp_tokens (
+  id               INTEGER PRIMARY KEY,
+  token_hash       TEXT NOT NULL UNIQUE,
+  zone_id          TEXT NOT NULL,
+  scope            TEXT NOT NULL CHECK (scope IN ('read','write','chat')),
+  label            TEXT NOT NULL DEFAULT '',
+  created_at       TEXT NOT NULL,
+  expires_at       TEXT NOT NULL,
+  revoked_at       TEXT,
+  last_used_at     TEXT,
+  chat_thread_id   INTEGER,
+  chat_message_id  INTEGER,
+  session_hash     TEXT
+);
+INSERT INTO new_mcp_tokens (id, token_hash, zone_id, scope, label, created_at, expires_at,
+  revoked_at, last_used_at)
+SELECT id, token_hash, zone_id, scope, label, created_at, expires_at, revoked_at, last_used_at
+FROM mcp_tokens;
+DROP TABLE mcp_tokens;
+ALTER TABLE new_mcp_tokens RENAME TO mcp_tokens;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1116,6 +1145,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 35, sql: V35_SQL },
   { version: 36, sql: V36_SQL, foreignKeysOff: true },
   { version: 37, sql: V37_SQL },
+  { version: 38, sql: V38_SQL, foreignKeysOff: true },
 ];
 
 /**
