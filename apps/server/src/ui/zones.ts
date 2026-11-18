@@ -11,6 +11,7 @@ import { latestDoctorRun } from '../doctor/run.js';
 import { BASE_EGRESS } from '../payloads.js';
 import { PRESET_EGRESS } from '../presets.js';
 import { FORM_SCRIPT, zoneToForm } from '../zones/form.js';
+import { renderFlags } from './flags.js';
 import { escapeHtml, MODE_LABELS, page, zoneBriefingsHref } from './pages.js';
 import { getWizard, projectBody } from './setup.js';
 import { zoneName, zoneNameText } from './zone-name.js';
@@ -252,7 +253,7 @@ ${field('overrideApprovers', 'Override approvers (logins)', textarea(f, 'overrid
   const advanced = sectionForm(
     'advanced',
     'Advanced',
-    `<p>Zone id: <code>${escapeHtml(id)}</code> <small>(the zone's key in URLs, the API and <code>jumpmaster ctl</code>)</small></p><p>The zone as JSON: models, budgets, crew and every other setting. It is checked as the sections are.</p><div id="goals"></div><div id="crew"></div><textarea name="json" rows="24" cols="90">${escapeHtml(JSON.stringify(raw, null, 2))}</textarea><span class="issue" data-issues="advanced"></span>`,
+    `<p>Zone id: <code>${escapeHtml(id)}</code> <small>(the zone's key in URLs, the API and <code>jumpmaster ctl</code>)</small></p><p>The zone as JSON: models, budgets, crew and every other setting. It is checked as the sections are.</p><p>All settings, one per row: <a href="${zoneHref(id)}/flags">advanced settings</a></p><div id="goals"></div><div id="crew"></div><textarea name="json" rows="24" cols="90">${escapeHtml(JSON.stringify(raw, null, 2))}</textarea><span class="issue" data-issues="advanced"></span>`,
     readOnly,
   );
   const base = zoneHref(id);
@@ -372,4 +373,18 @@ export function registerZonesPages(
     if (!body) return reply.code(404).type('text/plain').send('no such zone');
     return html(req, reply, body);
   });
+  // A zone's advanced settings: every setting of the catalog, one per row (issue #322).
+  app.get<{ Params: { id: string }; Querystring: { saved?: string } }>(
+    '/zones/:id/flags',
+    async (req, reply) => {
+      const saved = /^\d{1,9}$/.test(req.query.saved ?? '') ? Number(req.query.saved) : undefined;
+      const body = renderFlags(store, req.params.id, {
+        adoptBanner: ADOPT_BANNER,
+        forbiddenNote: FORBIDDEN_NOTE,
+        ...(saved === undefined ? {} : { saved }),
+      });
+      if (!body) return reply.code(404).type('text/plain').send('no such zone');
+      return html(req, reply, body);
+    },
+  );
 }
