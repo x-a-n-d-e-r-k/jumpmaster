@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vite
 import {
   bufferedResponse,
   GitHubForge,
+  gitBlobSha,
   staticTokenProvider,
   type TokenProvider,
 } from './github.js';
@@ -1193,6 +1194,81 @@ describe('GitHubForge issue writes', () => {
     expect(await f.getIssue(11)).toMatchObject({ pullRequest: true, state: 'open' });
     nock(api).get('/repos/o/r/issues/10').reply(404, {});
     expect(await f.getIssue(10)).toBeNull();
+  });
+
+  describe('goal-change writes (#362)', () => {
+    test('createBranch posts the ref; an existing ref on the same SHA is success, on another SHA it throws', async () => {
+      const f = new GitHubForge('o', 'r', 'tok');
+      nock(api)
+        .post('/repos/o/r/git/refs', { ref: 'refs/heads/jm/goal-change-7', sha: 'base1' })
+        .reply(201, { ref: 'refs/heads/jm/goal-change-7', object: { sha: 'base1' } });
+      await f.createBranch('jm/goal-change-7', 'base1');
+      const exists = { message: 'Reference already exists' };
+      nock(api).post('/repos/o/r/git/refs').reply(422, exists);
+      nock(api)
+        .get('/repos/o/r/branches/jm%2Fgoal-change-7')
+        .reply(200, { name: 'jm/goal-change-7', commit: { sha: 'base1' } });
+      await f.createBranch('jm/goal-change-7', 'base1');
+      nock(api).post('/repos/o/r/git/refs').reply(422, exists);
+      nock(api)
+        .get('/repos/o/r/branches/jm%2Fgoal-change-7')
+        .reply(200, { name: 'jm/goal-change-7', commit: { sha: 'other' } });
+      await expect(f.createBranch('jm/goal-change-7', 'base1')).rejects.toThrow(/another commit/);
+      nock(api).post('/repos/o/r/git/refs').reply(403, { message: 'no' });
+      await expect(f.createBranch('jm/goal-change-7', 'base1')).rejects.toMatchObject({
+        status: 403,
+      });
+    });
+
+    test('putFile puts the base64 content on the branch, naming the blob it replaces', async () => {
+      const f = new GitHubForge('o', 'r', 'tok');
+      let body: unknown;
+      nock(api)
+        .put('/repos/o/r/contents/docs/GOAL.md', (b) => {
+          body = b;
+          return true;
+        })
+        .reply(200, { content: { sha: 'blob2' }, commit: { sha: 'commit2' } });
+      expect(
+        await f.putFile({
+          branch: 'jm/goal-change-7',
+          path: 'docs/GOAL.md',
+          content: '# Goals\n',
+          message: 'Update docs/GOAL.md',
+          expectBlobSha: 'blob1',
+        }),
+      ).toEqual({ commitSha: 'commit2' });
+      expect(body).toEqual({
+        message: 'Update docs/GOAL.md',
+        content: Buffer.from('# Goals\n').toString('base64'),
+        branch: 'jm/goal-change-7',
+        sha: 'blob1',
+      });
+      // A new file names no blob.
+      nock(api)
+        .put('/repos/o/r/contents/GOAL.md', (b) => {
+          body = b;
+          return true;
+        })
+        .reply(201, { content: { sha: 'blob3' }, commit: { sha: 'commit3' } });
+      await f.putFile({
+        branch: 'b',
+        path: 'GOAL.md',
+        content: 'x',
+        message: 'm',
+        expectBlobSha: null,
+      });
+      expect(body).not.toHaveProperty('sha');
+      nock(api).put('/repos/o/r/contents/GOAL.md').reply(409, { message: 'sha mismatch' });
+      await expect(
+        f.putFile({ branch: 'b', path: 'GOAL.md', content: 'x', message: 'm', expectBlobSha: 'z' }),
+      ).rejects.toMatchObject({ status: 409 });
+    });
+
+    test("gitBlobSha is git's blob id of the text", () => {
+      // `printf 'hello\n' | git hash-object --stdin`
+      expect(gitBlobSha('hello\n')).toBe('ce013625030ba8dba906f756967f9e9ca394464a');
+    });
   });
 
   describe('issue comments', () => {

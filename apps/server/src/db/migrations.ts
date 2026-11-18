@@ -1280,6 +1280,34 @@ CREATE TABLE chat_cards (
 CREATE INDEX chat_cards_by_thread ON chat_cards (thread_id, id);
 `;
 
+/**
+ * v44 (#362, goal changes): one row per proposed GOAL.md change, from the chat or the crew. The
+ * server opens it as a PR on `jm/goal-change-<id>` (`base_sha`, `branch`, `pr_number`, `head_sha`),
+ * and merges it only at the SHA the owner confirmed in the browser (`confirmed_sha`).
+ */
+const V44_SQL = `
+CREATE TABLE goal_changes (
+  id            INTEGER PRIMARY KEY,
+  zone_id       TEXT NOT NULL,
+  source        TEXT NOT NULL CHECK (source IN ('chat','crew')),
+  source_ref    TEXT,
+  text          TEXT NOT NULL,
+  text_sha256   TEXT NOT NULL,
+  base_sha      TEXT,
+  branch        TEXT,
+  pr_number     INTEGER,
+  head_sha      TEXT,
+  state         TEXT NOT NULL
+                CHECK (state IN ('proposed','open','confirmed','merged','refused','closed')),
+  confirmed_sha TEXT,
+  confirmed_at  TEXT,
+  error         TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+CREATE INDEX goal_changes_by_zone_state ON goal_changes (zone_id, state, id);
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1324,6 +1352,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 41, sql: V41_SQL, foreignKeysOff: true },
   { version: 42, sql: V42_SQL },
   { version: 43, sql: V43_SQL },
+  { version: 44, sql: V44_SQL },
 ];
 
 /**
