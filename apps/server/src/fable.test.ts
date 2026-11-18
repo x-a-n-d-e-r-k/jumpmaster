@@ -88,7 +88,7 @@ function pastDrop(id: string, model: string, at: Date): void {
 
 describe('which model a drop gets', () => {
   test('pro, team_standard and enterprise never run Fable; diagnose gets the zone model', () => {
-    expect(FABLE_ROLES).toEqual(['diagnose', 'arbitrate']);
+    expect(FABLE_ROLES).toEqual(['diagnose', 'arbitrate', 'audit']);
     expect(FABLE_PLANS).toEqual(['max', 'ultra', 'team_premium']);
     for (const plan of ['pro', 'team_standard', 'enterprise'] as const) {
       const c = cfg({ plan, fableModel: FABLE });
@@ -129,6 +129,31 @@ describe('which model a drop gets', () => {
       resolveModel(w.db, cfg({ plan: 'pro', fableModel: FABLE }), w.zone, 'arbitrate', t0),
     ).toBe(w.zone.model);
     expect(resolveModel(w.db, cfg({ plan: 'max' }), w.zone, 'arbitrate', t0)).toBe(w.zone.model);
+  });
+
+  test("an audit drop's payload model is the Fable model when Fable is available, and the zone model when not (#385)", async () => {
+    const pass = await zonePass(w.forges, w.zone, 'main');
+    const enqueue = (at: Date) =>
+      enqueueCrew(w.db, w.forges, w.zone, pass, promptVersions(), usageCfg, at);
+    // A lead cycle, the cursor stored at main's head, a merge, the next cycle: an audit drop.
+    w.f.state.commit('main', 'chore: base');
+    updateDrop(w.db, (await enqueue(t0)) ?? '', { state: 'succeeded' });
+    expect(await enqueue(plus(t0, 60_000))).toBeNull();
+    w.f.state.commit('main', 'feat: one (#4)');
+    updateDrop(w.db, (await enqueue(plus(t0, 61 * 60_000))) ?? '', { state: 'succeeded' });
+    const id = (await enqueue(plus(t0, 62 * 60_000))) ?? '';
+    expect(getDrop(w.db, id)?.role).toBe('audit');
+    const payload = (claude: Pick<Config, 'claude'>) =>
+      buildPayload(w.db, w.zone, getDrop(w.db, id) as never, secrets, {
+        claude: claude.claude,
+        now: t0,
+      });
+    expect(payload(cfg({ plan: 'pro', fableModel: FABLE })).model).toBe(w.zone.model);
+    expect(payload(cfg({ plan: 'max' })).model).toBe(w.zone.model);
+    const p = payload(maxPlan);
+    expect(p.role).toBe('audit');
+    expect(p.model).toBe(FABLE);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(FABLE);
   });
 
   test('refute and crew-lead never get Fable by default', () => {

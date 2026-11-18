@@ -1375,6 +1375,90 @@ CREATE TABLE crew_retries (
 );
 `;
 
+/**
+ * v48 (#385): the audit of merged changes. `crew_audit_cursor` holds each zone's last audited
+ * commit on the default branch; `crew_audits` records one audit per (zone, commit). `drops` is
+ * rebuilt with foreign keys off so `audit` is a crew role: the work-item CHECK and the one-active
+ * crew drop index both name it. Every v47 column is carried.
+ */
+const V48_SQL = `
+CREATE TABLE crew_audit_cursor (
+  zone_id      TEXT PRIMARY KEY,
+  audited_sha  TEXT NOT NULL,
+  pending      INTEGER NOT NULL DEFAULT 0,
+  checked_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+CREATE TABLE crew_audits (
+  id             INTEGER PRIMARY KEY,
+  zone_id        TEXT NOT NULL,
+  sha            TEXT NOT NULL,
+  drop_id        TEXT NOT NULL,
+  state          TEXT NOT NULL CHECK (state IN ('running','holds','filed','refused','failed')),
+  crew_issue_id  INTEGER,
+  reason         TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  UNIQUE (zone_id, sha)
+);
+
+CREATE TABLE new_drops (
+  id               TEXT PRIMARY KEY,
+  drop_zone_id     TEXT NOT NULL REFERENCES drop_zones(id),
+  work_item_id     INTEGER REFERENCES work_items(id),
+  role             TEXT NOT NULL,
+  state            TEXT NOT NULL
+                   CHECK (state IN ('queued','leased','running','push_pending','succeeded','failed','lost','cancelled')),
+  stick_id         TEXT REFERENCES sticks(id),
+  epoch            INTEGER NOT NULL DEFAULT 0,
+  lease_expires_at TEXT,
+  prompt_version   TEXT,
+  image            TEXT,
+  result_json      TEXT,
+  created_at       TEXT NOT NULL,
+  started_at       TEXT,
+  finished_at      TEXT,
+  fingerprint      TEXT,
+  pr_number        INTEGER,
+  head_sha         TEXT,
+  input_json       TEXT,
+  charged_key      TEXT,
+  hard_cancel      INTEGER NOT NULL DEFAULT 0,
+  requested_model  TEXT,
+  served_model     TEXT,
+  push_kind        TEXT CHECK (push_kind IN ('final','checkpoint','salvage')),
+  push_expect_sha  TEXT,
+  push_deadline    TEXT,
+  running_at       TEXT,
+  usage_applied    INTEGER NOT NULL DEFAULT 0,
+  was_probe        INTEGER NOT NULL DEFAULT 0,
+  rate_limit_requeue INTEGER,
+  transcript_pruned_at TEXT,
+  transcript_archive TEXT,
+  CHECK ((work_item_id IS NULL) = (role IN ('crew-lead','refute','diagnose','triage','arbitrate','audit','doctor')))
+);
+INSERT INTO new_drops (id, drop_zone_id, work_item_id, role, state, stick_id, epoch, lease_expires_at,
+  prompt_version, image, result_json, created_at, started_at, finished_at, fingerprint, pr_number,
+  head_sha, input_json, charged_key, hard_cancel, requested_model, served_model, push_kind,
+  push_expect_sha, push_deadline, running_at, usage_applied, was_probe, rate_limit_requeue,
+  transcript_pruned_at, transcript_archive)
+SELECT id, drop_zone_id, work_item_id, role, state, stick_id, epoch, lease_expires_at,
+  prompt_version, image, result_json, created_at, started_at, finished_at, fingerprint, pr_number,
+  head_sha, input_json, charged_key, hard_cancel, requested_model, served_model, push_kind,
+  push_expect_sha, push_deadline, running_at, usage_applied, was_probe, rate_limit_requeue,
+  transcript_pruned_at, transcript_archive FROM drops;
+DROP TABLE drops;
+ALTER TABLE new_drops RENAME TO drops;
+CREATE UNIQUE INDEX one_active_drop
+  ON drops(work_item_id) WHERE state IN ('queued','leased','running','push_pending');
+CREATE UNIQUE INDEX one_active_crew_drop
+  ON drops(drop_zone_id) WHERE role IN ('crew-lead','refute','diagnose','triage','arbitrate','audit')
+    AND state IN ('queued','leased','running','push_pending');
+CREATE UNIQUE INDEX one_active_doctor_drop
+  ON drops(drop_zone_id) WHERE role = 'doctor'
+    AND state IN ('queued','leased','running','push_pending');
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1423,6 +1507,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 45, sql: V45_SQL },
   { version: 46, sql: V46_SQL, foreignKeysOff: true },
   { version: 47, sql: V47_SQL },
+  { version: 48, sql: V48_SQL, foreignKeysOff: true },
 ];
 
 /**

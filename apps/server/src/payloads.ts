@@ -291,6 +291,13 @@ export type CrewInputJson = {
         headSha: string;
         basis: 'review';
       }
+    | {
+        role: 'audit';
+        /** The merged first-parent commit audited, a full SHA on the default branch. */
+        sha: string;
+        /** Its commit message as the forge reported it. */
+        message: string;
+      }
     | { role: 'crew-lead' };
   input: string;
   /** A triage drop's issue images, fetched and checked at enqueue (`crew/images.ts`). */

@@ -657,6 +657,12 @@ const WORDS: Words[] = [
     'When reviewers and the crew keep disagreeing, a Fable agent rules on the evidence and acts on its ruling. Turned off, every such case is put to you, as before.',
     'bool',
   ),
+  w(
+    'dropZones[].crew.auditPerCycle',
+    'Merged changes audited per crew cycle',
+    'How many commits merged to the default branch the crew re-examines each cycle, oldest first. A refuted one becomes a staged issue; 0 turns the audit off.',
+    'number',
+  ),
   z_(
     'crew.autoRetry',
     'Let the crew retry failed work once',
