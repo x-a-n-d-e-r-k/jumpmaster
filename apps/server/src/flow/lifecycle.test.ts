@@ -230,12 +230,21 @@ describe('the merge reservation of the oldest approved PR', () => {
       const r = h.forge.state.rules[id];
       if (r.kind === 'ok') r.rules.requiredChecks = ['ci'];
     }
-    h.forge.state.checks.set('sha1', { state: 'pending', names: [] });
-    h.forge.state.checks.set('sha2', { state: 'pending', names: [] });
-    await toApproved(h, 'sha1');
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+      state: 'pending',
+      names: [],
+    });
+    h.forge.state.checks.set('7368613200000000000000000000000000000000', {
+      state: 'pending',
+      names: [],
+    });
+    await toApproved(h, '7368613100000000000000000000000000000000');
     h.at(5);
-    await toApproved(h, 'sha2');
-    h.forge.state.checks.set('sha2', { state: 'success', names: ['ci'] });
+    await toApproved(h, '7368613200000000000000000000000000000000');
+    h.forge.state.checks.set('7368613200000000000000000000000000000000', {
+      state: 'success',
+      names: ['ci'],
+    });
   }
   const merged = () => h.forge.state.merges.map((m) => m.sha);
   const attemptsOf = (id: number) =>
@@ -260,19 +269,22 @@ describe('the merge reservation of the oldest approved PR', () => {
     expect(attemptsOf(2)).toEqual(spent);
     expect(h.queuedRoles()).toEqual([]);
 
-    h.forge.state.checks.set('sha1', { state: 'success', names: ['ci'] });
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
+      state: 'success',
+      names: ['ci'],
+    });
     await h.reconcile();
-    expect(merged()).toEqual(['sha1']);
+    expect(merged()).toEqual(['7368613100000000000000000000000000000000']);
 
-    h.forge.state.compares.set('main...sha2', {
+    h.forge.state.compares.set('main...7368613200000000000000000000000000000000', {
       aheadBy: 1,
       behindBy: 1,
-      baseSha: 'base1',
-      mergeBaseSha: 'base0',
+      baseSha: '6261736531000000000000000000000000000000',
+      mergeBaseSha: '6261736530000000000000000000000000000000',
     });
     await h.reconcile();
     expect(h.queuedRoles()).toEqual(['resolve']);
-    expect(merged()).toEqual(['sha1']);
+    expect(merged()).toEqual(['7368613100000000000000000000000000000000']);
     expect(workItem(h.db, 2)).toMatchObject({ state: 'pr_open', reason: null });
   });
 
@@ -281,7 +293,7 @@ describe('the merge reservation of the oldest approved PR', () => {
     await h.reconcile();
     await h.reconcile();
     expect(merged()).toEqual([]);
-    h.forge.state.checks.set('sha1', {
+    h.forge.state.checks.set('7368613100000000000000000000000000000000', {
       state: 'failure',
       names: ['ci'],
       failed: [{ name: 'ci', conclusion: 'failure' }],
@@ -289,9 +301,13 @@ describe('the merge reservation of the oldest approved PR', () => {
     await h.reconcile();
     expect(h.queuedRoles()).toEqual(['heal']);
     expect(merged()).toEqual([]);
-    await h.finishDrop('heal', { status: 'completed', headSha: 'sha1h', gates: [gateOk] });
+    await h.finishDrop('heal', {
+      status: 'completed',
+      headSha: '7368613168000000000000000000000000000000',
+      gates: [gateOk],
+    });
     await h.reconcile();
-    expect(merged()).toEqual(['sha2']);
+    expect(merged()).toEqual(['7368613200000000000000000000000000000000']);
     expect(workItem(h.db, 2)).toMatchObject({ state: 'done', reason: 'merged' });
   });
 
@@ -302,7 +318,7 @@ describe('the merge reservation of the oldest approved PR', () => {
     expect(merged()).toEqual([]);
     h.at(26); // A was approved 31 minutes ago
     await h.reconcile();
-    expect(merged()).toEqual(['sha2']);
+    expect(merged()).toEqual(['7368613200000000000000000000000000000000']);
   });
 
   test('the reservation lapses when A leaves pr_open', async () => {
@@ -313,14 +329,14 @@ describe('the merge reservation of the oldest approved PR', () => {
     h.forge.state.close(1);
     await h.reconcile();
     expect(workItem(h.db, 1)).toMatchObject({ state: 'parked', reason: 'pr closed' });
-    expect(merged()).toEqual(['sha2']);
+    expect(merged()).toEqual(['7368613200000000000000000000000000000000']);
   });
 
   test('mergeReservationMinutes 0: B merges first, as before', async () => {
     await twoApproved({ mergeReservationMinutes: 0 });
     await h.reconcile();
     await h.reconcile();
-    expect(merged()).toEqual(['sha2']);
+    expect(merged()).toEqual(['7368613200000000000000000000000000000000']);
   });
 });
 
@@ -368,8 +384,8 @@ describe('an approval carried across a clean merge of the base', () => {
     h.forge.state.compares.set('main...aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', {
       aheadBy: 1,
       behindBy: 1,
-      baseSha: 'base1',
-      mergeBaseSha: 'base0',
+      baseSha: '6261736531000000000000000000000000000000',
+      mergeBaseSha: '6261736530000000000000000000000000000000',
     });
     await h.reconcile();
     expect(h.queuedRoles()).toEqual(['resolve']);
@@ -549,19 +565,30 @@ describe('a behind PR brought up to date by the forge (#292)', () => {
       const r = h.forge.state.rules[id];
       if (r.kind === 'ok') r.rules.requiredChecks = ['ci'];
     }
-    h.forge.state.checks.set('aaa', { state: 'pending', names: [] });
-    h.forge.state.checks.set('bbb', { state: 'pending', names: [] });
-    h.forge.state.compareFiles.set('main...aaa', [prFile()]);
-    h.forge.state.compareFiles.set('main...bbb', [prFile()]);
-    h.forge.state.updatedHeads.set('aaa', 'bbb');
-    await toApproved(h, 'aaa');
+    h.forge.state.checks.set('6161610000000000000000000000000000000000', {
+      state: 'pending',
+      names: [],
+    });
+    h.forge.state.checks.set('6262620000000000000000000000000000000000', {
+      state: 'pending',
+      names: [],
+    });
+    h.forge.state.compareFiles.set('main...6161610000000000000000000000000000000000', [prFile()]);
+    h.forge.state.compareFiles.set('main...6262620000000000000000000000000000000000', [prFile()]);
+    h.forge.state.updatedHeads.set(
+      '6161610000000000000000000000000000000000',
+      '6262620000000000000000000000000000000000',
+    );
+    await toApproved(h, '6161610000000000000000000000000000000000');
     await h.reconcile();
-    expect(h.forge.state.reviews.map((r) => r.commitId)).toEqual(['aaa']);
-    h.forge.state.compares.set('main...aaa', {
+    expect(h.forge.state.reviews.map((r) => r.commitId)).toEqual([
+      '6161610000000000000000000000000000000000',
+    ]);
+    h.forge.state.compares.set('main...6161610000000000000000000000000000000000', {
       aheadBy: 1,
       behindBy: 2,
-      baseSha: 'base1',
-      mergeBaseSha: 'base0',
+      baseSha: '6261736531000000000000000000000000000000',
+      mergeBaseSha: '6261736530000000000000000000000000000000',
     });
   }
 
@@ -571,9 +598,13 @@ describe('a behind PR brought up to date by the forge (#292)', () => {
     // Today's code enqueued a resolve drop here.
     expect(h.queuedRoles()).toEqual([]);
     expect(h.forge.state.branchUpdates).toEqual([
-      { number: 1, expectedHeadSha: 'aaa', identity: 'author' },
+      {
+        number: 1,
+        expectedHeadSha: '6161610000000000000000000000000000000000',
+        identity: 'author',
+      },
     ]);
-    expect(h.forge.state.pulls.get(1)?.headSha).toBe('bbb');
+    expect(h.forge.state.pulls.get(1)?.headSha).toBe('6262620000000000000000000000000000000000');
     expect(attempts('base_sync')).toBe(1);
     expect(attempts('resolve_total')).toBe(0);
 
@@ -582,22 +613,35 @@ describe('a behind PR brought up to date by the forge (#292)', () => {
     const filesBefore = h.forge.author.calls.filter((c) => c.method === 'listPullFiles').length;
     await h.reconcile();
     expect(h.queuedRoles()).toEqual([]);
-    expect(latestVerdict(h.db, 1)).toMatchObject({ headSha: 'bbb', decision: 'approve' });
+    expect(latestVerdict(h.db, 1)).toMatchObject({
+      headSha: '6262620000000000000000000000000000000000',
+      decision: 'approve',
+    });
     expect(h.forge.author.calls.filter((c) => c.method === 'listPullFiles').length).toBeGreaterThan(
       filesBefore,
     );
     expect(attempts('base_sync')).toBe(1);
     expect(attempts('resolve_total')).toBe(0);
     await h.reconcile();
-    expect(h.forge.state.reviews.map((r) => r.commitId)).toEqual(['aaa', 'bbb']);
+    expect(h.forge.state.reviews.map((r) => r.commitId)).toEqual([
+      '6161610000000000000000000000000000000000',
+      '6262620000000000000000000000000000000000',
+    ]);
     await h.reconcile();
     expect(h.forge.state.merges).toEqual([]);
-    expect(h.forge.author.calls.some((c) => c.method === 'checksFor' && c.args[0] === 'bbb')).toBe(
-      true,
-    );
-    h.forge.state.checks.set('bbb', { state: 'success', names: ['ci'] });
+    expect(
+      h.forge.author.calls.some(
+        (c) => c.method === 'checksFor' && c.args[0] === '6262620000000000000000000000000000000000',
+      ),
+    ).toBe(true);
+    h.forge.state.checks.set('6262620000000000000000000000000000000000', {
+      state: 'success',
+      names: ['ci'],
+    });
     await h.reconcile();
-    expect(h.forge.state.merges.map((m) => m.sha)).toEqual(['bbb']);
+    expect(h.forge.state.merges.map((m) => m.sha)).toEqual([
+      '6262620000000000000000000000000000000000',
+    ]);
     expect(dropRoles()).toEqual(['implement', 'review']);
     expect(updateCalls()).toHaveLength(1);
   });
@@ -630,8 +674,12 @@ describe('a behind PR brought up to date by the forge (#292)', () => {
     expect(attempts('resolve_total')).toBe(1);
     expect(updateCalls()).toHaveLength(1);
     // The resolve's own push makes the next head, as today.
-    await h.finishDrop('resolve', { status: 'completed', headSha: 'ccc', gates: [gateOk] });
-    expect(h.forge.state.pulls.get(1)?.headSha).toBe('ccc');
+    await h.finishDrop('resolve', {
+      status: 'completed',
+      headSha: '6363630000000000000000000000000000000000',
+      gates: [gateOk],
+    });
+    expect(h.forge.state.pulls.get(1)?.headSha).toBe('6363630000000000000000000000000000000000');
   });
 
   test('a moved head records nothing, and the next pass reads the new head', async () => {
@@ -639,18 +687,26 @@ describe('a behind PR brought up to date by the forge (#292)', () => {
     await behindAfterApproval({
       // The agent pushes between the pass's read and the update request.
       pusher: async () => {
-        if (!pushed) h.forge.state.setHead(1, 'ccc');
+        if (!pushed) h.forge.state.setHead(1, '6363630000000000000000000000000000000000');
         pushed = true;
         return { forge: h.forge.author, release: async () => {} };
       },
     });
     await h.reconcile();
     expect(h.forge.state.branchUpdates).toEqual([
-      { number: 1, expectedHeadSha: 'aaa', identity: 'author' },
+      {
+        number: 1,
+        expectedHeadSha: '6161610000000000000000000000000000000000',
+        identity: 'author',
+      },
     ]);
     expect(outboxRows()).toEqual([
       {
-        opKey: opKeys.updateBranch(1, 'aaa', 'base1'),
+        opKey: opKeys.updateBranch(
+          1,
+          '6161610000000000000000000000000000000000',
+          '6261736531000000000000000000000000000000',
+        ),
         state: 'done',
         result: '{"kind":"head_moved"}',
       },
@@ -689,7 +745,7 @@ describe('a behind PR brought up to date by the forge (#292)', () => {
     await h.reconcile();
     await h.reconcile();
     expect(updateCalls()).toHaveLength(2);
-    expect(h.forge.state.pulls.get(1)?.headSha).toBe('bbb');
+    expect(h.forge.state.pulls.get(1)?.headSha).toBe('6262620000000000000000000000000000000000');
     expect(h.queuedRoles()).toEqual([]);
     expect(attempts('base_sync')).toBe(1);
   });
@@ -700,7 +756,7 @@ describe('a behind PR brought up to date by the forge (#292)', () => {
     await h.reconcile();
     await h.reconcile();
     expect(updateCalls()).toHaveLength(1);
-    expect(h.forge.state.pulls.get(1)?.headSha).toBe('bbb');
+    expect(h.forge.state.pulls.get(1)?.headSha).toBe('6262620000000000000000000000000000000000');
     expect(h.queuedRoles()).toEqual([]);
   });
 
@@ -717,7 +773,7 @@ describe('a behind PR brought up to date by the forge (#292)', () => {
     await h.reconcile();
     expect(updateCalls()).toHaveLength(1);
     // GitHub has not landed the merge yet, and the server died before recording the 202.
-    h.forge.state.setHead(1, 'aaa');
+    h.forge.state.setHead(1, '6161610000000000000000000000000000000000');
     h.db.exec(
       `UPDATE outbox SET state = 'unknown', result_json = NULL WHERE kind = 'update_branch';
        DELETE FROM branch_updates;`,
@@ -727,7 +783,7 @@ describe('a behind PR brought up to date by the forge (#292)', () => {
     expect(updateCalls()).toHaveLength(1);
     expect(h.queuedRoles()).toEqual([]);
     // The merge lands: read back as done, and the next head is the new one.
-    h.forge.state.setHead(1, 'bbb');
+    h.forge.state.setHead(1, '6262620000000000000000000000000000000000');
     await h.reconcile();
     expect(outboxRows().map((r) => r.state)).toEqual(['done']);
     expect(updateCalls()).toHaveLength(1);
@@ -841,7 +897,11 @@ describe('parked-item recovery (sync)', () => {
 
   test('a dismissed human block un-parks without the label', async () => {
     await toApproved(h, '7368613100000000000000000000000000000000');
-    h.forge.state.review({ author: 'alice', state: 'CHANGES_REQUESTED', commitId: 'sha0' });
+    h.forge.state.review({
+      author: 'alice',
+      state: 'CHANGES_REQUESTED',
+      commitId: '7368613000000000000000000000000000000000',
+    });
     await h.reconcile();
     expect(workItem(h.db, 1)).toMatchObject({ state: 'parked', reason: 'human block stands' });
     const last = h.forge.state.reviews.at(-1);
@@ -932,8 +992,8 @@ describe('a Retry ruling on a parked briefing (#288)', () => {
     h.forge.state.compares.set('main...7368613100000000000000000000000000000000', {
       aheadBy: 1,
       behindBy: 3,
-      baseSha: 'base1',
-      mergeBaseSha: 'base0',
+      baseSha: '6261736531000000000000000000000000000000',
+      mergeBaseSha: '6261736530000000000000000000000000000000',
     });
     setAttempts(h.db, 1, 'resolve_total', h.zone.budgets.maxResolveTotal, null);
     setWorkItemState(h.db, 1, 'parked', 'budget exhausted: resolve-total', h.at(1));
