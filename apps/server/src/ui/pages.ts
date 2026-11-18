@@ -490,7 +490,12 @@ type BlockContext = {
   name: (id: string) => string;
   refs: (zoneId: string) => LinkRefs;
   about?: ReadonlyMap<number, About> | undefined;
+  /** Briefings the crew is still to diagnose (`diagnosePending`): no rule form yet. */
+  pending?: ReadonlySet<number> | undefined;
 };
+
+/** In place of the rule form while the crew is still to diagnose a parked briefing. */
+const PENDING_NOTICE = `<p class="pending">${escapeHtml("The crew is looking at this. You'll be asked if it needs you.")}</p>`;
 
 function briefingBlock(b: Briefing, ctx: BlockContext, heading: 'h3' | 'h4' = 'h3'): string {
   const hold = b.kind === 'promote_held' ? ctx.holds?.get(b.subject) : undefined;
@@ -508,10 +513,13 @@ function briefingBlock(b: Briefing, ctx: BlockContext, heading: 'h3' | 'h4' = 'h
   const pre = (k: string, v: string | null) =>
     v ? `<tr><th>${k}</th><td><pre>${text(v)}</pre></td></tr>` : '';
   const about = ctx.about?.get(b.id) ?? { text: b.subject };
+  const readOnly = `<ul>${b.options.map((o) => `<li>${escapeHtml(o.label)} <small><code>${escapeHtml(o.id)}</code></small> <small class="effect">${escapeHtml(effectText(b.kind, o.effect))}</small></li>`).join('')}</ul>`;
   const form =
-    b.state === 'open'
-      ? `<form class="rule" data-briefing="${escapeHtml(b.id)}" data-options="${optionsDigest(b)}">${options}<textarea name="note" maxlength="2000" placeholder="Note (optional)"></textarea><br><button>Rule</button></form>`
-      : `<p>${escapeHtml(b.state)}</p><ul>${b.options.map((o) => `<li>${escapeHtml(o.label)} <small><code>${escapeHtml(o.id)}</code></small> <small class="effect">${escapeHtml(effectText(b.kind, o.effect))}</small></li>`).join('')}</ul>`;
+    b.state !== 'open'
+      ? `<p>${escapeHtml(b.state)}</p>${readOnly}`
+      : ctx.pending?.has(b.id)
+        ? PENDING_NOTICE + readOnly
+        : `<form class="rule" data-briefing="${escapeHtml(b.id)}" data-options="${optionsDigest(b)}">${options}<textarea name="note" maxlength="2000" placeholder="Note (optional)"></textarea><br><button>Rule</button></form>`;
   return (
     `<div class="briefing" id="briefing-${escapeHtml(b.id)}">` +
     `<${heading}>${text(b.decision)}</${heading}>` +
@@ -596,6 +604,8 @@ export function renderBriefings(s: {
   about?: ReadonlyMap<number, About>;
   /** Each zone's filed crew issues by key (crewKeyNumbers), by zone id. */
   crewKeys?: ReadonlyMap<string, ReadonlyMap<string, number>>;
+  /** Open briefings the crew is still to diagnose (`diagnosePending`), by id. */
+  pending?: ReadonlySet<number>;
 }): string {
   const name = zoneNamer(s.zones);
   const per = s.per ?? PAGE_SIZES[0];
@@ -621,6 +631,7 @@ export function renderBriefings(s: {
     name,
     about: s.about,
     refs: briefingRefs(s.zones, s.rulings, s.crewKeys, shown),
+    pending: s.pending,
   };
   const blocks = (bs: readonly Briefing[], heading: 'h3' | 'h4') =>
     bs.map((b) => briefingBlock(b, ctx, heading)).join('');
@@ -767,6 +778,8 @@ export function renderBriefing(s: {
   holds?: Map<string, string>;
   about?: About;
   crewKeys?: ReadonlyMap<string, number>;
+  /** The crew is still to diagnose it (`diagnosePending`). */
+  pending?: boolean;
 }): string {
   const b = s.briefing;
   const name = zoneNamer(s.zones);
@@ -782,6 +795,7 @@ export function renderBriefing(s: {
       s.crewKeys ? new Map([[b.zoneId, s.crewKeys]]) : undefined,
       shown,
     ),
+    pending: s.pending ? new Set([b.id]) : undefined,
   };
   const rows = own
     .map(
