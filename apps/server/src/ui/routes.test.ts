@@ -23,6 +23,7 @@ import { actionFor, PAGES_M45A, pagesOf } from '../doctor/actions.js';
 import { CHECK_IDS, DOC } from '../doctor/checks.js';
 import { serverScrubSet } from '../forge/scrub-set.js';
 import { zoneGuidance } from '../github/guidance.js';
+import { recordObjectiveDone, zoneObjective } from '../goals.js';
 import { opMarker } from '../outbox.js';
 import { crewOn, GOAL } from '../test/crew.js';
 import { harness } from '../test/flowHarness.js';
@@ -215,6 +216,75 @@ describe('UI routes', () => {
     expect(res.body).toContain('Add docs');
     expect(res.body).toContain('Crew issues not started (no recorded promotion)');
     expect(res.body).toContain('#12');
+  });
+
+  const THREE_GOALS = `# Goals
+
+## Lighthouse
+
+Ship it.
+
+## Objectives
+
+- [x] Broker and JWT
+- [ ] Manifest flow
+- [ ] Release notes
+`;
+
+  async function rulingId(h: Awaited<ReturnType<typeof crewHarness>>): Promise<number> {
+    const id = raiseBriefing(
+      h.db,
+      {
+        zoneId: 'main',
+        kind: 'crew',
+        subject: 'crew:objective',
+        decision: 'Is it done?',
+        why: 'w',
+        options: [{ id: 'yes', label: 'Yes', effect: 'none' }],
+        source: 'crew',
+      },
+      h.now(),
+    );
+    const r = ruleBriefing(h.db, id, 'yes', 'done', h.now());
+    if (!r.ok) throw new Error('ruling failed');
+    return r.rulingId;
+  }
+
+  function statusOf(body: string, title: string): string | undefined {
+    const m = new RegExp(`<tr><td>${title}</td><td>([^<]*)</td>`).exec(body);
+    return m?.[1];
+  }
+
+  test('/zones/:id/goals marks done by ruling and names the crew’s current objective (#338)', async () => {
+    const h = await crewHarness();
+    h.forge.state.files.set('main:GOAL.md', THREE_GOALS);
+    await h.sync();
+    const rid = await rulingId(h);
+    recordObjectiveDone(h.db, 'main', 'manifest-flow', rid, h.now());
+    const body = (await get(h, '/zones/main/goals')).body;
+    expect(statusOf(body, 'Broker and JWT')).toBe('done');
+    expect(statusOf(body, 'Manifest flow')).toBe(`done (ruling #${rid})`);
+    expect(statusOf(body, 'Release notes')).toBe('Current objective');
+    expect(body.match(/Current objective/g)).toHaveLength(1);
+    const current = /<td>Current objective<\/td><td><code>([^<]*)<\/code>/.exec(body)?.[1];
+    expect(current).toBe(zoneObjective(h.db, 'main')?.key);
+    expect(body).not.toContain('Every objective is done');
+  });
+
+  test('/zones/:id/goals says every objective is done when the file and rulings cover all (#338)', async () => {
+    const h = await crewHarness();
+    h.forge.state.files.set('main:GOAL.md', THREE_GOALS);
+    await h.sync();
+    const rid = await rulingId(h);
+    recordObjectiveDone(h.db, 'main', 'manifest-flow', rid, h.now());
+    recordObjectiveDone(h.db, 'main', 'release-notes', rid, h.now());
+    const body = (await get(h, '/zones/main/goals')).body;
+    expect(zoneObjective(h.db, 'main')).toBeNull();
+    expect(body).toContain(
+      'Every objective is done. Add the next objective to GOAL.md to give the crew more work.',
+    );
+    expect(body).not.toContain('Current objective');
+    expect(statusOf(body, 'Release notes')).toBe(`done (ruling #${rid})`);
   });
 
   test('an unknown zone on /zones/:id/goals is 404', async () => {

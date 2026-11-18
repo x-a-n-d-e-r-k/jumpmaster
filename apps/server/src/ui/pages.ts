@@ -26,7 +26,7 @@ import type {
 } from '../db/repo.js';
 import { ACTIVE_DROP_STATES } from '../db/repo.js';
 import type { DoctorAction } from '../doctor/checks.js';
-import type { GoalRow } from '../goals.js';
+import { currentObjective, type GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import type { Status } from '../status.js';
 import type { Gate } from '../usage.js';
@@ -777,6 +777,8 @@ export function renderGoals(s: {
   crewIssues: CrewIssue[];
   items: WorkItem[];
   skippedCrewUnpromoted: number[];
+  /** Objectives Command marked done by a ruling: key to the ruling's id. */
+  doneByRuling: ReadonlyMap<string, number>;
 }): string {
   const path = s.zone.crew?.goalPath ?? 'GOAL.md';
   let ladder: string;
@@ -785,15 +787,25 @@ export function renderGoals(s: {
   } else if (!s.goals.parse.ok) {
     ladder = `<p>${escapeHtml(path)} could not be parsed: ${escapeHtml(s.goals.parse.error)}</p>`;
   } else {
-    const current = s.goals.parse.objectives.find((o) => !o.done);
+    const current = currentObjective(s.goals.parse, new Set(s.doneByRuling.keys()));
     const rows = s.goals.parse.objectives
       .map((o) => {
-        const status = o.done ? 'done' : o === current ? 'Current objective' : 'open';
+        const ruling = s.doneByRuling.get(o.key);
+        const status = o.done
+          ? 'done'
+          : ruling !== undefined
+            ? `done (ruling #${escapeHtml(ruling)})`
+            : o.key === current?.key
+              ? 'Current objective'
+              : 'open';
         return `<tr><td>${escapeHtml(o.title)}</td><td>${status}</td><td><code>${escapeHtml(o.key)}</code></td></tr>`;
       })
       .join('');
     ladder =
       `<p>${escapeHtml(s.goals.parse.lighthouse)}</p>` +
+      (current === null
+        ? `<p>Every objective is done. Add the next objective to ${escapeHtml(path)} to give the crew more work.</p>`
+        : '') +
       `<table><tr><th>Objective</th><th>Status</th><th>Key</th></tr>${rows}</table>` +
       `<p><small>Read ${escapeHtml(s.goals.readAt)}</small></p>`;
   }
