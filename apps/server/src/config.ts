@@ -120,6 +120,7 @@ const CREW_DEFAULTS = {
   maxRefute: 3,
   maxTriage: 2,
   arbiter: true,
+  auditPerCycle: 1,
   autoRetry: true,
 };
 
@@ -183,6 +184,11 @@ const CrewSchema = z
     maxTriage: z.number().int().min(1).default(CREW_DEFAULTS.maxTriage),
     /** Lets a Fable arbiter settle a crew disagreement instead of briefing; false briefs as before. */
     arbiter: z.boolean().default(CREW_DEFAULTS.arbiter),
+    /**
+     * Commits merged to the default branch the crew audits per lead cycle, oldest first. A
+     * refuted one becomes a staged crew issue; 0 turns the audit off.
+     */
+    auditPerCycle: z.number().int().min(0).default(CREW_DEFAULTS.auditPerCycle),
     /** Lets the crew retry a failed implementation once on its own diagnosis; false briefs. */
     autoRetry: z.boolean().default(CREW_DEFAULTS.autoRetry),
   })

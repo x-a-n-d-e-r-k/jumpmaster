@@ -46,6 +46,7 @@ import {
   claimArbitrationApply,
   claimCrewRetryApply,
   getArbitrationByDrop,
+  getAuditByDrop,
   getCrewIssue,
   getCrewRetry,
   getTriageRequest,
@@ -56,6 +57,7 @@ import {
   setCrewIssue,
   setTriageRequest,
   settleArbitration,
+  settleAudit,
   settleCrewRetry,
   unappliedItemArbitrations,
 } from './store.js';
@@ -672,6 +674,66 @@ function applyTriage(
   return undefined;
 }
 
+/** The line a refuted audit's issue body ends with; it counts toward the 12000-character limit. */
+export const foundByAudit = (sha: string): string => `Found by the audit of ${sha}.`;
+
+type AuditWork = Extract<CrewInputJson['work'], { role: 'audit' }>;
+
+/** An audit drop that came to nothing: its audit is `failed` with the reason. Never retried. */
+function auditFailed(db: Db, drop: Drop, reason: string, now: Date): void {
+  const row = getAuditByDrop(db, drop.id);
+  if (row) settleAudit(db, row.id, { state: 'failed', reason: reason.slice(0, MAX_ERROR) }, now);
+}
+
+/**
+ * An audit's verdict on a merged commit. `holds` settles it; `refuted` files its one fix-forward
+ * issue as a staged crew issue through `applyCrewActions` (key `audit-<sha7>`, objective
+ * `audit:<sha7>`), all or nothing, so it is refuted like any crew issue before work starts. A
+ * refused issue files nothing, and the reasons never echo its text. Nothing else is written: no
+ * revert, reopen or comment. Returns a note for the drop's log, if any.
+ */
+function applyAudit(
+  db: Db,
+  deps: ResultDeps,
+  drop: Drop,
+  work: AuditWork,
+  out: CrewOutput['audit'],
+  now: Date,
+): string | undefined {
+  const row = getAuditByDrop(db, drop.id);
+  if (!row || row.state !== 'running') return 'verdict not applied: its audit is settled';
+  if (out.verdict === 'holds' || !out.issue) {
+    settleAudit(db, row.id, { state: 'holds' }, now);
+    return undefined;
+  }
+  const sha7 = work.sha.slice(0, 7);
+  const body = `${out.issue.body.trim()}\n\n${foundByAudit(work.sha)}`;
+  const refused = (reason: string) => {
+    settleAudit(db, row.id, { state: 'refused', reason }, now);
+    return `refutation refused: ${reason}`;
+  };
+  if (body.length > MAX_ISSUE_BODY) {
+    return refused(`the issue body is over ${MAX_ISSUE_BODY} characters with its audit line`);
+  }
+  const objective = `audit:${sha7}`;
+  const report = applyCrewActions(
+    db,
+    deps.zone,
+    { fileIssues: [{ key: `audit-${sha7}`, objective, title: out.issue.title, body }] },
+    { kind: 'drop', dropId: drop.id },
+    now,
+    { objective, allOrNothing: true },
+  );
+  const filed = report.filed[0];
+  if (report.refused.length > 0 || filed === undefined) {
+    // The reasons without the key: they never echo the issue's text.
+    const reasons = report.refused.map((r) => r.slice(r.indexOf(': ') + 2));
+    return refused(reasons.join('; ') || 'nothing was filed');
+  }
+  settleAudit(db, row.id, { state: 'filed', crewIssueId: filed }, now);
+  return undefined;
+}
+
 /**
  * A crew drop's result. The output is validated per role; only then is it recorded as intents in
  * the database (never a forge write). Its usage, the probe's release included, is `applyUsage`'s.
@@ -693,6 +755,8 @@ export async function applyCrewResult(
         triageFailed(db, deps, work.requestId, error, now);
       } else if (role === 'arbitrate' && work?.role === 'arbitrate') {
         arbitrationFailed(db, deps, drop, work, error, now);
+      } else if (role === 'audit') {
+        auditFailed(db, drop, error, now);
       }
     };
     if (result.status === 'rate_limited') {
@@ -739,6 +803,11 @@ export async function applyCrewResult(
         work.subject === 'item'
           ? applyItemArbitration(db, deps, drop, work, out, now)
           : applyIssueArbitration(db, deps, drop, work, out, now);
+      return finish(db, drop, 'succeeded', now, note);
+    } else if (role === 'audit' && work?.role === 'audit') {
+      // Kept on the drop: its page is where the findings are read.
+      updateDrop(db, drop.id, { resultJson: JSON.stringify(result) });
+      const note = applyAudit(db, deps, drop, work, parsed.value as CrewOutput['audit'], now);
       return finish(db, drop, 'succeeded', now, note);
     } else if (role === 'diagnose' && work?.role === 'diagnose') {
       const out = parsed.value as CrewOutput['diagnose'];
