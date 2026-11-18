@@ -891,6 +891,39 @@ describe('zone checks', () => {
     expect(one(checks, 'zone.goals')).toMatchObject({ status: 'warn' });
   });
 
+  test('zone.crew-cap passes with maxDropsPerDay 0: no daily limit, usage paces the crew (#398)', async () => {
+    const crew = {
+      enabled: true,
+      goalPath: 'GOAL.md',
+      cycleMinutes: 60,
+      maxDropsPerDay: 0,
+      stagedLabel: 'agent-staged',
+      maxStaged: 3,
+      refutePromotes: false,
+      maxRefute: 2,
+      maxTriage: 2,
+      arbiter: true,
+    };
+    const w = world({ zone: { crew, protectedPaths: ['GOAL.md'] } });
+    w.f.state.labels.push('agent-staged');
+    for (let n = 0; n < 100; n++)
+      insertDrop(
+        w.db,
+        {
+          id: `c${n}`,
+          dropZoneId: 'main',
+          workItemId: null,
+          role: 'crew-lead',
+          state: 'succeeded',
+        },
+        ago(3_600_000),
+      );
+    expect(one(await w.run(), 'zone.crew-cap')).toMatchObject({
+      status: 'pass',
+      summary: 'crew drops in the last 24 hours: 100 (no daily limit; Claude usage paces the crew)',
+    });
+  });
+
   test('zone.crew-cap counts every crew role as crewDropsToday does: an arbitrate drop dates the cap (D5)', async () => {
     const crew = {
       enabled: true,
