@@ -1249,21 +1249,25 @@ export interface UsageWindowRow {
   utilization: number | null;
   resetsAt: string | null;
   observedAt: string | null;
+  /** The model of the drop that reported it (#377); null if unknown or stored before v40. */
+  model: string | null;
 }
 
-/** Stores the latest value of each reported window, stamped `now`. */
+/** Stores the latest value of each reported window, stamped `now` and the reporting `model`. */
 export function recordUsageWindows(
   db: Db,
   windows: Record<string, { utilization: number; resetsAt?: string | undefined }>,
   now: Date,
+  model: string | null,
 ): void {
   const up = db.prepare(
-    `INSERT INTO usage_windows (key, utilization, resets_at, observed_at) VALUES (?, ?, ?, ?)
+    `INSERT INTO usage_windows (key, utilization, resets_at, observed_at, model)
+     VALUES (?, ?, ?, ?, ?)
      ON CONFLICT (key) DO UPDATE SET utilization = excluded.utilization,
-       resets_at = excluded.resets_at, observed_at = excluded.observed_at`,
+       resets_at = excluded.resets_at, observed_at = excluded.observed_at, model = excluded.model`,
   );
   for (const [key, w] of Object.entries(windows)) {
-    up.run(key, w.utilization, w.resetsAt ?? null, now.toISOString());
+    up.run(key, w.utilization, w.resetsAt ?? null, now.toISOString(), model);
   }
 }
 
@@ -1271,7 +1275,7 @@ export function recordUsageWindows(
 export function listUsageWindows(db: Db): UsageWindowRow[] {
   return db
     .prepare(
-      `SELECT key, utilization, resets_at AS resetsAt, observed_at AS observedAt
+      `SELECT key, utilization, resets_at AS resetsAt, observed_at AS observedAt, model
        FROM usage_windows ORDER BY key`,
     )
     .all() as UsageWindowRow[];

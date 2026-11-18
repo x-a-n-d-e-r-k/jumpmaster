@@ -193,11 +193,36 @@ function meter(label: string, v: number | null, note?: string): string {
 
 /** The windows usage_state already carries, read by the gate. */
 const GATE_WINDOWS = new Set(['five_hour', 'seven_day']);
-const isFableWindow = (key: string): boolean => key.includes('fable');
+
+/**
+ * Windows that belong to one model the key does not name (#377): `seven_day_overage_included` is
+ * Claude's "per-model bucket", labelled by the model of the drop that reported it.
+ */
+export const PER_MODEL_WINDOWS = new Set(['seven_day_overage_included']);
+
+/** A model id's family: `claude-fable-5-2` reads `Fable`; null for any other shape. */
+export function modelFamily(model: string | null): string | null {
+  const m = model === null ? null : /^claude-([a-z]+)-/.exec(model);
+  const f = m?.[1];
+  return f ? f[0]?.toUpperCase() + f.slice(1) : null;
+}
+
+/** The Fable window: its key names Fable, or it is a per-model window a Fable drop reported. */
+const isFableWindow = (row: UsageWindowRow): boolean =>
+  row.key.includes('fable') ||
+  (PER_MODEL_WINDOWS.has(row.key) && modelFamily(row.model) === 'Fable');
 const PERIODS: [string, string][] = [
   ['five_hour', '5-hour'],
   ['seven_day', '7-day'],
 ];
+
+/** A per-model window's meter: by its model's family, or saying Claude didn't name it. */
+function perModelMeter(w: UsageWindowRow): string {
+  const family = modelFamily(w.model);
+  return family
+    ? meter(`${family} (7-day)`, w.utilization)
+    : meter('Model weekly limit (7-day)', w.utilization, "Claude didn't say which model");
+}
 
 /** A model window's meter label from its key: `seven_day_opus` reads `Opus (7-day)`. */
 export function windowLabel(key: string): string {
@@ -213,7 +238,7 @@ export function windowLabel(key: string): string {
 /** The Fable window: the one whose key names Fable, the most recently observed if several. */
 function fableWindow(windows: readonly UsageWindowRow[]): UsageWindowRow | undefined {
   return windows
-    .filter((w) => isFableWindow(w.key))
+    .filter(isFableWindow)
     .reduce<UsageWindowRow | undefined>(
       (best, w) =>
         best === undefined || (w.observedAt ?? '') > (best.observedAt ?? '') ? w : best,
@@ -229,7 +254,7 @@ function usageMeters(u: NonNullable<HomeState['usage']>): string {
   const s = u.state;
   const fable = fableWindow(u.windows);
   const others = u.windows
-    .filter((w) => !GATE_WINDOWS.has(w.key) && !isFableWindow(w.key))
+    .filter((w) => !GATE_WINDOWS.has(w.key) && !isFableWindow(w))
     .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   return (
     (u.plan === 'ultra' ? '' : meter('5-hour', s.fiveHourUtil)) +
@@ -237,7 +262,11 @@ function usageMeters(u: NonNullable<HomeState['usage']>): string {
     (fable && fable.utilization !== null
       ? meter('Fable (7-day)', fable.utilization)
       : meter('Fable (7-day)', null, 'not reported by Claude yet')) +
-    others.map((w) => meter(windowLabel(w.key), w.utilization)).join('')
+    others
+      .map((w) =>
+        PER_MODEL_WINDOWS.has(w.key) ? perModelMeter(w) : meter(windowLabel(w.key), w.utilization),
+      )
+      .join('')
   );
 }
 

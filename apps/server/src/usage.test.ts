@@ -14,6 +14,7 @@ import {
   type NewDrop,
   setUsageState,
   setWorkItemState,
+  updateDrop,
   upsertDropZone,
   upsertWorkItem,
 } from './db/repo.js';
@@ -560,12 +561,14 @@ describe('every reported usage window (#144)', () => {
         utilization: 0.3,
         resetsAt: '2026-10-25T00:00:00.000Z',
         observedAt: t0.toISOString(),
+        model: null,
       },
       {
         key: 'seven_day_fable',
         utilization: 0.42,
         resetsAt: '2026-10-26T00:00:00.000Z',
         observedAt: later.toISOString(),
+        model: null,
       },
     ]);
     // The existing columns still follow five_hour and seven_day only.
@@ -587,6 +590,53 @@ describe('every reported usage window (#144)', () => {
     expect(listUsageWindows(db).map((w) => [w.key, w.utilization])).toEqual([
       ['seven_day_fable', 1],
     ]);
+  });
+
+  test('each window records the model of the drop that reported it (#377)', () => {
+    const wi = item(1);
+    drop({ id: 'df', workItemId: wi });
+    updateDrop(db, 'df', { servedModel: 'claude-fable-5-2', requestedModel: 'claude-opus-5-5' });
+    ingestRateLimit(
+      db,
+      allowed({ seven_day_overage_included: { utilization: 0.01 } }),
+      src('df', null),
+      cfg,
+      t0,
+    );
+    expect(listUsageWindows(db)).toEqual([
+      {
+        key: 'seven_day_overage_included',
+        utilization: 0.01,
+        resetsAt: null,
+        observedAt: t0.toISOString(),
+        model: 'claude-fable-5-2',
+      },
+    ]);
+  });
+
+  test('an unknown drop records no model (#377)', () => {
+    ingestRateLimit(
+      db,
+      allowed({ seven_day_overage_included: { utilization: 0.01 } }),
+      src('nope', null),
+      cfg,
+      t0,
+    );
+    expect(listUsageWindows(db).map((w) => w.model)).toEqual([null]);
+  });
+
+  test('with no served model, the requested model is recorded (#377)', () => {
+    const wi = item(1);
+    drop({ id: 'dr', workItemId: wi });
+    updateDrop(db, 'dr', { requestedModel: 'claude-opus-5-5' });
+    ingestRateLimit(
+      db,
+      allowed({ seven_day_overage_included: { utilization: 0.3 } }),
+      src('dr', null),
+      cfg,
+      t0,
+    );
+    expect(listUsageWindows(db).map((w) => w.model)).toEqual(['claude-opus-5-5']);
   });
 
   test('the raw fallback keeps every valid window and drops bad ones', () => {
