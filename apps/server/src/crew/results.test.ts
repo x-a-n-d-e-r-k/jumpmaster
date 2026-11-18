@@ -384,6 +384,147 @@ describe('refute results', () => {
   });
 });
 
+describe('refutes of security-touching issues (#384)', () => {
+  const FABLE = 'claude-fable-1';
+  const fable: ClaudeConfig = { plan: 'max', fableModel: FABLE, fableWeeklyDropCap: 5 };
+  const secrets = {
+    claudeToken: 'claude-secret',
+    githubAuthorToken: 'author-secret',
+    githubReviewerToken: 'reviewer-secret',
+    joinToken: 'join',
+    operatorToken: 'o'.repeat(32),
+  } as Config['secrets'];
+  const SECURE_BODY = `${ISSUE_BODY}\n## Security-touching checklist\n\n- D2: fails closed.\n`;
+  const NOTE = 'This issue is security-touching and its review ran without Fable.';
+  const zoneOn = (): DropZoneConfig => ({ ...w.zone, crew: { ...crewOn, refutePromotes: true } });
+  const fdeps = (zone: DropZoneConfig): ResultDeps => ({ ...deps(zone), claude: fable });
+
+  /** A staged crew issue with `body`. */
+  function stagedWith(body: string): number {
+    const id = staged();
+    setCrewIssue(w.db, id, { body }, t0);
+    return id;
+  }
+
+  /** Enqueues the refute and leases it with `claude` as the payload's config. */
+  async function leasedRefute(zone: DropZoneConfig, claude: ClaudeConfig): Promise<string> {
+    const id = await crewDrop(t0, zone);
+    expect(getDrop(w.db, id)?.role).toBe('refute');
+    buildPayload(w.db, zone, getDrop(w.db, id) as never, secrets, { claude, now: t0 });
+    return id;
+  }
+
+  const promote = completed({ decision: 'promote', findings: [] });
+  const open = () => listBriefings(w.db, { zoneId: 'main', state: 'open' });
+  const expectBriefed = (issue: number) => {
+    expect(getCrewIssue(w.db, issue)).toMatchObject({ state: 'staged', refutedSha: 'sha-1' });
+    expect(open().map((b) => b.kind)).toEqual(['promote']);
+    expect(open()[0]?.why).toContain(NOTE);
+  };
+
+  test('on Fable: a promote is held as for any issue', async () => {
+    const zone = zoneOn();
+    const issue = stagedWith(SECURE_BODY);
+    const id = await leasedRefute(zone, fable);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(FABLE);
+    await applyResult(w.db, fdeps(zone), id, promote, t0);
+    expect(getCrewIssue(w.db, issue)?.state).toBe('promote_held');
+    expect(open().map((b) => b.kind)).toEqual(['promote_held']);
+    expect(open()[0]?.why).not.toContain(NOTE);
+  });
+
+  test('Fable unavailable: the refute ran on the zone model and its promote is briefed, even with refutePromotes on', async () => {
+    const zone = zoneOn();
+    const issue = stagedWith(SECURE_BODY);
+    const unavailable: ClaudeConfig = { ...fable, plan: 'pro' };
+    const id = await leasedRefute(zone, unavailable);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(zone.model);
+    await applyResult(w.db, fdeps(zone), id, promote, t0);
+    expectBriefed(issue);
+  });
+
+  test('an issue without the section on the zone model: held as today', async () => {
+    const zone = zoneOn();
+    const issue = stagedWith(ISSUE_BODY);
+    const id = await leasedRefute(zone, fable);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(zone.model);
+    await applyResult(w.db, fdeps(zone), id, promote, t0);
+    expect(getCrewIssue(w.db, issue)?.state).toBe('promote_held');
+    expect(open().map((b) => b.kind)).toEqual(['promote_held']);
+  });
+
+  test('a refute stored before #384 (no field) of a security-touching issue: zone model, briefed', async () => {
+    const zone = zoneOn();
+    const issue = stagedWith(SECURE_BODY);
+    const id = await crewDrop(t0, zone);
+    const stored = JSON.parse(getDrop(w.db, id)?.inputJson ?? '{}');
+    delete stored.work.securityTouching;
+    w.db.prepare('UPDATE drops SET input_json = ? WHERE id = ?').run(JSON.stringify(stored), id);
+    buildPayload(w.db, zone, getDrop(w.db, id) as never, secrets, { claude: fable, now: t0 });
+    expect(getDrop(w.db, id)?.requestedModel).toBe(zone.model);
+    await applyResult(w.db, fdeps(zone), id, promote, t0);
+    expectBriefed(issue);
+  });
+
+  test('D2: a Fable request served by another model is briefed, not held', async () => {
+    const zone = zoneOn();
+    const issue = stagedWith(SECURE_BODY);
+    const id = await leasedRefute(zone, fable);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(FABLE);
+    await applyResult(
+      w.db,
+      fdeps(zone),
+      id,
+      { ...promote, modelUsage: { 'claude-opus-5-5': { outputTokens: 40 } } },
+      t0,
+    );
+    expect(getDrop(w.db, id)?.servedModel).toBe('claude-opus-5-5');
+    expectBriefed(issue);
+  });
+
+  test('D2: with no claude config on the result side, it fails closed: briefed', async () => {
+    const zone = zoneOn();
+    const issue = stagedWith(SECURE_BODY);
+    const id = await leasedRefute(zone, fable);
+    await applyResult(w.db, deps(zone), id, promote, t0);
+    expectBriefed(issue);
+  });
+
+  test('D5: the stored flag alone forces the briefing', async () => {
+    const zone = zoneOn();
+    const issue = stagedWith(SECURE_BODY);
+    const id = await leasedRefute(zone, { ...fable, plan: 'pro' });
+    // The body no longer has the section; the flag stored at enqueue still says it is.
+    setCrewIssue(w.db, issue, { body: ISSUE_BODY }, t0);
+    await applyResult(w.db, fdeps(zone), id, promote, t0);
+    expectBriefed(issue);
+  });
+
+  test('D5: the body check alone forces the briefing', async () => {
+    const zone = zoneOn();
+    const issue = stagedWith(ISSUE_BODY);
+    const id = await leasedRefute(zone, fable);
+    expect(JSON.parse(getDrop(w.db, id)?.inputJson ?? '{}').work.securityTouching).toBe(false);
+    setCrewIssue(w.db, issue, { body: `${ISSUE_BODY}\n### security-touching CHECKLIST\n` }, t0);
+    await applyResult(w.db, fdeps(zone), id, promote, t0);
+    expectBriefed(issue);
+  });
+
+  test('revise and reject are unchanged', async () => {
+    const zone = zoneOn();
+    const issue = stagedWith(SECURE_BODY);
+    const id = await leasedRefute(zone, { ...fable, plan: 'pro' });
+    await applyResult(
+      w.db,
+      fdeps(zone),
+      id,
+      completed({ decision: 'reject', findings: ['x'] }),
+      t0,
+    );
+    expect(getCrewIssue(w.db, issue)?.state).toBe('rejecting');
+  });
+});
+
 describe('diagnose results', () => {
   const diagnosis = {
     diagnosis: 'The test is flaky.',
