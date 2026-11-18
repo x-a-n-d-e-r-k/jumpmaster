@@ -62,8 +62,11 @@ function applyRefute(
           zoneId: zone.id,
           kind: 'promote_held',
           subject,
-          decision: `The refute promoted ${label}. It will be promoted after one active pass unless you reject it.`,
-          why: 'Every criterion survived the refute, and this zone lets a refute promote.',
+          decision: `A reviewer found nothing to fix in ${label}. It becomes ready on the next pass unless you reject it.`,
+          why:
+            `The crew filed ${label} as staged, and a second agent reviewed it against the code and the spec ` +
+            'and found nothing wrong, vague or untestable. This zone lets a passing review promote ' +
+            '(crew.refutePromotes is on), so you only need to act to stop it.',
           options: [
             { id: 'reject', label: 'Reject', effect: 'reject_issue' },
             { id: 'promote', label: 'Promote now', effect: 'promote_issue' },
@@ -82,8 +85,13 @@ function applyRefute(
         zoneId: zone.id,
         kind: 'promote',
         subject,
-        decision: `Promote ${label}?`,
-        why: 'Every criterion survived the refute.',
+        decision: `A reviewer found nothing to fix in ${label}. Promote it so an agent can start?`,
+        why:
+          `The crew filed ${label} as staged, so no agent works on it yet. A second agent reviewed it ` +
+          'against the code and the spec, looking for criteria that are wrong, vague or untestable, ' +
+          'and found none. Promote gives it the ready label; Reject closes it. To let a passing ' +
+          'review promote on its own, with a notice you can still reject, set crew.refutePromotes ' +
+          `for this zone: jumpmaster ctl zones set ${zone.id} crew.refutePromotes=true`,
         options: PROMOTE_OPTIONS,
         onHold: label,
         source: 'server',
