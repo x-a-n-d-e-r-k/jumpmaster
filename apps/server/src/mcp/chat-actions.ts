@@ -21,6 +21,7 @@ import {
 import { FLAGS } from '../config/catalog.js';
 import type { DropZoneConfig } from '../config.js';
 import { getUsageState, isKilled } from '../db/repo.js';
+import { GOAL_TEXT_MAX, goalChangeDiff, proposeGoalChange } from '../goal-change.js';
 import { getGoals, objectivesDone } from '../goals.js';
 import { redactionList } from '../scrub.js';
 import { dispatchGate } from '../usage.js';
@@ -443,10 +444,67 @@ const changeSettingTool: ChatToolDef = {
   },
 };
 
+const GoalChangeArgs = z.strictObject({
+  zoneId: ZoneId,
+  // One more than the limit: proposeGoalChange refuses a longer text in its own words.
+  text: z
+    .string()
+    .min(1)
+    .max(GOAL_TEXT_MAX + 1),
+});
+
+/** How many changed lines of a goal change's diff its card shows. */
+const CARD_DIFF_LINES = 200;
+
+const proposeGoalChangeTool: ChatToolDef = {
+  name: 'propose_goal_change',
+  scope: 'chat-write',
+  description:
+    "Proposes a new text for the zone's whole goal file (GOAL.md), on the owner's word. The server " +
+    'opens a pull request changing that file only, on the next pass. It is merged only after the ' +
+    'owner confirms it in the browser. The text must parse as goals (## Objectives with ### ' +
+    'headings or - [ ] items).',
+  input: GoalChangeArgs,
+  run(ctx, args: z.infer<typeof GoalChangeArgs>) {
+    const p = chatOf(ctx);
+    return carded(ctx, 'goal_change', args, () => {
+      const zone = zoneNeeded(ctx);
+      if (!zone) return { out: refused('unknown zone', 'unknown zone') };
+      const r = proposeGoalChange(
+        ctx.db,
+        zone,
+        { text: args.text, source: 'chat', sourceRef: `chat:${p.threadId}:${p.messageId}` },
+        ctx.now(),
+      );
+      if (!r.ok) return { out: refused(r.error, r.error) };
+      const path = zone.crew.goalPath;
+      const diff = goalChangeDiff(ctx.db, r.id).split('\n');
+      const added = diff.filter((l) => l.startsWith('+ ')).length;
+      const removed = diff.filter((l) => l.startsWith('- ')).length;
+      const shown =
+        diff.length > CARD_DIFF_LINES
+          ? [...diff.slice(0, CARD_DIFF_LINES), `(${diff.length - CARD_DIFF_LINES} more lines)`]
+          : diff;
+      return {
+        out: ok(
+          `Goal change ${r.id} is proposed for zone ${zone.id}. The server opens its pull request on the next pass; it merges only after the owner confirms it in the browser.`,
+        ),
+        summary:
+          `Proposed a change to ${path} in zone ${zone.id} (goal change ${r.id}): ` +
+          `${added} lines added, ${removed} removed. A pull request opens on the next pass, and ` +
+          `it merges only after you confirm it.\n\n${shown.join('\n')}`,
+        target: `goal_change:${r.id}`,
+        link: zoneLink(zone.id),
+      };
+    });
+  },
+};
+
 export const CHAT_ACTION_TOOLS: ChatToolDef[] = [
   ruleBriefingTool,
   setZoneModeTool,
   runCrewCycleTool,
   markObjectiveDoneTool,
   changeSettingTool,
+  proposeGoalChangeTool,
 ];

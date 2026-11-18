@@ -144,7 +144,8 @@ export function fableStatus(
 /**
  * The model a drop runs on. A Fable role gets `fableModel` when Fable is available; otherwise the
  * role's configured model, unless that names Fable while Fable is unavailable, when the zone model
- * stands in. Fable never runs undeclared.
+ * stands in. Fable never runs undeclared. `opts.fable` makes this drop a Fable role too (a refute
+ * of a security-touching crew issue); the doctor never runs on Fable.
  */
 export function resolveModel(
   db: Db,
@@ -152,9 +153,11 @@ export function resolveModel(
   zone: DropZoneConfig,
   role: Role,
   now: Date,
+  opts: { fable?: boolean } = {},
 ): string {
   const status = fableStatus(db, cfg, now);
-  const fableRole = (FABLE_ROLES as readonly string[]).includes(role);
+  const fableRole =
+    role !== 'doctor' && ((FABLE_ROLES as readonly string[]).includes(role) || opts.fable === true);
   if (fableRole && status.available && cfg.claude.fableModel) return cfg.claude.fableModel;
   const configured = modelFor(zone, role);
   // The doctor's one-line probe never spends Fable: it runs on the zone's model whatever models says.

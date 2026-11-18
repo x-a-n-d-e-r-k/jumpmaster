@@ -20,7 +20,12 @@ import type { ForgePair } from '../outbox.js';
 import type { CrewInputJson } from '../payloads.js';
 import type { ResultDeps } from '../results.js';
 import { retryParkedItem } from '../sync.js';
-import { applyCrewActions, protectedPathsNamed, validateIssueSpec } from './actions.js';
+import {
+  applyCrewActions,
+  isSecurityTouching,
+  protectedPathsNamed,
+  validateIssueSpec,
+} from './actions.js';
 import { PROMOTE_OPTIONS, subjectOf } from './flush.js';
 import {
   briefItemRuling,
@@ -81,6 +86,7 @@ const REFUTE_WHY: ReviewWhy = {
  * A staged issue that passed review (a refute's `promote`, or an arbiter's ruling A). With
  * `crew.refutePromotes` on it becomes `promote_held`, ready next pass unless Command rejects it;
  * off, it stays staged and Command gets a Promote briefing. Never further than a refute could.
+ * With `attended`, it takes the off branch whatever the setting, and the why adds that line.
  */
 export function promoteAfterReview(
   db: Db,
@@ -89,11 +95,12 @@ export function promoteAfterReview(
   base: CrewIssuePatch,
   why: ReviewWhy,
   now: Date,
+  attended?: string,
 ): void {
   const { zone } = deps;
   const subject = subjectOf(issue);
   const label = labelOf(issue);
-  if (zone.crew.refutePromotes) {
+  if (zone.crew.refutePromotes && attended === undefined) {
     // hold_until is set by the first active flush that sees it (one pass for Command).
     setCrewIssue(db, issue.id, { ...base, state: 'promote_held' }, now);
     raiseBriefing(
@@ -129,7 +136,8 @@ export function promoteAfterReview(
         `The crew filed ${label} as staged, so no agent works on it yet. ${capitalise(why.reviewed)} ` +
         'Promote gives it the ready label; Reject closes it. To let a passing ' +
         'review promote on its own, with a notice you can still reject, set crew.refutePromotes ' +
-        `for this zone: jumpmaster ctl zones set ${zone.id} crew.refutePromotes=true`,
+        `for this zone: jumpmaster ctl zones set ${zone.id} crew.refutePromotes=true` +
+        (attended === undefined ? '' : `\n${attended}`),
       options: PROMOTE_OPTIONS,
       onHold: label,
       source: 'server',
@@ -140,6 +148,30 @@ export function promoteAfterReview(
 
 const capitalise = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 
+type RefuteWork = Extract<CrewInputJson['work'], { role: 'refute' }>;
+
+/** The why's extra line for a security-touching issue whose review did not run on Fable. */
+export const SECURITY_NO_FABLE =
+  'This issue is security-touching and its review ran without Fable.';
+
+/**
+ * A security-touching issue (the flag stored at enqueue or its body's section: either is enough)
+ * refuted by a drop that did not run on Fable, as the server recorded it (requested and served
+ * model, never the agent's word). With no claude config nothing says what Fable is: it fails
+ * closed, as not on Fable.
+ */
+function withoutFable(
+  db: Db,
+  deps: ResultDeps,
+  drop: Drop,
+  work: RefuteWork,
+  issue: CrewIssue,
+): boolean {
+  if (work.securityTouching !== true && !isSecurityTouching(issue.body)) return false;
+  const recorded = getDrop(db, drop.id) ?? drop;
+  return !deps.claude || !ranOnFable({ claude: deps.claude }, recorded);
+}
+
 /**
  * A refute's verdict on a staged crew issue. Nothing happens if the issue has moved on. A revise
  * at the refute budget is kept like any other: once staged again, the schedule's exhausted step
@@ -148,6 +180,8 @@ const capitalise = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1)
 function applyRefute(
   db: Db,
   deps: ResultDeps,
+  drop: Drop,
+  work: RefuteWork,
   issue: CrewIssue,
   out: CrewOutput['refute'],
   now: Date,
@@ -160,7 +194,8 @@ function applyRefute(
   };
 
   if (out.decision === 'promote') {
-    promoteAfterReview(db, deps, issue, base, REFUTE_WHY, now);
+    const attended = withoutFable(db, deps, drop, work, issue) ? SECURITY_NO_FABLE : undefined;
+    promoteAfterReview(db, deps, issue, base, REFUTE_WHY, now, attended);
     return;
   }
 
@@ -592,7 +627,9 @@ export async function applyCrewResult(
       // Kept on the drop: a refute_exhausted briefing quotes every review's findings from it.
       updateDrop(db, drop.id, { resultJson: JSON.stringify(result) });
       const issue = getCrewIssue(db, work.crewIssueId);
-      if (issue) applyRefute(db, deps, issue, parsed.value as CrewOutput['refute'], now);
+      if (issue) {
+        applyRefute(db, deps, drop, work, issue, parsed.value as CrewOutput['refute'], now);
+      }
     } else if (role === 'triage' && work?.role === 'triage') {
       const out = parsed.value as CrewOutput['triage'];
       const note = applyTriage(db, deps, drop, work.requestId, out, now);

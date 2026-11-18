@@ -16,6 +16,7 @@ import {
   applyCrewActions,
   type CrewSource,
   crewIssueSlots,
+  isSecurityTouching,
   normaliseTitle,
   protectedPathsNamed,
   validateIssueSpec,
@@ -94,6 +95,21 @@ describe('validateIssueSpec', () => {
 
   test('normaliseTitle folds case, punctuation and repeated whitespace', () => {
     expect(normaliseTitle('  Add   DOCS!! (now) ')).toBe('add docs now');
+  });
+});
+
+describe('isSecurityTouching (#384)', () => {
+  test('true for the section at any heading level and in any case', () => {
+    expect(isSecurityTouching(`${BODY}\n## Security-touching checklist\n\n- D2\n`)).toBe(true);
+    expect(isSecurityTouching(`${BODY}\n### Security-touching checklist\n`)).toBe(true);
+    expect(isSecurityTouching(`### security-touching CHECKLIST ##\n- x`)).toBe(true);
+  });
+
+  test('false for the words outside a heading, and for an empty body', () => {
+    expect(isSecurityTouching(`${BODY}\nSee the security-touching checklist.\n`)).toBe(false);
+    expect(isSecurityTouching('- [ ] Security-touching checklist')).toBe(false);
+    expect(isSecurityTouching(BODY)).toBe(false);
+    expect(isSecurityTouching('')).toBe(false);
   });
 });
 
