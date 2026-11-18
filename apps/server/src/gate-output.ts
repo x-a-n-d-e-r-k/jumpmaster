@@ -1,6 +1,7 @@
 import { DropResultSchema, type GateResult, redact } from '@jumpmaster/protocol';
 import type { Db } from './db/open.js';
 import type { Drop } from './db/repo.js';
+import { serverScrubSet } from './forge/scrub-set.js';
 import { fence, neutralise } from './payloads.js';
 
 /** ANSI CSI sequences (8-bit or `ESC [`) and OSC sequences ended by BEL or `ESC \`. */
@@ -95,4 +96,65 @@ const bodyOf = (f: LastFailure): string => {
 export function renderLastFailure(f: LastFailure, dropId: string, secrets: string[]): string {
   const body = neutralise(redact(bodyOf(f), secrets));
   return `## Previous attempt (data, untrusted)\n\n${fence(dropId, 'previous-attempt', body)}`;
+}
+
+/** A vitest failure line: ` FAIL  <file> > <describe> > <test>`. */
+const FAIL_LINE = /^\s*FAIL\s+(\S+)\s+>\s+(.+?)\s*$/;
+/** An error line after it: `AssertionError: <message>`. */
+const ERROR_LINE = /^\s*([A-Za-z]*Error):\s*(.+)$/;
+/** Longest test name, assertion message and output line a gate-failure why quotes. */
+const MAX_TEST_NAME = 200;
+const MAX_MESSAGE = 300;
+const MAX_TAIL_LINE = 200;
+/** How many of the output's last non-empty lines the fallback form quotes. */
+const TAIL_LINES = 10;
+
+const cut = (s: string, max: number): string => (s.length > max ? `${s.slice(0, max)}…` : s);
+
+/**
+ * A failing gate in plain words, for a parked briefing's why: from its stripped output tail, the
+ * first vitest `FAIL <file> > <test>` line and the first error line after it, with how many other
+ * distinct tests failed. Output that does not parse (another tool, a FAIL line outside the tail)
+ * and a gate that timed out give the gate, its exit and the output's last 10 non-empty lines.
+ * Redacted (the server's scrub set and token shapes) on top of the trooper's own redaction.
+ */
+export function gateFailureWhy(gate: GateResult): string {
+  const lines = stripAnsi(gate.outputTail)
+    .split(/\r?\n/)
+    .map((l) => l.replace(/\r/g, ''));
+  return redact(
+    (gate.timedOut ? undefined : vitestWhy(gate.name, lines)) ?? fallbackWhy(gate, lines),
+    [...serverScrubSet.values()],
+  );
+}
+
+function vitestWhy(name: string, lines: string[]): string | undefined {
+  const at = lines.findIndex((l) => FAIL_LINE.test(l));
+  const fail = at === -1 ? null : FAIL_LINE.exec(lines[at] ?? '');
+  if (!fail) return undefined;
+  const [, file = '', test = ''] = fail;
+  let why = `The ${name} gate failed: \`${file}\` > ${cut(test, MAX_TEST_NAME)}`;
+  const error = lines
+    .slice(at + 1)
+    .map((l) => ERROR_LINE.exec(l))
+    .find((m) => m !== null);
+  if (error) why += ` (${error[1]}: ${cut((error[2] ?? '').trim(), MAX_MESSAGE)})`;
+  // vitest repeats a test's FAIL line (its summary section): count each test once.
+  const failing = new Set(
+    lines.flatMap((l) => {
+      const m = FAIL_LINE.exec(l);
+      return m ? [`${m[1]} > ${m[2]}`] : [];
+    }),
+  );
+  const more = failing.size - 1;
+  if (more > 0) why += ` and ${more} more failing test${more === 1 ? '' : 's'}`;
+  return why;
+}
+
+function fallbackWhy(gate: GateResult, lines: string[]): string {
+  const how = gate.timedOut ? 'timed out' : `failed (${exitOf(gate)})`;
+  const last = lines.filter((l) => l.trim() !== '').slice(-TAIL_LINES);
+  if (last.length === 0) return `The ${gate.name} gate ${how} with no output.`;
+  const quoted = last.map((l) => cut(l, MAX_TAIL_LINE));
+  return [`The ${gate.name} gate ${how}. Its output ended with:`, '', ...quoted].join('\n');
 }

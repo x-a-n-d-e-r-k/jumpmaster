@@ -2,13 +2,16 @@ import type { DropResult, GateResult } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
 import type { Db } from './db/open.js';
 import { type DropState, insertDrop, updateDrop } from './db/repo.js';
+import { serverScrubSet } from './forge/scrub-set.js';
 import {
+  gateFailureWhy,
   lastFailure,
   MAX_PREVIOUS_FAILURE_CHARS,
   renderLastFailure,
   stripAnsi,
 } from './gate-output.js';
 import { plus, seedQueuedDrop, t0 } from './test/helpers.js';
+import { VITEST_348, VITEST_THREE_FAILED } from './test/vitest-output.js';
 
 const MIN = 60_000;
 const gate = (o: Partial<GateResult> & { name: string }): GateResult => ({
@@ -212,5 +215,122 @@ describe('renderLastFailure', () => {
       secret,
     ]);
     expect(out).toContain('x [REDACTED] y');
+  });
+});
+
+describe('gateFailureWhy', () => {
+  const red = (outputTail: string, o: Partial<GateResult> = {}): GateResult =>
+    gate({ name: 'test', exitCode: 1, outputTail, ...o });
+  /** A vitest FAIL line and its error, coloured as vitest prints them. */
+  const failure = (file: string, name: string, error: string): string =>
+    `\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m ${file}\u001b[2m > \u001b[22m${name}\n` +
+    `\u001b[31m\u001b[1m${error.replace(':', '\u001b[22m:')}\u001b[39m\n`;
+
+  test("#348's tail: the gate, the failing test file and name, and the assertion", () => {
+    expect(gateFailureWhy(red(VITEST_348))).toBe(
+      "The test gate failed: `scripts/no-token-literals.test.ts` > no tracked file holds a token-shaped literal, a real private key or a lockfile credential (AssertionError: expected [ 'apps/server/src/chat/session.test.ts:12' ] to deeply equal [])",
+    );
+  });
+
+  test('three failing tests: the first (describe names kept as written), then how many more', () => {
+    expect(gateFailureWhy(red(VITEST_THREE_FAILED))).toBe(
+      "The test gate failed: `a.test.ts` > outer > first fails (AssertionError: expected [ 'x' ] to deeply equal []) and 2 more failing tests",
+    );
+  });
+
+  test("the count ignores the repeated FAIL lines of vitest's summary section", () => {
+    const tail = `${VITEST_THREE_FAILED}\n${VITEST_THREE_FAILED.split('Failed Tests 3')[1]}`;
+    expect(tail.split(' FAIL ').length - 1).toBe(6);
+    expect(gateFailureWhy(red(tail))).toMatch(/ and 2 more failing tests$/);
+    const two = failure('a.test.ts', 'x', 'Error: e') + failure('b.test.ts', 'y', 'Error: f');
+    expect(gateFailureWhy(red(two))).toMatch(/ and 1 more failing test$/);
+  });
+
+  test('a FAIL line with no error line after it: the sentence without the parenthesis', () => {
+    const tail = ' FAIL  src/a.test.ts > does a thing\n\n Test Files  1 failed (1)\n';
+    expect(gateFailureWhy(red(tail))).toBe('The test gate failed: `src/a.test.ts` > does a thing');
+  });
+
+  test('an error line before the FAIL line is not its assertion', () => {
+    const tail = 'TypeError: early\n FAIL  src/a.test.ts > does a thing\n';
+    expect(gateFailureWhy(red(tail))).toBe('The test gate failed: `src/a.test.ts` > does a thing');
+  });
+
+  test('cuts the test name at 200 characters and the message at 300, each closed by …', () => {
+    const name = 'n'.repeat(250);
+    const message = 'm'.repeat(350);
+    expect(gateFailureWhy(red(failure('a.test.ts', name, `AssertionError: ${message}`)))).toBe(
+      `The test gate failed: \`a.test.ts\` > ${'n'.repeat(200)}… (AssertionError: ${'m'.repeat(300)}…)`,
+    );
+    // At the limit: nothing is cut.
+    expect(
+      gateFailureWhy(red(failure('a.test.ts', 'n'.repeat(200), `Error: ${'m'.repeat(300)}`))),
+    ).toBe(`The test gate failed: \`a.test.ts\` > ${'n'.repeat(200)} (Error: ${'m'.repeat(300)})`);
+  });
+
+  test('another tool: the gate, its exit and the last 10 non-empty lines, stripped and cut', () => {
+    const lines = Array.from({ length: 14 }, (_, i) => `\u001b[31mline ${i + 1}\u001b[39m`);
+    lines.splice(12, 0, '', '   ');
+    lines[13] = 'x'.repeat(250);
+    const why = gateFailureWhy(red(lines.join('\r\n'), { name: 'lint' }));
+    expect(why).toBe(
+      [
+        'The lint gate failed (exit 1). Its output ended with:',
+        '',
+        'line 6',
+        'line 7',
+        'line 8',
+        'line 9',
+        'line 10',
+        'line 11',
+        'line 12',
+        `${'x'.repeat(200)}…`,
+        'line 13',
+        'line 14',
+      ].join('\n'),
+    );
+  });
+
+  test('no exit code, and a gate that timed out: the fallback form, even with a FAIL line', () => {
+    expect(gateFailureWhy(red('boom', { name: 'lint', exitCode: null }))).toBe(
+      'The lint gate failed (no exit code). Its output ended with:\n\nboom',
+    );
+    expect(gateFailureWhy(red(VITEST_348, { exitCode: null, timedOut: true }))).toBe(
+      [
+        'The test gate timed out. Its output ended with:',
+        '',
+        ...stripAnsi(VITEST_348)
+          .split('\n')
+          .filter((l) => l.trim() !== '')
+          .slice(-10),
+      ].join('\n'),
+    );
+  });
+
+  test('no output at all: says so', () => {
+    expect(gateFailureWhy(red('\n  \n', { name: 'build', exitCode: 2 }))).toBe(
+      'The build gate failed (exit 2) with no output.',
+    );
+  });
+
+  test('a token shape or a scrub-set value in the output is redacted', () => {
+    const token = `ghp_${'A1b2C3d4'.repeat(5)}`;
+    const scrubbed = 'scrub-set-value-397-xyz';
+    serverScrubSet.add(scrubbed);
+    try {
+      const why = gateFailureWhy(
+        red(
+          failure('a.test.ts', `uses ${scrubbed}`, `AssertionError: expected '${token}' to be ''`),
+        ),
+      );
+      expect(why).toBe(
+        "The test gate failed: `a.test.ts` > uses [REDACTED] (AssertionError: expected '[REDACTED]' to be '')",
+      );
+      expect(gateFailureWhy(red(`leaked ${token}`, { name: 'lint' }))).toContain(
+        'leaked [REDACTED]',
+      );
+    } finally {
+      serverScrubSet.clear();
+    }
   });
 });

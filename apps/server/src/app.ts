@@ -14,6 +14,7 @@ import {
   getBriefing,
   listBriefings,
   listRulings,
+  pendingDiagnoses,
 } from './briefings.js';
 import { type ChatCard, listCards } from './chat/cards.js';
 import { type ChatTurnHub, registerChatRoutes, threadIdOf } from './chat/routes.js';
@@ -579,6 +580,7 @@ export function createApp(
       const html = renderBriefings({
         open,
         ...briefingContext(db, config.dropZones, open),
+        pending: pendingDiagnoses(db, config.dropZones, open, deps.now()),
         // Every ruling: each project counts its own, and pages or shows its newest `per`.
         rulings: zones.flatMap((z) => listRulings(db, z.id, ALL_RULINGS)),
         zones: config.dropZones,
@@ -614,6 +616,7 @@ export function createApp(
       holds,
       ...(about ? { about } : {}),
       ...(keys ? { crewKeys: keys } : {}),
+      pending: pendingDiagnoses(db, config.dropZones, [b], deps.now()).has(b.id),
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });

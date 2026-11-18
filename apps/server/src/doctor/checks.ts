@@ -2048,11 +2048,11 @@ function crewCapCheck(zone: DropZoneConfig, d: DoctorDeps): DoctorCheck {
       status: 'pass',
       summary: `crew drops in the last 24 hours: ${used}/${cap}`,
     };
-  // The cap frees a slot when the oldest counted drop leaves the trailing day.
+  // The cap frees a slot when the oldest counted drop (as crewDropsToday counts) leaves the day.
   const oldest = d.db
     .prepare(
       `SELECT created_at AS at FROM drops WHERE drop_zone_id = ? AND work_item_id IS NULL
-         AND role <> 'doctor' AND created_at > ? AND state <> 'lost'
+         AND role NOT IN ('doctor', 'diagnose') AND created_at > ? AND state <> 'lost'
          AND COALESCE(json_extract(result_json, '$.status'), '') <> 'rate_limited'
        ORDER BY created_at LIMIT 1`,
     )
@@ -2061,7 +2061,7 @@ function crewCapCheck(zone: DropZoneConfig, d: DoctorDeps): DoctorCheck {
   return {
     ...base,
     status: 'warn',
-    summary: `crew paused: daily cap ${used}/${cap} until ${until}; parked briefings wait for diagnosis until then`,
+    summary: `crew paused: daily cap ${used}/${cap} until ${until}; only parked briefings are still diagnosed until then`,
     fix: `Nothing breaks: the crew resumes by itself. To allow more, raise crew.maxDropsPerDay (each crew drop spends usage).`,
   };
 }
