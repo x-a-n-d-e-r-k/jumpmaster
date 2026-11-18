@@ -9,12 +9,29 @@ import { inspect } from 'node:util';
 import nock from 'nock';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { openDb } from '../db/open.js';
-import { getOutbox, insertOutbox, upsertDropZone, upsertWorkItem } from '../db/repo.js';
+import {
+  getOutbox,
+  getWorkItem,
+  insertOutbox,
+  upsertDropZone,
+  upsertWorkItem,
+} from '../db/repo.js';
 import { branchProtectionProblems } from '../flow/guards.js';
+import { reconcileZone } from '../flow/reconcile.js';
+import { zonePass } from '../flow/snapshot.js';
 import { log } from '../log.js';
-import { type ForgePair, opKeys, resolveUnknown } from '../outbox.js';
-import { makeZone } from '../test/fixtures.js';
+import {
+  type ForgePair,
+  ForgePairs,
+  opKeys,
+  opMarker,
+  pairOptionsFor,
+  resolveUnknown,
+} from '../outbox.js';
+import { promptVersions } from '../payloads.js';
+import { makeZone, usageCfg } from '../test/fixtures.js';
 import { t0, tmpDbFile } from '../test/helpers.js';
+import type { Resolved } from '../vault/credentials.js';
 import type { AppEntryRead, AppRole } from '../vault/github-app-entries.js';
 import type { ResolvedApps } from '../vault/resolution.js';
 import { type AppTokenSource, type AppTokenZone, createAppTokenSource } from './app-tokens.js';
@@ -26,6 +43,7 @@ import { serverScrubSet } from './scrub-set.js';
 const api = 'https://api.github.com';
 const OWNER = 'acme';
 const REPO = 'demo';
+const REPO_PATH = `/repos/${OWNER}/${REPO}`;
 const REPOSITORY_ID = 4242;
 const HOUR = 60 * 60 * 1000;
 
@@ -65,6 +83,12 @@ const APPS: Record<AppRole, App> = {
     grant: { contents: 'read', pull_requests: 'write', metadata: 'read' },
   },
 };
+/** The install-wide PATs the pair is also given: an app role must never send them. */
+const PATS = {
+  githubAuthorToken: ['ghp', 'PATAUTHOR'.padEnd(36, 'A')].join('_'),
+  githubReviewerToken: ['ghp', 'PATREVIEWER'.padEnd(36, 'R')].join('_'),
+};
+
 const BOT = { author: 'acme-author[bot]', reviewer: 'acme-reviewer[bot]' } as const;
 
 const ZONE = makeZone({
@@ -267,6 +291,13 @@ afterEach(() => {
   try {
     expect(userMock.isDone()).toBe(false);
     expect(gh.calls.filter((c) => c.path === '/user')).toEqual([]);
+    // Every repository request carried a minted server-use token, or a JWT for the app endpoints.
+    for (const c of gh.calls.filter((c) => c.path.startsWith(REPO_PATH)))
+      expect(
+        c.tokenOf !== undefined ||
+          c.jwtOf !== undefined ||
+          gh.probes.some((p) => c.authorization === `Bearer ${p.token}`),
+      ).toBe(true);
     expect(noMatch).toEqual([]);
     expect(gh.unrouted).toEqual([]);
     // No secret in anything the file saw: logs, returned values and errors.
@@ -275,7 +306,12 @@ afterEach(() => {
       ...gh.probes.map((p) => p.token),
       APPS.author.pem,
       APPS.reviewer.pem,
+      ...Object.values(PATS),
+      ...gh.calls.flatMap((c) => /^Bearer (eyJ\S+)$/.exec(c.authorization)?.slice(1) ?? []),
     ];
+    // No request carried a PAT: every role is its app.
+    for (const c of gh.calls)
+      for (const p of Object.values(PATS)) expect(c.authorization).not.toContain(p);
     for (const text of [...captured, ...outputs]) {
       for (const s of secrets) expect(text).not.toContain(s);
       expect(text).not.toContain('PRIVATE KEY');
@@ -306,8 +342,17 @@ const entryOf = (app: App): AppEntryRead => ({
   fingerprint: `fp-${app.role}`,
 });
 
-/** One zone on `acme`, both apps resolved, and the author and reviewer server forges. */
-function world(): { source: AppTokenSource; author: GitHubForge; reviewer: GitHubForge } {
+/**
+ * One zone on `acme`, both apps resolved, and its pair as the live server builds it (main.ts):
+ * `pairOptionsFor` over the resolved credentials and a real `createAppTokenSource`, through
+ * `ForgePairs`.
+ */
+function world(): {
+  source: AppTokenSource;
+  pair: ForgePair;
+  author: GitHubForge;
+  reviewer: GitHubForge;
+} {
   const zones: AppTokenZone[] = [ZONE];
   const apps: ResolvedApps = new Map([
     [OWNER, { author: entryOf(APPS.author), reviewer: entryOf(APPS.reviewer) }],
@@ -317,19 +362,17 @@ function world(): { source: AppTokenSource; author: GitHubForge; reviewer: GitHu
     zones: () => zones,
     add: (s) => serverScrubSet.add(s),
   });
-  const forge = (role: AppRole) =>
-    new GitHubForge(OWNER, REPO, source.provider(ZONE.id, role, `server-${role}`), {
-      identity: {
-        kind: 'app',
-        slug: APPS[role].slug,
-        appId: APPS[role].appId,
-        grant: source.grant(ZONE.id, role),
-      },
-    });
-  return { source, author: forge('author'), reviewer: forge('reviewer') };
+  const pair = new ForgePairs().for(
+    ZONE,
+    PATS,
+    pairOptionsFor(ZONE, { resolved: {} as Resolved, apps }, source),
+  );
+  const { author, reviewer } = pair;
+  if (!(author instanceof GitHubForge) || !(reviewer instanceof GitHubForge))
+    throw new Error('expected GitHub forges');
+  return { source, pair, author, reviewer };
 }
 
-const REPO_PATH = `/repos/${OWNER}/${REPO}`;
 /** `GET /repos` as GitHub sends it, with every permission set (an app forge must ignore them). */
 const repoBody = {
   id: REPOSITORY_ID,
@@ -620,6 +663,49 @@ describe('adoption through resolveUnknown', () => {
     expect(row?.state).toBe(adopted ? 'done' : 'unknown');
     if (adopted) expect(JSON.parse(String(row?.resultJson))).toEqual({ number: 7, created: false });
     expect(gh.forgeCalls('author')).toHaveLength(1);
+  });
+});
+
+describe('adoption in a reconcile pass (flow/reconcile.ts)', () => {
+  test('an open agent PR by acme-author[bot] with the server marker is adopted', async () => {
+    const { pair } = world();
+    // Paused: the pass resolves the outbox, lists and adopts, and starts nothing.
+    const zone = { ...ZONE, mode: 'paused' as const };
+    const db = openDb(tmpDbFile());
+    upsertDropZone(db, { id: 'main', repo: ZONE.repo, defaultBranch: 'main', configJson: '{}' });
+    const itemId = upsertWorkItem(db, {
+      dropZoneId: 'main',
+      issueNumber: 1,
+      title: 'Issue 1',
+      body: 'b',
+      author: 'alice',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    }).id;
+    gh.route('GET', `${REPO_PATH}/rules/branches/main`, () => [200, []]);
+    const pull = (number: number, login: string) => ({
+      number,
+      title: `PR ${number}`,
+      state: 'open',
+      merged_at: null,
+      user: { login },
+      head: { sha: `h${number}`, ref: 'agent/issue-1', repo: { full_name: `${OWNER}/${REPO}` } },
+      base: { ref: 'main' },
+      body: `work\n${opMarker(opKeys.pr(itemId, `h${number}`))}`,
+      labels: [],
+    });
+    gh.route('GET', `${REPO_PATH}/pulls`, () => [200, [pull(5, 'mallory'), pull(7, BOT.author)]]);
+    const zp = keep(await zonePass(pair, zone, 'main'));
+    expect(zp.authorLogins).toContain(BOT.author);
+    const now = new Date();
+    keep(await reconcileZone(db, pair, zone, zp, promptVersions(), usageCfg, [], now));
+    expect(keep(getWorkItem(db, itemId))).toMatchObject({ state: 'pr_open', prNumber: 7 });
+    const lists = gh.forgeCalls('author').filter((c) => c.path === `${REPO_PATH}/pulls`);
+    expect(lists).toHaveLength(1);
+    expect(lists[0]?.authorization).toBe(
+      `token ${gh.minted.find((m) => m.role === 'author')?.token}`,
+    );
   });
 });
 

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import nock from 'nock';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { type Db, openDb } from './db/open.js';
@@ -24,6 +25,7 @@ import {
   opMarker,
   pairFor,
   pairKey,
+  pairOptionsFor,
   pushOptionsFor,
   resolveUnknown,
   runOp,
@@ -1103,57 +1105,201 @@ describe('pairFor by credential kind (spec §4.4)', () => {
       expect(calls('updateBranch')).toEqual([]);
     });
 
-    describe('the live wiring: ForgePairs with pushOptionsFor, and no refs (main.ts)', () => {
-      const entry = { source: 'file', fingerprint: 'F1', entry: {} } as unknown as AppEntryRead;
-      const missing = { source: 'missing' } as unknown as AppEntryRead;
+    describe('the live wiring: ForgePairs with pairOptionsFor (main.ts)', () => {
+      const entryOf = (role: AppRole, fingerprint = `F-${role}`): AppEntryRead => ({
+        entry: {
+          appId: role === 'author' ? '100' : '200',
+          slug: slugs[role],
+          clientId: `Iv1.${role}`,
+          pem: '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0B\n-----END PRIVATE KEY-----',
+          importedAt: '2026-11-01T00:00:00Z',
+        },
+        source: 'file',
+        fingerprint,
+      });
+      const missing: AppEntryRead = { source: 'missing' };
+      const undecryptable: AppEntryRead = { source: 'missing', undecryptable: true };
       const zone = { ...twoBot, id: 'main' };
-      const appAuthor: ResolvedApps = new Map([['o', { author: entry, reviewer: missing }]]);
+      const resolved = {} as Resolved;
+      const appsOf = (author: AppEntryRead, reviewer: AppEntryRead): ResolvedApps =>
+        new Map([['o', { author, reviewer }]]);
+      const appAuthor = appsOf(entryOf('author'), missing);
+      const appReviewer = appsOf(missing, entryOf('reviewer'));
+      const creds = (apps: ResolvedApps) => ({ resolved, apps });
       const minted = (revoke: () => Promise<void> = async () => {}) => ({
         token: pushToken,
         expiresAt: plus(t0, 60 * MIN),
         owner: 'o',
         revoke,
       });
-      const source = (mint: () => Promise<ReturnType<typeof minted>>) => ({ fresh: vi.fn(mint) });
+      const serverToken = vi.fn(async () => appToken);
+      const source = (mint: () => Promise<ReturnType<typeof minted>> = async () => minted()) => ({
+        fresh: vi.fn(mint),
+        provider: vi.fn(
+          (_zoneId: string, _role: AppRole, _use: string): TokenProvider => ({
+            token: serverToken,
+          }),
+        ),
+        grant: vi.fn((_zoneId: string, _role: AppRole) => async () => ({
+          permissions: { contents: 'write', pull_requests: 'write' },
+          tokenExpiresAt: null,
+        })),
+      });
+      const identityOf = (forge: unknown) =>
+        forge instanceof GitHubForge ? forge.appIdentity() : 'not a GitHubForge';
+      beforeEach(() => serverToken.mockClear());
 
       test('an app-author zone updates with the minted push token, never the author PAT', async () => {
         const revoke = vi.fn(async () => {});
         const src = source(async () => minted(revoke));
-        const pair = new ForgePairs().for(zone, tokens, pushOptionsFor(zone, appAuthor, src));
+        const pair = new ForgePairs().for(
+          zone,
+          tokens,
+          pairOptionsFor(zone, creds(appAuthor), src),
+        );
         expectUpdate(pushToken);
         const r = await runOp(db, withPusher(pair), updateOp(), t0);
         expect(r).toEqual({ state: 'done', result: { kind: 'updated' } });
         expect(src.fresh).toHaveBeenCalledExactlyOnceWith('main', 'author', 'push');
         expect(revoke).toHaveBeenCalledOnce();
+        expect(serverToken).not.toHaveBeenCalled();
       });
 
       test('an app-author zone whose mint fails sends nothing: refused, not widened', async () => {
         const src = source(async () => {
           throw new Error('mint failed');
         });
-        const pair = new ForgePairs().for(zone, tokens, pushOptionsFor(zone, appAuthor, src));
+        const pair = new ForgePairs().for(
+          zone,
+          tokens,
+          pairOptionsFor(zone, creds(appAuthor), src),
+        );
         const r = await runOp(db, withPusher(pair), updateOp(), t0);
         expect(r).toEqual({ state: 'done', result: { kind: 'no_token' } });
         expect(src.fresh).toHaveBeenCalledOnce();
       });
 
-      test('a PAT-author zone keeps the author PAT, and its pair key', async () => {
-        const src = source(async () => minted());
-        const opts = pushOptionsFor(zone, new Map(), src);
-        expect(opts).toEqual({});
+      test('an app author acts as <slug>[bot] on the server-author token, never the PAT', async () => {
+        const src = source();
+        const pair = new ForgePairs().for(
+          zone,
+          tokens,
+          pairOptionsFor(zone, creds(appAuthor), src),
+        );
+        expect(identityOf(pair.author)).toEqual({ slug: 'acme-author', appId: '100' });
+        expect(identityOf(pair.reviewer)).toBeNull();
+        // No GET /user: nock allows no request, so one would reject.
+        expect(await pair.author.viewerLogin()).toBe('acme-author[bot]');
+        expect(serverToken).not.toHaveBeenCalled();
+        expectToken(appToken);
+        expect(await pair.author.getDefaultBranch()).toBe('main');
+        expect(src.provider).toHaveBeenCalledExactlyOnceWith('main', 'author', 'server-author');
+        expect(src.grant).toHaveBeenCalledExactlyOnceWith('main', 'author');
+        // The reviewer stays on its PAT.
+        expectToken(reviewerPat);
+        expect(await pair.reviewer!.getDefaultBranch()).toBe('main');
+      });
+
+      test('an app reviewer acts as <slug>[bot] on the server-reviewer token, never the PAT', async () => {
+        const src = source();
+        const opts = pairOptionsFor(zone, creds(appReviewer), src);
+        // A PAT author pushes with the author PAT, as before.
+        expect(opts.authorUsesApp).toBeUndefined();
         const pair = new ForgePairs().for(zone, tokens, opts);
+        expect(identityOf(pair.reviewer)).toEqual({ slug: 'acme-reviewer', appId: '200' });
+        expect(identityOf(pair.author)).toBeNull();
+        expect(await pair.reviewer!.viewerLogin()).toBe('acme-reviewer[bot]');
+        expect(serverToken).not.toHaveBeenCalled();
+        expectToken(appToken);
+        expect(await pair.reviewer!.getDefaultBranch()).toBe('main');
+        expect(src.provider).toHaveBeenCalledExactlyOnceWith('main', 'reviewer', 'server-reviewer');
+        expect(src.grant).toHaveBeenCalledExactlyOnceWith('main', 'reviewer');
+        expectToken(authorPat);
+        expect(await pair.author.getDefaultBranch()).toBe('main');
+      });
+
+      test('an undecryptable app entry refuses the pair, naming only the repository and role', () => {
+        for (const role of ['author', 'reviewer'] as const) {
+          const apps =
+            role === 'author' ? appsOf(undecryptable, missing) : appsOf(missing, undecryptable);
+          const src = source();
+          let error: unknown;
+          try {
+            new ForgePairs().for(zone, tokens, pairOptionsFor(zone, creds(apps), src));
+          } catch (e) {
+            error = e;
+          }
+          expect(error).toBeInstanceOf(Error);
+          const err = error as Error;
+          expect(err.message).toContain('o/r');
+          expect(err.message).toContain(role);
+          expect(err.cause).toBeUndefined();
+          const seen = `${err.message}\n${err.stack ?? ''}`;
+          for (const secret of [appToken, pushToken, authorPat, reviewerPat, 'PRIVATE KEY'])
+            expect(seen).not.toContain(secret);
+          expect(serverToken).not.toHaveBeenCalled();
+        }
+      });
+
+      test('a PAT-only zone and a starter zone get the push options and key of before', () => {
+        const PINNED = '["o/r","two-bot",false,"af14c68180fea0c1"]';
+        const src = source();
+        for (const apps of [new Map() as ResolvedApps, appsOf(missing, missing)]) {
+          const opts = pairOptionsFor(zone, creds(apps), src);
+          expect(opts).toEqual(pushOptionsFor(zone, apps, src));
+          expect(opts).toEqual({});
+          expect(pairKey(zone, tokens, opts)).toBe(PINNED);
+        }
+        const starter = { ...zone, identity: 'starter' as const };
+        const both = appsOf(entryOf('author'), entryOf('reviewer'));
+        const opts = pairOptionsFor(starter, creds(both), src);
+        expect(opts).toEqual(pushOptionsFor(starter, both, src));
+        expect(opts).toEqual({});
+        expect(pairKey(starter, tokens, opts)).toBe('["o/r","starter",false,"af14c68180fea0c1"]');
+        expect(src.provider).not.toHaveBeenCalled();
+      });
+
+      test('a PAT-author zone keeps the author PAT for its branch update', async () => {
+        const src = source();
+        const pair = new ForgePairs().for(
+          zone,
+          tokens,
+          pairOptionsFor(zone, creds(new Map()), src),
+        );
         expectUpdate(authorPat);
         const r = await runOp(db, withPusher(pair), updateOp(), t0);
         expect(r).toEqual({ state: 'done', result: { kind: 'updated' } });
         expect(src.fresh).not.toHaveBeenCalled();
       });
 
-      test('a zone switched to an app author gets a new pair, without the PAT pusher', () => {
+      test('main.ts builds every pair through pairOptionsFor, on the resolved credentials', () => {
+        const main = readFileSync(new URL('./main.ts', import.meta.url), 'utf8');
+        const calls = main.match(/pairs\.for\([^;]*;/g) ?? [];
+        expect(calls.length).toBeGreaterThanOrEqual(2);
+        for (const call of calls) expect(call).toMatch(/pairOptionsOf\(zone\)/);
+        expect(main).toMatch(
+          /pairOptionsFor\(\s*zone,\s*\{ resolved: live\.resolved\(\), apps: live\.resolvedApps\(\) \},\s*appTokens,\s*\)/,
+        );
+        expect(main).not.toMatch(/pushOptionsFor|pairFor\(/);
+      });
+
+      test('a role switched between PAT and app, or a changed entry, gets a new pair', () => {
         const pairs = new ForgePairs();
-        const src = source(async () => minted());
-        const before = pairs.for(zone, tokens, pushOptionsFor(zone, new Map(), src));
-        const after = pairs.for(zone, tokens, pushOptionsFor(zone, appAuthor, src));
-        expect(after).not.toBe(before);
+        const src = source();
+        const of = (apps: ResolvedApps) =>
+          pairs.for(zone, tokens, pairOptionsFor(zone, creds(apps), src));
+        const byPat = of(new Map());
+        expect(of(new Map())).toBe(byPat);
+        const byAuthorApp = of(appAuthor);
+        expect(byAuthorApp).not.toBe(byPat);
+        expect(identityOf(byAuthorApp.author)).toEqual({ slug: 'acme-author', appId: '100' });
+        expect(of(appAuthor)).toBe(byAuthorApp);
+        const replaced = of(appsOf(entryOf('author', 'F-new'), missing));
+        expect(replaced).not.toBe(byAuthorApp);
+        const byReviewerApp = of(appReviewer);
+        expect(byReviewerApp).not.toBe(replaced);
+        expect(identityOf(byReviewerApp.reviewer)).toEqual({ slug: 'acme-reviewer', appId: '200' });
+        expect(of(new Map())).not.toBe(byReviewerApp);
       });
     });
 
