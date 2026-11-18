@@ -13,7 +13,7 @@ import type {
   ReadProbe,
   RepoAccess,
 } from '../forge/github.js';
-import { digestCompareFiles } from '../forge/github.js';
+import { digestCompareFiles, gitBlobSha } from '../forge/github.js';
 
 /** A fake's issue: `authorType` defaults to `User`. */
 export type FakeIssue = Omit<ForgeIssue, 'authorType'> & { authorType?: string };
@@ -124,7 +124,10 @@ export interface FakeForgeState {
   comments: FakeComment[];
   /** Appends a review (defaults: `pr: 1`, a human author, `APPROVED` on the PR head). */
   review(r?: Partial<StateReview>): StateReview;
+  /** File contents, keyed `ref:path` (a branch name or a commit SHA); `putFile` writes both. */
   files: Map<string, string>;
+  /** Every commit `putFile` made, oldest first: one file each. */
+  commits: { branch: string; path: string; message: string; sha: string; parent: string }[];
   pullFiles: Map<number, PullFiles>;
   rules: Record<Identity, BranchRulesRead>;
   merges: { number: number; sha: string; title: string; message: string }[];
@@ -158,6 +161,8 @@ export const FORGE_WRITES: readonly (keyof Forge)[] = [
   'updateBranch',
   'createLabel',
   'addBlockedBy',
+  'createBranch',
+  'putFile',
 ];
 
 export const READ_PERMISSIONS = [
@@ -338,6 +343,7 @@ function createState(opts: {
       return rv;
     },
     files: new Map(),
+    commits: [],
     pullFiles: new Map(),
     rules: { author: okRules(), reviewer: okRules() },
     merges: [],
@@ -480,6 +486,34 @@ function forgeFor(
         state.branches.delete(input.head);
       }
       return { number: p.number, url: `https://example.test/pull/${p.number}`, created: true };
+    },
+    createBranch: async (name, fromSha) => {
+      const at = state.branches.get(name);
+      // GitHub's "Reference already exists": the real forge reads it back, and only the same SHA
+      // is success.
+      if (at === fromSha) return;
+      if (at !== undefined) throw forgeError(422, `branch ${name} exists on another commit`);
+      state.branches.set(name, fromSha);
+    },
+    putFile: async (o) => {
+      const parent = state.branches.get(o.branch);
+      if (parent === undefined) throw forgeError(404, `no branch ${o.branch}`);
+      const current = state.files.get(`${parent}:${o.path}`);
+      const blob = current === undefined ? null : gitBlobSha(current);
+      if (blob !== o.expectBlobSha) throw forgeError(409, `${o.path} does not match`);
+      const sha = `commit-${state.commits.length + 1}`;
+      // The new commit's tree is its parent's with the one file replaced.
+      for (const [key, text] of [...state.files]) {
+        const at = key.indexOf(':');
+        if (key.slice(0, at) === parent) state.files.set(`${sha}${key.slice(at)}`, text);
+      }
+      state.files.set(`${sha}:${o.path}`, o.content);
+      state.files.set(`${o.branch}:${o.path}`, o.content);
+      state.branches.set(o.branch, sha);
+      for (const p of state.pulls.values())
+        if (p.state === 'open' && p.headRef === o.branch) p.headSha = sha;
+      state.commits.push({ branch: o.branch, path: o.path, message: o.message, sha, parent });
+      return { commitSha: sha };
     },
     getPull: async (n) => {
       const p = state.pulls.get(n);

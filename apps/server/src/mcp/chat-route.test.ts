@@ -169,6 +169,7 @@ const ACTION_TOOLS = [
   'queue_issue',
   'retry_parked',
   'close_issue',
+  'propose_goal_change',
 ];
 const ALL_TOOLS = [...READ_TOOLS, ...CHAT_READ_TOOLS, ...ACTION_TOOLS].sort();
 
