@@ -815,8 +815,8 @@ describe('the version floor (issue #270)', () => {
         },
       }),
     );
-  const NO_SAN = fixture('certs/no-san.pem');
-  const BRANCH_SAN = fixture('certs/branch-san.pem');
+  const NO_SAN = fixture('certs/no-san.crt');
+  const BRANCH_SAN = fixture('certs/branch-san.crt');
   const layoutTrust = (floor: string | null, cosign: Cosign): ImageTrust => ({
     policy: 'signed',
     allowed: new Set(),
