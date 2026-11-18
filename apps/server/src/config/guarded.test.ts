@@ -164,7 +164,7 @@ describe('guarded scalar paths', () => {
     ],
     [
       'crew.refutePromotes',
-      {},
+      { crew: { refutePromotes: false } },
       { crew: { refutePromotes: true } },
       'A crew refute in web will be able to promote a staged issue to ready',
     ],
@@ -184,6 +184,19 @@ describe('guarded scalar paths', () => {
         );
     },
   );
+
+  test('crew.refutePromotes: false to true is guarded, true to false is not, and the default is true (#318)', () => {
+    const at = 'dropZones[web].crew.refutePromotes';
+    const off = { crew: { refutePromotes: false } };
+    const on = { crew: { refutePromotes: true } };
+    expect(paths(edit(off, on))).toEqual([at]);
+    expect(paths(edit(on, off))).toEqual([]);
+    // A config with no key already promotes: writing true over it, or the opt-out, asks nothing.
+    expect(paths(edit({}, on))).toEqual([]);
+    expect(paths(edit({}, off))).toEqual([]);
+    // Opting back in from an explicit false is guarded, whether written or by dropping the key.
+    expect(paths(edit(off, {}))).toEqual([at]);
+  });
 
   test('egress.mode off to monitor or enforce, and monitor to enforce, are not guarded', () => {
     expect(
