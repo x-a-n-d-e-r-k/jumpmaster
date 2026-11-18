@@ -53,6 +53,37 @@ describe('zonePass', () => {
   });
 });
 
+describe('author login aliases (issue #284)', () => {
+  test('authorLogins is the viewer login then the aliases, case-insensitive duplicates removed', async () => {
+    w = zoneWorld({ authorLoginAliases: ['old-bot', 'Author-Bot', 'OLD-BOT', 'app[bot]'] });
+    const p = await zonePass(w.forges, w.zone, 'main');
+    expect(p.authorLogins).toEqual(['author-bot', 'old-bot', 'app[bot]']);
+    expect(p.botLogins).toEqual(['author-bot', 'old-bot', 'app[bot]', 'reviewer-bot']);
+  });
+
+  test('with no aliases, authorLogins is the viewer login alone', async () => {
+    const p = await zonePass(w.forges, w.zone, 'main');
+    expect(p.authorLogins).toEqual(['author-bot']);
+  });
+
+  test('starter mode: botLogins is authorLogins alone', async () => {
+    w = zoneWorld({ identity: 'starter', authorLoginAliases: ['old-bot'] });
+    const p = await zonePass(w.forges, w.zone, 'main');
+    expect(p.botLogins).toEqual(['author-bot', 'old-bot']);
+  });
+
+  test('a trusted-looking review by an alias is not a trusted human review', async () => {
+    w = zoneWorld({ authorLoginAliases: ['old-bot'] });
+    itemId = w.prItem(1, 'sha1');
+    w.f.state.trusted.push('old-bot', 'Old-Bot');
+    w.f.state.review({ id: 1, author: 'old-bot', state: 'CHANGES_REQUESTED', commitId: 'sha1' });
+    w.f.state.review({ id: 2, author: 'Old-Bot', state: 'CHANGES_REQUESTED', commitId: 'sha1' });
+    const s = await snapshotOf();
+    expect(s.trustedChangeRequests).toEqual([]);
+    expect(s.humanBlockStanding).toBe(false);
+  });
+});
+
 describe('the CODEOWNERS read behind a required code owner review', () => {
   test('a skipped read is logged once per zone until a read succeeds, and parks nothing', async () => {
     for (const id of ['author', 'reviewer'] as const) {

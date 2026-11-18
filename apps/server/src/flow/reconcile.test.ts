@@ -373,6 +373,81 @@ describe('reconcileZone — adoption and resume', () => {
       expect(item(id)).toMatchObject({ state: 'pr_open', prNumber: 9 });
     });
 
+    describe('authorLoginAliases (issue #284)', () => {
+      const aliased = (zone: Parameters<typeof zoneWorld>[0] = {}) =>
+        zoneWorld({ authorLoginAliases: ['old-bot'], ...zone });
+
+      test('a listed PR by an alias is adopted', async () => {
+        w = aliased({ adoptPulls: [9] });
+        const id = w.item(1, 'ready');
+        w.f.state.addPull(pull({ author: 'old-bot' }));
+        await pass();
+        expect(item(id)).toMatchObject({ state: 'pr_open', prNumber: 9 });
+        expect(refusals(w)).toEqual([]);
+      });
+
+      test('a marked, unlisted PR by an alias is adopted', async () => {
+        w = aliased();
+        const id = w.item(1, 'ready');
+        w.f.state.addPull(
+          pull({ author: 'old-bot', body: `work\n${opMarker(opKeys.pr(id, 's9'))}` }),
+        );
+        await pass();
+        expect(item(id)).toMatchObject({ state: 'pr_open', prNumber: 9 });
+      });
+
+      test('an unlisted, unmarked PR by an alias is not adopted', async () => {
+        w = aliased();
+        const id = w.item(1, 'ready');
+        w.f.state.addPull(pull({ author: 'old-bot' }));
+        await pass();
+        expect(item(id)).toMatchObject({
+          state: 'parked',
+          reason: 'hand-opened PR on agent branch: #9',
+        });
+      });
+
+      test('a listed PR by a stranger is refused with the same detail', async () => {
+        w = aliased({ adoptPulls: [9] });
+        const id = w.item(1, 'ready');
+        w.f.state.addPull(pull({ author: 'mallory' }));
+        await pass();
+        expect(item(id).state).not.toBe('pr_open');
+        expect(refusals(w).map((o) => o.detail)).toEqual([
+          '#9 is authored by mallory, not the author account',
+        ]);
+      });
+
+      test('logins compare case-insensitively, for the author and for an alias', async () => {
+        w = zoneWorld({ authorLoginAliases: ['Old-Bot'], adoptPulls: [9, 10] });
+        const a = w.item(1, 'ready');
+        const b = w.item(2, 'ready');
+        w.f.state.addPull(pull({ author: 'OLD-bot' }));
+        w.f.state.addPull(pull({ number: 10, headRef: 'agent/issue-2', author: 'Author-Bot' }));
+        await pass();
+        expect(item(a)).toMatchObject({ state: 'pr_open', prNumber: 9 });
+        expect(item(b)).toMatchObject({ state: 'pr_open', prNumber: 10 });
+      });
+
+      test("resume's vouched check accepts a listed PR by an alias", async () => {
+        // A PR with no head yet isn't adopted, so resume meets it as foreign.
+        for (const author of ['old-bot', 'mallory']) {
+          w = aliased({ adoptPulls: [9] });
+          const id = w.item(1, 'in_flight');
+          w.f.state.addPull(pull({ author, headSha: null }));
+          w.f.state.branches.set('agent/issue-1', 'wip1');
+          await pass();
+          if (author === 'old-bot')
+            expect(activeDropFor(w.db, id)).toMatchObject({ role: 'implement', headSha: 'wip1' });
+          else
+            expect(item(id)).toMatchObject({
+              state: 'parked',
+              reason: 'hand-opened PR on agent branch: #9',
+            });
+        }
+      });
+    });
+
     test('a listed PR whose issue closes follows the closed-issue path', async () => {
       w = listed();
       const id = w.item(1, 'ready');

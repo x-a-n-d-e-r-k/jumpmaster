@@ -321,6 +321,11 @@ export type CreatePrPayload = {
   body: string;
   /** Open PRs on this head to accept without the server's marker. */
   adoptPulls?: number[];
+  /**
+   * Logins besides the author's whose listed PR on this head is ours (spec §4.3): the zone's
+   * `authorLoginAliases`, set only when it has some. Ops queued before it have none.
+   */
+  authorLoginAliases?: string[];
 };
 export type PostReviewPayload = {
   pr: number;
@@ -445,7 +450,7 @@ const withMarker = (body: string, opKey: string): string =>
 const isOwnPr = (body: string, opKey: string): boolean =>
   isServerPrBody(body, Number(opKey.split(':')[1]));
 
-/** Marked by the server, or listed by the operator and written by the author account. */
+/** Marked by the server, or listed by the operator and written by the author or an alias. */
 async function ours(
   forges: ForgePair,
   pr: PullFacts,
@@ -454,7 +459,9 @@ async function ours(
 ): Promise<boolean> {
   if (isOwnPr(pr.body, opKey)) return true;
   if (!(p.adoptPulls ?? []).includes(pr.number)) return false;
-  return pr.author === (await forges.author.viewerLogin());
+  const logins = [await forges.author.viewerLogin(), ...(p.authorLoginAliases ?? [])];
+  const author = pr.author.toLowerCase();
+  return logins.some((l) => l.toLowerCase() === author);
 }
 
 /** Read-back: the op's result if its effect is visible on the forge, else `null`. */
@@ -560,7 +567,7 @@ async function write(forges: ForgePair, kind: OpKind, opKey: string, payload: un
           status: 409,
         });
       }
-      const { adoptPulls: _listed, ...input } = p;
+      const { adoptPulls: _listed, authorLoginAliases: _aliases, ...input } = p;
       return forges.author.findOrCreatePullRequest({ ...input, body: withMarker(p.body, opKey) });
     }
     case 'post_review': {
