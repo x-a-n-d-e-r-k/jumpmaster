@@ -501,6 +501,90 @@ describe('GitHubForge', () => {
       });
     });
 
+    describe('firstParentCommits (#385)', () => {
+      // A recorded compare response, trimmed to the fields read: main went b0 -> m1 (merging
+      // feature commit f1, itself on f0) -> c2. GitHub lists every commit reachable from the head
+      // and not from the base, oldest first, the feature branch's included.
+      const c = (sha: string, message: string, parents: string[]) => ({
+        sha,
+        commit: { message },
+        parents: parents.map((p) => ({ sha: p })),
+      });
+      const recorded = {
+        status: 'ahead',
+        ahead_by: 4,
+        behind_by: 0,
+        total_commits: 4,
+        base_commit: { sha: 'b0' },
+        merge_base_commit: { sha: 'b0' },
+        commits: [
+          c('f0', 'wip', ['b0']),
+          c('f1', 'more wip', ['f0']),
+          c('m1', 'Merge pull request #7 from o/agent/issue-3', ['b0', 'f1']),
+          c('c2', 'feat: thing (#8)', ['m1']),
+        ],
+        files: [],
+      };
+      const answer = (body: unknown, basehead = 'b0...c2') =>
+        nock(api)
+          .get(`/repos/o/r/compare/${basehead}`)
+          .query({ per_page: '250' })
+          .reply(200, body as Record<string, unknown>);
+
+      test("skips a merge commit's second parent, oldest first", async () => {
+        answer(recorded);
+        expect(await forge.firstParentCommits('b0', 'c2', 10)).toEqual({
+          commits: [
+            { sha: 'm1', message: 'Merge pull request #7 from o/agent/issue-3' },
+            { sha: 'c2', message: 'feat: thing (#8)' },
+          ],
+          complete: true,
+        });
+      });
+
+      test('honours max, keeping the oldest', async () => {
+        answer(recorded);
+        expect(await forge.firstParentCommits('b0', 'c2', 1)).toEqual({
+          commits: [{ sha: 'm1', message: 'Merge pull request #7 from o/agent/issue-3' }],
+          complete: true,
+        });
+      });
+
+      test('an unreachable base gives complete: false', async () => {
+        // History rewritten: the head no longer descends from the base (a diverged compare).
+        answer(
+          {
+            ...recorded,
+            status: 'diverged',
+            behind_by: 1,
+            merge_base_commit: { sha: 'r0' },
+            commits: [c('r1', 'rewritten', ['r0']), c('c2', 'feat: thing (#8)', ['r1'])],
+          },
+          'old...c2',
+        );
+        expect(await forge.firstParentCommits('old', 'c2', 5)).toEqual({
+          commits: [],
+          complete: false,
+        });
+        // More than one page between them: the head is not in the listed commits.
+        answer({ ...recorded, commits: recorded.commits.slice(0, 2), total_commits: 300 });
+        expect((await forge.firstParentCommits('b0', 'c2', 5)).complete).toBe(false);
+        // A base GitHub no longer has.
+        nock(api).get('/repos/o/r/compare/gone...c2').query(true).reply(404, {});
+        expect(await forge.firstParentCommits('gone', 'c2', 5)).toEqual({
+          commits: [],
+          complete: false,
+        });
+      });
+
+      test('the same base and head is complete with no commits, and asks nothing', async () => {
+        expect(await forge.firstParentCommits('c2', 'c2', 5)).toEqual({
+          commits: [],
+          complete: true,
+        });
+      });
+    });
+
     describe('changeDigest', () => {
       type CompareFile = {
         filename: string;

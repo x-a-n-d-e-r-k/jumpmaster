@@ -194,7 +194,7 @@ describe('crew roles', () => {
   const checkout = { number: 3, branch: 'agent/issue-7', headSha: 'abc' };
 
   test('isCrewRole and RoleSchema know the crew roles', () => {
-    expect(CREW_ROLES).toEqual(['crew-lead', 'refute', 'diagnose', 'triage', 'arbitrate']);
+    expect(CREW_ROLES).toEqual(['crew-lead', 'refute', 'diagnose', 'triage', 'arbitrate', 'audit']);
     expect(isCrewRole('refute')).toBe(true);
     expect(isCrewRole('review')).toBe(false);
     expect(RoleSchema.parse('diagnose')).toBe('diagnose');
@@ -450,6 +450,40 @@ describe('crew roles', () => {
           .success,
       ).toBe(true);
       expect(DropPayloadSchema.safeParse({ ...arb, checkout: { number: 1 } }).success).toBe(false);
+    });
+  });
+
+  describe('audit', () => {
+    const issue = { title: 'Fix the cap', body: '## Acceptance criteria\n- [ ] x' };
+
+    test('parseCrewOutput accepts holds without an issue and refuted with one', () => {
+      const holds = { verdict: 'holds', findings: [] };
+      expect(parseCrewOutput('audit', holds)).toEqual({ ok: true, value: holds });
+      const refuted = { verdict: 'refuted', findings: ['src/a.ts:3 is off by one'], issue };
+      expect(parseCrewOutput('audit', refuted)).toEqual({ ok: true, value: refuted });
+    });
+
+    test('parseCrewOutput refuses refuted without an issue, holds with one, and extras', () => {
+      expect(parseCrewOutput('audit', { verdict: 'refuted', findings: [] }).ok).toBe(false);
+      expect(parseCrewOutput('audit', { verdict: 'holds', findings: [], issue }).ok).toBe(false);
+      expect(parseCrewOutput('audit', { verdict: 'holds', findings: [], x: 1 }).ok).toBe(false);
+      expect(
+        parseCrewOutput('audit', { verdict: 'refuted', findings: [], issue: { ...issue, x: 1 } })
+          .ok,
+      ).toBe(false);
+    });
+
+    test('DropPayloadSchema accepts an audit payload and refuses item fields', () => {
+      const audit = { ...crew, role: 'audit' };
+      expect(DropPayloadSchema.safeParse(audit).success).toBe(true);
+      expect(DropPayloadSchema.safeParse({ ...audit, issue: base.issue }).success).toBe(false);
+      expect(DropPayloadSchema.safeParse({ ...audit, branch: 'b' }).success).toBe(false);
+      expect(
+        DropPayloadSchema.safeParse({
+          ...audit,
+          checkout: { number: 1, branch: 'b', headSha: 'a' },
+        }).success,
+      ).toBe(false);
     });
   });
 

@@ -403,6 +403,18 @@ describe('runCrew', () => {
     expect(r.crew).toBeUndefined();
   });
 
+  test('audit runs read-only on the default branch with its schema and returns its verdict', async () => {
+    const out = { verdict: 'holds', findings: [] };
+    const w = world({ output: out });
+    const r = await runCrew({ ...base, role: 'audit' }, w.deps, newCtx());
+    expect(r).toMatchObject({ status: 'completed', role: 'audit', crew: out, gates: [] });
+    expect(w.claude.args[w.claude.args.indexOf('--json-schema') + 1]).toBe(
+      JSON.stringify(crewOutputJsonSchema('audit')),
+    );
+    expect(w.names()).not.toContain('checkoutBranch');
+    expect(w.calls.find((c) => c[0] === 'prepareBranch')?.[3]).toBe('main');
+  });
+
   test('a crew drop never pushes, even when it commits', async () => {
     const w = world({ commits: true });
     const r = await runCrew(lead, w.deps, newCtx());
