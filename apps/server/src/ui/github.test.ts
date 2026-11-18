@@ -16,7 +16,7 @@ import {
 } from '../github/guidance.js';
 import { MATRIX_AND_REUSABLE_NOTE } from '../github/workflows.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
-import { escapeHtml } from './pages.js';
+import { escapeHtml, FAVICON_HREF } from './pages.js';
 
 const TOKEN = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
@@ -168,10 +168,10 @@ describe('the GitHub page of a zone', () => {
     expect(links(html)).toContain(
       'https://github.com/octo-org/demo/new/main?filename=.github%2FCODEOWNERS',
     );
-    // Forge text is escaped wherever it appears; no external link but GitHub's.
+    // Forge text is escaped wherever it appears; no external link but GitHub's (the tab icon is our own data URI).
     expect(html).not.toContain(HOSTILE_JOB);
     expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
-    for (const l of links(html).filter((l) => /^[a-z]+:/i.test(l)))
+    for (const l of links(html).filter((l) => /^[a-z]+:/i.test(l) && l !== FAVICON_HREF))
       expect(l.startsWith('https://github.com/') || l.startsWith('data:application/json'), l).toBe(
         true,
       );
