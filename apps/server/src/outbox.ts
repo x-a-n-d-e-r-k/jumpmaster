@@ -266,9 +266,9 @@ function refsKey(zone: PairZone, opts: PairOptions): KeyPart[][] {
 }
 
 /**
- * The push-grant options the live server builds every pair with (issue #292, D1 and D5): a zone
- * whose author resolves to an app pushes, and updates its branch, only with that app's `push`
- * token minted from `source`; any other zone with the author PAT, as its push containers do.
+ * The push-grant options (issue #292, D1 and D5): a zone whose author resolves to an app pushes,
+ * and updates its branch, only with that app's `push` token minted from `source`; any other zone
+ * with the author PAT, as its push containers do. Part of `pairOptionsFor`.
  */
 export function pushOptionsFor(
   zone: Parameters<typeof credentialFor>[0] & { id: string },
@@ -277,6 +277,46 @@ export function pushOptionsFor(
 ): PairOptions {
   if (credentialFor(zone, 'author', apps).ref.kind !== 'github-app') return {};
   return { authorUsesApp: true, pushToken: appPushToken(source, zone.id) };
+}
+
+/** The use the server's own forge for each role acts with (§4.2's table). */
+const SERVER_USE = { author: 'server-author', reviewer: 'server-reviewer' } as const;
+
+/**
+ * The options the live server builds every pair with (spec §4.3, §4.4): in a two-bot zone where
+ * either role resolves to an app, each role's ref, the server-use token providers, each app's
+ * identity and installation grant from `source`, and the credentials for the pair cache's key,
+ * besides the push options. Any other zone (PAT roles, or starter) gets the push options alone,
+ * so its pair key is the one before apps. An app role whose entry is missing or undecryptable
+ * keeps the app (§4.4): its identity throws, so the pair is refused rather than built on the PAT.
+ */
+export function pairOptionsFor(
+  zone: Parameters<typeof credentialFor>[0] & { id: string },
+  credentials: { resolved: Resolved; apps: ResolvedApps },
+  source: Pick<AppTokenSource, 'fresh' | 'provider' | 'grant'>,
+): PairOptions {
+  const { apps } = credentials;
+  const push = pushOptionsFor(zone, apps, source);
+  const refs: PairRefs = {
+    author: credentialFor(zone, 'author', apps).ref,
+    reviewer: credentialFor(zone, 'reviewer', apps).ref,
+  };
+  if (refs.author.kind !== 'github-app' && refs.reviewer.kind !== 'github-app') return push;
+  return {
+    ...push,
+    refs,
+    credentials,
+    appTokens: (_owner, role) => source.provider(zone.id, role, SERVER_USE[role]),
+    appIdentity: (owner, role) => {
+      const read = apps.get(owner)?.[role];
+      if (!read || read.source === 'missing')
+        throw new Error(
+          `no readable GitHub App entry for the ${role} of ${redactTokenShapes(zone.repo)}`,
+        );
+      return { slug: read.entry.slug, appId: read.entry.appId };
+    },
+    appGrant: (_owner, role) => source.grant(zone.id, role),
+  };
 }
 
 /**
