@@ -38,6 +38,12 @@ services:
       JM_EGRESS_IMAGE: jumpmaster-egress:dev
       JM_ALLOWED_IMAGES: ${JM_ALLOWED_IMAGES:-jumpmaster-trooper:dev,jumpmaster-trooper-python:dev,jumpmaster-trooper-go:dev,jumpmaster-trooper-jvm:dev}
 
+  chat:
+    image: jumpmaster-trooper:dev
+
+  chat-egress:
+    image: jumpmaster-egress:dev
+
   # Build-only: `--profile build build` makes the images drops run. Never started.
   trooper:
     image: jumpmaster-trooper:dev

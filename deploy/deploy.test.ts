@@ -28,6 +28,8 @@ type Service = {
   restart?: string;
   tmpfs?: string[];
   cap_drop?: string[];
+  cap_add?: string[];
+  networks?: string[] | Record<string, { ipv4_address?: string } | null>;
   security_opt?: string[];
   ports?: string[];
   volumes?: string[];
@@ -47,6 +49,7 @@ type Compose = {
   services: Record<string, Service>;
   secrets?: unknown;
   volumes?: Record<string, unknown>;
+  networks?: Record<string, { internal?: boolean; ipam?: { config?: { subnet?: string }[] } }>;
 };
 
 const TEMPLATE = read('deploy/compose.yaml.tmpl');
@@ -90,6 +93,7 @@ describe('the released compose file', () => {
       JM_JOIN_TOKEN_FILE: '/secrets/join_token',
       JM_OPERATOR_TOKEN_FILE: '/secrets/operator_token',
       JM_VAULT_KEY_FILE: '/secrets/vault_key',
+      JM_CHAT_SERVICE_URL: 'http://chat:7431',
     });
     expect(svc('jumpmaster').command).toEqual(['serve']);
     expect(svc('jumpmaster').volumes).toEqual([
@@ -159,7 +163,12 @@ describe('the released compose file', () => {
     const m4 = load(renderCompose(read('deploy/fixtures/m4-compose.yaml.tmpl'), LOCK)) as Compose;
     expect(compose.name).toBe('jumpmaster');
     expect(m4.name).toBe(compose.name);
-    expect(Object.keys(m4.volumes ?? {})).toEqual(Object.keys(compose.volumes ?? {}));
+    // Every M4 volume keeps its name; the chat's volumes are new.
+    expect(Object.keys(compose.volumes ?? {})).toEqual([
+      ...Object.keys(m4.volumes ?? {}),
+      'chat-repos',
+      'chat-sessions',
+    ]);
     // The fixture is M4's file byte for byte below its header.
     expect(read('deploy/fixtures/m4-compose.yaml.tmpl')).toMatch(/^# FROZEN: /);
   });
@@ -174,6 +183,94 @@ describe('the released compose file', () => {
       .filter(([, s]) => (s.volumes ?? []).some((v) => /docker\.sock|DOCKER_SOCKET/.test(v)))
       .map(([n]) => n);
     expect(socket).toEqual(['stick']);
+  });
+
+  test('the chat service runs the trooper image with the chat entry point, read-only, no-new-privileges, cap_drop ALL and only SETUID, SETGID and KILL added', () => {
+    const c = svc('chat');
+    expect(c.image).toBe(
+      `ghcr.io/x-a-n-d-e-r-k/jumpmaster-trooper@${LOCK.images['jumpmaster-trooper']}`,
+    );
+    expect(c.entrypoint).toEqual(['node', '/opt/trooper/chat/main.js']);
+    expect(c.command).toBeUndefined();
+    expect(c.read_only).toBe(true);
+    expect(c.tmpfs).toEqual(['/tmp']);
+    expect(c.security_opt).toEqual(['no-new-privileges:true']);
+    expect(c.cap_drop).toEqual(['ALL']);
+    expect([...(c.cap_add ?? [])].sort()).toEqual(['KILL', 'SETGID', 'SETUID']);
+    expect(c.ports).toBeUndefined();
+    expect(c.profiles).toBeUndefined();
+    expect(c.restart).toBe('unless-stopped');
+    // Its traffic leaves through chat-egress only; the server is reached directly.
+    expect(c.environment).toMatchObject({
+      JM_CHAT_LISTEN: '0.0.0.0:7431',
+      HTTPS_PROXY: 'http://chat-egress:3128',
+      HTTP_PROXY: 'http://chat-egress:3128',
+      NO_PROXY: 'jumpmaster',
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+      DISABLE_AUTOUPDATER: '1',
+    });
+  });
+
+  test('the chat service mounts no secrets directory and no docker socket, and writes only to chat-repos and chat-sessions', () => {
+    const c = svc('chat');
+    expect(c.volumes).toEqual(['chat-repos:/chat/repos', 'chat-sessions:/home/agent/.claude']);
+    expect(c.secrets).toBeUndefined();
+    expect(c.user).toBeUndefined();
+    for (const key of Object.keys(c.environment ?? {}))
+      expect(key).not.toMatch(/TOKEN|SECRET|_KEY|PASSWORD/);
+    expect(compose.volumes).toHaveProperty('chat-repos');
+    expect(compose.volumes).toHaveProperty('chat-sessions');
+    // The image makes the mount point, root-owned and 0755.
+    expect(read('images/trooper/Dockerfile')).toMatch(
+      /install -d -o root -g root -m 0755 \/chat \/chat\/repos/,
+    );
+  });
+
+  test('chat-net is internal and joined only by jumpmaster, chat and chat-egress', () => {
+    const net = compose.networks?.['chat-net'];
+    expect(net?.internal).toBe(true);
+    expect(net?.ipam?.config).toEqual([{ subnet: '${JM_CHAT_SUBNET:-172.31.254.0/28}' }]);
+    const nets = (s: Service) =>
+      Array.isArray(s.networks) ? s.networks : Object.keys(s.networks ?? {});
+    const joined = Object.entries(compose.services)
+      .filter(([, s]) => nets(s).includes('chat-net'))
+      .map(([n]) => n)
+      .sort();
+    expect(joined).toEqual(['chat', 'chat-egress', 'jumpmaster']);
+    expect(nets(svc('chat'))).toEqual(['chat-net']);
+    expect(nets(svc('jumpmaster')).sort()).toEqual(['chat-net', 'default']);
+    expect(nets(svc('chat-egress')).sort()).toEqual(['chat-net', 'default']);
+    expect(nets(svc('stick'))).toEqual([]);
+  });
+
+  test('chat-egress enforces an allow list of exactly api.anthropic.com, github.com and api.github.com', () => {
+    const e = svc('chat-egress');
+    expect(e.image).toBe(
+      `ghcr.io/x-a-n-d-e-r-k/jumpmaster-egress@${LOCK.images['jumpmaster-egress']}`,
+    );
+    expect(e.environment?.JM_EGRESS_MODE).toBe('enforce');
+    expect((e.environment?.JM_EGRESS_ALLOW ?? '').split(',').sort()).toEqual([
+      'api.anthropic.com',
+      'api.github.com',
+      'github.com',
+    ]);
+    expect(e.environment?.JM_EGRESS_PORTS).toBeUndefined();
+    // Bound to its fixed chat-net address, the one compose gives it.
+    const addr = '${JM_CHAT_EGRESS_ADDR:-172.31.254.2}';
+    expect(e.environment?.JM_EGRESS_BIND).toBe(addr);
+    expect((e.networks as Record<string, { ipv4_address?: string }>)['chat-net']).toEqual({
+      ipv4_address: addr,
+    });
+    expect(e.read_only).toBe(true);
+    expect(e.cap_drop).toEqual(['ALL']);
+    expect(e.security_opt).toEqual(['no-new-privileges:true']);
+    expect(e.volumes).toBeUndefined();
+    expect(e.ports).toBeUndefined();
+    expect(svc('chat').depends_on).toEqual({ 'chat-egress': { condition: 'service_started' } });
+  });
+
+  test('jumpmaster has JM_CHAT_SERVICE_URL http://chat:7431', () => {
+    expect(svc('jumpmaster').environment?.JM_CHAT_SERVICE_URL).toBe('http://chat:7431');
   });
 
   test('the jumpmaster service publishes 127.0.0.1 only, is read_only, healthchecked and has tmpfs /tmp', () => {
@@ -277,6 +374,8 @@ describe('the from-source override', () => {
     expect(build.services.jumpmaster?.environment?.JM_DEV_IMAGES).toBe('1');
     expect(build.services.stick?.environment?.JM_IMAGE_POLICY).toBe('allowlist');
     expect(build.services.stick?.environment?.JM_EGRESS_IMAGE).toBe('jumpmaster-egress:dev');
+    expect(build.services.chat?.image).toBe('jumpmaster-trooper:dev');
+    expect(build.services['chat-egress']?.image).toBe('jumpmaster-egress:dev');
   });
 
   test.skipIf(!hasCompose)('docker compose accepts it over the template', () => {
