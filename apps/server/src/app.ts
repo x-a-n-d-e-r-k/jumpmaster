@@ -327,6 +327,7 @@ export function createApp(
     db: deps.db,
     config: deps.config,
     now: deps.now,
+    forgesFor: deps.forgesFor,
     ...(deps.chatTurns ? { turns: deps.chatTurns } : {}),
   });
   // The stick installer (issue #138): the script, cosign and the stick image, at publicUrl.
