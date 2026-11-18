@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { createApp } from '../app.js';
 import { Backoff } from '../auth/backoff.js';
 import { SetupMode, setOperatorPassphrase } from '../auth/operator.js';
+import { grantSudo, sha256Hex } from '../auth/sessions.js';
 import { loadBoot, RESTART_PATHS } from '../config/boot.js';
 import { flagRows } from '../config/catalog.js';
 import { ConfigStore, startVault } from '../config/store.js';
@@ -15,6 +16,7 @@ import { openDb } from '../db/open.js';
 import { insertDrop, recordUsageWindows, setZoneMode, upsertDropZone } from '../db/repo.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import { gateSecretName } from '../vault/credentials.js';
+import { appEntryName, serializeAppEntry } from '../vault/github-app-entries.js';
 import { fingerprintOf, openVault, VAULT_KEY_IN_DATA_DIR } from '../vault/vault.js';
 import { FLAGS_SCRIPT, renderFlagsForm } from './flags.js';
 import { RESTART_NOTE } from './setting-controls.js';
@@ -131,6 +133,22 @@ async function world(
       },
       repoAccess: async () => ({}),
     }),
+    // What GitHub says of a repository the Credentials tab's guide names: an organization's,
+    // public, read without a token (#374).
+    guidanceForge: () => ({
+      repoAccess: async () => ({
+        private: false,
+        defaultBranch: 'main',
+        permissions: { admin: false, maintain: false, push: false, triage: false, pull: true },
+        scopes: null,
+        tokenExpiresAt: null,
+        ownerType: 'Organization' as const,
+      }),
+      ownerType: async () => 'Organization' as const,
+      viewerLogin: async () => 'octo-bot',
+      listDir: async () => [],
+      getFileAt: async () => null,
+    }),
   });
   app = a;
   await setOperatorPassphrase(db, PASS, clock);
@@ -142,6 +160,8 @@ async function world(
     dbFile,
     store,
     secrets,
+    /** A sudo grant for the page's session (as `POST /api/control/sudo` gives). */
+    sudo: () => grantSudo(db, sha256Hex(s.id), clock),
     /** Moves the clock; the operator logs in again (a session idles out after 12 hours). */
     at(d: Date) {
       clock = d;
@@ -394,6 +414,81 @@ describe('the credentials tab', () => {
     expect(html).toContain(
       '<form method="get" action="/settings/credentials" id="recommend-form">',
     );
+  });
+});
+
+describe('creating the GitHub Apps from the Credentials tab (#374, spec §4.1)', () => {
+  const CLIENT_ID = 'Iv23liSettingsTab01';
+
+  test('a two-bot guide shows the create forms, wired to ask for the passphrase without sudo', async () => {
+    const w = await world();
+    const r = await w.get('/settings/credentials?repo=acme%2Fdemo');
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toContain('GitHub Apps (recommended for two bots)');
+    const forms =
+      r.body.match(/<form method="post" action="\/setup\/github-app\/start"[^>]*>/g) ?? [];
+    expect(forms).toHaveLength(2);
+    for (const f of forms) expect(f).toContain('data-sudo-first');
+    expect(r.body).toContain('<input type="hidden" name="owner" value="acme">');
+    expect(r.body).toContain('<input type="hidden" name="ownerType" value="Organization">');
+    expect(r.body).toContain('needs an owner or app manager of that organization');
+    // The page's sudo mechanism answers the hook.
+    expect(r.body).toContain('form.app-create[data-sudo-first]');
+    expect(r.body).toContain('id="sudo-prompt"');
+    w.sudo();
+    const held = await w.get('/settings/credentials?repo=acme%2Fdemo');
+    expect(held.body).not.toMatch(/action="\/setup\/github-app\/start"[^>]*data-sudo-first/);
+  });
+
+  test("an app entry for the guide's owner in the vault shows its slug, never its PEM or client id", async () => {
+    const w = await world();
+    const vault = w.store.vault();
+    if (vault === 'disabled') throw new Error('expected a vault');
+    const pem = generateKeyPairSync('rsa', { modulusLength: 2048 })
+      .privateKey.export({ type: 'pkcs8', format: 'pem' })
+      .toString();
+    const pemLines = pem.split('\n').filter((l) => l !== '' && !l.startsWith('-----'));
+    vault.put(
+      appEntryName('acme', 'author'),
+      serializeAppEntry({
+        appId: '77',
+        slug: 'jm-author-acme',
+        clientId: CLIENT_ID,
+        pem,
+        importedAt: '2026-11-15T10:00:00.000Z',
+      }),
+      { now: t0 },
+    );
+    const r = await w.get('/settings/credentials?repo=Acme%2Fdemo');
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toContain('Created: <code>jm-author-acme</code>');
+    expect(r.body).toContain('https://github.com/apps/jm-author-acme/installations/new');
+    expect(r.body).not.toContain('Create the author app');
+    expect(r.body).toContain('Create the reviewer app');
+    expect(r.body).not.toContain(CLIENT_ID);
+    expect(r.body).not.toContain('PRIVATE KEY');
+    for (const l of pemLines) expect(r.body).not.toContain(l);
+  });
+
+  test('a broken entry file counts as none: the page renders 200 with the button', async () => {
+    const w = await world();
+    mkdirSync(join(w.secrets, 'github-app', 'acme'), { recursive: true });
+    writeFileSync(join(w.secrets, 'github-app', 'acme', 'author.json'), '{ broken', {
+      mode: 0o644,
+    });
+    const r = await w.get('/settings/credentials?repo=acme%2Fdemo');
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toContain('Create the author app');
+    expect(r.body).not.toContain('{ broken');
+  });
+
+  test('the vault off: no buttons, a link to turn it on, and the token links as before', async () => {
+    const w = await world({ vaultOff: true });
+    const r = await w.get('/settings/credentials?repo=acme%2Fdemo');
+    expect(r.statusCode).toBe(200);
+    expect(r.body).not.toContain('/setup/github-app/start');
+    expect(r.body).toContain('The vault must be on first');
+    expect(r.body).toContain('id="tokens"');
   });
 });
 

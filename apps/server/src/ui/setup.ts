@@ -19,6 +19,8 @@ import { BASE_EGRESS } from '../payloads.js';
 import { PRESET_EGRESS } from '../presets.js';
 import type { CredentialName, ResolvedCredential } from '../vault/credentials.js';
 import {
+  type AppCreateOptions,
+  appCreateSection,
   COPY_SCRIPT,
   checklistSection,
   codeownersSection,
@@ -231,6 +233,31 @@ async function jmSaveCredentials(form, out) {
 }
 </script>`;
 
+/**
+ * The wizard's GitHub App buttons without sudo (#374): the passphrase from the step's own field
+ * (`sudoField`), `POST /api/control/sudo` once, then the form is submitted. With sudo held the
+ * field is disabled and the button submits at once.
+ */
+const APP_SUDO_SCRIPT = `<script>
+for (const form of document.querySelectorAll('form.app-create[data-sudo-first]')) form.addEventListener('submit', async (e) => {
+  if (e.defaultPrevented) return;
+  const sudo = document.querySelector('#forge input[name=sudo]');
+  if (!sudo || sudo.disabled) return;
+  e.preventDefault();
+  const out = form.querySelector('.app-out');
+  if (!sudo.value) {
+    jmAskPassphrase(sudo);
+    out.textContent = 'Creating an app asks for your passphrase again: enter it in the passphrase field below, then press the button again.';
+    return;
+  }
+  const r = await jmFetch('/api/control/sudo', { passphrase: sudo.value });
+  sudo.value = '';
+  if (!r.ok) { jmAskPassphrase(sudo); out.textContent = 'The passphrase was not accepted (' + r.status + ').'; return; }
+  sudo.disabled = true;
+  form.submit();
+});
+</script>`;
+
 const advanceForm = (step: Step, extra = ''): string =>
   `<form method="post" action="/setup/advance" id="advance" class="setup-advance"><input type="hidden" name="from" value="${step}">${extra}<button name="how" value="continue">Continue</button> <button name="how" value="later">Do this later</button></form>`;
 
@@ -321,12 +348,39 @@ export async function forgeGuideFor(
   return r.ok ? { repo, paidPlan, answer: r.answer } : { repo, paidPlan, error: r.error };
 }
 
+/** Whether the GitHub App buttons show: asked for, two bots, and not stopped (starter stays on PATs). */
+function offersApps(a: RecommendAnswer, apps?: AppCreateOptions): apps is AppCreateOptions {
+  return apps !== undefined && a.recommendation.identity === 'two-bot' && !a.recommendation.stop;
+}
+
+/**
+ * The GitHub App buttons' inputs for a guide (#374): the vault, sudo, and the slug of each role's
+ * existing app for the repository's owner (read only when the buttons would show). Undefined
+ * without a recommendation.
+ */
+export function appOptionsFor(
+  store: ConfigStore,
+  guide: ForgeGuide | undefined,
+  sudo: boolean,
+): AppCreateOptions | undefined {
+  const a = guide?.answer;
+  if (!a) return undefined;
+  const vaultOn = store.vault() !== 'disabled';
+  const shown = vaultOn && offersApps(a, { vaultOn, sudo, existing: {} });
+  return { vaultOn, sudo, existing: shown ? store.appSlugs(a.repo.split('/')[0] ?? '') : {} };
+}
+
 /**
  * The forge step's first part: which repository, then the accounts to use and the pre-filled
  * token links (unless the recommendation stops first), and the collaborator checklist once the
  * author token resolves a login. All of it is read from GitHub without writing, and escaped.
  */
-export function guideSection(guide: ForgeGuide | undefined, action = '/setup/forge'): string {
+export function guideSection(
+  guide: ForgeGuide | undefined,
+  action = '/setup/forge',
+  /** The GitHub App buttons' inputs (#374); without them the section is as before. */
+  apps?: AppCreateOptions,
+): string {
   const repo = guide?.repo ?? '';
   const plan = guide?.paidPlan ?? '';
   const option = (v: string, label: string) =>
@@ -343,7 +397,7 @@ export function guideSection(guide: ForgeGuide | undefined, action = '/setup/for
     ...(a.visibility === 'private' ? (['read'] as const) : []),
   ];
   return `${form}<p>${escapeHtml(a.repo)}: ${a.visible ? escapeHtml(a.visibility) : 'not visible without a token (private, or not there)'}, owned by ${a.ownerType === 'Organization' ? 'an organization' : 'a personal account'}.</p>
-${recommendationSection(a.recommendation)}
+${recommendationSection(a.recommendation)}${offersApps(a, apps) ? `\n${appCreateSection(a, apps)}` : ''}
 ${a.recommendation.stop ? '' : tokensSection(a.pat, roles)}
 ${a.logins.author ? checklistSection(a.checklist) : ''}`;
 }
@@ -352,6 +406,9 @@ function forgePage(store: ConfigStore, sudo: boolean, wizard: Wizard, guide?: Fo
   const r = store.resolved();
   const recommended = guide?.answer?.recommendation.identity;
   const starter = wizard.starter ?? recommended === 'starter';
+  const apps = appOptionsFor(store, guide, sudo);
+  // A create button without sudo asks for the passphrase in the same field Save uses.
+  const appButtons = !!guide?.answer && !!apps?.vaultOn && offersApps(guide.answer, apps);
   const fields = [
     credentialField('githubAuthorToken', 'Author token', r.githubAuthorToken),
     credentialField('githubReviewerToken', 'Reviewer token (two-bot mode)', r.githubReviewerToken),
@@ -366,7 +423,7 @@ function forgePage(store: ConfigStore, sudo: boolean, wizard: Wizard, guide?: Fo
   return frame(
     'forge',
     `<h3>Connect GitHub</h3>
-${guideSection(guide)}
+${guideSection(guide, '/setup/forge', apps)}
 <h4>The tokens</h4>
 <p><label><input type="checkbox" name="starter" value="1" form="advance"${starter ? ' checked' : ''}> Starter mode: one GitHub account, no reviewer</label> <small>Decides whether the reviewer token is needed; it is kept when you press Continue.</small></p>
 <p>Jumpmaster works on GitHub as an <strong>author</strong> account (opens and merges the agents' pull requests) and, in two-bot mode, a separate <strong>reviewer</strong> account (approves them). Use fine-grained tokens limited to your repositories. Each token is tested with GitHub before it is saved, and never shown back.</p>
@@ -374,7 +431,7 @@ ${guideSection(guide)}
 <h4>Reviewer</h4>${credentialLine('githubReviewerToken', r.githubReviewerToken)}
 <h4>Read token</h4>${credentialLine('githubReadToken', r.githubReadToken)}
 <form id="forge">${fields}
-${fields ? sudoField(sudo) : ''}<p><button>Save</button> <span id="forge-out" role="status"></span></p></form>
+${fields || appButtons ? sudoField(sudo) : ''}<p><button>Save</button> <span id="forge-out" role="status"></span></p></form>
 ${guide?.answer?.recommendation.identity === 'starter' ? '' : `<p class="warn" id="starter-warning"><strong>What starter mode costs:</strong> ${escapeHtml(STARTER_WARNING)}</p>`}
 ${SAVE_CREDENTIALS}
 <script>
@@ -382,7 +439,7 @@ document.getElementById('forge').addEventListener('submit', async (e) => {
   e.preventDefault();
   await jmSaveCredentials(e.target, document.getElementById('forge-out'));
 });
-</script>`,
+</script>${appButtons && !sudo ? APP_SUDO_SCRIPT : ''}`,
   );
 }
 

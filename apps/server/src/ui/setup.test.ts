@@ -17,6 +17,7 @@ import { DOC } from '../doctor/checks.js';
 import { PRESET_EGRESS } from '../presets.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
 import { openVault } from '../vault/vault.js';
+import { appCreateSection } from './github.js';
 import { getWizard, SAVE_CREDENTIALS } from './setup.js';
 
 const TOKEN = 'o'.repeat(32);
@@ -889,5 +890,103 @@ describe('the wizard says what it checked (#161)', () => {
     expect(text.match(/\b[a-z]+[A-Z][A-Za-z]*\b/g) ?? []).toEqual([]);
     expect(forge.indexOf('name="starter"')).toBeGreaterThan(-1);
     expect(forge.indexOf('name="starter"')).toBeLessThan(forge.indexOf('name="githubAuthorToken"'));
+  });
+});
+
+describe('creating the GitHub Apps from the forge step (#374, spec §4.1)', () => {
+  /** The start forms of a page, each as its hidden fields. */
+  const startForms = (html: string): Record<string, string>[] =>
+    [
+      ...html.matchAll(/<form method="post" action="\/setup\/github-app\/start"[\s\S]*?<\/form>/g),
+    ].map((m) =>
+      Object.fromEntries(
+        [...m[0].matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)].map((f) => [
+          f[1] as string,
+          f[2] as string,
+        ]),
+      ),
+    );
+  const SUDO_FIELD =
+    '<p class="sudo"><label>Your passphrase (saving a credential asks for it again) <input type="password" name="sudo" autocomplete="current-password"></label></p><p><button>Save</button> <span id="forge-out" role="status"></span></p></form>';
+
+  test('a two-bot guide shows the author and reviewer forms beside the token fields', async () => {
+    const w = await world({ github: { ownerType: 'Organization' } });
+    const forge = (await w.get('/setup/forge?repo=octo-org%2Fdemo')).body;
+    expect(startForms(forge)).toEqual([
+      { role: 'author', owner: 'octo-org', ownerType: 'Organization' },
+      { role: 'reviewer', owner: 'octo-org', ownerType: 'Organization' },
+    ]);
+    expect(forge).toContain('needs an owner or app manager of that organization');
+    // Without sudo: wired to the step's passphrase field, which is on the page.
+    expect(forge).toContain('data-sudo-first');
+    expect(forge).toContain('form.app-create[data-sudo-first]');
+    expect(forge).toContain(SUDO_FIELD);
+    // PAT mode is untouched: the token links, fields and the starter warning are still there.
+    expect(forge).toContain('id="tokens"');
+    expect(forge).toContain('name="githubAuthorToken"');
+    expect(forge).toContain('id="starter-warning"');
+    // With sudo the buttons submit at once.
+    expect((await w.call('POST', '/api/control/sudo', { passphrase: PASS })).statusCode).toBe(200);
+    const held = (await w.get('/setup/forge?repo=octo-org%2Fdemo')).body;
+    expect(startForms(held)).toHaveLength(2);
+    expect(held).not.toContain('data-sudo-first');
+  });
+
+  test('a starter guide renders no create buttons and the token part as before', async () => {
+    const w = await world({ github: { ownerType: 'User' } });
+    const forge = (await w.get('/setup/forge?repo=octo%2Fdemo')).body;
+    expect(forge).not.toContain('/setup/github-app/start');
+    expect(forge).not.toContain('github-apps');
+    expect(forge).toContain('id="tokens"');
+    expect(forge).toContain(SUDO_FIELD);
+    expect(forge).not.toContain('id="starter-warning"');
+    const escaped = STARTER_WARNING.replaceAll("'", '&#39;').replaceAll('"', '&quot;');
+    expect(forge.split(escaped)).toHaveLength(2);
+    for (const name of ['githubAuthorToken', 'githubReviewerToken', 'githubReadToken'])
+      expect(forge).toContain(
+        `<input type="password" name="${name}" autocomplete="off" spellcheck="false"></label>`,
+      );
+  });
+
+  test('a stopped guide (a private repository on a free plan) renders no create buttons', async () => {
+    const w = await world({ github: { ownerType: 'Organization', private: true } });
+    const stop = (await w.get('/setup/forge?repo=octo-org%2Fsecret&paidPlan=no')).body;
+    expect(stop).toContain('data-stop');
+    expect(stop).not.toContain('/setup/github-app/start');
+  });
+
+  test("end to end: the rendered author form's fields start the manifest flow for that owner", async () => {
+    const w = await world({ github: { ownerType: 'Organization' } });
+    expect((await w.call('POST', '/api/control/sudo', { passphrase: PASS })).statusCode).toBe(200);
+    const forge = (await w.get('/setup/forge?repo=octo-org%2Fdemo')).body;
+    const author = startForms(forge)[0] as Record<string, string>;
+    const org = await w.form('/setup/github-app/start', author);
+    expect(org.statusCode, org.body).toBe(200);
+    expect(org.body).toMatch(
+      /action="https:\/\/github\.com\/organizations\/octo-org\/settings\/apps\/new\?state=[^"]+"/,
+    );
+    // The personal choice, as the helper renders it for a user's repository.
+    const user = appCreateSection(
+      { repo: 'alice/demo', ownerType: 'User' },
+      { vaultOn: true, sudo: true, existing: {} },
+    );
+    const personal = startForms(user)[0] as Record<string, string>;
+    expect(personal).toEqual({ role: 'author', owner: 'alice', ownerType: 'User' });
+    const r = await w.form('/setup/github-app/start', personal);
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.body).toMatch(/action="https:\/\/github\.com\/settings\/apps\/new\?state=[^"]+"/);
+  });
+
+  test('the step stays in plain words with the apps section on it', async () => {
+    const w = await world({ github: { ownerType: 'Organization' } });
+    const forge = (await w.get('/setup/forge?repo=octo-org%2Fdemo')).body;
+    const text = forge
+      .replace(/<script>[\s\S]*?<\/script>/g, '')
+      .replace(/<style>[\s\S]*?<\/style>/g, '')
+      .replace(/<[^>]*>/g, ' ');
+    expect(text.match(/\b[a-z]+[A-Z][A-Za-z]*\b/g) ?? []).toEqual([]);
+    // Nothing secret on the page.
+    expect(forge).not.toMatch(/[?&]state=|name="state"|PRIVATE KEY|github_pat_/);
+    expect(forge).toContain('id="github-apps"');
   });
 });
