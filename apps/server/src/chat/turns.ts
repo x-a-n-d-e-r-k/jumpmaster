@@ -16,7 +16,12 @@ import type { AppTokenSource } from '../forge/app-tokens.js';
 import { mintChatToken, revokeMcpToken } from '../mcp/tokens.js';
 import { fence, neutralise } from '../payloads.js';
 import { redactionList } from '../scrub.js';
-import { dispatchGate } from '../usage.js';
+import {
+  dispatchGate,
+  ingestRateLimit,
+  type RateLimitSource,
+  rateLimitFromEvent,
+} from '../usage.js';
 import type { ResolvedApps } from '../vault/resolution.js';
 import { type ChatReadCredential, chatReadCredential } from './credentials.js';
 import { focusContext } from './focus.js';
@@ -59,6 +64,25 @@ export interface ChatTurnDeps {
   appTokens?: Pick<AppTokenSource, 'fresh'>;
   /** The operator's log; every line is redacted before it gets here. */
   log(msg: string): void;
+  /** Jitter for a usage pause (`ingestRateLimit`); `Math.random` by default. */
+  rand?: () => number;
+}
+
+/**
+ * Where a chat turn's rate-limit observation came from (R11). The id's `chat:` prefix never
+ * matches a drop id, so the usage state never treats a chat turn as a drop, a probe or a cause
+ * work item, and usage-credit use in a chat never starts a credits stop by itself.
+ *
+ * Because no drop has this id, `ingestRateLimit` finds no drop to read a model from, so a
+ * per-model window a chat turn reports is recorded with a null model. That is intended: the
+ * chat runs no drop, and the window's utilization still counts for the install.
+ */
+export function chatRateLimitSource(
+  threadId: number,
+  seq: number,
+  startedAt: string,
+): RateLimitSource {
+  return { dropId: `chat:${threadId}:${seq}`, workItemId: null, startedAt, outcome: null };
 }
 
 /** Why a turn is refused under the usage gate, in plain words. */
@@ -310,6 +334,7 @@ export class ChatTurns {
       return;
     }
     const chat = chatConfigOf(config);
+    const startedAt = this.d.now().toISOString();
     this.store(threadId, msg, { state: 'running' });
 
     // Every value this turn must never store, emit or log, beyond the server's own list.
@@ -389,6 +414,7 @@ export class ChatTurns {
         msg,
         { ...base, resumeSession: thread.claudeSessionId, prompt: `${context}${msg.text}` },
         chat.turnMinutes,
+        startedAt,
         clean,
       );
       if (outcome.kind === 'session_lost') {
@@ -401,17 +427,19 @@ export class ChatTurns {
           msg,
           { ...base, resumeSession: null, prompt },
           chat.turnMinutes,
+          startedAt,
           clean,
         );
       }
       if (outcome.kind === 'done') {
         if (outcome.texts.length > 0) {
-          const reply = this.append(threadId, {
+          // Stored with the result's usage in one write, so no subscriber sees it without one.
+          this.append(threadId, {
             role: 'assistant',
             text: outcome.texts.join('\n\n'),
             state: 'done',
+            ...(outcome.usage ? { usage: outcome.usage } : {}),
           });
-          if (outcome.usage) this.store(threadId, reply, { usage: outcome.usage });
         }
         this.store(threadId, msg, { state: 'done' });
       } else {
@@ -433,6 +461,7 @@ export class ChatTurns {
     msg: ChatMessage,
     req: ChatTurnRequest,
     turnMinutes: number,
+    startedAt: string,
     clean: (s: string) => string,
   ): Promise<Attempt> {
     const { db } = this.d;
@@ -473,8 +502,25 @@ export class ChatTurns {
             lastSeq = row.seq;
             break;
           }
-          case 'rate_limit':
+          case 'rate_limit': {
+            // The chat uses the install's one Claude credential: its limits are the install's.
+            const data = rateLimitFromEvent(e.data);
+            if (!data) break;
+            try {
+              ingestRateLimit(
+                db,
+                data,
+                chatRateLimitSource(threadId, msg.seq, startedAt),
+                this.config().usage,
+                this.d.now(),
+                this.d.rand ?? Math.random,
+              );
+            } catch (err) {
+              // Usage accounting never breaks the owner's turn.
+              this.d.log(clean(`${where}: usage not recorded: ${errorText(err)}`));
+            }
             break;
+          }
           case 'result':
             if (e.sessionId) setThreadSession(db, threadId, e.sessionId, this.d.now());
             if (e.isError) return { kind: 'failed', error: CLAUDE_UNFINISHED };

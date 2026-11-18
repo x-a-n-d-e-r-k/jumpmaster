@@ -1449,7 +1449,7 @@ test('v40 keeps every control_audit row and the 5000-row trigger (the rebuild sh
       `INSERT INTO control_audit (at, via, action, target, guarded, detail_json)
        VALUES (?, ?, ?, ?, ?, ?)`,
     );
-    // One transaction: 5002 autocommits each sync to disk and time the test out.
+    // One transaction: 5002 autocommits cost an fsync each and time the test out on slow disks.
     raw.transaction(() => {
       for (let i = 0; i < 5002; i++)
         put.run(
