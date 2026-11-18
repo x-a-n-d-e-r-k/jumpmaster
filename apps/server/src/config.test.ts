@@ -624,16 +624,22 @@ describe('crew config', () => {
     expect(loadConfig(withPlan('ultra'), fullEnv).claude).toEqual({
       plan: 'ultra',
       fableWeeklyDropCap: 5,
+      fableMaxUtilization: 0.8,
     });
     expect(() => loadConfig(withPlan('bogus'), fullEnv)).toThrow(/claude.plan/);
     expect(loadConfig(withPlan('max'), fullEnv).claude).toEqual({
       plan: 'max',
       fableWeeklyDropCap: 5,
+      fableMaxUtilization: 0.8,
     });
   });
 
-  test('claude defaults to the pro plan with no Fable and a weekly cap of 5', () => {
-    expect(loadConfig(minimal, fullEnv).claude).toEqual({ plan: 'pro', fableWeeklyDropCap: 5 });
+  test('claude defaults to the pro plan with no Fable, a weekly cap of 5 and a Fable limit of 0.8', () => {
+    expect(loadConfig(minimal, fullEnv).claude).toEqual({
+      plan: 'pro',
+      fableWeeklyDropCap: 5,
+      fableMaxUtilization: 0.8,
+    });
     const c = loadConfig(
       fixture({
         dataDir: './data',
@@ -642,7 +648,12 @@ describe('crew config', () => {
       }),
       fullEnv,
     );
-    expect(c.claude).toEqual({ plan: 'max', fableModel: 'claude-fable-1', fableWeeklyDropCap: 3 });
+    expect(c.claude).toEqual({
+      plan: 'max',
+      fableModel: 'claude-fable-1',
+      fableWeeklyDropCap: 3,
+      fableMaxUtilization: 0.8,
+    });
     expect(() =>
       loadConfig(
         fixture({ dataDir: './data', dropZones: [baseZone], claude: { plan: 'gold' } }),

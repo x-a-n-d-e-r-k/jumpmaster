@@ -349,6 +349,7 @@ export const NOT_GUARDED: FreePath[] = [
     'a model name for a role; drops run the same code under the same guards',
   ),
   free('claude.fableWeeklyDropCap', PACE),
+  free('claude.fableMaxUtilization', PACE),
   free('claude.tokenCreatedAt', 'a date the doctor reads for the expiry warning'),
   free('mcp.maxBodyBytes', MCP_LIMIT),
   free('mcp.writesPerHour', MCP_LIMIT),
