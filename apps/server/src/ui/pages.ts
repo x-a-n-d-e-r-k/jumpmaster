@@ -126,6 +126,8 @@ export interface ItemDetail {
   headSha?: string;
   /** The head whose gate changes Command allowed (set only when it is the current head). */
   gateAllowedSha?: string;
+  /** The head a carried allowance came from (main merged in, the branch unchanged). */
+  gateCarriedFrom?: string;
   verdict?: { decision: string; forced: boolean; summary: string };
   attempts: Partial<Record<AttemptKey, number>>;
 }
@@ -944,7 +946,9 @@ export function renderGoals(s: {
 
 function detailCells(d: ItemDetail | undefined): string {
   const allowed = d?.gateAllowedSha
-    ? `<br><small>gate change allowed by Command for ${escapeHtml(d.gateAllowedSha.slice(0, 7))}</small>`
+    ? `<br><small>gate change allowed by Command for ${escapeHtml(d.gateAllowedSha.slice(0, 7))}${
+        d.gateCarriedFrom ? ` (carried from ${escapeHtml(d.gateCarriedFrom.slice(0, 7))})` : ''
+      }</small>`
     : '';
   const head = d?.headSha ? escapeHtml(d.headSha.slice(0, 7)) : '-';
   const v = d?.verdict;

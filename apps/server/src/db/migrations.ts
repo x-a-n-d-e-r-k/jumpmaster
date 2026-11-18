@@ -1473,6 +1473,14 @@ ALTER TABLE crew_retries ADD COLUMN rerun_at TEXT;
 ALTER TABLE crew_retries ADD COLUMN reason TEXT;
 `;
 
+/**
+ * v50: a gate allowance carried to a new head when only main was merged in names the head it was
+ * carried from (null for an allowance Command ruled on that head itself).
+ */
+const V50_SQL = `
+ALTER TABLE gate_allowances ADD COLUMN carried_from_head TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1523,6 +1531,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 47, sql: V47_SQL },
   { version: 48, sql: V48_SQL, foreignKeysOff: true },
   { version: 49, sql: V49_SQL },
+  { version: 50, sql: V50_SQL },
 ];
 
 /**

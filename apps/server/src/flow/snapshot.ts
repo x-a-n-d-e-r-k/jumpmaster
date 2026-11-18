@@ -4,6 +4,8 @@ import { agentBranch } from '@jumpmaster/protocol';
 import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import {
+  carryGateAllowance,
+  type GateAllowance,
   getBranchUpdate,
   getDropZoneDefaultBranch,
   getGateAllowance,
@@ -11,6 +13,7 @@ import {
   getPullRequest,
   holdingDropFor,
   listWorkItems,
+  newestGateAllowance,
   type OutboxRow,
   recordGatePark,
   setWaitingSince,
@@ -21,6 +24,7 @@ import {
   type WorkItem,
 } from '../db/repo.js';
 import {
+  type ChangeDigest,
   type ChecksFacts,
   type ForgeReview,
   isHeld,
@@ -519,6 +523,41 @@ async function carryFacts(
 }
 
 /**
+ * Carries the item's newest gate allowance on another head of the same PR to `to.headSha` when
+ * only main was merged in: the same gate changes against the new merge base (gateDigest), and the
+ * branch's own change unchanged (equal, complete, non-empty change digests against the base, as
+ * `carriable`). Records the carried row and returns the head's allowance; undefined, recording
+ * nothing, when any condition fails or a digest read throws.
+ */
+async function carryAllowance(
+  db: Db,
+  forges: ForgePair,
+  itemId: number,
+  base: string,
+  to: { prNumber: number; headSha: string; mergeBaseSha: string },
+  details: { scripts: string[]; tools: string[] },
+  now: Date,
+): Promise<GateAllowance | undefined> {
+  const source = newestGateAllowance(db, itemId, to.prNumber);
+  if (!source || source.prNumber !== to.prNumber || source.headSha === to.headSha) return undefined;
+  if (source.digest !== gateDigest(details)) return undefined;
+  let from: ChangeDigest;
+  let head: ChangeDigest;
+  try {
+    [from, head] = await Promise.all([
+      forges.author.changeDigest(base, source.headSha),
+      forges.author.changeDigest(base, to.headSha),
+    ]);
+  } catch {
+    return undefined;
+  }
+  const same = from.complete && head.complete && from.digest !== '' && from.digest === head.digest;
+  if (!same) return undefined;
+  carryGateAllowance(db, source, to, now);
+  return getGateAllowance(db, itemId, to.prNumber, to.headSha);
+}
+
+/**
  * The zone's merge reservation holder, from the database alone: among pr_open items whose newest
  * verdict on their recorded PR head is an approve made no more than `zone.mergeReservationMinutes`
  * ago (carried verdicts included), the one approved first, ties to the lower item id. null when
@@ -642,11 +681,16 @@ export async function buildSnapshot(
       ? await maintainerApprovedHead(forges, zone, trusted, headSha, pass.botLogins, unavailable)
       : false;
   // Command's ruling allows one judged diff only: the head read just now, against the same merge
-  // base, with exactly the changes its briefing listed.
-  const allowance =
-    pr && headSha !== null && compare && (gate.scripts.length > 0 || gate.tools.length > 0)
-      ? getGateAllowance(db, item.id, pr.number, headSha)
-      : undefined;
+  // base, with exactly the changes its briefing listed. A ruling on an earlier head is carried
+  // here first when only main was merged in (carryAllowance).
+  let allowance: GateAllowance | undefined;
+  if (pr && headSha !== null && compare && (gate.scripts.length > 0 || gate.tools.length > 0)) {
+    allowance = getGateAllowance(db, item.id, pr.number, headSha);
+    if (allowance === undefined && forgeUnavailable === null) {
+      const to = { prNumber: pr.number, headSha, mergeBaseSha: compare.mergeBaseSha };
+      allowance = await carryAllowance(db, forges, item.id, base, to, gate.details, now);
+    }
+  }
   const commandAllowed =
     allowance !== undefined &&
     allowance.mergeBaseSha === compare?.mergeBaseSha &&

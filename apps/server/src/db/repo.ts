@@ -402,20 +402,31 @@ export type GateAllowance = {
   digest: string;
   ruledAt: string;
   rulingId: number;
+  /** The head this allowance was carried from (main merged in, the branch unchanged), or null. */
+  carriedFromHead: string | null;
 };
+
+const GATE_ALLOWANCE_COLUMNS = `item_id AS itemId, pr_number AS prNumber, head_sha AS headSha,
+  merge_base_sha AS mergeBaseSha, reason_digest AS digest, ruled_at AS ruledAt,
+  ruling_id AS rulingId, carried_from_head AS carriedFromHead`;
 
 /**
  * Records Command's allowance of `headSha`'s gate changes. Repeating the same allowance is a no-op
- * (the first ruled_at kept); a later ruling on the same head for another judgement replaces it.
+ * (the first ruled_at kept); a later ruling on the same head for another judgement replaces it
+ * (a carried row included: it is then Command's own ruling on that head).
  */
-export function recordGateAllowance(db: Db, a: Omit<GateAllowance, 'ruledAt'>, now: Date): void {
+export function recordGateAllowance(
+  db: Db,
+  a: Omit<GateAllowance, 'ruledAt' | 'carriedFromHead'>,
+  now: Date,
+): void {
   db.prepare(
     `INSERT INTO gate_allowances (item_id, pr_number, head_sha, merge_base_sha, reason_digest,
        ruled_at, ruling_id) VALUES (@itemId, @prNumber, @headSha, @mergeBaseSha, @digest, @at,
        @rulingId)
      ON CONFLICT (item_id, pr_number, head_sha) DO UPDATE SET merge_base_sha = excluded.merge_base_sha,
        reason_digest = excluded.reason_digest, ruled_at = excluded.ruled_at,
-       ruling_id = excluded.ruling_id
+       ruling_id = excluded.ruling_id, carried_from_head = NULL
      WHERE merge_base_sha IS NOT excluded.merge_base_sha
        OR reason_digest IS NOT excluded.reason_digest`,
   ).run({ ...a, at: now.toISOString() });
@@ -430,12 +441,53 @@ export function getGateAllowance(
 ): GateAllowance | undefined {
   return db
     .prepare(
-      `SELECT item_id AS itemId, pr_number AS prNumber, head_sha AS headSha,
-         merge_base_sha AS mergeBaseSha, reason_digest AS digest, ruled_at AS ruledAt,
-         ruling_id AS rulingId
+      `SELECT ${GATE_ALLOWANCE_COLUMNS}
          FROM gate_allowances WHERE item_id = ? AND pr_number = ? AND head_sha = ?`,
     )
     .get(itemId, prNumber, headSha) as GateAllowance | undefined;
+}
+
+/** The item's newest allowance on any head of PR `prNumber`, carried rows included. */
+export function newestGateAllowance(
+  db: Db,
+  itemId: number,
+  prNumber: number,
+): GateAllowance | undefined {
+  return db
+    .prepare(
+      `SELECT ${GATE_ALLOWANCE_COLUMNS}
+         FROM gate_allowances WHERE item_id = ? AND pr_number = ?
+         ORDER BY ruled_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(itemId, prNumber) as GateAllowance | undefined;
+}
+
+/**
+ * Carries Command's allowance `from` to `headSha` on `mergeBaseSha`: a new row keeping the ruling
+ * and digest, naming the source head. A row already on that head (another pass carried it, or
+ * Command ruled on it) is left as it is.
+ */
+export function carryGateAllowance(
+  db: Db,
+  from: GateAllowance,
+  to: { headSha: string; mergeBaseSha: string },
+  now: Date,
+): void {
+  db.prepare(
+    `INSERT INTO gate_allowances (item_id, pr_number, head_sha, merge_base_sha, reason_digest,
+       ruled_at, ruling_id, carried_from_head)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (item_id, pr_number, head_sha) DO NOTHING`,
+  ).run(
+    from.itemId,
+    from.prNumber,
+    to.headSha,
+    to.mergeBaseSha,
+    from.digest,
+    now.toISOString(),
+    from.rulingId,
+    from.headSha,
+  );
 }
 
 export function insertDrop(db: Db, d: NewDrop, now?: Date): void {

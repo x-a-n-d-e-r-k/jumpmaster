@@ -127,6 +127,20 @@ const ATTEMPT_KEYS: AttemptKey[] = [
   'base_sync',
 ];
 
+/** The Floor's gate allowance line: the head Command's allowance covers, and where it came from. */
+function gateAllowedOf(
+  db: Db,
+  itemId: number,
+  pr: { number: number; headSha: string } | undefined,
+): Pick<ItemDetail, 'gateAllowedSha' | 'gateCarriedFrom'> {
+  const a = pr ? getGateAllowance(db, itemId, pr.number, pr.headSha) : undefined;
+  if (!a) return {};
+  return {
+    gateAllowedSha: a.headSha,
+    ...(a.carriedFromHead ? { gateCarriedFrom: a.carriedFromHead } : {}),
+  };
+}
+
 /** Per work item: its PR head, whether Command allowed its gate change, verdict and attempts. */
 function itemDetails(db: Db, items: readonly WorkItem[]): Map<number, ItemDetail> {
   const details = new Map<number, ItemDetail>();
@@ -135,9 +149,7 @@ function itemDetails(db: Db, items: readonly WorkItem[]): Map<number, ItemDetail
     const pr = getPullRequest(db, i.id);
     details.set(i.id, {
       ...(pr ? { headSha: pr.headSha } : {}),
-      ...(pr && getGateAllowance(db, i.id, pr.number, pr.headSha)
-        ? { gateAllowedSha: pr.headSha }
-        : {}),
+      ...gateAllowedOf(db, i.id, pr),
       ...(v ? { verdict: { decision: v.decision, forced: v.forced, summary: v.summary } } : {}),
       attempts: Object.fromEntries(ATTEMPT_KEYS.map((k) => [k, getAttempts(db, i.id, k).count])),
     });
