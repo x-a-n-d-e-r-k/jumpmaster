@@ -443,7 +443,8 @@ export class ConfigStore implements ConfigSource {
     const zones = this.zoneRules(doc, c, meta);
     if ('issues' in zones) return { ok: false, issues: zones.issues };
     const p = meta.principal;
-    if (p.via === 'session') {
+    // A chat turn acts for the browser session that posted the owner's message: treated alike.
+    if (p.via === 'session' || p.via === 'chat') {
       if (c.sessionForbidden.length > 0) return { ok: false, sessionForbidden: c.sessionForbidden };
       const sid = p.sessionId;
       if ((meta.confirmation || c.guarded.length > 0) && !sid)

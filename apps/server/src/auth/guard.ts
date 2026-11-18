@@ -7,13 +7,22 @@ import type { Db } from '../db/open.js';
 import { setupActive } from './operator.js';
 import { loadSession, parseCookies, SESSION_COOKIE } from './sessions.js';
 
-/** The one operator, through `ctl`'s machine token or a browser session. */
+/**
+ * The one operator, through `ctl`'s machine token, a browser session, or a chat turn the owner's
+ * message started. A chat principal is treated exactly as a session (guarded changes wait for the
+ * browser's confirmation, browser-forbidden paths are refused) and is audited as `chat`.
+ */
 export type Principal = {
   kind: 'operator';
-  via: 'token' | 'session';
-  /** The SHA-256 of the session id (never the id itself). */
+  via: 'token' | 'session' | 'chat';
+  /**
+   * The SHA-256 of the session id (never the id itself). For a chat principal, the session that
+   * posted the owner's message: a pending change is confirmed by that browser.
+   */
   sessionId?: string;
   sudo: boolean;
+  /** The chat turn behind a chat principal: its audit rows carry both ids. */
+  chat?: { threadId: number; messageId: number };
 };
 
 declare module 'fastify' {

@@ -2,7 +2,7 @@ import { redact } from '@jumpmaster/protocol';
 import type { Db } from '../db/open.js';
 import { serverScrubSet } from '../forge/scrub-set.js';
 
-export type AuditVia = 'token' | 'session' | 'system';
+export type AuditVia = 'token' | 'session' | 'chat' | 'system';
 
 /** A detail value: named fields only, never a request body. */
 export type AuditDetail = Record<string, string | number | boolean | null | undefined>;
