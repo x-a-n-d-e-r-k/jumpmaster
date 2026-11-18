@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { configReader, type LiveConfig } from '../config/source.js';
 import type { Db } from '../db/open.js';
+import { type ChatCard, cardUndoable, safeCardLink } from './cards.js';
 import { focusKnown, focusTitle } from './focus.js';
 import {
   appendMessage,
@@ -31,6 +32,8 @@ export interface ChatTurnHub {
   enqueue(threadId: number): void;
   /** Absent, the events route replays the stored messages only. */
   subscribe?(threadId: number, afterSeq: number, fn: (e: HubEvent) => void): () => void;
+  /** Sends a chat action's card to its thread's subscribers. */
+  publishCard?(card: ChatCard): void;
 }
 
 /** The names of the events `GET /api/chat/threads/:id/events` sends; each carries `id: <seq>`. */
@@ -42,6 +45,13 @@ const HEARTBEAT_MS = 25_000;
 
 /** A message as the browser gets it: without the posting session's hash. */
 const publicMessage = ({ sessionHash: _hash, ...m }: ChatMessage) => m;
+
+/** A card as the browser gets it: what Undo needs stays on the server. */
+export const publicCard = ({ undo: _undo, link, ...c }: ChatCard) => ({
+  ...c,
+  link: safeCardLink(link),
+  undoable: cardUndoable({ ...c, link, undo: _undo }),
+});
 
 /** The seq a reconnecting browser last saw: `Last-Event-ID`, else `?after=`, else 0. */
 function afterSeqOf(req: FastifyRequest): number {
@@ -200,6 +210,8 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
         if (!replaying) settle();
       } else if (ev.type === 'text') {
         send('text', e.seq, { seq: e.seq, text: ev.text });
+      } else if (ev.type === 'card') {
+        send('card', e.seq, { seq: e.seq, card: publicCard(ev.card) });
       }
     };
     req.raw.on('close', end);
