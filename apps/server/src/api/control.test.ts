@@ -3626,3 +3626,112 @@ describe('the kill switch suspends app installations (issue #225)', () => {
     expect(everything).not.toContain('GitHub says no');
   });
 });
+
+describe('backlog and queue routes', () => {
+  function backlogApp() {
+    const db = openDb(tmpDbFile());
+    upsertDropZone(db, { id: 'main', repo: 'octo/demo', defaultBranch: 'main', configJson: '{}' });
+    const f = fakeForgePair({ issues: [], trusted: ['human'] });
+    f.state.addIssue({ number: 1 });
+    f.state.addIssue({ number: 2 });
+    f.state.addIssue({ number: 3, labels: ['agent-ready'] });
+    const config = {
+      listen: { host: '127.0.0.1', port: 7420 },
+      dropZones: [makeZone({ id: 'main' })],
+      secrets: { operatorToken: TOKEN },
+    } as unknown as Config;
+    let kicks = 0;
+    app = controlApp({
+      db,
+      config,
+      now: () => t0,
+      kick: () => {
+        kicks++;
+      },
+      forgesFor: () => ({ author: f.author, reviewer: f.reviewer }),
+    });
+    return { db, f, kicks: () => kicks };
+  }
+  const get = (url: string, headers: Record<string, string> = auth) =>
+    (app as FastifyInstance).inject({ method: 'GET', url, headers });
+
+  test('D1 queue and backlog need a principal and an existing zone', async () => {
+    const { f } = backlogApp();
+    expect((await get('/api/control/zones/main/backlog', { host: HOST })).statusCode).toBe(401);
+    expect(
+      (await post('/api/control/zones/main/queue', { issue: 1 }, { host: HOST })).statusCode,
+    ).toBe(401);
+    const missingGet = await get('/api/control/zones/nope/backlog');
+    expect([missingGet.statusCode, missingGet.json()]).toEqual([404, { error: 'unknown zone' }]);
+    const missingPost = await post('/api/control/zones/nope/queue', { issue: 1 });
+    expect([missingPost.statusCode, missingPost.json()]).toEqual([404, { error: 'unknown zone' }]);
+    expect(f.state.issues.get(1)?.labels).toEqual([]);
+  });
+
+  test('GET /api/control/zones/main/backlog lists the unlabeled open issues', async () => {
+    backlogApp();
+    const res = await get('/api/control/zones/main/backlog');
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { zone: string; issues: { number: number; startable: boolean }[] };
+    expect(body.zone).toBe('main');
+    expect(body.issues.map((i) => [i.number, i.startable])).toEqual([
+      [1, true],
+      [2, true],
+    ]);
+  });
+
+  test('a queue body without a positive integer issue is 400', async () => {
+    const { f } = backlogApp();
+    for (const payload of [{}, { issue: 0 }, { issue: 'x' }, { issue: 1.5 }]) {
+      expect((await post('/api/control/zones/main/queue', payload)).statusCode).toBe(400);
+    }
+    expect(f.state.issues.get(1)?.labels).toEqual([]);
+  });
+
+  test('POST /api/control/zones/main/queue audits zone.queue with the issue number', async () => {
+    const { db, f, kicks } = backlogApp();
+    const res = await post('/api/control/zones/main/queue', { issue: 1 });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ zone: 'main', issue: 1, label: 'agent-ready' });
+    expect(f.state.issues.get(1)?.labels).toEqual(['agent-ready']);
+    const [row] = listAudit(db);
+    expect(row).toMatchObject({ action: 'zone.queue', target: 'main', via: 'token' });
+    expect(row?.detail).toMatchObject({ issue: 1 });
+    expect(kicks()).toBe(1);
+  });
+
+  test('a refused queue answers its status and error', async () => {
+    const { f } = backlogApp();
+    const res = await post('/api/control/zones/main/queue', { issue: 3 });
+    expect(res.statusCode).toBe(409);
+    expect((res.json() as { error: string }).error).toContain('agent-ready');
+    expect(f.state.issues.get(3)?.labels).toEqual(['agent-ready']);
+    expect((await post('/api/control/zones/main/queue', { issue: 77 })).statusCode).toBe(404);
+  });
+
+  test('D5 queue as the session and as the token give the same answer for the same issue', async () => {
+    const { db } = backlogApp();
+    const session = operatorSession(db);
+    const asSession = { host: HOST, ...session.headers };
+    const viaToken = await post('/api/control/zones/main/queue', { issue: 1 });
+    const viaSession = await post('/api/control/zones/main/queue', { issue: 2 }, asSession);
+    expect(viaSession.statusCode).toBe(viaToken.statusCode);
+    expect(viaSession.json()).toEqual({ ...(viaToken.json() as object), issue: 2 });
+    // The same issue again: refused the same way, now that it carries the ready label.
+    const againToken = await post('/api/control/zones/main/queue', { issue: 1 });
+    const againSession = await post('/api/control/zones/main/queue', { issue: 1 }, asSession);
+    expect([againSession.statusCode, againSession.json()]).toEqual([
+      againToken.statusCode,
+      againToken.json(),
+    ]);
+    expect(againToken.statusCode).toBe(409);
+    const backlogToken = await get('/api/control/zones/main/backlog');
+    const backlogSession = await get('/api/control/zones/main/backlog', asSession);
+    expect(backlogSession.json()).toEqual(backlogToken.json());
+    expect(
+      listAudit(db)
+        .map((r) => r.via)
+        .sort(),
+    ).toEqual(['session', 'token']);
+  });
+});

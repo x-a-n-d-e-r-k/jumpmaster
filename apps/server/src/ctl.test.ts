@@ -1797,3 +1797,26 @@ describe('ctl prints no terminal control (issue #264)', () => {
     expect(log?.data).toEqual({ message: 'kept\u001b' });
   });
 });
+
+describe('ctl backlog and ctl queue', () => {
+  test('ctl queue <zone> <issue> posts the issue number; ctl backlog <zone> reads the backlog', () => {
+    expect(ctlRequest(['queue', 'web', '178'])).toEqual({
+      path: '/api/control/zones/web/queue',
+      method: 'POST',
+      body: { issue: 178 },
+    });
+    expect(ctlRequest(['backlog', 'web'])).toEqual({
+      path: '/api/control/zones/web/backlog',
+      method: 'GET',
+    });
+  });
+
+  test('a malformed queue or backlog line is not a request', () => {
+    expect(ctlRequest(['queue', 'web'])).toBeNull();
+    expect(ctlRequest(['queue', 'web', '0'])).toBeNull();
+    expect(ctlRequest(['queue', 'web', '12x'])).toBeNull();
+    expect(ctlRequest(['queue', 'web', '1', 'extra'])).toBeNull();
+    expect(ctlRequest(['backlog'])).toBeNull();
+    expect(ctlRequest(['backlog', 'web', 'extra'])).toBeNull();
+  });
+});

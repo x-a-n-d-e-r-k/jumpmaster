@@ -212,7 +212,15 @@ export type BranchRulesRead =
  */
 export type BranchUpdate = { kind: 'updated' } | { kind: 'conflict' } | { kind: 'head_moved' };
 
-export type IssueFacts = { body: string; state: 'open' | 'closed'; labels: string[] };
+export type IssueFacts = {
+  body: string;
+  state: 'open' | 'closed';
+  labels: string[];
+  /** Set when the number is a pull request (GitHub's issues API answers for PRs too). */
+  pullRequest?: boolean;
+  /** The opener's login, when GitHub names one. */
+  author?: string;
+};
 
 export interface Forge {
   getDefaultBranch(): Promise<string>;
@@ -813,6 +821,8 @@ export class GitHubForge implements Forge {
         body: data.body ?? '',
         state: data.state === 'open' ? 'open' : 'closed',
         labels: data.labels.map((l) => (typeof l === 'string' ? l : (l.name ?? ''))),
+        ...(data.pull_request ? { pullRequest: true } : {}),
+        ...(data.user?.login ? { author: data.user.login } : {}),
       };
     } catch (err) {
       if (statusOf(err) === 404) return null;

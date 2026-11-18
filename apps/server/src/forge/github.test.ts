@@ -1184,7 +1184,13 @@ describe('GitHubForge issue writes', () => {
       body: '',
       state: 'closed',
       labels: ['agent-ready', 'plain'],
+      author: 'alice',
     });
+    // A pull request number answers through the issues API too, marked as one.
+    nock(api)
+      .get('/repos/o/r/issues/11')
+      .reply(200, issue(11, { state: 'open', pull_request: { url: 'https://api.github.com/x' } }));
+    expect(await f.getIssue(11)).toMatchObject({ pullRequest: true, state: 'open' });
     nock(api).get('/repos/o/r/issues/10').reply(404, {});
     expect(await f.getIssue(10)).toBeNull();
   });

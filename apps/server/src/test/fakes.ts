@@ -387,7 +387,24 @@ function forgeFor(
     },
     getIssue: async (n) => {
       const e = state.issues.get(n);
-      return e ? { body: e.issue?.body ?? '', state: e.state, labels: [...e.labels] } : null;
+      if (e)
+        return {
+          body: e.issue?.body ?? '',
+          state: e.state,
+          labels: [...e.labels],
+          ...(e.issue ? { author: e.issue.author } : {}),
+        };
+      // GitHub's issues API answers for a pull request number too, marked as one.
+      const p = state.pulls.get(n);
+      return p
+        ? {
+            body: p.body,
+            state: p.state,
+            labels: [...p.labels],
+            pullRequest: true,
+            author: p.author,
+          }
+        : null;
     },
     createIssue: async (input) => {
       const number = Math.max(0, ...state.issues.keys(), ...state.pulls.keys()) + 1;
