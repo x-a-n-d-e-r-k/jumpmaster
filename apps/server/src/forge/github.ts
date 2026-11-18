@@ -47,6 +47,14 @@ function blockersOf(entry: BlockerEntry, repo: string): string[] {
   return named;
 }
 
+/** Git's blob id of a text file's UTF-8 bytes (`git hash-object`), as `PUT contents` names it. */
+export function gitBlobSha(text: string): string {
+  const bytes = Buffer.from(text, 'utf8');
+  return createHash('sha1')
+    .update(Buffer.concat([Buffer.from(`blob ${bytes.length}\0`), bytes]))
+    .digest('hex');
+}
+
 export type ForgeError = Error & { status?: number };
 
 /** One "blocked by" link of an issue: the blocking issue, its repository and whether it's open. */
@@ -264,6 +272,22 @@ export interface Forge {
     title: string;
     body: string;
   }): Promise<{ number: number; url: string; created: boolean }>;
+  /**
+   * A write (`POST git/refs`): makes branch `name` at `fromSha`. A branch that already exists on
+   * `fromSha` is success; one on another commit throws.
+   */
+  createBranch(name: string, fromSha: string): Promise<void>;
+  /**
+   * A write (`PUT contents`): commits `content` as `path` on `branch` with `message`, replacing the
+   * blob `expectBlobSha` (null: the file is new). A file that is no longer that blob is refused.
+   */
+  putFile(o: {
+    branch: string;
+    path: string;
+    content: string;
+    message: string;
+    expectBlobSha: string | null;
+  }): Promise<{ commitSha: string }>;
   viewerLogin(): Promise<string>;
   getPull(number: number): Promise<PullFacts | null>;
   findOpenPullByHead(branch: string): Promise<PullFacts | null>;
@@ -740,6 +764,44 @@ export class GitHubForge implements Forge {
       body: input.body,
     });
     return { number: data.number, url: data.html_url, created: true };
+  }
+
+  async createBranch(name: string, fromSha: string): Promise<void> {
+    try {
+      await this.octokit.rest.git.createRef({
+        owner: this.owner,
+        repo: this.repo,
+        ref: `refs/heads/${name}`,
+        sha: fromSha,
+      });
+    } catch (err) {
+      // 422 "Reference already exists": success only when the branch is on the same commit.
+      if (statusOf(err) !== 422) throw err;
+      const sha = await this.branchSha(name);
+      if (sha === fromSha) return;
+      throw new Error(`branch ${name} already exists on another commit`);
+    }
+  }
+
+  async putFile(o: {
+    branch: string;
+    path: string;
+    content: string;
+    message: string;
+    expectBlobSha: string | null;
+  }): Promise<{ commitSha: string }> {
+    const { data } = (await this.octokit.request('PUT /repos/{owner}/{repo}/contents/{+path}', {
+      owner: this.owner,
+      repo: this.repo,
+      path: o.path.split('/').map(encodeURIComponent).join('/'),
+      message: o.message,
+      content: Buffer.from(o.content, 'utf8').toString('base64'),
+      branch: o.branch,
+      ...(o.expectBlobSha === null ? {} : { sha: o.expectBlobSha }),
+    })) as { data: { commit?: { sha?: string } } };
+    const commitSha = data.commit?.sha;
+    if (!commitSha) throw new Error('the contents write answered without a commit');
+    return { commitSha };
   }
 
   private get slug(): string {
