@@ -566,3 +566,44 @@ describe('zones are named by their repository (#99)', () => {
     expect(section(page, 'advanced')).toContain('Zone id: <code>main</code>');
   });
 });
+
+/** The Backlog section's script source. */
+const backlogScript = (html: string): string => {
+  const at = html.indexOf('<script id="backlog-script">');
+  expect(at).toBeGreaterThanOrEqual(0);
+  return html.slice(at, html.indexOf('</script>', at));
+};
+
+describe('the Backlog section (#346)', () => {
+  test('the zone page has a Backlog section that loads from the backlog route', async () => {
+    const w = await world();
+    const r = await w.get('/zones/main');
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toContain('<section id="backlog">');
+    expect(r.body).toContain('id="backlog-rows"');
+    expect(r.body).toContain(
+      'Issues with no Jumpmaster label. Work on it puts the ready label on.',
+    );
+    const script = backlogScript(r.body);
+    expect(script).toContain("'/api/control/zones/'+");
+    expect(script).toContain("'/backlog'");
+    expect(script).toContain("'/queue'");
+    expect(script).toContain("'Work on it'");
+    expect(script).toContain('Queued: the next pass picks it up');
+  });
+
+  test('in file mode the Backlog section still shows', async () => {
+    const w = await world({ file: true });
+    const r = await w.get('/zones/main');
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toContain('<section id="backlog">');
+    expect(backlogScript(r.body)).toContain("'Work on it'");
+  });
+
+  test('the script escapes issue titles', async () => {
+    const w = await world();
+    const script = backlogScript((await w.get('/zones/main')).body);
+    expect(script).toContain('textContent');
+    expect(script.replaceAll(' ', '')).not.toContain('innerHTML=');
+  });
+});
