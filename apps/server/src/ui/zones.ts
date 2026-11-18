@@ -143,6 +143,64 @@ const checkbox = (fields: Record<string, string | string[]>, name: string) =>
 const sectionForm = (id: string, title: string, body: string, readOnly: boolean) =>
   `<h3>${title}</h3><form id="${id}" data-section="${id}"><fieldset${readOnly ? ' disabled' : ''}>${body}${readOnly ? '' : `<p><button>Save</button> <span class="out" role="status"></span></p>`}</fieldset></form>`;
 
+/**
+ * The Backlog section: open issues with no Jumpmaster label, loaded from the backlog route when the
+ * page loads. "Work on it" queues one (the ready label, through the outbox). Shown in file mode
+ * too: queueing is a forge write, not a config edit. Rows are built with `textContent`, so an
+ * issue title is never read as HTML.
+ */
+function backlogSection(id: string, repo: string): string {
+  return `<section id="backlog"><h3>Backlog</h3><p>Issues with no Jumpmaster label. Work on it puts the ready label on.</p><p id="backlog-out" role="status">Loading…</p><table><tbody id="backlog-rows"></tbody></table></section>
+<script id="backlog-script">
+(() => {
+  const ZONE = ${scriptJson(id)};
+  const REPO = ${scriptJson(repo)};
+  const base = '/api/control/zones/'+encodeURIComponent(ZONE);
+  const rows = document.getElementById('backlog-rows');
+  const out = document.getElementById('backlog-out');
+  const cell = (tr, text) => { const td = document.createElement('td'); td.textContent = text; tr.append(td); return td; };
+  async function queue(b, n, status) {
+    b.disabled = true;
+    status.textContent = '';
+    const r = await jmFetch(base+'/queue', { issue: n });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) { b.remove(); status.textContent = 'Queued: the next pass picks it up'; return; }
+    status.textContent = j.error || ('Refused ('+r.status+')');
+  }
+  function row(i) {
+    const tr = document.createElement('tr');
+    const num = document.createElement('td');
+    const a = document.createElement('a');
+    a.href = 'https://github.com/'+REPO+'/issues/'+i.number;
+    a.textContent = '#'+i.number;
+    num.append(a); tr.append(num);
+    cell(tr, i.title);
+    cell(tr, i.author);
+    const act = document.createElement('td');
+    const status = document.createElement('span');
+    status.setAttribute('role', 'status');
+    if (i.startable) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'queue'; b.dataset.issue = String(i.number);
+      b.textContent = 'Work on it';
+      b.addEventListener('click', () => queue(b, i.number, status));
+      act.append(b, ' ');
+    } else status.textContent = i.reason || 'Not startable';
+    act.append(status); tr.append(act);
+    return tr;
+  }
+  (async () => {
+    const r = await fetch(base+'/backlog', { headers: { accept: 'application/json' } }).catch(() => undefined);
+    const j = r ? await r.json().catch(() => ({})) : {};
+    if (!r || !r.ok) { out.textContent = j.error || ('The backlog could not be read'+(r ? ' ('+r.status+')' : '')); return; }
+    const issues = j.issues || [];
+    out.textContent = issues.length ? '' : 'Nothing in the backlog.';
+    for (const i of issues) rows.append(row(i));
+  })();
+})();
+</script>`;
+}
+
 function zonePage(store: ConfigStore, db: Db, id: string, now: Date): string | undefined {
   const doc = store.document();
   const zones = (Array.isArray(doc.dropZones) ? doc.dropZones : []) as Record<string, unknown>[];
@@ -262,6 +320,7 @@ ${field('overrideApprovers', 'Override approvers (logins)', textarea(f, 'overrid
 ${stopping ? `<p><strong>${escapeHtml(stopping)}</strong> <small>Resume or Pause from the Zones list withdraws it.</small></p>` : ''}
 ${readOnly || stopping ? '' : `<p>${stopButton(id, zoneNameText(resolved, all))}<small>No new work, then removed once drained; open pull requests and history stay.</small> <span id="stop-out" role="status"></span></p>`}
 ${readOnly ? ADOPT_BANNER : ''}
+${backlogSection(id, String(raw.repo))}
 <p id="form-out" role="status"></p>
 ${project}${stack}${egress}${merging}${advanced}
 ${
