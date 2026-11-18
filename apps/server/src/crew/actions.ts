@@ -54,6 +54,13 @@ function sectionLines(body: string): Map<string, string[]> {
 }
 
 /**
+ * The issue has a `## Security-touching checklist` section, matched like `validateIssueSpec`'s
+ * sections: any heading level, any case. A heading inside a fence counts too (errs toward Fable).
+ */
+export const isSecurityTouching = (body: string): boolean =>
+  sectionLines(body).has('security-touching checklist');
+
+/**
  * The drop-ready format (§8.3). An empty list means valid; otherwise each entry is a short reason
  * that never echoes the issue's text.
  */
