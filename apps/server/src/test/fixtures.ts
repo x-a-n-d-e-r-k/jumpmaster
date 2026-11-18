@@ -69,6 +69,7 @@ export function makeZone(o: Partial<DropZoneConfig> = {}): DropZoneConfig {
       maxTriage: 2,
     },
     botLogins: [],
+    authorLoginAliases: [],
     ...o,
   };
 }

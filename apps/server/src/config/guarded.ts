@@ -287,6 +287,11 @@ export const GUARDED_PATHS: GuardedPath[] = [
     'additions',
     (n, ctx) => `Jumpmaster will take over PR #${n} in ${zoneOf(ctx)} and may merge it`,
   ),
+  setRule(
+    'dropZones[].authorLoginAliases',
+    'additions',
+    (l, ctx) => `PRs by ${l} on agent branches in ${zoneOf(ctx)} will be adopted as the author's`,
+  ),
   appId('dropZones[].githubApp.repositoryId', 'Tokens', 'for repository id'),
   appId('dropZones[].githubApp.installations.author', 'Author tokens', 'from installation id'),
   appId('dropZones[].githubApp.installations.reviewer', 'Reviewer tokens', 'from installation id'),

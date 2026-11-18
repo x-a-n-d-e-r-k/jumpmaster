@@ -240,6 +240,76 @@ describe('FakeForgeState', () => {
     expect(await runOp(db, forges, op, new Date())).toMatchObject({ state: 'failed' });
   });
 
+  describe('authorLoginAliases (issue #284)', () => {
+    const createOp = (extra: Record<string, unknown>) => ({
+      kind: 'create_pr' as const,
+      opKey: opKeys.pr(itemId, 'h2'),
+      zoneId: 'main',
+      itemId,
+      payload: { head: 'agent/issue-77', base: 'main', title: 't', body: 'b', ...extra },
+    });
+
+    test.each(['old-bot', 'Old-BOT'])('a listed PR by an alias (%s) is ours', async (author) => {
+      f.state.addPull({ headRef: 'agent/issue-77', headSha: 'h2', author });
+      const op = createOp({ adoptPulls: [1], authorLoginAliases: ['old-bot'] });
+      expect(await runOp(db, forges, op, new Date())).toMatchObject({
+        state: 'done',
+        result: { number: 1 },
+      });
+    });
+
+    test('read-back of an unknown op treats a listed PR by an alias as ours', async () => {
+      const op = createOp({ adoptPulls: [1], authorLoginAliases: ['OLD-bot'] });
+      seed(op, 'unknown', t0);
+      f.state.addPull({ headRef: 'agent/issue-77', headSha: 'h2', author: 'old-bot' });
+      expect(await resolveUnknown(db, forges, 'main', t0, 45)).toBe(1);
+      expect(getOutbox(db, op.opKey)?.state).toBe('done');
+    });
+
+    test('read-back of an unknown op ignores a listed PR by a stranger', async () => {
+      const op = createOp({ adoptPulls: [1], authorLoginAliases: ['old-bot'] });
+      seed(op, 'unknown', t0);
+      f.state.addPull({ headRef: 'agent/issue-77', headSha: 'h2', author: 'mallory' });
+      expect(await resolveUnknown(db, forges, 'main', t0, 45)).toBe(0);
+    });
+
+    test('the author login compares case-insensitively', async () => {
+      f.state.addPull({ headRef: 'agent/issue-77', headSha: 'h2', author: 'Author-Bot' });
+      const op = createOp({ adoptPulls: [1] });
+      expect(await runOp(db, forges, op, new Date())).toMatchObject({ state: 'done' });
+    });
+
+    test('an unlisted PR by an alias is not ours', async () => {
+      f.state.addPull({ headRef: 'agent/issue-77', headSha: 'h2', author: 'old-bot' });
+      const op = createOp({ authorLoginAliases: ['old-bot'] });
+      expect(await runOp(db, forges, op, new Date())).toMatchObject({
+        state: 'failed',
+        error: 'hand-opened PR on agent branch: #1',
+      });
+    });
+
+    test('a listed PR by a stranger is not ours', async () => {
+      f.state.addPull({ headRef: 'agent/issue-77', headSha: 'h2', author: 'mallory' });
+      const op = createOp({ adoptPulls: [1], authorLoginAliases: ['old-bot'] });
+      expect(await runOp(db, forges, op, new Date())).toMatchObject({ state: 'failed' });
+    });
+
+    test('a queued op without the field trusts the author login alone', async () => {
+      f.state.addPull({ headRef: 'agent/issue-77', headSha: 'h2', author: 'old-bot' });
+      const op = createOp({ adoptPulls: [1] });
+      expect(await runOp(db, forges, op, new Date())).toMatchObject({ state: 'failed' });
+    });
+
+    test('the forge create call never receives the aliases', async () => {
+      const op = createOp({ adoptPulls: [1], authorLoginAliases: ['old-bot'] });
+      expect(await runOp(db, forges, op, new Date())).toMatchObject({ state: 'done' });
+      const creates = f.author.calls.filter((c) => c.method === 'findOrCreatePullRequest');
+      expect(creates).toHaveLength(1);
+      expect(creates[0]?.args[0]).not.toHaveProperty('authorLoginAliases');
+      expect(creates[0]?.args[0]).not.toHaveProperty('adoptPulls');
+    });
+  });
+
   test('create_pr tracks an open PR carrying this item marker from an older head', async () => {
     const op = {
       kind: 'create_pr' as const,

@@ -51,6 +51,8 @@ export const planLabel = (plan: string): string =>
 
 /** An image by digest (`name@sha256:<64 hex>`), the only form a signed zone runs. */
 const DIGEST_REF = /^[^\s@-][^\s@]*@sha256:[0-9a-f]{64}$/;
+/** A GitHub user login, or an app's `slug[bot]` login. */
+const LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(\[bot\])?$/;
 
 export const DEFAULT_PROTECTED_PATHS = [
   '.github/**',
@@ -325,6 +327,18 @@ export const DropZoneObject = z.object({
   crew: CrewSchema,
   /** Logins whose ready issues count as crew-filed (never the only provenance signal). */
   botLogins: z.array(z.string()).default([]),
+  /**
+   * Logins besides the author's own whose agent-branch PRs are adopted as the author's (spec
+   * §4.3): an old PAT bot's login, or an app's old slug after a rename. Guarded on additions.
+   */
+  authorLoginAliases: z
+    .array(
+      // The message never echoes the entry: a mistyped token must not land in a log.
+      z.string().regex(LOGIN_PATTERN, {
+        message: 'authorLoginAliases entries are GitHub logins (an app login ends in [bot])',
+      }),
+    )
+    .default([]),
 });
 
 /** Every key a zone may carry, for `ctl zones set` to refuse a path the schema does not know. */

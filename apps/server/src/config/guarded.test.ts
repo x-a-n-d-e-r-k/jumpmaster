@@ -348,6 +348,13 @@ describe('set paths are judged as set differences', () => {
         consequence: 'Jumpmaster will take over PR #12 in web and may merge it',
       },
     ]);
+    expect(edit({}, { authorLoginAliases: ['old-bot'] }).guarded).toEqual([
+      {
+        path: 'dropZones[web].authorLoginAliases',
+        consequence: "PRs by old-bot on agent branches in web will be adopted as the author's",
+      },
+    ]);
+    expect(paths(edit({ authorLoginAliases: ['old-bot'] }, {}))).toEqual([]);
   });
 
   test('services are keyed by name: an addition or a changed image is guarded, a reorder or a port change is not', () => {

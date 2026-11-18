@@ -190,6 +190,25 @@ describe('applyResult: implement', () => {
     expect(getDrop(db, 'd1')?.state).toBe('succeeded');
   });
 
+  test('the create_pr payload carries the zone aliases only when it has some (issue #284)', async () => {
+    const payloadOf = async (aliases: string[]) => {
+      const { db, f, deps } = setup();
+      f.state.branches.set('agent/issue-7', 'abc');
+      await applyResult(
+        db,
+        { ...deps, zone: { ...zone, authorLoginAliases: aliases } },
+        'd1',
+        { status: 'completed', headSha: 'abc', gates: [gateOk] },
+        t0,
+      );
+      const call = f.author.calls.find((c) => c.method === 'findOrCreatePullRequest');
+      expect(call?.args[0]).not.toHaveProperty('authorLoginAliases');
+      return JSON.parse(getOutbox(db, 'pr:1:abc')?.payloadJson ?? '{}');
+    };
+    expect(await payloadOf(['old-bot'])).toMatchObject({ authorLoginAliases: ['old-bot'] });
+    expect(await payloadOf([])).not.toHaveProperty('authorLoginAliases');
+  });
+
   test('create_pr is keyed by head', async () => {
     const { db, deps } = setup();
     await applyResult(db, deps, 'd1', { status: 'completed', headSha: 'sha-x', gates: [] }, t0);
