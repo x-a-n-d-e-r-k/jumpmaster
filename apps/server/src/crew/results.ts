@@ -4,24 +4,42 @@ import {
   isCrewRole,
   parseCrewOutput,
 } from '@jumpmaster/protocol';
-import { raiseBriefing, whyBasis } from '../briefings.js';
+import { raiseBriefing, recordDiagnosis, whyBasis } from '../briefings.js';
 import type { Db } from '../db/open.js';
-import { appendEvents, type Drop, type DropState, getDrop, updateDrop } from '../db/repo.js';
+import {
+  appendEvents,
+  type Drop,
+  type DropState,
+  getDrop,
+  getPullRequest,
+  getWorkItem,
+  updateDrop,
+} from '../db/repo.js';
 import { ranOnFable } from '../fable.js';
+import type { ForgePair } from '../outbox.js';
 import type { CrewInputJson } from '../payloads.js';
 import type { ResultDeps } from '../results.js';
+import { retryParkedItem } from '../sync.js';
 import { applyCrewActions, protectedPathsNamed, validateIssueSpec } from './actions.js';
 import { PROMOTE_OPTIONS, subjectOf } from './flush.js';
-import { raiseRefuteExhausted } from './schedule.js';
+import {
+  briefItemRuling,
+  HEAL_EXHAUSTED,
+  itemArbitrationFailed,
+  raiseRefuteExhausted,
+} from './schedule.js';
 import {
   type CrewIssue,
   type CrewIssuePatch,
+  claimArbitrationApply,
   getArbitrationByDrop,
   getCrewIssue,
   getTriageRequest,
+  releaseArbitrationApply,
   setCrewIssue,
   setTriageRequest,
   settleArbitration,
+  unappliedItemArbitrations,
 } from './store.js';
 
 const log = (db: Db, drop: Drop, now: Date, message: string) =>
@@ -173,17 +191,20 @@ const arbiterWhy = (dropId: string): ReviewWhy => {
 };
 
 type ArbitrateWork = Extract<CrewInputJson['work'], { role: 'arbitrate' }>;
+type IssueArbitrateWork = Extract<ArbitrateWork, { subject: 'issue' }>;
+type ItemArbitrateWork = Extract<ArbitrateWork, { subject: 'item' }>;
 
 /** The crew issue an arbitration judged, if it is still staged with the text judged. */
-function judgedIssue(db: Db, work: ArbitrateWork): CrewIssue | undefined {
+function judgedIssue(db: Db, work: IssueArbitrateWork): CrewIssue | undefined {
   const issue = getCrewIssue(db, work.crewIssueId);
   return issue && issue.state === 'staged' && issue.bodySha === work.basis ? issue : undefined;
 }
 
 /**
  * An arbitrate drop that came to nothing (rate-limited, failed, invalid output): its arbitration
- * is `failed` with the reason and, if the issue still reads as judged, Command is asked as before.
- * Fails closed: nothing is promoted.
+ * is `failed` with the reason and Command is asked as before: on a crew issue that still reads as
+ * judged, its refute_exhausted briefing; on an item, its parked briefing carries the reason as its
+ * diagnosis. Fails closed: nothing is promoted or retried.
  */
 function arbitrationFailed(
   db: Db,
@@ -194,23 +215,51 @@ function arbitrationFailed(
   now: Date,
 ): void {
   const row = getArbitrationByDrop(db, drop.id);
-  if (!row || !settleArbitration(db, row.id, { state: 'failed', reason }, now)) return;
+  if (!row) return;
+  if (work.subject === 'item') {
+    itemArbitrationFailed(db, row, reason, now);
+    return;
+  }
+  if (!settleArbitration(db, row.id, { state: 'failed', reason }, now)) return;
   const issue = judgedIssue(db, work);
   if (issue) raiseRefuteExhausted(db, deps.zone, issue, now);
 }
 
 /**
+ * Why a ruling may not act, if it may not: only a ruling A or B that is reversible, is not a
+ * product question, and ran on Fable as the server recorded it (never what the agent says it ran
+ * on) acts. The same rule for a crew issue and an item.
+ */
+function noActReason(
+  db: Db,
+  deps: ResultDeps,
+  drop: Drop,
+  out: CrewOutput['arbitrate'],
+): string | undefined {
+  const recorded = getDrop(db, drop.id) ?? drop;
+  return out.ruling === 'insufficient_evidence'
+    ? 'insufficient evidence'
+    : !out.reversible
+      ? 'not reversible'
+      : out.productQuestion
+        ? 'a product question'
+        : // No claude config: nothing says what Fable is here, so it fails closed.
+          !deps.claude || !ranOnFable({ claude: deps.claude }, recorded)
+          ? 'did not run on Fable'
+          : undefined;
+}
+
+/**
  * An arbiter's ruling on a crew issue that ran out of refutes. Settled once, from `pending` only. A
- * ruling on a text that changed (or an issue no longer staged) is discarded. It acts only on a
- * ruling A or B that is reversible, is not a product question, and ran on Fable as the server
- * recorded it: A promotes as a passing refute would, B rejects. Anything else is put to Command,
- * with the reason in the briefing's why. Returns a note for the drop's log, if any.
+ * ruling on a text that changed (or an issue no longer staged) is discarded. It acts only by
+ * `noActReason`'s rule: A promotes as a passing refute would, B rejects. Anything else is put to
+ * Command, with the reason in the briefing's why. Returns a note for the drop's log, if any.
  */
 export function applyIssueArbitration(
   db: Db,
   deps: ResultDeps,
   drop: Drop,
-  work: ArbitrateWork,
+  work: IssueArbitrateWork,
   out: CrewOutput['arbitrate'],
   now: Date,
 ): string | undefined {
@@ -222,19 +271,7 @@ export function applyIssueArbitration(
     settleArbitration(db, row.id, { state: 'discarded', reason }, now);
     return `ruling discarded: ${reason}`;
   }
-  // What the server recorded about the run, never what the agent says it ran on.
-  const recorded = getDrop(db, drop.id) ?? drop;
-  const reason =
-    out.ruling === 'insufficient_evidence'
-      ? 'insufficient evidence'
-      : !out.reversible
-        ? 'not reversible'
-        : out.productQuestion
-          ? 'a product question'
-          : // No claude config: nothing says what Fable is here, so it fails closed.
-            !deps.claude || !ranOnFable({ claude: deps.claude }, recorded)
-            ? 'did not run on Fable'
-            : undefined;
+  const reason = noActReason(db, deps, drop, out);
   const acts = reason === undefined;
   const settled = settleArbitration(
     db,
@@ -263,6 +300,99 @@ export function applyIssueArbitration(
   return undefined;
 }
 
+/** A ruling's side, in the parked briefing's words. */
+const ITEM_SIDE = {
+  A: 'for the reviewer: the change does not yet meet the issue',
+  B: 'for the author: the change meets the issue, and the remaining findings are not defects',
+} as const;
+
+/**
+ * An arbiter's ruling on a review disagreement (a parked item whose heals ran out). Settled once,
+ * from `pending` only. A ruling on an item no longer parked on its heals, or whose PR head moved
+ * from the one in dispute, is discarded. One that acts (`noActReason`) is only recorded here:
+ * `applyArbitrations` retries the item next pass, as Command's Retry. One that does not becomes
+ * the parked briefing's diagnosis, and the item stays parked. Returns a note for the drop's log.
+ */
+export function applyItemArbitration(
+  db: Db,
+  deps: ResultDeps,
+  drop: Drop,
+  work: ItemArbitrateWork,
+  out: CrewOutput['arbitrate'],
+  now: Date,
+): string | undefined {
+  const row = getArbitrationByDrop(db, drop.id);
+  if (!row || row.state !== 'pending') return 'ruling not applied: its arbitration is settled';
+  const item = getWorkItem(db, work.itemId);
+  const pr = getPullRequest(db, work.itemId);
+  if (
+    !item ||
+    item.state !== 'parked' ||
+    item.reason !== HEAL_EXHAUSTED ||
+    !pr ||
+    pr.state !== 'open' ||
+    pr.headSha !== work.headSha
+  ) {
+    const reason = 'the item moved on since it was asked';
+    settleArbitration(db, row.id, { state: 'discarded', reason }, now);
+    return `ruling discarded: ${reason}`;
+  }
+  const reason = noActReason(db, deps, drop, out);
+  const acts = reason === undefined;
+  const settled = settleArbitration(
+    db,
+    row.id,
+    {
+      state: 'ruled',
+      ruling: out.ruling,
+      acted: acts,
+      because: out.because,
+      instruction: out.instruction,
+      ...(reason !== undefined ? { reason } : {}),
+    },
+    now,
+  );
+  if (!settled || acts) return undefined;
+  const ruled =
+    out.ruling === 'insufficient_evidence'
+      ? 'The arbiter found the evidence insufficient to rule'
+      : `The arbiter ruled ${ITEM_SIDE[out.ruling]}`;
+  briefItemRuling(
+    db,
+    item.id,
+    `${ruled} (not acted on: ${reason}). ${out.because}`,
+    out.instruction.trim() !== '' ? out.instruction : (reason ?? ''),
+    now,
+  );
+  return `ruling ${out.ruling} not acted on: ${reason}`;
+}
+
+/**
+ * Applies the zone's acting item rulings, each once: a still-parked item is retried exactly as
+ * Command's Retry does (`retryParkedItem`: attempts reset, the request-changes on its head
+ * cleared, so the head is reviewed afresh). It never approves or merges: the item still needs an
+ * approving verdict on its head and CI. `applied_at` is claimed first, so two passes retry once; a
+ * PR that can't be read releases it for the next pass. Returns how many were applied.
+ */
+export async function applyArbitrations(
+  db: Db,
+  deps: { forges(zoneId: string): ForgePair },
+  zoneId: string,
+  now: Date,
+): Promise<number> {
+  let applied = 0;
+  for (const row of unappliedItemArbitrations(db, zoneId)) {
+    if (!claimArbitrationApply(db, row.id, now)) continue;
+    const item = getWorkItem(db, Number(row.subject.slice('item:'.length)));
+    if (item?.state === 'parked' && !(await retryParkedItem(db, deps.forges(zoneId), item, now))) {
+      releaseArbitrationApply(db, row.id, now);
+      continue;
+    }
+    applied++;
+  }
+  return applied;
+}
+
 /**
  * Records a diagnosis on the parked briefing it was asked for, beside the server's why, if that
  * briefing is still open and its why is still the one diagnosed (`basis`). Returns why it was
@@ -283,15 +413,11 @@ function applyDiagnose(
   if (work.basis !== undefined && work.basis !== basis) {
     return 'diagnosis discarded: the briefing changed since it was asked';
   }
-  db.prepare(
-    `UPDATE briefings SET diagnosis = ?, diagnosis_basis = ?, recommendation = ?, updated_at = ?
-       WHERE id = ?`,
-  ).run(
-    out.diagnosis,
-    basis,
-    `${out.recommendation}: ${out.detail}`,
-    now.toISOString(),
+  recordDiagnosis(
+    db,
     work.briefingId,
+    { diagnosis: out.diagnosis, basis, recommendation: `${out.recommendation}: ${out.detail}` },
+    now,
   );
   return undefined;
 }
@@ -475,7 +601,10 @@ export async function applyCrewResult(
       // Kept on the drop: its page is where the full ruling is read.
       updateDrop(db, drop.id, { resultJson: JSON.stringify(result) });
       const out = parsed.value as CrewOutput['arbitrate'];
-      const note = applyIssueArbitration(db, deps, drop, work, out, now);
+      const note =
+        work.subject === 'item'
+          ? applyItemArbitration(db, deps, drop, work, out, now)
+          : applyIssueArbitration(db, deps, drop, work, out, now);
       return finish(db, drop, 'succeeded', now, note);
     } else if (role === 'diagnose' && work?.role === 'diagnose') {
       const discarded = applyDiagnose(db, work, parsed.value as CrewOutput['diagnose'], now);

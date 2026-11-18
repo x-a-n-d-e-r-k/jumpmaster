@@ -1280,6 +1280,15 @@ CREATE TABLE chat_cards (
 CREATE INDEX chat_cards_by_thread ON chat_cards (thread_id, id);
 `;
 
+/**
+ * v44 (#383): an item's arbitration that acted is applied once (Command's Retry on the parked
+ * item): `applied_at` records when, so two passes never retry it twice. (Ships as v44: v43 was
+ * taken by the chat cards.)
+ */
+const V44_SQL = `
+ALTER TABLE arbitrations ADD COLUMN applied_at TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1324,6 +1333,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 41, sql: V41_SQL, foreignKeysOff: true },
   { version: 42, sql: V42_SQL },
   { version: 43, sql: V43_SQL },
+  { version: 44, sql: V44_SQL },
 ];
 
 /**

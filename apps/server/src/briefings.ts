@@ -172,6 +172,29 @@ export const WAITS_FOR_CREW: ReadonlySet<Effect> = new Set<Effect>([
  */
 export const whyBasis = (why: string): string => createHash('sha256').update(why).digest('hex');
 
+/**
+ * Writes a diagnosis beside a briefing's server-written why: `basis` is the `whyBasis` of the why
+ * it answers, so a refresh that changes the why clears it. With `spent`, the briefing counts as
+ * diagnosed (`diagnose_attempts` at least 1), so no diagnose drop runs on top.
+ */
+export function recordDiagnosis(
+  db: Db,
+  briefingId: number,
+  d: { diagnosis: string; basis: string; recommendation: string },
+  now: Date,
+  opts: { spent?: boolean } = {},
+): void {
+  db.prepare(
+    `UPDATE briefings SET diagnosis = ?, diagnosis_basis = ?, recommendation = ?, updated_at = ?
+       WHERE id = ?`,
+  ).run(d.diagnosis, d.basis, d.recommendation, now.toISOString(), briefingId);
+  if (opts.spent) {
+    db.prepare(
+      'UPDATE briefings SET diagnose_attempts = MAX(diagnose_attempts, 1) WHERE id = ?',
+    ).run(briefingId);
+  }
+}
+
 const BRIEFING_COLS = `id, zone_id AS zoneId, kind, subject, decision, why, options_json AS optionsJson,
   recommendation, on_hold AS onHold, source, source_ref AS sourceRef, state,
   diagnose_attempts AS diagnoseAttempts, diagnosis, diagnosis_basis AS diagnosisBasis,

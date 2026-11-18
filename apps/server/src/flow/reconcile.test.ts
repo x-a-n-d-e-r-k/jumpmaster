@@ -17,6 +17,13 @@ import { expireLeases } from '../leases.js';
 import { opKeys, opMarker } from '../outbox.js';
 import { promptVersions } from '../payloads.js';
 import { usageCfg, zoneWorld } from '../test/fixtures.js';
+import {
+  arbiterHarness,
+  type Harness,
+  headN,
+  ruling,
+  toHealsExhausted,
+} from '../test/flowHarness.js';
 import { reconcileZone } from './reconcile.js';
 import { zonePass } from './snapshot.js';
 
@@ -708,5 +715,53 @@ describe('maxOpenPrs (issue #291)', () => {
     const ready = w.item(3);
     await pass();
     expect(activeDropFor(w.db, ready)).toMatchObject({ role: 'implement' });
+  });
+});
+
+describe('after an arbiter ruled for the author (#383)', () => {
+  /** Issue 1 parked on review heals, ruled B by the arbiter on Fable, and retried by the next pass. */
+  async function retriedForAuthor(): Promise<Harness> {
+    const h = await arbiterHarness({ zone: { ciRequired: true } });
+    await toHealsExhausted(h);
+    await h.reconcile(); // queues the arbitrate drop
+    const { dropId, epoch, payload } = await h.lease();
+    expect(payload.role).toBe('arbitrate');
+    await h.postResult(dropId, epoch, { status: 'completed', gates: [], crew: ruling('B') });
+    await h.reconcile(); // applies the ruling: Command's Retry
+    expect(getWorkItem(h.db, 1)?.state).toBe('pr_open');
+    expect(h.queuedRoles()).toEqual(['review']);
+    return h;
+  }
+  const merged = (h: Harness) => h.forge.state.merges.length;
+  const ciGreen = { state: 'success' as const, names: ['ci'] };
+
+  test('a fresh review that requests changes leads to a heal, never to a merge', async () => {
+    const h = await retriedForAuthor();
+    h.forge.state.checks.set(headN(4), ciGreen);
+    await h.finishDrop('review', {
+      status: 'completed',
+      gates: [],
+      verdict: { decision: 'request_changes', summary: 'still no', findings: [] },
+    });
+    for (let i = 0; i < 3; i++) await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['heal']);
+    expect(merged(h)).toBe(0);
+    expect(getWorkItem(h.db, 1)?.state).toBe('pr_open');
+  });
+
+  test('with an approve, the item merges only once CI is green', async () => {
+    const h = await retriedForAuthor();
+    h.forge.state.checks.set(headN(4), { state: 'pending', names: ['ci'] });
+    await h.finishDrop('review', {
+      status: 'completed',
+      gates: [],
+      verdict: { decision: 'approve', summary: 'ok', findings: [] },
+    });
+    for (let i = 0; i < 4; i++) await h.reconcile();
+    expect(merged(h)).toBe(0);
+    h.forge.state.checks.set(headN(4), ciGreen);
+    for (let i = 0; i < 3 && merged(h) === 0; i++) await h.reconcile();
+    expect(h.forge.state.merges.map((m) => m.sha)).toEqual([headN(4)]);
+    expect(getWorkItem(h.db, 1)).toMatchObject({ state: 'done', reason: 'merged' });
   });
 });
