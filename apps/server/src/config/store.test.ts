@@ -1131,6 +1131,52 @@ describe('guarded paths and confirmation (Task 3)', () => {
   });
 });
 
+describe('the chat principal (crew chat)', () => {
+  const chat = (sessionId?: string): Principal => ({
+    kind: 'operator',
+    via: 'chat',
+    ...(sessionId === undefined ? {} : { sessionId }),
+    sudo: false,
+    chat: { threadId: 1, messageId: 2 },
+  });
+  function seeded() {
+    const w = world();
+    const store = w.open();
+    expect(store.apply({ dropZones: [zone()] }, { via: 'ctl', principal: token }).ok).toBe(true);
+    return { w, store };
+  }
+  const unprotect = { dropZones: [zone('main', { protectedPaths: ['GOAL.md'] })] };
+
+  test('a guarded change from chat is held for the browser session it carries, as from a session', () => {
+    const { store } = seeded();
+    const r = store.apply(unprotect, { via: 'ui', principal: chat('h') });
+    if (r.ok || !('needsConfirmation' in r)) throw new Error(JSON.stringify(r));
+    expect([...new Set(r.needsConfirmation.guarded.map((g) => g.path))]).toEqual([
+      'dropZones[main].protectedPaths',
+    ]);
+    expect(store.confirmations.pending(r.needsConfirmation.pendingId, 'h')).toBeDefined();
+    expect(store.revision()).toBe(2);
+  });
+
+  test('a browser-forbidden change from chat is refused, as from a session', () => {
+    const { store } = seeded();
+    expect(
+      store.apply(
+        { dropZones: [zone('main', { image: 'jm-trooper:other' })] },
+        { via: 'ui', principal: chat('h') },
+      ),
+    ).toEqual({ ok: false, sessionForbidden: ['dropZones[main].image'] });
+  });
+
+  test('a chat principal without a session hash cannot propose a guarded change', () => {
+    const { store } = seeded();
+    const r = store.apply(unprotect, { via: 'ui', principal: chat() });
+    expect(r.ok).toBe(false);
+    expect(r).not.toHaveProperty('needsConfirmation');
+    expect(store.revision()).toBe(2);
+  });
+});
+
 describe('zone removal, history and Resume (Task 3)', () => {
   const needsOf = (r: ReturnType<ConfigStore['apply']>) =>
     !r.ok && 'needsConfirmation' in r ? r.needsConfirmation.guarded : r;
