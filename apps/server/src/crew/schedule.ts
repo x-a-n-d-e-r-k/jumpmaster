@@ -1,15 +1,24 @@
 import { randomUUID } from 'node:crypto';
 import type { Role } from '@jumpmaster/protocol';
-import { raiseBriefing, refuteExhaustedWhy, refuteVerdicts, whyBasis } from '../briefings.js';
+import {
+  raiseBriefing,
+  recordDiagnosis,
+  refuteExhaustedWhy,
+  refuteVerdicts,
+  whyBasis,
+} from '../briefings.js';
 import type { ClaudeConfig, DropZoneConfig, UsageConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import {
   ACTIVE_DROP_STATES,
   ACTIVE_STATES_SQL,
+  getPullRequest,
+  getWorkItem,
   getZoneMode,
   insertDrop,
   isKilled,
   recordObservation,
+  type WorkItem,
 } from '../db/repo.js';
 import { fableStatus } from '../fable.js';
 import type { ZonePass } from '../flow/snapshot.js';
@@ -23,18 +32,23 @@ import { PROMOTE_OPTIONS, subjectOf } from './flush.js';
 import { fetchIssueImages, type ImageFetchOpts } from './images.js';
 import {
   arbitrateIssueInput,
+  arbitrateItemInput,
   crewLeadInput,
   diagnoseInput,
+  lastHealFeedback,
   refuteInput,
   triageInput,
 } from './inputs.js';
 import {
+  type Arbitration,
   type CrewIssue,
   getArbitration,
   getCrewIssue,
+  getItemArbitration,
   getTriageRequest,
   insertArbitration,
   issueArbitrationSubject,
+  itemArbitrationSubject,
   settleArbitration,
 } from './store.js';
 
@@ -81,8 +95,88 @@ export function raiseRefuteExhausted(db: Db, zone: DropZoneConfig, c: CrewIssue,
   );
 }
 
+const dropActive = (db: Db, dropId: string): boolean => {
+  const drop = db.prepare('SELECT state FROM drops WHERE id = ?').get(dropId) as
+    | { state: string }
+    | undefined;
+  return drop !== undefined && (ACTIVE_DROP_STATES as readonly string[]).includes(drop.state);
+};
+
 /**
- * The zone's next crew work, in order: diagnose an open parked briefing not yet diagnosed, refute a
+ * Briefs Command on an item's arbitration that does not act: the ruling (or why there is none)
+ * becomes the open parked briefing's diagnosis, and the briefing counts as diagnosed, so no
+ * diagnose drop runs on top. The item stays parked; nothing retries it.
+ */
+export function briefItemRuling(
+  db: Db,
+  itemId: number,
+  diagnosis: string,
+  recommendation: string,
+  now: Date,
+): void {
+  const b = db
+    .prepare(
+      `SELECT id, why FROM briefings WHERE kind = 'parked' AND state = 'open' AND subject = ?
+       ORDER BY id DESC LIMIT 1`,
+    )
+    .get(itemArbitrationSubject(itemId)) as { id: number; why: string } | undefined;
+  if (!b) return;
+  recordDiagnosis(
+    db,
+    b.id,
+    { diagnosis, basis: whyBasis(b.why), recommendation: `needs_command: ${recommendation}` },
+    now,
+    { spent: true },
+  );
+}
+
+/**
+ * An item's arbitration that came to nothing (a lost, failed, rate-limited or invalid drop): it is
+ * `failed` with the reason, once, and Command is briefed on the parked item. Fails closed.
+ */
+export function itemArbitrationFailed(db: Db, row: Arbitration, reason: string, now: Date): void {
+  if (!settleArbitration(db, row.id, { state: 'failed', reason }, now)) return;
+  const id = Number(row.subject.slice('item:'.length));
+  briefItemRuling(db, id, `The arbiter could not rule: ${reason}.`, reason, now);
+}
+
+/** The one park reason a review disagreement can have: the item ran out of heals. */
+export const HEAL_EXHAUSTED = 'budget exhausted: heal';
+
+/**
+ * Whether a parked item is a review disagreement the arbiter may rule on: parked on exactly
+ * `budget exhausted: heal`, its PR open with a `request_changes` verdict on the current head, its
+ * newest heal drop's stored feedback from the automated `review` (never a person's change request,
+ * never CI), an open parked briefing, and no arbitration of this item ever. Every fact is the
+ * server's own record, never an agent's report.
+ */
+export function reviewDisagreement(db: Db, item: WorkItem): boolean {
+  if (item.state !== 'parked' || item.reason !== HEAL_EXHAUSTED) return false;
+  const pr = getPullRequest(db, item.id);
+  if (!pr || pr.state !== 'open' || !pr.headSha) return false;
+  const rc = db
+    .prepare(
+      `SELECT 1 FROM verdicts WHERE work_item_id = ? AND head_sha = ?
+         AND decision = 'request_changes' LIMIT 1`,
+    )
+    .get(item.id, pr.headSha);
+  if (!rc) return false;
+  if (lastHealFeedback(db, item.id)?.source !== 'review') return false;
+  const briefing = db
+    .prepare(
+      `SELECT 1 FROM briefings WHERE zone_id = ? AND kind = 'parked' AND state = 'open'
+         AND subject = ? LIMIT 1`,
+    )
+    .get(item.dropZoneId, itemArbitrationSubject(item.id));
+  if (!briefing) return false;
+  return getItemArbitration(db, item.id) === undefined;
+}
+
+/**
+ * The zone's next crew work, in order: an open parked briefing not yet diagnosed is arbitrated
+ * when its item is a review disagreement (`reviewDisagreement`, with `crew.arbiter` on and Fable
+ * available), skipped while that arbitration is in flight or waits to be applied, and else
+ * diagnosed; then refute a
  * staged crew issue whose current body is unrefuted (within `maxRefute`), arbitrate one whose
  * refutes ran out (with `crew.arbiter` on, Fable available, at least one stored verdict, and no
  * arbitration of this text yet), triage the oldest open triage request (within `maxTriage`, with a
@@ -105,7 +199,31 @@ export function nextCrewWork(
     const m = /^item:(\d+)$/.exec(b.subject);
     // The basis ties the diagnosis to this why: one that lands after the why changed is dropped.
     if (!m) continue;
-    return { role: 'diagnose', briefingId: b.id, itemId: Number(m[1]), basis: whyBasis(b.why) };
+    const itemId = Number(m[1]);
+    const row = getItemArbitration(db, itemId);
+    if (row?.state === 'pending') {
+      if (dropActive(db, row.dropId)) continue; // its drop is in flight: neither arbitrate nor diagnose
+      // Its drop ended without a result applied (lost): fail closed, as a failed drop would.
+      itemArbitrationFailed(db, row, 'the arbitrate drop ended without a ruling', now);
+      continue;
+    }
+    // An acting ruling waits for its retry (applyArbitrations), not for a diagnosis.
+    if (row?.state === 'ruled' && row.acted && row.appliedAt === null) continue;
+    const item = getWorkItem(db, itemId);
+    if (!row && zone.crew.arbiter && fableOk && item && reviewDisagreement(db, item)) {
+      const headSha = getPullRequest(db, itemId)?.headSha;
+      if (headSha) {
+        return {
+          role: 'arbitrate',
+          subject: 'item',
+          itemId,
+          briefingId: b.id,
+          headSha,
+          basis: 'review',
+        };
+      }
+    }
+    return { role: 'diagnose', briefingId: b.id, itemId, basis: whyBasis(b.why) };
   }
 
   const refute = db
@@ -134,10 +252,7 @@ export function nextCrewWork(
     const subject = issueArbitrationSubject(c.id);
     const row = getArbitration(db, subject, c.bodySha);
     if (row?.state === 'pending') {
-      const drop = db.prepare('SELECT state FROM drops WHERE id = ?').get(row.dropId) as
-        | { state: string }
-        | undefined;
-      if (drop && (ACTIVE_DROP_STATES as readonly string[]).includes(drop.state)) continue; // its drop is in flight
+      if (dropActive(db, row.dropId)) continue; // its drop is in flight
       // Its drop ended without a result applied (lost): fail closed, as a failed drop would.
       settleArbitration(
         db,
@@ -221,7 +336,7 @@ const hasActiveCrewDrop = (db: Db, zoneId: string): boolean =>
     .get(zoneId) !== undefined;
 
 const observeDetail = (w: CrewWork): string =>
-  w.role === 'diagnose'
+  w.role === 'diagnose' || (w.role === 'arbitrate' && w.subject === 'item')
     ? `briefing ${w.briefingId}`
     : w.role === 'refute' || w.role === 'arbitrate'
       ? `crew issue ${w.crewIssueId}`
@@ -259,7 +374,10 @@ export async function enqueueCrew(
   if (!work) return null;
   if (work.role === 'crew-lead' && getGoals(db, zone.id)?.parse.ok !== true) return null;
   if (mode === 'observe') {
-    const itemId = work.role === 'diagnose' ? work.itemId : null;
+    const itemId =
+      work.role === 'diagnose' || (work.role === 'arbitrate' && work.subject === 'item')
+        ? work.itemId
+        : null;
     recordObservation(db, zone.id, itemId, `would_enqueue:${work.role}`, observeDetail(work), now);
     return null;
   }
@@ -273,7 +391,9 @@ export async function enqueueCrew(
         : work.role === 'refute'
           ? refuteInput(db, zone, work.crewIssueId, id)
           : work.role === 'arbitrate'
-            ? arbitrateIssueInput(db, zone, work, id)
+            ? work.subject === 'item'
+              ? arbitrateItemInput(db, zone, work, id)
+              : arbitrateIssueInput(db, zone, work, id)
             : work.role === 'triage'
               ? triageInput(db, zone, work.requestId, id)
               : diagnoseInput(db, zone, work.itemId, id);
@@ -302,12 +422,16 @@ export async function enqueueCrew(
           work.crewIssueId,
         );
       } else if (work.role === 'arbitrate') {
-        // One arbitration per text: a second for the same (subject, basis) rolls the drop back.
+        // One arbitration per text (an issue) or per item ever: a second for the same (subject,
+        // basis) rolls the drop back.
         insertArbitration(
           db,
           {
             zoneId: zone.id,
-            subject: issueArbitrationSubject(work.crewIssueId),
+            subject:
+              work.subject === 'item'
+                ? itemArbitrationSubject(work.itemId)
+                : issueArbitrationSubject(work.crewIssueId),
             basis: work.basis,
             dropId: id,
           },
