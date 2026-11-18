@@ -1023,9 +1023,17 @@ export class GitHubForge implements Forge {
   }
 
   /**
-   * Check runs on `sha`. GitHub never lets a fine-grained token read check runs (403), but
-   * with Actions: read it can list the commit's workflow jobs, which are the same checks under
-   * the same names. Checks from other apps are not visible that way.
+   * Check runs on `sha`.
+   *
+   * PAT forge: GitHub never lets a fine-grained token read check runs (403), but with
+   * Actions: read it can list the commit's workflow jobs, which are the same checks under the
+   * same names. Checks from other apps are not visible that way.
+   *
+   * App forge: the installation token is minted with Checks: read, so check runs are read
+   * directly and there is no Actions-jobs fallback, which would silently drop other apps'
+   * checks. A 403 means the installation's grant is wrong: it rejects with an error naming the
+   * repository and the missing permission, carrying no `cause` and nothing of GitHub's answer
+   * beyond the status. Any other error rejects as it is.
    */
   private async checkRunsFor(sha: string): Promise<CheckRunFacts[]> {
     try {
@@ -1037,6 +1045,11 @@ export class GitHubForge implements Forge {
       });
     } catch (e) {
       if ((e as { status?: number }).status !== 403) throw e;
+      if (this.app) {
+        throw new Error(
+          `the GitHub App could not read check runs on ${this.slug} (HTTP 403): its installation needs Checks: read`,
+        );
+      }
     }
     const workflowRuns = await this.octokit.paginate(
       this.octokit.rest.actions.listWorkflowRunsForRepo,
