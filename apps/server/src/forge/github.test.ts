@@ -2058,6 +2058,75 @@ describe('GitHubForge with an app identity (spec §4.3)', () => {
     nock.cleanAll();
   });
 
+  describe('checksFor on an app forge (spec §6, §13 Task 6)', () => {
+    const appIdentity = { kind: 'app' as const, slug: 'acme-author', appId: '1' };
+    const answer = () => {
+      nock(api)
+        .get('/repos/o/r/commits/sha1/check-runs')
+        .query(true)
+        .reply(200, {
+          total_count: 3,
+          check_runs: [
+            { name: 'build', status: 'completed', conclusion: 'failure' },
+            { name: 'lint', status: 'queued', conclusion: null },
+            { name: 'other-app', status: 'completed', conclusion: 'success' },
+          ],
+        });
+      nock(api)
+        .get('/repos/o/r/commits/sha1/status')
+        .query(true)
+        .reply(200, { state: 'pending', statuses: [{ context: 'ci/x', state: 'success' }] });
+    };
+
+    test('computes the same facts a PAT forge does for the same answers', async () => {
+      answer();
+      const app = await new GitHubForge('o', 'r', 'ghs_tok', {
+        identity: appIdentity,
+      }).checksFor('sha1');
+      answer();
+      const pat = await new GitHubForge('o', 'r', 'tok').checksFor('sha1');
+      expect(app).toEqual(pat);
+      expect(app).toEqual({
+        state: 'failure',
+        names: ['build', 'lint', 'other-app', 'ci/x'],
+        failed: [{ name: 'build', conclusion: 'failure' }],
+        queued: ['lint'],
+      });
+    });
+
+    test('a 403 on check runs rejects, names the grant, and takes no Actions fallback', async () => {
+      const body = 'Resource not accessible by integration SECRET-BODY-TEXT';
+      nock(api).get('/repos/o/r/commits/sha1/check-runs').query(true).reply(403, { message: body });
+      const runs = nock(api)
+        .get('/repos/o/r/actions/runs')
+        .query(true)
+        .reply(200, { total_count: 1, workflow_runs: [{ id: 11 }] });
+      const jobs = nock(api)
+        .get('/repos/o/r/actions/runs/11/jobs')
+        .query(true)
+        .reply(200, { total_count: 0, jobs: [] });
+      const forge = new GitHubForge('o', 'r', 'ghs_secrettoken123', { identity: appIdentity });
+      const err = (await forge.checksFor('sha1').then(
+        () => {
+          throw new Error('expected a rejection');
+        },
+        (e: unknown) => e,
+      )) as Error;
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toContain('o/r');
+      expect(err.message).toContain('Checks: read');
+      expect(err.message).toContain('403');
+      expect(err.cause).toBeUndefined();
+      const text = `${err.message} ${err.stack ?? ''} ${JSON.stringify(err)}`;
+      expect(text).not.toContain('ghs_secrettoken123');
+      expect(text).not.toContain('SECRET-BODY-TEXT');
+      expect(text).not.toContain('Resource not accessible');
+      expect(runs.isDone()).toBe(false);
+      expect(jobs.isDone()).toBe(false);
+      nock.cleanAll();
+    });
+  });
+
   test('a PAT forge still reads /user and the collaborator permission', async () => {
     const user = nock(api).get('/user').reply(200, { login: 'jm-bot' });
     nock(api)
