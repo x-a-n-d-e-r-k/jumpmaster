@@ -8,6 +8,7 @@
   },
   "main": "dist/claude.js",
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "postbuild": "node -e \"require('node:fs').cpSync('src/chat/prompt.md','dist/chat/prompt.md')\""
   }
 }
