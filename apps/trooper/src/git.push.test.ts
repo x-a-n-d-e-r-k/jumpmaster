@@ -31,6 +31,7 @@ import {
   setWorkRoot,
   stageFromAgent,
 } from './git.js';
+import { fixtureKey } from './test/privateKey.js';
 
 let tmp: string;
 let work: string;
@@ -385,6 +386,25 @@ describe('pushStaged', () => {
     const r = await stageAndPush(w, { secrets: ['plain-looking-secret-1234'] });
     expect(r).toEqual({ status: 'failed', reason: 'secret in diff', retryable: false });
     expect(w.remoteTip()).toBe(w.s0);
+  });
+
+  test('a real private key is refused for good, unless the grant allow-lists its path', async () => {
+    const w = await world('pkey');
+    mkdirSync(join(w.dir, 'config'));
+    writeFileSync(
+      join(w.dir, 'config', 'deploy.pem.ts'),
+      `export const K = \`${fixtureKey(1700)}\`;\n`,
+    );
+    await commitIfDirty(w.dir, 'feat: key');
+    const r = await stageAndPush(w);
+    expect(r).toEqual({
+      status: 'failed',
+      reason: 'private key in config/deploy.pem.ts',
+      retryable: false,
+    });
+    expect(w.remoteTip()).toBe(w.s0);
+    const ok = await stageAndPush(w, { privateKeyPaths: ['config/**'] });
+    expect(ok).toMatchObject({ status: 'pushed' });
   });
 
   test('non-agent author', async () => {

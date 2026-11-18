@@ -829,6 +829,8 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         lease: drop.headSha ?? '',
         ...(drop.pushExpectSha !== null ? { expectSha: drop.pushExpectSha } : {}),
         protectedPaths: zone.protectedPaths,
+        // Sent only when set, so a trooper from before the field still accepts the grant.
+        ...(zone.privateKeyPaths.length > 0 ? { privateKeyPaths: zone.privateKeyPaths } : {}),
         secrets: [
           ...new Set(
             dropSecrets({

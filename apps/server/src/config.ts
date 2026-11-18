@@ -307,6 +307,11 @@ export const DropZoneObject = z.object({
     .optional(),
   protectedPaths: z.array(z.string()).default(DEFAULT_PROTECTED_PATHS),
   /**
+   * Globs (matched like protectedPaths) where the trooper's pre-push check lets a real private key
+   * through: for projects that keep throwaway keys as test fixtures. Empty: refused everywhere.
+   */
+  privateKeyPaths: z.array(z.string()).default([]),
+  /**
    * Logins (with write access) whose approval of the exact head lets a gate script or gate tool
    * change through, besides anyone with maintain or admin. Protected paths are never overridden.
    */

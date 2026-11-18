@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest';
 import {
+  addedRuns,
   aheadOfBase,
   authHeader,
   cloneRepo,
@@ -22,6 +23,7 @@ import {
   GIT_OUTPUT_MAX_BYTES,
   headSha,
   mergeInProgress,
+  prePushCheck,
   prepareBranch,
   remoteBranchExists,
   removeInstructionFiles,
@@ -31,6 +33,7 @@ import {
   sweepProcesses,
   treeState,
 } from './git.js';
+import { fixtureKey, scratchPush } from './test/privateKey.js';
 
 let tmp: string;
 let origin: string;
@@ -338,5 +341,97 @@ describe('the git output cap', () => {
     expect(text.length).toBeLessThan(CAP);
     shell(`cat ${file}`);
     await expect(runGit(tmp, ['status'])).rejects.toThrow('output too large');
+  });
+});
+
+describe('prePushCheck: private keys', () => {
+  const B = 'agent/issue-1';
+  let n = 0;
+  const check = (
+    files: Record<string, string>,
+    privateKeyPaths: string[] = [],
+    seed?: Record<string, string>,
+  ) => {
+    const base = join(tmp, `pk-${n++}`);
+    mkdirSync(base);
+    const bare = scratchPush(base, B, files, seed);
+    return prePushCheck(bare, B, ['.github/**'], 'refs/jm/base', [], privateKeyPaths);
+  };
+  const real = fixtureKey(1700);
+
+  test('a real key in an added file is refused, naming the path', async () => {
+    const file = `export const KEY = \`${real}\`;\n`;
+    expect(await check({ 'config/deploy.pem.ts': file })).toBe(
+      'private key in config/deploy.pem.ts',
+    );
+  });
+
+  test('a real key on an allow-listed path is pushed', async () => {
+    const file = `export const KEY = \`${real}\`;\n`;
+    expect(await check({ 'test/fixtures/tls/key.ts': file }, ['test/fixtures/**'])).toBeNull();
+    // The allow-list covers only its own paths.
+    expect(
+      await check({ 'test/fixtures/tls/key.ts': file, 'src/k.ts': file }, ['test/fixtures/**']),
+    ).toBe('private key in src/k.ts');
+  });
+
+  test('a key spread over 30 added lines is caught', async () => {
+    const key = fixtureKey(64 * 28);
+    expect(key.split('\n')).toHaveLength(30);
+    expect(await check({ 'docs/setup.md': `# Setup\n\n${key}\n` })).toBe(
+      'private key in docs/setup.md',
+    );
+  });
+
+  test('a key added into an existing file, between kept lines, is caught', async () => {
+    const seed = { 'a.txt': 'a\n', 'notes.md': 'one\ntwo\n' };
+    expect(await check({ 'notes.md': `one\n${real}\ntwo\n` }, [], seed)).toBe(
+      'private key in notes.md',
+    );
+  });
+
+  test('JSON-escaped and CRLF keys are caught; a path git quotes is named unquoted', async () => {
+    expect(await check({ 'k.json': JSON.stringify({ key: real }) })).toBe('private key in k.json');
+    expect(await check({ 'k.txt': fixtureKey(1700, 'OPENSSH ', '\r\n') })).toBe(
+      'private key in k.txt',
+    );
+    expect(await check({ 'dir with space/é.ts': real })).toBe('private key in dir with space/é.ts');
+    expect(await check({ 'fx/é k.ts': real }, ['fx/**'])).toBeNull();
+  });
+
+  test('a fake (short) key is pushed', async () => {
+    expect(await check({ 'src/x.test.ts': `const pem = \`${fixtureKey(16)}\`;\n` })).toBeNull();
+  });
+
+  test('the refusal holds no base64 from the key', async () => {
+    const r = await check({ 'config/deploy.pem.ts': real });
+    expect(r).not.toBeNull();
+    for (const line of real.split('\n').slice(1, -1)) {
+      for (let i = 0; i + 8 <= line.length; i += 8) expect(r).not.toContain(line.slice(i, i + 8));
+    }
+    expect(r).not.toContain('PRIVATE KEY');
+  });
+});
+
+describe('addedRuns', () => {
+  test('splits runs at removed lines and keeps "no newline" markers inside a run', () => {
+    const patch = [
+      'diff --git a/x b/x',
+      '--- a/x',
+      '+++ b/x',
+      '@@ -1 +1,2 @@',
+      '-old',
+      '+a',
+      '+++ b/not-a-header',
+      '\\ No newline at end of file',
+      '@@ -5 +6 @@',
+      '+b',
+      'diff --git a/gone b/gone',
+      '--- a/gone',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-z',
+    ].join('\n');
+    expect(addedRuns(patch)).toEqual([{ path: 'x', runs: ['a\n++ b/not-a-header', 'b'] }]);
   });
 });

@@ -67,6 +67,7 @@ const config: Config = {
       maxTurns: 200,
       models: {},
       protectedPaths: [],
+      privateKeyPaths: [],
       reviewReadToken: false,
       budgets: {
         maxHeal: 3,
@@ -1457,6 +1458,26 @@ describe('push container routes', () => {
     for (const absent of ['gh-reviewer', 'join-me', 'npm-other', 'o'.repeat(32)]) {
       expect(JSON.stringify(body), absent).not.toContain(absent);
     }
+  });
+
+  test("the grant carries the zone's privateKeyPaths only when set", async () => {
+    const keyed: Config = {
+      ...config,
+      dropZones: [{ ...config.dropZones[0]!, privateKeyPaths: ['test/fixtures/**'] }],
+    };
+    const { db } = setup({ queued: false, config: keyed });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    const g = PushGrantSchema.parse(((await grant(stickToken)).json() as { grant: unknown }).grant);
+    expect(g.privateKeyPaths).toEqual(['test/fixtures/**']);
+  });
+
+  test('a grant for a zone without privateKeyPaths has no such field', async () => {
+    const { db } = setup({ queued: false });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    const body = (await grant(stickToken)).json() as { grant: Record<string, unknown> };
+    expect(body.grant).not.toHaveProperty('privateKeyPaths');
   });
 
   test("the grant's secrets include the read token the agent container held", async () => {
