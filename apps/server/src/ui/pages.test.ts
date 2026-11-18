@@ -20,10 +20,13 @@ import type { GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import { statusOf } from '../status.js';
 import { zoneWorld } from '../test/fixtures.js';
+import { harness } from '../test/flowHarness.js';
 import {
   dropRows,
   escapeHtml,
+  FAVICON_HREF,
   linkify,
+  MARK,
   page,
   pageParams,
   renderBriefing,
@@ -1925,5 +1928,43 @@ describe('every briefing stands on its own (#226)', () => {
     expect(list).toContain('<a href="#ruling-5">Ruling 5</a>');
     // Each briefing links to its own page.
     expect(list).toContain('<a href="/briefings/8">');
+  });
+});
+
+describe('the tab icon (#334)', () => {
+  const LINK = '<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,';
+
+  test('every page, with or without chrome, links the parachute mark as its icon', () => {
+    expect(page('x')).toContain(LINK);
+    expect(page('x', { chrome: false })).toContain(LINK);
+  });
+
+  test("the icon is the top bar's mark, drawn from the same paths, with no currentColor", () => {
+    const prefix = 'data:image/svg+xml,';
+    expect(FAVICON_HREF.startsWith(prefix)).toBe(true);
+    const svg = decodeURIComponent(FAVICON_HREF.slice(prefix.length));
+    expect(svg.startsWith('<svg')).toBe(true);
+    expect(svg).toContain('xmlns="http://www.w3.org/2000/svg"');
+    expect(svg).not.toContain('currentColor');
+    const ds = [...MARK.matchAll(/ d="([^"]*)"/g)].map((m) => m[1]);
+    expect(ds.length).toBe(2);
+    for (const d of ds) expect(svg).toContain(`d="${d}"`);
+    expect(svg).toContain('<circle cx="10" cy="17" r="1.6"');
+    expect(svg.endsWith('</svg>')).toBe(true);
+  });
+
+  test('GET /setup and GET /login carry the icon link', async () => {
+    const h = await harness({
+      live: true,
+      zone: { protectedPaths: ['.github/**', 'CODEOWNERS', 'GOAL.md'] },
+    });
+    // Before an operator exists, the guard sends everyone to the setup page.
+    const setup = await h.app.inject({ method: 'GET', url: '/setup' });
+    expect(setup.statusCode).toBe(200);
+    expect(setup.body).toContain(LINK);
+    await h.view('/'); // signs the operator in, so the login page is served
+    const res = await h.app.inject({ method: 'GET', url: '/login' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain(LINK);
   });
 });
