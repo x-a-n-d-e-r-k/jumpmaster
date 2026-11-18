@@ -1,8 +1,9 @@
 import type { DropPayload, DropResult, Role } from '@jumpmaster/protocol';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { createApp } from '../app.js';
+import { syncParkBriefings } from '../briefings.js';
 import { ConfigStore } from '../config/store.js';
-import type { Config, DropZoneConfig, UsageConfig } from '../config.js';
+import type { ClaudeConfig, Config, DropZoneConfig, UsageConfig } from '../config.js';
 import { creditsPass } from '../credits.js';
 import type { Db } from '../db/open.js';
 import { openDb } from '../db/open.js';
@@ -10,6 +11,7 @@ import { type ReconcileReport, reconcileZone } from '../flow/reconcile.js';
 import type { ForgePair } from '../outbox.js';
 import { promptVersions } from '../payloads.js';
 import { syncDropZone } from '../sync.js';
+import { crewOn } from './crew.js';
 import { type FakeForge, type FakeForgeState, type FakeIssue, fakeForgePair } from './fakes.js';
 import { makeZone, usageCfg } from './fixtures.js';
 import { operatorSession, tmpDbFile } from './helpers.js';
@@ -20,6 +22,8 @@ const START = new Date('2026-01-01T00:00:00Z');
 export interface Harness {
   db: Db;
   forge: { author: FakeForge; reviewer: FakeForge; state: FakeForgeState };
+  /** The pair every pass and route uses. */
+  forges: ForgePair;
   zone: DropZoneConfig;
   app: FastifyInstance;
   now(): Date;
@@ -70,6 +74,8 @@ export async function harness(
     pusher?: true | ForgePair['pusher'];
     /** The GitHub reads the zone's GitHub page makes (with `live`). */
     guidanceForge?: Parameters<typeof createApp>[0]['guidanceForge'];
+    /** The declared Claude plan (default `pro`: no Fable). */
+    claude?: ClaudeConfig;
   } = {},
 ): Promise<Harness> {
   const db = openDb(tmpDbFile());
@@ -112,7 +118,7 @@ export async function harness(
     dataDir: opts.dataDir ?? '.',
     pollSeconds: 60,
     dropZones: [zone, ...(opts.extraZones ?? []).map((z) => makeZone(z))],
-    claude: { plan: 'pro', fableWeeklyDropCap: 5 },
+    claude: opts.claude ?? { plan: 'pro', fableWeeklyDropCap: 5 },
     secrets: {
       claudeToken: 'claude-token',
       githubAuthorToken: 'author-token',
@@ -160,6 +166,7 @@ export async function harness(
     },
     db,
     forge: f,
+    forges,
     zone,
     app,
     ...(store ? { store } : {}),
@@ -267,6 +274,154 @@ export async function toPrOpen(h: Harness, sha: string): Promise<void> {
     gates: [{ name: 'test', exitCode: 0, durationMs: 10, timedOut: false, outputTail: '' }],
   });
   if (status !== 204) throw new Error(`implement result returned ${status}`);
+}
+
+const gateOk = { name: 'test', exitCode: 0, durationMs: 10, timedOut: false, outputTail: '' };
+
+/** The `n`th head of a harness item's PR: forty hex characters. */
+export const headN = (n: number): string => `${n.toString(16).padStart(2, '0')}`.padEnd(40, 'a');
+
+/**
+ * Where one heal round's feedback comes from: the reviewer's request-changes, a trusted person's
+ * change request on the head (after the reviewer's), or CI failing on a head the reviewer approved
+ * (the zone must require CI).
+ */
+export type HealRound = 'review' | 'human' | 'ci';
+
+/**
+ * Drives issue 1 through the real flow until it parks on `budget exhausted: heal`: implement at
+ * head 1, then one heal per round (head n+1 each), then a review that requests changes on the last
+ * head with no heal left. Its parked briefing is raised before returning, as the next pass would.
+ * `rounds` must spend the zone's `maxHeal`. No crew drop runs: without GOAL.md no lead cycle does.
+ */
+export async function toHealsExhausted(
+  h: Harness,
+  rounds: HealRound[] = ['review', 'review', 'review'],
+): Promise<void> {
+  if (h.zone.ciRequired) {
+    // Branch rules that require the check CI reports, so a required-CI zone is safe to run.
+    for (const id of ['author', 'reviewer'] as const) {
+      const r = h.forge.state.rules[id];
+      if (r.kind === 'ok') r.rules.requiredChecks = ['ci'];
+    }
+  }
+  await toPrOpen(h, headN(1));
+  for (const [i, round] of rounds.entries()) {
+    const head = headN(i + 1);
+    await h.reconcile();
+    const decision = round === 'ci' ? 'approve' : 'request_changes';
+    await h.finishDrop('review', {
+      status: 'completed',
+      gates: [gateOk],
+      verdict: {
+        decision,
+        summary: `round ${i + 1}`,
+        findings: decision === 'approve' ? [] : [{ severity: 'major', detail: `finding ${i + 1}` }],
+      },
+    });
+    if (round === 'human') {
+      h.forge.state.review({ state: 'CHANGES_REQUESTED', body: 'please fix', commitId: head });
+    }
+    if (round === 'ci') {
+      h.forge.state.checks.set(head, {
+        state: 'failure',
+        names: ['ci'],
+        failed: [{ name: 'ci', conclusion: 'failure' }],
+      });
+    }
+    for (let n = 0; n < 5 && !h.queuedRoles().includes('heal'); n++) await h.reconcile();
+    await h.finishDrop('heal', {
+      status: 'completed',
+      headSha: headN(i + 2),
+      gates: [gateOk],
+      summary: `healed round ${i + 1}`,
+    });
+  }
+  await h.reconcile();
+  await h.finishDrop('review', {
+    status: 'completed',
+    gates: [gateOk],
+    verdict: {
+      decision: 'request_changes',
+      summary: 'still wrong',
+      findings: [{ severity: 'major', detail: 'the last finding' }],
+    },
+  });
+  await h.reconcile();
+  syncParkBriefings(h.db, h.zone, h.now());
+}
+
+/** A declared plan with Fable available. */
+export const FABLE_CLAUDE: ClaudeConfig = {
+  plan: 'max',
+  fableModel: 'claude-fable-1',
+  fableWeeklyDropCap: 50,
+};
+
+/**
+ * A harness with the crew (and its arbiter) on, Fable available, and issue intake ungated, so its
+ * issue 1 runs the real flow while crew work is scheduled beside it.
+ */
+export function arbiterHarness(
+  o: { zone?: Partial<DropZoneConfig>; claude?: ClaudeConfig } = {},
+): Promise<Harness> {
+  return harness({
+    zone: { crew: crewOn, triage: { gate: false }, ...o.zone },
+    claude: o.claude ?? FABLE_CLAUDE,
+  });
+}
+
+/** An arbiter's output: ruling `ruling`, reversible, not a product question. */
+export const ruling = (
+  r: 'A' | 'B' | 'insufficient_evidence',
+  o: Partial<{
+    because: string;
+    instruction: string;
+    reversible: boolean;
+    productQuestion: boolean;
+  }> = {},
+) => ({
+  ruling: r,
+  because: o.because ?? `ruled ${r} on the evidence`,
+  wouldReverse: 'a failing test',
+  reversible: o.reversible ?? true,
+  productQuestion: o.productQuestion ?? false,
+  instruction: o.instruction ?? `do the ${r} thing`,
+});
+
+/**
+ * Plays issue 1's review rounds until it leaves `pr_open`: each queued review answers `decide`'s
+ * verdict for the head, each heal pushes a fresh head from `nextHead` on. Returns the last head.
+ */
+export async function reviewRounds(
+  h: Harness,
+  decide: (round: number) => 'approve' | 'request_changes',
+  nextHead = 20,
+): Promise<number> {
+  let head = nextHead;
+  for (let round = 0; round < 12; round++) {
+    const state = (
+      h.db.prepare('SELECT state FROM work_items WHERE id = 1').get() as { state: string }
+    ).state;
+    const queued = h.queuedRoles().filter((r) => r === 'review' || r === 'heal');
+    if (state !== 'pr_open' || queued.length === 0) break;
+    if (queued[0] === 'review') {
+      const decision = decide(round);
+      await h.finishDrop('review', {
+        status: 'completed',
+        gates: [gateOk],
+        verdict: {
+          decision,
+          summary: `again ${round}`,
+          findings: decision === 'approve' ? [] : [{ severity: 'major', detail: `again ${round}` }],
+        },
+      });
+    } else {
+      await h.finishDrop('heal', { status: 'completed', headSha: headN(head++), gates: [gateOk] });
+    }
+    await h.reconcile();
+  }
+  return head;
 }
 
 /** A db-mode store holding `config`'s editable part as revision 2, with `config`'s secrets. */
