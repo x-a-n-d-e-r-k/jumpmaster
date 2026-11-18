@@ -126,6 +126,7 @@ async function world(
   const manifestStore = o.manifestStore ?? new AppManifestStore({ now: () => clock.getTime() });
   const github = o.github ?? fakeGitHub();
   const logs: string[] = [];
+  const scrubbed: string[] = [];
   const a = createApp({
     db,
     config: store,
@@ -141,6 +142,7 @@ async function world(
     appManifestStore: manifestStore,
     appManifestFetch: github.fetch,
     appManifestApiBase: 'https://api.github.test',
+    scrub: { add: (secret: string) => scrubbed.push(secret) },
   });
   app = a;
   const session = (sudo: boolean) => {
@@ -164,6 +166,7 @@ async function world(
     manifestStore,
     github,
     logs,
+    scrubbed,
     responses,
     session,
     at(d: Date) {
@@ -412,6 +415,24 @@ describe('callback', () => {
     expect((await w.callback({ code: CODE, state: 'unknown-state-value' })).statusCode).toBe(400);
     expect((await w.callback({ code: CODE })).statusCode).toBe(400);
     expect(w.github.calls).toHaveLength(0);
+  });
+
+  test('an unknown state leaves the log scrub set unchanged', async () => {
+    const w = await world();
+    const before = [...w.scrubbed];
+    await w.callback({ code: 'attacker-chosen-code', state: 'jumpmaster-repository' });
+    await w.callback({ code: 'another-attacker-code' });
+    expect(w.scrubbed).toEqual(before);
+  });
+
+  test('a valid state registers the code and state for the log scrub', async () => {
+    const w = await world();
+    const s = w.session(true);
+    const start = await w.start(s.cookie);
+    const state = stateOf(start.body);
+    await w.callback({ code: CODE, state });
+    expect(w.scrubbed).toContain(CODE);
+    expect(w.scrubbed).toContain(state);
   });
 
   test('an expired state: 400 and no request to GitHub', async () => {

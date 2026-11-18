@@ -180,9 +180,6 @@ export function registerGitHubAppRoutes(app: FastifyInstance, deps: GitHubAppRou
     const q = (req.query ?? {}) as Record<string, unknown>;
     const code = typeof q.code === 'string' ? q.code : '';
     const state = typeof q.state === 'string' ? q.state : '';
-    // Both are scrubbed from every later log line, before anything can fail.
-    if (code !== '') scrub.add(code);
-    if (state !== '') scrub.add(state);
     const binding = manifestStore.consumeState(state);
     if (!binding)
       return callbackPage(
@@ -190,6 +187,12 @@ export function registerGitHubAppRoutes(app: FastifyInstance, deps: GitHubAppRou
         400,
         `<h2>Create a GitHub App</h2>${para('This link has expired or was already used: start again from Jumpmaster. If GitHub made an app, delete it there first.', 'warn')}`,
       );
+    // Only once the state is ours: an unauthenticated caller must not be able to fill
+    // (and evict real secrets from) the bounded server scrub set, or hide words of their
+    // choosing from the log. A state that does not match is never logged on that path.
+    // From here both are scrubbed from every later log line, before anything can fail.
+    if (code !== '') scrub.add(code);
+    scrub.add(state);
     let redeemed: Awaited<ReturnType<typeof redeemManifestCode>>;
     try {
       redeemed = await redeemManifestCode(code, binding, {
