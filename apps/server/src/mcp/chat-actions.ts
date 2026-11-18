@@ -4,12 +4,21 @@ import {
   type ActionCtx,
   type ActionResult,
   chatPrincipal,
+  configPatchAction,
   crewCycleAction,
   ruleAction,
   zoneModeAction,
 } from '../api/operator-actions.js';
 import { getBriefing, OBJECTIVE_PREFIX, optionsDigest, raiseBriefing } from '../briefings.js';
-import { type CardKind, type NewCard, recordCard } from '../chat/cards.js';
+import { type CardKind, type NewCard, recordCard, type SettingUndo } from '../chat/cards.js';
+import {
+  inversePatch,
+  SettingError,
+  settingDocPath,
+  settingPatch,
+  valueAt,
+} from '../chat/inverse.js';
+import { FLAGS } from '../config/catalog.js';
 import type { DropZoneConfig } from '../config.js';
 import { getUsageState, isKilled } from '../db/repo.js';
 import { getGoals, objectivesDone } from '../goals.js';
@@ -26,12 +35,18 @@ import { type ChatPrincipal, isChatPrincipal } from './tokens.js';
  * the chat token's own thread and message, written from the server's record of what was done.
  */
 
-/** What an action did, for its card: the server's own words, never the model's arguments. */
+/**
+ * What an action did, for its card: the server's own words, never the model's arguments. A
+ * `pending` action waits for the owner's confirmation in the browser; `undo` is what its Undo needs.
+ * A refusal's `summary` is the server's own text too (the store's message, a fixed hint).
+ */
 export type Acted = {
   out: Outcome;
   summary?: string;
   target?: string;
   link?: string;
+  pending?: boolean;
+  undo?: unknown;
 };
 
 const zoneLink = (zoneId: string): string => `/zones/${encodeURIComponent(zoneId)}`;
@@ -90,19 +105,21 @@ export function carded(
   if (!isChatPrincipal(p)) return act().out;
   const blocked = chatActionBlocked(ctx, args);
   const acted: Acted = blocked ? { out: blocked } : act();
-  const done = acted.out.outcome === 'ok';
+  const ok = acted.out.outcome === 'ok';
+  const state = !ok ? 'refused' : acted.pending ? 'pending' : 'done';
   const card: NewCard = {
     threadId: p.threadId,
     messageId: p.messageId,
     kind,
     zoneId: ctx.zone?.id ?? null,
-    state: done ? 'done' : 'refused',
+    state,
     summary:
-      done && acted.summary
+      !blocked && acted.summary
         ? acted.summary
         : `${ACTION_WORDS[kind]} was refused (${acted.out.detail ?? 'refused'}).`,
-    ...(done && acted.target ? { target: acted.target } : {}),
-    ...(done && acted.link ? { link: acted.link } : {}),
+    ...(ok && acted.target ? { target: acted.target } : {}),
+    ...(ok && acted.link ? { link: acted.link } : {}),
+    ...(state === 'done' && acted.undo !== undefined ? { undo: acted.undo } : {}),
   };
   ctx.onCard?.(recordCard(ctx.db, card, ctx.now()));
   return acted.out;
@@ -297,9 +314,129 @@ const markObjectiveDoneTool: ChatToolDef = {
   },
 };
 
+const MAX_SETTINGS = 20;
+
+const SettingArgs = z.strictObject({
+  zoneId: ZoneId.optional(),
+  set: z
+    .record(z.string().min(1).max(200), z.unknown())
+    .refine((o) => Object.keys(o).length > 0, 'name at least one setting')
+    .refine((o) => Object.keys(o).length <= MAX_SETTINGS, `at most ${MAX_SETTINGS} settings`),
+});
+
+const LABELS = new Map(FLAGS.map((f) => [f.path, f.label]));
+
+/** A value as a card shows it: short JSON, or "its default" when the key is unset. */
+const shown = (v: unknown): string => {
+  if (v === undefined) return 'its default';
+  const s = JSON.stringify(v);
+  return s.length > 60 ? `${s.slice(0, 57)}...` : s;
+};
+
+/** The hint a browser-forbidden change gets: the chat can no more change it than the browser. */
+export const SETTING_FORBIDDEN_HINT = 'set it with `jumpmaster ctl` or in the config file';
+
+const changeSettingTool: ChatToolDef = {
+  name: 'change_setting',
+  scope: 'chat-write',
+  external: true,
+  description:
+    "Changes settings on the owner's word, through the config store exactly as the settings page " +
+    'does. `set` maps each setting path from get_settings to its new value (null resets it to its ' +
+    'default): zone paths (`dropZones[].…`) with zoneId, install paths without. A guarded change ' +
+    'waits for the owner to Confirm it in the browser; a browser-forbidden one is refused (the ' +
+    'owner sets it with `jumpmaster ctl` or in the config file). A change applied has an Undo.',
+  input: SettingArgs,
+  run(ctx, args: z.infer<typeof SettingArgs>) {
+    const p = chatOf(ctx);
+    return carded(ctx, 'setting', args, () => {
+      const store = ctx.store;
+      if (!store)
+        return { out: refused('settings cannot be changed on this install', 'no config store') };
+      const zoneId = ctx.zone?.id;
+      const where = zoneId === undefined ? 'for the install' : `in zone ${zoneId}`;
+      const target = zoneId ?? 'install';
+      const before = store.document();
+      let patch: unknown;
+      let paths: string[];
+      try {
+        patch = settingPatch(before, zoneId, args.set);
+        paths = Object.keys(args.set).map((k) => settingDocPath(zoneId, k));
+      } catch (e) {
+        if (!(e instanceof SettingError)) throw e;
+        return {
+          out: refused(e.message, 'unknown setting'),
+          summary: `Changing a setting was refused: ${e.message}.`,
+        };
+      }
+      // The catalog's words for each, never the model's keys.
+      const labels = Object.keys(args.set)
+        .map((k) => LABELS.get(k) ?? 'a setting')
+        .join(', ');
+      const r = configPatchAction(actionCtx(ctx, p), store, patch, {
+        expectRevision: store.revision(),
+        returnTo: `/chat/${p.threadId}`,
+      });
+      if (r.ok) {
+        const after = store.document();
+        const values = Object.keys(args.set)
+          .map((k, i) => `${LABELS.get(k)} to ${shown(valueAt(after, paths[i] as string))}`)
+          .join('; ');
+        const undo: SettingUndo | undefined =
+          r.value.changed.length > 0
+            ? { revision: r.value.revision, ...inversePatch(before, after, paths) }
+            : undefined;
+        return {
+          out: ok(JSON.stringify({ revision: r.value.revision, changed: r.value.changed })),
+          summary:
+            r.value.changed.length > 0
+              ? `Changed ${where}: ${values} (revision ${r.value.revision}).`
+              : `Nothing changed ${where}: ${values} already (revision ${r.value.revision}).`,
+          target,
+          ...(undo ? { undo } : {}),
+        };
+      }
+      if (r.status === 409 && r.body?.needsConfirmation) {
+        return {
+          out: ok(
+            JSON.stringify({
+              ...r.body,
+              says: 'This change weakens a guard: it waits for the owner to Confirm it in the browser, on the card.',
+            }),
+          ),
+          pending: true,
+          summary: `Changing ${labels} ${where} weakens a guard: it waits for you to Confirm it.`,
+          target,
+          link: String(r.body.confirm),
+        };
+      }
+      if (r.status === 403) {
+        return {
+          out: refused(
+            `403 this cannot be changed from the browser or the chat: ${SETTING_FORBIDDEN_HINT}`,
+            'browser-forbidden',
+          ),
+          summary: `Changing ${labels} ${where} was refused: it cannot be changed from the browser or the chat; ${SETTING_FORBIDDEN_HINT}.`,
+        };
+      }
+      if (r.status === 409) {
+        return {
+          out: refused('the config changed meanwhile: read the settings again', 'conflict'),
+          summary: `Changing ${labels} ${where} was refused: the config changed meanwhile.`,
+        };
+      }
+      return {
+        out: refused(r.error, 'invalid setting'),
+        summary: `Changing ${labels} ${where} was refused: ${r.error}`,
+      };
+    });
+  },
+};
+
 export const CHAT_ACTION_TOOLS: ChatToolDef[] = [
   ruleBriefingTool,
   setZoneModeTool,
   runCrewCycleTool,
   markObjectiveDoneTool,
+  changeSettingTool,
 ];

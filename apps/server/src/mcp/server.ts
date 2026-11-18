@@ -9,6 +9,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { originAllowed } from '../api/control.js';
 import type { ChatCard } from '../chat/cards.js';
 import { configReader, type LiveConfig } from '../config/source.js';
+import { ConfigStore } from '../config/store.js';
 import {
   allowedHostsOf,
   type Config,
@@ -138,6 +139,7 @@ async function serve(
         ...(deps.log ? { log: deps.log } : {}),
         ...(deps.forgesFor ? { forgesFor: deps.forgesFor } : {}),
         ...(document ? { document } : {}),
+        ...(deps.config instanceof ConfigStore ? { store: deps.config } : {}),
         ...(isChatPrincipal(principal) ? { actions: true } : {}),
         ...(deps.onCard ? { onCard: deps.onCard } : {}),
         ...(deps.kick ? { kick: deps.kick } : {}),
