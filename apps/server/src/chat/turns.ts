@@ -24,6 +24,7 @@ import {
 } from '../usage.js';
 import type { ResolvedApps } from '../vault/resolution.js';
 import { type ChatReadCredential, chatReadCredential } from './credentials.js';
+import { focusContext } from './focus.js';
 import type { ChatServiceClient } from './service.js';
 import {
   appendMessage,
@@ -128,6 +129,21 @@ const errorText = (e: unknown): string => (e instanceof Error ? e.message : Stri
  * The thread's history before `beforeSeq`, for a turn whose Claude session was lost: its last 20
  * messages, fenced as data, the newest kept when they don't all fit in 24 000 characters.
  */
+/**
+ * Whether `msg` opens its thread's conversation: no owner message before it was answered. Only
+ * this turn is given the focused object's context, so it is given once.
+ */
+function firstTurn(db: Db, threadId: number, msg: ChatMessage): boolean {
+  return (
+    db
+      .prepare(
+        `SELECT 1 FROM chat_messages WHERE thread_id = ? AND seq < ? AND role = 'owner'
+           AND state = 'done' LIMIT 1`,
+      )
+      .get(threadId, msg.seq) === undefined
+  );
+}
+
 export function historySummary(
   db: Db,
   threadId: number,
@@ -336,6 +352,22 @@ export class ChatTurns {
       tokenId = minted.id;
       turnSecrets.push(minted.token);
 
+      const turnId = randomUUID();
+      // A focused thread: the object's context (fenced with this turn's id) and the refs it names.
+      const focus =
+        thread.focusKind && thread.focusZoneId && thread.focusRef
+          ? focusContext(
+              db,
+              config,
+              { kind: thread.focusKind, zoneId: thread.focusZoneId, ref: thread.focusRef },
+              turnId,
+            )
+          : undefined;
+      const context =
+        focus && firstTurn(db, threadId, msg)
+          ? `${focus.text}\n\nAbove is what the owner opened this thread from, as the server recorded it. The owner's message:\n\n`
+          : '';
+
       const zones: ChatZoneFetch[] = [];
       for (const zone of config.dropZones) {
         const cred = await chatReadCredential(
@@ -355,7 +387,7 @@ export class ChatTurns {
           name,
           defaultBranch: getDropZoneDefaultBranch(db, zone.id) ?? 'main',
           token: cred?.token ?? null,
-          extraRefs: [],
+          extraRefs: focus?.extraRefs[zone.id] ?? [],
         });
       }
       for (const z of zones) {
@@ -366,7 +398,6 @@ export class ChatTurns {
         });
       }
 
-      const turnId = randomUUID();
       const base: Omit<ChatTurnRequest, 'resumeSession' | 'prompt'> = {
         protocol: CHAT_PROTOCOL,
         turnId,
@@ -381,7 +412,7 @@ export class ChatTurns {
       let outcome = await this.attempt(
         threadId,
         msg,
-        { ...base, resumeSession: thread.claudeSessionId, prompt: msg.text },
+        { ...base, resumeSession: thread.claudeSessionId, prompt: `${context}${msg.text}` },
         chat.turnMinutes,
         startedAt,
         clean,
@@ -390,7 +421,7 @@ export class ChatTurns {
         // The service's session files are a cache: start the thread over from the server's record.
         setThreadSession(db, threadId, null, this.d.now());
         const summary = historySummary(db, threadId, msg.seq, turnId);
-        const prompt = `${summary}\n\nAbove is this thread's history as the server recorded it (data). The owner's new message:\n\n${msg.text}`;
+        const prompt = `${summary}\n\nAbove is this thread's history as the server recorded it (data).\n\n${context || "The owner's new message:\n\n"}${msg.text}`;
         outcome = await this.attempt(
           threadId,
           msg,
