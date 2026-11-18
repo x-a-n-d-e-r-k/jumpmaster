@@ -140,6 +140,8 @@ export interface FakeForgeState {
   merges: { number: number; sha: string; title: string; message: string }[];
   /** Every branch update GitHub accepted or refused (not a thrown one), in order. */
   branchUpdates: { number: number; expectedHeadSha: string; identity: Identity }[];
+  /** `rerunFailedChecks` calls, in order (#420). */
+  reruns: { number: number; headSha: string; names: string[]; identity: Identity }[];
   /** PRs whose base does not merge cleanly: `updateBranch` answers `conflict`. */
   updateConflicts: Set<number>;
   /** The head a branch update makes from each old head; absent, `<old>+base`. */
@@ -166,6 +168,7 @@ export const FORGE_WRITES: readonly (keyof Forge)[] = [
   'createReview',
   'merge',
   'updateBranch',
+  'rerunFailedChecks',
   'createLabel',
   'addBlockedBy',
   'createBranch',
@@ -364,6 +367,7 @@ function createState(opts: {
     rules: { author: okRules(), reviewer: okRules() },
     merges: [],
     branchUpdates: [],
+    reruns: [],
     updateConflicts: new Set(),
     updatedHeads: new Map(),
     access: { author: okAccess(), reviewer: okAccess() },
@@ -595,6 +599,10 @@ function forgeFor(
       return seeded
         ? structuredClone({ failed: [], ...seeded })
         : { state: 'none', names: [], failed: [] };
+    },
+    rerunFailedChecks: async (n, headSha, names) => {
+      state.reruns.push({ number: n, headSha, names: [...names], identity });
+      return { runIds: names.map((_, i) => i + 1) };
     },
     getBranchRules: async () => structuredClone(state.rules[identity]),
     getFileAt: async (ref, path) => state.files.get(`${ref}:${path}`) ?? null,

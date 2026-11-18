@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   type CrewOutput,
   type DropResult,
@@ -20,11 +21,14 @@ import {
   getDrop,
   getPullRequest,
   getWorkItem,
+  insertDrop,
   updateDrop,
 } from '../db/repo.js';
 import { ranOnFable } from '../fable.js';
+import { chargeBudget, fingerprint } from '../flow/budgets.js';
+import type { Feedback } from '../flow/decide.js';
 import type { ForgePair } from '../outbox.js';
-import type { CrewInputJson } from '../payloads.js';
+import { type CrewInputJson, promptVersions } from '../payloads.js';
 import type { ResultDeps } from '../results.js';
 import { retryParkedItem } from '../sync.js';
 import {
@@ -34,6 +38,7 @@ import {
   validateIssueSpec,
 } from './actions.js';
 import { PROMOTE_OPTIONS, subjectOf } from './flush.js';
+import { lastHealFeedback } from './inputs.js';
 import {
   briefItemRuling,
   HEAL_EXHAUSTED,
@@ -43,6 +48,7 @@ import {
 import {
   type CrewIssue,
   type CrewIssuePatch,
+  type CrewRetry,
   claimArbitrationApply,
   claimCrewRetryApply,
   getArbitrationByDrop,
@@ -52,6 +58,7 @@ import {
   getTriageRequest,
   insertCrewRetry,
   listUnappliedCrewRetries,
+  markCrewRerun,
   releaseArbitrationApply,
   releaseCrewRetryApply,
   setCrewIssue,
@@ -446,25 +453,70 @@ export async function applyArbitrations(
 const isUniqueViolation = (e: unknown): boolean =>
   e instanceof Error && 'code' in e && String(e.code).startsWith('SQLITE_CONSTRAINT');
 
+/** The park reasons of an item with an open PR the crew may act on (#420), besides heals. */
+const PR_PARK_REASONS = new Set(['budget exhausted: resolve', 'budget exhausted: base-sync']);
+/** The park of a heal that changed nothing on findings it had already seen. */
+export const HEAL_NO_CHANGES = 'heal made no changes for the same findings';
+/** The gate-script guard's park reason opens with this (`flow/guards.ts`, `decide`). */
+export const GATE_SCRIPT_PARK = 'gate script changed: ';
+
 /**
- * Whether the crew may retry the item on its own diagnosis (#396): `crew.autoRetry` on, the item
- * parked with no pull request, its newest drop an `implement` drop that `failed`, and no crew retry
- * ever recorded for it. Read from server-recorded rows only, never from an agent's report. So a
- * heal, review, resolve, budget, gate-change, conflict or human-hold park is never crew-retried.
+ * Which crew action a parked item allows: `implement` for a failed first implementation with no
+ * pull request (#396); `pr` for an item with an open PR parked on a resolve or base-sync budget,
+ * or by a heal on CI feedback that changed nothing or stopped blocked (#420); `gate` for a
+ * gate-script park, which the crew may only retry to remove the change.
  */
-export function crewMayRetry(db: Db, zone: DropZoneConfig, itemId: number): boolean {
-  if (!zone.crew.autoRetry) return false;
+export type CrewParkKind = 'implement' | 'pr' | 'gate';
+
+/**
+ * The crew action the item allows, if any: `crew.autoRetry` on, the item parked in the zone, no
+ * crew action ever recorded for it, and a park the crew may act on (`CrewParkKind`). Read from
+ * server-recorded rows only, never from an agent's report. A heal park counts only when the newest
+ * heal's stored feedback came from CI: a review's findings are the arbiter's, a person's are
+ * theirs. A human hold, a hand-opened conflict, a `no_changes` implement, credits, the heal budget
+ * (a review disagreement) or any other reason allows none.
+ */
+export function crewParkKind(db: Db, zone: DropZoneConfig, itemId: number): CrewParkKind | null {
+  return getCrewRetry(db, itemId) === undefined ? parkKind(db, zone, itemId) : null;
+}
+
+/** `crewParkKind` before the one-per-item cap, which the schema enforces when it is recorded. */
+function parkKind(db: Db, zone: DropZoneConfig, itemId: number): CrewParkKind | null {
+  if (!zone.crew.autoRetry) return null;
   const item = getWorkItem(db, itemId);
-  if (!item || item.dropZoneId !== zone.id || item.state !== 'parked') return false;
-  if (item.prNumber !== null || getPullRequest(db, itemId) !== undefined) return false;
+  if (!item || item.dropZoneId !== zone.id || item.state !== 'parked') return null;
+  const pr = getPullRequest(db, itemId);
   const newest = db
     .prepare(
-      `SELECT role, state FROM drops WHERE work_item_id = ?
+      `SELECT role, state, result_json AS resultJson FROM drops WHERE work_item_id = ?
        ORDER BY created_at DESC, rowid DESC LIMIT 1`,
     )
-    .get(itemId) as { role: string; state: string } | undefined;
-  if (newest?.role !== 'implement' || newest.state !== 'failed') return false;
-  return getCrewRetry(db, itemId) === undefined;
+    .get(itemId) as { role: string; state: string; resultJson: string | null } | undefined;
+  if (item.prNumber === null && pr === undefined) {
+    return newest?.role === 'implement' && newest.state === 'failed' ? 'implement' : null;
+  }
+  if (pr?.state !== 'open' || !pr.headSha) return null;
+  const reason = item.reason ?? '';
+  if (PR_PARK_REASONS.has(reason)) return 'pr';
+  if (reason.startsWith(GATE_SCRIPT_PARK)) return 'gate';
+  const ciHeal = lastHealFeedback(db, itemId)?.source === 'ci';
+  if (reason === HEAL_NO_CHANGES) return ciHeal ? 'pr' : null;
+  if (newest?.role === 'heal' && ciHeal) {
+    let result: { status?: unknown; reason?: unknown } = {};
+    try {
+      result = (JSON.parse(newest.resultJson ?? '{}') ?? {}) as typeof result;
+    } catch {
+      return null;
+    }
+    const parkedFor = typeof result.reason === 'string' ? result.reason : 'blocked';
+    if (result.status === 'blocked' && reason === parkedFor) return 'pr';
+  }
+  return null;
+}
+
+/** Whether the crew may act on the parked item on its own diagnosis (`crewParkKind`). */
+export function crewMayRetry(db: Db, zone: DropZoneConfig, itemId: number): boolean {
+  return crewParkKind(db, zone, itemId) !== null;
 }
 
 type DiagnoseWork = Extract<CrewInputJson['work'], { role: 'diagnose' }>;
@@ -472,11 +524,15 @@ type DiagnoseWork = Extract<CrewInputJson['work'], { role: 'diagnose' }>;
 /**
  * Records a diagnosis on the parked briefing it was asked for, beside the server's why, if that
  * briefing is still open and its why is still the one diagnosed (`basis`). The diagnosis is always
- * kept, as the record of what the crew saw. A `retry` with an instruction, on an item the crew may
- * retry (`crewMayRetry`), also records the crew's one retry and withdraws the briefing, in this
- * transaction: `applyCrewRetries` acts on it next active pass (a retry may read the forge). A
- * second retry for the item is refused by the schema, and leaves the diagnosis only. Returns why
- * it was discarded, if it was.
+ * kept, as the record of what the crew saw. On an item the crew may act on (`crewParkKind`), it
+ * also records the crew's one action, in this transaction; `applyCrewRetries` acts on it next
+ * active pass (it reads the forge):
+ * - a `retry` with an instruction withdraws the briefing. On a gate-change park it is taken only
+ *   with `gateChange: 'remove'`: the crew never allows a gate change, only takes it out.
+ * - a `rerun_checks` on an item with an open PR (not a gate park) leaves the briefing open: it is
+ *   withdrawn once the item is retried, and says why if the forge refused.
+ * A second action for the item is refused by the schema, and leaves the diagnosis only. Returns
+ * why it was discarded, if it was, or what the crew does.
  */
 function applyDiagnose(
   db: Db,
@@ -501,36 +557,157 @@ function applyDiagnose(
     { diagnosis: out.diagnosis, basis, recommendation: `${out.recommendation}: ${out.detail}` },
     now,
   );
-  const instruction = out.instruction?.trim() ?? '';
-  if (out.recommendation !== 'retry' || instruction === '') return undefined;
-  if (!crewMayRetry(db, deps.zone, work.itemId)) return undefined;
-  try {
-    db.transaction(() => {
-      insertCrewRetry(db, {
-        zoneId: deps.zone.id,
-        itemId: work.itemId,
-        briefingId: work.briefingId,
-        dropId: drop.id,
-        diagnosis: out.diagnosis,
-        instruction: out.instruction ?? instruction,
-        createdAt: now,
-      });
+  const base = {
+    zoneId: deps.zone.id,
+    itemId: work.itemId,
+    briefingId: work.briefingId,
+    dropId: drop.id,
+    diagnosis: out.diagnosis,
+    createdAt: now,
+  };
+  let record: () => void;
+  let note: string;
+  if (out.recommendation === 'retry') {
+    const instruction = out.instruction?.trim() ?? '';
+    if (instruction === '') return undefined;
+    const kind = parkKind(db, deps.zone, work.itemId);
+    if (kind === null) return undefined;
+    if (kind === 'gate' && out.gateChange !== 'remove') {
+      return 'crew retry not recorded: a gate-change park is retried only to remove the change';
+    }
+    record = () => {
+      insertCrewRetry(db, { ...base, instruction: out.instruction ?? instruction });
       withdrawBriefing(db, deps.zone.id, `item:${work.itemId}`, now);
-    })();
+    };
+    note = 'the crew retries the item on this diagnosis';
+  } else if (out.recommendation === 'rerun_checks') {
+    const checks = [...new Set((out.checks ?? []).map((c) => c.trim()).filter((c) => c !== ''))];
+    if (checks.length === 0) return undefined;
+    if (parkKind(db, deps.zone, work.itemId) !== 'pr') return undefined;
+    record = () => insertCrewRetry(db, { ...base, kind: 'rerun', instruction: '', checks });
+    note = `the crew re-runs ${checks.join(', ')} on this diagnosis`;
+  } else {
+    return undefined;
+  }
+  try {
+    db.transaction(record)();
   } catch (e) {
-    // Another result recorded the item's one crew retry first: the diagnosis stands alone.
+    // Another result recorded the item's one crew action first: the diagnosis stands alone.
     if (isUniqueViolation(e)) return 'crew retry not recorded: the item has one already';
     throw e;
   }
-  return 'the crew retries the item on this diagnosis';
+  return note;
+}
+
+/** The forge's refusal of a re-run, in plain words for the briefing (never its raw answer). */
+function rerunRefusal(e: unknown): string {
+  const status = (e as { status?: unknown } | null)?.status;
+  if (status === 403) return 'the token lacks the Actions write permission';
+  if (status === 404) return 'GitHub found no workflow run to re-run (HTTP 404)';
+  if (typeof status === 'number') return `GitHub refused the re-run (HTTP ${status})`;
+  return 'the forge could not be reached';
 }
 
 /**
- * Applies the zone's recorded crew retries, each once (#396). A row is claimed by its `applied_at`
- * first, so two passes retry once. With `crew.autoRetry` now off, or the item no longer parked,
- * it is `skipped`: the next `syncParkBriefings` briefs Command as usual. Otherwise the item is
- * retried exactly as Command's Retry (`retryParkedItem`); a PR read that fails releases the claim
- * for the next pass. Returns how many items were retried.
+ * Re-runs a rerun row's failed checks on the PR's current head (#420). Only names the forge reads
+ * as failed on the head the server records are re-run; anything else, a refusal or an error
+ * settles the row `skipped` with why. Returns `retry` once re-run (or re-run by an earlier pass),
+ * `wait` when a read failed (the claim is released for the next pass), or `skipped`.
+ */
+async function rerunChecks(
+  db: Db,
+  forges: ForgePair,
+  row: CrewRetry,
+  itemId: number,
+  now: Date,
+): Promise<'retry' | 'wait' | 'skipped'> {
+  if (row.rerunAt !== null) return 'retry';
+  const skip = (reason: string): 'skipped' => {
+    settleCrewRetry(db, row.id, 'skipped', reason);
+    return 'skipped';
+  };
+  const stored = getPullRequest(db, itemId);
+  if (!stored || stored.state !== 'open' || !stored.headSha) {
+    return skip('the pull request is no longer open');
+  }
+  let failed: Set<string>;
+  try {
+    const pull = await forges.author.getPull(stored.number);
+    if (pull?.state !== 'open') return skip('the pull request is no longer open');
+    if (pull.headSha !== stored.headSha) return skip("the pull request's head moved");
+    failed = new Set((await forges.author.checksFor(stored.headSha)).failed.map((f) => f.name));
+  } catch {
+    releaseCrewRetryApply(db, row.id, now);
+    return 'wait';
+  }
+  const unknown = row.checks.filter((c) => !failed.has(c));
+  if (unknown.length > 0) {
+    return skip(
+      `${unknown.join(', ')} ${unknown.length === 1 ? 'is not a failed check' : 'are not failed checks'} on the pull request's current head`,
+    );
+  }
+  try {
+    const { runIds } = await forges.author.rerunFailedChecks(
+      stored.number,
+      stored.headSha,
+      row.checks,
+    );
+    if (runIds.length === 0) return skip('GitHub has no failed workflow run of it to re-run');
+  } catch (e) {
+    return skip(rerunRefusal(e));
+  }
+  markCrewRerun(db, row.id, now);
+  return 'retry';
+}
+
+/** The heal a crew gate-change retry runs: server words, the crew's instruction rides beside. */
+export const GATE_REMOVAL_FEEDBACK =
+  'Remove every change this pull request makes to the scripts the gates run, so the gates run as they do on the base branch. The crew judged the issue does not need the change; the owner has not allowed it.';
+
+/**
+ * Queues the heal that takes a gate change out of the PR (#420), on its current head, charged to
+ * the heal budget as any heal. The guard judges the head it pushes: one that still changes a gate
+ * script parks again, and the owner is briefed.
+ */
+function enqueueGateRemoval(db: Db, zone: DropZoneConfig, itemId: number, now: Date): void {
+  const pr = getPullRequest(db, itemId);
+  if (!pr || pr.state !== 'open' || !pr.headSha) return;
+  const fp = fingerprint([pr.headSha, 'crew-gate-removal']);
+  db.transaction(() => {
+    const charge = chargeBudget(db, itemId, 'heal', fp, zone.budgets);
+    if (!charge.ok) return;
+    insertDrop(
+      db,
+      {
+        id: randomUUID(),
+        dropZoneId: zone.id,
+        workItemId: itemId,
+        role: 'heal',
+        state: 'queued',
+        fingerprint: fp,
+        prNumber: pr.number,
+        headSha: pr.headSha,
+        inputJson: JSON.stringify({
+          feedback: { source: 'crew', text: GATE_REMOVAL_FEEDBACK } satisfies Feedback,
+        }),
+        promptVersion: promptVersions().heal,
+        image: zone.image,
+        chargedKey: charge.charged.join(',') || null,
+        createdAt: now.toISOString(),
+      },
+      now,
+    );
+  })();
+}
+
+/**
+ * Applies the zone's recorded crew actions, each once (#396, #420). A row is claimed by its
+ * `applied_at` first, so two passes act once. With `crew.autoRetry` now off, or the item no longer
+ * parked, it is `skipped`: the next `syncParkBriefings` briefs Command as usual. A rerun first
+ * re-runs the named failed checks (`rerunChecks`); one the forge refused is `skipped` with why.
+ * Then the item is retried exactly as Command's Retry (`retryParkedItem`), and a gate-change retry
+ * queues the heal that removes the change. A PR read that fails releases the claim for the next
+ * pass. Never an allowance or a ruling. Returns how many items were retried.
  */
 export async function applyCrewRetries(
   db: Db,
@@ -542,14 +719,21 @@ export async function applyCrewRetries(
   for (const row of listUnappliedCrewRetries(db, zoneId)) {
     if (!claimCrewRetryApply(db, row.id, now)) continue;
     const item = getWorkItem(db, row.itemId);
-    if (!deps.zone(zoneId).crew.autoRetry || item?.state !== 'parked') {
+    const zone = deps.zone(zoneId);
+    if (!zone.crew.autoRetry || item?.state !== 'parked') {
       settleCrewRetry(db, row.id, 'skipped');
       continue;
     }
-    if (!(await retryParkedItem(db, deps.forges(zoneId), item, now))) {
+    const forges = deps.forges(zoneId);
+    if (row.kind === 'rerun' && (await rerunChecks(db, forges, row, item.id, now)) !== 'retry') {
+      continue;
+    }
+    const gate = row.kind === 'retry' && (item.reason ?? '').startsWith(GATE_SCRIPT_PARK);
+    if (!(await retryParkedItem(db, forges, item, now))) {
       releaseCrewRetryApply(db, row.id, now);
       continue;
     }
+    if (gate) enqueueGateRemoval(db, zone, item.id, now);
     settleCrewRetry(db, row.id, 'retried');
     retried++;
   }

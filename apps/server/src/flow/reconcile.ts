@@ -514,8 +514,9 @@ export async function reconcileZone(
     actions += await advanceGoalChanges(db, forges, zone, now);
     // An arbiter's acting ruling on a review disagreement: the item is retried, as Command's Retry.
     actions += await applyArbitrations(db, deps, zone.id, now);
-    // The crew's one retry of a failed implementation on its own diagnosis (#396), as Command's
-    // Retry; before the parked briefings, so one it skips is briefed this pass.
+    // The crew's one action on a parked item on its own diagnosis (#396, #420): a retry as
+    // Command's Retry, or a re-run of failed checks then a retry; before the parked briefings, so
+    // one it skips is briefed this pass.
     actions += await applyCrewRetries(db, deps, zone.id, now);
     actions += await flushCrewOps(db, forges, zone, secrets, now);
     // In the same pass that confirms crew issue numbers: a split's comment names its children.
