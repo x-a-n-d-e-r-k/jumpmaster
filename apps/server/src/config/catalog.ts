@@ -165,7 +165,13 @@ const WORDS: Words[] = [
   w(
     'claude.fableWeeklyDropCap',
     'Most Fable drops in seven days',
-    'The most drops that may run on Fable in any trailing seven days. Raising it spends more of the plan on Fable.',
+    "The most drops that may run on Fable in any trailing seven days, applied only until Claude reports Fable's weekly limit. Raising it spends more of the plan on Fable.",
+    'number',
+  ),
+  w(
+    'claude.fableMaxUtilization',
+    'Fable stops at this share of its weekly limit',
+    'Fable runs while Claude reports its weekly limit under this share (0 to 1). Lower keeps more of Fable for your own use; until Claude has reported it, the weekly drop cap applies instead.',
     'number',
   ),
   w(

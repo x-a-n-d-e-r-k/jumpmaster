@@ -13,6 +13,7 @@ import {
   planLabel,
 } from '../config.js';
 import type { Db } from '../db/open.js';
+import { FABLE_MAX_UTILIZATION } from '../fable.js';
 import { listMcpTokens, MAX_TOKEN_DAYS, type McpTokenInfo } from '../mcp/tokens.js';
 import {
   defaultTailscaleDeps,
@@ -509,6 +510,15 @@ function installSettings(config: Config): Setting[] {
       kind: 'number',
       value: config.claude.fableWeeklyDropCap,
       attrs: 'min="0" step="1"',
+    },
+    {
+      path: 'claude.fableMaxUtilization',
+      label:
+        'Fable stops at this share of its weekly limit (until Claude reports it, the drop cap applies)',
+      kind: 'number',
+      value: config.claude.fableMaxUtilization ?? FABLE_MAX_UTILIZATION,
+      // Any value (review M2): a step of 0.05 would make a stored 0.82 block the whole form.
+      attrs: 'min="0" max="1" step="any"',
     },
     {
       path: 'requireSignedImages',
