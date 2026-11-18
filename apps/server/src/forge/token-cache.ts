@@ -44,6 +44,8 @@ export interface TokenCacheDeps {
 
 export interface TokenCache {
   token(key: TokenKey): Promise<string>;
+  /** The key's cached token's expiry, or null when nothing is cached for it. Never mints. */
+  expiresAt(key: TokenKey): Date | null;
   /** Drops the key's cached token and detaches any mint in progress for it (on a 401). */
   invalidate(key: TokenKey): void;
   /** Drops every cached token and detaches every mint in progress (the kill switch). */
@@ -113,6 +115,10 @@ export function createTokenCache({ mint, register, now }: TokenCacheDeps): Token
       const entry = cached.get(id);
       if (fresh(entry)) return Promise.resolve(entry.token);
       return inFlight.get(id)?.promise ?? start(id, key);
+    },
+    expiresAt(key) {
+      const entry = cached.get(keyId(key));
+      return entry ? new Date(entry.expiresAt.getTime()) : null;
     },
     invalidate(key) {
       const id = keyId(key);
