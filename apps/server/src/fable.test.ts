@@ -8,7 +8,9 @@ import {
 } from './briefings.js';
 import type { ClaudeConfig, Config } from './config.js';
 import { creditsPass } from './credits.js';
+import { applyCrewActions } from './crew/actions.js';
 import { enqueueCrew } from './crew/schedule.js';
+import { setCrewIssue } from './crew/store.js';
 import {
   getDrop,
   getUsageState,
@@ -34,7 +36,7 @@ import {
 import { zonePass } from './flow/snapshot.js';
 import { buildPayload, promptVersions } from './payloads.js';
 import { applyResult } from './results.js';
-import { crewWorld } from './test/crew.js';
+import { crewWorld, ISSUE_BODY } from './test/crew.js';
 import { usageCfg, type ZoneWorld } from './test/fixtures.js';
 import { plus, t0 } from './test/helpers.js';
 import { renderHome } from './ui/pages.js';
@@ -187,6 +189,102 @@ describe('which model a drop gets', () => {
     );
     updateDrop(w.db, 'doc', { requestedModel: FABLE });
     expect(fableStatus(w.db, c, t0).available).toBe(true);
+  });
+});
+
+describe('refutes of security-touching crew issues (#384)', () => {
+  const SECTION = '\n## Security-touching checklist\n\n- D2: fails closed.\n';
+
+  /** A staged crew issue with `body`, ready for a refute. */
+  function staged(body: string): number {
+    const r = applyCrewActions(
+      w.db,
+      w.zone,
+      {
+        fileIssues: [{ key: 'k', objective: 'document-every-endpoint', title: 'Add docs', body }],
+      },
+      { kind: 'drop', dropId: 'd0' },
+      t0,
+    );
+    const id = r.filed[0] ?? -1;
+    setCrewIssue(w.db, id, { state: 'staged', number: 40, bodySha: 'sha-1' }, t0);
+    return id;
+  }
+
+  /** Enqueues the refute through the real schedule and leases it: the payload's model. */
+  async function refuteModel(c: Pick<Config, 'claude'>): Promise<{ id: string; model: string }> {
+    const pass = await zonePass(w.forges, w.zone, 'main');
+    const id = await enqueueCrew(w.db, w.forges, w.zone, pass, promptVersions(), usageCfg, t0);
+    if (!id) throw new Error('no refute drop');
+    const drop = getDrop(w.db, id);
+    expect(drop?.role).toBe('refute');
+    const p = buildPayload(w.db, w.zone, drop as never, secrets, { claude: c.claude, now: t0 });
+    return { id, model: p.model };
+  }
+
+  const report = (utilization: number) =>
+    recordUsageWindows(
+      w.db,
+      { seven_day_overage_included: { utilization, resetsAt: plus(t0, DAY).toISOString() } },
+      plus(t0, -1000),
+      'claude-fable-5-2',
+    );
+
+  test('the section and Fable available: the refute runs on Fable, recorded as requested_model', async () => {
+    staged(`${ISSUE_BODY}${SECTION}`);
+    const { id, model } = await refuteModel(maxPlan);
+    expect(model).toBe(FABLE);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(FABLE);
+    expect(JSON.parse(getDrop(w.db, id)?.inputJson ?? '{}').work).toMatchObject({
+      role: 'refute',
+      securityTouching: true,
+    });
+  });
+
+  test('the section with Fable over its weekly limit: the zone model', async () => {
+    staged(`${ISSUE_BODY}${SECTION}`);
+    report(0.85);
+    expect(fableStatus(w.db, maxPlan, t0).available).toBe(false);
+    const { id, model } = await refuteModel(maxPlan);
+    expect(model).toBe(w.zone.model);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(w.zone.model);
+  });
+
+  test('another heading level and case counts the same', async () => {
+    staged(`${ISSUE_BODY}\n### security-touching CHECKLIST\n\n- x\n`);
+    expect((await refuteModel(maxPlan)).model).toBe(FABLE);
+  });
+
+  test('an issue without the section: the zone model, and securityTouching false', async () => {
+    staged(ISSUE_BODY);
+    const { id, model } = await refuteModel(maxPlan);
+    expect(model).toBe(w.zone.model);
+    expect(JSON.parse(getDrop(w.db, id)?.inputJson ?? '{}').work.securityTouching).toBe(false);
+    // As today: refute and crew-lead never get Fable by role.
+    for (const role of ['refute', 'crew-lead'] as const) {
+      expect(resolveModel(w.db, maxPlan, w.zone, role, t0)).toBe(w.zone.model);
+    }
+  });
+
+  test('a refute stored before #384 (no securityTouching) of a security-touching issue: the zone model', async () => {
+    staged(`${ISSUE_BODY}${SECTION}`);
+    const pass = await zonePass(w.forges, w.zone, 'main');
+    const id = await enqueueCrew(w.db, w.forges, w.zone, pass, promptVersions(), usageCfg, t0);
+    const stored = JSON.parse(getDrop(w.db, id ?? '')?.inputJson ?? '{}');
+    delete stored.work.securityTouching;
+    w.db.prepare('UPDATE drops SET input_json = ? WHERE id = ?').run(JSON.stringify(stored), id);
+    const p = buildPayload(w.db, w.zone, getDrop(w.db, id ?? '') as never, secrets, {
+      claude: maxPlan.claude,
+      now: t0,
+    });
+    expect(p.model).toBe(w.zone.model);
+  });
+
+  test('{ fable: true } makes any role a Fable role, but never the doctor', () => {
+    expect(resolveModel(w.db, maxPlan, w.zone, 'refute', t0, { fable: true })).toBe(FABLE);
+    expect(resolveModel(w.db, maxPlan, w.zone, 'refute', t0, { fable: false })).toBe(w.zone.model);
+    expect(resolveModel(w.db, maxPlan, w.zone, 'doctor', t0, { fable: true })).toBe(w.zone.model);
+    expect(resolveModel(w.db, cfg(), w.zone, 'refute', t0, { fable: true })).toBe(w.zone.model);
   });
 });
 
