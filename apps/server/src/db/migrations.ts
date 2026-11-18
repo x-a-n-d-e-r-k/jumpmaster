@@ -1062,6 +1062,22 @@ CREATE TABLE branch_updates (
 );
 `;
 
+/**
+ * v37: the pasted code is swapped for an install token at once (issue #269). `kind` is how the
+ * invite will be installed (`line`: 24 hours; `cloud_init`: 1 hour). `exchanged_at` marks the
+ * exchange, after which the code works nowhere; the token is kept by its SHA-256 only
+ * (`token_hash`), until `token_expires_at`. An exchanged invite whose token expired counts as
+ * cancelled.
+ */
+const V37_SQL = `
+ALTER TABLE stick_invites ADD COLUMN kind TEXT NOT NULL DEFAULT 'line'
+  CHECK (kind IN ('line','cloud_init'));
+ALTER TABLE stick_invites ADD COLUMN exchanged_at TEXT;
+ALTER TABLE stick_invites ADD COLUMN token_hash TEXT;
+ALTER TABLE stick_invites ADD COLUMN token_expires_at TEXT;
+CREATE UNIQUE INDEX stick_invites_token_hash ON stick_invites (token_hash);
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1099,6 +1115,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 34, sql: V34_SQL, foreignKeysOff: true },
   { version: 35, sql: V35_SQL },
   { version: 36, sql: V36_SQL, foreignKeysOff: true },
+  { version: 37, sql: V37_SQL },
 ];
 
 /**

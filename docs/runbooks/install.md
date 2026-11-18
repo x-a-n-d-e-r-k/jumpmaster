@@ -1179,59 +1179,81 @@ Before you start:
 2. Set **Troopers** to a number from 1 to 64, or leave it empty for **Auto**. Auto runs as many
    troopers as the machine allows (its `JM_MAX_SLOTS` ceiling, 4 by default). You can change the
    count later on the same page.
-3. Press **Add a stick** and re-enter your passphrase (sudo).
+3. Under **How will you install it?**, choose **Paste a line** (the default) or **Cloud-init user
+   data**.
+4. Press **Add a stick** and re-enter your passphrase (sudo).
 
 The result page appears once. It holds a **one-time code**, which:
 
 - works once;
-- expires after 24 hours;
+- expires after 24 hours for **Paste a line**, or after 1 hour for **Cloud-init user data** (the
+  user data stays in the provider's metadata, so its code lives only as long as it takes to create
+  the VPS);
 - is never shown again.
 
-The server keeps only the code's SHA-256. Neither the audit row (`stick.invite`) nor any log
-holds the code.
+The server keeps only the code's SHA-256. Neither the audit row (`stick.invite`, which records
+the kind) nor any log holds the code.
 
-The result page has two tabs:
+The result page shows only the form you chose:
 
-- **Paste on the machine.** Run this as a user who can sudo:
+- **Paste a line.** Run this as a user who can sudo:
 
   ```sh
   curl -fsSL 'https://<address>/install/stick.sh' | sudo sh -s -- jm_enroll_…
   ```
 
-- **Paste when creating the VPS.** A `#cloud-config` for the provider's "user data" (cloud-init)
+- **Cloud-init user data.** A `#cloud-config` for the provider's "user data" (cloud-init)
   field. It installs Tailscale, joins your tailnet, installs Docker if the image has none, and runs
   the same installer line. First replace `TS_AUTHKEY` with an auth key from your Tailscale admin
   console (Settings, Keys). A one-off, pre-approved key is enough.
 
 **What the installer does** (the script is `GET /install/stick.sh`; it holds no secret):
 
-1. It refuses anything but Linux on x86_64 or aarch64.
-2. If Docker is missing, it asks `Install Docker with get.docker.com? [y/N]`. With no terminal, as
+1. It refuses anything but Linux on x86_64 or aarch64, and a machine where a stick is already
+   installed (run it with `--uninstall` first). These checks need no network, so they leave the
+   code unspent.
+2. **It swaps the code for an install token** (issue #269). Its first network call is
+   `POST /install/exchange`, which sends the code as `Authorization: Bearer` from a file. The
+   server answers with a new `jm_install_…` token that works for 30 minutes and is stored as its
+   SHA-256 only. The code is spent at once. The code is on the pasted line, so until this call any
+   local user can read it with `ps` or in `/proc`, and it also lands in shell history, sudo's log
+   and cloud-init user data. After the call it works nowhere: a second exchange or a download with
+   it gets `401 {"error":"this code was already used to start an install; make a new one on the
+   sticks page"}`. Everything after uses the token, which never appears in a command line.
+3. If Docker is missing, it asks `Install Docker with get.docker.com? [y/N]`. With no terminal, as
    in cloud-init, add `--yes` before the code; without `--yes` it stops and says how to install
    Docker.
-3. It downloads cosign, Sigstore's trusted root and the stick image for the machine's platform
-   from the server, sending the code as `Authorization: Bearer` (from a file, never on a command
-   line). The downloads don't use up the code. The SHA-256s of cosign and of the trusted root are
+4. It downloads cosign, Sigstore's trusted root and the stick image for the machine's platform
+   from the server, sending the token as `Authorization: Bearer` (from a file, never on a command
+   line). The downloads don't use up the token. The SHA-256s of cosign and of the trusted root are
    pinned in the script; a download that doesn't match is refused.
-4. It verifies the image fully offline, before `docker load`: cosign checks the release's
+5. It verifies the image fully offline, before `docker load`: cosign checks the release's
    Sigstore bundle on the image's index (its `verify-blob-attestation` command) against this
    repository's release workflow and the pinned trusted root. The machine needs no Sigstore
    access. These are the stick's own steps; see the release runbook's
    [Sticks that fetch from the server](release.md#sticks-that-fetch-from-the-server). An image
    that doesn't verify is never loaded.
-5. It starts the stick as the `jm-stick` container. The container has `--restart unless-stopped`,
+6. It starts the stick as the `jm-stick` container. The container has `--restart unless-stopped`,
    the Docker socket and the `jm-stick` state volume, and these settings:
    - `JM_SERVER_URL`;
-   - `JM_ENROLL_CODE_FILE`: the code, written into the volume with mode 0600;
+   - `JM_ENROLL_CODE_FILE`: the install token, written into the volume with mode 0600 (through
+     stdin when the volume is in a VM); the stick enrolls with it as `{ "enrollCode": <token> }`;
    - `JM_IMAGE_SOURCE=server`;
    - `JM_IMAGE_POLICY=signed`.
-6. It waits up to 60 seconds for the stick to enroll. Then it prints
-   `Enrolled as <name>. Back to your browser.`, or the enrollment error, and deletes the code file.
-   The stick also deletes the code file itself once it enrolls, so the spent code is gone even if
-   the 60-second wait ran out. If a stick already has the invite's name (for example, one that
+7. It waits up to 60 seconds for the stick to enroll. Then it prints
+   `Enrolled as <name>. Back to your browser.`, or the enrollment error, and deletes the token
+   file. The stick also deletes the file itself once it enrolls. If a stick already has the invite's name (for example, one that
    enrolled with the join token after you added the invite), enrolling with the code is refused
    and the invite stays unused: remove that stick, or cancel the invite and add the stick under
    another name.
+
+**When the install fails after the exchange** (a download or the signature check fails,
+`docker run` fails, the enrollment fails, the 60-second wait runs out, or you press Ctrl-C), the
+installer first calls `POST /install/cancel` with the token, waiting 5 seconds at most. The invite
+becomes cancelled, and the token stops working. Then the installer exits non-zero; it never
+reports success. If the cancel fails too, the installer adds `the invite may still be pending:
+press Cancel on the sticks page`. A token that expires before the stick enrolls counts as
+cancelled anyway. Either way, make a new code on the sticks page and paste the new line.
 
 **In the browser**, the sticks page lists the invite as `<name>: waiting for it to check in
 (expires <time>)` until the stick enrolls. You can **Cancel** the invite there (sudo; audited as
@@ -1245,8 +1267,10 @@ these stages in order, and the page refreshes every 3 seconds until the stick is
 3. Its health: the Docker version, `egress-v1`, `image-verify-v1` and the free disk.
 4. **Live**.
 
-The stick gets the invite's name and trooper count. A code that is used, expired, cancelled or
-unknown is refused exactly as a wrong join token is (`401 {"error":"unauthorized"}`).
+The stick gets the invite's name and trooper count. At enrollment, a code or token that is used,
+expired, cancelled, spent or unknown is refused exactly as a wrong join token is
+(`401 {"error":"unauthorized"}`). An expired token gets 401 on every route. A code that was never
+exchanged (a manual install) still downloads and enrolls until it expires.
 
 **Remove a stick** with **Remove** on its row (sudo, and a confirmation), or with
 `jumpmaster ctl sticks remove <name-or-id>`. Removal:

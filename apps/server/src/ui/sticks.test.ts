@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import type { MirrorStatus } from '../images/mirror.js';
 import { t0 } from '../test/helpers.js';
-import { renderSticks } from './sticks.js';
+import { renderInviteResult, renderSticks } from './sticks.js';
 
 const digest = `sha256:${'a'.repeat(64)}`;
 const image = (
@@ -157,5 +157,40 @@ describe('the Remove confirmation (issue #255)', () => {
     expect(text).toContain(
       "This stick keeps any credentials it was already sent. Rotate the Claude and GitHub tokens if you don't trust it. A stick that enrolled with the join token can enroll again until that token is changed.",
     );
+  });
+});
+
+describe('Add a stick: how it will be installed (issue #269)', () => {
+  test('the form asks "How will you install it?": Paste a line (the default) or Cloud-init user data', () => {
+    const html = renderSticks({ sticks: [], zones: [], now: t0, publicUrl: 'https://jm.example' });
+    expect(html).toContain('<legend>How will you install it?</legend>');
+    expect(html).toContain('<input type="radio" name="kind" value="line" checked> Paste a line');
+    expect(html).toContain(
+      '<input type="radio" name="kind" value="cloud_init"> Cloud-init user data',
+    );
+    expect(html).toContain('24 hours');
+    expect(html).toContain('1 hour');
+    // The form sends the choice.
+    expect(html).toContain("kind:(add.querySelector('[name=kind]:checked')");
+  });
+
+  const base = { name: 'vps-1', slots: null, expiresAt: '2026-01-01T01:00:00.000Z' };
+
+  test('a line invite: the result page holds the line only, 24 hours', () => {
+    const html = renderInviteResult({ ...base, kind: 'line', line: 'curl LINE | sudo sh -s -- c' });
+    expect(html).toContain('id="install-line"');
+    expect(html).toContain('curl LINE');
+    expect(html).toContain('(24 hours)');
+    expect(html).not.toContain('id="cloud-init"');
+    expect(html).not.toContain('role="tab"');
+  });
+
+  test('a cloud-init invite: the result page holds the cloud-config only, 1 hour', () => {
+    const html = renderInviteResult({ ...base, kind: 'cloud_init', cloudInit: '#cloud-config\n' });
+    expect(html).toContain('id="cloud-init"');
+    expect(html).toContain('#cloud-config');
+    expect(html).toContain('(1 hour)');
+    expect(html).not.toContain('id="install-line"');
+    expect(html).not.toContain('role="tab"');
   });
 });

@@ -59,6 +59,8 @@ const COSIGN_BIN = process.env.COSIGN_BIN ?? '';
 const fileSha = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex');
 const ROOT_SHA = fileSha(PINNED_ROOT);
 const CODE = `jm_enroll_${'C'.repeat(43)}`;
+/** The install token the fake server swaps the code for (issue #269). */
+const INSTALL_TOKEN = `jm_install_${'T'.repeat(43)}`;
 
 /** Real tools the script uses; docker, curl, uname, id and cosign are stubs. */
 const TOOLS = [
@@ -120,12 +122,25 @@ echo "chown $*" >>"$LOG"
 echo "curl $*" >>"$LOG"
 out=
 prev=
+hdr=
 for a in "$@"; do
   [ "$prev" = -o ] && out=$a
+  if [ "$prev" = -H ]; then case $a in @*) hdr=\${a#@} ;; esac; fi
   prev=$a
   url=$a
 done
+# What each call sent in its header file, which no argv shows.
+if [ -n "$hdr" ]; then printf '%s %s\\n' "$url" "$(cat "$hdr")" >>"$WORK/headers"; fi
 case $url in
+  */install/exchange)
+    if [ -n "\${EXCHANGE_STATUS:-}" ]; then
+      printf '{"error":"%s"}' "\${EXCHANGE_ERROR:-unauthorized}" >"$out"
+      printf '%s' "$EXCHANGE_STATUS"
+      exit 0
+    fi
+    printf '{"token":"%s"}' "$INSTALL_TOKEN_VALUE" >"$out"
+    printf 200 ;;
+  */install/cancel) [ -n "\${CANCEL_FAIL:-}" ] && exit 28; exit 0 ;;
   *get.docker.com*) printf '#!/bin/sh\\nexit 0\\n' >"$out" ;;
   */install/cosign*) [ -e "$WORK/no-cosign" ] && exit 22; cp "$WORK/cosign-stub" "$out" ;;
   */install/trusted-root.json*) cp "$WORK/trusted_root.json" "$out" ;;
@@ -135,6 +150,7 @@ esac
 `,
   docker: `#!/bin/sh
 echo "docker $*" >>"$LOG"
+[ "$1 $2" = "run -d" ] && [ -n "\${RUN_FAIL:-}" ] && exit 125
 case "$1 $2" in
   "container inspect") [ -n "\${EXISTS:-}" ] && exit 0; exit 1 ;;
   "volume create") exit 0 ;;
@@ -165,6 +181,7 @@ case $1 in
   run) echo "mode $(stat -c %a "$VOLDIR/enroll_code" 2>/dev/null || stat -f %Lp "$VOLDIR/enroll_code") $(cat "$VOLDIR/enroll_code")" >>"$LOG" ;;
   logs)
     if [ -n "\${ENROLL_FAIL:-}" ]; then echo 'enroll failed: 401 {"error":"unauthorized"}'
+    elif [ -n "\${ENROLL_SILENT:-}" ]; then echo 'images: from the server, for linux/amd64'
     else echo 'images: from the server, for linux/amd64'; echo 'enrolled as vps-1 (abc-123)'; fi ;;
   stop | rm) ;;
 esac
@@ -234,6 +251,7 @@ function world(o: WorldOptions = {}) {
         TMPDIR: work,
         JM_INSTALL_TTY: join(work, 'no-tty'),
         JM_INSTALL_WAIT: '3',
+        INSTALL_TOKEN_VALUE: INSTALL_TOKEN,
         // The engine: Docker's containerd store, which names the loaded index by its digest.
         IMAGE_ID: layout.digest,
         LOADED: `${STICK_NAME}@${layout.digest}`,
@@ -241,7 +259,14 @@ function world(o: WorldOptions = {}) {
       },
     });
     const text = readFileSync(log, 'utf8');
-    return { ...r, log: text, loaded: text.split('\n').some((l) => l.startsWith('docker load')) };
+    const hdrs = join(work, 'headers');
+    return {
+      ...r,
+      log: text,
+      loaded: text.split('\n').some((l) => l.startsWith('docker load')),
+      /** Each curl call's URL and the header its header file held. */
+      headers: existsSync(hdrs) ? readFileSync(hdrs, 'utf8').split('\n').filter(Boolean) : [],
+    };
   };
   /** The files of the tar the script gave `docker load`. */
   const loadedTar = (): Map<string, Buffer> => {
@@ -319,7 +344,7 @@ describe('the installer script', () => {
     expect(run).toContain('-e JM_IMAGE_SOURCE=server');
     expect(run).toContain('-e JM_IMAGE_POLICY=signed');
     expect(run).not.toContain(CODE);
-    expect(r.log).toContain(`mode 600 ${CODE}`);
+    expect(r.log).toContain(`mode 600 ${INSTALL_TOKEN}`);
     // The trusted root is downloaded with the code; then cosign checks the bundle on the index
     // bytes, offline, against the downloaded root (the fake refuses any other arguments, a HOME
     // that is not empty, or another root), before load.
@@ -384,7 +409,7 @@ describe('the installer script', () => {
       expect(lines.some((l) => l.startsWith('docker image rm jm-install-cosign'))).toBe(true);
       // The volume's Mountpoint is inside Docker Desktop's VM: the code is written by a
       // container, read from stdin, never on a command line, 0600, and removed once enrolled.
-      expect(r.log).toContain(`mode 600 ${CODE}`);
+      expect(r.log).toContain(`mode 600 ${INSTALL_TOKEN}`);
       for (const l of lines.filter((l) => l.startsWith('docker '))) expect(l).not.toContain(CODE);
       expect(existsSync(join(w.voldir, 'enroll_code'))).toBe(false);
       const stick = lines.find((l) => l.startsWith('docker run -d ')) ?? '';
@@ -435,7 +460,7 @@ describe('the installer script', () => {
     const w = world();
     const r = w.run([CODE], { VOLDIR_HIDDEN: '1' });
     expect(r.status).toBe(0);
-    expect(r.log).toContain(`mode 600 ${CODE}`);
+    expect(r.log).toContain(`mode 600 ${INSTALL_TOKEN}`);
     expect(existsSync(join(w.voldir, 'enroll_code'))).toBe(false);
   });
 
@@ -663,6 +688,99 @@ describe('the installer script', () => {
     const r = world().run([]);
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('no enrollment code');
+  });
+});
+
+describe('the code is swapped for an install token at once, and a failure cancels (issue #269)', () => {
+  const SPENT = 'this code was already used to start an install; make a new one on the sticks page';
+  const WARNING = 'the invite may still be pending: press Cancel on the sticks page';
+  const curls = (log: string) => log.split('\n').filter((l) => l.startsWith('curl '));
+  const argv = (log: string) =>
+    log.split('\n').filter((l) => /^(curl|docker|sudo|cosign|chown) /.test(l));
+
+  test('CLAIM = PROOF: the script says where the code appears, and its first network call is the exchange, with the code in a header file', () => {
+    const script = stickScript(SCRIPT_PARAMS);
+    expect(script).toContain(
+      "# The code appears on the pasted line (and so in ps, shell history and sudo's log) only until\n# the exchange, which is the first network call",
+    );
+    expect(script).not.toContain('The code goes in a header file, never on a command line');
+    const r = world().run([CODE]);
+    expect(r.status, r.stderr).toBe(0);
+    const calls = curls(r.log);
+    expect(calls[0]).toBe(
+      `curl -sS -X POST -H @${calls[0]?.match(/-H @(\S+)/)?.[1]} -o ${calls[0]?.match(/-o (\S+)/)?.[1]} -w %{http_code} ${SERVER}/install/exchange`,
+    );
+    expect(r.headers[0]).toBe(`${SERVER}/install/exchange Authorization: Bearer ${CODE}`);
+    // Every later call sends the token, never the code.
+    expect(r.headers.length).toBe(calls.length);
+    for (const h of r.headers.slice(1)) expect(h).toMatch(/ Authorization: Bearer jm_install_T+$/);
+  });
+
+  test('after the exchange no curl, docker or other argv holds the code or the token; the volume gets the token', () => {
+    for (const env of [{}, { VOLDIR_HIDDEN: '1' }]) {
+      const r = world().run([CODE], env);
+      expect(r.status, r.stderr).toBe(0);
+      for (const l of argv(r.log)) {
+        expect(l).not.toContain(CODE);
+        expect(l).not.toContain(INSTALL_TOKEN);
+      }
+      expect(r.log).toContain(`mode 600 ${INSTALL_TOKEN}`);
+      expect(r.log).not.toContain(`mode 600 ${CODE}`);
+      expect(r.log).not.toContain('/install/cancel');
+    }
+  });
+
+  test("a refused exchange shows the server's reason and stops: nothing downloaded, nothing to cancel", () => {
+    const r = world().run([CODE], { EXCHANGE_STATUS: '401', EXCHANGE_ERROR: SPENT });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(SPENT);
+    expect(curls(r.log)).toHaveLength(1);
+    expect(r.log).not.toContain('/install/cancel');
+    expect(r.log).not.toMatch(/^docker (load|run)/m);
+  });
+
+  test('a stick already installed here stops before the exchange, so the code is not spent', () => {
+    const r = world().run([CODE], { EXISTS: '1' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('already installed');
+    expect(curls(r.log)).toEqual([]);
+  });
+
+  const failures: [string, WorldOptions, Record<string, string>, string][] = [
+    ['docker run failed', {}, { RUN_FAIL: '1' }, 'docker run failed'],
+    ['enroll failed', {}, { ENROLL_FAIL: '1' }, 'could not enroll'],
+    ['the timeout', {}, { ENROLL_SILENT: '1', JM_INSTALL_WAIT: '1' }, 'did not enroll within 1'],
+    ['verification failed', {}, { COSIGN_FAIL: '1' }, 'is not signed by'],
+    ['a download failed', {}, {}, 'could not download cosign'],
+    ['Docker refused', { docker: false }, {}, 'Docker is not installed'],
+  ];
+  for (const [name, o, env, why] of failures) {
+    test(`D2: ${name} → a cancel call with the token, then non-zero, never success`, () => {
+      const w = world(o);
+      if (name === 'a download failed') writeFileSync(join(w.work, 'no-cosign'), '');
+      const r = w.run([CODE], env);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain(why);
+      expect(r.stdout).not.toContain('Enrolled as');
+      const calls = curls(r.log);
+      const last = calls.at(-1) ?? '';
+      expect(last).toMatch(
+        new RegExp(`^curl -fsS -m 5 -X POST -H @\\S+ -o /dev/null ${SERVER}/install/cancel$`),
+      );
+      expect(calls.filter((l) => l.includes('/install/cancel'))).toHaveLength(1);
+      expect(r.headers.at(-1)).toBe(
+        `${SERVER}/install/cancel Authorization: Bearer ${INSTALL_TOKEN}`,
+      );
+      expect(r.stderr).not.toContain(WARNING);
+    });
+  }
+
+  test('a failing cancel adds the warning, and still exits non-zero', () => {
+    const r = world().run([CODE], { ENROLL_FAIL: '1', CANCEL_FAIL: '1' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('could not enroll');
+    expect(r.stderr).toContain(WARNING);
+    expect(r.stdout).not.toContain('Enrolled as');
   });
 });
 

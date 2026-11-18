@@ -31,6 +31,7 @@ import {
   getPullRequest,
   getUsageState,
   getZoneMode,
+  type InviteKind,
   isKilled,
   latestRateLimitEvent,
   latestVerdict,
@@ -55,7 +56,7 @@ import type { AppTokenSource } from './forge/app-tokens.js';
 import type { Forge } from './forge/github.js';
 import { getGoals } from './goals.js';
 import { StickFetches } from './images/fetches.js';
-import { createInvite, inviteProblem } from './install/invite.js';
+import { createInvite, inviteProblem, inviteTtl } from './install/invite.js';
 import { type InstallRouteDeps, registerInstallRoutes } from './install/routes.js';
 import { cloudInit, installLine } from './install/stick-sh.js';
 import { missingFor, zoneRequirements } from './leases.js';
@@ -233,7 +234,10 @@ export function createApp(
     /** The Check's fetch and the tailscale CLI lookup (tests inject both). */
     reach?: ReachDeps & { tailscale?: TailscaleDeps };
     /** The stick installer's signer and cosign (issue #138); defaults from the environment. */
-    install?: Pick<InstallRouteDeps, 'signerRepository' | 'cosignDir' | 'cosignSha256'>;
+    install?: Pick<
+      InstallRouteDeps,
+      'signerRepository' | 'cosignDir' | 'cosignSha256' | 'trustedRootFile'
+    >;
     /** Where an invite's code is registered for the log scrub (default the server's set). */
     scrub?: { add(secret: string): void };
     /** The app token source: drops mint from it, and the kill switch clears its cache. */
@@ -297,6 +301,7 @@ export function createApp(
     config: deps.config,
     now: deps.now,
     ...(deps.images ? { images: deps.images } : {}),
+    ...(deps.scrub ? { scrub: deps.scrub } : {}),
     ...deps.install,
   });
   // Other machines check the address they reach this server at (issue #139): no auth, any Host,
@@ -387,15 +392,20 @@ export function createApp(
         error: `${PUBLIC_URL_NEEDED} first: Settings, Other machines (${PUBLIC_URL_PAGE})`,
         settings: PUBLIC_URL_PAGE,
       });
-    const body = (req.body ?? {}) as { name?: unknown; slots?: unknown };
+    const body = (req.body ?? {}) as { name?: unknown; slots?: unknown; kind?: unknown };
     const request = {
       name: typeof body.name === 'string' ? body.name : '',
       slots: body.slots === 'auto' ? ('auto' as const) : Number(body.slots),
+      // How it will be installed (issue #269): the pasted line by default.
+      kind: (body.kind === undefined ? 'line' : String(body.kind)) as InviteKind,
     };
     const at = deps.now();
     const problem = inviteProblem(deps.db, request, at);
     if (problem) return reply.code(400).send({ error: problem });
-    const { invite, code } = createInvite(deps.db, request, at, deps.scrub);
+    const { invite, code } = createInvite(deps.db, request, at, {
+      ttlMs: inviteTtl(request.kind),
+      ...(deps.scrub ? { scrub: deps.scrub } : {}),
+    });
     // The name, never the code (which is scrubbed here too, should it ever reach a field).
     recordAudit(
       deps.db,
@@ -403,7 +413,12 @@ export function createApp(
         via: p.via,
         action: 'stick.invite',
         target: invite.id,
-        detail: { name: invite.name, slots: invite.slots ?? 'auto', expiresAt: invite.expiresAt },
+        detail: {
+          name: invite.name,
+          slots: invite.slots ?? 'auto',
+          kind: invite.kind,
+          expiresAt: invite.expiresAt,
+        },
       },
       at,
       [code],
@@ -412,8 +427,9 @@ export function createApp(
       name: invite.name,
       slots: invite.slots,
       expiresAt: invite.expiresAt,
-      line: installLine(serverUrl, code),
-      cloudInit: cloudInit(serverUrl, code),
+      ...(invite.kind === 'cloud_init'
+        ? { kind: 'cloud_init' as const, cloudInit: cloudInit(serverUrl, code) }
+        : { kind: 'line' as const, line: installLine(serverUrl, code) }),
     });
     return reply
       .header('cache-control', 'no-store')
