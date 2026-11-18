@@ -28,6 +28,7 @@ import {
   BASE_EGRESS,
   buildPayload,
   crewTemplate,
+  fableWanted,
   neutralise,
   promptVersions,
   renderFeedback,
@@ -876,5 +877,32 @@ describe('egress', () => {
     const p = buildPayload(w.db, z, getDrop(w.db, id ?? '') as Drop, secrets);
     expect(p.egress).toEqual({ mode: 'enforce', allow: [...BASE_EGRESS] });
     expect(DropPayloadSchema.safeParse(p).success).toBe(true);
+  });
+});
+
+describe('fableWanted (#384)', () => {
+  const drop = (inputJson: string | null): Drop =>
+    ({ id: 'd', role: 'refute', inputJson }) as unknown as Drop;
+  const stored = (work: unknown) => JSON.stringify({ work, input: 'x' });
+
+  test('true only for a refute whose stored work says securityTouching: true', () => {
+    expect(
+      fableWanted(drop(stored({ role: 'refute', crewIssueId: 1, securityTouching: true }))),
+    ).toBe(true);
+    expect(
+      fableWanted(drop(stored({ role: 'refute', crewIssueId: 1, securityTouching: false }))),
+    ).toBe(false);
+  });
+
+  test('false for malformed input_json, a non-refute work and a missing field', () => {
+    expect(fableWanted(drop('{not json'))).toBe(false);
+    expect(fableWanted(drop(null))).toBe(false);
+    expect(fableWanted(drop('null'))).toBe(false);
+    expect(fableWanted(drop('{"input":"x"}'))).toBe(false);
+    expect(fableWanted(drop(stored({ role: 'crew-lead', securityTouching: true })))).toBe(false);
+    expect(fableWanted(drop(stored({ role: 'refute', crewIssueId: 1 })))).toBe(false);
+    expect(
+      fableWanted(drop(stored({ role: 'refute', crewIssueId: 1, securityTouching: 'true' }))),
+    ).toBe(false);
   });
 });
