@@ -23,8 +23,10 @@ import type { Db } from './db/open.js';
 import { type Drop, getPullRequest, listWorkItems, updateDrop } from './db/repo.js';
 import { resolveModel } from './fable.js';
 import type { Feedback } from './flow/decide.js';
+import { lastFailure, renderLastFailure } from './gate-output.js';
 import { unsanitizeForgeText } from './outbox.js';
 import { PRESET_EGRESS } from './presets.js';
+import { redactionList } from './scrub.js';
 
 const ROLES: Role[] = ['implement', 'review', 'heal', 'resolve', ...CREW_ROLES];
 
@@ -488,14 +490,22 @@ export function buildPayload(
   };
 
   switch (role) {
-    case 'implement':
+    case 'implement': {
+      // A retry learns how the last attempt failed (#395): untrusted, redacted, fenced.
+      const failure = lastFailure(db, item.id, drop);
       return {
         ...common,
         role,
+        ...(failure
+          ? {
+              prompt: `${common.prompt}\n\n${renderLastFailure(failure, drop.id, redactionList(secrets))}`,
+            }
+          : {}),
         credentials: fetchCredentials,
         resume: drop.headSha !== null,
         resumeSha: drop.headSha ?? undefined,
       };
+    }
     case 'review':
       return {
         ...common,
