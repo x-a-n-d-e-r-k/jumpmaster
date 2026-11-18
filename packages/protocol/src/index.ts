@@ -419,13 +419,29 @@ export const RefuteOutputSchema = z.strictObject({
 });
 export type RefuteOutput = z.infer<typeof RefuteOutputSchema>;
 
-export const DiagnoseOutputSchema = z.strictObject({
-  diagnosis: z.string().max(4000),
-  recommendation: z.enum(['retry', 'leave_parked', 'needs_command']),
-  detail: z.string().max(2000),
-  /** With `retry`: the one concrete change the next attempt must make. The server may act on it. */
-  instruction: z.string().min(1).max(2000).optional(),
-});
+export const DiagnoseOutputSchema = z
+  .strictObject({
+    diagnosis: z.string().max(4000),
+    recommendation: z.enum(['retry', 'leave_parked', 'needs_command', 'rerun_checks']),
+    detail: z.string().max(2000),
+    /** With `retry`: the one concrete change the next attempt must make. The server may act on it. */
+    instruction: z.string().min(1).max(2000).optional(),
+    /**
+     * With `rerun_checks` (#420): the failed checks on the PR's head to run again, by name. The
+     * server re-runs only those it reads as failed on the current head.
+     */
+    checks: z.array(z.string().min(1).max(200)).min(1).max(20).optional(),
+    /**
+     * With `retry` on a gate-change park (#420): the instruction removes the gate change. Without
+     * it, the server never retries a gate-change park; the change stays the owner's to allow.
+     */
+    gateChange: z.literal('remove').optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.recommendation === 'rerun_checks' && (v.checks?.length ?? 0) === 0) {
+      ctx.addIssue({ code: 'custom', path: ['checks'], message: 'rerun_checks needs checks' });
+    }
+  });
 export type DiagnoseOutput = z.infer<typeof DiagnoseOutputSchema>;
 
 /**

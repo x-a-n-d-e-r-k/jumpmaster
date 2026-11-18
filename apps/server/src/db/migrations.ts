@@ -1375,6 +1375,20 @@ CREATE TABLE crew_retries (
 );
 `;
 
+/**
+ * #420: the crew's one action on a parked item is a `retry` or a `rerun` of failed checks; the
+ * `UNIQUE (item_id)` cap counts both. A rerun names its `checks` (a JSON array) and, once the forge
+ * re-ran them, `rerun_at`; a crew action settled `skipped` says why in `reason` (the briefing
+ * quotes it).
+ */
+const V48_SQL = `
+ALTER TABLE crew_retries ADD COLUMN kind TEXT NOT NULL DEFAULT 'retry'
+  CHECK (kind IN ('retry', 'rerun'));
+ALTER TABLE crew_retries ADD COLUMN checks TEXT;
+ALTER TABLE crew_retries ADD COLUMN rerun_at TEXT;
+ALTER TABLE crew_retries ADD COLUMN reason TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1423,6 +1437,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 45, sql: V45_SQL },
   { version: 46, sql: V46_SQL, foreignKeysOff: true },
   { version: 47, sql: V47_SQL },
+  { version: 48, sql: V48_SQL },
 ];
 
 /**

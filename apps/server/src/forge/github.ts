@@ -309,6 +309,17 @@ export interface Forge {
    */
   changeDigest(base: string, head: string): Promise<ChangeDigest>;
   checksFor(sha: string): Promise<ChecksFacts>;
+  /**
+   * A write (#420): re-runs the failed jobs (`POST …/actions/runs/{run_id}/rerun-failed-jobs`) of
+   * each GitHub Actions workflow run on `headSha`, PR `prNumber`'s head, that has a failed job
+   * named in `names`; once per run. Returns the runs it re-ran. A refusal (403, 404) or any other
+   * error rejects; runs re-run before it stay re-run.
+   */
+  rerunFailedChecks(
+    prNumber: number,
+    headSha: string,
+    names: string[],
+  ): Promise<{ runIds: number[] }>;
   getBranchRules(branch: string): Promise<BranchRulesRead>;
   getFileAt(ref: string, path: string): Promise<string | null>;
   listReviews(number: number): Promise<ForgeReview[]>;
@@ -1149,6 +1160,47 @@ export class GitHubForge implements Forge {
       );
     }
     return jobs;
+  }
+
+  async rerunFailedChecks(
+    _prNumber: number,
+    headSha: string,
+    names: string[],
+  ): Promise<{ runIds: number[] }> {
+    const wanted = new Set(names);
+    const workflowRuns = await this.octokit.paginate(
+      this.octokit.rest.actions.listWorkflowRunsForRepo,
+      { owner: this.owner, repo: this.repo, head_sha: headSha, per_page: 100 },
+    );
+    const runIds: number[] = [];
+    for (const run of workflowRuns) {
+      const jobs = await this.octokit.paginate(this.octokit.rest.actions.listJobsForWorkflowRun, {
+        owner: this.owner,
+        repo: this.repo,
+        run_id: run.id,
+        filter: 'latest',
+        per_page: 100,
+      });
+      const failed = jobs.some(
+        (j) =>
+          wanted.has(j.name) &&
+          j.status === 'completed' &&
+          j.conclusion !== null &&
+          FAILED_CONCLUSIONS.has(j.conclusion),
+      );
+      if (failed && !runIds.includes(run.id)) runIds.push(run.id);
+    }
+    for (const id of runIds) {
+      await this.octokit.request(
+        'POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs',
+        {
+          owner: this.owner,
+          repo: this.repo,
+          run_id: id,
+        },
+      );
+    }
+    return { runIds };
   }
 
   async getBranchRules(branch: string): Promise<BranchRulesRead> {

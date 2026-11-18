@@ -415,7 +415,13 @@ export function settleArbitration(db: Db, id: number, s: ArbitrationSettle, now:
 export type CrewRetryOutcome = 'retried' | 'skipped';
 
 /**
- * The crew's one retry of a parked work item on its own diagnosis (#396): recorded with the
+ * The crew's one action on a parked item (#396, #420): a `retry` on its own diagnosis, or a
+ * `rerun` of failed checks it judged flaky, then a retry.
+ */
+export type CrewActionKind = 'retry' | 'rerun';
+
+/**
+ * The crew's one action on a parked work item on its own diagnosis (#396, #420): recorded with the
  * diagnose result, applied by the next active pass.
  */
 export type CrewRetry = {
@@ -425,59 +431,85 @@ export type CrewRetry = {
   briefingId: number;
   /** The diagnose drop whose result asked for it. */
   dropId: string;
+  kind: CrewActionKind;
   diagnosis: string;
+  /** A retry's instruction for the next attempt; empty for a rerun. */
   instruction: string;
+  /** A rerun's check names. */
+  checks: string[];
   createdAt: string;
   appliedAt: string | null;
+  /** When the forge re-ran a rerun's checks. */
+  rerunAt: string | null;
   outcome: CrewRetryOutcome | null;
+  /** Why a skipped action did nothing, in plain words. */
+  reason: string | null;
 };
 
 export type NewCrewRetry = Pick<
   CrewRetry,
   'zoneId' | 'itemId' | 'briefingId' | 'dropId' | 'diagnosis' | 'instruction'
-> & { createdAt: Date };
+> & { createdAt: Date; kind?: CrewActionKind; checks?: string[] };
 
 const RETRY_COLS = `id, zone_id AS zoneId, item_id AS itemId, briefing_id AS briefingId,
-  drop_id AS dropId, diagnosis, instruction, created_at AS createdAt, applied_at AS appliedAt,
-  outcome`;
+  drop_id AS dropId, kind, diagnosis, instruction, checks, created_at AS createdAt,
+  applied_at AS appliedAt, rerun_at AS rerunAt, outcome, reason`;
+
+type CrewRetryRow = Omit<CrewRetry, 'checks'> & { checks: string | null };
+
+const fromRow = (r: CrewRetryRow): CrewRetry => {
+  let checks: string[] = [];
+  try {
+    const parsed = JSON.parse(r.checks ?? '[]') as unknown;
+    if (Array.isArray(parsed)) checks = parsed.filter((c): c is string => typeof c === 'string');
+  } catch {
+    checks = [];
+  }
+  return { ...r, checks };
+};
 
 /**
- * Records a crew retry; throws a UNIQUE violation if the item has one already: one crew retry per
- * work item, ever, by the schema.
+ * Records a crew action; throws a UNIQUE violation if the item has one already: one crew action
+ * (retry or rerun) per work item, ever, by the schema.
  */
 export function insertCrewRetry(db: Db, r: NewCrewRetry): number {
   const res = db
     .prepare(
-      `INSERT INTO crew_retries (zone_id, item_id, briefing_id, drop_id, diagnosis, instruction,
-         created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO crew_retries (zone_id, item_id, briefing_id, drop_id, kind, diagnosis,
+         instruction, checks, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       r.zoneId,
       r.itemId,
       r.briefingId,
       r.dropId,
+      r.kind ?? 'retry',
       r.diagnosis,
       r.instruction,
+      r.checks ? JSON.stringify(r.checks) : null,
       r.createdAt.toISOString(),
     );
   return Number(res.lastInsertRowid);
 }
 
-/** The work item's crew retry, if it ever had one. */
+/** The work item's crew action, if it ever had one. */
 export function getCrewRetry(db: Db, itemId: number): CrewRetry | undefined {
-  return db.prepare(`SELECT ${RETRY_COLS} FROM crew_retries WHERE item_id = ?`).get(itemId) as
-    | CrewRetry
+  const r = db.prepare(`SELECT ${RETRY_COLS} FROM crew_retries WHERE item_id = ?`).get(itemId) as
+    | CrewRetryRow
     | undefined;
+  return r && fromRow(r);
 }
 
-/** The zone's crew retries not yet applied, oldest first. */
+/** The zone's crew actions not yet applied, oldest first. */
 export function listUnappliedCrewRetries(db: Db, zoneId: string): CrewRetry[] {
-  return db
-    .prepare(
-      `SELECT ${RETRY_COLS} FROM crew_retries WHERE zone_id = ? AND applied_at IS NULL
-       ORDER BY id`,
-    )
-    .all(zoneId) as CrewRetry[];
+  return (
+    db
+      .prepare(
+        `SELECT ${RETRY_COLS} FROM crew_retries WHERE zone_id = ? AND applied_at IS NULL
+         ORDER BY id`,
+      )
+      .all(zoneId) as CrewRetryRow[]
+  ).map(fromRow);
 }
 
 /** Claims a crew retry for one pass to apply: false when another pass has it already. */
@@ -496,7 +528,21 @@ export function releaseCrewRetryApply(db: Db, id: number, now: Date): void {
   ).run(id, now.toISOString());
 }
 
-/** Records what became of a claimed crew retry. */
-export function settleCrewRetry(db: Db, id: number, outcome: CrewRetryOutcome): void {
-  db.prepare('UPDATE crew_retries SET outcome = ? WHERE id = ?').run(outcome, id);
+/** Records that the forge re-ran a rerun's checks: a later pass only retries the item. */
+export function markCrewRerun(db: Db, id: number, now: Date): void {
+  db.prepare('UPDATE crew_retries SET rerun_at = ? WHERE id = ?').run(now.toISOString(), id);
+}
+
+/** Records what became of a claimed crew action, and why a skipped one did nothing. */
+export function settleCrewRetry(
+  db: Db,
+  id: number,
+  outcome: CrewRetryOutcome,
+  reason?: string,
+): void {
+  db.prepare('UPDATE crew_retries SET outcome = ?, reason = ? WHERE id = ?').run(
+    outcome,
+    reason ?? null,
+    id,
+  );
 }

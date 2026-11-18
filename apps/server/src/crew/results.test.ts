@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import type { DropResult } from '@jumpmaster/protocol';
-import { beforeEach, describe, expect, test } from 'vitest';
+import nock from 'nock';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest';
 import {
   applyPendingRulings,
   listBriefings,
@@ -27,8 +28,9 @@ import {
   upsertPullRequest,
 } from '../db/repo.js';
 import { zonePass } from '../flow/snapshot.js';
+import { GitHubForge } from '../forge/github.js';
 import { expireLeases } from '../leases.js';
-import { unsanitizeForgeText } from '../outbox.js';
+import { type ForgePair, unsanitizeForgeText } from '../outbox.js';
 import { buildPayload, promptVersions } from '../payloads.js';
 import { applyResult, type ResultDeps } from '../results.js';
 import { syncDropZone } from '../sync.js';
@@ -1938,6 +1940,547 @@ describe('the crew retries a failed implementation once on its own diagnosis (#3
         expect(crewMayRetry(h.db, h.zone, 1), name).toBe(false);
       }
       expect(checked).toContain('blocked');
+    });
+  });
+});
+
+describe('the crew acts once on a parked PR on its own diagnosis (#420)', () => {
+  const gateOk = { name: 'test', exitCode: 0, durationMs: 10, timedOut: false, outputTail: '' };
+  const INSTRUCTION =
+    'Merge main again; the conflict in config.ts is resolved by keeping both keys.';
+  const DIAGNOSIS = 'The last resolve ran out of budget on a conflict in config.ts.';
+  const diag = (o: Record<string, unknown> = {}) => ({
+    diagnosis: DIAGNOSIS,
+    recommendation: 'retry',
+    detail: 'Retry it with the fix.',
+    instruction: INSTRUCTION,
+    ...o,
+  });
+  const rerun = (checks: string[] = ['images']) => ({
+    diagnosis: 'The images step failed on a registry timeout; it passed on the parent commit.',
+    recommendation: 'rerun_checks',
+    detail: 'Re-run the images check.',
+    checks,
+  });
+  const IMAGES_FAILED = {
+    state: 'failure' as const,
+    names: ['ci', 'images'],
+    failed: [{ name: 'images', conclusion: 'failure' }],
+  };
+
+  type Park =
+    | 'budget exhausted: resolve'
+    | 'budget exhausted: base-sync'
+    | 'heal made no changes (CI)'
+    | 'heal blocked (CI)'
+    | 'gate script changed'
+    | 'human hold'
+    | 'hand-opened conflict'
+    | 'no_changes'
+    | 'review disagreement'
+    | 'heal made no changes (review)'
+    | 'heal blocked (review)';
+
+  const item = (h: Harness) => listWorkItems(h.db, 'main').find((i) => i.id === 1);
+  const briefings = (h: Harness) =>
+    listBriefings(h.db, { zoneId: 'main', kind: 'parked' }).filter((b) => b.subject === 'item:1');
+  const openBriefing = (h: Harness) => briefings(h).find((b) => b.state === 'open');
+  const rows = (h: Harness) =>
+    (h.db.prepare('SELECT COUNT(*) AS n FROM crew_retries').get() as { n: number }).n;
+  const count = (h: Harness, table: string) =>
+    (h.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+  const prNumber = (h: Harness) => getPullRequest(h.db, 1)?.number ?? -1;
+  async function diagnose(h: Harness, result: DropResult): Promise<string> {
+    const { dropId, epoch, payload } = await h.lease();
+    expect(payload.role).toBe('diagnose');
+    expect(await h.postResult(dropId, epoch, result)).toBe(204);
+    return dropId;
+  }
+  /** No crew result ever writes a ruling or a gate allowance: checked after every case. */
+  function noRulings(h: Harness, name = ''): void {
+    expect(count(h, 'rulings'), name).toBe(0);
+    expect(count(h, 'gate_allowances'), name).toBe(0);
+  }
+
+  /** A zone that requires CI, with branch rules that require the `ci` check. */
+  async function ciHarness(): Promise<Harness> {
+    const h = await harness({
+      zone: { crew: crewOn, triage: { gate: false }, ciRequired: true },
+    });
+    for (const id of ['author', 'reviewer'] as const) {
+      const r = h.forge.state.rules[id];
+      if (r.kind === 'ok') r.rules.requiredChecks = ['ci'];
+    }
+    return h;
+  }
+  const plain = () => harness({ zone: { crew: crewOn, triage: { gate: false } } });
+
+  /** PR at head 1, approved, the `images` check failed: a heal on CI feedback is queued. */
+  async function toCiHeal(h: Harness): Promise<void> {
+    await toPrOpen(h, headN(1));
+    await h.reconcile();
+    await h.finishDrop('review', {
+      status: 'completed',
+      gates: [gateOk],
+      verdict: { decision: 'approve', summary: 'ok', findings: [] },
+    });
+    h.forge.state.checks.set(headN(1), IMAGES_FAILED);
+    for (let n = 0; n < 5 && !h.queuedRoles().includes('heal'); n++) await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['heal']);
+  }
+
+  /** PR at head 1, changes requested by the automated review: a heal on review feedback. */
+  async function toReviewHeal(h: Harness): Promise<void> {
+    await toPrOpen(h, headN(1));
+    await h.reconcile();
+    await h.finishDrop('review', {
+      status: 'completed',
+      gates: [gateOk],
+      verdict: {
+        decision: 'request_changes',
+        summary: 'no',
+        findings: [{ severity: 'major', detail: 'cover the empty list' }],
+      },
+    });
+    for (let n = 0; n < 5 && !h.queuedRoles().includes('heal'); n++) await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['heal']);
+  }
+
+  /** Two heals that change nothing on the same findings park the item. */
+  async function healsNoChanges(h: Harness): Promise<void> {
+    await h.finishDrop('heal', { status: 'no_changes', gates: [gateOk] });
+    await h.reconcile();
+    await h.finishDrop('heal', { status: 'no_changes', gates: [gateOk] });
+  }
+
+  const pkg = (scripts: Record<string, string>): string => JSON.stringify({ name: 'x', scripts });
+  /** Head `sha` of the PR changes the `test` gate script, or leaves it as on the base. */
+  function gateChange(h: Harness, sha: string, changed = true): void {
+    h.forge.state.pullFiles.set(prNumber(h), {
+      files: [{ path: 'package.json' }],
+      complete: true,
+    });
+    h.forge.state.files.set('base0:package.json', pkg({ test: 'vitest' }));
+    h.forge.state.files.set(
+      `${sha}:package.json`,
+      pkg({ test: changed ? 'vitest --passWithNoTests' : 'vitest' }),
+    );
+  }
+
+  /**
+   * Issue 1 parked on `park` through the real flow where it can be (its state set directly where
+   * the flow would take a budget's worth of rounds), then a pass raises its briefing and queues
+   * its diagnose drop.
+   */
+  async function parkedOn(park: Park): Promise<Harness> {
+    let h: Harness;
+    switch (park) {
+      case 'budget exhausted: resolve':
+      case 'budget exhausted: base-sync':
+      case 'hand-opened conflict': {
+        h = await plain();
+        await toPrOpen(h, headN(1));
+        const reason =
+          park === 'hand-opened conflict' ? 'hand-opened PR on agent branch: #9' : park;
+        setWorkItemState(h.db, 1, 'parked', reason, h.now());
+        break;
+      }
+      case 'heal made no changes (CI)':
+        h = await ciHarness();
+        await toCiHeal(h);
+        await healsNoChanges(h);
+        break;
+      case 'heal blocked (CI)':
+        h = await ciHarness();
+        await toCiHeal(h);
+        await h.finishDrop('heal', {
+          status: 'blocked',
+          reason: 'cannot reproduce the images failure; re-run the job',
+          gates: [gateOk],
+        });
+        break;
+      case 'heal made no changes (review)':
+        h = await plain();
+        await toReviewHeal(h);
+        await healsNoChanges(h);
+        break;
+      case 'heal blocked (review)':
+        h = await plain();
+        await toReviewHeal(h);
+        await h.finishDrop('heal', { status: 'blocked', reason: 'blocked', gates: [gateOk] });
+        break;
+      case 'gate script changed':
+        h = await plain();
+        await toPrOpen(h, headN(1));
+        gateChange(h, headN(1));
+        await h.reconcile();
+        break;
+      case 'human hold': {
+        h = await plain();
+        await toPrOpen(h, headN(1));
+        const pull = h.forge.state.pulls.get(prNumber(h));
+        if (pull) pull.labels = ['jm:hold'];
+        await h.reconcile();
+        break;
+      }
+      case 'no_changes':
+        h = await plain();
+        for (let n = 0; n < 5 && item(h)?.state !== 'parked'; n++) {
+          await h.reconcile();
+          await h.finishDrop('implement', { status: 'no_changes', gates: [] });
+        }
+        expect(item(h)?.reason).toBe('no_changes');
+        break;
+      case 'review disagreement':
+        // The arbiter off, so the diagnose runs as it does for any park the arbiter does not take.
+        h = await arbiterHarness({ zone: { crew: { ...crewOn, arbiter: false } } });
+        await toHealsExhausted(h);
+        break;
+    }
+    await h.reconcile();
+    expect(item(h)?.state, park).toBe('parked');
+    expect(openBriefing(h), park).toBeDefined();
+    expect(h.queuedRoles(), park).toEqual(['diagnose']);
+    return h;
+  }
+
+  const ACCEPTED: Park[] = [
+    'budget exhausted: resolve',
+    'budget exhausted: base-sync',
+    'heal made no changes (CI)',
+    'heal blocked (CI)',
+  ];
+  const REFUSED: Park[] = [
+    'human hold',
+    'hand-opened conflict',
+    'no_changes',
+    'review disagreement',
+    'heal made no changes (review)',
+    'heal blocked (review)',
+  ];
+
+  describe('crewMayRetry', () => {
+    test.each([...ACCEPTED, 'gate script changed' as Park])(
+      'accepts %s with an open PR',
+      async (park) => {
+        const h = await parkedOn(park);
+        expect(crewMayRetry(h.db, h.zone, 1)).toBe(true);
+        const off = { ...h.zone, crew: { ...h.zone.crew, autoRetry: false } };
+        expect(crewMayRetry(h.db, off, 1)).toBe(false);
+      },
+    );
+
+    test.each(REFUSED)('refuses %s', async (park) => {
+      const h = await parkedOn(park);
+      expect(crewMayRetry(h.db, h.zone, 1)).toBe(false);
+    });
+
+    test('refuses an accepted reason once the PR is closed', async () => {
+      const h = await parkedOn('budget exhausted: resolve');
+      const pr = getPullRequest(h.db, 1);
+      upsertPullRequest(h.db, { ...(pr as never), state: 'closed' }, h.now());
+      expect(crewMayRetry(h.db, h.zone, 1)).toBe(false);
+    });
+  });
+
+  test.each(ACCEPTED)(
+    '%s: a retry is recorded once, withdraws the briefing, and the item is retried',
+    async (park) => {
+      const h = await parkedOn(park);
+      const raised = openBriefing(h);
+      const dropId = await diagnose(h, completed(diag()));
+      expect(getCrewRetry(h.db, 1)).toMatchObject({
+        kind: 'retry',
+        briefingId: raised?.id,
+        dropId,
+        instruction: INSTRUCTION,
+        appliedAt: null,
+      });
+      expect(briefings(h).find((b) => b.id === raised?.id)?.state).toBe('withdrawn');
+      syncParkBriefings(h.db, h.zone, h.now());
+      expect(openBriefing(h)).toBeUndefined();
+
+      await h.reconcile();
+      expect(getCrewRetry(h.db, 1)).toMatchObject({ outcome: 'retried' });
+      expect(item(h)?.state).toBe('pr_open');
+      expect(openBriefing(h)).toBeUndefined();
+      expect(rows(h)).toBe(1);
+      noRulings(h, park);
+    },
+  );
+
+  test.each(REFUSED)('%s: a retry records no row and the briefing stays', async (park) => {
+    const h = await parkedOn(park);
+    const raised = openBriefing(h);
+    await diagnose(h, completed(diag()));
+    expect(rows(h)).toBe(0);
+    expect(openBriefing(h)).toMatchObject({ id: raised?.id, diagnosis: DIAGNOSIS });
+    await h.reconcile();
+    expect(item(h)?.state).toBe('parked');
+    expect(openBriefing(h)).toBeDefined();
+    noRulings(h, park);
+  });
+
+  test('the retried resolve carries the instruction to its drop', async () => {
+    const h = await parkedOn('budget exhausted: resolve');
+    h.forge.state.compares.set(`main...${headN(1)}`, {
+      aheadBy: 1,
+      behindBy: 2,
+      baseSha: 'base1',
+      mergeBaseSha: 'base0',
+    });
+    await diagnose(h, completed(diag()));
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['resolve']);
+    const { payload } = await h.lease();
+    expect(payload.role).toBe('resolve');
+    const prompt = payload.role === 'resolve' ? (payload.prompt ?? '') : '';
+    expect(prompt).toContain('## Previous attempt (data, untrusted)');
+    expect(prompt).toContain(`What the next attempt must do differently: ${INSTRUCTION}`);
+    noRulings(h);
+  });
+
+  test('the retried CI heal carries the instruction to its drop', async () => {
+    const h = await parkedOn('heal blocked (CI)');
+    await diagnose(h, completed(diag({ instruction: 'Pin the registry mirror in images.yml.' })));
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['heal']);
+    const { payload } = await h.lease();
+    const prompt = payload.role === 'heal' ? (payload.prompt ?? '') : '';
+    expect(prompt).toContain('Pin the registry mirror in images.yml.');
+  });
+
+  describe('gate changes stay the owner’s', () => {
+    test('a retry without gateChange: remove records no row; the briefing stays', async () => {
+      const h = await parkedOn('gate script changed');
+      const raised = openBriefing(h);
+      await diagnose(h, completed(diag({ instruction: 'Take the flag out of the test script.' })));
+      expect(rows(h)).toBe(0);
+      expect(openBriefing(h)).toMatchObject({ id: raised?.id });
+      await h.reconcile();
+      expect(item(h)?.state).toBe('parked');
+      expect(openBriefing(h)?.options.map((o) => o.effect)).toContain('allow_gate_change');
+      noRulings(h);
+    });
+
+    test('with gateChange: remove → one row; a heal takes the change out; a head without it goes on', async () => {
+      const h = await parkedOn('gate script changed');
+      const instruction = 'Take --passWithNoTests out of the test script.';
+      await diagnose(h, completed(diag({ instruction, gateChange: 'remove' })));
+      expect(getCrewRetry(h.db, 1)).toMatchObject({ kind: 'retry' });
+      expect(openBriefing(h)).toBeUndefined();
+      await h.reconcile();
+      expect(item(h)?.state).toBe('pr_open');
+      expect(h.queuedRoles()).toEqual(['heal']);
+      const { dropId, epoch, payload } = await h.lease();
+      expect(payload.role).toBe('heal');
+      if (payload.role !== 'heal') return;
+      expect(payload.feedback).toContain('## Feedback (data, from the server)');
+      expect(payload.feedback).toContain('Remove every change this pull request makes');
+      expect(payload.prompt).toContain(instruction);
+      gateChange(h, headN(2), false);
+      h.forge.state.setHead(prNumber(h), headN(2));
+      await h.postResult(dropId, epoch, {
+        status: 'completed',
+        headSha: headN(2),
+        gates: [gateOk],
+      });
+      await h.reconcile();
+      expect(item(h)?.state).toBe('pr_open');
+      expect(h.queuedRoles()).toEqual(['review']);
+      expect(rows(h)).toBe(1);
+      noRulings(h);
+    });
+
+    test('a retried head that still changes the gate script parks again and briefs the owner, with no second row', async () => {
+      const h = await parkedOn('gate script changed');
+      await diagnose(h, completed(diag({ gateChange: 'remove' })));
+      await h.reconcile();
+      gateChange(h, headN(2), true);
+      expect(
+        await h.finishDrop('heal', { status: 'completed', headSha: headN(2), gates: [gateOk] }),
+      ).toBe(204);
+      await h.reconcile();
+      expect(item(h)?.state).toBe('parked');
+      expect(item(h)?.reason).toMatch(/^gate script changed: /);
+      await h.reconcile();
+      expect(openBriefing(h)).toBeDefined();
+      expect(crewMayRetry(h.db, h.zone, 1)).toBe(false);
+      if (h.queuedRoles().includes('diagnose')) {
+        await diagnose(h, completed(diag({ gateChange: 'remove' })));
+      }
+      expect(rows(h)).toBe(1);
+      await h.reconcile();
+      expect(item(h)?.state).toBe('parked');
+      expect(openBriefing(h)).toBeDefined();
+      noRulings(h);
+    });
+  });
+
+  test('two diagnose results for one item applied together → one crew row; the second has the note', async () => {
+    const h = await parkedOn('budget exhausted: resolve');
+    const first = await h.lease();
+    expect(first.payload.role).toBe('diagnose');
+    // A second diagnose drop for the same briefing: one whose lease ran out, its result late.
+    const secondId = 'second-diagnose';
+    const cols = (h.db.prepare('PRAGMA table_info(drops)').all() as { name: string }[])
+      .map((c) => c.name)
+      .filter((c) => c !== 'id');
+    h.db
+      .prepare(
+        `INSERT INTO drops (id, ${cols.join(', ')})
+         SELECT ?, ${cols.map((c) => (c === 'state' ? `'lost'` : c)).join(', ')}
+         FROM drops WHERE id = ?`,
+      )
+      .run(secondId, first.dropId);
+    const rdeps: ResultDeps = { forges: h.forges, zone: h.zone, secrets: [], usageCfg };
+    const d = (id: string) => getDrop(h.db, id) as Drop;
+    // The re-run is recorded first and leaves the briefing open: the retry passes every check but
+    // the schema's cap.
+    await Promise.all([
+      applyCrewResult(h.db, rdeps, d(secondId), completed(rerun()), h.now()),
+      applyCrewResult(h.db, rdeps, d(first.dropId), completed(diag()), h.now()),
+    ]);
+    expect(rows(h)).toBe(1);
+    expect(getCrewRetry(h.db, 1)).toMatchObject({ dropId: secondId, kind: 'rerun' });
+    const second = listEvents(h.db, first.dropId).map((e) => String(e.data.message));
+    expect(second).toContain('crew retry not recorded: the item has one already');
+    noRulings(h);
+  });
+
+  describe('rerun_checks, against GitHub faked by nock', () => {
+    const api = 'https://api.github.com';
+    const gh = new GitHubForge('o', 'r', 'tok');
+    beforeAll(() => {
+      nock.disableNetConnect();
+    });
+    afterEach(() => {
+      nock.cleanAll();
+    });
+    afterAll(() => {
+      nock.enableNetConnect();
+    });
+
+    /** The harness's forges, with the author's re-run going to GitHub (nock). */
+    const withGitHub = (h: Harness): ForgePair => ({
+      ...h.forges,
+      author: { ...h.forge.author, rerunFailedChecks: gh.rerunFailedChecks.bind(gh) },
+    });
+    const ghDeps = (h: Harness) => ({ forges: () => withGitHub(h), zone: () => h.zone });
+    /** Workflow run 11 on `sha` has a failed `images` job, run 12 a passing `lint` job. */
+    function actionsOn(sha: string): void {
+      nock(api)
+        .get('/repos/o/r/actions/runs')
+        .query((q) => q.head_sha === sha)
+        .reply(200, { total_count: 2, workflow_runs: [{ id: 11 }, { id: 12 }] });
+      nock(api)
+        .get('/repos/o/r/actions/runs/11/jobs')
+        .query(true)
+        .reply(200, {
+          total_count: 1,
+          jobs: [{ name: 'images', status: 'completed', conclusion: 'failure' }],
+        });
+      nock(api)
+        .get('/repos/o/r/actions/runs/12/jobs')
+        .query(true)
+        .reply(200, {
+          total_count: 1,
+          jobs: [{ name: 'lint', status: 'completed', conclusion: 'success' }],
+        });
+    }
+    async function rerunRecorded(checks: string[]): Promise<Harness> {
+      const h = await parkedOn('heal blocked (CI)');
+      h.forge.state.checks.set(headN(1), { ...IMAGES_FAILED, names: ['ci', 'images', 'lint'] });
+      await diagnose(h, completed(rerun(checks)));
+      expect(getCrewRetry(h.db, 1)).toMatchObject({ kind: 'rerun', checks, appliedAt: null });
+      // The briefing stays open until the checks are re-run.
+      expect(openBriefing(h)).toBeDefined();
+      return h;
+    }
+
+    test('a failed check on the current head → one rerun-failed-jobs POST per matching run, then the item is retried', async () => {
+      const h = await rerunRecorded(['images']);
+      actionsOn(headN(1));
+      const post = nock(api).post('/repos/o/r/actions/runs/11/rerun-failed-jobs').reply(201, {});
+      expect(await applyCrewRetries(h.db, ghDeps(h), 'main', h.now())).toBe(1);
+      expect(post.isDone()).toBe(true);
+      expect(nock.pendingMocks()).toEqual([]);
+      expect(getCrewRetry(h.db, 1)).toMatchObject({ outcome: 'retried' });
+      expect(getCrewRetry(h.db, 1)?.rerunAt).not.toBeNull();
+      expect(item(h)?.state).toBe('pr_open');
+      syncParkBriefings(h.db, h.zone, h.now());
+      expect(openBriefing(h)).toBeUndefined();
+      noRulings(h);
+    });
+
+    test.each([
+      ['a passing check', 'lint'],
+      ['a check not on the head', 'deploy'],
+    ])('%s → no POST, and the briefing stays', async (_name, check) => {
+      const h = await rerunRecorded([check]);
+      // Nothing is mocked and the network is off: any request to GitHub would be refused.
+      expect(await applyCrewRetries(h.db, ghDeps(h), 'main', h.now())).toBe(0);
+      expect(getCrewRetry(h.db, 1)).toMatchObject({ outcome: 'skipped' });
+      expect(getCrewRetry(h.db, 1)?.reason).toContain('is not a failed check');
+      syncParkBriefings(h.db, h.zone, h.now());
+      expect(item(h)?.state).toBe('parked');
+      expect(openBriefing(h)?.why).toContain(`The crew tried to re-run ${check}: `);
+      noRulings(h);
+    });
+
+    test('a check that failed on an older head only → no POST, and the briefing stays', async () => {
+      const h = await rerunRecorded(['images']);
+      // The PR moved on since: images failed on head 1, the head is now 2.
+      h.forge.state.setHead(prNumber(h), headN(2));
+      const pr = getPullRequest(h.db, 1);
+      upsertPullRequest(h.db, { ...(pr as never), headSha: headN(2) }, h.now());
+      expect(await applyCrewRetries(h.db, ghDeps(h), 'main', h.now())).toBe(0);
+      expect(getCrewRetry(h.db, 1)).toMatchObject({ outcome: 'skipped' });
+      syncParkBriefings(h.db, h.zone, h.now());
+      expect(item(h)?.state).toBe('parked');
+      expect(openBriefing(h)?.why).toContain('The crew tried to re-run images: ');
+    });
+
+    test('403 → no retry, the row settled skipped, and the why says why', async () => {
+      const h = await rerunRecorded(['images']);
+      actionsOn(headN(1));
+      nock(api)
+        .post('/repos/o/r/actions/runs/11/rerun-failed-jobs')
+        .reply(403, { message: 'Resource not accessible by personal access token' });
+      expect(await applyCrewRetries(h.db, ghDeps(h), 'main', h.now())).toBe(0);
+      expect(getCrewRetry(h.db, 1)).toMatchObject({
+        outcome: 'skipped',
+        reason: 'the token lacks the Actions write permission',
+      });
+      await h.reconcile();
+      expect(item(h)?.state).toBe('parked');
+      expect(openBriefing(h)?.why).toMatch(
+        /^The crew tried to re-run images: the token lacks the Actions write permission\./,
+      );
+      // It was the item's one crew action.
+      expect(crewMayRetry(h.db, h.zone, 1)).toBe(false);
+      expect(rows(h)).toBe(1);
+      noRulings(h);
+    });
+
+    test('the forge throwing → the same as 403, never a retry', async () => {
+      const h = await rerunRecorded(['images']);
+      nock(api).get('/repos/o/r/actions/runs').query(true).replyWithError('socket hang up');
+      expect(await applyCrewRetries(h.db, ghDeps(h), 'main', h.now())).toBe(0);
+      expect(getCrewRetry(h.db, 1)).toMatchObject({ outcome: 'skipped' });
+      await h.reconcile();
+      await h.reconcile();
+      expect(item(h)?.state).toBe('parked');
+      expect(openBriefing(h)?.why).toContain('The crew tried to re-run images: ');
+      expect(rows(h)).toBe(1);
+      noRulings(h);
+    });
+
+    test('rerun_checks on a gate-change park records nothing', async () => {
+      const h = await parkedOn('gate script changed');
+      await diagnose(h, completed(rerun()));
+      expect(rows(h)).toBe(0);
+      expect(openBriefing(h)).toBeDefined();
     });
   });
 });

@@ -20,7 +20,7 @@ import {
 } from './config.js';
 import { appliedItemArbitration, getCrewRetry } from './crew/store.js';
 import type { Db } from './db/open.js';
-import { type Drop, getPullRequest, listWorkItems, updateDrop } from './db/repo.js';
+import { type Drop, getPullRequest, listWorkItems, updateDrop, type WorkItem } from './db/repo.js';
 import { resolveModel } from './fable.js';
 import type { Feedback } from './flow/decide.js';
 import { type CrewRetryNote, lastFailure, renderLastFailure } from './gate-output.js';
@@ -91,7 +91,12 @@ function crewRetryNote(
   drop: Pick<Drop, 'id' | 'createdAt'>,
 ): CrewRetryNote | undefined {
   const r = getCrewRetry(db, itemId);
-  if (r?.outcome !== 'retried' || r.appliedAt === null || drop.createdAt < r.appliedAt) {
+  if (
+    r?.kind !== 'retry' ||
+    r.outcome !== 'retried' ||
+    r.appliedAt === null ||
+    drop.createdAt < r.appliedAt
+  ) {
     return undefined;
   }
   const failedSince = db
@@ -109,6 +114,47 @@ function crewRetryNote(
 }
 
 /**
+ * The crew's retry of an item with an open PR (#420), for a heal or resolve drop of that retry:
+ * the row says `retried`, the drop was created at or after it was applied, and the item was not
+ * briefed as parked since. So it rides every drop of the crew's retry and stops once the item
+ * parks again.
+ */
+function crewPrRetryNote(
+  db: Db,
+  item: Pick<WorkItem, 'id' | 'dropZoneId'>,
+  drop: Pick<Drop, 'createdAt'>,
+): CrewRetryNote | undefined {
+  const r = getCrewRetry(db, item.id);
+  if (
+    r?.kind !== 'retry' ||
+    r.outcome !== 'retried' ||
+    r.appliedAt === null ||
+    drop.createdAt < r.appliedAt
+  ) {
+    return undefined;
+  }
+  const parkedSince = db
+    .prepare(
+      `SELECT 1 FROM briefings WHERE zone_id = ? AND kind = 'parked' AND subject = ?
+         AND created_at > ? AND created_at <= ? LIMIT 1`,
+    )
+    .get(item.dropZoneId, `item:${item.id}`, r.appliedAt, drop.createdAt);
+  return parkedSince ? undefined : { diagnosis: r.diagnosis, instruction: r.instruction };
+}
+
+/** A heal's or resolve's prompt with the crew's retry note (#420), if it carries one. */
+function withCrewRetry(
+  prompt: string,
+  db: Db,
+  item: Pick<WorkItem, 'id' | 'dropZoneId'>,
+  drop: Pick<Drop, 'id' | 'createdAt'>,
+  secrets: string[],
+): string {
+  const note = crewPrRetryNote(db, item, drop);
+  return note ? `${prompt}\n\n${renderLastFailure(undefined, drop.id, secrets, note)}` : prompt;
+}
+
+/**
  * Wraps server-provided data in a per-drop fence. Callers neutralise the text first, so it cannot
  * contain a marker that closes the fence early.
  */
@@ -121,7 +167,9 @@ export function renderFeedback(f: Feedback, dropId: string): string {
   const heading =
     f.source === 'human'
       ? '## Feedback (data, from trusted reviewers)'
-      : '## Automated review findings (data, untrusted)';
+      : f.source === 'crew'
+        ? '## Feedback (data, from the server)'
+        : '## Automated review findings (data, untrusted)';
   return `${heading}\n\n${fence(dropId, 'feedback', neutralise(unsanitizeForgeText(f.text)))}`;
 }
 
@@ -555,13 +603,25 @@ export function buildPayload(
         ...common,
         role,
         pr: pr(),
-        prompt: `${common.prompt}${arbiterRuling(db, drop)}`,
+        prompt: withCrewRetry(
+          `${common.prompt}${arbiterRuling(db, drop)}`,
+          db,
+          item,
+          drop,
+          redactionList(secrets),
+        ),
         credentials: fetchCredentials,
         feedback: renderFeedback(input.feedback, drop.id),
       };
     }
     case 'resolve':
-      return { ...common, role, pr: pr(), credentials: fetchCredentials };
+      return {
+        ...common,
+        role,
+        pr: pr(),
+        prompt: withCrewRetry(common.prompt, db, item, drop, redactionList(secrets)),
+        credentials: fetchCredentials,
+      };
     default:
       throw new Error(`unknown drop role ${String(drop.role)}`);
   }
