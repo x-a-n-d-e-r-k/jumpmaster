@@ -3,9 +3,17 @@ import { containsSecret } from '@jumpmaster/protocol';
 import type { DropZoneConfig } from './config.js';
 import type { Db } from './db/open.js';
 import { getDropZoneDefaultBranch, getZoneMode, isKilled } from './db/repo.js';
-import { gitBlobSha } from './forge/github.js';
+import { branchProtectionProblems } from './flow/guards.js';
+import { type ChecksFacts, gitBlobSha } from './forge/github.js';
 import { getGoals, parseGoals } from './goals.js';
-import { type ForgePair, opMarker } from './outbox.js';
+import {
+  type ForgePair,
+  type MergePayload,
+  opKeys,
+  opMarker,
+  type PostReviewPayload,
+  runOp,
+} from './outbox.js';
 
 /**
  * Goal changes (#336 crew chat, #362): the only path that writes a zone's goal file. The chat (or
@@ -310,4 +318,193 @@ export function goalChangeDiff(db: Db, id: number): string {
   return lineDiff(base, c.text)
     .filter((l) => !l.startsWith('  '))
     .join('\n');
+}
+
+/**
+ * Records the owner's confirmation of an open goal change at `sha` (the confirm page, after the
+ * passphrase and after reading the PR head). One change is confirmed once: false when it is not
+ * open any more, or `sha` is not the commit the server made for it.
+ */
+export function confirmGoalChange(db: Db, id: number, sha: string, now: Date): boolean {
+  const at = now.toISOString();
+  const r = db
+    .prepare(
+      `UPDATE goal_changes SET state = 'confirmed', confirmed_sha = @sha, confirmed_at = @at,
+         error = NULL, updated_at = @at
+       WHERE id = @id AND state = 'open' AND head_sha = @sha`,
+    )
+    .run({ id, sha, at });
+  return r.changes === 1;
+}
+
+/** Why a change must be proposed again, in the server's words. */
+const AGAIN = 'propose the change again';
+
+/** The reviewer's approval of a goal change: fixed words, with no text of the proposal's. */
+export const goalChangeReviewBody = (goalPath: string, id: number): string =>
+  `Approved by Jumpmaster: the owner confirmed this change of ${goalPath} (goal change ${id}) in the browser, at this commit.`;
+
+/**
+ * Whether the zone's required checks pass on `sha`, as the flow judges an agent PR (with CI
+ * required, only the named required checks count).
+ */
+function checksPass(zone: DropZoneConfig, required: string[], c: ChecksFacts): boolean {
+  if (zone.ciRequired && required.length === 0) return false;
+  if (c.state === 'success') return required.every((n) => c.names.includes(n));
+  return c.state === 'none' && !zone.ciRequired && required.length === 0;
+}
+
+/**
+ * One confirmed change, one step on: reads its PR and merges it only when the server opened it
+ * (its body ends with `opMarker('goal:<id>')`), it changes the zone's goal file and nothing else
+ * (a complete list), its head is still the SHA the owner confirmed, the goal file on the default
+ * branch is still the one the change was made from, the branch rules are safe, and the required
+ * checks pass. Then the reviewer approves the confirmed SHA (none in starter mode, as agent PRs)
+ * and the PR is squash-merged at it, both through the outbox. Anything that can only come right by
+ * proposing again refuses the change; a read that failed, or checks not yet green, waits.
+ */
+async function advanceGoalChange(
+  db: Db,
+  forges: ForgePair,
+  zone: DropZoneConfig,
+  c: GoalChange,
+  now: Date,
+): Promise<boolean> {
+  const sha = c.confirmedSha;
+  const path = zone.crew.goalPath;
+  const refuse = (why: string) => {
+    update(db, c.id, { state: 'refused', error: `${why}: ${AGAIN}` }, now);
+    return true;
+  };
+  const wait = (error: string) => {
+    if (error !== c.error) update(db, c.id, { error }, now);
+    return false;
+  };
+  if (sha === null || c.prNumber === null) return refuse('the change has no confirmed commit');
+  const author = forges.author;
+  let step = 'read the pull request';
+  try {
+    const pr = await author.getPull(c.prNumber);
+    if (pr === null) return refuse('the pull request is gone');
+    if (pr.merged) {
+      update(db, c.id, { state: 'merged', error: null }, now);
+      return true;
+    }
+    if (pr.state !== 'open') {
+      update(db, c.id, { state: 'closed', error: `the pull request was closed: ${AGAIN}` }, now);
+      return true;
+    }
+    const lastLine = pr.body.trimEnd().split('\n').pop() ?? '';
+    if (lastLine !== opMarker(`goal:${c.id}`) || pr.headRef !== GOAL_CHANGE_BRANCH(c.id))
+      return refuse('the pull request is not the one Jumpmaster opened for this change');
+    if (pr.headSha !== sha)
+      return refuse('the pull request changed after you confirmed it, so it is not merged');
+    step = 'list the changed files';
+    const files = await author.listPullFiles(pr.number);
+    const only = files.files[0];
+    if (
+      !files.complete ||
+      files.files.length !== 1 ||
+      only?.path !== path ||
+      only.previousPath !== undefined
+    )
+      return refuse(`the pull request changes more than ${path}`);
+    step = 'read the goal file';
+    const [onBase, onDefault, confirmed] = await Promise.all([
+      c.baseSha === null ? Promise.resolve(null) : author.getFileAt(c.baseSha, path),
+      author.getFileAt(pr.baseRef, path),
+      author.getFileAt(sha, path),
+    ]);
+    if (confirmed !== c.text)
+      return refuse(`${path} at the confirmed commit is not the proposed text`);
+    if (onDefault !== onBase) return refuse(`${path} changed on ${pr.baseRef} since the proposal`);
+    step = 'read the branch rules';
+    const reviewer = forges.reviewer;
+    const [authorRules, reviewerRules] = await Promise.all([
+      author.getBranchRules(pr.baseRef),
+      reviewer ? reviewer.getBranchRules(pr.baseRef) : null,
+    ]);
+    const problems = branchProtectionProblems(
+      { author: authorRules, reviewer: reviewerRules },
+      zone,
+    );
+    if (problems === null) return wait('could not read the branch rules: waiting');
+    if (problems.length > 0)
+      return wait(`unsafe branch protection: ${problems.join('; ')}: waiting`);
+    const required = authorRules.kind === 'ok' ? authorRules.rules.requiredChecks : [];
+    step = 'read the checks';
+    const checks = await author.checksFor(sha);
+    if (checks.state === 'failure') return wait(`the checks failed on ${sha.slice(0, 7)}: waiting`);
+    if (!checksPass(zone, required, checks))
+      return wait(`waiting for the required checks on ${sha.slice(0, 7)}`);
+  } catch (err) {
+    return wait(failure(step, err));
+  }
+
+  // Starter mode has no reviewer identity: the author merges alone, as agent PRs do.
+  if (forges.reviewer !== null) {
+    const review: PostReviewPayload = {
+      pr: c.prNumber,
+      event: 'APPROVE',
+      commitId: sha,
+      body: goalChangeReviewBody(path, c.id),
+    };
+    const r = await runOp(
+      db,
+      forges,
+      {
+        kind: 'post_review',
+        opKey: opKeys.goalReview(c.id, sha),
+        zoneId: zone.id,
+        itemId: null,
+        payload: review,
+      },
+      now,
+    );
+    if (r.state === 'failed') return wait('could not post the approval: waiting');
+    if (r.state !== 'done') return false;
+  }
+  const merge: MergePayload = {
+    pr: c.prNumber,
+    sha,
+    title: goalChangePullTitle(path, c.id),
+    message: goalChangeCommitMessage(path, c.id),
+  };
+  const m = await runOp(
+    db,
+    forges,
+    {
+      kind: 'merge',
+      opKey: opKeys.goalMerge(c.id, sha),
+      zoneId: zone.id,
+      itemId: null,
+      payload: merge,
+    },
+    now,
+  );
+  if (m.state === 'done') {
+    update(db, c.id, { state: 'merged', error: null }, now);
+    return true;
+  }
+  if (m.state === 'failed') return wait('could not merge the pull request: waiting');
+  return false;
+}
+
+/**
+ * Merges every goal change of the zone the owner confirmed, each only at the commit they confirmed
+ * (a reconcile pass, while the zone is active). The only path that merges a change of the goal
+ * file: agent PRs touching it park on the protected path. Returns how many changes moved on.
+ */
+export async function advanceGoalChanges(
+  db: Db,
+  forges: ForgePair,
+  zone: DropZoneConfig,
+  now: Date,
+): Promise<number> {
+  if (isKilled(db) || getZoneMode(db, zone.id, zone.mode) !== 'active') return 0;
+  let moved = 0;
+  for (const c of listGoalChanges(db, zone.id, 'confirmed')) {
+    if (await advanceGoalChange(db, forges, zone, c, now)) moved++;
+  }
+  return moved;
 }

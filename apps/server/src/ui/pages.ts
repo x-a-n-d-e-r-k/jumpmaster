@@ -28,6 +28,7 @@ import type {
 import { ACTIVE_DROP_STATES } from '../db/repo.js';
 import type { DoctorAction } from '../doctor/checks.js';
 import { fableWindow, isFableWindow, modelFamily, PER_MODEL_WINDOWS } from '../fable.js';
+import type { GoalChange } from '../goal-change.js';
 import { currentObjective, type GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import type { Status } from '../status.js';
@@ -798,6 +799,45 @@ export function renderBriefing(s: {
   );
 }
 
+/** How many ended goal changes (merged, refused, closed) the goals page still lists. */
+const ENDED_GOAL_CHANGES = 3;
+
+/**
+ * The zone's goal changes still in flight, each with what happens next (an open one: its Approve
+ * and merge link), and the last few that ended, with why.
+ */
+function goalChangesBlock(changes: readonly GoalChange[]): string {
+  const live = changes.filter((c) => ['proposed', 'open', 'confirmed'].includes(c.state));
+  const ended = changes
+    .filter((c) => !live.includes(c))
+    .slice(-ENDED_GOAL_CHANGES)
+    .reverse();
+  if (live.length === 0 && ended.length === 0) return '';
+  const pr = (c: GoalChange) =>
+    c.prNumber === null ? '' : ` (pull request #${escapeHtml(c.prNumber)})`;
+  const next = (c: GoalChange): string => {
+    switch (c.state) {
+      case 'proposed':
+        return 'Its pull request opens at the next pass.';
+      case 'open':
+        return `<a href="/goal-changes/${escapeHtml(c.id)}/confirm">Approve and merge</a>`;
+      case 'confirmed':
+        return `Confirmed at <code>${escapeHtml((c.confirmedSha ?? '').slice(0, 7))}</code>: Jumpmaster merges it once its required checks pass.`;
+      case 'merged':
+        return 'Merged.';
+      default:
+        return `Not merged (${escapeHtml(c.state)}).`;
+    }
+  };
+  const rows = [...live, ...ended]
+    .map(
+      (c) =>
+        `<li>Goal change ${escapeHtml(c.id)}${pr(c)}, from the ${escapeHtml(c.source)}: ${next(c)}${c.error ? ` <small>${escapeHtml(c.error)}</small>` : ''}</li>`,
+    )
+    .join('');
+  return `<h3>Goal changes</h3><ul>${rows}</ul>`;
+}
+
 /** A zone's goal ladder, its crew issues, and marker-bearing issues intake did not start. */
 export function renderGoals(s: {
   zone: DropZoneConfig;
@@ -809,13 +849,15 @@ export function renderGoals(s: {
   skippedCrewUnpromoted: number[];
   /** Objectives Command marked done by a ruling: key to the ruling's id. */
   doneByRuling: ReadonlyMap<string, number>;
+  /** The zone's goal changes (#363), oldest first. */
+  goalChanges?: readonly GoalChange[];
 }): string {
   const path = s.zone.crew?.goalPath ?? 'GOAL.md';
   const missing = s.goals?.parse.ok === false && s.goals.parse.error === `${path} not found`;
   // Until the goal can change in the app (#336), the owner edits it on GitHub: a protected path.
   const edit = missing
     ? `<p>${escapeHtml(path)} isn't in the repository yet. <a href="${escapeHtml(zoneHref(s.zone.id))}/intake">Write one with the intake page</a>.</p>`
-    : `<p>The goals live in ${escapeHtml(path)} in ${escapeHtml(s.zone.repo)}. Jumpmaster never commits it, because it is a protected path. <a href="${escapeHtml(githubBlobHref(s.zone.repo, path))}">Open ${escapeHtml(path)} on GitHub</a> and use the pencil to edit it. The crew reads the change at its next cycle.</p>`;
+    : `<p>The goals live in ${escapeHtml(path)} in ${escapeHtml(s.zone.repo)}. It is a protected path: agent pull requests never change it, and Jumpmaster merges a change to it only when you approve it here. Propose a change in the chat, or <a href="${escapeHtml(githubBlobHref(s.zone.repo, path))}">open ${escapeHtml(path)} on GitHub</a> and use the pencil to edit it. The crew reads the change at its next cycle.</p>`;
   let ladder: string;
   if (!s.goals) {
     ladder = `<p>${escapeHtml(path)} has not been read yet.</p>`;
@@ -878,7 +920,7 @@ export function renderGoals(s: {
   return page(
     `<p><a href="/">Back</a> · <a href="${escapeHtml(zoneHref(s.zone.id))}">Zone</a></p><h2>Objectives (goal ladder): ${zoneName(s.zone, s.zones)}</h2>` +
       askButton({ kind: 'goals', zoneId: s.zone.id, ref: s.zone.id }) +
-      `${ladder}${edit}` +
+      `${ladder}${edit}${goalChangesBlock(s.goalChanges ?? [])}` +
       `<h2>Crew issues</h2><table><tr><th>Objective</th><th>Key</th><th>Title</th><th>State</th><th>Issue</th><th>Work item</th><th>Findings</th></tr>${issues}</table>` +
       `<h2>Crew issues not started (no recorded promotion)</h2>${skipped}`,
   );

@@ -459,6 +459,10 @@ export const opKeys = {
   review: (itemId: number, headSha: string, dropId: string) =>
     `review:${itemId}:${headSha}:${dropId}`,
   merge: (itemId: number, headSha: string) => `merge:${itemId}:${headSha}`,
+  /** A goal change's merge (#363): never an item's key, whose id is a bare number. */
+  goalMerge: (changeId: number, sha: string) => `merge:goal-${changeId}:${sha}`,
+  /** The reviewer's approval of a goal change at the SHA the owner confirmed. */
+  goalReview: (changeId: number, sha: string) => `review:goal-${changeId}:${sha}`,
   updateBranch: (itemId: number, headSha: string, baseSha: string) =>
     `update_branch:${itemId}:${headSha}:${baseSha}`,
   issue: (zoneId: string, objective: string, outputKey: string) =>
