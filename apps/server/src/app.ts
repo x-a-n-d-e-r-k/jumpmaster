@@ -15,7 +15,8 @@ import {
   listBriefings,
   listRulings,
 } from './briefings.js';
-import { registerChatRoutes } from './chat/routes.js';
+import { type ChatTurnHub, registerChatRoutes, threadIdOf } from './chat/routes.js';
+import { getThread, listMessages, listThreads } from './chat/store.js';
 import { configReader } from './config/source.js';
 import { ConfigStore } from './config/store.js';
 import type { Config } from './config.js';
@@ -78,6 +79,7 @@ import { buildStatus } from './status.js';
 import { lastSyncResult } from './sync.js';
 import { transcriptPruned } from './transcripts.js';
 import { registerAuthPages } from './ui/auth-pages.js';
+import { renderChatList, renderThread } from './ui/chat.js';
 import { registerConfirmPages } from './ui/confirm.js';
 import { registerGithubPages } from './ui/github.js';
 import {
@@ -217,7 +219,7 @@ export function createApp(
   deps: StickRouteDeps & {
     kick?: () => void;
     /** Starts a chat thread's next queued turn; absent, owner messages wait as `queued`. */
-    chatTurns?: { enqueue(threadId: number): void };
+    chatTurns?: ChatTurnHub;
     /** The chat service's health, for the doctor (`ChatServiceClient.health`); absent without one. */
     chatHealth?: ChatHealth;
     /** A forge on the read token, for the doctor (absent without `JM_GITHUB_READ_TOKEN`). */
@@ -664,6 +666,28 @@ export function createApp(
     const zone = zones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).type('text/plain').send('not found');
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, renderIntake(zone, zones)));
+  });
+
+  // The crew chat's pages: without the chat service (an older compose file) `/chat` names the
+  // one command that adds it.
+  app.get('/chat', async (req, reply) =>
+    reply
+      .type('text/html; charset=utf-8')
+      .send(
+        withCsrf(
+          req,
+          renderChatList(listThreads(deps.db), { serviceMissing: deps.chatTurns === undefined }),
+        ),
+      ),
+  );
+
+  app.get<{ Params: { id: string } }>('/chat/:id', async (req, reply) => {
+    const id = threadIdOf(req.params.id);
+    const thread = id === undefined ? undefined : getThread(deps.db, id);
+    if (!thread) return reply.code(404).type('text/plain').send('not found');
+    return reply
+      .type('text/html; charset=utf-8')
+      .send(withCsrf(req, renderThread(thread, listMessages(deps.db, thread.id))));
   });
 
   app.get('/doctor', async (req, reply) =>

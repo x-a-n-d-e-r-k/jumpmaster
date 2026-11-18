@@ -2,7 +2,16 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { LiveConfig } from '../config/source.js';
 import type { Db } from '../db/open.js';
-import { appendMessage, createThread, getThread, listMessages, listThreads } from './store.js';
+import {
+  appendMessage,
+  type ChatMessage,
+  createThread,
+  getThread,
+  listMessages,
+  listThreads,
+  threadBusy,
+} from './store.js';
+import type { HubEvent } from './turns.js';
 
 /** The longest owner message, in characters. */
 export const MAX_MESSAGE_CHARS = 20_000;
@@ -13,7 +22,34 @@ export interface ChatRouteDeps {
   config: LiveConfig;
   now(): Date;
   /** Starts the thread's next queued turn (Task 7); absent, messages wait as `queued`. */
-  turns?: { enqueue(threadId: number): void };
+  turns?: ChatTurnHub;
+}
+
+/** What the routes need of the turn runner (`ChatTurns`). */
+export interface ChatTurnHub {
+  enqueue(threadId: number): void;
+  /** Absent, the events route replays the stored messages only. */
+  subscribe?(threadId: number, afterSeq: number, fn: (e: HubEvent) => void): () => void;
+}
+
+/** The names of the events `GET /api/chat/threads/:id/events` sends; each carries `id: <seq>`. */
+export const CHAT_SSE_EVENTS = ['message', 'text', 'tool', 'card', 'done'] as const;
+export type ChatSseEvent = (typeof CHAT_SSE_EVENTS)[number];
+
+/** How often an open stream sends a comment, so proxies keep it open. */
+const HEARTBEAT_MS = 25_000;
+
+/** A message as the browser gets it: without the posting session's hash. */
+const publicMessage = ({ sessionHash: _hash, ...m }: ChatMessage) => m;
+
+/** The seq a reconnecting browser last saw: `Last-Event-ID`, else `?after=`, else 0. */
+function afterSeqOf(req: FastifyRequest): number {
+  const header = req.headers['last-event-id'];
+  const query = (req.query as { after?: unknown } | undefined)?.after;
+  for (const v of [Array.isArray(header) ? header[0] : header, query]) {
+    if (typeof v === 'string' && /^\d{1,15}$/.test(v)) return Number(v);
+  }
+  return 0;
 }
 
 const NewThreadBody = z.object({ title: z.string().trim().min(1).max(200).optional() });
@@ -37,7 +73,7 @@ function sessionOf(req: FastifyRequest, reply: FastifyReply): string | undefined
   return p.sessionId;
 }
 
-function threadIdOf(raw: string): number | undefined {
+export function threadIdOf(raw: string): number | undefined {
   if (!/^[1-9]\d{0,15}$/.test(raw)) return undefined;
   const id = Number(raw);
   return Number.isSafeInteger(id) ? id : undefined;
@@ -86,5 +122,80 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     );
     deps.turns?.enqueue(thread.id);
     return reply.code(202).send({ message });
+  });
+
+  /**
+   * The thread's stream (server-sent events): its stored messages after the last seq the browser
+   * saw, then the running turn's events, then `done` once no turn of the thread waits or runs.
+   * Reopening the thread replays what it missed.
+   */
+  app.get<{ Params: { id: string } }>('/api/chat/threads/:id/events', async (req, reply) => {
+    if (!sessionOf(req, reply)) return reply;
+    const id = threadIdOf(req.params.id);
+    const thread = id === undefined ? undefined : getThread(db, id);
+    if (!thread) return reply.code(404).send({ error: 'unknown thread' });
+    let last = afterSeqOf(req);
+
+    reply.hijack();
+    const raw = reply.raw;
+    raw.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+      'x-accel-buffering': 'no',
+    });
+    raw.write('retry: 3000\n\n');
+
+    let ended = false;
+    let replaying = true;
+    let unsubscribe: (() => void) | undefined;
+    const beat = setInterval(() => raw.write(': keep\n\n'), HEARTBEAT_MS);
+    beat.unref();
+    const end = (): void => {
+      if (ended) return;
+      ended = true;
+      clearInterval(beat);
+      unsubscribe?.();
+      raw.end();
+    };
+    const send = (event: ChatSseEvent, seq: number, data: unknown): void => {
+      if (ended) return;
+      last = Math.max(last, seq);
+      raw.write(`event: ${event}\nid: ${seq}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+    const settle = (): void => {
+      if (ended || threadBusy(db, thread.id)) return;
+      send('done', last, { seq: last });
+      end();
+    };
+    const relay = (e: HubEvent): void => {
+      const ev = e.event;
+      if (ev.type === 'message') {
+        const m = ev.message;
+        if (m.role === 'tool') {
+          send('tool', m.seq, { seq: m.seq, text: m.text, createdAt: m.createdAt });
+        } else send('message', m.seq, publicMessage(m));
+        if (!replaying) settle();
+      } else if (ev.type === 'text') {
+        send('text', e.seq, { seq: e.seq, text: ev.text });
+      }
+    };
+    req.raw.on('close', end);
+
+    const { turns } = deps;
+    if (turns?.subscribe) {
+      unsubscribe = turns.subscribe(thread.id, last, relay);
+      replaying = false;
+      if (ended) unsubscribe();
+      settle();
+    } else {
+      // No turn runner: nothing changes while the browser waits, so the replay is all there is.
+      for (const message of listMessages(db, thread.id, last)) {
+        relay({ seq: message.seq, event: { type: 'message', message } });
+      }
+      send('done', last, { seq: last });
+      end();
+    }
+    return reply;
   });
 }
