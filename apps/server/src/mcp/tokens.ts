@@ -101,20 +101,41 @@ function maybePrune(db: Db, now: Date): void {
   pruneMcpAudit(db, now);
 }
 
-export function auditMcp(db: Db, e: McpAuditEntry, now: Date): void {
-  db.prepare(
-    `INSERT INTO mcp_audit (token_id, zone_id, tool, args_sha256, outcome, detail, at)
+/** Records one audit row; returns its id. */
+export function auditMcp(db: Db, e: McpAuditEntry, now: Date): number {
+  const { lastInsertRowid } = db
+    .prepare(
+      `INSERT INTO mcp_audit (token_id, zone_id, tool, args_sha256, outcome, detail, at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    e.tokenId,
-    e.zoneId,
-    e.tool,
-    e.args === undefined ? null : sha256(JSON.stringify(e.args)),
-    e.outcome,
-    e.detail ?? '',
-    now.toISOString(),
-  );
+    )
+    .run(
+      e.tokenId,
+      e.zoneId,
+      e.tool,
+      e.args === undefined ? null : sha256(JSON.stringify(e.args)),
+      e.outcome,
+      e.detail ?? '',
+      now.toISOString(),
+    );
   maybePrune(db, now);
+  return Number(lastInsertRowid);
+}
+
+/**
+ * Sets the outcome of a row already recorded: an external tool's call (ruling R10), reserved
+ * before it ran so the budgets count it, and settled once it has.
+ */
+export function updateMcpAudit(
+  db: Db,
+  id: number,
+  outcome: McpAuditEntry['outcome'],
+  detail?: string,
+): void {
+  db.prepare('UPDATE mcp_audit SET outcome = ?, detail = ? WHERE id = ?').run(
+    outcome,
+    detail ?? '',
+    id,
+  );
 }
 
 /**
