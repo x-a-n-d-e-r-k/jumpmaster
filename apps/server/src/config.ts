@@ -143,6 +143,24 @@ export function mcpConfigOf(config: Pick<Config, 'mcp'>): McpConfig {
   return { ...MCP_DEFAULTS, ...config.mcp };
 }
 
+/** The crew chat's settings (#336): the model a turn runs, how many turns run at once, and how long one may take. */
+export type ChatConfig = {
+  model: string;
+  maxConcurrentTurns: number;
+  turnMinutes: number;
+};
+
+export const CHAT_DEFAULTS: ChatConfig = {
+  model: 'claude-opus-5-5',
+  maxConcurrentTurns: 2,
+  turnMinutes: 10,
+};
+
+/** The chat settings with defaults filled in. */
+export function chatConfigOf(config: Pick<Config, 'chat'>): ChatConfig {
+  return { ...CHAT_DEFAULTS, ...config.chat };
+}
+
 const CrewSchema = z
   .object({
     enabled: z.boolean().default(CREW_DEFAULTS.enabled),
@@ -515,6 +533,14 @@ export const EditableSchema = z.object({
       maxOpenBriefings: z.number().int().nonnegative().default(MCP_DEFAULTS.maxOpenBriefings),
     })
     .default(MCP_DEFAULTS),
+  /** The crew chat: always on, so these only tune it. */
+  chat: z
+    .object({
+      model: z.string().min(1).default(CHAT_DEFAULTS.model),
+      maxConcurrentTurns: z.number().int().min(1).max(4).default(CHAT_DEFAULTS.maxConcurrentTurns),
+      turnMinutes: z.number().int().min(1).max(30).default(CHAT_DEFAULTS.turnMinutes),
+    })
+    .default(CHAT_DEFAULTS),
   /**
    * The address other machines (a new stick) reach this server at: an https origin, no path, query
    * or fragment (issue #139). Unset by default; file mode reads `JM_PUBLIC_URL`. Applied live.
@@ -557,6 +583,8 @@ export interface Config {
   claude: ClaudeConfig;
   /** Absent means the defaults (`MCP_DEFAULTS`): off. */
   mcp?: Partial<McpConfig>;
+  /** Absent means the defaults (`CHAT_DEFAULTS`). */
+  chat?: Partial<ChatConfig>;
   /** Absent means false. */
   requireSignedImages?: boolean;
   /** Absent (or without `publicUrl`): no address for other machines yet. */
