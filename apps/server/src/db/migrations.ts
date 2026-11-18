@@ -1107,6 +1107,38 @@ DROP TABLE mcp_tokens;
 ALTER TABLE new_mcp_tokens RENAME TO mcp_tokens;
 `;
 
+/**
+ * v39 (#350): the crew chat's threads and messages. A message's `seq` is its place in its thread,
+ * allocated inside the insert; `session_hash` is the hash of the browser session that posted an
+ * owner message (never the session id), so a guarded change it asks for binds to that session.
+ */
+const V39_SQL = `
+CREATE TABLE chat_threads (
+  id                 INTEGER PRIMARY KEY,
+  title              TEXT NOT NULL,
+  focus_kind         TEXT CHECK (focus_kind IN ('zone','goals','briefing')),
+  focus_zone_id      TEXT,
+  focus_ref          TEXT,
+  claude_session_id  TEXT,
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL
+);
+CREATE INDEX chat_threads_updated ON chat_threads (updated_at);
+CREATE TABLE chat_messages (
+  id            INTEGER PRIMARY KEY,
+  thread_id     INTEGER NOT NULL REFERENCES chat_threads(id),
+  seq           INTEGER NOT NULL,
+  role          TEXT NOT NULL CHECK (role IN ('owner','assistant','tool','system')),
+  text          TEXT NOT NULL,
+  state         TEXT NOT NULL CHECK (state IN ('queued','running','done','failed')),
+  session_hash  TEXT,
+  usage_json    TEXT,
+  error         TEXT,
+  created_at    TEXT NOT NULL,
+  UNIQUE (thread_id, seq)
+);
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1146,6 +1178,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 36, sql: V36_SQL, foreignKeysOff: true },
   { version: 37, sql: V37_SQL },
   { version: 38, sql: V38_SQL, foreignKeysOff: true },
+  { version: 39, sql: V39_SQL },
 ];
 
 /**

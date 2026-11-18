@@ -348,6 +348,9 @@ export const NOT_GUARDED: FreePath[] = [
   free('mcp.writesPerHour', MCP_LIMIT),
   free('mcp.callsPerHour', MCP_LIMIT),
   free('mcp.maxOpenBriefings', MCP_LIMIT),
+  free('chat.model', 'the model the chat answers with; its tools and guards stay the same'),
+  free('chat.maxConcurrentTurns', PACE),
+  free('chat.turnMinutes', PACE),
   free('dropZones[].id', 'the zone key: a different id is a removal plus an add, judged as such'),
   free(
     'dropZones[].readyLabel',
