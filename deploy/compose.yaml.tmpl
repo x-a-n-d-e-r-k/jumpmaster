@@ -19,6 +19,7 @@
 # config/ and data/ keep working, and init's old block in .env is unused and may be deleted.
 #
 # Only the stick mounts the Docker socket, which is root on the host. The UI is on 127.0.0.1 only.
+# The chat service reaches the internet only through chat-egress (the Anthropic API and the forge).
 name: jumpmaster
 
 services:
@@ -63,6 +64,11 @@ services:
       JM_JOIN_TOKEN_FILE: /secrets/join_token
       JM_OPERATOR_TOKEN_FILE: /secrets/operator_token
       JM_VAULT_KEY_FILE: /secrets/vault_key
+      # The crew chat's service, reached on chat-net.
+      JM_CHAT_SERVICE_URL: http://chat:7431
+    networks:
+      - default
+      - chat-net
     volumes:
       - ./data:/data
       - ./config:/config:ro
@@ -118,6 +124,65 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # The crew chat: one Claude process per turn, reading the zones' code. It holds no secrets at rest
+  # (each turn brings its Claude token and a short-lived MCP token), mounts no secrets directory and
+  # no Docker socket, and writes only to its two volumes. It is on chat-net alone, which is
+  # internal: the server reaches it there, and everything else leaves through chat-egress. Root
+  # keeps only what it needs to run git and Claude as the agent uid (setpriv) and to stop them.
+  chat:
+    image: "{{image jumpmaster-trooper}}"
+    entrypoint: ["node", "/opt/trooper/chat/main.js"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - KILL
+    environment:
+      JM_CHAT_LISTEN: 0.0.0.0:7431
+      HTTPS_PROXY: http://chat-egress:3128
+      HTTP_PROXY: http://chat-egress:3128
+      NO_PROXY: jumpmaster
+      # Node's own fetch (the health probes) honours the proxy variables too.
+      NODE_USE_ENV_PROXY: "1"
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      DISABLE_AUTOUPDATER: "1"
+    volumes:
+      - chat-repos:/chat/repos
+      - chat-sessions:/home/agent/.claude
+    networks:
+      - chat-net
+    depends_on:
+      chat-egress:
+        condition: service_started
+    restart: unless-stopped
+
+  # The chat's only way out: the Anthropic API and the forge, nothing else. It listens on its fixed
+  # chat-net address only, and reaches the internet over the default network.
+  chat-egress:
+    image: "{{image jumpmaster-egress}}"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      JM_EGRESS_MODE: enforce
+      JM_EGRESS_ALLOW: api.anthropic.com,github.com,api.github.com
+      JM_EGRESS_BIND: ${JM_CHAT_EGRESS_ADDR:-172.31.254.2}
+    networks:
+      default:
+      chat-net:
+        ipv4_address: ${JM_CHAT_EGRESS_ADDR:-172.31.254.2}
+    restart: unless-stopped
+
   # `docker compose --profile init run --rm init --repo owner/name`: writes config/ (file mode) and
   # the generated secrets into this directory, as the host user. Never started by `up`.
   init:
@@ -139,3 +204,14 @@ services:
 
 volumes:
   jm-stick:
+  chat-repos:
+  chat-sessions:
+
+networks:
+  # Internal: no route out. Change the subnet (and JM_CHAT_EGRESS_ADDR, inside it) only if it
+  # overlaps a network of yours.
+  chat-net:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${JM_CHAT_SUBNET:-172.31.254.0/28}
