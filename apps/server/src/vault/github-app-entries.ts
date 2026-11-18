@@ -80,7 +80,8 @@ const PEM_BLOCK =
 const ISO_DATE_TIME =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/;
 
-function isPrivateKeyPem(pem: string): boolean {
+/** Whether `pem` is one PKCS#1 or PKCS#8 private-key block that Node can load (`parseAppEntry`'s rule). */
+export function isPrivateKeyPem(pem: string): boolean {
   if (!PEM_BLOCK.test(pem)) return false;
   try {
     createPrivateKey(pem);
