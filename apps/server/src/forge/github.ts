@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { containsSecret } from '@jumpmaster/protocol';
+import { isOwnerName, isRepoName } from '@jumpmaster/protocol';
 import { Octokit } from '@octokit/rest';
 
 export type ForgeIssue = {
@@ -450,20 +450,6 @@ export async function bufferedResponse(res: Response): Promise<Response> {
   const copy = new Response(body, { status: res.status, statusText: res.statusText, headers });
   Object.defineProperty(copy, 'url', { value: res.url });
   return copy;
-}
-
-/** A GitHub user or organisation login: letters, digits and single inner hyphens, at most 39 characters. */
-const OWNER_NAME = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/;
-/** A GitHub repository name: letters, digits, `.`, `_` and `-`, at most 100 characters. */
-const REPO_NAME = /^[A-Za-z0-9._-]{1,100}$/;
-
-export function isOwnerName(owner: string): boolean {
-  return OWNER_NAME.test(owner) && owner.length <= 39;
-}
-
-// A token's characters are all legal in a repository name, so token shapes are refused by shape.
-function isRepoName(repo: string): boolean {
-  return REPO_NAME.test(repo) && repo !== '.' && repo !== '..' && !containsSecret(repo, []);
 }
 
 /**

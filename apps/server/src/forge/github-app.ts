@@ -7,7 +7,7 @@
 // none is ever written to the vault, the database or a file. The module does not log, and no error
 // it throws carries a token, the JWT or the key.
 import { createSign } from 'node:crypto';
-import { redactTokenShapes } from '@jumpmaster/protocol';
+import { isOwnerName, isRepoName, redactTokenShapes } from '@jumpmaster/protocol';
 
 const b64url = (v: string | Buffer) => Buffer.from(v).toString('base64url');
 
@@ -166,8 +166,19 @@ export function createGitHubAppBroker(opts: GitHubAppBrokerOptions): GitHubAppBr
     return new GitHubAppError(what, r.status, clean(typeof msg === 'string' ? msg : '', secrets));
   };
 
+  /**
+   * Refuses a name that isn't one before any URL is built or request made (issue #265). The error
+   * never echoes the value: a token pasted into the wrong slot must not reach a log.
+   */
+  const checkNames = (owner: string, repo: string) => {
+    if (!isOwnerName(owner)) throw new Error('GitHub App: owner is not a valid GitHub owner name');
+    if (!isRepoName(repo))
+      throw new Error('GitHub App: repository is not a valid GitHub repository name');
+  };
+
   return {
     async installationFor(owner, repo) {
+      checkNames(owner, repo);
       const bearer = jwt();
       const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/installation`;
       const r = await call('GET', path, bearer);
@@ -195,6 +206,7 @@ export function createGitHubAppBroker(opts: GitHubAppBrokerOptions): GitHubAppBr
     },
 
     async repositoryIdOf(installationId, owner, repo) {
+      checkNames(owner, repo);
       const bearer = jwt();
       const what = `reading the repository id of ${owner}/${repo}`;
       // Narrowed by name, so the token reaches the named repository or none; it can read metadata only.

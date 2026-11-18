@@ -148,7 +148,7 @@ async function readRepo(
   forgeOf: (repo: string, token: string) => GuidanceForge,
   now: () => Date,
 ): Promise<ReadEntry> {
-  if (!REPO.test(repo)) throw new RepoNameError(repo);
+  if (!REPO.test(repo)) throw new RepoNameError();
   const token = config.secrets.githubAuthorToken ?? '';
   // The token this request read with (its snapshot), never the live store's: a read and its key
   // are always the same token's.
@@ -210,8 +210,7 @@ export async function guidanceFor(
 ): Promise<GuidanceResult> {
   // A name the config allows but GitHub's does not (owner/name only): said as such, not as a
   // network failure.
-  if (!REPO.test(zone.repo))
-    return { ok: false, status: 400, error: new RepoNameError(zone.repo).message };
+  if (!REPO.test(zone.repo)) return { ok: false, status: 400, error: new RepoNameError().message };
   const token = config.secrets.githubAuthorToken;
   if (!token) return { ok: false, status: 409, error: NO_AUTHOR };
   const entry = await readRepo(store, config, zone.repo, forgeOf, opts.now ?? systemNow);

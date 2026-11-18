@@ -1,4 +1,4 @@
-import type { GateSpec, Preset } from '@jumpmaster/protocol';
+import { type GateSpec, isRepoFullName, type Preset } from '@jumpmaster/protocol';
 import type { Forge } from '../forge/github.js';
 import { jobNames, runsOnPullRequest } from '../github/workflows.js';
 import { DETECT_FILES, detectAs, detectPreset } from '../presets.js';
@@ -10,12 +10,19 @@ import { DETECT_FILES, detectAs, detectPreset } from '../presets.js';
  * the CI job names (from `.github/workflows/` on the default branch) feed the GitHub guidance.
  */
 
-/** `owner/name` as GitHub spells them; anything else is refused before a request is made. */
-export const REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
+/**
+ * `owner/name` as GitHub spells them; anything else is refused before a request is made. The one
+ * rule shared with the zone schema, the drop payload, the push grant, the forge and the app broker
+ * (issue #265). It replaced a pattern that was looser (a leading or doubled hyphen or 40+
+ * characters in the owner; `.`, `..`, token shapes or 101+ characters in the name), so the stricter
+ * rule is kept.
+ */
+export const REPO: { test(repo: string): boolean } = Object.freeze({ test: isRepoFullName });
 
+/** Never echoes the refused value: a token pasted as the repository must not reach a reply or a log. */
 export class RepoNameError extends Error {
-  constructor(repo: string) {
-    super(`the repository must be owner/name, not ${JSON.stringify(repo.slice(0, 100))}`);
+  constructor() {
+    super('the repository must be owner/name, with a valid GitHub owner and repository name');
   }
 }
 
@@ -96,7 +103,7 @@ export async function detectRepo(
   repo: string,
   opts: { preset?: Preset } = {},
 ): Promise<Detection> {
-  if (!REPO.test(repo)) throw new RepoNameError(repo);
+  if (!REPO.test(repo)) throw new RepoNameError();
   const access = await forge.repoAccess();
   const files = await rootFiles(forge, access.defaultBranch);
   const found = opts.preset ? detectAs(opts.preset, files) : detectPreset(files);
@@ -139,7 +146,7 @@ export async function detectGuidance(
   repo: string,
   opts: { workflows?: boolean } = {},
 ): Promise<Pick<Detection, 'visibility' | 'defaultBranch' | 'ownerType' | 'ciJobs'>> {
-  if (!REPO.test(repo)) throw new RepoNameError(repo);
+  if (!REPO.test(repo)) throw new RepoNameError();
   const access = await forge.repoAccess();
   // Without a token nothing uses the job names: two reads instead of one per workflow.
   const { ciJobs } =
