@@ -1,6 +1,12 @@
+import { z } from 'zod';
 import { type ActionCtx, type ActionResult, configPatchAction } from '../api/operator-actions.js';
+import { recordAudit } from '../auth/audit.js';
+import type { Principal } from '../auth/guard.js';
 import type { ConfigStore } from '../config/store.js';
 import type { Db } from '../db/open.js';
+import { getOutbox, getZoneMode, isKilled, type ZoneMode } from '../db/repo.js';
+import type { IssueFacts } from '../forge/github.js';
+import { type ForgePair, type Op, runOp } from '../outbox.js';
 import { escapeHtml } from '../ui/pages.js';
 import { changedSince } from './inverse.js';
 
@@ -87,6 +93,13 @@ export function recordCard(db: Db, c: NewCard, now: Date): ChatCard {
       now.toISOString(),
     ) as CardRow;
   return toCard(row);
+}
+
+export function getCard(db: Db, id: number): ChatCard | undefined {
+  const row = db.prepare(`SELECT ${COLS} FROM chat_cards WHERE id = ?`).get(id) as
+    | CardRow
+    | undefined;
+  return row && toCard(row);
 }
 
 /** A thread's cards, oldest first. */
@@ -209,4 +222,148 @@ export function undoSettingCard(
   if (!r.ok) return r;
   markCardUndone(ctx.db, card.id, ctx.now());
   return { ok: true, value: { state: 'undone', revision: r.value.revision } };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Undo (#336, Task 14): a label the chat put on comes off, and an issue it closed is reopened,
+// through the outbox as the author identity, once per card.
+
+/** What Undo needs, stored with the card: the label to take off, or the issue to reopen. */
+export type CardUndo =
+  | { op: 'labels'; number: number; label: string }
+  | { op: 'reopen'; number: number };
+
+const CardUndoSchema = z.discriminatedUnion('op', [
+  z.strictObject({
+    op: z.literal('labels'),
+    number: z.number().int().positive(),
+    label: z.string().min(1),
+  }),
+  z.strictObject({ op: z.literal('reopen'), number: z.number().int().positive() }),
+]);
+
+/** The outbox key of a card's Undo: one per card, so a second press never writes again. */
+export const undoOpKey = (zoneId: string, cardId: number, u: CardUndo): string =>
+  u.op === 'labels' ? `labels:${zoneId}:undo:${cardId}` : `reopen:${zoneId}:${cardId}`;
+
+/** The forge write that undoes a card: a state change or a label change, with no text. */
+function undoOp(zoneId: string, cardId: number, u: CardUndo): Op {
+  const opKey = undoOpKey(zoneId, cardId, u);
+  return u.op === 'labels'
+    ? {
+        kind: 'set_labels',
+        opKey,
+        zoneId,
+        itemId: null,
+        payload: { number: u.number, add: [], remove: [u.label] },
+      }
+    : {
+        kind: 'update_issue',
+        opKey,
+        zoneId,
+        itemId: null,
+        payload: { number: u.number, state: 'open' },
+      };
+}
+
+/** Why the issue is no longer as the card left it, or undefined when it still is. */
+function issueChangedSince(issue: IssueFacts | null, u: CardUndo): string | undefined {
+  const lead = `changed since: issue #${u.number}`;
+  if (issue === null) return `${lead} no longer exists`;
+  if (u.op === 'labels') {
+    const has = issue.labels.some((l) => l.toLowerCase() === u.label.toLowerCase());
+    return has ? undefined : `${lead} no longer carries ${u.label}`;
+  }
+  return issue.state === 'closed' ? undefined : `${lead} was reopened`;
+}
+
+const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+type Refusal = Extract<ActionResult<never>, { ok: false }>;
+const refuse = (status: Refusal['status'], error: string): Refusal => ({
+  ok: false,
+  status,
+  error,
+});
+
+/**
+ * Undoes one card's action for `principal` (the browser session that pressed Undo): its label
+ * comes off (`set_labels`) or its issue is reopened (`update_issue` with `state: 'open'`), as the
+ * author identity. Refused (409) with nothing written for a card that has no Undo or is already
+ * undone, under the kill switch, in observe mode (`zoneMode` is the zone's configured mode, where
+ * no control row overrides it), and when someone else has changed the same thing since ("changed
+ * since"). The write's opKey is the card's own, so two presses make one forge write; only one of
+ * them marks the card undone, and the other answers 409.
+ */
+export async function undoCard(
+  db: Db,
+  forges: ForgePair,
+  card: ChatCard,
+  principal: Principal,
+  now: Date,
+  opts: { zoneMode?: ZoneMode; secrets?: string[] } = {},
+): Promise<ActionResult<{ state: 'undone' }>> {
+  const current = getCard(db, card.id);
+  if (!current) return refuse(404, 'unknown card');
+  if (current.state === 'undone') return refuse(409, 'this card is already undone');
+  const parsed = CardUndoSchema.safeParse(current.undo);
+  if (current.state !== 'done' || !parsed.success || current.zoneId === null)
+    return refuse(409, 'this card has no Undo');
+  const u = parsed.data;
+  const zoneId = current.zoneId;
+  if (isKilled(db))
+    return refuse(409, 'the kill switch is engaged: nothing is written to the forge');
+  if (getZoneMode(db, zoneId, opts.zoneMode ?? 'active') === 'observe')
+    return refuse(409, `zone ${zoneId} is in observe mode: nothing is written to the forge`);
+
+  const op = undoOp(zoneId, current.id, u);
+  // A press whose write is already recorded goes on to the outbox, which answers from that row;
+  // only a first press reads the issue, so a second never takes its own write for a change.
+  if (!getOutbox(db, op.opKey)) {
+    let issue: IssueFacts | null;
+    try {
+      issue = await forges.author.getIssue(u.number);
+    } catch (err) {
+      return refuse(502, `reading issue #${u.number} failed: ${errorText(err)}`);
+    }
+    const changed = issueChangedSince(issue, u);
+    if (changed !== undefined) return refuse(409, `${changed}; nothing was undone`);
+  }
+
+  let state: string;
+  let error: string | undefined;
+  try {
+    ({ state, error } = await runOp(db, forges, op, now));
+  } catch (err) {
+    // The kill switch or observe mode, engaged between the check above and the write.
+    return refuse(409, errorText(err));
+  }
+  // `unknown` is left to the outbox's read-back, as every other forge write is.
+  if (state === 'failed') return refuse(502, `undoing failed: ${error ?? state}`);
+
+  const marked = db
+    .prepare(
+      `UPDATE chat_cards SET state = 'undone', undone_at = ? WHERE id = ? AND state = 'done'`,
+    )
+    .run(now.toISOString(), current.id);
+  if (marked.changes === 0) return refuse(409, 'this card is already undone');
+  recordAudit(
+    db,
+    {
+      via: principal.via,
+      action: 'chat.undo',
+      target: `card:${current.id}`,
+      detail: {
+        kind: current.kind,
+        zone: zoneId,
+        issue: u.number,
+        opKey: op.opKey,
+        thread: current.threadId,
+        message: current.messageId,
+      },
+    },
+    now,
+    opts.secrets ?? [],
+  );
+  return { ok: true, value: { state: 'undone' } };
 }

@@ -1,16 +1,24 @@
-import { containsSecret } from '@jumpmaster/protocol';
+import { containsSecret, redact } from '@jumpmaster/protocol';
 import { z } from 'zod';
 import {
   type ActionCtx,
   type ActionResult,
+  auditAction,
   chatPrincipal,
   configPatchAction,
   crewCycleAction,
   ruleAction,
   zoneModeAction,
 } from '../api/operator-actions.js';
+import { type QueueResult, queueIssue } from '../backlog.js';
 import { getBriefing, OBJECTIVE_PREFIX, optionsDigest, raiseBriefing } from '../briefings.js';
-import { type CardKind, type NewCard, recordCard, type SettingUndo } from '../chat/cards.js';
+import {
+  type CardKind,
+  type CardUndo,
+  type NewCard,
+  recordCard,
+  type SettingUndo,
+} from '../chat/cards.js';
 import {
   inversePatch,
   SettingError,
@@ -20,9 +28,17 @@ import {
 } from '../chat/inverse.js';
 import { FLAGS } from '../config/catalog.js';
 import type { DropZoneConfig } from '../config.js';
-import { getUsageState, isKilled } from '../db/repo.js';
+import { getUsageState, getWorkItem, getZoneMode, isKilled, listWorkItems } from '../db/repo.js';
+import type { IssueFacts } from '../forge/github.js';
 import { GOAL_TEXT_MAX, goalChangeDiff, proposeGoalChange } from '../goal-change.js';
 import { getGoals, objectivesDone } from '../goals.js';
+import {
+  type ForgePair,
+  type Op,
+  runOp,
+  type SetLabelsPayload,
+  type UpdateIssuePayload,
+} from '../outbox.js';
 import { redactionList } from '../scrub.js';
 import { dispatchGate } from '../usage.js';
 import { type ChatToolContext, type ChatToolDef, type Outcome, ok, refused } from './kit.js';
@@ -47,7 +63,8 @@ export type Acted = {
   target?: string;
   link?: string;
   pending?: boolean;
-  undo?: unknown;
+  /** What Undo needs, where the action can be reversed. */
+  undo?: CardUndo | SettingUndo;
 };
 
 const zoneLink = (zoneId: string): string => `/zones/${encodeURIComponent(zoneId)}`;
@@ -102,10 +119,26 @@ export function carded(
   args: unknown,
   act: () => Acted,
 ): Outcome {
-  const p = ctx.principal;
-  if (!isChatPrincipal(p)) return act().out;
+  if (!isChatPrincipal(ctx.principal)) return act().out;
   const blocked = chatActionBlocked(ctx, args);
-  const acted: Acted = blocked ? { out: blocked } : act();
+  return cardOf(ctx, kind, blocked ? { out: blocked } : act(), blocked !== null);
+}
+
+/** `carded` for an action that awaits the forge: an external tool's (ruling R10). */
+export async function cardedAsync(
+  ctx: ChatToolContext,
+  kind: CardKind,
+  args: unknown,
+  act: () => Promise<Acted>,
+): Promise<Outcome> {
+  if (!isChatPrincipal(ctx.principal)) return (await act()).out;
+  const blocked = chatActionBlocked(ctx, args);
+  return cardOf(ctx, kind, blocked ? { out: blocked } : await act(), blocked !== null);
+}
+
+/** Records the chat principal's card for what an action did, and returns its outcome. */
+function cardOf(ctx: ChatToolContext, kind: CardKind, acted: Acted, blocked: boolean): Outcome {
+  const p = chatOf(ctx);
   const ok = acted.out.outcome === 'ok';
   const state = !ok ? 'refused' : acted.pending ? 'pending' : 'done';
   const card: NewCard = {
@@ -444,6 +477,221 @@ const changeSettingTool: ChatToolDef = {
   },
 };
 
+// ---------------------------------------------------------------------------------------------
+// The forge action tools (Task 14): a label on, or an issue closed, as the author identity through
+// the outbox, with no text. Each runs outside the call's transaction (R10) and carries Undo.
+
+const issueLink = (zone: DropZoneConfig, n: number): string =>
+  `https://github.com/${zone.repo}/issues/${n}`;
+
+const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/** The zone's forges, or why the chat cannot write to it. */
+function forgesOf(ctx: ChatToolContext, zone: DropZoneConfig): ForgePair | Acted {
+  if (!ctx.forgesFor)
+    return { out: refused('this server has no forge to write through', 'no forge') };
+  return ctx.forgesFor(zone.id);
+}
+const isActed = (f: ForgePair | Acted): f is Acted => 'out' in f;
+
+/** Why the zone writes nothing to its forge now: observe mode. Null when it may. */
+function observing(ctx: ChatToolContext, zone: DropZoneConfig): Acted | null {
+  return getZoneMode(ctx.db, zone.id, zone.mode) === 'observe'
+    ? {
+        out: refused(
+          `zone ${zone.id} is in observe mode: nothing is written to the forge`,
+          'observe mode',
+        ),
+      }
+    : null;
+}
+
+/** Reads one issue for a forge action: the issue, or why the action is refused. */
+async function issueFor(forges: ForgePair, n: number): Promise<IssueFacts | Acted> {
+  let issue: IssueFacts | null;
+  try {
+    issue = await forges.author.getIssue(n);
+  } catch {
+    return { out: refused(`reading issue #${n} failed`, 'forge error') };
+  }
+  if (issue === null) return { out: refused(`no issue #${n}`, 'unknown issue') };
+  if (issue.pullRequest)
+    return { out: refused(`#${n} is a pull request, not an issue`, 'not an issue') };
+  return issue;
+}
+
+/** Runs one forge write through the outbox; null once it is written (or left to read-back). */
+async function written(ctx: ChatToolContext, forges: ForgePair, op: Op): Promise<Acted | null> {
+  try {
+    const r = await runOp(ctx.db, forges, op, ctx.now());
+    if (r.state === 'failed') return { out: refused('the forge write failed', 'forge error') };
+    return null;
+  } catch (err) {
+    // The kill switch or observe mode, engaged between the checks and the write.
+    const text = redact(errorText(err), redactionList(ctx.config.secrets));
+    return { out: refused(text, /observe/.test(text) ? 'observe mode' : 'killed') };
+  }
+}
+
+/** A queue refusal's reason code: the route's status, in the audit's fixed vocabulary. */
+function queueRefusal(r: Extract<QueueResult, { ok: false }>, secrets: string[]): Acted {
+  const detail =
+    r.status === 404
+      ? 'unknown issue'
+      : r.status === 502
+        ? 'forge error'
+        : /observe mode/.test(r.error)
+          ? 'observe mode'
+          : 'not in backlog';
+  return { out: refused(redact(r.error, secrets), detail) };
+}
+
+const IssueArgs = z.strictObject({ zoneId: ZoneId, issue: z.number().int().positive() });
+
+const queueIssueTool: ChatToolDef = {
+  name: 'queue_issue',
+  scope: 'chat-write',
+  external: true,
+  description:
+    '"Work on it", on the owner\'s word: puts the zone\'s ready label on one backlog issue (from ' +
+    'list_open_issues), so intake picks it up on its next pass. Refused for an issue that is ' +
+    "closed, already Jumpmaster's, or by an author without write access. Undo takes the label off.",
+  input: IssueArgs,
+  run(ctx, args: z.infer<typeof IssueArgs>) {
+    const p = chatOf(ctx);
+    return cardedAsync(ctx, 'queue', args, async () => {
+      const zone = zoneNeeded(ctx);
+      if (!zone) return { out: refused('unknown zone', 'unknown zone') };
+      const forges = forgesOf(ctx, zone);
+      if (isActed(forges)) return forges;
+      const r = await queueIssue(ctx.db, forges, zone, args.issue, ctx.now());
+      if (!r.ok) return queueRefusal(r, redactionList(ctx.config.secrets));
+      auditAction(actionCtx(ctx, p), 'zone.queue', { issue: args.issue, opKey: r.opKey }, zone.id);
+      ctx.kick?.();
+      return {
+        out: ok(
+          `Issue #${args.issue} in zone ${zone.id} now carries ${zone.readyLabel}: intake picks it up on its next pass.`,
+        ),
+        summary: `Put ${zone.readyLabel} on issue #${args.issue} in zone ${zone.id}: intake picks it up on its next pass.`,
+        target: `issue:${args.issue}`,
+        link: issueLink(zone, args.issue),
+        undo: { op: 'labels', number: args.issue, label: zone.readyLabel },
+      };
+    });
+  },
+};
+
+const ItemArgs = z.strictObject({ zoneId: ZoneId, itemId: z.number().int().positive() });
+
+const retryParkedTool: ChatToolDef = {
+  name: 'retry_parked',
+  scope: 'chat-write',
+  external: true,
+  description:
+    "Retries a parked work item (from list_work), on the owner's word: puts the zone's retry " +
+    'label on its issue, as a person would; the next pass resets its attempts and puts it back on ' +
+    'its track. Undo takes the label off.',
+  input: ItemArgs,
+  run(ctx, args: z.infer<typeof ItemArgs>) {
+    const p = chatOf(ctx);
+    return cardedAsync(ctx, 'retry', args, async () => {
+      const zone = zoneNeeded(ctx);
+      if (!zone) return { out: refused('unknown zone', 'unknown zone') };
+      const item = getWorkItem(ctx.db, args.itemId);
+      if (!item || item.dropZoneId !== zone.id) {
+        return { out: refused(`no work item ${args.itemId} in zone ${zone.id}`, 'unknown item') };
+      }
+      if (item.state !== 'parked') {
+        return { out: refused(`work item ${item.id} is not parked (${item.state})`, 'not parked') };
+      }
+      const observe = observing(ctx, zone);
+      if (observe) return observe;
+      const forges = forgesOf(ctx, zone);
+      if (isActed(forges)) return forges;
+      const n = item.issueNumber;
+      const issue = await issueFor(forges, n);
+      if ('out' in issue) return issue;
+      if (issue.labels.some((l) => l.toLowerCase() === zone.retryLabel.toLowerCase())) {
+        return {
+          out: refused(`issue #${n} already carries ${zone.retryLabel}`, 'already labeled'),
+        };
+      }
+      const opKey = `labels:${zone.id}:retry:${item.id}:${ctx.now().getTime()}`;
+      const payload: SetLabelsPayload = { number: n, add: [zone.retryLabel], remove: [] };
+      const failed = await written(ctx, forges, {
+        kind: 'set_labels',
+        opKey,
+        zoneId: zone.id,
+        itemId: item.id,
+        payload,
+      });
+      if (failed) return failed;
+      auditAction(actionCtx(ctx, p), 'zone.retry', { item: item.id, issue: n, opKey }, zone.id);
+      ctx.kick?.();
+      return {
+        out: ok(
+          `Issue #${n} (work item ${item.id}) now carries ${zone.retryLabel}: the next pass retries it.`,
+        ),
+        summary: `Put ${zone.retryLabel} on issue #${n} in zone ${zone.id}: the next pass retries work item ${item.id}.`,
+        target: `issue:${n}`,
+        link: issueLink(zone, n),
+        undo: { op: 'labels', number: n, label: zone.retryLabel },
+      };
+    });
+  },
+};
+
+const closeIssueTool: ChatToolDef = {
+  name: 'close_issue',
+  scope: 'chat-write',
+  external: true,
+  description:
+    "Closes an issue, on the owner's word: the state alone, with no comment and no text. Refused " +
+    'while a drop works on it or its pull request is open. Undo reopens it.',
+  input: IssueArgs,
+  run(ctx, args: z.infer<typeof IssueArgs>) {
+    const p = chatOf(ctx);
+    return cardedAsync(ctx, 'close', args, async () => {
+      const zone = zoneNeeded(ctx);
+      if (!zone) return { out: refused('unknown zone', 'unknown zone') };
+      const n = args.issue;
+      const item = listWorkItems(ctx.db, zone.id).find((w) => w.issueNumber === n);
+      if (item?.state === 'in_flight') {
+        return { out: refused(`a drop is working on issue #${n} (in flight)`, 'in flight') };
+      }
+      if (item?.state === 'pr_open') {
+        return { out: refused(`issue #${n} has its pull request open`, 'pr open') };
+      }
+      const observe = observing(ctx, zone);
+      if (observe) return observe;
+      const forges = forgesOf(ctx, zone);
+      if (isActed(forges)) return forges;
+      const issue = await issueFor(forges, n);
+      if ('out' in issue) return issue;
+      if (issue.state !== 'open')
+        return { out: refused(`issue #${n} is already closed`, 'closed') };
+      const opKey = `close:${zone.id}:${n}:${ctx.now().getTime()}`;
+      const payload: UpdateIssuePayload = { number: n, state: 'closed' };
+      const failed = await written(ctx, forges, {
+        kind: 'update_issue',
+        opKey,
+        zoneId: zone.id,
+        itemId: null,
+        payload,
+      });
+      if (failed) return failed;
+      auditAction(actionCtx(ctx, p), 'issue.close', { issue: n, opKey }, zone.id);
+      return {
+        out: ok(`Issue #${n} in zone ${zone.id} is closed.`),
+        summary: `Closed issue #${n} in zone ${zone.id}.`,
+        target: `issue:${n}`,
+        link: issueLink(zone, n),
+        undo: { op: 'reopen', number: n },
+      };
+    });
+  },
+};
+
 const GoalChangeArgs = z.strictObject({
   zoneId: ZoneId,
   // One more than the limit: proposeGoalChange refuses a longer text in its own words.
@@ -506,5 +754,8 @@ export const CHAT_ACTION_TOOLS: ChatToolDef[] = [
   runCrewCycleTool,
   markObjectiveDoneTool,
   changeSettingTool,
+  queueIssueTool,
+  retryParkedTool,
+  closeIssueTool,
   proposeGoalChangeTool,
 ];

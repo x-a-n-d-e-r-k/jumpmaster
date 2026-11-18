@@ -18,7 +18,7 @@ import {
   listRulings,
   raiseBriefing,
 } from '../briefings.js';
-import { type ChatCard, listCards, renderCard, undoSettingCard } from '../chat/cards.js';
+import { type ChatCard, listCards, renderCard, undoCard, undoSettingCard } from '../chat/cards.js';
 import { createThread } from '../chat/store.js';
 import { loadBoot } from '../config/boot.js';
 import { mergeConfigPatch } from '../config/diff.js';
@@ -27,7 +27,16 @@ import type { Config } from '../config.js';
 import { flushCrewOps } from '../crew/flush.js';
 import { listCrewIssues } from '../crew/store.js';
 import { openDb } from '../db/open.js';
-import { getZoneMode, setKilled, setUsageState, upsertDropZone } from '../db/repo.js';
+import {
+  getZoneMode,
+  setKilled,
+  setUsageState,
+  setWorkItemState,
+  setZoneMode,
+  upsertDropZone,
+  upsertWorkItem,
+  type WorkItemState,
+} from '../db/repo.js';
 import { listGoalChanges, openGoalChange } from '../goal-change.js';
 import { objectivesDone } from '../goals.js';
 import { crewOn, crewWorld, GOAL, ISSUE_BODY } from '../test/crew.js';
@@ -434,6 +443,9 @@ describe('chat action tools', () => {
         'run_crew_cycle',
         'mark_objective_done',
         'change_setting',
+        'queue_issue',
+        'retry_parked',
+        'close_issue',
         'propose_goal_change',
       ].sort(),
     );
@@ -443,6 +455,9 @@ describe('chat action tools', () => {
       'raise_briefing',
       'set_zone_mode',
       'run_crew_cycle',
+      'queue_issue',
+      'retry_parked',
+      'close_issue',
       'propose_goal_change',
     ]) {
       expect(byName.get(name)?.inputSchema.required).toContain('zoneId');
@@ -805,5 +820,284 @@ describe('change_setting', () => {
     const [card] = listCards(w.db, w.thread.id);
     expect(card).toMatchObject({ kind: 'setting', state: 'refused' });
     expect(card?.summary).toMatch(/config is managed by the file/);
+  });
+});
+
+/** Every outbox row, as the forge write it records. */
+const outboxRows = (db: Parameters<typeof raiseBriefing>[0]) =>
+  (
+    db
+      .prepare('SELECT op_key AS opKey, kind, payload_json AS payload FROM outbox ORDER BY rowid')
+      .all() as {
+      opKey: string;
+      kind: string;
+      payload: string;
+    }[]
+  ).map((r) => ({ ...r, payload: JSON.parse(r.payload) as Record<string, unknown> }));
+
+/** The browser session that presses Undo. */
+const OWNER: Principal = {
+  kind: 'operator',
+  via: 'session',
+  sessionId: 'a'.repeat(64),
+  sudo: false,
+};
+
+/** A backlog issue (no Jumpmaster label) by a trusted author. */
+async function forgeWorld() {
+  const w = await world();
+  for (const number of [40, 41, 42]) w.f.state.addIssue({ number, title: `Backlog ${number}` });
+  const item = (n: number, state: WorkItemState, reason?: string) => {
+    const wi = upsertWorkItem(
+      w.db,
+      {
+        dropZoneId: 'main',
+        issueNumber: n,
+        title: `Issue ${n}`,
+        body: 'b',
+        author: 'human',
+        priority: 0,
+        isFix: false,
+        issueCreatedAt: t0.toISOString(),
+      },
+      t0,
+    );
+    setWorkItemState(w.db, wi.id, state, reason, t0);
+    return wi.id;
+  };
+  const card = (): ChatCard => {
+    const c = listCards(w.db, w.one.id).at(-1);
+    if (!c) throw new Error('no card');
+    return c;
+  };
+  const writes = (method: string) => w.f.author.calls.filter((c) => c.method === method);
+  return { ...w, item, card, writes };
+}
+
+describe('chat forge action tools and Undo', () => {
+  test('D5 queue_issue through chat and POST /api/control/zones/:id/queue put the same label on', async () => {
+    const w = await forgeWorld();
+    const app = Fastify();
+    registerGuard(app, { db: w.db, config: w.config, now: () => t0 });
+    registerControlRoutes(app, {
+      db: w.db,
+      config: w.config,
+      now: () => t0,
+      forgesFor: () => w.forges,
+    });
+    close = () => app.close();
+    const session = operatorSession(w.db);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/control/zones/main/queue',
+      headers: { ...session.headers, host: HOST },
+      payload: { issue: 40 },
+    });
+    expect(res.statusCode).toBe(200);
+    const r = await w.call('queue_issue', { zoneId: 'main', issue: 41 });
+    expect(r.isError).toBeFalsy();
+    expect(w.f.state.issues.get(40)?.labels).toEqual([w.zone.readyLabel]);
+    expect(w.f.state.issues.get(41)?.labels).toEqual([w.zone.readyLabel]);
+    const [http, chat] = outboxRows(w.db);
+    expect(http).toMatchObject({ kind: 'set_labels', payload: { number: 40 } });
+    expect(chat?.kind).toBe('set_labels');
+    expect(chat?.payload).toEqual({ ...http?.payload, number: 41 });
+    const [chatRow, httpRow] = listAudit(w.db, 2);
+    expect(httpRow).toMatchObject({ via: 'session', action: 'zone.queue', target: 'main' });
+    expect(chatRow).toMatchObject({ via: 'chat', action: 'zone.queue', target: 'main' });
+    expect(chatRow?.detail).toMatchObject({ issue: 41, thread: w.one.id, message: 22 });
+    expect(w.card()).toMatchObject({
+      kind: 'queue',
+      state: 'done',
+      zoneId: 'main',
+      target: 'issue:41',
+      link: 'https://github.com/octo/demo/issues/41',
+    });
+    expect(w.card().summary).toContain(w.zone.readyLabel);
+    expect(renderCard(w.card())).toMatch(/Undo/);
+    // The same refusals as the route: an issue already Jumpmaster's is not queued again.
+    const again = await w.call('queue_issue', { zoneId: 'main', issue: 41 });
+    expect(again.isError).toBe(true);
+    expect(w.card()).toMatchObject({ kind: 'queue', state: 'refused', undo: null });
+  });
+
+  test('close_issue writes state closed with no body and no comment', async () => {
+    const w = await forgeWorld();
+    const r = await w.call('close_issue', { zoneId: 'main', issue: 42 });
+    expect(r.isError).toBeFalsy();
+    expect(w.f.state.issues.get(42)?.state).toBe('closed');
+    const rows = outboxRows(w.db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe('update_issue');
+    // CLAIM=PROOF: the payload names the issue and the state, and nothing else.
+    expect(Object.keys(rows[0]?.payload ?? {}).sort()).toEqual(['number', 'state']);
+    expect(rows[0]?.payload).toEqual({ number: 42, state: 'closed' });
+    expect(w.writes('updateIssue').map((c) => c.args)).toEqual([[42, { state: 'closed' }]]);
+    expect(w.writes('createIssueComment')).toEqual([]);
+    expect(w.card()).toMatchObject({ kind: 'close', state: 'done', target: 'issue:42' });
+    expect(listAudit(w.db, 1)[0]).toMatchObject({ via: 'chat', action: 'issue.close' });
+  });
+
+  test('D1 close_issue refuses an issue whose work item is in flight or has a PR open', async () => {
+    const w = await forgeWorld();
+    w.item(1, 'in_flight');
+    w.item(2, 'pr_open');
+    for (const issue of [1, 2]) {
+      const r = await w.call('close_issue', { zoneId: 'main', issue });
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/in flight|pull request/);
+      expect(w.f.state.issues.get(issue)?.state).toBe('open');
+      expect(w.card()).toMatchObject({ kind: 'close', state: 'refused', undo: null });
+    }
+    expect(outboxRows(w.db)).toEqual([]);
+    expect(w.writes('updateIssue')).toEqual([]);
+  });
+
+  test('retry_parked puts the retry label on a parked item, and Undo takes it off', async () => {
+    const w = await forgeWorld();
+    const parked = w.item(3, 'parked', 'ci failed');
+    const ready = w.item(4, 'ready');
+    const no = await w.call('retry_parked', { zoneId: 'main', itemId: ready });
+    expect(no.isError).toBe(true);
+    expect(no.text).toMatch(/not parked/);
+    const r = await w.call('retry_parked', { zoneId: 'main', itemId: parked });
+    expect(r.isError).toBeFalsy();
+    expect(w.f.state.issues.get(3)?.labels).toContain(w.zone.retryLabel);
+    expect(outboxRows(w.db).at(-1)).toMatchObject({
+      kind: 'set_labels',
+      payload: { number: 3, add: [w.zone.retryLabel], remove: [] },
+    });
+    expect(w.card()).toMatchObject({ kind: 'retry', state: 'done', target: 'issue:3' });
+    const u = await undoCard(w.db, w.forges, w.card(), OWNER, t0);
+    expect(u).toEqual({ ok: true, value: { state: 'undone' } });
+    expect(w.f.state.issues.get(3)?.labels).not.toContain(w.zone.retryLabel);
+    // Another zone's item is not this zone's to retry.
+    const elsewhere = await w.call('retry_parked', { zoneId: 'other', itemId: parked });
+    expect(elsewhere.isError).toBe(true);
+  });
+
+  test('Undo of a queue removes the ready label and marks the card undone', async () => {
+    const w = await forgeWorld();
+    await w.call('queue_issue', { zoneId: 'main', issue: 40 });
+    const card = w.card();
+    const u = await undoCard(w.db, w.forges, card, OWNER, t0);
+    expect(u).toEqual({ ok: true, value: { state: 'undone' } });
+    expect(w.f.state.issues.get(40)?.labels).toEqual([]);
+    expect(outboxRows(w.db).at(-1)).toEqual({
+      opKey: `labels:main:undo:${card.id}`,
+      kind: 'set_labels',
+      payload: { number: 40, add: [], remove: [w.zone.readyLabel] },
+    });
+    expect(w.card()).toMatchObject({ id: card.id, state: 'undone', undoneAt: t0.toISOString() });
+    expect(renderCard(w.card())).not.toMatch(/<button/);
+    expect(listAudit(w.db, 1)[0]).toMatchObject({
+      via: 'session',
+      action: 'chat.undo',
+      target: `card:${card.id}`,
+    });
+  });
+
+  test('Undo of a close reopens the issue', async () => {
+    const w = await forgeWorld();
+    await w.call('close_issue', { zoneId: 'main', issue: 42 });
+    const card = w.card();
+    const u = await undoCard(w.db, w.forges, card, OWNER, t0);
+    expect(u.ok).toBe(true);
+    expect(w.f.state.issues.get(42)?.state).toBe('open');
+    expect(outboxRows(w.db).at(-1)).toEqual({
+      opKey: `reopen:main:${card.id}`,
+      kind: 'update_issue',
+      payload: { number: 42, state: 'open' },
+    });
+    expect(w.card().state).toBe('undone');
+  });
+
+  test('Undo refuses with changed since when the label is already gone or the issue was reopened by someone else', async () => {
+    const w = await forgeWorld();
+    await w.call('queue_issue', { zoneId: 'main', issue: 40 });
+    const queued = w.card();
+    w.f.state.setLabels(40, []);
+    await w.call('close_issue', { zoneId: 'main', issue: 42 });
+    const closed = w.card();
+    w.f.state.reopenIssue(42);
+    const rows = outboxRows(w.db).length;
+    const writes = w.f.author.calls.length;
+    for (const c of [queued, closed]) {
+      const u = await undoCard(w.db, w.forges, c, OWNER, t0);
+      expect(u).toMatchObject({ ok: false, status: 409 });
+      expect(!u.ok && u.error).toMatch(/changed since/);
+    }
+    expect(outboxRows(w.db)).toHaveLength(rows);
+    const after = w.f.author.calls.slice(writes).map((c) => c.method);
+    expect(after.filter((m) => m !== 'getIssue')).toEqual([]);
+    expect(listCards(w.db, w.one.id).map((c) => c.state)).toEqual(['done', 'done']);
+  });
+
+  test('a card already undone is 409, and a card with no Undo is 409', async () => {
+    const w = await forgeWorld();
+    await w.call('queue_issue', { zoneId: 'main', issue: 40 });
+    expect((await undoCard(w.db, w.forges, w.card(), OWNER, t0)).ok).toBe(true);
+    const again = await undoCard(w.db, w.forges, w.card(), OWNER, t0);
+    expect(again).toMatchObject({ ok: false, status: 409 });
+    await w.call('run_crew_cycle', { zoneId: 'main' });
+    expect(await undoCard(w.db, w.forges, w.card(), OWNER, t0)).toMatchObject({
+      ok: false,
+      status: 409,
+    });
+  });
+
+  test('D3 two Undo presses on one card make one forge write', async () => {
+    const w = await forgeWorld();
+    await w.call('queue_issue', { zoneId: 'main', issue: 40 });
+    const card = w.card();
+    const before = w.writes('setLabels').length;
+    // Both presses read the card as done: the opKey dedupes the forge write.
+    const results = await Promise.all([
+      undoCard(w.db, w.forges, card, OWNER, t0),
+      undoCard(w.db, w.forges, card, OWNER, t0),
+    ]);
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(results.find((r) => !r.ok)).toMatchObject({ ok: false, status: 409 });
+    expect(w.writes('setLabels').length - before).toBe(1);
+    expect(outboxRows(w.db).filter((r) => r.opKey === `labels:main:undo:${card.id}`)).toHaveLength(
+      1,
+    );
+    expect(listAudit(w.db, 5).filter((a) => a.action === 'chat.undo')).toHaveLength(1);
+  });
+
+  test('D2 undo in observe mode refuses with no outbox row', async () => {
+    const w = await forgeWorld();
+    await w.call('queue_issue', { zoneId: 'main', issue: 40 });
+    const card = w.card();
+    const rows = outboxRows(w.db).length;
+    setZoneMode(w.db, 'main', 'observe', t0);
+    const u = await undoCard(w.db, w.forges, card, OWNER, t0);
+    expect(u).toMatchObject({ ok: false, status: 409 });
+    expect(!u.ok && u.error).toMatch(/observe/);
+    setZoneMode(w.db, 'main', 'active', t0);
+    setKilled(w.db, true, t0);
+    expect(await undoCard(w.db, w.forges, card, OWNER, t0)).toMatchObject({
+      ok: false,
+      status: 409,
+    });
+    expect(outboxRows(w.db)).toHaveLength(rows);
+    expect(w.f.state.issues.get(40)?.labels).toEqual([w.zone.readyLabel]);
+    expect(w.card().state).toBe('done');
+  });
+
+  test('D2 the forge tools refuse in observe mode and under the kill switch with nothing written', async () => {
+    const w = await forgeWorld();
+    setZoneMode(w.db, 'main', 'observe', t0);
+    expect((await w.call('queue_issue', { zoneId: 'main', issue: 40 })).isError).toBe(true);
+    expect((await w.call('close_issue', { zoneId: 'main', issue: 42 })).isError).toBe(true);
+    setZoneMode(w.db, 'main', 'active', t0);
+    setKilled(w.db, true, t0);
+    expect((await w.call('queue_issue', { zoneId: 'main', issue: 40 })).isError).toBe(true);
+    expect(outboxRows(w.db)).toEqual([]);
+    expect(listCards(w.db, w.one.id).map((c) => c.state)).toEqual([
+      'refused',
+      'refused',
+      'refused',
+    ]);
   });
 });

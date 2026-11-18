@@ -158,7 +158,7 @@ const CHAT_READ_TOOLS = [
   'list_open_pulls',
   'get_drop_transcript',
 ];
-/** The zone write tools and the chat's action tools (Task 13): each records a card. */
+/** The zone write tools and the chat's action tools (Tasks 13 and 14): each records a card. */
 const ACTION_TOOLS = [
   'file_staged_issues',
   'raise_briefing',
@@ -167,6 +167,9 @@ const ACTION_TOOLS = [
   'run_crew_cycle',
   'mark_objective_done',
   'change_setting',
+  'queue_issue',
+  'retry_parked',
+  'close_issue',
   'propose_goal_change',
 ];
 const ALL_TOOLS = [...READ_TOOLS, ...CHAT_READ_TOOLS, ...ACTION_TOOLS].sort();
