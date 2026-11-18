@@ -12,6 +12,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
 import {
+  findPrivateKeys,
   type MergeOutcome,
   type PushGrant,
   type PushResult,
@@ -632,6 +633,68 @@ const shellQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
 const globHit = (p: string, globs: string[]): boolean =>
   globs.some((g) => protectedPathMatches(p, g));
 
+/** Undoes git's C-style quoting of a path (`"b/\\303\\251.ts"`); a plain path is returned as is. */
+export function unquoteGitPath(p: string): string {
+  if (!p.startsWith('"') || !p.endsWith('"') || p.length < 2) return p;
+  const ESC: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13 };
+  const bytes: number[] = [];
+  const s = p.slice(1, -1);
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i] ?? '';
+    if (c !== '\\') {
+      bytes.push(...Buffer.from(c, 'utf8'));
+      continue;
+    }
+    const n = s[++i] ?? '';
+    const oct = /^[0-7]{3}/.exec(s.slice(i, i + 3));
+    if (oct) {
+      bytes.push(Number.parseInt(oct[0], 8));
+      i += 2;
+    } else bytes.push(ESC[n] ?? n.charCodeAt(0));
+  }
+  return Buffer.from(bytes).toString('utf8');
+}
+
+/**
+ * The added lines of a `git diff -U0` patch, per destination file, as runs of consecutive added
+ * lines joined with `\n` (the leading `+` dropped). A deleted file has no destination and adds
+ * nothing.
+ */
+export function addedRuns(patch: string): { path: string; runs: string[] }[] {
+  const out: { path: string; runs: string[] }[] = [];
+  let file: { path: string; runs: string[] } | null = null;
+  let inHunk = false;
+  let run: string[] | null = null;
+  const close = () => {
+    if (file && run) file.runs.push(run.join('\n'));
+    run = null;
+  };
+  for (const line of patch.split('\n')) {
+    if (line.startsWith('diff --git ')) {
+      close();
+      file = null;
+      inHunk = false;
+    } else if (!inHunk && line.startsWith('+++ ')) {
+      // Git ends a name holding a space with a tab, for patch(1).
+      const p = line.slice(4).replace(/\t$/, '');
+      file = p === '/dev/null' ? null : { path: unquoteGitPath(p).replace(/^b\//, ''), runs: [] };
+      if (file) out.push(file);
+    } else if (line.startsWith('@@')) {
+      close();
+      inHunk = true;
+    } else if (inHunk && line.startsWith('+')) {
+      run ??= [];
+      run.push(line.slice(1));
+    } else if (inHunk && line.startsWith('\\')) {
+      // "\ No newline at end of file": part of the line before it, not a break in the run.
+    } else {
+      close();
+    }
+  }
+  close();
+  return out;
+}
+
 /**
  * Root, in the root-owned bare repo only: refuses protected-path changes against the trusted base
  * (`refs/jm/base`, fetched from the root mirror) and commits this push adds that are not authored
@@ -643,9 +706,10 @@ export async function prePushCheck(
   protectedPaths: string[],
   since: string,
   secrets: string[] = [],
+  privateKeyPaths: string[] = [],
 ): Promise<string | null> {
   try {
-    return await checkStaged(bareDir, branch, protectedPaths, since, secrets);
+    return await checkStaged(bareDir, branch, protectedPaths, since, secrets, privateKeyPaths);
   } catch (e) {
     // A listing cut at the cap could hide the very entry the check exists for: refuse.
     if (e instanceof OutputTooLarge) return 'diff too large to check';
@@ -659,6 +723,7 @@ async function checkStaged(
   protectedPaths: string[],
   since: string,
   secrets: string[],
+  privateKeyPaths: string[],
 ): Promise<string | null> {
   const ref = `refs/heads/${branch}`;
   // -z: paths are raw bytes, never C-quoted, so a non-ASCII name cannot dodge the glob.
@@ -696,6 +761,10 @@ async function checkStaged(
       '--no-textconv',
       '--no-ext-diff',
       '--no-color',
+      // A file moved out of an allow-listed path shows its whole content as added.
+      '--no-renames',
+      '--src-prefix=a/',
+      '--dst-prefix=b/',
       '-U0',
       '--end-of-options',
       `refs/jm/base...${ref}`,
@@ -703,10 +772,16 @@ async function checkStaged(
     '',
     { gitDir: bareDir },
   );
-  const added = patch
-    .split('\n')
-    .filter((l) => l.startsWith('+') && !l.startsWith('+++'))
-    .join('\n');
+  const files = addedRuns(patch);
+  // A real private key, its lines joined per run of added lines, outside the zone's allow-list.
+  // The refusal names the path only, never any of the key.
+  for (const { path, runs } of files) {
+    if (globHit(path, privateKeyPaths)) continue;
+    if (runs.some((run) => findPrivateKeys(run).some((k) => k.real))) {
+      return `private key in ${path}`;
+    }
+  }
+  const added = files.flatMap((f) => f.runs).join('\n');
   const messages = await runGit(
     undefined,
     [
@@ -905,6 +980,7 @@ export async function pushStaged(
       grant.protectedPaths,
       lease || 'refs/jm/base',
       grant.secrets,
+      grant.privateKeyPaths ?? [],
     );
     if (refusal) throw new PushFailure(refusal, false);
     const head = await runGit(

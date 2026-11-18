@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest';
 import {
   containsSecret,
   dropSecrets,
+  findPrivateKeys,
   payloadSecrets,
   redact,
   redactTokenShapes,
@@ -145,4 +146,83 @@ test('an identifier that merely contains ghs_ is not redacted', () => {
   const id = 'highs_and_lows_of_a_long_identifier_name_here';
   expect(redactTokenShapes(id)).toBe(id);
   expect(redactTokenShapes(`const ${id} = 1;`)).toBe(`const ${id} = 1;`);
+});
+
+describe('findPrivateKeys', () => {
+  // Built at run time, so this file's own source holds no key block.
+  const begin = (label: string) => `-----BEGIN ${label}PRIVATE KEY-----`;
+  const end = (label: string) => `-----END ${label}PRIVATE KEY-----`;
+  const body = (n: number) => 'MIIEo+/='.repeat(Math.ceil(n / 8)).slice(0, n);
+  /** `n` base64 body characters in 64-character lines. */
+  const block = (label: string, n: number, nl = '\n') =>
+    [begin(label), ...(body(n).match(/.{1,64}/g) ?? []), end(label)].join(nl);
+
+  test.each(['RSA ', 'EC ', 'OPENSSH ', 'ENCRYPTED ', 'DSA ', ''])(
+    'finds a %sblock with LF, CRLF and JSON-escaped newlines',
+    (label) => {
+      for (const nl of ['\n', '\r\n', '\\n', '\\r\\n']) {
+        const key = block(label, 1700, nl);
+        const text = `x = "${key}" y`;
+        expect(findPrivateKeys(text)).toEqual([{ start: 5, end: 5 + key.length, real: true }]);
+      }
+    },
+  );
+
+  test('finds a JSON-escaped key in a transcript line', () => {
+    const line = JSON.stringify({ text: `here: ${block('RSA ', 1700)}` });
+    expect(line).not.toContain('\n');
+    expect(findPrivateKeys(line)).toHaveLength(1);
+    expect(findPrivateKeys(line)[0]?.real).toBe(true);
+    expect(redact(line, [])).toBe(JSON.stringify({ text: 'here: [REDACTED PRIVATE KEY]' }));
+  });
+
+  test('real at 200 base64 body characters, not at 199', () => {
+    expect(findPrivateKeys(block('RSA ', 200))[0]?.real).toBe(true);
+    expect(findPrivateKeys(block('RSA ', 199))[0]?.real).toBe(false);
+    expect(findPrivateKeys(block('', 200, '\\n'))[0]?.real).toBe(true);
+    expect(findPrivateKeys(block('', 199, '\\r\\n'))[0]?.real).toBe(false);
+  });
+
+  test('Proc-Type and DEK-Info header fields are not counted', () => {
+    const fields = [
+      'Proc-Type: 4,ENCRYPTED',
+      `DEK-Info: AES-256-CBC,${'ABCDEF0123456789'.repeat(8)}`,
+    ];
+    for (const nl of ['\n', '\\n']) {
+      const key = [begin('RSA '), ...fields, '', body(199), end('RSA ')].join(nl);
+      expect(findPrivateKeys(key)[0]?.real).toBe(false);
+      const more = [begin('RSA '), ...fields, '', body(200), end('RSA ')].join(nl);
+      expect(findPrivateKeys(more)[0]?.real).toBe(true);
+    }
+  });
+
+  test('a header without a footer runs to the end of the text', () => {
+    const text = `a ${begin('EC ')}\n${body(300)}\nmore`;
+    expect(findPrivateKeys(text)).toEqual([{ start: 2, end: text.length, real: true }]);
+    const short = `a ${begin('EC ')}\n${body(20)}`;
+    expect(findPrivateKeys(short)).toEqual([{ start: 2, end: short.length, real: false }]);
+  });
+
+  test('a footer with another label does not end the block', () => {
+    const text = `${begin('RSA ')}\n${body(100)}\n${end('EC ')}\n${body(150)}`;
+    expect(findPrivateKeys(text)).toEqual([{ start: 0, end: text.length, real: true }]);
+  });
+
+  test('finds every block, and nothing in text without one', () => {
+    const text = `${block('RSA ', 30)}\nmid\n${block('OPENSSH ', 900)}`;
+    expect(findPrivateKeys(text).map((k) => k.real)).toEqual([false, true]);
+    expect(findPrivateKeys('-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----')).toEqual(
+      [],
+    );
+    expect(findPrivateKeys('BEGIN rsa private key')).toEqual([]);
+  });
+
+  test('both redact functions replace every block, real or fake', () => {
+    const text = `a ${block('RSA ', 30)} b ${block('', 1700, '\r\n')} c`;
+    const want = 'a [REDACTED PRIVATE KEY] b [REDACTED PRIVATE KEY] c';
+    expect(redactTokenShapes(text)).toBe(want);
+    expect(redact(text, [])).toBe(want);
+    expect(redact(`${text} s3cret`, ['s3cret'])).toBe(`${want} [REDACTED]`);
+    expect(redactTokenShapes(`x ${begin('DSA ')}\nAAAA`)).toBe('x [REDACTED PRIVATE KEY]');
+  });
 });

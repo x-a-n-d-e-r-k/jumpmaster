@@ -267,6 +267,11 @@ export const GUARDED_PATHS: GuardedPath[] = [
       `Agents will be able to merge changes to ${p} in ${zoneOf(ctx)} without a human review`,
   ),
   setRule(
+    'dropZones[].privateKeyPaths',
+    'additions',
+    (p, ctx) => `Agents will be able to push private keys to ${p} in ${zoneOf(ctx)}`,
+  ),
+  setRule(
     'dropZones[].overrideApprovers',
     'additions',
     (l, ctx) => `${l} will be able to override branch-rule problems for ${zoneOf(ctx)}`,

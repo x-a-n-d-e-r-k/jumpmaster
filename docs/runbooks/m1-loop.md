@@ -184,6 +184,11 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   `vite.config.*`, `jest.config.*`, `.mocharc*`, …); the full list is
   `DEFAULT_PROTECTED_PATHS` in `apps/server/src/config.ts`. Add paths; removing defaults is
   not recommended. A protected-path park is never overridden: a person merges such a PR.
+- `privateKeyPaths` (default `[]`): the trooper refuses a push that adds a real private key
+  (`-----BEGIN … PRIVATE KEY-----` with at least 200 base64 body characters; a shorter dummy
+  passes) with `private key in <path>`, and logs redact every key block. List globs (matched
+  like `protectedPaths`) only for paths that keep real throwaway keys as test fixtures, such as
+  `test/fixtures/**`. Adding one asks for confirmation.
 - Gate scripts and gate tools are guarded too (spec §7.2). A PR that changes a script the
   gates run parks `gate script changed: …`; one that could swap or wrap a tool they run parks
   `gate tool changed: …`, listing every change. Tool changes include a non-registry dependency

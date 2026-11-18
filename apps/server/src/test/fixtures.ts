@@ -52,6 +52,7 @@ export function makeZone(o: Partial<DropZoneConfig> = {}): DropZoneConfig {
     authorMayBeAdmin: false,
     identity: 'two-bot',
     protectedPaths: ['.github/**', 'CODEOWNERS', 'pnpm-workspace.yaml'],
+    privateKeyPaths: [],
     overrideApprovers: [],
     trustPnpmBuildBlocking: false,
     reviewReadToken: false,
