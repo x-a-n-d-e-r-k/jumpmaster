@@ -288,6 +288,27 @@ Ship it.
     expect(statusOf(body, 'Release notes')).toBe(`done (ruling #${rid})`);
   });
 
+  test('/zones/:id/goals links back to the zone page and to the goal file on GitHub (#365)', async () => {
+    const h = await crewHarness();
+    await h.sync();
+    const body = (await get(h, '/zones/main/goals')).body;
+    expect(body).toContain('href="/zones/main"');
+    expect(body).toContain('The goals live in GOAL.md in octo/demo.');
+    expect(body).toContain('<a href="https://github.com/octo/demo/blob/HEAD/GOAL.md">');
+    expect(body).not.toContain('/zones/main/intake');
+  });
+
+  test('/zones/:id/goals offers the intake page, not GitHub, when the goal file is missing (#365)', async () => {
+    const h = await crewHarness();
+    h.forge.state.files.delete('main:GOAL.md');
+    await h.sync();
+    const body = (await get(h, '/zones/main/goals')).body;
+    expect(body).toContain(
+      `GOAL.md isn't in the repository yet. <a href="/zones/main/intake">Write one with the intake page</a>.`,
+    );
+    expect(body).not.toContain('github.com');
+  });
+
   test('an unknown zone on /zones/:id/goals is 404', async () => {
     const h = await crewHarness();
     expect((await get(h, '/zones/nope/goals')).statusCode).toBe(404);
