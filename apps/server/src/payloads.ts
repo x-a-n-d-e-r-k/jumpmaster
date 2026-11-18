@@ -401,7 +401,7 @@ function buildDoctorPayload(
   };
 }
 
-const DEFAULT_CLAUDE: ClaudeConfig = { plan: 'pro', fableWeeklyDropCap: 5 };
+const DEFAULT_CLAUDE: ClaudeConfig = { plan: 'pro', fableWeeklyDropCap: 0 };
 
 /**
  * The payload for a leased drop. The model comes from `resolveModel` (Fable only where the declared
