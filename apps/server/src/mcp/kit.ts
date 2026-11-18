@@ -3,6 +3,7 @@ import { redact } from '@jumpmaster/protocol';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { z } from 'zod';
 import type { ChatCard } from '../chat/cards.js';
+import type { ConfigStore } from '../config/store.js';
 import type { Config, DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import type { ForgePair } from '../outbox.js';
@@ -25,6 +26,8 @@ export type ToolContext = {
   forgesFor?: (zoneId: string) => ForgePair;
   /** The editable config document as stored (the store's), for the settings catalog. */
   document?: () => Record<string, unknown>;
+  /** The config store, where the config is one: `change_setting` applies through it. */
+  store?: ConfigStore;
   /** A chat action's card, once recorded: pushed to the thread's stream after the call commits. */
   onCard?: (card: ChatCard) => void;
   /** Starts a pass without waiting for it, so a ruling or a cycle applies promptly. */
