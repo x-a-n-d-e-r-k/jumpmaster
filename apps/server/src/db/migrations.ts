@@ -1228,6 +1228,34 @@ CREATE UNIQUE INDEX one_active_doctor_drop
     AND state IN ('queued','leased','running','push_pending');
 `;
 
+/**
+ * v42 (#356, the crew chat's control_audit rebuild): `via` may be `chat`, the actor of an action a
+ * chat turn took. Every row is carried with its id, the AUTOINCREMENT sequence continues where it
+ * was, and the keep-the-last-5000 trigger is recreated (dropping the old table dropped it).
+ */
+const V42_SQL = `
+CREATE TABLE new_control_audit (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  at           TEXT NOT NULL,
+  via          TEXT NOT NULL CHECK (via IN ('token','session','chat','system')),
+  action       TEXT NOT NULL,
+  target       TEXT,
+  guarded      INTEGER NOT NULL DEFAULT 0,
+  detail_json  TEXT NOT NULL
+);
+INSERT INTO new_control_audit (id, at, via, action, target, guarded, detail_json)
+  SELECT id, at, via, action, target, guarded, detail_json FROM control_audit;
+DELETE FROM sqlite_sequence WHERE name = 'new_control_audit';
+INSERT INTO sqlite_sequence (name, seq)
+  SELECT 'new_control_audit', seq FROM sqlite_sequence WHERE name = 'control_audit';
+DROP TABLE control_audit;
+ALTER TABLE new_control_audit RENAME TO control_audit;
+CREATE TRIGGER control_audit_keep_5000 AFTER INSERT ON control_audit
+BEGIN
+  DELETE FROM control_audit WHERE id <= NEW.id - 5000;
+END;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1270,6 +1298,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 39, sql: V39_SQL },
   { version: 40, sql: V40_SQL },
   { version: 41, sql: V41_SQL, foreignKeysOff: true },
+  { version: 42, sql: V42_SQL },
 ];
 
 /**

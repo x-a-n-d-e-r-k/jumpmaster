@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { appliedDetail } from '../api/control.js';
+import { appliedDetail } from '../api/operator-actions.js';
 import { recordAudit } from '../auth/audit.js';
 import type { Backoff } from '../auth/backoff.js';
 import { withCsrf } from '../auth/guard.js';
