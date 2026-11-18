@@ -1372,3 +1372,59 @@ test('v38 keeps existing tokens and their audit rows', () => {
       .run(),
   ).toThrow(/FOREIGN KEY/);
 });
+
+test('v40 adds arbitrations and lets arbitrate be a crew drop, keeping every drop and its columns', () => {
+  const f = dbAt(39, (raw) => {
+    raw.exec(`INSERT INTO drop_zones (id, repo, default_branch, config_json)
+      VALUES ('z', 'o/r', 'main', '{}')`);
+    raw.exec(`INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, created_at,
+        was_probe, rate_limit_requeue, push_kind, transcript_pruned_at, transcript_archive,
+        requested_model, served_model)
+      VALUES ('d1', 'z', NULL, 'refute', 'succeeded', 't', 1, 0, 'final', 'p', 'a', 'rq', 'sv')`);
+    raw.exec(`INSERT INTO drop_events (drop_id, seq, ts, kind, data_json)
+      VALUES ('d1', 1, 't', 'log', '{}')`);
+  });
+  const db = openDb(f);
+  expect(MIGRATIONS.at(-1)?.version).toBeGreaterThanOrEqual(40);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(
+    db
+      .prepare(
+        `SELECT role, was_probe AS p, rate_limit_requeue AS r, push_kind AS k,
+           transcript_pruned_at AS tp, transcript_archive AS ta, requested_model AS rq,
+           served_model AS sv FROM drops WHERE id = 'd1'`,
+      )
+      .get(),
+  ).toEqual({ role: 'refute', p: 1, r: 0, k: 'final', tp: 'p', ta: 'a', rq: 'rq', sv: 'sv' });
+  expect(count(db, 'drop_events')).toBe(1);
+  expect(db.pragma('foreign_key_check')).toEqual([]);
+  db.exec(`INSERT INTO work_items (drop_zone_id, issue_number, title, body, author, issue_created_at,
+      updated_at) VALUES ('z', 1, 't', 'b', 'a', 't', 't')`);
+  const drop = db.prepare(
+    `INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, created_at)
+     VALUES (?, 'z', ?, ?, ?, 't')`,
+  );
+  // An arbitrate drop is a crew drop: never with a work item.
+  expect(() => drop.run('d2', 1, 'arbitrate', 'succeeded')).toThrow(/CHECK/);
+  drop.run('d3', null, 'arbitrate', 'queued');
+  // One active crew drop per zone, arbitrate included, both ways round.
+  expect(() => drop.run('d4', null, 'refute', 'queued')).toThrow(/UNIQUE/);
+  db.prepare(`UPDATE drops SET state = 'succeeded' WHERE id = 'd3'`).run();
+  drop.run('d5', null, 'triage', 'running');
+  expect(() => drop.run('d6', null, 'arbitrate', 'queued')).toThrow(/UNIQUE/);
+  const put = db.prepare(
+    `INSERT INTO arbitrations (zone_id, subject, basis, drop_id, state, created_at, updated_at)
+     VALUES ('z', 'issue:1', ?, 'd3', ?, 't', 't')`,
+  );
+  put.run('sha1', 'pending');
+  expect(db.prepare('SELECT acted, ruling FROM arbitrations').get()).toEqual({
+    acted: 0,
+    ruling: null,
+  });
+  expect(() => put.run('sha1', 'pending')).toThrow(/UNIQUE/);
+  expect(() => put.run('sha2', 'won')).toThrow(/CHECK/);
+  expect(() =>
+    db.prepare(`UPDATE arbitrations SET ruling = 'C' WHERE basis = 'sha1'`).run(),
+  ).toThrow(/CHECK/);
+  db.close();
+});

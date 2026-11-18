@@ -194,7 +194,7 @@ describe('crew roles', () => {
   const checkout = { number: 3, branch: 'agent/issue-7', headSha: 'abc' };
 
   test('isCrewRole and RoleSchema know the crew roles', () => {
-    expect(CREW_ROLES).toEqual(['crew-lead', 'refute', 'diagnose', 'triage']);
+    expect(CREW_ROLES).toEqual(['crew-lead', 'refute', 'diagnose', 'triage', 'arbitrate']);
     expect(isCrewRole('refute')).toBe(true);
     expect(isCrewRole('review')).toBe(false);
     expect(RoleSchema.parse('diagnose')).toBe('diagnose');
@@ -342,6 +342,46 @@ describe('crew roles', () => {
       expect(ok({ ...split, children: [{ ...child, body: 'x'.repeat(12001) }] })).toBe(false);
       expect(ok({ ...questions, briefing: { ...briefing, options: ['one'] } })).toBe(false);
       expect(ok({ ...notAgent, reason: 'x'.repeat(501) })).toBe(false);
+    });
+  });
+
+  describe('arbitrate', () => {
+    const ruling = {
+      ruling: 'A',
+      because: 'Every finding was wording; the cited lines exist.',
+      wouldReverse: 'A cited line that does not exist.',
+      reversible: true,
+      productQuestion: false,
+      instruction: 'Promote the issue.',
+    };
+
+    test('parseCrewOutput accepts a full ruling', () => {
+      expect(parseCrewOutput('arbitrate', ruling)).toEqual({ ok: true, value: ruling });
+      expect(parseCrewOutput('arbitrate', { ...ruling, ruling: 'insufficient_evidence' }).ok).toBe(
+        true,
+      );
+    });
+
+    test('parseCrewOutput refuses an extra property, an unknown or missing ruling', () => {
+      expect(parseCrewOutput('arbitrate', { ...ruling, x: 1 }).ok).toBe(false);
+      expect(parseCrewOutput('arbitrate', { ...ruling, ruling: 'C' }).ok).toBe(false);
+      const { ruling: _r, ...missing } = ruling;
+      expect(parseCrewOutput('arbitrate', missing).ok).toBe(false);
+    });
+
+    test('DropPayloadSchema accepts an arbitrate payload and refuses item fields', () => {
+      // The crew credential slot only ever carries the read token (payloads.ts); what a schema can
+      // refuse is everything a write needs: an issue, a branch, gates and their secrets.
+      expect(DropPayloadSchema.safeParse({ ...crew, role: 'arbitrate' }).success).toBe(true);
+      const arb = { ...crew, role: 'arbitrate' };
+      expect(DropPayloadSchema.safeParse({ ...arb, issue: base.issue }).success).toBe(false);
+      expect(DropPayloadSchema.safeParse({ ...arb, branch: 'b' }).success).toBe(false);
+      expect(DropPayloadSchema.safeParse({ ...arb, gates: [] }).success).toBe(false);
+      expect(DropPayloadSchema.safeParse({ ...arb, gateSecrets: { A: 'b' } }).success).toBe(false);
+      expect(
+        DropPayloadSchema.safeParse({ ...arb, checkout: { number: 1, branch: 'b', headSha: 'a' } })
+          .success,
+      ).toBe(false);
     });
   });
 
