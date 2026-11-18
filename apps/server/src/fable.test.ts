@@ -6,7 +6,7 @@ import {
   ruleBriefing,
   syncParkBriefings,
 } from './briefings.js';
-import type { ClaudeConfig, Config } from './config.js';
+import { type ClaudeConfig, type Config, EditableSchema } from './config.js';
 import { creditsPass } from './credits.js';
 import { applyCrewActions } from './crew/actions.js';
 import { enqueueCrew } from './crew/schedule.js';
@@ -569,5 +569,66 @@ describe("Fable's budget: its reported weekly window (#381)", () => {
         model: null,
       }),
     ).toBe(true);
+  });
+});
+
+describe('claude.fableWeeklyDropCap: 0 means no drop cap, and is the default (#399)', () => {
+  const drops = (n: number) => {
+    for (let i = 0; i < n; i++) pastDrop(`n${i}`, FABLE, plus(t0, -(i + 1) * 60_000));
+  };
+
+  test('unset: 50 Fable drops this week and Fable is still available', () => {
+    const claude = EditableSchema.shape.claude.parse({ plan: 'ultra', fableModel: FABLE });
+    expect(claude.fableWeeklyDropCap).toBe(0);
+    drops(50);
+    expect(fableStatus(w.db, { claude }, t0)).toEqual({ available: true, reason: 'available' });
+  });
+
+  test('a cap of 10: 9 drops is available, 10 reaches the cap', () => {
+    const c = cfg({ plan: 'ultra', fableModel: FABLE, fableWeeklyDropCap: 10 });
+    drops(9);
+    expect(fableStatus(w.db, c, t0)).toEqual({ available: true, reason: 'available' });
+    pastDrop('tenth', FABLE, plus(t0, -DAY));
+    expect(fableStatus(w.db, c, t0)).toEqual({
+      available: false,
+      reason: 'weekly cap reached (10 Fable drops in 7 days)',
+    });
+  });
+
+  test('a cap of 0 with Fable disabled: still unavailable, for the disable', () => {
+    const c = cfg({ plan: 'ultra', fableModel: FABLE, fableWeeklyDropCap: 0 });
+    w.db
+      .prepare(
+        "INSERT INTO fable_state (id, disabled_reason, paused_until, updated_at) VALUES (1, 'credits_required', NULL, ?)",
+      )
+      .run(t0.toISOString());
+    expect(fableStatus(w.db, c, t0)).toEqual({
+      available: false,
+      reason: 'disabled: credits_required',
+    });
+  });
+
+  test('a cap of 0 with the reported weekly usage over the limit: still unavailable, for usage', () => {
+    const c = cfg({ plan: 'ultra', fableModel: FABLE, fableWeeklyDropCap: 0 });
+    recordUsageWindows(
+      w.db,
+      { seven_day_fable: { utilization: 0.9, resetsAt: plus(t0, DAY).toISOString() } },
+      plus(t0, -1000),
+      null,
+    );
+    expect(fableStatus(w.db, c, t0)).toEqual({
+      available: false,
+      reason: 'Fable weekly usage at 90% (limit 80%)',
+    });
+  });
+
+  test('a cap of 0 still needs a plan that includes Fable and a fableModel', () => {
+    expect(
+      fableStatus(w.db, cfg({ plan: 'pro', fableModel: FABLE, fableWeeklyDropCap: 0 }), t0),
+    ).toMatchObject({ available: false, reason: 'plan pro does not include Fable' });
+    expect(fableStatus(w.db, cfg({ plan: 'ultra', fableWeeklyDropCap: 0 }), t0)).toMatchObject({
+      available: false,
+      reason: 'no fableModel is configured',
+    });
   });
 });

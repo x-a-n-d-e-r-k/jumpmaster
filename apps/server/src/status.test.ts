@@ -311,6 +311,8 @@ describe('statusOf', () => {
       NOW,
     );
     expect(s.headline).toBe('Working: implement #7 in main, 12m 0s, gate 0 of 3');
+    // The elapsed time changes with the clock alone, so the Floor's live script ignores it.
+    expect(s.volatile).toBe('12m 0s');
     expect(s.since).toBe(plus(NOW, -12 * MIN).toISOString());
     // The detail explains the headline only; every other cause is a short item with its fix.
     expect(s.detail).toBe('');
@@ -485,6 +487,7 @@ describe('a merge reservation (#287)', () => {
       NOW,
     );
     expect(s.headline).toBe('Waiting on CI for PR #11 (20 of 45 min)');
+    expect(s.volatile).toBe('(20 of 45 min)');
     expect(s.also).toEqual([
       {
         text: 'PR #12 is waiting to merge after #257',

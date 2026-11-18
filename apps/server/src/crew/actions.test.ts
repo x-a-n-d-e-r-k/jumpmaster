@@ -9,6 +9,7 @@ import {
   withdrawBriefing,
 } from '../briefings.js';
 import { setKilled, setZoneMode } from '../db/repo.js';
+import { getGoalChange, listGoalChanges } from '../goal-change.js';
 import { refreshGoals } from '../goals.js';
 import { makeZone, type ZoneWorld, zoneWorld } from '../test/fixtures.js';
 import { plus, t0 } from '../test/helpers.js';
@@ -521,5 +522,73 @@ describe('applyCrewActions', () => {
     await flushCrewOps(w.db, w.forges, w.zone, [], plus(t0, 2000));
     expect(w.f.author.calls.filter((c) => c.method === 'createIssue')).toHaveLength(1);
     expect(getCrewIssue(w.db, r.filed[0] ?? -1)?.state).toBe('staged');
+  });
+});
+
+describe('goalChange', () => {
+  const NEW_GOAL = GOAL.replace('### Ship the CLI', '### Ship the CLI\n\n### Write the guide');
+  const CHANGE = { text: NEW_GOAL, why: 'The CLI needs a user guide.' };
+
+  test("a crew drop's goalChange records a proposed change and raises a goal_change briefing", () => {
+    const r = apply({ goalChange: CHANGE });
+    expect(r).toEqual({ filed: [], briefings: [expect.any(Number)], refused: [] });
+    const [change] = listGoalChanges(w.db, 'main');
+    expect(change).toMatchObject({
+      zoneId: 'main',
+      source: 'crew',
+      sourceRef: 'drop-1',
+      text: NEW_GOAL,
+      state: 'proposed',
+    });
+    const all = listBriefings(w.db, { zoneId: 'main' });
+    expect(all).toHaveLength(1);
+    expect(all[0]).toMatchObject({
+      id: r.briefings[0],
+      kind: 'goal_change',
+      source: 'server',
+      sourceRef: 'drop-1',
+      subject: `goal-change:${change?.id}`,
+      why: 'The CLI needs a user guide.',
+      options: [
+        { id: 'open', label: 'Open the PR', effect: 'open_goal_change' },
+        { id: 'no', label: 'Leave the goals as they are', effect: 'none' },
+      ],
+      state: 'open',
+    });
+    // One proposal waits for a ruling at a time.
+    expect(apply({ goalChange: CHANGE }, plus(t0, 1)).refused).toEqual([
+      `goalChange: goal change ${change?.id} is waiting for a ruling`,
+    ]);
+    expect(listGoalChanges(w.db, 'main')).toHaveLength(1);
+  });
+
+  test('D1 an MCP source cannot propose through applyCrewActions', () => {
+    const r = apply({ goalChange: CHANGE }, t0, { kind: 'mcp', tokenId: 7 });
+    expect(r).toEqual({
+      filed: [],
+      briefings: [],
+      refused: ['goalChange: an MCP source cannot propose it'],
+    });
+    expect(listGoalChanges(w.db, 'main')).toEqual([]);
+    expect(listBriefings(w.db, { zoneId: 'main' })).toEqual([]);
+  });
+
+  test('a text that does not parse as goals is refused in the server words, and nothing is recorded', () => {
+    const r = apply({ goalChange: { text: 'no headings here', why: 'w' } });
+    expect(r.briefings).toEqual([]);
+    expect(r.refused).toEqual([expect.stringMatching(/^goalChange: the text does not parse/)]);
+    expect(r.refused[0]).not.toContain('no headings here');
+    expect(listGoalChanges(w.db, 'main')).toEqual([]);
+    expect(listBriefings(w.db, { zoneId: 'main' })).toEqual([]);
+  });
+
+  test('in observe or under the kill switch it is refused, and nothing is recorded', () => {
+    setZoneMode(w.db, 'main', 'observe', t0);
+    expect(apply({ goalChange: CHANGE }).refused).toEqual(['goalChange: zone is observe']);
+    setZoneMode(w.db, 'main', 'active', t0);
+    setKilled(w.db, true, t0);
+    expect(apply({ goalChange: CHANGE }).refused).toEqual(['goalChange: kill switch is engaged']);
+    expect(listGoalChanges(w.db, 'main')).toEqual([]);
+    expect(getGoalChange(w.db, 1)).toBeUndefined();
   });
 });

@@ -27,7 +27,7 @@ keeps working.
   "enabled": true,
   "goalPath": "GOAL.md",
   "cycleMinutes": 60,
-  "maxDropsPerDay": 24,
+  "maxDropsPerDay": 0,
   "stagedLabel": "agent-staged",
   "maxStaged": 3,
   "refutePromotes": true,
@@ -82,10 +82,13 @@ And at the top level of the server config:
   Each image is at most 3 MiB (8 MiB in all) and must be PNG, JPEG, GIF or WebP by its bytes;
   anything else is skipped with a short reason and the drop still runs. The agent reads them as
   `inputs/image-<n>.<ext>` in the trooper's work directory, as data like the issue text.
-- `maxDropsPerDay` counts crew drops (crew-lead, refute, diagnose, triage) over a trailing 24 hours,
-  including failed and killed ones but not rate-limited or lost ones.
-  Each ruling on a crew briefing starts a new crew-lead cycle, so a busy day can hit the cap; crew
-  work then stops until the window rolls.
+- `maxDropsPerDay` counts crew drops (crew-lead, refute, triage, arbitrate) over a trailing 24
+  hours, including failed and killed ones but not rate-limited or lost ones. Diagnose drops don't
+  count: there is one per park.
+  `0`, the default, means no daily limit: the usage gate paces the crew instead, pausing when the
+  subscription runs out and probing after it resets. With a positive cap, each ruling on a crew
+  briefing starts a new crew-lead cycle, so a busy day can hit the cap; crew work then stops until
+  the window rolls, except a parked briefing's diagnosis, which still runs.
 
 ## Stages
 
