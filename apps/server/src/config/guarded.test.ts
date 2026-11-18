@@ -47,6 +47,10 @@ describe('the schema walk', () => {
     for (const n of NOT_GUARDED) expect(n.reason.length, n.path).toBeGreaterThan(10);
   });
 
+  test('claude.fableMaxUtilization only picks the model, so it is free (#381)', () => {
+    expect(NOT_GUARDED.map((n) => n.path)).toContain('claude.fableMaxUtilization');
+  });
+
   test('a setting no table names is guarded with a consequence that says why (fail closed)', () => {
     // A field added to the schema without a rule: the parse seam lets it through as the schema
     // would, and classify meets a path no table names.
