@@ -21,11 +21,14 @@ import {
   setAttempts,
   setWorkItemState,
 } from './db/repo.js';
+import { reconcileZone } from './flow/reconcile.js';
 import { zonePass } from './flow/snapshot.js';
+import { getGoalChange, listGoalChanges } from './goal-change.js';
 import { objectivesDone } from './goals.js';
+import { promptVersions } from './payloads.js';
 import { syncParked } from './sync.js';
-import { crewWorld } from './test/crew.js';
-import { makeZone, type ZoneWorld, zoneWorld } from './test/fixtures.js';
+import { crewWorld, GOAL } from './test/crew.js';
+import { makeZone, usageCfg, type ZoneWorld, zoneWorld } from './test/fixtures.js';
 import { plus, t0 } from './test/helpers.js';
 
 const MIN = 60_000;
@@ -511,5 +514,102 @@ describe('advance_objective', () => {
       ).toThrow(/effect none/);
     }
     expect(listBriefings(w.db, { zoneId: 'main' })).toEqual([]);
+  });
+});
+
+describe('open_goal_change', () => {
+  const NEW_GOAL = GOAL.replace('### Ship the CLI', '### Ship the CLI\n\n### Write the guide');
+  async function goalChangeWorld() {
+    const w = await crewWorld();
+    w.f.state.branches.set('main', 'base0');
+    w.f.state.files.set('base0:GOAL.md', GOAL);
+    const r = applyCrewActions(
+      w.db,
+      w.zone,
+      { goalChange: { text: NEW_GOAL, why: 'A guide is next.' } },
+      { kind: 'drop', dropId: 'd1' },
+      t0,
+    );
+    const [change] = listGoalChanges(w.db, 'main');
+    if (!change || r.briefings[0] === undefined) throw new Error('not proposed');
+    const pass = async (now: Date) => {
+      const p = await zonePass(w.forges, w.zone, 'main');
+      return reconcileZone(w.db, w.forges, w.zone, p, promptVersions(), usageCfg, [], now);
+    };
+    return { w, briefingId: r.briefings[0], changeId: change.id, pass };
+  }
+  const pullsOf = (w: ZoneWorld, id: number) =>
+    [...w.f.state.pulls.values()].filter((p) => p.headRef === `jm/goal-change-${id}`);
+
+  test('ruling Open the PR opens it on the next pass, and merging still needs the browser confirmation', async () => {
+    const { w, briefingId, changeId, pass } = await goalChangeWorld();
+    // Before the ruling, a pass opens nothing: the crew's proposal waits for Command.
+    await pass(plus(t0, MIN));
+    expect(getGoalChange(w.db, changeId)).toMatchObject({ state: 'proposed', prNumber: null });
+    expect(pullsOf(w, changeId)).toEqual([]);
+
+    const ruled = ruleBriefing(w.db, briefingId, 'open', '', plus(t0, 2 * MIN));
+    if (!ruled.ok) throw new Error('not ruled');
+    await pass(plus(t0, 3 * MIN));
+    const pulls = pullsOf(w, changeId);
+    expect(pulls).toHaveLength(1);
+    expect(getGoalChange(w.db, changeId)).toMatchObject({
+      state: 'open',
+      prNumber: pulls[0]?.number,
+      confirmedSha: null,
+    });
+    expect(listRulings(w.db, 'main')[0]).toMatchObject({
+      applyError: null,
+      effect: 'open_goal_change',
+    });
+    // Another pass merges nothing: no merge op and no review without the owner's confirmation.
+    await pass(plus(t0, 4 * MIN));
+    expect(getGoalChange(w.db, changeId)?.state).toBe('open');
+    const ops = listOutbox(w.db, ['pending', 'done', 'failed', 'unknown'], 'main');
+    expect(ops.filter((o) => o.kind === 'merge' || o.kind === 'post_review')).toEqual([]);
+    expect(pulls[0]?.merged).toBeFalsy();
+  });
+
+  test('ruling Leave the goals closes the proposal, and no pass opens it', async () => {
+    const { w, briefingId, changeId, pass } = await goalChangeWorld();
+    expect(ruleBriefing(w.db, briefingId, 'no', '', t0).ok).toBe(true);
+    await pass(plus(t0, MIN));
+    await pass(plus(t0, 2 * MIN));
+    expect(getGoalChange(w.db, changeId)?.state).toBe('closed');
+    expect(pullsOf(w, changeId)).toEqual([]);
+  });
+
+  test('D1 open_goal_change outside a ruling on a server briefing throws', async () => {
+    const { w, changeId } = await goalChangeWorld();
+    const subject = `goal-change:${changeId}`;
+    const run = (ruling: Parameters<typeof applyEffect>[6]) =>
+      applyEffect(w.db, deps(w), 'main', subject, 'open_goal_change', t0, ruling);
+    await expect(run({})).rejects.toThrow(/only through a ruling/);
+    await expect(run({ rulingId: 1, source: 'crew' })).rejects.toThrow(/only through a ruling/);
+    await expect(run({ rulingId: 1, source: 'mcp' })).rejects.toThrow(/only through a ruling/);
+    await expect(
+      applyEffect(w.db, deps(w), 'main', 'item:1', 'open_goal_change', t0, {
+        rulingId: 1,
+        source: 'server',
+      }),
+    ).rejects.toThrow(/goal-change subject/);
+    expect(getGoalChange(w.db, changeId)?.state).toBe('proposed');
+    expect(pullsOf(w, changeId)).toEqual([]);
+    // A crew briefing can never carry the effect either.
+    expect(() =>
+      raiseBriefing(
+        w.db,
+        {
+          zoneId: 'main',
+          kind: 'crew',
+          subject: 'crew:x',
+          decision: 'd',
+          why: 'w',
+          options: [{ id: 'o1', label: 'Open', effect: 'open_goal_change' }],
+          source: 'crew',
+        },
+        t0,
+      ),
+    ).toThrow(/effect none/);
   });
 });
