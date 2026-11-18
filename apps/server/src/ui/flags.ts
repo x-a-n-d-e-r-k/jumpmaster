@@ -1,15 +1,18 @@
-import { type FlagGroup, type FlagRow, flagRows } from '../config/catalog.js';
+import { RESTART_PATHS } from '../config/boot.js';
+import { type FlagGroup, type FlagRow, type FlagScope, flagRows } from '../config/catalog.js';
 import type { ConfigStore } from '../config/store.js';
 import { escapeHtml, page } from './pages.js';
-import { CONFIG_ANSWER_FN, settingControl, settingId } from './setting-controls.js';
+import { CONFIG_ANSWER_FN, RESTART_NOTE, settingControl, settingId } from './setting-controls.js';
 import { zoneName, zoneNameText } from './zone-name.js';
 
 /**
- * A zone's advanced settings page (issue #322): every zone setting of the catalog, one per row,
- * grouped, with its plain words, a control, whether the zone sets it and a Reset. One Save sends
- * one merge patch of what changed through `PATCH /api/control/config`, as the zone's JSON editor
- * does, so every guard and confirmation applies unchanged: the page only mirrors them (a
- * browser-forbidden row is always disabled here). In file mode every control is disabled.
+ * The advanced settings pages: a zone's (`/zones/:id/flags`, issue #322) and the install's
+ * (`/settings/flags`, issue #323). Each lists every setting of its scope in the catalog, one per
+ * row, grouped, with its plain words, a control, whether the document sets it and a Reset. One
+ * Save sends one merge patch of what changed through `PATCH /api/control/config`, as the JSON
+ * editor and the Install tab do, so every guard and confirmation applies unchanged: the page only
+ * mirrors them. In file mode every control is disabled. Both pages draw their rows with
+ * `renderFlagsForm` and run `FLAGS_SCRIPT`.
  */
 
 const GROUP_HEADS: [FlagGroup, string][] = [
@@ -29,19 +32,60 @@ const NO_RESET = ['id', 'repo', 'gates'];
 const GUARDED_NOTE = 'asks to confirm a change that loosens it';
 const REFUSED_NOTE = 'fixed once the zone exists';
 
-/** The zone page's section an `elsewhere` sentence names, else the JSON editor (Advanced). */
-function elsewhereLink(base: string, sentence: string): string {
-  const named = /(\w+) section/.exec(sentence)?.[1]?.toLowerCase() ?? 'advanced';
-  const words = named === 'advanced' ? 'the JSON editor' : `the ${named} section`;
-  return `<a href="${base}#${escapeHtml(named)}">${escapeHtml(words)}</a>`;
+/** Where Save sends a page's patch, and where the answer returns to. */
+export interface FlagsTarget {
+  /** This page: the answer returns here, and a confirmation's Cancel too. */
+  savedTo: string;
+  /** A zone page: the patch is the zone's, inside `dropZones`, at this index of the document. */
+  zone?: { id: string; index: number };
 }
 
-function row(r: FlagRow, o: { base: string; readOnly: boolean; forbiddenNote: string }): string {
+export interface FlagsForm {
+  scope: FlagScope;
+  rows: readonly FlagRow[];
+  target: FlagsTarget;
+  /** The revision drawn: the save is conditional on it. */
+  revision: number;
+  readOnly: boolean;
+  /** Where a browser-forbidden change is made instead (HTML). */
+  forbiddenNote: string;
+}
+
+/**
+ * The link beside an `elsewhere` sentence. A zone's: the section of the zone page it names, else
+ * the JSON editor (Advanced). The install's: the Other machines tab for the address; none for a
+ * setting changed only with ctl or in the file.
+ */
+function elsewhereLink(f: FlagsForm, r: FlagRow): string {
+  const sentence = r.entry.elsewhere ?? '';
+  if (f.scope === 'install') {
+    return r.key === 'server.publicUrl'
+      ? ' <a href="/settings/other-machines">the Other machines tab</a>'
+      : '';
+  }
+  const base = `/zones/${encodeURIComponent(f.target.zone?.id ?? '')}`;
+  const named = /(\w+) section/.exec(sentence)?.[1]?.toLowerCase() ?? 'advanced';
+  const words = named === 'advanced' ? 'the JSON editor' : `the ${named} section`;
+  return ` <a href="${base}#${escapeHtml(named)}">${escapeHtml(words)}</a>`;
+}
+
+/**
+ * A browser-forbidden row is disabled: a session can't make that change. On the install, the
+ * signed image policy is forbidden only to turn off, so it is disabled only while it's on (as on
+ * the Install tab); a zone's is always disabled.
+ */
+function forbiddenLocked(f: FlagsForm, r: FlagRow): boolean {
+  if (r.guard !== 'browser-forbidden') return false;
+  return f.scope === 'zone' || r.entry.kind !== 'bool' || r.value === true;
+}
+
+function row(f: FlagsForm, r: FlagRow): string {
   const { entry, key, guard } = r;
-  const locked = o.readOnly || guard === 'browser-forbidden' || guard === 'refused';
+  const forbidden = forbiddenLocked(f, r);
+  const locked = f.readOnly || forbidden || guard === 'refused';
   const control =
     entry.kind === 'elsewhere'
-      ? `${escapeHtml(entry.elsewhere ?? '')} ${elsewhereLink(o.base, entry.elsewhere ?? '')}`
+      ? `${escapeHtml(entry.elsewhere ?? '')}${elsewhereLink(f, r)}`
       : settingControl({
           path: key,
           kind: entry.kind,
@@ -65,8 +109,8 @@ function row(r: FlagRow, o: { base: string; readOnly: boolean; forbiddenNote: st
         });
   const resettable =
     r.explicit &&
-    !o.readOnly &&
-    !NO_RESET.includes(key) &&
+    !f.readOnly &&
+    !(f.scope === 'zone' && NO_RESET.includes(key)) &&
     guard !== 'browser-forbidden' &&
     guard !== 'refused';
   const def = r.defaultValue === undefined ? 'not set' : JSON.stringify(r.defaultValue);
@@ -76,8 +120,11 @@ function row(r: FlagRow, o: { base: string; readOnly: boolean; forbiddenNote: st
       ? `<button type="button" class="reset" data-reset="${escapeHtml(key)}" title="Default: ${escapeHtml(def)}">Reset to default</button>`
       : '',
     guard === 'guarded' ? `<small>${GUARDED_NOTE}</small>` : '',
-    guard === 'browser-forbidden' ? `<small>${o.forbiddenNote}</small>` : '',
+    forbidden ? `<small>${f.forbiddenNote}</small>` : '',
     guard === 'refused' ? `<small>${REFUSED_NOTE}</small>` : '',
+    f.scope === 'install' && (RESTART_PATHS as readonly string[]).includes(key)
+      ? `<small>${RESTART_NOTE}</small>`
+      : '',
     `<span class="issue" data-flag-issue="${escapeHtml(key)}"></span>`,
   ]
     .filter(Boolean)
@@ -93,8 +140,9 @@ function row(r: FlagRow, o: { base: string; readOnly: boolean; forbiddenNote: st
 /**
  * The page's script. `jmFlagsPatch` turns the rows' fields (`{ key, kind, value, original,
  * explicit }`, or `{ key, reset: true }`) into one nested merge patch of what changed;
- * `jmSaveFlags` sends it for the zone, conditional on the revision drawn, and follows the answer
- * with the shared `jmConfigAnswer`, putting each issue beside its row.
+ * `jmSaveFlags(target, …)` sends it (inside `dropZones` for a zone's target, as it is for the
+ * install's), conditional on the revision drawn, and follows the answer with the shared
+ * `jmConfigAnswer` back to `target.savedTo`, putting each issue beside its row.
  */
 export const FLAGS_SCRIPT = `<script>
 ${CONFIG_ANSWER_FN}
@@ -121,10 +169,11 @@ function jmFlagsPatch(fields) {
   }
   return patch;
 }
-function jmFlagIssueAt(path, zoneIndex, zoneId) {
+function jmFlagIssueAt(path, target) {
   const p = String(path || '');
-  const pre = ['dropZones.' + zoneIndex + '.', 'dropZones[' + zoneId + '].'].find((x) => p.startsWith(x));
-  if (!pre) return null;
+  const z = target.zone;
+  const pre = z ? ['dropZones.' + z.index + '.', 'dropZones[' + z.id + '].'].find((x) => p.startsWith(x)) : '';
+  if (pre === undefined) return null;
   const parts = p.slice(pre.length).split('.');
   for (let n = parts.length; n > 0; n--) {
     const key = parts.slice(0, n).join('.');
@@ -134,22 +183,22 @@ function jmFlagIssueAt(path, zoneIndex, zoneId) {
   }
   return null;
 }
-function jmShowFlagIssues(issues, zoneIndex, zoneId, status) {
+function jmShowFlagIssues(issues, target, status) {
   const above = [];
   for (const i of issues) {
-    const at = jmFlagIssueAt(i.path, zoneIndex, zoneId);
+    const at = jmFlagIssueAt(i.path, target);
     if (at) at.textContent = (at.textContent ? at.textContent + ' ' : '') + i.message;
     else above.push((i.path ? i.path + ': ' : '') + i.message);
   }
   status.textContent = above.join('; ');
 }
-async function jmSaveFlags(zoneId, patch, revision, status, go, zoneIndex) {
+async function jmSaveFlags(target, patch, revision, status, go) {
   for (const s of document.querySelectorAll('[data-flag-issue]')) s.textContent = '';
   status.textContent = '';
   if (Object.keys(patch).length === 0) { status.textContent = 'Nothing changed.'; return 'unchanged'; }
-  const base = '/zones/' + encodeURIComponent(zoneId) + '/flags';
-  const r = await jmFetch('/api/control/config', { patch: { dropZones: [Object.assign({ id: zoneId }, patch)] }, expectRevision: revision, returnTo: base, cancelTo: base }, 'PATCH');
-  return jmConfigAnswer(r, status, go, base, (issues) => jmShowFlagIssues(issues, zoneIndex, zoneId, status));
+  const body = target.zone ? { dropZones: [Object.assign({ id: target.zone.id }, patch)] } : patch;
+  const r = await jmFetch('/api/control/config', { patch: body, expectRevision: revision, returnTo: target.savedTo, cancelTo: target.savedTo }, 'PATCH');
+  return jmConfigAnswer(r, status, go, target.savedTo, (issues) => jmShowFlagIssues(issues, target, status));
 }
 document.addEventListener('DOMContentLoaded', () => {
   const search = document.getElementById('flag-search');
@@ -184,12 +233,35 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!el || el.disabled) continue;
       fields.push({ key, kind: el.dataset.kind, value: el.dataset.kind === 'bool' ? el.checked : el.value, original: JSON.parse(el.dataset.original), explicit: row.dataset.explicit === '1' });
     }
-    await jmSaveFlags(form.dataset.zone, jmFlagsPatch(fields), Number(form.dataset.revision), document.getElementById('flags-out'), (to) => { location.href = to; }, Number(form.dataset.index));
+    await jmSaveFlags(JSON.parse(form.dataset.target), jmFlagsPatch(fields), Number(form.dataset.revision), document.getElementById('flags-out'), (to) => { location.href = to; });
   });
 });
 </script>`;
 
-/** The page, or undefined for an unknown zone. */
+/** The search box, the rows by group and the Save: the part both pages share. */
+export function renderFlagsForm(f: FlagsForm): string {
+  const sections = GROUP_HEADS.map(([group, head]) => {
+    const mine = f.rows.filter((r) => r.entry.group === group);
+    if (mine.length === 0) return '';
+    return `<section data-group="${group}"><h3 data-group-head="${group}">${head}</h3><table><tr><th>Setting</th><th>Value</th><th></th></tr>${mine
+      .map((r) => row(f, r))
+      .join('')}</table></section>`;
+  }).join('\n');
+  return `<p><label>Search <input type="search" id="flag-search" placeholder="label, words or key" size="30"></label></p>
+<form id="flags" data-scope="${f.scope}" data-target="${escapeHtml(JSON.stringify(f.target))}" data-revision="${f.revision}" data-readonly="${f.readOnly ? '1' : '0'}">
+<p id="flags-out" role="status"></p>
+${sections}
+${f.readOnly ? '' : '<p><button id="flags-save">Save changes</button></p>'}
+</form>`;
+}
+
+/** Said at the top after a save: only a revision number is ever echoed. */
+export const savedNote = (saved: number | undefined): string =>
+  saved === undefined
+    ? ''
+    : `<p class="saved" role="status">Saved as revision ${saved}: it takes effect at the next pass.</p>`;
+
+/** A zone's page, or undefined for an unknown zone. */
 export function renderFlags(
   store: ConfigStore,
   id: string,
@@ -204,29 +276,20 @@ export function renderFlags(
   if (!raw || !resolved) return undefined;
   const readOnly = store.mode() === 'file';
   const base = `/zones/${encodeURIComponent(id)}`;
-  const rows = flagRows('zone', raw, doc);
-  const sections = GROUP_HEADS.map(([group, head]) => {
-    const mine = rows.filter((r) => r.entry.group === group);
-    if (mine.length === 0) return '';
-    return `<section data-group="${group}"><h3 data-group-head="${group}">${head}</h3><table><tr><th>Setting</th><th>Value</th><th></th></tr>${mine
-      .map((r) => row(r, { base, readOnly, forbiddenNote: o.forbiddenNote }))
-      .join('')}</table></section>`;
-  }).join('\n');
-  const saved =
-    o.saved === undefined
-      ? ''
-      : `<p class="saved" role="status">Saved as revision ${o.saved}: it takes effect at the next pass.</p>`;
+  const form = renderFlagsForm({
+    scope: 'zone',
+    rows: flagRows('zone', raw, doc),
+    target: { savedTo: `${base}/flags`, zone: { id, index } },
+    revision: store.revision(),
+    readOnly,
+    forbiddenNote: o.forbiddenNote,
+  });
   return page(
     `<p><a href="/">Home</a> · <a href="/zones">Zones</a> · <a href="${base}">${zoneName(resolved, all)}</a> · <a href="${base}#advanced">Edit the zone as JSON</a></p>
 <h2>Advanced settings · ${zoneName(resolved, all)}</h2>
 <p>Every setting for this zone. Changes apply at the next pass; one that loosens a safeguard asks you to confirm first.</p>
-${saved}${readOnly ? o.adoptBanner : ''}
-<p><label>Search <input type="search" id="flag-search" placeholder="label, words or key" size="30"></label></p>
-<form id="flags" data-zone="${escapeHtml(id)}" data-index="${index}" data-revision="${store.revision()}" data-readonly="${readOnly ? '1' : '0'}">
-<p id="flags-out" role="status"></p>
-${sections}
-${readOnly ? '' : '<p><button id="flags-save">Save changes</button></p>'}
-</form>
+${savedNote(o.saved)}${readOnly ? o.adoptBanner : ''}
+${form}
 ${FLAGS_SCRIPT}`,
     { title: `Advanced settings · ${zoneNameText(resolved, all)}` },
   );

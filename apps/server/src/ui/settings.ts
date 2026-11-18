@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { type GuidanceForge, githubGuidanceForge } from '../api/github.js';
 import { withCsrf } from '../auth/guard.js';
 import type { BootOrigin } from '../config/boot.js';
+import { flagRows } from '../config/catalog.js';
 import { type ConfigStore, type RevisionView, VAULT_DISABLED } from '../config/store.js';
 import {
   CLAUDE_PLANS,
@@ -32,6 +33,7 @@ import {
   type ResolvedCredential,
 } from '../vault/credentials.js';
 import { VAULT_KEY_IN_DATA_DIR } from '../vault/vault.js';
+import { FLAGS_SCRIPT, renderFlagsForm, savedNote } from './flags.js';
 import { escapeHtml, page, tokenAgeBanner } from './pages.js';
 import {
   CONFIG_ANSWER_FN,
@@ -41,7 +43,7 @@ import {
   settingId,
 } from './setting-controls.js';
 import { CLAUDE_SAVED, forgeGuideFor, guideSection } from './setup.js';
-import { type ZoneRef, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
+import { type ZoneRef, zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
 
 /**
  * Settings, part one: the Credentials tab (§7.5, §10.3). A page over Task 4's secret routes, with
@@ -77,6 +79,7 @@ const TABS: [string, string][] = [
   ['other-machines', 'Other machines'],
   ['mcp-tokens', 'MCP tokens'],
   ['history', 'History'],
+  ['flags', 'Advanced'],
 ];
 const tabs = (current: string): string =>
   `<nav class="settings-tabs">${TABS.map(([path, label]) =>
@@ -656,6 +659,10 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 </script>`;
 
+/** File mode: the install's settings are the config file's, read-only here (Install and Advanced). */
+const fileModeBanner = (store: ConfigStore): string =>
+  `<p class="warn">These settings are set in the config file <code>${escapeHtml(store.status().filePath ?? '?')}</code> (file mode), so they are read-only here: edit the file and run <code>jumpmaster ctl config reload</code>, or adopt it into the database (<code>jumpmaster ctl config adopt</code>, or the button on <a href="/zones">Zones</a>) to change them here.</p>`;
+
 export function renderInstall(o: {
   store: ConfigStore;
   config: Config;
@@ -677,7 +684,7 @@ export function renderInstall(o: {
     ? `<div class="warn warnings"><p>The config file was read leniently:</p><ul>${status.warnings.map((w) => `<li>${escapeHtml(w)}</li>`).join('')}</ul></div>`
     : '';
   const banner = fileMode
-    ? `<p class="warn">These settings are set in the config file <code>${escapeHtml(status.filePath ?? '?')}</code> (file mode), so they are read-only here: edit the file and run <code>jumpmaster ctl config reload</code>, or adopt it into the database (<code>jumpmaster ctl config adopt</code>, or the button on <a href="/zones">Zones</a>) to change them here.</p>`
+    ? fileModeBanner(store)
     : '<p>Each change applies at the next pass, except those marked for the next restart. A change that weakens a guard asks for confirmation first.</p>';
   const rows = installSettings(config)
     .map(
@@ -696,6 +703,42 @@ ${saved}${restart}${warnings}${banner}
 </fieldset>${save}</form>
 ${bootSection(store)}
 ${INSTALL_SCRIPT}`,
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Advanced (issue #323): every install-wide setting of the catalog, one per row, as a zone's
+// advanced settings page draws its own (`flags.ts`), and a link to each zone's page.
+
+export function renderInstallFlags(o: { store: ConfigStore; saved?: number }): string {
+  const { store } = o;
+  const doc = store.document() as Record<string, unknown>;
+  const readOnly = store.mode() === 'file';
+  const zones = store.current().dropZones;
+  const links = zones
+    .map(
+      (z) =>
+        `<li><a href="/zones/${encodeURIComponent(z.id)}/flags">${zoneName(z, zones)}</a></li>`,
+    )
+    .join('');
+  const form = renderFlagsForm({
+    scope: 'install',
+    rows: flagRows('install', doc, doc),
+    target: { savedTo: '/settings/flags' },
+    revision: store.revision(),
+    readOnly,
+    forbiddenNote: SESSION_FORBIDDEN_NOTE,
+  });
+  return page(
+    `<h2>Settings</h2>${tabs('flags')}
+<h3>Advanced settings · this install</h3>
+<p>Every install-wide setting. Changes apply at the next pass, except those marked for the next restart; one that loosens a safeguard asks you to confirm first.</p>
+<p>Each zone has its own advanced settings:</p>
+${zones.length ? `<ul class="zone-flags">${links}</ul>` : '<p><small>No zones yet.</small></p>'}
+${savedNote(o.saved)}${readOnly ? fileModeBanner(store) : ''}
+${form}
+${FLAGS_SCRIPT}`,
+    { title: 'Advanced settings · this install' },
   );
 }
 
@@ -1080,6 +1123,16 @@ export function registerSettingsPages(
         config: req.jmConfig ?? store.current(),
         ...(saved !== undefined ? { saved } : {}),
       }),
+    );
+  });
+  // Advanced (issue #323): every install-wide setting, one per row.
+  app.get<{ Querystring: { saved?: string } }>('/settings/flags', async (req, reply) => {
+    const raw = req.query.saved;
+    const saved = typeof raw === 'string' && /^[1-9]\d{0,9}$/.test(raw) ? Number(raw) : undefined;
+    return html(
+      req,
+      reply,
+      renderInstallFlags({ store, ...(saved !== undefined ? { saved } : {}) }),
     );
   });
   app.get('/settings/other-machines', async (req, reply) => {

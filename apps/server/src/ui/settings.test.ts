@@ -8,13 +8,16 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { createApp } from '../app.js';
 import { Backoff } from '../auth/backoff.js';
 import { SetupMode, setOperatorPassphrase } from '../auth/operator.js';
-import { loadBoot } from '../config/boot.js';
+import { loadBoot, RESTART_PATHS } from '../config/boot.js';
+import { flagRows } from '../config/catalog.js';
 import { ConfigStore, startVault } from '../config/store.js';
 import { openDb } from '../db/open.js';
 import { insertDrop, recordUsageWindows, setZoneMode, upsertDropZone } from '../db/repo.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import { gateSecretName } from '../vault/credentials.js';
 import { fingerprintOf, openVault, VAULT_KEY_IN_DATA_DIR } from '../vault/vault.js';
+import { FLAGS_SCRIPT, renderFlagsForm } from './flags.js';
+import { RESTART_NOTE } from './setting-controls.js';
 import {
   CREDENTIALS_SCRIPT,
   HISTORY_SCRIPT,
@@ -145,6 +148,8 @@ async function world(
       s = operatorSession(db, clock);
     },
     get: (url: string) => a.inject({ method: 'GET', url, headers: browser() }),
+    /** A GET with no session. */
+    anon: (url: string) => a.inject({ method: 'GET', url, headers: { host: HOST } }),
     call: (method: 'POST' | 'PUT' | 'PATCH' | 'DELETE', url: string, body: unknown) =>
       a.inject({ method, url, headers: api(), payload: body as object }),
     /** `ctl`: the operator token. */
@@ -1399,5 +1404,263 @@ describe('turning the vault on and preferring it (#101)', () => {
     expect(CREDENTIALS_SCRIPT).toContain("'/api/control/secrets/vault/off'");
     expect(CREDENTIALS_SCRIPT).toContain("'/api/control/secrets/vault/prefer', { prefer:");
     expect(CREDENTIALS_SCRIPT).toContain("'/copy-to-vault', {}");
+  });
+});
+
+describe('the advanced settings page for the install, /settings/flags (issue #323)', () => {
+  const REF = { ...ZONE, id: 'ref', repo: 'octo/ref' };
+  const installRows = (store: ConfigStore) => {
+    const doc = store.document() as Record<string, unknown>;
+    return flagRows('install', doc, doc);
+  };
+  /** Every `<tr data-flag="…">…</tr>` of the page, by key, in page order. */
+  const flagRowsHtml = (html: string): [string, string][] =>
+    [...html.matchAll(/<tr data-flag="([^"]*)"[^>]*>(.*?)<\/tr>/gs)].map((m) => [
+      m[1] as string,
+      m[2] as string,
+    ]);
+  const flagRow = (html: string, key: string): string => {
+    const r = flagRowsHtml(html).find(([k]) => k === key);
+    if (!r) throw new Error(`no row for ${key}`);
+    return r[1];
+  };
+  const field = (
+    key: string,
+    kind: string,
+    value: unknown,
+    original: unknown,
+    explicit = false,
+  ) => ({
+    key,
+    kind,
+    value,
+    original,
+    explicit,
+  });
+
+  test('lists exactly the install flagRows, one link per zone, and the same auth as the other tabs', async () => {
+    const w = await world({ dbMode: true, doc: { dropZones: [ZONE, REF] } });
+    const r = await w.get('/settings/flags');
+    expect(r.statusCode).toBe(200);
+    const rows = installRows(w.store);
+    expect(rows.length).toBeGreaterThan(0);
+    const keys = flagRowsHtml(r.body).map(([k]) => k);
+    expect(keys).toEqual(rows.map((row) => row.key));
+    expect(keys).toContain('pollSeconds');
+    // No zone setting is a row here.
+    expect(keys.some((k) => k.startsWith('dropZones'))).toBe(false);
+    expect(r.body).toContain('Advanced settings · this install');
+    expect(r.body).toContain('Each zone has its own advanced settings:');
+    const links = [...r.body.matchAll(/<a href="(\/zones\/[^"]*\/flags)">/g)].map((m) => m[1]);
+    expect(links).toEqual(['/zones/main/flags', '/zones/ref/flags']);
+    // pollSeconds: a number input in Pace with the schema's bounds.
+    const pace = r.body.slice(r.body.indexOf('<section data-group="pace">'));
+    expect(pace.slice(0, pace.indexOf('</section>'))).toContain('data-flag="pollSeconds"');
+    expect(flagRow(r.body, 'pollSeconds')).toMatch(
+      /<input type="number" min="5" max="86400" step="1"[^>]*data-path="pollSeconds"/,
+    );
+    expect(r.body).toContain('<button id="flags-save">Save changes</button>');
+    // The elsewhere rows: publicUrl links to the Other machines tab; the jitter says ctl or file.
+    expect(flagRow(r.body, 'server.publicUrl')).toContain(
+      'Changed in the Other machines tab. <a href="/settings/other-machines">',
+    );
+    const jitter = flagRow(r.body, 'usage.probeJitterSeconds');
+    expect(jitter).toContain('Changed with jumpmaster ctl settings set or in the config file.');
+    expect(jitter).not.toContain('<a ');
+    // D1: as the other settings pages, no session gets no page.
+    const anon = await w.anon('/settings/flags');
+    expect(anon.statusCode).toBe((await w.anon('/settings/install')).statusCode);
+    expect(anon.statusCode).not.toBe(200);
+  });
+
+  test('the settings tabs include Advanced after History, linking to /settings/flags', async () => {
+    const w = await world({ dbMode: true });
+    const install = (await w.get('/settings/install')).body;
+    const nav = install.slice(install.indexOf('<nav class="settings-tabs">'));
+    const tabs = nav.slice(0, nav.indexOf('</nav>'));
+    expect(tabs).toMatch(/History<\/a> · <a href="\/settings\/flags">Advanced<\/a>$/);
+    expect((await w.get('/settings/flags')).body).toContain('<strong>Advanced</strong>');
+  });
+
+  test('in file mode every control is disabled, there is no Save, under the install banner', async () => {
+    const w = await world();
+    const html = (await w.get('/settings/flags')).body;
+    expect(html).toContain('(file mode), so they are read-only here');
+    expect(html).not.toContain('Save changes');
+    expect(html).not.toContain('class="reset"');
+    const controls = [...html.matchAll(/<(input|select|textarea)[^>]*data-path="[^"]*"[^>]*>/g)];
+    expect(controls.length).toBeGreaterThan(0);
+    for (const c of controls) expect(c[0]).toMatch(/ disabled/);
+    expect(html).toContain('<a href="/zones/main/flags">');
+  });
+
+  test('every row whose key is in RESTART_PATHS says so, and no other row does', async () => {
+    const w = await world({ dbMode: true });
+    const html = (await w.get('/settings/flags')).body;
+    const rows = flagRowsHtml(html);
+    expect(rows.filter(([k]) => (RESTART_PATHS as readonly string[]).includes(k))).toHaveLength(
+      RESTART_PATHS.length,
+    );
+    for (const [key, row] of rows)
+      expect(row.includes(RESTART_NOTE), key).toBe(
+        (RESTART_PATHS as readonly string[]).includes(key),
+      );
+  });
+
+  test('the script builds { pollSeconds: 30 } for that change, null for a reset, and saves to this page', async () => {
+    const { ctx, calls } = pageScript(FLAGS_SCRIPT, () => ({
+      ok: true,
+      status: 200,
+      json: { revision: 8 },
+    }));
+    const build = ctx.jmFlagsPatch as (f: unknown[]) => Record<string, unknown>;
+    const patch = build([
+      field('pollSeconds', 'number', '30', 60, true),
+      field('usage.throttleUtilization', 'number', '0.9', 0.9),
+    ]);
+    expect(patch).toEqual({ pollSeconds: 30 });
+    expect(build([{ key: 'pollSeconds', reset: true }])).toEqual({ pollSeconds: null });
+    let went = '';
+    const r = await (ctx.jmSaveFlags as (...a: unknown[]) => Promise<string>)(
+      { savedTo: '/settings/flags' },
+      patch,
+      5,
+      stubStatus(),
+      (to: string) => {
+        went = to;
+      },
+    );
+    expect(r).toBe('saved');
+    expect(calls).toEqual([
+      {
+        method: 'PATCH',
+        path: '/api/control/config',
+        body: {
+          patch: { pollSeconds: 30 },
+          expectRevision: 5,
+          returnTo: '/settings/flags',
+          cancelTo: '/settings/flags',
+        },
+      },
+    ]);
+    expect(went).toBe('/settings/flags?saved=8');
+  });
+
+  test('pollSeconds 60 → 30 from this page is applied', async () => {
+    const w = await world({ dbMode: true, doc: { pollSeconds: 60 } });
+    const { ctx } = pageScript(FLAGS_SCRIPT, () => ({ ok: true, status: 200, json: {} }));
+    const patch = (ctx.jmFlagsPatch as (f: unknown[]) => unknown)([
+      field('pollSeconds', 'number', '30', 60, true),
+    ]);
+    const r = await w.call('PATCH', '/api/control/config', {
+      patch,
+      expectRevision: w.store.revision(),
+      returnTo: '/settings/flags',
+      cancelTo: '/settings/flags',
+    });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(w.store.current().pollSeconds).toBe(30);
+    expect((await w.get('/settings/flags?saved=2')).body).toContain('Saved as revision 2');
+    expect((await w.get('/settings/flags?saved=<b>')).body).not.toContain('Saved as revision');
+  });
+
+  test('D5 parity (guarded): turning stopOnOverage off from this page and from /settings/install gets the same 409', async () => {
+    const w = await world({ dbMode: true, doc: { usage: { stopOnOverage: true } } });
+    const before = w.store.revision();
+    const flags = pageScript(FLAGS_SCRIPT, () => ({ ok: true, status: 200, json: {} }));
+    const install = pageScript(INSTALL_SCRIPT, () => ({ ok: true, status: 200, json: {} }));
+    const mine = (flags.ctx.jmFlagsPatch as (f: unknown[]) => unknown)([
+      field('usage.stopOnOverage', 'bool', false, true, true),
+    ]);
+    const theirs = (install.ctx.jmInstallPatch as (f: unknown[]) => unknown)([
+      { path: 'usage.stopOnOverage', kind: 'bool', value: false, original: true },
+    ]);
+    expect(mine).toEqual({ usage: { stopOnOverage: false } });
+    expect(mine).toEqual(theirs);
+    const answers = [];
+    for (const [patch, to] of [
+      [mine, '/settings/flags'],
+      [theirs, '/settings/install'],
+    ] as const) {
+      const r = await w.call('PATCH', '/api/control/config', {
+        patch,
+        expectRevision: w.store.revision(),
+        returnTo: to,
+        cancelTo: to,
+      });
+      expect(r.statusCode).toBe(409);
+      const j = r.json() as { needsConfirmation: boolean; guarded: unknown; confirm: string };
+      answers.push({ needsConfirmation: j.needsConfirmation, guarded: j.guarded });
+      if (to === '/settings/flags')
+        expect((await w.get(j.confirm)).body).toContain('<a href="/settings/flags">Cancel</a>');
+    }
+    expect(answers[0]?.needsConfirmation).toBe(true);
+    expect(answers[0]).toEqual(answers[1]);
+    expect(w.store.revision()).toBe(before);
+    expect(w.store.current().usage.stopOnOverage).toBe(true);
+  });
+
+  test('D5 parity (forbidden): requireSignedImages off is refused from both, and the row is disabled only while on', async () => {
+    const off = await world({ dbMode: true });
+    const offRow = flagRow((await off.get('/settings/flags')).body, 'requireSignedImages');
+    expect(offRow).toMatch(/<input type="checkbox"[^>]*data-path="requireSignedImages"[^>]*>/);
+    expect(offRow).not.toContain('disabled');
+    // Off: it can be turned on and saved.
+    const { ctx } = pageScript(FLAGS_SCRIPT, () => ({ ok: true, status: 200, json: {} }));
+    const build = ctx.jmFlagsPatch as (f: unknown[]) => unknown;
+    const on = await off.call('PATCH', '/api/control/config', {
+      patch: build([field('requireSignedImages', 'bool', true, false)]),
+      expectRevision: off.store.revision(),
+    });
+    expect(on.statusCode, on.body).not.toBe(403);
+
+    const w = await world({ dbMode: true, doc: { requireSignedImages: true } });
+    const before = w.store.revision();
+    const row = flagRow((await w.get('/settings/flags')).body, 'requireSignedImages');
+    expect(row).toMatch(/data-path="requireSignedImages"[^>]* checked disabled/);
+    expect(row).toContain('set with <code>jumpmaster ctl</code> or in the config file');
+    // A synthetic field: the page never offers this control enabled while it's on.
+    const mine = build([field('requireSignedImages', 'bool', false, true, true)]);
+    const install = pageScript(INSTALL_SCRIPT, () => ({ ok: true, status: 200, json: {} }));
+    const theirs = (install.ctx.jmInstallPatch as (f: unknown[]) => unknown)([
+      { path: 'requireSignedImages', kind: 'bool', value: false, original: true },
+    ]);
+    expect(mine).toEqual(theirs);
+    for (const patch of [mine, theirs]) {
+      const r = await w.call('PATCH', '/api/control/config', {
+        patch,
+        expectRevision: w.store.revision(),
+      });
+      expect(r.statusCode).toBe(403);
+      expect(r.json()).toMatchObject({ sessionForbidden: ['requireSignedImages'] });
+    }
+    expect(w.store.revision()).toBe(before);
+    expect(w.store.current().requireSignedImages).toBe(true);
+  });
+
+  test('the zone and install pages render through the same exported renderFlagsForm', async () => {
+    const w = await world({ dbMode: true, doc: { dropZones: [ZONE, REF] } });
+    const doc = w.store.document() as Record<string, unknown>;
+    const note = 'set with <code>jumpmaster ctl</code> or in the config file';
+    const install = renderFlagsForm({
+      scope: 'install',
+      rows: flagRows('install', doc, doc),
+      target: { savedTo: '/settings/flags' },
+      revision: w.store.revision(),
+      readOnly: false,
+      forbiddenNote: note,
+    });
+    expect((await w.get('/settings/flags')).body).toContain(install);
+    const zone = (doc.dropZones as Record<string, unknown>[])[1] as Record<string, unknown>;
+    const zoneForm = renderFlagsForm({
+      scope: 'zone',
+      rows: flagRows('zone', zone, doc),
+      target: { savedTo: '/zones/ref/flags', zone: { id: 'ref', index: 1 } },
+      revision: w.store.revision(),
+      readOnly: false,
+      forbiddenNote: note,
+    });
+    expect((await w.get('/zones/ref/flags')).body).toContain(zoneForm);
+    expect(install).not.toEqual(zoneForm);
   });
 });
