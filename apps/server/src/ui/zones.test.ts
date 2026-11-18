@@ -152,6 +152,13 @@ describe('the zones page', () => {
     expect(home.body).toContain('href="/zones"');
   });
 
+  test('the zone page links its goals page after Briefings (#365)', async () => {
+    const w = await world();
+    const body = (await w.get('/zones/main')).body;
+    expect(body).toContain('href="/zones/main/goals"');
+    expect(body).toMatch(/Briefings \(\d+ open\)<\/a> · <a href="\/zones\/main\/goals">Goals<\/a>/);
+  });
+
   test('each section of the zone page is filled from the current config and posts a patch with expectRevision', async () => {
     const w = await world();
     const r = await w.get('/zones/main');
