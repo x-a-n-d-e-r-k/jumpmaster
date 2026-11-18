@@ -410,3 +410,93 @@ export function settleArbitration(db: Db, id: number, s: ArbitrationSettle, now:
     });
   return r.changes > 0;
 }
+
+/** What became of a crew retry once a pass applied it. */
+export type CrewRetryOutcome = 'retried' | 'skipped';
+
+/**
+ * The crew's one retry of a parked work item on its own diagnosis (#396): recorded with the
+ * diagnose result, applied by the next active pass.
+ */
+export type CrewRetry = {
+  id: number;
+  zoneId: string;
+  itemId: number;
+  briefingId: number;
+  /** The diagnose drop whose result asked for it. */
+  dropId: string;
+  diagnosis: string;
+  instruction: string;
+  createdAt: string;
+  appliedAt: string | null;
+  outcome: CrewRetryOutcome | null;
+};
+
+export type NewCrewRetry = Pick<
+  CrewRetry,
+  'zoneId' | 'itemId' | 'briefingId' | 'dropId' | 'diagnosis' | 'instruction'
+> & { createdAt: Date };
+
+const RETRY_COLS = `id, zone_id AS zoneId, item_id AS itemId, briefing_id AS briefingId,
+  drop_id AS dropId, diagnosis, instruction, created_at AS createdAt, applied_at AS appliedAt,
+  outcome`;
+
+/**
+ * Records a crew retry; throws a UNIQUE violation if the item has one already: one crew retry per
+ * work item, ever, by the schema.
+ */
+export function insertCrewRetry(db: Db, r: NewCrewRetry): number {
+  const res = db
+    .prepare(
+      `INSERT INTO crew_retries (zone_id, item_id, briefing_id, drop_id, diagnosis, instruction,
+         created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      r.zoneId,
+      r.itemId,
+      r.briefingId,
+      r.dropId,
+      r.diagnosis,
+      r.instruction,
+      r.createdAt.toISOString(),
+    );
+  return Number(res.lastInsertRowid);
+}
+
+/** The work item's crew retry, if it ever had one. */
+export function getCrewRetry(db: Db, itemId: number): CrewRetry | undefined {
+  return db.prepare(`SELECT ${RETRY_COLS} FROM crew_retries WHERE item_id = ?`).get(itemId) as
+    | CrewRetry
+    | undefined;
+}
+
+/** The zone's crew retries not yet applied, oldest first. */
+export function listUnappliedCrewRetries(db: Db, zoneId: string): CrewRetry[] {
+  return db
+    .prepare(
+      `SELECT ${RETRY_COLS} FROM crew_retries WHERE zone_id = ? AND applied_at IS NULL
+       ORDER BY id`,
+    )
+    .all(zoneId) as CrewRetry[];
+}
+
+/** Claims a crew retry for one pass to apply: false when another pass has it already. */
+export function claimCrewRetryApply(db: Db, id: number, now: Date): boolean {
+  return (
+    db
+      .prepare('UPDATE crew_retries SET applied_at = ? WHERE id = ? AND applied_at IS NULL')
+      .run(now.toISOString(), id).changes === 1
+  );
+}
+
+/** Undoes `claimCrewRetryApply` when the retry could not run yet: the next pass tries again. */
+export function releaseCrewRetryApply(db: Db, id: number, now: Date): void {
+  db.prepare(
+    'UPDATE crew_retries SET applied_at = NULL WHERE id = ? AND applied_at = ? AND outcome IS NULL',
+  ).run(id, now.toISOString());
+}
+
+/** Records what became of a claimed crew retry. */
+export function settleCrewRetry(db: Db, id: number, outcome: CrewRetryOutcome): void {
+  db.prepare('UPDATE crew_retries SET outcome = ? WHERE id = ?').run(outcome, id);
+}

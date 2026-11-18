@@ -4,7 +4,14 @@ import {
   isCrewRole,
   parseCrewOutput,
 } from '@jumpmaster/protocol';
-import { raiseBriefing, recordDiagnosis, whyBasis } from '../briefings.js';
+import {
+  type RulingDeps,
+  raiseBriefing,
+  recordDiagnosis,
+  whyBasis,
+  withdrawBriefing,
+} from '../briefings.js';
+import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import {
   appendEvents,
@@ -37,13 +44,19 @@ import {
   type CrewIssue,
   type CrewIssuePatch,
   claimArbitrationApply,
+  claimCrewRetryApply,
   getArbitrationByDrop,
   getCrewIssue,
+  getCrewRetry,
   getTriageRequest,
+  insertCrewRetry,
+  listUnappliedCrewRetries,
   releaseArbitrationApply,
+  releaseCrewRetryApply,
   setCrewIssue,
   setTriageRequest,
   settleArbitration,
+  settleCrewRetry,
   unappliedItemArbitrations,
 } from './store.js';
 
@@ -428,14 +441,46 @@ export async function applyArbitrations(
   return applied;
 }
 
+const isUniqueViolation = (e: unknown): boolean =>
+  e instanceof Error && 'code' in e && String(e.code).startsWith('SQLITE_CONSTRAINT');
+
+/**
+ * Whether the crew may retry the item on its own diagnosis (#396): `crew.autoRetry` on, the item
+ * parked with no pull request, its newest drop an `implement` drop that `failed`, and no crew retry
+ * ever recorded for it. Read from server-recorded rows only, never from an agent's report. So a
+ * heal, review, resolve, budget, gate-change, conflict or human-hold park is never crew-retried.
+ */
+export function crewMayRetry(db: Db, zone: DropZoneConfig, itemId: number): boolean {
+  if (!zone.crew.autoRetry) return false;
+  const item = getWorkItem(db, itemId);
+  if (!item || item.dropZoneId !== zone.id || item.state !== 'parked') return false;
+  if (item.prNumber !== null || getPullRequest(db, itemId) !== undefined) return false;
+  const newest = db
+    .prepare(
+      `SELECT role, state FROM drops WHERE work_item_id = ?
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(itemId) as { role: string; state: string } | undefined;
+  if (newest?.role !== 'implement' || newest.state !== 'failed') return false;
+  return getCrewRetry(db, itemId) === undefined;
+}
+
+type DiagnoseWork = Extract<CrewInputJson['work'], { role: 'diagnose' }>;
+
 /**
  * Records a diagnosis on the parked briefing it was asked for, beside the server's why, if that
- * briefing is still open and its why is still the one diagnosed (`basis`). Returns why it was
- * discarded, if it was.
+ * briefing is still open and its why is still the one diagnosed (`basis`). The diagnosis is always
+ * kept, as the record of what the crew saw. A `retry` with an instruction, on an item the crew may
+ * retry (`crewMayRetry`), also records the crew's one retry and withdraws the briefing, in this
+ * transaction: `applyCrewRetries` acts on it next active pass (a retry may read the forge). A
+ * second retry for the item is refused by the schema, and leaves the diagnosis only. Returns why
+ * it was discarded, if it was.
  */
 function applyDiagnose(
   db: Db,
-  work: { briefingId: number; basis?: string },
+  deps: Pick<ResultDeps, 'zone'>,
+  drop: Drop,
+  work: DiagnoseWork,
   out: CrewOutput['diagnose'],
   now: Date,
 ): string | undefined {
@@ -454,7 +499,59 @@ function applyDiagnose(
     { diagnosis: out.diagnosis, basis, recommendation: `${out.recommendation}: ${out.detail}` },
     now,
   );
-  return undefined;
+  const instruction = out.instruction?.trim() ?? '';
+  if (out.recommendation !== 'retry' || instruction === '') return undefined;
+  if (!crewMayRetry(db, deps.zone, work.itemId)) return undefined;
+  try {
+    db.transaction(() => {
+      insertCrewRetry(db, {
+        zoneId: deps.zone.id,
+        itemId: work.itemId,
+        briefingId: work.briefingId,
+        dropId: drop.id,
+        diagnosis: out.diagnosis,
+        instruction: out.instruction ?? instruction,
+        createdAt: now,
+      });
+      withdrawBriefing(db, deps.zone.id, `item:${work.itemId}`, now);
+    })();
+  } catch (e) {
+    // Another result recorded the item's one crew retry first: the diagnosis stands alone.
+    if (isUniqueViolation(e)) return 'crew retry not recorded: the item has one already';
+    throw e;
+  }
+  return 'the crew retries the item on this diagnosis';
+}
+
+/**
+ * Applies the zone's recorded crew retries, each once (#396). A row is claimed by its `applied_at`
+ * first, so two passes retry once. With `crew.autoRetry` now off, or the item no longer parked,
+ * it is `skipped`: the next `syncParkBriefings` briefs Command as usual. Otherwise the item is
+ * retried exactly as Command's Retry (`retryParkedItem`); a PR read that fails releases the claim
+ * for the next pass. Returns how many items were retried.
+ */
+export async function applyCrewRetries(
+  db: Db,
+  deps: Pick<RulingDeps, 'forges' | 'zone'>,
+  zoneId: string,
+  now: Date,
+): Promise<number> {
+  let retried = 0;
+  for (const row of listUnappliedCrewRetries(db, zoneId)) {
+    if (!claimCrewRetryApply(db, row.id, now)) continue;
+    const item = getWorkItem(db, row.itemId);
+    if (!deps.zone(zoneId).crew.autoRetry || item?.state !== 'parked') {
+      settleCrewRetry(db, row.id, 'skipped');
+      continue;
+    }
+    if (!(await retryParkedItem(db, deps.forges(zoneId), item, now))) {
+      releaseCrewRetryApply(db, row.id, now);
+      continue;
+    }
+    settleCrewRetry(db, row.id, 'retried');
+    retried++;
+  }
+  return retried;
 }
 
 /** The line a triage child's body ends with; it counts toward the 12000-character limit. */
@@ -644,8 +741,9 @@ export async function applyCrewResult(
           : applyIssueArbitration(db, deps, drop, work, out, now);
       return finish(db, drop, 'succeeded', now, note);
     } else if (role === 'diagnose' && work?.role === 'diagnose') {
-      const discarded = applyDiagnose(db, work, parsed.value as CrewOutput['diagnose'], now);
-      return finish(db, drop, 'succeeded', now, discarded);
+      const out = parsed.value as CrewOutput['diagnose'];
+      const note = applyDiagnose(db, deps, drop, work, out, now);
+      return finish(db, drop, 'succeeded', now, note);
     }
     finish(db, drop, 'succeeded', now);
   })();

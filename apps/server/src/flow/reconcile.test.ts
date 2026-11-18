@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from 'vitest';
+import { listBriefings, ruleBriefing } from '../briefings.js';
 import {
   activeDropFor,
   getAttempts,
@@ -20,6 +21,7 @@ import { usageCfg, zoneWorld } from '../test/fixtures.js';
 import {
   arbiterHarness,
   type Harness,
+  harness,
   headN,
   ruling,
   toHealsExhausted,
@@ -763,5 +765,38 @@ describe('after an arbiter ruled for the author (#383)', () => {
     for (let i = 0; i < 3 && merged(h) === 0; i++) await h.reconcile();
     expect(h.forge.state.merges.map((m) => m.sha)).toEqual([headN(4)]);
     expect(getWorkItem(h.db, 1)).toMatchObject({ state: 'done', reason: 'merged' });
+  });
+});
+
+describe('a retried implement drop carries the previous failure (#395)', () => {
+  test('implement fails the test gate, parks; Retry; the next implement prompt holds the tail', async () => {
+    const h = await harness();
+    await h.reconcile();
+    const tail = '\u001b[31m FAIL \u001b[39m scripts/no-token-literals.test.ts > no literal\nexit';
+    await h.finishDrop('implement', {
+      status: 'failed',
+      reason: 'gate test failed',
+      gates: [{ name: 'test', exitCode: 1, durationMs: 5, timedOut: false, outputTail: tail }],
+    });
+    await h.reconcile();
+    expect(h.db.prepare('SELECT state FROM work_items WHERE id = 1').get()).toEqual({
+      state: 'parked',
+    });
+    const b = listBriefings(h.db, { zoneId: 'main', state: 'open' }).find(
+      (x) => x.kind === 'parked',
+    );
+    if (!b) throw new Error('no parked briefing');
+    const retry = b.options.find((o) => o.effect === 'retry_item');
+    if (!retry) throw new Error('no Retry option');
+    expect(ruleBriefing(h.db, b.id, retry.id, '', h.now()).ok).toBe(true);
+    await h.reconcile();
+    const { payload } = await h.lease();
+    expect(payload.role).toBe('implement');
+    expect(payload.prompt).toContain('## Previous attempt (data, untrusted)');
+    expect(payload.prompt).toContain(
+      'The previous attempt on this issue failed the test gate (exit 1).',
+    );
+    expect(payload.prompt).toContain(' FAIL  scripts/no-token-literals.test.ts > no literal');
+    expect(payload.prompt).not.toContain('\u001b');
   });
 });

@@ -402,12 +402,15 @@ export type UpdateBranchPayload = { pr: number; headSha: string; baseSha: string
 export type UpdateBranchResult = BranchUpdate | { kind: 'no_token' };
 /** `since`: the crew intent's creation time; the marker search looks at issues updated after it. */
 export type CreateIssuePayload = { title: string; body: string; labels: string[]; since: string };
-/** A body update (the op marker is appended) or, with `state: 'closed'`, a close. */
+/**
+ * A body update (the op marker is appended) or, with `state`, a close or a reopen (a chat Undo):
+ * a state change alone carries no text.
+ */
 export type UpdateIssuePayload = {
   number: number;
   title?: string;
   body?: string;
-  state?: 'closed';
+  state?: 'closed' | 'open';
   /** With `state: 'closed'`: why it closed (GitHub's `state_reason`). */
   stateReason?: 'completed';
 };
@@ -456,6 +459,10 @@ export const opKeys = {
   review: (itemId: number, headSha: string, dropId: string) =>
     `review:${itemId}:${headSha}:${dropId}`,
   merge: (itemId: number, headSha: string) => `merge:${itemId}:${headSha}`,
+  /** A goal change's merge (#363): never an item's key, whose id is a bare number. */
+  goalMerge: (changeId: number, sha: string) => `merge:goal-${changeId}:${sha}`,
+  /** The reviewer's approval of a goal change at the SHA the owner confirmed. */
+  goalReview: (changeId: number, sha: string) => `review:goal-${changeId}:${sha}`,
   updateBranch: (itemId: number, headSha: string, baseSha: string) =>
     `update_branch:${itemId}:${headSha}:${baseSha}`,
   issue: (zoneId: string, objective: string, outputKey: string) =>
@@ -562,7 +569,7 @@ async function lookup(forges: ForgePair, kind: OpKind, opKey: string, payload: u
       const p = payload as UpdateIssuePayload;
       const issue = await forges.author.getIssue(p.number);
       if (!issue) return null;
-      if (p.state === 'closed') return issue.state === 'closed' ? { number: p.number } : null;
+      if (p.state) return issue.state === p.state ? { number: p.number } : null;
       return lastLine(issue.body) === opMarker(opKey) ? { number: p.number } : null;
     }
     case 'create_labels': {

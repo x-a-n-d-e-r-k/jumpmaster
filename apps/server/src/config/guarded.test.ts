@@ -178,6 +178,12 @@ describe('guarded scalar paths', () => {
       { crew: { arbiter: true } },
       'A Fable arbiter in web will settle crew disagreements without asking you',
     ],
+    [
+      'crew.autoRetry',
+      { crew: { autoRetry: false } },
+      { crew: { autoRetry: true } },
+      'The crew in web will retry a failed implementation once on its own diagnosis, without asking you',
+    ],
   ];
 
   test.each(cases)(
@@ -218,6 +224,17 @@ describe('guarded scalar paths', () => {
     expect(paths(edit({}, on))).toEqual([]);
     expect(paths(edit({}, off))).toEqual([]);
     // Opting back in from an explicit false is guarded, whether written or by dropping the key.
+    expect(paths(edit(off, {}))).toEqual([at]);
+  });
+
+  test('crew.autoRetry: false to true is guarded, true to false is not, and the default is true', () => {
+    const at = 'dropZones[web].crew.autoRetry';
+    const off = { crew: { autoRetry: false } };
+    const on = { crew: { autoRetry: true } };
+    expect(paths(edit(off, on))).toEqual([at]);
+    expect(paths(edit(on, off))).toEqual([]);
+    expect(paths(edit({}, on))).toEqual([]);
+    expect(paths(edit({}, off))).toEqual([]);
     expect(paths(edit(off, {}))).toEqual([at]);
   });
 

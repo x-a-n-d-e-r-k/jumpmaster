@@ -33,3 +33,11 @@ describe('one open briefing per objective (#246)', () => {
     expect(text).toMatch(/don't raise another; reuse its subject to update it/);
   });
 });
+
+describe('proposing a goal change (#364)', () => {
+  test('the crew lead proposes a goal change only through goalChange', () => {
+    const text = prompt('crew-lead.md');
+    expect(text).toMatch(/Propose a goal change only through `goalChange`/);
+    expect(text).not.toMatch(/Raise a briefing to propose a goal change/);
+  });
+});

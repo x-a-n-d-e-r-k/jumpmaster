@@ -1,8 +1,11 @@
+import { redact } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { configReader, type LiveConfig } from '../config/source.js';
 import type { Db } from '../db/open.js';
-import { type ChatCard, cardUndoable, safeCardLink } from './cards.js';
+import type { ForgePair } from '../outbox.js';
+import { redactionList } from '../scrub.js';
+import { type ChatCard, cardUndoable, getCard, safeCardLink, undoCard } from './cards.js';
 import { focusKnown, focusTitle } from './focus.js';
 import {
   appendMessage,
@@ -25,6 +28,8 @@ export interface ChatRouteDeps {
   now(): Date;
   /** Starts the thread's next queued turn (Task 7); absent, messages wait as `queued`. */
   turns?: ChatTurnHub;
+  /** The zone's author pair, which Undo writes through; absent, Undo is a 503. */
+  forgesFor?: (zoneId: string) => ForgePair;
 }
 
 /** What the routes need of the turn runner (`ChatTurns`). */
@@ -154,6 +159,36 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     );
     deps.turns?.enqueue(thread.id);
     return reply.code(202).send({ message });
+  });
+
+  /**
+   * Undo on one card, from the browser that shows it: a label comes off or an issue is reopened,
+   * once (a second press is a 409). The card goes to its thread's stream as undone.
+   */
+  app.post<{ Params: { id: string } }>('/api/chat/cards/:id/undo', async (req, reply) => {
+    if (!sessionOf(req, reply)) return reply;
+    const p = req.principal;
+    const id = threadIdOf(req.params.id);
+    const card = id === undefined ? undefined : getCard(db, id);
+    if (!card || !p) return reply.code(404).send({ error: 'unknown card' });
+    const cfg = req.jmConfig ?? config();
+    const zone = cfg.dropZones.find((z) => z.id === card.zoneId);
+    if (!cardUndoable(card) || !zone) {
+      const error =
+        card.state === 'undone' ? 'this card is already undone' : 'this card has no Undo';
+      return reply.code(409).send({ error });
+    }
+    if (!deps.forgesFor)
+      return reply.code(503).send({ error: 'this server has no forge to undo through' });
+    const secrets = redactionList(cfg.secrets);
+    const r = await undoCard(db, deps.forgesFor(zone.id), card, p, deps.now(), {
+      zoneMode: zone.mode,
+      secrets,
+    });
+    if (!r.ok) return reply.code(r.status).send({ error: redact(r.error, secrets) });
+    const undone = getCard(db, card.id) ?? card;
+    deps.turns?.publishCard?.(undone);
+    return { card: publicCard(undone) };
   });
 
   /**

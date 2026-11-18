@@ -5,6 +5,8 @@ import type { Db } from '../db/open.js';
 import { getPullRequest, getWorkItem } from '../db/repo.js';
 import type { Feedback } from '../flow/decide.js';
 import type { ZonePass } from '../flow/snapshot.js';
+import { serverScrubSet } from '../forge/scrub-set.js';
+import { failureText, newestFailure } from '../gate-output.js';
 import { getGoals, objectivesDone, zoneObjective } from '../goals.js';
 import { type ForgePair, unsanitizeForgeText } from '../outbox.js';
 import { crewTemplate, fence, gatherAuthorReports, neutralise } from '../payloads.js';
@@ -517,7 +519,22 @@ export function diagnoseInput(
       kind: 'untrusted',
       text: verdictsText(db, itemId),
     },
+    {
+      // #395's renderer: redacted here, neutralised and fenced by `assemble`.
+      title: 'Last failure',
+      name: 'last-failure',
+      kind: 'untrusted',
+      text: lastFailureText(db, itemId),
+    },
   ]);
+}
+
+/** How the item's newest implement drop failed or was lost, as an implement retry reads it. */
+function lastFailureText(db: Db, itemId: number): string {
+  const f = newestFailure(db, itemId);
+  return f
+    ? failureText(f, [...serverScrubSet.values()])
+    : 'The newest implement attempt did not fail.';
 }
 
 /** The item's latest review verdicts, newest first, with their findings: as diagnose reads them. */

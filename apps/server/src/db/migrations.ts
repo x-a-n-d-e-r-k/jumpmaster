@@ -1317,6 +1317,64 @@ CREATE TABLE goal_changes (
 CREATE INDEX goal_changes_by_zone_state ON goal_changes (zone_id, state, id);
 `;
 
+/**
+ * v46 (#364, the plan's v43: v43 to v45 were taken): the crew lead may propose a goal change, so
+ * `briefings.kind` gains `goal_change`. SQLite's rebuild of `briefings`, foreign keys off
+ * (`rulings` references it), every row and column kept.
+ */
+const V46_SQL = `
+CREATE TABLE new_briefings (
+  id                 INTEGER PRIMARY KEY,
+  zone_id            TEXT NOT NULL,
+  kind               TEXT NOT NULL CHECK (kind IN ('parked','promote','promote_held',
+                       'refute_exhausted','crew','credits_required','objective_done',
+                       'goal_change')),
+  subject            TEXT NOT NULL,
+  decision           TEXT NOT NULL,
+  why                TEXT NOT NULL,
+  options_json       TEXT NOT NULL,
+  recommendation     TEXT NOT NULL DEFAULT '',
+  on_hold            TEXT NOT NULL DEFAULT '',
+  source             TEXT NOT NULL CHECK (source IN ('server','crew','mcp')),
+  source_ref         TEXT,
+  state              TEXT NOT NULL CHECK (state IN ('open','ruled','withdrawn','dismissed')),
+  diagnose_attempts  INTEGER NOT NULL DEFAULT 0,
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL,
+  diagnosis          TEXT,
+  diagnosis_basis    TEXT
+);
+INSERT INTO new_briefings (id, zone_id, kind, subject, decision, why, options_json, recommendation,
+  on_hold, source, source_ref, state, diagnose_attempts, created_at, updated_at, diagnosis,
+  diagnosis_basis)
+SELECT id, zone_id, kind, subject, decision, why, options_json, recommendation, on_hold, source,
+  source_ref, state, diagnose_attempts, created_at, updated_at, diagnosis, diagnosis_basis
+FROM briefings;
+DROP TABLE briefings;
+ALTER TABLE new_briefings RENAME TO briefings;
+CREATE UNIQUE INDEX briefings_open_subject ON briefings(zone_id, subject) WHERE state = 'open';
+`;
+
+/**
+ * #396: a crew retry of a parked item, on its own diagnosis. `UNIQUE (item_id)` is the cap: one
+ * crew retry per work item, ever. Recorded in the diagnose result's transaction, applied (claimed
+ * by `applied_at`) by the next active pass.
+ */
+const V47_SQL = `
+CREATE TABLE crew_retries (
+  id           INTEGER PRIMARY KEY,
+  zone_id      TEXT NOT NULL,
+  item_id      INTEGER NOT NULL UNIQUE REFERENCES work_items(id),
+  briefing_id  INTEGER NOT NULL REFERENCES briefings(id),
+  drop_id      TEXT NOT NULL,
+  diagnosis    TEXT NOT NULL,
+  instruction  TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  applied_at   TEXT,
+  outcome      TEXT CHECK (outcome IN ('retried', 'skipped'))
+);
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1363,6 +1421,8 @@ export const MIGRATIONS: Migration[] = [
   { version: 43, sql: V43_SQL },
   { version: 44, sql: V44_SQL },
   { version: 45, sql: V45_SQL },
+  { version: 46, sql: V46_SQL, foreignKeysOff: true },
+  { version: 47, sql: V47_SQL },
 ];
 
 /**

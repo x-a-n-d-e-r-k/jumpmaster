@@ -446,6 +446,8 @@ function forgeFor(
         if (patch.body !== undefined) e.issue.body = patch.body;
       }
       if (patch.state) e.state = patch.state;
+      // A reopen drops the reason the issue closed for, as GitHub does.
+      if (patch.state === 'open') delete e.stateReason;
       if (patch.stateReason) e.stateReason = patch.stateReason;
       e.updatedAt = new Date().toISOString();
     },
@@ -549,8 +551,16 @@ function forgeFor(
         ? digestCompareFiles(structuredClone(files))
         : { digest: `change of ${head}`, complete: true };
     },
-    listPullFiles: async (n) =>
-      structuredClone(state.pullFiles.get(n) ?? { files: [{ path: 'src/a.ts' }], complete: true }),
+    listPullFiles: async (n) => {
+      const seeded = state.pullFiles.get(n);
+      if (seeded) return structuredClone(seeded);
+      // A branch `putFile` committed on changes the files it committed.
+      const head = state.pulls.get(n)?.headRef;
+      const paths = [...new Set(state.commits.filter((c) => c.branch === head).map((c) => c.path))];
+      return paths.length > 0
+        ? { files: paths.map((path) => ({ path })), complete: true }
+        : { files: [{ path: 'src/a.ts' }], complete: true };
+    },
     checksFor: async (sha): Promise<ChecksFacts> => {
       const seeded = state.checks.get(sha);
       return seeded

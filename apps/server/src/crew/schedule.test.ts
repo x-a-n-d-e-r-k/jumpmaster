@@ -27,7 +27,7 @@ import { zonePass } from '../flow/snapshot.js';
 import { refreshGoals } from '../goals.js';
 import { leaseNextDrop } from '../leases.js';
 import { buildPayload, promptVersions } from '../payloads.js';
-import { crewOn, crewWorld, ISSUE_BODY } from '../test/crew.js';
+import { crewOn, crewWorld, ISSUE_BODY, parsedCrew } from '../test/crew.js';
 import { makeZone, usageCfg, type ZoneWorld } from '../test/fixtures.js';
 import {
   arbiterHarness,
@@ -44,6 +44,7 @@ import { plus, t0 } from '../test/helpers.js';
 import { applyCrewActions } from './actions.js';
 import {
   type CrewInputJson,
+  crewDropsToday,
   enqueueCrew,
   nextCrewWork,
   requestCrewCycle,
@@ -84,6 +85,10 @@ const work = (id: string) =>
 
 /** Finishes a crew drop so the next one may start. */
 const finish = (id: string) => updateDrop(w.db, id, { state: 'succeeded' });
+
+/** The zone's crew drops, of any state. */
+const listCrewDrops = () =>
+  w.db.prepare(`SELECT id FROM drops WHERE drop_zone_id = 'main' AND work_item_id IS NULL`).all();
 
 function stagedIssue(key = 'add-docs'): number {
   const r = applyCrewActions(
@@ -140,6 +145,48 @@ describe('enqueueCrew', () => {
     expect(await enqueue(at, capped)).toBeNull();
     // The cap is a trailing 24 hours.
     expect(await enqueue(plus(t0, 25 * HOUR), capped)).not.toBeNull();
+  });
+
+  /** Records `n` finished crew drops 20 hours before `at`, older than any cycle interval. */
+  function pastCrewDrops(n: number, at: Date): void {
+    for (let i = 0; i < n; i++)
+      insertDrop(
+        w.db,
+        {
+          id: `past${i}`,
+          dropZoneId: 'main',
+          workItemId: null,
+          role: 'crew-lead',
+          state: 'succeeded',
+        },
+        plus(at, -20 * HOUR + i * 1000),
+      );
+  }
+
+  test('maxDropsPerDay left unset is 0, no daily limit: 100 crew drops in the day still schedule work (#398)', async () => {
+    const unset = { ...w.zone, crew: parsedCrew() };
+    expect(unset.crew.maxDropsPerDay).toBe(0);
+    const at = plus(t0, 2 * HOUR);
+    pastCrewDrops(100, at);
+    expect(await enqueue(at, unset)).not.toBeNull();
+  });
+
+  test('a positive maxDropsPerDay caps at the boundary: 60 of 60 holds, 59 schedules (#398)', async () => {
+    const at = plus(t0, 2 * HOUR);
+    const capped = { ...w.zone, crew: parsedCrew({ maxDropsPerDay: 60 }) };
+    pastCrewDrops(59, at);
+    expect(await enqueue(at, capped)).not.toBeNull();
+    const other = await crewWorld();
+    w = other;
+    pastCrewDrops(60, at);
+    expect(await enqueue(at, { ...w.zone, crew: parsedCrew({ maxDropsPerDay: 60 }) })).toBeNull();
+  });
+
+  test('with no daily limit the usage gate still holds every crew drop (#398)', async () => {
+    const unset = { ...w.zone, crew: parsedCrew() };
+    setUsageState(w.db, { pausedUntil: plus(t0, HOUR).toISOString() }, t0);
+    expect(await enqueue(t0, unset)).toBeNull();
+    expect(listCrewDrops()).toHaveLength(0);
   });
 
   test('rate-limited and lost crew drops do not count toward maxDropsPerDay', async () => {
@@ -1006,5 +1053,61 @@ describe('arbitration of review disagreements (#383)', () => {
     await h.reconcile();
     expect(h.queuedRoles()).toEqual(['diagnose']);
     expect(crewDrops(h, 'arbitrate')).toHaveLength(1);
+  });
+});
+
+describe('diagnose and the daily crew cap (#397)', () => {
+  const capped = () => ({ ...w.zone, crew: { ...crewOn, maxDropsPerDay: 1, cycleMinutes: 1 } });
+  const roles = () =>
+    (w.db.prepare('SELECT role FROM drops').all() as { role: string }[]).map((r) => r.role);
+  /** Uses the day's one crew drop on a lead cycle. */
+  async function atCap(): Promise<void> {
+    const lead = (await enqueue(t0, capped())) ?? '';
+    expect(work(lead).role).toBe('crew-lead');
+    finish(lead);
+    expect(crewDropsToday(w.db, 'main', plus(t0, MIN))).toBe(1);
+  }
+
+  test('at maxDropsPerDay a parked briefing is still diagnosed; no other crew work is queued', async () => {
+    await atCap();
+    stagedIssue(); // refute work waiting
+    parkedItem();
+    const d = (await enqueue(plus(t0, 2 * MIN), capped())) ?? '';
+    expect(work(d).role).toBe('diagnose');
+    // Still one active crew drop at a time.
+    expect(await enqueue(plus(t0, 3 * MIN), capped())).toBeNull();
+    finish(d);
+    expect(await enqueue(plus(t0, 4 * MIN), capped())).toBeNull();
+    expect(roles().filter((r) => r === 'refute')).toEqual([]);
+  });
+
+  test('at the cap with no parked briefing nothing is queued, and an exhausted issue is not put to Command', async () => {
+    await atCap();
+    const issue = stagedIssue();
+    setCrewIssue(w.db, issue, { refuteCount: 2 }, t0);
+    expect(await enqueue(plus(t0, 2 * MIN), capped())).toBeNull();
+    expect(listBriefings(w.db, { zoneId: 'main', state: 'open' })).toEqual([]);
+  });
+
+  test('the kill switch and observe mode still hold a diagnose at the cap', async () => {
+    await atCap();
+    parkedItem();
+    setKilled(w.db, true, t0);
+    expect(await enqueue(plus(t0, 2 * MIN), capped())).toBeNull();
+    setKilled(w.db, false, t0);
+    setZoneMode(w.db, 'main', 'observe', t0);
+    expect(await enqueue(plus(t0, 3 * MIN), capped())).toBeNull();
+    expect(roles().filter((r) => r === 'diagnose')).toEqual([]);
+  });
+
+  test('diagnose drops do not count toward the cap', async () => {
+    parkedItem();
+    const d = (await enqueue(t0, capped())) ?? '';
+    expect(work(d).role).toBe('diagnose');
+    finish(d);
+    expect(crewDropsToday(w.db, 'main', plus(t0, MIN))).toBe(0);
+    const lead = (await enqueue(plus(t0, MIN), capped())) ?? '';
+    expect(work(lead).role).toBe('crew-lead');
+    expect(crewDropsToday(w.db, 'main', plus(t0, 2 * MIN))).toBe(1);
   });
 });

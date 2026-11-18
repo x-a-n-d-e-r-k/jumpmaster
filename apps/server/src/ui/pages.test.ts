@@ -1995,6 +1995,43 @@ describe('every briefing stands on its own (#226)', () => {
     expect(html).toContain('id="briefing-142"');
   });
 
+  test('a briefing the crew is still to diagnose shows a notice in place of the rule form (#397)', () => {
+    const parked = briefing({
+      id: 6,
+      kind: 'parked',
+      why: 'The test gate failed: `a.test.ts` > x',
+    });
+    const notice =
+      '<p class="pending">The crew is looking at this. You&#39;ll be asked if it needs you.</p>';
+    for (const html of [
+      renderBriefings({ open: [parked], rulings: [], zones: [z], pending: new Set([6]) }),
+      renderBriefings({
+        open: [parked],
+        rulings: [],
+        zones: [z],
+        zone: { id: 'main', mode: 'active' },
+        pending: new Set([6]),
+      }),
+      renderBriefing({ briefing: parked, rulings: [], zones: [z], pending: true }),
+    ]) {
+      expect(html).toContain(notice);
+      expect(html).not.toContain('class="rule"');
+      expect(html).not.toContain('type="radio"');
+      // The why and the options stay, read only.
+      expect(html).toContain('<pre>The test gate failed: `a.test.ts` &gt; x</pre>');
+      expect(html).toContain('<li>Split it <small><code>o1</code></small>');
+    }
+    // Not pending: the rule form, as before.
+    for (const html of [
+      renderBriefings({ open: [parked], rulings: [], zones: [z], pending: new Set([7]) }),
+      renderBriefings({ open: [parked], rulings: [], zones: [z] }),
+      renderBriefing({ briefing: parked, rulings: [], zones: [z], pending: false }),
+    ]) {
+      expect(html).not.toContain('class="pending"');
+      expect(html).toContain('<form class="rule" data-briefing="6"');
+    }
+  });
+
   test('/briefings/<n> shows one briefing with its rulings, and the lists carry anchors', () => {
     const ruled = briefing({ id: 7, state: 'ruled', decision: 'Split it, after Ruling 3?' });
     const one = renderBriefing({
