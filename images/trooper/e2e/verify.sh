@@ -19,6 +19,9 @@ REPO="${E2E_REPO:-x-a-n-d-e-r-k/jumpmaster}"
 # ("head moved"). Point it at a newer commit by hand when the e2e needs newer repository content.
 BRANCH="${E2E_BRANCH:-e2e-fixture}"
 SOURCE_URL="${SOURCE_URL:-}"
+# The stick's release version, its signature floor (#270): without one, the signed policy refuses
+# every signed image before cosign runs, and the cosign refusals below would go unexercised.
+RELEASE_VERSION="${E2E_RELEASE_VERSION:-0.0.0}"
 # Pinned by digest: the local registry (distribution 3.1.1) and an image Sigstore signs keyless
 # with its own identity (cosign v3.1.4), which this repository's identity must not accept.
 REGISTRY_IMAGE="registry:3.1.1@sha256:325b4b29b041e82803abeb703e201655e4e23ab83264ec1a7c9ddb0a5b14a6e0"
@@ -41,7 +44,7 @@ trap cleanup EXIT
 
 docker build -q --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-trooper:dev -f images/trooper/Dockerfile . >/dev/null
 docker build -q -t jumpmaster-trooper:e2e images/trooper/e2e >/dev/null
-docker build -q --build-arg SOURCE_URL="$SOURCE_URL" --build-arg RELEASE_REPOSITORY="$REPO" -t jumpmaster-stick:dev -f images/stick/Dockerfile . >/dev/null
+docker build -q --build-arg SOURCE_URL="$SOURCE_URL" --build-arg RELEASE_REPOSITORY="$REPO" --build-arg RELEASE_VERSION="$RELEASE_VERSION" -t jumpmaster-stick:dev -f images/stick/Dockerfile . >/dev/null
 docker build -q --build-arg SOURCE_URL="$SOURCE_URL" -t jumpmaster-egress:dev -f images/egress/Dockerfile . >/dev/null
 
 # A registry on the host's loopback: the engine pulls from it, and the stick (on the host network)
@@ -76,6 +79,6 @@ docker image rm "$OTHER_SIGNED" >/dev/null 2>&1 || true
 docker run --rm --network host --read-only --tmpfs /tmp --tmpfs /state:mode=0700 \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --mount "type=bind,src=$PWD/images/trooper/e2e/verify-drop.mjs,dst=/e2e/verify-drop.mjs,readonly" \
-  -e E2E_REPO="$REPO" -e E2E_BRANCH="$BRANCH" -e E2E_SHA="$SHA" \
+  -e E2E_REPO="$REPO" -e E2E_RELEASE_VERSION="$RELEASE_VERSION" -e E2E_BRANCH="$BRANCH" -e E2E_SHA="$SHA" \
   -e E2E_UNSIGNED="$UNSIGNED" -e E2E_EGRESS_UNSIGNED="$EGRESS_UNSIGNED" -e E2E_OTHER_SIGNED="$OTHER_SIGNED" \
   --entrypoint node jumpmaster-stick:dev /e2e/verify-drop.mjs
