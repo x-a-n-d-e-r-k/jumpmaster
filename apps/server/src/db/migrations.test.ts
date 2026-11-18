@@ -1490,8 +1490,8 @@ test('v40 keeps every control_audit row and the 5000-row trigger (the rebuild sh
   db.close();
 });
 
-test('v43 adds applied_at to arbitrations, keeping every row unapplied', () => {
-  const f = dbAt(42, (raw) => {
+test('v44 adds applied_at to arbitrations, keeping every row unapplied', () => {
+  const f = dbAt(43, (raw) => {
     raw.exec(`INSERT INTO arbitrations (zone_id, subject, basis, drop_id, state, created_at,
         updated_at) VALUES ('z', 'issue:1', 'sha1', 'd1', 'ruled', 't', 't')`);
   });

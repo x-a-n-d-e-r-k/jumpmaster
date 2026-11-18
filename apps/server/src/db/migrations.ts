@@ -1257,10 +1257,35 @@ END;
 `;
 
 /**
- * v43 (#383): an item's arbitration that acted is applied once (Command's Retry on the parked
- * item): `applied_at` records when, so two passes never retry it twice.
+ * v43 (#357, the crew chat's cards): one row per action a chat turn took or was refused, written
+ * from the server's own record of the action (never the model's text). A card is the thread's and
+ * message's of the chat token that acted. `undo_json` is what Undo needs; null where there is none
+ * (a ruling has no Undo).
  */
 const V43_SQL = `
+CREATE TABLE chat_cards (
+  id          INTEGER PRIMARY KEY,
+  thread_id   INTEGER NOT NULL,
+  message_id  INTEGER NOT NULL,
+  kind        TEXT NOT NULL,
+  zone_id     TEXT,
+  target      TEXT,
+  link        TEXT,
+  state       TEXT NOT NULL CHECK (state IN ('done','pending','refused','undone')),
+  summary     TEXT NOT NULL,
+  undo_json   TEXT,
+  created_at  TEXT NOT NULL,
+  undone_at   TEXT
+);
+CREATE INDEX chat_cards_by_thread ON chat_cards (thread_id, id);
+`;
+
+/**
+ * v44 (#383): an item's arbitration that acted is applied once (Command's Retry on the parked
+ * item): `applied_at` records when, so two passes never retry it twice. (Ships as v44: v43 was
+ * taken by the chat cards.)
+ */
+const V44_SQL = `
 ALTER TABLE arbitrations ADD COLUMN applied_at TEXT;
 `;
 
@@ -1308,6 +1333,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 41, sql: V41_SQL, foreignKeysOff: true },
   { version: 42, sql: V42_SQL },
   { version: 43, sql: V43_SQL },
+  { version: 44, sql: V44_SQL },
 ];
 
 /**
