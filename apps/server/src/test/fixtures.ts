@@ -68,6 +68,7 @@ export function makeZone(o: Partial<DropZoneConfig> = {}): DropZoneConfig {
       refutePromotes: false,
       maxRefute: 2,
       maxTriage: 2,
+      arbiter: true,
     },
     botLogins: [],
     authorLoginAliases: [],

@@ -1,15 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import type { Role } from '@jumpmaster/protocol';
-import { raiseBriefing, refuteExhaustedWhy, whyBasis } from '../briefings.js';
-import type { DropZoneConfig, UsageConfig } from '../config.js';
+import { raiseBriefing, refuteExhaustedWhy, refuteVerdicts, whyBasis } from '../briefings.js';
+import type { ClaudeConfig, DropZoneConfig, UsageConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import {
+  ACTIVE_DROP_STATES,
   ACTIVE_STATES_SQL,
   getZoneMode,
   insertDrop,
   isKilled,
   recordObservation,
 } from '../db/repo.js';
+import { fableStatus } from '../fable.js';
 import type { ZonePass } from '../flow/snapshot.js';
 import { getGoals } from '../goals.js';
 import { log } from '../log.js';
@@ -19,8 +21,22 @@ import { dispatchGate, gateQueuesCrew } from '../usage.js';
 import { crewIssueSlots } from './actions.js';
 import { PROMOTE_OPTIONS, subjectOf } from './flush.js';
 import { fetchIssueImages, type ImageFetchOpts } from './images.js';
-import { crewLeadInput, diagnoseInput, refuteInput, triageInput } from './inputs.js';
-import { getCrewIssue, getTriageRequest } from './store.js';
+import {
+  arbitrateIssueInput,
+  crewLeadInput,
+  diagnoseInput,
+  refuteInput,
+  triageInput,
+} from './inputs.js';
+import {
+  type CrewIssue,
+  getArbitration,
+  getCrewIssue,
+  getTriageRequest,
+  insertArbitration,
+  issueArbitrationSubject,
+  settleArbitration,
+} from './store.js';
 
 export type { CrewInputJson } from '../payloads.js';
 
@@ -43,11 +59,42 @@ export function requestCrewCycle(zoneId: string, now: Date): void {
 }
 
 /**
- * The zone's next crew work, in order: diagnose an open parked briefing not yet diagnosed, refute a
- * staged crew issue whose current body is unrefuted (within `maxRefute`), triage the oldest open
- * triage request (within `maxTriage`, with a slot free), then the lead cycle when it is due.
+ * Puts a staged crew issue whose refutes ran out to Command: promote it as it reads, or reject it.
+ * The one place a `refute_exhausted` briefing is raised; its why ends with the arbiter's ruling on
+ * this text, when one was settled.
  */
-export function nextCrewWork(db: Db, zone: DropZoneConfig, now: Date): CrewWork | null {
+export function raiseRefuteExhausted(db: Db, zone: DropZoneConfig, c: CrewIssue, now: Date): void {
+  const label = c.number !== null ? `crew issue #${c.number}` : `crew issue ${c.key}`;
+  raiseBriefing(
+    db,
+    {
+      zoneId: zone.id,
+      kind: 'refute_exhausted',
+      subject: subjectOf(c),
+      decision: `Reviewers asked for changes to ${label} ${c.refuteCount} times, and its latest text hasn't been reviewed. Promote it as it reads now, or reject it?`,
+      why: refuteExhaustedWhy(db, c),
+      options: PROMOTE_OPTIONS,
+      onHold: label,
+      source: 'server',
+    },
+    now,
+  );
+}
+
+/**
+ * The zone's next crew work, in order: diagnose an open parked briefing not yet diagnosed, refute a
+ * staged crew issue whose current body is unrefuted (within `maxRefute`), arbitrate one whose
+ * refutes ran out (with `crew.arbiter` on, Fable available, at least one stored verdict, and no
+ * arbitration of this text yet), triage the oldest open triage request (within `maxTriage`, with a
+ * slot free), then the lead cycle when it is due. An exhausted issue that may not be arbitrated, or
+ * whose arbitration of this text is settled, is put to Command instead.
+ */
+export function nextCrewWork(
+  db: Db,
+  zone: DropZoneConfig,
+  now: Date,
+  fableOk = false,
+): CrewWork | null {
   const parked = db
     .prepare(
       `SELECT id, subject, why FROM briefings WHERE zone_id = ? AND kind = 'parked'
@@ -70,34 +117,41 @@ export function nextCrewWork(db: Db, zone: DropZoneConfig, now: Date): CrewWork 
     .get(zone.id, zone.crew.maxRefute) as { id: number } | undefined;
   if (refute) return { role: 'refute', crewIssueId: refute.id };
 
-  // Refute attempts that died (failed, rate-limited, invalid) used up the budget with the current
-  // body unjudged: put it to Command rather than leave it staged forever.
+  // The refute budget is used up with the current body unjudged (every review asked for changes,
+  // or the attempts died): an arbiter rules on it once per text, or it is put to Command rather
+  // than left staged forever.
   const exhausted = db
     .prepare(
       `SELECT id FROM crew_issues WHERE zone_id = ? AND state = 'staged'
          AND body_sha IS NOT NULL AND (refuted_sha IS NULL OR refuted_sha <> body_sha)
-         AND refute_count >= ?`,
+         AND refute_count >= ? ORDER BY id`,
     )
     .all(zone.id, zone.crew.maxRefute) as { id: number }[];
+  let arbitrate: CrewWork | null = null;
   for (const { id } of exhausted) {
     const c = getCrewIssue(db, id);
-    if (!c) continue;
-    const label = c.number !== null ? `crew issue #${c.number}` : `crew issue ${c.key}`;
-    raiseBriefing(
-      db,
-      {
-        zoneId: zone.id,
-        kind: 'refute_exhausted',
-        subject: subjectOf(c),
-        decision: `Reviewers asked for changes to ${label} ${c.refuteCount} times, and its latest text hasn't been reviewed. Promote it as it reads now, or reject it?`,
-        why: refuteExhaustedWhy(db, c),
-        options: PROMOTE_OPTIONS,
-        onHold: label,
-        source: 'server',
-      },
-      now,
-    );
+    if (!c || c.bodySha === null) continue;
+    const subject = issueArbitrationSubject(c.id);
+    const row = getArbitration(db, subject, c.bodySha);
+    if (row?.state === 'pending') {
+      const drop = db.prepare('SELECT state FROM drops WHERE id = ?').get(row.dropId) as
+        | { state: string }
+        | undefined;
+      if (drop && (ACTIVE_DROP_STATES as readonly string[]).includes(drop.state)) continue; // its drop is in flight
+      // Its drop ended without a result applied (lost): fail closed, as a failed drop would.
+      settleArbitration(
+        db,
+        row.id,
+        { state: 'failed', reason: 'the arbitrate drop ended without a ruling' },
+        now,
+      );
+    } else if (!row && zone.crew.arbiter && fableOk && refuteVerdicts(db, c).length > 0) {
+      arbitrate ??= { role: 'arbitrate', subject: 'issue', crewIssueId: c.id, basis: c.bodySha };
+      continue;
+    }
+    raiseRefuteExhausted(db, zone, c, now);
   }
+  if (arbitrate) return arbitrate;
 
   const triage = nextTriage(db, zone, now);
   if (triage !== null) return { role: 'triage', requestId: triage };
@@ -169,7 +223,7 @@ const hasActiveCrewDrop = (db: Db, zoneId: string): boolean =>
 const observeDetail = (w: CrewWork): string =>
   w.role === 'diagnose'
     ? `briefing ${w.briefingId}`
-    : w.role === 'refute'
+    : w.role === 'refute' || w.role === 'arbitrate'
       ? `crew issue ${w.crewIssueId}`
       : w.role === 'triage'
         ? `triage request ${w.requestId}`
@@ -191,6 +245,7 @@ export async function enqueueCrew(
   usageCfg: UsageConfig,
   now: Date,
   images?: ImageFetchOpts,
+  opts: { claude?: ClaudeConfig } = {},
 ): Promise<string | null> {
   if (!zone.crew?.enabled || isKilled(db)) return null;
   const mode = getZoneMode(db, zone.id, zone.mode);
@@ -198,7 +253,9 @@ export async function enqueueCrew(
   if (!gateQueuesCrew(dispatchGate(db, usageCfg, now))) return null;
   if (hasActiveCrewDrop(db, zone.id)) return null;
   if (crewDropsToday(db, zone.id, now) >= zone.crew.maxDropsPerDay) return null;
-  const work = nextCrewWork(db, zone, now);
+  // No claude config means no Fable, so nothing is arbitrated: it is put to Command as before.
+  const fableOk = opts.claude ? fableStatus(db, { claude: opts.claude }, now).available : false;
+  const work = nextCrewWork(db, zone, now, fableOk);
   if (!work) return null;
   if (work.role === 'crew-lead' && getGoals(db, zone.id)?.parse.ok !== true) return null;
   if (mode === 'observe') {
@@ -215,9 +272,11 @@ export async function enqueueCrew(
         ? await crewLeadInput(db, forges, zone, pass, now, id)
         : work.role === 'refute'
           ? refuteInput(db, zone, work.crewIssueId, id)
-          : work.role === 'triage'
-            ? triageInput(db, zone, work.requestId, id)
-            : diagnoseInput(db, zone, work.itemId, id);
+          : work.role === 'arbitrate'
+            ? arbitrateIssueInput(db, zone, work, id)
+            : work.role === 'triage'
+              ? triageInput(db, zone, work.requestId, id)
+              : diagnoseInput(db, zone, work.itemId, id);
   } catch (err) {
     // A forge read failed while gathering input: try again next pass.
     log(`zone ${zone.id}: crew ${work.role} input failed: ${String(err)}`);
@@ -242,6 +301,18 @@ export async function enqueueCrew(
         db.prepare('UPDATE crew_issues SET refute_count = refute_count + 1 WHERE id = ?').run(
           work.crewIssueId,
         );
+      } else if (work.role === 'arbitrate') {
+        // One arbitration per text: a second for the same (subject, basis) rolls the drop back.
+        insertArbitration(
+          db,
+          {
+            zoneId: zone.id,
+            subject: issueArbitrationSubject(work.crewIssueId),
+            basis: work.basis,
+            dropId: id,
+          },
+          now,
+        );
       }
       insertDrop(db, {
         id,
@@ -256,7 +327,8 @@ export async function enqueueCrew(
       });
     })();
   } catch (e) {
-    if (isUniqueViolation(e)) return null; // another crew drop became active: rolled back
+    // Another crew drop became active, or this text was arbitrated already: rolled back.
+    if (isUniqueViolation(e)) return null;
     throw e;
   }
   return id;

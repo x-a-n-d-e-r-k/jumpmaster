@@ -502,6 +502,7 @@ describe('crew config', () => {
       refutePromotes: true,
       maxRefute: 3,
       maxTriage: 2,
+      arbiter: true,
     });
     expect(z?.botLogins).toEqual([]);
   });
@@ -1446,6 +1447,7 @@ describe('githubApp (spec §4.2: installation and repository ids, not secret)', 
         refutePromotes: true,
         maxRefute: 3,
         maxTriage: 2,
+        arbiter: true,
       },
       botLogins: [],
       authorLoginAliases: [],

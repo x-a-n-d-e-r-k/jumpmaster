@@ -209,6 +209,12 @@ export const GUARDED_PATHS: GuardedPath[] = [
     true,
     (ctx) => `A crew refute in ${zoneOf(ctx)} will be able to promote a staged issue to ready`,
   ),
+  // An arbiter's ruling replaces a decision that was the owner's; turning it off is free.
+  becomes(
+    'dropZones[].crew.arbiter',
+    true,
+    (ctx) => `A Fable arbiter in ${zoneOf(ctx)} will settle crew disagreements without asking you`,
+  ),
   {
     path: 'dropZones[].crew.goalPath',
     kind: 'scalar',

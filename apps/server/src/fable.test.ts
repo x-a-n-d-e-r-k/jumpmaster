@@ -15,7 +15,9 @@ import {
   FABLE_ROLES,
   fableStatus,
   getFableState,
+  isFableRequest,
   noteFableSignals,
+  ranOnFable,
   resolveModel,
   servedModel,
 } from './fable.js';
@@ -73,7 +75,7 @@ function pastDrop(id: string, model: string, at: Date): void {
 
 describe('which model a drop gets', () => {
   test('pro, team_standard and enterprise never run Fable; diagnose gets the zone model', () => {
-    expect(FABLE_ROLES).toEqual(['diagnose']);
+    expect(FABLE_ROLES).toEqual(['diagnose', 'arbitrate']);
     expect(FABLE_PLANS).toEqual(['max', 'ultra', 'team_premium']);
     for (const plan of ['pro', 'team_standard', 'enterprise'] as const) {
       const c = cfg({ plan, fableModel: FABLE });
@@ -106,6 +108,14 @@ describe('which model a drop gets', () => {
     });
     expect(p.model).toBe(FABLE);
     expect(getDrop(w.db, id)?.requestedModel).toBe(FABLE);
+  });
+
+  test('arbitrate runs on Fable when it is available, and on the zone model when not', () => {
+    expect(resolveModel(w.db, maxPlan, w.zone, 'arbitrate', t0)).toBe(FABLE);
+    expect(
+      resolveModel(w.db, cfg({ plan: 'pro', fableModel: FABLE }), w.zone, 'arbitrate', t0),
+    ).toBe(w.zone.model);
+    expect(resolveModel(w.db, cfg({ plan: 'max' }), w.zone, 'arbitrate', t0)).toBe(w.zone.model);
   });
 
   test('refute and crew-lead never get Fable by default', () => {
@@ -214,6 +224,25 @@ describe('what the drop reports', () => {
       t0,
     );
     expect(getDrop(w.db, id2)?.servedModel).toBe(FABLE);
+  });
+});
+
+describe('ranOnFable', () => {
+  const drop = (requestedModel: string | null, servedModel: string | null) =>
+    ({ requestedModel, servedModel }) as Parameters<typeof ranOnFable>[1];
+
+  test('a Fable request served by Fable, or with no served model recorded, ran on Fable', () => {
+    expect(ranOnFable(maxPlan, drop(FABLE, FABLE))).toBe(true);
+    expect(ranOnFable(maxPlan, drop(FABLE, null))).toBe(true);
+    expect(ranOnFable(maxPlan, drop('claude-fable-2', 'claude-fable-2'))).toBe(true);
+    expect(isFableRequest(maxPlan, drop(FABLE, 'claude-opus-5-5'))).toBe(true);
+  });
+
+  test('a Fable request served by another model, or a request for another model, did not', () => {
+    expect(ranOnFable(maxPlan, drop(FABLE, 'claude-opus-5-5'))).toBe(false);
+    expect(ranOnFable(maxPlan, drop('claude-opus-5-5', null))).toBe(false);
+    expect(ranOnFable(maxPlan, drop('claude-opus-5-5', FABLE))).toBe(false);
+    expect(ranOnFable(maxPlan, drop(null, FABLE))).toBe(false);
   });
 });
 

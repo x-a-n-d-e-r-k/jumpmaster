@@ -101,7 +101,7 @@ export const SKIPPED_HEADER = 'x-jumpmaster-skipped';
 export const SLOTS_HEADER = 'x-jumpmaster-slots';
 
 /** Roles that work for the zone rather than one work item. They hold no forge write credential. */
-export const CREW_ROLES = ['crew-lead', 'refute', 'diagnose', 'triage'] as const;
+export const CREW_ROLES = ['crew-lead', 'refute', 'diagnose', 'triage', 'arbitrate'] as const;
 export type CrewRole = (typeof CREW_ROLES)[number];
 export const isCrewRole = (r: string): r is CrewRole =>
   (CREW_ROLES as readonly string[]).includes(r);
@@ -258,6 +258,7 @@ export const DropPayloadSchema = z.discriminatedUnion('role', [
   z.object({ ...dropPayloadBase, role: z.literal('resolve'), pr: PrRefSchema }),
   z.strictObject({ ...crewPayloadBase, role: z.literal('crew-lead') }),
   z.strictObject({ ...crewPayloadBase, role: z.literal('refute') }),
+  z.strictObject({ ...crewPayloadBase, role: z.literal('arbitrate') }),
   z.strictObject({
     ...crewPayloadBase,
     role: z.literal('triage'),
@@ -409,6 +410,21 @@ export const DiagnoseOutputSchema = z.strictObject({
 });
 export type DiagnoseOutput = z.infer<typeof DiagnoseOutputSchema>;
 
+/**
+ * An arbiter's ruling on a contested decision between positions A and B. `reversible` is false
+ * when acting on it could not be undone by reverting a commit; `productQuestion` is true when the
+ * dispute is what the product should do, not how.
+ */
+export const ArbitrateOutputSchema = z.strictObject({
+  ruling: z.enum(['A', 'B', 'insufficient_evidence']),
+  because: z.string().max(4000),
+  wouldReverse: z.string().max(1000),
+  reversible: z.boolean(),
+  productQuestion: z.boolean(),
+  instruction: z.string().max(2000),
+});
+export type ArbitrateOutput = z.infer<typeof ArbitrateOutputSchema>;
+
 const TriageOutputObject = z.strictObject({
   summary: z.string().max(4000),
   outcome: z.enum(['split', 'questions', 'not-agent-work']),
@@ -465,6 +481,7 @@ const CREW_OUTPUT = {
   refute: RefuteOutputSchema,
   diagnose: DiagnoseOutputSchema,
   triage: TriageOutputSchema,
+  arbitrate: ArbitrateOutputSchema,
 } as const;
 
 export type CrewOutput = {
@@ -472,6 +489,7 @@ export type CrewOutput = {
   refute: RefuteOutput;
   diagnose: DiagnoseOutput;
   triage: TriageOutput;
+  arbitrate: ArbitrateOutput;
 };
 
 /** The `--json-schema` for a crew role; every object forbids additional properties. */

@@ -119,6 +119,7 @@ const CREW_DEFAULTS = {
   refutePromotes: true,
   maxRefute: 3,
   maxTriage: 2,
+  arbiter: true,
 };
 
 export type McpConfig = {
@@ -179,6 +180,8 @@ const CrewSchema = z
     maxRefute: z.number().int().min(1).default(CREW_DEFAULTS.maxRefute),
     /** Triage attempts on one issue text before it is put to Command as failed. */
     maxTriage: z.number().int().min(1).default(CREW_DEFAULTS.maxTriage),
+    /** Lets a Fable arbiter settle a crew disagreement instead of briefing; false briefs as before. */
+    arbiter: z.boolean().default(CREW_DEFAULTS.arbiter),
   })
   .default(CREW_DEFAULTS);
 

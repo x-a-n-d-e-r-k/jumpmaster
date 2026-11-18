@@ -333,6 +333,34 @@ describe('runCrew', () => {
     expect(r.crew).toBeUndefined();
   });
 
+  test('arbitrate runs read-only on the default branch with its schema and returns its ruling', async () => {
+    const out = {
+      ruling: 'A',
+      because: 'b',
+      wouldReverse: 'w',
+      reversible: true,
+      productQuestion: false,
+      instruction: 'i',
+    };
+    const w = world({ output: out });
+    const ctx = newCtx();
+    const r = await runCrew({ ...base, role: 'arbitrate' }, w.deps, ctx);
+    expect(r).toMatchObject({ status: 'completed', role: 'arbitrate', crew: out, gates: [] });
+    expect(w.claude.args[w.claude.args.indexOf('--json-schema') + 1]).toBe(
+      JSON.stringify(crewOutputJsonSchema('arbitrate')),
+    );
+    expect(w.names()).not.toContain('checkoutBranch');
+    expect(w.names()).not.toContain('runGates');
+    expect(w.calls.find((c) => c[0] === 'prepareBranch')?.[3]).toBe('main');
+  });
+
+  test('an arbitrate drop that changes the tree fails like any crew role', async () => {
+    const w = world({ writes: true });
+    const r = await runCrew({ ...base, role: 'arbitrate' }, w.deps, newCtx());
+    expect(r).toMatchObject({ status: 'failed', reason: 'crew modified the tree' });
+    expect(r.crew).toBeUndefined();
+  });
+
   test('a crew drop never pushes, even when it commits', async () => {
     const w = world({ commits: true });
     const r = await runCrew(lead, w.deps, newCtx());
@@ -401,6 +429,17 @@ describe('crew prompts', () => {
   const read = (role: string) =>
     readFileSync(new URL(`../../prompts/${role}.md`, import.meta.url), 'utf8');
 
+  test('the arbiter weighs only what it verified and rules A, B or insufficient_evidence', () => {
+    const t = read('arbitrate');
+    expect(t).toMatch(/no stake in either side/);
+    expect(t).toMatch(/Read every cited line yourself/);
+    expect(t).toMatch(/Weigh only what you verified/);
+    expect(t).toMatch(/`insufficient_evidence`/);
+    expect(t).toMatch(/`reversible` to false/);
+    expect(t).toMatch(/`productQuestion` to true/);
+    expect(t).toMatch(/one concrete step/);
+  });
+
   test('the crew lead and the diagnostician write briefings for a reader without context (#226)', () => {
     for (const role of ['crew-lead', 'diagnose']) {
       const t = read(role);
@@ -415,7 +454,7 @@ describe('crew prompts', () => {
   });
 
   test('each crew prompt template states the data and escalation rules', () => {
-    for (const role of ['crew-lead', 'refute', 'diagnose', 'triage']) {
+    for (const role of ['crew-lead', 'refute', 'diagnose', 'triage', 'arbitrate']) {
       const t = read(role);
       expect(t, role).toMatch(/<<<jm-data:<id>:begin NAME>>>/);
       expect(t, role).toMatch(/\(trusted instructions\)/);

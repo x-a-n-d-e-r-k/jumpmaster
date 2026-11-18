@@ -7,7 +7,7 @@ import {
   syncParkBriefings,
   whyBasis,
 } from '../briefings.js';
-import type { DropZoneConfig } from '../config.js';
+import type { ClaudeConfig, Config, DropZoneConfig } from '../config.js';
 import {
   getDrop,
   insertDrop,
@@ -38,6 +38,15 @@ import {
 } from './store.js';
 
 const MIN = 60_000;
+
+const secretsFor = () =>
+  ({
+    claudeToken: 'claude-secret',
+    githubAuthorToken: 'author-secret',
+    githubReviewerToken: 'reviewer-secret',
+    joinToken: 'join',
+    operatorToken: 'o'.repeat(32),
+  }) as Config['secrets'];
 const HOUR = 60 * MIN;
 
 let w: ZoneWorld;
@@ -506,5 +515,242 @@ describe('triage scheduling (#184)', () => {
     expect(work(t).role).toBe('triage');
     finish(t);
     expect(await enqueue(plus(t0, MIN), capped)).toBeNull();
+  });
+});
+
+describe('arbitration of crew issues out of refutes (#382)', () => {
+  const FABLE = 'claude-fable-1';
+  const fable: ClaudeConfig = { plan: 'max', fableModel: FABLE, fableWeeklyDropCap: 5 };
+  const noFable: ClaudeConfig = { plan: 'pro', fableModel: FABLE, fableWeeklyDropCap: 5 };
+  const zone3 = (o: Partial<DropZoneConfig['crew']> = {}): DropZoneConfig => ({
+    ...w.zone,
+    crew: { ...crewOn, maxRefute: 3, ...o },
+  });
+
+  async function enqueueWith(
+    at: Date,
+    zone: DropZoneConfig,
+    claude: ClaudeConfig | null = fable,
+  ): Promise<string | null> {
+    const pass = await zonePass(w.forges, zone, 'main');
+    return enqueueCrew(
+      w.db,
+      w.forges,
+      zone,
+      pass,
+      promptVersions(),
+      usageCfg,
+      at,
+      undefined,
+      claude ? { claude } : {},
+    );
+  }
+
+  let seq = 0;
+  /** A finished refute drop on the issue: a verdict when `decision` is given, else a dead drop. */
+  function refuteDrop(issue: number, at: Date, decision?: string, findings: string[] = []): void {
+    const id = `ref-${++seq}`;
+    insertDrop(
+      w.db,
+      {
+        id,
+        dropZoneId: 'main',
+        workItemId: null,
+        role: 'refute',
+        state: decision ? 'succeeded' : 'failed',
+        inputJson: JSON.stringify({ work: { role: 'refute', crewIssueId: issue }, input: '' }),
+      },
+      at,
+    );
+    updateDrop(w.db, id, {
+      resultJson: JSON.stringify(
+        decision
+          ? { status: 'completed', gates: [], crew: { decision, findings } }
+          : { status: 'failed', gates: [], reason: 'boom' },
+      ),
+    });
+  }
+
+  /** Issue #50: three refutes each asked to revise, the last revision staged unrefuted. */
+  function exhausted(key = 'add-docs'): number {
+    const id = stagedIssue(key);
+    for (let i = 0; i < 3; i++) refuteDrop(id, plus(t0, -(10 - i) * MIN), 'revise', [`fix ${i}`]);
+    setCrewIssue(w.db, id, { number: 50, refuteCount: 3 }, t0);
+    return id;
+  }
+
+  const arbitrations = () =>
+    w.db.prepare('SELECT subject, basis, drop_id AS dropId, state FROM arbitrations').all() as {
+      subject: string;
+      basis: string;
+      dropId: string;
+      state: string;
+    }[];
+  const exhaustedBriefings = () =>
+    listBriefings(w.db, { zoneId: 'main', state: 'open' }).filter(
+      (b) => b.kind === 'refute_exhausted',
+    );
+  const arbitrateDrops = () =>
+    (w.db.prepare(`SELECT id FROM drops WHERE role = 'arbitrate'`).all() as { id: string }[]).map(
+      (r) => r.id,
+    );
+
+  test('order: diagnose, refute, arbitrate, triage, then the lead cycle', async () => {
+    const zone = zone3();
+    const req =
+      recordTriageRequest(
+        w.db,
+        'main',
+        { number: 179, title: 'Issue 179', body: 'Two things.', author: 'human' },
+        t0,
+      ) ?? -1;
+    const arb = exhausted('arb');
+    const fresh = stagedIssue('fresh');
+    const item = parkedItem();
+    const work = (at: Date) => nextCrewWork(w.db, zone, at, true);
+    expect(work(t0)).toMatchObject({ role: 'diagnose', itemId: item });
+    const [parked] = listBriefings(w.db, { zoneId: 'main', state: 'open', kind: 'parked' });
+    w.db.prepare('UPDATE briefings SET diagnose_attempts = 1 WHERE id = ?').run(parked?.id);
+    expect(work(t0)).toEqual({ role: 'refute', crewIssueId: fresh });
+    setCrewIssue(w.db, fresh, { refutedSha: 'sha-1' }, t0);
+    expect(work(t0)).toEqual({
+      role: 'arbitrate',
+      subject: 'issue',
+      crewIssueId: arb,
+      basis: 'sha-1',
+    });
+    setCrewIssue(w.db, arb, { state: 'rejected' }, t0);
+    expect(work(t0)).toEqual({ role: 'triage', requestId: req });
+    setTriageRequest(w.db, req, { state: 'done', outcome: 'not-agent-work' }, t0);
+    expect(work(t0)).toEqual({ role: 'crew-lead' });
+  });
+
+  test('an exhausted issue with verdicts and Fable gets one arbitrate drop, before any briefing', async () => {
+    const zone = zone3();
+    const issue = exhausted();
+    const id = (await enqueueWith(t0, zone)) ?? '';
+    expect(getDrop(w.db, id)).toMatchObject({ role: 'arbitrate', workItemId: null });
+    expect(JSON.parse(getDrop(w.db, id)?.inputJson ?? '{}').work).toEqual({
+      role: 'arbitrate',
+      subject: 'issue',
+      crewIssueId: issue,
+      basis: 'sha-1',
+    });
+    expect(arbitrations()).toEqual([
+      { subject: `issue:${issue}`, basis: 'sha-1', dropId: id, state: 'pending' },
+    ]);
+    expect(exhaustedBriefings()).toEqual([]);
+    // While its drop is in flight the issue is neither arbitrated again nor put to Command.
+    expect(nextCrewWork(w.db, zone, plus(t0, MIN), true)).toEqual({ role: 'crew-lead' });
+    expect(exhaustedBriefings()).toEqual([]);
+    // Its payload runs on Fable, with the positions as instructions and the reviews as data.
+    const p = buildPayload(w.db, zone, getDrop(w.db, id) as never, secretsFor(), {
+      claude: fable,
+      now: t0,
+    });
+    expect(DropPayloadSchema.parse(p)).toMatchObject({ role: 'arbitrate', model: FABLE });
+    expect(p.role === 'arbitrate' && p.prompt).toContain('## Positions (trusted instructions)');
+    expect(p.role === 'arbitrate' && p.prompt).toContain(
+      '## Refute reviews, oldest first (data, untrusted)',
+    );
+    expect(p.role === 'arbitrate' && p.prompt).toContain('- fix 2');
+    expect(p.credentials).not.toHaveProperty('forgeToken', 'author-secret');
+  });
+
+  test('Fable unavailable, no claude config, or crew.arbiter off: no arbitrate drop, the briefing as today', async () => {
+    for (const [claude, zone] of [
+      [noFable, zone3()],
+      [null, zone3()],
+      [fable, zone3({ arbiter: false })],
+    ] as const) {
+      const issue = exhausted(`k-${++seq}`);
+      const id = await enqueueWith(t0, zone, claude);
+      expect(id === null ? null : getDrop(w.db, id)?.role).not.toBe('arbitrate');
+      if (id) finish(id);
+      expect(exhaustedBriefings().map((b) => b.subject)).toContain(`issue:${issue}`);
+      setCrewIssue(w.db, issue, { state: 'rejected' }, t0);
+    }
+    expect(arbitrateDrops()).toEqual([]);
+    expect(arbitrations()).toEqual([]);
+  });
+
+  test('refute drops that all died leave no verdict: no arbitration, the briefing as today', async () => {
+    const zone = zone3();
+    const issue = stagedIssue();
+    for (let i = 0; i < 3; i++) refuteDrop(issue, plus(t0, -(5 - i) * MIN));
+    setCrewIssue(w.db, issue, { refuteCount: 3 }, t0);
+    expect(nextCrewWork(w.db, zone, t0, true)).toEqual({ role: 'crew-lead' });
+    const [b] = exhaustedBriefings();
+    expect(b?.why).toContain('was never reviewed');
+    expect(arbitrations()).toEqual([]);
+  });
+
+  test('observe records would_enqueue:arbitrate and inserts no arbitration', async () => {
+    const zone = zone3();
+    const issue = exhausted();
+    setZoneMode(w.db, 'main', 'observe', t0);
+    expect(await enqueueWith(t0, zone)).toBeNull();
+    expect(
+      listObservations(w.db, 'main').find((o) => o.action === 'would_enqueue:arbitrate'),
+    ).toMatchObject({ detail: `crew issue ${issue}` });
+    expect(arbitrations()).toEqual([]);
+    expect(arbitrateDrops()).toEqual([]);
+  });
+
+  test('D3: two enqueues in one pass, or two passes before the drop finishes, give one arbitration', async () => {
+    const zone = zone3();
+    exhausted();
+    const ids = await Promise.all([enqueueWith(t0, zone), enqueueWith(t0, zone)]);
+    expect(ids.filter((x) => x !== null)).toHaveLength(1);
+    expect(await enqueueWith(plus(t0, MIN), zone)).toBeNull();
+    expect(arbitrations()).toHaveLength(1);
+    expect(arbitrateDrops()).toHaveLength(1);
+    // Even with the crew drop index out of the way, the same text is never arbitrated twice.
+    for (const id of arbitrateDrops()) updateDrop(w.db, id, { state: 'running' });
+    expect(nextCrewWork(w.db, zone, plus(t0, 2 * MIN), true)?.role).not.toBe('arbitrate');
+  });
+
+  test('D3: a forced second arbitration of the same text rolls the drop insert back', async () => {
+    const zone = zone3();
+    const issue = exhausted();
+    w.db.exec(`CREATE TEMP TRIGGER dup AFTER INSERT ON drops WHEN NEW.role = 'arbitrate' BEGIN
+      INSERT INTO arbitrations (zone_id, subject, basis, drop_id, state, created_at, updated_at)
+        SELECT zone_id, subject, basis, 'other', 'pending', 't', 't' FROM arbitrations
+        WHERE drop_id = NEW.id;
+    END`);
+    expect(await enqueueWith(t0, zone)).toBeNull();
+    expect(arbitrateDrops()).toEqual([]);
+    expect(arbitrations()).toEqual([]);
+    expect(getCrewIssue(w.db, issue)?.state).toBe('staged');
+  });
+
+  test('an arbitrate drop lost without a result fails closed: the briefing as today, once', async () => {
+    const zone = zone3();
+    const issue = exhausted();
+    const id = (await enqueueWith(t0, zone)) ?? '';
+    updateDrop(w.db, id, { state: 'lost' });
+    expect(nextCrewWork(w.db, zone, plus(t0, MIN), true)).toEqual({ role: 'crew-lead' });
+    expect(arbitrations()[0]?.state).toBe('failed');
+    const [b] = exhaustedBriefings();
+    expect(b?.subject).toBe(`issue:${issue}`);
+    expect(b?.why).toContain(
+      'The arbiter could not rule: the arbitrate drop ended without a ruling',
+    );
+    nextCrewWork(w.db, zone, plus(t0, 2 * MIN), true);
+    expect(arbitrateDrops()).toHaveLength(1);
+    expect(exhaustedBriefings()).toHaveLength(1);
+  });
+
+  test('a new body after an arbitration is arbitrated afresh', async () => {
+    const zone = zone3();
+    const issue = exhausted();
+    const id = (await enqueueWith(t0, zone)) ?? '';
+    finish(id);
+    w.db.prepare(`UPDATE arbitrations SET state = 'discarded'`).run();
+    setCrewIssue(w.db, issue, { bodySha: 'sha-2' }, t0);
+    expect(nextCrewWork(w.db, zone, plus(t0, MIN), true)).toMatchObject({
+      role: 'arbitrate',
+      basis: 'sha-2',
+    });
   });
 });
