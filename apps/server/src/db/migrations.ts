@@ -1460,10 +1460,24 @@ CREATE UNIQUE INDEX one_active_doctor_drop
 `;
 
 /**
- * v49: a gate allowance carried to a new head when only main was merged in names the head it was
- * carried from (null for an allowance Command ruled on that head itself).
+ * #420: the crew's one action on a parked item is a `retry` or a `rerun` of failed checks; the
+ * `UNIQUE (item_id)` cap counts both. A rerun names its `checks` (a JSON array) and, once the forge
+ * re-ran them, `rerun_at`; a crew action settled `skipped` says why in `reason` (the briefing
+ * quotes it).
  */
 const V49_SQL = `
+ALTER TABLE crew_retries ADD COLUMN kind TEXT NOT NULL DEFAULT 'retry'
+  CHECK (kind IN ('retry', 'rerun'));
+ALTER TABLE crew_retries ADD COLUMN checks TEXT;
+ALTER TABLE crew_retries ADD COLUMN rerun_at TEXT;
+ALTER TABLE crew_retries ADD COLUMN reason TEXT;
+`;
+
+/**
+ * v50: a gate allowance carried to a new head when only main was merged in names the head it was
+ * carried from (null for an allowance Command ruled on that head itself).
+ */
+const V50_SQL = `
 ALTER TABLE gate_allowances ADD COLUMN carried_from_head TEXT;
 `;
 
@@ -1517,6 +1531,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 47, sql: V47_SQL },
   { version: 48, sql: V48_SQL, foreignKeysOff: true },
   { version: 49, sql: V49_SQL },
+  { version: 50, sql: V50_SQL },
 ];
 
 /**

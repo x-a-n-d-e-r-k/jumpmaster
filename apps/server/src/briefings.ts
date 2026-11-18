@@ -886,18 +886,27 @@ export function pendingDiagnoses(
 export const MAX_CREW_RETRY_DIAGNOSIS = 500;
 
 /**
- * The parked-again why's opening (#396): when the crew retried the item, its diagnosis (cut) and
- * what it told the next attempt. Agent-written, so redacted (the server's scrub set and token
- * shapes); the page escapes it.
+ * The parked-again why's opening (#396, #420): when the crew retried the item, its diagnosis (cut)
+ * and what it told the next attempt; when it re-ran checks, which and its diagnosis; when the
+ * forge refused that re-run, which checks and why. Agent-written, so redacted (the server's scrub
+ * set and token shapes); the page escapes it.
  */
 function crewRetriedWhy(db: Db, itemId: number): string | undefined {
   const r = getCrewRetry(db, itemId);
-  if (r?.outcome !== 'retried' || r.appliedAt === null) return undefined;
+  if (r === undefined || r.appliedAt === null) return undefined;
   const secrets = [...serverScrubSet.values()];
+  const checks = redact(r.checks.join(', '), secrets);
+  if (r.kind === 'rerun' && r.outcome === 'skipped' && r.reason) {
+    return `The crew tried to re-run ${checks}: ${redact(r.reason, secrets)}.`;
+  }
+  if (r.outcome !== 'retried') return undefined;
   // Redacted before it is cut, so a cut cannot leave part of a secret that no longer matches.
   const full = redact(r.diagnosis, secrets);
   const diagnosis =
     full.length > MAX_CREW_RETRY_DIAGNOSIS ? `${full.slice(0, MAX_CREW_RETRY_DIAGNOSIS)}…` : full;
+  if (r.kind === 'rerun') {
+    return `The crew already re-ran ${checks} and retried this once on ${r.appliedAt.slice(0, 10)}. Its diagnosis: ${diagnosis}.`;
+  }
   return `The crew already retried this once on ${r.appliedAt.slice(0, 10)}. Its diagnosis: ${diagnosis}. It told the next attempt: ${redact(r.instruction, secrets)}`;
 }
 
@@ -938,7 +947,10 @@ function parkBriefing(db: Db, zoneId: string, item: WorkItem): NewBriefing {
   // A gate park keeps its own words: its decision is to read the diff, and its why is cut to fit.
   const crewRetried = park ? undefined : crewRetriedWhy(db, item.id);
   if (crewRetried !== undefined) {
-    decision = `Issue #${item.issueNumber} parked again after the crew retried it once. Retry it?`;
+    // A refused re-run did not retry the item: it is parked as it was.
+    if (getCrewRetry(db, item.id)?.outcome === 'retried') {
+      decision = `Issue #${item.issueNumber} parked again after the crew retried it once. Retry it?`;
+    }
     why = `${crewRetried}\n\n${why}`;
   }
   return {

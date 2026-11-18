@@ -116,7 +116,11 @@ export type CarryFacts = {
   digestHead: ChangeDigest;
 };
 
-export type Feedback = { source: 'human' | 'review' | 'ci'; text: string };
+/**
+ * A heal's feedback and where it came from. `crew`: the server's own words for a heal the crew
+ * asked for (#420, a gate change to take out).
+ */
+export type Feedback = { source: 'human' | 'review' | 'ci' | 'crew'; text: string };
 
 export type Action =
   | { kind: 'wait'; on: 'drop' | 'ci' | 'forge' | 'outbox' | 'merge-reservation' }

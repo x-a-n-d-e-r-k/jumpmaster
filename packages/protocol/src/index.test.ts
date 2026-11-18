@@ -320,6 +320,32 @@ describe('crew roles', () => {
     ).toBe(false);
   });
 
+  test('diagnose accepts rerun_checks with checks and gateChange remove; rerun_checks needs checks (#420)', () => {
+    const base = { diagnosis: 'd', detail: '' };
+    expect(
+      parseCrewOutput('diagnose', { ...base, recommendation: 'rerun_checks', checks: ['images'] })
+        .ok,
+    ).toBe(true);
+    expect(
+      parseCrewOutput('diagnose', {
+        ...base,
+        recommendation: 'retry',
+        instruction: 'Remove the change to the test script.',
+        gateChange: 'remove',
+      }).ok,
+    ).toBe(true);
+    expect(parseCrewOutput('diagnose', { ...base, recommendation: 'rerun_checks' }).ok).toBe(false);
+    expect(
+      parseCrewOutput('diagnose', { ...base, recommendation: 'rerun_checks', checks: [] }).ok,
+    ).toBe(false);
+    expect(
+      parseCrewOutput('diagnose', { ...base, recommendation: 'rerun_checks', checks: [''] }).ok,
+    ).toBe(false);
+    expect(
+      parseCrewOutput('diagnose', { ...base, recommendation: 'retry', gateChange: 'allow' }).ok,
+    ).toBe(false);
+  });
+
   describe('TriageOutputSchema', () => {
     const child = {
       key: 'hide-gauge',

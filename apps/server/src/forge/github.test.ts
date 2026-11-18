@@ -694,6 +694,51 @@ describe('GitHubForge', () => {
       expect(res.files[100]).toEqual({ path: 'new.ts', previousPath: 'old.ts' });
     });
 
+    describe('rerunFailedChecks (#420)', () => {
+      const job = (name: string, conclusion: string | null) => ({
+        name,
+        status: conclusion === null ? 'in_progress' : 'completed',
+        conclusion,
+      });
+      const runs = (ids: number[]) =>
+        nock(api)
+          .get('/repos/o/r/actions/runs')
+          .query((q) => q.head_sha === 'sha1')
+          .reply(200, { total_count: ids.length, workflow_runs: ids.map((id) => ({ id })) });
+      const jobs = (id: number, js: unknown[]) =>
+        nock(api)
+          .get(`/repos/o/r/actions/runs/${id}/jobs`)
+          .query(true)
+          .reply(200, { total_count: js.length, jobs: js });
+
+      test('re-runs the failed jobs of each run with a failed job of a named check, once', async () => {
+        runs([11, 12, 13]);
+        jobs(11, [job('images', 'failure'), job('lint', 'success')]);
+        jobs(12, [job('lint', 'failure')]);
+        jobs(13, [job('images', 'success')]);
+        const post = nock(api).post('/repos/o/r/actions/runs/11/rerun-failed-jobs').reply(201, {});
+        expect(await forge.rerunFailedChecks(5, 'sha1', ['images'])).toEqual({ runIds: [11] });
+        expect(post.isDone()).toBe(true);
+      });
+
+      test('no failed run of a named check: no POST', async () => {
+        runs([11]);
+        jobs(11, [job('images', 'success')]);
+        expect(await forge.rerunFailedChecks(5, 'sha1', ['images'])).toEqual({ runIds: [] });
+      });
+
+      test('a refused re-run rejects with its status', async () => {
+        runs([11]);
+        jobs(11, [job('images', 'failure')]);
+        nock(api)
+          .post('/repos/o/r/actions/runs/11/rerun-failed-jobs')
+          .reply(403, { message: 'Resource not accessible by personal access token' });
+        await expect(forge.rerunFailedChecks(5, 'sha1', ['images'])).rejects.toMatchObject({
+          status: 403,
+        });
+      });
+    });
+
     describe('checksFor', () => {
       const run = (name: string, status: string, conclusion: string | null) => ({
         name,
