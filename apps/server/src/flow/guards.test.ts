@@ -1163,6 +1163,54 @@ describe('branchProtectionProblems', () => {
     });
   });
 
+  describe('per-ruleset bypass (spec §4.3, §5.2)', () => {
+    const entry = (
+      name: string,
+      can: 'yes' | 'no' | 'unknown',
+      restrictUpdatesOnly = true,
+    ): NonNullable<BranchRules['bypass']>[number] => ({
+      rulesetId: 1,
+      name,
+      restrictUpdatesOnly,
+      can,
+    });
+    const read = (asApp: boolean, ...bypass: NonNullable<BranchRules['bypass']>) =>
+      rules({
+        viewerCanBypass: bypass.some((b) => b.can === 'yes'),
+        bypass,
+        ...(asApp ? { asApp: true } : {}),
+      });
+    const app = (...b: NonNullable<BranchRules['bypass']>) => read(true, ...b);
+    const problems = (author: BranchRulesRead, reviewer: BranchRulesRead) =>
+      branchProtectionProblems({ author, reviewer }, zone);
+
+    test('the author app on an update-only jumpmaster-merge does not park', () =>
+      expect(
+        problems(app(entry('jumpmaster', 'no', false), entry('jumpmaster-merge', 'yes')), app()),
+      ).toEqual([]));
+
+    test('the author app bypassing jumpmaster parks', () =>
+      expect(problems(app(entry('jumpmaster', 'yes', false)), app())).toEqual(['bot can bypass']));
+
+    test('the author app on a jumpmaster-merge with other rules parks', () =>
+      expect(problems(app(entry('jumpmaster-merge', 'yes', false)), app())).toEqual([
+        'bot can bypass',
+      ]));
+
+    test("the reviewer app's bypass of jumpmaster-merge parks", () =>
+      expect(problems(app(), app(entry('jumpmaster-merge', 'yes')))).toEqual(['bot can bypass']));
+
+    test('a PAT author bypassing a ruleset named jumpmaster-merge parks: the exemption is app-only', () =>
+      expect(problems(read(false, entry('jumpmaster-merge', 'yes')), rules())).toEqual([
+        'bot can bypass',
+      ]));
+
+    test('unknown alone never parks', () =>
+      expect(
+        problems(app(entry('jumpmaster', 'unknown', false)), app(entry('jumpmaster', 'unknown'))),
+      ).toEqual([]));
+  });
+
   test('an admin author is unsafe unless the zone opts in', () =>
     expect(
       branchProtectionProblems({ author: rules({ viewerIsAdmin: true }), reviewer: rules() }, zone),

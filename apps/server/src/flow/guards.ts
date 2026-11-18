@@ -20,7 +20,7 @@ import {
   timestampTag,
 } from 'js-yaml';
 import type { DropZoneConfig } from '../config.js';
-import type { BranchRulesRead, PullFiles } from '../forge/github.js';
+import type { BranchRules, BranchRulesRead, PullFiles } from '../forge/github.js';
 
 // ---- protected paths ---------------------------------------------------------------------------
 // `protectedMatch` is the protocol's `protectedPathMatches`, the trooper's push check's matcher too.
@@ -975,7 +975,7 @@ export function branchProtectionProblems(
     const r = read.rules;
     if (r.requiredApprovals < 1) out.add('approvals < 1');
     if (!r.dismissStaleOnPush) out.add('stale approvals not dismissed');
-    if (r.viewerCanBypass) out.add('bot can bypass');
+    if (read === rules.author ? authorCanBypass(r) : r.viewerCanBypass) out.add('bot can bypass');
     if (r.viewerIsAdmin && !adminAllowed) out.add('bot is admin');
     for (const c of r.unpinnedChecks) out.add(`required check not pinned: ${c}`);
     if (zone.ciRequired && r.requiredChecks.length === 0) out.add('no required checks');
@@ -989,6 +989,21 @@ export function branchProtectionProblems(
     for (const f of codeownersFindings(co.text, zone, co.reviewer).fail)
       out.add(codeownerBlocks(f, co.reviewer));
   return [...out];
+}
+
+/** The ruleset the author app may bypass, to merge (spec §5.2): only update rules, nothing else. */
+export const MERGE_RULESET = 'jumpmaster-merge';
+
+/**
+ * Whether the two-bot author's read is a bypass that parks. An app author may bypass an
+ * update-only `jumpmaster-merge` and nothing else; `unknown` never parks (the doctor warns). A
+ * token's author, or a read without a per-ruleset list, is judged by `viewerCanBypass` as before.
+ */
+function authorCanBypass(r: BranchRules): boolean {
+  if (r.asApp !== true || !r.bypass) return r.viewerCanBypass;
+  return r.bypass.some(
+    (b) => b.can === 'yes' && !(b.name === MERGE_RULESET && b.restrictUpdatesOnly),
+  );
 }
 
 /**
