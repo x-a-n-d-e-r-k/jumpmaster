@@ -3,6 +3,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
 import { SetupMode, setupActive, setupCodeLine } from './auth/operator.js';
+import { httpChatService } from './chat/service.js';
+import { ChatTurns, chatMcpUrl } from './chat/turns.js';
 import { configPathOf, loadBoot } from './config/boot.js';
 import { ConfigStore, startVault } from './config/store.js';
 import {
@@ -219,6 +221,22 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
   // within ten minutes is discarded, and the log says to delete it on GitHub.
   const appManifestStore = new AppManifestStore();
 
+  // The crew chat's turns (#336): only with the chat service's address (compose sets it). Without
+  // it, owner messages wait as `queued` and the chat page says why.
+  const chatServiceUrl = env.JM_CHAT_SERVICE_URL;
+  const chatTurns = chatServiceUrl
+    ? new ChatTurns({
+        db,
+        config: live,
+        now: () => new Date(),
+        service: httpChatService(chatServiceUrl),
+        mcpUrl: chatMcpUrl(boot.listen.port),
+        resolvedApps: () => live.resolvedApps(),
+        appTokens,
+        log,
+      })
+    : undefined;
+
   // A ruling starts a pass at once; `guardedPass` is defined below and only called after listen.
   const app = createApp({
     setup,
@@ -237,6 +255,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     installationVerifier: appTokens,
     appManifestStore,
     heldReadTokens,
+    ...(chatTurns ? { chatTurns } : {}),
     resolvedApps: () => live.resolvedApps(),
     // The kill switch suspends each zone's app installations, and release unsuspends them (§4.2).
     appSuspension: {
