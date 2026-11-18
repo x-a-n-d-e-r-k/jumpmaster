@@ -11,7 +11,7 @@ import {
 } from '@jumpmaster/protocol';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import type { TrooperIdentities } from '../privilege.js';
-import { type PushDeps, runPush } from './push.js';
+import { type PushDeps, runPush, SURVIVOR_CHECKS, SURVIVOR_POLL_MS, survivors } from './push.js';
 
 const B = 'agent/issue-1';
 const HEAD = 'a'.repeat(40);
@@ -91,6 +91,7 @@ function harness(o: Over = {}) {
       log.push(`alive:${uid}`);
       return o.alive ?? 0;
     },
+    sleep: async () => void log.push('sleep'),
     git: {
       commitIfDirty: async (...args) => {
         calls.commit?.push(args);
@@ -119,21 +120,56 @@ function harness(o: Over = {}) {
   return { deps, log, lines, calls, pushDir, result };
 }
 
+describe('survivors (issue #262)', () => {
+  /** A recorded run of `survivors` over fixed readings. */
+  async function run(readings: number[]) {
+    const log: string[] = [];
+    let i = 0;
+    const result = await survivors(
+      () => void log.push('sweep'),
+      () => {
+        const n = readings[i++] ?? 0;
+        log.push(`alive=${n}`);
+        return n;
+      },
+      async (ms) => void log.push(`sleep ${ms}`),
+    );
+    return { result, log };
+  }
+
+  test('one non-zero reading among zeros is a survivor', async () => {
+    const { result, log } = await run([0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+    expect(result).toBe(true);
+    // The sweep runs again before every reading.
+    expect(log).toEqual(['sweep', 'alive=0', `sleep ${SURVIVOR_POLL_MS}`, 'sweep', 'alive=1']);
+  });
+
+  test('none only when every reading, each after its own sweep, is zero', async () => {
+    const { result, log } = await run(Array(SURVIVOR_CHECKS).fill(0));
+    expect(result).toBe(false);
+    expect(log.filter((l) => l === 'sweep')).toHaveLength(SURVIVOR_CHECKS);
+    expect(log.filter((l) => l.startsWith('alive='))).toHaveLength(SURVIVOR_CHECKS);
+    for (let k = 0; k < log.length; k++)
+      if (log[k]?.startsWith('alive=')) expect(log[k - 1]).toBe('sweep');
+  });
+
+  test('a survivor on the last reading still counts', async () => {
+    const readings = Array(SURVIVOR_CHECKS).fill(0);
+    readings[SURVIVOR_CHECKS - 1] = 1;
+    expect((await run(readings)).result).toBe(true);
+  });
+});
+
 describe('runPush', () => {
   test('ready only after staging and the sweep', async () => {
     const h = harness();
     const r = await runPush(payload(), h.deps);
     expect(r).toEqual({ status: 'pushed', headSha: HEAD, alreadyThere: false });
-    expect(h.log).toEqual([
-      'stage',
-      'sweep',
-      'sweep',
-      'alive:10001',
-      'ready',
-      'stdin-read',
-      'push',
-      'emit',
-    ]);
+    // Every reading follows a fresh sweep, and every one of them is taken.
+    const checks = Array.from({ length: SURVIVOR_CHECKS }, (_, i) =>
+      i === 0 ? ['sweep', 'alive:10001'] : ['sleep', 'sweep', 'alive:10001'],
+    ).flat();
+    expect(h.log).toEqual(['stage', 'sweep', ...checks, 'ready', 'stdin-read', 'push', 'emit']);
     // The ready line is alone on its line, printed once.
     expect(h.lines.filter((l) => l === READY_LINE)).toHaveLength(1);
     expect(h.result()).toEqual(r);
@@ -235,13 +271,30 @@ describe('runPush', () => {
     expect(existsSync(h.pushDir)).toBe(false);
   });
 
-  test('a process killed by the sweep is given time to die before it counts', async () => {
+  test('a survivor on the second reading stops the push before ready (issue #262, D2)', async () => {
     const h = harness();
     let n = 0;
-    h.deps.alive = () => (n++ === 0 ? 1 : 0);
+    h.deps.alive = () => (n++ === 1 ? 1 : 0);
     const r = await runPush(payload(), h.deps);
-    expect(r.status).toBe('pushed');
-    expect(h.log).toContain('ready');
+    expect(r).toEqual({
+      status: 'failed',
+      reason: 'agent process survived the sweep',
+      retryable: true,
+    });
+    expect(h.lines).not.toContain(READY_LINE);
+    expect(h.log.some((l) => l.startsWith('stdin-read'))).toBe(false);
+    expect(h.calls.push).toHaveLength(0);
+    expect(h.result()).toEqual(r);
+    expect(existsSync(h.pushDir)).toBe(false);
+  });
+
+  test('a grant whose lease is not a SHA is refused before any git runs (issue #262)', async () => {
+    const h = harness({ grant: grant({ lease: 'main' }) });
+    const r = await runPush(payload(), h.deps);
+    expect(r).toMatchObject({ status: 'failed', retryable: false });
+    expect(h.calls.push).toHaveLength(0);
+    expect(h.result()).toEqual(r);
+    expect(existsSync(h.pushDir)).toBe(false);
   });
 
   test('the result line never contains the token or its basic-auth form', async () => {
