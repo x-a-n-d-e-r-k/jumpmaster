@@ -1,6 +1,11 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { type GuidanceForge, githubGuidanceForge, guidanceFor } from '../api/github.js';
+import {
+  type GuidanceForge,
+  githubGuidanceForge,
+  guidanceFor,
+  type RecommendAnswer,
+} from '../api/github.js';
 import { withCsrf } from '../auth/guard.js';
 import type { ConfigStore } from '../config/store.js';
 import type { DropZoneConfig } from '../config.js';
@@ -15,6 +20,7 @@ import {
   type ZoneGuidance,
 } from '../github/guidance.js';
 import { MATRIX_AND_REUSABLE_NOTE } from '../github/workflows.js';
+import type { AppRole } from '../vault/github-app-entries.js';
 import { linkTarget } from './links.js';
 import { escapeHtml, page } from './pages.js';
 import { type ZoneRef, zoneName } from './zone-name.js';
@@ -85,6 +91,104 @@ export function tokensSection(pat: ZoneGuidance['pat'], roles: PatRole[]): strin
 </ol>
 <p><small>Expiry: ${escapeHtml(EXPIRATION_NOTE)}.</small></p>
 <ul>${items}</ul></section>`;
+}
+
+/**
+ * What the GitHub App buttons need from the page: whether the vault is on, whether the session
+ * holds sudo, and each role's existing app for the repository's owner. Only a slug: the type has
+ * no field for the PEM or the client id, so neither can reach a page.
+ */
+export type AppCreateOptions = {
+  vaultOn: boolean;
+  sudo: boolean;
+  existing: Partial<Record<AppRole, { slug: string }>>;
+};
+
+const APP_ROLE_LABEL: Record<AppRole, string> = { author: 'author', reviewer: 'reviewer' };
+
+/**
+ * Keeps each create form's hidden `owner` and `ownerType` in step with the owner choice (the
+ * preselected values are already in them, so a form submits right without this), shows the
+ * organization note with the organization chosen, and refuses a personal choice with no login.
+ * It reads every value from the page: nothing is interpolated into it.
+ */
+const APP_OWNER_SCRIPT = `<script>
+(() => {
+  const sec = document.getElementById('github-apps');
+  const login = document.getElementById('app-owner-login');
+  if (!sec || !login) return;
+  const note = document.getElementById('app-org-note');
+  const chosen = () => sec.querySelector('input[name=app-owner-type]:checked');
+  const sync = () => {
+    const c = chosen();
+    if (!c) return;
+    const owner = c.value === 'Organization' ? c.dataset.owner : login.value.trim();
+    for (const f of sec.querySelectorAll('form.app-create')) {
+      f.elements.owner.value = owner;
+      f.elements.ownerType.value = c.value;
+    }
+    if (note) note.hidden = c.value !== 'Organization';
+  };
+  for (const r of sec.querySelectorAll('input[name=app-owner-type]')) r.addEventListener('change', sync);
+  login.addEventListener('input', sync);
+  login.addEventListener('focus', () => {
+    const user = sec.querySelector('input[name=app-owner-type][value=User]');
+    if (user && !user.checked) { user.checked = true; sync(); }
+  });
+  for (const f of sec.querySelectorAll('form.app-create')) f.addEventListener('submit', (e) => {
+    sync();
+    const c = chosen();
+    if (c && c.value === 'User' && !login.reportValidity()) e.preventDefault();
+  });
+})();
+</script>`;
+
+/**
+ * Create the author and reviewer GitHub Apps (spec 2026-11-13-github-app-auth §4.1): the owner
+ * choice, preselected from the repository's owner type, and one plain form per role posting to
+ * `/setup/github-app/start`. A role whose app exists for the owner shows its slug and install
+ * link instead. Without sudo each form carries `data-sudo-first`, which the page's own script
+ * answers by asking for the passphrase before it submits. With the vault off, no buttons.
+ */
+export function appCreateSection(
+  answer: Pick<RecommendAnswer, 'repo' | 'ownerType'>,
+  apps: AppCreateOptions,
+): string {
+  const head = `<section id="github-apps"><h3>GitHub Apps (recommended for two bots)</h3>
+<p>Instead of two tokens, Jumpmaster can act as two GitHub Apps: an author app and a reviewer app, registered under the account that owns the repository. Each button opens GitHub with the app filled in; you confirm it there, then install it on the repository. Its private key goes straight into the encrypted vault and is never shown.</p>`;
+  if (!apps.vaultOn)
+    return `${head}
+<p class="warn" id="apps-vault-off">The vault must be on first: an app's private key is kept only in the encrypted vault. Turn it on in <a href="/settings/credentials">Settings, Credentials</a>, then come back here.</p></section>`;
+  const repoOwner = answer.repo.split('/')[0] ?? '';
+  const org = answer.ownerType === 'Organization';
+  const owner = escapeHtml(repoOwner);
+  const ownerType = org ? 'Organization' : 'User';
+  const login = org ? '' : owner;
+  const sudoFirst = apps.sudo ? '' : ' data-sudo-first';
+  const roles = (['author', 'reviewer'] as const).map((role) => {
+    const have = apps.existing[role];
+    if (have) {
+      const install = gh(
+        `https://github.com/apps/${encodeURIComponent(have.slug)}/installations/new`,
+      );
+      return `<p class="app-made" data-role="${role}">The ${APP_ROLE_LABEL[role]} app. Created: <code>${escapeHtml(have.slug)}</code>. <a href="${install}"${linkTarget(install)}>Install it on the repository</a></p>`;
+    }
+    return `<form method="post" action="/setup/github-app/start" class="app-create"${sudoFirst}><input type="hidden" name="role" value="${role}"><input type="hidden" name="owner" value="${org ? owner : login}"><input type="hidden" name="ownerType" value="${ownerType}"><button>Create the ${APP_ROLE_LABEL[role]} app</button> <small class="app-out" role="status"></small></form>`;
+  });
+  const toCreate = (['author', 'reviewer'] as const).some((r) => !apps.existing[r]);
+  if (!toCreate)
+    return `${head}
+${roles.join('\n')}</section>`;
+  const choice = `<fieldset id="app-owner"><legend>Register the apps under</legend>
+<p><label><input type="radio" name="app-owner-type" value="User"${org ? '' : ' checked'}> My personal account</label> <label>Your GitHub login <input id="app-owner-login" value="${login}" pattern="[A-Za-z0-9\\-]{1,39}" required autocomplete="off" spellcheck="false"></label></p>
+${org ? `<p><label><input type="radio" name="app-owner-type" value="Organization" data-owner="${owner}" checked> The organization <code>${owner}</code></label></p>` : ''}
+</fieldset>
+${org ? '<p class="warn" id="app-org-note">Registering an app under an organization needs an owner or app manager of that organization, and installing it on the organization\'s repositories needs an owner, or an owner\'s approval of a member\'s request.</p>' : ''}`;
+  return `${head}
+${choice}
+${apps.sudo ? '' : '<p><small>Creating an app asks for your passphrase again first.</small></p>'}
+${roles.join('\n')}
+${APP_OWNER_SCRIPT}</section>`;
 }
 
 /** The collaborator page and what to do there. */

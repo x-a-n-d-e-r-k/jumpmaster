@@ -36,9 +36,11 @@ import {
   resolveCredentials,
 } from '../vault/credentials.js';
 import {
+  APP_ROLES,
   type AppRole,
   appEntryName,
   type GitHubAppEntry,
+  readAppEntry,
   serializeAppEntry,
 } from '../vault/github-app-entries.js';
 import { type CredentialProblem, credentialProblems } from '../vault/problems.js';
@@ -610,6 +612,34 @@ export class ConfigStore implements ConfigSource {
   /** The GitHub App entries of the two-bot zones' owners, as they resolved (§4.4). */
   resolvedApps(): ResolvedApps {
     return this.appsValue;
+  }
+
+  /**
+   * The slug of each role's GitHub App entry for `owner` (vault or secrets-directory file), for the
+   * pages that offer to create the apps (#374). Only the slug leaves: never the PEM or the client
+   * id. Unlike `resolvedApps()` it reads any owner, not only those of configured zones. A missing,
+   * undecryptable or unreadable entry (a bad file mode, unparsable JSON, a refused owner) is no
+   * entry, and nothing is logged: a page never fails, and no error text can carry the file.
+   */
+  appSlugs(owner: string): Partial<Record<AppRole, { slug: string }>> {
+    const out: Partial<Record<AppRole, { slug: string }>> = {};
+    for (const role of APP_ROLES) {
+      try {
+        const r = readAppEntry(
+          {
+            vault: this.vault(),
+            ...(this.o.boot.secretsDir ? { secretsDir: this.o.boot.secretsDir } : {}),
+            preferVault: this.preferVault(),
+          },
+          owner,
+          role,
+        );
+        if (r.source !== 'missing') out[role] = { slug: r.entry.slug };
+      } catch {
+        // A broken entry counts as none.
+      }
+    }
+    return out;
   }
 
   /** The vault, or `'disabled'` when there is no key file. */
