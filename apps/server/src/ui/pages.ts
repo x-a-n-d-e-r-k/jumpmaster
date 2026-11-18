@@ -265,6 +265,15 @@ function usageSection(u: HomeState['usage']): string {
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 /** A zone's briefings view: where the floor's held line and the zone page link. */
+/** A zone's page. */
+export const zoneHref = (id: string): string => `/zones/${encodeURIComponent(id)}`;
+
+/** A file on GitHub at the default branch, each segment of the repo and path URI-encoded. */
+const githubBlobHref = (repo: string, path: string): string => {
+  const enc = (p: string) => p.split('/').map(encodeURIComponent).join('/');
+  return `https://github.com/${enc(repo)}/blob/HEAD/${enc(path)}`;
+};
+
 export const zoneBriefingsHref = (zoneId: string): string =>
   `/briefings?zone=${encodeURIComponent(zoneId)}`;
 
@@ -781,6 +790,11 @@ export function renderGoals(s: {
   doneByRuling: ReadonlyMap<string, number>;
 }): string {
   const path = s.zone.crew?.goalPath ?? 'GOAL.md';
+  const missing = s.goals?.parse.ok === false && s.goals.parse.error === `${path} not found`;
+  // Until the goal can change in the app (#336), the owner edits it on GitHub: a protected path.
+  const edit = missing
+    ? `<p>${escapeHtml(path)} isn't in the repository yet. <a href="${escapeHtml(zoneHref(s.zone.id))}/intake">Write one with the intake page</a>.</p>`
+    : `<p>The goals live in ${escapeHtml(path)} in ${escapeHtml(s.zone.repo)}. Jumpmaster never commits it, because it is a protected path. <a href="${escapeHtml(githubBlobHref(s.zone.repo, path))}">Open ${escapeHtml(path)} on GitHub</a> and use the pencil to edit it. The crew reads the change at its next cycle.</p>`;
   let ladder: string;
   if (!s.goals) {
     ladder = `<p>${escapeHtml(path)} has not been read yet.</p>`;
@@ -841,7 +855,7 @@ export function renderGoals(s: {
       ? '<p>None.</p>'
       : `<ul>${s.skippedCrewUnpromoted.map((n) => `<li>${skippedLine(n)}</li>`).join('')}</ul>`;
   return page(
-    `<p><a href="/">Back</a></p><h2>Objectives (goal ladder): ${zoneName(s.zone, s.zones)}</h2>${ladder}` +
+    `<p><a href="/">Back</a> · <a href="${escapeHtml(zoneHref(s.zone.id))}">Zone</a></p><h2>Objectives (goal ladder): ${zoneName(s.zone, s.zones)}</h2>${ladder}${edit}` +
       `<h2>Crew issues</h2><table><tr><th>Objective</th><th>Key</th><th>Title</th><th>State</th><th>Issue</th><th>Work item</th><th>Findings</th></tr>${issues}</table>` +
       `<h2>Crew issues not started (no recorded promotion)</h2>${skipped}`,
   );

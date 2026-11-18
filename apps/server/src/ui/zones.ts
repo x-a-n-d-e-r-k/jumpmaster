@@ -12,7 +12,7 @@ import { BASE_EGRESS } from '../payloads.js';
 import { PRESET_EGRESS } from '../presets.js';
 import { FORM_SCRIPT, zoneToForm } from '../zones/form.js';
 import { renderFlags } from './flags.js';
-import { escapeHtml, MODE_LABELS, page, zoneBriefingsHref } from './pages.js';
+import { escapeHtml, MODE_LABELS, page, zoneBriefingsHref, zoneHref } from './pages.js';
 import { getWizard, projectBody } from './setup.js';
 import { zoneName, zoneNameText } from './zone-name.js';
 
@@ -36,8 +36,6 @@ const scriptJson = (v: unknown): string =>
 
 const html = (req: FastifyRequest, reply: FastifyReply, body: string, code = 200) =>
   reply.code(code).type('text/html; charset=utf-8').send(withCsrf(req, body));
-
-const zoneHref = (id: string) => `/zones/${encodeURIComponent(id)}`;
 
 const ADOPT_BANNER = `<div class="warn"><p><strong>Your config file holds these zones.</strong> In file mode the file is the config: edit it and run <code>jumpmaster ctl config reload</code>. To change zones here instead, adopt it into the database (<code>jumpmaster ctl config mode file</code> goes back).</p><p><button id="adopt">Adopt the config file</button> <span id="adopt-out" role="status"></span></p></div>
 <script>
@@ -259,7 +257,7 @@ ${field('overrideApprovers', 'Override approvers (logins)', textarea(f, 'overrid
   const base = zoneHref(id);
   const briefings = listBriefings(db, { zoneId: id, state: 'open' }).length;
   return page(
-    `<p><a href="/">Home</a> · <a href="/zones">Zones</a> · <a href="${base}/github">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${briefings} open)</a></p>
+    `<p><a href="/">Home</a> · <a href="/zones">Zones</a> · <a href="${base}/github">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${briefings} open)</a> · <a href="${base}/goals">Goals</a></p>
 <h2>${zoneName(resolved, all)}</h2><p>${escapeHtml(MODE_LABELS[mode] ?? mode)}</p>
 ${stopping ? `<p><strong>${escapeHtml(stopping)}</strong> <small>Resume or Pause from the Zones list withdraws it.</small></p>` : ''}
 ${readOnly || stopping ? '' : `<p>${stopButton(id, zoneNameText(resolved, all))}<small>No new work, then removed once drained; open pull requests and history stay.</small> <span id="stop-out" role="status"></span></p>`}
