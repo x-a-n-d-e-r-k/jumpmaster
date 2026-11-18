@@ -1,25 +1,35 @@
+import type { GateResult } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
 import {
   applyEffect,
   applyPendingRulings,
   type BriefingOption,
+  diagnosePending,
   dismissZoneBriefings,
+  getBriefing,
   listBriefings,
   listRulings,
   raiseBriefing,
+  recordDiagnosis,
   ruleBriefing,
   syncParkBriefings,
+  whyBasis,
 } from './briefings.js';
+import type { DropZoneConfig } from './config.js';
 import { applyCrewActions } from './crew/actions.js';
 import { flushCrewOps } from './crew/flush.js';
 import { getCrewIssue, insertCrewIssue, setCrewIssue } from './crew/store.js';
 import {
   getAttempts,
   getWorkItem,
+  insertDrop,
   insertOutbox,
   listOutbox,
   setAttempts,
+  setKilled,
   setWorkItemState,
+  setZoneMode,
+  updateDrop,
 } from './db/repo.js';
 import { reconcileZone } from './flow/reconcile.js';
 import { zonePass } from './flow/snapshot.js';
@@ -29,7 +39,9 @@ import { promptVersions } from './payloads.js';
 import { syncParked } from './sync.js';
 import { crewWorld, GOAL } from './test/crew.js';
 import { makeZone, usageCfg, type ZoneWorld, zoneWorld } from './test/fixtures.js';
+import { type Harness, harness } from './test/flowHarness.js';
 import { plus, t0 } from './test/helpers.js';
+import { VITEST_348 } from './test/vitest-output.js';
 
 const MIN = 60_000;
 const crewOn = { ...makeZone({}).crew, enabled: true };
@@ -611,5 +623,200 @@ describe('open_goal_change', () => {
         t0,
       ),
     ).toThrow(/effect none/);
+  });
+});
+
+describe('the why of a gate-failure park (#397)', () => {
+  const failingGate = (o: Partial<GateResult> = {}): GateResult => ({
+    name: 'test',
+    exitCode: 1,
+    durationMs: 1,
+    timedOut: false,
+    outputTail: VITEST_348,
+    ...o,
+  });
+
+  /** A harness whose item parked on an implement drop that failed `gate`. */
+  async function parkedOnGate(
+    gate: GateResult,
+    zone: Partial<DropZoneConfig> = {},
+  ): Promise<Harness> {
+    const h = await harness({ zone });
+    await h.reconcile();
+    await h.finishDrop('implement', {
+      status: 'failed',
+      reason: `gate ${gate.name} failed`,
+      gates: [{ ...gate, name: 'lint', exitCode: 0, outputTail: '' }, gate],
+    });
+    await h.reconcile();
+    return h;
+  }
+  const openOf = (h: Harness) => listBriefings(h.db, { zoneId: 'main', state: 'open' });
+
+  test('a failed implement drop: the failing test and its assertion, then the park reason', async () => {
+    const h = await parkedOnGate(failingGate());
+    const [b, ...rest] = openOf(h);
+    expect(rest).toEqual([]);
+    expect(b?.why).toBe(
+      "The test gate failed: `scripts/no-token-literals.test.ts` > no tracked file holds a token-shaped literal, a real private key or a lockfile credential (AssertionError: expected [ 'apps/server/src/chat/session.test.ts:12' ] to deeply equal [])\n\nPark reason: gate test failed",
+    );
+  });
+
+  test('a second pass leaves the briefing and its diagnosis untouched', async () => {
+    const h = await parkedOnGate(failingGate());
+    const b = openOf(h)[0];
+    if (!b) throw new Error('no briefing');
+    recordDiagnosis(
+      h.db,
+      b.id,
+      { diagnosis: 'the literal is a fixture', basis: whyBasis(b.why), recommendation: 'Retry' },
+      h.now(),
+      { spent: true },
+    );
+    const before = getBriefing(h.db, b.id);
+    h.at(5);
+    await h.reconcile();
+    syncParkBriefings(h.db, h.zone, h.at(5));
+    expect(openOf(h)).toEqual([before]);
+  });
+
+  test('output that does not parse: the gate, its exit and the last lines', async () => {
+    const tail = ['src/a.ts', '  3:1  error  no-unused-vars', '', '✖ 1 problem'].join('\n');
+    const h = await parkedOnGate(failingGate({ name: 'lint', outputTail: tail }));
+    expect(openOf(h)[0]?.why).toBe(
+      'The lint gate failed (exit 1). Its output ended with:\n\nsrc/a.ts\n  3:1  error  no-unused-vars\n✖ 1 problem\n\nPark reason: gate lint failed',
+    );
+  });
+
+  test('no stored result to match, or one that does not parse: the park reason, as before', () => {
+    const w = zoneWorld({});
+    const id = w.item(1, 'ready');
+    setWorkItemState(w.db, id, 'parked', 'gate test failed', t0);
+    syncParkBriefings(w.db, w.zone, t0);
+    expect(listBriefings(w.db, { zoneId: 'main', state: 'open' })[0]?.why).toBe('gate test failed');
+
+    insertDrop(w.db, {
+      id: 'bad',
+      dropZoneId: 'main',
+      workItemId: id,
+      role: 'implement',
+      state: 'failed',
+      createdAt: t0.toISOString(),
+    });
+    updateDrop(w.db, 'bad', { resultJson: '{"status":"failed",' });
+    syncParkBriefings(w.db, w.zone, plus(t0, MIN));
+    expect(listBriefings(w.db, { zoneId: 'main', state: 'open' })[0]?.why).toBe('gate test failed');
+
+    // A result for another reason, or without a red gate of that name, does not match either.
+    updateDrop(w.db, 'bad', {
+      resultJson: JSON.stringify({
+        status: 'failed',
+        reason: 'gate test failed',
+        gates: [failingGate({ name: 'lint' })],
+      }),
+    });
+    syncParkBriefings(w.db, w.zone, plus(t0, 2 * MIN));
+    expect(listBriefings(w.db, { zoneId: 'main', state: 'open' })[0]?.why).toBe('gate test failed');
+  });
+
+  test('a park for another reason keeps its reason', () => {
+    for (const reason of ['no_changes', 'budget exhausted: heal']) {
+      const w = zoneWorld({});
+      const id = w.item(1, 'ready');
+      setWorkItemState(w.db, id, 'parked', reason, t0);
+      syncParkBriefings(w.db, w.zone, t0);
+      expect(listBriefings(w.db, { zoneId: 'main', state: 'open' })[0]?.why).toBe(reason);
+    }
+  });
+});
+
+describe('diagnosePending (#397)', () => {
+  /** The crew on, and ready issues not held back for triage. */
+  const crewZone = { crew: crewOn, triage: { ...makeZone({}).triage, gate: false } };
+  async function parked(zone: Partial<DropZoneConfig> = crewZone) {
+    const h = await harness({ zone });
+    await h.reconcile();
+    await h.finishDrop('implement', {
+      status: 'failed',
+      reason: 'gate test failed',
+      gates: [
+        { name: 'test', exitCode: 1, durationMs: 1, timedOut: false, outputTail: VITEST_348 },
+      ],
+    });
+    await h.sync();
+    syncParkBriefings(h.db, h.zone, h.now());
+    const b = () => {
+      const [first] = listBriefings(h.db, { zoneId: 'main' }).filter((x) => x.kind === 'parked');
+      if (!first) throw new Error('no briefing');
+      return first;
+    };
+    return { h, b, pending: (at = h.now()) => diagnosePending(h.db, h.zone, b(), at) };
+  }
+
+  test('true while attempts are 0 and within 60 minutes; false past them with no drop', async () => {
+    const { h, pending } = await parked();
+    expect(pending()).toBe(true);
+    expect(pending(plus(h.now(), 59 * MIN))).toBe(true);
+    expect(pending(plus(h.now(), 60 * MIN))).toBe(false);
+    expect(pending(plus(h.now(), 70 * MIN))).toBe(false);
+  });
+
+  test('true while a diagnose drop is active, past 60 minutes too; false once it fails', async () => {
+    const { h, b, pending } = await parked();
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['diagnose']);
+    expect(b().diagnoseAttempts).toBe(1);
+    expect(pending(plus(h.now(), 90 * MIN))).toBe(true);
+    await h.finishDrop('diagnose', { status: 'failed', reason: 'no output', gates: [] });
+    expect(b().diagnosis).toBeNull();
+    expect(pending()).toBe(false);
+  });
+
+  test('false once the diagnosis lands', async () => {
+    const { h, b, pending } = await parked();
+    recordDiagnosis(
+      h.db,
+      b().id,
+      { diagnosis: 'a fixture literal', basis: whyBasis(b().why), recommendation: '' },
+      h.now(),
+    );
+    expect(pending()).toBe(false);
+  });
+
+  test('false with the crew disabled, under the kill switch, in observe mode, or once ruled', async () => {
+    expect((await parked({})).pending()).toBe(false);
+
+    const killed = await parked();
+    setKilled(killed.h.db, true, killed.h.now());
+    expect(killed.pending()).toBe(false);
+
+    const observing = await parked();
+    setZoneMode(observing.h.db, 'main', 'observe', observing.h.now());
+    expect(observing.pending()).toBe(false);
+
+    const ruled = await parked();
+    const b = ruled.b();
+    ruleBriefing(ruled.h.db, b.id, optionOf(b, 'none'), '', ruled.h.now());
+    expect(ruled.pending()).toBe(false);
+  });
+
+  test('false for a briefing of another kind', () => {
+    const w = zoneWorld({ crew: crewOn });
+    const id = raiseBriefing(
+      w.db,
+      {
+        zoneId: 'main',
+        kind: 'crew',
+        subject: 'x',
+        decision: 'd',
+        why: 'w',
+        options: [{ id: 'ok', label: 'OK', effect: 'none' }],
+        source: 'crew',
+      },
+      t0,
+    );
+    const b = listBriefings(w.db, { zoneId: 'main' }).find((x) => x.id === id);
+    if (!b) throw new Error('no briefing');
+    expect(diagnosePending(w.db, w.zone, b, t0)).toBe(false);
   });
 });
