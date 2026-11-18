@@ -152,6 +152,19 @@ describe('the zones page', () => {
     expect(home.body).toContain('href="/zones"');
   });
 
+  test('the zone page, the goals page and a briefing page each carry Ask about this with their focus', async () => {
+    const w = await world();
+    const body = (await w.get('/zones/main')).body;
+    const at = body.indexOf('<form class="ask"');
+    expect(at).toBeGreaterThanOrEqual(0);
+    const form = body.slice(at, body.indexOf('</form>', at));
+    expect(form).toContain('Ask about this');
+    expect(form).toContain('data-focus-kind="zone"');
+    expect(form).toContain('data-focus-zone="main"');
+    expect(form).toContain('data-focus-ref="main"');
+    expect(body).toContain("jmFetch('/api/chat/threads'");
+  });
+
   test('the zone page links its goals page after Briefings (#365)', async () => {
     const w = await world();
     const body = (await w.get('/zones/main')).body;
