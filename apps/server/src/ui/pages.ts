@@ -10,6 +10,7 @@ import {
   type Ruling,
   WAITS_FOR_CREW,
 } from '../briefings.js';
+import type { Focus } from '../chat/focus.js';
 import { type ClaudePlan, type DropZoneConfig, STARTER_WARNING } from '../config.js';
 import type { CrewIssue } from '../crew/store.js';
 import type {
@@ -737,6 +738,21 @@ function briefingRefs(
 }
 
 /**
+ * The script behind every Ask about this button: it opens a thread focused on the button's object
+ * (`POST /api/chat/threads {focus}`) and goes to it. It binds each form once, so a page may carry it
+ * more than once.
+ */
+const ASK_SCRIPT = `<script>for(const f of document.querySelectorAll('form.ask')){if(f.dataset.bound)continue;f.dataset.bound='1';f.addEventListener('submit',async(e)=>{e.preventDefault();const r=await jmFetch('/api/chat/threads',{focus:{kind:f.dataset.focusKind,zoneId:f.dataset.focusZone,ref:f.dataset.focusRef}});if(r.ok){const b=await r.json();location.href='/chat/'+encodeURIComponent(b.thread.id);}else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});}</script>`;
+
+/**
+ * Ask about this (#103): a form that opens a chat thread focused on a zone, its goals or a briefing,
+ * then goes to `/chat/<id>`. The focus rides in escaped `data-focus-*` attributes.
+ */
+export function askButton(focus: Focus): string {
+  return `<form class="ask" data-focus-kind="${escapeHtml(focus.kind)}" data-focus-zone="${escapeHtml(focus.zoneId)}" data-focus-ref="${escapeHtml(focus.ref)}"><button>Ask about this</button></form>${ASK_SCRIPT}`;
+}
+
+/**
  * One briefing on its own page (`/briefings/<n>`), open or not, with its rulings: where a
  * reference to it from another page, or `ctl briefings`, leads.
  */
@@ -772,6 +788,7 @@ export function renderBriefing(s: {
     .join('');
   return page(
     `<p><a href="/briefings">All briefings</a> · <a href="${escapeHtml(zoneBriefingsHref(b.zoneId))}">Briefings of ${name(b.zoneId)}</a></p><h2>Briefing ${escapeHtml(b.id)}</h2>` +
+      askButton({ kind: 'briefing', zoneId: b.zoneId, ref: String(b.id) }) +
       briefingBlock(b, ctx, 'h3') +
       (b.state === 'open' ? RULE_SCRIPT : '') +
       `<h3 id="rulings">Rulings</h3>` +
@@ -859,7 +876,9 @@ export function renderGoals(s: {
       ? '<p>None.</p>'
       : `<ul>${s.skippedCrewUnpromoted.map((n) => `<li>${skippedLine(n)}</li>`).join('')}</ul>`;
   return page(
-    `<p><a href="/">Back</a> · <a href="${escapeHtml(zoneHref(s.zone.id))}">Zone</a></p><h2>Objectives (goal ladder): ${zoneName(s.zone, s.zones)}</h2>${ladder}${edit}` +
+    `<p><a href="/">Back</a> · <a href="${escapeHtml(zoneHref(s.zone.id))}">Zone</a></p><h2>Objectives (goal ladder): ${zoneName(s.zone, s.zones)}</h2>` +
+      askButton({ kind: 'goals', zoneId: s.zone.id, ref: s.zone.id }) +
+      `${ladder}${edit}` +
       `<h2>Crew issues</h2><table><tr><th>Objective</th><th>Key</th><th>Title</th><th>State</th><th>Issue</th><th>Work item</th><th>Findings</th></tr>${issues}</table>` +
       `<h2>Crew issues not started (no recorded promotion)</h2>${skipped}`,
   );
