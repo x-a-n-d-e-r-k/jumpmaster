@@ -166,6 +166,7 @@ const ACTION_TOOLS = [
   'set_zone_mode',
   'run_crew_cycle',
   'mark_objective_done',
+  'change_setting',
   'queue_issue',
   'retry_parked',
   'close_issue',
