@@ -16,16 +16,11 @@ import {
   type CardKind,
   type CardUndo,
   type NewCard,
+  type PendingSetting,
   recordCard,
   type SettingUndo,
 } from '../chat/cards.js';
-import {
-  inversePatch,
-  SettingError,
-  settingDocPath,
-  settingPatch,
-  valueAt,
-} from '../chat/inverse.js';
+import { inversePatch, SettingError, settingDocPath, settingPatch } from '../chat/inverse.js';
 import { FLAGS } from '../config/catalog.js';
 import type { DropZoneConfig } from '../config.js';
 import { getUsageState, getWorkItem, getZoneMode, isKilled, listWorkItems } from '../db/repo.js';
@@ -63,8 +58,11 @@ export type Acted = {
   target?: string;
   link?: string;
   pending?: boolean;
-  /** What Undo needs, where the action can be reversed. */
-  undo?: CardUndo | SettingUndo;
+  /**
+   * What Undo needs, where the action can be reversed; for a pending setting, what its card needs
+   * to become done (with an Undo) once the owner confirms it.
+   */
+  undo?: CardUndo | SettingUndo | PendingSetting;
 };
 
 const zoneLink = (zoneId: string): string => `/zones/${encodeURIComponent(zoneId)}`;
@@ -153,7 +151,9 @@ function cardOf(ctx: ChatToolContext, kind: CardKind, acted: Acted, blocked: boo
         : `${ACTION_WORDS[kind]} was refused (${acted.out.detail ?? 'refused'}).`,
     ...(ok && acted.target ? { target: acted.target } : {}),
     ...(ok && acted.link ? { link: acted.link } : {}),
-    ...(state === 'done' && acted.undo !== undefined ? { undo: acted.undo } : {}),
+    ...((state === 'done' || state === 'pending') && acted.undo !== undefined
+      ? { undo: acted.undo }
+      : {}),
   };
   ctx.onCard?.(recordCard(ctx.db, card, ctx.now()));
   return acted.out;
@@ -360,13 +360,6 @@ const SettingArgs = z.strictObject({
 
 const LABELS = new Map(FLAGS.map((f) => [f.path, f.label]));
 
-/** A value as a card shows it: short JSON, or "its default" when the key is unset. */
-const shown = (v: unknown): string => {
-  if (v === undefined) return 'its default';
-  const s = JSON.stringify(v);
-  return s.length > 60 ? `${s.slice(0, 57)}...` : s;
-};
-
 /** The hint a browser-forbidden change gets: the chat can no more change it than the browser. */
 export const SETTING_FORBIDDEN_HINT = 'set it with `jumpmaster ctl` or in the config file';
 
@@ -417,9 +410,6 @@ const changeSettingTool: ChatToolDef = {
       });
       if (r.ok) {
         const after = store.document();
-        const values = Object.keys(args.set)
-          .map((k, i) => `${LABELS.get(k)} to ${shown(valueAt(after, paths[i] as string))}`)
-          .join('; ');
         const undo: SettingUndo | undefined =
           r.value.changed.length > 0
             ? { revision: r.value.revision, ...inversePatch(before, after, paths) }
@@ -428,8 +418,8 @@ const changeSettingTool: ChatToolDef = {
           out: ok(JSON.stringify({ revision: r.value.revision, changed: r.value.changed })),
           summary:
             r.value.changed.length > 0
-              ? `Changed ${where}: ${values} (revision ${r.value.revision}).`
-              : `Nothing changed ${where}: ${values} already (revision ${r.value.revision}).`,
+              ? `Changed ${labels} ${where} (revision ${r.value.revision}).`
+              : `Nothing changed ${where}: ${labels} already held that (revision ${r.value.revision}).`,
           target,
           ...(undo ? { undo } : {}),
         };
@@ -446,6 +436,7 @@ const changeSettingTool: ChatToolDef = {
           summary: `Changing ${labels} ${where} weakens a guard: it waits for you to Confirm it.`,
           target,
           link: String(r.body.confirm),
+          undo: { paths, what: `${labels} ${where}` },
         };
       }
       if (r.status === 403) {

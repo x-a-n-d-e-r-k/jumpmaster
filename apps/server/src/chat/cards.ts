@@ -8,7 +8,7 @@ import { getOutbox, getZoneMode, isKilled, type ZoneMode } from '../db/repo.js';
 import type { IssueFacts } from '../forge/github.js';
 import { type ForgePair, type Op, runOp } from '../outbox.js';
 import { escapeHtml } from '../ui/pages.js';
-import { changedSince } from './inverse.js';
+import { changedSince, inversePatch } from './inverse.js';
 
 /**
  * The crew chat's cards (#336, Task 13): one per action a chat turn took or was refused. A card's
@@ -178,6 +178,52 @@ const isSettingUndo = (u: unknown): u is SettingUndo =>
   typeof (u as SettingUndo).expect === 'object' &&
   (u as SettingUndo).expect !== null &&
   (u as SettingUndo).patch !== undefined;
+
+/**
+ * What a pending setting card keeps until the owner confirms its change: the document paths it
+ * sets, and the server's words for them ("Most open pull requests in zone main").
+ */
+export type PendingSetting = { paths: string[]; what: string };
+
+const isPendingSetting = (u: unknown): u is PendingSetting =>
+  typeof u === 'object' &&
+  u !== null &&
+  Array.isArray((u as PendingSetting).paths) &&
+  (u as PendingSetting).paths.every((p) => typeof p === 'string') &&
+  typeof (u as PendingSetting).what === 'string';
+
+/**
+ * The confirm page applied a pending change: the chat's setting card that offered its Confirm
+ * becomes done, with the revision and the inverse patch of just its paths as its Undo. Undefined
+ * when no pending chat card links to that change (one the settings page made).
+ */
+export function settleSettingCard(
+  db: Db,
+  pendingId: string,
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  revision: number,
+): ChatCard | undefined {
+  const row = db
+    .prepare(
+      `SELECT ${COLS} FROM chat_cards WHERE kind = 'setting' AND state = 'pending' AND link = ?`,
+    )
+    .get(`/config/confirm/${pendingId}`) as CardRow | undefined;
+  const card = row && toCard(row);
+  if (!card || !isPendingSetting(card.undo)) return undefined;
+  const undo: SettingUndo = { revision, ...inversePatch(before, after, card.undo.paths) };
+  const changed = changedSince(before, undo.expect).length > 0;
+  const summary = changed
+    ? `Changed ${card.undo.what} after you confirmed it (revision ${revision}).`
+    : `Nothing changed: ${card.undo.what} already held that (revision ${revision}).`;
+  const done = db
+    .prepare(
+      `UPDATE chat_cards SET state = 'done', summary = ?, undo_json = ?, link = NULL
+         WHERE id = ? AND state = 'pending' RETURNING ${COLS}`,
+    )
+    .get(summary, changed ? JSON.stringify(undo) : null, card.id) as CardRow | undefined;
+  return done && toCard(done);
+}
 
 /** Marks a done card undone; false when it no longer was done (a second press). */
 export function markCardUndone(db: Db, id: number, now: Date): boolean {

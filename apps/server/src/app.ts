@@ -15,7 +15,7 @@ import {
   listBriefings,
   listRulings,
 } from './briefings.js';
-import { type ChatCard, listCards } from './chat/cards.js';
+import { type ChatCard, listCards, settleSettingCard } from './chat/cards.js';
 import { type ChatTurnHub, registerChatRoutes, threadIdOf } from './chat/routes.js';
 import { getThread, listMessages, listThreads } from './chat/store.js';
 import { configReader } from './config/source.js';
@@ -326,6 +326,7 @@ export function createApp(
     config: deps.config,
     now: deps.now,
     forgesFor: deps.forgesFor,
+    ...(deps.config instanceof ConfigStore ? { store: deps.config } : {}),
     ...(deps.chatTurns ? { turns: deps.chatTurns } : {}),
   });
   // The stick installer (issue #138): the script, cosign and the stick image, at publicUrl.
@@ -351,7 +352,17 @@ export function createApp(
         ? payload.replace(STORE_NAV_SLOT, STORE_NAV)
         : payload,
     );
-    registerConfirmPages(app, { db: deps.db, store: deps.config, now: deps.now, backoff });
+    registerConfirmPages(app, {
+      db: deps.db,
+      store: deps.config,
+      now: deps.now,
+      backoff,
+      // A chat's pending setting card becomes done, with its Undo, once its change is confirmed.
+      onApplied: (pending, before, after, revision) => {
+        const card = settleSettingCard(deps.db, pending.id, before, after, revision);
+        if (card) deps.chatTurns?.publishCard?.(card);
+      },
+    });
     // The setup wizard: thin frames over the secret, zone, config and doctor routes.
     registerSetupPages(app, {
       db: deps.db,

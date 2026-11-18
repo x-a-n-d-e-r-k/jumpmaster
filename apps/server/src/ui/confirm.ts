@@ -18,6 +18,13 @@ export interface ConfirmPageDeps {
   now(): Date;
   /** The per-source backoff the login, setup and sudo share: the passphrase here is a guess too. */
   backoff: Backoff;
+  /** Told of each pending change this page applies, with the documents before and after it. */
+  onApplied?(
+    pending: Pending,
+    before: Record<string, unknown>,
+    after: Record<string, unknown>,
+    revision: number,
+  ): void;
 }
 
 /** Longer than any passphrase may be, so an oversized one fails like a wrong one. */
@@ -140,6 +147,7 @@ export function registerConfirmPages(app: FastifyInstance, deps: ConfirmPageDeps
     if (!right || !body.success || operatorHash(db) !== stored)
       return html(reply, 401, render(req, pending, 'That passphrase is not right.'));
     backoff.reset(req.ip);
+    const before = store.document();
     const r = store.apply(pending.patch, {
       ...pending.meta,
       principal,
@@ -147,6 +155,7 @@ export function registerConfirmPages(app: FastifyInstance, deps: ConfirmPageDeps
       confirmation: { pendingId: pending.id, token: body.data.token },
     });
     if (r.ok) {
+      deps.onApplied?.(pending, before, store.document(), r.revision);
       recordAudit(
         db,
         {

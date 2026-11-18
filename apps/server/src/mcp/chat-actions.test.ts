@@ -647,7 +647,8 @@ describe('change_setting', () => {
       kind: 'setting',
       state: 'pending',
       link: `/config/confirm/${answer.pendingId}`,
-      undo: null,
+      // What it needs to become done once confirmed: never an Undo while pending.
+      undo: { paths: ['dropZones[main].protectedPaths'], what: expect.any(String) },
     });
     const html = renderCard(card as never);
     expect(html).toContain(`href="/config/confirm/${answer.pendingId}"`);
@@ -820,6 +821,119 @@ describe('change_setting', () => {
     const [card] = listCards(w.db, w.thread.id);
     expect(card).toMatchObject({ kind: 'setting', state: 'refused' });
     expect(card?.summary).toMatch(/config is managed by the file/);
+  });
+});
+
+describe('change_setting cards through the chat routes and the confirm page', () => {
+  const undoAs = (w: Awaited<ReturnType<typeof settingWorld>>, id: number, s = w.one) =>
+    w.app.inject({
+      method: 'POST',
+      url: `/api/chat/cards/${id}/undo`,
+      headers: { host: HOST, origin: ORIGIN, cookie: s.cookie, 'x-jm-csrf': s.csrf },
+      payload: {},
+    });
+
+  test("Undo on a zone setting's card, pressed in the browser, restores it and marks the card undone", async () => {
+    const w = await settingWorld();
+    await w.call('change_setting', { zoneId: 'main', set: { 'dropZones[].maxOpenPrs': 4 } });
+    const [card] = listCards(w.db, w.thread.id);
+    expect(card).toMatchObject({ state: 'done' });
+    const res = await undoAs(w, card?.id as number);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ card: { state: 'undone', undoable: false } });
+    expect(res.json().card.undo).toBeUndefined();
+    expect(zoneOf(w.store)?.maxOpenPrs).toBeUndefined();
+    expect(listCards(w.db, w.thread.id)[0]).toMatchObject({ state: 'undone' });
+    expect((await undoAs(w, card?.id as number)).statusCode).toBe(409);
+  });
+
+  test("Undo on an install setting's card (no zone) is pressed through the route too", async () => {
+    const w = await settingWorld();
+    const was = w.store.current().pollSeconds;
+    const r = await w.call('change_setting', { set: { pollSeconds: 123 } });
+    expect(r.isError, r.text).toBeFalsy();
+    expect(w.store.current().pollSeconds).toBe(123);
+    const [card] = listCards(w.db, w.thread.id);
+    expect(card).toMatchObject({ kind: 'setting', state: 'done', zoneId: null });
+    const res = await undoAs(w, card?.id as number);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(w.store.current().pollSeconds).toBe(was);
+  });
+
+  test('Review Focus 4 Undo through the route refuses with changed since and writes nothing', async () => {
+    const w = await settingWorld();
+    await w.call('change_setting', { zoneId: 'main', set: { 'dropZones[].maxOpenPrs': 4 } });
+    const [card] = listCards(w.db, w.thread.id);
+    const moved = w.store.apply(
+      mergeConfigPatch(w.store.document(), { dropZones: [{ id: 'main', maxOpenPrs: 9 }] }),
+      { via: 'ctl', principal: tokenP },
+    );
+    expect(moved.ok).toBe(true);
+    const rev = w.store.revision();
+    const res = await undoAs(w, card?.id as number);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/changed since/);
+    expect(w.store.revision()).toBe(rev);
+    expect(zoneOf(w.store)?.maxOpenPrs).toBe(9);
+    expect(listCards(w.db, w.thread.id)[0]).toMatchObject({ state: 'done' });
+  });
+
+  test("an Undo through the route that would loosen a guard goes pending, bound to the pressing browser's session", async () => {
+    const w = await settingWorld();
+    const tighter = [...(zoneOf(w.store)?.protectedPaths ?? []), 'docs/**'];
+    await w.call('change_setting', {
+      zoneId: 'main',
+      set: { 'dropZones[].protectedPaths': tighter },
+    });
+    const [card] = listCards(w.db, w.thread.id);
+    const rev = w.store.revision();
+    const res = await undoAs(w, card?.id as number, w.two);
+    expect(res.statusCode).toBe(409);
+    const body = res.json() as { needsConfirmation: boolean; pendingId: string; confirm: string };
+    expect(body).toMatchObject({
+      needsConfirmation: true,
+      confirm: `/config/confirm/${body.pendingId}`,
+    });
+    expect(w.store.revision()).toBe(rev);
+    expect(zoneOf(w.store)?.protectedPaths).toEqual(tighter);
+    expect(w.store.confirmations.pending(body.pendingId, sha256Hex(w.two.id))).toBeDefined();
+    expect(w.store.confirmations.pending(body.pendingId, sha256Hex(w.one.id))).toBeUndefined();
+    expect(listCards(w.db, w.thread.id)[0]).toMatchObject({ state: 'done' });
+  });
+
+  test('a pending card becomes done, with its revision and an Undo, once the owner confirms it', async () => {
+    const w = await settingWorld();
+    const r = await w.call('change_setting', {
+      zoneId: 'main',
+      set: { 'dropZones[].protectedPaths': ['GOAL.md'] },
+    });
+    const { pendingId } = JSON.parse(r.text) as { pendingId: string };
+    const was = zoneOf(w.store)?.protectedPaths;
+    const res = await w.confirmAs(pendingId, w.one);
+    expect(res.statusCode, res.body).toBe(303);
+    const rev = w.store.revision();
+    const [card] = listCards(w.db, w.thread.id);
+    expect(card).toMatchObject({ kind: 'setting', state: 'done', undo: { revision: rev } });
+    expect(card?.summary).toContain(`revision ${rev}`);
+    expect(renderCard(card as never)).toMatch(/Undo/);
+    expect(renderCard(card as never)).not.toMatch(/>Confirm</);
+    // Its Undo tightens the guard again, so it applies at once.
+    const undone = await undoAs(w, card?.id as number);
+    expect(undone.statusCode, undone.body).toBe(200);
+    expect(zoneOf(w.store)?.protectedPaths).toEqual(was);
+  });
+
+  test('a done card names the setting, not the value the model chose', async () => {
+    const w = await settingWorld();
+    const r = await w.call('change_setting', {
+      zoneId: 'main',
+      set: { 'dropZones[].maxOpenPrs': 37 },
+    });
+    expect(r.isError, r.text).toBeFalsy();
+    const [card] = listCards(w.db, w.thread.id);
+    expect(card).toMatchObject({ state: 'done' });
+    expect(card?.summary).toContain('Most open pull requests');
+    expect(card?.summary).not.toContain('37');
   });
 });
 
