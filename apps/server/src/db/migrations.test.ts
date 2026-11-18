@@ -1018,6 +1018,20 @@ test('v27 adds usage_windows, empty, keyed by window', () => {
   db.close();
 });
 
+test('v40 adds the reporting model to usage_windows, null on every existing row (#377)', () => {
+  const f = dbAt(39, (raw) => {
+    raw.exec(
+      "INSERT INTO usage_windows (key, utilization, resets_at, observed_at) VALUES ('seven_day_overage_included', 0.01, NULL, 'a')",
+    );
+  });
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.prepare('SELECT key, utilization, model FROM usage_windows').all()).toEqual([
+    { key: 'seven_day_overage_included', utilization: 0.01, model: null },
+  ]);
+  db.close();
+});
+
 test("v28 adds stick invites and the sticks' removal, Auto count and health, unset on every existing stick", () => {
   const f = dbAt(27, (raw) => {
     raw.exec(
