@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { DropResult } from '@jumpmaster/protocol';
 import { beforeEach, describe, expect, test } from 'vitest';
 import {
   applyPendingRulings,
@@ -13,16 +14,20 @@ import {
   setKilled,
   setWorkItemState,
   setZoneMode,
+  updateDrop,
   upsertWorkItem,
 } from '../db/repo.js';
 import { reconcileZone } from '../flow/reconcile.js';
 import { zonePass } from '../flow/snapshot.js';
 import { isJmIssueBody, opMarker, resolveUnknown, sanitizeCrewText } from '../outbox.js';
 import { promptVersions } from '../payloads.js';
+import { applyResult } from '../results.js';
 import { syncDropZone } from '../sync.js';
+import { crewWorld, ISSUE_BODY, parsedCrew } from '../test/crew.js';
 import { makeZone, usageCfg, type ZoneWorld, zoneWorld } from '../test/fixtures.js';
 import { plus, t0 } from '../test/helpers.js';
 import { flushCrewOps, PROMOTE_OPTIONS } from './flush.js';
+import { enqueueCrew } from './schedule.js';
 import {
   type CrewIssueState,
   getCrewIssue,
@@ -775,5 +780,55 @@ describe('zone controls', () => {
     setKilled(w.db, false, t0);
     expect(await flush()).toBe(1);
     expect(getCrewIssue(w.db, id)?.state).toBe('staged');
+  });
+});
+
+describe('a passing refute, by default (#318)', () => {
+  /** Files one crew issue through the real flush and applies a passing refute to it. */
+  async function refutedPromote(crew: Record<string, unknown>) {
+    w = await crewWorld({ crew: parsedCrew(crew) });
+    const z = w.zone;
+    const id = intent({ body: ISSUE_BODY });
+    await flushCrewOps(w.db, w.forges, z, [], t0);
+    expect(getCrewIssue(w.db, id)?.state).toBe('staged');
+    const pass = await zonePass(w.forges, z, 'main');
+    const drop = await enqueueCrew(w.db, w.forges, z, pass, promptVersions(), usageCfg, t0);
+    if (!drop) throw new Error('no refute drop enqueued');
+    updateDrop(w.db, drop, { state: 'running', startedAt: t0.toISOString() });
+    const deps = { forges: w.forges, zone: z, secrets: [], usageCfg, rand: () => 0.5 };
+    const result: DropResult = {
+      status: 'completed',
+      crew: { decision: 'promote', findings: ['every criterion holds'] },
+      gates: [],
+    };
+    await applyResult(w.db, deps, drop, result, t0);
+    return { id, z };
+  }
+
+  test('a zone whose config leaves refutePromotes out promotes after the hold, with no ruling', async () => {
+    const { id, z } = await refutedPromote({});
+    expect(getCrewIssue(w.db, id)?.state).toBe('promote_held');
+    expect(listBriefings(w.db, { zoneId: 'main', state: 'open' }).map((b) => b.kind)).toEqual([
+      'promote_held',
+    ]);
+    await flushCrewOps(w.db, w.forges, z, [], plus(t0, MIN)); // starts the hold
+    expect(getCrewIssue(w.db, id)?.state).toBe('promote_held');
+    await flushCrewOps(w.db, w.forges, z, [], plus(t0, 3 * MIN));
+    const row = getCrewIssue(w.db, id);
+    expect(row?.state).toBe('promoted');
+    expect(w.f.state.issues.get(row?.number ?? -1)?.labels).toContain(z.readyLabel);
+    expect(listRulings(w.db, 'main')).toEqual([]);
+  });
+
+  test('an explicit refutePromotes false leaves it staged with an open Promote briefing', async () => {
+    const { id, z } = await refutedPromote({ refutePromotes: false });
+    await flushCrewOps(w.db, w.forges, z, [], plus(t0, MIN));
+    await flushCrewOps(w.db, w.forges, z, [], plus(t0, 60 * MIN));
+    const row = getCrewIssue(w.db, id);
+    expect(row?.state).toBe('staged');
+    expect(w.f.state.issues.get(row?.number ?? -1)?.labels).not.toContain(z.readyLabel);
+    expect(listBriefings(w.db, { zoneId: 'main', state: 'open' })).toMatchObject([
+      { kind: 'promote', subject: `issue:${id}` },
+    ]);
   });
 });

@@ -23,7 +23,7 @@ import { unsanitizeForgeText } from '../outbox.js';
 import { promptVersions } from '../payloads.js';
 import { applyResult, type ResultDeps } from '../results.js';
 import { syncDropZone } from '../sync.js';
-import { crewOn, crewWorld, ISSUE_BODY } from '../test/crew.js';
+import { crewOn, crewWorld, ISSUE_BODY, parsedCrew } from '../test/crew.js';
 import { usageCfg, type ZoneWorld } from '../test/fixtures.js';
 import { plus, t0 } from '../test/helpers.js';
 import { applyCrewActions } from './actions.js';
@@ -198,10 +198,22 @@ describe('refute results', () => {
     expect(getCrewIssue(w.db, other)?.state).toBe('promoted');
   });
 
-  test('a refute promote without refutePromotes raises a promote briefing and leaves it staged', async () => {
+  test('a refute promote on a zone whose config leaves refutePromotes out is held, not asked (#318)', async () => {
+    const zone = { ...w.zone, crew: parsedCrew() };
     const issue = staged();
-    const id = await crewDrop();
-    await applyResult(w.db, deps(), id, completed({ decision: 'promote', findings: [] }), t0);
+    const id = await crewDrop(t0, zone);
+    await applyResult(w.db, deps(zone), id, completed({ decision: 'promote', findings: [] }), t0);
+    expect(getCrewIssue(w.db, issue)?.state).toBe('promote_held');
+    const open = listBriefings(w.db, { zoneId: 'main', state: 'open' });
+    expect(open.map((b) => b.kind)).toEqual(['promote_held']);
+    expect(open[0]?.subject).toBe(`issue:${issue}`);
+  });
+
+  test('a refute promote with refutePromotes false raises a promote briefing and leaves it staged', async () => {
+    const zone = { ...w.zone, crew: parsedCrew({ refutePromotes: false }) };
+    const issue = staged();
+    const id = await crewDrop(t0, zone);
+    await applyResult(w.db, deps(zone), id, completed({ decision: 'promote', findings: [] }), t0);
     expect(getCrewIssue(w.db, issue)?.state).toBe('staged');
     const [b] = listBriefings(w.db, { zoneId: 'main', state: 'open' });
     expect(b).toMatchObject({ kind: 'promote', subject: `issue:${issue}` });
