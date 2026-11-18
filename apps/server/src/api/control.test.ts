@@ -36,6 +36,7 @@ import {
   upsertWorkItem,
   zoneIsDrained,
 } from '../db/repo.js';
+import type { DoctorCheck, DoctorDeps } from '../doctor/checks.js';
 import { createAppBrokers } from '../forge/app-brokers.js';
 import { serverScrubSet } from '../forge/scrub-set.js';
 import { createTokenCache } from '../forge/token-cache.js';
@@ -440,7 +441,9 @@ describe('rule route', () => {
 });
 
 describe('doctor routes', () => {
-  function doctorApp(o: { images?: { status(): MirrorStatus } } = {}) {
+  function doctorApp(
+    o: { images?: { status(): MirrorStatus }; chatHealth?: DoctorDeps['chatHealth'] } = {},
+  ) {
     const w = world();
     app = controlApp({
       db: w.db,
@@ -449,9 +452,25 @@ describe('doctor routes', () => {
       forgesFor: w.deps.forges,
       doctorEnv: w.deps.env,
       ...(o.images ? { images: o.images } : {}),
+      ...(o.chatHealth ? { chatHealth: o.chatHealth } : {}),
     });
     return w;
   }
+
+  test('the doctor asks the chat service it is given, and warns without one (#336)', async () => {
+    const chatOf = async () =>
+      ((await post('/api/control/doctor', {}))?.json().run.checks as DoctorCheck[]).find(
+        (x) => x.id === 'chat.service' && x.zoneId === null,
+      );
+    doctorApp();
+    expect(await chatOf()).toMatchObject({ status: 'warn' });
+    await app?.close();
+    doctorApp({ chatHealth: async () => ({ ok: true, claude: false, forge: true }) });
+    expect(await chatOf()).toMatchObject({
+      status: 'fail',
+      summary: expect.stringContaining('Claude'),
+    });
+  });
 
   test('the doctor reports the image mirror the server runs (issue #140)', async () => {
     doctorApp({ images: { status: () => ({ lock: false, images: [] }) } });
