@@ -528,6 +528,7 @@ describe('settings, part two (Task 13)', () => {
       'claude.plan',
       'claude.fableModel',
       'claude.fableWeeklyDropCap',
+      'claude.fableMaxUtilization',
       'requireSignedImages',
       'mcp.writesPerHour',
       'mcp.callsPerHour',
@@ -1085,7 +1086,7 @@ describe('settings, part two: browser findings (Task 13, fix round 1)', () => {
     const w = await world({ dbMode: true, doc: { mcp: { enabled: true }, dropZones: [ZONE] } });
     const html = (await w.get('/settings/install')).body;
     const controls = [...html.matchAll(/<(input|select)[^>]*data-path="([^"]+)"[^>]*>/g)];
-    expect(controls.length).toBe(12);
+    expect(controls.length).toBe(13);
     for (const [tag, , path] of controls) {
       const id = /id="([^"]+)"/.exec(tag as string)?.[1];
       expect([path, id]).toEqual([path, expect.any(String)]);
