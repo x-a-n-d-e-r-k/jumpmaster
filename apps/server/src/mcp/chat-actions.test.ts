@@ -1,9 +1,16 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import Fastify from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
 import { registerControlRoutes } from '../api/control.js';
+import type { ActionCtx } from '../api/operator-actions.js';
+import { createApp } from '../app.js';
 import { listAudit } from '../auth/audit.js';
-import type { Principal } from '../auth/guard.js';
-import { registerGuard } from '../auth/guard.js';
+import { Backoff } from '../auth/backoff.js';
+import { type Principal, registerGuard } from '../auth/guard.js';
+import { SetupMode, setOperatorPassphrase } from '../auth/operator.js';
+import { sha256Hex } from '../auth/sessions.js';
 import {
   applyPendingRulings,
   getBriefing,
@@ -11,11 +18,15 @@ import {
   listRulings,
   raiseBriefing,
 } from '../briefings.js';
-import { type ChatCard, listCards, renderCard, undoCard } from '../chat/cards.js';
+import { type ChatCard, listCards, renderCard, undoCard, undoSettingCard } from '../chat/cards.js';
 import { createThread } from '../chat/store.js';
+import { loadBoot } from '../config/boot.js';
+import { mergeConfigPatch } from '../config/diff.js';
+import { ConfigStore } from '../config/store.js';
 import type { Config } from '../config.js';
 import { flushCrewOps } from '../crew/flush.js';
 import { listCrewIssues } from '../crew/store.js';
+import { openDb } from '../db/open.js';
 import {
   getZoneMode,
   setKilled,
@@ -30,7 +41,7 @@ import { listGoalChanges, openGoalChange } from '../goal-change.js';
 import { objectivesDone } from '../goals.js';
 import { crewOn, crewWorld, GOAL, ISSUE_BODY } from '../test/crew.js';
 import { makeZone, usageCfg } from '../test/fixtures.js';
-import { operatorSession, t0 } from '../test/helpers.js';
+import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
 import { type ChatPrincipal, checkMcpToken, mintChatToken } from './tokens.js';
 import { callTool, listTools } from './tools.js';
 
@@ -431,6 +442,7 @@ describe('chat action tools', () => {
         'set_zone_mode',
         'run_crew_cycle',
         'mark_objective_done',
+        'change_setting',
         'queue_issue',
         'retry_parked',
         'close_issue',
@@ -450,6 +462,478 @@ describe('chat action tools', () => {
     ]) {
       expect(byName.get(name)?.inputSchema.required).toContain('zoneId');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// change_setting (Task 15): through the config store, as the browser session the chat acts for.
+
+const PASS = 'a long operator passphrase';
+const ORIGIN = `http://${HOST}`;
+const storeEnv = {
+  JM_CLAUDE_TOKEN: 'claude-secret-value-1',
+  JM_GITHUB_AUTHOR_TOKEN: 'author-secret-value-2',
+  JM_GITHUB_REVIEWER_TOKEN: 'reviewer-secret-value-3',
+  JM_JOIN_TOKEN: 'join-secret-value-4',
+  JM_OPERATOR_TOKEN: 'o'.repeat(32),
+};
+const tokenP: Principal = { kind: 'operator', via: 'token', sudo: true };
+const mainZone = {
+  id: 'main',
+  repo: 'octo/main',
+  gates: [{ name: 'test', run: 'npm test' }],
+  image: 'jm-trooper:dev',
+};
+
+/**
+ * A store-backed install with zone main, the app over it (the confirm page and the PATCH route),
+ * two browser sessions, and a chat token minted for a message session one posted.
+ */
+async function settingWorld(o: { fileMode?: boolean } = {}) {
+  const db = openDb(tmpDbFile());
+  const dir = mkdtempSync(join(tmpdir(), 'jm-chat-setting-'));
+  const file = join(dir, 'jumpmaster.config.json');
+  if (o.fileMode) writeFileSync(file, JSON.stringify({ dataDir: './data', dropZones: [mainZone] }));
+  const store = ConfigStore.open({
+    db,
+    boot: loadBoot({}, file),
+    filePath: file,
+    env: storeEnv,
+    now: () => t0,
+    imageLockPath: join(dir, 'no-lock.json'),
+  });
+  if (!o.fileMode) {
+    const seeded = store.apply({ dropZones: [mainZone] }, { via: 'ctl', principal: tokenP });
+    if (!seeded.ok) throw new Error(`seed failed: ${JSON.stringify(seeded)}`);
+  }
+  upsertDropZone(db, { id: 'main', repo: 'octo/main', defaultBranch: 'main', configJson: '{}' });
+  await setOperatorPassphrase(db, PASS, t0);
+  const app = createApp({
+    db,
+    config: store,
+    forgesFor: () => ({}) as never,
+    now: () => t0,
+    setup: new SetupMode(() => {}),
+    backoff: new Backoff(),
+    leaseWaitMs: 0,
+    leasePollMs: 0,
+  });
+  close = () => app.close();
+  const one = operatorSession(db);
+  const two = operatorSession(db);
+  const thread = createThread(db, { title: 'settings' }, t0);
+  const minted = mintChatToken(
+    db,
+    { threadId: thread.id, messageId: 31, sessionHash: sha256Hex(one.id), minutes: 30 },
+    t0,
+  );
+  const c = checkMcpToken(db, minted.token, t0);
+  if (!c.ok) throw new Error('chat token did not check');
+  const principal = c.principal as ChatPrincipal;
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const r = await callTool(
+      { db, config: store.current(), store, principal, now: () => t0, actions: true },
+      name,
+      args,
+    );
+    return { ...r, text: (r.content[0] as { text: string }).text };
+  };
+  const tokenIn = (html: string) => /name="token" value="([\w-]+)"/.exec(html)?.[1] as string;
+  const confirmAs = async (id: string, s: typeof one) => {
+    const page = await app.inject({
+      method: 'GET',
+      url: `/config/confirm/${id}`,
+      headers: { host: HOST, cookie: s.cookie },
+    });
+    if (page.statusCode !== 200) return page;
+    return app.inject({
+      method: 'POST',
+      url: `/config/confirm/${id}`,
+      headers: {
+        host: HOST,
+        origin: ORIGIN,
+        cookie: s.cookie,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      payload: new URLSearchParams({ token: tokenIn(page.body), passphrase: PASS }).toString(),
+    });
+  };
+  const actx = (): ActionCtx => ({
+    db,
+    now: () => t0,
+    config: store.current(),
+    principal: sessionPrincipal(sha256Hex(one.id)),
+    secrets: [],
+  });
+  return { db, store, app, one, two, thread, principal, call, confirmAs, actx };
+}
+
+const sessionPrincipal = (hash: string): Principal => ({
+  kind: 'operator',
+  via: 'session',
+  sessionId: hash,
+  sudo: false,
+});
+
+const zoneOf = (store: ConfigStore) => store.current().dropZones[0];
+
+describe('change_setting', () => {
+  test('a free setting applies as the chat, with a done card that can be undone', async () => {
+    const w = await settingWorld();
+    const before = w.store.revision();
+    const r = await w.call('change_setting', {
+      zoneId: 'main',
+      set: { 'dropZones[].maxOpenPrs': 4 },
+    });
+    expect(r.isError, r.text).toBeFalsy();
+    expect(w.store.revision()).toBe(before + 1);
+    expect(zoneOf(w.store)?.maxOpenPrs).toBe(4);
+    const [card] = listCards(w.db, w.thread.id);
+    expect(card).toMatchObject({ kind: 'setting', state: 'done', zoneId: 'main' });
+    expect(card?.summary).toContain('Most open pull requests');
+    expect(card?.summary).toContain(`revision ${before + 1}`);
+    expect(card?.undo).toMatchObject({ revision: before + 1 });
+    expect(renderCard(card as never)).toMatch(/Undo/);
+    const audit = listAudit(w.db, 1)[0];
+    expect(audit).toMatchObject({ via: 'chat', action: 'config.apply' });
+    expect(audit?.detail).toMatchObject({ thread: w.thread.id, message: 31 });
+    // Undo restores it, and marks the card undone.
+    const undone = undoSettingCard(w.actx(), w.store, card as ChatCard);
+    expect(undone.ok).toBe(true);
+    expect(zoneOf(w.store)?.maxOpenPrs).toBeUndefined();
+    expect(listCards(w.db, w.thread.id)[0]).toMatchObject({ state: 'undone' });
+    // A card already undone is refused.
+    const again = undoSettingCard(w.actx(), w.store, listCards(w.db, w.thread.id)[0] as ChatCard);
+    expect(again).toMatchObject({ ok: false, status: 409 });
+  });
+
+  test('D5 change_setting on a guarded path answers pending with the same pendingId shape the PATCH route gives a session, and its card offers Confirm linking /config/confirm/<id>', async () => {
+    const w = await settingWorld();
+    const before = w.store.revision();
+    const r = await w.call('change_setting', {
+      zoneId: 'main',
+      set: { 'dropZones[].protectedPaths': ['GOAL.md'] },
+    });
+    expect(r.isError, r.text).toBeFalsy();
+    expect(w.store.revision()).toBe(before);
+    const answer = JSON.parse(r.text) as Record<string, unknown>;
+    const http = await w.app.inject({
+      method: 'PATCH',
+      url: '/api/control/config',
+      headers: { host: HOST, cookie: w.two.cookie, 'x-jm-csrf': w.two.csrf },
+      payload: {
+        patch: { dropZones: [{ id: 'main', protectedPaths: ['GOAL.md'] }] },
+        expectRevision: before,
+      },
+    });
+    expect(http.statusCode).toBe(409);
+    const body = http.json() as Record<string, unknown>;
+    expect(answer).toMatchObject({
+      needsConfirmation: true,
+      pendingId: expect.any(String),
+      confirm: `/config/confirm/${answer.pendingId}`,
+    });
+    for (const k of Object.keys(body)) expect(answer).toHaveProperty(k);
+    expect(String(answer.pendingId)).toMatch(
+      new RegExp(`^[\\w-]{${String(body.pendingId).length}}$`),
+    );
+    expect(answer.guarded).toEqual(body.guarded);
+    // Bound to the session that posted the owner's message, returning to the thread.
+    const pending = w.store.confirmations.pending(String(answer.pendingId), sha256Hex(w.one.id));
+    expect(pending).toBeDefined();
+    expect(pending?.returnTo).toBe(`/chat/${w.thread.id}`);
+    const [card] = listCards(w.db, w.thread.id);
+    expect(card).toMatchObject({
+      kind: 'setting',
+      state: 'pending',
+      link: `/config/confirm/${answer.pendingId}`,
+      // What it needs to become done once confirmed: never an Undo while pending.
+      undo: { paths: ['dropZones[main].protectedPaths'], what: expect.any(String) },
+    });
+    const html = renderCard(card as never);
+    expect(html).toContain(`href="/config/confirm/${answer.pendingId}"`);
+    expect(html).toMatch(/>Confirm</);
+    expect(html).not.toMatch(/Undo/);
+  });
+
+  test("D5 confirming the chat's pending change on the confirm page with the posting session applies it", async () => {
+    const w = await settingWorld();
+    const before = w.store.revision();
+    const r = await w.call('change_setting', {
+      zoneId: 'main',
+      set: { 'dropZones[].protectedPaths': ['GOAL.md'] },
+    });
+    const { pendingId } = JSON.parse(r.text) as { pendingId: string };
+    const res = await w.confirmAs(pendingId, w.one);
+    // Applied, the page goes back to the thread.
+    expect(res.statusCode, res.body).toBe(303);
+    expect(res.headers.location).toBe(`/chat/${w.thread.id}`);
+    expect(w.store.revision()).toBe(before + 1);
+    expect(zoneOf(w.store)?.protectedPaths).toEqual(['GOAL.md']);
+  });
+
+  test("D1 a different browser session cannot confirm the chat's pending change", async () => {
+    const w = await settingWorld();
+    const before = w.store.revision();
+    const r = await w.call('change_setting', {
+      zoneId: 'main',
+      set: { 'dropZones[].protectedPaths': ['GOAL.md'] },
+    });
+    const { pendingId } = JSON.parse(r.text) as { pendingId: string };
+    const res = await w.confirmAs(pendingId, w.two);
+    expect(res.statusCode).toBe(404);
+    const post = await w.app.inject({
+      method: 'POST',
+      url: `/config/confirm/${pendingId}`,
+      headers: {
+        host: HOST,
+        origin: ORIGIN,
+        cookie: w.two.cookie,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      payload: new URLSearchParams({ token: 'x'.repeat(43), passphrase: PASS }).toString(),
+    });
+    expect(post.statusCode).toBe(404);
+    expect(w.store.revision()).toBe(before);
+  });
+
+  test('D5 a browser-forbidden path is refused 403 and the card says to use jumpmaster ctl or the config file', async () => {
+    const w = await settingWorld();
+    const before = w.store.revision();
+    const r = await w.call('change_setting', {
+      zoneId: 'main',
+      set: { 'dropZones[].image': 'evil/image:latest' },
+    });
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(/403/);
+    expect(w.store.revision()).toBe(before);
+    expect(zoneOf(w.store)?.image).toBe('jm-trooper:dev');
+    const [card] = listCards(w.db, w.thread.id);
+    expect(card).toMatchObject({ kind: 'setting', state: 'refused', undo: null });
+    expect(card?.summary).toContain('set it with `jumpmaster ctl` or in the config file');
+    expect(card?.summary).not.toContain('evil/image');
+  });
+
+  test('a path the catalog does not name is refused, and the card names no text the model gave', async () => {
+    const w = await settingWorld();
+    const r = await w.call('change_setting', { zoneId: 'main', set: { 'dropZones[].repo2': 'x' } });
+    expect(r.isError).toBe(true);
+    const [card] = listCards(w.db, w.thread.id);
+    expect(card).toMatchObject({ kind: 'setting', state: 'refused' });
+    expect(card?.summary).not.toContain('repo2');
+  });
+
+  test("a value the store refuses is refused with fixed words on the card, never the store's message quoting it", async () => {
+    const w = await settingWorld();
+    const before = w.store.revision();
+    const r = await w.call('change_setting', {
+      zoneId: 'main',
+      set: { 'dropZones[].crew.goalPath': 'MODEL-CHOSEN-TEXT.md' },
+    });
+    expect(r.isError).toBe(true);
+    expect(w.store.revision()).toBe(before);
+    const [card] = listCards(w.db, w.thread.id);
+    expect(card).toMatchObject({ kind: 'setting', state: 'refused' });
+    expect(card?.summary).toContain('the config store refused the value');
+    expect(card?.summary).not.toContain('MODEL-CHOSEN-TEXT');
+  });
+
+  test('Undo of an object-valued setting removes the keys the change added', async () => {
+    const w = await settingWorld();
+    const seeded = w.store.apply(
+      mergeConfigPatch(w.store.document(), {
+        dropZones: [{ id: 'main', models: { review: 'claude-sonnet-5-5' } }],
+      }),
+      { via: 'ctl', principal: tokenP },
+    );
+    expect(seeded.ok, JSON.stringify(seeded)).toBe(true);
+    const r = await w.call('change_setting', {
+      zoneId: 'main',
+      set: { 'dropZones[].models': { implement: 'claude-opus-5-5' } },
+    });
+    expect(r.isError, r.text).toBeFalsy();
+    expect(zoneOf(w.store)?.models).toEqual({
+      review: 'claude-sonnet-5-5',
+      implement: 'claude-opus-5-5',
+    });
+    const [card] = listCards(w.db, w.thread.id);
+    const u = undoSettingCard(w.actx(), w.store, card as ChatCard);
+    expect(u.ok).toBe(true);
+    expect(zoneOf(w.store)?.models).toEqual({ review: 'claude-sonnet-5-5' });
+    expect(listCards(w.db, w.thread.id)[0]).toMatchObject({ state: 'undone' });
+  });
+
+  test("Review Focus 4 Undo refuses with changed since when the path's value moved after the change", async () => {
+    const w = await settingWorld();
+    await w.call('change_setting', { zoneId: 'main', set: { 'dropZones[].maxOpenPrs': 4 } });
+    const [card] = listCards(w.db, w.thread.id);
+    // Someone else sets it again.
+    const moved = w.store.apply(
+      mergeConfigPatch(w.store.document(), { dropZones: [{ id: 'main', maxOpenPrs: 9 }] }),
+      { via: 'ctl', principal: tokenP },
+    );
+    expect(moved.ok).toBe(true);
+    const rev = w.store.revision();
+    const r = undoSettingCard(w.actx(), w.store, card as ChatCard);
+    expect(r).toMatchObject({ ok: false, status: 409 });
+    if (r.ok) return;
+    expect(r.error).toMatch(/changed since/);
+    expect(w.store.revision()).toBe(rev);
+    expect(zoneOf(w.store)?.maxOpenPrs).toBe(9);
+    expect(listCards(w.db, w.thread.id)[0]).toMatchObject({ state: 'done' });
+  });
+
+  test('an Undo that would loosen a guard goes pending like any other change', async () => {
+    const w = await settingWorld();
+    const tighter = [...(zoneOf(w.store)?.protectedPaths ?? []), 'docs/**'];
+    const r = await w.call('change_setting', {
+      zoneId: 'main',
+      set: { 'dropZones[].protectedPaths': tighter },
+    });
+    expect(r.isError, r.text).toBeFalsy();
+    expect(zoneOf(w.store)?.protectedPaths).toEqual(tighter);
+    const [card] = listCards(w.db, w.thread.id);
+    expect(card).toMatchObject({ state: 'done' });
+    const rev = w.store.revision();
+    const u = undoSettingCard(w.actx(), w.store, card as ChatCard);
+    expect(u).toMatchObject({ ok: false, status: 409 });
+    if (u.ok) return;
+    expect(u.body).toMatchObject({ needsConfirmation: true, pendingId: expect.any(String) });
+    expect(w.store.revision()).toBe(rev);
+    expect(zoneOf(w.store)?.protectedPaths).toEqual(tighter);
+  });
+
+  test("D2 change_setting in file mode is refused with the store's file-mode message and no revision", async () => {
+    const w = await settingWorld({ fileMode: true });
+    expect(w.store.mode()).toBe('file');
+    const before = w.store.revision();
+    const revs = () =>
+      (w.db.prepare('SELECT COUNT(*) AS n FROM config_revisions').get() as { n: number }).n;
+    const count = revs();
+    const r = await w.call('change_setting', {
+      zoneId: 'main',
+      set: { 'dropZones[].maxOpenPrs': 4 },
+    });
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(/config is managed by the file/);
+    expect(w.store.revision()).toBe(before);
+    expect(revs()).toBe(count);
+    const [card] = listCards(w.db, w.thread.id);
+    expect(card).toMatchObject({ kind: 'setting', state: 'refused' });
+    expect(card?.summary).toMatch(/config is managed by the file/);
+  });
+});
+
+describe('change_setting cards through the chat routes and the confirm page', () => {
+  const undoAs = (w: Awaited<ReturnType<typeof settingWorld>>, id: number, s = w.one) =>
+    w.app.inject({
+      method: 'POST',
+      url: `/api/chat/cards/${id}/undo`,
+      headers: { host: HOST, origin: ORIGIN, cookie: s.cookie, 'x-jm-csrf': s.csrf },
+      payload: {},
+    });
+
+  test("Undo on a zone setting's card, pressed in the browser, restores it and marks the card undone", async () => {
+    const w = await settingWorld();
+    await w.call('change_setting', { zoneId: 'main', set: { 'dropZones[].maxOpenPrs': 4 } });
+    const [card] = listCards(w.db, w.thread.id);
+    expect(card).toMatchObject({ state: 'done' });
+    const res = await undoAs(w, card?.id as number);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ card: { state: 'undone', undoable: false } });
+    expect(res.json().card.undo).toBeUndefined();
+    expect(zoneOf(w.store)?.maxOpenPrs).toBeUndefined();
+    expect(listCards(w.db, w.thread.id)[0]).toMatchObject({ state: 'undone' });
+    expect((await undoAs(w, card?.id as number)).statusCode).toBe(409);
+  });
+
+  test("Undo on an install setting's card (no zone) is pressed through the route too", async () => {
+    const w = await settingWorld();
+    const was = w.store.current().pollSeconds;
+    const r = await w.call('change_setting', { set: { pollSeconds: 123 } });
+    expect(r.isError, r.text).toBeFalsy();
+    expect(w.store.current().pollSeconds).toBe(123);
+    const [card] = listCards(w.db, w.thread.id);
+    expect(card).toMatchObject({ kind: 'setting', state: 'done', zoneId: null });
+    const res = await undoAs(w, card?.id as number);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(w.store.current().pollSeconds).toBe(was);
+  });
+
+  test('Review Focus 4 Undo through the route refuses with changed since and writes nothing', async () => {
+    const w = await settingWorld();
+    await w.call('change_setting', { zoneId: 'main', set: { 'dropZones[].maxOpenPrs': 4 } });
+    const [card] = listCards(w.db, w.thread.id);
+    const moved = w.store.apply(
+      mergeConfigPatch(w.store.document(), { dropZones: [{ id: 'main', maxOpenPrs: 9 }] }),
+      { via: 'ctl', principal: tokenP },
+    );
+    expect(moved.ok).toBe(true);
+    const rev = w.store.revision();
+    const res = await undoAs(w, card?.id as number);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/changed since/);
+    expect(w.store.revision()).toBe(rev);
+    expect(zoneOf(w.store)?.maxOpenPrs).toBe(9);
+    expect(listCards(w.db, w.thread.id)[0]).toMatchObject({ state: 'done' });
+  });
+
+  test("an Undo through the route that would loosen a guard goes pending, bound to the pressing browser's session", async () => {
+    const w = await settingWorld();
+    const tighter = [...(zoneOf(w.store)?.protectedPaths ?? []), 'docs/**'];
+    await w.call('change_setting', {
+      zoneId: 'main',
+      set: { 'dropZones[].protectedPaths': tighter },
+    });
+    const [card] = listCards(w.db, w.thread.id);
+    const rev = w.store.revision();
+    const res = await undoAs(w, card?.id as number, w.two);
+    expect(res.statusCode).toBe(409);
+    const body = res.json() as { needsConfirmation: boolean; pendingId: string; confirm: string };
+    expect(body).toMatchObject({
+      needsConfirmation: true,
+      confirm: `/config/confirm/${body.pendingId}`,
+    });
+    expect(w.store.revision()).toBe(rev);
+    expect(zoneOf(w.store)?.protectedPaths).toEqual(tighter);
+    expect(w.store.confirmations.pending(body.pendingId, sha256Hex(w.two.id))).toBeDefined();
+    expect(w.store.confirmations.pending(body.pendingId, sha256Hex(w.one.id))).toBeUndefined();
+    expect(listCards(w.db, w.thread.id)[0]).toMatchObject({ state: 'done' });
+  });
+
+  test('a pending card becomes done, with its revision and an Undo, once the owner confirms it', async () => {
+    const w = await settingWorld();
+    const r = await w.call('change_setting', {
+      zoneId: 'main',
+      set: { 'dropZones[].protectedPaths': ['GOAL.md'] },
+    });
+    const { pendingId } = JSON.parse(r.text) as { pendingId: string };
+    const was = zoneOf(w.store)?.protectedPaths;
+    const res = await w.confirmAs(pendingId, w.one);
+    expect(res.statusCode, res.body).toBe(303);
+    const rev = w.store.revision();
+    const [card] = listCards(w.db, w.thread.id);
+    expect(card).toMatchObject({ kind: 'setting', state: 'done', undo: { revision: rev } });
+    expect(card?.summary).toContain(`revision ${rev}`);
+    expect(renderCard(card as never)).toMatch(/Undo/);
+    expect(renderCard(card as never)).not.toMatch(/>Confirm</);
+    // Its Undo tightens the guard again, so it applies at once.
+    const undone = await undoAs(w, card?.id as number);
+    expect(undone.statusCode, undone.body).toBe(200);
+    expect(zoneOf(w.store)?.protectedPaths).toEqual(was);
+  });
+
+  test('a done card names the setting, not the value the model chose', async () => {
+    const w = await settingWorld();
+    const r = await w.call('change_setting', {
+      zoneId: 'main',
+      set: { 'dropZones[].maxOpenPrs': 37 },
+    });
+    expect(r.isError, r.text).toBeFalsy();
+    const [card] = listCards(w.db, w.thread.id);
+    expect(card).toMatchObject({ state: 'done' });
+    expect(card?.summary).toContain('Most open pull requests');
+    expect(card?.summary).not.toContain('37');
   });
 });
 

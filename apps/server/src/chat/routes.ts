@@ -1,11 +1,20 @@
 import { redact } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import type { ActionCtx } from '../api/operator-actions.js';
 import { configReader, type LiveConfig } from '../config/source.js';
+import type { ConfigStore } from '../config/store.js';
 import type { Db } from '../db/open.js';
 import type { ForgePair } from '../outbox.js';
 import { redactionList } from '../scrub.js';
-import { type ChatCard, cardUndoable, getCard, safeCardLink, undoCard } from './cards.js';
+import {
+  type ChatCard,
+  cardUndoable,
+  getCard,
+  safeCardLink,
+  undoCard,
+  undoSettingCard,
+} from './cards.js';
 import { focusKnown, focusTitle } from './focus.js';
 import {
   appendMessage,
@@ -30,6 +39,8 @@ export interface ChatRouteDeps {
   turns?: ChatTurnHub;
   /** The zone's author pair, which Undo writes through; absent, Undo is a 503. */
   forgesFor?: (zoneId: string) => ForgePair;
+  /** The config store a setting card's Undo applies through; absent, that Undo is a 503. */
+  store?: ConfigStore;
 }
 
 /** What the routes need of the turn runner (`ChatTurns`). */
@@ -163,7 +174,9 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
 
   /**
    * Undo on one card, from the browser that shows it: a label comes off or an issue is reopened,
-   * once (a second press is a 409). The card goes to its thread's stream as undone.
+   * once (a second press is a 409); a setting goes back through the config store as this session,
+   * like any other change (a guard it loosens waits for this session's Confirm, 409). The card
+   * goes to its thread's stream as undone.
    */
   app.post<{ Params: { id: string } }>('/api/chat/cards/:id/undo', async (req, reply) => {
     if (!sessionOf(req, reply)) return reply;
@@ -172,6 +185,23 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     const card = id === undefined ? undefined : getCard(db, id);
     if (!card || !p) return reply.code(404).send({ error: 'unknown card' });
     const cfg = req.jmConfig ?? config();
+    const secrets = redactionList(cfg.secrets);
+    if (card.kind === 'setting') {
+      if (!cardUndoable(card)) {
+        const error =
+          card.state === 'undone' ? 'this card is already undone' : 'this card has no Undo';
+        return reply.code(409).send({ error });
+      }
+      if (!deps.store)
+        return reply.code(503).send({ error: 'this server has no config store to undo through' });
+      const ctx: ActionCtx = { db, now: deps.now, config: cfg, principal: p, secrets };
+      const r = undoSettingCard(ctx, deps.store, card);
+      if (!r.ok)
+        return reply.code(r.status).send({ ...(r.body ?? {}), error: redact(r.error, secrets) });
+      const undone = getCard(db, card.id) ?? card;
+      deps.turns?.publishCard?.(undone);
+      return { card: publicCard(undone) };
+    }
     const zone = cfg.dropZones.find((z) => z.id === card.zoneId);
     if (!cardUndoable(card) || !zone) {
       const error =
@@ -180,7 +210,6 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     }
     if (!deps.forgesFor)
       return reply.code(503).send({ error: 'this server has no forge to undo through' });
-    const secrets = redactionList(cfg.secrets);
     const r = await undoCard(db, deps.forgesFor(zone.id), card, p, deps.now(), {
       zoneMode: zone.mode,
       secrets,
