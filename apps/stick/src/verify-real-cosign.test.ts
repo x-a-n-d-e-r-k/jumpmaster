@@ -14,7 +14,7 @@ function trust(repo = RC2_REPOSITORY): ImageTrust {
   return {
     policy: 'signed',
     allowed: new Set(),
-    signer: releaseSigner(repo),
+    signer: releaseSigner(repo, '0.4.0-rc.2'),
     // Every HTTPS request cosign might make goes to a dead proxy: a pass needs no network.
     cosign: execCosign(COSIGN_BIN, {
       PATH: '/usr/bin:/bin',

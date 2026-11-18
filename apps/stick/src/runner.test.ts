@@ -1641,8 +1641,11 @@ describe('image trust: verify, then pull, then create', () => {
     egress: { mode: 'enforce', allow: ['github.com'] },
     services: [{ name: 'db', image: DB, port: 5432, readyTimeoutSeconds: 60 }],
   };
-  /** A cosign that verifies exactly the digests in `good`, recording what it was asked. */
-  const cosignFor = (good: string[], calls: string[] = []) => {
+  /**
+   * A cosign that verifies exactly the digests in `good`, recording what it was asked; each
+   * signature's certificate names release tag `tags[digest]`, else v0.4.0-rc.2.
+   */
+  const cosignFor = (good: string[], calls: string[] = [], tags: Record<string, string> = {}) => {
     const cosign: Cosign = async (args) => {
       const ref = args.at(-1) as string;
       calls.push(ref);
@@ -1651,7 +1654,14 @@ describe('image trust: verify, then pull, then create', () => {
         return { code: 10, stdout: '', stderr: 'Error: no signatures found' };
       return {
         code: 0,
-        stdout: JSON.stringify([{ critical: { image: { 'docker-manifest-digest': digest } } }]),
+        stdout: JSON.stringify([
+          {
+            critical: { image: { 'docker-manifest-digest': digest } },
+            optional: {
+              Subject: `https://github.com/x-a-n-d-e-r-k/jumpmaster/.github/workflows/release.yml@refs/tags/${tags[digest] ?? 'v0.4.0-rc.2'}`,
+            },
+          },
+        ]),
         stderr: '',
       };
     };
@@ -1660,11 +1670,11 @@ describe('image trust: verify, then pull, then create', () => {
   const trust = (cosign: Cosign, allowed: string[] = []): ImageTrust => ({
     policy: 'signed',
     allowed: new Set(allowed),
-    signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster'),
+    signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster', '0.4.0-rc.2'),
     cosign,
     cache: new VerifyCache(
       join(mkdtempSync(join(tmpdir(), 'jm-trust-')), 'verified.json'),
-      releaseSigner('x-a-n-d-e-r-k/jumpmaster'),
+      releaseSigner('x-a-n-d-e-r-k/jumpmaster', '0.4.0-rc.2'),
       { now: () => new Date('2026-11-08T12:00:00Z') },
     ),
   });
@@ -1765,6 +1775,29 @@ describe('image trust: verify, then pull, then create', () => {
       expect(d.order).toEqual([]);
       expect(d.started).toBeUndefined();
       expect(d.inspected).toEqual([]);
+    },
+  );
+
+  test.each([
+    ['trooper', dg('1')],
+    ['service', dg('3')],
+  ])(
+    'a %s image signed by an older release than this stick fails the drop, as any unverified image does (D5)',
+    async (_n, old) => {
+      const d = fakeDriver([done], { present: () => false });
+      // The same old signature (v0.4.0-rc.1 on a 0.4.0-rc.2 stick), on the drop or a service image.
+      const c = cosignFor([dg('1'), dg('2'), dg('3')], [], { [old]: 'v0.4.0-rc.1' });
+      const client = fakeClient();
+      await runDrop(signedPayload, deps(d, trust(c.cosign), client));
+      expect(client.result).toMatchObject({ status: 'failed', role: 'implement', gates: [] });
+      expect(client.result?.reason).toMatch(
+        new RegExp(
+          `^image not verified: \\S+@${old}: image signed for v0\\.4\\.0-rc\\.1, older than this stick \\(0\\.4\\.0-rc\\.2\\)$`,
+        ),
+      );
+      expect(d.images).toEqual([]);
+      expect(d.order).toEqual([]);
+      expect(d.started).toBeUndefined();
     },
   );
 
@@ -2272,7 +2305,15 @@ describe('server-hosted images (issue #141)', () => {
         code: 0,
         stdout: offline
           ? ''
-          : JSON.stringify([{ critical: { image: { 'docker-manifest-digest': r.indexDigest } } }]),
+          : JSON.stringify([
+              {
+                critical: { image: { 'docker-manifest-digest': r.indexDigest } },
+                optional: {
+                  Subject:
+                    'https://github.com/x-a-n-d-e-r-k/jumpmaster/.github/workflows/release.yml@refs/tags/v0.4.0-rc.2',
+                },
+              },
+            ]),
         stderr: '',
       };
     };
@@ -2281,11 +2322,11 @@ describe('server-hosted images (issue #141)', () => {
   const trust = (c: Cosign, server: ServerImages): ImageTrust => ({
     policy: 'signed',
     allowed: new Set(),
-    signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster'),
+    signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster', '0.4.0-rc.2'),
     cosign: c,
     cache: new VerifyCache(
       join(mkdtempSync(join(tmpdir(), 'jm-trust-')), 'verified.json'),
-      releaseSigner('x-a-n-d-e-r-k/jumpmaster'),
+      releaseSigner('x-a-n-d-e-r-k/jumpmaster', '0.4.0-rc.2'),
     ),
     server,
   });
@@ -2316,6 +2357,27 @@ describe('server-hosted images (issue #141)', () => {
       ref: r.ref,
       via: 'cosign',
     });
+  });
+
+  test('a server image signed by a release older than this stick is refused after its offline check, never loaded (#270)', async () => {
+    const d = fakeDriver([done], { present: () => false });
+    const s = serverImages();
+    const c = cosign();
+    const client = fakeClient();
+    // The layout's bundle is the v0.4.0-rc.2 one; this stick is 0.4.0.
+    const t: ImageTrust = {
+      ...trust(c.cosign, s.server),
+      signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster', '0.4.0'),
+    };
+    t.cache = undefined;
+    await runDrop(p, { client, driver: d.driver, stickId: 's1', trust: t, log: () => {} });
+    expect(client.result).toMatchObject({
+      status: 'failed',
+      reason: `image not verified: ${r.ref}: image signed for v0.4.0-rc.2, older than this stick (0.4.0)`,
+    });
+    expect(c.local).toHaveLength(1);
+    expect(s.calls).toEqual([`fetch ${r.ref}`]);
+    expect(d.started).toBeUndefined();
   });
 
   test('404 not mirrored: the drop waits with the server state, posts nothing and never pulls', async () => {
@@ -2508,11 +2570,11 @@ describe('the heartbeat while images are prepared (issue #239)', () => {
     const trust: ImageTrust = {
       policy: 'signed',
       allowed: new Set(),
-      signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster'),
+      signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster', '0.4.0-rc.2'),
       cosign,
       cache: new VerifyCache(
         join(mkdtempSync(join(tmpdir(), 'jm-trust-')), 'verified.json'),
-        releaseSigner('x-a-n-d-e-r-k/jumpmaster'),
+        releaseSigner('x-a-n-d-e-r-k/jumpmaster', '0.4.0-rc.2'),
       ),
     };
     const run = runDrop(p, deps(d, client, { trust }));

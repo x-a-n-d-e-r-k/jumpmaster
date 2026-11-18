@@ -17,7 +17,7 @@ const reads = (path: string) =>
 const cosign: Cosign = async () => ({ code: 0, stdout: '', stderr: '' });
 const verify = (dir: string) =>
   verifyIndexBundles(dir, RC2_DIGEST, {
-    signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster'),
+    signer: releaseSigner('x-a-n-d-e-r-k/jumpmaster', '0.4.0-rc.2'),
     cosign,
     trustedRoot: '/nonexistent',
     timeoutMs: 1000,

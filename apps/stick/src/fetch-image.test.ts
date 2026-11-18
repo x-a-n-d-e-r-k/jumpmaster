@@ -133,9 +133,9 @@ function signedTrust(cosign: Cosign, dir = fresh(), allowed: string[] = []): Ima
   return {
     policy: 'signed',
     allowed: new Set(allowed),
-    signer: releaseSigner(REPO),
+    signer: releaseSigner(REPO, '0.4.0-rc.2'),
     cosign,
-    cache: new VerifyCache(join(dir, 'verified.json'), releaseSigner(REPO)),
+    cache: new VerifyCache(join(dir, 'verified.json'), releaseSigner(REPO, '0.4.0-rc.2')),
   };
 }
 
