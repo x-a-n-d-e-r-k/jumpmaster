@@ -185,7 +185,7 @@ describe('enqueueCrew', () => {
     expect(work(d).role).toBe('diagnose');
     finish(d);
     const r = (await enqueue(plus(t0, MIN))) ?? '';
-    expect(work(r)).toEqual({ role: 'refute', crewIssueId: issue });
+    expect(work(r)).toEqual({ role: 'refute', crewIssueId: issue, securityTouching: false });
     finish(r);
     setCrewIssue(w.db, issue, { refutedSha: 'sha-1' }, t0);
     expect(nextCrewWork(w.db, w.zone, plus(t0, 2 * MIN))).toEqual({ role: 'crew-lead' });
@@ -226,7 +226,7 @@ describe('enqueueCrew', () => {
     expect(await enqueue(plus(t0, MIN))).toBeNull(); // one crew drop at a time
     finish(d);
     const r = (await enqueue(plus(t0, 2 * MIN))) ?? '';
-    expect(work(r)).toEqual({ role: 'refute', crewIssueId: issue });
+    expect(work(r)).toEqual({ role: 'refute', crewIssueId: issue, securityTouching: false });
     expect(getCrewIssue(w.db, issue)?.refuteCount).toBe(1);
     finish(r);
     setCrewIssue(w.db, issue, { refutedSha: 'sha-1' }, t0);
@@ -388,7 +388,7 @@ describe('triage scheduling (#184)', () => {
     expect(work(d).role).toBe('diagnose');
     finish(d);
     const r = (await enqueue(plus(t0, MIN))) ?? '';
-    expect(work(r)).toEqual({ role: 'refute', crewIssueId: issue });
+    expect(work(r)).toEqual({ role: 'refute', crewIssueId: issue, securityTouching: false });
     finish(r);
     setCrewIssue(w.db, issue, { refutedSha: 'sha-1' }, t0);
     expect(nextCrewWork(w.db, w.zone, plus(t0, 2 * MIN))).toEqual({

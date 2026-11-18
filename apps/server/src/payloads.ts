@@ -236,7 +236,12 @@ export type CrewInputJson = {
         /** `whyBasis` of the briefing's why when asked; absent on drops queued before v12. */
         basis?: string;
       }
-    | { role: 'refute'; crewIssueId: number }
+    | {
+        role: 'refute';
+        crewIssueId: number;
+        /** The crew issue was security-touching at enqueue (#384); absent on older drops. */
+        securityTouching?: boolean;
+      }
     | { role: 'triage'; requestId: number }
     | {
         role: 'arbitrate';
@@ -269,6 +274,20 @@ export type CrewInputJson = {
   /** One short reason per image URL not fetched. */
   imagesSkipped?: TriageImageSkipped[];
 };
+
+/**
+ * The drop asks for Fable beyond its role: a refute whose stored work says the crew issue is
+ * security-touching. Unreadable input, another role or a missing field is false (today's model).
+ */
+export function fableWanted(drop: Pick<Drop, 'inputJson'>): boolean {
+  try {
+    const stored = JSON.parse(drop.inputJson ?? 'null') as Partial<CrewInputJson> | null;
+    const work = stored?.work;
+    return work?.role === 'refute' && work.securityTouching === true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * A crew drop: the template plus the input rendered at enqueue. It never carries the author or
@@ -415,6 +434,7 @@ export function buildPayload(
     zone,
     drop.role as Role,
     o.now ?? new Date(),
+    { fable: fableWanted(drop) },
   );
   // Records requested_model on the drop as a side effect (the Fable weekly cap counts it).
   updateDrop(db, drop.id, { requestedModel: model });

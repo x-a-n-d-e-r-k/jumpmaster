@@ -27,7 +27,7 @@ import { log } from '../log.js';
 import { type ForgePair, unsanitizeForgeText } from '../outbox.js';
 import type { CrewInputJson } from '../payloads.js';
 import { dispatchGate, gateQueuesCrew } from '../usage.js';
-import { crewIssueSlots } from './actions.js';
+import { crewIssueSlots, isSecurityTouching } from './actions.js';
 import { PROMOTE_OPTIONS, subjectOf } from './flush.js';
 import { fetchIssueImages, type ImageFetchOpts } from './images.js';
 import {
@@ -537,7 +537,17 @@ export async function enqueueCrew(
     log(`zone ${zone.id}: crew ${next.role} input failed: ${String(err)}`);
     return null;
   }
-  const stored: CrewInputJson = { work, input };
+  // Read with the row refuteInput just rendered (no await between): its model is chosen at lease.
+  const stored: CrewInputJson = {
+    work:
+      work.role === 'refute'
+        ? {
+            ...work,
+            securityTouching: isSecurityTouching(getCrewIssue(db, work.crewIssueId)?.body ?? ''),
+          }
+        : work,
+    input,
+  };
   if (work.role === 'triage' && images) {
     // The issue's images, fetched here: the server has the network and the read token, the
     // trooper's egress does not. A failure skips that image; it never stops the drop.
