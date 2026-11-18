@@ -1375,6 +1375,14 @@ CREATE TABLE crew_retries (
 );
 `;
 
+/**
+ * v48: a gate allowance carried to a new head when only main was merged in names the head it was
+ * carried from (null for an allowance Command ruled on that head itself).
+ */
+const V48_SQL = `
+ALTER TABLE gate_allowances ADD COLUMN carried_from_head TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1423,6 +1431,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 45, sql: V45_SQL },
   { version: 46, sql: V46_SQL, foreignKeysOff: true },
   { version: 47, sql: V47_SQL },
+  { version: 48, sql: V48_SQL },
 ];
 
 /**

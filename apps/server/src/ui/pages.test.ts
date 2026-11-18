@@ -403,6 +403,25 @@ describe('renderHome loop state', () => {
     expect(plain).not.toContain('allowed by Command');
   });
 
+  test('a carried gate allowance names its source head (issue #422)', () => {
+    const html = workItemRows(
+      [item],
+      [z],
+      new Map([
+        [
+          1,
+          {
+            headSha: 'abcdef1234567890',
+            gateAllowedSha: 'abcdef1234567890',
+            gateCarriedFrom: '0123456789abcdef',
+            attempts: {},
+          },
+        ],
+      ]),
+    );
+    expect(html).toContain('gate change allowed by Command for abcdef1 (carried from 0123456)');
+  });
+
   test('escapes verdict summary', () => {
     const html = workItemRows(
       [item],
