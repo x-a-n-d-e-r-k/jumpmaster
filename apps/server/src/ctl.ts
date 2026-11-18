@@ -620,6 +620,18 @@ function rawRequest(args: string[]): Raw | null {
       body: { ids: ids.map(Number) },
     };
   }
+  if (command === 'backlog')
+    return args.length === 2 && zone
+      ? { path: `/api/control/zones/${encodeURIComponent(zone)}/backlog`, method: 'GET' }
+      : null;
+  if (command === 'queue') {
+    const issue = args[2];
+    if (args.length !== 3 || !zone || !issue || !/^[1-9][0-9]*$/.test(issue)) return null;
+    return {
+      path: `/api/control/zones/${encodeURIComponent(zone)}/queue`,
+      body: { issue: Number(issue) },
+    };
+  }
   if (command === 'crew-cycle') {
     if (!zone) return null;
     return { path: `/api/control/zones/${encodeURIComponent(zone)}/crew-cycle`, body: {} };

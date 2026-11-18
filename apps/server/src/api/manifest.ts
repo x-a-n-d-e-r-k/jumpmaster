@@ -67,6 +67,8 @@ export const CONTROL_ROUTES: ControlRoute[] = [
     ctl: 'ctl zones egress adopt web registry.npmjs.org',
   },
   { method: 'POST', path: '/api/control/zones/:id/crew-cycle', ctl: 'ctl crew-cycle web' },
+  { method: 'GET', path: '/api/control/zones/:id/backlog', ctl: 'ctl backlog web' },
+  { method: 'POST', path: '/api/control/zones/:id/queue', ctl: 'ctl queue web 178' },
   {
     method: 'POST',
     path: '/api/control/zones/:id/intake/goal-stub',
@@ -264,6 +266,12 @@ export const CTL_VERBS: { verb: string; page: Page; forms: string[] }[] = [
   { verb: 'resume', page: 'Zones', forms: ['ctl resume <zone>'] },
   { verb: 'observe', page: 'Zones', forms: ['ctl observe <zone>'] },
   { verb: 'crew-cycle', page: 'Zones', forms: ['ctl crew-cycle <zone>'] },
+  {
+    verb: 'backlog',
+    page: 'Zones',
+    forms: ['ctl backlog <zone> (open issues with no Jumpmaster label)'],
+  },
+  { verb: 'queue', page: 'Zones', forms: ['ctl queue <zone> <issue> (puts the ready label on)'] },
   {
     verb: 'intake',
     page: 'Zones',
