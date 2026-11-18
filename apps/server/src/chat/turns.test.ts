@@ -2,7 +2,13 @@ import type { ChatEvent, ChatTurnRequest } from '@jumpmaster/protocol';
 import { describe, expect, test, vi } from 'vitest';
 import type { Config, DropZoneConfig } from '../config.js';
 import { type Db, openDb } from '../db/open.js';
-import { setUsageState, upsertDropZone } from '../db/repo.js';
+import {
+  getDrop,
+  getUsageState,
+  listUsageWindows,
+  setUsageState,
+  upsertDropZone,
+} from '../db/repo.js';
 import type { AppTokenSource, FreshToken } from '../forge/app-tokens.js';
 import { checkMcpToken } from '../mcp/tokens.js';
 import { makeZone } from '../test/fixtures.js';
@@ -23,6 +29,7 @@ import {
 import {
   ChatTurns,
   chatMcpUrl,
+  chatRateLimitSource,
   GATE_REFUSAL,
   HISTORY_MAX_CHARS,
   type HubEvent,
@@ -562,5 +569,89 @@ describe('ChatTurns', () => {
     w.turns.enqueue(th.id);
     await w.turns.idle();
     expect(events).toHaveLength(before);
+  });
+});
+
+describe('chat usage', () => {
+  test('each rate_limit event goes to ingestRateLimit with a chat source', async () => {
+    const resetsAt = plus(t0, 60 * 60_000).toISOString();
+    const w = world(async function* () {
+      yield {
+        type: 'rate_limit',
+        data: {
+          status: 'allowed_warning',
+          rateLimitType: 'five_hour',
+          unifiedWindows: { five_hour: { utilization: 0.95, resetsAt } },
+        },
+      };
+      yield { type: 'text', text: 'hi' };
+      yield { type: 'result', isError: false };
+    });
+    const th = createThread(w.db, { title: 't' }, t0);
+    const m = w.owner(th.id, 'how much is left?');
+    w.turns.enqueue(th.id);
+    await w.turns.idle();
+    expect(messageById(w.db, th.id, m.id)?.state).toBe('done');
+    expect(getUsageState(w.db).fiveHourUtil).toBe(0.95);
+    expect(listUsageWindows(w.db)).toContainEqual(
+      expect.objectContaining({ key: 'five_hour', utilization: 0.95, resetsAt }),
+    );
+  });
+
+  test('a per-model window a chat turn reports is recorded with no model', async () => {
+    const w = world(async function* () {
+      yield {
+        type: 'rate_limit',
+        data: {
+          status: 'allowed',
+          unifiedWindows: { seven_day_overage_included: { utilization: 0.3 } },
+        },
+      };
+      yield { type: 'text', text: 'hi' };
+      yield { type: 'result', isError: false };
+    });
+    const th = createThread(w.db, { title: 't' }, t0);
+    w.owner(th.id, 'q');
+    w.turns.enqueue(th.id);
+    await w.turns.idle();
+    // No drop has a chat source's id, so there is no drop model to name the window by.
+    expect(listUsageWindows(w.db)).toContainEqual(
+      expect.objectContaining({ key: 'seven_day_overage_included', utilization: 0.3, model: null }),
+    );
+  });
+
+  test('a chat source id never matches a real drop id', () => {
+    const db = openDb(tmpDbFile());
+    const src = chatRateLimitSource(7, 3, t0.toISOString());
+    expect(src).toEqual({
+      dropId: 'chat:7:3',
+      workItemId: null,
+      startedAt: t0.toISOString(),
+      outcome: null,
+    });
+    expect(src.dropId.startsWith('chat:')).toBe(true);
+    expect(getDrop(db, src.dropId)).toBeUndefined();
+  });
+
+  test("the result's usage is stored on the assistant message", async () => {
+    const usage = { input_tokens: 12, output_tokens: 34 };
+    const w = world(async function* () {
+      yield { type: 'text', text: 'answer' };
+      yield { type: 'result', isError: false, usage };
+    });
+    const th = createThread(w.db, { title: 't' }, t0);
+    w.owner(th.id, 'q');
+    const events: HubEvent[] = [];
+    w.turns.subscribe(th.id, 0, (e) => events.push(e));
+    w.turns.enqueue(th.id);
+    await w.turns.idle();
+    const reply = listMessages(w.db, th.id).find((m) => m.role === 'assistant');
+    expect(reply?.text).toBe('answer');
+    expect(reply?.usage).toEqual(usage);
+    // The reply is stored with its usage in one write: a subscriber never sees it without one.
+    const announced = events
+      .map((e) => e.event)
+      .filter((e) => e.type === 'message' && e.message.id === reply?.id);
+    expect(announced).toEqual([{ type: 'message', message: reply }]);
   });
 });
