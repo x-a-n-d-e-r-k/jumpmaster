@@ -33,6 +33,13 @@ import {
 } from '../vault/credentials.js';
 import { VAULT_KEY_IN_DATA_DIR } from '../vault/vault.js';
 import { escapeHtml, page, tokenAgeBanner } from './pages.js';
+import {
+  CONFIG_ANSWER_FN,
+  type Control,
+  RESTART_NOTE,
+  settingControl,
+  settingId,
+} from './setting-controls.js';
 import { CLAUDE_SAVED, forgeGuideFor, guideSection } from './setup.js';
 import { type ZoneRef, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
 
@@ -446,24 +453,12 @@ const runningBefore = (reader: ((since: string) => number) | undefined, since?: 
 // ---------------------------------------------------------------------------------------------
 // Install: the install-wide settings of the editable document, and the boot settings read-only.
 
-type Kind = 'number' | 'bool' | 'text' | 'select';
-type Setting = {
-  path: string;
+type Setting = Control & {
   /** The §4 plain-English words beside the key. */
   label: string;
-  kind: Kind;
-  value: unknown;
-  /** `<input>` attributes for a number (min, max, step). */
-  attrs?: string;
-  options?: readonly string[];
-  /** How a select's option reads (default: its value). */
-  optionLabel?: (option: string) => string;
   /** Read-only even in db mode, with `note` saying where it is changed. */
-  locked?: boolean;
   note?: string;
 };
-
-const RESTART_NOTE = 'takes effect at the next restart';
 
 function installSettings(config: Config): Setting[] {
   const mcp = mcpConfigOf(config);
@@ -564,26 +559,6 @@ function installSettings(config: Config): Setting[] {
 /** Where a session may never weaken a guard (§7.5): words for the page. */
 const SESSION_FORBIDDEN_NOTE = 'set with <code>jumpmaster ctl</code> or in the config file';
 
-/** The id that ties a setting's control to its `<label for>`. */
-const settingId = (path: string): string => `setting-${path.replaceAll('.', '-')}`;
-
-function settingControl(s: Setting): string {
-  const data = `id="${settingId(s.path)}" data-path="${s.path}" data-kind="${s.kind}" data-original="${escapeHtml(JSON.stringify(s.value))}"`;
-  const lock = s.locked ? ' disabled' : '';
-  if (s.kind === 'bool')
-    return `<input type="checkbox" ${data}${s.value ? ' checked' : ''}${lock}>`;
-  if (s.kind === 'select')
-    return `<select ${data}${lock}>${(s.options ?? [])
-      .map(
-        (o) =>
-          `<option value="${escapeHtml(o)}"${o === s.value ? ' selected' : ''}>${escapeHtml(s.optionLabel?.(o) ?? o)}</option>`,
-      )
-      .join('')}</select>`;
-  const value = s.value === null || s.value === undefined ? '' : String(s.value);
-  const type = s.kind === 'number' ? `type="number" ${s.attrs ?? ''}` : 'type="text"';
-  return `<input ${type} ${data} value="${escapeHtml(value)}"${lock}>`;
-}
-
 /** The boot settings, read before the database opens: each value and where it really comes from. */
 function bootSection(store: ConfigStore): string {
   const b = store.boot();
@@ -658,27 +633,11 @@ function jmInstallPatch(fields) {
   }
   return patch;
 }
-async function jmConfigAnswer(r, status, go) {
-  let j = {};
-  try { j = await r.json(); } catch (e) {}
-  if (r.ok) {
-    const restart = j.restartNeeded && j.restartNeeded.length ? ' ' + j.restartNeeded.join(', ') + ' ${RESTART_NOTE}.' : '';
-    status.textContent = 'Applied as revision ' + j.revision + ': it takes effect at the next pass.' + restart;
-    // Drawn again with the saved values, saying which revision it saved (and any restart badge).
-    go('/settings/install?saved=' + encodeURIComponent(j.revision));
-    return 'saved';
-  }
-  if (r.status === 409 && j.needsConfirmation) { go(j.confirm); return 'confirm'; }
-  if (r.status === 409 && j.conflict) { status.textContent = 'The config changed since this page was drawn: reload it and make the change again.'; return 'conflict'; }
-  if (r.status === 403 && j.sessionForbidden) { status.textContent = 'Not from the browser: ' + j.sessionForbidden.join(', ') + ' is set with jumpmaster ctl or in the config file.'; return 'forbidden'; }
-  if (j.issues) { status.textContent = j.issues.map((i) => (i.path ? i.path + ': ' : '') + i.message).join('; '); return 'refused'; }
-  status.textContent = j.error || ('Refused (' + r.status + ')');
-  return 'refused';
-}
+${CONFIG_ANSWER_FN}
 async function jmSaveInstall(patch, revision, status, go) {
   if (Object.keys(patch).length === 0) { status.textContent = 'Nothing changed.'; return 'unchanged'; }
   const r = await jmFetch('/api/control/config', { patch, expectRevision: revision, returnTo: '/settings/install', cancelTo: '/settings/install' }, 'PATCH');
-  return jmConfigAnswer(r, status, go);
+  return jmConfigAnswer(r, status, go, '/settings/install');
 }
 document.addEventListener('DOMContentLoaded', () => {
   const form = document.getElementById('install');
