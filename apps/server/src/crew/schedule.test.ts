@@ -44,6 +44,7 @@ import { plus, t0 } from '../test/helpers.js';
 import { applyCrewActions } from './actions.js';
 import {
   type CrewInputJson,
+  crewDropsToday,
   enqueueCrew,
   nextCrewWork,
   requestCrewCycle,
@@ -1006,5 +1007,61 @@ describe('arbitration of review disagreements (#383)', () => {
     await h.reconcile();
     expect(h.queuedRoles()).toEqual(['diagnose']);
     expect(crewDrops(h, 'arbitrate')).toHaveLength(1);
+  });
+});
+
+describe('diagnose and the daily crew cap (#397)', () => {
+  const capped = () => ({ ...w.zone, crew: { ...crewOn, maxDropsPerDay: 1, cycleMinutes: 1 } });
+  const roles = () =>
+    (w.db.prepare('SELECT role FROM drops').all() as { role: string }[]).map((r) => r.role);
+  /** Uses the day's one crew drop on a lead cycle. */
+  async function atCap(): Promise<void> {
+    const lead = (await enqueue(t0, capped())) ?? '';
+    expect(work(lead).role).toBe('crew-lead');
+    finish(lead);
+    expect(crewDropsToday(w.db, 'main', plus(t0, MIN))).toBe(1);
+  }
+
+  test('at maxDropsPerDay a parked briefing is still diagnosed; no other crew work is queued', async () => {
+    await atCap();
+    stagedIssue(); // refute work waiting
+    parkedItem();
+    const d = (await enqueue(plus(t0, 2 * MIN), capped())) ?? '';
+    expect(work(d).role).toBe('diagnose');
+    // Still one active crew drop at a time.
+    expect(await enqueue(plus(t0, 3 * MIN), capped())).toBeNull();
+    finish(d);
+    expect(await enqueue(plus(t0, 4 * MIN), capped())).toBeNull();
+    expect(roles().filter((r) => r === 'refute')).toEqual([]);
+  });
+
+  test('at the cap with no parked briefing nothing is queued, and an exhausted issue is not put to Command', async () => {
+    await atCap();
+    const issue = stagedIssue();
+    setCrewIssue(w.db, issue, { refuteCount: 2 }, t0);
+    expect(await enqueue(plus(t0, 2 * MIN), capped())).toBeNull();
+    expect(listBriefings(w.db, { zoneId: 'main', state: 'open' })).toEqual([]);
+  });
+
+  test('the kill switch and observe mode still hold a diagnose at the cap', async () => {
+    await atCap();
+    parkedItem();
+    setKilled(w.db, true, t0);
+    expect(await enqueue(plus(t0, 2 * MIN), capped())).toBeNull();
+    setKilled(w.db, false, t0);
+    setZoneMode(w.db, 'main', 'observe', t0);
+    expect(await enqueue(plus(t0, 3 * MIN), capped())).toBeNull();
+    expect(roles().filter((r) => r === 'diagnose')).toEqual([]);
+  });
+
+  test('diagnose drops do not count toward the cap', async () => {
+    parkedItem();
+    const d = (await enqueue(t0, capped())) ?? '';
+    expect(work(d).role).toBe('diagnose');
+    finish(d);
+    expect(crewDropsToday(w.db, 'main', plus(t0, MIN))).toBe(0);
+    const lead = (await enqueue(plus(t0, MIN), capped())) ?? '';
+    expect(work(lead).role).toBe('crew-lead');
+    expect(crewDropsToday(w.db, 'main', plus(t0, 2 * MIN))).toBe(1);
   });
 });

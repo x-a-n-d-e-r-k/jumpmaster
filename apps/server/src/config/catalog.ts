@@ -618,7 +618,7 @@ const WORDS: Words[] = [
   z_(
     'crew.maxDropsPerDay',
     'Most crew drops a day',
-    'The most crew drops this zone runs in a day. Raising it spends more of the plan on the crew.',
+    "The most crew drops this zone runs in a day. Raising it spends more of the plan on the crew. Diagnoses of parked work don't count: there is one per park.",
     'number',
   ),
   z_(
