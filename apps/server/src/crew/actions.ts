@@ -3,6 +3,7 @@ import { OBJECTIVE_PREFIX, raiseBriefing } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import { getZoneMode, isKilled } from '../db/repo.js';
+import { GOAL_CHANGE_PREFIX, proposeGoalChange } from '../goal-change.js';
 import { getGoals, zoneObjective } from '../goals.js';
 import { type CrewIssueState, insertCrewIssue, normTitle } from './store.js';
 
@@ -13,7 +14,7 @@ export const normaliseTitle = normTitle;
 export type CrewSource = { kind: 'drop'; dropId: string } | { kind: 'mcp'; tokenId: number };
 
 export type CrewActionInput = Partial<
-  Pick<CrewLeadOutput, 'fileIssues' | 'briefings' | 'objectiveDone'>
+  Pick<CrewLeadOutput, 'fileIssues' | 'briefings' | 'objectiveDone' | 'goalChange'>
 >;
 
 export type ApplyReport = { filed: number[]; briefings: number[]; refused: string[] };
@@ -193,6 +194,56 @@ function objectiveDoneBriefing(
 }
 
 /**
+ * The crew lead's proposed goal file, recorded as a proposed goal change and raised as a server
+ * briefing whose "Open the PR" ruling opens it (`open_goal_change`). Only a crew drop may propose
+ * through here (the chat has its own tool), one at a time: another proposal is refused while a
+ * crew goal change waits for its ruling. Merging still needs the owner's browser confirmation.
+ */
+export function goalChangeBriefing(
+  db: Db,
+  zone: DropZoneConfig,
+  change: NonNullable<CrewActionInput['goalChange']>,
+  source: CrewSource,
+  now: Date,
+): number | { refused: string } {
+  if (source.kind !== 'drop') return { refused: 'an MCP source cannot propose it' };
+  const waiting = db
+    .prepare(
+      `SELECT g.id FROM goal_changes g JOIN briefings b
+         ON b.zone_id = g.zone_id AND b.subject = ? || g.id AND b.state = 'open'
+       WHERE g.zone_id = ? AND g.source = 'crew' AND g.state = 'proposed' ORDER BY g.id LIMIT 1`,
+    )
+    .get(GOAL_CHANGE_PREFIX, zone.id) as { id: number } | undefined;
+  if (waiting) return { refused: `goal change ${waiting.id} is waiting for a ruling` };
+  const proposed = proposeGoalChange(
+    db,
+    zone,
+    { text: change.text, source: 'crew', sourceRef: source.dropId },
+    now,
+  );
+  if (!proposed.ok) return { refused: proposed.error };
+  const path = zone.crew.goalPath;
+  return raiseBriefing(
+    db,
+    {
+      zoneId: zone.id,
+      kind: 'goal_change',
+      subject: `${GOAL_CHANGE_PREFIX}${proposed.id}`,
+      decision: `Open a pull request changing ${path} as the crew lead proposes?`,
+      why: change.why,
+      options: [
+        { id: 'open', label: 'Open the PR', effect: 'open_goal_change' },
+        { id: 'no', label: 'Leave the goals as they are', effect: 'none' },
+      ],
+      onHold: `Nothing: ${path} stays as it is until you confirm the PR in the browser`,
+      source: 'server',
+      sourceRef: source.dropId,
+    },
+    now,
+  );
+}
+
+/**
  * Records the crew's proposed actions as intents, in one transaction that touches only the
  * database: forge writes happen later in `flushCrewOps`. Nothing is recorded unless the zone is
  * active with the kill switch off.
@@ -208,6 +259,7 @@ export function applyCrewActions(
   const issues = input.fileIssues ?? [];
   const briefs = input.briefings ?? [];
   const done = input.objectiveDone;
+  const goalChange = input.goalChange;
   const report: ApplyReport = { filed: [], briefings: [], refused: [] };
   const run = db.transaction((): ApplyReport => {
     const mode = getZoneMode(db, zone.id, zone.mode);
@@ -222,6 +274,7 @@ export function applyCrewActions(
         report.refused.push(`briefing ${n + 1}: ${blocked}`);
       });
       if (done) report.refused.push(`objectiveDone ${done.key}: ${blocked}`);
+      if (goalChange) report.refused.push(`goalChange: ${blocked}`);
       return report;
     }
 
@@ -337,6 +390,11 @@ export function applyCrewActions(
       const id = objectiveDoneBriefing(db, zone, done, source, now);
       if (typeof id === 'number') report.briefings.push(id);
       else report.refused.push(`objectiveDone ${done.key}: ${id.refused}`);
+    }
+    if (goalChange) {
+      const id = goalChangeBriefing(db, zone, goalChange, source, now);
+      if (typeof id === 'number') report.briefings.push(id);
+      else report.refused.push(`goalChange: ${id.refused}`);
     }
     return report;
   });
