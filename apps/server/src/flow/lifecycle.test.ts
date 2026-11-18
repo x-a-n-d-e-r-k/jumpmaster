@@ -219,6 +219,111 @@ describe('lifecycle', () => {
   });
 });
 
+describe('the merge reservation of the oldest approved PR', () => {
+  /**
+   * CI required. A (issue 1, sha1) is approved, then five minutes later B (issue 2, sha2); each
+   * review is posted. A's CI stays pending and B's is green.
+   */
+  async function twoApproved(zone: Partial<Parameters<typeof harness>[0]>['zone'] = {}) {
+    h = await harness({ issues: [issue(1), issue(2)], zone: { ciRequired: true, ...zone } });
+    for (const id of ['author', 'reviewer'] as const) {
+      const r = h.forge.state.rules[id];
+      if (r.kind === 'ok') r.rules.requiredChecks = ['ci'];
+    }
+    h.forge.state.checks.set('sha1', { state: 'pending', names: [] });
+    h.forge.state.checks.set('sha2', { state: 'pending', names: [] });
+    await toApproved(h, 'sha1');
+    h.at(5);
+    await toApproved(h, 'sha2');
+    h.forge.state.checks.set('sha2', { state: 'success', names: ['ci'] });
+  }
+  const merged = () => h.forge.state.merges.map((m) => m.sha);
+  const attemptsOf = (id: number) =>
+    h.db.prepare('SELECT key, count FROM attempts WHERE work_item_id = ? AND count > 0').all(id);
+
+  test('B waits for A, A merges when its CI is green, then B resolves without merging first', async () => {
+    await twoApproved();
+    const spent = attemptsOf(2);
+    await h.reconcile();
+    await h.reconcile();
+    await h.reconcile();
+    // Today's code merged B here, and A went behind.
+    expect(merged()).toEqual([]);
+    expect(workItem(h.db, 2)).toMatchObject({
+      state: 'pr_open',
+      reason: 'waiting to merge after #1',
+    });
+    // The floor's status line and the /work ledger both say whose merge B waits for.
+    for (const url of ['/', '/work']) {
+      expect((await h.view(url)).body).toContain('waiting to merge after #1');
+    }
+    expect(attemptsOf(2)).toEqual(spent);
+    expect(h.queuedRoles()).toEqual([]);
+
+    h.forge.state.checks.set('sha1', { state: 'success', names: ['ci'] });
+    await h.reconcile();
+    expect(merged()).toEqual(['sha1']);
+
+    h.forge.state.compares.set('main...sha2', {
+      aheadBy: 1,
+      behindBy: 1,
+      baseSha: 'base1',
+      mergeBaseSha: 'base0',
+    });
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['resolve']);
+    expect(merged()).toEqual(['sha1']);
+    expect(workItem(h.db, 2)).toMatchObject({ state: 'pr_open', reason: null });
+  });
+
+  test("A's CI fails: A heals, its new head has no approve, and B merges on the next pass", async () => {
+    await twoApproved();
+    await h.reconcile();
+    await h.reconcile();
+    expect(merged()).toEqual([]);
+    h.forge.state.checks.set('sha1', {
+      state: 'failure',
+      names: ['ci'],
+      failed: [{ name: 'ci', conclusion: 'failure' }],
+    });
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['heal']);
+    expect(merged()).toEqual([]);
+    await h.finishDrop('heal', { status: 'completed', headSha: 'sha1h', gates: [gateOk] });
+    await h.reconcile();
+    expect(merged()).toEqual(['sha2']);
+    expect(workItem(h.db, 2)).toMatchObject({ state: 'done', reason: 'merged' });
+  });
+
+  test('the reservation lapses when A has waited past mergeReservationMinutes', async () => {
+    await twoApproved();
+    await h.reconcile();
+    await h.reconcile();
+    expect(merged()).toEqual([]);
+    h.at(26); // A was approved 31 minutes ago
+    await h.reconcile();
+    expect(merged()).toEqual(['sha2']);
+  });
+
+  test('the reservation lapses when A leaves pr_open', async () => {
+    await twoApproved();
+    await h.reconcile();
+    await h.reconcile();
+    expect(merged()).toEqual([]);
+    h.forge.state.close(1);
+    await h.reconcile();
+    expect(workItem(h.db, 1)).toMatchObject({ state: 'parked', reason: 'pr closed' });
+    expect(merged()).toEqual(['sha2']);
+  });
+
+  test('mergeReservationMinutes 0: B merges first, as before', async () => {
+    await twoApproved({ mergeReservationMinutes: 0 });
+    await h.reconcile();
+    await h.reconcile();
+    expect(merged()).toEqual(['sha2']);
+  });
+});
+
 describe('an approval carried across a clean merge of the base', () => {
   const prFile = (patch: string): CompareFile => ({
     filename: 'src/a.ts',
@@ -406,6 +511,259 @@ describe('an approval carried across a clean merge of the base', () => {
     }
     expect(getAttempts(h.db, 1, 'resolve_total').count).toBe(0);
     expect(dropRoles().filter((r) => r === 'review')).toHaveLength(1);
+    expect(workItem(h.db, 1)).toMatchObject({
+      state: 'parked',
+      reason: 'budget exhausted: base-sync',
+    });
+  });
+});
+
+describe('a behind PR brought up to date by the forge (#292)', () => {
+  const hunk = '@@ -10,2 +10,3 @@\n context\n+handle the empty case\n context';
+  const prFile = (filename = 'src/a.ts'): CompareFile => ({
+    filename,
+    status: 'modified',
+    patch: hunk,
+  });
+  const dropRoles = () =>
+    (
+      h.db.prepare('SELECT role FROM drops ORDER BY created_at, rowid').all() as { role: string }[]
+    ).map((r) => r.role);
+  const updateCalls = () =>
+    [...h.forge.author.calls, ...h.forge.reviewer.calls].filter((c) => c.method === 'updateBranch');
+  const outboxRows = () =>
+    h.db
+      .prepare(
+        `SELECT op_key AS opKey, state, result_json AS result FROM outbox WHERE kind = 'update_branch'`,
+      )
+      .all() as { opKey: string; state: string; result: string | null }[];
+  const attempts = (key: Parameters<typeof getAttempts>[2]) => getAttempts(h.db, 1, key).count;
+
+  /**
+   * CI required, the zone's push grant on: `aaa` approved, its review posted, waiting on CI. Then
+   * main moves to `base1` and `aaa` is behind; the forge's merge of it makes `bbb`.
+   */
+  async function behindAfterApproval(opts: Parameters<typeof harness>[0] = {}): Promise<void> {
+    h = await harness({ issues: [issue(1)], zone: { ciRequired: true }, pusher: true, ...opts });
+    for (const id of ['author', 'reviewer'] as const) {
+      const r = h.forge.state.rules[id];
+      if (r.kind === 'ok') r.rules.requiredChecks = ['ci'];
+    }
+    h.forge.state.checks.set('aaa', { state: 'pending', names: [] });
+    h.forge.state.checks.set('bbb', { state: 'pending', names: [] });
+    h.forge.state.compareFiles.set('main...aaa', [prFile()]);
+    h.forge.state.compareFiles.set('main...bbb', [prFile()]);
+    h.forge.state.updatedHeads.set('aaa', 'bbb');
+    await toApproved(h, 'aaa');
+    await h.reconcile();
+    expect(h.forge.state.reviews.map((r) => r.commitId)).toEqual(['aaa']);
+    h.forge.state.compares.set('main...aaa', {
+      aheadBy: 1,
+      behindBy: 2,
+      baseSha: 'base1',
+      mergeBaseSha: 'base0',
+    });
+  }
+
+  test('behind → forge update → new head → carried, posted and merged after CI, with no drop', async () => {
+    await behindAfterApproval();
+    await h.reconcile();
+    // Today's code enqueued a resolve drop here.
+    expect(h.queuedRoles()).toEqual([]);
+    expect(h.forge.state.branchUpdates).toEqual([
+      { number: 1, expectedHeadSha: 'aaa', identity: 'author' },
+    ]);
+    expect(h.forge.state.pulls.get(1)?.headSha).toBe('bbb');
+    expect(attempts('base_sync')).toBe(1);
+    expect(attempts('resolve_total')).toBe(0);
+
+    // The new head goes through every per-head rule: the file list and the CI checks are read on
+    // bbb, and the approval is carried (not credited again) before it is posted.
+    const filesBefore = h.forge.author.calls.filter((c) => c.method === 'listPullFiles').length;
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual([]);
+    expect(latestVerdict(h.db, 1)).toMatchObject({ headSha: 'bbb', decision: 'approve' });
+    expect(h.forge.author.calls.filter((c) => c.method === 'listPullFiles').length).toBeGreaterThan(
+      filesBefore,
+    );
+    expect(attempts('base_sync')).toBe(1);
+    expect(attempts('resolve_total')).toBe(0);
+    await h.reconcile();
+    expect(h.forge.state.reviews.map((r) => r.commitId)).toEqual(['aaa', 'bbb']);
+    await h.reconcile();
+    expect(h.forge.state.merges).toEqual([]);
+    expect(h.forge.author.calls.some((c) => c.method === 'checksFor' && c.args[0] === 'bbb')).toBe(
+      true,
+    );
+    h.forge.state.checks.set('bbb', { state: 'success', names: ['ci'] });
+    await h.reconcile();
+    expect(h.forge.state.merges.map((m) => m.sha)).toEqual(['bbb']);
+    expect(dropRoles()).toEqual(['implement', 'review']);
+    expect(updateCalls()).toHaveLength(1);
+  });
+
+  test('the new head is gated like any other: a protected path on it parks', async () => {
+    await behindAfterApproval();
+    await h.reconcile();
+    h.forge.state.pullFiles.set(1, {
+      files: [{ path: 'src/a.ts' }, { path: '.github/workflows/ci.yml' }],
+      complete: true,
+    });
+    await h.reconcile();
+    expect(workItem(h.db, 1)).toMatchObject({
+      state: 'parked',
+      reason: 'protected path: .github/workflows/ci.yml',
+    });
+    expect(h.forge.state.merges).toEqual([]);
+  });
+
+  test('a conflict leads to one resolve drop for the head and base, charged as today', async () => {
+    await behindAfterApproval();
+    h.forge.state.updateConflicts.add(1);
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['resolve']);
+    expect(attempts('resolve_total')).toBe(1);
+    expect(attempts('base_sync')).toBe(0);
+    await h.reconcile();
+    await h.reconcile();
+    expect(dropRoles().filter((r) => r === 'resolve')).toHaveLength(1);
+    expect(attempts('resolve_total')).toBe(1);
+    expect(updateCalls()).toHaveLength(1);
+    // The resolve's own push makes the next head, as today.
+    await h.finishDrop('resolve', { status: 'completed', headSha: 'ccc', gates: [gateOk] });
+    expect(h.forge.state.pulls.get(1)?.headSha).toBe('ccc');
+  });
+
+  test('a moved head records nothing, and the next pass reads the new head', async () => {
+    let pushed = false;
+    await behindAfterApproval({
+      // The agent pushes between the pass's read and the update request.
+      pusher: async () => {
+        if (!pushed) h.forge.state.setHead(1, 'ccc');
+        pushed = true;
+        return { forge: h.forge.author, release: async () => {} };
+      },
+    });
+    await h.reconcile();
+    expect(h.forge.state.branchUpdates).toEqual([
+      { number: 1, expectedHeadSha: 'aaa', identity: 'author' },
+    ]);
+    expect(outboxRows()).toEqual([
+      {
+        opKey: opKeys.updateBranch(1, 'aaa', 'base1'),
+        state: 'done',
+        result: '{"kind":"head_moved"}',
+      },
+    ]);
+    expect(h.db.prepare('SELECT COUNT(*) AS n FROM branch_updates').get()).toEqual({ n: 0 });
+    expect(h.queuedRoles()).toEqual([]);
+    expect(attempts('base_sync')).toBe(0);
+    await h.reconcile();
+    // ccc changes something of its own: reviewed, never resolved.
+    expect(h.queuedRoles()).toEqual(['review']);
+    expect(updateCalls()).toHaveLength(1);
+  });
+
+  test('D2: the forge failing 3 times for the same head and base falls back to the resolve drop', async () => {
+    await behindAfterApproval();
+    for (let i = 0; i < 3; i++) h.forge.author.failNext('updateBranch', '5xx');
+    for (let i = 1; i <= 2; i++) {
+      await h.reconcile();
+      expect(updateCalls()).toHaveLength(i);
+      expect(h.queuedRoles()).toEqual([]);
+      expect(workItem(h.db, 1).state).toBe('pr_open');
+    }
+    await h.reconcile();
+    expect(updateCalls()).toHaveLength(3);
+    expect(h.queuedRoles()).toEqual(['resolve']);
+    expect(attempts('resolve_total')).toBe(1);
+    expect(attempts('base_sync')).toBe(0);
+    await h.reconcile();
+    expect(updateCalls()).toHaveLength(3);
+    expect(dropRoles().filter((r) => r === 'resolve')).toHaveLength(1);
+  });
+
+  test('a failure followed by a success is an update, with no drop', async () => {
+    await behindAfterApproval();
+    h.forge.author.failNext('updateBranch', '5xx');
+    await h.reconcile();
+    await h.reconcile();
+    expect(updateCalls()).toHaveLength(2);
+    expect(h.forge.state.pulls.get(1)?.headSha).toBe('bbb');
+    expect(h.queuedRoles()).toEqual([]);
+    expect(attempts('base_sync')).toBe(1);
+  });
+
+  test('a 5xx after GitHub took the update is read back, not sent again', async () => {
+    await behindAfterApproval();
+    h.forge.author.failNext('updateBranch', '5xx-after-success');
+    await h.reconcile();
+    await h.reconcile();
+    expect(updateCalls()).toHaveLength(1);
+    expect(h.forge.state.pulls.get(1)?.headSha).toBe('bbb');
+    expect(h.queuedRoles()).toEqual([]);
+  });
+
+  test('D3: two passes at once send one request', async () => {
+    await behindAfterApproval();
+    await Promise.all([h.reconcile(), h.reconcile()]);
+    expect(updateCalls()).toHaveLength(1);
+    expect(attempts('base_sync')).toBe(1);
+    expect(h.queuedRoles()).toEqual([]);
+  });
+
+  test('D3: a crash between the request and the record sends nothing more', async () => {
+    await behindAfterApproval();
+    await h.reconcile();
+    expect(updateCalls()).toHaveLength(1);
+    // GitHub has not landed the merge yet, and the server died before recording the 202.
+    h.forge.state.setHead(1, 'aaa');
+    h.db.exec(
+      `UPDATE outbox SET state = 'unknown', result_json = NULL WHERE kind = 'update_branch';
+       DELETE FROM branch_updates;`,
+    );
+    await h.reconcile();
+    await h.reconcile();
+    expect(updateCalls()).toHaveLength(1);
+    expect(h.queuedRoles()).toEqual([]);
+    // The merge lands: read back as done, and the next head is the new one.
+    h.forge.state.setHead(1, 'bbb');
+    await h.reconcile();
+    expect(outboxRows().map((r) => r.state)).toEqual(['done']);
+    expect(updateCalls()).toHaveLength(1);
+    expect(h.queuedRoles()).toEqual([]);
+  });
+
+  test('with no push grant the resolve drop runs at once, and the forge is never asked', async () => {
+    await behindAfterApproval({ pusher: undefined });
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['resolve']);
+    expect(updateCalls()).toHaveLength(0);
+    expect(outboxRows()).toEqual([]);
+  });
+
+  test('a push grant that cannot mint is refused, never widened: resolve drop', async () => {
+    let mints = 0;
+    await behindAfterApproval({
+      pusher: async () => {
+        mints++;
+        throw new Error('mint failed');
+      },
+    });
+    await h.reconcile();
+    expect(mints).toBe(1);
+    expect(updateCalls()).toHaveLength(0);
+    expect(h.queuedRoles()).toEqual(['resolve']);
+    expect(attempts('resolve_total')).toBe(1);
+  });
+
+  test('forge updates stop at maxBaseSync and park on base-sync', async () => {
+    await behindAfterApproval();
+    h.db
+      .prepare(`INSERT INTO attempts (work_item_id, key, count) VALUES (1, 'base_sync', ?)`)
+      .run(h.zone.budgets.maxBaseSync);
+    await h.reconcile();
+    expect(updateCalls()).toHaveLength(0);
     expect(workItem(h.db, 1)).toMatchObject({
       state: 'parked',
       reason: 'budget exhausted: base-sync',

@@ -383,10 +383,22 @@ describe('loadConfig', () => {
       problemsOf(minimal, { ...fullEnv, JM_GITHUB_REVIEWER_TOKEN: fullEnv.JM_GITHUB_AUTHOR_TOKEN }),
     ).toEqual([['same', 'githubReviewerToken']]));
 
+  test('mergeReservationMinutes: an integer from 0 to 240', () => {
+    for (const v of [0, 1, 240])
+      expect(
+        loadConfig(withZone({ mergeReservationMinutes: v }), fullEnv).dropZones[0],
+      ).toMatchObject({ mergeReservationMinutes: v });
+    for (const v of [-1, 241, 1.5, '30'])
+      expect(() => loadConfig(withZone({ mergeReservationMinutes: v }), fullEnv)).toThrow(
+        /mergeReservationMinutes/,
+      );
+  });
+
   test('M1 defaults', () =>
     expect(loadConfig(minimal, fullEnv).dropZones[0]).toMatchObject({
       ciRequired: true,
       ciDeadlineMinutes: 45,
+      mergeReservationMinutes: 30,
       retryLabel: 'agent-retry',
       mergeMethod: 'squash',
       requireBranchProtection: true,
@@ -447,6 +459,28 @@ describe('loadConfig', () => {
     expect(secretList(c.secrets).sort()).toEqual(['a', 'b', 'c', 'o'.repeat(32), 'r'].sort());
     expect(secretList({ ...c.secrets, githubReadToken: 'rd' })).toContain('rd');
   });
+});
+
+describe('authorLoginAliases (issue #284)', () => {
+  test('defaults to an empty list', () => {
+    expect(loadConfig(minimal, fullEnv).dropZones[0]?.authorLoginAliases).toEqual([]);
+    const z = loadConfig(withZone({ authorLoginAliases: ['old-bot', 'app-slug[bot]'] }), fullEnv);
+    expect(z.dropZones[0]?.authorLoginAliases).toEqual(['old-bot', 'app-slug[bot]']);
+  });
+
+  test.each(['a b', `ghp_${'a'.repeat(36)}`])(
+    'a bad entry is refused without being echoed',
+    (bad) => {
+      let message = '';
+      try {
+        loadConfig(withZone({ authorLoginAliases: [bad] }), fullEnv);
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message).toMatch(/authorLoginAliases/);
+      expect(message).not.toContain(bad);
+    },
+  );
 });
 
 describe('crew config', () => {
@@ -1368,6 +1402,7 @@ describe('githubApp (spec §4.2: installation and repository ids, not secret)', 
       },
       ciRequired: true,
       ciDeadlineMinutes: 45,
+      mergeReservationMinutes: 30,
       retryLabel: 'agent-retry',
       triageLabel: 'jm-triage',
       triagedLabel: 'jm-triaged',
@@ -1395,6 +1430,7 @@ describe('githubApp (spec §4.2: installation and repository ids, not secret)', 
         maxTriage: 2,
       },
       botLogins: [],
+      authorLoginAliases: [],
     });
     // The loaded file of an existing install, too.
     expect(loadConfig(minimal, fullEnv).dropZones[0]).not.toHaveProperty('githubApp');

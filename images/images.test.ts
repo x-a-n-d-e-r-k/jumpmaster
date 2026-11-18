@@ -540,6 +540,19 @@ describe('image verification in the stick image', () => {
     for (const s of ['image not verified', "via: 'pinned'", 'image-verify-v1', 'a tag reference'])
       expect(drop, s).toContain(s);
   });
+
+  test('verify.sh builds the stick with a release version, so cosign is reached (#270)', () => {
+    // Without a version the floor refuses every signed image before cosign runs, and the e2e's
+    // cosign refusals would never be exercised.
+    const e2e = read('images/trooper/e2e/verify.sh');
+    expect(e2e).toMatch(
+      /--build-arg RELEASE_REPOSITORY="\$REPO" --build-arg RELEASE_VERSION="\$[A-Z_]+"[^\n]*-t jumpmaster-stick:dev/,
+    );
+    const drop = read('images/trooper/e2e/verify-drop.mjs');
+    // The release version is baked in, and a stick without one refuses a signed image.
+    expect(drop).toContain('release?.version === env.E2E_RELEASE_VERSION');
+    expect(drop).toContain('this stick has no release version');
+  });
 });
 
 test('every e2e script records the engine architecture it ran on', () => {

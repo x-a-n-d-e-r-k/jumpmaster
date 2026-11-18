@@ -222,6 +222,9 @@ async function implementResult(c: Ctx, result: DropResult): Promise<void> {
       ].join('\n');
       const payload: CreatePrPayload = {
         ...(c.deps.zone.adoptPulls?.length ? { adoptPulls: c.deps.zone.adoptPulls } : {}),
+        ...(c.deps.zone.authorLoginAliases?.length
+          ? { authorLoginAliases: c.deps.zone.authorLoginAliases }
+          : {}),
         head,
         base: base.defaultBranch,
         title: item.title,

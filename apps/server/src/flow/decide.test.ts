@@ -159,6 +159,8 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
     headFirstSeenAt: now.toISOString(),
     missingSince: null,
     carry: null,
+    mergeReservedBy: null,
+    updateConflict: false,
     ...over,
   };
 }
@@ -482,8 +484,17 @@ describe('rules in order', () => {
     });
   });
 
-  test('18: behind base resolves', () =>
+  test('18: behind base with no conflict mark asks the forge to update the branch', () =>
     expect(decide(snap({ compare: cmp({ behindBy: 3, baseSha: 'base9' }) }))).toEqual({
+      kind: 'update_branch',
+      headSha: 's',
+      baseSha: 'base9',
+    }));
+
+  test('18: behind base with a conflict mark for this head and base resolves', () =>
+    expect(
+      decide(snap({ compare: cmp({ behindBy: 3, baseSha: 'base9' }), updateConflict: true })),
+    ).toEqual({
       kind: 'enqueue',
       role: 'resolve',
       fingerprint: fingerprint(['s', 'base9']),
@@ -575,9 +586,11 @@ describe('rules in order', () => {
         feedback: { source: 'review' },
       });
       expect(decide(snap({ ...c, compare: cmp({ behindBy: 1 }) }))).toMatchObject({
-        kind: 'enqueue',
-        role: 'resolve',
+        kind: 'update_branch',
       });
+      expect(
+        decide(snap({ ...c, compare: cmp({ behindBy: 1 }), updateConflict: true })),
+      ).toMatchObject({ kind: 'enqueue', role: 'resolve' });
     });
   });
 
@@ -587,6 +600,9 @@ describe('rules in order', () => {
     expect(decide(snap({ held: true, verdictsOnHead: [approve('s')] }))).toEqual(park);
     expect(decide(snap({ held: true, verdictsOnHead: [rc('s')] }))).toEqual(park);
     expect(decide(snap({ held: true, compare: cmp({ behindBy: 3 }) }))).toEqual(park);
+    expect(
+      decide(snap({ held: true, compare: cmp({ behindBy: 3 }), updateConflict: true })),
+    ).toEqual(park);
   });
 
   test('20: standing human block on an older commit parks after one review', () => {
@@ -837,6 +853,57 @@ test('a denied directory listing names the permission to grant', () =>
     reason: 'forge read denied: listDir (grant the author token Contents: read)',
   }));
 
+describe('25: a merge reservation held by an older approved item', () => {
+  const reserved = { mergeReservedBy: { itemId: 2, issueNumber: 257, since: minutesAgo(10) } };
+
+  test('a merge becomes a wait on the reservation', () => {
+    expect(decide(mergeable())).toEqual({ kind: 'merge', sha: 's' });
+    expect(decide(mergeable(reserved))).toEqual({ kind: 'wait', on: 'merge-reservation' });
+  });
+
+  test('the wait counts toward no deadline: CI past its deadline still waits, never parks', () => {
+    expect(decide(mergeable({ ...reserved, headFirstSeenAt: minutesAgo(600) }))).toEqual({
+      kind: 'wait',
+      on: 'merge-reservation',
+    });
+  });
+
+  test('a resolve is unchanged', () => {
+    const s = mergeable({ compare: cmp({ behindBy: 2, baseSha: 'b2' }), updateConflict: true });
+    expect(decide({ ...s, ...reserved })).toEqual(decide(s));
+    expect(decide(s)).toMatchObject({ kind: 'enqueue', role: 'resolve' });
+  });
+
+  test('a branch update is unchanged', () => {
+    const s = mergeable({ compare: cmp({ behindBy: 2, baseSha: 'b2' }) });
+    expect(decide({ ...s, ...reserved })).toEqual(decide(s));
+    expect(decide(s)).toMatchObject({ kind: 'update_branch' });
+  });
+
+  test('a heal is unchanged', () => {
+    const s = mergeable({ checks: failing, requiredChecks: [] });
+    expect(decide({ ...s, ...reserved })).toEqual(decide(s));
+    expect(decide(s)).toMatchObject({ kind: 'enqueue', role: 'heal' });
+  });
+
+  test('a review is unchanged', () => {
+    const s = mergeable({ verdictsOnHead: [] });
+    expect(decide({ ...s, ...reserved })).toEqual(decide(s));
+    expect(decide(s)).toMatchObject({ kind: 'enqueue', role: 'review' });
+  });
+
+  test('a wait on CI is unchanged', () => {
+    const s = mergeable({ checks: pending });
+    expect(decide({ ...s, ...reserved })).toEqual({ kind: 'wait', on: 'ci' });
+  });
+
+  test('the CI deadline still parks missing CI', () => {
+    const s = mergeable({ checks: pending, headFirstSeenAt: minutesAgo(46) });
+    expect(decide({ ...s, ...reserved })).toEqual(decide(s));
+    expect(decide(s)).toMatchObject({ kind: 'park' });
+  });
+});
+
 describe('overlaps', () => {
   test('head change invalidates approval', () =>
     expect(decide(snap({ verdictsOnHead: [], pr: pr('sha2'), checks: ok, mergeOp: null }))).toEqual(
@@ -922,17 +989,20 @@ describe('overlaps', () => {
       fingerprint: fingerprint(['s', 'human', 5]),
     }));
 
-  test('behind base and CI failure resolves first', () =>
+  test('behind base and CI failure updates the branch first', () =>
     expect(decide(mergeable({ checks: failing, compare: cmp({ behindBy: 2 }) }))).toMatchObject({
-      kind: 'enqueue',
-      role: 'resolve',
+      kind: 'update_branch',
     }));
 
-  test('behind base resolves before the first review', () =>
+  test('behind base updates the branch before the first review', () =>
     expect(decide(snap({ verdictsOnHead: [], compare: cmp({ behindBy: 2 }) }))).toMatchObject({
-      kind: 'enqueue',
-      role: 'resolve',
+      kind: 'update_branch',
     }));
+
+  test('behind base with a conflict mark resolves before the first review', () =>
+    expect(
+      decide(snap({ verdictsOnHead: [], compare: cmp({ behindBy: 2 }), updateConflict: true })),
+    ).toMatchObject({ kind: 'enqueue', role: 'resolve' }));
 
   test('stale mergeable flag is never consulted: behindBy 0 gives no resolve', () => {
     const p = { ...pr('s'), mergeable: false } as PullFacts;

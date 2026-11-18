@@ -78,7 +78,28 @@ export interface Snapshot {
    * request-changes after it, or when a read failed: the head is then reviewed.
    */
   carry: CarryFacts | null;
+  /**
+   * The zone's merge reservation (`mergeHolder`) when another item holds it: the oldest approved
+   * item, still within `zone.mergeReservationMinutes` of its approval. null when this item holds
+   * it, when there is no holder, or when the zone turns the reservation off.
+   */
+  mergeReservedBy: MergeReservation | null;
+  /**
+   * An `update_conflict` mark for (pr.headSha, compare.baseSha): the forge could not merge this base
+   * into this head (a conflict, repeated failures, or no push token), so a resolve drop runs.
+   */
+  updateConflict: boolean;
 }
+
+const RESERVATION_PREFIX = 'waiting to merge after #';
+/** A pr_open item's reason while it waits on another item's merge reservation. */
+export const reservationReason = (holderIssue: number): string =>
+  `${RESERVATION_PREFIX}${holderIssue}`;
+export const isReservationReason = (reason: string | null): boolean =>
+  reason?.startsWith(RESERVATION_PREFIX) === true;
+
+/** The item holding a zone's merge reservation, and when its approval of its head was recorded. */
+export type MergeReservation = { itemId: number; issueNumber: number; since: string };
 
 /**
  * The item's newest verdict (`latestVerdict`), on head `fromHead`, and what each head changes
@@ -98,7 +119,7 @@ export type CarryFacts = {
 export type Feedback = { source: 'human' | 'review' | 'ci'; text: string };
 
 export type Action =
-  | { kind: 'wait'; on: 'drop' | 'ci' | 'forge' | 'outbox' }
+  | { kind: 'wait'; on: 'drop' | 'ci' | 'forge' | 'outbox' | 'merge-reservation' }
   | {
       kind: 'enqueue';
       role: 'review' | 'heal' | 'resolve';
@@ -109,6 +130,8 @@ export type Action =
   /** Copy verdict `fromVerdictId` to `headSha` (see `carriable`). */
   | { kind: 'carry_verdict'; fromVerdictId: string; headSha: string }
   | { kind: 'merge'; sha: string }
+  /** Ask the forge to merge base `baseSha` into head `headSha` (no drop, no model). */
+  | { kind: 'update_branch'; headSha: string; baseSha: string }
   | { kind: 'done'; reason: string }
   | { kind: 'park'; reason: string }
   | { kind: 'none' };
@@ -330,8 +353,12 @@ export function decide(s: Snapshot): Action {
       feedback: { source: 'review', text: verdictFeedback(latestRc) },
     };
   }
-  // 18: forge `mergeable` is never read (§5.1).
+  // 18: forge `mergeable` is never read (§5.1). The forge merges the base in first; a resolve
+  // drop runs only once it could not for this head and base.
   if (compare.behindBy > 0) {
+    if (!s.updateConflict) {
+      return { kind: 'update_branch', headSha: head, baseSha: compare.baseSha };
+    }
     return { kind: 'enqueue', role: 'resolve', fingerprint: fingerprint([head, compare.baseSha]) };
   }
   // 19: a head that only merged the base in cleanly keeps its approval; any other is reviewed.
@@ -377,8 +404,13 @@ export function decide(s: Snapshot): Action {
       },
     };
   }
-  // 25
-  if (ciSatisfied(s)) return { kind: 'merge', sha: head };
+  // 25: an older approved item waiting on CI reserves the next merge, so main stops moving under
+  // it. Only the merge waits: it spends no budget and counts toward no deadline.
+  if (ciSatisfied(s)) {
+    return s.mergeReservedBy !== null
+      ? { kind: 'wait', on: 'merge-reservation' }
+      : { kind: 'merge', sha: head };
+  }
   // 26
   if (pastDeadline(s, s.headFirstSeenAt)) {
     if (s.checks.state === 'none' && s.requiredChecks.length === 0) {

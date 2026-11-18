@@ -18,11 +18,33 @@ import { digestCompareFiles } from '../forge/github.js';
 /** A fake's issue: `authorType` defaults to `User`. */
 export type FakeIssue = Omit<ForgeIssue, 'authorType'> & { authorType?: string };
 
-const asForgeIssue = (i: FakeIssue, labels: string[]): ForgeIssue => ({
+const asForgeIssue = (i: FakeIssue, labels: string[], linked: string[] = []): ForgeIssue => ({
   ...i,
   authorType: i.authorType ?? 'User',
   labels: [...labels],
+  ...(linked.length > 0 ? { blockedBy: [...(i.blockedBy ?? []), ...linked] } : {}),
 });
+
+/** A native "blocked by" link; `repo` defaults to the fake's own, `open` to the blocker's state. */
+export type FakeBlockerLink = { issue: number; blocker: number; repo?: string; open?: boolean };
+
+/** The blockers `addBlockedBy`/`listBlockedBy` see for `issue`, as GitHub would list them. */
+function linksOf(state: FakeForgeState, issue: number) {
+  return state.blockedByLinks
+    .filter((l) => l.issue === issue)
+    .map((l) => {
+      const repo = l.repo ?? state.repo;
+      const open =
+        l.open ?? (repo === state.repo ? state.issues.get(l.blocker)?.state === 'open' : true);
+      return { number: l.blocker, repo, open };
+    });
+}
+
+/** The open links as sync reads them: `#N`, or `owner/name#N` in another repository. */
+const openLinkNames = (state: FakeForgeState, issue: number): string[] =>
+  linksOf(state, issue)
+    .filter((b) => b.open)
+    .map((b) => (b.repo === state.repo ? `#${b.number}` : `${b.repo}#${b.number}`));
 
 export type PullRequestInput = Parameters<Forge['findOrCreatePullRequest']>[0];
 
@@ -68,13 +90,25 @@ export interface FakeForgeState {
   /** `issue` holds the content; `updatedAt` is what `findIssueByMarker`'s `since` compares. */
   issues: Map<
     number,
-    { state: 'open' | 'closed'; labels: string[]; issue?: FakeIssue; updatedAt?: string }
+    {
+      state: 'open' | 'closed';
+      labels: string[];
+      issue?: FakeIssue;
+      updatedAt?: string;
+      /** Set by an `updateIssue` close that names a reason. */
+      stateReason?: 'completed';
+    }
   >;
   /** Adds an open issue (author type `User` unless given). */
   addIssue(i: Partial<FakeIssue> & { number: number }): void;
   closeIssue(n: number): void;
   reopenIssue(n: number): void;
   setLabels(n: number, labels: string[]): void;
+  /**
+   * Native "blocked by" links, read live: sync sees an issue blocked by each link whose blocker
+   * is open, beside any static `blockedBy` on the issue.
+   */
+  blockedByLinks: FakeBlockerLink[];
   /** `failed` may be left out when a test doesn't care which checks failed: it reads as `[]`. */
   checks: Map<string, Omit<ChecksFacts, 'failed'> & { failed?: ChecksFacts['failed'] }>;
   compares: Map<string, CompareFacts>;
@@ -94,6 +128,12 @@ export interface FakeForgeState {
   pullFiles: Map<number, PullFiles>;
   rules: Record<Identity, BranchRulesRead>;
   merges: { number: number; sha: string; title: string; message: string }[];
+  /** Every branch update GitHub accepted or refused (not a thrown one), in order. */
+  branchUpdates: { number: number; expectedHeadSha: string; identity: Identity }[];
+  /** PRs whose base does not merge cleanly: `updateBranch` answers `conflict`. */
+  updateConflicts: Set<number>;
+  /** The head a branch update makes from each old head; absent, `<old>+base`. */
+  updatedHeads: Map<string, string>;
   /** Each identity's access to the repository (default: push, not admin, public repo). */
   access: Record<Identity, RepoAccess>;
   /** Label names on the repository (default: none). */
@@ -115,7 +155,9 @@ export const FORGE_WRITES: readonly (keyof Forge)[] = [
   'findOrCreatePullRequest',
   'createReview',
   'merge',
+  'updateBranch',
   'createLabel',
+  'addBlockedBy',
 ];
 
 export const READ_PERMISSIONS = [
@@ -271,6 +313,7 @@ function createState(opts: {
     setLabels(n, labels) {
       mustIssue(state, n).labels = [...labels];
     },
+    blockedByLinks: [],
     checks: new Map(),
     compares: new Map(),
     digests: new Map(),
@@ -298,6 +341,9 @@ function createState(opts: {
     pullFiles: new Map(),
     rules: { author: okRules(), reviewer: okRules() },
     merges: [],
+    branchUpdates: [],
+    updateConflicts: new Set(),
+    updatedHeads: new Map(),
     access: { author: okAccess(), reviewer: okAccess() },
     labels: [],
     dirs: new Map(),
@@ -323,9 +369,22 @@ function forgeFor(
     listOpenIssues: async (label) =>
       [...state.issues.values()].flatMap((e) =>
         e.issue && e.state === 'open' && (label === undefined || e.labels.includes(label))
-          ? [asForgeIssue(e.issue, e.labels)]
+          ? [asForgeIssue(e.issue, e.labels, openLinkNames(state, e.issue.number))]
           : [],
       ),
+    listBlockedBy: async (n) => {
+      mustIssue(state, n);
+      return { blockers: linksOf(state, n), unreadable: 0 };
+    },
+    addBlockedBy: async (issue, blocker) => {
+      mustIssue(state, issue);
+      mustIssue(state, blocker);
+      const exists = state.blockedByLinks.some(
+        (l) => l.issue === issue && l.blocker === blocker && (l.repo ?? state.repo) === state.repo,
+      );
+      // GitHub's "already exists" answer is success, as the real forge maps it.
+      if (!exists) state.blockedByLinks.push({ issue, blocker });
+    },
     getIssue: async (n) => {
       const e = state.issues.get(n);
       return e ? { body: e.issue?.body ?? '', state: e.state, labels: [...e.labels] } : null;
@@ -364,6 +423,7 @@ function forgeFor(
         if (patch.body !== undefined) e.issue.body = patch.body;
       }
       if (patch.state) e.state = patch.state;
+      if (patch.stateReason) e.stateReason = patch.stateReason;
       e.updatedAt = new Date().toISOString();
     },
     setLabels: async (n, change) => {
@@ -499,6 +559,15 @@ function forgeFor(
       state.merges.push({ number: n, sha: input.sha, title: input.title, message: input.message });
       return { merged: true, sha: `merge-${n}` };
     },
+    updateBranch: async (n, expectedHeadSha) => {
+      const p = mustPull(state, n);
+      if (p.state !== 'open' || p.merged) throw forgeError(422, 'Pull request is closed');
+      state.branchUpdates.push({ number: n, expectedHeadSha, identity });
+      if (p.headSha !== expectedHeadSha) return { kind: 'head_moved' };
+      if (state.updateConflicts.has(n)) return { kind: 'conflict' };
+      state.setHead(n, state.updatedHeads.get(expectedHeadSha) ?? `${expectedHeadSha}+base`);
+      return { kind: 'updated' };
+    },
     repoAccess: async () => structuredClone(state.access[identity]),
     listLabels: async () => [...state.labels],
     createLabel: async (name: string) => {
@@ -552,7 +621,7 @@ export function fakeForgePair(opts: {
   const ready = (label: string): ForgeIssue[] =>
     [...state.issues.values()].flatMap((s) =>
       s.issue && s.state === 'open' && s.labels.includes(label)
-        ? [asForgeIssue(s.issue, s.labels)]
+        ? [asForgeIssue(s.issue, s.labels, openLinkNames(state, s.issue.number))]
         : [],
     );
   const author = forgeFor(state, 'author', ready);

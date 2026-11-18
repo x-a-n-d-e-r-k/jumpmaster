@@ -8,8 +8,12 @@ import { enqueueCrew } from '../crew/schedule.js';
 import { flushTriageTrail } from '../crew/trail.js';
 import type { Db } from '../db/open.js';
 import {
+  addBranchUpdateFailure,
   deleteFailedOutbox,
+  deleteOutbox,
   ensureZoneMode,
+  forgeUpdatedFrom,
+  getOutbox,
   getPullRequest,
   getWorkItem,
   getZoneMode,
@@ -21,7 +25,9 @@ import {
   listObservations,
   listWorkItems,
   recordObservation,
+  setBranchUpdateOutcome,
   setParkMark,
+  setWorkItemReason,
   setWorkItemState,
   upsertPullRequest,
   verdictsForItem,
@@ -36,13 +42,27 @@ import {
   type PostReviewPayload,
   resolveUnknown,
   runOp,
+  type UpdateBranchPayload,
+  type UpdateBranchResult,
 } from '../outbox.js';
 import { renderReviewBody } from '../results.js';
-import { enqueueImplement, enqueueNext, isBlocked } from '../scheduler.js';
-import { rankItems } from '../sync.js';
-import { chargeBudget, creditBaseSync } from './budgets.js';
-import { type Action, decide, GATE_PARK_PREFIXES, type Snapshot } from './decide.js';
-import { buildSnapshot, recordGateParkOf, type ZonePass } from './snapshot.js';
+import {
+  enqueueImplement,
+  enqueueNext,
+  isBlocked,
+  openPrCap,
+  readyCandidates,
+} from '../scheduler.js';
+import { baseSyncExhausted, chargeBudget, creditBaseSync } from './budgets.js';
+import {
+  type Action,
+  decide,
+  GATE_PARK_PREFIXES,
+  isReservationReason,
+  reservationReason,
+  type Snapshot,
+} from './decide.js';
+import { buildSnapshot, loginIn, recordGateParkOf, type ZonePass } from './snapshot.js';
 
 export type ReconcileReport = { actions: number; merges: number };
 
@@ -68,7 +88,7 @@ const parkReason = (db: Db, itemId: number, reason: string, now: Date): void =>
 
 const handOpened = (n: number): string => `hand-opened PR on agent branch: #${n}`;
 
-/** Step 2: adopt open agent PRs (author, same repo, server marker) for items that lost track. */
+/** Step 2: adopt open agent PRs (an author login, same repo, marker or listing) for lost items. */
 async function adopt(
   db: Db,
   forges: ForgePair,
@@ -77,7 +97,6 @@ async function adopt(
   pulls: PullFacts[],
   now: Date,
 ): Promise<number> {
-  const authorLogin = pass.botLogins[0];
   const items = listWorkItems(db, zone.id);
   const refuse = (detail: string) =>
     recordObservation(db, zone.id, null, 'adopt_refused', detail, now);
@@ -88,7 +107,7 @@ async function adopt(
     seen.add(pr.number);
     const n = agentIssue(pr.headRef);
     if (n === null || pr.headSha === null) continue;
-    if (pr.author !== authorLogin) {
+    if (!loginIn(pr.author, pass.authorLogins)) {
       if (listed(pr.number))
         refuse(`#${pr.number} is authored by ${pr.author}, not the author account`);
       continue;
@@ -135,7 +154,7 @@ async function resume(
   now: Date,
   unknown: Set<number>,
   pulls: PullFacts[],
-  authorLogin: string | undefined,
+  authorLogins: readonly string[],
 ): Promise<number> {
   let acted = 0;
   const observing = getZoneMode(db, zone.id, zone.mode) === 'observe';
@@ -164,7 +183,7 @@ async function resume(
     // `adopt` already took any PR with the server's marker, so an open one here isn't ours.
     const foreign = pulls.find((p) => p.headRef === agentBranch(item.issueNumber));
     const vouched =
-      foreign && foreign.author === authorLogin && zone.adoptPulls.includes(foreign.number);
+      foreign && loginIn(foreign.author, authorLogins) && zone.adoptPulls.includes(foreign.number);
     if (foreign && !isServerPrBody(foreign.body, item.id) && !vouched) {
       if (observing) {
         recordObservation(db, zone.id, item.id, 'would_park', handOpened(foreign.number), now);
@@ -279,8 +298,72 @@ function carryVerdict(
       gatesJson: from.gatesJson,
       createdAt: now.toISOString(),
     });
-    if (inserted) creditBaseSync(db, s.item.id);
+    // A head the forge brought up to date already spent its base_sync, and no resolve_total.
+    if (inserted && !forgeUpdatedFrom(db, s.item.id, from.headSha)) creditBaseSync(db, s.item.id);
   })();
+}
+
+/** Failed update requests for one head and base before the resolve drop runs instead. */
+export const UPDATE_BRANCH_TRIES = 3;
+
+/**
+ * Asks the forge to merge the base into the PR head, through the outbox (one request per item,
+ * head and base). `updated` spends `base_sync` once and waits for the new head; `head_moved`
+ * records nothing; a conflict, no push token, or the third failed request records the
+ * `update_conflict` mark. Returns whether the mark was recorded, so the caller enqueues the
+ * resolve drop now.
+ */
+async function updateBranch(
+  db: Db,
+  forges: ForgePair,
+  zone: DropZoneConfig,
+  s: Snapshot,
+  a: Extract<Action, { kind: 'update_branch' }>,
+  now: Date,
+): Promise<boolean> {
+  const item = s.item;
+  if (!s.pr) return false;
+  const conflict = () => setBranchUpdateOutcome(db, item.id, a.headSha, a.baseSha, 'conflict', now);
+  // No push grant to write with: the agent path, never a wider token.
+  if (!forges.pusher) return conflict();
+  const opKey = opKeys.updateBranch(item.id, a.headSha, a.baseSha);
+  if (!getOutbox(db, opKey) && baseSyncExhausted(db, item.id, zone.budgets)) {
+    parkReason(db, item.id, 'budget exhausted: base-sync', now);
+    return false;
+  }
+  const payload: UpdateBranchPayload = { pr: s.pr.number, headSha: a.headSha, baseSha: a.baseSha };
+  const r = await runOp(
+    db,
+    forges,
+    { kind: 'update_branch', opKey, zoneId: item.dropZoneId, itemId: item.id, payload },
+    now,
+  );
+  if (r.state === 'done') {
+    const result = r.result as UpdateBranchResult | undefined;
+    switch (result?.kind) {
+      case 'updated':
+        db.transaction(() => {
+          if (setBranchUpdateOutcome(db, item.id, a.headSha, a.baseSha, 'updated', now))
+            chargeBudget(db, item.id, 'forge_update', opKey, zone.budgets);
+        })();
+        return false;
+      case 'conflict':
+      case 'no_token':
+        return conflict();
+      default:
+        return false; // head_moved: the next pass reads the new head
+    }
+  }
+  if (r.state === 'failed') {
+    // Sent again on a later pass (the outbox reads the head back first); the third failure for
+    // this head and base gives up on the forge, so the item never sticks here.
+    return db.transaction(() => {
+      deleteOutbox(db, opKey);
+      const failures = addBranchUpdateFailure(db, item.id, a.headSha, a.baseSha, now);
+      return failures >= UPDATE_BRANCH_TRIES && conflict();
+    })();
+  }
+  return false; // pending or unknown: read back on a later pass
 }
 
 async function postReview(
@@ -376,6 +459,8 @@ function observeDecision(db: Db, zoneId: string, s: Snapshot, a: Action, now: Da
       return note('would_carry_verdict', `${head} from verdict ${a.fromVerdictId}`);
     case 'merge':
       return note('would_merge', `sha ${a.sha}`);
+    case 'update_branch':
+      return note('would_update_branch', `${head} onto base ${a.baseSha}`);
     case 'park':
       return note('would_park', a.reason);
     case 'done':
@@ -440,7 +525,7 @@ export async function reconcileZone(
     now,
     branchUnknown,
     pulls,
-    pass.botLogins[0],
+    pass.authorLogins,
   );
 
   for (const listed of listWorkItems(db, zone.id, 'pr_open')) {
@@ -452,6 +537,15 @@ export async function reconcileZone(
       observeDecision(db, zone.id, s, a, now);
       continue;
     }
+    // A reserved-out item says whose merge it waits for (the /work list and the status line read
+    // it); the reason goes as soon as the wait does.
+    const reserved =
+      a.kind === 'wait' && a.on === 'merge-reservation' && s.mergeReservedBy
+        ? reservationReason(s.mergeReservedBy.issueNumber)
+        : null;
+    if (reserved !== item.reason && (reserved !== null || isReservationReason(item.reason))) {
+      setWorkItemReason(db, item.id, reserved);
+    }
     switch (a.kind) {
       case 'enqueue':
         enqueue(db, zone, s, a, versions, now);
@@ -461,6 +555,14 @@ export async function reconcileZone(
         carryVerdict(db, s, a, now);
         actions++;
         break;
+      case 'update_branch': {
+        actions++;
+        if (!(await updateBranch(db, forges, zone, s, a, now))) break;
+        // The forge could not: the resolve drop runs now, as decide asks with the mark.
+        const next = decide({ ...s, updateConflict: true });
+        if (next.kind === 'enqueue') enqueue(db, zone, s, next, versions, now);
+        break;
+      }
       case 'post_review':
         // Starter mode never posts (decide doesn't ask); with no reviewer there is no one to post.
         if (forges.reviewer === null) break;
@@ -501,9 +603,16 @@ export async function reconcileZone(
     const resumes = listObservations(db, zone.id).filter(
       (o) => o.action === 'would_enqueue:resume' && o.lastAt === now.toISOString(),
     ).length;
-    const slots = Math.max(0, (zone.maxConcurrentImplement ?? 1) - resumes);
-    const skip = (i: WorkItem) => !branchUnknown.has(i.id) && !isBlocked(i);
-    for (const pick of rankItems(ready.filter(skip)).slice(0, slots)) {
+    // The same holds as enqueueNext (#291): an open PR changing a file the Placement names, and
+    // the zone's open PR cap.
+    const candidates = readyCandidates(db, zone.id, branchUnknown);
+    for (const { item: i, overlap } of candidates)
+      if (overlap !== null)
+        recordObservation(db, zone.id, i.id, 'would_wait:overlap', overlap, now);
+    const capped = openPrCap(zone, listWorkItems(db, zone.id, 'pr_open').length) !== null;
+    const slots = capped ? 0 : Math.max(0, (zone.maxConcurrentImplement ?? 1) - resumes);
+    const picks = candidates.filter((c) => c.overlap === null).map((c) => c.item);
+    for (const pick of picks.slice(0, slots)) {
       const detail = `issue #${pick.issueNumber}`;
       recordObservation(db, zone.id, pick.id, 'would_enqueue:implement', detail, now);
     }

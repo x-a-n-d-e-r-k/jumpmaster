@@ -21,8 +21,9 @@ import {
 import type { Pages } from './doctor/actions.js';
 import { type DoctorCheck, doctorDropWait, liveSticks } from './doctor/checks.js';
 import { latestDoctorRun } from './doctor/run.js';
+import { isReservationReason } from './flow/decide.js';
 import { missingFor, zoneRequirements } from './leases.js';
-import { isBlocked } from './scheduler.js';
+import { isBlocked, isOverlapReason, openPrCap } from './scheduler.js';
 import { redactionList } from './scrub.js';
 import { wizardActive } from './ui/setup.js';
 import { dispatchGate, type Gate } from './usage.js';
@@ -93,6 +94,8 @@ export type StatusZone = {
   doctorWait?: string;
   /** Set when no live stick can run the zone's drops: what they lack (the lease route's check). */
   cannotRun?: string;
+  /** The zone's open PR cap (`maxOpenPrs`); absent: no cap. */
+  maxOpenPrs?: number;
 };
 
 export type StatusInput = {
@@ -182,9 +185,23 @@ export function statusOf(input: StatusInput, now: Date): Status {
   // Work the next pass would take: ready items the scheduler does not skip as blocked, in active
   // zones not parked for a credential (a paused or parked zone's work is held by that, not the gate).
   const heldZones = activeZones.filter((z) => z.credentialProblems.length === 0);
+  // A ready item an open PR overlaps (its reason says which, #291) is skipped like a blocked one.
+  const startable = (z: StatusZone) =>
+    z.items.filter((i) => i.state === 'ready' && !isBlocked(i) && !isOverlapReason(i.reason));
+  // A zone at its open PR cap starts no implement drop (#291): its ready items wait on that.
+  const capOf = (z: StatusZone) =>
+    openPrCap(z, z.items.filter((i) => i.state === 'pr_open').length);
+  const capped = heldZones.flatMap((z) => {
+    const cap = capOf(z);
+    const n = startable(z).length;
+    return cap !== null && n > 0 ? [{ z, cap, n }] : [];
+  });
   const readyCount = heldZones.reduce(
-    (n, z) => n + z.items.filter((i) => i.state === 'ready' && !isBlocked(i)).length,
+    (n, z) => n + (capOf(z) === null ? startable(z).length : 0),
     0,
+  );
+  const overlapReady = activeZones.flatMap((z) =>
+    z.items.filter((i) => i.state === 'ready' && !isBlocked(i) && isOverlapReason(i.reason)),
   );
   const blockedReady = activeZones.flatMap((z) =>
     z.items.filter((i) => i.state === 'ready' && isBlocked(i)),
@@ -198,8 +215,14 @@ export function statusOf(input: StatusInput, now: Date): Status {
   const throttled = heldQueued.filter((q) => !FINISHING.has(q.d.role) && q.d.role !== 'doctor');
 
   /** The status, with every other blocker listed short, each with its fix. */
-  const said = (s: Status, uses: { problem?: CredentialProblem; doctor?: boolean } = {}) => {
+  const said = (
+    s: Status,
+    uses: { problem?: CredentialProblem; doctor?: boolean; cap?: boolean } = {},
+  ) => {
     const also: NonNullable<Status['also']> = [];
+    if (!uses.cap)
+      for (const c of capped)
+        also.push({ text: `${name(c.z.id)}: ${c.cap}`, href: zoneHref(c.z.id) });
     for (const p of problems)
       if (p !== uses.problem) also.push({ text: shortProblem(p, name), href: credentialsHref(p) });
     if (!uses.doctor && fails.length > 0)
@@ -287,7 +310,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
   }
 
   // CI: an open PR none of the zone's drops is working on, oldest head first.
-  const ci = zones
+  const open = zones
     .flatMap((z) =>
       (z.prs ?? [])
         .filter((p) => {
@@ -296,24 +319,50 @@ export function statusOf(input: StatusInput, now: Date): Status {
         })
         .map((p) => ({ z, p })),
     )
-    .sort((a, b) => Date.parse(a.p.headFirstSeenAt) - Date.parse(b.p.headFirstSeenAt))[0];
+    .sort((a, b) => Date.parse(a.p.headFirstSeenAt) - Date.parse(b.p.headFirstSeenAt));
+  // The flow's own words for a PR held back by an older approved PR's merge reservation.
+  const reservedReason = (z: StatusZone, workItemId: number): string | null => {
+    const reason = z.items.find((i) => i.id === workItemId)?.reason ?? null;
+    return isReservationReason(reason) ? reason : null;
+  };
+  const prHref = (z: StatusZone, n: number) => `https://github.com/${z.repo}/pull/${n}`;
+  const ci = open[0];
   if (ci) {
     const { z, p } = ci;
     const m = Math.floor((now.getTime() - Date.parse(p.headFirstSeenAt)) / 60_000);
-    return said({
-      headline: `Waiting on CI for PR #${p.number} (${m} of ${z.ciDeadlineMinutes ?? '?'} min)`,
-      detail: 'After the deadline the item parks with the reason CI gave, or that it gave none.',
+    const reason = reservedReason(z, p.workItemId);
+    const reserved = reason !== null;
+    // Every other PR waiting on a reservation is listed, so each says whose merge it waits for.
+    const reservedOut = open.slice(1).flatMap(({ z: oz, p: op }) => {
+      const r = reservedReason(oz, op.workItemId);
+      return r === null
+        ? []
+        : [
+            {
+              text: `PR #${op.number} is ${r}`,
+              ...(oz.repo ? { href: prHref(oz, op.number) } : {}),
+            },
+          ];
+    });
+    const st = said({
+      headline: reserved
+        ? `PR #${p.number} is ${reason}`
+        : `Waiting on CI for PR #${p.number} (${m} of ${z.ciDeadlineMinutes ?? '?'} min)`,
+      detail: reserved
+        ? 'An older approved PR is waiting on CI and holds the next merge; this one merges after it, or once that reservation lapses.'
+        : 'After the deadline the item parks with the reason CI gave, or that it gave none.',
       waitingOn: 'ci',
       since: p.headFirstSeenAt,
       ...(z.repo
         ? {
             action: {
               label: `Open PR #${p.number}`,
-              href: `https://github.com/${z.repo}/pull/${p.number}`,
+              href: prHref(z, p.number),
             },
           }
         : {}),
     });
+    return reservedOut.length > 0 ? { ...st, also: [...reservedOut, ...(st.also ?? [])] } : st;
   }
 
   // Held by the usage gate: work waits that the gate, not a slot, keeps from starting. The words
@@ -449,6 +498,30 @@ export function statusOf(input: StatusInput, now: Date): Status {
       detail: 'Each pass starts the ready issues a slot and the usage gate allow.',
       waitingOn: 'nothing',
     });
+
+  // Ready, but the zone has as many open PRs as its cap allows (#291).
+  if (capped.length > 0) {
+    const n = capped.reduce((k, c) => k + c.n, 0);
+    return said(
+      {
+        headline: `${wait(n, 'ready issue')}: ${capped.map((c) => `${name(c.z.id)} is ${c.cap}`).join('; ')}`,
+        detail: 'The zone starts no new implement drop until an open PR merges or closes.',
+        waitingOn: 'nothing',
+      },
+      { cap: true },
+    );
+  }
+
+  // Ready, but an open PR changes a file its Placement names (#291): the pass skips it.
+  if (overlapReady.length > 0) {
+    const n = overlapReady.length;
+    const each = overlapReady.map((i) => `#${i.issueNumber}: ${i.reason}`).join('; ');
+    return said({
+      headline: `${wait(n, 'ready issue')} on ${n === 1 ? 'an open PR' : 'open PRs'} that change${n === 1 ? 's' : ''} the same files (${each})`,
+      detail: 'Each starts once the open PR it overlaps merges or closes.',
+      waitingOn: 'nothing',
+    });
+  }
 
   // Ready, but each waits on an open issue it is blocked by: the pass skips it (isBlocked).
   if (blockedReady.length > 0) {
@@ -601,6 +674,7 @@ export function statusInputOf(o: {
         prs,
         ...(doctorQueued ? { doctorWait: doctorDropWait(db, config, zone, now) } : {}),
         ...(cannotRun ? { cannotRun } : {}),
+        ...(zone.maxOpenPrs !== undefined ? { maxOpenPrs: zone.maxOpenPrs } : {}),
       };
     }),
     outboxRetrying: listOutbox(db, ['unknown']),

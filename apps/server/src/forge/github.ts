@@ -49,6 +49,14 @@ function blockersOf(entry: BlockerEntry, repo: string): string[] {
 
 export type ForgeError = Error & { status?: number };
 
+/** One "blocked by" link of an issue: the blocking issue, its repository and whether it's open. */
+export type IssueBlocker = { number: number; repo: string; open: boolean };
+/** An issue's "blocked by" links; `unreadable` counts open ones the token can't see. */
+export type BlockedByList = { blockers: IssueBlocker[]; unreadable: number };
+
+/** GitHub's answer when the link `addBlockedBy` asks for is already there. */
+const LINK_EXISTS = /already (exists|been taken|blocked|added)|duplicate/i;
+
 export type PullFacts = {
   number: number;
   title: string;
@@ -118,7 +126,15 @@ export type BranchRules = {
   unpinnedChecks: string[];
   /** Required checks pinned to an app other than GitHub Actions (absent when none). */
   nonActionsChecks?: string[];
+  /** True when any active ruleset's `bypass` entry is `yes`. */
   viewerCanBypass: boolean;
+  /**
+   * One entry per active ruleset: whether this token's identity can bypass it. `restrictUpdatesOnly`
+   * is true when every rule of that ruleset on the branch is `update`. Fakes may omit it.
+   */
+  bypass?: RulesetBypass[];
+  /** True when the forge reads as a GitHub App installation (absent for a token's forge). */
+  asApp?: boolean;
   viewerIsAdmin: boolean;
   /** Active rule types the server cannot satisfy with its own merge (merge queue, deployments). */
   unsupportedRules?: string[];
@@ -151,12 +167,50 @@ export type ReadProbe = {
   accepted: string | null;
   rateLimited?: boolean;
 };
+/** One active ruleset's bypass reading (spec §4.3). */
+export type RulesetBypass = {
+  rulesetId: number;
+  name: string;
+  restrictUpdatesOnly: boolean;
+  can: 'yes' | 'no' | 'unknown';
+};
+
+/**
+ * Whether the viewer can bypass one ruleset. The field, when GitHub sends it, decides. Without it,
+ * a token's forge reads `yes` (as always); an app reads its own `Integration` entry in
+ * `bypass_actors` (role, team, organization-admin and deploy-key entries are ones an installation
+ * can't hold), and `unknown` when that list is absent too.
+ */
+function rulesetBypass(
+  data: { current_user_can_bypass?: string | null; bypass_actors?: unknown },
+  appId: string | null,
+): RulesetBypass['can'] {
+  const field = data.current_user_can_bypass;
+  if (field != null) return field === 'never' ? 'no' : 'yes';
+  if (appId === null) return 'yes';
+  if (!Array.isArray(data.bypass_actors)) return 'unknown';
+  return data.bypass_actors.some(
+    (a: { actor_type?: unknown; actor_id?: unknown } | null) =>
+      a?.actor_type === 'Integration' &&
+      typeof a.actor_id === 'number' &&
+      String(a.actor_id) === appId,
+  )
+    ? 'yes'
+    : 'no';
+}
+
 export type BranchRulesRead =
   | { kind: 'ok'; rules: BranchRules }
   | { kind: 'none' }
   /** The rules read, but GitHub refused the token's collaborator-permission read (403 or 404). */
   | { kind: 'unreachable' }
   | { kind: 'unavailable' };
+
+/**
+ * What GitHub answered a branch update: `updated` (202, the merge runs), `conflict` (422: the base
+ * does not merge cleanly) or `head_moved` (422: the head is no longer the expected SHA).
+ */
+export type BranchUpdate = { kind: 'updated' } | { kind: 'conflict' } | { kind: 'head_moved' };
 
 export type IssueFacts = { body: string; state: 'open' | 'closed'; labels: string[] };
 
@@ -176,8 +230,15 @@ export interface Forge {
   findIssueByMarker(marker: string, since: string): Promise<{ number: number } | null>;
   updateIssue(
     number: number,
-    patch: { title?: string; body?: string; state?: 'closed' },
+    patch: { title?: string; body?: string; state?: 'closed'; stateReason?: 'completed' },
   ): Promise<void>;
+  /** Every "blocked by" link on the issue (the first 100), open and closed. */
+  listBlockedBy(number: number): Promise<BlockedByList>;
+  /**
+   * A write: marks `issue` blocked by `blocker`, both in this repository (GraphQL `addBlockedBy`).
+   * A link that already exists is success.
+   */
+  addBlockedBy(issue: number, blocker: number): Promise<void>;
   setLabels(number: number, change: { add: string[]; remove: string[] }): Promise<void>;
   /** A write: posts a comment on an issue (or PR). */
   createIssueComment(number: number, body: string): Promise<{ id: number }>;
@@ -223,6 +284,12 @@ export interface Forge {
     number: number,
     input: { sha: string; method: 'squash'; title: string; message: string },
   ): Promise<{ merged: boolean; sha?: string }>;
+  /**
+   * A write to the PR's head branch: GitHub merges the base into it (`PUT …/update-branch`), only
+   * while the head is still `expectedHeadSha`. The new head is not returned: a later read sees it.
+   * Any answer other than 202 or the two 422s below throws.
+   */
+  updateBranch(prNumber: number, expectedHeadSha: string): Promise<BranchUpdate>;
   /** Doctor reads (never a write): the token account's access to the repository. */
   repoAccess(): Promise<RepoAccess>;
   /** Every label name on the repository. */
@@ -554,6 +621,40 @@ export class GitHubForge implements Forge {
     }
   }
 
+  async listBlockedBy(number: number): Promise<BlockedByList> {
+    const entry = (await this.readBlockers([number])).repository?.[`i${number}`] ?? null;
+    if (!entry) throw new Error(`blockers of #${number} are unreadable`);
+    const blockers = (entry.blockedBy.nodes ?? []).flatMap((n) =>
+      n === null
+        ? []
+        : [{ number: n.number, repo: n.repository.nameWithOwner, open: n.state === 'OPEN' }],
+    );
+    const open = blockers.filter((b) => b.open).length;
+    return { blockers, unreadable: Math.max(0, entry.issueDependenciesSummary.blockedBy - open) };
+  }
+
+  async addBlockedBy(issue: number, blocker: number): Promise<void> {
+    type Ids = { repository?: { issue?: { id: string } | null; blocker?: { id: string } | null } };
+    const ids = await this.octokit.graphql<Ids>(
+      `query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { issue: issue(number: ${issue}) { id } blocker: issue(number: ${blocker}) { id } } }`,
+      { owner: this.owner, repo: this.repo },
+    );
+    const issueId = ids.repository?.issue?.id;
+    const blockingIssueId = ids.repository?.blocker?.id;
+    if (!issueId || !blockingIssueId) throw new Error(`no node id for #${issue} or #${blocker}`);
+    try {
+      await this.octokit.graphql(
+        `mutation($issueId: ID!, $blockingIssueId: ID!) { addBlockedBy(input: { issueId: $issueId, blockingIssueId: $blockingIssueId }) { issue { id } } }`,
+        { issueId, blockingIssueId },
+      );
+    } catch (err) {
+      const e = err as { errors?: { message?: string }[]; message?: string };
+      const messages = e.errors?.map((x) => x.message ?? '') ?? [e.message ?? ''];
+      if (messages.length > 0 && messages.every((m) => LINK_EXISTS.test(m))) return;
+      throw err;
+    }
+  }
+
   async isTrusted(login: string): Promise<boolean> {
     return this.hasRole(login, TRUSTED_ROLES, TRUSTED_PERMISSIONS);
   }
@@ -753,13 +854,15 @@ export class GitHubForge implements Forge {
 
   async updateIssue(
     number: number,
-    patch: { title?: string; body?: string; state?: 'closed' },
+    patch: { title?: string; body?: string; state?: 'closed'; stateReason?: 'completed' },
   ): Promise<void> {
+    const { stateReason, ...rest } = patch;
     await this.octokit.rest.issues.update({
       owner: this.owner,
       repo: this.repo,
       issue_number: number,
-      ...patch,
+      ...rest,
+      ...(stateReason ? { state_reason: stateReason } : {}),
     });
   }
 
@@ -942,7 +1045,7 @@ export class GitHubForge implements Forge {
       );
       const ids = [...new Set(rules.map((r) => r.ruleset_id).filter((id) => id != null))];
       const active = new Set<number>();
-      let viewerCanBypass = false;
+      const bypass: RulesetBypass[] = [];
       for (const id of ids) {
         const { data } = await this.octokit.request(
           'GET /repos/{owner}/{repo}/rulesets/{ruleset_id}',
@@ -955,8 +1058,15 @@ export class GitHubForge implements Forge {
         );
         if (data.enforcement !== 'active') continue;
         active.add(id as number);
-        if (data.current_user_can_bypass !== 'never') viewerCanBypass = true;
+        const own = rules.filter((r) => r.ruleset_id === id);
+        bypass.push({
+          rulesetId: id as number,
+          name: String(data.name ?? ''),
+          restrictUpdatesOnly: own.length > 0 && own.every((r) => r.type === 'update'),
+          can: rulesetBypass(data, this.app?.appId ?? null),
+        });
       }
+      const viewerCanBypass = bypass.some((b) => b.can === 'yes');
       if (active.size === 0) return { kind: 'none' };
 
       let requiredApprovals = 0;
@@ -1021,6 +1131,8 @@ export class GitHubForge implements Forge {
           requiredChecks,
           unpinnedChecks,
           viewerCanBypass,
+          bypass,
+          ...(this.app ? { asApp: true } : {}),
           viewerIsAdmin,
           ...(unsupportedRules.length > 0 ? { unsupportedRules } : {}),
           ...(nonActionsChecks.length > 0 ? { nonActionsChecks } : {}),
@@ -1124,6 +1236,34 @@ export class GitHubForge implements Forge {
       commit_message: input.message,
     });
     return data.sha ? { merged: data.merged, sha: data.sha } : { merged: data.merged };
+  }
+
+  async updateBranch(prNumber: number, expectedHeadSha: string): Promise<BranchUpdate> {
+    let status: number;
+    try {
+      ({ status } = await this.octokit.request(
+        'PUT /repos/{owner}/{repo}/pulls/{pull_number}/update-branch',
+        {
+          owner: this.owner,
+          repo: this.repo,
+          pull_number: prNumber,
+          expected_head_sha: expectedHeadSha,
+        },
+      ));
+    } catch (err) {
+      if (statusOf(err) === 422) {
+        const message = String(
+          (err as { response?: { data?: { message?: unknown } } }).response?.data?.message ?? '',
+        );
+        if (/merge conflict/i.test(message)) return { kind: 'conflict' };
+        if (/expected head sha/i.test(message)) return { kind: 'head_moved' };
+      }
+      throw err;
+    }
+    if (status !== 202) {
+      throw Object.assign(new Error(`update-branch answered ${status}, not 202`), { status });
+    }
+    return { kind: 'updated' };
   }
 
   async repoAccess(): Promise<RepoAccess> {

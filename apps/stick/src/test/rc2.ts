@@ -39,6 +39,11 @@ export type Rc2Case = {
   /** The bundle layer's bytes differ from its manifest's digest. */
   tamperBundle?: boolean;
   /**
+   * Another bundle in place of the rc.2 one (in a referrer manifest of its own): one whose
+   * certificate says something else (issue #270). Only a fake cosign accepts it.
+   */
+  bundle?: Buffer;
+  /**
    * The signed index is this image's (with its platforms' blobs) instead of the rc.2 index, whose
    * platform blobs these fixtures lack: for tests that load. Only a fake cosign told
    * `signedIndex: image.index` accepts it.
@@ -141,12 +146,24 @@ export function rc2Layout(o: Rc2Case = {}, dir = mkdtempSync(join(tmpdir(), 'jm-
   const digest = o.relabelIndex ? sha256(appended) : sha256(signed);
   const indexBlob = put(digest, o.tamperIndex || o.relabelIndex ? appended : signed);
   if (o.image) for (const b of [...o.image.amd64.blobs, ...o.image.arm64.blobs]) put(sha256(b), b);
-  put(sha256(RC2_BUNDLE_MANIFEST), RC2_BUNDLE_MANIFEST);
+  const bundle = o.bundle ?? RC2_BUNDLE;
+  const manifest = JSON.parse(RC2_BUNDLE_MANIFEST.toString('utf8')) as {
+    artifactType: string;
+    layers: { digest: string; size: number }[];
+  };
+  const bundleManifest = o.bundle
+    ? Buffer.from(
+        JSON.stringify({
+          ...manifest,
+          layers: [{ ...manifest.layers[0], digest: sha256(bundle), size: bundle.length }],
+        }),
+      )
+    : RC2_BUNDLE_MANIFEST;
+  put(sha256(bundleManifest), bundleManifest);
   const bundleBlob = put(
-    sha256(RC2_BUNDLE),
-    o.tamperBundle ? Buffer.concat([RC2_BUNDLE, Buffer.from(' ')]) : RC2_BUNDLE,
+    sha256(bundle),
+    o.tamperBundle ? Buffer.concat([bundle, Buffer.from(' ')]) : bundle,
   );
-  const manifest = JSON.parse(RC2_BUNDLE_MANIFEST.toString('utf8')) as { artifactType: string };
   const index = {
     schemaVersion: 2,
     mediaType: 'application/vnd.oci.image.index.v1+json',
@@ -162,8 +179,8 @@ export function rc2Layout(o: Rc2Case = {}, dir = mkdtempSync(join(tmpdir(), 'jm-
         : [
             {
               mediaType: 'application/vnd.oci.image.manifest.v1+json',
-              digest: sha256(RC2_BUNDLE_MANIFEST),
-              size: RC2_BUNDLE_MANIFEST.length,
+              digest: sha256(bundleManifest),
+              size: bundleManifest.length,
               artifactType: manifest.artifactType,
               annotations: {
                 'dev.sigstore.bundle.content': 'dsse-envelope',

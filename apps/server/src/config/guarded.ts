@@ -287,6 +287,11 @@ export const GUARDED_PATHS: GuardedPath[] = [
     'additions',
     (n, ctx) => `Jumpmaster will take over PR #${n} in ${zoneOf(ctx)} and may merge it`,
   ),
+  setRule(
+    'dropZones[].authorLoginAliases',
+    'additions',
+    (l, ctx) => `PRs by ${l} on agent branches in ${zoneOf(ctx)} will be adopted as the author's`,
+  ),
   appId('dropZones[].githubApp.repositoryId', 'Tokens', 'for repository id'),
   appId('dropZones[].githubApp.installations.author', 'Author tokens', 'from installation id'),
   appId('dropZones[].githubApp.installations.reviewer', 'Reviewer tokens', 'from installation id'),
@@ -353,6 +358,7 @@ export const NOT_GUARDED: FreePath[] = [
   free('dropZones[].limits.memoryMb', 'a container resource limit, not an access'),
   free('dropZones[].limits.shmMb', 'a container resource limit, not an access'),
   free('dropZones[].maxConcurrentImplement', PACE),
+  free('dropZones[].maxOpenPrs', PACE),
   free('dropZones[].outboxDeadlineMinutes', 'how long a forge write may stay unknown'),
   free('dropZones[].mode', 'the starting mode, used only until an operator stores one'),
   free('dropZones[].model', 'the model a drop runs; the same guards hold'),
@@ -368,6 +374,10 @@ export const NOT_GUARDED: FreePath[] = [
   free(
     'dropZones[].ciDeadlineMinutes',
     'how long to wait for CI; a missing CI is still a no-merge',
+  ),
+  free(
+    'dropZones[].mergeReservationMinutes',
+    'how long the oldest approved PR holds the next merge; every merge still needs approval and CI',
   ),
   free('dropZones[].retryLabel', 'the label that asks for a retry of parked work'),
   free(

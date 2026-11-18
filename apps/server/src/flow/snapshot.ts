@@ -4,14 +4,17 @@ import { agentBranch } from '@jumpmaster/protocol';
 import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import {
+  getBranchUpdate,
   getDropZoneDefaultBranch,
   getGateAllowance,
   getOutbox,
   getPullRequest,
   holdingDropFor,
+  listWorkItems,
   type OutboxRow,
   recordGatePark,
   setWaitingSince,
+  setWorkItemPrFiles,
   upsertPullRequest,
   verdictsForHead,
   verdictsForItem,
@@ -26,7 +29,7 @@ import {
 } from '../forge/github.js';
 import { log } from '../log.js';
 import { type ForgePair, type OpResult, opKeys } from '../outbox.js';
-import type { CarryFacts, Snapshot } from './decide.js';
+import type { CarryFacts, MergeReservation, Snapshot } from './decide.js';
 import {
   administrationOf,
   branchProtectionProblems,
@@ -46,7 +49,12 @@ import {
 
 /** Read once per zone per pass and shared by the parked-item sync and the reconciler. */
 export type ZonePass = {
-  /** `[authorLogin, reviewerLogin]`, in that order; `[authorLogin]` alone in starter mode. */
+  /**
+   * The logins whose agent-branch PRs are the author's (spec §4.3): the author's own login first,
+   * then the zone's `authorLoginAliases`, duplicates removed case-insensitively.
+   */
+  authorLogins: string[];
+  /** `[...authorLogins, reviewerLogin]`, the author's first; `authorLogins` alone in starter mode. */
   botLogins: string[];
   requiredChecks: string[];
   protectionProblems: string[] | null;
@@ -90,8 +98,10 @@ export async function zonePass(
     );
   const codeownersText = ownersRequired ? await readCodeowners(forges, baseBranch) : undefined;
   if (ownersRequired) noteCodeownersRead(zone.id, codeownersText !== undefined);
+  const authorLogins = uniqueLogins([authorLogin, ...(zone.authorLoginAliases ?? [])]);
   return {
-    botLogins: reviewerLogin === null ? [authorLogin] : [authorLogin, reviewerLogin],
+    authorLogins,
+    botLogins: reviewerLogin === null ? authorLogins : [...authorLogins, reviewerLogin],
     requiredChecks: authorRules.kind === 'ok' ? authorRules.rules.requiredChecks : [],
     protectionProblems: branchProtectionProblems(
       { author: authorRules, reviewer: reviewerRules },
@@ -104,6 +114,23 @@ export async function zonePass(
       },
     ),
   };
+}
+
+/** `logins` in order, keeping the first of any that differ only in case. */
+function uniqueLogins(logins: string[]): string[] {
+  const seen = new Set<string>();
+  return logins.filter((l) => {
+    const key = l.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** Whether `login` is one of `logins`, compared case-insensitively as GitHub compares logins. */
+export function loginIn(login: string, logins: readonly string[]): boolean {
+  const key = login.toLowerCase();
+  return logins.some((l) => l.toLowerCase() === key);
 }
 
 /** Zones whose last CODEOWNERS read failed and was said: said once until a read succeeds. */
@@ -164,7 +191,7 @@ async function trustedReviews(
   bots: string[],
   markUnavailable: (method: string) => void,
 ): Promise<ForgeReview[]> {
-  const candidates = reviews.filter((r) => !bots.includes(r.author) && !r.body.includes('jm:op:'));
+  const candidates = reviews.filter((r) => !loginIn(r.author, bots) && !r.body.includes('jm:op:'));
   const trust = new Map<string, boolean>();
   for (const author of new Set(candidates.map((r) => r.author))) {
     try {
@@ -223,6 +250,10 @@ async function maintainerApprovedHead(
   }
   return false;
 }
+
+/** Every path a PR's file list touches: each file's path, and a rename's previous path. */
+const prTouches = (files: PullFiles['files']): string[] =>
+  files.flatMap((f) => (f.previousPath ? [f.path, f.previousPath] : [f.path]));
 
 const isPackageJson = (p: string): boolean => p === 'package.json' || p.endsWith('/package.json');
 
@@ -488,6 +519,32 @@ async function carryFacts(
 }
 
 /**
+ * The zone's merge reservation holder, from the database alone: among pr_open items whose newest
+ * verdict on their recorded PR head is an approve made no more than `zone.mergeReservationMinutes`
+ * ago (carried verdicts included), the one approved first, ties to the lower item id. null when
+ * there is none, or the zone sets 0.
+ */
+export function mergeHolder(db: Db, zone: DropZoneConfig, now: Date): MergeReservation | null {
+  const minutes = zone.mergeReservationMinutes ?? 0;
+  if (minutes <= 0) return null;
+  const limit = minutes * 60_000;
+  let holder: MergeReservation | null = null;
+  for (const item of listWorkItems(db, zone.id, 'pr_open')) {
+    const pr = getPullRequest(db, item.id);
+    if (!pr || pr.state !== 'open') continue;
+    const latest = verdictsForHead(db, item.id, pr.headSha).at(-1);
+    if (latest?.decision !== 'approve') continue;
+    const age = now.getTime() - Date.parse(latest.createdAt);
+    if (!(age <= limit)) continue;
+    // Items come in id order, so a strict comparison leaves a tie with the lower id.
+    if (holder === null || Date.parse(latest.createdAt) < Date.parse(holder.since)) {
+      holder = { itemId: item.id, issueNumber: item.issueNumber, since: latest.createdAt };
+    }
+  }
+  return holder;
+}
+
+/**
  * Assembles everything `decide` reads for one pr_open item. Forge facts are read fresh; failed
  * reads fail closed (see `Snapshot` field docs). Upserts `pull_requests` and maintains
  * `work_items.waiting_since`.
@@ -559,7 +616,10 @@ export async function buildSnapshot(
     }
     try {
       files = await forges.author.listPullFiles(pr.number);
+      // What the PR changes, for the scheduler's overlap hold (#291): a list cut short is unknown.
+      setWorkItemPrFiles(db, item.id, files.complete ? prTouches(files.files) : null);
     } catch (err) {
+      // A failed read leaves the stored list as it was.
       unavailable('listPullFiles', err);
     }
   }
@@ -630,6 +690,14 @@ export async function buildSnapshot(
     headSha && !activeDrop && !missing && compare?.behindBy === 0 && verdictsOnHead.length === 0
       ? await carryFacts(db, forges, item.id, base, headSha)
       : null;
+  // After the upsert above, so this item's own holding reads the head just seen.
+  const holder = mergeHolder(db, zone, now);
+  const mergeReservedBy = holder !== null && holder.itemId !== item.id ? holder : null;
+
+  const updateConflict =
+    headSha !== null && compare !== null
+      ? getBranchUpdate(db, item.id, headSha, compare.baseSha)?.outcome === 'conflict'
+      : false;
 
   return {
     item,
@@ -662,5 +730,7 @@ export async function buildSnapshot(
     headFirstSeenAt,
     missingSince,
     carry,
+    mergeReservedBy,
+    updateConflict,
   };
 }

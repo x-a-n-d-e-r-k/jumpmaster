@@ -126,6 +126,7 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   "mergeMethod": "squash",
   "ciRequired": true,
   "ciDeadlineMinutes": 45,
+  "mergeReservationMinutes": 30,
   "retryLabel": "agent-retry",
   "requireBranchProtection": true,
   "reviewReadToken": false,
@@ -152,10 +153,28 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   `budget exhausted: base-sync`. A changed patch, a file list GitHub cut short, a file without a
   patch (binary or too large), a forced approval or a later request-changes all mean a fresh
   review. Retry clears every budget.
+- A PR behind its base is first brought up to date by GitHub itself (`update-branch`, pinned to
+  the PR head), with no drop and no model: it spends `base_sync`, never `resolve_total`, and the
+  new head then goes through every check (protected paths, gate changes, the carried approval or
+  a review, CI). The request runs on the zone's push grant only: the author token in PAT mode, a
+  per-update `contents: write` token from the author app in app mode. A resolve drop runs only
+  when GitHub reports a merge conflict, after 3 failed requests for the same head and base, or
+  when no push token can be had.
 - Set `ciRequired: false` for a repository with no CI. The ruleset then needs no
   required checks. With `ciRequired: true`, only checks the ruleset names count: an
   unrelated green check (a CLA bot, a labeler) never stands in for CI, and an item with no
   named required check waits, then parks `no CI result`.
+- `mergeReservationMinutes` (an integer from 0 to 240, default 30) gives the zone's oldest
+  approved PR a merge reservation. A PR is a candidate while the newest verdict on its current
+  head is an approve (a carried one counts) made no more than that many minutes ago; the holder
+  is the candidate approved first, ties to the lower item id. While it waits on CI, a younger
+  item that is otherwise ready to merge waits instead, so main stops moving under the older PR
+  and pushing it behind again. Only that final merge waits: a reserved-out item still resolves,
+  heals, is reviewed and waits on its own CI as before, and the wait spends no budget and counts
+  toward no deadline. Its reason on the Work page and in the status line (`ctl status`) reads
+  `waiting to merge after #<issue>`. The reservation lapses when the holder merges, leaves
+  `pr_open`, gets a new head with no approve on it, or its approval is older than the limit; the
+  next pass picks the next holder. `0` turns it off.
 - `protectedPaths` defaults to CI and agent configuration (`.github/**`, `.claude/**`,
   `CODEOWNERS`, `CLAUDE.md`, `AGENTS.md`, `.mcp.json`, `GOAL.md`, `jumpmaster*.json`), git
   settings (`.gitattributes`, `.gitmodules`), package-manager settings, hooks and patches
@@ -340,7 +359,7 @@ every blocker closes. Work already in flight continues if a blocker is added lat
 |---|---|---|
 | 1 | Happy path: an issue such as "add a `sum(a, b)` function with a test". | Implement → PR by the author bot → review drop → approval posted by the reviewer bot → CI green → merged by the server, no human click. Item `done`, reason `merged`. |
 | 2 | An issue whose first review should request changes, for example "add `parse(n)`" where the review asks to "also handle non-number inputs with a TypeError". | The reviewer bot posts REQUEST_CHANGES; a heal drop pushes onto the same branch; a new review runs on the new head; then merge. |
-| 3 | While a PR from scenario 1 or 2 is open, push any commit to base yourself. | A resolve drop merges base into the branch. A clean merge is free (no `resolve` attempt is charged); the new head is re-reviewed, then merged. |
+| 3 | While a PR from scenario 1 or 2 is open, push any commit to base yourself. | GitHub merges base into the branch (no drop runs; a conflict gets a resolve drop instead). The update counts one `base_sync` and no `resolve` attempt; the approval is carried to the new head (or the head re-reviewed), then merged after CI. |
 | 4 | Close an issue while its PR is open. Then reopen it. | The item parks `issue closed`, with no merge call. After reopening, the next pass returns it to `pr_open` and re-decides it. |
 | 5 | Park an item (for example scenario 6), then add the `agent-retry` label to its issue. | Attempts reset once, the item returns to `pr_open` (or resumes the branch if the PR was closed). Leaving the label on does not reset again; remove and re-add it to retry again. |
 | 6 | An issue that asks the agent to edit a file under `.github/`. | The push is refused in the trooper (`protected path …`), or, if such a change reaches a PR, the item parks `protected path: .github/…` before any review. |
@@ -380,7 +399,7 @@ by hand.
   `Closes #N` as its body, with no other trailers. The issue is closed by GitHub.
 - **Scenario 2:** the PR shows exactly one REQUEST_CHANGES and one APPROVE from the
   reviewer bot, each on a different commit, and the merged SHA is the approved one.
-- **Scenario 3:** the item's attempts show no `resolve` charge for the clean resolve.
+- **Scenario 3:** the item's attempts show a `base_sync` and no `resolve` charge for the clean update.
 - **Scenario 4:** the item is `parked` / `issue closed` while closed and `pr_open` after
   reopening; the server made no merge call meanwhile.
 - **Scenario 5:** after the label, the attempts column is empty and the item left

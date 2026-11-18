@@ -432,6 +432,68 @@ describe('statusOf', () => {
   });
 });
 
+describe('a merge reservation (#287)', () => {
+  test('a reserved-out PR says which issue it waits to merge after', () => {
+    const s = statusOf(
+      base({
+        zones: [
+          zone({
+            items: [
+              item({
+                id: 2,
+                issueNumber: 263,
+                state: 'pr_open',
+                prNumber: 12,
+                reason: 'waiting to merge after #257',
+              }),
+            ],
+            prs: [
+              { workItemId: 2, number: 12, headFirstSeenAt: plus(NOW, -20 * MIN).toISOString() },
+            ],
+          }),
+        ],
+      }),
+      NOW,
+    );
+    expect(s.headline).toBe('PR #12 is waiting to merge after #257');
+    expect(s.waitingOn).toBe('ci');
+    expect(s.action?.href).toBe('https://github.com/octo/demo/pull/12');
+  });
+
+  test('behind a holder waiting on CI, the reserved-out PR is listed with whose merge it waits for', () => {
+    const s = statusOf(
+      base({
+        zones: [
+          zone({
+            items: [
+              item({ id: 1, issueNumber: 257, state: 'pr_open', prNumber: 11 }),
+              item({
+                id: 2,
+                issueNumber: 263,
+                state: 'pr_open',
+                prNumber: 12,
+                reason: 'waiting to merge after #257',
+              }),
+            ],
+            prs: [
+              { workItemId: 1, number: 11, headFirstSeenAt: plus(NOW, -20 * MIN).toISOString() },
+              { workItemId: 2, number: 12, headFirstSeenAt: plus(NOW, -10 * MIN).toISOString() },
+            ],
+          }),
+        ],
+      }),
+      NOW,
+    );
+    expect(s.headline).toBe('Waiting on CI for PR #11 (20 of 45 min)');
+    expect(s.also).toEqual([
+      {
+        text: 'PR #12 is waiting to merge after #257',
+        href: 'https://github.com/octo/demo/pull/12',
+      },
+    ]);
+  });
+});
+
 describe('usage holds (round 2, I1 and I2)', () => {
   const ready = () => [item({ id: 5, issueNumber: 11, state: 'ready' })];
 
@@ -588,6 +650,47 @@ describe('round 3', () => {
     expect(mixed.headline).toBe(
       "Held by Claude's usage throttle: 1 issue waits; only finishing work starts",
     );
+  });
+
+  test('a ready issue an open PR overlaps says which PR and path it waits for (#291)', () => {
+    const held = item({
+      id: 5,
+      issueNumber: 15,
+      state: 'ready',
+      reason: 'waiting: overlaps #257 on src/a.ts',
+    });
+    const s = statusOf(base({ zones: [zone({ items: [held] })] }), NOW);
+    expect(s.headline).toBe(
+      '1 ready issue waits on an open PR that changes the same files (#15: waiting: overlaps #257 on src/a.ts)',
+    );
+    // With another ready issue free to start, that one is the work the next pass takes.
+    const mixed = statusOf(
+      base({ zones: [zone({ items: [held, item({ id: 9, state: 'ready' })] })] }),
+      NOW,
+    );
+    expect(mixed.headline).toBe('1 ready issue waits for the next pass');
+  });
+
+  test('a zone at maxOpenPrs says so, and its ready issues are not counted as startable (#291)', () => {
+    const open = (id: number) => item({ id, issueNumber: id + 10, state: 'pr_open' });
+    const items = [open(1), open(2), item({ id: 3, state: 'ready' })];
+    const s = statusOf(base({ zones: [zone({ items, maxOpenPrs: 2 })] }), NOW);
+    expect(s.headline).toBe('1 ready issue waits: main is waiting: 2 open PRs (cap 2)');
+    expect(s.also).toBeUndefined();
+    // Under the cap, the ready issue is the next pass's work.
+    const under = statusOf(base({ zones: [zone({ items, maxOpenPrs: 3 })] }), NOW);
+    expect(under.headline).toBe('1 ready issue waits for the next pass');
+    // Something else takes the headline: the cap is still said, as an extra line.
+    const busy = statusOf(
+      base({
+        zones: [zone({ items, maxOpenPrs: 2, drops: [drop({ workItemId: 1, role: 'review' })] })],
+      }),
+      NOW,
+    );
+    expect(busy.also).toContainEqual({
+      text: 'main: waiting: 2 open PRs (cap 2)',
+      href: '/zones/main',
+    });
   });
 
   test('a zone parked for a credential is not throttled work: the credential takes the headline', () => {

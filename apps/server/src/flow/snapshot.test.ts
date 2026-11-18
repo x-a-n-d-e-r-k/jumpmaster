@@ -1,5 +1,14 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
-import { getWorkItem, insertVerdict, recordGateAllowance, type VerdictRow } from '../db/repo.js';
+import {
+  addBranchUpdateFailure,
+  getWorkItem,
+  getWorkItemPrFiles,
+  insertVerdict,
+  recordGateAllowance,
+  setBranchUpdateOutcome,
+  setWorkItemState,
+  type VerdictRow,
+} from '../db/repo.js';
 import { zoneWorld } from '../test/fixtures.js';
 import { decide } from './decide.js';
 import { ADMINISTRATION_PROBLEM } from './guards.js';
@@ -41,6 +50,37 @@ describe('zonePass', () => {
     expect(p.botLogins).toEqual(['author-bot', 'reviewer-bot']);
     expect(p.requiredChecks).toEqual(['ci']);
     expect(p.protectionProblems).toEqual([]);
+  });
+});
+
+describe('author login aliases (issue #284)', () => {
+  test('authorLogins is the viewer login then the aliases, case-insensitive duplicates removed', async () => {
+    w = zoneWorld({ authorLoginAliases: ['old-bot', 'Author-Bot', 'OLD-BOT', 'app[bot]'] });
+    const p = await zonePass(w.forges, w.zone, 'main');
+    expect(p.authorLogins).toEqual(['author-bot', 'old-bot', 'app[bot]']);
+    expect(p.botLogins).toEqual(['author-bot', 'old-bot', 'app[bot]', 'reviewer-bot']);
+  });
+
+  test('with no aliases, authorLogins is the viewer login alone', async () => {
+    const p = await zonePass(w.forges, w.zone, 'main');
+    expect(p.authorLogins).toEqual(['author-bot']);
+  });
+
+  test('starter mode: botLogins is authorLogins alone', async () => {
+    w = zoneWorld({ identity: 'starter', authorLoginAliases: ['old-bot'] });
+    const p = await zonePass(w.forges, w.zone, 'main');
+    expect(p.botLogins).toEqual(['author-bot', 'old-bot']);
+  });
+
+  test('a trusted-looking review by an alias is not a trusted human review', async () => {
+    w = zoneWorld({ authorLoginAliases: ['old-bot'] });
+    itemId = w.prItem(1, 'sha1');
+    w.f.state.trusted.push('old-bot', 'Old-Bot');
+    w.f.state.review({ id: 1, author: 'old-bot', state: 'CHANGES_REQUESTED', commitId: 'sha1' });
+    w.f.state.review({ id: 2, author: 'Old-Bot', state: 'CHANGES_REQUESTED', commitId: 'sha1' });
+    const s = await snapshotOf();
+    expect(s.trustedChangeRequests).toEqual([]);
+    expect(s.humanBlockStanding).toBe(false);
   });
 });
 
@@ -667,5 +707,159 @@ describe('carry facts', () => {
     expect(s.carry).toBeNull();
     expect(s.forgeUnavailable).toBeNull();
     expect(decide(s)).toMatchObject({ kind: 'enqueue', role: 'review' });
+  });
+});
+
+describe('the update_conflict mark (issue #292)', () => {
+  const behind = (baseSha: string) =>
+    w.f.state.compares.set('main...sha1', { aheadBy: 1, behindBy: 2, baseSha, mergeBaseSha: 'b0' });
+
+  test('a conflict mark for this head and base is read, and decide resolves', async () => {
+    behind('b1');
+    setBranchUpdateOutcome(w.db, itemId, 'sha1', 'b1', 'conflict', now);
+    const s = await snapshotOf();
+    expect(s.updateConflict).toBe(true);
+    expect(decide(s)).toMatchObject({ kind: 'enqueue', role: 'resolve' });
+  });
+
+  test('a mark for another base sha does not count: the forge is asked again', async () => {
+    behind('b2');
+    setBranchUpdateOutcome(w.db, itemId, 'sha1', 'b1', 'conflict', now);
+    const s = await snapshotOf();
+    expect(s.updateConflict).toBe(false);
+    expect(decide(s)).toEqual({ kind: 'update_branch', headSha: 'sha1', baseSha: 'b2' });
+  });
+
+  test('a mark for another head does not count', async () => {
+    behind('b1');
+    setBranchUpdateOutcome(w.db, itemId, 'sha0', 'b1', 'conflict', now);
+    expect((await snapshotOf()).updateConflict).toBe(false);
+  });
+
+  test('failures short of a conflict and an updated outcome are no mark', async () => {
+    behind('b1');
+    addBranchUpdateFailure(w.db, itemId, 'sha1', 'b1', now);
+    expect((await snapshotOf()).updateConflict).toBe(false);
+    setBranchUpdateOutcome(w.db, itemId, 'sha1', 'b1', 'updated', now);
+    expect((await snapshotOf()).updateConflict).toBe(false);
+  });
+});
+
+describe('merge reservation', () => {
+  const at = (minutesAgo: number): string =>
+    new Date(now.getTime() - minutesAgo * 60_000).toISOString();
+  let n = 0;
+  const verdict = (
+    id: number,
+    headSha: string,
+    minutesAgo: number,
+    decision: VerdictRow['decision'] = 'approve',
+  ): void => {
+    insertVerdict(w.db, {
+      id: `r${++n}`,
+      workItemId: id,
+      headSha,
+      decision,
+      forced: false,
+      summary: 's',
+      findingsJson: '[]',
+      gatesJson: '[]',
+      createdAt: at(minutesAgo),
+    });
+  };
+  let two: number;
+  let three: number;
+  beforeEach(() => {
+    two = w.prItem(2, 'sha2');
+    three = w.prItem(3, 'sha3');
+  });
+
+  test('the holder is the item with the oldest approve on its current head', async () => {
+    verdict(itemId, 'sha1', 5);
+    verdict(two, 'sha2', 20);
+    verdict(three, 'sha3', 10);
+    expect((await snapshotOf(itemId)).mergeReservedBy).toEqual({
+      itemId: two,
+      issueNumber: 2,
+      since: at(20),
+    });
+    expect((await snapshotOf(three)).mergeReservedBy?.itemId).toBe(two);
+  });
+
+  test('a tie goes to the lower item id', async () => {
+    verdict(three, 'sha3', 10);
+    verdict(two, 'sha2', 10);
+    expect((await snapshotOf(itemId)).mergeReservedBy?.itemId).toBe(two);
+  });
+
+  test("the holder's own snapshot has none", async () => {
+    verdict(itemId, 'sha1', 5);
+    verdict(two, 'sha2', 20);
+    expect((await snapshotOf(two)).mergeReservedBy).toBeNull();
+  });
+
+  test('an approve on an older head does not count', async () => {
+    verdict(itemId, 'sha1', 5);
+    verdict(two, 'old2', 20);
+    verdict(three, 'sha3', 10);
+    expect((await snapshotOf(itemId)).mergeReservedBy?.itemId).toBe(three);
+    verdict(three, 'old3', 15);
+    expect((await snapshotOf(itemId)).mergeReservedBy?.itemId).toBe(three);
+  });
+
+  test('a request-changes newer than the approve on the same head does not count', async () => {
+    verdict(itemId, 'sha1', 5);
+    verdict(two, 'sha2', 20);
+    verdict(two, 'sha2', 18, 'request_changes');
+    expect((await snapshotOf(itemId)).mergeReservedBy).toBeNull();
+  });
+
+  test('an approve older than mergeReservationMinutes does not count', async () => {
+    verdict(itemId, 'sha1', 5);
+    verdict(two, 'sha2', 31);
+    expect((await snapshotOf(itemId)).mergeReservedBy).toBeNull();
+    verdict(three, 'sha3', 30);
+    expect((await snapshotOf(itemId)).mergeReservedBy?.itemId).toBe(three);
+  });
+
+  test('an item that is not pr_open holds nothing', async () => {
+    verdict(itemId, 'sha1', 5);
+    verdict(two, 'sha2', 20);
+    setWorkItemState(w.db, two, 'parked', 'x');
+    expect((await snapshotOf(itemId)).mergeReservedBy).toBeNull();
+  });
+
+  test('mergeReservationMinutes 0 turns it off', async () => {
+    w.zone = { ...w.zone, mergeReservationMinutes: 0 };
+    verdict(itemId, 'sha1', 5);
+    verdict(two, 'sha2', 20);
+    expect((await snapshotOf(itemId)).mergeReservedBy).toBeNull();
+  });
+});
+
+describe('the open PR file list is stored on the item (issue #291)', () => {
+  test('a complete list is stored, renames with their previous path, sorted', async () => {
+    w.f.state.pullFiles.set(1, {
+      files: [{ path: 'src/b.ts' }, { path: 'src/new.ts', previousPath: 'src/old.ts' }],
+      complete: true,
+    });
+    await snapshotOf();
+    expect(getWorkItemPrFiles(w.db, itemId)).toEqual(['src/b.ts', 'src/new.ts', 'src/old.ts']);
+  });
+
+  test('a list GitHub cut short stores null (unknown)', async () => {
+    w.f.state.pullFiles.set(1, { files: [{ path: 'src/a.ts' }], complete: true });
+    await snapshotOf();
+    w.f.state.pullFiles.set(1, { files: [{ path: 'src/a.ts' }], complete: false });
+    await snapshotOf();
+    expect(getWorkItemPrFiles(w.db, itemId)).toBeNull();
+  });
+
+  test('a failed read leaves the stored list as it was', async () => {
+    w.f.state.pullFiles.set(1, { files: [{ path: 'src/a.ts' }], complete: true });
+    await snapshotOf();
+    w.f.author.failNext('listPullFiles', '5xx');
+    await snapshotOf();
+    expect(getWorkItemPrFiles(w.db, itemId)).toEqual(['src/a.ts']);
   });
 });

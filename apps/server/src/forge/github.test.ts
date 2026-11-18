@@ -224,6 +224,75 @@ describe('GitHubForge', () => {
         });
       await expect(forge.listReadyIssues('agent-ready')).rejects.toThrow();
     });
+
+    test('listBlockedBy reads every link of one issue, open and closed, and counts unreadable ones', async () => {
+      nock(api)
+        .post('/graphql')
+        .reply(200, {
+          data: {
+            repository: {
+              i9: blockerEntry(3, [
+                { number: 7, state: 'OPEN' },
+                { number: 8, state: 'CLOSED' },
+                { number: 3, state: 'OPEN', repo: 'other/repo' },
+              ]),
+            },
+          },
+        });
+      expect(await forge.listBlockedBy(9)).toEqual({
+        blockers: [
+          { number: 7, repo: 'o/r', open: true },
+          { number: 8, repo: 'o/r', open: false },
+          { number: 3, repo: 'other/repo', open: true },
+        ],
+        unreadable: 1,
+      });
+    });
+
+    test('addBlockedBy sends the mutation with both node ids', async () => {
+      const bodies: { query: string; variables: Record<string, unknown> }[] = [];
+      nock(api)
+        .post('/graphql')
+        .times(2)
+        .reply(200, async (request: Request) => {
+          const body = (await request.json()) as {
+            query: string;
+            variables: Record<string, unknown>;
+          };
+          bodies.push(body);
+          return body.query.includes('mutation')
+            ? { data: { addBlockedBy: { issue: { id: 'I_12' } } } }
+            : { data: { repository: { issue: { id: 'I_12' }, blocker: { id: 'I_4' } } } };
+        });
+      await forge.addBlockedBy(12, 4);
+      expect(bodies[0]?.query).toMatch(/issue: issue\(number: 12\)/);
+      expect(bodies[0]?.query).toMatch(/blocker: issue\(number: 4\)/);
+      expect(bodies[1]?.query).toMatch(
+        /addBlockedBy\(input: \{ issueId: \$issueId, blockingIssueId: \$blockingIssueId \}\)/,
+      );
+      expect(bodies[1]?.variables).toEqual({ issueId: 'I_12', blockingIssueId: 'I_4' });
+    });
+
+    test('addBlockedBy: a link that already exists is success; any other error throws', async () => {
+      const ids = { data: { repository: { issue: { id: 'I_12' }, blocker: { id: 'I_4' } } } };
+      nock(api).post('/graphql').reply(200, ids);
+      nock(api)
+        .post('/graphql')
+        .reply(200, {
+          data: { addBlockedBy: null },
+          errors: [{ type: 'UNPROCESSABLE', message: 'Blocked by issue already exists' }],
+        });
+      await expect(forge.addBlockedBy(12, 4)).resolves.toBeUndefined();
+
+      nock(api).post('/graphql').reply(200, ids);
+      nock(api)
+        .post('/graphql')
+        .reply(200, {
+          data: { addBlockedBy: null },
+          errors: [{ type: 'FORBIDDEN', message: 'Resource not accessible by integration' }],
+        });
+      await expect(forge.addBlockedBy(12, 4)).rejects.toThrow(/not accessible/);
+    });
   });
 
   test('trusts write/maintain/admin only; 404 is untrusted, other errors throw', async () => {
@@ -808,6 +877,44 @@ describe('GitHubForge', () => {
       });
     });
 
+    describe('updateBranch', () => {
+      const url = '/repos/o/r/pulls/5/update-branch';
+
+      test('sends expected_head_sha and maps 202 to updated', async () => {
+        nock(api)
+          .put(url, (b) => b.expected_head_sha === 'aaa' && Object.keys(b).length === 1)
+          .reply(202, { message: 'Updating pull request branch.', url: 'https://x' });
+        expect(await forge.updateBranch(5, 'aaa')).toEqual({ kind: 'updated' });
+      });
+
+      test('a 422 naming a merge conflict is conflict', async () => {
+        nock(api).put(url).reply(422, { message: 'merge conflict between base and head' });
+        expect(await forge.updateBranch(5, 'aaa')).toEqual({ kind: 'conflict' });
+      });
+
+      test('a 422 naming the expected head is head_moved', async () => {
+        nock(api)
+          .put(url)
+          .reply(422, { message: "expected head sha didn't match current head ref." });
+        expect(await forge.updateBranch(5, 'aaa')).toEqual({ kind: 'head_moved' });
+      });
+
+      test.each([
+        [422, 'Validation Failed'],
+        [403, 'Resource not accessible by integration'],
+        [404, 'Not Found'],
+        [500, 'Server Error'],
+      ])('any other answer (%i %s) throws with its status', async (status, message) => {
+        nock(api).put(url).reply(status, { message });
+        await expect(forge.updateBranch(5, 'aaa')).rejects.toMatchObject({ status });
+      });
+
+      test('a 2xx other than 202 throws', async () => {
+        nock(api).put(url).reply(200, { message: 'ok' });
+        await expect(forge.updateBranch(5, 'aaa')).rejects.toThrow(/update-branch answered 200/);
+      });
+    });
+
     describe('getBranchRules', () => {
       const rulesUrl = '/repos/o/r/rules/branches/main';
       const prRule = (id: number, count = 1, stale = true) => ({
@@ -853,6 +960,7 @@ describe('GitHubForge', () => {
             requiredChecks: ['build'],
             unpinnedChecks: [],
             viewerCanBypass: false,
+            bypass: [{ rulesetId: 1, name: '', restrictUpdatesOnly: false, can: 'no' }],
             viewerIsAdmin: false,
             requiresPullRequest: true,
             requireCodeOwnerReview: false,
@@ -1065,6 +1173,10 @@ describe('GitHubForge issue writes', () => {
     });
     nock(api).patch('/repos/o/r/issues/9', { state: 'closed' }).reply(200, issue(9));
     await f.updateIssue(9, { state: 'closed' });
+    nock(api)
+      .patch('/repos/o/r/issues/9', { state: 'closed', state_reason: 'completed' })
+      .reply(200, issue(9));
+    await f.updateIssue(9, { state: 'closed', stateReason: 'completed' });
     nock(api)
       .get('/repos/o/r/issues/9')
       .reply(200, issue(9, { state: 'closed', body: null }));
@@ -1837,4 +1949,136 @@ describe('GitHubForge with an app identity (spec §4.3)', () => {
       if (slug) expect(message).not.toContain(slug);
     },
   );
+});
+
+describe('getBranchRules reads bypass per ruleset (spec §4.3, §5.2)', () => {
+  const identity = { kind: 'app' as const, slug: 'acme-author', appId: '12345' };
+  const rulesUrl = '/repos/o/r/rules/branches/main';
+  const prRule = (id: number) => ({
+    type: 'pull_request',
+    ruleset_id: id,
+    parameters: { required_approving_review_count: 1, dismiss_stale_reviews_on_push: true },
+  });
+  const updateRule = (id: number) => ({ type: 'update', ruleset_id: id, parameters: {} });
+  const mockRuleset = (id: number, body: Record<string, unknown>) =>
+    nock(api)
+      .get(`/repos/o/r/rulesets/${id}`)
+      .query({ includes_parents: 'true' })
+      .reply(200, { id, enforcement: 'active', ...body });
+  const mockViewer = () => {
+    nock(api).get('/user').reply(200, { login: 'jm-bot' });
+    nock(api)
+      .get('/repos/o/r/collaborators/jm-bot/permission')
+      .reply(200, { permission: 'write', role_name: 'write' });
+  };
+  const make = (mode: 'pat' | 'app') =>
+    mode === 'app'
+      ? new GitHubForge('o', 'r', 'ghs_tok', { identity })
+      : new GitHubForge('o', 'r', 'tok');
+
+  beforeAll(() => {
+    nock.disableNetConnect();
+  });
+  afterEach(() => {
+    expect(nock.pendingMocks()).toEqual([]);
+    nock.cleanAll();
+  });
+
+  const fields = ['never', 'always', 'absent'] as const;
+  const actorSets = {
+    absent: undefined,
+    'this app': [{ actor_id: 12345, actor_type: 'Integration', bypass_mode: 'always' }],
+    'another app': [{ actor_id: 999, actor_type: 'Integration', bypass_mode: 'always' }],
+    'a RepositoryRole only': [
+      { actor_id: 12345, actor_type: 'RepositoryRole', bypass_mode: 'always' },
+    ],
+  } as const;
+  const expected = (
+    mode: 'pat' | 'app',
+    field: (typeof fields)[number],
+    actors: keyof typeof actorSets,
+  ): 'yes' | 'no' | 'unknown' => {
+    if (field === 'never') return 'no';
+    if (field === 'always') return 'yes';
+    if (mode === 'pat') return 'yes';
+    if (actors === 'absent') return 'unknown';
+    return actors === 'this app' ? 'yes' : 'no';
+  };
+  const cases = (['pat', 'app'] as const).flatMap((mode) =>
+    fields.flatMap((field) =>
+      (Object.keys(actorSets) as (keyof typeof actorSets)[]).map(
+        (actors) => [mode, field, actors, expected(mode, field, actors)] as const,
+      ),
+    ),
+  );
+
+  test.each(cases)(
+    '%s forge, field %s, bypass_actors %s → %s',
+    async (mode, field, actors, can) => {
+      nock(api)
+        .get(rulesUrl)
+        .query(true)
+        .reply(200, [prRule(7)]);
+      const a = actorSets[actors];
+      mockRuleset(7, {
+        name: 'jumpmaster',
+        ...(field === 'absent' ? {} : { current_user_can_bypass: field }),
+        ...(a ? { bypass_actors: a } : {}),
+      });
+      if (mode === 'pat') mockViewer();
+      const res = await make(mode).getBranchRules('main');
+      expect(res.kind).toBe('ok');
+      if (res.kind !== 'ok') return;
+      expect(res.rules.bypass).toEqual([
+        { rulesetId: 7, name: 'jumpmaster', restrictUpdatesOnly: false, can },
+      ]);
+      expect(res.rules.viewerCanBypass).toBe(can === 'yes');
+      expect(res.rules.asApp).toBe(mode === 'app' ? true : undefined);
+    },
+  );
+
+  test('two rulesets with different answers give two entries', async () => {
+    nock(api)
+      .get(rulesUrl)
+      .query(true)
+      .reply(200, [prRule(1), updateRule(2)]);
+    mockRuleset(1, { name: 'jumpmaster', current_user_can_bypass: 'never' });
+    mockRuleset(2, { name: 'jumpmaster-merge', current_user_can_bypass: 'always' });
+    const res = await make('app').getBranchRules('main');
+    expect(res).toMatchObject({
+      kind: 'ok',
+      rules: {
+        viewerCanBypass: true,
+        asApp: true,
+        bypass: [
+          { rulesetId: 1, name: 'jumpmaster', restrictUpdatesOnly: false, can: 'no' },
+          { rulesetId: 2, name: 'jumpmaster-merge', restrictUpdatesOnly: true, can: 'yes' },
+        ],
+      },
+    });
+  });
+
+  test('restrictUpdatesOnly is false when the ruleset also has a pull_request rule', async () => {
+    nock(api)
+      .get(rulesUrl)
+      .query(true)
+      .reply(200, [updateRule(2), prRule(2)]);
+    mockRuleset(2, { name: 'jumpmaster-merge', current_user_can_bypass: 'always' });
+    const res = await make('app').getBranchRules('main');
+    expect(res.kind === 'ok' && res.rules.bypass).toEqual([
+      { rulesetId: 2, name: 'jumpmaster-merge', restrictUpdatesOnly: false, can: 'yes' },
+    ]);
+  });
+
+  test('PAT regression: a ruleset without the field still reads viewerCanBypass true', async () => {
+    nock(api)
+      .get(rulesUrl)
+      .query(true)
+      .reply(200, [prRule(1)]);
+    mockRuleset(1, { name: 'jumpmaster' });
+    mockViewer();
+    const res = await make('pat').getBranchRules('main');
+    expect(res).toMatchObject({ kind: 'ok', rules: { viewerCanBypass: true } });
+    expect(res.kind === 'ok' && 'asApp' in res.rules).toBe(false);
+  });
 });

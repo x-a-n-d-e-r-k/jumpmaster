@@ -11,8 +11,10 @@ import {
   resetDoneOutbox,
   updateOutbox,
 } from './db/repo.js';
+import type { AppTokenSource } from './forge/app-tokens.js';
 import {
   type AppForgeIdentity,
+  type BranchUpdate,
   type Forge,
   type ForgeError,
   GitHubForge,
@@ -24,6 +26,7 @@ import { credentialFingerprint, type Resolved } from './vault/credentials.js';
 import type { AppRole, CredentialRef } from './vault/github-app-entries.js';
 import {
   appInstallationFor,
+  credentialFor,
   type ResolvedApps,
   type ZoneForAppInstallation,
 } from './vault/resolution.js';
@@ -37,7 +40,29 @@ export type ForgePair = {
   reviewer: Forge | null;
   /** Performs merges instead of the author, when the author's account is a repository admin. */
   merger?: Forge;
+  /**
+   * The zone's push grant as a forge, for the server's one write to an agent branch (a branch
+   * update): the author token in PAT mode, and in app mode a `contents: write` token narrowed to
+   * the repository and minted for this write alone, as for a push container. Never a wider token:
+   * absent, or when the mint fails, the branch update falls back to a resolve drop.
+   */
+  pusher?: () => Promise<PushForge>;
 };
+
+/**
+ * The app-mode push token a pair's `pusher` mints from (`PairOptions.pushToken`): the author app's
+ * `push` use (`contents: write`, narrowed to the zone's repository), minted fresh for each write,
+ * exactly as the push containers' grant is, and revoked after it.
+ */
+export const appPushToken =
+  (source: Pick<AppTokenSource, 'fresh'>, zoneId: string) => (): Promise<PushToken> =>
+    source.fresh(zoneId, 'author', 'push');
+
+/** A forge on the push grant, and how to give its token up once the write is done. */
+export type PushForge = { forge: Forge; release(): Promise<void> };
+
+/** A token minted for one write (`AppTokenSource.fresh(zone, 'author', 'push')`). */
+export type PushToken = { token: string; revoke(): Promise<void> };
 
 /** Each role's resolved credential (spec §4.4): its owner's app, or an install-wide PAT. */
 export type PairRefs = { author: CredentialRef; reviewer: CredentialRef };
@@ -52,6 +77,17 @@ export type PairOptions = {
   refs?: PairRefs;
   appTokens?: (owner: string, role: AppRole) => TokenProvider;
   appIdentity?: (owner: string, role: AppRole) => { slug: string; appId: string };
+  /**
+   * In app mode, the author app's push token for this zone (`AppTokenSource.fresh(zone.id,
+   * 'author', 'push')`), minted per branch update. Absent, an app author zone has no `pusher`.
+   */
+  pushToken?: () => Promise<PushToken>;
+  /**
+   * The zone's author credential resolves to an app (`credentialFor(zone, 'author', apps)`), even
+   * when `refs` are absent and its forges still run on the PAT. Its push grant is then the app's
+   * narrowed `push` token: the pusher mints from `pushToken`, or there is none. Never the PAT.
+   */
+  authorUsesApp?: boolean;
   /**
    * The credentials as they resolved (`ConfigStore.resolved()` and `resolvedApps()`), for the pair
    * cache's key. `ForgePairs.for` requires them when a role uses an app, so a replaced app entry
@@ -76,11 +112,15 @@ export function pairFor(
   // Starter has no second identity, so the author merges (an admin author included: see
   // authorMayBeAdmin, and the per-pass Administration probe that guards it). It always uses the
   // author token, whatever the refs say.
-  if (zone.identity === 'starter')
-    return {
-      author: new GitHubForge(owner, name, secrets.githubAuthorToken, forgeOpts),
-      reviewer: null,
-    };
+  /** The PAT the push containers are granted: the author forge itself. */
+  const patPusher = (forge: Forge) => async (): Promise<PushForge> => ({
+    forge,
+    release: async () => {},
+  });
+  if (zone.identity === 'starter') {
+    const author = new GitHubForge(owner, name, secrets.githubAuthorToken, forgeOpts);
+    return { author, reviewer: null, pusher: patPusher(author) };
+  }
   const appRef = (role: AppRole) => {
     const ref = opts.refs?.[role];
     return ref?.kind === 'github-app' ? ref : undefined;
@@ -117,14 +157,37 @@ export function pairFor(
   const author = authorApp
     ? appForge('author', authorApp)
     : new GitHubForge(owner, name, secrets.githubAuthorToken, forgeOpts);
+  let pusher: ForgePair['pusher'];
+  if (!authorApp && !opts.authorUsesApp) pusher = patPusher(author);
+  else if (opts.pushToken) {
+    const mint = opts.pushToken;
+    const identity = author instanceof GitHubForge ? author.appIdentity() : null;
+    pusher = async () => {
+      let minted: PushToken;
+      try {
+        minted = await mint();
+      } catch {
+        // The source's error may quote a key or a token: drop it, and keep no `cause`.
+        throw new Error(`could not mint a push token for ${redactTokenShapes(zone.repo)}`);
+      }
+      return {
+        forge: new GitHubForge(owner, name, minted.token, {
+          ...forgeOpts,
+          ...(identity ? { identity: { kind: 'app', ...identity } } : {}),
+        }),
+        release: () => minted.revoke(),
+      };
+    };
+  }
   let reviewer: Forge;
   if (reviewerApp) reviewer = appForge('reviewer', reviewerApp);
   else if (!secrets.githubReviewerToken)
     throw new Error('JM_GITHUB_REVIEWER_TOKEN is required for a two-bot zone');
   else reviewer = new GitHubForge(owner, name, secrets.githubReviewerToken, forgeOpts);
+  const withPusher = pusher ? { pusher } : {};
   return zone.authorMayBeAdmin && !authorApp
-    ? { author, reviewer, merger: reviewer }
-    : { author, reviewer };
+    ? { author, reviewer, merger: reviewer, ...withPusher }
+    : { author, reviewer, ...withPusher };
 }
 
 type PairTokens = {
@@ -166,11 +229,14 @@ type KeyPart = string | number | null;
  */
 function refsKey(zone: PairZone, opts: PairOptions): KeyPart[][] {
   const refs = opts.refs;
-  if (!refs || zone.identity === 'starter') return [];
+  if (zone.identity === 'starter') return [];
+  // An app author's push grant differs from the PAT pair's, so it keys a pair of its own.
+  const push: KeyPart[][] = opts.authorUsesApp ? [['push:app']] : [];
+  if (!refs) return push;
   const owners = [refs.author, refs.reviewer].map((r) =>
     r.kind === 'github-app' ? r.owner : null,
   );
-  if (owners.every((o) => o === null)) return [];
+  if (owners.every((o) => o === null)) return push;
   if (!opts.credentials)
     throw new Error(
       `the pair of ${redactTokenShapes(zone.repo)} uses a GitHub App, but no resolved credentials were given for its key`,
@@ -181,7 +247,21 @@ function refsKey(zone: PairZone, opts: PairOptions): KeyPart[][] {
     const at = appInstallationFor(zone, role);
     return at ? `${at.installationId}@${at.repositoryId}` : null;
   });
-  return [owners, [credentialFingerprint(resolved, apps)], ids];
+  return [owners, [credentialFingerprint(resolved, apps)], ids, ...push];
+}
+
+/**
+ * The push-grant options the live server builds every pair with (issue #292, D1 and D5): a zone
+ * whose author resolves to an app pushes, and updates its branch, only with that app's `push`
+ * token minted from `source`; any other zone with the author PAT, as its push containers do.
+ */
+export function pushOptionsFor(
+  zone: Parameters<typeof credentialFor>[0] & { id: string },
+  apps: ResolvedApps,
+  source: Pick<AppTokenSource, 'fresh'>,
+): PairOptions {
+  if (credentialFor(zone, 'author', apps).ref.kind !== 'github-app') return {};
+  return { authorUsesApp: true, pushToken: appPushToken(source, zone.id) };
 }
 
 /**
@@ -241,6 +321,11 @@ export type CreatePrPayload = {
   body: string;
   /** Open PRs on this head to accept without the server's marker. */
   adoptPulls?: number[];
+  /**
+   * Logins besides the author's whose listed PR on this head is ours (spec §4.3): the zone's
+   * `authorLoginAliases`, set only when it has some. Ops queued before it have none.
+   */
+  authorLoginAliases?: string[];
 };
 export type PostReviewPayload = {
   pr: number;
@@ -253,6 +338,13 @@ export type CreateLabelsPayload = {
   labels: { name: string; color: string; description: string }[];
 };
 export type MergePayload = { pr: number; sha: string; title: string; message: string };
+/** GitHub merging the base into PR `pr`, only while its head is `headSha` (`baseSha` is the key's). */
+export type UpdateBranchPayload = { pr: number; headSha: string; baseSha: string };
+/**
+ * A branch update's result: the forge's answer, or `no_token` when the push grant gave no token
+ * (no request was sent, and no wider token is ever tried).
+ */
+export type UpdateBranchResult = BranchUpdate | { kind: 'no_token' };
 /** `since`: the crew intent's creation time; the marker search looks at issues updated after it. */
 export type CreateIssuePayload = { title: string; body: string; labels: string[]; since: string };
 /** A body update (the op marker is appended) or, with `state: 'closed'`, a close. */
@@ -261,7 +353,11 @@ export type UpdateIssuePayload = {
   title?: string;
   body?: string;
   state?: 'closed';
+  /** With `state: 'closed'`: why it closed (GitHub's `state_reason`). */
+  stateReason?: 'completed';
 };
+/** A "blocked by" link: `issue` blocked by `blocker`, both in `repo` (the zone's repository). */
+export type AddBlockedByPayload = { issue: number; blocker: number; repo: string };
 export type SetLabelsPayload = { number: number; add: string[]; remove: string[] };
 /** A comment on an issue, found again by `marker` (from `commentMarker`), which ends the body. */
 export type CommentIssuePayload = { number: number; body: string; marker: string };
@@ -305,6 +401,8 @@ export const opKeys = {
   review: (itemId: number, headSha: string, dropId: string) =>
     `review:${itemId}:${headSha}:${dropId}`,
   merge: (itemId: number, headSha: string) => `merge:${itemId}:${headSha}`,
+  updateBranch: (itemId: number, headSha: string, baseSha: string) =>
+    `update_branch:${itemId}:${headSha}:${baseSha}`,
   issue: (zoneId: string, objective: string, outputKey: string) =>
     `issue:${zoneId}:${objective}:${outputKey}`,
   update: (crewIssueId: number, sha12: string) => `update:${crewIssueId}:${sha12}`,
@@ -352,7 +450,7 @@ const withMarker = (body: string, opKey: string): string =>
 const isOwnPr = (body: string, opKey: string): boolean =>
   isServerPrBody(body, Number(opKey.split(':')[1]));
 
-/** Marked by the server, or listed by the operator and written by the author account. */
+/** Marked by the server, or listed by the operator and written by the author or an alias. */
 async function ours(
   forges: ForgePair,
   pr: PullFacts,
@@ -361,7 +459,9 @@ async function ours(
 ): Promise<boolean> {
   if (isOwnPr(pr.body, opKey)) return true;
   if (!(p.adoptPulls ?? []).includes(pr.number)) return false;
-  return pr.author === (await forges.author.viewerLogin());
+  const logins = [await forges.author.viewerLogin(), ...(p.authorLoginAliases ?? [])];
+  const author = pr.author.toLowerCase();
+  return logins.some((l) => l.toLowerCase() === author);
 }
 
 /** Read-back: the op's result if its effect is visible on the forge, else `null`. */
@@ -383,6 +483,21 @@ async function lookup(forges: ForgePair, kind: OpKind, opKey: string, payload: u
       const p = payload as MergePayload;
       const pr = await forges.author.getPull(p.pr);
       return pr?.merged ? { merged: true } : null;
+    }
+    case 'update_branch': {
+      // A head that moved off `headSha` is the update's effect (GitHub answers 202 before the
+      // merge lands) only when it holds both the old head and the base, as the forge's merge
+      // does. Any other move (an agent push) is `head_moved`: no update made, nothing charged.
+      // Either way sending again would only be refused as head_moved.
+      const p = payload as UpdateBranchPayload;
+      const pr = await forges.author.getPull(p.pr);
+      if (pr === null || pr.headSha === null || pr.headSha === p.headSha) return null;
+      const [fromHead, fromBase] = await Promise.all([
+        forges.author.compare(p.headSha, pr.headSha),
+        forges.author.compare(p.baseSha, pr.headSha),
+      ]);
+      const merged = fromHead.behindBy === 0 && fromBase.behindBy === 0;
+      return { kind: merged ? 'updated' : 'head_moved' } satisfies UpdateBranchResult;
     }
     case 'create_issue': {
       const p = payload as CreateIssuePayload;
@@ -412,6 +527,14 @@ async function lookup(forges: ForgePair, kind: OpKind, opKey: string, payload: u
     case 'comment_issue': {
       const p = payload as CommentIssuePayload;
       return forges.author.findIssueCommentByMarker(p.number, p.marker);
+    }
+    case 'add_blocked_by': {
+      const p = payload as AddBlockedByPayload;
+      const { blockers } = await forges.author.listBlockedBy(p.issue);
+      const linked = blockers.some(
+        (b) => b.number === p.blocker && b.repo.toLowerCase() === p.repo.toLowerCase(),
+      );
+      return linked ? { issue: p.issue, blocker: p.blocker } : null;
     }
   }
 }
@@ -444,7 +567,7 @@ async function write(forges: ForgePair, kind: OpKind, opKey: string, payload: un
           status: 409,
         });
       }
-      const { adoptPulls: _listed, ...input } = p;
+      const { adoptPulls: _listed, authorLoginAliases: _aliases, ...input } = p;
       return forges.author.findOrCreatePullRequest({ ...input, body: withMarker(p.body, opKey) });
     }
     case 'post_review': {
@@ -466,6 +589,22 @@ async function write(forges: ForgePair, kind: OpKind, opKey: string, payload: un
       });
       return r.merged ? r : null;
     }
+    case 'update_branch': {
+      const p = payload as UpdateBranchPayload;
+      const noToken: UpdateBranchResult = { kind: 'no_token' };
+      if (!forges.pusher) return noToken;
+      let held: PushForge;
+      try {
+        held = await forges.pusher();
+      } catch {
+        return noToken; // refused, never widened to another token
+      }
+      try {
+        return (await held.forge.updateBranch(p.pr, p.headSha)) satisfies UpdateBranchResult;
+      } finally {
+        await held.release().catch(() => {});
+      }
+    }
     case 'create_issue': {
       const p = payload as CreateIssuePayload;
       const r = await forges.author.createIssue({
@@ -481,6 +620,7 @@ async function write(forges: ForgePair, kind: OpKind, opKey: string, payload: un
         ...(p.title !== undefined ? { title: p.title } : {}),
         ...(p.body !== undefined ? { body: withMarker(p.body, opKey) } : {}),
         ...(p.state ? { state: p.state } : {}),
+        ...(p.stateReason ? { stateReason: p.stateReason } : {}),
       });
       return { number: p.number };
     }
@@ -504,6 +644,11 @@ async function write(forges: ForgePair, kind: OpKind, opKey: string, payload: un
     case 'comment_issue': {
       const p = payload as CommentIssuePayload;
       return forges.author.createIssueComment(p.number, `${p.body}\n\n${p.marker}`);
+    }
+    case 'add_blocked_by': {
+      const p = payload as AddBlockedByPayload;
+      await forges.author.addBlockedBy(p.issue, p.blocker);
+      return { issue: p.issue, blocker: p.blocker };
     }
   }
 }
@@ -567,9 +712,12 @@ async function execute(db: Db, forges: ForgePair, op: Op, now: Date): Promise<Op
   } catch (err) {
     const status = (err as ForgeError | null)?.status;
     const error = errorMessage(err);
-    // A rate limit (403/429) says nothing about the write: leave it to read-back like a 5xx.
+    // A rate limit (403/429) says nothing about the write: leave it to read-back like a 5xx. A
+    // branch update is pinned to its head (expected_head_sha) and read back before each send, so
+    // any error fails it, and the caller may send it again.
     const state: OutboxState =
-      status !== undefined && status >= 400 && status < 500 && !isRateLimited(err)
+      op.kind === 'update_branch' ||
+      (status !== undefined && status >= 400 && status < 500 && !isRateLimited(err))
         ? 'failed'
         : 'unknown';
     if (state === 'failed') {

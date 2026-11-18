@@ -89,6 +89,7 @@ implement drop is queued. Near the usage limit only finishing work and doctor dr
   ],
   "adoptPulls": [],
   "maxConcurrentImplement": 1,
+  "maxOpenPrs": 3,
   "reviewReadToken": true
 }
 ```
@@ -183,6 +184,21 @@ implement drop is queued. Near the usage limit only finishing work and doctor dr
   an `shmMb` limit.
 - **Concurrency:** raising `maxConcurrentImplement` adds conflicts that resolve drops must fix.
   Start at 1.
+- **Open PR cap:** `maxOpenPrs` (an integer from 1 to 50; absent, the default, means no cap)
+  bounds how many of the zone's items may be in `pr_open` at once. At the cap, a pass starts no
+  new implement drop, and the status line (home and `ctl status`) says
+  `waiting: <n> open PRs (cap <maxOpenPrs>)`. Resolve, heal, review, resume and crew drops still
+  run, so open PRs keep moving toward merge; once one merges or closes, the next pass starts the
+  next ready issue. Each PR that lands moves main under the others, so a small cap keeps approved
+  PRs from going stale and spending their `resolve-total` budget.
+- **Overlap hold:** a ready issue whose `## Placement` names a file an open PR changes is not
+  started while that PR is open; the next ready issue in rank starts instead. Placement paths are
+  the section's inline code spans that look like repository paths (they contain `/` or end in a
+  file extension); one ending in `/` is a directory and overlaps every file under it. The held
+  issue's reason reads `waiting: overlaps #<pr> on <path>` on the Work page and in the status
+  line, and observe mode records `would_wait:overlap`. Each pass stores the open PR's file list
+  when GitHub returns it complete; an incomplete or unread list holds nothing back, and an issue
+  whose Placement names no path is never held. Neither rule touches work already running or open.
 - **Attribution:** `"attribution": false` stops the agent adding Claude's co-author trailer and
   PR attribution, for projects whose policy forbids them. Jumpmaster's own PR and review text
   never carries a tool footer.

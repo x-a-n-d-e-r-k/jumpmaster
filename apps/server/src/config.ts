@@ -51,6 +51,8 @@ export const planLabel = (plan: string): string =>
 
 /** An image by digest (`name@sha256:<64 hex>`), the only form a signed zone runs. */
 const DIGEST_REF = /^[^\s@-][^\s@]*@sha256:[0-9a-f]{64}$/;
+/** A GitHub user login, or an app's `slug[bot]` login. */
+const LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(\[bot\])?$/;
 
 export const DEFAULT_PROTECTED_PATHS = [
   '.github/**',
@@ -183,6 +185,11 @@ export const DropZoneObject = z.object({
    */
   adoptPulls: z.array(z.number().int().positive()).default([]),
   maxConcurrentImplement: z.number().int().positive().default(1),
+  /**
+   * The most items the zone has in `pr_open` before it starts no new implement drop (#291).
+   * Absent: no cap. Resolve, heal, review, resume and crew drops are never held by it.
+   */
+  maxOpenPrs: z.number().int().min(1).max(50).optional(),
   /** How long an unresolved forge write may stay unknown; defaults to ciDeadlineMinutes. */
   outboxDeadlineMinutes: z.number().positive().optional(),
   /** Names of secrets for gate steps; values come from JM_ZONE_SECRET_<ZONE>_<NAME>[_FILE]. */
@@ -243,6 +250,11 @@ export const DropZoneObject = z.object({
     }),
   ciRequired: z.boolean().default(true),
   ciDeadlineMinutes: z.number().positive().default(45),
+  /**
+   * The oldest approved PR reserves the zone's next merge for this long after its approval, so
+   * younger items that are ready wait for it instead of moving main under it. 0 turns it off.
+   */
+  mergeReservationMinutes: z.number().int().min(0).max(240).default(30),
   retryLabel: z.string().min(1).default('agent-retry'),
   /**
    * Where a trusted human's ready issue that fails the drop-ready format is sent instead of to
@@ -315,6 +327,18 @@ export const DropZoneObject = z.object({
   crew: CrewSchema,
   /** Logins whose ready issues count as crew-filed (never the only provenance signal). */
   botLogins: z.array(z.string()).default([]),
+  /**
+   * Logins besides the author's own whose agent-branch PRs are adopted as the author's (spec
+   * §4.3): an old PAT bot's login, or an app's old slug after a rename. Guarded on additions.
+   */
+  authorLoginAliases: z
+    .array(
+      // The message never echoes the entry: a mistyped token must not land in a log.
+      z.string().regex(LOGIN_PATTERN, {
+        message: 'authorLoginAliases entries are GitHub logins (an app login ends in [bot])',
+      }),
+    )
+    .default([]),
 });
 
 /** Every key a zone may carry, for `ctl zones set` to refuse a path the schema does not know. */

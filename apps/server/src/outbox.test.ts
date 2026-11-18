@@ -11,7 +11,9 @@ import {
   upsertWorkItem,
 } from './db/repo.js';
 import { GitHubForge, type TokenProvider } from './forge/github.js';
+import { USE_PERMISSIONS } from './forge/github-app.js';
 import {
+  appPushToken,
   COMMENT_BODY_MAX,
   commentMarker,
   type ForgePair,
@@ -22,6 +24,7 @@ import {
   opMarker,
   pairFor,
   pairKey,
+  pushOptionsFor,
   resolveUnknown,
   runOp,
   sanitizeCrewText,
@@ -235,6 +238,76 @@ describe('FakeForgeState', () => {
     };
     f.state.addPull({ headRef: 'agent/issue-77', headSha: 'h2', author: 'mallory' });
     expect(await runOp(db, forges, op, new Date())).toMatchObject({ state: 'failed' });
+  });
+
+  describe('authorLoginAliases (issue #284)', () => {
+    const createOp = (extra: Record<string, unknown>) => ({
+      kind: 'create_pr' as const,
+      opKey: opKeys.pr(itemId, 'h2'),
+      zoneId: 'main',
+      itemId,
+      payload: { head: 'agent/issue-77', base: 'main', title: 't', body: 'b', ...extra },
+    });
+
+    test.each(['old-bot', 'Old-BOT'])('a listed PR by an alias (%s) is ours', async (author) => {
+      f.state.addPull({ headRef: 'agent/issue-77', headSha: 'h2', author });
+      const op = createOp({ adoptPulls: [1], authorLoginAliases: ['old-bot'] });
+      expect(await runOp(db, forges, op, new Date())).toMatchObject({
+        state: 'done',
+        result: { number: 1 },
+      });
+    });
+
+    test('read-back of an unknown op treats a listed PR by an alias as ours', async () => {
+      const op = createOp({ adoptPulls: [1], authorLoginAliases: ['OLD-bot'] });
+      seed(op, 'unknown', t0);
+      f.state.addPull({ headRef: 'agent/issue-77', headSha: 'h2', author: 'old-bot' });
+      expect(await resolveUnknown(db, forges, 'main', t0, 45)).toBe(1);
+      expect(getOutbox(db, op.opKey)?.state).toBe('done');
+    });
+
+    test('read-back of an unknown op ignores a listed PR by a stranger', async () => {
+      const op = createOp({ adoptPulls: [1], authorLoginAliases: ['old-bot'] });
+      seed(op, 'unknown', t0);
+      f.state.addPull({ headRef: 'agent/issue-77', headSha: 'h2', author: 'mallory' });
+      expect(await resolveUnknown(db, forges, 'main', t0, 45)).toBe(0);
+    });
+
+    test('the author login compares case-insensitively', async () => {
+      f.state.addPull({ headRef: 'agent/issue-77', headSha: 'h2', author: 'Author-Bot' });
+      const op = createOp({ adoptPulls: [1] });
+      expect(await runOp(db, forges, op, new Date())).toMatchObject({ state: 'done' });
+    });
+
+    test('an unlisted PR by an alias is not ours', async () => {
+      f.state.addPull({ headRef: 'agent/issue-77', headSha: 'h2', author: 'old-bot' });
+      const op = createOp({ authorLoginAliases: ['old-bot'] });
+      expect(await runOp(db, forges, op, new Date())).toMatchObject({
+        state: 'failed',
+        error: 'hand-opened PR on agent branch: #1',
+      });
+    });
+
+    test('a listed PR by a stranger is not ours', async () => {
+      f.state.addPull({ headRef: 'agent/issue-77', headSha: 'h2', author: 'mallory' });
+      const op = createOp({ adoptPulls: [1], authorLoginAliases: ['old-bot'] });
+      expect(await runOp(db, forges, op, new Date())).toMatchObject({ state: 'failed' });
+    });
+
+    test('a queued op without the field trusts the author login alone', async () => {
+      f.state.addPull({ headRef: 'agent/issue-77', headSha: 'h2', author: 'old-bot' });
+      const op = createOp({ adoptPulls: [1] });
+      expect(await runOp(db, forges, op, new Date())).toMatchObject({ state: 'failed' });
+    });
+
+    test('the forge create call never receives the aliases', async () => {
+      const op = createOp({ adoptPulls: [1], authorLoginAliases: ['old-bot'] });
+      expect(await runOp(db, forges, op, new Date())).toMatchObject({ state: 'done' });
+      const creates = f.author.calls.filter((c) => c.method === 'findOrCreatePullRequest');
+      expect(creates).toHaveLength(1);
+      expect(creates[0]?.args[0]).not.toHaveProperty('authorLoginAliases');
+      expect(creates[0]?.args[0]).not.toHaveProperty('adoptPulls');
+    });
   });
 
   test('create_pr tracks an open PR carrying this item marker from an older head', async () => {
@@ -910,6 +983,186 @@ describe('pairFor by credential kind (spec §4.4)', () => {
     expect(() =>
       pairFor(twoBot, tokens, { refs: { ...patRefs, author: app('o') }, appTokens, appIdentity }),
     ).not.toThrow(appToken);
+  });
+
+  describe('the push grant behind a branch update (#292, D1 and D5)', () => {
+    const pushToken = `ghs_${alnum(35)}P`;
+    const updateOp = () => ({
+      kind: 'update_branch' as const,
+      opKey: opKeys.updateBranch(itemId, 'aaa', 'base1'),
+      zoneId: 'main',
+      itemId,
+      payload: { pr: 7, headSha: 'aaa', baseSha: 'base1' },
+    });
+    /** The fake answers every read; the pair's pusher alone makes the write, over HTTP. */
+    const withPusher = (pair: ForgePair): ForgePair => ({
+      author: f.author,
+      reviewer: f.reviewer,
+      ...(pair.pusher ? { pusher: pair.pusher } : {}),
+    });
+    const expectUpdate = (token: string) =>
+      nock(api)
+        .matchHeader('authorization', `token ${token}`)
+        .put('/repos/o/r/pulls/7/update-branch', (b) => b.expected_head_sha === 'aaa')
+        .reply(202, { message: 'Updating pull request branch.' });
+    beforeEach(() => {
+      f.state.addPull({
+        number: 7,
+        headRef: 'agent/issue-1',
+        headSha: 'aaa',
+        author: 'author-bot',
+      });
+    });
+
+    test('PAT mode updates with the author token, the push containers’ grant', async () => {
+      const pair = pairFor(twoBot, tokens, { refs: patRefs });
+      expectUpdate(authorPat);
+      const r = await runOp(db, withPusher(pair), updateOp(), t0);
+      expect(r).toEqual({ state: 'done', result: { kind: 'updated' } });
+    });
+
+    test('app mode mints the push use from the author app per update, and revokes it', async () => {
+      const revoke = vi.fn(async () => {});
+      const source = {
+        fresh: vi.fn(async () => ({
+          token: pushToken,
+          expiresAt: plus(t0, 60 * MIN),
+          owner: 'o',
+          revoke,
+        })),
+      };
+      const serverAuthor = vi.fn(async () => appToken);
+      const pair = pairFor(twoBot, tokens, {
+        refs: { author: app('o'), reviewer: pat('githubReviewerToken') },
+        appTokens: () => ({ token: serverAuthor }),
+        appIdentity,
+        pushToken: appPushToken(source, 'main'),
+      });
+      expectUpdate(pushToken);
+      const r = await runOp(db, withPusher(pair), updateOp(), t0);
+      expect(r).toEqual({ state: 'done', result: { kind: 'updated' } });
+      // The token source's request: the author app, the push use, this zone.
+      expect(source.fresh).toHaveBeenCalledExactlyOnceWith('main', 'author', 'push');
+      // That use is contents: write alone, narrowed to the one repository by the mint body.
+      expect(USE_PERMISSIONS.push).toEqual({ contents: 'write' });
+      expect(revoke).toHaveBeenCalledOnce();
+      // The server-author token (wider: pull requests, issues…) was never asked for.
+      expect(serverAuthor).not.toHaveBeenCalled();
+    });
+
+    test('app mode refuses rather than widens when the mint fails: no request is sent', async () => {
+      const source = {
+        fresh: vi.fn(async (): Promise<never> => {
+          throw new Error(`mint failed: ${appToken}`);
+        }),
+      };
+      const serverAuthor = vi.fn(async () => appToken);
+      const pair = pairFor(twoBot, tokens, {
+        refs: { author: app('o'), reviewer: pat('githubReviewerToken') },
+        appTokens: () => ({ token: serverAuthor }),
+        appIdentity,
+        pushToken: appPushToken(source, 'main'),
+      });
+      const r = await runOp(db, withPusher(pair), updateOp(), t0);
+      expect(r).toEqual({ state: 'done', result: { kind: 'no_token' } });
+      expect(source.fresh).toHaveBeenCalledOnce();
+      expect(serverAuthor).not.toHaveBeenCalled();
+      expect(calls('updateBranch')).toEqual([]);
+      expect(JSON.stringify(getOutbox(db, updateOp().opKey))).not.toContain(appToken);
+    });
+
+    test('an app author with no push token source has no pusher, so no request', async () => {
+      const pair = pairFor(twoBot, tokens, {
+        refs: { author: app('o'), reviewer: pat('githubReviewerToken') },
+        appTokens: fakeApps(),
+        appIdentity,
+      });
+      expect(pair.pusher).toBeUndefined();
+      const r = await runOp(db, withPusher(pair), updateOp(), t0);
+      expect(r).toEqual({ state: 'done', result: { kind: 'no_token' } });
+    });
+
+    test('a head already off the expected SHA is read back as updated, and not sent', async () => {
+      f.state.setHead(7, 'bbb');
+      const pair = pairFor(twoBot, tokens, { refs: patRefs });
+      const r = await runOp(db, withPusher(pair), updateOp(), t0);
+      expect(r).toEqual({ state: 'done', result: { kind: 'updated' } });
+    });
+
+    test('a head moved by an agent push (not holding the base) is read back as head_moved', async () => {
+      f.state.setHead(7, 'ccc');
+      f.state.compares.set('base1...ccc', {
+        aheadBy: 1,
+        behindBy: 2,
+        baseSha: 'base1',
+        mergeBaseSha: 'base0',
+      });
+      const pair = pairFor(twoBot, tokens, { refs: patRefs });
+      const r = await runOp(db, withPusher(pair), updateOp(), t0);
+      expect(r).toEqual({ state: 'done', result: { kind: 'head_moved' } });
+      expect(calls('updateBranch')).toEqual([]);
+    });
+
+    describe('the live wiring: ForgePairs with pushOptionsFor, and no refs (main.ts)', () => {
+      const entry = { source: 'file', fingerprint: 'F1', entry: {} } as unknown as AppEntryRead;
+      const missing = { source: 'missing' } as unknown as AppEntryRead;
+      const zone = { ...twoBot, id: 'main' };
+      const appAuthor: ResolvedApps = new Map([['o', { author: entry, reviewer: missing }]]);
+      const minted = (revoke: () => Promise<void> = async () => {}) => ({
+        token: pushToken,
+        expiresAt: plus(t0, 60 * MIN),
+        owner: 'o',
+        revoke,
+      });
+      const source = (mint: () => Promise<ReturnType<typeof minted>>) => ({ fresh: vi.fn(mint) });
+
+      test('an app-author zone updates with the minted push token, never the author PAT', async () => {
+        const revoke = vi.fn(async () => {});
+        const src = source(async () => minted(revoke));
+        const pair = new ForgePairs().for(zone, tokens, pushOptionsFor(zone, appAuthor, src));
+        expectUpdate(pushToken);
+        const r = await runOp(db, withPusher(pair), updateOp(), t0);
+        expect(r).toEqual({ state: 'done', result: { kind: 'updated' } });
+        expect(src.fresh).toHaveBeenCalledExactlyOnceWith('main', 'author', 'push');
+        expect(revoke).toHaveBeenCalledOnce();
+      });
+
+      test('an app-author zone whose mint fails sends nothing: refused, not widened', async () => {
+        const src = source(async () => {
+          throw new Error('mint failed');
+        });
+        const pair = new ForgePairs().for(zone, tokens, pushOptionsFor(zone, appAuthor, src));
+        const r = await runOp(db, withPusher(pair), updateOp(), t0);
+        expect(r).toEqual({ state: 'done', result: { kind: 'no_token' } });
+        expect(src.fresh).toHaveBeenCalledOnce();
+      });
+
+      test('a PAT-author zone keeps the author PAT, and its pair key', async () => {
+        const src = source(async () => minted());
+        const opts = pushOptionsFor(zone, new Map(), src);
+        expect(opts).toEqual({});
+        const pair = new ForgePairs().for(zone, tokens, opts);
+        expectUpdate(authorPat);
+        const r = await runOp(db, withPusher(pair), updateOp(), t0);
+        expect(r).toEqual({ state: 'done', result: { kind: 'updated' } });
+        expect(src.fresh).not.toHaveBeenCalled();
+      });
+
+      test('a zone switched to an app author gets a new pair, without the PAT pusher', () => {
+        const pairs = new ForgePairs();
+        const src = source(async () => minted());
+        const before = pairs.for(zone, tokens, pushOptionsFor(zone, new Map(), src));
+        const after = pairs.for(zone, tokens, pushOptionsFor(zone, appAuthor, src));
+        expect(after).not.toBe(before);
+      });
+    });
+
+    test('any error fails the op, so the caller may send it again', async () => {
+      const pair = pairFor(twoBot, tokens, { refs: patRefs });
+      nock(api).put('/repos/o/r/pulls/7/update-branch').reply(502, { message: 'Bad Gateway' });
+      const r = await runOp(db, withPusher(pair), updateOp(), t0);
+      expect(r.state).toBe('failed');
+    });
   });
 
   describe('app identity (spec §4.3)', () => {

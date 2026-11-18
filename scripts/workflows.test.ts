@@ -602,9 +602,9 @@ describe('release docs', () => {
     // The control on who can release is named, and the guard is described as what it is.
     expect(section).toMatch(/tag ruleset/);
     expect(section).toMatch(/additionally refuses a tag whose commit is not on `main`/);
-    // No revocation: stated plainly.
+    // No revocation: stated plainly; the stick's version floor (issue #270) is the bound on age.
     expect(section).toMatch(/never withdrawn/);
-    expect(section).toMatch(/no minimum version/i);
+    expect(section).toMatch(/at or above the stick's own release version/);
     // cosign without installing it: a digest-pinned image.
     expect(section).toMatch(
       /docker run --rm[^\n]*ghcr\.io\/sigstore\/cosign\/cosign:v[\d.]+@sha256:[0-9a-f]{64}/,

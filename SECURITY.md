@@ -70,10 +70,16 @@ A signature proves the image was built and signed by `release.yml` in this repos
 additionally refuses a tag whose commit is not on `main`. Images are published for linux/amd64
 and linux/arm64 under one digest.
 
-A signature is never withdrawn. Every image this workflow has ever signed keeps verifying, and a
-stick has no minimum version: it runs any signed release's images it is given. The newest
-release's `images.lock.json` is the only floor; to move off an image, update the lock (or the
-zone's digest) rather than expecting old signatures to stop working.
+A signature is never withdrawn: every image this workflow has ever signed keeps verifying. A
+stick under the `signed` image policy has a floor, though: it runs a drop or service image only
+if its signature comes from a release tag at or above the stick's own release version (read from
+the signing certificate's `release.yml@refs/tags/<tag>` identity; `vX.Y.Z-rc.N` sorts below
+`vX.Y.Z`). An older release's image is refused with `image signed for <tag>, older than this stick
+(<version>)`, a signature naming no release tag with `image signature carries no release tag`,
+and a stick built without a release version refuses every signed image. So a newer server works
+with older sticks, but no one can select an older trooper for a stick. The stick's own and egress
+images, pinned by digest at install, are outside this rule; above the floor, the newest release's
+`images.lock.json` decides which image a zone runs.
 
 ## How Jumpmaster guards the operator and the secrets
 

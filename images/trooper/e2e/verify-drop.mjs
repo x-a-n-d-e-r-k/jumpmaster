@@ -2,9 +2,9 @@
 // image's own signed policy, its real cosign and its read-only root with /state writable, and
 // drives the stick's own startup check and runDrop against the real engine with a fake server
 // client. Prints one line per check and exits non-zero on any failure.
-// From the environment: E2E_REPO, E2E_BRANCH, E2E_SHA, E2E_UNSIGNED (a digest reference to an
-// unsigned copy of the e2e trooper in a local registry), E2E_OTHER_SIGNED (an image signed keyless
-// by another identity).
+// From the environment: E2E_REPO, E2E_RELEASE_VERSION (the release version baked into the stick),
+// E2E_BRANCH, E2E_SHA, E2E_UNSIGNED (a digest reference to an unsigned copy of the e2e trooper in
+// a local registry), E2E_OTHER_SIGNED (an image signed keyless by another identity).
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 
@@ -112,6 +112,11 @@ check(
   release?.repository === env.E2E_REPO,
   release,
 );
+check(
+  'the stick image records its release version (the signature floor)',
+  release?.version === env.E2E_RELEASE_VERSION,
+  release,
+);
 const startup = (extra) =>
   prepareImageTrust(
     { ...env, ...extra },
@@ -191,6 +196,19 @@ check(
 );
 
 console.log(`  reason: ${other.result?.reason}`);
+
+// 3b. A stick without a release version refuses every signed image, before cosign (#270).
+const versionless = await prepareImageTrust(
+  { ...env, JM_ALLOWED_IMAGES: '' },
+  { cosign: execCosign('cosign', env), release: { ...release, version: null }, log: () => {} },
+);
+const noVersion = await drop('verify-no-version', OTHER, versionless);
+check(
+  'a stick without a release version refuses a signed image, nothing created',
+  noVersion.result?.reason === `image not verified: ${OTHER}: this stick has no release version` &&
+    noVersion.started === 0,
+  noVersion,
+);
 
 // 4. The same unsigned image, pinned by digest: runs, and the log says how it was let through.
 const pinned = await startup({ JM_ALLOWED_IMAGES: UNSIGNED });

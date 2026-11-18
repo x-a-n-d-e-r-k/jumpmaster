@@ -46,7 +46,7 @@ function trust(cosign: Cosign | undefined, repo = RC2_REPOSITORY): ImageTrust {
   return {
     policy: 'signed',
     allowed: new Set(),
-    signer: releaseSigner(repo),
+    signer: releaseSigner(repo, '0.4.0-rc.2'),
     ...(cosign ? { cosign } : {}),
   };
 }
@@ -240,7 +240,7 @@ describe('every failure refuses, with a reason', () => {
   test('the function itself refuses a layout with no index.json, never throws', async () => {
     const f = fakeCosign(ok);
     const r = await verifyIndexBundles(join(tmpdir(), 'jm-no-layout'), RC2_DIGEST, {
-      signer: releaseSigner(RC2_REPOSITORY),
+      signer: releaseSigner(RC2_REPOSITORY, '0.4.0-rc.2'),
       cosign: f.cosign,
       trustedRoot: TRUSTED_ROOT_PATH,
       timeoutMs: 1000,
