@@ -19,7 +19,7 @@ import { insertDrop, updateDrop } from '../db/repo.js';
 import type { GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import { statusOf } from '../status.js';
-import { zoneWorld } from '../test/fixtures.js';
+import { makeZone, zoneWorld } from '../test/fixtures.js';
 import { harness } from '../test/flowHarness.js';
 import {
   dropRows,
@@ -696,6 +696,48 @@ describe('goal ladder', () => {
     );
     expect(html).toContain('<li>#26: crew issue staged, not promoted</li>');
     expect(html).toContain('<li>#27</li>');
+  });
+
+  const ladder = (zone: DropZoneConfig, g: GoalRow | undefined): string =>
+    renderGoals({
+      zone,
+      zones: [zone],
+      goals: g,
+      crewIssues: [],
+      items: [],
+      skippedCrewUnpromoted: [],
+      doneByRuling: new Map(),
+    });
+  const withPath = (goalPath: string, repo = 'o/r'): DropZoneConfig => ({
+    ...makeZone({ id: 'jm', repo }),
+    crew: { ...makeZone().crew, goalPath },
+  });
+  const parsed = goals({ ok: true, lighthouse: 'L', sections: {}, objectives: [] });
+
+  test('the edit link encodes each path segment and keeps the slashes (#365)', () => {
+    const html = ladder(withPath('a b/goals.md'), parsed);
+    expect(html).toContain('href="https://github.com/o/r/blob/HEAD/a%20b/goals.md"');
+    expect(html).toContain('The goals live in a b/goals.md in o/r.');
+    expect(html).toContain('href="/zones/jm"');
+  });
+
+  test('a repo or goal path holding markup is escaped in the text and encoded in the link (#365)', () => {
+    const html = ladder(withPath('<script>/g.md', 'o/<script>'), parsed);
+    expect(html).not.toContain('<script>/g.md');
+    expect(html).not.toContain('o/<script>');
+    expect(html).toContain('The goals live in &lt;script&gt;/g.md in o/&lt;script&gt;.');
+    expect(html).toContain('href="https://github.com/o/%3Cscript%3E/blob/HEAD/%3Cscript%3E/g.md"');
+  });
+
+  test('a missing goal file links the intake page instead of GitHub (#365)', () => {
+    const html = ladder(
+      withPath('a b/goals.md'),
+      goals({ ok: false, error: 'a b/goals.md not found' }),
+    );
+    expect(html).toContain(
+      `a b/goals.md isn't in the repository yet. <a href="/zones/jm/intake">Write one with the intake page</a>.`,
+    );
+    expect(html).not.toContain('github.com');
   });
 
   test('an unparsed GOAL.md shows its parse error', () => {
