@@ -1274,7 +1274,7 @@ test('v37 keeps every invite as a line invite and adds the exchange columns, the
     );
   });
   const db = openDb(f);
-  expect(MIGRATIONS.at(-1)?.version).toBe(37);
+  expect(MIGRATIONS.at(-1)?.version).toBeGreaterThanOrEqual(37);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(
     db
@@ -1292,4 +1292,83 @@ test('v37 keeps every invite as a line invite and adds the exchange columns, the
   expect(() => add.run('i4', 'c4', 'line', 'th')).toThrow(/UNIQUE/);
   expect(() => add.run('i5', 'c5', 'pigeon', null)).toThrow(/CHECK/);
   db.close();
+});
+
+test('v38 keeps existing tokens and their audit rows', () => {
+  const f = dbAt(37, (raw) =>
+    raw.exec(
+      `INSERT INTO mcp_tokens (id, token_hash, zone_id, scope, label, created_at, expires_at,
+         revoked_at, last_used_at)
+       VALUES (1, 'h1', 'main', 'read', 'laptop', 'c1', 'e1', NULL, 'u1'),
+              (2, 'h2', 'main', 'write', '', 'c2', 'e2', 'r2', NULL);
+       INSERT INTO mcp_audit (id, token_id, zone_id, tool, args_sha256, outcome, detail, at)
+       VALUES (1, 1, 'main', 'mint', NULL, 'ok', 'read, 30 days', 'a1'),
+              (2, 1, 'main', 'get_goals', 'x', 'ok', '', 'a2'),
+              (3, 2, 'main', 'revoke', NULL, 'ok', '', 'a3'),
+              (4, NULL, NULL, 'auth', NULL, 'refused', 'unknown', 'a4');`,
+    ),
+  );
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(
+    db
+      .prepare(
+        `SELECT id, token_hash AS h, zone_id AS z, scope, label, created_at AS c, expires_at AS e,
+           revoked_at AS r, last_used_at AS u, chat_thread_id AS t, chat_message_id AS m,
+           session_hash AS s FROM mcp_tokens ORDER BY id`,
+      )
+      .all(),
+  ).toEqual([
+    {
+      id: 1,
+      h: 'h1',
+      z: 'main',
+      scope: 'read',
+      label: 'laptop',
+      c: 'c1',
+      e: 'e1',
+      r: null,
+      u: 'u1',
+      t: null,
+      m: null,
+      s: null,
+    },
+    {
+      id: 2,
+      h: 'h2',
+      z: 'main',
+      scope: 'write',
+      label: '',
+      c: 'c2',
+      e: 'e2',
+      r: 'r2',
+      u: null,
+      t: null,
+      m: null,
+      s: null,
+    },
+  ]);
+  expect(
+    db.prepare('SELECT id, token_id AS t, tool, detail FROM mcp_audit ORDER BY id').all(),
+  ).toEqual([
+    { id: 1, t: 1, tool: 'mint', detail: 'read, 30 days' },
+    { id: 2, t: 1, tool: 'get_goals', detail: '' },
+    { id: 3, t: 2, tool: 'revoke', detail: '' },
+    { id: 4, t: null, tool: 'auth', detail: 'unknown' },
+  ]);
+  expect(db.pragma('foreign_key_check')).toEqual([]);
+  // The rebuilt table takes chat tokens, keeps the hash unique and refuses any other scope.
+  const insert = db.prepare(
+    `INSERT INTO mcp_tokens (token_hash, zone_id, scope, created_at, expires_at, chat_thread_id,
+       chat_message_id, session_hash) VALUES (?, '*', ?, 'c', 'e', 1, 2, 's')`,
+  );
+  insert.run('h3', 'chat');
+  expect(() => insert.run('h3', 'chat')).toThrow(/UNIQUE/);
+  expect(() => insert.run('h4', 'admin')).toThrow(/CHECK/);
+  // The audit foreign key still points at the rebuilt table.
+  expect(() =>
+    db
+      .prepare("INSERT INTO mcp_audit (token_id, tool, outcome, at) VALUES (999, 'x', 'ok', 'a')")
+      .run(),
+  ).toThrow(/FOREIGN KEY/);
 });

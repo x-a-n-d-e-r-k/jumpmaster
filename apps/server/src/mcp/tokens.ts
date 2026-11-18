@@ -1,15 +1,31 @@
 import { createHash, randomBytes } from 'node:crypto';
 import type { Db } from '../db/open.js';
 
-export type McpScope = 'read' | 'write';
+export type McpScope = 'read' | 'write' | 'chat';
+/** The scopes an operator can mint for a zone; `chat` tokens are minted per turn by the server. */
 export const MCP_SCOPES = ['read', 'write'] as const;
-/** Who is calling: the zone always comes from here, never from a tool argument. */
-export type McpPrincipal = { tokenId: number; zoneId: string; scope: McpScope };
+export type ZoneScope = (typeof MCP_SCOPES)[number];
+/** A zone token's caller: the zone always comes from here, never from a tool argument. */
+export type ZonePrincipal = { tokenId: number; zoneId: string; scope: ZoneScope };
+/**
+ * A chat turn's caller: the zone is a tool argument, checked against the config on every call. The
+ * thread, message and session are the turn's, so every audit row leads back to them by `token_id`.
+ */
+export type ChatPrincipal = {
+  tokenId: number;
+  scope: 'chat';
+  threadId: number;
+  messageId: number;
+  /** The SHA-256 of the browser session that posted the owner's message. */
+  sessionHash: string;
+};
+export type McpPrincipal = ZonePrincipal | ChatPrincipal;
+export const isChatPrincipal = (p: McpPrincipal): p is ChatPrincipal => p.scope === 'chat';
 /** A token as the operator's list shows it: never the hash. */
 export type McpTokenInfo = {
   id: number;
   zoneId: string;
-  scope: McpScope;
+  scope: ZoneScope;
   label: string;
   createdAt: string;
   expiresAt: string;
@@ -22,6 +38,7 @@ export type TokenCheck =
   | { ok: false; reason: RefusedAuth; tokenId: number | null };
 
 export const MAX_TOKEN_DAYS = 90;
+export const MAX_CHAT_TOKEN_MINUTES = 60;
 
 /**
  * How much of `mcp_audit` is kept. `mint` and `revoke` rows are never pruned (one each per token).
@@ -109,20 +126,23 @@ export function auditRefusedAuth(db: Db, reason: string, tokenId: number | null,
   auditMcp(db, { tokenId, zoneId: null, tool: 'auth', outcome: 'refused', detail: reason }, now);
 }
 
+/** `jmm_` plus 32 random bytes in base64url: the shape the redaction patterns know. */
+const newToken = (): string => `jmm_${randomBytes(32).toString('base64url')}`;
+
 /**
  * Mints a token for one zone: `jmm_` plus 32 random bytes in base64url, valid for `days` (1 to
  * 90). Only its SHA-256 is stored, so the returned token is the one copy. Audited as `mint`.
  */
 export function mintMcpToken(
   db: Db,
-  o: { zoneId: string; scope: McpScope; days: number; label?: string },
+  o: { zoneId: string; scope: ZoneScope; days: number; label?: string },
   now: Date,
 ): { id: number; token: string; expiresAt: string } {
   if (!Number.isInteger(o.days) || o.days < 1 || o.days > MAX_TOKEN_DAYS) {
     throw new Error(`days must be an integer from 1 to ${MAX_TOKEN_DAYS}`);
   }
   if (!MCP_SCOPES.includes(o.scope)) throw new Error('scope must be read or write');
-  const token = `jmm_${randomBytes(32).toString('base64url')}`;
+  const token = newToken();
   const expiresAt = new Date(now.getTime() + o.days * 24 * 60 * 60 * 1000).toISOString();
   return db.transaction(() => {
     const r = db
@@ -148,6 +168,54 @@ export function mintMcpToken(
 }
 
 /**
+ * Mints the token one chat turn uses on `/mcp/chat`, valid for `minutes` (1 to 60) and revoked when
+ * the turn ends. It has no zone (`zone_id` is `*`) and names the turn's thread, message and session.
+ * Only its SHA-256 is stored, and it never appears in the operator's list. Audited as `mint` with
+ * detail `chat`.
+ */
+export function mintChatToken(
+  db: Db,
+  o: { threadId: number; messageId: number; sessionHash: string; minutes: number },
+  now: Date,
+): { id: number; token: string; expiresAt: string } {
+  if (!Number.isInteger(o.minutes) || o.minutes < 1 || o.minutes > MAX_CHAT_TOKEN_MINUTES) {
+    throw new Error(`minutes must be an integer from 1 to ${MAX_CHAT_TOKEN_MINUTES}`);
+  }
+  const token = newToken();
+  const expiresAt = new Date(now.getTime() + o.minutes * 60 * 1000).toISOString();
+  return db.transaction(() => {
+    const r = db
+      .prepare(
+        `INSERT INTO mcp_tokens (token_hash, zone_id, scope, created_at, expires_at,
+           chat_thread_id, chat_message_id, session_hash)
+         VALUES (?, '*', 'chat', ?, ?, ?, ?, ?)`,
+      )
+      .run(sha256(token), now.toISOString(), expiresAt, o.threadId, o.messageId, o.sessionHash);
+    const id = Number(r.lastInsertRowid);
+    auditMcp(db, { tokenId: id, zoneId: '*', tool: 'mint', outcome: 'ok', detail: 'chat' }, now);
+    return { id, token, expiresAt };
+  })();
+}
+
+type TokenRow = {
+  id: number;
+  zoneId: string;
+  scope: McpScope;
+  expiresAt: string;
+  revokedAt: string | null;
+  threadId: number | null;
+  messageId: number | null;
+  sessionHash: string | null;
+};
+
+function principalOf(row: TokenRow): McpPrincipal | null {
+  if (row.scope !== 'chat') return { tokenId: row.id, zoneId: row.zoneId, scope: row.scope };
+  const { threadId, messageId, sessionHash } = row;
+  if (threadId === null || messageId === null || sessionHash === null) return null;
+  return { tokenId: row.id, scope: 'chat', threadId, messageId, sessionHash };
+}
+
+/**
  * Looks the token up by its hash (an index probe on a hash, so no timing oracle on the token) and
  * says why it is refused: refused from `expires_at` on, and from the call after a revocation.
  * Records `last_used_at` on success.
@@ -156,19 +224,21 @@ export function checkMcpToken(db: Db, token: string | undefined, now: Date): Tok
   if (!token) return { ok: false, reason: 'missing', tokenId: null };
   const row = db
     .prepare(
-      `SELECT id, zone_id AS zoneId, scope, expires_at AS expiresAt, revoked_at AS revokedAt
+      `SELECT id, zone_id AS zoneId, scope, expires_at AS expiresAt, revoked_at AS revokedAt,
+         chat_thread_id AS threadId, chat_message_id AS messageId, session_hash AS sessionHash
          FROM mcp_tokens WHERE token_hash = ?`,
     )
-    .get(sha256(token)) as
-    | { id: number; zoneId: string; scope: McpScope; expiresAt: string; revokedAt: string | null }
-    | undefined;
+    .get(sha256(token)) as TokenRow | undefined;
   if (!row) return { ok: false, reason: 'unknown', tokenId: null };
   if (row.revokedAt !== null) return { ok: false, reason: 'revoked', tokenId: row.id };
   if (now.getTime() >= Date.parse(row.expiresAt)) {
     return { ok: false, reason: 'expired', tokenId: row.id };
   }
+  const principal = principalOf(row);
+  // A chat row without its turn (a hand edit) is no principal at all.
+  if (!principal) return { ok: false, reason: 'unknown', tokenId: row.id };
   db.prepare('UPDATE mcp_tokens SET last_used_at = ? WHERE id = ?').run(now.toISOString(), row.id);
-  return { ok: true, principal: { tokenId: row.id, zoneId: row.zoneId, scope: row.scope } };
+  return { ok: true, principal };
 }
 
 export function verifyMcpToken(db: Db, token: string | undefined, now: Date): McpPrincipal | null {
@@ -176,7 +246,7 @@ export function verifyMcpToken(db: Db, token: string | undefined, now: Date): Mc
   return c.ok ? c.principal : null;
 }
 
-/** Revokes a live token; false when there is no such token or it was already revoked. */
+/** Revokes a live token, zone or chat; false when there is no such token or it was already revoked. */
 export function revokeMcpToken(db: Db, id: number, now: Date): boolean {
   return db.transaction(() => {
     const row = db
@@ -191,11 +261,13 @@ export function revokeMcpToken(db: Db, id: number, now: Date): boolean {
   })();
 }
 
+/** The operator's zone tokens; chat tokens are the server's own and never listed. */
 export function listMcpTokens(db: Db): McpTokenInfo[] {
   return db
     .prepare(
       `SELECT id, zone_id AS zoneId, scope, label, created_at AS createdAt, expires_at AS expiresAt,
-         revoked_at AS revokedAt, last_used_at AS lastUsedAt FROM mcp_tokens ORDER BY id`,
+         revoked_at AS revokedAt, last_used_at AS lastUsedAt FROM mcp_tokens
+         WHERE scope != 'chat' ORDER BY id`,
     )
     .all() as McpTokenInfo[];
 }

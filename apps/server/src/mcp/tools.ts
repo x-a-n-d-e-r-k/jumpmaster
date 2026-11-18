@@ -26,7 +26,7 @@ import { getGoals } from '../goals.js';
 import { fence, neutralise } from '../payloads.js';
 import { redactionList } from '../scrub.js';
 import { dispatchGate } from '../usage.js';
-import { auditMcp, type McpPrincipal, type McpScope } from './tokens.js';
+import { auditMcp, isChatPrincipal, type McpPrincipal, type McpScope } from './tokens.js';
 
 export type ToolContext = {
   db: Db;
@@ -36,6 +36,13 @@ export type ToolContext = {
   now(): Date;
   log?: (msg: string) => void;
 };
+
+/**
+ * What `callTool` is given: a zone principal's zone (resolved by the route), or none for a chat
+ * principal, whose zone is the call's `zoneId`. `actions` says whether a chat principal may call
+ * the write tools (off until the chat's actions land).
+ */
+export type CallContext = Omit<ToolContext, 'zone'> & { zone?: DropZoneConfig; actions?: boolean };
 
 export const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -48,9 +55,15 @@ const errorCode = (e: unknown): string => {
 /** What a tool did, for the caller and (as reason codes only) for the audit. */
 type Outcome = { result: CallToolResult; outcome: 'ok' | 'refused'; detail?: string };
 
+/**
+ * Who may call a tool: `read` and `write` are the zone tools (a chat principal calls them with a
+ * `zoneId`); `chat-read` and `chat-write` are the chat's own tools, which take their own arguments.
+ */
+export type ToolScope = 'read' | 'write' | 'chat-read' | 'chat-write';
+
 type ToolDef = {
   name: string;
-  scope: McpScope;
+  scope: ToolScope;
   description: string;
   input: z.ZodType;
   run(ctx: ToolContext, args: never, fx: Fence): Outcome;
@@ -403,7 +416,9 @@ const TOOLS: ToolDef[] = [
   fileStagedIssuesTool,
   raiseBriefingTool,
 ];
-const WRITE_TOOLS = TOOLS.filter((t) => t.scope === 'write').map((t) => t.name);
+const isZoneTool = (t: ToolDef): boolean => t.scope === 'read' || t.scope === 'write';
+const isWriteTool = (t: ToolDef): boolean => t.scope === 'write' || t.scope === 'chat-write';
+const WRITE_TOOLS = TOOLS.filter(isWriteTool).map((t) => t.name);
 /** Every tool's name, as a client sees it after `mcp__jumpmaster__` (the intake skills name them). */
 export const TOOL_NAMES: readonly string[] = TOOLS.map((t) => t.name);
 
@@ -412,13 +427,58 @@ function inputSchema(schema: z.ZodType): Tool['inputSchema'] {
   return json as Tool['inputSchema'];
 }
 
-/** The tools a token's scope may see: a read token never sees the write tools. */
-export function listTools(scope: McpScope): Tool[] {
-  return TOOLS.filter((t) => scope === 'write' || t.scope === 'read').map((t) => ({
+/**
+ * Whether a scope may call a tool: a read token only the read tools, a write token every zone tool,
+ * and a chat token the read tools of both kinds, plus the write tools of both with `actions`.
+ */
+function allowed(t: ToolDef, scope: McpScope, actions: boolean): boolean {
+  if (scope === 'read') return t.scope === 'read';
+  if (scope === 'write') return isZoneTool(t);
+  return actions || !isWriteTool(t);
+}
+
+/** The schema a chat principal sees for a zone tool: its own, with a required `zoneId`. */
+function chatInputSchema(t: ToolDef): Tool['inputSchema'] {
+  const own = inputSchema(t.input);
+  return {
+    ...own,
+    properties: { ...own.properties, zoneId: { type: 'string' } },
+    required: [...(own.required ?? []), 'zoneId'],
+  };
+}
+
+/**
+ * The tools a token's scope may see: a read token never sees the write tools. A chat token sees
+ * every zone tool it may call with a required `zoneId` added, plus the chat's own tools.
+ */
+export function listTools(scope: McpScope, o: { actions?: boolean } = {}): Tool[] {
+  return TOOLS.filter((t) => allowed(t, scope, o.actions ?? false)).map((t) => ({
     name: t.name,
     description: t.description,
-    inputSchema: inputSchema(t.input),
+    inputSchema: scope === 'chat' && isZoneTool(t) ? chatInputSchema(t) : inputSchema(t.input),
   }));
+}
+
+/**
+ * The zone a call acts on, and the arguments the tool parses: a zone principal's own zone, or for
+ * a chat principal the configured zone its `zoneId` names (taken off the arguments of a zone tool,
+ * whose schema does not know it). Null when the zone is not configured.
+ */
+function zoneOf(
+  ctx: CallContext,
+  tool: ToolDef,
+  args: Record<string, unknown>,
+): { zone: DropZoneConfig; args: Record<string, unknown> } | null {
+  const { principal, config } = ctx;
+  if (!isChatPrincipal(principal)) {
+    const zone = ctx.zone ?? config.dropZones.find((z) => z.id === principal.zoneId);
+    return zone ? { zone, args } : null;
+  }
+  const { zoneId, ...rest } = args;
+  const zone =
+    typeof zoneId === 'string' ? config.dropZones.find((z) => z.id === zoneId) : undefined;
+  if (!zone) return null;
+  return { zone, args: isZoneTool(tool) ? rest : args };
 }
 
 const hourBefore = (at: Date): string => new Date(at.getTime() - 60 * 60 * 1000).toISOString();
@@ -472,19 +532,22 @@ const budgetRefusalRecorded = (db: Db, tokenId: number, at: Date): boolean =>
  * the caller.
  */
 export async function callTool(
-  ctx: ToolContext,
+  ctx: CallContext,
   name: string,
   args: Record<string, unknown>,
 ): Promise<CallToolResult> {
   const { db, principal } = ctx;
   const at = ctx.now();
   const tool = TOOLS.find((t) => t.name === name);
+  // A chat call's zone is known once its `zoneId` is checked; until then the audit names none
+  // (the argument is the caller's text).
+  let zoneId: string | null = isChatPrincipal(principal) ? null : principal.zoneId;
   const audit = (outcome: 'ok' | 'refused' | 'error', detail?: string) =>
     auditMcp(
       db,
       {
         tokenId: principal.tokenId,
-        zoneId: principal.zoneId,
+        zoneId,
         // An unknown name is the caller's text: it is not stored.
         tool: tool?.name ?? 'unknown',
         args,
@@ -507,10 +570,15 @@ export async function callTool(
         return budgetRefusalRecorded(db, principal.tokenId, at) ? out.result : refuse(out);
       }
       if (!tool) return refuse(refused('unknown tool', 'unknown tool'));
-      if (tool.scope === 'write') {
-        if (principal.scope !== 'write') {
-          return refuse(refused('a read token cannot call write tools', 'read scope'));
-        }
+      if (!allowed(tool, principal.scope, ctx.actions ?? false)) {
+        return principal.scope === 'chat'
+          ? refuse(refused('this chat cannot call write tools', 'chat scope'))
+          : refuse(refused('a read token cannot call write tools', 'read scope'));
+      }
+      const target = zoneOf(ctx, tool, args);
+      if (!target) return refuse(refused('unknown zone', 'unknown zone'));
+      zoneId = target.zone.id;
+      if (isWriteTool(tool)) {
         const budget = mcpConfigOf(ctx.config).writesPerHour;
         if (writesInLastHour(db, principal.tokenId, at) >= budget) {
           return refuse(
@@ -518,7 +586,7 @@ export async function callTool(
           );
         }
       }
-      const parsed = tool.input.safeParse(args);
+      const parsed = tool.input.safeParse(target.args);
       if (!parsed.success) {
         const issues = parsed.error.issues
           .map((i) => `${i.path.join('.') || '(arguments)'}: ${i.message}`)
@@ -526,11 +594,11 @@ export async function callTool(
         return refuse(refused(`invalid arguments: ${issues}`, 'invalid arguments'));
       }
       const out = tool.run(
-        { ...ctx, now: () => at },
+        { ...ctx, zone: target.zone, now: () => at },
         parsed.data as never,
         fencer(redactionList(ctx.config.secrets)),
       );
-      if (tool.scope === 'read' && out.outcome === 'ok') audit('ok');
+      if (!isWriteTool(tool) && out.outcome === 'ok') audit('ok');
       else audit(out.outcome, out.detail);
       return out.result;
     })();
