@@ -54,7 +54,7 @@ import { latestDoctorRun } from './doctor/run.js';
 import { fableStatus } from './fable.js';
 import type { AppTokenSource } from './forge/app-tokens.js';
 import type { Forge } from './forge/github.js';
-import { getGoals } from './goals.js';
+import { getGoals, objectivesDone } from './goals.js';
 import { StickFetches } from './images/fetches.js';
 import { createInvite, inviteProblem, inviteTtl } from './install/invite.js';
 import { type InstallRouteDeps, registerInstallRoutes } from './install/routes.js';
@@ -613,6 +613,7 @@ export function createApp(
       crewIssues: listCrewIssues(db, zone.id),
       items: listWorkItems(db, zone.id),
       skippedCrewUnpromoted: lastSyncResult(zone.id)?.skippedCrewUnpromoted ?? [],
+      doneByRuling: objectivesDone(db, zone.id),
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });

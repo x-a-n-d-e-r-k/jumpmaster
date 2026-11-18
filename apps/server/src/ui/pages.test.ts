@@ -580,6 +580,7 @@ describe('briefings', () => {
         ],
         items: [],
         skippedCrewUnpromoted: [],
+        doneByRuling: new Map(),
       });
     expect(html).not.toContain('<img');
     expect(html).toContain('&lt;img');
@@ -644,6 +645,7 @@ describe('goal ladder', () => {
       ],
       items: [item],
       skippedCrewUnpromoted: [],
+      doneByRuling: new Map(),
     });
     expect(html).toContain('Objectives (goal ladder)');
     expect(html).toContain('Every endpoint is documented.');
@@ -662,6 +664,7 @@ describe('goal ladder', () => {
       crewIssues: [],
       items: [],
       skippedCrewUnpromoted: [12, 13],
+      doneByRuling: new Map(),
     });
     expect(html).toContain('Crew issues not started (no recorded promotion)');
     expect(html).toContain('#12');
@@ -680,6 +683,7 @@ describe('goal ladder', () => {
       ],
       items: [],
       skippedCrewUnpromoted: [24, 25, 26, 27],
+      doneByRuling: new Map(),
     });
     expect(html).toContain(
       '<li>#24: crew issue rejected. It can never start: close it, or file a fresh issue for the work.</li>',
@@ -699,6 +703,7 @@ describe('goal ladder', () => {
       crewIssues: [],
       items: [],
       skippedCrewUnpromoted: [],
+      doneByRuling: new Map(),
     });
     expect(html).toContain('could not be parsed: no ## Objectives section');
   });
@@ -1008,6 +1013,7 @@ describe('zones are named by their repository (#99)', () => {
       crewIssues: [],
       items: [],
       skippedCrewUnpromoted: [],
+      doneByRuling: new Map(),
     });
     expect(goals).toContain('acme/widgets');
     expectNoBareId(goals);
