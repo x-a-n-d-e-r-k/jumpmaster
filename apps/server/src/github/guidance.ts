@@ -32,7 +32,7 @@ export const PAT_PERMISSIONS: Record<PatRole, Record<string, 'read' | 'write'>> 
 };
 
 /** Never in a template: Workflows could change CI, Administration the ruleset that guards merges. */
-const FORBIDDEN = new Set(['workflows', 'administration']);
+export const FORBIDDEN: ReadonlySet<string> = new Set(['workflows', 'administration']);
 
 /** What the token step says beside every link. */
 export const RESOURCE_OWNER_NOTE =
