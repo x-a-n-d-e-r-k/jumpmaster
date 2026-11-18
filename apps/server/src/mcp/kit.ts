@@ -101,11 +101,10 @@ const withoutMarkers = (text: string): string =>
     .trimEnd();
 
 /**
- * A fence for one response: a fresh nonce, the text redacted of `secrets`, op markers dropped, and
+ * A fence for one response: a fresh nonce (or the caller's), the text redacted of `secrets`, op markers dropped, and
  * neutralised so no marker inside it can close the fence early.
  */
-export function fencer(secrets: string[]): Fence {
-  const nonce = randomUUID();
+export function fencer(secrets: string[], nonce: string = randomUUID()): Fence {
   return (trust, name, text) =>
     `${LABEL[trust]} ${fence(nonce, name, neutralise(redact(withoutMarkers(text), secrets)))}`;
 }

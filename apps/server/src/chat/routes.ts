@@ -1,8 +1,9 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import type { LiveConfig } from '../config/source.js';
+import { configReader, type LiveConfig } from '../config/source.js';
 import type { Db } from '../db/open.js';
 import { type ChatCard, cardUndoable, safeCardLink } from './cards.js';
+import { focusKnown, focusTitle } from './focus.js';
 import {
   appendMessage,
   type ChatMessage,
@@ -62,7 +63,16 @@ function afterSeqOf(req: FastifyRequest): number {
   return 0;
 }
 
-const NewThreadBody = z.object({ title: z.string().trim().min(1).max(200).optional() });
+const FocusBody = z.strictObject({
+  kind: z.enum(['zone', 'goals', 'briefing']),
+  zoneId: z.string().min(1).max(200),
+  ref: z.string().min(1).max(200),
+});
+const NewThreadBody = z.object({
+  title: z.string().trim().min(1).max(200).optional(),
+  /** What the thread is about ("Ask about this"): its first turn is given the object's context. */
+  focus: FocusBody.optional(),
+});
 const MessageBody = z.object({ text: z.string().min(1).max(MAX_MESSAGE_CHARS) });
 
 /**
@@ -91,6 +101,7 @@ export function threadIdOf(raw: string): number | undefined {
 
 export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): void {
   const { db } = deps;
+  const config = configReader(deps.config);
 
   app.get('/api/chat/threads', async (req, reply) => {
     if (!sessionOf(req, reply)) return reply;
@@ -100,8 +111,19 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
   app.post('/api/chat/threads', async (req, reply) => {
     if (!sessionOf(req, reply)) return reply;
     const body = NewThreadBody.safeParse(req.body ?? {});
-    if (!body.success) return reply.code(400).send({ error: 'a title is 1 to 200 characters' });
-    return { thread: createThread(db, { title: body.data.title ?? DEFAULT_TITLE }, deps.now()) };
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send({ error: 'a title is 1 to 200 characters, and a focus a zone, goals or briefing' });
+    }
+    const { focus } = body.data;
+    if (focus && !focusKnown(db, config(), focus)) {
+      return reply
+        .code(404)
+        .send({ error: `unknown ${focus.kind === 'briefing' ? 'briefing' : 'zone'}` });
+    }
+    const title = body.data.title ?? (focus ? focusTitle(db, config(), focus) : DEFAULT_TITLE);
+    return { thread: createThread(db, { title, ...(focus ? { focus } : {}) }, deps.now()) };
   });
 
   app.get<{ Params: { id: string } }>('/api/chat/threads/:id', async (req, reply) => {
