@@ -260,6 +260,15 @@ describe('guards from the tables', () => {
     const firstRows = first.startsWith(ZONE) ? rows : installRows();
     expect(row(firstRows, keyOf(first)).guard).toBe('browser-forbidden');
   });
+
+  test('claude.fableMaxUtilization is free, in models, a share from 0 to 1 (#381)', () => {
+    const r = row(installRows(), 'claude.fableMaxUtilization');
+    expect(r.guard).toBe('free');
+    expect(r.entry.group).toBe('models');
+    expect(r.entry.kind).toBe('number');
+    expect(r).toMatchObject({ min: 0, max: 1 });
+    expect(r.integer).toBeFalsy();
+  });
 });
 
 describe('words', () => {

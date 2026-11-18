@@ -26,6 +26,7 @@ import type {
 } from '../db/repo.js';
 import { ACTIVE_DROP_STATES } from '../db/repo.js';
 import type { DoctorAction } from '../doctor/checks.js';
+import { fableWindow, isFableWindow, modelFamily, PER_MODEL_WINDOWS } from '../fable.js';
 import { currentObjective, type GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import type { Status } from '../status.js';
@@ -194,23 +195,8 @@ function meter(label: string, v: number | null, note?: string): string {
 /** The windows usage_state already carries, read by the gate. */
 const GATE_WINDOWS = new Set(['five_hour', 'seven_day']);
 
-/**
- * Windows that belong to one model the key does not name (#377): `seven_day_overage_included` is
- * Claude's "per-model bucket", labelled by the model of the drop that reported it.
- */
-export const PER_MODEL_WINDOWS = new Set(['seven_day_overage_included']);
+export { modelFamily, PER_MODEL_WINDOWS };
 
-/** A model id's family: `claude-fable-5-2` reads `Fable`; null for any other shape. */
-export function modelFamily(model: string | null): string | null {
-  const m = model === null ? null : /^claude-([a-z]+)-/.exec(model);
-  const f = m?.[1];
-  return f ? f[0]?.toUpperCase() + f.slice(1) : null;
-}
-
-/** The Fable window: its key names Fable, or it is a per-model window a Fable drop reported. */
-const isFableWindow = (row: UsageWindowRow): boolean =>
-  row.key.includes('fable') ||
-  (PER_MODEL_WINDOWS.has(row.key) && modelFamily(row.model) === 'Fable');
 const PERIODS: [string, string][] = [
   ['five_hour', '5-hour'],
   ['seven_day', '7-day'],
@@ -233,17 +219,6 @@ export function windowLabel(key: string): string {
     .map((w) => w[0]?.toUpperCase() + w.slice(1))
     .join(' ');
   return period ? `${rest} (${period})` : rest;
-}
-
-/** The Fable window: the one whose key names Fable, the most recently observed if several. */
-function fableWindow(windows: readonly UsageWindowRow[]): UsageWindowRow | undefined {
-  return windows
-    .filter(isFableWindow)
-    .reduce<UsageWindowRow | undefined>(
-      (best, w) =>
-        best === undefined || (w.observedAt ?? '') > (best.observedAt ?? '') ? w : best,
-      undefined,
-    );
 }
 
 /**
