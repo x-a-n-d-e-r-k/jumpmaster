@@ -7,6 +7,7 @@ import {
   TriageImageSkippedSchema,
 } from './media.js';
 import { isOwnerName, isRepoName } from './names.js';
+import { RateLimitEventDataSchema } from './usage.js';
 
 export const EVENT_PREFIX = 'JM_EVENT ';
 /** One part of an event too large for a single `JM_EVENT ` line. */
@@ -320,59 +321,6 @@ export type Verdict = z.infer<typeof VerdictSchema>;
 export const MergeOutcomeSchema = z.enum(['clean', 'conflicts', 'up_to_date']);
 export type MergeOutcome = z.infer<typeof MergeOutcomeSchema>;
 
-/** A usage window's key as the account reports it: `five_hour`, `seven_day`, `seven_day_fable`... */
-export const USAGE_WINDOW_KEY = /^[a-z0-9_]{1,40}$/;
-const IsoSchema = z.iso.datetime({ offset: true });
-export const UsageWindowSchema = z.object({
-  utilization: z.number().min(0).max(1),
-  resetsAt: IsoSchema.optional(),
-});
-export type UsageWindow = z.infer<typeof UsageWindowSchema>;
-export type UsageWindows = Record<string, UsageWindow>;
-
-const isoOnly = (v: unknown): string | undefined =>
-  IsoSchema.safeParse(v).success ? (v as string) : undefined;
-
-/**
- * Every valid window of a reported `unifiedWindows` object (#144). A key not matching
- * USAGE_WINDOW_KEY, or a utilization outside 0..1, drops that window; a reset time that
- * `normalize` cannot make an ISO timestamp drops only the reset. Never throws.
- */
-export function usageWindowsOf(
-  v: unknown,
-  normalize: (resetsAt: unknown) => string | undefined = isoOnly,
-): UsageWindows | undefined {
-  if (typeof v !== 'object' || v === null || Array.isArray(v)) return undefined;
-  const out: UsageWindows = {};
-  for (const [key, w] of Object.entries(v as Record<string, unknown>)) {
-    if (!USAGE_WINDOW_KEY.test(key) || typeof w !== 'object' || w === null) continue;
-    const raw = w as Record<string, unknown>;
-    const resetsAt = isoOnly(normalize(raw.resetsAt ?? raw.resets_at));
-    const parsed = UsageWindowSchema.safeParse({
-      utilization: raw.utilization,
-      ...(resetsAt ? { resetsAt } : {}),
-    });
-    if (parsed.success) out[key] = parsed.data;
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
-}
-
-export const RateLimitEventDataSchema = z.object({
-  status: z.enum(['allowed', 'allowed_warning', 'rejected']),
-  resetsAt: z.string().optional(),
-  rateLimitType: z.string().optional(),
-  /** Every window the account reports, keyed as reported; bad entries are dropped, not refused. */
-  unifiedWindows: z
-    .preprocess((v) => usageWindowsOf(v), z.record(z.string(), UsageWindowSchema).optional())
-    .optional(),
-  /** Unobserved field names, kept as sent (pending rehearsal). */
-  isUsingOverage: z.boolean().optional(),
-  overageStatus: z.string().optional(),
-  /** When the extra-usage spending cap resets (monthly); never a usage window's reset. */
-  overageResetsAt: z.string().optional(),
-});
-export type RateLimitEventData = z.infer<typeof RateLimitEventDataSchema>;
-
 export const IMPLEMENT_OUTPUT_SCHEMA = {
   type: 'object',
   properties: {
@@ -649,6 +597,7 @@ export const DropResultSchema = z.object({
   numTurns: z.number().optional(),
 });
 export type DropResult = z.infer<typeof DropResultSchema>;
+export * from './chat.js';
 export * from './egress.js';
 export * from './media.js';
 export * from './names.js';
@@ -664,6 +613,7 @@ export {
   withBasicAuth,
 } from './redact.js';
 export { CREDENTIAL_FILES, MAX_SECRET_FILE_BYTES, readSecret, readSecretFile } from './secrets.js';
+export * from './usage.js';
 
 /**
  * The model that served a run: the `modelUsage` key with the most output tokens (the first on a
