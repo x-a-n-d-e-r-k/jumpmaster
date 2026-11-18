@@ -66,6 +66,14 @@ And at the top level of the server config:
   rejects. Insufficient evidence, a product question, an irreversible ruling, a drop that did not
   run on Fable, or a failed drop puts the issue to you as before, with the arbiter's reasons in the
   briefing. Turning it on is a guarded change; `arbiter: false` briefs every case as before.
+  It also rules, once per item ever, on a review disagreement: an item parked on
+  `budget exhausted: heal` whose PR is open with a request-changes verdict on its head, and whose
+  last heal answered the automated reviewer (never a person's change request, never CI). The
+  arbiter reads the PR head. A ruling for either side that acts retries the item on the next pass,
+  exactly as Retry does, and its later review and heal drops see the ruling as untrusted data: the
+  reviewer still decides, and the item still merges only with an approving verdict on its head and
+  CI. Anything else leaves the item parked, with the ruling as its briefing's diagnosis. If it
+  parks again, it is diagnosed and briefed to you as before.
 - A triage drop gets the issue's images. The server fetches at most 4 image URLs from the
   issue body, only GitHub attachments (`https://github.com/user-attachments/assets/…`,
   `user-images.githubusercontent.com`, `private-user-images.githubusercontent.com`), over HTTPS,

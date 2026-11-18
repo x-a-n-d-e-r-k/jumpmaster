@@ -326,6 +326,48 @@ describe('runCrew', () => {
     ]);
   });
 
+  test('arbitrate with a checkout checks out that branch and head, as diagnose does (D5)', async () => {
+    const arbitrate: CrewDropPayload = {
+      ...base,
+      role: 'arbitrate',
+      checkout: { number: 9, branch: 'agent/issue-1', headSha: 'h9' },
+    };
+    const a = world({
+      output: {
+        ruling: 'B',
+        because: 'b',
+        wouldReverse: 'w',
+        reversible: true,
+        productQuestion: false,
+        instruction: 'i',
+      },
+    });
+    const ctx = newCtx();
+    expect((await runCrew(arbitrate, a.deps, ctx)).status).toBe('completed');
+    expect(a.calls.find((c) => c[0] === 'checkoutBranch')).toEqual([
+      'checkoutBranch',
+      join(ctx.workdir, 'repo'),
+      'agent/issue-1',
+      'h9',
+      null,
+    ]);
+    expect(a.names()).not.toContain('prepareBranch');
+    // Without a checkout (a crew issue's arbitration) it stays on the default branch.
+    const n = world({
+      output: {
+        ruling: 'A',
+        because: 'b',
+        wouldReverse: 'w',
+        reversible: true,
+        productQuestion: false,
+        instruction: 'i',
+      },
+    });
+    await runCrew({ ...base, role: 'arbitrate' }, n.deps, newCtx());
+    expect(n.names()).not.toContain('checkoutBranch');
+    expect(n.names()).toContain('prepareBranch');
+  });
+
   test('a crew drop that changes the tree fails with "crew modified the tree"', async () => {
     const w = world({ writes: true });
     const r = await runCrew(lead, w.deps, newCtx());
