@@ -157,7 +157,7 @@ export function renderSticks(s: {
           ? `<br><span class="muted health">${escapeHtml(healthLine(st))}</span>`
           : '');
       const removeUrl = `/api/control/sticks/${encodeURIComponent(st.id)}/remove`;
-      const ask = `Remove the stick ${st.name}? Its token is revoked at once; drops it leased but never started go back to the queue. Run the installer with --uninstall on that machine to remove its container.`;
+      const ask = `Remove the stick ${st.name}? Its token is revoked at once; drops it leased go back to the queue. Run the installer with --uninstall on that machine to remove its container. This stick keeps any credentials it was already sent. Rotate the Claude and GitHub tokens if you don't trust it. A stick that enrolled with the join token can enroll again until that token is changed.`;
       const remove = `<button class="danger" data-remove="${escapeHtml(removeUrl)}" data-ask="${escapeHtml(ask)}">Remove</button> <output aria-live="polite"></output>`;
       return `<tr${stage.live ? '' : ' data-poll'} data-stick="${escapeHtml(st.id)}"><td>${escapeHtml(st.name)}</td><td>${status}</td><td>${escapeHtml(st.version ?? '-')}</td><td>${escapeHtml(st.capabilities.join(', ') || '-')}</td><td>${runs}</td><td>${troopers}</td><td>${remove}</td></tr>`;
     })

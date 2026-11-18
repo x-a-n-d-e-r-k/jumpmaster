@@ -90,7 +90,9 @@ const NOT_EXCLUDED = `AND drop_zone_id NOT IN (SELECT value FROM json_each(@excl
  * with no work item (a crew drop's) offers no Resume (credits.ts), so none binds to nothing. The gate is required: a caller that forgets it must not lease while stopped. All time
  * comes from `now`. Drops of the `exclude` zones (ones the stick can't run), and of the
  * `excludeRoles` (pushing roles, for a stick that can't take them), are never picked, under any
- * gate: they stay queued, untouched, for a capable stick.
+ * gate: they stay queued, untouched, for a capable stick. A stick that is gone or removed is leased
+ * nothing (issue #255), checked in the same transaction as the lease, so a removal racing it either
+ * comes first (nothing leased) or ends the lease it finds.
  */
 export function leaseNextDrop(
   db: Db,
@@ -104,6 +106,10 @@ export function leaseNextDrop(
   const exRoles = JSON.stringify(excludeRoles);
   return db.transaction(() => {
     if (isKilled(db)) return null;
+    const live = db
+      .prepare('SELECT 1 FROM sticks WHERE id = ? AND removed_at IS NULL')
+      .get(stickId);
+    if (!live) return null;
     let next: { id: string } | undefined;
     let probe = false;
     const probeNext = (): { id: string } | undefined => {

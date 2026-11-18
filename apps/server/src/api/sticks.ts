@@ -470,16 +470,19 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
        * The trooper count the stick runs at, read afresh (the operator may change it mid-poll) and
        * announced on the answer. True when the stick's live drops already reach it: it is leased
        * nothing, whatever `freeSlots` it asked with, so a lower count holds for an old stick too.
+       * 'removed' when the stick is gone or removed (issue #255): the poll answers 401.
        */
-      const full = (): boolean => {
-        const row = getStick(db, stick.id) ?? stick;
+      const full = (): boolean | 'removed' => {
+        const row = getStick(db, stick.id);
+        if (!row) return 'removed';
         const effective = effectiveSlots(row);
         reply.header(SLOTS_HEADER, String(effective));
         return liveDropsOn(db, stick.id) >= effective;
       };
+      const unauthorized = () => reply.code(401).send({ error: 'unauthorized' });
       const body = LeaseBody.safeParse(req.body);
       if (!body.success) {
-        full();
+        if (full() === 'removed') return unauthorized();
         return reply.code(400).send({ error: 'invalid body' });
       }
       // A stick that can't run push containers, or has no room for another pending push, gets no
@@ -496,7 +499,9 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         slots: body.data.slots,
         health: body.data.health,
       });
-      if (full() || body.data.freeSlots < 1) return reply.code(204).send();
+      const atStart = full();
+      if (atStart === 'removed') return unauthorized();
+      if (atStart || body.data.freeSlots < 1) return reply.code(204).send();
       let closed = false;
       // Not req.raw: IncomingMessage 'close' fires once the body is consumed, not on disconnect.
       reply.raw.on('close', () => {
@@ -504,6 +509,8 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       });
       const deadline = Date.now() + waitMs;
       for (;;) {
+        // Re-read each round: a stick removed while this poll waits is leased nothing.
+        if (!getStick(db, stick.id)) return unauthorized();
         const at = now();
         // Each poll reads the config afresh, and judges what the stick can run against it: the
         // payload is built from the config the lease saw.
@@ -551,7 +558,9 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         }
         await sleep(pollMs);
         // A count lowered while this poll waited holds from the next poll.
-        if (full()) {
+        const after = full();
+        if (after === 'removed') return unauthorized();
+        if (after) {
           reportSkips(reply, stick, cannot);
           return reply.code(204).send();
         }
