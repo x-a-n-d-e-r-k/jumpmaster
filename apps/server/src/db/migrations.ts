@@ -1256,6 +1256,14 @@ BEGIN
 END;
 `;
 
+/**
+ * v43 (#383): an item's arbitration that acted is applied once (Command's Retry on the parked
+ * item): `applied_at` records when, so two passes never retry it twice.
+ */
+const V43_SQL = `
+ALTER TABLE arbitrations ADD COLUMN applied_at TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1299,6 +1307,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 40, sql: V40_SQL },
   { version: 41, sql: V41_SQL, foreignKeysOff: true },
   { version: 42, sql: V42_SQL },
+  { version: 43, sql: V43_SQL },
 ];
 
 /**

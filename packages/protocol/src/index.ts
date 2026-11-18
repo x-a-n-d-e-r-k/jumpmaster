@@ -258,7 +258,12 @@ export const DropPayloadSchema = z.discriminatedUnion('role', [
   z.object({ ...dropPayloadBase, role: z.literal('resolve'), pr: PrRefSchema }),
   z.strictObject({ ...crewPayloadBase, role: z.literal('crew-lead') }),
   z.strictObject({ ...crewPayloadBase, role: z.literal('refute') }),
-  z.strictObject({ ...crewPayloadBase, role: z.literal('arbitrate') }),
+  z.strictObject({
+    ...crewPayloadBase,
+    role: z.literal('arbitrate'),
+    /** The pull request in dispute, when the arbitration is about a work item's review. */
+    checkout: PrRefSchema.optional(),
+  }),
   z.strictObject({
     ...crewPayloadBase,
     role: z.literal('triage'),

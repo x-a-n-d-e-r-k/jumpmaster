@@ -267,7 +267,8 @@ export type ArbitrationRuling = 'A' | 'B' | 'insufficient_evidence';
 
 /**
  * One arbiter ruling on a contested decision: `subject` names what was contested
- * (`issue:<crewIssueId>`), `basis` the exact text judged (the crew issue's `body_sha`). One per
+ * (`issue:<crewIssueId>`, or `item:<workItemId>` for a review disagreement), `basis` the exact text
+ * judged (the crew issue's `body_sha`, or `review` for an item: once per item ever). One per
  * subject and basis (`UNIQUE`), inserted in the arbitrate drop's own transaction.
  */
 export type Arbitration = {
@@ -283,6 +284,8 @@ export type Arbitration = {
   instruction: string | null;
   /** Why it failed, was discarded or did not act. */
   reason: string | null;
+  /** When an acting item ruling was applied (Command's Retry on the item); null until then. */
+  appliedAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -297,13 +300,62 @@ export type ArbitrationSettle = {
 };
 
 const ARB_COLS = `id, zone_id AS zoneId, subject, basis, drop_id AS dropId, state, ruling, acted, because,
-  instruction, reason, created_at AS createdAt, updated_at AS updatedAt`;
+  instruction, reason, applied_at AS appliedAt, created_at AS createdAt, updated_at AS updatedAt`;
 
 type ArbitrationRow = Omit<Arbitration, 'acted'> & { acted: number };
 const arbitrationOf = (r: ArbitrationRow): Arbitration => ({ ...r, acted: r.acted === 1 });
 
 /** The subject of a crew issue's arbitration (and of its briefings). */
 export const issueArbitrationSubject = (crewIssueId: number): string => `issue:${crewIssueId}`;
+
+/** The subject of a work item's arbitration: the same as its parked briefing's. */
+export const itemArbitrationSubject = (itemId: number): string => `item:${itemId}`;
+
+/**
+ * The basis of a work item's arbitration: a review disagreement. One per item ever, so a second
+ * disagreement on the same item goes to diagnose and Command.
+ */
+export const ITEM_ARBITRATION_BASIS = 'review';
+
+/** The work item's review arbitration, if it ever had one. */
+export const getItemArbitration = (db: Db, itemId: number): Arbitration | undefined =>
+  getArbitration(db, itemArbitrationSubject(itemId), ITEM_ARBITRATION_BASIS);
+
+/** The item's arbitration if it acted and was applied: its ruling goes to the next rounds. */
+export function appliedItemArbitration(db: Db, itemId: number): Arbitration | undefined {
+  const row = getItemArbitration(db, itemId);
+  return row && row.state === 'ruled' && row.acted && row.appliedAt !== null ? row : undefined;
+}
+
+/** The zone's item arbitrations that ruled to act and are not yet applied, oldest first. */
+export function unappliedItemArbitrations(db: Db, zoneId: string): Arbitration[] {
+  const rows = db
+    .prepare(
+      `SELECT ${ARB_COLS} FROM arbitrations WHERE zone_id = ? AND subject LIKE 'item:%'
+         AND basis = ? AND state = 'ruled' AND acted = 1 AND applied_at IS NULL ORDER BY id`,
+    )
+    .all(zoneId, ITEM_ARBITRATION_BASIS) as ArbitrationRow[];
+  return rows.map(arbitrationOf);
+}
+
+/**
+ * Claims an acting ruling for applying: sets `applied_at` only where it is unset, so of two passes
+ * one applies it. Returns false, changing nothing, when it was claimed already.
+ */
+export function claimArbitrationApply(db: Db, id: number, now: Date): boolean {
+  const r = db
+    .prepare('UPDATE arbitrations SET applied_at = ? WHERE id = ? AND applied_at IS NULL')
+    .run(now.toISOString(), id);
+  return r.changes > 0;
+}
+
+/** Undoes `claimArbitrationApply` when the apply could not run yet: the next pass tries again. */
+export function releaseArbitrationApply(db: Db, id: number, now: Date): void {
+  db.prepare('UPDATE arbitrations SET applied_at = NULL WHERE id = ? AND applied_at = ?').run(
+    id,
+    now.toISOString(),
+  );
+}
 
 /** Records a pending arbitration; throws a UNIQUE violation if (subject, basis) has one already. */
 export function insertArbitration(

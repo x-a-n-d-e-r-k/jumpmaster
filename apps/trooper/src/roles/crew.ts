@@ -125,7 +125,8 @@ async function crewSteps(
 ): Promise<DropResult> {
   const as = ctx.ids?.agent ?? null;
   const clone = await cloneAndPrepare(payload, deps, ctx);
-  if (payload.role === 'diagnose' && payload.checkout) {
+  // Diagnose and an item's arbitration read the parked PR's head, the one path for both.
+  if ((payload.role === 'diagnose' || payload.role === 'arbitrate') && payload.checkout) {
     emitEvent(deps, ctx, 'phase', { phase: 'checkout', branch: payload.checkout.branch });
     await deps.git.checkoutBranch(clone, payload.checkout.branch, payload.checkout.headSha, as);
   } else {

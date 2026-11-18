@@ -1489,3 +1489,16 @@ test('v40 keeps every control_audit row and the 5000-row trigger (the rebuild sh
   expect(count(db, 'control_audit')).toBe(5000);
   db.close();
 });
+
+test('v43 adds applied_at to arbitrations, keeping every row unapplied', () => {
+  const f = dbAt(42, (raw) => {
+    raw.exec(`INSERT INTO arbitrations (zone_id, subject, basis, drop_id, state, created_at,
+        updated_at) VALUES ('z', 'issue:1', 'sha1', 'd1', 'ruled', 't', 't')`);
+  });
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.prepare('SELECT subject, state, applied_at AS at FROM arbitrations').all()).toEqual([
+    { subject: 'issue:1', state: 'ruled', at: null },
+  ]);
+  db.close();
+});
