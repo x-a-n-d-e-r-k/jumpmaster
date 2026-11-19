@@ -7,7 +7,13 @@ import {
   type Resolved,
   type ResolvedCredential,
 } from './credentials.js';
-import { isAppReviewerZone, type ResolvedApps } from './resolution.js';
+import { appEntryName } from './github-app-entries.js';
+import {
+  type CredentialResolution,
+  credentialFor,
+  isAppReviewerZone,
+  type ResolvedApps,
+} from './resolution.js';
 
 /**
  * The rules that span a zone's config and the credentials (§7.5), judged locally and at once.
@@ -31,7 +37,9 @@ const present = (r: ResolvedCredential | undefined): boolean =>
 
 /**
  * `apps`: the GitHub App entries as they resolved. An app-reviewer zone's review, crew and doctor
- * drops clone with a reviewer token minted per drop (issue #237), so it needs no read token.
+ * drops clone with a reviewer token minted per drop (issue #237), so it needs no read token. A
+ * role that resolves to its owner's app (§4.4) needs no PAT; one whose entry won't decrypt stays
+ * parked on that role's PAT name, since resolution never falls back to the PAT (issue #458).
  */
 export function credentialProblems(
   zone: DropZoneConfig,
@@ -46,8 +54,24 @@ export function credentialProblems(
   if (!present(resolved.claudeToken))
     add('missing', 'claudeToken', `no Claude token is set: ${where('claude_token')}`);
 
+  const undecryptable = (credential: CredentialName, owner: string, role: 'author' | 'reviewer') =>
+    add(
+      'missing',
+      credential,
+      `${appEntryName(owner, role)} is undecryptable: import the entry again, or restore the vault key it was stored with`,
+    );
+  const appOf = (r: CredentialResolution): string | undefined =>
+    r.ref.kind === 'github-app' ? r.ref.owner : undefined;
+  const authorRes = credentialFor(zone, 'author', apps);
+  const reviewerRes = credentialFor(zone, 'reviewer', apps);
+  const authorApp = appOf(authorRes);
+  const reviewerApp = appOf(reviewerRes);
+
   const author = resolved.githubAuthorToken;
-  if (!present(author))
+  if (authorApp !== undefined) {
+    if (authorRes.problem === 'undecryptable')
+      undecryptable('githubAuthorToken', authorApp, 'author');
+  } else if (!present(author))
     add(
       'missing',
       'githubAuthorToken',
@@ -68,13 +92,16 @@ export function credentialProblems(
 
   if (zone.identity !== 'starter') {
     const reviewer = resolved.githubReviewerToken;
-    if (!present(reviewer))
+    if (reviewerApp !== undefined) {
+      if (reviewerRes.problem === 'undecryptable')
+        undecryptable('githubReviewerToken', reviewerApp, 'reviewer');
+    } else if (!present(reviewer))
       add(
         'missing',
         'githubReviewerToken',
         `zone ${zone.id} uses two bots, and no GitHub reviewer token is set: ${where('github_reviewer_token')}`,
       );
-    else if (present(author)) {
+    else if (authorApp === undefined && present(author)) {
       const sameValue = reviewer?.value === author?.value;
       const sameLogin =
         reviewer?.login !== undefined &&
