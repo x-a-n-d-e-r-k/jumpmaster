@@ -1,6 +1,16 @@
+import { recordDiagnosis, whyBasis, withdrawBriefing } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
-import { getOutbox, getZoneMode, isKilled, listOutbox, type OutboxRow } from '../db/repo.js';
+import {
+  deleteOutbox,
+  getOutbox,
+  getWorkItem,
+  getZoneMode,
+  isKilled,
+  listOutbox,
+  type OutboxRow,
+  setWorkItemState,
+} from '../db/repo.js';
 import {
   type AddBlockedByPayload,
   type CommentIssuePayload,
@@ -15,9 +25,14 @@ import {
 } from '../outbox.js';
 import { triageFailed } from './results.js';
 import {
+  type DoneClaim,
+  type DoneEvidence,
+  getDoneClaim,
   getTriageRequest,
   listTriageRequests,
+  listVerifyingDoneClaims,
   setTriageRequest,
+  settleDoneClaim,
   type TriageRequest,
   triageBodySha,
 } from './store.js';
@@ -192,11 +207,51 @@ function closeDoneOp(zone: DropZoneConfig, req: TriageRequest): Op {
 
 type Verdict = { kind: 'verified' } | { kind: 'superseded' } | { kind: 'refused'; why: string };
 
+/** `verifyCited`'s answer: why it refused names numbers only, never forge or agent text. */
+export type CitedVerdict = { ok: true } | { ok: false; why: string };
+
+/**
+ * Checks what a crew verdict cites as having done the work on issue `issueNumber`, against the
+ * forge (#466, #536): every cited pull is merged to the default branch; every cited issue is
+ * another issue (not a pull request, not `issueNumber`) closed as completed. Reads only. A lookup
+ * that throws refuses (D2): a failed read proves nothing. Shared by triage and diagnose (D5).
+ */
+export async function verifyCited(
+  forges: ForgePair,
+  issueNumber: number,
+  evidence: DoneEvidence | null | undefined,
+): Promise<CitedVerdict> {
+  const refused = (why: string): CitedVerdict => ({ ok: false, why });
+  const pulls = evidence?.pulls ?? [];
+  const issues = evidence?.issues ?? [];
+  if (pulls.length + issues.length === 0) return refused('nothing was cited');
+  try {
+    const defaultBranch = await forges.author.getDefaultBranch();
+    for (const p of pulls) {
+      const pull = await forges.author.getPull(p);
+      if (!pull) return refused(`#${p} not found`);
+      if (pull.merged !== true) return refused(`#${p} is not merged`);
+      if (pull.baseRef !== defaultBranch)
+        return refused(`#${p} was not merged to the default branch`);
+    }
+    for (const i of issues) {
+      if (i === issueNumber) return refused(`#${i} is this issue`);
+      const issue = await forges.author.getIssue(i);
+      if (!issue) return refused(`#${i} not found`);
+      if (issue.pullRequest === true) return refused(`#${i} is a pull request, not an issue`);
+      if (issue.state !== 'closed') return refused(`#${i} is not closed`);
+      if (issue.stateReason !== 'completed') return refused(`#${i} was not closed as completed`);
+    }
+  } catch {
+    return refused('a cited item could not be read');
+  }
+  return { ok: true };
+}
+
 /**
  * Checks an `already-done` request's evidence against the forge (#466): the original issue is
- * open with the text triaged; every cited pull is merged to the default branch; every cited issue
- * is another issue (not a pull request) closed as completed. Reads only. The reason it refuses
- * names numbers only, never forge or agent text.
+ * open with the text triaged, then `verifyCited`. Reads only. The reason it refuses names numbers
+ * only, never forge or agent text.
  */
 async function verifyEvidence(forges: ForgePair, req: TriageRequest): Promise<Verdict> {
   const n = req.issueNumber;
@@ -214,27 +269,12 @@ async function verifyEvidence(forges: ForgePair, req: TriageRequest): Promise<Ve
     ) {
       return { kind: 'superseded' };
     }
-    const defaultBranch = await forges.author.getDefaultBranch();
-    for (const p of pulls) {
-      const pull = await forges.author.getPull(p);
-      if (!pull) return refused(`#${p} not found`);
-      if (pull.merged !== true) return refused(`#${p} is not merged`);
-      if (pull.baseRef !== defaultBranch)
-        return refused(`#${p} was not merged to the default branch`);
-    }
-    for (const i of issues) {
-      if (i === n) return refused(`#${i} is this issue`);
-      const issue = await forges.author.getIssue(i);
-      if (!issue) return refused(`#${i} not found`);
-      if (issue.pullRequest === true) return refused(`#${i} is a pull request, not an issue`);
-      if (issue.state !== 'closed') return refused(`#${i} is not closed`);
-      if (issue.stateReason !== 'completed') return refused(`#${i} was not closed as completed`);
-    }
   } catch {
     // D2: a lookup that failed proves nothing.
     return refused('a cited item could not be read');
   }
-  return { kind: 'verified' };
+  const cited = await verifyCited(forges, n, req.evidence);
+  return cited.ok ? { kind: 'verified' } : refused(cited.why);
 }
 
 /**
@@ -445,6 +485,209 @@ export async function flushTriageTrail(
     if (children && trailOps.every((op) => getOutbox(db, op.opKey)?.state === 'done')) {
       ran += await closeSplitParent(db, forges, zone, req, children, now);
     }
+  }
+  ran += await flushDoneClaims(db, forges, zone, secrets, now);
+  return ran;
+}
+
+/** The work item's state once a verified claim closed its issue. */
+export const CLAIM_DONE_REASON = 'already done (crew, verified)';
+/** The briefing's recommendation once a claim was refused: the reason follows. */
+export const CLAIM_REFUSED = "the crew's claim that this is already done was refused: ";
+
+/** A claim's forge writes, found again by keys derived from its id (D3). */
+export const claimKeys = (zoneId: string, claimId: number) => ({
+  comment: `comment:${zoneId}:crew-done:${claimId}`,
+  marker: commentMarker(zoneId, `crew-done:${claimId}`),
+  close: `close:${zoneId}:crew-done:${claimId}`,
+});
+
+/** A claim's cited pulls then issues, each once, as `#N` (numbers only). */
+const citedList = (e: DoneEvidence): string =>
+  [...new Set([...(e.pulls ?? []), ...(e.issues ?? [])])].map((n) => `#${n}`).join(', ');
+
+/** The closing comment: the diagnosis redacted, then cut to `MAX_REASON` (#536). */
+export function claimComment(claim: Pick<DoneClaim, 'diagnosis' | 'evidence'>, secrets: string[]) {
+  const diagnosis = sanitizeCrewText(claim.diagnosis, secrets)
+    .slice(0, MAX_REASON)
+    .replace(/[\s.]+$/, '');
+  return `The crew found this already done: ${diagnosis}. Done in: ${citedList(claim.evidence)}. Closing it. Reopen the issue if something is missing.`;
+}
+
+type ClaimCheck =
+  | { kind: 'verified' }
+  | { kind: 'superseded'; why: string }
+  | { kind: 'refused'; why: string };
+
+/** The claim's briefing, if it is still open with the basis the claim was made on. */
+function claimBriefing(db: Db, claim: DoneClaim): string | null {
+  const b = db
+    .prepare(`SELECT why FROM briefings WHERE id = ? AND kind = 'parked' AND state = 'open'`)
+    .get(claim.briefingId) as { why: string } | undefined;
+  if (!b) return 'the parked briefing is no longer open';
+  if (whyBasis(b.why) !== claim.basis) return 'the parked briefing changed';
+  return null;
+}
+
+/** The facts on the server a claim still needs: the item parked, its briefing open, same basis. */
+function claimStands(db: Db, claim: DoneClaim): string | null {
+  const item = getWorkItem(db, claim.itemId);
+  if (!item || item.state !== 'parked') return 'the item is no longer parked';
+  return claimBriefing(db, claim);
+}
+
+/**
+ * Checks a claim (#536): the item still parked, its briefing open on the same basis, its issue
+ * still open, then every cited item by `verifyCited`. Reads only. A lookup that throws refuses.
+ */
+async function checkClaim(db: Db, forges: ForgePair, claim: DoneClaim): Promise<ClaimCheck> {
+  const stale = claimStands(db, claim);
+  if (stale) return { kind: 'superseded', why: stale };
+  const n = getWorkItem(db, claim.itemId)?.issueNumber ?? 0;
+  try {
+    const issue = await forges.author.getIssue(n);
+    if (!issue || issue.state !== 'open') return { kind: 'superseded', why: `#${n} is closed` };
+  } catch {
+    return { kind: 'refused', why: `#${n} could not be read` };
+  }
+  const cited = await verifyCited(forges, n, claim.evidence);
+  return cited.ok ? { kind: 'verified' } : { kind: 'refused', why: cited.why };
+}
+
+/**
+ * Settles a refused claim: once, with the reason on the parked briefing as `needs_command`, as
+ * `briefItemRuling` does. The item stays parked; the claim is not tried again.
+ */
+function refuseClaim(db: Db, claim: DoneClaim, why: string, now: Date): void {
+  db.transaction(() => {
+    if (!settleDoneClaim(db, claim.id, 'refused', why, now)) return;
+    briefClaim(db, claim, `${CLAIM_REFUSED}${why}`, now);
+  })();
+}
+
+/** Puts `recommendation` on the claim's still-open briefing, as `needs_command`. */
+function briefClaim(db: Db, claim: DoneClaim, recommendation: string, now: Date): void {
+  const b = db
+    .prepare(`SELECT why, diagnosis FROM briefings WHERE id = ? AND state = 'open'`)
+    .get(claim.briefingId) as { why: string; diagnosis: string | null } | undefined;
+  if (!b) return;
+  recordDiagnosis(
+    db,
+    claim.briefingId,
+    {
+      diagnosis: b.diagnosis ?? claim.diagnosis,
+      basis: whyBasis(b.why),
+      recommendation: `needs_command: ${recommendation}`,
+    },
+    now,
+    { spent: true },
+  );
+}
+
+/**
+ * Runs `op` unless it is done; whether it is done now. A failure is tried again next pass: a
+ * refused (4xx) comment sent nothing, and one whose answer was lost is read back by its marker; a
+ * close not done is sent again (closing a closed issue changes nothing), as Close as done does.
+ */
+async function runOnce(db: Db, forges: ForgePair, op: Op, now: Date): Promise<boolean> {
+  const row = getOutbox(db, op.opKey);
+  if (row?.state === 'done') return true;
+  if (row && (row.state === 'failed' || op.kind === 'update_issue')) deleteOutbox(db, op.opKey);
+  try {
+    return (await runOp(db, forges, op, now)).state === 'done';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Settles each `verifying` claim that a parked item is already done (#536), only in an active
+ * zone with the kill switch off. A claim the server's facts no longer back (the item no longer
+ * parked, its briefing not open or changed, its issue closed) is superseded and writes nothing. A
+ * cited item that fails `verifyCited`, or a lookup that throws, refuses it: the reason goes on the
+ * briefing as `needs_command`. Verified, with `crew.closeDone`: a comment, then the issue closed as
+ * completed, then the item `done` and its briefing withdrawn, each once by keys derived from the
+ * claim (D3); a write not done leaves it `verifying` for the next pass. Without `crew.closeDone`
+ * it is `done` and the briefing names what verified it. Returns how many ops it ran.
+ */
+export async function flushDoneClaims(
+  db: Db,
+  forges: ForgePair,
+  zone: DropZoneConfig,
+  secrets: string[],
+  now: Date,
+): Promise<number> {
+  if (isKilled(db) || getZoneMode(db, zone.id, zone.mode) !== 'active') return 0;
+  let ran = 0;
+  for (const claim of listVerifyingDoneClaims(db, zone.id)) {
+    const keys = claimKeys(zone.id, claim.id);
+    const comment = getOutbox(db, keys.comment);
+    // A comment sent (or maybe sent) commits the claim: it was verified before it was written.
+    const committed = comment !== undefined && comment.state !== 'failed';
+    if (!committed) {
+      const check = await checkClaim(db, forges, claim);
+      // Re-read: a ruling or another pass may have moved it while the forge was read.
+      if (getDoneClaim(db, claim.id)?.state !== 'verifying') continue;
+      if (check.kind !== 'verified') {
+        if (check.kind === 'superseded')
+          settleDoneClaim(db, claim.id, 'superseded', check.why, now);
+        else refuseClaim(db, claim, check.why, now);
+        continue;
+      }
+      const stale = claimStands(db, claim);
+      if (stale) {
+        settleDoneClaim(db, claim.id, 'superseded', stale, now);
+        continue;
+      }
+      if (!zone.crew.closeDone) {
+        db.transaction(() => {
+          if (!settleDoneClaim(db, claim.id, 'done', null, now)) return;
+          briefClaim(db, claim, `verified already done in ${citedList(claim.evidence)}`, now);
+        })();
+        continue;
+      }
+    }
+    const item = getWorkItem(db, claim.itemId);
+    if (!item) continue;
+    const commentOp: Op = {
+      kind: 'comment_issue',
+      opKey: keys.comment,
+      zoneId: zone.id,
+      itemId: null,
+      payload: {
+        number: item.issueNumber,
+        body: claimComment(claim, secrets),
+        marker: keys.marker,
+      } satisfies CommentIssuePayload,
+    };
+    const closeOp: Op = {
+      kind: 'update_issue',
+      opKey: keys.close,
+      zoneId: zone.id,
+      itemId: null,
+      payload: {
+        number: item.issueNumber,
+        state: 'closed',
+        stateReason: 'completed',
+      } satisfies UpdateIssuePayload,
+    };
+    // The close waits until its comment is done.
+    let done = true;
+    for (const op of [commentOp, closeOp]) {
+      if (getOutbox(db, op.opKey)?.state !== 'done') ran++;
+      if (!(await runOnce(db, forges, op, now))) {
+        done = false;
+        break;
+      }
+    }
+    if (!done) continue;
+    db.transaction(() => {
+      if (!settleDoneClaim(db, claim.id, 'done', null, now)) return;
+      if (getWorkItem(db, claim.itemId)?.state === 'parked') {
+        setWorkItemState(db, claim.itemId, 'done', CLAIM_DONE_REASON, now);
+      }
+      withdrawBriefing(db, zone.id, `item:${claim.itemId}`, now);
+    })();
   }
   return ran;
 }

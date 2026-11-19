@@ -488,10 +488,19 @@ export const RefuteOutputSchema = z.strictObject({
 });
 export type RefuteOutput = z.infer<typeof RefuteOutputSchema>;
 
+/** The most pull requests and issues an `already-done` triage verdict or an `already_done` diagnosis may cite, in all. */
+export const MAX_TRIAGE_EVIDENCE = 10;
+
 export const DiagnoseOutputSchema = z
   .strictObject({
     diagnosis: z.string().max(4000),
-    recommendation: z.enum(['retry', 'leave_parked', 'needs_command', 'rerun_checks']),
+    recommendation: z.enum([
+      'retry',
+      'leave_parked',
+      'needs_command',
+      'rerun_checks',
+      'already_done',
+    ]),
     detail: z.string().max(2000),
     /** With `retry`: the one concrete change the next attempt must make. The server may act on it. */
     instruction: z.string().min(1).max(2000).optional(),
@@ -505,10 +514,29 @@ export const DiagnoseOutputSchema = z
      * it, the server never retries a gate-change park; the change stays the owner's to allow.
      */
     gateChange: z.literal('remove').optional(),
+    /**
+     * With `already_done` only (#536): the merged pull requests and the issues closed as completed
+     * that did the work. The server verifies each before anything is written to the forge.
+     */
+    evidence: z
+      .strictObject({
+        pulls: z.array(z.number().int().positive()).max(MAX_TRIAGE_EVIDENCE).optional(),
+        issues: z.array(z.number().int().positive()).max(MAX_TRIAGE_EVIDENCE).optional(),
+      })
+      .optional(),
   })
   .superRefine((v, ctx) => {
     if (v.recommendation === 'rerun_checks' && (v.checks?.length ?? 0) === 0) {
       ctx.addIssue({ code: 'custom', path: ['checks'], message: 'rerun_checks needs checks' });
+    }
+    const evidence = (v.evidence?.pulls?.length ?? 0) + (v.evidence?.issues?.length ?? 0);
+    const fail = (message: string) => ctx.addIssue({ code: 'custom', path: ['evidence'], message });
+    if (v.recommendation === 'already_done') {
+      if (evidence < 1) fail('already_done needs at least one pull or issue');
+      if (evidence > MAX_TRIAGE_EVIDENCE)
+        fail(`already_done cites at most ${MAX_TRIAGE_EVIDENCE} items`);
+    } else if (v.evidence !== undefined) {
+      fail(`${v.recommendation} carries no evidence`);
     }
   });
 export type DiagnoseOutput = z.infer<typeof DiagnoseOutputSchema>;
@@ -527,9 +555,6 @@ export const ArbitrateOutputSchema = z.strictObject({
   instruction: z.string().max(2000),
 });
 export type ArbitrateOutput = z.infer<typeof ArbitrateOutputSchema>;
-
-/** The most pull requests and issues an `already-done` triage verdict may cite, in all. */
-export const MAX_TRIAGE_EVIDENCE = 10;
 
 const TriageOutputObject = z.strictObject({
   summary: z.string().max(4000),

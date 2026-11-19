@@ -682,3 +682,139 @@ export function settleCrewRetry(
     id,
   );
 }
+
+/** Where a diagnose drop's `already_done` claim on a parked item stands (#536). */
+export type DoneClaimState = 'verifying' | 'done' | 'refused' | 'superseded';
+
+/** What a claim cites as having done the work: merged pulls and issues closed as completed. */
+export type DoneEvidence = { pulls?: number[]; issues?: number[] };
+
+/**
+ * A diagnose drop's claim that a parked item is already done (#536). Recorded `verifying` with
+ * the diagnose result; the trail pass verifies its evidence on the forge before anything is written.
+ */
+export type DoneClaim = {
+  id: number;
+  zoneId: string;
+  itemId: number;
+  briefingId: number;
+  dropId: string;
+  /** The parked briefing's why basis the diagnosis was made on. */
+  basis: string;
+  diagnosis: string;
+  evidence: DoneEvidence;
+  state: DoneClaimState;
+  /** Why a claim was refused or superseded, in numbers and plain words only. */
+  reason: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type NewDoneClaim = Pick<
+  DoneClaim,
+  'zoneId' | 'itemId' | 'briefingId' | 'dropId' | 'basis' | 'diagnosis' | 'evidence'
+>;
+
+const CLAIM_COLS = `id, zone_id AS zoneId, item_id AS itemId, briefing_id AS briefingId,
+  drop_id AS dropId, basis, diagnosis, evidence_json AS evidenceJson, state, reason,
+  created_at AS createdAt, updated_at AS updatedAt`;
+
+type DoneClaimRow = Omit<DoneClaim, 'evidence'> & { evidenceJson: string };
+
+const positiveInts = (v: unknown): number[] | undefined =>
+  Array.isArray(v)
+    ? v.filter((n): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n > 0)
+    : undefined;
+
+const claimOfRow = ({ evidenceJson, ...r }: DoneClaimRow): DoneClaim => {
+  let parsed: { pulls?: unknown; issues?: unknown } = {};
+  try {
+    parsed = (JSON.parse(evidenceJson) ?? {}) as typeof parsed;
+  } catch {
+    parsed = {};
+  }
+  const pulls = positiveInts(parsed.pulls);
+  const issues = positiveInts(parsed.issues);
+  return { ...r, evidence: { ...(pulls ? { pulls } : {}), ...(issues ? { issues } : {}) } };
+};
+
+/**
+ * Records a `verifying` claim; throws a UNIQUE violation when the item has one verifying already,
+ * or the drop has one at all (D3).
+ */
+export function insertDoneClaim(db: Db, c: NewDoneClaim, now: Date): number {
+  const at = now.toISOString();
+  const res = db
+    .prepare(
+      `INSERT INTO crew_done_claims (zone_id, item_id, briefing_id, drop_id, basis, diagnosis,
+         evidence_json, state, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'verifying', ?, ?)`,
+    )
+    .run(
+      c.zoneId,
+      c.itemId,
+      c.briefingId,
+      c.dropId,
+      c.basis,
+      c.diagnosis,
+      JSON.stringify(c.evidence),
+      at,
+      at,
+    );
+  return Number(res.lastInsertRowid);
+}
+
+export function getDoneClaim(db: Db, id: number): DoneClaim | undefined {
+  const r = db.prepare(`SELECT ${CLAIM_COLS} FROM crew_done_claims WHERE id = ?`).get(id) as
+    | DoneClaimRow
+    | undefined;
+  return r && claimOfRow(r);
+}
+
+/** The item's claims, oldest first. */
+export function listItemDoneClaims(db: Db, itemId: number): DoneClaim[] {
+  return (
+    db
+      .prepare(`SELECT ${CLAIM_COLS} FROM crew_done_claims WHERE item_id = ? ORDER BY id`)
+      .all(itemId) as DoneClaimRow[]
+  ).map(claimOfRow);
+}
+
+/** The zone's claims still `verifying`, oldest first. */
+export function listVerifyingDoneClaims(db: Db, zoneId: string): DoneClaim[] {
+  return (
+    db
+      .prepare(
+        `SELECT ${CLAIM_COLS} FROM crew_done_claims WHERE zone_id = ? AND state = 'verifying'
+         ORDER BY id`,
+      )
+      .all(zoneId) as DoneClaimRow[]
+  ).map(claimOfRow);
+}
+
+/** Whether the item has a claim still `verifying`: no new diagnosis is asked for meanwhile. */
+export function hasVerifyingDoneClaim(db: Db, itemId: number): boolean {
+  return (
+    db
+      .prepare(`SELECT 1 FROM crew_done_claims WHERE item_id = ? AND state = 'verifying'`)
+      .get(itemId) !== undefined
+  );
+}
+
+/** Settles a `verifying` claim; false when it was settled already. */
+export function settleDoneClaim(
+  db: Db,
+  id: number,
+  state: Exclude<DoneClaimState, 'verifying'>,
+  reason: string | null,
+  now: Date,
+): boolean {
+  return (
+    db
+      .prepare(
+        `UPDATE crew_done_claims SET state = ?, reason = ?, updated_at = ?
+           WHERE id = ? AND state = 'verifying'`,
+      )
+      .run(state, reason, now.toISOString(), id).changes === 1
+  );
+}

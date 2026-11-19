@@ -1767,3 +1767,27 @@ test('v55 adds a nullable via to rulings, keeping every row', () => {
     { id: 1, note: 'go', via: null },
   ]);
 });
+
+test('v56 adds crew_done_claims: one verifying claim per item, one claim per drop', () => {
+  const f = dbAt(55);
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  db.pragma('foreign_keys = OFF'); // the table's own constraints only
+  db.exec(
+    `INSERT INTO work_items (id, drop_zone_id, issue_number, title, body, author,
+       issue_created_at, updated_at) VALUES (1, 'z', 1, 't', 'b', 'a', 't', 't');
+     INSERT INTO briefings (id, zone_id, kind, subject, decision, why, options_json,
+       recommendation, on_hold, source, state, created_at, updated_at)
+       VALUES (1, 'z', 'parked', 'item:1', 'd', 'w', '[]', '', '', 'server', 'open', 't', 't')`,
+  );
+  const put = db.prepare(
+    `INSERT INTO crew_done_claims (zone_id, item_id, briefing_id, drop_id, basis, diagnosis,
+       evidence_json, state, created_at, updated_at)
+     VALUES ('z', 1, 1, ?, 'b', 'd', '{}', ?, 't', 't')`,
+  );
+  put.run('d1', 'verifying');
+  expect(() => put.run('d2', 'verifying')).toThrow(/UNIQUE/);
+  expect(() => put.run('d1', 'refused')).toThrow(/UNIQUE/);
+  put.run('d3', 'refused');
+  expect(() => put.run('d4', 'maybe')).toThrow(/CHECK/);
+});
