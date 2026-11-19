@@ -3,11 +3,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { listAudit } from '../auth/audit.js';
-import { listBriefings, raiseBriefing } from '../briefings.js';
+import { floorBriefings, listBriefings, raiseBriefing } from '../briefings.js';
 import { loadBoot } from '../config/boot.js';
 import { ConfigStore } from '../config/store.js';
+import { creditsPass, noteOverage } from '../credits.js';
 import { type Db, openDb } from '../db/open.js';
 import {
+  type Drop,
   getZoneMode,
   insertDrop,
   setZoneMode,
@@ -235,5 +237,81 @@ describe('the start-up sweep of orphan briefings (#178)', () => {
     expect(withdrawOrphanBriefings(db, store, plus(t0, 1000))).toBe(0);
     expect(states(db, 'a')).toEqual(['open']);
     expect(audited()).toHaveLength(1);
+  });
+});
+
+describe('the credits stop briefing outlives its zone (#541)', () => {
+  const stopBrief = (zoneId: string) => ({
+    ...brief(zoneId, 'credits:stop:d1'),
+    kind: 'credits_required' as const,
+    onHold: 'All dispatch',
+  });
+  const audited = (db: Db) => listAudit(db).filter((a) => a.action === 'briefing.withdraw');
+
+  test('the start-up sweep leaves a credits stop briefing open', () => {
+    const { db, store } = world();
+    raiseBriefing(db, stopBrief('old'), t0);
+    raiseBriefing(db, brief('old', 'item:1'), t0);
+    expect(withdrawOrphanBriefings(db, store, t0)).toBe(1);
+    expect(listBriefings(db, { state: 'open' }).map((b) => b.subject)).toEqual(['credits:stop:d1']);
+    expect(withdrawOrphanBriefings(db, store, plus(t0, 1000))).toBe(0);
+    expect(audited(db)).toHaveLength(1);
+    expect(audited(db)[0]).toMatchObject({ detail: { count: 1 } });
+  });
+
+  test('removing a zone (removeZone) withdraws only its other briefings', () => {
+    const { db, store } = world();
+    raiseBriefing(db, stopBrief('a'), t0);
+    raiseBriefing(db, brief('a', 'item:1'), t0);
+    expect(stopZone(db, store, 'a', { via: 'ctl', principal: token, now: t0 }).kind).toBe(
+      'removed',
+    );
+    expect(listBriefings(db, { zoneId: 'a' }).map((b) => [b.subject, b.state])).toEqual([
+      ['credits:stop:d1', 'open'],
+      ['item:1', 'withdrawn'],
+    ]);
+    expect(audited(db)).toHaveLength(1);
+    expect(audited(db)[0]).toMatchObject({ target: 'a', detail: { count: 1 } });
+  });
+
+  test('a stop in force on a removed zone keeps one briefing, listed on the Floor', () => {
+    const { db, store } = world();
+    runningDrop(db);
+    const d = { id: 'd1', dropZoneId: 'a', workItemId: 1, role: 'implement' } as Drop;
+    const resetsAt = plus(t0, 3 * 24 * 3600_000).toISOString();
+    expect(
+      noteOverage(
+        db,
+        { throttleUtilization: 0.9, probeJitterSeconds: [0, 0] },
+        d,
+        {
+          status: 'allowed',
+          resetsAt,
+          rateLimitType: 'seven_day',
+          unifiedWindows: {
+            five_hour: { utilization: 0.4, resetsAt: plus(t0, 2 * 3600_000).toISOString() },
+            seven_day: { utilization: 1, resetsAt },
+          },
+          isUsingOverage: true,
+          overageStatus: 'allowed',
+        },
+        'succeeded',
+        t0,
+      ),
+    ).toBe(true);
+    updateDrop(db, 'd1', { state: 'succeeded' });
+    creditsPass(db, t0);
+    const [before, ...rest] = listBriefings(db, { state: 'open' });
+    expect(rest).toEqual([]);
+    expect(before).toMatchObject({ zoneId: 'a', subject: 'credits:stop:d1' });
+    expect(stopZone(db, store, 'a', { via: 'ctl', principal: token, now: t0 }).kind).toBe(
+      'removed',
+    );
+    creditsPass(db, plus(t0, 60_000));
+    const open = listBriefings(db, { state: 'open' });
+    expect(open.map((b) => b.id)).toEqual([before?.id]);
+    expect(listBriefings(db).map((b) => b.id)).toEqual([before?.id]);
+    const listed = floorBriefings(db, store.current().dropZones).listed;
+    expect(listed.map((b) => b.id)).toEqual([before?.id]);
   });
 });
