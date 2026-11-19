@@ -15,6 +15,10 @@ const TOKEN_SHAPES = [
   /sk-ant-[A-Za-z0-9_-]{20,}/g,
   // Jumpmaster MCP tokens (`jmm_` plus 32 random bytes in base64url).
   /jmm_[A-Za-z0-9_-]{20,}/g,
+  // GitLab tokens: `glpat-` (personal, project, group) and the other `gl*-` prefixes. The legacy
+  // body is 20 characters; the routable form adds `.`-separated segments, taken whole. A `.` with
+  // no token character after it (a sentence's end) is left in place.
+  /gl(?:pat|oas|dt|rt|cbt|ptt|ft|imt|agent|soat)-[A-Za-z0-9_-]{20,}(?:\.[A-Za-z0-9_-]+)*/g,
 ];
 
 /** A private key block's header; `<label>` is captured so the footer can be matched to it. */
