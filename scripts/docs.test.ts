@@ -15,6 +15,7 @@ import { dirname, join, normalize, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import { CONTROL_ROUTES, CTL_VERBS, PAGES } from '../apps/server/src/api/manifest.js';
+import { DELETE_OLD_KEY } from '../apps/server/src/api/secrets.js';
 import { ENV_FIX, VAULT_KEY_WARNING } from '../apps/server/src/bootstrap.js';
 import { STARTER_WARNING } from '../apps/server/src/config.js';
 import { actionFor, type Pages } from '../apps/server/src/doctor/actions.js';
@@ -713,5 +714,52 @@ describe('a first install from the docs (issue 160)', () => {
     expect(quick).toContain(logs);
     expect(flat(section(read(INSTALL), /^### Step 2:/))).toContain(logs);
     expect(flat(section(read(INSTALL), /^### Start, claim and check it/))).toContain(logs);
+  });
+});
+
+describe('rotating a GitHub App private key (issue 504)', () => {
+  const rotation = () => section(read(OPERATE), /^#### Rotating an app's private key$/);
+  const flat = (s: string) => s.replace(/\s+/g, ' ');
+
+  test('operate.md has the rotation section, and drops "not covered here yet"', () => {
+    expect(anchors(read(OPERATE))).toContain('rotating-an-apps-private-key');
+    expect(read(OPERATE)).not.toContain('not covered here yet');
+    const text = flat(rotation());
+    for (const s of ['**Replace key**', '`ctl secrets reload`', 'delete the old key', '365 days'])
+      expect(text, s).toContain(s);
+    expect(text).toContain('](#kill-switch)');
+  });
+
+  test("the runbook and the server's DELETE_OLD_KEY hint agree where the old key is deleted", () => {
+    expect(DELETE_OLD_KEY).toContain("the app's GitHub page, under Private keys");
+    expect(flat(rotation())).toContain('**Private keys**');
+    expect(flat(rotation())).toMatch(/delete the old key on the app's GitHub page/i);
+  });
+
+  test("SECURITY.md's private key section links to the rotation steps", () => {
+    const key = flat(section(read('SECURITY.md'), /^### The GitHub App private key$/));
+    expect(key).toContain('(docs/runbooks/operate.md#rotating-an-apps-private-key)');
+    expect(key).toContain('**Replace key**');
+    expect(key).toMatch(/no API/);
+  });
+
+  test("install.md's forge.author points at Replace key, not at importing the app again", () => {
+    const author = flat(section(read(INSTALL), /^### `forge\.author`$/));
+    expect(author).not.toContain('importing the app again with it');
+    expect(author).toContain('**Replace key**');
+    expect(author).toContain('(operate.md#rotating-an-apps-private-key)');
+    // The wrong-app and slug-mismatch bullets stay.
+    expect(author).toContain("the key belongs to another app than the entry's: re-import the app");
+    expect(author).toContain("add the old login to the zone's `authorLoginAliases`");
+  });
+
+  test('the rotation docs show no key or token literal', () => {
+    for (const text of [
+      rotation(),
+      section(read('SECURITY.md'), /^### The GitHub App private key$/),
+    ])
+      expect(text).not.toMatch(
+        /-----BEGIN|gh[pousr]_[A-Za-z0-9]{8,}|github_pat_|MII[A-Za-z0-9+/]{8,}/,
+      );
   });
 });

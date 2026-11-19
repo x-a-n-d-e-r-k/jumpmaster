@@ -156,7 +156,10 @@ every entry), or in the file `secrets/github-app/<owner>/<role>.json`. The serve
 when its group or others have any permission bit: keep it at mode `0600`. The key never leaves the
 server: no stick, container, page or response receives it, and it is scrubbed from logs, as a whole
 and line by line. Back it up with the vault key, since the vault entry is unreadable without it.
-Rotation is manual, on the app's settings page on GitHub: GitHub offers no API for it.
+GitHub offers no API for rotating it: generate a new key on the app's page on GitHub, paste it
+into **Replace key** on Settings → Credentials, where Jumpmaster tests it with GitHub before
+storing it, then delete the old key on the app's GitHub page. See
+[Rotating an app's private key](docs/runbooks/operate.md#rotating-an-apps-private-key).
 
 ### File secrets by name
 
