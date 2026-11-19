@@ -9,6 +9,7 @@ import {
   IMAGE_MIRROR_FEATURE,
   ImageFetchSchema,
   isCrewRole,
+  isReleaseVersion,
   isRepoFullName,
   isSafeBranchName,
   type LeaseSkip,
@@ -25,6 +26,10 @@ import {
   sha40,
   splitRepoFullName,
   TrooperEventSchema,
+  UPGRADE_HEADER,
+  type UpgradeOffer,
+  UpgradeOfferSchema,
+  UpgradeReportSchema,
 } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -37,6 +42,7 @@ import type { Db } from '../db/open.js';
 import {
   activeDropFor,
   appendEvents,
+  autoRequestStickUpgrade,
   type Drop,
   type DropState,
   effectiveSlots,
@@ -44,8 +50,10 @@ import {
   getDrop,
   getStick,
   getStickByTokenHash,
+  getStickUpgrade,
   getWorkItem,
   getZoneMode,
+  holdForUpgrade,
   insertStick,
   isKilled,
   isReclaimable,
@@ -57,8 +65,12 @@ import {
   reserveGrant,
   revokeGrants,
   type Stick,
+  settleStickUpgrade,
   stampStick,
+  type UpgradeTarget,
   updateDrop,
+  upgradeBehind,
+  upgradeEligible,
 } from '../db/repo.js';
 import type { AppBrokers } from '../forge/app-brokers.js';
 import type { AppTokenSource } from '../forge/app-tokens.js';
@@ -72,6 +84,7 @@ import type { StickFetches } from '../images/fetches.js';
 import type { ImageMirror } from '../images/mirror.js';
 import { layoutFor } from '../images/serve.js';
 import { codeHash, ENROLL_CODE, INSTALL_TOKEN } from '../install/invite.js';
+import { digestName, STICK_IMAGE_NAME } from '../install/stick-sh.js';
 import { heartbeat, leaseNextDrop, missingFor, zoneRequirements, zonesWaiting } from '../leases.js';
 import { log as serverLog } from '../log.js';
 import type { ForgePair } from '../outbox.js';
@@ -102,8 +115,13 @@ export interface StickRouteDeps {
   kick?: () => void;
   /** Where a refused lease is logged; defaults to the server's stderr log. */
   log?: (line: string) => void;
-  /** The image mirror (issue #140); absent, no image is served. */
+  /** The image mirror (issue #140); absent, no image is served (and no upgrade offered). */
   images?: Pick<ImageMirror, 'lookup' | 'status'>;
+  /**
+   * The server's release (`JM_RELEASE_VERSION`), the version sticks are offered (issue #427);
+   * default the environment's, else `dev`, which is no release and offers nothing.
+   */
+  version?: string;
   /** Where the sticks' image downloads are recorded, for /sticks (issue #141). */
   fetches?: StickFetches;
   /**
@@ -164,6 +182,11 @@ const LeaseBody = StickInfoSchema.extend({
   imageFetch: ImageFetchSchema.nullable().optional(),
   /** The image its first health check is checking (issue #157); `null` once it has a result. */
   starting: StickStartingSchema.nullable().optional(),
+  /**
+   * Its last upgrade attempt (issue #427). One that fails its schema is dropped, never a 400: an
+   * old or confused stick still leases.
+   */
+  upgrade: UpgradeReportSchema.optional().catch(undefined),
   /** Its engine version and free drop-volume space, for the sticks page (issue #138). */
   health: z
     .object({
@@ -236,6 +259,41 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
   // The app runs with Fastify's logger off; the server's own log is stderr.
   const log = deps.log ?? serverLog;
   const lastLogged = new Map<string, number>();
+  const release = deps.version ?? (process.env.JM_RELEASE_VERSION || 'dev');
+
+  /** Whether the mirror has a lock; a read that throws is none, never a failed lease. */
+  const mirrorHasLock = (): boolean => {
+    try {
+      return deps.images?.status().lock === true;
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * What sticks are offered (issue #427): the server's own release and the `jumpmaster-stick`
+   * image of its current lock, once the mirror holds it complete. None when the version is no
+   * release, or a lock or mirror read throws (fail closed).
+   */
+  const upgradeTarget = (): UpgradeTarget | null => {
+    if (!deps.images || !isReleaseVersion(release)) return null;
+    try {
+      const image = deps.images
+        .status()
+        .images.find((i) => i.name === STICK_IMAGE_NAME && i.current);
+      if (!image) return null;
+      const held = deps.images.lookup(image.name, image.digest);
+      if (!held.listed || !held.complete) return null;
+      // Only an offer the stick would accept: a release and a jumpmaster-stick digest reference.
+      const offer = UpgradeOfferSchema.safeParse({
+        version: release,
+        image: digestName(image.ref, image.digest),
+      });
+      return offer.success ? offer.data : null;
+    } catch {
+      return null;
+    }
+  };
 
   /**
    * The push token each drop was last granted in app mode, so it can be revoked when the drop's
@@ -470,7 +528,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       // Announced on every answer: a stick refuses pushing roles from a server without it.
       // image-mirror-v1 once there is a lock to mirror: a stick with no JM_IMAGE_SOURCE then
       // fetches its images from here (issue #141).
-      const features = ['push-v1', ...(deps.images?.status().lock ? [IMAGE_MIRROR_FEATURE] : [])];
+      const features = ['push-v1', ...(mirrorHasLock() ? [IMAGE_MIRROR_FEATURE] : [])];
       reply.header(FEATURES_HEADER, features.join(','));
       /**
        * The trooper count the stick runs at, read afresh (the operator may change it mid-poll) and
@@ -505,9 +563,37 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         slots: body.data.slots,
         health: body.data.health,
       });
+      // The stick's upgrade (issue #427): first its row is settled from what it runs and reports,
+      // then an automatic request is made, then the answer is decided (so a lease that reports
+      // `refused` gets no offer in its own answer).
+      const target = upgradeTarget();
+      settleStickUpgrade(db, stick.id, body.data.version ?? null, body.data.upgrade, now());
+      if (
+        target &&
+        live().sticks?.autoUpgrade !== false &&
+        upgradeEligible(body.data) &&
+        upgradeBehind(body.data.version ?? null, target)
+      )
+        autoRequestStickUpgrade(db, stick.id, target, now());
+      /**
+       * The offer, while the stick's row is pending for the current target and it is still
+       * eligible: re-read each poll round, so a request made mid-poll ends the poll. Leases it
+       * nothing; its running drops go on.
+       */
+      const offered = (): boolean => {
+        const t = upgradeTarget();
+        if (!t || !upgradeEligible(body.data)) return false;
+        const was = getStickUpgrade(db, stick.id);
+        if (!was || was.targetVersion !== t.version || was.image !== t.image) return false;
+        const row = holdForUpgrade(db, stick.id, now());
+        if (!row) return false;
+        const offer: UpgradeOffer = { version: row.targetVersion, image: row.image };
+        reply.header(UPGRADE_HEADER, JSON.stringify(offer));
+        return true;
+      };
       const atStart = full();
       if (atStart === 'removed') return unauthorized();
-      if (atStart || body.data.freeSlots < 1) return reply.code(204).send();
+      if (offered() || atStart || body.data.freeSlots < 1) return reply.code(204).send();
       let closed = false;
       // Not req.raw: IncomingMessage 'close' fires once the body is consumed, not on disconnect.
       reply.raw.on('close', () => {
@@ -517,6 +603,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       for (;;) {
         // Re-read each round: a stick removed while this poll waits is leased nothing.
         if (!getStick(db, stick.id)) return unauthorized();
+        if (offered()) return reply.code(204).send();
         const at = now();
         // Each poll reads the config afresh, and judges what the stick can run against it: the
         // payload is built from the config the lease saw.

@@ -187,6 +187,12 @@ const WORDS: Words[] = [
     'bool',
   ),
   w(
+    'sticks.autoUpgrade',
+    'Upgrade sticks automatically',
+    "Upgrade each stick to the server's release after the server upgrades. Sticks verify the image themselves and roll back if the new version doesn't start.",
+    'bool',
+  ),
+  w(
     'mcp.enabled',
     'Turn on the MCP server',
     "Command's MCP server accepts tokens at /mcp after the next restart. Off, no MCP client can reach Jumpmaster.",
