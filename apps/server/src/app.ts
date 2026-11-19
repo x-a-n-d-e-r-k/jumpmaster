@@ -30,6 +30,7 @@ import {
   ACTIVE_DROP_STATES,
   type AttemptKey,
   effectiveSlots,
+  findWorkItem,
   getAttempts,
   getDrop,
   getGateAllowance,
@@ -175,6 +176,21 @@ function listFilter<S extends string>(
     ...(typeof zone === 'string' ? { zone } : {}),
     ...(state !== undefined ? { state: state as S } : {}),
   };
+}
+
+/**
+ * /drops' `issue` filter: a positive integer, written plainly, and only with `zone` (issue numbers
+ * are per repository). Unset when absent; refused, answered 404, otherwise.
+ */
+function issueFilter(
+  issue: unknown,
+  zone: string | undefined,
+): number | undefined | { refuse: string } {
+  if (issue === undefined) return undefined;
+  if (zone === undefined) return { refuse: 'issue needs zone' };
+  if (typeof issue !== 'string' || !/^[1-9]\d*$/.test(issue)) return { refuse: 'bad issue' };
+  const n = Number(issue);
+  return Number.isSafeInteger(n) ? n : { refuse: 'bad issue' };
 }
 
 /** The most active drops the floor reads: far above any slot count. */
@@ -670,28 +686,43 @@ export function createApp(
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
 
-  app.get<{ Querystring: { zone?: string; state?: string } }>('/drops', async (req, reply) => {
-    const { db } = deps;
-    const config = cfg(req);
-    const f = listFilter(req.query, config.dropZones, ['all', 'active', ...DROP_STATES] as const);
-    if ('refuse' in f) return reply.code(404).type('text/plain').send(f.refuse);
-    const state = f.state ?? 'all';
-    const found = listDrops(db, {
-      ...(f.zone !== undefined ? { zoneId: f.zone } : {}),
-      ...(state === 'all' ? {} : { states: state === 'active' ? ACTIVE_DROP_STATES : [state] }),
-      limit: DROP_LIST_LIMIT + 1,
-    });
-    const html = renderDropList({
-      zones: config.dropZones,
-      ...(f.zone !== undefined ? { zone: f.zone } : {}),
-      state,
-      drops: found.slice(0, DROP_LIST_LIMIT),
-      items: config.dropZones.flatMap((z) => listWorkItems(db, z.id)),
-      limited: found.length > DROP_LIST_LIMIT,
-      now: deps.now(),
-    });
-    return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
-  });
+  app.get<{ Querystring: { zone?: string; state?: string; issue?: string } }>(
+    '/drops',
+    async (req, reply) => {
+      const { db } = deps;
+      const config = cfg(req);
+      const f = listFilter(req.query, config.dropZones, ['all', 'active', ...DROP_STATES] as const);
+      if ('refuse' in f) return reply.code(404).type('text/plain').send(f.refuse);
+      const issue = issueFilter(req.query.issue, f.zone);
+      if (typeof issue === 'object') return reply.code(404).type('text/plain').send(issue.refuse);
+      const state = f.state ?? 'all';
+      const item =
+        issue === undefined || f.zone === undefined ? undefined : findWorkItem(db, f.zone, issue);
+      // An issue without a work item has no drops.
+      const found =
+        issue !== undefined && item === undefined
+          ? []
+          : listDrops(db, {
+              ...(f.zone !== undefined ? { zoneId: f.zone } : {}),
+              ...(item !== undefined ? { workItemId: item.id } : {}),
+              ...(state === 'all'
+                ? {}
+                : { states: state === 'active' ? ACTIVE_DROP_STATES : [state] }),
+              limit: DROP_LIST_LIMIT + 1,
+            });
+      const html = renderDropList({
+        zones: config.dropZones,
+        ...(f.zone !== undefined ? { zone: f.zone } : {}),
+        ...(issue !== undefined ? { issue } : {}),
+        state,
+        drops: found.slice(0, DROP_LIST_LIMIT),
+        items: config.dropZones.flatMap((z) => listWorkItems(db, z.id)),
+        limited: found.length > DROP_LIST_LIMIT,
+        now: deps.now(),
+      });
+      return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
+    },
+  );
 
   app.get<{ Params: { id: string } }>('/zones/:id/goals', async (req, reply) => {
     const { db } = deps;

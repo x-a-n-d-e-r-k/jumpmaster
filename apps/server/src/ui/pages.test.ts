@@ -147,6 +147,18 @@ describe('renderHome', () => {
     expect(html).toContain('&lt;script&gt;');
   });
 
+  test("the issue cell links to GitHub; the title links to the issue's drops (#496)", () => {
+    const html = workItemRows(
+      [{ ...item, issueNumber: 12, title: 'fix <b>it</b>' }],
+      [{ ...z, repo: 'o/r' }],
+    );
+    expect(html).toContain('href="https://github.com/o/r/issues/12"');
+    expect(html).toMatch(/<a href="https:\/\/github\.com\/o\/r\/issues\/12"[^>]*>#12<\/a>/);
+    expect(html).toContain('href="/drops?zone=main&amp;issue=12"');
+    expect(html).toContain('>fix &lt;b&gt;it&lt;/b&gt;</a>');
+    expect(html).not.toContain('<b>');
+  });
+
   test('a blocked ready item shows what it waits on', () => {
     const html = workItemRows(
       [{ ...item, state: 'ready', prNumber: null, blockedBy: ['#4', 'o/x#<2>'] }],
