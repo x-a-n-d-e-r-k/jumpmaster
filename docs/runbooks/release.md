@@ -407,7 +407,9 @@ names is deleted (a blob a kept image shares stays). Collection is skipped at th
 while an image is fetching or an image of the current lock is pending; the next pass collects. A
 pending image of the previous lock only does not hold it back (no pass fetches it). A failed
 image's record names every blob its attempts stored (issue #451), so they are kept and its retry
-resumes without fetching them again; once it completes, or leaves the index, they are collected as
+resumes without fetching them again. Blobs of a signature artifact the mirror refused are not kept
+(issue #486): no retry uses them, so the collection deletes them unless another record names them
+(a refused artifact's `{}` config shared with an accepted signature stays). Once it completes, or leaves the index, they are collected as
 usual if no record names them. It logs `{"event":"image-mirror-collect","removed":n,"bytes":b}`; a blob it cannot delete
 is logged and the rest still go. The doctor's `server.image-mirror` names the store's size. Old
 release images in the host's Docker are the operator's to remove: see

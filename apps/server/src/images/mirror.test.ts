@@ -713,6 +713,96 @@ describe('the store keeps only the blobs the index names (issue #426)', () => {
     expect(m.lookup(b.name, b.digest)).toMatchObject({ complete: true });
   });
 
+  test('a failing image does not accumulate the blobs of refused signature artifacts', async () => {
+    const MiB = 1024 * 1024;
+    fake = await startFakeRegistry();
+    const img = fake.addImage('jumpmaster-trooper', { signatures: 'none' });
+    const refusedConfigs: string[] = [];
+    const addRefused = (n: number) => {
+      const s = fake?.addSignature(img, {
+        via: 'referrers-api',
+        config: Buffer.from(JSON.stringify({ n })),
+        layer: Buffer.alloc(5 * MiB, 1),
+        declaredSize: 1024,
+      });
+      refusedConfigs.push(s?.blobs[0] as string);
+    };
+    addRefused(0);
+    const dir = tmp();
+    let waits = 0;
+    const sizes: number[] = [];
+    const partials: number[] = [];
+    const m = mirrorOn(dir, {
+      backoffMs: [1],
+      sleep: async () => {
+        waits++;
+        sizes.push(stored(dir).length);
+        partials.push(indexOf(dir).images[`${img.name}@${img.digest}`]?.partial?.length ?? 0);
+        if (waits >= 3) m.stop();
+        else addRefused(waits);
+      },
+    });
+    m.setLock(lockOf(img));
+    m.start();
+    await m.idle();
+    expect(waits).toBe(3);
+    expect(m.status().images[0]).toMatchObject({ state: 'failed' });
+    expect(m.status().images[0]?.error).toMatch(/no cosign signature/);
+    for (const d of refusedConfigs) expect(stored(dir)).not.toContain(d);
+    const partial = indexOf(dir).images[`${img.name}@${img.digest}`]?.partial ?? [];
+    for (const d of refusedConfigs) expect(partial).not.toContain(d);
+    for (const p of Object.values(img.platforms))
+      for (const d of p.blobs) {
+        expect(stored(dir)).toContain(d);
+        expect(partial).toContain(d);
+      }
+    expect(new Set(sizes).size).toBe(1);
+    expect(new Set(partials).size).toBe(1);
+  });
+
+  test('a failed attempt keeps an accepted signature, not a refused one, sharing kept', async () => {
+    const MiB = 1024 * 1024;
+    fake = await startFakeRegistry();
+    const img = fake.addImage('jumpmaster-trooper', { signatures: 'none' });
+    const accepted = fake.addSignature(img, { via: 'referrers-api' });
+    const refused = fake.addSignature(img, {
+      via: 'referrers-api',
+      config: Buffer.from('{"refused":true}'),
+      layer: Buffer.alloc(5 * MiB, 1),
+      declaredSize: 1024,
+    });
+    // A refused artifact sharing the accepted one's `{}` config.
+    const sharing = fake.addSignature(img, {
+      via: 'referrers-api',
+      layer: Buffer.alloc(5 * MiB, 2),
+      declaredSize: 1024,
+    });
+    const broken = fake.addSignature(img, { via: 'referrers-api' });
+    fake.corrupt(broken.blobs[1] as string);
+    const dir = tmp();
+    const m = mirrorOn(dir, { backoffMs: [1], sleep: async () => m.stop() });
+    m.setLock(lockOf(img));
+    m.start();
+    await m.idle();
+    expect(m.status().images[0]?.state).toBe('failed');
+    expect(m.status().images[0]?.error).not.toMatch(/no cosign signature/);
+    const partial = indexOf(dir).images[`${img.name}@${img.digest}`]?.partial ?? [];
+    const kept = [
+      img.digest,
+      accepted.manifest,
+      ...accepted.blobs,
+      ...Object.values(img.platforms).flatMap((p) => [p.manifest, ...p.blobs]),
+    ];
+    for (const d of kept) {
+      expect(partial, d).toContain(d);
+      expect(stored(dir), d).toContain(d);
+    }
+    expect(sharing.blobs[0]).toBe(accepted.blobs[0]);
+    expect(partial).not.toContain(refused.blobs[0]);
+    expect(stored(dir)).not.toContain(refused.blobs[0]);
+    expect(partial).not.toContain(refused.manifest);
+  });
+
   test('the status reports the store’s size on disk', async () => {
     fake = await startFakeRegistry();
     const a = fake.addImage('jumpmaster-trooper');
