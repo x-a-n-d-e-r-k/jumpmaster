@@ -1059,7 +1059,7 @@ describe('backlog issues to crew triage (#467)', () => {
       if (e?.issue) e.issue.body = FORMATTED;
       w.f.state.setLabels(178, ['agent-ready']);
       await sync(w, plus(t0, 60_000));
-      expect(rows(w)).toEqual([{ n: 178, state: 'done', reason: 'superseded' }]);
+      expect(rows(w)).toEqual([{ n: 178, state: 'done', reason: 'withdrawn' }]);
     });
 
     test('an issue closed before its drop ran is superseded', async () => {
@@ -1067,7 +1067,7 @@ describe('backlog issues to crew triage (#467)', () => {
       await sync(w);
       w.f.state.closeIssue(178);
       await sync(w, plus(t0, 60_000));
-      expect(rows(w)).toEqual([{ n: 178, state: 'done', reason: 'superseded' }]);
+      expect(rows(w)).toEqual([{ n: 178, state: 'done', reason: 'withdrawn' }]);
     });
 
     test('a request with attempts is not superseded', async () => {
@@ -1085,6 +1085,152 @@ describe('backlog issues to crew triage (#467)', () => {
       await sync(w);
       await sync(w, plus(t0, 60_000));
       expect(rows(w)).toEqual([{ n: 179, state: 'open', reason: null }]);
+    });
+
+    const open = (w: ReturnType<typeof zoneWorld>) => rows(w).filter((r) => r.state === 'open');
+    const forgeWrites = (w: ReturnType<typeof zoneWorld>) =>
+      w.f.author.calls.filter((c) =>
+        /^(create|update|add|remove|set|close|comment)/i.test(c.method),
+      );
+
+    test('a Jumpmaster label added then removed, same body: sent again', async () => {
+      const w = world([{ number: 178 }]);
+      await sync(w);
+      w.f.state.setLabels(178, ['jm-triaged']);
+      await sync(w, plus(t0, 60_000));
+      expect(open(w)).toEqual([]);
+      w.f.state.setLabels(178, []);
+      await sync(w, plus(t0, 120_000));
+      expect(open(w)).toEqual([{ n: 178, state: 'open', reason: null }]);
+      expect(rows(w)).toHaveLength(1);
+    });
+
+    test('closed then reopened, same body: one open request after the reopen', async () => {
+      const w = world([{ number: 178 }]);
+      await sync(w);
+      w.f.state.closeIssue(178);
+      await sync(w, plus(t0, 60_000));
+      expect(open(w)).toEqual([]);
+      w.f.state.reopenIssue(178);
+      await sync(w, plus(t0, 120_000));
+      expect(open(w)).toEqual([{ n: 178, state: 'open', reason: null }]);
+    });
+
+    test('a jm-triage label swapped for another Jumpmaster label for one pass, then restored', async () => {
+      const w = world([{ number: 179, labels: ['jm-triage'] }]);
+      await sync(w);
+      w.f.state.setLabels(179, ['agent-staged']);
+      await sync(w, plus(t0, 60_000));
+      expect(open(w)).toEqual([]);
+      w.f.state.setLabels(179, ['jm-triage']);
+      await sync(w, plus(t0, 120_000));
+      expect(open(w)).toEqual([{ n: 179, state: 'open', reason: null }]);
+    });
+
+    test('an issue that stays out of both listings has no open request and no forge write', async () => {
+      const w = world([{ number: 178 }]);
+      await sync(w);
+      const before = forgeWrites(w).length;
+      w.f.state.closeIssue(178);
+      await sync(w, plus(t0, 60_000));
+      await sync(w, plus(t0, 120_000));
+      expect(open(w)).toEqual([]);
+      expect(forgeWrites(w)).toHaveLength(before);
+    });
+
+    test('a returning withdrawn request still honours the pace of three', async () => {
+      const w = world([10, 11, 12, 13].map((number) => ({ number })));
+      await sync(w);
+      w.f.state.closeIssue(10);
+      await sync(w, plus(t0, 60_000));
+      expect(open(w).map((r) => r.n)).toEqual([11, 12, 13]);
+      w.f.state.reopenIssue(10);
+      await sync(w, plus(t0, 120_000));
+      expect(open(w).map((r) => r.n)).toEqual([11, 12, 13]);
+    });
+
+    test('a returning withdrawn request still honours the skip labels', async () => {
+      const w = world([{ number: 178 }], { backlogSkipLabels: ['later'] });
+      await sync(w);
+      w.f.state.closeIssue(178);
+      await sync(w, plus(t0, 60_000));
+      w.f.state.reopenIssue(178);
+      w.f.state.setLabels(178, ['later']);
+      await sync(w, plus(t0, 120_000));
+      expect(open(w)).toEqual([]);
+    });
+
+    test('a request done with an outcome is not recorded again when its issue returns', async () => {
+      const w = world([{ number: 178 }]);
+      await sync(w);
+      const [r] = listTriageRequests(w.db, 'main');
+      setTriageRequest(
+        w.db,
+        r?.id ?? -1,
+        { state: 'done', outcome: 'not-agent-work', reason: 'withdrawn' },
+        t0,
+      );
+      w.f.state.closeIssue(178);
+      await sync(w, plus(t0, 60_000));
+      w.f.state.reopenIssue(178);
+      await sync(w, plus(t0, 120_000));
+      expect(rows(w)).toEqual([{ n: 178, state: 'done', reason: 'withdrawn' }]);
+    });
+
+    test.each<[string, Parameters<typeof setTriageRequest>[2]]>([
+      ['failed', { state: 'failed', reason: 'failed', attempts: 3 }],
+      ['waiting', { state: 'waiting', outcome: 'questions' }],
+      ['verifying', { state: 'verifying', outcome: 'already-done' }],
+      ['superseded after verifying', { state: 'done', outcome: null, reason: 'superseded' }],
+    ])('a %s request is not recorded again in the backlog', async (_, patch) => {
+      const w = world([{ number: 178 }]);
+      await sync(w);
+      const [r] = listTriageRequests(w.db, 'main');
+      setTriageRequest(w.db, r?.id ?? -1, patch, t0);
+      const before = rows(w);
+      await sync(w, plus(t0, 60_000));
+      await sync(w, plus(t0, 120_000));
+      expect(rows(w)).toEqual(before);
+    });
+
+    test('a request with attempts whose issue left the listings: unchanged, no duplicate', async () => {
+      const w = world([{ number: 178 }]);
+      await sync(w);
+      const [r] = listTriageRequests(w.db, 'main');
+      setTriageRequest(w.db, r?.id ?? -1, { attempts: 1 }, t0);
+      w.f.state.closeIssue(178);
+      await sync(w, plus(t0, 60_000));
+      w.f.state.reopenIssue(178);
+      await sync(w, plus(t0, 120_000));
+      expect(listTriageRequests(w.db, 'main')).toMatchObject([
+        { issueNumber: 178, state: 'open', reason: null, attempts: 1 },
+      ]);
+    });
+
+    test('a withdrawn request with attempts is never reopened', async () => {
+      const w = world([{ number: 178 }]);
+      await sync(w);
+      const [r] = listTriageRequests(w.db, 'main');
+      setTriageRequest(w.db, r?.id ?? -1, { state: 'done', reason: 'withdrawn', attempts: 1 }, t0);
+      await sync(w, plus(t0, 60_000));
+      expect(rows(w)).toEqual([{ n: 178, state: 'done', reason: 'withdrawn' }]);
+    });
+
+    test('returning to an earlier withdrawn text supersedes the open request for the newer text', async () => {
+      const w = world([{ number: 178 }]);
+      await sync(w);
+      w.f.state.closeIssue(178);
+      await sync(w, plus(t0, 60_000));
+      const e = w.f.state.issues.get(178);
+      w.f.state.reopenIssue(178);
+      if (e?.issue) e.issue.body = 'Another text.';
+      await sync(w, plus(t0, 120_000));
+      if (e?.issue) e.issue.body = BODY;
+      await sync(w, plus(t0, 180_000));
+      expect(rows(w)).toEqual([
+        { n: 178, state: 'open', reason: null },
+        { n: 178, state: 'done', reason: 'superseded' },
+      ]);
     });
   });
 
