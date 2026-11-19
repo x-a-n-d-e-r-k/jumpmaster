@@ -674,3 +674,89 @@ describe('/chat composer (#491)', () => {
     expect(html).toMatch(/\.chat-send\{[^}]*env\(safe-area-inset-bottom\)/);
   });
 });
+
+describe('focus chips and relative times', () => {
+  const zones = [
+    { id: 'main', repo: 'acme/demo' },
+    { id: 'other', repo: 'acme/other' },
+  ];
+  const now = new Date('2026-11-26T12:00:00.000Z');
+
+  function threads() {
+    const db = openDb(tmpDbFile());
+    const at = new Date('2026-11-26T11:55:00.000Z');
+    const plain = createThread(db, { title: 'Plain one' }, at);
+    const zone = createThread(
+      db,
+      { title: 'Zone main', focus: { kind: 'zone', zoneId: 'main', ref: 'main' } },
+      at,
+    );
+    const goals = createThread(
+      db,
+      { title: 'Goals of other', focus: { kind: 'goals', zoneId: 'other', ref: 'other' } },
+      at,
+    );
+    const briefing = createThread(
+      db,
+      { title: 'Briefing 12: Retry?', focus: { kind: 'briefing', zoneId: 'main', ref: '12' } },
+      at,
+    );
+    const gone = createThread(
+      db,
+      { title: 'Zone gone', focus: { kind: 'zone', zoneId: 'gone-zone', ref: 'gone-zone' } },
+      at,
+    );
+    return { db, plain, zone, goals, briefing, gone };
+  }
+
+  const rowOf = (html: string, id: number) => {
+    const start = html.indexOf(`href="/chat/${id}"`);
+    expect(start).toBeGreaterThan(-1);
+    return html.slice(start, html.indexOf('</tr>', start));
+  };
+
+  test('the list shows a chip for each focus kind and none for an unfocused thread', () => {
+    const t = threads();
+    const html = renderChatList(listThreads(t.db), { serviceMissing: false, zones, now });
+    expect(rowOf(html, t.zone.id)).toContain('<span class="chip">acme/demo</span>');
+    expect(rowOf(html, t.goals.id)).toContain('<span class="chip">acme/other · goals</span>');
+    expect(rowOf(html, t.briefing.id)).toContain('<span class="chip">Briefing 12</span>');
+    expect(rowOf(html, t.plain.id)).toContain('Plain one');
+    expect(rowOf(html, t.plain.id)).not.toContain('class="chip"');
+  });
+
+  test('a focus whose zone was removed shows its raw id', () => {
+    const t = threads();
+    const html = renderChatList(listThreads(t.db), { serviceMissing: false, zones, now });
+    expect(rowOf(html, t.gone.id)).toContain('<span class="chip">gone-zone</span>');
+  });
+
+  test('the Updated column is a relative <time> with the full ISO', () => {
+    const t = threads();
+    const html = renderChatList(listThreads(t.db), { serviceMissing: false, zones, now });
+    expect(rowOf(html, t.plain.id)).toContain(
+      '<time datetime="2026-11-26T11:55:00.000Z" title="2026-11-26T11:55:00.000Z">5 min ago</time>',
+    );
+  });
+
+  test('the thread page shows the chip next to the heading', () => {
+    const t = threads();
+    const goals = renderThread(t.goals, [], [], { zones });
+    expect(goals).toContain('<h2>Goals of other <span class="chip">acme/other · goals</span></h2>');
+    expect(renderThread(t.plain, [], [], { zones })).toContain('<h2>Plain one</h2>');
+  });
+
+  test('/chat and /chat/:id show chips for the configured zones', async () => {
+    const w = world();
+    const th = createThread(
+      w.db,
+      { title: 'Zone gone', focus: { kind: 'zone', zoneId: 'gone-zone', ref: 'gone-zone' } },
+      t0,
+    );
+    const list = await w.app.inject({ method: 'GET', url: '/chat', headers: w.session });
+    expect(list.body).toContain('<span class="chip">gone-zone</span>');
+    expect(list.body).toContain(`<time datetime="${t0.toISOString()}"`);
+    const one = await w.app.inject({ method: 'GET', url: `/chat/${th.id}`, headers: w.session });
+    expect(one.body).toContain('<span class="chip">gone-zone</span>');
+  });
+});

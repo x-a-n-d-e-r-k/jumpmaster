@@ -17,7 +17,7 @@ import { usageCfg, zoneWorld } from '../test/fixtures.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
 import { listCards, recordCard } from './cards.js';
 import { registerChatRoutes } from './routes.js';
-import { appendMessage, createThread, listMessages } from './store.js';
+import { appendMessage, createThread, getThread, listMessages } from './store.js';
 
 const TOKEN = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
@@ -298,5 +298,84 @@ describe('POST /api/chat/cards/:id/undo', () => {
     expect(w.db.prepare('SELECT COUNT(*) AS n FROM outbox').get()).toEqual({ n: 0 });
     expect(w.setLabelWrites()).toBe(0);
     expect(listCards(w.db, w.th.id)[0]?.state).toBe('done');
+  });
+});
+
+describe('a thread titled from its first message', () => {
+  const post = (w: ReturnType<typeof world>, id: number, text: string) =>
+    w.app.inject({
+      method: 'POST',
+      url: `/api/chat/threads/${id}/messages`,
+      headers: w.session,
+      payload: { text },
+    });
+  const newThread = async (w: ReturnType<typeof world>) => {
+    const made = await w.app.inject({
+      method: 'POST',
+      url: '/api/chat/threads',
+      headers: w.session,
+      payload: {},
+    });
+    const { thread } = made.json() as { thread: { id: number; title: string } };
+    expect(thread.title).toBe('New chat');
+    return thread.id;
+  };
+
+  test('the first message sets the title, cut at a word boundary; a second does not change it', async () => {
+    const w = world();
+    const id = await newThread(w);
+    const first = await post(
+      w,
+      id,
+      '  can you   clean up the Doctor records? A bunch are set as failed on Merlin',
+    );
+    expect(first.statusCode).toBe(202);
+    const title = getThread(w.db, id)?.title;
+    expect(title).toBe('can you clean up the Doctor records? A bunch are set as…');
+    expect(title?.length).toBeLessThanOrEqual(60);
+    expect((await post(w, id, 'Something else entirely')).statusCode).toBe(202);
+    expect(getThread(w.db, id)?.title).toBe(
+      'can you clean up the Doctor records? A bunch are set as…',
+    );
+  });
+
+  test('a short first message is the title as is, without heading markers', async () => {
+    const w = world();
+    const id = await newThread(w);
+    await post(w, id, '## What\n is   next?');
+    expect(getThread(w.db, id)?.title).toBe('What is next?');
+  });
+
+  test('a thread created with a focus keeps its focus title after a message', async () => {
+    const w = world();
+    const th = createThread(
+      w.db,
+      { title: 'Zone main', focus: { kind: 'zone', zoneId: 'main', ref: 'main' } },
+      t0,
+    );
+    expect((await post(w, th.id, 'What is next?')).statusCode).toBe(202);
+    expect(getThread(w.db, th.id)?.title).toBe('Zone main');
+  });
+
+  test('a thread with an explicit title keeps it', async () => {
+    const w = world();
+    const th = createThread(w.db, { title: 'About the backlog' }, t0);
+    await post(w, th.id, 'What is next?');
+    expect(getThread(w.db, th.id)?.title).toBe('About the backlog');
+  });
+
+  test('a first message of only "## " leaves "New chat"', async () => {
+    const w = world();
+    const id = await newThread(w);
+    expect((await post(w, id, '## ')).statusCode).toBe(202);
+    expect(getThread(w.db, id)?.title).toBe('New chat');
+  });
+
+  test('a thread whose earlier owner message did not title it is not titled later', async () => {
+    const w = world();
+    const id = await newThread(w);
+    await post(w, id, '## ');
+    await post(w, id, 'A real question');
+    expect(getThread(w.db, id)?.title).toBe('New chat');
   });
 });
