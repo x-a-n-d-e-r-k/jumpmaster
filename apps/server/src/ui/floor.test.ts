@@ -372,6 +372,45 @@ describe('floorCounts', () => {
     expect(zoneOf(f, 'A').state).toBe(expected);
   });
 
+  const ready = (n: number) => Array.from({ length: n }, () => wi('A', 'ready'));
+  test.each<[string, string, Partial<HomeState>, string]>([
+    ['paused, 3 ready, none running', 'paused', { items: ready(3) }, 'held'],
+    ['paused, one running', 'paused', { drops: [dr('A', 'running')] }, 'working'],
+    ['observe, 2 ready', 'observe', { items: ready(2) }, 'held'],
+    ['active, 3 ready', 'active', { items: ready(3) }, 'working'],
+    ['paused, one parked', 'paused', { items: [wi('A', 'parked')] }, 'blocked'],
+  ])('held card state (#495): %s', (_name, mode, s, expected) => {
+    const f = floorCounts(home({ zones: [zone('A')], modes: { A: mode }, ...s }), NOW);
+    expect(zoneOf(f, 'A').state).toBe(expected);
+  });
+
+  test('a held card reads PAUSED or OBSERVING by mode, after working ones (#495)', () => {
+    const paused = renderHome(
+      home({
+        zones: [zone('A')],
+        modes: { A: 'paused' },
+        items: [wi('A', 'ready'), wi('A', 'ready'), wi('A', 'ready')],
+      }),
+    );
+    expect(paused).toMatch(
+      /data-state="held" data-zone="A">.*?<span class="card-state">PAUSED<\/span>/,
+    );
+    const observing = renderHome(
+      home({ zones: [zone('A')], modes: { A: 'observe' }, items: [wi('A', 'ready')] }),
+    );
+    expect(observing).toContain('<span class="card-state">OBSERVING</span>');
+    const order = renderHome(
+      home({
+        zones: [zone('I'), zone('H'), zone('W')],
+        modes: { H: 'paused' },
+        drops: [dr('W', 'running')],
+      }),
+    );
+    const at = (id: string) => order.indexOf(`data-zone="${id}"`);
+    expect(at('W')).toBeLessThan(at('H'));
+    expect(at('H')).toBeLessThan(at('I'));
+  });
+
   test("a paused zone's briefings are held, not needs-you, on the card and in the totals", () => {
     const f = floorCounts(
       home({

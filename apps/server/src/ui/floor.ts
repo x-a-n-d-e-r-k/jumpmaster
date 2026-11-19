@@ -17,7 +17,7 @@ const esc = (v: unknown): string =>
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 
-export type CardState = 'needs-you' | 'blocked' | 'working' | 'idle';
+export type CardState = 'needs-you' | 'blocked' | 'working' | 'held' | 'idle';
 
 /** The Working counts. `merged24h` is null when the merges could not be read: unknown, not 0. */
 export interface WorkingCounts {
@@ -55,7 +55,13 @@ export interface FloorCounts {
 
 const HELD_MODES: ReadonlySet<string> = new Set(['paused', 'observe']);
 const DAY_MS = 24 * 3_600_000;
-const STATE_RANK: Record<CardState, number> = { 'needs-you': 0, blocked: 1, working: 2, idle: 3 };
+const STATE_RANK: Record<CardState, number> = {
+  'needs-you': 0,
+  blocked: 1,
+  working: 2,
+  held: 3,
+  idle: 4,
+};
 
 /** Live drops: active and started (a pending push still holds its slot). */
 const isRunning = (state: string): boolean =>
@@ -66,10 +72,16 @@ const liveSticks = (sticks: readonly StickLine[], now: Date): StickLine[] =>
     (s) => s.lastSeenAt !== null && now.getTime() - Date.parse(s.lastSeenAt) <= STICK_LIVE_MS,
   );
 
-function cardState(c: ZoneCounts): CardState {
+/**
+ * The card's state. A paused or observing zone starts nothing, so its ready work reads `held`,
+ * not `working`; a drop still running there finishes, so that zone stays `working` (#495).
+ */
+function cardState(c: ZoneCounts, held: boolean): CardState {
   if (c.needsYou > 0) return 'needs-you';
   if (c.parked > 0 || c.outbox > 0 || c.noStick) return 'blocked';
-  if (c.running + c.queued + c.prOpen > 0) return 'working';
+  if (c.running > 0) return 'working';
+  if (held) return 'held';
+  if (c.queued + c.prOpen > 0) return 'working';
   return 'idle';
 }
 
@@ -109,7 +121,7 @@ export function floorCounts(state: HomeState, now: Date): FloorCounts {
       needsYou: held ? 0 : needs,
       held: held ? (heldBriefings.get(z.id) ?? 0) + open : 0,
     };
-    return { zoneId: z.id, mode, counts, held, state: cardState(counts) };
+    return { zoneId: z.id, mode, counts, held, state: cardState(counts, held) };
   });
 
   const heldZones = new Set(zones.filter((z) => z.held).map((z) => z.zoneId));
@@ -166,8 +178,11 @@ const STATE_LABEL: Record<CardState, string> = {
   'needs-you': 'Needs you',
   blocked: 'Blocked',
   working: 'Working',
+  held: 'Held',
   idle: 'Idle',
 };
+/** A held card names its mode (#495). */
+const HELD_LABEL: Record<string, string> = { paused: 'PAUSED', observe: 'OBSERVING' };
 const MODE_TONE: Record<string, string> = { active: 'ok', observe: 'info', paused: 'warn-b' };
 const HELD_WORD: Record<string, string> = { paused: 'paused', observe: 'observing' };
 
@@ -177,7 +192,7 @@ function zoneCard(z: ZoneFloor, zone: ZoneRef, zones: readonly ZoneRef[]): strin
   const heading =
     `<h2><a href="${esc(`/zones/${encodeURIComponent(id)}`)}">${zoneName(zone, zones)}</a>` +
     ` <span class="badge ${MODE_TONE[z.mode] ?? ''}">${esc(z.mode)}</span>` +
-    ` <span class="card-state">${STATE_LABEL[z.state]}</span></h2>`;
+    ` <span class="card-state">${z.state === 'held' ? (HELD_LABEL[z.mode] ?? STATE_LABEL.held) : STATE_LABEL[z.state]}</span></h2>`;
   const allZero =
     c.running === 0 && c.queued === 0 && c.prOpen === 0 && c.merged24h === 0 && z.state === 'idle';
   const working = allZero
@@ -206,7 +221,7 @@ function zoneCard(z: ZoneFloor, zone: ZoneRef, zones: readonly ZoneRef[]): strin
   );
 }
 
-/** One card per zone: needs-you first, then blocked, working and idle; config order within. */
+/** One card per zone: needs-you first, then blocked, working, held and idle; config order within. */
 export function zoneCards(f: FloorCounts, zones: readonly ZoneRef[]): string {
   const byId = new Map(zones.map((z) => [z.id, z]));
   const cards = f.zones

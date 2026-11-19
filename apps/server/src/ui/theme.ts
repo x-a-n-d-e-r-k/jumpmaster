@@ -212,6 +212,7 @@ td>code:first-child{white-space:nowrap}
 .zone-card[data-state=blocked]{box-shadow:var(--shadow-xs),inset 0 0 0 1px var(--error-light),inset 4px 0 0 var(--error-base)}
 .zone-card[data-state=blocked] .card-state{color:var(--error-base)}
 .zone-card[data-state=working] .card-state{color:var(--information-base)}
+.zone-card[data-state=held] .card-state{color:var(--warning-base)}
 .zone-card ul.blocked{margin:.75rem 0 0;padding-left:1.25rem}
 .zone-card .needs{margin:.75rem 0 0;font-weight:500}
 .zone-card p.muted{margin:.75rem 0 0}.zone-card a.muted{color:var(--text-sub-600);font-weight:400}
