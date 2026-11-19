@@ -1,5 +1,5 @@
 import { redact } from '@jumpmaster/protocol';
-import { floorBriefings } from './briefings.js';
+import { floorBriefings, HELD_MODES } from './briefings.js';
 import { getSetting, setSetting } from './config/revisions.js';
 import type { ConfigStore } from './config/store.js';
 import { type Config, DEFAULT_READY_LABEL } from './config.js';
@@ -133,6 +133,8 @@ const ALL_PAGES: Pages = { zones: true, settings: true, credentials: true };
 const ACTIVE = new Set(['leased', 'running']);
 /** The roles that still lease under the throttle (leases.ts FINISHING). */
 const FINISHING = new Set(['review', 'heal', 'resolve']);
+/** How a held zone's mode reads in a line. */
+const HELD_WORD: Record<string, string> = { paused: 'paused', observe: 'observing' };
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 /** "1 issue waits", "2 issues wait". */
 const wait = (n: number, word: string) => `${plural(n, word)} wait${n === 1 ? 's' : ''}`;
@@ -542,6 +544,20 @@ export function statusOf(input: StatusInput, now: Date): Status {
       waitingOn: 'nothing',
     });
   }
+
+  // Ready, but in a paused or observing zone: nothing starts until it is resumed (#495).
+  const heldReady = zones.flatMap((z) => {
+    const n = HELD_MODES.has(z.mode) ? z.items.filter((i) => i.state === 'ready').length : 0;
+    return n > 0 ? [{ z, n }] : [];
+  });
+  const firstHeld = heldReady[0]?.z;
+  if (firstHeld)
+    return said({
+      headline: `Nothing will start: ${heldReady.map((h) => `${wait(h.n, 'ready issue')} in ${HELD_WORD[h.z.mode] ?? h.z.mode} ${name(h.z.id)}`).join(', ')}`,
+      detail: 'A paused or observing zone starts nothing; resume it to start its ready issues.',
+      waitingOn: 'you',
+      action: { label: `Open ${name(firstHeld.id)}`, href: zoneHref(firstHeld.id) },
+    });
 
   const zoneOne = activeZones[0] ?? zones[0];
   return said({

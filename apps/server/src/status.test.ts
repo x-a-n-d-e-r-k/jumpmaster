@@ -594,6 +594,46 @@ describe('usage holds (round 2, I1 and I2)', () => {
   });
 });
 
+describe('ready work held in a paused or observing zone (#495)', () => {
+  const ready = (n: number) => Array.from({ length: n }, () => item({ state: 'ready' }));
+
+  test('a paused zone with ready items and an active zone with none: the line names it', () => {
+    const s = statusOf(
+      base({
+        zones: [zone(), zone({ id: 'merlin', mode: 'paused', items: ready(3) })],
+        zoneName: (id) => `octo/${id}`,
+      }),
+      NOW,
+    );
+    expect(s.headline).toBe('Nothing will start: 3 ready issues wait in paused octo/merlin');
+    expect(s.waitingOn).toBe('you');
+    expect(s.action).toEqual({ label: 'Open octo/merlin', href: '/zones/merlin' });
+  });
+
+  test('two held zones are both named', () => {
+    const s = statusOf(
+      base({
+        zones: [
+          zone(),
+          zone({ id: 'merlin', mode: 'paused', items: ready(1) }),
+          zone({ id: 'docs', mode: 'observe', items: ready(2) }),
+        ],
+      }),
+      NOW,
+    );
+    expect(s.headline).toContain('merlin');
+    expect(s.headline).toContain('docs');
+    expect(s.headline).toBe(
+      'Nothing will start: 1 ready issue waits in paused merlin, 2 ready issues wait in observing docs',
+    );
+  });
+
+  test('with no ready items anywhere the idle line is unchanged', () => {
+    const s = statusOf(base({ zones: [zone(), zone({ id: 'merlin', mode: 'paused' })] }), NOW);
+    expect(s.headline).toBe('Idle: no ready issues. Label one drop-ready or file one from Intake');
+  });
+});
+
 describe('the detail and its list (round 2: S1, M2, M3)', () => {
   test('a paused zone among active ones is listed with a link to it', () => {
     const s = statusOf(base({ zones: [zone(), zone({ id: 'docs', mode: 'paused' })] }), NOW);
