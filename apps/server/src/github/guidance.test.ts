@@ -27,12 +27,18 @@ const starter = makeZone({ repo: 'octo/demo', identity: 'starter', authorMayBeAd
 /** The query of a template URL as [name, value] pairs, in order. */
 const query = (url: string): [string, string][] => [...new URL(url).searchParams.entries()];
 
-/** The install runbook's ruleset JSON (the `gh api … rulesets` block under Branch rules). */
-function runbookRuleset(): unknown {
+/**
+ * A ruleset JSON from the install runbook (a `gh api … rulesets --input - <<'JSON'` block under
+ * Branch rules), picked by its `"name"`. `edit` rewrites the block's text before it is parsed.
+ */
+function runbookRuleset(name: string, edit: (text: string) => string = (t) => t): unknown {
   const md = readFileSync(new URL('../../../../docs/runbooks/install.md', import.meta.url), 'utf8');
-  const m = /rulesets --input - <<'JSON'\n([\s\S]*?)\nJSON\n/.exec(md);
-  if (!m?.[1]) throw new Error('the runbook ruleset block moved');
-  return JSON.parse(m[1]);
+  const blocks = [...md.matchAll(/rulesets --input - <<'JSON'\n([\s\S]*?)\nJSON\n/g)].map(
+    (m) => m[1] ?? '',
+  );
+  const found = blocks.filter((b) => (JSON.parse(b) as { name?: unknown }).name === name);
+  if (found.length !== 1) throw new Error(`the runbook has ${found.length} ${name} ruleset blocks`);
+  return JSON.parse(edit(found[0] as string));
 }
 
 describe('pre-filled token links', () => {
@@ -103,10 +109,12 @@ describe('the ruleset file', () => {
     const ci = { defaultBranch: 'main', ciJobs: [{ workflow: 'ci.yml', job: 'test' }] };
     // Two-bot: the runbook's JSON as it stands, a code owner's review required.
     const one = JSON.parse(rulesetJson(twoBot, ci));
-    expect(one).toEqual(runbookRuleset());
+    expect(one).toEqual(runbookRuleset('jumpmaster'));
     expect(one.rules[0].parameters.require_code_owner_review).toBe(true);
     // Starter: the runbook's own variant (it says which two fields change, and to what).
-    const runbookStarter = runbookRuleset() as { rules: { parameters: Record<string, unknown> }[] };
+    const runbookStarter = runbookRuleset('jumpmaster') as {
+      rules: { parameters: Record<string, unknown> }[];
+    };
     const pr0 = runbookStarter.rules[0];
     if (!pr0) throw new Error('no pull_request rule in the runbook');
     pr0.parameters.required_approving_review_count = 0;
@@ -387,6 +395,24 @@ describe('two-app zones (spec 2026-11-13-github-app-auth §5.2)', () => {
     expect(r.conditions).toEqual({ ref_name: { include: ['~DEFAULT_BRANCH'], exclude: [] } });
     for (const bad of [1.5, 0, -1, Number.NaN, 2 ** 53])
       expect(() => mergeRulesetJson(bad), String(bad)).toThrow();
+  });
+
+  test("the runbook's jumpmaster-merge block, its placeholder replaced by the author app's id, equals mergeRulesetJson", () => {
+    const md = readFileSync(
+      new URL('../../../../docs/runbooks/install.md', import.meta.url),
+      'utf8',
+    );
+    // The placeholder is the number the text tells the reader to replace.
+    expect(md).toContain("replace `123456` with the author app's id");
+    const merge = runbookRuleset('jumpmaster-merge', (t) => {
+      expect(t.match(/\b123456\b/g)).toHaveLength(1);
+      return t.replace(/\b123456\b/, '4242');
+    });
+    expect(merge).toEqual(JSON.parse(mergeRulesetJson(4242)));
+    // The main ruleset's block stays first.
+    expect(md.indexOf('"name": "jumpmaster"')).toBeLessThan(
+      md.indexOf('"name": "jumpmaster-merge"'),
+    );
   });
 
   test('a two-app zone gets both rulesets; hybrid, PAT two-bot and starter get only the main one', () => {
