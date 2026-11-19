@@ -16,7 +16,7 @@ import { plus, t0, tmpDbFile } from '../test/helpers.js';
 import { dispatchGate } from '../usage.js';
 import type { AppEntryRead } from '../vault/github-app-entries.js';
 import type { ResolvedApps } from '../vault/resolution.js';
-import { recordCard } from './cards.js';
+import { listCards, recordCard } from './cards.js';
 import type { ChatServiceClient } from './service.js';
 import {
   appendMessage,
@@ -653,5 +653,119 @@ describe('chat usage', () => {
       .map((e) => e.event)
       .filter((e) => e.type === 'message' && e.message.id === reply?.id);
     expect(announced).toEqual([{ type: 'message', message: reply }]);
+  });
+  describe('confirm paths in assistant text', () => {
+    const ID = 'abc_DEF-1';
+    async function oneTurn(texts: string[], during?: (db: Db, threadId: number) => void) {
+      let db!: Db;
+      let threadId = 0;
+      const w = world(async function* () {
+        during?.(db, threadId);
+        for (const text of texts) yield { type: 'text', text };
+        yield { type: 'result', isError: false };
+      });
+      db = w.db;
+      const th = createThread(w.db, { title: 't' }, t0);
+      threadId = th.id;
+      const seen: HubEvent[] = [];
+      w.turns.subscribe(th.id, 0, (e) => seen.push(e));
+      w.owner(th.id, 'pause it');
+      w.turns.enqueue(th.id);
+      await w.turns.idle();
+      const streamed = seen.flatMap((e) => (e.event.type === 'text' ? [e.event.text] : []));
+      const stored = listMessages(w.db, th.id)
+        .filter((m) => m.role === 'assistant')
+        .map((m) => m.text);
+      return { w, th, streamed, stored };
+    }
+
+    test.each([
+      ['plain', `Confirm it at /config/confirm/${ID}.`, 'Confirm it at the card below.'],
+      ['backticked', 'Confirm it at `/config/confirm/abc`.', 'Confirm it at the card below.'],
+      [
+        'absolute',
+        'Confirm it at https://firstborn.example:8443/config/confirm/abc now.',
+        'Confirm it at the card below now.',
+      ],
+      [
+        'absolute in backticks',
+        'See `https://firstborn.example:8443/config/confirm/abc`.',
+        'See the card below.',
+      ],
+      [
+        'Markdown link',
+        'Use [confirm](/config/confirm/abc) to apply.',
+        'Use the card below to apply.',
+      ],
+      [
+        'absolute Markdown link',
+        'Use [confirm](https://firstborn.example:8443/config/confirm/abc "Confirm") to apply.',
+        'Use the card below to apply.',
+      ],
+      ['autolink', 'Open <https://h.example/config/confirm/abc>.', 'Open the card below.'],
+    ])('%s: stored and streamed as the card below', async (_name, input, want) => {
+      const { streamed, stored } = await oneTurn([input]);
+      expect(streamed).toEqual([want]);
+      expect(stored).toEqual([want]);
+      for (const t of [...streamed, ...stored]) {
+        expect(t).not.toContain('abc');
+        expect(t).not.toContain('/config/confirm/');
+      }
+    });
+
+    test('streamed text events and the stored message get the same treatment', async () => {
+      const { streamed, stored } = await oneTurn([
+        `I staged the pause. Confirm it at \`/config/confirm/${ID}\`.`,
+        `Or open https://firstborn.example:8443/config/confirm/${ID}.`,
+      ]);
+      expect(streamed).toEqual([
+        'I staged the pause. Confirm it at the card below.',
+        'Or open the card below.',
+      ]);
+      expect(stored).toEqual([streamed.join('\n\n')]);
+      for (const t of [...streamed, ...stored]) expect(t).not.toContain(ID);
+    });
+
+    test('paths that are not a confirm path with an id are left alone', async () => {
+      const text =
+        'See /config/confirmations and /config/confirm with no id, or `/config/confirm`.';
+      const { streamed, stored } = await oneTurn([text]);
+      expect(streamed).toEqual([text]);
+      expect(stored).toEqual([text]);
+    });
+
+    test('a pending card recorded in the same turn keeps its confirm link', async () => {
+      const link = `/config/confirm/${ID}`;
+      const { w, th, stored } = await oneTurn([`Confirm at ${link}.`], (db, threadId) => {
+        recordCard(
+          db,
+          { threadId, messageId: 1, kind: 'pause', state: 'pending', summary: 'Pause', link },
+          t0,
+        );
+      });
+      expect(stored).toEqual(['Confirm at the card below.']);
+      expect(listCards(w.db, th.id).map((c) => c.link)).toEqual([link]);
+    });
+
+    test('the history summary carries no confirm path from an older stored reply', async () => {
+      const w = world(async function* (_req, _s, n) {
+        if (n === 1) yield { type: 'error', code: 'session_lost', message: 'gone' };
+        else yield { type: 'result', isError: false };
+      });
+      const th = createThread(w.db, { title: 't' }, t0);
+      setThreadSession(w.db, th.id, 'sess-1', t0);
+      appendMessage(
+        w.db,
+        th.id,
+        { role: 'assistant', text: `Confirm at \`/config/confirm/${ID}\`.`, state: 'done' },
+        t0,
+      );
+      w.owner(th.id, 'now');
+      w.turns.enqueue(th.id);
+      await w.turns.idle();
+      const prompt = w.service.requests[1]?.prompt ?? '';
+      expect(prompt).toContain('Confirm at the card below.');
+      expect(prompt).not.toContain(ID);
+    });
   });
 });

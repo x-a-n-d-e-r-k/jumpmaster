@@ -124,6 +124,31 @@ const DEADLINE_GRACE_MS = 30_000;
 /** The chat MCP endpoint as the chat service reaches it on the compose network. */
 export const chatMcpUrl = (port: number): string => `http://jumpmaster:${port}/mcp/chat`;
 
+/** What a confirm path in assistant text becomes: the pending card carries the action. */
+export const CONFIRM_PATH_WORDS = 'the card below';
+
+// An optional origin, then `/config/confirm/<id>`. The id is a session-bound capability (#508).
+const CONFIRM_URL = String.raw`(?:https?:\/\/[^\s/<>()\[\]\x60]+)?\/config\/confirm\/[A-Za-z0-9_-]+`;
+const CONFIRM_PATH = new RegExp(
+  [
+    // A Markdown link, with an optional <target> and title: the whole link collapses.
+    String.raw`\[[^\]\n]*\]\(\s*<?${CONFIRM_URL}>?(?:\s+(?:"[^"\n]*"|'[^'\n]*'))?\s*\)`,
+    // Backticked, or an autolink.
+    String.raw`\x60+\s*${CONFIRM_URL}\s*\x60+`,
+    String.raw`<${CONFIRM_URL}>`,
+    CONFIRM_URL,
+  ].join('|'),
+  'g',
+);
+
+/**
+ * Replaces each `/config/confirm/<id>` in assistant text, with or without an origin, in
+ * backticks or as a Markdown link, by plain words: the id belongs on the card, not in prose.
+ */
+export function stripConfirmPaths(s: string): string {
+  return s.replace(CONFIRM_PATH, CONFIRM_PATH_WORDS);
+}
+
 const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 /**
@@ -154,7 +179,10 @@ export function historySummary(
   const lines = listMessages(db, threadId)
     .filter((m) => m.seq < beforeSeq)
     .slice(-HISTORY_MESSAGES)
-    .map((m) => `[${m.role}] ${neutralise(m.text)}`);
+    .map(
+      (m) =>
+        `[${m.role}] ${neutralise(m.role === 'assistant' ? stripConfirmPaths(m.text) : m.text)}`,
+    );
   const room = HISTORY_MAX_CHARS - fence(fenceId, 'history', '').length;
   const kept: string[] = [];
   let used = 0;
@@ -353,6 +381,8 @@ export class ChatTurns {
     const turnSecrets: string[] = [claudeToken];
     const clean = (s: string): string =>
       redact(s, [...redactionList(config.secrets), ...turnSecrets]);
+    // Assistant text, stored and streamed alike: redacted, and with no confirm path (#508).
+    const cleanText = (s: string): string => stripConfirmPaths(clean(s));
     const creds: ChatReadCredential[] = [];
     let tokenId: number | undefined;
     try {
@@ -427,7 +457,7 @@ export class ChatTurns {
         { ...base, resumeSession: thread.claudeSessionId, prompt: `${context}${msg.text}` },
         chat.turnMinutes,
         startedAt,
-        clean,
+        { clean, cleanText },
       );
       if (outcome.kind === 'session_lost') {
         // The service's session files are a cache: start the thread over from the server's record.
@@ -440,7 +470,7 @@ export class ChatTurns {
           { ...base, resumeSession: null, prompt },
           chat.turnMinutes,
           startedAt,
-          clean,
+          { clean, cleanText },
         );
       }
       if (outcome.kind === 'done') {
@@ -474,7 +504,7 @@ export class ChatTurns {
     req: ChatTurnRequest,
     turnMinutes: number,
     startedAt: string,
-    clean: (s: string) => string,
+    { clean, cleanText }: { clean: (s: string) => string; cleanText: (s: string) => string },
   ): Promise<Attempt> {
     const { db } = this.d;
     const ctl = new AbortController();
@@ -500,7 +530,7 @@ export class ChatTurns {
             });
             break;
           case 'text': {
-            const text = clean(e.text);
+            const text = cleanText(e.text);
             texts.push(text);
             this.emit(threadId, { seq: lastSeq, event: { type: 'text', text } });
             break;
