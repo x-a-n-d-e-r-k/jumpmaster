@@ -160,6 +160,24 @@ export function listMessages(db: Db, threadId: number, afterSeq = 0): ChatMessag
   ).map(messageOf);
 }
 
+/** Sets the thread's title and marks it updated. The caller titles a thread once (#492). */
+export function setThreadTitle(db: Db, id: number, title: string, now: Date): void {
+  db.prepare('UPDATE chat_threads SET title = ?, updated_at = ? WHERE id = ?').run(
+    title,
+    now.toISOString(),
+    id,
+  );
+}
+
+/** Whether the thread has an owner message. */
+export function hasOwnerMessage(db: Db, threadId: number): boolean {
+  return (
+    db
+      .prepare(`SELECT 1 FROM chat_messages WHERE thread_id = ? AND role = 'owner' LIMIT 1`)
+      .get(threadId) !== undefined
+  );
+}
+
 /** Records (or clears) the Claude session a thread resumes. */
 export function setThreadSession(db: Db, id: number, sessionId: string | null, now: Date): void {
   db.prepare('UPDATE chat_threads SET claude_session_id = ?, updated_at = ? WHERE id = ?').run(
