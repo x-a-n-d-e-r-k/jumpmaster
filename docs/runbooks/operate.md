@@ -188,6 +188,80 @@ when that line is gone.
 home and on this tab says how old it is and links here; the doctor's `claude.token-age` warns
 too. A token entered here is dated the day it is entered, or the **Made on** date you give.
 
+### GitHub Apps
+
+Two-bot zones that use GitHub Apps (see [GitHub Apps](install.md#github-apps)) use one author app
+and one reviewer app per GitHub owner, and every zone on that owner's repositories shares the
+pair. Credentials lists each pair under **GitHub App entries**, one row per owner and role:
+
+- **Owner**: the personal account or organization the app belongs to.
+- **Role**: `author` or `reviewer`.
+- **Source**: where the entry comes from, `vault (encrypted)` or a file (with its path), and,
+  when another source also holds one, which one it overrides.
+- **App**: the app's slug, linked to its page on GitHub.
+- **App id**, **Imported** (the date it was saved) and **Last test** (the result and its date).
+- **Install**, a link to `https://github.com/apps/<slug>/installations/new`, and **Test**, which
+  signs a request with the stored key and checks with GitHub that it answers as that app id and
+  slug. From a terminal:
+  `ctl secrets test github-app/<owner>/<role>`.
+
+An entry not created yet shows `not created` as its source and says "Not created yet: one app
+pair per GitHub owner." instead of the links. The private key and the client secret are never
+shown, on this page or anywhere else. With no two-bot zone the section says GitHub Apps are for
+two-bot mode.
+
+This section lists and tests the entries; it creates none. The apps are created on the setup
+wizard's GitHub step, `/setup/forge`, which stays open after setup: name a repository of the
+owner, press **Recommend**, and a two-bot recommendation shows **Register the apps under** (**My
+personal account** or **The organization**) with **Create the author app** and **Create the
+reviewer app** (see [step 4](install.md#step-4-the-setup-wizard)). An owner whose pair already
+exists gets an **Install it on the repository** link there instead.
+
+**Adding a repository on an owner that already has a pair.** The pair is already there; the new
+zone only needs its installation and repository ids.
+
+1. Add the zone: [Add a project](#add-a-project), with two-bot accounts.
+2. If the apps' installations cover **Only select repositories**, add the new repository to each
+   app's installation on GitHub: follow the author row's **Install** link, choose
+   **Configure** on the owner where the app is installed, add the repository and save; then the
+   same for the reviewer row. An installation that covers **All repositories** needs nothing.
+3. Open `/setup/github-app/installed` (GitHub also sends you there after an installation update)
+   and press **Find the installations**. Jumpmaster asks GitHub for each two-bot zone's
+   installation and repository ids and proposes them as one guarded change: follow **Review and
+   confirm** and confirm it with your passphrase
+   ([the confirmation page](#guarded-changes-and-the-confirmation-page)). Nothing is recorded
+   until you do.
+4. Set up the new repository's rulesets and CODEOWNERS on its GitHub page
+   ([Branch rules](install.md#branch-rules), [step 5](install.md#step-5-the-github-page)), then
+   run the doctor (`ctl doctor <zone>`) to zero fails.
+
+Whatever the installation covers, each token Jumpmaster mints is narrowed to the one zone's
+repository: All repositories does not give a drop the owner's other repositories.
+
+**Adding an owner** (another personal account or organization).
+
+1. Add the zone for the new owner's repository ([Add a project](#add-a-project)).
+2. Create that owner's pair: open `/setup/forge`, name the new repository and press
+   **Recommend**; under **Register the apps under** choose **My personal account** or **The
+   organization**, then press **Create the author app** and **Create the reviewer app**, and
+   finish each on Jumpmaster's **Finish** page, as in
+   [step 4](install.md#step-4-the-setup-wizard). The new owner's rows then appear under Settings →
+   Credentials, **GitHub App entries**.
+3. Install both apps on the new owner, through each row's **Install** link.
+4. Run discovery as above: `/setup/github-app/installed`, **Find the installations**, confirm with
+   your passphrase.
+5. Set up the rulesets and CODEOWNERS the install runbook describes:
+   [Branch rules](install.md#branch-rules) and the
+   [GitHub page](install.md#step-5-the-github-page). Then run the doctor to zero fails.
+
+The first owner's pair and its zones are unaffected: each zone uses the pair of its own
+repository's owner.
+
+**Starter mode and tokens.** Starter-mode zones, and two-bot zones that chose "Use tokens
+instead", are unchanged: they keep using the token rows above ([Credentials and
+rotation](#credentials-and-rotation)), and nothing here applies to them. Rotating an app's private
+key is not covered here yet.
+
 ### Install settings
 
 **Install** (`/settings/install`) holds the install-wide settings: `pollSeconds`,
