@@ -3117,3 +3117,153 @@ describe('forge.admin for GitHub App roles (issue #447)', () => {
     }
   });
 });
+
+describe('forge.author-reads and forge.reviewer-reads for GitHub App roles (issue #456)', () => {
+  const AUTHOR_SLUG = 'jm-author-app';
+  const REVIEWER_SLUG = 'jm-reviewer-app';
+  const MINTED = 'ghs_' + 'MINTEDMINTEDMINTEDMINTED0123456789';
+  const pemBody = APP_ENTRY.pem
+    .split('\n')
+    .filter((l) => l.trim() !== '' && !l.startsWith('-----'))
+    .join('');
+  const entry = (appId: string, slug: string) =>
+    ({
+      source: 'vault',
+      fingerprint: 'fp',
+      entry: { ...APP_ENTRY, appId, slug, importedAt: 'x' },
+    }) as const;
+  // forge.author tests the app key against GET /app; nothing here may reach github.com.
+  beforeAll(() => {
+    nock.disableNetConnect();
+  });
+  afterAll(() => {
+    nock.enableNetConnect();
+  });
+  const appWorld = (o: { reviewer?: 'app' | 'pat' } = {}) => {
+    const w = world({
+      zone: { githubApp: { repositoryId: 5, installations: { author: 7, reviewer: 8 } } },
+    });
+    w.deps.appApiBase = 'https://ghe.reads.test.invalid/api/v3';
+    const roles = {
+      author: entry('8', AUTHOR_SLUG),
+      reviewer: o.reviewer === 'pat' ? { source: 'missing' } : entry('9', REVIEWER_SLUG),
+    };
+    w.deps.resolvedApps = () => new Map([['octo', roles]]) as unknown as ResolvedApps;
+    return w;
+  };
+  const leaks = (c: DoctorCheck) => {
+    const json = JSON.stringify(c);
+    expect(json).not.toContain(pemBody);
+    expect(json).not.toContain(pemBody.slice(0, 40));
+    expect(json).not.toContain(MINTED);
+    expect(json).not.toContain(AUTHOR_TOKEN);
+  };
+
+  test('check runs refused with Actions allowed fails naming check runs, never Actions', async () => {
+    const w = appWorld();
+    w.f.state.probes.author = okProbes().map((p) =>
+      p.permission === 'Checks: read' ? { ...p, status: 403, accepted: 'checks=read' } : p,
+    );
+    const c = one(await w.run(), 'forge.author-reads');
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('check runs');
+    expect(c.summary).toContain("can't read CI results");
+    expect(c.fix).toContain('Checks: Read-only');
+    expect(JSON.stringify(c)).not.toContain('Actions');
+    leaks(c);
+  });
+
+  test('a refused Actions probe never changes an app role result, nor is named', async () => {
+    const w = appWorld();
+    w.f.state.access.author.private = true;
+    w.f.state.probes.author = okProbes().map((p) =>
+      p.permission === 'Actions: read' ? { ...p, status: 403 } : p,
+    );
+    const c = one(await w.run(), 'forge.author-reads');
+    expect(c.status).toBe('pass');
+    expect(JSON.stringify(c)).not.toContain('Actions');
+    const both = appWorld();
+    both.f.state.probes.author = okProbes().map((p) =>
+      p.permission === 'Actions: read' || p.permission === 'Checks: read'
+        ? { ...p, status: 404 }
+        : p,
+    );
+    const f = one(await both.run(), 'forge.author-reads');
+    expect(f.status).toBe('fail');
+    expect(JSON.stringify(f)).not.toContain('Actions');
+  });
+
+  test('every probe allowed passes naming the app slug; private and public', async () => {
+    const w = appWorld();
+    w.f.state.access.author.private = true;
+    const c = one(await w.run(), 'forge.author-reads');
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain(`the author GitHub App ${AUTHOR_SLUG}`);
+    expect(c.summary).toContain('Checks: read');
+    expect(c.summary).not.toContain('token');
+    leaks(c);
+    const pub = one(await appWorld().run(), 'forge.author-reads');
+    expect(pub.status).toBe('pass');
+    expect(pub.summary).toContain(`the author GitHub App ${AUTHOR_SLUG}`);
+    expect(pub.summary).toContain('is public');
+    leaks(pub);
+    const rev = one(await appWorld().run(), 'forge.reviewer-reads');
+    expect(rev.status).toBe('pass');
+    expect(rev.summary).toContain(`the reviewer GitHub App ${REVIEWER_SLUG}`);
+  });
+
+  test('Issues refused fails with a fix on the app permissions page and the installation', async () => {
+    const w = appWorld();
+    w.f.state.probes.author = okProbes().map((p) =>
+      p.permission === 'Issues: read' ? { ...p, status: 403 } : p,
+    );
+    const c = one(await w.run(), 'forge.author-reads');
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('Issues: read');
+    expect(c.fix).toContain(
+      `Settings → Developer settings → GitHub Apps → ${AUTHOR_SLUG} → Permissions & events`,
+    );
+    expect(c.fix).toContain('Issues: Read-only');
+    expect(c.fix).toContain('accept the new permissions on the installation');
+    expect(c.fix).not.toContain('Fine-grained');
+    expect(c.fix).not.toContain('_FILE');
+    expect(c.fix).not.toMatch(/token/i);
+    leaks(c);
+  });
+
+  test('a 401 probe on the reviewer app fails, never telling the operator to create a token', async () => {
+    const w = appWorld();
+    w.f.state.probes.reviewer = okProbes().map((p) =>
+      p.permission === 'Contents: read' ? { ...p, status: 401 } : p,
+    );
+    const c = one(await w.run(), 'forge.reviewer-reads');
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain(`the reviewer GitHub App ${REVIEWER_SLUG}`);
+    expect(c.summary).toContain('minted token');
+    expect(c.fix).toContain('forge.reviewer');
+    expect(c.fix).toContain('run the doctor again');
+    expect(c.fix).not.toMatch(/create a (new )?token/i);
+    expect(c.fix).not.toContain('_FILE');
+    leaks(c);
+  });
+
+  test("a hybrid zone's PAT reviewer keeps the token texts", async () => {
+    const w = appWorld({ reviewer: 'pat' });
+    w.f.state.probes.reviewer = okProbes().map((p) =>
+      p.permission === 'Contents: read' ? { ...p, status: 401 } : p,
+    );
+    const c = one(await w.run(), 'forge.reviewer-reads');
+    expect(c.fix).toContain('Create a new token');
+  });
+
+  test('a PAT zone with check runs refused and Actions allowed still passes with the Actions note', async () => {
+    const w = world();
+    w.f.state.probes.author = okProbes().map((p) =>
+      p.permission === 'Checks: read' ? { ...p, status: 403 } : p,
+    );
+    const c = one(await w.run(), 'forge.author-reads');
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('CI is read through Actions jobs');
+    expect(c.summary).toContain('the author token');
+  });
+});
