@@ -33,6 +33,7 @@ import {
   GATE_REFUSAL,
   HISTORY_MAX_CHARS,
   type HubEvent,
+  historySummary,
   SERVICE_STOPPED,
 } from './turns.js';
 
@@ -540,7 +541,7 @@ describe('ChatTurns', () => {
     expect(getThread(w.db, th.id)?.claudeSessionId).toBe('sess-new');
   });
 
-  test('a tool_result event is accepted and stores nothing: the turn ends as it would without it', async () => {
+  test('a tool_result event changes no message text: the turn ends as it would without it', async () => {
     const stream = (withResult: boolean): Script =>
       async function* () {
         yield { type: 'text', text: 'Looking.' };
@@ -808,5 +809,264 @@ describe('chat usage', () => {
       expect(prompt).toContain('Confirm at the card below.');
       expect(prompt).not.toContain(ID);
     });
+  });
+});
+
+describe('tool step input and result (#502)', () => {
+  // Configured but not token-shaped: only redaction by value can catch it.
+  const SECRET = 'join-NOTSHAPED-value-0123456789abcdef';
+  const secretConfig = (): Config => {
+    const c = configOf({});
+    return { ...c, secrets: { ...c.secrets, joinToken: SECRET } };
+  };
+  const toolEvent = (id: string, input: Record<string, unknown> = { file_path: 'GOAL.md' }) =>
+    ({ type: 'tool', name: 'Read', summary: 'read GOAL.md', id, input }) as const;
+  const resultEvent = (
+    id: string,
+    text: string,
+    o: { truncated?: boolean; totalLines?: number; isError?: boolean } = {},
+  ): ChatEvent => ({
+    type: 'tool_result',
+    id,
+    text,
+    truncated: o.truncated ?? false,
+    totalLines: o.totalLines ?? (text === '' ? 0 : text.split('\n').length),
+    isError: o.isError ?? false,
+  });
+  const run = async (events: ChatEvent[], config = secretConfig()) => {
+    const w = world(
+      async function* () {
+        for (const e of events) yield e;
+        yield { type: 'result', isError: false };
+      },
+      { config },
+    );
+    const th = createThread(w.db, { title: 't' }, t0);
+    const hub: HubEvent[] = [];
+    w.turns.subscribe(th.id, 0, (e) => hub.push(e));
+    w.owner(th.id, 'hi');
+    w.turns.enqueue(th.id);
+    await w.turns.idle();
+    const tools = listMessages(w.db, th.id).filter((m) => m.role === 'tool');
+    return { w, th, hub, tools, tool: tools[0] };
+  };
+  const rawRow = (db: Db, id: number) =>
+    db
+      .prepare(
+        `SELECT tool_name, tool_use_id, input_json, result_text, result_truncated, result_lines,
+           result_error FROM chat_messages WHERE id = ?`,
+      )
+      .get(id) as Record<string, unknown>;
+
+  test('a tool event stores its name, id and input; its result is stored on the same message', async () => {
+    const { w, tool } = await run([toolEvent('t1'), resultEvent('t1', 'goal\nline 2')]);
+    expect(rawRow(w.db, tool?.id ?? 0)).toEqual({
+      tool_name: 'Read',
+      tool_use_id: 't1',
+      input_json: '{"file_path":"GOAL.md"}',
+      result_text: 'goal\nline 2',
+      result_truncated: 0,
+      result_lines: 2,
+      result_error: 0,
+    });
+    expect(tool).toMatchObject({
+      text: 'read GOAL.md',
+      toolName: 'Read',
+      input: { file_path: 'GOAL.md' },
+      result: { text: 'goal\nline 2', truncated: false, lines: 2, isError: false },
+    });
+  });
+
+  test('an error result keeps isError', async () => {
+    const { tool } = await run([toolEvent('t1'), resultEvent('t1', 'nope', { isError: true })]);
+    expect(tool?.result).toEqual({ text: 'nope', truncated: false, lines: 1, isError: true });
+  });
+
+  test('a 500-line result stores exactly 200 lines, result_lines 500, truncated', async () => {
+    const text = Array.from({ length: 500 }, (_, i) => `line ${i + 1}`).join('\n');
+    const { w, tool } = await run([toolEvent('t1'), resultEvent('t1', text)]);
+    const row = rawRow(w.db, tool?.id ?? 0);
+    // Short lines: only the line limit cuts it.
+    expect(String(row.result_text).split('\n')).toHaveLength(200);
+    expect(String(row.result_text).endsWith('line 200')).toBe(true);
+    expect(row.result_lines).toBe(500);
+    expect(row.result_truncated).toBe(1);
+  });
+
+  test('a 3-line 20 KB result stores 16 KB', async () => {
+    const text = ['a'.repeat(7000), 'b'.repeat(7000), 'c'.repeat(6480)].join('\n');
+    expect(Buffer.byteLength(text)).toBe(20_482);
+    const { w, tool } = await run([toolEvent('t1'), resultEvent('t1', text)]);
+    const row = rawRow(w.db, tool?.id ?? 0);
+    // Few lines: only the size limit cuts it.
+    expect(Buffer.byteLength(String(row.result_text))).toBe(16_384);
+    expect(row.result_lines).toBe(3);
+    expect(row.result_truncated).toBe(1);
+  });
+
+  test('the size cut never splits a multi-byte character', async () => {
+    const text = `a${'é'.repeat(10_000)}`;
+    const { tool } = await run([toolEvent('t1'), resultEvent('t1', text)]);
+    const stored = tool?.result?.text ?? '';
+    expect(stored).not.toContain('�');
+    expect(Buffer.byteLength(stored)).toBe(16_383);
+  });
+
+  test('a result within both limits is stored whole and not truncated', async () => {
+    const text = Array.from({ length: 200 }, () => 'x'.repeat(80)).join('\n');
+    expect(Buffer.byteLength(text)).toBeLessThan(16_384);
+    const { tool } = await run([toolEvent('t1'), resultEvent('t1', text)]);
+    expect(tool?.result).toEqual({ text, truncated: false, lines: 200, isError: false });
+  });
+
+  test('D4: a secret straddling the 16 KB cut is redacted before the cut, leaving no prefix of it', async () => {
+    const text = `${'a'.repeat(16_380)}${SECRET}${'b'.repeat(5000)}`;
+    const { tool } = await run([toolEvent('t1'), resultEvent('t1', text)]);
+    const stored = tool?.result?.text ?? '';
+    expect(stored).not.toContain(SECRET.slice(0, 8));
+    expect(stored.startsWith('a'.repeat(16_380))).toBe(true);
+    expect(tool?.result?.truncated).toBe(true);
+  });
+
+  test("D4: a secret straddling the service's 64 KB cut leaves no prefix of 8 or more characters", async () => {
+    // A long secret: each whole one shrinks to a short mark, so the service's cut end is still
+    // the end once stored, and the server's own cut does not hide it.
+    const long = `long-NOTSHAPED-${'q'.repeat(85)}`;
+    const c = secretConfig();
+    const config = { ...c, secrets: { ...c.secrets, joinToken: long } };
+    const unit = `${long} `;
+    const body = unit.repeat(Math.floor((65_536 - 20) / unit.length));
+    const text = `${body}${long.slice(0, 20)}`;
+    expect(text.length).toBeLessThanOrEqual(65_536);
+    const { tool } = await run(
+      [toolEvent('t1'), resultEvent('t1', text, { truncated: true, totalLines: 1 })],
+      config,
+    );
+    const stored = tool?.result?.text ?? '';
+    expect(stored.length).toBeGreaterThan(0);
+    expect(Buffer.byteLength(stored)).toBeLessThan(16_384);
+    for (let k = 8; k <= long.length; k++) expect(stored).not.toContain(long.slice(0, k));
+    expect(stored.endsWith('[REDACTED] ')).toBe(true);
+    expect(tool?.result?.truncated).toBe(true);
+  });
+
+  test('a short trailing run that is not 8 characters of a secret prefix is kept', async () => {
+    const text = `x\n${SECRET.slice(0, 7)}`;
+    const { tool } = await run([
+      toolEvent('t1'),
+      resultEvent('t1', text, { truncated: true, totalLines: 9 }),
+    ]);
+    expect(tool?.result).toEqual({ text, truncated: true, lines: 9, isError: false });
+  });
+
+  test('a secret in full in the input and in the result is replaced in both', async () => {
+    const { w, tool } = await run([
+      toolEvent('t1', { pattern: SECRET, nested: { list: [`x${SECRET}y`] } }),
+      resultEvent('t1', `found ${SECRET} here`),
+    ]);
+    const row = rawRow(w.db, tool?.id ?? 0);
+    expect(JSON.stringify(row)).not.toContain(SECRET);
+    expect(tool?.input).toEqual({
+      pattern: '[REDACTED]',
+      nested: { list: ['x[REDACTED]y'] },
+    });
+    expect(tool?.result?.text).toBe('found [REDACTED] here');
+  });
+
+  test('a secret whose JSON form differs from its value is still redacted in the input', async () => {
+    const multi = 'line-one-NOTSHAPED-aaaa\nline-two-NOTSHAPED-bbbb';
+    const c = secretConfig();
+    const config = { ...c, secrets: { ...c.secrets, joinToken: multi } };
+    const { w, tool } = await run([toolEvent('t1', { content: `<${multi}>` })], config);
+    const row = rawRow(w.db, tool?.id ?? 0);
+    expect(String(row.input_json)).not.toContain('NOTSHAPED');
+    expect(tool?.input).toEqual({ content: '<[REDACTED]>' });
+  });
+
+  test('D5: the stored input and result and the streamed tool message redact alike', async () => {
+    const { tool, hub } = await run([
+      toolEvent('t1', { pattern: SECRET }),
+      resultEvent('t1', `got ${SECRET}`),
+    ]);
+    const streamed = hub
+      .map((e) => e.event)
+      .filter((e) => e.type === 'message' && e.message.role === 'tool')
+      .map((e) => (e.type === 'message' ? e.message : undefined));
+    // Appended, then updated in place: two messages, one seq.
+    expect(streamed.map((m) => m?.seq)).toEqual([tool?.seq, tool?.seq]);
+    expect(streamed.at(-1)).toEqual(tool);
+    expect(streamed[0]?.input).toEqual(tool?.input);
+    expect(JSON.stringify(hub)).not.toContain(SECRET);
+    expect(tool?.input).toEqual({ pattern: '[REDACTED]' });
+    expect(tool?.result?.text).toBe('got [REDACTED]');
+  });
+
+  test('a result for an unknown id stores nothing', async () => {
+    const { w, tool } = await run([toolEvent('t1'), resultEvent('other', 'x')]);
+    expect(tool?.result).toBeUndefined();
+    expect(rawRow(w.db, tool?.id ?? 0).result_text).toBeNull();
+  });
+
+  test('a result whose id is a tool message of an earlier turn leaves that message unchanged', async () => {
+    let n = 0;
+    const w = world(
+      async function* () {
+        n++;
+        if (n === 1) yield toolEvent('t1');
+        else yield resultEvent('t1', 'late result');
+        yield { type: 'result', isError: false };
+      },
+      { config: secretConfig() },
+    );
+    const th = createThread(w.db, { title: 't' }, t0);
+    w.owner(th.id, 'first');
+    w.turns.enqueue(th.id);
+    await w.turns.idle();
+    const before = listMessages(w.db, th.id).find((m) => m.role === 'tool');
+    expect(before?.toolName).toBe('Read');
+    w.owner(th.id, 'second');
+    w.turns.enqueue(th.id);
+    await w.turns.idle();
+    const after = listMessages(w.db, th.id).find((m) => m.role === 'tool');
+    expect(after).toEqual(before);
+    expect(after?.result).toBeUndefined();
+  });
+
+  test('historySummary for a thread with a stored result carries none of its input or result', async () => {
+    const { w, th } = await run([
+      toolEvent('t1', { file_path: 'INPUT-MARKER.md' }),
+      resultEvent('t1', 'RESULT-MARKER body'),
+    ]);
+    const summary = historySummary(w.db, th.id, 1_000, 'fence-1');
+    expect(summary).toContain('[tool] read GOAL.md');
+    expect(summary).not.toContain('RESULT-MARKER');
+    expect(summary).not.toContain('INPUT-MARKER');
+  });
+
+  test('an older-image stream (no id, no tool_result) stores tool messages exactly as before', async () => {
+    const { w, tool } = await run([{ type: 'tool', name: 'Read', summary: 'read GOAL.md' }]);
+    expect(rawRow(w.db, tool?.id ?? 0)).toEqual({
+      tool_name: null,
+      tool_use_id: null,
+      input_json: null,
+      result_text: null,
+      result_truncated: null,
+      result_lines: null,
+      result_error: null,
+    });
+    expect(Object.keys(tool ?? {}).sort()).toEqual(
+      [
+        'createdAt',
+        'error',
+        'id',
+        'role',
+        'seq',
+        'sessionHash',
+        'state',
+        'text',
+        'threadId',
+        'usage',
+      ].sort(),
+    );
   });
 });

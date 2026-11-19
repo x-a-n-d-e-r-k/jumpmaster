@@ -1700,3 +1700,34 @@ test('v52 rebuilds triage_requests keeping every row, and takes verifying, alrea
   ).toThrow(/UNIQUE/);
   db.close();
 });
+
+test('v53 adds nullable tool step columns to chat_messages, keeping every row', () => {
+  const f = dbAt(52, (raw) => {
+    raw.exec(
+      `INSERT INTO chat_threads (id, title, created_at, updated_at) VALUES (1, 't', 'c', 'u');
+       INSERT INTO chat_messages (thread_id, seq, role, text, state, created_at)
+       VALUES (1, 1, 'tool', 'read GOAL.md', 'done', 'c')`,
+    );
+  });
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(
+    db
+      .prepare(
+        `SELECT text, tool_name, tool_use_id, input_json, result_text, result_truncated,
+           result_lines, result_error FROM chat_messages`,
+      )
+      .all(),
+  ).toEqual([
+    {
+      text: 'read GOAL.md',
+      tool_name: null,
+      tool_use_id: null,
+      input_json: null,
+      result_text: null,
+      result_truncated: null,
+      result_lines: null,
+      result_error: null,
+    },
+  ]);
+});

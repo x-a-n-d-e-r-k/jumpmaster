@@ -1534,6 +1534,20 @@ DROP TABLE triage_requests;
 ALTER TABLE new_triage_requests RENAME TO triage_requests;
 `;
 
+/**
+ * v53 (#502): a chat tool step keeps its tool, its `tool_use` id, its input (redacted JSON) and a
+ * short, redacted result. All nullable: a step from an older chat image has none of them.
+ */
+const V53_SQL = `
+ALTER TABLE chat_messages ADD COLUMN tool_name TEXT;
+ALTER TABLE chat_messages ADD COLUMN tool_use_id TEXT;
+ALTER TABLE chat_messages ADD COLUMN input_json TEXT;
+ALTER TABLE chat_messages ADD COLUMN result_text TEXT;
+ALTER TABLE chat_messages ADD COLUMN result_truncated INTEGER CHECK (result_truncated IN (0, 1));
+ALTER TABLE chat_messages ADD COLUMN result_lines INTEGER;
+ALTER TABLE chat_messages ADD COLUMN result_error INTEGER CHECK (result_error IN (0, 1));
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1587,6 +1601,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 50, sql: V50_SQL },
   { version: 51, sql: V51_SQL },
   { version: 52, sql: V52_SQL, foreignKeysOff: true },
+  { version: 53, sql: V53_SQL },
 ];
 
 /**

@@ -35,6 +35,9 @@ import {
   nextQueued,
   setMessage,
   setThreadSession,
+  setToolResult,
+  type ToolStepResult,
+  turnToolMessage,
 } from './store.js';
 
 /**
@@ -65,6 +68,8 @@ export interface ChatTurnDeps {
   appTokens?: Pick<AppTokenSource, 'fresh'>;
   /** The operator's log; every line is redacted before it gets here. */
   log(msg: string): void;
+  /** The operator's debug log, for what is expected now and then; silent when absent. */
+  debug?(msg: string): void;
   /** Jitter for a usage pause (`ingestRateLimit`); `Math.random` by default. */
   rand?: () => number;
 }
@@ -147,6 +152,80 @@ const CONFIRM_PATH = new RegExp(
  */
 export function stripConfirmPaths(s: string): string {
   return s.replace(CONFIRM_PATH, CONFIRM_PATH_WORDS);
+}
+
+/** The most lines of a tool result the server keeps (#502). */
+export const RESULT_MAX_LINES = 200;
+/** The most bytes (UTF-8) of a tool result the server keeps. */
+export const RESULT_MAX_BYTES = 16_384;
+/** The shortest end of a cut text that is removed as a part of a secret. */
+const PARTIAL_SECRET_MIN = 8;
+
+/** The first `max` bytes of `s` in UTF-8, never splitting a character. */
+function firstBytes(s: string, max: number): string {
+  const buf = Buffer.from(s, 'utf8');
+  if (buf.length <= max) return s;
+  let end = max;
+  // Back off a continuation byte so the cut lands on a character's start.
+  while (end > 0 && ((buf[end] ?? 0) & 0xc0) === 0x80) end--;
+  return buf.subarray(0, end).toString('utf8');
+}
+
+/**
+ * `s` without a trailing run of 8 or more characters that begins one of `secrets`: what a cut
+ * through a secret leaves, which redaction by whole value cannot see.
+ */
+export function dropPartialSecret(s: string, secrets: readonly string[]): string {
+  let out = s;
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const secret of secrets) {
+      for (let k = Math.min(secret.length, out.length); k >= PARTIAL_SECRET_MIN; k--) {
+        if (out.endsWith(secret.slice(0, k))) {
+          out = out.slice(0, out.length - k);
+          changed = true;
+          break;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * A tool result as stored: redacted in full first, then cut to its first 200 lines or 16 KB,
+ * whichever is smaller, then rid of any part of a secret left at the end of a cut.
+ */
+export function storedResult(
+  r: { text: string; truncated: boolean; totalLines: number; isError: boolean },
+  clean: (s: string) => string,
+  secrets: readonly string[],
+): ToolStepResult {
+  const full = clean(r.text);
+  const lines = full.split('\n');
+  let text = lines.length > RESULT_MAX_LINES ? lines.slice(0, RESULT_MAX_LINES).join('\n') : full;
+  text = firstBytes(text, RESULT_MAX_BYTES);
+  const truncated = r.truncated || text.length < full.length;
+  if (truncated) text = dropPartialSecret(text, secrets);
+  return { text, truncated, lines: r.totalLines, isError: r.isError };
+}
+
+/** Every string of a value, keys included, through `clean`. */
+function cleanDeep(v: unknown, clean: (s: string) => string): unknown {
+  if (typeof v === 'string') return clean(v);
+  if (Array.isArray(v)) return v.map((x) => cleanDeep(x, clean));
+  if (typeof v === 'object' && v !== null) {
+    return Object.fromEntries(Object.entries(v).map(([k, x]) => [clean(k), cleanDeep(x, clean)]));
+  }
+  return v;
+}
+
+/**
+ * A tool input as stored: each string redacted (a secret's JSON escape differs from its value),
+ * then the JSON redacted once more.
+ */
+export function storedInput(input: Record<string, unknown>, clean: (s: string) => string): string {
+  return clean(JSON.stringify(cleanDeep(input, clean)));
 }
 
 const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -379,8 +458,8 @@ export class ChatTurns {
 
     // Every value this turn must never store, emit or log, beyond the server's own list.
     const turnSecrets: string[] = [claudeToken];
-    const clean = (s: string): string =>
-      redact(s, [...redactionList(config.secrets), ...turnSecrets]);
+    const secrets = (): string[] => [...redactionList(config.secrets), ...turnSecrets];
+    const clean = (s: string): string => redact(s, secrets());
     // Assistant text, stored and streamed alike: redacted, and with no confirm path (#508).
     const cleanText = (s: string): string => stripConfirmPaths(clean(s));
     const creds: ChatReadCredential[] = [];
@@ -457,7 +536,7 @@ export class ChatTurns {
         { ...base, resumeSession: thread.claudeSessionId, prompt: `${context}${msg.text}` },
         chat.turnMinutes,
         startedAt,
-        { clean, cleanText },
+        { clean, cleanText, secrets },
       );
       if (outcome.kind === 'session_lost') {
         // The service's session files are a cache: start the thread over from the server's record.
@@ -470,7 +549,7 @@ export class ChatTurns {
           { ...base, resumeSession: null, prompt },
           chat.turnMinutes,
           startedAt,
-          { clean, cleanText },
+          { clean, cleanText, secrets },
         );
       }
       if (outcome.kind === 'done') {
@@ -504,7 +583,15 @@ export class ChatTurns {
     req: ChatTurnRequest,
     turnMinutes: number,
     startedAt: string,
-    { clean, cleanText }: { clean: (s: string) => string; cleanText: (s: string) => string },
+    {
+      clean,
+      cleanText,
+      secrets,
+    }: {
+      clean: (s: string) => string;
+      cleanText: (s: string) => string;
+      secrets: () => string[];
+    },
   ): Promise<Attempt> {
     const { db } = this.d;
     const ctl = new AbortController();
@@ -536,17 +623,38 @@ export class ChatTurns {
             break;
           }
           case 'tool': {
+            // A step from an older chat image has no id: stored as it always was.
+            const tool =
+              e.id === undefined
+                ? undefined
+                : {
+                    name: clean(e.name),
+                    useId: e.id,
+                    ...(e.input === undefined ? {} : { inputJson: storedInput(e.input, clean) }),
+                  };
             const row = this.append(threadId, {
               role: 'tool',
               text: clean(e.summary),
               state: 'done',
+              ...(tool ? { tool } : {}),
             });
             lastSeq = row.seq;
             break;
           }
-          case 'tool_result':
-            // Not stored yet: a later change keeps it, through `clean`, with its tool row.
+          case 'tool_result': {
+            // Only a step of this turn: a stale or unknown id changes nothing.
+            const step = turnToolMessage(db, threadId, msg.seq, e.id);
+            if (!step) {
+              this.d.debug?.(clean(`${where}: a tool result for no step of this turn: ${e.id}`));
+              break;
+            }
+            setToolResult(db, step.id, storedResult(e, clean, secrets()), this.d.now());
+            const row = listMessages(db, threadId, step.seq - 1)[0];
+            // The same seq: a page updates the step in place.
+            if (row)
+              this.emit(threadId, { seq: row.seq, event: { type: 'message', message: row } });
             break;
+          }
           case 'rate_limit': {
             // The chat uses the install's one Claude credential: its limits are the install's.
             const data = rateLimitFromEvent(e.data);
