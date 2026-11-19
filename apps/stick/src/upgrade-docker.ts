@@ -1,6 +1,6 @@
 // The upgrade helper's Docker calls (issue #429), on dockerode.
 import Docker from 'dockerode';
-import type { ContainerSpec, UpgradeDocker } from './upgrade-helper.js';
+import { type ContainerSpec, NoSuchContainer, type UpgradeDocker } from './upgrade-helper.js';
 
 const statusOf = (e: unknown): number | undefined => (e as { statusCode?: number }).statusCode;
 
@@ -20,6 +20,16 @@ async function idempotent(call: () => Promise<unknown>): Promise<void> {
     await call();
   } catch (e) {
     if (statusOf(e) !== 304) throw e;
+  }
+}
+
+/** A container call whose 404 (no such container) becomes {@link NoSuchContainer}. */
+export async function onContainer(name: string, call: () => Promise<unknown>): Promise<void> {
+  try {
+    await call();
+  } catch (e) {
+    if (statusOf(e) === 404) throw new NoSuchContainer(name);
+    throw e;
   }
 }
 
@@ -62,14 +72,12 @@ export function dockerUpgrade(socketPath: string): UpgradeDocker {
         HostConfig: spec.HostConfig as Docker.HostConfig,
       });
     },
-    start: (name) => idempotent(() => docker.getContainer(name).start()),
-    stop: (name, t) => idempotent(() => docker.getContainer(name).stop({ t })),
-    async rename(name, newName) {
-      await docker.getContainer(name).rename({ name: newName });
-    },
-    async remove(name) {
-      await docker.getContainer(name).remove();
-    },
+    start: (name) => onContainer(name, () => idempotent(() => docker.getContainer(name).start())),
+    stop: (name, t) =>
+      onContainer(name, () => idempotent(() => docker.getContainer(name).stop({ t }))),
+    rename: (name, newName) =>
+      onContainer(name, () => docker.getContainer(name).rename({ name: newName })),
+    remove: (name) => onContainer(name, () => docker.getContainer(name).remove()),
     async removeImage(id) {
       await docker.getImage(id).remove({ force: false });
     },
