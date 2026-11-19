@@ -7,9 +7,11 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { createApp } from '../app.js';
 import { Backoff } from '../auth/backoff.js';
 import { SetupMode } from '../auth/operator.js';
-import { recordCard } from '../chat/cards.js';
+import { type ChatCard, recordCard } from '../chat/cards.js';
 import {
   appendMessage,
+  type ChatMessage,
+  type ChatThread,
   createThread,
   listMessages,
   listThreads,
@@ -20,7 +22,13 @@ import { loadBoot } from '../config/boot.js';
 import { ConfigStore } from '../config/store.js';
 import { openDb } from '../db/open.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
-import { CHAT_MISSING_COMMAND, renderChatList, renderThread, THREAD_SCRIPT } from './chat.js';
+import {
+  CHAT_MISSING_COMMAND,
+  messageTextHtml,
+  renderChatList,
+  renderThread,
+  THREAD_SCRIPT,
+} from './chat.js';
 import { renderChatMarkdown } from './markdown.js';
 import { page } from './pages.js';
 
@@ -137,7 +145,7 @@ describe('/chat', () => {
     expect(res.body).toContain(CHAT_MISSING_COMMAND.replaceAll('&', '&amp;'));
   });
 
-  test('/chat/:id renders owner and assistant text escaped and each tool line as one collapsed line', async () => {
+  test('/chat/:id renders owner and assistant text escaped and each tool line as a collapsed step', async () => {
     const w = world();
     const th = createThread(w.db, { title: 'Ask' }, t0);
     appendMessage(w.db, th.id, { role: 'owner', text: 'Is <b>this</b> safe?', state: 'done' }, t0);
@@ -161,7 +169,7 @@ describe('/chat', () => {
     expect(html).toContain('Yes &lt;script&gt;alert(1)&lt;/script&gt; it is');
     expect(html).not.toContain('<script>alert(1)');
     expect(html).toMatch(
-      /<details class="tool"[^>]*><summary>read apps\/server\/src\/goals\.ts<\/summary><\/details>/,
+      /<details class="steps"><summary>Worked through 1 step<\/summary><ol><li data-seq="2">read apps\/server\/src\/goals\.ts<\/li><\/ol><\/details>/,
     );
     const missing = await w.app.inject({
       method: 'GET',
@@ -426,6 +434,9 @@ describe('/chat Markdown (#490)', () => {
     get lastChild() {
       return this.children[this.children.length - 1];
     }
+    get lastElementChild() {
+      return this.lastChild ?? null;
+    }
     append(...els: FakeEl[]) {
       for (const e of els) {
         e.parent = this;
@@ -659,6 +670,151 @@ describe('/chat Markdown (#490)', () => {
     scroller.scrollTop = scroller.scrollHeight - scroller.clientHeight - 100;
     emit('card', { card: { id: 10, kind: 'x', state: 'pending', summary: 's' } });
     expect(scroller.scrollTop).toBe(scroller.scrollHeight);
+  });
+
+  const THREAD: ChatThread = {
+    id: 1,
+    title: 't',
+    focusKind: null,
+    focusZoneId: null,
+    focusRef: null,
+    claudeSessionId: null,
+    createdAt: t0.toISOString(),
+    updatedAt: t0.toISOString(),
+  };
+
+  /** A stored message for `renderThread`. */
+  const stored = (seq: number, role: ChatMessage['role'], text: string): ChatMessage => ({
+    id: seq,
+    threadId: 1,
+    seq,
+    role,
+    text,
+    state: 'done',
+    sessionHash: null,
+    usage: null,
+    error: null,
+    createdAt: t0.toISOString(),
+  });
+
+  /** The chat log's top-level items in a stored page: a role, or `steps:N` for a group of N. */
+  function storedShape(html: string): string[] {
+    const log = /<div id="messages"[^>]*>([\s\S]*)<\/div><form id="send"/.exec(html)?.[1] ?? '';
+    return [
+      ...log.matchAll(
+        /<div class="msg (\w+)"|<details class="steps"><summary>[^<]*<\/summary><ol>((?:<li data-seq="\d+">[^<]*<\/li>)*)<\/ol><\/details>/g,
+      ),
+    ].map((m) => (m[1] ?? `steps:${(m[2]?.match(/<li /g) ?? []).length}`) as string);
+  }
+
+  /** The chat log's top-level items in the fake DOM, as `storedShape` reads them. */
+  const liveShape = (log: FakeEl) =>
+    log.children.map((c) =>
+      c.className === 'steps'
+        ? `steps:${c.querySelector('ol')?.children.length}`
+        : (c.className.split(' ')[1] as string),
+    );
+
+  const SEQUENCE: [ChatMessage['role'], string][] = [
+    ['owner', 'go'],
+    ['tool', 'read a'],
+    ['tool', 'read b'],
+    ['tool', 'searched for invalid'],
+    ['assistant', 'half'],
+    ['tool', 'read c'],
+    ['assistant', 'done'],
+  ];
+
+  test('stored consecutive tool lines group into one "Worked through N steps" disclosure each run', () => {
+    const msgs = SEQUENCE.map(([role, text], i) => stored(i + 1, role, text));
+    const html = renderThread(THREAD, msgs);
+    expect(storedShape(html)).toEqual(['owner', 'steps:3', 'assistant', 'steps:1', 'assistant']);
+    expect(html).toContain(
+      '<details class="steps"><summary>Worked through 3 steps</summary><ol><li data-seq="2">read a</li><li data-seq="3">read b</li><li data-seq="4">searched for invalid</li></ol></details>',
+    );
+    expect(html).toContain(
+      '<summary>Worked through 1 step</summary><ol><li data-seq="6">read c</li></ol>',
+    );
+    expect(html).not.toMatch(/<details[^>]*>(<summary>[^<]*<\/summary>)?<\/details>/);
+    expect(html).not.toContain('<details class="steps" open');
+  });
+
+  test('a card between tool lines splits the group', () => {
+    const msgs = [stored(1, 'tool', 'a'), stored(2, 'tool', 'b')];
+    msgs[1] = { ...(msgs[1] as ChatMessage), createdAt: plus(t0, 2000).toISOString() };
+    const card = {
+      id: 1,
+      threadId: 1,
+      kind: 'x',
+      state: 'pending',
+      summary: 's',
+      link: null,
+      createdAt: plus(t0, 1000).toISOString(),
+    } as unknown as ChatCard;
+    const html = renderThread(THREAD, msgs, [card]);
+    expect((html.match(/<details class="steps">/g) ?? []).length).toBe(2);
+  });
+
+  test("a tool line's text is escaped in its step", () => {
+    const html = renderThread(THREAD, [stored(1, 'tool', 'read <b>x</b>')]);
+    expect(html).toContain('<li data-seq="1">read &lt;b&gt;x&lt;/b&gt;</li>');
+    expect(html).not.toContain('<b>x</b>');
+  });
+
+  test('streamed tool events group until a message, then a further tool event starts a new group', () => {
+    const { log, emit } = runScript();
+    emit('tool', { seq: 2, text: 'read a' });
+    emit('tool', { seq: 3, text: '<b>b</b>' });
+    emit('tool', { seq: 4, text: 'read c' });
+    expect(log.children).toHaveLength(1);
+    const group = log.children[0] as FakeEl;
+    expect(group.tagName).toBe('details');
+    expect(group.className).toBe('steps');
+    expect(group.querySelector('summary')?.textContent).toBe('Worked through 3 steps');
+    const ol = group.querySelector('ol') as FakeEl;
+    expect(ol.children.map((li) => [li.tagName, li.dataset.seq, li.textContent])).toEqual([
+      ['li', '2', 'read a'],
+      ['li', '3', '<b>b</b>'],
+      ['li', '4', 'read c'],
+    ]);
+    emit('message', { seq: 5, role: 'assistant', state: 'done', text: 'x', html: '<p>x</p>' });
+    expect(liveShape(log)).toEqual(['steps:3', 'assistant']);
+    emit('tool', { seq: 6, text: 'read d' });
+    expect(liveShape(log)).toEqual(['steps:3', 'assistant', 'steps:1']);
+    expect(log.children[2]?.querySelector('summary')?.textContent).toBe('Worked through 1 step');
+    expect(FakeEl.htmlWrites.map((w) => w.value)).toEqual(['<p>x</p>']);
+  });
+
+  test('a re-sent tool line replaces its step in place', () => {
+    const { log, emit } = runScript();
+    emit('tool', { seq: 2, text: 'a' });
+    emit('tool', { seq: 3, text: 'b' });
+    emit('tool', { seq: 2, text: 'a2' });
+    const ol = log.children[0]?.querySelector('ol') as FakeEl;
+    expect(ol.children.map((li) => li.textContent)).toEqual(['a2', 'b']);
+    expect(log.children[0]?.querySelector('summary')?.textContent).toBe('Worked through 2 steps');
+  });
+
+  test('text and card events close the open group', () => {
+    const { log, emit } = runScript();
+    emit('tool', { seq: 2, text: 'a' });
+    emit('text', { seq: 2, text: 'thinking' });
+    emit('tool', { seq: 3, text: 'b' });
+    emit('card', { card: { id: 9, kind: 'x', state: 'pending', summary: 's' } });
+    emit('tool', { seq: 4, text: 'c' });
+    expect(liveShape(log)).toEqual(['steps:1', 'assistant', 'steps:1', 'card', 'steps:1']);
+  });
+
+  test('stored and streamed rendering give the same groups for the same sequence', () => {
+    const msgs = SEQUENCE.map(([role, text], i) => stored(i + 1, role, text));
+    const html = renderThread(THREAD, msgs);
+    const { log, emit } = runScript();
+    for (const m of msgs) {
+      if (m.role === 'tool') emit('tool', { seq: m.seq, text: m.text });
+      else emit('message', { ...m, html: messageTextHtml(m) });
+    }
+    expect(liveShape(log)).toEqual(storedShape(html));
+    expect(liveShape(log)).toEqual(['owner', 'steps:3', 'assistant', 'steps:1', 'assistant']);
   });
 });
 
