@@ -27,6 +27,8 @@ import {
   ImageStore,
   imageKey,
   type MirrorIndex,
+  referencedDigests,
+  type StoreOptions,
 } from './store.js';
 
 /** The platforms a stick runs on. */
@@ -79,6 +81,8 @@ export type MirrorDeps = {
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   backoffMs?: readonly number[];
   now?: () => Date;
+  /** Deletes one blob file during collection (tests inject a failing one). */
+  unlink?: StoreOptions['unlink'];
 };
 
 export type ImageStatus = {
@@ -94,7 +98,12 @@ export type ImageStatus = {
   current: boolean;
 };
 
-export type MirrorStatus = { lock: boolean; images: ImageStatus[] };
+export type MirrorStatus = {
+  lock: boolean;
+  images: ImageStatus[];
+  /** Bytes of every blob in the store, on disk (absent when it could not be read). */
+  storeBytes?: number;
+};
 
 /** What the store holds for an image a stick asked for, if the lock lists it. */
 export type Lookup =
@@ -188,12 +197,17 @@ export class ImageMirror {
   #again = false;
   #stopped = false;
   #wake = new AbortController();
+  /** The store's size on disk, computed when asked for after a change. */
+  #storeBytes: number | undefined;
 
   constructor(deps: MirrorDeps) {
     this.#deps = deps;
     this.#scrub = deps.scrub ?? serverScrubSet;
     this.#log = deps.log ?? log;
-    this.store = new ImageStore(join(deps.dataDir, 'images'));
+    this.store = new ImageStore(
+      join(deps.dataDir, 'images'),
+      deps.unlink ? { unlink: deps.unlink } : {},
+    );
     this.#index = this.store.readIndex();
     // A pass that died mid-fetch left `fetching`: it starts again.
     for (const r of Object.values(this.#index.images))
@@ -203,7 +217,7 @@ export class ImageMirror {
   /**
    * The lock as it is now (undefined: none, the server runs from a checkout). A lock that names
    * other images makes the old one the previous lock, whose images are still served; images of
-   * neither leave the index (their blobs stay: no garbage collection yet).
+   * neither leave the index; their blobs are deleted by the next pass's collection (issue #426).
    */
   setLock(lock: ImageLockFile | undefined): void {
     this.#hasLock = lock !== undefined;
@@ -293,13 +307,26 @@ export class ImageMirror {
         },
       ];
     };
+    const storeBytes = this.#hasLock ? this.#diskBytes() : undefined;
     return {
       lock: this.#hasLock,
       images: [
         ...idx.current.flatMap((k) => row(k, true)),
         ...idx.previous.flatMap((k) => row(k, false)),
       ],
+      ...(storeBytes !== undefined ? { storeBytes } : {}),
     };
+  }
+
+  #diskBytes(): number | undefined {
+    if (this.#storeBytes === undefined) {
+      try {
+        this.#storeBytes = this.store.bytesOnDisk();
+      } catch {
+        return undefined;
+      }
+    }
+    return this.#storeBytes;
   }
 
   /** The record of `<name>@<digest>` when the current or the previous lock lists it. */
@@ -309,7 +336,12 @@ export class ImageMirror {
     const rec = idx.images[key];
     if (!rec || !(idx.current.includes(key) || idx.previous.includes(key)))
       return { listed: false };
-    return { listed: true, record: rec, store: this.store, complete: rec.state === 'complete' };
+    return {
+      listed: true,
+      record: rec,
+      store: this.store,
+      complete: rec.state === 'complete',
+    };
   }
 
   async #loop(): Promise<void> {
@@ -325,6 +357,7 @@ export class ImageMirror {
         failed = 1;
       }
       if (this.#stopped) return;
+      this.#collect();
       if (this.#again) {
         attempt = 0;
         continue;
@@ -335,6 +368,27 @@ export class ImageMirror {
       this.#wake = new AbortController();
       await (this.#deps.sleep ?? defaultSleep)(delay, this.#wake.signal);
       if (this.#stopped) return;
+    }
+  }
+
+  /**
+   * Deletes every blob no record in the index names (issue #426), at the end of a pass and only
+   * when no record is pending or fetching: a record still at work may have written blobs it does
+   * not name yet. Runs only inside the serialized pass loop, so no pass writes meanwhile. A failure
+   * is logged and the pass carries on; only the blob directory is ever touched.
+   */
+  #collect(): void {
+    const records = Object.values(this.#index.images);
+    if (records.some((r) => r.state === 'pending' || r.state === 'fetching')) return;
+    const keep = new Set(records.flatMap(referencedDigests));
+    this.#storeBytes = undefined;
+    try {
+      const { removed, bytes } = this.store.removeUnreferenced(keep, (file, e) =>
+        this.#log(`image mirror: could not delete blob ${file}: ${this.#clean(errorText(e))}`),
+      );
+      this.#log(JSON.stringify({ event: 'image-mirror-collect', removed, bytes }));
+    } catch (e) {
+      this.#log(`image mirror: collection failed: ${this.#clean(errorText(e))}`);
     }
   }
 
@@ -566,7 +620,9 @@ export class ImageMirror {
             mediaType: legacy.mediaType,
             digest: legacy.digest,
             size: legacy.bytes.length,
-            annotations: { 'org.opencontainers.image.ref.name': `sha256-${digest.slice(7)}.sig` },
+            annotations: {
+              'org.opencontainers.image.ref.name': `sha256-${digest.slice(7)}.sig`,
+            },
           },
           blobs,
         });
@@ -587,6 +643,7 @@ export class ImageMirror {
   }
 
   #persist(): void {
+    this.#storeBytes = undefined;
     this.store.writeIndex(this.#index);
   }
 
