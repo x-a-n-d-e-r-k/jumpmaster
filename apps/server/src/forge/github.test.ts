@@ -1662,6 +1662,8 @@ describe('GitHubForge doctor reads', () => {
         scopes: null,
         tokenExpiresAt: EXPIRES,
         ownerType: 'Organization',
+        // The raw grant, for the doctor's forbidden-permission check (issue #447).
+        grantedPermissions: { contents: 'write', pull_requests: 'write', metadata: 'read' },
       });
       // The forge's own token is fetched (and cached) before the grant reads its expiry.
       expect(order).toEqual(['GET /repos', 'grant']);
