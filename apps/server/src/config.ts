@@ -538,6 +538,11 @@ export const EditableSchema = z.object({
    * `signed` policy. Off by default; the generated install turns it on.
    */
   requireSignedImages: z.boolean().default(false),
+  /**
+   * The sticks (issue #427): `autoUpgrade` offers each capable stick behind the server's release an
+   * upgrade to it. The stick verifies the image itself and rolls back if it doesn't start.
+   */
+  sticks: z.object({ autoUpgrade: z.boolean().default(true) }).default({ autoUpgrade: true }),
   /** The zone-scoped MCP server at `/mcp` (off by default; read at start, so a flip needs a restart). */
   mcp: z
     .object({
@@ -605,6 +610,8 @@ export interface Config {
   chat?: Partial<ChatConfig>;
   /** Absent means false. */
   requireSignedImages?: boolean;
+  /** Absent (or `autoUpgrade` absent) means sticks upgrade automatically. */
+  sticks?: { autoUpgrade?: boolean };
   /** Absent (or without `publicUrl`): no address for other machines yet. */
   server?: ServerConfig;
   secrets: {

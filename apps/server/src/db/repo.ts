@@ -1,4 +1,9 @@
-import type { ImagePolicy, TrooperEvent } from '@jumpmaster/protocol';
+import {
+  compareReleaseVersions,
+  type ImagePolicy,
+  parseReleaseVersion,
+  type TrooperEvent,
+} from '@jumpmaster/protocol';
 import { defang } from '../terminal.js';
 import type { Db } from './open.js';
 
@@ -1897,6 +1902,195 @@ export function removeStick(db: Db, id: string, now: Date): Stick | undefined {
       `UPDATE drops SET lease_expires_at = @past
        WHERE stick_id = @id AND state = 'leased'`,
     ).run({ id, past: new Date(now.getTime() - 1).toISOString() });
+    db.prepare('DELETE FROM stick_upgrades WHERE stick_id = ?').run(id);
     return stick;
   })();
+}
+
+/** What the server offers a stick (issue #427): its own release, and the stick image's digest. */
+export type UpgradeTarget = { version: string; image: string };
+export type UpgradeState = 'pending' | 'ok' | 'failed' | 'refused';
+export type StickUpgrade = {
+  stickId: string;
+  targetVersion: string;
+  image: string;
+  requestedBy: 'auto' | 'command';
+  state: UpgradeState;
+  reason: string | null;
+  requestedAt: string;
+  drainedSince: string | null;
+  updatedAt: string;
+};
+
+/** How long a drained stick has to come back on the target before its upgrade is failed. */
+export const UPGRADE_DRAIN_TIMEOUT_MS = 30 * 60_000;
+export const UPGRADE_TIMEOUT_REASON =
+  'the stick did not finish the upgrade within 30 minutes of draining';
+
+const UPGRADE_COLS = `stick_id AS stickId, target_version AS targetVersion, image,
+  requested_by AS requestedBy, state, reason, requested_at AS requestedAt,
+  drained_since AS drainedSince, updated_at AS updatedAt`;
+
+export function getStickUpgrade(db: Db, stickId: string): StickUpgrade | undefined {
+  return db.prepare(`SELECT ${UPGRADE_COLS} FROM stick_upgrades WHERE stick_id = ?`).get(stickId) as
+    | StickUpgrade
+    | undefined;
+}
+
+/**
+ * Asks the stick to upgrade to `target`: inserts or replaces its one row as `pending`. One
+ * statement, so concurrent calls leave one row.
+ */
+export function requestStickUpgrade(
+  db: Db,
+  stickId: string,
+  target: UpgradeTarget,
+  by: 'auto' | 'command',
+  now: Date = new Date(),
+): StickUpgrade {
+  db.prepare(
+    `INSERT INTO stick_upgrades (stick_id, target_version, image, requested_by, state, reason,
+       requested_at, drained_since, updated_at)
+     VALUES (@stickId, @version, @image, @by, 'pending', NULL, @now, NULL, @now)
+     ON CONFLICT (stick_id) DO UPDATE SET target_version = excluded.target_version,
+       image = excluded.image, requested_by = excluded.requested_by, state = 'pending',
+       reason = NULL, requested_at = excluded.requested_at, drained_since = NULL,
+       updated_at = excluded.updated_at`,
+  ).run({ stickId, version: target.version, image: target.image, by, now: now.toISOString() });
+  return getStickUpgrade(db, stickId) as StickUpgrade;
+}
+
+/**
+ * The automatic request: only when the stick has no row for `target`'s version, so a failed or
+ * refused target is never asked again. Checked and written in one transaction.
+ */
+export function autoRequestStickUpgrade(
+  db: Db,
+  stickId: string,
+  target: UpgradeTarget,
+  now: Date,
+): boolean {
+  return db.transaction((): boolean => {
+    const row = getStickUpgrade(db, stickId);
+    if (row && row.targetVersion === target.version) return false;
+    requestStickUpgrade(db, stickId, target, 'auto', now);
+    return true;
+  })();
+}
+
+/** The stick's report of its last attempt, as the lease body carries it. */
+export type UpgradeReportIn = {
+  version: string;
+  result: 'ok' | 'failed' | 'refused';
+  reason?: string;
+};
+
+/**
+ * Settles the stick's row from one lease: `ok` when it runs the target (whatever it claims, from
+ * any state), else the `failed` or `refused` it reports for the target while pending. A claimed
+ * `ok`, or a report for another version, changes nothing.
+ */
+export function settleStickUpgrade(
+  db: Db,
+  stickId: string,
+  running: string | null,
+  report: UpgradeReportIn | undefined,
+  now: Date,
+): void {
+  const row = getStickUpgrade(db, stickId);
+  if (!row) return;
+  const set = db.prepare(
+    `UPDATE stick_upgrades SET state = @state, reason = @reason, drained_since = NULL,
+       updated_at = @now WHERE stick_id = @stickId AND target_version = @target`,
+  );
+  const at = now.toISOString();
+  if (running !== null && running === row.targetVersion) {
+    if (row.state !== 'ok')
+      set.run({ stickId, target: row.targetVersion, state: 'ok', reason: null, now: at });
+    return;
+  }
+  if (
+    row.state === 'pending' &&
+    report &&
+    report.version === row.targetVersion &&
+    (report.result === 'failed' || report.result === 'refused')
+  )
+    set.run({
+      stickId,
+      target: row.targetVersion,
+      state: report.result,
+      reason: report.reason ?? null,
+      now: at,
+    });
+}
+
+/**
+ * The stick's pending upgrade as a lease answers it, after the drain bookkeeping: `drained_since`
+ * is set while it has no live drop and cleared while it has one, and a stick drained for 30
+ * minutes has its upgrade failed (undefined: drops are leased again).
+ */
+export function holdForUpgrade(db: Db, stickId: string, now: Date): StickUpgrade | undefined {
+  return db.transaction((): StickUpgrade | undefined => {
+    const row = getStickUpgrade(db, stickId);
+    if (!row || row.state !== 'pending') return undefined;
+    const at = now.toISOString();
+    if (liveDropsOn(db, stickId) > 0) {
+      if (row.drainedSince !== null)
+        db.prepare(
+          'UPDATE stick_upgrades SET drained_since = NULL, updated_at = ? WHERE stick_id = ?',
+        ).run(at, stickId);
+      return { ...row, drainedSince: null };
+    }
+    if (row.drainedSince === null) {
+      db.prepare(
+        'UPDATE stick_upgrades SET drained_since = ?, updated_at = ? WHERE stick_id = ?',
+      ).run(at, at, stickId);
+      return { ...row, drainedSince: at };
+    }
+    if (now.getTime() - Date.parse(row.drainedSince) >= UPGRADE_DRAIN_TIMEOUT_MS) {
+      db.prepare(
+        `UPDATE stick_upgrades SET state = 'failed', reason = ?, drained_since = NULL,
+           updated_at = ? WHERE stick_id = ?`,
+      ).run(UPGRADE_TIMEOUT_REASON, at, stickId);
+      return undefined;
+    }
+    return row;
+  })();
+}
+
+/** Advertises `upgrade-v1` and runs under the `signed` policy. */
+export const upgradeEligible = (s: Pick<Stick, 'capabilities' | 'imagePolicy'>): boolean =>
+  s.capabilities.includes('upgrade-v1') && s.imagePolicy === 'signed';
+
+/** Its version is a release version older than `target`'s (`0.0.0-dev`, `dev`: never behind). */
+export function upgradeBehind(version: string | null, target: UpgradeTarget): boolean {
+  const mine = version === null ? null : parseReleaseVersion(version);
+  const theirs = parseReleaseVersion(target.version);
+  return mine !== null && theirs !== null && compareReleaseVersions(mine, theirs) < 0;
+}
+
+export type StickUpgradeStatus =
+  | { status: 'none' | 'up-to-date' | 'available' | 'needs-reinstall' | 'upgrading' }
+  | { status: 'failed' | 'refused'; reason: string };
+
+/**
+ * Where a stick stands against the server's release (issue #427), for the sticks page: `none`
+ * without a target, else its row for the target's version, else whether it is behind and can
+ * upgrade in place.
+ */
+export function stickUpgradeStatus(
+  db: Db,
+  stick: Pick<Stick, 'id' | 'capabilities' | 'imagePolicy' | 'version'>,
+  target: UpgradeTarget | null,
+): StickUpgradeStatus {
+  if (!target) return { status: 'none' };
+  const row = getStickUpgrade(db, stick.id);
+  const behind = upgradeBehind(stick.version, target);
+  if (row && row.targetVersion === target.version && behind) {
+    if (row.state === 'pending') return { status: 'upgrading' };
+    if (row.state === 'failed' || row.state === 'refused')
+      return { status: row.state, reason: row.reason ?? '' };
+  }
+  if (!behind) return { status: 'up-to-date' };
+  return { status: upgradeEligible(stick) ? 'available' : 'needs-reinstall' };
 }

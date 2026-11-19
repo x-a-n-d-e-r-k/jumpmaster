@@ -243,6 +243,13 @@ export const GUARDED_PATHS: GuardedPath[] = [
     false,
     () => 'Dispatch will continue on usage credits; only a briefing is raised',
   ),
+  // Issue #427: on, each capable stick is offered the server's release and replaces its own code.
+  becomes(
+    'sticks.autoUpgrade',
+    true,
+    () =>
+      "Sticks will upgrade themselves to the server's release; each verifies the image's signature first",
+  ),
   becomes(
     'mcp.enabled',
     true,

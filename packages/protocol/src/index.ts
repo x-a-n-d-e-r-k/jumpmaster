@@ -66,7 +66,12 @@ export const PresetSchema = z.enum(PRESETS);
  * What a stick can enforce. A stick advertises a capability only once its code really does it,
  * and the server never leases it a drop from a zone that needs one it lacks.
  */
-export const STICK_CAPABILITIES = ['egress-v1', 'image-verify-v1', 'push-v1'] as const;
+export const STICK_CAPABILITIES = [
+  'egress-v1',
+  'image-verify-v1',
+  'push-v1',
+  'upgrade-v1',
+] as const;
 export type StickCapability = (typeof STICK_CAPABILITIES)[number];
 export const ImagePolicySchema = z.enum(['allowlist', 'signed']);
 export type ImagePolicy = z.infer<typeof ImagePolicySchema>;
@@ -99,6 +104,62 @@ export const SKIPPED_HEADER = 'x-jumpmaster-skipped';
  * (`maxSlots` in the lease body); a stick that never sees it keeps its `JM_SLOTS`.
  */
 export const SLOTS_HEADER = 'x-jumpmaster-slots';
+
+/** A release version: `X.Y.Z` or `X.Y.Z-rc.N`; `rc` null for a final release. */
+export type ReleaseVersion = { major: number; minor: number; patch: number; rc: number | null };
+
+const RELEASE_VERSION =
+  /^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(?:-rc\.(0|[1-9][0-9]{0,8}))?$/;
+
+/** `X.Y.Z` or `X.Y.Z-rc.N` (no `v`), or null for anything else. */
+export function parseReleaseVersion(v: string): ReleaseVersion | null {
+  const m = RELEASE_VERSION.exec(v);
+  if (!m) return null;
+  return {
+    major: Number(m[1]),
+    minor: Number(m[2]),
+    patch: Number(m[3]),
+    rc: m[4] === undefined ? null : Number(m[4]),
+  };
+}
+
+/** Semver order on release versions: `X.Y.Z-rc.N` < `X.Y.Z`, and `rc.N` < `rc.M` when N < M. */
+export function compareReleaseVersions(a: ReleaseVersion, b: ReleaseVersion): number {
+  for (const k of ['major', 'minor', 'patch'] as const) if (a[k] !== b[k]) return a[k] - b[k];
+  if (a.rc === b.rc) return 0;
+  if (a.rc === null) return 1;
+  if (b.rc === null) return -1;
+  return a.rc - b.rc;
+}
+
+/** Whether `v` is a release version (`0.0.0-dev`, `dev` and `unknown` are not). */
+export const isReleaseVersion = (v: unknown): v is string =>
+  typeof v === 'string' && parseReleaseVersion(v) !== null;
+
+/**
+ * The lease response header offering the stick an upgrade to the server's own release (issue
+ * #427): compact JSON `UpgradeOffer`. While it rides on an answer the stick is leased no new drop.
+ * The server only names a version and a digest: the stick verifies the image and decides.
+ */
+export const UPGRADE_HEADER = 'x-jumpmaster-upgrade';
+
+/** `<registry>/jumpmaster-stick@sha256:<64 hex>`, the registry as the image lock writes it. */
+const STICK_IMAGE_REF =
+  /^[a-z0-9.-]+(?::\d+)?(?:\/[a-z0-9._-]+)*\/jumpmaster-stick@sha256:[0-9a-f]{64}$/;
+
+export const UpgradeOfferSchema = z.object({
+  version: z.string().max(64).refine(isReleaseVersion, 'not a release version'),
+  image: z.string().max(512).regex(STICK_IMAGE_REF, 'not a jumpmaster-stick digest reference'),
+});
+export type UpgradeOffer = z.infer<typeof UpgradeOfferSchema>;
+
+/** The stick's report of its last upgrade attempt, on the lease body (`upgrade`). */
+export const UpgradeReportSchema = z.object({
+  version: z.string().min(1).max(64),
+  result: z.enum(['ok', 'failed', 'refused']),
+  reason: z.string().max(500).optional(),
+});
+export type UpgradeReport = z.infer<typeof UpgradeReportSchema>;
 
 /** Roles that work for the zone rather than one work item. They hold no forge write credential. */
 export const CREW_ROLES = [
