@@ -1,5 +1,12 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -437,6 +444,197 @@ describe('the signature artifacts stored are bounded (issue #257)', () => {
     expect(r.rec?.signatures).toEqual([]);
     expect(r.m.status().images[0]).toMatchObject({ state: 'failed' });
     expect(r.m.status().images[0]?.error).toMatch(/no cosign signature/);
+  });
+});
+
+describe('the store keeps only the blobs the index names (issue #426)', () => {
+  const blobDir = (dir: string) => join(dir, 'images', 'blobs', 'sha256');
+  const stored = (dir: string) =>
+    readdirSync(blobDir(dir))
+      .map((f) => `sha256:${f}`)
+      .sort();
+  const digestsOf = (img: FakeImage): string[] => [
+    img.digest,
+    ...Object.values(img.platforms).flatMap((p) => [p.manifest, ...p.blobs]),
+    img.signature.manifest,
+    ...img.signature.blobs,
+  ];
+  const union = (...imgs: FakeImage[]) => [...new Set(imgs.flatMap(digestsOf))].sort();
+  /** The digests of `img` none of `others` names. */
+  const onlyIn = (img: FakeImage, ...others: FakeImage[]) =>
+    union(img).filter((d) => !union(...others).includes(d));
+  const lockOf = (...imgs: FakeImage[]): ImageLockFile => ({
+    registry: fake?.registry ?? '',
+    images: Object.fromEntries(imgs.map((i) => [i.name, i.digest])),
+  });
+  const collected = (logs: string[]) =>
+    logs
+      .filter((l) => l.includes('"image-mirror-collect"'))
+      .map((l) => JSON.parse(l) as { event: string; removed: number; bytes: number });
+  async function pass(m: ImageMirror, lock: ImageLockFile) {
+    m.setLock(lock);
+    m.start();
+    await m.idle();
+  }
+
+  test('three locks A → B → C with complete passes: A’s blobs are gone, B’s and C’s remain', async () => {
+    fake = await startFakeRegistry();
+    const [a, b, c] = [0, 1, 2].map(() => fake?.addImage('jumpmaster-trooper') as FakeImage) as [
+      FakeImage,
+      FakeImage,
+      FakeImage,
+    ];
+    const dir = tmp();
+    const logs: string[] = [];
+    const m = mirrorOn(dir, { logs });
+    await pass(m, lockOf(a));
+    await pass(m, lockOf(b));
+    expect(stored(dir)).toEqual(union(a, b));
+    await pass(m, lockOf(c));
+    expect(stored(dir)).toEqual(union(b, c));
+    for (const d of onlyIn(a, b, c)) expect(stored(dir)).not.toContain(d);
+    const last = collected(logs).at(-1);
+    expect(last?.removed).toBe(onlyIn(a, b, c).length);
+    expect(last?.bytes).toBeGreaterThan(0);
+    // The served images are untouched.
+    expect(m.lookup(b.name, b.digest)).toMatchObject({ complete: true });
+    expect(m.lookup(c.name, c.digest)).toMatchObject({ complete: true });
+  });
+
+  test('a blob shared with an image still in the index is kept when the other leaves', async () => {
+    fake = await startFakeRegistry();
+    const sharedLayer = Buffer.from('a common base layer');
+    const shared = sha(sharedLayer);
+    const a = fake.addImage('jumpmaster-trooper', { sharedLayer });
+    const b = fake.addImage('jumpmaster-trooper', { sharedLayer });
+    const c = fake.addImage('jumpmaster-trooper');
+    expect(digestsOf(a)).toContain(shared);
+    expect(digestsOf(c)).not.toContain(shared);
+    const dir = tmp();
+    const m = mirrorOn(dir);
+    await pass(m, lockOf(a));
+    await pass(m, lockOf(b));
+    await pass(m, lockOf(c));
+    // A left the index; B (the previous lock, not the current one) names the shared layer.
+    expect(stored(dir)).toContain(shared);
+    expect(stored(dir)).toEqual(union(b, c));
+  });
+
+  test('the previous lock’s blobs are kept', async () => {
+    fake = await startFakeRegistry();
+    const a = fake.addImage('jumpmaster-trooper');
+    const b = fake.addImage('jumpmaster-trooper');
+    const dir = tmp();
+    const logs: string[] = [];
+    const m = mirrorOn(dir, { logs });
+    await pass(m, lockOf(a));
+    await pass(m, lockOf(b));
+    expect(collected(logs)).toHaveLength(2);
+    for (const d of digestsOf(a)) expect(stored(dir), d).toContain(d);
+    expect(stored(dir)).toEqual(union(a, b));
+  });
+
+  test('no collection while a record is pending or fetching; the next pass collects', async () => {
+    fake = await startFakeRegistry();
+    const a = fake.addImage('jumpmaster-trooper');
+    const b = fake.addImage('jumpmaster-egress');
+    const c = fake.addImage('jumpmaster-stick');
+    const dir = tmp();
+    const logs: string[] = [];
+    const m = mirrorOn(dir, { logs });
+    await pass(m, lockOf(a));
+    expect(collected(logs)).toHaveLength(1);
+    // A blob of an image no lock names any longer.
+    const orphan = sha(Buffer.from('an old release'));
+    writeFileSync(join(blobDir(dir), hex(orphan)), 'an old release');
+
+    const held = fake.hold(b.platforms['linux/amd64']?.blobs[1] as string);
+    m.setLock(lockOf(a, b));
+    m.start();
+    await held.requested;
+    expect(m.status().images.find((i) => i.name === b.name)?.state).toBe('fetching');
+    // A new lock arrives mid-pass: C is pending when this pass ends.
+    m.setLock(lockOf(a, b, c));
+    m.start();
+    expect(stored(dir)).toContain(orphan);
+    held.release();
+    await m.idle();
+
+    // The pass that finished B ended with C pending: it did not collect. The next one did.
+    expect(collected(logs)).toHaveLength(2);
+    expect(collected(logs)[1]?.removed).toBe(1);
+    expect(stored(dir)).toEqual(union(a, b, c));
+  });
+
+  test('blobs a fetching image wrote but no record names yet are never deleted (D3)', async () => {
+    fake = await startFakeRegistry();
+    const a = fake.addImage('jumpmaster-trooper');
+    const b = fake.addImage('jumpmaster-trooper');
+    const dir = tmp();
+    const logs: string[] = [];
+    const m = mirrorOn(dir, { logs });
+    await pass(m, lockOf(a));
+    const amd = b.platforms['linux/amd64'] as { manifest: string; blobs: string[] };
+    const held = fake.hold(amd.blobs[1] as string);
+    m.setLock(lockOf(b));
+    m.start();
+    await held.requested;
+    // Written by the pass, named by no record yet.
+    const written = [b.digest, amd.manifest, amd.blobs[0] as string];
+    for (const d of written) expect(stored(dir), d).toContain(d);
+    expect(indexOf(dir).images[`${b.name}@${b.digest}`]?.index).toBeUndefined();
+    // A lock change mid-fetch does not collect either.
+    m.setLock(lockOf(b));
+    m.start();
+    for (const d of written) expect(stored(dir), d).toContain(d);
+    expect(collected(logs)).toHaveLength(1);
+    held.release();
+    await m.idle();
+    expect(stored(dir)).toEqual(union(a, b));
+  });
+
+  test('a blob that cannot be deleted is logged; the others go, nothing kept is touched (D2)', async () => {
+    fake = await startFakeRegistry();
+    const a = fake.addImage('jumpmaster-trooper');
+    const b = fake.addImage('jumpmaster-trooper');
+    const c = fake.addImage('jumpmaster-trooper');
+    const stuck = a.platforms['linux/arm64']?.blobs[1] as string;
+    const dir = tmp();
+    const logs: string[] = [];
+    const m = mirrorOn(dir, {
+      logs,
+      unlink: (path) => {
+        if (path.endsWith(hex(stuck)))
+          throw Object.assign(new Error(`EACCES: permission denied, unlink '${path}'`), {
+            code: 'EACCES',
+          });
+        unlinkSync(path);
+      },
+    });
+    await pass(m, lockOf(a));
+    await pass(m, lockOf(b));
+    await pass(m, lockOf(c));
+    expect(logs.some((l) => l.includes('could not delete') && l.includes(hex(stuck)))).toBe(true);
+    expect(stored(dir)).toEqual([...union(b, c), stuck].sort());
+    expect(collected(logs).at(-1)?.removed).toBe(onlyIn(a, b, c).length - 1);
+    const idx = indexOf(dir);
+    expect(idx.current).toEqual([`${c.name}@${c.digest}`]);
+    expect(idx.previous).toEqual([`${b.name}@${b.digest}`]);
+    expect(m.status().images.map((i) => i.state)).toEqual(['complete', 'complete']);
+  });
+
+  test('the status reports the store’s size on disk', async () => {
+    fake = await startFakeRegistry();
+    const a = fake.addImage('jumpmaster-trooper');
+    const dir = tmp();
+    const m = mirrorOn(dir);
+    await pass(m, lockOf(a));
+    const onDisk = readdirSync(blobDir(dir)).reduce(
+      (n, f) => n + readFileSync(join(blobDir(dir), f)).length,
+      0,
+    );
+    expect(onDisk).toBeGreaterThan(0);
+    expect(m.status().storeBytes).toBe(onDisk);
   });
 });
 

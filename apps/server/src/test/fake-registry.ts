@@ -47,7 +47,11 @@ export type FakeRegistry = {
   /** `<host>/<owner>`: the lock's `registry`. */
   registry: string;
   owner: string;
-  addImage(name: string, o?: { platforms?: string[]; signatures?: SignatureMode }): FakeImage;
+  /** `sharedLayer`: one more layer on each platform, so images can share a blob. */
+  addImage(
+    name: string,
+    o?: { platforms?: string[]; signatures?: SignatureMode; sharedLayer?: Buffer },
+  ): FakeImage;
   /**
    * Publishes one more signature artifact signing `img` where `via` says: listed by the referrers
    * API, in the `sha256-<hex>` fallback tag's list, or as the legacy `.sig` tag (replacing it).
@@ -70,6 +74,11 @@ export type FakeRegistry = {
   corrupt(digest: string): void;
   /** Serve the right bytes again. */
   heal(digest: string): void;
+  /**
+   * Holds every request for this blob until `release()`; `requested` resolves when the first
+   * one arrives.
+   */
+  hold(digest: string): { requested: Promise<void>; release(): void };
   requests: { method: string; path: string; authorization?: string }[];
   /** Bearer tokens handed out by a token exchange made with the read token. */
   exchanged: string[];
@@ -94,6 +103,7 @@ export async function startFakeRegistry(
   const exchanged: string[] = [];
   const valid = new Set<string>();
   const tagLists = new Map<string, Descriptor[]>();
+  const held = new Map<string, { arrived: () => void; released: Promise<void> }>();
 
   const blob = (mediaType: string, bytes: Buffer): Descriptor => {
     const digest = sha256(bytes);
@@ -160,6 +170,11 @@ export async function startFakeRegistry(
     if (!m) return { status: 404 };
     const [, repo, kind, ref] = m as unknown as [string, string, string, string];
     if (kind === 'blobs') {
+      const h = held.get(ref);
+      if (h) {
+        h.arrived();
+        await h.released;
+      }
       const b = blobs.get(ref);
       if (!b) return { status: 404 };
       const body = corrupted.has(ref) ? Buffer.from(b).fill(0x41) : b;
@@ -232,6 +247,24 @@ export async function startFakeRegistry(
     },
     corrupt: (digest) => corrupted.add(digest),
     heal: (digest) => corrupted.delete(digest),
+    hold(digest) {
+      let arrived = () => {};
+      let release = () => {};
+      const requested = new Promise<void>((r) => {
+        arrived = r;
+      });
+      const released = new Promise<void>((r) => {
+        release = r;
+      });
+      held.set(digest, { arrived, released });
+      return {
+        requested,
+        release: () => {
+          held.delete(digest);
+          release();
+        },
+      };
+    },
     addImage(name, opts = {}) {
       const repo = `${owner}/${name}`;
       const platforms = opts.platforms ?? ['linux/amd64', 'linux/arm64'];
@@ -242,6 +275,7 @@ export async function startFakeRegistry(
         const layers = [0, 1].map(() =>
           blob(OCI_LAYER, randomBytes(200 + Math.floor(Math.random() * 900))),
         );
+        if (opts.sharedLayer) layers.push(blob(OCI_LAYER, opts.sharedLayer));
         const config = blob(OCI_CONFIG, json({ os, architecture, rootfs: { type: 'layers' } }));
         const m = manifest(repo, OCI_MANIFEST, {
           schemaVersion: 2,
