@@ -143,12 +143,28 @@ Pages show a credential's source, a fingerprint (the first 8 hex characters of i
 its dates, never the value. A value that fails its test is treated as a secret too: it reaches
 no log, audit row or response.
 
+### The GitHub App private key
+
+In GitHub App mode, each app's private key is the install's most powerful GitHub secret for its
+owner. It mints `contents: write` tokens, merge included, on every repository the app's
+installation covers, and it does not expire. On **All repositories** that is every repository of
+the owner, including ones created later; on selected repositories, those. Jumpmaster narrows
+every token it mints to one repository (see below), but the key itself is not narrowed.
+
+The key lives in the vault entry `github-app/<owner>/<role>` (encrypted under the vault key, like
+every entry), or in the file `secrets/github-app/<owner>/<role>.json`. The server refuses that file
+when its group or others have any permission bit: keep it at mode `0600`. The key never leaves the
+server: no stick, container, page or response receives it, and it is scrubbed from logs, as a whole
+and line by line. Back it up with the vault key, since the vault entry is unreadable without it.
+Rotation is manual, on the app's settings page on GitHub: GitHub offers no API for it.
+
 ### File secrets by name
 
 A file under `secrets/` named for a credential (`claude_token`, `github_author_token`,
-`github_reviewer_token`, `github_read_token`), or a `*_FILE` variable, is a file secret: it wins
-over the vault and is read with the same checks as the machine secrets (a regular file, mode
-`0600`). Only those names count. When a file and a vault entry both exist and differ, the
+`github_reviewer_token`, `github_read_token`), a GitHub App entry file
+`secrets/github-app/<owner>/<role>.json`, or a `*_FILE` variable, is a file secret: it wins over
+the vault and is read with the same checks as the machine secrets (a regular file, mode `0600`).
+Only those names count. When a file and a vault entry both exist and differ, the
 doctor's `credential.shadowed` says so.
 
 ### The setup code
@@ -199,14 +215,32 @@ of every container an agent runs in.
   messages, unexpected commit identities, and a head that isn't the gated commit. It pushes with
   `--force-with-lease`, so a branch someone else moved is never overwritten.
 
-**The PAT-mode caveat.** Jumpmaster runs in PAT mode today: the grant carries the author token.
-"No write token in a container an agent ran in" holds fully only once GitHub App mode mints a
-`contents: read` token per drop. In PAT mode the agent's container clones with `githubReadToken`
-when one is configured, and with the author token when none is. Without a read token, the author
-token is still inside the agent's container for its clone (as before this release); what changes is
-that the push happens only in the push container. Configure a read token (Contents: Read-only) to
-keep the author token out of agent containers, on a public repository too. The Claude token is
-always readable by the agent (see the install runbook's Claude token section).
+**In GitHub App mode** (two-bot zones whose roles resolve to their owner's apps), no write token
+is ever in a container an agent ran in:
+
+- **The agent's container gets a `contents: read` token** minted for that drop alone, narrowed to
+  the zone's one repository, and revoked when the drop ends.
+- **The push container's `contents: write` token** is minted per push, only for the push
+  container, narrowed to the zone's one repository, and revoked when the push result
+  arrives.
+- **The kill switch suspends the installations** the zones use, which kills their live tokens and
+  refuses new ones until it is released.
+- **Minted tokens are never stored.** They are held in the server's memory only: never written to
+  the vault, and never written on the stick's host.
+
+No app has the Administration or the Workflows permission. An app with Administration could edit
+or bypass the rulesets that keep merges behind the review and checks, and without Workflows GitHub
+refuses a push that changes the CI configuration, so agent code can't run arbitrary CI with the
+repository's secrets.
+
+**The PAT-mode caveat.** With tokens (starter mode, or two-bot zones on tokens), the grant carries
+the author token, and "no write token in a container an agent ran in" holds only when a read token
+is configured, as before. The agent's container clones with `githubReadToken` when one is
+configured, and with the author token when none is. Without a read token, the author token is
+still inside the agent's container for its clone; what changes is that the push happens only in
+the push container. Configure a read token (Contents: Read-only) to keep the author token out of
+agent containers, on a public repository too. In either mode, the Claude token is always readable
+by the agent (see the install runbook's Claude token section).
 
 The stick holds the Docker socket, which is root on its host: a compromised stick can ask for a
 grant only for drops it holds, one repository each, and only after their agent run.
