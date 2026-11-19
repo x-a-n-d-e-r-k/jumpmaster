@@ -2530,3 +2530,141 @@ describe('forge.author and forge.reviewer for GitHub App roles (issue #435)', ()
     }
   });
 });
+
+describe('forge.branch-rules in a two-app zone needs jumpmaster-merge (issue #436)', () => {
+  type Bypass = {
+    rulesetId: number;
+    name: string;
+    restrictUpdatesOnly: boolean;
+    can: 'yes' | 'no' | 'unknown';
+  };
+  const entry = (appId: string, slug: string) =>
+    ({
+      source: 'vault',
+      fingerprint: 'fp',
+      entry: { appId, slug, clientId: 'c', pem: 'unused', importedAt: 'x' },
+    }) as const;
+  const apps = new Map([
+    ['octo', { author: entry('8', 'jm-author'), reviewer: entry('9', 'jm-reviewer') }],
+  ]) as unknown as ResolvedApps;
+  const main = (can: Bypass['can'] = 'no'): Bypass => ({
+    rulesetId: 1,
+    name: 'jumpmaster',
+    restrictUpdatesOnly: false,
+    can,
+  });
+  const merge = (can: Bypass['can'], restrictUpdatesOnly = true): Bypass => ({
+    rulesetId: 2,
+    name: 'jumpmaster-merge',
+    restrictUpdatesOnly,
+    can,
+  });
+  const appWorld = (
+    o: {
+      author?: Bypass[] | null;
+      reviewer?: Bypass[];
+      installations?: { author?: number; reviewer?: number };
+    } = {},
+  ) => {
+    const w = world({
+      zone: {
+        githubApp: {
+          repositoryId: 5,
+          installations: o.installations ?? { author: 7, reviewer: 8 },
+        },
+      },
+    });
+    w.deps.resolvedApps = () => apps;
+    const lists = {
+      author: o.author === undefined ? [main(), merge('yes')] : o.author,
+      reviewer: o.reviewer ?? [main(), merge('no')],
+    };
+    for (const id of ['author', 'reviewer'] as const) {
+      const r = w.f.state.rules[id];
+      if (r.kind !== 'ok') throw new Error('world rules');
+      const list = lists[id];
+      w.f.state.rules[id] = {
+        kind: 'ok',
+        rules: {
+          ...r.rules,
+          asApp: true,
+          ...(list === null ? {} : { bypass: list }),
+          viewerCanBypass: id === 'reviewer' && (list ?? []).some((b) => b.can === 'yes'),
+        },
+      };
+    }
+    return w;
+  };
+  const check = async (w: ReturnType<typeof appWorld>) => one(await w.run(), 'forge.branch-rules');
+  const noSecrets = (c: { summary: string; fix?: string }) =>
+    expect(`${c.summary} ${c.fix ?? ''}`).not.toMatch(/unused|ghp_|BEGIN|secret/i);
+
+  test('the merge ruleset, update-only, bypassed by the author app alone, passes with the merge sentence', async () => {
+    const c = await check(appWorld());
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain(
+      "the reviewer can't bypass, and only the author app and admins can merge, through jumpmaster-merge",
+    );
+    expect(c.summary).not.toContain('neither bot can bypass');
+  });
+
+  test('no jumpmaster-merge fails, with the steps naming the author app', async () => {
+    const c = await check(appWorld({ author: [main()], reviewer: [main()] }));
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain(
+      'no jumpmaster-merge ruleset: anyone with write access can merge an approved pull request',
+    );
+    expect(c.fix).toContain('Settings → Rules → Rulesets → New branch ruleset');
+    expect(c.fix).toContain('Restrict updates');
+    expect(c.fix).toContain('jm-author');
+    expect(c.fix).toContain('Repository admin');
+    noSecrets(c);
+  });
+
+  test('a jumpmaster-merge with more than Restrict updates fails', async () => {
+    const c = await check(appWorld({ author: [main(), merge('no', false)] }));
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('jumpmaster-merge must hold only the Restrict updates rule');
+    expect(c.fix).toContain('jm-author');
+    noSecrets(c);
+  });
+
+  test("an author app that can't bypass jumpmaster-merge fails", async () => {
+    const c = await check(appWorld({ author: [main(), merge('no')] }));
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('author app must be on its bypass list');
+    expect(c.fix).toContain('jm-author');
+  });
+
+  test('a reviewer that can bypass jumpmaster-merge fails as today', async () => {
+    const c = await check(appWorld({ reviewer: [main(), merge('yes')] }));
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('bot can bypass');
+  });
+
+  test("an author's unknown bypass on jumpmaster-merge warns", async () => {
+    const c = await check(appWorld({ author: [main(), merge('unknown')] }));
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('jumpmaster-merge');
+  });
+
+  test('an author read with no bypass list warns, naming the manual check', async () => {
+    const c = await check(appWorld({ author: null }));
+    expect(c.status).toBe('warn');
+    expect(c.fix).toContain('Settings → Rules → Rulesets → jumpmaster-merge');
+  });
+
+  test('no jumpmaster-merge fails even when another ruleset reads unknown', async () => {
+    const c = await check(appWorld({ author: [main('unknown')], reviewer: [main()] }));
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('no jumpmaster-merge ruleset');
+  });
+
+  test('a hybrid zone (app author, PAT reviewer) without jumpmaster-merge keeps today’s pass', async () => {
+    const c = await check(
+      appWorld({ author: [main()], reviewer: [main()], installations: { author: 7 } }),
+    );
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('neither bot can bypass');
+  });
+});
