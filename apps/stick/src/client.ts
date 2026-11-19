@@ -17,6 +17,10 @@ import {
   type StickInfo,
   type StickStarting,
   type TrooperEvent,
+  UPGRADE_HEADER,
+  type UpgradeOffer,
+  UpgradeOfferSchema,
+  type UpgradeReport,
 } from '@jumpmaster/protocol';
 
 export type Ack = 'ok' | 'stale';
@@ -61,6 +65,14 @@ export interface PushClient {
   pushPlan(dropId: string, epoch: number): Promise<PlanReply>;
   pushGrant(dropId: string, epoch: number): Promise<GrantReply>;
   postPushResult(dropId: string, epoch: number, result: PushResult): Promise<Ack>;
+}
+
+/**
+ * The stick upgrade's part in each lease (issue #430): asked before every lease what it reports,
+ * and told when that lease is answered 2xx (a 204 included).
+ */
+export interface LeaseUpgradeHooks {
+  beforeLease(): { report?: UpgradeReport; answered?: () => void };
 }
 
 /** A request the server answered with an error status (never thrown for a network failure). */
@@ -138,6 +150,13 @@ export function leaseLogger(
 export class StickClient implements DropClient, PushClient {
   /** The features the server announced on its latest lease answer. */
   features: ReadonlySet<string> = new Set();
+  /**
+   * The upgrade the server offered on its latest lease answer (issue #430); undefined when that
+   * answer had none, or one that fails its schema (which is logged).
+   */
+  upgradeOffer: UpgradeOffer | undefined;
+  /** The stick upgrade's reporting, when it is wired (issue #430). */
+  upgradeHooks: LeaseUpgradeHooks | undefined;
 
   constructor(
     private readonly baseUrl: string,
@@ -149,6 +168,8 @@ export class StickClient implements DropClient, PushClient {
       maxSlots?: number;
       /** The stick's starting count (`JM_SLOTS`), sent with every lease. */
       slots?: number;
+      /** Where a malformed upgrade offer is logged; default stderr. */
+      log?: (line: string) => void;
     } = {},
   ) {}
 
@@ -227,6 +248,7 @@ export class StickClient implements DropClient, PushClient {
     this.lastTerms = terms;
     const fetching = this.imageFetch;
     const starting = this.startingReport;
+    const upgrade = this.upgradeHooks?.beforeLease() ?? {};
     const res = await this.req('/api/sticks/lease', {
       freeSlots,
       ...this.info,
@@ -235,11 +257,14 @@ export class StickClient implements DropClient, PushClient {
       ...(start === undefined ? {} : { slots: start }),
       ...(fetching === undefined ? {} : { imageFetch: fetching }),
       ...(starting === undefined ? {} : { starting }),
+      ...(upgrade.report === undefined ? {} : { upgrade: upgrade.report }),
     });
     // The end of a download, and of the first check, is said once.
     if (fetching === null && this.imageFetch === null) this.imageFetch = undefined;
     if (starting === null && this.startingReport === null) this.startingReport = undefined;
     this.features = featuresOf(res);
+    this.upgradeOffer = this.offerOf(res);
+    if (res.ok) upgrade.answered?.();
     const skipped = skippedOf(res);
     const slots = slotsOf(res);
     if (res.status === 204) return { drop: null, skipped, slots };
@@ -392,11 +417,34 @@ export class StickClient implements DropClient, PushClient {
     throw new HttpStatusError(`push-result failed: ${last}`, last);
   }
 
+  /** The answer's upgrade offer; a malformed one is ignored and logged. */
+  private offerOf(res: Response): UpgradeOffer | undefined {
+    const { offer, malformed } = upgradeOfferOf(res);
+    if (malformed !== undefined)
+      (this.opts.log ?? ((l: string) => console.error(l)))(
+        JSON.stringify({ event: 'upgrade-offer', ignored: malformed.slice(0, 300) }),
+      );
+    return offer;
+  }
+
   async salvage(dropId: string, epoch: number): Promise<'ok' | 'refused'> {
     const res = await this.req('/api/sticks/salvage', { dropId, epoch });
     if (res.status === 409) return 'refused';
     if (!res.ok) throw await failure('salvage', res);
     return 'ok';
+  }
+}
+
+/** The upgrade offer a lease answer carries; undefined when there is none or it is malformed. */
+function upgradeOfferOf(res: Response): { offer?: UpgradeOffer; malformed?: string } {
+  const raw = res.headers.get(UPGRADE_HEADER);
+  if (raw === null) return {};
+  try {
+    const parsed = UpgradeOfferSchema.safeParse(JSON.parse(raw));
+    if (parsed.success) return { offer: parsed.data };
+    return { malformed: parsed.error.issues.map((i) => i.message).join('; ') };
+  } catch {
+    return { malformed: 'not JSON' };
   }
 }
 

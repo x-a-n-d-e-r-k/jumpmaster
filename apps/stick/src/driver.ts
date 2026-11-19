@@ -197,3 +197,35 @@ export interface ImageLoader {
    */
   tagImage(id: string, ref: string): Promise<void>;
 }
+
+/** A mount the stick upgrade's helper shares with the stick (issue #430). */
+export type HelperMount = { type: 'volume' | 'bind'; source: string; target: string };
+
+/**
+ * The stick upgrade's helper container (issue #430), exactly: the Docker socket and the stick's
+ * state mount, no network, removed when it exits. No other option is offered.
+ */
+export type UpgradeHelperSpec = {
+  name: string;
+  /** The verified image id. */
+  image: string;
+  /** The whole command (the image's entrypoint is replaced; no Cmd). */
+  entrypoint: string[];
+  mounts: [HelperMount, HelperMount];
+  networkMode: 'none';
+  autoRemove: true;
+};
+
+/** What the stick upgrade needs of the engine (issue #430). */
+export interface UpgradeDriver {
+  /** This stick's own container: its name and mounts; undefined outside a container. */
+  ownContainer(): Promise<{ name: string; mounts: HelperMount[] } | undefined>;
+  /** Whether a container by this name exists (running or not). */
+  containerExists(name: string): Promise<boolean>;
+  /** Starts the helper; `wait` resolves with its exit code. */
+  startUpgradeHelper(spec: UpgradeHelperSpec): Promise<{ wait(): Promise<{ exitCode: number }> }>;
+  /** The id of the image `ref` names, or undefined when the engine has none. */
+  imageId(ref: string): Promise<string | undefined>;
+  /** The image's config labels. */
+  imageLabels(image: string): Promise<Record<string, string>>;
+}

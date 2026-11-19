@@ -79,6 +79,13 @@ export type ServerImageDeps = {
 /** Where missing images come from, decided per use, and how to fetch from the server. */
 export type ServerImages = { source: () => ImageSource; deps: ServerImageDeps };
 
+/**
+ * How `fetchFromServer` decides. `exactTag` (a stick upgrade, issue #430): no pin, cached
+ * success or present image stands in for the layout's signature, which must be the release
+ * workflow's for exactly that tag (`verifyIndexBundles`).
+ */
+export type FetchOptions = { exactTag?: string };
+
 /** A fetch's outcome: `wait` when the server has not mirrored the image yet. */
 export type Fetched = Verdict | { ok: false; reason: string; wait: true };
 
@@ -560,16 +567,28 @@ export function fetchFromServer(
   ref: string,
   trust: ImageTrust,
   deps: ServerImageDeps,
+  opts: FetchOptions = {},
 ): Promise<Fetched> {
   // Taken within this call (the lock grants a free holder at once), so a sweep started after it
   // waits for it.
   return deps.images
-    ? deps.images.lock.shared(() => fetchImage(ref, trust, deps))
-    : fetchImage(ref, trust, deps);
+    ? deps.images.lock.shared(() => fetchImage(ref, trust, deps, opts))
+    : fetchImage(ref, trust, deps, opts);
 }
 
-async function fetchImage(ref: string, trust: ImageTrust, deps: ServerImageDeps): Promise<Fetched> {
+async function fetchImage(
+  ref: string,
+  trust: ImageTrust,
+  deps: ServerImageDeps,
+  opts: FetchOptions,
+): Promise<Fetched> {
+  const exact = opts.exactTag !== undefined;
   const digest = digestOf(ref);
+  if (exact && (!digest || trust.policy !== 'signed'))
+    return {
+      ok: false,
+      reason: `image not verified: ${ref}: a release check needs a digest and the signed image policy`,
+    };
   // A tag is never fetched, as it is never pulled; under signed it is refused.
   if (!digest)
     return trust.policy === 'signed'
@@ -578,8 +597,10 @@ async function fetchImage(ref: string, trust: ImageTrust, deps: ServerImageDeps)
           reason: `image not verified: ${ref}`,
         })
       : { ok: true, via: 'allowlist' };
-  const known: Verdict | null =
-    trust.policy === 'allowlist'
+  // Under an exact tag nothing is known: the layout is always downloaded and verified.
+  const known: Verdict | null = exact
+    ? null
+    : trust.policy === 'allowlist'
       ? { ok: true, via: 'allowlist' }
       : verifiedWithoutSignature(ref, trust);
   if (known && !known.ok) return known;
@@ -613,7 +634,7 @@ async function fetchImage(ref: string, trust: ImageTrust, deps: ServerImageDeps)
     }
     let verdict: Verdict = known ?? { ok: false, reason: '' };
     if (!known) {
-      verdict = await verifyLayout(dir, ref, trust);
+      verdict = await verifyLayout(dir, ref, trust, opts);
       if (!verdict.ok) {
         deps.log(
           JSON.stringify({

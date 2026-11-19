@@ -694,3 +694,64 @@ describe('fetching a missing image from the server (issue #141)', () => {
     expect(unverified.calls).not.toContain('load');
   });
 });
+
+describe('an exact release tag (a stick upgrade, issue #430)', () => {
+  // The rc.2 bundle the layout carries names v0.4.0-rc.2.
+  test('a cached digest is downloaded and verified again; a bundle for another tag is refused', async () => {
+    const r = release();
+    const c = fakeCosign(() => verified());
+    const trust = signedTrust(c.cosign);
+    trust.cache?.add(r.indexDigest);
+    // Without the option the cache stands in for the signature.
+    const cached = world({ r, present: true });
+    expect(await fetchFromServer(r.ref, trust, cached.deps)).toEqual({ ok: true, via: 'cache' });
+    expect(c.calls).toEqual([]);
+    const w = world({ r, present: true });
+    const got = await fetchFromServer(r.ref, trust, w.deps, { exactTag: 'v0.4.0' });
+    expect(got).toEqual({
+      ok: false,
+      reason: `image not verified: ${r.ref}: no signature for release v0.4.0`,
+    });
+    expect(w.calls).toContain(`fetch ${r.ref} ${PLATFORM}`);
+    expect(c.calls).toHaveLength(1);
+  });
+
+  test('the exact tag is accepted, after a download, even for a present, cached image', async () => {
+    const r = release();
+    const c = fakeCosign(() => verified());
+    const trust = signedTrust(c.cosign);
+    trust.cache?.add(r.indexDigest);
+    const w = world({ r, present: true });
+    expect(await fetchFromServer(r.ref, trust, w.deps, { exactTag: 'v0.4.0-rc.2' })).toEqual({
+      ok: true,
+      via: 'cosign',
+    });
+    expect(w.calls).toContain(`fetch ${r.ref} ${PLATFORM}`);
+    expect(c.calls).toHaveLength(1);
+  });
+
+  test('a pin is no shortcut: the signature must still be for the tag', async () => {
+    const r = release();
+    const c = fakeCosign(() => verified());
+    const w = world({ r });
+    const got = await fetchFromServer(r.ref, signedTrust(c.cosign, fresh(), [r.ref]), w.deps, {
+      exactTag: 'v9.9.9',
+    });
+    expect(got.ok).toBe(false);
+    expect(w.calls).toContain(`fetch ${r.ref} ${PLATFORM}`);
+    expect(w.calls).not.toContain('load');
+  });
+
+  test('under allowlist nothing is accepted for an exact tag', async () => {
+    const r = release();
+    const w = world({ r });
+    const got = await fetchFromServer(
+      r.ref,
+      { policy: 'allowlist', allowed: new Set([r.ref]) },
+      w.deps,
+      { exactTag: 'v0.4.0-rc.2' },
+    );
+    expect(got.ok).toBe(false);
+    expect(w.calls).toEqual([]);
+  });
+});

@@ -6,10 +6,13 @@ import type {
   ContainerDriver,
   ContainerHandle,
   DropNet,
+  HelperMount,
   ImageLoader,
   IsolationFacts,
   ProxyHandle,
   RepoMount,
+  UpgradeDriver,
+  UpgradeHelperSpec,
   VolumeInfo,
 } from './driver.js';
 import type { ContainerInfo, ImageGcDriver } from './image-gc.js';
@@ -157,7 +160,7 @@ async function* lines(stream: Readable): AsyncIterable<string> {
   if (buf) yield buf;
 }
 
-export class DockerDriver implements ContainerDriver, ImageLoader, ImageGcDriver {
+export class DockerDriver implements ContainerDriver, ImageLoader, ImageGcDriver, UpgradeDriver {
   constructor(
     private readonly docker = new Docker(),
     private readonly opts: {
@@ -782,6 +785,79 @@ export class DockerDriver implements ContainerDriver, ImageLoader, ImageGcDriver
     throw new Error(
       `the engine did not name the loaded image ${id} as ${ref}${named?.Id ? ` (it names ${named.Id})` : ''}: loading images by digest needs Docker's containerd image store`,
     );
+  }
+
+  async ownContainer(): Promise<{ name: string; mounts: HelperMount[] } | undefined> {
+    const id = ownContainerId();
+    if (!id) return undefined;
+    const info = (await this.docker.getContainer(id).inspect()) as {
+      Name?: string;
+      Mounts?: { Type?: string; Name?: string; Source?: string; Destination?: string }[];
+    };
+    const name = (info.Name ?? '').replace(/^\//, '');
+    if (name === '') return undefined;
+    const mounts: HelperMount[] = [];
+    for (const m of info.Mounts ?? []) {
+      if (!m.Destination) continue;
+      if (m.Type === 'volume' && m.Name)
+        mounts.push({ type: 'volume', source: m.Name, target: m.Destination });
+      else if (m.Type === 'bind' && m.Source)
+        mounts.push({ type: 'bind', source: m.Source, target: m.Destination });
+    }
+    return { name, mounts };
+  }
+
+  async containerExists(name: string): Promise<boolean> {
+    try {
+      await this.docker.getContainer(name).inspect();
+      return true;
+    } catch (e) {
+      if (statusOf(e) === 404) return false;
+      throw e;
+    }
+  }
+
+  /**
+   * The upgrade helper (issue #430), exactly as specified: its whole command as the entrypoint,
+   * the two mounts given, no network, auto-removed. Nothing of the trooper's start is reused.
+   */
+  async startUpgradeHelper(
+    spec: UpgradeHelperSpec,
+  ): Promise<{ wait(): Promise<{ exitCode: number }> }> {
+    const container = await this.docker.createContainer({
+      name: spec.name,
+      Image: spec.image,
+      Entrypoint: spec.entrypoint,
+      Cmd: [],
+      HostConfig: {
+        NetworkMode: spec.networkMode,
+        AutoRemove: spec.autoRemove,
+        Mounts: spec.mounts.map(
+          (m) =>
+            ({
+              Type: m.type,
+              Source: m.source,
+              Target: m.target,
+              ReadOnly: false,
+            }) as Docker.MountSettings,
+        ),
+      },
+    });
+    // Asked before the start: an auto-removed container may be gone before a later wait.
+    const exited = container.wait({ condition: 'next-exit' }) as Promise<{ StatusCode?: number }>;
+    exited.catch(() => {});
+    try {
+      await container.start();
+    } catch (e) {
+      await container.remove({ force: true }).catch(() => {});
+      throw e;
+    }
+    return {
+      async wait() {
+        const r = await exited;
+        return { exitCode: typeof r.StatusCode === 'number' ? r.StatusCode : -1 };
+      },
+    };
   }
 
   async imageLabels(image: string): Promise<Record<string, string>> {
