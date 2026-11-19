@@ -1093,6 +1093,83 @@ describe('two bots on GitHub Apps, tokens under "Use tokens instead" (#446)', ()
     }
   });
 
+  test('guideSection renders the starter checklist under the starter flag, the two-bot one without it (#484)', () => {
+    const g = guide();
+    const answer = {
+      ...(g.answer as RecommendAnswer),
+      repo: 'octo-owner/demo',
+      logins: { author: 'octo-owner' },
+      checklist: {
+        url: 'https://github.com/octo-owner/demo/settings/access',
+        items: [
+          'nothing to invite: octo-owner owns the repository',
+          'invite the reviewer account with the Write role',
+          'accept the invitation as the reviewer account',
+        ],
+      },
+    };
+    const two = guideSection({ ...g, repo: 'octo-owner/demo', answer }, '/setup/forge', apps());
+    expect(two).toContain('id="checklist"');
+    expect(two).toContain('invite the reviewer account with the Write role');
+    const one = guideSection(
+      { ...g, repo: 'octo-owner/demo', answer },
+      '/setup/forge',
+      apps(),
+      true,
+    );
+    expect(one).toContain('id="checklist"');
+    expect(one).toContain('nothing to invite: octo-owner owns the repository');
+    expect(one).not.toContain('reviewer account');
+    expect(one).not.toMatch(/invite[^<]*reviewer/);
+  });
+
+  const withAuthor = async (ownerType: 'User' | 'Organization', starter: boolean) => {
+    const w = await world({ github: { ownerType } });
+    expect((await w.call('POST', '/api/control/sudo', { passphrase: PASS })).statusCode).toBe(200);
+    expect(
+      (await w.call('PUT', '/api/control/secrets/githubAuthorToken', { value: AUTHOR })).statusCode,
+    ).toBe(200);
+    if (starter) await w.form('/setup/advance', { from: 'forge', starter: '1' });
+    return w;
+  };
+  const checklistOf = (html: string) =>
+    html.slice(
+      html.indexOf('id="checklist"'),
+      html.indexOf('</section>', html.indexOf('id="checklist"')),
+    );
+
+  test('a starter choice on a personal repository shows the starter checklist, no reviewer to invite (#484)', async () => {
+    const w = await withAuthor('User', true);
+    const forge = (await w.get('/setup/forge?repo=octo-owner%2Fdemo')).body;
+    expect(forge).toContain('id="checklist"');
+    expect(forge).toContain('nothing to invite: octo-owner owns the repository');
+    expect(forge).not.toContain('reviewer account');
+    expect(forge).not.toMatch(/invite[^<]*reviewer/);
+    expect(forge).not.toContain(AUTHOR);
+  });
+
+  test('a starter choice on an organization repository names the author only in the checklist (#484)', async () => {
+    const w = await withAuthor('Organization', true);
+    const forge = (await w.get('/setup/forge?repo=octo-org%2Fdemo')).body;
+    const list = checklistOf(forge);
+    expect(list).toContain('invite octo-owner with the Write role');
+    expect(list).toContain('accept the invitation as octo-owner');
+    expect(list).not.toContain('reviewer');
+    expect(forge).not.toContain(AUTHOR);
+  });
+
+  test('without the starter choice a personal repository keeps both roles, the apps and the folded tokens (#484)', async () => {
+    const w = await withAuthor('User', false);
+    const forge = (await w.get('/setup/forge?repo=octo-owner%2Fdemo')).body;
+    const list = checklistOf(forge);
+    expect(list).toContain('nothing to invite: octo-owner owns the repository');
+    expect(list).toContain('invite the reviewer account with the Write role');
+    expect(list).toContain('accept the invitation as the reviewer account');
+    expect(forge).toContain('id="github-apps"');
+    expect(forge).toContain('id="use-tokens"');
+    expect(forge).not.toContain(AUTHOR);
+  });
+
   test('the forge page of an organization repository still shows the starter warning beside the box', async () => {
     const w = await world({ github: { ownerType: 'Organization' } });
     const forge = (await w.get('/setup/forge?repo=octo-org%2Fdemo')).body;

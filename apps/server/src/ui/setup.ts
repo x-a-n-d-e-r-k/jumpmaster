@@ -15,6 +15,7 @@ import type { Db } from '../db/open.js';
 import { listSticks } from '../db/repo.js';
 import { DOC } from '../doctor/checks.js';
 import { latestDoctorRun } from '../doctor/run.js';
+import { collaboratorChecklist } from '../github/guidance.js';
 import { BASE_EGRESS } from '../payloads.js';
 import { PRESET_EGRESS } from '../presets.js';
 import type { CredentialName, ResolvedCredential } from '../vault/credentials.js';
@@ -400,6 +401,10 @@ export function guideSection(
     ...(onTokens ? [] : (['reviewer'] as const)),
     ...(a.visibility === 'private' ? (['read'] as const) : []),
   ];
+  // One account chosen: the starter checklist, with no reviewer to invite or accept as (#484).
+  const checklist = starter
+    ? collaboratorChecklist({ repo: a.repo, identity: 'starter' }, a.logins)
+    : a.checklist;
   // Two bots: the apps first, the token links folded under "Use tokens instead". Starter stays
   // on tokens, shown as they are, with no app section.
   const tokens = a.recommendation.stop
@@ -410,7 +415,7 @@ export function guideSection(
   return `${form}<p>${escapeHtml(a.repo)}: ${a.visible ? escapeHtml(a.visibility) : 'not visible without a token (private, or not there)'}, owned by ${a.ownerType === 'Organization' ? 'an organization' : 'a personal account'}.</p>
 ${recommendationSection(a.recommendation)}${!onTokens && offersApps(a, apps) ? `\n${appCreateSection(a, apps)}` : ''}
 ${tokens}
-${a.logins.author ? checklistSection(a.checklist) : ''}`;
+${a.logins.author ? checklistSection(checklist) : ''}`;
 }
 
 function forgePage(store: ConfigStore, sudo: boolean, wizard: Wizard, guide?: ForgeGuide): string {
