@@ -265,16 +265,17 @@ test('v12 carves a diagnosis out of each parked briefing why, keyed to the serve
       recommendation: '',
     },
   ]);
-  // The next pass finds the carved briefing up to date: it keeps the diagnosis and is not rewritten.
+  // The next pass finds the carved why up to date: it keeps the diagnosis. Only the options and
+  // decision are refreshed in place, to today's three (#535).
   syncParkBriefings(db, makeZone(), new Date('2026-01-02T00:00:00.000Z'));
   expect(
-    ids(db, 'SELECT why, diagnosis, recommendation, updated_at FROM briefings WHERE id = 1'),
+    ids(db, 'SELECT why, diagnosis, recommendation, decision FROM briefings WHERE id = 1'),
   ).toEqual([
     {
       why: 'heal budget exhausted',
       diagnosis: 'The test is flaky.',
       recommendation: 'retry: Re-run it.',
-      updated_at: 'x',
+      decision: 'Issue #1 is parked. Retry it, close it as done, or leave it?',
     },
   ]);
 });
@@ -1537,7 +1538,10 @@ test('v43 keeps every briefing and ruling (the rebuild ships as v46: v43 to v45 
   expect(MIGRATIONS.some((m) => m.version === 46 && m.foreignKeysOff)).toBe(true);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(db.prepare('SELECT * FROM briefings ORDER BY id').all()).toEqual(briefings);
-  expect(db.prepare('SELECT * FROM rulings ORDER BY id').all()).toEqual(rulings);
+  // v55 adds `via`, null on every older ruling.
+  expect(db.prepare('SELECT * FROM rulings ORDER BY id').all()).toEqual(
+    rulings.map((r) => ({ ...(r as object), via: null })),
+  );
   expect(count(db, 'objectives_done')).toBe(1);
   const put = db.prepare(
     `INSERT INTO briefings (zone_id, kind, subject, decision, why, options_json, source, state,
@@ -1745,4 +1749,21 @@ test('v54 adds a nullable result_pruned_at to chat_messages, keeping every row',
   expect(db.prepare('SELECT text, result_text, result_pruned_at FROM chat_messages').all()).toEqual(
     [{ text: 'read GOAL.md', result_text: 'out', result_pruned_at: null }],
   );
+});
+
+test('v55 adds a nullable via to rulings, keeping every row', () => {
+  const f = dbAt(54, (raw) => {
+    raw.exec(
+      `INSERT INTO briefings (id, zone_id, kind, subject, decision, why, options_json,
+         recommendation, on_hold, source, state, created_at, updated_at)
+       VALUES (1, 'z', 'parked', 'item:1', 'd', 'w', '[]', '', '', 'server', 'ruled', 't', 't');
+       INSERT INTO rulings (id, zone_id, briefing_id, choice, note, created_at)
+       VALUES (1, 'z', 1, 'retry', 'go', 't')`,
+    );
+  });
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.prepare('SELECT id, note, via FROM rulings').all()).toEqual([
+    { id: 1, note: 'go', via: null },
+  ]);
 });

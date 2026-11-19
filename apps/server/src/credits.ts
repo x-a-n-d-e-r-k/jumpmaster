@@ -381,6 +381,7 @@ export function applyCreditsEffect(db: Db, subject: string, effect: Effect, now:
       return resumeAfterCredits(db, subject.slice(CREDITS_STOP.length), now);
     }
     case 'retry_item':
+    case 'close_item':
     case 'promote_issue':
     case 'reject_issue':
     case 'restage_issue':

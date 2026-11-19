@@ -6,6 +6,7 @@ import {
   type BriefingOption,
   diagnosePending,
   dismissZoneBriefings,
+  effectText,
   getBriefing,
   listBriefings,
   listRulings,
@@ -103,10 +104,54 @@ describe('parked briefings', () => {
     const list = open(w);
     expect(list).toHaveLength(1);
     expect(list[0]).toMatchObject({ kind: 'parked', subject: `item:${id}`, source: 'server' });
-    expect(list[0]?.options.map((o) => [o.label, o.effect])).toEqual([
-      ['Retry', 'retry_item'],
-      ['Leave parked', 'none'],
+    expect(list[0]?.decision).toBe(
+      `Issue #${getWorkItem(w.db, id)?.issueNumber} is parked. Retry it, close it as done, or leave it?`,
+    );
+    expect(
+      list[0]?.options.map((o) => [o.label, o.effect, effectText('parked', o.effect)]),
+    ).toEqual([
+      [
+        'Retry',
+        'retry_item',
+        'the parked item goes back to work: an agent runs it again from where it parked, with your note, if you wrote one, as direction',
+      ],
+      [
+        'Close as done',
+        'close_item',
+        'closes the issue as completed with a comment and stops work on it; nothing is merged',
+      ],
+      ['Leave parked', 'none', 'the item stays parked; nothing runs and nothing changes on GitHub'],
     ]);
+  });
+
+  test('an open two-option briefing gains Close as done on the next pass, in place (#535)', () => {
+    const { w, id } = parkedWorld();
+    const n = getWorkItem(w.db, id)?.issueNumber;
+    // As an older server raised it: two options, the old decision.
+    const old = raiseBriefing(
+      w.db,
+      {
+        zoneId: 'main',
+        kind: 'parked',
+        subject: `item:${id}`,
+        decision: `Issue #${n} is parked. Retry it?`,
+        why: 'heal budget exhausted',
+        options: [
+          { id: 'retry', label: 'Retry', effect: 'retry_item' },
+          { id: 'leave', label: 'Leave parked', effect: 'none' },
+        ],
+        recommendation: 'Retry it.',
+        source: 'server',
+      },
+      t0,
+    );
+    syncParkBriefings(w.db, w.zone, plus(t0, MIN));
+    const [b] = open(w);
+    expect(b?.id).toBe(old);
+    expect(b?.decision).toBe(`Issue #${n} is parked. Retry it, close it as done, or leave it?`);
+    expect(b?.options.map((o) => o.effect)).toEqual(['retry_item', 'close_item', 'none']);
+    // The why is unchanged, so the crew's recommendation stays.
+    expect(b?.recommendation).toBe('Retry it.');
   });
 
   test('the briefing is withdrawn when the item leaves parked by any path', () => {
@@ -162,7 +207,7 @@ describe('parked briefings and the crew retry (#396)', () => {
     settleCrewRetry(w.db, rowId, 'skipped');
     syncParkBriefings(w.db, w.zone, plus(t0, 4 * MIN));
     expect(open(w)).toHaveLength(1);
-    expect(open(w)[0]?.decision).toMatch(/is parked\. Retry it\?$/);
+    expect(open(w)[0]?.decision).toMatch(/is parked\. Retry it, close it as done, or leave it\?$/);
   });
 
   test("the parked-again briefing's decision and why: the crew's diagnosis, cut, and its instruction, redacted", () => {
@@ -176,13 +221,17 @@ describe('parked briefings and the crew retry (#396)', () => {
     syncParkBriefings(w.db, w.zone, plus(t0, 3 * MIN));
     const [b] = open(w);
     expect(b?.decision).toBe(
-      `Issue #${getWorkItem(w.db, id)?.issueNumber} parked again after the crew retried it once. Retry it?`,
+      `Issue #${getWorkItem(w.db, id)?.issueNumber} is parked again after the crew retried it once. Retry it, close it as done, or leave it?`,
     );
     expect(b?.why).toBe(
       `The crew already retried this once on 2026-03-04. Its diagnosis: ${'D'.repeat(480)}[REDACTED] ${'E'.repeat(9)}…. It told the next attempt: Never paste [REDACTED].\n\ngate test failed`,
     );
     expect(b?.why).not.toContain(token);
-    expect(b?.options.map((o) => o.effect)).toEqual(['retry_item', 'none']);
+    expect(b?.options.map((o) => [o.label, o.effect])).toEqual([
+      ['Retry', 'retry_item'],
+      ['Close as done', 'close_item'],
+      ['Leave parked', 'none'],
+    ]);
   });
 });
 

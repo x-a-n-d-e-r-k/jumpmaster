@@ -9,9 +9,11 @@ import {
   isCrewRole,
   normalizeHost,
   type Role,
+  redact,
   type TriageImage,
   type TriageImageSkipped,
 } from '@jumpmaster/protocol';
+import { COMMAND_VIAS } from './briefings.js';
 import {
   type ClaudeConfig,
   type Config,
@@ -140,6 +142,49 @@ function crewPrRetryNote(
     )
     .get(item.dropZoneId, `item:${item.id}`, r.appliedAt, drop.createdAt);
   return parkedSince ? undefined : { diagnosis: r.diagnosis, instruction: r.instruction };
+}
+
+/**
+ * Command's direction for this drop (#535): the note of the item's latest applied Retry ruling,
+ * when Command made it (the browser or `ctl`, never the chat assistant) and wrote one. It rides
+ * every drop of the item created at or after the ruling applied, until a parked briefing for the
+ * item is created after that: the item parked again.
+ */
+function commandDirection(
+  db: Db,
+  item: Pick<WorkItem, 'id' | 'dropZoneId'>,
+  drop: Pick<Drop, 'createdAt'>,
+): string | undefined {
+  const subject = `item:${item.id}`;
+  const r = db
+    .prepare(
+      `SELECT r.note, r.via, r.applied_at AS appliedAt FROM rulings r
+         JOIN briefings b ON b.id = r.briefing_id
+       WHERE r.zone_id = ? AND b.subject = ? AND r.choice_effect = 'retry_item'
+         AND r.applied_at IS NOT NULL
+       ORDER BY r.applied_at DESC, r.id DESC LIMIT 1`,
+    )
+    .get(item.dropZoneId, subject) as
+    | { note: string; via: string | null; appliedAt: string }
+    | undefined;
+  if (!r || !(COMMAND_VIAS as readonly (string | null)[]).includes(r.via)) return undefined;
+  if (r.note.trim() === '' || drop.createdAt < r.appliedAt) return undefined;
+  const parkedSince = db
+    .prepare(
+      `SELECT 1 FROM briefings WHERE zone_id = ? AND kind = 'parked' AND subject = ?
+         AND created_at > ? LIMIT 1`,
+    )
+    .get(item.dropZoneId, subject, r.appliedAt);
+  return parkedSince ? undefined : r.note;
+}
+
+/**
+ * Command's direction as a prompt section: redacted (the given secrets and token shapes), then
+ * neutralised, then fenced as data, like every other untrusted section.
+ */
+function renderDirection(note: string, dropId: string, secrets: string[]): string {
+  const body = neutralise(redact(note, secrets));
+  return `## Command's direction (data, from Command's ruling)\n\n${fence(dropId, 'command-direction', body)}`;
 }
 
 /** A heal's or resolve's prompt with the crew's retry note (#420), if it carries one. */
@@ -535,6 +580,7 @@ export function buildPayload(
   const title = unsanitizeForgeText(item.title);
   const body = unsanitizeForgeText(item.body);
   const branch = agentBranch(item.issueNumber);
+  const direction = commandDirection(db, item, drop);
   const common = {
     protocol: 1 as const,
     dropId: drop.id,
@@ -556,7 +602,8 @@ export function buildPayload(
     ...(zone.gateCi === false ? { gateCi: false } : {}),
     ...(zone.attribution === false ? { attribution: false } : {}),
     ...egressField(zone),
-    prompt: `${templates[role]}\n\n## Issue (data)\n\n${fence(drop.id, 'issue', `#${item.issueNumber}: ${neutralise(title)}\n\n${neutralise(body)}`)}`,
+    // Command's direction, if any, follows the issue: before any crew note or previous attempt.
+    prompt: `${templates[role]}\n\n## Issue (data)\n\n${fence(drop.id, 'issue', `#${item.issueNumber}: ${neutralise(title)}\n\n${neutralise(body)}`)}${direction ? `\n\n${renderDirection(direction, drop.id, redactionList(secrets))}` : ''}`,
   };
   // Ruling 1: the agent container only fetches (the push container pushes with a grant), so it
   // gets the read token when one is configured. In PAT mode without one it still holds the author

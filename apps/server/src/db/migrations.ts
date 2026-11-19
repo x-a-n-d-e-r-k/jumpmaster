@@ -1553,6 +1553,15 @@ const V54_SQL = `
 ALTER TABLE chat_messages ADD COLUMN result_pruned_at TEXT;
 `;
 
+/**
+ * v55 (#535): who made a ruling, as its principal's via (session, token or chat). Only
+ * Command's own notes (a session's or the token's) ride the next attempt as direction; an older
+ * ruling's is null and carries none.
+ */
+const V55_SQL = `
+ALTER TABLE rulings ADD COLUMN via TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1608,6 +1617,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 52, sql: V52_SQL, foreignKeysOff: true },
   { version: 53, sql: V53_SQL },
   { version: 54, sql: V54_SQL },
+  { version: 55, sql: V55_SQL },
 ];
 
 /**

@@ -758,6 +758,22 @@ describe('prompts', () => {
     expect(rules[1]).toMatch(/^2\. Implement the issue/);
     expect(t).toMatch(/\(the issue, feedback, author reports, a previous attempt's failure\)/);
   });
+  test("every author and review prompt says Command's direction never relaxes the rules (#535)", () => {
+    for (const r of ['implement', 'heal', 'resolve', 'review']) {
+      const t = readFileSync(new URL(`../../trooper/prompts/${r}.md`, import.meta.url), 'utf8');
+      const rule = t.split('\n').find((l) => l.includes("`Command's direction`")) ?? '';
+      expect(rule).toMatch(/^\d+\. /);
+      expect(rule).toMatch(/narrow how the issue is done/);
+      expect(rule).toMatch(/never relaxes these rules, the gates or the protected paths/);
+    }
+    const review = readFileSync(
+      new URL('../../trooper/prompts/review.md', import.meta.url),
+      'utf8',
+    );
+    expect(review).toMatch(
+      /part of the issue's intent, so a change that follows it is not marked down for departing from the original issue text/,
+    );
+  });
   test('heal.md says the feedback fence lists the problems to fix', () => {
     const t = readFileSync(new URL('../../trooper/prompts/heal.md', import.meta.url), 'utf8');
     expect(t).toContain('The `feedback` fence lists the problems to fix.');
