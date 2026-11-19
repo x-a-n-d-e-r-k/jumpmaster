@@ -18,6 +18,7 @@ import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
 import { listCards, recordCard } from './cards.js';
 import { registerChatRoutes } from './routes.js';
 import { appendMessage, createThread, getThread, listMessages } from './store.js';
+import { ChatTurns, chatMcpUrl, type HubEvent } from './turns.js';
 
 const TOKEN = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
@@ -377,5 +378,134 @@ describe('a thread titled from its first message', () => {
     await post(w, id, '## ');
     await post(w, id, 'A real question');
     expect(getThread(w.db, id)?.title).toBe('New chat');
+  });
+});
+
+describe('tool steps (#502)', () => {
+  /** The SSE events a replayed stream sends, by name. */
+  const sseEvents = (body: string) =>
+    body
+      .split('\n\n')
+      .map((block) => ({
+        event: /^event: (.*)$/m.exec(block)?.[1],
+        data: /^data: (.*)$/m.exec(block)?.[1],
+      }))
+      .filter((e) => e.event !== undefined)
+      .map((e) => ({
+        event: e.event,
+        data: JSON.parse(e.data ?? 'null') as Record<string, unknown>,
+      }));
+
+  test('D5: one secret is redacted alike in the stored input and result, the hub, the SSE tool event and GET', async () => {
+    const w = world();
+    // Configured, and not token-shaped: only redaction by value catches it.
+    const SECRET = 'join-secret-value-4';
+    const config = {
+      listen: { host: '0.0.0.0', port: 7420 },
+      dataDir: '/data',
+      pollSeconds: 60,
+      dropZones: [],
+      usage: { throttleUtilization: 0.9, probeJitterSeconds: [30, 90] },
+      claude: { plan: 'max', fableWeeklyDropCap: 0 },
+      chat: {},
+      secrets: {
+        claudeToken: ['sk', 'ant', 'oat01', 'ROUTESCLAUDETOKEN0123456789'].join('-'),
+        githubAuthorToken: ['github', 'pat', 'ROUTESAUTHORAUTHOR999999'].join('_'),
+        joinToken: SECRET,
+        operatorToken: TOKEN,
+      },
+    } as unknown as Config;
+    const turns = new ChatTurns({
+      db: w.db,
+      config,
+      now: () => t0,
+      service: {
+        async *runTurn() {
+          yield {
+            type: 'tool',
+            name: 'Grep',
+            summary: 'grep',
+            id: 't1',
+            input: { pattern: SECRET },
+          };
+          yield {
+            type: 'tool_result',
+            id: 't1',
+            text: `hit: ${SECRET}`,
+            truncated: false,
+            totalLines: 1,
+            isError: false,
+          };
+          yield { type: 'result', isError: false };
+        },
+        health: async () => null,
+      },
+      mcpUrl: chatMcpUrl(7420),
+      resolvedApps: () => new Map(),
+      log: () => {},
+    });
+    const th = createThread(w.db, { title: 't' }, t0);
+    appendMessage(
+      w.db,
+      th.id,
+      { role: 'owner', text: 'find it', state: 'queued', sessionHash: 'h' },
+      t0,
+    );
+    const hub: HubEvent[] = [];
+    turns.subscribe(th.id, 0, (e) => hub.push(e));
+    turns.enqueue(th.id);
+    await turns.idle();
+
+    const want = {
+      toolName: 'Grep',
+      input: { pattern: '[REDACTED]' },
+      result: { text: 'hit: [REDACTED]', truncated: false, lines: 1, isError: false },
+    };
+    const stored = listMessages(w.db, th.id).find((m) => m.role === 'tool');
+    expect(stored).toMatchObject(want);
+    const streamed = hub
+      .map((e) => e.event)
+      .filter((e) => e.type === 'message' && e.message.role === 'tool');
+    expect(streamed.at(-1)).toMatchObject({ type: 'message', message: want });
+
+    const got = await w.app.inject({
+      method: 'GET',
+      url: `/api/chat/threads/${th.id}`,
+      headers: w.session,
+    });
+    const messages = (got.json() as { messages: Record<string, unknown>[] }).messages;
+    expect(messages.find((m) => m.role === 'tool')).toMatchObject(want);
+
+    const sse = await w.app.inject({
+      method: 'GET',
+      url: `/api/chat/threads/${th.id}/events`,
+      headers: w.session,
+    });
+    const tool = sseEvents(sse.body).find((e) => e.event === 'tool');
+    expect(tool?.data).toEqual({
+      seq: stored?.seq,
+      text: 'grep',
+      createdAt: stored?.createdAt,
+      ...want,
+    });
+    for (const body of [JSON.stringify(stored), JSON.stringify(hub), got.body, sse.body]) {
+      expect(body).not.toContain(SECRET);
+    }
+  });
+
+  test('an older tool message streams as before, with no tool fields', async () => {
+    const w = world();
+    const th = createThread(w.db, { title: 't' }, t0);
+    const m = appendMessage(w.db, th.id, { role: 'tool', text: 'read X', state: 'done' }, t0);
+    const sse = await w.app.inject({
+      method: 'GET',
+      url: `/api/chat/threads/${th.id}/events`,
+      headers: w.session,
+    });
+    expect(sseEvents(sse.body).find((e) => e.event === 'tool')?.data).toEqual({
+      seq: m.seq,
+      text: 'read X',
+      createdAt: m.createdAt,
+    });
   });
 });

@@ -299,7 +299,16 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
       if (ev.type === 'message') {
         const m = ev.message;
         if (m.role === 'tool') {
-          send('tool', m.seq, { seq: m.seq, text: m.text, createdAt: m.createdAt });
+          // A step's tool, input and result when stored (#502); a later update has the same seq.
+          const { toolName, input, result } = m;
+          send('tool', m.seq, {
+            seq: m.seq,
+            text: m.text,
+            createdAt: m.createdAt,
+            ...(toolName === undefined ? {} : { toolName }),
+            ...(input === undefined ? {} : { input }),
+            ...(result === undefined ? {} : { result }),
+          });
         } else if (m.role === 'owner') send('message', m.seq, publicMessage(m));
         // The same HTML the stored page shows (#490): the browser sets only this as markup.
         else send('message', m.seq, { ...publicMessage(m), html: messageTextHtml(m) });

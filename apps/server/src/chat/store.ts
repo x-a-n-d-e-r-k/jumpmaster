@@ -32,6 +32,22 @@ export interface ChatMessage {
   usage: Record<string, unknown> | null;
   error: string | null;
   createdAt: string;
+  /** A tool step's tool; absent on a step from an older chat image and on other roles. */
+  toolName?: string;
+  /** A tool step's input as stored, redacted; absent when the step has none. */
+  input?: Record<string, unknown>;
+  /** A tool step's result, redacted and capped; absent until one arrives. */
+  result?: ToolStepResult;
+}
+
+/** What a tool step gave back, as stored (#502). */
+export interface ToolStepResult {
+  text: string;
+  /** Whether the chat service or the server cut it. */
+  truncated: boolean;
+  /** Lines in the uncut result. */
+  lines: number;
+  isError: boolean;
 }
 
 const THREAD_COLS = `id, title, focus_kind AS focusKind, focus_zone_id AS focusZoneId,
@@ -39,13 +55,57 @@ const THREAD_COLS = `id, title, focus_kind AS focusKind, focus_zone_id AS focusZ
   updated_at AS updatedAt`;
 
 const MESSAGE_COLS = `id, thread_id AS threadId, seq, role, text, state, session_hash AS sessionHash,
-  usage_json AS usageJson, error, created_at AS createdAt`;
+  usage_json AS usageJson, error, created_at AS createdAt, tool_name AS toolName,
+  input_json AS inputJson, result_text AS resultText, result_truncated AS resultTruncated,
+  result_lines AS resultLines, result_error AS resultError`;
 
-type MessageRow = Omit<ChatMessage, 'usage'> & { usageJson: string | null };
+type MessageRow = Omit<ChatMessage, 'usage' | 'toolName' | 'input' | 'result'> & {
+  usageJson: string | null;
+  toolName: string | null;
+  inputJson: string | null;
+  resultText: string | null;
+  resultTruncated: number | null;
+  resultLines: number | null;
+  resultError: number | null;
+};
 
-const messageOf = ({ usageJson, ...r }: MessageRow): ChatMessage => ({
+/** A stored input's JSON as an object; a value that is not one is kept as its text. */
+function inputOf(json: string): Record<string, unknown> {
+  try {
+    const v: unknown = JSON.parse(json);
+    if (typeof v === 'object' && v !== null && !Array.isArray(v))
+      return v as Record<string, unknown>;
+  } catch {
+    // Not JSON: kept as text below.
+  }
+  return { _unparsed: json };
+}
+
+const messageOf = ({
+  usageJson,
+  toolName,
+  inputJson,
+  resultText,
+  resultTruncated,
+  resultLines,
+  resultError,
+  ...r
+}: MessageRow): ChatMessage => ({
   ...r,
   usage: usageJson === null ? null : (JSON.parse(usageJson) as Record<string, unknown>),
+  // Only the fields a row has, so a message stored as before reads as before.
+  ...(toolName === null ? {} : { toolName }),
+  ...(inputJson === null ? {} : { input: inputOf(inputJson) }),
+  ...(resultText === null
+    ? {}
+    : {
+        result: {
+          text: resultText,
+          truncated: resultTruncated === 1,
+          lines: resultLines ?? 0,
+          isError: resultError === 1,
+        },
+      }),
 });
 
 export function createThread(
@@ -97,6 +157,8 @@ export function appendMessage(
     state: ChatMessageState;
     sessionHash?: string;
     usage?: Record<string, unknown>;
+    /** A tool step's tool, `tool_use` id and input JSON, each already redacted. */
+    tool?: { name: string; useId?: string; inputJson?: string };
   },
   now: Date,
 ): ChatMessage {
@@ -104,9 +166,10 @@ export function appendMessage(
     const row = db
       .prepare(
         `INSERT INTO chat_messages
-           (thread_id, seq, role, text, state, session_hash, usage_json, created_at)
+           (thread_id, seq, role, text, state, session_hash, usage_json, created_at, tool_name,
+            tool_use_id, input_json)
          VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM chat_messages WHERE thread_id = ?),
-           ?, ?, ?, ?, ?, ?)
+           ?, ?, ?, ?, ?, ?, ?, ?, ?)
          RETURNING ${MESSAGE_COLS}`,
       )
       .get(
@@ -118,6 +181,9 @@ export function appendMessage(
         m.sessionHash ?? null,
         m.usage === undefined ? null : JSON.stringify(m.usage),
         now.toISOString(),
+        m.tool?.name ?? null,
+        m.tool?.useId ?? null,
+        m.tool?.inputJson ?? null,
       ) as MessageRow;
     touch(db, threadId, now);
     return messageOf(row);
@@ -145,6 +211,40 @@ export function setMessage(
     const row = db
       .prepare(`UPDATE chat_messages SET ${sets.join(', ')} WHERE id = ? RETURNING thread_id AS t`)
       .get(...args, id) as { t: number } | undefined;
+    if (row) touch(db, row.t, now);
+  })();
+}
+
+/**
+ * The latest tool message of the thread after `afterSeq` (the turn's owner message) with this
+ * `tool_use` id: a step of the running turn, never one of an earlier turn.
+ */
+export function turnToolMessage(
+  db: Db,
+  threadId: number,
+  afterSeq: number,
+  toolUseId: string,
+): ChatMessage | undefined {
+  const row = db
+    .prepare(
+      `SELECT ${MESSAGE_COLS} FROM chat_messages WHERE thread_id = ? AND seq > ? AND role = 'tool'
+         AND tool_use_id = ? ORDER BY seq DESC LIMIT 1`,
+    )
+    .get(threadId, afterSeq, toolUseId) as MessageRow | undefined;
+  return row ? messageOf(row) : undefined;
+}
+
+/** Stores a tool step's result, already redacted and capped, and marks its thread updated. */
+export function setToolResult(db: Db, id: number, r: ToolStepResult, now: Date): void {
+  db.transaction(() => {
+    const row = db
+      .prepare(
+        `UPDATE chat_messages SET result_text = ?, result_truncated = ?, result_lines = ?,
+           result_error = ? WHERE id = ? RETURNING thread_id AS t`,
+      )
+      .get(r.text, r.truncated ? 1 : 0, r.lines, r.isError ? 1 : 0, id) as
+      | { t: number }
+      | undefined;
     if (row) touch(db, row.t, now);
   })();
 }
