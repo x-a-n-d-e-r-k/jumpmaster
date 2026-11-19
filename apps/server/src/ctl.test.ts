@@ -9,7 +9,10 @@ import { ConfigStore } from './config/store.js';
 import { ctlRequest, runCtl } from './ctl.js';
 import { openDb } from './db/open.js';
 import { appendEvents, listEvents } from './db/repo.js';
+import { zoneGuidance } from './github/guidance.js';
 import { plain } from './terminal.js';
+import { APP_ENTRIES, APP_SECRETS, guidanceAppsOf } from './test/app-guidance-fixture.js';
+import { makeZone } from './test/fixtures.js';
 import { seedQueuedDrop, t0, tmpDbFile } from './test/helpers.js';
 
 const TOKEN = 'o'.repeat(32);
@@ -989,6 +992,47 @@ describe('ctl github (Task 7)', () => {
     const r = await run(['github']);
     expect(r.code).toBe(2);
     expect(r.err.join('\n')).toContain('ctl github <zone> recommend');
+    expect(r.err.join('\n')).toContain('| merge-ruleset |');
+  });
+
+  test('ctl github <zone> merge-ruleset prints the merge ruleset alone; a zone without one says so and fails', async () => {
+    const zone = makeZone({ id: 'demo', repo: 'octo-org/demo', identity: 'two-bot' });
+    const detection = {
+      defaultBranch: 'main',
+      ciJobs: [{ workflow: 'ci.yml', job: 'test' }],
+      ownerType: 'Organization' as const,
+      visibility: 'public' as const,
+    };
+    const g = zoneGuidance(
+      zone,
+      detection,
+      { codeowners: ['alice'] },
+      {},
+      guidanceAppsOf(APP_ENTRIES),
+    );
+    if (!g.mergeRuleset) throw new Error('no merge ruleset');
+    expect(ctlRequest(['github', 'demo', 'merge-ruleset'])).toEqual({
+      path: '/api/control/zones/demo/github',
+      method: 'GET',
+    });
+    expect(ctlRequest(['github', 'demo', 'merge-ruleset', 'extra'])).toBeNull();
+    const merge = await run(['github', 'demo', 'merge-ruleset'], '', fakeFetch(200, g));
+    expect(merge.code).toBe(0);
+    expect(merge.out.join('\n')).toBe(g.mergeRuleset.text.trimEnd());
+    expect(merge.calls[0]?.url).toBe('http://127.0.0.1:7420/api/control/zones/demo/github');
+    // The main ruleset is still only the main one.
+    const main = await run(['github', 'demo', 'ruleset'], '', fakeFetch(200, g));
+    expect(main.out.join('\n')).toBe(g.ruleset.text.trimEnd());
+    expect(main.out.join('\n')).not.toContain('jumpmaster-merge');
+    // No key, secret or token in any output.
+    const all = [...merge.out, ...merge.err, ...main.out, ...main.err].join('\n');
+    for (const s of Object.values(APP_SECRETS)) expect(all).not.toContain(s);
+
+    const none = await run(['github', 'demo', 'merge-ruleset'], '', fakeFetch(200, GUIDANCE));
+    expect(none.code).not.toBe(0);
+    expect(none.out).toEqual([]);
+    expect(none.err).toHaveLength(1);
+    expect(none.err[0]).toMatch(/demo is not a two-app zone/);
   });
 });
 
