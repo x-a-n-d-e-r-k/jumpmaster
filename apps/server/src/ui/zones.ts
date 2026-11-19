@@ -162,6 +162,24 @@ const checkbox = (fields: Record<string, string | string[]>, name: string) =>
   `<input type="hidden" name="bool" value="${name}"><input type="checkbox" name="${name}" value="1"${fields[name] === '1' ? ' checked' : ''}>`;
 
 /** A section: one form, one Save, or a disabled fieldset in file mode. */
+/** STARTER_WARNING without its own "starter mode: " lead, which the page prints in bold. */
+const STARTER_WARNING_BODY = STARTER_WARNING.replace(/^starter mode:\s*/i, '');
+
+/**
+ * Shows the Merging section's starter-mode warning only while the Accounts select reads
+ * `starter` (#494), in the page, with no round trip.
+ */
+const IDENTITY_SCRIPT = `<script id="identity-script">
+(() => {
+  const select = document.querySelector('#identity select[name=identity]');
+  const warning = document.getElementById('starter-warning');
+  if (!select || !warning) return;
+  const sync = () => { warning.hidden = select.value !== 'starter'; };
+  select.addEventListener('change', sync);
+  sync();
+})();
+</script>`;
+
 const sectionForm = (id: string, title: string, body: string, readOnly: boolean) =>
   `<h3>${title}</h3><form id="${id}" data-section="${id}"><fieldset${readOnly ? ' disabled' : ''}>${body}${readOnly ? '' : `<p><button>Save</button> <span class="out" role="status"></span></p>`}</fieldset></form>`;
 
@@ -318,7 +336,7 @@ ${field('egress.allow', 'Allow list (one host or *.name per line)', textarea(f, 
   const merging = sectionForm(
     'merging',
     'Merging',
-    `${hidden}<div id="identity">${field('identity', 'Accounts', `<select name="identity">${identityOptions}</select>`)}<p class="warn"><strong>Starter mode:</strong> ${escapeHtml(STARTER_WARNING)}</p></div>
+    `${hidden}<div id="identity">${field('identity', 'Accounts', `<select name="identity">${identityOptions}</select>`)}<p class="warn" id="starter-warning"${f.identity === 'starter' ? '' : ' hidden'}><strong>Starter mode:</strong> ${escapeHtml(STARTER_WARNING_BODY)}</p></div>${readOnly ? '' : IDENTITY_SCRIPT}
 ${field('ciRequired', 'CI must pass', checkbox(f, 'ciRequired'))}
 ${field('ciDeadlineMinutes', 'CI deadline (minutes)', input(f, 'ciDeadlineMinutes', 6))}
 ${field('requireBranchProtection', 'Branch rules required', checkbox(f, 'requireBranchProtection'))}
