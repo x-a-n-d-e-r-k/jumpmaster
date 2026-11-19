@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { type ControlDeps, registerControlRoutes, stderrSetupMode } from './api/control.js';
 import { runningSince } from './api/secrets.js';
+import { stickUpgradeView, upgradeTargetOf } from './api/stick-upgrade.js';
 import { registerStickRoutes, type StickRouteDeps } from './api/sticks.js';
 import { getArtifact, listArtifacts, readArtifact } from './artifacts.js';
 import { recordAudit } from './auth/audit.js';
@@ -433,6 +434,7 @@ export function createApp(
   app.get('/sticks', async (req, reply) => {
     const { db } = deps;
     const config = cfg(req);
+    const target = upgradeTargetOf(deps.images, version);
     const html = renderSticks({
       sticks: listSticks(db).map((s): StickRow => {
         const fetching = fetches.get(s.id, deps.now());
@@ -447,6 +449,7 @@ export function createApp(
           ...(starting ? { starting } : {}),
           dockerVersion: s.dockerVersion,
           freeBytes: s.freeBytes,
+          upgrade: stickUpgradeView(db, s, target),
         };
       }),
       pending: listPendingInvites(db, deps.now()),

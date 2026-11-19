@@ -1,11 +1,13 @@
 // The sticks page (issue #136): every enrolled stick, what it can run, and how many troopers it
 // runs at once, set here and applied on its next lease answer with no restart.
 import type { ImageFetch, StickStarting } from '@jumpmaster/protocol';
+
 import { STICK_LIVE_MS } from '../doctor/checks.js';
 import type { MirrorStatus } from '../images/mirror.js';
 import { MAX_INVITE_SLOTS } from '../install/invite.js';
 import { TS_AUTHKEY_PLACEHOLDER } from '../install/stick-sh.js';
 import { PUBLIC_URL_NEEDED, PUBLIC_URL_PAGE } from '../reach.js';
+import { type StickUpgradeView, upgradeWords } from '../stick-upgrade-words.js';
 import { escapeHtml, page, type StickLine } from './pages.js';
 import { type ZoneRef, zoneNamer } from './zone-name.js';
 
@@ -30,6 +32,8 @@ export interface StickRow extends StickLine {
   dockerVersion?: string | null;
   /** The free space on its drop volumes it last measured (issue #138). */
   freeBytes?: number | null;
+  /** Its upgrade against the server's release (issue #428); null or absent: no target. */
+  upgrade?: StickUpgradeView;
 }
 
 /** An invite whose stick has not checked in yet (issue #138). */
@@ -91,14 +95,35 @@ export function healthLine(st: StickRow): string {
 }
 
 /**
+ * Its upgrade in words beside its version (issue #428), and the button where Command can ask for
+ * one: Upgrade when an update is available, Retry after a failed or refused attempt.
+ */
+export function upgradeLine(st: Pick<StickRow, 'id' | 'name' | 'upgrade'>): string {
+  const u = st.upgrade;
+  if (!u) return '';
+  const label =
+    u.status === 'available'
+      ? `Upgrade to v${u.target}`
+      : u.status === 'failed' || u.status === 'refused'
+        ? 'Retry'
+        : null;
+  const url = `/api/control/sticks/${encodeURIComponent(st.id)}/upgrade`;
+  const button =
+    label === null
+      ? ''
+      : ` <button data-upgrade="${escapeHtml(url)}">${escapeHtml(label)}</button> <output aria-live="polite"></output>`;
+  return `<br><span class="muted upgrade">${escapeHtml(upgradeWords(u))}</span>${button}`;
+}
+
+/**
  * Every write on this page: the passphrase first when it was asked for (sudo), then the request;
- * a refusal that needs sudo shows the passphrase field. The slots, Cancel and Remove controls
+ * a refusal that needs sudo shows the passphrase field. The slots, Cancel, Remove, Upgrade and Retry controls
  * are found by delegation, so rows the poll replaces keep working.
  */
 const STICKS_SCRIPT = `<script>
 async function jmSticks(path,body){const p=document.getElementById('sticks-sudo');if(p&&p.value){const s=await jmFetch('/api/control/sudo',{passphrase:p.value});p.value='';if(!s.ok){p.closest('p').hidden=false;p.focus();return {ok:false,error:'The passphrase was not accepted.'};}}const r=await jmFetch(path,body);if(r.ok)return {ok:true,r};const j=await r.json().catch(()=>({}));if(r.status===403&&j.sudo&&p){p.closest('p').hidden=false;p.focus();return {ok:false,error:'Enter your passphrase, then press again.'};}return {ok:false,error:j.error??String(r.status),settings:j.settings};}
 document.addEventListener('submit',async(e)=>{const f=e.target.closest('form[data-slots]');if(!f)return;e.preventDefault();const out=f.querySelector('output');const b=f.querySelector('button');b.disabled=true;out.textContent='';try{const r=await jmFetch(f.dataset.slots,{slots:Number(f.querySelector('input').value)});const j=await r.json().catch(()=>({}));out.textContent=r.ok?'Saved: '+j.slots+' at once, from its next lease.':'Refused: '+(j.error??r.status);}catch(err){out.textContent='Refused: '+err;}finally{b.disabled=false;}});
-document.addEventListener('click',async(e)=>{const b=e.target.closest('button[data-cancel],button[data-remove]');if(!b)return;if(b.dataset.remove&&!confirm(b.dataset.ask))return;const out=b.parentElement.querySelector('output');b.disabled=true;const a=await jmSticks(b.dataset.cancel||b.dataset.remove,{});b.disabled=false;if(a.ok)location.reload();else if(out)out.textContent='Refused: '+a.error;});
+document.addEventListener('click',async(e)=>{const b=e.target.closest('button[data-cancel],button[data-remove],button[data-upgrade]');if(!b)return;if(b.dataset.remove&&!confirm(b.dataset.ask))return;const out=b.parentElement.querySelector('output');b.disabled=true;const a=await jmSticks(b.dataset.cancel||b.dataset.remove||b.dataset.upgrade,{});b.disabled=false;if(a.ok)location.reload();else if(out)out.textContent='Refused: '+a.error;});
 const add=document.getElementById('add-stick');if(add)add.addEventListener('submit',async(e)=>{e.preventDefault();const out=document.getElementById('add-out');out.textContent='';const n=add.querySelector('[name=slots]').value.trim();const a=await jmSticks('/sticks/add',{name:add.querySelector('[name=name]').value.trim(),slots:n===''?'auto':Number(n),kind:(add.querySelector('[name=kind]:checked')||{value:'line'}).value});if(a.ok){const html=await a.r.text();document.open();document.write(html);document.close();return;}out.textContent='Refused: '+a.error;if(a.settings){const l=document.createElement('a');l.href=a.settings;l.textContent=' Settings';out.append(l);}});
 function jmPoll(){if(!document.querySelector('#sticks-live [data-poll]'))return;setTimeout(async()=>{try{const r=await fetch(location.pathname,{headers:{accept:'text/html'}});if(r.ok){const d=new DOMParser().parseFromString(await r.text(),'text/html');const next=d.getElementById('sticks-live');const cur=document.getElementById('sticks-live');if(next&&cur)cur.replaceWith(next);}}catch{}jmPoll();},3000);}
 jmPoll();
@@ -159,7 +184,9 @@ export function renderSticks(s: {
       const removeUrl = `/api/control/sticks/${encodeURIComponent(st.id)}/remove`;
       const ask = `Remove the stick ${st.name}? Its token is revoked at once; drops it leased go back to the queue. Run the installer with --uninstall on that machine to remove its container. This stick keeps any credentials it was already sent. Rotate the Claude and GitHub tokens if you don't trust it. A stick that enrolled with the join token can enroll again until that token is changed.`;
       const remove = `<button class="danger" data-remove="${escapeHtml(removeUrl)}" data-ask="${escapeHtml(ask)}">Remove</button> <output aria-live="polite"></output>`;
-      return `<tr${stage.live ? '' : ' data-poll'} data-stick="${escapeHtml(st.id)}"><td>${escapeHtml(st.name)}</td><td>${status}</td><td>${escapeHtml(st.version ?? '-')}</td><td>${escapeHtml(st.capabilities.join(', ') || '-')}</td><td>${runs}</td><td>${troopers}</td><td>${remove}</td></tr>`;
+      // An upgrading stick is watched until it settles.
+      const poll = !stage.live || st.upgrade?.status === 'upgrading';
+      return `<tr${poll ? ' data-poll' : ''} data-stick="${escapeHtml(st.id)}"><td>${escapeHtml(st.name)}</td><td>${status}</td><td>${escapeHtml(st.version ?? '-')}${upgradeLine(st)}</td><td>${escapeHtml(st.capabilities.join(', ') || '-')}</td><td>${runs}</td><td>${troopers}</td><td>${remove}</td></tr>`;
     })
     .join('');
   const table =
@@ -175,7 +202,7 @@ export function renderSticks(s: {
 
 /** The passphrase a session re-enters for sudo: hidden until a write asks for it. */
 const SUDO_FIELD =
-  '<p class="sudo" hidden><label>Your passphrase (adding, cancelling or removing a stick asks for it again) <input type="password" id="sticks-sudo" autocomplete="current-password"></label></p>';
+  '<p class="sudo" hidden><label>Your passphrase (adding, cancelling, removing or upgrading a stick asks for it again) <input type="password" id="sticks-sudo" autocomplete="current-password"></label></p>';
 
 /** Add a stick (issue #138): a name and a trooper count; with no public address, the way to set it. */
 function addForm(publicUrl: string | undefined): string {

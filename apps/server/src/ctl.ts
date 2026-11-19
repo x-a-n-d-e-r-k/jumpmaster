@@ -18,6 +18,7 @@ import { BOOT_KEYS, EditableSchema, ZONE_ID, ZONE_KEYS } from './config.js';
 import type { DoctorCheck } from './doctor/checks.js';
 import { EXPIRATION_NOTE, REPOSITORY_ACCESS_NOTE, RESOURCE_OWNER_NOTE } from './github/guidance.js';
 import { readSecret, readSecretFile } from './secrets.js';
+import { type StickUpgradeView, upgradeWords } from './stick-upgrade-words.js';
 import { jsonLine, plain } from './terminal.js';
 
 const MODES: Record<string, string> = { pause: 'paused', resume: 'active', observe: 'observe' };
@@ -416,12 +417,21 @@ function publicUrlRequest(args: string[]): Raw | null {
 
 /**
  * `sticks [--json]`, `sticks slots <name-or-id> <n>`: each stick's trooper count; `sticks remove
- * <name-or-id>` and `sticks cancel <invite>` (issue #138).
+ * <name-or-id>` and `sticks cancel <invite>` (issue #138); `sticks upgrade <name-or-id>` and
+ * `sticks upgrade --all` (issue #428).
  */
 function sticksRequest(args: string[]): Raw | null {
   const [, what, stick, n, ...rest] = args;
   if (what === undefined || (what === '--json' && args.length === 2))
     return { path: '/api/control/sticks', method: 'GET' };
+  if (what === 'upgrade' && stick && n === undefined)
+    return {
+      path:
+        stick === '--all'
+          ? '/api/control/sticks/upgrade-all'
+          : `/api/control/sticks/${encodeURIComponent(stick)}/upgrade`,
+      body: {},
+    };
   if ((what === 'remove' || what === 'cancel') && stick && n === undefined) {
     const path =
       what === 'remove'
@@ -445,6 +455,9 @@ type StickView = {
   maxSlots: number;
   running: number;
   lastSeenAt: string | null;
+  /** Absent from a server older than issue #428. */
+  version?: string | null;
+  upgrade?: StickUpgradeView;
 };
 
 /** `ctl sticks` and `ctl sticks slots` as lines a person reads. */
@@ -458,6 +471,19 @@ function sticksLines(args: string[], body: Record<string, unknown>): string[] {
     const b = body as { id: string; name: string };
     return [`invite for ${b.name} (${b.id}) cancelled: its code no longer works`];
   }
+  if (args[1] === 'upgrade' && args[2] === '--all') {
+    const b = body as { requested: string[]; skipped: { name: string; reason: string }[] };
+    return [
+      `requested: ${b.requested.length === 0 ? 'none' : b.requested.join(', ')}`,
+      ...b.skipped.map((k) => `skipped ${k.name}: ${k.reason}`),
+    ];
+  }
+  if (args[1] === 'upgrade') {
+    const b = body as { id: string; name: string; target: string };
+    return [
+      `stick ${b.name} (${b.id}): upgrade to v${b.target} requested; it upgrades once its running drops end`,
+    ];
+  }
   if (args[1] === 'slots') {
     const b = body as { id: string; slots: number; maxSlots: number };
     return [`stick ${b.id}: ${troopers(b.slots)} at once (allows up to ${b.maxSlots})`];
@@ -466,7 +492,9 @@ function sticksLines(args: string[], body: Record<string, unknown>): string[] {
   if (sticks.length === 0) return ['no stick has enrolled'];
   return sticks.map(
     (s) =>
-      `${s.name} (${s.id}): ${troopers(s.slots)} (desired ${s.desiredSlots ?? '-'}, max ${s.maxSlots}), ${s.running} running, last seen ${s.lastSeenAt ?? 'never'}`,
+      `${s.name} (${s.id}): ${troopers(s.slots)} (desired ${s.desiredSlots ?? '-'}, max ${s.maxSlots}), ${s.running} running, last seen ${s.lastSeenAt ?? 'never'}` +
+      (s.version ? `, v${s.version}` : '') +
+      (s.upgrade ? `, ${upgradeWords(s.upgrade)}` : ''),
   );
 }
 
@@ -1607,6 +1635,19 @@ async function runCtlOn(
     if (args.includes('--json')) out(JSON.stringify(parsed, null, 2));
     else for (const line of briefingsLines(parsed, base)) out(line);
     return 0;
+  }
+  if (args[0] === 'sticks' && args[1] === 'upgrade' && !res.ok) {
+    // A refusal is its reason, on its own line (issue #428).
+    let reason: unknown;
+    try {
+      reason = (JSON.parse(text) as { error?: unknown }).error;
+    } catch {
+      reason = undefined;
+    }
+    if (typeof reason === 'string') {
+      err(args[2] === '--all' ? reason : `stick ${args[2]}: ${reason}`);
+      return 1;
+    }
   }
   if (args[0] === 'sticks' && res.ok) {
     const parsed = JSON.parse(text) as Record<string, unknown>;
