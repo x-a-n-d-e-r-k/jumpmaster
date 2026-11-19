@@ -226,9 +226,15 @@ export type BranchRulesRead =
  */
 export type BranchUpdate = { kind: 'updated' } | { kind: 'conflict' } | { kind: 'head_moved' };
 
+/** Why GitHub says an issue was closed (or reopened). */
+export type IssueStateReason = 'completed' | 'not_planned' | 'duplicate' | 'reopened';
+const STATE_REASONS: readonly string[] = ['completed', 'not_planned', 'duplicate', 'reopened'];
+
 export type IssueFacts = {
   body: string;
   state: 'open' | 'closed';
+  /** GitHub's `state_reason`, when it names one we know: `completed` for a close as completed. */
+  stateReason?: IssueStateReason;
   labels: string[];
   /** Set when the number is a pull request (GitHub's issues API answers for PRs too). */
   pullRequest?: boolean;
@@ -949,6 +955,9 @@ export class GitHubForge implements Forge {
       return {
         body: data.body ?? '',
         state: data.state === 'open' ? 'open' : 'closed',
+        ...(typeof data.state_reason === 'string' && STATE_REASONS.includes(data.state_reason)
+          ? { stateReason: data.state_reason as IssueStateReason }
+          : {}),
         labels: data.labels.map((l) => (typeof l === 'string' ? l : (l.name ?? ''))),
         ...(data.pull_request ? { pullRequest: true } : {}),
         ...(data.user?.login ? { author: data.user.login } : {}),

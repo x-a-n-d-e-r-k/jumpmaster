@@ -13,14 +13,21 @@ import {
   sanitizeCrewText,
   type UpdateIssuePayload,
 } from '../outbox.js';
-import { listTriageRequests, type TriageRequest } from './store.js';
+import { triageFailed } from './results.js';
+import {
+  getTriageRequest,
+  listTriageRequests,
+  setTriageRequest,
+  type TriageRequest,
+  triageBodySha,
+} from './store.js';
 
 /**
  * The trail a triage outcome leaves on the original issue (#185): one comment, and for a final
  * outcome the label swap. The comment is built from the outcome, the child numbers, the briefing
  * subject and the reason only: never from the issue's own text.
  */
-type Trail = { comment: Op; labels?: Op };
+type Trail = { comment: Op; labels?: Op; close?: Op };
 
 /** The comment marker key: one per request, and one more for a `questions` wait before it. */
 export const trailKey = (req: Pick<TriageRequest, 'issueNumber' | 'id'>, questions = false) =>
@@ -102,7 +109,7 @@ function trailOf(
       remove: [zone.triageLabel],
     } satisfies SetLabelsPayload,
   };
-  // Superseded requests and failed ones leave no trail: only these three states do.
+  // Superseded, verifying and failed requests leave no trail: only these states do.
   if (req.outcome === 'questions' && req.state === 'waiting') {
     const subject = briefingSubject(db, req);
     if (subject === null) return null;
@@ -129,6 +136,25 @@ function trailOf(
       labels: swap,
     };
   }
+  if (req.outcome === 'already-done') {
+    const cited = citedNumbers(req);
+    if (cited.length === 0) return null;
+    const reason = sanitizeCrewText(
+      (req.reason ?? '').slice(0, MAX_REASON).replace(/[\s.]+$/, ''),
+      secrets,
+    );
+    const done = cited.map((c) => `#${c}`).join(', ');
+    const close = zone.crew.closeDone;
+    return {
+      comment: comment(
+        close
+          ? `The crew found this already done: ${reason}. Done in: ${done}. Closing it. Reopen the issue if something is missing.`
+          : `The crew found this already done: ${reason}. Done in: ${done}. Close the issue if nothing is missing.`,
+      ),
+      labels: swap,
+      ...(close ? { close: closeDoneOp(zone, req) } : {}),
+    };
+  }
   if (req.outcome === 'not-agent-work') {
     return {
       comment: comment(
@@ -138,6 +164,112 @@ function trailOf(
     };
   }
   return null;
+}
+
+/** The longest reason a trail comment quotes, as the triage schema allows. */
+const MAX_REASON = 500;
+
+/** An `already-done` request's verified pulls then issues, each once, as numbers only. */
+function citedNumbers(req: TriageRequest): number[] {
+  const all = [...(req.evidence?.pulls ?? []), ...(req.evidence?.issues ?? [])];
+  return [...new Set(all.filter((n) => Number.isSafeInteger(n) && n > 0))];
+}
+
+/** The close of an issue found already done: its own key, never a split parent's (#466). */
+function closeDoneOp(zone: DropZoneConfig, req: TriageRequest): Op {
+  return {
+    kind: 'update_issue',
+    opKey: `close:${zone.id}:triage-done:${req.id}`,
+    zoneId: zone.id,
+    itemId: null,
+    payload: {
+      number: req.issueNumber,
+      state: 'closed',
+      stateReason: 'completed',
+    } satisfies UpdateIssuePayload,
+  };
+}
+
+type Verdict = { kind: 'verified' } | { kind: 'superseded' } | { kind: 'refused'; why: string };
+
+/**
+ * Checks an `already-done` request's evidence against the forge (#466): the original issue is
+ * open with the text triaged; every cited pull is merged to the default branch; every cited issue
+ * is another issue (not a pull request) closed as completed. Reads only. The reason it refuses
+ * names numbers only, never forge or agent text.
+ */
+async function verifyEvidence(forges: ForgePair, req: TriageRequest): Promise<Verdict> {
+  const n = req.issueNumber;
+  const refused = (why: string): Verdict => ({ kind: 'refused', why: `evidence refused: ${why}` });
+  const pulls = req.evidence?.pulls ?? [];
+  const issues = req.evidence?.issues ?? [];
+  if (pulls.length + issues.length === 0) return refused('nothing was cited');
+  try {
+    const original = await forges.author.getIssue(n);
+    if (
+      !original ||
+      original.state !== 'open' ||
+      original.pullRequest === true ||
+      triageBodySha(original.body) !== req.bodySha
+    ) {
+      return { kind: 'superseded' };
+    }
+    const defaultBranch = await forges.author.getDefaultBranch();
+    for (const p of pulls) {
+      const pull = await forges.author.getPull(p);
+      if (!pull) return refused(`#${p} not found`);
+      if (pull.merged !== true) return refused(`#${p} is not merged`);
+      if (pull.baseRef !== defaultBranch)
+        return refused(`#${p} was not merged to the default branch`);
+    }
+    for (const i of issues) {
+      if (i === n) return refused(`#${i} is this issue`);
+      const issue = await forges.author.getIssue(i);
+      if (!issue) return refused(`#${i} not found`);
+      if (issue.pullRequest === true) return refused(`#${i} is a pull request, not an issue`);
+      if (issue.state !== 'closed') return refused(`#${i} is not closed`);
+      if (issue.stateReason !== 'completed') return refused(`#${i} was not closed as completed`);
+    }
+  } catch {
+    // D2: a lookup that failed proves nothing.
+    return refused('a cited item could not be read');
+  }
+  return { kind: 'verified' };
+}
+
+/**
+ * Settles each `verifying` request (#466): verified, it is `done` and its trail comments (and
+ * closes, with `crew.closeDone`); the original issue closed or edited meanwhile supersedes it,
+ * writing nothing; any other failure is a failed triage attempt, the request `open` again with
+ * the refusal kept for the retry's input. Writes nothing to the forge. Returns how many it settled.
+ */
+async function verifyRequests(
+  db: Db,
+  forges: ForgePair,
+  zone: DropZoneConfig,
+  now: Date,
+): Promise<number> {
+  let settled = 0;
+  for (const req of listTriageRequests(db, zone.id)) {
+    if (req.state !== 'verifying') continue;
+    const verdict = await verifyEvidence(forges, req);
+    db.transaction(() => {
+      // Re-read: a new body may have superseded it while the forge was read.
+      if (getTriageRequest(db, req.id)?.state !== 'verifying') return;
+      if (verdict.kind === 'verified') {
+        setTriageRequest(db, req.id, { state: 'done', outcome: 'already-done' }, now);
+      } else if (verdict.kind === 'superseded') {
+        // No outcome: a superseded request leaves no trail.
+        setTriageRequest(db, req.id, { state: 'done', outcome: null, reason: 'superseded' }, now);
+      } else {
+        const back = { state: 'open', outcome: null, reason: null, evidence: null } as const;
+        setTriageRequest(db, req.id, { ...back, lastError: verdict.why }, now);
+        triageFailed(db, { zone }, req.id, verdict.why, now);
+      }
+      settled++;
+    })();
+  }
+  return settled;
 }
 
 /** A blocker in another repository as GitHub names it: `owner/name#N`. */
@@ -276,8 +408,9 @@ async function runEach(db: Db, forges: ForgePair, ops: Op[], now: Date): Promise
  * Leaves each triage outcome's trail on its original issue through the outbox, as the author
  * identity: idempotent per request by the comment marker and the op keys (D3). For a split, the
  * parts first inherit the parent's open blockers, and the parent closes once every part is closed
- * (#297). Only in an active zone with the kill switch off. Returns how many ops it ran that were
- * not already done.
+ * (#297). An `already-done` verdict is verified first, reads only, also in observe (#466). Ops
+ * run only in an active zone, and nothing runs with the kill switch on. Returns how many ops it
+ * ran that were not already done.
  */
 export async function flushTriageTrail(
   db: Db,
@@ -286,7 +419,10 @@ export async function flushTriageTrail(
   secrets: string[],
   now: Date,
 ): Promise<number> {
-  if (isKilled(db) || getZoneMode(db, zone.id, zone.mode) !== 'active') return 0;
+  if (isKilled(db)) return 0;
+  // Reads only, so also in observe: the trail it leaves waits for an active zone.
+  await verifyRequests(db, forges, zone, now);
+  if (getZoneMode(db, zone.id, zone.mode) !== 'active') return 0;
   let ran = 0;
   for (const req of listTriageRequests(db, zone.id)) {
     const children =
@@ -302,6 +438,10 @@ export async function flushTriageTrail(
     if (!trail) continue;
     const trailOps = [trail.comment, ...(trail.labels ? [trail.labels] : [])];
     ran += await runEach(db, forges, trailOps, now);
+    // The close waits until its comment and label swap are done (#466).
+    if (trail.close && trailOps.every((op) => getOutbox(db, op.opKey)?.state === 'done')) {
+      ran += await runEach(db, forges, [trail.close], now);
+    }
     if (children && trailOps.every((op) => getOutbox(db, op.opKey)?.state === 'done')) {
       ran += await closeSplitParent(db, forges, zone, req, children, now);
     }

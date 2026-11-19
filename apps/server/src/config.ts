@@ -122,6 +122,7 @@ const CREW_DEFAULTS = {
   arbiter: true,
   auditPerCycle: 1,
   autoRetry: true,
+  closeDone: true,
 };
 
 export type McpConfig = {
@@ -191,6 +192,11 @@ const CrewSchema = z
     auditPerCycle: z.number().int().min(0).default(CREW_DEFAULTS.auditPerCycle),
     /** Lets the crew retry a failed implementation once on its own diagnosis; false briefs. */
     autoRetry: z.boolean().default(CREW_DEFAULTS.autoRetry),
+    /**
+     * Lets crew triage close an issue it finds already done, once the server has verified the
+     * evidence it cites (#466); false leaves the comment and keeps the issue open.
+     */
+    closeDone: z.boolean().default(CREW_DEFAULTS.closeDone),
   })
   .default(CREW_DEFAULTS);
 

@@ -749,8 +749,15 @@ const MAX_ERROR = 500;
 /**
  * A triage attempt that came to nothing: `attempts` goes up and, at `maxTriage`, the request is
  * `failed` and put to Command once. The briefing carries the error only, never the issue's text.
+ * Only an `open` request counts: the trail sets a refused `verifying` one back to `open` first.
  */
-function triageFailed(db: Db, deps: ResultDeps, requestId: number, error: string, now: Date): void {
+export function triageFailed(
+  db: Db,
+  deps: Pick<ResultDeps, 'zone'>,
+  requestId: number,
+  error: string,
+  now: Date,
+): void {
   const req = getTriageRequest(db, requestId);
   if (!req || req.state !== 'open') return;
   const attempts = req.attempts + 1;
@@ -779,7 +786,9 @@ function triageFailed(db: Db, deps: ResultDeps, requestId: number, error: string
 /**
  * A triage drop's outcome on its request. `split` files every child through `applyCrewActions`,
  * all or nothing, under objective `triage:#N`; `questions` raises its briefing and waits on it;
- * `not-agent-work` closes the request with its reason. The original issue is never written.
+ * `not-agent-work` closes the request with its reason; `already-done` waits in `verifying` with
+ * its reason and evidence until the trail has checked every cited item (#466). The original
+ * issue is never written here.
  */
 function applyTriage(
   db: Db,
@@ -847,6 +856,24 @@ function applyTriage(
       return error;
     }
     setTriageRequest(db, req.id, { state: 'waiting', outcome: 'questions', briefingId }, now);
+    return undefined;
+  }
+  if (out.outcome === 'already-done' && out.evidence) {
+    const evidence = {
+      pulls: [...new Set(out.evidence.pulls ?? [])],
+      issues: [...new Set(out.evidence.issues ?? [])],
+    };
+    setTriageRequest(
+      db,
+      req.id,
+      {
+        state: 'verifying',
+        outcome: 'already-done',
+        reason: (out.reason ?? '').slice(0, MAX_ERROR),
+        evidence,
+      },
+      now,
+    );
     return undefined;
   }
   setTriageRequest(

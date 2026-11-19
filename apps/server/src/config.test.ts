@@ -505,6 +505,7 @@ describe('crew config', () => {
       arbiter: true,
       auditPerCycle: 1,
       autoRetry: true,
+      closeDone: true,
     });
     expect(z?.botLogins).toEqual([]);
   });
@@ -1472,6 +1473,7 @@ describe('githubApp (spec §4.2: installation and repository ids, not secret)', 
         arbiter: true,
         auditPerCycle: 1,
         autoRetry: true,
+        closeDone: true,
       },
       botLogins: [],
       authorLoginAliases: [],

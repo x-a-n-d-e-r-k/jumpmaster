@@ -675,6 +675,12 @@ const WORDS: Words[] = [
     "When an implementation fails and the crew's diagnosis says another try with a specific fix would work, the crew retries it once without asking you. Turned off, every such case is put to you, as before.",
     'bool',
   ),
+  z_(
+    'crew.closeDone',
+    'Let crew triage close work already done',
+    'Let crew triage close an issue it finds already done, after the server checks that the pull requests it cites merged to the default branch, or that the issues it cites were closed as completed.',
+    'bool',
+  ),
 ];
 
 /** Every setting, in plain words, with its group. */

@@ -71,6 +71,7 @@ export function makeZone(o: Partial<DropZoneConfig> = {}): DropZoneConfig {
       arbiter: true,
       auditPerCycle: 1,
       autoRetry: true,
+      closeDone: true,
     },
     botLogins: [],
     authorLoginAliases: [],

@@ -459,4 +459,14 @@ describe('triage input (#184)', () => {
     expect(input).toContain('Chosen: Drop the gauge');
     expect(input).not.toContain('OTHER-NOTE');
   });
+
+  test('the last refusal is a trusted section, shown only when there is one (#466)', () => {
+    const req = record('b');
+    expect(triageInput(w.db, w.zone, req, DROP)).not.toContain('Last attempt refused');
+    setTriageRequest(w.db, req, { lastError: 'evidence refused: #120 is not merged' }, t0);
+    const input = triageInput(w.db, w.zone, req, DROP);
+    const trusted = input.slice(0, input.indexOf('(data)'));
+    expect(trusted).toContain('## Last attempt refused (trusted instructions)');
+    expect(trusted).toContain('evidence refused: #120 is not merged');
+  });
 });

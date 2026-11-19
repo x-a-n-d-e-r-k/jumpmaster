@@ -222,6 +222,12 @@ export const GUARDED_PATHS: GuardedPath[] = [
     (ctx) =>
       `The crew in ${zoneOf(ctx)} will retry a failed implementation once on its own diagnosis, without asking you`,
   ),
+  // A triage close on verified evidence replaces the owner's own close; turning it off is free.
+  becomes(
+    'dropZones[].crew.closeDone',
+    true,
+    (ctx) => `Crew triage in ${zoneOf(ctx)} will be able to close an issue it finds already done`,
+  ),
   {
     path: 'dropZones[].crew.goalPath',
     kind: 'scalar',

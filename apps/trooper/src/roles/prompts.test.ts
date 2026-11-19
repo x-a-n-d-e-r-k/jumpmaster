@@ -56,3 +56,17 @@ describe('proposing a goal change (#364)', () => {
     expect(text).not.toMatch(/Raise a briefing to propose a goal change/);
   });
 });
+
+describe('already done (#466)', () => {
+  test('triage.md describes already-done: on the default branch, cited and checked', () => {
+    const text = prompt('triage.md');
+    expect(text).toContain(
+      'Return `already-done` only when the work the issue asks for is already on the default branch',
+    );
+    expect(text).toMatch(
+      /merged pull requests \(`pulls`\) or the issues closed as completed \(`issues`\)/,
+    );
+    expect(text).toMatch(/each one you checked in the repository/);
+    expect(text).toContain('Last attempt refused');
+  });
+});

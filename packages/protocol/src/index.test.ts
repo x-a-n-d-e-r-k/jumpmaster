@@ -409,6 +409,55 @@ describe('crew roles', () => {
       expect(ok({ ...questions, briefing: { ...briefing, options: ['one'] } })).toBe(false);
       expect(ok({ ...notAgent, reason: 'x'.repeat(501) })).toBe(false);
     });
+
+    describe('already-done', () => {
+      const done = {
+        summary: 's',
+        outcome: 'already-done',
+        reason: 'shipped',
+        evidence: { pulls: [120], issues: [119] },
+      };
+
+      test('accepts evidence with a reason', () => {
+        expect(ok(done)).toBe(true);
+        expect(ok({ ...done, evidence: { issues: [119] } })).toBe(true);
+        expect(ok({ ...done, evidence: { pulls: [1] } })).toBe(true);
+        expect(parseCrewOutput('triage', done)).toEqual({ ok: true, value: done });
+      });
+
+      test('refuses it without evidence, without a reason, or with children or a briefing', () => {
+        for (const bad of [
+          { ...done, evidence: undefined },
+          { ...done, evidence: {} },
+          { ...done, evidence: { pulls: [], issues: [] } },
+          { ...done, reason: undefined },
+          { ...done, children: [child] },
+          { ...done, briefing },
+          { ...done, evidence: { pulls: [0] } },
+          { ...done, evidence: { pulls: [-3] } },
+          { ...done, evidence: { pulls: [1.5] } },
+          { ...done, evidence: { pulls: [1], extra: [2] } },
+        ]) {
+          expect(ok(bad), JSON.stringify(bad)).toBe(false);
+        }
+      });
+
+      test('refuses evidence on every other outcome', () => {
+        const evidence = { pulls: [1] };
+        expect(ok({ ...split, evidence })).toBe(false);
+        expect(ok({ ...questions, evidence })).toBe(false);
+        expect(ok({ ...notAgent, evidence })).toBe(false);
+      });
+
+      test('refuses more than 10 entries in all', () => {
+        const ten = { pulls: [1, 2, 3, 4, 5], issues: [6, 7, 8, 9, 10] };
+        expect(ok({ ...done, evidence: ten })).toBe(true);
+        expect(ok({ ...done, evidence: { ...ten, issues: [...ten.issues, 11] } })).toBe(false);
+        expect(
+          ok({ ...done, evidence: { pulls: Array.from({ length: 11 }, (_, n) => n + 1) } }),
+        ).toBe(false);
+      });
+    });
   });
 
   describe('arbitrate', () => {
