@@ -696,3 +696,40 @@ describe('pending guarded changes on the floor (#507)', () => {
     expect(html).not.toContain('secretOnlyInPatch');
   });
 });
+
+test('a credits stop briefing is listed whatever its zone, configured or not (#541)', async () => {
+  const h = await twoZones();
+  const stop = (zoneId: string) => ({
+    ...brief(zoneId, 'credits:stop:d1'),
+    kind: 'credits_required' as const,
+  });
+  raiseBriefing(h.db, stop('old'), h.now());
+  raiseBriefing(h.db, stop(''), h.now());
+  raiseBriefing(h.db, brief('old', 'crew:o1'), h.now());
+  const f = floorBriefings(h.db, [
+    { id: 'main', repo: 'octo/demo', mode: 'active' },
+    { id: 'shadow', repo: 'octo/shadow', mode: 'active' },
+  ]);
+  expect(f.listed.map((b) => [b.zoneId, b.subject])).toEqual([
+    ['main', 'crew:m1'],
+    ['shadow', 'crew:s1'],
+    ['shadow', 'crew:s2'],
+    ['old', 'credits:stop:d1'],
+    ['', 'credits:stop:d1'],
+  ]);
+});
+
+test('a paused zone that is still configured holds its credits stop briefing (#541)', async () => {
+  const h = await twoZones();
+  raiseBriefing(
+    h.db,
+    { ...brief('shadow', 'credits:stop:d1'), kind: 'credits_required' as const },
+    h.now(),
+  );
+  const f = floorBriefings(h.db, [
+    { id: 'main', repo: 'octo/demo', mode: 'active' },
+    { id: 'shadow', repo: 'octo/shadow', mode: 'paused' },
+  ]);
+  expect(f.listed.map((b) => b.subject)).toEqual(['crew:m1']);
+  expect(f.held).toMatchObject([{ zoneId: 'shadow', count: 3 }]);
+});

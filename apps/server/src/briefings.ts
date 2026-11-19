@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { DropResultSchema, redact } from '@jumpmaster/protocol';
 import type { DropZoneConfig } from './config.js';
-import { applyCreditsEffect } from './credits.js';
+import { applyCreditsEffect, CREDITS_STOP } from './credits.js';
 import { crewBodySha, liveCrewBody } from './crew/flush.js';
 import {
   type CrewIssue,
@@ -318,25 +318,41 @@ export function withdrawBriefing(db: Db, zoneId: string, subject: string, now: D
 }
 
 /**
+ * Whether a briefing is the credits stop: it holds all dispatch, not its zone, which is only the
+ * zone of the drop that tripped it (or `''`). `syncCreditsBriefing` alone withdraws it, so a zone's
+ * removal leaves it open and the floor lists it whatever its zone (#541).
+ */
+export const isCreditsStop = (b: Pick<Briefing, 'subject'>): boolean =>
+  b.subject.startsWith(CREDITS_STOP);
+
+/** SQL: the briefing is not the credits stop (`isCreditsStop`); binds `@stop`. */
+const NOT_CREDITS_STOP = `substr(subject, 1, length(@stop)) <> @stop`;
+
+/**
  * Withdraws every open briefing of a zone (issue #178): the zone was removed, so nothing will
- * rule them. Returns how many were withdrawn.
+ * rule them. The credits stop stays open (#541). Returns how many were withdrawn.
  */
 export function withdrawZoneBriefings(db: Db, zoneId: string, now: Date): number {
   return db
     .prepare(
-      `UPDATE briefings SET state = 'withdrawn', updated_at = ? WHERE zone_id = ? AND state = 'open'`,
+      `UPDATE briefings SET state = 'withdrawn', updated_at = @now
+         WHERE zone_id = @zoneId AND state = 'open' AND ${NOT_CREDITS_STOP}`,
     )
-    .run(now.toISOString(), zoneId).changes;
+    .run({ now: now.toISOString(), zoneId, stop: CREDITS_STOP }).changes;
 }
 
-/** Withdraws every open briefing whose zone is not among `zoneIds`; returns how many. */
+/**
+ * Withdraws every open briefing whose zone is not among `zoneIds`, except the credits stop
+ * (#541); returns how many.
+ */
 export function withdrawBriefingsOutside(db: Db, zoneIds: readonly string[], now: Date): number {
   return db
     .prepare(
-      `UPDATE briefings SET state = 'withdrawn', updated_at = ?
-         WHERE state = 'open' AND zone_id NOT IN (SELECT value FROM json_each(?))`,
+      `UPDATE briefings SET state = 'withdrawn', updated_at = @now
+         WHERE state = 'open' AND zone_id NOT IN (SELECT value FROM json_each(@zoneIds))
+           AND ${NOT_CREDITS_STOP}`,
     )
-    .run(now.toISOString(), JSON.stringify(zoneIds)).changes;
+    .run({ now: now.toISOString(), zoneIds: JSON.stringify(zoneIds), stop: CREDITS_STOP }).changes;
 }
 
 export function listBriefings(
@@ -372,7 +388,8 @@ export const isNotice = (b: Pick<Briefing, 'kind'>): boolean => NOTICE_KINDS.has
  * The open briefings the floor lists as needing Command, the notices that go ahead unless Command
  * stops them, and the zones (paused or observing) whose briefings it holds back (every kind). Only
  * the floor's view: the briefings are unchanged, and resuming the zone lists them again. A
- * briefing of a zone not among `zones` (removed from the config) is not counted at all (#178).
+ * briefing of a zone not among `zones` (removed from the config) is not counted at all (#178),
+ * except the credits stop, which holds all dispatch whatever its zone (#541).
  */
 export function floorBriefings(
   db: Db,
@@ -387,7 +404,7 @@ export function floorBriefings(
   const listed: Briefing[] = [];
   const notices: Briefing[] = [];
   for (const b of open) {
-    if (!configured.has(b.zoneId)) continue;
+    if (!configured.has(b.zoneId) && !isCreditsStop(b)) continue;
     const h = byZone.get(b.zoneId);
     if (h) h.count++;
     else if (isNotice(b)) notices.push(b);
