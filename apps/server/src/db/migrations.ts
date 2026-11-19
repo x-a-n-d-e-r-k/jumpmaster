@@ -1481,6 +1481,24 @@ const V50_SQL = `
 ALTER TABLE gate_allowances ADD COLUMN carried_from_head TEXT;
 `;
 
+/**
+ * v51 (issue #427): the upgrade the server offers each stick, one row per stick, a new request
+ * replacing it. `drained_since` is when the pending stick was first seen with no live drop.
+ */
+const V51_SQL = `
+CREATE TABLE stick_upgrades (
+  stick_id       TEXT PRIMARY KEY REFERENCES sticks(id),
+  target_version TEXT NOT NULL,
+  image          TEXT NOT NULL,
+  requested_by   TEXT NOT NULL CHECK (requested_by IN ('auto', 'command')),
+  state          TEXT NOT NULL CHECK (state IN ('pending', 'ok', 'failed', 'refused')),
+  reason         TEXT,
+  requested_at   TEXT NOT NULL,
+  drained_since  TEXT,
+  updated_at     TEXT NOT NULL
+);
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1532,6 +1550,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 48, sql: V48_SQL, foreignKeysOff: true },
   { version: 49, sql: V49_SQL },
   { version: 50, sql: V50_SQL },
+  { version: 51, sql: V51_SQL },
 ];
 
 /**

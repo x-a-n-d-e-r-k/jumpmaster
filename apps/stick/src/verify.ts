@@ -24,7 +24,13 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { type ImagePolicy, ImagePolicySchema } from '@jumpmaster/protocol';
+import {
+  compareReleaseVersions,
+  type ImagePolicy,
+  ImagePolicySchema,
+  parseReleaseVersion,
+  type ReleaseVersion,
+} from '@jumpmaster/protocol';
 import { fetchFromServer, fromServer, type ServerImages } from './fetch-image.js';
 import { type PullDeps, pullImage } from './pull.js';
 import { allowedImages } from './runner.js';
@@ -93,32 +99,9 @@ export function releaseSigner(repository: string, floor: string | null): Signer 
 export const signerKey = (s: Signer): string =>
   JSON.stringify([s.identityRegexp, s.issuer, s.trigger, s.repository, s.floor]);
 
-/** A release version: `X.Y.Z` or `X.Y.Z-rc.N`; `rc` null for a final release. */
-export type ReleaseVersion = { major: number; minor: number; patch: number; rc: number | null };
-
-const RELEASE_VERSION =
-  /^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(?:-rc\.(0|[1-9][0-9]{0,8}))?$/;
-
-/** `X.Y.Z` or `X.Y.Z-rc.N` (no `v`), or null for anything else. */
-export function parseReleaseVersion(v: string): ReleaseVersion | null {
-  const m = RELEASE_VERSION.exec(v);
-  if (!m) return null;
-  return {
-    major: Number(m[1]),
-    minor: Number(m[2]),
-    patch: Number(m[3]),
-    rc: m[4] === undefined ? null : Number(m[4]),
-  };
-}
-
-/** Semver order on release versions: `X.Y.Z-rc.N` < `X.Y.Z`, and `rc.N` < `rc.M` when N < M. */
-export function compareReleaseVersions(a: ReleaseVersion, b: ReleaseVersion): number {
-  for (const k of ['major', 'minor', 'patch'] as const) if (a[k] !== b[k]) return a[k] - b[k];
-  if (a.rc === b.rc) return 0;
-  if (a.rc === null) return 1;
-  if (b.rc === null) return -1;
-  return a.rc - b.rc;
-}
+// The release version functions live in the protocol package (issue #427): the server judges
+// which sticks are behind its release with the same order the stick checks its floor with.
+export { compareReleaseVersions, parseReleaseVersion, type ReleaseVersion };
 
 export const NO_RELEASE_VERSION = 'this stick has no release version';
 export const NO_RELEASE_TAG = 'image signature carries no release tag';

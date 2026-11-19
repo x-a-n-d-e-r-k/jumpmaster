@@ -8,6 +8,7 @@ import { creditsPass } from '../credits.js';
 import type { Db } from '../db/open.js';
 import { openDb } from '../db/open.js';
 import { type ReconcileReport, reconcileZone } from '../flow/reconcile.js';
+import type { ImageMirror, ImageStatus } from '../images/mirror.js';
 import type { ForgePair } from '../outbox.js';
 import { promptVersions } from '../payloads.js';
 import { syncDropZone } from '../sync.js';
@@ -38,6 +39,18 @@ export interface Harness {
   queuedRoles(): Role[];
   /** Headers for a stick route, enrolling on first use. */
   stickHeaders(): Record<string, string>;
+  /** The harness stick's id. */
+  stickId: string;
+  /** Enrolls another stick: its id and the headers for its stick routes. */
+  enrollStick(name: string): Promise<{ stickId: string; headers: Record<string, string> }>;
+  /**
+   * A raw lease call (the harness stick's headers unless given), so a 204 with its headers can be
+   * read. `body` is sent as is: `freeSlots` defaults to 1.
+   */
+  leaseRaw(
+    body?: Record<string, unknown>,
+    headers?: Record<string, string>,
+  ): Promise<LightMyRequestResponse>;
   /** Deletes all workflow rows and resets usage; the forge state is kept. */
   wipeDbKeepIssues(): void;
   lease(): Promise<{ dropId: string; epoch: number; payload: DropPayload }>;
@@ -76,6 +89,15 @@ export async function harness(
     guidanceForge?: Parameters<typeof createApp>[0]['guidanceForge'];
     /** The declared Claude plan (default `pro`: no Fable). */
     claude?: ClaudeConfig;
+    /** The server's release version (`JM_RELEASE_VERSION`); default `dev`. */
+    version?: string;
+    /** The image mirror the stick routes read (`fakeMirror`); absent, none. */
+    images?: Pick<ImageMirror, 'lookup' | 'status'>;
+    /** The install's `sticks` settings. */
+    sticks?: Config['sticks'];
+    /** The lease long-poll's wait and round (default 0: one round). */
+    leaseWaitMs?: number;
+    leasePollMs?: number;
   } = {},
 ): Promise<Harness> {
   const db = openDb(tmpDbFile());
@@ -128,6 +150,7 @@ export async function harness(
       ...(opts.zoneSecrets ? { zoneSecrets: { [zone.id]: opts.zoneSecrets } } : {}),
     },
     usage: { ...usageCfg, ...opts.usage },
+    ...(opts.sticks ? { sticks: opts.sticks } : {}),
   };
   let clock = START;
   const rand = () => 0;
@@ -142,8 +165,10 @@ export async function harness(
     forgesFor: () => forges,
     now: () => clock,
     rand,
-    leaseWaitMs: 0,
-    leasePollMs: 0,
+    leaseWaitMs: opts.leaseWaitMs ?? 0,
+    leasePollMs: opts.leasePollMs ?? 0,
+    version: opts.version ?? 'dev',
+    ...(opts.images ? { images: opts.images } : {}),
     ...(opts.kick ? { kick: opts.kick } : {}),
     ...(opts.guidanceForge ? { guidanceForge: opts.guidanceForge } : {}),
   });
@@ -153,7 +178,7 @@ export async function harness(
     headers: PROTO,
     payload: { joinToken: 'join', name: 'h', slots: 4 },
   });
-  const { stickToken } = enroll.json() as { stickToken: string };
+  const { stickToken, stickId } = enroll.json() as { stickToken: string; stickId: string };
   const auth = { ...PROTO, authorization: `Bearer ${stickToken}` };
 
   const h: Harness = {
@@ -189,6 +214,28 @@ export async function harness(
       });
     },
     stickHeaders: () => auth,
+    stickId,
+    async enrollStick(name) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sticks/enroll',
+        headers: PROTO,
+        payload: { joinToken: 'join', name, slots: 4 },
+      });
+      const j = res.json() as { stickToken: string; stickId: string };
+      return {
+        stickId: j.stickId,
+        headers: { ...PROTO, authorization: `Bearer ${j.stickToken}` },
+      };
+    },
+    leaseRaw(body = {}, headers = auth) {
+      return app.inject({
+        method: 'POST',
+        url: '/api/sticks/lease',
+        headers,
+        payload: { freeSlots: 1, ...body },
+      });
+    },
     queuedRoles() {
       return (
         db
@@ -449,4 +496,58 @@ function liveStore(db: Db, config: Config, now: () => Date): ConfigStore {
   });
   if (!r.ok) throw new Error(`harness config refused: ${JSON.stringify(r)}`);
   return store;
+}
+
+/** The digest of the stick image `fakeMirror` holds. */
+export const STICK_DIGEST = `sha256:${'5'.repeat(64)}`;
+export const MIRROR_REGISTRY = 'ghcr.io/owner';
+
+/**
+ * A mirror whose current lock holds a `jumpmaster-stick` image (unless `stick: false`), complete
+ * unless `complete: false`. `throws` makes its status or lookup throw. Every field is read afresh,
+ * so a test may change them on the returned object.
+ */
+export function fakeMirror(
+  o: { stick?: boolean; complete?: boolean; throws?: 'status' | 'lookup' } = {},
+): Pick<ImageMirror, 'lookup' | 'status'> & {
+  stick: boolean;
+  complete: boolean;
+  throws?: 'status' | 'lookup';
+} {
+  const m = {
+    stick: o.stick ?? true,
+    complete: o.complete ?? true,
+    ...(o.throws ? { throws: o.throws } : {}),
+    status() {
+      if (m.throws === 'status') throw new Error('the index is unreadable');
+      const image = (name: string, digest: string): ImageStatus => ({
+        name,
+        digest,
+        ref: `${MIRROR_REGISTRY}/${name}@${digest}`,
+        state: m.complete ? 'complete' : 'pending',
+        platforms: [],
+        size: 0,
+        current: true,
+      });
+      return {
+        lock: true,
+        images: [
+          image('jumpmaster-trooper', `sha256:${'7'.repeat(64)}`),
+          ...(m.stick ? [image('jumpmaster-stick', STICK_DIGEST)] : []),
+        ],
+      };
+    },
+    lookup(name: string, digest: string) {
+      if (m.throws === 'lookup') throw new Error('the store is unreadable');
+      if (!m.stick || name !== 'jumpmaster-stick' || digest !== STICK_DIGEST)
+        return { listed: false as const };
+      return {
+        listed: true as const,
+        complete: m.complete,
+        record: {} as never,
+        store: {} as never,
+      };
+    },
+  };
+  return m;
 }
