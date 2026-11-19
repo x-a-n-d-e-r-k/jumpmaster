@@ -920,6 +920,246 @@ describe('/chat Markdown (#490)', () => {
     expect(liveShape(log)).toEqual(['owner', 'steps:3', 'assistant', 'steps:1', 'assistant']);
   });
 
+  describe('a tool step opens to its input and result (#514)', () => {
+    const step = (
+      seq: number,
+      o: Partial<Pick<ChatMessage, 'toolName' | 'input' | 'result' | 'text'>>,
+    ): ChatMessage => ({ ...stored(seq, 'tool', o.text ?? `step ${seq}`), ...o });
+    const ok = (text: string, lines = text.split('\n').length) => ({
+      text,
+      truncated: false,
+      lines,
+      isError: false,
+    });
+    /** The `<li>` of the step at `seq` in a stored page. */
+    const li = (html: string, seq: number) =>
+      new RegExp(`<li data-seq="${seq}">([\\s\\S]*?)</li>`).exec(html)?.[1] ?? '';
+
+    test('a Read step renders its path and a result <pre>', () => {
+      const html = renderThread(THREAD, [
+        step(1, {
+          text: 'read a.ts',
+          toolName: 'Read',
+          input: { file_path: '/repo/a.ts', offset: 10, limit: 20 },
+          result: ok('one\ntwo\nthree'),
+        }),
+      ]);
+      const item = li(html, 1);
+      expect(item).toMatch(/^<details><summary>read a\.ts<\/summary>/);
+      expect(item).toMatch(/<\/details>$/);
+      expect(item).toContain('/repo/a.ts');
+      expect(item).toContain('offset: 10');
+      expect(item).toContain('limit: 20');
+      expect(item).toContain('<pre>one\ntwo\nthree</pre>');
+      expect(item).toContain('3 lines');
+    });
+
+    test('Read without offset or limit, Grep and Glob show only what is set', () => {
+      const html = renderThread(THREAD, [
+        step(1, { toolName: 'Read', input: { file_path: 'b.ts' }, result: ok('x') }),
+        step(2, {
+          toolName: 'Grep',
+          input: { pattern: 'foo.*', path: 'src', glob: '*.ts', output_mode: 'content' },
+          result: ok('x'),
+        }),
+        step(3, { toolName: 'Grep', input: { pattern: 'bar' }, result: ok('x') }),
+        step(4, { toolName: 'Glob', input: { pattern: '**/*.md' }, result: ok('x') }),
+      ]);
+      expect(li(html, 1)).not.toContain('offset');
+      expect(li(html, 1)).not.toContain('limit');
+      expect(li(html, 2)).toContain('foo.*');
+      expect(li(html, 2)).toContain('path: src');
+      expect(li(html, 2)).toContain('glob: *.ts');
+      expect(li(html, 2)).not.toContain('output_mode');
+      expect(li(html, 3)).not.toContain('path:');
+      expect(li(html, 4)).toContain('**/*.md');
+      expect(li(html, 1)).toContain('1 line<');
+    });
+
+    test('a Bash step renders its command in <code>', () => {
+      const html = renderThread(THREAD, [
+        step(1, { toolName: 'Bash', input: { command: 'ls -la && echo "<hi>"' }, result: ok('') }),
+      ]);
+      expect(li(html, 1)).toContain('<code>ls -la &amp;&amp; echo &quot;&lt;hi&gt;&quot;</code>');
+    });
+
+    test('an MCP step renders each key as key: JSON value, cut at 200 characters', () => {
+      const html = renderThread(THREAD, [
+        step(1, {
+          toolName: 'mcp__jm__zone_status',
+          input: { zoneId: 'jm', deep: { a: [1, 2] }, long: 'x'.repeat(500) },
+          result: ok('{}'),
+        }),
+      ]);
+      const item = li(html, 1);
+      expect(item).toContain('zoneId: &quot;jm&quot;');
+      expect(item).toContain('deep: {&quot;a&quot;:[1,2]}');
+      expect(item).toContain(`long: &quot;${'x'.repeat(199)}…`);
+      expect(item).not.toContain('x'.repeat(200));
+    });
+
+    test('a truncated input shows its preview and an "input truncated" note', () => {
+      const html = renderThread(THREAD, [
+        step(1, {
+          toolName: 'Write',
+          input: { _truncated: true, preview: '{"file_path":"a","content":"<b>' },
+        }),
+      ]);
+      const item = li(html, 1);
+      expect(item).toContain(
+        '{&quot;file_path&quot;:&quot;a&quot;,&quot;content&quot;:&quot;&lt;b&gt;',
+      );
+      expect(item).toContain('input truncated');
+      expect(item).not.toContain('_truncated');
+    });
+
+    test('a truncated result shows "showing the first 200 of 500 lines"', () => {
+      const text = Array.from({ length: 200 }, (_, i) => `line ${i}`).join('\n');
+      const html = renderThread(THREAD, [
+        step(1, {
+          toolName: 'Read',
+          input: { file_path: 'big' },
+          result: { text, truncated: true, lines: 500, isError: false },
+        }),
+      ]);
+      expect(li(html, 1)).toContain('showing the first 200 of 500 lines');
+    });
+
+    test('an error result has class error and says Error', () => {
+      const html = renderThread(THREAD, [
+        step(1, {
+          toolName: 'Bash',
+          input: { command: 'false' },
+          result: { text: 'exit 1', truncated: false, lines: 1, isError: true },
+        }),
+        step(2, { toolName: 'Bash', input: { command: 'true' }, result: ok('fine') }),
+      ]);
+      expect(li(html, 1)).toMatch(/<div class="result error">[^]*Error/);
+      expect(li(html, 2)).not.toContain('error');
+      expect(li(html, 2)).not.toContain('Error');
+    });
+
+    test('a result with <script> and a javascript: link renders escaped, with no element or href', () => {
+      const html = renderThread(THREAD, [
+        step(1, {
+          text: 'ran <i>x</i>',
+          toolName: 'mcp__x__y',
+          input: { q: '<img src=x onerror=alert(1)>' },
+          result: ok('<script>alert(1)</script> [x](javascript:alert(1)) https://evil.example'),
+        }),
+      ]);
+      const item = li(html, 1);
+      expect(item).toContain('&lt;script&gt;alert(1)&lt;/script&gt; [x](javascript:alert(1))');
+      expect(item).toContain('ran &lt;i&gt;x&lt;/i&gt;');
+      expect(item).not.toMatch(/<(script|a|img|i)[\s>]/);
+      expect(item).not.toContain('href');
+    });
+
+    test('an older step with no input or result stays a plain <li>', () => {
+      const html = renderThread(THREAD, [stored(1, 'tool', 'read a')]);
+      expect(html).toContain('<li data-seq="1">read a</li>');
+      expect(html).not.toMatch(/<li[^>]*><details>/);
+    });
+
+    test('a step with no result says running… while its turn runs, else no result recorded', () => {
+      const pending = step(2, { toolName: 'Read', input: { file_path: 'a' } });
+      const busy = renderThread(THREAD, [
+        { ...stored(1, 'owner', 'go') },
+        pending,
+        { ...stored(3, 'assistant', ''), state: 'running' },
+      ]);
+      expect(li(busy, 2)).toContain('running…');
+      const done = renderThread(THREAD, [stored(1, 'owner', 'go'), pending]);
+      expect(li(done, 2)).toContain('no result recorded');
+      expect(li(done, 2)).not.toContain('running');
+      // A step of an earlier turn is done even while a later turn runs.
+      const later = renderThread(THREAD, [
+        stored(1, 'owner', 'go'),
+        pending,
+        stored(3, 'owner', 'again'),
+        { ...stored(4, 'assistant', ''), state: 'running' },
+      ]);
+      expect(li(later, 2)).toContain('no result recorded');
+    });
+
+    test('streamed: a step re-sent with its result updates its <li> in place, the group as it was', () => {
+      const { log, emit } = runScript();
+      const input = { file_path: 'a.ts' };
+      emit('tool', { seq: 2, text: 'read a.ts', toolName: 'Read', input });
+      emit('tool', { seq: 3, text: 'old' });
+      const group = log.children[0] as FakeEl & { open?: boolean };
+      const ol = group.querySelector('ol') as FakeEl;
+      const first = ol.children[0] as FakeEl;
+      expect(first.querySelector('summary')?.textContent).toBe('read a.ts');
+      expect(first.textContent).toContain('running…');
+      expect(ol.children[1]?.querySelector('details')).toBeNull();
+      group.open = true;
+      (first.querySelector('details') as FakeEl & { open?: boolean }).open = true;
+      emit('tool', {
+        seq: 2,
+        text: 'read a.ts',
+        toolName: 'Read',
+        input,
+        result: { text: '<script>x</script>', truncated: true, lines: 9, isError: true },
+      });
+      expect(log.children).toHaveLength(1);
+      expect(log.children[0]).toBe(group);
+      expect(group.open).toBe(true);
+      expect(ol.children).toHaveLength(2);
+      expect(group.querySelector('summary')?.textContent).toBe('Worked through 2 steps');
+      const now = ol.children[0] as FakeEl;
+      expect(now.dataset.seq).toBe('2');
+      expect(now.tagName).toBe('li');
+      expect((now.querySelector('details') as FakeEl & { open?: boolean }).open).toBe(true);
+      expect(now.textContent).not.toContain('running…');
+      expect(now.querySelector('pre')?.textContent).toBe('<script>x</script>');
+      expect(now.querySelector('.result')?.className).toBe('result error');
+      expect(now.textContent).toContain('Error');
+      expect(now.textContent).toContain('showing the first 1 of 9 lines');
+      expect(FakeEl.htmlWrites).toEqual([]);
+    });
+
+    test('streamed: input per tool matches the stored page', () => {
+      const msgs = [
+        step(1, { toolName: 'Read', input: { file_path: 'a', offset: 3 }, result: ok('x\ny') }),
+        step(2, { toolName: 'Bash', input: { command: 'ls' }, result: ok('') }),
+        step(3, { toolName: 'mcp__a__b', input: { zoneId: 'jm' }, result: ok('z') }),
+        step(4, { toolName: 'Grep', input: { _truncated: true, preview: '{"pa' } }),
+      ];
+      const { log, emit } = runScript();
+      for (const m of msgs) emit('tool', m);
+      const ol = log.children[0]?.querySelector('ol') as FakeEl;
+      const texts = ol.children.map((c) => c.textContent);
+      expect(texts[0]).toContain('offset: 3');
+      expect(texts[0]).toContain('2 lines');
+      expect(ol.children[1]?.querySelector('code')?.textContent).toBe('ls');
+      expect(texts[2]).toContain('zoneId: "jm"');
+      expect(texts[3]).toContain('input truncated');
+      expect(texts[3]).toContain('running…');
+      // Once the turn is done, the same text as the stored page of a thread at rest.
+      emit('done', {});
+      const html = renderThread(THREAD, msgs);
+      for (const [i, item] of ol.children.entries()) {
+        const t = item.textContent;
+        const plain = li(html, i + 1)
+          .replace(/<[^>]+>/g, '')
+          .replace(/&quot;/g, '"')
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>')
+          .replace(/&amp;/g, '&');
+        expect(t).toBe(plain);
+      }
+    });
+
+    test('streamed: done turns a step still running into no result recorded', () => {
+      const { log, emit } = runScript();
+      emit('tool', { seq: 2, text: 'r', toolName: 'Read', input: { file_path: 'a' } });
+      emit('done', {});
+      expect(log.children[0]?.textContent).toContain('no result recorded');
+      expect(log.children[0]?.textContent).not.toContain('running…');
+    });
+  });
+
   describe('the confirm dialog (#503)', () => {
     const T = Date.parse('2026-01-01T00:00:00.000Z');
     const MIN = 60_000;
