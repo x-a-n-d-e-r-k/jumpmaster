@@ -747,6 +747,85 @@ describe('/work and /drops list pages (#119)', () => {
     expect(body).toContain('Drops in octo/demo');
   });
 
+  describe('/drops?issue= (#496)', () => {
+    const five = (h: Awaited<ReturnType<typeof harness>>, zoneId: string) =>
+      upsertWorkItem(
+        h.db,
+        {
+          dropZoneId: zoneId,
+          issueNumber: 5,
+          title: `${zoneId} five`,
+          body: 'b',
+          author: 'human',
+          priority: 2,
+          isFix: false,
+          issueCreatedAt: '2026-01-01T00:00:00.000Z',
+        },
+        h.now(),
+      );
+
+    test('lists only that zone’s drops for the issue, in every state', async () => {
+      const { h, item } = await lists();
+      const main5 = five(h, 'main');
+      const ref5 = five(h, 'ref');
+      drop(h, 'main-5-old', 'failed', 'main', '2026-01-01T00:00:00.000Z', main5.id);
+      drop(h, 'main-5-new', 'running', 'main', '2026-01-02T00:00:00.000Z', main5.id);
+      drop(h, 'ref-5', 'succeeded', 'ref', '2026-01-01T00:00:00.000Z', ref5.id);
+      drop(h, 'main-other', 'failed', 'main', '2026-01-01T00:00:00.000Z', item('main', 'ready').id);
+      drop(h, 'main-crew', 'succeeded', 'main');
+      const res = await h.view('/drops?zone=main&issue=5');
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toContain('>main-5-old</a>');
+      expect(res.body).toContain('>main-5-new</a>');
+      expect(res.body).not.toContain('ref-5');
+      expect(res.body).not.toContain('main-other');
+      expect(res.body).not.toContain('main-crew');
+      expect(res.body).toContain('Drops for #5 in octo/demo');
+      const ref = (await h.view('/drops?zone=ref&issue=5')).body;
+      expect(ref).toContain('>ref-5</a>');
+      expect(ref).not.toContain('main-5');
+    });
+
+    test('the state links keep the issue; links to another zone drop it', async () => {
+      const { h } = await lists();
+      const body = (await h.view('/drops?zone=main&issue=5&state=failed')).body;
+      expect(body).toContain('href="/drops?zone=main&amp;issue=5"');
+      expect(body).toContain('href="/drops?zone=main&amp;issue=5&amp;state=active"');
+      expect(body).toContain('href="/drops?zone=main&amp;issue=5&amp;state=failed"');
+      expect(body).toContain('href="/drops?zone=ref&amp;state=failed"');
+      expect(body).toContain('href="/drops?state=failed"');
+      expect(body).not.toContain('zone=ref&amp;issue=5');
+    });
+
+    test('an issue with no work item, or no drops: the empty line, 200', async () => {
+      const { h } = await lists();
+      five(h, 'main');
+      for (const n of [999, 5]) {
+        const res = await h.view(`/drops?zone=main&issue=${n}`);
+        expect(res.statusCode).toBe(200);
+        expect(res.body).toContain(`No drops for #${n} in octo/demo.`);
+        expect(res.body).not.toContain('<table');
+      }
+    });
+
+    test.each([
+      ['/drops?issue=5', 'issue needs zone'],
+      ['/drops?zone=main&issue=0', 'bad issue'],
+      ['/drops?zone=main&issue=-3', 'bad issue'],
+      ['/drops?zone=main&issue=x', 'bad issue'],
+      ['/drops?zone=main&issue=1.5', 'bad issue'],
+      ['/drops?zone=main&issue=05', 'bad issue'],
+      ['/drops?zone=main&issue=', 'bad issue'],
+      ['/drops?zone=main&issue=5&issue=6', 'bad issue'],
+    ])('%s is 404 %s', async (url, text) => {
+      const { h } = await lists();
+      const res = await h.view(url);
+      expect(res.statusCode).toBe(404);
+      expect(res.headers['content-type']).toMatch(/^text\/plain/);
+      expect(res.body).toBe(text);
+    });
+  });
+
   test('/drops shows the newest 200, and says so only when more exist', async () => {
     const { h } = await lists();
     const at = (i: number) => new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString();

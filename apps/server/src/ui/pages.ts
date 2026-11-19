@@ -1128,10 +1128,20 @@ export function workItemRows(
     const href = `https://github.com/${repo}/pull/${i.prNumber}`;
     return `<a href="${escapeHtml(href)}"${linkTarget(href)}>#${escapeHtml(i.prNumber)}</a>`;
   };
+  const issueLink = (i: WorkItem): string => {
+    const repo = repoOf.get(i.dropZoneId);
+    if (!repo) return `#${escapeHtml(i.issueNumber)}`;
+    const href = `https://github.com/${repo}/issues/${i.issueNumber}`;
+    return `<a href="${escapeHtml(href)}"${linkTarget(href)}>#${escapeHtml(i.issueNumber)}</a>`;
+  };
+  const dropsLink = (i: WorkItem): string => {
+    const q = new URLSearchParams({ zone: i.dropZoneId, issue: String(i.issueNumber) });
+    return `<a href="${escapeHtml(`/drops?${q}`)}">${escapeHtml(i.title)}</a>`;
+  };
   return items
     .map(
       (i) =>
-        `<tr><td>${name(i.dropZoneId)}</td><td>#${escapeHtml(i.issueNumber)}</td><td>${escapeHtml(i.title)}</td><td>${badge(i.state)}</td><td>${escapeHtml(i.reason ?? waitingOn(i))}</td><td>${prLink(i)}</td>${detailCells(details?.get(i.id))}</tr>`,
+        `<tr><td>${name(i.dropZoneId)}</td><td>${issueLink(i)}</td><td>${dropsLink(i)}</td><td>${badge(i.state)}</td><td>${escapeHtml(i.reason ?? waitingOn(i))}</td><td>${prLink(i)}</td>${detailCells(details?.get(i.id))}</tr>`,
     )
     .join('');
 }
@@ -1187,6 +1197,8 @@ function listPage(p: {
   titleText: string;
   zones: readonly ZoneRef[];
   zone: string | undefined;
+  /** An issue filter within `zone`: kept by links to that zone, dropped by links to another. */
+  issue?: number;
   state: string;
   defaultState: string;
   states: { value: string; label: string }[];
@@ -1198,6 +1210,8 @@ function listPage(p: {
   const href = (zone: string | undefined, state: string): string => {
     const q = new URLSearchParams();
     if (zone !== undefined) q.set('zone', zone);
+    if (zone !== undefined && zone === p.zone && p.issue !== undefined)
+      q.set('issue', String(p.issue));
     if (state !== p.defaultState) q.set('state', state);
     const qs = q.toString();
     return escapeHtml(qs ? `${p.path}?${qs}` : p.path);
@@ -1257,6 +1271,8 @@ export function renderWorkList(s: {
 export function renderDropList(s: {
   zones: readonly ZoneRef[];
   zone?: string;
+  /** An issue number within `zone`: the drops are that issue's. */
+  issue?: number;
   state: DropFilter;
   /** Already filtered, newest first, at most DROP_LIST_LIMIT. */
   drops: readonly Drop[];
@@ -1267,16 +1283,19 @@ export function renderDropList(s: {
   now?: Date;
 }): string {
   const z = s.zone === undefined ? undefined : s.zones.find((x) => x.id === s.zone);
+  const issue = z ? s.issue : undefined;
   const words = s.state === 'all' ? '' : `${stateWords(s.state)} `;
-  const where = z ? ` in ${zoneName(z, s.zones)}` : '';
+  const forIssue = issue !== undefined ? ` for #${issue}` : '';
+  const where = z ? `${forIssue} in ${zoneName(z, s.zones)}` : '';
   const heading = (w: string): string =>
     z ? `${capital(`${words}drops`)}${w}` : `All ${words}drops`;
   return listPage({
     path: '/drops',
     title: heading(where),
-    titleText: heading(z ? ` in ${zoneNameText(z, s.zones)}` : ''),
+    titleText: heading(z ? `${forIssue} in ${zoneNameText(z, s.zones)}` : ''),
     zones: s.zones,
     zone: z?.id,
+    ...(issue !== undefined ? { issue } : {}),
     state: s.state,
     defaultState: 'all',
     states: [
