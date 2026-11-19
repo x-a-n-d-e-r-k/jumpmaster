@@ -934,6 +934,51 @@ export function codeownersFindings(
   return out;
 }
 
+export type AppCodeownersFindings = {
+  /** Non-protected lines that are the effective owners of their paths: nothing touching them merges. */
+  fail: { line: number; pattern: string; app: boolean; others: boolean }[];
+  /** Protected globs whose last covering line names no person: GitHub asks no person for them. */
+  warn: { glob: string; line?: number; pattern?: string }[];
+};
+
+/**
+ * How a CODEOWNERS file sits with a required code owner review when the reviewer is a GitHub App
+ * (spec §5.2, §6; F14): an app can't be a code owner, so any non-protected line that names an
+ * owner, and is not overridden by a later line covering it, holds its pull requests for good
+ * (`app` when it names the reviewer app's `<slug>[bot]`, `others` when it names anyone else); a
+ * protected glob whose last covering line names no one but the app is a warn.
+ */
+export function appCodeownersFindings(
+  text: string,
+  zone: Pick<DropZoneConfig, 'protectedPaths'>,
+  appLogin: string | undefined,
+): AppCodeownersFindings {
+  const bot = appLogin?.toLowerCase();
+  const isApp = (o: string) => bot !== undefined && o.replace(/^@/, '').toLowerCase() === bot;
+  const isProtected = (r: CodeownersRule) =>
+    zone.protectedPaths.some((g) => protectedMatch(asPath(r.pattern), g));
+  const rules = codeownersRules(text);
+  const out: AppCodeownersFindings = { fail: [], warn: [] };
+  rules.forEach((r, i) => {
+    if (r.owners.length === 0 || isProtected(r)) return;
+    // A later line covering this one decides its paths: it is judged on its own.
+    if (rules.slice(i + 1).some((l) => covers(l.pattern, r.pattern))) return;
+    out.fail.push({
+      line: r.line,
+      pattern: r.pattern,
+      app: r.owners.some(isApp),
+      others: r.owners.some((o) => !isApp(o)),
+    });
+  });
+  for (const glob of zone.protectedPaths) {
+    const last = rules.filter((r) => covers(r.pattern, glob)).at(-1);
+    if (!last) out.warn.push({ glob });
+    else if (last.owners.every(isApp))
+      out.warn.push({ glob, line: last.line, pattern: last.pattern });
+  }
+  return out;
+}
+
 /** The park reason and fix for a rule that holds every pull request it covers for a person. */
 export const codeownerBlocks = (f: { line: number; pattern: string }, reviewer: string): string =>
   `code owner review blocks the reviewer bot: CODEOWNERS line ${f.line} (${f.pattern}) does not name @${reviewer}, so every pull request it covers waits for a person: name @${reviewer} on that line (the protected lines after it stay people-only; the last match wins), or turn off Require review from Code Owners`;
