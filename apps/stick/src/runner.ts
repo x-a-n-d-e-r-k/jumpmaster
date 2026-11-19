@@ -23,6 +23,7 @@ import type { ContainerDriver, DropNet, VolumeInfo } from './driver.js';
 import { type EgressSession, egressImage, startEgress, trooperEgressRefusal } from './egress.js';
 import { EventAssembler } from './event-assembler.js';
 import { fetchFromServer, fromServer } from './fetch-image.js';
+import type { StickImages } from './image-gc.js';
 import { pullImage } from './pull.js';
 import {
   type PendingPushes,
@@ -443,7 +444,22 @@ type RunDeps = {
   baseImage?: () => BaseVerdict;
   /** First wait before re-sending a held result (doubling, capped). */
   resultRetryMs?: number;
+  /**
+   * The stick's images (issue #425): a container start holds the lock shared, so the image sweep
+   * never runs meanwhile, and marks its recorded images used now.
+   */
+  images?: Pick<StickImages, 'lock' | 'used'>;
 };
+
+/** Starts containers from `refs`: never during an image sweep; each recorded image used now. */
+function starting<T>(deps: RunDeps, refs: string[], start: () => Promise<T>): Promise<T> {
+  const images = deps.images;
+  if (!images) return start();
+  return images.lock.shared(async () => {
+    for (const ref of refs) images.used(ref);
+    return start();
+  });
+}
 
 /**
  * What becomes of a pushing drop's volume once its agent container is confirmed gone: queued for
@@ -729,15 +745,19 @@ async function prepareAndRun(payload: DropPayload, deps: RunDeps, beat: DropBeat
       try {
         const pool = deps.subnetPool ?? dropSubnetPool(process.env);
         net = await driver.createDropNetwork(network, labels, pool);
-        session = await startEgress(driver, {
-          dropId,
-          epoch,
-          egress,
-          net,
-          image: proxyImage ?? egressImage(process.env),
-          labels,
-          ...(deps.egressReadyMs !== undefined ? { readyMs: deps.egressReadyMs } : {}),
-        });
+        const proxy = proxyImage ?? egressImage(process.env);
+        const dropNet = net;
+        session = await starting(deps, [proxy], () =>
+          startEgress(driver, {
+            dropId,
+            epoch,
+            egress,
+            net: dropNet,
+            image: proxy,
+            labels,
+            ...(deps.egressReadyMs !== undefined ? { readyMs: deps.egressReadyMs } : {}),
+          }),
+        );
       } catch (e) {
         await fail(`egress proxy failed to start: ${e instanceof Error ? e.message : String(e)}`);
         return;
@@ -747,7 +767,11 @@ async function prepareAndRun(payload: DropPayload, deps: RunDeps, beat: DropBeat
     if (services.length > 0) {
       if (halted()) return;
       try {
-        await driver.startServices(dropId, epoch, services, labels, net);
+        await starting(
+          deps,
+          services.map((s) => s.image),
+          () => driver.startServices(dropId, epoch, services, labels, net),
+        );
       } catch (e) {
         await fail(`services failed: ${e instanceof Error ? e.message : String(e)}`);
         return;
@@ -821,16 +845,18 @@ async function runContainer(
 ): Promise<void> {
   const { client, driver } = deps;
   const { dropId, epoch } = payload;
-  const handle = await driver.start({
-    image,
-    payload: JSON.stringify(payload),
-    name: agentName(dropId, epoch),
-    labels,
-    ...(network ? { network } : {}),
-    ...(net ? { egress: net } : {}),
-    ...(payload.limits ? { limits: payload.limits } : {}),
-    ...(volume ? { mount: { volume, target: REPO_MOUNT } } : {}),
-  });
+  const handle = await starting(deps, [image], () =>
+    driver.start({
+      image,
+      payload: JSON.stringify(payload),
+      name: agentName(dropId, epoch),
+      labels,
+      ...(network ? { network } : {}),
+      ...(net ? { egress: net } : {}),
+      ...(payload.limits ? { limits: payload.limits } : {}),
+      ...(volume ? { mount: { volume, target: REPO_MOUNT } } : {}),
+    }),
+  );
 
   let stopping: Promise<void> | undefined;
   let killing: Promise<void> | undefined;

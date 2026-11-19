@@ -12,6 +12,7 @@ import type {
   RepoMount,
   VolumeInfo,
 } from './driver.js';
+import type { ContainerInfo, ImageGcDriver } from './image-gc.js';
 import { allocateSubnet, dropLayout } from './subnets.js';
 import { canonicalRef } from './verify.js';
 import { REMOVE_TIMEOUT_MS, REPO_MOUNT } from './volumes.js';
@@ -156,7 +157,7 @@ async function* lines(stream: Readable): AsyncIterable<string> {
   if (buf) yield buf;
 }
 
-export class DockerDriver implements ContainerDriver, ImageLoader {
+export class DockerDriver implements ContainerDriver, ImageLoader, ImageGcDriver {
   constructor(
     private readonly docker = new Docker(),
     private readonly opts: {
@@ -744,6 +745,30 @@ export class DockerDriver implements ContainerDriver, ImageLoader {
     } catch (e) {
       if (statusOf(e) !== 404) throw e;
     }
+  }
+
+  async imageId(ref: string): Promise<string | undefined> {
+    try {
+      const info = (await this.docker.getImage(pullRef(ref)).inspect()) as { Id?: string };
+      return info.Id;
+    } catch (e) {
+      if (statusOf(e) === 404) return undefined;
+      throw e;
+    }
+  }
+
+  async removeImageRef(ref: string): Promise<void> {
+    try {
+      // Never forced: an image a container still uses is refused (409) and stays.
+      await this.docker.getImage(pullRef(ref)).remove({ force: false, noprune: false });
+    } catch (e) {
+      if (statusOf(e) !== 404) throw e;
+    }
+  }
+
+  async listContainers(): Promise<ContainerInfo[]> {
+    const found = await this.docker.listContainers({ all: true });
+    return found.map((c) => ({ id: c.Id, image: c.Image, imageId: c.ImageID }));
   }
 
   async tagImage(id: string, ref: string): Promise<void> {
