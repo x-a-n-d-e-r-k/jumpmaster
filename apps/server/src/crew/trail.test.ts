@@ -11,18 +11,25 @@ import {
   updateOutbox,
 } from '../db/repo.js';
 import { zonePass } from '../flow/snapshot.js';
-import { commentMarker, opKeys } from '../outbox.js';
+import { commentMarker, opKeys, sanitizeCrewText } from '../outbox.js';
 import { promptVersions } from '../payloads.js';
 import { applyResult, type ResultDeps } from '../results.js';
 import { enqueueNext } from '../scheduler.js';
 import { syncDropZone } from '../sync.js';
-import { crewWorld, ISSUE_BODY } from '../test/crew.js';
+import { crewOn, crewWorld, ISSUE_BODY } from '../test/crew.js';
 import { FORGE_WRITES } from '../test/fakes.js';
 import { usageCfg, type ZoneWorld } from '../test/fixtures.js';
 import { plus, t0 } from '../test/helpers.js';
 import { flushCrewOps } from './flush.js';
+import { triageInput } from './inputs.js';
 import { enqueueCrew } from './schedule.js';
-import { getTriageRequest, listCrewIssues, recordTriageRequest } from './store.js';
+import {
+  getTriageRequest,
+  listCrewIssues,
+  listTriageRequests,
+  recordTriageRequest,
+  setTriageRequest,
+} from './store.js';
 import { flushTriageTrail } from './trail.js';
 
 const MIN = 60_000;
@@ -532,5 +539,325 @@ describe('a split parent closes once all its parts are closed (#297)', () => {
     setKilled(w.db, false, plus(t0, 5 * MIN));
     await trail(plus(t0, 6 * MIN));
     expect(issueState(179)).toBe('closed');
+  });
+});
+
+describe('already-done: the server verifies the evidence, then the trail comments and closes (#466)', () => {
+  /** #120 a pull merged to main, #119 an issue closed as completed: the work #179 asks for. */
+  function shipped(): void {
+    w.f.state.addPull({
+      number: 120,
+      headRef: 'feature',
+      headSha: 'a'.repeat(40),
+      author: 'human',
+      state: 'closed',
+      merged: true,
+    });
+    w.f.state.addIssue({ number: 119, title: 'Shipped', body: 'b', author: 'human', labels: [] });
+    w.f.state.closeIssue(119, 'completed');
+  }
+
+  const done = (evidence: { pulls?: number[]; issues?: number[] }, reason = 'it shipped') => ({
+    summary: 's',
+    outcome: 'already-done',
+    reason,
+    evidence,
+  });
+
+  const allOps = () => listOutbox(w.db, ['pending', 'unknown', 'done', 'failed'], 'main');
+  const closeOps = () => allOps().filter((o) => o.kind === 'update_issue');
+  const issue179 = () => w.f.state.issues.get(179);
+  const closing = (req: number, reason = 'it shipped', done = '#120, #119') =>
+    `The crew found this already done: ${reason}. Done in: ${done}. Closing it. Reopen the issue if something is missing.\n\n${commentMarker('main', `triage:179:${req}`)}`;
+
+  test('a merged pull to the default branch and an issue closed as completed: one comment, then one close as completed', async () => {
+    shipped();
+    const req = request179();
+    await triaged(done({ pulls: [120], issues: [119] }));
+    // Recorded only: verifying, nothing written to the forge.
+    expect(getTriageRequest(w.db, req)).toMatchObject({
+      state: 'verifying',
+      outcome: 'already-done',
+      reason: 'it shipped',
+      evidence: { pulls: [120], issues: [119] },
+    });
+    expect(allOps()).toEqual([]);
+
+    await trail();
+    expect(getTriageRequest(w.db, req)).toMatchObject({ state: 'done', outcome: 'already-done' });
+    expect(commentOps()).toHaveLength(1);
+    expect(closeOps()).toHaveLength(1);
+    expect(JSON.parse(closeOps()[0]?.payloadJson ?? '{}')).toEqual({
+      number: 179,
+      state: 'closed',
+      stateReason: 'completed',
+    });
+    expect(commentsOn(179).map((c) => c.body)).toEqual([closing(req)]);
+    expect(issue179()).toMatchObject({ state: 'closed', stateReason: 'completed' });
+    expect(labelsOf(179)).toEqual(['jm-triaged']);
+    // The comment is written before the close.
+    const writes = w.f.author.calls
+      .map((c) => c.method)
+      .filter((m) => m === 'createIssueComment' || m === 'updateIssue');
+    expect(writes).toEqual(['createIssueComment', 'updateIssue']);
+  });
+
+  test('D3: two trail passes write one comment op and one close op', async () => {
+    shipped();
+    request179();
+    await triaged(done({ issues: [119] }));
+    await trail();
+    await trail(plus(t0, 6 * MIN));
+    expect(commentOps()).toHaveLength(1);
+    expect(closeOps()).toHaveLength(1);
+    expect(commentsOn(179)).toHaveLength(1);
+    expect(w.f.author.calls.filter((c) => c.method === 'updateIssue')).toHaveLength(1);
+    // Its keys are not a split parent's.
+    expect(closeOps()[0]?.opKey).not.toMatch(/^close:main:triage:\d+$/);
+    expect(commentOps()[0]?.opKey).not.toMatch(/:closed$/);
+  });
+
+  const refusals: [string, () => void, { pulls?: number[]; issues?: number[] }, string][] = [
+    [
+      'an unmerged pull',
+      () =>
+        w.f.state.addPull({
+          number: 121,
+          headRef: 'x',
+          headSha: 'b'.repeat(40),
+          author: 'human',
+          state: 'closed',
+        }),
+      { pulls: [121], issues: [119] },
+      'evidence refused: #121 is not merged',
+    ],
+    [
+      'a pull merged to another branch',
+      () =>
+        w.f.state.addPull({
+          number: 121,
+          headRef: 'x',
+          headSha: 'b'.repeat(40),
+          author: 'human',
+          state: 'closed',
+          merged: true,
+          baseRef: 'release',
+        }),
+      { pulls: [120, 121] },
+      'evidence refused: #121 was not merged to the default branch',
+    ],
+    [
+      'a missing pull',
+      () => {},
+      { pulls: [999], issues: [119] },
+      'evidence refused: #999 not found',
+    ],
+    [
+      'a closed pull request cited under issues',
+      () => {
+        w.f.state.addPull({
+          number: 121,
+          headRef: 'x',
+          headSha: 'b'.repeat(40),
+          author: 'human',
+          state: 'closed',
+        });
+        // Even were GitHub to name it closed as completed, a pull request is not an issue.
+        const read = w.f.author.getIssue.bind(w.f.author);
+        w.f.author.getIssue = async (n) => {
+          const r = await read(n);
+          return n === 121 && r ? { ...r, stateReason: 'completed' } : r;
+        };
+      },
+      { pulls: [120], issues: [121] },
+      'evidence refused: #121 is a pull request, not an issue',
+    ],
+    [
+      'an issue closed as not planned',
+      () => {
+        w.f.state.addIssue({ number: 122, title: 'No', body: 'b', author: 'human', labels: [] });
+        w.f.state.closeIssue(122, 'not_planned');
+      },
+      { issues: [119, 122] },
+      'evidence refused: #122 was not closed as completed',
+    ],
+    [
+      'an issue still open',
+      () =>
+        w.f.state.addIssue({ number: 122, title: 'No', body: 'b', author: 'human', labels: [] }),
+      { issues: [122] },
+      'evidence refused: #122 is not closed',
+    ],
+    [
+      'the issue citing itself',
+      () => {},
+      { pulls: [120], issues: [179] },
+      'evidence refused: #179 is this issue',
+    ],
+    [
+      'getPull throwing',
+      () => w.f.author.failNext('getPull', 'throw'),
+      { pulls: [120], issues: [119] },
+      'evidence refused: a cited item could not be read',
+    ],
+  ];
+
+  test.each(refusals)(
+    'refused: %s fails the attempt, enqueues no op and the retry sees why',
+    async (_name, arrange, evidence, why) => {
+      shipped();
+      const req = request179();
+      await triaged(done(evidence));
+      arrange();
+      await trail();
+      expect(getTriageRequest(w.db, req)).toMatchObject({
+        state: 'open',
+        attempts: 1,
+        lastError: why,
+        outcome: null,
+        evidence: null,
+      });
+      expect(allOps()).toEqual([]);
+      expect(w.f.state.comments).toEqual([]);
+      expect(issue179()).toMatchObject({ state: 'open', labels: ['jm-triage'] });
+      expect(triageInput(w.db, w.zone, req, 'd-next')).toContain(why);
+      // A second pass writes nothing either.
+      await trail(plus(t0, 6 * MIN));
+      expect(allOps()).toEqual([]);
+    },
+  );
+
+  test('refused maxTriage times: failed and put to Command; the issue is untouched', async () => {
+    request179();
+    await triaged(done({ pulls: [999] }));
+    await trail();
+    await triaged(done({ pulls: [998] }), plus(t0, 10 * MIN));
+    await trail(plus(t0, 15 * MIN));
+    const req = listTriageRequests(w.db, 'main')[0];
+    expect(req).toMatchObject({
+      state: 'failed',
+      attempts: 2,
+      lastError: 'evidence refused: #998 not found',
+    });
+    const b = w.db.prepare('SELECT why FROM briefings WHERE id = ?').get(req?.briefingId) as {
+      why: string;
+    };
+    expect(b.why).toContain('evidence refused: #998 not found');
+    expect(allOps()).toEqual([]);
+    expect(issue179()?.state).toBe('open');
+  });
+
+  test('superseded: the body edited while verifying is done with no op; the new text is triaged afresh', async () => {
+    shipped();
+    const req = request179();
+    await triaged(done({ pulls: [120] }));
+    const entry = issue179();
+    if (!entry?.issue) throw new Error('#179 expected');
+    entry.issue.body = 'edited';
+    await trail();
+    expect(getTriageRequest(w.db, req)).toMatchObject({
+      state: 'done',
+      reason: 'superseded',
+      outcome: null,
+      attempts: 0,
+    });
+    expect(allOps()).toEqual([]);
+    expect(issue179()?.state).toBe('open');
+    // Sync records the new text as a fresh request.
+    const fresh = recordTriageRequest(
+      w.db,
+      'main',
+      { number: 179, title: TEXT_179.title, body: 'edited', author: 'human' },
+      plus(t0, 6 * MIN),
+    );
+    expect(getTriageRequest(w.db, fresh ?? -1)?.state).toBe('open');
+  });
+
+  test('superseded: the issue closed while verifying is done with no op', async () => {
+    shipped();
+    const req = request179();
+    await triaged(done({ pulls: [120] }));
+    w.f.state.closeIssue(179);
+    await trail();
+    expect(getTriageRequest(w.db, req)).toMatchObject({ state: 'done', reason: 'superseded' });
+    expect(allOps()).toEqual([]);
+  });
+
+  test('superseded: a body recorded before verification supersedes it through recordTriageRequest', async () => {
+    shipped();
+    const req = request179();
+    await triaged(done({ pulls: [120] }));
+    recordTriageRequest(
+      w.db,
+      'main',
+      { number: 179, title: TEXT_179.title, body: 'edited', author: 'human' },
+      plus(t0, MIN),
+    );
+    expect(getTriageRequest(w.db, req)).toMatchObject({
+      state: 'done',
+      reason: 'superseded',
+      outcome: null,
+    });
+    await trail();
+    expect(allOps()).toEqual([]);
+    expect(w.f.author.calls.filter((c) => c.method === 'getPull')).toEqual([]);
+  });
+
+  test('observe: verified and done, and the comment and close are written once the zone is active', async () => {
+    shipped();
+    const req = request179();
+    await triaged(done({ pulls: [120], issues: [119] }));
+    setZoneMode(w.db, 'main', 'observe', plus(t0, MIN));
+    expect(await trail()).toBe(0);
+    expect(getTriageRequest(w.db, req)).toMatchObject({ state: 'done', outcome: 'already-done' });
+    expect(allOps()).toEqual([]);
+    setZoneMode(w.db, 'main', 'active', plus(t0, 6 * MIN));
+    await trail(plus(t0, 7 * MIN));
+    expect(allOps().map((o) => [o.kind, o.state])).toEqual([
+      ['comment_issue', 'done'],
+      ['set_labels', 'done'],
+      ['update_issue', 'done'],
+    ]);
+    expect(commentsOn(179).map((c) => c.body)).toEqual([closing(req)]);
+    expect(issue179()?.state).toBe('closed');
+  });
+
+  test('crew.closeDone false: a comment, never a close', async () => {
+    w = await crewWorld({ crew: { ...crewOn, closeDone: false } });
+    shipped();
+    const req = request179();
+    await triaged(done({ pulls: [120] }));
+    await trail();
+    await trail(plus(t0, 6 * MIN));
+    expect(getTriageRequest(w.db, req)).toMatchObject({ state: 'done', outcome: 'already-done' });
+    expect(closeOps()).toEqual([]);
+    expect(w.f.author.calls.filter((c) => c.method === 'updateIssue')).toEqual([]);
+    expect(issue179()?.state).toBe('open');
+    expect(commentsOn(179).map((c) => c.body)).toEqual([
+      `The crew found this already done: it shipped. Done in: #120. Close the issue if nothing is missing.\n\n${commentMarker('main', `triage:179:${req}`)}`,
+    ]);
+  });
+
+  test('the reason is posted sanitized as sanitizeCrewText does, and cut to 500 characters', async () => {
+    shipped();
+    const reason = '@someone shipped it, see https://evil.example/x <!-- hidden --> and #12';
+    const req = request179();
+    await triaged(done({ pulls: [120] }, reason));
+    await trail();
+    const body = commentsOn(179)[0]?.body ?? '';
+    expect(body).toBe(closing(req, sanitizeCrewText(reason, []), '#120'));
+    expect(body).not.toContain('@someone');
+    expect(body).not.toContain('https://');
+    expect(body.split('<!--')).toHaveLength(2); // the marker's only
+
+    w.f.state.addIssue({ number: 180, ...TEXT_179, author: 'human', labels: ['jm-triage'] });
+    const long =
+      recordTriageRequest(w.db, 'main', { number: 180, ...TEXT_179, author: 'human' }, t0) ?? -1;
+    await triaged(done({ pulls: [120] }), plus(t0, 10 * MIN));
+    setTriageRequest(w.db, long, { reason: 'y'.repeat(3000) }, plus(t0, 10 * MIN));
+    await trail(plus(t0, 11 * MIN));
+    const longBody = commentsOn(180)[0]?.body ?? '';
+    expect(longBody).toContain(`done: ${'y'.repeat(500)}. Done in: #120.`);
+    expect(longBody).not.toContain('y'.repeat(501));
   });
 });

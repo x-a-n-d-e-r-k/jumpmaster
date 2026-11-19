@@ -1499,6 +1499,41 @@ CREATE TABLE stick_upgrades (
 );
 `;
 
+/**
+ * v52 (#466): a triage drop may find an issue already done. The request waits in `verifying`
+ * while the server checks the evidence it cites (`evidence_json`); a refusal is kept in
+ * `last_error` for the retry's input. The CHECKs on `state` and `outcome` change, so the table is
+ * rebuilt with every row and column kept, foreign keys off.
+ */
+const V52_SQL = `
+CREATE TABLE new_triage_requests (
+  id            INTEGER PRIMARY KEY,
+  zone_id       TEXT NOT NULL,
+  issue_number  INTEGER NOT NULL,
+  title         TEXT NOT NULL,
+  body          TEXT NOT NULL,
+  body_sha      TEXT NOT NULL,
+  author        TEXT NOT NULL,
+  state         TEXT NOT NULL CHECK (state IN ('open','waiting','verifying','done','failed')),
+  outcome       TEXT CHECK (outcome IN ('split','questions','not-agent-work','already-done')),
+  reason        TEXT,
+  attempts      INTEGER NOT NULL DEFAULT 0,
+  briefing_id   INTEGER,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  gate_reasons  TEXT,
+  evidence_json TEXT,
+  last_error    TEXT,
+  UNIQUE (zone_id, issue_number, body_sha)
+);
+INSERT INTO new_triage_requests (id, zone_id, issue_number, title, body, body_sha, author, state,
+  outcome, reason, attempts, briefing_id, created_at, updated_at, gate_reasons)
+SELECT id, zone_id, issue_number, title, body, body_sha, author, state, outcome, reason, attempts,
+  briefing_id, created_at, updated_at, gate_reasons FROM triage_requests;
+DROP TABLE triage_requests;
+ALTER TABLE new_triage_requests RENAME TO triage_requests;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1551,6 +1586,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 49, sql: V49_SQL },
   { version: 50, sql: V50_SQL },
   { version: 51, sql: V51_SQL },
+  { version: 52, sql: V52_SQL, foreignKeysOff: true },
 ];
 
 /**

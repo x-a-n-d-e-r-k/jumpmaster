@@ -1620,3 +1620,83 @@ test('v48 adds the audit tables and lets audit be a crew drop, keeping every dro
   expect(() => put.run('def', 'reverted')).toThrow(/CHECK/);
   db.close();
 });
+
+test('v52 rebuilds triage_requests keeping every row, and takes verifying, already-done, evidence and last_error', () => {
+  const f = dbAt(51, (raw) => {
+    raw.exec(
+      `INSERT INTO triage_requests (zone_id, issue_number, title, body, body_sha, author, state,
+         outcome, reason, gate_reasons, attempts, briefing_id, created_at, updated_at)
+       VALUES ('z', 179, 't', 'b', 's', 'a', 'done', 'not-agent-work', 'r', '["g"]', 2, 7, 'c', 'u'),
+              ('z', 180, 't2', 'b2', 's2', 'a2', 'open', NULL, NULL, NULL, 0, NULL, 'c', 'u')`,
+    );
+  });
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(MIGRATIONS.find((m) => m.version === 52)?.foreignKeysOff).toBe(true);
+  expect(
+    db
+      .prepare(
+        `SELECT id, zone_id AS z, issue_number AS n, title, body, body_sha AS sha, author, state,
+           outcome, reason, gate_reasons AS g, attempts, briefing_id AS b, created_at AS c,
+           updated_at AS u, evidence_json AS e, last_error AS le FROM triage_requests ORDER BY id`,
+      )
+      .all(),
+  ).toEqual([
+    {
+      id: 1,
+      z: 'z',
+      n: 179,
+      title: 't',
+      body: 'b',
+      sha: 's',
+      author: 'a',
+      state: 'done',
+      outcome: 'not-agent-work',
+      reason: 'r',
+      g: '["g"]',
+      attempts: 2,
+      b: 7,
+      c: 'c',
+      u: 'u',
+      e: null,
+      le: null,
+    },
+    {
+      id: 2,
+      z: 'z',
+      n: 180,
+      title: 't2',
+      body: 'b2',
+      sha: 's2',
+      author: 'a2',
+      state: 'open',
+      outcome: null,
+      reason: null,
+      g: null,
+      attempts: 0,
+      b: null,
+      c: 'c',
+      u: 'u',
+      e: null,
+      le: null,
+    },
+  ]);
+  db.prepare(
+    `UPDATE triage_requests SET state = 'verifying', outcome = 'already-done',
+       evidence_json = '{"pulls":[1]}', last_error = 'x' WHERE id = 2`,
+  ).run();
+  expect(() => db.prepare(`UPDATE triage_requests SET state = 'maybe' WHERE id = 2`).run()).toThrow(
+    /CHECK/,
+  );
+  expect(() =>
+    db.prepare(`UPDATE triage_requests SET outcome = 'maybe' WHERE id = 2`).run(),
+  ).toThrow(/CHECK/);
+  // The body is still recorded once per text.
+  expect(() =>
+    db.exec(
+      `INSERT INTO triage_requests (zone_id, issue_number, title, body, body_sha, author, state,
+         created_at, updated_at) VALUES ('z', 179, 't', 'b', 's', 'a', 'open', 'c', 'u')`,
+    ),
+  ).toThrow(/UNIQUE/);
+  db.close();
+});

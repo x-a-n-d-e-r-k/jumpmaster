@@ -184,6 +184,12 @@ describe('guarded scalar paths', () => {
       { crew: { autoRetry: true } },
       'The crew in web will retry a failed implementation once on its own diagnosis, without asking you',
     ],
+    [
+      'crew.closeDone',
+      { crew: { closeDone: false } },
+      { crew: { closeDone: true } },
+      'Crew triage in web will be able to close an issue it finds already done',
+    ],
   ];
 
   test.each(cases)(

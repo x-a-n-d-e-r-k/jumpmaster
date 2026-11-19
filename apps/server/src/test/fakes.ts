@@ -8,6 +8,7 @@ import type {
   ForgeError,
   ForgeIssue,
   ForgeReview,
+  IssueStateReason,
   PullFacts,
   PullFiles,
   ReadProbe,
@@ -95,13 +96,14 @@ export interface FakeForgeState {
       labels: string[];
       issue?: FakeIssue;
       updatedAt?: string;
-      /** Set by an `updateIssue` close that names a reason. */
-      stateReason?: 'completed';
+      /** Set by an `updateIssue` close that names a reason, or by `closeIssue` with one. */
+      stateReason?: IssueStateReason;
     }
   >;
   /** Adds an open issue (author type `User` unless given). */
   addIssue(i: Partial<FakeIssue> & { number: number }): void;
-  closeIssue(n: number): void;
+  /** Closes the issue, naming why when `reason` is given. */
+  closeIssue(n: number, reason?: IssueStateReason): void;
   reopenIssue(n: number): void;
   setLabels(n: number, labels: string[]): void;
   /**
@@ -319,11 +321,15 @@ function createState(opts: {
         updatedAt: issue.createdAt,
       });
     },
-    closeIssue(n) {
-      mustIssue(state, n).state = 'closed';
+    closeIssue(n, reason) {
+      const e = mustIssue(state, n);
+      e.state = 'closed';
+      if (reason) e.stateReason = reason;
     },
     reopenIssue(n) {
-      mustIssue(state, n).state = 'open';
+      const e = mustIssue(state, n);
+      e.state = 'open';
+      delete e.stateReason;
     },
     setLabels(n, labels) {
       mustIssue(state, n).labels = [...labels];
@@ -417,6 +423,7 @@ function forgeFor(
         return {
           body: e.issue?.body ?? '',
           state: e.state,
+          ...(e.stateReason ? { stateReason: e.stateReason } : {}),
           labels: [...e.labels],
           ...(e.issue ? { author: e.issue.author } : {}),
         };

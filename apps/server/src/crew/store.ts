@@ -143,8 +143,10 @@ export function setCrewIssue(db: Db, id: number, patch: CrewIssuePatch, now: Dat
   });
 }
 
-export type TriageState = 'open' | 'waiting' | 'done' | 'failed';
-export type TriageOutcome = 'split' | 'questions' | 'not-agent-work';
+export type TriageState = 'open' | 'waiting' | 'verifying' | 'done' | 'failed';
+export type TriageOutcome = 'split' | 'questions' | 'not-agent-work' | 'already-done';
+/** What an `already-done` verdict cites as having done the work (#466). */
+export type TriageEvidence = { pulls?: number[]; issues?: number[] };
 
 /** One triage-labeled issue text by a trusted author: what a triage drop works on (#184). */
 export type TriageRequest = {
@@ -162,23 +164,35 @@ export type TriageRequest = {
   gateReasons: string[] | null;
   attempts: number;
   briefingId: number | null;
+  /** An `already-done` verdict's citations, while and after the server verifies them. */
+  evidence: TriageEvidence | null;
+  /** Why the server refused the last attempt's verdict (numbers only), for the retry's input. */
+  lastError: string | null;
   createdAt: string;
   updatedAt: string;
 };
 
 export type TriagePatch = Partial<
-  Pick<TriageRequest, 'state' | 'outcome' | 'reason' | 'attempts' | 'briefingId'>
+  Pick<
+    TriageRequest,
+    'state' | 'outcome' | 'reason' | 'attempts' | 'briefingId' | 'evidence' | 'lastError'
+  >
 >;
 
 const TRIAGE_COLS = `id, zone_id AS zoneId, issue_number AS issueNumber, title, body,
   body_sha AS bodySha, author, state, outcome, reason, gate_reasons AS gateReasons, attempts,
-  briefing_id AS briefingId, created_at AS createdAt, updated_at AS updatedAt`;
+  briefing_id AS briefingId, evidence_json AS evidence, last_error AS lastError,
+  created_at AS createdAt, updated_at AS updatedAt`;
 
-type TriageRow = Omit<TriageRequest, 'gateReasons'> & { gateReasons: string | null };
+type TriageRow = Omit<TriageRequest, 'gateReasons' | 'evidence'> & {
+  gateReasons: string | null;
+  evidence: string | null;
+};
 
 const triageOf = (r: TriageRow): TriageRequest => ({
   ...r,
   gateReasons: r.gateReasons === null ? null : (JSON.parse(r.gateReasons) as string[]),
+  evidence: r.evidence === null ? null : (JSON.parse(r.evidence) as TriageEvidence),
 });
 
 const TRIAGE_COLUMN: Record<keyof TriagePatch, string> = {
@@ -187,6 +201,8 @@ const TRIAGE_COLUMN: Record<keyof TriagePatch, string> = {
   reason: 'reason',
   attempts: 'attempts',
   briefingId: 'briefing_id',
+  evidence: 'evidence_json',
+  lastError: 'last_error',
 };
 
 export const triageBodySha = (body: string): string =>
@@ -194,8 +210,8 @@ export const triageBodySha = (body: string): string =>
 
 /**
  * Records a request for an issue's current text, once per body (`UNIQUE(zone, number, sha)`):
- * the same body again records nothing. A new body supersedes the issue's request still open (or
- * waiting on Command). Returns the new request's id, or null when nothing was recorded.
+ * the same body again records nothing. A new body supersedes the issue's request still open,
+ * waiting on Command or having its evidence verified. Returns the new request's id, or null when nothing was recorded.
  */
 export function recordTriageRequest(
   db: Db,
@@ -214,8 +230,10 @@ export function recordTriageRequest(
       .get(zoneId, issue.number, sha);
     if (seen) return null;
     db.prepare(
-      `UPDATE triage_requests SET state = 'done', reason = 'superseded', updated_at = ?
-         WHERE zone_id = ? AND issue_number = ? AND state IN ('open', 'waiting')`,
+      // A verdict still being verified loses its outcome: a superseded request leaves no trail.
+      `UPDATE triage_requests SET state = 'done', reason = 'superseded', updated_at = ?,
+         outcome = CASE WHEN state = 'verifying' THEN NULL ELSE outcome END
+         WHERE zone_id = ? AND issue_number = ? AND state IN ('open', 'waiting', 'verifying')`,
     ).run(at, zoneId, issue.number);
     const r = db
       .prepare(
@@ -256,7 +274,9 @@ export function setTriageRequest(db: Db, id: number, patch: TriagePatch, now: Da
   const keys = (Object.keys(patch) as (keyof TriagePatch)[]).filter((k) => patch[k] !== undefined);
   const sets = [...keys.map((k) => `${TRIAGE_COLUMN[k]} = @${k}`), 'updated_at = @updatedAt'];
   db.prepare(`UPDATE triage_requests SET ${sets.join(', ')} WHERE id = @id`).run({
-    ...Object.fromEntries(keys.map((k) => [k, patch[k]])),
+    ...Object.fromEntries(
+      keys.map((k) => [k, k === 'evidence' && patch[k] ? JSON.stringify(patch[k]) : patch[k]]),
+    ),
     updatedAt: now.toISOString(),
     id,
   });

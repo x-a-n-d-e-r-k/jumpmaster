@@ -528,9 +528,12 @@ export const ArbitrateOutputSchema = z.strictObject({
 });
 export type ArbitrateOutput = z.infer<typeof ArbitrateOutputSchema>;
 
+/** The most pull requests and issues an `already-done` triage verdict may cite, in all. */
+export const MAX_TRIAGE_EVIDENCE = 10;
+
 const TriageOutputObject = z.strictObject({
   summary: z.string().max(4000),
-  outcome: z.enum(['split', 'questions', 'not-agent-work']),
+  outcome: z.enum(['split', 'questions', 'not-agent-work', 'already-done']),
   children: z
     .array(
       z.strictObject({
@@ -553,11 +556,22 @@ const TriageOutputObject = z.strictObject({
     })
     .optional(),
   reason: z.string().max(500).optional(),
+  /**
+   * With `already-done` only: the merged pull requests and the issues closed as completed that
+   * did the work. The server verifies each before anything is written to the forge (#466).
+   */
+  evidence: z
+    .strictObject({
+      pulls: z.array(z.number().int().positive()).max(MAX_TRIAGE_EVIDENCE).optional(),
+      issues: z.array(z.number().int().positive()).max(MAX_TRIAGE_EVIDENCE).optional(),
+    })
+    .optional(),
 });
 
 /**
  * A triage drop's verdict on one issue. `split` carries 1..5 children and nothing else,
- * `questions` a briefing and nothing else, `not-agent-work` a reason and nothing else.
+ * `questions` a briefing and nothing else, `not-agent-work` a reason and nothing else,
+ * `already-done` a reason and 1..10 evidence entries and nothing else.
  */
 export const TriageOutputSchema = TriageOutputObject.superRefine((v, ctx) => {
   const children = v.children?.length ?? 0;
@@ -572,9 +586,17 @@ export const TriageOutputSchema = TriageOutputObject.superRefine((v, ctx) => {
     if (children > 0) fail('children', 'questions carries no children');
     if (v.reason !== undefined) fail('reason', 'questions carries no reason');
   } else {
-    if (v.reason === undefined) fail('reason', 'not-agent-work needs a reason');
-    if (children > 0) fail('children', 'not-agent-work carries no children');
-    if (v.briefing !== undefined) fail('briefing', 'not-agent-work carries no briefing');
+    if (v.reason === undefined) fail('reason', `${v.outcome} needs a reason`);
+    if (children > 0) fail('children', `${v.outcome} carries no children`);
+    if (v.briefing !== undefined) fail('briefing', `${v.outcome} carries no briefing`);
+  }
+  const evidence = (v.evidence?.pulls?.length ?? 0) + (v.evidence?.issues?.length ?? 0);
+  if (v.outcome === 'already-done') {
+    if (evidence < 1) fail('evidence', 'already-done needs at least one pull or issue');
+    if (evidence > MAX_TRIAGE_EVIDENCE)
+      fail('evidence', `already-done cites at most ${MAX_TRIAGE_EVIDENCE} items`);
+  } else if (v.evidence !== undefined) {
+    fail('evidence', `${v.outcome} carries no evidence`);
   }
 });
 export type TriageOutput = z.infer<typeof TriageOutputSchema>;

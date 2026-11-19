@@ -410,6 +410,17 @@ export function triageInput(
           },
         ]
       : []),
+    ...(req.lastError
+      ? [
+          {
+            // Server-written: why the last verdict was refused, naming numbers only (#466).
+            title: 'Last attempt refused',
+            name: 'last-refusal',
+            kind: 'trusted' as const,
+            text: req.lastError,
+          },
+        ]
+      : []),
     {
       title: "Command's rulings on this issue",
       name: 'rulings',

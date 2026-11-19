@@ -1328,6 +1328,22 @@ describe('GitHubForge issue writes', () => {
     expect(await f.getIssue(10)).toBeNull();
   });
 
+  test('getIssue names why a closed issue was closed (#466)', async () => {
+    const f = new GitHubForge('o', 'r', 'tok');
+    nock(api)
+      .get('/repos/o/r/issues/9')
+      .reply(200, issue(9, { state: 'closed', state_reason: 'completed' }));
+    expect(await f.getIssue(9)).toMatchObject({ state: 'closed', stateReason: 'completed' });
+    nock(api)
+      .get('/repos/o/r/issues/9')
+      .reply(200, issue(9, { state: 'closed', state_reason: 'not_planned' }));
+    expect(await f.getIssue(9)).toMatchObject({ state: 'closed', stateReason: 'not_planned' });
+    nock(api)
+      .get('/repos/o/r/issues/9')
+      .reply(200, issue(9, { state: 'closed', state_reason: 'something-new' }));
+    expect((await f.getIssue(9))?.stateReason).toBeUndefined();
+  });
+
   describe('goal-change writes (#362)', () => {
     test('createBranch posts the ref; an existing ref on the same SHA is success, on another SHA it throws', async () => {
       const f = new GitHubForge('o', 'r', 'tok');
