@@ -3086,6 +3086,45 @@ describe('forge.codeowners in an app-reviewer zone (issue #450)', () => {
     });
   });
 
+  describe('a PAT author with an app reviewer (issue #506)', () => {
+    const patAuthor = (codeowners: string) =>
+      appWorld({ codeowners, installations: { reviewer: 8 } });
+
+    test('people-only protected lines do not claim the jumpmaster-merge fence, and warn', async () => {
+      const c = await check(patAuthor(PROTECTED));
+      expect(`${c.summary} ${c.fix ?? ''}`).not.toContain('jumpmaster-merge limits');
+      expect(c.summary).not.toContain('ruleset limits who may merge');
+      expect(c.status).toBe('warn');
+      expect(c.summary).toContain('any account with write access');
+      expect(c.fix).toContain('make the author a GitHub App too');
+      expect(c.fix).toContain('machine user with a personal access token');
+      noSecrets(c);
+      noPage(c);
+    });
+
+    test('a person owning a non-protected path fails; the fix does not say to keep an author app', async () => {
+      const c = await check(patAuthor(`* @alice\n${PROTECTED}`));
+      expect(c.status).toBe('fail');
+      expect(c.fix).not.toContain('keep the author app');
+      expect(c.fix).not.toContain('hybrid reviewer');
+      expect(c.fix).toContain('machine user with a personal access token');
+      expect(c.fix).toContain('make the author a GitHub App too');
+      expect(`${c.summary} ${c.fix ?? ''}`).not.toContain('jumpmaster-merge limits');
+      noSecrets(c);
+      noPage(c);
+    });
+
+    test("the reviewer app named on a line still fails: an app can't be a code owner", async () => {
+      const c = await check(patAuthor(`* @jm-reviewer[bot]\n${PROTECTED}`));
+      expect(c.status).toBe('fail');
+      expect(c.fix).toContain("an app can't be a code owner");
+      expect(c.fix).toContain('remove @jm-reviewer[bot] from line 1 (*)');
+      expect(c.fix).not.toContain('keep the author app');
+      noSecrets(c);
+      noPage(c);
+    });
+  });
+
   test('code-owner review not required passes as today', async () => {
     const c = await check(appWorld({ required: false, codeowners: `* @alice\n${PROTECTED}` }));
     expect(c).toMatchObject({

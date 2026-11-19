@@ -2058,6 +2058,7 @@ async function codeownersCheck(
   zone: DropZoneConfig,
   r: ZoneReads,
   app?: string,
+  twoApp = false,
 ): Promise<DoctorCheck> {
   const base = { id: 'forge.codeowners', zoneId: zone.id, doc: doc('branch-rules') };
   const rules = await r.rules();
@@ -2085,7 +2086,7 @@ async function codeownersCheck(
   if (app !== undefined) {
     const read = await readCodeowners(r, branch);
     if (!read.ok) return readFailed(base, 'author', `read ${read.path}`, 'Contents: read', read);
-    return appCodeownersCheck(base, zone, app, read.text);
+    return appCodeownersCheck(base, zone, app, read.text, twoApp);
   }
   const reviewer = await r.logins.reviewer();
   if (!reviewer.ok)
@@ -2166,12 +2167,15 @@ async function readCodeowners(
  * `forge.codeowners` with a required code owner review in an app-reviewer zone (§5.2, §6): only
  * the protected paths may have owners, and they must be people; the jumpmaster-merge ruleset, not
  * CODEOWNERS, fences who may merge the rest. `slug` is the reviewer app's (`reviewerAppOf`).
+ * `twoApp` is true only when the author is an app too (`twoAppAuthorOf`): with a PAT author no
+ * `jumpmaster-merge` ruleset is required (issue #506), so an unowned rest has no merge fence.
  */
 function appCodeownersCheck(
   base: Pick<DoctorCheck, 'id' | 'zoneId' | 'doc'>,
   zone: DropZoneConfig,
   slug: string,
   text: string | null,
+  twoApp: boolean,
 ): DoctorCheck {
   const protectedList = zone.protectedPaths.join(', ');
   if (text === null)
@@ -2201,7 +2205,9 @@ function appCodeownersCheck(
         : []),
       ...(others.length > 0
         ? [
-            `To keep the owners on ${others.map(at).join(', ')}, use the hybrid reviewer: keep the author app and make the reviewer a machine user with a personal access token, which can be a code owner, and name it on ${others.length === 1 ? 'that line' : 'those lines'}. Otherwise remove the owners from ${others.length === 1 ? 'that line' : 'those lines'} (the protected lines stay people-only), or turn code-owner review off.`,
+            twoApp
+              ? `To keep the owners on ${others.map(at).join(', ')}, use the hybrid reviewer: keep the author app and make the reviewer a machine user with a personal access token, which can be a code owner, and name it on ${others.length === 1 ? 'that line' : 'those lines'}. Otherwise remove the owners from ${others.length === 1 ? 'that line' : 'those lines'} (the protected lines stay people-only), or turn code-owner review off.`
+              : `To keep the owners on ${others.map(at).join(', ')}, make the reviewer a machine user with a personal access token, which can be a code owner, and name it on ${others.length === 1 ? 'that line' : 'those lines'}. Otherwise make the author a GitHub App too, so a ${MERGE_RULESET} ruleset can fence who may merge, and remove the owners from ${others.length === 1 ? 'that line' : 'those lines'} (the protected lines stay people-only); or turn code-owner review off.`,
           ]
         : []),
     ];
@@ -2218,6 +2224,13 @@ function appCodeownersCheck(
       status: 'warn',
       summary: unowned,
       fix: 'In CODEOWNERS, make the last line covering each protected path name people (you, and anyone else who may approve), not the reviewer app (the last match wins).',
+    };
+  if (!twoApp)
+    return {
+      ...base,
+      status: 'warn',
+      summary: `code owner review is required: the protected paths are owned by people and nothing else has an owner, but the author is not a GitHub App, so nothing fences who may merge (no ${MERGE_RULESET} ruleset is required for a token author): any account with write access can then approve and merge a pull request that touches only the other paths`,
+      fix: `Either make the author a GitHub App too, then add the ${MERGE_RULESET} ruleset that forge.branch-rules describes, or make the reviewer a machine user with a personal access token, which can be a code owner, and name it on a * line ahead of the protected lines.`,
     };
   return {
     ...base,
@@ -3015,7 +3028,9 @@ export async function zoneChecks(
       readsCheck(zone, r, 'reviewer', appEntryFor(d, zone, 'reviewer')),
     ),
     g('forge.branch-rules', z, () => branchRulesCheck(d, zone, r)),
-    g('forge.codeowners', z, () => codeownersCheck(zone, r, reviewerAppOf(d, zone))),
+    g('forge.codeowners', z, () =>
+      codeownersCheck(zone, r, reviewerAppOf(d, zone), twoAppAuthorOf(d, zone) !== undefined),
+    ),
     g('forge.ci', z, () => ciCheck(zone, r)),
     g('forge.labels', z, () => labelsCheck(zone, r)),
     g('forge.private-clone', z, () => privateCloneCheck(d, zone, r)),
