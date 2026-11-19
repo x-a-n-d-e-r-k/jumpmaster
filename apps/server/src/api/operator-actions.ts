@@ -101,6 +101,7 @@ export function ruleAction(
     return fail(400, `a note is at most ${MAX_RULING_NOTE} characters`);
   const r = ruleBriefing(ctx.db, briefingId, optionId, note, ctx.now(), {
     ...(seen.optionsDigest ? { optionsDigest: seen.optionsDigest } : {}),
+    via: ctx.principal.via,
   });
   if (!r.ok) {
     const error = { 404: 'unknown briefing', 409: 'already ruled', 400: 'unknown option' };

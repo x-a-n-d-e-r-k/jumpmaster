@@ -1918,14 +1918,16 @@ describe('the crew retries a failed implementation once on its own diagnosis (#3
     await h.reconcile();
     expect(item(h)?.state).toBe('parked');
     const again = openBriefing(h);
-    expect(again?.decision).toBe('Issue #1 parked again after the crew retried it once. Retry it?');
+    expect(again?.decision).toBe(
+      'Issue #1 is parked again after the crew retried it once. Retry it, close it as done, or leave it?',
+    );
     expect(again?.why).toMatch(
       new RegExp(
         `^The crew already retried this once on ${retriedAt.slice(0, 10)}\\. Its diagnosis: `,
       ),
     );
     expect(again?.why).toContain(`It told the next attempt: ${INSTRUCTION}`);
-    expect(again?.options.map((o) => o.effect)).toEqual(['retry_item', 'none']);
+    expect(again?.options.map((o) => o.effect)).toEqual(['retry_item', 'close_item', 'none']);
     expect(crewMayRetry(h.db, h.zone, 1)).toBe(false);
 
     await diagnose(h, completed(diag({ diagnosis: 'Same again.' })));
@@ -2015,7 +2017,9 @@ describe('the crew retries a failed implementation once on its own diagnosis (#3
     syncParkBriefings(h.db, off, h.now());
     expect(getCrewRetry(h.db, 1)).toMatchObject({ outcome: 'skipped' });
     expect(item(h)?.state).toBe('parked');
-    expect(openBriefing(h)).toMatchObject({ decision: 'Issue #1 is parked. Retry it?' });
+    expect(openBriefing(h)).toMatchObject({
+      decision: 'Issue #1 is parked. Retry it, close it as done, or leave it?',
+    });
     expect(await applyCrewRetries(h.db, retryDeps(h), 'main', h.now())).toBe(0);
     expect(item(h)?.state).toBe('parked');
   });

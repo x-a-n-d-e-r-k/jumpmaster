@@ -104,6 +104,7 @@ describe('allow a gate change by Command ruling', () => {
     expect(b.decision).toContain('Read the PR diff at a1b2c3d on the forge before ruling.');
     expect(b.options).toEqual([
       { id: 'retry', label: 'Retry', effect: 'retry_item' },
+      { id: 'close', label: 'Close as done', effect: 'close_item' },
       { id: 'leave', label: 'Leave parked', effect: 'none' },
       {
         id: expect.stringMatching(/^allow-a1b2c3d4e5f6-[0-9a-f]{8}$/),
@@ -122,7 +123,7 @@ describe('allow a gate change by Command ruling', () => {
     const b = await parkAndBrief(w, id);
     expect(b.why.length).toBeLessThanOrEqual(8200);
     expect(b.why).toContain('too long to review here');
-    expect(b.options.map((o) => o.effect)).toEqual(['retry_item', 'none']);
+    expect(b.options.map((o) => o.effect)).toEqual(['retry_item', 'close_item', 'none']);
   });
 
   test('a truncated park reason offers no allow option', async () => {
@@ -136,7 +137,7 @@ describe('allow a gate change by Command ruling', () => {
     gateChange(w, HEAD, pkg({ test, ...many }));
     const b = await parkAndBrief(w, id);
     expect(b.why).toMatch(/\(\+\d+ more\)/);
-    expect(b.options.map((o) => o.effect)).toEqual(['retry_item', 'none']);
+    expect(b.options.map((o) => o.effect)).toEqual(['retry_item', 'close_item', 'none']);
   });
 
   test('a park not fully read offers no allow option', async () => {
@@ -146,7 +147,7 @@ describe('allow a gate change by Command ruling', () => {
     );
     const b = await parkAndBrief(w, id);
     expect(b.why).toContain('(not fully read: merge it by hand)');
-    expect(b.options.map((o) => o.effect)).toEqual(['retry_item', 'none']);
+    expect(b.options.map((o) => o.effect)).toEqual(['retry_item', 'close_item', 'none']);
   });
 
   test('a protected path park offers no allow option', async () => {
@@ -157,7 +158,7 @@ describe('allow a gate change by Command ruling', () => {
     });
     const b = await parkAndBrief(w, id);
     expect(b.why).toBe('protected path: .github/workflows/ci.yml');
-    expect(b.options.map((o) => o.effect)).toEqual(['retry_item', 'none']);
+    expect(b.options.map((o) => o.effect)).toEqual(['retry_item', 'close_item', 'none']);
   });
 
   test('allowing the current head un-parks the item; the next pass enqueues review', async () => {
@@ -316,7 +317,11 @@ describe('allow a gate change by Command ruling', () => {
       .prepare('UPDATE work_items SET reason = ? WHERE id = ?')
       .run('gate tool changed: lockfile not found (not fully read: merge it by hand)', id);
     await reconcile(w, plus(t0, 2 * MIN));
-    expect(parkedBriefing(w).options.map((o) => o.effect)).toEqual(['retry_item', 'none']);
+    expect(parkedBriefing(w).options.map((o) => o.effect)).toEqual([
+      'retry_item',
+      'close_item',
+      'none',
+    ]);
   });
 
   test('after a head-moved ruling the item is briefed again once the new head is judged', async () => {

@@ -16,8 +16,10 @@ import type { Db } from './db/open.js';
 import {
   ACTIVE_STATES_SQL,
   activeDropFor,
+  deleteOutbox,
   type GatePark,
   getGatePark,
+  getOutbox,
   getPullRequest,
   getWorkItem,
   getZoneMode,
@@ -39,7 +41,15 @@ import {
   openGoalChange,
 } from './goal-change.js';
 import { GOAL_KEY, recordObjectiveDone } from './goals.js';
-import type { ForgePair } from './outbox.js';
+import {
+  type CommentIssuePayload,
+  commentMarker,
+  type ForgePair,
+  type Op,
+  runOp,
+  sanitizeCrewText,
+  type UpdateIssuePayload,
+} from './outbox.js';
 import { retryParkedItem } from './sync.js';
 
 export type BriefingKind =
@@ -55,6 +65,7 @@ export type BriefingKind =
 export const EFFECTS = [
   'none',
   'retry_item',
+  'close_item',
   'promote_issue',
   'reject_issue',
   'restage_issue',
@@ -82,7 +93,10 @@ export const EFFECT_TEXT: Record<
     },
   },
   retry_item: {
-    text: 'the parked item goes back to work: an agent runs it again from where it parked',
+    text: 'the parked item goes back to work: an agent runs it again from where it parked, with your note, if you wrote one, as direction',
+  },
+  close_item: {
+    text: 'closes the issue as completed with a comment and stops work on it; nothing is merged',
   },
   promote_issue: { text: 'the issue gets the ready label; an implementer takes it as written' },
   reject_issue: { text: 'the issue is closed; the crew may file a replacement' },
@@ -399,7 +413,15 @@ export function hasOpenBriefing(db: Db, zoneId: string, subject: string): boolea
 }
 
 /**
- * Records Command's ruling in one transaction; it is applied by the next pass. A briefing is
+ * Who made a ruling: the browser (`session`), `ctl` (`token`) or the chat assistant (`chat`). Only
+ * Command's own (`COMMAND_VIAS`) note rides a retried item's next attempt as direction.
+ */
+export type RulingVia = 'session' | 'token' | 'chat';
+export const COMMAND_VIAS: readonly RulingVia[] = ['session', 'token'];
+
+/**
+ * Records Command's ruling in one transaction; it is applied by the next pass. `seen.via` records
+ * who made it (absent: unknown, and its note is never carried as direction). A briefing is
  * ruled once: a second ruling (another tab) is 409. The chosen option's label and effect are
  * recorded with it. An assistant (MCP) briefing can be rewritten while open, so a ruling on one
  * must name the option set it was made on (`optionsDigest`); otherwise, or if they changed, 409.
@@ -410,7 +432,7 @@ export function ruleBriefing(
   optionId: string,
   note: string,
   now: Date,
-  seen: { optionsDigest?: string } = {},
+  seen: { optionsDigest?: string; via?: RulingVia } = {},
 ):
   | { ok: true; rulingId: number }
   | { ok: false; status: 404 | 409 | 400; reason?: 'options changed' } {
@@ -432,9 +454,9 @@ export function ruleBriefing(
     const r = db
       .prepare(
         `INSERT INTO rulings (zone_id, briefing_id, choice, note, created_at, choice_label,
-           choice_effect) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           choice_effect, via) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(b.zoneId, id, optionId, note, at, option.label, option.effect);
+      .run(b.zoneId, id, optionId, note, at, option.label, option.effect, seen.via ?? null);
     return { ok: true as const, rulingId: Number(r.lastInsertRowid) };
   })();
 }
@@ -579,6 +601,8 @@ export async function applyEffect(
       return true;
     case 'allow_gate_change':
       throw new Error('allow_gate_change applies only through a ruling');
+    case 'close_item':
+      throw new Error('close_item applies only through a ruling');
     case 'resume_after_credits':
       applyCreditsEffect(db, subject, effect, now);
       return true;
@@ -684,6 +708,97 @@ export async function applyGateAllowance(
   return true;
 }
 
+/** How a Close as done's `apply_error` starts once it gave up: its parked briefing is raised again. */
+export const CLOSE_FAILED = 'close as done failed';
+/** A Close as done's forge writes: found again by keys derived from the ruling's id. */
+export const closeItemKeys = (zoneId: string, rulingId: number) => ({
+  comment: `comment:${zoneId}:close-done:${rulingId}`,
+  marker: commentMarker(zoneId, `close-done:${rulingId}`),
+  close: `close:${zoneId}:close-done:${rulingId}`,
+});
+
+/**
+ * Applies a Close as done ruling (`close_item`): a comment on the issue (with Command's note,
+ * sanitized, and a line for a PR still open), then the issue closed as completed, then the item
+ * `done`; each step only once the one before it is `done` in the outbox, so each write happens
+ * once. An item no longer parked, or of another zone, is left alone. Returns false when a step is
+ * not done yet: refused by the kill switch or observe mode (tried again, uncounted), or a forge
+ * failure (tried again, at most `MAX_APPLY_ATTEMPTS` times; then it throws `CLOSE_FAILED`, and the
+ * item stays parked).
+ */
+export async function applyCloseItem(
+  db: Db,
+  deps: RulingDeps,
+  zoneId: string,
+  ruling: { id: number; subject: string; note: string },
+  now: Date,
+): Promise<boolean> {
+  const itemId = idOf(ruling.subject, 'item:');
+  if (itemId === null) throw new Error(`close_item needs an item subject, got ${ruling.subject}`);
+  const item = getWorkItem(db, itemId);
+  if (!item || item.dropZoneId !== zoneId || item.state !== 'parked') return true;
+  const keys = closeItemKeys(zoneId, ruling.id);
+  const forges = deps.forges(zoneId);
+  const failedTry = (error: string): false => {
+    const tries = db
+      .prepare(
+        'UPDATE rulings SET apply_attempts = apply_attempts + 1 WHERE id = ? RETURNING apply_attempts AS n',
+      )
+      .get(ruling.id) as { n: number } | undefined;
+    if ((tries?.n ?? MAX_APPLY_ATTEMPTS) >= MAX_APPLY_ATTEMPTS) {
+      throw new Error(`${CLOSE_FAILED}: ${error}`);
+    }
+    return false;
+  };
+  const note = ruling.note.trim();
+  const pr = getPullRequest(db, item.id);
+  const body = [
+    'Closed by Command as already done.',
+    ...(note ? [sanitizeCrewText(note, [...serverScrubSet.values()])] : []),
+    // Outside the sanitized note, so its number links.
+    ...(pr?.state === 'open' ? [`PR #${pr.number} is still open.`] : []),
+  ].join('\n\n');
+  const comment: Op = {
+    kind: 'comment_issue',
+    opKey: keys.comment,
+    zoneId,
+    itemId: null,
+    payload: { number: item.issueNumber, body, marker: keys.marker } satisfies CommentIssuePayload,
+  };
+  const close: Op = {
+    kind: 'update_issue',
+    opKey: keys.close,
+    zoneId,
+    itemId: null,
+    payload: {
+      number: item.issueNumber,
+      state: 'closed',
+      stateReason: 'completed',
+    } satisfies UpdateIssuePayload,
+  };
+  try {
+    // A refused comment (4xx) is tried afresh; one whose answer was lost is read back by marker.
+    if (getOutbox(db, comment.opKey)?.state === 'failed') deleteOutbox(db, comment.opKey);
+    const c = await runOp(db, forges, comment, now);
+    if (c.state !== 'done') return failedTry(c.error ?? `comment ${c.state}`);
+    // A close is read back by the issue's state, so one not done is sent again only if still open.
+    const row = getOutbox(db, close.opKey);
+    if (row && row.state !== 'done') deleteOutbox(db, close.opKey);
+    const cl = await runOp(db, forges, close, now);
+    if (cl.state !== 'done') return failedTry(cl.error ?? `close ${cl.state}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.startsWith(CLOSE_FAILED)) throw err;
+    // The kill switch or observe mode refused the write: nothing was sent; wait for it to lift.
+    if (isKilled(db) || getZoneMode(db, zoneId, deps.zone(zoneId).mode) === 'observe') {
+      return false;
+    }
+    return failedTry(message);
+  }
+  setWorkItemState(db, item.id, 'done', 'closed by Command as done', now);
+  return true;
+}
+
 /**
  * Applies the zone's recorded rulings that are neither applied nor failed, each exactly once. A
  * failed effect records `apply_error` and is not tried again. A ruling whose effect waits for the
@@ -709,7 +824,8 @@ export async function applyPendingRulings(
 ): Promise<number> {
   const pending = db
     .prepare(
-      `SELECT r.id, r.choice, b.subject, b.kind, b.source, b.why, b.options_json AS optionsJson
+      `SELECT r.id, r.choice, r.note, b.subject, b.kind, b.source, b.why,
+         b.options_json AS optionsJson
          FROM rulings r JOIN briefings b ON b.id = r.briefing_id
        WHERE r.zone_id = ? AND r.applied_at IS NULL AND r.apply_error IS NULL
          AND b.subject NOT LIKE 'credits:%' ORDER BY r.id`,
@@ -717,6 +833,7 @@ export async function applyPendingRulings(
     .all(zoneId) as {
     id: number;
     choice: string;
+    note: string;
     subject: string;
     kind: BriefingKind;
     source: BriefingSource;
@@ -737,10 +854,12 @@ export async function applyPendingRulings(
       const done =
         option.effect === 'allow_gate_change'
           ? await applyGateAllowance(db, deps, zoneId, r, option, now)
-          : await applyEffect(db, deps, zoneId, r.subject, option.effect, now, {
-              rulingId: r.id,
-              source: r.source,
-            });
+          : option.effect === 'close_item'
+            ? await applyCloseItem(db, deps, zoneId, r, now)
+            : await applyEffect(db, deps, zoneId, r.subject, option.effect, now, {
+                rulingId: r.id,
+                source: r.source,
+              });
       if (!done) continue;
       if (r.kind === 'goal_change' && r.source === 'server' && option.effect === 'none') {
         // Leave the goals as they are: the crew's proposal is closed, so nothing ever opens it.
@@ -764,7 +883,8 @@ export async function applyPendingRulings(
  * `why` is unchanged; when the `why` changes they no longer apply: they are cleared and the
  * briefing is diagnosed afresh. An item whose briefing was ruled is not briefed again until it
  * parks again or its gate park is judged afresh (a new head, merge base or change list), unless
- * the ruling was refused as out of date: then Command is asked again about what it is parked on.
+ * the ruling was refused as out of date: then Command is asked again about what it is parked on,
+ * or its Close as done gave up (`CLOSE_FAILED`): then it is asked again, the error in the why.
  * A dismissed briefing counts as answered the same way. An item with a crew retry recorded and not
  * yet applied is not briefed: the crew is retrying it (#396).
  */
@@ -781,7 +901,8 @@ export function syncParkBriefings(db: Db, zone: DropZoneConfig, now: Date): void
     `SELECT 1 FROM briefings b WHERE b.zone_id = ? AND b.subject = ?
        AND b.state IN ('ruled','dismissed')
        AND b.updated_at >= ?
-       AND NOT EXISTS (SELECT 1 FROM rulings r WHERE r.briefing_id = b.id AND r.apply_error = ?)
+       AND NOT EXISTS (SELECT 1 FROM rulings r WHERE r.briefing_id = b.id
+         AND (r.apply_error = ? OR r.apply_error LIKE ? || '%'))
      LIMIT 1`,
   );
   const forget = db.prepare(
@@ -816,7 +937,7 @@ export function syncParkBriefings(db: Db, zone: DropZoneConfig, now: Date): void
       ? getGatePark(db, item.id)?.recordedAt
       : undefined;
     const at = judged && judged > parkedAtTime ? judged : parkedAtTime;
-    if (ruledSince.get(zone.id, subject, at, OUT_OF_DATE)) continue;
+    if (ruledSince.get(zone.id, subject, at, OUT_OF_DATE, CLOSE_FAILED)) continue;
     raiseBriefing(db, want, now);
   }
 }
@@ -954,14 +1075,35 @@ function crewRetriedWhy(db: Db, itemId: number): string | undefined {
   return `The crew already retried this once on ${r.appliedAt.slice(0, 10)}. Its diagnosis: ${diagnosis}. It told the next attempt: ${redact(r.instruction, secrets)}`;
 }
 
+/** What every non-gate parked briefing asks Command. */
+const PARK_QUESTION = 'Retry it, close it as done, or leave it?';
+
+/**
+ * Why the item's last Close as done gave up, when its latest ruling was one that did: the error,
+ * redacted (the server's scrub set and token shapes). Undefined otherwise.
+ */
+function closeFailure(db: Db, zoneId: string, itemId: number): string | undefined {
+  const r = db
+    .prepare(
+      `SELECT r.choice_effect AS effect, r.apply_error AS error FROM rulings r
+         JOIN briefings b ON b.id = r.briefing_id
+       WHERE r.zone_id = ? AND b.subject = ? ORDER BY r.id DESC LIMIT 1`,
+    )
+    .get(zoneId, `item:${itemId}`) as { effect: string | null; error: string | null } | undefined;
+  if (r?.effect !== 'close_item' || !r.error?.startsWith(CLOSE_FAILED)) return undefined;
+  const text = r.error.slice(CLOSE_FAILED.length);
+  return `Close as done failed${redact(text, [...serverScrubSet.values()])}`;
+}
+
 /** The parked briefing the server raises for `item` now. */
 function parkBriefing(db: Db, zoneId: string, item: WorkItem): NewBriefing {
   const reason = item.reason ?? 'no reason recorded';
   const options: BriefingOption[] = [
     { id: 'retry', label: 'Retry', effect: 'retry_item' },
+    { id: 'close', label: 'Close as done', effect: 'close_item' },
     { id: 'leave', label: 'Leave parked', effect: 'none' },
   ];
-  let decision = `Issue #${item.issueNumber} is parked. Retry it?`;
+  let decision = `Issue #${item.issueNumber} is parked. ${PARK_QUESTION}`;
   let why = gateFailureParkWhy(db, item) ?? reason;
   const park = GATE_PARK_PREFIXES.some((p) => reason.startsWith(p))
     ? getGatePark(db, item.id)
@@ -993,10 +1135,12 @@ function parkBriefing(db: Db, zoneId: string, item: WorkItem): NewBriefing {
   if (crewRetried !== undefined) {
     // A refused re-run did not retry the item: it is parked as it was.
     if (getCrewRetry(db, item.id)?.outcome === 'retried') {
-      decision = `Issue #${item.issueNumber} parked again after the crew retried it once. Retry it?`;
+      decision = `Issue #${item.issueNumber} is parked again after the crew retried it once. ${PARK_QUESTION}`;
     }
     why = `${crewRetried}\n\n${why}`;
   }
+  const closeFailed = closeFailure(db, zoneId, item.id);
+  if (closeFailed !== undefined) why = `${closeFailed}\n\n${why}`;
   return {
     zoneId,
     kind: 'parked',
