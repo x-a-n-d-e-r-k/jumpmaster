@@ -1069,3 +1069,62 @@ describe('loading an image fetched from the server (issue #141)', () => {
     ).rejects.toThrow(`(it names ${other})`);
   });
 });
+
+describe('the image sweep on the engine (issue #425)', () => {
+  const ID = `sha256:${'c'.repeat(64)}`;
+  const REF = `ghcr.io/o/x@${D}`;
+  function sweepDocker(o: { images?: Record<string, string>; removeError?: number } = {}) {
+    const calls: unknown[] = [];
+    const docker = {
+      getImage(name: string) {
+        return {
+          async inspect() {
+            const id = o.images?.[name];
+            if (!id) throw Object.assign(new Error('no such image'), { statusCode: 404 });
+            return { Id: id };
+          },
+          async remove(opts: unknown) {
+            calls.push({ remove: name, opts });
+            if (o.removeError)
+              throw Object.assign(new Error(`status ${o.removeError}`), {
+                statusCode: o.removeError,
+              });
+          },
+        };
+      },
+      async listContainers(opts: unknown) {
+        calls.push({ list: opts });
+        return [
+          { Id: 'c1', Image: REF, ImageID: ID, State: 'exited' },
+          { Id: 'c2', Image: 'busybox', ImageID: 'sha256:b', State: 'running' },
+        ];
+      },
+    };
+    return { driver: new DockerDriver(docker as never), calls };
+  }
+
+  test('imageId names the image a reference resolves to, or undefined when there is none', async () => {
+    const d = sweepDocker({ images: { [REF]: ID } });
+    expect(await d.driver.imageId(`ghcr.io/o/x:v1@${D}`)).toBe(ID);
+    expect(await d.driver.imageId(`ghcr.io/o/y@${D}`)).toBeUndefined();
+  });
+
+  test('removeImageRef never forces; gone is fine, in use throws', async () => {
+    const ok = sweepDocker();
+    await ok.driver.removeImageRef(REF);
+    expect(ok.calls).toEqual([{ remove: REF, opts: { force: false, noprune: false } }]);
+    await sweepDocker({ removeError: 404 }).driver.removeImageRef(REF);
+    await expect(sweepDocker({ removeError: 409 }).driver.removeImageRef(REF)).rejects.toThrow(
+      'status 409',
+    );
+  });
+
+  test('listContainers lists every container, stopped ones too', async () => {
+    const d = sweepDocker();
+    expect(await d.driver.listContainers()).toEqual([
+      { id: 'c1', image: REF, imageId: ID },
+      { id: 'c2', image: 'busybox', imageId: 'sha256:b' },
+    ]);
+    expect(d.calls).toEqual([{ list: { all: true } }]);
+  });
+});
