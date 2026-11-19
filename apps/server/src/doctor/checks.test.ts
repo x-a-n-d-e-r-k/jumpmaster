@@ -2860,6 +2860,37 @@ describe('forge.branch-rules in a two-app zone needs jumpmaster-merge (issue #43
     noSecrets(c);
   });
 
+  test('a jumpmaster-merge with more than Restrict updates that the author app bypasses names the real fix', async () => {
+    const c = await check(appWorld({ author: [main(), merge('yes', false)] }));
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('jumpmaster-merge must hold only the Restrict updates rule');
+    expect(c.fix).toContain('tick only Restrict updates');
+    expect(c.fix).toContain('jm-author');
+    expect(c.fix).not.toContain('Remove the bot accounts');
+    noSecrets(c);
+  });
+
+  test('the same jumpmaster-merge beside another rules problem still names the real fix', async () => {
+    const w = appWorld({ author: [main(), merge('yes', false)] });
+    const r = w.f.state.rules.author;
+    if (r.kind === 'ok') r.rules = { ...r.rules, dismissStaleOnPush: false };
+    const c = await check(w);
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('stale approvals not dismissed');
+    expect(c.summary).toContain('jumpmaster-merge must hold only the Restrict updates rule');
+    expect(c.summary).not.toContain('bot can bypass');
+    expect(c.fix).toContain('tick only Restrict updates');
+    expect(c.fix).not.toContain('Remove the bot accounts');
+    noSecrets(c);
+  });
+
+  test('an author app that can bypass the main ruleset still fails as bot can bypass', async () => {
+    const c = await check(appWorld({ author: [main('yes'), merge('yes')] }));
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('bot can bypass');
+    expect(c.fix).toContain('Remove the bot accounts');
+  });
+
   test("an author app that can't bypass jumpmaster-merge fails", async () => {
     const c = await check(appWorld({ author: [main(), merge('no')] }));
     expect(c.status).toBe('fail');
