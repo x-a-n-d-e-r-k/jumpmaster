@@ -32,7 +32,12 @@ import {
   type Stick,
 } from '../db/repo.js';
 import { FABLE_PLANS } from '../fable.js';
-import { branchProtectionProblems, codeownersFindings, MERGE_RULESET } from '../flow/guards.js';
+import {
+  appCodeownersFindings,
+  branchProtectionProblems,
+  codeownersFindings,
+  MERGE_RULESET,
+} from '../flow/guards.js';
 import {
   type BranchRulesRead,
   type Forge,
@@ -1832,7 +1837,15 @@ async function branchRulesCheck(
 
 const CODEOWNERS_PATHS = ['.github/CODEOWNERS', 'CODEOWNERS', 'docs/CODEOWNERS'];
 
-async function codeownersCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck> {
+/**
+ * `forge.codeowners`. `app` is the reviewer app's slug in an app-reviewer zone (§5.2, §6): an app
+ * can't be a code owner (F14), so there nothing but the protected paths may have an owner.
+ */
+async function codeownersCheck(
+  zone: DropZoneConfig,
+  r: ZoneReads,
+  app?: string,
+): Promise<DoctorCheck> {
   const base = { id: 'forge.codeowners', zoneId: zone.id, doc: doc('branch-rules') };
   const rules = await r.rules();
   const required = [rules.author, rules.reviewer].some(
@@ -1856,18 +1869,17 @@ async function codeownersCheck(zone: DropZoneConfig, r: ZoneReads): Promise<Doct
   if (!required)
     return { ...base, status: 'pass', summary: 'the rules do not require a code owner review' };
   const branch = await r.branch();
+  if (app !== undefined) {
+    const read = await readCodeowners(r, branch);
+    if (!read.ok) return readFailed(base, 'author', `read ${read.path}`, 'Contents: read', read);
+    return appCodeownersCheck(base, zone, app, read.text);
+  }
   const reviewer = await r.logins.reviewer();
   if (!reviewer.ok)
     return readFailed(base, 'reviewer', 'read its own account', 'any valid token', reviewer);
-  let text: string | null = null;
-  for (const p of CODEOWNERS_PATHS) {
-    const got = await attempt(() => r.pair.author.getFileAt(branch, p));
-    if (!got.ok) return readFailed(base, 'author', `read ${p}`, 'Contents: read', got);
-    if (got.value !== null) {
-      text = got.value;
-      break;
-    }
-  }
+  const read = await readCodeowners(r, branch);
+  if (!read.ok) return readFailed(base, 'author', `read ${read.path}`, 'Contents: read', read);
+  const text = read.text;
   const github = `/zones/${encodeURIComponent(zone.id)}/github`;
   if (text === null)
     return {
@@ -1921,6 +1933,83 @@ async function codeownersCheck(zone: DropZoneConfig, r: ZoneReads): Promise<Doct
     ...base,
     status: 'pass',
     summary: `code owner review is required: the protected paths are owned by people, and the reviewer ${reviewer.value} owns the rest, so GitHub holds a protected-path pull request for a person and merges the others`,
+  };
+}
+
+/** The first CODEOWNERS file GitHub would read on `branch`, or null when there is none. */
+async function readCodeowners(
+  r: ZoneReads,
+  branch: string,
+): Promise<{ ok: true; text: string | null } | (Failed & { path: string })> {
+  for (const p of CODEOWNERS_PATHS) {
+    const got = await attempt(() => r.pair.author.getFileAt(branch, p));
+    if (!got.ok) return { ...got, path: p };
+    if (got.value !== null) return { ok: true, text: got.value };
+  }
+  return { ok: true, text: null };
+}
+
+/**
+ * `forge.codeowners` with a required code owner review in an app-reviewer zone (§5.2, §6): only
+ * the protected paths may have owners, and they must be people; the jumpmaster-merge ruleset, not
+ * CODEOWNERS, fences who may merge the rest. `slug` is the reviewer app's (`reviewerAppOf`).
+ */
+function appCodeownersCheck(
+  base: Pick<DoctorCheck, 'id' | 'zoneId' | 'doc'>,
+  zone: DropZoneConfig,
+  slug: string,
+  text: string | null,
+): DoctorCheck {
+  const protectedList = zone.protectedPaths.join(', ');
+  if (text === null)
+    return {
+      ...base,
+      status: 'warn',
+      summary:
+        "the rules require a code owner's review, and there is no CODEOWNERS file: nobody owns the protected paths on GitHub, so GitHub asks no person to review them",
+      fix: `Create .github/CODEOWNERS naming people (you, and anyone else who may approve) for the protected paths only (${protectedList}), and no owner for any other path.`,
+    };
+  const known = slug !== 'the reviewer app';
+  const login = known ? `${slug}[bot]` : undefined;
+  const found = appCodeownersFindings(text, zone, login);
+  const at = (f: { line: number; pattern: string }) => `line ${f.line} (${f.pattern})`;
+  const unowned =
+    found.warn.length > 0
+      ? `no line names a person for ${found.warn.map((w) => w.glob).join(', ')} (no line covers it, or the last line that does names no owner or only the reviewer app): GitHub asks no person for those protected paths`
+      : undefined;
+  if (found.fail.length > 0) {
+    const others = found.fail.filter((f) => f.others);
+    const apps = found.fail.filter((f) => f.app);
+    const fixes = [
+      ...(apps.length > 0
+        ? [
+            `The reviewer is a GitHub App, and an app can't be a code owner: remove @${login} from ${apps.map(at).join(', ')}.`,
+          ]
+        : []),
+      ...(others.length > 0
+        ? [
+            `To keep the owners on ${others.map(at).join(', ')}, use the hybrid reviewer: keep the author app and make the reviewer a machine user with a personal access token, which can be a code owner, and name it on ${others.length === 1 ? 'that line' : 'those lines'}. Otherwise remove the owners from ${others.length === 1 ? 'that line' : 'those lines'} (the protected lines stay people-only), or turn code-owner review off.`,
+          ]
+        : []),
+    ];
+    return {
+      ...base,
+      status: 'fail',
+      summary: `the rules require a code owner's review, and CODEOWNERS ${found.fail.map(at).join(', ')} gives an owner to paths that are not protected: the reviewer is a GitHub App (${slug}), which can't be a code owner, so no app approval satisfies those owners and nothing touching those paths can merge${unowned ? `; ${unowned}` : ''}`,
+      fix: fixes.join(' '),
+    };
+  }
+  if (unowned)
+    return {
+      ...base,
+      status: 'warn',
+      summary: unowned,
+      fix: 'In CODEOWNERS, make the last line covering each protected path name people (you, and anyone else who may approve), not the reviewer app (the last match wins).',
+    };
+  return {
+    ...base,
+    status: 'pass',
+    summary: `code owner review is required: the protected paths are owned by people and nothing else has an owner, so GitHub holds a protected-path pull request for a person, the reviewer app's (${slug}) approval merges the rest, and the ${MERGE_RULESET} ruleset limits who may merge`,
   };
 }
 
@@ -2711,7 +2800,7 @@ export async function zoneChecks(
     g('forge.author-reads', z, () => readsCheck(zone, r, 'author')),
     g('forge.reviewer-reads', z, () => readsCheck(zone, r, 'reviewer')),
     g('forge.branch-rules', z, () => branchRulesCheck(d, zone, r)),
-    g('forge.codeowners', z, () => codeownersCheck(zone, r)),
+    g('forge.codeowners', z, () => codeownersCheck(zone, r, reviewerAppOf(d, zone))),
     g('forge.ci', z, () => ciCheck(zone, r)),
     g('forge.labels', z, () => labelsCheck(zone, r)),
     g('forge.private-clone', z, () => privateCloneCheck(d, zone, r)),

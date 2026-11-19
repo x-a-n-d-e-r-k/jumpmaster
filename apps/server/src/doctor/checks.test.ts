@@ -2669,6 +2669,158 @@ describe('forge.branch-rules in a two-app zone needs jumpmaster-merge (issue #43
   });
 });
 
+describe('forge.codeowners in an app-reviewer zone (issue #450)', () => {
+  const entry = (appId: string, slug: string) =>
+    ({
+      source: 'vault',
+      fingerprint: 'fp',
+      entry: { appId, slug, clientId: 'c', pem: 'unused', importedAt: 'x' },
+    }) as const;
+  const apps = new Map([
+    ['octo', { author: entry('8', 'jm-author'), reviewer: entry('9', 'jm-reviewer') }],
+  ]) as unknown as ResolvedApps;
+  const PROTECTED = '.github/** @alice\nCODEOWNERS @alice\npnpm-workspace.yaml @alice\n';
+  const appWorld = (
+    o: {
+      codeowners?: string | null;
+      required?: boolean;
+      installations?: { author?: number; reviewer?: number };
+    } = {},
+  ) => {
+    const w = world({
+      zone: {
+        githubApp: {
+          repositoryId: 5,
+          installations: o.installations ?? { author: 7, reviewer: 8 },
+        },
+      },
+    });
+    w.deps.resolvedApps = () => apps;
+    for (const id of ['author', 'reviewer'] as const) {
+      const r = w.f.state.rules[id];
+      if (r.kind === 'ok') r.rules.requireCodeOwnerReview = o.required ?? true;
+    }
+    if (o.codeowners === null || o.codeowners === undefined)
+      w.f.state.files.delete('main:.github/CODEOWNERS');
+    else w.f.state.files.set('main:.github/CODEOWNERS', o.codeowners);
+    return w;
+  };
+  const check = async (w: ReturnType<typeof appWorld>) => one(await w.run(), 'forge.codeowners');
+  const noSecrets = (c: { summary: string; fix?: string }) =>
+    expect(`${c.summary} ${c.fix ?? ''}`).not.toMatch(/unused|ghp_|BEGIN|secret/i);
+  const noPage = (c: { summary: string; fix?: string }) =>
+    expect(`${c.summary} ${c.fix ?? ''}`).not.toMatch(/\/github|generated/);
+
+  test('a person owning a non-protected path fails, the fix naming the hybrid reviewer', async () => {
+    const c = await check(appWorld({ codeowners: `* @alice\n${PROTECTED}` }));
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('line 1 (*)');
+    expect(c.fix).toContain('hybrid reviewer');
+    expect(c.fix).not.toContain('[bot]');
+    expect(c.fix).not.toContain('/github');
+    noSecrets(c);
+    noPage(c);
+  });
+
+  test('a team owning a non-protected path fails, not warns', async () => {
+    const c = await check(appWorld({ codeowners: `* @org/team\n${PROTECTED}` }));
+    expect(c.status).toBe('fail');
+    expect(c.fix).toContain('hybrid reviewer');
+    expect(c.fix).not.toContain('[bot]');
+    noSecrets(c);
+    noPage(c);
+  });
+
+  test('an e-mail owning a non-protected path fails', async () => {
+    const c = await check(appWorld({ codeowners: `docs/ dev@example.com\n${PROTECTED}` }));
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('line 1 (docs/)');
+    noSecrets(c);
+  });
+
+  test("the reviewer app named on a line fails: an app can't be a code owner", async () => {
+    const c = await check(appWorld({ codeowners: `* @jm-reviewer[bot]\n${PROTECTED}` }));
+    expect(c.status).toBe('fail');
+    expect(c.fix).toContain("an app can't be a code owner");
+    expect(c.fix).toContain('remove @jm-reviewer[bot] from line 1 (*)');
+    expect(c.fix).not.toContain('hybrid reviewer');
+    noSecrets(c);
+    noPage(c);
+  });
+
+  test('a line naming the app and people gets both fixes', async () => {
+    const c = await check(appWorld({ codeowners: `* @alice @jm-reviewer[bot]\n${PROTECTED}` }));
+    expect(c.status).toBe('fail');
+    expect(c.fix).toContain("an app can't be a code owner");
+    expect(c.fix).toContain('hybrid reviewer');
+    noSecrets(c);
+  });
+
+  test('people on the protected paths and no other owner passes, naming jumpmaster-merge', async () => {
+    const c = await check(appWorld({ codeowners: PROTECTED }));
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('jumpmaster-merge');
+    expect(c.summary).toContain('jm-reviewer');
+    noSecrets(c);
+    noPage(c);
+  });
+
+  test('a later unowned line clears an earlier owner', async () => {
+    const c = await check(appWorld({ codeowners: `* @alice\n*\n${PROTECTED}` }));
+    expect(c.status).toBe('pass');
+  });
+
+  test('a protected path with no covering line warns, naming it', async () => {
+    const c = await check(appWorld({ codeowners: '.github/** @alice\nCODEOWNERS @alice\n' }));
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('pnpm-workspace.yaml');
+    noSecrets(c);
+    noPage(c);
+  });
+
+  test('a protected path owned only by the app warns', async () => {
+    const c = await check(
+      appWorld({
+        codeowners: '.github/** @jm-reviewer[bot]\nCODEOWNERS @alice\npnpm-workspace.yaml @alice\n',
+      }),
+    );
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('.github/**');
+    noSecrets(c);
+    noPage(c);
+  });
+
+  test('no CODEOWNERS warns, mentioning no bot owning anything', async () => {
+    const c = await check(appWorld({ codeowners: null }));
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('no CODEOWNERS');
+    expect(c.fix).toContain('.github/CODEOWNERS');
+    expect(`${c.summary} ${c.fix ?? ''}`).not.toContain('reviewer bot');
+    expect(`${c.summary} ${c.fix ?? ''}`).not.toContain('[bot]');
+    noSecrets(c);
+    noPage(c);
+  });
+
+  test("a hybrid zone (app author, PAT reviewer) keeps today's two-bot pass", async () => {
+    const c = await check(
+      appWorld({ codeowners: `* @reviewer-bot\n${PROTECTED}`, installations: { author: 7 } }),
+    );
+    expect(c).toMatchObject({
+      status: 'pass',
+      summary:
+        'code owner review is required: the protected paths are owned by people, and the reviewer reviewer-bot owns the rest, so GitHub holds a protected-path pull request for a person and merges the others',
+    });
+  });
+
+  test('code-owner review not required passes as today', async () => {
+    const c = await check(appWorld({ required: false, codeowners: `* @alice\n${PROTECTED}` }));
+    expect(c).toMatchObject({
+      status: 'pass',
+      summary: 'the rules do not require a code owner review',
+    });
+  });
+});
+
 describe('forge.admin for GitHub App roles (issue #447)', () => {
   type Bypass = {
     rulesetId: number;
