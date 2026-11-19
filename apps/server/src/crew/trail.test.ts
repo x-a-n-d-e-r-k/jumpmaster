@@ -838,6 +838,95 @@ describe('already-done: the server verifies the evidence, then the trail comment
     ]);
   });
 
+  const updateCalls = () => w.f.author.calls.filter((c) => c.method === 'updateIssue');
+
+  test('a close whose write failed is sent again on the next pass', async () => {
+    shipped();
+    const req = request179();
+    await triaged(done({ pulls: [120], issues: [119] }));
+    w.f.author.failNext('updateIssue', '5xx');
+    await trail();
+    // The comment and label swap are done; the close failed.
+    expect(commentsOn(179)).toHaveLength(1);
+    expect(issue179()).toMatchObject({ state: 'open', labels: ['jm-triaged'] });
+
+    await trail(plus(t0, 6 * MIN));
+    expect(issue179()).toMatchObject({ state: 'closed', stateReason: 'completed' });
+    expect(commentsOn(179)).toHaveLength(1);
+    expect(commentOps()).toHaveLength(1);
+    expect(closeOps().map((o) => o.state)).toEqual(['done']);
+    expect(updateCalls()).toHaveLength(2);
+    expect(getTriageRequest(w.db, req)).toMatchObject({ state: 'done', outcome: 'already-done' });
+  });
+
+  test('a close refused with a 4xx is sent again on the next pass', async () => {
+    shipped();
+    const req = request179();
+    await triaged(done({ pulls: [120], issues: [119] }));
+    w.f.author.failNext('updateIssue', { status: 422 });
+    await trail();
+    expect(issue179()?.state).toBe('open');
+    expect(closeOps().map((o) => o.state)).toEqual(['failed']);
+
+    await trail(plus(t0, 6 * MIN));
+    expect(issue179()).toMatchObject({ state: 'closed', stateReason: 'completed' });
+    expect(commentsOn(179)).toHaveLength(1);
+    expect(closeOps().map((o) => o.state)).toEqual(['done']);
+    expect(getTriageRequest(w.db, req)).toMatchObject({ state: 'done', outcome: 'already-done' });
+  });
+
+  test('a close that landed but whose answer was lost settles done with no further write', async () => {
+    shipped();
+    request179();
+    await triaged(done({ pulls: [120], issues: [119] }));
+    w.f.author.failNext('updateIssue', '5xx-after-success');
+    await trail();
+    expect(issue179()?.state).toBe('closed');
+    expect(closeOps().map((o) => o.state)).toEqual(['unknown']);
+    expect(updateCalls()).toHaveLength(1);
+
+    await trail(plus(t0, 6 * MIN));
+    expect(closeOps().map((o) => o.state)).toEqual(['done']);
+    expect(updateCalls()).toHaveLength(1);
+    expect(commentsOn(179)).toHaveLength(1);
+  });
+
+  test('an issue closed by a person after a failed close settles done with no further write', async () => {
+    shipped();
+    request179();
+    await triaged(done({ pulls: [120], issues: [119] }));
+    w.f.author.failNext('updateIssue', '5xx');
+    await trail();
+    w.f.state.closeIssue(179, 'completed');
+
+    await trail(plus(t0, 6 * MIN));
+    expect(closeOps().map((o) => o.state)).toEqual(['done']);
+    expect(updateCalls()).toHaveLength(1);
+  });
+
+  test('a failed close is not sent while the zone is paused or the kill switch is on, then is sent once active', async () => {
+    shipped();
+    request179();
+    await triaged(done({ pulls: [120], issues: [119] }));
+    w.f.author.failNext('updateIssue', '5xx');
+    await trail();
+    expect(updateCalls()).toHaveLength(1);
+
+    setZoneMode(w.db, 'main', 'paused', plus(t0, 6 * MIN));
+    expect(await trail(plus(t0, 7 * MIN))).toBe(0);
+    setZoneMode(w.db, 'main', 'active', plus(t0, 8 * MIN));
+    setKilled(w.db, true, plus(t0, 9 * MIN));
+    expect(await trail(plus(t0, 10 * MIN))).toBe(0);
+    expect(updateCalls()).toHaveLength(1);
+    expect(issue179()?.state).toBe('open');
+
+    setKilled(w.db, false, plus(t0, 11 * MIN));
+    await trail(plus(t0, 12 * MIN));
+    expect(updateCalls()).toHaveLength(2);
+    expect(issue179()).toMatchObject({ state: 'closed', stateReason: 'completed' });
+    expect(commentsOn(179)).toHaveLength(1);
+  });
+
   test('the reason is posted sanitized as sanitizeCrewText does, and cut to 500 characters', async () => {
     shipped();
     const reason = '@someone shipped it, see https://evil.example/x <!-- hidden --> and #12';
