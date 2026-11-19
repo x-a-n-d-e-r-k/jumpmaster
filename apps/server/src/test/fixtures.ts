@@ -72,6 +72,8 @@ export function makeZone(o: Partial<DropZoneConfig> = {}): DropZoneConfig {
       auditPerCycle: 1,
       autoRetry: true,
       closeDone: true,
+      triageBacklog: true,
+      backlogSkipLabels: ['epic', 'idea', 'needs-design', 'needs-feedback', 'wontfix'],
     },
     botLogins: [],
     authorLoginAliases: [],

@@ -12,6 +12,7 @@ import {
   insertCrewIssue,
   listTriageRequests,
   setCrewIssue,
+  setTriageRequest,
 } from './crew/store.js';
 import type { Db } from './db/open.js';
 import { openDb } from './db/open.js';
@@ -926,6 +927,203 @@ describe('triage requests at sync (#184)', () => {
     const w = world({ crew: false });
     await syncDropZone(w.db, w.forges, w.zone, t0);
     expect(rows(w)).toEqual([]);
+  });
+});
+
+describe('backlog issues to crew triage (#467)', () => {
+  const BODY = 'Make the zone page show the backlog count.';
+  /** A crew-on world whose open issues are the given ones, all by `human` unless set. */
+  const world = (
+    issues: Array<Partial<ForgeIssue> & { number: number }>,
+    crew: Partial<DropZoneConfig['crew']> = {},
+  ) => {
+    const w = zoneWorld({ crew: { ...makeZone().crew, enabled: true, ...crew } });
+    for (const n of [1, 2, 3, 4, 5]) w.f.state.closeIssue(n);
+    for (const i of issues)
+      w.f.state.addIssue({ title: `Issue ${i.number}`, body: BODY, labels: [], ...i });
+    return w;
+  };
+  const rows = (w: ReturnType<typeof zoneWorld>) =>
+    listTriageRequests(w.db, 'main').map((r) => ({
+      n: r.issueNumber,
+      state: r.state,
+      reason: r.reason,
+    }));
+  const sync = (w: ReturnType<typeof zoneWorld>, at = t0) =>
+    syncDropZone(w.db, w.forges, w.zone, at);
+
+  test('default on: an unlabeled trusted issue gets one open request with its title and body', async () => {
+    const w = world([{ number: 178, title: 'Backlog count' }]);
+    expect(w.zone.crew.triageBacklog).toBe(true);
+    await sync(w);
+    const reqs = listTriageRequests(w.db, 'main');
+    expect(reqs).toHaveLength(1);
+    expect(reqs[0]).toMatchObject({
+      issueNumber: 178,
+      state: 'open',
+      title: 'Backlog count',
+      body: BODY,
+      author: 'human',
+      attempts: 0,
+    });
+  });
+
+  describe('exclusions record nothing', () => {
+    test.each<[string, Partial<ForgeIssue>]>([
+      ['the ready label', { labels: ['agent-ready'], body: FORMATTED }],
+      ['the staged label', { labels: ['agent-staged'] }],
+      ['the triaged label', { labels: ['jm-triaged'] }],
+      ['a Bot author', { author: 'helper', authorType: 'Bot' }],
+      ['an Epic label', { labels: ['Epic'] }],
+      ['an untrusted author', { author: 'stranger' }],
+    ])('%s', async (_, o) => {
+      const w = world([{ number: 178, ...o }]);
+      w.f.state.trusted.push('helper');
+      await sync(w);
+      expect(rows(w)).toEqual([]);
+    });
+
+    test('a crew-filed body', async () => {
+      const w = world([{ number: 178, body: `${BODY}\n\n<!-- jm:op:issue:main:k1 -->` }]);
+      await sync(w);
+      expect(rows(w)).toEqual([]);
+    });
+
+    test('a trust lookup that throws', async () => {
+      const w = world([{ number: 178 }]);
+      w.f.author.isTrusted = async () => {
+        throw new Error('fake 502');
+      };
+      await sync(w);
+      expect(rows(w)).toEqual([]);
+    });
+  });
+
+  test('two passes over the same body record one request', async () => {
+    const w = world([{ number: 178 }]);
+    await sync(w);
+    await sync(w, plus(t0, 60_000));
+    expect(rows(w)).toEqual([{ n: 178, state: 'open', reason: null }]);
+  });
+
+  test('a changed body while open records a second request and supersedes the first', async () => {
+    const w = world([{ number: 178 }]);
+    await sync(w);
+    const e = w.f.state.issues.get(178);
+    if (e?.issue) e.issue.body = `${BODY}\n\nEdited.`;
+    await sync(w, plus(t0, 60_000));
+    expect(rows(w)).toEqual([
+      { n: 178, state: 'done', reason: 'superseded' },
+      { n: 178, state: 'open', reason: null },
+    ]);
+  });
+
+  describe('pacing', () => {
+    const five = () => world([14, 12, 10, 13, 11].map((number) => ({ number })));
+
+    test('five backlog issues: the three lowest numbers after one pass, none more while open', async () => {
+      const w = five();
+      await sync(w);
+      expect(rows(w).map((r) => r.n)).toEqual([10, 11, 12]);
+      await sync(w, plus(t0, 60_000));
+      expect(rows(w).map((r) => r.n)).toEqual([10, 11, 12]);
+    });
+
+    test('one more once one of them is done', async () => {
+      const w = five();
+      await sync(w);
+      const [first] = listTriageRequests(w.db, 'main');
+      setTriageRequest(w.db, first?.id ?? -1, { state: 'done', outcome: 'questions' }, t0);
+      await sync(w, plus(t0, 60_000));
+      expect(
+        rows(w)
+          .filter((r) => r.state === 'open')
+          .map((r) => r.n),
+      ).toEqual([11, 12, 13]);
+    });
+
+    test('a triage-labeled issue in the same pass is recorded on top of the three', async () => {
+      const w = five();
+      w.f.state.addIssue({ number: 20, body: BODY, labels: ['jm-triage'] });
+      await sync(w);
+      expect(rows(w).map((r) => r.n)).toEqual([20, 10, 11, 12]);
+    });
+  });
+
+  describe('stale requests', () => {
+    test('an issue labeled ready before its drop ran is superseded', async () => {
+      const w = world([{ number: 178 }]);
+      await sync(w);
+      const e = w.f.state.issues.get(178);
+      // Drop-ready, so intake takes it rather than sending it back to triage.
+      if (e?.issue) e.issue.body = FORMATTED;
+      w.f.state.setLabels(178, ['agent-ready']);
+      await sync(w, plus(t0, 60_000));
+      expect(rows(w)).toEqual([{ n: 178, state: 'done', reason: 'superseded' }]);
+    });
+
+    test('an issue closed before its drop ran is superseded', async () => {
+      const w = world([{ number: 178 }]);
+      await sync(w);
+      w.f.state.closeIssue(178);
+      await sync(w, plus(t0, 60_000));
+      expect(rows(w)).toEqual([{ n: 178, state: 'done', reason: 'superseded' }]);
+    });
+
+    test('a request with attempts is not superseded', async () => {
+      const w = world([{ number: 178 }]);
+      await sync(w);
+      const [r] = listTriageRequests(w.db, 'main');
+      setTriageRequest(w.db, r?.id ?? -1, { attempts: 1 }, t0);
+      w.f.state.closeIssue(178);
+      await sync(w, plus(t0, 60_000));
+      expect(rows(w)).toEqual([{ n: 178, state: 'open', reason: null }]);
+    });
+
+    test('a triage-labeled request is not superseded', async () => {
+      const w = world([{ number: 179, labels: ['jm-triage'] }]);
+      await sync(w);
+      await sync(w, plus(t0, 60_000));
+      expect(rows(w)).toEqual([{ n: 179, state: 'open', reason: null }]);
+    });
+  });
+
+  test('triageBacklog false: only the triage-labeled issue is recorded', async () => {
+    const w = world([{ number: 178 }, { number: 179, labels: ['jm-triage'] }], {
+      triageBacklog: false,
+    });
+    await sync(w);
+    expect(rows(w).map((r) => r.n)).toEqual([179]);
+  });
+
+  test('crew disabled: nothing is recorded', async () => {
+    const w = world([{ number: 178 }], { enabled: false });
+    await sync(w);
+    expect(rows(w)).toEqual([]);
+  });
+
+  test('a failed unfiltered listing records no backlog request; the labeled issue still is', async () => {
+    const w = world([{ number: 178 }, { number: 179, labels: ['jm-triage'] }]);
+    const real = w.f.author.listOpenIssues;
+    w.f.author.listOpenIssues = async (label) => {
+      if (label === undefined) throw new Error('fake 502');
+      return real(label);
+    };
+    await expect(sync(w)).resolves.toBeDefined();
+    expect(rows(w).map((r) => r.n)).toEqual([179]);
+  });
+
+  test('D5: the same text by either path records the same gate reasons', async () => {
+    const body = 'Edit .github/workflows/ci.yml to cache deps.';
+    const w = world([
+      { number: 178, title: 'Cache deps', body },
+      { number: 179, title: 'Cache deps', body, labels: ['jm-triage'] },
+    ]);
+    await sync(w);
+    const reqs = listTriageRequests(w.db, 'main');
+    expect(reqs.map((r) => r.issueNumber).sort()).toEqual([178, 179]);
+    expect(reqs[0]?.gateReasons).not.toBeNull();
+    expect(reqs[0]?.gateReasons).toEqual(reqs[1]?.gateReasons);
   });
 });
 

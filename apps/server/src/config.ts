@@ -123,6 +123,8 @@ const CREW_DEFAULTS = {
   auditPerCycle: 1,
   autoRetry: true,
   closeDone: true,
+  triageBacklog: true,
+  backlogSkipLabels: ['epic', 'idea', 'needs-design', 'needs-feedback', 'wontfix'],
 };
 
 export type McpConfig = {
@@ -197,6 +199,15 @@ const CrewSchema = z
      * evidence it cites (#466); false leaves the comment and keeps the issue open.
      */
     closeDone: z.boolean().default(CREW_DEFAULTS.closeDone),
+    /**
+     * Sends open issues that carry no Jumpmaster label to crew triage (#467), paced and once per
+     * body text, trusted authors only.
+     */
+    triageBacklog: z.boolean().default(CREW_DEFAULTS.triageBacklog),
+    /** A backlog issue carrying any of these labels (compared without case) is not sent. */
+    backlogSkipLabels: z
+      .array(z.string().min(1))
+      .default(() => [...CREW_DEFAULTS.backlogSkipLabels]),
   })
   .default(CREW_DEFAULTS);
 

@@ -54,6 +54,17 @@ function jmReason(issue: Pick<IssueFacts, 'labels' | 'body'>, zone: DropZoneConf
   return undefined;
 }
 
+/**
+ * The backlog rule: an issue is in the backlog when it carries no Jumpmaster label and no body
+ * Jumpmaster wrote. Sync's backlog triage (#467) reads the same rule.
+ */
+export function isBacklogIssue(
+  issue: Pick<IssueFacts, 'labels' | 'body'>,
+  zone: DropZoneConfig,
+): boolean {
+  return jmReason(issue, zone) === undefined;
+}
+
 /** Whether `login` has write access; a failed read counts as no, as intake's does (`sync.ts`). */
 async function trusted(forge: Forge, login: string): Promise<boolean> {
   try {
@@ -68,7 +79,7 @@ async function trusted(forge: Forge, login: string): Promise<boolean> {
  * kept. Each author is checked once; an author without write access makes the row unstartable.
  */
 export async function listBacklog(forge: Forge, zone: DropZoneConfig): Promise<BacklogIssue[]> {
-  const open = (await forge.listOpenIssues()).filter((i) => jmReason(i, zone) === undefined);
+  const open = (await forge.listOpenIssues()).filter((i) => isBacklogIssue(i, zone));
   const trust = new Map<string, boolean>();
   for (const author of new Set(open.map((i) => i.author))) {
     trust.set(author, await trusted(forge, author));

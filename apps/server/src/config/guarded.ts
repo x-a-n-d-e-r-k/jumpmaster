@@ -449,6 +449,10 @@ export const NOT_GUARDED: FreePath[] = [
   // crew.maxDropsPerDay still caps the drops.
   free('dropZones[].crew.auditPerCycle', PACE),
   free('dropZones[].crew.maxTriage', PACE),
+  // Both only choose which trusted authors' issues reach a triage drop, paced three at a time;
+  // crew.maxDropsPerDay still caps the drops.
+  free('dropZones[].crew.triageBacklog', 'whether unlabeled backlog issues go to crew triage'),
+  free('dropZones[].crew.backlogSkipLabels', 'labels that keep a backlog issue out of triage'),
 ];
 
 /**

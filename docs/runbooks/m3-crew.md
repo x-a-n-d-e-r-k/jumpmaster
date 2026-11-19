@@ -34,7 +34,9 @@ keeps working.
   "maxRefute": 3,
   "maxTriage": 2,
   "arbiter": true,
-  "auditPerCycle": 1
+  "auditPerCycle": 1,
+  "triageBacklog": true,
+  "backlogSkipLabels": ["epic", "idea", "needs-design", "needs-feedback", "wontfix"]
 }
 ```
 
@@ -60,6 +62,12 @@ And at the top level of the server config:
   crew issues under objective `triage:#N`, and go through refute and promotion like the lead's.
   On the original issue it leaves one comment and, for a split or not-agent-work, swaps
   `triageLabel` for `triagedLabel` (see the install runbook's "How Jumpmaster triages issues").
+- `triageBacklog` (on by default) sends backlog issues to triage too: open issues with no
+  Jumpmaster label and no Jumpmaster body, by a trusted author, not crew-filed, and carrying none
+  of `backlogSkipLabels` (compared without case). Each issue text is sent once, lowest issue
+  number first, and only while fewer than three backlog requests are open; triage-labeled issues
+  are not limited. A queued request whose issue is closed or labeled before its drop runs is
+  superseded, with nothing written to the forge. Set it to `false` to triage labeled issues only.
 - `arbiter` (on by default) lets a Fable arbiter settle a staged crew issue whose refutes ran out
   with at least one verdict, once per issue text, instead of briefing you. It runs only when Fable
   is available (`claude.plan` includes it and `fableModel` is set). Ruling A promotes as a passing
