@@ -38,6 +38,8 @@ export interface ChatMessage {
   input?: Record<string, unknown>;
   /** A tool step's result, redacted and capped; absent until one arrives. */
   result?: ToolStepResult;
+  /** When a tool step's result was pruned (#515); absent while it is kept. */
+  resultPrunedAt?: string;
 }
 
 /** What a tool step gave back, as stored (#502). */
@@ -57,9 +59,12 @@ const THREAD_COLS = `id, title, focus_kind AS focusKind, focus_zone_id AS focusZ
 const MESSAGE_COLS = `id, thread_id AS threadId, seq, role, text, state, session_hash AS sessionHash,
   usage_json AS usageJson, error, created_at AS createdAt, tool_name AS toolName,
   input_json AS inputJson, result_text AS resultText, result_truncated AS resultTruncated,
-  result_lines AS resultLines, result_error AS resultError`;
+  result_lines AS resultLines, result_error AS resultError, result_pruned_at AS resultPrunedAt`;
 
-type MessageRow = Omit<ChatMessage, 'usage' | 'toolName' | 'input' | 'result'> & {
+type MessageRow = Omit<
+  ChatMessage,
+  'usage' | 'toolName' | 'input' | 'result' | 'resultPrunedAt'
+> & {
   usageJson: string | null;
   toolName: string | null;
   inputJson: string | null;
@@ -67,6 +72,7 @@ type MessageRow = Omit<ChatMessage, 'usage' | 'toolName' | 'input' | 'result'> &
   resultTruncated: number | null;
   resultLines: number | null;
   resultError: number | null;
+  resultPrunedAt: string | null;
 };
 
 /** A stored input's JSON as an object; a value that is not one is kept as its text. */
@@ -89,6 +95,7 @@ const messageOf = ({
   resultTruncated,
   resultLines,
   resultError,
+  resultPrunedAt,
   ...r
 }: MessageRow): ChatMessage => ({
   ...r,
@@ -106,6 +113,7 @@ const messageOf = ({
           isError: resultError === 1,
         },
       }),
+  ...(resultPrunedAt === null ? {} : { resultPrunedAt }),
 });
 
 export function createThread(
@@ -307,4 +315,21 @@ export function threadBusy(db: Db, threadId: number): boolean {
       )
       .get(threadId) !== undefined
   );
+}
+
+/** How long a tool step's stored result is kept (#515). Inputs, summaries and messages stay. */
+export const CHAT_TOOL_RESULT_DAYS = 30;
+
+/**
+ * Drops the result of each tool step created more than `CHAT_TOOL_RESULT_DAYS` before `now`,
+ * recording when. Returns how many were pruned; a step pruned already is not counted again.
+ */
+export function pruneChatToolResults(db: Db, now: Date): number {
+  const cutoff = new Date(now.getTime() - CHAT_TOOL_RESULT_DAYS * 86_400_000).toISOString();
+  return db
+    .prepare(
+      `UPDATE chat_messages SET result_text = NULL, result_pruned_at = ?
+       WHERE role = 'tool' AND result_text IS NOT NULL AND created_at < ?`,
+    )
+    .run(now.toISOString(), cutoff).changes;
 }

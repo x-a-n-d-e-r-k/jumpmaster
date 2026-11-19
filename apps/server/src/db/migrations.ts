@@ -1548,6 +1548,11 @@ ALTER TABLE chat_messages ADD COLUMN result_lines INTEGER;
 ALTER TABLE chat_messages ADD COLUMN result_error INTEGER CHECK (result_error IN (0, 1));
 `;
 
+// Tool step results expire after 30 days (#515); this records when one was pruned.
+const V54_SQL = `
+ALTER TABLE chat_messages ADD COLUMN result_pruned_at TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1602,6 +1607,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 51, sql: V51_SQL },
   { version: 52, sql: V52_SQL, foreignKeysOff: true },
   { version: 53, sql: V53_SQL },
+  { version: 54, sql: V54_SQL },
 ];
 
 /**

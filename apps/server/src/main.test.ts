@@ -3,8 +3,16 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, test, vi } from 'vitest';
+import { appendMessage, createThread, setToolResult } from './chat/store.js';
 import { openDb } from './db/open.js';
-import { APP_MANIFEST_SWEEP_MS, listeningLine, pollTimer, start } from './main.js';
+import {
+  APP_MANIFEST_SWEEP_MS,
+  chatResultPruner,
+  listeningLine,
+  pollTimer,
+  start,
+} from './main.js';
+import { PRUNE_EVERY_MS } from './transcripts.js';
 
 const env: Record<string, string> = {
   JM_CLAUDE_TOKEN: 'claude-token-value',
@@ -356,4 +364,38 @@ test('the listening line puts 0.0.0.0 in its container context; any other host p
   const local = listeningLine('127.0.0.1', 7420, 'file');
   expect(local).toBe('listening on 127.0.0.1:7420 (config: file mode)');
   expect(local).not.toContain('inside the container');
+});
+
+test('chatResultPruner prunes at most once per PRUNE_EVERY_MS and logs one line when it pruned', () => {
+  const db = openDb(join(mkdtempSync(join(tmpdir(), 'jm-chatprune-')), 'jm.db'));
+  const DAY = 86_400_000;
+  const t = Date.parse('2026-06-01T00:00:00.000Z');
+  const th = createThread(db, { title: 't' }, new Date(t - 40 * DAY));
+  const stepAt = (at: number) => {
+    const m = appendMessage(db, th.id, { role: 'tool', text: 's', state: 'done' }, new Date(at));
+    setToolResult(
+      db,
+      m.id,
+      { text: 'x', truncated: false, lines: 1, isError: false },
+      new Date(at),
+    );
+  };
+  stepAt(t - 31 * DAY);
+  stepAt(t - 31 * DAY);
+  const lines: string[] = [];
+  const prune = chatResultPruner(db, (l) => lines.push(l));
+  prune(new Date(t));
+  expect(lines).toEqual(['pruned 2 chat tool results older than 30 days']);
+  // Within the hour: not run, though a further result is now due.
+  stepAt(t - 31 * DAY);
+  prune(new Date(t + PRUNE_EVERY_MS - 1));
+  expect(lines).toHaveLength(1);
+  prune(new Date(t + PRUNE_EVERY_MS));
+  expect(lines).toEqual([
+    'pruned 2 chat tool results older than 30 days',
+    'pruned 1 chat tool result older than 30 days',
+  ]);
+  // A run that prunes nothing logs nothing.
+  prune(new Date(t + 2 * PRUNE_EVERY_MS));
+  expect(lines).toHaveLength(2);
 });

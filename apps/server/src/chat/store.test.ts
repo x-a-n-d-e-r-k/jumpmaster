@@ -4,13 +4,16 @@ import { openDb } from '../db/open.js';
 import { t0, tmpDbFile } from '../test/helpers.js';
 import {
   appendMessage,
+  CHAT_TOOL_RESULT_DAYS,
   createThread,
   getThread,
   listMessages,
   listThreads,
   nextQueued,
+  pruneChatToolResults,
   setMessage,
   setThreadSession,
+  setToolResult,
 } from './store.js';
 
 const at = (min: number) => new Date(t0.getTime() + min * 60_000);
@@ -128,5 +131,85 @@ describe('chat store', () => {
     expect(a).toMatchObject({ state: 'done', text: 'q!', usage: { inputTokens: 3 }, error: null });
     expect(b).toMatchObject({ state: 'failed', error: 'the chat service is down', usage: null });
     expect(getThread(db, th.id)?.updatedAt).toBe(at(3).toISOString());
+  });
+
+  describe('pruneChatToolResults (#515)', () => {
+    const DAY = 86_400_000;
+    const now = new Date('2026-06-01T12:00:00.000Z');
+    const ago = (ms: number) => new Date(now.getTime() - ms);
+    const result = { text: 'out', truncated: false, lines: 1, isError: false };
+    /** A tool step created at `created`, with input and a result. */
+    const stepAt = (db: Db, threadId: number, created: Date) => {
+      const m = appendMessage(
+        db,
+        threadId,
+        {
+          role: 'tool',
+          text: `step at ${created.toISOString()}`,
+          state: 'done',
+          tool: { name: 'Read', useId: 'u', inputJson: '{"file_path":"a.ts"}' },
+        },
+        created,
+      );
+      setToolResult(db, m.id, result, created);
+      return m;
+    };
+    const byId = (db: Db, threadId: number, id: number) =>
+      listMessages(db, threadId).find((m) => m.id === id);
+
+    test('the window is 30 days', () => {
+      expect(CHAT_TOOL_RESULT_DAYS).toBe(30);
+    });
+
+    test('a 31-day-old result is pruned, a 29-day-old one kept, each counted once', () => {
+      const db = openDb(tmpDbFile());
+      const th = createThread(db, { title: 't' }, ago(40 * DAY));
+      const old = stepAt(db, th.id, ago(31 * DAY));
+      const recent = stepAt(db, th.id, ago(29 * DAY));
+      expect(pruneChatToolResults(db, now)).toBe(1);
+      const o = byId(db, th.id, old.id);
+      expect(o?.result).toBeUndefined();
+      expect(o?.resultPrunedAt).toBe(now.toISOString());
+      const r = byId(db, th.id, recent.id);
+      expect(r?.result).toEqual(result);
+      expect(r?.resultPrunedAt).toBeUndefined();
+      // Already pruned: not counted again, and its prune time kept.
+      expect(pruneChatToolResults(db, new Date(now.getTime() + 1000))).toBe(0);
+      expect(byId(db, th.id, old.id)?.resultPrunedAt).toBe(now.toISOString());
+    });
+
+    test('inputs, summaries and other messages are untouched', () => {
+      const db = openDb(tmpDbFile());
+      const th = createThread(db, { title: 't' }, ago(40 * DAY));
+      const owner = appendMessage(
+        db,
+        th.id,
+        { role: 'owner', text: 'go', state: 'done' },
+        ago(35 * DAY),
+      );
+      const old = stepAt(db, th.id, ago(31 * DAY));
+      const before = listMessages(db, th.id);
+      expect(pruneChatToolResults(db, now)).toBe(1);
+      const after = listMessages(db, th.id);
+      expect(after.find((m) => m.id === owner.id)).toEqual(before.find((m) => m.id === owner.id));
+      const o = after.find((m) => m.id === old.id);
+      expect(o?.text).toBe(`step at ${ago(31 * DAY).toISOString()}`);
+      expect(o?.input).toEqual({ file_path: 'a.ts' });
+      expect(o?.toolName).toBe('Read');
+      const { result: _r, resultPrunedAt: _p, ...rest } = o ?? ({} as never);
+      const { result: _br, ...was } = before.find((m) => m.id === old.id) ?? ({} as never);
+      expect(rest).toEqual(was);
+    });
+
+    test('boundary: exactly 30 days old is kept, 30 days and 1 second old is pruned', () => {
+      const db = openDb(tmpDbFile());
+      const th = createThread(db, { title: 't' }, ago(40 * DAY));
+      const edge = stepAt(db, th.id, ago(30 * DAY));
+      const past = stepAt(db, th.id, ago(30 * DAY + 1000));
+      expect(pruneChatToolResults(db, now)).toBe(1);
+      expect(byId(db, th.id, edge.id)?.result).toEqual(result);
+      expect(byId(db, th.id, past.id)?.result).toBeUndefined();
+      expect(byId(db, th.id, past.id)?.resultPrunedAt).toBe(now.toISOString());
+    });
   });
 });
