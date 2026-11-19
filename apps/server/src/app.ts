@@ -36,6 +36,7 @@ import {
   getGateAllowance,
   getPullRequest,
   getUsageState,
+  getWorkItem,
   getZoneMode,
   type InviteKind,
   isKilled,
@@ -838,6 +839,7 @@ export function createApp(
   app.get<{ Params: { id: string } }>('/drops/:id', async (req, reply) => {
     const drop = getDrop(deps.db, req.params.id);
     if (!drop) return reply.code(404).type('text/plain').send('not found');
+    const item = drop.workItemId === null ? undefined : getWorkItem(deps.db, drop.workItemId);
     return reply
       .type('text/html; charset=utf-8')
       .send(
@@ -848,6 +850,7 @@ export function createApp(
             listEvents(deps.db, drop.id),
             listArtifacts(deps.db, drop.id),
             transcriptPruned(deps.db, drop.id),
+            { ...(item ? { item } : {}), zones: cfg(req).dropZones, now: deps.now() },
           ),
         ),
       );

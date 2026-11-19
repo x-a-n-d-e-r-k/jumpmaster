@@ -1731,31 +1731,112 @@ export function transcriptSection(
       : sorted.some((e) => e.kind === 'agent')
         ? ''
         : '<p>No agent transcript in this drop.</p>';
-  return `<section class="transcript"><h3>Transcript</h3>${note}${sorted.map(transcriptEvent).join('')}</section>`;
+  return `<section class="transcript"><h3>Transcript</h3>${note}${transcriptBody(sorted)}</section>`;
+}
+
+/** An agent event whose stream-json line is a `system` one: init, hooks, status. */
+const isSystemEvent = (e: StoredEvent): boolean =>
+  e.kind === 'agent' && isObj(e.data.raw) && e.data.raw.type === 'system';
+
+/**
+ * The events in order, each run of two or more consecutive system events folded into one
+ * `t-system` disclosure (#499); a lone system event, and every other event, renders as is.
+ */
+function transcriptBody(sorted: readonly StoredEvent[]): string {
+  let html = '';
+  for (let i = 0; i < sorted.length; ) {
+    let j = i;
+    while (j < sorted.length && isSystemEvent(sorted[j] as StoredEvent)) j++;
+    if (j - i >= 2) {
+      const run = sorted.slice(i, j);
+      html += `<details class="t-system"><summary>${run.length} system events</summary>${run.map(transcriptEvent).join('')}</details>`;
+      i = j;
+    } else {
+      html += transcriptEvent(sorted[i] as StoredEvent);
+      i++;
+    }
+  }
+  return html;
 }
 
 /** A drop whose events retention pruned (issue #197): when, and its archive under the data dir. */
 export type TranscriptPruned = { prunedAt: string; archive: string | null };
+
+/** What the drop page knows besides the drop (#499): its work item, the zones, and now. */
+export type DropContext = { item?: WorkItem; zones?: readonly ZoneRef[]; now?: Date };
+
+/** The drop page's breadcrumb: under its issue for issue work, else under Drops. */
+function dropCrumbs(drop: Drop, item: WorkItem | undefined, project: string): string {
+  const short = escapeHtml(drop.id.slice(0, 8));
+  const trail = item
+    ? `<a href="/work">Work</a> › <a href="${escapeHtml(`/work?${new URLSearchParams({ zone: item.dropZoneId })}`)}">${project}</a> › <a href="${escapeHtml(workItemHref(item))}">#${escapeHtml(item.issueNumber)}</a> › ${short}`
+    : `<a href="/drops">Drops</a> › ${short}`;
+  return `<nav class="crumbs" aria-label="Breadcrumb"><p>${trail}</p></nav>`;
+}
+
+/** The drop page's summary: project, work, state, stick, times, PR, head, gates and models. */
+function dropSummary(
+  drop: Drop,
+  item: WorkItem | undefined,
+  project: string,
+  repo: string | undefined,
+  now: Date,
+): string {
+  const time = (iso: string | null | undefined) => (iso ? relativeTime(iso, now) : '-');
+  const work =
+    drop.workItemId === null
+      ? drop.role === 'doctor'
+        ? 'doctor'
+        : 'crew'
+      : item
+        ? `<a href="${escapeHtml(workItemHref(item))}">#${escapeHtml(item.issueNumber)} ${escapeHtml(item.title)}</a>`
+        : '-';
+  const fields: [string, string][] = [
+    ['Project', `<a href="${escapeHtml(zoneHref(drop.dropZoneId))}">${project}</a>`],
+    ['Work', work],
+    ['State', badge(drop.state)],
+    ['Stick', drop.stickId ? escapeHtml(drop.stickId) : '-'],
+    ['Created', time(drop.createdAt)],
+    ['Started', time(drop.startedAt)],
+    ['Finished', time(drop.finishedAt)],
+    ['Elapsed', escapeHtml(elapsed(drop, now))],
+    ['PR', drop.prNumber == null ? '-' : githubRef(repo, 'pull', drop.prNumber)],
+    ['Head', drop.headSha ? `<code>${escapeHtml(drop.headSha.slice(0, 7))}</code>` : '-'],
+    ['Gates', gateSummary(drop)],
+  ];
+  const rows = fields.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  return `<dl class="drop-summary">${rows}</dl>${modelLines(drop)}`;
+}
 
 export function renderDrop(
   drop: Drop,
   events: StoredEvent[],
   artifacts: ArtifactRow[] = [],
   pruned: TranscriptPruned | null = null,
+  ctx: DropContext = {},
 ): string {
+  const zones = ctx.zones ?? [];
+  const now = ctx.now ?? new Date();
+  const item = ctx.item && ctx.item.id === drop.workItemId ? ctx.item : undefined;
+  const known = zones.find((z) => z.id === drop.dropZoneId);
+  const project = zoneName(known ?? { id: drop.dropZoneId, repo: drop.dropZoneId }, zones);
   const rows = events
     .map(
       (e) =>
         `<tr><td>${escapeHtml(e.seq)}</td><td>${escapeHtml(e.ts)}</td><td>${escapeHtml(e.kind)}</td><td><pre>${escapeHtml(JSON.stringify(e.data))}</pre></td></tr>`,
     )
     .join('');
+  const id = escapeHtml(drop.id);
   return page(
-    `<p><a href="/">Back</a></p><h2>Drop ${escapeHtml(drop.id)}</h2><p>State: ${escapeHtml(drop.state)}</p>` +
-      modelLines(drop) +
+    dropCrumbs(drop, item, project) +
+      `<h2 title="${id}">${escapeHtml(drop.role)} drop ${escapeHtml(drop.id.slice(0, 8))}</h2>` +
+      `<p><small><code>${id}</code></small></p>` +
+      dropSummary(drop, item, project, known?.repo, now) +
       egressSection(events) +
       transcriptSection(events, pruned) +
       `<details class="raw-events"><summary>Raw events (${events.length})</summary><table><tr><th>Seq</th><th>Time</th><th>Kind</th><th>Data</th></tr>${rows}</table></details>` +
       artifactsSection(artifacts),
+    { title: `${drop.role} drop ${drop.id.slice(0, 8)}` },
   );
 }
 
