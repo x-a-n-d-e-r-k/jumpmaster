@@ -441,16 +441,62 @@ describe('/chat Markdown (#490)', () => {
       e.parent = p;
       p.children = p.children.map((c) => (c === this ? e : c));
     }
-    addEventListener() {}
+    value = '';
+    disabled = false;
+    attrs: Record<string, string> = {};
+    listeners: Record<string, ((e: unknown) => unknown)[]> = {};
+    addEventListener(ev: string, fn: (e: unknown) => unknown) {
+      (this.listeners[ev] ??= []).push(fn);
+    }
+    fire(ev: string, e: unknown) {
+      return (this.listeners[ev] ?? []).map((fn) => fn(e));
+    }
+    setAttribute(k: string, v: string) {
+      this.attrs[k] = v;
+    }
+    insertBefore(e: FakeEl, ref: FakeEl) {
+      e.parent = this;
+      const i = this.children.indexOf(ref);
+      this.children.splice(i < 0 ? this.children.length : i, 0, e);
+    }
+    querySelector(sel: string): FakeEl | null {
+      for (const c of this.children) {
+        if (
+          c.tagName === sel ||
+          (sel.startsWith('.') && c.className.split(' ').includes(sel.slice(1)))
+        )
+          return c;
+        const d = c.querySelector(sel);
+        if (d) return d;
+      }
+      return null;
+    }
+    /** Like the browser's: fires `submit` unless the required textarea is empty. */
+    requestSubmit() {
+      const box = this.querySelector('textarea');
+      if (box && box.value === '') return;
+      this.fire('submit', { preventDefault() {}, target: this });
+    }
   }
 
-  /** THREAD_SCRIPT in a vm with a fake DOM, following a busy thread; `emit` fires an SSE event. */
+  type FakeResponse = { ok: boolean; status: number; json: () => Promise<unknown> };
+
+  /**
+   * THREAD_SCRIPT in a vm with a fake DOM, following a busy thread; `emit` fires an SSE event.
+   * `fetches` holds each `jmFetch` call's resolver; `scroller` is the page's scrolling element.
+   */
   function runScript() {
     FakeEl.htmlWrites = [];
     const root = new FakeEl('div');
     root.dataset = { thread: '1', last: '1', busy: '1' };
     const log = new FakeEl('div');
-    const ids: Record<string, FakeEl> = { chat: root, messages: log, send: new FakeEl('form') };
+    const form = new FakeEl('form');
+    const box = new FakeEl('textarea');
+    const button = new FakeEl('button');
+    form.append(box, new FakeEl('small'), button);
+    const ids: Record<string, FakeEl> = { chat: root, messages: log, send: form };
+    const scroller = { scrollHeight: 2000, clientHeight: 600, scrollTop: 1400 };
+    const fetches: { url: string; body: unknown; resolve: (r: FakeResponse) => void }[] = [];
     const handlers: Record<string, (e: { data: string }) => void> = {};
     class FakeEventSource {
       constructor(readonly url: string) {}
@@ -464,10 +510,14 @@ describe('/chat Markdown (#490)', () => {
         getElementById: (id: string) => ids[id] ?? null,
         createElement: (tag: string) => new FakeEl(tag),
         querySelector: () => null,
+        scrollingElement: scroller,
       },
       EventSource: FakeEventSource,
-      jmFetch: async () => ({ ok: false, status: 500, json: async () => ({}) }),
-      alert: () => {},
+      jmFetch: (url: string, body: unknown) =>
+        new Promise<FakeResponse>((resolve) => fetches.push({ url, body, resolve })),
+      alert: () => {
+        throw new Error('the script must not call alert()');
+      },
     });
     vm.runInContext(THREAD_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
     const emit = (ev: string, data: unknown) => {
@@ -475,7 +525,7 @@ describe('/chat Markdown (#490)', () => {
       if (!fn) throw new Error(`no ${ev} listener`);
       fn({ data: JSON.stringify(data) });
     };
-    return { log, emit };
+    return { log, emit, form, box, button, scroller, fetches };
   }
 
   test('the page script shows text events as textContent, then a message html replaces the live box', () => {
@@ -513,5 +563,114 @@ describe('/chat Markdown (#490)', () => {
       '<i>y</i>',
       '<u>z</u>',
     ]);
+  });
+
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const key = (o: Record<string, unknown>) => {
+    const e = { key: 'Enter', shiftKey: false, isComposing: false, prevented: false, ...o };
+    return Object.assign(e, {
+      preventDefault() {
+        e.prevented = true;
+      },
+    });
+  };
+
+  test('Enter submits; Shift+Enter and Enter during IME composition do not', () => {
+    const { box, fetches } = runScript();
+    box.value = 'hello';
+    const shift = key({ shiftKey: true });
+    box.fire('keydown', shift);
+    expect(shift.prevented).toBe(false);
+    const ime = key({ isComposing: true });
+    box.fire('keydown', ime);
+    expect(ime.prevented).toBe(false);
+    box.fire('keydown', key({ key: 'a' }));
+    expect(fetches).toHaveLength(0);
+    const enter = key({});
+    box.fire('keydown', enter);
+    expect(enter.prevented).toBe(true);
+    expect(fetches).toHaveLength(1);
+    expect(fetches[0]?.url).toBe('/api/chat/threads/1/messages');
+    expect(fetches[0]?.body).toEqual({ text: 'hello' });
+  });
+
+  test('a blank or whitespace-only message is not sent', () => {
+    const { box, form, fetches } = runScript();
+    box.value = '   \n ';
+    box.fire('keydown', key({}));
+    form.fire('submit', { preventDefault() {}, target: form });
+    expect(fetches).toHaveLength(0);
+  });
+
+  test('Send is disabled while the request is in flight, and a refusal shows inline, then a success clears it', async () => {
+    const { box, form, button, fetches } = runScript();
+    box.value = 'do it';
+    box.fire('keydown', key({}));
+    expect(button.disabled).toBe(true);
+    fetches[0]?.resolve({ ok: false, status: 403, json: async () => ({ error: 'sudo' }) });
+    await flush();
+    expect(button.disabled).toBe(false);
+    const err = form.querySelector('.error') as FakeEl;
+    expect(err).not.toBeNull();
+    expect(err.tagName).toBe('p');
+    expect(err.attrs.role).toBe('alert');
+    expect(err.textContent).toContain('403');
+    expect(err.textContent).toContain('sudo');
+    expect(form.children.indexOf(err)).toBe(form.children.indexOf(box) - 1);
+    expect(box.value).toBe('do it');
+
+    box.fire('keydown', key({}));
+    expect(button.disabled).toBe(true);
+    expect(form.children.filter((c) => c.className === 'error')).toHaveLength(1);
+    fetches[1]?.resolve({
+      ok: true,
+      status: 200,
+      json: async () => ({ message: { seq: 2, role: 'owner', state: 'done', text: 'do it' } }),
+    });
+    await flush();
+    expect(button.disabled).toBe(false);
+    expect(form.querySelector('.error')).toBeNull();
+    expect(box.value).toBe('');
+  });
+
+  test('the page opens scrolled to the newest message', () => {
+    const { scroller } = runScript();
+    expect(scroller.scrollTop).toBe(scroller.scrollHeight);
+  });
+
+  test('a new message scrolls to the end only when the reader was within 120px of the bottom', () => {
+    const { emit, scroller } = runScript();
+    const msg = (seq: number) => ({ seq, role: 'assistant', state: 'done', text: 'x' });
+    // At the bottom: follows.
+    scroller.scrollTop = scroller.scrollHeight - scroller.clientHeight;
+    emit('message', msg(2));
+    expect(scroller.scrollTop).toBe(scroller.scrollHeight);
+    // 500px from the bottom: stays put.
+    scroller.scrollTop = scroller.scrollHeight - scroller.clientHeight - 500;
+    const before = scroller.scrollTop;
+    emit('message', msg(3));
+    emit('text', { seq: 4, text: 'more' });
+    emit('card', { card: { id: 9, kind: 'x', state: 'pending', summary: 's' } });
+    expect(scroller.scrollTop).toBe(before);
+    // 100px from the bottom: follows streamed text and cards too.
+    scroller.scrollTop = scroller.scrollHeight - scroller.clientHeight - 100;
+    emit('text', { seq: 4, text: 'more' });
+    expect(scroller.scrollTop).toBe(scroller.scrollHeight);
+    scroller.scrollTop = scroller.scrollHeight - scroller.clientHeight - 100;
+    emit('card', { card: { id: 10, kind: 'x', state: 'pending', summary: 's' } });
+    expect(scroller.scrollTop).toBe(scroller.scrollHeight);
+  });
+});
+
+describe('/chat composer (#491)', () => {
+  test('the thread page has the sticky composer, new placeholder and hint', () => {
+    const w = world({ service: false });
+    const th = createThread(w.db, { title: 't' }, t0);
+    const html = renderThread(th, []);
+    expect(html).toContain('placeholder="Ask Jumpmaster"');
+    expect(html).toContain('Enter to send, Shift+Enter for a new line');
+    expect(html).not.toContain('Ask the crew');
+    expect(html).toMatch(/\.chat-send\{[^}]*position:sticky;bottom:0/);
+    expect(html).toMatch(/\.chat-send\{[^}]*env\(safe-area-inset-bottom\)/);
   });
 });
