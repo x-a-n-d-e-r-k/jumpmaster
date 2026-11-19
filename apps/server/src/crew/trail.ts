@@ -429,7 +429,11 @@ async function closeSplitParent(
   return ran;
 }
 
-/** Runs each op not already done; a failure is tried again next pass. Counts the ops it ran. */
+/**
+ * Runs each op not already done, through `runOp`, and counts the ops it ran. A later pass never
+ * writes an op again: one whose answer was lost (`unknown`) is only read back, and one refused
+ * (`failed`) stays failed. A close that must be sent again goes through `runOnce` instead.
+ */
 async function runEach(db: Db, forges: ForgePair, ops: Op[], now: Date): Promise<number> {
   let ran = 0;
   for (const op of ops) {
@@ -438,7 +442,7 @@ async function runEach(db: Db, forges: ForgePair, ops: Op[], now: Date): Promise
       await runOp(db, forges, op, now);
       ran++;
     } catch {
-      // A forge read or write failed: tried again next pass.
+      // A forge read threw: the row is read back next pass.
     }
   }
   return ran;
@@ -478,9 +482,15 @@ export async function flushTriageTrail(
     if (!trail) continue;
     const trailOps = [trail.comment, ...(trail.labels ? [trail.labels] : [])];
     ran += await runEach(db, forges, trailOps, now);
-    // The close waits until its comment and label swap are done (#466).
-    if (trail.close && trailOps.every((op) => getOutbox(db, op.opKey)?.state === 'done')) {
-      ran += await runEach(db, forges, [trail.close], now);
+    // The close waits until its comment and label swap are done (#466). A close not done is sent
+    // again each pass until it is (#545); one that finds the issue closed is done with no write.
+    if (
+      trail.close &&
+      getOutbox(db, trail.close.opKey)?.state !== 'done' &&
+      trailOps.every((op) => getOutbox(db, op.opKey)?.state === 'done')
+    ) {
+      await runOnce(db, forges, trail.close, now);
+      ran++;
     }
     if (children && trailOps.every((op) => getOutbox(db, op.opKey)?.state === 'done')) {
       ran += await closeSplitParent(db, forges, zone, req, children, now);
