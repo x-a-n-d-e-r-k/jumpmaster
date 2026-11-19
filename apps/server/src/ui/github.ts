@@ -217,6 +217,24 @@ ${identity === 'starter' ? `<p>${escapeHtml(STARTER_CODEOWNERS_NOTE)}</p>` : ''}
 <pre id="ruleset-text">${escapeHtml(ruleset.text)}</pre></section>`;
 }
 
+/**
+ * A two-app zone's second ruleset, `jumpmaster-merge` (spec 2026-11-13-github-app-auth §5.2): its
+ * note, the same import steps, and the file. It does have a bypass list (the author app and
+ * admins), so it never says otherwise.
+ */
+export function mergeRulesetSection(
+  merge: NonNullable<ZoneGuidance['mergeRuleset']>,
+  rulesUrl: string,
+): string {
+  const data = `data:application/json;charset=utf-8,${encodeURIComponent(merge.text)}`;
+  return `<section id="merge-ruleset"><h3>The merge ruleset</h3>
+<p>${escapeHtml(merge.note)}</p>
+<ol><li>Open the repository's <a href="${gh(rulesUrl)}"${linkTarget(gh(rulesUrl))}>Rulesets</a>, then New ruleset → Import a ruleset, and choose <code>${escapeHtml(merge.filename)}</code>.</li>
+<li>Review it and click Create.</li></ol>
+<p><a href="${escapeHtml(data)}" download="${escapeHtml(merge.filename)}" id="merge-ruleset-download">Download ${escapeHtml(merge.filename)}</a> <button type="button" data-copy="merge-ruleset-text">Copy</button></p>
+<pre id="merge-ruleset-text">${escapeHtml(merge.text)}</pre></section>`;
+}
+
 /** CODEOWNERS: the reviewer's login, the text, and GitHub's new-file page for it. */
 export function codeownersSection(
   codeowners: ZoneGuidance['codeowners'],
@@ -248,7 +266,8 @@ export const rolesOf = (zone: Pick<DropZoneConfig, 'identity' | 'reviewReadToken
   ...(zone.reviewReadToken ? (['read'] as const) : []),
 ];
 
-function zonePage(
+/** The zone's GitHub page body, from its guidance. */
+export function zonePage(
   zone: DropZoneConfig,
   zones: readonly ZoneRef[],
   g: ZoneGuidance,
@@ -262,7 +281,7 @@ ${recommendationSection(g.recommendation)}
 ${tokensSection(g.pat, rolesOf(zone))}
 ${checklistSection(g.checklist)}
 ${rulesetSection(g.ruleset, g.rulesUrl, zone.identity)}
-${codeownersSection(g.codeowners, { action: `/zones/${encodeURIComponent(zone.id)}/github`, reviewer }, zone.identity)}
+${g.mergeRuleset ? `${mergeRulesetSection(g.mergeRuleset, g.rulesUrl)}\n` : ''}${codeownersSection(g.codeowners, { action: `/zones/${encodeURIComponent(zone.id)}/github`, reviewer }, zone.identity)}
 ${COPY_SCRIPT}`,
   );
 }

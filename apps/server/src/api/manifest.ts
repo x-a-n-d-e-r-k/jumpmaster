@@ -294,7 +294,7 @@ export const CTL_VERBS: { verb: string; page: Page; forms: string[] }[] = [
     verb: 'github',
     page: 'GitHub',
     forms: [
-      'ctl github <zone> recommend | pat <author|reviewer|read> | ruleset | codeowners [--reviewer <login>]… | checklist',
+      'ctl github <zone> recommend | pat <author|reviewer|read> | ruleset | merge-ruleset | codeowners [--reviewer <login>]… | checklist',
       'ctl github recommend <owner/name> [--paid-plan] [--identity starter|two-bot]',
     ],
   },
