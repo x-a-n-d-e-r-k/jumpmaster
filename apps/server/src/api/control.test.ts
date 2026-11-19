@@ -3202,6 +3202,8 @@ describe('stick trooper counts (issue #136)', () => {
           maxSlots: 4,
           running: 0,
           lastSeenAt: t0.toISOString(),
+          version: null,
+          upgrade: null,
         },
       ],
     });

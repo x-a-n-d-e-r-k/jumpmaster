@@ -205,6 +205,16 @@ export const CONTROL_ROUTES: ControlRoute[] = [
   },
   {
     method: 'POST',
+    path: '/api/control/sticks/:id/upgrade',
+    ctl: 'ctl sticks upgrade kidney-shadow',
+  },
+  {
+    method: 'POST',
+    path: '/api/control/sticks/upgrade-all',
+    ctl: 'ctl sticks upgrade --all',
+  },
+  {
+    method: 'POST',
     path: '/api/control/sticks/invites/:id/cancel',
     ctl: 'ctl sticks cancel vps-1',
   },
@@ -371,6 +381,8 @@ export const CTL_VERBS: { verb: string; page: Page; forms: string[] }[] = [
       'ctl sticks [--json]',
       'ctl sticks slots <name-or-id> <n>',
       'ctl sticks remove <name-or-id>',
+      'ctl sticks upgrade <name-or-id>',
+      'ctl sticks upgrade --all',
       'ctl sticks cancel <invite-name-or-id>',
     ],
   },

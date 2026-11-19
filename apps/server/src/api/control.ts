@@ -52,11 +52,14 @@ import {
   listSticks,
   liveDropsOn,
   removeStick,
+  requestStickUpgrade,
   revokeGrants,
   setStickDesiredSlots,
   setWorkItemState,
   setZoneMode,
   stickCeiling,
+  stickUpgradeStatus,
+  type UpgradeTarget,
   updateDrop,
   ZONE_MODES,
   zoneHistoryCounts,
@@ -127,6 +130,12 @@ import {
   zoneIdOf,
 } from '../zones/detect.js';
 import { removalNote, stopZone } from '../zones/stop.js';
+import {
+  NO_TARGET_REASON,
+  stickUpgradeView,
+  upgradeRefusal,
+  upgradeTargetOf,
+} from './stick-upgrade.js';
 
 export { detectFailure } from '../zones/detect.js';
 
@@ -176,8 +185,13 @@ export interface ControlDeps {
   doctorEnv?: DoctorEnv;
   /** The chat service's health, for the doctor's `chat.service`; absent, there is no chat service. */
   chatHealth?: ChatHealth;
-  /** The image mirror, for the doctor's `server.image-mirror` (issue #140). */
-  images?: Pick<ImageMirror, 'status'>;
+  /**
+   * The image mirror, for the doctor's `server.image-mirror` (issue #140), and with `lookup` the
+   * stick image Command may upgrade sticks to (issue #428).
+   */
+  images?: Pick<ImageMirror, 'status'> & Partial<Pick<ImageMirror, 'lookup'>>;
+  /** The server's release (`JM_RELEASE_VERSION`), what sticks upgrade to; default the env's, else `dev`. */
+  version?: string;
   /** The in-memory setup code, shared with the setup pages (default: one printing to stderr). */
   setup?: SetupMode;
   /** Per-source backoff for passphrase guesses, shared with the login page. */
@@ -330,6 +344,20 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         ...(store ? [...secretList(store.current().secrets), ...store.retired()] : []),
       ]),
     ];
+  };
+  const release = deps.version ?? (process.env.JM_RELEASE_VERSION || 'dev');
+  /** What Command may upgrade a stick to (issue #428): the same target the lease route offers. */
+  const upgradeTarget = (): UpgradeTarget | null => {
+    const images = deps.images;
+    const lookup = images?.lookup;
+    if (!images || !lookup) return null;
+    return upgradeTargetOf(
+      {
+        status: () => images.status(),
+        lookup: (name, digest) => lookup.call(images, name, digest),
+      },
+      release,
+    );
   };
   const audit = (req: FastifyRequest, action: string, detail: AuditDetail, target?: string) =>
     recordAudit(
@@ -511,19 +539,24 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       },
     );
 
-    // Each stick's trooper counts (issue #136), for `ctl sticks`.
-    scope.get('/api/control/sticks', async () => ({
-      sticks: listSticks(db).map((s) => ({
-        id: s.id,
-        name: s.name,
-        slots: effectiveSlots(s),
-        enrolledSlots: s.slots,
-        desiredSlots: s.desiredSlots,
-        maxSlots: stickCeiling(s),
-        running: liveDropsOn(db, s.id),
-        lastSeenAt: s.lastSeenAt,
-      })),
-    }));
+    // Each stick's trooper counts (issue #136), version and upgrade (issue #428), for `ctl sticks`.
+    scope.get('/api/control/sticks', async () => {
+      const target = upgradeTarget();
+      return {
+        sticks: listSticks(db).map((s) => ({
+          id: s.id,
+          name: s.name,
+          slots: effectiveSlots(s),
+          enrolledSlots: s.slots,
+          desiredSlots: s.desiredSlots,
+          maxSlots: stickCeiling(s),
+          running: liveDropsOn(db, s.id),
+          lastSeenAt: s.lastSeenAt,
+          version: s.version,
+          upgrade: stickUpgradeView(db, s, target),
+        })),
+      };
+    });
 
     // How many troopers a stick runs at once, applied on its next lease answer, no restart. Up to
     // the ceiling it reported (its enrolled count for a stick too old to report one).
@@ -596,6 +629,57 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       expireLeases(db, at, cfg(req).usage);
       audit(req, 'stick.remove', { name: stick.name }, stick.id);
       return { id: stick.id, name: stick.name, removed: true };
+    });
+
+    // Upgrades a stick in place to the server's release (issue #428): a pending request its next
+    // lease answers with the offer. Refused (409, no row) when it cannot take one.
+    scope.post<{ Params: { id: string } }>(
+      '/api/control/sticks/:id/upgrade',
+      async (req, reply) => {
+        if (!stickSudo(req, reply, 'upgrading a stick')) return reply;
+        const stick = findStick(db, req.params.id);
+        if (stick === 'ambiguous')
+          return reply
+            .code(409)
+            .send({ error: `several sticks are named ${req.params.id}: name it by its id` });
+        if (!stick) return reply.code(404).send({ error: 'unknown stick' });
+        const target = upgradeTarget();
+        const refused = upgradeRefusal(stick, target);
+        if (refused !== null || !target) return reply.code(409).send({ error: refused });
+        requestStickUpgrade(db, stick.id, target, 'command', now());
+        audit(req, 'stick.upgrade', { name: stick.name, version: target.version }, stick.id);
+        return { id: stick.id, name: stick.name, target: target.version, requested: true };
+      },
+    );
+
+    // Upgrades every stick that can be (issue #428); each other one is skipped with its reason.
+    scope.post('/api/control/sticks/upgrade-all', async (req, reply) => {
+      if (!stickSudo(req, reply, 'upgrading sticks')) return reply;
+      const target = upgradeTarget();
+      if (!target) return reply.code(409).send({ error: NO_TARGET_REASON });
+      const requested: string[] = [];
+      const skipped: { name: string; reason: string }[] = [];
+      const at = now();
+      for (const stick of listSticks(db)) {
+        const reason =
+          upgradeRefusal(stick, target) ??
+          (stickUpgradeStatus(db, stick, target).status === 'upgrading'
+            ? `already upgrading to v${target.version}`
+            : null);
+        if (reason !== null) {
+          skipped.push({ name: stick.name, reason });
+          continue;
+        }
+        requestStickUpgrade(db, stick.id, target, 'command', at);
+        audit(
+          req,
+          'stick.upgrade',
+          { name: stick.name, version: target.version, all: true },
+          stick.id,
+        );
+        requested.push(stick.name);
+      }
+      return { requested, skipped };
     });
 
     // What Jumpmaster is doing and why it waits (§10.3): the home banner's line, for `ctl status`.
