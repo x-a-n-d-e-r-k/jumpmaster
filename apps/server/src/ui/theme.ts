@@ -120,6 +120,7 @@ nav.settings-tabs>*,.setup-steps>*{padding:.875rem 0 .75rem;white-space:nowrap;b
 nav.settings-tabs a,.setup-steps a{color:var(--text-sub-600);border-radius:0}
 nav.settings-tabs a:hover,.setup-steps a:hover{color:var(--text-strong-950);text-decoration:none}
 nav.settings-tabs strong,nav.settings-tabs [aria-current],.setup-steps strong{color:var(--text-strong-950);border-bottom-color:var(--primary-base);font-weight:500}
+[hidden]{display:none!important}
 .warn,.status,.error,.alert{display:block;border-radius:12px;padding:.75rem 1rem;margin:0 0 1rem;background:var(--warning-lighter);color:var(--text-strong-950);box-shadow:inset 0 0 0 1px var(--warning-light)}
 .warn::before,.error::before{content:"";float:left;width:1rem;height:1rem;margin:.125rem .5rem 0 0;border-radius:50%;background:var(--warning-base);-webkit-mask:var(--ico-alert) center/contain no-repeat;mask:var(--ico-alert) center/contain no-repeat}
 .warn>p:first-child,.status>p:first-child{margin-top:0}.warn>p:last-child,.status>p:last-child{margin-bottom:0}

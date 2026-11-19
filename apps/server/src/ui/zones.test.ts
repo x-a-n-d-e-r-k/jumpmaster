@@ -762,6 +762,11 @@ describe('the starter-mode warning (#494)', () => {
     expect(img).toContain('<strong>Starter mode:</strong> the author token can merge any green PR');
   });
 
+  test('the theme lets `hidden` win over `.warn{display:block}`', async () => {
+    const w = await world();
+    expect((await w.get('/zones/main')).body).toContain('[hidden]{display:none!important}');
+  });
+
   test('the label is never doubled, for either identity', async () => {
     const w = await world();
     for (const id of ['main', 'img']) {
