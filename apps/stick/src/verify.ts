@@ -391,15 +391,23 @@ export async function verifyImage(ref: string, trust: ImageTrust): Promise<Verdi
  * Everything decided without cosign: the allow-list, a tag under signed, a pin, a cached
  * success, no signer; otherwise the digest cosign must verify.
  */
-function decideWithoutCosign(ref: string, trust: ImageTrust): Verdict | NeedsSignature {
+function decideWithoutCosign(
+  ref: string,
+  trust: ImageTrust,
+  o: { shortcuts?: boolean } = {},
+): Verdict | NeedsSignature {
+  const shortcuts = o.shortcuts ?? true;
   const refuseTag = (why: string): Verdict => ({
     ok: false,
     reason: `image not verified: ${ref}: ${why}`,
   });
-  if (trust.policy === 'allowlist')
+  if (trust.policy === 'allowlist') {
+    // Without shortcuts (an exact release tag, issue #430) only a signature can say yes.
+    if (!shortcuts) return refuseTag('a signature check needs the signed image policy');
     return trust.allowed.has(ref)
       ? { ok: true, via: 'allowlist' }
       : { ok: false, reason: `image not allowed: ${ref}` };
+  }
   const digest = digestOf(ref);
   if (!digest)
     return refuseTag(
@@ -408,7 +416,8 @@ function decideWithoutCosign(ref: string, trust: ImageTrust): Verdict | NeedsSig
   // A pin is a name and a digest; a tag on either side doesn't change what runs.
   const canonical = canonicalRef(ref);
   const pins = [...trust.allowed].filter((p) => digestOf(p) !== null);
-  if (pins.some((p) => canonicalRef(p) === canonical)) return { ok: true, via: 'pinned' };
+  if (shortcuts && pins.some((p) => canonicalRef(p) === canonical))
+    return { ok: true, via: 'pinned' };
   const elsewhere = pins.find((p) => digestOf(p) === digest);
   const hint = elsewhere
     ? `; JM_ALLOWED_IMAGES pins this digest as ${elsewhere}, under another name: a pin matches only the same name and digest`
@@ -421,7 +430,7 @@ function decideWithoutCosign(ref: string, trust: ImageTrust): Verdict | NeedsSig
   // No version, no floor: every signature is refused, never accepted as "any release" (#270).
   const floor = trust.signer.floor;
   if (floor === null || !parseReleaseVersion(floor)) return refuse(NO_RELEASE_VERSION);
-  if (trust.cache?.has(digest)) return { ok: true, via: 'cache' };
+  if (shortcuts && trust.cache?.has(digest)) return { ok: true, via: 'cache' };
   return { digest, refuse };
 }
 
@@ -545,12 +554,19 @@ const annotation = (d: Descriptor, key: string): unknown =>
  *    identity and `trustedRoot`, `--offline`, its HOME and TUF_ROOT an empty temporary directory
  *    (so no cache and no TUF fetch can stand in for the pinned root).
  * Verified when one bundle verifies; otherwise refused with why, naming cosign's last error.
- * Never throws. The installer (apps/server/src/install/stick-sh.ts) runs the same steps in sh.
+ * With `exactTag` (a stick upgrade, issue #430) every bundle is tried, and only one cosign
+ * verifies whose certificate names exactly that release tag counts. Never throws. The installer (apps/server/src/install/stick-sh.ts) runs the same steps in sh.
  */
 export async function verifyIndexBundles(
   dir: string,
   digest: string,
-  o: { signer: Signer; cosign?: Cosign; trustedRoot: string; timeoutMs: number },
+  o: {
+    signer: Signer;
+    cosign?: Cosign;
+    trustedRoot: string;
+    timeoutMs: number;
+    exactTag?: string;
+  },
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   const bundles: string[] = [];
   let indexBlob: string;
@@ -601,10 +617,12 @@ export async function verifyIndexBundles(
       );
       if (!r.error && r.code === 0) {
         // Verified; now its age: the certificate's release tag against this stick's (#270).
-        const floor = checkFloor(
-          bundleReleaseTag(readFileSync(bundle), o.signer.repository),
-          o.signer.floor,
-        );
+        const tag = bundleReleaseTag(readFileSync(bundle), o.signer.repository);
+        if (o.exactTag !== undefined && tag !== o.exactTag) {
+          why = `no signature for release ${o.exactTag}`;
+          continue;
+        }
+        const floor = checkFloor(tag, o.signer.floor);
         if (floor.ok) return { ok: true };
         why = floor.reason;
         continue;
@@ -624,10 +642,17 @@ export async function verifyIndexBundles(
  * Verifies `ref` from an OCI image layout the server sent (issue #141), fully offline with the
  * pinned trusted root (issue #167, `verifyIndexBundles`). Nothing is asked of the registry or of
  * Sigstore; the server is no trust anchor, since what it sent must carry the release workflow's
- * signature on `ref`'s digest. A success is cached. Never throws.
+ * signature on `ref`'s digest. A success is cached. Never throws. With `exactTag` (issue #430) no
+ * pin or cached success stands in for the signature, which must be for exactly that release tag.
  */
-export async function verifyLayout(dir: string, ref: string, trust: ImageTrust): Promise<Verdict> {
-  const pre = decideWithoutCosign(ref, trust);
+export async function verifyLayout(
+  dir: string,
+  ref: string,
+  trust: ImageTrust,
+  o: { exactTag?: string } = {},
+): Promise<Verdict> {
+  const exact = o.exactTag !== undefined;
+  const pre = decideWithoutCosign(ref, trust, { shortcuts: !exact });
   if ('ok' in pre) return pre;
   if (!trust.cosign) return pre.refuse('cosign is not available');
   const r = await verifyIndexBundles(dir, pre.digest, {
@@ -635,6 +660,7 @@ export async function verifyLayout(dir: string, ref: string, trust: ImageTrust):
     cosign: trust.cosign,
     trustedRoot: trust.trustedRoot ?? TRUSTED_ROOT_PATH,
     timeoutMs: trust.timeoutMs ?? VERIFY_TIMEOUT_MS,
+    ...(exact ? { exactTag: o.exactTag } : {}),
   });
   if (!r.ok) return pre.refuse(r.reason);
   trust.cache?.add(pre.digest);

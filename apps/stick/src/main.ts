@@ -1,5 +1,5 @@
 import { leaseLogger, StickClient } from './client.js';
-import { DockerDriver } from './docker.js';
+import { DockerDriver, ownContainerId } from './docker.js';
 import { egressCapability, egressImage } from './egress.js';
 import { stickPlatform } from './fetch-image.js';
 import { StickImages } from './image-gc.js';
@@ -17,6 +17,7 @@ import {
 import { enrolledSlots, maxSlotsFor, SlotTarget } from './slots.js';
 import {
   advertisedCapabilities,
+  canUpgrade,
   enrollStick,
   healthLine,
   leaseTerms,
@@ -26,6 +27,7 @@ import {
   stickInfo,
   stickVersion,
 } from './state.js';
+import { cleanupAtStartup, StickUpgrade } from './upgrade.js';
 import { execCosign, prepareImageTrust } from './verify.js';
 
 const SWEEP_MS = 10 * 60_000;
@@ -76,17 +78,28 @@ async function main() {
   // Where missing images come from (issue #141): JM_IMAGE_SOURCE, else the server once it
   // announces image-mirror-v1 on a lease. Checked here, so a bad value stops the start.
   imageSource(process.env, undefined);
+  const serverDeps = {
+    client,
+    loader: driver,
+    stateDir: dir,
+    platform: stickPlatform(),
+    log: (line: string) => console.log(line),
+    images,
+  };
   trust.server = {
     source: () => imageSource(process.env, client.features),
-    deps: {
-      client,
-      loader: driver,
-      stateDir: dir,
-      platform: stickPlatform(),
-      log: (line) => console.log(line),
-      images,
-    },
+    deps: serverDeps,
   };
+  // Upgrading in place (issue #430): under signed, from the server, in a container, as a release.
+  const version = stickVersion(release);
+  const containerId = ownContainerId();
+  const upgradeEnabled = () =>
+    canUpgrade({
+      policy: trust.policy,
+      source: imageSource(process.env, client.features),
+      containerId,
+      version,
+    });
   if (imageSource(process.env, undefined) === 'server') {
     console.log(`images: from the server, for ${stickPlatform()}`);
     // The proxy image below comes from the server, which needs the stick token: enroll first,
@@ -130,6 +143,18 @@ async function main() {
   if (!stickId) throw new Error('not enrolled');
   const id: string = stickId;
   const pending = new PendingPushes();
+  await cleanupAtStartup({ stateDir: dir, version, driver, log: (line) => console.log(line) });
+  const upgrade = new StickUpgrade({
+    stateDir: dir,
+    version,
+    trust,
+    server: serverDeps,
+    driver,
+    enabled: upgradeEnabled,
+    pendingPushes: () => pending.size(),
+    log: (line) => console.log(line),
+  });
+  client.upgradeHooks = upgrade;
   // Before leasing: kill troopers a previous run of this stick left behind, then rediscover its
   // pending pushes, each volume once its own drop's containers are confirmed gone (Ruling 14).
   const reaped = await recoverAtStartup(driver, client, id, pending);
@@ -160,6 +185,7 @@ async function main() {
       policy: trust.policy,
       health: health.latest(),
       pending: pending.size(),
+      upgrade: upgradeEnabled(),
     });
     return terms && { ...terms, health: { docker, freeBytes: health.latest().freeBytes } };
   };
@@ -174,6 +200,11 @@ async function main() {
   // while the lease loop reports the stick in, starting, and leases nothing (issue #157).
   console.log(`starting: checking the trooper image ${TROOPER_IMAGE}`);
   const firstCheck = checkVolumes();
+  // The new stick's health handshake (issue #430): `ok` waits for a passing base check.
+  firstCheck.then(
+    () => upgrade.selfCheckSettled(health.latest().base.ok),
+    () => {},
+  );
   const active = new Set<string>();
   /** `dropId:epoch` of every drop in a lease slot: the sweep leaves their volumes alone. */
   const live = new Set<string>();
@@ -217,6 +248,7 @@ async function main() {
     recheck: checkVolumes,
     image: TROOPER_IMAGE,
     leaseLog,
+    upgrade,
     start: (drop) => {
       const key = `${drop.dropId}:${drop.epoch}`;
       live.add(key);
