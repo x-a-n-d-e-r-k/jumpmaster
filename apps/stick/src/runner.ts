@@ -660,7 +660,7 @@ async function prepareAndRun(
     }
     for (const i of unique) {
       if (halted()) return;
-      const v = await fetchFromServer(i.ref, trust, server, hold);
+      const v = await fetchFromServer(i.ref, trust, server, { hold });
       if (!v.ok) {
         if ('wait' in v) {
           // Not mirrored yet: no result and no heartbeat, so the lease lapses and the drop is

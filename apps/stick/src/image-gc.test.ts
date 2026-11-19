@@ -352,9 +352,12 @@ describe('images a drop holds (issue #439)', () => {
     const { s, images, calls, w, deps, trust } = world();
     const hold = images.hold();
     // The drop's service image is present: nothing is fetched.
-    expect(await fetchFromServer(P1, trust, deps, hold)).toEqual({ ok: true, via: 'allowlist' });
+    expect(await fetchFromServer(P1, trust, deps, { hold })).toEqual({
+      ok: true,
+      via: 'allowlist',
+    });
     // Its next image is new to the stick: the load starts a sweep.
-    expect((await fetchFromServer(w.r.ref, trust, deps, hold)).ok).toBe(true);
+    expect((await fetchFromServer(w.r.ref, trust, deps, { hold })).ok).toBe(true);
     await images.idle();
     // No container has started yet; the drop still needs P1.
     expect(removes(calls)).not.toContain(`remove ${P1}`);
@@ -365,8 +368,8 @@ describe('images a drop holds (issue #439)', () => {
     const { s, images, calls, w, deps, trust } = world();
     const first = images.hold();
     const second = images.hold();
-    expect((await fetchFromServer(P1, trust, deps, first)).ok).toBe(true);
-    expect((await fetchFromServer(w.r.ref, trust, deps, second)).ok).toBe(true);
+    expect((await fetchFromServer(P1, trust, deps, { hold: first })).ok).toBe(true);
+    expect((await fetchFromServer(w.r.ref, trust, deps, { hold: second })).ok).toBe(true);
     await images.idle();
     expect(removes(calls)).not.toContain(`remove ${P1}`);
     expect(Object.keys(readImageRecords(s.stateDir).records)).toContain(P1);
@@ -375,8 +378,8 @@ describe('images a drop holds (issue #439)', () => {
   test('once the drop ends, a later sweep removes the image beyond the two newest', async () => {
     const { s, images, calls, w, deps, trust } = world();
     const hold = images.hold();
-    expect((await fetchFromServer(P1, trust, deps, hold)).ok).toBe(true);
-    expect((await fetchFromServer(w.r.ref, trust, deps, hold)).ok).toBe(true);
+    expect((await fetchFromServer(P1, trust, deps, { hold })).ok).toBe(true);
+    expect((await fetchFromServer(w.r.ref, trust, deps, { hold })).ok).toBe(true);
     await images.idle();
     expect(removes(calls)).not.toContain(`remove ${P1}`);
     hold.release();
@@ -412,7 +415,7 @@ describe('images a drop holds (issue #439)', () => {
         imageLayout: async () => new Response('{"error":"nope"}', { status: 403 }),
       },
     };
-    expect((await fetchFromServer(P1, refused, failing, hold)).ok).toBe(false);
+    expect((await fetchFromServer(P1, refused, failing, { hold })).ok).toBe(false);
     hold.add('ghcr.io/o/pg:16');
     expect((await images.sweep()).removed).toEqual([P1]);
   });
