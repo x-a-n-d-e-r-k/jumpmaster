@@ -147,3 +147,120 @@ describe('the read token in app mode (issue #237)', () => {
     ]);
   });
 });
+
+describe('PAT requirements for GitHub App roles (issue #458)', () => {
+  const PEM =
+    '-----BEGIN RSA PRIVATE KEY-----\nfixture-pem-body-458\n-----END RSA PRIVATE KEY-----';
+  const entry = {
+    source: 'vault',
+    fingerprint: 'fp',
+    entry: { appId: '9', slug: 'bot', clientId: 'c', pem: PEM, importedAt: '2026-11-01' },
+  } as const;
+  const absent = { source: 'missing' } as const;
+  const broken = { source: 'missing', undecryptable: true } as const;
+  type Read = typeof entry | typeof absent | typeof broken;
+  const owner = (z: DropZoneConfig) => z.repo.split('/')[0]!.toLowerCase();
+  const appsOf = (z: DropZoneConfig, author: Read, reviewer: Read): ResolvedApps =>
+    new Map([[owner(z), { author, reviewer }]]);
+  const TOKENS = [
+    'sk-ant-oat01-x',
+    'github_pat_author',
+    'github_pat_reviewer',
+    'ghp_classic_458',
+    'github_pat_leftover',
+  ];
+  const seen: string[] = [];
+  const run = (z: DropZoneConfig, r: Resolved, a: ResolvedApps) => {
+    const out = credentialProblems(z, r, a);
+    seen.push(...out.map((p) => p.message));
+    return out;
+  };
+  const shape = (z: DropZoneConfig, r: Resolved, a: ResolvedApps) =>
+    run(z, r, a).map((p) => [p.kind, p.credential]);
+
+  test('a two-bot zone with both app entries and no PATs has no problems', () => {
+    const z = zone();
+    const r = full({ githubAuthorToken: missing, githubReviewerToken: missing });
+    expect(run(z, r, appsOf(z, entry, entry))).toEqual([]);
+  });
+
+  test('an author app with authorMayBeAdmin and no author PAT has no problems', () => {
+    const z = zone({ authorMayBeAdmin: true });
+    expect(run(z, full({ githubAuthorToken: missing }), appsOf(z, entry, absent))).toEqual([]);
+    // A leftover classic author PAT is unused, so not the wrong kind either.
+    expect(
+      run(z, full({ githubAuthorToken: has('ghp_classic_458') }), appsOf(z, entry, absent)),
+    ).toEqual([]);
+  });
+
+  test('hybrid: an author app needs only the reviewer PAT', () => {
+    const z = zone();
+    const a = appsOf(z, entry, absent);
+    expect(run(z, full({ githubAuthorToken: missing }), a)).toEqual([]);
+    expect(shape(z, full({ githubAuthorToken: missing, githubReviewerToken: missing }), a)).toEqual(
+      [['missing', 'githubReviewerToken']],
+    );
+  });
+
+  test('hybrid: a reviewer PAT equal to a leftover author PAT is not the same account', () => {
+    const z = zone();
+    const r = full({
+      githubAuthorToken: has('github_pat_leftover', { login: 'bot' }),
+      githubReviewerToken: has('github_pat_leftover', { login: 'bot' }),
+    });
+    expect(run(z, r, appsOf(z, entry, absent))).toEqual([]);
+  });
+
+  test('a reviewer app needs no reviewer PAT', () => {
+    const z = zone();
+    expect(run(z, full({ githubReviewerToken: missing }), appsOf(z, absent, entry))).toEqual([]);
+  });
+
+  test('an undecryptable author entry parks the zone on the author PAT, PAT set or not', () => {
+    const z = zone();
+    const a = appsOf(z, broken, entry);
+    const without = run(z, full({ githubAuthorToken: missing, githubReviewerToken: missing }), a);
+    expect(without.map((p) => [p.kind, p.credential])).toEqual([['missing', 'githubAuthorToken']]);
+    expect(without[0]!.message).toContain(`github-app/${owner(z)}/author`);
+    expect(without[0]!.message).toMatch(/undecryptable/);
+    expect(without[0]!.message).toMatch(/import the entry again|restore the vault key/);
+    const withPat = run(z, full({ githubReviewerToken: missing }), a);
+    expect(withPat).toEqual(without);
+    // A classic PAT with authorMayBeAdmin adds no kind problem: the PAT is not in use.
+    expect(
+      shape(
+        zone({ authorMayBeAdmin: true }),
+        full({ githubAuthorToken: has('ghp_classic_458') }),
+        a,
+      ),
+    ).toEqual([['missing', 'githubAuthorToken']]);
+  });
+
+  test('an undecryptable reviewer entry parks the zone on the reviewer PAT', () => {
+    const z = zone();
+    const out = run(z, full(), appsOf(z, entry, broken));
+    expect(out.map((p) => [p.kind, p.credential])).toEqual([['missing', 'githubReviewerToken']]);
+    expect(out[0]!.message).toContain(`github-app/${owner(z)}/reviewer`);
+  });
+
+  test('a starter zone ignores app entries for its owner', () => {
+    const z = zone({ identity: 'starter' });
+    const a = appsOf(z, entry, entry);
+    expect(run(z, full({ githubReviewerToken: missing }), a)).toEqual([]);
+    expect(shape(z, full({ githubAuthorToken: has('ghp_classic_458') }), a)).toEqual([
+      ['kind', 'githubAuthorToken'],
+    ]);
+    expect(shape(z, full({ githubAuthorToken: missing }), a)).toEqual([
+      ['missing', 'githubAuthorToken'],
+    ]);
+  });
+
+  test('no message carries a token value or PEM text', () => {
+    expect(seen.length).toBeGreaterThan(0);
+    for (const m of seen) {
+      for (const t of TOKENS) expect(m).not.toContain(t);
+      expect(m).not.toContain('fixture-pem-body-458');
+      expect(m).not.toContain('BEGIN RSA');
+    }
+  });
+});

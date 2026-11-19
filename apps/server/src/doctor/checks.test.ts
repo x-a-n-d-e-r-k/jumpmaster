@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import nock from 'nock';
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import type { ConfigStatus } from '../config/source.js';
-import { STARTER_WARNING } from '../config.js';
+import { type DropZoneConfig, STARTER_WARNING } from '../config.js';
 import {
   appendEvents,
   insertDrop,
@@ -29,11 +29,14 @@ import { okProbes } from '../test/fakes.js';
 import { makeZone } from '../test/fixtures.js';
 import { addTranscriptDrop } from '../test/transcriptWorld.js';
 import { prunePass } from '../transcripts.js';
+import type { Resolved } from '../vault/credentials.js';
 import {
+  type AppEntryRead,
   type GitHubAppEntry,
   readAppEntry,
   serializeAppEntry,
 } from '../vault/github-app-entries.js';
+import { credentialProblems } from '../vault/problems.js';
 import type { ResolvedApps } from '../vault/resolution.js';
 import {
   ADD_CHAT_SERVICE,
@@ -1606,6 +1609,51 @@ describe('credential checks (Task 4)', () => {
     });
     expect(one(checks, 'credential.kind').credentials).toEqual(['githubAuthorToken']);
     expect(one(checks, 'credential.missing').status).toBe('pass');
+  });
+
+  describe('GitHub App roles need no PAT (issue #458)', () => {
+    const entry = {
+      source: 'vault',
+      fingerprint: 'fp',
+      entry: { appId: '9', slug: 'bot', clientId: 'c', pem: 'unused', importedAt: '2026-11-01' },
+    } as const;
+    const noPats = (): Resolved =>
+      ({
+        claudeToken: { value: 'sk-ant-oat01-x', source: 'vault', fingerprint: 'fp' },
+        githubAuthorToken: { source: 'missing' },
+        githubReviewerToken: { source: 'missing' },
+        githubReadToken: { source: 'missing' },
+      }) as Resolved;
+    const appsOf = (
+      zone: DropZoneConfig,
+      author: AppEntryRead,
+      reviewer: AppEntryRead,
+    ): ResolvedApps => new Map([[zone.repo.split('/')[0]!.toLowerCase(), { author, reviewer }]]);
+
+    test('a two-bot zone with both app entries and no PATs passes every credential check', async () => {
+      const w = world();
+      w.deps.credentials = creds({
+        problems: credentialProblems(w.zone, noPats(), appsOf(w.zone, entry, entry)),
+      });
+      const checks = await w.run();
+      for (const id of ['credential.missing', 'credential.kind', 'credential.same'])
+        expect(one(checks, id)).toMatchObject({ zoneId: w.zone.id, status: 'pass' });
+    });
+
+    test('an undecryptable author entry fails credential.missing on the author token', async () => {
+      const w = world();
+      const broken: AppEntryRead = { source: 'missing', undecryptable: true };
+      w.deps.credentials = creds({
+        problems: credentialProblems(w.zone, noPats(), appsOf(w.zone, broken, entry)),
+      });
+      const checks = await w.run();
+      expect(one(checks, 'credential.missing')).toMatchObject({
+        status: 'fail',
+        credentials: ['githubAuthorToken'],
+      });
+      expect(one(checks, 'credential.kind').status).toBe('pass');
+      expect(one(checks, 'credential.same').status).toBe('pass');
+    });
   });
 
   test('credential.shadowed warns naming the file and both fingerprints, never a value', async () => {
