@@ -2715,6 +2715,51 @@ describe('forge.author and forge.reviewer for GitHub App roles (issue #435)', ()
       }
     });
   });
+
+  describe('the install runbook troubleshooting section (issue #472)', () => {
+    const runbook = readFileSync(
+      new URL('../../../../docs/runbooks/install.md', import.meta.url),
+      'utf8',
+    );
+    const start = runbook.indexOf('\n## Troubleshooting by check id\n');
+    const rest = runbook.slice(start + 1);
+    const next = rest.indexOf('\n## ', 1);
+    const section = next === -1 ? rest : rest.slice(0, next);
+    /** The text under `### \`<id>\``, up to the next heading. */
+    const entry = (id: string): string => {
+      const head = `### \`${id}\`\n`;
+      const at = section.indexOf(head);
+      if (at === -1) return '';
+      const body = section.slice(at + head.length);
+      const end = body.search(/^#{2,3} /m);
+      return end === -1 ? body : body.slice(0, end);
+    };
+
+    test('every check id the doctor emits, in a token zone and a two-app zone, has a heading', async () => {
+      expect(start).toBeGreaterThan(-1);
+      getApp(byId);
+      const ids = new Set<string>();
+      for (const w of [world({ readToken: true }), appWorld({})])
+        for (const c of await w.run()) ids.add(c.id);
+      expect(ids.size).toBeGreaterThan(25);
+      const headings = new Set(
+        [...section.matchAll(/^### `([a-z]+\.[a-z-]+)`$/gm)].map((m) => m[1]),
+      );
+      expect([...ids].filter((id) => !headings.has(id))).toEqual([]);
+    });
+
+    test('the app-role texts stay: jumpmaster-merge for the rules and owners, the key for the author', () => {
+      expect(entry('forge.codeowners')).toContain('jumpmaster-merge');
+      expect(entry('forge.branch-rules')).toContain('jumpmaster-merge');
+      expect(entry('forge.author')).toMatch(/private key/);
+      expect(entry('forge.author')).toMatch(/GitHub App/);
+    });
+
+    test('no token, key or secret-looking literal appears in the section', () => {
+      expect(section).not.toMatch(/gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}/);
+      expect(section).not.toMatch(/BEGIN [A-Z ]*PRIVATE KEY|sk-ant-/);
+    });
+  });
 });
 
 describe('forge.branch-rules in a two-app zone needs jumpmaster-merge (issue #436)', () => {

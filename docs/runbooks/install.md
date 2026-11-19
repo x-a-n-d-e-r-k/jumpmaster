@@ -1583,6 +1583,13 @@ is parked until it arrives (its queue reason says `credentials: …`). Enter it 
 Credentials, or `jumpmaster ctl secrets set <name>` (the value on stdin), or write its file under
 `secrets/` and run `jumpmaster ctl secrets reload`.
 
+GitHub App roles: a role that resolves to its owner's GitHub App needs no token, so a missing
+author or reviewer token is not reported for it, and a zone whose reviewer is an app needs no read
+token even with `reviewReadToken` on (drops clone with the reviewer app). An app entry that won't
+decrypt is reported here under the role's token name (`githubAuthorToken` or
+`githubReviewerToken`), because the role never falls back to a token: import the entry again, or
+restore the vault key it was stored with. The fix the doctor shows is the same.
+
 ### `credential.kind`
 
 **Action:** Open Settings, Credentials (`/settings/credentials`).
@@ -1704,12 +1711,45 @@ Whether dispatch is open under your Claude usage; nothing to do unless a credits
 The author token's account, its role on the repository (must be Write, not Admin unless
 `authorMayBeAdmin`), and its expiry ([Tokens](#tokens)).
 
+When the author is its owner's GitHub App, the check tests the app's private key instead: the
+server signs a request as the app and compares GitHub's answer with the imported entry. It fails,
+naming the app by its slug, when:
+
+- GitHub rejects the key, or the key can't sign: the fix is a new private key from the app's page
+  on GitHub, then importing the app again with it;
+- the key belongs to another app than the entry's: re-import the app under Settings, Credentials;
+- GitHub names the app differently (the slug mismatch: the app was renamed, so it no longer acts
+  as `<old-slug>[bot]`): re-import the app, and add the old login to the zone's
+  `authorLoginAliases` so its open pull requests stay adopted;
+- the zone's recorded installation or repository id doesn't match the repository: nothing mints
+  until you install the author app on the repository and set the zone's `githubApp` ids to the
+  ones GitHub gives it;
+- the app has less than write on the repository: check its installation includes the repository
+  and the app grants Contents: Read and write (accept the new permissions on the installation if
+  GitHub asks).
+
+It warns when the private key was imported more than 365 days ago (the fix points to the app's
+page for a new key), and when the installation grant differs from the app's manifest: a
+permission missing or below what the manifest asks (the account owner accepts the new permissions
+on the installation; the app keeps the old grant until then), or one beyond it (remove it on the
+app's page and accept the change on the installation). A grant it can't read is a warn too.
+Administration and Workflows are `forge.admin`'s. An app has no token expiry to report: its
+tokens are minted per use.
+
 ### `forge.reviewer`
 
 **Action:** Open Settings, Credentials (`/settings/credentials`).
 
 The same for the reviewer; it must be another account than the author, with Write and not Admin.
 `skip` in starter mode ([Tokens](#tokens)).
+
+When the reviewer is its owner's GitHub App, it runs the same app checks as `forge.author` (the
+key, the slug, the installation ids, write, the key's age and the grant against the manifest),
+and the renamed-app fix is only to re-import it. It also fails when the reviewer and the author
+are the same GitHub App, or the same account: GitHub never lets an app approve its own pull
+request, so create a second GitHub App for the reviewer, install it on the repository and import
+it as the owner's reviewer app. A reviewer app with admin on the repository fails: remove the
+Administration permission on its page and accept the change on its installation.
 
 ### `forge.author-reads`
 
@@ -1718,11 +1758,23 @@ The same for the reviewer; it must be another account than the author, with Writ
 Tries each read the server relies on with the author token: Contents, Issues, Pull requests,
 Commit statuses, and CI results (Actions). A refusal names the permission to add ([Tokens](#tokens)).
 
+For an author GitHub App, it tries the reads with a token minted for the app, and check runs are
+required: on an app the server reads CI results through check runs directly, so Checks: read
+counts and Actions is ignored. A refusal fails naming the permission; the fix is to add it
+(Read-only) on the app's page (Permissions & events) and have the account owner accept the new
+permissions on the installation. A refused minted token (401) fails without asking for a token,
+since there is none to replace: run the doctor again and look at `forge.author` (the key and the
+installation). For an app role, follow that fix rather than the **Action**'s token page.
+
 ### `forge.reviewer-reads`
 
 **Action:** Make a reviewer token with the right permissions (GitHub's token page, pre-filled).
 
 The same for the reviewer token: Contents and Pull requests ([Tokens](#tokens)).
+
+For a reviewer GitHub App, the same reads through its minted token, with the same fixes as an
+author app: add the refused permission on the app's page and accept it on the installation. For
+an app role, follow that fix rather than the **Action**'s token page.
 
 ### `forge.admin`
 
@@ -1731,12 +1783,32 @@ The same for the reviewer token: Contents and Pull requests ([Tokens](#tokens)).
 Neither bot may be a repository admin, unless `authorMayBeAdmin` is set for an owner's personal
 repository and the author token has no Administration permission ([Starter mode](#starter-mode)).
 
+For each role on a GitHub App, it reads the app's installation grant and its bypass on each
+ruleset, as that app. An app granted administration or workflows, at any level, fails: remove the
+permission on the app's page (Permissions & events), then accept the change on its installation.
+An app that can bypass a ruleset fails: remove it from that ruleset's bypass list (Settings →
+Rules → Rulesets → the ruleset → Bypass list). The one exception is the author app on
+`jumpmaster-merge`, which `forge.branch-rules` checks. A grant or bypass list it can't read, or a
+bypass GitHub doesn't answer, is a warn: check the bypass lists by hand and run the doctor again.
+When the zone's app entries can't be used it skips; the credential checks say why.
+
 ### `forge.branch-rules`
 
 **Action:** Get the ruleset file for <zone> (the zone's GitHub page). When GitHub answered the doctor's reads, the action is **Import the ruleset file on GitHub** instead: the repository's Rulesets page, with the ruleset file as a download beside it.
 
 The ruleset on the default branch, as the tokens see it; the summary names each problem
 ([Branch rules](#branch-rules)).
+
+In a two-app zone (both roles GitHub Apps), the reviewer app can't be a code owner, so a
+`jumpmaster-merge` ruleset is required: Active on the default branch, holding only Restrict
+updates, with the author app on its bypass list. It fails when the ruleset is missing (anyone
+with write access could merge an approved pull request), holds other rules, or the author app
+can't bypass it (nothing merges). The fix gives the steps: Settings → Rules → Rulesets → New
+branch ruleset named `jumpmaster-merge`, enforcement Active, the default branch as target, only
+Restrict updates ticked, and the author app and Repository admin on its bypass list. When GitHub
+gives no per-ruleset bypass list, or doesn't say whether an app can bypass a ruleset, it warns
+with the rulesets to check by hand. A hybrid zone (author app, reviewer token) doesn't need
+`jumpmaster-merge`.
 
 ### `forge.codeowners`
 
@@ -1751,6 +1823,17 @@ people-only one, and each protected path's last matching line must name people. 
 team or an e-mail is a warn, not a park: Jumpmaster cannot tell whether the bot is a member. Starter mode: the option must stay off (GitHub never lets an author
 approve their own pull request); Jumpmaster parks those pull requests for you to merge by hand
 ([Branch rules](#branch-rules)).
+
+When the reviewer is a GitHub App, which can't be a code owner, the rule turns around: only the
+protected paths may have owners, and they must be people. No `*` line, and no other line that
+gives owners to paths that are not protected; the `jumpmaster-merge` ruleset, which
+`forge.branch-rules` checks, decides who may merge the rest. A line naming the reviewer app fails:
+remove it from the line. A line giving owners to other paths fails: to keep those owners, use the
+hybrid reviewer (keep the author app, and make the reviewer a machine user with a token, which can
+be a code owner), or remove the owners from those lines, or turn code-owner review off. With no
+CODEOWNERS file it warns: create `.github/CODEOWNERS` naming people for the protected paths only.
+A protected path whose last matching line names no person warns too. A hybrid zone (author app,
+reviewer token) keeps the two-bot rules above.
 
 ### `forge.ci`
 
@@ -1775,6 +1858,12 @@ make sure no label action is in flight.
 **Action:** Open Settings, Credentials (`/settings/credentials`).
 
 A private repository needs the read token and `reviewReadToken: true` ([Read token](#read-token)).
+
+When the reviewer is a GitHub App, drops read the private repository through the apps: review,
+crew and doctor drops clone with a token minted for the reviewer app, so no read token and no
+`reviewReadToken` are needed. A public repository passes. A private one fails when the reviewer
+app can't read its files: install the reviewer app on the repository, with Contents: Read-only,
+and run the doctor again. GitHub's rate limit is a warn.
 
 ### `zone.mode`
 
