@@ -7,6 +7,7 @@ import type { ConfigStore } from '../config/store.js';
 import type { Db } from '../db/open.js';
 import type { ForgePair } from '../outbox.js';
 import { redactionList } from '../scrub.js';
+import { messageTextHtml } from '../ui/chat.js';
 import {
   type ChatCard,
   cardUndoable,
@@ -270,7 +271,9 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
         const m = ev.message;
         if (m.role === 'tool') {
           send('tool', m.seq, { seq: m.seq, text: m.text, createdAt: m.createdAt });
-        } else send('message', m.seq, publicMessage(m));
+        } else if (m.role === 'owner') send('message', m.seq, publicMessage(m));
+        // The same HTML the stored page shows (#490): the browser sets only this as markup.
+        else send('message', m.seq, { ...publicMessage(m), html: messageTextHtml(m) });
         if (!replaying) settle();
       } else if (ev.type === 'text') {
         send('text', e.seq, { seq: e.seq, text: ev.text });
