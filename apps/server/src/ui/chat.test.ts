@@ -1,6 +1,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import vm from 'node:vm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createApp } from '../app.js';
@@ -19,7 +20,8 @@ import { loadBoot } from '../config/boot.js';
 import { ConfigStore } from '../config/store.js';
 import { openDb } from '../db/open.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
-import { CHAT_MISSING_COMMAND, renderChatList, renderThread } from './chat.js';
+import { CHAT_MISSING_COMMAND, renderChatList, renderThread, THREAD_SCRIPT } from './chat.js';
+import { renderChatMarkdown } from './markdown.js';
 import { page } from './pages.js';
 
 const TOKEN = 'o'.repeat(32);
@@ -331,5 +333,185 @@ describe('/chat', () => {
     });
     expect(unknown.statusCode).toBe(404);
     expect(w.subscribed).toEqual([]);
+  });
+});
+
+/** The text box of each stored message in a page, by seq. */
+function textBoxes(html: string): Map<number, string> {
+  const out = new Map<number, string>();
+  for (const m of html.matchAll(
+    /data-seq="(\d+)"><div class="who">[^<]*<\/div><div class="text">([\s\S]*?)<\/div>/g,
+  )) {
+    out.set(Number(m[1]), m[2] as string);
+  }
+  return out;
+}
+
+describe('/chat Markdown (#490)', () => {
+  test('a stored assistant message renders Markdown; the same owner text stays literal', () => {
+    const w = world({ service: false });
+    const th = createThread(w.db, { title: 't' }, t0);
+    appendMessage(w.db, th.id, { role: 'owner', text: '## Title', state: 'done' }, t0);
+    appendMessage(w.db, th.id, { role: 'assistant', text: '## Title', state: 'done' }, t0);
+    const html = renderThread(th, listMessages(w.db, th.id, 0));
+    const boxes = textBoxes(html);
+    expect(boxes.get(1)).toBe('## Title');
+    expect(boxes.get(2)).toBe('<h3>Title</h3>');
+  });
+
+  test('the stored page and the streamed message event render one reply identically', async () => {
+    const w = world({ service: false });
+    const th = createThread(w.db, { title: 't' }, t0);
+    const text =
+      '## Plan\n\n| A | B | C |\n|---|---|---|\n| 1 | 2 | 3 |\n\nSee [docs](https://ok.example) and /drops.\n\n<script>alert(1)</script> [x](javascript:alert(1))';
+    appendMessage(w.db, th.id, { role: 'assistant', text, state: 'done' }, t0);
+    const page = await w.app.inject({ method: 'GET', url: `/chat/${th.id}`, headers: w.session });
+    const stored = textBoxes(page.body).get(1);
+    const res = await w.app.inject({
+      method: 'GET',
+      url: `/api/chat/threads/${th.id}/events`,
+      headers: w.session,
+    });
+    const streamed = (
+      frames(res.body).find((f) => f.event === 'message')?.data as { html?: string }
+    ).html;
+    expect(stored).toBeDefined();
+    expect(streamed).toBe(stored);
+    expect(stored).toBe(renderChatMarkdown(text, {}));
+    expect(stored).toContain('<table>');
+    expect(stored).toContain('<a href="https://ok.example"');
+    expect(stored).toContain('&lt;script&gt;');
+    expect(stored).not.toContain('<script');
+  });
+
+  test('an owner message streams without html', async () => {
+    const w = world({ service: false });
+    const th = createThread(w.db, { title: 't' }, t0);
+    appendMessage(w.db, th.id, { role: 'owner', text: '## hi', state: 'done' }, t0);
+    const res = await w.app.inject({
+      method: 'GET',
+      url: `/api/chat/threads/${th.id}/events`,
+      headers: w.session,
+    });
+    expect(frames(res.body).find((f) => f.event === 'message')?.data).not.toHaveProperty('html');
+  });
+
+  /** A DOM element fake: records every write of innerHTML. */
+  class FakeEl {
+    className = '';
+    dataset: Record<string, string> = {};
+    children: FakeEl[] = [];
+    parent: FakeEl | undefined;
+    text = '';
+    html: string | undefined;
+    static htmlWrites: { el: FakeEl; value: string }[] = [];
+    constructor(readonly tagName: string) {}
+    get textContent() {
+      return this.html ?? this.text + this.children.map((c) => c.textContent).join('');
+    }
+    set textContent(v: string) {
+      this.text = v;
+      this.html = undefined;
+      this.children = [];
+    }
+    get innerHTML(): string {
+      throw new Error('the script must not read innerHTML');
+    }
+    set innerHTML(v: string) {
+      FakeEl.htmlWrites.push({ el: this, value: v });
+      this.html = v;
+      this.text = '';
+      this.children = [];
+    }
+    get lastChild() {
+      return this.children[this.children.length - 1];
+    }
+    append(...els: FakeEl[]) {
+      for (const e of els) {
+        e.parent = this;
+        this.children.push(e);
+      }
+    }
+    remove() {
+      if (this.parent) this.parent.children = this.parent.children.filter((c) => c !== this);
+    }
+    replaceWith(e: FakeEl) {
+      const p = this.parent;
+      if (!p) return;
+      e.parent = p;
+      p.children = p.children.map((c) => (c === this ? e : c));
+    }
+    addEventListener() {}
+  }
+
+  /** THREAD_SCRIPT in a vm with a fake DOM, following a busy thread; `emit` fires an SSE event. */
+  function runScript() {
+    FakeEl.htmlWrites = [];
+    const root = new FakeEl('div');
+    root.dataset = { thread: '1', last: '1', busy: '1' };
+    const log = new FakeEl('div');
+    const ids: Record<string, FakeEl> = { chat: root, messages: log, send: new FakeEl('form') };
+    const handlers: Record<string, (e: { data: string }) => void> = {};
+    class FakeEventSource {
+      constructor(readonly url: string) {}
+      addEventListener(ev: string, fn: (e: { data: string }) => void) {
+        handlers[ev] = fn;
+      }
+      close() {}
+    }
+    const ctx = vm.createContext({
+      document: {
+        getElementById: (id: string) => ids[id] ?? null,
+        createElement: (tag: string) => new FakeEl(tag),
+        querySelector: () => null,
+      },
+      EventSource: FakeEventSource,
+      jmFetch: async () => ({ ok: false, status: 500, json: async () => ({}) }),
+      alert: () => {},
+    });
+    vm.runInContext(THREAD_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
+    const emit = (ev: string, data: unknown) => {
+      const fn = handlers[ev];
+      if (!fn) throw new Error(`no ${ev} listener`);
+      fn({ data: JSON.stringify(data) });
+    };
+    return { log, emit };
+  }
+
+  test('the page script shows text events as textContent, then a message html replaces the live box', () => {
+    const { log, emit } = runScript();
+    emit('text', { seq: 1, text: '## <b>part</b>' });
+    emit('text', { seq: 1, text: 'two' });
+    expect(FakeEl.htmlWrites).toEqual([]);
+    const live = log.children[0] as FakeEl;
+    expect(live.className).toContain('live');
+    const box = live.lastChild as FakeEl;
+    expect(box.textContent).toBe('## <b>part</b>\n\ntwo');
+    const html = renderChatMarkdown('## part\n\ntwo', {});
+    emit('message', {
+      seq: 2,
+      role: 'assistant',
+      state: 'done',
+      text: '<img src=x onerror=alert(1)>',
+      html,
+    });
+    expect(log.children).toHaveLength(1);
+    expect(log.children[0]).toBe(live);
+    expect(live.className).toBe('msg assistant');
+    expect(live.dataset.seq).toBe('2');
+    expect(FakeEl.htmlWrites).toEqual([{ el: box, value: html }]);
+  });
+
+  test('the page script builds no HTML from a message without html, or from an owner message', () => {
+    const { log, emit } = runScript();
+    emit('message', { seq: 2, role: 'owner', state: 'done', text: '<b>x</b>', html: '<b>x</b>' });
+    emit('message', { seq: 3, role: 'assistant', state: 'done', text: '<i>y</i>' });
+    emit('tool', { seq: 4, text: '<u>z</u>' });
+    expect(FakeEl.htmlWrites).toEqual([]);
+    expect(log.children.map((c) => c.lastChild?.textContent)).toEqual([
+      '<b>x</b>',
+      '<i>y</i>',
+      '<u>z</u>',
+    ]);
   });
 });

@@ -1,11 +1,14 @@
 import { CARD_STATE_TEXT, CARD_TITLE, type ChatCard, renderCard } from '../chat/cards.js';
 import type { ChatMessage, ChatThread } from '../chat/store.js';
+import { renderChatMarkdown } from './markdown.js';
 import { escapeHtml, linkify, page } from './pages.js';
 
 /**
  * The crew chat's pages (#336): `/chat` lists the threads, `/chat/:id` shows one and streams its
- * turns. Stored text is rendered here, escaped and then linked by `linkify`; the page script adds
- * streamed text with `textContent` only, so no text from a turn ever becomes markup.
+ * turns. Owner text is rendered here escaped and linked by `linkify`; assistant and system text
+ * goes through `renderChatMarkdown` (#490), a fixed Markdown subset that escapes everything else.
+ * The page script adds streamed partial text with `textContent` only; the one HTML it sets is a
+ * finished message's `html`, which the server made with the same renderer.
  */
 
 /**
@@ -21,7 +24,7 @@ const WHO: Record<string, string> = {
   system: 'Jumpmaster',
 };
 
-const CHAT_STYLE = `<style>.chat-log{display:flex;flex-direction:column;gap:.75rem;margin:1rem 0}.chat-log .msg{padding:.75rem 1rem;border-radius:12px;box-shadow:inset 0 0 0 1px var(--stroke-soft-200);white-space:pre-wrap;overflow-wrap:anywhere}.chat-log .msg.owner{background:var(--bg-weak-50)}.chat-log .who{font-weight:600;font-size:.875rem;white-space:normal}.chat-log .state{display:block;white-space:normal}.chat-log details.tool{font-size:.875rem;padding:0 1rem}.chat-log .msg.card{background:var(--bg-weak-50);white-space:normal}.chat-log .msg.card.refused{opacity:.8}.chat-send textarea{width:100%;min-height:5rem}</style>`;
+const CHAT_STYLE = `<style>.chat-log{display:flex;flex-direction:column;gap:.75rem;margin:1rem 0}.chat-log .msg{padding:.75rem 1rem;border-radius:12px;box-shadow:inset 0 0 0 1px var(--stroke-soft-200);overflow-wrap:anywhere}.chat-log .msg.owner{background:var(--bg-weak-50);white-space:pre-wrap}.chat-log .msg.live .text{white-space:pre-wrap}.chat-log .msg .text>:first-child{margin-top:0}.chat-log .msg .text>:last-child{margin-bottom:0}.chat-log .msg h3,.chat-log .msg h4,.chat-log .msg h5{margin:.75rem 0 .25rem}.chat-log .msg ul,.chat-log .msg ol{margin:.25rem 0;padding-left:1.5rem}.chat-log .msg p{margin:.5rem 0}.chat-log .msg table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse;margin:.5rem 0}.chat-log .msg th,.chat-log .msg td{border:1px solid var(--stroke-soft-200);padding:.25rem .5rem;text-align:left}.chat-log .msg pre{white-space:pre;overflow-x:auto;padding:.5rem;background:var(--bg-weak-50);border-radius:8px}.chat-log .who{font-weight:600;font-size:.875rem;white-space:normal}.chat-log .state{display:block;white-space:normal}.chat-log details.tool{font-size:.875rem;padding:0 1rem}.chat-log .msg.card{background:var(--bg-weak-50);white-space:normal}.chat-log .msg.card.refused{opacity:.8}.chat-send textarea{width:100%;min-height:5rem}</style>`;
 
 /** The `/chat` page: the threads, newest first, and a New thread button. */
 export function renderChatList(threads: ChatThread[], o: { serviceMissing: boolean }): string {
@@ -44,7 +47,17 @@ export function renderChatList(threads: ChatThread[], o: { serviceMissing: boole
   );
 }
 
-/** One stored message as HTML: a tool line is one collapsed line, the rest escaped and linked. */
+/**
+ * A message's text as HTML: the owner's escaped and linked as typed, the assistant's and the
+ * system's as chat Markdown. The events route sends the same HTML as a message's `html`.
+ */
+export function messageTextHtml(m: Pick<ChatMessage, 'role' | 'text'>): string {
+  return m.role === 'assistant' || m.role === 'system'
+    ? renderChatMarkdown(m.text, {})
+    : linkify(m.text, {});
+}
+
+/** One stored message as HTML: a tool line is one collapsed line, the rest as `messageTextHtml`. */
 function messageHtml(m: ChatMessage): string {
   if (m.role === 'tool') {
     return `<details class="tool" data-seq="${m.seq}"><summary>${escapeHtml(m.text)}</summary></details>`;
@@ -53,17 +66,18 @@ function messageHtml(m: ChatMessage): string {
     m.state === 'done'
       ? ''
       : `<small class="state">${escapeHtml(m.error ? `${m.state}: ${m.error}` : m.state)}</small>`;
-  return `<div class="msg ${escapeHtml(m.role)}" data-seq="${m.seq}"><div class="who">${escapeHtml(WHO[m.role] ?? m.role)}</div><div class="text">${linkify(m.text, {})}</div>${state}</div>`;
+  return `<div class="msg ${escapeHtml(m.role)}" data-seq="${m.seq}"><div class="who">${escapeHtml(WHO[m.role] ?? m.role)}</div><div class="text">${messageTextHtml(m)}</div>${state}</div>`;
 }
 
 /**
  * The page script. It posts the owner's message, then follows the thread's events
  * (`/api/chat/threads/:id/events`) from the last seq it has, until `done`.
  */
-const THREAD_SCRIPT = `<script>{const root=document.getElementById('chat');const id=root.dataset.thread;const log=document.getElementById('messages');let last=Number(root.dataset.last)||0;let es=null;let live=null;const WHO=${JSON.stringify(WHO)};const CARD_TITLE=${JSON.stringify(CARD_TITLE)};const STATE=${JSON.stringify(CARD_STATE_TEXT)};
+export const THREAD_SCRIPT = `<script>{const root=document.getElementById('chat');const id=root.dataset.thread;const log=document.getElementById('messages');let last=Number(root.dataset.last)||0;let es=null;let live=null;const WHO=${JSON.stringify(WHO)};const CARD_TITLE=${JSON.stringify(CARD_TITLE)};const STATE=${JSON.stringify(CARD_STATE_TEXT)};
 const el=(tag,cls,text)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=String(text);return e;};
-const msgEl=(m)=>{if(m.role==='tool'){const d=el('details','tool');d.dataset.seq=String(m.seq);d.append(el('summary','',m.text));return d;}const d=el('div','msg '+m.role);d.dataset.seq=String(m.seq);d.append(el('div','who',WHO[m.role]||m.role),el('div','text',m.text));if(m.state!=='done')d.append(el('small','state',m.error?m.state+': '+m.error:m.state));return d;};
-const put=(m)=>{last=Math.max(last,Number(m.seq)||0);const node=msgEl(m);const old=[...log.children].find((c)=>c.dataset.seq===String(m.seq));if(old)old.replaceWith(node);else log.append(node);if(m.role==='assistant'&&live){live.remove();live=null;}};
+const textEl=(m)=>{const t=el('div','text');if(m.role!=='owner'&&typeof m.html==='string')t.innerHTML=m.html;else t.textContent=String(m.text);return t;};
+const msgEl=(m)=>{if(m.role==='tool'){const d=el('details','tool');d.dataset.seq=String(m.seq);d.append(el('summary','',m.text));return d;}const d=el('div','msg '+m.role);d.dataset.seq=String(m.seq);d.append(el('div','who',WHO[m.role]||m.role),textEl(m));if(m.state!=='done')d.append(el('small','state',m.error?m.state+': '+m.error:m.state));return d;};
+const put=(m)=>{last=Math.max(last,Number(m.seq)||0);const old=[...log.children].find((c)=>c.dataset.seq===String(m.seq));if(m.role==='assistant'&&live&&!old&&typeof m.html==='string'){live.lastChild.innerHTML=m.html;live.className='msg assistant';live.dataset.seq=String(m.seq);if(m.state!=='done')live.append(el('small','state',m.error?m.state+': '+m.error:m.state));live=null;return;}const node=msgEl(m);if(old)old.replaceWith(node);else log.append(node);if(m.role==='assistant'&&live){live.remove();live=null;}};
 const follow=()=>{if(es)return;es=new EventSource('/api/chat/threads/'+encodeURIComponent(id)+'/events?after='+last);
 es.addEventListener('message',(e)=>put(JSON.parse(e.data)));
 es.addEventListener('tool',(e)=>put({...JSON.parse(e.data),role:'tool',state:'done'}));
