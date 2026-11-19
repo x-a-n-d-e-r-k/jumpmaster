@@ -117,6 +117,8 @@ export type StatusInput = {
   lastPassAt?: string;
   /** Open briefings the floor lists: a paused or observing zone's are held off it. */
   openBriefings: number;
+  /** The viewing session's unexpired pending guarded changes (#507); none for a token. */
+  pendingChanges?: number;
   zones: StatusZone[];
   outboxRetrying: OutboxRow[];
   restartPending: boolean;
@@ -435,13 +437,25 @@ export function statusOf(input: StatusInput, now: Date): Status {
       { doctor: true },
     );
 
-  if (input.openBriefings > 0)
+  const pendingChanges = input.pendingChanges ?? 0;
+  if (input.openBriefings > 0 || pendingChanges > 0) {
+    const what = [
+      input.openBriefings > 0 ? plural(input.openBriefings, 'briefing') : '',
+      pendingChanges > 0 ? `${plural(pendingChanges, 'guarded change')} to confirm` : '',
+    ].filter((w) => w !== '');
     return said({
-      headline: `Waiting on you: ${plural(input.openBriefings, 'briefing')}`,
-      detail: 'Work they hold waits for your ruling.',
+      headline: `Waiting on you: ${what.join(', ')}`,
+      detail:
+        input.openBriefings > 0
+          ? 'Work they hold waits for your ruling.'
+          : 'A guarded change lapses unless you confirm it in time.',
       waitingOn: 'you',
-      action: { label: 'Answer them', href: '/briefings' },
+      action:
+        input.openBriefings > 0
+          ? { label: 'Answer them', href: '/briefings' }
+          : { label: 'Review them on home', href: '/' },
     });
+  }
 
   if (zones.length > 0 && activeZones.length === 0) {
     const draining = zones
@@ -734,9 +748,14 @@ function redactStatus(s: Status, secrets: string[]): Status {
  * of the install's secrets and the scrub set's values so no future reason text can carry one.
  */
 export function buildStatus(
-  o: Parameters<typeof statusInputOf>[0] & { zoneName?: (id: string) => string },
+  o: Parameters<typeof statusInputOf>[0] & {
+    zoneName?: (id: string) => string;
+    /** The viewing session's pending guarded changes (#507). */
+    pendingChanges?: number;
+  },
 ): Status {
-  const input = statusInputOf(o);
+  const base = statusInputOf(o);
+  const input = o.pendingChanges ? { ...base, pendingChanges: o.pendingChanges } : base;
   return redactStatus(
     statusOf(o.zoneName ? { ...input, zoneName: o.zoneName } : input, o.now),
     redactionList(o.config.secrets),
