@@ -90,8 +90,10 @@ import { registerGithubPages } from './ui/github.js';
 import { registerGoalConfirmPages } from './ui/goal-confirm.js';
 import {
   type CrewLine,
+  DROP_KINDS,
   DROP_LIST_LIMIT,
   DROP_STATES,
+  type DropKind,
   type HomeState,
   type ItemDetail,
   pageParams,
@@ -191,6 +193,14 @@ function issueFilter(
   if (typeof issue !== 'string' || !/^[1-9]\d*$/.test(issue)) return { refuse: 'bad issue' };
   const n = Number(issue);
   return Number.isSafeInteger(n) ? n : { refuse: 'bad issue' };
+}
+
+/** /drops' `kind` filter: one of DROP_KINDS, issue work when absent; refused otherwise. */
+function kindFilter(kind: unknown): DropKind | { refuse: string } {
+  if (kind === undefined) return 'work';
+  return (DROP_KINDS as readonly unknown[]).includes(kind)
+    ? (kind as DropKind)
+    : { refuse: 'bad kind' };
 }
 
 /** The most active drops the floor reads: far above any slot count. */
@@ -686,7 +696,7 @@ export function createApp(
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
 
-  app.get<{ Querystring: { zone?: string; state?: string; issue?: string } }>(
+  app.get<{ Querystring: { zone?: string; state?: string; issue?: string; kind?: string } }>(
     '/drops',
     async (req, reply) => {
       const { db } = deps;
@@ -695,6 +705,8 @@ export function createApp(
       if ('refuse' in f) return reply.code(404).type('text/plain').send(f.refuse);
       const issue = issueFilter(req.query.issue, f.zone);
       if (typeof issue === 'object') return reply.code(404).type('text/plain').send(issue.refuse);
+      const kind = kindFilter(req.query.kind);
+      if (typeof kind === 'object') return reply.code(404).type('text/plain').send(kind.refuse);
       const state = f.state ?? 'all';
       const item =
         issue === undefined || f.zone === undefined ? undefined : findWorkItem(db, f.zone, issue);
@@ -705,6 +717,7 @@ export function createApp(
           : listDrops(db, {
               ...(f.zone !== undefined ? { zoneId: f.zone } : {}),
               ...(item !== undefined ? { workItemId: item.id } : {}),
+              ...(kind === 'all' ? {} : { kind }),
               ...(state === 'all'
                 ? {}
                 : { states: state === 'active' ? ACTIVE_DROP_STATES : [state] }),
@@ -715,6 +728,7 @@ export function createApp(
         ...(f.zone !== undefined ? { zone: f.zone } : {}),
         ...(issue !== undefined ? { issue } : {}),
         state,
+        kind,
         drops: found.slice(0, DROP_LIST_LIMIT),
         items: config.dropZones.flatMap((z) => listWorkItems(db, z.id)),
         limited: found.length > DROP_LIST_LIMIT,
