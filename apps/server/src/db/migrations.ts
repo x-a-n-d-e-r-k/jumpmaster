@@ -1562,6 +1562,31 @@ const V55_SQL = `
 ALTER TABLE rulings ADD COLUMN via TEXT;
 `;
 
+/**
+ * v56 (#536): a diagnose drop may claim a parked item already done. The claim waits in
+ * `verifying` until the trail pass checks its evidence on the forge; at most one per item verifies
+ * at a time, and one per diagnose drop ever. `diagnosis` is the crew's, quoted (sanitized) by
+ * the closing comment.
+ */
+const V56_SQL = `
+CREATE TABLE crew_done_claims (
+  id            INTEGER PRIMARY KEY,
+  zone_id       TEXT NOT NULL,
+  item_id       INTEGER NOT NULL REFERENCES work_items(id),
+  briefing_id   INTEGER NOT NULL REFERENCES briefings(id),
+  drop_id       TEXT NOT NULL UNIQUE,
+  basis         TEXT NOT NULL,
+  diagnosis     TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  state         TEXT NOT NULL CHECK (state IN ('verifying', 'done', 'refused', 'superseded')),
+  reason        TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+CREATE UNIQUE INDEX crew_done_claims_one_verifying ON crew_done_claims(item_id)
+  WHERE state = 'verifying';
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1618,6 +1643,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 53, sql: V53_SQL },
   { version: 54, sql: V54_SQL },
   { version: 55, sql: V55_SQL },
+  { version: 56, sql: V56_SQL },
 ];
 
 /**

@@ -346,6 +346,51 @@ describe('crew roles', () => {
     ).toBe(false);
   });
 
+  describe('diagnose already_done (#536)', () => {
+    const base = { diagnosis: 'd', detail: 'close it' };
+    const ok = (v: unknown) => parseCrewOutput('diagnose', v).ok;
+
+    test('accepts already_done with evidence', () => {
+      expect(ok({ ...base, recommendation: 'already_done', evidence: { issues: [502] } })).toBe(
+        true,
+      );
+      expect(ok({ ...base, recommendation: 'already_done', evidence: { pulls: [7] } })).toBe(true);
+    });
+
+    test('refuses already_done without evidence', () => {
+      expect(ok({ ...base, recommendation: 'already_done' })).toBe(false);
+      expect(ok({ ...base, recommendation: 'already_done', evidence: {} })).toBe(false);
+      expect(
+        ok({ ...base, recommendation: 'already_done', evidence: { pulls: [], issues: [] } }),
+      ).toBe(false);
+    });
+
+    test('refuses evidence on any other recommendation', () => {
+      for (const recommendation of ['retry', 'leave_parked', 'needs_command']) {
+        expect(ok({ ...base, recommendation, evidence: { pulls: [1] } }), recommendation).toBe(
+          false,
+        );
+      }
+      expect(
+        ok({ ...base, recommendation: 'rerun_checks', checks: ['ci'], evidence: { pulls: [1] } }),
+      ).toBe(false);
+    });
+
+    test('refuses 11 entries, a non-positive number and an unknown key', () => {
+      const ten = { pulls: [1, 2, 3, 4, 5], issues: [6, 7, 8, 9, 10] };
+      expect(ok({ ...base, recommendation: 'already_done', evidence: ten })).toBe(true);
+      expect(
+        ok({
+          ...base,
+          recommendation: 'already_done',
+          evidence: { ...ten, issues: [...ten.issues, 11] },
+        }),
+      ).toBe(false);
+      expect(ok({ ...base, recommendation: 'already_done', evidence: { pulls: [0] } })).toBe(false);
+      expect(ok({ ...base, recommendation: 'already_done', evidence: { prs: [1] } })).toBe(false);
+    });
+  });
+
   describe('TriageOutputSchema', () => {
     const child = {
       key: 'hide-gauge',
