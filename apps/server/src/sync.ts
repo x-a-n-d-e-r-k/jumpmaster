@@ -7,6 +7,7 @@ import {
   listTriageRequests,
   recordTriageRequest,
   setTriageRequest,
+  TRIAGE_WITHDRAWN,
 } from './crew/store.js';
 import type { Db } from './db/open.js';
 import {
@@ -373,12 +374,13 @@ async function recordTriage(
   }
   const backlog = open.filter((i) => isBacklogIssue(i, zone)).sort((a, b) => a.number - b.number);
   // An untouched request whose issue was closed, labeled ready or otherwise taken out of both
-  // listings before its drop ran: nothing is written to the forge for it.
+  // listings before its drop ran is withdrawn: nothing is written to the forge for it, and the
+  // same text is sent again if the issue comes back (`recordTriageRequest` reopens it).
   if (labeled !== null) {
     const present = new Set([...backlog, ...labeled].map((i) => i.number));
     for (const r of listTriageRequests(db, zone.id)) {
       if (r.state === 'open' && r.attempts === 0 && !present.has(r.issueNumber))
-        setTriageRequest(db, r.id, { state: 'done', reason: 'superseded' }, now);
+        setTriageRequest(db, r.id, { state: 'done', reason: TRIAGE_WITHDRAWN }, now);
     }
   }
   const skip = new Set((zone.crew.backlogSkipLabels ?? []).map((l) => l.toLowerCase()));

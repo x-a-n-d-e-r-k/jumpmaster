@@ -67,7 +67,10 @@ And at the top level of the server config:
   of `backlogSkipLabels` (compared without case). Each issue text is sent once, lowest issue
   number first, and only while fewer than three backlog requests are open; triage-labeled issues
   are not limited. A queued request whose issue is closed or labeled before its drop runs is
-  superseded, with nothing written to the forge. Set it to `false` to triage labeled issues only.
+  withdrawn, with nothing written to the forge. If the issue returns to triage with the same text
+  (reopened, the label taken off, or `triageLabel` put back), the withdrawn request is sent again,
+  under the same pace, trust, crew-filed and skip-label rules. A text that was triaged, failed or
+  had an attempt is never sent again. Set it to `false` to triage labeled issues only.
 - `arbiter` (on by default) lets a Fable arbiter settle a staged crew issue whose refutes ran out
   with at least one verdict, once per issue text, instead of briefing you. It runs only when Fable
   is available (`claude.plan` includes it and `fableModel` is set). Ruling A promotes as a passing

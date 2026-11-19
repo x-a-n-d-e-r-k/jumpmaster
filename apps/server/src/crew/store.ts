@@ -209,9 +209,16 @@ export const triageBodySha = (body: string): string =>
   createHash('sha256').update(body).digest('hex');
 
 /**
+ * The reason sync gives an untouched open request whose issue left both triage listings. Only a
+ * row with this reason, no outcome and no attempts was never triaged, so only it is reopened.
+ */
+export const TRIAGE_WITHDRAWN = 'withdrawn';
+
+/**
  * Records a request for an issue's current text, once per body (`UNIQUE(zone, number, sha)`):
- * the same body again records nothing. A new body supersedes the issue's request still open,
- * waiting on Command or having its evidence verified. Returns the new request's id, or null when nothing was recorded.
+ * the same body again records nothing, unless its request was withdrawn untouched, which is
+ * reopened. A new body supersedes the issue's request still open, waiting on Command or having
+ * its evidence verified. Returns the new or reopened request's id, or null when nothing was recorded.
  */
 export function recordTriageRequest(
   db: Db,
@@ -225,16 +232,38 @@ export function recordTriageRequest(
   return db.transaction(() => {
     const seen = db
       .prepare(
-        'SELECT 1 FROM triage_requests WHERE zone_id = ? AND issue_number = ? AND body_sha = ?',
+        `SELECT id, state, outcome, reason, attempts FROM triage_requests
+           WHERE zone_id = ? AND issue_number = ? AND body_sha = ?`,
       )
-      .get(zoneId, issue.number, sha);
-    if (seen) return null;
+      .get(zoneId, issue.number, sha) as
+      | Pick<TriageRequest, 'id' | 'state' | 'outcome' | 'reason' | 'attempts'>
+      | undefined;
+    const withdrawn =
+      seen?.state === 'done' &&
+      seen.reason === TRIAGE_WITHDRAWN &&
+      seen.outcome === null &&
+      seen.attempts === 0;
+    if (seen && !withdrawn) return null;
     db.prepare(
       // A verdict still being verified loses its outcome: a superseded request leaves no trail.
       `UPDATE triage_requests SET state = 'done', reason = 'superseded', updated_at = ?,
          outcome = CASE WHEN state = 'verifying' THEN NULL ELSE outcome END
          WHERE zone_id = ? AND issue_number = ? AND state IN ('open', 'waiting', 'verifying')`,
     ).run(at, zoneId, issue.number);
+    if (seen) {
+      // The same text, never triaged: the withdrawn row is sent again with the issue's current facts.
+      db.prepare(
+        `UPDATE triage_requests SET state = 'open', reason = NULL, title = ?, author = ?,
+           gate_reasons = ?, updated_at = ? WHERE id = ?`,
+      ).run(
+        issue.title,
+        issue.author,
+        gateReasons.length > 0 ? JSON.stringify(gateReasons) : null,
+        at,
+        seen.id,
+      );
+      return seen.id;
+    }
     const r = db
       .prepare(
         `INSERT INTO triage_requests (zone_id, issue_number, title, body, body_sha, author, state,
