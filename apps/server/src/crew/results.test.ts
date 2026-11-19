@@ -271,7 +271,7 @@ describe('refute results', () => {
     expect(b?.options.map((o) => o.effect)).toEqual(['promote_issue', 'reject_issue']);
   });
 
-  test('a passing refute with refutePromotes on says it becomes ready unless rejected', async () => {
+  test('a passing refute with refutePromotes on says it goes ahead in about a minute unless rejected', async () => {
     const zone = { ...w.zone, crew: { ...crewOn, refutePromotes: true } };
     staged();
     const id = await crewDrop(t0, zone);
@@ -279,9 +279,11 @@ describe('refute results', () => {
     const [b] = listBriefings(w.db, { zoneId: 'main', state: 'open' });
     expect(b?.kind).toBe('promote_held');
     expect(b?.decision).toBe(
-      'A reviewer found nothing to fix in crew issue #40. It becomes ready on the next pass ' +
+      'A reviewer found nothing to fix in crew issue #40. It goes ahead in about a minute ' +
         'unless you reject it.',
     );
+    expect(b?.decision).toContain('in about a minute');
+    expect(b?.decision).not.toContain('next pass');
     expect(b?.why).toBe(
       'The crew filed crew issue #40 as staged, and a second agent reviewed it against the code ' +
         'and the spec and found nothing wrong, vague or untestable. This zone lets a passing ' +

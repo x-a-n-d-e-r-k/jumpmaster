@@ -106,7 +106,7 @@ const REFUTE_WHY: ReviewWhy = {
 
 /**
  * A staged issue that passed review (a refute's `promote`, or an arbiter's ruling A). With
- * `crew.refutePromotes` on it becomes `promote_held`, ready next pass unless Command rejects it;
+ * `crew.refutePromotes` on it becomes `promote_held`, ready after a one-minute hold unless Command rejects it;
  * off, it stays staged and Command gets a Promote briefing. Never further than a refute could.
  * With `attended`, it takes the off branch whatever the setting, and the why adds that line.
  */
@@ -131,7 +131,7 @@ export function promoteAfterReview(
         zoneId: zone.id,
         kind: 'promote_held',
         subject,
-        decision: `${why.found} ${label}. It becomes ready on the next pass unless you reject it.`,
+        decision: `${why.found} ${label}. It goes ahead in about a minute unless you reject it.`,
         why:
           `The crew filed ${label} as staged, and ${why.held} This zone lets a passing review ` +
           'promote (crew.refutePromotes is on), so you only need to act to stop it.',

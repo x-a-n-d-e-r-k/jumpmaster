@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { type Briefing, listBriefings, raiseBriefing } from '../briefings.js';
+import { type Briefing, floorBriefings, listBriefings, raiseBriefing } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
 import {
   type Drop,
@@ -123,6 +123,86 @@ test('bulk dismiss refuses an unknown zone', async () => {
     payload: { ids: [1] },
   });
   expect(res.statusCode).toBe(404);
+});
+
+// --- a held promotion is a notice, not a briefing that needs Command (#449) ---
+
+const held = (zoneId: string, subject: string) => ({
+  zoneId,
+  kind: 'promote_held' as const,
+  subject,
+  decision: `Hold ${subject}. It goes ahead in about a minute unless you reject it.`,
+  why: 'w',
+  options: [
+    { id: 'reject', label: 'Reject', effect: 'reject_issue' as const },
+    { id: 'promote', label: 'Promote now', effect: 'promote_issue' as const },
+  ],
+  source: 'server' as const,
+});
+const parked = (zoneId: string, subject: string) => ({
+  ...brief(zoneId, subject),
+  kind: 'parked' as const,
+  decision: `Parked ${subject}?`,
+  source: 'server' as const,
+});
+
+/** One zone with its stick checked in, so the status line is about briefings. */
+async function oneZone() {
+  const h = await harness();
+  await h.app.inject({
+    method: 'POST',
+    url: '/api/sticks/lease',
+    headers: h.stickHeaders(),
+    payload: { freeSlots: 1, capabilities: ['push-v1'] },
+  });
+  return h;
+}
+
+test('an open promote_held is a notice: Needs you and the headline count only the parked one', async () => {
+  const h = await oneZone();
+  raiseBriefing(h.db, held('main', 'issue:1'), h.now());
+  raiseBriefing(h.db, parked('main', 'item:2'), h.now());
+  const f = floorBriefings(h.db, [{ id: 'main', repo: 'octo/demo', mode: 'active' }]);
+  expect(f.listed.map((b) => b.kind)).toEqual(['parked']);
+  expect(f.notices.map((b) => b.kind)).toEqual(['promote_held']);
+  expect(f.held).toEqual([]);
+  const home = (await h.view('/')).body;
+  expect(home).toContain('<a class="tile" data-tile="needs-you" href="/briefings"><b>1</b>');
+  expect(home).toContain('Waiting on you: 1 briefing');
+  expect(home).not.toContain('Waiting on you: 2 briefings');
+  expect(home).toContain('1 decision waiting');
+});
+
+test('only a promote_held open: Needs you is 0, and the Floor shows no notice count', async () => {
+  const h = await oneZone();
+  raiseBriefing(h.db, held('main', 'issue:1'), h.now());
+  const home = (await h.view('/')).body;
+  expect(home).toContain('<a class="tile" data-tile="needs-you" href="/briefings"><b>0</b>');
+  expect(home).not.toContain('Waiting on you: 1 briefing');
+  expect(home).not.toContain('Going ahead unless you stop it');
+  expect(home).toContain('Nothing is waiting on you.');
+});
+
+test('a promote_held in a paused zone is held with its other briefings, as before', async () => {
+  const h = await oneZone();
+  raiseBriefing(h.db, held('main', 'issue:1'), h.now());
+  raiseBriefing(h.db, parked('main', 'item:2'), h.now());
+  setZoneMode(h.db, 'main', 'paused', h.now());
+  const f = floorBriefings(h.db, [{ id: 'main', repo: 'octo/demo', mode: 'active' }]);
+  expect(f).toMatchObject({ listed: [], notices: [], held: [{ zoneId: 'main', count: 2 }] });
+  const home = (await h.view('/')).body;
+  expect(home).toContain('octo/demo: paused, 2 briefings held');
+  expect(home).toContain('<a class="tile" data-tile="needs-you" href="/briefings"><b>0</b>');
+});
+
+test('floorCounts never counts a notice as needs-you, on the card or in the totals', () => {
+  const notice = { ...br('A'), kind: 'promote_held' as const };
+  const f = floorCounts(home({ zones: [zone('A')], briefings: [notice, br('A')] }), NOW);
+  expect(zoneOf(f, 'A').counts.needsYou).toBe(1);
+  expect(f.totals.needsYou).toBe(1);
+  const only = floorCounts(home({ zones: [zone('A')], briefings: [notice] }), NOW);
+  expect(zoneOf(only, 'A').counts.needsYou).toBe(0);
+  expect(zoneOf(only, 'A').state).not.toBe('needs-you');
 });
 
 // --- floorCounts and the dashboard's renderers (#120) ---

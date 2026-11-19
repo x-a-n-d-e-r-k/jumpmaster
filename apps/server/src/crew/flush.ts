@@ -249,7 +249,12 @@ export async function flushCrewOps(
           if (now.getTime() < Date.parse(row.holdUntil)) continue;
           // Held with a Reject option: it goes ahead only while that briefing is still unanswered.
           if (!hasOpenBriefing(db, zone.id, subjectOf(row))) continue;
-          setCrewIssue(db, row.id, { state: 'promoting' }, now);
+          // The veto window has passed: the notice closes with it, even if the promotion now
+          // waits on an earlier issue of the objective (#449).
+          db.transaction(() => {
+            setCrewIssue(db, row.id, { state: 'promoting' }, now);
+            withdrawBriefing(db, zone.id, subjectOf(row), now);
+          })();
           moved++;
           step = await promote(db, forges, zone, { ...row, state: 'promoting' }, now);
           break;

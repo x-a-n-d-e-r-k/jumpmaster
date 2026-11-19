@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest';
+import { raiseBriefing } from './briefings.js';
 import { openDb } from './db/open.js';
 import type { Drop, OutboxRow, WorkItem } from './db/repo.js';
 import type { DoctorCheck } from './doctor/checks.js';
@@ -11,6 +12,7 @@ import {
   statusOf,
   type UsageFacts,
 } from './status.js';
+import { harness } from './test/flowHarness.js';
 import { plus, t0, tmpDbFile } from './test/helpers.js';
 import type { CredentialProblem } from './vault/problems.js';
 
@@ -813,5 +815,50 @@ describe('zones named by a namer (#99)', () => {
       NOW,
     );
     expect(doctor.detail).toBe('The doctor drop in octo/demo: waiting for a free stick slot.');
+  });
+});
+
+describe('a held promotion is a notice, not a briefing waiting on you (#449)', () => {
+  const OPERATOR = { authorization: `Bearer ${'o'.repeat(32)}`, host: 'localhost:80' };
+
+  test('one open promote_held and one parked: the headline counts 1', async () => {
+    const h = await harness();
+    await h.app.inject({
+      method: 'POST',
+      url: '/api/sticks/lease',
+      headers: h.stickHeaders(),
+      payload: { freeSlots: 1, capabilities: ['push-v1'] },
+    });
+    const base = { zoneId: 'main', why: 'w', source: 'server' as const };
+    raiseBriefing(
+      h.db,
+      {
+        ...base,
+        kind: 'promote_held',
+        subject: 'issue:1',
+        decision: 'Held. It goes ahead in about a minute unless you reject it.',
+        options: [
+          { id: 'reject', label: 'Reject', effect: 'reject_issue' },
+          { id: 'promote', label: 'Promote now', effect: 'promote_issue' },
+        ],
+      },
+      h.now(),
+    );
+    const status = async () =>
+      (await h.app.inject({ method: 'GET', url: '/api/control/status', headers: OPERATOR })).json()
+        .headline as string;
+    expect(await status()).not.toContain('Waiting on you');
+    raiseBriefing(
+      h.db,
+      {
+        ...base,
+        kind: 'parked',
+        subject: 'item:2',
+        decision: 'Parked. Retry?',
+        options: [{ id: 'retry', label: 'Retry', effect: 'none' }],
+      },
+      h.now(),
+    );
+    expect(await status()).toBe('Waiting on you: 1 briefing');
   });
 });
