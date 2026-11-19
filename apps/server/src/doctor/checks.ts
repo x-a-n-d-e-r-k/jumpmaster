@@ -70,7 +70,12 @@ import {
 } from '../vault/credentials.js';
 import type { GitHubAppEntry } from '../vault/github-app-entries.js';
 import type { CredentialProblem } from '../vault/problems.js';
-import { credentialFor, isAppReviewerZone, type ResolvedApps } from '../vault/resolution.js';
+import {
+  credentialFor,
+  isAppAuthorZone,
+  isAppReviewerZone,
+  type ResolvedApps,
+} from '../vault/resolution.js';
 import { KEY_CHANGED, VAULT_KEY_IN_DATA_DIR } from '../vault/vault.js';
 
 /** `info` says something worth knowing that is no fault (an optional setting left unset). */
@@ -1518,7 +1523,48 @@ const RULE_FIX: [RegExp, (zone: DropZoneConfig, branch: string) => string][] = [
   ],
 ];
 
-async function branchRulesCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck> {
+/**
+ * The author app's slug when both roles are GitHub Apps (a two-app zone, issue #436), whose
+ * merges are fenced by the `jumpmaster-merge` ruleset; undefined for hybrid, PAT and starter zones.
+ */
+function twoAppAuthorOf(d: DoctorDeps, zone: DropZoneConfig): string | undefined {
+  const apps = d.resolvedApps?.();
+  if (!apps || !isAppAuthorZone(zone, apps) || !isAppReviewerZone(zone, apps)) return undefined;
+  const read = apps.get(zone.repo.split('/')[0]?.toLowerCase() ?? '')?.author;
+  return read && read.source !== 'missing' ? read.entry.slug : 'the author app';
+}
+
+const mergeRulesetFix = (author: string, branch: string): string =>
+  `Open Settings → Rules → Rulesets → New branch ruleset (or edit the existing one): name it ${MERGE_RULESET}, set Enforcement status to Active, target the default branch (${branch}), tick only Restrict updates, then add the author app (${author}) and Repository admin to its Bypass list.`;
+
+/**
+ * A two-app zone's `jumpmaster-merge` problems, read from the author's per-ruleset bypass list:
+ * no CODEOWNERS line can name the reviewer app, so only this ruleset stops a foreign approval
+ * from leading to a merge. Null when the author read has no bypass list.
+ */
+function mergeRulesetFails(read: BranchRulesRead): string[] | null {
+  const bypass = read.kind === 'ok' ? read.rules.bypass : undefined;
+  if (!bypass) return null;
+  const entry = bypass.find((b) => b.name === MERGE_RULESET);
+  if (!entry)
+    return [
+      `no ${MERGE_RULESET} ruleset: anyone with write access can merge an approved pull request`,
+    ];
+  const out: string[] = [];
+  if (!entry.restrictUpdatesOnly)
+    out.push(`${MERGE_RULESET} must hold only the Restrict updates rule`);
+  if (entry.can === 'no')
+    out.push(
+      `the author app can't bypass ${MERGE_RULESET}: the author app must be on its bypass list or nothing merges`,
+    );
+  return out;
+}
+
+async function branchRulesCheck(
+  d: DoctorDeps,
+  zone: DropZoneConfig,
+  r: ZoneReads,
+): Promise<DoctorCheck> {
   const base = { id: 'forge.branch-rules', zoneId: zone.id, doc: doc('branch-rules') };
   const branch = await r.branch();
   if (!zone.requireBranchProtection)
@@ -1563,6 +1609,15 @@ async function branchRulesCheck(zone: DropZoneConfig, r: ZoneReads): Promise<Doc
       if (!problems.includes('no pull request rule')) problems.push('no pull request rule');
   if (problems.length === 0) {
     const ok = rules.author.kind === 'ok' ? rules.author.rules : null;
+    const twoApp = zone.identity === 'starter' ? undefined : twoAppAuthorOf(d, zone);
+    const mergeFails = twoApp === undefined ? [] : mergeRulesetFails(rules.author);
+    if (mergeFails && mergeFails.length > 0)
+      return {
+        ...base,
+        status: 'fail',
+        summary: `${branch}: ${mergeFails.join('; ')}`,
+        fix: mergeRulesetFix(twoApp ?? 'the author app', branch),
+      };
     // An unreadable bypass is never read as "cannot bypass": it is a warn naming how to check.
     const unknown = [
       ...new Set(
@@ -1579,6 +1634,19 @@ async function branchRulesCheck(zone: DropZoneConfig, r: ZoneReads): Promise<Doc
         status: 'warn',
         summary: `${branch} is otherwise safe, but GitHub did not say whether the bots can bypass ${unknown.length === 1 ? 'the ruleset' : 'the rulesets'} ${unknown.join(', ')} (no current_user_can_bypass and no bypass list in its answer)`,
         fix: `${unknown.map((n) => `Open Settings → Rules → Rulesets → ${n} → Bypass list`).join('; ')}, and check that the app is listed only on ${MERGE_RULESET}, and only for the author app.`,
+      };
+    if (twoApp !== undefined && mergeFails === null)
+      return {
+        ...base,
+        status: 'warn',
+        summary: `${branch} is otherwise safe, but GitHub gave no per-ruleset bypass list for the author app, so the ${MERGE_RULESET} ruleset can't be checked`,
+        fix: `Open Settings → Rules → Rulesets → ${MERGE_RULESET} and check that it is Active on ${branch}, holds only Restrict updates, and lists only the author app (${twoApp}) and Repository admin on its Bypass list. If it is missing: ${mergeRulesetFix(twoApp, branch)}`,
+      };
+    if (twoApp !== undefined)
+      return {
+        ...base,
+        status: 'pass',
+        summary: `${branch} requires a pull request with ${ok?.requiredApprovals ?? 1}+ approval(s), dismisses stale approvals, pins its required checks (${ok?.requiredChecks.join(', ') || 'none'}); the reviewer can't bypass, and only the author app and admins can merge, through ${MERGE_RULESET}`,
       };
     if (zone.identity === 'starter')
       return {
@@ -2487,7 +2555,7 @@ export async function zoneChecks(
     g('forge.admin', z, () => adminCheck(zone, r)),
     g('forge.author-reads', z, () => readsCheck(zone, r, 'author')),
     g('forge.reviewer-reads', z, () => readsCheck(zone, r, 'reviewer')),
-    g('forge.branch-rules', z, () => branchRulesCheck(zone, r)),
+    g('forge.branch-rules', z, () => branchRulesCheck(d, zone, r)),
     g('forge.codeowners', z, () => codeownersCheck(zone, r)),
     g('forge.ci', z, () => ciCheck(zone, r)),
     g('forge.labels', z, () => labelsCheck(zone, r)),
