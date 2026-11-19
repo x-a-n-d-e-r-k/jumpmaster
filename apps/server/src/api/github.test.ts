@@ -8,13 +8,17 @@ import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { createApp } from '../app.js';
+import { setOperatorPassphrase } from '../auth/operator.js';
 import { loadBoot } from '../config/boot.js';
 import { ConfigStore } from '../config/store.js';
 import type { Config, DropZoneConfig } from '../config.js';
+import { runCtl } from '../ctl.js';
 import { openDb } from '../db/open.js';
 import { AppTokenError, type AppTokenSource } from '../forge/app-tokens.js';
+import { mergeRulesetJson } from '../github/guidance.js';
+import { APP_ENTRIES, APP_SECRETS } from '../test/app-guidance-fixture.js';
 import { makeZone } from '../test/fixtures.js';
-import { t0, tmpDbFile } from '../test/helpers.js';
+import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
 import type { AppEntryRead } from '../vault/github-app-entries.js';
 import type { ResolvedApps } from '../vault/resolution.js';
 import { guidanceReader } from './control.js';
@@ -374,5 +378,167 @@ describe('the callers', () => {
     expect(g?.ruleset.text).toContain('Lint');
     // Without the source, as before: no author PAT, no guidance.
     expect(await guidanceReader(store, config, f.forgeOf, () => t0)('demo')).toBeUndefined();
+  });
+});
+
+/** The fixture entries as the vault reads them: a key, a client secret and a token-like value. */
+const fixtureRead = (role: 'author' | 'reviewer', appId?: string): AppEntryRead => ({
+  source: 'vault',
+  fingerprint: `fp-${role}`,
+  entry: { ...APP_ENTRIES[role], ...(appId !== undefined ? { appId } : {}) },
+});
+const fixtureApps = (o: { reviewer?: boolean; authorId?: string } = {}): ResolvedApps =>
+  new Map([
+    [
+      'octo-org',
+      {
+        author: fixtureRead('author', o.authorId),
+        reviewer: o.reviewer === false ? missing : fixtureRead('reviewer'),
+      },
+    ],
+  ]);
+const INSTALL_AUTHOR = `install the author GitHub App ${APP_ENTRIES.author.slug} on octo-org/demo (no invitation needed)`;
+const INSTALL_REVIEWER = `install the reviewer GitHub App ${APP_ENTRIES.reviewer.slug} on octo-org/demo (no invitation needed)`;
+
+describe('guidanceFor, the zone apps reach the guidance (issue #482)', () => {
+  const read = async (
+    apps: ResolvedApps,
+    zone: DropZoneConfig,
+    o: { appTokens?: boolean; env?: Record<string, string> } = {},
+  ) => {
+    const { store, config } = storeWith(o.env ?? withPat, apps, [zone]);
+    const r = await guidanceFor(store, config, zone, fakeForge().forgeOf, {
+      now: () => t0,
+      reviewers: ['alice'],
+      ...(o.appTokens === false ? {} : { appTokens: counting().source }),
+    });
+    if (!r.ok) throw new Error(r.error);
+    return r;
+  };
+
+  test('a two-app zone gets the merge ruleset, the app CODEOWNERS and the install checklist', async () => {
+    const r = await read(fixtureApps(), twoAppZone);
+    const g = r.guidance;
+    expect(g.mergeRuleset?.text).toBe(mergeRulesetJson(Number(APP_ENTRIES.author.appId)));
+    expect(g.codeowners.text).not.toMatch(/^\* @/m);
+    expect(g.codeowners.text).toContain(APP_ENTRIES.reviewer.slug);
+    expect(g.checklist.items).toEqual([INSTALL_AUTHOR, INSTALL_REVIEWER]);
+    const json = JSON.stringify(r);
+    for (const secret of Object.values(APP_SECRETS)) expect(json).not.toContain(secret);
+  });
+
+  test('the apps are read without a token source too: they need only the public id and slug', async () => {
+    const r = await read(fixtureApps(), twoAppZone, { appTokens: false });
+    expect(r.guidance.mergeRuleset?.text).toBe(mergeRulesetJson(Number(APP_ENTRIES.author.appId)));
+  });
+
+  test('a hybrid zone (app author, PAT reviewer) keeps the reviewer catch-all and a mixed checklist', async () => {
+    const r = await read(fixtureApps({ reviewer: false }), authorZone);
+    const g = r.guidance;
+    expect(g.mergeRuleset).toBeUndefined();
+    expect(g.codeowners.text).toMatch(/^\* @pat-reviewer$/m);
+    expect(g.checklist.items).toEqual([
+      INSTALL_AUTHOR,
+      'invite pat-reviewer with the Write role',
+      'accept the invitation as pat-reviewer',
+    ]);
+  });
+
+  test('an app reviewer entry on a zone with no recorded reviewer installation is not a two-app zone', async () => {
+    const r = await read(fixtureApps(), authorZone);
+    expect(r.guidance.mergeRuleset).toBeUndefined();
+    expect(r.guidance.checklist.items[0]).toBe(INSTALL_AUTHOR);
+    expect(r.guidance.checklist.items).toHaveLength(3);
+  });
+
+  test('a PAT two-bot zone and a starter zone are unchanged by app entries they do not resolve to', async () => {
+    const patZone = zoneOf({});
+    const starter = zoneOf({ identity: 'starter', installations: { author: 11, reviewer: 12 } });
+    const none: ResolvedApps = new Map();
+    for (const zone of [patZone, starter]) {
+      const without = await read(none, zone);
+      const withEntries = await read(fixtureApps(), zone);
+      expect(withEntries).toEqual(without);
+      expect(withEntries.guidance.mergeRuleset).toBeUndefined();
+    }
+  });
+
+  test("an author entry with appId '0' answers the guidance without a merge ruleset", async () => {
+    const r = await read(fixtureApps({ authorId: '0' }), twoAppZone);
+    expect(r.guidance.mergeRuleset).toBeUndefined();
+    expect(r.guidance.codeowners.text).toBeTypeOf('string');
+  });
+});
+
+describe('the two-app callers (issue #482)', () => {
+  let app: FastifyInstance | undefined;
+  afterEach(async () => {
+    await app?.close();
+    app = undefined;
+  });
+
+  async function twoAppWorld(apps: ResolvedApps) {
+    const { store } = storeWith(withPat, apps, [twoAppZone]);
+    const db = openDb(tmpDbFile());
+    const a = createApp({
+      db,
+      config: store,
+      forgesFor: () => {
+        throw new Error('no zone forge in this test');
+      },
+      now: () => t0,
+      leaseWaitMs: 0,
+      leasePollMs: 0,
+      log: () => undefined,
+      guidanceForge: fakeForge().forgeOf,
+      appTokens: { ...counting().source, fresh: vi.fn(), clear: vi.fn() },
+    });
+    app = a;
+    await setOperatorPassphrase(db, 'a long operator passphrase', t0);
+    const s = operatorSession(db);
+    return {
+      api: (url: string) =>
+        a.inject({ method: 'GET', url, headers: { authorization: `Bearer ${TOKEN}`, host: HOST } }),
+      page: (url: string) =>
+        a.inject({ method: 'GET', url, headers: { host: HOST, cookie: s.cookie } }),
+    };
+  }
+
+  test('the route JSON has the merge ruleset, the page renders it, ctl prints it; no secret leaks', async () => {
+    const w = await twoAppWorld(fixtureApps());
+    const r = await w.api('/api/control/zones/demo/github?reviewer=alice');
+    expect(r.statusCode, r.body).toBe(200);
+    const text = mergeRulesetJson(Number(APP_ENTRIES.author.appId));
+    expect(r.json().mergeRuleset.text).toBe(text);
+    const page = await w.page('/zones/demo/github');
+    expect(page.statusCode, page.body).toBe(200);
+    expect(page.body).toContain('<section id="merge-ruleset">');
+
+    const out: string[] = [];
+    const err: string[] = [];
+    const fetchImpl = (async () => new Response(r.body, { status: 200 })) as typeof fetch;
+    const code = await runCtl(
+      ['github', 'demo', 'merge-ruleset'],
+      { JM_OPERATOR_TOKEN: TOKEN },
+      fetchImpl,
+      (l) => out.push(l),
+      (l) => err.push(l),
+      async () => '',
+    );
+    expect(code, err.join('\n')).toBe(0);
+    expect(out.join('\n')).toBe(text.trimEnd());
+
+    for (const body of [r.body, page.body, [...out, ...err].join('\n')])
+      for (const secret of Object.values(APP_SECRETS)) expect(body).not.toContain(secret);
+  });
+
+  test("an author appId of '0' does not answer 500: the guidance comes without a merge ruleset", async () => {
+    const w = await twoAppWorld(fixtureApps({ authorId: '0' }));
+    const r = await w.api('/api/control/zones/demo/github');
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json()).not.toHaveProperty('mergeRuleset');
+    const page = await w.page('/zones/demo/github');
+    expect(page.statusCode).toBe(200);
+    expect(page.body).not.toContain('<section id="merge-ruleset">');
   });
 });

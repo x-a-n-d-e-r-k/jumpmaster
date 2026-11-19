@@ -6,6 +6,7 @@ import type { AppTokenSource } from '../forge/app-tokens.js';
 import { type Forge, GitHubForge } from '../forge/github.js';
 import {
   collaboratorChecklist,
+  type GuidanceApps,
   type GuidanceZone,
   PAT_EXPIRATION_DAYS,
   patTemplateUrl,
@@ -16,7 +17,7 @@ import {
   zoneGuidance,
 } from '../github/guidance.js';
 import { ownerOfRepo } from '../vault/github-app-entries.js';
-import { isAppAuthorZone, isAppReviewerZone } from '../vault/resolution.js';
+import { isAppAuthorZone, isAppReviewerZone, type ResolvedApps } from '../vault/resolution.js';
 import { fingerprintOf } from '../vault/vault.js';
 import {
   detectFailure,
@@ -139,6 +140,27 @@ function patPlan(
     authed: token !== '',
     logins: () => loginsOf(store, config, repo, forgeOf),
   };
+}
+
+/**
+ * The zone's apps for its guidance (§5.2, issue #482), resolved as the doctor does
+ * (`isAppAuthorZone` / `isAppReviewerZone`): only each app's public id and slug, never a key, a
+ * client secret or a token. Read whether or not a token source is wired, since nothing here mints.
+ * An author entry whose id is not a positive integer (the vault takes `'0'`) is left out, so the
+ * zone gets the guidance without a merge ruleset rather than a ruleset that names no app.
+ */
+export function guidanceAppsFor(zone: DropZoneConfig, apps: ResolvedApps): GuidanceApps {
+  const reads = apps.get(ownerOfRepo(zone.repo));
+  const out: GuidanceApps = {};
+  const author = reads?.author;
+  if (author && author.source !== 'missing' && isAppAuthorZone(zone, apps)) {
+    const appId = Number(author.entry.appId);
+    if (Number.isSafeInteger(appId) && appId > 0) out.author = { appId, slug: author.entry.slug };
+  }
+  const reviewer = reads?.reviewer;
+  if (reviewer && reviewer.source !== 'missing' && isAppReviewerZone(zone, apps))
+    out.reviewer = { slug: reviewer.entry.slug };
+  return out;
 }
 
 /**
@@ -335,6 +357,7 @@ export async function guidanceFor(
       detection,
       { ...logins, codeowners: opts.reviewers ?? [] },
       opts.paidPlan === undefined ? {} : { paidPlan: opts.paidPlan },
+      guidanceAppsFor(zone, store.resolvedApps()),
     ),
     logins,
   };
