@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { ConfigStore } from '../config/store.js';
 import { type Config, DEFAULT_PROTECTED_PATHS, type DropZoneConfig } from '../config.js';
+import type { AppTokenSource } from '../forge/app-tokens.js';
 import { type Forge, GitHubForge } from '../forge/github.js';
 import {
   collaboratorChecklist,
@@ -13,6 +14,8 @@ import {
   type ZoneGuidance,
   zoneGuidance,
 } from '../github/guidance.js';
+import { ownerOfRepo } from '../vault/github-app-entries.js';
+import { isAppAuthorZone, isAppReviewerZone } from '../vault/resolution.js';
 import { fingerprintOf } from '../vault/vault.js';
 import {
   detectFailure,
@@ -62,21 +65,33 @@ async function loginOf(
   }
 }
 
+type Logins = { author?: string; reviewer?: string };
+
+/** The reviewer PAT's login, as far as the token resolves it. */
+async function reviewerPatLogin(
+  store: ConfigStore,
+  config: Config,
+  repo: string,
+  forgeOf: (repo: string, token: string) => GuidanceForge,
+): Promise<string | undefined> {
+  return loginOf(
+    store.resolved().githubReviewerToken.login,
+    config.secrets.githubReviewerToken,
+    (t) => forgeOf(repo, t),
+  );
+}
+
 /** The bot logins, as far as the tokens resolve them. */
 async function loginsOf(
   store: ConfigStore,
   config: Config,
   repo: string,
   forgeOf: (repo: string, token: string) => GuidanceForge,
-): Promise<{ author?: string; reviewer?: string }> {
+): Promise<Logins> {
   const r = store.resolved();
   const forge = (t: string) => forgeOf(repo, t);
   const author = await loginOf(r.githubAuthorToken.login, config.secrets.githubAuthorToken, forge);
-  const reviewer = await loginOf(
-    r.githubReviewerToken.login,
-    config.secrets.githubReviewerToken,
-    forge,
-  );
+  const reviewer = await reviewerPatLogin(store, config, repo, forgeOf);
   return { ...(author ? { author } : {}), ...(reviewer ? { reviewer } : {}) };
 }
 
@@ -88,9 +103,84 @@ type ReadEntry =
       ok: true;
       read: GuidanceRead | null;
       ownerType: 'User' | 'Organization';
-      logins: { author?: string; reviewer?: string };
+      logins: Logins;
     }
   | { ok: false; error: string };
+
+/**
+ * How one read is made: its cache key, the token it reads with (asked for only on a cache miss),
+ * whether that is a token read (an empty PAT reads anonymously), and the logins.
+ */
+type ReadPlan = {
+  key: string;
+  token: () => Promise<string>;
+  authed: boolean;
+  logins: () => Promise<Logins>;
+};
+
+/** A mint refused or failed: the repository and the author app only, never the error's text. */
+const mintFailure = (repo: string): string =>
+  `could not get a token from the author GitHub App for ${repo}; check the app's installation on the repository`;
+
+/** Today's read: the author PAT (its snapshot's), or anonymous without one. */
+function patPlan(
+  store: ConfigStore,
+  config: Config,
+  repo: string,
+  forgeOf: (repo: string, token: string) => GuidanceForge,
+): ReadPlan {
+  const token = config.secrets.githubAuthorToken ?? '';
+  // The token this request read with (its snapshot), never the live store's: a read and its key
+  // are always the same token's.
+  return {
+    key: `${repo}\u0000${token ? fingerprintOf(token) : 'anonymous'}`,
+    token: async () => token,
+    authed: token !== '',
+    logins: () => loginsOf(store, config, repo, forgeOf),
+  };
+}
+
+/**
+ * An app-author zone's read (§4.4): on a server-author token from the owner's author app. The key
+ * is built from the resolved entries, never the token, so a re-mint hits it, and a different app,
+ * a rotated key or a changed reviewer credential never shares one (app changes don't clear the
+ * cache). The logins are the apps' bot logins; a PAT reviewer's is read as today.
+ */
+function appPlan(
+  store: ConfigStore,
+  config: Config,
+  zone: DropZoneConfig,
+  appTokens: Pick<AppTokenSource, 'provider'>,
+  forgeOf: (repo: string, token: string) => GuidanceForge,
+): ReadPlan | undefined {
+  const apps = store.resolvedApps();
+  const owner = ownerOfRepo(zone.repo);
+  const reads = apps.get(owner);
+  const author = reads?.author;
+  if (!reads || !author || author.source === 'missing') return undefined;
+  const reviewerApp = isAppReviewerZone(zone, apps) ? reads.reviewer : undefined;
+  const reviewerPat = config.secrets.githubReviewerToken;
+  const reviewerKey =
+    reviewerApp && reviewerApp.source !== 'missing'
+      ? `app:${reviewerApp.fingerprint}`
+      : reviewerPat
+        ? `pat:${fingerprintOf(reviewerPat)}`
+        : 'none';
+  return {
+    key: [zone.repo, 'app', owner, author.entry.appId, author.fingerprint, reviewerKey].join(
+      '\u0000',
+    ),
+    token: () => appTokens.provider(zone.id, 'author', 'server-author').token(),
+    authed: true,
+    logins: async () => {
+      const reviewer =
+        reviewerApp && reviewerApp.source !== 'missing'
+          ? `${reviewerApp.entry.slug}[bot]`
+          : await reviewerPatLogin(store, config, zone.repo, forgeOf);
+      return { author: `${author.entry.slug}[bot]`, ...(reviewer ? { reviewer } : {}) };
+    },
+  };
+}
 
 const READ_TTL_MS = 5 * 60_000;
 const MISSING_TTL_MS = 60_000;
@@ -100,7 +190,8 @@ const READ_ENTRIES = 50;
  * Reads of a repository for the guidance, kept a few minutes in this process: the wizard's steps
  * and the zone page ask again on every view, and without a token GitHub allows an address 60
  * requests an hour. Keyed by the repository and the author token's fingerprint ("anonymous"
- * without one); a 404 is kept a minute; at most fifty entries, the oldest dropped first; emptied
+ * without one), or for an app-author zone by the repository and the resolved app entries (never
+ * the minted token); a 404 is kept a minute; at most fifty entries, the oldest dropped first; emptied
  * whenever the config or the secrets change. Nothing is persisted.
  */
 class ReadCache {
@@ -143,28 +234,32 @@ function cacheOf(store: ConfigStore): ReadCache {
 /** The repository as the guidance needs it, through the cache; a refused name throws. */
 async function readRepo(
   store: ConfigStore,
-  config: Config,
   repo: string,
+  plan: ReadPlan,
   forgeOf: (repo: string, token: string) => GuidanceForge,
   now: () => Date,
 ): Promise<ReadEntry> {
   if (!REPO.test(repo)) throw new RepoNameError();
-  const token = config.secrets.githubAuthorToken ?? '';
-  // The token this request read with (its snapshot), never the live store's: a read and its key
-  // are always the same token's.
-  const key = `${repo}\u0000${token ? fingerprintOf(token) : 'anonymous'}`;
+  const { key, authed } = plan;
   const cache = cacheOf(store);
   const t = now().getTime();
   const hit = cache.get(key, t);
   if (hit) return hit;
+  let token: string;
+  try {
+    token = await plan.token();
+  } catch {
+    // Never cached: the next view asks again.
+    return { ok: false, error: mintFailure(repo) };
+  }
   const forge = forgeOf(repo, token);
   try {
-    const read = await detectGuidance(forge, repo, { workflows: token !== '' });
+    const read = await detectGuidance(forge, repo, { workflows: authed });
     const entry: ReadEntry = {
       ok: true,
       read,
       ownerType: read.ownerType,
-      logins: await loginsOf(store, config, repo, forgeOf),
+      logins: await plan.logins(),
     };
     cache.set(key, entry, READ_TTL_MS, t);
     return entry;
@@ -173,7 +268,7 @@ async function readRepo(
     if ((e as { status?: unknown }).status !== 404)
       return { ok: false, error: detectFailure(e, repo) };
     // A token that cannot see it is an answer to keep a minute.
-    if (token !== '') {
+    if (authed) {
       const entry: ReadEntry = { ok: false, error: detectFailure(e, repo) };
       cache.set(key, entry, MISSING_TTL_MS, t);
       return entry;
@@ -195,25 +290,38 @@ async function readRepo(
 }
 
 export type GuidanceResult =
-  | { ok: true; guidance: ZoneGuidance }
+  | { ok: true; guidance: ZoneGuidance; logins: Logins }
   | { ok: false; status: 400 | 409 | 502; error: string };
 
 const systemNow = () => new Date();
 
-/** The five for `zone`, read through the author token. */
+/**
+ * The five for `zone`, read app-first (§4.4): an app-author zone through its author app when a
+ * token source is given (whether or not an author PAT is set), else the author PAT.
+ */
 export async function guidanceFor(
   store: ConfigStore,
   config: Config,
   zone: DropZoneConfig,
   forgeOf: (repo: string, token: string) => GuidanceForge,
-  opts: { reviewers?: string[]; paidPlan?: boolean; now?: () => Date } = {},
+  opts: {
+    reviewers?: string[];
+    paidPlan?: boolean;
+    now?: () => Date;
+    appTokens?: Pick<AppTokenSource, 'provider'>;
+  } = {},
 ): Promise<GuidanceResult> {
   // A name the config allows but GitHub's does not (owner/name only): said as such, not as a
   // network failure.
   if (!REPO.test(zone.repo)) return { ok: false, status: 400, error: new RepoNameError().message };
-  const token = config.secrets.githubAuthorToken;
-  if (!token) return { ok: false, status: 409, error: NO_AUTHOR };
-  const entry = await readRepo(store, config, zone.repo, forgeOf, opts.now ?? systemNow);
+  const app =
+    opts.appTokens && isAppAuthorZone(zone, store.resolvedApps())
+      ? appPlan(store, config, zone, opts.appTokens, forgeOf)
+      : undefined;
+  if (!app && !config.secrets.githubAuthorToken)
+    return { ok: false, status: 409, error: NO_AUTHOR };
+  const plan = app ?? patPlan(store, config, zone.repo, forgeOf);
+  const entry = await readRepo(store, zone.repo, plan, forgeOf, opts.now ?? systemNow);
   if (!entry.ok) return { ok: false, status: 502, error: entry.error };
   const detection = entry.read;
   if (!detection)
@@ -227,6 +335,7 @@ export async function guidanceFor(
       { ...logins, codeowners: opts.reviewers ?? [] },
       opts.paidPlan === undefined ? {} : { paidPlan: opts.paidPlan },
     ),
+    logins,
   };
 }
 
@@ -284,7 +393,7 @@ export async function recommendFor(
   if (!REPO.test(repo))
     return { ok: false, status: 400, error: 'the repository must be owner/name' };
   const token = config.secrets.githubAuthorToken ?? '';
-  const entry = await readRepo(store, config, repo, forgeOf, now);
+  const entry = await readRepo(store, repo, patPlan(store, config, repo, forgeOf), forgeOf, now);
   if (!entry.ok) return { ok: false, status: 502, error: entry.error };
   const { read, ownerType } = entry;
   const visibility = read?.visibility ?? 'private';
@@ -339,6 +448,8 @@ export function registerGuidanceRoutes(
     store: ConfigStore;
     now(): Date;
     guidanceForge?: (repo: string, token: string) => GuidanceForge;
+    /** The app token source: an app-author zone's guidance reads on its author app (§4.4). */
+    appTokens?: Pick<AppTokenSource, 'provider'>;
   },
 ): void {
   const { store, now } = deps;
@@ -361,6 +472,7 @@ export function registerGuidanceRoutes(
       return reply.code(400).send({ error: 'reviewer is a comma-separated list of GitHub logins' });
     const r = await guidanceFor(store, config, zone, forgeOf, {
       now,
+      ...(deps.appTokens ? { appTokens: deps.appTokens } : {}),
       reviewers: reviewers.data,
       ...(q.data.paidPlan ? { paidPlan: q.data.paidPlan === 'true' } : {}),
     });

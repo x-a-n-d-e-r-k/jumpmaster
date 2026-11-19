@@ -219,7 +219,7 @@ export interface ControlDeps {
    * The server's GitHub App token cache (issue #266): engaging the kill switch empties it, and a
    * mint in flight then is neither cached nor handed to a later caller.
    */
-  appTokens?: Pick<AppTokenSource, 'clear'>;
+  appTokens?: Pick<AppTokenSource, 'clear' | 'provider'>;
   /** The per-drop read tokens (issue #237): the kill switch revokes the cancelled drops' at once. */
   heldReadTokens?: Pick<HeldDropTokens, 'sweep'>;
   /** The app entries as they resolved now, for the doctor's app-reviewer zones (issue #237). */
@@ -237,16 +237,20 @@ export function stderrSetupMode(listen: Config['listen']): SetupMode {
 }
 
 /** A zone's generated GitHub files, or undefined when GitHub can't be read just now. */
-function guidanceReader(
+export function guidanceReader(
   store: ConfigStore,
   config: Config,
   forgeOf: ((repo: string, token: string) => GuidanceForge) | undefined,
   now: () => Date,
+  appTokens?: Pick<AppTokenSource, 'provider'>,
 ): (zoneId: string) => Promise<ZoneGuidance | undefined> {
   return async (zoneId) => {
     const zone = config.dropZones.find((z) => z.id === zoneId);
     if (!zone) return undefined;
-    const r = await guidanceFor(store, config, zone, forgeOf ?? githubGuidanceForge, { now });
+    const r = await guidanceFor(store, config, zone, forgeOf ?? githubGuidanceForge, {
+      now,
+      ...(appTokens ? { appTokens } : {}),
+    });
     return r.ok ? r.guidance : undefined;
   };
 }
@@ -859,7 +863,15 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
               pages: pagesOf(app),
               // The zone's generated GitHub files, for the fix links that bring one along.
               ...(deps.config instanceof ConfigStore
-                ? { guidance: guidanceReader(deps.config, cfg(req), deps.guidanceForge, now) }
+                ? {
+                    guidance: guidanceReader(
+                      deps.config,
+                      cfg(req),
+                      deps.guidanceForge,
+                      now,
+                      deps.appTokens,
+                    ),
+                  }
                 : {}),
             },
             zoneId !== undefined ? { zoneId } : {},
@@ -1195,6 +1207,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         store: deps.config,
         now,
         ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
+        ...(deps.appTokens ? { appTokens: deps.appTokens } : {}),
       });
       registerSecretRoutes(scope, {
         db,
