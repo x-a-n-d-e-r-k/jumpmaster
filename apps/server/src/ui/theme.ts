@@ -141,6 +141,7 @@ form[action="/login"] input,form[action^="/setup/"] input{width:100%}
 @media (prefers-color-scheme:dark){.badge.info,.badge.ok,.badge.warn-b,.badge.bad,.badge.crew{color:var(--text-strong-950)}.badge.info::before{background:var(--information-base)}.badge.ok::before{background:var(--success-base)}.badge.warn-b::before{background:var(--warning-base)}.badge.bad::before{background:var(--error-base)}.badge.crew::before{background:var(--feature-base)}}
 tr.pass>td:first-child,tr.warn>td:first-child,tr.fail>td:first-child,tr.skip>td:first-child{font:500 .75rem/1.5rem var(--font-sans);white-space:nowrap}
 tr.pass>td:first-child{color:var(--success-base)}tr.warn>td:first-child{color:var(--warning-base)}tr.fail>td:first-child{color:var(--error-base)}tr.skip>td:first-child{color:var(--text-soft-400)}
+span.gate.fail{color:var(--error-base);font-weight:500}
 tr.warn{display:table-row;padding:0;margin:0;background:none;box-shadow:none;border-radius:0}tr.warn::before{content:none}`;
 
 /** The floor: status, the kill switch, cards and meters (home only). */

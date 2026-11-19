@@ -106,6 +106,7 @@ import {
   renderHome,
   renderIntake,
   renderObservations,
+  renderWorkItem,
   renderWorkList,
   STORE_NAV,
   STORE_NAV_SLOT,
@@ -692,6 +693,26 @@ export function createApp(
       state,
       items,
       details: itemDetails(db, items),
+    });
+    return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
+  });
+
+  app.get<{ Params: { zone: string; issue: string } }>('/work/:zone/:issue', async (req, reply) => {
+    const { db } = deps;
+    const config = cfg(req);
+    const zone = config.dropZones.find((z) => z.id === req.params.zone);
+    const n = issueFilter(req.params.issue, zone?.id);
+    const item = zone && typeof n === 'number' ? findWorkItem(db, zone.id, n) : undefined;
+    if (!item) return reply.code(404).type('text/plain').send('not found');
+    // SQLite's LIMIT -1 is no limit: the page shows every attempt.
+    const drops = listDrops(db, { zoneId: item.dropZoneId, workItemId: item.id, limit: -1 });
+    const detail = itemDetails(db, [item]).get(item.id);
+    const html = renderWorkItem({
+      item,
+      zones: config.dropZones,
+      ...(detail ? { detail } : {}),
+      drops,
+      now: deps.now(),
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });

@@ -42,6 +42,7 @@ import {
   renderHome,
   renderIntake,
   renderObservations,
+  renderWorkItem,
   renderWorkList,
   statusBanner,
   waitingOnYou,
@@ -148,15 +149,15 @@ describe('renderHome', () => {
     expect(html).toContain('&lt;script&gt;');
   });
 
-  test("the issue cell links to GitHub; the title links to the issue's drops (#496)", () => {
+  test('the issue cell links to GitHub; the title links to the work-item page (#498)', () => {
     const html = workItemRows(
       [{ ...item, issueNumber: 12, title: 'fix <b>it</b>' }],
       [{ ...z, repo: 'o/r' }],
     );
     expect(html).toContain('href="https://github.com/o/r/issues/12"');
     expect(html).toMatch(/<a href="https:\/\/github\.com\/o\/r\/issues\/12"[^>]*>#12<\/a>/);
-    expect(html).toContain('href="/drops?zone=main&amp;issue=12"');
-    expect(html).toContain('>fix &lt;b&gt;it&lt;/b&gt;</a>');
+    expect(html).toContain('<a href="/work/main/12">fix &lt;b&gt;it&lt;/b&gt;</a>');
+    expect(html).not.toContain('/drops?zone=main');
     expect(html).not.toContain('<b>');
   });
 
@@ -176,6 +177,71 @@ describe('renderHome', () => {
     expect(html).toContain('lint&lt;b&gt;');
     expect(html).toContain('https://github.com/octo/demo/pull/9');
     expect(html).toContain('1m 5s');
+  });
+});
+
+describe('renderWorkItem (#498)', () => {
+  const now = new Date('2026-01-01T02:00:00.000Z');
+  const evil = '<img src=x onerror=alert(1)>';
+
+  test('a title with <img onerror> is escaped on /work and on the work-item page', () => {
+    const items = [{ ...item, title: evil }];
+    const list = renderWorkList({ zones: [z], state: 'active', items });
+    const one = renderWorkItem({ item: items[0] as WorkItem, zones: [z], drops: [], now });
+    for (const html of [list, one]) {
+      expect(html).not.toContain('<img');
+      expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
+    }
+  });
+
+  test('the header: issue link, project, state, PR, head and verdict', () => {
+    const html = renderWorkItem({
+      item: { ...item, reason: 'needs <review>' },
+      zones: [z],
+      detail: {
+        headSha: 'abcdef0123456789',
+        verdict: { decision: 'approve', forced: true, summary: 'looks <ok>' },
+        attempts: { implement: 2, diagnose: 1, resolve: 0 },
+      },
+      drops: [],
+      now,
+    });
+    expect(html).toMatch(/<a href="https:\/\/github\.com\/octo\/demo\/issues\/7"[^>]*>#7<\/a>/);
+    expect(html).toContain('<a href="/zones/main">octo/demo</a>');
+    expect(html).toContain('<span class="badge crew">pr_open</span>');
+    expect(html).toContain('needs &lt;review&gt;');
+    expect(html).toMatch(/<a href="https:\/\/github\.com\/octo\/demo\/pull\/9"[^>]*>#9<\/a>/);
+    expect(html).toContain('<code>abcdef0</code>');
+    expect(html).not.toContain('abcdef01');
+    expect(html).toContain('approve (forced)');
+    expect(html).toContain('looks &lt;ok&gt;');
+    expect(html).toContain('Attempt counts: implement 2, diagnose 1');
+    expect(html).not.toContain('resolve 0');
+    expect(html).toContain('No attempts yet.');
+  });
+
+  test('a drop with no resultJson shows - for gates, and never renders inputJson raw', () => {
+    const html = renderWorkItem({
+      item,
+      zones: [z],
+      drops: [
+        {
+          ...drop,
+          id: 'abe46fc6-1234-4abc-8def-0123456789ab',
+          resultJson: null,
+          inputJson: '{"secret":"<b>raw</b>"}',
+          prNumber: null,
+        },
+      ],
+      now,
+    });
+    const row = html.match(/<tr class="attempt">.*?<\/tr>/)?.[0] ?? '';
+    expect(row).toContain('<td>-</td>');
+    expect(row).toContain('>abe46fc6</a>');
+    expect(row).toContain('href="/drops/abe46fc6-1234-4abc-8def-0123456789ab"');
+    expect(row).toContain('<time datetime="2026-01-01T00:00:00.000Z"');
+    expect(row).toContain('1m 5s');
+    expect(html).not.toContain('secret');
   });
 });
 
