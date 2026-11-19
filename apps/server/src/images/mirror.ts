@@ -589,6 +589,7 @@ export class ImageMirror {
         continue;
       }
       seen.add(desc.digest);
+      const mark = this.#mark();
       try {
         this.#manifestSize(desc.size);
         const m = await client.manifest(desc.digest);
@@ -612,6 +613,7 @@ export class ImageMirror {
         });
       } catch (e) {
         if (!(e instanceof SignatureRefused)) throw e;
+        this.#unnote(mark);
         refuse(desc.digest, e.message);
       }
     }
@@ -625,6 +627,7 @@ export class ImageMirror {
       );
     const legacy = await client.signatureTag(digest, '.sig');
     if (legacy && !seen.has(legacy.digest)) {
+      const mark = this.#mark();
       try {
         this.#manifestSize(legacy.bytes.length);
         const body = parse(legacy.bytes, 'the .sig manifest');
@@ -643,6 +646,7 @@ export class ImageMirror {
         });
       } catch (e) {
         if (!(e instanceof SignatureRefused)) throw e;
+        this.#unnote(mark);
         refuse(legacy.digest, e.message);
       }
     }
@@ -655,6 +659,20 @@ export class ImageMirror {
       .filter((v): v is string => typeof v === 'string' && v.length >= 8)
       .sort((a, b) => b.length - a.length);
     return values.reduce((m, v) => m.split(v).join('[redacted]'), msg);
+  }
+
+  /** The digests the running attempt has noted so far, for `#unnote`. */
+  #mark(): Set<string> {
+    return new Set(this.#touched);
+  }
+
+  /**
+   * Forgets what the attempt noted since `mark`: a refused signature artifact's blobs (issue
+   * #486). No retry uses them, so a failed record does not name them and collection deletes them;
+   * one noted before `mark` (shared with a platform or an accepted artifact) stays noted.
+   */
+  #unnote(mark: Set<string>): void {
+    for (const d of this.#touched) if (!mark.has(d)) this.#touched.delete(d);
   }
 
   /** Stores a manifest the running attempt fetched, noting it for a retry (issue #451). */

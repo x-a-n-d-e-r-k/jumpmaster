@@ -64,6 +64,8 @@ export type FakeRegistry = {
       via?: 'referrers-api' | 'referrers-tag' | 'legacy';
       artifactType?: string | null;
       configMediaType?: string;
+      /** The config blob's bytes (`{}` by default, which every default artifact shares). */
+      config?: Buffer;
       layer?: Buffer;
       declaredSize?: number;
       /** Bytes of padding in an annotation, to grow the manifest. */
@@ -210,7 +212,7 @@ export async function startFakeRegistry(
       const hex = img.digest.slice('sha256:'.length);
       const via = o.via ?? 'referrers-tag';
       const artifactType = o.artifactType === undefined ? SIGSTORE_BUNDLE : o.artifactType;
-      const config = blob(o.configMediaType ?? OCI_EMPTY, Buffer.from('{}'));
+      const config = blob(o.configMediaType ?? OCI_EMPTY, o.config ?? Buffer.from('{}'));
       const bytes =
         o.layer ?? json({ mediaType: SIGSTORE_BUNDLE, sig: randomBytes(8).toString('hex') });
       const layer = { ...blob(artifactType ?? SIGSTORE_BUNDLE, bytes) };
