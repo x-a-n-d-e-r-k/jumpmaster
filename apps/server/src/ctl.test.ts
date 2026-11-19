@@ -124,6 +124,91 @@ describe('ctl sticks (issue #136)', () => {
   });
 });
 
+describe('ctl sticks upgrade (issue #428)', () => {
+  test('sticks upgrade <name> posts to the stick upgrade route and prints the request', async () => {
+    const r = await run(
+      ['sticks', 'upgrade', 'kidney'],
+      '',
+      fakeFetch(200, { id: 's1', name: 'kidney', target: '0.6.0', requested: true }),
+    );
+    expect(r.code).toBe(0);
+    expect(r.calls[0]?.url).toBe('http://127.0.0.1:7420/api/control/sticks/kidney/upgrade');
+    expect(r.calls[0]?.init.method).toBe('POST');
+    expect(r.out).toEqual([
+      'stick kidney (s1): upgrade to v0.6.0 requested; it upgrades once its running drops end',
+    ]);
+  });
+
+  test('a 409 prints the reason and exits non-zero', async () => {
+    const reason = 'this stick is older than in-place upgrades: reinstall it once with a new code';
+    const r = await run(['sticks', 'upgrade', 'crucible'], '', fakeFetch(409, { error: reason }));
+    expect(r.code).toBe(1);
+    expect(r.err).toEqual([`stick crucible: ${reason}`]);
+    expect(r.out).toEqual([]);
+  });
+
+  test('sticks upgrade --all posts to upgrade-all and prints what it requested and skipped', async () => {
+    const r = await run(
+      ['sticks', 'upgrade', '--all'],
+      '',
+      fakeFetch(200, {
+        requested: ['kidney'],
+        skipped: [{ name: 'crucible', reason: 'this stick is older than in-place upgrades' }],
+      }),
+    );
+    expect(r.code).toBe(0);
+    expect(r.calls[0]?.url).toBe('http://127.0.0.1:7420/api/control/sticks/upgrade-all');
+    expect(r.calls[0]?.init.method).toBe('POST');
+    expect(r.out).toEqual([
+      'requested: kidney',
+      'skipped crucible: this stick is older than in-place upgrades',
+    ]);
+  });
+
+  test('sticks upgrade with no stick, or with more words, is a usage error', async () => {
+    for (const bad of [
+      ['sticks', 'upgrade'],
+      ['sticks', 'upgrade', 'a', 'b'],
+    ]) {
+      const r = await run(bad);
+      expect(r.code, bad.join(' ')).toBe(2);
+      expect(r.calls).toHaveLength(0);
+    }
+  });
+
+  test('ctl sticks shows each stick version and its upgrade', async () => {
+    const base = { slots: 1, desiredSlots: null, maxSlots: 1, running: 0, lastSeenAt: null };
+    const r = await run(
+      ['sticks'],
+      '',
+      fakeFetch(200, {
+        sticks: [
+          {
+            ...base,
+            id: 's1',
+            name: 'kidney',
+            version: '0.5.1',
+            upgrade: { status: 'available', target: '0.6.0', reason: null, requestedBy: null },
+          },
+          {
+            ...base,
+            id: 's2',
+            name: 'lung',
+            version: '0.5.0',
+            upgrade: { status: 'failed', target: '0.6.0', reason: 'no start', requestedBy: 'auto' },
+          },
+          { ...base, id: 's3', name: 'dev', version: '0.5.0', upgrade: null },
+        ],
+      }),
+    );
+    expect(r.out).toEqual([
+      'kidney (s1): 1 trooper (desired -, max 1), 0 running, last seen never, v0.5.1, update available: v0.6.0',
+      'lung (s2): 1 trooper (desired -, max 1), 0 running, last seen never, v0.5.0, upgrade to v0.6.0 failed: no start',
+      'dev (s3): 1 trooper (desired -, max 1), 0 running, last seen never, v0.5.0',
+    ]);
+  });
+});
+
 describe('ctl public-url (issue #139)', () => {
   test('set, clear and check map to their routes; anything else is not a command', () => {
     expect(ctlRequest(['public-url', 'set', 'https://a.b.ts.net'])).toEqual({
@@ -1613,6 +1698,9 @@ describe('ctl prints no terminal control (issue #264)', () => {
     slots: 2,
     maxSlots: 4,
     revision: 3,
+    target: '0.6.0',
+    requested: ['kidney'],
+    skipped: [{ name: 'crucible', reason: 'a reason' }],
     since: '2026-11-03',
     headline: 'Blocked',
     detail: 'a detail',

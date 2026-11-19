@@ -328,6 +328,13 @@ stick's ceiling (`JM_MAX_SLOTS`, see the install runbook's
 requeued) and `ctl sticks cancel <invite>` cancels an invite that hasn't checked in; see
 [Add a stick](install.md#add-a-stick).
 
+Beside each stick's version the page says where it stands against the server's release: up to
+date, an update available (with an **Upgrade to v…** button), older than in-place upgrades
+(reinstall it once with a new code), upgrading, or a failed or refused upgrade with its reason
+(and **Retry**). Upgrading asks for sudo, as removing does, and is audited as `stick.upgrade`.
+`ctl sticks upgrade <name-or-id>` upgrades one stick and prints the reason when it can't;
+`ctl sticks upgrade --all` upgrades every stick that can be and lists the ones it skipped.
+
 A stick on another machine reaches the server at `server.publicUrl` (Settings, Other machines, or
 `ctl public-url set https://…`; `ctl public-url check` fetches its `/healthz`). Each change is
 audited as `server.public_url`. See install.md, "Reaching the server from other machines".
@@ -368,7 +375,7 @@ token is always allowed.
 | Briefings | `ctl rule <briefing> <option> [--options <digest>] [note]` | `POST /api/control/briefings/:id/rule` |
 | Briefings | `ctl dismiss <zone> <briefing>…` | `POST /api/control/zones/:id/briefings/dismiss` |
 | Drops | `ctl drops extend-retention <dropId> <hours>`<br>`ctl drops cancel <dropId>`<br>`ctl drops transcript <dropId> [--out <file>]` | `POST /api/control/drops/:id/extend-retention`<br>`POST /api/control/drops/:id/cancel`<br>`GET /api/control/drops/:id/transcript` |
-| Sticks | `ctl sticks [--json]`<br>`ctl sticks slots <name-or-id> <n>`<br>`ctl sticks remove <name-or-id>`<br>`ctl sticks cancel <invite-name-or-id>` | `GET /api/control/sticks`<br>`POST /api/control/sticks/:id/slots`<br>`POST /api/control/sticks/:id/remove`<br>`POST /api/control/sticks/invites/:id/cancel` |
+| Sticks | `ctl sticks [--json]`<br>`ctl sticks slots <name-or-id> <n>`<br>`ctl sticks remove <name-or-id>`<br>`ctl sticks upgrade <name-or-id>`<br>`ctl sticks upgrade --all`<br>`ctl sticks cancel <invite-name-or-id>` | `GET /api/control/sticks`<br>`POST /api/control/sticks/:id/slots`<br>`POST /api/control/sticks/:id/remove`<br>`POST /api/control/sticks/:id/upgrade`<br>`POST /api/control/sticks/upgrade-all`<br>`POST /api/control/sticks/invites/:id/cancel` |
 | Kill | `ctl kill` | `POST /api/control/kill` |
 | Kill | `ctl unkill` | `POST /api/control/kill` |
 <!-- ctl-table:end -->

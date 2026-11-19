@@ -9,7 +9,6 @@ import {
   IMAGE_MIRROR_FEATURE,
   ImageFetchSchema,
   isCrewRole,
-  isReleaseVersion,
   isRepoFullName,
   isSafeBranchName,
   type LeaseSkip,
@@ -28,7 +27,6 @@ import {
   TrooperEventSchema,
   UPGRADE_HEADER,
   type UpgradeOffer,
-  UpgradeOfferSchema,
   UpgradeReportSchema,
 } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -84,7 +82,6 @@ import type { StickFetches } from '../images/fetches.js';
 import type { ImageMirror } from '../images/mirror.js';
 import { layoutFor } from '../images/serve.js';
 import { codeHash, ENROLL_CODE, INSTALL_TOKEN } from '../install/invite.js';
-import { digestName, STICK_IMAGE_NAME } from '../install/stick-sh.js';
 import { heartbeat, leaseNextDrop, missingFor, zoneRequirements, zonesWaiting } from '../leases.js';
 import { log as serverLog } from '../log.js';
 import type { ForgePair } from '../outbox.js';
@@ -98,6 +95,7 @@ import {
   isAppReviewerZone,
   type ResolvedApps,
 } from '../vault/resolution.js';
+import { upgradeTargetOf } from './stick-upgrade.js';
 
 const ArtifactBody = ArtifactUploadSchema.extend({ epoch: z.number() });
 
@@ -270,30 +268,8 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
     }
   };
 
-  /**
-   * What sticks are offered (issue #427): the server's own release and the `jumpmaster-stick`
-   * image of its current lock, once the mirror holds it complete. None when the version is no
-   * release, or a lock or mirror read throws (fail closed).
-   */
-  const upgradeTarget = (): UpgradeTarget | null => {
-    if (!deps.images || !isReleaseVersion(release)) return null;
-    try {
-      const image = deps.images
-        .status()
-        .images.find((i) => i.name === STICK_IMAGE_NAME && i.current);
-      if (!image) return null;
-      const held = deps.images.lookup(image.name, image.digest);
-      if (!held.listed || !held.complete) return null;
-      // Only an offer the stick would accept: a release and a jumpmaster-stick digest reference.
-      const offer = UpgradeOfferSchema.safeParse({
-        version: release,
-        image: digestName(image.ref, image.digest),
-      });
-      return offer.success ? offer.data : null;
-    } catch {
-      return null;
-    }
-  };
+  /** What sticks are offered (issue #427): see `upgradeTargetOf`. */
+  const upgradeTarget = (): UpgradeTarget | null => upgradeTargetOf(deps.images, release);
 
   /**
    * The push token each drop was last granted in app mode, so it can be revoked when the drop's
