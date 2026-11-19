@@ -1774,9 +1774,12 @@ installation). For an app role, follow that fix rather than the **Action**'s tok
 
 The same for the reviewer token: Contents and Pull requests ([Tokens](#tokens)).
 
-For a reviewer GitHub App, the same reads through its minted token, with the same fixes as an
-author app: add the refused permission on the app's page and accept it on the installation. For
-an app role, follow that fix rather than the **Action**'s token page.
+For a reviewer GitHub App, the server's minted reviewer token carries pull requests alone, so
+only Pull requests is read through it; Contents (which drops use) is judged from the app's
+installation grant, and when that grant can't be read the pass says Contents is not proven. The
+fixes are the same as an author app's: add the refused or missing permission on the app's page
+and accept it on the installation. For an app role, follow that fix rather than the **Action**'s
+token page.
 
 ### `forge.admin`
 

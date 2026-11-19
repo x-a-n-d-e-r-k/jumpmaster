@@ -994,6 +994,11 @@ type ZoneReads = {
   branch: () => Promise<string>;
   /** The reviewer's rules read is null in starter mode, which has no reviewer identity. */
   rules: () => Promise<{ author: BranchRulesRead; reviewer: BranchRulesRead | null }>;
+  /**
+   * An app role's installation grant (`installationGrant`), read once per run and bound to half
+   * the check deadline: `null` with no such dependency, `undefined` when the read failed or was late.
+   */
+  grant: Record<'author' | 'reviewer', () => Promise<Record<string, string> | null | undefined>>;
 };
 
 /** What a skipped reviewer check says in starter mode. */
@@ -1033,7 +1038,24 @@ function zoneReads(d: DoctorDeps, zone: DropZoneConfig): ZoneReads {
     const a = await access.author();
     return a.ok ? a.value.defaultBranch : (getDropZoneDefaultBranch(d.db, zone.id) ?? 'main');
   });
+  const grant = (who: 'author' | 'reviewer') =>
+    once(async (): Promise<Record<string, string> | null | undefined> => {
+      if (!d.installationGrant) return null;
+      const deadlineMs = Math.floor((d.checkTimeoutMs ?? CHECK_TIMEOUT_MS) / 2);
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        const late = new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), deadlineMs);
+        });
+        return (await Promise.race([d.installationGrant(zone.id, who), late]))?.permissions;
+      } catch {
+        return undefined;
+      } finally {
+        clearTimeout(timer);
+      }
+    });
   return Object.assign(reads, {
+    grant: { author: grant('author'), reviewer: grant('reviewer') },
     logins: {
       author: once(() => attempt(() => pair().author.viewerLogin())),
       reviewer: once(() => attempt(() => reviewerOf(pair()).viewerLogin())),
@@ -1269,7 +1291,7 @@ async function appIdentityCheck(
       summary: `its private key was imported more than ${APP_KEY_LIFE_DAYS} days ago`,
       fix: `Generate a new private key on ${page}, import it, then delete the old key on the app's page.`,
     });
-  warns.push(...(await grantWarns(d, zone, who, named, page)));
+  warns.push(...(await grantWarns(r, zone, who, named, page)));
   if (warns.length === 0) return { ...base, status: 'pass', summary };
   return {
     ...base,
@@ -1291,26 +1313,14 @@ const rankOf = (level: string | undefined): number =>
  * warn; with no `installationGrant` dependency there is nothing to compare.
  */
 async function grantWarns(
-  d: DoctorDeps,
+  r: ZoneReads,
   zone: DropZoneConfig,
   who: 'author' | 'reviewer',
   named: string,
   page: string,
 ): Promise<{ summary: string; fix: string }[]> {
-  if (!d.installationGrant) return [];
-  const deadlineMs = Math.floor((d.checkTimeoutMs ?? CHECK_TIMEOUT_MS) / 2);
-  let timer: NodeJS.Timeout | undefined;
-  let granted: Record<string, string> | undefined;
-  try {
-    const late = new Promise<undefined>((resolve) => {
-      timer = setTimeout(() => resolve(undefined), deadlineMs);
-    });
-    granted = (await Promise.race([d.installationGrant(zone.id, who), late]))?.permissions;
-  } catch {
-    granted = undefined;
-  } finally {
-    clearTimeout(timer);
-  }
+  const granted = await r.grant[who]();
+  if (granted === null) return [];
   if (!granted)
     return [
       {
@@ -1734,7 +1744,10 @@ const refusedRead = (p: ReadProbe | undefined): p is ReadProbe =>
 /**
  * The reads check for an app role: the PAT check's probes and wanted lists, plus `Checks: read`
  * for the author, since an app forge reads check runs directly. The `Actions: read` probe is
- * ignored. No line holds the app id, the key or a token: only the slug and permission names.
+ * ignored. The reviewer's probes run on the server's reviewer token, which spec §4.2 narrows to
+ * `pull_requests: write` (issue #522): only `Pull requests: read` is judged from them, and the
+ * app's `contents: read` (what drops use) is judged from its installation grant when it can be
+ * read. No line holds the app id, the key or a token: only the slug and permission names.
  */
 async function appReadsCheck(
   zone: DropZoneConfig,
@@ -1749,11 +1762,18 @@ async function appReadsCheck(
     (who === 'author' ? r.pair.author : reviewerOf(r.pair)).probeReads(branch),
   );
   if (!probed.ok) return readFailed(base, who, 'try its reads', 'Metadata: read', probed);
-  const wanted =
+  // The reviewer's minted server token carries pull_requests alone (spec §4.2), so its other
+  // probes are refused on a private repository whatever the app is granted: they prove nothing.
+  const required =
     who === 'reviewer'
-      ? ['Contents: read', 'Pull requests: read']
-      : ['Contents: read', 'Issues: read', 'Pull requests: read', 'Commit statuses: read'];
-  const required = who === 'author' ? [...wanted, 'Checks: read'] : wanted;
+      ? ['Pull requests: read']
+      : [
+          'Contents: read',
+          'Issues: read',
+          'Pull requests: read',
+          'Commit statuses: read',
+          'Checks: read',
+        ];
   // Only the reads the app needs count: Actions: read is no fallback on an app forge.
   const relevant = probed.value.filter((p) => required.includes(p.permission));
   const probes = new Map(relevant.map((p) => [p.permission, p]));
@@ -1761,7 +1781,12 @@ async function appReadsCheck(
   const unknown = relevant.filter(
     (p) => p.status === 401 || p.rateLimited || p.status === null || p.status >= 500,
   );
-  if (unknown.some((p) => p.status === 401))
+  // A 401 refuses the token itself, whatever it is narrowed to.
+  const tokenRefused = probed.value.some(
+    (p) =>
+      p.status === 401 && (required.includes(p.permission) || p.permission === 'Contents: read'),
+  );
+  if (tokenRefused)
     return {
       ...base,
       status: 'fail',
@@ -1779,6 +1804,23 @@ async function appReadsCheck(
         : `${name} refused (HTTP ${p.status})${wants(p)}: the server uses it to ${READ_PERMISSION_USE[name]}`,
     );
     fixes.push(name.replace(': read', ': Read-only'));
+  }
+  // The reviewer app's contents read, from its installation grant: no token wider than §4.2's.
+  const proven = [...required];
+  let grantNote = '';
+  if (who === 'reviewer') {
+    const granted = await r.grant.reviewer();
+    if (granted === null || granted === undefined)
+      grantNote = `; Contents: read, which drops use, is not proven here: the server's reviewer token is narrowed to pull requests, and the app's installation grant ${granted === null ? 'is not read by this server' : 'could not be read (forge.reviewer says more)'}`;
+    else if (rankOf(Object.hasOwn(granted, 'contents') ? granted.contents : undefined) < 1) {
+      problems.push(
+        `Contents: read is missing from its installation grant on ${zone.repo}: drops use it to ${READ_PERMISSION_USE['Contents: read']}`,
+      );
+      fixes.push('Contents: Read-only');
+    } else {
+      proven.unshift('Contents: read');
+      grantNote = ' (Contents: read from its installation grant)';
+    }
   }
   if (problems.length > 0)
     return {
@@ -1804,7 +1846,10 @@ async function appReadsCheck(
   return {
     ...base,
     status: 'pass',
-    summary: `${named} can make every read the server relies on (${required.join(', ')})`,
+    summary:
+      who === 'reviewer'
+        ? `${named} can make the reads it relies on: ${proven.join(', ')}${grantNote}`
+        : `${named} can make every read the server relies on (${required.join(', ')})`,
   };
 }
 
