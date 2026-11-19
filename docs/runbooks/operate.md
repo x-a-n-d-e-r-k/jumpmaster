@@ -91,6 +91,9 @@ The mode is runtime state, separate from the config: a config change never flips
   let them drain first.
 - **Resume** (`ctl resume <zone>`): takes ready issues and runs drops again.
 
+These act on one zone. The [kill switch](#kill-switch) (`ctl kill`, `ctl unkill`) stops every
+zone at once and, for zones on GitHub Apps, suspends their app installations.
+
 A paused or observing zone's open briefings are held off the floor: they are not listed or counted
 in "Waiting on you" or the status line, and the zone gets one line instead, `<repo>: paused, N
 briefings held`, linking to the zone's briefings (`/briefings?zone=<zone>`, also linked from the
@@ -373,14 +376,47 @@ restarts).
   most 92 days. Transcripts hold code from private repositories: export is operator-only, each
   export writes a `transcript-export` audit row, and `--out` creates the file mode 0600 and never
   overwrites one.
-- **Kill switch.** `ctl kill` hard-cancels queued and running drops, but leaves pending pushes in
-  place. While it is on, no push credential is issued and a running push container is stopped
+- <a id="kill-switch"></a>**Kill switch.** `ctl kill` hard-cancels queued and running drops, but
+  leaves pending pushes in place. While it is on, no push credential is issued and a running push container is stopped
   with its volume kept, so nothing reaches GitHub. An agent run the kill stopped leaves its
   uncommitted work on its volume, and the stick salvages it into a pending push, even while the
   switch is on, or up to 15 minutes after `ctl unkill` (a stick that was down longer, or an issue
   that has moved on since, gets its volume removed instead). The retention clock stops for the
   duration. `ctl unkill` adds the time back to
   every deadline, and the pending pushes, salvaged ones included, go out.
+
+  *Zones on GitHub Apps only:* `ctl kill` also suspends every app installation each zone records
+  (author and reviewer). Suspension stops every live app token within seconds, the server's own
+  GitHub work included, and GitHub refuses new mints until `ctl unkill` unsuspends them. Each
+  installation is suspended (or unsuspended) on its own, with its own 10-second deadline, so one
+  that fails doesn't hold up the others. ctl prints one line per failure:
+
+  ```text
+  could not suspend the <role> app installation <id> of <owner> (status N)
+  ```
+
+  (`could not unsuspend …` for `ctl unkill`), and the server log records the same failure. N is
+  GitHub's HTTP status; status 0 means a network error, a timeout or a missing broker (no app
+  entry to sign with). Run `ctl kill` (or `ctl unkill`) again, or suspend or unsuspend that
+  installation yourself on GitHub: open the installation's settings (**Configure** on the app's
+  installation for that owner) and press **Suspend** or **Unsuspend**. Token-mode zones have no installation to suspend: for them the
+  switch is only what the paragraph above describes.
+- **The push token (zones on GitHub Apps only).** In token mode the push uses the zone's author
+  token, as configured. On a zone whose author is a GitHub App, the server mints a
+  `contents: write` token from the author app when the stick asks for a push credential, narrowed
+  to the zone's repository and good for that one push. It is held in the server's memory only and
+  revoked on GitHub when the push result arrives, when a new push plan releases the drop's
+  reservation, or when a salvage replaces the pending push. Retention expiry and
+  `ctl drops cancel` void the drop's grant, so no credential is issued for it again, and the stick
+  stops a running push container; they do not call GitHub to revoke a token already minted, which
+  stays valid until it expires within its hour. The push token goes only into the push container:
+  no write token ever enters a container an agent ran in. The agent's own fetches use a separate
+  per-drop `contents: read` token (the author app's for implement, heal and resolve drops; the
+  reviewer app's for review, crew and doctor drops), revoked when the drop ends.
+- **Nothing to clean up after a restart (zones on GitHub Apps only).** Minted tokens are never
+  stored: not in the database, the vault, an audit row or a log. A server restart forgets the
+  ones it held, needs no cleanup, and any token left unrevoked expires within its hour. To stop
+  every live token at once, use the [kill switch](#kill-switch).
 - **A refused push.** GitHub refusing the push (branch protection, a pre-receive hook, secret
   scanning) is final, as is the trooper's own pre-push check (a protected path, a secret, a
   commit that isn't the gated one). The drop then fails, or for a checkpoint resumes from the last
