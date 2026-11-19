@@ -274,6 +274,8 @@ export function createApp(
     appSuspension?: ControlDeps['appSuspension'];
     /** The installation check every mint goes through (issue #267), for the doctor. */
     installationVerifier?: ControlDeps['installationVerifier'];
+    /** The installation grant of a zone's role app (issue #457), for the doctor. */
+    appGrants?: ControlDeps['appGrants'];
     /** The GitHub App manifest flow's states and pendings (main.ts sweeps it); default a new one. */
     appManifestStore?: AppManifestStore;
     /** The manifest conversion's fetch and API base (tests inject a fake GitHub). */

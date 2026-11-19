@@ -254,6 +254,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     appBrokers,
     appTokens,
     installationVerifier: appTokens,
+    appGrants: appTokens,
     appManifestStore,
     heldReadTokens,
     ...(chatTurns ? { chatTurns } : {}),

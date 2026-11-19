@@ -23,6 +23,7 @@ import {
   stampStick,
 } from '../db/repo.js';
 import { InstallationCheckError } from '../forge/installation-verifier.js';
+import { APP_MANIFEST_PERMISSIONS } from '../github/app-manifest.js';
 import { AUTHOR_TOKEN, ago, NOW, one, PG, world } from '../test/doctorWorld.js';
 import { okProbes } from '../test/fakes.js';
 import { makeZone } from '../test/fixtures.js';
@@ -2528,6 +2529,143 @@ describe('forge.author and forge.reviewer for GitHub App roles (issue #435)', ()
     } finally {
       for (const s of spies) s.mockRestore();
     }
+  });
+
+  describe("the installation grant against the app's manifest (issue #457)", () => {
+    type Grants = Partial<Record<'author' | 'reviewer', Record<string, string>>>;
+    type GrantRead = (
+      role: 'author' | 'reviewer',
+    ) => Promise<{ permissions: Record<string, string> }>;
+    /** An app world with a fake grant dependency; `calls` records each read. */
+    const grantWorld = (grants: Grants | GrantRead, o: Parameters<typeof appWorld>[0] = {}) => {
+      const w = appWorld(o);
+      const calls: string[] = [];
+      w.deps.installationGrant = (zoneId, role) => {
+        calls.push(`${zoneId}:${role}`);
+        if (typeof grants === 'function') return grants(role);
+        return Promise.resolve({
+          permissions: grants[role] ?? { ...APP_MANIFEST_PERMISSIONS[role] },
+        });
+      };
+      return { w, calls };
+    };
+
+    test('a grant equal to the manifest passes, as before', async () => {
+      getApp(byId);
+      const { w, calls } = grantWorld({});
+      const checks = await w.run();
+      expect(one(checks, 'forge.author').status).toBe('pass');
+      expect(one(checks, 'forge.reviewer').status).toBe('pass');
+      expect(calls.sort()).toEqual(['main:author', 'main:reviewer']);
+    });
+
+    test('an author grant without checks warns, naming checks and the owner who must accept', async () => {
+      getApp(byId);
+      const { checks: _omit, ...lacking } = APP_MANIFEST_PERMISSIONS.author;
+      const { w } = grantWorld({ author: lacking });
+      const c = one(await w.run(), 'forge.author');
+      expect(c.status).toBe('warn');
+      expect(c.summary).toContain('checks');
+      expect(c.fix).toContain('owner octo');
+      expect(c.fix).toContain('Review request');
+      expect(c.fix).toContain('installation');
+      expect(c.fix).toMatch(/old grant until/);
+    });
+
+    test('a reviewer granted contents: read where the manifest asks write warns, naming the level', async () => {
+      getApp(byId);
+      const { w } = grantWorld({
+        reviewer: { ...APP_MANIFEST_PERMISSIONS.reviewer, contents: 'read' },
+      });
+      const c = one(await w.run(), 'forge.reviewer');
+      expect(c.status).toBe('warn');
+      expect(c.summary).toContain('contents (read; the manifest asks write)');
+    });
+
+    test('an extra issues: write on the reviewer warns, naming it, with a fix on the app page', async () => {
+      getApp(byId);
+      const { w } = grantWorld({
+        reviewer: { ...APP_MANIFEST_PERMISSIONS.reviewer, issues: 'write' },
+      });
+      const c = one(await w.run(), 'forge.reviewer');
+      expect(c.status).toBe('warn');
+      expect(c.summary).toContain('issues (write)');
+      expect(c.fix).toContain('Remove issues');
+      expect(c.fix).toContain('page on GitHub');
+    });
+
+    test("a grant differing only in administration or workflows is not this check's warn", async () => {
+      getApp(byId);
+      const { w } = grantWorld({
+        author: { ...APP_MANIFEST_PERMISSIONS.author, administration: 'write', workflows: 'write' },
+        reviewer: { ...APP_MANIFEST_PERMISSIONS.reviewer, administration: 'read' },
+      });
+      const checks = await w.run();
+      expect(one(checks, 'forge.author').status).toBe('pass');
+      expect(one(checks, 'forge.reviewer').status).toBe('pass');
+    });
+
+    test('a grant read that rejects warns that it could not be read, never a fail', async () => {
+      getApp(byId);
+      const { w } = grantWorld(() => Promise.reject(new Error('boom')));
+      const checks = await w.run();
+      for (const id of ['forge.author', 'forge.reviewer']) {
+        const c = one(checks, id);
+        expect(c.status).toBe('warn');
+        expect(c.summary).toContain('could not be read');
+        expect(c.summary).not.toContain('boom');
+      }
+    });
+
+    test('a grant read that never answers warns that it could not be read', async () => {
+      getApp(byId);
+      const { w } = grantWorld(() => new Promise(() => {}));
+      w.deps.checkTimeoutMs = 2_000;
+      const c = one(await w.run(), 'forge.author');
+      expect(c.status).toBe('warn');
+      expect(c.summary).toContain('could not be read');
+    });
+
+    test('an old key plus a grant difference is one warn mentioning both', async () => {
+      getApp(byId);
+      const { checks: _omit, ...lacking } = APP_MANIFEST_PERMISSIONS.author;
+      const { w } = grantWorld(
+        { author: lacking },
+        { author: { ...AUTHOR_APP, importedAt: ago(400 * DAY).toISOString() } },
+      );
+      const c = one(await w.run(), 'forge.author');
+      expect(c.status).toBe('warn');
+      expect(c.summary).toContain('365 days');
+      expect(c.summary).toContain('checks');
+      expect(c.fix).toContain('new private key');
+      expect(c.fix).toContain('Review request');
+    });
+
+    test('a PAT zone makes no grant read and its results are unchanged', async () => {
+      const before = await appWorld({ author: null, reviewer: null }).run();
+      const { w, calls } = grantWorld({}, { author: null, reviewer: null });
+      const after = await w.run();
+      expect(calls).toEqual([]);
+      for (const id of ['forge.author', 'forge.reviewer'])
+        expect(one(after, id)).toEqual(one(before, id));
+    });
+
+    test("no result's JSON holds the PEM", async () => {
+      getApp(byId);
+      const texts: string[] = [];
+      const cases: (Grants | GrantRead)[] = [
+        { author: { issues: 'write' }, reviewer: { contents: 'read' } },
+        () => Promise.reject(new Error(APP_ENTRY.pem)),
+      ];
+      for (const g of cases) {
+        const { w } = grantWorld(g);
+        texts.push(JSON.stringify(await w.run()));
+      }
+      for (const t of texts) {
+        expect(t).not.toContain(pemBody.slice(0, 40));
+        expect(t).not.toContain('PRIVATE KEY');
+      }
+    });
   });
 });
 

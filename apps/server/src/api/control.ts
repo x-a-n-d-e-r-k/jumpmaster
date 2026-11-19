@@ -229,6 +229,11 @@ export interface ControlDeps {
    * `forge.reviewer` fail a zone whose recorded ids it refuses.
    */
   installationVerifier?: InstallationVerifier;
+  /**
+   * The installation grant of a zone's role app (issue #457); the doctor's `forge.author` and
+   * `forge.reviewer` compare it with the app's manifest.
+   */
+  appGrants?: Pick<AppTokenSource, 'grant'>;
 }
 
 /** A setup mode whose codes go to stderr, alone on their line (main.ts passes its own). */
@@ -851,6 +856,12 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
                     verifiedInstallation: (
                       ...a: Parameters<InstallationVerifier['verifiedInstallation']>
                     ) => deps.installationVerifier!.verifiedInstallation(...a),
+                  }
+                : {}),
+              ...(deps.appGrants
+                ? {
+                    installationGrant: (zoneId: string, role: AppRole) =>
+                      deps.appGrants!.grant(zoneId, role)(),
                   }
                 : {}),
               ...(configStatus ? { configStatus } : {}),
