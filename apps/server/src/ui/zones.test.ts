@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import vm from 'node:vm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createApp } from '../app.js';
@@ -277,8 +278,8 @@ describe('the zones page', () => {
     expect(section(img, 'project')).toContain('octo/img');
     expect(section(img, 'project')).not.toContain('name="repo"');
     expect(section(img, 'project')).toContain('remove and re-add to change');
-    // The starter warning, verbatim, in Merging.
-    expect(section(img, 'merging')).toContain(esc(STARTER_WARNING));
+    // The starter warning in Merging, its label once.
+    expect(section(img, 'merging')).toContain(esc(STARTER_WARNING.replace(/^starter mode: /i, '')));
     // readyLabel carries its note.
     expect(section(img, 'project')).toContain(
       'renaming to a label already on many issues dispatches them all',
@@ -732,5 +733,93 @@ describe('the Backlog section (#346)', () => {
     const script = backlogScript((await w.get('/zones/main')).body);
     expect(script).toContain('textContent');
     expect(script.replaceAll(' ', '')).not.toContain('innerHTML=');
+  });
+});
+
+/** The Merging section's starter-mode warning paragraph (opening tag through `</p>`). */
+const starterWarning = (html: string): string | undefined => {
+  const m = /<p class="warn" id="starter-warning"[^>]*>[\s\S]*?<\/p>/.exec(
+    section(html, 'merging'),
+  );
+  return m?.[0];
+};
+const isHidden = (p: string | undefined) => p === undefined || /^<p[^>]*\shidden[\s>]/.test(p);
+
+/** The identity script source (without its tags). */
+const identityScript = (html: string): string => {
+  const at = html.indexOf('<script id="identity-script">');
+  expect(at).toBeGreaterThanOrEqual(0);
+  return html.slice(at + '<script id="identity-script">'.length, html.indexOf('</script>', at));
+};
+
+describe('the starter-mode warning (#494)', () => {
+  test('a two-bot zone hides it; a starter zone shows it', async () => {
+    const w = await world();
+    expect(isHidden(starterWarning((await w.get('/zones/main')).body))).toBe(true);
+    const img = starterWarning((await w.get('/zones/img')).body);
+    expect(img).toBeDefined();
+    expect(isHidden(img)).toBe(false);
+    expect(img).toContain('<strong>Starter mode:</strong> the author token can merge any green PR');
+  });
+
+  test('the theme lets `hidden` win over `.warn{display:block}`', async () => {
+    const w = await world();
+    expect((await w.get('/zones/main')).body).toContain('[hidden]{display:none!important}');
+  });
+
+  test('the label is never doubled, for either identity', async () => {
+    const w = await world();
+    for (const id of ['main', 'img']) {
+      const merging = section((await w.get(`/zones/${id}`)).body, 'merging');
+      expect(merging).not.toMatch(/starter mode:(\s|<\/strong>)*starter mode/i);
+      const p = starterWarning((await w.get(`/zones/${id}`)).body) ?? '';
+      expect(p.replace(/<[^>]+>/g, '')).not.toMatch(/starter mode:\s*starter mode/i);
+    }
+  });
+
+  test('a read-only page follows the same rule', async () => {
+    const w = await world({ file: true });
+    expect(isHidden(starterWarning((await w.get('/zones/main')).body))).toBe(true);
+    const img = starterWarning((await w.get('/zones/img')).body);
+    expect(img).toBeDefined();
+    expect(isHidden(img)).toBe(false);
+  });
+
+  test('the page script toggles it as the Accounts select changes, with no fetch', async () => {
+    const w = await world();
+    const script = identityScript((await w.get('/zones/main')).body);
+    const listeners: Record<string, (() => void)[]> = {};
+    const select = {
+      value: 'two-bot',
+      addEventListener: (ev: string, fn: () => void) => {
+        (listeners[ev] ??= []).push(fn);
+      },
+    };
+    const warning = { hidden: true };
+    const document = {
+      querySelector: (sel: string) => (sel === '#identity select[name=identity]' ? select : null),
+      getElementById: (id: string) => (id === 'starter-warning' ? warning : null),
+    };
+    let fetched = 0;
+    vm.runInContext(
+      script,
+      vm.createContext({
+        document,
+        fetch: () => {
+          fetched++;
+          return Promise.reject(new Error('no fetch'));
+        },
+      }),
+    );
+    const change = (v: string) => {
+      select.value = v;
+      for (const fn of listeners.change ?? []) fn();
+    };
+    expect(warning.hidden).toBe(true);
+    change('starter');
+    expect(warning.hidden).toBe(false);
+    change('two-bot');
+    expect(warning.hidden).toBe(true);
+    expect(fetched).toBe(0);
   });
 });
