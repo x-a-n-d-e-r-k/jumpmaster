@@ -141,20 +141,26 @@ function resultLinesText(r: ToolStepResult): string {
   return `${r.lines} ${r.lines === 1 ? 'line' : 'lines'}`;
 }
 
+/** Where a pruned result was (#515): the day it was pruned. */
+const prunedText = (at: string) => `result pruned on ${at.slice(0, 10)}`;
+
 /**
  * One tool step (#514): a step with an input or a result opens to show them; one with neither, from
  * an older chat image, is its text only. A step with no result yet says `running…` while its turn
- * runs, `no result recorded` once it is done. The page script builds the same with `textContent`.
+ * runs, `no result recorded` once it is done, and `result pruned on <date>` once its result expired
+ * (#515). The page script builds the same with `textContent`.
  */
 function stepHtml(m: ChatMessage, running: boolean): string {
   const text = escapeHtml(m.text);
-  if (m.input === undefined && m.result === undefined)
+  if (m.input === undefined && m.result === undefined && m.resultPrunedAt === undefined)
     return `<li data-seq="${m.seq}">${text}</li>`;
   const input = m.input ? stepInputHtml(m.toolName ?? '', m.input) : '';
   const r = m.result;
   const result = r
     ? `<div class="result${r.isError ? ' error' : ''}"><small>${r.isError ? 'Error · ' : ''}${escapeHtml(resultLinesText(r))}</small><pre>${escapeHtml(r.text)}</pre></div>`
-    : `<small class="pending">${running ? 'running…' : 'no result recorded'}</small>`;
+    : m.resultPrunedAt !== undefined
+      ? `<small class="note">${escapeHtml(prunedText(m.resultPrunedAt))}</small>`
+      : `<small class="pending">${running ? 'running…' : 'no result recorded'}</small>`;
   return `<li data-seq="${m.seq}"><details><summary>${text}</summary>${input}${result}</details></li>`;
 }
 
@@ -198,7 +204,7 @@ const msgEl=(m)=>{const d=el('div','msg '+m.role);d.dataset.seq=String(m.seq);d.
 const FIELDS=${JSON.stringify(STEP_FIELDS)};const VMAX=${STEP_VALUE_MAX};const set=(v)=>v!==undefined&&v!==null&&v!=='';
 const inputEl=(name,i)=>{if(i._truncated){const d=el('div','input');d.append(el('code','',i.preview??''),el('small','note','input truncated'));return d;}if(name==='Bash'&&typeof i.command==='string'){const p=el('pre','input');p.append(el('code','',i.command));return p;}const f=FIELDS[name];const d=el('div','input');if(f&&typeof i[f[0]]==='string'){d.append(el('code','',i[f[0]]));for(const k of f.slice(1))if(set(i[k]))d.append(el('div','',k+': '+String(i[k])));}else for(const k of Object.keys(i)){const j=String(JSON.stringify(i[k]));d.append(el('div','',k+': '+(j.length>VMAX?j.slice(0,VMAX)+'…':j)));}return d.children.length?d:null;};
 const linesText=(r)=>{const n=Number(r.lines)||0;const text=String(r.text??'');if(r.truncated)return 'showing the first '+(text===''?0:text.split('\\n').length)+' of '+n+' lines';return n+(n===1?' line':' lines');};
-const stepEl=(m)=>{const li=el('li');li.dataset.seq=String(m.seq);const i=m.input&&typeof m.input==='object'?m.input:null;const r=m.result&&typeof m.result==='object'?m.result:null;if(!i&&!r){li.textContent=String(m.text);return li;}const d=el('details');d.append(el('summary','',m.text));const x=i?inputEl(String(m.toolName||''),i):null;if(x)d.append(x);if(r){const b=el('div',r.isError?'result error':'result');b.append(el('small','',(r.isError?'Error · ':'')+linesText(r)),el('pre','',r.text??''));d.append(b);}else d.append(el('small','pending','running…'));li.append(d);return li;};
+const stepEl=(m)=>{const li=el('li');li.dataset.seq=String(m.seq);const i=m.input&&typeof m.input==='object'?m.input:null;const r=m.result&&typeof m.result==='object'?m.result:null;const pr=typeof m.resultPrunedAt==='string'?m.resultPrunedAt:null;if(!i&&!r&&!pr){li.textContent=String(m.text);return li;}const d=el('details');d.append(el('summary','',m.text));const x=i?inputEl(String(m.toolName||''),i):null;if(x)d.append(x);if(r){const b=el('div',r.isError?'result error':'result');b.append(el('small','',(r.isError?'Error · ':'')+linesText(r)),el('pre','',r.text??''));d.append(b);}else if(pr)d.append(el('small','note','result pruned on '+pr.slice(0,10)));else d.append(el('small','pending','running…'));li.append(d);return li;};
 const step=(m)=>{const seq=String(m.seq);for(const g of log.children){if(g.className!=='steps')continue;const old=[...g.querySelector('ol').children].find((li)=>li.dataset.seq===seq);if(old){const n=stepEl(m);const o=old.querySelector('details');const nd=n.querySelector('details');if(o&&nd&&o.open)nd.open=true;old.replaceWith(n);return;}}let g=log.lastElementChild;if(!g||g.className!=='steps'){g=el('details','steps');g.append(el('summary'),el('ol'));log.append(g);}const ol=g.querySelector('ol');ol.append(stepEl(m));g.querySelector('summary').textContent='Worked through '+ol.children.length+(ol.children.length===1?' step':' steps');};
 const put=(m)=>{last=Math.max(last,Number(m.seq)||0);if(m.role==='tool')return step(m);const old=[...log.children].find((c)=>c.dataset.seq===String(m.seq));if(m.role==='assistant'&&live&&!old&&typeof m.html==='string'){live.lastChild.innerHTML=m.html;live.className='msg assistant';live.dataset.seq=String(m.seq);if(m.state!=='done')live.append(el('small','state',m.error?m.state+': '+m.error:m.state));live=null;return;}const node=msgEl(m);if(old)old.replaceWith(node);else log.append(node);if(m.role==='assistant'&&live){live.remove();live=null;}};
 const PENDING_MS=${PENDING_MS};const CONFIRM=new RegExp(${JSON.stringify(CONFIRM_LINK.source)});const dlg=document.getElementById('confirm-dialog');const dbody=dlg?dlg.querySelector('.confirm-body'):null;let dcard=null;let dmsg=null;

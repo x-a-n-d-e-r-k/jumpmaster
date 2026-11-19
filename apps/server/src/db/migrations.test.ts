@@ -1731,3 +1731,18 @@ test('v53 adds nullable tool step columns to chat_messages, keeping every row', 
     },
   ]);
 });
+
+test('v54 adds a nullable result_pruned_at to chat_messages, keeping every row', () => {
+  const f = dbAt(53, (raw) => {
+    raw.exec(
+      `INSERT INTO chat_threads (id, title, created_at, updated_at) VALUES (1, 't', 'c', 'u');
+       INSERT INTO chat_messages (thread_id, seq, role, text, state, created_at, result_text)
+       VALUES (1, 1, 'tool', 'read GOAL.md', 'done', 'c', 'out')`,
+    );
+  });
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.prepare('SELECT text, result_text, result_pruned_at FROM chat_messages').all()).toEqual(
+    [{ text: 'read GOAL.md', result_text: 'out', result_pruned_at: null }],
+  );
+});

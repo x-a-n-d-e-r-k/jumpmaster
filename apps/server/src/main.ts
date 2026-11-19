@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
 import { SetupMode, setupActive, setupCodeLine } from './auth/operator.js';
 import { httpChatService } from './chat/service.js';
+import { CHAT_TOOL_RESULT_DAYS, pruneChatToolResults } from './chat/store.js';
 import { ChatTurns, chatMcpUrl } from './chat/turns.js';
 import { configPathOf, loadBoot } from './config/boot.js';
 import { ConfigStore, startVault } from './config/store.js';
@@ -15,7 +16,7 @@ import {
   startupWarnings,
 } from './config.js';
 import { creditsPass } from './credits.js';
-import { openDb } from './db/open.js';
+import { type Db, openDb } from './db/open.js';
 import { reconcileZone } from './flow/reconcile.js';
 import { createAppBrokers } from './forge/app-brokers.js';
 import { createAppTokenSource } from './forge/app-tokens.js';
@@ -34,7 +35,7 @@ import { AppManifestStore } from './setup/app-manifest-state.js';
 import { sweepPendingApps } from './setup/github-app-routes.js';
 import { recordPass } from './status.js';
 import { syncDropZone } from './sync.js';
-import { transcriptPruner } from './transcripts.js';
+import { PRUNE_EVERY_MS, transcriptPruner } from './transcripts.js';
 import { credentialProblems } from './vault/problems.js';
 import { sweepStopping, withdrawOrphanBriefings } from './zones/stop.js';
 
@@ -52,6 +53,28 @@ export function listeningLine(host: string, port: number, mode: string): string 
 export const APP_MANIFEST_SWEEP_MS = 60_000;
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/**
+ * Chat tool result retention (#515): called beside the transcript prune, it runs at most once per
+ * `PRUNE_EVERY_MS`, and a run that pruned anything logs one line with the count.
+ */
+export function chatResultPruner(db: Db, log: (message: string) => void): (now: Date) => void {
+  let last: number | undefined;
+  return (now) => {
+    if (last !== undefined && now.getTime() - last < PRUNE_EVERY_MS) return;
+    last = now.getTime();
+    try {
+      const n = pruneChatToolResults(db, now);
+      if (n > 0) {
+        log(
+          `pruned ${n} chat tool ${n === 1 ? 'result' : 'results'} older than ${CHAT_TOOL_RESULT_DAYS} days`,
+        );
+      }
+    } catch (e) {
+      log(`chat tool result prune failed: ${errorMessage(e)}`);
+    }
+  };
+}
 
 type Timers = {
   setInterval: (fn: () => void, ms: number) => NodeJS.Timeout;
@@ -367,6 +390,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     zones: () => live.current().dropZones,
     log,
   });
+  const pruneChatResults = chatResultPruner(db, log);
   const poll = pollTimer(live, () => void guardedPass());
   const leaseTimer = setInterval(() => {
     try {
@@ -382,6 +406,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     }
     sweepStops();
     void pruneTranscripts(new Date());
+    pruneChatResults(new Date());
   }, 10_000);
 
   await app.listen({ host: boot.listen.host, port: boot.listen.port });

@@ -923,7 +923,7 @@ describe('/chat Markdown (#490)', () => {
   describe('a tool step opens to its input and result (#514)', () => {
     const step = (
       seq: number,
-      o: Partial<Pick<ChatMessage, 'toolName' | 'input' | 'result' | 'text'>>,
+      o: Partial<Pick<ChatMessage, 'toolName' | 'input' | 'result' | 'text' | 'resultPrunedAt'>>,
     ): ChatMessage => ({ ...stored(seq, 'tool', o.text ?? `step ${seq}`), ...o });
     const ok = (text: string, lines = text.split('\n').length) => ({
       text,
@@ -1157,6 +1157,46 @@ describe('/chat Markdown (#490)', () => {
       emit('done', {});
       expect(log.children[0]?.textContent).toContain('no result recorded');
       expect(log.children[0]?.textContent).not.toContain('running…');
+    });
+
+    test('a pruned step says "result pruned on" with the date, and has no <pre> (#515)', () => {
+      const html = renderThread(THREAD, [
+        step(1, {
+          text: 'read a.ts',
+          toolName: 'Read',
+          input: { file_path: '/repo/a.ts' },
+          resultPrunedAt: '2026-06-01T12:00:00.000Z',
+        }),
+      ]);
+      const item = li(html, 1);
+      expect(item).toMatch(/^<details><summary>read a\.ts<\/summary>/);
+      expect(item).toContain('/repo/a.ts');
+      expect(item).toContain('result pruned on 2026-06-01');
+      expect(item).not.toContain('<pre');
+      expect(item).not.toContain('no result recorded');
+      expect(item).not.toContain('running…');
+    });
+
+    test('streamed: a pruned step says "result pruned on" with the date, and has no <pre>', () => {
+      const { log, emit } = runScript();
+      emit('tool', {
+        seq: 2,
+        text: 'r',
+        toolName: 'Read',
+        input: { file_path: 'a' },
+        resultPrunedAt: '2026-06-01T12:00:00.000Z',
+      });
+      emit('done', {});
+      const text = log.children[0]?.textContent ?? '';
+      expect(text).toContain('result pruned on 2026-06-01');
+      expect(text).not.toContain('no result recorded');
+      const tags: string[] = [];
+      const walk = (e: { tagName?: string; children?: unknown[] }) => {
+        tags.push(String(e.tagName).toLowerCase());
+        for (const c of e.children ?? []) walk(c as typeof e);
+      };
+      walk(log.children[0] as never);
+      expect(tags).not.toContain('pre');
     });
   });
 
