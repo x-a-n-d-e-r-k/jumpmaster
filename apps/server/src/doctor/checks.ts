@@ -1529,14 +1529,22 @@ const PERMISSION_USE: Record<string, string> = {
   'Commit statuses: read': 'read commit statuses (CI that reports statuses)',
 };
 
+/**
+ * `forge.author-reads` / `forge.reviewer-reads`: the read probes, through the zone's forge pair.
+ * `app` is the role's GitHub App entry when the role uses it (spec §6, app column): the same
+ * probes on a minted token, plus check runs for the author, which an app forge reads directly with
+ * no Actions-jobs fallback. Without `app`, the PAT texts, unchanged.
+ */
 async function readsCheck(
   zone: DropZoneConfig,
   r: ZoneReads,
   who: 'author' | 'reviewer',
+  app?: GitHubAppEntry,
 ): Promise<DoctorCheck> {
   const base = { id: `forge.${who}-reads`, zoneId: zone.id, doc: doc('tokens') };
   if (who === 'reviewer' && zone.identity === 'starter')
     return { ...base, status: 'skip', summary: NO_REVIEWER, doc: doc('starter-mode') };
+  if (app) return appReadsCheck(zone, r, who, app, base);
   const branch = await r.branch();
   const probed = await attempt(() =>
     (who === 'author' ? r.pair.author : reviewerOf(r.pair)).probeReads(branch),
@@ -1619,6 +1627,92 @@ async function readsCheck(
     ...base,
     status: 'pass',
     summary: `the ${who} token can make every read the server relies on (${wanted.join(', ')})${ci}`,
+  };
+}
+
+const READ_PERMISSION_USE: Record<string, string> = {
+  ...PERMISSION_USE,
+  'Checks: read': 'read check runs (CI results)',
+};
+
+/** A rate-limited 403 says nothing about permissions: it is a read that could not be tried. */
+const refusedRead = (p: ReadProbe | undefined): p is ReadProbe =>
+  p !== undefined && !p.rateLimited && (p.status === 403 || p.status === 404);
+
+/**
+ * The reads check for an app role: the PAT check's probes and wanted lists, plus `Checks: read`
+ * for the author, since an app forge reads check runs directly. The `Actions: read` probe is
+ * ignored. No line holds the app id, the key or a token: only the slug and permission names.
+ */
+async function appReadsCheck(
+  zone: DropZoneConfig,
+  r: ZoneReads,
+  who: 'author' | 'reviewer',
+  app: GitHubAppEntry,
+  base: { id: string; zoneId: string; doc: string },
+): Promise<DoctorCheck> {
+  const named = `the ${who} GitHub App ${app.slug}`;
+  const branch = await r.branch();
+  const probed = await attempt(() =>
+    (who === 'author' ? r.pair.author : reviewerOf(r.pair)).probeReads(branch),
+  );
+  if (!probed.ok) return readFailed(base, who, 'try its reads', 'Metadata: read', probed);
+  const wanted =
+    who === 'reviewer'
+      ? ['Contents: read', 'Pull requests: read']
+      : ['Contents: read', 'Issues: read', 'Pull requests: read', 'Commit statuses: read'];
+  const required = who === 'author' ? [...wanted, 'Checks: read'] : wanted;
+  // Only the reads the app needs count: Actions: read is no fallback on an app forge.
+  const relevant = probed.value.filter((p) => required.includes(p.permission));
+  const probes = new Map(relevant.map((p) => [p.permission, p]));
+  const wants = (p: ReadProbe) => (p.accepted ? ` (GitHub says it needs ${p.accepted})` : '');
+  const unknown = relevant.filter(
+    (p) => p.status === 401 || p.rateLimited || p.status === null || p.status >= 500,
+  );
+  if (unknown.some((p) => p.status === 401))
+    return {
+      ...base,
+      status: 'fail',
+      summary: `GitHub refused the minted token of ${named} (401)`,
+      fix: `Tokens for the app are minted per use, so there is none to replace: run the doctor again, and check forge.${who} (the app's private key and its installation on ${zone.repo}).`,
+    };
+  const problems: string[] = [];
+  const fixes: string[] = [];
+  for (const name of required) {
+    const p = probes.get(name);
+    if (!refusedRead(p)) continue;
+    problems.push(
+      name === 'Checks: read'
+        ? `the server can't read CI results: check runs refused (HTTP ${p.status})${wants(p)}, and on an app forge the server reads CI through check runs alone`
+        : `${name} refused (HTTP ${p.status})${wants(p)}: the server uses it to ${READ_PERMISSION_USE[name]}`,
+    );
+    fixes.push(name.replace(': read', ': Read-only'));
+  }
+  if (problems.length > 0)
+    return {
+      ...base,
+      status: 'fail',
+      summary: `${named}: ${problems.join('; ')}`,
+      fix: `Add ${fixes.join(', ')} to ${named} on its page (Settings → Developer settings → GitHub Apps → ${app.slug} → Permissions & events), then have the account owner accept the new permissions on the installation on ${zone.repo}.`,
+    };
+  if (unknown.length > 0)
+    return {
+      ...base,
+      status: 'warn',
+      summary: `could not try ${unknown.map((p) => p.permission).join(', ')} (${unknown.map((p) => (p.rateLimited ? 'rate limit' : p.status === null ? 'no answer' : `HTTP ${p.status}`)).join(', ')}); the check did not finish`,
+      fix: 'Run the doctor again in a few minutes.',
+    };
+  const access = await r.access[who]();
+  if (access.ok && !access.value.private)
+    return {
+      ...base,
+      status: 'pass',
+      summary: `${named} works, and ${zone.repo} is public, so every read succeeds with any token: this proves the app's token works, not its permissions; a missing Contents, Issues or Pull requests permission shows at the first push or filing`,
+    };
+  return {
+    ...base,
+    status: 'pass',
+    summary: `${named} can make every read the server relies on (${required.join(', ')})`,
   };
 }
 
@@ -2797,8 +2891,10 @@ export async function zoneChecks(
     g('forge.author', z, () => identityCheck(d, zone, r, 'author')),
     g('forge.reviewer', z, () => identityCheck(d, zone, r, 'reviewer')),
     g('forge.admin', z, () => adminCheck(d, zone, r)),
-    g('forge.author-reads', z, () => readsCheck(zone, r, 'author')),
-    g('forge.reviewer-reads', z, () => readsCheck(zone, r, 'reviewer')),
+    g('forge.author-reads', z, () => readsCheck(zone, r, 'author', appEntryFor(d, zone, 'author'))),
+    g('forge.reviewer-reads', z, () =>
+      readsCheck(zone, r, 'reviewer', appEntryFor(d, zone, 'reviewer')),
+    ),
     g('forge.branch-rules', z, () => branchRulesCheck(d, zone, r)),
     g('forge.codeowners', z, () => codeownersCheck(zone, r, reviewerAppOf(d, zone))),
     g('forge.ci', z, () => ciCheck(zone, r)),
