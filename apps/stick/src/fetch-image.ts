@@ -30,6 +30,7 @@ import { Readable } from 'node:stream';
 import type { ImageFetch } from '@jumpmaster/protocol';
 import type { StickClient } from './client.js';
 import type { ImageLoader } from './driver.js';
+import type { StickImages } from './image-gc.js';
 import type { ImageSource } from './pull.js';
 import {
   canonicalRef,
@@ -68,6 +69,11 @@ export type ServerImageDeps = {
   progressMs?: number;
   /** Milliseconds, for the progress throttle. */
   now?: () => number;
+  /**
+   * The stick's images (issue #425): a fetch holds the lock shared, so the image sweep never runs
+   * meanwhile, and a load is recorded (a new digest starts a sweep, once the lock is free).
+   */
+  images?: Pick<StickImages, 'lock' | 'loaded'>;
 };
 
 /** Where missing images come from, decided per use, and how to fetch from the server. */
@@ -550,11 +556,19 @@ async function download(
  * image is allowed only as the proxy); under `signed` this decides, offline. An image already
  * present that needs no signature check is not fetched. Never throws.
  */
-export async function fetchFromServer(
+export function fetchFromServer(
   ref: string,
   trust: ImageTrust,
   deps: ServerImageDeps,
 ): Promise<Fetched> {
+  // Taken within this call (the lock grants a free holder at once), so a sweep started after it
+  // waits for it.
+  return deps.images
+    ? deps.images.lock.shared(() => fetchImage(ref, trust, deps))
+    : fetchImage(ref, trust, deps);
+}
+
+async function fetchImage(ref: string, trust: ImageTrust, deps: ServerImageDeps): Promise<Fetched> {
   const digest = digestOf(ref);
   // A tag is never fetched, as it is never pulled; under signed it is refused.
   if (!digest)
@@ -640,6 +654,7 @@ export async function fetchFromServer(
       return { ok: false, reason: `image load failed: ${ref}: ${message(e)}` };
     }
     deps.log(JSON.stringify({ event: 'image-fetch', ref, status: 'loaded', id }));
+    deps.images?.loaded(ref);
     return verdict;
   } catch (e) {
     return { ok: false, reason: `image fetch failed: ${ref}: ${message(e)}` };
