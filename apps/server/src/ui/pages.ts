@@ -34,7 +34,14 @@ import { currentObjective, type GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import type { Status } from '../status.js';
 import type { Gate } from '../usage.js';
-import { floorCounts, sticksSummary, totalsStrip, zoneCards } from './floor.js';
+import {
+  floorCounts,
+  type PendingLine,
+  pendingRows,
+  sticksSummary,
+  totalsStrip,
+  zoneCards,
+} from './floor.js';
 import { linkTarget } from './links.js';
 import { STYLE } from './theme.js';
 import { relativeTime } from './time.js';
@@ -96,6 +103,8 @@ export interface HomeState {
   briefings?: Briefing[];
   /** The zones whose briefings are held back, one collapsed line each. */
   heldBriefings?: HeldZone[];
+  /** The viewing session's unexpired pending guarded changes, oldest first (#507). */
+  pending?: PendingLine[];
   /** One line per zone about its crew. */
   crew?: CrewLine[];
   /** Every enrolled stick, and the zones each can't run. */
@@ -349,6 +358,8 @@ export function waitingOnYou(
   open: Briefing[],
   held: HeldZone[] = [],
   zones: readonly ZoneRef[] = [],
+  pending: readonly PendingLine[] = [],
+  now: Date = new Date(),
 ): string {
   const name = zoneNamer(zones);
   const heldLines =
@@ -360,7 +371,8 @@ export function waitingOnYou(
               `<li><a href="${escapeHtml(zoneBriefingsHref(z.zoneId))}">${name(z.zoneId, z.repo)}: ${escapeHtml(z.mode)}, ${plural(z.count, 'briefing')} held</a></li>`,
           )
           .join('')}</ul>`;
-  if (open.length === 0) {
+  const changes = pendingRows(pending, now);
+  if (open.length === 0 && changes === '') {
     return card(
       'Briefings',
       '<h2>Waiting on you</h2>',
@@ -378,7 +390,11 @@ export function waitingOnYou(
   return card(
     'Briefings',
     '<h2>Waiting on you</h2>',
-    `<p>${plural(open.length, 'decision')} waiting. <a href="/briefings">Answer them on the briefings page</a>.</p><ul>${rows}</ul>${heldLines}`,
+    changes +
+      (open.length > 0
+        ? `<p>${plural(open.length, 'decision')} waiting. <a href="/briefings">Answer them on the briefings page</a>.</p><ul>${rows}</ul>`
+        : '') +
+      heldLines,
     'attention',
   );
 }
@@ -1508,8 +1524,8 @@ export function renderHome(state: HomeState): string {
       setupFrame +
       starterBanner +
       dashboard +
-      (state.briefings
-        ? `<div class="grid">${waitingOnYou(state.briefings, state.heldBriefings, state.zones)}</div>`
+      (state.briefings || (state.pending && state.pending.length > 0)
+        ? `<div class="grid">${waitingOnYou(state.briefings ?? [], state.heldBriefings, state.zones, state.pending, now)}</div>`
         : '') +
       `<h2 class="section-h">Running now <small class="muted">Troopers: one job slot each</small></h2>${slots}` +
       `<div class="grid">${usageSection(state.usage) || card('Claude subscription', '<h2>Usage</h2>', '<p class="empty">No usage reported yet.</p>')}</div>` +

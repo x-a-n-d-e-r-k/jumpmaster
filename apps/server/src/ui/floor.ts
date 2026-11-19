@@ -1,4 +1,5 @@
 import { isNotice } from '../briefings.js';
+import type { Pending } from '../config/confirm.js';
 import { ACTIVE_DROP_STATES } from '../db/repo.js';
 import { STICK_LIVE_MS } from '../doctor/checks.js';
 import type { HomeState, StickLine } from './pages.js';
@@ -46,6 +47,15 @@ export interface ZoneFloor {
   /** The zone is paused or observing: its briefings are held, not needs-you. */
   held: boolean;
   state: CardState;
+}
+
+/**
+ * A guarded change this session staged and has not confirmed (#507), and the chat thread whose
+ * pending card links to it, if one does. Its row reads `change.guarded` only, never its patch.
+ */
+export interface PendingLine {
+  change: Pending;
+  chat?: { threadId: number; title: string };
 }
 
 export interface FloorCounts {
@@ -132,7 +142,10 @@ export function floorCounts(state: HomeState, now: Date): FloorCounts {
       prOpen: count(items, (i) => i.state === 'pr_open'),
       merged24h: merges ? merges.length : null,
       parked: count(items, (i) => i.state === 'parked'),
-      needsYou: count(briefings, (b) => !heldZones.has(b.zoneId) && !isNotice(b)),
+      // This session's pending guarded changes wait on you as an open briefing does (#507).
+      needsYou:
+        count(briefings, (b) => !heldZones.has(b.zoneId) && !isNotice(b)) +
+        (state.pending ?? []).length,
     },
     zones,
   };
@@ -243,4 +256,27 @@ export function sticksSummary(sticks: readonly StickLine[], now: Date): string {
   const live = liveSticks(sticks, now).length;
   const cannot = sticks.filter((s) => s.cannotRun.length > 0).length;
   return `Sticks: ${live} live${cannot > 0 ? `, ${cannot} can't run a zone` : ''}`;
+}
+
+/**
+ * This session's pending guarded changes, one row each: the first guarded consequence (and how
+ * many more), the minutes left, the confirm page's link, and the chat thread that staged it. The
+ * patch is never read here: what the row says comes from `guarded` alone.
+ */
+export function pendingRows(lines: readonly PendingLine[], now: Date): string {
+  if (lines.length === 0) return '';
+  const rows = lines.map(({ change, chat }) => {
+    const [first, ...rest] = change.guarded;
+    const what = `${esc(first?.consequence ?? 'A guarded change')}${rest.length > 0 ? ` and ${rest.length} more` : ''}`;
+    const left = Math.max(0, Math.ceil((change.expiresAt.getTime() - now.getTime()) / 60_000));
+    const from = chat
+      ? ` <small>from chat: <a href="${esc(`/chat/${chat.threadId}`)}">${esc(chat.title)}</a></small>`
+      : '';
+    return (
+      `<li class="pending-change" data-pending="${esc(change.id)}">${what}` +
+      ` <small class="expiry">expires in ${left} min</small>${from}` +
+      ` <a href="${esc(`/config/confirm/${encodeURIComponent(change.id)}`)}">Review and confirm</a></li>`
+    );
+  });
+  return `<p>${plural(lines.length, 'guarded change')} to confirm.</p><ul class="pending-changes">${rows.join('')}</ul>`;
 }

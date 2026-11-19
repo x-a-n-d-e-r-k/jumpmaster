@@ -907,3 +907,18 @@ describe('a held promotion is a notice, not a briefing waiting on you (#449)', (
     expect(await status()).toBe('Waiting on you: 1 briefing');
   });
 });
+
+describe('pending guarded changes wait on you as a briefing does (#507)', () => {
+  test('one pending change and no briefing: waiting on you, linking to the floor', () => {
+    const s = statusOf(base({ pendingChanges: 1 }), NOW);
+    expect(s.waitingOn).toBe('you');
+    expect(s.headline).toBe('Waiting on you: 1 guarded change to confirm');
+    expect(statusOf(base(), NOW).headline).not.toContain('Waiting on you');
+  });
+
+  test('briefings and pending changes are both named', () => {
+    const s = statusOf(base({ openBriefings: 2, pendingChanges: 1 }), NOW);
+    expect(s.headline).toBe('Waiting on you: 2 briefings, 1 guarded change to confirm');
+    expect(s.action?.href).toBe('/briefings');
+  });
+});

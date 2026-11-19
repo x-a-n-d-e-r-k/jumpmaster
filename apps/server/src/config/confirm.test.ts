@@ -52,6 +52,29 @@ describe('pending changes', () => {
   });
 });
 
+describe('pendingFor', () => {
+  test("returns session A's two live changes, oldest first, and not session B's", () => {
+    const { c, input, clock } = world();
+    const a1 = c.addPending(input({ pollSeconds: 11 }));
+    c.addPending(input({ pollSeconds: 12 }, 'sess-b'));
+    clock.now = plus(t0, 1000);
+    const a2 = c.addPending(input({ pollSeconds: 13 }));
+    expect(c.pendingFor('sess-a').map((p) => p.id)).toEqual([a1.id, a2.id]);
+    expect(c.pendingFor('sess-b').every((p) => p.sessionIdHash === 'sess-b')).toBe(true);
+    expect(c.pendingFor('sess-b')).toHaveLength(1);
+    expect(c.pendingFor('sess-c')).toEqual([]);
+  });
+
+  test('omits one past its expiry', () => {
+    const { c, input, clock } = world();
+    c.addPending(input({ pollSeconds: 11 }));
+    clock.now = plus(t0, PENDING_MS / 2);
+    const later = c.addPending(input({ pollSeconds: 12 }));
+    clock.now = plus(t0, PENDING_MS);
+    expect(c.pendingFor('sess-a').map((p) => p.id)).toEqual([later.id]);
+  });
+});
+
 describe('confirmations', () => {
   test('one minted by the render is accepted once, and a second use is refused as used', () => {
     const { c, input } = world();
