@@ -826,6 +826,118 @@ describe('/work and /drops list pages (#119)', () => {
     });
   });
 
+  describe('/work/:zone/:issue (#498)', () => {
+    const five = (h: Awaited<ReturnType<typeof harness>>, zoneId: string) =>
+      upsertWorkItem(
+        h.db,
+        {
+          dropZoneId: zoneId,
+          issueNumber: 5,
+          title: `${zoneId} five`,
+          body: 'b',
+          author: 'human',
+          priority: 2,
+          isFix: false,
+          issueCreatedAt: '2026-01-01T00:00:00.000Z',
+        },
+        h.now(),
+      );
+    const gates = (test: number) =>
+      JSON.stringify({
+        status: 'completed',
+        gates: [
+          { name: 'lint', exitCode: 0, durationMs: 1, timedOut: false, outputTail: '' },
+          { name: 'test', exitCode: test, durationMs: 1, timedOut: false, outputTail: '' },
+        ],
+      });
+
+    test('lists every attempt oldest first, each with its own gates', async () => {
+      const { h } = await lists();
+      const w = five(h, 'main');
+      const at = (d: number) => `2026-01-0${d}T00:00:00.000Z`;
+      // Inserted out of order: the page orders by time, not by insertion.
+      insertDrop(h.db, {
+        id: 'impl-ok-0000',
+        dropZoneId: 'main',
+        workItemId: w.id,
+        role: 'implement',
+        state: 'succeeded',
+        createdAt: at(3),
+        prNumber: 42,
+      });
+      insertDrop(h.db, {
+        id: 'impl-bad-0000',
+        dropZoneId: 'main',
+        workItemId: w.id,
+        role: 'implement',
+        state: 'failed',
+        createdAt: at(1),
+      });
+      insertDrop(h.db, {
+        // The issue's "diagnose" step: `diagnose` is a crew role with no work item (a schema
+        // CHECK), so the middle attempt is the item's review.
+        id: 'review-00000',
+        dropZoneId: 'main',
+        workItemId: w.id,
+        role: 'review',
+        state: 'succeeded',
+        createdAt: at(2),
+      });
+      updateDrop(h.db, 'impl-bad-0000', { resultJson: gates(1) });
+      updateDrop(h.db, 'impl-ok-0000', { resultJson: gates(0) });
+      const res = await h.view('/work/main/5');
+      expect(res.statusCode).toBe(200);
+      const body = res.body;
+      const rows = body.match(/<tr class="attempt">.*?<\/tr>/g) ?? [];
+      expect(rows).toHaveLength(3);
+      expect(rows[0]).toContain('href="/drops/impl-bad-0000"');
+      expect(rows[0]).toContain('<span class="gate fail">test: fail</span>');
+      expect(rows[0]).toContain('<span class="gate pass">lint: pass</span>');
+      expect(rows[0]).toContain('implement');
+      expect(rows[1]).toContain('href="/drops/review-00000"');
+      expect(rows[1]).toContain('<td>review</td>');
+      expect(rows[2]).toContain('href="/drops/impl-ok-0000"');
+      expect(rows[2]).toContain('<span class="gate pass">test: pass</span>');
+      expect(rows[2]).toContain('<span class="gate pass">lint: pass</span>');
+      expect(rows[2]).not.toContain('fail');
+      expect(rows[2]).toContain('#42');
+      // Breadcrumb and the drop-list link.
+      expect(body).toContain('<a href="/work">Work</a>');
+      expect(body).toContain('<a href="/work?zone=main">octo/demo</a>');
+      expect(body).toContain('href="/drops?zone=main&amp;issue=5">All drops for this issue</a>');
+    });
+
+    test('two zones with #5: each page lists only its own zone’s drops', async () => {
+      const { h } = await lists();
+      const a = five(h, 'main');
+      const b = five(h, 'ref');
+      drop(h, 'main-five-1', 'failed', 'main', '2026-01-01T00:00:00.000Z', a.id);
+      drop(h, 'ref-five-11', 'failed', 'ref', '2026-01-01T00:00:00.000Z', b.id);
+      const main = (await h.view('/work/main/5')).body;
+      expect(main).toContain('href="/drops/main-five-1"');
+      expect(main).not.toContain('ref-five');
+      expect(main).toContain('main five');
+      const ref = (await h.view('/work/ref/5')).body;
+      expect(ref).toContain('href="/drops/ref-five-11"');
+      expect(ref).not.toContain('main-five');
+    });
+
+    test.each([
+      '/work/main/0',
+      '/work/main/x',
+      '/work/main/05',
+      '/work/main/1.5',
+      '/work/nope/5',
+      '/work/main/999',
+    ])('%s is 404', async (url) => {
+      const { h } = await lists();
+      five(h, 'main');
+      const res = await h.view(url);
+      expect(res.statusCode).toBe(404);
+      expect(res.body).toBe('not found');
+    });
+  });
+
   test('/drops shows the newest 200, and says so only when more exist', async () => {
     const { h } = await lists();
     const at = (i: number) => new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString();

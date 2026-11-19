@@ -976,12 +976,7 @@ function detailCells(d: ItemDetail | undefined): string {
   const verdict = v
     ? `${escapeHtml(v.decision)}${v.forced ? ' (forced)' : ''}<br><small>${escapeHtml(v.summary)}</small>`
     : '-';
-  const attempts = d
-    ? Object.entries(d.attempts)
-        .filter(([, n]) => (n ?? 0) > 0)
-        .map(([k, n]) => `${escapeHtml(k)} ${escapeHtml(n)}`)
-        .join(', ') || '-'
-    : '-';
+  const attempts = d ? attemptPairs(d.attempts) : '-';
   return `<td>${d?.headSha ? `<code>${head}</code>` : '-'}${allowed}</td><td>${verdict}</td><td>${attempts}</td>`;
 }
 
@@ -1069,23 +1064,39 @@ function elapsed(drop: Drop, now: Date): string {
   return m > 0 ? `${m}m ${total % 60}s` : `${total}s`;
 }
 
-function gateSummary(drop: Drop): string {
-  if (!drop.resultJson) return '-';
+type GateResult = { name: string; exitCode: number | null; timedOut: boolean };
+type GateOutcome = 'pass' | 'fail' | 'timeout';
+
+/** A drop's gates from its result, each with its outcome; empty when it reported none. */
+function gateOutcomes(drop: Drop): { name: string; outcome: GateOutcome }[] {
+  if (!drop.resultJson) return [];
   try {
-    const result = JSON.parse(drop.resultJson) as {
-      gates?: { name: string; exitCode: number | null; timedOut: boolean }[];
-    };
-    const gates = result.gates ?? [];
-    if (gates.length === 0) return '-';
-    return gates
-      .map(
-        (g) =>
-          `${escapeHtml(g.name)}: ${g.timedOut ? 'timeout' : g.exitCode === 0 ? 'pass' : 'fail'}`,
-      )
-      .join('<br>');
+    const gates = (JSON.parse(drop.resultJson) as { gates?: GateResult[] }).gates ?? [];
+    return gates.map((g) => ({
+      name: String(g.name),
+      outcome: g.timedOut ? 'timeout' : g.exitCode === 0 ? 'pass' : 'fail',
+    }));
   } catch {
-    return '-';
+    return [];
   }
+}
+
+function gateSummary(drop: Drop): string {
+  const gates = gateOutcomes(drop);
+  if (gates.length === 0) return '-';
+  return gates.map((g) => `${escapeHtml(g.name)}: ${g.outcome}`).join('<br>');
+}
+
+/** Each gate as `name: outcome`, a failed or timed-out one marked `fail`; `-` when none. */
+function gateMarks(drop: Drop): string {
+  const gates = gateOutcomes(drop);
+  if (gates.length === 0) return '-';
+  return gates
+    .map(
+      (g) =>
+        `<span class="gate ${g.outcome === 'pass' ? 'pass' : 'fail'}">${escapeHtml(g.name)}: ${g.outcome}</span>`,
+    )
+    .join('<br>');
 }
 
 /** How a drop's gates stand so far, or nothing when it has reported none. */
@@ -1115,6 +1126,28 @@ export const DROP_HEAD =
 const waitingOn = (i: WorkItem): string =>
   i.state === 'ready' && i.blockedBy.length > 0 ? `waiting on ${i.blockedBy.join(', ')}` : '';
 
+/** A work item's own page (#498). */
+export const workItemHref = (i: Pick<WorkItem, 'dropZoneId' | 'issueNumber'>): string =>
+  `/work/${encodeURIComponent(i.dropZoneId)}/${i.issueNumber}`;
+
+/** An issue's drop list on /drops. */
+const issueDropsHref = (i: Pick<WorkItem, 'dropZoneId' | 'issueNumber'>): string =>
+  `/drops?${new URLSearchParams({ zone: i.dropZoneId, issue: String(i.issueNumber) })}`;
+
+/** A GitHub link `#N` to an issue or pull request, or plain `#N` without the repository. */
+function githubRef(repo: string | undefined, kind: 'issues' | 'pull', n: number): string {
+  if (!repo) return `#${escapeHtml(n)}`;
+  const href = `https://github.com/${repo}/${kind}/${n}`;
+  return `<a href="${escapeHtml(href)}"${linkTarget(href)}>#${escapeHtml(n)}</a>`;
+}
+
+/** Attempt counts as `key N` pairs, those above zero; `-` when none. */
+const attemptPairs = (attempts: ItemDetail['attempts']): string =>
+  Object.entries(attempts)
+    .filter(([, n]) => (n ?? 0) > 0)
+    .map(([k, n]) => `${escapeHtml(k)} ${escapeHtml(n)}`)
+    .join(', ') || '-';
+
 /** The work-item ledger's rows (/work's), zones named by repository. */
 export function workItemRows(
   items: readonly WorkItem[],
@@ -1126,23 +1159,16 @@ export function workItemRows(
   const prLink = (i: WorkItem): string => {
     const repo = repoOf.get(i.dropZoneId);
     if (i.prNumber === null || !repo) return '-';
-    const href = `https://github.com/${repo}/pull/${i.prNumber}`;
-    return `<a href="${escapeHtml(href)}"${linkTarget(href)}>#${escapeHtml(i.prNumber)}</a>`;
+    return githubRef(repo, 'pull', i.prNumber);
   };
-  const issueLink = (i: WorkItem): string => {
-    const repo = repoOf.get(i.dropZoneId);
-    if (!repo) return `#${escapeHtml(i.issueNumber)}`;
-    const href = `https://github.com/${repo}/issues/${i.issueNumber}`;
-    return `<a href="${escapeHtml(href)}"${linkTarget(href)}>#${escapeHtml(i.issueNumber)}</a>`;
-  };
-  const dropsLink = (i: WorkItem): string => {
-    const q = new URLSearchParams({ zone: i.dropZoneId, issue: String(i.issueNumber) });
-    return `<a href="${escapeHtml(`/drops?${q}`)}">${escapeHtml(i.title)}</a>`;
-  };
+  const issueLink = (i: WorkItem): string =>
+    githubRef(repoOf.get(i.dropZoneId), 'issues', i.issueNumber);
+  const titleLink = (i: WorkItem): string =>
+    `<a href="${escapeHtml(workItemHref(i))}">${escapeHtml(i.title)}</a>`;
   return items
     .map(
       (i) =>
-        `<tr><td>${name(i.dropZoneId)}</td><td>${issueLink(i)}</td><td>${dropsLink(i)}</td><td>${badge(i.state)}</td><td>${escapeHtml(i.reason ?? waitingOn(i))}</td><td>${prLink(i)}</td>${detailCells(details?.get(i.id))}</tr>`,
+        `<tr><td>${name(i.dropZoneId)}</td><td>${issueLink(i)}</td><td>${titleLink(i)}</td><td>${badge(i.state)}</td><td>${escapeHtml(i.reason ?? waitingOn(i))}</td><td>${prLink(i)}</td>${detailCells(details?.get(i.id))}</tr>`,
     )
     .join('');
 }
@@ -1309,6 +1335,64 @@ export function renderWorkList(s: {
     rows: workItemRows(s.items, s.zones, s.details),
     empty: `No ${words} work${where}.`,
   });
+}
+
+/**
+ * /work/:zone/:issue (#498): one issue's whole story. The header (issue, project, state, PR, head
+ * and verdict), the attempt counts, then every drop for it oldest first with its gates.
+ */
+export function renderWorkItem(s: {
+  item: WorkItem;
+  zones: readonly ZoneRef[];
+  detail?: ItemDetail;
+  /** The item's drops, in any order: shown oldest first. */
+  drops: readonly Drop[];
+  now?: Date;
+}): string {
+  const { item: i, zones, detail: d } = s;
+  const now = s.now ?? new Date();
+  const zone = zones.find((z) => z.id === i.dropZoneId) ?? { id: i.dropZoneId, repo: i.dropZoneId };
+  const repo = zones.some((z) => z.id === i.dropZoneId) ? zone.repo : undefined;
+  const project = zoneName(zone, zones);
+  const workZoneHref = `/work?${new URLSearchParams({ zone: i.dropZoneId })}`;
+  const crumbs =
+    `<nav class="crumbs" aria-label="Breadcrumb"><p><a href="/work">Work</a> › ` +
+    `<a href="${escapeHtml(workZoneHref)}">${project}</a> › #${escapeHtml(i.issueNumber)}</p></nav>`;
+  const why = i.reason ?? waitingOn(i);
+  const pr = i.prNumber === null ? '-' : githubRef(repo, 'pull', i.prNumber);
+  const head = d?.headSha ? `<code>${escapeHtml(d.headSha.slice(0, 7))}</code>` : '-';
+  const v = d?.verdict;
+  const verdict = v
+    ? `${escapeHtml(v.decision)}${v.forced ? ' (forced)' : ''} <small>${escapeHtml(v.summary)}</small>`
+    : '-';
+  const header =
+    `<h2>${githubRef(repo, 'issues', i.issueNumber)} ${escapeHtml(i.title)}</h2>` +
+    `<p>Project: <a href="${escapeHtml(zoneHref(i.dropZoneId))}">${project}</a> · ${badge(i.state)}${
+      why ? ` ${escapeHtml(why)}` : ''
+    }</p>` +
+    `<p>PR: ${pr} · Head: ${head} · Verdict: ${verdict}</p>` +
+    `<p>Attempt counts: ${d ? attemptPairs(d.attempts) : '-'}</p>`;
+  const oldestFirst = [...s.drops].sort(
+    (a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
+  );
+  const rows = oldestFirst
+    .map((dr) => {
+      const link = `<a href="/drops/${encodeURIComponent(dr.id)}" title="${escapeHtml(dr.id)}">${escapeHtml(dr.id.slice(0, 8))}</a>`;
+      const started = relativeTime(dr.startedAt ?? dr.createdAt, now);
+      const drPr = dr.prNumber === null ? '-' : githubRef(repo, 'pull', dr.prNumber);
+      return `<tr class="attempt"><td>${escapeHtml(dr.role)}</td><td>${badge(dr.state)}</td><td>${started}</td><td class="num">${escapeHtml(elapsed(dr, now))}</td><td>${gateMarks(dr)}</td><td>${drPr}</td><td>${link}</td></tr>`;
+    })
+    .join('');
+  const attempts = rows
+    ? `<table><tr><th>Role</th><th>State</th><th>Started</th><th>Elapsed</th><th>Gates</th><th>PR</th><th>Drop</th></tr>${rows}</table>`
+    : '<p class="empty">No attempts yet.</p>';
+  return page(
+    crumbs +
+      header +
+      `<h3>Attempts</h3>${attempts}` +
+      `<p><a href="${escapeHtml(issueDropsHref(i))}">All drops for this issue</a></p>`,
+    { title: `#${i.issueNumber} ${i.title}` },
+  );
 }
 
 /** /drops: drops newest first, of one zone or all, in one state, the active ones or any. */
