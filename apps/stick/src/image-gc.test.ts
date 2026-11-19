@@ -323,6 +323,120 @@ describe('recording what the stick loads (issue #425)', () => {
   });
 });
 
+describe('images a drop holds (issue #439)', () => {
+  const PG = 'ghcr.io/o/pg';
+  const P1 = `${PG}@sha256:${'1'.repeat(64)}`;
+  const P2 = `${PG}@sha256:${'2'.repeat(64)}`;
+  const P3 = `${PG}@sha256:${'3'.repeat(64)}`;
+  /** P1 < P2 < P3 by last use: P1 is the one beyond the two newest. */
+  function world() {
+    const s = setup(recorded([P1, 1], [P2, 2], [P3, 3]));
+    const images = new StickImages({
+      driver: s.d.driver,
+      stateDir: s.stateDir,
+      keep: [],
+      log: () => {},
+      now: () => new Date(at(19)),
+    });
+    const calls = s.d.gc;
+    const w = fetchWorld(images, s.stateDir, calls);
+    const deps = {
+      ...w.deps,
+      loader: { ...w.deps.loader, imageExists: async (ref: string) => ref === P1 },
+    };
+    const trust: ImageTrust = { policy: 'allowlist', allowed: new Set([P1, w.r.ref]) };
+    return { s, images, calls, w, deps, trust };
+  }
+
+  test('an image a fetch found present is not swept before its container starts', async () => {
+    const { s, images, calls, w, deps, trust } = world();
+    const hold = images.hold();
+    // The drop's service image is present: nothing is fetched.
+    expect(await fetchFromServer(P1, trust, deps, { hold })).toEqual({
+      ok: true,
+      via: 'allowlist',
+    });
+    // Its next image is new to the stick: the load starts a sweep.
+    expect((await fetchFromServer(w.r.ref, trust, deps, { hold })).ok).toBe(true);
+    await images.idle();
+    // No container has started yet; the drop still needs P1.
+    expect(removes(calls)).not.toContain(`remove ${P1}`);
+    expect(Object.keys(readImageRecords(s.stateDir).records)).toContain(P1);
+  });
+
+  test("another drop's fresh load does not sweep an image this drop found present", async () => {
+    const { s, images, calls, w, deps, trust } = world();
+    const first = images.hold();
+    const second = images.hold();
+    expect((await fetchFromServer(P1, trust, deps, { hold: first })).ok).toBe(true);
+    expect((await fetchFromServer(w.r.ref, trust, deps, { hold: second })).ok).toBe(true);
+    await images.idle();
+    expect(removes(calls)).not.toContain(`remove ${P1}`);
+    expect(Object.keys(readImageRecords(s.stateDir).records)).toContain(P1);
+  });
+
+  test('once the drop ends, a later sweep removes the image beyond the two newest', async () => {
+    const { s, images, calls, w, deps, trust } = world();
+    const hold = images.hold();
+    expect((await fetchFromServer(P1, trust, deps, { hold })).ok).toBe(true);
+    expect((await fetchFromServer(w.r.ref, trust, deps, { hold })).ok).toBe(true);
+    await images.idle();
+    expect(removes(calls)).not.toContain(`remove ${P1}`);
+    hold.release();
+    // Released twice is the same as once.
+    hold.release();
+    const r = await images.sweep();
+    expect(r.removed).toContain(P1);
+    expect(Object.keys(readImageRecords(s.stateDir).records)).not.toContain(P1);
+  });
+
+  test('a hold keeps an image until every drop holding it has ended', async () => {
+    const { s, images } = world();
+    const a = images.hold();
+    const b = images.hold();
+    a.add(P1);
+    b.add(P1);
+    a.release();
+    expect((await images.sweep()).removed).toEqual([]);
+    b.release();
+    expect((await images.sweep()).removed).toEqual([P1]);
+    expect(Object.keys(readImageRecords(s.stateDir).records).sort()).toEqual([P2, P3]);
+  });
+
+  test('a refused fetch holds nothing; a tag is never held', async () => {
+    const { images, deps } = world();
+    const hold = images.hold();
+    const refused: ImageTrust = { policy: 'allowlist', allowed: new Set([P1]) };
+    const failing = {
+      ...deps,
+      loader: { ...deps.loader, imageExists: async () => false },
+      client: {
+        ...deps.client,
+        imageLayout: async () => new Response('{"error":"nope"}', { status: 403 }),
+      },
+    };
+    expect((await fetchFromServer(P1, refused, failing, { hold })).ok).toBe(false);
+    hold.add('ghcr.io/o/pg:16');
+    expect((await images.sweep()).removed).toEqual([P1]);
+  });
+
+  test('a held image is kept while the container list still fails closed', async () => {
+    const s = setup(recorded([P1, 1], [P2, 2], [P3, 3]), {
+      listContainersError: new Error('engine down'),
+    });
+    const images = new StickImages({
+      driver: s.d.driver,
+      stateDir: s.stateDir,
+      keep: [],
+      log: () => {},
+    });
+    images.hold().add(P2);
+    const r = await images.sweep();
+    expect(r.aborted).toMatch(/container list failed/);
+    expect(removes(s.d.gc)).toEqual([]);
+  });
+});
+
 describe('the image lock', () => {
   test('shared holders run together; an exclusive one waits for them and holds back later ones', async () => {
     const lock = new ImageLock();

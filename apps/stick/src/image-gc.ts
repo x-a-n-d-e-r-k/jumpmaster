@@ -5,7 +5,9 @@
 // keeps anything a container (running or stopped) uses, the configured trooper and egress images,
 // and the two most recently used digests per repository; the rest it removes, never forced.
 // A sweep never overlaps an image fetch or a container start: those hold `ImageLock` shared, the
-// sweep holds it exclusively.
+// sweep holds it exclusively. Between the two, a drop holds its images (`StickImages.hold`, issue
+// #439): from before its first fetch until it ends, the sweep keeps every image the drop needs,
+// whatever the keep count, so an image found present is still there when its container starts.
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { canonicalRef, digestOf } from './verify.js';
@@ -163,6 +165,8 @@ export type SweepDeps = {
   keep: string[];
   lock: ImageLock;
   log: (line: string) => void;
+  /** Records held by drops that have not ended (keys as `recordKey` gives them): always kept. */
+  held?: () => ReadonlySet<string>;
 };
 
 const message = (e: unknown): string =>
@@ -216,8 +220,9 @@ export function sweepImages(deps: SweepDeps): Promise<SweepResult> {
       candidates.push(...keys.slice(KEEP_PER_REPOSITORY));
     }
     let changed = !valid;
+    const held = deps.held?.() ?? new Set<string>();
     for (const ref of candidates) {
-      if (configured.has(ref) || usedRefs.has(ref)) continue;
+      if (configured.has(ref) || usedRefs.has(ref) || held.has(ref)) continue;
       try {
         const id = await deps.driver.imageId(ref);
         if (id && usedIds.has(id)) continue;
@@ -236,12 +241,23 @@ export function sweepImages(deps: SweepDeps): Promise<SweepResult> {
 }
 
 /**
+ * The images one drop needs, kept from every sweep until `release` (the drop has ended). A tag is
+ * never recorded, so never held.
+ */
+export interface ImageHold {
+  add(ref: string): void;
+  release(): void;
+}
+
+/**
  * The stick's images: the lock, the records and the sweep, as fetches and starts use them. A load
  * of a digest not recorded before starts a sweep (which waits for the lock to be free).
  */
 export class StickImages {
   readonly lock = new ImageLock();
   #idle: Promise<unknown> = Promise.resolve();
+  /** Record key to the number of drops holding it. */
+  readonly #held = new Map<string, number>();
 
   constructor(
     private readonly o: {
@@ -258,9 +274,32 @@ export class StickImages {
   }
 
   sweep(): Promise<SweepResult> {
-    const s = sweepImages({ ...this.o, lock: this.lock });
+    const s = sweepImages({ ...this.o, lock: this.lock, held: () => new Set(this.#held.keys()) });
     this.#idle = Promise.allSettled([this.#idle, s]);
     return s;
+  }
+
+  /** A new hold for one drop: what it adds is kept until it is released (once; again is a no-op). */
+  hold(): ImageHold {
+    const keys = new Set<string>();
+    let released = false;
+    return {
+      add: (ref) => {
+        const k = recordKey(ref)?.key;
+        if (released || !k || keys.has(k)) return;
+        keys.add(k);
+        this.#held.set(k, (this.#held.get(k) ?? 0) + 1);
+      },
+      release: () => {
+        if (released) return;
+        released = true;
+        for (const k of keys) {
+          const n = (this.#held.get(k) ?? 1) - 1;
+          if (n > 0) this.#held.set(k, n);
+          else this.#held.delete(k);
+        }
+      },
+    };
   }
 
   /** `fetchFromServer` loaded `ref`. Never throws. */
