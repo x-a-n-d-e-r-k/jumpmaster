@@ -48,6 +48,11 @@ export type ImageRecord = {
   signatures: { manifest: Descriptor; blobs: Descriptor[] }[];
   /** Bytes of every blob the image holds, counted once. */
   size: number;
+  /**
+   * Digests the failed attempts of an image not yet complete stored or found in the store (issue
+   * #451): collection keeps them, so the retry resumes where they stopped. Cleared on completion.
+   */
+  partial?: string[];
 };
 
 export type MirrorIndex = {
@@ -82,6 +87,7 @@ export function referencedDigests(rec: ImageRecord): string[] {
       ...p.blobs.map((b) => b.digest),
     ]),
     ...(rec.signatures ?? []).flatMap((s) => [s.manifest.digest, ...s.blobs.map((b) => b.digest)]),
+    ...(Array.isArray(rec.partial) ? rec.partial.filter((d) => typeof d === 'string') : []),
   ];
 }
 

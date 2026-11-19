@@ -402,9 +402,13 @@ cosign verify-blob-attestation --bundle bundle.json --type https://sigstore.dev/
 ```
 
 Collection (issue #426): images of neither the current nor the previous lock leave the index, and
-at the end of a mirror pass in which no image is pending or fetching, every blob under
-`<dataDir>/images/blobs` that no record in the index names is deleted (a blob a kept image shares
-stays). It logs `{"event":"image-mirror-collect","removed":n,"bytes":b}`; a blob it cannot delete
+at the end of a mirror pass every blob under `<dataDir>/images/blobs` that no record in the index
+names is deleted (a blob a kept image shares stays). Collection is skipped at the end of a pass
+while an image is fetching or an image of the current lock is pending; the next pass collects. A
+pending image of the previous lock only does not hold it back (no pass fetches it). A failed
+image's record names every blob its attempts stored (issue #451), so they are kept and its retry
+resumes without fetching them again; once it completes, or leaves the index, they are collected as
+usual if no record names them. It logs `{"event":"image-mirror-collect","removed":n,"bytes":b}`; a blob it cannot delete
 is logged and the rest still go. The doctor's `server.image-mirror` names the store's size. Old
 release images in the host's Docker are the operator's to remove: see
 [Upgrading the server](operate.md#upgrading-the-server).
