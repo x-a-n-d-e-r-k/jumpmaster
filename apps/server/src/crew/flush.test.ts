@@ -399,6 +399,82 @@ describe('promotion', () => {
     expect(listRulings(w.db, 'main')[0]?.applyError).toBe('already started');
   });
 
+  test('the hold ending withdraws its briefing as the row moves to promoting, though the objective is busy (#449)', async () => {
+    const a = await staged({ key: 'a' });
+    const b = await staged({ key: 'b' });
+    // An earlier issue of the same objective is promoted, its work not merged.
+    setCrewIssue(w.db, a, { state: 'promoting' }, t0);
+    await flush(plus(t0, MIN));
+    expect(getCrewIssue(w.db, a)?.state).toBe('promoted');
+    holdBriefing(b);
+    setCrewIssue(w.db, b, { state: 'promote_held', holdUntil: plus(t0, MIN).toISOString() }, t0);
+    await flush(plus(t0, 2 * MIN));
+    expect(getCrewIssue(w.db, b)?.state).toBe('promoting');
+    expect(listBriefings(w.db, { zoneId: 'main', state: 'open' })).toEqual([]);
+    const [withdrawn] = listBriefings(w.db, { zoneId: 'main' }).filter(
+      (x) => x.subject === `issue:${b}`,
+    );
+    expect(withdrawn?.state).toBe('withdrawn');
+    // It waits on the objective with no open briefing, then goes ahead once the first merges.
+    await flush(plus(t0, 3 * MIN));
+    expect(getCrewIssue(w.db, b)?.state).toBe('promoting');
+    expect(listBriefings(w.db, { zoneId: 'main', state: 'open' })).toEqual([]);
+    const first = upsertWorkItem(w.db, {
+      dropZoneId: 'main',
+      issueNumber: getCrewIssue(w.db, a)?.number ?? -1,
+      title: 'Add docs',
+      body: 'x',
+      author: 'author-bot',
+      priority: 1,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    setWorkItemState(w.db, first.id, 'done', 'merged');
+    await flush(plus(t0, 4 * MIN));
+    expect(getCrewIssue(w.db, b)?.state).toBe('promoted');
+  });
+
+  test('within the hold the briefing stays open (#449)', async () => {
+    const id = await staged();
+    holdBriefing(id);
+    setCrewIssue(w.db, id, { state: 'promote_held' }, t0);
+    await flush(plus(t0, MIN)); // starts the hold
+    await flush(plus(t0, MIN + 30_000));
+    expect(getCrewIssue(w.db, id)?.state).toBe('promote_held');
+    expect(listBriefings(w.db, { zoneId: 'main', state: 'open' }).map((x) => x.kind)).toEqual([
+      'promote_held',
+    ]);
+  });
+
+  test('a Reject ruled within the hold rejects, and the issue is never promoted (#449)', async () => {
+    const id = await staged();
+    const bid = (holdBriefing(id), listBriefings(w.db, { zoneId: 'main', state: 'open' })[0]?.id);
+    setCrewIssue(w.db, id, { state: 'promote_held' }, t0);
+    await flush(plus(t0, MIN)); // starts the hold
+    ruleBriefing(w.db, bid ?? -1, 'reject', '', plus(t0, MIN + 10_000));
+    await applyPendingRulings(w.db, rulingDeps(), 'main', plus(t0, MIN + 20_000));
+    await flush(plus(t0, 3 * MIN));
+    await flush(plus(t0, 4 * MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('rejected');
+    expect(writes('setLabels')).toHaveLength(0);
+  });
+
+  test('a Reject ruled as the hold expires wins: no promotion, and the issue goes to rejecting (#449)', async () => {
+    const id = await staged();
+    const bid = (holdBriefing(id), listBriefings(w.db, { zoneId: 'main', state: 'open' })[0]?.id);
+    setCrewIssue(w.db, id, { state: 'promote_held', holdUntil: t0.toISOString() }, t0);
+    // Ruled, not yet applied, in the pass whose flush finds the hold expired.
+    ruleBriefing(w.db, bid ?? -1, 'reject', '', plus(t0, MIN));
+    await flush(plus(t0, MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('promote_held');
+    expect(writes('setLabels')).toHaveLength(0);
+    await applyPendingRulings(w.db, rulingDeps(), 'main', plus(t0, MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('rejecting');
+    await flush(plus(t0, 2 * MIN));
+    expect(getCrewIssue(w.db, id)?.state).toBe('rejected');
+    expect(writes('setLabels')).toHaveLength(0);
+  });
+
   test('a promote_held issue whose briefing is gone does not move', async () => {
     const id = await staged();
     setCrewIssue(w.db, id, { state: 'promote_held', holdUntil: t0.toISOString() }, t0);

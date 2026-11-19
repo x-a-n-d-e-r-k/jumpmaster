@@ -324,25 +324,37 @@ export type HeldZone = { zoneId: string; repo: string; mode: string; count: numb
 export const HELD_MODES: ReadonlySet<string> = new Set(['paused', 'observe']);
 
 /**
- * The open briefings the floor lists, and the zones (paused or observing) whose briefings it holds
- * back. Only the floor's view: the briefings are unchanged, and resuming the zone lists them again.
+ * Briefing kinds that are notices with a veto, not requests: they go ahead unless Command stops
+ * them, so they never count as needing Command (#449).
+ */
+export const NOTICE_KINDS: ReadonlySet<BriefingKind> = new Set<BriefingKind>(['promote_held']);
+
+/** Whether an open briefing is a notice (goes ahead unless stopped), not one that needs Command. */
+export const isNotice = (b: Pick<Briefing, 'kind'>): boolean => NOTICE_KINDS.has(b.kind);
+
+/**
+ * The open briefings the floor lists as needing Command, the notices that go ahead unless Command
+ * stops them, and the zones (paused or observing) whose briefings it holds back (every kind). Only
+ * the floor's view: the briefings are unchanged, and resuming the zone lists them again.
  */
 export function floorBriefings(
   db: Db,
   zones: readonly Pick<DropZoneConfig, 'id' | 'repo' | 'mode'>[],
-): { listed: Briefing[]; held: HeldZone[] } {
+): { listed: Briefing[]; notices: Briefing[]; held: HeldZone[] } {
   const open = listBriefings(db, { state: 'open' });
   const held = zones
     .map((z) => ({ zoneId: z.id, repo: z.repo, mode: getZoneMode(db, z.id, z.mode), count: 0 }))
     .filter((z) => HELD_MODES.has(z.mode));
   const byZone = new Map(held.map((z) => [z.zoneId, z]));
   const listed: Briefing[] = [];
+  const notices: Briefing[] = [];
   for (const b of open) {
     const h = byZone.get(b.zoneId);
     if (h) h.count++;
+    else if (isNotice(b)) notices.push(b);
     else listed.push(b);
   }
-  return { listed, held: held.filter((z) => z.count > 0) };
+  return { listed, notices, held: held.filter((z) => z.count > 0) };
 }
 
 export function getBriefing(db: Db, id: number): Briefing | undefined {
