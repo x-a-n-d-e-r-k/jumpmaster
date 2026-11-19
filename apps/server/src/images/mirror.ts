@@ -199,6 +199,8 @@ export class ImageMirror {
   #wake = new AbortController();
   /** The store's size on disk, computed when asked for after a change. */
   #storeBytes: number | undefined;
+  /** Digests the running attempt stored or found in the store (issue #451). */
+  #touched = new Set<string>();
 
   constructor(deps: MirrorDeps) {
     this.#deps = deps;
@@ -373,13 +375,18 @@ export class ImageMirror {
 
   /**
    * Deletes every blob no record in the index names (issue #426), at the end of a pass and only
-   * when no record is pending or fetching: a record still at work may have written blobs it does
-   * not name yet. Runs only inside the serialized pass loop, so no pass writes meanwhile. A failure
-   * is logged and the pass carries on; only the blob directory is ever touched.
+   * when no record is fetching and no record of the current lock is pending: a record still at
+   * work may have written blobs it does not name yet. A failed record names the blobs its attempts
+   * stored (`partial`, issue #451), so they are kept for its retry. A pending record of the
+   * previous lock only does not hold collection back: no pass fetches it. Runs only inside the
+   * serialized pass loop, so no pass writes meanwhile. A failure is logged and the pass carries
+   * on; only the blob directory is ever touched.
    */
   #collect(): void {
-    const records = Object.values(this.#index.images);
-    if (records.some((r) => r.state === 'pending' || r.state === 'fetching')) return;
+    const idx = this.#index;
+    const records = Object.values(idx.images);
+    if (records.some((r) => r.state === 'fetching')) return;
+    if (idx.current.some((k) => idx.images[k]?.state === 'pending')) return;
     const keep = new Set(records.flatMap(referencedDigests));
     this.#storeBytes = undefined;
     try {
@@ -399,12 +406,14 @@ export class ImageMirror {
     delete rec.error;
     rec.updatedAt = this.#now();
     this.#persist();
+    this.#touched = new Set();
     try {
       const got = await this.#fetch(rec);
       rec.index = got.index;
       rec.platforms = got.platforms;
       rec.signatures = got.signatures;
       rec.size = got.size;
+      delete rec.partial;
       rec.state = 'complete';
       rec.updatedAt = this.#now();
       this.#persist();
@@ -412,6 +421,7 @@ export class ImageMirror {
       return true;
     } catch (e) {
       rec.state = 'failed';
+      rec.partial = [...new Set([...(rec.partial ?? []), ...this.#touched])].sort();
       rec.error = this.#clean(errorText(e));
       rec.updatedAt = this.#now();
       this.#persist();
@@ -436,7 +446,7 @@ export class ImageMirror {
     const index = await client.manifest(rec.digest);
     if (index.mediaType !== OCI_INDEX && index.mediaType !== DOCKER_LIST)
       throw new Error(`${rec.digest} is not a multi-arch index (${index.mediaType})`);
-    this.store.putBytes(index.digest, index.bytes);
+    this.#put(index.digest, index.bytes);
     const indexDesc: Descriptor = {
       mediaType: index.mediaType,
       digest: index.digest,
@@ -454,7 +464,7 @@ export class ImageMirror {
       if (!entry) continue;
       const desc = descriptor(entry, `the index's ${p} entry`);
       const m = await client.manifest(desc.digest);
-      this.store.putBytes(m.digest, m.bytes);
+      this.#put(m.digest, m.bytes);
       const manifest: Descriptor = {
         mediaType: m.mediaType || desc.mediaType,
         digest: m.digest,
@@ -509,14 +519,19 @@ export class ImageMirror {
         );
     }
     for (const b of out) {
-      if (this.store.has(b.digest)) continue;
+      if (this.store.has(b.digest)) {
+        this.#touched.add(b.digest);
+        continue;
+      }
       const body = await client.blob(b.digest);
       if (!signature) {
         await this.store.putStream(b.digest, body, b.size);
+        this.#touched.add(b.digest);
         continue;
       }
       try {
         await this.store.putStream(b.digest, body, b.size, MAX_SIGNATURE_BLOB_BYTES);
+        this.#touched.add(b.digest);
       } catch (e) {
         if (e instanceof BlobTooLarge) throw new SignatureRefused(`blob ${e.message}`);
         throw e;
@@ -585,7 +600,7 @@ export class ImageMirror {
         if (typeof type !== 'string' || !SIGNATURE_ARTIFACT_TYPES.includes(type))
           throw new SignatureRefused(`its artifact type ${String(type)} is not a signature`);
         const blobs = await this.#blobs(client, body, `referrer ${desc.digest}`, true);
-        this.store.putBytes(m.digest, m.bytes);
+        this.#put(m.digest, m.bytes);
         out.push({
           manifest: {
             ...desc,
@@ -614,7 +629,7 @@ export class ImageMirror {
         this.#manifestSize(legacy.bytes.length);
         const body = parse(legacy.bytes, 'the .sig manifest');
         const blobs = await this.#blobs(client, body, 'the .sig manifest', true);
-        this.store.putBytes(legacy.digest, legacy.bytes);
+        this.#put(legacy.digest, legacy.bytes);
         out.push({
           manifest: {
             mediaType: legacy.mediaType,
@@ -640,6 +655,12 @@ export class ImageMirror {
       .filter((v): v is string => typeof v === 'string' && v.length >= 8)
       .sort((a, b) => b.length - a.length);
     return values.reduce((m, v) => m.split(v).join('[redacted]'), msg);
+  }
+
+  /** Stores a manifest the running attempt fetched, noting it for a retry (issue #451). */
+  #put(digest: string, bytes: Buffer): void {
+    this.store.putBytes(digest, bytes);
+    this.#touched.add(digest);
   }
 
   #persist(): void {
