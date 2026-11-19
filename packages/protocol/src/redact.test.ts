@@ -130,9 +130,22 @@ const survivors = (out: string, token: string) =>
     ...token.split(/[._]/).filter((p) => p.length >= 8),
   ].filter((part) => out.includes(part));
 
+// GitLab (#539): every gl*- prefix, legacy and routable `glpat-`, built at run time like the rest.
+const gl = (prefix: string) => 'gl' + prefix + '-';
+const legacyGlpat = gl('pat') + 'Ab1_-Cd2'.repeat(2) + 'Ef3G';
+const routableGlpat = gl('pat') + 'Qw9-Er8_Ty7Ui6'.repeat(3) + '.01.' + 'zx81cv72b';
+const gitlabKinds: [string, string][] = [
+  ['legacy glpat-', legacyGlpat],
+  ['routable glpat-', routableGlpat],
+  ...['oas', 'dt', 'rt', 'cbt', 'ptt', 'ft', 'imt', 'agent', 'soat'].map((p): [string, string] => [
+    `gl${p}-`,
+    gl(p) + 'Mn4Op5Qr6St7Uv8Wx9Yz',
+  ]),
+];
+
 describe('redactTokenShapes catches each token kind in each position', () => {
   test.each(
-    tokenKinds.flatMap(([kind, token]) =>
+    [...tokenKinds, ...gitlabKinds].flatMap(([kind, token]) =>
       positions.map(([where, wrap]) => ({ kind, where, token, wrap })),
     ),
   )('$kind, $where', ({ token, wrap }) => {
@@ -224,5 +237,42 @@ describe('findPrivateKeys', () => {
     expect(redact(text, [])).toBe(want);
     expect(redact(`${text} s3cret`, ['s3cret'])).toBe(`${want} [REDACTED]`);
     expect(redactTokenShapes(`x ${begin('DSA ')}\nAAAA`)).toBe('x [REDACTED PRIVATE KEY]');
+  });
+});
+
+describe('GitLab token shapes', () => {
+  test('a legacy glpat- token in a sentence is redacted, the text and a sentence-ending . kept', () => {
+    expect(legacyGlpat.length).toBe(26);
+    expect(redact(`token ${legacyGlpat} here`, [])).toBe('token [REDACTED] here');
+    expect(redactTokenShapes(`use ${legacyGlpat}. Next`)).toBe('use [REDACTED]. Next');
+  });
+
+  test('a routable glpat- token is replaced whole', () => {
+    const out = redactTokenShapes(`a ${routableGlpat} b`);
+    expect(out).toBe('a [REDACTED] b');
+    expect(survivors(out, routableGlpat)).toEqual([]);
+  });
+
+  test.each([
+    'glpat-short',
+    'glpat-',
+    'a bare glpat- here',
+    'use-glpat-format-helper',
+    'my_glpat_value',
+  ])('%s is not a token', (text) => {
+    expect(redactTokenShapes(text)).toBe(text);
+    expect(containsSecret(text, [])).toBe(false);
+  });
+
+  test('containsSecret finds a glpat- token and another gl*- prefix', () => {
+    expect(containsSecret(`+const t = "${legacyGlpat}";`, [])).toBe(true);
+    expect(containsSecret(`+const t = "${routableGlpat}";`, [])).toBe(true);
+    expect(containsSecret(`deploy ${gl('dt')}Mn4Op5Qr6St7Uv8Wx9Yz`, [])).toBe(true);
+  });
+
+  test("this test file's own source holds no token-shaped literal", async () => {
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(new URL('./redact.test.ts', import.meta.url), 'utf8');
+    expect(containsSecret(source, [])).toBe(false);
   });
 });
