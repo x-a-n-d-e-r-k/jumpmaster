@@ -23,7 +23,7 @@ import type { ContainerDriver, DropNet, VolumeInfo } from './driver.js';
 import { type EgressSession, egressImage, startEgress, trooperEgressRefusal } from './egress.js';
 import { EventAssembler } from './event-assembler.js';
 import { fetchFromServer, fromServer } from './fetch-image.js';
-import type { StickImages } from './image-gc.js';
+import type { ImageHold, StickImages } from './image-gc.js';
 import { pullImage } from './pull.js';
 import {
   type PendingPushes,
@@ -539,14 +539,22 @@ function startBeat(client: DropClient, dropId: string, epoch: number, deps: RunD
 export async function runDrop(payload: DropPayload, deps: RunDeps): Promise<void> {
   // The lease lapses unless renewed: beat from acceptance on, through the image preparation.
   const beat = startBeat(deps.client, payload.dropId, payload.epoch, deps);
+  // The images this drop holds from the sweep (issue #439), let go however the drop ends.
+  const holds: ImageHold[] = [];
   try {
-    await prepareAndRun(payload, deps, beat);
+    await prepareAndRun(payload, deps, beat, holds);
   } finally {
     beat.stop();
+    for (const h of holds) h.release();
   }
 }
 
-async function prepareAndRun(payload: DropPayload, deps: RunDeps, beat: DropBeat): Promise<void> {
+async function prepareAndRun(
+  payload: DropPayload,
+  deps: RunDeps,
+  beat: DropBeat,
+  holds: ImageHold[],
+): Promise<void> {
   const { client, driver } = deps;
   const { dropId, epoch } = payload;
   const image = payload.image || deps.image || TROOPER_IMAGE;
@@ -642,9 +650,17 @@ async function prepareAndRun(payload: DropPayload, deps: RunDeps, beat: DropBeat
   if (server) {
     // Server-hosted images (issue #141): each missing image comes from the server and is
     // verified offline before it loads. The registry is never asked, not even to verify.
+    // Every image is held before the first fetch, until the drop ends (issue #439): a sweep a
+    // load starts (this drop's or another's) never removes one found present before its
+    // container is created.
+    const hold = server.images?.hold();
+    if (hold) {
+      holds.push(hold);
+      for (const i of unique) hold.add(i.ref);
+    }
     for (const i of unique) {
       if (halted()) return;
-      const v = await fetchFromServer(i.ref, trust, server);
+      const v = await fetchFromServer(i.ref, trust, server, hold);
       if (!v.ok) {
         if ('wait' in v) {
           // Not mirrored yet: no result and no heartbeat, so the lease lapses and the drop is

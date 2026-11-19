@@ -30,7 +30,7 @@ import { Readable } from 'node:stream';
 import type { ImageFetch } from '@jumpmaster/protocol';
 import type { StickClient } from './client.js';
 import type { ImageLoader } from './driver.js';
-import type { StickImages } from './image-gc.js';
+import type { ImageHold, StickImages } from './image-gc.js';
 import type { ImageSource } from './pull.js';
 import {
   canonicalRef,
@@ -73,7 +73,7 @@ export type ServerImageDeps = {
    * The stick's images (issue #425): a fetch holds the lock shared, so the image sweep never runs
    * meanwhile, and a load is recorded (a new digest starts a sweep, once the lock is free).
    */
-  images?: Pick<StickImages, 'lock' | 'loaded'>;
+  images?: Pick<StickImages, 'lock' | 'loaded' | 'hold'>;
 };
 
 /** Where missing images come from, decided per use, and how to fetch from the server. */
@@ -554,18 +554,24 @@ async function download(
  * Makes `ref` present on the engine from the server, verified: the `server` mode counterpart of
  * verifying and then pulling. Under `allowlist` the caller has checked the allow-list (the proxy
  * image is allowed only as the proxy); under `signed` this decides, offline. An image already
- * present that needs no signature check is not fetched. Never throws.
+ * present that needs no signature check is not fetched. An image reported usable (present or
+ * loaded) joins `hold`, before the lock is let go, so no sweep removes it until the hold's drop
+ * has ended (issue #439). Never throws.
  */
 export function fetchFromServer(
   ref: string,
   trust: ImageTrust,
   deps: ServerImageDeps,
+  hold?: ImageHold,
 ): Promise<Fetched> {
+  const fetch = async () => {
+    const v = await fetchImage(ref, trust, deps);
+    if (v.ok) hold?.add(ref);
+    return v;
+  };
   // Taken within this call (the lock grants a free holder at once), so a sweep started after it
   // waits for it.
-  return deps.images
-    ? deps.images.lock.shared(() => fetchImage(ref, trust, deps))
-    : fetchImage(ref, trust, deps);
+  return deps.images ? deps.images.lock.shared(fetch) : fetch();
 }
 
 async function fetchImage(ref: string, trust: ImageTrust, deps: ServerImageDeps): Promise<Fetched> {
