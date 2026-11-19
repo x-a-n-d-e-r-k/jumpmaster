@@ -9,6 +9,7 @@ import {
   MAX_FINDING,
   REFUTE_RECOMMENDATION,
   type Ruling,
+  raiseBriefing,
   refuteExhaustedWhy,
 } from '../briefings.js';
 import type { ClaudePlan, DropZoneConfig } from '../config.js';
@@ -610,6 +611,58 @@ describe('briefings', () => {
     expect(html).toContain('value="reject"');
     expect(html).toContain('Reject');
     expect(html).toContain('Promotes at 2026-01-01T00:01:00.000Z unless you reject it.');
+  });
+
+  test('a held promotion is listed under "Going ahead unless you stop it", after what needs you (#449)', async () => {
+    const h = await harness();
+    const options = [
+      { id: 'reject', label: 'Reject', effect: 'reject_issue' as const },
+      { id: 'promote', label: 'Promote now', effect: 'promote_issue' as const },
+    ];
+    const held = raiseBriefing(
+      h.db,
+      {
+        zoneId: 'main',
+        kind: 'promote_held',
+        subject: 'issue:3',
+        decision:
+          'A reviewer found nothing to fix. It goes ahead in about a minute unless you reject it.',
+        why: 'w',
+        options,
+        source: 'server',
+      },
+      h.now(),
+    );
+    const parked = raiseBriefing(
+      h.db,
+      {
+        zoneId: 'main',
+        kind: 'parked',
+        subject: 'item:9',
+        decision: 'Item 9 is parked. Retry it?',
+        why: 'w',
+        options: [{ id: 'retry', label: 'Retry', effect: 'none' }],
+        source: 'server',
+      },
+      h.now(),
+    );
+    for (const url of ['/briefings', '/briefings?zone=main']) {
+      const html = (await h.view(url)).body;
+      const heading = html.indexOf('Going ahead unless you stop it');
+      expect(heading).toBeGreaterThan(-1);
+      const parkedAt = html.indexOf(`id="briefing-${parked}"`);
+      const heldAt = html.indexOf(`id="briefing-${held}"`);
+      expect(parkedAt).toBeGreaterThan(-1);
+      expect(parkedAt).toBeLessThan(heading);
+      expect(heldAt).toBeGreaterThan(heading);
+      const block = html.slice(heldAt);
+      expect(block).toContain(`<form class="rule" data-briefing="${held}"`);
+      expect(block).toContain('value="reject"');
+      expect(block).toContain('value="promote"');
+      expect(block).toContain('Promote now');
+    }
+    // The all-projects page counts only what needs you.
+    expect((await h.view('/briefings')).body).toContain('1 decision waiting.');
   });
 
   test('a rule form posts optionId through jmFetch, with no token field', () => {

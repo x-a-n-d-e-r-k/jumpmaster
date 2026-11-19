@@ -5,6 +5,7 @@ import {
   effectText,
   HELD_MODES,
   type HeldZone,
+  isNotice,
   issueUrl,
   optionsDigest,
   type Ruling,
@@ -637,10 +638,18 @@ export function renderBriefings(s: {
   };
   const blocks = (bs: readonly Briefing[], heading: 'h3' | 'h4') =>
     bs.map((b) => briefingBlock(b, ctx, heading)).join('');
+  // Notices (held promotions) go ahead unless stopped: listed after what needs Command (#449).
+  const noticesSection = (ns: readonly Briefing[]) =>
+    ns.length === 0
+      ? ''
+      : `<section class="notices"><h2 id="notices">Going ahead unless you stop it</h2>${blocks(ns, 'h3')}</section><!--/notices-->`;
 
   if (s.zone) {
     const zone = s.zone.id;
-    const open = newestFirst(s.open);
+    const all = newestFirst(s.open);
+    const open = all.filter((b) => !isNotice(b));
+    const notices = all.filter(isNotice);
+    for (const x of notices) shown.briefings.add(x.id);
     const rulings = newestFirst(s.rulings);
     const b = paged(open, per, s.page ?? 1, 'Briefing pages', (page) =>
       briefingsHref({ zone, per, page }),
@@ -655,13 +664,15 @@ export function renderBriefings(s: {
     for (const x of b.rows) shown.briefings.add(x.id);
     for (const x of r.rows) shown.rulings.add(x.id);
     const list =
-      open.length === 0 ? '<p>Nothing is waiting on you.</p>' : blocks(b.rows, 'h3') + RULE_SCRIPT;
+      (open.length === 0 ? '<p>Nothing is waiting on you.</p>' : blocks(b.rows, 'h3')) +
+      (open.length > 0 ? b.nav : '') +
+      noticesSection(notices) +
+      (all.length > 0 ? RULE_SCRIPT : '');
     return page(
       `<p><a href="/">Back</a> · <a href="/briefings">All briefings</a></p><h2>Briefings of ${name(zone)} <small>(${escapeHtml(s.zone.mode)})</small></h2>` +
-        (open.length > 0 ? dismissAllForm(zone, s.open, s.zones) : '') +
+        (all.length > 0 ? dismissAllForm(zone, s.open, s.zones) : '') +
         sizeSelector(zone, per) +
         list +
-        (open.length > 0 ? b.nav : '') +
         `<h2 id="rulings">Rulings (decisions recorded)</h2>` +
         (rulings.length === 0
           ? '<p class="empty">No rulings yet.</p>'
@@ -671,6 +682,14 @@ export function renderBriefings(s: {
   }
 
   const projects = projectsOf(s.zones, s.open, s.rulings, s.modes);
+  // A held zone keeps its notices with its other held briefings; elsewhere they are listed apart.
+  const notices: Briefing[] = [];
+  for (const p of projects) {
+    if (HELD_MODES.has(p.mode)) continue;
+    notices.push(...p.open.filter(isNotice));
+    p.open = p.open.filter((b) => !isNotice(b));
+  }
+  for (const x of notices) shown.briefings.add(x.id);
   const held = (p: Project) => HELD_MODES.has(p.mode) && p.open.length > 0;
   const busy = projects.filter((p) => !held(p) && p.open.length > 0).sort(byWaiting);
   const quiet = projects.filter((p) => p.open.length === 0).sort(byWaiting);
@@ -709,7 +728,7 @@ export function renderBriefings(s: {
         `<details class="project held" data-zone="${escapeHtml(p.id)}"><summary>${name(p.id)}: ${p.open.length} held while ${escapeHtml(p.mode)}</summary>${blocks(p.open.slice(0, per), 'h4')}${showAll(p)}${rulingsOf(p)}</details><!--/project-->`,
     ),
   ].join('');
-  const anyBlock = busy.length > 0 || heldOnes.length > 0;
+  const anyBlock = busy.length > 0 || heldOnes.length > 0 || notices.length > 0;
   return page(
     '<p><a href="/">Back</a></p><h2>Briefings (decisions waiting on you)</h2>' +
       (total === 0
@@ -717,6 +736,7 @@ export function renderBriefings(s: {
         : `<p>${plural(total, 'decision')} waiting.</p>`) +
       sizeSelector(undefined, per) +
       sections +
+      noticesSection(newestFirst(notices)) +
       (anyBlock ? RULE_SCRIPT : ''),
     { live: true },
   );
