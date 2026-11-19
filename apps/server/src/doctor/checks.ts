@@ -48,6 +48,7 @@ import {
   InstallationCheckError,
   type InstallationVerifier,
 } from '../forge/installation-verifier.js';
+import { APP_MANIFEST_PERMISSIONS } from '../github/app-manifest.js';
 import { FORBIDDEN, type ZoneGuidance } from '../github/guidance.js';
 import { getGoals } from '../goals.js';
 import type { MirrorStatus } from '../images/mirror.js';
@@ -199,6 +200,14 @@ export type DoctorDeps = {
    * against its repository. Absent, `forge.author` and `forge.reviewer` don't check them.
    */
   verifiedInstallation?: InstallationVerifier['verifiedInstallation'];
+  /**
+   * The installation grant of a zone's role app (`AppTokenSource.grant`, issue #457), compared with
+   * the app's manifest. Absent, `forge.author` and `forge.reviewer` don't read it.
+   */
+  installationGrant?(
+    zoneId: string,
+    role: 'author' | 'reviewer',
+  ): Promise<{ permissions: Record<string, string> }>;
   /** The config store's status (mode, file problems, restart-pending settings), when there is one. */
   configStatus?: ConfigStatus;
   /** The image mirror's state, for `server.image-mirror`; absent, the check does not run. */
@@ -1253,15 +1262,98 @@ async function appIdentityCheck(
       fix: `Remove the Administration permission from ${named} on its page, and accept the change on ${installation}.`,
     };
   const summary = `${who} app ${bot} has ${role} on ${zone.repo} (a GitHub App: tokens are minted per use, so there is no token expiry); app has push`;
+  const warns: { summary: string; fix: string }[] = [];
   const imported = Date.parse(entry.importedAt);
   if (!Number.isNaN(imported) && d.now().getTime() - imported > APP_KEY_LIFE_DAYS * DAY_MS)
-    return {
-      ...base,
-      status: 'warn',
-      summary: `${summary}; its private key was imported more than ${APP_KEY_LIFE_DAYS} days ago`,
+    warns.push({
+      summary: `its private key was imported more than ${APP_KEY_LIFE_DAYS} days ago`,
       fix: `Generate a new private key on ${page}, import it, then delete the old key on the app's page.`,
-    };
-  return { ...base, status: 'pass', summary };
+    });
+  warns.push(...(await grantWarns(d, zone, who, named, page)));
+  if (warns.length === 0) return { ...base, status: 'pass', summary };
+  return {
+    ...base,
+    status: 'warn',
+    summary: [summary, ...warns.map((w) => w.summary)].join('; '),
+    fix: warns.map((w) => w.fix).join(' '),
+  };
+}
+
+/** How much a permission level allows, for comparing a grant with a manifest. */
+const LEVEL_RANK: Record<string, number> = { read: 1, write: 2, admin: 3 };
+const rankOf = (level: string | undefined): number =>
+  level === undefined ? 0 : (LEVEL_RANK[level] ?? 0);
+
+/**
+ * An app role's installation grant against `APP_MANIFEST_PERMISSIONS` (spec §6, F9): what the
+ * grant lacks or holds at a lower level, and what it holds beyond the manifest, each a warn.
+ * `administration` and `workflows` are `forge.admin`'s. A read that fails or doesn't answer is a
+ * warn; with no `installationGrant` dependency there is nothing to compare.
+ */
+async function grantWarns(
+  d: DoctorDeps,
+  zone: DropZoneConfig,
+  who: 'author' | 'reviewer',
+  named: string,
+  page: string,
+): Promise<{ summary: string; fix: string }[]> {
+  if (!d.installationGrant) return [];
+  const deadlineMs = Math.floor((d.checkTimeoutMs ?? CHECK_TIMEOUT_MS) / 2);
+  let timer: NodeJS.Timeout | undefined;
+  let granted: Record<string, string> | undefined;
+  try {
+    const late = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), deadlineMs);
+    });
+    granted = (await Promise.race([d.installationGrant(zone.id, who), late]))?.permissions;
+  } catch {
+    granted = undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!granted)
+    return [
+      {
+        summary: `the installation grant of ${named} on ${zone.repo} could not be read, so it was not compared with the app's manifest`,
+        fix: 'Check the server can reach api.github.com, then run the doctor again.',
+      },
+    ];
+  const wanted = APP_MANIFEST_PERMISSIONS[who];
+  const short: string[] = [];
+  const extra: string[] = [];
+  for (const [permission, level] of Object.entries(wanted)) {
+    if (FORBIDDEN.has(permission)) continue;
+    const has = Object.hasOwn(granted, permission) ? granted[permission] : undefined;
+    if (rankOf(has) < rankOf(level))
+      short.push(
+        has === undefined
+          ? `${permission} (missing; the manifest asks ${level})`
+          : `${permission} (${has}; the manifest asks ${level})`,
+      );
+  }
+  for (const [permission, level] of Object.entries(granted)) {
+    if (FORBIDDEN.has(permission)) continue;
+    const asked = Object.hasOwn(wanted, permission) ? wanted[permission] : undefined;
+    if (rankOf(level) > rankOf(asked))
+      extra.push(
+        asked === undefined
+          ? `${permission} (${level})`
+          : `${permission} (${level}; the manifest asks ${asked})`,
+      );
+  }
+  const owner = zone.repo.split('/')[0] ?? zone.repo;
+  const out: { summary: string; fix: string }[] = [];
+  if (short.length > 0)
+    out.push({
+      summary: `its installation grant on ${zone.repo} lacks what its manifest asks: ${short.join(', ')}`,
+      fix: `The account owner ${owner} must accept the new permissions on ${named}'s installation (its page on GitHub → Install App → ${owner} → Configure → Review request); the app keeps the old grant until then.`,
+    });
+  if (extra.length > 0)
+    out.push({
+      summary: `its installation grant on ${zone.repo} holds more than its manifest asks: ${extra.join(', ')}`,
+      fix: `Remove ${extra.map((e) => e.split(' ')[0]).join(', ')} from ${named} on ${page}, and accept the change on its installation.`,
+    });
+  return out;
 }
 
 /**
