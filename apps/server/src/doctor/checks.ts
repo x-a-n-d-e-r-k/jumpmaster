@@ -1906,6 +1906,24 @@ function mergeRulesetFails(read: BranchRulesRead): string[] | null {
   return out;
 }
 
+/**
+ * Whether a two-app zone's `bot can bypass` comes only from the author app's bypass of a
+ * `jumpmaster-merge` that holds more than Restrict updates (issue #478): the fix there is to
+ * untick the extra rules, never to take the author app off the bypass list.
+ */
+function onlyMergeBypass(rules: {
+  author: BranchRulesRead;
+  reviewer: BranchRulesRead | null;
+}): boolean {
+  const a = rules.author.kind === 'ok' ? rules.author.rules : null;
+  const rv = rules.reviewer?.kind === 'ok' ? rules.reviewer.rules : null;
+  if (!a || a.asApp !== true || !a.bypass || !rv || rv.viewerCanBypass) return false;
+  const offending = a.bypass.filter(
+    (b) => b.can === 'yes' && !(b.name === MERGE_RULESET && b.restrictUpdatesOnly),
+  );
+  return offending.length > 0 && offending.every((b) => b.name === MERGE_RULESET);
+}
+
 async function branchRulesCheck(
   d: DoctorDeps,
   zone: DropZoneConfig,
@@ -1953,9 +1971,14 @@ async function branchRulesCheck(
   for (const read of [rules.author, rules.reviewer])
     if (read?.kind === 'ok' && read.rules.requiresPullRequest === false)
       if (!problems.includes('no pull request rule')) problems.push('no pull request rule');
+  const twoApp = zone.identity === 'starter' ? undefined : twoAppAuthorOf(d, zone);
+  // The author app bypassing a jumpmaster-merge that holds extra rules is a merge-ruleset problem,
+  // not a "bot can bypass" one (issue #478): its fix keeps the author app on the bypass list.
+  const mergeBypass =
+    twoApp !== undefined && problems.includes('bot can bypass') && onlyMergeBypass(rules);
+  if (mergeBypass) problems.splice(problems.indexOf('bot can bypass'), 1);
   if (problems.length === 0) {
     const ok = rules.author.kind === 'ok' ? rules.author.rules : null;
-    const twoApp = zone.identity === 'starter' ? undefined : twoAppAuthorOf(d, zone);
     const mergeFails = twoApp === undefined ? [] : mergeRulesetFails(rules.author);
     if (mergeFails && mergeFails.length > 0)
       return {
@@ -2013,6 +2036,10 @@ async function branchRulesCheck(
       ),
     ),
   ];
+  if (mergeBypass && twoApp !== undefined) {
+    problems.push(...(mergeRulesetFails(rules.author) ?? []));
+    fixes.push(mergeRulesetFix(twoApp, branch));
+  }
   return {
     ...base,
     status: 'fail',
