@@ -579,7 +579,8 @@ describe('the dashboard', () => {
     expect(listHref('/work', 'a b', 'parked')).toBe('/work?zone=a%20b&state=parked');
     expect(html).toContain('<a href="/work?zone=a%20b&amp;state=parked">1 parked</a>');
     expect(html).toContain('href="/zones/a%20b"');
-    expect(html).toContain('href="/drops?zone=a%20b&amp;state=active"');
+    expect(html).toContain('href="/drops?zone=a%20b&amp;state=active&amp;kind=all"');
+    expect(html).toMatch(/data-tile="running" href="\/drops\?[^"]*kind=all"/);
     const needs = renderHome(home({ zones: [B], briefings: [br('a b')] }));
     expect(needs).toContain('<a href="/briefings?zone=a%20b">1 briefing needs you</a>');
   });
@@ -591,7 +592,7 @@ describe('the dashboard', () => {
       html.indexOf('</nav>', html.indexOf('<nav class="totals"')),
     );
     for (const href of [
-      '/drops?state=active',
+      '/drops?state=active&amp;kind=all',
       '/work?state=ready',
       '/work?state=pr_open',
       '/work?state=done',

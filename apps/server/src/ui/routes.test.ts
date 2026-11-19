@@ -730,7 +730,7 @@ describe('/work and /drops list pages (#119)', () => {
       drop(h, `drop-${s}`, s, 'main', '2026-01-01T00:00:00.000Z', item('main', 'in_flight').id);
     const body = (await h.view('/drops?state=active')).body;
     for (const s of ['queued', 'leased', 'running', 'push_pending'])
-      expect(body).toContain(`>drop-${s}</a>`);
+      expect(body).toContain(`href="/drops/drop-${s}"`);
     expect(body).not.toContain('drop-succeeded');
     expect(body).toContain('All active drops');
   });
@@ -740,10 +740,10 @@ describe('/work and /drops list pages (#119)', () => {
     drop(h, 'old-main', 'succeeded', 'main', '2026-01-01T00:00:00.000Z');
     drop(h, 'new-main', 'failed', 'main', '2026-01-02T00:00:00.000Z');
     drop(h, 'ref-drop', 'succeeded', 'ref');
-    const body = (await h.view('/drops?zone=main')).body;
+    const body = (await h.view('/drops?zone=main&kind=all')).body;
     expect(body).not.toContain('ref-drop');
-    expect(body.indexOf('>new-main<')).toBeGreaterThan(-1);
-    expect(body.indexOf('>new-main<')).toBeLessThan(body.indexOf('>old-main<'));
+    expect(body.indexOf('title="new-main"')).toBeGreaterThan(-1);
+    expect(body.indexOf('title="new-main"')).toBeLessThan(body.indexOf('title="old-main"'));
     expect(body).toContain('Drops in octo/demo');
   });
 
@@ -775,14 +775,14 @@ describe('/work and /drops list pages (#119)', () => {
       drop(h, 'main-crew', 'succeeded', 'main');
       const res = await h.view('/drops?zone=main&issue=5');
       expect(res.statusCode).toBe(200);
-      expect(res.body).toContain('>main-5-old</a>');
-      expect(res.body).toContain('>main-5-new</a>');
+      expect(res.body).toContain('title="main-5-old"');
+      expect(res.body).toContain('title="main-5-new"');
       expect(res.body).not.toContain('ref-5');
       expect(res.body).not.toContain('main-other');
       expect(res.body).not.toContain('main-crew');
       expect(res.body).toContain('Drops for #5 in octo/demo');
       const ref = (await h.view('/drops?zone=ref&issue=5')).body;
-      expect(ref).toContain('>ref-5</a>');
+      expect(ref).toContain('title="ref-5"');
       expect(ref).not.toContain('main-5');
     });
 
@@ -831,15 +831,79 @@ describe('/work and /drops list pages (#119)', () => {
     const at = (i: number) => new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString();
     for (let i = 0; i < 200; i++)
       drop(h, `d${String(i).padStart(3, '0')}`, 'succeeded', 'main', at(i));
-    const two = (await h.view('/drops')).body;
-    expect(two.match(/<a href="\/drops\/d\d+">/g)).toHaveLength(200);
+    const two = (await h.view('/drops?kind=all')).body;
+    expect(two.match(/<a href="\/drops\/d\d+"/g)).toHaveLength(200);
     expect(two).not.toContain('Showing the newest 200');
     drop(h, 'd200', 'succeeded', 'main', at(200));
-    const more = (await h.view('/drops')).body;
-    expect(more.match(/<a href="\/drops\/d\d+">/g)).toHaveLength(200);
+    const more = (await h.view('/drops?kind=all')).body;
+    expect(more.match(/<a href="\/drops\/d\d+"/g)).toHaveLength(200);
     expect(more).toContain('Showing the newest 200');
-    expect(more).toContain('>d200<');
-    expect(more).not.toContain('>d000<');
+    expect(more).toContain('title="d200"');
+    expect(more).not.toContain('title="d000"');
+  });
+
+  describe('/drops?kind= (#497)', () => {
+    const ids = (body: string) =>
+      [...body.matchAll(/<a href="\/drops\/([^"]+)"/g)].map((m) => m[1]);
+
+    test('the default lists issue work; crew, doctor and all list theirs', async () => {
+      const { h, item } = await lists();
+      for (const id of ['crew-1', 'crew-2', 'crew-3']) drop(h, id, 'succeeded');
+      drop(h, 'work-1', 'succeeded', 'main', undefined, item('main', 'in_flight').id);
+      drop(h, 'work-2', 'failed', 'main', undefined, item('main', 'in_flight').id);
+      insertDrop(h.db, {
+        id: 'doc-1',
+        dropZoneId: 'main',
+        workItemId: null,
+        role: 'doctor',
+        state: 'succeeded',
+        createdAt: '2026-01-01T00:00:00.000Z',
+      });
+      expect(ids((await h.view('/drops')).body).sort()).toEqual(['work-1', 'work-2']);
+      expect(ids((await h.view('/drops?kind=work')).body).sort()).toEqual(['work-1', 'work-2']);
+      expect(ids((await h.view('/drops?kind=crew')).body).sort()).toEqual([
+        'crew-1',
+        'crew-2',
+        'crew-3',
+      ]);
+      expect(ids((await h.view('/drops?kind=doctor')).body)).toEqual(['doc-1']);
+      expect(ids((await h.view('/drops?kind=all')).body)).toHaveLength(6);
+    });
+
+    test('the filter applies before the limit: 250 crew drops hide no issue drop', async () => {
+      const { h, item } = await lists();
+      const at = (i: number) => new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString();
+      for (let i = 0; i < 5; i++)
+        drop(h, `work-${i}`, 'succeeded', 'main', at(i), item('main', 'in_flight').id);
+      for (let i = 0; i < 250; i++) drop(h, `crew-${i}`, 'succeeded', 'main', at(10 + i));
+      const body = (await h.view('/drops')).body;
+      expect(ids(body).sort()).toEqual(['work-0', 'work-1', 'work-2', 'work-3', 'work-4']);
+      expect(body).not.toContain('Showing the newest');
+    });
+
+    test('kind=bogus is 404 bad kind', async () => {
+      const { h } = await lists();
+      const res = await h.view('/drops?kind=bogus');
+      expect(res.statusCode).toBe(404);
+      expect(res.body).toBe('bad kind');
+    });
+
+    test('kind links keep zone and state; zone and state links keep kind', async () => {
+      const { h } = await lists();
+      const body = (await h.view('/drops?zone=main&state=failed&kind=crew')).body;
+      expect(body).toContain('<a href="/drops?zone=main&amp;state=failed">Issue work</a>');
+      expect(body).toContain(
+        '<a href="/drops?zone=main&amp;state=failed&amp;kind=crew" aria-current="page">Crew</a>',
+      );
+      expect(body).toContain(
+        '<a href="/drops?zone=main&amp;state=failed&amp;kind=doctor">Doctor</a>',
+      );
+      expect(body).toContain(
+        '<a href="/drops?zone=main&amp;state=failed&amp;kind=all">All kinds</a>',
+      );
+      expect(body).toContain('href="/drops?zone=ref&amp;state=failed&amp;kind=crew"');
+      expect(body).toContain('href="/drops?zone=main&amp;state=active&amp;kind=crew"');
+    });
   });
 
   test.each([
@@ -847,6 +911,8 @@ describe('/work and /drops list pages (#119)', () => {
     ['/drops?zone=nope', 'no such zone'],
     ['/work?state=bogus', 'no such state'],
     ['/drops?state=bogus', 'no such state'],
+    ['/drops?kind=', 'bad kind'],
+    ['/drops?kind=all&kind=crew', 'bad kind'],
     ['/work?state=cancelled', 'no such state'],
   ])('%s is 404 %s', async (url, text) => {
     const { h } = await lists();
@@ -888,7 +954,10 @@ describe('/work and /drops list pages (#119)', () => {
         .match(new RegExp(`<a class="tile" data-tile="${key}" href="([^"]*)"><b[^>]*>([^<]*)</b>`));
       return m ? { href: m[1], n: m[2] } : undefined;
     };
-    expect(tile('running', 'class="totals"')).toEqual({ href: '/drops?state=active', n: '1' });
+    expect(tile('running', 'class="totals"')).toEqual({
+      href: '/drops?state=active&amp;kind=all',
+      n: '1',
+    });
     expect(tile('queued', 'class="totals"')).toEqual({ href: '/work?state=ready', n: '1' });
     expect(tile('parked', 'class="totals"')).toEqual({ href: '/work?state=parked', n: '2' });
     expect(tile('merged', 'class="totals"')).toEqual({ href: '/work?state=done', n: '1' });
@@ -897,7 +966,7 @@ describe('/work and /drops list pages (#119)', () => {
       n: '1',
     });
     expect(tile('running', 'data-zone="ref"')).toEqual({
-      href: '/drops?zone=ref&amp;state=active',
+      href: '/drops?zone=ref&amp;state=active&amp;kind=all',
       n: '1',
     });
     // The failed merge counts as blocked on main's card; main comes first, then ref.
@@ -925,7 +994,7 @@ describe('/work and /drops list pages (#119)', () => {
     const { h } = await lists();
     const home = (await h.view('/')).body;
     expect(home).toContain('href="/work?state=ready"');
-    expect(home).toContain('href="/drops?state=active"');
+    expect(home).toContain('href="/drops?state=active&amp;kind=all"');
     expect(home).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/work">Work<\/a>.*<\/nav>/);
     expect(home).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/drops">Drops<\/a>.*<\/nav>/);
   });

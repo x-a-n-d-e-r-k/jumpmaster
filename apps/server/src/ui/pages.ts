@@ -37,6 +37,7 @@ import type { Gate } from '../usage.js';
 import { floorCounts, sticksSummary, totalsStrip, zoneCards } from './floor.js';
 import { linkTarget } from './links.js';
 import { STYLE } from './theme.js';
+import { relativeTime } from './time.js';
 import { type ZoneRef, zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
 
 export const escapeHtml = (v: unknown): string =>
@@ -1108,7 +1109,7 @@ export const WORK_HEAD =
 
 /** The drop ledger's header row, on /drops. */
 export const DROP_HEAD =
-  '<tr><th>Drop</th><th>Issue</th><th>Role</th><th>State</th><th>Elapsed</th><th>Gates</th></tr>';
+  '<tr><th>Drop</th><th>Project</th><th>Work</th><th>Role</th><th>State</th><th>Started</th><th>Elapsed</th><th>Gates</th></tr>';
 
 /** What a ready item waits on, in words, or nothing. */
 const waitingOn = (i: WorkItem): string =>
@@ -1153,14 +1154,37 @@ function dropTarget(d: Drop, itemById: Map<number, WorkItem>): string {
   return wi ? `#${escapeHtml(wi.issueNumber)}` : '-';
 }
 
-/** The drop ledger's rows (/drops'); `items` resolve each drop's issue. */
-export function dropRows(drops: readonly Drop[], items: readonly WorkItem[], now: Date): string {
+/** The longest issue title a drop row shows; a longer one is cut with "…". */
+const DROP_TITLE_MAX = 60;
+
+/** A drop row's Work cell: `#N <title>` for issue work, else `crew` or `doctor`. */
+function dropWork(d: Drop, itemById: Map<number, WorkItem>): string {
+  const wi = d.workItemId === null ? undefined : itemById.get(d.workItemId);
+  if (!wi) return dropTarget(d, itemById);
+  const title =
+    wi.title.length > DROP_TITLE_MAX ? `${wi.title.slice(0, DROP_TITLE_MAX)}…` : wi.title;
+  return `#${escapeHtml(wi.issueNumber)} ${escapeHtml(title)}`;
+}
+
+/**
+ * The drop ledger's rows (/drops'): a short id, the project, the work, and when it started (or was
+ * created, if it has not started); `items` resolve each drop's issue, `zones` name its project.
+ */
+export function dropRows(
+  drops: readonly Drop[],
+  items: readonly WorkItem[],
+  zones: readonly ZoneRef[],
+  now: Date,
+): string {
   const itemById = new Map(items.map((i) => [i.id, i]));
+  const name = zoneNamer(zones);
   return drops
-    .map(
-      (d) =>
-        `<tr><td><a href="/drops/${encodeURIComponent(d.id)}">${escapeHtml(d.id)}</a></td><td>${dropTarget(d, itemById)}</td><td>${escapeHtml(d.role)}</td><td>${badge(d.state)}</td><td class="num">${escapeHtml(elapsed(d, now))}</td><td>${gateSummary(d)}</td></tr>`,
-    )
+    .map((d) => {
+      const id = escapeHtml(d.id);
+      const link = `<a href="/drops/${encodeURIComponent(d.id)}" title="${id}">${escapeHtml(d.id.slice(0, 8))}</a>`;
+      const started = relativeTime(d.startedAt ?? d.createdAt, now);
+      return `<tr><td>${link}</td><td>${name(d.dropZoneId)}</td><td>${dropWork(d, itemById)}</td><td>${escapeHtml(d.role)}</td><td>${badge(d.state)}</td><td>${started}</td><td class="num">${escapeHtml(elapsed(d, now))}</td><td>${gateSummary(d)}</td></tr>`;
+    })
     .join('');
 }
 
@@ -1177,6 +1201,15 @@ export const DROP_STATES = [
   'cancelled',
 ] as const satisfies readonly DropState[];
 export type DropFilter = DropState | 'active' | 'all';
+/** /drops' kind filter: issue work (the default), crew, doctor, or every kind. */
+export const DROP_KINDS = ['work', 'crew', 'doctor', 'all'] as const;
+export type DropKind = (typeof DROP_KINDS)[number];
+const KIND_LABEL: Record<DropKind, string> = {
+  work: 'Issue work',
+  crew: 'Crew',
+  doctor: 'Doctor',
+  all: 'All kinds',
+};
 /** The most drops /drops lists. */
 export const DROP_LIST_LIMIT = 200;
 
@@ -1202,17 +1235,22 @@ function listPage(p: {
   state: string;
   defaultState: string;
   states: { value: string; label: string }[];
+  /** A third filter row, by kind: kept by every link, omitted from the query at its default. */
+  kinds?: { value: string; label: string }[];
+  kind?: string;
+  defaultKind?: string;
   head: string;
   rows: string;
   empty: string;
   note?: string;
 }): string {
-  const href = (zone: string | undefined, state: string): string => {
+  const href = (zone: string | undefined, state: string, kind = p.kind): string => {
     const q = new URLSearchParams();
     if (zone !== undefined) q.set('zone', zone);
     if (zone !== undefined && zone === p.zone && p.issue !== undefined)
       q.set('issue', String(p.issue));
     if (state !== p.defaultState) q.set('state', state);
+    if (kind !== undefined && kind !== p.defaultKind) q.set('kind', kind);
     const qs = q.toString();
     return escapeHtml(qs ? `${p.path}?${qs}` : p.path);
   };
@@ -1225,13 +1263,19 @@ function listPage(p: {
   const stateLinks = p.states
     .map((s) => link(href(p.zone, s.value), escapeHtml(s.label), p.state === s.value))
     .join(' · ');
+  const kindLinks = p.kinds
+    ?.map((k) => link(href(p.zone, p.state, k.value), escapeHtml(k.label), p.kind === k.value))
+    .join(' · ');
+  const kindNav = kindLinks
+    ? `<nav class="filters" aria-label="Kind"><p>${kindLinks}</p></nav>`
+    : '';
   const body = p.rows
     ? `<table>${p.head}${p.rows}</table>${p.note ? `<p class="muted">${p.note}</p>` : ''}`
     : `<p class="empty">${p.empty}</p>`;
   return page(
     `<p><a href="/">Back</a></p><h2>${p.title}</h2>` +
       `<nav class="filters" aria-label="Project"><p>${zoneLinks}</p></nav>` +
-      `<nav class="filters" aria-label="State"><p>${stateLinks}</p></nav>${body}`,
+      `<nav class="filters" aria-label="State"><p>${stateLinks}</p></nav>${kindNav}${body}`,
     { title: p.titleText },
   );
 }
@@ -1274,6 +1318,8 @@ export function renderDropList(s: {
   /** An issue number within `zone`: the drops are that issue's. */
   issue?: number;
   state: DropFilter;
+  /** Which drops by kind; issue work when absent. */
+  kind?: DropKind;
   /** Already filtered, newest first, at most DROP_LIST_LIMIT. */
   drops: readonly Drop[];
   /** Work items, to name each drop's issue. */
@@ -1303,8 +1349,11 @@ export function renderDropList(s: {
       { value: 'active', label: 'Active' },
       ...DROP_STATES.map((v) => ({ value: v, label: capital(stateWords(v)) })),
     ],
+    kinds: DROP_KINDS.map((v) => ({ value: v, label: KIND_LABEL[v] })),
+    kind: s.kind ?? 'work',
+    defaultKind: 'work',
     head: DROP_HEAD,
-    rows: dropRows(s.drops, s.items, s.now ?? new Date()),
+    rows: dropRows(s.drops, s.items, s.zones, s.now ?? new Date()),
     empty: `No ${words}drops${where}.`,
     ...(s.limited ? { note: `Showing the newest ${DROP_LIST_LIMIT}.` } : {}),
   });

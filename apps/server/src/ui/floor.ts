@@ -138,11 +138,15 @@ export function floorCounts(state: HomeState, now: Date): FloorCounts {
   };
 }
 
-/** A list page's URL, filtered to a zone and a state; the values URL-encoded. */
+/**
+ * A list page's URL, filtered to a zone and a state; the values URL-encoded. /drops links ask for
+ * every kind, so the list matches the count that links to it, crew drops included (#497).
+ */
 export function listHref(path: string, zone: string | undefined, state?: string): string {
   const q: string[] = [];
   if (zone !== undefined) q.push(`zone=${encodeURIComponent(zone)}`);
   if (state !== undefined) q.push(`state=${encodeURIComponent(state)}`);
+  if (path === '/drops') q.push('kind=all');
   return q.length === 0 ? path : `${path}?${q.join('&')}`;
 }
 
