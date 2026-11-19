@@ -540,6 +540,47 @@ describe('ChatTurns', () => {
     expect(getThread(w.db, th.id)?.claudeSessionId).toBe('sess-new');
   });
 
+  test('a tool_result event is accepted and stores nothing: the turn ends as it would without it', async () => {
+    const stream = (withResult: boolean): Script =>
+      async function* () {
+        yield { type: 'text', text: 'Looking.' };
+        yield {
+          type: 'tool',
+          name: 'Read',
+          summary: 'read GOAL.md',
+          id: 't1',
+          input: { file_path: 'GOAL.md' },
+        };
+        if (withResult)
+          yield {
+            type: 'tool_result',
+            id: 't1',
+            text: 'goal',
+            truncated: false,
+            totalLines: 1,
+            isError: false,
+          };
+        yield { type: 'text', text: 'Found it.' };
+        yield { type: 'result', isError: false };
+      };
+    const stored = async (withResult: boolean) => {
+      const w = world(stream(withResult));
+      const th = createThread(w.db, { title: 't' }, t0);
+      w.owner(th.id, 'hi');
+      w.turns.enqueue(th.id);
+      await w.turns.idle();
+      return listMessages(w.db, th.id).map((m) => [m.seq, m.role, m.text, m.state]);
+    };
+    const withResult = await stored(true);
+    expect(withResult.at(-1)).toEqual([
+      expect.any(Number),
+      'assistant',
+      'Looking.\n\nFound it.',
+      'done',
+    ]);
+    expect(withResult).toEqual(await stored(false));
+  });
+
   test('subscribe replays stored messages after the seq, then live events', async () => {
     const w = world(done('live'));
     const th = createThread(w.db, { title: 't' }, t0);

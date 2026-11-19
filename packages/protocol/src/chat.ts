@@ -54,7 +54,25 @@ export const ChatEventSchema = z.discriminatedUnion('type', [
     reason: z.string().optional(),
   }),
   z.object({ type: z.literal('text'), text: z.string() }),
-  z.object({ type: z.literal('tool'), name: z.string(), summary: z.string() }),
+  z.object({
+    type: z.literal('tool'),
+    name: z.string(),
+    summary: z.string(),
+    /** The `tool_use` block's id; absent from an older chat image. */
+    id: z.string().optional(),
+    /** The tool's input, or `{_truncated: true, preview}` when its JSON is too long. */
+    input: z.record(z.string(), z.unknown()).optional(),
+  }),
+  /** What a tool gave back, capped; `id` is the `tool_use` id it answers. */
+  z.object({
+    type: z.literal('tool_result'),
+    id: z.string(),
+    text: z.string(),
+    truncated: z.boolean(),
+    /** Lines in the uncut text; 0 when it is empty. */
+    totalLines: z.number().int().nonnegative(),
+    isError: z.boolean(),
+  }),
   z.object({ type: z.literal('rate_limit'), data: RateLimitEventDataSchema }),
   z.object({
     type: z.literal('result'),

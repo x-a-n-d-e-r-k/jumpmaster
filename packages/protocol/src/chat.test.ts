@@ -66,6 +66,8 @@ describe('chat protocol', () => {
       { type: 'zone', zoneId: 'z2', state: 'unavailable', reason: 'no read token' },
       { type: 'text', text: 'hello' },
       { type: 'tool', name: 'Read', summary: 'README.md' },
+      { type: 'tool', name: 'Read', summary: 'read a', id: 't1', input: { file_path: 'a' } },
+      { type: 'tool_result', id: 't1', text: 'a', truncated: false, totalLines: 1, isError: false },
       { type: 'rate_limit', data: { status: 'allowed', rateLimitType: 'five_hour' } },
       { type: 'result', isError: false, usage: { input_tokens: 3 }, numTurns: 2, sessionId: 's1' },
       { type: 'result', isError: true },
@@ -82,7 +84,7 @@ describe('chat protocol', () => {
     ];
     const types = new Set(events.map((e) => e.type));
     expect([...types].sort()).toEqual(
-      ['error', 'rate_limit', 'result', 'session', 'text', 'tool', 'zone'].sort(),
+      ['error', 'rate_limit', 'result', 'session', 'text', 'tool', 'tool_result', 'zone'].sort(),
     );
     for (const e of events)
       expect(ChatEventSchema.parse(JSON.parse(JSON.stringify(e))), e.type).toEqual(e);
@@ -90,5 +92,31 @@ describe('chat protocol', () => {
     expect(ChatEventSchema.safeParse({ type: 'error', code: 'other', message: 'x' }).success).toBe(
       false,
     );
+  });
+
+  test('tool events with and without id and input parse; a tool_result needs its id', () => {
+    expect(
+      ChatEventSchema.safeParse({ type: 'tool', name: 'Read', summary: 'read a' }).success,
+    ).toBe(true);
+    expect(
+      ChatEventSchema.safeParse({
+        type: 'tool',
+        name: 'Read',
+        summary: 'read a',
+        id: 't1',
+        input: { file_path: 'a' },
+      }).success,
+    ).toBe(true);
+    const result = {
+      type: 'tool_result',
+      id: 't1',
+      text: 'a',
+      truncated: false,
+      totalLines: 1,
+      isError: false,
+    };
+    expect(ChatEventSchema.safeParse(result).success).toBe(true);
+    const { id: _id, ...noId } = result;
+    expect(ChatEventSchema.safeParse(noId).success).toBe(false);
   });
 });

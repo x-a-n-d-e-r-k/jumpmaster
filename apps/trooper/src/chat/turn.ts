@@ -25,6 +25,10 @@ import { type SyncResult, syncZone } from './repos.js';
 /** The `chat-repos` volume's mount point in the chat service. */
 export const DEFAULT_CHAT_REPOS = '/chat/repos';
 const SUMMARY_MAX = 200;
+/** The longest tool input sent as is, in characters of its JSON. */
+const INPUT_MAX = 4096;
+/** The longest tool result text sent, in characters. */
+const RESULT_MAX = 65536;
 const STDERR_TAIL = 8192;
 const SESSION_LOST = /No conversation found with session ID/;
 
@@ -79,6 +83,59 @@ export function toolSummary(raw: unknown): { name: string; summary: string } | n
   return { name, summary: clip(summary.trim()) };
 }
 
+/** A `tool_use` block's id and input for its `tool` event, each left out when unusable. */
+function toolDetail(raw: unknown): { id?: string; input?: Record<string, unknown> } {
+  const b = raw as { id?: unknown; input?: unknown };
+  const out: { id?: string; input?: Record<string, unknown> } = {};
+  if (typeof b.id === 'string' && b.id !== '') out.id = b.id;
+  if (typeof b.input === 'object' && b.input !== null && !Array.isArray(b.input)) {
+    const input = b.input as Record<string, unknown>;
+    const json = JSON.stringify(input);
+    out.input =
+      json.length > INPUT_MAX ? { _truncated: true, preview: json.slice(0, INPUT_MAX) } : input;
+  }
+  return out;
+}
+
+/** The text of a `tool_result` block's content: text parts as is, any other part as `[type]`. */
+function resultText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part) => {
+      const p = part as { type?: unknown; text?: unknown } | null;
+      if (p?.type === 'text' && typeof p.text === 'string') return p.text;
+      return `[${typeof p?.type === 'string' ? p.type : 'unknown'}]`;
+    })
+    .join('\n');
+}
+
+/** The `tool_result` events of a `user` message's content blocks, in block order. */
+function toolResults(content: unknown[]): ChatEvent[] {
+  const out: ChatEvent[] = [];
+  for (const block of content) {
+    const b = block as {
+      type?: unknown;
+      tool_use_id?: unknown;
+      content?: unknown;
+      is_error?: unknown;
+    };
+    if (b?.type !== 'tool_result' || typeof b.tool_use_id !== 'string' || b.tool_use_id === '')
+      continue;
+    const text = resultText(b.content);
+    const truncated = text.length > RESULT_MAX;
+    out.push({
+      type: 'tool_result',
+      id: b.tool_use_id,
+      text: truncated ? text.slice(0, RESULT_MAX) : text,
+      truncated,
+      totalLines: text === '' ? 0 : text.split('\n').length,
+      isError: b.is_error === true,
+    });
+  }
+  return out;
+}
+
 /** The events one stream-json line gives, in order. */
 function eventsOf(line: string): ChatEvent[] {
   const p = parseStreamLine(line);
@@ -106,7 +163,9 @@ function eventsOf(line: string): ChatEvent[] {
     }
     case 'agent': {
       const m = p.raw as { type?: unknown; message?: { content?: unknown } };
-      if (m.type !== 'assistant' || !Array.isArray(m.message?.content)) return [];
+      if (!Array.isArray(m.message?.content)) return [];
+      if (m.type === 'user') return toolResults(m.message.content as unknown[]);
+      if (m.type !== 'assistant') return [];
       const out: ChatEvent[] = [];
       for (const block of m.message.content as unknown[]) {
         const b = block as { type?: unknown; text?: unknown };
@@ -114,7 +173,7 @@ function eventsOf(line: string): ChatEvent[] {
           out.push({ type: 'text', text: b.text });
         } else {
           const t = toolSummary(block);
-          if (t) out.push({ type: 'tool', ...t });
+          if (t) out.push({ type: 'tool', ...t, ...toolDetail(block) });
         }
       }
       return out;
