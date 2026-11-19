@@ -241,7 +241,14 @@ describe('runChatTurn', () => {
     expect(events).toEqual([
       { type: 'session', sessionId: 'sess-1' },
       { type: 'text', text: 'Let me look.' },
-      { type: 'tool', name: 'Read', summary: 'read /chat/repos/main/work/a.txt' },
+      {
+        type: 'tool',
+        name: 'Read',
+        summary: 'read /chat/repos/main/work/a.txt',
+        id: 't1',
+        input: { file_path: '/chat/repos/main/work/a.txt' },
+      },
+      { type: 'tool_result', id: 't1', text: 'a', truncated: false, totalLines: 1, isError: false },
       {
         type: 'rate_limit',
         data: {
@@ -250,7 +257,13 @@ describe('runChatTurn', () => {
           rateLimitType: 'five_hour',
         },
       },
-      { type: 'tool', name: 'list_issues', summary: 'list_issues in main' },
+      {
+        type: 'tool',
+        name: 'list_issues',
+        summary: 'list_issues in main',
+        id: 't2',
+        input: { zoneId: 'main' },
+      },
       { type: 'text', text: 'Two are open.' },
       {
         type: 'result',
@@ -312,6 +325,141 @@ describe('runChatTurn', () => {
     expect(calls[0]?.killed).toBe(true);
     expect(privilege.sweepUid).toHaveBeenCalledWith(10001);
     expect(seen[0]).toEqual({ type: 'session', sessionId: 'sess-1' });
+  });
+});
+
+/** The events a stream of the given messages (then a result) gives, without the result. */
+async function streamEvents(...msgs: unknown[]): Promise<ChatEvent[]> {
+  const { spawn } = fakeSpawn({
+    stdout: [
+      ...msgs.map((m) => JSON.stringify(m)),
+      JSON.stringify({ type: 'result', is_error: false }),
+    ],
+  });
+  const events = await collect(
+    runChatTurn(req(), new AbortController().signal, { spawn, root: tmp, ids: null }),
+  );
+  return events.filter((e) => e.type !== 'result');
+}
+
+const toolUse = (id: unknown, name: string, input: unknown) => ({
+  type: 'assistant',
+  message: { content: [{ type: 'tool_use', id, name, input }] },
+});
+const toolResults = (...content: unknown[]) => ({ type: 'user', message: { content } });
+
+describe('tool steps', () => {
+  test('a Read tool_use and its tool_result give a tool event with id and input, then a tool_result', async () => {
+    const events = await streamEvents(
+      toolUse('t1', 'Read', { file_path: 'a.txt' }),
+      toolResults({ type: 'tool_result', tool_use_id: 't1', content: 'one\ntwo' }),
+    );
+    expect(events).toEqual([
+      {
+        type: 'tool',
+        name: 'Read',
+        summary: 'read a.txt',
+        id: 't1',
+        input: { file_path: 'a.txt' },
+      },
+      {
+        type: 'tool_result',
+        id: 't1',
+        text: 'one\ntwo',
+        truncated: false,
+        totalLines: 2,
+        isError: false,
+      },
+    ]);
+  });
+
+  test('a long result is cut to 65536 characters with the uncut line count; a short one is not', async () => {
+    const line = `${'x'.repeat(99)}\n`;
+    const long = line.repeat(1000);
+    expect(long.length).toBe(100_000);
+    const events = await streamEvents(
+      toolResults(
+        { type: 'tool_result', tool_use_id: 'big', content: long },
+        { type: 'tool_result', tool_use_id: 'small', content: 'ok', is_error: true },
+      ),
+    );
+    expect(events).toEqual([
+      {
+        type: 'tool_result',
+        id: 'big',
+        text: long.slice(0, 65536),
+        truncated: true,
+        totalLines: 1001,
+        isError: false,
+      },
+      {
+        type: 'tool_result',
+        id: 'small',
+        text: 'ok',
+        truncated: false,
+        totalLines: 1,
+        isError: true,
+      },
+    ]);
+  });
+
+  test('array content joins its text parts and names the others; missing content is empty', async () => {
+    const events = await streamEvents(
+      toolResults(
+        {
+          type: 'tool_result',
+          tool_use_id: 'a',
+          content: [
+            { type: 'text', text: 'seen' },
+            { type: 'image', source: {} },
+          ],
+        },
+        { type: 'tool_result', tool_use_id: 'b' },
+      ),
+    );
+    expect(events).toEqual([
+      {
+        type: 'tool_result',
+        id: 'a',
+        text: 'seen\n[image]',
+        truncated: false,
+        totalLines: 2,
+        isError: false,
+      },
+      { type: 'tool_result', id: 'b', text: '', truncated: false, totalLines: 0, isError: false },
+    ]);
+  });
+
+  test('an input over 4096 characters of JSON is sent as a truncated preview', async () => {
+    const input = { command: 'y'.repeat(10_000) };
+    const [e] = await streamEvents(toolUse('t1', 'Bash', input));
+    expect(e).toMatchObject({ type: 'tool', id: 't1' });
+    const sent = (e as { input?: Record<string, unknown> }).input;
+    expect(sent).toEqual({ _truncated: true, preview: JSON.stringify(input).slice(0, 4096) });
+    expect((sent?.preview as string).length).toBe(4096);
+  });
+
+  test('an array input or a missing id is left out of the tool event', async () => {
+    const events = await streamEvents(toolUse('', 'Read', ['a']), toolUse(7, 'Read', null));
+    expect(events).toEqual([
+      { type: 'tool', name: 'Read', summary: 'read' },
+      { type: 'tool', name: 'Read', summary: 'read' },
+    ]);
+  });
+
+  test('a tool_result block without a tool_use_id yields no event', async () => {
+    const events = await streamEvents(
+      toolResults(
+        { type: 'tool_result', content: 'x' },
+        { type: 'tool_result', tool_use_id: '', content: 'x' },
+        { type: 'text', text: 'not a result' },
+        { type: 'tool_result', tool_use_id: 'ok', content: 'x' },
+      ),
+      { type: 'user', message: { content: 'plain' } },
+    );
+    expect(events).toEqual([
+      { type: 'tool_result', id: 'ok', text: 'x', truncated: false, totalLines: 1, isError: false },
+    ]);
   });
 });
 

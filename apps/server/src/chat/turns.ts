@@ -544,6 +544,9 @@ export class ChatTurns {
             lastSeq = row.seq;
             break;
           }
+          case 'tool_result':
+            // Not stored yet: a later change keeps it, through `clean`, with its tool row.
+            break;
           case 'rate_limit': {
             // The chat uses the install's one Claude credential: its limits are the install's.
             const data = rateLimitFromEvent(e.data);
