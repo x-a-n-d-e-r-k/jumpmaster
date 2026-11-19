@@ -9,7 +9,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import nock from 'nock';
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import type { ConfigStatus } from '../config/source.js';
 import { STARTER_WARNING } from '../config.js';
 import {
@@ -1679,6 +1680,13 @@ const APP_ENTRY: GitHubAppEntry = {
   importedAt: '2026-11-17T00:00:00.000Z',
 };
 
+/** The app id a GitHub App JWT (a `Bearer` header) is issued for. */
+const issOf = (auth: string): string =>
+  String(
+    (JSON.parse(Buffer.from(auth.split('.')[1] ?? '', 'base64url').toString()) as { iss: unknown })
+      .iss,
+  );
+
 test('#258 D5 parity: one mode rule for a top-level secret file and a GitHub App entry file', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'jm-secrets-app-'));
   mkdirSync(join(dir, 'github-app', 'acme'), { recursive: true });
@@ -2103,17 +2111,40 @@ describe('forge.private-clone for an app-reviewer zone (issue #237)', () => {
 });
 
 describe("forge.author and forge.reviewer verify an app zone's ids (issue #267)", () => {
-  const entry = {
-    source: 'vault',
-    fingerprint: 'fp',
-    entry: { appId: '9', slug: 'jm', clientId: 'c', pem: 'unused', importedAt: 'x' },
-  } as const;
-  const apps = new Map([['octo', { author: entry, reviewer: entry }]]) as unknown as ResolvedApps;
+  const API = 'https://ghe.ids.test.invalid/api/v3';
+  // Two apps on a real key, each of which GitHub (a fake `GET /app`) recognises (issue #435).
+  const entry = (appId: string, slug: string) =>
+    ({
+      source: 'vault',
+      fingerprint: 'fp',
+      entry: { ...APP_ENTRY, appId, slug, importedAt: 'x' },
+    }) as const;
+  const apps = new Map([
+    ['octo', { author: entry('9', 'jm'), reviewer: entry('10', 'jm-reviewer') }],
+  ]) as unknown as ResolvedApps;
+  beforeAll(() => {
+    nock.disableNetConnect();
+  });
+  afterEach(() => {
+    nock.cleanAll();
+  });
+  afterAll(() => {
+    nock.enableNetConnect();
+  });
   const appWorld = (verify: (role: string) => Promise<void>) => {
     const w = world({
       zone: { githubApp: { repositoryId: 5, installations: { author: 7, reviewer: 8 } } },
     });
     w.deps.resolvedApps = () => apps;
+    w.deps.appApiBase = API;
+    for (const [id, slug] of [
+      ['9', 'jm'],
+      ['10', 'jm-reviewer'],
+    ] as const)
+      nock(API, { reqheaders: { authorization: (v: string) => issOf(v) === id } })
+        .persist()
+        .get('/app')
+        .reply(200, { id: Number(id), slug });
     const asked: string[] = [];
     w.deps.verifiedInstallation = async (zone, role) => {
       asked.push(`${zone.id}/${role}`);
@@ -2247,5 +2278,255 @@ describe('chat.service (#336)', () => {
       new Map([['octo', { author: reviewer, reviewer }]]) as unknown as ResolvedApps;
     app.deps.chatHealth = healthy;
     expect((await app.run()).filter((x) => x.id === 'chat.service' && x.zoneId)).toEqual([]);
+  });
+});
+
+describe('forge.author and forge.reviewer for GitHub App roles (issue #435)', () => {
+  const API = 'https://ghe.doctor.test.invalid/api/v3';
+  const DAY = 86_400_000;
+  const AUTHOR_APP: GitHubAppEntry = { ...APP_ENTRY, importedAt: ago(10 * DAY).toISOString() };
+  const REVIEWER_APP: GitHubAppEntry = {
+    ...AUTHOR_APP,
+    appId: '654321',
+    slug: 'acme-jumpmaster-reviewer',
+  };
+  const SENTINEL = 'ghs_' + 'SENTINELSENTINELSENTINEL0123456789';
+  const pemBody = APP_ENTRY.pem
+    .split('\n')
+    .filter((l) => l.trim() !== '' && !l.startsWith('-----'))
+    .join('');
+  const read = (entry: GitHubAppEntry | null) =>
+    entry ? { source: 'vault', fingerprint: 'fp', entry } : { source: 'missing' };
+  const appWorld = (o: { author?: GitHubAppEntry | null; reviewer?: GitHubAppEntry | null }) => {
+    const w = world({
+      zone: { githubApp: { repositoryId: 5, installations: { author: 7, reviewer: 8 } } },
+    });
+    const apps = new Map([
+      [
+        'octo',
+        {
+          author: read(o.author === undefined ? AUTHOR_APP : o.author),
+          reviewer: read(o.reviewer === undefined ? REVIEWER_APP : o.reviewer),
+        },
+      ],
+    ]) as unknown as ResolvedApps;
+    w.deps.resolvedApps = () => apps;
+    w.deps.appApiBase = API;
+    return w;
+  };
+  /** A fake `GET /app`: answers by the app id the JWT is issued for. */
+  const getApp = (answer: (appId: string) => [number, unknown]) => {
+    for (const id of [AUTHOR_APP.appId, REVIEWER_APP.appId])
+      nock(API, { reqheaders: { authorization: (v: string) => issOf(v) === id } })
+        .persist()
+        .get('/app')
+        .reply(() => answer(id));
+  };
+  const byId = (id: string): [number, unknown] =>
+    id === AUTHOR_APP.appId
+      ? [200, { id: Number(AUTHOR_APP.appId), slug: AUTHOR_APP.slug }]
+      : [200, { id: Number(REVIEWER_APP.appId), slug: REVIEWER_APP.slug }];
+
+  beforeAll(() => {
+    nock.disableNetConnect();
+  });
+  afterEach(() => {
+    nock.cleanAll();
+  });
+  afterAll(() => {
+    nock.enableNetConnect();
+  });
+
+  test("an app author whose GET /app names the entry's id and slug, with push, passes", async () => {
+    getApp(byId);
+    const checks = await appWorld({}).run();
+    const c = one(checks, 'forge.author');
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('acme-jumpmaster-author[bot]');
+    expect(c.summary).toContain('GitHub App');
+    expect(c.summary).toContain('write on octo/demo');
+    expect(c.summary).not.toMatch(/unrecognised|unset token|123456/);
+    expect(one(checks, 'forge.reviewer').status).toBe('pass');
+  });
+
+  test("the installation token's expiry an hour ahead is not the token-expiry warn", async () => {
+    getApp(byId);
+    const w = appWorld({});
+    w.f.state.access.author.tokenExpiresAt = new Date(NOW.getTime() + 3_600_000).toISOString();
+    const c = one(await w.run(), 'forge.author');
+    expect(c.status).toBe('pass');
+    expect(c.summary).not.toContain('expires');
+  });
+
+  test('a key GitHub rejects (401) fails, naming the key', async () => {
+    getApp(() => [401, { message: 'Bad credentials' }]);
+    const c = one(await appWorld({}).run(), 'forge.author');
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('key');
+    expect(c.fix).toContain('private key');
+    expect(c.fix).toContain('import');
+  });
+
+  test('a key that cannot sign fails, naming the key', async () => {
+    const c = one(
+      await appWorld({ author: { ...AUTHOR_APP, pem: 'not a key' } }).run(),
+      'forge.author',
+    );
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('key');
+    expect(c.fix).toContain('private key');
+  });
+
+  test('another app id for the right slug fails, saying to re-import', async () => {
+    getApp(() => [200, { id: 999, slug: AUTHOR_APP.slug }]);
+    const c = one(await appWorld({}).run(), 'forge.author');
+    expect(c.status).toBe('fail');
+    expect(c.fix).toMatch(/re-import/i);
+  });
+
+  test('another slug for the author fails, naming authorLoginAliases and the old login', async () => {
+    getApp((id) => [200, { id: Number(id), slug: 'renamed-app' }]);
+    const c = one(await appWorld({}).run(), 'forge.author');
+    expect(c.status).toBe('fail');
+    expect(c.fix).toMatch(/re-import/i);
+    expect(c.fix).toContain('authorLoginAliases');
+    expect(c.fix).toContain('acme-jumpmaster-author[bot]');
+  });
+
+  test('another slug for the reviewer fails without authorLoginAliases', async () => {
+    getApp((id) =>
+      id === AUTHOR_APP.appId ? byId(id) : [200, { id: Number(id), slug: 'renamed-app' }],
+    );
+    const checks = await appWorld({}).run();
+    expect(one(checks, 'forge.author').status).toBe('pass');
+    const c = one(checks, 'forge.reviewer');
+    expect(c.status).toBe('fail');
+    expect(c.fix).toMatch(/re-import/i);
+    expect(c.fix).not.toContain('authorLoginAliases');
+  });
+
+  test('no answer, a 503 or an unparseable body warns to run the doctor again', async () => {
+    nock(API).persist().get('/app').replyWithError('socket hang up');
+    const none = one(await appWorld({ reviewer: null }).run(), 'forge.author');
+    expect(none.status).toBe('warn');
+    expect(none.fix).toContain('doctor again');
+    nock.cleanAll();
+    getApp(() => [503, 'unavailable']);
+    const busy = one(await appWorld({ reviewer: null }).run(), 'forge.author');
+    expect(busy.status).toBe('warn');
+    expect(busy.fix).toContain('doctor again');
+    nock.cleanAll();
+    nock(API).persist().get('/app').reply(200, 'not json', { 'content-type': 'text/plain' });
+    expect(one(await appWorld({ reviewer: null }).run(), 'forge.author').status).toBe('warn');
+  });
+
+  test("a reviewer app with the author's appId fails forge.reviewer; a different one does not", async () => {
+    getApp((id) => byId(id));
+    const same = await appWorld({ reviewer: { ...AUTHOR_APP } }).run();
+    const c = one(same, 'forge.reviewer');
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('approve its own pull request');
+    expect(one(same, 'forge.author').status).toBe('pass');
+    expect(one(await appWorld({}).run(), 'forge.reviewer').status).toBe('pass');
+  });
+
+  test('a key imported more than 365 days ago warns; 364 days passes', async () => {
+    getApp(byId);
+    const old = one(
+      await appWorld({ author: { ...AUTHOR_APP, importedAt: ago(366 * DAY).toISOString() } }).run(),
+      'forge.author',
+    );
+    expect(old.status).toBe('warn');
+    expect(old.fix).toContain('new private key');
+    expect(old.fix).toContain('delete the old key');
+    const fresh = one(
+      await appWorld({ author: { ...AUTHOR_APP, importedAt: ago(364 * DAY).toISOString() } }).run(),
+      'forge.author',
+    );
+    expect(fresh.status).toBe('pass');
+  });
+
+  test('the write-role and reviewer-admin fixes name the app and its installation, not a PAT variable', async () => {
+    getApp(byId);
+    const w = appWorld({});
+    w.f.state.access.author.permissions.push = false;
+    w.f.state.access.reviewer.permissions.admin = true;
+    const checks = await w.run();
+    const a = one(checks, 'forge.author');
+    expect(a.status).toBe('fail');
+    expect(a.fix).toContain('acme-jumpmaster-author');
+    expect(a.fix).toContain('installation');
+    expect(a.fix).not.toMatch(/JM_GITHUB_/);
+    const r = one(checks, 'forge.reviewer');
+    expect(r.status).toBe('fail');
+    expect(r.summary).toContain('admin');
+    expect(r.fix).toContain('acme-jumpmaster-reviewer');
+    expect(r.fix).not.toMatch(/JM_GITHUB_/);
+  });
+
+  test("a PAT zone, a hybrid zone's PAT role, and no resolvedApps give today's results", async () => {
+    const tokens = `${installDocUrl(process.env.JM_RELEASE_VERSION)}#tokens`;
+    const limit =
+      "account has push; the token's own permissions can't be read — a missing Contents or Issues write shows at the first push or filing";
+    const author = {
+      id: 'forge.author',
+      zoneId: 'main',
+      doc: tokens,
+      status: 'pass',
+      summary: `author account author-bot has write on octo/demo (fine-grained token); ${limit}`,
+    };
+    const reviewer = {
+      id: 'forge.reviewer',
+      zoneId: 'main',
+      doc: tokens,
+      status: 'pass',
+      summary: `reviewer account reviewer-bot has write on octo/demo (fine-grained token); ${limit}`,
+    };
+    const bare = await world().run();
+    expect(one(bare, 'forge.author')).toEqual(author);
+    expect(one(bare, 'forge.reviewer')).toEqual(reviewer);
+    const pat = await appWorld({ author: null, reviewer: null }).run();
+    expect(one(pat, 'forge.author')).toEqual(author);
+    expect(one(pat, 'forge.reviewer')).toEqual(reviewer);
+    getApp(byId);
+    const hybrid = await appWorld({ author: null }).run();
+    expect(one(hybrid, 'forge.author')).toEqual(author);
+    expect(one(hybrid, 'forge.reviewer').summary).toContain('GitHub App');
+  });
+
+  test('no summary, fix or log line holds the PEM, a JWT or a token', async () => {
+    const logged: string[] = [];
+    const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation((...a: unknown[]) => {
+        logged.push(a.map(String).join(' '));
+      }),
+    );
+    try {
+      const outcomes: Array<(id: string) => [number, unknown]> = [
+        byId,
+        () => [401, { message: SENTINEL }],
+        (id) => [200, { id: Number(id), slug: SENTINEL }],
+        () => [200, { id: 1, slug: SENTINEL }],
+        () => [503, SENTINEL],
+      ];
+      const texts: string[] = [];
+      for (const answer of outcomes) {
+        nock.cleanAll();
+        getApp(answer);
+        const w = appWorld({
+          author: { ...AUTHOR_APP, importedAt: ago(400 * DAY).toISOString() },
+        });
+        w.f.state.access.author.tokenExpiresAt = SENTINEL;
+        for (const c of await w.run()) texts.push(c.summary, c.fix ?? '');
+      }
+      for (const t of [...texts, ...logged]) {
+        expect(t).not.toContain(pemBody.slice(0, 40));
+        expect(t).not.toContain('PRIVATE KEY');
+        expect(t).not.toMatch(/eyJ/);
+        expect(t).not.toContain(SENTINEL);
+      }
+    } finally {
+      for (const s of spies) s.mockRestore();
+    }
   });
 });

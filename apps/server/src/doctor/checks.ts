@@ -60,7 +60,15 @@ import {
   lastArchiveFailure,
 } from '../transcripts.js';
 import { dispatchGate } from '../usage.js';
-import type { Shadowed } from '../vault/credentials.js';
+import {
+  APP_ID_MISMATCH,
+  APP_KEY_REJECTED,
+  APP_SIGN_FAILED,
+  APP_SLUG_MISMATCH,
+  type Shadowed,
+  testAppEntry,
+} from '../vault/credentials.js';
+import type { GitHubAppEntry } from '../vault/github-app-entries.js';
 import type { CredentialProblem } from '../vault/problems.js';
 import { credentialFor, isAppReviewerZone, type ResolvedApps } from '../vault/resolution.js';
 import { KEY_CHANGED, VAULT_KEY_IN_DATA_DIR } from '../vault/vault.js';
@@ -174,6 +182,8 @@ export type DoctorDeps = {
   readForge?(zoneId: string): Forge | undefined;
   /** The GitHub App entries as they resolved; absent, every zone is judged as a PAT zone. */
   resolvedApps?(): ResolvedApps;
+  /** The GitHub API an app role's key is tested against (`GET /app`; default GitHub's). */
+  appApiBase?: string;
   /**
    * The installation check every mint goes through (issue #267): an app zone's recorded ids
    * against its repository. Absent, `forge.author` and `forge.reviewer` don't check them.
@@ -238,6 +248,8 @@ export const STICK_LIVE_MS = 120_000;
 const TOKEN_WARN_DAYS = 330;
 const TOKEN_LIFE_DAYS = 365;
 const TOKEN_EXPIRY_WARN_MS = 14 * 86_400_000;
+/** An app key imported longer ago than this is due for rotation. */
+const APP_KEY_LIFE_DAYS = 365;
 const EGRESS_WINDOW_MS = 14 * 86_400_000;
 const DAY_MS = 86_400_000;
 const DIGEST_REF = /^[^\s@-][^\s@]*@sha256:[0-9a-f]{64}$/;
@@ -1048,6 +1060,8 @@ async function identityCheck(
     return { ...base, status: 'skip', summary: NO_REVIEWER, doc: doc('starter-mode') };
   const unverified = await appIdsProblem(d, zone, who, base);
   if (unverified) return unverified;
+  const app = appEntryFor(d, zone, who);
+  if (app) return appIdentityCheck(d, zone, r, who, app, base);
   const login = await r.logins[who]();
   if (!login.ok)
     return readFailed(base, who, 'read its own account (GET /user)', 'any valid token', login);
@@ -1058,15 +1072,7 @@ async function identityCheck(
   const token =
     who === 'author' ? d.config.secrets.githubAuthorToken : d.config.secrets.githubReviewerToken;
   const kind = tokenKind(token);
-  const role = a.permissions.admin
-    ? 'admin'
-    : a.permissions.maintain
-      ? 'maintain'
-      : a.permissions.push
-        ? 'write'
-        : a.permissions.pull
-          ? 'read'
-          : 'none';
+  const role = roleOf(a);
   const v = TOKEN_VAR[who];
   if (who === 'reviewer') {
     const author = await r.logins.author();
@@ -1109,6 +1115,141 @@ async function identityCheck(
       status: 'warn',
       summary,
       fix: `Create a replacement token before then, write it to the file ${v}_FILE names, and restart the server.`,
+    };
+  return { ...base, status: 'pass', summary };
+}
+
+/** The repository role GitHub reports for an identity. */
+function roleOf(a: Awaited<ReturnType<Forge['repoAccess']>>): string {
+  const p = a.permissions;
+  return p.admin ? 'admin' : p.maintain ? 'maintain' : p.push ? 'write' : p.pull ? 'read' : 'none';
+}
+
+/**
+ * The app entry a zone's `who` role uses, when the role is an app role: its owner's GitHub App,
+ * decryptable. Undefined for a PAT role, an undecryptable entry, or when no apps resolved.
+ */
+function appEntryFor(
+  d: DoctorDeps,
+  zone: DropZoneConfig,
+  who: 'author' | 'reviewer',
+): GitHubAppEntry | undefined {
+  const apps = d.resolvedApps?.();
+  if (!apps) return undefined;
+  const r = credentialFor(zone, who, apps);
+  if (r.ref.kind !== 'github-app' || r.problem) return undefined;
+  const read = apps.get(r.ref.owner)?.[who];
+  return read && read.source !== 'missing' ? read.entry : undefined;
+}
+
+/**
+ * `forge.author` / `forge.reviewer` for an app role (spec §6, app column): the key against
+ * `GET /app`, distinct apps, the app's grant on the repository, then the key's age. The
+ * installation token's expiry is not the operator's to renew, so it is never reported. No line
+ * holds the app id, the key, the JWT or a token.
+ */
+async function appIdentityCheck(
+  d: DoctorDeps,
+  zone: DropZoneConfig,
+  r: ZoneReads,
+  who: 'author' | 'reviewer',
+  entry: GitHubAppEntry,
+  base: { id: string; zoneId: string; doc: string },
+): Promise<DoctorCheck> {
+  const bot = `${entry.slug}[bot]`;
+  const named = `the ${who} GitHub App ${entry.slug}`;
+  const page = `${named}'s page on GitHub (Settings → Developer settings → GitHub Apps)`;
+  const test = await testAppEntry(entry, {
+    now: () => d.now().getTime(),
+    ...(d.appApiBase ? { apiBase: d.appApiBase } : {}),
+  });
+  if (!test.ok) {
+    const problem = test.problem;
+    if (problem === APP_KEY_REJECTED || problem === APP_SIGN_FAILED)
+      return {
+        ...base,
+        status: 'fail',
+        summary:
+          problem === APP_KEY_REJECTED
+            ? `GitHub rejected the private key of ${named} (401): it is the wrong key or it was revoked`
+            : `the private key of ${named} could not be used to sign`,
+        fix: `Generate a new private key on ${page}, then import the app again with it.`,
+      };
+    if (problem === APP_ID_MISMATCH)
+      return {
+        ...base,
+        status: 'fail',
+        summary: `GitHub says the key of ${named} belongs to a different app than its entry's app id`,
+        fix: `Re-import ${named} (Settings, Credentials) so its entry matches the app its key belongs to.`,
+      };
+    if (problem === APP_SLUG_MISMATCH)
+      return {
+        ...base,
+        status: 'fail',
+        summary: `GitHub names ${named} differently now: the app was renamed, so it no longer acts as ${bot}`,
+        fix:
+          who === 'author'
+            ? `Re-import the app (Settings, Credentials) so its entry carries the new name, and add the old login ${bot} to zone ${zone.id}'s authorLoginAliases so its open pull requests stay adopted.`
+            : `Re-import the app (Settings, Credentials) so its entry carries the new name.`,
+      };
+    return {
+      ...base,
+      status: 'warn',
+      summary: `could not test the key of ${named}: ${test.status === null ? 'GitHub did not answer' : `GitHub answered HTTP ${test.status}`}; the check did not run`,
+      fix: 'Check the server can reach api.github.com, then run the doctor again.',
+    };
+  }
+  if (who === 'reviewer') {
+    const author = appEntryFor(d, zone, 'author');
+    if (author && author.appId === entry.appId)
+      return {
+        ...base,
+        status: 'fail',
+        summary: `the reviewer and the author are the same GitHub App (${entry.slug}): GitHub never lets an app approve its own pull request`,
+        fix: `Create a second GitHub App for the reviewer, install it on ${zone.repo}, and import it as ${zone.repo.split('/')[0]}'s reviewer app.`,
+      };
+  }
+  const login = await r.logins[who]();
+  if (!login.ok)
+    return readFailed(base, who, 'read its own account (GET /user)', 'any valid token', login);
+  const access = await r.access[who]();
+  if (!access.ok)
+    return readFailed(base, who, `read the repository ${zone.repo}`, 'Metadata: read', access);
+  const a = access.value;
+  const role = roleOf(a);
+  const installation = `${named}'s installation (its page on GitHub → Install App → the account → Configure)`;
+  if (who === 'reviewer') {
+    const author = await r.logins.author();
+    if (author.ok && author.value === login.value)
+      return {
+        ...base,
+        status: 'fail',
+        summary: `the reviewer is the same account as the author (${login.value}): GitHub never lets an account approve its own pull request`,
+        fix: `Import a second GitHub App for the reviewer, and install it on ${zone.repo}.`,
+      };
+  }
+  if (!a.permissions.push)
+    return {
+      ...base,
+      status: 'fail',
+      summary: `GitHub reports ${role} access to ${zone.repo} for ${named} (${bot}), not write`,
+      fix: `Check ${installation} includes ${zone.repo}, and that the app grants Contents: Read and write (accept the new permissions on the installation if GitHub asks).`,
+    };
+  if (who === 'reviewer' && a.permissions.admin)
+    return {
+      ...base,
+      status: 'fail',
+      summary: `${named} (${bot}) has admin on ${zone.repo}: an admin can change the rules its own approval is checked against`,
+      fix: `Remove the Administration permission from ${named} on its page, and accept the change on ${installation}.`,
+    };
+  const summary = `${who} app ${bot} has ${role} on ${zone.repo} (a GitHub App: tokens are minted per use, so there is no token expiry); app has push`;
+  const imported = Date.parse(entry.importedAt);
+  if (!Number.isNaN(imported) && d.now().getTime() - imported > APP_KEY_LIFE_DAYS * DAY_MS)
+    return {
+      ...base,
+      status: 'warn',
+      summary: `${summary}; its private key was imported more than ${APP_KEY_LIFE_DAYS} days ago`,
+      fix: `Generate a new private key on ${page}, import it, then delete the old key on the app's page.`,
     };
   return { ...base, status: 'pass', summary };
 }
