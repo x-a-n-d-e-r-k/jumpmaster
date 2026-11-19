@@ -2352,3 +2352,109 @@ describe('Ask about this (#103)', () => {
     expect(html).toContain('data-focus-ref="a&#39;&amp;&lt;b&gt;"');
   });
 });
+
+describe('the drop page header and system-event groups (#499)', () => {
+  const jm: DropZoneConfig = { ...z, id: 'jm', repo: 'octo/jm' };
+  const now = new Date('2026-01-01T01:00:00.000Z');
+  const issue: WorkItem = { ...item, id: 42, dropZoneId: 'jm', issueNumber: 487, title: 'Header' };
+  const implement: Drop = {
+    ...drop,
+    id: 'abcdef12-3456-7890-abcd-ef1234567890',
+    dropZoneId: 'jm',
+    workItemId: 42,
+    stickId: 'kidney',
+    prNumber: 12,
+    headSha: '0123456789abcdef',
+  };
+  const summaryOf = (html: string) =>
+    html.slice(html.indexOf('<dl class="drop-summary">'), html.indexOf('</dl>'));
+
+  test('an implement drop shows project, issue, PR, stick, times and its short id', () => {
+    const html = renderDrop(implement, [], [], null, { item: issue, zones: [jm], now });
+    expect(html).toContain(
+      '<h2 title="abcdef12-3456-7890-abcd-ef1234567890">implement drop abcdef12</h2>',
+    );
+    expect(html).toContain('<code>abcdef12-3456-7890-abcd-ef1234567890</code>');
+    const s = summaryOf(html);
+    expect(s).toContain('<a href="/zones/jm">octo/jm</a>');
+    expect(s).toContain('<a href="/work/jm/487">#487 Header</a>');
+    expect(s).toContain('kidney');
+    expect(s).toContain('https://github.com/octo/jm/pull/12');
+    expect(s).toContain('<code>0123456</code>');
+    expect(s).toContain('<time datetime="2026-01-01T00:01:05.000Z"');
+    expect(s).toContain('1m 5s');
+    expect(s).toContain('lint&lt;b&gt;: pass');
+    expect(html.slice(html.indexOf('</dl>'), html.indexOf('<h3>Transcript'))).toContain(
+      'Requested model:',
+    );
+    expect(html.indexOf('<dl class="drop-summary">')).toBeLessThan(html.indexOf('<h3>Transcript'));
+    expect(html).toContain(
+      '<a href="/work">Work</a> › <a href="/work?zone=jm">octo/jm</a> › <a href="/work/jm/487">#487</a> › abcdef12',
+    );
+    expect(html).not.toContain('href="/">Back');
+  });
+
+  test('a crew drop shows crew and the Drops breadcrumb', () => {
+    const html = renderDrop({ ...implement, role: 'crew', workItemId: null }, [], [], null, {
+      zones: [jm],
+      now,
+    });
+    expect(summaryOf(html)).toContain('<dd>crew</dd>');
+    expect(html).toContain('<a href="/drops">Drops</a> › abcdef12');
+    expect(html).not.toContain('<a href="/work">Work</a> ›');
+  });
+
+  test('a drop with no work item, stick or times shows - in those fields', () => {
+    const bare: Drop = {
+      ...drop,
+      workItemId: 5,
+      stickId: null,
+      startedAt: null,
+      finishedAt: null,
+      prNumber: null,
+      headSha: null,
+      resultJson: null,
+    };
+    const s = summaryOf(renderDrop(bare, []));
+    for (const f of ['Work', 'Stick', 'Started', 'Finished', 'Elapsed', 'PR', 'Head', 'Gates']) {
+      expect(s).toContain(`<dt>${f}</dt><dd>-</dd>`);
+    }
+  });
+
+  const sys = (seq: number) =>
+    ({
+      seq,
+      ts: 't',
+      kind: 'agent',
+      data: { raw: { type: 'system', marker: `sys-${seq}` } },
+    }) as const;
+  const text = (seq: number) =>
+    ({
+      seq,
+      ts: 't',
+      kind: 'agent',
+      data: {
+        raw: { type: 'assistant', message: { content: [{ type: 'text', text: `txt-${seq}` }] } },
+      },
+    }) as const;
+
+  test('runs of two or more system events fold into one group; a lone one does not', () => {
+    const html = renderDrop(drop, [sys(1), sys(2), sys(3), text(4), sys(5)]);
+    const t = html.slice(
+      html.indexOf('<h3>Transcript</h3>'),
+      html.indexOf('<details class="raw-events">'),
+    );
+    expect(t.match(/<details class="t-system">/g)).toHaveLength(1);
+    expect(t).toContain('<summary>3 system events</summary>');
+    const group = t.indexOf('<details class="t-system">');
+    const groupEnd = t.indexOf('</details></details>', group);
+    expect(t.indexOf('sys-3')).toBeLessThan(groupEnd);
+    expect(t.indexOf('txt-4')).toBeGreaterThan(groupEnd);
+    expect(t.indexOf('sys-5')).toBeGreaterThan(t.indexOf('txt-4'));
+    // sys-5 stays outside any group: nothing after the text opens one.
+    expect(t.slice(t.indexOf('txt-4'))).not.toContain('t-system');
+    for (const m of ['sys-1', 'sys-2', 'sys-3', 'txt-4', 'sys-5']) {
+      expect(t.split(m)).toHaveLength(2);
+    }
+  });
+});
