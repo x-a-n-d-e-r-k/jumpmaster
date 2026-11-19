@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { listAudit } from '../auth/audit.js';
+import { listBriefings, raiseBriefing } from '../briefings.js';
 import { loadBoot } from '../config/boot.js';
 import { ConfigStore } from '../config/store.js';
 import { type Db, openDb } from '../db/open.js';
@@ -16,7 +17,7 @@ import {
   zoneStopping,
 } from '../db/repo.js';
 import { plus, t0, tmpDbFile } from '../test/helpers.js';
-import { stopZone, sweepStopping } from './stop.js';
+import { removeZone, stopZone, sweepStopping, withdrawOrphanBriefings } from './stop.js';
 
 const env = {
   JM_CLAUDE_TOKEN: 'sk-ant-' + 'oat01-STOPCLAUDEDUMMY0123456789',
@@ -139,5 +140,100 @@ describe('stopping a zone', () => {
     expect(r.kind).toBe('refused');
     expect(getZoneMode(db, 'a', 'active')).toBe('active');
     expect(zoneStopping(db, 'a')).toBeUndefined();
+  });
+});
+
+const brief = (zoneId: string, subject: string) => ({
+  zoneId,
+  kind: 'parked' as const,
+  subject,
+  decision: `Parked ${subject}?`,
+  why: 'w',
+  options: [{ id: 'retry', label: 'Retry', effect: 'none' as const }],
+  source: 'server' as const,
+});
+const states = (db: Db, zoneId: string) => listBriefings(db, { zoneId }).map((b) => b.state);
+
+describe('removing a zone withdraws its open briefings (#178)', () => {
+  test('only the removed zone’s open briefings are withdrawn, with one audit entry', () => {
+    const { db, store } = world();
+    for (const z of ['a', 'b'])
+      for (const s of ['item:1', 'item:2']) raiseBriefing(db, brief(z, s), t0);
+    const r = stopZone(db, store, 'a', {
+      via: 'ctl',
+      principal: token,
+      now: t0,
+    });
+    expect(r.kind).toBe('removed');
+    expect(states(db, 'a')).toEqual(['withdrawn', 'withdrawn']);
+    expect(states(db, 'b')).toEqual(['open', 'open']);
+    const withdrawals = listAudit(db).filter((a) => a.action === 'briefing.withdraw');
+    expect(withdrawals).toHaveLength(1);
+    expect(withdrawals[0]).toMatchObject({
+      target: 'a',
+      detail: { count: 2, reason: 'zone removed' },
+    });
+  });
+
+  test('a zone removed by the stopping sweep once drained has its briefings withdrawn', () => {
+    const { db, store } = world();
+    runningDrop(db);
+    raiseBriefing(db, brief('a', 'item:1'), t0);
+    raiseBriefing(db, brief('b', 'item:1'), t0);
+    expect(stopZone(db, store, 'a', { via: 'ui', principal: token, now: t0 }).kind).toBe(
+      'stopping',
+    );
+    expect(states(db, 'a')).toEqual(['open']);
+    updateDrop(db, 'd1', { state: 'succeeded' });
+    expect(sweepStopping(db, store, plus(t0, 1000))).toEqual(['a']);
+    expect(states(db, 'a')).toEqual(['withdrawn']);
+    expect(states(db, 'b')).toEqual(['open']);
+  });
+
+  test('a removal refused for a revision conflict withdraws nothing', () => {
+    const { db, store } = world();
+    raiseBriefing(db, brief('a', 'item:1'), t0);
+    const r = removeZone(db, store, 'a', {
+      via: 'ctl',
+      principal: token,
+      expectRevision: store.revision() - 1,
+      now: t0,
+    });
+    expect(r.ok).toBe(false);
+    expect(ids(store)).toEqual(['a', 'b']);
+    expect(states(db, 'a')).toEqual(['open']);
+    expect(listAudit(db).filter((a) => a.action === 'briefing.withdraw')).toEqual([]);
+  });
+
+  test('a removal refused in file mode withdraws nothing', () => {
+    const d = dir();
+    const filePath = join(d, 'jumpmaster.config.json');
+    writeFileSync(filePath, JSON.stringify({ dataDir: './data', dropZones: [zd('a')] }));
+    const db = openDb(tmpDbFile());
+    const store = openStore(db, join(d, 'no-lock.json'), filePath);
+    raiseBriefing(db, brief('a', 'item:1'), t0);
+    expect(stopZone(db, store, 'a', { via: 'ctl', principal: token, now: t0 }).kind).toBe(
+      'refused',
+    );
+    expect(states(db, 'a')).toEqual(['open']);
+  });
+});
+
+describe('the start-up sweep of orphan briefings (#178)', () => {
+  test('withdraws only briefings of zones not in the config, once', () => {
+    const { db, store } = world();
+    raiseBriefing(db, brief('a', 'item:1'), t0);
+    raiseBriefing(db, brief('old', 'item:1'), t0);
+    raiseBriefing(db, brief('old', 'item:2'), t0);
+    expect(withdrawOrphanBriefings(db, store, t0)).toBe(2);
+    expect(states(db, 'old')).toEqual(['withdrawn', 'withdrawn']);
+    expect(states(db, 'a')).toEqual(['open']);
+    const audited = () => listAudit(db).filter((a) => a.action === 'briefing.withdraw');
+    expect(audited()).toHaveLength(1);
+    expect(audited()[0]).toMatchObject({ via: 'system', detail: { count: 2 } });
+    // A second run changes nothing more.
+    expect(withdrawOrphanBriefings(db, store, plus(t0, 1000))).toBe(0);
+    expect(states(db, 'a')).toEqual(['open']);
+    expect(audited()).toHaveLength(1);
   });
 });

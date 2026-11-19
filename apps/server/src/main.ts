@@ -36,7 +36,7 @@ import { recordPass } from './status.js';
 import { syncDropZone } from './sync.js';
 import { transcriptPruner } from './transcripts.js';
 import { credentialProblems } from './vault/problems.js';
-import { sweepStopping } from './zones/stop.js';
+import { sweepStopping, withdrawOrphanBriefings } from './zones/stop.js';
 
 /**
  * The startup line. On 0.0.0.0 the server is inside a container (compose's default), where that
@@ -285,6 +285,13 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     }
   };
   sweepStops();
+  // Open briefings of zones no longer in the config (left by removals before #178), withdrawn once.
+  try {
+    const orphans = withdrawOrphanBriefings(db, live, new Date());
+    if (orphans > 0) log(`withdrew ${orphans} open briefings of zones no longer configured`);
+  } catch (e) {
+    log(`orphan briefing sweep failed: ${errorMessage(e)}`);
+  }
   // One config per pass, read at its start: a revision applied mid-pass is the next pass's. A
   // running drop keeps the payload it was leased with.
   const pass = async () => {
