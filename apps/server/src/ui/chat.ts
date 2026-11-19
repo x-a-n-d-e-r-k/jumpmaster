@@ -2,6 +2,8 @@ import { CARD_STATE_TEXT, CARD_TITLE, type ChatCard, renderCard } from '../chat/
 import type { ChatMessage, ChatThread } from '../chat/store.js';
 import { renderChatMarkdown } from './markdown.js';
 import { escapeHtml, linkify, page } from './pages.js';
+import { relativeTime } from './time.js';
+import { type ZoneRef, zoneNamer } from './zone-name.js';
 
 /**
  * The crew chat's pages (#336): `/chat` lists the threads, `/chat/:id` shows one and streams its
@@ -26,8 +28,32 @@ const WHO: Record<string, string> = {
 
 const CHAT_STYLE = `<style>.chat-log{display:flex;flex-direction:column;gap:.75rem;margin:1rem 0}.chat-log .msg{padding:.75rem 1rem;border-radius:12px;box-shadow:inset 0 0 0 1px var(--stroke-soft-200);overflow-wrap:anywhere}.chat-log .msg.owner{background:var(--bg-weak-50);white-space:pre-wrap}.chat-log .msg.live .text{white-space:pre-wrap}.chat-log .msg .text>:first-child{margin-top:0}.chat-log .msg .text>:last-child{margin-bottom:0}.chat-log .msg h3,.chat-log .msg h4,.chat-log .msg h5{margin:.75rem 0 .25rem}.chat-log .msg ul,.chat-log .msg ol{margin:.25rem 0;padding-left:1.5rem}.chat-log .msg p{margin:.5rem 0}.chat-log .msg table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse;margin:.5rem 0}.chat-log .msg th,.chat-log .msg td{border:1px solid var(--stroke-soft-200);padding:.25rem .5rem;text-align:left}.chat-log .msg pre{white-space:pre;overflow-x:auto;padding:.5rem;background:var(--bg-weak-50);border-radius:8px}.chat-log .who{font-weight:600;font-size:.875rem;white-space:normal}.chat-log .state{display:block;white-space:normal}.chat-log details.tool{font-size:.875rem;padding:0 1rem}.chat-log .msg.card{background:var(--bg-weak-50);white-space:normal}.chat-log .msg.card.refused{opacity:.8}.chat-send{position:sticky;bottom:0;z-index:1;background:var(--bg-weak-50);padding:.5rem 0 calc(.5rem + env(safe-area-inset-bottom))}.chat-send textarea{width:100%;min-height:5rem}.chat-send .error{margin:0 0 .5rem}.chat-send .hint{display:block;margin:.25rem 0 .5rem;color:var(--text-sub-600)}</style>`;
 
+const CHIP_STYLE = `<style>.chip{display:inline-block;margin-left:.5rem;padding:0 .5rem;border-radius:6px;font:500 .75rem/1.5rem var(--font-sans);white-space:nowrap;vertical-align:middle;background:var(--faded-lighter);color:var(--text-sub-600)}</style>`;
+
+/**
+ * What a focused thread is about, as a chip: the project for `zone`, `<project> · goals` for
+ * `goals`, `Briefing <ref>` for `briefing`. A zone no longer configured goes by its id; an
+ * unfocused thread has no chip.
+ */
+export function focusChip(t: ChatThread, zones: readonly ZoneRef[]): string {
+  if (t.focusKind === null || t.focusZoneId === null) return '';
+  const name = zoneNamer(zones)(t.focusZoneId);
+  const text =
+    t.focusKind === 'zone'
+      ? name
+      : t.focusKind === 'goals'
+        ? `${name} · goals`
+        : `Briefing ${escapeHtml(t.focusRef ?? '')}`;
+  return ` <span class="chip">${text}</span>`;
+}
+
 /** The `/chat` page: the threads, newest first, and a New thread button. */
-export function renderChatList(threads: ChatThread[], o: { serviceMissing: boolean }): string {
+export function renderChatList(
+  threads: ChatThread[],
+  o: { serviceMissing: boolean; zones?: readonly ZoneRef[]; now?: Date },
+): string {
+  const zones = o.zones ?? [];
+  const now = o.now ?? new Date();
   const missing = o.serviceMissing
     ? `<div class="card attention"><h2>The chat service is not running</h2><p>This install's <code>compose.yaml</code> is from before the chat. Run this in the install's directory to add it; your messages wait until it is up:</p><pre><code>${escapeHtml(CHAT_MISSING_COMMAND)}</code></pre></div>`
     : '';
@@ -37,12 +63,12 @@ export function renderChatList(threads: ChatThread[], o: { serviceMissing: boole
       : `<table><tr><th>Thread</th><th>Updated</th></tr>${threads
           .map(
             (t) =>
-              `<tr><td><a href="/chat/${encodeURIComponent(t.id)}">${escapeHtml(t.title)}</a></td><td>${escapeHtml(t.updatedAt)}</td></tr>`,
+              `<tr><td><a href="/chat/${encodeURIComponent(t.id)}">${escapeHtml(t.title)}</a>${focusChip(t, zones)}</td><td>${relativeTime(t.updatedAt, now)}</td></tr>`,
           )
           .join('')}</table>`;
   const script = `<script>document.getElementById('new-thread').addEventListener('submit',async(e)=>{e.preventDefault();const r=await jmFetch('/api/chat/threads',{});if(r.ok){const b=await r.json();location.href='/chat/'+encodeURIComponent(b.thread.id);}else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});</script>`;
   return page(
-    `<h2>Chat</h2>${missing}<form id="new-thread"><button class="primary">New thread</button></form>${list}${script}`,
+    `${CHIP_STYLE}<h2>Chat</h2>${missing}<form id="new-thread"><button class="primary">New thread</button></form>${list}${script}`,
     { title: 'Chat' },
   );
 }
@@ -114,11 +140,12 @@ export function renderThread(
   t: ChatThread,
   messages: ChatMessage[],
   cards: ChatCard[] = [],
+  o: { zones?: readonly ZoneRef[] } = {},
 ): string {
   const last = messages.reduce((n, m) => Math.max(n, m.seq), 0);
   const busy = messages.some((m) => m.state === 'queued' || m.state === 'running');
   return page(
-    `${CHAT_STYLE}<p><a href="/chat">All threads</a></p><h2>${escapeHtml(t.title)}</h2>` +
+    `${CHAT_STYLE}${CHIP_STYLE}<p><a href="/chat">All threads</a></p><h2>${escapeHtml(t.title)}${focusChip(t, o.zones ?? [])}</h2>` +
       `<div id="chat" data-thread="${t.id}" data-last="${last}" data-busy="${busy ? '1' : '0'}">` +
       `<div id="messages" class="chat-log" aria-live="polite">${logHtml(messages, cards)}</div>` +
       `<form id="send" class="chat-send"><textarea name="text" maxlength="20000" required placeholder="Ask Jumpmaster" aria-describedby="send-hint"></textarea><small id="send-hint" class="hint">Enter to send, Shift+Enter for a new line</small><button class="primary">Send</button></form></div>` +

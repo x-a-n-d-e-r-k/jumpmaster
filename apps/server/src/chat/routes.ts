@@ -22,8 +22,10 @@ import {
   type ChatMessage,
   createThread,
   getThread,
+  hasOwnerMessage,
   listMessages,
   listThreads,
+  setThreadTitle,
   threadBusy,
 } from './store.js';
 import type { HubEvent } from './turns.js';
@@ -31,6 +33,26 @@ import type { HubEvent } from './turns.js';
 /** The longest owner message, in characters. */
 export const MAX_MESSAGE_CHARS = 20_000;
 const DEFAULT_TITLE = 'New chat';
+/** The longest title a thread takes from its first message, `…` included. */
+export const MESSAGE_TITLE_CHARS = 60;
+
+/**
+ * A thread's title from its first owner message (#492): whitespace collapsed, leading heading
+ * markers off, and cut at a word boundary with `…` to at most MESSAGE_TITLE_CHARS. Empty when
+ * nothing is left.
+ */
+export function titleFromMessage(text: string): string {
+  const flat = text
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^#+\s*/, '')
+    .trim();
+  if (flat.length <= MESSAGE_TITLE_CHARS) return flat;
+  const room = flat.slice(0, MESSAGE_TITLE_CHARS);
+  const space = room.lastIndexOf(' ');
+  const cut = space > 0 ? room.slice(0, space) : room.slice(0, MESSAGE_TITLE_CHARS - 1);
+  return `${cut.trimEnd().slice(0, MESSAGE_TITLE_CHARS - 1)}…`;
+}
 
 export interface ChatRouteDeps {
   db: Db;
@@ -163,12 +185,19 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
         .code(400)
         .send({ error: `a message is 1 to ${MAX_MESSAGE_CHARS} characters of text` });
     }
-    const message = appendMessage(
-      db,
-      thread.id,
-      { role: 'owner', text: body.data.text, state: 'queued', sessionHash },
-      deps.now(),
-    );
+    const now = deps.now();
+    const message = db.transaction(() => {
+      if (thread.title === DEFAULT_TITLE && !hasOwnerMessage(db, thread.id)) {
+        const title = titleFromMessage(body.data.text);
+        if (title) setThreadTitle(db, thread.id, title, now);
+      }
+      return appendMessage(
+        db,
+        thread.id,
+        { role: 'owner', text: body.data.text, state: 'queued', sessionHash },
+        now,
+      );
+    })();
     deps.turns?.enqueue(thread.id);
     return reply.code(202).send({ message });
   });

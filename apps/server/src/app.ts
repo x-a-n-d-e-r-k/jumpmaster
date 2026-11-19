@@ -752,28 +752,30 @@ export function createApp(
   // The crew chat's pages: without the chat service (an older compose file) `/chat` names the
   // one command that adds it.
   app.get('/chat', async (req, reply) =>
-    reply
-      .type('text/html; charset=utf-8')
-      .send(
-        withCsrf(
-          req,
-          renderChatList(listThreads(deps.db), { serviceMissing: deps.chatTurns === undefined }),
-        ),
+    reply.type('text/html; charset=utf-8').send(
+      withCsrf(
+        req,
+        renderChatList(listThreads(deps.db), {
+          serviceMissing: deps.chatTurns === undefined,
+          zones: cfg(req).dropZones,
+          now: deps.now(),
+        }),
       ),
+    ),
   );
 
   app.get<{ Params: { id: string } }>('/chat/:id', async (req, reply) => {
     const id = threadIdOf(req.params.id);
     const thread = id === undefined ? undefined : getThread(deps.db, id);
     if (!thread) return reply.code(404).type('text/plain').send('not found');
-    return reply
-      .type('text/html; charset=utf-8')
-      .send(
-        withCsrf(
-          req,
-          renderThread(thread, listMessages(deps.db, thread.id), listCards(deps.db, thread.id)),
-        ),
-      );
+    return reply.type('text/html; charset=utf-8').send(
+      withCsrf(
+        req,
+        renderThread(thread, listMessages(deps.db, thread.id), listCards(deps.db, thread.id), {
+          zones: cfg(req).dropZones,
+        }),
+      ),
+    );
   });
 
   app.get('/doctor', async (req, reply) =>
