@@ -43,7 +43,7 @@ import {
   InstallationCheckError,
   type InstallationVerifier,
 } from '../forge/installation-verifier.js';
-import type { ZoneGuidance } from '../github/guidance.js';
+import { FORBIDDEN, type ZoneGuidance } from '../github/guidance.js';
 import { getGoals } from '../goals.js';
 import type { MirrorStatus } from '../images/mirror.js';
 import { doctorMayLease, missingFor, zoneRequirements } from '../leases.js';
@@ -1300,7 +1300,162 @@ async function appIdsProblem(
   }
 }
 
-async function adminCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck> {
+/** One finding of `forge.admin`: a status, the sentence for the summary, and its fix. */
+type AdminFinding = { status: 'pass' | 'warn' | 'fail'; summary: string; fix?: string };
+
+/**
+ * How a role takes part in `forge.admin`: an app role (its usable entry), a PAT role, or an app
+ * role whose entry can't be used, which `credential.*` reports and this check leaves alone.
+ */
+function adminRoleOf(
+  d: DoctorDeps,
+  zone: DropZoneConfig,
+  who: 'author' | 'reviewer',
+): { kind: 'app'; entry: GitHubAppEntry } | { kind: 'pat' } | { kind: 'unusable' } {
+  const entry = appEntryFor(d, zone, who);
+  if (entry) return { kind: 'app', entry };
+  const apps = d.resolvedApps?.();
+  if (apps && credentialFor(zone, who, apps).ref.kind === 'github-app') return { kind: 'unusable' };
+  return { kind: 'pat' };
+}
+
+/**
+ * `forge.admin` (spec §6, §4.3): a PAT author's admin role as before, and for each app role its
+ * installation grant (no `administration` or `workflows`, at any level) and its bypass on each
+ * ruleset, read with that app's token: `no` everywhere, except the author app on
+ * `MERGE_RULESET`, which `forge.branch-rules` checks. A PAT reviewer adds nothing (its admin role
+ * is `forge.reviewer`'s), and an unusable app entry adds nothing (`credential.*` reports it).
+ */
+async function adminCheck(d: DoctorDeps, zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck> {
+  const base = { id: 'forge.admin', zoneId: zone.id, doc: doc('tokens') };
+  const author = adminRoleOf(d, zone, 'author');
+  const reviewer =
+    zone.identity === 'starter' ? { kind: 'pat' as const } : adminRoleOf(d, zone, 'reviewer');
+  // No app role: today's result, byte for byte.
+  if (author.kind === 'pat' && reviewer.kind !== 'app') return patAdminCheck(zone, r);
+  const findings: AdminFinding[] = [];
+  if (author.kind === 'pat') {
+    const { status, summary, fix } = await patAdminCheck(zone, r);
+    findings.push({
+      status: status === 'fail' || status === 'warn' ? status : 'pass',
+      summary,
+      ...(fix ? { fix } : {}),
+    });
+  }
+  const passes: string[] = [];
+  for (const [who, role] of [
+    ['author', author],
+    ['reviewer', reviewer],
+  ] as const) {
+    if (role.kind !== 'app') continue;
+    const found = await appAdminFindings(zone, r, who, role.entry.slug);
+    findings.push(...found);
+    if (found.length === 0) passes.push(role.entry.slug);
+  }
+  if (findings.length === 0 && passes.length === 0)
+    return {
+      ...base,
+      status: 'skip',
+      summary: `the zone's GitHub App entries can't be used, so their permissions were not checked; credential checks report why`,
+    };
+  const bad = findings.filter((f) => f.status !== 'pass');
+  if (bad.length === 0)
+    return { ...base, status: 'pass', summary: adminPassSummary(author, reviewer, findings) };
+  const status = bad.some((f) => f.status === 'fail') ? 'fail' : 'warn';
+  const fixes = [...new Set(bad.flatMap((f) => (f.fix ? [f.fix] : [])))];
+  return {
+    ...base,
+    status,
+    summary: bad.map((f) => f.summary).join('; '),
+    ...(fixes.length > 0 ? { fix: fixes.join(' ') } : {}),
+  };
+}
+
+/** The pass sentence: never a claim that the author app can bypass anything. */
+function adminPassSummary(
+  author: ReturnType<typeof adminRoleOf>,
+  reviewer: ReturnType<typeof adminRoleOf>,
+  findings: AdminFinding[],
+): string {
+  const merge = `${MERGE_RULESET}, which forge.branch-rules checks`;
+  if (author.kind === 'app' && reviewer.kind === 'app')
+    return `neither installation (${author.entry.slug}, ${reviewer.entry.slug}) has administration or workflows, and no app bypasses any ruleset except the author app on ${merge}`;
+  const parts = findings.map((f) => f.summary);
+  if (author.kind === 'app')
+    parts.push(
+      `the author installation (${author.entry.slug}) has neither administration nor workflows, and bypasses no ruleset other than ${merge}`,
+    );
+  if (reviewer.kind === 'app')
+    parts.push(
+      `the reviewer installation (${reviewer.entry.slug}) has neither administration nor workflows, and bypasses no ruleset`,
+    );
+  return parts.join('; ');
+}
+
+/**
+ * One app role's `forge.admin` findings, none when it passes: its grant, then its bypass on each
+ * ruleset. A read that fails is a warn that the check did not run, claiming nothing. No line
+ * holds the app id, the key or a token: only the slug, permission names and ruleset names.
+ */
+async function appAdminFindings(
+  zone: DropZoneConfig,
+  r: ZoneReads,
+  who: 'author' | 'reviewer',
+  slug: string,
+): Promise<AdminFinding[]> {
+  const out: AdminFinding[] = [];
+  const named = `the ${who} GitHub App ${slug}`;
+  const access = await r.access[who]();
+  const granted = access.ok ? access.value.grantedPermissions : undefined;
+  if (!granted)
+    out.push({
+      status: 'warn',
+      summary: `could not read the installation grant of ${named} on ${zone.repo}: the permission check did not run for that app`,
+      fix: 'Run the doctor again in a few minutes.',
+    });
+  else
+    for (const permission of FORBIDDEN) {
+      if (!Object.hasOwn(granted, permission)) continue;
+      out.push({
+        status: 'fail',
+        summary: `${named} is granted ${permission} (${granted[permission]}): no Jumpmaster app may hold administration or workflows`,
+        fix: `Remove the ${permission} permission on ${slug}'s page (Settings → Developer settings → GitHub Apps → ${slug} → Permissions & events), then accept the change on its installation on ${zone.repo}.`,
+      });
+    }
+  const read = (await r.rules())[who];
+  const bypass = read?.kind === 'ok' ? read.rules.bypass : undefined;
+  if (!bypass) {
+    out.push({
+      status: 'warn',
+      summary: `could not read the rulesets' bypass lists as ${named}: the bypass check did not run for that app`,
+      fix: `Check by hand: Settings → Rules → Rulesets → each ruleset → Bypass list; only the author app may be listed, and only on ${MERGE_RULESET}. Then run the doctor again.`,
+    });
+    return out;
+  }
+  for (const b of bypass) {
+    // The author app's own reading on the merge ruleset is forge.branch-rules' to report.
+    if (who === 'author' && b.name === MERGE_RULESET) continue;
+    if (b.can === 'yes')
+      out.push({
+        status: 'fail',
+        summary:
+          b.name === MERGE_RULESET
+            ? `${named} can bypass the ruleset ${b.name}: only the author app may`
+            : `${named} can bypass the ruleset ${b.name} that guards ${zone.repo}`,
+        fix: `Remove ${slug} from the bypass list of ${b.name} (Settings → Rules → Rulesets → ${b.name} → Bypass list).`,
+      });
+    else if (b.can === 'unknown')
+      out.push({
+        status: 'warn',
+        summary: `could not tell whether ${named} can bypass the ruleset ${b.name}`,
+        fix: `Check by hand: Settings → Rules → Rulesets → ${b.name} → Bypass list; ${slug} must not be on it.`,
+      });
+  }
+  return out;
+}
+
+/** `forge.admin` for a PAT author: its repository role, as before app roles existed. */
+async function patAdminCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck> {
   const base = { id: 'forge.admin', zoneId: zone.id, doc: doc('tokens') };
   const [login, access] = await Promise.all([r.logins.author(), r.access.author()]);
   if (!access.ok)
@@ -2552,7 +2707,7 @@ export async function zoneChecks(
     g('stick.capabilities', z, () => stickCapabilityCheck(d, zone, sticks)),
     g('forge.author', z, () => identityCheck(d, zone, r, 'author')),
     g('forge.reviewer', z, () => identityCheck(d, zone, r, 'reviewer')),
-    g('forge.admin', z, () => adminCheck(zone, r)),
+    g('forge.admin', z, () => adminCheck(d, zone, r)),
     g('forge.author-reads', z, () => readsCheck(zone, r, 'author')),
     g('forge.reviewer-reads', z, () => readsCheck(zone, r, 'reviewer')),
     g('forge.branch-rules', z, () => branchRulesCheck(d, zone, r)),

@@ -2668,3 +2668,300 @@ describe('forge.branch-rules in a two-app zone needs jumpmaster-merge (issue #43
     expect(c.summary).toContain('neither bot can bypass');
   });
 });
+
+describe('forge.admin for GitHub App roles (issue #447)', () => {
+  type Bypass = {
+    rulesetId: number;
+    name: string;
+    restrictUpdatesOnly: boolean;
+    can: 'yes' | 'no' | 'unknown';
+  };
+  type Role = 'author' | 'reviewer';
+  const AUTHOR_SLUG = 'jm-author-app';
+  const REVIEWER_SLUG = 'jm-reviewer-app';
+  const entry = (appId: string, slug: string, pem = 'unused') =>
+    ({
+      source: 'vault',
+      fingerprint: 'fp',
+      entry: { appId, slug, clientId: 'c', pem, importedAt: 'x' },
+    }) as const;
+  type Read = ReturnType<typeof entry> | { source: 'missing'; undecryptable?: true };
+  const CLEAN = { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read' };
+  const main = (can: Bypass['can'] = 'no'): Bypass => ({
+    rulesetId: 1,
+    name: 'jumpmaster',
+    restrictUpdatesOnly: false,
+    can,
+  });
+  const merge = (can: Bypass['can']): Bypass => ({
+    rulesetId: 2,
+    name: 'jumpmaster-merge',
+    restrictUpdatesOnly: true,
+    can,
+  });
+  /**
+   * A two-bot zone whose roles are apps (an entry), PATs (missing) or undecryptable apps. Each
+   * app role gets `grant` (CLEAN by default) and `bypass` (null: no bypass field).
+   */
+  const appWorld = (
+    o: {
+      author?: Read;
+      reviewer?: Read;
+      grant?: Partial<Record<Role, Record<string, string>>>;
+      bypass?: Partial<Record<Role, Bypass[] | null>>;
+    } = {},
+  ) => {
+    const w = world({
+      zone: { githubApp: { repositoryId: 5, installations: { author: 7, reviewer: 8 } } },
+    });
+    const roles = {
+      author: o.author ?? entry('8', AUTHOR_SLUG),
+      reviewer: o.reviewer ?? entry('9', REVIEWER_SLUG),
+    };
+    w.deps.resolvedApps = () => new Map([['octo', roles]]) as unknown as ResolvedApps;
+    const lists = {
+      author: o.bypass?.author === undefined ? [main(), merge('yes')] : o.bypass.author,
+      reviewer: o.bypass?.reviewer === undefined ? [main(), merge('no')] : o.bypass.reviewer,
+    };
+    for (const who of ['author', 'reviewer'] as const) {
+      if (roles[who].source === 'missing') continue;
+      w.f.state.access[who].grantedPermissions = o.grant?.[who] ?? { ...CLEAN };
+      const r = w.f.state.rules[who];
+      if (r.kind !== 'ok') throw new Error('world rules');
+      const list = lists[who];
+      w.f.state.rules[who] = {
+        kind: 'ok',
+        rules: { ...r.rules, asApp: true, ...(list === null ? {} : { bypass: list }) },
+      };
+    }
+    return w;
+  };
+  const admin = async (w: ReturnType<typeof appWorld>) => one(await w.run(), 'forge.admin');
+  const PERMISSIONS_PAGE = 'Settings → Developer settings → GitHub Apps';
+
+  describe('a two-app zone', () => {
+    test('an author grant with administration: write fails, naming it and the author slug', async () => {
+      const c = await admin(appWorld({ grant: { author: { ...CLEAN, administration: 'write' } } }));
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain('administration');
+      expect(c.summary).toContain(AUTHOR_SLUG);
+      expect(c.fix).toContain(PERMISSIONS_PAGE);
+      expect(c.fix).toContain('Permissions & events');
+      expect(c.fix).toContain('installation');
+    });
+
+    test('a reviewer grant with workflows: read fails, naming it and the reviewer slug', async () => {
+      const c = await admin(appWorld({ grant: { reviewer: { ...CLEAN, workflows: 'read' } } }));
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain('workflows');
+      expect(c.summary).toContain(REVIEWER_SLUG);
+      expect(c.summary).not.toContain(AUTHOR_SLUG);
+    });
+
+    test('clean grants, and only the author bypassing jumpmaster-merge, pass with the two-app summary', async () => {
+      const c = await admin(appWorld());
+      expect(c).toMatchObject({
+        id: 'forge.admin',
+        status: 'pass',
+        summary: `neither installation (${AUTHOR_SLUG}, ${REVIEWER_SLUG}) has administration or workflows, and no app bypasses any ruleset except the author app on jumpmaster-merge, which forge.branch-rules checks`,
+      });
+      expect(c.summary).not.toMatch(/can bypass/);
+    });
+
+    test("the author app's unknown on jumpmaster-merge passes: forge.branch-rules reports it", async () => {
+      const c = await admin(appWorld({ bypass: { author: [main(), merge('unknown')] } }));
+      expect(c.status).toBe('pass');
+    });
+  });
+
+  describe('bypass', () => {
+    test('the reviewer app bypassing jumpmaster-merge fails, naming the ruleset and the reviewer slug', async () => {
+      const c = await admin(appWorld({ bypass: { reviewer: [main(), merge('yes')] } }));
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain('jumpmaster-merge');
+      expect(c.summary).toContain(REVIEWER_SLUG);
+      expect(c.fix).toContain(`Remove ${REVIEWER_SLUG} from the bypass list of jumpmaster-merge`);
+    });
+
+    test('the author app bypassing jumpmaster fails, naming the ruleset and the author slug', async () => {
+      const c = await admin(appWorld({ bypass: { author: [main('yes'), merge('yes')] } }));
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain('ruleset jumpmaster ');
+      expect(c.summary).toContain(AUTHOR_SLUG);
+      expect(c.fix).toContain(`Remove ${AUTHOR_SLUG} from the bypass list of jumpmaster`);
+    });
+
+    test('an unknown on another ruleset warns, naming the ruleset and the Bypass list path', async () => {
+      const c = await admin(appWorld({ bypass: { reviewer: [main('unknown'), merge('no')] } }));
+      expect(c.status).toBe('warn');
+      expect(c.summary).toContain('jumpmaster');
+      expect(c.summary).toContain(REVIEWER_SLUG);
+      expect(c.fix).toContain('Settings → Rules → Rulesets → jumpmaster → Bypass list');
+    });
+
+    test('an ok read with no bypass field warns that the bypass check did not run', async () => {
+      const c = await admin(appWorld({ bypass: { author: null } }));
+      expect(c.status).toBe('warn');
+      expect(c.summary).toContain('the bypass check did not run');
+      expect(c.summary).toContain(AUTHOR_SLUG);
+    });
+
+    test.each([{ kind: 'unavailable' } as const, { kind: 'none' } as const])(
+      'a rules read of kind $kind warns that the bypass check did not run',
+      async (read) => {
+        const w = appWorld();
+        w.f.state.rules.reviewer = read;
+        const c = await admin(w);
+        expect(c.status).toBe('warn');
+        expect(c.summary).toContain('the bypass check did not run');
+        expect(c.summary).toContain(REVIEWER_SLUG);
+      },
+    );
+  });
+
+  test('a forbidden grant with an unknown bypass fails, and the summary names both', async () => {
+    const c = await admin(
+      appWorld({
+        grant: { author: { ...CLEAN, workflows: 'write' } },
+        bypass: { reviewer: [main('unknown'), merge('no')] },
+      }),
+    );
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('workflows');
+    expect(c.summary).toMatch(/could not tell whether[^;]*jm-reviewer-app/);
+    expect(c.fix).toContain(PERMISSIONS_PAGE);
+    expect(c.fix).toContain('Bypass list');
+  });
+
+  test('a grant read that rejects warns, claiming nothing about the permissions', async () => {
+    const w = appWorld();
+    w.f.author.failNext('repoAccess', 'throw');
+    const c = await admin(w);
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('the permission check did not run');
+    expect(c.summary).toContain(AUTHOR_SLUG);
+    expect(c.summary).not.toMatch(/administration|workflows/);
+  });
+
+  test('an app access read without a raw grant warns the same way', async () => {
+    const w = appWorld();
+    delete w.f.state.access.reviewer.grantedPermissions;
+    const c = await admin(w);
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('the permission check did not run');
+    expect(c.summary).toContain(REVIEWER_SLUG);
+  });
+
+  describe('a hybrid zone (app author, PAT reviewer)', () => {
+    test('a clean author grant passes with the hybrid summary', async () => {
+      const c = await admin(appWorld({ reviewer: { source: 'missing' } }));
+      expect(c).toMatchObject({
+        status: 'pass',
+        summary: `the author installation (${AUTHOR_SLUG}) has neither administration nor workflows, and bypasses no ruleset other than jumpmaster-merge, which forge.branch-rules checks`,
+      });
+    });
+
+    test('a reviewer account that is an admin still fails forge.reviewer as today', async () => {
+      const pat = world();
+      pat.f.state.access.reviewer.permissions.admin = true;
+      const hybrid = appWorld({ reviewer: { source: 'missing' } });
+      hybrid.f.state.access.reviewer.permissions.admin = true;
+      const today = one(await pat.run(), 'forge.reviewer');
+      expect(today.status).toBe('fail');
+      expect(one(await hybrid.run(), 'forge.reviewer')).toEqual(today);
+    });
+  });
+
+  describe('a PAT author with an app reviewer', () => {
+    test("a clean reviewer grant passes with today's author text and the reviewer's", async () => {
+      const c = await admin(appWorld({ author: { source: 'missing' } }));
+      expect(c).toMatchObject({
+        status: 'pass',
+        summary: `neither bot account is a repository admin; the reviewer installation (${REVIEWER_SLUG}) has neither administration nor workflows, and bypasses no ruleset`,
+      });
+    });
+
+    test('a reviewer grant with administration: read fails naming the reviewer slug', async () => {
+      const c = await admin(
+        appWorld({
+          author: { source: 'missing' },
+          grant: { reviewer: { ...CLEAN, administration: 'read' } },
+        }),
+      );
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain('administration');
+      expect(c.summary).toContain(REVIEWER_SLUG);
+    });
+
+    test("a PAT author's finding combines with the reviewer app's", async () => {
+      const w = appWorld({
+        author: { source: 'missing' },
+        bypass: { reviewer: [main('unknown'), merge('no')] },
+      });
+      w.f.state.access.author.permissions.admin = true;
+      const c = await admin(w);
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain('(the author) is a repository admin');
+      expect(c.summary).toContain(REVIEWER_SLUG);
+      expect(c.fix).toContain('Give author-bot the Write role');
+      expect(c.fix).toContain('Bypass list');
+    });
+  });
+
+  test('an undecryptable app entry runs no PAT logic and claims nothing about its permissions', async () => {
+    const w = appWorld({ author: { source: 'missing', undecryptable: true } });
+    // The PAT logic would fail on this; the app logic would warn on the missing grant.
+    w.f.state.access.author.permissions.admin = true;
+    const c = await admin(w);
+    expect(c.status).toBe('pass');
+    expect(c.summary).not.toContain('author');
+    expect(c.summary).toContain(REVIEWER_SLUG);
+    const both = appWorld({
+      author: { source: 'missing', undecryptable: true },
+      reviewer: { source: 'missing', undecryptable: true },
+    });
+    both.f.state.access.author.permissions.admin = true;
+    const none = await admin(both);
+    expect(none.status).toBe('skip');
+    expect(none.summary).not.toMatch(/administration|workflows|is a repository admin/);
+  });
+
+  test('no summary, fix or log line holds the PEM, a token or the app id', async () => {
+    const pem = [
+      '-----BEGIN RSA PRIVATE KEY-----',
+      'MIIEowIBAAKCAQEAsentinelPEMbodyNOTAREALKEY0123456789',
+      '-----END RSA PRIVATE KEY-----',
+    ].join('\n');
+    const token = ['ghs', 'SECRETSENTINELTOKEN0123456789'].join('_');
+    const appId = '987654321';
+    const logged: string[] = [];
+    const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation((...a: unknown[]) => {
+        logged.push(a.map(String).join(' '));
+      }),
+    );
+    try {
+      const texts: string[] = [];
+      for (const grant of [CLEAN, { ...CLEAN, administration: 'write', workflows: 'write' }]) {
+        const w = appWorld({
+          author: entry(appId, AUTHOR_SLUG, pem),
+          grant: { author: grant },
+          bypass: { author: [main('yes'), merge('unknown')], reviewer: [main('unknown')] },
+        });
+        w.f.state.access.author.tokenExpiresAt = token;
+        texts.push(JSON.stringify(await admin(w)));
+      }
+      const thrown = appWorld({ author: entry(appId, AUTHOR_SLUG, pem) });
+      thrown.f.author.failNext('repoAccess', 'throw');
+      texts.push(JSON.stringify(await admin(thrown)));
+      for (const t of [...texts, ...logged]) {
+        expect(t).not.toContain('sentinelPEMbody');
+        expect(t).not.toContain('PRIVATE KEY');
+        expect(t).not.toContain(token);
+        expect(t).not.toContain(appId);
+      }
+    } finally {
+      for (const s of spies) s.mockRestore();
+    }
+  });
+});

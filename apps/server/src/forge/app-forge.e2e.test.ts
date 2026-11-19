@@ -540,6 +540,12 @@ describe('repoAccess on an app token', () => {
       scopes: null,
       tokenExpiresAt: new Date(String(mint?.expiresAt)).toISOString(),
       ownerType: 'Organization',
+      grantedPermissions: {
+        contents: 'write',
+        pull_requests: 'write',
+        issues: 'write',
+        metadata: 'read',
+      },
     });
     // The grant was read under the author app's JWT, besides the #267 verification's lookup.
     const lookups = gh.calls.filter((c) => c.path === `${REPO_PATH}/installation`);

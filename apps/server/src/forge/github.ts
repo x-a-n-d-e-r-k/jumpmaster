@@ -163,6 +163,12 @@ export type RepoAccess = {
   tokenExpiresAt: string | null;
   /** The repository owner's account type (`owner.type`): a person's or an organization's. */
   ownerType: 'User' | 'Organization';
+  /**
+   * An app forge's installation grant as GitHub names it (`administration: 'write'`, ...), copied
+   * from the grant `repoAccess()` already reads, so the doctor can name a forbidden permission
+   * (issue #447). Permission names and levels only, never a token. Unset on a PAT forge.
+   */
+  grantedPermissions?: Record<string, string>;
 };
 
 /**
@@ -592,6 +598,14 @@ function appPermissions(grant: Record<string, string>): RepoAccess['permissions'
     triage: level('issues') === 'write' || level('pull_requests') === 'write',
     pull: level('contents') === 'read' || level('contents') === 'write',
   };
+}
+
+/** A copy of a grant's string-valued entries: names and levels, nothing else. */
+function grantedPermissions(grant: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, level] of Object.entries(grant))
+    if (typeof level === 'string') out[name] = level;
+  return out;
 }
 
 /** GitHub's app-slug rule: lowercase letters, digits and hyphens, and not empty. */
@@ -1563,6 +1577,7 @@ export class GitHubForge implements Forge {
         (data.owner as { type?: string } | undefined)?.type === 'Organization'
           ? 'Organization'
           : 'User',
+      grantedPermissions: grantedPermissions(grant.permissions),
     };
   }
 

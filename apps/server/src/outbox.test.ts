@@ -1428,6 +1428,7 @@ describe('pairFor by credential kind (spec §4.4)', () => {
         scopes: null,
         tokenExpiresAt: '2026-12-01T10:00:00.000Z',
         ownerType: 'User',
+        grantedPermissions: { contents: 'write', pull_requests: 'write' },
       });
     });
 
