@@ -363,6 +363,120 @@ describe('the zones page', () => {
     );
   });
 
+  /** Seeds `drops` drops in `main`, oldest first, each reaching every host in `hosts`. */
+  const seedEgress = (
+    db: ReturnType<typeof openDb>,
+    hosts: { host: string; count?: number }[],
+    drops: number,
+    prefix = 'drop',
+  ) => {
+    const ids = Array.from(
+      { length: drops },
+      (_, i) => `${prefix}${String(i).padStart(5, '0')}xyz`,
+    );
+    db.transaction(() => {
+      ids.forEach((id, i) => {
+        insertDrop(db, {
+          id,
+          dropZoneId: 'main',
+          workItemId: null,
+          role: 'doctor',
+          state: 'succeeded',
+          createdAt: new Date(t0.getTime() - (drops - i) * 1000).toISOString(),
+        });
+        hosts.forEach((h, seq) =>
+          db
+            .prepare(
+              `INSERT INTO drop_events (drop_id, seq, ts, kind, data_json) VALUES (?, ?, ?, 'egress', ?)`,
+            )
+            .run(
+              id,
+              seq + 1,
+              t0.toISOString(),
+              JSON.stringify({ host: h.host, decision: 'allow', count: h.count ?? 1 }),
+            ),
+        );
+      });
+    })();
+    return ids;
+  };
+  /** The observed table row for `host`. */
+  const rowOf = (egress: string, host: string): string => {
+    const at = egress.indexOf(`<tr><td>${host}</td>`);
+    expect(at, host).toBeGreaterThanOrEqual(0);
+    return egress.slice(at, egress.indexOf('</tr>', at));
+  };
+  const dropLinks = (html: string) => html.match(/href="\/drops\/[^"?]+"/g) ?? [];
+
+  test('the observed table has Host, Decision, Connections, Drops, Listed and Adopt columns', async () => {
+    const w = await world();
+    seedEgress(w.db, [{ host: 'new.example.com', count: 4 }], 2);
+    const egress = section((await w.get('/zones/main')).body, 'egress');
+    expect(egress).toContain(
+      '<tr><th>Host</th><th>Decision</th><th>Connections</th><th>Drops</th><th>Listed</th><th>Adopt</th></tr>',
+    );
+    expect(rowOf(egress, 'new.example.com')).toMatch(
+      /^<tr><td>new\.example\.com<\/td><td>allow<\/td><td>8<\/td><td>2 /,
+    );
+  });
+
+  test('a host with 25 drops shows the count and links the newest 20, then "and 5 more"', async () => {
+    const w = await world();
+    const ids = seedEgress(w.db, [{ host: 'new.example.com' }], 25);
+    const row = rowOf(section((await w.get('/zones/main')).body, 'egress'), 'new.example.com');
+    expect(row).toMatch(/<td>25 <details><summary>show 25<\/summary>/);
+    const links = dropLinks(row);
+    expect(links).toHaveLength(20);
+    for (const id of ids.slice(5)) {
+      expect(row).toContain(`href="/drops/${id}"`);
+      expect(row).toContain(`>${id.slice(0, 8)}</a>`);
+    }
+    for (const id of ids.slice(0, 5)) expect(row).not.toContain(`/drops/${id}`);
+    expect(row).toContain('<a href="/drops?zone=main">and 5 more</a>');
+  });
+
+  test('a host with 3 drops links all three and no "more" line', async () => {
+    const w = await world();
+    const ids = seedEgress(w.db, [{ host: 'new.example.com' }], 3);
+    const row = rowOf(section((await w.get('/zones/main')).body, 'egress'), 'new.example.com');
+    expect(row).toContain('<summary>show 3</summary>');
+    expect(dropLinks(row)).toHaveLength(3);
+    for (const id of ids) expect(row).toContain(`href="/drops/${id}"`);
+    expect(row).not.toContain('more');
+    expect(row).not.toContain('/drops?zone=');
+  });
+
+  test('counts render with en-US thousands separators', async () => {
+    const w = await world();
+    seedEgress(w.db, [{ host: 'registry.npmjs.org', count: 19510 }], 1);
+    const row = rowOf(section((await w.get('/zones/main')).body, 'egress'), 'registry.npmjs.org');
+    expect(row).toContain('<td>19,510</td>');
+  });
+
+  test('50 hosts reached by 300 drops each link at most 20 drops per host', async () => {
+    const w = await world();
+    const hosts = Array.from({ length: 50 }, (_, i) => ({ host: `h${i}.example.com` }));
+    seedEgress(w.db, hosts, 300);
+    const egress = section((await w.get('/zones/main')).body, 'egress');
+    const links = dropLinks(egress);
+    expect(links.length).toBeGreaterThan(0);
+    expect(links.length).toBeLessThanOrEqual(50 * 20);
+    expect(egress).toContain('and 280 more');
+  });
+
+  test('adopt checkboxes render for an unlisted host and not for a listed one', async () => {
+    const w = await world();
+    seedEgress(w.db, [{ host: 'new.example.com' }, { host: 'registry.npmjs.org' }], 2);
+    const egress = section((await w.get('/zones/main')).body, 'egress');
+    expect(rowOf(egress, 'new.example.com')).toContain(
+      '<input type="checkbox" name="adopt" value="new.example.com">',
+    );
+    const listed = rowOf(egress, 'registry.npmjs.org');
+    expect(listed).toContain('listed by the node preset');
+    expect(listed).not.toContain('name="adopt"');
+    expect(egress).toContain('Adopt ticked');
+  });
+
   test("a host is judged against this zone's own lists: another preset's host gets a tick box", async () => {
     const w = await world();
     // A jvm zone reached npm's registry: the node preset lists it, but this zone's drops are
