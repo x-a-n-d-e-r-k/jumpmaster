@@ -24,6 +24,7 @@ import { makeZone, zoneWorld } from '../test/fixtures.js';
 import { harness } from '../test/flowHarness.js';
 import {
   askButton,
+  DROP_HEAD,
   dropRows,
   escapeHtml,
   FAVICON_HREF,
@@ -169,12 +170,63 @@ describe('renderHome', () => {
 
   test('the ledger rows escape reasons and gate names, and show the PR link and elapsed', () => {
     const items = [{ ...item, reason: '"><img src=x>' }];
-    const html = workItemRows(items, [z]) + dropRows([drop], items, new Date());
+    const html = workItemRows(items, [z]) + dropRows([drop], items, [z], new Date());
     expect(html).not.toContain('<img src=x>');
     expect(html).not.toContain('lint<b>');
     expect(html).toContain('lint&lt;b&gt;');
     expect(html).toContain('https://github.com/octo/demo/pull/9');
     expect(html).toContain('1m 5s');
+  });
+});
+
+describe('dropRows (#497)', () => {
+  const uuid = 'abe46fc6-1234-4abc-8def-0123456789ab';
+  const now = new Date('2026-01-01T02:00:00.000Z');
+
+  test('the drop link shows the first 8 characters, the full id in title and href', () => {
+    const html = dropRows([{ ...drop, id: uuid }], [item], [z], now);
+    expect(html).toContain(`<a href="/drops/${uuid}" title="${uuid}">abe46fc6</a>`);
+  });
+
+  test('project and issue title show; a 70-character title is cut with …', () => {
+    const long = `${'x'.repeat(59)}<${'y'.repeat(10)}`;
+    expect(long).toHaveLength(70);
+    const html = dropRows([drop], [{ ...item, title: long }], [z], now);
+    expect(html).toContain('<td>octo/demo</td>');
+    expect(html).toContain(`<td>#7 ${'x'.repeat(59)}&lt;…</td>`);
+    expect(html).not.toContain('y');
+    expect(dropRows([drop], [item], [z], now)).toContain('<td>#7 plain</td>');
+  });
+
+  test('crew and doctor drops say so in the Work column', () => {
+    const crew = dropRows([{ ...drop, workItemId: null, role: 'audit' }], [], [z], now);
+    expect(crew).toContain('<td>crew</td>');
+    const doc = dropRows([{ ...drop, workItemId: null, role: 'doctor' }], [], [z], now);
+    expect(doc).toContain('<td>doctor</td>');
+  });
+
+  test('Started is a <time> of the start, or of the creation when not started', () => {
+    const started = dropRows(
+      [{ ...drop, createdAt: '2026-01-01T00:00:00.000Z', startedAt: '2026-01-01T01:00:00.000Z' }],
+      [item],
+      [z],
+      now,
+    );
+    expect(started).toContain('<time datetime="2026-01-01T01:00:00.000Z"');
+    expect(started).toContain('1 h ago');
+    const queued = dropRows(
+      [{ ...drop, state: 'queued', startedAt: null, finishedAt: null }],
+      [item],
+      [z],
+      now,
+    );
+    expect(queued).toContain('<time datetime="2026-01-01T00:00:00.000Z"');
+  });
+
+  test('the head names the columns in order', () => {
+    expect(DROP_HEAD).toBe(
+      '<tr><th>Drop</th><th>Project</th><th>Work</th><th>Role</th><th>State</th><th>Started</th><th>Elapsed</th><th>Gates</th></tr>',
+    );
   });
 });
 
@@ -390,7 +442,7 @@ describe('renderHome loop state', () => {
             },
           ],
         ]),
-      ) + dropRows([{ ...drop, role: 'review' }], [item], new Date());
+      ) + dropRows([{ ...drop, role: 'review' }], [item], [z], new Date());
     expect(html).toContain('abcdef1');
     expect(html).not.toContain('abcdef12345');
     expect(html).toContain('approve (forced)');
@@ -1247,8 +1299,8 @@ describe('renderWorkList and renderDropList (#119)', () => {
 
   test('/drops renders drop rows through dropRows; the floor only counts them', () => {
     const now = new Date('2026-01-01T00:02:00.000Z');
-    const rows = dropRows([drop], [item], now);
-    expect(rows).toContain('>d1</a>');
+    const rows = dropRows([drop], [item], zones, now);
+    expect(rows).toContain('title="d1">d1</a>');
     expect(renderHome({ zones, items: [item], drops: [drop], now })).not.toContain(rows);
     expect(
       renderDropList({ zones, state: 'all', drops: [drop], items: [item], limited: false, now }),
