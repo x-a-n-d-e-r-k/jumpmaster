@@ -45,9 +45,19 @@ You need all of these before step 1.
 - **Claude:** a Claude Pro, Max, Team or Enterprise plan, and the Claude CLI (`claude`) on any
   machine with a browser, to run `claude setup-token` once.
 - **GitHub:** a repository (`your-org/your-repo`) with a GitHub Actions workflow that runs its
-  tests on `pull_request`, plus **either** two bot accounts (an author and a reviewer, the
-  default, "two-bot") **or** [starter mode](#starter-mode) (your account alone). The setup wizard
-  recommends which from the repository's owner and visibility. The default branch needs a
+  tests on `pull_request`, plus **either** two-bot mode (an author and a reviewer, the default)
+  **or** [starter mode](#starter-mode) (your account alone). The setup wizard recommends which
+  from the repository's owner and visibility.
+  - **Two-bot mode** uses two [GitHub Apps](#github-apps), an author app and a reviewer app,
+    registered under the repository's owner (your personal account, or the organization). The
+    wizard recommends them for every owner. Registering an app under an organization needs an
+    owner or app manager of it.
+  - **Starter mode** stays on the author's fine-grained personal access token
+    ([Tokens](#tokens)).
+  - The alternative to the apps is two bot accounts with [tokens](#tokens) ("Use tokens
+    instead" in the wizard).
+
+  The default branch needs a
   ruleset ([Branch rules](#branch-rules)): on a **private** repository GitHub offers rulesets only
   on a paid plan (GitHub Pro for a personal account, GitHub Team for an organization); on a free
   plan, use a public repository.
@@ -186,11 +196,41 @@ Saving a credential asks for your passphrase again (sudo, good for five minutes)
 2. **GitHub** (`/setup/forge`). Under **Which repository?** name `your-org/your-repo` and press
    **Recommend**: Jumpmaster reads the repository's owner and visibility and recommends two-bot
    or starter mode, and stops early when a private repository on a free plan can't have a
-   ruleset. The token links open GitHub's token page pre-filled with the permissions in
-   [Tokens](#tokens); check the resource owner and the repository there, generate, and paste
-   each token under **The tokens** (**Author token**, **Reviewer token** for two-bot, **Read
-   token** for a private repository). Each is tested with GitHub before it is saved, and never
-   shown back. Tick **Starter mode** only if you chose it.
+   ruleset.
+
+   **Two-bot: GitHub Apps (recommended).** Under **GitHub Apps (recommended for two bots)** (the
+   vault must be on: an app's private key is kept only there; see [GitHub Apps](#github-apps)):
+   1. **Register the apps under**: preselected from the repository, your personal account for a
+      personal repository, the organization for an organization's. Registering an app under an
+      organization needs an owner or app manager of that organization (and installing it there
+      needs an owner, or an owner's approval of a member's request).
+   2. Press **Create the author app**, then **Create the reviewer app** (the first asks for your
+      passphrase again). Each opens GitHub with the app filled in from a manifest; check the
+      name and click GitHub's button to create it.
+   3. GitHub sends you back to Jumpmaster's **Finish** page. Press **Finish** within ten minutes:
+      it saves the app and its private key in the vault (never shown). An app not finished in
+      time is discarded; delete it on GitHub (the owner's Settings → Developer settings → GitHub
+      Apps) and create it again.
+   4. The saved page shows the install link, `https://github.com/apps/<slug>/installations/new`
+      (the GitHub step also shows **Install it on the repository** beside each created app).
+      Install each app on the repository's owner and choose **All repositories** or **Only select
+      repositories** (then the repository). Either is fine: every token Jumpmaster mints is
+      narrowed to one zone's repository.
+   5. After an install GitHub sends you to **The GitHub App is installed**. Press **Find the
+      installations**: Jumpmaster asks GitHub for each two-bot zone's installation and repository
+      ids and proposes them as a guarded change, which records nothing until you confirm it with
+      your passphrase (**Review and confirm**). It looks only at zones that already exist, so
+      if you install the apps before the Project step below, it says no zone uses GitHub Apps:
+      after **Create the project**, open `/setup/github-app/installed` and press **Find the
+      installations** again. Do the same whenever you add a zone for the same owner.
+
+   **Tokens (starter mode, or "Use tokens instead").** Starter mode shows the token links
+   directly; for two-bot they are folded under **Use tokens instead**. The token links open
+   GitHub's token page pre-filled with the permissions in [Tokens](#tokens); check the resource
+   owner and the repository there, generate, and paste each token under **The tokens** (**Author
+   token**, **Reviewer token** for two-bot, **Read token** for a private repository). Each is
+   tested with GitHub before it is saved, and never shown back. Tick **Starter mode** only if you
+   chose it.
 3. **Runner** (`/setup/stick`). The stick starts beside the server under Compose, so this usually
    says it has checked in. If not, `docker compose logs stick` says why.
 4. **Project** (`/setup/project`). Name the repository and press **Detect**: Jumpmaster reads its
@@ -217,6 +257,26 @@ writes nothing to GitHub: it gives you links and generated files, and you click.
   Commit it. Doctor check: `forge.codeowners`.
 - **Give the accounts access**: the collaborators page and a checklist naming each bot login
   (Write role; accept the invitation as that account).
+
+A **two-app zone** (both the author and the reviewer are GitHub Apps) has the same page, with
+these differences:
+
+- **Which accounts** recommends the apps, with the token links folded under **Use tokens
+  instead**.
+- **The branch ruleset** and **The merge ruleset**: two files to import the same way. The first
+  is `jumpmaster`, as above. The second, `jumpmaster-<zone>-merge-ruleset.json`, is
+  `jumpmaster-merge`: its one rule, Restrict updates on the default branch, lets only the author
+  app and repository admins merge, so people with plain write access no longer can. See
+  [Branch rules](#branch-rules).
+- **Code owners for the protected paths**: no `* @reviewer` line, because a GitHub App can't be a
+  code owner. The reviewer app's approval counts on paths that have no owner, and the file gives
+  only the protected paths to people. If your repository's CODEOWNERS already gives other paths to
+  people or teams, don't delete those lines: use the hybrid instead, an author app with a
+  machine-user reviewer account and its token (that reviewer can be a code owner, as in token
+  mode). Doctor check: `forge.codeowners`.
+- **Give the accounts access**: the checklist says to install each app on the repository (no
+  invitation to send or accept): `install the author GitHub App <slug> on your-org/your-repo (no
+  invitation needed)`, and the same for the reviewer app.
 
 The labels (`drop-ready`, `agent-retry`) are created from the doctor: `forge.labels` fails while
 one is missing, and its **Create the missing labels** button creates them as the author bot.
@@ -695,7 +755,47 @@ su - jumpmaster      # then start again
 
 (`init --allow-root` runs as root anyway; the doctor's `config.uid` then warns for good.)
 
+## GitHub Apps
+
+In two-bot mode Jumpmaster recommends two GitHub Apps, an author app and a reviewer app, instead
+of two bot accounts with tokens. Step 4 of [Install in the browser](#step-4-the-setup-wizard) creates
+and installs them. Starter mode stays on [tokens](#tokens), and two bot accounts with tokens remain
+the alternative ("Use tokens instead").
+
+Each app asks for exactly these permissions when it is created (from its manifest); GitHub shows
+them on the app's settings page and on the install page:
+
+| App | Repository permissions |
+|---|---|
+| the author app (pushes branches, opens, labels and merges pull requests) | Contents: Read and write · Pull requests: Read and write · Issues: Read and write · Metadata: Read-only · Commit statuses: Read-only · Actions: Read-only · Checks: Read-only |
+| the reviewer app (reviews, approves or requests changes) | Pull requests: Read and write · Contents: Read and write · Metadata: Read-only |
+
+- **Why the reviewer needs Contents: Read and write.** A ruleset counts approvals only from those
+  with write access. A reviewer app with Contents: Read-only can post an approving review, but it
+  doesn't count: the pull request stays "review required" and the merge is refused (finding F12
+  in the [GitHub App spike](../spikes/2026-11-14-github-app.md), rows A5 and A6). With Contents:
+  Read and write the same approval counts at once. Each reviewer token is still narrowed when it
+  is minted.
+- **No app ever gets Administration or Workflows.** Administration could change or bypass the
+  rulesets that keep merges behind the review and the checks; Workflows could change CI.
+  Jumpmaster refuses to build a manifest that asks for either.
+- **One pair per owner.** The apps belong to the repository's owner (your personal account or the
+  organization), and every zone on a repository of that owner shares the same pair. A zone on
+  another owner's repository gets its own pair, created under that owner.
+- **Private apps.** Both are created with `public: false`, so only their owner can install them.
+- **Every drop token is narrowed to the zone's repository.** Whether an installation covers All
+  repositories or Only select repositories, each token Jumpmaster mints, for a drop or for the
+  server's own use, reaches only the one zone's repository.
+- **The private key stays on the server.** It goes straight into the encrypted vault at
+  **Finish** and is never shown; the vault must be on before you create an app.
+
+Each two-app zone also needs both rulesets ([Branch rules](#branch-rules)) and the app form of
+`.github/CODEOWNERS` ([step 5](#step-5-the-github-page)).
+
 ## Tokens
+
+Tokens are for starter mode, and for two-bot zones that chose tokens ("Use tokens instead")
+instead of [GitHub Apps](#github-apps).
 
 The setup wizard's GitHub step and each zone's GitHub page link GitHub's token page pre-filled with
 these permissions; this is what they ask for. In the browser the tokens are `githubAuthorToken`,
@@ -832,6 +932,32 @@ gh api -X POST repos/your-org/your-repo/rulesets --input - <<'JSON'
 JSON
 ```
 
+A zone where both the author and the reviewer are [GitHub Apps](#github-apps) needs a second
+ruleset, `jumpmaster-merge`, beside `jumpmaster`. Its one rule, **Restrict updates** on the default
+branch, lets only the author app and repository admins update it: without the `* @reviewer-bot`
+CODEOWNERS line (an app can't be a code owner), an approval from anyone else with write access
+would count, so this ruleset keeps every merge with the author app. Its bypass list holds the
+author app (`Integration`) and the repository admin role; adding a write role there re-opens
+merges to anyone with write access. The zone's GitHub page offers it as a file to import, and
+`jumpmaster ctl github <zone> merge-ruleset` prints it with the id filled in; by hand with
+`gh`, replace `123456` with the author app's id (its App ID, on the app's settings page):
+
+```sh
+gh api -X POST repos/your-org/your-repo/rulesets --input - <<'JSON'
+{
+  "name": "jumpmaster-merge",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [
+    { "actor_type": "Integration", "actor_id": 123456, "bypass_mode": "always" },
+    { "actor_type": "RepositoryRole", "actor_id": 5, "bypass_mode": "always" }
+  ],
+  "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
+  "rules": [ { "type": "update" } ]
+}
+JSON
+```
+
 Jumpmaster reads the rules through its tokens on every pass, and parks items with
 `unsafe branch protection: …` until they are right. Rule types it can't satisfy with its own merge
 (a merge queue, required deployments) park items too: leave them off the default branch.
@@ -890,7 +1016,8 @@ repository's owner** when you add the project, or run `init` with
 `--identity starter --author-may-be-admin`. The doctor's `forge.admin` then confirms the token
 has no Administration permission.
 
-A starter zone needs no reviewer token, and never uses one if it is there. To move to two-bot
+Starter mode stays on tokens: [GitHub Apps](#github-apps) are for two-bot zones only. A starter
+zone needs no reviewer token, and never uses one if it is there. To move to two-bot
 later, see the fix under [`zone.identity`](#zoneidentity).
 
 ## Presets

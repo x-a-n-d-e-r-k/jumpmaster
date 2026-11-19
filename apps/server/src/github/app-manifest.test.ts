@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
 import { APP_ROLES } from '../vault/github-app-entries.js';
 import {
@@ -165,5 +166,72 @@ describe('isPlainHttpBase', () => {
     ['http://[::1]:7431', false],
   ])('%s → %s', (url, plain) => {
     expect(isPlainHttpBase(url)).toBe(plain);
+  });
+});
+
+describe("the install runbook's GitHub Apps table", () => {
+  /** GitHub's names for each permission, as its pages show them. */
+  const NAMES: Record<string, string> = {
+    Contents: 'contents',
+    'Pull requests': 'pull_requests',
+    Issues: 'issues',
+    Metadata: 'metadata',
+    'Commit statuses': 'statuses',
+    Actions: 'actions',
+    Checks: 'checks',
+    Administration: 'administration',
+    Workflows: 'workflows',
+  };
+  const LEVELS: Record<string, 'read' | 'write'> = {
+    'Read and write': 'write',
+    'Read-only': 'read',
+  };
+
+  /** The `## GitHub Apps` section's `| App | Repository permissions |` table, row by row. */
+  function tableRows(): string[][] {
+    const md = readFileSync(
+      new URL('../../../../docs/runbooks/install.md', import.meta.url),
+      'utf8',
+    );
+    const start = md.indexOf('\n## GitHub Apps\n');
+    if (start < 0) throw new Error('no GitHub Apps section in the runbook');
+    const end = md.indexOf('\n## ', start + 1);
+    const section = md.slice(start, end < 0 ? undefined : end);
+    const lines = section.split('\n');
+    const head = lines.indexOf('| App | Repository permissions |');
+    if (head < 0) throw new Error('no permission table in the GitHub Apps section');
+    const rows: string[][] = [];
+    for (const line of lines.slice(head + 2)) {
+      if (!line.startsWith('|')) break;
+      rows.push(
+        line
+          .split('|')
+          .slice(1, -1)
+          .map((c) => c.trim()),
+      );
+    }
+    return rows;
+  }
+
+  test('each row lists exactly the manifest permissions at their levels, never Administration or Workflows', () => {
+    const rows = tableRows();
+    expect(rows).toHaveLength(APP_ROLES.length);
+    for (const role of APP_ROLES) {
+      const row = rows.find(([app]) => app?.toLowerCase().includes(`${role} app`));
+      if (!row?.[1]) throw new Error(`no row for the ${role} app`);
+      const entries = row[1].split(' · ').map((cell) => {
+        const m = /^(.+?): (Read and write|Read-only)$/.exec(cell);
+        if (!m?.[1] || !m[2]) throw new Error(`unreadable permission: ${cell}`);
+        const key = NAMES[m[1]];
+        if (!key) throw new Error(`unknown permission name: ${m[1]}`);
+        return [key, LEVELS[m[2]]] as const;
+      });
+      const keys = entries.map(([k]) => k);
+      expect(new Set(keys).size).toBe(keys.length);
+      expect(Object.fromEntries(entries)).toEqual(APP_MANIFEST_PERMISSIONS[role]);
+      expect(keys).not.toContain('administration');
+      expect(keys).not.toContain('workflows');
+      expect(row[1]).not.toMatch(/Administration|Workflows/);
+    }
   });
 });
