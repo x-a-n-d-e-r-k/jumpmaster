@@ -93,6 +93,14 @@ export class Confirmations {
     return p;
   }
 
+  /** This session's live pending changes, oldest first; another session's are never included. */
+  pendingFor(sessionIdHash: string): Pending[] {
+    const at = this.now().getTime();
+    return [...this.pendings.values()]
+      .filter((p) => p.sessionIdHash === sessionIdHash && at < p.expiresAt.getTime())
+      .sort((a, b) => a.expiresAt.getTime() - b.expiresAt.getTime());
+  }
+
   /**
    * Called by the confirmation page's render only. Returns the plain token once; only its hash is
    * kept, and a later render replaces it.

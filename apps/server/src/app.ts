@@ -87,6 +87,7 @@ import { transcriptPruned } from './transcripts.js';
 import { registerAuthPages } from './ui/auth-pages.js';
 import { renderChatList, renderThread } from './ui/chat.js';
 import { registerConfirmPages } from './ui/confirm.js';
+import type { PendingLine } from './ui/floor.js';
 import { registerGithubPages } from './ui/github.js';
 import { registerGoalConfirmPages } from './ui/goal-confirm.js';
 import {
@@ -355,6 +356,25 @@ export function createApp(
         deps.config.confirmations.pending(pendingId, sid) !== undefined
       );
     };
+  /**
+   * The request's session's unexpired pending guarded changes, oldest first, each with the chat
+   * thread whose pending card links to it (#507). None for any principal but a browser session.
+   */
+  const pendingLinesFor = (req: FastifyRequest): PendingLine[] => {
+    const sid = req.principal?.via === 'session' ? req.principal.sessionId : undefined;
+    if (sid === undefined || !(deps.config instanceof ConfigStore)) return [];
+    const chatOf = deps.db.prepare(
+      `SELECT t.id AS threadId, t.title AS title FROM chat_cards c
+         JOIN chat_threads t ON t.id = c.thread_id
+        WHERE c.state = 'pending' AND c.link = ? ORDER BY c.id DESC LIMIT 1`,
+    );
+    return deps.config.confirmations.pendingFor(sid).map((change): PendingLine => {
+      const chat = chatOf.get(`/config/confirm/${change.id}`) as
+        | { threadId: number; title: string }
+        | undefined;
+      return chat ? { change, chat } : { change };
+    });
+  };
   // The login and setup pages post plain HTML forms.
   app.addContentTypeParser(
     'application/x-www-form-urlencoded',
@@ -573,6 +593,7 @@ export function createApp(
     const at = now();
     const items = config.dropZones.flatMap((z) => listWorkItems(db, z.id));
     const floor = floorBriefings(db, config.dropZones);
+    const pending = pendingLinesFor(req);
     const html = renderHome({
       setup: {
         // The frame shows until a zone exists or it is dismissed (a store install only).
@@ -589,6 +610,7 @@ export function createApp(
         pages: pagesOf(app),
         // The floor names zones by repository (#99); `ctl status` keeps the id.
         zoneName: zoneTextNamer(config.dropZones),
+        pendingChanges: pending.length,
       }),
       ...(deps.config instanceof ConfigStore
         ? { claudeTokenDays: claudeTokenDays(deps.config, at) }
@@ -604,6 +626,7 @@ export function createApp(
       outbox: listOutbox(db, ['unknown', 'failed']),
       briefings: floor.listed,
       heldBriefings: floor.held,
+      pending,
       sticks: listSticks(db).map((s) => stickLine(s, config)),
       crew: config.dropZones.map((z): CrewLine => {
         const last = db

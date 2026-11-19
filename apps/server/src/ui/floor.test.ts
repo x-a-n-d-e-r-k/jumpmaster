@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { type Briefing, floorBriefings, listBriefings, raiseBriefing } from '../briefings.js';
+import type { Pending } from '../config/confirm.js';
 import type { DropZoneConfig } from '../config.js';
 import {
   type Drop,
@@ -622,5 +623,76 @@ describe('the dashboard', () => {
     expect(html).not.toContain('class="totals"');
     expect(html).toContain('No project yet');
     expect(html).toContain('<a href="/zones/new">Add a project</a>');
+  });
+});
+
+describe('pending guarded changes on the floor (#507)', () => {
+  const pending = (over: Partial<Pending> = {}): Pending => ({
+    id: 'pend-1',
+    sessionIdHash: 'sess-a',
+    patch: { mcp: { enabled: true, secretOnlyInPatch: 'PATCH-ONLY-VALUE-x9' } },
+    changeHash: 'h',
+    expectRevision: 3,
+    meta: {
+      via: 'ui',
+      principal: { kind: 'operator', via: 'session', sessionId: 'sess-a', sudo: false },
+    },
+    expiresAt: new Date(NOW.getTime() + 7 * 60_000),
+    guarded: [{ path: 'mcp.enabled', consequence: 'Turns on the MCP server' }],
+    notes: [],
+    ...over,
+  });
+  const strip = (html: string) =>
+    html.slice(
+      html.indexOf('<nav class="totals"'),
+      html.indexOf('</nav>', html.indexOf('<nav class="totals"')),
+    );
+
+  test('one pending change and no briefings: Needs you = 1', () => {
+    const state = home({ zones: [zone('A')], briefings: [], pending: [{ change: pending() }] });
+    expect(floorCounts(state, NOW).totals.needsYou).toBe(1);
+    expect(floorCounts(home({ zones: [zone('A')], briefings: [] }), NOW).totals.needsYou).toBe(0);
+    expect(strip(renderHome(state))).toContain('<b>1</b><span>Needs you</span>');
+  });
+
+  test('a row: the first guarded item, "and N more", expiry and the Review and confirm link', () => {
+    const one = renderHome(
+      home({ zones: [zone('A')], briefings: [], pending: [{ change: pending() }] }),
+    );
+    expect(one).toContain('Turns on the MCP server');
+    expect(one).not.toContain('more</');
+    expect(one).toContain('expires in 7 min');
+    expect(one).toContain('<a href="/config/confirm/pend-1">Review and confirm</a>');
+    expect(one).not.toContain('from chat:');
+    const three = renderHome(
+      home({
+        zones: [zone('A')],
+        briefings: [],
+        pending: [
+          {
+            change: pending({
+              guarded: [
+                { path: 'a', consequence: 'First <thing>' },
+                { path: 'b', consequence: 'Second' },
+                { path: 'c', consequence: 'Third' },
+              ],
+            }),
+            chat: { threadId: 42, title: 'Tune <the> zone' },
+          },
+        ],
+      }),
+    );
+    expect(three).toContain('First &lt;thing&gt; and 2 more');
+    expect(three).not.toContain('Second');
+    expect(three).toContain('from chat: <a href="/chat/42">Tune &lt;the&gt; zone</a>');
+  });
+
+  test('the row never renders a value that is only in the patch', () => {
+    const html = renderHome(
+      home({ zones: [zone('A')], briefings: [], pending: [{ change: pending() }] }),
+    );
+    expect(html).toContain('Review and confirm');
+    expect(html).not.toContain('PATCH-ONLY-VALUE-x9');
+    expect(html).not.toContain('secretOnlyInPatch');
   });
 });

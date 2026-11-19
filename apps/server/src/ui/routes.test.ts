@@ -2,7 +2,10 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { routeClass } from '../auth/guard.js';
+import { sha256Hex } from '../auth/sessions.js';
 import { listBriefings, raiseBriefing, ruleBriefing } from '../briefings.js';
+import { recordCard } from '../chat/cards.js';
+import { appendMessage, createThread } from '../chat/store.js';
 import { DEFAULT_PROTECTED_PATHS } from '../config.js';
 import { insertCrewIssue } from '../crew/store.js';
 import {
@@ -1466,5 +1469,87 @@ describe('route classes (crew chat, #349)', () => {
     expect(routeClass('/mcp/chat')).toBe('chat-mcp');
     expect(routeClass('/mcp')).toBe('mcp');
     expect(routeClass('/mcp/chat/x')).toBe('page');
+  });
+});
+
+describe("this session's pending guarded changes under Waiting on you (#507)", () => {
+  const OPERATOR = { authorization: `Bearer ${'o'.repeat(32)}`, host: 'localhost:80' };
+  const needsYou = (body: string) => /data-tile="needs-you"[^>]*><b>(\d+)<\/b>/.exec(body)?.[1];
+
+  async function staged() {
+    const h = await harness({ live: true, zone: { protectedPaths: [...DEFAULT_PROTECTED_PATHS] } });
+    const store = h.store;
+    if (!store) throw new Error('no store');
+    const a = operatorSession(h.db, h.now());
+    const b = operatorSession(h.db, h.now());
+    const stage = (sid: string, consequence: string, secret: string) =>
+      store.confirmations.addPending({
+        sessionIdHash: sha256Hex(sid),
+        patch: { pollSeconds: 30, secret },
+        expectRevision: store.revision(),
+        meta: { via: 'ui' } as never,
+        guarded: [{ path: 'mcp.enabled', consequence }],
+        notes: [],
+      });
+    return { h, a, b, stage };
+  }
+
+  test("D1: session A's floor lists A's pending change; session B's neither lists nor counts it", async () => {
+    const { h, a, b, stage } = await staged();
+    const p = stage(a.id, 'Turns on the MCP server for A', 'PATCH-SECRET-A');
+    const mine = (await h.view('/', { cookie: a.cookie })).body;
+    expect(mine).toContain('Turns on the MCP server for A');
+    expect(mine).toContain(`<a href="/config/confirm/${p.id}">Review and confirm</a>`);
+    expect(mine).toContain('expires in 10 min');
+    expect(mine).toContain('1 guarded change to confirm');
+    expect(mine).not.toContain('PATCH-SECRET-A');
+    expect(needsYou(mine)).toBe('1');
+    const theirs = (await h.view('/', { cookie: b.cookie })).body;
+    expect(theirs).not.toContain('Turns on the MCP server for A');
+    expect(theirs).not.toContain(p.id);
+    expect(theirs).not.toContain('guarded change to confirm');
+    expect(needsYou(theirs)).toBe('0');
+  });
+
+  test('a control-token request to / lists none', async () => {
+    const { h, a, stage } = await staged();
+    const p = stage(a.id, 'Turns on the MCP server for A', 'PATCH-SECRET-A');
+    // Pages take a session only: a token alone is sent to log in, and is shown no pending change.
+    const res = await h.app.inject({ method: 'GET', url: '/', headers: OPERATOR });
+    expect(res.statusCode).toBe(302);
+    expect(res.body).not.toContain('Turns on the MCP server for A');
+    expect(res.body).not.toContain(p.id);
+    expect(res.body).not.toContain('Review and confirm');
+  });
+
+  test('a chat-staged change says "from chat:" with the thread link; a settings-staged one does not', async () => {
+    const { h, a, stage } = await staged();
+    const fromChat = stage(a.id, 'Chat change', 's1');
+    const fromSettings = stage(a.id, 'Settings change', 's2');
+    const th = createThread(h.db, { title: 'Tune main' }, h.now());
+    const msg = appendMessage(h.db, th.id, { role: 'owner', text: 'x', state: 'done' }, h.now());
+    recordCard(
+      h.db,
+      {
+        threadId: th.id,
+        messageId: msg.id,
+        kind: 'setting',
+        state: 'pending',
+        link: `/config/confirm/${fromChat.id}`,
+        summary: 'Turn on MCP',
+        undo: { paths: ['mcp.enabled'], what: 'MCP' },
+      },
+      h.now(),
+    );
+    const body = (await h.view('/', { cookie: a.cookie })).body;
+    const row = (id: string) =>
+      new RegExp(`<li class="pending-change" data-pending="${id}">.*?</li>`).exec(body)?.[0] ?? '';
+    expect(row(fromChat.id)).toContain(`from chat: <a href="/chat/${th.id}">Tune main</a>`);
+    expect(row(fromSettings.id)).toContain('Settings change');
+    expect(row(fromSettings.id)).not.toContain('from chat:');
+    expect(row(fromSettings.id)).not.toContain('/chat/');
+    // Oldest first.
+    expect(body.indexOf('Chat change')).toBeLessThan(body.indexOf('Settings change'));
+    expect(needsYou(body)).toBe('2');
   });
 });
