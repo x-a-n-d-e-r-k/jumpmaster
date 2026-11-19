@@ -29,7 +29,8 @@ export const removalNote = (id: string): string => {
 /**
  * The removal itself: the document without the zone, through the apply path. Once the apply
  * succeeds, the zone's open briefings are withdrawn (nothing will rule them, issue #178), with one
- * audit entry for the count; a refused apply withdraws nothing.
+ * audit entry for the count; a refused apply withdraws nothing. The credits stop briefing stays
+ * open (#541): it holds all dispatch, not the zone.
  */
 export function removeZone(
   db: Db,
@@ -75,7 +76,8 @@ export function removeZone(
 /**
  * Withdraws, once, the open briefings of zones no longer in the config (left behind by removals
  * before issue #178), with one audit entry for the count. Called at server start; a second run
- * finds none. Returns how many were withdrawn.
+ * finds none. The credits stop briefing stays open whatever its zone (#541): `syncCreditsBriefing`
+ * withdraws it once the stop lifts. Returns how many were withdrawn.
  */
 export function withdrawOrphanBriefings(db: Db, store: ConfigStore, now: Date): number {
   const count = withdrawBriefingsOutside(
