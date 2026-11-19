@@ -22,6 +22,7 @@ import {
 import { grantSudo } from '../auth/sessions.js';
 import { listBacklog, queueIssue } from '../backlog.js';
 import {
+  allBriefingsOfZone,
   briefingContext,
   dismissZoneBriefings,
   effectText,
@@ -533,18 +534,22 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
 
     // Dismisses the zone's open briefings Command was shown (issue #98), each recorded as one
     // dismissal. No ruling: nothing is ruled, promoted, rejected or closed, on the forge or here.
+    // A zone no longer in the config is accepted when every id names one of its briefings, so
+    // briefings a removal left open can still be cleared (issue #178).
     scope.post<{ Params: { id: string } }>(
       '/api/control/zones/:id/briefings/dismiss',
       async (req, reply) => {
-        const zone = cfg(req).dropZones.find((z) => z.id === req.params.id);
-        if (!zone) return reply.code(404).send({ error: 'unknown zone' });
+        const zoneId = req.params.id;
+        const configured = cfg(req).dropZones.some((z) => z.id === zoneId);
         const body = DismissBody.safeParse(req.body);
+        if (!configured && !(body.success && allBriefingsOfZone(db, zoneId, body.data.ids)))
+          return reply.code(404).send({ error: 'unknown zone' });
         if (!body.success) return reply.code(400).send({ error: 'invalid body' });
-        const dismissed = dismissZoneBriefings(db, zone.id, body.data.ids, now());
+        const dismissed = dismissZoneBriefings(db, zoneId, body.data.ids, now());
         for (const id of dismissed) {
-          audit(req, 'briefing.dismiss', { zone: zone.id, bulk: true }, `briefing:${id}`);
+          audit(req, 'briefing.dismiss', { zone: zoneId, bulk: true }, `briefing:${id}`);
         }
-        return { zone: zone.id, dismissed };
+        return { zone: zoneId, dismissed };
       },
     );
 

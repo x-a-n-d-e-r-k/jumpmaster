@@ -125,6 +125,62 @@ test('bulk dismiss refuses an unknown zone', async () => {
   expect(res.statusCode).toBe(404);
 });
 
+// --- briefings of a zone no longer in the config (#178) ---
+
+test('bulk dismiss reaches the open briefings of a removed zone', async () => {
+  const h = await twoZones();
+  raiseBriefing(h.db, brief('old', 'crew:o1'), h.now());
+  raiseBriefing(h.db, brief('old', 'crew:o2'), h.now());
+  const ids = listBriefings(h.db, { zoneId: 'old', state: 'open' }).map((b) => b.id);
+  const res = await h.app.inject({
+    method: 'POST',
+    url: '/api/control/zones/old/briefings/dismiss',
+    headers: OPERATOR,
+    payload: { ids },
+  });
+  expect(res.statusCode).toBe(200);
+  expect(res.json()).toEqual({ zone: 'old', dismissed: ids });
+  expect(listBriefings(h.db, { zoneId: 'old' }).map((b) => b.state)).toEqual([
+    'dismissed',
+    'dismissed',
+  ]);
+  expect(listBriefings(h.db, { zoneId: 'shadow', state: 'open' })).toHaveLength(2);
+});
+
+test('bulk dismiss for a removed zone refuses ids that are not all its own', async () => {
+  const h = await twoZones();
+  raiseBriefing(h.db, brief('old', 'crew:o1'), h.now());
+  const old = listBriefings(h.db, { zoneId: 'old' }).map((b) => b.id);
+  const main = listBriefings(h.db, { zoneId: 'main' }).map((b) => b.id);
+  const res = await h.app.inject({
+    method: 'POST',
+    url: '/api/control/zones/old/briefings/dismiss',
+    headers: OPERATOR,
+    payload: { ids: [...old, ...main] },
+  });
+  expect(res.statusCode).toBe(404);
+  expect(listBriefings(h.db, { state: 'open' })).toHaveLength(4);
+});
+
+test('an orphan open briefing counts neither on the Floor nor in the status headline', async () => {
+  const h = await twoZones();
+  raiseBriefing(h.db, brief('old', 'crew:o1'), h.now());
+  const f = floorBriefings(h.db, [
+    { id: 'main', repo: 'octo/demo', mode: 'active' },
+    { id: 'shadow', repo: 'octo/shadow', mode: 'active' },
+  ]);
+  expect(f.listed.map((b) => b.zoneId)).toEqual(['main', 'shadow', 'shadow']);
+  const home = (await h.view('/')).body;
+  expect(home).toContain('Waiting on you: 3 briefings');
+  expect(home).not.toContain('Waiting on you: 4 briefings');
+  const status = await h.app.inject({
+    method: 'GET',
+    url: '/api/control/status',
+    headers: OPERATOR,
+  });
+  expect(status.json().headline).toBe('Waiting on you: 3 briefings');
+});
+
 // --- a held promotion is a notice, not a briefing that needs Command (#449) ---
 
 const held = (zoneId: string, subject: string) => ({
