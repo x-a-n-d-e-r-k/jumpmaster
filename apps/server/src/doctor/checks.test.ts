@@ -3560,6 +3560,95 @@ describe('forge.author-reads and forge.reviewer-reads for GitHub App roles (issu
     leaks(c);
   });
 
+  // What GitHub answers a server-reviewer token ({ pull_requests: 'write' }, spec §4.2): no
+  // contents read on a private repository, so every probe but Pull requests: read is refused.
+  const narrowedReviewer = () =>
+    okProbes().map((p) =>
+      p.permission === 'Pull requests: read' ? p : { ...p, status: 403, accepted: 'contents=read' },
+    );
+  const withGrant = (w: ReturnType<typeof appWorld>, reviewer: Record<string, string>) => {
+    const calls: string[] = [];
+    w.deps.installationGrant = (zoneId, role) => {
+      calls.push(`${zoneId}:${role}`);
+      return Promise.resolve({
+        permissions: role === 'reviewer' ? reviewer : { ...APP_MANIFEST_PERMISSIONS.author },
+      });
+    };
+    return calls;
+  };
+
+  test('a reviewer app whose server token is narrowed to pull_requests passes on a private repository (issue #522)', async () => {
+    const w = appWorld();
+    w.f.state.access.reviewer.private = true;
+    w.f.state.probes.reviewer = narrowedReviewer();
+    const c = one(await w.run(), 'forge.reviewer-reads');
+    expect(c.status).toBe('pass');
+    expect(c.fix ?? '').not.toContain('Contents: Read-only');
+    // Only the proven read is listed; Contents is named only as not proven.
+    expect(c.summary).toContain('reads it relies on: Pull requests: read;');
+    expect(c.summary).not.toMatch(/relies on: [^;]*Contents/);
+    expect(c.summary).toContain('Contents: read, which drops use, is not proven here');
+    expect(c.summary).not.toContain('every read');
+    leaks(c);
+  });
+
+  test('an app reviewer with Pull requests: read refused fails with the app fix text (issue #522)', async () => {
+    const w = appWorld();
+    w.f.state.access.reviewer.private = true;
+    w.f.state.probes.reviewer = narrowedReviewer().map((p) =>
+      p.permission === 'Pull requests: read'
+        ? { ...p, status: 403, accepted: 'pull_requests=read' }
+        : p,
+    );
+    const c = one(await w.run(), 'forge.reviewer-reads');
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('Pull requests: read');
+    expect(c.summary).not.toContain('Contents');
+    expect(c.fix).toContain('Pull requests: Read-only');
+    expect(c.fix).not.toContain('Contents');
+    expect(c.fix).toContain(
+      `Settings → Developer settings → GitHub Apps → ${REVIEWER_SLUG} → Permissions & events`,
+    );
+    expect(c.fix).toContain('accept the new permissions on the installation');
+    expect(c.fix).not.toMatch(/token/i);
+    leaks(c);
+  });
+
+  test('an app reviewer grant without contents fails naming Contents with the app fix (issue #522)', async () => {
+    const w = appWorld();
+    w.f.state.access.reviewer.private = true;
+    w.f.state.probes.reviewer = narrowedReviewer();
+    const { contents: _omit, ...lacking } = APP_MANIFEST_PERMISSIONS.reviewer;
+    const calls = withGrant(w, lacking);
+    const checks = await w.run();
+    const c = one(checks, 'forge.reviewer-reads');
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('Contents: read');
+    expect(c.summary).toContain('installation grant');
+    expect(c.fix).toContain('Contents: Read-only');
+    expect(c.fix).toContain(
+      `Settings → Developer settings → GitHub Apps → ${REVIEWER_SLUG} → Permissions & events`,
+    );
+    expect(c.fix).toContain('accept the new permissions on the installation');
+    expect(c.fix).not.toMatch(/token/i);
+    leaks(c);
+    // forge.reviewer and forge.reviewer-reads share one grant read.
+    expect(calls.filter((x) => x === 'main:reviewer')).toHaveLength(1);
+  });
+
+  test('an app reviewer grant with contents: read passes, listing both proven reads (issue #522)', async () => {
+    const w = appWorld();
+    w.f.state.access.reviewer.private = true;
+    w.f.state.probes.reviewer = narrowedReviewer();
+    withGrant(w, { ...APP_MANIFEST_PERMISSIONS.reviewer, contents: 'read' });
+    const c = one(await w.run(), 'forge.reviewer-reads');
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('Pull requests: read');
+    expect(c.summary).toContain('Contents: read');
+    expect(c.summary).toContain('installation grant');
+    leaks(c);
+  });
+
   test("a hybrid zone's PAT reviewer keeps the token texts", async () => {
     const w = appWorld({ reviewer: 'pat' });
     w.f.state.probes.reviewer = okProbes().map((p) =>
