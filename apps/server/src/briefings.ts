@@ -303,6 +303,28 @@ export function withdrawBriefing(db: Db, zoneId: string, subject: string, now: D
   ).run(now.toISOString(), zoneId, subject);
 }
 
+/**
+ * Withdraws every open briefing of a zone (issue #178): the zone was removed, so nothing will
+ * rule them. Returns how many were withdrawn.
+ */
+export function withdrawZoneBriefings(db: Db, zoneId: string, now: Date): number {
+  return db
+    .prepare(
+      `UPDATE briefings SET state = 'withdrawn', updated_at = ? WHERE zone_id = ? AND state = 'open'`,
+    )
+    .run(now.toISOString(), zoneId).changes;
+}
+
+/** Withdraws every open briefing whose zone is not among `zoneIds`; returns how many. */
+export function withdrawBriefingsOutside(db: Db, zoneIds: readonly string[], now: Date): number {
+  return db
+    .prepare(
+      `UPDATE briefings SET state = 'withdrawn', updated_at = ?
+         WHERE state = 'open' AND zone_id NOT IN (SELECT value FROM json_each(?))`,
+    )
+    .run(now.toISOString(), JSON.stringify(zoneIds)).changes;
+}
+
 export function listBriefings(
   db: Db,
   q: { zoneId?: string; state?: BriefingState } = {},
@@ -335,7 +357,8 @@ export const isNotice = (b: Pick<Briefing, 'kind'>): boolean => NOTICE_KINDS.has
 /**
  * The open briefings the floor lists as needing Command, the notices that go ahead unless Command
  * stops them, and the zones (paused or observing) whose briefings it holds back (every kind). Only
- * the floor's view: the briefings are unchanged, and resuming the zone lists them again.
+ * the floor's view: the briefings are unchanged, and resuming the zone lists them again. A
+ * briefing of a zone not among `zones` (removed from the config) is not counted at all (#178).
  */
 export function floorBriefings(
   db: Db,
@@ -346,9 +369,11 @@ export function floorBriefings(
     .map((z) => ({ zoneId: z.id, repo: z.repo, mode: getZoneMode(db, z.id, z.mode), count: 0 }))
     .filter((z) => HELD_MODES.has(z.mode));
   const byZone = new Map(held.map((z) => [z.zoneId, z]));
+  const configured = new Set(zones.map((z) => z.id));
   const listed: Briefing[] = [];
   const notices: Briefing[] = [];
   for (const b of open) {
+    if (!configured.has(b.zoneId)) continue;
     const h = byZone.get(b.zoneId);
     if (h) h.count++;
     else if (isNotice(b)) notices.push(b);
@@ -432,6 +457,13 @@ export function dismissZoneBriefings(
   return db.transaction(() =>
     [...new Set(ids)].filter((id) => dismiss.run(now.toISOString(), id, zoneId).changes === 1),
   )();
+}
+
+/** Whether every one of `ids` names a briefing of `zoneId` (and there is at least one). */
+export function allBriefingsOfZone(db: Db, zoneId: string, ids: readonly number[]): boolean {
+  if (ids.length === 0) return false;
+  const of = db.prepare(`SELECT zone_id AS zoneId FROM briefings WHERE id = ?`);
+  return ids.every((id) => (of.get(id) as { zoneId: string } | undefined)?.zoneId === zoneId);
 }
 
 /** listRulings' limit for every ruling: SQLite reads a negative LIMIT as none. */

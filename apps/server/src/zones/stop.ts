@@ -1,5 +1,6 @@
 import { recordAudit } from '../auth/audit.js';
 import type { Principal } from '../auth/guard.js';
+import { withdrawBriefingsOutside, withdrawZoneBriefings } from '../briefings.js';
 import type { ApplyResult, ConfigStore } from '../config/store.js';
 import type { Db } from '../db/open.js';
 import {
@@ -25,15 +26,25 @@ export const removalNote = (id: string): string => {
   return note.length > 500 ? `${note.slice(0, 497)}...` : note;
 };
 
-/** The removal itself: the document without the zone, through the apply path. */
+/**
+ * The removal itself: the document without the zone, through the apply path. Once the apply
+ * succeeds, the zone's open briefings are withdrawn (nothing will rule them, issue #178), with one
+ * audit entry for the count; a refused apply withdraws nothing.
+ */
 export function removeZone(
+  db: Db,
   store: ConfigStore,
   id: string,
-  meta: { via: 'ui' | 'ctl'; principal: Principal; expectRevision?: number },
+  meta: {
+    via: 'ui' | 'ctl';
+    principal: Principal;
+    expectRevision?: number;
+    now: Date;
+  },
 ): ApplyResult {
   const doc = store.document();
   const zones = (Array.isArray(doc.dropZones) ? doc.dropZones : []) as Record<string, unknown>[];
-  return store.apply(
+  const r = store.apply(
     { ...doc, dropZones: zones.filter((z) => z.id !== id) },
     {
       via: meta.via,
@@ -44,6 +55,45 @@ export function removeZone(
       cancelTo: `/zones/${encodeURIComponent(id)}`,
     },
   );
+  if (r.ok) {
+    const count = withdrawZoneBriefings(db, id, meta.now);
+    if (count > 0)
+      recordAudit(
+        db,
+        {
+          via: 'system',
+          action: 'briefing.withdraw',
+          target: id,
+          detail: { count, reason: 'zone removed' },
+        },
+        meta.now,
+      );
+  }
+  return r;
+}
+
+/**
+ * Withdraws, once, the open briefings of zones no longer in the config (left behind by removals
+ * before issue #178), with one audit entry for the count. Called at server start; a second run
+ * finds none. Returns how many were withdrawn.
+ */
+export function withdrawOrphanBriefings(db: Db, store: ConfigStore, now: Date): number {
+  const count = withdrawBriefingsOutside(
+    db,
+    store.current().dropZones.map((z) => z.id),
+    now,
+  );
+  if (count > 0)
+    recordAudit(
+      db,
+      {
+        via: 'system',
+        action: 'briefing.withdraw',
+        detail: { count, reason: 'zone not configured' },
+      },
+      now,
+    );
+  return count;
 }
 
 export type StopOutcome =
@@ -62,16 +112,17 @@ export function stopZone(
   o: { via: 'ui' | 'ctl'; principal: Principal; now: Date },
 ): StopOutcome {
   if (store.mode() === 'file') {
-    const r = removeZone(store, id, o);
+    const r = removeZone(db, store, id, o);
     if (r.ok) throw new Error('a file-mode config applied a removal');
     return { kind: 'refused', result: r };
   }
   markZoneStopping(db, id, o.via, o.now);
   if (!zoneDrained(db, id)) return { kind: 'stopping', waits: zoneWaits(db, id) };
-  const r = removeZone(store, id, {
+  const r = removeZone(db, store, id, {
     via: o.via,
     principal: o.principal,
     expectRevision: store.revision(),
+    now: o.now,
   });
   return r.ok ? { kind: 'removed', result: r } : { kind: 'refused', result: r };
 }
@@ -95,7 +146,12 @@ export function sweepStopping(
   for (const id of stoppingZones(db)) {
     if (!configured.has(id) || !zoneDrained(db, id)) continue;
     const via = zoneStopping(db, id)?.via ?? 'ctl';
-    const r = removeZone(store, id, { via, principal: SWEEP, expectRevision: store.revision() });
+    const r = removeZone(db, store, id, {
+      via,
+      principal: SWEEP,
+      expectRevision: store.revision(),
+      now,
+    });
     if (!r.ok) {
       log(`zone ${id} is drained but could not be removed: ${refusalText(r)}`);
       continue;
